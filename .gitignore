@@ -1,4 +1,10 @@
+# binary
 *.bin
 *.o
-*.swp
 *.elf
+
+# vim file
+*.swp
+
+# log
+log
