@@ -9,7 +9,7 @@ OBJ = ${C_SOURCES:.c=.o cpu/interrupt.o}
 CC=gcc
 LD=ld
 # -g: Use debugging symbols in gcc
-CFLAGS = -g -m32 -nostdlib -nostdinc -fno-builtin -fno-stack-protector -nodefaultlibs -fno-pic -Wall -Wextra -Werror -mno-sse
+CFLAGS = -g -m32 -fno-builtin -fno-stack-protector -nodefaultlibs -fno-pic -Wall -Wextra -Werror -mno-sse -I.
 
 # First rule is run by default
 os-image.bin: bootsect.bin kernel.bin

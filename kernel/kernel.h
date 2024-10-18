@@ -1,6 +1,6 @@
-#ifndef KERNEL_H
-#define KERNEL_H
+#ifndef KERNEL_KERNEL_H_
+#define KERNEL_KERNEL_H_
 
 void user_input(char *input);
 
-#endif
+#endif // KERNEL_KERNEL_H_

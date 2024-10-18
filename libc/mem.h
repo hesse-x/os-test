@@ -1,9 +1,12 @@
-#ifndef MEM_H
-#define MEM_H
+#ifndef LIBC_MEM_H_
+#define LIBC_MEM_H_
 
-#include "../cpu/types.h"
+#include <stdint.h>
 
-void memory_copy(u8 *source, u8 *dest, int nbytes);
-void memory_set(u8 *dest, u8 val, u32 len);
+#define low_16(address) (uint16_t)((address) & 0xFFFF)
+#define high_16(address) (uint16_t)(((address) >> 16) & 0xFFFF)
 
-#endif
+void memcpy(uint8_t *source, uint8_t *dest, int nbytes);
+void memset(uint8_t *dest, uint8_t val, uint32_t len);
+
+#endif // LIBC_MEM_H_
