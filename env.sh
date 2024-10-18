@@ -1,6 +1,6 @@
 sudo apt install qemu qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virt-manager nasm
 
-# GCC also compile, no need to compile cross-compiler
+# !!!GCC also compile, no need to compile cross-compiler
 # Compile i686-elf clang
 # cmake -G Ninja \
 #   -DCMAKE_BUILD_TYPE=Release \
