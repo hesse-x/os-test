@@ -1,9 +1,8 @@
-#include "kernel/kernel.h"
 #include "cpu/isr.h"
 #include "drivers/screen.h"
 #include "libc/string.h"
 
-void main() {
+void kernel_start() {
   kprint("Kernel start...\n");
   isr_install();
   irq_install();

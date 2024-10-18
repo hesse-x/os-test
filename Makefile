@@ -24,7 +24,7 @@ bootsect.bin: bootsect.o
 # '--oformat binary' deletes all symbols as a collateral, so we don't need
 # to 'strip' them manually on this case
 kernel.bin: boot/kernel_entry.o ${OBJ}
-	$(LD) -o $@ -m elf_i386 -e main -Ttext 0x1000 $^ --oformat binary
+	$(LD) -o $@ -m elf_i386 -e kernel_start -Ttext 0x1000 $^ --oformat binary
 
 # kernel.elf: boot/kernel_entry.o ${OBJ}
 # 	$(LD) -o $@ -Ttext 0x1000 $^ 
