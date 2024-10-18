@@ -1,7 +1,7 @@
 #include <stdint.h>
-#include "drivers/screen.h"
-#include "cpu/ports.h"
-#include "libc/mem.h"
+#include "os-test/drivers/screen.h"
+#include "os-test/cpu/ports.h"
+#include "os-test/libc/mem.h"
 
 /* Declaration of private functions */
 int get_cursor_offset();

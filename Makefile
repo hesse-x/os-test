@@ -1,7 +1,7 @@
-C_SOURCES = $(wildcard kernel/*.c drivers/*.c cpu/*.c libc/*.c)
-HEADERS = $(wildcard kernel/*.h drivers/*.h cpu/*.h libc/*.h)
+C_SOURCES = $(wildcard os-test/kernel/*.c os-test/drivers/*.c os-test/cpu/*.c os-test/libc/*.c)
+HEADERS = $(wildcard os-test/kernel/*.h os-test/drivers/*.h os-test/cpu/*.h os-test/libc/*.h)
 # Nice syntax for file extension replacement
-OBJ = ${C_SOURCES:.c=.o cpu/interrupt.o} 
+OBJ = ${C_SOURCES:.c=.o os-test/cpu/interrupt.o} 
 
 # Change this if your cross-compiler is somewhere else
 # CC=$(HOME)/llvm-project/build/bin/clang
@@ -15,7 +15,7 @@ CFLAGS = -g -m32 -fno-builtin -fno-stack-protector -nodefaultlibs -fno-pic -Wall
 os-image.bin: bootsect.bin kernel.bin
 	cat $^ > os-image.bin
 
-bootsect.o: boot/bootsect.s
+bootsect.o: os-test/boot/bootsect.s
 	$(CC) $< -c -o $@
 
 bootsect.bin: bootsect.o
@@ -23,7 +23,7 @@ bootsect.bin: bootsect.o
 
 # '--oformat binary' deletes all symbols as a collateral, so we don't need
 # to 'strip' them manually on this case
-kernel.bin: boot/kernel_entry.o ${OBJ}
+kernel.bin: os-test/boot/kernel_entry.o ${OBJ}
 	$(LD) -o $@ -m elf_i386 -e kernel_start -Ttext 0x1000 $^ --oformat binary
 
 # kernel.elf: boot/kernel_entry.o ${OBJ}
@@ -42,4 +42,4 @@ run: os-image.bin
 
 clean:
 	rm -rf *.bin *.dis *.o os-image.bin *.elf
-	rm -rf kernel/*.o boot/*.bin drivers/*.o boot/*.o cpu/*.o libc/*.o
+	rm -rf os-test/kernel/*.o os-test/boot/*.bin os-test/drivers/*.o os-test/boot/*.o os-test/cpu/*.o os-test/libc/*.o

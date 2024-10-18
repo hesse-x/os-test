@@ -1,4 +1,4 @@
-#include "libc/string.h"
+#include "os-test/libc/string.h"
 
 /**
  * K&R implementation

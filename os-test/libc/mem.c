@@ -1,4 +1,4 @@
-#include "libc/mem.h"
+#include "os-test/libc/mem.h"
 
 void memcpy(uint8_t *source, uint8_t *dest, int nbytes) {
   int i;

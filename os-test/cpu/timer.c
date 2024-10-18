@@ -1,7 +1,7 @@
-#include "cpu/timer.h"
-#include "cpu/isr.h"
-#include "cpu/ports.h"
-#include "libc/function.h"
+#include "os-test/cpu/timer.h"
+#include "os-test/cpu/isr.h"
+#include "os-test/cpu/ports.h"
+#include "os-test/libc/function.h"
 
 uint32_t tick = 0;
 

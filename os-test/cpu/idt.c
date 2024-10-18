@@ -1,5 +1,5 @@
-#include "cpu/idt.h"
-#include "libc/mem.h"
+#include "os-test/cpu/idt.h"
+#include "os-test/libc/mem.h"
 
 // ------ internal data ------
 /* How every interrupt gate (handler) is defined */

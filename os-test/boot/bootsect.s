@@ -15,12 +15,12 @@ _start:
   call switch_to_pm # disable interrupts, load GDT,  etc. Finally jumps to 'BEGIN_PM'
   jmp . # Never executed
 
-.include "boot/print.s"
-.include "boot/print_hex.s"
-.include "boot/disk.s"
-.include "boot/gdt.s"
-.include "boot/32bit_print.s"
-.include "boot/switch_pm.s"
+.include "os-test/boot/print.s"
+.include "os-test/boot/print_hex.s"
+.include "os-test/boot/disk.s"
+.include "os-test/boot/gdt.s"
+.include "os-test/boot/32bit_print.s"
+.include "os-test/boot/switch_pm.s"
 
 .code16
 load_kernel:

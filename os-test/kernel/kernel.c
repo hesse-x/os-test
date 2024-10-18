@@ -1,6 +1,6 @@
-#include "cpu/isr.h"
-#include "drivers/screen.h"
-#include "libc/string.h"
+#include "os-test/cpu/isr.h"
+#include "os-test/drivers/screen.h"
+#include "os-test/libc/string.h"
 
 void kernel_start() {
   kprint("Kernel start...\n");

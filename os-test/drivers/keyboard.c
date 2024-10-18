@@ -1,10 +1,10 @@
 #include <stdint.h>
-#include "drivers/keyboard.h"
-#include "drivers/screen.h"
-#include "cpu/isr.h"
-#include "cpu/ports.h"
-#include "libc/function.h"
-#include "libc/string.h"
+#include "os-test/drivers/keyboard.h"
+#include "os-test/drivers/screen.h"
+#include "os-test/cpu/isr.h"
+#include "os-test/cpu/ports.h"
+#include "os-test/libc/function.h"
+#include "os-test/libc/string.h"
 
 #define BACKSPACE 0x0E
 #define ENTER 0x1C
