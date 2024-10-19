@@ -1,5 +1,4 @@
 add_library(boot_elf OBJECT bootsect.s)
-add_library(kernel_entry OBJECT kernel_entry.s)
 
 add_executable(boot.bin)
 target_link_libraries(boot.bin PRIVATE boot_elf)

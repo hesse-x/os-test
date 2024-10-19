@@ -1,5 +1,5 @@
-.code16
 .global _start
+.code16
 _start:
   .equ KERNEL_OFFSET, 0x9000 # The same one we used when linking the kernel
 
@@ -11,7 +11,7 @@ _start:
   call print
   call print_nl
 
-  call load_kernel # read the kernel from disk
+  call load_init # read the kernel from disk
   call switch_to_pm # disable interrupts, load GDT,  etc. Finally jumps to 'BEGIN_PM'
   jmp . # Never executed
 
@@ -23,13 +23,13 @@ _start:
 .include "os-test/boot/switch_pm.s"
 
 .code16
-load_kernel:
+load_init:
   movw $MSG_LOAD_KERNEL, %bx
   call print
   call print_nl
 
-  movw $KERNEL_OFFSET, %bx # Read from disk and store in 0x10000
-  movb $52, %dh # Our future kernel will be larger, make this big
+  movw $KERNEL_OFFSET, %bx # Read from disk and store in 0x9000
+  movb $4, %dh # Our future kernel will be larger, make this big
   movb BOOT_DRIVE, %dl
   call disk_load
   ret

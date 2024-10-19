@@ -379,3 +379,4 @@ irq15:
   pushl $15
   pushl $47
   jmp irq_common_stub
+.section .note.GNU-stack,"",%progbits
