@@ -1,7 +1,7 @@
 .code16
 .global _start
 _start:
-  .equ KERNEL_OFFSET, 0x1000 # The same one we used when linking the kernel
+  .equ KERNEL_OFFSET, 0x9000 # The same one we used when linking the kernel
 
   movb %dl, BOOT_DRIVE # Remember that the BIOS sets us the boot drive in 'dl' on boot
   movw $0x9000, %bp
@@ -28,8 +28,8 @@ load_kernel:
   call print
   call print_nl
 
-  movw $KERNEL_OFFSET, %bx # Read from disk and store in 0x1000
-  movb $31, %dh # Our future kernel will be larger, make this big
+  movw $KERNEL_OFFSET, %bx # Read from disk and store in 0x10000
+  movb $52, %dh # Our future kernel will be larger, make this big
   movb BOOT_DRIVE, %dl
   call disk_load
   ret
