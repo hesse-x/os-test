@@ -2,6 +2,7 @@
 #include "os-test/drivers/screen.h"
 #include "os-test/libc/string.h"
 
+extern char etext[], edata[], end[], kern_start[];
 void kernel_start(void) {
   // Here, we have taken over the entire boot process,
   // and this function will no longer return,

@@ -8,9 +8,6 @@ add_subdirectory(utils)
 
 add_executable(kernel.bin)
 target_link_libraries(kernel.bin PRIVATE cpu cpu_asm drivers kernel libc utils)
-target_link_options(kernel.bin PRIVATE -static -e kernel_start -Ttext 0x10000)
-target_link_options(kernel.bin PRIVATE -Wl,-m,elf_i386)
+target_link_options(kernel.bin PRIVATE -T ${CMAKE_SOURCE_DIR}/os-test/kernel/kernel.ld)
+target_link_options(kernel.bin PRIVATE -static)
 target_link_options(kernel.bin PRIVATE -N -Wl,--build-id=none)
-# target_link_options(kernel.bin PRIVATE -Wl,--oformat,binary)
-target_link_options(kernel.bin PRIVATE -nostdlib -nostdinc -nodefaultlibs -fno-builtin -ffreestanding -nostartfiles)
-
