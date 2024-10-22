@@ -1,35 +1,35 @@
-#include <stdint.h>
 #include "os-test/utils/disk_io.h"
 #include "os-test/utils/x86.h"
+#include <stdint.h>
 
 static void waitdisk(void) {
-    while ((inb(0x1F7) & 0xC0) != 0x40)
-        /* do nothing */;
+  while ((inb(0x1F7) & 0xC0) != 0x40)
+    /* do nothing */;
 }
 
 void read_sect(void *dst, uint32_t secno) {
-    // wait for disk to be ready
-    // waitdisk();
+  // wait for disk to be ready
+  // waitdisk();
 
-    outb(0x1F2, 1);                         // count = 1
-    outb(0x1F3, secno & 0xFF);
-    outb(0x1F4, (secno >> 8) & 0xFF);
-    outb(0x1F5, (secno >> 16) & 0xFF);
-    outb(0x1F6, ((secno >> 24) & 0xF) | 0xE0);
-    outb(0x1F7, 0x20);                      // cmd 0x20 - read sectors
+  outb(0x1F2, 1); // count = 1
+  outb(0x1F3, secno & 0xFF);
+  outb(0x1F4, (secno >> 8) & 0xFF);
+  outb(0x1F5, (secno >> 16) & 0xFF);
+  outb(0x1F6, ((secno >> 24) & 0xF) | 0xE0);
+  outb(0x1F7, 0x20); // cmd 0x20 - read sectors
 
-    // wait for disk to be ready
-    waitdisk();
+  // wait for disk to be ready
+  waitdisk();
 
-    // read a sector
-    insl(0x1F0, dst, SECTSIZE / 4);
+  // read a sector
+  insl(0x1F0, dst, SECTSIZE / 4);
 }
 
 /* *
  * readseg - read @count bytes at @offset from kernel into virtual address @va,
  * might copy more than asked.
  * */
-void read_seg(void* dst, uint32_t count, uint32_t offset) {
+void read_seg(void *dst, uint32_t count, uint32_t offset) {
   char *buffer = (char *)dst;
   char *end = buffer + count;
   // round down to sector boundary

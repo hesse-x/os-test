@@ -1,10 +1,10 @@
-#include <stdint.h>
 #include "os-test/drivers/keyboard.h"
-#include "os-test/drivers/screen.h"
 #include "os-test/cpu/isr.h"
 #include "os-test/cpu/ports.h"
+#include "os-test/drivers/screen.h"
 #include "os-test/libc/function.h"
 #include "os-test/libc/string.h"
+#include <stdint.h>
 
 #define BACKSPACE 0x0E
 #define ENTER 0x1C
@@ -49,7 +49,7 @@ static void keyboard_callback(registers_t *regs) {
     return;
   if (scancode == BACKSPACE) {
     backspace(key_buffer);
-    kprint_backspace();
+    put_char('\b', WHITE_ON_BLACK);
   } else if (scancode == ENTER) {
     kprint("\n");
     user_input(key_buffer); /* kernel-controlled function */

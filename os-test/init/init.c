@@ -1,19 +1,17 @@
-#include <stdint.h>
 #include "os-test/utils/disk_io.h"
 #include "os-test/utils/elf.h"
+#include "os-test/utils/os_utils.h"
 #include "os-test/utils/x86.h"
+#include <stdint.h>
 
-extern uint32_t elf_addr;
-uint32_t elf_addr = 0x10000;
+static uint32_t elf_addr = KERNEL_ENTRY_ADDR;
 
 static const uint32_t elf_offset = 4096 + 512;
 static const uint32_t elf_sect = elf_offset / 512;
 
 static bool isElf(Elf32_Ehdr *hdr) {
-  return hdr->e_ident[EI_MAG0] == ELFMAG0 &&
-         hdr->e_ident[EI_MAG1] == ELFMAG1 &&
-         hdr->e_ident[EI_MAG2] == ELFMAG2 &&
-         hdr->e_ident[EI_MAG3] == ELFMAG3;
+  return hdr->e_ident[EI_MAG0] == ELFMAG0 && hdr->e_ident[EI_MAG1] == ELFMAG1 &&
+         hdr->e_ident[EI_MAG2] == ELFMAG2 && hdr->e_ident[EI_MAG3] == ELFMAG3;
 }
 
 void load_kernel() {
@@ -46,12 +44,12 @@ void load_kernel() {
     for (int i = 0; i < (int)phnum; ++i) {
       if (ph[i].p_memsz == 0)
         continue;
-      read_seg((void*)(ph[i].p_vaddr & 0xFFFFFF), ph[i].p_memsz, ph[i].p_offset + elf_offset);
+      read_seg((void *)(ph[i].p_vaddr & 0xFFFFFF), ph[i].p_memsz,
+               ph[i].p_offset + elf_offset);
     }
   }
 
   // call the entry point from the ELF header
   // note: does not return
   ((void (*)(void))(entry & 0xFFFFFF))();
-
 }

@@ -40,4 +40,3 @@ add_custom_command(
 )  
 
 add_custom_target(os-image ALL DEPENDS os-image.bin)
-
