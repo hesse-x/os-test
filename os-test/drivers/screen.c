@@ -47,60 +47,50 @@ void put_char(char c, char attr) {
     attr = WHITE_ON_BLACK;
 
   switch (c) {
-  case '\n': {
-    cursor.col = 0;
-    cursor.row += 1;
-    cursor.offset = get_offset(cursor.col, cursor.row);
-    break;
-  }
-  case '\r': {
-    cursor.col = 0;
-    cursor.offset = get_offset(cursor.col, cursor.row);
-    break;
-  }
-  case '\b': {
-    if (cursor.offset == 0)
+    case '\n': {
+      cursor.col = 0;
+      cursor.row += 1;
+      cursor.offset = get_offset(cursor.col, cursor.row);
       break;
-    cursor.col -= 1;
-    cursor.offset -= 2;
-    vidmem[cursor.offset] = ' ';
-    vidmem[cursor.offset + 1] = attr;
-    break;
+    }
+    case '\r': {
+      cursor.col = 0;
+      cursor.offset = get_offset(cursor.col, cursor.row);
+      break;
+    }
+    case '\b': {
+      if (cursor.offset == 0)
+        break;
+      cursor.col -= 1;
+      cursor.offset -= 2;
+      vidmem[cursor.offset] = ' ';
+      vidmem[cursor.offset + 1] = attr;
+      break;
+    }
+    default: {
+      vidmem[cursor.offset] = c;
+      vidmem[cursor.offset + 1] = attr;
+      cursor.col += 1;
+      cursor.offset += 2;
+    }
   }
-  default: {
-    vidmem[cursor.offset] = c;
-    vidmem[cursor.offset + 1] = attr;
-    cursor.col += 1;
-    cursor.offset += 2;
-  }
-  }
-  //  if (c == '\n') {
-  //  } else if (c == '\b') { /* Backspace */
-  //    cursor.offset -= 2;
-  //    vidmem[cursor.offset] = ' ';
-  //    vidmem[cursor.offset + 1] = attr;
-  //  } else {
-  //    vidmem[cursor.offset] = c;
-  //    vidmem[cursor.offset + 1] = attr;
-  //    cursor.offset += 2;
-  //  }
 
   /* Check if the offset is over screen size and scroll */
-  // if (cursor.offset >= MAX_ROWS * MAX_COLS * 2) {
-  //   int i;
-  //   for (i = 1; i < MAX_ROWS; i++)
-  //     memcpy((uint8_t *)(get_offset(0, i) + VIDEO_ADDRESS),
-  //                 (uint8_t *)(get_offset(0, i - 1) + VIDEO_ADDRESS), MAX_COLS
-  //                 * 2);
+  if (cursor.offset >= MAX_ROWS * MAX_COLS * 2) {
+    int i;
+    for (i = 1; i < MAX_ROWS; i++)
+      memcpy((uint8_t *)(get_offset(0, i) + VIDEO_ADDRESS),
+             (uint8_t *)(get_offset(0, i - 1) + VIDEO_ADDRESS), MAX_COLS
+              * 2);
 
-  //   /* Blank last line */
-  //   char *last_line =
-  //       (char *)(get_offset(0, MAX_ROWS - 1) + (uint8_t *)VIDEO_ADDRESS);
-  //   for (i = 0; i < MAX_COLS * 2; i++)
-  //     last_line[i] = 0;
+    /* Blank last line */
+    char *last_line =
+        (char *)(get_offset(0, MAX_ROWS - 1) + (uint8_t *)VIDEO_ADDRESS);
+    for (i = 0; i < MAX_COLS * 2; i++)
+      last_line[i] = 0;
 
-  //   offset -= 2 * MAX_COLS;
-  // }
+    cursor.offset -= 2 * MAX_COLS;
+  }
 
   set_cursor_offset(cursor.offset);
 }

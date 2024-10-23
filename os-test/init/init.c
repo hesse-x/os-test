@@ -4,7 +4,7 @@
 #include "os-test/utils/x86.h"
 #include <stdint.h>
 
-static uint32_t elf_addr = KERNEL_ENTRY_ADDR;
+static uint32_t elf_addr = KERNEL_ELF_ADDR;
 
 static const uint32_t elf_offset = 4096 + 512;
 static const uint32_t elf_sect = elf_offset / 512;
@@ -51,5 +51,8 @@ void load_kernel() {
 
   // call the entry point from the ELF header
   // note: does not return
-  ((void (*)(void))(entry & 0xFFFFFF))();
+  // Here, we have taken over the entire boot process,
+  // and this function will no longer return,
+  // so we completely reset the stack(ebp/esp).
+  init_stack_and_call(entry & 0xFFFFFF, KERNEL_STACK_TOP);
 }

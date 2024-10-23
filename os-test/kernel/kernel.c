@@ -6,19 +6,12 @@
 #include "os-test/utils/os_utils.h"
 
 extern char etext[], edata[], end[], kern_start[];
-void kernel_start(void) {
-  // Here, we have taken over the entire boot process,
-  // and this function will no longer return,
-  // so we completely reset the stack(ebp/esp).
-  // !But this function can't use any stack space.
-  init_stack(KERNEL_STACK_TOP);
-
+void kernel_init(void) {
   clear_screen();
   kprint("Kernel start...\n");
   pmm_init();
   isr_install();
   irq_install();
-
   kprint("Type something, it will go through the kernel\n"
          "Type END to halt the CPU\n> ");
   while (1)
