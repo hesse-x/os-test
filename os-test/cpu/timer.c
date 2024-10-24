@@ -1,6 +1,6 @@
 #include "os-test/cpu/timer.h"
 #include "os-test/cpu/isr.h"
-#include "os-test/cpu/ports.h"
+#include "os-test/utils/x86.h"
 #include "os-test/libc/function.h"
 
 uint32_t tick = 0;
@@ -19,7 +19,7 @@ void init_timer(uint32_t freq) {
   uint8_t low = (uint8_t)(divisor & 0xFF);
   uint8_t high = (uint8_t)((divisor >> 8) & 0xFF);
   /* Send the command */
-  port_byte_out(0x43, 0x36); /* Command port */
-  port_byte_out(0x40, low);
-  port_byte_out(0x40, high);
+  outb(0x43, 0x36); /* Command port */
+  outb(0x40, low);
+  outb(0x40, high);
 }
