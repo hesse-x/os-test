@@ -1,6 +1,5 @@
 #include "os-test/drivers/screen.h"
 #include "os-test/utils/x86.h"
-#include "os-test/libc/mem.h"
 #include <stdint.h>
 
 #define VIDEO_ADDRESS 0xb8000
@@ -18,7 +17,6 @@ typedef struct {
 } Cursor;
 
 static Cursor cursor = {0, 0, 0};
-
 /* Declaration of private functions */
 static int get_offset(int col, int row) { return 2 * (row * MAX_COLS + col); }
 static int get_offset_row(int offset) { return offset / (2 * MAX_COLS); }
@@ -32,6 +30,11 @@ static void set_cursor_offset(int offset);
 /**********************************************************
  * Public Kernel API functions                            *
  **********************************************************/
+void init_screen() {
+  cursor.offset = get_cursor_offset();
+  cursor.row = get_offset_row(cursor.offset);
+  cursor.row = get_offset_row(cursor.offset);
+}
 
 /**
  * Innermost print function for our kernel, directly accesses the video memory
@@ -47,41 +50,40 @@ void put_char(char c, char attr) {
     attr = WHITE_ON_BLACK;
 
   switch (c) {
-    case '\n': {
-      cursor.col = 0;
-      cursor.row += 1;
-      cursor.offset = get_offset(cursor.col, cursor.row);
+  case '\n': {
+    cursor.col = 0;
+    cursor.row += 1;
+    cursor.offset = get_offset(cursor.col, cursor.row);
+    break;
+  }
+  case '\r': {
+    cursor.col = 0;
+    cursor.offset = get_offset(cursor.col, cursor.row);
+    break;
+  }
+  case '\b': {
+    if (cursor.offset == 0)
       break;
-    }
-    case '\r': {
-      cursor.col = 0;
-      cursor.offset = get_offset(cursor.col, cursor.row);
-      break;
-    }
-    case '\b': {
-      if (cursor.offset == 0)
-        break;
-      cursor.col -= 1;
-      cursor.offset -= 2;
-      vidmem[cursor.offset] = ' ';
-      vidmem[cursor.offset + 1] = attr;
-      break;
-    }
-    default: {
-      vidmem[cursor.offset] = c;
-      vidmem[cursor.offset + 1] = attr;
-      cursor.col += 1;
-      cursor.offset += 2;
-    }
+    cursor.col -= 1;
+    cursor.offset -= 2;
+    vidmem[cursor.offset] = ' ';
+    vidmem[cursor.offset + 1] = attr;
+    break;
+  }
+  default: {
+    vidmem[cursor.offset] = c;
+    vidmem[cursor.offset + 1] = attr;
+    cursor.col += 1;
+    cursor.offset += 2;
+  }
   }
 
   /* Check if the offset is over screen size and scroll */
   if (cursor.offset >= MAX_ROWS * MAX_COLS * 2) {
     int i;
     for (i = 1; i < MAX_ROWS; i++)
-      memcpy((uint8_t *)(get_offset(0, i) + VIDEO_ADDRESS),
-             (uint8_t *)(get_offset(0, i - 1) + VIDEO_ADDRESS), MAX_COLS
-              * 2);
+      __memmove((uint8_t *)(get_offset(0, i - 1) + VIDEO_ADDRESS),
+                (uint8_t *)(get_offset(0, i) + VIDEO_ADDRESS), MAX_COLS * 2);
 
     /* Blank last line */
     char *last_line =

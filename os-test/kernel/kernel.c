@@ -2,12 +2,11 @@
 #include "os-test/drivers/screen.h"
 #include "os-test/kernel/mmu.h"
 #include "os-test/kernel/pmm.h"
-#include "os-test/libc/string.h"
 #include "os-test/utils/os_utils.h"
 
 extern char etext[], edata[], end[], kern_start[];
 void kernel_init(void) {
-  clear_screen();
+  init_screen();
   kprint("Kernel start...\n");
   pmm_init();
   isr_install();

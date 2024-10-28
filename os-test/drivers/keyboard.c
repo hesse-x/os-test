@@ -1,11 +1,10 @@
 #include "os-test/drivers/keyboard.h"
 #include "os-test/cpu/isr.h"
 #include "os-test/drivers/screen.h"
-#include "os-test/libc/function.h"
-#include "os-test/libc/string.h"
+#include "os-test/utils/os_utils.h"
 #include "os-test/utils/x86.h"
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #define BACKSPACE 0x0E
 #define ENTER 0x1C
@@ -14,21 +13,13 @@ static char key_buffer[256] = {'\0'};
 
 static uint8_t state = 0;
 
-static bool shift_state() {
-  return state >> 7;
-}
+static bool shift_state() { return state >> 7; }
 
-static void set_shift() {
-  state |= (1 << 7);
-}
+static void set_shift() { state |= (1 << 7); }
 
-static void release_shift() {
-  state &= (0 << 7);
-}
+static void release_shift() { state &= (0 << 7); }
 
-static bool is_shift(char sc) {
-  return (sc == 0x2A || sc == 0x36);
-}
+static bool is_shift(char sc) { return (sc == 0x2A || sc == 0x36); }
 
 #define SC_MAX 57
 static const char *sc_name[] = {
@@ -57,7 +48,7 @@ char get_letter(char sc) {
 }
 
 static void user_input(char *input) {
-  if (strcmp(input, "END") == 0) {
+  if (__strcmp(input, "END") == 0) {
     kprint("Stopping the CPU. Bye!\n");
     asm volatile("hlt");
   }
@@ -65,7 +56,6 @@ static void user_input(char *input) {
   kprint(input);
   kprint("\n> ");
 }
-
 
 static void keyboard_callback(registers_t *regs) {
   /* The PIC leaves us the scancode in port 0x60 */
@@ -83,7 +73,8 @@ static void keyboard_callback(registers_t *regs) {
   if (scancode > SC_MAX)
     return;
   if (scancode == BACKSPACE) {
-    backspace(key_buffer);
+    size_t end = __strlen(key_buffer);
+    key_buffer[end - 1] = '\0';
     put_char('\b', WHITE_ON_BLACK);
   } else if (scancode == ENTER) {
     kprint("\n");
@@ -100,10 +91,15 @@ static void keyboard_callback(registers_t *regs) {
     }
     /* Remember that kprint only accepts char[] */
     char str[2] = {letter, '\0'};
-    append(key_buffer, letter);
+    size_t end = __strlen(key_buffer);
+    key_buffer[end] = letter;
+    key_buffer[end + 1] = '\0';
     kprint(str);
   }
   UNUSED(regs);
 }
 
-void init_keyboard() { register_interrupt_handler(IRQ1, keyboard_callback); }
+void init_keyboard() {
+  key_buffer[0] = '\0';
+  register_interrupt_handler(IRQ1, keyboard_callback);
+}

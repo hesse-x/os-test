@@ -4,7 +4,6 @@
 #include "os-test/cpu/timer.h"
 #include "os-test/drivers/keyboard.h"
 #include "os-test/drivers/screen.h"
-#include "os-test/libc/string.h"
 
 isr_t interrupt_handlers[256];
 
@@ -116,8 +115,17 @@ char *exception_messages[] = {"Division By Zero",
 
 void isr_handler(registers_t *r) {
   kprint("received interrupt: ");
-  char s[3];
-  int_to_ascii(r->int_no, s);
+  kprint("0x");
+  static const char map[16] = {'0', '1', '2', '3',
+                               '4', '5', '6', '7',
+                               '8', '9', 'a', 'b',
+                               'c', 'd', 'e', 'f'};
+  char s[5];
+  s[0] = map[(r->int_no >> 24 & 0xff)];
+  s[1] = map[(r->int_no >> 16 & 0xff)];
+  s[2] = map[(r->int_no >> 8 & 0xff)];
+  s[3] = map[(r->int_no & 0xff)];
+  s[4] = '\0';
   kprint(s);
   kprint("\n");
   kprint(exception_messages[r->int_no]);

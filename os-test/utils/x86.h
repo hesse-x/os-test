@@ -172,4 +172,17 @@ static inline void *__memcpy(void *dst, const void *src, size_t n) {
 }
 #endif /* __HAVE_ARCH_MEMCPY */
 
+#ifndef __HAVE_ARCH_STRLEN
+#define __HAVE_ARCH_STRLEN
+static inline size_t __strlen(const char *str) {
+  int cnt;
+  asm("cld\n" /* Search forward.  */
+      /* Some old versions of gas need `repne' instead of `repnz'.  */
+      "repnz\n" /* Look for a zero byte.  */
+      "scasb"   /* %0, %1, %3 */
+      : "=c"(cnt)
+      : "D"(str), "0"(-1), "a"(0));
+  return -2 - cnt;
+}
+#endif /* __HAVE_ARCH_STRLEN */
 #endif // UTILS_X86_H_

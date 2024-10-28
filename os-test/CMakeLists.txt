@@ -7,7 +7,7 @@ add_subdirectory(libc)
 add_subdirectory(utils)
 
 add_executable(kernel.bin)
-target_link_libraries(kernel.bin PRIVATE cpu cpu_asm drivers kernel libc utils)
+target_link_libraries(kernel.bin PRIVATE cpu cpu_asm drivers kernel utils)
 target_link_options(kernel.bin PRIVATE -T ${CMAKE_SOURCE_DIR}/os-test/kernel/kernel.ld)
 target_link_options(kernel.bin PRIVATE -static)
 target_link_options(kernel.bin PRIVATE -N -Wl,--build-id=none)
