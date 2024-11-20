@@ -1,7 +1,7 @@
 #include "os-test/kernel/interrupt/timer.h"
 #include "os-test/kernel/interrupt/isr.h"
-#include "os-test/utils/x86.h"
 #include "os-test/utils/os_utils.h"
+#include "os-test/utils/x86.h"
 
 uint32_t tick = 0;
 

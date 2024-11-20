@@ -1,5 +1,5 @@
-#include "os-test/kernel/interrupt/isr.h"
 #include "os-test/drivers/screen.h"
+#include "os-test/kernel/interrupt/isr.h"
 #include "os-test/kernel/mem/mmu.h"
 #include "os-test/kernel/mem/pmm.h"
 #include "os-test/utils/os_utils.h"

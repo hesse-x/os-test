@@ -1,6 +1,6 @@
 #include "os-test/drivers/keyboard.h"
-#include "os-test/kernel/interrupt/isr.h"
 #include "os-test/drivers/screen.h"
+#include "os-test/kernel/interrupt/isr.h"
 #include "os-test/utils/os_utils.h"
 #include "os-test/utils/x86.h"
 #include <stdbool.h>
@@ -52,9 +52,15 @@ static void user_input(char *input) {
     kprint("Stopping the CPU. Bye!\n");
     asm volatile("hlt");
   }
+  if (__strcmp(input, "INTERRUPT") == 0) {
+    kprint("Interupt!\n");
+    asm volatile("int $0x0");
+    asm volatile("int $0x1");
+  }
   kprint("You said: ");
   kprint(input);
   kprint("\n> ");
+  input[0] = '\0';
 }
 
 static void keyboard_callback(registers_t *regs) {

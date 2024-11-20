@@ -1,47 +1,141 @@
 #include "os-test/kernel/interrupt/isr.h"
 #include "os-test/kernel/interrupt/idt.h"
-#include "os-test/utils/x86.h"
 #include "os-test/kernel/interrupt/timer.h"
-#include "os-test/drivers/keyboard.h"
-#include "os-test/drivers/screen.h"
+#include "os-test/utils/x86.h"
 
 isr_t interrupt_handlers[256];
+
+void isr_handler(registers_t *r);
+void irq_handler(registers_t *r);
+
+static inline void __isr(int id, isr_t handle) __attribute__((always_inline));
+static void __isr(int id, isr_t handle) {
+  asm volatile("pushl $0\n"
+               "movl %0, %%ebx\n"
+               "push %%ebx\n"
+               :
+               : "r"(id)
+               : "ebx");
+
+  asm volatile("pusha\n"
+               "push %%ds\n"
+               "push %%es\n"
+               "push %%fs\n"
+               "push %%gs\n"
+               :
+               :
+               : "memory");
+
+  asm volatile("movw $0x10, %%ax\n"
+               "movw %%ax, %%ds\n"
+               "movw %%ax, %%es\n"
+               "movw %%ax, %%fs\n"
+               "movw %%ax, %%gs\n"
+               "push %%esp\n"
+               "cld\n"
+               :
+               :
+               : "memory");
+
+  asm volatile("movl %0, %%ebx\n"
+               "call *%%ebx\n"
+               "pop %%ebx\n"
+               :
+               : "r"(handle)
+               : "ebx");
+
+  asm volatile("pop %%ds\n"
+               "pop %%es\n"
+               "pop %%fs\n"
+               "pop %%gs\n"
+               "popa\n"
+               "addl $8, %%esp\n"
+               "iret"
+               :
+               :
+               : "memory");
+}
+
+#define FOREACH(F)                                                             \
+  F(0)                                                                         \
+  F(1)                                                                         \
+  F(2)                                                                         \
+  F(3)                                                                         \
+  F(4)                                                                         \
+  F(5)                                                                         \
+  F(6)                                                                         \
+  F(7)                                                                         \
+  F(8)                                                                         \
+  F(9)                                                                         \
+  F(10)                                                                        \
+  F(11)                                                                        \
+  F(12)                                                                        \
+  F(13)                                                                        \
+  F(14)                                                                        \
+  F(15)                                                                        \
+  F(16)                                                                        \
+  F(17)                                                                        \
+  F(18)                                                                        \
+  F(19)                                                                        \
+  F(20)                                                                        \
+  F(21)                                                                        \
+  F(22)                                                                        \
+  F(23)                                                                        \
+  F(24)                                                                        \
+  F(25)                                                                        \
+  F(26)                                                                        \
+  F(27)                                                                        \
+  F(28)                                                                        \
+  F(29)                                                                        \
+  F(30)                                                                        \
+  F(31)
+
+#define GEN_ISR(N)                                                             \
+  __attribute__((naked)) void isr##N() { __isr(N, isr_handler); }
+FOREACH(GEN_ISR)
+#undef GEN_ISR
+
+void interrupt_install() {
+#define GEN_ISR_INSTALL(N) set_idt_gate(N, (uint32_t)isr##N);
+  FOREACH(GEN_ISR_INSTALL)
+#undef GEN_ISR_INSTALL
+}
+#undef FOREACH
+
+#define FOREACH(F)                                                             \
+  F(0)                                                                         \
+  F(1)                                                                         \
+  F(2)                                                                         \
+  F(3)                                                                         \
+  F(4)                                                                         \
+  F(5)                                                                         \
+  F(6)                                                                         \
+  F(7)                                                                         \
+  F(8)                                                                         \
+  F(9)                                                                         \
+  F(10)                                                                        \
+  F(11)                                                                        \
+  F(12)                                                                        \
+  F(13)                                                                        \
+  F(14)                                                                        \
+  F(15)
+
+#define GEN_IRQ(N)                                                             \
+  __attribute__((naked)) void irq##N() { __isr(N + 31, irq_handler); }
+FOREACH(GEN_IRQ)
+#undef GEN_IRQ
+
+void irq_reg() {
+#define GEN_IRQ_INSTALL(N) set_idt_gate(N + 31, (uint32_t)irq##N);
+  FOREACH(GEN_IRQ_INSTALL)
+#undef GEN_IRQ_INSTALL
+}
+#undef FOREACH
 
 /* Can't do this with a loop because we need the address
  * of the function names */
 void isr_install() {
-  set_idt_gate(0, (uint32_t)isr0);
-  set_idt_gate(1, (uint32_t)isr1);
-  set_idt_gate(2, (uint32_t)isr2);
-  set_idt_gate(3, (uint32_t)isr3);
-  set_idt_gate(4, (uint32_t)isr4);
-  set_idt_gate(5, (uint32_t)isr5);
-  set_idt_gate(6, (uint32_t)isr6);
-  set_idt_gate(7, (uint32_t)isr7);
-  set_idt_gate(8, (uint32_t)isr8);
-  set_idt_gate(9, (uint32_t)isr9);
-  set_idt_gate(10, (uint32_t)isr10);
-  set_idt_gate(11, (uint32_t)isr11);
-  set_idt_gate(12, (uint32_t)isr12);
-  set_idt_gate(13, (uint32_t)isr13);
-  set_idt_gate(14, (uint32_t)isr14);
-  set_idt_gate(15, (uint32_t)isr15);
-  set_idt_gate(16, (uint32_t)isr16);
-  set_idt_gate(17, (uint32_t)isr17);
-  set_idt_gate(18, (uint32_t)isr18);
-  set_idt_gate(19, (uint32_t)isr19);
-  set_idt_gate(20, (uint32_t)isr20);
-  set_idt_gate(21, (uint32_t)isr21);
-  set_idt_gate(22, (uint32_t)isr22);
-  set_idt_gate(23, (uint32_t)isr23);
-  set_idt_gate(24, (uint32_t)isr24);
-  set_idt_gate(25, (uint32_t)isr25);
-  set_idt_gate(26, (uint32_t)isr26);
-  set_idt_gate(27, (uint32_t)isr27);
-  set_idt_gate(28, (uint32_t)isr28);
-  set_idt_gate(29, (uint32_t)isr29);
-  set_idt_gate(30, (uint32_t)isr30);
-  set_idt_gate(31, (uint32_t)isr31);
+  interrupt_install();
 
   // Remap the PIC
   outb(0x20, 0x11);
@@ -56,22 +150,7 @@ void isr_install() {
   outb(0xA1, 0x0);
 
   // Install the IRQs
-  set_idt_gate(32, (uint32_t)irq0);
-  set_idt_gate(33, (uint32_t)irq1);
-  set_idt_gate(34, (uint32_t)irq2);
-  set_idt_gate(35, (uint32_t)irq3);
-  set_idt_gate(36, (uint32_t)irq4);
-  set_idt_gate(37, (uint32_t)irq5);
-  set_idt_gate(38, (uint32_t)irq6);
-  set_idt_gate(39, (uint32_t)irq7);
-  set_idt_gate(40, (uint32_t)irq8);
-  set_idt_gate(41, (uint32_t)irq9);
-  set_idt_gate(42, (uint32_t)irq10);
-  set_idt_gate(43, (uint32_t)irq11);
-  set_idt_gate(44, (uint32_t)irq12);
-  set_idt_gate(45, (uint32_t)irq13);
-  set_idt_gate(46, (uint32_t)irq14);
-  set_idt_gate(47, (uint32_t)irq15);
+  irq_reg();
 
   set_idt(); // Load with ASM
 }
@@ -116,10 +195,8 @@ char *exception_messages[] = {"Division By Zero",
 void isr_handler(registers_t *r) {
   kprint("received interrupt: ");
   kprint("0x");
-  static const char map[16] = {'0', '1', '2', '3',
-                               '4', '5', '6', '7',
-                               '8', '9', 'a', 'b',
-                               'c', 'd', 'e', 'f'};
+  static const char map[16] = {'0', '1', '2', '3', '4', '5', '6', '7',
+                               '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
   char s[5];
   s[0] = map[(r->int_no >> 24 & 0xff)];
   s[1] = map[(r->int_no >> 16 & 0xff)];
