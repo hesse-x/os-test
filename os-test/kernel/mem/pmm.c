@@ -1,6 +1,6 @@
-#include "os-test/kernel/pmm.h"
-#include "os-test/kernel/memlayout.h"
-#include "os-test/kernel/mmu.h"
+#include "os-test/kernel/mem/pmm.h"
+#include "os-test/kernel/mem/memlayout.h"
+#include "os-test/kernel/mem/mmu.h"
 #include "os-test/utils/x86.h"
 #include <stdint.h>
 

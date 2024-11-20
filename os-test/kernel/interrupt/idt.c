@@ -1,4 +1,4 @@
-#include "os-test/cpu/idt.h"
+#include "os-test/kernel/interrupt/idt.h"
 #include "os-test/utils/os_utils.h"
 
 // ------ internal data ------

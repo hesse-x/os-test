@@ -1,5 +1,5 @@
 #include "os-test/drivers/keyboard.h"
-#include "os-test/cpu/isr.h"
+#include "os-test/kernel/interrupt/isr.h"
 #include "os-test/drivers/screen.h"
 #include "os-test/utils/os_utils.h"
 #include "os-test/utils/x86.h"
