@@ -54,5 +54,5 @@ void load_kernel() {
   // Here, we have taken over the entire boot process,
   // and this function will no longer return,
   // so we completely reset the stack(ebp/esp).
-  init_stack_and_call(entry & 0xFFFFFF, KERNEL_STACK_TOP);
+  init_stack_and_call(entry & 0xFFFFFF, KERNEL_STACK_BOTTOM);
 }
