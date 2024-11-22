@@ -1,6 +1,8 @@
 #include "os-test/kernel/mem/pmm.h"
+#include "os-test/drivers/screen.h"
 #include "os-test/kernel/mem/memlayout.h"
 #include "os-test/kernel/mem/mmu.h"
+#include "os-test/utils/os_utils.h"
 #include "os-test/utils/x86.h"
 #include <stdint.h>
 
@@ -65,15 +67,10 @@ static inline void lgdt(struct pseudodesc *pd) {
   asm volatile("ljmp %0, $1f\n 1:\n" ::"i"(KERNEL_CS));
 }
 
-/* temporary kernel stack */
-uint8_t stack0[1024];
-
+extern char bootstack[], bootstacktop[];
 /* gdt_init - initialize the default GDT and TSS */
 static void gdt_init(void) {
-  // Setup a TSS so that we can get the right stack when we trap from
-  // user to the kernel. But not safe here, it's only a temporary value,
-  // it will be set to KSTACKTOP in lab2.
-  ts.ts_esp0 = (uint32_t)&stack0 + sizeof(stack0);
+  ts.ts_esp0 = (uintptr_t)bootstacktop;
   ts.ts_ss0 = KERNEL_DS;
 
   // initialize the TSS filed of the gdt
@@ -87,5 +84,67 @@ static void gdt_init(void) {
   ltr(GD_TSS);
 }
 
+static void fill_pde(struct pde_t *pde, unsigned int offset, void *addr,
+                     size_t len) {
+  uintptr_t phys_addr = (uintptr_t)addr;
+  size_t num_pages = len / PAGE_SIZE;
+  unsigned int pde_index = offset / PTE_MAX_ENTRIES;
+  unsigned int pte_index = offset % PTE_MAX_ENTRIES;
+  struct pde_t *current_pde = &pde[pde_index];
+  struct pte_t *page_table = (struct pte_t *)(current_pde->base_addr << 12);
+  for (size_t i = 0; i < num_pages; i++) {
+    page_table[pte_index].present = 1;
+    page_table[pte_index].writable = 1;
+    page_table[pte_index].base_addr = phys_addr >> 12;
+    phys_addr += PAGE_SIZE;
+    pte_index++;
+    if (pte_index >= PTE_MAX_ENTRIES) {
+      pte_index = 0; // 重置 PTE 索引
+      pde_index++;   // 切换到下一个 PDE
+      page_table = (struct pte_t *)(pde[pde_index].base_addr << 12);
+    }
+  }
+}
+
+// This function is call in kernel_entry.S.
+void pde_init(struct pde_t *kernel_pde) {
+  uint32_t pde_idx = GET_PDE_INDEX(KERNEL_BASE_ADDR);
+  kernel_pde[pde_idx].present = 1;
+  kernel_pde[pde_idx].writable = 1;
+  kernel_pde[pde_idx].base_addr = (uintptr_t)kernel_pde >> 12;
+  // We run this func on phy_addr, so we need map vaddr to paddr and call.
+  void (*fn)(struct pde_t *, unsigned int, void *, size_t) =
+      (void (*)(struct pde_t *, unsigned int, void *, size_t))(
+          (uintptr_t)fill_pde & 0xFFFFFF);
+  fn(kernel_pde + pde_idx, 0, 0, 3 << 20 /* 3M */);
+  // Before call kernel_init, we run on phy_addr,
+  // so we also need to map 0-4M vaddr to 0-4M paddr.
+  pde_idx = 0;
+  kernel_pde[pde_idx].present = 1;
+  kernel_pde[pde_idx].writable = 1;
+  kernel_pde[pde_idx].base_addr = (uintptr_t)kernel_pde >> 12;
+}
+
 /* pmm_init - initialize the physical memory management */
-void pmm_init(void) { gdt_init(); }
+void pmm_init(void) {
+  struct e820map *memmap = (struct e820map *)(0x90000);
+
+  kprint("e820map:\n");
+  kprint("num: ");
+  kprint_int(memmap->nr_map);
+  kprint("\n");
+  int i;
+  for (i = 0; i < memmap->nr_map; i++) {
+    uint64_t begin = memmap->map[i].addr, end = begin + memmap->map[i].size;
+    kprint("  memory size: ");
+    kprint_int64(memmap->map[i].size);
+    kprint(", begin: ");
+    kprint_hex64(begin);
+    kprint(", end:");
+    kprint_hex64(end);
+    kprint(", type:");
+    kprint_int(memmap->map[i].type);
+    kprint("\n");
+  }
+  gdt_init();
+}
