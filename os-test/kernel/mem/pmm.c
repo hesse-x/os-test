@@ -1,4 +1,5 @@
 #include "os-test/kernel/mem/pmm.h"
+#include "os-test/drivers/screen.h"
 #include "os-test/kernel/mem/memlayout.h"
 #include "os-test/kernel/mem/mmu.h"
 #include "os-test/utils/x86.h"
@@ -87,5 +88,72 @@ static void gdt_init(void) {
   ltr(GD_TSS);
 }
 
+struct pde page_directory[1024] __attribute__((aligned(4096)));
+struct pte page_table[1024] __attribute__((aligned(4096)));
+
+static void page_init() {
+  // 初始化页表
+  for (int i = 0; i < 1024; i++) {
+    page_table[i].present = 1;
+    page_table[i].read_write = 1;
+    page_table[i].user_supervisor = 0;
+    page_table[i].page_write_through = 0;
+    page_table[i].page_cache_disable = 0;
+    page_table[i].accessed = 0;
+    page_table[i].dirty = 0;
+    page_table[i].page_attribute_table = 0;
+    page_table[i].global = 0;
+    page_table[i].available = 0;
+    page_table[i].page_frame_base = (i * 4096) >> 12; // 物理地址的高20位
+  }
+
+  // 设置页目录项
+  page_directory[0].present = 1;
+  page_directory[0].read_write = 1;
+  page_directory[0].user_supervisor = 0;
+  page_directory[0].page_write_through = 0;
+  page_directory[0].page_cache_disable = 0;
+  page_directory[0].accessed = 0;
+  page_directory[0].reserved = 0;
+  page_directory[0].page_size = 0;
+  page_directory[0].global = 0;
+  page_directory[0].available = 0;
+  page_directory[0].page_table_base =
+      ((uint32_t)page_table) >> 12; // 页表基地址的高20位
+
+  // 加载页目录地址到CR3寄存器
+  asm volatile("mov %0, %%cr3" : : "r"((uint32_t)page_directory));
+
+  // 启用分页机制
+  uint32_t cr0;
+  asm volatile("mov %%cr0, %0" : "=r"(cr0));
+  cr0 |= 0x80000000; // 设置CR0的PG位
+  asm volatile("mov %0, %%cr0" : : "r"(cr0));
+}
+
 /* pmm_init - initialize the physical memory management */
-void pmm_init(void) { gdt_init(); }
+void pmm_init(void) {
+  //  page_init();
+
+  struct e820map *memmap = (struct e820map *)(0x90000);
+
+  kprint("e820map:\n");
+  kprint("num: ");
+  kprint_int(memmap->nr_map);
+  kprint("\n");
+  int i;
+  for (i = 0; i < memmap->nr_map; i++) {
+    uint64_t begin = memmap->map[i].addr, end = begin + memmap->map[i].size;
+    kprint("  memory size: ");
+    kprint_int64(memmap->map[i].size);
+    kprint(", begin: ");
+    kprint_hex64(begin);
+    kprint(", end:");
+    kprint_hex64(end);
+    kprint(", type:");
+    kprint_int(memmap->map[i].type);
+    kprint("\n");
+  }
+
+  gdt_init();
+}
