@@ -1,4 +1,6 @@
 #include "os-test/kernel/interrupt/isr.h"
+#include "os-test/drivers/keyboard.h"
+#include "os-test/drivers/screen.h"
 #include "os-test/kernel/interrupt/idt.h"
 #include "os-test/kernel/interrupt/timer.h"
 #include "os-test/utils/x86.h"

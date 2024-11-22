@@ -20,6 +20,10 @@
     __mod;                                                                     \
   })
 
+static inline int64_t div64(int64_t lhs, int64_t rhs)
+    __attribute__((always_inline));
+static inline int64_t mod64(int64_t lhs, int64_t rhs)
+    __attribute__((always_inline));
 static inline uint8_t inb(uint16_t port) __attribute__((always_inline));
 static inline void insl(uint32_t port, void *addr, int cnt)
     __attribute__((always_inline));
@@ -88,6 +92,44 @@ static inline void *__memmove(void *dst, const void *src, size_t n)
     __attribute__((always_inline));
 static inline void *__memcpy(void *dst, const void *src, size_t n)
     __attribute__((always_inline));
+
+int64_t div64(int64_t lhs, int64_t rhs) {
+  int32_t lhs_low = (int32_t)(lhs & 0xFFFFFFFF);
+  int32_t lhs_high = (int32_t)(lhs >> 32);
+  int32_t rhs_low = (int32_t)(rhs & 0xFFFFFFFF);
+
+  int32_t quotient_low, quotient_high;
+
+  __asm__ volatile("movl %2, %%eax\n" // 被除数的低32位
+                   "movl %3, %%edx\n" // 被除数的高32位
+                   "idivl %4\n"       // 除以除数的低32位
+                   "movl %%eax, %0\n" // 存储商的低32位
+                   "movl %%edx, %1\n" // 存储余数的低32位
+                   : "=r"(quotient_low), "=r"(quotient_high)
+                   : "r"(lhs_low), "r"(lhs_high), "r"(rhs_low)
+                   : "%eax", "%edx");
+
+  return ((int64_t)quotient_high << 32) | quotient_low;
+}
+
+int64_t mod64(int64_t lhs, int64_t rhs) {
+  int32_t lhs_low = (int32_t)(lhs & 0xFFFFFFFF);
+  int32_t lhs_high = (int32_t)(lhs >> 32);
+  int32_t rhs_low = (int32_t)(rhs & 0xFFFFFFFF);
+
+  int32_t remainder_low, remainder_high;
+
+  __asm__ volatile("movl %2, %%eax\n" // 被除数的低32位
+                   "movl %3, %%edx\n" // 被除数的高32位
+                   "idivl %4\n"       // 除以除数的低32位
+                   "movl %%edx, %0\n" // 存储余数的低32位
+                   "movl %%eax, %1\n" // 存储商的低32位
+                   : "=r"(remainder_low), "=r"(remainder_high)
+                   : "r"(lhs_low), "r"(lhs_high), "r"(rhs_low)
+                   : "%eax", "%edx");
+
+  return ((int64_t)remainder_high << 32) | remainder_low;
+}
 
 #ifndef __HAVE_ARCH_STRCMP
 #define __HAVE_ARCH_STRCMP

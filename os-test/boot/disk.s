@@ -29,16 +29,9 @@ disk_load:
 
 
 disk_error:
-    movw $DISK_ERROR, %bx
-    call print
-    call print_nl
-    movb %ah, %dh # ah = error code, dl = disk drive that dropped the error
-    call print_hex # check out the code at http:#stanislavs.org/helppc/int_13-1.html
     jmp disk_loop
 
 sectors_error:
-    movw $SECTORS_ERROR, %bx
-    call print
 
 disk_loop:
     jmp .
