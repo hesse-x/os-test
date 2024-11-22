@@ -117,6 +117,54 @@ void kprint(const char *message) {
   }
 }
 
+void kprint_int64(int64_t value) {
+  if (value < 0) {
+    put_char('-', WHITE_ON_BLACK);
+    value = -value;
+  }
+  if (value >= 10) {
+    kprint_int(div64(value, 10));
+  }
+  put_char('0' + mod64(value, 10), WHITE_ON_BLACK);
+}
+
+void kprint_int(int32_t value) {
+  if (value < 0) {
+    put_char('-', WHITE_ON_BLACK);
+    value = -value;
+  }
+  if (value >= 10) {
+    kprint_int(value / 10);
+  }
+  put_char('0' + value % 10, WHITE_ON_BLACK);
+}
+
+void kprint_hex(int32_t value) {
+  put_char('0', WHITE_ON_BLACK);
+  put_char('x', WHITE_ON_BLACK);
+  for (int i = 28; i >= 0; i -= 4) {
+    int digit = (value >> i) & 0xF;
+    if (digit < 10) {
+      put_char('0' + digit, WHITE_ON_BLACK);
+    } else {
+      put_char('A' + digit - 10, WHITE_ON_BLACK);
+    }
+  }
+}
+
+void kprint_hex64(int64_t value) {
+  put_char('0', WHITE_ON_BLACK);
+  put_char('x', WHITE_ON_BLACK);
+  for (int i = 60; i >= 0; i -= 4) {
+    int digit = (value >> i) & 0xF;
+    if (digit < 10) {
+      put_char('0' + digit, WHITE_ON_BLACK);
+    } else {
+      put_char('A' + digit - 10, WHITE_ON_BLACK);
+    }
+  }
+}
+
 /**********************************************************
  * Private kernel functions                               *
  **********************************************************/

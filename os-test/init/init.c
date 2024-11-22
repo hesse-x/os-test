@@ -1,6 +1,7 @@
 #include "os-test/utils/disk_io.h"
 #include "os-test/utils/elf.h"
 #include "os-test/utils/os_utils.h"
+#include "os-test/kernel/mem/memlayout.h"
 #include "os-test/utils/x86.h"
 #include <stdint.h>
 
@@ -49,10 +50,6 @@ void load_kernel() {
     }
   }
 
-  // call the entry point from the ELF header
-  // note: does not return
-  // Here, we have taken over the entire boot process,
-  // and this function will no longer return,
-  // so we completely reset the stack(ebp/esp).
-  init_stack_and_call(entry & 0xFFFFFF, KERNEL_STACK_TOP);
+  void (*fn)(void) = (void(*)(void))(entry & 0xFFFFFF);
+  fn();
 }

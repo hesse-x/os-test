@@ -1,8 +1,12 @@
 #include "os-test/kernel/mem/pmm.h"
+#include "os-test/drivers/screen.h"
 #include "os-test/kernel/mem/memlayout.h"
 #include "os-test/kernel/mem/mmu.h"
 #include "os-test/utils/x86.h"
+#include "os-test/utils/os_utils.h"
 #include <stdint.h>
+
+extern uint32_t bootstacktop;
 
 /* *
  * Task State Segment:
@@ -65,15 +69,9 @@ static inline void lgdt(struct pseudodesc *pd) {
   asm volatile("ljmp %0, $1f\n 1:\n" ::"i"(KERNEL_CS));
 }
 
-/* temporary kernel stack */
-uint8_t stack0[1024];
-
 /* gdt_init - initialize the default GDT and TSS */
 static void gdt_init(void) {
-  // Setup a TSS so that we can get the right stack when we trap from
-  // user to the kernel. But not safe here, it's only a temporary value,
-  // it will be set to KSTACKTOP in lab2.
-  ts.ts_esp0 = (uint32_t)&stack0 + sizeof(stack0);
+  ts.ts_esp0 = bootstacktop;
   ts.ts_ss0 = KERNEL_DS;
 
   // initialize the TSS filed of the gdt
@@ -87,5 +85,43 @@ static void gdt_init(void) {
   ltr(GD_TSS);
 }
 
+struct pde page_directory[1024] __attribute__((aligned(4096)));
+struct pte page_table[1024] __attribute__((aligned(4096)));
+
+static void page_init() {
+  // 加载页目录地址到CR3寄存器
+  asm volatile("mov %0, %%cr3" : : "r"((uint32_t)page_directory));
+
+  // 启用分页机制
+  uint32_t cr0;
+  asm volatile("mov %%cr0, %0" : "=r"(cr0));
+  cr0 |= 0x80000000; // 设置CR0的PG位
+  asm volatile("mov %0, %%cr0" : : "r"(cr0));
+}
+
 /* pmm_init - initialize the physical memory management */
-void pmm_init(void) { gdt_init(); }
+void pmm_init(void) {
+  //  page_init();
+
+  struct e820map *memmap = (struct e820map *)(0x90000);
+
+  kprint("e820map:\n");
+  kprint("num: ");
+  kprint_int(memmap->nr_map);
+  kprint("\n");
+  int i;
+  for (i = 0; i < memmap->nr_map; i++) {
+    uint64_t begin = memmap->map[i].addr, end = begin + memmap->map[i].size;
+    kprint("  memory size: ");
+    kprint_int64(memmap->map[i].size);
+    kprint(", begin: ");
+    kprint_hex64(begin);
+    kprint(", end:");
+    kprint_hex64(end);
+    kprint(", type:");
+    kprint_int(memmap->map[i].type);
+    kprint("\n");
+  }
+
+  gdt_init();
+}

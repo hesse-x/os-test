@@ -13,7 +13,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin -fno-stack-protector -nodefault
 # set arch and forbidden simd
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -m32 -mno-sse")
 
-set(CMAKE_ASM_FLAGS "${CMAKE_ASM_NASM_FLAGS} -m32")
+set(CMAKE_ASM_FLAGS "${CMAKE_C_FLAGS} -m32")
 
 # set script path
 set(BUILD_TOOLS "${CMAKE_SOURCE_DIR}/build_tools")
