@@ -4,7 +4,7 @@
 #include "os-test/kernel/mem/pmm.h"
 #include "os-test/utils/os_utils.h"
 
-extern char etext[], edata[], end[], kern_start[];
+extern char etext[], edata[], kern_end[], kern_start[];
 void kernel_init(void) {
   init_screen();
   pmm_init();

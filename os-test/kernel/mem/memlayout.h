@@ -1,9 +1,10 @@
-#ifndef KERNEL_MEMLAYOUT_H_
-#define KERNEL_MEMLAYOUT_H_
+#ifndef KERNEL_MEM_MEMLAYOUT_H_
+#define KERNEL_MEM_MEMLAYOUT_H_
 
 #include "stdint.h"
 
 /* This file contains the definitions for memory management in our OS. */
+#define PAGE_SIZE 4096
 
 /* global segment number */
 #define SEG_KTEXT 1
@@ -70,4 +71,4 @@ struct pte {
   uint32_t page_frame_base : 20; // 页帧基地址（物理地址的高20位）
 } __attribute__((packed));
 
-#endif // KERNEL_MEMLAYOUT_H_
+#endif // KERNEL_MEM_MEMLAYOUT_H_

@@ -2,7 +2,9 @@
 #include "os-test/drivers/screen.h"
 #include "os-test/kernel/mem/memlayout.h"
 #include "os-test/kernel/mem/mmu.h"
+#include "os-test/kernel/mem/bfc.h"
 #include "os-test/utils/x86.h"
+#include "os-test/utils/os_utils.h"
 #include <stdint.h>
 
 /* *
@@ -119,7 +121,7 @@ static void page_init() {
   page_directory[0].global = 0;
   page_directory[0].available = 0;
   page_directory[0].page_table_base =
-      ((uint32_t)page_table) >> 12; // 页表基地址的高20位
+  ((uint32_t)page_table) >> 12; // 页表基地址的高20位
 
   // 加载页目录地址到CR3寄存器
   asm volatile("mov %0, %%cr3" : : "r"((uint32_t)page_directory));
@@ -131,18 +133,13 @@ static void page_init() {
   asm volatile("mov %0, %%cr0" : : "r"(cr0));
 }
 
-/* pmm_init - initialize the physical memory management */
-void pmm_init(void) {
-  //  page_init();
-
-  struct e820map *memmap = (struct e820map *)(0x90000);
-
+#if 1
+static void dump_e820map(struct e820map *memmap) {
   kprint("e820map:\n");
   kprint("num: ");
   kprint_int(memmap->nr_map);
   kprint("\n");
-  int i;
-  for (i = 0; i < memmap->nr_map; i++) {
+  for (int i = 0; i < memmap->nr_map; i++) {
     uint64_t begin = memmap->map[i].addr, end = begin + memmap->map[i].size;
     kprint("  memory size: ");
     kprint_int64(memmap->map[i].size);
@@ -154,6 +151,16 @@ void pmm_init(void) {
     kprint_int(memmap->map[i].type);
     kprint("\n");
   }
+}
+#else
+static void dump_e820map(struct e820map *memmap) {}
+#endif
 
+/* pmm_init - initialize the physical memory management */
+void pmm_init(void) {
+  //  page_init();
+  struct e820map *memmap = (struct e820map *)(KERNEL_STACK_TOP);
+  dump_e820map(memmap);
+  init_mem(memmap);
   gdt_init();
 }

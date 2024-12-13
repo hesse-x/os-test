@@ -10,6 +10,9 @@
 #define KERNEL_ELF_ADDR 0x10000
 #define KERNEL_ENTRY_ADDR 0x100000
 #define KERNEL_STACK_TOP 0x90000
+#define ALIGN(addr,size)   (((addr)+(size)-1)&(~((size)-1)))
+
+extern char kern_end[];
 
 static inline void init_stack_and_call(uint32_t, uint32_t)
     __attribute__((always_inline));
