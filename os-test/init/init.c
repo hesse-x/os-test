@@ -4,6 +4,8 @@
 #include "os-test/utils/x86.h"
 #include <stdint.h>
 
+#define MAP_KERNEL_ADDR(addr, offset) (addr - KERNEL_ENTRY_ADDR + offset)
+
 static uint32_t elf_addr = KERNEL_ELF_ADDR;
 
 static const uint32_t elf_offset = 4096 + 512;
@@ -15,6 +17,7 @@ static bool isElf(Elf32_Ehdr *hdr) {
 }
 
 void load_kernel() {
+  uint32_t offset = 0x100000;
   void *addr = (void *)elf_addr;
   read_sect(addr, elf_sect);
   Elf32_Ehdr *hdr = (Elf32_Ehdr *)addr;
@@ -44,7 +47,7 @@ void load_kernel() {
     for (int i = 0; i < (int)phnum; ++i) {
       if (ph[i].p_memsz == 0)
         continue;
-      read_seg((void *)(ph[i].p_vaddr & 0xFFFFFF), ph[i].p_memsz,
+      read_seg((void *)(MAP_KERNEL_ADDR(ph[i].p_vaddr, offset)), ph[i].p_memsz,
                ph[i].p_offset + elf_offset);
     }
   }
@@ -54,5 +57,7 @@ void load_kernel() {
   // Here, we have taken over the entire boot process,
   // and this function will no longer return,
   // so we completely reset the stack(ebp/esp).
-  init_stack_and_call(entry & 0xFFFFFF, KERNEL_STACK_BOTTOM);
+  // init_stack_and_call(MAP_KERNEL_ADDR(entry, offset), KERNEL_STACK_BOTTOM);
+  void (*fn)(uint32_t) = (void (*)(uint32_t))MAP_KERNEL_ADDR(entry, offset);
+  fn(offset);
 }

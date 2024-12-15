@@ -1,8 +1,6 @@
 #ifndef KERNEL_MEMLAYOUT_H_
 #define KERNEL_MEMLAYOUT_H_
 
-#include "stdint.h"
-
 /* This file contains the definitions for memory management in our OS. */
 
 /* global segment number */
@@ -27,19 +25,8 @@
 #define USER_CS ((GD_UTEXT) | DPL_USER)
 #define USER_DS ((GD_UDATA) | DPL_USER)
 
-#define E820MAX 20 // number of entries in E820MAP
-#define E820_ARM 1 // address range memory
-#define E820_ARR 2 // address range reserved
-
-struct e820map {
-  int nr_map;
-  struct {
-    uint64_t addr;
-    uint64_t size;
-    uint32_t type;
-  } __attribute__((packed)) map[E820MAX];
-};
-
+#ifndef __ASSEMBLER__
+#include "stdint.h"
 // Page Directory Entry
 struct pde {
   uint32_t present : 1;            // 存在位
@@ -69,5 +56,5 @@ struct pte {
   uint32_t available : 3;            // 可用位（供操作系统使用）
   uint32_t page_frame_base : 20; // 页帧基地址（物理地址的高20位）
 } __attribute__((packed));
-
+#endif // __ASSEMBLER__
 #endif // KERNEL_MEMLAYOUT_H_

@@ -1,6 +1,5 @@
 #ifndef KERNEL_MMU_H_
 #define KERNEL_MMU_H_
-#include <stdint.h>
 
 /* Eflags register */
 #define FL_CF 0x00000001        // Carry Flag
@@ -47,6 +46,8 @@
 #define STS_IG32 0xE // 32-bit Interrupt Gate
 #define STS_TG32 0xF // 32-bit Trap Gate
 
+#ifndef __ASSEMBLER__
+#include <stdint.h>
 /* Gate descriptors for interrupts and traps */
 struct gatedesc {
   unsigned gd_off_15_0 : 16;  // low 16 bits of offset in segment
@@ -169,4 +170,5 @@ struct taskstate {
   uint16_t ts_iomb; // i/o map base address
 };
 
+#endif // __ASSEMBLER__
 #endif // KERNEL_MMU_H_

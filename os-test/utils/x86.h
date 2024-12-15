@@ -3,6 +3,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define E820MAX 160 // number of entries in E820MAP
+#define E820_AVAIL 1 // address range memory
+#define E820_RESERV 2 // address range reserved
+
+#define E820MAP_ADDR 0x9C000
+
+struct e820map;
+
+struct e820map {
+  int nr_map;
+  struct {
+    uint64_t addr;
+    uint64_t size;
+    uint32_t type;
+  } __attribute__((packed)) map[E820MAX];
+};
+
 #define do_div(n, base)                                                        \
   ({                                                                           \
     unsigned long __upper, __low, __high, __mod, __base;                       \
