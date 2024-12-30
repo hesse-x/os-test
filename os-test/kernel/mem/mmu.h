@@ -47,6 +47,7 @@
 #define STS_TG32 0xF // 32-bit Trap Gate
 
 #define PAGE_SIZE 0x1000 // 4K
+#define LADDR_TO_PADDR(addr) (addr>>22)&0x3FF
 
 #ifdef __ASSEMBLER__
 #define SEG_NULL                                                \
@@ -60,6 +61,39 @@
 
 #else
 #include <stdint.h>
+#define ADDR_TO_PDE_OFFSET(addr) (addr>>22)&0x3FF
+
+// Page Directory Entry
+struct pde_t {
+  uint32_t present : 1;            // 存在位
+  uint32_t writable : 1;         // 读/写位
+  uint32_t user_supervisor : 1;    // 用户/内核位
+  uint32_t page_write_through : 1; // 写直达位
+  uint32_t page_cache_disable : 1; // 禁用缓存位
+  uint32_t accessed : 1;           // 访问位
+  uint32_t reserved : 1;           // 保留位
+  uint32_t page_size : 1;          // 页大小位（0表示4KB，1表示4MB）
+  uint32_t global : 1;             // 全局页位
+  uint32_t available : 3;          // 可用位（供操作系统使用）
+  uint32_t base_addr : 20; // 页表基地址（物理地址的高20位）
+} __attribute__((packed));
+
+// Page Table Entry
+struct pte_t {
+  uint32_t present : 1;              // 存在位
+  uint32_t writable : 1;           // 读/写位
+  uint32_t user_supervisor : 1;      // 用户/内核位
+  uint32_t page_write_through : 1;   // 写直达位
+  uint32_t page_cache_disable : 1;   // 禁用缓存位
+  uint32_t accessed : 1;             // 访问位
+  uint32_t dirty : 1;                // 脏位
+  uint32_t page_attribute_table : 1; // 页属性表位
+  uint32_t global : 1;               // 全局页位
+  uint32_t available : 3;            // 可用位（供操作系统使用）
+  uint32_t base_addr : 20; // 页帧基地址（物理地址的高20位）
+} __attribute__((packed));
+
+
 /* Gate descriptors for interrupts and traps */
 struct gatedesc {
   unsigned gd_off_15_0 : 16;  // low 16 bits of offset in segment

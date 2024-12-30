@@ -29,7 +29,10 @@
 #define E820_ARR 2 // address range reserved
 
 #define KERNEL_ELF_ADDR 0x10000
-#define KERNEL_ENTRY_ADDR 0x000000
+#define KERNEL_ENTRY_ADDR 0x100000
+#define KERNEL_BASE_VADDR 0xC0000000
+#define KERNEL_ENTRY_VADDR 0xC0100000
+#define KERNEL_RESERVE_MEM_SIZE 0x100000
 #define KERNEL_STACK_SIZE 0x10000
 
 #ifndef __ASSEMBLER__
@@ -44,35 +47,6 @@ struct e820map {
   } __attribute__((packed)) map[E820MAX];
 };
 
-// Page Directory Entry
-struct pde {
-  uint32_t present : 1;            // 存在位
-  uint32_t read_write : 1;         // 读/写位
-  uint32_t user_supervisor : 1;    // 用户/内核位
-  uint32_t page_write_through : 1; // 写直达位
-  uint32_t page_cache_disable : 1; // 禁用缓存位
-  uint32_t accessed : 1;           // 访问位
-  uint32_t reserved : 1;           // 保留位
-  uint32_t page_size : 1;          // 页大小位（0表示4KB，1表示4MB）
-  uint32_t global : 1;             // 全局页位
-  uint32_t available : 3;          // 可用位（供操作系统使用）
-  uint32_t page_table_base : 20; // 页表基地址（物理地址的高20位）
-} __attribute__((packed));
-
-// Page Table Entry
-struct pte {
-  uint32_t present : 1;              // 存在位
-  uint32_t read_write : 1;           // 读/写位
-  uint32_t user_supervisor : 1;      // 用户/内核位
-  uint32_t page_write_through : 1;   // 写直达位
-  uint32_t page_cache_disable : 1;   // 禁用缓存位
-  uint32_t accessed : 1;             // 访问位
-  uint32_t dirty : 1;                // 脏位
-  uint32_t page_attribute_table : 1; // 页属性表位
-  uint32_t global : 1;               // 全局页位
-  uint32_t available : 3;            // 可用位（供操作系统使用）
-  uint32_t page_frame_base : 20; // 页帧基地址（物理地址的高20位）
-} __attribute__((packed));
 #endif  // __ASSEMBLER__
 
 #endif // KERNEL_MEMLAYOUT_H_

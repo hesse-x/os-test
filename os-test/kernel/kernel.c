@@ -6,8 +6,9 @@
 
 extern char etext[], edata[], end[], kern_start[];
 void kernel_init(void) {
-  init_screen();
   pmm_init();
+
+  init_screen();
   isr_install();
   irq_install();
   kprint("Kernel init finished\n");

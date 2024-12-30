@@ -53,6 +53,7 @@ static struct segdesc gdt[] = {
 };
 
 static struct pseudodesc gdt_pd = {sizeof(gdt) - 1, (uint32_t)gdt};
+struct pde_t kernel_pde[1024] __attribute__((aligned(4096)));
 
 /* *
  * lgdt - load the global descriptor table register and reset the
@@ -85,12 +86,41 @@ static void gdt_init(void) {
   ltr(GD_TSS);
 }
 
-struct pde page_directory[1024] __attribute__((aligned(4096)));
-struct pte page_table[1024] __attribute__((aligned(4096)));
+#define PDE_MAX_ENTRIES 1024
+#define PTE_MAX_ENTRIES 1024
+static void fill_pde(struct pde_t *pde, unsigned int offset, void *addr, size_t len) {
+  uintptr_t phys_addr = (uintptr_t)addr;
+  size_t num_pages = len / PAGE_SIZE;
+  unsigned int pde_index = offset / PTE_MAX_ENTRIES;
+  unsigned int pte_index = offset % PTE_MAX_ENTRIES;
+  struct pde_t *current_pde = &pde[pde_index];
+  struct pte_t *page_table = (struct pte_t *)(((uintptr_t)current_pde->base_addr) << 12);
+  for (size_t i = 0; i < num_pages; i++) {
+    page_table[pte_index].present = 1;
+    page_table[pte_index].writable = 1;
+    page_table[pte_index].base_addr = phys_addr >> 12;
+
+    phys_addr += PAGE_SIZE;
+    pte_index++;
+
+    if (pte_index >= PTE_MAX_ENTRIES) {
+      pte_index = 0;  // 重置 PTE 索引
+      pde_index++;    // 切换到下一个 PDE
+      page_table = (struct pte_t *)(pde[pde_index].base_addr << 12);
+    }
+  }
+}
 
 static void page_init() {
+  __memset(kernel_pde, 0, 4 * 1024);
+  int init_pde_offset = ADDR_TO_PDE_OFFSET(KERNEL_BASE_VADDR);
+  kernel_pde[init_pde_offset].base_addr = (((uintptr_t) kernel_pde) >> 12);
+  kernel_pde[init_pde_offset].present = 1;
+  kernel_pde[init_pde_offset].writable = 1;
+  fill_pde(kernel_pde, 0, (void*)0, 3 << 20);
+
   // 加载页目录地址到CR3寄存器
-  asm volatile("mov %0, %%cr3" : : "r"((uint32_t)page_directory));
+  asm volatile("mov %0, %%cr3" : : "r"((uint32_t)kernel_pde));
 
   // 启用分页机制
   uint32_t cr0;
@@ -101,7 +131,8 @@ static void page_init() {
 
 /* pmm_init - initialize the physical memory management */
 void pmm_init(void) {
-  //  page_init();
+  page_init();
+  gdt_init();
 
   struct e820map *memmap = (struct e820map *)(0x90000);
 
@@ -123,5 +154,4 @@ void pmm_init(void) {
     kprint("\n");
   }
 
-  gdt_init();
 }

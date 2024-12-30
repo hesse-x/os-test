@@ -1,9 +1,10 @@
 #include "os-test/kernel/mem/mmu.h"
 #include "os-test/kernel/mem/memlayout.h"
-#define REALLOC(x) (x - KERNEL_ENTRY_ADDR)
+#define REALLOC(x) (x - KERNEL_BASE_VADDR)
 
 .text
 .globl kernel_entry
+.extern kernel_init
 kernel_entry:
     # reload temperate gdt (second time) to remap all physical memory
     # virtual_addr 0~4G=linear_addr&physical_addr -KERNEL_ENTRY_ADDR~4G-KERNEL_ENTRY_ADDR 
@@ -13,6 +14,7 @@ kernel_entry:
     movw %ax, %es
     movw %ax, %ss
 
+    movl (relocated), %eax
     ljmp $KERNEL_CS, $relocated
 
 relocated:
@@ -40,8 +42,8 @@ bootstacktop:
 .align 4
 __gdt:
     SEG_NULL
-    SEG_ASM(STA_X | STA_R, - KERNEL_ENTRY_ADDR, 0xFFFFFFFF)      # code segment
-    SEG_ASM(STA_W, - KERNEL_ENTRY_ADDR, 0xFFFFFFFF)              # data segment
+    SEG_ASM(STA_X | STA_R, -KERNEL_BASE_VADDR, 0xFFFFFFFF)      # code segment
+    SEG_ASM(STA_W,         -KERNEL_BASE_VADDR, 0xFFFFFFFF)      # data segment
 __gdtdesc:
     .word 0x17                                          # sizeof(__gdt) - 1
     .long REALLOC(__gdt)
