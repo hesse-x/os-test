@@ -1,0 +1,5 @@
+*.o
+*.iso
+*.swo
+*.swp
+*.bin
