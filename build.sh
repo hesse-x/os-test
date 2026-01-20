@@ -7,10 +7,10 @@ if [[ "$1" == "clear" ]]; then
 fi
 
 # 1. 编译入口文件boot.cc，生成目标文件boot.o
-g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c boot.cc -o boot.o -fno-pic -fno-pie
+g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c boot.cc -o boot.o -fPIC -fno-pie
 
 # 2. 编译C语言内核文件kernel.c，生成目标文件kernel.o（裸机编译，无libc依赖）
-g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c kernel.cc -o kernel.o
+g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c kernel.cc -o kernel.o -fPIC -fno-pie
 
 # 3. 链接目标文件，生成ELF内核镜像myos.bin
 ld -m elf_x86_64 -T linker.ld boot.o kernel.o -o myos.bin
