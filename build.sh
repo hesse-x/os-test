@@ -1,10 +1,15 @@
 #!/bin/bash
-# 1. 编译汇编入口文件boot.s，生成目标文件boot.o
-# nasm -f elf32 boot.s -o boot.o
-gcc -ffreestanding boot.S -c -o boot.o -m32
+if [[ "$1" == "clear" ]]; then
+    rm -f *.o  # -f 参数：强制删除，无文件时不报错
+    rm -f *.iso  # -f 参数：强制删除，无文件时不报错
+    rm -f *.bin  # -f 参数：强制删除，无文件时不报错
+    exit 0     # 正常退出脚本，确保后续逻辑不执行
+fi
+
+# 1. 编译入口文件boot.cc，生成目标文件boot.o
+g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c boot.cc -o boot.o -fno-pic -fno-pie
 
 # 2. 编译C语言内核文件kernel.c，生成目标文件kernel.o（裸机编译，无libc依赖）
-# gcc -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c kernel.c -o kernel.o
 g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c kernel.cc -o kernel.o
 
 # 3. 链接目标文件，生成ELF内核镜像myos.bin
@@ -22,7 +27,12 @@ cp myos.bin iso/boot/myos.bin
 # 3. 编写GRUB2配置文件（iso/boot/grub/grub.cfg）
 cat > iso/boot/grub/grub.cfg << EOF
 # GRUB2配置文件：定义启动菜单和内核路径
-insmod gfxterm        # 启用图形终端（GRUB图形模式的核心模块）
+insmod video_bochs
+insmod vbe
+insmod video
+insmod video_fb
+insmod gfxterm
+
 set gfxpayload=auto
 set gfxterm=auto
 terminal_output gfxterm  # 必须执行，切换到图形终端

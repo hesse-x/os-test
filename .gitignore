@@ -2,4 +2,8 @@
 *.iso
 *.swo
 *.swp
+*.swm
+*.swn
 *.bin
+tmp
+log*
