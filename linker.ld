@@ -35,6 +35,8 @@ SECTIONS {
         *(.bss)
     }
 
+    kernel_end = .;
+
     /* 丢弃编译器自动生成的冗余段（关键！避免乱序） */
     /DISCARD/ : {
         *(.eh_frame)
