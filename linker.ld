@@ -4,7 +4,8 @@ OUTPUT_ARCH(i386)            /* 目标架构为i386 */
 
 ENTRY(_start)  /* 入口点为_start符号 */
 
-. = 0xc0100000;
+/*. = 0xc0100000;*/
+. = 0x100000;
 SECTIONS {
     /* Multiboot头部段 */
     .multiboot : AT(0x100000) {

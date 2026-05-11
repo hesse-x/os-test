@@ -6,9 +6,22 @@
 #include "multiboot2.h"
 
 static void *frame_buffer;
+static size_t frame_size;
+
+static void fill_white() {
+  char *s = (char *)frame_buffer;
+  for (int32_t i = 0; i < frame_size; i++) {
+    s[i] = 0xFF;
+  }
+
+}
 
 static void init_screen(multiboot_tag_framebuffer *info) {
   frame_buffer = (void *)info->common.framebuffer_addr;
+  uint32_t pitch = info->common.framebuffer_pitch;
+  uint32_t height = info->common.framebuffer_height;
+  frame_size = pitch * height;
+  fill_white();
 }
 
 static multiboot_tag *readinfo(multiboot_tag *info) {

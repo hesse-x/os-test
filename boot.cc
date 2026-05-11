@@ -46,7 +46,6 @@ void _start() {
   __asm__ volatile(
       // 1. 初始化栈指针（ESP指向栈顶，x86栈向下生长）
       "movl %0, %%esp\n"
-      "movl 0xffffff, %%esp\n"
 
       // 2. 保存Multiboot2传递的参数（压栈供kernel_main使用）
       "movl %2, %%eax\n"

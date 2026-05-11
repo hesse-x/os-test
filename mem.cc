@@ -144,7 +144,7 @@ size_t BFCAllocator::free_page_nums() const {
 }
 
 // ===================== Multiboot2内存映射解析 =====================
-size_t get_total_page_num(multiboot_tag_mmap *mmap) {
+static size_t get_total_page_num(multiboot_tag_mmap *mmap) {
   uint64_t max_phys_addr = 0;
   const multiboot_mmap_entry *entry = mmap->entries;
   for (int32_t i = 0; i < mmap->entry_size; i++) {
@@ -159,7 +159,7 @@ size_t get_total_page_num(multiboot_tag_mmap *mmap) {
   return GET_PAGE_NUM(max_phys_addr);
 }
 
-void init_frames(multiboot_tag_mmap *mmap) {
+static void init_frames(multiboot_tag_mmap *mmap) {
   size_t total_page_num = get_total_page_num(mmap);
   uintptr_t real_kernel_end = PHY_ADDR(kernel_end) + total_page_num * sizeof(Page);
 
@@ -228,31 +228,3 @@ void init_frames(multiboot_tag_mmap *mmap) {
 
 void enable_page() {
 }
-
-// ===================== 打印内存信息 =====================
-// void print_memory_info() {
-//     serial_puts("\n=== Memory Summary ===\n");
-//     serial_puts("Max physical address: ");
-//     serial_puthex(max_phys_addr);
-//     serial_puts("Kernel physical end: ");
-//     serial_puthex(kernel_phys_end);
-//     serial_puts("Total page frames: ");
-//     serial_puthex(total_page_num);
-// 
-//     // 统计各类页帧数量
-//     uint32_t free = 0, used = 0, reserved = 0;
-//     for (uint32_t i = 0; i < total_page_num; i++) {
-//         switch (BFCAllocator::frames[i].status) {
-//             case PAGE_FRAME_FREE: free++; break;
-//             case PAGE_FRAME_USED: used++; break;
-//             case PAGE_FRAME_RESERVED: reserved++; break;
-//         }
-//     }
-// 
-//     serial_puts("Free page frames: ");
-//     serial_puthex(free);
-//     serial_puts("Used page frames: ");
-//     serial_puthex(used);
-//     serial_puts("Reserved page frames: ");
-//     serial_puthex(reserved);
-// }
