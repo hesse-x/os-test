@@ -12,8 +12,10 @@ g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c boot.cc -
 # 2. 编译C语言内核文件kernel.c，生成目标文件kernel.o（裸机编译，无libc依赖）
 g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c kernel.cc -o kernel.o -fPIC -fno-pie
 
+g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c serial.cc -o serial.o -fPIC -fno-pie
+
 # 3. 链接目标文件，生成ELF内核镜像myos.bin
-ld -m elf_x86_64 -T linker.ld boot.o kernel.o -o myos.bin
+ld -m elf_x86_64 -T linker.ld boot.o kernel.o serial.o -o myos.bin
 
 # 4. 验证：检查myos.bin是否为有效ELF镜像（可选）
 file myos.bin

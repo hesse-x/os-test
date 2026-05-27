@@ -4,6 +4,7 @@
 
 #include "macro.h"
 #include "multiboot2.h"
+#include "serial.h"
 
 static void *frame_buffer;
 static size_t frame_size;
@@ -68,6 +69,14 @@ static multiboot_tag *readinfo(multiboot_tag *info) {
 extern "C" {
 // 内核主函数（入口）
 void kernel_main(int32_t magic_num, uintptr_t addr) {
+  serial_init();
+
+  if (magic_num == MULTIBOOT2_BOOTLOADER_MAGIC) {
+    serial_puts("OK\n");
+  } else {
+    serial_puts("FAIL\n");
+  }
+
   multiboot_tag *cur = (multiboot_tag *)(addr + 8);
   while (cur != NULL) {
     cur = readinfo(cur);
