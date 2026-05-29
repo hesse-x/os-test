@@ -8,9 +8,10 @@
 
 // ===================== 常量定义 =====================
 #define PAGE_SIZE 4096 // 4KB页帧大小
+#define VMA_BASE 0xC0000000
 #define KERNEL_LMA_BASE 0x100000
 #define KERNEL_VMA_BASE 0xC0100000
-#define PHY_ADDR(addr) ((uintptr_t)addr & 0xffffff)
+#define PHY_ADDR(addr) ((uintptr_t)(addr) - VMA_BASE)
 #define PTX_SHIFT 12
 #define PHY_TO_PAGE(addr) (addr >> PTX_SHIFT)
 #define GET_PAGE_NUM(len) (ALIGN_UP(len, PAGE_SIZE) / PAGE_SIZE)

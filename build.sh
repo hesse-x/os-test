@@ -6,27 +6,31 @@ if [[ "$1" == "clear" ]]; then
     exit 0     # 正常退出脚本，确保后续逻辑不执行
 fi
 
-# 1. 编译入口文件boot.cc，生成目标文件boot.o
-g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c boot.cc -o boot.o -fPIC -fno-pie
+# 1. 汇编入口文件start.S（纯汇编，避免-fPIE PIC thunk覆盖multiboot参数）
+gcc -m32 -c start.S -o start.o
 
-# 2. 编译C语言内核文件kernel.c，生成目标文件kernel.o（裸机编译，无libc依赖）
-g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c kernel.cc -o kernel.o -fPIC -fno-pie
+# 2. 编译boot.cc，生成目标文件boot.o（-fPIE，GOTOFF机制）
+g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c boot.cc -o boot.o -fPIE
 
-g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c serial.cc -o serial.o -fPIC -fno-pie
+# 3. 编译内核文件kernel.cc，生成目标文件kernel.o
+g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c kernel.cc -o kernel.o -fPIE
 
-# 3. 链接目标文件，生成ELF内核镜像myos.bin
-ld -m elf_x86_64 -T linker.ld boot.o kernel.o serial.o -o myos.bin
+# 4. 编译serial.cc
+g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c serial.cc -o serial.o -fPIE
 
-# 4. 验证：检查myos.bin是否为有效ELF镜像（可选）
+# 5. 链接目标文件，生成ELF内核镜像myos.bin
+ld -m elf_x86_64 -T linker.ld start.o boot.o kernel.o serial.o -o myos.bin
+
+# 6. 验证：检查myos.bin是否为有效ELF镜像（可选）
 file myos.bin
 
-# 1. 创建临时目录结构（GRUB2要求的目录格式）
+# 7. 创建临时目录结构（GRUB2要求的目录格式）
 mkdir -p iso/boot/grub
 
-# 2. 将内核镜像myos.bin复制到iso/boot目录下
+# 8. 将内核镜像myos.bin复制到iso/boot目录下
 cp myos.bin iso/boot/myos.bin
 
-# 3. 编写GRUB2配置文件（iso/boot/grub/grub.cfg）
+# 9. 编写GRUB2配置文件（iso/boot/grub/grub.cfg）
 cat > iso/boot/grub/grub.cfg << EOF
 # GRUB2配置文件：定义启动菜单和内核路径
 insmod video_bochs
@@ -51,8 +55,8 @@ menuentry "My Operating System (GRUB2)" {
 }
 EOF
 
-# 4. 制作ISO镜像（myos.iso），集成GRUB2引导程序
+# 10. 制作ISO镜像（myos.iso），集成GRUB2引导程序
 grub-mkrescue -o myos.iso iso
 
-# 5. 清理临时目录（可选）
+# 11. 清理临时目录（可选）
 rm -rf iso 

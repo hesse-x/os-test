@@ -1,4 +1,4 @@
-// 最简C语言内核，直接操作VGA文本缓冲区打印字符串
+// Higher-half内核，-fPIE编译，虚拟地址0xC010xxxx运行
 #include <stddef.h>
 #include <stdint.h>
 
