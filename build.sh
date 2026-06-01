@@ -18,8 +18,11 @@ g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c kernel.cc
 # 4. 编译serial.cc
 g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c serial.cc -o serial.o -fPIE
 
-# 5. 链接目标文件，生成ELF内核镜像myos.bin
-ld -m elf_x86_64 -T linker.ld start.o boot.o kernel.o serial.o -o myos.bin
+# 5. 编译mem.cc
+g++ -m32 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -c mem.cc -o mem.o -fPIE
+
+# 6. 链接目标文件，生成ELF内核镜像myos.bin
+ld -m elf_x86_64 -T linker.ld start.o boot.o kernel.o serial.o mem.o -o myos.bin
 
 # 6. 验证：检查myos.bin是否为有效ELF镜像（可选）
 file myos.bin

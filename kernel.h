@@ -3,7 +3,6 @@
 #include <stddef.h>
 #include <stdint.h>
 extern "C" {
-void boot_main(int32_t magic_num, uintptr_t addr);
 void kernel_main(int32_t magic_num, uintptr_t addr);
 }
 #endif // KERNEL_H

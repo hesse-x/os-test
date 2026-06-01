@@ -15,7 +15,7 @@
 #define PTX_SHIFT 12
 #define PHY_TO_PAGE(addr) (addr >> PTX_SHIFT)
 #define GET_PAGE_NUM(len) (ALIGN_UP(len, PAGE_SIZE) / PAGE_SIZE)
-
+extern "C" {
 // ===================== 页帧描述符 =====================
 // 页帧状态
 enum class PageStatus : int8_t {
@@ -43,13 +43,18 @@ struct BFCAllocator {
 };
 
 // ===================== 全局变量声明 =====================
-// 页帧描述符数组（存储所有页帧的状态）
-// 系统总页帧数
 extern size_t total_page_frames;
+extern uint32_t page_directory[1024];
+extern uint32_t page_table[1024];
 
 // ===================== 函数声明 =====================
-// 解析Multiboot2内存映射信息
-void init_memory(multiboot_tag_mmap *mmap);
+void enable_page();
+void init_mem(uintptr_t mbi_addr);
 
-// void print_memory_info();
+// ===================== 显存映射 =====================
+// init_mem 解析 framebuffer tag，映射显存物理地址到逻辑地址
+// init_mem 完成后这两个变量可直接使用
+extern void *fb_mapped_vaddr;  // 显存逻辑地址指针（已映射）
+extern size_t fb_size;         // 显存大小（pitch * height）
+}
 #endif // MEMORY_H

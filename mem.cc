@@ -1,14 +1,70 @@
 #include "mem.h"
 #include "common.h"
 
+// ===================== 页表 =====================
+__attribute__((aligned(4096))) uint32_t page_directory[1024];
+__attribute__((aligned(4096))) uint32_t page_table[1024];
+
+// ===================== enable_page =====================
+// 在物理地址运行，由 start.S 调用
+// 设置 identity map + higher-half 初始映射后返回
+extern "C" void enable_page() {
+  // GOTOFF 自动给出物理地址（因 enable_page 在物理地址运行）
+
+  // 清零 PD 和 PT
+  for (int i = 0; i < 1024; i++) {
+    page_directory[i] = 0;
+    page_table[i] = 0;
+  }
+
+  // 填充 PT：物理 0x0-0x3FFFFF → 4KB页，present + writable
+  for (int i = 0; i < 1024; i++) {
+    page_table[i] = (i * 4096) | 0x03;
+  }
+
+  // PD[0] = PT 物理地址 | flags（identity map: virt 0-4MB → phys 0-4MB）
+  page_directory[0] = ((uintptr_t)page_table) | 0x03;
+
+  // PD[768] = PT 物理地址 | flags（higher-half: virt 0xC0000000-0xC0400000 → phys 0-4MB）
+  page_directory[768] = ((uintptr_t)page_table) | 0x03;
+
+  // 启用分页
+  __asm__ volatile(
+      "movl %0, %%cr3\n"
+      "movl %%cr0, %%eax\n"
+      "orl $0x80000000, %%eax\n"
+      "movl %%eax, %%cr0\n"
+      :
+      : "r"((uintptr_t)page_directory)
+      : "eax", "memory");
+}
+
 // ===================== 全局变量定义 =====================
-// BFCAllocator 静态成员初始化
+size_t total_page_frames = 0;
 Page *BFCAllocator::frames = NULL;
 Page *BFCAllocator::free_list = NULL;
+void *fb_mapped_vaddr = NULL;       // 显存逻辑地址指针，NULL=未映射
+size_t fb_size = 0;                 // 显存大小（pitch * height）
+
+// ===================== Bump 分配器 =====================
+// 极简物理内存分配器，仅在 BFC 初始化前使用
+// 返回虚拟地址（phys + VMA_BASE），kernel_main_higher 可直接读写
+static uintptr_t bump_next_phys; // 下一个空闲物理页地址
+
+static void bump_init(uintptr_t start) {
+  bump_next_phys = ALIGN_UP(start, PAGE_SIZE);
+}
+
+// 返回虚拟地址，kernel_main 可直接读写
+static void *bump_alloc(size_t size) {
+  uintptr_t phys = bump_next_phys;
+  bump_next_phys += ALIGN_UP(size, PAGE_SIZE);
+  return (void *)(phys + VMA_BASE);
+}
 
 // ===================== BFCAllocator 实现 =====================
 void BFCAllocator::init() {
-  // 等待调用 init_memory 来初始化
+  // init_mem 中完成初始化
 }
 
 Page *BFCAllocator::alloc_page(size_t n) {
@@ -16,15 +72,12 @@ Page *BFCAllocator::alloc_page(size_t n) {
     return NULL;
   }
 
-  // 遍历 free_list 寻找足够大的连续空闲块
   Page *cur = free_list;
   Page *prev = NULL;
 
   while (cur != NULL) {
     if (cur->cont_page_num >= n) {
-      // 找到合适的块
       if (cur->cont_page_num == n) {
-        // 完全匹配，从链表中移除
         if (prev == NULL) {
           free_list = cur->next;
         } else {
@@ -36,12 +89,10 @@ Page *BFCAllocator::alloc_page(size_t n) {
         cur->status = PageStatus::USED;
         return cur;
       } else {
-        // 块更大，分割它
         size_t remaining = cur->cont_page_num - n;
         cur->cont_page_num = n;
         cur->status = PageStatus::USED;
 
-        // 创建新的空闲块
         Page *new_block = cur + n;
         new_block->status = PageStatus::FREE;
         new_block->cont_page_num = remaining;
@@ -66,7 +117,7 @@ Page *BFCAllocator::alloc_page(size_t n) {
     cur = cur->next;
   }
 
-  return NULL; // 未找到足够大的块
+  return NULL;
 }
 
 Page *BFCAllocator::free_page(Page *page, size_t n) {
@@ -74,11 +125,9 @@ Page *BFCAllocator::free_page(Page *page, size_t n) {
     return NULL;
   }
 
-  // 设置页面为空闲
   page->status = PageStatus::FREE;
   page->cont_page_num = n;
 
-  // 如果 free_list 为空，直接插入
   if (free_list == NULL) {
     page->prev = NULL;
     page->next = NULL;
@@ -86,7 +135,6 @@ Page *BFCAllocator::free_page(Page *page, size_t n) {
     return page;
   }
 
-  // 在 free_list 中寻找合适的位置插入（按地址排序）
   Page *cur = free_list;
   Page *prev = NULL;
 
@@ -95,7 +143,6 @@ Page *BFCAllocator::free_page(Page *page, size_t n) {
     cur = cur->next;
   }
 
-  // 插入到 prev 和 cur 之间
   page->prev = prev;
   page->next = cur;
 
@@ -109,17 +156,15 @@ Page *BFCAllocator::free_page(Page *page, size_t n) {
     cur->prev = page;
   }
 
-  // 尝试与前一个块合并
   if (prev != NULL && prev + prev->cont_page_num == page) {
     prev->cont_page_num += page->cont_page_num;
     prev->next = cur;
     if (cur != NULL) {
       cur->prev = prev;
     }
-    page = prev; // 更新为合并后的块
+    page = prev;
   }
 
-  // 尝试与后一个块合并
   if (cur != NULL && page + page->cont_page_num == cur) {
     page->cont_page_num += cur->cont_page_num;
     page->next = cur->next;
@@ -143,88 +188,211 @@ size_t BFCAllocator::free_page_nums() const {
   return total;
 }
 
-// ===================== Multiboot2内存映射解析 =====================
-static size_t get_total_page_num(multiboot_tag_mmap *mmap) {
-  uint64_t max_phys_addr = 0;
-  const multiboot_mmap_entry *entry = mmap->entries;
-  for (int32_t i = 0; i < mmap->entry_size; i++) {
-    uint64_t entry_addr = entry[i].addr;
-    uint64_t entry_len = entry[i].len;
-    uint32_t entry_end = entry_addr + entry_len;
+// ===================== multiboot 标签查找 =====================
 
-    if (entry_end > max_phys_addr) {
-      max_phys_addr = entry_end;
+static multiboot_tag_mmap *find_mmap_tag(uintptr_t mbi_addr) {
+  multiboot_tag *tag = (multiboot_tag *)(mbi_addr + 8);
+  while (tag->type != MULTIBOOT_TAG_TYPE_END) {
+    if (tag->type == MULTIBOOT_TAG_TYPE_MMAP) {
+      return (multiboot_tag_mmap *)tag;
+    }
+    tag = (multiboot_tag *)((uintptr_t)tag +
+                             ALIGN_UP(tag->size, MULTIBOOT_TAG_ALIGN));
+  }
+  return NULL;
+}
+
+static multiboot_tag_framebuffer *find_fb_tag(uintptr_t mbi_addr) {
+  multiboot_tag *tag = (multiboot_tag *)(mbi_addr + 8);
+  while (tag->type != MULTIBOOT_TAG_TYPE_END) {
+    if (tag->type == MULTIBOOT_TAG_TYPE_FRAMEBUFFER) {
+      return (multiboot_tag_framebuffer *)tag;
+    }
+    tag = (multiboot_tag *)((uintptr_t)tag +
+                             ALIGN_UP(tag->size, MULTIBOOT_TAG_ALIGN));
+  }
+  return NULL;
+}
+
+// 只统计 AVAILABLE 内存的最大物理地址，避免 BIOS 高地址条目撑爆 frames 数组
+static size_t compute_total_page_frames(multiboot_tag_mmap *mmap_tag) {
+  uint64_t max_phys_addr = 0;
+  size_t num_entries =
+      (mmap_tag->size - offsetof(multiboot_tag_mmap, entries)) /
+      mmap_tag->entry_size;
+  const multiboot_mmap_entry *entry = mmap_tag->entries;
+  for (size_t i = 0; i < num_entries; i++) {
+    if (entry[i].type == MULTIBOOT_MEMORY_AVAILABLE) {
+      uint64_t entry_end = entry[i].addr + entry[i].len;
+      if (entry_end > max_phys_addr) {
+        max_phys_addr = entry_end;
+      }
     }
   }
   return GET_PAGE_NUM(max_phys_addr);
 }
 
-static void init_frames(multiboot_tag_mmap *mmap) {
-  size_t total_page_num = get_total_page_num(mmap);
-  uintptr_t real_kernel_end = PHY_ADDR(kernel_end) + total_page_num * sizeof(Page);
+// ===================== init_mem =====================
+// 在虚拟地址运行（kernel_main 调用）
 
-  Page *frames = (Page *)PHY_ADDR(kernel_end);
-  for (int64_t i = 0; i < total_page_num; i++) {
+void init_mem(uintptr_t mbi_addr) {
+  // 1. 解析 multiboot2 标签
+  multiboot_tag_mmap *mmap_tag = find_mmap_tag(mbi_addr);
+  if (mmap_tag == NULL) {
+    return;
+  }
+  multiboot_tag_framebuffer *fb_tag = find_fb_tag(mbi_addr);
+
+  // 2. 计算总页帧数（仅 AVAILABLE 内存）
+  total_page_frames = compute_total_page_frames(mmap_tag);
+
+  // 3. Bump 分配器初始化
+  uintptr_t kernel_end_phys = PHY_ADDR((uintptr_t)kernel_end);
+  bump_init(kernel_end_phys);
+
+  // 4. Bump 分配 frames 数组
+  size_t frames_size = total_page_frames * sizeof(Page);
+  Page *frames = (Page *)bump_alloc(frames_size);
+
+  // 5. 初始化 frames 为 RESERVED
+  for (size_t i = 0; i < total_page_frames; i++) {
     frames[i].status = PageStatus::RESERVED;
     frames[i].cont_page_num = 1;
     frames[i].prev = NULL;
     frames[i].next = NULL;
   }
 
-  const multiboot_mmap_entry *entry = mmap->entries;
-  for (int32_t i = 0; i < mmap->entry_size; i++) {
-    uint64_t entry_addr = entry[i].addr;
-    uint64_t entry_len = entry[i].len;
-
-    int64_t page_num = GET_PAGE_NUM(entry_len);
-    int64_t page_idx = PHY_TO_PAGE(ALIGN_UP(entry_addr, PAGE_SIZE));
-    Page *cur_frames = frames + page_idx;
-    for (int64_t i = 0; i < page_num; i++) {
-      cur_frames[i].status = PageStatus::FREE;
+  // 6. 根据 mmap 标记 FREE 页
+  size_t num_entries =
+      (mmap_tag->size - offsetof(multiboot_tag_mmap, entries)) /
+      mmap_tag->entry_size;
+  const multiboot_mmap_entry *entry = mmap_tag->entries;
+  for (size_t i = 0; i < num_entries; i++) {
+    if (entry[i].type == MULTIBOOT_MEMORY_AVAILABLE) {
+      uint64_t entry_addr = entry[i].addr;
+      uint64_t entry_len = entry[i].len;
+      size_t page_num = GET_PAGE_NUM(entry_len);
+      size_t page_idx = PHY_TO_PAGE(ALIGN_UP(entry_addr, PAGE_SIZE));
+      for (size_t j = 0; j < page_num && page_idx + j < total_page_frames;
+           j++) {
+        frames[page_idx + j].status = PageStatus::FREE;
+      }
     }
-  } 
-
-  int64_t kernel_page_idx = PHY_TO_PAGE(KERNEL_LMA_BASE);
-  int64_t kernel_size = ((uintptr_t)kernel_end) - KERNEL_VMA_BASE + total_page_num * sizeof(Page);
-  int64_t kernel_page_num = GET_PAGE_NUM(kernel_size);
-  Page *kernel_page_start = frames + kernel_page_idx;
-  for (int64_t i = 0; i < kernel_page_num; i++) {
-    kernel_page_start[i].status = PageStatus::RESERVED;
   }
 
-  // 0: find first free
-  // 1: find contiguous page
+  // 7. 计算 AVAILABLE 内存最大物理地址（用于 higher-half RAM 映射范围）
+  uint64_t max_phys_addr = 0;
+  for (size_t i = 0; i < num_entries; i++) {
+    if (entry[i].type == MULTIBOOT_MEMORY_AVAILABLE) {
+      uint64_t entry_end = entry[i].addr + entry[i].len;
+      if (entry_end > max_phys_addr) {
+        max_phys_addr = entry_end;
+      }
+    }
+  }
+
+  // 8. 扩展 higher-half 映射：为超出 4MB 的物理 RAM 块分配 PT
+  //    PD[768] 已映射初始 4MB, PD[769] 对应 0xC0400000...
+  size_t max_4mb_block = (size_t)(max_phys_addr / 0x400000);
+  for (size_t n = 1; n <= max_4mb_block; n++) {
+    uint32_t *pt = (uint32_t *)bump_alloc(4096);
+    uintptr_t pt_phys = PHY_ADDR((uintptr_t)pt);
+
+    uint32_t phys_base = (uint32_t)(n * 0x400000);
+    for (int i = 0; i < 1024; i++) {
+      pt[i] = (phys_base + i * 4096) | 0x03;
+    }
+
+    page_directory[768 + n] = pt_phys | 0x03;
+  }
+
+  // 9. 设备映射区：RAM 映射之后的逻辑地址，类似 Linux ioremap 区域
+  //    device_vma_base = ALIGN_UP(VMA_BASE + max_phys_addr, 4MB)
+  //    显存物理地址映射到此区域，不是 identity map
+  uintptr_t device_vma_base =
+      ALIGN_UP(VMA_BASE + (uintptr_t)max_phys_addr, 0x400000);
+
+  // 10. 映射显存：找到 framebuffer tag，为其 4MB 物理块分配 PT
+  if (fb_tag != NULL) {
+    uint64_t fb_phys = fb_tag->common.framebuffer_addr;
+    uint32_t fb_pitch = fb_tag->common.framebuffer_pitch;
+    uint32_t fb_height = fb_tag->common.framebuffer_height;
+    uint32_t fb_bytes = fb_pitch * fb_height;
+
+    // 显存物理地址对齐到 4MB 块边界
+    uint32_t fb_4mb_start = (uint32_t)(fb_phys & ~0x3FFFFF);
+    uint32_t fb_4mb_end = (uint32_t)ALIGN_UP(fb_phys + fb_bytes, 0x400000);
+    size_t num_fb_blocks = (fb_4mb_end - fb_4mb_start) / 0x400000;
+
+    // PD 起始索引 = device_vma_base >> 22
+    size_t fb_pd_start = device_vma_base >> 22;
+
+    for (size_t n = 0; n < num_fb_blocks; n++) {
+      uint32_t *pt = (uint32_t *)bump_alloc(4096);
+      uintptr_t pt_phys = PHY_ADDR((uintptr_t)pt);
+
+      uint32_t block_phys_base = fb_4mb_start + (uint32_t)(n * 0x400000);
+      for (int i = 0; i < 1024; i++) {
+        pt[i] = (block_phys_base + i * 4096) | 0x03;
+      }
+
+      page_directory[fb_pd_start + n] = pt_phys | 0x03;
+    }
+
+    // 显存逻辑地址 = device_vma_base + (fb_phys 在 4MB 块内的偏移)
+    fb_mapped_vaddr = (void *)(device_vma_base + (uint32_t)(fb_phys - fb_4mb_start));
+    fb_size = fb_bytes;
+  }
+
+  // 11. 刷新 TLB
+  __asm__ volatile("movl %0, %%cr3\n" ::"r"(PHY_ADDR((uintptr_t)page_directory))
+                   : "memory");
+
+  // 12. 标记内核 + bump 分配的页为 USED
+  uintptr_t used_start = KERNEL_LMA_BASE;
+  uintptr_t used_end = bump_next_phys;
+  size_t used_page_idx_start = PHY_TO_PAGE(used_start);
+  size_t used_page_idx_end = PHY_TO_PAGE(ALIGN_UP(used_end, PAGE_SIZE));
+  for (size_t i = used_page_idx_start;
+       i < used_page_idx_end && i < total_page_frames; i++) {
+    frames[i].status = PageStatus::USED;
+  }
+
+  // 13. 建立 free list
   int state = 0;
   Page *prev = NULL;
   Page **cur_page = &BFCAllocator::free_list;
   size_t cont_page_num = 0;
-  for (int64_t i = 0; i < total_page_num; i++) {
-    PageStatus status = BFCAllocator::frames[i].status;
+  for (size_t i = 0; i < total_page_frames; i++) {
+    PageStatus status = frames[i].status;
     switch (state) {
-      case 0: {
-       if (status == PageStatus::FREE) {
-         state = 1;
-         *cur_page = BFCAllocator::frames + i;
-         (*cur_page)->prev = prev;
-         prev = *cur_page;
-         cont_page_num += 1;
-       }
-       break;
+    case 0: {
+      if (status == PageStatus::FREE) {
+        state = 1;
+        *cur_page = frames + i;
+        (*cur_page)->prev = prev;
+        prev = *cur_page;
+        cont_page_num = 1;
       }
-      case 1: {
-       if (status != PageStatus::FREE) {
-         state = 0;
-         (*cur_page)->cont_page_num = cont_page_num;
-         cont_page_num = 0;
-         cur_page = &((*cur_page)->next);
-       } else {
-         cont_page_num += 1;
-       }
-       break;
+      break;
+    }
+    case 1: {
+      if (status != PageStatus::FREE) {
+        state = 0;
+        (*cur_page)->cont_page_num = cont_page_num;
+        cont_page_num = 0;
+        cur_page = &((*cur_page)->next);
+      } else {
+        cont_page_num++;
       }
+      break;
+    }
     }
   }
-}
+  if (state == 1) {
+    (*cur_page)->cont_page_num = cont_page_num;
+  }
 
-void enable_page() {
+  // 14. 设置 BFCAllocator::frames
+  BFCAllocator::frames = frames;
 }
