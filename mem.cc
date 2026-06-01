@@ -1,5 +1,6 @@
 #include "mem.h"
 #include "common.h"
+#include "fb.h"
 
 // ===================== 页表 =====================
 __attribute__((aligned(4096))) uint32_t page_directory[1024];
@@ -43,8 +44,7 @@ extern "C" void enable_page() {
 size_t total_page_frames = 0;
 Page *BFCAllocator::frames = NULL;
 Page *BFCAllocator::free_list = NULL;
-void *fb_mapped_vaddr = NULL;       // 显存逻辑地址指针，NULL=未映射
-size_t fb_size = 0;                 // 显存大小（pitch * height）
+uintptr_t device_vma_base = 0;
 
 // ===================== Bump 分配器 =====================
 // 极简物理内存分配器，仅在 BFC 初始化前使用
@@ -56,7 +56,7 @@ static void bump_init(uintptr_t start) {
 }
 
 // 返回虚拟地址，kernel_main 可直接读写
-static void *bump_alloc(size_t size) {
+void *bump_alloc(size_t size) {
   uintptr_t phys = bump_next_phys;
   bump_next_phys += ALIGN_UP(size, PAGE_SIZE);
   return (void *)(phys + VMA_BASE);
@@ -202,19 +202,7 @@ static multiboot_tag_mmap *find_mmap_tag(uintptr_t mbi_addr) {
   return NULL;
 }
 
-static multiboot_tag_framebuffer *find_fb_tag(uintptr_t mbi_addr) {
-  multiboot_tag *tag = (multiboot_tag *)(mbi_addr + 8);
-  while (tag->type != MULTIBOOT_TAG_TYPE_END) {
-    if (tag->type == MULTIBOOT_TAG_TYPE_FRAMEBUFFER) {
-      return (multiboot_tag_framebuffer *)tag;
-    }
-    tag = (multiboot_tag *)((uintptr_t)tag +
-                             ALIGN_UP(tag->size, MULTIBOOT_TAG_ALIGN));
-  }
-  return NULL;
-}
-
-// 只统计 AVAILABLE 内存的最大物理地址，避免 BIOS 高地址条目撑爆 frames 数组
+// ===================== init_mem =====================
 static size_t compute_total_page_frames(multiboot_tag_mmap *mmap_tag) {
   uint64_t max_phys_addr = 0;
   size_t num_entries =
@@ -241,7 +229,6 @@ void init_mem(uintptr_t mbi_addr) {
   if (mmap_tag == NULL) {
     return;
   }
-  multiboot_tag_framebuffer *fb_tag = find_fb_tag(mbi_addr);
 
   // 2. 计算总页帧数（仅 AVAILABLE 内存）
   total_page_frames = compute_total_page_frames(mmap_tag);
@@ -309,42 +296,10 @@ void init_mem(uintptr_t mbi_addr) {
   // 9. 设备映射区：RAM 映射之后的逻辑地址，类似 Linux ioremap 区域
   //    device_vma_base = ALIGN_UP(VMA_BASE + max_phys_addr, 4MB)
   //    显存物理地址映射到此区域，不是 identity map
-  uintptr_t device_vma_base =
+  device_vma_base =
       ALIGN_UP(VMA_BASE + (uintptr_t)max_phys_addr, 0x400000);
 
-  // 10. 映射显存：找到 framebuffer tag，为其 4MB 物理块分配 PT
-  if (fb_tag != NULL) {
-    uint64_t fb_phys = fb_tag->common.framebuffer_addr;
-    uint32_t fb_pitch = fb_tag->common.framebuffer_pitch;
-    uint32_t fb_height = fb_tag->common.framebuffer_height;
-    uint32_t fb_bytes = fb_pitch * fb_height;
-
-    // 显存物理地址对齐到 4MB 块边界
-    uint32_t fb_4mb_start = (uint32_t)(fb_phys & ~0x3FFFFF);
-    uint32_t fb_4mb_end = (uint32_t)ALIGN_UP(fb_phys + fb_bytes, 0x400000);
-    size_t num_fb_blocks = (fb_4mb_end - fb_4mb_start) / 0x400000;
-
-    // PD 起始索引 = device_vma_base >> 22
-    size_t fb_pd_start = device_vma_base >> 22;
-
-    for (size_t n = 0; n < num_fb_blocks; n++) {
-      uint32_t *pt = (uint32_t *)bump_alloc(4096);
-      uintptr_t pt_phys = PHY_ADDR((uintptr_t)pt);
-
-      uint32_t block_phys_base = fb_4mb_start + (uint32_t)(n * 0x400000);
-      for (int i = 0; i < 1024; i++) {
-        pt[i] = (block_phys_base + i * 4096) | 0x03;
-      }
-
-      page_directory[fb_pd_start + n] = pt_phys | 0x03;
-    }
-
-    // 显存逻辑地址 = device_vma_base + (fb_phys 在 4MB 块内的偏移)
-    fb_mapped_vaddr = (void *)(device_vma_base + (uint32_t)(fb_phys - fb_4mb_start));
-    fb_size = fb_bytes;
-  }
-
-  // 11. 刷新 TLB
+  // 10. 刷新 TLB
   __asm__ volatile("movl %0, %%cr3\n" ::"r"(PHY_ADDR((uintptr_t)page_directory))
                    : "memory");
 
@@ -395,4 +350,7 @@ void init_mem(uintptr_t mbi_addr) {
 
   // 14. 设置 BFCAllocator::frames
   BFCAllocator::frames = frames;
+
+  // 15. 初始化 framebuffer（必须在 bump_alloc 和 device_vma_base 就绪之后）
+  init_fb(mbi_addr);
 }

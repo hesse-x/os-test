@@ -4,9 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-32位 x86 higher-half 内核，Multiboot2/GRUB2 引导，freestanding C++ + 纯汇编。所有代码编译为 `-fPIE`，利用 GOTOFF（PC推导基址+常量偏移）实现位置无关。`_start` 和 `boot_main` 在物理地址运行，设置分页后跳转到 `kernel_main` 在虚拟地址 0xC010xxxx 运行。
-
-`mem.cc`（BFC 物理内存分配器）存在但 build.sh **未编译链接它**。
+32位 x86 higher-half 内核，Multiboot2/GRUB2 引导，freestanding C++ + 纯汇编。所有代码编译为 `-fPIE`，利用 GOTOFF（PC推导基址+常量偏移）实现位置无关。`_start` 和 `enable_page` 在物理地址运行，设置分页后跳转到 `kernel_main` 在虚拟地址 0xC010xxxx 运行。
 
 ## 构建与运行
 
@@ -16,26 +14,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./run.sh            # QEMU 启动（OVMF UEFI, 512MB, VGA, 串口输出到 log.txt）
 ```
 
-编译流程：`start.S` → `boot.cc` → `kernel.cc` → `serial.cc`，统一 `-fPIE`。链接：`ld -m elf_x86_64 -T linker.ld`（输出 elf32-i386）。
+编译流程：`start.S` → `boot.cc` → `kernel.cc` → `serial.cc` → `mem.cc` → `fb.cc`，统一 `-fPIE`。链接：`ld -m elf_x86_64 -T linker.ld`（输出 elf32-i386）。
 
 **添加新源文件：** 在 build.sh 增加编译步骤（复制现有 g++ 行），并在 ld 行加入 `.o` 文件。
 
 ## 启动流程
 
 ```
-GRUB2 (0x100000) → _start (start.S, 物理地址) → boot_main (boot.cc, 物理地址) → 分页启用 → kernel_main (kernel.cc, 虚拟地址 0xC010xxxx)
+GRUB2 (0x100000) → _start (start.S, 物理地址) → enable_page (mem.cc, 物理地址) → 分页启用 → kernel_main (kernel.cc, 虚拟地址 0xC010xxxx)
 ```
 
 1. GRUB2 在 LMA=0x100000 加载内核，%eax=魔数, %ebx=multiboot_info地址
-2. `_start`（纯汇编）：保存 %eax/%ebx → 设置物理栈 → 调用 `boot_main`（VMA-VMA_BASE计算物理地址）
-3. `boot_main`：清零 PD/PT → 填充 identity map + higher-half → 内联asm启用分页(CR3/CR0) → 切换ESP到虚拟地址 → jmp kernel_main
-4. `kernel_main`：串口初始化 → 验证魔数 → 遍历 multiboot2 标签 → framebuffer 填白
+2. `_start`（纯汇编）：保存 %eax/%ebx → 设置物理栈 → 调用 `enable_page`（VMA-VMA_BASE计算物理地址）
+3. `enable_page`：清零 PD/PT → 填充 identity map + higher-half → 内联asm启用分页(CR3/CR0) → 返回
+4. `_start`：切换ESP到虚拟地址 → 间接调用 `kernel_main`
+5. `kernel_main`：`init_mem`（mmap解析、Bump/BFC分配器、扩展higher-half映射、设备映射区、framebuffer初始化）→ 串口输出 → framebuffer文字渲染
 
 ## 地址映射
 
 - 物理 0-4MB → 虚拟 0-4MB（identity map，过渡期保留）
-- 物理 0-4MB → 虚拟 0xC0000000-0xC0400000（higher-half）
-- PD[0] 和 PD[768] 共享同一个 PT（4KB小页）
+- 物理 0-4MB → 虚拟 0xC0000000-0xC0400000（higher-half，PD[0] 和 PD[768] 共享同一个 PT）
+- `init_mem` 动态扩展：物理 RAM 每 4MB 块对应 PD[768+n]，覆盖全部可用内存
+- 设备映射区：`device_vma_base = ALIGN_UP(VMA_BASE + max_phys_addr, 4MB)`，framebuffer 等设备 MMIO 映射到此区域
 - 地址转换：`vaddr = paddr + VMA_BASE`，`PHY_ADDR(vaddr) = vaddr - VMA_BASE`
 
 ## 链接脚本（linker.ld）
@@ -58,17 +58,27 @@ VMA=0xC0100000，LMA 用 AT() 指定从 0x100000 起连续排列：
 
 | 文件 | 作用 |
 |---|---|
-| `start.S` | 纯汇编入口 `_start`，保存multiboot参数，设置物理栈，调用 `boot_main` |
-| `boot.cc` | Multiboot2 头构造，PD/PT 数组，`boot_main`（物理地址运行，启用分页+跳转） |
-| `kernel.cc` | `kernel_main`（虚拟地址运行），串口输出，multiboot2标签遍历，framebuffer填白 |
+| `start.S` | 纯汇编入口 `_start`，保存multiboot参数，设置物理栈，调用 `enable_page`，栈平移，调用 `kernel_main` |
+| `boot.cc` | Multiboot2 头构造（magic/framebuffer tag/end tag），引导栈定义 |
+| `mem.cc` | `enable_page`（物理地址运行，初始分页），`init_mem`（mmap解析、Bump/BFC分配器、扩展higher-half映射、设备映射区），BFC分配器实现 |
+| `kernel.cc` | `kernel_main`（虚拟地址运行），调用 `init_mem` → 串口输出 → framebuffer文字渲染 |
+| `fb.cc/h` | Framebuffer 驱动：8x16 PC BIOS字体渲染，`init_fb`（设备映射区页表映射），`clear/fb_putc/prints`，光标管理 |
 | `serial.cc/h` | COM1 串口驱动（init/putc/puts），QEMU `-serial file:log.txt` 捕获输出 |
-| `mem.h` | Page/BFCAllocator 定义，VMA/LMA 常量，PHY_ADDR 宏 |
+| `mem.h` | Page/BFCAllocator 定义，VMA/LMA 常量，PHY_ADDR 宏，全局变量声明（page_directory/page_table/device_vma_base） |
+| `kernel.h` | `kernel_main` 声明 |
 | `mem_layout.h` | VMA_BASE/KERNEL_VMA_BASE/KERNEL_LMA_BASE/PHY_ADDR（与 mem.h 有重叠） |
-| `mem.cc` | BFC 分配器实现 + mmap 解析 — **当前未链接** |
 | `common.h` | 链接脚本导出符号声明（`kernel_end`） |
 | `macro.h` | ALIGN_UP 宏 |
 | `multiboot2.h` | Multiboot2 规范定义 |
-| `doc/design/page_plan.md` | Higher-half + 分页实现方案设计文档 |
+
+## 内存管理架构
+
+两阶段分配器，均在 `init_mem` 中初始化：
+
+1. **Bump 分配器**：极简线性分配，`kernel_end` 起始，仅向前增长。用于 `init_mem` 阶段分配 frames 数组和页表。返回虚拟地址。
+2. **BFC 分配器**：Best-Fit Contiguous，基于 frames 数组 + 有序 free_list，支持分配/释放/合并。`init_mem` 完成后可用于通用分配。
+
+初始化顺序：mmap解析 → Bump初始化 → 分配frames数组 → 标记FREE/USED/RESERVED → 扩展higher-half映射 → 设置device_vma_base → 初始化framebuffer → 建立free_list。
 
 ## 开发备注
 
@@ -77,6 +87,8 @@ VMA=0xC0100000，LMA 用 AT() 指定从 0x100000 起连续排列：
 - `.clang-format` = LLVM 风格
 - `mem_layout.h` 与 `mem.h` 地址常量有重叠，合并时应统一
 - 未来扩展：relocatable header tag + 任意基址支持时需 EIP 推导方式替代 VMA-VMA_BASE
+- `enable_page` 在 mem.cc 中定义（物理地址运行），`boot_main` 已不存在
+- `init_fb` 在 `init_mem` 末尾调用，依赖 bump_alloc 和 device_vma_base 就绪
 
 # 编程指导原则
 

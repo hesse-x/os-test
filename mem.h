@@ -46,15 +46,11 @@ struct BFCAllocator {
 extern size_t total_page_frames;
 extern uint32_t page_directory[1024];
 extern uint32_t page_table[1024];
+extern uintptr_t device_vma_base;
 
 // ===================== 函数声明 =====================
 void enable_page();
 void init_mem(uintptr_t mbi_addr);
-
-// ===================== 显存映射 =====================
-// init_mem 解析 framebuffer tag，映射显存物理地址到逻辑地址
-// init_mem 完成后这两个变量可直接使用
-extern void *fb_mapped_vaddr;  // 显存逻辑地址指针（已映射）
-extern size_t fb_size;         // 显存大小（pitch * height）
+void *bump_alloc(size_t size);
 }
 #endif // MEMORY_H

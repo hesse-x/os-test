@@ -7,27 +7,27 @@ ENTRY(_start)  /* 入口点为_start符号 */
 . = 0xC0100000;
 SECTIONS {
     /* Multiboot头部段 */
-    .multiboot : AT(0x100000) {
+    .multiboot : AT(ADDR(.multiboot) - 0xC0000000) {
         *(.multiboot)
     }
 
-    .stack : AT(LOADADDR(.multiboot) + SIZEOF(.multiboot)) {
+    .stack : AT(ADDR(.stack) - 0xC0000000) {
         *(.stack)
     }
 
     /* 代码段 */
-    .text : AT(LOADADDR(.stack) + SIZEOF(.stack)) {
+    .text : AT(ADDR(.text) - 0xC0000000) {
         *(.text)
         *(.text.*)
     }
 
-    .rodata : AT(LOADADDR(.text) + SIZEOF(.text)) {
+    .rodata : AT(ADDR(.rodata) - 0xC0000000) {
         *(.rodata)
         *(.rodata.*)
     }
 
     /* 已初始化数据段 */
-    .data : AT(LOADADDR(.rodata) + SIZEOF(.rodata)) {
+    .data : AT(ADDR(.data) - 0xC0000000) {
         *(.data)
         *(.data.*)
         *(.data.rel.ro.local)
@@ -36,14 +36,14 @@ SECTIONS {
     }
 
     /* GOT段 (-fPIE生成) */
-    .got : AT(LOADADDR(.data) + SIZEOF(.data)) {
+    .got : AT(ADDR(.got) - 0xC0000000) {
         *(.got)
         *(.got.plt)
     }
 
     . = ALIGN(4096);
     /* 未初始化数据段（BSS） - 4KB对齐供PD/PT使用 */
-    .bss (NOLOAD) : AT(LOADADDR(.got) + SIZEOF(.got)) {
+    .bss (NOLOAD) : AT(ADDR(.bss) - 0xC0000000) {
         *(.bss)
         *(COMMON)
     }

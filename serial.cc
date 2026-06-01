@@ -16,3 +16,11 @@ void serial_puts(const char *s) {
     serial_putc(*s++);
   }
 }
+
+void serial_put_hex(uint32_t val) {
+  const char hex[] = "0123456789ABCDEF";
+  serial_puts("0x");
+  for (int i = 28; i >= 0; i -= 4) {
+    serial_putc(hex[(val >> i) & 0xF]);
+  }
+}
