@@ -1,4 +1,4 @@
-#include "kernel.h"
+#include "kernel/kernel.h"
 #include "multiboot2.h"
 #include <stdint.h>
 
@@ -31,6 +31,5 @@ static const multiboot_header_tag end_tag BOOT_HEADER_ATTR = {
     .size = sizeof(multiboot_header_tag)};
 
 extern "C" {
-// 引导栈，C linkage + extern外部链接供start.S引用（C++ const默认内部链接）
 extern const uint8_t stack_bottom[8192] STACK_ATTR = {0};
-} // extern C
+}

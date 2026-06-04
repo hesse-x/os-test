@@ -9,26 +9,70 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 构建与运行
 
 ```bash
-./build.sh          # 编译 + 链接 + 生成 ISO (myos.iso)
-./build.sh clear    # 清除 .o, .bin, .iso 产物
+./build.sh          # CMake 编译 + 链接 + mkiso.sh 生成 ISO
+./build.sh clear    # 清除 build/ 目录
 ./run.sh            # QEMU 启动（OVMF UEFI, 512MB, VGA, 串口输出到 log.txt）
+./mkiso.sh          # 单独生成 ISO（从 build/myos.bin）
 ```
 
-编译流程：`start.S` → `vectors.S` → `trapentry.S` → `boot.cc` → `kernel.cc` → `serial.cc` → `mem.cc` → `fb.cc` → `isr.cc` → `kbd.cc`，C++ 统一 `-fPIE`，纯汇编不用 PIE。链接：`ld -m elf_x86_64 -T linker.ld`（输出 elf32-i386）。
+构建体系为 CMake + 自定义链接脚本（`cmake/do_link.cmake`）。C++ 统一 `-fPIE`，纯汇编不用 PIE。链接：`ld -m elf_x86_64 -T arch/x86/linker.ld`（输出 elf32-i386）。
 
-**添加新源文件：** 在 build.sh 增加编译步骤（复制现有 g++ 行），并在 ld 行加入 `.o` 文件。
+**重要：** `add_library(OBJECT)` 不能设置 `POSITION_INDEPENDENT_CODE ON`，否则会加 `-fPIC`，破坏 GOTOFF 机制导致物理地址阶段崩溃。只用 `-fPIE`。
+
+**添加新源文件：** 在对应目录的 CMakeLists.txt 中将文件加入 `add_library(... OBJECT ...)` 列表即可。
+
+## 目录结构
+
+```
+cmake/toolchain-i686.cmake
+CMakeLists.txt
+cmake/do_link.cmake
+build.sh / mkiso.sh / run.sh
+grub.cfg
+.clang-format / .gitignore
+
+arch/x86/
+  CMakeLists.txt
+  start.S            — 纯汇编入口 _start
+  vectors.S          — 48个中断向量桩
+  trapentry.S        — __alltraps / __trapret
+  linker.ld          — 链接脚本
+  boot.cc            — Multiboot2 头 + 引导栈
+  paging.cc / paging.h — GDT, enable_page, 页表, bump_alloc, extend_mapping, flush_tlb
+  trap.cc / trap.h   — IDT, PIC, PIT 初始化
+  utils.h            — outb/inb, KERNEL_CS, L16/H16（统一，无重复定义）
+  multiboot2.h       — Multiboot2 规范定义
+
+kernel/
+  CMakeLists.txt
+  kernel.cc / kernel.h — kernel_main
+  serial.cc / serial.h — COM1 串口驱动
+  trap.cc / trap.h   — trap_dispatch + IRQ 注册表（register_irq）
+  mem/
+    CMakeLists.txt
+    alloc.cc / alloc.h — init_mem, Bump/BFC 分配器, Page 描述符
+
+driver/
+  CMakeLists.txt
+  kbd.cc / kbd.h     — 键盘驱动
+  fb.cc / fb.h       — Framebuffer 驱动
+
+common/
+  common.h            — kernel_end 声明
+  macro.h             — ALIGN_UP 宏
+```
 
 ## 启动流程
 
 ```
-GRUB2 (0x100000) → _start (start.S, 物理地址) → enable_page (mem.cc, 物理地址) → 分页启用 → kernel_main (kernel.cc, 虚拟地址 0xC010xxxx)
+GRUB2 (0x100000) → _start (arch/x86/start.S, 物理地址) → enable_page (arch/x86/paging.cc, 物理地址) → 分页启用 → kernel_main (kernel/kernel.cc, 虚拟地址 0xC010xxxx)
 ```
 
 1. GRUB2 在 LMA=0x100000 加载内核，%eax=魔数, %ebx=multiboot_info地址
 2. `_start`（纯汇编）：保存 %eax/%ebx → 设置物理栈 → 调用 `enable_page`（VMA-VMA_BASE计算物理地址）
 3. `enable_page`：清零 PD/PT → 填充 identity map + higher-half → 内联asm启用分页(CR3/CR0) → 返回
 4. `_start`：切换ESP到虚拟地址 → 间接调用 `kernel_main`
-5. `kernel_main`：`init_mem`（mmap解析、Bump/BFC分配器、扩展higher-half映射、设备映射区、framebuffer初始化）→ `isr_init`（GDT/IDT/PIC/PIT/键盘）→ 串口输出 → framebuffer文字渲染 → 键盘回显 → halt循环
+5. `kernel_main`：`init_mem`（mmap解析、Bump/BFC分配器、扩展higher-half映射、设备映射区、framebuffer初始化）→ `isr_init`（GDT/IDT/PIC/PIT/键盘IRQ注册）→ 串口输出 → framebuffer文字渲染 → 键盘回显 → halt循环
 
 ## 地址映射
 
@@ -38,7 +82,7 @@ GRUB2 (0x100000) → _start (start.S, 物理地址) → enable_page (mem.cc, 物
 - 设备映射区：`device_vma_base = ALIGN_UP(VMA_BASE + max_phys_addr, 4MB)`，framebuffer 等设备 MMIO 映射到此区域
 - 地址转换：`vaddr = paddr + VMA_BASE`，`PHY_ADDR(vaddr) = vaddr - VMA_BASE`
 
-## 链接脚本（linker.ld）
+## 链接脚本（arch/x86/linker.ld）
 
 VMA=0xC0100000，LMA 用 AT() 指定从 0x100000 起连续排列：
 
@@ -54,55 +98,36 @@ VMA=0xC0100000，LMA 用 AT() 指定从 0x100000 起连续排列：
 - **不需要 GOT fixup**：偏移是链接时常量，PC推导基址自动适配
 - 外部符号（如 `kernel_main`）不走 GOTOFF，用 R_386_32 重定位（直接VMA）
 
-## 关键源文件
+## 中断架构
 
-| 文件 | 作用 |
-|---|---|
-| `start.S` | 纯汇编入口 `_start`，保存multiboot参数，设置物理栈，调用 `enable_page`，栈平移，调用 `kernel_main` |
-| `boot.cc` | Multiboot2 头构造（magic/framebuffer tag/end tag），引导栈定义 |
-| `mem.cc` | `enable_page`（物理地址运行，初始分页），`init_mem`（mmap解析、Bump/BFC分配器、扩展higher-half映射、设备映射区），BFC分配器实现，GDT设置 |
-| `kernel.cc` | `kernel_main`（虚拟地址运行），调用 `init_mem` → `isr_init` → 串口输出 → framebuffer文字渲染 → 键盘回显 |
-| `isr.cc` | IDT/PIC/PIT初始化，中断分发（`trap`），定时器/键盘IRQ处理 |
-| `isr.h` | IDT/trapframe结构定义，I/O内联函数（`outb`/`inb`），`KERNEL_CS`/`L16`/`H16` |
-| `vectors.S` | 48个中断向量桩（vector0-47），处理error code有无的差异，跳转 `__alltraps` |
-| `trapentry.S` | `__alltraps`（保存寄存器→调用trap）和 `__trapret`（恢复寄存器→iret） |
-| `kbd.cc/h` | 键盘驱动：Set 1 scancode→ASCII表，`kbd_handle`（IRQ1回调），`kbd_register_handler` |
-| `fb.cc/h` | Framebuffer 驱动：8x16 PC BIOS字体渲染，`init_fb`（设备映射区页表映射），`clear/fb_putc/prints`，光标管理 |
-| `serial.cc/h` | COM1 串口驱动（init/putc/puts），QEMU `-serial file:log.txt` 捕获输出 |
-| `mem.h` | Page/BFCAllocator 定义，VMA/LMA 常量，PHY_ADDR 宏，全局变量声明（page_directory/page_table/device_vma_base） |
-| `kernel.h` | `kernel_main` 声明 |
-| `mem_layout.h` | VMA_BASE/KERNEL_VMA_BASE/KERNEL_LMA_BASE/PHY_ADDR（与 mem.h 有重叠） |
-| `common.h` | 链接脚本导出符号声明（`kernel_end`） |
-| `macro.h` | ALIGN_UP 宏 |
-| `multiboot2.h` | Multiboot2 规范定义 |
+- **GDT**：3项（null/code/data），在 `arch/x86/paging.cc` 的 `gdt_init` 中设置，通过 `lgdt` + 远跳转加载
+- **IDT**：48项（向量0-47），`arch/x86/trap.cc` 的 `idt_install` 安装所有门描述符（selector=0x08, flags=0x8E）
+- **向量桩**：`arch/x86/vectors.S` 定义 vector0-47，CPU异常自动push error code的向量（8,10-14,17）不push dummy 0，其余push 0+向量号
+- **trapentry.S**：`__alltraps` 保存段寄存器+pushal→调用 `trap_dispatch()`；`__trapret` 恢复→iret
+- **IRQ 注册表**：`kernel/trap.cc` 维护 `irq_handler_t` 数组，`register_irq(vec, fn)` 注册处理器，`trap_dispatch` 查表调用
+- **PIC**：master(0x20)/slave(0xA0)重映射，master IRQ 32-39，slave IRQ 40-47；仅unmask timer(IRQ0)和keyboard(IRQ1)
+- **PIT**：通道0 ~100Hz（divisor 11932）
+- **trap分发**：注册表优先→默认：向量32=定时器（EOI），向量33=键盘（kbd_handle+EOI），其他IRQ仅EOI，CPU异常=串口诊断+halt
 
 ## 内存管理架构
 
-两阶段分配器，均在 `init_mem` 中初始化：
+两阶段分配器，均在 `init_mem`（`kernel/mem/alloc.cc`）中初始化：
 
-1. **Bump 分配器**：极简线性分配，`kernel_end` 起始，仅向前增长。用于 `init_mem` 阶段分配 frames 数组和页表。返回虚拟地址。
+1. **Bump 分配器**：极简线性分配，`kernel_end` 起始，仅向前增长。定义在 `arch/x86/paging.cc`。用于 `init_mem` 阶段分配 frames 数组和页表。返回虚拟地址。
 2. **BFC 分配器**：Best-Fit Contiguous，基于 frames 数组 + 有序 free_list，支持分配/释放/合并。`init_mem` 完成后可用于通用分配。
 
-初始化顺序：mmap解析 → Bump初始化 → 分配frames数组 → 标记FREE/USED/RESERVED → 扩展higher-half映射 → 设置device_vma_base → 初始化framebuffer → 建立free_list。
-
-## 中断架构
-
-- **GDT**：3项（null/code/data），在 `mem.cc` 的 `gdt_init` 中设置，通过 `lgdt` + 远跳转加载
-- **IDT**：48项（向量0-47），`isr_init` 调用 `idt_init` 安装所有门描述符（selector=0x08, flags=0x8E）
-- **向量桩**：`vectors.S` 定义 vector0-47，CPU异常自动push error code的向量（8,10-14,17）不push dummy 0，其余push 0+向量号
-- **trapentry.S**：`__alltraps` 保存段寄存器+pushal→调用 `trap()`；`__trapret` 恢复→iret
-- **PIC**：master(0x20)/slave(0xA0)重映射，master IRQ 32-39，slave IRQ 40-47；仅unmask timer(IRQ0)和keyboard(IRQ1)
-- **PIT**：通道0 ~100Hz（divisor 11932）
-- **trap分发**：向量32=定时器（tick++，EOI），向量33=键盘（`kbd_handle`，EOI），其他IRQ仅EOI，CPU异常=串口诊断+halt
+初始化顺序：mmap解析 → Bump初始化 → 分配frames数组 → 标记FREE/USED/RESERVED → extend_mapping(arch层) → flush_tlb → 标记内核占用页 → 建立free_list → init_fb。
 
 ## 开发备注
 
 - QEMU 调试：run.sh 注释掉的 `-s -S` 参数用于 GDB 远程调试
 - `.clang-format` = LLVM 风格
-- `outb()` 内联定义重复于 `serial.cc` 和 `isr.h`；`KERNEL_CS`/`L16`/`H16` 重复于 `mem.h` 和 `isr.h`；合并时应统一
+- `outb`/`inb`/`KERNEL_CS`/`L16`/`H16` 统一在 `arch/x86/utils.h`，无重复定义
+- `mem_layout.h` 已废弃，常量已入 `arch/x86/paging.h`
 - 未来扩展：relocatable header tag + 任意基址支持时需 EIP 推导方式替代 VMA-VMA_BASE
-- `enable_page` 在 mem.cc 中定义（物理地址运行），`boot_main` 已不存在
+- `enable_page` 在 `arch/x86/paging.cc` 中定义（物理地址运行）
 - `init_fb` 在 `init_mem` 末尾调用，依赖 bump_alloc 和 device_vma_base 就绪
+- CMake 链接步骤使用 `cmake/do_link.cmake` 脚本处理 `$<TARGET_OBJECTS>` 的分号列表问题
 
 # 编程指导原则
 

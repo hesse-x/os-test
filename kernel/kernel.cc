@@ -3,13 +3,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "macro.h"
-#include "kernel.h"
-#include "mem.h"
-#include "serial.h"
-#include "fb.h"
-#include "isr.h"
-#include "kbd.h"
+#include "common/macro.h"
+#include "kernel/kernel.h"
+#include "kernel/mem/alloc.h"
+#include "kernel/serial.h"
+#include "driver/fb.h"
+#include "kernel/trap.h"
+#include "driver/kbd.h"
+#include "arch/x86/multiboot2.h"
 
 static void kbd_echo(char c) {
   fb_putc(c, 0xFFFFFF);
@@ -37,4 +38,4 @@ void kernel_main(int32_t magic_num, uintptr_t addr) {
   while (1)
     __asm__ volatile("hlt");
 }
-} // extern C
+}

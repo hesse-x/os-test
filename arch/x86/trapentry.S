@@ -16,11 +16,11 @@ __alltraps:
     movw %ax, %ds
     movw %ax, %es
 
-    # push %esp to pass a pointer to the trapframe as an argument to trap()
+    # push %esp to pass a pointer to the trapframe as an argument to trap_dispatch()
     pushl %esp
 
-    # call trap(tf), where tf=%esp
-    call trap
+    # call trap_dispatch(tf), where tf=%esp
+    call trap_dispatch
 
     # pop the pushed stack pointer
     popl %esp

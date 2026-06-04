@@ -1,25 +1,25 @@
-#include "fb.h"
-#include "mem.h"
-#include "multiboot2.h"
-#include "macro.h"
+#include "driver/fb.h"
+#include "arch/x86/paging.h"
+#include "arch/x86/multiboot2.h"
+#include "common/macro.h"
 #include <stddef.h>
 #include <stdint.h>
 
 // ===================== Struct 定义 =====================
 
 struct Framebuffer {
-  uint32_t width;      // 像素宽度
-  uint32_t height;     // 像素高度
-  uint32_t pitch;      // 每行字节数
-  uint32_t bpp;        // 每像素位数
-  void *vaddr;         // 映射后的虚拟地址
-  size_t size;         // 显存总大小 (pitch * height)
-  uint64_t phys_addr;  // 物理地址
+  uint32_t width;
+  uint32_t height;
+  uint32_t pitch;
+  uint32_t bpp;
+  void *vaddr;
+  size_t size;
+  uint64_t phys_addr;
 };
 
 struct Cursor {
-  uint32_t x;          // 光标列（字符单位）
-  uint32_t y;          // 光标行（字符单位）
+  uint32_t x;
+  uint32_t y;
 };
 
 // ===================== 全局实例 =====================
@@ -28,7 +28,6 @@ static Framebuffer fb;
 static Cursor cursor;
 
 // ===================== 8x16 PC BIOS 字体 =====================
-// 覆盖 ASCII 可打印字符 0x20-0x7E
 
 static const uint8_t font8x16[96][16] = {
     // 0x20 ' '
@@ -337,22 +336,8 @@ static multiboot_tag_framebuffer *find_fb_tag(uintptr_t mbi_addr) {
   return NULL;
 }
 
-// 字符列数/行数
 static uint32_t cols() { return fb.width / FONT_WIDTH; }
 static uint32_t rows() { return fb.height / FONT_HEIGHT; }
-
-// 在 (px, py) 像素位置写入一个像素
-static void draw_pixel(uint32_t px, uint32_t py, uint32_t color) {
-  uint8_t *dst = (uint8_t *)fb.vaddr + py * fb.pitch + px * (fb.bpp / 8);
-  if (fb.bpp == 32) {
-    *(uint32_t *)dst = color;
-  } else {
-    // 24bpp: 写 RGB 3字节，忽略 alpha
-    dst[0] = color & 0xFF;         // B
-    dst[1] = (color >> 8) & 0xFF;  // G
-    dst[2] = (color >> 16) & 0xFF; // R
-  }
-}
 
 // ===================== 对外接口实现 =====================
 
@@ -369,13 +354,10 @@ void init_fb(uint32_t mbi_addr) {
   uint32_t fb_bpp = fb_tag->common.framebuffer_bpp;
   uint32_t fb_bytes = fb_pitch * fb_h;
 
-  // 使用 device_vma_base（由 init_mem 设置）作为映射基址
-  // 显存物理地址对齐到 4MB 块边界
   uint32_t fb_4mb_start = (uint32_t)(fb_phys & ~0x3FFFFF);
   uint32_t fb_4mb_end = (uint32_t)ALIGN_UP(fb_phys + fb_bytes, 0x400000);
   size_t num_fb_blocks = (fb_4mb_end - fb_4mb_start) / 0x400000;
 
-  // PD 起始索引 = device_vma_base >> 22
   size_t fb_pd_start = device_vma_base >> 22;
 
   for (size_t n = 0; n < num_fb_blocks; n++) {
@@ -390,13 +372,8 @@ void init_fb(uint32_t mbi_addr) {
     page_directory[fb_pd_start + n] = pt_phys | 0x03;
   }
 
-  // 刷新 TLB
-  __asm__ volatile("movl %0, %%cr3\n"
-                   :
-                   : "r"(PHY_ADDR((uintptr_t)page_directory))
-                   : "memory");
+  flush_tlb();
 
-  // 填充 fb struct
   fb.width = fb_w;
   fb.height = fb_h;
   fb.pitch = fb_pitch;
@@ -405,7 +382,6 @@ void init_fb(uint32_t mbi_addr) {
   fb.size = fb_bytes;
   fb.phys_addr = fb_phys;
 
-  // 光标归零
   cursor.x = 0;
   cursor.y = 0;
 }
@@ -450,12 +426,10 @@ void fb_putc(char c, uint32_t fg) {
     return;
   }
 
-  // 可打印字符
   if (c < FONT_CHARS_START || c > 0x7E) {
     return;
   }
 
-  // 绘制字符
   const uint8_t *glyph = font8x16[c - FONT_CHARS_START];
   uint32_t px = cursor.x * FONT_WIDTH;
   uint32_t py = cursor.y * FONT_HEIGHT;
@@ -478,7 +452,6 @@ void fb_putc(char c, uint32_t fg) {
     }
   }
 
-  // 光标右移
   cursor.x++;
   if (cursor.x >= cols()) {
     cursor.x = 0;

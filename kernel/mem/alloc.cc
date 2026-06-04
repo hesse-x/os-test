@@ -1,104 +1,16 @@
-#include "mem.h"
-#include "common.h"
-#include "fb.h"
+#include "kernel/mem/alloc.h"
+#include "arch/x86/paging.h"
+#include "common/common.h"
+#include "common/macro.h"
+#include "arch/x86/multiboot2.h"
+#include "driver/fb.h"
 
-// ===================== GDT =====================
-static gdt_entry_t gdt[3];
-static gdt_ptr_t gdt_reg;
-
-void set_gdt_gate(int n, uint32_t base, uint32_t limit, uint8_t access,
-                  uint8_t gran) {
-  gdt[n].limit_low = L16(limit);
-  gdt[n].base_low = L16(base);
-  gdt[n].base_middle = (base >> 16) & 0xFF;
-  gdt[n].access = access;
-  gdt[n].granularity = ((gran & 0x0F) << 4) | ((limit >> 16) & 0x0F);
-  gdt[n].base_high = (base >> 24) & 0xFF;
-}
-
-void set_gdt() {
-  gdt_reg.base = (uint32_t)&gdt;
-  gdt_reg.limit = sizeof(gdt) - 1;
-  __asm__ volatile("lgdt (%0)" : : "r"(&gdt_reg));
-  __asm__ volatile(
-      "movw $0x10, %%ax\n"
-      "movw %%ax, %%ds\n"
-      "movw %%ax, %%es\n"
-      "movw %%ax, %%fs\n"
-      "movw %%ax, %%gs\n"
-      "movw %%ax, %%ss\n"
-      "ljmp $0x08, $1f\n"
-      "1:\n" :::"eax");
-}
-
-void gdt_init() {
-  set_gdt_gate(0, 0, 0, 0, 0);                   // null segment
-  set_gdt_gate(1, 0, 0xFFFFFFFF, 0x9A, 0x0C);    // code: ER, ring0, 4K granularity, 32-bit
-  set_gdt_gate(2, 0, 0xFFFFFFFF, 0x92, 0x0C);    // data: RW, ring0, 4K granularity, 32-bit
-  set_gdt();
-}
-
-// ===================== 页表 =====================
-__attribute__((aligned(4096))) uint32_t page_directory[1024];
-__attribute__((aligned(4096))) uint32_t page_table[1024];
-
-// ===================== enable_page =====================
-// 在物理地址运行，由 start.S 调用
-// 设置 identity map + higher-half 初始映射后返回
-extern "C" void enable_page() {
-  // GOTOFF 自动给出物理地址（因 enable_page 在物理地址运行）
-
-  // 清零 PD 和 PT
-  for (int i = 0; i < 1024; i++) {
-    page_directory[i] = 0;
-    page_table[i] = 0;
-  }
-
-  // 填充 PT：物理 0x0-0x3FFFFF → 4KB页，present + writable
-  for (int i = 0; i < 1024; i++) {
-    page_table[i] = (i * 4096) | 0x03;
-  }
-
-  // PD[0] = PT 物理地址 | flags（identity map: virt 0-4MB → phys 0-4MB）
-  page_directory[0] = ((uintptr_t)page_table) | 0x03;
-
-  // PD[768] = PT 物理地址 | flags（higher-half: virt 0xC0000000-0xC0400000 → phys 0-4MB）
-  page_directory[768] = ((uintptr_t)page_table) | 0x03;
-
-  // 启用分页
-  __asm__ volatile(
-      "movl %0, %%cr3\n"
-      "movl %%cr0, %%eax\n"
-      "orl $0x80000000, %%eax\n"
-      "movl %%eax, %%cr0\n"
-      :
-      : "r"((uintptr_t)page_directory)
-      : "eax", "memory");
-}
-
-// ===================== 全局变量定义 =====================
+// ===================== Global variable definitions =====================
 size_t total_page_frames = 0;
 Page *BFCAllocator::frames = NULL;
 Page *BFCAllocator::free_list = NULL;
-uintptr_t device_vma_base = 0;
 
-// ===================== Bump 分配器 =====================
-// 极简物理内存分配器，仅在 BFC 初始化前使用
-// 返回虚拟地址（phys + VMA_BASE），kernel_main_higher 可直接读写
-static uintptr_t bump_next_phys; // 下一个空闲物理页地址
-
-static void bump_init(uintptr_t start) {
-  bump_next_phys = ALIGN_UP(start, PAGE_SIZE);
-}
-
-// 返回虚拟地址，kernel_main 可直接读写
-void *bump_alloc(size_t size) {
-  uintptr_t phys = bump_next_phys;
-  bump_next_phys += ALIGN_UP(size, PAGE_SIZE);
-  return (void *)(phys + VMA_BASE);
-}
-
-// ===================== BFCAllocator 实现 =====================
+// ===================== BFCAllocator implementation =====================
 void BFCAllocator::init() {
   // init_mem 中完成初始化
 }
@@ -224,8 +136,7 @@ size_t BFCAllocator::free_page_nums() const {
   return total;
 }
 
-// ===================== multiboot 标签查找 =====================
-
+// ===================== multiboot tag lookup =====================
 static multiboot_tag_mmap *find_mmap_tag(uintptr_t mbi_addr) {
   multiboot_tag *tag = (multiboot_tag *)(mbi_addr + 8);
   while (tag->type != MULTIBOOT_TAG_TYPE_END) {
@@ -256,8 +167,8 @@ static size_t compute_total_page_frames(multiboot_tag_mmap *mmap_tag) {
   return GET_PAGE_NUM(max_phys_addr);
 }
 
-// ===================== init_mem =====================
-// 在虚拟地址运行（kernel_main 调用）
+// Forward declaration from arch/x86/paging.cc
+extern "C" uintptr_t bump_end_phys();
 
 void init_mem(uintptr_t mbi_addr) {
   // 1. 解析 multiboot2 标签
@@ -271,7 +182,7 @@ void init_mem(uintptr_t mbi_addr) {
 
   // 3. Bump 分配器初始化
   uintptr_t kernel_end_phys = PHY_ADDR((uintptr_t)kernel_end);
-  bump_init(kernel_end_phys);
+  bump_init_phys(kernel_end_phys);
 
   // 4. Bump 分配 frames 数组
   size_t frames_size = total_page_frames * sizeof(Page);
@@ -314,34 +225,15 @@ void init_mem(uintptr_t mbi_addr) {
     }
   }
 
-  // 8. 扩展 higher-half 映射：为超出 4MB 的物理 RAM 块分配 PT
-  //    PD[768] 已映射初始 4MB, PD[769] 对应 0xC0400000...
-  size_t max_4mb_block = (size_t)(max_phys_addr / 0x400000);
-  for (size_t n = 1; n <= max_4mb_block; n++) {
-    uint32_t *pt = (uint32_t *)bump_alloc(4096);
-    uintptr_t pt_phys = PHY_ADDR((uintptr_t)pt);
+  // 8. 扩展 higher-half 映射 + 设备映射区（arch 层）
+  extend_mapping(max_phys_addr);
 
-    uint32_t phys_base = (uint32_t)(n * 0x400000);
-    for (int i = 0; i < 1024; i++) {
-      pt[i] = (phys_base + i * 4096) | 0x03;
-    }
+  // 9. 刷新 TLB
+  flush_tlb();
 
-    page_directory[768 + n] = pt_phys | 0x03;
-  }
-
-  // 9. 设备映射区：RAM 映射之后的逻辑地址，类似 Linux ioremap 区域
-  //    device_vma_base = ALIGN_UP(VMA_BASE + max_phys_addr, 4MB)
-  //    显存物理地址映射到此区域，不是 identity map
-  device_vma_base =
-      ALIGN_UP(VMA_BASE + (uintptr_t)max_phys_addr, 0x400000);
-
-  // 10. 刷新 TLB
-  __asm__ volatile("movl %0, %%cr3\n" ::"r"(PHY_ADDR((uintptr_t)page_directory))
-                   : "memory");
-
-  // 12. 标记内核 + bump 分配的页为 USED
+  // 10. 标记内核 + bump 分配的页为 USED
   uintptr_t used_start = KERNEL_LMA_BASE;
-  uintptr_t used_end = bump_next_phys;
+  uintptr_t used_end = bump_end_phys();
   size_t used_page_idx_start = PHY_TO_PAGE(used_start);
   size_t used_page_idx_end = PHY_TO_PAGE(ALIGN_UP(used_end, PAGE_SIZE));
   for (size_t i = used_page_idx_start;
@@ -349,7 +241,7 @@ void init_mem(uintptr_t mbi_addr) {
     frames[i].status = PageStatus::USED;
   }
 
-  // 13. 建立 free list
+  // 11. 建立 free list
   int state = 0;
   Page *prev = NULL;
   Page **cur_page = &BFCAllocator::free_list;
@@ -384,9 +276,9 @@ void init_mem(uintptr_t mbi_addr) {
     (*cur_page)->cont_page_num = cont_page_num;
   }
 
-  // 14. 设置 BFCAllocator::frames
+  // 12. 设置 BFCAllocator::frames
   BFCAllocator::frames = frames;
 
-  // 15. 初始化 framebuffer（必须在 bump_alloc 和 device_vma_base 就绪之后）
+  // 13. 初始化 framebuffer（必须在 bump_alloc 和 device_vma_base 就绪之后）
   init_fb(mbi_addr);
 }
