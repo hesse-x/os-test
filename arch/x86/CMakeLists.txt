@@ -7,6 +7,7 @@ add_library(arch_x86 OBJECT
     boot.cc
     paging.cc
     trap.cc
+    lib.cc
 )
 
 target_include_directories(arch_x86 PRIVATE ${CMAKE_SOURCE_DIR})

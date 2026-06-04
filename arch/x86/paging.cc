@@ -1,8 +1,10 @@
 #include "arch/x86/paging.h"
+#include "arch/x86/lib.h"
 
 // ===================== GDT =====================
-static gdt_entry_t gdt[3];
+static gdt_entry_t gdt[6];
 static gdt_ptr_t gdt_reg;
+static tss_t tss;
 
 static void set_gdt_gate(int n, uint32_t base, uint32_t limit, uint8_t access,
                          uint8_t gran) {
@@ -29,11 +31,22 @@ static void set_gdt() {
       "1:\n" :::"eax");
 }
 
+extern "C" const uint8_t stack_bottom[8192];
+
 void gdt_init() {
   set_gdt_gate(0, 0, 0, 0, 0);                   // null segment
   set_gdt_gate(1, 0, 0xFFFFFFFF, 0x9A, 0x0C);    // code: ER, ring0, 4K granularity, 32-bit
   set_gdt_gate(2, 0, 0xFFFFFFFF, 0x92, 0x0C);    // data: RW, ring0, 4K granularity, 32-bit
+  set_gdt_gate(3, 0, 0xFFFFFFFF, 0xFA, 0x0C);    // user code: ER, ring3, 4K granularity, 32-bit
+  set_gdt_gate(4, 0, 0xFFFFFFFF, 0xF2, 0x0C);    // user data: RW, ring3, 4K granularity, 32-bit
+  set_gdt_gate(5, (uint32_t)&tss, sizeof(tss_t) - 1, 0x89, 0x0); // TSS, Available, byte granularity
   set_gdt();
+
+  // Initialize TSS
+  tss.ss0 = 0x10;
+  tss.esp0 = (uint32_t)&stack_bottom + 8192;
+  tss.iomap_base = sizeof(tss_t);
+  __asm__ volatile("ltr %w0" :: "r"(TSS_SEL));
 }
 
 // ===================== 页表 =====================
@@ -78,16 +91,23 @@ uintptr_t device_vma_base = 0;
 
 // ===================== Bump 分配器 =====================
 static uintptr_t bump_next_phys;
+static bool bump_disabled = false;
 
 void bump_init_phys(uintptr_t start) {
   bump_next_phys = ALIGN_UP(start, PAGE_SIZE);
 }
 
 void *bump_alloc(size_t size) {
+  if (bump_disabled) {
+    // Can't format a nice message without printf; just halt
+    __asm__ volatile("cli; hlt");
+  }
   uintptr_t phys = bump_next_phys;
   bump_next_phys += ALIGN_UP(size, PAGE_SIZE);
   return (void *)(phys + VMA_BASE);
 }
+
+void bump_disable() { bump_disabled = true; }
 
 // ===================== extend_mapping =====================
 // 扩展 higher-half 映射：为超出初始 4MB 的物理 RAM 块分配 PT

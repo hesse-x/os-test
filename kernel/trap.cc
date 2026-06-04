@@ -19,6 +19,14 @@ void register_irq(int vec, irq_handler_t fn) {
 static uint32_t tick = 0;
 
 void trap_dispatch(trapframe_t *tf) {
+  // #PF from ring 3: verify ring 3 switch succeeded
+  if (tf->trapno == 14 && (tf->cs & 0x3) == 3) {
+    serial_puts("Ring 3 switch verified! #PF at EIP=");
+    serial_put_hex(tf->eip);
+    serial_puts("\n");
+    while (1) __asm__ volatile("hlt");
+  }
+
   // Check registered handler first
   if (tf->trapno >= 0 && tf->trapno < MAX_IRQ_HANDLERS &&
       irq_handlers[tf->trapno] != nullptr) {
@@ -75,4 +83,11 @@ void isr_init() {
   pit_init();
   kbd_init();
   __asm__ volatile("sti");
+}
+
+// Stub: syscall dispatch (int 0x80)
+void syscall_dispatch(trapframe_t *tf) {
+  serial_puts("syscall: vector ");
+  serial_put_hex(tf->trapno);
+  serial_puts("\n");
 }

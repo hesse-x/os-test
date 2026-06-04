@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include "arch/x86/utils.h"
 
-#define IDT_ENTRIES 48
+#define IDT_ENTRIES 49
 
 // ===================== IDT =====================
 typedef struct {
@@ -44,11 +44,13 @@ typedef struct {
   uint32_t eip;
   uint32_t cs;
   uint32_t eflags;
+  uint32_t esp;
+  uint32_t ss;
 } trapframe_t;
 
 // ===================== Export interface =====================
 extern "C" {
-void set_idt_gate(int n, uint32_t handler);
+void set_idt_gate(int n, uint32_t handler, uint8_t flags = 0x8E);
 void set_idt();
 void idt_install();
 void pic_remap();

@@ -31,6 +31,29 @@ typedef struct {
   uint32_t base;
 } __attribute__((packed)) gdt_ptr_t;
 
+// ===================== TSS =====================
+typedef struct {
+  uint32_t link;
+  uint32_t esp0;
+  uint32_t ss0;
+  uint32_t esp1;
+  uint32_t ss1;
+  uint32_t esp2;
+  uint32_t ss2;
+  uint32_t cr3;
+  uint32_t eip;
+  uint32_t eflags;
+  uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;
+  uint32_t es, cs, ss, ds, fs, gs;
+  uint32_t ldt;
+  uint16_t trap;
+  uint16_t iomap_base;
+} __attribute__((packed)) tss_t;
+
+#define USER_CS  0x1B    // index 3, RPL=3
+#define USER_DS  0x23    // index 4, RPL=3
+#define TSS_SEL  0x28    // index 5
+
 // ===================== Global variables =====================
 extern "C" {
 extern uint32_t page_directory[1024];
@@ -44,6 +67,7 @@ void extend_mapping(uint64_t max_phys_addr);
 void flush_tlb();
 void *bump_alloc(size_t size);
 void bump_init_phys(uintptr_t start);
+void bump_disable();
 }
 
 #endif // ARCH_X86_PAGING_H
