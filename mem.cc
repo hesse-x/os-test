@@ -2,6 +2,42 @@
 #include "common.h"
 #include "fb.h"
 
+// ===================== GDT =====================
+static gdt_entry_t gdt[3];
+static gdt_ptr_t gdt_reg;
+
+void set_gdt_gate(int n, uint32_t base, uint32_t limit, uint8_t access,
+                  uint8_t gran) {
+  gdt[n].limit_low = L16(limit);
+  gdt[n].base_low = L16(base);
+  gdt[n].base_middle = (base >> 16) & 0xFF;
+  gdt[n].access = access;
+  gdt[n].granularity = ((gran & 0x0F) << 4) | ((limit >> 16) & 0x0F);
+  gdt[n].base_high = (base >> 24) & 0xFF;
+}
+
+void set_gdt() {
+  gdt_reg.base = (uint32_t)&gdt;
+  gdt_reg.limit = sizeof(gdt) - 1;
+  __asm__ volatile("lgdt (%0)" : : "r"(&gdt_reg));
+  __asm__ volatile(
+      "movw $0x10, %%ax\n"
+      "movw %%ax, %%ds\n"
+      "movw %%ax, %%es\n"
+      "movw %%ax, %%fs\n"
+      "movw %%ax, %%gs\n"
+      "movw %%ax, %%ss\n"
+      "ljmp $0x08, $1f\n"
+      "1:\n" :::"eax");
+}
+
+void gdt_init() {
+  set_gdt_gate(0, 0, 0, 0, 0);                   // null segment
+  set_gdt_gate(1, 0, 0xFFFFFFFF, 0x9A, 0x0C);    // code: ER, ring0, 4K granularity, 32-bit
+  set_gdt_gate(2, 0, 0xFFFFFFFF, 0x92, 0x0C);    // data: RW, ring0, 4K granularity, 32-bit
+  set_gdt();
+}
+
 // ===================== 页表 =====================
 __attribute__((aligned(4096))) uint32_t page_directory[1024];
 __attribute__((aligned(4096))) uint32_t page_table[1024];

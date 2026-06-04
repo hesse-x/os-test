@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./run.sh            # QEMU 启动（OVMF UEFI, 512MB, VGA, 串口输出到 log.txt）
 ```
 
-编译流程：`start.S` → `boot.cc` → `kernel.cc` → `serial.cc` → `mem.cc` → `fb.cc`，统一 `-fPIE`。链接：`ld -m elf_x86_64 -T linker.ld`（输出 elf32-i386）。
+编译流程：`start.S` → `vectors.S` → `trapentry.S` → `boot.cc` → `kernel.cc` → `serial.cc` → `mem.cc` → `fb.cc` → `isr.cc` → `kbd.cc`，C++ 统一 `-fPIE`，纯汇编不用 PIE。链接：`ld -m elf_x86_64 -T linker.ld`（输出 elf32-i386）。
 
 **添加新源文件：** 在 build.sh 增加编译步骤（复制现有 g++ 行），并在 ld 行加入 `.o` 文件。
 
@@ -28,7 +28,7 @@ GRUB2 (0x100000) → _start (start.S, 物理地址) → enable_page (mem.cc, 物
 2. `_start`（纯汇编）：保存 %eax/%ebx → 设置物理栈 → 调用 `enable_page`（VMA-VMA_BASE计算物理地址）
 3. `enable_page`：清零 PD/PT → 填充 identity map + higher-half → 内联asm启用分页(CR3/CR0) → 返回
 4. `_start`：切换ESP到虚拟地址 → 间接调用 `kernel_main`
-5. `kernel_main`：`init_mem`（mmap解析、Bump/BFC分配器、扩展higher-half映射、设备映射区、framebuffer初始化）→ 串口输出 → framebuffer文字渲染
+5. `kernel_main`：`init_mem`（mmap解析、Bump/BFC分配器、扩展higher-half映射、设备映射区、framebuffer初始化）→ `isr_init`（GDT/IDT/PIC/PIT/键盘）→ 串口输出 → framebuffer文字渲染 → 键盘回显 → halt循环
 
 ## 地址映射
 
@@ -60,8 +60,13 @@ VMA=0xC0100000，LMA 用 AT() 指定从 0x100000 起连续排列：
 |---|---|
 | `start.S` | 纯汇编入口 `_start`，保存multiboot参数，设置物理栈，调用 `enable_page`，栈平移，调用 `kernel_main` |
 | `boot.cc` | Multiboot2 头构造（magic/framebuffer tag/end tag），引导栈定义 |
-| `mem.cc` | `enable_page`（物理地址运行，初始分页），`init_mem`（mmap解析、Bump/BFC分配器、扩展higher-half映射、设备映射区），BFC分配器实现 |
-| `kernel.cc` | `kernel_main`（虚拟地址运行），调用 `init_mem` → 串口输出 → framebuffer文字渲染 |
+| `mem.cc` | `enable_page`（物理地址运行，初始分页），`init_mem`（mmap解析、Bump/BFC分配器、扩展higher-half映射、设备映射区），BFC分配器实现，GDT设置 |
+| `kernel.cc` | `kernel_main`（虚拟地址运行），调用 `init_mem` → `isr_init` → 串口输出 → framebuffer文字渲染 → 键盘回显 |
+| `isr.cc` | IDT/PIC/PIT初始化，中断分发（`trap`），定时器/键盘IRQ处理 |
+| `isr.h` | IDT/trapframe结构定义，I/O内联函数（`outb`/`inb`），`KERNEL_CS`/`L16`/`H16` |
+| `vectors.S` | 48个中断向量桩（vector0-47），处理error code有无的差异，跳转 `__alltraps` |
+| `trapentry.S` | `__alltraps`（保存寄存器→调用trap）和 `__trapret`（恢复寄存器→iret） |
+| `kbd.cc/h` | 键盘驱动：Set 1 scancode→ASCII表，`kbd_handle`（IRQ1回调），`kbd_register_handler` |
 | `fb.cc/h` | Framebuffer 驱动：8x16 PC BIOS字体渲染，`init_fb`（设备映射区页表映射），`clear/fb_putc/prints`，光标管理 |
 | `serial.cc/h` | COM1 串口驱动（init/putc/puts），QEMU `-serial file:log.txt` 捕获输出 |
 | `mem.h` | Page/BFCAllocator 定义，VMA/LMA 常量，PHY_ADDR 宏，全局变量声明（page_directory/page_table/device_vma_base） |
@@ -80,12 +85,21 @@ VMA=0xC0100000，LMA 用 AT() 指定从 0x100000 起连续排列：
 
 初始化顺序：mmap解析 → Bump初始化 → 分配frames数组 → 标记FREE/USED/RESERVED → 扩展higher-half映射 → 设置device_vma_base → 初始化framebuffer → 建立free_list。
 
+## 中断架构
+
+- **GDT**：3项（null/code/data），在 `mem.cc` 的 `gdt_init` 中设置，通过 `lgdt` + 远跳转加载
+- **IDT**：48项（向量0-47），`isr_init` 调用 `idt_init` 安装所有门描述符（selector=0x08, flags=0x8E）
+- **向量桩**：`vectors.S` 定义 vector0-47，CPU异常自动push error code的向量（8,10-14,17）不push dummy 0，其余push 0+向量号
+- **trapentry.S**：`__alltraps` 保存段寄存器+pushal→调用 `trap()`；`__trapret` 恢复→iret
+- **PIC**：master(0x20)/slave(0xA0)重映射，master IRQ 32-39，slave IRQ 40-47；仅unmask timer(IRQ0)和keyboard(IRQ1)
+- **PIT**：通道0 ~100Hz（divisor 11932）
+- **trap分发**：向量32=定时器（tick++，EOI），向量33=键盘（`kbd_handle`，EOI），其他IRQ仅EOI，CPU异常=串口诊断+halt
+
 ## 开发备注
 
-- 没有分页以外的保护机制（无 IDT、中断、键盘驱动）
 - QEMU 调试：run.sh 注释掉的 `-s -S` 参数用于 GDB 远程调试
 - `.clang-format` = LLVM 风格
-- `mem_layout.h` 与 `mem.h` 地址常量有重叠，合并时应统一
+- `outb()` 内联定义重复于 `serial.cc` 和 `isr.h`；`KERNEL_CS`/`L16`/`H16` 重复于 `mem.h` 和 `isr.h`；合并时应统一
 - 未来扩展：relocatable header tag + 任意基址支持时需 EIP 推导方式替代 VMA-VMA_BASE
 - `enable_page` 在 mem.cc 中定义（物理地址运行），`boot_main` 已不存在
 - `init_fb` 在 `init_mem` 末尾调用，依赖 bump_alloc 和 device_vma_base 就绪
