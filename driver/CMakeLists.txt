@@ -3,6 +3,7 @@
 add_library(driver_obj OBJECT
     kbd.cc
     fb.cc
+    ata.cc
 )
 
 target_include_directories(driver_obj PRIVATE ${CMAKE_SOURCE_DIR})

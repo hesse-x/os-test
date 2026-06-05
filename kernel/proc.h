@@ -29,6 +29,7 @@ extern "C" {
 void proc_init();
 void init_idle_proc();
 proc_t *process_create(uint32_t entry);
+proc_t *process_create_elf(const uint8_t *elf_data, uint32_t elf_size);
 void schedule();
 void switch_to(proc_t *prev, proc_t *next);
 void process_entry();

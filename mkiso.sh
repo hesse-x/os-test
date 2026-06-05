@@ -1,5 +1,5 @@
 #!/bin/bash
-# mkiso.sh - Generate bootable ISO from myos.bin
+# mkiso.sh - 从 myos.bin 生成可引导 ISO
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

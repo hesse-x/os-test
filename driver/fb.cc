@@ -395,6 +395,25 @@ void clear() {
   cursor.y = 0;
 }
 
+static void scroll_up() {
+  uint32_t line_bytes = fb.pitch * FONT_HEIGHT;
+  uint8_t *fb_buf = (uint8_t *)fb.vaddr;
+  for (uint32_t i = 0; i < fb.size - line_bytes; i++) {
+    fb_buf[i] = fb_buf[i + line_bytes];
+  }
+  for (uint32_t i = fb.size - line_bytes; i < fb.size; i++) {
+    fb_buf[i] = 0;
+  }
+}
+
+static void advance_line() {
+  if (cursor.y < (int32_t)rows() - 1) {
+    cursor.y++;
+  } else {
+    scroll_up();
+  }
+}
+
 void fb_putc(char c, uint32_t fg) {
   if (fb.vaddr == NULL) {
     return;
@@ -402,9 +421,7 @@ void fb_putc(char c, uint32_t fg) {
 
   if (c == '\n') {
     cursor.x = 0;
-    if (cursor.y < rows() - 1) {
-      cursor.y++;
-    }
+    advance_line();
     return;
   }
 
@@ -417,9 +434,7 @@ void fb_putc(char c, uint32_t fg) {
     uint32_t next_tab = ALIGN_UP(cursor.x + 1, 8);
     if (next_tab >= cols()) {
       cursor.x = 0;
-      if (cursor.y < rows() - 1) {
-        cursor.y++;
-      }
+      advance_line();
     } else {
       cursor.x = next_tab;
     }
@@ -455,9 +470,7 @@ void fb_putc(char c, uint32_t fg) {
   cursor.x++;
   if (cursor.x >= cols()) {
     cursor.x = 0;
-    if (cursor.y < rows() - 1) {
-      cursor.y++;
-    }
+    advance_line();
   }
 }
 

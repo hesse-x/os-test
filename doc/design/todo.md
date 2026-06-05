@@ -151,14 +151,32 @@
 
 ---
 
-## 阶段四：Shell 进程（跳过 IPC，直接用 syscall）
+## 阶段四：Shell + ATA PIO + ELF Loader
 
-> 阶段三完成后直接做 shell，不经过 IPC 阶段。shell 通过 syscall 与内核交互（sys_getc 读键盘、sys_putc 输出），不需要 IPC 机制。
+> 详细方案见 [shell.md](shell.md)
 
-### 12. 简单 shell
-- 用户态 shell 进程：循环 sys_getc 读取按键，回车时执行简单命令
-- 命令集：`help`（列出命令）、`pid`（打印当前 PID）、`clear`（清屏）、`yield`（让出 CPU）
-- shell 代码作为用户程序加载（不再是硬编码 jmp $）
+### 12. ATA PIO 磁盘驱动
+- LBA28 读扇区：`ata_read_lba(lba, count, buf)`，~60 行
+- 端口 0x1F0-0x1F7，inw 读 16-bit data 寄存器
+- QEMU `-drive file=disk.img,format=raw,if=ide`
+
+### 13. ELF32 Loader
+- 解析 ELF32 static binary，支持多 PT_LOAD 段
+- 按 p_vaddr 映射用户页，BSS 清零
+- 返回入口地址，供 process_create_elf 使用
+
+### 14. Shell 进程
+- shell.asm：getc → putc 回显 + 回车换行，零新 syscall
+- nasm 编译 → ELF32 → 写入磁盘映像 / module tag 加载
+- 短期：Multiboot2 module tag 获取 shell.elf；长期：ATA PIO 从磁盘读取
+
+### 15. framebuffer 滚动
+- fb_putc 处理 \n 到底部时 memmove 上移 + 清最后一行
+- 纯内部实现，不暴露新接口
+
+### 16. process_create_elf
+- 新增 `process_create_elf(elf_data, size)` 独立接口
+- 内部调用 elf_load 映射段 + 分配用户栈 + 构建陷阱帧
 
 ### 后续：IPC（阶段四原计划，shell 之后按需实现）
 
