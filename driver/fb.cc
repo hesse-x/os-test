@@ -1,6 +1,5 @@
 #include "driver/fb.h"
-#include "arch/x86/paging.h"
-#include "arch/x86/multiboot2.h"
+#include "arch/x64/paging.h"
 #include "common/macro.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -324,53 +323,61 @@ static const uint8_t font8x16[96][16] = {
 
 // ===================== 辅助函数 =====================
 
-static multiboot_tag_framebuffer *find_fb_tag(uintptr_t mbi_addr) {
-  multiboot_tag *tag = (multiboot_tag *)(mbi_addr + 8);
-  while (tag->type != MULTIBOOT_TAG_TYPE_END) {
-    if (tag->type == MULTIBOOT_TAG_TYPE_FRAMEBUFFER) {
-      return (multiboot_tag_framebuffer *)tag;
-    }
-    tag = (multiboot_tag *)((uintptr_t)tag +
-                             ALIGN_UP(tag->size, MULTIBOOT_TAG_ALIGN));
-  }
-  return NULL;
-}
-
 static uint32_t cols() { return fb.width / FONT_WIDTH; }
 static uint32_t rows() { return fb.height / FONT_HEIGHT; }
 
 // ===================== 对外接口实现 =====================
 
-void init_fb(uint32_t mbi_addr) {
-  multiboot_tag_framebuffer *fb_tag = find_fb_tag(mbi_addr);
-  if (fb_tag == NULL) {
+void init_fb(boot_info *bi) {
+  if (bi->fb_addr == 0) {
     return;
   }
 
-  uint64_t fb_phys = fb_tag->common.framebuffer_addr;
-  uint32_t fb_pitch = fb_tag->common.framebuffer_pitch;
-  uint32_t fb_w = fb_tag->common.framebuffer_width;
-  uint32_t fb_h = fb_tag->common.framebuffer_height;
-  uint32_t fb_bpp = fb_tag->common.framebuffer_bpp;
+  uint64_t fb_phys = bi->fb_addr;
+  uint32_t fb_pitch = bi->fb_pitch;
+  uint32_t fb_w = bi->fb_width;
+  uint32_t fb_h = bi->fb_height;
+  uint32_t fb_bpp = bi->fb_bpp;
   uint32_t fb_bytes = fb_pitch * fb_h;
 
-  uint32_t fb_4mb_start = (uint32_t)(fb_phys & ~0x3FFFFF);
-  uint32_t fb_4mb_end = (uint32_t)ALIGN_UP(fb_phys + fb_bytes, 0x400000);
-  size_t num_fb_blocks = (fb_4mb_end - fb_4mb_start) / 0x400000;
+  // Map framebuffer using 2MB huge pages in the device mapping area
+  uint64_t fb_2mb_start = fb_phys & ~0x1FFFFFULL;
+  uint64_t fb_2mb_end = ALIGN_UP(fb_phys + fb_bytes, 0x200000);
+  size_t num_fb_2mb = (fb_2mb_end - fb_2mb_start) / 0x200000;
 
-  size_t fb_pd_start = device_vma_base >> 22;
-
-  for (size_t n = 0; n < num_fb_blocks; n++) {
-    uint32_t *pt = (uint32_t *)bump_alloc(4096);
-    uintptr_t pt_phys = PHY_ADDR((uintptr_t)pt);
-
-    uint32_t block_phys_base = fb_4mb_start + (uint32_t)(n * 0x400000);
-    for (int i = 0; i < 1024; i++) {
-      pt[i] = (block_phys_base + i * 4096) | 0x03;
+  // Find first free PDPT_hh entry (after RAM mappings)
+  int pdpt_start = 510;
+  for (int i = pdpt_start; i < 512; i++) {
+    if (pdpt_hh[i] == 0) {
+      pdpt_start = i;
+      break;
     }
-
-    page_directory[fb_pd_start + n] = pt_phys | 0x03;
   }
+
+  // Allocate a PD for the framebuffer
+  uint64_t *fb_pd = (uint64_t *)bump_alloc(4096);
+  uintptr_t fb_pd_phys = PHY_ADDR((uintptr_t)fb_pd);
+
+  // Clear PD
+  for (int i = 0; i < 512; i++) {
+    fb_pd[i] = 0;
+  }
+
+  // Fill PD with 2MB huge pages mapping the framebuffer physical region
+  for (size_t n = 0; n < num_fb_2mb; n++) {
+    uint64_t page_phys = fb_2mb_start + (uint64_t)n * 0x200000;
+    fb_pd[n] = page_phys | 0x83;  // Present + RW + PS (2MB huge page)
+  }
+
+  // Install PD into PDPT_hh
+  pdpt_hh[pdpt_start] = fb_pd_phys | 0x03;
+
+  // 虚拟地址: PML4[511] 的基址 + PDPT_hh[pdpt_start] 的偏移
+  // PML4[511] 对应 0xFFFFFF0000000000 区域 (sign-extended 9-bit index)
+  // PDPT_hh[510] = 0xFFFFFFFFC0000000, PDPT_hh[511] = 0xFFFFFFFF00000000 (wraps)
+  // 通用公式: device_vma_base 已经由 extend_mapping 计算好
+  uint64_t fb_vma_base = device_vma_base;
+  device_vma_base += (uint64_t)num_fb_2mb * 0x200000;
 
   flush_tlb();
 
@@ -378,7 +385,7 @@ void init_fb(uint32_t mbi_addr) {
   fb.height = fb_h;
   fb.pitch = fb_pitch;
   fb.bpp = fb_bpp;
-  fb.vaddr = (void *)(device_vma_base + (uint32_t)(fb_phys - fb_4mb_start));
+  fb.vaddr = (void *)(fb_vma_base + (fb_phys - fb_2mb_start));
   fb.size = fb_bytes;
   fb.phys_addr = fb_phys;
 

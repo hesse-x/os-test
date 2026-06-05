@@ -202,10 +202,97 @@
 
 ---
 
+## 阶段零：x86-64 迁移
+
+> 从32位 x86 全面迁移到 x86-64（arch/x86 → arch/x64）
+
+### 已确定的设计决策
+
+| 决策项 | 选择 | 理由 |
+|--------|------|------|
+| 内核位数 | 64位 | 32位 x86 已过时，学习64位更贴近实际 |
+| 启动协议 | multiboot2 + GRUB + 32→64 trampoline | 最小改动，和 UEFI 迁移解耦 |
+| higher-half 基址 | `0xFFFFFFFF80000000` | Linux 标准，配合 `-mcmodel=kernel` 高效寻址 |
+| 初始页表 | 2MB huge pages，identity + higher-half 双映射 | 和现有双映射策略一致，trampoline 只需3个页表 |
+| GDT 策略 | trampoline 最小 GDT，完整 GDT 在 kernel_main | 和现有 enable_page/gdt_init 分步思路一致 |
+| TSS | 只设 RSP0，不用 IST | 和现有逻辑对应，简单 |
+| trapframe | pushall 风格扩展到64位 | 和现有 __alltraps/__trapret 思路一致 |
+| 系统调用 | syscall/sysret | 64位标配，int 0x80 是遗留路径 |
+| 中断控制器 | 暂保留 PIC | 和 APIC 迁移/SMP 解耦 |
+
+### 待实现清单
+
+#### 1. 构建体系迁移
+- [ ] toolchain: `-m32` → `-m64`，目标 `elf64-x86-64`
+- [ ] CMakeLists.txt: CXX_FLAGS 加 `-m64 -mcmodel=kernel -mno-red-zone -mno-sse`
+- [ ] linker script: `OUTPUT_FORMAT("elf64-x86-64")`，VMA 改 `0xFFFFFFFF80000000`，LMA AT() 重算
+- [ ] do_link.cmake: `ld -m elf_x86_64` 适配64位
+
+#### 2. 32→64 trampoline（arch/x64/trampoline.S）
+- [ ] 入口仍在32位保护模式（multiboot2 交付状态）
+- [ ] 设置临时 PML4 + PDPT + PD（2MB huge pages，identity + higher-half）
+- [ ] 启用 PAE（CR4.PAE）、设置 CR3、启用 EFER.LME、启用 CR0.PG
+- [ ] 最小 GDT（null + 64-bit code + 64-bit data）+ lgdt + ljmp 到64位代码
+- [ ] 跳转到64位 `_start`
+
+#### 3. 入口与启动（arch/x64/start.S）
+- [ ] 64位 `_start`：接收 multiboot2 参数，设置64位栈，调用 `enable_page`/`kernel_main`
+
+#### 4. 分页（arch/x64/paging.cc / paging.h）
+- [ ] 4级页表结构：PML4 → PDPT → PD → PT
+- [ ] `enable_page`：用64位页表项格式（bit63 NX, bit7 PS 等）
+- [ ] `extend_mapping`：适配64位物理地址（uintptr_t → uint64_t 物理地址）
+- [ ] `bump_alloc`：返回虚拟地址（0xFFFFFFFF80000000 + offset）
+- [ ] `flush_tlb`：重写 CR3 写入适配64位
+
+#### 5. GDT + TSS（arch/x64/paging.cc）
+- [ ] 完整 GDT：null / code64 / data64 / user code64 / user data64 / TSS_low / TSS_high
+- [ ] 64位 TSS：128字节，RSP0/RSP1/RSP2 + 7个 IST 入口 + IOPB
+- [ ] TSS 描述符跨两个 GDT slot（128位）
+- [ ] gdt_init 在 kernel_main 中调用
+
+#### 6. IDT + 中断（arch/x64/trap.cc / trap.h）
+- [ ] 64位 IDT 入口：16字节门描述符（IST 字段可用）
+- [ ] vectors.S：48个向量桩，适配64位（push qword 等）
+- [ ] trapentry.S：`__alltraps` push 所有16个通用寄存器 + 保存 DS/ES 等段寄存器
+- [ ] trapframe_t：扩展为64位版本（RAX-R15 + trapno + err_code + RIP + CS + RFLAGS + RSP + SS）
+- [ ] `__trapret`：恢复寄存器 + `iretq`
+- [ ] PIC 重映射逻辑基本不变（端口 I/O 相同）
+
+#### 7. 系统调用（syscall/sysret）
+- [ ] MSR 设置：STAR / LSTAR / SFMASK / CSTAR
+- [ ] `syscall_entry`：swapgs → 保存 RSP → 加载内核栈 → 保存寄存器 → 调用 syscall_dispatch
+- [ ] `syscall_ret`：恢复寄存器 → swapgs → sysretq
+- [ ] syscall 分发表适配64位调用约定（参数从 trapframe 提取）
+
+#### 8. 内核模块适配
+- [ ] kernel.cc：kernel_main 签名适配64位
+- [ ] serial.cc：端口 I/O 不变（outb/inb），适配64位地址
+- [ ] mem/alloc.cc：物理地址 uint32_t → uint64_t，BFC 分配器适配
+- [ ] kbd.cc：基本不变
+- [ ] fb.cc：framebuffer 地址从 uint32_t → uint64_t
+- [ ] 进程/调度：trapframe_t 64位化，switch_to 适配64位 callee-saved 寄存器
+- [ ] ELF loader：ELF32 → ELF64
+
+#### 9. Multiboot2 header（arch/x64/boot.cc）
+- [ ] 保持 multiboot2 header（GRUB 仍用 multiboot2 协议加载）
+- [ ] framebuffer tag 等照旧
+
+### 后续迁移（x64 稳定后）
+- [ ] APIC（Local APIC + I/O APIC）替代 PIC（SMP 前置条件）
+- [ ] TSS IST 配置（NMI / double fault 独立栈）
+- [ ] UEFI 原生启动（EFI stub 或独立 bootloader）
+- [ ] 多核 SMP 支持
+- [ ] NX 位（页表项 bit63）按需启用
+
+---
+
 ## 依赖关系
 
 ```
-阶段一(1→2→3) → 阶段二(4→5→6) → 阶段三(7→8→9→10→11) → 阶段四(shell) → IPC(后续按需) → 阶段五(驱动服务化)
+阶段零(构建→trampoline→分页→GDT/IDT→中断→syscall→模块适配) → 稳定后(APIC→IST→UEFI→SMP)
 ```
 
-每阶段末尾有验证点，确保前一层稳固再进入下一层。
+---
+
+## 微内核缺失功能实现计划

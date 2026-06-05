@@ -1,9 +1,10 @@
 #include "kernel/mem/alloc.h"
-#include "arch/x86/paging.h"
+#include "arch/x64/paging.h"
+#include "arch/x64/efi.h"
 #include "common/common.h"
 #include "common/macro.h"
-#include "arch/x86/multiboot2.h"
 #include "driver/fb.h"
+#include "kernel/serial.h"
 
 // ===================== Global variable definitions =====================
 size_t total_page_frames = 0;
@@ -138,59 +139,45 @@ size_t BFCAllocator::free_page_nums() const {
   return total;
 }
 
-// ===================== multiboot tag lookup =====================
-static multiboot_tag_mmap *find_mmap_tag(uintptr_t mbi_addr) {
-  multiboot_tag *tag = (multiboot_tag *)(mbi_addr + 8);
-  while (tag->type != MULTIBOOT_TAG_TYPE_END) {
-    if (tag->type == MULTIBOOT_TAG_TYPE_MMAP) {
-      return (multiboot_tag_mmap *)tag;
-    }
-    tag = (multiboot_tag *)((uintptr_t)tag +
-                             ALIGN_UP(tag->size, MULTIBOOT_TAG_ALIGN));
-  }
-  return NULL;
+// ===================== EFI mmap iteration helpers =====================
+// EFI mmap 地址是物理地址，转虚拟: phys + VMA_BASE
+static efi_memory_descriptor_t *get_efi_desc(boot_info *bi, size_t index) {
+  uintptr_t mmap_virt = (uintptr_t)bi->mmap_addr + VMA_BASE;
+  return (efi_memory_descriptor_t *)(mmap_virt + index * bi->mmap_desc_size);
 }
 
 // ===================== init_mem =====================
-static size_t compute_total_page_frames(multiboot_tag_mmap *mmap_tag) {
+void init_mem(boot_info *bi) {
+  serial_puts("init_mem: mmap_addr=");
+  serial_put_hex(bi->mmap_addr);
+  serial_puts(" mmap_size=");
+  serial_put_hex(bi->mmap_size);
+  serial_puts(" desc_size=");
+  serial_put_hex(bi->mmap_desc_size);
+  serial_puts("\n");
+
+  size_t desc_count = bi->mmap_size / bi->mmap_desc_size;
+
+  // 1. 计算 AVAILABLE 内存最大物理地址 + 总页帧数
   uint64_t max_phys_addr = 0;
-  size_t num_entries =
-      (mmap_tag->size - offsetof(multiboot_tag_mmap, entries)) /
-      mmap_tag->entry_size;
-  const multiboot_mmap_entry *entry = mmap_tag->entries;
-  for (size_t i = 0; i < num_entries; i++) {
-    if (entry[i].type == MULTIBOOT_MEMORY_AVAILABLE) {
-      uint64_t entry_end = entry[i].addr + entry[i].len;
-      if (entry_end > max_phys_addr) {
-        max_phys_addr = entry_end;
-      }
+  for (size_t i = 0; i < desc_count; i++) {
+    efi_memory_descriptor_t *desc = get_efi_desc(bi, i);
+    if (desc->type == EfiConventionalMemory) {
+      uint64_t end = desc->physical_start + desc->number_of_pages * 4096;
+      if (end > max_phys_addr) max_phys_addr = end;
     }
   }
-  return GET_PAGE_NUM(max_phys_addr);
-}
+  total_page_frames = GET_PAGE_NUM(max_phys_addr);
 
-// Forward declaration from arch/x86/paging.cc
-extern "C" uintptr_t bump_end_phys();
-
-void init_mem(uintptr_t mbi_addr) {
-  // 1. 解析 multiboot2 标签
-  multiboot_tag_mmap *mmap_tag = find_mmap_tag(mbi_addr);
-  if (mmap_tag == NULL) {
-    return;
-  }
-
-  // 2. 计算总页帧数（仅 AVAILABLE 内存）
-  total_page_frames = compute_total_page_frames(mmap_tag);
-
-  // 3. Bump 分配器初始化
+  // 2. Bump 分配器初始化
   uintptr_t kernel_end_phys = PHY_ADDR((uintptr_t)kernel_end);
   bump_init_phys(kernel_end_phys);
 
-  // 4. Bump 分配 frames 数组
+  // 3. Bump 分配 frames 数组
   size_t frames_size = total_page_frames * sizeof(Page);
   Page *frames = (Page *)bump_alloc(frames_size);
 
-  // 5. 初始化 frames 为 RESERVED
+  // 4. 初始化 frames 为 RESERVED
   for (size_t i = 0; i < total_page_frames; i++) {
     frames[i].status = PageStatus::RESERVED;
     frames[i].cont_page_num = 1;
@@ -198,17 +185,14 @@ void init_mem(uintptr_t mbi_addr) {
     frames[i].next = NULL;
   }
 
-  // 6. 根据 mmap 标记 FREE 页
-  size_t num_entries =
-      (mmap_tag->size - offsetof(multiboot_tag_mmap, entries)) /
-      mmap_tag->entry_size;
-  const multiboot_mmap_entry *entry = mmap_tag->entries;
-  for (size_t i = 0; i < num_entries; i++) {
-    if (entry[i].type == MULTIBOOT_MEMORY_AVAILABLE) {
-      uint64_t entry_addr = entry[i].addr;
-      uint64_t entry_len = entry[i].len;
-      size_t page_num = GET_PAGE_NUM(entry_len);
-      size_t page_idx = PHY_TO_PAGE(ALIGN_UP(entry_addr, PAGE_SIZE));
+  // 5. 根据 EFI mmap 标记 FREE 页
+  for (size_t i = 0; i < desc_count; i++) {
+    efi_memory_descriptor_t *desc = get_efi_desc(bi, i);
+    if (desc->type == EfiConventionalMemory) {
+      uint64_t addr = desc->physical_start;
+      uint64_t len = desc->number_of_pages * 4096;
+      size_t page_num = GET_PAGE_NUM(len);
+      size_t page_idx = PHY_TO_PAGE(ALIGN_UP(addr, PAGE_SIZE));
       for (size_t j = 0; j < page_num && page_idx + j < total_page_frames;
            j++) {
         frames[page_idx + j].status = PageStatus::FREE;
@@ -216,25 +200,14 @@ void init_mem(uintptr_t mbi_addr) {
     }
   }
 
-  // 7. 计算 AVAILABLE 内存最大物理地址（用于 higher-half RAM 映射范围）
-  uint64_t max_phys_addr = 0;
-  for (size_t i = 0; i < num_entries; i++) {
-    if (entry[i].type == MULTIBOOT_MEMORY_AVAILABLE) {
-      uint64_t entry_end = entry[i].addr + entry[i].len;
-      if (entry_end > max_phys_addr) {
-        max_phys_addr = entry_end;
-      }
-    }
-  }
-
-  // 8. 扩展 higher-half 映射 + 设备映射区（arch 层）
+  // 6. 扩展 higher-half 映射 + 设备映射区
   extend_mapping(max_phys_addr);
 
-  // 9. 刷新 TLB
+  // 7. 刷新 TLB
   flush_tlb();
 
-  // 10. 标记内核 + bump 分配的页为 USED
-  uintptr_t used_start = KERNEL_LMA_BASE;
+  // 8. 标记内核 + bump 分配的页为 USED
+  uintptr_t used_start = bi->kernel_phys;
   uintptr_t used_end = bump_end_phys();
   size_t used_page_idx_start = PHY_TO_PAGE(used_start);
   size_t used_page_idx_end = PHY_TO_PAGE(ALIGN_UP(used_end, PAGE_SIZE));
@@ -243,7 +216,7 @@ void init_mem(uintptr_t mbi_addr) {
     frames[i].status = PageStatus::USED;
   }
 
-  // 11. 建立 free list
+  // 9. 建立 free list
   int state = 0;
   Page *prev = NULL;
   Page **cur_page = &BFCAllocator::free_list;
@@ -278,9 +251,9 @@ void init_mem(uintptr_t mbi_addr) {
     (*cur_page)->cont_page_num = cont_page_num;
   }
 
-  // 12. 设置 BFCAllocator::frames
+  // 10. 设置 BFCAllocator::frames
   BFCAllocator::frames = frames;
 
-  // 13. 初始化 framebuffer（必须在 bump_alloc 和 device_vma_base 就绪之后）
-  init_fb(mbi_addr);
+  // 11. 初始化 framebuffer
+  init_fb(bi);
 }

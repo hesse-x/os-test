@@ -1,5 +1,5 @@
-#ifndef ARCH_X86_UTILS_H
-#define ARCH_X86_UTILS_H
+#ifndef ARCH_X64_UTILS_H
+#define ARCH_X64_UTILS_H
 
 #include <stdint.h>
 
@@ -20,10 +20,25 @@ static inline uint16_t inw(uint16_t port) {
   return ret;
 }
 
+// ===================== MSR helpers =====================
+static inline void wrmsr(uint32_t msr, uint64_t val) {
+  uint32_t lo = (uint32_t)val;
+  uint32_t hi = (uint32_t)(val >> 32);
+  __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
+}
+
+static inline uint64_t rdmsr(uint32_t msr) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+  return ((uint64_t)hi << 32) | lo;
+}
+
 // ===================== Constants =====================
 #define KERNEL_CS 0x08
 
 #define L16(x) ((uint16_t)((x) & 0xFFFF))
 #define H16(x) ((uint16_t)(((x) >> 16) & 0xFFFF))
+#define L32(x) ((uint32_t)((x) & 0xFFFFFFFF))
+#define H32(x) ((uint32_t)(((x) >> 32) & 0xFFFFFFFF))
 
-#endif // ARCH_X86_UTILS_H
+#endif // ARCH_X64_UTILS_H

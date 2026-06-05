@@ -32,7 +32,9 @@ struct BFCAllocator {
 extern "C" {
 extern size_t total_page_frames;
 
-void init_mem(uintptr_t mbi_addr);
+struct boot_info;
+
+void init_mem(boot_info *bi);
 }
 
 extern BFCAllocator bfc_alloc;

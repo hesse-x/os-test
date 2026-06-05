@@ -5,35 +5,38 @@
 #include "kernel/serial.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/elf.h"
-#include "arch/x86/paging.h"
-#include "arch/x86/trap.h"
-#include "arch/x86/utils.h"
+#include "arch/x64/paging.h"
+#include "arch/x64/trap.h"
+#include "arch/x64/lib.h"
+#include "arch/x64/utils.h"
 
 proc_t procs[MAX_PROC];
 proc_t *current_proc = nullptr;
 
-// getpid → add '0' → putc → yield → loop
+// 64-bit init_code: getpid → add '0' → putc → yield → loop
+// Using int 0x80 with: rax=syscall#, rbx=arg1
 static const uint8_t init_code[] = {
-    0xB8, 0x01, 0x00, 0x00, 0x00,  // mov eax, 1 (sys_getpid)
-    0xCD, 0x80,                      // int 0x80   ← call getpid
-    0x83, 0xC0, 0x30,                // add eax, '0'
-    0x89, 0xC3,                      // mov ebx, eax
-    0xB8, 0x00, 0x00, 0x00, 0x00,  // mov eax, 0 (sys_putc)
-    0xCD, 0x80,                      // int 0x80   ← call putc
-    0xB8, 0x02, 0x00, 0x00, 0x00,  // mov eax, 2 (sys_yield)
-    0xCD, 0x80,                      // int 0x80   ← call yield
-    0xEB, 0xE4                       // jmp -28 (back to start)
+    0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00,  // movq $1, %rax (sys_getpid)
+    0x48, 0xC7, 0xC3, 0x00, 0x00, 0x00, 0x00,  // movq $0, %rbx (dummy arg)
+    0xCD, 0x80,                                   // int $0x80
+    0x48, 0x83, 0xC0, 0x30,                      // addq $0x30, %rax
+    0x48, 0x89, 0xC3,                             // movq %rax, %rbx
+    0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00,  // movq $0, %rax (sys_putc)
+    0xCD, 0x80,                                   // int $0x80
+    0x48, 0xC7, 0xC0, 0x02, 0x00, 0x00, 0x00,  // movq $2, %rax (sys_yield)
+    0xCD, 0x80,                                   // int $0x80
+    0xEB, 0xD5                                    // jmp back (offset 0)
 };
 
 extern "C" const uint8_t stack_bottom[8192];
 
 // Convert Page descriptor pointer to physical address of the actual memory page
-static uint32_t page_to_phys(Page *p) {
-    return (uint32_t)(p - BFCAllocator::frames) * PAGE_SIZE;
+static uint64_t page_to_phys(Page *p) {
+    return (uint64_t)(p - BFCAllocator::frames) * PAGE_SIZE;
 }
 
 // Convert physical address to higher-half virtual address
-static uint32_t phys_to_virt(uint32_t phys) {
+static uint64_t phys_to_virt(uint64_t phys) {
     return phys + VMA_BASE;
 }
 
@@ -41,7 +44,7 @@ void proc_init() {
     for (int i = 0; i < MAX_PROC; i++) {
         procs[i].pid = -1;
         procs[i].state = READY;
-        procs[i].k_esp = 0;
+        procs[i].k_rsp = 0;
         procs[i].k_stack_top = 0;
         procs[i].cr3 = 0;
         procs[i].entry = 0;
@@ -55,20 +58,150 @@ void init_idle_proc() {
     idle->pid = 0;
     idle->state = RUNNING;
 
-    // Get current ESP (boot stack position)
-    uint32_t esp;
-    __asm__ volatile("movl %%esp, %0" : "=r"(esp));
-    idle->k_esp = esp;
-    idle->k_stack_top = (uint32_t)&stack_bottom + 8192;
-    idle->cr3 = PHY_ADDR((uintptr_t)page_directory);
+    // Get current RSP (boot stack position)
+    uint64_t rsp;
+    __asm__ volatile("movq %%rsp, %0" : "=r"(rsp));
+    idle->k_rsp = rsp;
+    idle->k_stack_top = (uint64_t)&stack_bottom + 8192;
+    idle->cr3 = PHY_ADDR((uintptr_t)pml4);
     idle->entry = 0;
     idle->wait_event = WAIT_NONE;
 
     current_proc = idle;
-    tss.esp0 = idle->k_stack_top;
+    tss.rsp0 = idle->k_stack_top;
 }
 
-proc_t *process_create(uint32_t entry) {
+// Ensure a PDPT entry exists for the given virtual address in user PML4.
+// Returns the virtual address of the PD, or allocates a new one.
+static uint64_t *ensure_pd(uint64_t *new_pml4, uint64_t vaddr) {
+    uint64_t pml4_idx = (vaddr >> 39) & 0x1FF;
+    if (new_pml4[pml4_idx] & 0x01) {
+        return (uint64_t *)phys_to_virt(new_pml4[pml4_idx] & ~0xFFF);
+    }
+    // Allocate new PDPT
+    Page *pdpt_page = bfc_alloc.alloc_page(1);
+    if (!pdpt_page) return nullptr;
+    uint64_t pdpt_phys = page_to_phys(pdpt_page);
+    uint64_t pdpt_virt = phys_to_virt(pdpt_phys);
+    uint64_t *pdpt = (uint64_t *)pdpt_virt;
+    for (int i = 0; i < 512; i++) {
+        pdpt[i] = 0;
+    }
+    new_pml4[pml4_idx] = pdpt_phys | 0x07;  // Present + RW + User
+    return pdpt;
+}
+
+// Ensure a PD entry exists for the given virtual address.
+// Returns the virtual address of the PT.
+static uint64_t *ensure_pt_in_pd(uint64_t *pd_or_pdpt, uint64_t vaddr, int level) {
+    // level 2 = PDPT (need PD), level 1 = PD (need PT)
+    uint64_t idx;
+    if (level == 2) {
+        idx = (vaddr >> 30) & 0x1FF;
+    } else {
+        idx = (vaddr >> 21) & 0x1FF;
+    }
+    if (pd_or_pdpt[idx] & 0x01) {
+        return (uint64_t *)phys_to_virt(pd_or_pdpt[idx] & ~0xFFF);
+    }
+    // Allocate next-level table
+    Page *table_page = bfc_alloc.alloc_page(1);
+    if (!table_page) return nullptr;
+    uint64_t table_phys = page_to_phys(table_page);
+    uint64_t table_virt = phys_to_virt(table_phys);
+    uint64_t *table = (uint64_t *)table_virt;
+    for (int i = 0; i < 512; i++) {
+        table[i] = 0;
+    }
+    pd_or_pdpt[idx] = table_phys | 0x07;  // Present + RW + User
+    return table;
+}
+
+// Map a single 4KB page at vaddr into new_pml4, copying data from src.
+static bool map_user_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
+                          uint64_t copy_len) {
+    Page *page = bfc_alloc.alloc_page(1);
+    if (!page) return false;
+    uint64_t page_phys = page_to_phys(page);
+    uint64_t page_virt = phys_to_virt(page_phys);
+
+    // Clear page first (handles BSS zeroing)
+    uint8_t *dst = (uint8_t *)page_virt;
+    for (size_t i = 0; i < PAGE_SIZE; i++) {
+        dst[i] = 0;
+    }
+
+    // Copy file data
+    if (src && copy_len > 0) {
+        for (uint64_t i = 0; i < copy_len; i++) {
+            dst[i] = src[i];
+        }
+    }
+
+    // Walk page tables: PML4 → PDPT → PD → PT
+    uint64_t *pdpt = ensure_pd(new_pml4, vaddr);
+    if (!pdpt) return false;
+    uint64_t *pd = ensure_pt_in_pd(pdpt, vaddr, 2);
+    if (!pd) return false;
+    uint64_t *pt = ensure_pt_in_pd(pd, vaddr, 1);
+    if (!pt) return false;
+
+    uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
+    pt[pt_idx] = page_phys | 0x07;  // Present + Writable + User
+
+    return true;
+}
+
+// Map a physical page directly at vaddr in new_pml4 (no copy, page already initialized)
+static bool map_user_page_direct(uint64_t *new_pml4, uint64_t vaddr, uint64_t phys) {
+    uint64_t *pdpt = ensure_pd(new_pml4, vaddr);
+    if (!pdpt) return false;
+    uint64_t *pd = ensure_pt_in_pd(pdpt, vaddr, 2);
+    if (!pd) return false;
+    uint64_t *pt = ensure_pt_in_pd(pd, vaddr, 1);
+    if (!pt) return false;
+
+    uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
+    pt[pt_idx] = phys | 0x07;  // Present + Writable + User
+    return true;
+}
+
+// switch_to 恢复帧：callee-saved 寄存器 + 返回地址
+struct switch_frame_t {
+    uint64_t rbx;
+    uint64_t rbp;
+    uint64_t r12;
+    uint64_t r13;
+    uint64_t r14;
+    uint64_t r15;
+    uint64_t ret_addr;
+};
+
+// 在内核栈顶构建 trapframe + switch_frame，返回 k_rsp
+static uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
+    trapframe_t tf = {};
+    tf.ss      = 0x23;                   // USER_DS
+    tf.rsp     = 0x00007FFFFFFFE000;      // user stack top (top of mapped page at 0x7FFFFFFFD000)
+    tf.rflags  = 0x202;                  // IF=1
+    tf.cs      = 0x1B;                   // USER_CS
+    tf.rip     = entry_rip;
+    tf.err_code = 0;
+    tf.trapno  = 0;
+
+    switch_frame_t sf = {};
+    sf.ret_addr = (uint64_t)process_entry;
+
+    uint8_t *sp = (uint8_t *)k_stack_top;
+    sp -= sizeof(trapframe_t);
+    memcpy(sp, &tf, sizeof(trapframe_t));
+
+    sp -= sizeof(switch_frame_t);
+    memcpy(sp, &sf, sizeof(switch_frame_t));
+
+    return (uint64_t)sp;
+}
+
+proc_t *process_create(uint64_t entry) {
     // 1. Find free slot (pid == -1)
     proc_t *proc = nullptr;
     int alloc_idx = -1;
@@ -79,36 +212,39 @@ proc_t *process_create(uint32_t entry) {
             break;
         }
     }
-    if (!proc) return nullptr;
+    if (!proc) { serial_puts("process_create: no free slot\n"); return nullptr; }
 
     // 2. Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc.alloc_page(2);
-    if (!stack_pages) return nullptr;
-    uint32_t k_stack_phys = page_to_phys(stack_pages);
-    uint32_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
+    if (!stack_pages) { serial_puts("process_create: alloc stack failed\n"); return nullptr; }
+    serial_puts("process_create: stack ok\n");
+    uint64_t k_stack_phys = page_to_phys(stack_pages);
+    uint64_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
 
-    // 3. Allocate per-process PD
-    Page *pd_page = bfc_alloc.alloc_page(1);
-    if (!pd_page) return nullptr;
-    uint32_t pd_phys = page_to_phys(pd_page);
-    uint32_t pd_virt = phys_to_virt(pd_phys);
+    // 3. Allocate per-process PML4
+    Page *pml4_page = bfc_alloc.alloc_page(1);
+    if (!pml4_page) { serial_puts("process_create: alloc pml4 failed\n"); return nullptr; }
+    serial_puts("process_create: pml4 ok\n");
+    uint64_t pml4_phys = page_to_phys(pml4_page);
+    uint64_t pml4_virt = phys_to_virt(pml4_phys);
 
-    // 4. Clear PD
-    uint32_t *new_pd = (uint32_t *)pd_virt;
-    for (int i = 0; i < 1024; i++) {
-        new_pd[i] = 0;
+    // 4. Clear PML4
+    uint64_t *new_pml4 = (uint64_t *)pml4_virt;
+    for (int i = 0; i < 512; i++) {
+        new_pml4[i] = 0;
     }
 
-    // 5. Copy kernel PDEs (PD[768..1023]), share kernel PT
-    for (int i = 768; i < 1024; i++) {
-        new_pd[i] = page_directory[i];
-    }
+    // 5. Copy kernel PML4 entries (PML4[511] = higher-half)
+    extern uint64_t pdpt_hh[512];
+    // Share the kernel's PML4[511] entry
+    new_pml4[511] = pml4[511];
 
-    // 6. Allocate user code page + PT
+    // 6. Map user code page at 0x400000
     Page *user_code_page = bfc_alloc.alloc_page(1);
-    if (!user_code_page) return nullptr;
-    uint32_t user_code_phys = page_to_phys(user_code_page);
-    uint32_t user_code_virt = phys_to_virt(user_code_phys);
+    if (!user_code_page) { serial_puts("process_create: alloc code failed\n"); return nullptr; }
+    serial_puts("process_create: code page ok\n");
+    uint64_t user_code_phys = page_to_phys(user_code_page);
+    uint64_t user_code_virt = phys_to_virt(user_code_phys);
 
     // Copy user code bytes
     uint8_t *code_dst = (uint8_t *)user_code_virt;
@@ -116,85 +252,34 @@ proc_t *process_create(uint32_t entry) {
         code_dst[i] = init_code[i];
     }
 
-    // Allocate PT for user code at 0x400000 (PD[1])
-    Page *user_code_pt_page = bfc_alloc.alloc_page(1);
-    if (!user_code_pt_page) return nullptr;
-    uint32_t user_code_pt_phys = page_to_phys(user_code_pt_page);
-    uint32_t user_code_pt_virt = phys_to_virt(user_code_pt_phys);
+    if (!map_user_page_direct(new_pml4, 0x400000, user_code_phys))
+        { serial_puts("process_create: map code failed\n"); return nullptr; }
 
-    // Clear PT and set entry
-    uint32_t *code_pt = (uint32_t *)user_code_pt_virt;
-    for (int i = 0; i < 1024; i++) {
-        code_pt[i] = 0;
-    }
-    code_pt[0] = user_code_phys | 0x07;  // Present + Writable + User
-    new_pd[1] = user_code_pt_phys | 0x07;
-
-    // 7. Allocate user stack page + PT (PD[767], PT[1023] → 0xBFFFF000)
+    // 7. Map user stack page at 0x00007FFFFFFFD000 (canonical low-half)
     Page *user_stack_page = bfc_alloc.alloc_page(1);
-    if (!user_stack_page) return nullptr;
-    uint32_t user_stack_phys = page_to_phys(user_stack_page);
+    if (!user_stack_page) { serial_puts("process_create: alloc stack page failed\n"); return nullptr; }
+    serial_puts("process_create: stack page ok\n");
+    uint64_t user_stack_phys = page_to_phys(user_stack_page);
 
-    Page *user_stack_pt_page = bfc_alloc.alloc_page(1);
-    if (!user_stack_pt_page) return nullptr;
-    uint32_t user_stack_pt_phys = page_to_phys(user_stack_pt_page);
-    uint32_t user_stack_pt_virt = phys_to_virt(user_stack_pt_phys);
-
-    // Clear PT and set entry
-    uint32_t *stack_pt = (uint32_t *)user_stack_pt_virt;
-    for (int i = 0; i < 1024; i++) {
-        stack_pt[i] = 0;
-    }
-    stack_pt[1023] = user_stack_phys | 0x07;  // PT[1023] → 0xBFFFF000
-    new_pd[767] = user_stack_pt_phys | 0x07;
+    if (!map_user_page_direct(new_pml4, 0x00007FFFFFFFD000, user_stack_phys))
+        { serial_puts("process_create: map stack failed\n"); return nullptr; }
 
     // 8. Build trapframe + switch_to frame on kernel stack
-    uint32_t *stack = (uint32_t *)k_stack_top;
-
-    // trapframe (from high address downward)
-    stack[-1]  = 0x23;           // ss (USER_DS)
-    stack[-2]  = 0xC0000000;     // esp (stack top, grows down from 0xBFFFFFFC)
-    stack[-3]  = 0x202;          // eflags (IF=1)
-    stack[-4]  = 0x1B;           // cs (USER_CS)
-    stack[-5]  = entry;          // eip
-    stack[-6]  = 0;              // err_code
-    stack[-7]  = 0;              // trapno
-    stack[-8]  = 0x23;           // ds
-    stack[-9]  = 0x23;           // es
-    stack[-10] = 0x23;           // fs
-    stack[-11] = 0x23;           // gs
-    // pushregs_t: edi, esi, ebp, esp_ignored, ebx, edx, ecx, eax
-    stack[-12] = 0;              // eax
-    stack[-13] = 0;              // ecx
-    stack[-14] = 0;              // edx
-    stack[-15] = 0;              // ebx
-    stack[-16] = 0;              // esp_ignored
-    stack[-17] = 0;              // ebp
-    stack[-18] = 0;              // esi
-    stack[-19] = 0;              // edi
-
-    // switch_to restore frame (below trapframe)
-    stack[-20] = (uint32_t)process_entry;  // return address
-    stack[-21] = 0;                         // ebp
-    stack[-22] = 0;                         // edi
-    stack[-23] = 0;                         // esi
-    stack[-24] = 0;                         // ebx
-
-    uint32_t k_esp = (uint32_t)&stack[-24];
+    uint64_t k_rsp = build_kstack(k_stack_top, entry);
 
     // 9. Fill PCB
     proc->pid = alloc_idx;
     proc->state = READY;
-    proc->k_esp = k_esp;
+    proc->k_rsp = k_rsp;
     proc->k_stack_top = k_stack_top;
-    proc->cr3 = pd_phys;
+    proc->cr3 = pml4_phys;
     proc->entry = entry;
     proc->wait_event = WAIT_NONE;
 
     return proc;
 }
 
-proc_t *process_create_elf(const uint8_t *elf_data, uint32_t elf_size) {
+proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     // 1. Find free slot
     proc_t *proc = nullptr;
     int alloc_idx = -1;
@@ -210,82 +295,43 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint32_t elf_size) {
     // 2. Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc.alloc_page(2);
     if (!stack_pages) return nullptr;
-    uint32_t k_stack_phys = page_to_phys(stack_pages);
-    uint32_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
+    uint64_t k_stack_phys = page_to_phys(stack_pages);
+    uint64_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
 
-    // 3. Allocate per-process PD
-    Page *pd_page = bfc_alloc.alloc_page(1);
-    if (!pd_page) return nullptr;
-    uint32_t pd_phys = page_to_phys(pd_page);
-    uint32_t pd_virt = phys_to_virt(pd_phys);
+    // 3. Allocate per-process PML4
+    Page *pml4_page = bfc_alloc.alloc_page(1);
+    if (!pml4_page) return nullptr;
+    uint64_t pml4_phys = page_to_phys(pml4_page);
+    uint64_t pml4_virt = phys_to_virt(pml4_phys);
 
-    // 4. Clear PD + copy kernel PDEs
-    uint32_t *new_pd = (uint32_t *)pd_virt;
-    for (int i = 0; i < 1024; i++) {
-        new_pd[i] = 0;
+    // 4. Clear PML4 + copy kernel entries
+    uint64_t *new_pml4 = (uint64_t *)pml4_virt;
+    for (int i = 0; i < 512; i++) {
+        new_pml4[i] = 0;
     }
-    for (int i = 768; i < 1024; i++) {
-        new_pd[i] = page_directory[i];
-    }
+    new_pml4[511] = pml4[511];
 
     // 5. Load ELF segments into user address space
-    elf_load_result lr = elf_load(elf_data, elf_size, new_pd);
+    elf_load_result lr = elf_load(elf_data, elf_size, new_pml4);
     if (!lr.success) return nullptr;
 
-    // 6. Allocate user stack page + PT (PD[767], PT[1023] → 0xBFFFF000)
+    // 6. Map user stack page at 0x00007FFFFFFFD000
     Page *user_stack_page = bfc_alloc.alloc_page(1);
     if (!user_stack_page) return nullptr;
-    uint32_t user_stack_phys = page_to_phys(user_stack_page);
+    uint64_t user_stack_phys = page_to_phys(user_stack_page);
 
-    Page *user_stack_pt_page = bfc_alloc.alloc_page(1);
-    if (!user_stack_pt_page) return nullptr;
-    uint32_t user_stack_pt_phys = page_to_phys(user_stack_pt_page);
-    uint32_t user_stack_pt_virt = phys_to_virt(user_stack_pt_phys);
-
-    uint32_t *stack_pt = (uint32_t *)user_stack_pt_virt;
-    for (int i = 0; i < 1024; i++) {
-        stack_pt[i] = 0;
-    }
-    stack_pt[1023] = user_stack_phys | 0x07;
-    new_pd[767] = user_stack_pt_phys | 0x07;
+    if (!map_user_page_direct(new_pml4, 0x00007FFFFFFFD000, user_stack_phys))
+        return nullptr;
 
     // 7. Build trapframe + switch_to frame on kernel stack
-    uint32_t *stack = (uint32_t *)k_stack_top;
-
-    stack[-1]  = 0x23;           // ss (USER_DS)
-    stack[-2]  = 0xC0000000;     // esp (stack top)
-    stack[-3]  = 0x202;          // eflags (IF=1)
-    stack[-4]  = 0x1B;           // cs (USER_CS)
-    stack[-5]  = lr.entry;       // eip
-    stack[-6]  = 0;              // err_code
-    stack[-7]  = 0;              // trapno
-    stack[-8]  = 0x23;           // ds
-    stack[-9]  = 0x23;           // es
-    stack[-10] = 0x23;           // fs
-    stack[-11] = 0x23;           // gs
-    stack[-12] = 0;              // eax
-    stack[-13] = 0;              // ecx
-    stack[-14] = 0;              // edx
-    stack[-15] = 0;              // ebx
-    stack[-16] = 0;              // esp_ignored
-    stack[-17] = 0;              // ebp
-    stack[-18] = 0;              // esi
-    stack[-19] = 0;              // edi
-
-    stack[-20] = (uint32_t)process_entry;
-    stack[-21] = 0;              // ebp
-    stack[-22] = 0;              // edi
-    stack[-23] = 0;              // esi
-    stack[-24] = 0;              // ebx
-
-    uint32_t k_esp = (uint32_t)&stack[-24];
+    uint64_t k_rsp = build_kstack(k_stack_top, lr.entry);
 
     // 8. Fill PCB
     proc->pid = alloc_idx;
     proc->state = READY;
-    proc->k_esp = k_esp;
+    proc->k_rsp = k_rsp;
     proc->k_stack_top = k_stack_top;
-    proc->cr3 = pd_phys;
+    proc->cr3 = pml4_phys;
     proc->entry = lr.entry;
     proc->wait_event = WAIT_NONE;
 
@@ -306,8 +352,8 @@ void schedule() {
     }
     if (next == nullptr) return;
 
-    // Update TSS.esp0 for next process
-    tss.esp0 = next->k_stack_top;
+    // Update TSS.rsp0 for next process
+    tss.rsp0 = next->k_stack_top;
 
     // Only set READY if currently RUNNING (preempted by timer/yield)
     // BLOCKED processes stay BLOCKED
@@ -326,9 +372,6 @@ void schedule() {
     current_proc = next;
 
     switch_to(prev, next);
-    // After switch_to returns (prev is resumed), ensure interrupts are on.
-    // If we were switched out from a syscall (int 0x80 gate auto-CLI'd),
-    // IF is still 0 here. STI is safe: the caller will iret and restore
-    // the saved EFLAGS anyway.
+    // After switch_to returns, ensure interrupts are on.
     __asm__ volatile("sti");
 }

@@ -1,5 +1,5 @@
 #include "driver/ata.h"
-#include "arch/x86/utils.h"
+#include "arch/x64/utils.h"
 
 // ATA PIO LBA28 I/O ports
 #define ATA_DATA     0x1F0
@@ -25,7 +25,7 @@ void ata_read_lba(uint32_t lba, uint32_t count, void *buf) {
     outb(ATA_LBA_LO,  lba & 0xFF);
     outb(ATA_LBA_MID, (lba >> 8) & 0xFF);
     outb(ATA_LBA_HI,  (lba >> 16) & 0xFF);
-    outb(ATA_DRIVE, 0xE0 | ((lba >> 24) & 0x0F));
+    outb(ATA_DRIVE, 0xF0 | ((lba >> 24) & 0x0F));
 
     // 3. Send read command
     outb(ATA_STATUS, ATA_CMD_READ);

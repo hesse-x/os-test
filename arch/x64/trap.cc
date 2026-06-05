@@ -1,6 +1,6 @@
-#include "arch/x86/trap.h"
-#include "arch/x86/utils.h"
-#include "arch/x86/paging.h"
+#include "arch/x64/trap.h"
+#include "arch/x64/utils.h"
+#include "arch/x64/paging.h"
 
 // Vector stubs defined in vectors.S
 #define V(N) extern "C" void vector##N();
@@ -13,8 +13,8 @@ V(40) V(41) V(42) V(43) V(44) V(45) V(46) V(47)
 V(128)
 #undef V
 
-static uint32_t __vectors[IDT_ENTRIES] = {
-#define V(N) (uint32_t)vector##N,
+static uint64_t __vectors[IDT_ENTRIES] = {
+#define V(N) (uint64_t)vector##N,
     V(0) V(1) V(2) V(3) V(4) V(5) V(6) V(7)
     V(8) V(9) V(10) V(11) V(12) V(13) V(14) V(15)
     V(16) V(17) V(18) V(19) V(20) V(21) V(22) V(23)
@@ -28,18 +28,29 @@ static uint32_t __vectors[IDT_ENTRIES] = {
 static idt_gate_t idt[IDT_ENTRIES];
 static idt_register_t idt_reg;
 
-void set_idt_gate(int n, uint32_t handler, uint8_t flags) {
-  idt[n].low_offset = L16(handler);
+void set_idt_gate(int n, uint64_t handler, uint8_t flags) {
+  idt[n].offset_low = L16(handler);
   idt[n].sel = KERNEL_CS;
-  idt[n].always0 = 0;
+  idt[n].ist = 0;
   idt[n].flags = flags;
-  idt[n].high_offset = H16(handler);
+  idt[n].offset_mid = H16(handler);
+  idt[n].offset_high = H32(handler);
+  idt[n].reserved = 0;
 }
 
 void set_idt() {
-  idt_reg.base = (uint32_t)&idt;
+  uint64_t base = (uint64_t)&idt;
   idt_reg.limit = IDT_ENTRIES * sizeof(idt_gate_t) - 1;
-  __asm__ volatile("lidtl (%0)" : : "r"(&idt_reg));
+  idt_reg.base_low = L16(base);
+  idt_reg.base_high = (uint32_t)(base >> 16);  // bits 31:16
+  // For lidt in 64-bit mode, we use inline asm with the full 10-byte descriptor
+  struct {
+    uint16_t limit;
+    uint64_t base;
+  } __attribute__((packed)) idtr;
+  idtr.limit = idt_reg.limit;
+  idtr.base = base;
+  __asm__ volatile("lidt (%0)" : : "r"(&idtr));
 }
 
 void idt_install() {
@@ -47,7 +58,7 @@ void idt_install() {
     set_idt_gate(i, __vectors[i]);
   }
   // vector128: syscall gate, DPL=3 (interrupt gate, user-callable)
-  set_idt_gate(128, (uint32_t)vector128, 0xEE);
+  set_idt_gate(128, (uint64_t)vector128, 0xEE);
   set_idt();
 }
 

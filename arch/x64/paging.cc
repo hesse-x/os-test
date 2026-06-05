@@ -1,0 +1,189 @@
+#include "arch/x64/paging.h"
+#include "arch/x64/lib.h"
+
+// ===================== GDT =====================
+// 7 entries: null, code64, data, user_code64, user_data, TSS_low, TSS_high
+static gdt_entry_t gdt[7];
+static gdt_ptr_t gdt_reg;
+tss_t tss;
+
+static void set_gdt_gate(int n, uint32_t base, uint32_t limit, uint8_t access,
+                         uint8_t gran) {
+  gdt[n].limit_low = L16(limit);
+  gdt[n].base_low = L16(base);
+  gdt[n].base_middle = (base >> 16) & 0xFF;
+  gdt[n].access = access;
+  gdt[n].granularity = ((gran & 0x0F) << 4) | ((limit >> 16) & 0x0F);
+  gdt[n].base_high = (base >> 24) & 0xFF;
+}
+
+// 64-bit TSS descriptor spans two GDT slots
+static void set_tss_gate(int n, uint64_t base, uint32_t limit) {
+  // Low 8 bytes: standard GDT entry format
+  gdt[n].limit_low = L16(limit);
+  gdt[n].base_low = L16(base);
+  gdt[n].base_middle = (base >> 16) & 0xFF;
+  gdt[n].access = 0x89;  // Available 64-bit TSS
+  gdt[n].granularity = 0x00;
+  gdt[n].base_high = (base >> 24) & 0xFF;
+
+  // High 8 bytes: upper 32 bits of base, rest zero
+  uint32_t *hi = (uint32_t *)&gdt[n + 1];
+  hi[0] = (uint32_t)(base >> 32);
+  hi[1] = 0;
+}
+
+// 远跳转刷新 CS，在单独的汇编文件中实现
+extern "C" void reload_cs(void);
+
+static void set_gdt() {
+  gdt_reg.base = (uint64_t)&gdt;
+  gdt_reg.limit = sizeof(gdt) - 1;
+  __asm__ volatile("lgdt %0" : : "m"(gdt_reg));
+  __asm__ volatile(
+      "movw $0x10, %%ax\n"
+      "movw %%ax, %%ds\n"
+      "movw %%ax, %%es\n"
+      "movw %%ax, %%fs\n"
+      "movw %%ax, %%gs\n"
+      "movw %%ax, %%ss\n" ::: "ax");
+  reload_cs();
+}
+
+// stack_bottom 定义在 boot.cc，现在定义在此
+extern "C" const uint8_t stack_bottom[8192]
+    __attribute__((aligned(16))) = {0};
+
+void gdt_init() {
+  set_gdt_gate(0, 0, 0, 0, 0);                   // null segment
+  set_gdt_gate(1, 0, 0, 0x9A, 0x02);             // code64: ER, ring0, L=1, D=0
+  set_gdt_gate(2, 0, 0, 0x92, 0x00);             // data: RW, ring0
+  set_gdt_gate(3, 0, 0, 0xFA, 0x02);             // user code64: ER, ring3, L=1, D=0
+  set_gdt_gate(4, 0, 0, 0xF2, 0x00);             // user data: RW, ring3
+  set_tss_gate(5, (uint64_t)&tss, sizeof(tss_t) - 1);
+  set_gdt();
+
+  // Initialize TSS
+  tss.rsp0 = (uint64_t)&stack_bottom + 8192;
+  tss.iomap_base = sizeof(tss_t);
+  __asm__ volatile("ltr %w0" :: "r"(TSS_SEL));
+}
+
+// ===================== 页表 =====================
+// stub.S 在物理地址阶段设置这些页表，此处定义 BSS
+__attribute__((aligned(4096))) uint64_t pml4[512];
+__attribute__((aligned(4096))) uint64_t pdpt_ident[512];
+__attribute__((aligned(4096))) uint64_t pdpt_hh[512];
+__attribute__((aligned(4096))) uint64_t page_dir[512];
+
+// ===================== enable_paging =====================
+// 物理地址阶段，由 start.S _start 调用
+// 注意：此时 higher-half 不可访问，必须通过物理地址指针操作页表
+// CR3 加载后 identity map + higher-half 生效，才能访问 VMA
+// 返回: rax = &gdtr(栈/物理地址), rdx = &far_ptr(栈/物理地址)
+extern "C" __attribute__((noinline)) void enable_paging(boot_info *bi_phys) {
+  (void)bi_phys;
+
+  // === 构建页表 (2MB huge pages) ===
+  // 物理地址运行时 RIP-relative 直接给出物理地址
+  uint64_t *pml4_p   = pml4;
+  uint64_t *pdpt_i_p = pdpt_ident;
+  uint64_t *pdpt_h_p = pdpt_hh;
+  uint64_t *pd_p     = page_dir;
+
+  uint64_t pml4_phys   = (uint64_t)pml4_p;
+  uint64_t pdpt_i_phys = (uint64_t)pdpt_i_p;
+  uint64_t pdpt_h_phys = (uint64_t)pdpt_h_p;
+  uint64_t pd_phys     = (uint64_t)pd_p;
+
+  // 清零（手动循环，不用 __builtin_memset）
+  for (int i = 0; i < 512; i++) pml4_p[i] = 0;
+  for (int i = 0; i < 512; i++) pdpt_i_p[i] = 0;
+  for (int i = 0; i < 512; i++) pdpt_h_p[i] = 0;
+  for (int i = 0; i < 512; i++) pd_p[i] = 0;
+
+  pml4_p[0]     = pdpt_i_phys | 0x03;
+  pml4_p[511]   = pdpt_h_phys | 0x03;
+  pdpt_i_p[0]   = pd_phys | 0x03;
+  pdpt_h_p[510] = pd_phys | 0x03;
+
+  for (int i = 0; i < 512; i++) {
+    pd_p[i] = ((uint64_t)i << 21) | 0x83;
+  }
+
+  // 加载 CR3 — 此后 identity map + higher-half 均生效
+  __asm__ volatile("movq %0, %%cr3" :: "r"(pml4_phys) : "memory");
+}
+
+// ===================== 全局变量定义 =====================
+boot_info g_boot_info;
+uintptr_t device_vma_base = 0;
+
+// ===================== Bump 分配器 =====================
+static uintptr_t bump_next_phys;
+static bool bump_disabled = false;
+
+void bump_init_phys(uintptr_t start) {
+  bump_next_phys = ALIGN_UP(start, PAGE_SIZE);
+}
+
+void *bump_alloc(size_t size) {
+  if (bump_disabled) {
+    __asm__ volatile("cli; hlt");
+  }
+  uintptr_t phys = bump_next_phys;
+  bump_next_phys += ALIGN_UP(size, PAGE_SIZE);
+  return (void *)(phys + VMA_BASE);
+}
+
+void bump_disable() { bump_disabled = true; }
+
+// ===================== extend_mapping =====================
+// 扩展 higher-half 映射：为超出初始 1GB 的物理 RAM 分配 PDPT+PD
+// 0xFFFFFFFF80000000 的页表索引:
+//   PML4 index = 511
+//   PDPT index = 510
+//   所以 higher-half 从 PDPT_hh[510] 开始
+//   后续 1GB 块使用 PDPT_hh[511], PDPT_hh[512-overflow]...
+//   注意: PDPT_hh[511] 已被 PML4 自映射占用时需要换 PDPT
+void extend_mapping(uint64_t max_phys_addr) {
+  // 计算需要多少个 1GB 块
+  size_t max_1gb_block = (size_t)(max_phys_addr / 0x40000000);
+
+  // stub 已设置 PDPT_hh[510] → PD (第一个1GB)
+  // 需要继续设置 PDPT_hh[511] ...
+  // 同时需要设置 identity map 的 PDPT_ident[1..max_1gb_block]
+
+  for (size_t n = 1; n <= max_1gb_block; n++) {
+    // 分配 PD (4KB)
+    uint64_t *pd = (uint64_t *)bump_alloc(4096);
+    uintptr_t pd_phys = PHY_ADDR((uintptr_t)pd);
+
+    // 填充 PD: 512个 2MB huge pages 映射物理 n*1GB 到 (n+1)*1GB
+    uint64_t phys_base = (uint64_t)n * 0x40000000;
+    for (int i = 0; i < 512; i++) {
+      pd[i] = (phys_base + (uint64_t)i * PAGE_SIZE_2M) | 0x83;  // Present + RW + PS
+    }
+
+    // identity map: PDPT_ident[n] = PD
+    pdpt_ident[n] = pd_phys | 0x03;
+
+    // higher-half map: PDPT_hh[510 + n] = PD
+    pdpt_hh[510 + n] = pd_phys | 0x03;
+  }
+
+  // 设备映射区
+  device_vma_base =
+      ALIGN_UP(VMA_BASE + (uintptr_t)max_phys_addr, 0x40000000);
+}
+
+// ===================== flush_tlb =====================
+void flush_tlb() {
+  __asm__ volatile("movq %0, %%cr3\n" ::"r"(PHY_ADDR((uintptr_t)pml4))
+                   : "memory");
+}
+
+// ===================== bump allocator query =====================
+extern "C" uintptr_t bump_end_phys() {
+  return bump_next_phys;
+}
