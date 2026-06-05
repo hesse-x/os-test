@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include "arch/x86/utils.h"
 
-#define IDT_ENTRIES 49
+#define IDT_ENTRIES 256
 
 // ===================== IDT =====================
 typedef struct {

@@ -14,11 +14,6 @@
 #include "arch/x86/paging.h"
 #include "kernel/proc.h"
 
-static void kbd_echo(char c) {
-  fb_putc(c, 0xFFFFFF);
-}
-
-
 extern "C" {
 
 void kernel_init_finish() {

@@ -7,5 +7,9 @@ typedef void (*kbd_handler)(char);
 void kbd_init();
 void kbd_handle();
 void kbd_register_handler(kbd_handler h);
+
+// Ring buffer for sys_getc
+bool kbd_buffer_empty();
+char kbd_buffer_pop();
 }
 #endif // KBD_H

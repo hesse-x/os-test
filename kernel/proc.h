@@ -6,7 +6,9 @@
 
 typedef int32_t pid_t;
 
-enum proc_state_t { READY, RUNNING };
+enum proc_state_t { READY, RUNNING, BLOCKED };
+
+enum wait_event_t { WAIT_NONE, WAIT_KBD };
 
 struct proc_t {
     pid_t pid;
@@ -15,6 +17,7 @@ struct proc_t {
     uint32_t k_stack_top;   // kernel stack top (8KB region high end)
     uint32_t cr3;           // page directory physical address
     uint32_t entry;         // user entry EIP
+    wait_event_t wait_event; // 阻塞原因
 };
 
 #define MAX_PROC 64

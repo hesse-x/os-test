@@ -76,7 +76,7 @@ syscall_ret:
 
 # ===================== context switch =====================
 # void switch_to(proc_t *prev, proc_t *next)
-# proc_t layout: pid(0) state(4) k_esp(8) k_stack_top(12) cr3(16) entry(20)
+# proc_t layout: pid(0) state(4) k_esp(8) k_stack_top(12) cr3(16) entry(20) wait_event(24)
 # C calling convention: prev at [esp+4], next at [esp+8] before callee-saved push
 .globl switch_to
 switch_to:
@@ -92,6 +92,10 @@ switch_to:
     # next = original esp+8, after 4 pushes = current esp+24
     movl 24(%esp), %ecx
     movl 8(%ecx), %esp           # ESP = next->k_esp
+
+    # Switch CR3 to next process's page directory
+    movl 16(%ecx), %eax          # next->cr3
+    movl %eax, %cr3              # load CR3 (flushes TLB)
 
     popl %ebp
     popl %edi

@@ -27,15 +27,14 @@ set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/arch/x86/linker.ld)
 set(BIN_FILE ${CMAKE_BINARY_DIR}/myos.bin)
 set(LINK_SCRIPT ${CMAKE_SOURCE_DIR}/cmake/do_link.cmake)
 
-add_custom_command(
-    OUTPUT ${BIN_FILE}
+add_custom_target(link ALL
     COMMAND ${CMAKE_COMMAND}
         -DOBJ_LIST="$<TARGET_OBJECTS:arch_x86>;$<TARGET_OBJECTS:kernel_mem>;$<TARGET_OBJECTS:kernel_obj>;$<TARGET_OBJECTS:driver_obj>"
         -DLINKER_SCRIPT=${LINKER_SCRIPT}
         -DBIN_FILE=${BIN_FILE}
         -P ${LINK_SCRIPT}
-    DEPENDS ${LINKER_SCRIPT} arch_x86 kernel_mem kernel_obj driver_obj
+    BYPRODUCTS ${BIN_FILE}
     COMMENT "Linking myos.bin"
 )
 
-add_custom_target(link ALL DEPENDS ${BIN_FILE})
+add_dependencies(link arch_x86 kernel_mem kernel_obj driver_obj)
