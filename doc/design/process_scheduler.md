@@ -1,6 +1,15 @@
 # 进程与调度方案
 
-阶段二：进程控制块、上下文切换、轮转调度、进程创建。
+> **历史文档**：这是 x86-32 阶段二的进程调度设计方案。当前代码已迁移至 x86-64。
+>
+> 当前实现概要：
+> - proc_t: 全64位字段（k_rsp, k_stack_top, cr3, entry 均为 uint64_t）
+> - switch_to: pushq rbx/rbp/r12-r15，System V AMD64 (rdi=prev, rsi=next)
+> - trapframe: 全64位，process_entry → jmp __trapret → iretq
+> - 用户栈: 0x00007FFFFFFFD000（canonical 低半区，非 0xBFFFE000）
+> - 每进程独立 PML4（共享 PML4[511]），CR3 在 switch_to 中切换
+> - tss.rsp0（非 esp0）在 schedule() 中更新
+> - 参见 CLAUDE.md 和 kernel/proc.cc 了解当前实现
 
 ## 设计决策汇总
 

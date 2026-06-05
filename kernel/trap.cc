@@ -1,8 +1,8 @@
 #include "kernel/trap.h"
 #include "kernel/proc.h"
-#include "arch/x86/utils.h"
-#include "arch/x86/paging.h"
-#include "arch/x86/trap.h"
+#include "arch/x64/utils.h"
+#include "arch/x64/paging.h"
+#include "arch/x64/trap.h"
 #include "kernel/serial.h"
 #include "driver/kbd.h"
 #include "driver/fb.h"
@@ -18,7 +18,7 @@ void register_irq(int vec, irq_handler_t fn) {
 }
 
 // ===================== Trap dispatch =====================
-static uint32_t tick = 0;
+static uint64_t tick = 0;
 
 void trap_dispatch(trapframe_t *tf) {
   // Syscall vector 128
@@ -28,7 +28,7 @@ void trap_dispatch(trapframe_t *tf) {
   }
 
   // Check registered handler first
-  if (tf->trapno >= 0 && tf->trapno < MAX_IRQ_HANDLERS &&
+  if (tf->trapno < MAX_IRQ_HANDLERS &&
       irq_handlers[tf->trapno] != nullptr) {
     irq_handlers[tf->trapno](tf);
     return;
@@ -54,10 +54,10 @@ void trap_dispatch(trapframe_t *tf) {
   serial_put_hex(tf->trapno);
   serial_puts(" err ");
   serial_put_hex(tf->err_code);
-  serial_puts(" eip ");
-  serial_put_hex(tf->eip);
+  serial_puts(" rip ");
+  serial_put_hex(tf->rip);
   serial_puts("\n");
-  __asm__ volatile("cli; hlt");
+  halt();
 }
 
 // ===================== Timer IRQ handler =====================
@@ -92,12 +92,10 @@ void isr_init() {
   pic_remap();
   pit_init();
   kbd_init();
-  __asm__ volatile("sti");
+  sti();
 }
 
 // ===================== Syscall dispatch =====================
-typedef uint32_t (*syscall_fn_t)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
-
 #define NR_SYSCALL 4
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_putc,    // 0: 输出字符
@@ -107,39 +105,38 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
 };
 
 void syscall_dispatch(trapframe_t *tf) {
-    if (tf->regs.eax < NR_SYSCALL) {
-        tf->regs.eax = syscall_table[tf->regs.eax](
-            tf->regs.ebx, tf->regs.ecx, tf->regs.edx,
-            tf->regs.esi, tf->regs.edi);
+    if (tf->rax < NR_SYSCALL) {
+        tf->rax = syscall_table[tf->rax](
+            tf->rbx, tf->rcx, tf->rdx, tf->rsi, tf->rdi);
     } else {
-        tf->regs.eax = (uint32_t)-1;  // 无效 syscall 号
+        tf->rax = (uint64_t)-1;  // 无效 syscall 号
     }
 }
 
 // sys_putc(char c) — syscall 0
-uint32_t sys_putc(uint32_t arg1, uint32_t, uint32_t, uint32_t, uint32_t) {
+uint64_t sys_putc(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     fb_putc((char)arg1, 0xFFFFFF);
     serial_putc((char)arg1);
     return 0;
 }
 
 // sys_getpid() — syscall 1
-uint32_t sys_getpid(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {
-    return (uint32_t)current_proc->pid;
+uint64_t sys_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+    return (uint64_t)current_proc->pid;
 }
 
 // sys_yield() — syscall 2
-uint32_t sys_yield(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {
+uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     schedule();
     return 0;
 }
 
 // sys_getc() — syscall 3 (阻塞等待键盘输入)
-uint32_t sys_getc(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {
+uint64_t sys_getc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     if (kbd_buffer_empty()) {
         current_proc->state = BLOCKED;
         current_proc->wait_event = WAIT_KBD;
         schedule();
     }
-    return (uint32_t)kbd_buffer_pop();
+    return (uint64_t)kbd_buffer_pop();
 }

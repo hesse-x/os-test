@@ -1,5 +1,16 @@
 # CMake 重构实录
 
+> **历史文档**：这是 x86-32 阶段的 CMake 重构记录。当前代码已迁移至 x86-64。
+>
+> 当前构建体系概要：
+> - toolchain: `cmake/toolchain-x86_64.cmake`（`-m64`）
+> - CXX_FLAGS: `-mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx`（非 `-fPIE`/GOTOFF）
+> - 架构目录: `arch/x64/`（非 `arch/x86/`）
+> - 链接: `ld -m elf_x86_64 -T arch/x64/linker.ld`
+> - 产物: `build/myos.elf`（非 myos.bin）
+> - `POSITION_INDEPENDENT_CODE OFF` 仍不可设（会加 `-fPIC`，破坏 `-mcmodel=kernel`）
+> - 参见 CLAUDE.md 了解当前架构
+
 ## 目标
 
 将当前扁平目录结构拆分为分层架构，用 CMake 替代 build.sh 中的硬编码编译命令。

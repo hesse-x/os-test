@@ -1,5 +1,9 @@
 # Framebuffer 模块分离方案
 
+> **已实现**。当前实现在 `driver/fb.cc`/`fb.h`，init_fb 接收 `boot_info*`（非 multiboot2 mbi_addr），
+> 从 UEFI GOP 获取 framebuffer 信息。设备映射区基址 `device_vma_base` 在 `arch/x64/paging.cc` 定义。
+> init_fb 在 init_mem 末尾调用，依赖 bump_alloc 和 device_vma_base 就绪。
+
 ## 概述
 
 将 `init_mem` 中显存相关逻辑分离为独立模块 `fb.h`/`fb.cc`，提供 struct 封装、光标管理和基本渲染接口。

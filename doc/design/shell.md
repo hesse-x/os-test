@@ -1,5 +1,16 @@
 # 阶段四：Shell + ATA PIO + ELF Loader
 
+> **历史文档**：这是 x86-32 / ELF32 / Multiboot2 阶段的 Shell 设计方案。当前代码已迁移至 x86-64 / ELF64 / UEFI。
+>
+> 当前实现概要：
+> - Shell 源码: `user/shell.cc`（C++，非 NASM 汇编），编译为 ELF64 静态可执行文件
+> - Shell 构建: `g++ -m64 -ffreestanding -nostdlib ... -c user/shell.cc` + `ld -m elf_x86_64 -Ttext 0x400000`
+> - ATA PIO: 驱动字节 0xF0（从盘，QEMU 第二个 IDE 设备），非 0xE0
+> - ELF64 Loader: Elf64_Ehdr/Elf64_Phdr，4级页表映射（PML4→PDPT→PD→PT）
+> - Shell 加载: kernel_main 中 `load_shell_from_disk()` 从 disk.img LBA 1 读取 → `process_create_elf()`
+> - 非 Multiboot2 module tag 方式
+> - 参见 CLAUDE.md 了解当前架构
+
 ## 设计决策
 
 | 决策 | 选择 | 理由 |

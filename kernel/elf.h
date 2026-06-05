@@ -3,18 +3,18 @@
 
 #include <stdint.h>
 
-// ELF32 fixed header
+// ELF64 fixed header
 #define EI_NIDENT 16
 #define PT_LOAD 1
 
-struct Elf32_Ehdr {
+struct Elf64_Ehdr {
     uint8_t  e_ident[EI_NIDENT];
     uint16_t e_type;
     uint16_t e_machine;
     uint32_t e_version;
-    uint32_t e_entry;
-    uint32_t e_phoff;
-    uint32_t e_shoff;
+    uint64_t e_entry;
+    uint64_t e_phoff;
+    uint64_t e_shoff;
     uint32_t e_flags;
     uint16_t e_ehsize;
     uint16_t e_phentsize;
@@ -24,26 +24,26 @@ struct Elf32_Ehdr {
     uint16_t e_shstrndx;
 };
 
-struct Elf32_Phdr {
+struct Elf64_Phdr {
     uint32_t p_type;
-    uint32_t p_offset;
-    uint32_t p_vaddr;
-    uint32_t p_paddr;
-    uint32_t p_filesz;
-    uint32_t p_memsz;
     uint32_t p_flags;
-    uint32_t p_align;
+    uint64_t p_offset;
+    uint64_t p_vaddr;
+    uint64_t p_paddr;
+    uint64_t p_filesz;
+    uint64_t p_memsz;
+    uint64_t p_align;
 };
 
 struct elf_load_result {
-    uint32_t entry;
+    uint64_t entry;
     bool     success;
 };
 
-// Load ELF32 static binary into user address space
-// new_pd: caller-allocated page directory (kernel PDEs already copied)
+// Load ELF64 static binary into user address space
+// new_pml4: caller-allocated PML4 (kernel entries already copied)
 // Returns entry point and success status
-elf_load_result elf_load(const uint8_t *data, uint32_t size,
-                         uint32_t *new_pd);
+elf_load_result elf_load(const uint8_t *data, uint64_t size,
+                         uint64_t *new_pml4);
 
 #endif // KERNEL_ELF_H

@@ -1,5 +1,5 @@
 #include "driver/kbd.h"
-#include "arch/x86/utils.h"
+#include "arch/x64/utils.h"
 
 static kbd_handler callback = nullptr;
 

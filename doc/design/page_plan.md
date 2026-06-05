@@ -6,6 +6,15 @@ type: project
 
 # Higher-Half Kernel PIE + 分页实现方案
 
+> **历史文档**：这是 x86-32 / Multiboot2 / GOTOFF 阶段的设计方案。当前代码已迁移至 x86-64 / UEFI / `-mcmodel=kernel` + RIP-relative。本文件仅作历史参考。
+>
+> 当前实现概要：
+> - VMA_BASE = `0xFFFFFFFF80000000`，KERNEL_VMA_BASE = `0xFFFFFFFF80100000`
+> - 4级页表 (PML4→PDPT→PD)，2MB huge pages，identity + higher-half 双映射
+> - 寻址方式：`-mcmodel=kernel` + RIP-relative（非 GOTOFF）
+> - 启动协议：UEFI stub (boot/stub.c)，非 GRUB/Multiboot2
+> - 参见 CLAUDE.md 了解当前架构
+
 ## 设计目标
 
 将内核从低地址扁平布局升级为 PIE + higher-half 设计：所有代码编译为 `-fPIE`，利用 GOTOFF（PC 推导基址 + 常量偏移）机制实现位置无关。分页前在物理地址运行，分页后无缝切换到虚拟高地址运行。物理加载地址固定 0x100000，PIE 为未来任意基址扩展预留能力。

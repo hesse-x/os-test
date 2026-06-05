@@ -1,211 +1,75 @@
-# 微内核缺失功能实现计划
+# 微内核实现进度
 
-## 阶段一：用户态基础设施 ✅ 已完成
+## 已完成
 
-> 详细方案见 [ring3_switch.md](ring3_switch.md)
+### 阶段一：用户态基础设施 ✅
+> 原始设计见 [ring3_switch.md](ring3_switch.md)（x86-32 版本）
 
-### 1. GDT 扩展：TSS + 用户态段 ✅
-- 新增 TSS（Task State Segment），用于 ring 0 → ring 3 栈切换
-- TSS 为静态全局变量（放 .bss，和 gdt_entries 同理）
-- GDT 从 3 项扩展到 6 项：null, code, data, user code, user data, TSS
-- 新增选择子：`USER_CS = 0x1B`（ring 3 code）、`USER_DS = 0x23`（ring 3 data）、`TSS_SEL = 0x28`
-- 加载 TR 寄存器（`ltr %w0`），TSS 描述符 type=0x89（Available），ltr 后 CPU 自动标记 Busy
-- TSS.esp0 初始设为 boot stack top（虚拟地址）；阶段二进程切换时改为 per-process 更新（见下方补充）
+- GDT 扩展：TSS + 用户态段（x64: 7项 GDT，TSS 跨两个 slot）
+- IDT 扩展：vector128 (int 0x80) syscall 入口，flags=0xEE
+- trapframe_t 扩展：64位版本（RAX-R15 + trapno + err_code + RIP + CS + RFLAGS + RSP + SS）
+- syscall_entry / syscall_ret：独立入口，pushall 风格
+- kernel_init_finish：禁用 bump 分配器
 
-### 2. IDT 扩展：用户态可触发的中断门 ✅
-- `int 0x80` 系统调用入口：flags=0xEE（interrupt gate, DPL=3）
-- 新增 `vector128` stub（vectors.S 中），走独立 syscall_entry 入口（不走 __alltraps）
-- IDT_ENTRIES 从 48 改为 49
-- `set_idt_gate` 新增 flags 参数（默认 0x8E），vector128 传入 0xEE
+### 阶段二：进程与调度 ✅
+> 原始设计见 [process_scheduler.md](process_scheduler.md)（x86-32 版本）
 
-### 3. trapframe_t 扩展 ✅
-- 增加 `esp` 和 `ss` 字段（struct 尾部，eflags 之后），与 ucore 一致
-- **不手动 push SS/ESP**：esp/ss 仅在特权级变化时由 CPU 自动 push，`__alltraps` 和 `__trapret` 保持原逻辑不变
-- ring 0 中断时 esp/ss 不在栈上，不应访问
-- 新增 `syscall_entry/syscall_ret`（独立于 __alltraps/__trapret），段寄存器用 `pushl`（32 位），iret 自动处理特权级变化
-- 新增 `syscall_dispatch` stub（kernel/trap.cc）
+- PCB (proc_t)：pid, state, k_rsp, k_stack_top, cr3, entry, wait_event
+- switch_to：保存/恢复 callee-saved (rbx, rbp, r12-r15) + 切换 RSP + 切换 CR3
+- process_entry：jmp __trapret → iretq 到用户态
+- schedule()：轮询扫描 READY 进程
+- idle 进程：PID=0，boot stack，hlt 循环
 
-### 4. 新增基础库 ✅
-- `arch/x86/lib.h` + `lib.cc`：`memcpy` 等（freestanding 无标准库）
-- 拷贝 PDE 等场景需要，后续按需补充 memset/memmove
+### 阶段三：系统调用 + 用户分页 + 用户栈 ✅
+> 原始设计见 [sys_call.md](sys_call.md)（x86-32 版本）
 
-### 5. 引导清理 ✅
-- `kernel_init_finish()`：清除 PD[0] identity map（not present + flush_tlb）+ 禁止 bump 分配器
-- bump_alloc 加 `cli;hlt` 检查，防止初始化后误用
+- 4个系统调用：putc(0), getpid(1), yield(2), getc(3)
+- 独立 PML4 + CR3 切换（每进程 PML4，共享 PML4[511] 内核映射）
+- 用户栈：0x00007FFFFFFFD000（canonical 低半区）
+- BLOCKED 状态 + WAIT_KBD 键盘阻塞/唤醒
 
-### 6. ring 3 验证测试 ✅
-- 不分配用户页/用户栈，EIP 指向 not-present 地址（0x1000），ESP=0xBFFFFFFC
-- iret 进入 ring 3 → 立刻触发 #PF
-- trap_dispatch 检测 #PF from ring 3（检查 tf->cs & 0x3 == 3）→ 串口输出 → halt
-- 测试代码内联在 kernel.cc，注释标注临时代码
-- **修正方案中 test_ring3 内联汇编栈顺序**：iret 从低到高 pop EIP→SS，负偏移编号需反转
+### 阶段四：Shell + ATA PIO + ELF Loader ✅
+> 原始设计见 [shell.md](shell.md)（x86-32/ELF32 版本）
 
-**验证结果：** QEMU 串口输出 `Ring 3 switch verified! #PF at EIP=0x00001000`，特权级切换成功
+- ATA PIO LBA28 驱动（从盘 0xF0，QEMU 第二个 IDE 设备）
+- ELF64 Loader（Elf64_Ehdr/Phdr，4级页表映射）
+- process_create_elf：从 ELF64 加载创建进程
+- Shell 程序：user/shell.cc，getc/putc 循环
+- Shell 构建流程：g++ -m64 → ld -m elf_x86_64 -Ttext 0x400000 → disk.img LBA 1
+- Framebuffer 滚动
 
----
+### 阶段零：x86-64 迁移 ✅
+> 设计见 [x64_migration.md](x64_migration.md)
 
-## 阶段二补充 ✅ 已完成
+- 32位 x86 → 64位 x86-64 全面迁移
+- Multiboot2/GRUB → UEFI stub bootloader (boot/stub.c)
+- -fPIE/GOTOFF → -mcmodel=kernel/RIP-relative
+- VMA_BASE 0xC0000000 → 0xFFFFFFFF80000000
+- 2级页表 → 4级页表 (PML4→PDPT→PD，2MB huge pages)
+- ELF32 → ELF64
+- 所有 arch/x86/ → arch/x64/
 
-> 见 [process_scheduler.md](process_scheduler.md)
+### UEFI 引导 ✅
+> 设计见 [uefi.md](uefi.md)
 
-- TSS.esp0：schedule() 中更新为 `next->k_stack_top` ✅
-- 用户页分配 + 用户程序加载：硬编码 `jmp $`（2字节），映射到 0x400000 ✅
-- 用户栈分配：阶段二不分配（ESP 假值），阶段三 syscall 时再分配 ✅
-- 删除 test_ring3 临时代码 ✅
-- 用户态 PD：**暂用全局 page_directory**（独立 PD + CR3 切换后续实现）✅
+- EFI stub bootloader (BOOTX64.EFI)
+- FAT32 启动映像 (mkimg.sh)
+- GOP framebuffer + RSDP 传递
+- boot_info 结构体传递内核启动参数
 
----
+## 当前状态
 
-## 阶段三补充（基于阶段一决策）
+内核已完整运行：UEFI 引导 → 内核初始化 → 加载 shell.elf → 启动 shell 用户进程。
 
-> 原计划已整合到阶段三完整方案中，见 [sys_call.md](sys_call.md)
+## 后续扩展
 
-- syscall 入口优化：~~pushal → 只保存 callee-saved~~ → **保持 pushal，与 __alltraps 一致**
-- syscall_dispatch 实现：系统调用分发表 + 参数传递（从 tf 提取参数传入）
-- IRQ/ISR 入口分离：暂不实现，推迟到有性能需求时
-- 独立 PD + CR3 切换：阶段三实现，边做边排查之前 crash bug
-- 用户栈分配：栈映射到 0xBFFFE000，ESP=0xBFFFF000
-- sys_getc 阻塞：wait_event 字段 + 扫描 procs[]
-
----
-
-## 阶段二：进程与调度 ✅ 已完成
-
-> 详细方案见 [process_scheduler.md](process_scheduler.md)
-
-### 前置清理 ✅
-- 删除 `test_ring3()` 及调用（kernel.cc）
-- 删除 `#PF from ring 3` 特殊处理（trap.cc）
-- 修复 `syscall_ret` 恢复顺序 bug（trapentry.S）：改为与 `__trapret` 一致的 popal→pop段寄存器→skip trapno/err_code→iret
-
-### 4. 进程控制块（PCB） ✅
-- `proc_t`：pid、state（READY/RUNNING）、k_esp、k_stack_top、cr3、entry
-- `procs[MAX_PROC=64]` 固定数组 + `current_proc` 指针
-- `proc_init()`：pid=-1 表示空闲；**schedule() 添加 current_proc==nullptr 检查**（timer 中断在 init_idle_proc 前可触发）
-
-### 5. 上下文切换 ✅
-- `switch_to(prev, next)`：push/pop callee-saved + 切换 ESP（trapentry.S）
-- `process_entry()`：`jmp __trapret`，新进程首次恢复路径
-- `schedule()`：环形扫描找 READY 进程 → 更新 tss.esp0 → 更新状态 → switch_to
-- idle 进程（PID 0）：boot stack + 全局 PD，hlt 循环兜底
-- **关键修复：idle 在 kernel_main 的 `while(1) hlt` 循环中等待中断**
-
-### 6. 进程创建 ✅
-- `process_create(entry)`：分配 PCB + 8KB 内核栈 + 用户代码页 + PT
-- 用户代码：`jmp $`（2字节，0xEB 0xFE），映射到 0x400000（PD[1] + PT[0]，flags 0x07=User）
-- 内核栈手工构建 trapframe + switch_to 恢复帧
-- 用户栈不分配（ESP 假值 0xBFFFFFFC）
-- **Page 地址转换修复**：`bfc_alloc.alloc_page()` 返回 Page 描述符指针，实际物理地址需用 `(p - BFCAllocator::frames) * PAGE_SIZE` 计算，不能直接用 `PHY_ADDR(Page*)`
-- **tss 导出**：paging.cc 中 `tss` 从 static 改为 extern，paging.h 增加声明
-
-### 当前简化
-- **所有进程共用全局 page_directory**，不分配独立 PD、不切 CR3
-- 独立 PD + CR3 切换暂未实现（拷贝内核 PDE 后切 CR3 仍 crash，后续排查）
-- `BFCAllocator` 新增全局实例 `bfc_alloc`，供 process_create 调用非静态成员 alloc_page
-
-**验证结果：** QEMU 串口输出轮转信息 `schedule: proc 0 → 1 → 2 → 0`，两个用户进程在 ring 3 轮转执行
-
----
-
-## 阶段三：系统调用 + 用户分页 + 用户栈
-
-> 详细方案见 [sys_call.md](sys_call.md)
-
-### 7. 系统调用框架
-- syscall_entry 保持 pushal（与 __alltraps 一致），syscall_dispatch 用 trapframe_t*
-- syscall 分发表：`syscall_table[eax](ebx, ecx, edx, esi, edi)`，从 tf 提取参数传入
-- 返回值写 tf->eax，syscall_ret 的 popal 自动恢复
-
-### 8. 基础系统调用（4个）
-- `sys_putc(char c)` — 输出字符（0）
-- `sys_getpid()` — 获取当前进程 PID（1）
-- `sys_yield()` — 主动让出 CPU，直接调 schedule()（2）
-- `sys_getc()` — 读键盘输入，缓冲区空则 BLOCKED 阻塞等待（3）
-
-### 9. 独立 PD + CR3 切换
-- 每个进程分配独立 PD 页，拷贝内核 PDE（PD[768..1023]），用户 PDE 各自设置
-- switch_to 时切 CR3（next->cr3），写 CR3 自动 flush TLB
-- idle 进程仍用全局 page_directory 物理地址
-- 之前 CR3 crash bug 边做边排查
-
-### 10. 用户栈分配
-- 每个进程分配 1 页用户栈，映射到 0xBFFFE000（PD[767], PT[1023]）
-- ESP = 0xBFFFF000（栈区起始，向下增长）
-- trapframe 中 esp 从假值改为真实栈地址
-
-### 11. 进程状态扩展
-- `proc_state_t` 增加 `BLOCKED` 状态
-- `proc_t` 增加 `wait_event_t` 字段（WAIT_NONE / WAIT_KBD）
-- schedule() 只扫描 READY 进程，跳过 BLOCKED
-- kbd IRQ handler 扫描 procs[] 唤醒 BLOCKED+WAIT_KBD 进程
-
-### 用户地址空间布局
-```
-0x400000   代码区（PD[1], 1 page+）
-0x600000   堆区（预留，brk 按需扩展）
-0xBFFFE000 栈区（PD[767], 1 page）
-0xC0000000 VMA_BASE（内核, PD[768+]）
-```
-
-**验证点：** 用户态进程通过 int 0x80 调用 sys_putc 打印字符；shell 进程通过 sys_getc 等待键盘输入并回显
-
----
-
-## 阶段四：Shell + ATA PIO + ELF Loader
-
-> 详细方案见 [shell.md](shell.md)
-
-### 12. ATA PIO 磁盘驱动
-- LBA28 读扇区：`ata_read_lba(lba, count, buf)`，~60 行
-- 端口 0x1F0-0x1F7，inw 读 16-bit data 寄存器
-- QEMU `-drive file=disk.img,format=raw,if=ide`
-
-### 13. ELF32 Loader
-- 解析 ELF32 static binary，支持多 PT_LOAD 段
-- 按 p_vaddr 映射用户页，BSS 清零
-- 返回入口地址，供 process_create_elf 使用
-
-### 14. Shell 进程
-- shell.asm：getc → putc 回显 + 回车换行，零新 syscall
-- nasm 编译 → ELF32 → 写入磁盘映像 / module tag 加载
-- 短期：Multiboot2 module tag 获取 shell.elf；长期：ATA PIO 从磁盘读取
-
-### 15. framebuffer 滚动
-- fb_putc 处理 \n 到底部时 memmove 上移 + 清最后一行
-- 纯内部实现，不暴露新接口
-
-### 16. process_create_elf
-- 新增 `process_create_elf(elf_data, size)` 独立接口
-- 内部调用 elf_load 映射段 + 分配用户栈 + 构建陷阱帧
-
-### 后续：IPC（阶段四原计划，shell 之后按需实现）
-
-### 9. IPC 消息传递（原阶段四）
-- 消息结构：固定大小（如 256 字节），包含发送方 PID + 类型 + 数据
-- 同步 IPC：`send(dest, &msg)` 阻塞直到对方 receive，`recv(src, &msg)` 阻塞直到有消息
-- 实现：发送方挂入接收方等待队列，接收方无等待者则阻塞
-
-### 10. IPC 系统调用（原阶段四）
-- `sys_send(pid_t dest, void *msg)` — 发送消息
-- `sys_recv(pid_t src, void *msg)` — 接收消息（src=0 表示任意来源）
-- `sys_sendrecv(pid_t dest, void *msg)` — 原子发送+接收（RPC 语义）
-
-**验证点：** 两个进程通过 IPC 互相发送消息，屏幕交替打印
-
----
-
-## 阶段五：用户态服务
-
-### 驱动服务化（IPC 实现后）
-- 键盘驱动从内核移至用户态服务进程：通过 IPC 接收中断通知，转换 scancode 后发送给请求进程
-- 内核仅保留中断通知机制：IRQ 时向注册的服务进程发送通知消息
-
----
-
-## 依赖关系
-
-```
-阶段一(1→2→3) → 阶段二(4→5→6) → 阶段三(7→8→9→10→11) → 阶段四(shell) → IPC(后续按需) → 阶段五(驱动服务化)
-```
-
-每阶段末尾有验证点，确保前一层稳固再进入下一层。
+| 功能 | 依赖 | 说明 |
+|------|------|------|
+| syscall/sysret 指令 | MSR 设置 | 替代 int 0x80，64位标准路径 |
+| APIC | 无 | 替代 PIC，SMP 前置条件 |
+| TSS IST | 无 | NMI/double fault 独立栈 |
+| 多核 SMP | APIC | 多核调度 |
+| NX 位 | 无 | 页表项 bit63 按需启用 |
+| IPC 消息传递 | 无 | 用户态服务化基础 |
+| 文件系统 | ATA | 替代硬编码 LBA |
+| 更多 shell 命令 | 无 | echo, help, clear, pid |

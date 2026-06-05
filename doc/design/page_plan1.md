@@ -6,6 +6,15 @@ type: project
 
 # 分页重构方案：分阶段映射
 
+> **历史文档**：这是 x86-32 / Multiboot2 阶段的分页重构方案。当前代码已迁移至 x86-64 / UEFI。
+>
+> 当前实现概要：
+> - 4级页表 (PML4→PDPT→PD)，enable_paging 在物理地址构建初始映射，init_mem 在虚拟地址扩展
+> - 2MB huge pages 初始覆盖 1GB，extend_mapping 按 1GB 块动态扩展
+> - VMA_BASE = `0xFFFFFFFF80000000`
+> - 栈切换：_entry64 中 `lea stack_bottom(%rip), %rsp` 直接切到虚拟地址
+> - 参见 CLAUDE.md 了解当前架构
+
 ## 设计目标
 
 将分页设置从 boot_main 中拆出，分为两个阶段：

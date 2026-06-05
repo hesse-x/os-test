@@ -1,5 +1,16 @@
 # 阶段三：系统调用 + 用户分页 + 用户栈
 
+> **历史文档**：这是 x86-32 阶段三的系统调用设计方案。当前代码已迁移至 x86-64。
+>
+> 当前实现概要：
+> - syscall 仍用 int 0x80（vector128 → syscall_entry），syscall/sysret 指令待实现
+> - syscall_dispatch: `syscall_table[tf->rax](tf->rbx, tf->rcx, tf->rdx, tf->rsi, tf->rdi)`
+> - 所有 syscall 函数签名: `uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)`
+> - 用户地址空间: 代码 0x400000, 栈 0x00007FFFFFFFD000
+> - 独立 PML4 + CR3 切换（switch_to 中 movq 24(%rsi), %rax; movq %rax, %cr3）
+> - BLOCKED + WAIT_KBD 键盘阻塞/唤醒
+> - 参见 CLAUDE.md 和 kernel/trap.cc 了解当前实现
+
 ## 设计决策
 
 | 决策 | 选择 | 理由 |

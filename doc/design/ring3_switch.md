@@ -1,6 +1,16 @@
 # Ring 3 特权级切换方案
 
-阶段一：用户态基础设施——建立 ring 0 → ring 3 切换能力并验证。
+> **历史文档**：这是 x86-32 阶段一的 ring 3 切换设计方案。当前代码已迁移至 x86-64。
+>
+> 当前实现概要：
+> - GDT: 7项（null/code64/data/user_code64/user_data/TSS_low/TSS_high），TSS 跨两个 slot
+> - TSS: 128字节，仅 RSP0（无 esp0/ss0），iomap_base=sizeof(tss_t)
+> - IDT: 256项，16字节门描述符；vector128 走 syscall_entry
+> - trapframe_t: 全64位（R15-R8, RDI-RAX, trapno, err_code, RIP, CS, RFLAGS, RSP, SS）
+> - __alltraps: push 16个GP寄存器 + movw $0x10 → trap_dispatch(rdi=&trapframe)
+> - __trapret: pop 16个GP寄存器 + addq $16 + iretq
+> - USER_CS=0x1B, USER_DS=0x23, TSS_SEL=0x28
+> - 参见 CLAUDE.md 了解当前架构
 
 ## 设计决策汇总
 
