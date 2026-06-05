@@ -10,6 +10,8 @@ size_t total_page_frames = 0;
 Page *BFCAllocator::frames = NULL;
 Page *BFCAllocator::free_list = NULL;
 
+BFCAllocator bfc_alloc;
+
 // ===================== BFCAllocator implementation =====================
 void BFCAllocator::init() {
   // init_mem 中完成初始化

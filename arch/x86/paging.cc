@@ -4,7 +4,7 @@
 // ===================== GDT =====================
 static gdt_entry_t gdt[6];
 static gdt_ptr_t gdt_reg;
-static tss_t tss;
+tss_t tss;
 
 static void set_gdt_gate(int n, uint32_t base, uint32_t limit, uint8_t access,
                          uint8_t gran) {

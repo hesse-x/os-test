@@ -44,68 +44,130 @@
 
 ---
 
-## 阶段二补充（基于阶段一决策）
+## 阶段二补充 ✅ 已完成
 
-- TSS.esp0：进程切换时更新为 `next_proc->kernel_stack_top`（替代阶段一的 boot stack top）
-- 用户页分配 + 用户程序加载：分配物理页映射到用户地址空间，拷贝用户代码
-- 用户栈分配：为每个用户进程分配真实用户栈页（阶段一用随机 ESP，不分配）
-- 删除 test_ring3 临时代码
-- 用户态 PD：PD[0] not present，内核区域拷贝 PDE（supervisor-only），用户区域 User 位
+> 见 [process_scheduler.md](process_scheduler.md)
+
+- TSS.esp0：schedule() 中更新为 `next->k_stack_top` ✅
+- 用户页分配 + 用户程序加载：硬编码 `jmp $`（2字节），映射到 0x400000 ✅
+- 用户栈分配：阶段二不分配（ESP 假值），阶段三 syscall 时再分配 ✅
+- 删除 test_ring3 临时代码 ✅
+- 用户态 PD：**暂用全局 page_directory**（独立 PD + CR3 切换后续实现）✅
 
 ---
 
 ## 阶段三补充（基于阶段一决策）
 
-- syscall 入口优化：pushal → 只保存 callee-saved（ebx, esi, edi, ebp）+ eax 返回值占位
-- syscall_dispatch 实现：系统调用分发表 + 参数传递
-- IRQ/ISR 入口分离：ISR（异常）走 __alltraps，IRQ（硬件中断）走更精简路径
+> 原计划已整合到阶段三完整方案中，见 [sys_call.md](sys_call.md)
+
+- syscall 入口优化：~~pushal → 只保存 callee-saved~~ → **保持 pushal，与 __alltraps 一致**
+- syscall_dispatch 实现：系统调用分发表 + 参数传递（从 tf 提取参数传入）
+- IRQ/ISR 入口分离：暂不实现，推迟到有性能需求时
+- 独立 PD + CR3 切换：阶段三实现，边做边排查之前 crash bug
+- 用户栈分配：栈映射到 0xBFFFE000，ESP=0xBFFFF000
+- sys_getc 阻塞：wait_event 字段 + 扫描 procs[]
 
 ---
 
-## 阶段二：进程与调度
+## 阶段二：进程与调度 ✅ 已完成
 
-### 4. 进程控制块（PCB）
-- 结构体：PID、状态（READY/RUNNING/BLOCKED）、页表、内核栈、用户栈、上下文寄存器、入口点
-- 进程表：固定大小数组（如 MAX_PROC=64）
-- 当前进程指针 `current_proc`
+> 详细方案见 [process_scheduler.md](process_scheduler.md)
 
-### 5. 上下文切换
-- `switch_to(prev, next)`：保存/恢复 callee-saved 寄存器（ebx, esi, edi, ebp, esp），切换栈
-- 时钟中断（PIT 已就绪）驱动调度：`trap` 中检测 vector 32 时调用 `schedule()`
-- 简单轮转调度器（Round Robin）
+### 前置清理 ✅
+- 删除 `test_ring3()` 及调用（kernel.cc）
+- 删除 `#PF from ring 3` 特殊处理（trap.cc）
+- 修复 `syscall_ret` 恢复顺序 bug（trapentry.S）：改为与 `__trapret` 一致的 popal→pop段寄存器→skip trapno/err_code→iret
 
-### 6. 进程创建
-- `process_create(entry, args)`：分配 PCB、分配内核栈、构建 trapframe（模拟中断返回到用户态）、设置入口地址
-- 第一个用户进程：内核初始化末尾创建 init 进程，切换过去
+### 4. 进程控制块（PCB） ✅
+- `proc_t`：pid、state（READY/RUNNING）、k_esp、k_stack_top、cr3、entry
+- `procs[MAX_PROC=64]` 固定数组 + `current_proc` 指针
+- `proc_init()`：pid=-1 表示空闲；**schedule() 添加 current_proc==nullptr 检查**（timer 中断在 init_idle_proc 前可触发）
 
-**验证点：** 两个用户进程轮转，各自在屏幕不同位置打印字符
+### 5. 上下文切换 ✅
+- `switch_to(prev, next)`：push/pop callee-saved + 切换 ESP（trapentry.S）
+- `process_entry()`：`jmp __trapret`，新进程首次恢复路径
+- `schedule()`：环形扫描找 READY 进程 → 更新 tss.esp0 → 更新状态 → switch_to
+- idle 进程（PID 0）：boot stack + 全局 PD，hlt 循环兜底
+- **关键修复：idle 在 kernel_main 的 `while(1) hlt` 循环中等待中断**
+
+### 6. 进程创建 ✅
+- `process_create(entry)`：分配 PCB + 8KB 内核栈 + 用户代码页 + PT
+- 用户代码：`jmp $`（2字节，0xEB 0xFE），映射到 0x400000（PD[1] + PT[0]，flags 0x07=User）
+- 内核栈手工构建 trapframe + switch_to 恢复帧
+- 用户栈不分配（ESP 假值 0xBFFFFFFC）
+- **Page 地址转换修复**：`bfc_alloc.alloc_page()` 返回 Page 描述符指针，实际物理地址需用 `(p - BFCAllocator::frames) * PAGE_SIZE` 计算，不能直接用 `PHY_ADDR(Page*)`
+- **tss 导出**：paging.cc 中 `tss` 从 static 改为 extern，paging.h 增加声明
+
+### 当前简化
+- **所有进程共用全局 page_directory**，不分配独立 PD、不切 CR3
+- 独立 PD + CR3 切换暂未实现（拷贝内核 PDE 后切 CR3 仍 crash，后续排查）
+- `BFCAllocator` 新增全局实例 `bfc_alloc`，供 process_create 调用非静态成员 alloc_page
+
+**验证结果：** QEMU 串口输出轮转信息 `schedule: proc 0 → 1 → 2 → 0`，两个用户进程在 ring 3 轮转执行
 
 ---
 
-## 阶段三：系统调用
+## 阶段三：系统调用 + 用户分页 + 用户栈
+
+> 详细方案见 [sys_call.md](sys_call.md)
 
 ### 7. 系统调用框架
-- `int 0x80` 入口：用户态通过 `int $0x80` + eax=syscall号 进入内核
-- 系统调用分发表：`syscall_table[eax](ebx, ecx, edx, esi, edi)`
-- trapframe 中 eax 存返回值
+- syscall_entry 保持 pushal（与 __alltraps 一致），syscall_dispatch 用 trapframe_t*
+- syscall 分发表：`syscall_table[eax](ebx, ecx, edx, esi, edi)`，从 tf 提取参数传入
+- 返回值写 tf->eax，syscall_ret 的 popal 自动恢复
 
-### 8. 基础系统调用
-- `sys_putc(char c)` — 输出字符（替代直接调用内核 fb_putc）
-- `sys_getpid()` — 获取当前进程 PID
-- `sys_yield()` — 主动让出 CPU
+### 8. 基础系统调用（4个）
+- `sys_putc(char c)` — 输出字符（0）
+- `sys_getpid()` — 获取当前进程 PID（1）
+- `sys_yield()` — 主动让出 CPU，直接调 schedule()（2）
+- `sys_getc()` — 读键盘输入，缓冲区空则 BLOCKED 阻塞等待（3）
 
-**验证点：** 用户态进程通过 `int 0x80` 调用 sys_putc 打印字符
+### 9. 独立 PD + CR3 切换
+- 每个进程分配独立 PD 页，拷贝内核 PDE（PD[768..1023]），用户 PDE 各自设置
+- switch_to 时切 CR3（next->cr3），写 CR3 自动 flush TLB
+- idle 进程仍用全局 page_directory 物理地址
+- 之前 CR3 crash bug 边做边排查
+
+### 10. 用户栈分配
+- 每个进程分配 1 页用户栈，映射到 0xBFFFE000（PD[767], PT[1023]）
+- ESP = 0xBFFFF000（栈区起始，向下增长）
+- trapframe 中 esp 从假值改为真实栈地址
+
+### 11. 进程状态扩展
+- `proc_state_t` 增加 `BLOCKED` 状态
+- `proc_t` 增加 `wait_event_t` 字段（WAIT_NONE / WAIT_KBD）
+- schedule() 只扫描 READY 进程，跳过 BLOCKED
+- kbd IRQ handler 扫描 procs[] 唤醒 BLOCKED+WAIT_KBD 进程
+
+### 用户地址空间布局
+```
+0x400000   代码区（PD[1], 1 page+）
+0x600000   堆区（预留，brk 按需扩展）
+0xBFFFE000 栈区（PD[767], 1 page）
+0xC0000000 VMA_BASE（内核, PD[768+]）
+```
+
+**验证点：** 用户态进程通过 int 0x80 调用 sys_putc 打印字符；shell 进程通过 sys_getc 等待键盘输入并回显
 
 ---
 
-## 阶段四：IPC
+## 阶段四：Shell 进程（跳过 IPC，直接用 syscall）
 
-### 9. IPC 消息传递
+> 阶段三完成后直接做 shell，不经过 IPC 阶段。shell 通过 syscall 与内核交互（sys_getc 读键盘、sys_putc 输出），不需要 IPC 机制。
+
+### 12. 简单 shell
+- 用户态 shell 进程：循环 sys_getc 读取按键，回车时执行简单命令
+- 命令集：`help`（列出命令）、`pid`（打印当前 PID）、`clear`（清屏）、`yield`（让出 CPU）
+- shell 代码作为用户程序加载（不再是硬编码 jmp $）
+
+### 后续：IPC（阶段四原计划，shell 之后按需实现）
+
+### 9. IPC 消息传递（原阶段四）
 - 消息结构：固定大小（如 256 字节），包含发送方 PID + 类型 + 数据
 - 同步 IPC：`send(dest, &msg)` 阻塞直到对方 receive，`recv(src, &msg)` 阻塞直到有消息
 - 实现：发送方挂入接收方等待队列，接收方无等待者则阻塞
 
-### 10. IPC 系统调用
+### 10. IPC 系统调用（原阶段四）
 - `sys_send(pid_t dest, void *msg)` — 发送消息
 - `sys_recv(pid_t src, void *msg)` — 接收消息（src=0 表示任意来源）
 - `sys_sendrecv(pid_t dest, void *msg)` — 原子发送+接收（RPC 语义）
@@ -116,20 +178,16 @@
 
 ## 阶段五：用户态服务
 
-### 11. 驱动服务化
+### 驱动服务化（IPC 实现后）
 - 键盘驱动从内核移至用户态服务进程：通过 IPC 接收中断通知，转换 scancode 后发送给请求进程
 - 内核仅保留中断通知机制：IRQ 时向注册的服务进程发送通知消息
-
-### 12. 简单 shell
-- 用户态 shell 进程：等待键盘输入，按回车执行命令
-- 演示微内核架构：shell → IPC → 驱动服务 → IPC → 回 shell
 
 ---
 
 ## 依赖关系
 
 ```
-阶段一(1→2→3) → 阶段二(4→5→6) → 阶段三(7→8) → 阶段四(9→10) → 阶段五(11→12)
+阶段一(1→2→3) → 阶段二(4→5→6) → 阶段三(7→8→9→10→11) → 阶段四(shell) → IPC(后续按需) → 阶段五(驱动服务化)
 ```
 
 每阶段末尾有验证点，确保前一层稳固再进入下一层。

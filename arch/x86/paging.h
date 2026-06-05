@@ -59,6 +59,7 @@ extern "C" {
 extern uint32_t page_directory[1024];
 extern uint32_t page_table[1024];
 extern uintptr_t device_vma_base;
+extern tss_t tss;
 
 // ===================== Functions =====================
 void enable_page();

@@ -6,6 +6,7 @@ add_library(kernel_obj OBJECT
     kernel.cc
     serial.cc
     trap.cc
+    proc.cc
 )
 
 target_include_directories(kernel_obj PRIVATE ${CMAKE_SOURCE_DIR})

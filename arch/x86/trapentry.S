@@ -67,9 +67,39 @@ syscall_entry:
 .globl syscall_ret
 syscall_ret:
     popal
-    addl $8, %esp        /* skip trapno + err_code */
     popl %gs
     popl %fs
     popl %es
     popl %ds
+    addl $8, %esp        /* skip trapno + err_code */
     iret                 /* pops EIP, CS, EFLAGS; on privilege change also ESP, SS */
+
+# ===================== context switch =====================
+# void switch_to(proc_t *prev, proc_t *next)
+# proc_t layout: pid(0) state(4) k_esp(8) k_stack_top(12) cr3(16) entry(20)
+# C calling convention: prev at [esp+4], next at [esp+8] before callee-saved push
+.globl switch_to
+switch_to:
+    pushl %ebx
+    pushl %esi
+    pushl %edi
+    pushl %ebp
+
+    # prev = original esp+4, after 4 pushes = current esp+20
+    movl 20(%esp), %eax
+    movl %esp, 8(%eax)           # prev->k_esp = current ESP
+
+    # next = original esp+8, after 4 pushes = current esp+24
+    movl 24(%esp), %ecx
+    movl 8(%ecx), %esp           # ESP = next->k_esp
+
+    popl %ebp
+    popl %edi
+    popl %esi
+    popl %ebx
+    ret
+
+# process_entry: first return target for new processes
+.globl process_entry
+process_entry:
+    jmp __trapret

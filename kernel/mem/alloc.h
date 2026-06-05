@@ -35,4 +35,6 @@ extern size_t total_page_frames;
 void init_mem(uintptr_t mbi_addr);
 }
 
+extern BFCAllocator bfc_alloc;
+
 #endif // KERNEL_MEM_ALLOC_H
