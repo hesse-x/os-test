@@ -6,6 +6,13 @@
 #include "arch/x64/utils.h"
 #include "common/macro.h"
 
+// ===================== Page table entry flags =====================
+#define PTE_PRESENT  (1ULL << 0)
+#define PTE_RW       (1ULL << 1)
+#define PTE_USER     (1ULL << 2)
+#define PTE_PS       (1ULL << 7)   // Page size (2MB huge page at PD level)
+#define PTE_NX       (1ULL << 63)  // No-execute
+
 // ===================== Constants =====================
 #define PAGE_SIZE 4096
 #define PAGE_SIZE_2M 0x200000
@@ -94,6 +101,7 @@ void *bump_alloc(size_t size);
 void bump_init_phys(uintptr_t start);
 void bump_disable();
 uintptr_t bump_end_phys();
+void enable_nx();
 }
 
 #endif // ARCH_X64_PAGING_H

@@ -1,5 +1,5 @@
-#ifndef KERNEL_ELF_H
-#define KERNEL_ELF_H
+#ifndef COMMON_ELF_H
+#define COMMON_ELF_H
 
 #include <stdint.h>
 
@@ -46,4 +46,4 @@ struct elf_load_result {
 elf_load_result elf_load(const uint8_t *data, uint64_t size,
                          uint64_t *new_pml4);
 
-#endif // KERNEL_ELF_H
+#endif // COMMON_ELF_H

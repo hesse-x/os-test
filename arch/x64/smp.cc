@@ -12,6 +12,7 @@ int ncpu = 1;
 gdt_entry_t per_cpu_gdt[MAX_CPUS][7];
 gdt_ptr_t per_cpu_gdtr[MAX_CPUS];
 tss_t per_cpu_tss[MAX_CPUS];
+uint64_t per_cpu_ist_stack[MAX_CPUS][3]; // IST1=NMI, IST2=DF, IST3=MCE
 
 // Trampoline page at physical 0x8000, mapped via identity map
 #define AP_TRAMPOLINE_PHYS 0x8000
@@ -77,6 +78,20 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
         ((uint8_t *)tss)[i] = 0;
     tss->rsp0 = kernel_stack;
     tss->iomap_base = sizeof(tss_t);
+
+    // Allocate per-CPU IST stacks (1 page each: NMI, Double Fault, Machine Check)
+    for (int i = 0; i < 3; i++) {
+        Page *ist_page = bfc_alloc.alloc_page(1);
+        if (!ist_page) {
+            serial_puts("smp_init_cpu: IST alloc failed\n");
+            halt();
+        }
+        uint64_t ist_phys = (uint64_t)(ist_page - BFCAllocator::frames) * PAGE_SIZE;
+        per_cpu_ist_stack[cpu_id][i] = ist_phys + VMA_BASE + PAGE_SIZE; // top of page
+    }
+    tss->ist[0] = per_cpu_ist_stack[cpu_id][0]; // IST1 = NMI (#2)
+    tss->ist[1] = per_cpu_ist_stack[cpu_id][1]; // IST2 = Double Fault (#8)
+    tss->ist[2] = per_cpu_ist_stack[cpu_id][2]; // IST3 = Machine Check (#18)
 
     set_tss_gate(gdt, 5, (uint64_t)tss, sizeof(tss_t) - 1);
 

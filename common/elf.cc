@@ -1,4 +1,4 @@
-#include "kernel/elf.h"
+#include "common/elf.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/proc.h"
 #include "arch/x64/paging.h"
@@ -27,7 +27,7 @@ static uint64_t *ensure_pd(uint64_t *new_pml4, uint64_t vaddr) {
     for (int i = 0; i < 512; i++) {
         pdpt[i] = 0;
     }
-    new_pml4[pml4_idx] = pdpt_phys | 0x07;
+    new_pml4[pml4_idx] = pdpt_phys | PTE_PRESENT | PTE_RW | PTE_USER;
     return pdpt;
 }
 
@@ -50,7 +50,7 @@ static uint64_t *ensure_pt_in_pd(uint64_t *pd_or_pdpt, uint64_t vaddr, int level
     for (int i = 0; i < 512; i++) {
         table[i] = 0;
     }
-    pd_or_pdpt[idx] = table_phys | 0x07;
+    pd_or_pdpt[idx] = table_phys | PTE_PRESENT | PTE_RW | PTE_USER;
     return table;
 }
 
@@ -84,7 +84,7 @@ static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
     if (!pt) return false;
 
     uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
-    pt[pt_idx] = page_phys | 0x07;  // Present + Writable + User
+    pt[pt_idx] = page_phys | PTE_PRESENT | PTE_RW | PTE_USER;
 
     return true;
 }

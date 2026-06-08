@@ -4,7 +4,7 @@
 #include "kernel/proc.h"
 #include "kernel/serial.h"
 #include "kernel/mem/alloc.h"
-#include "kernel/elf.h"
+#include "common/elf.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
@@ -13,18 +13,17 @@ proc_t procs[MAX_PROC];
 // current_proc is per-CPU (in cpu_local_t), accessed via macro
 
 // 64-bit init_code: getpid → add '0' → putc → yield → loop
-// Using int 0x80 with: rax=syscall#, rbx=arg1
+// Using SYSCALL with: rax=syscall#, rdi=arg1
 static const uint8_t init_code[] = {
     0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00,  // movq $1, %rax (sys_getpid)
-    0x48, 0xC7, 0xC3, 0x00, 0x00, 0x00, 0x00,  // movq $0, %rbx (dummy arg)
-    0xCD, 0x80,                                   // int $0x80
+    0x0F, 0x05,                                   // syscall
     0x48, 0x83, 0xC0, 0x30,                      // addq $0x30, %rax
-    0x48, 0x89, 0xC3,                             // movq %rax, %rbx
+    0x48, 0x89, 0xC7,                             // movq %rax, %rdi
     0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00,  // movq $0, %rax (sys_putc)
-    0xCD, 0x80,                                   // int $0x80
+    0x0F, 0x05,                                   // syscall
     0x48, 0xC7, 0xC0, 0x02, 0x00, 0x00, 0x00,  // movq $2, %rax (sys_yield)
-    0xCD, 0x80,                                   // int $0x80
-    0xEB, 0xD5                                    // jmp back (offset 0)
+    0x0F, 0x05,                                   // syscall
+    0xEB, 0xDC                                    // jmp back (offset = -36)
 };
 
 extern "C" const uint8_t stack_bottom[8192];
@@ -119,7 +118,7 @@ static uint64_t *ensure_pd(uint64_t *new_pml4, uint64_t vaddr) {
     for (int i = 0; i < 512; i++) {
         pdpt[i] = 0;
     }
-    new_pml4[pml4_idx] = pdpt_phys | 0x07;  // Present + RW + User
+    new_pml4[pml4_idx] = pdpt_phys | PTE_PRESENT | PTE_RW | PTE_USER;
     return pdpt;
 }
 
@@ -145,7 +144,7 @@ static uint64_t *ensure_pt_in_pd(uint64_t *pd_or_pdpt, uint64_t vaddr, int level
     for (int i = 0; i < 512; i++) {
         table[i] = 0;
     }
-    pd_or_pdpt[idx] = table_phys | 0x07;  // Present + RW + User
+    pd_or_pdpt[idx] = table_phys | PTE_PRESENT | PTE_RW | PTE_USER;
     return table;
 }
 
@@ -179,13 +178,15 @@ static bool map_user_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src
     if (!pt) return false;
 
     uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
-    pt[pt_idx] = page_phys | 0x07;  // Present + Writable + User
+    pt[pt_idx] = page_phys | PTE_PRESENT | PTE_RW | PTE_USER;
 
     return true;
 }
 
 // Map a physical page directly at vaddr in new_pml4 (no copy, page already initialized)
-static bool map_user_page_direct(uint64_t *new_pml4, uint64_t vaddr, uint64_t phys) {
+// flags: PTE flags (Present+RW+User+optional NX, etc.)
+static bool map_user_page_direct(uint64_t *new_pml4, uint64_t vaddr, uint64_t phys,
+                                 uint64_t flags) {
     uint64_t *pdpt = ensure_pd(new_pml4, vaddr);
     if (!pdpt) return false;
     uint64_t *pd = ensure_pt_in_pd(pdpt, vaddr, 2);
@@ -194,7 +195,7 @@ static bool map_user_page_direct(uint64_t *new_pml4, uint64_t vaddr, uint64_t ph
     if (!pt) return false;
 
     uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
-    pt[pt_idx] = phys | 0x07;  // Present + Writable + User
+    pt[pt_idx] = phys | flags;
     return true;
 }
 
@@ -295,7 +296,8 @@ proc_t *process_create(uint64_t entry) {
         code_dst[i] = init_code[i];
     }
 
-    if (!map_user_page_direct(new_pml4, 0x400000, user_code_phys))
+    if (!map_user_page_direct(new_pml4, 0x400000, user_code_phys,
+                             PTE_PRESENT | PTE_RW | PTE_USER))
         { serial_puts("process_create: map code failed\n"); return nullptr; }
 
     // 7. Map user stack page at 0x00007FFFFFFFD000 (canonical low-half)
@@ -304,7 +306,8 @@ proc_t *process_create(uint64_t entry) {
     serial_puts("process_create: stack page ok\n");
     uint64_t user_stack_phys = page_to_phys(user_stack_page);
 
-    if (!map_user_page_direct(new_pml4, 0x00007FFFFFFFD000, user_stack_phys))
+    if (!map_user_page_direct(new_pml4, 0x00007FFFFFFFD000, user_stack_phys,
+                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX))
         { serial_puts("process_create: map stack failed\n"); return nullptr; }
 
     // 8. Build trapframe + switch_to frame on kernel stack
@@ -364,7 +367,8 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     if (!user_stack_page) return nullptr;
     uint64_t user_stack_phys = page_to_phys(user_stack_page);
 
-    if (!map_user_page_direct(new_pml4, 0x00007FFFFFFFD000, user_stack_phys))
+    if (!map_user_page_direct(new_pml4, 0x00007FFFFFFFD000, user_stack_phys,
+                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX))
         return nullptr;
 
     // 7. Build trapframe + switch_to frame on kernel stack

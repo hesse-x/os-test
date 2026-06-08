@@ -79,10 +79,10 @@ trampoline_32bit:
     movl 0x80C0, %eax
     movl %eax, %cr3
 
-    # Enable long mode (EFER.LME)
+    # Enable long mode (EFER.LME + EFER.NXE for NX bit)
     movl $0xC0000080, %ecx
     rdmsr
-    orl $0x100, %eax
+    orl $0x900, %eax         # bit 8 = LME, bit 11 = NXE
     wrmsr
 
     # Enable paging

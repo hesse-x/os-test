@@ -236,9 +236,3 @@ vector47:
   pushq $0
   pushq $47
   jmp __alltraps
-
-.globl vector128
-vector128:
-  pushq $0
-  pushq $128
-  jmp syscall_entry

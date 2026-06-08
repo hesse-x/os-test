@@ -8,6 +8,14 @@
 #define MSR_GS_BASE 0xC0000101
 #define MSR_KERNEL_GS_BASE 0xC0000102
 #define MSR_FS_BASE 0xC0000100
+#define MSR_EFER 0xC0000080
+#define MSR_STAR 0xC0000081
+#define MSR_LSTAR 0xC0000082
+#define MSR_CSTAR 0xC0000083
+#define MSR_SFMASK 0xC0000084
+
+#define EFER_SCE (1ULL << 0)
+#define EFER_NXE (1ULL << 11)
 
 struct proc_t; // forward declaration
 
@@ -26,6 +34,7 @@ extern int ncpu;
 extern gdt_entry_t per_cpu_gdt[MAX_CPUS][7];
 extern gdt_ptr_t per_cpu_gdtr[MAX_CPUS];
 extern tss_t per_cpu_tss[MAX_CPUS];
+extern uint64_t per_cpu_ist_stack[MAX_CPUS][3]; // IST1=NMI, IST2=DF, IST3=MCE
 
 static inline void set_cpu_local(cpu_local_t *p) {
     // Kernel GS base holds cpu_local pointer; swapgs will exchange it to GS_BASE

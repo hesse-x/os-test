@@ -1,5 +1,6 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
+#include "arch/x64/utils.h"
 
 // ===================== GDT (物理地址阶段) =====================
 // start.S 调用 gdt_init() 时仍在物理地址运行，
@@ -97,13 +98,13 @@ extern "C" __attribute__((noinline)) void enable_paging(boot_info *bi_phys) {
   for (int i = 0; i < 512; i++) pdpt_h_p[i] = 0;
   for (int i = 0; i < 512; i++) pd_p[i] = 0;
 
-  pml4_p[0]     = pdpt_i_phys | 0x03;
-  pml4_p[511]   = pdpt_h_phys | 0x03;
-  pdpt_i_p[0]   = pd_phys | 0x03;
-  pdpt_h_p[510] = pd_phys | 0x03;
+  pml4_p[0]     = pdpt_i_phys | PTE_PRESENT | PTE_RW;
+  pml4_p[511]   = pdpt_h_phys | PTE_PRESENT | PTE_RW;
+  pdpt_i_p[0]   = pd_phys | PTE_PRESENT | PTE_RW;
+  pdpt_h_p[510] = pd_phys | PTE_PRESENT | PTE_RW;
 
   for (int i = 0; i < 512; i++) {
-    pd_p[i] = ((uint64_t)i << 21) | 0x83;
+    pd_p[i] = ((uint64_t)i << 21) | PTE_PRESENT | PTE_RW | PTE_PS;
   }
 
   // 加载 CR3 — 此后 identity map + higher-half 均生效
@@ -157,14 +158,14 @@ void extend_mapping(uint64_t max_phys_addr) {
     // 填充 PD: 512个 2MB huge pages 映射物理 n*1GB 到 (n+1)*1GB
     uint64_t phys_base = (uint64_t)n * 0x40000000;
     for (int i = 0; i < 512; i++) {
-      pd[i] = (phys_base + (uint64_t)i * PAGE_SIZE_2M) | 0x83;  // Present + RW + PS
+      pd[i] = (phys_base + (uint64_t)i * PAGE_SIZE_2M) | PTE_PRESENT | PTE_RW | PTE_PS;
     }
 
     // identity map: PDPT_ident[n] = PD
-    pdpt_ident[n] = pd_phys | 0x03;
+    pdpt_ident[n] = pd_phys | PTE_PRESENT | PTE_RW;
 
     // higher-half map: PDPT_hh[510 + n] = PD
-    pdpt_hh[510 + n] = pd_phys | 0x03;
+    pdpt_hh[510 + n] = pd_phys | PTE_PRESENT | PTE_RW;
   }
 
   // 设备映射区
@@ -180,4 +181,18 @@ void flush_tlb() {
 // ===================== bump allocator query =====================
 extern "C" uintptr_t bump_end_phys() {
   return bump_next_phys;
+}
+
+// ===================== NX bit enable =====================
+// Set CR4.NXDE (bit 5) and EFER.NXE (bit 11) to enable no-execute pages.
+extern "C" void enable_nx() {
+  // Enable CR4.NXDE
+  uint64_t cr4 = read_cr4();
+  cr4 |= (1ULL << 5);
+  write_cr4(cr4);
+
+  // Enable EFER.NXE
+  uint64_t efer = rdmsr(MSR_EFER);
+  efer |= EFER_NXE;
+  wrmsr(MSR_EFER, efer);
 }

@@ -106,7 +106,7 @@ static void map_apic_mmio(uint64_t lapic_phys, uint64_t ioapic_phys) {
     pd[n] = (region_start + n * 0x200000) | 0x9B; // Present+RW+PS+PCD+PWT
   }
 
-  pdpt_hh[pdpt_idx] = pd_phys | 0x03;
+  pdpt_hh[pdpt_idx] = pd_phys | PTE_PRESENT | PTE_RW;
 
   // Compute virtual address for this PDPT slot
   // pdpt_hh[i] maps virtual: VMA_BASE + (i - 510) * 0x40000000

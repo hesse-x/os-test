@@ -82,6 +82,28 @@
 - `init_ap_idle()`：每个 AP 创建独立 idle 进程
 - `pick_cpu()`：基于 run_count 的简单负载均衡
 
+### SYSCALL/SYSRET 快速系统调用 ✅
+
+- MSR 设置：STAR(0x08/0x0B)、LSTAR(syscall_fast_entry)、SFMASK(IF+TF)、EFER.SCE
+- `syscall_fast_entry`：swapgs → 读 tss_rsp0 切栈 → 构建 trapframe → call syscall_dispatch
+- SYSRET 返回：从 trapframe 恢复寄存器 → RCX=rip, R11=rflags → swapgs → sysretq
+- 调用约定：RAX=syscall#，args=RDI/RSI/RDX/R10/R8/R9（Linux 风格）
+- `map_user_page_direct` 增加 flags 参数，用户栈页映射时加 PTE_NX
+- int 0x80 路径已移除，仅支持 SYSCALL/SYSRET
+
+### TSS IST 栈 ✅
+
+- 每 CPU 3 个独立 IST 栈（4KB）：IST1=NMI(#2), IST2=Double Fault(#8), IST3=Machine Check(#18)
+- `smp_init_cpu()` 中通过 bfc_alloc 分配并填入 `tss.ist[0/1/2]`
+- `set_idt_gate()` 增加 ist 参数，IDT 门描述符 IST index 字段生效
+
+### NX 位 ✅
+
+- `enable_nx()`：设置 CR4.NXDE(bit5) + EFER.NXE(bit11)
+- PTE 标志常量化：PTE_PRESENT/PTE_RW/PTE_USER/PTE_PS/PTE_NX
+- 用户栈页映射时加 PTE_NX（不可执行）
+- AP trampoline 中 EFER 写入增加 NXE 位
+
 ## 当前状态
 
 内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动 → 加载 shell.elf → 启动 shell 用户进程。BSP 运行调度循环，AP 进入 idle 循环。
@@ -108,9 +130,6 @@
 
 | 功能 | 依赖 | 状态 |
 |------|------|------|
-| syscall/sysret 指令 | MSR 设置 | [ ] |
-| TSS IST | 无 | [ ] |
-| NX 位 | 无 | [ ] 页表项 bit63 按需启用 |
 | 运行时 IPI | LAPIC | [ ] reschedule / TLB shootdown |
 | IPC 消息传递 | 无 | [ ] 用户态服务化基础 |
 | 文件系统 | ATA | [ ] 替代硬编码 LBA |

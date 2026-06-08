@@ -102,6 +102,16 @@ static inline void load_cr3(uint64_t addr) {
   __asm__ volatile("movq %0, %%cr3" :: "r"(addr) : "memory");
 }
 
+static inline uint64_t read_cr4() {
+  uint64_t val;
+  __asm__ volatile("movq %%cr4, %0" : "=r"(val));
+  return val;
+}
+
+static inline void write_cr4(uint64_t val) {
+  __asm__ volatile("movq %0, %%cr4" :: "r"(val) : "memory");
+}
+
 static inline void lgdt(const void *ptr) {
   __asm__ volatile("lgdt %0" : : "m"(*((const uint64_t *)ptr)));
 }
@@ -123,15 +133,47 @@ static inline void ltr(uint16_t sel) {
 #define H32(x) ((uint32_t)(((x) >> 32) & 0xFFFFFFFF))
 
 // ===================== Syscall =====================
+// SYSCALL/SYSRET calling convention (Linux-style):
+//   RAX = syscall number, RDI/RSI/RDX/R10/R8/R9 = args
+//   RAX = return value
+//   RCX = saved RIP, R11 = saved RFLAGS (clobbered by SYSCALL)
 static inline int64_t syscall0(int64_t num) {
   int64_t ret;
-  __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num));
+  __asm__ volatile(
+      "syscall"
+      : "=a"(ret)
+      : "a"(num)
+      : "rcx", "r11", "memory");
   return ret;
 }
 
 static inline int64_t syscall1(int64_t num, int64_t arg1) {
   int64_t ret;
-  __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "b"(arg1));
+  __asm__ volatile(
+      "syscall"
+      : "=a"(ret)
+      : "a"(num), "D"(arg1)
+      : "rcx", "r11", "memory");
+  return ret;
+}
+
+static inline int64_t syscall2(int64_t num, int64_t arg1, int64_t arg2) {
+  int64_t ret;
+  __asm__ volatile(
+      "syscall"
+      : "=a"(ret)
+      : "a"(num), "D"(arg1), "S"(arg2)
+      : "rcx", "r11", "memory");
+  return ret;
+}
+
+static inline int64_t syscall3(int64_t num, int64_t arg1, int64_t arg2, int64_t arg3) {
+  int64_t ret;
+  __asm__ volatile(
+      "syscall"
+      : "=a"(ret)
+      : "a"(num), "D"(arg1), "S"(arg2), "d"(arg3)
+      : "rcx", "r11", "memory");
   return ret;
 }
 

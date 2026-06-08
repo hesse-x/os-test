@@ -23,12 +23,6 @@ void register_irq(int vec, irq_handler_t fn) {
 static uint64_t tick = 0;
 
 void trap_dispatch(trapframe_t *tf) {
-  // Syscall vector 128
-  if (tf->trapno == 128) {
-    syscall_dispatch(tf);
-    return;
-  }
-
   // Check registered handler first
   if (tf->trapno < MAX_IRQ_HANDLERS &&
       irq_handlers[tf->trapno] != nullptr) {
@@ -104,7 +98,11 @@ void isr_init() {
   smp_init_cpu(0, 0, (uint64_t)&stack_bottom + 8192);
   smp_apply_cpu(0);
 
+  // Enable NX bit (CR4.NXDE + EFER.NXE) before IDT install
+  enable_nx();
+
   idt_install();
+  setup_syscall();
   apic_init();
 
   kbd_init();
@@ -123,9 +121,9 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
 void syscall_dispatch(trapframe_t *tf) {
     if (tf->rax < NR_SYSCALL) {
         tf->rax = syscall_table[tf->rax](
-            tf->rbx, tf->rcx, tf->rdx, tf->rsi, tf->rdi);
+            tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8);
     } else {
-        tf->rax = (uint64_t)-1;  // 无效 syscall 号
+        tf->rax = (uint64_t)-1;
     }
 }
 

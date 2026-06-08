@@ -7,7 +7,6 @@ add_library(kernel_obj OBJECT
     serial.cc
     trap.cc
     proc.cc
-    elf.cc
 )
 
 target_include_directories(kernel_obj PRIVATE ${CMAKE_SOURCE_DIR})
