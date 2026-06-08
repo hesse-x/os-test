@@ -88,6 +88,15 @@ public:
   IrqGuard &operator=(const IrqGuard &) = delete;
 };
 
+// ===================== MMIO helpers =====================
+static inline uint32_t readl(const void *addr) {
+  return *(volatile const uint32_t *)addr;
+}
+
+static inline void writel(void *addr, uint32_t val) {
+  *(volatile uint32_t *)addr = val;
+}
+
 // ===================== System register helpers =====================
 static inline void load_cr3(uint64_t addr) {
   __asm__ volatile("movq %0, %%cr3" :: "r"(addr) : "memory");

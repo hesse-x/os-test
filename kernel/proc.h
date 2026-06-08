@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "arch/x64/trap.h"
+#include "arch/x64/smp.h"
 
 typedef int32_t pid_t;
 
@@ -18,16 +19,18 @@ struct proc_t {
     uint64_t cr3;          // PML4 physical address
     uint64_t entry;        // user entry RIP
     wait_event_t wait_event; // 阻塞原因
+    int assigned_cpu;      // which CPU this process runs on
 };
 
 #define MAX_PROC 64
 
 extern proc_t procs[MAX_PROC];
-extern proc_t *current_proc;
+// current_proc is now per-CPU, accessed via macro in smp.h
 
 extern "C" {
 void proc_init();
 void init_idle_proc();
+void init_ap_idle(int cpu_id, uint64_t k_stack_top);
 proc_t *process_create(uint64_t entry);
 proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);
 void schedule();

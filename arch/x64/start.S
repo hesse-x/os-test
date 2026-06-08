@@ -57,7 +57,7 @@ _entry64:
     # 复制到 g_boot_info
     movq %r12, %rsi
     lea g_boot_info(%rip), %rdi
-    movq $176, %rcx
+    movq $128, %rcx
     rep movsb
 
     # rdi = &g_boot_info

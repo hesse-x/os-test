@@ -31,6 +31,12 @@ __alltraps:
     movw %ax, %ds
     movw %ax, %es
 
+    # swapgs if from user mode (CS=0x1B at offset 144)
+    cmpw $0x1B, 144(%rsp)
+    jne 1f
+    swapgs
+1:
+
     # 调用 trap_dispatch(rdi = &trapframe)
     movq %rsp, %rdi
     call trap_dispatch
@@ -38,6 +44,12 @@ __alltraps:
     # __trapret: 恢复
 .globl __trapret
 __trapret:
+    # swapgs if returning to user mode (CS=0x1B at offset 144)
+    cmpw $0x1B, 144(%rsp)
+    jne 1f
+    swapgs
+1:
+
     popq %r15
     popq %r14
     popq %r13
@@ -83,11 +95,18 @@ syscall_entry:
     movw $0x10, %ax
     movw %ax, %ds
     movw %ax, %es
+
+    # int 0x80 always from user mode: swapgs
+    swapgs
+
     movq %rsp, %rdi
     call syscall_dispatch
 
 .globl syscall_ret
 syscall_ret:
+    # swapgs before returning to user mode
+    swapgs
+
     popq %r15
     popq %r14
     popq %r13
@@ -155,5 +174,4 @@ reload_cs:
     movq $0x08, 8(%rsp)
     lretq
 1:
-    addq $16, %rsp
     ret

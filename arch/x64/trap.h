@@ -47,8 +47,6 @@ extern "C" {
 void set_idt_gate(int n, uint64_t handler, uint8_t flags = 0x8E);
 void set_idt();
 void idt_install();
-void pic_remap();
-void pit_init();
 }
 
 #endif // ARCH_X64_TRAP_H

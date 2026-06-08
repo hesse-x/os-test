@@ -57,19 +57,62 @@
 - GOP framebuffer + RSDP 传递
 - boot_info 结构体传递内核启动参数
 
+### 多核 SMP — Per-CPU 基础设施 ✅
+
+- `cpu_local_t` 结构体（cpu_id, apic_id, _cur_proc, lapic_base, kernel_stack, tss_rsp0, run_count）
+- GS base 机制：`set_cpu_local()` 写 MSR_KERNEL_GS_BASE，`swapgs` 切换，`get_cpu_local()` 读 MSR_GS_BASE
+- `current_proc` 宏改为 per-CPU 访问（通过 GS base）
+- Per-CPU GDT + TSS：`per_cpu_gdt[MAX_CPUS][7]`、`per_cpu_tss[MAX_CPUS]`
+- `smp_init_cpu()`：初始化 per-CPU 数据，`smp_apply_cpu()`：lgdt + swapgs + ltr 加载
+
+### 多核 SMP — APIC 替换 PIC ✅
+
+- MADT 解析（boot/stub.c）：提取 LAPIC 基地址 + I/O APIC 基地址 + 各 CPU APIC ID
+- `pic_disable()`：mask 全部 8259A IRQ
+- LAPIC 使能：MMIO 映射 + MSR 启用 + SVR software enable
+- I/O APIC 配置：24 个 GSI 重定向项，timer(GSI 0) + keyboard(GSI 1) unmask 路由到 BSP
+- EOI：`outb(0x20, 0x20)` → `lapic_write(LAPIC_EOI, 0)`
+- LAPIC Timer：PIT 校准 + 周期模式启动，替代 PIT 定时中断
+
+### 多核 SMP — AP 启动 ✅
+
+- AP trampoline（`arch/x64/ap_trampoline.S`）：16位实模式入口，实模式→保护模式→长模式→`ap_entry_c`
+- INIT IPI + SIPI 启动协议（`smp_boot_aps()`）：INIT → 10ms → SIPI x2 → 200us
+- `ap_entry_c()`：加载 GDT/IDT，设置 GS base，初始化本 CPU TSS + LAPIC，启用中断
+- `init_ap_idle()`：每个 AP 创建独立 idle 进程
+- `pick_cpu()`：基于 run_count 的简单负载均衡
+
 ## 当前状态
 
-内核已完整运行：UEFI 引导 → 内核初始化 → 加载 shell.elf → 启动 shell 用户进程。
+内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动 → 加载 shell.elf → 启动 shell 用户进程。BSP 运行调度循环，AP 进入 idle 循环。
 
-## 后续扩展
+## 未完成
 
-| 功能 | 依赖 | 说明 |
+### 多核 SMP — 调度与锁
+
+- [ ] 自旋锁（`spinlock_t`：原子 test-and-set + `pause` + `cli`）
+- [ ] 大内核锁（BKL）：`__alltraps`/`syscall_entry` 入口加锁，`__trapret`/`syscall_ret` 出口释放
+- [ ] 全局调度器加 `scheduler_lock` 保护
+- [ ] `procs[]` 进程表加 `procs_lock` 保护
+- [ ] 键盘唤醒路径加锁保护
+- [ ] AP 进入调度循环，参与 round-robin 调度
+
+### 多核 SMP — 细粒度锁优化
+
+- [ ] 拆分 BKL：调度器独立锁
+- [ ] 拆分 BKL：进程表独立锁
+- [ ] 拆分 BKL：键盘/驱动独立锁
+- [ ] 验证并发正确性
+
+### 其他扩展
+
+| 功能 | 依赖 | 状态 |
 |------|------|------|
-| syscall/sysret 指令 | MSR 设置 | 替代 int 0x80，64位标准路径 |
-| APIC | 无 | 替代 PIC，SMP 前置条件 |
-| TSS IST | 无 | NMI/double fault 独立栈 |
-| 多核 SMP | APIC | 多核调度 |
-| NX 位 | 无 | 页表项 bit63 按需启用 |
-| IPC 消息传递 | 无 | 用户态服务化基础 |
-| 文件系统 | ATA | 替代硬编码 LBA |
-| 更多 shell 命令 | 无 | echo, help, clear, pid |
+| syscall/sysret 指令 | MSR 设置 | [ ] |
+| TSS IST | 无 | [ ] |
+| NX 位 | 无 | [ ] 页表项 bit63 按需启用 |
+| 运行时 IPI | LAPIC | [ ] reschedule / TLB shootdown |
+| IPC 消息传递 | 无 | [ ] 用户态服务化基础 |
+| 文件系统 | ATA | [ ] 替代硬编码 LBA |
+| 更多 shell 命令 | 无 | [ ] echo, help, clear, pid |
+| MSI / MSI-X | APIC | [ ] PCIe 设备中断 |

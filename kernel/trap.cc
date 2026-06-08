@@ -3,6 +3,8 @@
 #include "arch/x64/utils.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
+#include "arch/x64/smp.h"
+#include "arch/x64/apic.h"
 #include "kernel/serial.h"
 #include "driver/kbd.h"
 #include "driver/fb.h"
@@ -37,19 +39,30 @@ void trap_dispatch(trapframe_t *tf) {
   // Default: timer EOI
   if (tf->trapno == 32) {
     tick++;
-    outb(0x20, 0x20);
+    lapic_eoi();
     return;
   }
 
   // Other hardware IRQ: send EOI
   if (tf->trapno >= 32 && tf->trapno <= 47) {
-    if (tf->trapno >= 40)
-      outb(0xA0, 0x20);
-    outb(0x20, 0x20);
+    lapic_eoi();
     return;
   }
 
   // CPU exception: print diagnostic and halt
+  if (tf->trapno == 14) {
+    // Page fault: also print CR2 (faulting address)
+    uint64_t cr2;
+    __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
+    serial_puts("PAGE FAULT: fault addr=");
+    serial_put_hex(cr2);
+    serial_puts(" rip=");
+    serial_put_hex(tf->rip);
+    serial_puts(" err=");
+    serial_put_hex(tf->err_code);
+    serial_puts("\n");
+    halt();
+  }
   serial_puts("EXCEPTION: vector ");
   serial_put_hex(tf->trapno);
   serial_puts(" err ");
@@ -63,7 +76,7 @@ void trap_dispatch(trapframe_t *tf) {
 // ===================== Timer IRQ handler =====================
 static void timer_handler(trapframe_t *tf) {
   tick++;
-  outb(0x20, 0x20); /* EOI */
+  lapic_eoi();
   schedule();
 }
 
@@ -79,7 +92,7 @@ static void keyboard_handler(trapframe_t *tf) {
       break;  // only wake one
     }
   }
-  outb(0x20, 0x20); /* EOI */
+  lapic_eoi();
 }
 
 void isr_init() {
@@ -87,10 +100,13 @@ void isr_init() {
   register_irq(32, timer_handler);
   register_irq(33, keyboard_handler);
 
-  gdt_init();
+  // Re-initialize GDT with per-CPU setup (now running at virtual address)
+  smp_init_cpu(0, 0, (uint64_t)&stack_bottom + 8192);
+  smp_apply_cpu(0);
+
   idt_install();
-  pic_remap();
-  pit_init();
+  apic_init();
+
   kbd_init();
   sti();
 }

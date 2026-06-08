@@ -10,7 +10,7 @@
 #include "arch/x64/utils.h"
 
 proc_t procs[MAX_PROC];
-proc_t *current_proc = nullptr;
+// current_proc is per-CPU (in cpu_local_t), accessed via macro
 
 // 64-bit init_code: getpid → add '0' → putc → yield → loop
 // Using int 0x80 with: rax=syscall#, rbx=arg1
@@ -48,14 +48,17 @@ void proc_init() {
         procs[i].cr3 = 0;
         procs[i].entry = 0;
         procs[i].wait_event = WAIT_NONE;
+        procs[i].assigned_cpu = -1;
     }
-    current_proc = nullptr;
+    cpu_locals[0]._cur_proc = nullptr;
+    cpu_locals[0].run_count = 0;
 }
 
 void init_idle_proc() {
     proc_t *idle = &procs[0];
     idle->pid = 0;
     idle->state = RUNNING;
+    idle->assigned_cpu = 0;
 
     // Get current RSP (boot stack position)
     uint64_t rsp;
@@ -66,8 +69,38 @@ void init_idle_proc() {
     idle->entry = 0;
     idle->wait_event = WAIT_NONE;
 
-    current_proc = idle;
-    tss.rsp0 = idle->k_stack_top;
+    cpu_locals[0]._cur_proc = idle;
+    cpu_locals[0].run_count = 1;
+    per_cpu_tss[0].rsp0 = idle->k_stack_top;
+    cpu_locals[0].tss_rsp0 = idle->k_stack_top;
+}
+
+void init_ap_idle(int cpu_id, uint64_t k_stack_top) {
+    // Find a free PCB slot (skip pid 0 = BSP idle)
+    proc_t *idle = nullptr;
+    int alloc_idx = -1;
+    for (int i = 1; i < MAX_PROC; i++) {
+        if (procs[i].pid < 0) {
+            idle = &procs[i];
+            alloc_idx = i;
+            break;
+        }
+    }
+    if (!idle) return;
+
+    idle->pid = alloc_idx;
+    idle->state = RUNNING;
+    idle->assigned_cpu = cpu_id;
+    idle->k_stack_top = k_stack_top;
+    idle->cr3 = PHY_ADDR((uintptr_t)pml4);
+    idle->entry = 0;
+    idle->wait_event = WAIT_NONE;
+    idle->k_rsp = k_stack_top;
+
+    cpu_locals[cpu_id]._cur_proc = idle;
+    cpu_locals[cpu_id].run_count = 1;
+    per_cpu_tss[cpu_id].rsp0 = k_stack_top;
+    cpu_locals[cpu_id].tss_rsp0 = k_stack_top;
 }
 
 // Ensure a PDPT entry exists for the given virtual address in user PML4.
@@ -200,6 +233,17 @@ static uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
     return (uint64_t)sp;
 }
 
+// Assign a new process to the CPU with fewest runnable processes
+static int pick_cpu() {
+    int best = 0;
+    for (int i = 1; i < ncpu; i++) {
+        if (cpu_locals[i].run_count < cpu_locals[best].run_count)
+            best = i;
+    }
+    cpu_locals[best].run_count++;
+    return best;
+}
+
 proc_t *process_create(uint64_t entry) {
     // 1. Find free slot (pid == -1)
     proc_t *proc = nullptr;
@@ -274,6 +318,7 @@ proc_t *process_create(uint64_t entry) {
     proc->cr3 = pml4_phys;
     proc->entry = entry;
     proc->wait_event = WAIT_NONE;
+    proc->assigned_cpu = pick_cpu();
 
     return proc;
 }
@@ -333,6 +378,7 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->cr3 = pml4_phys;
     proc->entry = lr.entry;
     proc->wait_event = WAIT_NONE;
+    proc->assigned_cpu = pick_cpu();
 
     return proc;
 }
@@ -340,37 +386,30 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
 void schedule() {
     if (current_proc == nullptr) return;
 
+    int my_cpu = get_cpu_local()->cpu_id;
+
     proc_t *next = nullptr;
-    // Round-robin: scan from current_proc+1, only find READY processes
     for (int i = current_proc->pid + 1; i < MAX_PROC + current_proc->pid + 1; i++) {
         int idx = i % MAX_PROC;
-        if (procs[idx].pid >= 0 && procs[idx].state == READY) {
+        if (procs[idx].pid >= 0 && procs[idx].state == READY &&
+            procs[idx].assigned_cpu == my_cpu) {
             next = &procs[idx];
             break;
         }
     }
     if (next == nullptr) return;
 
-    // Update TSS.rsp0 for next process
-    tss.rsp0 = next->k_stack_top;
+    per_cpu_tss[my_cpu].rsp0 = next->k_stack_top;
+    get_cpu_local()->tss_rsp0 = next->k_stack_top;
 
-    // Only set READY if currently RUNNING (preempted by timer/yield)
-    // BLOCKED processes stay BLOCKED
     if (current_proc->state == RUNNING) {
         current_proc->state = READY;
     }
     next->state = RUNNING;
 
-    serial_puts("schedule: ");
-    serial_put_hex(current_proc->pid);
-    serial_puts(" -> ");
-    serial_put_hex(next->pid);
-    serial_puts("\n");
-
     proc_t *prev = current_proc;
     current_proc = next;
 
     switch_to(prev, next);
-    // After switch_to returns, ensure interrupts are on.
     sti();
 }

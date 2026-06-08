@@ -1,10 +1,12 @@
 #include "arch/x64/paging.h"
+#include "arch/x64/smp.h"
 
-// ===================== GDT =====================
-// 7 entries: null, code64, data, user_code64, user_data, TSS_low, TSS_high
+// ===================== GDT (物理地址阶段) =====================
+// start.S 调用 gdt_init() 时仍在物理地址运行，
+// 必须用物理地址的 GDT。smp_init_cpu 在虚拟地址阶段调用。
+
 static gdt_entry_t gdt[7];
 static gdt_ptr_t gdt_reg;
-tss_t tss;
 
 static void set_gdt_gate(int n, uint32_t base, uint32_t limit, uint8_t access,
                          uint8_t gran) {
@@ -16,26 +18,35 @@ static void set_gdt_gate(int n, uint32_t base, uint32_t limit, uint8_t access,
   gdt[n].base_high = (base >> 24) & 0xFF;
 }
 
-// 64-bit TSS descriptor spans two GDT slots
 static void set_tss_gate(int n, uint64_t base, uint32_t limit) {
-  // Low 8 bytes: standard GDT entry format
   gdt[n].limit_low = L16(limit);
   gdt[n].base_low = L16(base);
   gdt[n].base_middle = (base >> 16) & 0xFF;
-  gdt[n].access = 0x89;  // Available 64-bit TSS
+  gdt[n].access = 0x89;
   gdt[n].granularity = 0x00;
   gdt[n].base_high = (base >> 24) & 0xFF;
-
-  // High 8 bytes: upper 32 bits of base, rest zero
   uint32_t *hi = (uint32_t *)&gdt[n + 1];
   hi[0] = (uint32_t)(base >> 32);
   hi[1] = 0;
 }
 
-// 远跳转刷新 CS，在单独的汇编文件中实现
 extern "C" void reload_cs(void);
 
-static void set_gdt() {
+// 临时 TSS，仅供物理地址阶段使用
+static tss_t boot_tss;
+
+extern "C" const uint8_t stack_bottom[8192]
+    __attribute__((aligned(16))) = {0};
+
+void gdt_init() {
+  // 物理地址阶段：使用静态 GDT（RIP-relative 自动给出物理地址）
+  set_gdt_gate(0, 0, 0, 0, 0);
+  set_gdt_gate(1, 0, 0, 0x9A, 0x02);
+  set_gdt_gate(2, 0, 0, 0x92, 0x00);
+  set_gdt_gate(3, 0, 0, 0xFA, 0x02);
+  set_gdt_gate(4, 0, 0, 0xF2, 0x00);
+  set_tss_gate(5, (uint64_t)&boot_tss, sizeof(tss_t) - 1);
+
   gdt_reg.base = (uint64_t)&gdt;
   gdt_reg.limit = sizeof(gdt) - 1;
   lgdt(&gdt_reg);
@@ -47,24 +58,9 @@ static void set_gdt() {
       "movw %%ax, %%gs\n"
       "movw %%ax, %%ss\n" ::: "ax");
   reload_cs();
-}
 
-// stack_bottom 定义在 boot.cc，现在定义在此
-extern "C" const uint8_t stack_bottom[8192]
-    __attribute__((aligned(16))) = {0};
-
-void gdt_init() {
-  set_gdt_gate(0, 0, 0, 0, 0);                   // null segment
-  set_gdt_gate(1, 0, 0, 0x9A, 0x02);             // code64: ER, ring0, L=1, D=0
-  set_gdt_gate(2, 0, 0, 0x92, 0x00);             // data: RW, ring0
-  set_gdt_gate(3, 0, 0, 0xFA, 0x02);             // user code64: ER, ring3, L=1, D=0
-  set_gdt_gate(4, 0, 0, 0xF2, 0x00);             // user data: RW, ring3
-  set_tss_gate(5, (uint64_t)&tss, sizeof(tss_t) - 1);
-  set_gdt();
-
-  // Initialize TSS
-  tss.rsp0 = (uint64_t)&stack_bottom + 8192;
-  tss.iomap_base = sizeof(tss_t);
+  boot_tss.rsp0 = (uint64_t)&stack_bottom + 8192;
+  boot_tss.iomap_base = sizeof(tss_t);
   ltr(TSS_SEL);
 }
 

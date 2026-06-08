@@ -8,6 +8,7 @@
 qemu-system-x86_64 \
     -drive file=build/boot.img,format=raw \
     -vga std -m 512M -bios /usr/share/ovmf/OVMF.fd \
+    -smp 2 \
     -serial file:log.txt \
     -drive file=build/disk.img,format=raw,if=ide
 
