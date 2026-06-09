@@ -2,6 +2,7 @@
 #define KERNEL_PROC_H
 
 #include <stdint.h>
+#include "kernel/list.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/smp.h"
 
@@ -21,6 +22,8 @@ struct proc_t {
     wait_event_t wait_event; // 阻塞原因
     int assigned_cpu;      // which CPU this process runs on
     uint8_t iopl;          // IOPL for this process (0=normal, 3=driver)
+    list_node_t run_node;  // embedded in per-CPU run_queue
+    list_node_t wait_node; // embedded in wait_queue (reserved)
 };
 
 #define MAX_PROC 64
@@ -30,13 +33,13 @@ extern proc_t procs[MAX_PROC];
 
 extern "C" {
 void proc_init();
-void init_idle_proc();
-void init_ap_idle(int cpu_id, uint64_t k_stack_top);
 proc_t *process_create(uint64_t entry);
 proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t iopl = 0);
 void schedule();
 void switch_to(proc_t *prev, proc_t *next);
 void process_entry();
+void idle_entry();
+proc_t *create_idle_process(int cpu_id);
 void shm_init();
 }
 

@@ -3,7 +3,7 @@
 > **历史文档**：这是 x86-32 阶段一的 ring 3 切换设计方案。当前代码已迁移至 x86-64。
 >
 > 当前实现概要：
-> - GDT: 7项（null/code64/data/user_code64/user_data/TSS_low/TSS_high），TSS 跨两个 slot
+> - GDT: 8项（null/code64/data/user_code32_compat/user_data/user_code64/TSS_low/TSS_high），TSS 跨两个 slot
 > - TSS: 128字节，仅 RSP0（无 esp0/ss0），iomap_base=sizeof(tss_t)
 > - IDT: 256项，16字节门描述符；syscall 不走 IDT，由 SYSCALL 指令直接进入 MSR LSTAR
 > - trapframe_t: 全64位（R15-R8, RDI-RAX, trapno, err_code, RIP, CS, RFLAGS, RSP, SS）

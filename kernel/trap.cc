@@ -1,5 +1,6 @@
 #include "kernel/trap.h"
 #include "kernel/proc.h"
+#include "kernel/spinlock.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
@@ -7,6 +8,9 @@
 #include "arch/x64/apic.h"
 #include "kernel/serial.h"
 #include "kernel/fb.h"
+
+// ===================== fb_lock (framebuffer cursor + buffer) =====================
+spinlock_t fb_lock = {0};
 
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 48
@@ -27,14 +31,20 @@ static uint64_t tick = 0;
 void trap_dispatch(trapframe_t *tf) {
   // Hardware IRQ: check user-space driver binding first
   if (tf->trapno >= 32 && tf->trapno < MAX_IRQ_HANDLERS &&
-      irq_owner[tf->trapno] >= 0) {
+      __atomic_load_n(&irq_owner[tf->trapno], __ATOMIC_ACQUIRE) >= 0) {
+    pid_t owner_pid = __atomic_load_n(&irq_owner[tf->trapno], __ATOMIC_ACQUIRE);
     // Wake up the bound user-space driver process
     for (int i = 0; i < MAX_PROC; i++) {
-      if (procs[i].pid == irq_owner[tf->trapno] &&
+      if (procs[i].pid == owner_pid &&
           procs[i].state == BLOCKED &&
           procs[i].wait_event == WAIT_NOTIFY) {
+        int target_cpu = procs[i].assigned_cpu;
+        spin_lock(&cpu_locals[target_cpu].scheduler_lock);
         procs[i].state = READY;
         procs[i].wait_event = WAIT_NONE;
+        list_push_back(&cpu_locals[target_cpu].run_queue, &procs[i].run_node);
+        cpu_locals[target_cpu].run_count++;
+        spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
         break;
       }
     }
@@ -142,7 +152,9 @@ void trap_dispatch(trapframe_t *tf) {
 static void timer_handler(trapframe_t *tf) {
   tick++;
   lapic_eoi();
-  schedule();
+  if (tf->cs == 0x2B) {   // from user mode
+    schedule();
+  }
 }
 
 // Keyboard IRQ handler: wake up bound user-space driver (handled by irq_owner above)
@@ -167,8 +179,6 @@ void isr_init() {
   idt_install();
   setup_syscall();
   apic_init();
-
-  sti();
 }
 
 // ===================== Syscall dispatch =====================
@@ -184,9 +194,6 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
 };
 
 void syscall_dispatch(trapframe_t *tf) {
-    serial_puts("syscall: ");
-    serial_put_hex(tf->rax);
-    serial_putc('\n');
     if (tf->rax < NR_SYSCALL) {
         tf->rax = syscall_table[tf->rax](
             tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8);
@@ -197,7 +204,9 @@ void syscall_dispatch(trapframe_t *tf) {
 
 // sys_putc(char c) — syscall 0
 uint64_t sys_putc(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    spin_lock(&fb_lock);
     fb_putc((char)arg1, 0xFFFFFF);
+    spin_unlock(&fb_lock);
     serial_putc((char)arg1);
     return 0;
 }
@@ -220,11 +229,9 @@ uint64_t sys_getc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
 
 // sys_wait() — syscall 4 (阻塞等待通知)
 uint64_t sys_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
-    serial_puts("wait pid=");
-    serial_put_hex((uint64_t)current_proc->pid);
-    serial_puts("\n");
     current_proc->state = BLOCKED;
     current_proc->wait_event = WAIT_NOTIFY;
+    __atomic_add_fetch(&cpu_locals[current_proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
     schedule();
     return 0;
 }
@@ -236,8 +243,13 @@ uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
         if (procs[i].pid == target_pid &&
             procs[i].state == BLOCKED &&
             procs[i].wait_event == WAIT_NOTIFY) {
+            int target_cpu = procs[i].assigned_cpu;
+            spin_lock(&cpu_locals[target_cpu].scheduler_lock);
             procs[i].state = READY;
             procs[i].wait_event = WAIT_NONE;
+            list_push_back(&cpu_locals[target_cpu].run_queue, &procs[i].run_node);
+            cpu_locals[target_cpu].run_count++;
+            spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
             break;
         }
     }
@@ -248,6 +260,6 @@ uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     int irq = (int)arg1;
     if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return (uint64_t)-1;
-    irq_owner[irq] = current_proc->pid;
+    __atomic_store_n(&irq_owner[irq], current_proc->pid, __ATOMIC_RELEASE);
     return 0;
 }

@@ -143,8 +143,14 @@ void apic_init() {
   // 3. Software-enable LAPIC via Spurious Interrupt Vector Register
   lapic_write(LAPIC_SVR, LAPIC_SVR_ENABLE | 0xFF);
 
-  // 4. Disable PIC (mask all IRQs)
-  pic_disable();
+  // 4. Remap PIC (don't fully disable yet — keyboard may still route through PIC)
+  outb(0x20, 0x11); outb(0xA0, 0x11);
+  outb(0x21, 0x20); outb(0xA1, 0x28);
+  outb(0x21, 0x04); outb(0xA1, 0x02);
+  outb(0x21, 0x01); outb(0xA1, 0x01);
+  // Mask all PIC IRQs (interrupts now routed through I/O APIC)
+  outb(0x21, 0xFF);
+  outb(0xA1, 0xFF);
 
   // 5. Mask unused LAPIC LVT entries
   lapic_write(LAPIC_LVT_LINT0, LAPIC_LVT_MASKED);
@@ -156,8 +162,9 @@ void apic_init() {
   for (int i = 0; i < 24; i++) {
     ioapic_set_irq(i, 32 + i, bsp_apic_id, true);
   }
-  ioapic_set_irq(0, 32, bsp_apic_id, false); // timer
-  ioapic_set_irq(1, 33, bsp_apic_id, false); // keyboard
+  ioapic_set_irq(0, 32, bsp_apic_id, false); // timer, edge
+  // Keyboard: GSI 1, edge-triggered (PS/2 keyboard is edge-triggered)
+  ioapic_set_irq(1, 33, bsp_apic_id, false);
 
   // 7. Calibrate and start LAPIC timer
   uint32_t ticks = calibrate_lapic_timer();

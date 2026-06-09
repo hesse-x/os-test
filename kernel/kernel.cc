@@ -48,7 +48,6 @@ void kernel_main(boot_info *bi) {
   kernel_init_finish();
 
   proc_init();
-  init_idle_proc();
 
   // Initialize shared pages (after BFC allocator is ready)
   shm_init();
@@ -56,6 +55,13 @@ void kernel_main(boot_info *bi) {
   clear();
 
   smp_boot_aps();
+
+  // Create BSP idle process
+  proc_t *bsp_idle = create_idle_process(0);
+  if (!bsp_idle) {
+    serial_puts("kernel_main: create BSP idle failed\n");
+    halt();
+  }
 
   // Load user processes from disk
   // LBA layout: 1=disk_driver(32 sectors), 33=kbd_driver(32 sectors), 65=shell(32 sectors)
@@ -79,8 +85,27 @@ void kernel_main(boot_info *bi) {
     serial_puts("kernel_main: shell.elf not found\n");
   }
 
-  schedule();
+  // BKL removed — fine-grained locks protect each subsystem
+  sti();
 
-  while (1) __asm__ volatile("hlt");
+  // Set current_proc to BSP idle, switch to idle kernel stack, enter idle_entry
+  current_proc = bsp_idle;
+  bsp_idle->state = RUNNING;
+  per_cpu_tss[0].rsp0 = bsp_idle->k_stack_top;
+  cpu_locals[0].tss_rsp0 = bsp_idle->k_stack_top;
+
+  uint64_t idle_rsp = bsp_idle->k_rsp;
+  __asm__ volatile(
+      "movq %0, %%rsp\n"
+      "popq %%rbx\n"
+      "popq %%rbp\n"
+      "popq %%r12\n"
+      "popq %%r13\n"
+      "popq %%r14\n"
+      "popq %%r15\n"
+      "retq\n"
+      :: "r"(idle_rsp)
+      : "memory");
+  // never reaches here
 }
 }

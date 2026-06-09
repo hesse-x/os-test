@@ -1,5 +1,7 @@
 # 用户态驱动与 IPC
 
+> **已实现**。`irq_owner[]` 已改为 atomic 访问（`__atomic_store_n` RELEASE / `__atomic_load_n` ACQUIRE），`trap_dispatch` 和 `sys_notify` 中唤醒进程使用 `scheduler_lock` 保护 run_queue + run_count。
+
 ## 架构
 
 键盘驱动、磁盘驱动运行在用户态，作为独立 ELF 进程。内核仅提供最小机制（调度、内存、中断分发、syscall），驱动只做硬件抽象，策略留给消费者。

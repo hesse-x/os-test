@@ -16,55 +16,72 @@
 | SYSCALL/SYSRET 快速系统调用 | [syscall_fastpath.md](syscall_fastpath.md) |
 | TSS IST 栈 | [tss_ist.md](tss_ist.md) |
 | NX 位 | [nx_bit.md](nx_bit.md) |
+| 自旋锁原语 | [spinlock.md](spinlock.md) |
+| BKL 大内核锁 | [bkl.md](bkl.md) |
 | 用户态驱动 — IPC 基础设施 | [user_driver.md](user_driver.md) |
-| 用户态驱动 — 驺动进程 | [user_driver.md](user_driver.md) |
+| 用户态驱动 — 驱动进程 | [user_driver.md](user_driver.md) |
 | 用户态驱动 — 多 ELF 启动 | [user_driver.md](user_driver.md) |
 | 用户态驱动 — 内核态 kbd ISR 移除 + sys_getc deprecated | [user_driver.md](user_driver.md) |
+| AP 参与调度（idle 进程模型 + pick_cpu） | [ap_schedule.md](ap_schedule.md) |
+| 细粒度锁拆分（BKL 移除） | [fine_grained_lock.md](fine_grained_lock.md) |
 
 ## 当前状态
 
-内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动 → 加载 3 个 ELF（disk_driver → kbd_driver → shell）→ 多进程协作。BSP 运行调度循环，AP 进入 idle 循环。键盘/磁盘驱动在用户态通过共享页 + wait/notify/irq_bind 与 shell 协作。
+内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 3 个 ELF（disk_driver → kbd_driver → shell）→ 多进程协作。BKL 已完全移除，替换为 per-CPU `scheduler_lock` + 全局 `procs_lock` + `fb_lock` + `irq_owner[]` atomic。每 CPU 有独立 idle 进程和 run_queue。`timer_handler` 用 `tf->cs == 0x2B` 判断抢占，AP 参与调度。
+
+## 多核 SMP — 调度与锁（全部完成）
+
+### 步骤 1: 自旋锁原语 ✅
+
+- [x] 实现 `spinlock_t`（`volatile uint32_t locked`）
+- [x] `spin_lock()`: `atomic_exchange` + `pause` 自旋
+- [x] `spin_unlock()`: `atomic_store` 释放
+- [x] `spin_lock_irqsave` / `spin_unlock_irqrestore`
+- [x] 验证: 编译通过，单核启动无回归
+
+### 步骤 2: BKL 大内核锁 ✅（已移除）
+
+> 设计文档: [bkl.md](bkl.md)。BKL 已在步骤 4 中完全移除，替换为细粒度锁。
+
+- [x] `__alltraps` 入口加 `kernel_lock_acquire()`（仅用户态，CS==0x2B）
+- [x] `syscall_fast_entry` 入口加 `kernel_lock_acquire()`
+- [x] `__trapret` 出口加 `kernel_lock_release()`（仅用户态，CS==0x2B）
+- [x] syscall 返回路径加 `kernel_lock_release()`
+- [x] `schedule()` 中 `kernel_lock_release()` → `switch_to` → `kernel_lock_acquire()`
+- [x] `process_entry` 加 `kernel_lock_acquire()` 补平衡
+- [x] `kernel_main` idle 循环前 `kernel_lock_acquire()` + `sti()`
+- [x] AP timer 只做 EOI 不调 `schedule()`
+- [x] 验证: `-smp 2` 启动，AP idle 但中断处理串行化，系统稳定
+
+### 步骤 3: AP 参与调度 ✅
+
+> 设计文档: [ap_schedule.md](ap_schedule.md)
+
+- [x] `cpu_local_t` 新增 `idle_proc` 字段
+- [x] 实现 `create_idle_process(cpu_id)`：分配独立内核栈 + switch_frame（ret_addr=idle_entry）+ 内核 PML4
+- [x] 实现 `idle_entry()`：`sti → while(1) { schedule(); sti(); hlt; }`
+- [x] BSP/AP idle：栈切换进入 idle_entry
+- [x] `schedule()` 改造：per-CPU run_queue + scheduler_lock，移除 BKL 和线性扫描
+- [x] `timer_handler`：`tf->cs == 0x2B` 判断抢占（移除 `cpu_id != 0` 守卫）
+- [x] 实现 `pick_cpu()`：遍历 `cpu_locals[].run_count`（RELAXED）选最小值
+- [x] `run_count` 维护：创建++、BLOCKED--、唤醒++
+- [x] 验证: `-smp 2` 启动，进程在不同 CPU 上调度运行
+
+### 步骤 4: 细粒度锁拆分 ✅
+
+> 设计文档: [fine_grained_lock.md](fine_grained_lock.md)
+
+- [x] `scheduler_lock`（per-CPU, irqsave）保护 schedule() + run_queue + state + run_count
+- [x] `procs_lock`（全局）保护 `procs[]` 空闲槽位分配 + PCB 初始化
+- [x] `fb_lock`（全局）保护 fb_putc cursor + VGA 缓冲区
+- [x] `irq_owner[]` atomic 化（`__atomic_store_n` RELEASE / `__atomic_load_n` ACQUIRE）
+- [x] `kernel/list.h`：内嵌双向链表（`list_node_t` + `LIST_ENTRY`）
+- [x] `proc_t` 新增 `run_node` / `wait_node`
+- [x] `cpu_local_t` 新增 `scheduler_lock` / `run_queue`
+- [x] BKL 完全移除：汇编入口/出口不再有 `kernel_lock_acquire/release`
+- [x] 验证: 多进程调度 + shell 交互 + kbd/disk 驱动正常
 
 ## 未完成
-
-### 多核 SMP — 调度与锁
-
-> 设计见 [smp.md](smp.md) 阶段四/五
-
-#### 步骤 1: 自旋锁原语
-
-- [ ] 实现 `spinlock_t`（`volatile uint32_t locked`）
-- [ ] `spin_lock()`: `atomic_exchange` + `pause` 自旋
-- [ ] `spin_unlock()`: `atomic_store` 释放
-- [ ] 验证: 编译通过，单核启动无回归
-
-#### 步骤 2: BKL 大内核锁
-
-> 依赖: 步骤 1
-
-- [ ] `__alltraps` 入口加 `spin_lock(&kernel_lock)`
-- [ ] `syscall_fast_entry` 入口加 `spin_lock(&kernel_lock)`
-- [ ] `__trapret` 出口加 `spin_unlock(&kernel_lock)`（用户态返回时 + sti）
-- [ ] `syscall_ret` 出口加 `spin_unlock(&kernel_lock)` + sti
-- [ ] 验证: `-smp 2` 启动，AP idle 但中断处理串行化，系统稳定
-
-#### 步骤 3: AP 参与调度
-
-> 依赖: 步骤 2
-
-- [ ] 实现 `pick_cpu()`: 遍历 `cpu_locals[].run_count`，选最小负载的 CPU
-- [ ] AP idle 循环从 `while(1) hlt` 改为调用 `schedule()`（无 READY 进程时 hlt）
-- [ ] `process_create`/`process_create_elf` 调用 `pick_cpu()` 分配进程到 AP
-- [ ] 验证: 串口输出可见进程在不同 CPU 上调度运行
-
-#### 步骤 4: 细粒度锁拆分（BKL → 独立子系统锁）
-
-> 依赖: 步骤 2，可渐进式拆分，每次拆一个验证一个
-
-- [ ] `scheduler_lock` 保护 `schedule()` + 运行队列
-- [ ] `procs_lock` 保护 `procs[]` 进程表
-- [ ] 键盘/驱动路径独立锁
-- [ ] 验证并发正确性
 
 ### 其他扩展
 
@@ -75,3 +92,4 @@
 | 文件系统 | ATA | [ ] 替代硬编码 LBA |
 | 更多 shell 命令 | 无 | [ ] echo, clear, pid（help 和 disk read 已完成） |
 | MSI / MSI-X | APIC | [ ] PCIe 设备中断 |
+| 用户态 SSE/FPU | 无 | [ ] lazy FPU restore |

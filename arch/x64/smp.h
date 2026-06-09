@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 #include "arch/x64/paging.h"
+#include "kernel/spinlock.h"
+#include "kernel/list.h"
 
 #define MAX_CPUS 4
 #define MSR_GS_BASE 0xC0000101
@@ -26,7 +28,10 @@ struct cpu_local_t {
     uint64_t lapic_base;
     uint64_t kernel_stack;
     uint64_t tss_rsp0;
-    int run_count;         // number of runnable processes on this CPU
+    int run_count;         // number of runnable processes on this CPU (excludes idle)
+    proc_t *idle_proc;     // this CPU's idle process
+    spinlock_t scheduler_lock; // per-CPU scheduler lock
+    list_node_t run_queue;     // per-CPU ready queue (sentinel node)
 };
 
 extern cpu_local_t cpu_locals[MAX_CPUS];

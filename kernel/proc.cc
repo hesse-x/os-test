@@ -3,15 +3,19 @@
 
 #include "kernel/proc.h"
 #include "kernel/serial.h"
+#include "kernel/trap.h"
 #include "kernel/mem/alloc.h"
 #include "common/elf.h"
 #include "common/shm.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
+#include "arch/x64/apic.h"
 
 proc_t procs[MAX_PROC];
 // current_proc is per-CPU (in cpu_local_t), accessed via macro
+
+spinlock_t procs_lock = {0};
 
 // 64-bit init_code: getpid → add '0' → putc → yield → loop
 // Using SYSCALL with: rax=syscall#, rdi=arg1
@@ -26,8 +30,6 @@ static const uint8_t init_code[] = {
     0x0F, 0x05,                                   // syscall
     0xEB, 0xDC                                    // jmp back (offset = -36)
 };
-
-extern "C" const uint8_t stack_bottom[8192];
 
 // Convert Page descriptor pointer to physical address of the actual memory page
 static uint64_t page_to_phys(Page *p) {
@@ -56,58 +58,12 @@ void proc_init() {
         procs[i].wait_event = WAIT_NONE;
         procs[i].assigned_cpu = -1;
         procs[i].iopl = 0;
+        list_init(&procs[i].run_node);
+        list_init(&procs[i].wait_node);
     }
     cpu_locals[0]._cur_proc = nullptr;
     cpu_locals[0].run_count = 0;
-}
-
-void init_idle_proc() {
-    proc_t *idle = &procs[0];
-    idle->pid = 0;
-    idle->state = RUNNING;
-    idle->assigned_cpu = 0;
-
-    // Get current RSP (boot stack position)
-    uint64_t rsp;
-    __asm__ volatile("movq %%rsp, %0" : "=r"(rsp));
-    idle->k_rsp = rsp;
-    idle->k_stack_top = (uint64_t)&stack_bottom + 8192;
-    idle->cr3 = PHY_ADDR((uintptr_t)pml4);
-    idle->entry = 0;
-    idle->wait_event = WAIT_NONE;
-
-    cpu_locals[0]._cur_proc = idle;
-    cpu_locals[0].run_count = 1;
-    per_cpu_tss[0].rsp0 = idle->k_stack_top;
-    cpu_locals[0].tss_rsp0 = idle->k_stack_top;
-}
-
-void init_ap_idle(int cpu_id, uint64_t k_stack_top) {
-    // Find a free PCB slot (skip pid 0 = BSP idle)
-    proc_t *idle = nullptr;
-    int alloc_idx = -1;
-    for (int i = 1; i < MAX_PROC; i++) {
-        if (procs[i].pid < 0) {
-            idle = &procs[i];
-            alloc_idx = i;
-            break;
-        }
-    }
-    if (!idle) return;
-
-    idle->pid = alloc_idx;
-    idle->state = RUNNING;
-    idle->assigned_cpu = cpu_id;
-    idle->k_stack_top = k_stack_top;
-    idle->cr3 = PHY_ADDR((uintptr_t)pml4);
-    idle->entry = 0;
-    idle->wait_event = WAIT_NONE;
-    idle->k_rsp = k_stack_top;
-
-    cpu_locals[cpu_id]._cur_proc = idle;
-    cpu_locals[cpu_id].run_count = 1;
-    per_cpu_tss[cpu_id].rsp0 = k_stack_top;
-    cpu_locals[cpu_id].tss_rsp0 = k_stack_top;
+    cpu_locals[0].idle_proc = nullptr;
 }
 
 // Ensure a PDPT entry exists for the given virtual address in user PML4.
@@ -283,13 +239,21 @@ static uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip, uint8_t i
     return (uint64_t)sp;
 }
 
-// Assign a new process to the BSP (CPU 0) since APs don't participate in scheduling yet
-static int pick_cpu() {
-    return 0;
+// Build idle kernel stack: only switch_frame (no trapframe), ret_addr = idle_entry
+static uint64_t build_idle_kstack(uint64_t k_stack_top) {
+    switch_frame_t sf = {};
+    sf.ret_addr = (uint64_t)idle_entry;
+
+    uint8_t *sp = (uint8_t *)k_stack_top;
+    sp -= sizeof(switch_frame_t);
+    __memcpy(sp, &sf, sizeof(switch_frame_t));
+
+    return (uint64_t)sp;
 }
 
-proc_t *process_create(uint64_t entry) {
-    // 1. Find free slot (pid == -1)
+// Create idle process for the specified CPU
+proc_t *create_idle_process(int cpu_id) {
+    spin_lock(&procs_lock);
     proc_t *proc = nullptr;
     int alloc_idx = -1;
     for (int i = 0; i < MAX_PROC; i++) {
@@ -299,18 +263,96 @@ proc_t *process_create(uint64_t entry) {
             break;
         }
     }
-    if (!proc) { serial_puts("process_create: no free slot\n"); return nullptr; }
+    if (!proc) { spin_unlock(&procs_lock); serial_puts("create_idle_process: no free slot\n"); return nullptr; }
+
+    // Allocate kernel stack (8KB = 2 pages)
+    Page *stack_pages = bfc_alloc.alloc_page(2);
+    if (!stack_pages) { spin_unlock(&procs_lock); serial_puts("create_idle_process: alloc stack failed\n"); return nullptr; }
+    uint64_t k_stack_phys = page_to_phys(stack_pages);
+    uint64_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
+
+    // Build idle switch_frame on kernel stack (no trapframe, no user mode)
+    uint64_t k_rsp = build_idle_kstack(k_stack_top);
+
+    // Fill PCB: idle uses kernel PML4, no user address space
+    proc->pid = alloc_idx;
+    proc->state = RUNNING;  // idle starts as RUNNING on its CPU
+    proc->k_rsp = k_rsp;
+    proc->k_stack_top = k_stack_top;
+    proc->cr3 = PHY_ADDR((uintptr_t)pml4); // kernel PML4 physical address
+    proc->entry = (uint64_t)idle_entry;
+    proc->wait_event = WAIT_NONE;
+    proc->assigned_cpu = cpu_id;
+    proc->iopl = 0;
+    list_init(&proc->run_node);
+    list_init(&proc->wait_node);
+    spin_unlock(&procs_lock);
+
+    // Store in cpu_locals
+    cpu_locals[cpu_id].idle_proc = proc;
+
+    return proc;
+}
+
+void idle_entry() {
+    sti();
+    while (1) {
+        schedule();
+        sti();
+        __asm__ volatile("hlt");
+    }
+}
+
+// Pick the CPU with the fewest runnable processes
+static int pick_cpu() {
+    int best = 0;
+    int min = __atomic_load_n(&cpu_locals[0].run_count, __ATOMIC_RELAXED);
+    for (int i = 1; i < ncpu; i++) {
+        int r = __atomic_load_n(&cpu_locals[i].run_count, __ATOMIC_RELAXED);
+        if (r < min) {
+            min = r;
+            best = i;
+        }
+    }
+    return best;
+}
+
+proc_t *process_create(uint64_t entry) {
+    // 1. Find free slot + fill PCB under procs_lock
+    spin_lock(&procs_lock);
+    proc_t *proc = nullptr;
+    int alloc_idx = -1;
+    for (int i = 0; i < MAX_PROC; i++) {
+        if (procs[i].pid < 0) {
+            proc = &procs[i];
+            alloc_idx = i;
+            break;
+        }
+    }
+    if (!proc) {
+        spin_unlock(&procs_lock);
+        serial_puts("process_create: no free slot\n");
+        return nullptr;
+    }
 
     // 2. Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc.alloc_page(2);
-    if (!stack_pages) { serial_puts("process_create: alloc stack failed\n"); return nullptr; }
+    if (!stack_pages) {
+        spin_unlock(&procs_lock);
+        serial_puts("process_create: alloc stack failed\n");
+        return nullptr;
+    }
     serial_puts("process_create: stack ok\n");
     uint64_t k_stack_phys = page_to_phys(stack_pages);
     uint64_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
 
     // 3. Allocate per-process PML4
     Page *pml4_page = bfc_alloc.alloc_page(1);
-    if (!pml4_page) { serial_puts("process_create: alloc pml4 failed\n"); return nullptr; }
+    if (!pml4_page) {
+        spin_unlock(&procs_lock);
+        serial_puts("process_create: alloc pml4 failed\n");
+        return nullptr;
+    }
     serial_puts("process_create: pml4 ok\n");
     uint64_t pml4_phys = page_to_phys(pml4_page);
     uint64_t pml4_virt = phys_to_virt(pml4_phys);
@@ -323,40 +365,53 @@ proc_t *process_create(uint64_t entry) {
 
     // 5. Copy kernel PML4 entries (PML4[511] = higher-half)
     extern uint64_t pdpt_hh[512];
-    // Share the kernel's PML4[511] entry
     new_pml4[511] = pml4[511];
 
     // 6. Map user code page at 0x400000
     Page *user_code_page = bfc_alloc.alloc_page(1);
-    if (!user_code_page) { serial_puts("process_create: alloc code failed\n"); return nullptr; }
+    if (!user_code_page) {
+        spin_unlock(&procs_lock);
+        serial_puts("process_create: alloc code failed\n");
+        return nullptr;
+    }
     serial_puts("process_create: code page ok\n");
     uint64_t user_code_phys = page_to_phys(user_code_page);
     uint64_t user_code_virt = phys_to_virt(user_code_phys);
 
-    // Copy user code bytes
     uint8_t *code_dst = (uint8_t *)user_code_virt;
     for (size_t i = 0; i < sizeof(init_code); i++) {
         code_dst[i] = init_code[i];
     }
 
     if (!map_user_page_direct(new_pml4, 0x400000, user_code_phys,
-                             PTE_PRESENT | PTE_RW | PTE_USER))
-        { serial_puts("process_create: map code failed\n"); return nullptr; }
+                             PTE_PRESENT | PTE_RW | PTE_USER)) {
+        spin_unlock(&procs_lock);
+        serial_puts("process_create: map code failed\n");
+        return nullptr;
+    }
 
-    // 7. Map user stack page at 0x00007FFFFFFFD000 (canonical low-half)
+    // 7. Map user stack page at 0x00007FFFFFFFD000
     Page *user_stack_page = bfc_alloc.alloc_page(1);
-    if (!user_stack_page) { serial_puts("process_create: alloc stack page failed\n"); return nullptr; }
+    if (!user_stack_page) {
+        spin_unlock(&procs_lock);
+        serial_puts("process_create: alloc stack page failed\n");
+        return nullptr;
+    }
     serial_puts("process_create: stack page ok\n");
     uint64_t user_stack_phys = page_to_phys(user_stack_page);
 
     if (!map_user_page_direct(new_pml4, 0x00007FFFFFFFD000, user_stack_phys,
-                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX))
-        { serial_puts("process_create: map stack failed\n"); return nullptr; }
+                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
+        spin_unlock(&procs_lock);
+        serial_puts("process_create: map stack failed\n");
+        return nullptr;
+    }
 
     // 8. Build trapframe + switch_to frame on kernel stack
-    uint64_t k_rsp = build_kstack(k_stack_top, entry, proc->iopl);
+    uint64_t k_rsp = build_kstack(k_stack_top, entry, 0);
 
-    // 9. Fill PCB
+    // 9. Fill PCB (still under procs_lock)
+    int assigned_cpu = pick_cpu();
     proc->pid = alloc_idx;
     proc->state = READY;
     proc->k_rsp = k_rsp;
@@ -364,13 +419,24 @@ proc_t *process_create(uint64_t entry) {
     proc->cr3 = pml4_phys;
     proc->entry = entry;
     proc->wait_event = WAIT_NONE;
-    proc->assigned_cpu = pick_cpu();
+    proc->assigned_cpu = assigned_cpu;
+    proc->iopl = 0;
+    list_init(&proc->run_node);
+    list_init(&proc->wait_node);
+    spin_unlock(&procs_lock);
+
+    // Enqueue to target CPU's run_queue under scheduler_lock
+    spin_lock(&cpu_locals[assigned_cpu].scheduler_lock);
+    list_push_back(&cpu_locals[assigned_cpu].run_queue, &proc->run_node);
+    cpu_locals[assigned_cpu].run_count++;
+    spin_unlock(&cpu_locals[assigned_cpu].scheduler_lock);
 
     return proc;
 }
 
 proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t iopl) {
-    // 1. Find free slot
+    // 1. Find free slot under procs_lock
+    spin_lock(&procs_lock);
     proc_t *proc = nullptr;
     int alloc_idx = -1;
     for (int i = 0; i < MAX_PROC; i++) {
@@ -380,17 +446,17 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
             break;
         }
     }
-    if (!proc) return nullptr;
+    if (!proc) { spin_unlock(&procs_lock); return nullptr; }
 
     // 2. Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc.alloc_page(2);
-    if (!stack_pages) return nullptr;
+    if (!stack_pages) { spin_unlock(&procs_lock); return nullptr; }
     uint64_t k_stack_phys = page_to_phys(stack_pages);
     uint64_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
 
     // 3. Allocate per-process PML4
     Page *pml4_page = bfc_alloc.alloc_page(1);
-    if (!pml4_page) return nullptr;
+    if (!pml4_page) { spin_unlock(&procs_lock); return nullptr; }
     uint64_t pml4_phys = page_to_phys(pml4_page);
     uint64_t pml4_virt = phys_to_virt(pml4_phys);
 
@@ -403,13 +469,13 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
 
     // 5. Load ELF segments into user address space
     elf_load_result lr = elf_load(elf_data, elf_size, new_pml4);
-    if (!lr.success) { serial_puts("process_create_elf: elf_load failed\n"); return nullptr; }
+    if (!lr.success) { spin_unlock(&procs_lock); serial_puts("process_create_elf: elf_load failed\n"); return nullptr; }
     serial_puts("process_create_elf: entry=");
     serial_put_hex(lr.entry);
     serial_puts("\n");
 
     // 6. Map shared pages (KBD, DISK_REQ, DISK_RESP)
-    if (!map_shared_pages(new_pml4)) { serial_puts("process_create_elf: map_shared_pages failed\n"); return nullptr; }
+    if (!map_shared_pages(new_pml4)) { spin_unlock(&procs_lock); serial_puts("process_create_elf: map_shared_pages failed\n"); return nullptr; }
 
     // Debug: verify .data page at 0x403000 is mapped
     {
@@ -430,17 +496,20 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
 
     // 7. Map user stack page at 0x00007FFFFFFFD000
     Page *user_stack_page = bfc_alloc.alloc_page(1);
-    if (!user_stack_page) return nullptr;
+    if (!user_stack_page) { spin_unlock(&procs_lock); return nullptr; }
     uint64_t user_stack_phys = page_to_phys(user_stack_page);
 
     if (!map_user_page_direct(new_pml4, 0x00007FFFFFFFD000, user_stack_phys,
-                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX))
+                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
+        spin_unlock(&procs_lock);
         return nullptr;
+    }
 
     // 8. Build trapframe + switch_to frame on kernel stack
     uint64_t k_rsp = build_kstack(k_stack_top, lr.entry, iopl);
 
-    // 9. Fill PCB
+    // 9. Fill PCB (still under procs_lock)
+    int assigned_cpu = pick_cpu();
     proc->pid = alloc_idx;
     proc->state = READY;
     proc->k_rsp = k_rsp;
@@ -448,97 +517,69 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
     proc->cr3 = pml4_phys;
     proc->entry = lr.entry;
     proc->wait_event = WAIT_NONE;
-    proc->assigned_cpu = pick_cpu();
+    proc->assigned_cpu = assigned_cpu;
     proc->iopl = iopl;
+    list_init(&proc->run_node);
+    list_init(&proc->wait_node);
+    spin_unlock(&procs_lock);
+
+    // Enqueue to target CPU's run_queue under scheduler_lock
+    spin_lock(&cpu_locals[assigned_cpu].scheduler_lock);
+    list_push_back(&cpu_locals[assigned_cpu].run_queue, &proc->run_node);
+    cpu_locals[assigned_cpu].run_count++;
+    spin_unlock(&cpu_locals[assigned_cpu].scheduler_lock);
 
     return proc;
 }
 
 void schedule() {
-    if (current_proc == nullptr) return;
-
     int my_cpu = get_cpu_local()->cpu_id;
+    proc_t *idle = get_cpu_local()->idle_proc;
+    proc_t *prev = current_proc;
 
-    proc_t *next = nullptr;
-    for (int i = current_proc->pid + 1; i < MAX_PROC + current_proc->pid + 1; i++) {
-        int idx = i % MAX_PROC;
-        if (procs[idx].pid >= 0 && procs[idx].state == READY &&
-            procs[idx].assigned_cpu == my_cpu) {
-            next = &procs[idx];
-            break;
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
+
+    // Check if run_queue has a runnable process
+    if (list_empty(&cpu_locals[my_cpu].run_queue)) {
+        // If prev is BLOCKED (e.g. sys_wait), it cannot continue running —
+        // switch to idle so the CPU halts until an IRQ wakes a process.
+        if (prev != idle && prev->state == BLOCKED) {
+            current_proc = idle;
+            per_cpu_tss[my_cpu].rsp0 = idle->k_stack_top;
+            get_cpu_local()->tss_rsp0 = idle->k_stack_top;
+            spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
+            switch_to(prev, idle);
+            spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
+            spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
+            return;
         }
+        spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
+        return; // no runnable process, prev continues
     }
-    // No READY user process: stay on current
-    if (next == nullptr) return;
 
-    serial_puts("sched: ");
-    serial_put_hex((uint64_t)current_proc->pid);
-    serial_puts("->");
-    serial_put_hex((uint64_t)next->pid);
-    serial_puts("\n  cur: k_rsp=");
-    serial_put_hex(current_proc->k_rsp);
-    serial_puts(" k_stack_top=");
-    serial_put_hex(current_proc->k_stack_top);
-    serial_puts(" cr3=");
-    serial_put_hex(current_proc->cr3);
-    serial_puts("\n  next: k_rsp=");
-    serial_put_hex(next->k_rsp);
-    serial_puts(" k_stack_top=");
-    serial_put_hex(next->k_stack_top);
-    serial_puts(" cr3=");
-    serial_put_hex(next->cr3);
-    serial_puts("\n  tss_rsp0 before=");
-    serial_put_hex(get_cpu_local()->tss_rsp0);
-    serial_puts("\n");
+    // Dequeue next process from head (FIFO round-robin)
+    list_node_t *next_node = list_front(&cpu_locals[my_cpu].run_queue);
+    proc_t *next = LIST_ENTRY(next_node, proc_t, run_node);
+    list_remove(&next->run_node);
 
+    // State transition for prev
+    if (prev != idle && prev->state == RUNNING) {
+        prev->state = READY;
+        list_push_back(&cpu_locals[my_cpu].run_queue, &prev->run_node);
+        cpu_locals[my_cpu].run_count++;
+    }
+    // if prev->state == BLOCKED: don't enqueue, run_count unchanged (already decremented in sys_wait)
+
+    next->state = RUNNING;
+    cpu_locals[my_cpu].run_count--;
+    current_proc = next;
     per_cpu_tss[my_cpu].rsp0 = next->k_stack_top;
     get_cpu_local()->tss_rsp0 = next->k_stack_top;
 
-    serial_puts("  tss_rsp0 after=");
-    serial_put_hex(get_cpu_local()->tss_rsp0);
-    serial_puts("\n  GS_BASE=");
-    serial_put_hex(rdmsr(MSR_GS_BASE));
-    serial_puts(" KGS_BASE=");
-    serial_put_hex(rdmsr(MSR_KERNEL_GS_BASE));
-    serial_puts("\n");
-
-    // Dump top of next's kernel stack (switch_frame + trapframe)
-    if (next->k_rsp) {
-        uint64_t *sp = (uint64_t *)next->k_rsp;
-        serial_puts("  next stack top:");
-        for (int i = 0; i < 8 && (uint64_t)(sp + i) < next->k_stack_top; i++) {
-            serial_puts(" ");
-            serial_put_hex(sp[i]);
-        }
-        // Check if returning via syscall or irq: read trapframe trapno
-        // switch_frame is 7*8=56 bytes, trapno is at offset 120 from trapframe base
-        // trapframe base = k_rsp + 56 (after switch_frame)
-        uint64_t tf_base = next->k_rsp + 56;
-        if (tf_base + 120 < next->k_stack_top) {
-            uint64_t *tf_trapno = (uint64_t *)(tf_base + 120);
-            uint64_t *tf_cs = (uint64_t *)(tf_base + 144);
-            uint64_t *tf_ss = (uint64_t *)(tf_base + 168);
-            uint64_t *tf_rip = (uint64_t *)(tf_base + 136);
-            serial_puts("\n  tf: trapno=");
-            serial_put_hex(*tf_trapno);
-            serial_puts(" cs=");
-            serial_put_hex(*tf_cs);
-            serial_puts(" ss=");
-            serial_put_hex(*tf_ss);
-            serial_puts(" rip=");
-            serial_put_hex(*tf_rip);
-        }
-        serial_puts("\n");
-    }
-
-    if (current_proc->state == RUNNING) {
-        current_proc->state = READY;
-    }
-    next->state = RUNNING;
-
-    proc_t *prev = current_proc;
-    current_proc = next;
-
+    // Release lock before switch_to, re-acquire after — same pattern as old BKL
+    spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
     switch_to(prev, next);
-    sti();
+    spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
+    spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
 }

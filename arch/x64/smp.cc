@@ -4,8 +4,8 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
 #include "kernel/serial.h"
-#include "kernel/proc.h"
 #include "kernel/mem/alloc.h"
+#include "kernel/proc.h"
 
 cpu_local_t cpu_locals[MAX_CPUS];
 int ncpu = 1;
@@ -63,6 +63,8 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     cpu_locals[cpu_id].kernel_stack = kernel_stack;
     cpu_locals[cpu_id].tss_rsp0 = kernel_stack;
     cpu_locals[cpu_id].run_count = 0;
+    cpu_locals[cpu_id].scheduler_lock = {0};
+    list_init(&cpu_locals[cpu_id].run_queue);
 
     // Set up per-CPU GDT (8 entries)
     gdt_entry_t *gdt = per_cpu_gdt[cpu_id];
@@ -132,6 +134,9 @@ extern "C" void ap_entry_c(int cpu_id) {
     // Load IDT (same IDT as BSP, shared kernel address space)
     idt_install();
 
+    // Setup SYSCALL/SYSRET MSRs for this CPU
+    setup_syscall();
+
     // Enable LAPIC for this AP
     uint64_t msr = rdmsr(MSR_IA32_APIC_BASE);
     msr |= APIC_BASE_ENABLE;
@@ -152,16 +157,31 @@ extern "C" void ap_entry_c(int cpu_id) {
     // Set this AP's lapic_base in cpu_local
     cpu_locals[cpu_id].lapic_base = lapic_vaddr;
 
-    // Enable interrupts
-    sti();
-
     serial_puts("AP ");
     serial_put_hex(cpu_id);
     serial_puts(" init finish\n");
 
-    // Enter idle loop
-    while (1)
-        __asm__ volatile("hlt");
+    // Switch to idle process: set current_proc, switch to idle kernel stack
+    proc_t *idle = cpu_locals[cpu_id].idle_proc;
+    current_proc = idle;
+    idle->state = RUNNING;
+    per_cpu_tss[cpu_id].rsp0 = idle->k_stack_top;
+    cpu_locals[cpu_id].tss_rsp0 = idle->k_stack_top;
+
+    // Switch to idle kernel stack and enter idle_entry (never returns)
+    uint64_t idle_rsp = idle->k_rsp;
+    __asm__ volatile(
+        "movq %0, %%rsp\n"
+        "popq %%rbx\n"
+        "popq %%rbp\n"
+        "popq %%r12\n"
+        "popq %%r13\n"
+        "popq %%r14\n"
+        "popq %%r15\n"
+        "retq\n"
+        :: "r"(idle_rsp)
+        : "memory");
+    // never reaches here
 }
 
 // ===================== LAPIC IPI helpers =====================
@@ -237,7 +257,7 @@ void smp_boot_aps() {
         smp_init_cpu(i, apic_id, k_stack_top);
 
         // Create idle process for this AP
-        init_ap_idle(i, k_stack_top);
+        create_idle_process(i);
 
         // Fill trampoline data fields (BSP writes, AP reads in 16-bit mode)
         volatile uint64_t *t_pml4   = (volatile uint64_t *)(trampoline_dst + TRAMP_PML4);

@@ -86,7 +86,6 @@ ExitBootServices 后 mmap 缓冲区数据仍然有效：
 
 ## 需要新增的文件
 
-- `arch/x64/efi.h` — EFI 类型定义和函数指针
-- `arch/x64/stub.S` — EFI stub 汇编入口
-- `arch/x64/stub.cc` — UEFI API 调用 + 页表设置 C 函数
+- `common/efi.h` — EFI 类型定义和函数指针（实际放在 common/，非 arch/x64/）
+- `boot/stub.c` — EFI stub（C 语言实现，非汇编+cc 拆分）
 - `mkimg.sh` — FAT32 磁盘映像构建脚本
