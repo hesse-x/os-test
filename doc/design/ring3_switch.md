@@ -5,11 +5,12 @@
 > 当前实现概要：
 > - GDT: 7项（null/code64/data/user_code64/user_data/TSS_low/TSS_high），TSS 跨两个 slot
 > - TSS: 128字节，仅 RSP0（无 esp0/ss0），iomap_base=sizeof(tss_t)
-> - IDT: 256项，16字节门描述符；vector128 走 syscall_entry
+> - IDT: 256项，16字节门描述符；syscall 不走 IDT，由 SYSCALL 指令直接进入 MSR LSTAR
 > - trapframe_t: 全64位（R15-R8, RDI-RAX, trapno, err_code, RIP, CS, RFLAGS, RSP, SS）
-> - __alltraps: push 16个GP寄存器 + movw $0x10 → trap_dispatch(rdi=&trapframe)
-> - __trapret: pop 16个GP寄存器 + addq $16 + iretq
-> - USER_CS=0x1B, USER_DS=0x23, TSS_SEL=0x28
+> - __alltraps: push 16个GP寄存器 + 条件 swapgs + movw $0x10 → trap_dispatch(rdi=&trapframe)
+> - __trapret: 条件 swapgs + pop 16个GP寄存器 + addq $16 + iretq
+> - SYSCALL/SYSRET: 独立入口（syscall_fast_entry），不走 __alltraps，详见 [syscall_fastpath.md](syscall_fastpath.md)
+> - USER_CS=0x2B, USER_DS=0x23, TSS_SEL=0x30（SYSRET64 CS/SS 从 STAR[63:48] 计算）
 > - 参见 CLAUDE.md 了解当前架构
 
 ## 设计决策汇总

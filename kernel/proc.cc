@@ -5,6 +5,7 @@
 #include "kernel/serial.h"
 #include "kernel/mem/alloc.h"
 #include "common/elf.h"
+#include "common/shm.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
@@ -38,6 +39,12 @@ static uint64_t phys_to_virt(uint64_t phys) {
     return phys + VMA_BASE;
 }
 
+// ===================== Shared pages =====================
+// Allocated in shm_init(), mapped into all user processes
+static uint64_t kbd_shm_phys = 0;
+static uint64_t disk_req_shm_phys = 0;
+static uint64_t disk_resp_shm_phys = 0;
+
 void proc_init() {
     for (int i = 0; i < MAX_PROC; i++) {
         procs[i].pid = -1;
@@ -48,6 +55,7 @@ void proc_init() {
         procs[i].entry = 0;
         procs[i].wait_event = WAIT_NONE;
         procs[i].assigned_cpu = -1;
+        procs[i].iopl = 0;
     }
     cpu_locals[0]._cur_proc = nullptr;
     cpu_locals[0].run_count = 0;
@@ -199,6 +207,47 @@ static bool map_user_page_direct(uint64_t *new_pml4, uint64_t vaddr, uint64_t ph
     return true;
 }
 
+void shm_init() {
+    Page *p;
+
+    p = bfc_alloc.alloc_page(1);
+    if (!p) { serial_puts("shm_init: kbd alloc failed\n"); halt(); }
+    kbd_shm_phys = page_to_phys(p);
+
+    p = bfc_alloc.alloc_page(1);
+    if (!p) { serial_puts("shm_init: disk_req alloc failed\n"); halt(); }
+    disk_req_shm_phys = page_to_phys(p);
+
+    p = bfc_alloc.alloc_page(1);
+    if (!p) { serial_puts("shm_init: disk_resp alloc failed\n"); halt(); }
+    disk_resp_shm_phys = page_to_phys(p);
+
+    // Zero out shared pages
+    uint8_t *v;
+    v = (uint8_t *)phys_to_virt(kbd_shm_phys);
+    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
+    v = (uint8_t *)phys_to_virt(disk_req_shm_phys);
+    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
+    v = (uint8_t *)phys_to_virt(disk_resp_shm_phys);
+    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
+
+    serial_puts("shm_init: ok\n");
+}
+
+// Map the 3 shared pages into a user PML4
+static bool map_shared_pages(uint64_t *new_pml4) {
+    if (!map_user_page_direct(new_pml4, KBD_SHM_ADDR, kbd_shm_phys,
+                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX))
+        return false;
+    if (!map_user_page_direct(new_pml4, DISK_REQ_ADDR, disk_req_shm_phys,
+                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX))
+        return false;
+    if (!map_user_page_direct(new_pml4, DISK_RESP_ADDR, disk_resp_shm_phys,
+                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX))
+        return false;
+    return true;
+}
+
 // switch_to 恢复帧：callee-saved 寄存器 + 返回地址
 struct switch_frame_t {
     uint64_t rbx;
@@ -211,12 +260,12 @@ struct switch_frame_t {
 };
 
 // 在内核栈顶构建 trapframe + switch_frame，返回 k_rsp
-static uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
+static uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip, uint8_t iopl) {
     trapframe_t tf = {};
     tf.ss      = 0x23;                   // USER_DS
     tf.rsp     = 0x00007FFFFFFFE000;      // user stack top (top of mapped page at 0x7FFFFFFFD000)
-    tf.rflags  = 0x202;                  // IF=1
-    tf.cs      = 0x1B;                   // USER_CS
+    tf.rflags  = 0x202 | ((uint64_t)iopl << 12); // IF=1, IOPL
+    tf.cs      = 0x2B;                   // USER_CS
     tf.rip     = entry_rip;
     tf.err_code = 0;
     tf.trapno  = 0;
@@ -234,15 +283,9 @@ static uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
     return (uint64_t)sp;
 }
 
-// Assign a new process to the CPU with fewest runnable processes
+// Assign a new process to the BSP (CPU 0) since APs don't participate in scheduling yet
 static int pick_cpu() {
-    int best = 0;
-    for (int i = 1; i < ncpu; i++) {
-        if (cpu_locals[i].run_count < cpu_locals[best].run_count)
-            best = i;
-    }
-    cpu_locals[best].run_count++;
-    return best;
+    return 0;
 }
 
 proc_t *process_create(uint64_t entry) {
@@ -311,7 +354,7 @@ proc_t *process_create(uint64_t entry) {
         { serial_puts("process_create: map stack failed\n"); return nullptr; }
 
     // 8. Build trapframe + switch_to frame on kernel stack
-    uint64_t k_rsp = build_kstack(k_stack_top, entry);
+    uint64_t k_rsp = build_kstack(k_stack_top, entry, proc->iopl);
 
     // 9. Fill PCB
     proc->pid = alloc_idx;
@@ -326,7 +369,7 @@ proc_t *process_create(uint64_t entry) {
     return proc;
 }
 
-proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
+proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t iopl) {
     // 1. Find free slot
     proc_t *proc = nullptr;
     int alloc_idx = -1;
@@ -360,9 +403,32 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
 
     // 5. Load ELF segments into user address space
     elf_load_result lr = elf_load(elf_data, elf_size, new_pml4);
-    if (!lr.success) return nullptr;
+    if (!lr.success) { serial_puts("process_create_elf: elf_load failed\n"); return nullptr; }
+    serial_puts("process_create_elf: entry=");
+    serial_put_hex(lr.entry);
+    serial_puts("\n");
 
-    // 6. Map user stack page at 0x00007FFFFFFFD000
+    // 6. Map shared pages (KBD, DISK_REQ, DISK_RESP)
+    if (!map_shared_pages(new_pml4)) { serial_puts("process_create_elf: map_shared_pages failed\n"); return nullptr; }
+
+    // Debug: verify .data page at 0x403000 is mapped
+    {
+        uint64_t *pdpt = ensure_pd(new_pml4, 0x403000);
+        uint64_t *pd = ensure_pt_in_pd(pdpt, 0x403000, 2);
+        uint64_t *pt = ensure_pt_in_pd(pd, 0x403000, 1);
+        uint64_t pt_idx = (0x403000 >> 12) & 0x1FF;
+        serial_puts("  .data PTE: ");
+        serial_put_hex(pt[pt_idx]);
+        serial_puts("\n");
+        if (pt[pt_idx] & 0x01) {
+            uint8_t *data_virt = (uint8_t *)phys_to_virt(pt[pt_idx] & ~0xFFF);
+            serial_puts("  .data content: ");
+            serial_put_hex(*(uint64_t *)data_virt);
+            serial_puts("\n");
+        }
+    }
+
+    // 7. Map user stack page at 0x00007FFFFFFFD000
     Page *user_stack_page = bfc_alloc.alloc_page(1);
     if (!user_stack_page) return nullptr;
     uint64_t user_stack_phys = page_to_phys(user_stack_page);
@@ -371,10 +437,10 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
                              PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX))
         return nullptr;
 
-    // 7. Build trapframe + switch_to frame on kernel stack
-    uint64_t k_rsp = build_kstack(k_stack_top, lr.entry);
+    // 8. Build trapframe + switch_to frame on kernel stack
+    uint64_t k_rsp = build_kstack(k_stack_top, lr.entry, iopl);
 
-    // 8. Fill PCB
+    // 9. Fill PCB
     proc->pid = alloc_idx;
     proc->state = READY;
     proc->k_rsp = k_rsp;
@@ -383,6 +449,7 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->entry = lr.entry;
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = pick_cpu();
+    proc->iopl = iopl;
 
     return proc;
 }
@@ -401,10 +468,68 @@ void schedule() {
             break;
         }
     }
+    // No READY user process: stay on current
     if (next == nullptr) return;
+
+    serial_puts("sched: ");
+    serial_put_hex((uint64_t)current_proc->pid);
+    serial_puts("->");
+    serial_put_hex((uint64_t)next->pid);
+    serial_puts("\n  cur: k_rsp=");
+    serial_put_hex(current_proc->k_rsp);
+    serial_puts(" k_stack_top=");
+    serial_put_hex(current_proc->k_stack_top);
+    serial_puts(" cr3=");
+    serial_put_hex(current_proc->cr3);
+    serial_puts("\n  next: k_rsp=");
+    serial_put_hex(next->k_rsp);
+    serial_puts(" k_stack_top=");
+    serial_put_hex(next->k_stack_top);
+    serial_puts(" cr3=");
+    serial_put_hex(next->cr3);
+    serial_puts("\n  tss_rsp0 before=");
+    serial_put_hex(get_cpu_local()->tss_rsp0);
+    serial_puts("\n");
 
     per_cpu_tss[my_cpu].rsp0 = next->k_stack_top;
     get_cpu_local()->tss_rsp0 = next->k_stack_top;
+
+    serial_puts("  tss_rsp0 after=");
+    serial_put_hex(get_cpu_local()->tss_rsp0);
+    serial_puts("\n  GS_BASE=");
+    serial_put_hex(rdmsr(MSR_GS_BASE));
+    serial_puts(" KGS_BASE=");
+    serial_put_hex(rdmsr(MSR_KERNEL_GS_BASE));
+    serial_puts("\n");
+
+    // Dump top of next's kernel stack (switch_frame + trapframe)
+    if (next->k_rsp) {
+        uint64_t *sp = (uint64_t *)next->k_rsp;
+        serial_puts("  next stack top:");
+        for (int i = 0; i < 8 && (uint64_t)(sp + i) < next->k_stack_top; i++) {
+            serial_puts(" ");
+            serial_put_hex(sp[i]);
+        }
+        // Check if returning via syscall or irq: read trapframe trapno
+        // switch_frame is 7*8=56 bytes, trapno is at offset 120 from trapframe base
+        // trapframe base = k_rsp + 56 (after switch_frame)
+        uint64_t tf_base = next->k_rsp + 56;
+        if (tf_base + 120 < next->k_stack_top) {
+            uint64_t *tf_trapno = (uint64_t *)(tf_base + 120);
+            uint64_t *tf_cs = (uint64_t *)(tf_base + 144);
+            uint64_t *tf_ss = (uint64_t *)(tf_base + 168);
+            uint64_t *tf_rip = (uint64_t *)(tf_base + 136);
+            serial_puts("\n  tf: trapno=");
+            serial_put_hex(*tf_trapno);
+            serial_puts(" cs=");
+            serial_put_hex(*tf_cs);
+            serial_puts(" ss=");
+            serial_put_hex(*tf_ss);
+            serial_puts(" rip=");
+            serial_put_hex(*tf_rip);
+        }
+        serial_puts("\n");
+    }
 
     if (current_proc->state == RUNNING) {
         current_proc->state = READY;

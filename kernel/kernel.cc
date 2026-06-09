@@ -7,12 +7,11 @@
 #include "kernel/kernel.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/serial.h"
-#include "driver/fb.h"
+#include "kernel/fb.h"
 #include "kernel/trap.h"
-#include "driver/kbd.h"
 #include "arch/x64/paging.h"
 #include "kernel/proc.h"
-#include "driver/ata.h"
+#include "kernel/ata.h"
 #include "arch/x64/smp.h"
 
 extern "C" {
@@ -22,12 +21,12 @@ void kernel_init_finish() {
   bump_disable();
 }
 
-// Read shell.elf from disk (LBA 1) via ATA PIO
-#define SHELL_ELF_SECTORS 16
-#define SHELL_ELF_BUFSIZE (SHELL_ELF_SECTORS * 512)
+// Read ELF from disk via ATA PIO
+#define ELF_SECTORS 32
+#define ELF_BUFSIZE (ELF_SECTORS * 512)
 
-static bool load_shell_from_disk(uint8_t *buf, uint32_t buf_size) {
-  ata_read_lba(1, SHELL_ELF_SECTORS, buf);
+static bool load_elf_from_disk(uint8_t *buf, uint32_t buf_size, uint32_t lba) {
+  ata_read_lba(lba, ELF_SECTORS, buf);
 
   // Validate ELF magic
   if (buf[0] != 0x7F || buf[1] != 'E' || buf[2] != 'L' || buf[3] != 'F') {
@@ -51,14 +50,31 @@ void kernel_main(boot_info *bi) {
   proc_init();
   init_idle_proc();
 
+  // Initialize shared pages (after BFC allocator is ready)
+  shm_init();
+
   clear();
 
   smp_boot_aps();
 
-  // Load shell.elf from disk and create one user process
-  static uint8_t shell_buf[SHELL_ELF_BUFSIZE];
-  if (load_shell_from_disk(shell_buf, SHELL_ELF_BUFSIZE)) {
-    process_create_elf(shell_buf, SHELL_ELF_BUFSIZE);
+  // Load user processes from disk
+  // LBA layout: 1=disk_driver(32 sectors), 33=kbd_driver(32 sectors), 65=shell(32 sectors)
+  static uint8_t elf_buf[ELF_BUFSIZE];
+
+  if (load_elf_from_disk(elf_buf, ELF_BUFSIZE, 1)) {
+    process_create_elf(elf_buf, ELF_BUFSIZE, 3);  // IOPL=3 for driver
+  } else {
+    serial_puts("kernel_main: disk_driver.elf not found\n");
+  }
+
+  if (load_elf_from_disk(elf_buf, ELF_BUFSIZE, 33)) {
+    process_create_elf(elf_buf, ELF_BUFSIZE, 3);  // IOPL=3 for driver
+  } else {
+    serial_puts("kernel_main: kbd_driver.elf not found\n");
+  }
+
+  if (load_elf_from_disk(elf_buf, ELF_BUFSIZE, 65)) {
+    process_create_elf(elf_buf, ELF_BUFSIZE, 0);  // IOPL=0 for shell
   } else {
     serial_puts("kernel_main: shell.elf not found\n");
   }

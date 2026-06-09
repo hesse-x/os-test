@@ -20,7 +20,6 @@ add_subdirectory(boot)
 # Kernel (higher-half ELF)
 add_subdirectory(arch/x64)
 add_subdirectory(kernel)
-add_subdirectory(driver)
 add_subdirectory(common)
 
 # 链接内核 ELF
@@ -30,7 +29,7 @@ set(LINK_SCRIPT ${CMAKE_SOURCE_DIR}/build_script/cmake/do_link.cmake)
 
 add_custom_target(link ALL
     COMMAND ${CMAKE_COMMAND}
-        -DOBJ_LIST="$<TARGET_OBJECTS:arch_x64>;$<TARGET_OBJECTS:kernel_mem>;$<TARGET_OBJECTS:kernel_obj>;$<TARGET_OBJECTS:driver_obj>;$<TARGET_OBJECTS:common_obj>"
+        -DOBJ_LIST="$<TARGET_OBJECTS:arch_x64>;$<TARGET_OBJECTS:kernel_mem>;$<TARGET_OBJECTS:kernel_obj>;$<TARGET_OBJECTS:common_obj>"
         -DLINKER_SCRIPT=${LINKER_SCRIPT}
         -DBIN_FILE=${BIN_FILE}
         -P ${LINK_SCRIPT}
@@ -38,7 +37,7 @@ add_custom_target(link ALL
     COMMENT "Linking myos.elf"
 )
 
-add_dependencies(link arch_x64 kernel_mem kernel_obj driver_obj common_obj)
+add_dependencies(link arch_x64 kernel_mem kernel_obj common_obj)
 
 # 将 EFI bootloader 复制到 build/ 根目录
 add_custom_target(copy_boot ALL

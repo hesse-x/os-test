@@ -3,12 +3,15 @@
 > **历史文档**：这是 x86-32 / ELF32 / Multiboot2 阶段的 Shell 设计方案。当前代码已迁移至 x86-64 / ELF64 / UEFI。
 >
 > 当前实现概要：
-> - Shell 源码: `user/shell.cc`（C++，非 NASM 汇编），编译为 ELF64 静态可执行文件
-> - Shell 构建: `g++ -m64 -ffreestanding -nostdlib ... -c user/shell.cc` + `ld -m elf_x86_64 -Ttext 0x400000`
+> - Shell 源码: `shell/shell.cc`（C++），通过 KBD_SHM 共享页接收键盘输入，SYS_WAIT 阻塞等待通知
+> - Shell 构建: `g++ -m64 -ffreestanding -nostdlib ... -c shell/shell.cc` + `ld -m elf_x86_64 -Ttext 0x400000`
+> - Shell 不再使用 sys_getc，改用共享页环形缓冲区 + sys_wait/sys_notify 与键盘驱动进程通信
+> - Shell 功能：readline（支持退格）、disk_read（hex dump）、help 命令
+> - 内核启动加载 3 个 ELF：disk_driver(LBA 1) → kbd_driver(LBA 33) → shell(LBA 65)
 > - ATA PIO: 驱动字节 0xF0（从盘，QEMU 第二个 IDE 设备），非 0xE0
 > - ELF64 Loader: Elf64_Ehdr/Elf64_Phdr，4级页表映射（PML4→PDPT→PD→PT）
-> - Shell 加载: kernel_main 中 `load_shell_from_disk()` 从 disk.img LBA 1 读取 → `process_create_elf()`
-> - 非 Multiboot2 module tag 方式
+> - process_create_elf 支持 iopl 参数：驱动 IOPL=3，shell IOPL=0
+> - 共享页通信设计见 [user_driver.md](user_driver.md)
 > - 参见 CLAUDE.md 了解当前架构
 
 ## 设计决策

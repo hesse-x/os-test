@@ -6,7 +6,7 @@
 // start.S 调用 gdt_init() 时仍在物理地址运行，
 // 必须用物理地址的 GDT。smp_init_cpu 在虚拟地址阶段调用。
 
-static gdt_entry_t gdt[7];
+static gdt_entry_t gdt[8];
 static gdt_ptr_t gdt_reg;
 
 static void set_gdt_gate(int n, uint32_t base, uint32_t limit, uint8_t access,
@@ -42,11 +42,12 @@ extern "C" const uint8_t stack_bottom[8192]
 void gdt_init() {
   // 物理地址阶段：使用静态 GDT（RIP-relative 自动给出物理地址）
   set_gdt_gate(0, 0, 0, 0, 0);
-  set_gdt_gate(1, 0, 0, 0x9A, 0x02);
-  set_gdt_gate(2, 0, 0, 0x92, 0x00);
-  set_gdt_gate(3, 0, 0, 0xFA, 0x02);
-  set_gdt_gate(4, 0, 0, 0xF2, 0x00);
-  set_tss_gate(5, (uint64_t)&boot_tss, sizeof(tss_t) - 1);
+  set_gdt_gate(1, 0, 0, 0x9A, 0x02);    // kernel code64 (L=1)
+  set_gdt_gate(2, 0, 0, 0x92, 0x00);    // kernel data
+  set_gdt_gate(3, 0, 0, 0xFA, 0x00);    // user code32 compat (DPL=3, STAR[63:48] base)
+  set_gdt_gate(4, 0, 0, 0xF2, 0x00);    // user data (DPL=3)
+  set_gdt_gate(5, 0, 0, 0xFA, 0x02);    // user code64 (DPL=3, L=1)
+  set_tss_gate(6, (uint64_t)&boot_tss, sizeof(tss_t) - 1);
 
   gdt_reg.base = (uint64_t)&gdt;
   gdt_reg.limit = sizeof(gdt) - 1;

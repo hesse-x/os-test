@@ -68,15 +68,11 @@ void idt_install() {
 extern "C" void syscall_fast_entry(void);
 
 void setup_syscall() {
-  // MSR_STAR: [63:32] = kernel CS (0x08), [31:0] = user CS base (0x0B for SYSRET)
-  // SYSCALL loads CS from STAR[47:32] = 0x08, SS = 0x08+8 = 0x10
-  // SYSRET loads CS from STAR[63:48]+16 = 0x0B+16 = 0x1B, SS = 0x0B+8 = 0x23
-  uint64_t star = ((uint64_t)0x08 << 32) | ((uint64_t)0x0B << 48);
-  // Wait, STAR layout: [63:48] = SYSRET CS base, [47:32] = SYSCALL CS base
-  // SYSCALL: CS = STAR[47:32], SS = STAR[47:32]+8
-  // SYSRET: CS = STAR[63:48]+16, SS = STAR[63:48]+8
-  // So: STAR[47:32] = 0x08 (kernel CS), STAR[63:48] = 0x0B (user CS base: 0x0B+16=0x1B, 0x0B+8=0x23)
-  star = ((uint64_t)0x08 << 32) | ((uint64_t)0x0B << 48);
+  // MSR_STAR: [47:32] = kernel CS (0x08), [63:48] = SYSRET base (0x18)
+  // SYSCALL: CS = STAR[47:32] = 0x08, SS = STAR[47:32]+8 = 0x10
+  // SYSRET64: CS = STAR[63:48]+16 | 3 = 0x18+16 | 3 = 0x2B, SS = STAR[63:48]+8 | 3 = 0x18+8 | 3 = 0x23
+  // SYSRET32: CS = STAR[63:48] | 3 = 0x18 | 3 = 0x1B, SS = STAR[63:48]+8 | 3 = 0x23
+  uint64_t star = ((uint64_t)0x08 << 32) | ((uint64_t)0x18 << 48);
   wrmsr(MSR_STAR, star);
 
   // MSR_LSTAR: SYSCALL entry point (64-bit)

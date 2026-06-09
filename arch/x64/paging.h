@@ -78,9 +78,9 @@ typedef struct {
   uint16_t iomap_base;
 } __attribute__((packed)) tss_t;
 
-#define USER_CS  0x1B    // index 3, RPL=3
-#define USER_DS  0x23    // index 4, RPL=3
-#define TSS_SEL  0x28    // index 5
+#define USER_CS  0x2B    // index 5, RPL=3 (SYSRET64 CS = STAR[63:48]+16 | 3)
+#define USER_DS  0x23    // index 4, RPL=3 (SYSRET SS = STAR[63:48]+8 | 3)
+#define TSS_SEL  0x30    // index 6
 
 // ===================== Global variables =====================
 extern "C" {

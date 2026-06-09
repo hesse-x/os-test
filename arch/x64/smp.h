@@ -31,7 +31,7 @@ struct cpu_local_t {
 
 extern cpu_local_t cpu_locals[MAX_CPUS];
 extern int ncpu;
-extern gdt_entry_t per_cpu_gdt[MAX_CPUS][7];
+extern gdt_entry_t per_cpu_gdt[MAX_CPUS][8];
 extern gdt_ptr_t per_cpu_gdtr[MAX_CPUS];
 extern tss_t per_cpu_tss[MAX_CPUS];
 extern uint64_t per_cpu_ist_stack[MAX_CPUS][3]; // IST1=NMI, IST2=DF, IST3=MCE

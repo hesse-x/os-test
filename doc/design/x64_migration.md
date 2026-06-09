@@ -558,9 +558,11 @@ CMAKE_CXX_FLAGS "-m64"
 
 ## 后续迁移（x64 稳定后）
 
-- APIC（Local APIC + I/O APIC）替代 PIC → SMP 前置条件
-- TSS IST 配置（NMI / double fault 独立栈）
-- UEFI 原生启动（EFI stub 或独立 bootloader）
-- 多核 SMP 支持
-- NX 位（页表项 bit63）按需启用
-- 用户态 SSE/FPU：lazy FPU restore
+- APIC（Local APIC + I/O APIC）替代 PIC → **已完成**，见 [smp.md](smp.md)
+- TSS IST 配置（NMI / double fault 独立栈）→ **已完成**，见 [tss_ist.md](tss_ist.md)
+- UEFI 原生启动（EFI stub）→ **已完成**，见 [uefi.md](uefi.md)
+- 多核 SMP 支持 → **部分完成**（AP 启动但仅 idle），见 [smp.md](smp.md)
+- NX 位（PTE bit63）→ **已完成**，见 [nx_bit.md](nx_bit.md)
+- 用户态驱动 IPC → **已完成**，见 [user_driver.md](user_driver.md)
+- SYSCALL/SYSRET 快速系统调用 → **已完成**，见 [syscall_fastpath.md](syscall_fastpath.md)
+- 用户态 SSE/FPU：lazy FPU restore → **未完成**

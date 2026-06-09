@@ -31,8 +31,8 @@ __alltraps:
     movw %ax, %ds
     movw %ax, %es
 
-    # swapgs if from user mode (CS=0x1B at offset 144)
-    cmpw $0x1B, 144(%rsp)
+    # swapgs if from user mode (CS=0x2B at offset 144)
+    cmpw $0x2B, 144(%rsp)
     jne 1f
     swapgs
 1:
@@ -44,8 +44,8 @@ __alltraps:
     # __trapret: 恢复
 .globl __trapret
 __trapret:
-    # swapgs if returning to user mode (CS=0x1B at offset 144)
-    cmpw $0x1B, 144(%rsp)
+    # swapgs if returning to user mode (CS=0x2B at offset 144)
+    cmpw $0x2B, 144(%rsp)
     jne 1f
     swapgs
 1:
@@ -106,7 +106,7 @@ syscall_fast_entry:
     movq $0x23, 168(%rsp)     # ss = USER_DS
     movq %r10, 160(%rsp)      # rsp = user RSP (saved in R10)
     movq %r11, 152(%rsp)      # rflags (was in R11)
-    movq $0x1B, 144(%rsp)     # cs = USER_CS
+    movq $0x2B, 144(%rsp)     # cs = USER_CS
     movq %rcx, 136(%rsp)      # rip (was in RCX)
     movq $0, 128(%rsp)        # err_code = 0
     movq $128, 120(%rsp)      # trapno = 128

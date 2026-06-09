@@ -1,4 +1,4 @@
-#include "driver/fb.h"
+#include "kernel/fb.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/utils.h"
 #include "kernel/serial.h"
@@ -437,6 +437,28 @@ void fb_putc(char c, uint32_t fg) {
 
   if (c == '\r') {
     cursor.x = 0;
+    return;
+  }
+
+  if (c == '\b') {
+    if (cursor.x > 0) {
+      cursor.x--;
+      // Clear the character cell
+      uint32_t px = cursor.x * FONT_WIDTH;
+      uint32_t py = cursor.y * FONT_HEIGHT;
+      uint32_t bpp_bytes = fb.bpp / 8;
+      for (int row = 0; row < FONT_HEIGHT; row++) {
+        uint8_t *dst = (uint8_t *)fb.vaddr + (py + row) * fb.pitch + px * bpp_bytes;
+        for (int col = 0; col < FONT_WIDTH; col++) {
+          if (fb.bpp == 32) {
+            *(uint32_t *)dst = 0;
+          } else {
+            dst[0] = 0; dst[1] = 0; dst[2] = 0;
+          }
+          dst += bpp_bytes;
+        }
+      }
+    }
     return;
   }
 

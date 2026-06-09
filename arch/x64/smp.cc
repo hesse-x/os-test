@@ -9,7 +9,7 @@
 
 cpu_local_t cpu_locals[MAX_CPUS];
 int ncpu = 1;
-gdt_entry_t per_cpu_gdt[MAX_CPUS][7];
+gdt_entry_t per_cpu_gdt[MAX_CPUS][8];
 gdt_ptr_t per_cpu_gdtr[MAX_CPUS];
 tss_t per_cpu_tss[MAX_CPUS];
 uint64_t per_cpu_ist_stack[MAX_CPUS][3]; // IST1=NMI, IST2=DF, IST3=MCE
@@ -64,13 +64,14 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     cpu_locals[cpu_id].tss_rsp0 = kernel_stack;
     cpu_locals[cpu_id].run_count = 0;
 
-    // Set up per-CPU GDT (7 entries)
+    // Set up per-CPU GDT (8 entries)
     gdt_entry_t *gdt = per_cpu_gdt[cpu_id];
     set_gdt_gate(gdt, 0, 0, 0, 0, 0);                   // null
-    set_gdt_gate(gdt, 1, 0, 0, 0x9A, 0x02);             // code64
-    set_gdt_gate(gdt, 2, 0, 0, 0x92, 0x00);             // data
-    set_gdt_gate(gdt, 3, 0, 0, 0xFA, 0x02);             // user code64
-    set_gdt_gate(gdt, 4, 0, 0, 0xF2, 0x00);             // user data
+    set_gdt_gate(gdt, 1, 0, 0, 0x9A, 0x02);             // kernel code64 (L=1)
+    set_gdt_gate(gdt, 2, 0, 0, 0x92, 0x00);             // kernel data
+    set_gdt_gate(gdt, 3, 0, 0, 0xFA, 0x00);             // user code32 compat (DPL=3, STAR[63:48] base)
+    set_gdt_gate(gdt, 4, 0, 0, 0xF2, 0x00);             // user data (DPL=3)
+    set_gdt_gate(gdt, 5, 0, 0, 0xFA, 0x02);             // user code64 (DPL=3, L=1)
 
     // Set up per-CPU TSS
     tss_t *tss = &per_cpu_tss[cpu_id];
@@ -93,7 +94,7 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     tss->ist[1] = per_cpu_ist_stack[cpu_id][1]; // IST2 = Double Fault (#8)
     tss->ist[2] = per_cpu_ist_stack[cpu_id][2]; // IST3 = Machine Check (#18)
 
-    set_tss_gate(gdt, 5, (uint64_t)tss, sizeof(tss_t) - 1);
+    set_tss_gate(gdt, 6, (uint64_t)tss, sizeof(tss_t) - 1);
 
     // Fill GDTR (but don't load it yet)
     per_cpu_gdtr[cpu_id].limit = sizeof(per_cpu_gdt[0]) - 1;

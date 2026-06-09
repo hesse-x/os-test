@@ -3,7 +3,7 @@
 #include "common/efi.h"
 #include "common/common.h"
 #include "common/macro.h"
-#include "driver/fb.h"
+#include "kernel/fb.h"
 #include "kernel/serial.h"
 
 // ===================== Global variable definitions =====================

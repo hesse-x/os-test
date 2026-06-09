@@ -3,12 +3,20 @@
 > **历史文档**：这是 x86-32 阶段三的系统调用设计方案。当前代码已迁移至 x86-64。
 >
 > 当前实现概要：
-> - syscall 仍用 int 0x80（vector128 → syscall_entry），syscall/sysret 指令待实现
-> - syscall_dispatch: `syscall_table[tf->rax](tf->rbx, tf->rcx, tf->rdx, tf->rsi, tf->rdi)`
+> - syscall 使用 SYSCALL/SYSRET 指令（MSR LSTAR），不再使用 int 0x80。int 0x80 路径已移除
+> - syscall_fast_entry: swapgs → %gs:32 读 tss_rsp0 切栈 → 手动构建 trapframe → call syscall_dispatch
+> - SYSRET 返回：从 trapframe 恢复寄存器 → RCX=rip/R11=rflags → swapgs → sysretq
+> - 详见 [syscall_fastpath.md](syscall_fastpath.md)
+> - syscall_dispatch: `syscall_table[tf->rax](tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8)`（Linux x86-64 约定）
 > - 所有 syscall 函数签名: `uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)`
+> - 7 个系统调用：putc(0), getpid(1), yield(2), getc(3), wait(4), notify(5), irq_bind(6)
+> - sys_getc(3) 已废弃（直接返回 -1，不再阻塞），键盘完全由用户态 kbd_driver 通过共享页 + irq_bind 接管
+> - sys_wait/sys_notify/sys_irq_bind 为用户态驱动 IPC 基础设施，详见 [user_driver.md](user_driver.md)
 > - 用户地址空间: 代码 0x400000, 栈 0x00007FFFFFFFD000
 > - 独立 PML4 + CR3 切换（switch_to 中 movq 24(%rsi), %rax; movq %rax, %cr3）
-> - BLOCKED + WAIT_KBD 键盘阻塞/唤醒
+> - BLOCKED + WAIT_NOTIFY 阻塞/唤醒（WAIT_KBD 已移除，键盘由用户态驱动接管）
+> - IRQ 绑定机制：irq_owner[] + trap_dispatch 查表唤醒绑定进程
+> - IOPL 支持：驱动进程 IOPL=3，普通进程 IOPL=0
 > - 参见 CLAUDE.md 和 kernel/trap.cc 了解当前实现
 
 ## 设计决策

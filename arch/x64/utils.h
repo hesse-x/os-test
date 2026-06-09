@@ -137,7 +137,8 @@ static inline void ltr(uint16_t sel) {
 //   RAX = syscall number, RDI/RSI/RDX/R10/R8/R9 = args
 //   RAX = return value
 //   RCX = saved RIP, R11 = saved RFLAGS (clobbered by SYSCALL)
-static inline int64_t syscall0(int64_t num) {
+// Semantic wrappers are in common/syscall.h
+static inline int64_t __syscall0(int64_t num) {
   int64_t ret;
   __asm__ volatile(
       "syscall"
@@ -147,7 +148,7 @@ static inline int64_t syscall0(int64_t num) {
   return ret;
 }
 
-static inline int64_t syscall1(int64_t num, int64_t arg1) {
+static inline int64_t __syscall1(int64_t num, int64_t arg1) {
   int64_t ret;
   __asm__ volatile(
       "syscall"
@@ -157,7 +158,7 @@ static inline int64_t syscall1(int64_t num, int64_t arg1) {
   return ret;
 }
 
-static inline int64_t syscall2(int64_t num, int64_t arg1, int64_t arg2) {
+static inline int64_t __syscall2(int64_t num, int64_t arg1, int64_t arg2) {
   int64_t ret;
   __asm__ volatile(
       "syscall"
@@ -167,7 +168,7 @@ static inline int64_t syscall2(int64_t num, int64_t arg1, int64_t arg2) {
   return ret;
 }
 
-static inline int64_t syscall3(int64_t num, int64_t arg1, int64_t arg2, int64_t arg3) {
+static inline int64_t __syscall3(int64_t num, int64_t arg1, int64_t arg2, int64_t arg3) {
   int64_t ret;
   __asm__ volatile(
       "syscall"
@@ -177,9 +178,7 @@ static inline int64_t syscall3(int64_t num, int64_t arg1, int64_t arg2, int64_t 
   return ret;
 }
 
-#define SYS_PUTC   0
-#define SYS_GETPID 1
-#define SYS_YIELD  2
-#define SYS_GETC   3
+#include "common/syscall.h"
+#include "common/shm.h"
 
 #endif // ARCH_X64_UTILS_H
