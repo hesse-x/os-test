@@ -119,13 +119,40 @@ void syscall_dispatch(trapframe_t *tf) {
 }
 ```
 
-## 8. 基础系统调用
+## 8. 系统调用（x86-64 当前实现）
+
+### 概览
+
+| # | 名称 | 功能 | 参数（RDI, RSI, RDX, R10, R8） | 返回值 (RAX) |
+|---|------|------|-------------------------------|-------------|
+| 0 | sys_putc | 输出字符到 framebuffer + 串口 | arg1=(char)c | 0 |
+| 1 | sys_getpid | 获取当前进程 PID | 无 | pid |
+| 2 | sys_yield | 主动让出 CPU，触发调度 | 无 | 0 |
+| 3 | sys_getc | ~~读键盘输入~~ 已废弃 | 无 | -1 |
+| 4 | sys_wait | 阻塞当前进程，等待 WAIT_NOTIFY | 无 | 0（被唤醒后） |
+| 5 | sys_notify | 唤醒指定 PID 的阻塞进程 | arg1=(pid_t)target_pid | 0 |
+| 6 | sys_irq_bind | 绑定当前进程到指定 IRQ 向量 | arg1=(int)irq | 0 成功 / -1 失败 |
+
+### ABI
+
+- **入口**：SYSCALL 指令 → MSR_LSTAR → `syscall_fast_entry`
+- **调用约定**：Linux x86-64 syscall 约定
+  - RAX = syscall 编号
+  - RDI = arg1, RSI = arg2, RDX = arg3, R10 = arg4, R8 = arg5
+  - 返回值写回 RAX
+- **函数签名**：`uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)`
+- **分发**：`syscall_table[tf->rax](tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8)`
+- **无效 syscall 号**：返回 `(uint64_t)-1`
 
 ### sys_putc(char c) — syscall 0
 
+输出字符到 framebuffer（加 fb_lock 保护）和 COM1 串口。
+
 ```c
-uint32_t sys_putc(uint32_t arg1, uint32_t, uint32_t, uint32_t, uint32_t) {
+uint64_t sys_putc(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    spin_lock(&fb_lock);
     fb_putc((char)arg1, 0xFFFFFF);
+    spin_unlock(&fb_lock);
     serial_putc((char)arg1);
     return 0;
 }
@@ -133,47 +160,119 @@ uint32_t sys_putc(uint32_t arg1, uint32_t, uint32_t, uint32_t, uint32_t) {
 
 ### sys_getpid() — syscall 1
 
+返回当前进程的 PID（从 `current_proc->pid` 读取）。
+
 ```c
-uint32_t sys_getpid(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {
-    return (uint32_t)current_proc->pid;
+uint64_t sys_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+    return (uint64_t)current_proc->pid;
 }
 ```
 
 ### sys_yield() — syscall 2
 
+主动让出 CPU，调用 `schedule()` 将当前进程重新入队，切换到下一个就绪进程。
+
 ```c
-uint32_t sys_yield(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {
-    schedule();  // 直接调用，与 timer IRQ 共享同一路径
-    return 0;    // 被唤醒后从 schedule() 返回点继续
+uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+    schedule();
+    return 0;
 }
 ```
 
-执行流程：
-1. sys_yield 调用 schedule()
-2. schedule 把 current_proc 状态改为 READY，switch_to 切到下一个进程
-3. 当前进程下次被轮转回来时，从 schedule() 返回点继续
-4. syscall_dispatch 写 tf->regs.eax = 0
-5. syscall_ret 恢复回用户态
-6. switch_to 返回后执行 `sti`（int 0x80 门自动 CLI，需要重新开中断）
+### sys_getc() — syscall 3 (已废弃)
 
-### sys_getc() — syscall 3
+键盘输入已由用户态 kbd_driver 通过共享页 + irq_bind 接管，此 syscall 直接返回 -1。
 
 ```c
-uint32_t sys_getc(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {
-    if (kbd_buffer_empty()) {
-        current_proc->state = BLOCKED;
-        current_proc->wait_event = WAIT_KBD;
-        schedule();
-        // 被唤醒后继续执行
+uint64_t sys_getc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+    return (uint64_t)-1;
+}
+```
+
+### sys_wait() — syscall 4
+
+阻塞当前进程（state=BLOCKED, wait_event=WAIT_NOTIFY），递减 run_count，调用 `schedule()` 切走。进程在被 `sys_notify` 或 IRQ 唤醒后从 `schedule()` 返回点继续执行。
+
+```c
+uint64_t sys_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+    current_proc->state = BLOCKED;
+    current_proc->wait_event = WAIT_NOTIFY;
+    __atomic_add_fetch(&cpu_locals[current_proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
+    schedule();
+    return 0;
+}
+```
+
+典型用法：用户态驱动在空闲循环中 `sys_wait()` 阻塞，等待事件（键盘中断、磁盘请求等）唤醒后处理。
+
+### sys_notify(pid_t target_pid) — syscall 5
+
+唤醒指定 PID 的阻塞进程。遍历 `procs[]` 查找匹配 PID 且 state==BLOCKED + wait_event==WAIT_NOTIFY 的进程，获取目标 CPU 的 `scheduler_lock` 后将状态改为 READY、入队 run_queue、递增 run_count。
+
+```c
+uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    pid_t target_pid = (pid_t)arg1;
+    for (int i = 0; i < MAX_PROC; i++) {
+        if (procs[i].pid == target_pid &&
+            procs[i].state == BLOCKED &&
+            procs[i].wait_event == WAIT_NOTIFY) {
+            int target_cpu = procs[i].assigned_cpu;
+            spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+            procs[i].state = READY;
+            procs[i].wait_event = WAIT_NONE;
+            list_push_back(&cpu_locals[target_cpu].run_queue, &procs[i].run_node);
+            cpu_locals[target_cpu].run_count++;
+            spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+            break;
+        }
     }
-    return (uint32_t)kbd_buffer_pop();
+    return 0;
 }
 ```
 
-阻塞与唤醒：
-- sys_getc 发现键盘缓冲区空 → 设 `state=BLOCKED, wait_event=WAIT_KBD` → schedule()
-- kbd IRQ handler：将 scancode 转 ASCII 入缓冲区 → 扫描 procs[] 找 `pid>=0 && BLOCKED+WAIT_KBD` 进程 → 设 `state=READY, wait_event=WAIT_NONE`
-- 被唤醒进程下次轮转回来时，从 schedule() 返回点继续 → kbd_buffer_pop() 取字符
+典型用法：disk_driver 完成磁盘操作后 `sys_notify(shell_pid)` 通知 shell；fs_driver 请求磁盘后由 disk_driver 唤醒。
+
+### sys_irq_bind(int irq) — syscall 6
+
+将当前进程绑定到指定硬件 IRQ 向量。绑定后，该 IRQ 发生时 `trap_dispatch` 查 `irq_owner[irq]`，发现已绑定用户进程则直接唤醒（获取 scheduler_lock → READY → 入队 → EOI），不再走内核 ISR 注册表。
+
+```c
+uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    int irq = (int)arg1;
+    if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return (uint64_t)-1;
+    __atomic_store_n(&irq_owner[irq], current_proc->pid, __ATOMIC_RELEASE);
+    return 0;
+}
+```
+
+典型用法：kbd_driver 启动时 `sys_irq_bind(33)` 绑定键盘中断，之后 `sys_wait()` 阻塞，IRQ 到来时内核自动唤醒 kbd_driver。
+
+### 用户态封装
+
+定义在 `common/syscall.h`，底层内联汇编在 `arch/x64/utils.h`：
+
+```c
+// arch/x64/utils.h — 底层 syscall 指令封装
+static inline int64_t __syscall0(int64_t nr) {
+    int64_t ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(nr) : "rcx", "r11", "memory");
+    return ret;
+}
+static inline int64_t __syscall1(int64_t nr, int64_t a1) {
+    int64_t ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(nr), "D"(a1) : "rcx", "r11", "memory");
+    return ret;
+}
+
+// common/syscall.h — 语义封装
+static inline void sys_putc(char c)        { __syscall1(SYS_PUTC, (int64_t)c); }
+static inline int64_t sys_getpid()         { return __syscall0(SYS_GETPID); }
+static inline void sys_yield()             { __syscall0(SYS_YIELD); }
+static inline int64_t sys_getc()           { return __syscall0(SYS_GETC); }
+static inline void sys_wait()              { __syscall0(SYS_WAIT); }
+static inline void sys_notify(int32_t pid) { __syscall1(SYS_NOTIFY, (int64_t)pid); }
+static inline void sys_irq_bind(int irq)   { __syscall1(SYS_IRQ_BIND, (int64_t)irq); }
+```
 
 ## 9. 独立 PD + CR3 切换
 

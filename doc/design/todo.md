@@ -83,13 +83,54 @@
 
 ## 未完成
 
+### pwd/touch/mkdir + FAT32 写入（设计文档: [fat32.md](fat32.md)）
+
+- [ ] disk_driver: ATA PIO LBA28 WRITE cmd (cmd=1)
+- [ ] shm.h: disk_req_shm 扩到 2 页，地址常量重排（8 页布局）
+- [ ] shm.h: 新增 FS_CMD_CREATE=5, FS_CMD_MKDIR=6
+- [ ] kernel/proc.cc: shm_init 多分配 1 物理页，map_shared_pages 8 页映射
+- [ ] fs_driver: handle_create (touch) — 解析路径→查找/创建目录项→更新时间戳
+- [ ] fs_driver: handle_mkdir — 创建目录项+分配簇+初始化 . 和 ..
+- [ ] fs_driver: find_free_cluster — 线性扫描 FAT 表
+- [ ] fs_driver: allocate_cluster — 更新 FAT1+FAT2
+- [ ] fs_driver: dir_chain_extend — 目录簇链扩展
+- [ ] fs_driver: disk_write — 封装 disk_req WRITE IPC
+- [ ] fs_driver: 缓存更新（写后更新缓存）
+- [ ] shell: 重构为表驱动命令解析
+- [ ] shell: cmd_pwd (puts(cwd))
+- [ ] shell: cmd_touch (fs_req CREATE)
+- [ ] shell: cmd_mkdir (fs_req MKDIR)
+- [ ] 验证: touch 创建空文件、touch 更新已存在文件时间戳、mkdir 创建目录
+
+### FAT32 写入后续优化
+
+| 功能 | 说明 | 优先级 |
+|------|------|--------|
+| RMW 组合命令 | disk_driver 新增 READ-MODIFY-WRITE cmd，一次 IPC 内读扇区→改→写回 | 中 |
+| FSINFO 空闲簇提示 | 解析 BPB FSINFO sector，用上次空闲簇提示加速查找 | 低 |
+| RTC 时间源 | UEFI 获取初始时间 → sys_gettime syscall → 真实时间戳 | 中 |
+| 文件写入 (write) | fs_driver 支持文件内容写入（簇分配+数据写入） | 高 |
+| 删除 (unlink/rmdir) | 目录项标记 0xE5 + FAT 簇释放 | 中 |
+| LFN 支持 | 解析长文件名目录项 | 低 |
+| 多客户端 | fs_driver 打开文件表按 PID 索引 | 低 |
+| VFS 层 | 支持多种文件系统类型 | 低 |
+
+### 内存管理增强
+
+| 功能 | 说明 | 优先级 |
+|------|------|--------|
+| 用户态堆 (sbrk/mmap) | sys_sbrk syscall → BFC 分配物理页 → 映射到用户地址空间 | 高 |
+| 共享内存扩展 | sys_shm_create/shm_attach → 进程间共享内存区域创建与映射 | 中 |
+| 进程退出 + 内存回收 | proc_exit → 释放 PCB + 用户 PML4 + 所有映射页 | 高 |
+| 页面换出 (swap) | BFC 不足时换出到磁盘 FAT32 分区 | 低 |
+| 内存统计 | sys_meminfo → 返回已用/空闲页数 | 低 |
+
 ### 其他扩展
 
 | 功能 | 依赖 | 状态 |
 |------|------|------|
 | 运行时 IPI | LAPIC | [ ] reschedule / TLB shootdown |
 | IPC 消息传递 | 无 | [ ] 用户态服务化基础 |
-| 文件系统 | ATA | [ ] 替代硬编码 LBA |
-| 更多 shell 命令 | 无 | [ ] echo, clear, pid（help 和 disk read 已完成） |
+| 更多 shell 命令 | 无 | [ ] echo, clear, pid |
 | MSI / MSI-X | APIC | [ ] PCIe 设备中断 |
 | 用户态 SSE/FPU | 无 | [ ] lazy FPU restore |

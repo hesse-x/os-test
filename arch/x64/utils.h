@@ -21,6 +21,10 @@ static inline uint16_t inw(uint16_t port) {
   return ret;
 }
 
+static inline void outw(uint16_t port, uint16_t val) {
+  __asm__ volatile("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+
 // ===================== MSR helpers =====================
 static inline void wrmsr(uint32_t msr, uint64_t val) {
   uint32_t lo = (uint32_t)val;

@@ -9,19 +9,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### 微内核设计原则
 
 - **最小内核**：内核仅包含调度、内存管理、中断分发、系统调用等不可替代的机制。键盘驱动和磁盘驱动已在用户态运行（`driver/kbd_driver.cc`、`driver/disk_driver.cc`），framebuffer 和 ATA 驱动仍留在内核空间（`kernel/fb.cc`、`kernel/ata.cc`）。
-- **用户态服务**：shell 等应用及驱动进程作为独立用户进程从磁盘加载，拥有独立地址空间（每进程 PML4），通过 syscall 和共享页与内核及其他进程通信。
+- **用户态服务**：shell 等应用及驱动进程作为独立用户进程从磁盘加载，拥有独立地址空间（每进程 PML4），通过 syscall 和共享页与内核及其他进程通信。文件系统服务（fs_driver）作为用户态进程运行，通过共享页 IPC 间接访问磁盘驱动。
 - **系统调用 + 共享内存 IPC**：7 个 syscall（putc/getpid/yield/getc[deprecated]/wait/notify/irq_bind）是用户态与内核的控制接口，数据传输通过共享页（KBD_SHM/DISK_REQ/DISK_RESP）完成。新增功能应优先考虑扩展 syscall 接口而非在内核内实现策略。
-- **进程隔离**：每个用户进程拥有独立地址空间（代码 0x400000 起，栈 0x00007FFFFFFFD000），PML4[511] 共享内核映射，其余独立。共享页映射到 0x500000-0x502000。
+- **进程隔离**：每个用户进程拥有独立地址空间（代码 0x400000 起，栈 0x00007FFFFFFFD000），PML4[511] 共享内核映射，其余独立。共享页映射到 0x500000-0x506000。
 
 ## 构建与运行
 
 ```bash
-./build.sh          # CMake 编译内核 + EFI bootloader + 编译 3 个用户 ELF（disk_driver/kbd_driver/shell）+ 生成 disk.img + mkimg.sh 生成 boot.img
+./build.sh          # CMake 编译内核 + EFI bootloader + 编译 4 个用户 ELF（disk_driver/kbd_driver/shell/fs_driver）+ 生成 disk.img（含 MBR 分区表 + FAT32）+ mkimg.sh 生成 boot.img
 ./build.sh clear    # 清除 build/ 目录
-./run.sh            # QEMU 启动（OVMF UEFI, 512MB, VGA, 串口输出到 log.txt）
+./run.sh            # QEMU 启动（OVMF UEFI, 512MB, VGA, -smp 2, 串口输出到 log.txt）
 ```
 
 构建体系为 CMake + 自定义链接脚本（`build_script/cmake/do_link.cmake`）。C++ 使用 `-fPIE -mno-red-zone -mno-sse -mno-sse2 -mno-mmx`，C 使用 `-fno-pic -fno-pie`，纯汇编用 `-m64`。链接：`ld -m elf_x86_64 -T build_script/linker.ld`（输出 elf64-x86-64）。
+
+**磁盘布局（disk.img, 1MB, 2048 扇区）**：
+```
+LBA 0:       MBR 分区表（sfdisk 创建）
+LBA 1-40:    disk_driver.elf（40 扇区/20KB）
+LBA 41-80:   kbd_driver.elf（40 扇区/20KB）
+LBA 81-120:  shell.elf（40 扇区/20KB）
+LBA 121-160: fs_driver.elf（40 扇区/20KB）
+LBA 161+:    FAT32 分区（type=0x0C，4KB 簇）
+```
+MBR 分区1 (type=0xDA) 覆盖 LBA 1-160（裸 ELF 存储），分区2 (type=0x0C) 覆盖 LBA 161+（FAT32 文件系统）。内核 `ata_read_lba` 直接读裸扇区加载 ELF，fs_driver 通过 MBR 分区表找到 FAT32 分区起始 LBA。
 
 **重要：** `add_library(OBJECT)` 不能设置 `POSITION_INDEPENDENT_CODE ON`，否则会加 `-fPIC`，破坏内核的 RIP-relative 寻址。
 
@@ -55,7 +66,7 @@ arch/x64/
 
 kernel/
   CMakeLists.txt
-  kernel.cc / kernel.h — kernel_main（加载 3 个 ELF → process_create_elf → schedule）
+  kernel.cc / kernel.h — kernel_main（加载 4 个 ELF → process_create_elf → schedule）
   serial.cc / serial.h — COM1 串口驱动
   trap.cc / trap.h   — trap_dispatch + syscall_dispatch + IRQ 注册表 + irq_owner[] + 7个系统调用
   proc.cc / proc.h   — PCB, switch_to, process_create/process_create_elf, schedule, shm_init, map_shared_pages
@@ -70,9 +81,10 @@ kernel/
 driver/
   kbd_driver.cc      — 用户态键盘驱动进程（IOPL=3, sys_irq_bind(33), inb(0x60), kbd_shm, sys_notify）
   disk_driver.cc     — 用户态磁盘驱动进程（IOPL=3, disk_req_shm, ATA PIO, disk_resp_shm, sys_notify）
+  fs_driver.cc       — 用户态 FAT32 只读文件系统驱动（IOPL=0, fs_req/fs_resp, 通过 disk_req/disk_resp 间接访问磁盘）
 
 shell/
-  shell.cc           — Shell 用户进程（readline, disk read 命令, kbd_shm 输入, 共享页 IPC）
+  shell.cc           — Shell 用户进程（ls/cat/cd 命令, kbd_shm 输入, fs_driver IPC, 裸扇区 r 命令）
 
 common/
   common.h            — kernel_end 声明
@@ -80,7 +92,7 @@ common/
   efi.h               — EFI 类型定义（memory_descriptor, system_table, GOP, GUID 等）
   elf.cc / elf.h     — ELF64 静态二进制加载器
   syscall.h           — syscall 编号（SYS_PUTC 等）+ 语义封装（sys_putc 等）
-  shm.h               — 共享页地址定义 + 数据结构（kbd_shm, disk_req_shm, disk_resp_shm）
+  shm.h               — 共享页地址定义 + 数据结构（kbd_shm, disk_req_shm, disk_resp_shm[2页], fs_req_shm, fs_resp_shm[2页]）
 ```
 
 ## 启动流程
@@ -93,7 +105,7 @@ UEFI 固件 → BOOTX64.EFI (boot/stub.c) → 加载 myos.elf 到 0x100000 → E
 2. `efi_main`（stub.c）：打开 `myos.elf`，加载 ELF64 段到物理 0x100000，读取 GOP/RSDP，解析 ACPI MADT（LAPIC/IOAPIC 基地址、CPU APIC ID），填充 `boot_info`，调用 `ExitBootServices`，跳转到 `_start`
 3. `_start`（start.S）：设置物理栈 → 保存 `boot_info*`（r12）→ 调用 `enable_paging`（构建 4 级页表 + 加载 CR3）→ 调用 `gdt_init`（8项 GDT + TSS + ltr）→ `lretq` 跳转到 `_entry64`
 4. `_entry64`：切换到虚拟地址栈 → 复制 `boot_info` 到 `g_boot_info` → 调用 `kernel_main`
-5. `kernel_main`：`init_mem` → `isr_init`（内含第二次 `gdt_init`，BSP 的 `smp_init_cpu` + `smp_apply_cpu`，`enable_nx`，`idt_install` + `setup_syscall`，`apic_init`）→ `kernel_init_finish`（禁用 bump）→ `proc_init` → `shm_init` → `clear` → `smp_boot_aps`（启动所有 AP）→ 从磁盘加载 disk_driver.elf（LBA 1, IOPL=3）→ kbd_driver.elf（LBA 33, IOPL=3）→ shell.elf（LBA 65, IOPL=0）→ 栈切换进入 idle_entry → idle 循环（schedule + hlt）
+5. `kernel_main`：`init_mem` → `isr_init`（内含第二次 `gdt_init`，BSP 的 `smp_init_cpu` + `smp_apply_cpu`，`enable_nx`，`idt_install` + `setup_syscall`，`apic_init`）→ `kernel_init_finish`（禁用 bump）→ `proc_init` → `shm_init` → `clear` → `smp_boot_aps`（启动所有 AP）→ 从磁盘加载 disk_driver.elf（LBA 1, IOPL=3）→ kbd_driver.elf（LBA 41, IOPL=3）→ shell.elf（LBA 81, IOPL=0）→ fs_driver.elf（LBA 121, IOPL=0）→ 栈切换进入 idle_entry → idle 循环（schedule + hlt）
 
 注意：GDT 被初始化两次 — 一次在 start.S 物理地址阶段，一次在 `isr_init` 中虚拟地址阶段。
 
@@ -103,7 +115,7 @@ UEFI 固件 → BOOTX64.EFI (boot/stub.c) → 加载 myos.elf 到 0x100000 → E
 - 物理 0-1GB → 虚拟 0xFFFFFFFF80000000-0xFFFFFFFFC0000000（higher-half，PML4[511] → PDPT_hh[510]）
 - 使用 2MB huge pages（PD 级别 PS=1），初始映射覆盖 1GB。内核 huge page 不标 NX（代码数据混合）
 - PTE 标志常量：`PTE_PRESENT`/`PTE_RW`/`PTE_USER`/`PTE_PS`/`PTE_NX`（定义在 `paging.h`）
-- 用户栈页映射时加 `PTE_NX`（不可执行），用户代码页可执行，共享页（0x500000-0x502000）加 `PTE_NX`
+- 用户栈页映射时加 `PTE_NX`（不可执行），用户代码页可执行，共享页（0x500000-0x506000）加 `PTE_NX`
 - `extend_mapping` 动态扩展：每 1GB 物理块对应 PDPT_hh[510+n]
 - 设备映射区：`device_vma_base = ALIGN_UP(VMA_BASE + max_phys_addr, 1GB)`，framebuffer 等映射到此区域
 - 地址转换：`vaddr = paddr + VMA_BASE`，`PHY_ADDR(vaddr) = vaddr - VMA_BASE`
@@ -220,12 +232,13 @@ irq_owner[]：
 
 - **创建方式**：`process_create(entry)` 使用硬编码 `init_code[]`（使用 `syscall` 指令，RAX=syscall#，RDI=arg1）；`process_create_elf(elf_data, size, iopl)` 从 ELF64 加载，`iopl` 参数指定 IOPL（0=普通进程，3=驱动进程）。两者均先 `procs_lock` 分配槽位，再 `scheduler_lock` 入队
 - **地址空间**：代码从 0x400000 起，用户栈页面映射在 0x00007FFFFFFFD000，RSP 初始值 0x00007FFFFFFFE000（页面顶端），每进程独立 PML4（共享 PML4[511] 内核映射）
-- **共享页**：每进程映射 3 个共享页（KBD_SHM=0x500000, DISK_REQ=0x501000, DISK_RESP=0x502000），所有进程共享同一物理页，用于驱动与 shell 之间的数据传递。`shm_init()` 在 `kernel_main` 中分配，`map_shared_pages()` 在 `process_create_elf` 中映射
+- **共享页**：每进程映射 7 个共享页（KBD_SHM=0x500000, DISK_REQ=0x501000, DISK_RESP=0x502000, DISK_RESP2=0x503000, FS_REQ=0x504000, FS_RESP=0x505000, FS_RESP2=0x506000），所有进程共享同一物理页，用于驱动间 IPC。disk_resp 和 fs_resp 扩展为 2 页以容纳大块数据。`shm_init()` 在 `kernel_main` 中分配，`map_shared_pages()` 在 `process_create_elf` 中映射
+- **IPC 拓扑（三层）**：Shell(PID4) ←→ fs_driver(PID5) ←→ disk_driver(PID2)。Shell 通过 FS_REQ/FS_RESP 与 fs_driver 通信；fs_driver 通过 DISK_REQ/DISK_RESP 与 disk_driver 通信。kbd_driver(PID3) 通过 KBD_SHM 直接与 shell 通信
 - **系统调用**：7个（putc/getpid/yield/getc[deprecated]/wait/notify/irq_bind），通过 `syscall` 指令触发（EFER.SCE），rax=syscall#，参数通过 rdi/rsi/rdx/r10/r8 传递
 - **IOPL 支持**：`proc_t::iopl` 字段允许 per-process IOPL。驱动进程（disk_driver, kbd_driver）IOPL=3，可直接 `in`/`out`；普通进程 IOPL=0，执行 I/O 指令触发 #GP
 - **IRQ 绑定**：`sys_irq_bind(irq)` 将当前进程绑定到指定 IRQ（`__atomic_store_n` RELEASE），内核在 `irq_owner[irq]` 中记录 PID，该 IRQ 发生时内核直接获取 `scheduler_lock` 唤醒绑定进程
-- **Shell**：`shell/shell.cc` 编译为 ELF64 静态可执行文件，写入 disk.img LBA 65 起始扇区（ELF_SECTORS=32，即 16KB）。交互式命令行：从 `kbd_shm` 环形缓冲区读键盘输入（支持 readline + 退格），通过 `disk_req_shm`/`disk_resp_shm` + `sys_notify`/`sys_wait` 进行磁盘操作。命令：`r LBA [COUNT]`（hex dump）、`h`（帮助）
-- **用户态驱动**：`driver/kbd_driver.cc`（LBA 33, IOPL=3）绑定 IRQ33，读扫描码写入 `kbd_shm`；`driver/disk_driver.cc`（LBA 1, IOPL=3）读 `disk_req_shm` 执行 ATA PIO 操作写入 `disk_resp_shm`
+- **Shell**：`shell/shell.cc` 编译为 ELF64 静态可执行文件，写入 disk.img LBA 81 起始扇区（ELF_SECTORS=40，即 20KB）。交互式命令行：从 `kbd_shm` 环形缓冲区读键盘输入（支持 readline + 退格），通过 fs_driver 共享页（FS_REQ/FS_RESP）进行文件操作，支持 `r` 命令直接读裸扇区。命令：`ls [-l]`（目录列表）、`cat <path>`（读文件）、`cd <path>`（切换目录）、`r LBA [COUNT]`（hex dump 裸扇区）、`h`（帮助）
+- **用户态驱动**：`driver/kbd_driver.cc`（LBA 41, IOPL=3）绑定 IRQ33，读扫描码写入 `kbd_shm`；`driver/disk_driver.cc`（LBA 1, IOPL=3）读 `disk_req_shm` 执行 ATA PIO 操作写入 `disk_resp_shm`；`driver/fs_driver.cc`（LBA 121, IOPL=0）读 `fs_req_shm` 执行 FAT32 只读操作（readdir/open/read/close/raw_read），内部通过 `disk_req_shm`/`disk_resp_shm` 与 disk_driver 通信，结果写入 `fs_resp_shm`
 - **Shell 构建**：`g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -I. -c shell/shell.cc` + `ld -m elf_x86_64 -Ttext 0x400000`。注意 `-fno-pie`（固定地址链接）和 `-I.`（允许 include `common/syscall.h` 和 `common/shm.h` 中的封装）
 
 ## 内存管理架构

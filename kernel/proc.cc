@@ -45,7 +45,12 @@ static uint64_t phys_to_virt(uint64_t phys) {
 // Allocated in shm_init(), mapped into all user processes
 static uint64_t kbd_shm_phys = 0;
 static uint64_t disk_req_shm_phys = 0;
+static uint64_t disk_req_shm_phys2 = 0;   // second page of expanded disk_req
 static uint64_t disk_resp_shm_phys = 0;
+static uint64_t disk_resp_shm_phys2 = 0;  // second page of expanded disk_resp
+static uint64_t fs_req_shm_phys = 0;
+static uint64_t fs_resp_shm_phys = 0;
+static uint64_t fs_resp_shm_phys2 = 0;    // second page of fs_resp
 
 void proc_init() {
     for (int i = 0; i < MAX_PROC; i++) {
@@ -175,8 +180,28 @@ void shm_init() {
     disk_req_shm_phys = page_to_phys(p);
 
     p = bfc_alloc.alloc_page(1);
+    if (!p) { serial_puts("shm_init: disk_req2 alloc failed\n"); halt(); }
+    disk_req_shm_phys2 = page_to_phys(p);
+
+    p = bfc_alloc.alloc_page(1);
     if (!p) { serial_puts("shm_init: disk_resp alloc failed\n"); halt(); }
     disk_resp_shm_phys = page_to_phys(p);
+
+    p = bfc_alloc.alloc_page(1);
+    if (!p) { serial_puts("shm_init: disk_resp2 alloc failed\n"); halt(); }
+    disk_resp_shm_phys2 = page_to_phys(p);
+
+    p = bfc_alloc.alloc_page(1);
+    if (!p) { serial_puts("shm_init: fs_req alloc failed\n"); halt(); }
+    fs_req_shm_phys = page_to_phys(p);
+
+    p = bfc_alloc.alloc_page(1);
+    if (!p) { serial_puts("shm_init: fs_resp alloc failed\n"); halt(); }
+    fs_resp_shm_phys = page_to_phys(p);
+
+    p = bfc_alloc.alloc_page(1);
+    if (!p) { serial_puts("shm_init: fs_resp2 alloc failed\n"); halt(); }
+    fs_resp_shm_phys2 = page_to_phys(p);
 
     // Zero out shared pages
     uint8_t *v;
@@ -184,22 +209,40 @@ void shm_init() {
     for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
     v = (uint8_t *)phys_to_virt(disk_req_shm_phys);
     for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
+    v = (uint8_t *)phys_to_virt(disk_req_shm_phys2);
+    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
     v = (uint8_t *)phys_to_virt(disk_resp_shm_phys);
+    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
+    v = (uint8_t *)phys_to_virt(disk_resp_shm_phys2);
+    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
+    v = (uint8_t *)phys_to_virt(fs_req_shm_phys);
+    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
+    v = (uint8_t *)phys_to_virt(fs_resp_shm_phys);
+    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
+    v = (uint8_t *)phys_to_virt(fs_resp_shm_phys2);
     for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
 
     serial_puts("shm_init: ok\n");
 }
 
-// Map the 3 shared pages into a user PML4
+// Map the shared pages into a user PML4
 static bool map_shared_pages(uint64_t *new_pml4) {
-    if (!map_user_page_direct(new_pml4, KBD_SHM_ADDR, kbd_shm_phys,
-                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX))
+    uint64_t flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+    if (!map_user_page_direct(new_pml4, KBD_SHM_ADDR, kbd_shm_phys, flags))
         return false;
-    if (!map_user_page_direct(new_pml4, DISK_REQ_ADDR, disk_req_shm_phys,
-                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX))
+    if (!map_user_page_direct(new_pml4, DISK_REQ_ADDR, disk_req_shm_phys, flags))
         return false;
-    if (!map_user_page_direct(new_pml4, DISK_RESP_ADDR, disk_resp_shm_phys,
-                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX))
+    if (!map_user_page_direct(new_pml4, DISK_REQ_ADDR2, disk_req_shm_phys2, flags))
+        return false;
+    if (!map_user_page_direct(new_pml4, DISK_RESP_ADDR, disk_resp_shm_phys, flags))
+        return false;
+    if (!map_user_page_direct(new_pml4, DISK_RESP_ADDR2, disk_resp_shm_phys2, flags))
+        return false;
+    if (!map_user_page_direct(new_pml4, FS_REQ_ADDR, fs_req_shm_phys, flags))
+        return false;
+    if (!map_user_page_direct(new_pml4, FS_RESP_ADDR, fs_resp_shm_phys, flags))
+        return false;
+    if (!map_user_page_direct(new_pml4, FS_RESP_ADDR2, fs_resp_shm_phys2, flags))
         return false;
     return true;
 }

@@ -47,6 +47,29 @@ static void ata_read(uint32_t lba, uint32_t count, uint8_t *buf) {
     }
 }
 
+static void ata_write(uint32_t lba, uint32_t count, const uint8_t *buf) {
+    while (inb(ATA_STATUS) & ATA_BSY);
+
+    outb(ATA_SECTOR, count);
+    outb(ATA_LBA_LO,  lba & 0xFF);
+    outb(ATA_LBA_MID, (lba >> 8) & 0xFF);
+    outb(ATA_LBA_HI,  (lba >> 16) & 0xFF);
+    outb(ATA_DRIVE, 0xF0 | ((lba >> 24) & 0x0F));
+    outb(ATA_STATUS, ATA_CMD_WRITE);
+
+    const uint16_t *src = (const uint16_t *)buf;
+    for (uint32_t s = 0; s < count; s++) {
+        uint8_t st;
+        while (((st = inb(ATA_STATUS)) & ATA_DRQ) == 0 &&
+               (st & ATA_ERR) == 0);
+        for (int i = 0; i < 256; i++) {
+            outw(ATA_DATA, *src++);
+        }
+        // Wait for BSY to clear after each sector
+        while (inb(ATA_STATUS) & ATA_BSY);
+    }
+}
+
 static void handle_request() {
     uint32_t cmd  = req->cmd;
     uint32_t lba  = req->lba;
@@ -57,17 +80,20 @@ static void handle_request() {
         ata_read(lba, cnt, (uint8_t *)resp->data);
         resp->status = 0;
         resp->count  = cnt;
+    } else if (cmd == DISK_CMD_WRITE) {
+        ata_write(lba, cnt, (const uint8_t *)req->data);
+        resp->status = 0;
+        resp->count  = cnt;
     } else {
-        // WRITE not implemented yet
         resp->status = 1;
         resp->count  = 0;
     }
 }
 
 extern "C" void _start() {
-    // Shell PID = our PID + 2 (PID2=disk_driver, PID3=kbd_driver, PID4=shell)
+    // fs_driver PID = our PID + 3 (PID2=disk_driver, PID3=kbd_driver, PID4=shell, PID5=fs_driver)
     int32_t my_pid = (int32_t)sys_getpid();
-    int32_t shell_pid = my_pid + 2;
+    int32_t fs_driver_pid = my_pid + 3;
 
     while (1) {
         // Wait for request
@@ -75,6 +101,6 @@ extern "C" void _start() {
 
         handle_request();
 
-        sys_notify(shell_pid);
+        sys_notify(fs_driver_pid);
     }
 }
