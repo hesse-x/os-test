@@ -6,12 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **微内核操作系统** — 64位 x86-64 higher-half 微内核，UEFI stub 引导，freestanding C++ + 纯汇编。内核仅提供最小机制：调度器、内存管理、中断/异常分发、系统调用接口。策略和服务尽量在用户态实现（shell 等用户进程从磁盘加载为独立 ELF64 运行）。C++ 编译为 `-fPIE`，使用 RIP-relative 寻址。`_start` 和 `enable_paging` 在物理地址运行，设置分页后跳转到 `kernel_main` 在虚拟地址 0xFFFFFFFF80100000 运行。
 
+## 项目目标
+
+-**支持简单elf可执行文件的执行**: 在宿主机上编译hello world，静态链接os中的print函数实现，在os上执行
+-**支持Wayland核心协议**: 验收目标，
+-**支持构建gcc**：成功在os上构建出gcc
+
 ### 微内核设计原则
 
 - **最小内核**：内核仅包含调度、内存管理、中断分发、系统调用等不可替代的机制。键盘驱动和磁盘驱动已在用户态运行（`driver/kbd_driver.cc`、`driver/disk_driver.cc`），framebuffer 和 ATA 驱动仍留在内核空间（`kernel/fb.cc`、`kernel/ata.cc`）。
 - **用户态服务**：shell 等应用及驱动进程作为独立用户进程从磁盘加载，拥有独立地址空间（每进程 PML4），通过 syscall 和共享页与内核及其他进程通信。文件系统服务（fs_driver）作为用户态进程运行，通过共享页 IPC 间接访问磁盘驱动。
-- **系统调用 + 共享内存 IPC**：7 个 syscall（putc/getpid/yield/getc[deprecated]/wait/notify/irq_bind）是用户态与内核的控制接口，数据传输通过共享页（KBD_SHM/DISK_REQ/DISK_RESP）完成。新增功能应优先考虑扩展 syscall 接口而非在内核内实现策略。
-- **进程隔离**：每个用户进程拥有独立地址空间（代码 0x400000 起，栈 0x00007FFFFFFFD000），PML4[511] 共享内核映射，其余独立。共享页映射到 0x500000-0x506000。
+- **系统调用 + 共享内存 IPC**：8 个 syscall（putc/getpid/yield/getc[deprecated]/wait/notify/irq_bind/sbrk）是用户态与内核的控制接口，数据传输通过共享页（KBD_SHM/DISK_REQ/DISK_RESP）完成。新增功能应优先考虑扩展 syscall 接口而非在内核内实现策略。
+- **进程隔离**：每个用户进程拥有独立地址空间（代码 0x400000 起，堆 0x600000 起，栈 0x00007FFFFFFFD000），PML4[511] 共享内核映射，其余独立。共享页映射到 0x500000-0x506000。
 
 ## 构建与运行
 
@@ -68,7 +74,7 @@ kernel/
   CMakeLists.txt
   kernel.cc / kernel.h — kernel_main（加载 4 个 ELF → process_create_elf → schedule）
   serial.cc / serial.h — COM1 串口驱动
-  trap.cc / trap.h   — trap_dispatch + syscall_dispatch + IRQ 注册表 + irq_owner[] + 7个系统调用
+  trap.cc / trap.h   — trap_dispatch + syscall_dispatch + IRQ 注册表 + irq_owner[] + 8个系统调用（含 sys_sbrk）
   proc.cc / proc.h   — PCB, switch_to, process_create/process_create_elf, schedule, shm_init, map_shared_pages
   fb.cc / fb.h       — Framebuffer 驱动（含 IrqGuard 保护的操作）
   ata.cc / ata.h     — ATA PIO LBA28 驱动（从盘，启动时读取 ELF，之后由用户态 disk_driver 接管）
@@ -76,7 +82,8 @@ kernel/
   spinlock.h         — spinlock_t, spin_lock/unlock, spin_lock_irqsave/unlock_irqrestore
   mem/
     CMakeLists.txt
-    alloc.cc / alloc.h — init_mem, Bump/BFC 分配器, Page 描述符
+    alloc.cc / alloc.h — init_mem, Bump/BFC 分配器, Page 描述符, page_to_phys/phys_to_virt, 用户页映射函数声明
+    user_mapping.cc    — ensure_pd, ensure_pt_in_pd, map_user_page_direct, map_user_pages, unmap_user_pages
 
 driver/
   kbd_driver.cc      — 用户态键盘驱动进程（IOPL=3, sys_irq_bind(33), inb(0x60), kbd_shm, sys_notify）
@@ -84,14 +91,21 @@ driver/
   fs_driver.cc       — 用户态 FAT32 只读文件系统驱动（IOPL=0, fs_req/fs_resp, 通过 disk_req/disk_resp 间接访问磁盘）
 
 shell/
-  shell.cc           — Shell 用户进程（ls/cat/cd 命令, kbd_shm 输入, fs_driver IPC, 裸扇区 r 命令）
+  shell.cc           — Shell 用户进程（ls/cat/cd/sbrk/malloc/mtest 命令, kbd_shm 输入, fs_driver IPC, 裸扇区 r 命令）
+
+user/
+  include/
+    stdlib.h         — 用户态 C 标准库头文件（malloc/free/calloc/realloc 声明）
+  lib/
+    malloc.cc        — 用户态 malloc/free/calloc/realloc 实现（显式空闲链表 + 边界标记，基于 sys_sbrk）
 
 common/
   common.h            — kernel_end 声明
   macro.h             — ALIGN_UP 宏
+  errno.h             — 错误码定义（EOK/EPERM/ENOENT/ENOMEM/EINVAL/ENOSYS）
   efi.h               — EFI 类型定义（memory_descriptor, system_table, GOP, GUID 等）
   elf.cc / elf.h     — ELF64 静态二进制加载器
-  syscall.h           — syscall 编号（SYS_PUTC 等）+ 语义封装（sys_putc 等）
+  syscall.h           — syscall 编号（SYS_PUTC 等）+ 语义封装（sys_putc 等，含 arch/x64/utils.h）
   shm.h               — 共享页地址定义 + 数据结构（kbd_shm, disk_req_shm, disk_resp_shm[2页], fs_req_shm, fs_resp_shm[2页]）
 ```
 
@@ -220,7 +234,7 @@ irq_owner[]：
 
 ## 进程与调度
 
-- **PCB**：`proc_t`（pid, state, k_rsp, k_stack_top, cr3, entry, wait_event, assigned_cpu, iopl, run_node, wait_node），最多 64 个进程
+- **PCB**：`proc_t`（pid, state, k_rsp, k_stack_top, cr3, entry, wait_event, assigned_cpu, iopl, brk, run_node, wait_node），最多 64 个进程
 - **状态**：READY / RUNNING / BLOCKED（可等待 WAIT_NOTIFY）
 - **调度**：`schedule()` 从 per-CPU `run_queue`（`list_node_t` 链表）队头取出下一进程，FIFO round-robin。切换 FROM idle 时不设 READY 也不入队。无就绪进程时若 prev 为 BLOCKED 则切到 idle，否则 prev 继续运行。持锁模式：`spin_lock_irqsave(&scheduler_lock)` → 出队/入队 → `spin_unlock_irqrestore` → `switch_to` → `spin_lock_irqsave` → `spin_unlock_irqrestore`
 - **上下文切换**：`switch_to` 保存 callee-saved（rbx, rbp, r12-r15）→ 保存/恢复 RSP → 切换 CR3 → 恢复 callee-saved → ret
@@ -231,15 +245,17 @@ irq_owner[]：
 ## 用户进程
 
 - **创建方式**：`process_create(entry)` 使用硬编码 `init_code[]`（使用 `syscall` 指令，RAX=syscall#，RDI=arg1）；`process_create_elf(elf_data, size, iopl)` 从 ELF64 加载，`iopl` 参数指定 IOPL（0=普通进程，3=驱动进程）。两者均先 `procs_lock` 分配槽位，再 `scheduler_lock` 入队
-- **地址空间**：代码从 0x400000 起，用户栈页面映射在 0x00007FFFFFFFD000，RSP 初始值 0x00007FFFFFFFE000（页面顶端），每进程独立 PML4（共享 PML4[511] 内核映射）
+- **地址空间**：代码从 0x400000 起，堆从 0x600000 起（brk 初始=0x600000，sbrk 按页扩展/缩小），用户栈页面映射在 0x00007FFFFFFFD000，RSP 初始值 0x00007FFFFFFFE000（页面顶端），每进程独立 PML4（共享 PML4[511] 内核映射）
 - **共享页**：每进程映射 7 个共享页（KBD_SHM=0x500000, DISK_REQ=0x501000, DISK_RESP=0x502000, DISK_RESP2=0x503000, FS_REQ=0x504000, FS_RESP=0x505000, FS_RESP2=0x506000），所有进程共享同一物理页，用于驱动间 IPC。disk_resp 和 fs_resp 扩展为 2 页以容纳大块数据。`shm_init()` 在 `kernel_main` 中分配，`map_shared_pages()` 在 `process_create_elf` 中映射
 - **IPC 拓扑（三层）**：Shell(PID4) ←→ fs_driver(PID5) ←→ disk_driver(PID2)。Shell 通过 FS_REQ/FS_RESP 与 fs_driver 通信；fs_driver 通过 DISK_REQ/DISK_RESP 与 disk_driver 通信。kbd_driver(PID3) 通过 KBD_SHM 直接与 shell 通信
-- **系统调用**：7个（putc/getpid/yield/getc[deprecated]/wait/notify/irq_bind），通过 `syscall` 指令触发（EFER.SCE），rax=syscall#，参数通过 rdi/rsi/rdx/r10/r8 传递
+- **系统调用**：8个（putc/getpid/yield/getc[deprecated]/wait/notify/irq_bind/sbrk），通过 `syscall` 指令触发（EFER.SCE），rax=syscall#，参数通过 rdi/rsi/rdx/r10/r8 传递。错误返回统一为负 errno（-EPERM/-EINVAL/-ENOMEM/-ENOSYS，定义在 common/errno.h）
 - **IOPL 支持**：`proc_t::iopl` 字段允许 per-process IOPL。驱动进程（disk_driver, kbd_driver）IOPL=3，可直接 `in`/`out`；普通进程 IOPL=0，执行 I/O 指令触发 #GP
 - **IRQ 绑定**：`sys_irq_bind(irq)` 将当前进程绑定到指定 IRQ（`__atomic_store_n` RELEASE），内核在 `irq_owner[irq]` 中记录 PID，该 IRQ 发生时内核直接获取 `scheduler_lock` 唤醒绑定进程
-- **Shell**：`shell/shell.cc` 编译为 ELF64 静态可执行文件，写入 disk.img LBA 81 起始扇区（ELF_SECTORS=40，即 20KB）。交互式命令行：从 `kbd_shm` 环形缓冲区读键盘输入（支持 readline + 退格），通过 fs_driver 共享页（FS_REQ/FS_RESP）进行文件操作，支持 `r` 命令直接读裸扇区。命令：`ls [-l]`（目录列表）、`cat <path>`（读文件）、`cd <path>`（切换目录）、`r LBA [COUNT]`（hex dump 裸扇区）、`h`（帮助）
+- **Shell**：`shell/shell.cc` 编译为 ELF64 静态可执行文件，写入 disk.img LBA 101 起始扇区。链接 `user/lib/malloc.o`（用户态 malloc/free）。交互式命令行：从 `kbd_shm` 环形缓冲区读键盘输入（支持 readline + 退格），通过 fs_driver 共享页（FS_REQ/FS_RESP）进行文件操作，支持 `r` 命令直接读裸扇区。命令：`ls [-l]`（目录列表）、`cat <path>`（读文件）、`cd <path>`（切换目录）、`touch <path>`（创建文件）、`mkdir <path>`（创建目录）、`r LBA [COUNT]`（hex dump 裸扇区）、`sbrk N`（测试 sbrk）、`malloc N`（测试 malloc）、`free ADDR`（测试 free）、`mtest`（malloc 测试套件）、`h`（帮助）
 - **用户态驱动**：`driver/kbd_driver.cc`（LBA 41, IOPL=3）绑定 IRQ33，读扫描码写入 `kbd_shm`；`driver/disk_driver.cc`（LBA 1, IOPL=3）读 `disk_req_shm` 执行 ATA PIO 操作写入 `disk_resp_shm`；`driver/fs_driver.cc`（LBA 121, IOPL=0）读 `fs_req_shm` 执行 FAT32 只读操作（readdir/open/read/close/raw_read），内部通过 `disk_req_shm`/`disk_resp_shm` 与 disk_driver 通信，结果写入 `fs_resp_shm`
-- **Shell 构建**：`g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -I. -c shell/shell.cc` + `ld -m elf_x86_64 -Ttext 0x400000`。注意 `-fno-pie`（固定地址链接）和 `-I.`（允许 include `common/syscall.h` 和 `common/shm.h` 中的封装）
+- **Shell 构建**：`g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -I. -c user/lib/malloc.cc / shell/shell.cc` + `ld -m elf_x86_64 -Ttext 0x400000`。注意 `-fno-pie`（固定地址链接）和 `-I.`（允许 include `common/syscall.h` 和 `common/shm.h` 中的封装）
+- **用户态堆**：`sys_sbrk` 系统调用（#7）管理进程堆空间，支持扩展和缩小（按页映射/解映射）。`proc_t::brk` 记录堆顶地址（初始 0x600000）。`map_user_pages`/`unmap_user_pages` 提供批量页映射/解映射能力
+- **用户态 malloc/free**：`user/lib/malloc.cc` 实现显式空闲链表 + 边界标记算法，16 字节对齐，最小块 32 字节。sbrk 增量从 4KB 起步翻倍至上限 64KB。支持 malloc/free/calloc/realloc，头文件 `user/include/stdlib.h`。线程安全占位宏 MALLOC_LOCK/MALLOC_UNLOCK
 
 ## 内存管理架构
 
@@ -293,3 +309,7 @@ GDB 远程调试：取消 `run.sh` 底部注释行的注释（添加 `-s -S` 参
 ```
 gdb -ex "target remote localhost:1234"
 ```
+
+## 6. 技术债务
+
+在设计过程中需要综合考量工作量和规范性、扩展性，不能一味追求简单快速，但也不要过度设计，如果有不确定的地方参考Linux的实现方案。对于暂时的技术妥协中间状态，需要补充后续工作到doc/design/todo.md中

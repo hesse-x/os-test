@@ -31,16 +31,6 @@ static const uint8_t init_code[] = {
     0xEB, 0xDC                                    // jmp back (offset = -36)
 };
 
-// Convert Page descriptor pointer to physical address of the actual memory page
-static uint64_t page_to_phys(Page *p) {
-    return (uint64_t)(p - BFCAllocator::frames) * PAGE_SIZE;
-}
-
-// Convert physical address to higher-half virtual address
-static uint64_t phys_to_virt(uint64_t phys) {
-    return phys + VMA_BASE;
-}
-
 // ===================== Shared pages =====================
 // Allocated in shm_init(), mapped into all user processes
 static uint64_t kbd_shm_phys = 0;
@@ -63,109 +53,13 @@ void proc_init() {
         procs[i].wait_event = WAIT_NONE;
         procs[i].assigned_cpu = -1;
         procs[i].iopl = 0;
+        procs[i].brk = 0;
         list_init(&procs[i].run_node);
         list_init(&procs[i].wait_node);
     }
     cpu_locals[0]._cur_proc = nullptr;
     cpu_locals[0].run_count = 0;
     cpu_locals[0].idle_proc = nullptr;
-}
-
-// Ensure a PDPT entry exists for the given virtual address in user PML4.
-// Returns the virtual address of the PD, or allocates a new one.
-static uint64_t *ensure_pd(uint64_t *new_pml4, uint64_t vaddr) {
-    uint64_t pml4_idx = (vaddr >> 39) & 0x1FF;
-    if (new_pml4[pml4_idx] & 0x01) {
-        return (uint64_t *)phys_to_virt(new_pml4[pml4_idx] & ~0xFFF);
-    }
-    // Allocate new PDPT
-    Page *pdpt_page = bfc_alloc.alloc_page(1);
-    if (!pdpt_page) return nullptr;
-    uint64_t pdpt_phys = page_to_phys(pdpt_page);
-    uint64_t pdpt_virt = phys_to_virt(pdpt_phys);
-    uint64_t *pdpt = (uint64_t *)pdpt_virt;
-    for (int i = 0; i < 512; i++) {
-        pdpt[i] = 0;
-    }
-    new_pml4[pml4_idx] = pdpt_phys | PTE_PRESENT | PTE_RW | PTE_USER;
-    return pdpt;
-}
-
-// Ensure a PD entry exists for the given virtual address.
-// Returns the virtual address of the PT.
-static uint64_t *ensure_pt_in_pd(uint64_t *pd_or_pdpt, uint64_t vaddr, int level) {
-    // level 2 = PDPT (need PD), level 1 = PD (need PT)
-    uint64_t idx;
-    if (level == 2) {
-        idx = (vaddr >> 30) & 0x1FF;
-    } else {
-        idx = (vaddr >> 21) & 0x1FF;
-    }
-    if (pd_or_pdpt[idx] & 0x01) {
-        return (uint64_t *)phys_to_virt(pd_or_pdpt[idx] & ~0xFFF);
-    }
-    // Allocate next-level table
-    Page *table_page = bfc_alloc.alloc_page(1);
-    if (!table_page) return nullptr;
-    uint64_t table_phys = page_to_phys(table_page);
-    uint64_t table_virt = phys_to_virt(table_phys);
-    uint64_t *table = (uint64_t *)table_virt;
-    for (int i = 0; i < 512; i++) {
-        table[i] = 0;
-    }
-    pd_or_pdpt[idx] = table_phys | PTE_PRESENT | PTE_RW | PTE_USER;
-    return table;
-}
-
-// Map a single 4KB page at vaddr into new_pml4, copying data from src.
-static bool map_user_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
-                          uint64_t copy_len) {
-    Page *page = bfc_alloc.alloc_page(1);
-    if (!page) return false;
-    uint64_t page_phys = page_to_phys(page);
-    uint64_t page_virt = phys_to_virt(page_phys);
-
-    // Clear page first (handles BSS zeroing)
-    uint8_t *dst = (uint8_t *)page_virt;
-    for (size_t i = 0; i < PAGE_SIZE; i++) {
-        dst[i] = 0;
-    }
-
-    // Copy file data
-    if (src && copy_len > 0) {
-        for (uint64_t i = 0; i < copy_len; i++) {
-            dst[i] = src[i];
-        }
-    }
-
-    // Walk page tables: PML4 → PDPT → PD → PT
-    uint64_t *pdpt = ensure_pd(new_pml4, vaddr);
-    if (!pdpt) return false;
-    uint64_t *pd = ensure_pt_in_pd(pdpt, vaddr, 2);
-    if (!pd) return false;
-    uint64_t *pt = ensure_pt_in_pd(pd, vaddr, 1);
-    if (!pt) return false;
-
-    uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
-    pt[pt_idx] = page_phys | PTE_PRESENT | PTE_RW | PTE_USER;
-
-    return true;
-}
-
-// Map a physical page directly at vaddr in new_pml4 (no copy, page already initialized)
-// flags: PTE flags (Present+RW+User+optional NX, etc.)
-static bool map_user_page_direct(uint64_t *new_pml4, uint64_t vaddr, uint64_t phys,
-                                 uint64_t flags) {
-    uint64_t *pdpt = ensure_pd(new_pml4, vaddr);
-    if (!pdpt) return false;
-    uint64_t *pd = ensure_pt_in_pd(pdpt, vaddr, 2);
-    if (!pd) return false;
-    uint64_t *pt = ensure_pt_in_pd(pd, vaddr, 1);
-    if (!pt) return false;
-
-    uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
-    pt[pt_idx] = phys | flags;
-    return true;
 }
 
 void shm_init() {
@@ -327,6 +221,7 @@ proc_t *create_idle_process(int cpu_id) {
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = cpu_id;
     proc->iopl = 0;
+    proc->brk = 0;
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
     spin_unlock(&procs_lock);
@@ -464,6 +359,7 @@ proc_t *process_create(uint64_t entry) {
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = assigned_cpu;
     proc->iopl = 0;
+    proc->brk = 0x600000;
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
     spin_unlock(&procs_lock);
@@ -562,6 +458,7 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = assigned_cpu;
     proc->iopl = iopl;
+    proc->brk = 0x600000;
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
     spin_unlock(&procs_lock);

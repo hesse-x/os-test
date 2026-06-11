@@ -2,6 +2,7 @@
 #define COMMON_SYSCALL_H
 
 #include <stdint.h>
+#include "arch/x64/utils.h"
 
 // ===================== Syscall numbers =====================
 #define SYS_PUTC     0
@@ -11,6 +12,7 @@
 #define SYS_WAIT     4
 #define SYS_NOTIFY   5
 #define SYS_IRQ_BIND 6
+#define SYS_SBRK     7
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -42,6 +44,10 @@ static inline void sys_notify(int32_t pid) {
 
 static inline void sys_irq_bind(int irq) {
     __syscall1(SYS_IRQ_BIND, (int64_t)irq);
+}
+
+static inline int64_t sys_sbrk(int64_t increment) {
+    return __syscall1(SYS_SBRK, increment);
 }
 
 #endif // COMMON_SYSCALL_H

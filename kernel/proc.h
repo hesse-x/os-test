@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "kernel/list.h"
+#include "kernel/mem/alloc.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/smp.h"
 
@@ -22,6 +23,7 @@ struct proc_t {
     wait_event_t wait_event; // 阻塞原因
     int assigned_cpu;      // which CPU this process runs on
     uint8_t iopl;          // IOPL for this process (0=normal, 3=driver)
+    uint64_t brk;          // 堆顶地址，idle=0，用户进程=0x600000
     list_node_t run_node;  // embedded in per-CPU run_queue
     list_node_t wait_node; // embedded in wait_queue (reserved)
 };
@@ -40,7 +42,6 @@ void switch_to(proc_t *prev, proc_t *next);
 void process_entry();
 void idle_entry();
 proc_t *create_idle_process(int cpu_id);
-void shm_init();
-}
+void shm_init();}
 
 #endif // KERNEL_PROC_H

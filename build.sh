@@ -28,9 +28,12 @@ ld -m elf_x86_64 -Ttext 0x400000 -o build/kbd_driver.elf build/kbd_driver.o
 
 # shell.elf (IOPL=0)
 g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
+    -I. -c user/lib/malloc.cc -o build/malloc.o
+g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
     -I. -c shell/shell.cc -o build/shell.o
 objcopy --remove-section .note.gnu.property build/shell.o
-ld -m elf_x86_64 -Ttext 0x400000 -o build/shell.elf build/shell.o
+objcopy --remove-section .note.gnu.property build/malloc.o
+ld -m elf_x86_64 -Ttext 0x400000 -o build/shell.elf build/malloc.o build/shell.o
 
 # fs_driver.elf (IOPL=0)
 g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \

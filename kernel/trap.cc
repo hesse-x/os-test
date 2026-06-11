@@ -8,6 +8,9 @@
 #include "arch/x64/apic.h"
 #include "kernel/serial.h"
 #include "kernel/fb.h"
+#include "common/errno.h"
+
+#define HEAP_START 0x600000
 
 // ===================== fb_lock (framebuffer cursor + buffer) =====================
 spinlock_t fb_lock = {0};
@@ -182,7 +185,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 7
+#define NR_SYSCALL 8
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_putc,      // 0: 输出字符
     sys_getpid,    // 1: 获取 PID
@@ -191,6 +194,7 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_wait,      // 4: 阻塞等待通知
     sys_notify,    // 5: 唤醒指定进程
     sys_irq_bind,  // 6: 绑定当前进程到指定 IRQ
+    sys_sbrk,      // 7: 扩展用户态堆
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -198,7 +202,7 @@ void syscall_dispatch(trapframe_t *tf) {
         tf->rax = syscall_table[tf->rax](
             tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8);
     } else {
-        tf->rax = (uint64_t)-1;
+        tf->rax = (uint64_t)-ENOSYS;
     }
 }
 
@@ -224,7 +228,7 @@ uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
 
 // sys_getc() — syscall 3 (deprecated: keyboard now handled by user-space driver)
 uint64_t sys_getc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
-    return (uint64_t)-1;
+    return (uint64_t)-EPERM;
 }
 
 // sys_wait() — syscall 4 (阻塞等待通知)
@@ -259,7 +263,55 @@ uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 // sys_irq_bind(irq) — syscall 6 (绑定当前进程到指定 IRQ)
 uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     int irq = (int)arg1;
-    if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return (uint64_t)-1;
+    if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return (uint64_t)-EINVAL;
     __atomic_store_n(&irq_owner[irq], current_proc->pid, __ATOMIC_RELEASE);
     return 0;
+}
+
+// sys_sbrk(increment) — syscall 7 (扩展/缩小用户态堆)
+uint64_t sys_sbrk(uint64_t increment, uint64_t, uint64_t, uint64_t, uint64_t) {
+    uint64_t old_brk = current_proc->brk;
+
+    if (increment == 0)
+        return old_brk;
+
+    uint64_t new_brk;
+    if ((int64_t)increment > 0) {
+        new_brk = old_brk + increment;
+
+        // 需要映射的页范围：[old_brk 向上取整, new_brk 向上取整)
+        uint64_t page_start = ALIGN_UP(old_brk, PAGE_SIZE);
+        uint64_t page_end   = ALIGN_UP(new_brk, PAGE_SIZE);
+
+        if (page_start < page_end) {
+            int pages_mapped = 0;
+            uint64_t *pml4 = (uint64_t *)phys_to_virt(current_proc->cr3);
+            uint64_t flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+
+            if (!map_user_pages(pml4, page_start, page_end, flags, &pages_mapped)) {
+                if (pages_mapped > 0)
+                    unmap_user_pages(pml4, page_start, page_start + pages_mapped * PAGE_SIZE, pages_mapped);
+                return (uint64_t)-ENOMEM;
+            }
+        }
+    } else {
+        // 缩小堆
+        uint64_t dec = (uint64_t)(-(int64_t)increment);
+        if (dec >= old_brk - HEAP_START)
+            return (uint64_t)-EINVAL;
+        new_brk = old_brk - dec;
+
+        // 需要解映射的页范围：[new_brk 向上取整, old_brk 向上取整)
+        uint64_t page_start = ALIGN_UP(new_brk, PAGE_SIZE);
+        uint64_t page_end   = ALIGN_UP(old_brk, PAGE_SIZE);
+
+        if (page_start < page_end) {
+            uint64_t *pml4 = (uint64_t *)phys_to_virt(current_proc->cr3);
+            int count = (page_end - page_start) / PAGE_SIZE;
+            unmap_user_pages(pml4, page_start, page_end, count);
+        }
+    }
+
+    current_proc->brk = new_brk;
+    return old_brk;
 }

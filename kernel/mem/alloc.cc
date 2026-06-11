@@ -257,3 +257,12 @@ void init_mem(boot_info *bi) {
   // 11. 初始化 framebuffer
   init_fb(bi);
 }
+
+// ===================== Address conversion =====================
+uint64_t page_to_phys(Page *p) {
+    return (uint64_t)(p - BFCAllocator::frames) * PAGE_SIZE;
+}
+
+uint64_t phys_to_virt(uint64_t phys) {
+    return phys + VMA_BASE;
+}

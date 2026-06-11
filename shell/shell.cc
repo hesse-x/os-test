@@ -1,5 +1,6 @@
 #include "arch/x64/utils.h"
 #include "common/shm.h"
+#include "stdlib.h"
 
 static inline void putc(char c)       { sys_putc(c); }
 
@@ -54,6 +55,12 @@ static void puts(const char *s) {
 static void print_hex(uint32_t v) {
     const char *hex = "0123456789ABCDEF";
     for (int i = 28; i >= 0; i -= 4)
+        putc(hex[(v >> i) & 0xF]);
+}
+
+static void print_hex64(uint64_t v) {
+    const char *hex = "0123456789ABCDEF";
+    for (int i = 60; i >= 0; i -= 4)
         putc(hex[(v >> i) & 0xF]);
 }
 
@@ -252,6 +259,123 @@ static void cmd_raw_read(uint32_t lba, uint32_t count) {
     if (bytes % 16 != 0) putc('\n');
 }
 
+static void cmd_sbrk(const char *args) {
+    uint32_t increment = parse_u32(args);
+    int64_t result = sys_sbrk((int64_t)increment);
+    puts("sbrk(");
+    print_u32(increment);
+    puts(") = ");
+    if (result < 0) {
+        puts("-");
+        print_hex64((uint64_t)(-result));
+    } else {
+        print_hex64((uint64_t)result);
+    }
+    putc('\n');
+}
+
+static void cmd_malloc(const char *args) {
+    uint32_t size = parse_u32(args);
+    void *p = malloc(size);
+    puts("malloc(");
+    print_u32(size);
+    puts(") = ");
+    if (p) {
+        print_hex64((uint64_t)p);
+        // 写入测试数据验证可访问
+        char *buf = (char *)p;
+        for (uint32_t i = 0; i < size && i < 64; i++)
+            buf[i] = 'A' + (i % 26);
+    } else {
+        puts("NULL");
+    }
+    putc('\n');
+}
+
+static void cmd_free(const char *args) {
+    uint64_t addr = 0;
+    const char *p = args;
+    while (*p >= '0' && *p <= '9') {
+        addr = addr * 10 + (*p - '0');
+        p++;
+    }
+    // 也可以用 hex 前缀
+    if (args[0] == '0' && (args[1] == 'x' || args[1] == 'X')) {
+        addr = 0;
+        p = args + 2;
+        while (*p) {
+            char c = *p++;
+            if (c >= '0' && c <= '9') addr = addr * 16 + (c - '0');
+            else if (c >= 'a' && c <= 'f') addr = addr * 16 + (c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') addr = addr * 16 + (c - 'A' + 10);
+            else break;
+        }
+    }
+    if (addr == 0) {
+        puts("free: invalid addr\n");
+        return;
+    }
+    puts("free(");
+    print_hex64(addr);
+    puts(")\n");
+    free((void *)addr);
+}
+
+static void cmd_malloc_test(const char *) {
+    puts("=== malloc test ===\n");
+
+    // Test 1: basic alloc/free
+    void *p1 = malloc(64);
+    puts("1. malloc(64) = ");
+    print_hex64((uint64_t)p1);
+    putc('\n');
+
+    void *p2 = malloc(128);
+    puts("2. malloc(128) = ");
+    print_hex64((uint64_t)p2);
+    putc('\n');
+
+    void *p3 = malloc(32);
+    puts("3. malloc(32) = ");
+    print_hex64((uint64_t)p3);
+    putc('\n');
+
+    // Test 2: free and realloc
+    free(p2);
+    puts("4. free(p2)\n");
+
+    void *p4 = realloc(p1, 256);
+    puts("5. realloc(p1,256) = ");
+    print_hex64((uint64_t)p4);
+    putc('\n');
+
+    // Test 3: calloc
+    int *arr = (int *)calloc(10, sizeof(int));
+    puts("6. calloc(10,4) = ");
+    print_hex64((uint64_t)arr);
+    if (arr) {
+        int ok = 1;
+        for (int i = 0; i < 10; i++) { if (arr[i] != 0) ok = 0; }
+        puts(ok ? " zero-ok" : " NOT-ZERO");
+    }
+    putc('\n');
+
+    // Test 4: malloc(0)
+    void *p5 = malloc(0);
+    puts("7. malloc(0) = ");
+    print_hex64((uint64_t)p5);
+    putc('\n');
+
+    // Cleanup
+    free(p3);
+    free(p4);
+    free(arr);
+    free(p5);
+    puts("8. all freed\n");
+
+    puts("=== test done ===\n");
+}
+
 // ===================== Table-driven command parsing =====================
 
 typedef void (*cmd_func)(const char *args);
@@ -321,6 +445,30 @@ extern "C" void _start() {
             continue;
         }
 
+        // sbrk INCREMENT — test sbrk syscall
+        if (my_strcmp(cmd_name, "sbrk") == 0) {
+            cmd_sbrk(p);
+            continue;
+        }
+
+        // malloc SIZE — test malloc
+        if (my_strcmp(cmd_name, "malloc") == 0) {
+            cmd_malloc(p);
+            continue;
+        }
+
+        // free ADDR — test free
+        if (my_strcmp(cmd_name, "free") == 0) {
+            cmd_free(p);
+            continue;
+        }
+
+        // mtest — run malloc test suite
+        if (my_strcmp(cmd_name, "mtest") == 0) {
+            cmd_malloc_test(p);
+            continue;
+        }
+
         // cd with no arg = cd /
         if (my_strcmp(cmd_name, "cd") == 0) {
             if (*p == '\0') cmd_cd("/");
@@ -337,6 +485,10 @@ extern "C" void _start() {
             puts("touch <path>    - create empty file / update timestamp\n");
             puts("mkdir <path>    - create directory\n");
             puts("r LBA [COUNT]   - raw disk read (hex dump)\n");
+            puts("sbrk N          - test sbrk syscall (allocate N bytes)\n");
+            puts("malloc N        - test malloc\n");
+            puts("free ADDR       - test free (hex addr with 0x prefix)\n");
+            puts("mtest           - run malloc test suite\n");
             puts("h               - show this help\n");
             continue;
         }

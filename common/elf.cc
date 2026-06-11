@@ -5,54 +5,8 @@
 #include "common/macro.h"
 #include <stddef.h>
 
-static uint64_t page_to_phys(Page *p) {
-    return (uint64_t)(p - BFCAllocator::frames) * PAGE_SIZE;
-}
-
-static uint64_t phys_to_virt(uint64_t phys) {
-    return phys + VMA_BASE;
-}
-
-// Ensure a PDPT entry exists for the given virtual address in new_pml4.
-static uint64_t *ensure_pd(uint64_t *new_pml4, uint64_t vaddr) {
-    uint64_t pml4_idx = (vaddr >> 39) & 0x1FF;
-    if (new_pml4[pml4_idx] & 0x01) {
-        return (uint64_t *)phys_to_virt(new_pml4[pml4_idx] & ~0xFFF);
-    }
-    Page *pdpt_page = bfc_alloc.alloc_page(1);
-    if (!pdpt_page) return nullptr;
-    uint64_t pdpt_phys = page_to_phys(pdpt_page);
-    uint64_t pdpt_virt = phys_to_virt(pdpt_phys);
-    uint64_t *pdpt = (uint64_t *)pdpt_virt;
-    for (int i = 0; i < 512; i++) {
-        pdpt[i] = 0;
-    }
-    new_pml4[pml4_idx] = pdpt_phys | PTE_PRESENT | PTE_RW | PTE_USER;
-    return pdpt;
-}
-
-// Ensure a PD entry exists for the given virtual address.
-static uint64_t *ensure_pt_in_pd(uint64_t *pd_or_pdpt, uint64_t vaddr, int level) {
-    uint64_t idx;
-    if (level == 2) {
-        idx = (vaddr >> 30) & 0x1FF;
-    } else {
-        idx = (vaddr >> 21) & 0x1FF;
-    }
-    if (pd_or_pdpt[idx] & 0x01) {
-        return (uint64_t *)phys_to_virt(pd_or_pdpt[idx] & ~0xFFF);
-    }
-    Page *table_page = bfc_alloc.alloc_page(1);
-    if (!table_page) return nullptr;
-    uint64_t table_phys = page_to_phys(table_page);
-    uint64_t table_virt = phys_to_virt(table_phys);
-    uint64_t *table = (uint64_t *)table_virt;
-    for (int i = 0; i < 512; i++) {
-        table[i] = 0;
-    }
-    pd_or_pdpt[idx] = table_phys | PTE_PRESENT | PTE_RW | PTE_USER;
-    return table;
-}
+// page_to_phys, phys_to_virt — defined in kernel/mem/alloc.cc
+// ensure_pd, ensure_pt_in_pd, map_user_page_direct — defined in kernel/mem/user_mapping.cc
 
 // Map a single 4KB page at vaddr into new_pml4, copying data from src.
 static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
