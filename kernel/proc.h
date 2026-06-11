@@ -9,9 +9,9 @@
 
 typedef int32_t pid_t;
 
-enum proc_state_t { READY, RUNNING, BLOCKED };
+enum proc_state_t { READY, RUNNING, BLOCKED, ZOMBIE };
 
-enum wait_event_t { WAIT_NONE, WAIT_NOTIFY };
+enum wait_event_t { WAIT_NONE, WAIT_NOTIFY, WAIT_CHILD };
 
 struct proc_t {
     pid_t pid;
@@ -23,6 +23,8 @@ struct proc_t {
     wait_event_t wait_event; // 阻塞原因
     int assigned_cpu;      // which CPU this process runs on
     uint8_t iopl;          // IOPL for this process (0=normal, 3=driver)
+    pid_t parent_pid;      // 父进程 PID，启动时进程设为 -1
+    int32_t exit_code;     // 退出码，ZOMBIE 时有效
     uint64_t brk;          // 堆顶地址，idle=0，用户进程=0x600000
     list_node_t run_node;  // embedded in per-CPU run_queue
     list_node_t wait_node; // embedded in wait_queue (reserved)
@@ -31,6 +33,7 @@ struct proc_t {
 #define MAX_PROC 64
 
 extern proc_t procs[MAX_PROC];
+extern spinlock_t procs_lock;
 // current_proc is now per-CPU, accessed via macro in smp.h
 
 extern "C" {
@@ -42,6 +45,8 @@ void switch_to(proc_t *prev, proc_t *next);
 void process_entry();
 void idle_entry();
 proc_t *create_idle_process(int cpu_id);
-void shm_init();}
+void shm_init();
+void proc_reap(proc_t *proc);
+}
 
 #endif // KERNEL_PROC_H

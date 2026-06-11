@@ -1,6 +1,7 @@
 #include "arch/x64/utils.h"
 #include "common/shm.h"
 #include "stdlib.h"
+#include "common/syscall.h"
 
 static inline void putc(char c)       { sys_putc(c); }
 
@@ -376,6 +377,103 @@ static void cmd_malloc_test(const char *) {
     puts("=== test done ===\n");
 }
 
+// run <path>: read ELF file from FAT32, spawn as child process, wait for it
+static void cmd_run(const char *rel_path) {
+    char abs_path[256];
+    build_abs_path(rel_path, abs_path);
+
+    // Open file
+    freq->cmd = FS_CMD_OPEN;
+    set_path(abs_path);
+    if (fs_request() != 0) {
+        puts("run: cannot open\n");
+        return;
+    }
+
+    uint32_t fd = fresp->fd;
+    uint32_t file_size = fresp->total;
+
+    if (file_size == 0) {
+        puts("run: empty file\n");
+        freq->cmd = FS_CMD_CLOSE;
+        freq->fd = fd;
+        fs_request();
+        return;
+    }
+
+    // Allocate buffer for ELF data
+    uint8_t *elf_buf = (uint8_t *)malloc(file_size);
+    if (!elf_buf) {
+        puts("run: malloc failed\n");
+        freq->cmd = FS_CMD_CLOSE;
+        freq->fd = fd;
+        fs_request();
+        return;
+    }
+
+    // Read entire file into buffer
+    uint32_t offset = 0;
+    while (offset < file_size) {
+        uint32_t to_read = file_size - offset;
+        if (to_read > 8176) to_read = 8176;
+
+        freq->cmd = FS_CMD_READ;
+        freq->fd = fd;
+        freq->offset = offset;
+        freq->count = to_read;
+
+        if (fs_request() != 0) {
+            puts("run: read error\n");
+            free(elf_buf);
+            freq->cmd = FS_CMD_CLOSE;
+            freq->fd = fd;
+            fs_request();
+            return;
+        }
+        if (fresp->count == 0) break;
+
+        __memcpy(elf_buf + offset, (const void *)fresp->data, fresp->count);
+        offset += fresp->count;
+    }
+
+    // Close file
+    freq->cmd = FS_CMD_CLOSE;
+    freq->fd = fd;
+    fs_request();
+
+    // Spawn child process (IOPL=0 for normal user programs)
+    int64_t child_pid = sys_spawn((const void *)elf_buf, (uint64_t)file_size, 0);
+
+    // Free buffer — the kernel has already loaded the ELF into the child's address space
+    free(elf_buf);
+
+    if (child_pid < 0) {
+        puts("run: spawn failed (errno=");
+        print_hex64((uint64_t)(-child_pid));
+        puts(")\n");
+        return;
+    }
+
+    puts("run: spawned pid=");
+    print_u32((uint32_t)child_pid);
+    putc('\n');
+
+    // Wait for child to exit
+    int32_t exit_code = 0;
+    int64_t result = sys_waitpid((int32_t)child_pid, &exit_code);
+
+    if (result < 0) {
+        puts("run: waitpid failed\n");
+        return;
+    }
+
+    puts("run: pid=");
+    print_u32((uint32_t)child_pid);
+    puts(" exited with code ");
+    print_u32((uint32_t)exit_code);
+    putc('\n');
+}
+
 // ===================== Table-driven command parsing =====================
 
 typedef void (*cmd_func)(const char *args);
@@ -469,10 +567,23 @@ extern "C" void _start() {
             continue;
         }
 
+        // run <path> — execute ELF file from FAT32
+        if (my_strcmp(cmd_name, "run") == 0) {
+            if (*p == '\0') { puts("run: missing argument\n"); continue; }
+            cmd_run(p);
+            continue;
+        }
+
         // cd with no arg = cd /
         if (my_strcmp(cmd_name, "cd") == 0) {
             if (*p == '\0') cmd_cd("/");
             else cmd_cd(p);
+            continue;
+        }
+
+        // pwd
+        if (my_strcmp(cmd_name, "pwd") == 0) {
+            cmd_pwd();
             continue;
         }
 
@@ -482,14 +593,15 @@ extern "C" void _start() {
             puts("cat <path>      - read file\n");
             puts("cd <path>       - change directory\n");
             puts("pwd             - print working directory\n");
-            puts("touch <path>    - create empty file / update timestamp\n");
+            puts("touch <path>    - create empty file\n");
             puts("mkdir <path>    - create directory\n");
-            puts("r LBA [COUNT]   - raw disk read (hex dump)\n");
-            puts("sbrk N          - test sbrk syscall (allocate N bytes)\n");
+            puts("run <path>      - execute ELF file\n");
+            puts("r LBA [COUNT]   - raw disk read\n");
+            puts("sbrk N          - test sbrk syscall\n");
             puts("malloc N        - test malloc\n");
-            puts("free ADDR       - test free (hex addr with 0x prefix)\n");
-            puts("mtest           - run malloc test suite\n");
-            puts("h               - show this help\n");
+            puts("free ADDR       - test free\n");
+            puts("mtest           - malloc test suite\n");
+            puts("h               - show help\n");
             continue;
         }
 

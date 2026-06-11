@@ -41,6 +41,24 @@ g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
 objcopy --remove-section .note.gnu.property build/fs_driver.o
 ld -m elf_x86_64 -Ttext 0x400000 -o build/fs_driver.elf build/fs_driver.o
 
+# libc.a (static library: printf + FILE + string + malloc + _start)
+g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
+    -I. -Iuser/include -c user/lib/stdio.cc -o build/stdio.o
+g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
+    -I. -Iuser/include -c user/lib/string.cc -o build/string.o
+g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
+    -I. -Iuser/include -c user/lib/start.cc -o build/start.o
+objcopy --remove-section .note.gnu.property build/stdio.o
+objcopy --remove-section .note.gnu.property build/string.o
+objcopy --remove-section .note.gnu.property build/start.o
+ar rcs build/libc.a build/start.o build/stdio.o build/string.o build/malloc.o
+
+# hello.elf (IOPL=0, C program linked with libc.a)
+gcc -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
+    -I. -Iuser/include -c user/hello.c -o build/hello.o
+objcopy --remove-section .note.gnu.property build/hello.o
+ld -m elf_x86_64 -Ttext 0x400000 -o build/hello.elf build/hello.o build/libc.a
+
 # 3. 生成 disk.img
 # LBA layout: 0=MBR, 1-50=disk_driver, 51-100=kbd_driver, 101-150=shell, 151-200=fs_driver, 201+=FAT32
 dd if=/dev/zero of=build/disk.img bs=512 count=2048
@@ -73,6 +91,7 @@ echo "Microkernel OS with FAT32 support" > build/README
 # Copy files into FAT32 image using mtools (no root needed)
 mcopy -i build/part2.img build/hello.txt ::
 mcopy -i build/part2.img build/README ::
+mcopy -i build/part2.img build/hello.elf ::
 
 # Write FAT32 partition back into disk.img
 dd if=build/part2.img of=build/disk.img bs=512 seek=201 conv=notrunc

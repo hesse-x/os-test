@@ -21,6 +21,9 @@ uint64_t sys_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_sbrk(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t);
+uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t);
 }
 
 #endif // KERNEL_TRAP_H

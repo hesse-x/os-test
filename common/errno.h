@@ -7,5 +7,6 @@
 #define ENOMEM   3
 #define EINVAL   4
 #define ENOSYS   5
+#define ECHILD   6
 
 #endif // COMMON_ERRNO_H

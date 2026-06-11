@@ -75,7 +75,7 @@ void trap_dispatch(trapframe_t *tf) {
     return;
   }
 
-  // CPU exception: print diagnostic and halt
+  // CPU exception: kill user process, halt for kernel exceptions
   if (tf->trapno == 14) {
     uint64_t cr2;
     __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
@@ -133,21 +133,25 @@ void trap_dispatch(trapframe_t *tf) {
   uint64_t cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(cr3));
   serial_put_hex(cr3);
-  // Print current process info and CR3 comparison
   if (current_proc) {
     serial_puts(" pid=");
     serial_put_hex((uint64_t)current_proc->pid);
     serial_puts(" proc_cr3=");
     serial_put_hex(current_proc->cr3);
   }
-  // Stack dump (8 qwords at rsp)
-  serial_puts("\n  stack:");
-  uint64_t *sp = (uint64_t *)tf->rsp;
-  for (int i = 0; i < 8; i++) {
-    serial_puts(" ");
-    serial_put_hex(sp[i]);
-  }
   serial_puts("\n");
+
+  if (tf->cs == 0x2B) {
+    // User-mode exception: kill process, don't halt the machine
+    serial_puts("Process ");
+    serial_put_hex((uint64_t)current_proc->pid);
+    serial_puts(" crashed: vector ");
+    serial_put_hex(tf->trapno);
+    serial_puts("\n");
+    sys_exit((uint64_t)-1, 0, 0, 0, 0);
+    // sys_exit does not return
+  }
+  // Kernel-mode exception: unrecoverable, halt
   halt();
 }
 
@@ -185,16 +189,19 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 8
+#define NR_SYSCALL 11
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_putc,      // 0: 输出字符
     sys_getpid,    // 1: 获取 PID
     sys_yield,     // 2: 主动让出 CPU
-    sys_getc,      // 3: 读键盘输入（阻塞）
+    sys_getc,      // 3: 读键盘输入（废弃）
     sys_wait,      // 4: 阻塞等待通知
     sys_notify,    // 5: 唤醒指定进程
     sys_irq_bind,  // 6: 绑定当前进程到指定 IRQ
     sys_sbrk,      // 7: 扩展用户态堆
+    sys_exit,      // 8: 进程退出
+    sys_waitpid,   // 9: 等待子进程退出
+    sys_spawn,     // 10: 创建子进程
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -314,4 +321,92 @@ uint64_t sys_sbrk(uint64_t increment, uint64_t, uint64_t, uint64_t, uint64_t) {
 
     current_proc->brk = new_brk;
     return old_brk;
+}
+
+// sys_exit(exit_code) — syscall 8 (进程退出)
+uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    proc_t *proc = current_proc;
+    int32_t exit_code = (int32_t)arg1;
+    proc->exit_code = exit_code;
+
+    if (proc->parent_pid < 0) {
+        // No parent: directly reap all resources
+        proc_reap(proc);
+    } else {
+        // Has parent: become ZOMBIE, wait for sys_waitpid to reap
+        int cpu = proc->assigned_cpu;
+        uint64_t flags;
+        spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+        proc->state = ZOMBIE;
+        __atomic_add_fetch(&cpu_locals[cpu].run_count, -1, __ATOMIC_RELAXED);
+        spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+        // Notify parent so it can call waitpid
+        sys_notify((uint64_t)proc->parent_pid, 0, 0, 0, 0);
+    }
+
+    schedule();  // never returns
+    return 0;    // unreachable
+}
+
+// sys_waitpid(pid, exit_code_ptr) — syscall 9 (等待子进程退出)
+uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+    pid_t pid = (pid_t)arg1;
+    int32_t *exit_code_ptr = (int32_t *)arg2;
+
+    if (pid < 0) return (uint64_t)-EINVAL;
+
+    // Validate: pid must be our child
+    spin_lock(&procs_lock);
+    proc_t *child = &procs[pid];
+    if (child->pid != pid || child->parent_pid != current_proc->pid) {
+        spin_unlock(&procs_lock);
+        return (uint64_t)-ECHILD;
+    }
+    spin_unlock(&procs_lock);
+
+    while (1) {
+        // Check if child is ZOMBIE under its scheduler_lock
+        int cpu = child->assigned_cpu;
+        uint64_t flags;
+        spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+        if (child->state == ZOMBIE) {
+            child->state = READY;  // temporary, prevent races during reap
+            spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+            break;
+        }
+        spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+
+        // Child not yet exited: block on WAIT_CHILD
+        current_proc->wait_event = WAIT_CHILD;
+        current_proc->state = BLOCKED;
+        __atomic_add_fetch(&cpu_locals[current_proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
+        schedule();
+
+        // Woken up by notify — re-check child state
+    }
+
+    // Reap child resources
+    if (exit_code_ptr) *exit_code_ptr = child->exit_code;
+    proc_reap(child);
+    return (uint64_t)pid;
+}
+
+// sys_spawn(elf_data, elf_size, iopl) — syscall 10 (创建子进程)
+uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+    const uint8_t *elf_data = (const uint8_t *)arg1;
+    uint64_t elf_size = arg2;
+    uint32_t iopl = (uint32_t)arg3;
+
+    // IOPL permission check
+    if (current_proc->iopl < iopl) return (uint64_t)-EPERM;
+
+    // Basic parameter validation
+    if (!elf_data || elf_size == 0) return (uint64_t)-EINVAL;
+
+    // Create child process from ELF
+    proc_t *child = process_create_elf(elf_data, elf_size, iopl);
+    if (!child) return (uint64_t)-ENOMEM;
+
+    child->parent_pid = current_proc->pid;
+    return (uint64_t)child->pid;
 }

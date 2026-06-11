@@ -13,6 +13,9 @@
 #define SYS_NOTIFY   5
 #define SYS_IRQ_BIND 6
 #define SYS_SBRK     7
+#define SYS_EXIT     8
+#define SYS_WAITPID  9
+#define SYS_SPAWN    10
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -48,6 +51,19 @@ static inline void sys_irq_bind(int irq) {
 
 static inline int64_t sys_sbrk(int64_t increment) {
     return __syscall1(SYS_SBRK, increment);
+}
+
+static inline void sys_exit(int32_t exit_code) {
+    __syscall1(SYS_EXIT, (int64_t)exit_code);
+    // does not return
+}
+
+static inline int64_t sys_waitpid(int32_t pid, int32_t *exit_code) {
+    return __syscall2(SYS_WAITPID, (int64_t)pid, (int64_t)(uintptr_t)exit_code);
+}
+
+static inline int64_t sys_spawn(const void *elf_data, uint64_t elf_size, uint32_t iopl) {
+    return __syscall3(SYS_SPAWN, (int64_t)(uintptr_t)elf_data, (int64_t)elf_size, (int64_t)iopl);
 }
 
 #endif // COMMON_SYSCALL_H

@@ -51,10 +51,13 @@
 | 细粒度锁拆分（BKL 移除） | [fine_grained_lock.md](fine_grained_lock.md) |
 | FAT32 写入（touch/mkdir） | [fat32.md](fat32.md) |
 | 用户态堆（sys_sbrk） | [sbrk.md](sbrk.md) |
+| 进程生命周期管理（sys_exit/sys_waitpid/sys_spawn） | [process_lifecycle.md](process_lifecycle.md) |
+| hello.elf + shell run 命令 | [process_lifecycle.md](process_lifecycle.md) |
+| libc.a 静态库（printf + FILE + _start） | [libc.md](libc.md) |
 
 ## 当前状态
 
-内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 4 个 ELF（disk_driver → kbd_driver → shell → fs_driver）→ 多进程协作。BKL 已完全移除，替换为 per-CPU `scheduler_lock` + 全局 `procs_lock` + `fb_lock` + `irq_owner[]` atomic。每 CPU 有独立 idle 进程和 run_queue。`timer_handler` 用 `tf->cs == 0x2B` 判断抢占，AP 参与调度。FAT32 读写完整（readdir/open/read/close/raw_read/touch/mkdir），sbrk 可用。
+内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 4 个 ELF（disk_driver → kbd_driver → shell → fs_driver）→ 多进程协作。BKL 已完全移除，替换为 per-CPU `scheduler_lock` + 全局 `procs_lock` + `fb_lock` + `irq_owner[]` atomic。每 CPU 有独立 idle 进程和 run_queue。`timer_handler` 用 `tf->cs == 0x2B` 判断抢占，AP 参与调度。FAT32 读写完整（readdir/open/read/close/raw_read/touch/mkdir），sbrk 可用。进程生命周期管理（exit/waitpid/spawn）已实现，用户态异常不再 halt 全机。shell `run` 命令可从 FAT32 加载 ELF 并 spawn 执行。libc.a 静态库已实现（printf/FILE/string/malloc/_start），hello.c 使用 printf 输出 "Hello, World!" 并通过 libc.a 链接。
 
 ## 多核 SMP — 调度与锁（全部完成）
 
@@ -112,37 +115,65 @@
 
 ## 短期目标 — 支持简单 ELF 可执行文件的执行
 
-核心机制已具备（ELF loader、FAT32 read、sbrk），需补进程生命周期管理 + shell 加载能力。
+核心机制已具备（ELF loader、FAT32 read、sbrk），进程生命周期管理 + shell 加载能力已实现。
 
-### 进程退出 + 资源回收
+### 进程退出 + 资源回收（sys_exit / sys_waitpid） ✅
 
-- [ ] sys_exit syscall：进程主动退出（状态→DEAD，内核回收 PML4 + 映射页 + 堆页 + 内核栈）
-- [ ] sys_waitpid syscall：shell 等待子进程退出，获取退出码
-- [ ] proc_t 新增 parent_pid 字段，退出时 notify parent
-- [ ] 验证: 用户进程退出后 shell 收到通知，PCB 槽位可复用
+> 设计文档: [process_lifecycle.md](process_lifecycle.md)
 
-### 用户态运行时
+- [x] proc_t 新增 `parent_pid`（pid_t）、`exit_code`（int32_t）字段
+- [x] 新增 `PROC_ZOMBIE` 状态 + `WAIT_CHILD` 等待事件
+- [x] sys_exit syscall (#8)：设 ZOMBIE + 保存退出码 + notify 父进程 + schedule；无父进程（parent_pid==-1）时直接回收
+- [x] proc_reap：回收 PML4 + 用户页映射 + 页表页 + 内核栈 + PCB 槽位（共享页物理帧不回收）
+- [x] sys_waitpid syscall (#9)：阻塞等指定子进程 ZOMBIE + 回收资源 + 返回退出码
+- [x] 验证: 编译通过，系统启动正常
 
-- [ ] crt0.o：用户态 C 运行时入口 `_start → main(argc, argv) → sys_exit(ret)`
-- [ ] 用户态链接脚本：ENTRY(_start)，代码 0x400000，栈 0x7FFFFFFFD000
-- [ ] 静态 libc：putc/puts/memcpy/memset/sbrk 封装（编译为 .a 供用户程序链接）
-- [ ] 验证: 宿主机编译 hello.c → 静态链接 libc → 生成 ELF → 放入 FAT32
+### 运行时加载新进程（sys_spawn） ✅
 
-### shell: run 命令
+> 设计文档: [process_lifecycle.md](process_lifecycle.md)
 
-- [ ] shell cmd_run：从 FAT32 读 ELF 文件 → 通过 fs_driver IPC 获取文件内容 → 通知内核加载（需新 syscall 或 shell 直接传 ELF 数据给内核）
-- [ ] 内核需支持运行时加载 ELF（当前只在 kernel_main 启动时加载，需扩展为 shell 可请求内核加载新进程）
-- [ ] sys_spawn(elf_data_ptr, elf_size, iopl)：或 shell 通过 IPC 将 ELF 数据传给内核
-- [ ] shell 等待子进程退出（sys_waitpid）
-- [ ] 验证: shell 输入 `run hello.elf` → hello world 输出字符 → shell 回到命令行
+- [x] sys_spawn syscall (#10)：用户态 ELF 缓冲区指针 → process_create_elf，IOPL 权限检查（调用者 IOPL < 请求 IOPL 返回 -EPERM），设 parent_pid，返回子 PID
+- [x] 验证: 编译通过，系统启动正常
 
-### FAT32 写入后续（短期目标支撑）
+### 异常退出路径改造 ✅
+
+> 设计文档: [process_lifecycle.md](process_lifecycle.md)
+
+- [x] trap_dispatch CPU 异常：用户态异常 → sys_exit(-1) 替代 halt()；内核态异常仍 halt
+- [x] 验证: 编译通过，系统启动正常
+
+### hello.elf + shell run 命令 ✅
+
+- [x] hello.cc：最小用户程序（sys_putc 输出 "Hello, World!" → sys_exit(0)）
+- [x] shell cmd_run：从 FAT32 读 ELF 文件 → malloc 缓冲区 → sys_spawn → sys_waitpid → 打印退出码
+- [x] hello.elf 写入 FAT32（build.sh mcopy）
+- [x] 验证: 编译通过，hello.elf 可通过 shell run 命令执行
+
+### libc.a 静态库（printf + FILE + _start） ✅
+
+> 设计文档: [libc.md](libc.md)
+
+- [x] user/include/stdio.h：FILE 结构体（fd/buffer/mode/flags/write_fn）、stdout/stderr、printf/fprintf/vfprintf/fputc/fputs/puts/fflush、EOF 及缓冲模式常量
+- [x] user/include/string.h：strlen/strcmp/strncmp/strcpy/strncpy/strcat/strchr、memcpy/memset/memmove
+- [x] user/include/stdlib.h：增加 exit() 声明 + EXIT_SUCCESS/EXIT_FAILURE
+- [x] user/lib/stdio.cc：FILE 实现、stdout/stderr 实例（line-buffered/unbuffered）、sys_putc_flush、vfprintf 格式化引擎（%s/%d/%u/%c/%x/%X/%p/%ld/%lu/%lX/%% + 宽度前缀）
+- [x] user/lib/string.cc：字符串和内存操作函数
+- [x] user/lib/start.cc：_start 入口点（stdio_init → main → sys_exit）
+- [x] user/hello.c：改为 `#include <stdio.h>` + `int main(void)` + `printf("Hello, World!\n")`
+- [x] build.sh：新增 libc.a 构建步骤（ar rcs libc.a start.o stdio.o string.o malloc.o）、hello 改用 gcc + libc.a 链接
+- [x] 验证: `./build.sh` 编译成功，shell `run hello.elf` 输出 "Hello, World!"
+
+### FAT32 写入（run 命令前置依赖）
 
 | 功能 | 说明 | 优先级 |
 |------|------|--------|
-| 文件写入 (write) | fs_driver 支持文件内容写入（簇分配+数据写入），run 命令需写入 ELF 到磁盘 | 高 |
+| 文件写入 (write) | fs_driver 支持文件内容写入（簇分配+数据写入），需将宿主机编译的 ELF 写入 FAT32 | 高 |
 | 删除 (unlink/rmdir) | 目录项标记 0xE5 + FAT 簇释放 | 中 |
 | RTC 时间源 | UEFI 获取初始时间 → sys_gettime syscall → 真实时间戳 | 中 |
+
+### 验收目标：shell 中运行 hello.elf
+
+完整流程：宿主机编写 hello.c → gcc 编译 + 静态链接 libc.a → 生成 hello.elf → 写入 FAT32 → OS 启动 → shell `run hello.elf` → 屏幕输出 "Hello, World!" → shell 回到命令行
 
 ---
 
@@ -295,6 +326,7 @@
 | sbrk 缩小堆 | sbrk.md | 中 | 内核侧 sys_sbrk 支持 increment<0，用户态 malloc 达阈值后归还堆顶空闲块 |
 | malloc/free 加锁 | sbrk.md | 中 | MALLOC_LOCK/MALLOC_UNLOCK 占位宏替换为实际锁（需用户态线程/futex 支持） |
 | 串口打印统一 NDEBUG 控制 | — | 低 | 全项目串口输出用宏包装，NDEBUG 下为空实现 |
+| printf %f 浮点格式化 | 用户态 SSE/FPU + libc.md | 中 | 完整 printf 支持 %f/%lf，需 FPU 上下文保存 + 浮点到十进制转换算法（Ryu） |
 | 动态库加载（.so 支持） | — | 远 | PIC 编译 + 动态链接器 + PLT/GOT + 运行时重定位 |
 
 | 运行时 IPI | LAPIC | 低 | reschedule / TLB shootdown |
