@@ -207,11 +207,9 @@ Shell (PID 4)                      fs_driver (PID 5)                 disk_driver
 - ELF_MAX_SECTORS=50（25KB/ELF），按实际大小读取，避免加载不完整 ELF 导致 page fault
 - LBA 偏移更新：disk_driver=1, kbd_driver=51, shell=101, fs_driver=151
 
-### shm_init 扩展
+### shm_init（已删除）
 
-- 新增 5 个物理页：disk_req_shm_phys2、disk_resp_shm_phys(2)、fs_req_shm_phys、fs_resp_shm_phys(2)
-- map_shared_pages 从 3 页扩展到 8 页映射
-- 所有用户进程统一映射全部共享页
+硬编码共享页基础设施已在动态 SHM 迁移中完全删除，详见 [dynamic_shm_migration.md](dynamic_shm_migration.md)
 
 ## 构建改动（build.sh）
 
@@ -241,7 +239,7 @@ Shell (PID 4)                      fs_driver (PID 5)                 disk_driver
 | 文件 | 操作 | 说明 |
 |------|------|------|
 | `common/shm.h` | 修改 | 地址常量更新（8页布局）；disk_req_shm 扩到 2 页；disk_resp_shm 扩到 2 页（地址后移）；新增 FS_CMD_CREATE=5, FS_CMD_MKDIR=6 |
-| `kernel/proc.cc` | 修改 | shm_init 多分配物理页；map_shared_pages 改为 8 页映射；地址常量更新 |
+| `kernel/proc.cc` | 修改 | shm_init 多分配物理页；map_shared_pages 改为 8 页映射；地址常量更新（已删除，见 [dynamic_shm_migration.md](dynamic_shm_migration.md)） |
 | `kernel/kernel.cc` | 修改 | 动态 ELF 加载（load_elf_from_disk）；LBA 更新（1/51/101/151）；ELF_MAX_SECTORS=50 |
 | `driver/kbd_driver.cc` | 修改 | 新增 Shift/CapsLock 状态追踪 + shifted scancode 表，支持大小写输入 |
 | `driver/fs_driver.cc` | 修改 | 新增 handle_create/handle_mkdir；新增 find_free_cluster/allocate_cluster/dir_chain_extend；BPB 校验防除零；静态全局缓冲区防栈溢出 |
@@ -284,7 +282,7 @@ disk_req_shm 从 1 页扩到 2 页，地址重排：
 0x506000  fs_resp_shm    (2页, 0x506000-0x507FFF) ← 地址后移
 ```
 
-总计 8 页（0x500000-0x507FFF），内核 shm_init 多分配 1 个物理页，map_shared_pages 改为 8 页映射。
+总计 8 页（0x500000-0x507FFF），现已迁移到动态 SHM，详见 [dynamic_shm_migration.md](dynamic_shm_migration.md)。
 
 ### disk_req_shm 结构（2 页）
 
@@ -423,7 +421,7 @@ Shell (PID 4)                      fs_driver (PID 5)                 disk_driver
 | 文件 | 操作 | 说明 |
 |------|------|------|
 | `common/shm.h` | 修改 | 地址常量更新（8页布局）；disk_req_shm 扩到 2 页；新增 FS_CMD_CREATE=5, FS_CMD_MKDIR=6 |
-| `kernel/proc.cc` | 修改 | shm_init 多分配 1 物理页；map_shared_pages 改为 8 页映射；地址常量更新 |
+| `kernel/proc.cc` | 修改 | shm_init 多分配 1 物理页；map_shared_pages 改为 8 页映射；地址常量更新（已删除，见 [dynamic_shm_migration.md](dynamic_shm_migration.md)） |
 | `driver/disk_driver.cc` | 修改 | notify 目标改为 fs_driver_pid；新增 WRITE cmd（ATA PIO LBA28 write） |
 | `driver/kbd_driver.cc` | 修改 | 新增 Shift/CapsLock 状态追踪 + shifted scancode 表，支持大小写输入 |
 | `driver/fs_driver.cc` | 修改 | 新增 handle_create/handle_mkdir；新增 find_free_cluster/allocate_cluster/dir_chain_extend；BPB 校验防除零；缓存写后更新 |

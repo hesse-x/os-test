@@ -101,9 +101,6 @@ void kernel_main(boot_info *bi) {
 
   proc_init();
 
-  // Initialize shared pages (after BFC allocator is ready)
-  shm_init();
-
   smp_boot_aps();
 
   // Create BSP idle process

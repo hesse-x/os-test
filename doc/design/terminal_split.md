@@ -356,7 +356,7 @@ Shell 不再需要 `kms_flush()`（不再直接写 KMS ring）。删除 shell.cc
 
 ### 3.5 FS IPC 适配
 
-Shell 的 FS IPC 仍使用硬编码共享页（FS_REQ/FS_RESP），不变。但 `fs_request()` 中的 `kms_flush()` 调用改为 `fflush(stdout)` 或直接移除（sys_write 会自动刷新 pipe）。
+Shell 的 FS IPC 已迁移到动态 SHM（详见 [dynamic_shm_migration.md](dynamic_shm_migration.md)）。
 
 ## 4. libc 适配
 

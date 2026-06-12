@@ -96,22 +96,9 @@ LBA 251+:    FAT32 分区                      ← 原 201
 
 MBR 分区1 (type=0xDA) 覆盖 LBA 1-210（裸 ELF 存储），分区2 (type=0x0C) 覆盖 LBA 211+（FAT32 文件系统）。
 
-## 共享页地址
+## 共享页地址（已迁移到动态 SHM）
 
-```
-0x500000  KBD_SHM       — 键盘驱动共享页
-0x501000  DISK_REQ      — 磁盘请求
-0x502000  DISK_REQ2     — 磁盘请求（扩展）
-0x503000  DISK_RESP     — 磁盘响应
-0x504000  DISK_RESP2    — 磁盘响应（扩展）
-0x505000  FS_REQ        — 文件系统请求
-0x506000  FS_RESP       — 文件系统响应
-0x507000  FS_RESP2      — 文件系统响应（扩展）
-0x508000  KMS_INFO      — framebuffer 元信息（内核写，KMS 读）
-0x509000  KMS_REQ       — 渲染请求（shell 写，KMS 读）
-```
-
-所有共享页映射给所有进程，和现有共享页一致。
+所有驱动间 IPC 已统一使用动态共享内存（sys_shm_create/sys_shm_attach），硬编码地址常量和 shm_init/map_shared_pages 已删除。详见 [dynamic_shm_migration.md](dynamic_shm_migration.md)。
 
 ## 内核改动
 
@@ -141,9 +128,9 @@ MBR 分区1 (type=0xDA) 覆盖 LBA 1-210（裸 ELF 存储），分区2 (type=0x0
 - 创建 KMS 进程时，额外将 framebuffer 物理页映射到进程地址空间 `0x700000`（4KB 页，不加 PCD/PAT）
 - 需要一种方式识别 KMS 进程（通过 ELF 加载顺序/PID 判断，或传入标志位）
 
-### map_shared_pages 改动
+### map_shared_pages（已删除）
 
-- 新增 KMS_INFO(0x507000) + KMS_REQ(0x508000) 映射
+map_shared_pages 已在动态 SHM 迁移中删除，KMS 通过 sys_shm_attach 获取共享内存。
 
 ### kernel_main 改动
 

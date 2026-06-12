@@ -8,8 +8,9 @@
 
 // ===================== FS IPC =====================
 
-static volatile fs_req_shm    *freq  = (volatile fs_req_shm    *)FS_REQ_ADDR;
-static volatile fs_resp_shm   *fresp = (volatile fs_resp_shm   *)FS_RESP_ADDR;
+static volatile fs_req_shm    *freq;
+static volatile fs_resp_shm   *fresp;
+static volatile fs_shm_header *fs_hdr;
 
 // Current working directory
 static char cwd[256] = "/";
@@ -71,8 +72,12 @@ static uint64_t parse_hex64(const char *s) {
 static int fs_request() {
     freq->client_pid = sys_getpid();
     fflush(stdout);
-    sys_notify(FS_DRIVER_PID);
+    if (fs_hdr->fs_driver_sleeping) {
+        sys_notify(FS_DRIVER_PID);
+    }
+    fs_hdr->client_sleeping = 1;
     sys_wait(0);
+    fs_hdr->client_sleeping = 0;
     return (int)fresp->status;
 }
 
@@ -396,6 +401,15 @@ static const cmd_entry cmds[] = {
 // ===================== Main =====================
 
 extern "C" void _start() {
+    // Attach to fs_driver SHM (retry until fs_driver has created it)
+    uint64_t fs_shm = 0;
+    while ((fs_shm = (uint64_t)sys_shm_attach(FS_DRIVER_PID)) == 0) {
+        sys_wait(1);
+    }
+    fs_hdr = (volatile fs_shm_header *)(fs_shm + FS_SHM_HEADER_OFFSET);
+    freq   = (volatile fs_req_shm *)(fs_shm + FS_REQ_OFFSET);
+    fresp  = (volatile fs_resp_shm *)(fs_shm + FS_RESP_OFFSET);
+
     // fd 0 and fd 1 are already set up by the kernel (pipe to terminal)
 
     char line[80];

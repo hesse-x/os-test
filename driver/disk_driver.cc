@@ -5,8 +5,9 @@
 #include "common/shm.h"
 #include "common/pid.h"
 
-static volatile disk_req_shm  *req  = (volatile disk_req_shm  *)DISK_REQ_ADDR;
-static volatile disk_resp_shm *resp = (volatile disk_resp_shm *)DISK_RESP_ADDR;
+static volatile disk_req_shm  *req;
+static volatile disk_resp_shm *resp;
+static volatile disk_shm_header *hdr;
 
 // ATA PIO LBA28 I/O ports
 #define ATA_DATA     0x1F0
@@ -23,9 +24,6 @@ static volatile disk_resp_shm *resp = (volatile disk_resp_shm *)DISK_RESP_ADDR;
 #define ATA_DRDY      0x40
 #define ATA_DRQ       0x08
 #define ATA_ERR       0x01
-
-#define DISK_CMD_READ  0
-#define DISK_CMD_WRITE 1
 
 static void ata_read(uint32_t lba, uint32_t count, uint8_t *buf) {
     while (inb(ATA_STATUS) & ATA_BSY);
@@ -92,17 +90,27 @@ static void handle_request() {
 }
 
 extern "C" void _start() {
-    // fs_driver PID = our PID + 3 (PID2=disk_driver, PID3=kbd_driver, PID4=shell, PID5=fs_driver)
-    int32_t my_pid = (int32_t)sys_getpid();
-    (void)my_pid;
     int32_t fs_driver_pid = FS_DRIVER_PID;
 
+    // Create shared memory: header(1) + req(2) + resp(2) = 5 pages
+    uint64_t shm_base = (uint64_t)sys_shm_create(5 * 4096);
+    hdr  = (volatile disk_shm_header *)(shm_base + DISK_SHM_HEADER_OFFSET);
+    req  = (volatile disk_req_shm *)(shm_base + DISK_REQ_OFFSET);
+    resp = (volatile disk_resp_shm *)(shm_base + DISK_RESP_OFFSET);
+    hdr->disk_driver_sleeping = 0;
+    hdr->fs_driver_sleeping = 0;
+
     while (1) {
-        // Wait for request
+        // Sleep: set flag, wait, clear flag
+        hdr->disk_driver_sleeping = 1;
         sys_wait(0);
+        hdr->disk_driver_sleeping = 0;
 
         handle_request();
 
-        sys_notify(fs_driver_pid);
+        // Notify fs_driver only if it's sleeping
+        if (hdr->fs_driver_sleeping) {
+            sys_notify(fs_driver_pid);
+        }
     }
 }

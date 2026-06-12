@@ -92,7 +92,6 @@ void switch_to(proc_t *prev, proc_t *next);
 void process_entry();
 void idle_entry();
 proc_t *create_idle_process(int cpu_id);
-void shm_init();
 void proc_reap(proc_t *proc);
 }
 

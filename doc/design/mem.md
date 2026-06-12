@@ -225,7 +225,6 @@ kernel_main:
   kernel_init_finish()  → bump 禁用
   slab_init()           → 初始化 9 个 kmem_cache_t（设 obj_size, 初始化 lock, partial=NULL）
   proc_init()
-  shm_init()
   smp_boot_aps()
   ...
 ```

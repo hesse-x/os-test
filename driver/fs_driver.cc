@@ -12,11 +12,13 @@ static uint8_t dir_cluster_data_buf[4096];   // used in handle_mkdir
 static uint8_t zero_cluster_buf[4096];       // used in dir_chain_extend
 static uint8_t sector_buf[512];              // used in fat_write_entry
 
-// ===================== Shared page pointers =====================
-static volatile disk_req_shm  *dreq  = (volatile disk_req_shm  *)DISK_REQ_ADDR;
-static volatile disk_resp_shm *dresp = (volatile disk_resp_shm *)DISK_RESP_ADDR;
-static volatile fs_req_shm    *freq  = (volatile fs_req_shm    *)FS_REQ_ADDR;
-static volatile fs_resp_shm   *fresp = (volatile fs_resp_shm   *)FS_RESP_ADDR;
+// ===================== Shared page pointers (set in _start) =====================
+static volatile disk_req_shm  *dreq;
+static volatile disk_resp_shm *dresp;
+static volatile disk_shm_header *disk_hdr;
+static volatile fs_req_shm    *freq;
+static volatile fs_resp_shm   *fresp;
+static volatile fs_shm_header *fs_hdr;
 
 // ===================== FAT32 volume state =====================
 static uint32_t part_start_lba;     // FAT32 partition start LBA
@@ -29,23 +31,31 @@ static uint32_t total_data_clusters; // total data clusters in volume
 
 // ===================== Disk I/O helpers =====================
 static int disk_read(uint32_t lba, uint32_t count) {
-    dreq->cmd   = 0;  // READ
+    dreq->cmd   = DISK_CMD_READ;
     dreq->lba   = lba;
     dreq->count = count;
-    sys_notify(DISK_DRIVER_PID);
+    if (disk_hdr->disk_driver_sleeping) {
+        sys_notify(DISK_DRIVER_PID);
+    }
+    disk_hdr->fs_driver_sleeping = 1;
     sys_wait(0);
+    disk_hdr->fs_driver_sleeping = 0;
     return dresp->status;
 }
 
 static int disk_write(uint32_t lba, uint32_t count, const uint8_t *data) {
-    dreq->cmd   = 1;  // WRITE
+    dreq->cmd   = DISK_CMD_WRITE;
     dreq->lba   = lba;
     dreq->count = count;
     // Copy data into disk_req (full sector(s))
     uint32_t bytes = count * 512;
     __memcpy((void *)dreq->data, data, bytes);
-    sys_notify(DISK_DRIVER_PID);
+    if (disk_hdr->disk_driver_sleeping) {
+        sys_notify(DISK_DRIVER_PID);
+    }
+    disk_hdr->fs_driver_sleeping = 1;
     sys_wait(0);
+    disk_hdr->fs_driver_sleeping = 0;
     return dresp->status;
 }
 
@@ -932,9 +942,23 @@ static void handle_mkdir(const char *path) {
 
 // ===================== Main loop =====================
 extern "C" void _start() {
-    int32_t my_pid = (int32_t)sys_getpid();
-    (void)my_pid;
-    int32_t shell_pid = SHELL_PID;
+    // IMPORTANT: create fs SHM first (must be shm_regions[0] for shell attach),
+    // then attach to disk_driver SHM
+    uint64_t fs_shm = (uint64_t)sys_shm_create(4 * 4096);
+    fs_hdr = (volatile fs_shm_header *)(fs_shm + FS_SHM_HEADER_OFFSET);
+    freq   = (volatile fs_req_shm *)(fs_shm + FS_REQ_OFFSET);
+    fresp  = (volatile fs_resp_shm *)(fs_shm + FS_RESP_OFFSET);
+    fs_hdr->fs_driver_sleeping = 0;
+    fs_hdr->client_sleeping = 0;
+
+    // Attach to disk_driver SHM (retry until disk_driver has created it)
+    uint64_t disk_shm = 0;
+    while ((disk_shm = (uint64_t)sys_shm_attach(DISK_DRIVER_PID)) == 0) {
+        sys_wait(1);
+    }
+    disk_hdr = (volatile disk_shm_header *)(disk_shm + DISK_SHM_HEADER_OFFSET);
+    dreq     = (volatile disk_req_shm *)(disk_shm + DISK_REQ_OFFSET);
+    dresp    = (volatile disk_resp_shm *)(disk_shm + DISK_RESP_OFFSET);
 
     // Initialize cache
     for (int i = 0; i < CACHE_SLOTS; i++) {
@@ -951,7 +975,9 @@ extern "C" void _start() {
     fat32_init();
 
     while (1) {
+        fs_hdr->fs_driver_sleeping = 1;
         sys_wait(0);
+        fs_hdr->fs_driver_sleeping = 0;
 
         uint32_t cmd = freq->cmd;
         int32_t client_pid = (int32_t)freq->client_pid;
@@ -1001,6 +1027,8 @@ extern "C" void _start() {
             break;
         }
 
-        sys_notify(client_pid);
+        if (fs_hdr->client_sleeping) {
+            sys_notify(client_pid);
+        }
     }
 }

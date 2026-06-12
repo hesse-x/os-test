@@ -6,7 +6,7 @@
 
 同时增加内核基础设施：TSC 时钟源、定时等待队列、sys_wait 超时、动态共享内存、sys_fb_info。
 
-**不动**：disk_driver 和 fs_driver 的工作流，保留硬编码共享页。
+**已迁移**：disk_driver 和 fs_driver 的工作流也已迁移到动态 SHM，详见 [dynamic_shm_migration.md](dynamic_shm_migration.md)。
 
 ## 1. TSC 时钟基础设施
 
@@ -241,11 +241,10 @@ struct kms_msg {
 - 新增 `driver_shm_header`、`kbd_msg`、`kms_msg` 结构体
 - 新增偏移常量 `KBD_RING_OFFSET 0`、`KMS_RING_OFFSET 128`
 
-### 6.4 kernel/proc.cc 变更
+### 6.4 kernel/proc.cc 变更（kbd/kms 迁移时）
 
-- `shm_init()`：10 页 → 7 页（删除 kbd_shm_phys、kms_info_shm_phys、kms_req_shm_phys 的分配和清零；删除 g_fb_info 拷贝）
-- `map_shared_pages()`：删除 KBD_SHM_ADDR、KMS_INFO_ADDR、KMS_REQ_ADDR 三个映射
-- `proc_reap()`：is_shared 检查中删除对这三个物理页的比较，增加对 `shm_regions[]` 的检查
+- `shm_init()`：10 页 → 7 页（删除 kbd_shm_phys、kms_info_shm_phys、kms_req_shm_phys 的分配和清零；删除 g_fb_info 拷贝）。后续 disk/fs 迁移后 `shm_init()` 和 `map_shared_pages()` 已完全删除，详见 [dynamic_shm_migration.md](dynamic_shm_migration.md)
+- `proc_reap()`：is_shared 检查改为仅检查 `shm_regions[]`
 
 ## 7. Sleeping Flag 协议
 

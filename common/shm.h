@@ -3,20 +3,23 @@
 
 #include <stdint.h>
 
-// Shared memory virtual addresses (fixed, mapped into all user processes)
-// Layout: 7 pages (0x501000-0x507FFF)
-//   0x501000  disk_req_shm   (2 pages, 0x501000-0x502FFF)
-//   0x503000  disk_resp_shm  (2 pages, 0x503000-0x504FFF)
-//   0x505000  fs_req_shm     (1 page)
-//   0x506000  fs_resp_shm    (2 pages, 0x506000-0x507FFF)
-// KBD/KMS shared memory is now dynamic (sys_shm_create/sys_shm_attach)
-#define DISK_REQ_ADDR   0x501000
-#define DISK_REQ_ADDR2  0x502000   // second page of disk_req (expanded to 2 pages)
-#define DISK_RESP_ADDR  0x503000
-#define DISK_RESP_ADDR2 0x504000   // second page of disk_resp
-#define FS_REQ_ADDR     0x505000
-#define FS_RESP_ADDR    0x506000
-#define FS_RESP_ADDR2   0x507000   // second page of fs_resp
+// Disk and FS shared memory are now dynamic (sys_shm_create/sys_shm_attach)
+// KBD/KMS shared memory is also dynamic
+// Internal offsets within each SHM region:
+
+// Disk SHM: 5 pages, created by disk_driver
+#define DISK_SHM_HEADER_OFFSET  0
+#define DISK_REQ_OFFSET         4096    // 1 page in
+#define DISK_RESP_OFFSET        12288   // 3 pages in
+
+// FS SHM: 4 pages, created by fs_driver
+#define FS_SHM_HEADER_OFFSET    0
+#define FS_REQ_OFFSET           4096    // 1 page in
+#define FS_RESP_OFFSET          8192    // 2 pages in
+
+// Disk commands
+#define DISK_CMD_READ   0
+#define DISK_CMD_WRITE  1
 
 // Disk request shared page (fs_driver -> disk_driver), 2 pages
 struct disk_req_shm {
@@ -69,6 +72,20 @@ struct fs_dirent {
 #define FS_CMD_RAW_READ  4
 #define FS_CMD_CREATE    5   // touch: create empty file or update timestamp
 #define FS_CMD_MKDIR     6   // mkdir: create directory
+
+// Disk SHM header (sleeping flags for disk_driver <-> fs_driver)
+struct disk_shm_header {
+    uint8_t disk_driver_sleeping;   // disk_driver sets before sys_wait
+    uint8_t fs_driver_sleeping;     // fs_driver sets before disk wait
+    uint8_t reserved[6];
+};
+
+// FS SHM header (sleeping flags for fs_driver <-> client)
+struct fs_shm_header {
+    uint8_t fs_driver_sleeping;     // fs_driver sets before sys_wait
+    uint8_t client_sleeping;        // shell sets before fs wait
+    uint8_t reserved[6];
+};
 
 // KMS framebuffer info (returned by sys_fb_info)
 struct kms_fb_info {

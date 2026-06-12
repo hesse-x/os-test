@@ -22,13 +22,7 @@
 
 3 个固定虚拟地址页，映射到同一物理页，所有用户进程 PML4 共享：
 
-| 虚拟地址   | 名称       | 方向                | 结构体          |
-|-----------|------------|---------------------|-----------------|
-| 0x500000  | KBD_SHM    | kbd_driver → shell  | `kbd_shm`       |
-| 0x501000  | DISK_REQ   | shell → disk_driver | `disk_req_shm`  |
-| 0x502000  | DISK_RESP  | disk_driver → shell | `disk_resp_shm` |
-
-共享页在 `shm_init()` 中分配（`kernel/proc.cc`），`process_create_elf` 中通过 `map_shared_pages()` 映射到每个用户进程。标志：`PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX`。
+所有驱动间 IPC 统一使用动态共享内存（sys_shm_create/sys_shm_attach），详见 [dynamic_shm_migration.md](dynamic_shm_migration.md)。
 
 数据结构定义在 `common/shm.h`。
 

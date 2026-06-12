@@ -68,7 +68,7 @@
 
 内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 6 个 ELF（disk_driver → kbd_driver → kms_driver → terminal → shell → fs_driver）→ 多进程协作。Phase 3 完成：fd + pipe + terminal 进程拆分。Shell 不再直写 KMS ring，通过 fd 0/1 pipe 与 terminal 通信。Terminal 管理 VT100 状态机 + cell 缓冲区，负责键盘输入分发和屏幕渲染。KMS 驱动不变（仅做像素渲染）。新增 4 个 syscall（sys_pipe/sys_write/sys_read/sys_close），sys_spawn 自动继承 fd 0/1。
 
-**Phase 2 设计完成**：驱动工作流重构方案已设计（[driver_workflow.md](driver_workflow.md)），核心变更为 kbd/kms 驱动从硬编码共享页 + 每次 sys_notify 改为动态 shm + 环形缓冲区 + sleeping flag + 轮询窗口（快速路径零内核入口）。新增内核基础设施：TSC 时钟源 + sched_clock()、定时等待队列 + sys_wait(timeout_ms)、sys_fb_info、sys_shm_create/sys_shm_attach。disk/fs 驱动暂不动。
+**Phase 2 完成**：驱动工作流重构完成（[driver_workflow.md](driver_workflow.md)），kbd/kms 驱动已迁移到动态 shm + 环形缓冲区 + sleeping flag。disk/fs 驱动也已迁移到动态 SHM（[dynamic_shm_migration.md](dynamic_shm_migration.md)），硬编码共享页基础设施（shm_init/map_shared_pages/7 路物理地址特判）已完全删除。
 
 ## 多核 SMP — 调度与锁（全部完成）
 
@@ -441,7 +441,7 @@
 | 动态库加载（.so 支持） | — | 远 | PIC 编译 + 动态链接器 + PLT/GOT + 运行时重定位 |
 
 | 运行时 IPI | LAPIC | 低 | reschedule / TLB shootdown |
-| disk/fs 驱动迁移到动态 shm | driver_workflow.md | 中 | 将 disk_driver/fs_driver 从硬编码共享页迁移到 sys_shm_create/shm_attach + ring buffer（kbd/kms 已完成） |
+| ~~disk/fs 驱动迁移到动态 shm~~ | dynamic_shm_migration.md | ~~中~~ ✅ | 已完成 |
 | DRM/KMS compositor 重构 | 无 | 高 | 当前 KMS 逐字符 PUTC 消息模型→改为共享文本 buffer + compositor 帧调度模型：shell 写 char grid（纯内存）→ compositor 定时扫描 dirty region 渲染 framebuffer → page flip。类似 Linux DRM 模型：应用写 buffer → 显示服务合成输出 |
 | KMS PAT/write-combining | KMS | 低 | framebuffer 页映射加 PCD/PAT 标记，优化真机性能 |
 | KMS huge page 映射 | KMS | 低 | 用户态 framebuffer 映射改用 2MB huge page，减少 TLB miss |

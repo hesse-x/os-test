@@ -46,15 +46,7 @@ void timer_queue_remove(proc_t *proc) {
     list_remove(&proc->wait_node);
 }
 
-// ===================== Shared pages =====================
-// Allocated in shm_init(), mapped into all user processes
-static uint64_t disk_req_shm_phys = 0;
-static uint64_t disk_req_shm_phys2 = 0;   // second page of expanded disk_req
-static uint64_t disk_resp_shm_phys = 0;
-static uint64_t disk_resp_shm_phys2 = 0;  // second page of expanded disk_resp
-static uint64_t fs_req_shm_phys = 0;
-static uint64_t fs_resp_shm_phys = 0;
-static uint64_t fs_resp_shm_phys2 = 0;    // second page of fs_resp
+// ===================== Process table =====================
 
 void proc_init() {
     for (int i = 0; i < MAX_PROC; i++) {
@@ -93,77 +85,6 @@ void proc_init() {
     for (int c = 0; c < NUM_KMALLOC_CLASSES; c++) {
         cpu_locals[0].active_slab[c] = nullptr;
     }
-}
-
-void shm_init() {
-    Page *p;
-
-    p = bfc_alloc.alloc_page(1);
-    if (!p) { serial_puts("shm_init: disk_req alloc failed\n"); halt(); }
-    disk_req_shm_phys = page_to_phys(p);
-
-    p = bfc_alloc.alloc_page(1);
-    if (!p) { serial_puts("shm_init: disk_req2 alloc failed\n"); halt(); }
-    disk_req_shm_phys2 = page_to_phys(p);
-
-    p = bfc_alloc.alloc_page(1);
-    if (!p) { serial_puts("shm_init: disk_resp alloc failed\n"); halt(); }
-    disk_resp_shm_phys = page_to_phys(p);
-
-    p = bfc_alloc.alloc_page(1);
-    if (!p) { serial_puts("shm_init: disk_resp2 alloc failed\n"); halt(); }
-    disk_resp_shm_phys2 = page_to_phys(p);
-
-    p = bfc_alloc.alloc_page(1);
-    if (!p) { serial_puts("shm_init: fs_req alloc failed\n"); halt(); }
-    fs_req_shm_phys = page_to_phys(p);
-
-    p = bfc_alloc.alloc_page(1);
-    if (!p) { serial_puts("shm_init: fs_resp alloc failed\n"); halt(); }
-    fs_resp_shm_phys = page_to_phys(p);
-
-    p = bfc_alloc.alloc_page(1);
-    if (!p) { serial_puts("shm_init: fs_resp2 alloc failed\n"); halt(); }
-    fs_resp_shm_phys2 = page_to_phys(p);
-
-    // Zero out shared pages
-    uint8_t *v;
-    v = (uint8_t *)phys_to_virt(disk_req_shm_phys);
-    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
-    v = (uint8_t *)phys_to_virt(disk_req_shm_phys2);
-    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
-    v = (uint8_t *)phys_to_virt(disk_resp_shm_phys);
-    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
-    v = (uint8_t *)phys_to_virt(disk_resp_shm_phys2);
-    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
-    v = (uint8_t *)phys_to_virt(fs_req_shm_phys);
-    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
-    v = (uint8_t *)phys_to_virt(fs_resp_shm_phys);
-    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
-    v = (uint8_t *)phys_to_virt(fs_resp_shm_phys2);
-    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
-
-    serial_puts("shm_init: ok\n");
-}
-
-// Map the shared pages into a user PML4
-static bool map_shared_pages(uint64_t *new_pml4) {
-    uint64_t flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
-    if (!map_user_page_direct(new_pml4, DISK_REQ_ADDR, disk_req_shm_phys, flags))
-        return false;
-    if (!map_user_page_direct(new_pml4, DISK_REQ_ADDR2, disk_req_shm_phys2, flags))
-        return false;
-    if (!map_user_page_direct(new_pml4, DISK_RESP_ADDR, disk_resp_shm_phys, flags))
-        return false;
-    if (!map_user_page_direct(new_pml4, DISK_RESP_ADDR2, disk_resp_shm_phys2, flags))
-        return false;
-    if (!map_user_page_direct(new_pml4, FS_REQ_ADDR, fs_req_shm_phys, flags))
-        return false;
-    if (!map_user_page_direct(new_pml4, FS_RESP_ADDR, fs_resp_shm_phys, flags))
-        return false;
-    if (!map_user_page_direct(new_pml4, FS_RESP_ADDR2, fs_resp_shm_phys2, flags))
-        return false;
-    return true;
 }
 
 // switch_to 恢复帧：callee-saved 寄存器 + 返回地址
@@ -323,9 +244,6 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
     // 5. Load ELF segments into user address space
     elf_load_result lr = elf_load(elf_data, elf_size, new_pml4);
     if (!lr.success) { spin_unlock(&procs_lock); return nullptr; }
-
-    // 6. Map shared pages (KBD, DISK_REQ, DISK_RESP, FS, KMS)
-    if (!map_shared_pages(new_pml4)) { spin_unlock(&procs_lock); return nullptr; }
 
     // 6b. Map framebuffer pages for KMS process
     if (map_fb && g_fb_info.fb_phys != 0) {
@@ -488,26 +406,15 @@ void proc_reap(proc_t *proc) {
                     if (pte & PTE_PRESENT) {
                         // Mask: keep only physical address bits [51:12], clear flags/NX
                         uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
-                        // Shared pages (KBD_SHM, DISK_REQ, etc.) are global — don't free them
-                        // They are mapped via map_user_page_direct with known physical addresses
-                        // We need to check if this physical page belongs to the shared pool
-                        bool is_shared = (leaf_phys == disk_req_shm_phys ||
-                                          leaf_phys == disk_req_shm_phys2 ||
-                                          leaf_phys == disk_resp_shm_phys ||
-                                          leaf_phys == disk_resp_shm_phys2 ||
-                                          leaf_phys == fs_req_shm_phys ||
-                                          leaf_phys == fs_resp_shm_phys ||
-                                          leaf_phys == fs_resp_shm_phys2);
-                        // Also check dynamic shm regions
-                        if (!is_shared) {
-                            for (int s = 0; s < MAX_SHM_PER_PROC; s++) {
-                                if (proc->shm_regions[s].ref_count > 0) {
-                                    uint64_t sphys = proc->shm_regions[s].phys;
-                                    size_t snp = proc->shm_regions[s].npages;
-                                    if (leaf_phys >= sphys && leaf_phys < sphys + snp * PAGE_SIZE) {
-                                        is_shared = true;
-                                        break;
-                                    }
+                        // Skip dynamic shm regions (don't free shared pages)
+                        bool is_shared = false;
+                        for (int s = 0; s < MAX_SHM_PER_PROC; s++) {
+                            if (proc->shm_regions[s].ref_count > 0) {
+                                uint64_t sphys = proc->shm_regions[s].phys;
+                                size_t snp = proc->shm_regions[s].npages;
+                                if (leaf_phys >= sphys && leaf_phys < sphys + snp * PAGE_SIZE) {
+                                    is_shared = true;
+                                    break;
                                 }
                             }
                         }

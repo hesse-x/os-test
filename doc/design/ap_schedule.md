@@ -192,7 +192,7 @@ static int pick_cpu() {
 #### BSP（kernel_main）
 
 ```
-1. init_mem, isr_init, kernel_init_finish, proc_init, shm_init   （不变）
+1. init_mem, isr_init, kernel_init_finish, proc_init   （不变）
 2. create_idle_process(0)                                         （NEW：BSP idle）
 3. smp_boot_aps():
      对每个 AP (cpu_id 1..ncpu-1):
