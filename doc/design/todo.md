@@ -54,10 +54,12 @@
 | 进程生命周期管理（sys_exit/sys_waitpid/sys_spawn） | [process_lifecycle.md](process_lifecycle.md) |
 | hello.elf + shell run 命令 | [process_lifecycle.md](process_lifecycle.md) |
 | libc.a 静态库（printf + FILE + _start） | [libc.md](libc.md) |
+| KMS 用户态驱动（framebuffer 渲染移至用户态） | [kms.md](kms.md) |
+| KMS Bug 修复：主循环通知丢失 + sys_notify WAIT_CHILD + proc_reap PTE NX 位 | [kms.md](kms.md) |
 
 ## 当前状态
 
-内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 4 个 ELF（disk_driver → kbd_driver → shell → fs_driver）→ 多进程协作。BKL 已完全移除，替换为 per-CPU `scheduler_lock` + 全局 `procs_lock` + `fb_lock` + `irq_owner[]` atomic。每 CPU 有独立 idle 进程和 run_queue。`timer_handler` 用 `tf->cs == 0x2B` 判断抢占，AP 参与调度。FAT32 读写完整（readdir/open/read/close/raw_read/touch/mkdir），sbrk 可用。进程生命周期管理（exit/waitpid/spawn）已实现，用户态异常不再 halt 全机。shell `run` 命令可从 FAT32 加载 ELF 并 spawn 执行。libc.a 静态库已实现（printf/FILE/string/malloc/_start），hello.c 使用 printf 输出 "Hello, World!" 并通过 libc.a 链接。
+内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 5 个 ELF（disk_driver → kbd_driver → kms_driver → shell → fs_driver）→ 多进程协作。Framebuffer 渲染已移至用户态 KMS 驱动，内核仅保留 `init_fb` 做物理页映射和元信息保存。`sys_putc` 已删除，所有输出通过 libc 的 `kms_write_flush`（写 KMS_REQ 共享页 + sys_notify KMS 驱动）。`run hello.elf` 可正常执行，子进程退出后 shell 恢复交互。
 
 ## 多核 SMP — 调度与锁（全部完成）
 
@@ -175,6 +177,29 @@
 
 完整流程：宿主机编写 hello.c → gcc 编译 + 静态链接 libc.a → 生成 hello.elf → 写入 FAT32 → OS 启动 → shell `run hello.elf` → 屏幕输出 "Hello, World!" → shell 回到命令行
 
+### KMS 用户态驱动（framebuffer 渲染移至用户态） ✅
+
+> 设计文档: [kms.md](kms.md)
+
+- [x] `common/pid.h`：集中定义所有驱动 PID（DISK_DRIVER_PID=2, KBD_DRIVER_PID=3, KMS_DRIVER_PID=4, SHELL_PID=5, FS_DRIVER_PID=6）
+- [x] `kernel/fb.cc` 瘦身：删除所有渲染函数 + 字体数据 + Cursor/Framebuffer struct，仅保留 `init_fb` 映射逻辑 + 全局 `g_fb_info`
+- [x] `kernel/fb.h` 瘦身：仅保留 `init_fb` 声明
+- [x] `kernel/trap.cc`：删除 `sys_putc` 实现（保留编号返回 -ENOSYS）、删除 `fb_lock`
+- [x] `common/shm.h`：新增 KMS_INFO(0x508000) + KMS_REQ(0x509000) 地址定义 + `kms_fb_info`/`kms_cmd`/`kms_req_shm` 结构体
+- [x] `kernel/mem/alloc.cc` `shm_init`：分配 KMS_INFO + KMS_REQ 物理页，末尾拷贝 `g_fb_info` 到 KMS_INFO
+- [x] `kernel/proc.cc` `map_shared_pages`：新增 KMS_INFO + KMS_REQ 映射
+- [x] `kernel/proc.cc` `process_create_elf`：KMS 进程额外映射 framebuffer 物理页到 0x700000（4KB 页），`map_fb` 参数控制
+- [x] `driver/kms_driver.cc`：KMS 用户态驱动（字体数据 + 命令解析主循环 + 渲染逻辑 + framebuffer 直写），IOPL=0
+- [x] `user/lib/stdio.cc`：stdout/stderr write_fn 改为 `kms_write_flush`（写 KMS_REQ + notify KMS 驱动）
+- [x] `shell/shell.cc`：删除 sys_putc 输出路径，新增 kms_flush 写 KMS_REQ + sys_notify(KMS_DRIVER_PID)
+- [x] 驱动 PID 引用统一改为 `#include "common/pid.h"`（shell/fs_driver/disk_driver/kbd_driver）
+- [x] `kernel/kernel.cc`：删除 `clear()` 调用，新增 KMS ELF 加载（LBA 201），调整 shell(301)/fs_driver(401) LBA
+- [x] `build.sh`：新增 kms_driver.elf 编译 + dd 写入 LBA 201，调整 shell/fs_driver LBA 偏移 + MBR 分区表
+- [x] Bug 修复：KMS 主循环改为先处理再等待（避免丢失通知）
+- [x] Bug 修复：`sys_notify` 同时匹配 `WAIT_NOTIFY` 和 `WAIT_CHILD`（修复 run 命令卡住）
+- [x] Bug 修复：`proc_reap` PTE 物理地址提取改用 `pte & 0x000FFFFFFFFFF000`（修复 NX 位导致 #GP）
+- [x] 验证: 编译通过，KMS 驱动启动后屏幕输出正常，shell 交互正常，`run hello.elf` 正常执行
+
 ---
 
 ## 中期目标 — 支持 Wayland 核心协议
@@ -209,9 +234,9 @@
 
 #### Framebuffer 双缓冲 / page flip
 
-- [ ] fb.cc 改造：双 framebuffer（front + back），compositor 写 back buffer
+- [ ] KMS 驱动改造：双 framebuffer（front + back），compositor 写 back buffer
 - [ ] sys_fb_flip()：原子切换 front/back buffer（更新 FB 基地址）
-- [ ] sys_fb_info()：返回 framebuffer 地址/分辨率/格式
+- [ ] KMS 新增 FLIP 命令：compositor 通过 KMS_REQ 发 page flip 请求
 - [ ] 验证: 写入 back buffer → flip → 屏幕更新，无撕裂
 
 #### sys_poll / sys_epoll（compositor 事件多路复用）
@@ -319,6 +344,63 @@
 
 ---
 
+## 已知 Bug 与技术债务
+
+### 严重（可导致内核崩溃/数据损坏）
+
+| # | 问题 | 位置 | 说明 |
+|---|------|------|------|
+| 1 | BFC 分配器无锁保护 | `kernel/mem/alloc.cc` | `alloc_page`/`free_page` 操作全局 `free_list` 无锁，SMP 并发损坏空闲链表，导致 double-allocation 或丢失页面。加一把全局自旋锁即可 |
+| 2 | `sys_waitpid` 写用户指针未校验 | `kernel/trap.cc:389` | `*exit_code_ptr = child->exit_code`，`exit_code_ptr` 来自用户参数未校验，恶意程序可传入内核地址导致任意内核内存写入 |
+| 3 | `sys_spawn` 读用户 ELF 指针未校验 | `kernel/trap.cc:396` | `elf_data` 直接解引用用户指针，无效地址触发内核 #PF halt 全机 |
+| 4 | ELF 加载越界读 | `kernel/kernel.cc:43-48` | 只读首 512 字节就遍历 program header，`e_phoff + e_phnum * e_phentsize > 512` 时访问未初始化数据 |
+| 5 | `pdpt_hh` 越界写入 | `arch/x64/paging.cc:154,169` | `pdpt_hh[510 + n]`，物理内存 > 2GB 时 `n >= 2`，写入 `pdpt_hh[512]` 越界（数组仅 512 项）。`extend_mapping` 循环 `n <= max_1gb_block` 边界错误 |
+
+### 高（SMP 竞态 / 内存安全）
+
+| # | 问题 | 位置 | 说明 |
+|---|------|------|------|
+| 6 | `sys_notify`/`trap_dispatch` 访问 `procs[]` 无 `procs_lock` | `kernel/trap.cc:253-267, 40-53` | 遍历 `procs[]` 比较 PID 时未持锁，另一 CPU 在 `proc_reap` 清零槽位可读到陈旧数据 |
+| 7 | `sys_waitpid` TOCTOU | `kernel/trap.cc:359-365` | `procs_lock` 下验证父子关系后释放锁，轮询前子进程可能已被回收或 PID 槽位被重用 |
+| 8 | ZOMBIE 临时设 READY 引入竞态 | `kernel/trap.cc:372` | `child->state = READY` 临时标记，另一 CPU 调度器可能将其当作可运行进程 |
+| 9 | 进程创建失败内存泄漏 | `kernel/proc.cc:261-443` | `process_create_elf` 后续 `alloc_page` 失败时，前面已分配的页面未释放 |
+| 10 | disk_driver 共享页无边界检查 | `driver/disk_driver.cc:78-84` | `cnt * 512` 可能超过 `resp->data` 的 8180 字节，缓冲区溢出 |
+| 11 | `scancode_normal` 越界读 | `driver/kbd_driver.cc:76` | `scancode` 值域 0-255，数组仅 128 项（break code 检查后 make code 仍无范围检查） |
+| 12 | framebuffer glyph 渲染越界 | `driver/kms_driver.cc` | 未检查 `py + row < fb.height`，`fb.height` 非 `FONT_HEIGHT` 整数倍时最后几行写入越界 |
+
+### 中（逻辑错误 / 健壮性）
+
+| # | 问题 | 位置 | 说明 |
+|---|------|------|------|
+| 13 | `fb_lock` 保护不完整 | `kernel/fb.cc` | `fb_putc` 持 `fb_lock`，但 `clear()` 用 `IrqGuard`，`prints()` 不持锁，多 CPU 并发写 framebuffer 竞态 | **已修复**：KMS 移至用户态后此问题消除（KMS 单进程渲染，无并发） |
+| 14 | `udelay` 精度损失 | `arch/x64/smp.cc:217` | `ticks_calibrated / 10000 * us` 先除后乘截断，应改为 `ticks_calibrated * us / 10000` |
+| 15 | `total_sectors` 64→32 位截断 | `kernel/kernel.cc:52` | `(uint32_t)((file_end + 511) / 512)`，ELF > 4GB 静默截断 |
+| 16 | 用户栈仅 4KB 无 guard page | `kernel/proc.cc:323-328` | 栈溢出触发 #PF 被 kill 而非友好报错，应至少 2 页 + 1 页 guard page |
+| 17 | 内核栈仅 8KB | `kernel/proc.cc` | `trap_dispatch → sys_waitpid → schedule → proc_reap` 路径 + trapframe，8KB 偏紧 |
+| 18 | `ALIGN_UP` 宏参数多次求值 | `common/macro.h:4` | 若 `aligned` 参数有副作用会被求值两次 |
+| 19 | ATA `count=0` 意为 256 扇区 | `kernel/ata.cc:24` | 未检查 `count` 为 0 或超缓冲区大小 |
+| 20 | `pick_cpu` 总倾向 CPU 0 | `kernel/proc.cc:248-259` | 所有 CPU run_count 相同时返回 0，负载不均 |
+| 21 | `pid` 未校验上界 | `kernel/trap.cc:360` | `procs[pid]` 未检查 `pid >= MAX_PROC`，可能越界访问 |
+| 22 | `malloc free` 不验证指针合法性 | `user/lib/malloc.cc:243-299` | `free()` 不检查 `ptr` 是否在堆范围内，任意指针损坏空闲链表 |
+| 23 | ELF `e_phnum`/`e_phentsize` 未校验 | `common/elf.cc:63-65` | `e_phnum` 过大或 `e_phentsize` 为 0 可导致异常行为 |
+| 24 | `proc_reap` 未校验 `cr3` 有效性 | `kernel/proc.cc:505-596` | 若 `cr3` 被损坏或已释放，解引用页表为 UAF |
+| 25 | `proc_reap` PTE 物理地址提取未清除 NX 位 | `kernel/proc.cc` | **已修复**：原 `pte & ~0xFFF` 不清除 bit 63（NX），带 PTE_NX 的页提取出错误物理地址，导致 `frames[]` 越界 → #GP。改用 `pte & 0x000FFFFFFFFFF000` |
+| 26 | `sys_notify` 不匹配 `WAIT_CHILD` | `kernel/trap.cc` | **已修复**：`sys_exit` → `sys_notify(parent_pid)` 只匹配 `WAIT_NOTIFY`，但 `sys_waitpid` 设 `WAIT_CHILD`，导致父进程永远不被唤醒。改为同时匹配两者 |
+
+### 低（构建 / 链接脚本 / 代码质量）
+
+| # | 问题 | 位置 | 说明 |
+|---|------|------|------|
+| 25 | 缺少 `-mcmodel=kernel` | `CMakeLists.txt` | 内核 VMA 在顶层 2GB，C++ 用 `-fPIE`（碰巧 RIP-relative 能工作），C 用 `-fno-pie`（绝对寻址错误），应统一 `-mcmodel=kernel` |
+| 26 | 链接脚本缺 section 对齐 | `build_script/linker.ld` | `.text`/`.rodata`/`.data` 无 `ALIGN(4096)`，无法设置不同页权限（R-X / R-O / RW-） |
+| 27 | `build.sh` 未检查 ELF 大小 | `build.sh:63-70` | 每个 ELF 槽位 25KB，`dd` 写入不检查文件是否超限，大 ELF 静默覆盖下一槽位 |
+| 28 | `boot_info` 复制硬编码 128B | `arch/x64/start.S:60` | `rep movsb` 复制 128B，结构体扩展会截断 |
+| 29 | FAT32 分区过小 | `build.sh:85` | 仅 ~230 簇，远低于规范最低 65527 簇 |
+| 30 | `__memcpy` 未对齐 8 字节访问 | `arch/x64/utils.h:42-54` | 未检查对齐直接 `uint64_t*` 拷贝，UB in C/C++（x86 硬件容错但可慢） |
+| 31 | `serial_init()` 为空 | `kernel/serial.cc:6` | QEMU 不需初始化，真机需设置波特率/FIFO |
+
+---
+
 ## 其他扩展（无特定目标归属）
 
 | 功能 | 依赖 | 优先级 | 说明 |
@@ -330,6 +412,9 @@
 | 动态库加载（.so 支持） | — | 远 | PIC 编译 + 动态链接器 + PLT/GOT + 运行时重定位 |
 
 | 运行时 IPI | LAPIC | 低 | reschedule / TLB shootdown |
+| 驱动工作流重构 | 无 | 中 | 统一驱动 IPC 机制（共享页 + notify → 通用通道），统一多客户端模型，PID 发现机制替代硬编码 |
+| KMS PAT/write-combining | KMS | 低 | framebuffer 页映射加 PCD/PAT 标记，优化真机性能 |
+| KMS huge page 映射 | KMS | 低 | 用户态 framebuffer 映射改用 2MB huge page，减少 TLB miss |
 | MSI / MSI-X | APIC | 低 | PCIe 设备中断 |
 | 用户态 SSE/FPU | 无 | 中 | lazy FPU restore，gcc 构建依赖 |
 | RMW 组合命令 | disk_driver | 低 | 一次 IPC 内读扇区→改→写回 |

@@ -7,6 +7,8 @@
 #include "kernel/mem/alloc.h"
 #include "common/elf.h"
 #include "common/shm.h"
+#include "common/macro.h"
+#include "kernel/fb.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
@@ -41,6 +43,8 @@ static uint64_t disk_resp_shm_phys2 = 0;  // second page of expanded disk_resp
 static uint64_t fs_req_shm_phys = 0;
 static uint64_t fs_resp_shm_phys = 0;
 static uint64_t fs_resp_shm_phys2 = 0;    // second page of fs_resp
+static uint64_t kms_info_shm_phys = 0;   // KMS framebuffer info
+static uint64_t kms_req_shm_phys = 0;   // KMS render requests
 
 void proc_init() {
     for (int i = 0; i < MAX_PROC; i++) {
@@ -99,6 +103,14 @@ void shm_init() {
     if (!p) { serial_puts("shm_init: fs_resp2 alloc failed\n"); halt(); }
     fs_resp_shm_phys2 = page_to_phys(p);
 
+    p = bfc_alloc.alloc_page(1);
+    if (!p) { serial_puts("shm_init: kms_info alloc failed\n"); halt(); }
+    kms_info_shm_phys = page_to_phys(p);
+
+    p = bfc_alloc.alloc_page(1);
+    if (!p) { serial_puts("shm_init: kms_req alloc failed\n"); halt(); }
+    kms_req_shm_phys = page_to_phys(p);
+
     // Zero out shared pages
     uint8_t *v;
     v = (uint8_t *)phys_to_virt(kbd_shm_phys);
@@ -117,6 +129,16 @@ void shm_init() {
     for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
     v = (uint8_t *)phys_to_virt(fs_resp_shm_phys2);
     for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
+    v = (uint8_t *)phys_to_virt(kms_info_shm_phys);
+    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
+    v = (uint8_t *)phys_to_virt(kms_req_shm_phys);
+    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
+
+    // Copy framebuffer info into KMS_INFO shared page
+    if (g_fb_info.width != 0) {
+        kms_fb_info *info = (kms_fb_info *)phys_to_virt(kms_info_shm_phys);
+        *info = g_fb_info;
+    }
 
     serial_puts("shm_init: ok\n");
 }
@@ -139,6 +161,10 @@ static bool map_shared_pages(uint64_t *new_pml4) {
     if (!map_user_page_direct(new_pml4, FS_RESP_ADDR, fs_resp_shm_phys, flags))
         return false;
     if (!map_user_page_direct(new_pml4, FS_RESP_ADDR2, fs_resp_shm_phys2, flags))
+        return false;
+    if (!map_user_page_direct(new_pml4, KMS_INFO_ADDR, kms_info_shm_phys, flags))
+        return false;
+    if (!map_user_page_direct(new_pml4, KMS_REQ_ADDR, kms_req_shm_phys, flags))
         return false;
     return true;
 }
@@ -361,7 +387,7 @@ proc_t *process_create(uint64_t entry) {
     return proc;
 }
 
-proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t iopl) {
+proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t iopl, bool map_fb) {
     // 1. Find free slot under procs_lock
     spin_lock(&procs_lock);
     proc_t *proc = nullptr;
@@ -398,8 +424,27 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
     elf_load_result lr = elf_load(elf_data, elf_size, new_pml4);
     if (!lr.success) { spin_unlock(&procs_lock); return nullptr; }
 
-    // 6. Map shared pages (KBD, DISK_REQ, DISK_RESP)
+    // 6. Map shared pages (KBD, DISK_REQ, DISK_RESP, FS, KMS)
     if (!map_shared_pages(new_pml4)) { spin_unlock(&procs_lock); return nullptr; }
+
+    // 6b. Map framebuffer pages for KMS process
+    if (map_fb && g_fb_info.fb_phys != 0) {
+        uint64_t fb_phys = g_fb_info.fb_phys;
+        uint64_t fb_size = g_fb_info.fb_size;
+        uint64_t fb_end = ALIGN_UP(fb_phys + fb_size, PAGE_SIZE);
+        uint64_t fb_start_page = fb_phys & ~0xFFFULL;  // page-align physical address
+        uint64_t user_vaddr = 0x700000;
+        uint64_t fb_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+
+        for (uint64_t pa = fb_start_page, va = user_vaddr;
+             pa < fb_end;
+             pa += PAGE_SIZE, va += PAGE_SIZE) {
+            if (!map_user_page_direct(new_pml4, va, pa, fb_flags)) {
+                spin_unlock(&procs_lock);
+                return nullptr;
+            }
+        }
+    }
 
     // 7. Map user stack page at 0x00007FFFFFFFD000
     Page *user_stack_page = bfc_alloc.alloc_page(1);
@@ -535,7 +580,8 @@ void proc_reap(proc_t *proc) {
                 for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
                     uint64_t pte = pt_virt[pt_idx];
                     if (pte & PTE_PRESENT) {
-                        uint64_t leaf_phys = pte & ~0xFFF;
+                        // Mask: keep only physical address bits [51:12], clear flags/NX
+                        uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
                         // Shared pages (KBD_SHM, DISK_REQ, etc.) are global — don't free them
                         // They are mapped via map_user_page_direct with known physical addresses
                         // We need to check if this physical page belongs to the shared pool
@@ -546,7 +592,9 @@ void proc_reap(proc_t *proc) {
                                           leaf_phys == disk_resp_shm_phys2 ||
                                           leaf_phys == fs_req_shm_phys ||
                                           leaf_phys == fs_resp_shm_phys ||
-                                          leaf_phys == fs_resp_shm_phys2);
+                                          leaf_phys == fs_resp_shm_phys2 ||
+                                          leaf_phys == kms_info_shm_phys ||
+                                          leaf_phys == kms_req_shm_phys);
                         if (!is_shared) {
                             Page *leaf_page = &BFCAllocator::frames[PHY_TO_PAGE(leaf_phys)];
                             bfc_alloc.free_page(leaf_page, 1);

@@ -1,5 +1,9 @@
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 size_t strlen(const char *s) {
     size_t n = 0;
     while (*s++) n++;
@@ -70,3 +74,7 @@ void *memmove(void *dst, const void *src, size_t n) {
     }
     return dst;
 }
+
+#ifdef __cplusplus
+}
+#endif

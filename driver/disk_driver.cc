@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include "arch/x64/utils.h"
 #include "common/shm.h"
+#include "common/pid.h"
 
 static volatile disk_req_shm  *req  = (volatile disk_req_shm  *)DISK_REQ_ADDR;
 static volatile disk_resp_shm *resp = (volatile disk_resp_shm *)DISK_RESP_ADDR;
@@ -93,7 +94,8 @@ static void handle_request() {
 extern "C" void _start() {
     // fs_driver PID = our PID + 3 (PID2=disk_driver, PID3=kbd_driver, PID4=shell, PID5=fs_driver)
     int32_t my_pid = (int32_t)sys_getpid();
-    int32_t fs_driver_pid = my_pid + 3;
+    (void)my_pid;
+    int32_t fs_driver_pid = FS_DRIVER_PID;
 
     while (1) {
         // Wait for request

@@ -1,23 +1,42 @@
 #include "stdio.h"
 #include "string.h"
 #include "common/syscall.h"
+#include "common/shm.h"
+#include "common/pid.h"
 #include "arch/x64/utils.h"
 
 /* ===================== Standard streams ===================== */
 
-static char stdout_buf[1024];
-
-static void sys_putc_flush(FILE *f, const char *data, int len) {
-    for (int i = 0; i < len; i++)
-        sys_putc(data[i]);
+static void kms_write_flush(FILE *f, const char *data, int len) {
+    (void)f;
+    volatile kms_req_shm *kms_req = (volatile kms_req_shm *)KMS_REQ_ADDR;
+    for (int i = 0; i < len; i++) {
+        uint32_t idx = kms_req->count;
+        if (idx < 255) {
+            kms_req->cmds[idx].cmd  = KMS_CMD_PUTC;
+            kms_req->cmds[idx].arg1 = (uint32_t)data[i];
+            kms_req->cmds[idx].arg2 = 0xFFFFFF;
+            kms_req->cmds[idx].arg3 = 0;
+            kms_req->count = idx + 1;
+        }
+        // Flush when buffer is full
+        if (kms_req->count >= 255) {
+            sys_notify(KMS_DRIVER_PID);
+            // Wait for KMS to process so we don't overflow
+            sys_yield();
+        }
+    }
+    if (kms_req->count > 0) {
+        sys_notify(KMS_DRIVER_PID);
+    }
 }
 
 static FILE stdout_file = {
-    1, stdout_buf, 1024, 0, _IOLBF, _F_WRITE, sys_putc_flush
+    1, nullptr, 0, 0, _IONBF, _F_WRITE, kms_write_flush
 };
 
 static FILE stderr_file = {
-    2, nullptr, 0, 0, _IONBF, _F_WRITE, sys_putc_flush
+    2, nullptr, 0, 0, _IONBF, _F_WRITE, kms_write_flush
 };
 
 FILE *stdout = &stdout_file;
@@ -61,6 +80,12 @@ static void file_putc_internal(FILE *f, char c) {
     if (f->buf_mode == _IOFBF && f->buf_pos >= f->buf_size) {
         file_flush(f);
     }
+}
+
+int putchar(int c) {
+    file_putc_internal(stdout, (char)c);
+    fflush(stdout);
+    return c;
 }
 
 int fputc(int c, FILE *f) {
@@ -254,6 +279,7 @@ int printf(const char *fmt, ...) {
     va_start(ap, fmt);
     int n = vfprintf(stdout, fmt, ap);
     va_end(ap);
+    fflush(stdout);
     return n;
 }
 
@@ -262,5 +288,6 @@ int fprintf(FILE *f, const char *fmt, ...) {
     va_start(ap, fmt);
     int n = vfprintf(f, fmt, ap);
     va_end(ap);
+    fflush(f);
     return n;
 }

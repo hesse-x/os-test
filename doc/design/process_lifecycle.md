@@ -58,7 +58,7 @@ int64_t sys_exit(int32_t exit_code)
 语义：
 - 将当前进程状态设为 ZOMBIE，保存退出码
 - 若 `parent_pid == -1`：跳过 ZOMBIE，直接回收全部资源（PML4 + 用户页 + 内核栈 + PCB 槽位）
-- 若 `parent_pid >= 0`：notify 父进程，资源延迟到 sys_waitpid 回收
+- 若 `parent_pid >= 0`：notify 父进程（sys_notify 同时匹配 WAIT_NOTIFY 和 WAIT_CHILD），资源延迟到 sys_waitpid 回收
 - 调用 schedule() 切走当前进程（不返回）
 
 实现要点：
@@ -91,6 +91,9 @@ int64_t sys_exit(int32_t exit_code, uint64_t, uint64_t, uint64_t, uint64_t) {
 // 调用者：sys_exit（无父进程时）或 sys_waitpid
 void proc_reap(proc_t *proc) {
     // 1. 解映射用户页 + 释放物理页（遍历用户 PML4 条目）
+    //    注意：PTE 叶页物理地址提取必须用 pte & 0x000FFFFFFFFFF000，
+    //    而非 pte & ~0xFFF，因为 bit 63 是 NX 位，~0xFFF 不会清除它，
+    //    导致 PHY_TO_PAGE 越界访问 frames[] 数组
     // 2. 释放 PML4 页本身
     // 3. 释放内核栈（phys = proc->k_stack_top - 2*PAGE_SIZE + VMA_BASE 偏移）
     // 4. PCB 槽位清零：pid = -1，state = ...（标记空闲）
@@ -292,8 +295,9 @@ static inline int64_t sys_spawn(const void *elf_data, uint64_t elf_size, uint32_
 | 设计 | 实际 | 原因 |
 |------|------|------|
 | sys_waitpid 持 procs_lock 验证父关系 | ✅ 一致 | |
-| sys_exit 中 sys_notify(parent_pid) | ✅ 一致，复用 sys_notify 函数 | |
+| sys_exit 中 sys_notify(parent_pid) | ✅ 一致，复用 sys_notify 函数，且 sys_notify 同时匹配 WAIT_NOTIFY 和 WAIT_CHILD | 原设计 sys_notify 只匹配 WAIT_NOTIFY，导致 sys_waitpid(WAIT_CHILD) 永远不会被 sys_exit 唤醒 |
 | proc_reap 解映射用户页遍历 PML4[0-255] | ✅ 一致，加上共享页物理帧排除 | 共享页是全局资源，不能随进程回收 |
+| proc_reap PTE 物理地址提取 | `pte & 0x000FFFFFFFFFF000`（清除 NX 位 bit 63） | 原实现用 `pte & ~0xFFF` 不会清除 bit 63，带 PTE_NX 的页（用户栈、共享页）提取出错误的物理地址，导致 frames[] 越界 → #GP |
 | proc_reap 释放页表页（PDPT/PD/PT） | ✅ 新增 free_table_page | 设计中未提及中间页表回收，实际实现完整回收 |
 | ELF 数据复制到内核缓冲区 | 第一版直接传用户态指针 | 同步调用，内核态非抢占，安全。后续可加内核复制 |
 | hello.c + crt0.o + 静态 libc | hello.cc 直接 `_start` 调用 syscall | 最简实现，后续改进为 crt0/main 模型 |

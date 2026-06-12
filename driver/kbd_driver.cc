@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "arch/x64/utils.h"
 #include "common/shm.h"
+#include "common/pid.h"
 
 static volatile kbd_shm *kbd = (volatile kbd_shm *)KBD_SHM_ADDR;
 
@@ -45,7 +46,8 @@ extern "C" void _start() {
     sys_irq_bind(33);
 
     int32_t my_pid = (int32_t)sys_getpid();
-    int32_t shell_pid = my_pid + 1;
+    (void)my_pid;
+    int32_t shell_pid = SHELL_PID;
 
     while (1) {
         // Wait for keyboard interrupt

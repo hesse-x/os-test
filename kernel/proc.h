@@ -39,7 +39,7 @@ extern spinlock_t procs_lock;
 extern "C" {
 void proc_init();
 proc_t *process_create(uint64_t entry);
-proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t iopl = 0);
+proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t iopl = 0, bool map_fb = false);
 void schedule();
 void switch_to(proc_t *prev, proc_t *next);
 void process_entry();

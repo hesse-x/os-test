@@ -37,6 +37,7 @@ extern FILE *stderr;
 int printf(const char *fmt, ...);
 int fprintf(FILE *f, const char *fmt, ...);
 int vfprintf(FILE *f, const char *fmt, va_list ap);
+int putchar(int c);
 int fputc(int c, FILE *f);
 int fputs(const char *s, FILE *f);
 int puts(const char *s);

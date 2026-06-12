@@ -13,7 +13,6 @@ void syscall_dispatch(trapframe_t *tf);
 void isr_init();
 
 // Syscalls
-uint64_t sys_putc(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_getc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);

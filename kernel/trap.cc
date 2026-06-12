@@ -7,13 +7,9 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/apic.h"
 #include "kernel/serial.h"
-#include "kernel/fb.h"
 #include "common/errno.h"
 
 #define HEAP_START 0x600000
-
-// ===================== fb_lock (framebuffer cursor + buffer) =====================
-spinlock_t fb_lock = {0};
 
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 48
@@ -191,7 +187,7 @@ void isr_init() {
 // ===================== Syscall dispatch =====================
 #define NR_SYSCALL 11
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
-    sys_putc,      // 0: 输出字符
+    nullptr,       // 0: sys_putc removed (returns -ENOSYS)
     sys_getpid,    // 1: 获取 PID
     sys_yield,     // 2: 主动让出 CPU
     sys_getc,      // 3: 读键盘输入（废弃）
@@ -205,21 +201,12 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
 };
 
 void syscall_dispatch(trapframe_t *tf) {
-    if (tf->rax < NR_SYSCALL) {
+    if (tf->rax < NR_SYSCALL && syscall_table[tf->rax] != nullptr) {
         tf->rax = syscall_table[tf->rax](
             tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8);
     } else {
         tf->rax = (uint64_t)-ENOSYS;
     }
-}
-
-// sys_putc(char c) — syscall 0
-uint64_t sys_putc(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
-    spin_lock(&fb_lock);
-    fb_putc((char)arg1, 0xFFFFFF);
-    spin_unlock(&fb_lock);
-    serial_putc((char)arg1);
-    return 0;
 }
 
 // sys_getpid() — syscall 1
@@ -253,7 +240,8 @@ uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     for (int i = 0; i < MAX_PROC; i++) {
         if (procs[i].pid == target_pid &&
             procs[i].state == BLOCKED &&
-            procs[i].wait_event == WAIT_NOTIFY) {
+            (procs[i].wait_event == WAIT_NOTIFY ||
+             procs[i].wait_event == WAIT_CHILD)) {
             int target_cpu = procs[i].assigned_cpu;
             spin_lock(&cpu_locals[target_cpu].scheduler_lock);
             procs[i].state = READY;

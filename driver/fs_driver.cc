@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "arch/x64/utils.h"
 #include "common/shm.h"
+#include "common/pid.h"
 
 // Static buffers to avoid stack overflow (4KB arrays on stack exceed user stack page)
 static uint8_t dir_cluster_data_buf[4096];   // used in handle_mkdir
@@ -16,8 +17,6 @@ static volatile disk_req_shm  *dreq  = (volatile disk_req_shm  *)DISK_REQ_ADDR;
 static volatile disk_resp_shm *dresp = (volatile disk_resp_shm *)DISK_RESP_ADDR;
 static volatile fs_req_shm    *freq  = (volatile fs_req_shm    *)FS_REQ_ADDR;
 static volatile fs_resp_shm   *fresp = (volatile fs_resp_shm   *)FS_RESP_ADDR;
-
-#define DISK_DRIVER_PID 2
 
 // ===================== FAT32 volume state =====================
 static uint32_t part_start_lba;     // FAT32 partition start LBA
@@ -933,7 +932,8 @@ static void handle_mkdir(const char *path) {
 // ===================== Main loop =====================
 extern "C" void _start() {
     int32_t my_pid = (int32_t)sys_getpid();
-    int32_t shell_pid = my_pid - 1;  // fs_driver=PID5, shell=PID4
+    (void)my_pid;
+    int32_t shell_pid = SHELL_PID;
 
     // Initialize cache
     for (int i = 0; i < CACHE_SLOTS; i++) {

@@ -7,7 +7,7 @@
 #include "kernel/kernel.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/serial.h"
-#include "kernel/fb.h"
+#include "common/shm.h"
 #include "kernel/trap.h"
 #include "arch/x64/paging.h"
 #include "kernel/proc.h"
@@ -22,46 +22,61 @@ void kernel_init_finish() {
   bump_disable();
 }
 
-// Read ELF from disk via ATA PIO — dynamic size
-// First read 1 sector to get ELF header, then read the remaining sectors
-// based on the actual file size parsed from program headers.
-#define ELF_MAX_SECTORS 50   // max slot size per ELF on disk (25KB)
-#define ELF_MAX_BUFSIZE (ELF_MAX_SECTORS * 512)
+// Read ELF from disk via ATA PIO — two-phase: read header first, then allocate
+// exact-size pages and read the rest. Returns BFC-allocated buffer (caller must free_page)
+// or nullptr on failure.
+#define ELF_SLOT_SECTORS 100   // max slot size per ELF on disk (50KB)
 
-static bool load_elf_from_disk(uint8_t *buf, uint32_t buf_size, uint32_t lba) {
-  // Step 1: Read first sector (ELF header + possibly program headers)
-  ata_read_lba(lba, 1, buf);
+static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_page, size_t *out_npages) {
+  // Phase 1: read first sector to parse ELF header
+  uint8_t hdr_buf[512];
+  ata_read_lba(lba, 1, hdr_buf);
 
-  // Validate ELF magic
-  if (buf[0] != 0x7F || buf[1] != 'E' || buf[2] != 'L' || buf[3] != 'F') {
-    return false;
+  if (hdr_buf[0] != 0x7F || hdr_buf[1] != 'E' || hdr_buf[2] != 'L' || hdr_buf[3] != 'F') {
+    return nullptr;
   }
 
-  // Step 2: Parse ELF header to determine total file size
-  Elf64_Ehdr *ehdr = (Elf64_Ehdr *)buf;
+  Elf64_Ehdr *ehdr = (Elf64_Ehdr *)hdr_buf;
   uint64_t file_end = 0;
   for (int i = 0; i < ehdr->e_phnum; i++) {
-    Elf64_Phdr *phdr = (Elf64_Phdr *)(buf + ehdr->e_phoff + i * ehdr->e_phentsize);
+    Elf64_Phdr *phdr = (Elf64_Phdr *)(hdr_buf + ehdr->e_phoff + i * ehdr->e_phentsize);
     if (phdr->p_type == PT_LOAD) {
       uint64_t seg_end = phdr->p_offset + phdr->p_filesz;
       if (seg_end > file_end) file_end = seg_end;
     }
   }
 
-  // Calculate total sectors needed (round up)
   uint32_t total_sectors = (uint32_t)((file_end + 511) / 512);
-  if (total_sectors > ELF_MAX_SECTORS) {
+  if (total_sectors > ELF_SLOT_SECTORS) {
     serial_puts("load_elf_from_disk: ELF too large\n");
-    return false;
+    return nullptr;
   }
   if (total_sectors < 1) total_sectors = 1;
 
-  // Step 3: Read remaining sectors (we already have sector 0)
+  uint64_t file_size = total_sectors * 512;
+
+  // Phase 2: allocate pages and read
+  size_t npages = (file_size + 4095) / 4096;
+  Page *page = bfc_alloc.alloc_page(npages);
+  if (!page) {
+    serial_puts("load_elf_from_disk: alloc_page failed\n");
+    return nullptr;
+  }
+
+  uint8_t *buf = (uint8_t *)phys_to_virt(page_to_phys(page));
+
+  // Copy header sector already read
+  __builtin_memcpy(buf, hdr_buf, 512);
+
+  // Read remaining sectors
   if (total_sectors > 1) {
     ata_read_lba(lba + 1, total_sectors - 1, buf + 512);
   }
 
-  return true;
+  *out_size = file_size;
+  *out_page = page;
+  *out_npages = npages;
+  return buf;
 }
 
 void kernel_main(boot_info *bi) {
@@ -81,8 +96,6 @@ void kernel_main(boot_info *bi) {
   // Initialize shared pages (after BFC allocator is ready)
   shm_init();
 
-  clear();
-
   smp_boot_aps();
 
   // Create BSP idle process
@@ -93,31 +106,40 @@ void kernel_main(boot_info *bi) {
   }
 
   // Load user processes from disk
-  // LBA layout: 1=disk_driver(50s), 51=kbd_driver(50s), 101=shell(50s), 151=fs_driver(50s)
-  static uint8_t elf_buf[ELF_MAX_BUFSIZE];
-
-  if (load_elf_from_disk(elf_buf, ELF_MAX_BUFSIZE, 1)) {
-    process_create_elf(elf_buf, ELF_MAX_BUFSIZE, 3);  // IOPL=3 for driver
-  } else {
-    serial_puts("kernel_main: disk_driver.elf not found\n");
+  // LBA layout: 1=disk_driver(100s), 101=kbd_driver(100s), 201=kms_driver(100s), 301=shell(100s), 401=fs_driver(100s)
+  {
+    uint64_t sz; Page *pg; size_t np;
+    uint8_t *elf = load_elf_from_disk(1, &sz, &pg, &np);
+    if (elf) { process_create_elf(elf, sz, 3); bfc_alloc.free_page(pg, np); }
+    else serial_puts("kernel_main: disk_driver.elf not found\n");
   }
 
-  if (load_elf_from_disk(elf_buf, ELF_MAX_BUFSIZE, 51)) {
-    process_create_elf(elf_buf, ELF_MAX_BUFSIZE, 3);  // IOPL=3 for driver
-  } else {
-    serial_puts("kernel_main: kbd_driver.elf not found\n");
+  {
+    uint64_t sz; Page *pg; size_t np;
+    uint8_t *elf = load_elf_from_disk(101, &sz, &pg, &np);
+    if (elf) { process_create_elf(elf, sz, 3); bfc_alloc.free_page(pg, np); }
+    else serial_puts("kernel_main: kbd_driver.elf not found\n");
   }
 
-  if (load_elf_from_disk(elf_buf, ELF_MAX_BUFSIZE, 101)) {
-    process_create_elf(elf_buf, ELF_MAX_BUFSIZE, 0);  // IOPL=0 for shell
-  } else {
-    serial_puts("kernel_main: shell.elf not found\n");
+  {
+    uint64_t sz; Page *pg; size_t np;
+    uint8_t *elf = load_elf_from_disk(201, &sz, &pg, &np);
+    if (elf) { process_create_elf(elf, sz, 0, true); bfc_alloc.free_page(pg, np); }
+    else serial_puts("kernel_main: kms_driver.elf not found\n");
   }
 
-  if (load_elf_from_disk(elf_buf, ELF_MAX_BUFSIZE, 151)) {
-    process_create_elf(elf_buf, ELF_MAX_BUFSIZE, 0);  // IOPL=0 for fs_driver
-  } else {
-    serial_puts("kernel_main: fs_driver.elf not found\n");
+  {
+    uint64_t sz; Page *pg; size_t np;
+    uint8_t *elf = load_elf_from_disk(301, &sz, &pg, &np);
+    if (elf) { process_create_elf(elf, sz, 0); bfc_alloc.free_page(pg, np); }
+    else serial_puts("kernel_main: shell.elf not found\n");
+  }
+
+  {
+    uint64_t sz; Page *pg; size_t np;
+    uint8_t *elf = load_elf_from_disk(401, &sz, &pg, &np);
+    if (elf) { process_create_elf(elf, sz, 0); bfc_alloc.free_page(pg, np); }
+    else serial_puts("kernel_main: fs_driver.elf not found\n");
   }
 
   // BKL removed — fine-grained locks protect each subsystem

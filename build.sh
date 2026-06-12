@@ -26,20 +26,11 @@ g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
 objcopy --remove-section .note.gnu.property build/kbd_driver.o
 ld -m elf_x86_64 -Ttext 0x400000 -o build/kbd_driver.elf build/kbd_driver.o
 
-# shell.elf (IOPL=0)
+# kms_driver.elf (IOPL=0, framebuffer rendering)
 g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -c user/lib/malloc.cc -o build/malloc.o
-g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -c shell/shell.cc -o build/shell.o
-objcopy --remove-section .note.gnu.property build/shell.o
-objcopy --remove-section .note.gnu.property build/malloc.o
-ld -m elf_x86_64 -Ttext 0x400000 -o build/shell.elf build/malloc.o build/shell.o
-
-# fs_driver.elf (IOPL=0)
-g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -c driver/fs_driver.cc -o build/fs_driver.o
-objcopy --remove-section .note.gnu.property build/fs_driver.o
-ld -m elf_x86_64 -Ttext 0x400000 -o build/fs_driver.elf build/fs_driver.o
+    -I. -c driver/kms_driver.cc -o build/kms_driver.o
+objcopy --remove-section .note.gnu.property build/kms_driver.o
+ld -m elf_x86_64 -Ttext 0x400000 -o build/kms_driver.elf build/kms_driver.o
 
 # libc.a (static library: printf + FILE + string + malloc + _start)
 g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
@@ -48,10 +39,25 @@ g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
     -I. -Iuser/include -c user/lib/string.cc -o build/string.o
 g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
     -I. -Iuser/include -c user/lib/start.cc -o build/start.o
+g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
+    -I. -c user/lib/malloc.cc -o build/malloc.o
 objcopy --remove-section .note.gnu.property build/stdio.o
 objcopy --remove-section .note.gnu.property build/string.o
 objcopy --remove-section .note.gnu.property build/start.o
+objcopy --remove-section .note.gnu.property build/malloc.o
 ar rcs build/libc.a build/start.o build/stdio.o build/string.o build/malloc.o
+
+# shell.elf (IOPL=0, linked with libc.a)
+g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
+    -I. -Iuser/include -c shell/shell.cc -o build/shell.o
+objcopy --remove-section .note.gnu.property build/shell.o
+ld -m elf_x86_64 -Ttext 0x400000 -o build/shell.elf build/shell.o build/libc.a
+
+# fs_driver.elf (IOPL=0)
+g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
+    -I. -c driver/fs_driver.cc -o build/fs_driver.o
+objcopy --remove-section .note.gnu.property build/fs_driver.o
+ld -m elf_x86_64 -Ttext 0x400000 -o build/fs_driver.elf build/fs_driver.o
 
 # hello.elf (IOPL=0, C program linked with libc.a)
 gcc -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
@@ -60,28 +66,29 @@ objcopy --remove-section .note.gnu.property build/hello.o
 ld -m elf_x86_64 -Ttext 0x400000 -o build/hello.elf build/hello.o build/libc.a
 
 # 3. 生成 disk.img
-# LBA layout: 0=MBR, 1-50=disk_driver, 51-100=kbd_driver, 101-150=shell, 151-200=fs_driver, 201+=FAT32
-dd if=/dev/zero of=build/disk.img bs=512 count=2048
+# LBA layout: 0=MBR, 1-100=disk_driver, 101-200=kbd_driver, 201-300=kms_driver, 301-400=shell, 401-500=fs_driver, 501+=FAT32
+dd if=/dev/zero of=build/disk.img bs=512 count=4096
 
-# Write ELFs to raw area (50 sectors = 25KB per slot)
+# Write ELFs to raw area (100 sectors = 50KB per slot)
 dd if=build/disk_driver.elf of=build/disk.img bs=512 seek=1 conv=notrunc
-dd if=build/kbd_driver.elf of=build/disk.img bs=512 seek=51 conv=notrunc
-dd if=build/shell.elf of=build/disk.img bs=512 seek=101 conv=notrunc
-dd if=build/fs_driver.elf of=build/disk.img bs=512 seek=151 conv=notrunc
+dd if=build/kbd_driver.elf of=build/disk.img bs=512 seek=101 conv=notrunc
+dd if=build/kms_driver.elf of=build/disk.img bs=512 seek=201 conv=notrunc
+dd if=build/shell.elf of=build/disk.img bs=512 seek=301 conv=notrunc
+dd if=build/fs_driver.elf of=build/disk.img bs=512 seek=401 conv=notrunc
 
 # Create MBR partition table
-# Partition 1: LBA 1-200, type 0xDA (non-FS data, for raw ELF storage)
-# Partition 2: LBA 201-2047, type 0x0C (FAT32 LBA)
+# Partition 1: LBA 1-500, type 0xDA (non-FS data, for raw ELF storage)
+# Partition 2: LBA 501-4095, type 0x0C (FAT32 LBA)
 sfdisk build/disk.img <<EOF
 label: dos
 unit: sectors
 
-build/disk.img1 : start=1, size=200, type=da
-build/disk.img2 : start=201, size=1847, type=0c
+build/disk.img1 : start=1, size=500, type=da
+build/disk.img2 : start=501, size=3595, type=0c
 EOF
 
 # Extract FAT32 partition area, format it, add test files, write back
-dd if=build/disk.img of=build/part2.img bs=512 skip=201 count=1847
+dd if=build/disk.img of=build/part2.img bs=512 skip=501 count=3595
 mkfs.fat -F 32 -s 8 build/part2.img
 
 # Create test files
@@ -94,7 +101,7 @@ mcopy -i build/part2.img build/README ::
 mcopy -i build/part2.img build/hello.elf ::
 
 # Write FAT32 partition back into disk.img
-dd if=build/part2.img of=build/disk.img bs=512 seek=201 conv=notrunc
+dd if=build/part2.img of=build/disk.img bs=512 seek=501 conv=notrunc
 
 # Clean up temp files
 rm -f build/part2.img build/hello.txt build/README
