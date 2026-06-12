@@ -446,7 +446,8 @@
 | KMS PAT/write-combining | KMS | 低 | framebuffer 页映射加 PCD/PAT 标记，优化真机性能 |
 | KMS huge page 映射 | KMS | 低 | 用户态 framebuffer 映射改用 2MB huge page，减少 TLB miss |
 | MSI / MSI-X | APIC | 低 | PCIe 设备中断 |
-| 用户态 SSE/FPU | 无 | 中 | lazy FPU restore，gcc 构建依赖 |
+| 用户态 SSE/FPU | 无 | 中 | lazy FPU restore，gcc 构建依赖。**前置**: 内核实现 FXSAVE/RXRSTORE 后，CMake 用户态编译可移除 `-mno-red-zone -mno-sse -mno-sse2 -mno-mmx` |
+| objcopy → ld --remove-section | CMake 用户态构建 | 低 | 当前 add_user_elf 保留 compile → objcopy → ld 三步管线，可用 ld `--remove-section .note.gnu.property` 省掉中间 .stripped.o 文件。见 [cmake_user_build.md](cmake_user_build.md) |
 | RMW 组合命令 | disk_driver | 低 | 一次 IPC 内读扇区→改→写回 |
 | FSINFO 穷闲簇提示 | FAT32 | 低 | 用上次穷闲簇提示加速查找 |
 | LFN 支持 | FAT32 | 低 | 解析长文件名目录项 |

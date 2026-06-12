@@ -4,11 +4,12 @@
 >
 > 当前构建体系概要：
 > - toolchain: `cmake/toolchain-x86_64.cmake`（`-m64`）
-> - CXX_FLAGS: `-mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx`（非 `-fPIE`/GOTOFF）
+> - CXX_FLAGS: `-fPIE -mno-red-zone -mno-sse -mno-sse2 -mno-mmx`（内核），`-fno-pie -mno-red-zone -mno-sse -mno-sse2 -mno-mmx`（用户态）
 > - 架构目录: `arch/x64/`（非 `arch/x86/`）
 > - 链接: `ld -m elf_x86_64 -T arch/x64/linker.ld`
 > - 产物: `build/myos.elf`（非 myos.bin）
 > - `POSITION_INDEPENDENT_CODE OFF` 仍不可设（会加 `-fPIC`，破坏 `-mcmodel=kernel`）
+> - 内核和用户态编译规则已封装为 `add_kernel_object` / `add_user_lib` / `add_user_elf`，见 [cmake_user_build.md](cmake_user_build.md)
 > - 参见 CLAUDE.md 了解当前架构
 
 ## 目标

@@ -17,21 +17,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **最小内核**：内核仅包含调度、内存管理、中断分发、系统调用等不可替代的机制。键盘驱动和磁盘驱动已在用户态运行（`driver/kbd_driver.cc`、`driver/disk_driver.cc`），KMS 渲染驱动也在用户态运行（`driver/kms_driver.cc`），内核仅保留 `init_fb` 做 framebuffer 物理页映射和元信息保存。ATA 驱动仍留在内核空间（`kernel/ata.cc`）。
 - **用户态服务**：shell 等应用及驱动进程作为独立用户进程从磁盘加载，拥有独立地址空间（每进程 PML4），通过 syscall 和共享页与内核及其他进程通信。文件系统服务（fs_driver）作为用户态进程运行，通过共享页 IPC 间接访问磁盘驱动。
 - **系统调用 + 共享内存 IPC + fd/pipe**：18 个 syscall（NR_SYSCALL=18，编号 0-17 连续无空洞）：getpid/yield/wait/notify/irq_bind/exit/waitpid/spawn/mmap/munmap/serial_write/fb_info/shm_create/shm_attach/pipe/write/read/close。所有驱动间 IPC 统一使用动态共享内存（sys_shm_create/sys_shm_attach）+ sleeping flag + sys_wait/sys_notify 同步，详见 `doc/design/dynamic_shm_migration.md`。所有输出通过 fd 1 (stdout pipe) → terminal → KMS ring 路径完成。用户进程间 I/O 通过 pipe（sys_pipe/sys_write/sys_read/sys_close）+ fd 继承（sys_spawn 自动继承 fd 0/1）。新增功能应优先考虑扩展 syscall 接口而非在内核内实现策略。
-- **用户态 libc**：libc.a 静态库（`ar rcs libc.a start.o stdio.o string.o malloc.o`）提供 printf/fprintf/vfprintf/fputc/fputs/puts/fflush、FILE 结构体（缓冲输出 + write_fn 抽象）、stdin（read_fn 抽象 + fgetc/getchar）、strlen/strcmp/strcpy/strcat/strchr/memcpy/memset/memmove、malloc/free/calloc/realloc、`_start` 入口（调用 main → sys_exit）。stdout/stderr 的 write_fn 为 `sys_write_flush`（调用 sys_write(fd, ...) 写 pipe），stdin 的 read_fn 为 `sys_read_fill`（调用 sys_read(fd, ...) 读 pipe）。均为无缓冲模式。`kms_write_flush` 和 `kms_shm_init` 保留供 terminal 进程使用，普通进程不再调用。用户程序（hello.c）用 gcc 编译 + `-Iuser/include` + 链接 libc.a。设计文档 `doc/design/libc.md`。
+- **用户态 libc**：libc.a 静态库（CMake target `c`，输出 `libc.a`）提供 printf/fprintf/vfprintf/fputc/fputs/puts/fflush、FILE 结构体（缓冲输出 + write_fn 抽象）、stdin（read_fn 抽象 + fgetc/getchar）、strlen/strcmp/strcpy/strcat/strchr/memcpy/memset/memmove、malloc/free/calloc/realloc、`_start` 入口（调用 main → sys_exit）。stdout/stderr 的 write_fn 为 `sys_write_flush`（调用 sys_write(fd, ...) 写 pipe），stdin 的 read_fn 为 `sys_read_fill`（调用 sys_read(fd, ...) 读 pipe）。均为无缓冲模式。`kms_write_flush` 和 `kms_shm_init` 保留供 terminal 进程使用，普通进程不再调用。用户程序（hello.c）通过 `add_user_elf` 链接 libc。设计文档 `doc/design/libc.md`。
 - **进程隔离**：每个用户进程拥有独立地址空间（代码 0x400000 起，堆 0x600000 起，栈 0x00007FFFFFFFD000），PML4[511] 共享内核映射，其余独立。动态共享内存虚拟地址从 0x510000 起（sys_shm_create/sys_shm_attach 分配）。每进程有 fd_table[32]（fd 0=stdin, fd 1=stdout, 其余 FD_NONE），通过 sys_pipe/sys_write/sys_read/sys_close 管理 pipe 通道。
 
 ## 构建与运行
 
 ```bash
-./build.sh          # CMake 编译内核 + EFI bootloader + 编译 libc.a + 编译用户 ELF + 生成 disk.img
+./build.sh          # CMake 编译内核 + EFI bootloader + 用户态 ELF + 生成 disk.img + boot.img
 ./build.sh -d       # Debug 模式（加 -g -fno-omit-frame-pointer，异常时打印栈回溯）
-./build.sh clear    # 清除 build/ 目录
 ./run.sh            # QEMU 启动（OVMF UEFI, 512MB, VGA, -smp 2, 串口输出到 log.txt）
 ```
 
-构建体系为 CMake + 自定义链接脚本（`build_script/cmake/do_link.cmake`）。C++ 使用 `-fPIE -mno-red-zone -mno-sse -mno-sse2 -mno-mmx`，C 使用 `-fno-pic -fno-pie`，纯汇编用 `-m64`。链接：`ld -m elf_x86_64 -T build_script/linker.ld`（输出 elf64-x86-64）。用户态 ELF（shell/driver）使用 `ld -m elf_x86_64 -Ttext 0x400000`，`-fno-pie -ffreestanding -nostdlib -I.`。hello.c 使用 gcc + `-I. -Iuser/include -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector` + 链接 libc.a（`ld ... build/hello.o build/libc.a`）。libc.a 源文件（stdio.cc/string.cc/start.cc）使用 g++ + `-I. -Iuser/include`。
+构建体系为 CMake + 自定义链接脚本（`build_script/cmake/do_link.cmake`）。内核和用户态统一由 CMake 管理，编译规则封装在 `build_script/cmake/kernel_rules.cmake`（`add_kernel_object`）和 `build_script/cmake/user_rules.cmake`（`add_user_lib` + `add_user_elf`）。内核 C++ 使用 `-fPIE -mno-red-zone -mno-sse -mno-sse2 -mno-mmx`，C 使用 `-fno-pic -fno-pie -mno-red-zone -mno-sse -mno-sse2 -mno-mmx`，纯汇编用 `-m64`。内核链接：`ld -m elf_x86_64 -T build_script/linker.ld`。用户态编译 flags：`-m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -mno-red-zone -mno-sse -mno-sse2 -mno-mmx`，链接：`ld -m elf_x86_64 -Ttext 0x400000`。用户态 ELF 通过 `add_user_elf` 自动执行 compile → objcopy（strip .note.gnu.property）→ ld 三步管线。详细设计见 `doc/design/cmake_user_build.md`。
 
-**磁盘布局（disk.img, 1MB, 2048 扇区）**：
+磁盘映像生成：`build_script/mkdisk.sh` 生成 `disk.img`（裸 ELF + FAT32），`mkimg.sh` 生成 `boot.img`（EFI 启动盘）。
+
+**磁盘布局（disk.img, 128MB, 262144 扇区）**：
 ```
 LBA 0:       MBR 分区表（sfdisk 创建）
 LBA 1-100:   disk_driver.elf（100 扇区/50KB）
@@ -40,13 +41,15 @@ LBA 201-300: kms_driver.elf（100 扇区/50KB）
 LBA 301-400: terminal.elf（100 扇区/50KB）
 LBA 401-500: shell.elf（100 扇区/50KB）
 LBA 501-600: fs_driver.elf（100 扇区/50KB）
-LBA 601+:    FAT32 分区（type=0x0C，4KB 簇，含 HELLO.TXT/README/HELLO.ELF）
+LBA 601+:    FAT32 分区（type=0x0C，4KB 簇，含 README/HELLO.ELF/MALLOC.ELF）
 ```
-MBR 分区1 (type=0xDA) 覆盖 LBA 1-600（裸 ELF 存储），分区2 (type=0x0C) 覆盖 LBA 601+（FAT32 文件系统）。内核 `ata_read_lba` 直接读裸扇区加载 ELF，fs_driver 通过 MBR 分区表找到 FAT32 分区起始 LBA。
+MBR 分区1 (type=0xDA) 覆盖 LBA 1-600（裸 ELF 存储），分区2 (type=0x0C) 覆盖 LBA 601-262143（FAT32 文件系统，~127MB，512B/簇，合规）。内核 `ata_read_lba` 直接读裸扇区加载 ELF，fs_driver 通过 MBR 分区表找到 FAT32 分区起始 LBA。
 
 **重要：** `add_library(OBJECT)` 不能设置 `POSITION_INDEPENDENT_CODE ON`，否则会加 `-fPIC`，破坏内核的 RIP-relative 寻址。
 
-**添加新源文件：** 在对应目录的 CMakeLists.txt 中将文件加入 `add_library(... OBJECT ...)` 列表即可。
+**添加新内核源文件：** 在对应目录的 CMakeLists.txt 中调用 `add_kernel_object(lib_name SOURCES ... ASM_SOURCES ...)` 即可。
+
+**添加新用户态 ELF：** 在对应目录的 CMakeLists.txt 中调用 `add_user_elf(name [C] SOURCES ... [LINK_LIBS ...])` 即可。`C` 标记表示使用 C 编译器，`LINK_LIBS` 声明依赖的库（如 `c` 即 libc.a）。
 
 ## 目录结构
 
@@ -54,9 +57,14 @@ MBR 分区1 (type=0xDA) 覆盖 LBA 1-600（裸 ELF 存储），分区2 (type=0x0
 build_script/
   cmake/toolchain-x86_64.cmake
   cmake/do_link.cmake
+  cmake/kernel_rules.cmake   — add_kernel_object() 内核编译规则封装
+  cmake/user_rules.cmake     — add_user_lib() / add_user_elf() 用户态编译规则封装
   linker.ld            — 64位链接脚本
+  mkdisk.sh            — disk.img 打包脚本（裸 ELF + FAT32）
 CMakeLists.txt
 build.sh / mkimg.sh / run.sh
+testdata/
+  README               — FAT32 测试文件
 .clang-format / .gitignore
 
 boot/
@@ -92,6 +100,7 @@ kernel/
     user_mapping.cc    — ensure_pd, ensure_pt_in_pd, map_user_page_direct, map_user_pages, unmap_user_pages
 
 driver/
+  CMakeLists.txt
   kbd_driver.cc      — 用户态键盘驱动进程（IOPL=3, sys_irq_bind(33), inb(0x60), kbd_shm, sys_notify terminal）
   disk_driver.cc     — 用户态磁盘驱动进程（IOPL=3, sys_shm_create, disk_req/disk_resp, ATA PIO, sleeping flag）
   kms_driver.cc      — 用户态 KMS 渲染驱动进程（IOPL=0, sys_shm_attach kbd_shm, KMS_REQ 共享页, framebuffer 直写 0x700000, 8x16 字体, 先处理再等待避免通知丢失, bg 颜色渲染）
@@ -99,9 +108,11 @@ driver/
   fs_driver.cc       — 用户态 FAT32 文件系统驱动（IOPL=0, sys_shm_create fs_shm + sys_shm_attach disk_shm, readdir/open/read/close/raw_read/touch/mkdir）
 
 shell/
+  CMakeLists.txt
   shell.cc           — Shell 用户进程（ls/cat/cd/pwd/touch/mkdir/run/malloc/mtest 命令, fd 0 stdin 输入, fd 1 stdout 输出, fs_driver IPC, 裸扇区 r 命令）
 
 user/
+  CMakeLists.txt
   hello.c           — 最小用户程序（#include <stdio.h> + main + printf 输出 "Hello, World!"）
   include/
     stdio.h         — 用户态 C 标准库头文件（FILE/printf/fprintf/vfprintf/fputc/fputs/puts/fflush/stdin/fgetc/getchar + 缓冲模式常量）
@@ -112,7 +123,7 @@ user/
     string.cc       — 字符串和内存操作函数实现
     start.cc        — libc _start 入口点（fflush(stdout) → main → fflush(stdout) → sys_exit）
     malloc.cc        — 用户态 malloc/free/calloc/realloc 实现（size-class slab + sys_mmap）
-  malloctest.c     — malloc/free 测试程序（小分配/大分配/calloc/realloc，链接 libc.a）
+  malloctest.c     — malloc/free 测试程序（小分配/大分配/calloc/realloc，链接 libc，输出 ELF 名 malloc.elf）
 
 common/
   common.h            — kernel_end 声明
@@ -284,12 +295,12 @@ irq_owner[]：
 - **IRQ 绑定**：`sys_irq_bind(irq)` 将当前进程绑定到指定 IRQ（`__atomic_store_n` RELEASE），内核在 `irq_owner[irq]` 中记录 PID，该 IRQ 发生时内核直接获取 `scheduler_lock` 唤醒绑定进程
 - **Shell**：`shell/shell.cc` 编译为 ELF64 静态可执行文件，写入 disk.img LBA 401 起始扇区。链接 libc.a。交互式命令行：从 fd 0 (stdin pipe) 读键盘输入（支持 readline + 退格），通过 fd 1 (stdout pipe) 输出，通过 fs_driver 共享页（FS_REQ/FS_RESP）进行文件操作，支持 `r` 命令直接读裸扇区。命令：`ls [-l]`（目录列表）、`cat <path>`（读文件）、`cd <path>`（切换目录）、`pwd`（打印工作目录）、`touch <path>`（创建文件）、`mkdir <path>`（创建目录）、`run <path>`（执行 ELF 文件）、`r LBA [COUNT]`（hex dump 裸扇区）、`malloc N`（测试 malloc）、`free ADDR`（测试 free）、`mtest`（malloc 测试套件）、`h`（帮助）
 - **用户态驱动**：`driver/kbd_driver.cc`（LBA 101, IOPL=3）绑定 IRQ33，读扫描码写入动态 SHM（kbd_ring），notify terminal（consumer_pid=TERMINAL_PID）；`driver/disk_driver.cc`（LBA 1, IOPL=3）创建 5 页动态 SHM，读 disk_req 执行 ATA PIO 操作写入 disk_resp，sleeping flag 防止 lost-wakeup；`driver/kms_driver.cc`（LBA 201, IOPL=0, map_fb=true）attach kbd_driver SHM 读 kms_ring 渲染文本到 framebuffer（0x700000 直写），fb_putc 支持 fg/bg 颜色渲染，主循环先 `process_commands()` 再在 `count==0` 时 `sys_wait()`；`driver/terminal.cc`（LBA 301, IOPL=0）attach kbd_shm 读键盘→sys_write(1) 到 stdin pipe，sys_read(0) 从 stdout pipe 读→VT100 状态机→cell 缓冲区→flush_dirty_cells 写 KMS ring，fd 0 为 O_RDONLY|O_NONBLOCK；`driver/fs_driver.cc`（LBA 501, IOPL=0）创建 4 页 fs SHM + attach disk SHM，执行 FAT32 操作（readdir/open/read/close/raw_read/touch/mkdir），通过动态 SHM 与 disk_driver 通信
-- **Shell 构建**：`g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -I. -Iuser/include -c shell/shell.cc` + 链接 libc.a + `ld -m elf_x86_64 -Ttext 0x400000`。注意 `-fno-pie`（固定地址链接）和 `-I.`（允许 include `common/syscall.h` 和 `common/shm.h` 中的封装）
-- **hello 构建**：`gcc -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -I. -Iuser/include -c user/hello.c` + `ld -m elf_x86_64 -Ttext 0x400000 -o build/hello.elf build/hello.o build/libc.a`。注意用 gcc（不是 g++）编译 C 程序，链接 libc.a（含 _start/printf/string/malloc）。hello.elf 通过 `mcopy -i build/part2.img build/hello.elf ::` 写入 FAT32
-- **hello 程序**：`user/hello.c` 编译为 ELF64 静态可执行文件，使用 libc.a 提供的 `_start`（调用 main → sys_exit）和 `printf`（"Hello, World!\n"）。通过 build.sh mcopy 写入 FAT32 分区。shell 的 `run` 命令可从 FAT32 加载并 spawn 执行
+- **Shell 构建**：通过 `add_user_elf(shell SOURCES shell.cc LINK_LIBS c)` 在 CMake 中管理。编译 flags 由 `user_rules.cmake` 统一设置（`-m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -I. -Iuser/include`），链接 `libc.a`
+- **hello 构建**：通过 `add_user_elf(hello C SOURCES hello.c LINK_LIBS c)` 在 CMake 中管理。`C` 标记指定使用 gcc 编译 C 程序。hello.elf 通过 mkdisk.sh 写入 FAT32
+- **hello 程序**：`user/hello.c` 编译为 ELF64 静态可执行文件，使用 libc 提供的 `_start`（调用 main → sys_exit）和 `printf`（"Hello, World!\n"）。通过 mkdisk.sh 写入 FAT32 分区。shell 的 `run` 命令可从 FAT32 加载并 spawn 执行
 - **用户态堆**：`sys_mmap`（#11）/`sys_munmap`（#12）管理 mmap 区域（0x800000 起），是用户态 malloc 的底层支撑。`proc_t::mmap_brk` 记录 mmap 高水位，`proc_t::mmap_regions` 链表记录已映射区域
-- **用户态 malloc/free**：`user/lib/malloc.cc` 实现 size-class slab 方案。小分配（≤2048B）走 per-class freelist + user_slab_header，大分配（>2048B）走 sys_mmap + big_alloc_header。底层统一用 sys_mmap。头文件 `user/include/stdlib.h`。打包进 libc.a（`ar rcs libc.a start.o stdio.o string.o malloc.o`）
-- **用户态 libc.a**：静态库包含 `_start.o`（入口点，调用 main → sys_exit）、`stdio.o`（FILE + printf/fprintf/vfprintf + stdout/stderr（sys_write_flush 写 pipe）+ stdin（sys_read_fill 读 pipe）+ kms_write_flush（terminal 专用））、`string.o`（strlen/strcmp/memcpy/memset/memmove 等）、`malloc.o`。FILE 结构体含 fd/buffer/mode/flags/write_fn/read_fn，stdout/stderr 均为无缓冲（_IONBF），write_fn 为 sys_write_flush（调用 sys_write(fd, ...) 写 pipe）。stdin 的 read_fn 为 sys_read_fill（调用 sys_read(fd, ...) 读 pipe）。设计文档 `doc/design/libc.md`
+- **用户态 malloc/free**：`user/lib/malloc.cc` 实现 size-class slab 方案。小分配（≤2048B）走 per-class freelist + user_slab_header，大分配（>2048B）走 sys_mmap + big_alloc_header。底层统一用 sys_mmap。头文件 `user/include/stdlib.h`。打包进 libc（CMake target `c`）
+- **用户态 libc.a**：CMake STATIC library target `c`，输出为 `build/libc.a`。包含 `_start.o`（入口点，调用 main → sys_exit）、`stdio.o`（FILE + printf/fprintf/vfprintf + stdout/stderr（sys_write_flush 写 pipe）+ stdin（sys_read_fill 读 pipe）+ kms_write_flush（terminal 专用））、`string.o`（strlen/strcmp/memcpy/memset/memmove 等）、`malloc.o`。FILE 结构体含 fd/buffer/mode/flags/write_fn/read_fn，stdout/stderr 均为无缓冲（_IONBF），write_fn 为 sys_write_flush（调用 sys_write(fd, ...) 写 pipe）。stdin 的 read_fn 为 sys_read_fill（调用 sys_read(fd, ...) 读 pipe）。设计文档 `doc/design/libc.md`
 
 ## fd 与 pipe 架构
 
@@ -330,7 +341,7 @@ Phase 3 实现了最小 fd + pipe 机制，将 Shell 的 I/O 从直写 KMS ring 
 - `init_fb` 在 `init_mem` 末尾调用，依赖 bump_alloc 和 device_vma_base 就绪
 - CMake 链接步骤使用 `build_script/cmake/do_link.cmake` 脚本处理 `$<TARGET_OBJECTS>` 的分号列表问题
 - Shell 的用户态 syscall 封装定义在 `common/syscall.h`（语义封装）+ `arch/x64/utils.h`（底层 `__syscall0` 等内联汇编），共享页结构定义在 `common/shm.h`
-- libc.a 由 `ar rcs build/libc.a build/start.o build/stdio.o build/string.o build/malloc.o` 创建。hello.c 用 gcc 编译 + 链接 libc.a；shell 也链接 libc.a（通过 sys_write_flush 输出到 fd 1 pipe）；terminal 不链接 libc.a（直接操作 syscall + shm）
+- libc.a 为 CMake STATIC target `c`，输出 `build/libc.a`。shell/hello/malloctest 通过 `add_user_elf(LINK_LIBS c)` 链接。terminal 不链接 libc（直接操作 syscall + shm）
 - 用户程序编译加 `-I. -Iuser/include`：`-Iuser/include` 让自定义 stdio.h/stdlib.h/string.h 优先于宿主机版本；`-I.` 让 common/syscall.h 和 arch/x64/utils.h 可用；宿主机 freestanding 头文件（stdint.h/stddef.h/stdarg.h）通过 gcc 默认路径可用
 - PTE 物理地址提取必须用 `pte & 0x000FFFFFFFFFF000`（清除 bit 63 NX 位），`& ~0xFFF` 不清除 NX 位会导致越界
 - `sys_notify` 同时匹配 `WAIT_NOTIFY` 和 `WAIT_CHILD`，因为 `sys_exit` 通过 `sys_notify(parent_pid)` 唤醒在 `sys_waitpid` 中等待的父进程

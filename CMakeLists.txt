@@ -20,6 +20,10 @@ endif()
 # Include project root for #include "arch/x64/..." etc.
 include_directories(${CMAKE_SOURCE_DIR})
 
+# 编译规则封装
+include(build_script/cmake/kernel_rules.cmake)
+include(build_script/cmake/user_rules.cmake)
+
 # Boot loader (独立 EFI 应用，用 GNU-EFI 编译)
 add_subdirectory(boot)
 
@@ -27,6 +31,11 @@ add_subdirectory(boot)
 add_subdirectory(arch/x64)
 add_subdirectory(kernel)
 add_subdirectory(common)
+
+# User-space (drivers, shell, libc, test programs)
+add_subdirectory(driver)
+add_subdirectory(shell)
+add_subdirectory(user)
 
 # 链接内核 ELF
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/build_script/linker.ld)
