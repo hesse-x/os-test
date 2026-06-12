@@ -54,9 +54,11 @@ static inline void *__memcpy(void *dst, const void *src, size_t n) {
 }
 
 // ===================== Early serial output =====================
-static inline void serial_early_out(char c) {
-  outb(0x3F8, c);
-}
+#ifdef NDEBUG
+static inline void serial_early_out(char c) { (void)c; }
+#else
+static inline void serial_early_out(char c) { outb(0x3F8, c); }
+#endif
 
 // ===================== Interrupt control =====================
 static inline void cli() {

@@ -5,6 +5,8 @@
 
 void serial_init() {}
 
+#ifndef NDEBUG
+
 void serial_putc(char c) { outb(COM1, c); }
 
 void serial_puts(const char *s) {
@@ -20,3 +22,5 @@ void serial_put_hex(uint64_t val) {
     serial_putc(hex[(val >> i) & 0xF]);
   }
 }
+
+#endif

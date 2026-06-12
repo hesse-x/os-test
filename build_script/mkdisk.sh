@@ -15,8 +15,8 @@ for elf in disk_driver.elf kbd_driver.elf kms_driver.elf terminal.elf shell.elf 
     fi
 done
 
-# 创建零填充映像 (128MB, 262144 扇区)
-dd if=/dev/zero of="${BUILD_DIR}/disk.img" bs=512 count=262144 status=none
+# 创建零填充映像 (16MB, 32768 扇区)
+dd if=/dev/zero of="${BUILD_DIR}/disk.img" bs=512 count=32768 status=none
 
 # 写入 ELF 到裸 LBA 区域 (每槽 100 扇区 = 50KB)
 dd if="${BUILD_DIR}/disk_driver.elf"  of="${BUILD_DIR}/disk.img" bs=512 seek=1   conv=notrunc status=none
@@ -32,11 +32,11 @@ label: dos
 unit: sectors
 
 ${BUILD_DIR}/disk.img1 : start=1, size=600, type=da
-${BUILD_DIR}/disk.img2 : start=601, size=261543, type=0c
+${BUILD_DIR}/disk.img2 : start=601, size=32167, type=0c
 EOF
 
 # 提取 FAT32 分区区域，格式化，写入文件，写回
-dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part2.img" bs=512 skip=601 count=261543 status=none
+dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part2.img" bs=512 skip=601 count=32167 status=none
 mkfs.fat -F 32 -s 1 "${BUILD_DIR}/part2.img" >/dev/null
 
 # 写入测试文件和用户程序
