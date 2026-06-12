@@ -99,7 +99,7 @@ extern "C" void _start() {
 
     while (1) {
         // Wait for request
-        sys_wait();
+        sys_wait(0);
 
         handle_request();
 

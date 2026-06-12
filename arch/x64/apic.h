@@ -96,4 +96,11 @@ void pic_disable();
 // BSP-calibrated LAPIC timer ticks (set by apic_init, used by AP init)
 extern uint32_t lapic_timer_ticks_calibrated;
 
+// TSC frequency (set by apic_init during PIT-based calibration)
+extern uint64_t tsc_freq;       // TSC ticks per second
+extern uint64_t tsc_per_ms;     // TSC ticks per millisecond
+
+// Monotonic nanosecond clock since boot (TSC-based)
+uint64_t sched_clock();
+
 #endif // ARCH_X64_APIC_H

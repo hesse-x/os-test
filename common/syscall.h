@@ -19,6 +19,9 @@
 #define SYS_MMAP     11
 #define SYS_MUNMAP   12
 #define SYS_SERIAL_WRITE 13
+#define SYS_FB_INFO      14
+#define SYS_SHM_CREATE   15
+#define SYS_SHM_ATTACH   16
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -49,8 +52,8 @@ static inline int sys_getc() {
     return (int)__syscall0(SYS_GETC);
 }
 
-static inline int sys_wait() {
-    return (int)__syscall0(SYS_WAIT);
+static inline int sys_wait(uint32_t timeout_ms) {
+    return (int)__syscall1(SYS_WAIT, (int64_t)timeout_ms);
 }
 
 static inline int sys_notify(int32_t pid) {
@@ -88,6 +91,18 @@ static inline int sys_munmap(void *addr, size_t size) {
 
 static inline int sys_serial_write(const char *buf, size_t len) {
     return (int)__syscall2(SYS_SERIAL_WRITE, (int64_t)(uintptr_t)buf, (int64_t)len);
+}
+
+static inline int sys_fb_info(void *buf) {
+    return (int)__syscall1(SYS_FB_INFO, (int64_t)(uintptr_t)buf);
+}
+
+static inline void *sys_shm_create(size_t size) {
+    return (void *)__syscall1(SYS_SHM_CREATE, (int64_t)size);
+}
+
+static inline void *sys_shm_attach(int32_t target_pid) {
+    return (void *)__syscall1(SYS_SHM_ATTACH, (int64_t)target_pid);
 }
 
 #endif // COMMON_SYSCALL_H

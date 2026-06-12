@@ -8,6 +8,18 @@ uint64_t lapic_vaddr = 0;
 uint64_t ioapic_vaddr = 0;
 uint32_t lapic_timer_ticks_calibrated = 0;
 
+// TSC calibration results
+uint64_t tsc_freq = 0;     // TSC ticks per second
+uint64_t tsc_per_ms = 0;   // TSC ticks per millisecond
+static uint64_t tsc_base = 0;  // TSC value at boot baseline
+
+// Monotonic nanosecond clock since boot
+uint64_t sched_clock() {
+  uint64_t now = rdtsc64();
+  uint64_t delta = now - tsc_base;
+  return delta * 1000000000ULL / tsc_freq;
+}
+
 // ===================== PIC disable =====================
 void pic_disable() {
   outb(0x21, 0xFF);
@@ -169,6 +181,39 @@ void apic_init() {
   // 7. Calibrate and start LAPIC timer
   uint32_t ticks = calibrate_lapic_timer();
   lapic_timer_ticks_calibrated = ticks;
+
+  // 8. Calibrate TSC using the same PIT 10ms window
+  // Re-run the LAPIC calibration to measure TSC ticks per 10ms
+  {
+    uint16_t divisor = 11932;
+    uint64_t tsc_start = rdtsc64();
+
+    lapic_write(LAPIC_TIMER_DCR, 0x0B);
+    lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_TIMER_MASKED);
+    outb(0x43, 0x30);
+    outb(0x40, divisor & 0xFF);
+    outb(0x40, (divisor >> 8) & 0xFF);
+    lapic_write(LAPIC_TIMER_ICR, 0xFFFFFFFF);
+
+    for (;;) {
+      outb(0x43, 0x00);
+      uint8_t lo = inb(0x40);
+      uint8_t hi = inb(0x40);
+      uint16_t cur = (uint16_t)((hi << 8) | lo);
+      if (cur == 0 || cur > divisor) break;
+    }
+
+    uint64_t tsc_end = rdtsc64();
+    uint64_t tsc_delta = tsc_end - tsc_start;
+    // tsc_delta = TSC ticks per 10ms, multiply by 100 for Hz
+    tsc_freq = tsc_delta * 100;
+    tsc_per_ms = tsc_freq / 1000;
+  }
+
+  // Record TSC baseline for sched_clock()
+  tsc_base = rdtsc64();
+
+  // Start LAPIC periodic timer
   lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
   lapic_write(LAPIC_LVT_TIMER, 32 | LAPIC_LVT_TIMER_PERIODIC);
   lapic_write(LAPIC_TIMER_ICR, ticks);

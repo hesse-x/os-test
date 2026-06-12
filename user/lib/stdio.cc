@@ -5,28 +5,46 @@
 #include "common/pid.h"
 #include "arch/x64/utils.h"
 
+/* ===================== KMS ring globals ===================== */
+
+static volatile kms_ring *g_kms_ring;
+static volatile driver_shm_header *g_shm_hdr;
+
+void kms_shm_init(uint64_t shm_addr) {
+    g_shm_hdr = (volatile driver_shm_header *)shm_addr;
+    g_kms_ring = (volatile kms_ring *)(shm_addr + KMS_RING_OFFSET);
+}
+
+/* Lazy init: auto-attach to KBD driver's shm on first output */
+static void kms_ensure_init() {
+    if (g_kms_ring) return;
+    uint64_t addr = (uint64_t)sys_shm_attach(KBD_DRIVER_PID);
+    if (addr) kms_shm_init(addr);
+}
+
 /* ===================== Standard streams ===================== */
 
 static void kms_write_flush(FILE *f, const char *data, int len) {
     (void)f;
-    volatile kms_req_shm *kms_req = (volatile kms_req_shm *)KMS_REQ_ADDR;
+    if (!g_kms_ring) kms_ensure_init();
+    if (!g_kms_ring) return;
     for (int i = 0; i < len; i++) {
-        uint32_t idx = kms_req->count;
-        if (idx < 255) {
-            kms_req->cmds[idx].cmd  = KMS_CMD_PUTC;
-            kms_req->cmds[idx].arg1 = (uint32_t)data[i];
-            kms_req->cmds[idx].arg2 = 0xFFFFFF;
-            kms_req->cmds[idx].arg3 = 0;
-            kms_req->count = idx + 1;
-        }
-        // Flush when buffer is full
-        if (kms_req->count >= 255) {
-            sys_notify(KMS_DRIVER_PID);
-            // Wait for KMS to process so we don't overflow
+        // Wait for a free slot in the KMS ring
+        while (g_kms_ring->head == ((g_kms_ring->tail + KMS_RING_SIZE - 1) % KMS_RING_SIZE)) {
+            // Ring full — notify KMS driver to drain it
+            if (g_shm_hdr->kms_sleeping) {
+                sys_notify(KMS_DRIVER_PID);
+            }
             sys_yield();
         }
+        uint32_t idx = g_kms_ring->head;
+        g_kms_ring->msgs[idx].cmd  = KMS_CMD_PUTC;
+        g_kms_ring->msgs[idx].arg1 = (uint32_t)(unsigned char)data[i];
+        g_kms_ring->msgs[idx].arg2 = 0xFFFFFF;
+        g_kms_ring->head = (idx + 1) % KMS_RING_SIZE;
     }
-    if (kms_req->count > 0) {
+    // Notify KMS driver if it's sleeping (fast path: skip syscall)
+    if (g_shm_hdr->kms_sleeping) {
         sys_notify(KMS_DRIVER_PID);
     }
     // Mirror output to serial port

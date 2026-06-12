@@ -33,7 +33,7 @@ static int disk_read(uint32_t lba, uint32_t count) {
     dreq->lba   = lba;
     dreq->count = count;
     sys_notify(DISK_DRIVER_PID);
-    sys_wait();
+    sys_wait(0);
     return dresp->status;
 }
 
@@ -45,7 +45,7 @@ static int disk_write(uint32_t lba, uint32_t count, const uint8_t *data) {
     uint32_t bytes = count * 512;
     __memcpy((void *)dreq->data, data, bytes);
     sys_notify(DISK_DRIVER_PID);
-    sys_wait();
+    sys_wait(0);
     return dresp->status;
 }
 
@@ -565,7 +565,7 @@ static void fat32_init() {
     // Sanity checks — if disk_driver wasn't ready, BPB may be zeros
     if (bps != 512 || sectors_per_cluster == 0 || spf32 == 0 || root_cluster < 2) {
         sys_putc('E'); sys_putc('B'); sys_putc('P'); sys_putc('B'); sys_putc('\n');
-        sys_wait();  // never recover, halt
+        sys_wait(0);  // never recover, halt
     }
 
     fat_start_lba = part_start_lba + reserved;
@@ -950,7 +950,7 @@ extern "C" void _start() {
     fat32_init();
 
     while (1) {
-        sys_wait();
+        sys_wait(0);
 
         uint32_t cmd = freq->cmd;
         int32_t client_pid = (int32_t)freq->client_pid;

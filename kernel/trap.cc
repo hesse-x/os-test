@@ -9,6 +9,7 @@
 #include "kernel/serial.h"
 #include "kernel/mem/slab.h"
 #include "common/errno.h"
+#include "kernel/fb.h"
 
 #define HEAP_START 0x600000
 
@@ -170,6 +171,28 @@ void trap_dispatch(trapframe_t *tf) {
 static void timer_handler(trapframe_t *tf) {
   tick++;
   lapic_eoi();
+
+  // Check timer queue for expired deadlines
+  int cpu = get_cpu_local()->cpu_id;
+  uint64_t now = sched_clock();
+  uint64_t flags;
+  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+  list_node_t *head = &cpu_locals[cpu].timer_queue;
+  while (!list_empty(head)) {
+    proc_t *p = LIST_ENTRY(list_front(head), proc_t, wait_node);
+    if (p->wait_deadline > now) break;  // sorted, stop at first unexpired
+    list_remove(&p->wait_node);
+    if (p->state == BLOCKED) {
+      p->state = READY;
+      p->wait_event = WAIT_NONE;
+      p->wait_timed_out = 1;
+      p->wait_deadline = 0;
+      list_push_back(&cpu_locals[cpu].run_queue, &p->run_node);
+      cpu_locals[cpu].run_count++;
+    }
+  }
+  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+
   if (tf->cs == 0x2B) {   // from user mode
     schedule();
   }
@@ -200,13 +223,13 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 14
+#define NR_SYSCALL 17
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     nullptr,            // 0: sys_putc removed (returns -ENOSYS)
     sys_getpid,         // 1: 获取 PID
     sys_yield,          // 2: 主动让出 CPU
     sys_getc,           // 3: 读键盘输入（废弃）
-    sys_wait,           // 4: 阻塞等待通知
+    sys_wait,           // 4: 阻塞等待通知（带超时）
     sys_notify,         // 5: 唤醒指定进程
     sys_irq_bind,       // 6: 绑定当前进程到指定 IRQ
     sys_sbrk,           // 7: 扩展用户态堆
@@ -216,6 +239,9 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_mmap,           // 11: 匿名内存映射
     sys_munmap,         // 12: 解除内存映射
     sys_serial_write,   // 13: 串口输出
+    sys_fb_info,        // 14: 获取 framebuffer 信息
+    sys_shm_create,     // 15: 创建共享内存
+    sys_shm_attach,     // 16: 附加共享内存
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -243,13 +269,29 @@ uint64_t sys_getc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     return (uint64_t)EPERM;
 }
 
-// sys_wait() — syscall 4 (阻塞等待通知)
-uint64_t sys_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+// sys_wait(timeout_ms) — syscall 4 (阻塞等待通知，可选超时)
+// timeout_ms=0: 无限等待; >0: 超时后唤醒
+// 返回: 0=notify 唤醒, 1=超时唤醒
+uint64_t sys_wait(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    uint32_t timeout_ms = (uint32_t)arg1;
+
     current_proc->state = BLOCKED;
     current_proc->wait_event = WAIT_NOTIFY;
+    current_proc->wait_timed_out = 0;
+
+    if (timeout_ms > 0) {
+        current_proc->wait_deadline = sched_clock() + (uint64_t)timeout_ms * 1000000ULL;
+        int cpu = current_proc->assigned_cpu;
+        spin_lock(&cpu_locals[cpu].scheduler_lock);
+        timer_queue_insert(cpu, current_proc);
+        spin_unlock(&cpu_locals[cpu].scheduler_lock);
+    } else {
+        current_proc->wait_deadline = 0;
+    }
+
     __atomic_add_fetch(&cpu_locals[current_proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
     schedule();
-    return 0;
+    return (uint64_t)current_proc->wait_timed_out;
 }
 
 // sys_notify(pid) — syscall 5 (唤醒指定进程)
@@ -265,8 +307,14 @@ uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
         target->state == BLOCKED &&
         (target->wait_event == WAIT_NOTIFY ||
          target->wait_event == WAIT_CHILD)) {
+        // If process has a deadline, remove from timer queue
+        if (target->wait_deadline != 0) {
+            timer_queue_remove(target);
+            target->wait_deadline = 0;
+        }
         target->state = READY;
         target->wait_event = WAIT_NONE;
+        target->wait_timed_out = 0;
         list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
         cpu_locals[target_cpu].run_count++;
     }
@@ -564,4 +612,159 @@ uint64_t sys_serial_write(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint
         serial_putc(buf[i]);
 
     return 0;
+}
+
+// sys_fb_info(buf) — syscall 14 (获取 framebuffer 信息)
+// Returns: 0 on success, positive errno on failure
+uint64_t sys_fb_info(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    void *user_buf = (void *)arg1;
+    if (!user_buf) return (uint64_t)EINVAL;
+
+    // Validate user pointer range
+    uint64_t ptr = (uint64_t)user_buf;
+    if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(kms_fb_info) > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    __memcpy(user_buf, &g_fb_info, sizeof(kms_fb_info));
+    return 0;
+}
+
+// sys_shm_create(size) — syscall 15 (创建共享内存)
+// Returns: virtual address on success, 0 on failure
+uint64_t sys_shm_create(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    size_t size = (size_t)arg1;
+    if (size == 0) return 0;
+    size = ALIGN_UP(size, PAGE_SIZE);
+    size_t npages = size / PAGE_SIZE;
+
+    proc_t *proc = current_proc;
+
+    // Find free slot
+    int slot = -1;
+    for (int i = 0; i < MAX_SHM_PER_PROC; i++) {
+        if (proc->shm_regions[i].ref_count == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) return 0;
+
+    // Allocate physical pages
+    Page *pages = bfc_alloc.alloc_page(npages);
+    if (!pages) return 0;
+    uint64_t phys = (uint64_t)(pages - BFCAllocator::frames) * PAGE_SIZE;
+
+    // Zero the pages
+    uint8_t *vptr = (uint8_t *)phys_to_virt(phys);
+    for (size_t i = 0; i < size; i++) vptr[i] = 0;
+
+    // Pick virtual address: scan existing regions, find gap above SHM_VADDR_BASE
+    uint64_t vaddr = SHM_VADDR_BASE;
+    for (int i = 0; i < MAX_SHM_PER_PROC; i++) {
+        if (proc->shm_regions[i].ref_count > 0) {
+            uint64_t end = proc->shm_regions[i].vaddr + proc->shm_regions[i].npages * PAGE_SIZE;
+            if (end > vaddr) vaddr = ALIGN_UP(end, PAGE_SIZE);
+        }
+    }
+
+    // Map into caller's PML4
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->cr3);
+    uint64_t flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+    for (size_t i = 0; i < npages; i++) {
+        if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, phys + i * PAGE_SIZE, flags)) {
+            // Rollback: unmap already-mapped pages
+            for (size_t j = 0; j < i; j++)
+                unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
+            bfc_alloc.free_page(&BFCAllocator::frames[PHY_TO_PAGE(phys)], npages);
+            return 0;
+        }
+    }
+
+    // Fill slot
+    proc->shm_regions[slot].vaddr = vaddr;
+    proc->shm_regions[slot].phys = phys;
+    proc->shm_regions[slot].npages = npages;
+    proc->shm_regions[slot].ref_count = 1;
+
+    return vaddr;
+}
+
+// sys_shm_attach(target_pid) — syscall 16 (附加共享内存)
+// Returns: virtual address on success, 0 on failure
+uint64_t sys_shm_attach(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    pid_t target_pid = (pid_t)arg1;
+    if (target_pid < 0 || target_pid >= MAX_PROC) return 0;
+
+    proc_t *proc = current_proc;
+    proc_t *target = &procs[target_pid];
+
+    // Under procs_lock, find target's first active shm region
+    spin_lock(&procs_lock);
+    if (target->pid != target_pid) {
+        spin_unlock(&procs_lock);
+        return 0;
+    }
+
+    shm_region *src = nullptr;
+    for (int i = 0; i < MAX_SHM_PER_PROC; i++) {
+        if (target->shm_regions[i].ref_count > 0) {
+            src = &target->shm_regions[i];
+            break;
+        }
+    }
+    if (!src) {
+        spin_unlock(&procs_lock);
+        return 0;
+    }
+
+    // Find free slot in our shm_regions
+    int slot = -1;
+    for (int i = 0; i < MAX_SHM_PER_PROC; i++) {
+        if (proc->shm_regions[i].ref_count == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        spin_unlock(&procs_lock);
+        return 0;
+    }
+
+    // Increment ref_count while still under lock
+    src->ref_count++;
+    spin_unlock(&procs_lock);
+
+    // Pick virtual address
+    uint64_t vaddr = SHM_VADDR_BASE;
+    for (int i = 0; i < MAX_SHM_PER_PROC; i++) {
+        if (proc->shm_regions[i].ref_count > 0) {
+            uint64_t end = proc->shm_regions[i].vaddr + proc->shm_regions[i].npages * PAGE_SIZE;
+            if (end > vaddr) vaddr = ALIGN_UP(end, PAGE_SIZE);
+        }
+    }
+
+    // Map shared physical pages into our PML4
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->cr3);
+    uint64_t flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+    for (size_t i = 0; i < src->npages; i++) {
+        if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, src->phys + i * PAGE_SIZE, flags)) {
+            // Rollback: unmap already-mapped pages
+            for (size_t j = 0; j < i; j++)
+                unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
+            // Decrement ref_count
+            spin_lock(&procs_lock);
+            src->ref_count--;
+            spin_unlock(&procs_lock);
+            return 0;
+        }
+    }
+
+    // Fill our slot (ref_count=1 means we hold a reference; actual physical page
+    // refcount is tracked by counting entries across all procs[].shm_regions)
+    proc->shm_regions[slot].vaddr = vaddr;
+    proc->shm_regions[slot].phys = src->phys;
+    proc->shm_regions[slot].npages = src->npages;
+    proc->shm_regions[slot].ref_count = 1;
+
+    return vaddr;
 }

@@ -19,6 +19,16 @@ struct mmap_region {
     mmap_region *next;
 };
 
+#define MAX_SHM_PER_PROC 4
+#define SHM_VADDR_BASE 0x510000
+
+struct shm_region {
+    uint64_t vaddr;       // virtual address in this process
+    uint64_t phys;        // physical page start address
+    size_t   npages;      // number of pages
+    uint32_t ref_count;   // reference count (0 = free slot)
+};
+
 struct proc_t {
     pid_t pid;
     proc_state_t state;
@@ -35,7 +45,10 @@ struct proc_t {
     uint64_t mmap_brk;     // mmap 区域高水位（初始 0x800000）
     mmap_region *mmap_regions; // mmap 区域链表头
     list_node_t run_node;  // embedded in per-CPU run_queue
-    list_node_t wait_node; // embedded in wait_queue (reserved)
+    list_node_t wait_node; // embedded in per-CPU timer_queue (sorted by wait_deadline)
+    uint64_t wait_deadline; // sched_clock() nanosecond deadline, 0 = no timeout
+    uint8_t  wait_timed_out; // 1 = timer expired wakeup, 0 = notify wakeup
+    shm_region shm_regions[MAX_SHM_PER_PROC]; // dynamic shared memory regions
 };
 
 #define MAX_PROC 64
@@ -56,5 +69,9 @@ proc_t *create_idle_process(int cpu_id);
 void shm_init();
 void proc_reap(proc_t *proc);
 }
+
+// Timer queue operations (must be called under scheduler_lock)
+void timer_queue_insert(int cpu, proc_t *proc);
+void timer_queue_remove(proc_t *proc);
 
 #endif // KERNEL_PROC_H

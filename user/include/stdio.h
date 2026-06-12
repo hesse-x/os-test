@@ -2,6 +2,7 @@
 #define _STDIO_H
 
 #include <stdarg.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,6 +43,9 @@ int fputc(int c, FILE *f);
 int fputs(const char *s, FILE *f);
 int puts(const char *s);
 int fflush(FILE *f);
+
+/* KMS shared memory initialization (call from shell _start) */
+void kms_shm_init(uint64_t shm_addr);
 
 #ifdef __cplusplus
 }

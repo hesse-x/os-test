@@ -26,6 +26,9 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
 uint64_t sys_mmap(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t);
 uint64_t sys_serial_write(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t);
+uint64_t sys_fb_info(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_shm_create(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_shm_attach(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 }
 
 #endif // KERNEL_TRAP_H

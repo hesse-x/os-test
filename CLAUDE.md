@@ -16,9 +16,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **最小内核**：内核仅包含调度、内存管理、中断分发、系统调用等不可替代的机制。键盘驱动和磁盘驱动已在用户态运行（`driver/kbd_driver.cc`、`driver/disk_driver.cc`），KMS 渲染驱动也在用户态运行（`driver/kms_driver.cc`），内核仅保留 `init_fb` 做 framebuffer 物理页映射和元信息保存。ATA 驱动仍留在内核空间（`kernel/ata.cc`）。
 - **用户态服务**：shell 等应用及驱动进程作为独立用户进程从磁盘加载，拥有独立地址空间（每进程 PML4），通过 syscall 和共享页与内核及其他进程通信。文件系统服务（fs_driver）作为用户态进程运行，通过共享页 IPC 间接访问磁盘驱动。
-- **系统调用 + 共享内存 IPC**：11 个 syscall（putc[deprecated]/getpid/yield/getc[deprecated]/wait/notify/irq_bind/sbrk/exit/waitpid/spawn）是用户态与内核的控制接口，数据传输通过共享页（KBD_SHM/DISK_REQ/DISK_RESP/FS_REQ/FS_RESP/KMS_REQ）完成。`sys_putc` 已删除（返回 -ENOSYS），所有输出通过 KMS_REQ 共享页 + sys_notify 完成。新增功能应优先考虑扩展 syscall 接口而非在内核内实现策略。
-- **用户态 libc**：libc.a 静态库（`ar rcs libc.a start.o stdio.o string.o malloc.o`）提供 printf/fprintf/vfprintf/fputc/fputs/puts/fflush、FILE 结构体（缓冲输出 + write_fn 抽象）、strlen/strcmp/strcpy/strcat/strchr/memcpy/memset/memmove、malloc/free/calloc/realloc、`_start` 入口（调用 main → sys_exit）。stdout/stderr 的 write_fn 为 `kms_write_flush`（写 KMS_REQ 共享页 + sys_notify KMS 驱动），均为无缓冲模式。用户程序（hello.c）用 gcc 编译 + `-Iuser/include` + 链接 libc.a。设计文档 `doc/design/libc.md`。
-- **进程隔离**：每个用户进程拥有独立地址空间（代码 0x400000 起，堆 0x600000 起，栈 0x00007FFFFFFFD000），PML4[511] 共享内核映射，其余独立。共享页映射到 0x500000-0x509000（10 页）。
+- **系统调用 + 共享内存 IPC**：17 个 syscall（putc[deprecated]/getpid/yield/getc[deprecated]/wait/notify/irq_bind/sbrk/exit/waitpid/spawn/mmap/munmap/fb_info/shm_create/shm_attach/serial_write）是用户态与内核的控制接口。KBD/KMS 数据传输通过动态共享内存（sys_shm_create/sys_shm_attach）+ 环形缓冲区 + sleeping flag 完成；DISK/FS 仍使用硬编码共享页（DISK_REQ/DISK_RESP/FS_REQ/FS_RESP）。`sys_putc` 已删除（返回 -ENOSYS），所有输出通过 kms_ring + sleeping flag 协议完成。新增功能应优先考虑扩展 syscall 接口而非在内核内实现策略。
+- **用户态 libc**：libc.a 静态库（`ar rcs libc.a start.o stdio.o string.o malloc.o`）提供 printf/fprintf/vfprintf/fputc/fputs/puts/fflush、FILE 结构体（缓冲输出 + write_fn 抽象）、strlen/strcmp/strcpy/strcat/strchr/memcpy/memset/memmove、malloc/free/calloc/realloc、`_start` 入口（调用 main → sys_exit）。stdout/stderr 的 write_fn 为 `kms_write_flush`（写 kms_ring + sleeping flag 协议），均为无缓冲模式。kms_ring 初始化由 `kms_shm_init(addr)` 完成。用户程序（hello.c）用 gcc 编译 + `-Iuser/include` + 链接 libc.a。设计文档 `doc/design/libc.md`。
+- **进程隔离**：每个用户进程拥有独立地址空间（代码 0x400000 起，堆 0x600000 起，栈 0x00007FFFFFFFD000），PML4[511] 共享内核映射，其余独立。硬编码共享页映射到 0x501000-0x507FFF（7 页，DISK_REQ/DISK_RESP/FS_REQ/FS_RESP）。KBD/KMS 使用动态共享内存（sys_shm_create/sys_shm_attach），虚拟地址从 0x510000 起。
 
 ## 构建与运行
 

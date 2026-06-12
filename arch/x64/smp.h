@@ -34,6 +34,7 @@ struct cpu_local_t {
     proc_t *idle_proc;     // this CPU's idle process
     spinlock_t scheduler_lock; // per-CPU scheduler lock
     list_node_t run_queue;     // per-CPU ready queue (sentinel node)
+    list_node_t timer_queue;   // per-CPU timer queue (sorted by wait_deadline, sentinel node)
     Page *active_slab[NUM_KMALLOC_CLASSES]; // per-CPU active slab per size class
 };
 

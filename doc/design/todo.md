@@ -57,10 +57,18 @@
 | libc.a 静态库（printf + FILE + _start） | [libc.md](libc.md) |
 | KMS 用户态驱动（framebuffer 渲染移至用户态） | [kms.md](kms.md) |
 | KMS Bug 修复：主循环通知丢失 + sys_notify WAIT_CHILD + proc_reap PTE NX 位 | [kms.md](kms.md) |
+| TSC 时钟 + sched_clock + udelay 修复 | [driver_workflow.md](driver_workflow.md) |
+| 定时等待队列 + sys_wait(timeout_ms) | [driver_workflow.md](driver_workflow.md) |
+| sys_fb_info / sys_shm_create / sys_shm_attach | [driver_workflow.md](driver_workflow.md) |
+| 共享页重构（KBD/KMS 硬编码→动态 shm） | [driver_workflow.md](driver_workflow.md) |
+| 驱动工作流重构（ring buffer + sleeping flag + 轮询窗口） | [driver_workflow.md](driver_workflow.md) |
+| KMS 帧调度优化（240 slot ring + 16ms 定时刷帧） | [driver_workflow.md](driver_workflow.md) |
 
 ## 当前状态
 
 内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 5 个 ELF（disk_driver → kbd_driver → kms_driver → shell → fs_driver）→ 多进程协作。Framebuffer 渲染已移至用户态 KMS 驱动，内核仅保留 `init_fb` 做物理页映射和元信息保存。`sys_putc` 已删除，所有输出通过 libc 的 `kms_write_flush`（写 KMS_REQ 共享页 + sys_notify KMS 驱动）。`run hello.elf` 可正常执行，子进程退出后 shell 恢复交互。
+
+**Phase 2 设计完成**：驱动工作流重构方案已设计（[driver_workflow.md](driver_workflow.md)），核心变更为 kbd/kms 驱动从硬编码共享页 + 每次 sys_notify 改为动态 shm + 环形缓冲区 + sleeping flag + 轮询窗口（快速路径零内核入口）。新增内核基础设施：TSC 时钟源 + sched_clock()、定时等待队列 + sys_wait(timeout_ms)、sys_fb_info、sys_shm_create/sys_shm_attach。disk/fs 驱动暂不动。
 
 ## 多核 SMP — 调度与锁（全部完成）
 
@@ -219,6 +227,8 @@
 
 #### IPC 通道（替代 Unix socket）
 
+> 已采用更轻量方案：sys_shm_create/sys_shm_attach + 环形缓冲区 + sleeping flag + sys_notify，详见 [driver_workflow.md](driver_workflow.md)。以下为未来通用 IPC 通道设计（多客户端、动态连接），待 Wayland 阶段需要时再实现。
+
 - [ ] 设计 IPC 通道机制：共享页环形缓冲区 + sys_notify，支持动态多客户端连接
 - [ ] sys_channel_create()：创建 IPC 通道，返回 channel handle
 - [ ] sys_channel_connect(target_pid)：连接到目标进程的通道
@@ -367,7 +377,7 @@
 
 | # | 问题 | 位置 | 说明 |
 |---|------|------|------|
-| 14 | `udelay` 精度损失 | `arch/x64/smp.cc:217` | `ticks_calibrated / 10000 * us` 先除后乘截断，应改为 `ticks_calibrated * us / 10000` |
+| 14 | `udelay` 精度损失 | `arch/x64/smp.cc:217` | `ticks_calibrated / 10000 * us` 先除后乘截断，应改为 `ticks_calibrated * us / 10000`。**方案**: [driver_workflow.md](driver_workflow.md) §1.4 |
 | 15 | `total_sectors` 64→32 位截断 | `kernel/kernel.cc:52` | `(uint32_t)((file_end + 511) / 512)`，ELF > 4GB 静默截断 |
 | 16 | 用户栈仅 4KB 无 guard page | `kernel/proc.cc:323-328` | 栈溢出触发 #PF 被 kill 而非友好报错，应至少 2 页 + 1 页 guard page |
 | 17 | 内核栈仅 8KB | `kernel/proc.cc` | `trap_dispatch → sys_waitpid → schedule → proc_reap` 路径 + trapframe，8KB 偏紧 |
@@ -404,7 +414,8 @@
 | 动态库加载（.so 支持） | — | 远 | PIC 编译 + 动态链接器 + PLT/GOT + 运行时重定位 |
 
 | 运行时 IPI | LAPIC | 低 | reschedule / TLB shootdown |
-| 驱动工作流重构 | 无 | 中 | 统一驱动 IPC 机制（共享页 + notify → 通用通道），统一多客户端模型，PID 发现机制替代硬编码 |
+| disk/fs 驱动迁移到动态 shm | driver_workflow.md | 中 | 将 disk_driver/fs_driver 从硬编码共享页迁移到 sys_shm_create/shm_attach + ring buffer（kbd/kms 已完成） |
+| DRM/KMS compositor 重构 | 无 | 高 | 当前 KMS 逐字符 PUTC 消息模型→改为共享文本 buffer + compositor 帧调度模型：shell 写 char grid（纯内存）→ compositor 定时扫描 dirty region 渲染 framebuffer → page flip。类似 Linux DRM 模型：应用写 buffer → 显示服务合成输出 |
 | KMS PAT/write-combining | KMS | 低 | framebuffer 页映射加 PCD/PAT 标记，优化真机性能 |
 | KMS huge page 映射 | KMS | 低 | 用户态 framebuffer 映射改用 2MB huge page，减少 TLB miss |
 | MSI / MSI-X | APIC | 低 | PCIe 设备中断 |

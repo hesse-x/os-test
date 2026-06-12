@@ -65,6 +65,7 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     cpu_locals[cpu_id].run_count = 0;
     cpu_locals[cpu_id].scheduler_lock = {0};
     list_init(&cpu_locals[cpu_id].run_queue);
+    list_init(&cpu_locals[cpu_id].timer_queue);
     for (int c = 0; c < NUM_KMALLOC_CLASSES; c++) {
         cpu_locals[cpu_id].active_slab[c] = nullptr;
     }
@@ -217,7 +218,8 @@ static void udelay(uint32_t us) {
     if (lapic_timer_ticks_calibrated == 0) return;
     // ticks per 10ms = lapic_timer_ticks_calibrated
     // ticks per 1us = lapic_timer_ticks_calibrated / 10000
-    uint32_t ticks = lapic_timer_ticks_calibrated / 10000 * us;
+    // Multiply first to avoid truncation
+    uint32_t ticks = lapic_timer_ticks_calibrated * us / 10000;
 
     lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
     lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_TIMER_MASKED); // one-shot, masked

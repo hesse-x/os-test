@@ -1,5 +1,6 @@
 // KMS driver process (user-space)
-// Reads framebuffer info from KMS_INFO shared page, renders text from KMS_REQ
+// Gets framebuffer info via sys_fb_info, renders text from kms_ring
+// Uses dynamic shared memory (sys_shm_attach) + sleeping flag protocol
 #include <stdint.h>
 #include <stddef.h>
 #include "arch/x64/utils.h"
@@ -7,8 +8,8 @@
 #include "common/pid.h"
 #include "common/macro.h"
 
-static volatile kms_fb_info *fb_info = (volatile kms_fb_info *)KMS_INFO_ADDR;
-static volatile kms_req_shm *req     = (volatile kms_req_shm *)KMS_REQ_ADDR;
+static volatile kms_ring *kms;
+static volatile driver_shm_header *shm_hdr;
 
 // ===================== Framebuffer state =====================
 
@@ -431,61 +432,69 @@ static void fb_putc(char c, uint32_t fg) {
     }
 }
 
-// ===================== Command processing =====================
-
-static void process_commands() {
-    uint32_t count = req->count;
-    if (count == 0 || count > 255) {
-        req->count = 0;
-        return;
-    }
-
-    for (uint32_t i = 0; i < count; i++) {
-        volatile kms_cmd *cmd = &req->cmds[i];
-        switch (cmd->cmd) {
-        case KMS_CMD_PUTC:
-            fb_putc((char)cmd->arg1, cmd->arg2);
-            break;
-        case KMS_CMD_CLEAR:
-            fb_clear();
-            break;
-        case KMS_CMD_SCROLL:
-            scroll_up();
-            break;
-        case KMS_CMD_CURSOR_MOVE:
-            cursor_x = cmd->arg1;
-            cursor_y = cmd->arg2;
-            break;
-        }
-    }
-    req->count = 0;
-}
-
 // ===================== Main loop =====================
 
 extern "C" void _start() {
-    // Read framebuffer info from KMS_INFO shared page
-    fb_width  = fb_info->width;
-    fb_height = fb_info->height;
-    fb_pitch  = fb_info->pitch;
-    fb_bpp    = fb_info->bpp;
-    fb_size   = (uint32_t)fb_info->fb_size;
-    fb_vaddr  = (uint8_t *)(uintptr_t)fb_info->fb_vaddr;
+    // Attach to KBD driver's shared memory page (retry until available)
+    uint64_t shm_addr = 0;
+    while ((shm_addr = (uint64_t)sys_shm_attach(KBD_DRIVER_PID)) == 0) {
+        sys_wait(1);
+    }
+
+    shm_hdr = (volatile driver_shm_header *)shm_addr;
+    kms = (volatile kms_ring *)(shm_addr + KMS_RING_OFFSET);
+
+    // Get framebuffer info via syscall
+    kms_fb_info fb_info;
+    sys_fb_info(&fb_info);
+
+    fb_width  = fb_info.width;
+    fb_height = fb_info.height;
+    fb_pitch  = fb_info.pitch;
+    fb_bpp    = fb_info.bpp;
+    fb_size   = (uint32_t)fb_info.fb_size;
+    fb_vaddr  = (uint8_t *)(uintptr_t)fb_info.fb_vaddr;
 
     if (fb_width == 0 || fb_vaddr == 0) {
         // No framebuffer, just idle
-        while (1) { sys_wait(); }
+        while (1) { sys_wait(0); }
     }
 
     // Clear screen
     fb_clear();
 
-    // Main loop: process any pending commands, then wait if idle
+    // Main loop: drain all pending messages each tick, ~60fps
     while (1) {
-        process_commands();
-        // Only block if no commands are pending (avoid missing notifications)
-        if (req->count == 0) {
-            sys_wait();
+        // Drain entire ring in one go
+        while (kms->head != kms->tail) {
+            uint32_t idx = kms->tail;
+            volatile kms_msg *msg = &kms->msgs[idx];
+            switch (msg->cmd) {
+            case KMS_CMD_PUTC:
+                fb_putc((char)msg->arg1, msg->arg2);
+                break;
+            case KMS_CMD_CLEAR:
+                fb_clear();
+                break;
+            case KMS_CMD_SCROLL:
+                scroll_up();
+                break;
+            case KMS_CMD_CURSOR_MOVE:
+                cursor_x = msg->arg1;
+                cursor_y = msg->arg2;
+                break;
+            }
+            kms->tail = (idx + 1) % KMS_RING_SIZE;
         }
+
+        // If no work, sleep until next tick (~16ms for 60fps)
+        shm_hdr->kms_sleeping = 1;
+        // Double-check ring after setting sleeping flag (prevent lost-wakeup)
+        if (kms->head != kms->tail) {
+            shm_hdr->kms_sleeping = 0;
+            continue;
+        }
+        sys_wait(16);
+        shm_hdr->kms_sleeping = 0;
     }
 }

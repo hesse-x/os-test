@@ -20,6 +20,31 @@ proc_t procs[MAX_PROC];
 
 spinlock_t procs_lock = {0};
 
+// ===================== Timer queue operations =====================
+// Must be called under scheduler_lock of the target CPU
+
+// Insert process into per-CPU timer queue, sorted by wait_deadline ascending
+// Must be called under scheduler_lock of the target CPU
+void timer_queue_insert(int cpu, proc_t *proc) {
+    list_node_t *head = &cpu_locals[cpu].timer_queue;
+    list_node_t *node = head->next;
+    while (node != head) {
+        proc_t *p = LIST_ENTRY(node, proc_t, wait_node);
+        if (p->wait_deadline > proc->wait_deadline) break;
+        node = node->next;
+    }
+    // Insert before node
+    proc->wait_node.prev = node->prev;
+    proc->wait_node.next = node;
+    node->prev->next = &proc->wait_node;
+    node->prev = &proc->wait_node;
+}
+
+// Remove process from timer queue (no-op if not on any queue)
+void timer_queue_remove(proc_t *proc) {
+    list_remove(&proc->wait_node);
+}
+
 // 64-bit init_code: getpid → add '0' → putc → yield → loop
 // Using SYSCALL with: rax=syscall#, rdi=arg1
 static const uint8_t init_code[] = {
@@ -36,7 +61,6 @@ static const uint8_t init_code[] = {
 
 // ===================== Shared pages =====================
 // Allocated in shm_init(), mapped into all user processes
-static uint64_t kbd_shm_phys = 0;
 static uint64_t disk_req_shm_phys = 0;
 static uint64_t disk_req_shm_phys2 = 0;   // second page of expanded disk_req
 static uint64_t disk_resp_shm_phys = 0;
@@ -44,8 +68,6 @@ static uint64_t disk_resp_shm_phys2 = 0;  // second page of expanded disk_resp
 static uint64_t fs_req_shm_phys = 0;
 static uint64_t fs_resp_shm_phys = 0;
 static uint64_t fs_resp_shm_phys2 = 0;    // second page of fs_resp
-static uint64_t kms_info_shm_phys = 0;   // KMS framebuffer info
-static uint64_t kms_req_shm_phys = 0;   // KMS render requests
 
 void proc_init() {
     for (int i = 0; i < MAX_PROC; i++) {
@@ -63,6 +85,14 @@ void proc_init() {
         procs[i].brk = 0;
         procs[i].mmap_brk = 0;
         procs[i].mmap_regions = nullptr;
+        procs[i].wait_deadline = 0;
+        procs[i].wait_timed_out = 0;
+        for (int j = 0; j < MAX_SHM_PER_PROC; j++) {
+            procs[i].shm_regions[j].vaddr = 0;
+            procs[i].shm_regions[j].phys = 0;
+            procs[i].shm_regions[j].npages = 0;
+            procs[i].shm_regions[j].ref_count = 0;
+        }
         list_init(&procs[i].run_node);
         list_init(&procs[i].wait_node);
     }
@@ -76,10 +106,6 @@ void proc_init() {
 
 void shm_init() {
     Page *p;
-
-    p = bfc_alloc.alloc_page(1);
-    if (!p) { serial_puts("shm_init: kbd alloc failed\n"); halt(); }
-    kbd_shm_phys = page_to_phys(p);
 
     p = bfc_alloc.alloc_page(1);
     if (!p) { serial_puts("shm_init: disk_req alloc failed\n"); halt(); }
@@ -109,18 +135,8 @@ void shm_init() {
     if (!p) { serial_puts("shm_init: fs_resp2 alloc failed\n"); halt(); }
     fs_resp_shm_phys2 = page_to_phys(p);
 
-    p = bfc_alloc.alloc_page(1);
-    if (!p) { serial_puts("shm_init: kms_info alloc failed\n"); halt(); }
-    kms_info_shm_phys = page_to_phys(p);
-
-    p = bfc_alloc.alloc_page(1);
-    if (!p) { serial_puts("shm_init: kms_req alloc failed\n"); halt(); }
-    kms_req_shm_phys = page_to_phys(p);
-
     // Zero out shared pages
     uint8_t *v;
-    v = (uint8_t *)phys_to_virt(kbd_shm_phys);
-    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
     v = (uint8_t *)phys_to_virt(disk_req_shm_phys);
     for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
     v = (uint8_t *)phys_to_virt(disk_req_shm_phys2);
@@ -135,16 +151,6 @@ void shm_init() {
     for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
     v = (uint8_t *)phys_to_virt(fs_resp_shm_phys2);
     for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
-    v = (uint8_t *)phys_to_virt(kms_info_shm_phys);
-    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
-    v = (uint8_t *)phys_to_virt(kms_req_shm_phys);
-    for (size_t i = 0; i < PAGE_SIZE; i++) v[i] = 0;
-
-    // Copy framebuffer info into KMS_INFO shared page
-    if (g_fb_info.width != 0) {
-        kms_fb_info *info = (kms_fb_info *)phys_to_virt(kms_info_shm_phys);
-        *info = g_fb_info;
-    }
 
     serial_puts("shm_init: ok\n");
 }
@@ -152,8 +158,6 @@ void shm_init() {
 // Map the shared pages into a user PML4
 static bool map_shared_pages(uint64_t *new_pml4) {
     uint64_t flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
-    if (!map_user_page_direct(new_pml4, KBD_SHM_ADDR, kbd_shm_phys, flags))
-        return false;
     if (!map_user_page_direct(new_pml4, DISK_REQ_ADDR, disk_req_shm_phys, flags))
         return false;
     if (!map_user_page_direct(new_pml4, DISK_REQ_ADDR2, disk_req_shm_phys2, flags))
@@ -167,10 +171,6 @@ static bool map_shared_pages(uint64_t *new_pml4) {
     if (!map_user_page_direct(new_pml4, FS_RESP_ADDR, fs_resp_shm_phys, flags))
         return false;
     if (!map_user_page_direct(new_pml4, FS_RESP_ADDR2, fs_resp_shm_phys2, flags))
-        return false;
-    if (!map_user_page_direct(new_pml4, KMS_INFO_ADDR, kms_info_shm_phys, flags))
-        return false;
-    if (!map_user_page_direct(new_pml4, KMS_REQ_ADDR, kms_req_shm_phys, flags))
         return false;
     return true;
 }
@@ -597,16 +597,26 @@ void proc_reap(proc_t *proc) {
                         // Shared pages (KBD_SHM, DISK_REQ, etc.) are global — don't free them
                         // They are mapped via map_user_page_direct with known physical addresses
                         // We need to check if this physical page belongs to the shared pool
-                        bool is_shared = (leaf_phys == kbd_shm_phys ||
-                                          leaf_phys == disk_req_shm_phys ||
+                        bool is_shared = (leaf_phys == disk_req_shm_phys ||
                                           leaf_phys == disk_req_shm_phys2 ||
                                           leaf_phys == disk_resp_shm_phys ||
                                           leaf_phys == disk_resp_shm_phys2 ||
                                           leaf_phys == fs_req_shm_phys ||
                                           leaf_phys == fs_resp_shm_phys ||
-                                          leaf_phys == fs_resp_shm_phys2 ||
-                                          leaf_phys == kms_info_shm_phys ||
-                                          leaf_phys == kms_req_shm_phys);
+                                          leaf_phys == fs_resp_shm_phys2);
+                        // Also check dynamic shm regions
+                        if (!is_shared) {
+                            for (int s = 0; s < MAX_SHM_PER_PROC; s++) {
+                                if (proc->shm_regions[s].ref_count > 0) {
+                                    uint64_t sphys = proc->shm_regions[s].phys;
+                                    size_t snp = proc->shm_regions[s].npages;
+                                    if (leaf_phys >= sphys && leaf_phys < sphys + snp * PAGE_SIZE) {
+                                        is_shared = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         if (!is_shared) {
                             Page *leaf_page = &BFCAllocator::frames[PHY_TO_PAGE(leaf_phys)];
                             bfc_alloc.free_page(leaf_page, 1);
@@ -644,7 +654,37 @@ void proc_reap(proc_t *proc) {
         region = next;
     }
 
-    // 5. Clear PCB slot
+    // 5. Handle dynamic shm regions: unmap virtual pages were already freed
+    //    in step 1 (PML4 walk skipped them). Now check if physical pages
+    //    should be freed by scanning all processes for remaining references.
+    for (int s = 0; s < MAX_SHM_PER_PROC; s++) {
+        if (proc->shm_regions[s].ref_count > 0) {
+            uint64_t sphys = proc->shm_regions[s].phys;
+            size_t snp = proc->shm_regions[s].npages;
+            // Count remaining references across all processes
+            int refs = 0;
+            spin_lock(&procs_lock);
+            for (int p = 0; p < MAX_PROC; p++) {
+                if (procs[p].pid < 0) continue;
+                for (int j = 0; j < MAX_SHM_PER_PROC; j++) {
+                    if (procs[p].shm_regions[j].ref_count > 0 &&
+                        procs[p].shm_regions[j].phys == sphys &&
+                        &procs[p] != proc) {
+                        refs++;
+                    }
+                }
+            }
+            spin_unlock(&procs_lock);
+            // If no other process references these pages, free them
+            if (refs == 0) {
+                Page *page = &BFCAllocator::frames[PHY_TO_PAGE(sphys)];
+                bfc_alloc.free_page(page, snp);
+            }
+            proc->shm_regions[s].ref_count = 0;
+        }
+    }
+
+    // 6. Clear PCB slot
     spin_lock(&procs_lock);
     proc->pid = -1;
     proc->state = READY;
@@ -660,6 +700,14 @@ void proc_reap(proc_t *proc) {
     proc->brk = 0;
     proc->mmap_brk = 0;
     proc->mmap_regions = nullptr;
+    proc->wait_deadline = 0;
+    proc->wait_timed_out = 0;
+    for (int j = 0; j < MAX_SHM_PER_PROC; j++) {
+        proc->shm_regions[j].vaddr = 0;
+        proc->shm_regions[j].phys = 0;
+        proc->shm_regions[j].npages = 0;
+        proc->shm_regions[j].ref_count = 0;
+    }
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
     spin_unlock(&procs_lock);

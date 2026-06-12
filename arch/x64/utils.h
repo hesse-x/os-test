@@ -128,6 +128,13 @@ static inline void ltr(uint16_t sel) {
   __asm__ volatile("ltr %w0" :: "r"(sel));
 }
 
+// ===================== TSC helpers =====================
+static inline uint64_t rdtsc64() {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
+}
+
 // ===================== Constants =====================
 #define KERNEL_CS 0x08
 

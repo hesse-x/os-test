@@ -6,34 +6,44 @@
 #include "common/pid.h"
 #include "arch/x64/utils.h"
 
-// ===================== KMS output =====================
+// ===================== Shared memory + KMS output =====================
 
-static volatile kms_req_shm *kms_req = (volatile kms_req_shm *)KMS_REQ_ADDR;
+static volatile kbd_ring *kbd;
+static volatile kms_ring *kms;
+static volatile driver_shm_header *shm_hdr;
 
 static void kms_flush() {
-    if (kms_req->count > 0) {
-        sys_notify(KMS_DRIVER_PID);
+    if (kms->head != kms->tail) {
+        if (shm_hdr->kms_sleeping) {
+            sys_notify(KMS_DRIVER_PID);
+        }
     }
 }
 
-// ===================== Keyboard input =====================
+// ===================== Keyboard input + FS IPC =====================
 
-static volatile kbd_shm       *kbd   = (volatile kbd_shm       *)KBD_SHM_ADDR;
 static volatile fs_req_shm    *freq  = (volatile fs_req_shm    *)FS_REQ_ADDR;
 static volatile fs_resp_shm   *fresp = (volatile fs_resp_shm   *)FS_RESP_ADDR;
 
 // Current working directory
 static char cwd[256] = "/";
 
-#define KBD_BUF_SIZE 4088
-
 static char getc() {
-    while (kbd->tail == kbd->head) {
+    while (kbd->head == kbd->tail) {
+        shm_hdr->consumer_sleeping = 1;
+        // Double-check ring after setting sleeping flag (prevent lost-wakeup:
+        // kbd_driver may have written between ring-empty check and setting flag)
+        if (kbd->head != kbd->tail) {
+            shm_hdr->consumer_sleeping = 0;
+            break;
+        }
         kms_flush();
-        sys_wait();
+        sys_wait(0);
+        shm_hdr->consumer_sleeping = 0;
     }
-    char ch = (char)kbd->data[kbd->tail];
-    kbd->tail = (kbd->tail + 1) % KBD_BUF_SIZE;
+    uint32_t idx = kbd->tail;
+    char ch = (char)kbd->msgs[idx].ch;
+    kbd->tail = (idx + 1) % 8;
     return ch;
 }
 
@@ -87,7 +97,7 @@ static int fs_request() {
     freq->client_pid = sys_getpid();
     kms_flush();
     sys_notify(FS_DRIVER_PID);
-    sys_wait();
+    sys_wait(0);
     return (int)fresp->status;
 }
 
@@ -420,6 +430,19 @@ static const cmd_entry cmds[] = {
 // ===================== Main =====================
 
 extern "C" void _start() {
+    // Attach to KBD driver's shared memory page (retry until available)
+    uint64_t shm_addr = 0;
+    while ((shm_addr = (uint64_t)sys_shm_attach(KBD_DRIVER_PID)) == 0) {
+        sys_wait(1);
+    }
+
+    shm_hdr = (volatile driver_shm_header *)shm_addr;
+    kbd = (volatile kbd_ring *)(shm_addr + KBD_RING_OFFSET);
+    kms = (volatile kms_ring *)(shm_addr + KMS_RING_OFFSET);
+
+    // Initialize libc's KMS output with the same shared page
+    kms_shm_init(shm_addr);
+
     char line[80];
 
     while (1) {
