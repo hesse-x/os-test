@@ -12,6 +12,7 @@ Page *BFCAllocator::frames = NULL;
 Page *BFCAllocator::free_list = NULL;
 
 BFCAllocator bfc_alloc;
+spinlock_t bfc_lock = {0};
 
 // ===================== BFCAllocator implementation =====================
 void BFCAllocator::init() {
@@ -19,7 +20,13 @@ void BFCAllocator::init() {
 }
 
 Page *BFCAllocator::alloc_page(size_t n) {
-  if (n == 0 || free_list == NULL) {
+  if (n == 0) return NULL;
+
+  uint64_t flags;
+  spin_lock_irqsave(&bfc_lock, &flags);
+
+  if (free_list == NULL) {
+    spin_unlock_irqrestore(&bfc_lock, flags);
     return NULL;
   }
 
@@ -27,47 +34,50 @@ Page *BFCAllocator::alloc_page(size_t n) {
   Page *prev = NULL;
 
   while (cur != NULL) {
-    if (cur->cont_page_num >= n) {
-      if (cur->cont_page_num == n) {
+    if (cur->bfc.cont_page_num >= n) {
+      if (cur->bfc.cont_page_num == n) {
         if (prev == NULL) {
-          free_list = cur->next;
+          free_list = cur->bfc.next;
         } else {
-          prev->next = cur->next;
+          prev->bfc.next = cur->bfc.next;
         }
-        if (cur->next != NULL) {
-          cur->next->prev = prev;
+        if (cur->bfc.next != NULL) {
+          cur->bfc.next->bfc.prev = prev;
         }
         cur->status = PageStatus::USED;
+        spin_unlock_irqrestore(&bfc_lock, flags);
         return cur;
       } else {
-        size_t remaining = cur->cont_page_num - n;
-        cur->cont_page_num = n;
+        size_t remaining = cur->bfc.cont_page_num - n;
+        cur->bfc.cont_page_num = n;
         cur->status = PageStatus::USED;
 
         Page *new_block = cur + n;
         new_block->status = PageStatus::FREE;
-        new_block->cont_page_num = remaining;
-        new_block->prev = prev;
-        new_block->next = cur->next;
+        new_block->bfc.cont_page_num = remaining;
+        new_block->bfc.prev = prev;
+        new_block->bfc.next = cur->bfc.next;
 
         if (prev == NULL) {
           free_list = new_block;
         } else {
-          prev->next = new_block;
+          prev->bfc.next = new_block;
         }
-        if (cur->next != NULL) {
-          cur->next->prev = new_block;
+        if (cur->bfc.next != NULL) {
+          cur->bfc.next->bfc.prev = new_block;
         }
 
-        cur->prev = NULL;
-        cur->next = NULL;
+        cur->bfc.prev = NULL;
+        cur->bfc.next = NULL;
+        spin_unlock_irqrestore(&bfc_lock, flags);
         return cur;
       }
     }
     prev = cur;
-    cur = cur->next;
+    cur = cur->bfc.next;
   }
 
+  spin_unlock_irqrestore(&bfc_lock, flags);
   return NULL;
 }
 
@@ -76,13 +86,17 @@ Page *BFCAllocator::free_page(Page *page, size_t n) {
     return NULL;
   }
 
+  uint64_t flags;
+  spin_lock_irqsave(&bfc_lock, &flags);
+
   page->status = PageStatus::FREE;
-  page->cont_page_num = n;
+  page->bfc.cont_page_num = n;
 
   if (free_list == NULL) {
-    page->prev = NULL;
-    page->next = NULL;
+    page->bfc.prev = NULL;
+    page->bfc.next = NULL;
     free_list = page;
+    spin_unlock_irqrestore(&bfc_lock, flags);
     return page;
   }
 
@@ -91,51 +105,55 @@ Page *BFCAllocator::free_page(Page *page, size_t n) {
 
   while (cur != NULL && cur < page) {
     prev = cur;
-    cur = cur->next;
+    cur = cur->bfc.next;
   }
 
-  page->prev = prev;
-  page->next = cur;
+  page->bfc.prev = prev;
+  page->bfc.next = cur;
 
   if (prev == NULL) {
     free_list = page;
   } else {
-    prev->next = page;
+    prev->bfc.next = page;
   }
 
   if (cur != NULL) {
-    cur->prev = page;
+    cur->bfc.prev = page;
   }
 
-  if (prev != NULL && prev + prev->cont_page_num == page) {
-    prev->cont_page_num += page->cont_page_num;
-    prev->next = cur;
+  if (prev != NULL && prev + prev->bfc.cont_page_num == page) {
+    prev->bfc.cont_page_num += page->bfc.cont_page_num;
+    prev->bfc.next = cur;
     if (cur != NULL) {
-      cur->prev = prev;
+      cur->bfc.prev = prev;
     }
     page = prev;
   }
 
-  if (cur != NULL && page + page->cont_page_num == cur) {
-    page->cont_page_num += cur->cont_page_num;
-    page->next = cur->next;
-    if (cur->next != NULL) {
-      cur->next->prev = page;
+  if (cur != NULL && page + page->bfc.cont_page_num == cur) {
+    page->bfc.cont_page_num += cur->bfc.cont_page_num;
+    page->bfc.next = cur->bfc.next;
+    if (cur->bfc.next != NULL) {
+      cur->bfc.next->bfc.prev = page;
     }
   }
 
+  spin_unlock_irqrestore(&bfc_lock, flags);
   return page;
 }
 
 size_t BFCAllocator::free_page_nums() const {
+  uint64_t flags;
+  spin_lock_irqsave(&bfc_lock, &flags);
   size_t total = 0;
   Page *cur = free_list;
 
   while (cur != NULL) {
-    total += cur->cont_page_num;
-    cur = cur->next;
+    total += cur->bfc.cont_page_num;
+    cur = cur->bfc.next;
   }
 
+  spin_unlock_irqrestore(&bfc_lock, flags);
   return total;
 }
 
@@ -180,9 +198,9 @@ void init_mem(boot_info *bi) {
   // 4. 初始化 frames 为 RESERVED
   for (size_t i = 0; i < total_page_frames; i++) {
     frames[i].status = PageStatus::RESERVED;
-    frames[i].cont_page_num = 1;
-    frames[i].prev = NULL;
-    frames[i].next = NULL;
+    frames[i].bfc.cont_page_num = 1;
+    frames[i].bfc.prev = NULL;
+    frames[i].bfc.next = NULL;
   }
 
   // 5. 根据 EFI mmap 标记 FREE 页
@@ -228,7 +246,7 @@ void init_mem(boot_info *bi) {
       if (status == PageStatus::FREE) {
         state = 1;
         *cur_page = frames + i;
-        (*cur_page)->prev = prev;
+        (*cur_page)->bfc.prev = prev;
         prev = *cur_page;
         cont_page_num = 1;
       }
@@ -237,9 +255,9 @@ void init_mem(boot_info *bi) {
     case 1: {
       if (status != PageStatus::FREE) {
         state = 0;
-        (*cur_page)->cont_page_num = cont_page_num;
+        (*cur_page)->bfc.cont_page_num = cont_page_num;
         cont_page_num = 0;
-        cur_page = &((*cur_page)->next);
+        cur_page = &((*cur_page)->bfc.next);
       } else {
         cont_page_num++;
       }
@@ -248,7 +266,7 @@ void init_mem(boot_info *bi) {
     }
   }
   if (state == 1) {
-    (*cur_page)->cont_page_num = cont_page_num;
+    (*cur_page)->bfc.cont_page_num = cont_page_num;
   }
 
   // 10. 设置 BFCAllocator::frames

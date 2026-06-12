@@ -5,6 +5,7 @@
 #include "kernel/serial.h"
 #include "kernel/trap.h"
 #include "kernel/mem/alloc.h"
+#include "kernel/mem/slab.h"
 #include "common/elf.h"
 #include "common/shm.h"
 #include "common/macro.h"
@@ -60,12 +61,17 @@ void proc_init() {
         procs[i].parent_pid = -1;
         procs[i].exit_code = 0;
         procs[i].brk = 0;
+        procs[i].mmap_brk = 0;
+        procs[i].mmap_regions = nullptr;
         list_init(&procs[i].run_node);
         list_init(&procs[i].wait_node);
     }
     cpu_locals[0]._cur_proc = nullptr;
     cpu_locals[0].run_count = 0;
     cpu_locals[0].idle_proc = nullptr;
+    for (int c = 0; c < NUM_KMALLOC_CLASSES; c++) {
+        cpu_locals[0].active_slab[c] = nullptr;
+    }
 }
 
 void shm_init() {
@@ -252,6 +258,8 @@ proc_t *create_idle_process(int cpu_id) {
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->brk = 0;
+    proc->mmap_brk = 0x800000;
+    proc->mmap_regions = nullptr;
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
     spin_unlock(&procs_lock);
@@ -374,6 +382,8 @@ proc_t *process_create(uint64_t entry) {
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->brk = 0x600000;
+    proc->mmap_brk = 0x800000;
+    proc->mmap_regions = nullptr;
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
     spin_unlock(&procs_lock);
@@ -474,6 +484,8 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->brk = 0x600000;
+    proc->mmap_brk = 0x800000;
+    proc->mmap_regions = nullptr;
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
     spin_unlock(&procs_lock);
@@ -497,9 +509,9 @@ void schedule() {
 
     // Check if run_queue has a runnable process
     if (list_empty(&cpu_locals[my_cpu].run_queue)) {
-        // If prev is BLOCKED or ZOMBIE, it cannot continue running —
+        // If prev is BLOCKED, ZOMBIE, or REAPING, it cannot continue running —
         // switch to idle so the CPU halts until an IRQ wakes a process.
-        if (prev != idle && (prev->state == BLOCKED || prev->state == ZOMBIE)) {
+        if (prev != idle && (prev->state == BLOCKED || prev->state == ZOMBIE || prev->state == REAPING)) {
             current_proc = idle;
             per_cpu_tss[my_cpu].rsp0 = idle->k_stack_top;
             get_cpu_local()->tss_rsp0 = idle->k_stack_top;
@@ -524,7 +536,7 @@ void schedule() {
         list_push_back(&cpu_locals[my_cpu].run_queue, &prev->run_node);
         cpu_locals[my_cpu].run_count++;
     }
-    // if prev->state == BLOCKED or ZOMBIE: don't enqueue, run_count unchanged
+    // if prev->state == BLOCKED, ZOMBIE, or REAPING: don't enqueue, run_count unchanged
 
     next->state = RUNNING;
     cpu_locals[my_cpu].run_count--;
@@ -555,7 +567,7 @@ void proc_reap(proc_t *proc) {
         uint64_t pdpt_entry = pml4_virt[pml4_idx];
         if (!(pdpt_entry & PTE_PRESENT)) continue;
 
-        uint64_t pdpt_phys = pdpt_entry & ~0xFFF;
+        uint64_t pdpt_phys = pdpt_entry & 0x000FFFFFFFFFF000ULL;
         uint64_t *pdpt_virt = (uint64_t *)phys_to_virt(pdpt_phys);
 
         for (int pdpt_idx = 0; pdpt_idx < 512; pdpt_idx++) {
@@ -564,7 +576,7 @@ void proc_reap(proc_t *proc) {
             // Skip huge pages (shouldn't exist in user PML4, but safe check)
             if (pd_entry & PTE_PS) continue;
 
-            uint64_t pd_phys = pd_entry & ~0xFFF;
+            uint64_t pd_phys = pd_entry & 0x000FFFFFFFFFF000ULL;
             uint64_t *pd_virt = (uint64_t *)phys_to_virt(pd_phys);
 
             for (int pd_idx = 0; pd_idx < 512; pd_idx++) {
@@ -573,7 +585,7 @@ void proc_reap(proc_t *proc) {
                 // Skip huge pages at PT level (2MB pages mapped as PD entries with PS bit)
                 if (pt_entry & PTE_PS) continue;
 
-                uint64_t pt_phys = pt_entry & ~0xFFF;
+                uint64_t pt_phys = pt_entry & 0x000FFFFFFFFFF000ULL;
                 uint64_t *pt_virt = (uint64_t *)phys_to_virt(pt_phys);
 
                 // Free all leaf pages in PT
@@ -624,7 +636,15 @@ void proc_reap(proc_t *proc) {
     Page *stack_page = &BFCAllocator::frames[PHY_TO_PAGE(k_stack_phys_base)];
     bfc_alloc.free_page(stack_page, 2);
 
-    // 4. Clear PCB slot
+    // 4. Free mmap region metadata (physical pages already freed in step 1)
+    mmap_region *region = proc->mmap_regions;
+    while (region) {
+        mmap_region *next = region->next;
+        kfree(region);
+        region = next;
+    }
+
+    // 5. Clear PCB slot
     spin_lock(&procs_lock);
     proc->pid = -1;
     proc->state = READY;
@@ -638,6 +658,8 @@ void proc_reap(proc_t *proc) {
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->brk = 0;
+    proc->mmap_brk = 0;
+    proc->mmap_regions = nullptr;
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
     spin_unlock(&procs_lock);

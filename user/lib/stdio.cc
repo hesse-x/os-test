@@ -29,6 +29,8 @@ static void kms_write_flush(FILE *f, const char *data, int len) {
     if (kms_req->count > 0) {
         sys_notify(KMS_DRIVER_PID);
     }
+    // Mirror output to serial port
+    sys_serial_write(data, len);
 }
 
 static FILE stdout_file = {

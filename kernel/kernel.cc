@@ -6,6 +6,7 @@
 #include "common/macro.h"
 #include "kernel/kernel.h"
 #include "kernel/mem/alloc.h"
+#include "kernel/mem/slab.h"
 #include "kernel/serial.h"
 #include "common/shm.h"
 #include "kernel/trap.h"
@@ -37,6 +38,12 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
   }
 
   Elf64_Ehdr *ehdr = (Elf64_Ehdr *)hdr_buf;
+  // Validate program headers are within the first sector
+  if (ehdr->e_phentsize == 0 ||
+      ehdr->e_phoff + (uint64_t)ehdr->e_phnum * ehdr->e_phentsize > 512) {
+    serial_puts("load_elf_from_disk: program headers exceed first sector\n");
+    return nullptr;
+  }
   uint64_t file_end = 0;
   for (int i = 0; i < ehdr->e_phnum; i++) {
     Elf64_Phdr *phdr = (Elf64_Phdr *)(hdr_buf + ehdr->e_phoff + i * ehdr->e_phentsize);
@@ -90,6 +97,7 @@ void kernel_main(boot_info *bi) {
   init_mem(bi);
   isr_init();
   kernel_init_finish();
+  slab_init();
 
   proc_init();
 

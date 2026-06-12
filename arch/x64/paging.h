@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "arch/x64/utils.h"
 #include "common/macro.h"
+#include "arch/x64/memlayout.h"
 
 // ===================== Page table entry flags =====================
 #define PTE_PRESENT  (1ULL << 0)
@@ -14,15 +15,10 @@
 #define PTE_NX       (1ULL << 63)  // No-execute
 
 // ===================== Constants =====================
-#define PAGE_SIZE 4096
-#define PAGE_SIZE_2M 0x200000
 #define VMA_BASE 0xFFFFFFFF80000000ULL
 #define KERNEL_LMA_BASE 0x100000
 #define KERNEL_VMA_BASE 0xFFFFFFFF80100000ULL
 #define PHY_ADDR(addr) ((uintptr_t)(addr) - VMA_BASE)
-#define PTX_SHIFT 12
-#define PHY_TO_PAGE(addr) ((addr) >> PTX_SHIFT)
-#define GET_PAGE_NUM(len) (ALIGN_UP(len, PAGE_SIZE) / PAGE_SIZE)
 
 // ===================== boot_info (stub → kernel) =====================
 #define BOOT_INFO_MAGIC 0x4F53424F544F4F42ULL  // "BOOTBOOS"

@@ -9,9 +9,15 @@
 
 typedef int32_t pid_t;
 
-enum proc_state_t { READY, RUNNING, BLOCKED, ZOMBIE };
+enum proc_state_t { READY, RUNNING, BLOCKED, ZOMBIE, REAPING };
 
 enum wait_event_t { WAIT_NONE, WAIT_NOTIFY, WAIT_CHILD };
+
+struct mmap_region {
+    uint64_t vaddr;
+    uint64_t size;
+    mmap_region *next;
+};
 
 struct proc_t {
     pid_t pid;
@@ -26,6 +32,8 @@ struct proc_t {
     pid_t parent_pid;      // 父进程 PID，启动时进程设为 -1
     int32_t exit_code;     // 退出码，ZOMBIE 时有效
     uint64_t brk;          // 堆顶地址，idle=0，用户进程=0x600000
+    uint64_t mmap_brk;     // mmap 区域高水位（初始 0x800000）
+    mmap_region *mmap_regions; // mmap 区域链表头
     list_node_t run_node;  // embedded in per-CPU run_queue
     list_node_t wait_node; // embedded in wait_queue (reserved)
 };

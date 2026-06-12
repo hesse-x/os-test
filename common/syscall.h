@@ -16,13 +16,25 @@
 #define SYS_EXIT     8
 #define SYS_WAITPID  9
 #define SYS_SPAWN    10
+#define SYS_MMAP     11
+#define SYS_MUNMAP   12
+#define SYS_SERIAL_WRITE 13
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
 
+// ===================== Syscall return convention =====================
+// 0 = success (for status-only syscalls: wait/notify/exit/irq_bind/munmap)
+// positive errno = error (for status-only syscalls)
+// For value-returning syscalls: 0 = failure, nonzero = success
+//   sys_sbrk: returns old brk (>=0x600000) on success, 0 on failure
+//   sys_mmap: returns mapped address on success, NULL on failure
+//   sys_spawn/sys_waitpid: returns pid on success, 0 on failure
+//   sys_getpid: always succeeds (returns pid >= 1)
+
 // ===================== Semantic wrappers =====================
-static inline void sys_putc(char c) {
-    __syscall1(SYS_PUTC, (int64_t)c);
+static inline int sys_putc(char c) {
+    return (int)__syscall1(SYS_PUTC, (int64_t)c);
 }
 
 static inline int64_t sys_getpid() {
@@ -33,24 +45,24 @@ static inline void sys_yield() {
     __syscall0(SYS_YIELD);
 }
 
-static inline int64_t sys_getc() {
-    return __syscall0(SYS_GETC);
+static inline int sys_getc() {
+    return (int)__syscall0(SYS_GETC);
 }
 
-static inline void sys_wait() {
-    __syscall0(SYS_WAIT);
+static inline int sys_wait() {
+    return (int)__syscall0(SYS_WAIT);
 }
 
-static inline void sys_notify(int32_t pid) {
-    __syscall1(SYS_NOTIFY, (int64_t)pid);
+static inline int sys_notify(int32_t pid) {
+    return (int)__syscall1(SYS_NOTIFY, (int64_t)pid);
 }
 
-static inline void sys_irq_bind(int irq) {
-    __syscall1(SYS_IRQ_BIND, (int64_t)irq);
+static inline int sys_irq_bind(int irq) {
+    return (int)__syscall1(SYS_IRQ_BIND, (int64_t)irq);
 }
 
-static inline int64_t sys_sbrk(int64_t increment) {
-    return __syscall1(SYS_SBRK, increment);
+static inline uint64_t sys_sbrk(int64_t increment) {
+    return (uint64_t)__syscall1(SYS_SBRK, increment);
 }
 
 static inline void sys_exit(int32_t exit_code) {
@@ -64,6 +76,18 @@ static inline int64_t sys_waitpid(int32_t pid, int32_t *exit_code) {
 
 static inline int64_t sys_spawn(const void *elf_data, uint64_t elf_size, uint32_t iopl) {
     return __syscall3(SYS_SPAWN, (int64_t)(uintptr_t)elf_data, (int64_t)elf_size, (int64_t)iopl);
+}
+
+static inline void *sys_mmap(size_t size) {
+    return (void *)__syscall1(SYS_MMAP, (int64_t)size);
+}
+
+static inline int sys_munmap(void *addr, size_t size) {
+    return (int)__syscall2(SYS_MUNMAP, (int64_t)(uintptr_t)addr, (int64_t)size);
+}
+
+static inline int sys_serial_write(const char *buf, size_t len) {
+    return (int)__syscall2(SYS_SERIAL_WRITE, (int64_t)(uintptr_t)buf, (int64_t)len);
 }
 
 #endif // COMMON_SYSCALL_H

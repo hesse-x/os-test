@@ -148,8 +148,13 @@ void extend_mapping(uint64_t max_phys_addr) {
   size_t max_1gb_block = (size_t)(max_phys_addr / 0x40000000);
 
   // stub 已设置 PDPT_hh[510] → PD (第一个1GB)
-  // 需要继续设置 PDPT_hh[511] ...
-  // 同时需要设置 identity map 的 PDPT_ident[1..max_1gb_block]
+  // PDPT_hh[511] 将用于第二个1GB
+  // n >= 2 的 1GB 块需要新的 PDPT 页，链接到 PML4[510]
+  // 因为 PML4[511] + PDPT_hh 仅覆盖索引 510-511（2GB 虚拟地址空间）
+
+  // PML4[510] 对应虚拟地址 0xFFFFFFFF00000000 起
+  // 用于扩展 higher-half 映射（物理 2GB 以上）
+  static uint64_t *pdpt_extra = nullptr;
 
   for (size_t n = 1; n <= max_1gb_block; n++) {
     // 分配 PD (4KB)
@@ -165,8 +170,24 @@ void extend_mapping(uint64_t max_phys_addr) {
     // identity map: PDPT_ident[n] = PD
     pdpt_ident[n] = pd_phys | PTE_PRESENT | PTE_RW;
 
-    // higher-half map: PDPT_hh[510 + n] = PD
-    pdpt_hh[510 + n] = pd_phys | PTE_PRESENT | PTE_RW;
+    // higher-half map:
+    //   n=1: PDPT_hh[511] (第二个1GB, 虚拟地址 0xFFFFFFFFC0000000)
+    //   n>=2: 分配额外 PDPT, 链接到 PML4[510]
+    if (n == 1) {
+      pdpt_hh[511] = pd_phys | PTE_PRESENT | PTE_RW;
+    } else {
+      if (!pdpt_extra) {
+        // 分配扩展 PDPT 页
+        pdpt_extra = (uint64_t *)bump_alloc(4096);
+        uintptr_t pdpt_phys = PHY_ADDR((uintptr_t)pdpt_extra);
+        for (int i = 0; i < 512; i++)
+          pdpt_extra[i] = 0;
+        // PML4[510] 映射虚拟地址 0xFFFFFFFF00000000 起
+        pml4[510] = pdpt_phys | PTE_PRESENT | PTE_RW;
+      }
+      // PDPT 索引: 第 n 个 1GB 块(n>=2)映射到 pdpt_extra[n-2]
+      pdpt_extra[n - 2] = pd_phys | PTE_PRESENT | PTE_RW;
+    }
   }
 
   // 设备映射区

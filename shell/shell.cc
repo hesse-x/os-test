@@ -252,8 +252,8 @@ static void cmd_raw_read(uint32_t lba, uint32_t count) {
 static void cmd_sbrk(const char *args) {
     uint32_t increment = parse_u32(args);
     int64_t result = sys_sbrk((int64_t)increment);
-    if (result < 0)
-        printf("sbrk(%u) = -%lX\n", increment, (unsigned long)(-result));
+    if (result == 0)
+        printf("sbrk(%u) failed\n", increment);
     else
         printf("sbrk(%u) = %lX\n", increment, (unsigned long)result);
 }
@@ -383,8 +383,8 @@ static void cmd_run(const char *rel_path) {
     int64_t child_pid = sys_spawn((const void *)elf_buf, (uint64_t)file_size, 0);
     free(elf_buf);
 
-    if (child_pid < 0) {
-        printf("run: spawn failed (errno=%lX)\n", (unsigned long)(-child_pid));
+    if (child_pid == 0) {
+        printf("run: spawn failed\n");
         return;
     }
 
@@ -393,7 +393,7 @@ static void cmd_run(const char *rel_path) {
     int32_t exit_code = 0;
     int64_t result = sys_waitpid((int32_t)child_pid, &exit_code);
 
-    if (result < 0) {
+    if (result == 0) {
         printf("run: waitpid failed\n");
         return;
     }

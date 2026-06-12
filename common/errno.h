@@ -8,5 +8,6 @@
 #define EINVAL   4
 #define ENOSYS   5
 #define ECHILD   6
+#define EFAULT   7
 
 #endif // COMMON_ERRNO_H

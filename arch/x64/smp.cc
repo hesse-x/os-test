@@ -65,6 +65,9 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     cpu_locals[cpu_id].run_count = 0;
     cpu_locals[cpu_id].scheduler_lock = {0};
     list_init(&cpu_locals[cpu_id].run_queue);
+    for (int c = 0; c < NUM_KMALLOC_CLASSES; c++) {
+        cpu_locals[cpu_id].active_slab[c] = nullptr;
+    }
 
     // Set up per-CPU GDT (8 entries)
     gdt_entry_t *gdt = per_cpu_gdt[cpu_id];

@@ -51,6 +51,7 @@
 | 细粒度锁拆分（BKL 移除） | [fine_grained_lock.md](fine_grained_lock.md) |
 | FAT32 写入（touch/mkdir） | [fat32.md](fat32.md) |
 | 用户态堆（sys_sbrk） | [sbrk.md](sbrk.md) |
+| 内存管理系统（slab + mmap + 用户态 malloc 重写） | [mem.md](mem.md) |
 | 进程生命周期管理（sys_exit/sys_waitpid/sys_spawn） | [process_lifecycle.md](process_lifecycle.md) |
 | hello.elf + shell run 命令 | [process_lifecycle.md](process_lifecycle.md) |
 | libc.a 静态库（printf + FILE + _start） | [libc.md](libc.md) |
@@ -210,10 +211,11 @@
 
 #### sys_mmap / sys_munmap
 
-- [ ] sys_mmap(addr, length, flags)：共享内存区域创建/映射（wl_shm buffer pool 依赖）
-- [ ] sys_munmap(addr, length)：解除映射 + 归还物理页
-- [ ] 支持匿名映射（MAP_ANONYMOUS）和共享映射（MAP_SHARED）
-- [ ] 验证: 用户进程 mmap 一段内存 → 写入数据 → 可访问
+- [ ] sys_mmap(size)：匿名私有映射（完整设计见 [mem.md](mem.md) Phase 3）
+- [ ] sys_munmap(addr, size)：解除映射 + 归还物理页
+- [ ] mmap_brk 简单调高 + mmap_region 链表跟踪
+- [ ] 验证: 用户进程 mmap 一段内存 → 写入数据 → 可访问 → munmap 释放
+- [ ] **后续**: 共享映射（MAP_SHARED + refcount），见 [mem.md](mem.md) Phase 6
 
 #### IPC 通道（替代 Unix socket）
 
@@ -331,7 +333,7 @@
 
 - [ ] stdio：printf/fprintf/fopen/fclose/fread/fwrite
 - [ ] string：strlen/strcmp/strcpy/strcat/strchr/memmove
-- [ ] stdlib：malloc/free（基于 sbrk）、atoi/exit
+- [ ] stdlib：malloc/free 重写为 size-class slab（基于 mmap，见 [mem.md](mem.md) Phase 4）、atoi/exit
 - [ ] unistd：read/write/close/open/lseek/fork/exec/waitpid
 - [ ] errno + 错误处理
 - [ ] 验证: 标准 C 程序可编译链接运行
@@ -350,19 +352,12 @@
 
 | # | 问题 | 位置 | 说明 |
 |---|------|------|------|
-| 1 | BFC 分配器无锁保护 | `kernel/mem/alloc.cc` | `alloc_page`/`free_page` 操作全局 `free_list` 无锁，SMP 并发损坏空闲链表，导致 double-allocation 或丢失页面。加一把全局自旋锁即可 |
-| 2 | `sys_waitpid` 写用户指针未校验 | `kernel/trap.cc:389` | `*exit_code_ptr = child->exit_code`，`exit_code_ptr` 来自用户参数未校验，恶意程序可传入内核地址导致任意内核内存写入 |
-| 3 | `sys_spawn` 读用户 ELF 指针未校验 | `kernel/trap.cc:396` | `elf_data` 直接解引用用户指针，无效地址触发内核 #PF halt 全机 |
-| 4 | ELF 加载越界读 | `kernel/kernel.cc:43-48` | 只读首 512 字节就遍历 program header，`e_phoff + e_phnum * e_phentsize > 512` 时访问未初始化数据 |
-| 5 | `pdpt_hh` 越界写入 | `arch/x64/paging.cc:154,169` | `pdpt_hh[510 + n]`，物理内存 > 2GB 时 `n >= 2`，写入 `pdpt_hh[512]` 越界（数组仅 512 项）。`extend_mapping` 循环 `n <= max_1gb_block` 边界错误 |
+| 1 | BFC 分配器无锁保护 | `kernel/mem/alloc.cc` | `alloc_page`/`free_page` 操作全局 `free_list` 无锁，SMP 并发损坏空闲链表。**方案**: [mem.md](mem.md) Phase 1 — 新增全局 `bfc_lock` 自旋锁 |
 
 ### 高（SMP 竞态 / 内存安全）
 
 | # | 问题 | 位置 | 说明 |
 |---|------|------|------|
-| 6 | `sys_notify`/`trap_dispatch` 访问 `procs[]` 无 `procs_lock` | `kernel/trap.cc:253-267, 40-53` | 遍历 `procs[]` 比较 PID 时未持锁，另一 CPU 在 `proc_reap` 清零槽位可读到陈旧数据 |
-| 7 | `sys_waitpid` TOCTOU | `kernel/trap.cc:359-365` | `procs_lock` 下验证父子关系后释放锁，轮询前子进程可能已被回收或 PID 槽位被重用 |
-| 8 | ZOMBIE 临时设 READY 引入竞态 | `kernel/trap.cc:372` | `child->state = READY` 临时标记，另一 CPU 调度器可能将其当作可运行进程 |
 | 9 | 进程创建失败内存泄漏 | `kernel/proc.cc:261-443` | `process_create_elf` 后续 `alloc_page` 失败时，前面已分配的页面未释放 |
 | 10 | disk_driver 共享页无边界检查 | `driver/disk_driver.cc:78-84` | `cnt * 512` 可能超过 `resp->data` 的 8180 字节，缓冲区溢出 |
 | 11 | `scancode_normal` 越界读 | `driver/kbd_driver.cc:76` | `scancode` 值域 0-255，数组仅 128 项（break code 检查后 make code 仍无范围检查） |
@@ -372,7 +367,6 @@
 
 | # | 问题 | 位置 | 说明 |
 |---|------|------|------|
-| 13 | `fb_lock` 保护不完整 | `kernel/fb.cc` | `fb_putc` 持 `fb_lock`，但 `clear()` 用 `IrqGuard`，`prints()` 不持锁，多 CPU 并发写 framebuffer 竞态 | **已修复**：KMS 移至用户态后此问题消除（KMS 单进程渲染，无并发） |
 | 14 | `udelay` 精度损失 | `arch/x64/smp.cc:217` | `ticks_calibrated / 10000 * us` 先除后乘截断，应改为 `ticks_calibrated * us / 10000` |
 | 15 | `total_sectors` 64→32 位截断 | `kernel/kernel.cc:52` | `(uint32_t)((file_end + 511) / 512)`，ELF > 4GB 静默截断 |
 | 16 | 用户栈仅 4KB 无 guard page | `kernel/proc.cc:323-328` | 栈溢出触发 #PF 被 kill 而非友好报错，应至少 2 页 + 1 页 guard page |
@@ -380,12 +374,10 @@
 | 18 | `ALIGN_UP` 宏参数多次求值 | `common/macro.h:4` | 若 `aligned` 参数有副作用会被求值两次 |
 | 19 | ATA `count=0` 意为 256 扇区 | `kernel/ata.cc:24` | 未检查 `count` 为 0 或超缓冲区大小 |
 | 20 | `pick_cpu` 总倾向 CPU 0 | `kernel/proc.cc:248-259` | 所有 CPU run_count 相同时返回 0，负载不均 |
-| 21 | `pid` 未校验上界 | `kernel/trap.cc:360` | `procs[pid]` 未检查 `pid >= MAX_PROC`，可能越界访问 |
+| 21 | `pid` 未校验上界 | `kernel/trap.cc` | `procs[pid]` 未检查 `pid >= MAX_PROC`，可能越界访问 |
 | 22 | `malloc free` 不验证指针合法性 | `user/lib/malloc.cc:243-299` | `free()` 不检查 `ptr` 是否在堆范围内，任意指针损坏空闲链表 |
 | 23 | ELF `e_phnum`/`e_phentsize` 未校验 | `common/elf.cc:63-65` | `e_phnum` 过大或 `e_phentsize` 为 0 可导致异常行为 |
 | 24 | `proc_reap` 未校验 `cr3` 有效性 | `kernel/proc.cc:505-596` | 若 `cr3` 被损坏或已释放，解引用页表为 UAF |
-| 25 | `proc_reap` PTE 物理地址提取未清除 NX 位 | `kernel/proc.cc` | **已修复**：原 `pte & ~0xFFF` 不清除 bit 63（NX），带 PTE_NX 的页提取出错误物理地址，导致 `frames[]` 越界 → #GP。改用 `pte & 0x000FFFFFFFFFF000` |
-| 26 | `sys_notify` 不匹配 `WAIT_CHILD` | `kernel/trap.cc` | **已修复**：`sys_exit` → `sys_notify(parent_pid)` 只匹配 `WAIT_NOTIFY`，但 `sys_waitpid` 设 `WAIT_CHILD`，导致父进程永远不被唤醒。改为同时匹配两者 |
 
 ### 低（构建 / 链接脚本 / 代码质量）
 

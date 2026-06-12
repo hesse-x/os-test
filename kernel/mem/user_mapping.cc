@@ -10,7 +10,7 @@
 uint64_t *ensure_pd(uint64_t *new_pml4, uint64_t vaddr) {
     uint64_t pml4_idx = (vaddr >> 39) & 0x1FF;
     if (new_pml4[pml4_idx] & 0x01) {
-        return (uint64_t *)phys_to_virt(new_pml4[pml4_idx] & ~0xFFF);
+        return (uint64_t *)phys_to_virt(new_pml4[pml4_idx] & 0x000FFFFFFFFFF000ULL);
     }
     // Allocate new PDPT
     Page *pdpt_page = bfc_alloc.alloc_page(1);
@@ -36,7 +36,7 @@ uint64_t *ensure_pt_in_pd(uint64_t *pd_or_pdpt, uint64_t vaddr, int level) {
         idx = (vaddr >> 21) & 0x1FF;
     }
     if (pd_or_pdpt[idx] & 0x01) {
-        return (uint64_t *)phys_to_virt(pd_or_pdpt[idx] & ~0xFFF);
+        return (uint64_t *)phys_to_virt(pd_or_pdpt[idx] & 0x000FFFFFFFFFF000ULL);
     }
     // Allocate next-level table
     Page *table_page = bfc_alloc.alloc_page(1);
@@ -112,7 +112,7 @@ void unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
 
         uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
         if (pt[pt_idx] & PTE_PRESENT) {
-            uint64_t phys = pt[pt_idx] & ~0xFFF;
+            uint64_t phys = pt[pt_idx] & 0x000FFFFFFFFFF000ULL;
             Page *p = &BFCAllocator::frames[PHY_TO_PAGE(phys)];
             bfc_alloc.free_page(p, 1);
             pt[pt_idx] = 0;

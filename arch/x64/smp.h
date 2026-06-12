@@ -5,6 +5,7 @@
 #include "arch/x64/paging.h"
 #include "kernel/spinlock.h"
 #include "kernel/list.h"
+#include "kernel/mem/alloc.h"
 
 #define MAX_CPUS 4
 #define MSR_GS_BASE 0xC0000101
@@ -20,6 +21,7 @@
 #define EFER_NXE (1ULL << 11)
 
 struct proc_t; // forward declaration
+struct Page;
 
 struct cpu_local_t {
     int cpu_id;
@@ -32,6 +34,7 @@ struct cpu_local_t {
     proc_t *idle_proc;     // this CPU's idle process
     spinlock_t scheduler_lock; // per-CPU scheduler lock
     list_node_t run_queue;     // per-CPU ready queue (sentinel node)
+    Page *active_slab[NUM_KMALLOC_CLASSES]; // per-CPU active slab per size class
 };
 
 extern cpu_local_t cpu_locals[MAX_CPUS];

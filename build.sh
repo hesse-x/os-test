@@ -7,40 +7,45 @@ if [[ "$1" == "clear" ]]; then
     exit 0
 fi
 
+# 构建类型：默认 Release，-d 为 Debug（带 -g 调试信息）
+BUILD_TYPE=Release
+EXTRA_CFLAGS=""
+if [[ "$1" == "-d" ]]; then
+    BUILD_TYPE=Debug
+    EXTRA_CFLAGS="-g -fno-omit-frame-pointer"
+fi
+
 # 1. CMake 编译
 mkdir -p build && cd build
-cmake -DCMAKE_TOOLCHAIN_FILE=../build_script/cmake/toolchain-x86_64.cmake ..
+cmake -DCMAKE_TOOLCHAIN_FILE=../build_script/cmake/toolchain-x86_64.cmake \
+      -DCMAKE_BUILD_TYPE=$BUILD_TYPE ..
 make
 cd ..
 
+# 用户态编译公共 flags
+USER_CFLAGS="-m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector $EXTRA_CFLAGS"
+
 # 2. 编译用户态进程
 # disk_driver.elf (IOPL=3, I/O port access)
-g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -c driver/disk_driver.cc -o build/disk_driver.o
+g++ $USER_CFLAGS -I. -c driver/disk_driver.cc -o build/disk_driver.o
 objcopy --remove-section .note.gnu.property build/disk_driver.o
 ld -m elf_x86_64 -Ttext 0x400000 -o build/disk_driver.elf build/disk_driver.o
 
 # kbd_driver.elf (IOPL=3, I/O port access)
-g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -c driver/kbd_driver.cc -o build/kbd_driver.o
+g++ $USER_CFLAGS -I. -c driver/kbd_driver.cc -o build/kbd_driver.o
 objcopy --remove-section .note.gnu.property build/kbd_driver.o
 ld -m elf_x86_64 -Ttext 0x400000 -o build/kbd_driver.elf build/kbd_driver.o
 
 # kms_driver.elf (IOPL=0, framebuffer rendering)
-g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -c driver/kms_driver.cc -o build/kms_driver.o
+g++ $USER_CFLAGS -I. -c driver/kms_driver.cc -o build/kms_driver.o
 objcopy --remove-section .note.gnu.property build/kms_driver.o
 ld -m elf_x86_64 -Ttext 0x400000 -o build/kms_driver.elf build/kms_driver.o
 
 # libc.a (static library: printf + FILE + string + malloc + _start)
-g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -Iuser/include -c user/lib/stdio.cc -o build/stdio.o
-g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -Iuser/include -c user/lib/string.cc -o build/string.o
-g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -Iuser/include -c user/lib/start.cc -o build/start.o
-g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -c user/lib/malloc.cc -o build/malloc.o
+g++ $USER_CFLAGS -I. -Iuser/include -c user/lib/stdio.cc -o build/stdio.o
+g++ $USER_CFLAGS -I. -Iuser/include -c user/lib/string.cc -o build/string.o
+g++ $USER_CFLAGS -I. -Iuser/include -c user/lib/start.cc -o build/start.o
+g++ $USER_CFLAGS -I. -c user/lib/malloc.cc -o build/malloc.o
 objcopy --remove-section .note.gnu.property build/stdio.o
 objcopy --remove-section .note.gnu.property build/string.o
 objcopy --remove-section .note.gnu.property build/start.o
@@ -48,22 +53,24 @@ objcopy --remove-section .note.gnu.property build/malloc.o
 ar rcs build/libc.a build/start.o build/stdio.o build/string.o build/malloc.o
 
 # shell.elf (IOPL=0, linked with libc.a)
-g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -Iuser/include -c shell/shell.cc -o build/shell.o
+g++ $USER_CFLAGS -I. -Iuser/include -c shell/shell.cc -o build/shell.o
 objcopy --remove-section .note.gnu.property build/shell.o
 ld -m elf_x86_64 -Ttext 0x400000 -o build/shell.elf build/shell.o build/libc.a
 
 # fs_driver.elf (IOPL=0)
-g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -c driver/fs_driver.cc -o build/fs_driver.o
+g++ $USER_CFLAGS -I. -c driver/fs_driver.cc -o build/fs_driver.o
 objcopy --remove-section .note.gnu.property build/fs_driver.o
 ld -m elf_x86_64 -Ttext 0x400000 -o build/fs_driver.elf build/fs_driver.o
 
 # hello.elf (IOPL=0, C program linked with libc.a)
-gcc -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector \
-    -I. -Iuser/include -c user/hello.c -o build/hello.o
+gcc $USER_CFLAGS -I. -Iuser/include -c user/hello.c -o build/hello.o
 objcopy --remove-section .note.gnu.property build/hello.o
 ld -m elf_x86_64 -Ttext 0x400000 -o build/hello.elf build/hello.o build/libc.a
+
+# malloctest.elf (IOPL=0, C program linked with libc.a)
+gcc $USER_CFLAGS -I. -Iuser/include -c user/malloctest.c -o build/malloctest.o
+objcopy --remove-section .note.gnu.property build/malloctest.o
+ld -m elf_x86_64 -Ttext 0x400000 -o build/malloctest.elf build/malloctest.o build/libc.a
 
 # 3. 生成 disk.img
 # LBA layout: 0=MBR, 1-100=disk_driver, 101-200=kbd_driver, 201-300=kms_driver, 301-400=shell, 401-500=fs_driver, 501+=FAT32
@@ -99,6 +106,7 @@ echo "Microkernel OS with FAT32 support" > build/README
 mcopy -i build/part2.img build/hello.txt ::
 mcopy -i build/part2.img build/README ::
 mcopy -i build/part2.img build/hello.elf ::
+mcopy -i build/part2.img build/malloctest.elf ::malloc.elf
 
 # Write FAT32 partition back into disk.img
 dd if=build/part2.img of=build/disk.img bs=512 seek=501 conv=notrunc

@@ -3,6 +3,7 @@
 add_library(kernel_mem OBJECT
     alloc.cc
     user_mapping.cc
+    slab.cc
 )
 
 target_include_directories(kernel_mem PRIVATE ${CMAKE_SOURCE_DIR})

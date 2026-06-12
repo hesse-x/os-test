@@ -23,7 +23,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 构建与运行
 
 ```bash
-./build.sh          # CMake 编译内核 + EFI bootloader + 编译 libc.a + 编译 6 个用户 ELF（disk_driver/kbd_driver/kms_driver/shell/fs_driver/hello）+ 生成 disk.img（含 MBR 分区表 + FAT32 + hello.elf）+ mkimg.sh 生成 boot.img
+./build.sh          # CMake 编译内核 + EFI bootloader + 编译 libc.a + 编译用户 ELF + 生成 disk.img
+./build.sh -d       # Debug 模式（加 -g -fno-omit-frame-pointer，异常时打印栈回溯）
 ./build.sh clear    # 清除 build/ 目录
 ./run.sh            # QEMU 启动（OVMF UEFI, 512MB, VGA, -smp 2, 串口输出到 log.txt）
 ```
@@ -71,6 +72,7 @@ arch/x64/
   smp.cc / smp.h     — Per-CPU 数据/GDT/TSS, AP 启动, smp_init_cpu, smp_apply_cpu, smp_boot_aps
   apic.cc / apic.h   — LAPIC/I/O APIC 初始化, MMIO 访问, 定时器校准, pic_disable
   utils.h            — outb/inb/inw, wrmsr/rdmsr, KERNEL_CS, L16/H16, memcpy, serial_early_out, IrqGuard, 底层 syscall 内联汇编（__syscall0 等）
+  memlayout.h        — 内存布局常量（PAGE_SIZE/PAGE_SHIFT/PAGE_SIZE_2M/PHY_TO_PAGE/GET_PAGE_NUM），内核/用户态共享
 
 kernel/
   CMakeLists.txt
@@ -84,7 +86,8 @@ kernel/
   spinlock.h         — spinlock_t, spin_lock/unlock, spin_lock_irqsave/unlock_irqrestore
   mem/
     CMakeLists.txt
-    alloc.cc / alloc.h — init_mem, Bump/BFC 分配器, Page 描述符, page_to_phys/phys_to_virt, 用户页映射函数声明
+    alloc.cc / alloc.h — init_mem, Bump/BFC 分配器, Page 描述符(union: bfc/slab), bfc_lock, page_to_phys/phys_to_virt, 用户页映射函数声明
+    slab.cc / slab.h   — 内核 slab 分配器(kmalloc/kfree/kcalloc/krealloc), kmem_cache_t, per-CPU active slab
     user_mapping.cc    — ensure_pd, ensure_pt_in_pd, map_user_page_direct, map_user_pages, unmap_user_pages
 
 driver/
@@ -106,11 +109,12 @@ user/
     stdio.cc        — FILE 实现 + stdout/stderr + kms_write_flush（写 KMS_REQ + sys_notify）+ vfprintf 格式化引擎
     string.cc       — 字符串和内存操作函数实现
     start.cc        — libc _start 入口点（fflush(stdout) → main → fflush(stdout) → sys_exit）
-    malloc.cc        — 用户态 malloc/free/calloc/realloc 实现（显式空闲链表 + 边界标记，基于 sys_sbrk）
+    malloc.cc        — 用户态 malloc/free/calloc/realloc 实现（size-class slab + sys_mmap，替代旧显式空闲链表 + sys_sbrk 方案）
+  malloctest.c     — malloc/free 测试程序（小分配/大分配/calloc/realloc，链接 libc.a）
 
 common/
   common.h            — kernel_end 声明
-  macro.h             — ALIGN_UP 宏
+  macro.h             — ALIGN_UP/ALIGN_DOWN 通用对齐宏
   errno.h             — 错误码定义（EOK/EPERM/ENOENT/ENOMEM/EINVAL/ENOSYS/ECHILD）
   efi.h               — EFI 类型定义（memory_descriptor, system_table, GOP, GUID 等）
   elf.cc / elf.h     — ELF64 静态二进制加载器
@@ -129,7 +133,7 @@ UEFI 固件 → BOOTX64.EFI (boot/stub.c) → 加载 myos.elf 到 0x100000 → E
 2. `efi_main`（stub.c）：打开 `myos.elf`，加载 ELF64 段到物理 0x100000，读取 GOP/RSDP，解析 ACPI MADT（LAPIC/IOAPIC 基地址、CPU APIC ID），填充 `boot_info`，调用 `ExitBootServices`，跳转到 `_start`
 3. `_start`（start.S）：设置物理栈 → 保存 `boot_info*`（r12）→ 调用 `enable_paging`（构建 4 级页表 + 加载 CR3）→ 调用 `gdt_init`（8项 GDT + TSS + ltr）→ `lretq` 跳转到 `_entry64`
 4. `_entry64`：切换到虚拟地址栈 → 复制 `boot_info` 到 `g_boot_info` → 调用 `kernel_main`
-5. `kernel_main`：`init_mem` → `isr_init`（内含第二次 `gdt_init`，BSP 的 `smp_init_cpu` + `smp_apply_cpu`，`enable_nx`，`idt_install` + `setup_syscall`，`apic_init`）→ `kernel_init_finish`（禁用 bump）→ `proc_init` → `shm_init` → `clear` → `smp_boot_aps`（启动所有 AP）→ 从磁盘加载 disk_driver.elf（LBA 1, IOPL=3）→ kbd_driver.elf（LBA 101, IOPL=3）→ kms_driver.elf（LBA 201, IOPL=0, map_fb=true）→ shell.elf（LBA 301, IOPL=0）→ fs_driver.elf（LBA 401, IOPL=0）→ 栈切换进入 idle_entry → idle 循环（schedule + hlt）
+5. `kernel_main`：`init_mem` → `isr_init`（内含第二次 `gdt_init`，BSP 的 `smp_init_cpu` + `smp_apply_cpu`，`enable_nx`，`idt_install` + `setup_syscall`，`apic_init`）→ `kernel_init_finish`（禁用 bump）→ `slab_init`（初始化 9 个 kmem_cache_t）→ `proc_init` → `shm_init` → `clear` → `smp_boot_aps`（启动所有 AP）→ 从磁盘加载 disk_driver.elf（LBA 1, IOPL=3）→ kbd_driver.elf（LBA 101, IOPL=3）→ kms_driver.elf（LBA 201, IOPL=0, map_fb=true）→ shell.elf（LBA 301, IOPL=0）→ fs_driver.elf（LBA 401, IOPL=0）→ 栈切换进入 idle_entry → idle 循环（schedule + hlt）
 
 注意：GDT 被初始化两次 — 一次在 start.S 物理地址阶段，一次在 `isr_init` 中虚拟地址阶段。
 
@@ -270,7 +274,7 @@ irq_owner[]：
 - **地址空间**：代码从 0x400000 起，堆从 0x600000 起（brk 初始=0x600000，sbrk 按页扩展/缩小），用户栈页面映射在 0x00007FFFFFFFD000，RSP 初始值 0x00007FFFFFFFE000（页面顶端），每进程独立 PML4（共享 PML4[511] 内核映射）
 - **共享页**：每进程映射 10 个共享页（KBD_SHM=0x500000, DISK_REQ=0x501000, DISK_REQ2=0x502000, DISK_RESP=0x503000, DISK_RESP2=0x504000, FS_REQ=0x505000, FS_RESP=0x506000, FS_RESP2=0x507000, KMS_INFO=0x508000, KMS_REQ=0x509000），所有进程共享同一物理页，用于驱动间 IPC。disk_resp、disk_req、fs_resp 扩展为 2 页以容纳大块数据。`shm_init()` 在 `kernel_main` 中分配，`map_shared_pages()` 在 `process_create_elf` 中映射
 - **IPC 拓扑（三层）**：Shell(PID5) ←→ fs_driver(PID6) ←→ disk_driver(PID2)。Shell 通过 FS_REQ/FS_RESP 与 fs_driver 通信；fs_driver 通过 DISK_REQ/DISK_RESP 与 disk_driver 通信。kbd_driver(PID3) 通过 KBD_SHM 直接与 shell 通信。Shell 通过 KMS_REQ + sys_notify 与 kms_driver(PID4) 通信
-- **系统调用**：11个（putc/getpid/yield/getc[deprecated]/wait/notify/irq_bind/sbrk/exit/waitpid/spawn），通过 `syscall` 指令触发（EFER.SCE），rax=syscall#，参数通过 rdi/rsi/rdx/r10/r8 传递。错误返回统一为负 errno（-EPERM/-EINVAL/-ENOMEM/-ENOSYS/-ECHILD，定义在 common/errno.h）
+- **系统调用**：13个（putc/getpid/yield/getc[deprecated]/wait/notify/irq_bind/sbrk/exit/waitpid/spawn/mmap/munmap），通过 `syscall` 指令触发（EFER.SCE），rax=syscall#，参数通过 rdi/rsi/rdx/r10/r8 传递。错误返回统一为负 errno（-EPERM/-EINVAL/-ENOMEM/-ENOSYS/-ECHILD，定义在 common/errno.h）
 - **进程生命周期**：`sys_exit(exit_code)` 将当前进程设为 ZOMBIE（有父进程时 notify 父进程）或直接回收（`parent_pid==-1` 时调用 `proc_reap`）；`sys_waitpid(pid, exit_code_ptr)` 阻塞等待子进程 ZOMBIE 后回收资源，返回子 PID 和退出码；`sys_spawn(elf_data, elf_size, iopl)` 从用户态 ELF 缓冲区创建子进程，IOPL 权限检查，设 `parent_pid`。sys_exit 通过 sys_notify 唤醒父进程（sys_notify 同时匹配 WAIT_NOTIFY 和 WAIT_CHILD）
 - **proc_reap**：回收进程全部资源——遍历 PML4[0-255] 释放用户页映射 + 页表页（PDPT/PD/PT）+ PML4 页 + 内核栈（2 页）+ PCB 槽位清零。共享页物理帧（KBD_SHM/DISK_REQ/FS_REQ/KMS_INFO/KMS_REQ 等）不回收，因为它们是全局资源。PTE 叶页物理地址提取使用 `pte & 0x000FFFFFFFFFF000`（清除 bit 63 NX 位），而非 `pte & ~0xFFF`（后者不清除 NX 位导致越界）
 - **用户态异常**：CPU 异常在 `trap_dispatch` 中判断 `tf->cs==0x2B`（用户态）时调用 `sys_exit(-1)` 替代 `halt()`，防止用户进程 crash 拖垮全机。内核态异常仍 halt
@@ -281,16 +285,17 @@ irq_owner[]：
 - **Shell 构建**：`g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -I. -Iuser/include -c shell/shell.cc` + 链接 libc.a + `ld -m elf_x86_64 -Ttext 0x400000`。注意 `-fno-pie`（固定地址链接）和 `-I.`（允许 include `common/syscall.h` 和 `common/shm.h` 中的封装）
 - **hello 构建**：`gcc -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -I. -Iuser/include -c user/hello.c` + `ld -m elf_x86_64 -Ttext 0x400000 -o build/hello.elf build/hello.o build/libc.a`。注意用 gcc（不是 g++）编译 C 程序，链接 libc.a（含 _start/printf/string/malloc）。hello.elf 通过 `mcopy -i build/part2.img build/hello.elf ::` 写入 FAT32
 - **hello 程序**：`user/hello.c` 编译为 ELF64 静态可执行文件，使用 libc.a 提供的 `_start`（调用 main → sys_exit）和 `printf`（"Hello, World!\n"）。通过 build.sh mcopy 写入 FAT32 分区。shell 的 `run` 命令可从 FAT32 加载并 spawn 执行
-- **用户态堆**：`sys_sbrk` 系统调用（#7）管理进程堆空间，支持扩展和缩小（按页映射/解映射）。`proc_t::brk` 记录堆顶地址（初始 0x600000）。`map_user_pages`/`unmap_user_pages` 提供批量页映射/解映射能力
-- **用户态 malloc/free**：`user/lib/malloc.cc` 实现显式空闲链表 + 边界标记算法，16 字节对齐，最小块 32 字节。sbrk 增量从 4KB 起步翻倍至上限 64KB。支持 malloc/free/calloc/realloc，头文件 `user/include/stdlib.h`。线程安全占位宏 MALLOC_LOCK/MALLOC_UNLOCK。打包进 libc.a（`ar rcs libc.a start.o stdio.o string.o malloc.o`）
+- **用户态堆**：`sys_sbrk` 系统调用（#7）管理进程 brk 堆空间（0x600000 起），保留但用户态 malloc 不再使用。`sys_mmap`（#11）/`sys_munmap`（#12）管理 mmap 区域（0x800000 起），是用户态 malloc 的底层支撑。`proc_t::mmap_brk` 记录 mmap 高水位，`proc_t::mmap_regions` 链表记录已映射区域
+- **用户态 malloc/free**：`user/lib/malloc.cc` 实现 size-class slab 方案。小分配（≤2048B）走 per-class freelist + user_slab_header，大分配（>2048B）走 sys_mmap + big_alloc_header。底层统一用 sys_mmap，不再调用 sys_sbrk。头文件 `user/include/stdlib.h`。打包进 libc.a（`ar rcs libc.a start.o stdio.o string.o malloc.o`）
 - **用户态 libc.a**：静态库包含 `_start.o`（入口点，调用 main → sys_exit）、`stdio.o`（FILE + printf/fprintf/vfprintf + stdout/stderr + kms_write_flush）、`string.o`（strlen/strcmp/memcpy/memset/memmove 等）、`malloc.o`。FILE 结构体含 fd/buffer/mode/flags/write_fn，stdout/stderr 均为无缓冲（_IONBF），write_fn 为 kms_write_flush（写 KMS_REQ 共享页 + sys_notify KMS_DRIVER_PID）。设计文档 `doc/design/libc.md`
 
 ## 内存管理架构
 
-两阶段分配器，均在 `init_mem`（`kernel/mem/alloc.cc`）中初始化：
+两阶段分配器 + slab 分配器，均在 `init_mem`/`slab_init` 中初始化：
 
 1. **Bump 分配器**：极简线性分配，`kernel_end` 起始，仅向前增长。定义在 `arch/x64/paging.cc`。用于 `init_mem` 阶段分配 frames 数组和页表。返回虚拟地址。`kernel_init_finish` 后禁用。
-2. **BFC 分配器**：Best-Fit Contiguous，基于 frames 数组 + 有序 free_list，支持分配/释放/合并。`init_mem` 完成后可用于通用分配（进程创建等）。
+2. **BFC 分配器**：Best-Fit Contiguous，基于 frames 数组 + 有序 free_list，支持分配/释放/合并。`init_mem` 完成后可用于通用分配。`bfc_lock`（`spinlock_t`）保护 SMP 并发安全。
+3. **Slab 分配器**：简化 SLUB，per-CPU active slab 无锁 fast path + per-cache partial list 持锁 slow path。9 个 size class（8-2048B），大分配（>2048B）回退 BFC。`kernel/mem/slab.h` + `slab.cc`。
 
 初始化顺序：EFI mmap解析 → Bump初始化 → 分配frames数组 → 标记FREE/USED/RESERVED → extend_mapping(arch层) → flush_tlb → 标记内核占用页 → 建立free_list → init_fb。
 
@@ -335,9 +340,28 @@ irq_owner[]：
 
 ## 5. debug
 
-优先考虑串口打印定位，qemu初始化时间较长约5s加上引导时间，建议等等时间10s以上。串口输出在 `log.txt`。
+### 串口打印
 
-GDB 远程调试：取消 `run.sh` 底部注释行的注释（添加 `-s -S` 参数），QEMU 会等待 GDB 连接后再执行。连接命令：
+优先考虑串口打印定位，qemu初始化时间较长约5s加上引导时间，建议等待10s以上。串口输出在 `log.txt`。
+
+### Debug 模式（栈回溯）
+
+`./build.sh -d` 启用 Debug 模式，编译时添加 `-g -fno-omit-frame-pointer`。当 CPU 异常发生时，`trap_dispatch` 会打印完整寄存器 + RBP 链栈回溯（最多 16 帧），输出到串口。典型流程：
+
+```bash
+./build.sh -d          # 带 -g -fno-omit-frame-pointer 编译
+./run.sh               # 启动 QEMU
+# 触发异常后查看串口输出
+cat log.txt            # 找到 BACKTRACE 段，每帧格式: #N <return_addr>
+# 用 addr2line 将虚拟地址解析为源码位置
+addr2line -e build/myos.elf -f -C 0xFFFFFFFF8010XXXX
+```
+
+注意：仅内核态异常的栈回溯可解析（内核 ELF 含 debug info）；用户态异常的回溯地址在用户地址空间，需用对应用户 ELF 解析。
+
+### GDB 远程调试
+
+取消 `run.sh` 底部注释行的注释（添加 `-s -S` 参数），QEMU 会等待 GDB 连接后再执行。连接命令：
 ```
 gdb -ex "target remote localhost:1234"
 ```
