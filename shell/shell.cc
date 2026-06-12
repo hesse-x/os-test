@@ -6,21 +6,7 @@
 #include "common/pid.h"
 #include "arch/x64/utils.h"
 
-// ===================== Shared memory + KMS output =====================
-
-static volatile kbd_ring *kbd;
-static volatile kms_ring *kms;
-static volatile driver_shm_header *shm_hdr;
-
-static void kms_flush() {
-    if (kms->head != kms->tail) {
-        if (shm_hdr->kms_sleeping) {
-            sys_notify(KMS_DRIVER_PID);
-        }
-    }
-}
-
-// ===================== Keyboard input + FS IPC =====================
+// ===================== FS IPC =====================
 
 static volatile fs_req_shm    *freq  = (volatile fs_req_shm    *)FS_REQ_ADDR;
 static volatile fs_resp_shm   *fresp = (volatile fs_resp_shm   *)FS_RESP_ADDR;
@@ -29,21 +15,10 @@ static volatile fs_resp_shm   *fresp = (volatile fs_resp_shm   *)FS_RESP_ADDR;
 static char cwd[256] = "/";
 
 static char getc() {
-    while (kbd->head == kbd->tail) {
-        shm_hdr->consumer_sleeping = 1;
-        // Double-check ring after setting sleeping flag (prevent lost-wakeup:
-        // kbd_driver may have written between ring-empty check and setting flag)
-        if (kbd->head != kbd->tail) {
-            shm_hdr->consumer_sleeping = 0;
-            break;
-        }
-        kms_flush();
-        sys_wait(0);
-        shm_hdr->consumer_sleeping = 0;
+    char ch;
+    while (sys_read(0, &ch, 1) != 1) {
+        // Block until data available
     }
-    uint32_t idx = kbd->tail;
-    char ch = (char)kbd->msgs[idx].ch;
-    kbd->tail = (idx + 1) % 8;
     return ch;
 }
 
@@ -95,7 +70,7 @@ static uint64_t parse_hex64(const char *s) {
 
 static int fs_request() {
     freq->client_pid = sys_getpid();
-    kms_flush();
+    fflush(stdout);
     sys_notify(FS_DRIVER_PID);
     sys_wait(0);
     return (int)fresp->status;
@@ -430,18 +405,7 @@ static const cmd_entry cmds[] = {
 // ===================== Main =====================
 
 extern "C" void _start() {
-    // Attach to KBD driver's shared memory page (retry until available)
-    uint64_t shm_addr = 0;
-    while ((shm_addr = (uint64_t)sys_shm_attach(KBD_DRIVER_PID)) == 0) {
-        sys_wait(1);
-    }
-
-    shm_hdr = (volatile driver_shm_header *)shm_addr;
-    kbd = (volatile kbd_ring *)(shm_addr + KBD_RING_OFFSET);
-    kms = (volatile kms_ring *)(shm_addr + KMS_RING_OFFSET);
-
-    // Initialize libc's KMS output with the same shared page
-    kms_shm_init(shm_addr);
+    // fd 0 and fd 1 are already set up by the kernel (pipe to terminal)
 
     char line[80];
 

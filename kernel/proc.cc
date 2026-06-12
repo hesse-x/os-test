@@ -4,6 +4,7 @@
 #include "kernel/proc.h"
 #include "kernel/serial.h"
 #include "kernel/trap.h"
+#include "kernel/trap.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/mem/slab.h"
 #include "common/elf.h"
@@ -92,6 +93,11 @@ void proc_init() {
             procs[i].shm_regions[j].phys = 0;
             procs[i].shm_regions[j].npages = 0;
             procs[i].shm_regions[j].ref_count = 0;
+        }
+        for (int j = 0; j < MAX_FD; j++) {
+            procs[i].fd_table[j].type = FD_NONE;
+            procs[i].fd_table[j].flags = 0;
+            procs[i].fd_table[j].pipe = nullptr;
         }
         list_init(&procs[i].run_node);
         list_init(&procs[i].wait_node);
@@ -260,6 +266,11 @@ proc_t *create_idle_process(int cpu_id) {
     proc->brk = 0;
     proc->mmap_brk = 0x800000;
     proc->mmap_regions = nullptr;
+    for (int j = 0; j < MAX_FD; j++) {
+        proc->fd_table[j].type = FD_NONE;
+        proc->fd_table[j].flags = 0;
+        proc->fd_table[j].pipe = nullptr;
+    }
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
     spin_unlock(&procs_lock);
@@ -384,6 +395,11 @@ proc_t *process_create(uint64_t entry) {
     proc->brk = 0x600000;
     proc->mmap_brk = 0x800000;
     proc->mmap_regions = nullptr;
+    for (int j = 0; j < MAX_FD; j++) {
+        proc->fd_table[j].type = FD_NONE;
+        proc->fd_table[j].flags = 0;
+        proc->fd_table[j].pipe = nullptr;
+    }
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
     spin_unlock(&procs_lock);
@@ -486,6 +502,11 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
     proc->brk = 0x600000;
     proc->mmap_brk = 0x800000;
     proc->mmap_regions = nullptr;
+    for (int j = 0; j < MAX_FD; j++) {
+        proc->fd_table[j].type = FD_NONE;
+        proc->fd_table[j].flags = 0;
+        proc->fd_table[j].pipe = nullptr;
+    }
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
     spin_unlock(&procs_lock);
@@ -681,6 +702,30 @@ void proc_reap(proc_t *proc) {
                 bfc_alloc.free_page(page, snp);
             }
             proc->shm_regions[s].ref_count = 0;
+        }
+    }
+
+    // 5b. Close all open fds
+    for (int fd = 0; fd < MAX_FD; fd++) {
+        if (proc->fd_table[fd].type != FD_NONE) {
+            struct pipe *p = proc->fd_table[fd].pipe;
+            if (p) {
+                p->ref_count--;
+                // Notify blocked peer
+                if (proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)) {
+                    if (p->read_pid >= 0) wake_process(p->read_pid);
+                }
+                if (proc->fd_table[fd].flags & (O_RDONLY | O_RDWR)) {
+                    if (p->write_pid >= 0) wake_process(p->write_pid);
+                }
+                if (p->ref_count == 0) {
+                    kfree(p->buf);
+                    kfree(p);
+                }
+            }
+            proc->fd_table[fd].type = FD_NONE;
+            proc->fd_table[fd].flags = 0;
+            proc->fd_table[fd].pipe = nullptr;
         }
     }
 

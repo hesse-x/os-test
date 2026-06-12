@@ -17,6 +17,7 @@ typedef struct _FILE {
     int buf_mode;        /* _IONBF / _IOLBF / _IOFBF */
     int flags;           /* _F_WRITE / _F_READ / _F_EOF / _F_ERR */
     void (*write_fn)(struct _FILE *, const char *, int len); /* output function */
+    int (*read_fn)(struct _FILE *, char *, int len);        /* input function */
 } FILE;
 
 /* Constants */
@@ -31,6 +32,7 @@ typedef struct _FILE {
 #define _F_ERR     8
 
 /* Standard streams */
+extern FILE *stdin;
 extern FILE *stdout;
 extern FILE *stderr;
 
@@ -43,6 +45,8 @@ int fputc(int c, FILE *f);
 int fputs(const char *s, FILE *f);
 int puts(const char *s);
 int fflush(FILE *f);
+int fgetc(FILE *f);
+int getchar(void);
 
 /* KMS shared memory initialization (call from shell _start) */
 void kms_shm_init(uint64_t shm_addr);

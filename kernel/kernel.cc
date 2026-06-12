@@ -114,40 +114,116 @@ void kernel_main(boot_info *bi) {
   }
 
   // Load user processes from disk
-  // LBA layout: 1=disk_driver(100s), 101=kbd_driver(100s), 201=kms_driver(100s), 301=shell(100s), 401=fs_driver(100s)
+  // LBA layout: 1=disk_driver(100s), 101=kbd_driver(100s), 201=kms_driver(100s),
+  //   301=terminal(100s), 401=shell(100s), 501=fs_driver(100s)
+
+  proc_t *disk_proc = nullptr;
+  proc_t *kbd_proc = nullptr;
+  proc_t *kms_proc = nullptr;
+  proc_t *terminal_proc = nullptr;
+  proc_t *shell_proc = nullptr;
+
   {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(1, &sz, &pg, &np);
-    if (elf) { process_create_elf(elf, sz, 3); bfc_alloc.free_page(pg, np); }
+    if (elf) { disk_proc = process_create_elf(elf, sz, 3); bfc_alloc.free_page(pg, np); }
     else serial_puts("kernel_main: disk_driver.elf not found\n");
   }
 
   {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(101, &sz, &pg, &np);
-    if (elf) { process_create_elf(elf, sz, 3); bfc_alloc.free_page(pg, np); }
+    if (elf) { kbd_proc = process_create_elf(elf, sz, 3); bfc_alloc.free_page(pg, np); }
     else serial_puts("kernel_main: kbd_driver.elf not found\n");
   }
 
   {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(201, &sz, &pg, &np);
-    if (elf) { process_create_elf(elf, sz, 0, true); bfc_alloc.free_page(pg, np); }
+    if (elf) { kms_proc = process_create_elf(elf, sz, 0, true); bfc_alloc.free_page(pg, np); }
     else serial_puts("kernel_main: kms_driver.elf not found\n");
   }
 
   {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(301, &sz, &pg, &np);
-    if (elf) { process_create_elf(elf, sz, 0); bfc_alloc.free_page(pg, np); }
-    else serial_puts("kernel_main: shell.elf not found\n");
+    if (elf) { terminal_proc = process_create_elf(elf, sz, 0); bfc_alloc.free_page(pg, np); }
+    else serial_puts("kernel_main: terminal.elf not found\n");
   }
 
   {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(401, &sz, &pg, &np);
+    if (elf) { shell_proc = process_create_elf(elf, sz, 0); bfc_alloc.free_page(pg, np); }
+    else serial_puts("kernel_main: shell.elf not found\n");
+  }
+
+  {
+    uint64_t sz; Page *pg; size_t np;
+    uint8_t *elf = load_elf_from_disk(501, &sz, &pg, &np);
     if (elf) { process_create_elf(elf, sz, 0); bfc_alloc.free_page(pg, np); }
     else serial_puts("kernel_main: fs_driver.elf not found\n");
+  }
+
+  // Create pipes between terminal and shell:
+  //   pipe_stdin:  terminal fd_table[1](W) → shell fd_table[0](R)
+  //   pipe_stdout: shell fd_table[1](W) → terminal fd_table[0](R)
+  if (terminal_proc && shell_proc) {
+    // Create stdin pipe
+    {
+      uint8_t *buf = (uint8_t *)kmalloc(PIPE_BUF_SIZE);
+      struct pipe *p = (struct pipe *)kmalloc(sizeof(struct pipe));
+      if (buf && p) {
+        for (int i = 0; i < PIPE_BUF_SIZE; i++) buf[i] = 0;
+        p->buf = buf;
+        p->head = 0;
+        p->tail = 0;
+        p->read_pid = -1;
+        p->write_pid = -1;
+        p->ref_count = 2;
+
+        // terminal fd 1 = write end (sends keystrokes to shell stdin)
+        terminal_proc->fd_table[1].type = FD_PIPE;
+        terminal_proc->fd_table[1].flags = O_WRONLY;
+        terminal_proc->fd_table[1].pipe = p;
+
+        // shell fd 0 = read end (reads stdin)
+        shell_proc->fd_table[0].type = FD_PIPE;
+        shell_proc->fd_table[0].flags = O_RDONLY;
+        shell_proc->fd_table[0].pipe = p;
+      } else {
+        serial_puts("kernel_main: stdin pipe alloc failed\n");
+      }
+    }
+
+    // Create stdout pipe
+    {
+      uint8_t *buf = (uint8_t *)kmalloc(PIPE_BUF_SIZE);
+      struct pipe *p = (struct pipe *)kmalloc(sizeof(struct pipe));
+      if (buf && p) {
+        for (int i = 0; i < PIPE_BUF_SIZE; i++) buf[i] = 0;
+        p->buf = buf;
+        p->head = 0;
+        p->tail = 0;
+        p->read_pid = -1;
+        p->write_pid = -1;
+        p->ref_count = 2;
+
+        // shell fd 1 = write end (sends output to terminal)
+        shell_proc->fd_table[1].type = FD_PIPE;
+        shell_proc->fd_table[1].flags = O_WRONLY;
+        shell_proc->fd_table[1].pipe = p;
+
+        // terminal fd 0 = read end (reads shell output, non-blocking)
+        terminal_proc->fd_table[0].type = FD_PIPE;
+        terminal_proc->fd_table[0].flags = O_RDONLY | O_NONBLOCK;
+        terminal_proc->fd_table[0].pipe = p;
+      } else {
+        serial_puts("kernel_main: stdout pipe alloc failed\n");
+      }
+    }
+
+    serial_puts("kernel_main: terminal<->shell pipes created\n");
   }
 
   // BKL removed — fine-grained locks protect each subsystem

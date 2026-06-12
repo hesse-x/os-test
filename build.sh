@@ -41,6 +41,11 @@ g++ $USER_CFLAGS -I. -c driver/kms_driver.cc -o build/kms_driver.o
 objcopy --remove-section .note.gnu.property build/kms_driver.o
 ld -m elf_x86_64 -Ttext 0x400000 -o build/kms_driver.elf build/kms_driver.o
 
+# terminal.elf (IOPL=0, VT100 terminal process)
+g++ $USER_CFLAGS -I. -c driver/terminal.cc -o build/terminal.o
+objcopy --remove-section .note.gnu.property build/terminal.o
+ld -m elf_x86_64 -Ttext 0x400000 -o build/terminal.elf build/terminal.o
+
 # libc.a (static library: printf + FILE + string + malloc + _start)
 g++ $USER_CFLAGS -I. -Iuser/include -c user/lib/stdio.cc -o build/stdio.o
 g++ $USER_CFLAGS -I. -Iuser/include -c user/lib/string.cc -o build/string.o
@@ -73,29 +78,30 @@ objcopy --remove-section .note.gnu.property build/malloctest.o
 ld -m elf_x86_64 -Ttext 0x400000 -o build/malloctest.elf build/malloctest.o build/libc.a
 
 # 3. 生成 disk.img
-# LBA layout: 0=MBR, 1-100=disk_driver, 101-200=kbd_driver, 201-300=kms_driver, 301-400=shell, 401-500=fs_driver, 501+=FAT32
+# LBA layout: 0=MBR, 1-100=disk_driver, 101-200=kbd_driver, 201-300=kms_driver, 301-400=terminal, 401-500=shell, 501-600=fs_driver, 601+=FAT32
 dd if=/dev/zero of=build/disk.img bs=512 count=4096
 
 # Write ELFs to raw area (100 sectors = 50KB per slot)
 dd if=build/disk_driver.elf of=build/disk.img bs=512 seek=1 conv=notrunc
 dd if=build/kbd_driver.elf of=build/disk.img bs=512 seek=101 conv=notrunc
 dd if=build/kms_driver.elf of=build/disk.img bs=512 seek=201 conv=notrunc
-dd if=build/shell.elf of=build/disk.img bs=512 seek=301 conv=notrunc
-dd if=build/fs_driver.elf of=build/disk.img bs=512 seek=401 conv=notrunc
+dd if=build/terminal.elf of=build/disk.img bs=512 seek=301 conv=notrunc
+dd if=build/shell.elf of=build/disk.img bs=512 seek=401 conv=notrunc
+dd if=build/fs_driver.elf of=build/disk.img bs=512 seek=501 conv=notrunc
 
 # Create MBR partition table
-# Partition 1: LBA 1-500, type 0xDA (non-FS data, for raw ELF storage)
-# Partition 2: LBA 501-4095, type 0x0C (FAT32 LBA)
+# Partition 1: LBA 1-600, type 0xDA (non-FS data, for raw ELF storage)
+# Partition 2: LBA 601-4095, type 0x0C (FAT32 LBA)
 sfdisk build/disk.img <<EOF
 label: dos
 unit: sectors
 
-build/disk.img1 : start=1, size=500, type=da
-build/disk.img2 : start=501, size=3595, type=0c
+build/disk.img1 : start=1, size=600, type=da
+build/disk.img2 : start=601, size=3495, type=0c
 EOF
 
 # Extract FAT32 partition area, format it, add test files, write back
-dd if=build/disk.img of=build/part2.img bs=512 skip=501 count=3595
+dd if=build/disk.img of=build/part2.img bs=512 skip=601 count=3495
 mkfs.fat -F 32 -s 8 build/part2.img
 
 # Create test files
@@ -109,7 +115,7 @@ mcopy -i build/part2.img build/hello.elf ::
 mcopy -i build/part2.img build/malloctest.elf ::malloc.elf
 
 # Write FAT32 partition back into disk.img
-dd if=build/part2.img of=build/disk.img bs=512 seek=501 conv=notrunc
+dd if=build/part2.img of=build/disk.img bs=512 seek=601 conv=notrunc
 
 # Clean up temp files
 rm -f build/part2.img build/hello.txt build/README

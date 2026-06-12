@@ -223,7 +223,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 17
+#define NR_SYSCALL 21
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     nullptr,            // 0: sys_putc removed (returns -ENOSYS)
     sys_getpid,         // 1: 获取 PID
@@ -242,6 +242,10 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_fb_info,        // 14: 获取 framebuffer 信息
     sys_shm_create,     // 15: 创建共享内存
     sys_shm_attach,     // 16: 附加共享内存
+    sys_pipe,           // 17: 创建 pipe
+    sys_write,          // 18: 写 fd
+    sys_read,           // 19: 读 fd
+    sys_close,          // 20: 关闭 fd
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -491,6 +495,17 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
     if (!child) return (uint64_t)ENOMEM;
 
     child->parent_pid = current_proc->pid;
+
+    // Inherit fd 0 and fd 1 from parent
+    for (int fd = 0; fd <= 1; fd++) {
+        if (current_proc->fd_table[fd].type != FD_NONE) {
+            child->fd_table[fd] = current_proc->fd_table[fd];
+            if (child->fd_table[fd].type == FD_PIPE) {
+                child->fd_table[fd].pipe->ref_count++;
+            }
+        }
+    }
+
     return (uint64_t)child->pid;
 }
 
@@ -767,4 +782,207 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     proc->shm_regions[slot].ref_count = 1;
 
     return vaddr;
+}
+
+// ===================== Pipe / fd syscalls =====================
+
+// Wake a process that is BLOCKED on WAIT_NOTIFY
+void wake_process(int32_t pid) {
+    if (pid < 0 || pid >= MAX_PROC) return;
+    proc_t *target = &procs[pid];
+    int target_cpu = target->assigned_cpu;
+    spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+    if (target->pid == pid &&
+        target->state == BLOCKED &&
+        target->wait_event == WAIT_NOTIFY) {
+        if (target->wait_deadline != 0) {
+            timer_queue_remove(target);
+            target->wait_deadline = 0;
+        }
+        target->state = READY;
+        target->wait_event = WAIT_NONE;
+        target->wait_timed_out = 0;
+        list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
+        cpu_locals[target_cpu].run_count++;
+    }
+    spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+}
+
+// sys_pipe(fd_ptr) — syscall 17 (创建 pipe，写 [read_fd, write_fd] 到用户指针)
+uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    int *fd_ptr = (int *)arg1;
+
+    // Validate user pointer
+    uint64_t ptr = (uint64_t)fd_ptr;
+    if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || ptr + 2 * sizeof(int) > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    proc_t *proc = current_proc;
+
+    // Find two free fd slots
+    int read_fd = -1, write_fd = -1;
+    for (int i = 0; i < MAX_FD; i++) {
+        if (proc->fd_table[i].type == FD_NONE) {
+            if (read_fd < 0) read_fd = i;
+            else if (write_fd < 0) { write_fd = i; break; }
+        }
+    }
+    if (read_fd < 0 || write_fd < 0) return (uint64_t)ENOMEM;
+
+    // Allocate pipe buffer (1 page)
+    uint8_t *buf = (uint8_t *)kmalloc(PIPE_BUF_SIZE);
+    if (!buf) return (uint64_t)ENOMEM;
+
+    // Allocate pipe struct
+    struct pipe *p = (struct pipe *)kmalloc(sizeof(struct pipe));
+    if (!p) { kfree(buf); return (uint64_t)ENOMEM; }
+
+    // Zero the buffer
+    for (int i = 0; i < PIPE_BUF_SIZE; i++) buf[i] = 0;
+
+    p->buf = buf;
+    p->head = 0;
+    p->tail = 0;
+    p->read_pid = -1;
+    p->write_pid = -1;
+    p->ref_count = 2;  // read end + write end
+
+    // Fill fd table entries
+    proc->fd_table[read_fd].type = FD_PIPE;
+    proc->fd_table[read_fd].flags = O_RDONLY;
+    proc->fd_table[read_fd].pipe = p;
+
+    proc->fd_table[write_fd].type = FD_PIPE;
+    proc->fd_table[write_fd].flags = O_WRONLY;
+    proc->fd_table[write_fd].pipe = p;
+
+    // Write fd pair to user space
+    fd_ptr[0] = read_fd;
+    fd_ptr[1] = write_fd;
+
+    return 0;
+}
+
+// sys_write(fd, buf, len) — syscall 18 (向 fd 写入数据)
+uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+    int fd = (int)arg1;
+    const char *buf = (const char *)arg2;
+    size_t len = (size_t)arg3;
+
+    if (fd < 0 || fd >= MAX_FD) return (uint64_t)EINVAL;
+    if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)EINVAL;
+    if (!(current_proc->fd_table[fd].flags & (O_WRONLY | O_RDWR))) return (uint64_t)EINVAL;
+
+    // Validate user buf pointer
+    if (!buf) return (uint64_t)EFAULT;
+    uint64_t ptr_start = (uint64_t)buf;
+    uint64_t ptr_end = ptr_start + len;
+    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    struct pipe *p = current_proc->fd_table[fd].pipe;
+    size_t written = 0;
+
+    while (written < len) {
+        // Check if pipe has space: full when head is one behind tail
+        if ((p->head + 1) % PIPE_BUF_SIZE == p->tail) {
+            // Pipe full: block
+            p->write_pid = current_proc->pid;
+            current_proc->state = BLOCKED;
+            current_proc->wait_event = WAIT_NOTIFY;
+            __atomic_add_fetch(&cpu_locals[current_proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
+            schedule();
+            p->write_pid = -1;
+            continue;
+        }
+        p->buf[p->head] = buf[written];
+        p->head = (p->head + 1) % PIPE_BUF_SIZE;
+        written++;
+    }
+
+    // Wake reader if blocked
+    if (p->read_pid >= 0) wake_process(p->read_pid);
+
+    return (uint64_t)written;
+}
+
+// sys_read(fd, buf, len) — syscall 19 (从 fd 读数据，阻塞直到有数据)
+uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+    int fd = (int)arg1;
+    char *buf = (char *)arg2;
+    size_t len = (size_t)arg3;
+
+    if (fd < 0 || fd >= MAX_FD) return (uint64_t)EINVAL;
+    if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)EINVAL;
+    // O_RDONLY=0, so check: must not be O_WRONLY only
+    if ((current_proc->fd_table[fd].flags & O_WRONLY) && !(current_proc->fd_table[fd].flags & O_RDWR))
+        return (uint64_t)EINVAL;
+
+    // Validate user buf pointer
+    if (!buf) return (uint64_t)EFAULT;
+    uint64_t ptr_start = (uint64_t)buf;
+    uint64_t ptr_end = ptr_start + len;
+    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    struct pipe *p = current_proc->fd_table[fd].pipe;
+
+    // Block if pipe is empty
+    while (p->head == p->tail) {
+        // Check if write end is closed (all write fds gone)
+        if (p->ref_count == 1) return 0;  // EOF: no writers left
+        // Non-blocking: return EAGAIN-like indication (0 bytes read)
+        if (current_proc->fd_table[fd].flags & O_NONBLOCK) return 0;
+        p->read_pid = current_proc->pid;
+        current_proc->state = BLOCKED;
+        current_proc->wait_event = WAIT_NOTIFY;
+        __atomic_add_fetch(&cpu_locals[current_proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
+        schedule();
+        p->read_pid = -1;
+    }
+
+    // Read as much as available (up to len)
+    size_t nread = 0;
+    while (nread < len && p->head != p->tail) {
+        buf[nread] = p->buf[p->tail];
+        p->tail = (p->tail + 1) % PIPE_BUF_SIZE;
+        nread++;
+    }
+
+    // Wake writer if blocked
+    if (p->write_pid >= 0) wake_process(p->write_pid);
+
+    return (uint64_t)nread;
+}
+
+// sys_close(fd) — syscall 20 (关闭 fd，pipe ref_count--)
+uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    int fd = (int)arg1;
+
+    if (fd < 0 || fd >= MAX_FD) return (uint64_t)EINVAL;
+    if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)EINVAL;
+
+    struct pipe *p = current_proc->fd_table[fd].pipe;
+    p->ref_count--;
+
+    // Notify blocked peer
+    if (current_proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)) {
+        // Closing write end: wake reader (it will see EOF if ref_count indicates no writers)
+        if (p->read_pid >= 0) wake_process(p->read_pid);
+    }
+    if (current_proc->fd_table[fd].flags & (O_RDONLY | O_RDWR)) {
+        // Closing read end: wake writer (it should get EPIPE)
+        if (p->write_pid >= 0) wake_process(p->write_pid);
+    }
+
+    if (p->ref_count == 0) {
+        kfree(p->buf);
+        kfree(p);
+    }
+
+    current_proc->fd_table[fd].type = FD_NONE;
+    current_proc->fd_table[fd].flags = 0;
+    current_proc->fd_table[fd].pipe = nullptr;
+
+    return 0;
 }

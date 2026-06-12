@@ -45,7 +45,7 @@ extern "C" void _start() {
     // Bind to keyboard IRQ (IRQ1 = vector 33)
     sys_irq_bind(33);
 
-    int32_t shell_pid = SHELL_PID;
+    int32_t consumer_pid = TERMINAL_PID;
 
     // Create shared memory page for KBD+KMS communication
     uint64_t shm_addr = (uint64_t)sys_shm_create(4096);
@@ -101,7 +101,7 @@ extern "C" void _start() {
 
         // Notify consumer (shell) if we wrote anything
         if (shm_hdr->consumer_sleeping) {
-            sys_notify(shell_pid);
+            sys_notify(consumer_pid);
         }
     }
 }

@@ -63,10 +63,11 @@
 | 共享页重构（KBD/KMS 硬编码→动态 shm） | [driver_workflow.md](driver_workflow.md) |
 | 驱动工作流重构（ring buffer + sleeping flag + 轮询窗口） | [driver_workflow.md](driver_workflow.md) |
 | KMS 帧调度优化（240 slot ring + 16ms 定时刷帧） | [driver_workflow.md](driver_workflow.md) |
+| Phase 3: 最小 fd + VT100 + Terminal/Shell 拆分 | [terminal_split.md](terminal_split.md) |
 
 ## 当前状态
 
-内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 5 个 ELF（disk_driver → kbd_driver → kms_driver → shell → fs_driver）→ 多进程协作。Framebuffer 渲染已移至用户态 KMS 驱动，内核仅保留 `init_fb` 做物理页映射和元信息保存。`sys_putc` 已删除，所有输出通过 libc 的 `kms_write_flush`（写 KMS_REQ 共享页 + sys_notify KMS 驱动）。`run hello.elf` 可正常执行，子进程退出后 shell 恢复交互。
+内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 6 个 ELF（disk_driver → kbd_driver → kms_driver → terminal → shell → fs_driver）→ 多进程协作。Phase 3 完成：fd + pipe + terminal 进程拆分。Shell 不再直写 KMS ring，通过 fd 0/1 pipe 与 terminal 通信。Terminal 管理 VT100 状态机 + cell 缓冲区，负责键盘输入分发和屏幕渲染。KMS 驱动不变（仅做像素渲染）。新增 4 个 syscall（sys_pipe/sys_write/sys_read/sys_close），sys_spawn 自动继承 fd 0/1。
 
 **Phase 2 设计完成**：驱动工作流重构方案已设计（[driver_workflow.md](driver_workflow.md)），核心变更为 kbd/kms 驱动从硬编码共享页 + 每次 sys_notify 改为动态 shm + 环形缓冲区 + sleeping flag + 轮询窗口（快速路径零内核入口）。新增内核基础设施：TSC 时钟源 + sched_clock()、定时等待队列 + sys_wait(timeout_ms)、sys_fb_info、sys_shm_create/sys_shm_attach。disk/fs 驱动暂不动。
 
@@ -215,52 +216,80 @@
 
 需建立 IPC 通道 + mmap + 双缓冲 + compositor 等基础设施，工作量较大但架构清晰。
 
-### Phase 1: 内核/IPC 基础设施
+### Phase 1: 内核基础设施
 
-#### sys_mmap / sys_munmap
+#### sys_mmap / sys_munmap ✅
 
-- [ ] sys_mmap(size)：匿名私有映射（完整设计见 [mem.md](mem.md) Phase 3）
-- [ ] sys_munmap(addr, size)：解除映射 + 归还物理页
-- [ ] mmap_brk 简单调高 + mmap_region 链表跟踪
-- [ ] 验证: 用户进程 mmap 一段内存 → 写入数据 → 可访问 → munmap 释放
-- [ ] **后续**: 共享映射（MAP_SHARED + refcount），见 [mem.md](mem.md) Phase 6
+- [x] sys_mmap(size)：匿名私有映射（设计见 [mem.md](mem.md) Phase 3）
+- [x] sys_munmap(addr, size)：解除映射 + 归还物理页
+- [x] mmap_brk 简单调高 + mmap_region 链表跟踪
+- [x] 验证: 用户进程 mmap 一段内存 → 写入数据 → 可访问 → munmap 释放
+- **后续**: 共享映射（MAP_SHARED + refcount），见 [mem.md](mem.md) Phase 6
 
-#### IPC 通道（替代 Unix socket）
+#### VFS + fd 抽象
 
-> 已采用更轻量方案：sys_shm_create/sys_shm_attach + 环形缓冲区 + sleeping flag + sys_notify，详见 [driver_workflow.md](driver_workflow.md)。以下为未来通用 IPC 通道设计（多客户端、动态连接），待 Wayland 阶段需要时再实现。
+> Wayland 协议的传输层（Unix socket）和资源共享（fd passing）都依赖 fd 抽象。Phase 3 已完成最小 fd + pipe 实现。
 
-- [ ] 设计 IPC 通道机制：共享页环形缓冲区 + sys_notify，支持动态多客户端连接
-- [ ] sys_channel_create()：创建 IPC 通道，返回 channel handle
-- [ ] sys_channel_connect(target_pid)：连接到目标进程的通道
-- [ ] sys_channel_send(channel, data, len)：发送消息
-- [ ] sys_channel_recv(channel, buf, len)：接收消息（阻塞等待）
-- [ ] 验证: 两个进程通过 IPC 通道双向通信
+- [x] 内核 fd 表：proc_t 新增 `struct file fd_table[MAX_FD]`（固定大小数组 32 项），每项含 type/flags/pipe 指针
+- [x] sys_pipe / sys_write / sys_read / sys_close：pipe 环形缓冲区 + 阻塞/非阻塞读写 + ref_count + 对端唤醒
+- [x] sys_spawn fd 继承：子进程自动继承 fd 0/1，pipe ref_count++
+- [x] proc_reap fd 清理：退出时遍历 fd_table 关闭所有 pipe
+- [x] 验证: shell 通过 fd 0/1 pipe 与 terminal 通信，子进程继承 fd 正常输出
+- [ ] `struct file` 通用化：引用计数 + 操作向量（read/write/close/poll），统一 file/pipe/socket/shm
+- [ ] sys_open：VFS 层 file_ops 虚函数分派，fs_driver IPC 作为文件后端
+- [ ] 验证: 用户进程通过 sys_open("hello.txt") → sys_read(fd, buf) 读取 FAT32 文件
 
-#### Handle 传递机制（替代 FD passing）
+#### pipe / Unix domain socket + fd passing
 
-- [ ] 内核托管资源句柄（handle = 内核资源 ID）
-- [ ] sys_handle_send(channel, handle)：通过 IPC 通道传递 handle
-- [ ] sys_handle_recv(channel)：接收 handle
-- [ ] handle 类型：shared memory region、IPC channel
-- [ ] 验证: 进程 A 创建共享内存 → 通过 handle_send 传给进程 B → 进程 B 可访问
+> Wayland 线协议跑在 Unix domain socket 上，wl_buffer 通过 fd passing (SCM_RIGHTS) 共享。这是 Wayland 的致命依赖。Phase 3 已完成基本 pipe。
 
-#### Framebuffer 双缓冲 / page flip
+- [x] pipe：sys_pipe(fd[2]) 创建一对相联的 file（4KB 环形缓冲区），写入端/读取端各占一个 fd
+- [ ] Unix domain socket：sys_socket(AF_UNIX) 创建 socket file，支持 bind/listen/accept/connect
+- [ ] fd passing (SCM_RIGHTS)：sendmsg/recvmsg 支持辅助消息传递 fd，内核在收发进程 fd 表间转移 file 引用
+- [ ] 验证: 两个进程通过 Unix socket 连接 → 传递 shm fd → 接收方可 mmap 访问共享内存
 
-- [ ] KMS 驱动改造：双 framebuffer（front + back），compositor 写 back buffer
-- [ ] sys_fb_flip()：原子切换 front/back buffer（更新 FB 基地址）
-- [ ] KMS 新增 FLIP 命令：compositor 通过 KMS_REQ 发 page flip 请求
-- [ ] 验证: 写入 back buffer → flip → 屏幕更新，无撕裂
+#### epoll（compositor 事件多路复用）
 
-#### sys_poll / sys_epoll（compositor 事件多路复用）
+- [ ] sys_epoll_create()：创建 epoll 实例（内核 file，内部维护监听集）
+- [ ] sys_epoll_ctl(epfd, op, fd, event)：添加/修改/删除监听的 fd
+- [ ] sys_epoll_wait(epfd, events, maxevents, timeout)：阻塞等待就绪事件
+- [ ] 支持 pipe/socket 可读可写事件
+- [ ] 验证: compositor 同时监听 N 个 client socket 的可读事件
 
-- [ ] sys_poll(events[], timeout)：监听多个 IPC 通道的可读事件
-- [ ] 验证: compositor 同时监听 N 个客户端通道输入
+#### 信号机制
+
+> 合成器至少需要 SIGCHLD 管理 client 子进程退出，未来 gcc 构建依赖完整信号。
+
+- [ ] sigaction 系统调用：注册信号处理函数（SIG_DFL/SIG_IGN/自定义 handler）
+- [ ] kill 系统调用：向指定进程发送信号
+- [ ] 信号投递：进程返回用户态前检查 pending signals，修改 trapframe 跳转到 handler
+- [ ] SIGCHLD：子进程 exit 时向父进程投递
+- [ ] 验证: 子进程 exit → 父进程收到 SIGCHLD → handler 执行
+
+#### shm 改进
+
+> 当前 shm_attach 仅能附加目标进程的第一个 shm 区域，限 4 个/进程，无名。Wayland 需要客户端创建任意数量 wl_shm_pool 并通过 fd passing 传给合成器。
+
+- [ ] shm 与 fd 绑定：sys_shm_create 返回 fd 而非裸虚拟地址，shm 通过 fd passing 共享
+- [ ] 放宽数量限制：移除 MAX_SHM_PER_PROC=4 限制，按需动态分配
+- [ ] sys_shm_attach 改为 fd-based：接收端通过 recvmsg 收到 fd 后，内核自动映射共享页
+- [ ] 验证: 进程 A 创建 shm fd → 通过 Unix socket 传递 → 进程 B mmap 访问
 
 #### 鼠标驱动
 
 - [ ] PS/2 鼠标驱动（IOPL=3, irq_bind(44)，用户态进程）
 - [ ] 鼠标共享页（mouse_shm：x, y, buttons, events）
 - [ ] 验证: 鼠标移动事件写入 mouse_shm，compositor 可读取
+
+#### 像素渲染基础
+
+> 当前 KMS 驱动仅支持文本模式 8x16 字体渲染。合成器需要 pixel-level framebuffer 操作。
+
+- [ ] 合成器进程直写 framebuffer（map_fb=true，已有机制）
+- [ ] 像素级绘制原语：fill_rect / blit / memcpy 到 framebuffer 偏移
+- [ ] 双缓冲 / page flip：双 framebuffer（front + back），合成器写 back buffer → 原子切换
+- [ ] KMS 驱动改造：新增 FLIP 命令（compositor 通过 KMS_REQ 发 page flip 请求）
+- [ ] 验证: 合成器填充红色矩形到 back buffer → flip → 屏幕显示红色
 
 ### Phase 2: Wayland 用户态服务
 
@@ -318,17 +347,17 @@
 
 - [ ] sys_fork：复制进程地址空间 + PCB
 - [ ] sys_exec：替换进程地址空间（加载新 ELF）
-- [ ] sys_waitpid 完善：支持 SIGCHLD 语义
-- [ ] sys_kill / sys_signal：信号机制
+- [ ] sys_waitpid 完善：支持 SIGCHLD 语义（信号机制见中期 Phase 1）
+- [ ] sys_kill / sys_signal：信号机制（见中期 Phase 1）
 - [ ] 验证: fork + exec 运行子进程
 
 ### 文件系统（POSIX 文件 I/O）
 
-- [ ] sys_open / sys_close / sys_read / sys_write：统一文件 I/O 接口
-- [ ] sys_stat / sys_lseek：文件元信息和偏移
-- [ ] 管道（pipe）：进程间数据流
-- [ ] 文件描述符表：per-process fd table，替代固定共享页 IPC
+> VFS + fd 抽象、pipe/unix socket 已在中期 Phase 1 实现，此处补充远期所需扩展。
+
 - [ ] FAT32 完善：文件写入、删除、truncate、大文件支持
+- [ ] sys_stat / sys_lseek：文件元信息和偏移
+- [ ] sys_mmap 文件映射：MAP_SHARED 文件后端
 - [ ] 验证: 用户程序通过 sys_open/read/write 读写文件
 
 ### Shell 增强

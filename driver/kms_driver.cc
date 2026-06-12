@@ -356,7 +356,7 @@ static void advance_line() {
     }
 }
 
-static void fb_putc(char c, uint32_t fg) {
+static void fb_putc(char c, uint32_t fg, uint32_t bg) {
     if (c == '\n') {
         cursor_x = 0;
         advance_line();
@@ -377,9 +377,9 @@ static void fb_putc(char c, uint32_t fg) {
                 uint8_t *dst = fb_vaddr + (py + row) * fb_pitch + px * bpp_bytes;
                 for (int col = 0; col < FONT_WIDTH; col++) {
                     if (fb_bpp == 32) {
-                        *(uint32_t *)dst = 0;
+                        *(uint32_t *)dst = bg;
                     } else {
-                        dst[0] = 0; dst[1] = 0; dst[2] = 0;
+                        dst[0] = bg & 0xFF; dst[1] = (bg >> 8) & 0xFF; dst[2] = (bg >> 16) & 0xFF;
                     }
                     dst += bpp_bytes;
                 }
@@ -406,20 +406,18 @@ static void fb_putc(char c, uint32_t fg) {
     uint32_t py = cursor_y * FONT_HEIGHT;
     uint32_t bpp_bytes = fb_bpp / 8;
 
+    // Clear cell background first, then draw glyph
     for (int row = 0; row < FONT_HEIGHT; row++) {
         if (py + row >= fb_height) break;
         uint8_t bits = glyph[row];
         uint8_t *dst = fb_vaddr + (py + row) * fb_pitch + px * bpp_bytes;
         for (int col = 0; col < FONT_WIDTH; col++) {
             if (px + col >= fb_width) break;
-            if (bits & (0x80 >> col)) {
-                if (fb_bpp == 32) {
-                    *(uint32_t *)dst = fg;
-                } else {
-                    dst[0] = fg & 0xFF;
-                    dst[1] = (fg >> 8) & 0xFF;
-                    dst[2] = (fg >> 16) & 0xFF;
-                }
+            if (fb_bpp == 32) {
+                *(uint32_t *)dst = (bits & (0x80 >> col)) ? fg : bg;
+            } else {
+                uint32_t color = (bits & (0x80 >> col)) ? fg : bg;
+                dst[0] = color & 0xFF; dst[1] = (color >> 8) & 0xFF; dst[2] = (color >> 16) & 0xFF;
             }
             dst += bpp_bytes;
         }
@@ -471,7 +469,7 @@ extern "C" void _start() {
             volatile kms_msg *msg = &kms->msgs[idx];
             switch (msg->cmd) {
             case KMS_CMD_PUTC:
-                fb_putc((char)msg->arg1, msg->arg2);
+                fb_putc((char)msg->arg1, msg->arg2, msg->arg3);
                 break;
             case KMS_CMD_CLEAR:
                 fb_clear();

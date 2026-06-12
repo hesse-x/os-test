@@ -29,6 +29,13 @@ uint64_t sys_serial_write(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint
 uint64_t sys_fb_info(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_shm_create(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_shm_attach(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t);
+uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t);
+uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+
+// Wake a process blocked on WAIT_NOTIFY (used by pipe close and proc_reap)
+void wake_process(int32_t pid);
 }
 
 #endif // KERNEL_TRAP_H

@@ -22,6 +22,33 @@ struct mmap_region {
 #define MAX_SHM_PER_PROC 4
 #define SHM_VADDR_BASE 0x510000
 
+// ===================== fd / pipe =====================
+#define MAX_FD       32
+#define PIPE_BUF_SIZE 4096
+
+#define FD_NONE   0
+#define FD_PIPE   1
+
+#define O_RDONLY  0
+#define O_WRONLY  1
+#define O_RDWR    2
+#define O_NONBLOCK 4
+
+struct pipe {
+    uint8_t *buf;        // 4KB ring buffer (kmalloc)
+    uint32_t head;       // write position
+    uint32_t tail;       // read position
+    pid_t read_pid;      // reader blocked process PID (-1 if none)
+    pid_t write_pid;     // writer blocked process PID (-1 if none)
+    int ref_count;       // open fd count
+};
+
+struct file {
+    int type;            // FD_NONE / FD_PIPE
+    int flags;           // O_RDONLY / O_WRONLY / O_RDWR
+    struct pipe *pipe;   // if type == FD_PIPE
+};
+
 struct shm_region {
     uint64_t vaddr;       // virtual address in this process
     uint64_t phys;        // physical page start address
@@ -49,6 +76,7 @@ struct proc_t {
     uint64_t wait_deadline; // sched_clock() nanosecond deadline, 0 = no timeout
     uint8_t  wait_timed_out; // 1 = timer expired wakeup, 0 = notify wakeup
     shm_region shm_regions[MAX_SHM_PER_PROC]; // dynamic shared memory regions
+    struct file fd_table[MAX_FD];  // per-process file descriptor table
 };
 
 #define MAX_PROC 64

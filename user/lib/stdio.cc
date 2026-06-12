@@ -22,7 +22,24 @@ static void kms_ensure_init() {
     if (addr) kms_shm_init(addr);
 }
 
-/* ===================== Standard streams ===================== */
+/* ===================== sys_write based flush ===================== */
+
+static void sys_write_flush(FILE *f, const char *data, int len) {
+    (void)f;
+    sys_write(f->fd, data, len);
+    // Mirror output to serial port
+    sys_serial_write(data, len);
+}
+
+/* ===================== sys_read based fill ===================== */
+
+static int sys_read_fill(FILE *f, char *buf, int len) {
+    int64_t n = sys_read(f->fd, buf, len);
+    if (n <= 0) return 0;
+    return (int)n;
+}
+
+/* ===================== KMS ring output (for terminal process only) ===================== */
 
 static void kms_write_flush(FILE *f, const char *data, int len) {
     (void)f;
@@ -51,14 +68,19 @@ static void kms_write_flush(FILE *f, const char *data, int len) {
     sys_serial_write(data, len);
 }
 
+static FILE stdin_file = {
+    0, nullptr, 0, 0, _IONBF, _F_READ, nullptr, sys_read_fill
+};
+
 static FILE stdout_file = {
-    1, nullptr, 0, 0, _IONBF, _F_WRITE, kms_write_flush
+    1, nullptr, 0, 0, _IONBF, _F_WRITE, sys_write_flush, nullptr
 };
 
 static FILE stderr_file = {
-    2, nullptr, 0, 0, _IONBF, _F_WRITE, kms_write_flush
+    2, nullptr, 0, 0, _IONBF, _F_WRITE, sys_write_flush, nullptr
 };
 
+FILE *stdin  = &stdin_file;
 FILE *stdout = &stdout_file;
 FILE *stderr = &stderr_file;
 
@@ -310,4 +332,23 @@ int fprintf(FILE *f, const char *fmt, ...) {
     va_end(ap);
     fflush(f);
     return n;
+}
+
+/* ===================== Character input ===================== */
+
+int fgetc(FILE *f) {
+    char c;
+    if (f->read_fn) {
+        int n = f->read_fn(f, &c, 1);
+        if (n <= 0) return EOF;
+        return (unsigned char)c;
+    }
+    /* Fallback: direct sys_read */
+    int64_t n = sys_read(f->fd, &c, 1);
+    if (n <= 0) return EOF;
+    return (unsigned char)c;
+}
+
+int getchar(void) {
+    return fgetc(stdin);
 }

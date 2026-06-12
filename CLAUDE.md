@@ -16,9 +16,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **最小内核**：内核仅包含调度、内存管理、中断分发、系统调用等不可替代的机制。键盘驱动和磁盘驱动已在用户态运行（`driver/kbd_driver.cc`、`driver/disk_driver.cc`），KMS 渲染驱动也在用户态运行（`driver/kms_driver.cc`），内核仅保留 `init_fb` 做 framebuffer 物理页映射和元信息保存。ATA 驱动仍留在内核空间（`kernel/ata.cc`）。
 - **用户态服务**：shell 等应用及驱动进程作为独立用户进程从磁盘加载，拥有独立地址空间（每进程 PML4），通过 syscall 和共享页与内核及其他进程通信。文件系统服务（fs_driver）作为用户态进程运行，通过共享页 IPC 间接访问磁盘驱动。
-- **系统调用 + 共享内存 IPC**：17 个 syscall（putc[deprecated]/getpid/yield/getc[deprecated]/wait/notify/irq_bind/sbrk/exit/waitpid/spawn/mmap/munmap/fb_info/shm_create/shm_attach/serial_write）是用户态与内核的控制接口。KBD/KMS 数据传输通过动态共享内存（sys_shm_create/sys_shm_attach）+ 环形缓冲区 + sleeping flag 完成；DISK/FS 仍使用硬编码共享页（DISK_REQ/DISK_RESP/FS_REQ/FS_RESP）。`sys_putc` 已删除（返回 -ENOSYS），所有输出通过 kms_ring + sleeping flag 协议完成。新增功能应优先考虑扩展 syscall 接口而非在内核内实现策略。
-- **用户态 libc**：libc.a 静态库（`ar rcs libc.a start.o stdio.o string.o malloc.o`）提供 printf/fprintf/vfprintf/fputc/fputs/puts/fflush、FILE 结构体（缓冲输出 + write_fn 抽象）、strlen/strcmp/strcpy/strcat/strchr/memcpy/memset/memmove、malloc/free/calloc/realloc、`_start` 入口（调用 main → sys_exit）。stdout/stderr 的 write_fn 为 `kms_write_flush`（写 kms_ring + sleeping flag 协议），均为无缓冲模式。kms_ring 初始化由 `kms_shm_init(addr)` 完成。用户程序（hello.c）用 gcc 编译 + `-Iuser/include` + 链接 libc.a。设计文档 `doc/design/libc.md`。
-- **进程隔离**：每个用户进程拥有独立地址空间（代码 0x400000 起，堆 0x600000 起，栈 0x00007FFFFFFFD000），PML4[511] 共享内核映射，其余独立。硬编码共享页映射到 0x501000-0x507FFF（7 页，DISK_REQ/DISK_RESP/FS_REQ/FS_RESP）。KBD/KMS 使用动态共享内存（sys_shm_create/sys_shm_attach），虚拟地址从 0x510000 起。
+- **系统调用 + 共享内存 IPC + fd/pipe**：21 个 syscall（putc[deprecated]/getpid/yield/getc[deprecated]/wait/notify/irq_bind/sbrk/exit/waitpid/spawn/mmap/munmap/fb_info/shm_create/shm_attach/serial_write/pipe/write/read/close）是用户态与内核的控制接口。KBD/KMS 数据传输通过动态共享内存（sys_shm_create/sys_shm_attach）+ 环形缓冲区 + sleeping flag 完成；DISK/FS 仍使用硬编码共享页（DISK_REQ/DISK_RESP/FS_REQ/FS_RESP）。`sys_putc` 已删除（返回 -ENOSYS），所有输出通过 fd 1 (stdout pipe) → terminal → KMS ring 路径完成。用户进程间 I/O 通过 pipe（sys_pipe/sys_write/sys_read/sys_close）+ fd 继承（sys_spawn 自动继承 fd 0/1）。新增功能应优先考虑扩展 syscall 接口而非在内核内实现策略。
+- **用户态 libc**：libc.a 静态库（`ar rcs libc.a start.o stdio.o string.o malloc.o`）提供 printf/fprintf/vfprintf/fputc/fputs/puts/fflush、FILE 结构体（缓冲输出 + write_fn 抽象）、stdin（read_fn 抽象 + fgetc/getchar）、strlen/strcmp/strcpy/strcat/strchr/memcpy/memset/memmove、malloc/free/calloc/realloc、`_start` 入口（调用 main → sys_exit）。stdout/stderr 的 write_fn 为 `sys_write_flush`（调用 sys_write(fd, ...) 写 pipe），stdin 的 read_fn 为 `sys_read_fill`（调用 sys_read(fd, ...) 读 pipe）。均为无缓冲模式。`kms_write_flush` 和 `kms_shm_init` 保留供 terminal 进程使用，普通进程不再调用。用户程序（hello.c）用 gcc 编译 + `-Iuser/include` + 链接 libc.a。设计文档 `doc/design/libc.md`。
+- **进程隔离**：每个用户进程拥有独立地址空间（代码 0x400000 起，堆 0x600000 起，栈 0x00007FFFFFFFD000），PML4[511] 共享内核映射，其余独立。硬编码共享页映射到 0x501000-0x507FFF（7 页，DISK_REQ/DISK_RESP/FS_REQ/FS_RESP）。KBD/KMS 使用动态共享内存（sys_shm_create/sys_shm_attach），虚拟地址从 0x510000 起。每进程有 fd_table[32]（fd 0=stdin, fd 1=stdout, 其余 FD_NONE），通过 sys_pipe/sys_write/sys_read/sys_close 管理 pipe 通道。
 
 ## 构建与运行
 
@@ -37,11 +37,12 @@ LBA 0:       MBR 分区表（sfdisk 创建）
 LBA 1-100:   disk_driver.elf（100 扇区/50KB）
 LBA 101-200: kbd_driver.elf（100 扇区/50KB）
 LBA 201-300: kms_driver.elf（100 扇区/50KB）
-LBA 301-400: shell.elf（100 扇区/50KB）
-LBA 401-500: fs_driver.elf（100 扇区/50KB）
-LBA 501+:    FAT32 分区（type=0x0C，4KB 簇，含 HELLO.TXT/README/HELLO.ELF）
+LBA 301-400: terminal.elf（100 扇区/50KB）
+LBA 401-500: shell.elf（100 扇区/50KB）
+LBA 501-600: fs_driver.elf（100 扇区/50KB）
+LBA 601+:    FAT32 分区（type=0x0C，4KB 簇，含 HELLO.TXT/README/HELLO.ELF）
 ```
-MBR 分区1 (type=0xDA) 覆盖 LBA 1-500（裸 ELF 存储），分区2 (type=0x0C) 覆盖 LBA 501+（FAT32 文件系统）。内核 `ata_read_lba` 直接读裸扇区加载 ELF，fs_driver 通过 MBR 分区表找到 FAT32 分区起始 LBA。
+MBR 分区1 (type=0xDA) 覆盖 LBA 1-600（裸 ELF 存储），分区2 (type=0x0C) 覆盖 LBA 601+（FAT32 文件系统）。内核 `ata_read_lba` 直接读裸扇区加载 ELF，fs_driver 通过 MBR 分区表找到 FAT32 分区起始 LBA。
 
 **重要：** `add_library(OBJECT)` 不能设置 `POSITION_INDEPENDENT_CODE ON`，否则会加 `-fPIC`，破坏内核的 RIP-relative 寻址。
 
@@ -76,10 +77,10 @@ arch/x64/
 
 kernel/
   CMakeLists.txt
-  kernel.cc / kernel.h — kernel_main（加载 5 个 ELF → process_create_elf → schedule）
+  kernel.cc / kernel.h — kernel_main（加载 6 个 ELF → process_create_elf → 创建 terminal↔shell pipe → schedule）
   serial.cc / serial.h — COM1 串口驱动
-  trap.cc / trap.h   — trap_dispatch（用户态异常→sys_exit替代halt）+ syscall_dispatch + 11个系统调用（含 sys_exit/sys_waitpid/sys_spawn）+ IRQ 注册表 + irq_owner[]。sys_notify 同时匹配 WAIT_NOTIFY 和 WAIT_CHILD
-  proc.cc / proc.h   — PCB, switch_to, process_create/process_create_elf, schedule, shm_init, map_shared_pages, proc_reap（进程资源回收，PTE 物理地址提取用 `pte & 0x000FFFFFFFFFF000` 清除 NX 位）
+  trap.cc / trap.h   — trap_dispatch（用户态异常→sys_exit替代halt）+ syscall_dispatch + 20个系统调用（含 sys_exit/sys_waitpid/sys_spawn/sys_pipe/sys_write/sys_read/sys_close）+ IRQ 注册表 + irq_owner[]。sys_notify 同时匹配 WAIT_NOTIFY 和 WAIT_CHILD
+  proc.cc / proc.h   — PCB, switch_to, process_create/process_create_elf, schedule, shm_init, map_shared_pages, proc_reap（进程资源回收，PTE 物理地址提取用 `pte & 0x000FFFFFFFFFF000` 清除 NX 位）。proc_t 含 fd_table[MAX_FD]，proc_reap 清理 fd（pipe ref_count-- + wake_process + kfree）
   fb.cc / fb.h       — Framebuffer 初始化（init_fb 映射 + g_fb_info 元信息保存），渲染已移至用户态 KMS 驱动
   ata.cc / ata.h     — ATA PIO LBA28 驱动（从盘，启动时读取 ELF，之后由用户态 disk_driver 接管）
   list.h             — 内嵌双向链表（list_node_t, list_push_back/remove/empty/front, LIST_ENTRY）
@@ -91,22 +92,23 @@ kernel/
     user_mapping.cc    — ensure_pd, ensure_pt_in_pd, map_user_page_direct, map_user_pages, unmap_user_pages
 
 driver/
-  kbd_driver.cc      — 用户态键盘驱动进程（IOPL=3, sys_irq_bind(33), inb(0x60), kbd_shm, sys_notify）
+  kbd_driver.cc      — 用户态键盘驱动进程（IOPL=3, sys_irq_bind(33), inb(0x60), kbd_shm, sys_notify terminal）
   disk_driver.cc     — 用户态磁盘驱动进程（IOPL=3, disk_req_shm, ATA PIO, disk_resp_shm, sys_notify）
-  kms_driver.cc      — 用户态 KMS 渲染驱动进程（IOPL=0, KMS_REQ 共享页, framebuffer 直写 0x700000, 8x16 字体, 先处理再等待避免通知丢失）
+  kms_driver.cc      — 用户态 KMS 渲染驱动进程（IOPL=0, KMS_REQ 共享页, framebuffer 直写 0x700000, 8x16 字体, 先处理再等待避免通知丢失, bg 颜色渲染）
+  terminal.cc        — 用户态 Terminal 进程（IOPL=0, kbd_ring 读 + stdin pipe 写, stdout pipe 读 + VT100 状态机 + cell 缓冲区 + flush_dirty_cells 到 KMS ring）
   fs_driver.cc       — 用户态 FAT32 文件系统驱动（IOPL=0, fs_req/fs_resp, readdir/open/read/close/raw_read/touch/mkdir）
 
 shell/
-  shell.cc           — Shell 用户进程（ls/cat/cd/pwd/touch/mkdir/run/sbrk/malloc/mtest 命令, kbd_shm 输入, fs_driver IPC, kms_flush 输出, 裸扇区 r 命令）
+  shell.cc           — Shell 用户进程（ls/cat/cd/pwd/touch/mkdir/run/sbrk/malloc/mtest 命令, fd 0 stdin 输入, fd 1 stdout 输出, fs_driver IPC, 裸扇区 r 命令）
 
 user/
   hello.c           — 最小用户程序（#include <stdio.h> + main + printf 输出 "Hello, World!"）
   include/
-    stdio.h         — 用户态 C 标准库头文件（FILE/printf/fprintf/vfprintf/fputc/fputs/puts/fflush + 缓冲模式常量）
+    stdio.h         — 用户态 C 标准库头文件（FILE/printf/fprintf/vfprintf/fputc/fputs/puts/fflush/stdin/fgetc/getchar + 缓冲模式常量）
     stdlib.h         — 用户态 C 标准库头文件（malloc/free/calloc/realloc/exit + EXIT_SUCCESS/EXIT_FAILURE）
     string.h         — 用户态字符串操作头文件（strlen/strcmp/strcpy/strcat/strchr/memcpy/memset/memmove）
   lib/
-    stdio.cc        — FILE 实现 + stdout/stderr + kms_write_flush（写 KMS_REQ + sys_notify）+ vfprintf 格式化引擎
+    stdio.cc        — FILE 实现 + stdout/stderr（sys_write_flush 写 pipe）+ stdin（sys_read_fill 读 pipe）+ kms_write_flush（terminal 专用）+ vfprintf 格式化引擎
     string.cc       — 字符串和内存操作函数实现
     start.cc        — libc _start 入口点（fflush(stdout) → main → fflush(stdout) → sys_exit）
     malloc.cc        — 用户态 malloc/free/calloc/realloc 实现（size-class slab + sys_mmap，替代旧显式空闲链表 + sys_sbrk 方案）
@@ -118,9 +120,9 @@ common/
   errno.h             — 错误码定义（EOK/EPERM/ENOENT/ENOMEM/EINVAL/ENOSYS/ECHILD）
   efi.h               — EFI 类型定义（memory_descriptor, system_table, GOP, GUID 等）
   elf.cc / elf.h     — ELF64 静态二进制加载器
-  syscall.h           — syscall 编号（SYS_PUTC 等）+ 语义封装（sys_putc 等，含 arch/x64/utils.h）
+  syscall.h           — syscall 编号（SYS_PUTC 等）+ 语义封装（sys_putc 等，含 arch/x64/utils.h）+ SYS_PIPE/SYS_WRITE/SYS_READ/SYS_CLOSE
   shm.h               — 共享页地址定义 + 数据结构（kbd_shm, disk_req_shm, disk_resp_shm[2页], fs_req_shm, fs_resp_shm[2页], kms_fb_info, kms_cmd, kms_req_shm）
-  pid.h               — 驱动 PID 集中定义（DISK_DRIVER_PID=2, KBD_DRIVER_PID=3, KMS_DRIVER_PID=4, SHELL_PID=5, FS_DRIVER_PID=6）
+  pid.h               — 驱动 PID 集中定义（DISK_DRIVER_PID=2, KBD_DRIVER_PID=3, KMS_DRIVER_PID=4, TERMINAL_PID=5, SHELL_PID=6, FS_DRIVER_PID=7）
 ```
 
 ## 启动流程
@@ -133,7 +135,7 @@ UEFI 固件 → BOOTX64.EFI (boot/stub.c) → 加载 myos.elf 到 0x100000 → E
 2. `efi_main`（stub.c）：打开 `myos.elf`，加载 ELF64 段到物理 0x100000，读取 GOP/RSDP，解析 ACPI MADT（LAPIC/IOAPIC 基地址、CPU APIC ID），填充 `boot_info`，调用 `ExitBootServices`，跳转到 `_start`
 3. `_start`（start.S）：设置物理栈 → 保存 `boot_info*`（r12）→ 调用 `enable_paging`（构建 4 级页表 + 加载 CR3）→ 调用 `gdt_init`（8项 GDT + TSS + ltr）→ `lretq` 跳转到 `_entry64`
 4. `_entry64`：切换到虚拟地址栈 → 复制 `boot_info` 到 `g_boot_info` → 调用 `kernel_main`
-5. `kernel_main`：`init_mem` → `isr_init`（内含第二次 `gdt_init`，BSP 的 `smp_init_cpu` + `smp_apply_cpu`，`enable_nx`，`idt_install` + `setup_syscall`，`apic_init`）→ `kernel_init_finish`（禁用 bump）→ `slab_init`（初始化 9 个 kmem_cache_t）→ `proc_init` → `shm_init` → `clear` → `smp_boot_aps`（启动所有 AP）→ 从磁盘加载 disk_driver.elf（LBA 1, IOPL=3）→ kbd_driver.elf（LBA 101, IOPL=3）→ kms_driver.elf（LBA 201, IOPL=0, map_fb=true）→ shell.elf（LBA 301, IOPL=0）→ fs_driver.elf（LBA 401, IOPL=0）→ 栈切换进入 idle_entry → idle 循环（schedule + hlt）
+5. `kernel_main`：`init_mem` → `isr_init`（内含第二次 `gdt_init`，BSP 的 `smp_init_cpu` + `smp_apply_cpu`，`enable_nx`，`idt_install` + `setup_syscall`，`apic_init`）→ `kernel_init_finish`（禁用 bump）→ `slab_init`（初始化 9 个 kmem_cache_t）→ `proc_init` → `shm_init` → `clear` → `smp_boot_aps`（启动所有 AP）→ 从磁盘加载 disk_driver.elf（LBA 1, IOPL=3）→ kbd_driver.elf（LBA 101, IOPL=3）→ kms_driver.elf（LBA 201, IOPL=0, map_fb=true）→ terminal.elf（LBA 301, IOPL=0）→ shell.elf（LBA 401, IOPL=0）→ fs_driver.elf（LBA 501, IOPL=0）→ 创建 terminal↔shell 的 pipe 对（pipe_stdin: terminal fd1(W)→shell fd0(R), pipe_stdout: shell fd1(W)→terminal fd0(R|O_NONBLOCK)）→ 栈切换进入 idle_entry → idle 循环（schedule + hlt）
 
 注意：GDT 被初始化两次 — 一次在 start.S 物理地址阶段，一次在 `isr_init` 中虚拟地址阶段。
 
@@ -260,7 +262,7 @@ irq_owner[]：
 
 ## 进程与调度
 
-- **PCB**：`proc_t`（pid, state, k_rsp, k_stack_top, cr3, entry, wait_event, assigned_cpu, iopl, parent_pid, exit_code, brk, run_node, wait_node），最多 64 个进程
+- **PCB**：`proc_t`（pid, state, k_rsp, k_stack_top, cr3, entry, wait_event, assigned_cpu, iopl, parent_pid, exit_code, brk, mmap_brk, mmap_regions, fd_table[MAX_FD], run_node, wait_node），最多 64 个进程
 - **状态**：READY / RUNNING / BLOCKED（可等待 WAIT_NOTIFY 或 WAIT_CHILD）/ ZOMBIE（已退出，等待父进程 waitpid 回收）
 - **调度**：`schedule()` 从 per-CPU `run_queue`（`list_node_t` 链表）队头取出下一进程，FIFO round-robin。切换 FROM idle 时不设 READY 也不入队。无就绪进程时若 prev 为 BLOCKED 或 ZOMBIE 则切到 idle，否则 prev 继续运行。持锁模式：`spin_lock_irqsave(&scheduler_lock)` → 出队/入队 → `spin_unlock_irqrestore` → `switch_to` → `spin_lock_irqsave` → `spin_unlock_irqrestore`
 - **上下文切换**：`switch_to` 保存 callee-saved（rbx, rbp, r12-r15）→ 保存/恢复 RSP → 切换 CR3 → 恢复 callee-saved → ret
@@ -273,21 +275,40 @@ irq_owner[]：
 - **创建方式**：`process_create(entry)` 使用硬编码 `init_code[]`（使用 `syscall` 指令，RAX=syscall#，RDI=arg1）；`process_create_elf(elf_data, size, iopl)` 从 ELF64 加载，`iopl` 参数指定 IOPL（0=普通进程，3=驱动进程）。两者均先 `procs_lock` 分配槽位，再 `scheduler_lock` 入队。启动时进程由内核创建，`parent_pid=-1`；用户态 spawn 创建的子进程 `parent_pid` 为调用者 PID
 - **地址空间**：代码从 0x400000 起，堆从 0x600000 起（brk 初始=0x600000，sbrk 按页扩展/缩小），用户栈页面映射在 0x00007FFFFFFFD000，RSP 初始值 0x00007FFFFFFFE000（页面顶端），每进程独立 PML4（共享 PML4[511] 内核映射）
 - **共享页**：每进程映射 10 个共享页（KBD_SHM=0x500000, DISK_REQ=0x501000, DISK_REQ2=0x502000, DISK_RESP=0x503000, DISK_RESP2=0x504000, FS_REQ=0x505000, FS_RESP=0x506000, FS_RESP2=0x507000, KMS_INFO=0x508000, KMS_REQ=0x509000），所有进程共享同一物理页，用于驱动间 IPC。disk_resp、disk_req、fs_resp 扩展为 2 页以容纳大块数据。`shm_init()` 在 `kernel_main` 中分配，`map_shared_pages()` 在 `process_create_elf` 中映射
-- **IPC 拓扑（三层）**：Shell(PID5) ←→ fs_driver(PID6) ←→ disk_driver(PID2)。Shell 通过 FS_REQ/FS_RESP 与 fs_driver 通信；fs_driver 通过 DISK_REQ/DISK_RESP 与 disk_driver 通信。kbd_driver(PID3) 通过 KBD_SHM 直接与 shell 通信。Shell 通过 KMS_REQ + sys_notify 与 kms_driver(PID4) 通信
-- **系统调用**：13个（putc/getpid/yield/getc[deprecated]/wait/notify/irq_bind/sbrk/exit/waitpid/spawn/mmap/munmap），通过 `syscall` 指令触发（EFER.SCE），rax=syscall#，参数通过 rdi/rsi/rdx/r10/r8 传递。错误返回统一为负 errno（-EPERM/-EINVAL/-ENOMEM/-ENOSYS/-ECHILD，定义在 common/errno.h）
-- **进程生命周期**：`sys_exit(exit_code)` 将当前进程设为 ZOMBIE（有父进程时 notify 父进程）或直接回收（`parent_pid==-1` 时调用 `proc_reap`）；`sys_waitpid(pid, exit_code_ptr)` 阻塞等待子进程 ZOMBIE 后回收资源，返回子 PID 和退出码；`sys_spawn(elf_data, elf_size, iopl)` 从用户态 ELF 缓冲区创建子进程，IOPL 权限检查，设 `parent_pid`。sys_exit 通过 sys_notify 唤醒父进程（sys_notify 同时匹配 WAIT_NOTIFY 和 WAIT_CHILD）
-- **proc_reap**：回收进程全部资源——遍历 PML4[0-255] 释放用户页映射 + 页表页（PDPT/PD/PT）+ PML4 页 + 内核栈（2 页）+ PCB 槽位清零。共享页物理帧（KBD_SHM/DISK_REQ/FS_REQ/KMS_INFO/KMS_REQ 等）不回收，因为它们是全局资源。PTE 叶页物理地址提取使用 `pte & 0x000FFFFFFFFFF000`（清除 bit 63 NX 位），而非 `pte & ~0xFFF`（后者不清除 NX 位导致越界）
+- **IPC 拓扑（三层 + terminal 中间层）**：kbd_driver(PID3) 通过 KBD_SHM + sys_notify 与 terminal(PID5) 通信；terminal 通过 pipe 与 shell(PID6) 通信（stdin pipe + stdout pipe）；Shell(PID6) ←→ fs_driver(PID7) ←→ disk_driver(PID2)。Shell 通过 FS_REQ/FS_RESP 与 fs_driver 通信；fs_driver 通过 DISK_REQ/DISK_RESP 与 disk_driver 通信。Terminal 通过 KMS_REQ + sys_notify 与 kms_driver(PID4) 通信
+- **系统调用**：21 个 syscall 编号（NR_SYSCALL=21），20 个有效实现（sys_putc 保留编号但返回 -ENOSYS），通过 `syscall` 指令触发（EFER.SCE），rax=syscall#，参数通过 rdi/rsi/rdx/r10/r8 传递。错误返回统一为负 errno（-EPERM/-EINVAL/-ENOMEM/-ENOSYS/-ECHILD，定义在 common/errno.h）。新增 pipe/write/read/close 实现 fd 抽象和进程间 pipe 通信
+- **进程生命周期**：`sys_exit(exit_code)` 将当前进程设为 ZOMBIE（有父进程时 notify 父进程）或直接回收（`parent_pid==-1` 时调用 `proc_reap`）；`sys_waitpid(pid, exit_code_ptr)` 阻塞等待子进程 ZOMBIE 后回收资源，返回子 PID 和退出码；`sys_spawn(elf_data, elf_size, iopl)` 从用户态 ELF 缓冲区创建子进程，IOPL 权限检查，设 `parent_pid`，自动继承 fd 0/1（pipe ref_count++）。sys_exit 通过 sys_notify 唤醒父进程（sys_notify 同时匹配 WAIT_NOTIFY 和 WAIT_CHILD）。proc_reap 清理进程全部 fd（pipe ref_count--，归零则 kfree pipe buf + pipe struct，wake_process 对端）
+- **proc_reap**：回收进程全部资源——遍历 PML4[0-255] 释放用户页映射 + 页表页（PDPT/PD/PT）+ PML4 页 + 内核栈（2 页）+ 关闭所有 fd（pipe ref_count-- + wake 对端 + 归零 kfree）+ PCB 槽位清零。共享页物理帧（KBD_SHM/DISK_REQ/FS_REQ/KMS_INFO/KMS_REQ 等）不回收，因为它们是全局资源。PTE 叶页物理地址提取使用 `pte & 0x000FFFFFFFFFF000`（清除 bit 63 NX 位），而非 `pte & ~0xFFF`（后者不清除 NX 位导致越界）
 - **用户态异常**：CPU 异常在 `trap_dispatch` 中判断 `tf->cs==0x2B`（用户态）时调用 `sys_exit(-1)` 替代 `halt()`，防止用户进程 crash 拖垮全机。内核态异常仍 halt
 - **IOPL 支持**：`proc_t::iopl` 字段允许 per-process IOPL。驱动进程（disk_driver, kbd_driver）IOPL=3，可直接 `in`/`out`；普通进程 IOPL=0，执行 I/O 指令触发 #GP
 - **IRQ 绑定**：`sys_irq_bind(irq)` 将当前进程绑定到指定 IRQ（`__atomic_store_n` RELEASE），内核在 `irq_owner[irq]` 中记录 PID，该 IRQ 发生时内核直接获取 `scheduler_lock` 唤醒绑定进程
-- **Shell**：`shell/shell.cc` 编译为 ELF64 静态可执行文件，写入 disk.img LBA 101 起始扇区。链接 `user/lib/malloc.o`（用户态 malloc/free）。交互式命令行：从 `kbd_shm` 环形缓冲区读键盘输入（支持 readline + 退格），通过 fs_driver 共享页（FS_REQ/FS_RESP）进行文件操作，支持 `r` 命令直接读裸扇区。命令：`ls [-l]`（目录列表）、`cat <path>`（读文件）、`cd <path>`（切换目录）、`pwd`（打印工作目录）、`touch <path>`（创建文件）、`mkdir <path>`（创建目录）、`run <path>`（执行 ELF 文件）、`r LBA [COUNT]`（hex dump 裸扇区）、`sbrk N`（测试 sbrk）、`malloc N`（测试 malloc）、`free ADDR`（测试 free）、`mtest`（malloc 测试套件）、`h`（帮助）
-- **用户态驱动**：`driver/kbd_driver.cc`（LBA 101, IOPL=3）绑定 IRQ33，读扫描码写入 `kbd_shm`；`driver/disk_driver.cc`（LBA 1, IOPL=3）读 `disk_req_shm` 执行 ATA PIO 操作写入 `disk_resp_shm`；`driver/kms_driver.cc`（LBA 201, IOPL=0, map_fb=true）读 KMS_REQ 共享页渲染文本到 framebuffer（0x700000 直写），主循环先 `process_commands()` 再在 `count==0` 时 `sys_wait()`；`driver/fs_driver.cc`（LBA 401, IOPL=0）读 `fs_req_shm` 执行 FAT32 只读操作（readdir/open/read/close/raw_read），内部通过 `disk_req_shm`/`disk_resp_shm` 与 disk_driver 通信，结果写入 `fs_resp_shm`
+- **Shell**：`shell/shell.cc` 编译为 ELF64 静态可执行文件，写入 disk.img LBA 401 起始扇区。链接 libc.a。交互式命令行：从 fd 0 (stdin pipe) 读键盘输入（支持 readline + 退格），通过 fd 1 (stdout pipe) 输出，通过 fs_driver 共享页（FS_REQ/FS_RESP）进行文件操作，支持 `r` 命令直接读裸扇区。命令：`ls [-l]`（目录列表）、`cat <path>`（读文件）、`cd <path>`（切换目录）、`pwd`（打印工作目录）、`touch <path>`（创建文件）、`mkdir <path>`（创建目录）、`run <path>`（执行 ELF 文件）、`r LBA [COUNT]`（hex dump 裸扇区）、`sbrk N`（测试 sbrk）、`malloc N`（测试 malloc）、`free ADDR`（测试 free）、`mtest`（malloc 测试套件）、`h`（帮助）
+- **用户态驱动**：`driver/kbd_driver.cc`（LBA 101, IOPL=3）绑定 IRQ33，读扫描码写入 `kbd_shm`，notify terminal（consumer_pid=TERMINAL_PID）；`driver/disk_driver.cc`（LBA 1, IOPL=3）读 `disk_req_shm` 执行 ATA PIO 操作写入 `disk_resp_shm`；`driver/kms_driver.cc`（LBA 201, IOPL=0, map_fb=true）读 KMS_REQ 共享页渲染文本到 framebuffer（0x700000 直写），fb_putc 支持 fg/bg 颜色渲染，主循环先 `process_commands()` 再在 `count==0` 时 `sys_wait()`；`driver/terminal.cc`（LBA 301, IOPL=0）attach kbd_shm 读键盘→sys_write(1) 到 stdin pipe，sys_read(0) 从 stdout pipe 读→VT100 状态机→cell 缓冲区→flush_dirty_cells 写 KMS ring，fd 0 为 O_RDONLY|O_NONBLOCK；`driver/fs_driver.cc`（LBA 501, IOPL=0）读 `fs_req_shm` 执行 FAT32 只读操作（readdir/open/read/close/raw_read），内部通过 `disk_req_shm`/`disk_resp_shm` 与 disk_driver 通信，结果写入 `fs_resp_shm`
 - **Shell 构建**：`g++ -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -I. -Iuser/include -c shell/shell.cc` + 链接 libc.a + `ld -m elf_x86_64 -Ttext 0x400000`。注意 `-fno-pie`（固定地址链接）和 `-I.`（允许 include `common/syscall.h` 和 `common/shm.h` 中的封装）
 - **hello 构建**：`gcc -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -I. -Iuser/include -c user/hello.c` + `ld -m elf_x86_64 -Ttext 0x400000 -o build/hello.elf build/hello.o build/libc.a`。注意用 gcc（不是 g++）编译 C 程序，链接 libc.a（含 _start/printf/string/malloc）。hello.elf 通过 `mcopy -i build/part2.img build/hello.elf ::` 写入 FAT32
 - **hello 程序**：`user/hello.c` 编译为 ELF64 静态可执行文件，使用 libc.a 提供的 `_start`（调用 main → sys_exit）和 `printf`（"Hello, World!\n"）。通过 build.sh mcopy 写入 FAT32 分区。shell 的 `run` 命令可从 FAT32 加载并 spawn 执行
 - **用户态堆**：`sys_sbrk` 系统调用（#7）管理进程 brk 堆空间（0x600000 起），保留但用户态 malloc 不再使用。`sys_mmap`（#11）/`sys_munmap`（#12）管理 mmap 区域（0x800000 起），是用户态 malloc 的底层支撑。`proc_t::mmap_brk` 记录 mmap 高水位，`proc_t::mmap_regions` 链表记录已映射区域
 - **用户态 malloc/free**：`user/lib/malloc.cc` 实现 size-class slab 方案。小分配（≤2048B）走 per-class freelist + user_slab_header，大分配（>2048B）走 sys_mmap + big_alloc_header。底层统一用 sys_mmap，不再调用 sys_sbrk。头文件 `user/include/stdlib.h`。打包进 libc.a（`ar rcs libc.a start.o stdio.o string.o malloc.o`）
-- **用户态 libc.a**：静态库包含 `_start.o`（入口点，调用 main → sys_exit）、`stdio.o`（FILE + printf/fprintf/vfprintf + stdout/stderr + kms_write_flush）、`string.o`（strlen/strcmp/memcpy/memset/memmove 等）、`malloc.o`。FILE 结构体含 fd/buffer/mode/flags/write_fn，stdout/stderr 均为无缓冲（_IONBF），write_fn 为 kms_write_flush（写 KMS_REQ 共享页 + sys_notify KMS_DRIVER_PID）。设计文档 `doc/design/libc.md`
+- **用户态 libc.a**：静态库包含 `_start.o`（入口点，调用 main → sys_exit）、`stdio.o`（FILE + printf/fprintf/vfprintf + stdout/stderr（sys_write_flush 写 pipe）+ stdin（sys_read_fill 读 pipe）+ kms_write_flush（terminal 专用））、`string.o`（strlen/strcmp/memcpy/memset/memmove 等）、`malloc.o`。FILE 结构体含 fd/buffer/mode/flags/write_fn/read_fn，stdout/stderr 均为无缓冲（_IONBF），write_fn 为 sys_write_flush（调用 sys_write(fd, ...) 写 pipe）。stdin 的 read_fn 为 sys_read_fill（调用 sys_read(fd, ...) 读 pipe）。设计文档 `doc/design/libc.md`
+
+## fd 与 pipe 架构
+
+Phase 3 实现了最小 fd + pipe 机制，将 Shell 的 I/O 从直写 KMS ring 重构为经 Terminal 中转的分层模型。
+
+- **fd 表**：每进程 `struct file fd_table[MAX_FD]`（MAX_FD=32），每项含 type（FD_NONE/FD_PIPE）+ flags（O_RDONLY/O_WRONLY/O_RDWR/O_NONBLOCK）+ pipe 指针。初始化全为 FD_NONE
+- **pipe**：内核 `struct pipe`（4KB ring buffer + head/tail + read_pid/write_pid + ref_count）。sys_pipe 创建一对相联 fd（read_fd + write_fd），ref_count=2。写满阻塞（设 write_pid + schedule），读完阻塞（设 read_pid + schedule，O_NONBLOCK 立即返回 0）。对端写入/关闭时 wake_process 唤醒
+- **sys_pipe(fd_ptr)**：syscall #17，kmalloc pipe buf + pipe struct，找两个空闲 fd slot，写 fd_ptr[0]=read_fd, fd_ptr[1]=write_fd
+- **sys_write(fd, buf, len)**：syscall #18，写 pipe ring buffer，满时阻塞，写后 wake read_pid
+- **sys_read(fd, buf, len)**：syscall #19，读 pipe ring buffer，空时阻塞（O_NONBLOCK 返回 0），读后 wake write_pid
+- **sys_close(fd)**：syscall #20，ref_count--，归零则 kfree(pipe->buf) + kfree(pipe)，否则 wake 对端
+- **fd 继承**：sys_spawn 自动复制 fd 0/1 到子进程，pipe ref_count++。子进程（如 hello.elf）继承 shell 的 stdin/stdout pipe
+- **proc_reap fd 清理**：遍历 fd_table，每个 FD_PIPE 项执行 ref_count-- + wake 对端 + 归零 kfree
+- **Terminal/Shell pipe 拓扑**：kernel_main 创建两对 pipe：
+  - pipe_stdin：terminal fd_table[1](O_WRONLY) → shell fd_table[0](O_RDONLY)
+  - pipe_stdout：shell fd_table[1](O_WRONLY) → terminal fd_table[0](O_RDONLY | O_NONBLOCK)
+- **数据流**：键盘 → kbd_driver → kbd_ring → terminal → sys_write(1) → stdin pipe → shell sys_read(0)；shell printf → sys_write(1) → stdout pipe → terminal sys_read(0) → VT100 → cell buffer → KMS ring → kms_driver → framebuffer
+- **Terminal 进程**（`driver/terminal.cc`）：attach kbd_shm，维护 VT100 状态机（NORMAL/ESC/CSI）+ cell 缓冲区（ch + fg_color + bg_color），支持 \033[H/\033[row;colH/\033[2J/\033[K/\033[...m。主循环轮询 kbd_ring 和 stdout pipe（fd 0 O_NONBLOCK），flush_dirty_cells 增量写 KMS ring，consumer_sleeping 协议让 kbd_driver 知道何时 notify
+- **KMS 驱动 bg 颜色**：`fb_putc(char c, uint32_t fg, uint32_t bg)` 对每个像素根据 glyph bit 选 fg 或 bg 颜色，确保退格/空格能正确清除旧字符
 
 ## 内存管理架构
 
@@ -309,7 +330,7 @@ irq_owner[]：
 - `init_fb` 在 `init_mem` 末尾调用，依赖 bump_alloc 和 device_vma_base 就绪
 - CMake 链接步骤使用 `build_script/cmake/do_link.cmake` 脚本处理 `$<TARGET_OBJECTS>` 的分号列表问题
 - Shell 的用户态 syscall 封装定义在 `common/syscall.h`（语义封装）+ `arch/x64/utils.h`（底层 `__syscall0` 等内联汇编），共享页结构定义在 `common/shm.h`
-- libc.a 由 `ar rcs build/libc.a build/start.o build/stdio.o build/string.o build/malloc.o` 创建。hello.c 用 gcc 编译 + 链接 libc.a；shell 也链接 libc.a（通过 kms_write_flush 输出）
+- libc.a 由 `ar rcs build/libc.a build/start.o build/stdio.o build/string.o build/malloc.o` 创建。hello.c 用 gcc 编译 + 链接 libc.a；shell 也链接 libc.a（通过 sys_write_flush 输出到 fd 1 pipe）；terminal 不链接 libc.a（直接操作 syscall + shm）
 - 用户程序编译加 `-I. -Iuser/include`：`-Iuser/include` 让自定义 stdio.h/stdlib.h/string.h 优先于宿主机版本；`-I.` 让 common/syscall.h 和 arch/x64/utils.h 可用；宿主机 freestanding 头文件（stdint.h/stddef.h/stdarg.h）通过 gcc 默认路径可用
 - PTE 物理地址提取必须用 `pte & 0x000FFFFFFFFFF000`（清除 bit 63 NX 位），`& ~0xFFF` 不清除 NX 位会导致越界
 - `sys_notify` 同时匹配 `WAIT_NOTIFY` 和 `WAIT_CHILD`，因为 `sys_exit` 通过 `sys_notify(parent_pid)` 唤醒在 `sys_waitpid` 中等待的父进程

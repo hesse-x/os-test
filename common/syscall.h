@@ -22,6 +22,10 @@
 #define SYS_FB_INFO      14
 #define SYS_SHM_CREATE   15
 #define SYS_SHM_ATTACH   16
+#define SYS_PIPE         17
+#define SYS_WRITE        18
+#define SYS_READ         19
+#define SYS_CLOSE        20
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -103,6 +107,22 @@ static inline void *sys_shm_create(size_t size) {
 
 static inline void *sys_shm_attach(int32_t target_pid) {
     return (void *)__syscall1(SYS_SHM_ATTACH, (int64_t)target_pid);
+}
+
+static inline int sys_pipe(int *fd_ptr) {
+    return (int)__syscall1(SYS_PIPE, (int64_t)(uintptr_t)fd_ptr);
+}
+
+static inline int64_t sys_write(int fd, const void *buf, size_t len) {
+    return __syscall3(SYS_WRITE, (int64_t)fd, (int64_t)(uintptr_t)buf, (int64_t)len);
+}
+
+static inline int64_t sys_read(int fd, void *buf, size_t len) {
+    return __syscall3(SYS_READ, (int64_t)fd, (int64_t)(uintptr_t)buf, (int64_t)len);
+}
+
+static inline int sys_close(int fd) {
+    return (int)__syscall1(SYS_CLOSE, (int64_t)fd);
 }
 
 #endif // COMMON_SYSCALL_H

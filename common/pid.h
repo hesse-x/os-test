@@ -5,7 +5,8 @@
 #define DISK_DRIVER_PID  2
 #define KBD_DRIVER_PID   3
 #define KMS_DRIVER_PID   4
-#define SHELL_PID        5
-#define FS_DRIVER_PID    6
+#define TERMINAL_PID     5
+#define SHELL_PID        6
+#define FS_DRIVER_PID    7
 
 #endif // PID_H
