@@ -11,8 +11,6 @@
 #include "common/errno.h"
 #include "kernel/fb.h"
 
-#define HEAP_START 0x600000
-
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 48
 static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS];
@@ -223,33 +221,30 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 21
+#define NR_SYSCALL 18
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
-    nullptr,            // 0: sys_putc removed (returns -ENOSYS)
-    sys_getpid,         // 1: 获取 PID
-    sys_yield,          // 2: 主动让出 CPU
-    sys_getc,           // 3: 读键盘输入（废弃）
-    sys_wait,           // 4: 阻塞等待通知（带超时）
-    sys_notify,         // 5: 唤醒指定进程
-    sys_irq_bind,       // 6: 绑定当前进程到指定 IRQ
-    sys_sbrk,           // 7: 扩展用户态堆
-    sys_exit,           // 8: 进程退出
-    sys_waitpid,        // 9: 等待子进程退出
-    sys_spawn,          // 10: 创建子进程
-    sys_mmap,           // 11: 匿名内存映射
-    sys_munmap,         // 12: 解除内存映射
-    sys_serial_write,   // 13: 串口输出
-    sys_fb_info,        // 14: 获取 framebuffer 信息
-    sys_shm_create,     // 15: 创建共享内存
-    sys_shm_attach,     // 16: 附加共享内存
-    sys_pipe,           // 17: 创建 pipe
-    sys_write,          // 18: 写 fd
-    sys_read,           // 19: 读 fd
-    sys_close,          // 20: 关闭 fd
+    sys_getpid,         // 0: 获取 PID
+    sys_yield,          // 1: 主动让出 CPU
+    sys_wait,           // 2: 阻塞等待通知（带超时）
+    sys_notify,         // 3: 唤醒指定进程
+    sys_irq_bind,       // 4: 绑定当前进程到指定 IRQ
+    sys_exit,           // 5: 进程退出
+    sys_waitpid,        // 6: 等待子进程退出
+    sys_spawn,          // 7: 创建子进程
+    sys_mmap,           // 8: 匿名内存映射
+    sys_munmap,         // 9: 解除内存映射
+    sys_serial_write,   // 10: 串口输出
+    sys_fb_info,        // 11: 获取 framebuffer 信息
+    sys_shm_create,     // 12: 创建共享内存
+    sys_shm_attach,     // 13: 附加共享内存
+    sys_pipe,           // 14: 创建 pipe
+    sys_write,          // 15: 写 fd
+    sys_read,           // 16: 读 fd
+    sys_close,          // 17: 关闭 fd
 };
 
 void syscall_dispatch(trapframe_t *tf) {
-    if (tf->rax < NR_SYSCALL && syscall_table[tf->rax] != nullptr) {
+    if (tf->rax < NR_SYSCALL) {
         tf->rax = syscall_table[tf->rax](
             tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8);
     } else {
@@ -266,11 +261,6 @@ uint64_t sys_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
 uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     schedule();
     return 0;
-}
-
-// sys_getc() — syscall 3 (deprecated: keyboard now handled by user-space driver)
-uint64_t sys_getc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
-    return (uint64_t)EPERM;
 }
 
 // sys_wait(timeout_ms) — syscall 4 (阻塞等待通知，可选超时)
@@ -332,54 +322,6 @@ uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return (uint64_t)EINVAL;
     __atomic_store_n(&irq_owner[irq], current_proc->pid, __ATOMIC_RELEASE);
     return 0;
-}
-
-// sys_sbrk(increment) — syscall 7 (扩展/缩小用户态堆)
-uint64_t sys_sbrk(uint64_t increment, uint64_t, uint64_t, uint64_t, uint64_t) {
-    uint64_t old_brk = current_proc->brk;
-
-    if (increment == 0)
-        return old_brk;
-
-    uint64_t new_brk;
-    if ((int64_t)increment > 0) {
-        new_brk = old_brk + increment;
-
-        // 需要映射的页范围：[old_brk 向上取整, new_brk 向上取整)
-        uint64_t page_start = ALIGN_UP(old_brk, PAGE_SIZE);
-        uint64_t page_end   = ALIGN_UP(new_brk, PAGE_SIZE);
-
-        if (page_start < page_end) {
-            int pages_mapped = 0;
-            uint64_t *pml4 = (uint64_t *)phys_to_virt(current_proc->cr3);
-            uint64_t flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
-
-            if (!map_user_pages(pml4, page_start, page_end, flags, &pages_mapped)) {
-                if (pages_mapped > 0)
-                    unmap_user_pages(pml4, page_start, page_start + pages_mapped * PAGE_SIZE, pages_mapped);
-                return 0;  // ENOMEM
-            }
-        }
-    } else {
-        // 缩小堆
-        uint64_t dec = (uint64_t)(-(int64_t)increment);
-        if (dec >= old_brk - HEAP_START)
-            return 0;  // EINVAL: cannot shrink below HEAP_START
-        new_brk = old_brk - dec;
-
-        // 需要解映射的页范围：[new_brk 向上取整, old_brk 向上取整)
-        uint64_t page_start = ALIGN_UP(new_brk, PAGE_SIZE);
-        uint64_t page_end   = ALIGN_UP(old_brk, PAGE_SIZE);
-
-        if (page_start < page_end) {
-            uint64_t *pml4 = (uint64_t *)phys_to_virt(current_proc->cr3);
-            int count = (page_end - page_start) / PAGE_SIZE;
-            unmap_user_pages(pml4, page_start, page_end, count);
-        }
-    }
-
-    current_proc->brk = new_brk;
-    return old_brk;
 }
 
 // sys_exit(exit_code) — syscall 8 (进程退出)

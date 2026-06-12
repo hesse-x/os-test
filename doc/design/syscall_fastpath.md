@@ -89,18 +89,29 @@ syscall_fast_entry:
 
 ## syscall_dispatch（kernel/trap.cc）
 
-7 个系统调用，分发表方式：
+当前 18 个系统调用（编号 0-17 连续无空洞），分发表方式：
 
 ```c
-#define NR_SYSCALL 7
+#define NR_SYSCALL 18
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
-    sys_putc,      // 0
-    sys_getpid,    // 1
-    sys_yield,     // 2
-    sys_getc,      // 3 (deprecated, returns -1)
-    sys_wait,      // 4
-    sys_notify,    // 5
-    sys_irq_bind,  // 6
+    sys_getpid,       // 0
+    sys_yield,        // 1
+    sys_wait,         // 2
+    sys_notify,       // 3
+    sys_irq_bind,     // 4
+    sys_exit,         // 5
+    sys_waitpid,      // 6
+    sys_spawn,        // 7
+    sys_mmap,         // 8
+    sys_munmap,       // 9
+    sys_serial_write, // 10
+    sys_fb_info,      // 11
+    sys_shm_create,   // 12
+    sys_shm_attach,   // 13
+    sys_pipe,         // 14
+    sys_write,        // 15
+    sys_read,         // 16
+    sys_close,        // 17
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -129,15 +140,15 @@ void syscall_dispatch(trapframe_t *tf) {
 ## 用户态封装（arch/x64/utils.h）
 
 ```c
-#define SYS_PUTC   0
-#define SYS_GETPID 1
-#define SYS_YIELD  2
-#define SYS_GETC   3
-#define SYS_WAIT   4
-#define SYS_NOTIFY 5
-#define SYS_IRQ_BIND 6
+// 当前编号（详见 common/syscall.h）
+#define SYS_GETPID       0
+#define SYS_YIELD        1
+#define SYS_WAIT         2
+#define SYS_NOTIFY       3
+#define SYS_IRQ_BIND     4
+// ... 完整列表见 common/syscall.h
 
-static inline uint64_t syscall0(uint64_t n) {
+static inline uint64_t __syscall0(uint64_t n) {
     uint64_t ret;
     __asm__ volatile("syscall" : "=a"(ret) : "a"(n) : "rcx", "r11", "memory");
     return ret;

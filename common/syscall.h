@@ -5,27 +5,24 @@
 #include "arch/x64/utils.h"
 
 // ===================== Syscall numbers =====================
-#define SYS_PUTC     0
-#define SYS_GETPID   1
-#define SYS_YIELD    2
-#define SYS_GETC     3
-#define SYS_WAIT     4
-#define SYS_NOTIFY   5
-#define SYS_IRQ_BIND 6
-#define SYS_SBRK     7
-#define SYS_EXIT     8
-#define SYS_WAITPID  9
-#define SYS_SPAWN    10
-#define SYS_MMAP     11
-#define SYS_MUNMAP   12
-#define SYS_SERIAL_WRITE 13
-#define SYS_FB_INFO      14
-#define SYS_SHM_CREATE   15
-#define SYS_SHM_ATTACH   16
-#define SYS_PIPE         17
-#define SYS_WRITE        18
-#define SYS_READ         19
-#define SYS_CLOSE        20
+#define SYS_GETPID       0
+#define SYS_YIELD        1
+#define SYS_WAIT         2
+#define SYS_NOTIFY       3
+#define SYS_IRQ_BIND     4
+#define SYS_EXIT         5
+#define SYS_WAITPID      6
+#define SYS_SPAWN        7
+#define SYS_MMAP         8
+#define SYS_MUNMAP       9
+#define SYS_SERIAL_WRITE 10
+#define SYS_FB_INFO      11
+#define SYS_SHM_CREATE   12
+#define SYS_SHM_ATTACH   13
+#define SYS_PIPE         14
+#define SYS_WRITE        15
+#define SYS_READ         16
+#define SYS_CLOSE        17
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -34,26 +31,17 @@
 // 0 = success (for status-only syscalls: wait/notify/exit/irq_bind/munmap)
 // positive errno = error (for status-only syscalls)
 // For value-returning syscalls: 0 = failure, nonzero = success
-//   sys_sbrk: returns old brk (>=0x600000) on success, 0 on failure
 //   sys_mmap: returns mapped address on success, NULL on failure
 //   sys_spawn/sys_waitpid: returns pid on success, 0 on failure
 //   sys_getpid: always succeeds (returns pid >= 1)
 
 // ===================== Semantic wrappers =====================
-static inline int sys_putc(char c) {
-    return (int)__syscall1(SYS_PUTC, (int64_t)c);
-}
-
 static inline int64_t sys_getpid() {
     return __syscall0(SYS_GETPID);
 }
 
 static inline void sys_yield() {
     __syscall0(SYS_YIELD);
-}
-
-static inline int sys_getc() {
-    return (int)__syscall0(SYS_GETC);
 }
 
 static inline int sys_wait(uint32_t timeout_ms) {
@@ -66,10 +54,6 @@ static inline int sys_notify(int32_t pid) {
 
 static inline int sys_irq_bind(int irq) {
     return (int)__syscall1(SYS_IRQ_BIND, (int64_t)irq);
-}
-
-static inline uint64_t sys_sbrk(int64_t increment) {
-    return (uint64_t)__syscall1(SYS_SBRK, increment);
 }
 
 static inline void sys_exit(int32_t exit_code) {

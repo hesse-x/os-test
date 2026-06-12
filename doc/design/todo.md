@@ -46,11 +46,10 @@
 | 用户态驱动 — IPC 基础设施 | [user_driver.md](user_driver.md) |
 | 用户态驱动 — 驱动进程 | [user_driver.md](user_driver.md) |
 | 用户态驱动 — 多 ELF 启动 | [user_driver.md](user_driver.md) |
-| 用户态驱动 — 内核态 kbd ISR 移除 + sys_getc deprecated | [user_driver.md](user_driver.md) |
+| 用户态驱动 — 内核态 kbd ISR 移除 | [user_driver.md](user_driver.md) |
 | AP 参与调度（idle 进程模型 + pick_cpu） | [ap_schedule.md](ap_schedule.md) |
 | 细粒度锁拆分（BKL 移除） | [fine_grained_lock.md](fine_grained_lock.md) |
 | FAT32 写入（touch/mkdir） | [fat32.md](fat32.md) |
-| 用户态堆（sys_sbrk） | [sbrk.md](sbrk.md) |
 | 内存管理系统（slab + mmap + 用户态 malloc 重写） | [mem.md](mem.md) |
 | 进程生命周期管理（sys_exit/sys_waitpid/sys_spawn） | [process_lifecycle.md](process_lifecycle.md) |
 | hello.elf + shell run 命令 | [process_lifecycle.md](process_lifecycle.md) |
@@ -127,7 +126,7 @@
 
 ## 短期目标 — 支持简单 ELF 可执行文件的执行
 
-核心机制已具备（ELF loader、FAT32 read、sbrk），进程生命周期管理 + shell 加载能力已实现。
+核心机制已具备（ELF loader、FAT32 read、mmap），进程生命周期管理 + shell 加载能力已实现。
 
 ### 进程退出 + 资源回收（sys_exit / sys_waitpid） ✅
 
@@ -135,16 +134,16 @@
 
 - [x] proc_t 新增 `parent_pid`（pid_t）、`exit_code`（int32_t）字段
 - [x] 新增 `PROC_ZOMBIE` 状态 + `WAIT_CHILD` 等待事件
-- [x] sys_exit syscall (#8)：设 ZOMBIE + 保存退出码 + notify 父进程 + schedule；无父进程（parent_pid==-1）时直接回收
+- [x] sys_exit syscall (#5)：设 ZOMBIE + 保存退出码 + notify 父进程 + schedule；无父进程（parent_pid==-1）时直接回收
 - [x] proc_reap：回收 PML4 + 用户页映射 + 页表页 + 内核栈 + PCB 槽位（共享页物理帧不回收）
-- [x] sys_waitpid syscall (#9)：阻塞等指定子进程 ZOMBIE + 回收资源 + 返回退出码
+- [x] sys_waitpid syscall (#6)：阻塞等指定子进程 ZOMBIE + 回收资源 + 返回退出码
 - [x] 验证: 编译通过，系统启动正常
 
 ### 运行时加载新进程（sys_spawn） ✅
 
 > 设计文档: [process_lifecycle.md](process_lifecycle.md)
 
-- [x] sys_spawn syscall (#10)：用户态 ELF 缓冲区指针 → process_create_elf，IOPL 权限检查（调用者 IOPL < 请求 IOPL 返回 -EPERM），设 parent_pid，返回子 PID
+- [x] sys_spawn syscall (#7)：用户态 ELF 缓冲区指针 → process_create_elf，IOPL 权限检查（调用者 IOPL < 请求 IOPL 返回 -EPERM），设 parent_pid，返回子 PID
 - [x] 验证: 编译通过，系统启动正常
 
 ### 异常退出路径改造 ✅
@@ -156,7 +155,7 @@
 
 ### hello.elf + shell run 命令 ✅
 
-- [x] hello.cc：最小用户程序（sys_putc 输出 "Hello, World!" → sys_exit(0)）
+- [x] hello.cc：最小用户程序（printf 输出 "Hello, World!" → sys_exit(0)）
 - [x] shell cmd_run：从 FAT32 读 ELF 文件 → malloc 缓冲区 → sys_spawn → sys_waitpid → 打印退出码
 - [x] hello.elf 写入 FAT32（build.sh mcopy）
 - [x] 验证: 编译通过，hello.elf 可通过 shell run 命令执行
@@ -168,7 +167,7 @@
 - [x] user/include/stdio.h：FILE 结构体（fd/buffer/mode/flags/write_fn）、stdout/stderr、printf/fprintf/vfprintf/fputc/fputs/puts/fflush、EOF 及缓冲模式常量
 - [x] user/include/string.h：strlen/strcmp/strncmp/strcpy/strncpy/strcat/strchr、memcpy/memset/memmove
 - [x] user/include/stdlib.h：增加 exit() 声明 + EXIT_SUCCESS/EXIT_FAILURE
-- [x] user/lib/stdio.cc：FILE 实现、stdout/stderr 实例（line-buffered/unbuffered）、sys_putc_flush、vfprintf 格式化引擎（%s/%d/%u/%c/%x/%X/%p/%ld/%lu/%lX/%% + 宽度前缀）
+- [x] user/lib/stdio.cc：FILE 实现、stdout/stderr 实例（line-buffered/unbuffered）、vfprintf 格式化引擎（%s/%d/%u/%c/%x/%X/%p/%ld/%lu/%lX/%% + 宽度前缀）
 - [x] user/lib/string.cc：字符串和内存操作函数
 - [x] user/lib/start.cc：_start 入口点（stdio_init → main → sys_exit）
 - [x] user/hello.c：改为 `#include <stdio.h>` + `int main(void)` + `printf("Hello, World!\n")`
@@ -194,7 +193,7 @@
 - [x] `common/pid.h`：集中定义所有驱动 PID（DISK_DRIVER_PID=2, KBD_DRIVER_PID=3, KMS_DRIVER_PID=4, SHELL_PID=5, FS_DRIVER_PID=6）
 - [x] `kernel/fb.cc` 瘦身：删除所有渲染函数 + 字体数据 + Cursor/Framebuffer struct，仅保留 `init_fb` 映射逻辑 + 全局 `g_fb_info`
 - [x] `kernel/fb.h` 瘦身：仅保留 `init_fb` 声明
-- [x] `kernel/trap.cc`：删除 `sys_putc` 实现（保留编号返回 -ENOSYS）、删除 `fb_lock`
+- [x] `kernel/trap.cc`：删除 `sys_putc` 实现、删除 `fb_lock`
 - [x] `common/shm.h`：新增 KMS_INFO(0x508000) + KMS_REQ(0x509000) 地址定义 + `kms_fb_info`/`kms_cmd`/`kms_req_shm` 结构体
 - [x] `kernel/mem/alloc.cc` `shm_init`：分配 KMS_INFO + KMS_REQ 物理页，末尾拷贝 `g_fb_info` 到 KMS_INFO
 - [x] `kernel/proc.cc` `map_shared_pages`：新增 KMS_INFO + KMS_REQ 映射
@@ -436,8 +435,7 @@
 
 | 功能 | 依赖 | 优先级 | 说明 |
 |------|------|--------|------|
-| sbrk 缩小堆 | sbrk.md | 中 | 内核侧 sys_sbrk 支持 increment<0，用户态 malloc 达阈值后归还堆顶空闲块 |
-| malloc/free 加锁 | sbrk.md | 中 | MALLOC_LOCK/MALLOC_UNLOCK 占位宏替换为实际锁（需用户态线程/futex 支持） |
+| malloc/free 加锁 | — | 中 | MALLOC_LOCK/MALLOC_UNLOCK 占位宏替换为实际锁（需用户态线程/futex 支持） |
 | 串口打印统一 NDEBUG 控制 | — | 低 | 全项目串口输出用宏包装，NDEBUG 下为空实现 |
 | printf %f 浮点格式化 | 用户态 SSE/FPU + libc.md | 中 | 完整 printf 支持 %f/%lf，需 FPU 上下文保存 + 浮点到十进制转换算法（Ryu） |
 | 动态库加载（.so 支持） | — | 远 | PIC 编译 + 动态链接器 + PLT/GOT + 运行时重定位 |

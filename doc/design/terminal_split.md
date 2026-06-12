@@ -74,7 +74,7 @@ struct proc_t {
 ### 1.3 sys_pipe(fd_ptr)
 
 ```c
-// syscall #17
+// syscall #14
 uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     int *fd_ptr = (int *)arg1;
     // 校验用户指针：非空、不在内核地址空间
@@ -91,7 +91,7 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 ### 1.4 sys_write(fd, buf, len)
 
 ```c
-// syscall #18
+// syscall #15
 uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
     int fd = (int)arg1;
     const char *buf = (const char *)arg2;
@@ -110,7 +110,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
 ### 1.5 sys_read(fd, buf, len)
 
 ```c
-// syscall #19
+// syscall #16
 uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
     int fd = (int)arg1;
     char *buf = (char *)arg2;
@@ -128,7 +128,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_
 ### 1.6 sys_close(fd)
 
 ```c
-// syscall #20
+// syscall #17
 uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     int fd = (int)arg1;
     // 校验 fd 范围 + fd_table[fd].type != FD_NONE
@@ -461,12 +461,12 @@ load_elf("fs_driver", LBA 501, IOPL=0, map_fb=false);  // LBA 从 401→501
 
 | # | 名称 | 签名 | 说明 |
 |---|------|------|------|
-| 17 | SYS_PIPE | `sys_pipe(fd_ptr)` | 创建 pipe，写 [read_fd, write_fd] 到用户指针 |
-| 18 | SYS_WRITE | `sys_write(fd, buf, len)` | 向 fd 写入数据 |
-| 19 | SYS_READ | `sys_read(fd, buf, len)` | 从 fd 读数据，阻塞直到有数据 |
-| 20 | SYS_CLOSE | `sys_close(fd)` | 关闭 fd，pipe ref_count-- |
+| 14 | SYS_PIPE | `sys_pipe(fd_ptr)` | 创建 pipe，写 [read_fd, write_fd] 到用户指针 |
+| 15 | SYS_WRITE | `sys_write(fd, buf, len)` | 向 fd 写入数据 |
+| 16 | SYS_READ | `sys_read(fd, buf, len)` | 从 fd 读数据，阻塞直到有数据 |
+| 17 | SYS_CLOSE | `sys_close(fd)` | 关闭 fd，pipe ref_count-- |
 
-NR_SYSCALL 从 17 增至 21。
+NR_SYSCALL=18（编号 0-17 连续无空洞）。
 
 ## 8. 实施步骤
 
@@ -481,7 +481,7 @@ NR_SYSCALL 从 17 增至 21。
 
 ### 8.2 sys_pipe + sys_close
 
-- [x] `common/syscall.h`：新增 `SYS_PIPE=17`、`SYS_CLOSE=20` 封装
+- [x] `common/syscall.h`：新增 `SYS_PIPE=14`、`SYS_CLOSE=17` 封装
 - [x] `kernel/trap.cc`：实现 `sys_pipe` — 校验指针 + 找空闲 fd + kmalloc pipe + 写用户指针
 - [x] `kernel/trap.cc`：实现 `sys_close` — ref_count-- + 归零释放 + notify 对端
 - [x] NR_SYSCALL 增至 21

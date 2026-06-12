@@ -46,20 +46,6 @@ void timer_queue_remove(proc_t *proc) {
     list_remove(&proc->wait_node);
 }
 
-// 64-bit init_code: getpid → add '0' → putc → yield → loop
-// Using SYSCALL with: rax=syscall#, rdi=arg1
-static const uint8_t init_code[] = {
-    0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00,  // movq $1, %rax (sys_getpid)
-    0x0F, 0x05,                                   // syscall
-    0x48, 0x83, 0xC0, 0x30,                      // addq $0x30, %rax
-    0x48, 0x89, 0xC7,                             // movq %rax, %rdi
-    0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00,  // movq $0, %rax (sys_putc)
-    0x0F, 0x05,                                   // syscall
-    0x48, 0xC7, 0xC0, 0x02, 0x00, 0x00, 0x00,  // movq $2, %rax (sys_yield)
-    0x0F, 0x05,                                   // syscall
-    0xEB, 0xDC                                    // jmp back (offset = -36)
-};
-
 // ===================== Shared pages =====================
 // Allocated in shm_init(), mapped into all user processes
 static uint64_t disk_req_shm_phys = 0;
@@ -83,7 +69,6 @@ void proc_init() {
         procs[i].iopl = 0;
         procs[i].parent_pid = -1;
         procs[i].exit_code = 0;
-        procs[i].brk = 0;
         procs[i].mmap_brk = 0;
         procs[i].mmap_regions = nullptr;
         procs[i].wait_deadline = 0;
@@ -263,7 +248,6 @@ proc_t *create_idle_process(int cpu_id) {
     proc->iopl = 0;
     proc->parent_pid = -1;
     proc->exit_code = 0;
-    proc->brk = 0;
     proc->mmap_brk = 0x800000;
     proc->mmap_regions = nullptr;
     for (int j = 0; j < MAX_FD; j++) {
@@ -301,116 +285,6 @@ static int pick_cpu() {
         }
     }
     return best;
-}
-
-proc_t *process_create(uint64_t entry) {
-    // 1. Find free slot + fill PCB under procs_lock
-    spin_lock(&procs_lock);
-    proc_t *proc = nullptr;
-    int alloc_idx = -1;
-    for (int i = 0; i < MAX_PROC; i++) {
-        if (procs[i].pid < 0) {
-            proc = &procs[i];
-            alloc_idx = i;
-            break;
-        }
-    }
-    if (!proc) {
-        spin_unlock(&procs_lock);
-        return nullptr;
-    }
-
-    // 2. Allocate kernel stack (8KB = 2 pages)
-    Page *stack_pages = bfc_alloc.alloc_page(2);
-    if (!stack_pages) { spin_unlock(&procs_lock); return nullptr; }
-    uint64_t k_stack_phys = page_to_phys(stack_pages);
-    uint64_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
-
-    // 3. Allocate per-process PML4
-    Page *pml4_page = bfc_alloc.alloc_page(1);
-    if (!pml4_page) { spin_unlock(&procs_lock); return nullptr; }
-    uint64_t pml4_phys = page_to_phys(pml4_page);
-    uint64_t pml4_virt = phys_to_virt(pml4_phys);
-
-    // 4. Clear PML4
-    uint64_t *new_pml4 = (uint64_t *)pml4_virt;
-    for (int i = 0; i < 512; i++) {
-        new_pml4[i] = 0;
-    }
-
-    // 5. Copy kernel PML4 entries (PML4[511] = higher-half)
-    extern uint64_t pdpt_hh[512];
-    new_pml4[511] = pml4[511];
-
-    // 6. Map user code page at 0x400000
-    Page *user_code_page = bfc_alloc.alloc_page(1);
-    if (!user_code_page) {
-        spin_unlock(&procs_lock);
-        serial_puts("process_create: alloc code failed\n");
-        return nullptr;
-    }
-    uint64_t user_code_phys = page_to_phys(user_code_page);
-    uint64_t user_code_virt = phys_to_virt(user_code_phys);
-
-    uint8_t *code_dst = (uint8_t *)user_code_virt;
-    for (size_t i = 0; i < sizeof(init_code); i++) {
-        code_dst[i] = init_code[i];
-    }
-
-    if (!map_user_page_direct(new_pml4, 0x400000, user_code_phys,
-                             PTE_PRESENT | PTE_RW | PTE_USER)) {
-        spin_unlock(&procs_lock);
-        serial_puts("process_create: map code failed\n");
-        return nullptr;
-    }
-
-    // 7. Map user stack page at 0x00007FFFFFFFD000
-    Page *user_stack_page = bfc_alloc.alloc_page(1);
-    if (!user_stack_page) { spin_unlock(&procs_lock); return nullptr; }
-    uint64_t user_stack_phys = page_to_phys(user_stack_page);
-
-    if (!map_user_page_direct(new_pml4, 0x00007FFFFFFFD000, user_stack_phys,
-                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
-        spin_unlock(&procs_lock);
-        serial_puts("process_create: map stack failed\n");
-        return nullptr;
-    }
-
-    // 8. Build trapframe + switch_to frame on kernel stack
-    uint64_t k_rsp = build_kstack(k_stack_top, entry, 0);
-
-    // 9. Fill PCB (still under procs_lock)
-    int assigned_cpu = pick_cpu();
-    proc->pid = alloc_idx;
-    proc->state = READY;
-    proc->k_rsp = k_rsp;
-    proc->k_stack_top = k_stack_top;
-    proc->cr3 = pml4_phys;
-    proc->entry = entry;
-    proc->wait_event = WAIT_NONE;
-    proc->assigned_cpu = assigned_cpu;
-    proc->iopl = 0;
-    proc->parent_pid = -1;
-    proc->exit_code = 0;
-    proc->brk = 0x600000;
-    proc->mmap_brk = 0x800000;
-    proc->mmap_regions = nullptr;
-    for (int j = 0; j < MAX_FD; j++) {
-        proc->fd_table[j].type = FD_NONE;
-        proc->fd_table[j].flags = 0;
-        proc->fd_table[j].pipe = nullptr;
-    }
-    list_init(&proc->run_node);
-    list_init(&proc->wait_node);
-    spin_unlock(&procs_lock);
-
-    // Enqueue to target CPU's run_queue under scheduler_lock
-    spin_lock(&cpu_locals[assigned_cpu].scheduler_lock);
-    list_push_back(&cpu_locals[assigned_cpu].run_queue, &proc->run_node);
-    cpu_locals[assigned_cpu].run_count++;
-    spin_unlock(&cpu_locals[assigned_cpu].scheduler_lock);
-
-    return proc;
 }
 
 proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t iopl, bool map_fb) {
@@ -499,7 +373,6 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
     proc->iopl = iopl;
     proc->parent_pid = -1;
     proc->exit_code = 0;
-    proc->brk = 0x600000;
     proc->mmap_brk = 0x800000;
     proc->mmap_regions = nullptr;
     for (int j = 0; j < MAX_FD; j++) {
@@ -742,7 +615,6 @@ void proc_reap(proc_t *proc) {
     proc->iopl = 0;
     proc->parent_pid = -1;
     proc->exit_code = 0;
-    proc->brk = 0;
     proc->mmap_brk = 0;
     proc->mmap_regions = nullptr;
     proc->wait_deadline = 0;

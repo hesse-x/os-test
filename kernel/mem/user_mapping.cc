@@ -1,5 +1,5 @@
 // User-space page mapping functions
-// Used by proc.cc (process creation) and trap.cc (sys_sbrk)
+// Used by proc.cc (process creation) and trap.cc (sys_mmap/sys_munmap/sys_spawn)
 
 #include "kernel/mem/alloc.h"
 #include "arch/x64/paging.h"

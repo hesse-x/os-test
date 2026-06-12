@@ -161,9 +161,9 @@ libc 源文件（stdio.cc, string.cc, start.cc）编译也用 `-I. -Iuser/includ
 
 当前 FILE.write_fn = sys_putc_flush。将来加 sys_read/sys_write syscall 后：
 
-1. **sys_write(syscall #11)**：`sys_write(int fd, const char *buf, int len)` → 一次 syscall 输出整段字符串
+1. **sys_write(syscall #15)**：`sys_write(int fd, const char *buf, int len)` → 一次 syscall 输出整段字符串
 2. _start 中 stdout/stderr 的 write_fn 改为 sys_write_flush
-3. **sys_read(syscall #12)**：`sys_read(int fd, char *buf, int len)` → 从 stdin 读数据
+3. **sys_read(syscall #16)**：`sys_read(int fd, char *buf, int len)` → 从 stdin 读数据
 4. stdin FILE 实例：fd=0, mode=read, line-buffered
 5. fgetc/fgets/fread 实现：从 FILE buffer 读，buffer 空 → sys_read 填充
 6. fopen/fclose：分配 FILE + 调 sys_open 获取 fd（需 sys_open syscall）

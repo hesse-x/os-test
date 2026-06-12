@@ -234,15 +234,6 @@ static void cmd_raw_read(uint32_t lba, uint32_t count) {
     if (bytes % 16 != 0) putchar('\n');
 }
 
-static void cmd_sbrk(const char *args) {
-    uint32_t increment = parse_u32(args);
-    int64_t result = sys_sbrk((int64_t)increment);
-    if (result == 0)
-        printf("sbrk(%u) failed\n", increment);
-    else
-        printf("sbrk(%u) = %lX\n", increment, (unsigned long)result);
-}
-
 static void cmd_malloc(const char *args) {
     uint32_t size = parse_u32(args);
     void *p = malloc(size);
@@ -445,11 +436,6 @@ extern "C" void _start() {
             continue;
         }
 
-        if (strcmp(cmd_name, "sbrk") == 0) {
-            cmd_sbrk(p);
-            continue;
-        }
-
         if (strcmp(cmd_name, "malloc") == 0) {
             cmd_malloc(p);
             continue;
@@ -491,7 +477,6 @@ extern "C" void _start() {
             printf("mkdir <path>    - create directory\n");
             printf("run <path>      - execute ELF file\n");
             printf("r LBA [COUNT]   - raw disk read\n");
-            printf("sbrk N          - test sbrk syscall\n");
             printf("malloc N        - test malloc\n");
             printf("free ADDR       - test free\n");
             printf("mtest           - malloc test suite\n");

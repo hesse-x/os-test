@@ -19,9 +19,8 @@
 | BFC 分配器 | `kernel/mem/alloc.cc`，Best-Fit Contiguous 页面级分配，frames[] + free_list + bfc_lock |
 | 页表映射 | `arch/x64/paging.cc`，4 级页表，2MB huge pages，identity + higher-half 双映射 |
 | 用户页映射 | `kernel/mem/user_mapping.cc`，ensure_pd/ensure_pt/map_user_page_direct/map_user_pages/unmap_user_pages |
-| sys_sbrk | syscall #7，堆扩展/查询，proc_t.brk 管理 |
 | **内核 slab 分配器** | `kernel/mem/slab.cc`，per-CPU active slab + per-cache partial list，kmalloc/kfree/kcalloc/krealloc |
-| **sys_mmap / sys_munmap** | syscall #11/#12，匿名私有映射，proc_t.mmap_brk + mmap_regions 管理 |
+| **sys_mmap / sys_munmap** | syscall #8/#9，匿名私有映射，proc_t.mmap_brk + mmap_regions 管理 |
 | **用户态 slab malloc** | `user/lib/malloc.cc`，size-class slab + sys_mmap，替代旧显式空闲链表方案 |
 
 ## 地址空间布局

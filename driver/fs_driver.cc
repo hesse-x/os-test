@@ -564,7 +564,8 @@ static void fat32_init() {
 
     // Sanity checks — if disk_driver wasn't ready, BPB may be zeros
     if (bps != 512 || sectors_per_cluster == 0 || spf32 == 0 || root_cluster < 2) {
-        sys_putc('E'); sys_putc('B'); sys_putc('P'); sys_putc('B'); sys_putc('\n');
+        const char msg[] = "EBPB\n";
+        sys_serial_write(msg, sizeof(msg) - 1);
         sys_wait(0);  // never recover, halt
     }
 

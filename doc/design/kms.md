@@ -128,7 +128,7 @@ MBR 分区1 (type=0xDA) 覆盖 LBA 1-210（裸 ELF 存储），分区2 (type=0x0
 
 ### sys_putc 删除
 
-- `sys_putc`（syscall 0）删除实现，保留编号，返回 `-ENOSYS`
+- `sys_putc` 已完全删除，编号已紧凑重排（当前 NR_SYSCALL=18，编号 0-17）
 - `fb_lock` 同步删除
 
 ### shm_init 改动

@@ -68,7 +68,6 @@ struct proc_t {
     uint8_t iopl;          // IOPL for this process (0=normal, 3=driver)
     pid_t parent_pid;      // 父进程 PID，启动时进程设为 -1
     int32_t exit_code;     // 退出码，ZOMBIE 时有效
-    uint64_t brk;          // 堆顶地址，idle=0，用户进程=0x600000
     uint64_t mmap_brk;     // mmap 区域高水位（初始 0x800000）
     mmap_region *mmap_regions; // mmap 区域链表头
     list_node_t run_node;  // embedded in per-CPU run_queue
@@ -87,7 +86,6 @@ extern spinlock_t procs_lock;
 
 extern "C" {
 void proc_init();
-proc_t *process_create(uint64_t entry);
 proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t iopl = 0, bool map_fb = false);
 void schedule();
 void switch_to(proc_t *prev, proc_t *next);

@@ -9,8 +9,8 @@
 > - 详见 [syscall_fastpath.md](syscall_fastpath.md)
 > - syscall_dispatch: `syscall_table[tf->rax](tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8)`（Linux x86-64 约定）
 > - 所有 syscall 函数签名: `uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)`
-> - 7 个系统调用：putc(0), getpid(1), yield(2), getc(3), wait(4), notify(5), irq_bind(6)
-> - sys_getc(3) 已废弃（直接返回 -1，不再阻塞），键盘完全由用户态 kbd_driver 通过共享页 + irq_bind 接管
+> - 18 个系统调用（编号 0-17 连续无空洞）：getpid(0), yield(1), wait(2), notify(3), irq_bind(4), exit(5), waitpid(6), spawn(7), mmap(8), munmap(9), serial_write(10), fb_info(11), shm_create(12), shm_attach(13), pipe(14), write(15), read(16), close(17)
+> - sys_putc/sys_getc/sys_sbrk 已删除，编号已紧凑重排为 0-17
 > - sys_wait/sys_notify/sys_irq_bind 为用户态驱动 IPC 基础设施，详见 [user_driver.md](user_driver.md)
 > - 用户地址空间: 代码 0x400000, 栈 0x00007FFFFFFFD000
 > - 独立 PML4 + CR3 切换（switch_to 中 movq 24(%rsi), %rax; movq %rax, %cr3）
@@ -28,7 +28,7 @@
 | 用户地址空间布局 | 经典三段：代码 0x400000, 堆预留 0x600000, 栈 0xBFFFE000 | 间距充足，栈远离 VMA_BASE 边界 |
 | syscall 分发方式 | trap_dispatch 检查 trapno==128 后调用 syscall_dispatch | 与硬件中断/异常共享 trap_dispatch 入口，统一分发路径 |
 | syscall 参数传递 | 从 trapframe 的 pushregs_t 提取参数 | `uint32_t (*)(uint32_t,...)` 分发表，dispatch 提取 tf->regs.ebx/ecx/edx/esi/edi 作为5个参数，返回值写 tf->regs.eax |
-| syscall 集合 | 4个：putc(0), getpid(1), yield(2), getc(3) | shell 最小依赖；getc 阻塞等待键盘输入 |
+| syscall 集合 | 18个（编号 0-17 连续无空洞） | 见 common/syscall.h |
 | 阻塞机制 | wait_event 字段 + 扫描 procs[] | freestanding 无 std::list，64进程扫描成本忽略不计 |
 | sys_yield 实现 | 直接调 schedule()，无特殊处理 | 与 timer IRQ 路径共享同一 schedule()，Linux 同方案 |
 | CR3 切换策略 | 无条件写 CR3 | 每次都刷新 TLB，简单正确；避免 CR3 比较开销（需要读旧值+条件跳转），64 进程下切换频率不高 |
@@ -125,13 +125,11 @@ void syscall_dispatch(trapframe_t *tf) {
 
 | # | 名称 | 功能 | 参数（RDI, RSI, RDX, R10, R8） | 返回值 (RAX) |
 |---|------|------|-------------------------------|-------------|
-| 0 | sys_putc | 输出字符到 framebuffer + 串口 | arg1=(char)c | 0 |
-| 1 | sys_getpid | 获取当前进程 PID | 无 | pid |
-| 2 | sys_yield | 主动让出 CPU，触发调度 | 无 | 0 |
-| 3 | sys_getc | ~~读键盘输入~~ 已废弃 | 无 | -1 |
-| 4 | sys_wait | 阻塞当前进程，等待 WAIT_NOTIFY | 无 | 0（被唤醒后） |
-| 5 | sys_notify | 唤醒指定 PID 的阻塞进程 | arg1=(pid_t)target_pid | 0 |
-| 6 | sys_irq_bind | 绑定当前进程到指定 IRQ 向量 | arg1=(int)irq | 0 成功 / -1 失败 |
+| 0 | sys_getpid | 获取当前进程 PID | 无 | pid |
+| 1 | sys_yield | 主动让出 CPU，触发调度 | 无 | 0 |
+| 2 | sys_wait | 阻塞当前进程，等待 WAIT_NOTIFY | 无 | 0（被唤醒后） |
+| 3 | sys_notify | 唤醒指定 PID 的阻塞进程 | arg1=(pid_t)target_pid | 0 |
+| 4 | sys_irq_bind | 绑定当前进程到指定 IRQ 向量 | arg1=(int)irq | 0 成功 / -1 失败 |
 
 ### ABI
 
@@ -144,21 +142,7 @@ void syscall_dispatch(trapframe_t *tf) {
 - **分发**：`syscall_table[tf->rax](tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8)`
 - **无效 syscall 号**：返回 `(uint64_t)-1`
 
-### sys_putc(char c) — syscall 0
-
-输出字符到 framebuffer（加 fb_lock 保护）和 COM1 串口。
-
-```c
-uint64_t sys_putc(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
-    spin_lock(&fb_lock);
-    fb_putc((char)arg1, 0xFFFFFF);
-    spin_unlock(&fb_lock);
-    serial_putc((char)arg1);
-    return 0;
-}
-```
-
-### sys_getpid() — syscall 1
+### sys_getpid() — syscall 0
 
 返回当前进程的 PID（从 `current_proc->pid` 读取）。
 
@@ -168,7 +152,7 @@ uint64_t sys_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
 }
 ```
 
-### sys_yield() — syscall 2
+### sys_yield() — syscall 1
 
 主动让出 CPU，调用 `schedule()` 将当前进程重新入队，切换到下一个就绪进程。
 
@@ -179,17 +163,7 @@ uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
 }
 ```
 
-### sys_getc() — syscall 3 (已废弃)
-
-键盘输入已由用户态 kbd_driver 通过共享页 + irq_bind 接管，此 syscall 直接返回 -1。
-
-```c
-uint64_t sys_getc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
-    return (uint64_t)-1;
-}
-```
-
-### sys_wait() — syscall 4
+### sys_wait() — syscall 2
 
 阻塞当前进程（state=BLOCKED, wait_event=WAIT_NOTIFY），递减 run_count，调用 `schedule()` 切走。进程在被 `sys_notify` 或 IRQ 唤醒后从 `schedule()` 返回点继续执行。
 
@@ -205,7 +179,7 @@ uint64_t sys_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
 
 典型用法：用户态驱动在空闲循环中 `sys_wait()` 阻塞，等待事件（键盘中断、磁盘请求等）唤醒后处理。
 
-### sys_notify(pid_t target_pid) — syscall 5
+### sys_notify(pid_t target_pid) — syscall 3
 
 唤醒指定 PID 的阻塞进程。遍历 `procs[]` 查找匹配 PID 且 state==BLOCKED + wait_event==WAIT_NOTIFY 的进程，获取目标 CPU 的 `scheduler_lock` 后将状态改为 READY、入队 run_queue、递增 run_count。
 
@@ -232,7 +206,7 @@ uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 
 典型用法：disk_driver 完成磁盘操作后 `sys_notify(shell_pid)` 通知 shell；fs_driver 请求磁盘后由 disk_driver 唤醒。
 
-### sys_irq_bind(int irq) — syscall 6
+### sys_irq_bind(int irq) — syscall 4
 
 将当前进程绑定到指定硬件 IRQ 向量。绑定后，该 IRQ 发生时 `trap_dispatch` 查 `irq_owner[irq]`，发现已绑定用户进程则直接唤醒（获取 scheduler_lock → READY → 入队 → EOI），不再走内核 ISR 注册表。
 
@@ -265,10 +239,8 @@ static inline int64_t __syscall1(int64_t nr, int64_t a1) {
 }
 
 // common/syscall.h — 语义封装
-static inline void sys_putc(char c)        { __syscall1(SYS_PUTC, (int64_t)c); }
 static inline int64_t sys_getpid()         { return __syscall0(SYS_GETPID); }
 static inline void sys_yield()             { __syscall0(SYS_YIELD); }
-static inline int64_t sys_getc()           { return __syscall0(SYS_GETC); }
 static inline void sys_wait()              { __syscall0(SYS_WAIT); }
 static inline void sys_notify(int32_t pid) { __syscall1(SYS_NOTIFY, (int64_t)pid); }
 static inline void sys_irq_bind(int irq)   { __syscall1(SYS_IRQ_BIND, (int64_t)irq); }
@@ -276,35 +248,7 @@ static inline void sys_irq_bind(int irq)   { __syscall1(SYS_IRQ_BIND, (int64_t)i
 
 ## 9. 独立 PD + CR3 切换
 
-### process_create 实现
-
-```c
-proc_t *process_create(uint32_t entry) {
-    // 1. 查找空闲 PCB 槽位 (pid == -1)
-    // 2. 分配内核栈 (2 pages = 8KB)
-    Page *stack_pages = bfc_alloc.alloc_page(2);
-    uint32_t k_stack_phys = page_to_phys(stack_pages);
-    uint32_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
-
-    // 3. 分配独立 PD 页
-    Page *pd_page = bfc_alloc.alloc_page(1);
-    uint32_t pd_phys = page_to_phys(pd_page);
-    uint32_t pd_virt = phys_to_virt(pd_phys);
-
-    // 4. 清零 PD（手动 for 循环，freestanding 无 memset 优化）
-    uint32_t *new_pd = (uint32_t *)pd_virt;
-    for (int i = 0; i < 1024; i++) new_pd[i] = 0;
-
-    // 5. 拷贝内核 PDE（PD[768..1023]），共享内核 PT
-    for (int i = 768; i < 1024; i++) {
-        new_pd[i] = page_directory[i];  // 共享内核 PT，只拷贝 PDE 值
-    }
-
-    // 6. 分配用户代码页 + PT（PD[1] → 0x400000）
-    Page *user_code_page = bfc_alloc.alloc_page(1);
-    uint32_t user_code_phys = page_to_phys(user_code_page);
-    // 拷贝 init_code[] 到代码页
-    ...
+`process_create` 已删除，当前仅保留 `process_create_elf`。详见 `kernel/proc.cc`。
 
     Page *user_code_pt_page = bfc_alloc.alloc_page(1);
     uint32_t *code_pt = (uint32_t *)phys_to_virt(page_to_phys(user_code_pt_page));
@@ -512,45 +456,9 @@ static void keyboard_handler(trapframe_t *tf) {
 }
 ```
 
-## 用户测试程序
-
-当前使用硬编码的 `init_code[]` 字节序列作为用户态测试程序：
-
-```asm
-# getpid → add '0' → putc → yield → loop
-mov eax, 1           # sys_getpid
-int 0x80
-add eax, '0'         # PID 转 ASCII
-mov ebx, eax
-mov eax, 0           # sys_putc
-int 0x80
-mov eax, 2           # sys_yield
-int 0x80
-jmp -28              # 循环
-```
-
-对应机器码：
-```c
-static const uint8_t init_code[] = {
-    0xB8, 0x01, 0x00, 0x00, 0x00,  // mov eax, 1
-    0xCD, 0x80,                      // int 0x80
-    0x83, 0xC0, 0x30,                // add eax, '0'
-    0x89, 0xC3,                      // mov ebx, eax
-    0xB8, 0x00, 0x00, 0x00, 0x00,  // mov eax, 0
-    0xCD, 0x80,                      // int 0x80
-    0xB8, 0x02, 0x00, 0x00, 0x00,  // mov eax, 2
-    0xCD, 0x80,                      // int 0x80
-    0xEB, 0xE4                       // jmp -28
-};
-```
-
-该程序循环调用 getpid→putc→yield，尚未测试 sys_getc（syscall 3）的阻塞路径。ELF 加载器将在后续阶段实现。
-
 ## 验证计划
 
-1. **sys_putc 验证**：用户进程代码改为调用 `int 0x80` (eax=0, ebx='A')，屏幕输出字符 'A'
-2. **sys_yield 验证**：用户进程调用 sys_yield 后进程轮转正常
-3. **sys_getc 验证**：shell 进程调用 sys_getc 等待键盘输入，按键后字符回显
+1. **sys_yield 验证**：用户进程调用 sys_yield 后进程轮转正常
 4. **独立 PD 验证**：CR3 切换后进程正常运行，内核空间访问正常
 
 ## 实现顺序
@@ -565,9 +473,6 @@ static const uint8_t init_code[] = {
 3. syscall_dispatch + syscall_table 实现
    → 验证: syscall stub 输出正确 ✅
 
-4. sys_putc + sys_getpid + sys_yield 实现
-   → 验证: 用户态通过 int 0x80 打印字符 ✅
-
-5. sys_getc + kbd 阻塞唤醒
-   → 验证: shell 进程等待按键并回显（未测试，需 init_code 增加 getc 调用）
+4. sys_getpid + sys_yield 实现
+   → 验证: 用户态 syscall 正常工作 ✅
 ```
