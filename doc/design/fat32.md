@@ -166,7 +166,7 @@ Shell (PID 4)                      fs_driver (PID 5)                 disk_driver
 ### 限制
 
 - 不支持文件内容写入（write cmd），仅支持创建空文件和目录
-- 只支持 8.3 短文件名，LFN 条目跳过
+- ~~不支持 LFN~~：LFN 读写已规划，详见 [fs_restructure.md](fs_restructure.md) Phase 1-3
 - 单客户端（shell）
 - 时间戳硬编码（无 RTC）
 
@@ -433,7 +433,7 @@ Shell (PID 4)                      fs_driver (PID 5)                 disk_driver
 - FSINFO 空闲簇提示：解析 BPB 中的 FSINFO sector（LBA part_start+6），用上次空闲簇提示加速查找，写完后更新 FSINFO
 - RTC 时间源：UEFI 获取初始时间 → 内核全局时间变量 → sys_gettime syscall → fs_driver 获取真实时间戳
 - 真实 RTC 支持：cmos_read 驱动读取硬件实时时钟
-- LFN 支持：解析长文件名目录项
+- LFN 支持：解析长文件名目录项 → 已规划，详见 [fs_restructure.md](fs_restructure.md)
 - 多客户端：fs_driver 打开文件表按 PID 索引，支持多个进程同时访问
 - VFS 层：支持多种文件系统类型
 - 文件写入（write cmd）：fs_driver 支持文件内容写入（簇分配 + FAT 链扩展 + 数据写入）

@@ -1,6 +1,5 @@
 #include "stdio.h"
-#include "common/syscall.h"
-#include "arch/x64/utils.h"
+#include <sys.h>
 
 extern "C" int main(void);
 

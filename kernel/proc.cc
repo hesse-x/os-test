@@ -10,6 +10,7 @@
 #include "common/elf.h"
 #include "common/shm.h"
 #include "common/macro.h"
+#include "common/errno.h"
 #include "kernel/fb.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
@@ -79,6 +80,15 @@ void proc_init() {
         }
         list_init(&procs[i].run_node);
         list_init(&procs[i].wait_node);
+        // recv queue
+        procs[i].recv_head = 0;
+        procs[i].recv_tail = 0;
+        procs[i].recv_lock = SPINLOCK_INIT;
+        // RPC state
+        procs[i].rpc_caller_pid = -1;
+        procs[i].rpc_reply_buf = nullptr;
+        procs[i].rpc_result = 0;
+        procs[i].rpc_target_pid = -1;
     }
     cpu_locals[0]._cur_proc = nullptr;
     cpu_locals[0].run_count = 0;
@@ -513,6 +523,25 @@ void proc_reap(proc_t *proc) {
     // 6. Clear dev_table entries for this PID
     dev_table_cleanup(proc->pid);
 
+    // 6b. Wake any processes waiting for RPC reply from this process
+    for (int i = 0; i < MAX_PROC; i++) {
+        if (procs[i].pid >= 0 &&
+            procs[i].state == BLOCKED &&
+            procs[i].wait_event == WAIT_RPC_REPLY &&
+            procs[i].rpc_target_pid == proc->pid) {
+            int wcpu = procs[i].assigned_cpu;
+            spin_lock(&cpu_locals[wcpu].scheduler_lock);
+            if (procs[i].state == BLOCKED && procs[i].wait_event == WAIT_RPC_REPLY) {
+                procs[i].state = READY;
+                procs[i].wait_event = WAIT_NONE;
+                procs[i].rpc_result = ESRCH;
+                list_push_back(&cpu_locals[wcpu].run_queue, &procs[i].run_node);
+                cpu_locals[wcpu].run_count++;
+            }
+            spin_unlock(&cpu_locals[wcpu].scheduler_lock);
+        }
+    }
+
     // 7. Clear PCB slot
     spin_lock(&procs_lock);
     proc->pid = -1;
@@ -538,5 +567,14 @@ void proc_reap(proc_t *proc) {
     }
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
+    // recv queue
+    proc->recv_head = 0;
+    proc->recv_tail = 0;
+    proc->recv_lock = SPINLOCK_INIT;
+    // RPC state
+    proc->rpc_caller_pid = -1;
+    proc->rpc_reply_buf = nullptr;
+    proc->rpc_result = 0;
+    proc->rpc_target_pid = -1;
     spin_unlock(&procs_lock);
 }

@@ -163,7 +163,7 @@ void kernel_main(boot_info *bi) {
   {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(501, &sz, &pg, &np);
-    if (elf) { proc_t *fs_proc = process_create_elf(elf, sz, 0); bfc_alloc.free_page(pg, np); if (fs_proc) register_dev(DEV_FS, fs_proc->pid); }
+    if (elf) { proc_t *fs_proc = process_create_elf(elf, sz, 0); bfc_alloc.free_page(pg, np); }
     else serial_puts("kernel_main: fs_driver.elf not found\n");
   }
 

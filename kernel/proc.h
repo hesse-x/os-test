@@ -11,7 +11,10 @@ typedef int32_t pid_t;
 
 enum proc_state_t { READY, RUNNING, BLOCKED, ZOMBIE, REAPING };
 
-enum wait_event_t { WAIT_NONE, WAIT_NOTIFY, WAIT_CHILD };
+enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_RPC_REPLY, WAIT_CHILD, WAIT_PIPE };
+
+#define RECV_MSG_SIZE   64
+#define RECV_QUEUE_SIZE 16
 
 struct mmap_region {
     uint64_t vaddr;
@@ -76,6 +79,18 @@ struct proc_t {
     uint8_t  wait_timed_out; // 1 = timer expired wakeup, 0 = notify wakeup
     shm_region shm_regions[MAX_SHM_PER_PROC]; // dynamic shared memory regions
     struct file fd_table[MAX_FD];  // per-process file descriptor table
+
+    // === 统一 recv 队列 ===
+    uint8_t  recv_buf[RECV_QUEUE_SIZE][RECV_MSG_SIZE]; // 16 × 64B = 1KB
+    uint32_t recv_head;         // producer write position
+    uint32_t recv_tail;         // consumer read position
+    spinlock_t recv_lock;       // protects recv_buf/head/tail
+
+    // === RPC 状态 ===
+    pid_t    rpc_caller_pid;    // current RPC caller PID (-1 = none)
+    void    *rpc_reply_buf;     // caller's reply buffer user-space address
+    int32_t  rpc_result;        // 0 = success, positive errno on error
+    pid_t    rpc_target_pid;    // for crash cleanup: who we're waiting on
 };
 
 #define MAX_PROC 64

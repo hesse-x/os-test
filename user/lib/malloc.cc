@@ -1,10 +1,9 @@
 #include "stdlib.h"
 #include "string.h"
-#include "common/syscall.h"
+#include <sys.h>
 #include "common/errno.h"
 #include "common/macro.h"
 #include "arch/x64/memlayout.h"
-#include "arch/x64/utils.h"
 
 // ===================== Size class 定义 =====================
 #define NUM_KMALLOC_CLASSES 9

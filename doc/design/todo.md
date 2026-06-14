@@ -64,12 +64,19 @@
 | KMS 帧调度优化（240 slot ring + 16ms 定时刷帧） | [driver_workflow.md](driver_workflow.md) |
 | Phase 3: 最小 fd + VT100 + Terminal/Shell 拆分 | [terminal_split.md](terminal_split.md) |
 | 设备管理器（dev_table + sys_load_dev/sys_lookup_dev） | [dev_table.md](dev_table.md) |
+| 统一 IPC 机制（sys_recv/sys_rpc/sys_reply 替换 sys_wait） | [rpc.md](rpc.md) |
+| 用户态驱动（3 层 kbd + bind/unbind + 各驱动工作流） | [user_driver.md](user_driver.md) |
+| 键盘驱动 3 层架构 + RPC bind/unbind | [user_driver.md](user_driver.md) |
 
 ## 当前状态
 
 内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 6 个 ELF（disk_driver → kbd_driver → kms_driver → terminal → shell → fs_driver）→ 多进程协作。Phase 3 完成：fd + pipe + terminal 进程拆分。Shell 不再直写 KMS ring，通过 fd 0/1 pipe 与 terminal 通信。Terminal 管理 VT100 状态机 + cell 缓冲区，负责键盘输入分发和屏幕渲染。KMS 驱动不变（仅做像素渲染）。新增 4 个 syscall（sys_pipe/sys_write/sys_read/sys_close），sys_spawn 自动继承 fd 0/1。设备管理器完成：`dev_table[dev_type→PID]` 映射 + `sys_load_dev`/`sys_lookup_dev` 两个新 syscall，驱动间通过设备类型动态发现对端 PID，`common/pid.h` 已删除。
 
 **Phase 2 完成**：驱动工作流重构完成（[driver_workflow.md](driver_workflow.md)），kbd/kms 驱动已迁移到动态 shm + 环形缓冲区 + sleeping flag。disk/fs 驱动也已迁移到动态 SHM（[dynamic_shm_migration.md](dynamic_shm_migration.md)），硬编码共享页基础设施（shm_init/map_shared_pages/7 路物理地址特判）已完全删除。
+
+**统一 IPC 完成**：sys_recv/sys_rpc/sys_reply 已替换 sys_wait（[rpc.md](rpc.md)），建立轻量级同步 RPC 机制。sys_recv 统一接收 IRQ/RPC/notify 三类消息（per-process 16 slot recv 队列 + 超时支持），sys_rpc 同步调用（56 字节载荷 + WAIT_RPC_REPLY 阻塞），sys_reply 跨地址空间拷贝回复。NR_SYSCALL 从 20 增至 22（新增 sys_rpc/sys_reply，sys_notify 移至 #21 改为消息入队模式）。键盘驱动 3 层架构完成（acquire→translate→push），RPC bind/unbind 协议实现（KBD_RPC_BIND/KBD_RPC_UNBIND），kbd_driver 创建含 kbd_ring + kms_ring 的单一 SHM 页，terminal 通过 sys_rpc 绑定键盘。
+
+**待实施**：文件系统重构（[fs_restructure.md](fs_restructure.md)）— LFN 长文件名读写 + Linux FHS 目录结构 + Shell 路径执行改造 + 启动流程改造（init + exec）。Phase 1-3 不改启动流程，Phase 4 需在 kbd 重构完成后审视。
 
 ## 多核 SMP — 调度与锁（全部完成）
 
@@ -391,7 +398,7 @@
 
 | # | 问题 | 位置 | 说明 |
 |---|------|------|------|
-| 1 | BFC 分配器无锁保护 | `kernel/mem/alloc.cc` | `alloc_page`/`free_page` 操作全局 `free_list` 无锁，SMP 并发损坏空闲链表。**方案**: [mem.md](mem.md) Phase 1 — 新增全局 `bfc_lock` 自旋锁 |
+| 1 | ~~BFC 分配器无锁保护~~ | `kernel/mem/alloc.cc` | **已修复**：`bfc_lock` 自旋锁已添加（`spin_lock_irqsave`/`spin_unlock_irqrestore`） |
 
 ### 高（SMP 竞态 / 内存安全）
 
@@ -451,7 +458,7 @@
 | objcopy → ld --remove-section | CMake 用户态构建 | 低 | 当前 add_user_elf 保留 compile → objcopy → ld 三步管线，可用 ld `--remove-section .note.gnu.property` 省掉中间 .stripped.o 文件。见 [cmake_user_build.md](cmake_user_build.md) |
 | RMW 组合命令 | disk_driver | 低 | 一次 IPC 内读扇区→改→写回 |
 | FSINFO 穷闲簇提示 | FAT32 | 低 | 用上次穷闲簇提示加速查找 |
-| LFN 支持 | FAT32 | 低 | 解析长文件名目录项 |
+| LFN 支持 | FAT32 | 中 | 解析长文件名目录项，设计见 [fs_restructure.md](fs_restructure.md) Phase 1/3 |
 | 多客户端 fs_driver | 无 | 低 | 打开文件表按 PID 索引 |
 | VFS 层 | 无 | 低 | 支持多种文件系统类型 |
 | 页面换出 (swap) | FAT32 write | 低 | BFC 不足时换出到磁盘 |

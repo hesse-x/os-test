@@ -10,5 +10,8 @@
 #define ECHILD   6
 #define EFAULT   7
 #define EEXIST   8
+#define EBUSY    9
+#define ESRCH    10
+#define ETIMEDOUT 11
 
 #endif // COMMON_ERRNO_H

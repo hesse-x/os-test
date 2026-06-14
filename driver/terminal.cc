@@ -9,11 +9,11 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "arch/x64/utils.h"
-#include "common/syscall.h"
+#include <sys.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/macro.h"
+#include "common/input.h"
 
 // ===================== Shared memory (kbd/kms) =====================
 
@@ -444,12 +444,26 @@ static void flush_dirty_cells() {
 extern "C" void _start() {
     kms_driver_pid = sys_lookup_dev(DEV_KMS);
 
-    // 1. Attach to KBD driver's shared memory page (retry until available)
-    uint64_t shm_addr = 0;
-    while ((shm_addr = (uint64_t)sys_shm_attach(sys_lookup_dev(DEV_KBD))) == 0) {
-        sys_wait(1);
+    int32_t kbd_pid = sys_lookup_dev(DEV_KBD);
+
+    // 1. Bind to KBD driver via RPC, then attach SHM
+    struct kbd_rpc_request bind_req;
+    for (int i = 0; i < 56; i++) ((uint8_t*)&bind_req)[i] = 0;
+    bind_req.opcode = KBD_RPC_BIND;
+    bind_req.pid = sys_getpid();
+
+    struct kbd_rpc_reply bind_reply;
+    for (int i = 0; i < 64; i++) ((uint8_t*)&bind_reply)[i] = 0;
+
+    while (1) {
+        int rc = sys_rpc(kbd_pid, &bind_req, &bind_reply);
+        if (rc == 0 && bind_reply.result == 0) break;
+        // Retry: kbd_driver may not have started yet, or EBUSY
+        struct recv_msg m;
+        sys_recv(&m, 100);
     }
 
+    uint64_t shm_addr = (uint64_t)sys_shm_attach(kbd_pid);
     shm_hdr = (volatile driver_shm_header *)shm_addr;
     kbd = (volatile kbd_ring *)(shm_addr + KBD_RING_OFFSET);
     kms = (volatile kms_ring *)(shm_addr + KMS_RING_OFFSET);
@@ -480,7 +494,7 @@ extern "C" void _start() {
     cells = (struct cell *)sys_mmap(cell_bytes);
     if (!cells) {
         // Cannot allocate cells, just idle
-        while (1) sys_wait(0);
+        while (1) { struct recv_msg m; sys_recv(&m, 0); }
     }
 
     // 5. Initialize cells to spaces
@@ -535,7 +549,8 @@ extern "C" void _start() {
                 shm_hdr->consumer_sleeping = 0;
                 continue;
             }
-            sys_wait(1);
+            struct recv_msg m;
+            sys_recv(&m, 1);
             shm_hdr->consumer_sleeping = 0;
         }
     }

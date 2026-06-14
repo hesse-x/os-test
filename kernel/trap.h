@@ -15,10 +15,12 @@ void isr_init();
 // Syscalls
 uint64_t sys_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_recv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_rpc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_reply(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t);
 uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t);
 uint64_t sys_mmap(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -40,7 +42,8 @@ int register_dev(int dev_type, int32_t pid);
 // Remove a PID from dev_table (called by proc_reap)
 void dev_table_cleanup(int32_t pid);
 
-// Wake a process blocked on WAIT_NOTIFY (used by pipe close and proc_reap)
+// Wake a process blocked on WAIT_PIPE (used by pipe close and proc_reap)
+// Enqueues a RECV_NOTIFY message and wakes if in WAIT_RECV
 void wake_process(int32_t pid);
 }
 

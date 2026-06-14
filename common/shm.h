@@ -64,6 +64,21 @@ struct fs_dirent {
     uint8_t  attr;       // FAT attributes (dir/readonly etc)
 };
 
+// FS RPC request (fits in recv_msg.data[56])
+struct fs_rpc_request {
+    uint32_t cmd;        // FS_CMD_*
+    uint8_t  reserved[52];
+};
+
+// FS RPC reply (fits in 64 bytes, same as RECV_MSG_SIZE)
+struct fs_rpc_reply {
+    uint32_t status;     // 0=success, nonzero=error
+    uint32_t fd;         // open returns fd
+    uint32_t count;      // bytes read/returned
+    uint32_t total;      // file size (open) or entry count (readdir)
+    uint8_t  reserved[48];
+};
+
 // FS commands
 #define FS_CMD_READDIR   0
 #define FS_CMD_OPEN      1
@@ -77,14 +92,13 @@ struct fs_dirent {
 struct disk_shm_header {
     uint8_t disk_driver_sleeping;   // disk_driver sets before sys_wait
     uint8_t fs_driver_sleeping;     // fs_driver sets before disk wait
-    uint8_t reserved[6];
+    int32_t fs_driver_pid;          // fs_driver writes its PID after attach
+    uint8_t reserved[2];
 };
 
-// FS SHM header (sleeping flags for fs_driver <-> client)
+// FS SHM header (no sleeping flags — sync is via RPC now)
 struct fs_shm_header {
-    uint8_t fs_driver_sleeping;     // fs_driver sets before sys_wait
-    uint8_t client_sleeping;        // shell sets before fs wait
-    uint8_t reserved[6];
+    uint8_t reserved[8];
 };
 
 // KMS framebuffer info (returned by sys_fb_info)

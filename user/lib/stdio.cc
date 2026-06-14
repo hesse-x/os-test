@@ -1,9 +1,8 @@
 #include "stdio.h"
 #include "string.h"
-#include "common/syscall.h"
+#include <sys.h>
 #include "common/shm.h"
 #include "common/dev.h"
-#include "arch/x64/utils.h"
 
 /* ===================== KMS ring globals ===================== */
 

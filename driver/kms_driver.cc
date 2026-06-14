@@ -3,7 +3,7 @@
 // Uses dynamic shared memory (sys_shm_attach) + sleeping flag protocol
 #include <stdint.h>
 #include <stddef.h>
-#include "arch/x64/utils.h"
+#include <sys.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/macro.h"
@@ -436,7 +436,8 @@ extern "C" void _start() {
     // Attach to KBD driver's shared memory page (retry until available)
     uint64_t shm_addr = 0;
     while ((shm_addr = (uint64_t)sys_shm_attach(sys_lookup_dev(DEV_KBD))) == 0) {
-        sys_wait(1);
+        struct recv_msg msg;
+        sys_recv(&msg, 1);
     }
 
     shm_hdr = (volatile driver_shm_header *)shm_addr;
@@ -455,7 +456,7 @@ extern "C" void _start() {
 
     if (fb_width == 0 || fb_vaddr == 0) {
         // No framebuffer, just idle
-        while (1) { sys_wait(0); }
+        while (1) { struct recv_msg msg; sys_recv(&msg, 0); }
     }
 
     // Clear screen
@@ -492,7 +493,8 @@ extern "C" void _start() {
             shm_hdr->kms_sleeping = 0;
             continue;
         }
-        sys_wait(16);
+        struct recv_msg msg;
+        sys_recv(&msg, 16);
         shm_hdr->kms_sleeping = 0;
     }
 }

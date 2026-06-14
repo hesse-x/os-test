@@ -1,10 +1,9 @@
 #include "stdio.h"
 #include "string.h"
 #include "stdlib.h"
-#include "common/syscall.h"
+#include <sys.h>
 #include "common/shm.h"
 #include "common/dev.h"
-#include "arch/x64/utils.h"
 
 // ===================== FS IPC =====================
 
@@ -69,15 +68,33 @@ static uint64_t parse_hex64(const char *s) {
 
 // ===================== FS IPC =====================
 
+static int32_t fs_pid;  // fs_driver PID, resolved at init
+
 static int fs_request() {
     freq->client_pid = sys_getpid();
     fflush(stdout);
-    if (fs_hdr->fs_driver_sleeping) {
-        sys_notify(sys_lookup_dev(DEV_FS));
+
+    fs_rpc_request req;
+    req.cmd = freq->cmd;
+    memset(req.reserved, 0, sizeof(req.reserved));
+
+    fs_rpc_reply rep;
+    sys_rpc(fs_pid, &req, &rep);
+
+    // Copy reply fields into fresp so existing cmd handlers can read them
+    // (they already reference fresp->status, fresp->total etc.)
+    fresp->status = rep.status;
+    fresp->fd     = rep.fd;
+    fresp->count  = rep.count;
+    fresp->total  = rep.total;
+
+    {
+        const char msg[] = "fs_req: s=X t=Y\n";
+        char *p = (char *)msg;
+        p[10] = '0' + (char)fresp->status;
+        p[14] = '0' + (char)(fresp->total & 0xF);
+        sys_serial_write(msg, 16);
     }
-    fs_hdr->client_sleeping = 1;
-    sys_wait(0);
-    fs_hdr->client_sleeping = 0;
     return (int)fresp->status;
 }
 
@@ -112,7 +129,8 @@ static void cmd_ls(int long_format) {
     freq->cmd = FS_CMD_READDIR;
     set_path(cwd);
 
-    if (fs_request() != 0) {
+    int rc = fs_request();
+    if (rc != 0) {
         printf("ls: error\n");
         return;
     }
@@ -401,11 +419,21 @@ static const cmd_entry cmds[] = {
 // ===================== Main =====================
 
 extern "C" void _start() {
+    // Resolve fs_driver PID (retry until it registers)
+    sys_serial_write("shell: waiting for fs_driver\n", 29);
+    while ((fs_pid = sys_lookup_dev(DEV_FS)) == 0) {
+        struct recv_msg m;
+        sys_recv(&m, 1);
+    }
+    sys_serial_write("shell: fs_driver found\n", 23);
+
     // Attach to fs_driver SHM (retry until fs_driver has created it)
     uint64_t fs_shm = 0;
-    while ((fs_shm = (uint64_t)sys_shm_attach(sys_lookup_dev(DEV_FS))) == 0) {
-        sys_wait(1);
+    while ((fs_shm = (uint64_t)sys_shm_attach(fs_pid)) == 0) {
+        struct recv_msg m;
+        sys_recv(&m, 1);
     }
+    sys_serial_write("shell: fs_driver attached\n", 26);
     fs_hdr = (volatile fs_shm_header *)(fs_shm + FS_SHM_HEADER_OFFSET);
     freq   = (volatile fs_req_shm *)(fs_shm + FS_REQ_OFFSET);
     fresp  = (volatile fs_resp_shm *)(fs_shm + FS_RESP_OFFSET);

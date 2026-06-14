@@ -3,7 +3,7 @@
 // writes results in FS_RESP. Accesses disk via disk_driver through
 // DISK_REQ/DISK_RESP shared pages.
 #include <stdint.h>
-#include "arch/x64/utils.h"
+#include <sys.h>
 #include "common/shm.h"
 #include "common/dev.h"
 
@@ -30,15 +30,30 @@ static uint32_t bytes_per_cluster;  // = sectors_per_cluster * 512
 static uint32_t total_data_clusters; // total data clusters in volume
 
 // ===================== Disk I/O helpers =====================
+// Wait for disk_driver reply, ignoring other messages (e.g. incoming RPC).
+// Non-disk messages are re-notified to self so the main loop can handle them later.
+static int32_t disk_driver_pid;  // resolved at init
+
+static void disk_wait_reply() {
+    int32_t my_pid = sys_getpid();
+    while (1) {
+        struct recv_msg m;
+        sys_recv(&m, 0);
+        if (m.type == RECV_NOTIFY && (int32_t)m.src == disk_driver_pid) return;
+        // Not from disk_driver — re-notify self for later processing
+        sys_notify(my_pid);
+    }
+}
+
 static int disk_read(uint32_t lba, uint32_t count) {
     dreq->cmd   = DISK_CMD_READ;
     dreq->lba   = lba;
     dreq->count = count;
-    if (disk_hdr->disk_driver_sleeping) {
-        sys_notify(sys_lookup_dev(DEV_DISK));
-    }
     disk_hdr->fs_driver_sleeping = 1;
-    sys_wait(0);
+    if (disk_hdr->disk_driver_sleeping) {
+        sys_notify(disk_driver_pid);
+    }
+    disk_wait_reply();
     disk_hdr->fs_driver_sleeping = 0;
     return dresp->status;
 }
@@ -50,11 +65,11 @@ static int disk_write(uint32_t lba, uint32_t count, const uint8_t *data) {
     // Copy data into disk_req (full sector(s))
     uint32_t bytes = count * 512;
     __memcpy((void *)dreq->data, data, bytes);
-    if (disk_hdr->disk_driver_sleeping) {
-        sys_notify(sys_lookup_dev(DEV_DISK));
-    }
     disk_hdr->fs_driver_sleeping = 1;
-    sys_wait(0);
+    if (disk_hdr->disk_driver_sleeping) {
+        sys_notify(disk_driver_pid);
+    }
+    disk_wait_reply();
     disk_hdr->fs_driver_sleeping = 0;
     return dresp->status;
 }
@@ -576,7 +591,7 @@ static void fat32_init() {
     if (bps != 512 || sectors_per_cluster == 0 || spf32 == 0 || root_cluster < 2) {
         const char msg[] = "EBPB\n";
         sys_serial_write(msg, sizeof(msg) - 1);
-        sys_wait(0);  // never recover, halt
+        while (1) { struct recv_msg m; sys_recv(&m, 0); }
     }
 
     fat_start_lba = part_start_lba + reserved;
@@ -942,23 +957,30 @@ static void handle_mkdir(const char *path) {
 
 // ===================== Main loop =====================
 extern "C" void _start() {
+    sys_serial_write("fs_driver: _start\n", 18);
     // IMPORTANT: create fs SHM first (must be shm_regions[0] for shell attach),
     // then attach to disk_driver SHM
     uint64_t fs_shm = (uint64_t)sys_shm_create(4 * 4096);
     fs_hdr = (volatile fs_shm_header *)(fs_shm + FS_SHM_HEADER_OFFSET);
     freq   = (volatile fs_req_shm *)(fs_shm + FS_REQ_OFFSET);
     fresp  = (volatile fs_resp_shm *)(fs_shm + FS_RESP_OFFSET);
-    fs_hdr->fs_driver_sleeping = 0;
-    fs_hdr->client_sleeping = 0;
 
     // Attach to disk_driver SHM (retry until disk_driver has created it)
-    uint64_t disk_shm = 0;
-    while ((disk_shm = (uint64_t)sys_shm_attach(sys_lookup_dev(DEV_DISK))) == 0) {
-        sys_wait(1);
+    sys_serial_write("fs_driver: attaching disk_shm\n", 29);
+    while ((disk_driver_pid = sys_lookup_dev(DEV_DISK)) == 0) {
+        struct recv_msg m;
+        sys_recv(&m, 1);
     }
+    uint64_t disk_shm = 0;
+    while ((disk_shm = (uint64_t)sys_shm_attach(disk_driver_pid)) == 0) {
+        struct recv_msg m;
+        sys_recv(&m, 1);
+    }
+    sys_serial_write("fs_driver: disk_shm attached\n", 29);
     disk_hdr = (volatile disk_shm_header *)(disk_shm + DISK_SHM_HEADER_OFFSET);
     dreq     = (volatile disk_req_shm *)(disk_shm + DISK_REQ_OFFSET);
     dresp    = (volatile disk_resp_shm *)(disk_shm + DISK_RESP_OFFSET);
+    disk_hdr->fs_driver_pid = sys_getpid();
 
     // Initialize cache
     for (int i = 0; i < CACHE_SLOTS; i++) {
@@ -973,14 +995,19 @@ extern "C" void _start() {
 
     // Mount FAT32
     fat32_init();
+    sys_serial_write("fs_driver: fat32_init done\n", 26);
+
+    // Register as ready — shell will poll sys_lookup_dev(DEV_FS) before requesting
+    sys_load_dev(sys_getpid(), DEV_FS);
+    sys_serial_write("fs_driver: registered\n", 22);
 
     while (1) {
-        fs_hdr->fs_driver_sleeping = 1;
-        sys_wait(0);
-        fs_hdr->fs_driver_sleeping = 0;
+        struct recv_msg m;
+        sys_recv(&m, 0);
+
+        if (m.type != RECV_RPC) continue;
 
         uint32_t cmd = freq->cmd;
-        int32_t client_pid = (int32_t)freq->client_pid;
 
         // Clear response
         fresp->status = 0;
@@ -1027,8 +1054,14 @@ extern "C" void _start() {
             break;
         }
 
-        if (fs_hdr->client_sleeping) {
-            sys_notify(client_pid);
-        }
+        sys_serial_write("ls finish\n", 10);
+
+        fs_rpc_reply reply;
+        reply.status = fresp->status;
+        reply.fd     = fresp->fd;
+        reply.count  = fresp->count;
+        reply.total  = fresp->total;
+        for (int i = 0; i < 48; i++) reply.reserved[i] = 0;
+        sys_reply(&reply);
     }
 }
