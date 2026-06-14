@@ -35,6 +35,8 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_
 uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_load_dev(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t);
 uint64_t sys_lookup_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_clock(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 // Register a driver PID for a device type (kernel-internal, not a syscall)
 int register_dev(int dev_type, int32_t pid);

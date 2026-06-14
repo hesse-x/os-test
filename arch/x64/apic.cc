@@ -13,11 +13,14 @@ uint64_t tsc_freq = 0;     // TSC ticks per second
 uint64_t tsc_per_ms = 0;   // TSC ticks per millisecond
 static uint64_t tsc_base = 0;  // TSC value at boot baseline
 
-// Monotonic nanosecond clock since boot
+// Monotonic nanosecond clock since boot (TSC-based)
 uint64_t sched_clock() {
   uint64_t now = rdtsc64();
   uint64_t delta = now - tsc_base;
-  return delta * 1000000000ULL / tsc_freq;
+  // Split to avoid overflow: delta * 1e9 overflows uint64_t after ~7s at 2.5GHz
+  uint64_t sec = delta / tsc_freq;
+  uint64_t rem = delta % tsc_freq;
+  return sec * 1000000000ULL + rem * 1000000000ULL / tsc_freq;
 }
 
 // ===================== PIC disable =====================
@@ -53,26 +56,24 @@ static uint32_t calibrate_lapic_timer() {
   lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
   lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_TIMER_MASKED);
 
-  // Set PIT channel 0 to one-shot (mode 4, latch on read)
-  // Write the divisor to start the countdown
-  outb(0x43, 0x30); // channel 0, access latched, mode 4 (one-shot), binary
+  // Set PIT channel 0 to mode 4 (software strobe): write divisor starts
+  // countdown, counter stops at 0 (does not wrap/reload).
+  outb(0x43, 0x38); // channel 0, lobyte/hibyte, mode 4, binary
   outb(0x40, divisor & 0xFF);
   outb(0x40, (divisor >> 8) & 0xFF);
 
   // Start LAPIC timer from max count (same time as PIT starts)
   lapic_write(LAPIC_TIMER_ICR, 0xFFFFFFFF);
 
-  // Wait for PIT to count down to 0.
-  // In one-shot mode, after writing the divisor the counter starts
-  // counting down. When it reaches 0, the output goes high.
-  // We poll by latching and reading the count.
-  // Once the count wraps past 0 (becomes > divisor or stays at 0), done.
+  // Poll until PIT counter reaches 0.
+  // In mode 4 the counter stops at 0, so we just wait for cur == 0.
+  // Latch before each read to get a consistent 16-bit snapshot.
   for (;;) {
     outb(0x43, 0x00); // latch PIT count
     uint8_t lo = inb(0x40);
     uint8_t hi = inb(0x40);
     uint16_t cur = (uint16_t)((hi << 8) | lo);
-    if (cur == 0 || cur > divisor) break;
+    if (cur == 0) break;
   }
 
   // Read LAPIC current count
@@ -188,9 +189,8 @@ void apic_init() {
     uint16_t divisor = 11932;
     uint64_t tsc_start = rdtsc64();
 
-    lapic_write(LAPIC_TIMER_DCR, 0x0B);
-    lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_TIMER_MASKED);
-    outb(0x43, 0x30);
+    // PIT mode 4: counter stops at 0
+    outb(0x43, 0x38); // channel 0, lobyte/hibyte, mode 4, binary
     outb(0x40, divisor & 0xFF);
     outb(0x40, (divisor >> 8) & 0xFF);
     lapic_write(LAPIC_TIMER_ICR, 0xFFFFFFFF);
@@ -200,7 +200,7 @@ void apic_init() {
       uint8_t lo = inb(0x40);
       uint8_t hi = inb(0x40);
       uint16_t cur = (uint16_t)((hi << 8) | lo);
-      if (cur == 0 || cur > divisor) break;
+      if (cur == 0) break;
     }
 
     uint64_t tsc_end = rdtsc64();

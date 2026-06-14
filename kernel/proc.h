@@ -91,6 +91,10 @@ struct proc_t {
     void    *rpc_reply_buf;     // caller's reply buffer user-space address
     int32_t  rpc_result;        // 0 = success, positive errno on error
     pid_t    rpc_target_pid;    // for crash cleanup: who we're waiting on
+
+    // === CPU 时间记账 ===
+    uint64_t cpu_time_ns;       // 累计 CPU 时间（纳秒）
+    uint64_t last_sched;        // 上次被调度时的 sched_clock() 值
 };
 
 #define MAX_PROC 64

@@ -17,6 +17,7 @@
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
 #include "common/dev.h"
+#include "arch/x64/apic.h"
 
 proc_t procs[MAX_PROC];
 // current_proc is per-CPU (in cpu_local_t), accessed via macro
@@ -89,6 +90,8 @@ void proc_init() {
         procs[i].rpc_reply_buf = nullptr;
         procs[i].rpc_result = 0;
         procs[i].rpc_target_pid = -1;
+        procs[i].cpu_time_ns = 0;
+        procs[i].last_sched = 0;
     }
     cpu_locals[0]._cur_proc = nullptr;
     cpu_locals[0].run_count = 0;
@@ -182,6 +185,8 @@ proc_t *create_idle_process(int cpu_id) {
     proc->exit_code = 0;
     proc->mmap_brk = 0x800000;
     proc->mmap_regions = nullptr;
+    proc->cpu_time_ns = 0;
+    proc->last_sched = 0;
     for (int j = 0; j < MAX_FD; j++) {
         proc->fd_table[j].type = FD_NONE;
         proc->fd_table[j].flags = 0;
@@ -304,6 +309,8 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
     proc->exit_code = 0;
     proc->mmap_brk = 0x800000;
     proc->mmap_regions = nullptr;
+    proc->cpu_time_ns = 0;
+    proc->last_sched = 0;
     for (int j = 0; j < MAX_FD; j++) {
         proc->fd_table[j].type = FD_NONE;
         proc->fd_table[j].flags = 0;
@@ -335,6 +342,10 @@ void schedule() {
         // If prev is BLOCKED, ZOMBIE, or REAPING, it cannot continue running —
         // switch to idle so the CPU halts until an IRQ wakes a process.
         if (prev != idle && (prev->state == BLOCKED || prev->state == ZOMBIE || prev->state == REAPING)) {
+            // Account prev's CPU time before switching to idle
+            if (prev->last_sched != 0) {
+                prev->cpu_time_ns += sched_clock() - prev->last_sched;
+            }
             current_proc = idle;
             per_cpu_tss[my_cpu].rsp0 = idle->k_stack_top;
             get_cpu_local()->tss_rsp0 = idle->k_stack_top;
@@ -353,6 +364,11 @@ void schedule() {
     proc_t *next = LIST_ENTRY(next_node, proc_t, run_node);
     list_remove(&next->run_node);
 
+    // Account prev's CPU time before switching out
+    if (prev != idle && prev->last_sched != 0) {
+        prev->cpu_time_ns += sched_clock() - prev->last_sched;
+    }
+
     // State transition for prev
     if (prev != idle && prev->state == RUNNING) {
         prev->state = READY;
@@ -362,6 +378,7 @@ void schedule() {
     // if prev->state == BLOCKED, ZOMBIE, or REAPING: don't enqueue, run_count unchanged
 
     next->state = RUNNING;
+    next->last_sched = sched_clock();
     cpu_locals[my_cpu].run_count--;
     current_proc = next;
     per_cpu_tss[my_cpu].rsp0 = next->k_stack_top;
@@ -576,5 +593,7 @@ void proc_reap(proc_t *proc) {
     proc->rpc_reply_buf = nullptr;
     proc->rpc_result = 0;
     proc->rpc_target_pid = -1;
+    proc->cpu_time_ns = 0;
+    proc->last_sched = 0;
     spin_unlock(&procs_lock);
 }

@@ -248,7 +248,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 22
+#define NR_SYSCALL 24
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0: 获取 PID
     sys_yield,          // 1: 主动让出 CPU
@@ -272,6 +272,8 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_load_dev,       // 19: 注册驱动
     sys_lookup_dev,     // 20: 查询驱动 PID
     sys_notify,         // 21: 异步通知（消息入队）
+    sys_gettime,        // 22: 全局单调时钟（纳秒）
+    sys_clock,          // 23: per-process CPU 时间（纳秒）
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -501,6 +503,12 @@ uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     proc_t *proc = current_proc;
     int32_t exit_code = (int32_t)arg1;
     proc->exit_code = exit_code;
+
+    // Final CPU time accounting: ensure last running slice is recorded
+    if (proc->last_sched != 0) {
+        proc->cpu_time_ns += sched_clock() - proc->last_sched;
+        proc->last_sched = 0;
+    }
 
     if (proc->parent_pid < 0) {
         // No parent: directly reap all resources
@@ -1228,4 +1236,14 @@ uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     }
     spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
     return 0;
+}
+
+// sys_gettime() — syscall 22 (全局单调时钟，返回纳秒)
+uint64_t sys_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+    return sched_clock();
+}
+
+// sys_clock() — syscall 23 (per-process CPU 时间，返回纳秒)
+uint64_t sys_clock(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+    return current_proc->cpu_time_ns;
 }

@@ -27,6 +27,8 @@
 #define SYS_LOAD_DEV     19
 #define SYS_LOOKUP_DEV   20
 #define SYS_NOTIFY       21
+#define SYS_GETTIME      22
+#define SYS_CLOCK        23
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -138,6 +140,14 @@ static inline int32_t sys_lookup_dev(int dev_type) {
 
 static inline int sys_notify(int32_t pid) {
     return (int)__syscall1(SYS_NOTIFY, (int64_t)pid);
+}
+
+static inline uint64_t sys_gettime() {
+    return (uint64_t)__syscall0(SYS_GETTIME);
+}
+
+static inline uint64_t sys_clock() {
+    return (uint64_t)__syscall0(SYS_CLOCK);
 }
 
 #endif // COMMON_SYSCALL_H
