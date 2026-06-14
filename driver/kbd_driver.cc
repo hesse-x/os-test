@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include "arch/x64/utils.h"
 #include "common/shm.h"
-#include "common/pid.h"
+#include "common/dev.h"
 
 static volatile kbd_ring *kbd;
 static volatile driver_shm_header *shm_hdr;
@@ -45,7 +45,7 @@ extern "C" void _start() {
     // Bind to keyboard IRQ (IRQ1 = vector 33)
     sys_irq_bind(33);
 
-    int32_t consumer_pid = TERMINAL_PID;
+    int32_t consumer_pid = sys_lookup_dev(DEV_TERMINAL);
 
     // Create shared memory page for KBD+KMS communication
     uint64_t shm_addr = (uint64_t)sys_shm_create(4096);

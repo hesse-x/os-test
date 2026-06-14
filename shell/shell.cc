@@ -3,7 +3,7 @@
 #include "stdlib.h"
 #include "common/syscall.h"
 #include "common/shm.h"
-#include "common/pid.h"
+#include "common/dev.h"
 #include "arch/x64/utils.h"
 
 // ===================== FS IPC =====================
@@ -73,7 +73,7 @@ static int fs_request() {
     freq->client_pid = sys_getpid();
     fflush(stdout);
     if (fs_hdr->fs_driver_sleeping) {
-        sys_notify(FS_DRIVER_PID);
+        sys_notify(sys_lookup_dev(DEV_FS));
     }
     fs_hdr->client_sleeping = 1;
     sys_wait(0);
@@ -403,7 +403,7 @@ static const cmd_entry cmds[] = {
 extern "C" void _start() {
     // Attach to fs_driver SHM (retry until fs_driver has created it)
     uint64_t fs_shm = 0;
-    while ((fs_shm = (uint64_t)sys_shm_attach(FS_DRIVER_PID)) == 0) {
+    while ((fs_shm = (uint64_t)sys_shm_attach(sys_lookup_dev(DEV_FS))) == 0) {
         sys_wait(1);
     }
     fs_hdr = (volatile fs_shm_header *)(fs_shm + FS_SHM_HEADER_OFFSET);

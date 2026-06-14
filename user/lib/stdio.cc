@@ -2,13 +2,14 @@
 #include "string.h"
 #include "common/syscall.h"
 #include "common/shm.h"
-#include "common/pid.h"
+#include "common/dev.h"
 #include "arch/x64/utils.h"
 
 /* ===================== KMS ring globals ===================== */
 
 static volatile kms_ring *g_kms_ring;
 static volatile driver_shm_header *g_shm_hdr;
+static int32_t g_kms_driver_pid;
 
 void kms_shm_init(uint64_t shm_addr) {
     g_shm_hdr = (volatile driver_shm_header *)shm_addr;
@@ -18,8 +19,11 @@ void kms_shm_init(uint64_t shm_addr) {
 /* Lazy init: auto-attach to KBD driver's shm on first output */
 static void kms_ensure_init() {
     if (g_kms_ring) return;
-    uint64_t addr = (uint64_t)sys_shm_attach(KBD_DRIVER_PID);
-    if (addr) kms_shm_init(addr);
+    uint64_t addr = (uint64_t)sys_shm_attach(sys_lookup_dev(DEV_KBD));
+    if (addr) {
+        g_kms_driver_pid = sys_lookup_dev(DEV_KMS);
+        kms_shm_init(addr);
+    }
 }
 
 /* ===================== sys_write based flush ===================== */
@@ -50,7 +54,7 @@ static void kms_write_flush(FILE *f, const char *data, int len) {
         while (g_kms_ring->head == ((g_kms_ring->tail + KMS_RING_SIZE - 1) % KMS_RING_SIZE)) {
             // Ring full — notify KMS driver to drain it
             if (g_shm_hdr->kms_sleeping) {
-                sys_notify(KMS_DRIVER_PID);
+                sys_notify(g_kms_driver_pid);
             }
             sys_yield();
         }
@@ -62,7 +66,7 @@ static void kms_write_flush(FILE *f, const char *data, int len) {
     }
     // Notify KMS driver if it's sleeping (fast path: skip syscall)
     if (g_shm_hdr->kms_sleeping) {
-        sys_notify(KMS_DRIVER_PID);
+        sys_notify(g_kms_driver_pid);
     }
     // Mirror output to serial port
     sys_serial_write(data, len);

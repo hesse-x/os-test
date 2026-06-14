@@ -9,7 +9,7 @@
 > - 详见 [syscall_fastpath.md](syscall_fastpath.md)
 > - syscall_dispatch: `syscall_table[tf->rax](tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8)`（Linux x86-64 约定）
 > - 所有 syscall 函数签名: `uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)`
-> - 18 个系统调用（编号 0-17 连续无空洞）：getpid(0), yield(1), wait(2), notify(3), irq_bind(4), exit(5), waitpid(6), spawn(7), mmap(8), munmap(9), serial_write(10), fb_info(11), shm_create(12), shm_attach(13), pipe(14), write(15), read(16), close(17)
+> - 20 个系统调用（编号 0-19 连续无空洞）：getpid(0), yield(1), wait(2), notify(3), irq_bind(4), exit(5), waitpid(6), spawn(7), mmap(8), munmap(9), serial_write(10), fb_info(11), shm_create(12), shm_attach(13), pipe(14), write(15), read(16), close(17), load_dev(18), lookup_dev(19)
 > - sys_putc/sys_getc/sys_sbrk 已删除，编号已紧凑重排为 0-17
 > - sys_wait/sys_notify/sys_irq_bind 为用户态驱动 IPC 基础设施，详见 [user_driver.md](user_driver.md)
 > - 用户地址空间: 代码 0x400000, 栈 0x00007FFFFFFFD000
@@ -28,7 +28,7 @@
 | 用户地址空间布局 | 经典三段：代码 0x400000, 堆预留 0x600000, 栈 0xBFFFE000 | 间距充足，栈远离 VMA_BASE 边界 |
 | syscall 分发方式 | trap_dispatch 检查 trapno==128 后调用 syscall_dispatch | 与硬件中断/异常共享 trap_dispatch 入口，统一分发路径 |
 | syscall 参数传递 | 从 trapframe 的 pushregs_t 提取参数 | `uint32_t (*)(uint32_t,...)` 分发表，dispatch 提取 tf->regs.ebx/ecx/edx/esi/edi 作为5个参数，返回值写 tf->regs.eax |
-| syscall 集合 | 18个（编号 0-17 连续无空洞） | 见 common/syscall.h |
+| syscall 集合 | 20个（编号 0-19 连续无空洞） | 见 common/syscall.h |
 | 阻塞机制 | wait_event 字段 + 扫描 procs[] | freestanding 无 std::list，64进程扫描成本忽略不计 |
 | sys_yield 实现 | 直接调 schedule()，无特殊处理 | 与 timer IRQ 路径共享同一 schedule()，Linux 同方案 |
 | CR3 切换策略 | 无条件写 CR3 | 每次都刷新 TLB，简单正确；避免 CR3 比较开销（需要读旧值+条件跳转），64 进程下切换频率不高 |

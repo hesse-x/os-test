@@ -318,7 +318,7 @@ _start():
     if 产生了字符 ch:
       写入 kbd_ring（head 推进）
       if consumer_sleeping:
-        sys_notify(SHELL_PID)            // 慢路径：唤醒消费者
+        sys_notify(sys_lookup_dev(DEV_TERMINAL))  // 慢路径：唤醒消费者
       idle_polls = 0
     else:
       idle_polls++
@@ -335,7 +335,7 @@ _start():
 
 ```
 _start():
-  shm_addr = sys_shm_attach(KBD_DRIVER_PID)  // 重试直到成功
+  shm_addr = sys_shm_attach(sys_lookup_dev(DEV_KBD))  // 重试直到成功
   kms_ring = (kms_ring *)(shm_addr + KMS_RING_OFFSET)
   sys_fb_info(&fb_info)                       // 获取 framebuffer 信息
   fb_vaddr = fb_info.fb_vaddr                 // 0x700000 (map_fb 仍由内核映射)
@@ -380,10 +380,10 @@ static void kms_flush() {
   for each buffered cmd:
     写入 kms_ring (head 推进)
     if kms_ring 满了:
-      if kms_sleeping: sys_notify(KMS_DRIVER_PID)
+      if kms_sleeping: sys_notify(sys_lookup_dev(DEV_KMS))
       sys_wait(1)                  // 等 KMS 消费
   if kms_sleeping:
-    sys_notify(KMS_DRIVER_PID)     // 慢路径
+    sys_notify(sys_lookup_dev(DEV_KMS))     // 慢路径
   // 快速路径：kms_sleeping==0 时不走 syscall
 }
 ```
@@ -445,7 +445,7 @@ kbd_driver：
 ```c
 static bool kbd_poll(void *ctx) { /* 检查 IRQ 产生了字符 */ }
 static void kbd_process(void *ctx) { /* 读 scancode → 写 ring → notify */ }
-driver_config cfg = { .sleeping_flag = &hdr->kbd_sleeping, .notify_pid = SHELL_PID, ... };
+driver_config cfg = { .sleeping_flag = &hdr->kbd_sleeping, .notify_pid = sys_lookup_dev(DEV_TERMINAL), ... };
 driver_loop(&cfg);
 ```
 
@@ -472,7 +472,7 @@ KMS 驱动的 framebuffer 映射（`map_fb=true`，虚拟地址 0x700000）**不
 ## 12. 启动时序
 
 kbd_driver（PID 3）先运行 → `sys_shm_create(4096)` → 共享页就绪。
-kms_driver（PID 4）和 shell（PID 5）→ `sys_shm_attach(KBD_DRIVER_PID)` 重试循环（`sys_wait(1)` 间隔），直到 kbd_driver 创建 shm。
+kms_driver（PID 4）和 shell（PID 5）→ `sys_shm_attach(sys_lookup_dev(DEV_KBD))` 重试循环（`sys_wait(1)` 间隔），直到 kbd_driver 创建 shm。
 
 ## 13. 依赖图
 

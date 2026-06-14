@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include "arch/x64/utils.h"
 #include "common/shm.h"
-#include "common/pid.h"
+#include "common/dev.h"
 
 static volatile disk_req_shm  *req;
 static volatile disk_resp_shm *resp;
@@ -90,7 +90,7 @@ static void handle_request() {
 }
 
 extern "C" void _start() {
-    int32_t fs_driver_pid = FS_DRIVER_PID;
+    int32_t fs_driver_pid = sys_lookup_dev(DEV_FS);
 
     // Create shared memory: header(1) + req(2) + resp(2) = 5 pages
     uint64_t shm_base = (uint64_t)sys_shm_create(5 * 4096);

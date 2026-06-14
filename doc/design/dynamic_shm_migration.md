@@ -42,7 +42,7 @@ Offset    内容              大小
 12288     disk_resp_shm     2 页 (8192: status 4B + count 4B + data[8180])
 ```
 
-disk_driver 调用 `sys_shm_create(5 * 4096)`，fs_driver 调用 `sys_shm_attach(DISK_DRIVER_PID)`。
+disk_driver 调用 `sys_shm_create(5 * 4096)`，fs_driver 调用 `sys_shm_attach(sys_lookup_dev(DEV_DISK))`。
 
 ### fs_driver SHM（4 页 = 16384 字节）
 
@@ -53,7 +53,7 @@ Offset    内容              大小
 8192      fs_resp_shm       2 页 (8192: status + fd + count + total + data[8176])
 ```
 
-fs_driver 调用 `sys_shm_create(4 * 4096)`，shell 调用 `sys_shm_attach(FS_DRIVER_PID)`。
+fs_driver 调用 `sys_shm_create(4 * 4096)`，shell 调用 `sys_shm_attach(sys_lookup_dev(DEV_FS))`。
 
 ---
 
@@ -73,7 +73,7 @@ struct disk_shm_header {
 ```c
 // 通知 fs_driver 前：只在对方已睡眠时才 notify
 if (hdr->fs_driver_sleeping) {
-    sys_notify(FS_DRIVER_PID);
+    sys_notify(sys_lookup_dev(DEV_FS));
 }
 // 自身睡眠前：设 flag → sys_wait → 清 flag
 hdr->disk_driver_sleeping = 1;
@@ -85,7 +85,7 @@ hdr->disk_driver_sleeping = 0;
 ```c
 // 通知 disk_driver 前
 if (hdr->disk_driver_sleeping) {
-    sys_notify(DISK_DRIVER_PID);
+    sys_notify(sys_lookup_dev(DEV_DISK));
 }
 // 自身睡眠前（等 disk 响应）
 hdr->fs_driver_sleeping = 1;
@@ -116,7 +116,7 @@ hdr->fs_driver_sleeping = 0;
 **shell 侧：**
 ```c
 if (hdr->fs_driver_sleeping) {
-    sys_notify(FS_DRIVER_PID);
+    sys_notify(sys_lookup_dev(DEV_FS));
 }
 hdr->client_sleeping = 1;
 sys_wait(0);
@@ -185,7 +185,7 @@ struct fs_shm_header {
 
 - 删除 `DISK_REQ_ADDR`/`DISK_RESP_ADDR`/`FS_REQ_ADDR`/`FS_RESP_ADDR` 硬编码指针
 - **先** `sys_shm_create(4 * 4096)` 创建 fs SHM（占 shm_regions[0]，确保 shell attach 时 first-fit 命中 fs SHM）
-- **再** `sys_shm_attach(DISK_DRIVER_PID)` + 重试循环 attach disk SHM
+- **再** `sys_shm_attach(sys_lookup_dev(DEV_DISK))` + 重试循环 attach disk SHM
 - fs 通道：
   - `freq = (volatile fs_req_shm *)(fs_shm + FS_REQ_OFFSET)`
   - `fresp = (volatile fs_resp_shm *)(fs_shm + FS_RESP_OFFSET)`
@@ -199,7 +199,7 @@ struct fs_shm_header {
 ### 4. `shell/shell.cc`
 
 - 删除 `FS_REQ_ADDR`/`FS_RESP_ADDR` 硬编码指针
-- `sys_shm_attach(FS_DRIVER_PID)` + 重试循环获取 fs SHM
+- `sys_shm_attach(sys_lookup_dev(DEV_FS))` + 重试循环获取 fs SHM
 - `freq = (volatile fs_req_shm *)(fs_shm + FS_REQ_OFFSET)`
 - `fresp = (volatile fs_resp_shm *)(fs_shm + FS_RESP_OFFSET)`
 - `fs_hdr = (volatile fs_shm_header *)fs_shm`
@@ -225,7 +225,7 @@ struct fs_shm_header {
 
 ## 不改的文件
 
-- `common/pid.h` — PID 常量仍需要（用于 `sys_notify` 和 `sys_shm_attach`）
+- `common/dev.h` — 设备类型定义，驱动 PID 通过 `sys_lookup_dev` 动态发现（详见 [dev_table.md](dev_table.md)）
 - `kernel/trap.cc` — `sys_shm_create`/`sys_shm_attach` 不变
 - `driver/kbd_driver.cc` / `driver/kms_driver.cc` / `driver/terminal.cc` — 已迁移，不动
 

@@ -95,12 +95,12 @@ struct disk_resp_shm {
 ### 键盘驱动（driver/kbd_driver.cc）
 
 1. `sys_irq_bind(33)` 绑定键盘 IRQ（向量 33 = IRQ1）
-2. 循环：`sys_wait()` → `inb(0x60)` 读扫描码 → 翻译 ASCII → 写入 `kbd_shm` 环形缓冲区 → `sys_notify(shell_pid)`
+2. 循环：`sys_wait()` → `inb(0x60)` 读扫描码 → 翻译 ASCII → 写入 `kbd_shm` 环形缓冲区 → `sys_notify(sys_lookup_dev(DEV_TERMINAL))`
 3. 仅处理 make code（bit 7 = 0），break code 忽略
 
 ### 磁盘驱动（driver/disk_driver.cc）
 
-1. 循环：`sys_wait()` → 读 `disk_req_shm` → ATA PIO LBA28 操作 → 写 `disk_resp_shm` → `sys_notify(shell_pid)`
+1. 循环：`sys_wait()` → 读 `disk_req_shm` → ATA PIO LBA28 操作 → 写 `disk_resp_shm` → `sys_notify(sys_lookup_dev(DEV_FS))`
 2. 支持 READ（cmd=0），WRITE（cmd=1）暂未实现
 3. ATA 驱动字节 0xF0（从盘），与 disk.img 作为 QEMU 第二 IDE 设备对应
 
@@ -108,7 +108,7 @@ struct disk_resp_shm {
 
 - 键盘输入：从 `kbd_shm` 环形缓冲区读取（`getc`），空时 `sys_wait()` 阻塞
 - 命令行编辑：`readline` 支持退格，最长 80 字符
-- 磁盘操作：写 `disk_req_shm` → `sys_notify(disk_driver_pid)` → `sys_wait()` → 读 `disk_resp_shm`
+- 磁盘操作：写 `disk_req_shm` → `sys_notify(sys_lookup_dev(DEV_DISK))` → `sys_wait()` → 读 `disk_resp_shm`
 - 命令：
   - `r LBA [COUNT]` — 读取磁盘扇区，hex dump 显示
   - `h` — 显示帮助

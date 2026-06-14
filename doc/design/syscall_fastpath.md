@@ -89,10 +89,10 @@ syscall_fast_entry:
 
 ## syscall_dispatch（kernel/trap.cc）
 
-当前 18 个系统调用（编号 0-17 连续无空洞），分发表方式：
+当前 20 个系统调用（编号 0-19 连续无空洞），分发表方式：
 
 ```c
-#define NR_SYSCALL 18
+#define NR_SYSCALL 20
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,       // 0
     sys_yield,        // 1
@@ -112,6 +112,8 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_write,        // 15
     sys_read,         // 16
     sys_close,        // 17
+    sys_load_dev,     // 18
+    sys_lookup_dev,   // 19
 };
 
 void syscall_dispatch(trapframe_t *tf) {

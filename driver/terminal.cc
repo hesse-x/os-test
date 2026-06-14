@@ -12,7 +12,7 @@
 #include "arch/x64/utils.h"
 #include "common/syscall.h"
 #include "common/shm.h"
-#include "common/pid.h"
+#include "common/dev.h"
 #include "common/macro.h"
 
 // ===================== Shared memory (kbd/kms) =====================
@@ -20,6 +20,7 @@
 static volatile kbd_ring *kbd;
 static volatile kms_ring *kms;
 static volatile driver_shm_header *shm_hdr;
+static int32_t kms_driver_pid;
 
 // ===================== VT100 state =====================
 
@@ -190,7 +191,7 @@ static const uint32_t vt100_colors[] = {
 static void write_kms_ring(uint32_t cmd, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
     while (kms->head == ((kms->tail + KMS_RING_SIZE - 1) % KMS_RING_SIZE)) {
         if (shm_hdr->kms_sleeping) {
-            sys_notify(KMS_DRIVER_PID);
+            sys_notify(kms_driver_pid);
         }
         sys_yield();
     }
@@ -204,7 +205,7 @@ static void write_kms_ring(uint32_t cmd, uint32_t arg1, uint32_t arg2, uint32_t 
 
 static void kms_notify_driver() {
     if (kms->head != kms->tail && shm_hdr->kms_sleeping) {
-        sys_notify(KMS_DRIVER_PID);
+        sys_notify(kms_driver_pid);
     }
 }
 
@@ -441,9 +442,11 @@ static void flush_dirty_cells() {
 // ===================== Main =====================
 
 extern "C" void _start() {
+    kms_driver_pid = sys_lookup_dev(DEV_KMS);
+
     // 1. Attach to KBD driver's shared memory page (retry until available)
     uint64_t shm_addr = 0;
-    while ((shm_addr = (uint64_t)sys_shm_attach(KBD_DRIVER_PID)) == 0) {
+    while ((shm_addr = (uint64_t)sys_shm_attach(sys_lookup_dev(DEV_KBD))) == 0) {
         sys_wait(1);
     }
 

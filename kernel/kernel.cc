@@ -15,6 +15,7 @@
 #include "kernel/ata.h"
 #include "arch/x64/smp.h"
 #include "common/elf.h"
+#include "common/dev.h"
 
 extern "C" {
 
@@ -124,6 +125,7 @@ void kernel_main(boot_info *bi) {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(1, &sz, &pg, &np);
     if (elf) { disk_proc = process_create_elf(elf, sz, 3); bfc_alloc.free_page(pg, np); }
+    if (disk_proc) register_dev(DEV_DISK, disk_proc->pid);
     else serial_puts("kernel_main: disk_driver.elf not found\n");
   }
 
@@ -131,6 +133,7 @@ void kernel_main(boot_info *bi) {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(101, &sz, &pg, &np);
     if (elf) { kbd_proc = process_create_elf(elf, sz, 3); bfc_alloc.free_page(pg, np); }
+    if (kbd_proc) register_dev(DEV_KBD, kbd_proc->pid);
     else serial_puts("kernel_main: kbd_driver.elf not found\n");
   }
 
@@ -138,6 +141,7 @@ void kernel_main(boot_info *bi) {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(201, &sz, &pg, &np);
     if (elf) { kms_proc = process_create_elf(elf, sz, 0, true); bfc_alloc.free_page(pg, np); }
+    if (kms_proc) register_dev(DEV_KMS, kms_proc->pid);
     else serial_puts("kernel_main: kms_driver.elf not found\n");
   }
 
@@ -145,6 +149,7 @@ void kernel_main(boot_info *bi) {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(301, &sz, &pg, &np);
     if (elf) { terminal_proc = process_create_elf(elf, sz, 0); bfc_alloc.free_page(pg, np); }
+    if (terminal_proc) register_dev(DEV_TERMINAL, terminal_proc->pid);
     else serial_puts("kernel_main: terminal.elf not found\n");
   }
 
@@ -158,7 +163,7 @@ void kernel_main(boot_info *bi) {
   {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(501, &sz, &pg, &np);
-    if (elf) { process_create_elf(elf, sz, 0); bfc_alloc.free_page(pg, np); }
+    if (elf) { proc_t *fs_proc = process_create_elf(elf, sz, 0); bfc_alloc.free_page(pg, np); if (fs_proc) register_dev(DEV_FS, fs_proc->pid); }
     else serial_puts("kernel_main: fs_driver.elf not found\n");
   }
 

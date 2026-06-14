@@ -63,10 +63,11 @@
 | 驱动工作流重构（ring buffer + sleeping flag + 轮询窗口） | [driver_workflow.md](driver_workflow.md) |
 | KMS 帧调度优化（240 slot ring + 16ms 定时刷帧） | [driver_workflow.md](driver_workflow.md) |
 | Phase 3: 最小 fd + VT100 + Terminal/Shell 拆分 | [terminal_split.md](terminal_split.md) |
+| 设备管理器（dev_table + sys_load_dev/sys_lookup_dev） | [dev_table.md](dev_table.md) |
 
 ## 当前状态
 
-内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 6 个 ELF（disk_driver → kbd_driver → kms_driver → terminal → shell → fs_driver）→ 多进程协作。Phase 3 完成：fd + pipe + terminal 进程拆分。Shell 不再直写 KMS ring，通过 fd 0/1 pipe 与 terminal 通信。Terminal 管理 VT100 状态机 + cell 缓冲区，负责键盘输入分发和屏幕渲染。KMS 驱动不变（仅做像素渲染）。新增 4 个 syscall（sys_pipe/sys_write/sys_read/sys_close），sys_spawn 自动继承 fd 0/1。
+内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 6 个 ELF（disk_driver → kbd_driver → kms_driver → terminal → shell → fs_driver）→ 多进程协作。Phase 3 完成：fd + pipe + terminal 进程拆分。Shell 不再直写 KMS ring，通过 fd 0/1 pipe 与 terminal 通信。Terminal 管理 VT100 状态机 + cell 缓冲区，负责键盘输入分发和屏幕渲染。KMS 驱动不变（仅做像素渲染）。新增 4 个 syscall（sys_pipe/sys_write/sys_read/sys_close），sys_spawn 自动继承 fd 0/1。设备管理器完成：`dev_table[dev_type→PID]` 映射 + `sys_load_dev`/`sys_lookup_dev` 两个新 syscall，驱动间通过设备类型动态发现对端 PID，`common/pid.h` 已删除。
 
 **Phase 2 完成**：驱动工作流重构完成（[driver_workflow.md](driver_workflow.md)），kbd/kms 驱动已迁移到动态 shm + 环形缓冲区 + sleeping flag。disk/fs 驱动也已迁移到动态 SHM（[dynamic_shm_migration.md](dynamic_shm_migration.md)），硬编码共享页基础设施（shm_init/map_shared_pages/7 路物理地址特判）已完全删除。
 
@@ -190,7 +191,7 @@
 
 > 设计文档: [kms.md](kms.md)
 
-- [x] `common/pid.h`：集中定义所有驱动 PID（DISK_DRIVER_PID=2, KBD_DRIVER_PID=3, KMS_DRIVER_PID=4, SHELL_PID=5, FS_DRIVER_PID=6）
+- [x] `common/dev.h`：设备类型定义（DEV_DISK/DEV_KBD/DEV_KMS/DEV_FS/DEV_TERMINAL），驱动 PID 通过 `sys_lookup_dev` 动态发现
 - [x] `kernel/fb.cc` 瘦身：删除所有渲染函数 + 字体数据 + Cursor/Framebuffer struct，仅保留 `init_fb` 映射逻辑 + 全局 `g_fb_info`
 - [x] `kernel/fb.h` 瘦身：仅保留 `init_fb` 声明
 - [x] `kernel/trap.cc`：删除 `sys_putc` 实现、删除 `fb_lock`
@@ -200,8 +201,8 @@
 - [x] `kernel/proc.cc` `process_create_elf`：KMS 进程额外映射 framebuffer 物理页到 0x700000（4KB 页），`map_fb` 参数控制
 - [x] `driver/kms_driver.cc`：KMS 用户态驱动（字体数据 + 命令解析主循环 + 渲染逻辑 + framebuffer 直写），IOPL=0
 - [x] `user/lib/stdio.cc`：stdout/stderr write_fn 改为 `kms_write_flush`（写 KMS_REQ + notify KMS 驱动）
-- [x] `shell/shell.cc`：删除 sys_putc 输出路径，新增 kms_flush 写 KMS_REQ + sys_notify(KMS_DRIVER_PID)
-- [x] 驱动 PID 引用统一改为 `#include "common/pid.h"`（shell/fs_driver/disk_driver/kbd_driver）
+- [x] `shell/shell.cc`：删除 sys_putc 输出路径，新增 kms_flush 写 KMS_REQ + sys_notify(sys_lookup_dev(DEV_KMS))
+- [x] 驱动 PID 引用统一改为 `#include "common/dev.h"` + `sys_lookup_dev(DEV_XXX)`（shell/fs_driver/disk_driver/kbd_driver/kms_driver/terminal/libc）
 - [x] `kernel/kernel.cc`：删除 `clear()` 调用，新增 KMS ELF 加载（LBA 201），调整 shell(301)/fs_driver(401) LBA
 - [x] `build.sh`：新增 kms_driver.elf 编译 + dd 写入 LBA 201，调整 shell/fs_driver LBA 偏移 + MBR 分区表
 - [x] Bug 修复：KMS 主循环改为先处理再等待（避免丢失通知）

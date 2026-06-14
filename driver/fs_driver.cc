@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include "arch/x64/utils.h"
 #include "common/shm.h"
-#include "common/pid.h"
+#include "common/dev.h"
 
 // Static buffers to avoid stack overflow (4KB arrays on stack exceed user stack page)
 static uint8_t dir_cluster_data_buf[4096];   // used in handle_mkdir
@@ -35,7 +35,7 @@ static int disk_read(uint32_t lba, uint32_t count) {
     dreq->lba   = lba;
     dreq->count = count;
     if (disk_hdr->disk_driver_sleeping) {
-        sys_notify(DISK_DRIVER_PID);
+        sys_notify(sys_lookup_dev(DEV_DISK));
     }
     disk_hdr->fs_driver_sleeping = 1;
     sys_wait(0);
@@ -51,7 +51,7 @@ static int disk_write(uint32_t lba, uint32_t count, const uint8_t *data) {
     uint32_t bytes = count * 512;
     __memcpy((void *)dreq->data, data, bytes);
     if (disk_hdr->disk_driver_sleeping) {
-        sys_notify(DISK_DRIVER_PID);
+        sys_notify(sys_lookup_dev(DEV_DISK));
     }
     disk_hdr->fs_driver_sleeping = 1;
     sys_wait(0);
@@ -953,7 +953,7 @@ extern "C" void _start() {
 
     // Attach to disk_driver SHM (retry until disk_driver has created it)
     uint64_t disk_shm = 0;
-    while ((disk_shm = (uint64_t)sys_shm_attach(DISK_DRIVER_PID)) == 0) {
+    while ((disk_shm = (uint64_t)sys_shm_attach(sys_lookup_dev(DEV_DISK))) == 0) {
         sys_wait(1);
     }
     disk_hdr = (volatile disk_shm_header *)(disk_shm + DISK_SHM_HEADER_OFFSET);

@@ -23,6 +23,8 @@
 #define SYS_WRITE        15
 #define SYS_READ         16
 #define SYS_CLOSE        17
+#define SYS_LOAD_DEV     18
+#define SYS_LOOKUP_DEV   19
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -107,6 +109,14 @@ static inline int64_t sys_read(int fd, void *buf, size_t len) {
 
 static inline int sys_close(int fd) {
     return (int)__syscall1(SYS_CLOSE, (int64_t)fd);
+}
+
+static inline int sys_load_dev(int32_t pid, int dev_type) {
+    return (int)__syscall2(SYS_LOAD_DEV, (int64_t)pid, (int64_t)dev_type);
+}
+
+static inline int32_t sys_lookup_dev(int dev_type) {
+    return (int32_t)__syscall1(SYS_LOOKUP_DEV, (int64_t)dev_type);
 }
 
 #endif // COMMON_SYSCALL_H

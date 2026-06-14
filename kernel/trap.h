@@ -31,6 +31,14 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t);
 uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t);
 uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_load_dev(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t);
+uint64_t sys_lookup_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+
+// Register a driver PID for a device type (kernel-internal, not a syscall)
+int register_dev(int dev_type, int32_t pid);
+
+// Remove a PID from dev_table (called by proc_reap)
+void dev_table_cleanup(int32_t pid);
 
 // Wake a process blocked on WAIT_NOTIFY (used by pipe close and proc_reap)
 void wake_process(int32_t pid);

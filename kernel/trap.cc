@@ -10,6 +10,7 @@
 #include "kernel/mem/slab.h"
 #include "common/errno.h"
 #include "kernel/fb.h"
+#include "common/dev.h"
 
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 48
@@ -17,6 +18,9 @@ static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS];
 
 // ===================== IRQ owner (user-space driver binding) =====================
 static pid_t irq_owner[MAX_IRQ_HANDLERS];
+
+// ===================== Device table (dev_type → PID) =====================
+static pid_t dev_table[DEV_TYPE_MAX];
 
 void register_irq(int vec, irq_handler_t fn) {
   if (vec >= 0 && vec < MAX_IRQ_HANDLERS) {
@@ -205,6 +209,11 @@ void isr_init() {
     irq_owner[i] = -1;
   }
 
+  // Initialize device table
+  for (int i = 0; i < DEV_TYPE_MAX; i++) {
+    dev_table[i] = 0;
+  }
+
   // Register default handlers
   register_irq(32, timer_handler);
 
@@ -221,7 +230,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 18
+#define NR_SYSCALL 20
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0: 获取 PID
     sys_yield,          // 1: 主动让出 CPU
@@ -241,6 +250,8 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_write,          // 15: 写 fd
     sys_read,           // 16: 读 fd
     sys_close,          // 17: 关闭 fd
+    sys_load_dev,       // 18: 注册驱动
+    sys_lookup_dev,     // 19: 查询驱动 PID
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -927,4 +938,37 @@ uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     current_proc->fd_table[fd].pipe = nullptr;
 
     return 0;
+}
+
+// ===================== Device table syscalls =====================
+
+// Kernel-internal: register a driver PID for a device type
+int register_dev(int dev_type, pid_t pid) {
+    if (dev_type <= DEV_NONE || dev_type >= DEV_TYPE_MAX) return EINVAL;
+    if (dev_table[dev_type] != 0) return EEXIST;
+    dev_table[dev_type] = pid;
+    return 0;
+}
+
+// sys_load_dev(pid, dev_type) — syscall 18 (注册驱动)
+// Returns: 0 on success, positive errno on failure
+uint64_t sys_load_dev(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+    pid_t pid = (pid_t)arg1;
+    int dev_type = (int)arg2;
+    return (uint64_t)register_dev(dev_type, pid);
+}
+
+// sys_lookup_dev(dev_type) — syscall 19 (查询驱动 PID)
+// Returns: PID on success, 0 if not found
+uint64_t sys_lookup_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    int dev_type = (int)arg1;
+    if (dev_type <= DEV_NONE || dev_type >= DEV_TYPE_MAX) return 0;
+    return (uint64_t)dev_table[dev_type];
+}
+
+// Remove a PID from dev_table (called by proc_reap)
+void dev_table_cleanup(pid_t pid) {
+    for (int i = 0; i < DEV_TYPE_MAX; i++) {
+        if (dev_table[i] == pid) dev_table[i] = 0;
+    }
 }

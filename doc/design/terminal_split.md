@@ -191,7 +191,7 @@ pipe_stdout: shell fd_table[1]（写端）→ terminal fd_table[0]（读端）
 ```c
 void terminal_main() {
     // 1. attach kbd_driver shm（读键盘输入）
-    shm_addr = sys_shm_attach(KBD_DRIVER_PID);
+    shm_addr = sys_shm_attach(sys_lookup_dev(DEV_KBD));
     shm_hdr = (driver_shm_header *)shm_addr;
     kbd = (kbd_ring *)(shm_addr + KBD_RING_OFFSET);
     kms = (kms_ring *)(shm_addr + KMS_RING_OFFSET);
@@ -319,7 +319,7 @@ void flush_dirty_cells() {
 
 ### 3.1 移除 shm attach
 
-Shell 不再需要 `sys_shm_attach(KBD_DRIVER_PID)`。fd 0 和 fd 1 已由内核设置。
+Shell 不再需要 `sys_shm_attach(sys_lookup_dev(DEV_KBD))`。fd 0 和 fd 1 已由内核设置。
 
 ### 3.2 输入改造
 
@@ -429,17 +429,9 @@ disk_driver → kbd_driver → kms_driver → terminal → shell → fs_driver
 | 501-600 | fs_driver.elf | 7 |
 | 601+ | FAT32 分区 | — |
 
-### 6.3 PID 调整
+### 6.3 设备管理
 
-```c
-// common/pid.h
-#define DISK_DRIVER_PID   2
-#define KBD_DRIVER_PID    3
-#define KMS_DRIVER_PID    4
-#define TERMINAL_PID      5
-#define SHELL_PID         6
-#define FS_DRIVER_PID     7
-```
+驱动 PID 通过 `sys_lookup_dev(dev_type)` 动态发现（`common/dev.h` 定义设备类型），不再硬编码。详见 [dev_table.md](dev_table.md)。
 
 ### 6.4 kernel_main 修改
 
@@ -466,7 +458,7 @@ load_elf("fs_driver", LBA 501, IOPL=0, map_fb=false);  // LBA 从 401→501
 | 16 | SYS_READ | `sys_read(fd, buf, len)` | 从 fd 读数据，阻塞直到有数据 |
 | 17 | SYS_CLOSE | `sys_close(fd)` | 关闭 fd，pipe ref_count-- |
 
-NR_SYSCALL=18（编号 0-17 连续无空洞）。
+NR_SYSCALL=20（编号 0-19 连续无空洞）。
 
 ## 8. 实施步骤
 
@@ -484,7 +476,7 @@ NR_SYSCALL=18（编号 0-17 连续无空洞）。
 - [x] `common/syscall.h`：新增 `SYS_PIPE=14`、`SYS_CLOSE=17` 封装
 - [x] `kernel/trap.cc`：实现 `sys_pipe` — 校验指针 + 找空闲 fd + kmalloc pipe + 写用户指针
 - [x] `kernel/trap.cc`：实现 `sys_close` — ref_count-- + 归零释放 + notify 对端
-- [x] NR_SYSCALL 增至 21
+- [x] NR_SYSCALL 增至 22
 
 验证: 两个进程通过 sys_pipe + sys_shm_attach 共享 pipe 通信
 
@@ -513,7 +505,7 @@ NR_SYSCALL=18（编号 0-17 连续无空洞）。
 
 ### 8.6 PID + 磁盘布局调整
 
-- [x] `common/pid.h`：新增 `TERMINAL_PID=5`，shell 改为 6，fs_driver 改为 7
+- [x] `common/dev.h`：新增设备类型定义（DEV_DISK/DEV_KBD/DEV_KMS/DEV_FS/DEV_TERMINAL），驱动 PID 通过 `sys_lookup_dev` 动态发现
 - [x] `kernel/kernel.cc`：调整 ELF 加载顺序和 LBA
 - [x] `build.sh`：新增 terminal.elf 编译 + dd 写入 LBA 301，调整 shell/fs_driver LBA + MBR 分区表
 

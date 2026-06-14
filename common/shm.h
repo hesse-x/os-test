@@ -106,7 +106,7 @@ struct kms_fb_info {
 
 // ===================== Driver shared page layout =====================
 // One 4K page created by kbd_driver via sys_shm_create(4096),
-// attached by kms_driver and shell via sys_shm_attach(KBD_DRIVER_PID).
+// attached by kms_driver and terminal via sys_shm_attach(sys_lookup_dev(DEV_KBD)).
 //
 // Offset 0:   driver_shm_header (8 bytes)
 // Offset 8:   kbd ring buffer (head + tail + msgs[8] = 72 bytes, padded to 128)

@@ -15,6 +15,7 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
+#include "common/dev.h"
 
 proc_t procs[MAX_PROC];
 // current_proc is per-CPU (in cpu_local_t), accessed via macro
@@ -509,7 +510,10 @@ void proc_reap(proc_t *proc) {
         }
     }
 
-    // 6. Clear PCB slot
+    // 6. Clear dev_table entries for this PID
+    dev_table_cleanup(proc->pid);
+
+    // 7. Clear PCB slot
     spin_lock(&procs_lock);
     proc->pid = -1;
     proc->state = READY;

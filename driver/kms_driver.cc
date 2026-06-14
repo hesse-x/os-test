@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include "arch/x64/utils.h"
 #include "common/shm.h"
-#include "common/pid.h"
+#include "common/dev.h"
 #include "common/macro.h"
 
 static volatile kms_ring *kms;
@@ -435,7 +435,7 @@ static void fb_putc(char c, uint32_t fg, uint32_t bg) {
 extern "C" void _start() {
     // Attach to KBD driver's shared memory page (retry until available)
     uint64_t shm_addr = 0;
-    while ((shm_addr = (uint64_t)sys_shm_attach(KBD_DRIVER_PID)) == 0) {
+    while ((shm_addr = (uint64_t)sys_shm_attach(sys_lookup_dev(DEV_KBD))) == 0) {
         sys_wait(1);
     }
 
