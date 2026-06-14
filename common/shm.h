@@ -58,10 +58,12 @@ struct fs_resp_shm {
 
 // Directory entry (readdir)
 struct fs_dirent {
-    char     name[28];   // 8.3 short name
-    uint32_t size;       // file size
-    uint32_t date;       // modification date
-    uint8_t  attr;       // FAT attributes (dir/readonly etc)
+    char     name[256]; // LFN long filename
+    uint32_t size;      // file size
+    uint32_t date;      // modification date (FAT32 wrt_date)
+    uint32_t time;      // modification time (FAT32 wrt_time)
+    uint8_t  attr;      // FAT attributes (dir/readonly etc)
+    // 3 bytes padding → sizeof = 272
 };
 
 // FS RPC request (fits in recv_msg.data[56])

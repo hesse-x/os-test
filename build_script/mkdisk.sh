@@ -15,8 +15,8 @@ for elf in disk_driver.elf kbd_driver.elf kms_driver.elf terminal.elf shell.elf 
     fi
 done
 
-# 创建零填充映像 (16MB, 32768 扇区)
-dd if=/dev/zero of="${BUILD_DIR}/disk.img" bs=512 count=32768 status=none
+# 创建零填充映像 (64MB, 131072 扇区)
+dd if=/dev/zero of="${BUILD_DIR}/disk.img" bs=512 count=131072 status=none
 
 # 写入 ELF 到裸 LBA 区域 (每槽 100 扇区 = 50KB)
 dd if="${BUILD_DIR}/disk_driver.elf"  of="${BUILD_DIR}/disk.img" bs=512 seek=1   conv=notrunc status=none
@@ -32,17 +32,32 @@ label: dos
 unit: sectors
 
 ${BUILD_DIR}/disk.img1 : start=1, size=600, type=da
-${BUILD_DIR}/disk.img2 : start=601, size=32167, type=0c
+${BUILD_DIR}/disk.img2 : start=601, size=130471, type=0c
 EOF
 
 # 提取 FAT32 分区区域，格式化，写入文件，写回
-dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part2.img" bs=512 skip=601 count=32167 status=none
-mkfs.fat -F 32 -s 1 "${BUILD_DIR}/part2.img" >/dev/null
+dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part2.img" bs=512 skip=601 count=130471 status=none
+mkfs.fat -F 32 -s 8 "${BUILD_DIR}/part2.img" >/dev/null
 
-# 写入测试文件和用户程序
-mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/README" ::
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello.elf" ::
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/malloc.elf" ::
+# 创建目录结构
+mmd -i "${BUILD_DIR}/part2.img" ::boot ::boot/bin ::boot/driver
+mmd -i "${BUILD_DIR}/part2.img" ::driver
+mmd -i "${BUILD_DIR}/part2.img" ::usr ::usr/bin ::usr/lib
+mmd -i "${BUILD_DIR}/part2.img" ::local
+
+# 复制文件到目录结构
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/disk_driver.elf"  ::boot/driver/disk.dev
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/fs_driver.elf"    ::boot/driver/fs.dev
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/kbd_driver.elf"   ::driver/kbd.dev
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/kms_driver.elf"   ::driver/kms.dev
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/terminal.elf"     ::usr/bin/terminal
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/shell.elf"        ::usr/bin/shell
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.a"           ::usr/lib/libc.a
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello.elf"        ::local/hello.elf
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/malloc.elf"       ::local/malloc.elf
+
+# 保留根目录 README
+mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/README" ::README
 
 # 写回 FAT32 分区
 dd if="${BUILD_DIR}/part2.img" of="${BUILD_DIR}/disk.img" bs=512 seek=601 conv=notrunc status=none

@@ -404,6 +404,12 @@ static void fb_putc(char c, uint32_t fg, uint32_t bg) {
         return;
     }
 
+    // Deferred newline: if cursor wrapped past end of line, do the wrap now
+    if (cursor_x >= cols()) {
+        cursor_x = 0;
+        advance_line();
+    }
+
     const uint8_t *glyph = font8x16[c - FONT_CHARS_START];
     uint32_t px = cursor_x * FONT_WIDTH;
     uint32_t py = cursor_y * FONT_HEIGHT;
@@ -427,10 +433,7 @@ static void fb_putc(char c, uint32_t fg, uint32_t bg) {
     }
 
     cursor_x++;
-    if (cursor_x >= cols()) {
-        cursor_x = 0;
-        advance_line();
-    }
+    // Deferred newline: don't wrap here, let next fb_putc handle it
 }
 
 // ===================== Main loop =====================

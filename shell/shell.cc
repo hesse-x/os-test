@@ -22,22 +22,16 @@ static char cwd[256] = "/";
 
 static char getc() {
     char ch;
-    while (read(0, &ch, 1) != 1) {
-        // Block until data available
-    }
+    while (read(0, &ch, 1) != 1) {}
     return ch;
 }
 
-// Read a line into buf (max len-1 chars), returns length
 static int readline(char *buf, int len) {
     int i = 0;
     while (i < len - 1) {
         char c = getc();
-        if (c == '\n') {
-            putchar(c);
-            break;
-        }
-        if (c == 8) { // backspace
+        if (c == '\n') { putchar(c); break; }
+        if (c == 8) {
             if (i > 0) { i--; putchar(c); putchar(' '); putchar(c); }
             continue;
         }
@@ -52,29 +46,13 @@ static int readline(char *buf, int len) {
 
 static uint32_t parse_u32(const char *s) {
     uint32_t v = 0;
-    while (*s >= '0' && *s <= '9') {
-        v = v * 10 + (*s - '0');
-        s++;
-    }
-    return v;
-}
-
-static uint64_t parse_hex64(const char *s) {
-    uint64_t v = 0;
-    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
-    while (*s) {
-        char c = *s++;
-        if (c >= '0' && c <= '9') v = v * 16 + (c - '0');
-        else if (c >= 'a' && c <= 'f') v = v * 16 + (c - 'a' + 10);
-        else if (c >= 'A' && c <= 'F') v = v * 16 + (c - 'A' + 10);
-        else break;
-    }
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
     return v;
 }
 
 // ===================== FS IPC =====================
 
-static pid_t fs_pid;  // fs_driver PID, resolved at init
+static pid_t fs_pid;
 
 static int fs_request() {
     freq->client_pid = getpid();
@@ -87,35 +65,21 @@ static int fs_request() {
     fs_rpc_reply rep;
     rpc(fs_pid, &req, &rep);
 
-    // Copy reply fields into fresp so existing cmd handlers can read them
-    // (they already reference fresp->status, fresp->total etc.)
     fresp->status = rep.status;
     fresp->fd     = rep.fd;
     fresp->count  = rep.count;
     fresp->total  = rep.total;
 
-    {
-        const char msg[] = "fs_req: s=X t=Y\n";
-        char *p = (char *)msg;
-        p[10] = '0' + (char)fresp->status;
-        p[14] = '0' + (char)(fresp->total & 0xF);
-        serial_write(msg, 16);
-    }
     return (int)fresp->status;
 }
 
-// Copy string to freq->path, zero-padded
 static void set_path(const char *s) {
     for (int i = 0; i < 256; i++) {
         freq->path[i] = s[i];
-        if (s[i] == '\0') {
-            for (int j = i + 1; j < 256; j++) freq->path[j] = 0;
-            break;
-        }
+        if (s[i] == '\0') { for (int j = i + 1; j < 256; j++) freq->path[j] = 0; break; }
     }
 }
 
-// Build absolute path from relative path + cwd
 static void build_abs_path(const char *rel, char *abs) {
     int i;
     if (rel[0] == '/') {
@@ -129,27 +93,132 @@ static void build_abs_path(const char *rel, char *abs) {
     }
 }
 
+// ===================== Date/time formatting =====================
+
+static const char *month_names[] = {
+    "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
+};
+
+// Format FAT32 date+time as "Mon DD HH:MM"
+static void format_datetime(uint32_t date, uint32_t time, char *out, int out_len) {
+    int year  = ((date >> 9) & 0x7F) + 1980;
+    int month = (date >> 5) & 0x0F;
+    int day   = date & 0x1F;
+    int hour  = (time >> 11) & 0x1F;
+    int min   = (time >> 5) & 0x3F;
+
+    if (month < 1 || month > 12) month = 1;
+
+    // Simple formatting: "Jun 14 10:30"
+    const char *mon = month_names[month - 1];
+    int pos = 0;
+    for (int i = 0; mon[i] && pos < out_len - 1; i++) out[pos++] = mon[i];
+    if (pos < out_len - 1) out[pos++] = ' ';
+    // Day
+    if (day < 10 && pos < out_len - 1) out[pos++] = ' ';
+    if (day >= 10 && pos < out_len - 2) {
+        out[pos++] = '0' + (day / 10);
+        out[pos++] = '0' + (day % 10);
+    } else if (pos < out_len - 1) {
+        out[pos++] = '0' + day;
+    }
+    if (pos < out_len - 1) out[pos++] = ' ';
+    // Hour
+    if (hour < 10 && pos < out_len - 1) out[pos++] = '0';
+    if (hour >= 10 && pos < out_len - 2) {
+        out[pos++] = '0' + (hour / 10);
+        out[pos++] = '0' + (hour % 10);
+    } else if (pos < out_len - 1) {
+        out[pos++] = '0' + hour;
+    }
+    if (pos < out_len - 1) out[pos++] = ':';
+    // Minute
+    if (min < 10 && pos < out_len - 1) out[pos++] = '0';
+    if (min >= 10 && pos < out_len - 2) {
+        out[pos++] = '0' + (min / 10);
+        out[pos++] = '0' + (min % 10);
+    } else if (pos < out_len - 1) {
+        out[pos++] = '0' + min;
+    }
+    out[pos] = '\0';
+}
+
 // ===================== Command handlers =====================
 
-static void cmd_ls(int long_format) {
+static void cmd_ls(const char *rel_path, int long_format) {
+    char abs_path[256];
+    if (rel_path[0] == '\0') {
+        // No argument — list cwd directly
+        for (int i = 0; cwd[i] && i < 255; i++) abs_path[i] = cwd[i];
+        abs_path[255] = '\0';
+    } else {
+        build_abs_path(rel_path, abs_path);
+    }
+
+    // Try readdir directly — if path is a file, fs_driver returns status 2
     freq->cmd = FS_CMD_READDIR;
-    set_path(cwd);
+    set_path(abs_path);
+    freq->offset = 0;
+    freq->count = 30;
 
     int rc = fs_request();
+    if (rc == 2) {
+        printf("ls: not a directory\n");
+        return;
+    }
     if (rc != 0) {
-        printf("ls: error\n");
+        printf("ls: cannot access\n");
         return;
     }
 
     fs_dirent *entries = (fs_dirent *)fresp->data;
-    for (uint32_t i = 0; i < fresp->total; i++) {
-        if (long_format) {
-            if (entries[i].attr & 0x10) printf("drwxr-xr-x");
-            else printf("-rw-r--r--");
-            printf("  0 root root %u Jan 01 00:00 %s\n", entries[i].size, entries[i].name);
-        } else {
-            printf("%s\n", entries[i].name);
+    uint32_t total = fresp->total;
+
+    // Paginated readdir loop
+    uint32_t offset = 0;
+    bool first = true;
+    while (true) {
+        if (!first) {
+            freq->cmd = FS_CMD_READDIR;
+            set_path(abs_path);
+            freq->offset = offset;
+            freq->count = 30;
+            rc = fs_request();
+            if (rc != 0) break;
+            entries = (fs_dirent *)fresp->data;
+            total = fresp->total;
         }
+        first = false;
+
+        for (uint32_t i = 0; i < total; i++) {
+            if (long_format) {
+                // Permissions
+                if (entries[i].attr & 0x10)
+                    printf("drwxr-xr-x");
+                else if (entries[i].attr & 0x01)
+                    printf("-r--r--r--");
+                else
+                    printf("-rw-r--r--");
+                // Hard links
+                printf(" %u", (entries[i].attr & 0x10) ? 2 : 1);
+                // Owner/group
+                printf(" root root");
+                // Size
+                printf(" %u", entries[i].size);
+                // Date/time
+                char dt[20];
+                format_datetime(entries[i].date, entries[i].time, dt, sizeof(dt));
+                printf(" %s", dt);
+                // Name
+                printf(" %s", entries[i].name);
+                putchar('\n');
+            } else {
+                printf("%s\n", entries[i].name);
+            }
+        }
+
+        offset += total;
+        if (total < 30) break;
     }
 }
 
@@ -197,6 +266,8 @@ static void cmd_cd(const char *rel_path) {
 
     freq->cmd = FS_CMD_READDIR;
     set_path(abs_path);
+    freq->offset = 0;
+    freq->count = 1;
     if (fs_request() != 0) {
         printf("cd: not a directory\n");
         return;
@@ -263,77 +334,16 @@ static void cmd_raw_read(uint32_t lba, uint32_t count) {
     if (bytes % 16 != 0) putchar('\n');
 }
 
-static void cmd_malloc(const char *args) {
-    uint32_t size = parse_u32(args);
-    void *p = malloc(size);
-    if (p) {
-        printf("malloc(%u) = %p\n", size, p);
-        char *buf = (char *)p;
-        for (uint32_t i = 0; i < size && i < 64; i++)
-            buf[i] = 'A' + (i % 26);
-    } else {
-        printf("malloc(%u) = NULL\n", size);
-    }
-}
-
-static void cmd_free(const char *args) {
-    uint64_t addr = parse_hex64(args);
-    if (addr == 0) {
-        printf("free: invalid addr\n");
-        return;
-    }
-    printf("free(%p)\n", (void *)addr);
-    free((void *)addr);
-}
-
-static void cmd_malloc_test(const char *) {
-    printf("=== malloc test ===\n");
-
-    void *p1 = malloc(64);
-    printf("1. malloc(64) = %p\n", p1);
-
-    void *p2 = malloc(128);
-    printf("2. malloc(128) = %p\n", p2);
-
-    void *p3 = malloc(32);
-    printf("3. malloc(32) = %p\n", p3);
-
-    free(p2);
-    printf("4. free(p2)\n");
-
-    void *p4 = realloc(p1, 256);
-    printf("5. realloc(p1,256) = %p\n", p4);
-
-    int *arr = (int *)calloc(10, sizeof(int));
-    printf("6. calloc(10,4) = %p", arr);
-    if (arr) {
-        int ok = 1;
-        for (int i = 0; i < 10; i++) { if (arr[i] != 0) ok = 0; }
-        printf(ok ? " zero-ok" : " NOT-ZERO");
-    }
-    putchar('\n');
-
-    void *p5 = malloc(0);
-    printf("7. malloc(0) = %p\n", p5);
-
-    free(p3);
-    free(p4);
-    free(arr);
-    free(p5);
-    printf("8. all freed\n");
-
-    printf("=== test done ===\n");
-}
-
-// run <path>: read ELF file from FAT32, spawn as child process, wait for it
-static void cmd_run(const char *rel_path) {
+// Execute a file as an ELF: open, read, spawn, wait
+static void exec_path(const char *rel_path) {
     char abs_path[256];
     build_abs_path(rel_path, abs_path);
 
+    // Open file
     freq->cmd = FS_CMD_OPEN;
     set_path(abs_path);
     if (fs_request() != 0) {
-        printf("run: cannot open\n");
+        printf("%s: file not found\n", rel_path);
         return;
     }
 
@@ -341,7 +351,7 @@ static void cmd_run(const char *rel_path) {
     uint32_t file_size = fresp->total;
 
     if (file_size == 0) {
-        printf("run: empty file\n");
+        printf("%s: empty file\n", rel_path);
         freq->cmd = FS_CMD_CLOSE;
         freq->fd = fd;
         fs_request();
@@ -350,13 +360,14 @@ static void cmd_run(const char *rel_path) {
 
     uint8_t *elf_buf = (uint8_t *)malloc(file_size);
     if (!elf_buf) {
-        printf("run: malloc failed\n");
+        printf("%s: malloc failed\n", rel_path);
         freq->cmd = FS_CMD_CLOSE;
         freq->fd = fd;
         fs_request();
         return;
     }
 
+    // Read entire file
     uint32_t offset = 0;
     while (offset < file_size) {
         uint32_t to_read = file_size - offset;
@@ -368,7 +379,7 @@ static void cmd_run(const char *rel_path) {
         freq->count = to_read;
 
         if (fs_request() != 0) {
-            printf("run: read error\n");
+            printf("%s: read error\n", rel_path);
             free(elf_buf);
             freq->cmd = FS_CMD_CLOSE;
             freq->fd = fd;
@@ -385,25 +396,27 @@ static void cmd_run(const char *rel_path) {
     freq->fd = fd;
     fs_request();
 
+    // ELF magic check
+    if (elf_buf[0] != 0x7F || elf_buf[1] != 'E' || elf_buf[2] != 'L' || elf_buf[3] != 'F') {
+        printf("%s: not an executable file\n", rel_path);
+        free(elf_buf);
+        return;
+    }
+
     pid_t child_pid = spawn((const void *)elf_buf, (size_t)file_size, 0);
     free(elf_buf);
 
     if (child_pid < 0) {
-        printf("run: spawn failed\n");
+        printf("%s: spawn failed\n", rel_path);
         return;
     }
-
-    printf("run: spawned pid=%u\n", (uint32_t)child_pid);
 
     int32_t exit_code = 0;
     pid_t result = waitpid(child_pid, &exit_code, 0);
-
     if (result < 0) {
-        printf("run: waitpid failed\n");
+        printf("%s: waitpid failed\n", rel_path);
         return;
     }
-
-    printf("run: pid=%u exited with code %u\n", (uint32_t)child_pid, (uint32_t)exit_code);
 }
 
 // ===================== Command parsing =====================
@@ -417,15 +430,14 @@ struct cmd_entry {
 };
 
 static const cmd_entry cmds[] = {
-    {"cat",   cmd_cat,             1},
-    {"touch", cmd_touch,           1},
-    {"mkdir", cmd_mkdir,           1},
+    {"cat",   cmd_cat,    1},
+    {"touch", cmd_touch,  1},
+    {"mkdir", cmd_mkdir,  1},
 };
 
 // ===================== Main =====================
 
 extern "C" void _start() {
-    // Resolve fs_driver PID (retry until it registers)
     serial_write("shell: waiting for fs_driver\n", 29);
     while ((fs_pid = device_lookup(DEV_FS)) < 0) {
         struct recv_msg m;
@@ -433,7 +445,6 @@ extern "C" void _start() {
     }
     serial_write("shell: fs_driver found\n", 23);
 
-    // Attach to fs_driver SHM (retry until fs_driver has created it)
     void *shm_addr = NULL;
     while (shm_attach(fs_pid, &shm_addr) < 0) {
         struct recv_msg m;
@@ -445,9 +456,7 @@ extern "C" void _start() {
     freq   = (volatile fs_req_shm *)(fs_shm + FS_REQ_OFFSET);
     fresp  = (volatile fs_resp_shm *)(fs_shm + FS_RESP_OFFSET);
 
-    // fd 0 and fd 1 are already set up by the kernel (pipe to terminal)
-
-    char line[80];
+    char line[256];
 
     while (1) {
         printf("> ");
@@ -458,17 +467,24 @@ extern "C" void _start() {
         const char *p = line;
         while (*p == ' ') p++;
 
-        char cmd_name[16];
+        char cmd_name[256];
         int ci = 0;
-        while (*p && *p != ' ' && ci < 15) cmd_name[ci++] = *p++;
+        while (*p && *p != ' ' && ci < 255) cmd_name[ci++] = *p++;
         cmd_name[ci] = '\0';
 
         while (*p == ' ') p++;
 
+        // Built-in commands
         if (strcmp(cmd_name, "ls") == 0) {
             int long_fmt = 0;
-            if (*p == '-' && *(p+1) == 'l') long_fmt = 1;
-            cmd_ls(long_fmt);
+            const char *arg = p;
+            if (*p == '-' && *(p+1) == 'l') {
+                long_fmt = 1;
+                p += 2;
+                while (*p == ' ') p++;
+                arg = p;
+            }
+            cmd_ls(arg, long_fmt);
             continue;
         }
 
@@ -485,27 +501,6 @@ extern "C" void _start() {
             continue;
         }
 
-        if (strcmp(cmd_name, "malloc") == 0) {
-            cmd_malloc(p);
-            continue;
-        }
-
-        if (strcmp(cmd_name, "free") == 0) {
-            cmd_free(p);
-            continue;
-        }
-
-        if (strcmp(cmd_name, "mtest") == 0) {
-            cmd_malloc_test(p);
-            continue;
-        }
-
-        if (strcmp(cmd_name, "run") == 0) {
-            if (*p == '\0') { printf("run: missing argument\n"); continue; }
-            cmd_run(p);
-            continue;
-        }
-
         if (strcmp(cmd_name, "cd") == 0) {
             if (*p == '\0') cmd_cd("/");
             else cmd_cd(p);
@@ -518,21 +513,20 @@ extern "C" void _start() {
         }
 
         if (strcmp(cmd_name, "h") == 0) {
-            printf("ls [-l]         - list directory\n");
+            printf("ls [-l] [path]  - list directory\n");
             printf("cat <path>      - read file\n");
             printf("cd <path>       - change directory\n");
             printf("pwd             - print working directory\n");
             printf("touch <path>    - create empty file\n");
             printf("mkdir <path>    - create directory\n");
-            printf("run <path>      - execute ELF file\n");
             printf("r LBA [COUNT]   - raw disk read\n");
-            printf("malloc N        - test malloc\n");
-            printf("free ADDR       - test free\n");
-            printf("mtest           - malloc test suite\n");
+            printf("<path>          - execute ELF file\n");
             printf("h               - show help\n");
             continue;
         }
 
+        // Check built-in command table
+        bool found_builtin = false;
         for (int i = 0; i < (int)(sizeof(cmds) / sizeof(cmds[0])); i++) {
             if (strcmp(cmd_name, cmds[i].name) == 0) {
                 if (cmds[i].handler) {
@@ -542,11 +536,13 @@ extern "C" void _start() {
                         cmds[i].handler(p);
                     }
                 }
-                goto next_line;
+                found_builtin = true;
+                break;
             }
         }
+        if (found_builtin) continue;
 
-        printf("unknown cmd\n");
-next_line:;
+        // Not a built-in command — treat as file path to execute
+        exec_path(cmd_name);
     }
 }
