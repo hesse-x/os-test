@@ -3,7 +3,10 @@
 // Uses dynamic shared memory (sys_shm_attach) + sleeping flag protocol
 #include <stdint.h>
 #include <stddef.h>
-#include <sys.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/device.h>
+#include <sys/fb.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/macro.h"
@@ -434,29 +437,30 @@ static void fb_putc(char c, uint32_t fg, uint32_t bg) {
 
 extern "C" void _start() {
     // Attach to KBD driver's shared memory page (retry until available)
-    uint64_t shm_addr = 0;
-    while ((shm_addr = (uint64_t)sys_shm_attach(sys_lookup_dev(DEV_KBD))) == 0) {
+    void *shm_ptr = NULL;
+    while (shm_attach(device_lookup(DEV_KBD), &shm_ptr) < 0) {
         struct recv_msg msg;
-        sys_recv(&msg, 1);
+        recv(&msg, 1);
     }
+    uint64_t shm_addr = (uint64_t)shm_ptr;
 
     shm_hdr = (volatile driver_shm_header *)shm_addr;
     kms = (volatile kms_ring *)(shm_addr + KMS_RING_OFFSET);
 
     // Get framebuffer info via syscall
-    kms_fb_info fb_info;
-    sys_fb_info(&fb_info);
+    struct kms_fb_info kfb;
+    ::fb_info(&kfb);
 
-    fb_width  = fb_info.width;
-    fb_height = fb_info.height;
-    fb_pitch  = fb_info.pitch;
-    fb_bpp    = fb_info.bpp;
-    fb_size   = (uint32_t)fb_info.fb_size;
-    fb_vaddr  = (uint8_t *)(uintptr_t)fb_info.fb_vaddr;
+    fb_width  = kfb.width;
+    fb_height = kfb.height;
+    fb_pitch  = kfb.pitch;
+    fb_bpp    = kfb.bpp;
+    fb_size   = (uint32_t)kfb.fb_size;
+    fb_vaddr  = (uint8_t *)(uintptr_t)kfb.fb_vaddr;
 
     if (fb_width == 0 || fb_vaddr == 0) {
         // No framebuffer, just idle
-        while (1) { struct recv_msg msg; sys_recv(&msg, 0); }
+        while (1) { struct recv_msg msg; recv(&msg, 0); }
     }
 
     // Clear screen
@@ -494,7 +498,7 @@ extern "C" void _start() {
             continue;
         }
         struct recv_msg msg;
-        sys_recv(&msg, 16);
+        recv(&msg, 16);
         shm_hdr->kms_sleeping = 0;
     }
 }

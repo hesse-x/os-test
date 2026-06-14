@@ -1,7 +1,13 @@
 #include "stdio.h"
 #include "string.h"
 #include "stdlib.h"
-#include <sys.h>
+#include <unistd.h>
+#include <sys/ipc.h>
+#include <sys/device.h>
+#include <sys/shm.h>
+#include <sys/process.h>
+#include <sys/wait.h>
+#include <sys/serial.h>
 #include "common/shm.h"
 #include "common/dev.h"
 
@@ -16,7 +22,7 @@ static char cwd[256] = "/";
 
 static char getc() {
     char ch;
-    while (sys_read(0, &ch, 1) != 1) {
+    while (read(0, &ch, 1) != 1) {
         // Block until data available
     }
     return ch;
@@ -68,10 +74,10 @@ static uint64_t parse_hex64(const char *s) {
 
 // ===================== FS IPC =====================
 
-static int32_t fs_pid;  // fs_driver PID, resolved at init
+static pid_t fs_pid;  // fs_driver PID, resolved at init
 
 static int fs_request() {
-    freq->client_pid = sys_getpid();
+    freq->client_pid = getpid();
     fflush(stdout);
 
     fs_rpc_request req;
@@ -79,7 +85,7 @@ static int fs_request() {
     memset(req.reserved, 0, sizeof(req.reserved));
 
     fs_rpc_reply rep;
-    sys_rpc(fs_pid, &req, &rep);
+    rpc(fs_pid, &req, &rep);
 
     // Copy reply fields into fresp so existing cmd handlers can read them
     // (they already reference fresp->status, fresp->total etc.)
@@ -93,7 +99,7 @@ static int fs_request() {
         char *p = (char *)msg;
         p[10] = '0' + (char)fresp->status;
         p[14] = '0' + (char)(fresp->total & 0xF);
-        sys_serial_write(msg, 16);
+        serial_write(msg, 16);
     }
     return (int)fresp->status;
 }
@@ -379,10 +385,10 @@ static void cmd_run(const char *rel_path) {
     freq->fd = fd;
     fs_request();
 
-    int64_t child_pid = sys_spawn((const void *)elf_buf, (uint64_t)file_size, 0);
+    pid_t child_pid = spawn((const void *)elf_buf, (size_t)file_size, 0);
     free(elf_buf);
 
-    if (child_pid == 0) {
+    if (child_pid < 0) {
         printf("run: spawn failed\n");
         return;
     }
@@ -390,9 +396,9 @@ static void cmd_run(const char *rel_path) {
     printf("run: spawned pid=%u\n", (uint32_t)child_pid);
 
     int32_t exit_code = 0;
-    int64_t result = sys_waitpid((int32_t)child_pid, &exit_code);
+    pid_t result = waitpid(child_pid, &exit_code, 0);
 
-    if (result == 0) {
+    if (result < 0) {
         printf("run: waitpid failed\n");
         return;
     }
@@ -420,20 +426,21 @@ static const cmd_entry cmds[] = {
 
 extern "C" void _start() {
     // Resolve fs_driver PID (retry until it registers)
-    sys_serial_write("shell: waiting for fs_driver\n", 29);
-    while ((fs_pid = sys_lookup_dev(DEV_FS)) == 0) {
+    serial_write("shell: waiting for fs_driver\n", 29);
+    while ((fs_pid = device_lookup(DEV_FS)) < 0) {
         struct recv_msg m;
-        sys_recv(&m, 1);
+        recv(&m, 1);
     }
-    sys_serial_write("shell: fs_driver found\n", 23);
+    serial_write("shell: fs_driver found\n", 23);
 
     // Attach to fs_driver SHM (retry until fs_driver has created it)
-    uint64_t fs_shm = 0;
-    while ((fs_shm = (uint64_t)sys_shm_attach(fs_pid)) == 0) {
+    void *shm_addr = NULL;
+    while (shm_attach(fs_pid, &shm_addr) < 0) {
         struct recv_msg m;
-        sys_recv(&m, 1);
+        recv(&m, 1);
     }
-    sys_serial_write("shell: fs_driver attached\n", 26);
+    uint64_t fs_shm = (uint64_t)shm_addr;
+    serial_write("shell: fs_driver attached\n", 26);
     fs_hdr = (volatile fs_shm_header *)(fs_shm + FS_SHM_HEADER_OFFSET);
     freq   = (volatile fs_req_shm *)(fs_shm + FS_REQ_OFFSET);
     fresp  = (volatile fs_resp_shm *)(fs_shm + FS_RESP_OFFSET);

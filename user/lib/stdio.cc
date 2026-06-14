@@ -75,8 +75,9 @@ static FILE stdin_file = {
     0, nullptr, 0, 0, _IONBF, _F_READ, nullptr, sys_read_fill
 };
 
+static char stdout_buf[256];
 static FILE stdout_file = {
-    1, nullptr, 0, 0, _IONBF, _F_WRITE, sys_write_flush, nullptr
+    1, stdout_buf, sizeof(stdout_buf), 0, _IOLBF, _F_WRITE, sys_write_flush, nullptr
 };
 
 static FILE stderr_file = {

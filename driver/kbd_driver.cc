@@ -2,7 +2,11 @@
 // 3-layer architecture: acquire → translate → push
 // Supports extended keys (0xE0 prefix), Shift/CapsLock, bind/unbind RPC protocol
 #include <stdint.h>
-#include <sys.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/irq.h>
+#include <sys/device.h>
+#include <unistd.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/input.h"
@@ -335,7 +339,9 @@ static void handle_rpc(struct recv_msg *msg) {
         } else {
             if (consumer_pid < 0) {
                 // First bind: create SHM
-                uint64_t shm_addr = (uint64_t)sys_shm_create(4096);
+                void *shm_ptr = NULL;
+                shm_create(4096, &shm_ptr);
+                uint64_t shm_addr = (uint64_t)shm_ptr;
                 kbd = (volatile kbd_ring *)(shm_addr + KBD_RING_OFFSET);
                 shm_hdr = (volatile driver_shm_header *)shm_addr;
                 kbd->head = 0;
@@ -356,17 +362,17 @@ static void handle_rpc(struct recv_msg *msg) {
         reply.result = -EINVAL;
     }
 
-    sys_reply(&reply);
+    rpc_reply(&reply);
 }
 
 // ===================== Main =====================
 
 extern "C" void _start() {
     // Bind to keyboard IRQ (IRQ1 = vector 33)
-    sys_irq_bind(33);
+    irq_bind(33);
 
     // Register as KBD device
-    sys_load_dev(sys_getpid(), DEV_KBD);
+    device_register(getpid(), DEV_KBD);
 
     // Initialize translation state
     for (uint8_t *p = (uint8_t *)&kst; p < (uint8_t *)(&kst + 1); *p++ = 0);
@@ -374,7 +380,7 @@ extern "C" void _start() {
     // Main loop: wait for events (IRQ or RPC)
     while (1) {
         struct recv_msg msg;
-        sys_recv(&msg, 0);
+        recv(&msg, 0);
 
         if (msg.type == RECV_RPC) {
             handle_rpc(&msg);
@@ -395,7 +401,7 @@ extern "C" void _start() {
 
             // Notify consumer if sleeping
             if (shm_hdr && shm_hdr->consumer_sleeping) {
-                sys_notify(consumer_pid);
+                notify(consumer_pid);
             }
         }
         // RECV_IRQ without consumer: skip (don't read hardware, don't push)

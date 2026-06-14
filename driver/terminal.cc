@@ -9,7 +9,12 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <sys.h>
+#include <unistd.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/device.h>
+#include <sys/fb.h>
+#include <sys/mman.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/macro.h"
@@ -191,9 +196,9 @@ static const uint32_t vt100_colors[] = {
 static void write_kms_ring(uint32_t cmd, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
     while (kms->head == ((kms->tail + KMS_RING_SIZE - 1) % KMS_RING_SIZE)) {
         if (shm_hdr->kms_sleeping) {
-            sys_notify(kms_driver_pid);
+            notify(kms_driver_pid);
         }
-        sys_yield();
+        sched_yield();
     }
     uint32_t idx = kms->head;
     kms->msgs[idx].cmd = cmd;
@@ -205,7 +210,7 @@ static void write_kms_ring(uint32_t cmd, uint32_t arg1, uint32_t arg2, uint32_t 
 
 static void kms_notify_driver() {
     if (kms->head != kms->tail && shm_hdr->kms_sleeping) {
-        sys_notify(kms_driver_pid);
+        notify(kms_driver_pid);
     }
 }
 
@@ -442,42 +447,51 @@ static void flush_dirty_cells() {
 // ===================== Main =====================
 
 extern "C" void _start() {
-    kms_driver_pid = sys_lookup_dev(DEV_KMS);
+    while ((kms_driver_pid = device_lookup(DEV_KMS)) < 0) {
+        struct recv_msg m;
+        recv(&m, 1);
+    }
 
-    int32_t kbd_pid = sys_lookup_dev(DEV_KBD);
+    int32_t kbd_pid;
+    while ((kbd_pid = device_lookup(DEV_KBD)) < 0) {
+        struct recv_msg m;
+        recv(&m, 1);
+    }
 
     // 1. Bind to KBD driver via RPC, then attach SHM
     struct kbd_rpc_request bind_req;
     for (int i = 0; i < 56; i++) ((uint8_t*)&bind_req)[i] = 0;
     bind_req.opcode = KBD_RPC_BIND;
-    bind_req.pid = sys_getpid();
+    bind_req.pid = getpid();
 
     struct kbd_rpc_reply bind_reply;
     for (int i = 0; i < 64; i++) ((uint8_t*)&bind_reply)[i] = 0;
 
     while (1) {
-        int rc = sys_rpc(kbd_pid, &bind_req, &bind_reply);
+        int rc = rpc(kbd_pid, &bind_req, &bind_reply);
         if (rc == 0 && bind_reply.result == 0) break;
         // Retry: kbd_driver may not have started yet, or EBUSY
         struct recv_msg m;
-        sys_recv(&m, 100);
+        recv(&m, 100);
     }
 
-    uint64_t shm_addr = (uint64_t)sys_shm_attach(kbd_pid);
+    void *shm_ptr = NULL;
+    shm_attach(kbd_pid, &shm_ptr);
+    uint64_t shm_addr = (uint64_t)shm_ptr;
     shm_hdr = (volatile driver_shm_header *)shm_addr;
     kbd = (volatile kbd_ring *)(shm_addr + KBD_RING_OFFSET);
     kms = (volatile kms_ring *)(shm_addr + KMS_RING_OFFSET);
 
     // 2. Get framebuffer info
-    kms_fb_info fb_info;
-    sys_fb_info(&fb_info);
+    struct kms_fb_info kfb;
+    ::fb_info(&kfb);
 
-    fb_width  = fb_info.width;
-    fb_height = fb_info.height;
-    fb_pitch  = fb_info.pitch;
-    fb_bpp    = fb_info.bpp;
-    fb_size   = (uint32_t)fb_info.fb_size;
-    fb_vaddr  = (uint8_t *)(uintptr_t)fb_info.fb_vaddr;
+    fb_width  = kfb.width;
+    fb_height = kfb.height;
+    fb_pitch  = kfb.pitch;
+    fb_bpp    = kfb.bpp;
+    fb_size   = (uint32_t)kfb.fb_size;
+    fb_vaddr  = (uint8_t *)(uintptr_t)kfb.fb_vaddr;
 
     // 3. Initialize VT100 state
     vt.cols = fb_width / FONT_WIDTH;
@@ -489,12 +503,12 @@ extern "C" void _start() {
     vt.escape_state = VT100_NORMAL;
     vt.csi_param_count = 0;
 
-    // 4. Allocate cell buffer via sys_mmap
+    // 4. Allocate cell buffer via mmap
     int cell_bytes = vt.rows * vt.cols * sizeof(struct cell);
-    cells = (struct cell *)sys_mmap(cell_bytes);
+    cells = (struct cell *)mmap(NULL, cell_bytes, 0, 0, -1, 0);
     if (!cells) {
         // Cannot allocate cells, just idle
-        while (1) { struct recv_msg m; sys_recv(&m, 0); }
+        while (1) { struct recv_msg m; recv(&m, 0); }
     }
 
     // 5. Initialize cells to spaces
@@ -520,7 +534,7 @@ extern "C" void _start() {
         while (kbd->head != kbd->tail) {
             char ch = (char)kbd->msgs[kbd->tail].ch;
             kbd->tail = (kbd->tail + 1) % 8;
-            sys_write(1, &ch, 1);
+            write(1, &ch, 1);
             did_work = 1;
         }
 
@@ -529,7 +543,7 @@ extern "C" void _start() {
 
         // Read shell stdout pipe (fd 0) → VT100 parse → cell buffer
         char buf[256];
-        int64_t n = sys_read(0, buf, sizeof(buf));
+        int64_t n = read(0, buf, sizeof(buf));
         if (n > 0) {
             for (int64_t i = 0; i < n; i++) {
                 vt100_feed(buf[i]);
@@ -550,7 +564,7 @@ extern "C" void _start() {
                 continue;
             }
             struct recv_msg m;
-            sys_recv(&m, 1);
+            recv(&m, 1);
             shm_hdr->consumer_sleeping = 0;
         }
     }

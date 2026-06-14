@@ -1,7 +1,8 @@
 // Disk driver process (user-space)
 // Reads requests from DISK_REQ shared page, performs ATA PIO, writes to DISK_RESP
 #include <stdint.h>
-#include <sys.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 #include "common/shm.h"
 #include "common/dev.h"
 
@@ -91,7 +92,9 @@ static void handle_request() {
 
 extern "C" void _start() {
     // Create shared memory: header(1) + req(2) + resp(2) = 5 pages
-    uint64_t shm_base = (uint64_t)sys_shm_create(5 * 4096);
+    void *shm_ptr = NULL;
+    shm_create(5 * 4096, &shm_ptr);
+    uint64_t shm_base = (uint64_t)shm_ptr;
     hdr  = (volatile disk_shm_header *)(shm_base + DISK_SHM_HEADER_OFFSET);
     req  = (volatile disk_req_shm *)(shm_base + DISK_REQ_OFFSET);
     resp = (volatile disk_resp_shm *)(shm_base + DISK_RESP_OFFSET);
@@ -102,14 +105,14 @@ extern "C" void _start() {
         // Sleep: set flag, wait, clear flag
         hdr->disk_driver_sleeping = 1;
         struct recv_msg msg;
-        sys_recv(&msg, 0);
+        recv(&msg, 0);
         hdr->disk_driver_sleeping = 0;
 
         handle_request();
 
         // Notify fs_driver only if it's sleeping
         if (hdr->fs_driver_sleeping && hdr->fs_driver_pid > 0) {
-            sys_notify(hdr->fs_driver_pid);
+            notify(hdr->fs_driver_pid);
         }
     }
 }
