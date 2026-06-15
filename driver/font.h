@@ -1,5 +1,5 @@
-#ifndef COMMON_FONT_H
-#define COMMON_FONT_H
+#ifndef DRIVER_FONT_H
+#define DRIVER_FONT_H
 
 #include <stdint.h>
 
@@ -295,4 +295,4 @@ static const uint8_t font8x16[96][16] = {
      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 };
 
-#endif
+#endif // DRIVER_FONT_H

@@ -14,7 +14,7 @@
 #include "kernel/proc.h"
 #include "kernel/ata.h"
 #include "arch/x64/smp.h"
-#include "common/elf.h"
+#include "kernel/elf_loader.h"
 #include "common/dev.h"
 
 extern "C" {

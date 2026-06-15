@@ -1,5 +1,5 @@
-#ifndef ARCH_X64_EFI_H
-#define ARCH_X64_EFI_H
+#ifndef KERNEL_EFI_H
+#define KERNEL_EFI_H
 
 #include <stdint.h>
 
@@ -216,4 +216,4 @@ typedef struct {
   { 0x5B1B31A1, 0x9562, 0x11D2,       \
     { 0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B } }
 
-#endif // ARCH_X64_EFI_H
+#endif // KERNEL_EFI_H

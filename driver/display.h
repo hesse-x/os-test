@@ -8,7 +8,7 @@
 #include <sys/device.h>
 #include <sys/ipc.h>
 #include "common/macro.h"
-#include "common/font.h"
+#include "driver/font.h"
 #include "common/dev.h"
 
 // ===== display_shm_header（KMS 和 terminal 共享）=====

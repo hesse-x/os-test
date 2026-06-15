@@ -35,15 +35,4 @@ struct Elf64_Phdr {
     uint64_t p_align;
 };
 
-struct elf_load_result {
-    uint64_t entry;
-    bool     success;
-};
-
-// Load ELF64 static binary into user address space
-// new_pml4: caller-allocated PML4 (kernel entries already copied)
-// Returns entry point and success status
-elf_load_result elf_load(const uint8_t *data, uint64_t size,
-                         uint64_t *new_pml4);
-
 #endif // COMMON_ELF_H

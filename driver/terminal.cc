@@ -16,7 +16,7 @@
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/macro.h"
-#include "common/input.h"
+#include "input.h"
 #include "driver/display.h"
 
 // ===================== Shared memory (kbd only) =====================

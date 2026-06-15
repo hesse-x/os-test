@@ -1,5 +1,5 @@
-#ifndef COMMON_INPUT_H
-#define COMMON_INPUT_H
+#ifndef USER_INPUT_H
+#define USER_INPUT_H
 
 #include <stdint.h>
 
@@ -66,4 +66,4 @@ struct kbd_rpc_reply {
     uint8_t  reserved[60];
 };
 
-#endif // COMMON_INPUT_H
+#endif // USER_INPUT_H

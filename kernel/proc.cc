@@ -7,7 +7,7 @@
 #include "kernel/trap.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/mem/slab.h"
-#include "common/elf.h"
+#include "kernel/elf_loader.h"
 #include "common/shm.h"
 #include "common/macro.h"
 #include "common/errno.h"

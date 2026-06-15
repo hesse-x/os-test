@@ -1,4 +1,4 @@
-#include "common/elf.h"
+#include "kernel/elf_loader.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/proc.h"
 #include "arch/x64/paging.h"

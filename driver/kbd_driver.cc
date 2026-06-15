@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include "common/shm.h"
 #include "common/dev.h"
-#include "common/input.h"
+#include "input.h"
 #include "common/errno.h"
 
 static volatile kbd_ring *kbd;
@@ -348,7 +348,6 @@ static void handle_rpc(struct recv_msg *msg) {
                 kbd->tail = 0;
                 shm_hdr->kbd_sleeping = 0;
                 shm_hdr->consumer_sleeping = 0;
-                shm_hdr->kms_sleeping = 0;
                 consumer_pid = msg->src;
             }
             reply.result = 0;  // idempotent success
