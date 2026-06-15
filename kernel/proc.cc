@@ -85,11 +85,17 @@ void proc_init() {
         procs[i].recv_head = 0;
         procs[i].recv_tail = 0;
         procs[i].recv_lock = SPINLOCK_INIT;
-        // RPC state
-        procs[i].rpc_caller_pid = -1;
-        procs[i].rpc_reply_buf = nullptr;
-        procs[i].rpc_result = 0;
-        procs[i].rpc_target_pid = -1;
+        // REQ state
+        procs[i].req_caller_pid = -1;
+        procs[i].req_reply_buf = nullptr;
+        procs[i].req_result = 0;
+        procs[i].req_target_pid = -1;
+        // MSG state
+        procs[i].msg_reply_buf = nullptr;
+        procs[i].msg_reply_len = 0;
+        procs[i].msg_caller_pid = -1;
+        procs[i].msg_result = 0;
+        procs[i].msg_target_pid = -1;
         procs[i].cpu_time_ns = 0;
         procs[i].last_sched = 0;
     }
@@ -540,24 +546,59 @@ void proc_reap(proc_t *proc) {
     // 6. Clear dev_table entries for this PID
     dev_table_cleanup(proc->pid);
 
-    // 6b. Wake any processes waiting for RPC reply from this process
+    // 6b. Wake any processes waiting for REQ reply from this process
     for (int i = 0; i < MAX_PROC; i++) {
         if (procs[i].pid >= 0 &&
             procs[i].state == BLOCKED &&
-            procs[i].wait_event == WAIT_RPC_REPLY &&
-            procs[i].rpc_target_pid == proc->pid) {
+            procs[i].wait_event == WAIT_REQ_REPLY &&
+            procs[i].req_target_pid == proc->pid) {
             int wcpu = procs[i].assigned_cpu;
             spin_lock(&cpu_locals[wcpu].scheduler_lock);
-            if (procs[i].state == BLOCKED && procs[i].wait_event == WAIT_RPC_REPLY) {
+            if (procs[i].state == BLOCKED && procs[i].wait_event == WAIT_REQ_REPLY) {
                 procs[i].state = READY;
                 procs[i].wait_event = WAIT_NONE;
-                procs[i].rpc_result = ESRCH;
+                procs[i].req_result = ESRCH;
                 list_push_back(&cpu_locals[wcpu].run_queue, &procs[i].run_node);
                 cpu_locals[wcpu].run_count++;
             }
             spin_unlock(&cpu_locals[wcpu].scheduler_lock);
         }
     }
+
+    // 6c. Wake any processes waiting for MSG reply from this process
+    for (int i = 0; i < MAX_PROC; i++) {
+        if (procs[i].pid >= 0 &&
+            procs[i].state == BLOCKED &&
+            procs[i].wait_event == WAIT_MSG_REPLY &&
+            procs[i].msg_target_pid == proc->pid) {
+            int wcpu = procs[i].assigned_cpu;
+            spin_lock(&cpu_locals[wcpu].scheduler_lock);
+            if (procs[i].state == BLOCKED && procs[i].wait_event == WAIT_MSG_REPLY) {
+                procs[i].state = READY;
+                procs[i].wait_event = WAIT_NONE;
+                procs[i].msg_result = -ESRCH;
+                list_push_back(&cpu_locals[wcpu].run_queue, &procs[i].run_node);
+                cpu_locals[wcpu].run_count++;
+            }
+            spin_unlock(&cpu_locals[wcpu].scheduler_lock);
+        }
+    }
+
+    // 6d. Clear MSG caller state (server died before responding)
+    proc->msg_caller_pid = -1;
+
+    // 6e. Free any RECV_MSG entries in recv queue (kfree their kmaddr)
+    spin_lock(&proc->recv_lock);
+    uint32_t idx = proc->recv_tail;
+    while (idx != proc->recv_head) {
+        recv_msg *m = (recv_msg *)proc->recv_buf[idx];
+        if (m->type == RECV_MSG && m->msg.kmaddr) {
+            kfree(m->msg.kmaddr);
+            m->msg.kmaddr = nullptr;
+        }
+        idx = (idx + 1) % RECV_QUEUE_SIZE;
+    }
+    spin_unlock(&proc->recv_lock);
 
     // 7. Clear PCB slot
     spin_lock(&procs_lock);
@@ -588,11 +629,17 @@ void proc_reap(proc_t *proc) {
     proc->recv_head = 0;
     proc->recv_tail = 0;
     proc->recv_lock = SPINLOCK_INIT;
-    // RPC state
-    proc->rpc_caller_pid = -1;
-    proc->rpc_reply_buf = nullptr;
-    proc->rpc_result = 0;
-    proc->rpc_target_pid = -1;
+    // REQ state
+    proc->req_caller_pid = -1;
+    proc->req_reply_buf = nullptr;
+    proc->req_result = 0;
+    proc->req_target_pid = -1;
+    // MSG state
+    proc->msg_reply_buf = nullptr;
+    proc->msg_reply_len = 0;
+    proc->msg_caller_pid = -1;
+    proc->msg_result = 0;
+    proc->msg_target_pid = -1;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
     spin_unlock(&procs_lock);

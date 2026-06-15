@@ -66,14 +66,14 @@ struct fs_dirent {
     // 3 bytes padding → sizeof = 272
 };
 
-// FS RPC request (fits in recv_msg.data[56])
-struct fs_rpc_request {
+// FS REQ request (fits in recv_msg.data[56])
+struct fs_req_request {
     uint32_t cmd;        // FS_CMD_*
     uint8_t  reserved[52];
 };
 
-// FS RPC reply (fits in 64 bytes, same as RECV_MSG_SIZE)
-struct fs_rpc_reply {
+// FS REQ reply (fits in 64 bytes, same as RECV_MSG_SIZE)
+struct fs_req_reply {
     uint32_t status;     // 0=success, nonzero=error
     uint32_t fd;         // open returns fd
     uint32_t count;      // bytes read/returned
@@ -98,7 +98,7 @@ struct disk_shm_header {
     uint8_t reserved[2];
 };
 
-// FS SHM header (no sleeping flags — sync is via RPC now)
+// FS SHM header (no sleeping flags — sync is via REQ now)
 struct fs_shm_header {
     uint8_t reserved[8];
 };

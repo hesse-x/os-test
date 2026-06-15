@@ -6,8 +6,8 @@
 #include "common/shm.h"
 #include "common/dev.h"
 
-static volatile disk_req_shm  *req;
-static volatile disk_resp_shm *resp;
+static volatile disk_req_shm  *dreq;
+static volatile disk_resp_shm *dresp;
 static volatile disk_shm_header *hdr;
 
 // ATA PIO LBA28 I/O ports
@@ -71,22 +71,22 @@ static void ata_write(uint32_t lba, uint32_t count, const uint8_t *buf) {
 }
 
 static void handle_request() {
-    uint32_t cmd  = req->cmd;
-    uint32_t lba  = req->lba;
-    uint32_t cnt  = req->count;
+    uint32_t cmd  = dreq->cmd;
+    uint32_t lba  = dreq->lba;
+    uint32_t cnt  = dreq->count;
 
     if (cmd == DISK_CMD_READ) {
         // Read directly into response data buffer
-        ata_read(lba, cnt, (uint8_t *)resp->data);
-        resp->status = 0;
-        resp->count  = cnt;
+        ata_read(lba, cnt, (uint8_t *)dresp->data);
+        dresp->status = 0;
+        dresp->count  = cnt;
     } else if (cmd == DISK_CMD_WRITE) {
-        ata_write(lba, cnt, (const uint8_t *)req->data);
-        resp->status = 0;
-        resp->count  = cnt;
+        ata_write(lba, cnt, (const uint8_t *)dreq->data);
+        dresp->status = 0;
+        dresp->count  = cnt;
     } else {
-        resp->status = 1;
-        resp->count  = 0;
+        dresp->status = 1;
+        dresp->count  = 0;
     }
 }
 
@@ -96,8 +96,8 @@ extern "C" void _start() {
     shm_create(5 * 4096, &shm_ptr);
     uint64_t shm_base = (uint64_t)shm_ptr;
     hdr  = (volatile disk_shm_header *)(shm_base + DISK_SHM_HEADER_OFFSET);
-    req  = (volatile disk_req_shm *)(shm_base + DISK_REQ_OFFSET);
-    resp = (volatile disk_resp_shm *)(shm_base + DISK_RESP_OFFSET);
+    dreq  = (volatile disk_req_shm *)(shm_base + DISK_REQ_OFFSET);
+    dresp = (volatile disk_resp_shm *)(shm_base + DISK_RESP_OFFSET);
     hdr->disk_driver_sleeping = 0;
     hdr->fs_driver_sleeping = 0;
 
@@ -105,7 +105,7 @@ extern "C" void _start() {
         // Sleep: set flag, wait, clear flag
         hdr->disk_driver_sleeping = 1;
         struct recv_msg msg;
-        recv(&msg, 0);
+        recv(&msg, NULL, 0, 0);
         hdr->disk_driver_sleeping = 0;
 
         handle_request();

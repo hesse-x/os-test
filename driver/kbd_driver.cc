@@ -326,14 +326,14 @@ static void kbd_push(struct key_event *ev) {
     if (ch) kbd_write(ch);
 }
 
-// ===================== RPC handlers =====================
+// ===================== REQ handlers =====================
 
-static void handle_rpc(struct recv_msg *msg) {
-    struct kbd_rpc_request *req = (struct kbd_rpc_request *)msg->data;
-    struct kbd_rpc_reply reply;
+static void handle_req(struct recv_msg *msg) {
+    struct kbd_req_request *req = (struct kbd_req_request *)msg->data;
+    struct kbd_req_reply reply;
     for (int i = 0; i < 64; i++) ((uint8_t*)&reply)[i] = 0;
 
-    if (req->opcode == KBD_RPC_BIND) {
+    if (req->opcode == KBD_REQ_BIND) {
         if (consumer_pid >= 0 && consumer_pid != (int32_t)msg->src) {
             reply.result = -EBUSY;
         } else {
@@ -352,7 +352,7 @@ static void handle_rpc(struct recv_msg *msg) {
             }
             reply.result = 0;  // idempotent success
         }
-    } else if (req->opcode == KBD_RPC_UNBIND) {
+    } else if (req->opcode == KBD_REQ_UNBIND) {
         consumer_pid = -1;
         kbd = nullptr;
         shm_hdr = nullptr;
@@ -361,7 +361,7 @@ static void handle_rpc(struct recv_msg *msg) {
         reply.result = -EINVAL;
     }
 
-    rpc_reply(&reply);
+    resp(&reply);
 }
 
 // ===================== Main =====================
@@ -376,13 +376,13 @@ extern "C" void _start() {
     // Initialize translation state
     for (uint8_t *p = (uint8_t *)&kst; p < (uint8_t *)(&kst + 1); *p++ = 0);
 
-    // Main loop: wait for events (IRQ or RPC)
+    // Main loop: wait for events (IRQ or REQ)
     while (1) {
         struct recv_msg msg;
-        recv(&msg, 0);
+        recv(&msg, NULL, 0, 0);
 
-        if (msg.type == RECV_RPC) {
-            handle_rpc(&msg);
+        if (msg.type == RECV_REQ) {
+            handle_req(&msg);
             continue;
         }
 

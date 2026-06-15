@@ -13,5 +13,10 @@
 #define EBUSY    9
 #define ESRCH    10
 #define ETIMEDOUT 11
+#define EBADF     12
+#define EMFILE    13
+#define EISDIR    14
+#define ENOTDIR   15
+#define EIO       16
 
 #endif // COMMON_ERRNO_H

@@ -248,13 +248,13 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 24
+#define NR_SYSCALL 26
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0: 获取 PID
     sys_yield,          // 1: 主动让出 CPU
-    sys_recv,           // 2: 统一事件接收（IRQ/RPC/notify）
-    sys_rpc,            // 3: 同步 RPC
-    sys_reply,          // 4: 回复当前 RPC 调用者
+    sys_recv,           // 2: 统一事件接收（IRQ/REQ/notify）
+    sys_req,            // 3: 同步 REQ
+    sys_resp,           // 4: 回复当前 REQ 调用者
     sys_irq_bind,       // 5: 绑定当前进程到指定 IRQ
     sys_exit,           // 6: 进程退出
     sys_waitpid,        // 7: 等待子进程退出
@@ -274,6 +274,8 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_notify,         // 21: 异步通知（消息入队）
     sys_gettime,        // 22: 全局单调时钟（纳秒）
     sys_clock,          // 23: per-process CPU 时间（纳秒）
+    sys_msg,            // 24: 变长消息请求
+    sys_msg_resp,       // 25: 变长消息回复
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -296,16 +298,24 @@ uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     return 0;
 }
 
-// sys_recv(buf, timeout_ms) — syscall 2 (统一事件接收：IRQ/RPC/notify)
+// sys_recv(buf, data_buf, data_buf_len, timeout_ms) — syscall 2 (统一事件接收：IRQ/REQ/notify/MSG)
 // timeout_ms=0: 无限等待; >0: 超时后唤醒
 // 返回: 0=成功, 正数=errno
-uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t) {
     void *buf = (void *)arg1;
-    uint32_t timeout_ms = (uint32_t)arg2;
+    void *data_buf = (void *)arg2;
+    size_t data_buf_len = (size_t)arg3;
+    uint32_t timeout_ms = (uint32_t)arg4;
 
     // Validate user pointer
     uint64_t ptr = (uint64_t)buf;
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    // Validate data_buf if provided
+    if (data_buf && (data_buf_len == 0 ||
+        (uint64_t)data_buf >= 0xFFFFFFFF80000000ULL ||
+        (uint64_t)data_buf + data_buf_len > 0xFFFFFFFF80000000ULL))
         return (uint64_t)EFAULT;
 
     proc_t *proc = current_proc;
@@ -317,10 +327,37 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
         if (proc->recv_head != proc->recv_tail) {
             // Message available: copy to user buffer
             __memcpy(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
-            // If this is an RPC request, record the caller PID for sys_reply
+            // If this is an REQ request, record the caller PID for sys_resp
             recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
-            if (msg->type == RECV_RPC) {
-                proc->rpc_caller_pid = (pid_t)msg->src;
+            if (msg->type == RECV_REQ) {
+                proc->req_caller_pid = (pid_t)msg->src;
+            }
+            // If this is RECV_MSG, copy data to user data_buf and free kernel buffer
+            if (msg->type == RECV_MSG) {
+                void *kmaddr = msg->msg.kmaddr;
+                size_t len = msg->msg.len;
+                proc->msg_caller_pid = (pid_t)msg->src;
+
+                if (!data_buf || data_buf_len < len) {
+                    // User didn't provide enough buffer — free kernel buf and return error
+                    kfree(kmaddr);
+                    // Write msg.len into data field so user knows the required size
+                    recv_msg *umsg = (recv_msg *)buf;
+                    umsg->msg.kmaddr = nullptr;
+                    umsg->msg.len = len;
+                    proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+                    spin_unlock(&proc->recv_lock);
+                    return (uint64_t)EINVAL;
+                }
+
+                // Copy data to user buffer under current CR3
+                __memcpy(data_buf, kmaddr, len);
+                kfree(kmaddr);
+
+                // Rewrite recv_msg for user: put len in data field
+                recv_msg *umsg = (recv_msg *)buf;
+                umsg->msg.kmaddr = nullptr;
+                umsg->msg.len = len;
             }
             proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
             spin_unlock(&proc->recv_lock);
@@ -352,8 +389,28 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
             if (proc->recv_head != proc->recv_tail) {
                 __memcpy(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
                 recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
-                if (msg->type == RECV_RPC) {
-                    proc->rpc_caller_pid = (pid_t)msg->src;
+                if (msg->type == RECV_REQ) {
+                    proc->req_caller_pid = (pid_t)msg->src;
+                }
+                if (msg->type == RECV_MSG) {
+                    void *kmaddr = msg->msg.kmaddr;
+                    size_t len = msg->msg.len;
+                    proc->msg_caller_pid = (pid_t)msg->src;
+
+                    if (!data_buf || data_buf_len < len) {
+                        kfree(kmaddr);
+                        recv_msg *umsg = (recv_msg *)buf;
+                        umsg->msg.kmaddr = nullptr;
+                        umsg->msg.len = len;
+                        proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+                        spin_unlock(&proc->recv_lock);
+                        return (uint64_t)EINVAL;
+                    }
+                    __memcpy(data_buf, kmaddr, len);
+                    kfree(kmaddr);
+                    recv_msg *umsg = (recv_msg *)buf;
+                    umsg->msg.kmaddr = nullptr;
+                    umsg->msg.len = len;
                 }
                 proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
                 spin_unlock(&proc->recv_lock);
@@ -366,10 +423,10 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
     }
 }
 
-// sys_rpc(pid, request, reply) — syscall 3 (同步 RPC)
+// sys_req(pid, request, reply) — syscall 3 (同步 REQ)
 // 向目标发送 64 字节请求，阻塞等待 reply
 // 返回: 0=成功, 正数=errno
-uint64_t sys_rpc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
     pid_t target_pid = (pid_t)arg1;
     void *request = (void *)arg2;
     void *reply = (void *)arg3;
@@ -390,10 +447,10 @@ uint64_t sys_rpc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t
     proc_t *target = &procs[target_pid];
     if (target->pid != target_pid) return (uint64_t)ESRCH;
 
-    // Build RECV_RPC message
+    // Build RECV_REQ message
     uint8_t msg[RECV_MSG_SIZE];
     recv_msg *hdr = (recv_msg *)msg;
-    hdr->type = RECV_RPC;
+    hdr->type = RECV_REQ;
     hdr->src = (uint32_t)current_proc->pid;
     // Copy request payload from user space
     __memcpy(hdr->data, request, 56);
@@ -425,28 +482,28 @@ uint64_t sys_rpc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t
     }
     spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
 
-    // Block caller on WAIT_RPC_REPLY
+    // Block caller on WAIT_REQ_REPLY
     proc_t *proc = current_proc;
     int cpu = proc->assigned_cpu;
     proc->state = BLOCKED;
-    proc->wait_event = WAIT_RPC_REPLY;
+    proc->wait_event = WAIT_REQ_REPLY;
     proc->wait_timed_out = 0;
     proc->wait_deadline = 0;
-    proc->rpc_target_pid = target_pid;
-    proc->rpc_reply_buf = reply;
-    proc->rpc_result = 0;
+    proc->req_target_pid = target_pid;
+    proc->req_reply_buf = reply;
+    proc->req_result = 0;
 
     __atomic_add_fetch(&cpu_locals[cpu].run_count, -1, __ATOMIC_RELAXED);
     schedule();
 
-    // Woken up by sys_reply or proc_reap
-    if (proc->rpc_result != 0) return (uint64_t)proc->rpc_result;
+    // Woken up by sys_resp or proc_reap
+    if (proc->req_result != 0) return (uint64_t)proc->req_result;
     return 0;
 }
 
-// sys_reply(reply) — syscall 4 (回复当前 RPC 调用者)
+// sys_resp(reply) — syscall 4 (回复当前 REQ 调用者)
 // 返回: 0=成功, 正数=errno
-uint64_t sys_reply(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_resp(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     void *reply = (void *)arg1;
 
     // Validate user pointer
@@ -455,7 +512,7 @@ uint64_t sys_reply(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
         return (uint64_t)EFAULT;
 
     proc_t *proc = current_proc;
-    pid_t caller_pid = proc->rpc_caller_pid;
+    pid_t caller_pid = proc->req_caller_pid;
     if (caller_pid < 0 || caller_pid >= MAX_PROC) return (uint64_t)EINVAL;
 
     proc_t *caller = &procs[caller_pid];
@@ -470,23 +527,23 @@ uint64_t sys_reply(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)caller->cr3) : "memory");
-    __memcpy(caller->rpc_reply_buf, kbuf, RECV_MSG_SIZE);
+    __memcpy(caller->req_reply_buf, kbuf, RECV_MSG_SIZE);
     __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
     // Wake caller
     int caller_cpu = caller->assigned_cpu;
     spin_lock(&cpu_locals[caller_cpu].scheduler_lock);
-    if (caller->state == BLOCKED && caller->wait_event == WAIT_RPC_REPLY) {
+    if (caller->state == BLOCKED && caller->wait_event == WAIT_REQ_REPLY) {
         caller->state = READY;
         caller->wait_event = WAIT_NONE;
         caller->wait_timed_out = 0;
-        caller->rpc_result = 0;
+        caller->req_result = 0;
         list_push_back(&cpu_locals[caller_cpu].run_queue, &caller->run_node);
         cpu_locals[caller_cpu].run_count++;
     }
     spin_unlock(&cpu_locals[caller_cpu].scheduler_lock);
 
-    proc->rpc_caller_pid = -1;  // clear
+    proc->req_caller_pid = -1;  // clear
     return 0;
 }
 
@@ -554,19 +611,19 @@ uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
             spin_unlock(&cpu_locals[pcpu].scheduler_lock);
         }
 
-        // Wake any processes waiting for our RPC reply
+        // Wake any processes waiting for our REQ reply
         for (int i = 0; i < MAX_PROC; i++) {
             proc_t *waiter = &procs[i];
             if (waiter->pid >= 0 &&
                 waiter->state == BLOCKED &&
-                waiter->wait_event == WAIT_RPC_REPLY &&
-                waiter->rpc_target_pid == proc->pid) {
+                waiter->wait_event == WAIT_REQ_REPLY &&
+                waiter->req_target_pid == proc->pid) {
                 int wcpu = waiter->assigned_cpu;
                 spin_lock(&cpu_locals[wcpu].scheduler_lock);
-                if (waiter->state == BLOCKED && waiter->wait_event == WAIT_RPC_REPLY) {
+                if (waiter->state == BLOCKED && waiter->wait_event == WAIT_REQ_REPLY) {
                     waiter->state = READY;
                     waiter->wait_event = WAIT_NONE;
-                    waiter->rpc_result = ESRCH;
+                    waiter->req_result = ESRCH;
                     list_push_back(&cpu_locals[wcpu].run_queue, &waiter->run_node);
                     cpu_locals[wcpu].run_count++;
                 }
@@ -1246,4 +1303,147 @@ uint64_t sys_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
 // sys_clock() — syscall 23 (per-process CPU 时间，返回纳秒)
 uint64_t sys_clock(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     return current_proc->cpu_time_ns;
+}
+
+// sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — syscall 24 (变长消息请求)
+// 向目标发送变长数据，阻塞等待 reply
+// 返回: 0=成功, 负errno
+uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5) {
+    pid_t target_pid = (pid_t)arg1;
+    void *msg_buf = (void *)arg2;
+    size_t msg_len = (size_t)arg3;
+    void *reply_buf = (void *)arg4;
+    size_t reply_len = (size_t)arg5;
+
+    // Validate target PID
+    if (target_pid < 0 || target_pid >= MAX_PROC) return (uint64_t)ESRCH;
+
+    // Validate msg_len
+    if (msg_len == 0 || msg_len > 65536) return (uint64_t)EINVAL;
+
+    // Validate user pointers
+    uint64_t msg_ptr = (uint64_t)msg_buf;
+    if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
+        msg_ptr + msg_len > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    uint64_t rep_ptr = (uint64_t)reply_buf;
+    if (!rep_ptr || rep_ptr >= 0xFFFFFFFF80000000ULL ||
+        rep_ptr + reply_len > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    proc_t *target = &procs[target_pid];
+    if (target->pid != target_pid) return (uint64_t)ESRCH;
+
+    // Allocate kernel buffer and copy message from user space
+    void *kbuf = kmalloc(msg_len);
+    if (!kbuf) return (uint64_t)ENOMEM;
+    __memcpy(kbuf, msg_buf, msg_len);
+
+    // Build RECV_MSG
+    uint8_t msg[RECV_MSG_SIZE];
+    recv_msg *hdr = (recv_msg *)msg;
+    hdr->type = RECV_MSG;
+    hdr->src = (uint32_t)current_proc->pid;
+    hdr->msg.kmaddr = kbuf;
+    hdr->msg.len = msg_len;
+
+    // Enqueue to target's recv queue
+    spin_lock(&target->recv_lock);
+    uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
+    if (next == target->recv_tail) {
+        spin_unlock(&target->recv_lock);
+        kfree(kbuf);
+        return (uint64_t)EBUSY;  // queue full
+    }
+    __memcpy(target->recv_buf[target->recv_head], msg, RECV_MSG_SIZE);
+    target->recv_head = next;
+    spin_unlock(&target->recv_lock);
+
+    // Wake target if in WAIT_RECV
+    int target_cpu = target->assigned_cpu;
+    spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+    if (target->state == BLOCKED && target->wait_event == WAIT_RECV) {
+        if (target->wait_deadline != 0) {
+            timer_queue_remove(target);
+            target->wait_deadline = 0;
+        }
+        target->state = READY;
+        target->wait_event = WAIT_NONE;
+        target->wait_timed_out = 0;
+        list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
+        cpu_locals[target_cpu].run_count++;
+    }
+    spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+
+    // Block caller on WAIT_MSG_REPLY
+    proc_t *proc = current_proc;
+    int cpu = proc->assigned_cpu;
+    proc->state = BLOCKED;
+    proc->wait_event = WAIT_MSG_REPLY;
+    proc->wait_timed_out = 0;
+    proc->wait_deadline = 0;
+    proc->msg_target_pid = target_pid;
+    proc->msg_reply_buf = reply_buf;
+    proc->msg_reply_len = reply_len;
+    proc->msg_result = 0;
+
+    __atomic_add_fetch(&cpu_locals[cpu].run_count, -1, __ATOMIC_RELAXED);
+    schedule();
+
+    // Woken up by sys_msg_resp or proc_reap
+    if (proc->msg_result != 0) return (uint64_t)proc->msg_result;
+    return 0;
+}
+
+// sys_msg_resp(resp_buf, resp_len) — syscall 25 (回复当前 MSG 调用者)
+// 返回: 0=成功, 正数=errno
+uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+    void *resp_buf = (void *)arg1;
+    size_t resp_len = (size_t)arg2;
+
+    // Validate user pointer
+    uint64_t ptr = (uint64_t)resp_buf;
+    if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || resp_len == 0 ||
+        ptr + resp_len > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    proc_t *proc = current_proc;
+    pid_t caller_pid = proc->msg_caller_pid;
+    if (caller_pid < 0 || caller_pid >= MAX_PROC) return (uint64_t)EINVAL;
+
+    proc_t *caller = &procs[caller_pid];
+    if (caller->pid != caller_pid) return (uint64_t)ESRCH;
+
+    // Copy response data from server user space to kernel buffer
+    void *kbuf = kmalloc(resp_len);
+    if (!kbuf) return (uint64_t)ENOMEM;
+    __memcpy(kbuf, resp_buf, resp_len);
+
+    // Copy to caller's reply buffer under caller's CR3
+    size_t copy_len = resp_len < caller->msg_reply_len ? resp_len : caller->msg_reply_len;
+
+    uint64_t saved_cr3;
+    __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+    __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)caller->cr3) : "memory");
+    __memcpy(caller->msg_reply_buf, kbuf, copy_len);
+    __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
+
+    kfree(kbuf);
+
+    // Wake caller
+    int caller_cpu = caller->assigned_cpu;
+    spin_lock(&cpu_locals[caller_cpu].scheduler_lock);
+    if (caller->state == BLOCKED && caller->wait_event == WAIT_MSG_REPLY) {
+        caller->state = READY;
+        caller->wait_event = WAIT_NONE;
+        caller->wait_timed_out = 0;
+        caller->msg_result = 0;
+        list_push_back(&cpu_locals[caller_cpu].run_queue, &caller->run_node);
+        cpu_locals[caller_cpu].run_count++;
+    }
+    spin_unlock(&cpu_locals[caller_cpu].scheduler_lock);
+
+    proc->msg_caller_pid = -1;  // clear
+    return 0;
 }

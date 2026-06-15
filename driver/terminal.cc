@@ -313,29 +313,29 @@ extern "C" void _start() {
     // 1. Initialize display client (attach display SHM from KMS)
     if (display_client_init() < 0) {
         // Unsupported bpp or no display
-        while (1) { struct recv_msg m; recv(&m, 0); }
+        while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
 
-    // 2. Bind to KBD driver via RPC, then attach SHM
+    // 2. Bind to KBD driver via REQ, then attach SHM
     int32_t kbd_pid;
     while ((kbd_pid = device_lookup(DEV_KBD)) <= 0) {
         struct recv_msg m;
-        recv(&m, 1);
+        recv(&m, NULL, 0, 1);
     }
 
-    struct kbd_rpc_request bind_req;
+    struct kbd_req_request bind_req;
     for (int i = 0; i < 56; i++) ((uint8_t*)&bind_req)[i] = 0;
-    bind_req.opcode = KBD_RPC_BIND;
+    bind_req.opcode = KBD_REQ_BIND;
     bind_req.pid = getpid();
 
-    struct kbd_rpc_reply bind_reply;
+    struct kbd_req_reply bind_reply;
     for (int i = 0; i < 64; i++) ((uint8_t*)&bind_reply)[i] = 0;
 
     while (1) {
-        int rc = rpc(kbd_pid, &bind_req, &bind_reply);
+        int rc = req(kbd_pid, &bind_req, &bind_reply);
         if (rc == 0 && bind_reply.result == 0) break;
         struct recv_msg m;
-        recv(&m, 100);
+        recv(&m, NULL, 0, 100);
     }
 
     void *shm_ptr = NULL;
@@ -358,7 +358,7 @@ extern "C" void _start() {
     int cell_bytes = vt.rows * vt.cols * sizeof(struct cell);
     cells = (struct cell *)mmap(NULL, cell_bytes, 0, 0, -1, 0);
     if (!cells) {
-        while (1) { struct recv_msg m; recv(&m, 0); }
+        while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
 
     // 5. Initialize cells to spaces
@@ -413,7 +413,7 @@ extern "C" void _start() {
                 continue;
             }
             struct recv_msg m;
-            recv(&m, 1);
+            recv(&m, NULL, 0, 1);
             shm_hdr->consumer_sleeping = 0;
         }
     }

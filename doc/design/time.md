@@ -13,7 +13,7 @@
 | 22 | `sys_gettime` | `uint64_t sys_gettime()` | `sched_clock()` 纳秒 | 全局单调时钟 |
 | 23 | `sys_clock` | `uint64_t sys_clock()` | 当前进程 `cpu_time_ns` | per-process CPU 时间 |
 
-NR_SYSCALL 从 22 改为 24。
+NR_SYSCALL 从 22 改为 24（后续 sys_msg/sys_msg_resp 使 NR_SYSCALL 达到 26）。
 
 ### per-process CPU 时间记账
 

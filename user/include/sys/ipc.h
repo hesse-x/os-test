@@ -10,9 +10,11 @@ extern "C" {
 #endif
 
 int notify(pid_t pid);
-int recv(struct recv_msg *msg, uint32_t timeout_ms);
-int rpc(pid_t pid, void *req, void *resp);
-int rpc_reply(void *resp);
+int recv(struct recv_msg *msg, void *data_buf, size_t data_buf_len, uint32_t timeout_ms);
+int req(pid_t pid, void *req, void *resp);
+int resp(void *resp);
+int msg(int32_t pid, void *req_buf, size_t req_len, void *resp_buf, size_t resp_len);
+int msg_resp(void *resp_buf, size_t resp_len);
 
 #ifdef __cplusplus
 }

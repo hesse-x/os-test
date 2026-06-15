@@ -87,29 +87,27 @@ __trapret:
 syscall_fast_entry:
     # SYSCALL entered kernel mode. We're still on user RSP.
     # RCX = user return RIP, R11 = user RFLAGS.
-    # No swapgs or stack switch happened yet.
+    # R10 = 4th syscall argument (arg4) — must preserve before using R10 as scratch.
 
-    # Save user RSP before we lose it (R10 is scratch, SYSCALL doesn't preserve it)
-    movq %rsp, %r10
-
-    # swapgs: GS_BASE(0) ↔ KERNEL_GS_BASE(cpu_local*) → GS_BASE = cpu_local*
+    # Save user R10 (arg4) to per-CPU scratch slot (cpu_local.saved_r10 at GS:0)
     swapgs
+    movq %r10, %gs:0
 
-    # Switch to kernel stack from cpu_local.tss_rsp0 (offset 32)
-    # tss_rsp0 is updated by schedule() to the current process's kernel stack
-    movq %gs:32, %rsp
+    # Now R10 is free — use it to save user RSP before switching stacks
+    movq %rsp, %r10
+    movq %gs:40, %rsp          # switch to kernel stack (tss_rsp0 at offset 40)
 
     # Build trapframe on kernel stack (176 bytes)
     subq $176, %rsp
 
     # Store CPU-saved fields
-    movq $0x23, 168(%rsp)     # ss = USER_DS
-    movq %r10, 160(%rsp)      # rsp = user RSP (saved in R10)
-    movq %r11, 152(%rsp)      # rflags (was in R11)
-    movq $0x2B, 144(%rsp)     # cs = USER_CS
-    movq %rcx, 136(%rsp)      # rip (was in RCX)
-    movq $0, 128(%rsp)        # err_code = 0
-    movq $128, 120(%rsp)      # trapno = 128
+    movq $0x23, 168(%rsp)      # ss = USER_DS
+    movq %r10, 160(%rsp)       # rsp = user RSP (was in R10)
+    movq %r11, 152(%rsp)       # rflags (was in R11)
+    movq $0x2B, 144(%rsp)      # cs = USER_CS
+    movq %rcx, 136(%rsp)       # rip (was in RCX)
+    movq $0, 128(%rsp)         # err_code = 0
+    movq $128, 120(%rsp)       # trapno = 128
 
     # Save all GP registers in trapframe order
     movq %r15, 0(%rsp)
@@ -117,7 +115,8 @@ syscall_fast_entry:
     movq %r13, 16(%rsp)
     movq %r12, 24(%rsp)
     movq %r11, 32(%rsp)
-    movq %r10, 40(%rsp)
+    movq %gs:0, %r10           # restore original user R10 (arg4) from scratch
+    movq %r10, 40(%rsp)        # save to trapframe r10 slot
     movq %r9, 48(%rsp)
     movq %r8, 56(%rsp)
     movq %rdi, 64(%rsp)

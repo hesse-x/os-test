@@ -53,14 +53,14 @@ static inline int display_client_init() {
     // Wait for KMS driver to register
     while ((display_kms_pid = device_lookup(DEV_KMS)) <= 0) {
         struct recv_msg m;
-        recv(&m, 1);
+        recv(&m, NULL, 0, 1);
     }
 
     // Attach display SHM
     void *shm_ptr = NULL;
     while (shm_attach(display_kms_pid, &shm_ptr) < 0) {
         struct recv_msg m;
-        recv(&m, 1);
+        recv(&m, NULL, 0, 1);
     }
 
     uint64_t shm_addr = (uint64_t)shm_ptr;
@@ -240,7 +240,7 @@ static inline void display_backend_wait(uint32_t timeout_ms) {
         return;
     }
     struct recv_msg msg;
-    recv(&msg, timeout_ms);
+    recv(&msg, NULL, 0, timeout_ms);
     backend_hdr->backend_sleeping = 0;
 }
 

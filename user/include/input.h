@@ -51,17 +51,17 @@ enum input_key {
     BTN_BASE = 0x100,
 };
 
-// RPC opcodes for kbd_driver
-#define KBD_RPC_BIND    1
-#define KBD_RPC_UNBIND  2
+// REQ opcodes for kbd_driver
+#define KBD_REQ_BIND    1
+#define KBD_REQ_UNBIND  2
 
-struct kbd_rpc_request {
+struct kbd_req_request {
     uint32_t opcode;
     uint32_t pid;
     uint8_t  reserved[48];
 };
 
-struct kbd_rpc_reply {
+struct kbd_req_reply {
     int32_t  result;
     uint8_t  reserved[60];
 };

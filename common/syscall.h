@@ -8,8 +8,8 @@
 #define SYS_GETPID       0
 #define SYS_YIELD        1
 #define SYS_RECV         2
-#define SYS_RPC          3
-#define SYS_REPLY        4
+#define SYS_REQ          3
+#define SYS_RESP         4
 #define SYS_IRQ_BIND     5
 #define SYS_EXIT         6
 #define SYS_WAITPID      7
@@ -29,12 +29,14 @@
 #define SYS_NOTIFY       21
 #define SYS_GETTIME      22
 #define SYS_CLOCK        23
+#define SYS_MSG          24
+#define SYS_MSG_RESP     25
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
 
 // ===================== Syscall return convention =====================
-// 0 = success (for status-only syscalls: recv/rpc/reply/notify/exit/irq_bind/munmap)
+// 0 = success (for status-only syscalls: recv/req/resp/notify/exit/irq_bind/munmap)
 // positive errno = error (for status-only syscalls)
 // For value-returning syscalls: 0 = failure, nonzero = success
 //   sys_mmap: returns mapped address on success, NULL on failure
@@ -43,13 +45,20 @@
 
 // ===================== recv_msg (shared between kernel and user) =====================
 #define RECV_IRQ    0
-#define RECV_RPC    1
+#define RECV_REQ     1
 #define RECV_NOTIFY 2
+#define RECV_MSG    3
 
 struct recv_msg {
-    uint32_t type;       // RECV_IRQ / RECV_RPC / RECV_NOTIFY
+    uint32_t type;       // RECV_IRQ / RECV_REQ / RECV_NOTIFY / RECV_MSG
     uint32_t src;        // IRQ number or sender PID
-    uint8_t  data[56];   // payload (IRQ/NOTIFY: empty, RPC: request data)
+    union {
+        uint8_t  data[56];       // RECV_IRQ / RECV_REQ / RECV_NOTIFY
+        struct {                  // RECV_MSG only
+            void  *kmaddr;       // kernel kmalloc buffer (opaque to user)
+            size_t len;          // data length
+        } msg;
+    };
 };
 
 // ===================== Semantic wrappers =====================
@@ -61,16 +70,30 @@ static inline void sys_yield() {
     __syscall0(SYS_YIELD);
 }
 
-static inline int sys_recv(void *buf, uint32_t timeout_ms) {
-    return (int)__syscall2(SYS_RECV, (int64_t)(uintptr_t)buf, (int64_t)timeout_ms);
+static inline int sys_recv(void *buf, void *data_buf, size_t data_buf_len,
+                            uint32_t timeout_ms) {
+    return (int)__syscall4(SYS_RECV, (int64_t)(uintptr_t)buf,
+        (int64_t)(uintptr_t)data_buf, (int64_t)data_buf_len, (int64_t)timeout_ms);
 }
 
-static inline int sys_rpc(int32_t pid, void *request, void *reply) {
-    return (int)__syscall3(SYS_RPC, (int64_t)pid, (int64_t)(uintptr_t)request, (int64_t)(uintptr_t)reply);
+static inline int sys_req(int32_t pid, void *request, void *reply) {
+    return (int)__syscall3(SYS_REQ, (int64_t)pid, (int64_t)(uintptr_t)request, (int64_t)(uintptr_t)reply);
 }
 
-static inline int sys_reply(void *reply) {
-    return (int)__syscall1(SYS_REPLY, (int64_t)(uintptr_t)reply);
+static inline int sys_resp(void *reply) {
+    return (int)__syscall1(SYS_RESP, (int64_t)(uintptr_t)reply);
+}
+
+static inline int sys_msg(int32_t target_pid, void *msg_buf, size_t msg_len,
+                           void *reply_buf, size_t reply_len) {
+    return (int)__syscall5(SYS_MSG, (int64_t)target_pid,
+        (int64_t)(uintptr_t)msg_buf, (int64_t)msg_len,
+        (int64_t)(uintptr_t)reply_buf, (int64_t)reply_len);
+}
+
+static inline int sys_msg_resp(void *resp_buf, size_t resp_len) {
+    return (int)__syscall2(SYS_MSG_RESP, (int64_t)(uintptr_t)resp_buf,
+        (int64_t)resp_len);
 }
 
 static inline int sys_irq_bind(int irq) {

@@ -11,7 +11,7 @@ typedef int32_t pid_t;
 
 enum proc_state_t { READY, RUNNING, BLOCKED, ZOMBIE, REAPING };
 
-enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_RPC_REPLY, WAIT_CHILD, WAIT_PIPE };
+enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WAIT_PIPE, WAIT_MSG_REPLY };
 
 #define RECV_MSG_SIZE   64
 #define RECV_QUEUE_SIZE 16
@@ -86,11 +86,18 @@ struct proc_t {
     uint32_t recv_tail;         // consumer read position
     spinlock_t recv_lock;       // protects recv_buf/head/tail
 
-    // === RPC 状态 ===
-    pid_t    rpc_caller_pid;    // current RPC caller PID (-1 = none)
-    void    *rpc_reply_buf;     // caller's reply buffer user-space address
-    int32_t  rpc_result;        // 0 = success, positive errno on error
-    pid_t    rpc_target_pid;    // for crash cleanup: who we're waiting on
+    // === REQ 状态 ===
+    pid_t    req_caller_pid;    // current REQ caller PID (-1 = none)
+    void    *req_reply_buf;     // caller's reply buffer user-space address
+    int32_t  req_result;        // 0 = success, positive errno on error
+    pid_t    req_target_pid;    // for crash cleanup: who we're waiting on
+
+    // === MSG 状态（独立于 req 字段） ===
+    void    *msg_reply_buf;     // caller's reply buffer user-space address
+    size_t   msg_reply_len;     // caller's reply buffer size
+    pid_t    msg_caller_pid;    // server side: who sent the msg (-1 = none)
+    int32_t  msg_result;        // 0 = success, negative errno on error
+    pid_t    msg_target_pid;    // caller side: who we're waiting on (crash cleanup)
 
     // === CPU 时间记账 ===
     uint64_t cpu_time_ns;       // 累计 CPU 时间（纳秒）

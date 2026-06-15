@@ -16,8 +16,8 @@ void isr_init();
 uint64_t sys_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_recv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_rpc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_reply(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_req(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_resp(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -37,6 +37,8 @@ uint64_t sys_load_dev(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t
 uint64_t sys_lookup_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_clock(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_msg(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_msg_resp(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 // Register a driver PID for a device type (kernel-internal, not a syscall)
 int register_dev(int dev_type, int32_t pid);

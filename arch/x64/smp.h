@@ -24,6 +24,7 @@ struct proc_t; // forward declaration
 struct Page;
 
 struct cpu_local_t {
+    uint64_t saved_r10;    // scratch slot: SYSCALL entry saves user R10 (arg4) here
     int cpu_id;
     uint32_t apic_id;
     proc_t *_cur_proc;

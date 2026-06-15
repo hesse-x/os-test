@@ -91,7 +91,7 @@ struct fs_dirent {
 
 fs_dirent 扩到 272 字节后，单次 readdir 最多返回 30 个条目。加 offset/count 分页避免大目录截断。
 
-**请求**（fs_req_shm）：`offset`（跳过前 N 个）+ `count`（最多返回 N 个）。
+**请求**（file_req）：`readdir_offset`（跳过前 N 个）+ `readdir_count`（最多返回 N 个）。
 **响应**：返回实际条目数 `total`。
 **shell 端**：循环 `offset=0; offset+=total` 直到 `total < count`。
 **fs_driver 端**：纯无状态遍历，跳过前 `offset` 个有效条目，收集到 `count` 个就停。

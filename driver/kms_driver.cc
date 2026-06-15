@@ -19,7 +19,7 @@ extern "C" void _start() {
     // write header → register DEV_KMS
     if (display_backend_init() < 0) {
         // No framebuffer, just idle
-        while (1) { struct recv_msg msg; recv(&msg, 0); }
+        while (1) { struct recv_msg msg; recv(&msg, NULL, 0, 0); }
     }
 
     // Flip loop: poll for dirty → memcpy back→front → wait if idle
