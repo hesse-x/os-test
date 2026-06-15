@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <sys/fb.h>
 #include <sys/shm.h>
+#include <sys/mman.h>
 #include <sys/device.h>
 #include <sys/ipc.h>
 #include "common/macro.h"
@@ -156,11 +157,16 @@ static inline int display_backend_init() {
     struct kms_fb_info kfb;
     fb_info(&kfb);
 
-    if (kfb.width == 0 || kfb.fb_vaddr == 0) {
+    if (kfb.width == 0 || kfb.fb_phys == 0) {
         return -1;
     }
 
-    backend_front_buffer = (uint8_t *)(uintptr_t)kfb.fb_vaddr;
+    // Map framebuffer physical memory via mmap MAP_PHYSICAL
+    void *fb_ptr = mmap(NULL, kfb.fb_size, PROT_READ | PROT_WRITE, MAP_PHYSICAL, kfb.fb_phys);
+    if (fb_ptr == MAP_FAILED) {
+        return -1;
+    }
+    backend_front_buffer = (uint8_t *)fb_ptr;
 
     // Calculate SHM size: header page + back buffer pages
     uint32_t back_buffer_size = kfb.height * kfb.pitch;

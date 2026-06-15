@@ -15,7 +15,9 @@ ssize_t write(int fd, const void *buf, size_t count);
 int close(int fd);
 int pipe(int fd[2]);
 int open(const char *path, int flags, ...);
+int dup2(int old_fd, int new_fd);
 int sched_yield(void);
+int ioperm(unsigned long from, unsigned long num, int turn_on);
 
 #ifdef __cplusplus
 }

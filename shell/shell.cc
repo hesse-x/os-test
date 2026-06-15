@@ -457,7 +457,7 @@ static void exec_path(const char *rel_path) {
         return;
     }
 
-    pid_t child_pid = spawn((const void *)elf_buf, (size_t)file_size, 0);
+    pid_t child_pid = spawn((const void *)elf_buf, (size_t)file_size);
     free(elf_buf);
 
     if (child_pid < 0) {

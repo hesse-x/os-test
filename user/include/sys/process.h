@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-pid_t spawn(const void *elf, size_t size, int iopl);
+pid_t spawn(const void *elf, size_t size);
 
 #ifdef __cplusplus
 }

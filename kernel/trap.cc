@@ -248,7 +248,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 26
+#define NR_SYSCALL 29
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0: 获取 PID
     sys_yield,          // 1: 主动让出 CPU
@@ -276,6 +276,9 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_clock,          // 23: per-process CPU 时间（纳秒）
     sys_msg,            // 24: 变长消息请求
     sys_msg_resp,       // 25: 变长消息回复
+    sys_ioperm,         // 26: I/O 端口权限
+    sys_dup2,           // 27: 复制 fd
+    sys_fcntl,          // 28: 文件控制
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -567,6 +570,17 @@ uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
         proc->last_sched = 0;
     }
 
+    // Orphan adoption: reparent children to init
+    if (init_pid >= 0) {
+        spin_lock(&procs_lock);
+        for (int i = 0; i < MAX_PROC; i++) {
+            if (procs[i].pid >= 0 && procs[i].parent_pid == proc->pid) {
+                procs[i].parent_pid = init_pid;
+            }
+        }
+        spin_unlock(&procs_lock);
+    }
+
     if (proc->parent_pid < 0) {
         // No parent: directly reap all resources
         proc_reap(proc);
@@ -637,9 +651,55 @@ uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 }
 
 // sys_waitpid(pid, exit_code_ptr) — syscall 7 (等待子进程退出)
+// pid=-1: wait for any child
 uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
     pid_t pid = (pid_t)arg1;
     int32_t *exit_code_ptr = (int32_t *)arg2;
+
+    if (pid == -1) {
+        // Wait for any child to become ZOMBIE
+        while (1) {
+            // Scan for a ZOMBIE child
+            spin_lock(&procs_lock);
+            proc_t *zombie = nullptr;
+            for (int i = 0; i < MAX_PROC; i++) {
+                if (procs[i].pid >= 0 && procs[i].parent_pid == current_proc->pid &&
+                    procs[i].state == ZOMBIE) {
+                    zombie = &procs[i];
+                    break;
+                }
+            }
+            if (zombie) {
+                int cpu = zombie->assigned_cpu;
+                spin_unlock(&procs_lock);
+                uint64_t flags;
+                spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+                if (zombie->state == ZOMBIE) {
+                    zombie->state = REAPING;
+                    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+                } else {
+                    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+                    continue;  // Race, retry
+                }
+                pid_t zpid = zombie->pid;
+                if (exit_code_ptr) {
+                    uint64_t ptr_val = (uint64_t)exit_code_ptr;
+                    if (ptr_val < 0xFFFFFFFF80000000ULL && ptr_val &&
+                        (ptr_val + sizeof(int32_t) - 1) < 0xFFFFFFFF80000000ULL)
+                        *exit_code_ptr = zombie->exit_code;
+                }
+                proc_reap(zombie);
+                return (uint64_t)zpid;
+            }
+            spin_unlock(&procs_lock);
+
+            // No zombie child: block on WAIT_CHILD
+            current_proc->wait_event = WAIT_CHILD;
+            current_proc->state = BLOCKED;
+            __atomic_add_fetch(&cpu_locals[current_proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
+            schedule();
+        }
+    }
 
     if (pid < 0 || pid >= MAX_PROC) return 0;  // EINVAL
 
@@ -694,17 +754,13 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t)
     return (uint64_t)pid;
 }
 
-// sys_spawn(elf_data, elf_size, iopl) — syscall 8 (创建子进程)
-uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+// sys_spawn(elf_data, elf_size) — syscall 8 (创建子进程)
+uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
     const uint8_t *elf_data_user = (const uint8_t *)arg1;
     uint64_t elf_size = arg2;
-    uint32_t iopl = (uint32_t)arg3;
-
-    // IOPL permission check
-    if (current_proc->iopl < iopl) return (uint64_t)EPERM;
 
     // Basic parameter validation
-    if (!elf_data_user || elf_size == 0 || elf_size > 256 * 1024)
+    if (!elf_data_user || elf_size == 0)
         return (uint64_t)EINVAL;
 
     // Validate user pointer range
@@ -719,7 +775,7 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
     __memcpy(elf_buf, elf_data_user, elf_size);
 
     // Create child process from ELF
-    proc_t *child = process_create_elf(elf_buf, elf_size, iopl);
+    proc_t *child = process_create_elf(elf_buf, elf_size);
     kfree(elf_buf);
     if (!child) return (uint64_t)ENOMEM;
 
@@ -738,19 +794,63 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
     return (uint64_t)child->pid;
 }
 
-// sys_mmap(size) — syscall 9 (匿名私有映射)
+// sys_mmap(addr, size, prot, flags, offset) — syscall 9 (内存映射)
+// MAP_PHYSICAL: map physical address range (no new page allocation)
+// Otherwise: anonymous private mapping (allocates new pages)
 // Returns: mapped address on success, 0 on failure
-uint64_t sys_mmap(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
-    size_t size = (size_t)arg1;
-    if (size == 0) return 0;  // EINVAL
+#define MAP_PHYSICAL_KERNEL 0x80000000
+
+uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5) {
+    uint64_t addr = arg1;
+    size_t size = (size_t)arg2;
+    // int prot = (int)arg3;  // prot currently ignored
+    int flags = (int)arg4;
+    uint64_t offset = arg5;
+
+    if (size == 0) return 0;
 
     size = ALIGN_UP(size, PAGE_SIZE);
     proc_t *proc = current_proc;
-    uint64_t vaddr = proc->mmap_brk;
     uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->cr3);
-    uint64_t flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
 
-    // 逐页分配物理页并映射
+    if (flags & MAP_PHYSICAL_KERNEL) {
+        // MAP_PHYSICAL: map physical address range to user address space
+        uint64_t vaddr = proc->mmap_brk;
+        uint64_t phys_start = ALIGN_DOWN(offset, PAGE_SIZE);
+        uint64_t phys_end = ALIGN_UP(offset + size, PAGE_SIZE);
+        size_t npages = (phys_end - phys_start) / PAGE_SIZE;
+        uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+
+        for (size_t i = 0; i < npages; i++) {
+            if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE,
+                                      phys_start + i * PAGE_SIZE, pte_flags)) {
+                // Rollback
+                for (size_t j = 0; j < i; j++)
+                    unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
+                return 0;
+            }
+        }
+
+        mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
+        if (!region) {
+            for (size_t i = 0; i < npages; i++)
+                unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE, 1);
+            return 0;
+        }
+
+        region->vaddr = vaddr;
+        region->size = npages * PAGE_SIZE;
+        region->next = proc->mmap_regions;
+        proc->mmap_regions = region;
+        proc->mmap_brk = vaddr + npages * PAGE_SIZE;
+
+        return vaddr;
+    }
+
+    // Anonymous private mapping: allocate new pages
+    uint64_t vaddr = proc->mmap_brk;
+    uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+
     size_t npages = size / PAGE_SIZE;
     uint64_t *phys_pages = (uint64_t *)kmalloc(npages * sizeof(uint64_t));
     if (!phys_pages) return 0;
@@ -759,7 +859,6 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     for (size_t i = 0; i < npages; i++) {
         Page *page = bfc_alloc.alloc_page(1);
         if (!page) {
-            // 回滚
             for (size_t j = 0; j < mapped; j++) {
                 uint64_t va = vaddr + j * PAGE_SIZE;
                 unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
@@ -768,8 +867,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
             return 0;
         }
         phys_pages[i] = page_to_phys(page);
-        if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, phys_pages[i], flags)) {
-            // 回滚
+        if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, phys_pages[i], pte_flags)) {
             bfc_alloc.free_page(&BFCAllocator::frames[PHY_TO_PAGE(phys_pages[i])], 1);
             for (size_t j = 0; j < mapped; j++) {
                 uint64_t va = vaddr + j * PAGE_SIZE;
@@ -781,10 +879,8 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
         mapped++;
     }
 
-    // 分配 mmap_region 节点记录
     mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
     if (!region) {
-        // 回滚所有映射
         for (size_t i = 0; i < npages; i++) {
             uint64_t va = vaddr + i * PAGE_SIZE;
             unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
@@ -1054,9 +1150,9 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 
     proc_t *proc = current_proc;
 
-    // Find two free fd slots
+    // Find two free fd slots (skip 0/1, reserved for stdin/stdout)
     int read_fd = -1, write_fd = -1;
-    for (int i = 0; i < MAX_FD; i++) {
+    for (int i = 3; i < MAX_FD; i++) {
         if (proc->fd_table[i].type == FD_NONE) {
             if (read_fd < 0) read_fd = i;
             else if (write_fd < 0) { write_fd = i; break; }
@@ -1446,4 +1542,112 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t
 
     proc->msg_caller_pid = -1;  // clear
     return 0;
+}
+
+// sys_ioperm(from, num, turn_on) — syscall 26 (I/O 端口权限)
+uint64_t sys_ioperm(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+    unsigned long from = (unsigned long)arg1;
+    unsigned long num = (unsigned long)arg2;
+    int turn_on = (int)arg3;
+
+    if (from + num > 65536) return (uint64_t)EINVAL;
+
+    proc_t *proc = current_proc;
+
+    // Lazy-allocate IOPM if needed
+    if (!proc->iopm) {
+        uint8_t *iopm = (uint8_t *)kmalloc(IOPM_SIZE);
+        if (!iopm) return (uint64_t)ENOMEM;
+        // Initialize to deny all
+        for (int i = 0; i < IOPM_SIZE; i++)
+            iopm[i] = 0xFF;
+        proc->iopm = iopm;
+    }
+
+    // Update IOPM bits: bit=0 means allow, bit=1 means deny
+    for (unsigned long port = from; port < from + num; port++) {
+        int byte_idx = port / 8;
+        int bit_idx = port % 8;
+        if (turn_on) {
+            // Allow: clear bit
+            proc->iopm[byte_idx] &= ~(1 << bit_idx);
+        } else {
+            // Deny: set bit
+            proc->iopm[byte_idx] |= (1 << bit_idx);
+        }
+    }
+
+    // Immediately update current CPU's TSS IOPM
+    int cpu = proc->assigned_cpu;
+    __memcpy(per_cpu_tss[cpu].iopm, proc->iopm, IOPM_SIZE);
+
+    return 0;
+}
+
+// F_GETFL / F_SETFL for sys_fcntl
+#define F_GETFL 1
+#define F_SETFL 2
+
+// sys_dup2(old_fd, new_fd) — syscall 27 (复制 fd)
+uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+    int old_fd = (int)arg1;
+    int new_fd = (int)arg2;
+
+    if (old_fd < 0 || old_fd >= MAX_FD || new_fd < 0 || new_fd >= MAX_FD)
+        return (uint64_t)EBADF;
+
+    proc_t *proc = current_proc;
+    if (proc->fd_table[old_fd].type == FD_NONE)
+        return (uint64_t)EBADF;
+
+    // Close new_fd if it's open
+    if (proc->fd_table[new_fd].type != FD_NONE) {
+        struct pipe *p = proc->fd_table[new_fd].pipe;
+        if (p) {
+            p->ref_count--;
+            if (proc->fd_table[new_fd].flags & (O_WRONLY | O_RDWR)) {
+                if (p->read_pid >= 0) wake_process(p->read_pid);
+            }
+            if (proc->fd_table[new_fd].flags & (O_RDONLY | O_RDWR)) {
+                if (p->write_pid >= 0) wake_process(p->write_pid);
+            }
+            if (p->ref_count == 0) {
+                kfree(p->buf);
+                kfree(p);
+            }
+        }
+        proc->fd_table[new_fd].type = FD_NONE;
+        proc->fd_table[new_fd].flags = 0;
+        proc->fd_table[new_fd].pipe = nullptr;
+    }
+
+    // Copy old_fd to new_fd
+    proc->fd_table[new_fd] = proc->fd_table[old_fd];
+    if (proc->fd_table[new_fd].type == FD_PIPE) {
+        proc->fd_table[new_fd].pipe->ref_count++;
+    }
+
+    return (uint64_t)new_fd;
+}
+
+// sys_fcntl(fd, cmd, arg) — syscall 28 (文件控制)
+uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+    int fd = (int)arg1;
+    int cmd = (int)arg2;
+    int arg = (int)arg3;
+
+    if (fd < 0 || fd >= MAX_FD) return (uint64_t)EBADF;
+
+    proc_t *proc = current_proc;
+    if (proc->fd_table[fd].type == FD_NONE) return (uint64_t)EBADF;
+
+    switch (cmd) {
+    case F_GETFL:
+        return (uint64_t)proc->fd_table[fd].flags;
+    case F_SETFL:
+        proc->fd_table[fd].flags = arg;
+        return 0;
+    default:
+        return (uint64_t)EINVAL;
+    }
 }

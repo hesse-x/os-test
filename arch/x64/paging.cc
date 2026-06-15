@@ -62,7 +62,10 @@ void gdt_init() {
   reload_cs();
 
   boot_tss.rsp0 = (uint64_t)&stack_bottom + 8192;
-  boot_tss.iomap_base = sizeof(tss_t);
+  boot_tss.iomap_base = 104;
+  // Initialize IOPM to deny all ports
+  for (int i = 0; i < IOPM_SIZE; i++)
+      boot_tss.iopm[i] = 0xFF;
   ltr(TSS_SEL);
 }
 

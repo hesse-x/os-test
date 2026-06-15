@@ -564,5 +564,5 @@ CMAKE_CXX_FLAGS "-m64"
 - 多核 SMP 支持 → **部分完成**（AP 启动但仅 idle），见 [smp.md](smp.md)
 - NX 位（PTE bit63）→ **已完成**，见 [nx_bit.md](nx_bit.md)
 - 用户态驱动 IPC → **已完成**，见 [user_driver.md](user_driver.md)
-- SYSCALL/SYSRET 快速系统调用 → **已完成**，见 [syscall_fastpath.md](syscall_fastpath.md)
+- SYSCALL/SYSRET 快速系统调用 → **已完成**，见 [syscall.md](syscall.md)
 - 用户态 SSE/FPU：lazy FPU restore → **未完成**

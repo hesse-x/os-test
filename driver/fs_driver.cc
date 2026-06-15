@@ -40,7 +40,9 @@ static void disk_wait_reply() {
     while (1) {
         struct recv_msg m;
         recv(&m, NULL, 0, 0);
-        if (m.type == RECV_NOTIFY && (int32_t)m.src == disk_driver_pid) return;
+        if (m.type == RECV_NOTIFY && (int32_t)m.src == disk_driver_pid) {
+            return;
+        }
         notify(my_pid);
     }
 }
@@ -814,6 +816,8 @@ static int session_alloc_fd(struct client_session *sess) {
 #define FILE_CMD_CREATE    6
 #define FILE_CMD_MKDIR     7
 #define FILE_CMD_RAW_READ  8
+#define FILE_CMD_STAT      9
+#define FILE_CMD_PING     10
 
 struct file_req {
     uint32_t cmd;
@@ -1296,20 +1300,16 @@ static void handle_mkdir(const char *path, struct file_resp *resp) {
 
 // ===================== Main loop =====================
 extern "C" void _start() {
-    serial_write("fs_driver: _start\n", 18);
-
-    serial_write("fs_driver: attaching disk_shm\n", 29);
     while ((disk_driver_pid = device_lookup(DEV_DISK)) < 0) {
         struct recv_msg m;
-        recv(&m, NULL, 0, 1);
+        recv(&m, NULL, 0, 10);
     }
     void *disk_shm_ptr = NULL;
     while (shm_attach(disk_driver_pid, &disk_shm_ptr) < 0) {
         struct recv_msg m;
-        recv(&m, NULL, 0, 1);
+        recv(&m, NULL, 0, 10);
     }
     uint64_t disk_shm = (uint64_t)disk_shm_ptr;
-    serial_write("fs_driver: disk_shm attached\n", 29);
     disk_hdr = (volatile disk_shm_header *)(disk_shm + DISK_SHM_HEADER_OFFSET);
     dreq     = (volatile disk_req_shm *)(disk_shm + DISK_REQ_OFFSET);
     dresp    = (volatile disk_resp_shm *)(disk_shm + DISK_RESP_OFFSET);
@@ -1331,10 +1331,8 @@ extern "C" void _start() {
     }
 
     fat32_init();
-    serial_write("fs_driver: fat32_init done\n", 26);
 
     device_register(getpid(), DEV_FS);
-    serial_write("fs_driver: registered\n", 22);
 
     while (1) {
         struct recv_msg m;
@@ -1388,6 +1386,22 @@ extern "C" void _start() {
             break;
         case FILE_CMD_RAW_READ:
             handle_raw_read(freq->lba, freq->count, resp);
+            break;
+        case FILE_CMD_STAT:
+            {
+                fat_dir_entry de;
+                uint32_t cluster;
+                if (!resolve_path(freq->path, &de, &cluster)) {
+                    resp->status = -ENOENT;
+                } else {
+                    resp->status = 0;
+                    resp->file_size = de.file_size;
+                }
+            }
+            break;
+        case FILE_CMD_PING:
+            /* PING — no-op */
+            resp->status = 0;  // ready
             break;
         default:
             resp->status = -EINVAL;

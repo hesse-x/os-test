@@ -61,7 +61,8 @@ typedef struct {
   uint64_t base;
 } __attribute__((packed)) gdt_ptr_t;
 
-// ===================== TSS (64-bit, 128字节) =====================
+// ===================== TSS (64-bit, 128字节 + 8KB IOPM) =====================
+#define IOPM_SIZE 8192  // 8KB IOPM bitmap (65536 ports / 8 bits per byte)
 typedef struct {
   uint32_t reserved0;
   uint64_t rsp0;
@@ -72,6 +73,7 @@ typedef struct {
   uint64_t reserved2;
   uint16_t reserved3;
   uint16_t iomap_base;
+  uint8_t  iopm[IOPM_SIZE];  // I/O permission bitmap
 } __attribute__((packed)) tss_t;
 
 #define USER_CS  0x2B    // index 5, RPL=3 (SYSRET64 CS = STAR[63:48]+16 | 3)

@@ -1,21 +1,29 @@
 // Terminal process: VT100 state machine + cell buffer + compositor.
 // Renders cells → pixels → back buffer (display SHM), KMS does flip.
 //
-// fd 0 = stdout pipe read end (reads shell output)
+// fd 0 = stdout pipe read end (reads shell output, O_NONBLOCK)
 // fd 1 = stdin pipe write end  (sends keystrokes to shell)
 //
-// Does NOT link libc.a — uses syscalls directly.
+// Links libc.a, uses main() entry point.
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <sys/device.h>
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/macro.h"
+#include "common/syscall.h"
 #include "input.h"
 #include "driver/display.h"
 
@@ -309,7 +317,7 @@ static void flush_dirty_cells() {
 
 // ===================== Main =====================
 
-extern "C" void _start() {
+int main() {
     // 1. Initialize display client (attach display SHM from KMS)
     if (display_client_init() < 0) {
         // Unsupported bpp or no display
@@ -356,7 +364,7 @@ extern "C" void _start() {
 
     // 4. Allocate cell buffer via mmap
     int cell_bytes = vt.rows * vt.cols * sizeof(struct cell);
-    cells = (struct cell *)mmap(NULL, cell_bytes, 0, 0, -1, 0);
+    cells = (struct cell *)mmap(NULL, cell_bytes, PROT_READ | PROT_WRITE, 0, 0);
     if (!cells) {
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
@@ -376,7 +384,50 @@ extern "C" void _start() {
     display_client_clear(0x000000);
     display_client_flush();
 
-    // 7. Main loop
+    // 7. Create pipes for terminal ↔ shell communication
+    // p_stdin:  [0]=read end (shell reads), [1]=write end (terminal writes keystrokes)
+    // p_stdout: [0]=read end (terminal reads shell output), [1]=write end (shell writes)
+    int p_stdin[2];
+    int p_stdout[2];
+    pipe(p_stdin);
+    pipe(p_stdout);
+
+    // 8. Set up fd 0 and fd 1 for shell to inherit via spawn
+    // Shell fd 0 = p_stdin[0] (reads keystrokes from terminal)
+    // Shell fd 1 = p_stdout[1] (writes output to terminal)
+    dup2(p_stdin[0], 0);   // fd 0 = stdin pipe read end
+    dup2(p_stdout[1], 1);  // fd 1 = stdout pipe write end
+
+    // 9. Spawn shell — it inherits fd 0 (stdin read) and fd 1 (stdout write)
+    {
+        struct stat st;
+        if (stat("/usr/bin/shell", &st) >= 0) {
+            void *buf = malloc(st.st_size);
+            int fd = open("/usr/bin/shell", O_RDONLY);
+            if (fd >= 0 && buf) {
+                read(fd, buf, st.st_size);
+                close(fd);
+                sys_spawn(buf, (uint64_t)st.st_size);
+                free(buf);
+            }
+        }
+    }
+
+    // 10. Close pipe ends owned by shell, set up terminal's own fd 0/1
+    close(p_stdin[0]);   // close read end (shell owns it)
+    close(p_stdout[1]);  // close write end (shell owns it)
+
+    // Terminal fd 0 = p_stdout[0] (read shell output, non-blocking)
+    // Terminal fd 1 = p_stdin[1]  (write keystrokes to shell stdin)
+    dup2(p_stdout[0], 0);
+    dup2(p_stdin[1], 1);
+    close(p_stdout[0]);  // close original (now duped to fd 0)
+    close(p_stdin[1]);   // close original (now duped to fd 1)
+
+    // 11. Set fd 0 to non-blocking
+    fcntl(0, F_SETFL, O_RDONLY | O_NONBLOCK);
+
+    // 12. Main loop
     while (1) {
         int did_work = 0;
 
@@ -417,4 +468,6 @@ extern "C" void _start() {
             shm_hdr->consumer_sleeping = 0;
         }
     }
+
+    return 0;
 }

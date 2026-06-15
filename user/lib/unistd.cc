@@ -17,3 +17,12 @@ int sched_yield(void) {
     sys_yield();
     return 0;
 }
+
+int ioperm(unsigned long from, unsigned long num, int turn_on) {
+    int r = sys_ioperm(from, num, turn_on);
+    if (r < 0) {
+        errno = -r;
+        return -1;
+    }
+    return r;
+}

@@ -1,10 +1,11 @@
 // KMS driver process (user-space)
 // Creates display SHM (back buffer), does memcpy flip (back → front).
-// IOPL=0, no IRQ binding. Framebuffer mapped at 0x700000 via map_fb=true.
+// IOPL=0, no IRQ binding. Framebuffer mapped via mmap MAP_PHYSICAL.
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <sys/mman.h>
 #include <sys/device.h>
 #include <sys/fb.h>
 #include "common/shm.h"

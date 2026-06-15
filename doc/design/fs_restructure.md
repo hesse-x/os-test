@@ -7,7 +7,7 @@
 2. 支持 VFAT LFN 长文件名读写
 3. Shell 支持路径执行（替代 `run` 命令）
 
-启动流程改造（init + exec + 从 FAT32 启动用户态服务）已拆到 [refactor_boot.md](refactor_boot.md)。
+启动流程改造（init + 从 FAT32 启动用户态服务）已拆到 [boot.md](boot.md)。
 
 ## FAT32 目录结构
 
@@ -15,9 +15,9 @@
 /                    根目录
 ├── README           测试用文本文件
 ├── boot/            启动必需文件
-│   ├── bin/         init（refactor_boot 后内核从裸LBA加载的唯一用户态入口）
-│   └── driver/      disk.dev, fs.dev（refactor_boot 后内核从裸LBA加载的驱动）
-├── driver/          用户态驱动（refactor_boot 后 init/fork 从 FAT32 加载）
+│   ├── bin/         init（boot 改造后内核从裸LBA加载的唯一用户态入口）
+│   └── driver/      disk.dev, fs.dev（boot 改造后内核从裸LBA加载的驱动）
+├── driver/          用户态驱动（boot 改造后 init/fork 从 FAT32 加载）
 │   ├── kbd.dev
 │   └── kms.dev
 ├── usr/

@@ -54,7 +54,7 @@ elf_load_result elf_load(const uint8_t *data, uint64_t size,
         return result;
 
     // Check ELF class (should be 64-bit)
-    if (data[4] != 2) return result;  // EI_CLASS != ELFCLASS64
+    if (data[4] != 2) return result;
 
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)data;
     result.entry = ehdr->e_entry;

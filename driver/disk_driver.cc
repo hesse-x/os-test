@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <unistd.h>
+#include <sys/device.h>
 #include "common/shm.h"
 #include "common/dev.h"
 
@@ -91,6 +93,11 @@ static void handle_request() {
 }
 
 extern "C" void _start() {
+    // Enable I/O ports for ATA PIO
+    ioperm(0x1F0, 8, 1);  // ATA command block registers
+    ioperm(0x3F6, 2, 1);  // ATA control block registers
+    device_register(getpid(), DEV_DISK);
+
     // Create shared memory: header(1) + req(2) + resp(2) = 5 pages
     void *shm_ptr = NULL;
     shm_create(5 * 4096, &shm_ptr);

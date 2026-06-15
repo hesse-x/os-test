@@ -85,6 +85,7 @@ static inline void local_irq_restore(uint64_t flags) {
 }
 
 // ===================== RAII interrupt guard =====================
+#ifdef __cplusplus
 class IrqGuard {
   uint64_t flags_;
 public:
@@ -93,6 +94,7 @@ public:
   IrqGuard(const IrqGuard &) = delete;
   IrqGuard &operator=(const IrqGuard &) = delete;
 };
+#endif
 
 // ===================== MMIO helpers =====================
 static inline uint32_t readl(const void *addr) {

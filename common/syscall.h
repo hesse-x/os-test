@@ -31,6 +31,9 @@
 #define SYS_CLOCK        23
 #define SYS_MSG          24
 #define SYS_MSG_RESP     25
+#define SYS_IOPERM       26
+#define SYS_DUP2         27
+#define SYS_FCNTL        28
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -109,12 +112,13 @@ static inline int64_t sys_waitpid(int32_t pid, int32_t *exit_code) {
     return __syscall2(SYS_WAITPID, (int64_t)pid, (int64_t)(uintptr_t)exit_code);
 }
 
-static inline int64_t sys_spawn(const void *elf_data, uint64_t elf_size, uint32_t iopl) {
-    return __syscall3(SYS_SPAWN, (int64_t)(uintptr_t)elf_data, (int64_t)elf_size, (int64_t)iopl);
+static inline int64_t sys_spawn(const void *elf_data, uint64_t elf_size) {
+    return __syscall2(SYS_SPAWN, (int64_t)(uintptr_t)elf_data, (int64_t)elf_size);
 }
 
-static inline void *sys_mmap(size_t size) {
-    return (void *)__syscall1(SYS_MMAP, (int64_t)size);
+static inline void *sys_mmap(void *addr, size_t size, int prot, int flags, uint64_t offset) {
+    return (void *)__syscall5(SYS_MMAP, (int64_t)(uintptr_t)addr, (int64_t)size,
+        (int64_t)prot, (int64_t)flags, (int64_t)offset);
 }
 
 static inline int sys_munmap(void *addr, size_t size) {
@@ -171,6 +175,18 @@ static inline uint64_t sys_gettime() {
 
 static inline uint64_t sys_clock() {
     return (uint64_t)__syscall0(SYS_CLOCK);
+}
+
+static inline int sys_ioperm(unsigned long from, unsigned long num, int turn_on) {
+    return (int)__syscall3(SYS_IOPERM, (int64_t)from, (int64_t)num, (int64_t)turn_on);
+}
+
+static inline int sys_dup2(int old_fd, int new_fd) {
+    return (int)__syscall2(SYS_DUP2, (int64_t)old_fd, (int64_t)new_fd);
+}
+
+static inline int sys_fcntl(int fd, int cmd, int arg) {
+    return (int)__syscall3(SYS_FCNTL, (int64_t)fd, (int64_t)cmd, (int64_t)arg);
 }
 
 #endif // COMMON_SYSCALL_H

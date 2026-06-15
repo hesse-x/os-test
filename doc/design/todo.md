@@ -34,11 +34,11 @@
 | 多核 SMP — Per-CPU 基础设施 | [smp.md](smp.md) |
 | 多核 SMP — APIC 替换 PIC | [smp.md](smp.md) |
 | 多核 SMP — AP 启动 | [smp.md](smp.md) |
-| SYSCALL/SYSRET 快速系统调用 | [syscall_fastpath.md](syscall_fastpath.md) |
+| SYSCALL/SYSRET 快速系统调用 | [syscall.md](syscall.md) |
 | TSS IST 栈 | [tss_ist.md](tss_ist.md) |
 | NX 位 | [nx_bit.md](nx_bit.md) |
 | 自旋锁原语 | [spinlock.md](spinlock.md) |
-| AP 参与调度（idle 进程模型 + pick_cpu） | [ap_schedule.md](ap_schedule.md) |
+| AP 参与调度（idle 进程模型 + pick_cpu） | [schedule.md](schedule.md) |
 | 细粒度锁拆分（BKL 移除） | [fine_grained_lock.md](fine_grained_lock.md) |
 | FAT32 文件系统 | [fat32.md](fat32.md) |
 | 内存管理系统（slab + mmap + 用户态 malloc 重写） | [mem.md](mem.md) |
@@ -56,10 +56,12 @@
 | 文件系统重构（LFN + FHS 目录结构 + Shell 路径执行） | [fs_restructure.md](fs_restructure.md) |
 | libc 文件 I/O（open/read/write/close via sys_msg） | [rpc.md](rpc.md) |
 | 用户态驱动（3 层 kbd + req bind/unbind + 各驱动工作流） | [user_driver.md](user_driver.md) |
+| 构建系统（CMake + mkdisk + mkimg） | [cmake.md](cmake.md) |
+| Shell 设计（命令 + FS IPC + 路径执行） | [shell.md](shell.md) |
 
 ## 当前状态
 
-内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 6 个 ELF（disk_driver → kbd_driver → kms_driver → terminal → shell → fs_driver）→ 多进程协作。
+内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 3 个 ELF（disk_driver + fs_driver + init）→ init 从 FAT32 启动 kbd/kms/terminal → terminal 启动 shell → 多进程协作。
 
 **统一 IPC 完成**：sys_recv/sys_req/sys_resp + sys_msg/sys_msg_resp 双层 IPC 机制。sys_recv 统一接收 IRQ/REQ/NOTIFY/MSG 四类消息（per-process 16 slot recv 队列 + 4 参数签名支持变长数据），sys_req 同步内联请求（56 字节载荷），sys_msg 同步变长消息（≤64KB，内核 kmalloc 中转拷贝）。NR_SYSCALL=26。
 
@@ -69,13 +71,13 @@
 
 **时间子系统完成**：sys_gettime（全局单调时钟）+ sys_clock（per-process CPU 时间），libc timespec_get/clock 封装。
 
-**设备自注册**：驱动通过 device_register(getpid(), DEV_XXX) 自注册（kbd_driver、kms_driver、fs_driver），disk_driver 由 kernel_main 注册。
+**设备自注册**：所有驱动通过 device_register(getpid(), DEV_XXX) 自注册（kbd_driver、disk_driver、kms_driver、fs_driver）。
 
 ## 多核 SMP — 调度与锁（全部完成）
 
 ### 步骤 1: 自旋锁原语 ✅
 ### 步骤 2: BKL 大内核锁 ✅（已移除，替换为细粒度锁）
-### 步骤 3: AP 参与调度 ✅ — [ap_schedule.md](ap_schedule.md)
+### 步骤 3: AP 参与调度 ✅ — [schedule.md](schedule.md)
 ### 步骤 4: 细粒度锁拆分 ✅ — [fine_grained_lock.md](fine_grained_lock.md)
 
 ---
@@ -283,5 +285,5 @@
 | 多客户端 fs_driver | 无 | 低 | 已有多客户端 session，需更多测试 |
 | VFS 层 | 无 | 低 | 支持多种文件系统类型 |
 | 页面换出 (swap) | FAT32 write | 低 | BFC 不足时换出到磁盘 |
-| 启动流程改造 | kbd 重构完成 | 中 | init + exec + FAT32 启动用户态服务，见 [refactor_boot.md](refactor_boot.md) |
+| 启动流程改造 | kbd 重构完成 | ✅ | init + FAT32 启动用户态服务，见 [boot.md](boot.md) |
 | POSIX API 封装 | — | 中 | unistd.h/sys/wait.h/sys/mman.h 等，见 [sys_api.md](sys_api.md) |

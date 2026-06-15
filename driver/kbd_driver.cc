@@ -367,6 +367,10 @@ static void handle_req(struct recv_msg *msg) {
 // ===================== Main =====================
 
 extern "C" void _start() {
+    // Enable I/O ports for keyboard (0x60-0x64)
+    ioperm(0x60, 2, 1);
+    ioperm(0x64, 1, 1);
+
     // Bind to keyboard IRQ (IRQ1 = vector 33)
     irq_bind(33);
 

@@ -1,6 +1,8 @@
 // libc file I/O: fd_table + open/read/write/close/pipe dispatch
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdarg.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -131,7 +133,7 @@ int open(const char *path, int flags, ...) {
 // ===================== read =====================
 
 ssize_t file_read(int fd, void *buf, size_t count) {
-    if (!(fd_table[fd].flags & O_RDONLY) && !(fd_table[fd].flags & O_RDWR))
+    if ((fd_table[fd].flags & O_WRONLY) && !(fd_table[fd].flags & O_RDWR))
         { errno = EBADF; return -1; }
 
     pid_t pid = get_fs_pid();
@@ -261,4 +263,77 @@ int close(int fd) {
     }
     fd_table[fd].type = FD_NONE;
     return 0;
+}
+
+int fcntl(int fd, int cmd, ...) {
+    fd_table_init();
+
+    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type == FD_NONE)
+        { errno = EBADF; return -1; }
+
+    if (cmd == F_GETFL) {
+        return fd_table[fd].flags;
+    } else if (cmd == F_SETFL) {
+        va_list ap;
+        va_start(ap, cmd);
+        int arg = va_arg(ap, int);
+        va_end(ap);
+        // If FD_PIPE, update kernel-side flags too
+        if (fd_table[fd].type == FD_PIPE) {
+            int r = sys_fcntl(fd, cmd, arg);
+            if (r < 0) { errno = -r; return -1; }
+        }
+        fd_table[fd].flags = arg;
+        return 0;
+    }
+
+    errno = EINVAL;
+    return -1;
+}
+
+// stat — get file status via fs_driver
+int stat(const char *path, struct stat *st) {
+    fd_table_init();
+
+    if (!path || !st) { errno = EFAULT; return -1; }
+
+    int32_t fs_pid = get_fs_pid();
+    if (fs_pid <= 0) { errno = ENOENT; return -1; }
+
+    // FILE_CMD_STAT = 9
+    struct {
+        uint32_t cmd;
+        char path[256];
+    } freq;
+    freq.cmd = 9;
+    int i;
+    for (i = 0; path[i] && i < 255; i++)
+        freq.path[i] = path[i];
+    freq.path[i] = '\0';
+
+    struct {
+        uint32_t status;
+        uint64_t size;
+    } fresp;
+
+    int r = sys_msg(fs_pid, &freq, sizeof(freq), &fresp, sizeof(fresp));
+    if (r < 0) { errno = -r; return -1; }
+    if (fresp.status != 0) { errno = (int)fresp.status; return -1; }
+
+    st->st_size = (off_t)fresp.size;
+    return 0;
+}
+
+// dup2 — duplicate fd with libc fd_table sync
+int dup2(int old_fd, int new_fd) {
+    fd_table_init();
+
+    int r = sys_dup2(old_fd, new_fd);
+    if (r < 0) { errno = -r; return -1; }
+
+    // Sync libc fd_table: copy old_fd entry to new_fd
+    if (new_fd >= 0 && new_fd < MAX_FD && old_fd >= 0 && old_fd < MAX_FD) {
+        fd_table[new_fd] = fd_table[old_fd];
+    }
+    return r;
 }

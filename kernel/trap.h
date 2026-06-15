@@ -22,8 +22,8 @@ uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t);
-uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t);
-uint64_t sys_mmap(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t);
+uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5);
 uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t);
 uint64_t sys_serial_write(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t);
 uint64_t sys_fb_info(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -39,6 +39,9 @@ uint64_t sys_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_clock(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_msg(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_msg_resp(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_ioperm(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_dup2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 // Register a driver PID for a device type (kernel-internal, not a syscall)
 int register_dev(int dev_type, int32_t pid);

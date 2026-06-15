@@ -84,7 +84,10 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     for (size_t i = 0; i < sizeof(tss_t); i++)
         ((uint8_t *)tss)[i] = 0;
     tss->rsp0 = kernel_stack;
-    tss->iomap_base = sizeof(tss_t);
+    tss->iomap_base = 104;  // offset of IOPM within TSS (after reserved3)
+    // Initialize IOPM to deny all ports (all bits = 1)
+    for (int i = 0; i < IOPM_SIZE; i++)
+        tss->iopm[i] = 0xFF;
 
     // Allocate per-CPU IST stacks (1 page each: NMI, Double Fault, Machine Check)
     for (int i = 0; i < 3; i++) {

@@ -35,6 +35,7 @@ add_subdirectory(kernel)
 add_subdirectory(driver)
 add_subdirectory(shell)
 add_subdirectory(user)
+add_subdirectory(init)
 
 # 链接内核 ELF
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/build_script/linker.ld)

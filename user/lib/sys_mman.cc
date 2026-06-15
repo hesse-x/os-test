@@ -2,13 +2,8 @@
 #include <errno.h>
 #include "common/syscall.h"
 
-void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
-    (void)addr;
-    (void)prot;
-    (void)flags;
-    (void)fd;
-    (void)offset;
-    void *r = sys_mmap(length);
+void *mmap(void *addr, size_t length, int prot, int flags, uint64_t offset) {
+    void *r = sys_mmap(addr, length, prot, flags, offset);
     if (r == NULL) {
         errno = ENOMEM;
         return MAP_FAILED;

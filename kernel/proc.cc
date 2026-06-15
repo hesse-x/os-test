@@ -23,6 +23,7 @@ proc_t procs[MAX_PROC];
 // current_proc is per-CPU (in cpu_local_t), accessed via macro
 
 spinlock_t procs_lock = {0};
+pid_t init_pid = -1;
 
 // ===================== Timer queue operations =====================
 // Must be called under scheduler_lock of the target CPU
@@ -61,7 +62,7 @@ void proc_init() {
         procs[i].entry = 0;
         procs[i].wait_event = WAIT_NONE;
         procs[i].assigned_cpu = -1;
-        procs[i].iopl = 0;
+        procs[i].iopm = nullptr;
         procs[i].parent_pid = -1;
         procs[i].exit_code = 0;
         procs[i].mmap_brk = 0;
@@ -119,11 +120,11 @@ struct switch_frame_t {
 };
 
 // 在内核栈顶构建 trapframe + switch_frame，返回 k_rsp
-static uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip, uint8_t iopl) {
+static uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
     trapframe_t tf = {};
     tf.ss      = 0x23;                   // USER_DS
     tf.rsp     = 0x00007FFFFFFFE000;      // user stack top (top of mapped page at 0x7FFFFFFFD000)
-    tf.rflags  = 0x202 | ((uint64_t)iopl << 12); // IF=1, IOPL
+    tf.rflags  = 0x202;                  // IF=1, IOPL=0
     tf.cs      = 0x2B;                   // USER_CS
     tf.rip     = entry_rip;
     tf.err_code = 0;
@@ -186,7 +187,7 @@ proc_t *create_idle_process(int cpu_id) {
     proc->entry = (uint64_t)idle_entry;
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = cpu_id;
-    proc->iopl = 0;
+    proc->iopm = nullptr;
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->mmap_brk = 0x800000;
@@ -230,7 +231,7 @@ static int pick_cpu() {
     return best;
 }
 
-proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t iopl, bool map_fb) {
+proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     // 1. Find free slot under procs_lock
     spin_lock(&procs_lock);
     proc_t *proc = nullptr;
@@ -267,38 +268,24 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
     elf_load_result lr = elf_load(elf_data, elf_size, new_pml4);
     if (!lr.success) { spin_unlock(&procs_lock); return nullptr; }
 
-    // 6b. Map framebuffer pages for KMS process
-    if (map_fb && g_fb_info.fb_phys != 0) {
-        uint64_t fb_phys = g_fb_info.fb_phys;
-        uint64_t fb_size = g_fb_info.fb_size;
-        uint64_t fb_end = ALIGN_UP(fb_phys + fb_size, PAGE_SIZE);
-        uint64_t fb_start_page = fb_phys & ~0xFFFULL;  // page-align physical address
-        uint64_t user_vaddr = 0x700000;
-        uint64_t fb_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+    // 7. Map user stack: 128 pages (512KB) at 0x7FFFFFFF0000-0x7FFFFFFFE000
+    int user_stack_pages = 128;
+    Page *user_stack_page = bfc_alloc.alloc_page(user_stack_pages);
+    if (!user_stack_page) { spin_unlock(&procs_lock); return nullptr; }
+    uint64_t user_stack_phys = page_to_phys(user_stack_page);
+    uint64_t stack_base = 0x00007FFFFFFFE000 - (uint64_t)user_stack_pages * PAGE_SIZE;
 
-        for (uint64_t pa = fb_start_page, va = user_vaddr;
-             pa < fb_end;
-             pa += PAGE_SIZE, va += PAGE_SIZE) {
-            if (!map_user_page_direct(new_pml4, va, pa, fb_flags)) {
-                spin_unlock(&procs_lock);
-                return nullptr;
-            }
+    for (int i = 0; i < user_stack_pages; i++) {
+        if (!map_user_page_direct(new_pml4, stack_base + i * PAGE_SIZE,
+                                 user_stack_phys + i * PAGE_SIZE,
+                                 PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
+            spin_unlock(&procs_lock);
+            return nullptr;
         }
     }
 
-    // 7. Map user stack page at 0x00007FFFFFFFD000
-    Page *user_stack_page = bfc_alloc.alloc_page(1);
-    if (!user_stack_page) { spin_unlock(&procs_lock); return nullptr; }
-    uint64_t user_stack_phys = page_to_phys(user_stack_page);
-
-    if (!map_user_page_direct(new_pml4, 0x00007FFFFFFFD000, user_stack_phys,
-                             PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
-        spin_unlock(&procs_lock);
-        return nullptr;
-    }
-
     // 8. Build trapframe + switch_to frame on kernel stack
-    uint64_t k_rsp = build_kstack(k_stack_top, lr.entry, iopl);
+    uint64_t k_rsp = build_kstack(k_stack_top, lr.entry);
 
     // 9. Fill PCB (still under procs_lock)
     int assigned_cpu = pick_cpu();
@@ -310,7 +297,7 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
     proc->entry = lr.entry;
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = assigned_cpu;
-    proc->iopl = iopl;
+    proc->iopm = nullptr;
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->mmap_brk = 0x800000;
@@ -335,6 +322,19 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size, uint8_t i
     return proc;
 }
 
+// Update TSS IOPM for the current CPU to match the given process
+static void update_tss_iopm(proc_t *proc) {
+    int cpu = get_cpu_local()->cpu_id;
+    tss_t *tss = &per_cpu_tss[cpu];
+    if (proc->iopm) {
+        __memcpy(tss->iopm, proc->iopm, IOPM_SIZE);
+    } else {
+        // Deny all ports
+        for (int i = 0; i < IOPM_SIZE; i++)
+            tss->iopm[i] = 0xFF;
+    }
+}
+
 void schedule() {
     int my_cpu = get_cpu_local()->cpu_id;
     proc_t *idle = get_cpu_local()->idle_proc;
@@ -355,6 +355,7 @@ void schedule() {
             current_proc = idle;
             per_cpu_tss[my_cpu].rsp0 = idle->k_stack_top;
             get_cpu_local()->tss_rsp0 = idle->k_stack_top;
+            update_tss_iopm(idle);
             spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
             switch_to(prev, idle);
             spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
@@ -389,6 +390,7 @@ void schedule() {
     current_proc = next;
     per_cpu_tss[my_cpu].rsp0 = next->k_stack_top;
     get_cpu_local()->tss_rsp0 = next->k_stack_top;
+    update_tss_iopm(next);
 
     // Release lock before switch_to, re-acquire after — same pattern as old BKL
     spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
@@ -543,6 +545,12 @@ void proc_reap(proc_t *proc) {
         }
     }
 
+    // 5c. Free IOPM bitmap
+    if (proc->iopm) {
+        kfree(proc->iopm);
+        proc->iopm = nullptr;
+    }
+
     // 6. Clear dev_table entries for this PID
     dev_table_cleanup(proc->pid);
 
@@ -610,7 +618,7 @@ void proc_reap(proc_t *proc) {
     proc->entry = 0;
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = -1;
-    proc->iopl = 0;
+    proc->iopm = nullptr;
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->mmap_brk = 0;

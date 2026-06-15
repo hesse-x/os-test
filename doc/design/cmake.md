@@ -125,7 +125,7 @@ Terminal 和各驱动不链接 libc，直接使用 syscall 原语。
 /                    根目录
 ├── README           测试用文本文件
 ├── boot/
-│   ├── bin/         init（refactor_boot 后）
+│   ├── bin/         init（boot 改造后）
 │   └── driver/      disk.dev, fs.dev
 ├── driver/          kbd.dev, kms.dev
 ├── usr/
