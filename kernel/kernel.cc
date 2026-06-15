@@ -141,7 +141,7 @@ void kernel_main(boot_info *bi) {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(201, &sz, &pg, &np);
     if (elf) { kms_proc = process_create_elf(elf, sz, 0, true); bfc_alloc.free_page(pg, np); }
-    if (kms_proc) register_dev(DEV_KMS, kms_proc->pid);
+    // KMS registers DEV_KMS itself in display_backend_init()
     else serial_puts("kernel_main: kms_driver.elf not found\n");
   }
 
@@ -149,7 +149,7 @@ void kernel_main(boot_info *bi) {
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(301, &sz, &pg, &np);
     if (elf) { terminal_proc = process_create_elf(elf, sz, 0); bfc_alloc.free_page(pg, np); }
-    if (terminal_proc) register_dev(DEV_TERMINAL, terminal_proc->pid);
+    // Terminal does not need kernel-side dev registration
     else serial_puts("kernel_main: terminal.elf not found\n");
   }
 

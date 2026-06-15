@@ -114,29 +114,19 @@ struct kms_fb_info {
     uint64_t fb_phys;    // framebuffer physical address (for KMS driver reference)
 };
 
-// KMS request commands (used in kms_msg)
-#define KMS_CMD_PUTC        0   // arg1=char, arg2=fg color
-#define KMS_CMD_CLEAR       1   // no args
-#define KMS_CMD_SCROLL      2   // no args, scroll up one line
-#define KMS_CMD_CURSOR_MOVE 3   // arg1=x, arg2=y
-
 // ===================== Driver shared page layout =====================
 // One 4K page created by kbd_driver via sys_shm_create(4096),
-// attached by kms_driver and terminal via sys_shm_attach(sys_lookup_dev(DEV_KBD)).
+// attached by terminal via sys_shm_attach(sys_lookup_dev(DEV_KBD)).
 //
 // Offset 0:   driver_shm_header (8 bytes)
 // Offset 8:   kbd ring buffer (head + tail + msgs[8] = 72 bytes, padded to 128)
-// Offset 128: kms ring buffer (head + tail + msgs[240] = 3848 bytes)
 
 #define KBD_RING_OFFSET  0
-#define KMS_RING_OFFSET  128
-#define KMS_RING_SIZE    240
 
 struct driver_shm_header {
     uint8_t kbd_sleeping;      // 1 = kbd_driver is sleeping
-    uint8_t consumer_sleeping;  // 1 = consumer (shell) is sleeping
-    uint8_t kms_sleeping;      // 1 = kms_driver is sleeping
-    uint8_t reserved[5];
+    uint8_t consumer_sleeping;  // 1 = consumer (terminal) is sleeping
+    uint8_t reserved[6];
 };
 
 struct kbd_msg {
@@ -153,21 +143,6 @@ struct kbd_ring {
     uint32_t tail;                    // read position (0..7)
     struct kbd_msg msgs[8];           // 8 slots × 8 bytes = 64 bytes
     uint8_t padding[48];             // pad to 128 bytes total
-};
-
-struct kms_msg {
-    uint32_t cmd;
-    uint32_t arg1;
-    uint32_t arg2;
-    uint32_t arg3;
-};
-
-// KMS ring buffer at offset 128:
-//   head(4B) + tail(4B) + kms_msg[240] (240 × 16B = 3840B) = 3848B
-struct kms_ring {
-    uint32_t head;                       // write position (0..239)
-    uint32_t tail;                       // read position (0..239)
-    struct kms_msg msgs[KMS_RING_SIZE];  // 240 slots × 16 bytes
 };
 
 #endif

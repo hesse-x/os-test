@@ -48,9 +48,6 @@ int fflush(FILE *f);
 int fgetc(FILE *f);
 int getchar(void);
 
-/* KMS shared memory initialization (call from shell _start) */
-void kms_shm_init(uint64_t shm_addr);
-
 #ifdef __cplusplus
 }
 #endif

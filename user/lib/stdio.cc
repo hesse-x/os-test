@@ -1,29 +1,6 @@
 #include "stdio.h"
 #include "string.h"
 #include <sys.h>
-#include "common/shm.h"
-#include "common/dev.h"
-
-/* ===================== KMS ring globals ===================== */
-
-static volatile kms_ring *g_kms_ring;
-static volatile driver_shm_header *g_shm_hdr;
-static int32_t g_kms_driver_pid;
-
-void kms_shm_init(uint64_t shm_addr) {
-    g_shm_hdr = (volatile driver_shm_header *)shm_addr;
-    g_kms_ring = (volatile kms_ring *)(shm_addr + KMS_RING_OFFSET);
-}
-
-/* Lazy init: auto-attach to KBD driver's shm on first output */
-static void kms_ensure_init() {
-    if (g_kms_ring) return;
-    uint64_t addr = (uint64_t)sys_shm_attach(sys_lookup_dev(DEV_KBD));
-    if (addr) {
-        g_kms_driver_pid = sys_lookup_dev(DEV_KMS);
-        kms_shm_init(addr);
-    }
-}
 
 /* ===================== sys_write based flush ===================== */
 
@@ -40,35 +17,6 @@ static int sys_read_fill(FILE *f, char *buf, int len) {
     int64_t n = sys_read(f->fd, buf, len);
     if (n <= 0) return 0;
     return (int)n;
-}
-
-/* ===================== KMS ring output (for terminal process only) ===================== */
-
-static void kms_write_flush(FILE *f, const char *data, int len) {
-    (void)f;
-    if (!g_kms_ring) kms_ensure_init();
-    if (!g_kms_ring) return;
-    for (int i = 0; i < len; i++) {
-        // Wait for a free slot in the KMS ring
-        while (g_kms_ring->head == ((g_kms_ring->tail + KMS_RING_SIZE - 1) % KMS_RING_SIZE)) {
-            // Ring full — notify KMS driver to drain it
-            if (g_shm_hdr->kms_sleeping) {
-                sys_notify(g_kms_driver_pid);
-            }
-            sys_yield();
-        }
-        uint32_t idx = g_kms_ring->head;
-        g_kms_ring->msgs[idx].cmd  = KMS_CMD_PUTC;
-        g_kms_ring->msgs[idx].arg1 = (uint32_t)(unsigned char)data[i];
-        g_kms_ring->msgs[idx].arg2 = 0xFFFFFF;
-        g_kms_ring->head = (idx + 1) % KMS_RING_SIZE;
-    }
-    // Notify KMS driver if it's sleeping (fast path: skip syscall)
-    if (g_shm_hdr->kms_sleeping) {
-        sys_notify(g_kms_driver_pid);
-    }
-    // Mirror output to serial port
-    sys_serial_write(data, len);
 }
 
 static FILE stdin_file = {
