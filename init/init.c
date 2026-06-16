@@ -38,23 +38,31 @@ static void wait_dev_ready(int dev) {
 }
 
 int main(void) {
+    serial_write("init: started\n", 14);
     // 1. Wait for fs_driver to be ready (device registered + initialized)
     int32_t fs_pid;
     while ((fs_pid = device_lookup(DEV_FS)) <= 0) {
         struct recv_msg m;
         recv(&m, NULL, 0, 10);
     }
+    serial_write("init: fs_driver ready\n", 22);
 
     // 2. Spawn kbd_driver, wait for DEV_KBD
+    serial_write("init: spawning kbd_driver\n", 26);
     spawn_service("/driver/kbd.dev");
     wait_dev_ready(DEV_KBD);
+    serial_write("init: kbd_driver ready\n", 23);
 
     // 3. Spawn kms_driver, wait for DEV_KMS
+    serial_write("init: spawning kms_driver\n", 26);
     spawn_service("/driver/kms.dev");
     wait_dev_ready(DEV_KMS);
+    serial_write("init: kms_driver ready\n", 23);
 
     // 4. Spawn terminal
+    serial_write("init: spawning terminal\n", 24);
     spawn_service("/usr/bin/terminal");
+    serial_write("init: terminal spawned\n", 23);
 
     // 5. Adopt orphans + reap children
     while (1) {

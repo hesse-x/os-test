@@ -142,6 +142,70 @@ Page *BFCAllocator::free_page(Page *page, size_t n) {
   return page;
 }
 
+Page *BFCAllocator::alloc_page_low(size_t n) {
+  if (n == 0) return NULL;
+
+  uint64_t flags;
+  spin_lock_irqsave(&bfc_lock, &flags);
+
+  if (free_list == NULL) {
+    spin_unlock_irqrestore(&bfc_lock, flags);
+    return NULL;
+  }
+
+  Page *cur = free_list;
+  Page *prev = NULL;
+
+  while (cur != NULL) {
+    uint64_t phys = (uint64_t)(cur - frames) * PAGE_SIZE;
+    if (cur->bfc.cont_page_num >= n && phys + (uint64_t)n * PAGE_SIZE <= 0x100000000ULL) {
+      // Same split logic as alloc_page
+      if (cur->bfc.cont_page_num == n) {
+        if (prev == NULL) {
+          free_list = cur->bfc.next;
+        } else {
+          prev->bfc.next = cur->bfc.next;
+        }
+        if (cur->bfc.next != NULL) {
+          cur->bfc.next->bfc.prev = prev;
+        }
+        cur->status = PageStatus::USED;
+        spin_unlock_irqrestore(&bfc_lock, flags);
+        return cur;
+      } else {
+        size_t remaining = cur->bfc.cont_page_num - n;
+        cur->bfc.cont_page_num = n;
+        cur->status = PageStatus::USED;
+
+        Page *new_block = cur + n;
+        new_block->status = PageStatus::FREE;
+        new_block->bfc.cont_page_num = remaining;
+        new_block->bfc.prev = prev;
+        new_block->bfc.next = cur->bfc.next;
+
+        if (prev == NULL) {
+          free_list = new_block;
+        } else {
+          prev->bfc.next = new_block;
+        }
+        if (cur->bfc.next != NULL) {
+          cur->bfc.next->bfc.prev = new_block;
+        }
+
+        cur->bfc.prev = NULL;
+        cur->bfc.next = NULL;
+        spin_unlock_irqrestore(&bfc_lock, flags);
+        return cur;
+      }
+    }
+    prev = cur;
+    cur = cur->bfc.next;
+  }
+
+  spin_unlock_irqrestore(&bfc_lock, flags);
+  return NULL;
+}
+
 size_t BFCAllocator::free_page_nums() const {
   uint64_t flags;
   spin_lock_irqsave(&bfc_lock, &flags);

@@ -237,10 +237,199 @@ struct session_open_file {
 
 **FAT 链预取**：readahead 需沿 FAT 链遍历确定预取簇号，连续簇（next == cur + 1）合并为单次 `read_clusters` 调用，非连续簇拆分多次调用。
 
+## Phase 5: fs_driver 事件循环 + disk_driver DMA
+
+### 设计目标
+
+多客户端低延迟高并发。当前 fs_driver 单线程同步处理所有请求，磁盘 I/O 期间阻塞无法 recv 新请求，多客户端时请求排队等待。
+
+### 5.1 fs_driver 单线程事件循环
+
+**并发模型**：单线程事件循环 + 异步 I/O。fs_driver 不再阻塞在 disk_wait_reply，提交磁盘请求后回到 recv 循环，磁盘完成后通过 RECV_NOTIFY 回调继续处理。
+
+选择单线程事件循环而非多 worker 线程的理由：disk_driver 本身单请求同步，多线程在磁盘端完全串行化，并发收益仅存在于"CPU 处理与磁盘 I/O 重叠"，加锁复杂度不值得。
+
+**初始化阶段保持同步**：启动时的 MBR/BPB/FAT 缓存预填充无客户端，直接用同步磁盘 I/O，事件循环只在主循环启用。
+
+### 5.2 两层抽象：disk_io + pending_op
+
+**底层：disk_io**（I/O 描述，不关心请求语义）：
+
+```c
+struct disk_io {
+    uint32_t lba;
+    uint32_t count;
+    void *dest;                     // 数据目标地址（memcpy 到此）
+    void (*complete)(disk_io *io);  // 数据已拷完，回调继续
+    void *ctx;                      // 回调上下文（指向 pending_op 或 readahead 状态）
+    struct disk_io *next;           // 队列链接
+};
+```
+
+完成路径：`memcpy(io->dest, dresp->data, io->count * 512)` → `io->complete(io)`。dest 字段将"先拷数据再回调"合并为一步，消除 dresp->data 生命周期 footgun。
+
+**上层：pending_op**（客户端请求状态）：
+
+```c
+struct pending_op {
+    int client_pid;
+    int session_idx;
+    enum op_type { OP_READ, OP_WRITE, OP_OPEN, OP_READDIR, OP_RAW_READ } type;
+    void (*resume)(pending_op *op);  // 磁盘完成后继续处理
+    union {
+        struct { /* read 上下文 */ } read;
+        struct { /* write 上下文 */ } write;
+        struct { /* open 上下文 */ } open;
+        struct { /* readdir 上下文 */ } readdir;
+        struct { /* raw_read 上下文 */ } raw_read;
+    } u;
+};
+```
+
+pending_op 永远有有效 client_pid，readahead 不走 pending_op（走 disk_io），消除特殊 case。
+
+### 5.3 磁盘请求队列
+
+fs_driver 侧维护磁盘 FIFO 队列 + `disk_in_flight` 标志：
+
+- `disk_in_flight == true`：当前有 disk_io 在 disk_driver 中处理
+- 新 disk_io 提交：`disk_in_flight == false` 且队列非空 → 直接写 SHM + notify disk_driver；否则入队尾
+- complete 回调：清 `disk_in_flight = false`，检查队列，非空则提交新队头
+
+disk_driver 不改动，sleeping flag 机制完全复用。
+
+**FIFO 调度**：先来先服务。readahead 是异步的、小窗口的，实际阻塞其他 client 的概率低。需要时再加分优先级队列。
+
+### 5.4 事件循环主循环
+
+```
+while (1) {
+    recv(&m, data_buf, sizeof(file_req), 0);
+
+    if (m.type == RECV_MSG) {
+        // 客户端文件请求 → 构造 pending_op，尝试同步处理
+        // 需要磁盘时：构造 disk_io 入队，挂起 pending_op
+        // 缓存命中时：直接完成，msg_resp
+
+    } else if (m.type == RECV_NOTIFY && m.src == disk_driver_pid) {
+        // 磁盘完成通知
+        disk_io *io = current_disk_io;
+        memcpy(io->dest, dresp->data, io->count * 512);
+        disk_in_flight = false;
+        io->complete(io);
+        submit_next_disk_io();
+
+    } else if (m.type == RECV_NOTIFY) {
+        // 其他通知（如 write_lock 释放通知），按需处理
+    }
+}
+```
+
+### 5.5 全异步统一框架
+
+所有操作统一走 pending_op + disk_io，无同步/异步两条路径：
+
+| 操作 | 磁盘 I/O | 异步化 |
+|------|---------|--------|
+| open | 读目录项查文件 | pending_op + disk_io |
+| read | 读 FAT + 读数据簇 | pending_op + disk_io |
+| readdir | 读目录簇 | pending_op + disk_io |
+| raw_read | 读裸扇区 | pending_op + disk_io |
+| touch | 分配 FAT + 写 FAT + 写目录 | pending_op + disk_io |
+| mkdir | 分配簇 + 写 FAT + 初始化 + 写目录 | pending_op + disk_io |
+| close | 无磁盘 | 同步直接处理 |
+
+### 5.6 write 一致性：write_lock + cache pin
+
+**write_lock**：全局锁，write pending_op 在 flight 期间持有。新 write 请求排队等释放。read 不受 write_lock 限制，可以并行。
+
+**cache pin**：LRU 条目增加 `pin_count` 字段，>0 时不允许淘汰。write 修改缓存数据前 pin，写盘完成后 unpin。`cache_alloc` 跳过 `pin_count > 0` 的条目，全 pin 时报错（当前 16 slot 对 1-2 个并发写绰绰有余）。
+
+### 5.7 FAT 链遍历异步化
+
+read 操作的 FAT 链遍历在 resume 回调中自包含：
+
+```c
+void resume_read(pending_op *op) {
+    while (op->u.read.chain_pos < op->u.read.offset_clusters) {
+        // FAT 缓存命中 → continue 循环
+        if (fat_cache_hit(fat_lba)) {
+            op->u.read.current_cluster = fat_cache_lookup(op->u.read.current_cluster);
+            op->u.read.chain_pos++;
+            continue;
+        }
+        // FAT 缓存未命中 → 提交 disk_io，回调是 resume_read 自身
+        submit_disk_io(fat_lba, 1, fat_cache_slot, resume_read, op);
+        return;  // 挂起，等磁盘
+    }
+    // FAT 遍历完成，开始读数据
+    submit_data_read(op);
+}
+```
+
+缓存命中时 continue，未命中时 return 挂起，逻辑集中在一个函数里。
+
+### 5.8 readahead 异步化
+
+readahead 不走 pending_op，构造 disk_io 直接入磁盘队列：
+- `readahead_pending` 标志防止重复提交（上一次 readahead 还在磁盘队列里时不入新请求）
+- FAT 缓存命中时正常提交 disk_io 读数据簇
+- FAT 缓存未命中时跳过本次 readahead（FAT 缓存 4 页覆盖全部 FAT，未命中几乎不可能）
+- disk_io complete 回调：memcpy 数据到 LRU slot，清 `readahead_pending`，无 msg_resp
+
+### 5.9 disk_wait_reply deferred queue 修复
+
+事件循环下 disk_wait_reply 问题自动消失——fs_driver 不再阻塞在 disk_wait_reply，而是在 recv 循环中统一收消息。磁盘完成通知和其他客户端消息都是普通的 RECV_NOTIFY / RECV_MSG，自然交替处理。
+
+### 5.10 disk_driver DMA 改造（暂缓，需 PCI 子系统）
+
+**前提**：DMA 需要 PCI 配置空间枚举（定位 IDE 控制器 BAR4）、PCI 命令寄存器 enable（I/O Space + Bus Master 位）、以及正确的 BAR 解析。当前内核无 PCI 子系统，用户态 `outl(0xCF8, ...)` 扫描虽然能读配置空间但 BM IDE 寄存器写入不生效（BM_CMD_REG 写 0x01 读回 0x00），原因是 PCI 命令寄存器未 enable Bus Master 位。需先实现内核 PCI 枚举框架。
+
+**实现方案**（PCI 就绪后启用）：
+
+**收益**：QEMU 下 PIO 每扇区需 ~2000 次 I/O 指令模拟（256 × inw + 状态轮询），DMA 是单次批量 memcpy + 中断通知。QEMU 下 DMA 收益比实机更大。
+
+**PCI 配置空间访问**：disk_driver IOPL=3，直接 `outl(0xCF8, ...)` + `inl(0xCFC)` 读 PCI 配置空间 BAR4 获取 BM IDE 基地址，零内核改动。与 Linux 用户态驱动直接 I/O 端口访问一致。
+
+**新增 syscall**（NR_SYSCALL 从 26 增到 28）：
+
+```c
+// 分配物理连续、<4GB 的 DMA 缓冲区，映射到调用者地址空间
+int sys_dma_alloc(size_t size, void **vaddr, uint64_t *paddr);
+
+// 释放 DMA 缓冲区
+int sys_dma_free(void *vaddr);
+```
+
+内核侧：`bfc_alloc(n)` 分配连续物理页（约束物理地址 < 4GB）→ `map_user_pages` 映射到用户态 → 返回虚拟地址 + 物理地址。与 Linux `dma_alloc_coherent` 语义一致。
+
+**ATA IRQ 绑定**：复用 `sys_irq_bind(14)`（primary IDE channel），需内核在 I/O APIC 里 unmask IRQ14。
+
+**DMA 数据流**：
+1. `sys_dma_alloc(16KB)` 分配 DMA buffer（启动时一次分配，终身复用）
+2. 填写 PRDT（指向 DMA buffer 物理地址 + 传输长度）
+3. 设置 BM IDE 寄存器，启动 DMA 传输
+4. ATA 控制器直接 DMA 到 DMA buffer
+5. 传输完成，IRQ 14 → disk_driver 收到 RECV_IRQ
+6. disk_driver 从 DMA buffer memcpy 到 `dresp->data`
+
+SHM 协议不变，disk_driver 外部接口不变。DMA 是 disk_driver 内部实现替换。
+
+**DMA buffer 策略**：启动时分配一块 16KB（最大单次 I/O = 4 cluster = 16KB），所有请求复用。
+
+### 5.11 实施顺序
+
+1. **fs_driver 事件循环改造** ✅：disk_io / pending_op / 磁盘队列 / write_lock + cache pin / readahead 异步化 / disk_wait_reply 修复
+2. **disk_driver DMA 改造**：暂缓，需先实现内核 PCI 枚举子系统（配置空间读写 + 设备扫描 + BAR 解析 + 命令寄存器 enable）。disk_driver 当前使用纯 PIO 模式
+
+事件循环是架构改造，决定后续所有代码的形状；DMA 是局部替换，改 disk_driver 内部不影响 fs_driver 设计。
+
 ## 搁置项
 
 | 项目 | 原因 | 触发条件 |
 |------|------|---------|
-| dresp->data 生命周期 | FAT 缓存部分缓解（FAT hit 时不覆盖 dresp->data），当前单客户端不会触发 | 多客户端 |
-| disk_wait_reply deferred 队列 | FAT 缓存降低调用频率，当前单客户端不会触发忙循环 | 多客户端 |
-| readahead 自适应窗口 | 当前文件规模（20-40KB）固定 4 簇窗口已足够，后续文件变大时再扩展 | 大文件顺序读场景 |
+| readahead 自适应窗口 | 当前文件规模（20-40KB）固定 4 簇窗口已足够 | 大文件顺序读场景 |
+| 磁盘队列优先级调度 | FIFO 在当前少量客户端下足够，readahead 窗口小 | 多客户端延迟敏感场景 |
+| 回调链 → C++20 协程迁移 | GCC 10 协程 experimental + 栈回溯断裂（协程帧在堆上，addr2line 不可用） | GCC ≥ 12 + 栈回溯支持协程帧 |
+| 多线程客户端 session 并发安全 | 当前每客户端同一时刻仅一个 sys_msg 阻塞调用，session 内无并发 | 多线程客户端（需 per-fd 粒度锁） |
+| DMA 多请求 slot / buffer pool | 当前单请求同步模型，一块 DMA buffer 够用 | disk_driver 多请求并发 |

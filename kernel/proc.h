@@ -19,6 +19,7 @@ enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WAIT_PIPE,
 struct mmap_region {
     uint64_t vaddr;
     uint64_t size;
+    uint64_t phys;       // physical address (for DMA buffers)
     mmap_region *next;
 };
 

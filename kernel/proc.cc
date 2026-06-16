@@ -554,6 +554,9 @@ void proc_reap(proc_t *proc) {
     // 6. Clear dev_table entries for this PID
     dev_table_cleanup(proc->pid);
 
+    // 6a. Clear irq_owner entries for this PID
+    irq_owner_cleanup(proc->pid);
+
     // 6b. Wake any processes waiting for REQ reply from this process
     for (int i = 0; i < MAX_PROC; i++) {
         if (procs[i].pid >= 0 &&

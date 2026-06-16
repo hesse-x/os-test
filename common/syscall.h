@@ -34,6 +34,8 @@
 #define SYS_IOPERM       26
 #define SYS_DUP2         27
 #define SYS_FCNTL        28
+#define SYS_DMA_ALLOC    29
+#define SYS_DMA_FREE     30
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -187,6 +189,15 @@ static inline int sys_dup2(int old_fd, int new_fd) {
 
 static inline int sys_fcntl(int fd, int cmd, int arg) {
     return (int)__syscall3(SYS_FCNTL, (int64_t)fd, (int64_t)cmd, (int64_t)arg);
+}
+
+static inline int sys_dma_alloc(size_t size, void **vaddr, uint64_t *paddr) {
+    return (int)__syscall3(SYS_DMA_ALLOC, (int64_t)size,
+        (int64_t)(uintptr_t)vaddr, (int64_t)(uintptr_t)paddr);
+}
+
+static inline int sys_dma_free(void *vaddr) {
+    return (int)__syscall1(SYS_DMA_FREE, (int64_t)(uintptr_t)vaddr);
 }
 
 #endif // COMMON_SYSCALL_H

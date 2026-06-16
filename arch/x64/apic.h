@@ -93,6 +93,9 @@ static inline void ioapic_write(uint32_t reg, uint32_t val) {
 void apic_init();
 void pic_disable();
 
+// I/O APIC IRQ configuration (called by sys_irq_bind to unmask)
+void ioapic_set_irq(uint32_t gsi, uint8_t vector, uint32_t apic_id, bool masked);
+
 // BSP-calibrated LAPIC timer ticks (set by apic_init, used by AP init)
 extern uint32_t lapic_timer_ticks_calibrated;
 

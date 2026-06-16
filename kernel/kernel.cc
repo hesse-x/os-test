@@ -103,44 +103,53 @@ void kernel_main(boot_info *bi) {
 
   smp_boot_aps();
 
+  serial_puts("kernel_main: smp_boot_aps done\n");
+
   // Create BSP idle process
   proc_t *bsp_idle = create_idle_process(0);
   if (!bsp_idle) {
     serial_puts("kernel_main: create BSP idle failed\n");
     halt();
   }
+  serial_puts("kernel_main: BSP idle created\n");
 
   // Load user processes from disk
   // LBA layout: 1=disk_driver(100s), 101=fs_driver(100s), 201=init(100s)
   // kbd_driver, kms_driver, terminal, shell are spawned by init from FAT32
 
   {
+    serial_puts("kernel_main: loading disk_driver...\n");
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(1, &sz, &pg, &np);
     if (elf) {
       proc_t *p = process_create_elf(elf, sz);
       bfc_alloc.free_page(pg, np);
-      if (p) { /* disk_driver self-registers via device_register() */ }
+      if (p) { serial_puts("kernel_main: disk_driver created\n"); }
     }
     else serial_puts("kernel_main: disk_driver.elf not found\n");
   }
 
   {
+    serial_puts("kernel_main: loading fs_driver...\n");
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(101, &sz, &pg, &np);
     if (elf) {
       proc_t *p = process_create_elf(elf, sz);
       bfc_alloc.free_page(pg, np);
+      if (p) { serial_puts("kernel_main: fs_driver created\n"); }
     }
     else serial_puts("kernel_main: fs_driver.elf not found\n");
   }
 
   {
+    serial_puts("kernel_main: loading init...\n");
     uint64_t sz; Page *pg; size_t np;
     uint8_t *elf = load_elf_from_disk(201, &sz, &pg, &np);
-    if (elf) { proc_t *init_proc = process_create_elf(elf, sz); bfc_alloc.free_page(pg, np); if (init_proc) { init_pid = init_proc->pid; } }
+    if (elf) { proc_t *init_proc = process_create_elf(elf, sz); bfc_alloc.free_page(pg, np); if (init_proc) { init_pid = init_proc->pid; serial_puts("kernel_main: init created\n"); } }
     else serial_puts("kernel_main: init.elf not found\n");
   }
+
+  serial_puts("kernel_main: all procs loaded, entering idle\n");
 
   sti();
 

@@ -2,6 +2,7 @@
 #define KERNEL_TRAP_H
 
 #include "arch/x64/trap.h"
+#include "kernel/proc.h"   // pid_t
 
 typedef void (*irq_handler_t)(trapframe_t *);
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -42,16 +43,21 @@ uint64_t sys_msg_resp(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_ioperm(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_dup2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_dma_alloc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_dma_free(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 // Register a driver PID for a device type (kernel-internal, not a syscall)
-int register_dev(int dev_type, int32_t pid);
+int register_dev(int dev_type, pid_t pid);
 
 // Remove a PID from dev_table (called by proc_reap)
-void dev_table_cleanup(int32_t pid);
+void dev_table_cleanup(pid_t pid);
+
+// Remove a PID from irq_owner (called by proc_reap)
+void irq_owner_cleanup(pid_t pid);
 
 // Wake a process blocked on WAIT_PIPE (used by pipe close and proc_reap)
 // Enqueues a RECV_NOTIFY message and wakes if in WAIT_RECV
-void wake_process(int32_t pid);
+void wake_process(pid_t pid);
 }
 
 #endif // KERNEL_TRAP_H

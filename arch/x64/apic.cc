@@ -30,8 +30,8 @@ void pic_disable() {
 }
 
 // ===================== I/O APIC =====================
-static void ioapic_set_irq(uint32_t gsi, uint8_t vector, uint32_t apic_id,
-                            bool masked) {
+void ioapic_set_irq(uint32_t gsi, uint8_t vector, uint32_t apic_id,
+                    bool masked) {
   uint32_t reg = IOAPIC_REDIR_OFFSET(gsi);
   uint64_t entry = IOAPIC_DELIVERY_FIXED | IOAPIC_DEST_MODE_PHYS |
                    IOAPIC_TRIGGER_EDGE | IOAPIC_POLARITY_HIGH |

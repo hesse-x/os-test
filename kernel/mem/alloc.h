@@ -41,6 +41,7 @@ struct Page {
 struct BFCAllocator {
   void init();
   Page *alloc_page(size_t n);
+  Page *alloc_page_low(size_t n);  // allocate n contiguous pages with phys < 4GB
   Page *free_page(Page *page, size_t n);
   size_t free_page_nums() const;
 

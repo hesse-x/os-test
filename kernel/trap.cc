@@ -8,6 +8,7 @@
 #include "arch/x64/apic.h"
 #include "kernel/serial.h"
 #include "kernel/mem/slab.h"
+#include "kernel/mem/alloc.h"
 #include "common/errno.h"
 #include "kernel/fb.h"
 #include "common/dev.h"
@@ -248,7 +249,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 29
+#define NR_SYSCALL 31
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0: 获取 PID
     sys_yield,          // 1: 主动让出 CPU
@@ -279,6 +280,8 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_ioperm,         // 26: I/O 端口权限
     sys_dup2,           // 27: 复制 fd
     sys_fcntl,          // 28: 文件控制
+    sys_dma_alloc,      // 29: 分配 DMA 缓冲区（物理连续、<4GB）
+    sys_dma_free,       // 30: 释放 DMA 缓冲区
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -550,11 +553,20 @@ uint64_t sys_resp(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     return 0;
 }
 
-// sys_irq_bind(irq) — syscall 5 (绑定当前进程到指定 IRQ)
+// sys_irq_bind(irq) — syscall 5 (绑定当前进程到指定 IRQ，自动 unmask I/O APIC)
+// irq 参数为向量号（例如 IRQ14 → vector 46 = 32+14）
 uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     int irq = (int)arg1;
     if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return (uint64_t)EINVAL;
     __atomic_store_n(&irq_owner[irq], current_proc->pid, __ATOMIC_RELEASE);
+
+    // Auto-unmask I/O APIC for this IRQ (GSI = vector - 32)
+    int gsi = irq - 32;
+    if (gsi >= 0 && gsi < 24) {
+        uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
+        ioapic_set_irq(gsi, irq, bsp_apic_id, false);
+    }
+
     return 0;
 }
 
@@ -840,6 +852,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 
         region->vaddr = vaddr;
         region->size = npages * PAGE_SIZE;
+        region->phys = 0;
         region->next = proc->mmap_regions;
         proc->mmap_regions = region;
         proc->mmap_brk = vaddr + npages * PAGE_SIZE;
@@ -891,6 +904,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 
     region->vaddr = vaddr;
     region->size = size;
+    region->phys = 0;
     region->next = proc->mmap_regions;
     proc->mmap_regions = region;
     proc->mmap_brk = vaddr + size;
@@ -1117,7 +1131,7 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 // sys_read/sys_write loop which never checks the recv queue. Enqueuing
 // RECV_NOTIFY would leave stale messages that sys_recv can mistakenly
 // consume, causing IPC protocols to see false responses.
-void wake_process(int32_t pid) {
+void wake_process(pid_t pid) {
     if (pid < 0 || pid >= MAX_PROC) return;
     proc_t *target = &procs[pid];
 
@@ -1650,4 +1664,114 @@ uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
     default:
         return (uint64_t)EINVAL;
     }
+}
+
+// Remove a PID from irq_owner[] (called by proc_reap)
+void irq_owner_cleanup(pid_t pid) {
+    for (int i = 0; i < MAX_IRQ_HANDLERS; i++) {
+        if (irq_owner[i] == pid) {
+            __atomic_store_n(&irq_owner[i], -1, __ATOMIC_RELEASE);
+        }
+    }
+}
+
+// sys_dma_alloc(size, vaddr_ptr, paddr_ptr) — syscall 29
+// 分配物理连续、<4GB 的 DMA 缓冲区，映射到调用者地址空间
+// Returns: 0 on success, positive errno on failure
+uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+    size_t size = (size_t)arg1;
+    void **vaddr_ptr = (void **)arg2;
+    uint64_t *paddr_ptr = (uint64_t *)arg3;
+
+    if (size == 0) return (uint64_t)EINVAL;
+
+    // Validate user pointers
+    uint64_t vp = (uint64_t)vaddr_ptr;
+    uint64_t pp = (uint64_t)paddr_ptr;
+    if (!vp || vp >= 0xFFFFFFFF80000000ULL || vp + sizeof(void *) > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+    if (!pp || pp >= 0xFFFFFFFF80000000ULL || pp + sizeof(uint64_t) > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    size = ALIGN_UP(size, PAGE_SIZE);
+    size_t npages = size / PAGE_SIZE;
+
+    // Allocate contiguous physical pages below 4GB
+    Page *pages = bfc_alloc.alloc_page_low(npages);
+    if (!pages) return (uint64_t)ENOMEM;
+
+    uint64_t phys = page_to_phys(pages);
+    proc_t *proc = current_proc;
+
+    // Pick virtual address from mmap_brk
+    uint64_t vaddr = proc->mmap_brk;
+    uint64_t vaddr_end = vaddr + size;
+
+    // Map pages into user address space using map_user_page_direct
+    for (size_t i = 0; i < npages; i++) {
+        uint64_t page_phys = phys + i * PAGE_SIZE;
+        uint64_t page_vaddr = vaddr + i * PAGE_SIZE;
+        if (!map_user_page_direct((uint64_t *)phys_to_virt(proc->cr3), page_vaddr, page_phys,
+                                  PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
+            // Cleanup: unmap already-mapped pages
+            if (i > 0) unmap_user_pages((uint64_t *)phys_to_virt(proc->cr3), vaddr, vaddr + i * PAGE_SIZE, i);
+            bfc_alloc.free_page(pages, npages);
+            return (uint64_t)ENOMEM;
+        }
+    }
+
+    proc->mmap_brk = vaddr_end;
+
+    // Track in mmap_regions for cleanup
+    mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
+    if (!region) {
+        unmap_user_pages((uint64_t *)phys_to_virt(proc->cr3), vaddr, vaddr_end, npages);
+        bfc_alloc.free_page(pages, npages);
+        return (uint64_t)ENOMEM;
+    }
+    region->vaddr = vaddr;
+    region->size = size;
+    region->phys = phys;
+    region->next = proc->mmap_regions;
+    proc->mmap_regions = region;
+
+    // Write results to user space
+    *vaddr_ptr = (void *)vaddr;
+    *paddr_ptr = phys;
+
+    return 0;
+}
+
+// sys_dma_free(vaddr) — syscall 30
+// 释放 DMA 缓冲区
+// Returns: 0 on success, positive errno on failure
+uint64_t sys_dma_free(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    uint64_t vaddr = (uint64_t)arg1;
+    if (!vaddr) return (uint64_t)EINVAL;
+
+    proc_t *proc = current_proc;
+
+    // Find and remove from mmap_regions
+    mmap_region **pp = &proc->mmap_regions;
+    while (*pp) {
+        mmap_region *r = *pp;
+        if (r->vaddr == vaddr) {
+            size_t npages = r->size / PAGE_SIZE;
+
+            // Unmap from user address space
+            unmap_user_pages((uint64_t *)phys_to_virt(proc->cr3), r->vaddr, r->vaddr + r->size, npages);
+
+            // Free physical pages
+            Page *page = BFCAllocator::frames + (r->phys / PAGE_SIZE);
+            bfc_alloc.free_page(page, npages);
+
+            // Remove from list
+            *pp = r->next;
+            kfree(r);
+            return 0;
+        }
+        pp = &r->next;
+    }
+
+    return (uint64_t)EINVAL;
 }
