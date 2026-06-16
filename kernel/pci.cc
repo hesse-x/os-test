@@ -67,7 +67,7 @@ static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus
 
 // ===================== Config space access =====================
 
-uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset) {
+uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset) {
   uint64_t addr = ecam_vbase
                 + ((uint64_t)bus << 20)
                 + ((uint64_t)dev << 15)
@@ -76,7 +76,7 @@ uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset)
   return *(volatile uint32_t *)addr;
 }
 
-void pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset, uint32_t value) {
+void pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset, uint32_t value) {
   uint64_t addr = ecam_vbase
                 + ((uint64_t)bus << 20)
                 + ((uint64_t)dev << 15)

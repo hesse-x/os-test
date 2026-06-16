@@ -39,6 +39,7 @@
 #define SYS_PCI_DEV_INFO 31
 #define SYS_BLOCK_READ   32
 #define SYS_BLOCK_WRITE  33
+#define SYS_BLOCK_ASYNC  34
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -234,6 +235,13 @@ static inline int sys_block_read(uint32_t lba, void *buf, uint32_t count) {
 static inline int sys_block_write(uint32_t lba, const void *buf, uint32_t count) {
     return (int)__syscall3(SYS_BLOCK_WRITE, (int64_t)lba,
         (int64_t)(uintptr_t)buf, (int64_t)count);
+}
+
+// Async block I/O: returns cookie (>0) on success, -errno on error.
+// Completion delivered via RECV_NOTIFY with cookie+result+lba+count in data.
+static inline int sys_block_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
+    return (int)__syscall4(SYS_BLOCK_ASYNC, (int64_t)lba,
+        (int64_t)(uintptr_t)buf, (int64_t)count, (int64_t)dir);
 }
 
 #endif // COMMON_SYSCALL_H

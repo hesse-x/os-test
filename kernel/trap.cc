@@ -16,7 +16,7 @@
 #include "common/dev.h"
 
 // ===================== IRQ handler registry =====================
-#define MAX_IRQ_HANDLERS 48
+#define MAX_IRQ_HANDLERS 64
 static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS];
 
 // ===================== IRQ owner (user-space driver binding) =====================
@@ -91,7 +91,7 @@ void trap_dispatch(trapframe_t *tf) {
   }
 
   // Other hardware IRQ: send EOI
-  if (tf->trapno >= 32 && tf->trapno <= 47) {
+  if (tf->trapno >= 32 && tf->trapno <= 63) {
     lapic_eoi();
     return;
   }
@@ -251,7 +251,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 34
+#define NR_SYSCALL 35
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -287,6 +287,7 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_pci_dev_info,   // 31
     sys_block_read,     // 32
     sys_block_write,    // 33
+    sys_block_async,    // 34
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -954,7 +955,48 @@ uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) 
     return (uint64_t)EINVAL;
 }
 
+// ===================== notify_and_wake =====================
+// Shared notification helper: enqueue recv_msg and wake target if WAIT_RECV.
+// Used by AHCI IRQ completion, sys_notify, sys_req, sys_msg, IRQ dispatch.
+void notify_and_wake(pid_t target_pid, recv_msg *msg) {
+    if (target_pid < 0 || target_pid >= MAX_PROC) return;
+    proc_t *target = &procs[target_pid];
+    if (target->pid != target_pid) return;
+
+    // Enqueue message
+    spin_lock(&target->recv_lock);
+    uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
+    if (next == target->recv_tail) {
+        // Queue full — drop message
+        spin_unlock(&target->recv_lock);
+        return;
+    }
+    __memcpy(target->recv_buf[target->recv_head], msg, RECV_MSG_SIZE);
+    target->recv_head = next;
+    spin_unlock(&target->recv_lock);
+
+    // Wake target if blocked on WAIT_RECV
+    int target_cpu = target->assigned_cpu;
+    spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+    if (target->pid == target_pid &&
+        target->state == BLOCKED &&
+        target->wait_event == WAIT_RECV) {
+        if (target->wait_deadline != 0) {
+            // Remove from timer queue
+            list_remove(&target->wait_node);
+            target->wait_deadline = 0;
+        }
+        target->state = READY;
+        target->wait_event = WAIT_NONE;
+        target->wait_timed_out = 0;
+        list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
+        cpu_locals[target_cpu].run_count++;
+    }
+    spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+}
+
 // ===================== sys_block_read / sys_block_write =====================
+// Synchronous polling path. Returns EBUSY if async request is active.
 uint64_t sys_block_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
     uint32_t lba = (uint32_t)arg1;
     void *buf = (void *)arg2;
@@ -970,6 +1012,10 @@ uint64_t sys_block_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, u
 
     if (count == 0 || count > AHCI_MAX_SECTORS)
         return (uint64_t)EINVAL;
+
+    // Safety: refuse if async request is active (would deadlock with polling + IRQ)
+    if (ahci_is_busy())
+        return (uint64_t)EBUSY;
 
     uint64_t flags;
     spin_lock_irqsave(&ahci_lock, &flags);
@@ -995,12 +1041,29 @@ uint64_t sys_block_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, 
     if (count == 0 || count > AHCI_MAX_SECTORS)
         return (uint64_t)EINVAL;
 
+    // Safety: refuse if async request is active
+    if (ahci_is_busy())
+        return (uint64_t)EBUSY;
+
     uint64_t flags;
     spin_lock_irqsave(&ahci_lock, &flags);
     int rc = ahci_write_lba(lba, count, buf);
     spin_unlock_irqrestore(&ahci_lock, flags);
 
     return (uint64_t)(rc < 0 ? -rc : 0);
+}
+
+// sys_block_async(lba, buf, count, dir) — syscall 34
+// Async block I/O: returns cookie (>0) on success, positive errno on error.
+// Completion delivered via RECV_NOTIFY with cookie+result+lba+count in data.
+uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t) {
+    uint32_t lba = (uint32_t)arg1;
+    void *buf = (void *)arg2;
+    uint32_t count = (uint32_t)arg3;
+    uint8_t dir = (uint8_t)arg4;
+
+    int ret = ahci_submit_async(lba, buf, count, dir);
+    return (uint64_t)ret;
 }// sys_serial_write(buf, len) — syscall 11 (用户态串口输出)
 uint64_t sys_serial_write(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
     const char *buf = (const char *)arg1;

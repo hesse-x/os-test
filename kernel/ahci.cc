@@ -2,7 +2,11 @@
 #include "kernel/pci.h"
 #include "kernel/serial.h"
 #include "kernel/mem/alloc.h"
+#include "kernel/proc.h"
+#include "kernel/trap.h"
 #include "arch/x64/utils.h"
+#include "arch/x64/apic.h"
+#include "arch/x64/smp.h"
 #include "common/errno.h"
 
 // ===================== AHCI register offsets (from ABAR) =====================
@@ -18,7 +22,7 @@
 #define PxCLBU  0x04
 #define PxFB    0x08
 #define PxFBU   0x0C
-#define PxIS    0x10   // TFES=bit30
+#define PxIS    0x10   // DHRS=bit0, TFES=bit30
 #define PxIE    0x14
 #define PxCMD   0x18   // ST=bit0, SUD=bit1, POD=bit2, CLO=bit3, FRE=bit4, FR=bit14, CR=bit15
 #define PxTFD   0x20
@@ -55,12 +59,87 @@ static uint64_t fis_recv_phys, fis_recv_virt;
 static uint64_t cmd_table_phys, cmd_table_virt;
 static uint64_t bounce_phys, bounce_virt;
 
+// ===================== Block request queue (async I/O) =====================
+#define BLOCK_QUEUE_SIZE 32
+
+struct block_req {
+    pid_t       caller_pid;
+    uint32_t    lba;
+    uint32_t    count;          // sector count (1..AHCI_MAX_SECTORS)
+    uint8_t     dir;            // 0=read, 1=write
+    void       *user_buf;       // user-space virtual address
+    uint32_t    cookie;         // monotonic ID for completion matching
+    int         result;         // 0=ok, EIO=error
+};
+
+static block_req block_pool[BLOCK_QUEUE_SIZE];
+static int bq_head = 0;     // next slot to dequeue
+static int bq_tail = 0;     // next slot to enqueue
+static int bq_count = 0;    // number of queued requests
+block_req *ahci_current_req = nullptr;  // in-flight request
+static uint32_t ahci_cookie_counter = 0;
+
 // ===================== Helpers =====================
 static inline void *port_reg(int port, uint32_t offset) {
   return (void *)(abar + 0x100 + port * 0x80 + offset);
 }
 
 static void ahci_puts(const char *s) { serial_puts(s); }
+
+// ===================== Page-table walk: bounce → user pages =====================
+// Walk target process's page tables from proc->cr3 (physical address)
+// to find physical pages backing the user buffer, then copy bounce buffer
+// data via kernel higher-half mapping. Safe in IRQ context (no CR3 switch).
+
+static uint64_t walk_user_pt(uint64_t cr3_phys, uint64_t vaddr) {
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(cr3_phys);
+    int pml4_idx = (vaddr >> 39) & 0x1FF;
+    if (!(pml4[pml4_idx] & PTE_PRESENT)) return 0;
+
+    uint64_t *pdpt = (uint64_t *)phys_to_virt(pml4[pml4_idx] & 0x000FFFFFFFFFF000ULL);
+    int pdpt_idx = (vaddr >> 30) & 0x1FF;
+    if (!(pdpt[pdpt_idx] & PTE_PRESENT)) return 0;
+    if (pdpt[pdpt_idx] & PTE_PS)  // 1GB huge page
+        return (pdpt[pdpt_idx] & 0x000FFFFFFFFFF000ULL) + (vaddr & 0x3FFFFFFF);
+
+    uint64_t *pd = (uint64_t *)phys_to_virt(pdpt[pdpt_idx] & 0x000FFFFFFFFFF000ULL);
+    int pd_idx = (vaddr >> 21) & 0x1FF;
+    if (!(pd[pd_idx] & PTE_PRESENT)) return 0;
+    if (pd[pd_idx] & PTE_PS)  // 2MB huge page
+        return (pd[pd_idx] & 0x000FFFFFFFFFF000ULL) + (vaddr & 0x1FFFFF);
+
+    uint64_t *pt = (uint64_t *)phys_to_virt(pd[pd_idx] & 0x000FFFFFFFFFF000ULL);
+    int pt_idx = (vaddr >> 12) & 0x1FF;
+    if (!(pt[pt_idx] & PTE_PRESENT)) return 0;
+    return (pt[pt_idx] & 0x000FFFFFFFFFF000ULL) + (vaddr & 0xFFF);  // 4KB page
+}
+
+// Copy bounce buffer data to a user process's buffer via page-table walk.
+// Returns true on success, false if page walk failed.
+static bool bounce_to_user_pages(pid_t pid, void *user_buf, uint32_t byte_len) {
+    if (pid < 0 || pid >= MAX_PROC) return false;
+    proc_t *proc = &procs[pid];
+    if (proc->pid != pid || proc->state == ZOMBIE || proc->state == REAPING) return false;
+
+    uint64_t cr3 = proc->cr3;  // physical address of PML4
+    uint64_t dst_va = (uint64_t)user_buf;
+    uint32_t offset = 0;
+
+    while (offset < byte_len) {
+        uint64_t page_va = (dst_va + offset) & ~0xFFFULL;  // ALIGN_DOWN to page
+        uint64_t page_offset = (dst_va + offset) - page_va;
+        uint32_t remaining = byte_len - offset;
+        uint32_t chunk = remaining < (4096 - page_offset) ? remaining : (4096 - (uint32_t)page_offset);
+
+        uint64_t phys = walk_user_pt(cr3, page_va);
+        if (phys == 0) return false;
+
+        __memcpy((void *)(phys_to_virt(phys) + page_offset),
+                 (const void *)(bounce_virt + offset), chunk);
+        offset += chunk;
+    }
+    return true;
+}
 
 // ===================== DMA allocation =====================
 static void ahci_alloc_dma() {
@@ -124,6 +203,10 @@ static void port_init(int port) {
   // Clear error and interrupt status
   writel(port_reg(port, PxSERR), readl(port_reg(port, PxSERR)));
   writel(port_reg(port, PxIS), 0xFFFFFFFF);
+
+  // Enable port interrupts: DHRE (bit0) for command completion notification
+  // + error bits: TFEE (bit30), HBFE (bit31), HBDIE (bit29)
+  writel(port_reg(port, PxIE), (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
 
   // Enable FIS receive: set FRE, wait for FR=1
   void *cmd = port_reg(port, PxCMD);
@@ -196,6 +279,125 @@ done:
   return 0;
 }
 
+// ===================== AHCI IRQ handler =====================
+// Called when AHCI port interrupt fires (command completion).
+// Completes the current async request, notifies caller, issues next queued request.
+
+void ahci_issue_cmd(block_req *req);  // forward declaration
+
+static void ahci_irq_handler(trapframe_t *tf) {
+    // Check if our port generated the interrupt
+    uint32_t pxis = readl(port_reg(active_port, PxIS));
+    if (pxis == 0) {
+        // Not our interrupt — still acknowledge and EOI
+        writel((void *)(abar + AHCI_IS), readl((void *)(abar + AHCI_IS)));
+        lapic_eoi();
+        return;
+    }
+
+    // Acknowledge port interrupt status
+    writel(port_reg(active_port, PxIS), pxis);
+    // Acknowledge global IS
+    writel((void *)(abar + AHCI_IS), readl((void *)(abar + AHCI_IS)));
+
+    // Check if a command was in flight
+    if (!ahci_current_req) {
+        lapic_eoi();
+        return;
+    }
+
+    // Check for error (TFES = bit30)
+    bool error = (pxis & (1U << 30));
+
+    // For reads: copy bounce buffer data to user buffer via page-table walk
+    if (ahci_current_req->dir == 0 && !error) {
+        uint32_t byte_len = ahci_current_req->count * 512;
+        bool ok = bounce_to_user_pages(ahci_current_req->caller_pid,
+                                       ahci_current_req->user_buf, byte_len);
+        if (!ok) error = true;  // page walk failed = I/O error
+    }
+
+    ahci_current_req->result = error ? EIO : 0;
+
+    // Build RECV_NOTIFY completion message
+    recv_msg msg;
+    msg.type = RECV_NOTIFY;
+    msg.src = 0;  // kernel disk completion
+    __memset(msg.data, 0, 56);
+    // Pack: cookie(4) + result(4) + lba(4) + count(4)
+    __memcpy(msg.data, &ahci_current_req->cookie, 4);
+    __memcpy(msg.data + 4, &ahci_current_req->result, 4);
+    __memcpy(msg.data + 8, &ahci_current_req->lba, 4);
+    __memcpy(msg.data + 12, &ahci_current_req->count, 4);
+
+    pid_t caller = ahci_current_req->caller_pid;
+    ahci_current_req = nullptr;
+    bq_count--;
+    bq_head = (bq_head + 1) % BLOCK_QUEUE_SIZE;
+
+    // Notify caller process
+    notify_and_wake(caller, &msg);
+
+    // Issue next queued request if available
+    if (bq_count > 0) {
+        ahci_current_req = &block_pool[bq_head];
+        ahci_issue_cmd(ahci_current_req);
+    }
+
+    lapic_eoi();
+}
+
+// ===================== ahci_issue_cmd =====================
+// Build FIS + PRD + command header and issue PxCI=1 (no polling).
+// For writes: bounce buffer must already contain the data (done in syscall context).
+
+void ahci_issue_cmd(block_req *req) {
+    uint32_t lba = req->lba;
+    uint32_t chunk = req->count;
+    uint8_t cmd_byte = (req->dir == 0) ? CMD_READ_DMA_EXT : CMD_WRITE_DMA_EXT;
+
+    // Build Command Table: zero FIS area
+    __memset((void *)cmd_table_virt, 0, 0x80);
+
+    // H2D Register FIS
+    uint8_t *fis = (uint8_t *)cmd_table_virt;
+    fis[0]  = FIS_H2D;          // FIS type
+    fis[1]  = FIS_H2D_CMD;      // D2H register FIS with interrupt
+    fis[2]  = cmd_byte;
+    fis[3]  = 0x00;             // Features (low)
+    fis[4]  = (uint8_t)(lba & 0xFF);
+    fis[5]  = (uint8_t)((lba >> 8) & 0xFF);
+    fis[6]  = (uint8_t)((lba >> 16) & 0xFF);
+    fis[7]  = 0x40;             // Device: LBA mode
+    fis[8]  = (uint8_t)((lba >> 24) & 0xFF);
+    fis[9]  = 0x00;             // LBA[32:39]
+    fis[10] = 0x00;             // LBA[40:47]
+    fis[11] = 0x00;             // Features (high)
+    fis[12] = (uint8_t)(chunk & 0xFF);
+    fis[13] = (uint8_t)((chunk >> 8) & 0xFF);
+
+    // PRD entry at offset 0x80 in command table
+    uint32_t *prd = (uint32_t *)(cmd_table_virt + 0x80);
+    prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);
+    prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);
+    prd[2] = 0;
+    prd[3] = ((chunk * 512 - 1) & 0x3FFFFF) | (1U << 31);
+
+    // Command Header (slot 0)
+    uint32_t *hdr = (uint32_t *)cmd_list_virt;
+    hdr[0] = (5 << 0) | (1 << 16);  // CFL=5 DW, PRDTL=1
+    hdr[1] = 0;
+    hdr[2] = (uint32_t)(cmd_table_phys & 0xFFFFFFFF);
+    hdr[3] = (uint32_t)((cmd_table_phys >> 32) & 0xFFFFFFFF);
+    hdr[4] = 0; hdr[5] = 0; hdr[6] = 0; hdr[7] = 0;
+
+    // Clear port interrupt status before issuing
+    writel(port_reg(active_port, PxIS), 0xFFFFFFFF);
+
+    // Issue command
+    writel(port_reg(active_port, PxCI), 1);
+}
+
 // ===================== ahci_init =====================
 void ahci_init() {
   // Find AHCI controller (class 0x0106 = SATA/AHCI)
@@ -223,7 +425,7 @@ void ahci_init() {
   uint32_t ghc = readl((void *)(abar + AHCI_GHC));
   writel((void *)(abar + AHCI_GHC), ghc | 1);
 
-  // Poll until HR clears (some QEMU versions may have AE already set)
+  // Poll until HR clears
   for (int i = 0; i < 1000000; i++) {
     if (!(readl((void *)(abar + AHCI_GHC)) & 1)) break;
   }
@@ -264,55 +466,74 @@ void ahci_init() {
 
   // Idempotent re-initialize the active port
   port_init(active_port);
+
+  // Use the interrupt line programmed by firmware (OVMF sets this correctly for ICH9)
+  uint8_t ahci_gsi = dev->irq_line;
+  uint8_t ahci_irq_vec = 32 + ahci_gsi;
+
+  // Enable AHCI interrupts:
+  // 1. Register IRQ handler for AHCI vector
+  register_irq(ahci_irq_vec, ahci_irq_handler);
+
+  // 2. Enable GHC.IE (global HBA interrupt enable, bit 1)
+  writel((void *)(abar + AHCI_GHC), readl((void *)(abar + AHCI_GHC)) | (1U << 1));
+
+  // 3. Route I/O APIC GSI → AHCI vector, unmasked, to BSP
+  uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
+  ioapic_set_irq(ahci_gsi, ahci_irq_vec, bsp_apic_id, false);
+
+  ahci_puts("ahci: interrupts enabled (GSI=");
+  serial_put_hex(ahci_gsi);
+  ahci_puts(" vec=");
+  serial_put_hex(ahci_irq_vec);
+  ahci_puts(")\n");
+
   ahci_puts("ahci: init done\n");
 }
 
-// ===================== ahci_read_lba =====================
+// ===================== ahci_read_lba (polling, for init-time ELF loading) =====================
 int ahci_read_lba(uint32_t lba, uint32_t count, void *buf) {
   uint8_t *dst = (uint8_t *)buf;
 
   while (count > 0) {
     uint32_t chunk = count > AHCI_MAX_SECTORS ? AHCI_MAX_SECTORS : count;
 
-    // Build Command Table: zero FIS area
+    // Disable port interrupts during polling I/O to prevent IRQ handler
+    // from clearing PxIS before we can check TFES
+    writel(port_reg(active_port, PxIE), 0);
+
     __memset((void *)cmd_table_virt, 0, 0x80);
 
-    // H2D Register FIS (20 bytes at offset 0)
     uint8_t *fis = (uint8_t *)cmd_table_virt;
-    fis[0]  = FIS_H2D;          // FIS type
-    fis[1]  = FIS_H2D_CMD;      // D2H register FIS with interrupt
-    fis[2]  = CMD_READ_DMA_EXT; // Command
-    fis[3]  = 0x00;             // Features (low)
+    fis[0]  = FIS_H2D;
+    fis[1]  = FIS_H2D_CMD;
+    fis[2]  = CMD_READ_DMA_EXT;
+    fis[3]  = 0x00;
     fis[4]  = (uint8_t)(lba & 0xFF);
     fis[5]  = (uint8_t)((lba >> 8) & 0xFF);
     fis[6]  = (uint8_t)((lba >> 16) & 0xFF);
-    fis[7]  = 0x40;             // Device: LBA mode
+    fis[7]  = 0x40;
     fis[8]  = (uint8_t)((lba >> 24) & 0xFF);
-    fis[9]  = 0x00;             // LBA[32:39]
-    fis[10] = 0x00;             // LBA[40:47]
-    fis[11] = 0x00;             // Features (high)
-    fis[12] = (uint8_t)(chunk & 0xFF);         // Sector count low
-    fis[13] = (uint8_t)((chunk >> 8) & 0xFF);  // Sector count high
+    fis[9]  = 0x00;
+    fis[10] = 0x00;
+    fis[11] = 0x00;
+    fis[12] = (uint8_t)(chunk & 0xFF);
+    fis[13] = (uint8_t)((chunk >> 8) & 0xFF);
 
-    // PRD entry at offset 0x80 in command table
     uint32_t *prd = (uint32_t *)(cmd_table_virt + 0x80);
-    prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);           // DBA low
-    prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);  // DBA high
-    prd[2] = 0;                                               // Reserved
-    prd[3] = ((chunk * 512 - 1) & 0x3FFFFF) | (1U << 31);  // DBC + IOC
+    prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);
+    prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);
+    prd[2] = 0;
+    prd[3] = ((chunk * 512 - 1) & 0x3FFFFF) | (1U << 31);
 
-    // Command Header (slot 0 in command list)
     uint32_t *hdr = (uint32_t *)cmd_list_virt;
-    hdr[0] = (5 << 0) | (1 << 16);  // CFL=5 DW, PRDTL=1
-    hdr[1] = 0;                       // PRDBC
-    hdr[2] = (uint32_t)(cmd_table_phys & 0xFFFFFFFF);         // CTBA low
-    hdr[3] = (uint32_t)((cmd_table_phys >> 32) & 0xFFFFFFFF); // CTBA high
-    hdr[4] = 0; hdr[5] = 0; hdr[6] = 0; hdr[7] = 0;         // Reserved
+    hdr[0] = (5 << 0) | (1 << 16);
+    hdr[1] = 0;
+    hdr[2] = (uint32_t)(cmd_table_phys & 0xFFFFFFFF);
+    hdr[3] = (uint32_t)((cmd_table_phys >> 32) & 0xFFFFFFFF);
+    hdr[4] = 0; hdr[5] = 0; hdr[6] = 0; hdr[7] = 0;
 
-    // Clear port interrupt status
     writel(port_reg(active_port, PxIS), 0xFFFFFFFF);
-
-    // Issue command: set PxCI bit 0
     writel(port_reg(active_port, PxCI), 1);
 
     // Poll until PxCI bit 0 clears
@@ -320,91 +541,96 @@ int ahci_read_lba(uint32_t lba, uint32_t count, void *buf) {
     for (int i = 0; i < 10000000; i++) {
       if (!(readl(port_reg(active_port, PxCI)) & 1)) { timed_out = 0; break; }
     }
-    if (timed_out) return -EIO;
+    if (timed_out) {
+      // Re-enable port interrupts before returning
+      writel(port_reg(active_port, PxIE), (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
+      return -EIO;
+    }
 
-    // Check for task file error
     uint32_t pxis = readl(port_reg(active_port, PxIS));
     if (pxis & (1 << 30)) {
       ahci_puts("ahci: task file error on port ");
       serial_putc('0' + active_port);
       ahci_puts("\n");
+      // Re-enable port interrupts before returning
+      writel(port_reg(active_port, PxIE), (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
       return -EIO;
     }
 
-    // Copy from bounce buffer to caller
     __memcpy(dst, (const void *)bounce_virt, chunk * 512);
 
     dst += chunk * 512;
     lba += chunk;
     count -= chunk;
   }
+  // Re-enable port interrupts after polling loop
+  writel(port_reg(active_port, PxIE), (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
   return 0;
 }
 
-// ===================== ahci_write_lba =====================
+// ===================== ahci_write_lba (polling, for init-time) =====================
 int ahci_write_lba(uint32_t lba, uint32_t count, const void *buf) {
   const uint8_t *src = (const uint8_t *)buf;
 
   while (count > 0) {
     uint32_t chunk = count > AHCI_MAX_SECTORS ? AHCI_MAX_SECTORS : count;
 
-    // Copy caller data into bounce buffer BEFORE issuing command
+    // Disable port interrupts during polling I/O
+    writel(port_reg(active_port, PxIE), 0);
+
     __memcpy((void *)bounce_virt, src, chunk * 512);
 
-    // Build Command Table: zero FIS area
     __memset((void *)cmd_table_virt, 0, 0x80);
 
-    // H2D Register FIS (20 bytes at offset 0)
     uint8_t *fis = (uint8_t *)cmd_table_virt;
-    fis[0]  = FIS_H2D;           // FIS type
-    fis[1]  = FIS_H2D_CMD;       // D2H register FIS with interrupt
-    fis[2]  = CMD_WRITE_DMA_EXT; // Command
-    fis[3]  = 0x00;              // Features (low)
+    fis[0]  = FIS_H2D;
+    fis[1]  = FIS_H2D_CMD;
+    fis[2]  = CMD_WRITE_DMA_EXT;
+    fis[3]  = 0x00;
     fis[4]  = (uint8_t)(lba & 0xFF);
     fis[5]  = (uint8_t)((lba >> 8) & 0xFF);
     fis[6]  = (uint8_t)((lba >> 16) & 0xFF);
-    fis[7]  = 0x40;              // Device: LBA mode
+    fis[7]  = 0x40;
     fis[8]  = (uint8_t)((lba >> 24) & 0xFF);
-    fis[9]  = 0x00;              // LBA[32:39]
-    fis[10] = 0x00;              // LBA[40:47]
-    fis[11] = 0x00;              // Features (high)
-    fis[12] = (uint8_t)(chunk & 0xFF);         // Sector count low
-    fis[13] = (uint8_t)((chunk >> 8) & 0xFF);  // Sector count high
+    fis[9]  = 0x00;
+    fis[10] = 0x00;
+    fis[11] = 0x00;
+    fis[12] = (uint8_t)(chunk & 0xFF);
+    fis[13] = (uint8_t)((chunk >> 8) & 0xFF);
 
-    // PRD entry at offset 0x80 in command table
     uint32_t *prd = (uint32_t *)(cmd_table_virt + 0x80);
-    prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);           // DBA low
-    prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);  // DBA high
-    prd[2] = 0;                                               // Reserved
-    prd[3] = ((chunk * 512 - 1) & 0x3FFFFF) | (1U << 31);  // DBC + IOC
+    prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);
+    prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);
+    prd[2] = 0;
+    prd[3] = ((chunk * 512 - 1) & 0x3FFFFF) | (1U << 31);
 
-    // Command Header (slot 0 in command list)
     uint32_t *hdr = (uint32_t *)cmd_list_virt;
-    hdr[0] = (5 << 0) | (1 << 16);  // CFL=5 DW, PRDTL=1
-    hdr[1] = 0;                       // PRDBC
-    hdr[2] = (uint32_t)(cmd_table_phys & 0xFFFFFFFF);         // CTBA low
-    hdr[3] = (uint32_t)((cmd_table_phys >> 32) & 0xFFFFFFFF); // CTBA high
-    hdr[4] = 0; hdr[5] = 0; hdr[6] = 0; hdr[7] = 0;         // Reserved
+    hdr[0] = (5 << 0) | (1 << 16);
+    hdr[1] = 0;
+    hdr[2] = (uint32_t)(cmd_table_phys & 0xFFFFFFFF);
+    hdr[3] = (uint32_t)((cmd_table_phys >> 32) & 0xFFFFFFFF);
+    hdr[4] = 0; hdr[5] = 0; hdr[6] = 0; hdr[7] = 0;
 
-    // Clear port interrupt status
     writel(port_reg(active_port, PxIS), 0xFFFFFFFF);
-
-    // Issue command: set PxCI bit 0
     writel(port_reg(active_port, PxCI), 1);
 
-    // Poll until PxCI bit 0 clears
     int timed_out = 1;
     for (int i = 0; i < 10000000; i++) {
       if (!(readl(port_reg(active_port, PxCI)) & 1)) { timed_out = 0; break; }
     }
-    if (timed_out) return -EIO;
+    if (timed_out) {
+      // Re-enable port interrupts before returning
+      writel(port_reg(active_port, PxIE), (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
+      return -EIO;
+    }
 
-    // Check for task file error
     uint32_t pxis = readl(port_reg(active_port, PxIS));
     if (pxis & (1 << 30)) {
       ahci_puts("ahci: write task file error on port ");
       serial_putc('0' + active_port);
       ahci_puts("\n");
+      // Re-enable port interrupts before returning
+      writel(port_reg(active_port, PxIE), (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
       return -EIO;
     }
 
@@ -412,5 +638,63 @@ int ahci_write_lba(uint32_t lba, uint32_t count, const void *buf) {
     lba += chunk;
     count -= chunk;
   }
+  // Re-enable port interrupts after polling loop
+  writel(port_reg(active_port, PxIE), (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
   return 0;
 }
+
+// ===================== Async block I/O interface =====================
+
+bool ahci_is_busy() {
+    return ahci_current_req != nullptr;
+}
+
+// Submit async block request. Returns cookie (>0) on success, -errno on error.
+// Completion delivered via RECV_NOTIFY to caller.
+int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
+    // Validate user buffer
+    uint64_t ptr = (uint64_t)buf;
+    if (!ptr || ptr >= 0xFFFFFFFF80000000ULL)
+        return EFAULT;
+    uint64_t end = ptr + (uint64_t)count * 512;
+    if (end < ptr || end > 0xFFFFFFFF80000000ULL)
+        return EFAULT;
+    if (count == 0 || count > AHCI_MAX_SECTORS)
+        return EINVAL;
+
+    uint64_t flags;
+    spin_lock_irqsave(&ahci_lock, &flags);
+
+    if (bq_count >= BLOCK_QUEUE_SIZE) {
+        spin_unlock_irqrestore(&ahci_lock, flags);
+        return EBUSY;
+    }
+
+    // For writes: copy user data to bounce buffer (in syscall context, CR3 loaded)
+    if (dir == 1) {
+        __memcpy((void *)bounce_virt, buf, (size_t)count * 512);
+    }
+
+    // Allocate request from pool
+    block_req *req = &block_pool[bq_tail];
+    req->caller_pid = current_proc->pid;
+    req->lba = lba;
+    req->count = count;
+    req->dir = dir;
+    req->user_buf = buf;
+    req->cookie = ++ahci_cookie_counter;
+    req->result = 0;
+
+    bq_tail = (bq_tail + 1) % BLOCK_QUEUE_SIZE;
+    bq_count++;
+
+    // Issue immediately if AHCI idle, else queue
+    if (!ahci_current_req) {
+        ahci_current_req = req;
+        ahci_issue_cmd(req);
+    }
+
+    spin_unlock_irqrestore(&ahci_lock, flags);
+    return (int)req->cookie;  // positive cookie = success
+}
+

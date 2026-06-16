@@ -1,4 +1,4 @@
-# vectors.S - ISR stubs for vector 0-47 (64-bit)
+# vectors.S - ISR stubs for vector 0-63 (64-bit)
 # 64-bit: pushq $0 (dummy error) + pushq $vector_num, then jmp __alltraps
 # CPU-exception vectors that push error code (8,10-14,17) only push the vector num
 .text
@@ -235,4 +235,84 @@ vector46:
 vector47:
   pushq $0
   pushq $47
+  jmp __alltraps
+.globl vector48
+vector48:
+  pushq $0
+  pushq $48
+  jmp __alltraps
+.globl vector49
+vector49:
+  pushq $0
+  pushq $49
+  jmp __alltraps
+.globl vector50
+vector50:
+  pushq $0
+  pushq $50
+  jmp __alltraps
+.globl vector51
+vector51:
+  pushq $0
+  pushq $51
+  jmp __alltraps
+.globl vector52
+vector52:
+  pushq $0
+  pushq $52
+  jmp __alltraps
+.globl vector53
+vector53:
+  pushq $0
+  pushq $53
+  jmp __alltraps
+.globl vector54
+vector54:
+  pushq $0
+  pushq $54
+  jmp __alltraps
+.globl vector55
+vector55:
+  pushq $0
+  pushq $55
+  jmp __alltraps
+.globl vector56
+vector56:
+  pushq $0
+  pushq $56
+  jmp __alltraps
+.globl vector57
+vector57:
+  pushq $0
+  pushq $57
+  jmp __alltraps
+.globl vector58
+vector58:
+  pushq $0
+  pushq $58
+  jmp __alltraps
+.globl vector59
+vector59:
+  pushq $0
+  pushq $59
+  jmp __alltraps
+.globl vector60
+vector60:
+  pushq $0
+  pushq $60
+  jmp __alltraps
+.globl vector61
+vector61:
+  pushq $0
+  pushq $61
+  jmp __alltraps
+.globl vector62
+vector62:
+  pushq $0
+  pushq $62
+  jmp __alltraps
+.globl vector63
+vector63:
+  pushq $0
+  pushq $63
   jmp __alltraps

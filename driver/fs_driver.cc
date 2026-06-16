@@ -4,6 +4,7 @@
 // Single-threaded event loop: disk I/O is synchronous, client requests are
 // processed via pending_op state machines with resume callbacks.
 #include <stdint.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/device.h>
@@ -43,16 +44,23 @@ struct disk_io {
     void *dest;                     // read: target buffer; write: NULL
     void (*complete)(disk_io *io);  // completion callback
     void *ctx;                      // callback context (typically pending_op*)
+    uint32_t cookie;                // async completion cookie (matches kernel RECV_NOTIFY)
     disk_io *next;                  // unused (kept for struct compatibility)
 };
 
-// Synchronous submit: calls sys_block_read/write, then invokes callback inline
+// Async submit: calls sys_block_async, completion arrives via RECV_NOTIFY.
+// io->complete() is NOT called here — it will be called when RECV_NOTIFY arrives.
 static void submit_disk_io(disk_io *io) {
     if (io->dest != NULL) {
-        sys_block_read(io->lba, io->dest, io->count);
+        int rc = sys_block_async(io->lba, io->dest, io->count, 0);
+        if (rc < 0) {
+            // Immediate error (queue full, etc.) — call complete with error
+            io->complete(io);
+            return;
+        }
+        io->cookie = (uint32_t)rc;  // store cookie for completion matching
     }
-    // Write path: not currently used in async context
-    io->complete(io);
+    // Write path: synchronous for now (not yet async)
 }
 
 // ===================== Data cluster LRU cache (16 slots) =====================
@@ -519,6 +527,17 @@ static void free_pending_op(pending_op *op) {
     op->client_pid = -1;
 }
 
+// Find pending_op by its disk_io cookie (for async completion matching)
+static pending_op *find_pending_op_by_cookie(uint32_t cookie) {
+    for (int i = 0; i < MAX_PENDING_OPS; i++) {
+        if (pending_pool[i].client_pid >= 0 && pending_pool[i].io_active &&
+            pending_pool[i].io.cookie == cookie) {
+            return &pending_pool[i];
+        }
+    }
+    return NULL;
+}
+
     // Helper: send reply and free pending_op
 static void op_complete(pending_op *op, int32_t status, uint32_t count) {
     file_resp *resp = (file_resp *)op->reply_buf;
@@ -789,6 +808,7 @@ static void submit_readahead(uint32_t start_cluster, uint32_t num_clusters) {
     readahead_io.dest = cache[slot].data;
     readahead_io.complete = readahead_complete;
     readahead_io.ctx = NULL;
+    readahead_io.cookie = 0;  // will be set by submit_disk_io
     readahead_io.next = NULL;
     submit_disk_io(&readahead_io);
 }
@@ -2005,8 +2025,27 @@ extern "C" void _start() {
         int rr = recv(&m, data_buf, sizeof(data_buf), 0);
         if (rr != 0) continue;
 
-        // Notifications (write_lock release, etc.)
+        // Notifications: disk I/O completion, write_lock release, etc.
         if (m.type == RECV_NOTIFY) {
+            // Parse AHCI completion data: cookie(4) + result(4) + lba(4) + count(4)
+            uint32_t cookie, result, lba, count;
+            memcpy(&cookie, m.data, 4);
+            memcpy(&result, m.data + 4, 4);
+            memcpy(&lba, m.data + 8, 4);
+            memcpy(&count, m.data + 12, 4);
+
+            // Check readahead completion first
+            if (readahead_pending && readahead_io.cookie == cookie) {
+                readahead_pending = false;
+                continue;
+            }
+
+            // Find pending_op with matching cookie
+            pending_op *op = find_pending_op_by_cookie(cookie);
+            if (op && op->io_active) {
+                op->io_active = false;
+                op->io.complete(&op->io);
+            }
             continue;
         }
 

@@ -59,8 +59,8 @@ extern uint8_t  ecam_end_bus;
 // ===================== PCI API =====================
 void pci_init();
 
-uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset);
-void     pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset, uint32_t value);
+uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset);
+void     pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset, uint32_t value);
 
 struct pci_device *pci_find_device(uint16_t class_code);
 struct pci_device *pci_find_device_by_id(uint16_t vendor, uint16_t device);
