@@ -7,35 +7,10 @@
 // KBD/KMS shared memory is also dynamic
 // Internal offsets within each SHM region:
 
-// Disk SHM: 8 pages, created by disk_driver
-// Layout: header(1) + req(2) + resp(5) = 32KB resp area
-#define DISK_SHM_HEADER_OFFSET  0
-#define DISK_REQ_OFFSET         4096    // 1 page in
-#define DISK_RESP_OFFSET        12288   // 3 pages in
-
 // FS SHM: 4 pages, created by fs_driver
 #define FS_SHM_HEADER_OFFSET    0
 #define FS_REQ_OFFSET           4096    // 1 page in
 #define FS_RESP_OFFSET          8192    // 2 pages in
-
-// Disk commands
-#define DISK_CMD_READ   0
-#define DISK_CMD_WRITE  1
-
-// Disk request shared page (fs_driver -> disk_driver), 2 pages
-struct disk_req_shm {
-    uint32_t cmd;        // READ=0, WRITE=1
-    uint32_t lba;
-    uint32_t count;      // sector count
-    uint8_t  data[8180]; // write data (2 pages - 12 bytes header)
-};
-
-// Disk response shared page (disk_driver -> fs_driver), 5 pages
-struct disk_resp_shm {
-    uint32_t status;     // 0=success
-    uint32_t count;      // actual sectors transferred
-    uint8_t  data[20472]; // read data (5 pages - 8 bytes header)
-};
 
 // FS request shared page (shell -> fs_driver)
 struct fs_req_shm {
@@ -90,14 +65,6 @@ struct fs_req_reply {
 #define FS_CMD_RAW_READ  4
 #define FS_CMD_CREATE    5   // touch: create empty file or update timestamp
 #define FS_CMD_MKDIR     6   // mkdir: create directory
-
-// Disk SHM header (sleeping flags for disk_driver <-> fs_driver)
-struct disk_shm_header {
-    uint8_t disk_driver_sleeping;   // disk_driver sets before sys_wait
-    uint8_t fs_driver_sleeping;     // fs_driver sets before disk wait
-    int32_t fs_driver_pid;          // fs_driver writes its PID after attach
-    uint8_t reserved[2];
-};
 
 // FS SHM header (no sleeping flags — sync is via REQ now)
 struct fs_shm_header {

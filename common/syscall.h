@@ -37,6 +37,8 @@
 #define SYS_DMA_ALLOC    29
 #define SYS_DMA_FREE     30
 #define SYS_PCI_DEV_INFO 31
+#define SYS_BLOCK_READ   32
+#define SYS_BLOCK_WRITE  33
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -222,6 +224,16 @@ static inline int sys_pci_dev_info(uint8_t bus, uint8_t dev, uint8_t func,
                                     struct pci_dev_info *out) {
     return (int)__syscall4(SYS_PCI_DEV_INFO, (int64_t)bus, (int64_t)dev,
         (int64_t)func, (int64_t)(uintptr_t)out);
+}
+
+static inline int sys_block_read(uint32_t lba, void *buf, uint32_t count) {
+    return (int)__syscall3(SYS_BLOCK_READ, (int64_t)lba,
+        (int64_t)(uintptr_t)buf, (int64_t)count);
+}
+
+static inline int sys_block_write(uint32_t lba, const void *buf, uint32_t count) {
+    return (int)__syscall3(SYS_BLOCK_WRITE, (int64_t)lba,
+        (int64_t)(uintptr_t)buf, (int64_t)count);
 }
 
 #endif // COMMON_SYSCALL_H

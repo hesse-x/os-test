@@ -244,7 +244,6 @@
 | # | 问题 | 位置 | 说明 |
 |---|------|------|------|
 | 9 | 进程创建失败内存泄漏 | `kernel/proc.cc` | `process_create_elf` 后续 `alloc_page` 失败时，前面已分配的页面未释放 |
-| 10 | disk_driver 共享页无边界检查 | `driver/disk_driver.cc` | `cnt * 512` 可能超过 `resp->data` 缓冲区 |
 | 11 | `scancode_normal` 越界读 | `driver/kbd_driver.cc` | `scancode` 值域 0-255，数组仅 128 项 |
 
 ### 中（逻辑错误 / 健壮性）
@@ -267,6 +266,18 @@
 
 ---
 
+## Q35 + AHCI 后续
+
+| 功能 | 优先级 | 状态 | 说明 |
+|------|--------|------|------|
+| 异步块设备 | 中 | 待做 | 内核 kthread 处理 block 请求，fs_driver 通过 msg/msg_resp 异步访问（当前同步 syscall 在单线程下吞吐一致，多客户端并发时需要异步化） |
+| NVMe 驱动 | 低 | 待做 | PCIe + 多队列 + PRP/SGL |
+| 块设备文件系统 `/dev/sda` | 低 | 待做 | fs_driver 通过 open + read/write 访问磁盘，而非专用 syscall |
+| `qemu-xhci` 替代遗留 USB 控制器 | 低 | 已有基础设施 | PCIe 枚举已就绪，需 xHCI 驱动实现 |
+| `-vga none` | 低 | 已有基础设施 | GPU 原生 mode setting 后可移除 VGA 仿真 |
+
+---
+
 ## 其他扩展
 
 | 功能 | 依赖 | 优先级 | 说明 |
@@ -280,12 +291,10 @@
 | KMS huge page 映射 | KMS | 低 | 减少 TLB miss |
 | MSI / MSI-X | APIC | 低 | PCIe 设备中断 |
 | 用户态 SSE/FPU | 无 | 中 | lazy FPU restore，gcc 构建依赖 |
-| RMW 组合命令 | disk_driver | 低 | 一次 IPC 内读扇区→改→写回 |
 | FSINFO 空闲簇提示 | FAT32 | 低 | 加速空闲簇查找 |
 | 多客户端 fs_driver 并发 | fs_driver 事件循环 | 高 | 已设计，见 [file_system.md](file_system.md) Phase 5 |
 | fs_driver 事件循环 → 协程迁移 | GCC ≥ 12 + 栈回溯支持 | 中 | 回调链重构为 C++20 协程，见 [file_system.md](file_system.md) 搁置项 |
 | 多线程客户端 session 并发安全 | 多线程进程 | 中 | 需 per-fd 粒度锁，见 [file_system.md](file_system.md) 搁置项 |
-| disk_driver DMA | PCI 子系统 | 高 | 需要 PCI 配置空间枚举 + 命令寄存器 enable + BAR 解析，见 [file_system.md](file_system.md) §5.10 |
 | 磁盘队列优先级调度 | 多客户端延迟敏感 | 低 | client read > readahead 优先级，见 [file_system.md](file_system.md) 搁置项 |
 | VFS 层 | 无 | 低 | 支持多种文件系统类型 |
 | 页面换出 (swap) | FAT32 write | 低 | BFC 不足时换出到磁盘 |

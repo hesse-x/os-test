@@ -1,6 +1,7 @@
 #include "kernel/trap.h"
 #include "kernel/proc.h"
 #include "kernel/spinlock.h"
+#include "kernel/ahci.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
@@ -250,7 +251,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 32
+#define NR_SYSCALL 34
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -284,6 +285,8 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_dma_alloc,      // 29
     sys_dma_free,       // 30
     sys_pci_dev_info,   // 31
+    sys_block_read,     // 32
+    sys_block_write,    // 33
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -951,7 +954,54 @@ uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) 
     return (uint64_t)EINVAL;
 }
 
-// sys_serial_write(buf, len) — syscall 11 (用户态串口输出)
+// ===================== sys_block_read / sys_block_write =====================
+uint64_t sys_block_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+    uint32_t lba = (uint32_t)arg1;
+    void *buf = (void *)arg2;
+    uint32_t count = (uint32_t)arg3;
+
+    uint64_t ptr = (uint64_t)buf;
+    if (!ptr || ptr >= 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    uint64_t end = ptr + (uint64_t)count * 512;
+    if (end < ptr || end > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    if (count == 0 || count > AHCI_MAX_SECTORS)
+        return (uint64_t)EINVAL;
+
+    uint64_t flags;
+    spin_lock_irqsave(&ahci_lock, &flags);
+    int rc = ahci_read_lba(lba, count, buf);
+    spin_unlock_irqrestore(&ahci_lock, flags);
+
+    return (uint64_t)(rc < 0 ? -rc : 0);
+}
+
+uint64_t sys_block_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+    uint32_t lba = (uint32_t)arg1;
+    const void *buf = (const void *)arg2;
+    uint32_t count = (uint32_t)arg3;
+
+    uint64_t ptr = (uint64_t)buf;
+    if (!ptr || ptr >= 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    uint64_t end = ptr + (uint64_t)count * 512;
+    if (end < ptr || end > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)EFAULT;
+
+    if (count == 0 || count > AHCI_MAX_SECTORS)
+        return (uint64_t)EINVAL;
+
+    uint64_t flags;
+    spin_lock_irqsave(&ahci_lock, &flags);
+    int rc = ahci_write_lba(lba, count, buf);
+    spin_unlock_irqrestore(&ahci_lock, flags);
+
+    return (uint64_t)(rc < 0 ? -rc : 0);
+}// sys_serial_write(buf, len) — syscall 11 (用户态串口输出)
 uint64_t sys_serial_write(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
     const char *buf = (const char *)arg1;
     size_t len = (size_t)arg2;

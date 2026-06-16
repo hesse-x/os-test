@@ -8,7 +8,7 @@ BUILD_DIR="${PROJECT_DIR}/build"
 TESTDATA_DIR="${PROJECT_DIR}/testdata"
 
 # 检查依赖文件
-for elf in disk_driver.elf fs_driver.elf init.elf; do
+for elf in fs_driver.elf init.elf; do
     if [ ! -f "${BUILD_DIR}/${elf}" ]; then
         echo "mkdisk.sh: ${BUILD_DIR}/${elf} not found, run build.sh first"
         exit 1
@@ -19,7 +19,6 @@ done
 dd if=/dev/zero of="${BUILD_DIR}/disk.img" bs=512 count=131072 status=none
 
 # 写入 ELF 到裸 LBA 区域 (每槽 100 扇区 = 50KB)
-dd if="${BUILD_DIR}/disk_driver.elf"  of="${BUILD_DIR}/disk.img" bs=512 seek=1   conv=notrunc status=none
 dd if="${BUILD_DIR}/fs_driver.elf"    of="${BUILD_DIR}/disk.img" bs=512 seek=101 conv=notrunc status=none
 dd if="${BUILD_DIR}/init.elf"         of="${BUILD_DIR}/disk.img" bs=512 seek=201 conv=notrunc status=none
 

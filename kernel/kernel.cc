@@ -11,7 +11,7 @@
 #include "kernel/trap.h"
 #include "arch/x64/paging.h"
 #include "kernel/proc.h"
-#include "kernel/ata.h"
+#include "kernel/ahci.h"
 #include "arch/x64/smp.h"
 #include "kernel/elf_loader.h"
 #include "kernel/acpi.h"
@@ -25,7 +25,7 @@ void kernel_init_finish() {
   bump_disable();
 }
 
-// Read ELF from disk via ATA PIO — two-phase: read header first, then allocate
+// Read ELF from disk via AHCI DMA — two-phase: read header first, then allocate
 // exact-size pages and read the rest. Returns BFC-allocated buffer (caller must free_page)
 // or nullptr on failure.
 #define ELF_SLOT_SECTORS 100   // max slot size per ELF on disk (50KB)
@@ -33,7 +33,7 @@ void kernel_init_finish() {
 static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_page, size_t *out_npages) {
   // Phase 1: read first sector to parse ELF header
   uint8_t hdr_buf[512];
-  ata_read_lba(lba, 1, hdr_buf);
+  if (ahci_read_lba(lba, 1, hdr_buf) != 0) return nullptr;
 
   if (hdr_buf[0] != 0x7F || hdr_buf[1] != 'E' || hdr_buf[2] != 'L' || hdr_buf[3] != 'F') {
     return nullptr;
@@ -79,7 +79,10 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
 
   // Read remaining sectors
   if (total_sectors > 1) {
-    ata_read_lba(lba + 1, total_sectors - 1, buf + 512);
+    if (ahci_read_lba(lba + 1, total_sectors - 1, buf + 512) != 0) {
+      bfc_alloc.free_page(page, npages);
+      return nullptr;
+    }
   }
 
   *out_size = file_size;
@@ -112,6 +115,10 @@ void kernel_main(boot_info *bi) {
 
   serial_puts("kernel_main: pci_init done\n");
 
+  ahci_init();
+
+  serial_puts("kernel_main: ahci_init done\n");
+
   // Create BSP idle process
   proc_t *bsp_idle = create_idle_process(0);
   if (!bsp_idle) {
@@ -121,20 +128,8 @@ void kernel_main(boot_info *bi) {
   serial_puts("kernel_main: BSP idle created\n");
 
   // Load user processes from disk
-  // LBA layout: 1=disk_driver(100s), 101=fs_driver(100s), 201=init(100s)
+  // LBA layout: 1-100=unused(gap), 101=fs_driver(100s), 201=init(100s)
   // kbd_driver, kms_driver, terminal, shell are spawned by init from FAT32
-
-  {
-    serial_puts("kernel_main: loading disk_driver...\n");
-    uint64_t sz; Page *pg; size_t np;
-    uint8_t *elf = load_elf_from_disk(1, &sz, &pg, &np);
-    if (elf) {
-      proc_t *p = process_create_elf(elf, sz);
-      bfc_alloc.free_page(pg, np);
-      if (p) { serial_puts("kernel_main: disk_driver created\n"); }
-    }
-    else serial_puts("kernel_main: disk_driver.elf not found\n");
-  }
 
   {
     serial_puts("kernel_main: loading fs_driver...\n");

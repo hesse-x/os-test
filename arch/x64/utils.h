@@ -63,6 +63,20 @@ static inline void *__memcpy(void *dst, const void *src, size_t n) {
   return dst;
 }
 
+static inline void *__memset(void *dst, int val, size_t n) {
+  size_t nq = n >> 3;
+  uint64_t *dq = (uint64_t *)dst;
+  uint64_t v8 = (uint8_t)val;
+  v8 |= v8 << 8; v8 |= v8 << 16; v8 |= v8 << 32;
+  while (nq--)
+    *dq++ = v8;
+  unsigned char *db = (unsigned char *)dq;
+  n &= 7;
+  while (n--)
+    *db++ = (uint8_t)val;
+  return dst;
+}
+
 // ===================== Early serial output =====================
 #ifdef NDEBUG
 static inline void serial_early_out(char c) { (void)c; }

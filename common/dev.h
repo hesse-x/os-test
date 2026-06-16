@@ -5,7 +5,7 @@
 #define DEV_TYPE_MAX  32
 
 #define DEV_NONE      0   // slot empty / not found
-#define DEV_DISK      1
+#define DEV_DISK      1   // deprecated: disk I/O now via sys_block_read/write
 #define DEV_KBD       2
 #define DEV_KMS       3
 #define DEV_FS        4

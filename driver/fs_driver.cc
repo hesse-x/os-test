@@ -1,23 +1,17 @@
-// ===================== FAT32 filesystem driver (user-space) — async event loop
+// ===================== FAT32 filesystem driver (user-space) — event loop
 // Receives requests via sys_msg (variable-length IPC), performs FAT32 operations,
-// replies via sys_msg_resp. Accesses disk via disk_driver through
-// DISK_REQ/DISK_RESP shared pages.
-// Single-threaded event loop: disk I/O is async, client requests are
+// replies via sys_msg_resp. Accesses disk via sys_block_read/sys_block_write.
+// Single-threaded event loop: disk I/O is synchronous, client requests are
 // processed via pending_op state machines with resume callbacks.
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/ipc.h>
-#include <sys/shm.h>
 #include <sys/device.h>
 #include <sys/serial.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/errno.h"
-
-// ===================== Shared page pointers (disk SHM only) =====================
-static volatile disk_req_shm  *dreq;
-static volatile disk_resp_shm *dresp;
-static volatile disk_shm_header *disk_hdr;
+#include "common/syscall.h"
 
 // ===================== FAT32 volume state =====================
 static uint32_t part_start_lba;
@@ -30,176 +24,35 @@ static uint32_t total_data_clusters;
 static uint32_t spf32;
 
 // ===================== Disk I/O helpers =====================
-static int32_t disk_driver_pid;
 
-// Synchronous disk I/O (only used during fat32_init)
-static void disk_wait_reply_sync() {
-    int32_t my_pid = getpid();
-    while (1) {
-        struct recv_msg m;
-        recv(&m, NULL, 0, 0);
-        if (m.type == RECV_NOTIFY && (int32_t)m.src == disk_driver_pid) {
-            return;
-        }
-        notify(my_pid);
-    }
+// Synchronous disk I/O via kernel syscalls
+static int disk_read_sync(uint32_t lba, uint32_t count, void *buf) {
+    return sys_block_read(lba, buf, count);
 }
 
-static int disk_read_sync(uint32_t lba, uint32_t count) {
-    dreq->cmd   = DISK_CMD_READ;
-    dreq->lba   = lba;
-    dreq->count = count;
-    disk_hdr->fs_driver_sleeping = 1;
-    if (disk_hdr->disk_driver_sleeping) {
-        notify(disk_driver_pid);
-    }
-    disk_wait_reply_sync();
-    disk_hdr->fs_driver_sleeping = 0;
-    return dresp->status;
+static int disk_write_sync(uint32_t lba, uint32_t count, const void *data) {
+    return sys_block_write(lba, data, count);
 }
 
-static int disk_write_sync(uint32_t lba, uint32_t count, const uint8_t *data) {
-    dreq->cmd   = DISK_CMD_WRITE;
-    dreq->lba   = lba;
-    dreq->count = count;
-    uint32_t bytes = count * 512;
-    __memcpy((void *)dreq->data, data, bytes);
-    disk_hdr->fs_driver_sleeping = 1;
-    if (disk_hdr->disk_driver_sleeping) {
-        notify(disk_driver_pid);
-    }
-    disk_wait_reply_sync();
-    disk_hdr->fs_driver_sleeping = 0;
-    return dresp->status;
-}
-
-// ===================== disk_io: async disk I/O descriptor =====================
+// ===================== disk_io: disk I/O descriptor =====================
 struct disk_io;
 
 struct disk_io {
     uint32_t lba;
     uint32_t count;
-    void *dest;                     // read: memcpy target; write: NULL
+    void *dest;                     // read: target buffer; write: NULL
     void (*complete)(disk_io *io);  // completion callback
     void *ctx;                      // callback context (typically pending_op*)
-    disk_io *next;                  // queue link
+    disk_io *next;                  // unused (kept for struct compatibility)
 };
 
-#define DISK_IO_POOL_SIZE 32
-static disk_io disk_io_pool[DISK_IO_POOL_SIZE];
-static bool disk_io_used[DISK_IO_POOL_SIZE];
-
-static disk_io *disk_io_alloc() {
-    for (int i = 0; i < DISK_IO_POOL_SIZE; i++) {
-        if (!disk_io_used[i]) {
-            disk_io_used[i] = true;
-            return &disk_io_pool[i];
-        }
-    }
-    return NULL;
-}
-
-static void disk_io_free(disk_io *io) {
-    int idx = io - disk_io_pool;
-    if (idx >= 0 && idx < DISK_IO_POOL_SIZE) disk_io_used[idx] = false;
-}
-
-// Disk FIFO queue
-static disk_io *disk_queue_head = NULL;
-static disk_io *disk_queue_tail = NULL;
-static bool disk_in_flight = false;
-static disk_io *current_disk_io = NULL;
-
-static void submit_disk_io(disk_io *io);
-
-static void submit_next_disk_io() {
-    if (disk_queue_head == NULL) return;
-    disk_io *io = disk_queue_head;
-    disk_queue_head = io->next;
-    if (disk_queue_head == NULL) disk_queue_tail = NULL;
-    io->next = NULL;
-    submit_disk_io(io);
-}
-
+// Synchronous submit: calls sys_block_read/write, then invokes callback inline
 static void submit_disk_io(disk_io *io) {
-    if (disk_in_flight) {
-        // Enqueue at tail
-        io->next = NULL;
-        if (disk_queue_tail) disk_queue_tail->next = io;
-        else disk_queue_head = io;
-        disk_queue_tail = io;
-        return;
-    }
-
-    disk_in_flight = true;
-    current_disk_io = io;
-
-    // Determine read vs write by dest field (NULL = write, non-NULL = read)
     if (io->dest != NULL) {
-        dreq->cmd = DISK_CMD_READ;
-    } else {
-        dreq->cmd = DISK_CMD_WRITE;
+        sys_block_read(io->lba, io->dest, io->count);
     }
-    dreq->lba = io->lba;
-    dreq->count = io->count;
-
-    disk_hdr->fs_driver_sleeping = 1;
-    if (disk_hdr->disk_driver_sleeping) {
-        notify(disk_driver_pid);
-    }
-}
-
-// Called when disk_driver sends completion notification
-static void handle_disk_complete() {
-    disk_io *io = current_disk_io;
-    if (!io) {
-        serial_write("fs: disk_complete but no io!\n", 29);
-        return;
-    }
-
-    // For reads: memcpy from dresp to io->dest before callback
-    if (io->dest != NULL) {
-        if (dresp->status != 0) {
-            serial_write("fs: disk read error!\n", 22);
-        }
-        __memcpy(io->dest, (const void *)dresp->data, io->count * 512);
-    }
-
-    disk_hdr->fs_driver_sleeping = 0;
-    disk_in_flight = false;
-    current_disk_io = NULL;
-
+    // Write path: not currently used in async context
     io->complete(io);
-
-    submit_next_disk_io();
-}
-
-// Helper: submit a disk read that fills a cache slot
-static void submit_disk_read(uint32_t lba, uint32_t count, void *dest,
-                              void (*complete)(disk_io *), void *ctx) {
-    disk_io *io = disk_io_alloc();
-    if (!io) return; // pool exhausted
-    io->lba = lba;
-    io->count = count;
-    io->dest = dest;
-    io->complete = complete;
-    io->ctx = ctx;
-    io->next = NULL;
-    submit_disk_io(io);
-}
-
-// Helper: submit a disk write (data already in dreq->data via caller)
-static void submit_disk_write(uint32_t lba, uint32_t count,
-                               void (*complete)(disk_io *), void *ctx) {
-    disk_io *io = disk_io_alloc();
-    if (!io) return;
-    io->lba = lba;
-    io->count = count;
-    io->dest = NULL; // NULL signals write
-    io->complete = complete;
-    io->ctx = ctx;
-    io->next = NULL;
-    submit_disk_io(io);
 }
 
 // ===================== Data cluster LRU cache (16 slots) =====================
@@ -296,10 +149,8 @@ static int fat_cache_read_sync(uint32_t sector_lba) {
     int slot = fat_cache_lookup(sector_lba);
     if (slot >= 0) return slot;
 
-    if (disk_read_sync(sector_lba, 1) != 0) return -1;
-
     slot = fat_cache_alloc(sector_lba);
-    __memcpy(fat_cache[slot].data, (const void *)dresp->data, 512);
+    if (disk_read_sync(sector_lba, 1, fat_cache[slot].data) != 0) return -1;
     return slot;
 }
 
@@ -311,12 +162,10 @@ static int read_cluster_sync(uint32_t cluster) {
     slot = cache_alloc(cluster);
     uint32_t lba = data_start_lba + (cluster - 2) * sectors_per_cluster;
 
-    if (disk_read_sync(lba, sectors_per_cluster) != 0) {
+    if (disk_read_sync(lba, sectors_per_cluster, cache[slot].data) != 0) {
         cache[slot].cluster = 0xFFFFFFFF;
         return -1;
     }
-
-    __memcpy(cache[slot].data, (const void *)dresp->data, bytes_per_cluster);
     return slot;
 }
 
@@ -946,7 +795,7 @@ static void submit_readahead(uint32_t start_cluster, uint32_t num_clusters) {
 
 static void readahead_complete(disk_io *io) {
     readahead_pending = false;
-    // Data already copied to cache slot by handle_disk_complete
+    // Data already copied to cache slot by submit_disk_io
 }
 
 // ===================== Async handlers =====================
@@ -2049,8 +1898,12 @@ static void start_mkdir(pending_op *op, const char *path) {
 
 // ===================== FAT32 init (sync) =====================
 static void fat32_init() {
-    disk_read_sync(0, 1);
-    uint8_t *mbr = (uint8_t *)dresp->data;
+    uint8_t mbr_buf[512];
+    if (disk_read_sync(0, 1, mbr_buf) != 0) {
+        serial_write("fs: MBR read failed\n", 21);
+        while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
+    }
+    uint8_t *mbr = mbr_buf;
 
     part_start_lba = 0;
     uint32_t part_total_sectors = 0;
@@ -2068,8 +1921,8 @@ static void fat32_init() {
 
     serial_write("fs: part_start_lba found\n", 26);
 
-    disk_read_sync(part_start_lba, 1);
-    uint8_t *bpb = (uint8_t *)dresp->data;
+    disk_read_sync(part_start_lba, 1, mbr_buf);
+    uint8_t *bpb = mbr_buf;
 
     uint16_t bps = (uint16_t)bpb[11] | ((uint16_t)bpb[12] << 8);
     sectors_per_cluster = bpb[13];
@@ -2115,20 +1968,6 @@ static void fat32_init() {
 // ===================== Main event loop =====================
 extern "C" void _start() {
     serial_write("fs_driver: started\n", 20);
-    while ((disk_driver_pid = device_lookup(DEV_DISK)) < 0) {
-        struct recv_msg m;
-        recv(&m, NULL, 0, 10);
-    }
-    void *disk_shm_ptr = NULL;
-    while (shm_attach(disk_driver_pid, &disk_shm_ptr) < 0) {
-        struct recv_msg m;
-        recv(&m, NULL, 0, 10);
-    }
-    uint64_t disk_shm = (uint64_t)disk_shm_ptr;
-    disk_hdr = (volatile disk_shm_header *)(disk_shm + DISK_SHM_HEADER_OFFSET);
-    dreq     = (volatile disk_req_shm *)(disk_shm + DISK_REQ_OFFSET);
-    dresp    = (volatile disk_resp_shm *)(disk_shm + DISK_RESP_OFFSET);
-    disk_hdr->fs_driver_pid = getpid();
 
     // Initialize caches
     for (int i = 0; i < CACHE_SLOTS; i++) {
@@ -2151,11 +1990,6 @@ extern "C" void _start() {
         pending_pool[i].client_pid = -1;
     }
 
-    // Initialize disk_io pool
-    for (int i = 0; i < DISK_IO_POOL_SIZE; i++) {
-        disk_io_used[i] = false;
-    }
-
     // Sync init (MBR/BPB/FAT cache warm-up)
     serial_write("fs_driver: calling fat32_init\n", 30);
     fat32_init();
@@ -2171,13 +2005,7 @@ extern "C" void _start() {
         int rr = recv(&m, data_buf, sizeof(data_buf), 0);
         if (rr != 0) continue;
 
-        // Disk completion notification
-        if (m.type == RECV_NOTIFY && (int32_t)m.src == disk_driver_pid) {
-            handle_disk_complete();
-            continue;
-        }
-
-        // Other notifications (write_lock release, etc.)
+        // Notifications (write_lock release, etc.)
         if (m.type == RECV_NOTIFY) {
             continue;
         }
