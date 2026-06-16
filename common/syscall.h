@@ -36,6 +36,7 @@
 #define SYS_FCNTL        28
 #define SYS_DMA_ALLOC    29
 #define SYS_DMA_FREE     30
+#define SYS_PCI_DEV_INFO 31
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -198,6 +199,29 @@ static inline int sys_dma_alloc(size_t size, void **vaddr, uint64_t *paddr) {
 
 static inline int sys_dma_free(void *vaddr) {
     return (int)__syscall1(SYS_DMA_FREE, (int64_t)(uintptr_t)vaddr);
+}
+
+// ===================== PCI device info =====================
+struct pci_dev_info_bar {
+    uint64_t phys;
+    uint64_t size;
+    uint8_t  type;   // 0=MMIO32, 1=IO, 2=MMIO64
+};
+
+struct pci_dev_info {
+    uint16_t vendor_id;
+    uint16_t device_id;
+    uint16_t class_code;
+    uint8_t  irq_pin;
+    uint8_t  irq_line;
+    uint8_t  num_bars;
+    struct pci_dev_info_bar bars[6];
+};
+
+static inline int sys_pci_dev_info(uint8_t bus, uint8_t dev, uint8_t func,
+                                    struct pci_dev_info *out) {
+    return (int)__syscall4(SYS_PCI_DEV_INFO, (int64_t)bus, (int64_t)dev,
+        (int64_t)func, (int64_t)(uintptr_t)out);
 }
 
 #endif // COMMON_SYSCALL_H

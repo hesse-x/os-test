@@ -14,6 +14,8 @@
 #include "kernel/ata.h"
 #include "arch/x64/smp.h"
 #include "kernel/elf_loader.h"
+#include "kernel/acpi.h"
+#include "kernel/pci.h"
 #include "common/dev.h"
 
 extern "C" {
@@ -95,6 +97,7 @@ void kernel_main(boot_info *bi) {
   }
 
   init_mem(bi);
+  acpi_init(bi->rsdp);
   isr_init();
   kernel_init_finish();
   slab_init();
@@ -104,6 +107,10 @@ void kernel_main(boot_info *bi) {
   smp_boot_aps();
 
   serial_puts("kernel_main: smp_boot_aps done\n");
+
+  pci_init();
+
+  serial_puts("kernel_main: pci_init done\n");
 
   // Create BSP idle process
   proc_t *bsp_idle = create_idle_process(0);

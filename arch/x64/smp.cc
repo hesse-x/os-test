@@ -3,6 +3,7 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
+#include "kernel/acpi.h"
 #include "kernel/serial.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/proc.h"
@@ -236,10 +237,9 @@ static void udelay(uint32_t us) {
 // ===================== Boot all APs via SIPI (called by BSP) =====================
 
 void smp_boot_aps() {
-    boot_info *bi = &g_boot_info;
-    if (bi->ncpus <= 1) return;
+    if (g_madt.ncpus <= 1) return;
 
-    ncpu = bi->ncpus;
+    ncpu = g_madt.ncpus;
 
     // Copy trampoline to physical 0x8000
     uint64_t trampoline_size = (uint64_t)ap_trampoline_end - (uint64_t)ap_trampoline_start;
@@ -250,7 +250,7 @@ void smp_boot_aps() {
 
     // Boot each AP (cpu_id 1..ncpu-1) one at a time
     for (int i = 1; i < ncpu; i++) {
-        uint32_t apic_id = bi->apic_ids[i];
+        uint32_t apic_id = g_madt.apic_ids[i];
 
         // Allocate kernel stack (8KB)
         Page *stack_pages = bfc_alloc.alloc_page(2);

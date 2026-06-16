@@ -11,6 +11,7 @@
 #include "kernel/mem/alloc.h"
 #include "common/errno.h"
 #include "kernel/fb.h"
+#include "kernel/pci.h"
 #include "common/dev.h"
 
 // ===================== IRQ handler registry =====================
@@ -249,39 +250,40 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 31
+#define NR_SYSCALL 32
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
-    sys_getpid,         // 0: 获取 PID
-    sys_yield,          // 1: 主动让出 CPU
-    sys_recv,           // 2: 统一事件接收（IRQ/REQ/notify）
-    sys_req,            // 3: 同步 REQ
-    sys_resp,           // 4: 回复当前 REQ 调用者
-    sys_irq_bind,       // 5: 绑定当前进程到指定 IRQ
-    sys_exit,           // 6: 进程退出
-    sys_waitpid,        // 7: 等待子进程退出
-    sys_spawn,          // 8: 创建子进程
-    sys_mmap,           // 9: 匿名内存映射
-    sys_munmap,         // 10: 解除内存映射
-    sys_serial_write,   // 11: 串口输出
-    sys_fb_info,        // 12: 获取 framebuffer 信息
-    sys_shm_create,     // 13: 创建共享内存
-    sys_shm_attach,     // 14: 附加共享内存
-    sys_pipe,           // 15: 创建 pipe
-    sys_write,          // 16: 写 fd
-    sys_read,           // 17: 读 fd
-    sys_close,          // 18: 关闭 fd
-    sys_load_dev,       // 19: 注册驱动
-    sys_lookup_dev,     // 20: 查询驱动 PID
-    sys_notify,         // 21: 异步通知（消息入队）
-    sys_gettime,        // 22: 全局单调时钟（纳秒）
-    sys_clock,          // 23: per-process CPU 时间（纳秒）
-    sys_msg,            // 24: 变长消息请求
-    sys_msg_resp,       // 25: 变长消息回复
-    sys_ioperm,         // 26: I/O 端口权限
-    sys_dup2,           // 27: 复制 fd
-    sys_fcntl,          // 28: 文件控制
-    sys_dma_alloc,      // 29: 分配 DMA 缓冲区（物理连续、<4GB）
-    sys_dma_free,       // 30: 释放 DMA 缓冲区
+    sys_getpid,         // 0
+    sys_yield,          // 1
+    sys_recv,           // 2
+    sys_req,            // 3
+    sys_resp,           // 4
+    sys_irq_bind,       // 5
+    sys_exit,           // 6
+    sys_waitpid,        // 7
+    sys_spawn,          // 8
+    sys_mmap,           // 9
+    sys_munmap,         // 10
+    sys_serial_write,   // 11
+    sys_fb_info,        // 12
+    sys_shm_create,     // 13
+    sys_shm_attach,     // 14
+    sys_pipe,           // 15
+    sys_write,          // 16
+    sys_read,           // 17
+    sys_close,          // 18
+    sys_load_dev,       // 19
+    sys_lookup_dev,     // 20
+    sys_notify,         // 21
+    sys_gettime,        // 22
+    sys_clock,          // 23
+    sys_msg,            // 24
+    sys_msg_resp,       // 25
+    sys_ioperm,         // 26
+    sys_dup2,           // 27
+    sys_fcntl,          // 28
+    sys_dma_alloc,      // 29
+    sys_dma_free,       // 30
+    sys_pci_dev_info,   // 31
 };
 
 void syscall_dispatch(trapframe_t *tf) {

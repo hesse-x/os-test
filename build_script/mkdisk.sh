@@ -49,6 +49,7 @@ mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/shell.elf"        ::usr/bin/shel
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.a"           ::usr/lib/libc.a
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello.elf"        ::local/hello.elf
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/malloc.elf"       ::local/malloc.elf
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/pcie.elf"         ::local/pcie.elf
 
 # 保留根目录 README
 mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/README" ::README

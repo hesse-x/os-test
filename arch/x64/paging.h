@@ -37,11 +37,6 @@ struct boot_info {
   uint64_t mmap_size;       // total bytes
   uint64_t mmap_desc_size;  // single descriptor size
   uint64_t mmap_desc_ver;   // descriptor version
-  // APIC info (from MADT)
-  uint64_t lapic_base;      // LAPIC MMIO base physical address
-  uint64_t ioapic_base;     // I/O APIC MMIO base physical address
-  uint32_t ncpus;           // number of CPUs
-  uint32_t apic_ids[4];     // APIC IDs (MAX_CPUS=4)
 };
 
 // ===================== GDT =====================

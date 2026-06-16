@@ -2,6 +2,7 @@
 #include "arch/x64/utils.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
+#include "kernel/acpi.h"
 #include "kernel/serial.h"
 
 uint64_t lapic_vaddr = 0;
@@ -137,10 +138,8 @@ static void map_apic_mmio(uint64_t lapic_phys, uint64_t ioapic_phys) {
 
 // ===================== APIC init =====================
 void apic_init() {
-  boot_info *bi = &g_boot_info;
-
-  uint64_t lapic_phys = bi->lapic_base;
-  uint64_t ioapic_phys = bi->ioapic_base;
+  uint64_t lapic_phys = g_madt.lapic_base;
+  uint64_t ioapic_phys = g_madt.ioapic_base;
   if (lapic_phys == 0) lapic_phys = 0xFEE00000;
   if (ioapic_phys == 0) ioapic_phys = 0xFEC00000;
 

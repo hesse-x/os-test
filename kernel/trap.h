@@ -45,6 +45,7 @@ uint64_t sys_dup2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_dma_alloc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_dma_free(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_pci_dev_info(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 // Register a driver PID for a device type (kernel-internal, not a syscall)
 int register_dev(int dev_type, pid_t pid);

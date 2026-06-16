@@ -28,11 +28,6 @@ struct boot_info {
   UINT64 mmap_size;
   UINT64 mmap_desc_size;
   UINT64 mmap_desc_ver;
-  // APIC info (from MADT)
-  UINT64 lapic_base;
-  UINT64 ioapic_base;
-  UINT32 ncpus;
-  UINT32 apic_ids[4];
 };
 
 // EFI 内存映射缓冲区
@@ -156,133 +151,7 @@ static void read_rsdp(EFI_SYSTEM_TABLE *SystemTable) {
   }
 }
 
-// ===================== ACPI table helpers =====================
-// RSDP is at 16-byte alignment, XSDT entry is 8 bytes
-static UINT8 checksum(UINT8 *tbl, UINTN len) {
-  UINT8 sum = 0;
-  for (UINTN i = 0; i < len; i++) sum += tbl[i];
-  return sum;
-}
-
-#pragma pack(push, 1)
-typedef struct {
-  UINT8  signature[8];
-  UINT8  checksum;
-  UINT8  oem_id[6];
-  UINT8  revision;
-  UINT32 rsdt_address;
-  UINT32 length;
-  UINT64 xsdt_address;
-} RSDP;
-typedef struct {
-  UINT8  signature[4];
-  UINT32 length;
-  UINT8  revision;
-  UINT8  checksum;
-  UINT8  oem_id[6];
-  UINT8  oem_table_id[8];
-  UINT32 oem_revision;
-  UINT32 creator_id;
-  UINT32 creator_revision;
-} SDT_HEADER;
-typedef struct {
-  SDT_HEADER header;
-  UINT32 local_apic_address;
-  UINT32 flags;
-} MADT;
-typedef struct {
-  UINT8 type;
-  UINT8 length;
-} MADT_ENTRY;
-typedef struct {
-  UINT8 type;   // 0
-  UINT8 length;
-  UINT8 processor_id;
-  UINT8 apic_id;
-  UINT32 flags;
-} MADT_LAPIC_ENTRY;
-typedef struct {
-  UINT8 type;   // 1
-  UINT8 length;
-  UINT8 ioapic_id;
-  UINT8 reserved;
-  UINT32 ioapic_address;
-  UINT32 gsi_base;
-} MADT_IOAPIC_ENTRY;
-#pragma pack(pop)
-
-static void read_madt() {
-  RSDP *rsdp = (RSDP *)bi.rsdp;
-  if (rsdp == NULL) return;
-  // Validate RSDP signature "RSD PTR "
-  if (rsdp->signature[0] != 'R' || rsdp->signature[1] != 'S' ||
-      rsdp->signature[2] != 'D' || rsdp->signature[3] != ' ' ||
-      rsdp->signature[4] != 'P' || rsdp->signature[5] != 'T' ||
-      rsdp->signature[6] != 'R' || rsdp->signature[7] != ' ') {
-    Print(L"stub: RSDP signature mismatch\n");
-    return;
-  }
-
-  // Use XSDT if revision >= 2 and xsdt_address is valid
-  UINT8 *sdt = NULL;
-  UINT8 entry_size = 4; // RSDT entries are 4 bytes
-  if (rsdp->revision >= 2 && rsdp->xsdt_address) {
-    sdt = (UINT8 *)(uintptr_t)rsdp->xsdt_address;
-    entry_size = 8; // XSDT entries are 8 bytes
-  } else {
-    sdt = (UINT8 *)(uintptr_t)rsdp->rsdt_address;
-  }
-  if (sdt == NULL) return;
-
-  SDT_HEADER *sdt_hdr = (SDT_HEADER *)sdt;
-  UINTN entry_count = (sdt_hdr->length - sizeof(SDT_HEADER)) / entry_size;
-
-  // Scan for MADT (signature "APIC")
-  for (UINTN i = 0; i < entry_count; i++) {
-    UINT64 addr;
-    if (entry_size == 8) {
-      addr = *(UINT64 *)(sdt + sizeof(SDT_HEADER) + i * 8);
-    } else {
-      addr = *(UINT32 *)(sdt + sizeof(SDT_HEADER) + i * 4);
-    }
-    MADT *madt = (MADT *)(uintptr_t)addr;
-    if (madt->header.signature[0] != 'A' || madt->header.signature[1] != 'P' ||
-        madt->header.signature[2] != 'I' || madt->header.signature[3] != 'C') {
-      continue;
-    }
-    Print(L"stub: MADT at 0x%lx, len=%d\n", addr, madt->header.length);
-
-    bi.lapic_base = madt->local_apic_address;
-
-    // Parse MADT entries for LAPIC and IOAPIC
-    UINTN offset = sizeof(MADT);
-    bi.ncpus = 0;
-    while (offset < madt->header.length) {
-      MADT_ENTRY *e = (MADT_ENTRY *)((UINT8 *)madt + offset);
-      if (e->length == 0) break;
-      if (e->type == 0 && bi.ncpus < 4) {
-        // LAPIC entry
-        MADT_LAPIC_ENTRY *lapic = (MADT_LAPIC_ENTRY *)e;
-        if (lapic->flags & 1) { // enabled
-          bi.apic_ids[bi.ncpus] = lapic->apic_id;
-          bi.ncpus++;
-          Print(L"  LAPIC: id=%d\n", lapic->apic_id);
-        }
-      } else if (e->type == 1 && bi.ioapic_base == 0) {
-        // IOAPIC entry (use first one)
-        MADT_IOAPIC_ENTRY *ioapic = (MADT_IOAPIC_ENTRY *)e;
-        bi.ioapic_base = ioapic->ioapic_address;
-        Print(L"  IOAPIC: addr=0x%x gsi_base=%d\n", ioapic->ioapic_address, ioapic->gsi_base);
-      }
-      offset += e->length;
-    }
-    break; // only need first MADT
-  }
-  Print(L"stub: lapic=0x%lx ioapic=0x%lx ncpus=%d\n", bi.lapic_base, bi.ioapic_base, bi.ncpus);
-}
-
-// ===================== ExitBootServices =====================
-static EFI_STATUS exit_bs(EFI_SYSTEM_TABLE *SystemTable, EFI_HANDLE ImageHandle) {
+EFI_STATUS exit_bs(EFI_SYSTEM_TABLE *SystemTable, EFI_HANDLE ImageHandle) {
   UINTN map_key, mmap_size, desc_size;
   UINT32 desc_ver;
 
@@ -329,7 +198,6 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
   read_gop(SystemTable);
   read_rsdp(SystemTable);
-  read_madt();
 
   EFI_FILE_PROTOCOL *kernel_file;
   EFI_STATUS st = open_file(SystemTable, &kernel_file, L"myos.elf");

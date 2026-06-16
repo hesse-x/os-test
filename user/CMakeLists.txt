@@ -11,3 +11,4 @@ add_user_lib(c
 
 add_user_elf(hello  C SOURCES hello.c  LINK_LIBS c)
 add_user_elf(malloc C SOURCES malloctest.c LINK_LIBS c)
+add_user_elf(pcie C SOURCES test_pcie.c LINK_LIBS c)
