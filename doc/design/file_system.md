@@ -46,13 +46,13 @@
 - `fat_write_entry` 修改缓存中的 FAT 扇区并写回磁盘（FAT1 + FAT2）
 - `fat32_init` 时预填充前 4 页 FAT 扇区
 
-### O.2 数据簇 cache 增大
+### O.2 数据簇 LRU 缓存
 
-`CACHE_SLOTS` 从 2 增到 8（8 × 4KB = 32KB），覆盖典型目录遍历深度。
+`CACHE_SLOTS` 为 16（16 × 4KB = 64KB），为 readahead 预取簇提供空间，同时支持多个文件缓存共存。
 
 FAT 缓存和数据簇 cache 分离，互不挤占：
 - FAT 缓存：随机访问模式，固定 4 页
-- 数据簇 cache：遍历模式，8 slot
+- 数据簇 cache：遍历模式，16 slot
 
 ### O.3 write_dir_entry_at 只写目标扇区
 
@@ -184,9 +184,63 @@ static uint8_t lfn_checksum(const uint8_t *name) {
 
 `static uint32_t next_free_hint`（初始值 2），分配簇时从上次位置继续扫描，扫到末尾回绕。
 
+## Phase 4: 启动性能优化（fs_driver IPC + readahead）
+
+### 4.1 删 stat，fd_table 存 file_size
+
+`spawn_service()` 原先调用 stat 获取 `file_size` 再 open/read/close，stat 和 open 各做一次 `resolve_path()` 目录遍历，完全重复。
+
+删除 `stat()` 调用，libc `open()` 把 `resp->file_size` 存入 `fd_table[fd].file_size`，`spawn_service` 改为 `open → fd_file_size → malloc → read → close → spawn`，4 次 IPC 往返变 3 次。
+
+- `user/lib/file.cc`：`file_fd_entry` 增加 `uint64_t file_size` 字段；`open()` 中存 `fd_table[fd].file_size = resp->file_size`；新增 `fd_file_size(fd)` 函数（声明在 `user/include/fcntl.h`）
+- `init/init.c`：`spawn_service` 不再 include `sys/stat.h`，不再调用 `stat()`
+
+### 4.2 数据簇 LRU 缓存增大
+
+`CACHE_SLOTS` 从 8 增到 16（16 × 4KB = 64KB），为 readahead 预取簇提供空间，同时支持多个文件缓存共存。
+
+### 4.3 disk_driver SHM resp 扩容 + 多扇区读
+
+readahead 一次预取 4 簇（16KB），原 disk_driver SHM resp 区域仅 2 页（8KB），无法容纳。
+
+- `disk_driver.cc`：`shm_create` 参数从 5 页改为 8 页（header 1 页 + req 2 页 + resp 5 页 = 20KB resp 区域）
+- `common/shm.h`：`disk_resp_shm.data` 从 `data[8180]` 扩为 `data[20472]`
+- `fs_driver.cc`：新增 `read_clusters(start_cluster, count)` 函数，一次磁盘请求读取连续多扇区（最多 32 扇区 = 4 簇 = 16KB），已缓存的簇跳过
+
+### 4.4 顺序 readahead
+
+对齐 Linux readahead 模型：检测顺序访问模式，预取后续簇进 LRU 缓存，使后续 read 请求命中缓存而零磁盘 I/O。
+
+**顺序检测**：在 `session_open_file` 增加 readahead 状态：
+
+```c
+struct session_open_file {
+    bool     used;
+    uint32_t start_cluster;
+    uint32_t file_size;
+    // readahead 状态
+    uint64_t ra_prev_offset;   // 上一次 read 的 offset
+    uint32_t ra_prev_count;    // 上一次 read 的 count
+    bool     ra_sequential;    // 是否检测到顺序模式
+};
+```
+
+当 `offset == ra_prev_offset + ra_prev_count` 时标记 `ra_sequential = true`，触发预取。
+
+**预取策略**（固定窗口，4 簇）：
+1. `handle_read` 正常处理当前请求，填充 reply
+2. `msg_resp` 先回复调用方（调用方被唤醒）
+3. 检测到顺序模式后，调用 `read_clusters` 预取后续 4 簇进 LRU 缓存
+4. 预取完成后调 `recv()` 取下一个请求
+
+**pipeline 效果**：步骤 2 调用方被唤醒后准备下一次 msg 请求，与步骤 3 的磁盘 I/O 时间重叠。后续 read 请求命中 LRU 缓存直接返回，无磁盘 I/O 等待。
+
+**FAT 链预取**：readahead 需沿 FAT 链遍历确定预取簇号，连续簇（next == cur + 1）合并为单次 `read_clusters` 调用，非连续簇拆分多次调用。
+
 ## 搁置项
 
 | 项目 | 原因 | 触发条件 |
 |------|------|---------|
 | dresp->data 生命周期 | FAT 缓存部分缓解（FAT hit 时不覆盖 dresp->data），当前单客户端不会触发 | 多客户端 |
 | disk_wait_reply deferred 队列 | FAT 缓存降低调用频率，当前单客户端不会触发忙循环 | 多客户端 |
+| readahead 自适应窗口 | 当前文件规模（20-40KB）固定 4 簇窗口已足够，后续文件变大时再扩展 | 大文件顺序读场景 |

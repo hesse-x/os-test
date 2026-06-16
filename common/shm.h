@@ -7,7 +7,8 @@
 // KBD/KMS shared memory is also dynamic
 // Internal offsets within each SHM region:
 
-// Disk SHM: 5 pages, created by disk_driver
+// Disk SHM: 8 pages, created by disk_driver
+// Layout: header(1) + req(2) + resp(5) = 32KB resp area
 #define DISK_SHM_HEADER_OFFSET  0
 #define DISK_REQ_OFFSET         4096    // 1 page in
 #define DISK_RESP_OFFSET        12288   // 3 pages in
@@ -29,11 +30,11 @@ struct disk_req_shm {
     uint8_t  data[8180]; // write data (2 pages - 12 bytes header)
 };
 
-// Disk response shared page (disk_driver -> fs_driver), 2 pages
+// Disk response shared page (disk_driver -> fs_driver), 5 pages
 struct disk_resp_shm {
     uint32_t status;     // 0=success
     uint32_t count;      // actual sectors transferred
-    uint8_t  data[8180]; // read data (2 pages - 8 bytes header)
+    uint8_t  data[20472]; // read data (5 pages - 8 bytes header)
 };
 
 // FS request shared page (shell -> fs_driver)

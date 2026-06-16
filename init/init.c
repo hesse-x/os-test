@@ -6,7 +6,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/device.h>
 #include <sys/wait.h>
@@ -15,19 +14,17 @@
 #include "common/dev.h"
 
 static int spawn_service(const char *path) {
-    struct stat st;
-    if (stat(path, &st) < 0) return -1;
-
-    void *buf = malloc(st.st_size);
-    if (!buf) return -1;
-
     int fd = open(path, O_RDONLY);
-    if (fd < 0) { free(buf); return -1; }
+    if (fd < 0) return -1;
 
-    read(fd, buf, st.st_size);
+    uint64_t size = fd_file_size(fd);
+    void *buf = malloc(size);
+    if (!buf) { close(fd); return -1; }
+
+    read(fd, buf, size);
     close(fd);
 
-    int64_t pid = sys_spawn(buf, (uint64_t)st.st_size);
+    int64_t pid = sys_spawn(buf, size);
     free(buf);
 
     return (pid > 0) ? (int)pid : -1;

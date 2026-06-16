@@ -75,8 +75,8 @@ static int disk_write(uint32_t lba, uint32_t count, const uint8_t *data) {
     return dresp->status;
 }
 
-// ===================== Data cluster LRU cache (8 slots) =====================
-#define CACHE_SLOTS 8
+// ===================== Data cluster LRU cache (16 slots) =====================
+#define CACHE_SLOTS 16
 
 struct cache_entry {
     uint32_t cluster;   // 0xFFFFFFFF = invalid
@@ -130,6 +130,32 @@ static int read_cluster(uint32_t cluster) {
 
     __memcpy(cache[slot].data, (const void *)dresp->data, bytes_per_cluster);
     return slot;
+}
+
+// Read multiple consecutive clusters into LRU cache via single disk request.
+// Max 4 clusters (16KB) per call, limited by disk resp SHM size.
+static int read_clusters(uint32_t start_cluster, uint32_t num_clusters) {
+    if (num_clusters > 4) num_clusters = 4;
+
+    // Check if all clusters are already cached
+    bool all_cached = true;
+    for (uint32_t i = 0; i < num_clusters; i++) {
+        if (cache_lookup(start_cluster + i) < 0) { all_cached = false; break; }
+    }
+    if (all_cached) return 0;
+
+    uint32_t start_lba = data_start_lba + (start_cluster - 2) * sectors_per_cluster;
+    uint32_t total_sectors = num_clusters * sectors_per_cluster;
+
+    if (disk_read(start_lba, total_sectors) != 0) return -1;
+
+    const uint8_t *src = (const uint8_t *)dresp->data;
+    for (uint32_t i = 0; i < num_clusters; i++) {
+        int slot = cache_lookup(start_cluster + i);
+        if (slot < 0) slot = cache_alloc(start_cluster + i);
+        __memcpy(cache[slot].data, src + i * bytes_per_cluster, bytes_per_cluster);
+    }
+    return 0;
 }
 
 // ===================== FAT sector cache (4 pages, fixed) =====================
@@ -775,6 +801,10 @@ struct session_open_file {
     bool     used;
     uint32_t start_cluster;
     uint32_t file_size;
+    // readahead state
+    uint64_t ra_prev_offset;
+    uint32_t ra_prev_count;
+    bool     ra_sequential;
 };
 
 struct client_session {
@@ -924,6 +954,9 @@ static void handle_open(struct client_session *sess, const char *path,
     sess->open_files[fd].used = true;
     sess->open_files[fd].start_cluster = cluster;
     sess->open_files[fd].file_size = de.file_size;
+    sess->open_files[fd].ra_prev_offset = 0;
+    sess->open_files[fd].ra_prev_count = 0;
+    sess->open_files[fd].ra_sequential = false;
 
     resp->status = 0;
     resp->fd = (uint32_t)fd;
@@ -931,7 +964,11 @@ static void handle_open(struct client_session *sess, const char *path,
 }
 
 static void handle_read(struct client_session *sess, uint32_t fs_fd,
-                         uint64_t offset, uint32_t count, struct file_resp *resp) {
+                         uint64_t offset, uint32_t count, struct file_resp *resp,
+                         uint32_t *ra_cluster_out, uint32_t *ra_count_out) {
+    *ra_cluster_out = 0;
+    *ra_count_out = 0;
+
     if (fs_fd >= MAX_SESSION_FDS || !sess->open_files[fs_fd].used) {
         resp->status = -EBADF;
         return;
@@ -943,6 +980,15 @@ static void handle_read(struct client_session *sess, uint32_t fs_fd,
         resp->count = 0;
         return;
     }
+
+    // Sequential detection
+    if (f->ra_prev_count > 0 && offset == f->ra_prev_offset + f->ra_prev_count) {
+        f->ra_sequential = true;
+    } else if (offset != 0) {
+        f->ra_sequential = false;
+    }
+    f->ra_prev_offset = offset;
+    f->ra_prev_count = count;
 
     uint32_t avail = f->file_size - (uint32_t)offset;
     if (count > avail) count = avail;
@@ -978,12 +1024,19 @@ static void handle_read(struct client_session *sess, uint32_t fs_fd,
 
     resp->status = 0;
     resp->count = bytes_read;
+
+    // Compute readahead target: prefetch 4 clusters after the last read cluster
+    if (f->ra_sequential && cluster >= 2 && cluster < 0x0FFFFFF8) {
+        *ra_cluster_out = cluster;
+        *ra_count_out = 4;
+    }
 }
 
 static void handle_close(struct client_session *sess, uint32_t fs_fd,
                           struct file_resp *resp) {
     if (fs_fd < MAX_SESSION_FDS) {
         sess->open_files[fs_fd].used = false;
+        sess->open_files[fs_fd].ra_sequential = false;
     }
     resp->status = 0;
 }
@@ -1362,12 +1415,15 @@ extern "C" void _start() {
         resp->count = 0;
         resp->total = 0;
 
+        uint32_t ra_cluster = 0, ra_count = 0;
+
         switch (freq->cmd) {
         case FILE_CMD_OPEN:
             handle_open(sess, freq->path, freq->flags, resp);
             break;
         case FILE_CMD_READ:
-            handle_read(sess, freq->fs_fd, freq->offset, freq->count, resp);
+            handle_read(sess, freq->fs_fd, freq->offset, freq->count, resp,
+                        &ra_cluster, &ra_count);
             break;
         case FILE_CMD_WRITE:
             resp->status = -ENOSYS;
@@ -1411,5 +1467,35 @@ extern "C" void _start() {
         // Send reply: header + data bytes (count)
         size_t resp_len = sizeof(struct file_resp) + resp->count;
         msg_resp(resp, resp_len);
+
+        // Pipeline: reply sent, now prefetch readahead clusters if sequential
+        if (ra_cluster > 0 && ra_count > 0) {
+            // Walk FAT chain to find consecutive clusters for readahead
+            uint32_t c = ra_cluster;
+            uint32_t consecutive_start = c;
+            uint32_t consecutive_count = 0;
+            uint32_t remaining = ra_count;
+
+            while (remaining > 0 && c >= 2 && c < 0x0FFFFFF8) {
+                uint32_t next = fat_read_entry(c);
+                if (next == c + 1) {
+                    // Consecutive: extend current batch
+                    consecutive_count++;
+                } else {
+                    // Chain broke: prefetch what we have, start new batch
+                    if (consecutive_count > 0) {
+                        read_clusters(consecutive_start, consecutive_count);
+                    }
+                    consecutive_start = next;
+                    consecutive_count = 1;
+                }
+                remaining--;
+                c = next;
+            }
+            // Prefetch remaining consecutive batch
+            if (consecutive_count > 0) {
+                read_clusters(consecutive_start, consecutive_count);
+            }
+        }
     }
 }

@@ -22,6 +22,7 @@ struct file_fd_entry {
     // FD_FILE only:
     int32_t fs_fd;          // fs_driver local fd
     uint64_t offset;        // current read/write offset (libc maintained)
+    uint64_t file_size;     // file size (set by open)
 };
 
 static struct file_fd_entry fd_table[MAX_FD];
@@ -42,6 +43,13 @@ static void fd_table_init() {
     fd_table[1].type = FD_PIPE;
     fd_table[1].flags = O_WRONLY;
     fd_table_inited = true;
+}
+
+uint64_t fd_file_size(int fd) {
+    fd_table_init();
+    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type != FD_FILE)
+        return 0;
+    return fd_table[fd].file_size;
 }
 
 // Lazy fs_driver PID cache
@@ -127,6 +135,7 @@ int open(const char *path, int flags, ...) {
     fd_table[fd].fs_fd = (int32_t)resp->fd;
     fd_table[fd].offset = 0;
     fd_table[fd].flags = flags;
+    fd_table[fd].file_size = resp->file_size;
     return fd;
 }
 

@@ -1,6 +1,8 @@
 #ifndef _FCNTL_H
 #define _FCNTL_H
 
+#include <stdint.h>
+
 #define O_RDONLY    0
 #define O_WRONLY    1
 #define O_RDWR      2
@@ -16,6 +18,7 @@ extern "C" {
 int open(const char *path, int flags, ...);
 int dup2(int old_fd, int new_fd);
 int fcntl(int fd, int cmd, ...);
+uint64_t fd_file_size(int fd);
 
 #ifdef __cplusplus
 }

@@ -98,9 +98,9 @@ extern "C" void _start() {
     ioperm(0x3F6, 2, 1);  // ATA control block registers
     device_register(getpid(), DEV_DISK);
 
-    // Create shared memory: header(1) + req(2) + resp(2) = 5 pages
+    // Create shared memory: header(1) + req(2) + resp(5) = 8 pages
     void *shm_ptr = NULL;
-    shm_create(5 * 4096, &shm_ptr);
+    shm_create(8 * 4096, &shm_ptr);
     uint64_t shm_base = (uint64_t)shm_ptr;
     hdr  = (volatile disk_shm_header *)(shm_base + DISK_SHM_HEADER_OFFSET);
     dreq  = (volatile disk_req_shm *)(shm_base + DISK_REQ_OFFSET);
