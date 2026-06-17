@@ -5,6 +5,7 @@
 #include "kernel/mem/alloc.h"
 #include "common/macro.h"
 #include "common/errno.h"
+#include "arch/x64/apic.h"
 
 struct pci_device pci_devices[MAX_PCI_DEV];
 int pci_device_count = 0;
@@ -12,6 +13,9 @@ int pci_device_count = 0;
 uint64_t ecam_vbase = 0;
 uint8_t  ecam_start_bus = 0;
 uint8_t  ecam_end_bus = 0;
+
+// MSI-X vector allocation: simple counter starting at 64
+static int next_msix_vector = 64;
 
 // ===================== ECAM MMIO mapping =====================
 
@@ -170,7 +174,42 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   d->header_type = header_type & 0x7F;
   d->irq_pin = irq_pin;
   d->irq_line = irq_line;
+  d->msix_cap_offset = 0;
+  d->msix_table_bar = 0;
+  d->msix_pba_bar = 0;
+  d->msix_table_offset = 0;
+  d->msix_pba_offset = 0;
+  d->msix_vector_base = -1;
+  d->msix_num_vectors = 0;
   d->enabled = false;
+
+  // Walk PCI capability chain (Type 0 header only)
+  if (d->header_type == PCI_HEADER_TYPE_NORMAL) {
+    uint8_t cap_ptr = (pci_read_config(bus, dev, func, 0x34) & 0xFC);
+    while (cap_ptr != 0) {
+      uint32_t cap_word = pci_read_config(bus, dev, func, cap_ptr);
+      uint8_t cap_id = cap_word & 0xFF;
+      uint8_t next_ptr = (cap_word >> 8) & 0xFC;
+      if (cap_id == PCI_CAP_ID_MSIX) {
+        d->msix_cap_offset = cap_ptr;
+        uint32_t table_info = pci_read_config(bus, dev, func, cap_ptr + 4);
+        uint32_t pba_info = pci_read_config(bus, dev, func, cap_ptr + 8);
+        d->msix_table_bar = table_info & 0x7;
+        d->msix_table_offset = table_info & ~0x7;
+        d->msix_pba_bar = pba_info & 0x7;
+        d->msix_pba_offset = pba_info & ~0x7;
+        serial_puts("pci: MSI-X cap at 0x");
+        serial_put_hex(cap_ptr);
+        serial_puts(" table_bar=");
+        serial_put_hex(d->msix_table_bar);
+        serial_puts(" table_off=0x");
+        serial_put_hex(d->msix_table_offset);
+        serial_puts("\n");
+      }
+      cap_ptr = next_ptr;
+      if (cap_ptr < 0x40) break; // invalid, stop
+    }
+  }
 
   // Size all BARs
   int max_bars = (d->header_type == PCI_HEADER_TYPE_BRIDGE) ? 2 : 6;
@@ -345,6 +384,105 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
 
   __memcpy(out_ptr, &info, sizeof(info));
   return 0;
+}
+
+// ===================== MSI-X =====================
+
+int pci_enable_msix(struct pci_device *dev, int num_vectors) {
+  if (dev->msix_cap_offset == 0) return -ENOSYS;
+  if (num_vectors <= 0 || next_msix_vector + num_vectors > 128) return -ENOMEM;
+
+  // Read Message Control to get table size (bits 10:2 = N-1)
+  uint32_t msg_ctrl = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset + 2);
+  int table_size = ((msg_ctrl >> 2) & 0x7FF) + 1;
+  if (num_vectors > table_size) num_vectors = table_size;
+
+  // Allocate vectors
+  int base = next_msix_vector;
+  next_msix_vector += num_vectors;
+  dev->msix_vector_base = base;
+  dev->msix_num_vectors = num_vectors;
+
+  // Get MSI-X Table address (BAR vaddr + offset)
+  // BAR should already be mapped by pci_enable_device
+  uint64_t bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
+  if (bar_vaddr == 0) return -EFAULT;
+
+  volatile uint32_t *table = (volatile uint32_t *)(bar_vaddr + dev->msix_table_offset);
+  uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
+
+  // Write all Table Entries: masked, with vector numbers
+  for (int i = 0; i < num_vectors; i++) {
+    uint32_t vector = base + i;
+    table[i * 4 + 0] = 0xFEE00000 | (bsp_apic_id << 12);  // Message Address low
+    table[i * 4 + 1] = 0;                                    // Message Address high
+    table[i * 4 + 2] = vector;                                // Message Data (vector, Fixed, Edge)
+    table[i * 4 + 3] = 1;                                     // Vector Control: Mask bit = 1
+  }
+
+  // Enable MSI-X: set Enable bit (bit 0) in Message Control
+  // Also set Function Mask (bit 1) temporarily to prevent spurious interrupts
+  msg_ctrl = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset + 2);
+  msg_ctrl |= (1 << 0);  // MSI-X Enable
+  msg_ctrl |= (1 << 1);  // Function Mask (global mask during setup)
+  // Write back: preserve upper 16 bits, write full 32-bit word
+  uint32_t cap_word = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
+  cap_word = (cap_word & 0xFFFF) | ((msg_ctrl & 0xFFFF) << 16);
+  // Actually: Message Control is at cap_offset+2, which is the upper 16 bits of the first 32-bit word
+  // Let's write directly to offset+2 as a 16-bit value within a 32-bit write
+  // PCI config writes are 32-bit aligned. cap_offset+2 is the upper halfword.
+  uint32_t orig = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
+  orig = (orig & 0xFFFF) | ((msg_ctrl & 0xFFFF) << 16);
+  pci_write_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset, orig);
+
+  // Disable INTx: set bit 10 (Interrupt Disable) in Command register
+  uint32_t cmd = pci_read_config(dev->bus, dev->dev, dev->func, 0x04);
+  cmd |= (1 << 10);  // Interrupt Disable
+  pci_write_config(dev->bus, dev->dev, dev->func, 0x04, cmd);
+
+  // Clear Function Mask now that setup is done
+  msg_ctrl = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset + 2);
+  // Read the full 32-bit word at cap_offset, modify upper 16 bits (Message Control)
+  orig = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
+  msg_ctrl &= ~(1 << 1);  // Clear Function Mask
+  orig = (orig & 0xFFFF) | ((msg_ctrl & 0xFFFF) << 16);
+  pci_write_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset, orig);
+
+  serial_puts("pci: MSI-X enabled, vectors ");
+  serial_put_hex(base);
+  serial_puts("-");
+  serial_put_hex(base + num_vectors - 1);
+  serial_puts("\n");
+
+  return num_vectors;
+}
+
+void pci_msix_mask_entry(struct pci_device *dev, int entry) {
+  if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors) return;
+  uint64_t bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
+  volatile uint32_t *table = (volatile uint32_t *)(bar_vaddr + dev->msix_table_offset);
+  table[entry * 4 + 3] |= 1;  // Set Mask bit
+}
+
+void pci_msix_unmask_entry(struct pci_device *dev, int entry) {
+  if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors) return;
+  uint64_t bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
+  volatile uint32_t *table = (volatile uint32_t *)(bar_vaddr + dev->msix_table_offset);
+  table[entry * 4 + 3] &= ~1;  // Clear Mask bit
+}
+
+void *pci_msix_table_addr(struct pci_device *dev) {
+  if (dev->msix_cap_offset == 0) return nullptr;
+  return (void *)(dev->bar[dev->msix_table_bar].vaddr + dev->msix_table_offset);
+}
+
+void *pci_msix_pba_addr(struct pci_device *dev) {
+  if (dev->msix_cap_offset == 0) return nullptr;
+  return (void *)(dev->bar[dev->msix_pba_bar].vaddr + dev->msix_pba_offset);
+}
+
+int pci_msix_vector_base(struct pci_device *dev) {
+  return dev->msix_vector_base;
 }
 
 // ===================== pci_init =====================

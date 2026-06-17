@@ -12,6 +12,7 @@
 #include "arch/x64/paging.h"
 #include "kernel/proc.h"
 #include "kernel/ahci.h"
+#include "kernel/xhci.h"
 #include "arch/x64/smp.h"
 #include "kernel/elf_loader.h"
 #include "kernel/acpi.h"
@@ -118,6 +119,10 @@ void kernel_main(boot_info *bi) {
   ahci_init();
 
   serial_puts("kernel_main: ahci_init done\n");
+
+  xhci_init();
+
+  serial_puts("kernel_main: xhci_init done\n");
 
   // Create BSP idle process
   proc_t *bsp_idle = create_idle_process(0);

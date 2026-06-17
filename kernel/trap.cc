@@ -16,7 +16,7 @@
 #include "common/dev.h"
 
 // ===================== IRQ handler registry =====================
-#define MAX_IRQ_HANDLERS 64
+#define MAX_IRQ_HANDLERS 128
 static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS];
 
 // ===================== IRQ owner (user-space driver binding) =====================
@@ -91,7 +91,7 @@ void trap_dispatch(trapframe_t *tf) {
   }
 
   // Other hardware IRQ: send EOI
-  if (tf->trapno >= 32 && tf->trapno <= 63) {
+  if (tf->trapno >= 32 && tf->trapno <= 127) {
     lapic_eoi();
     return;
   }

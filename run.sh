@@ -7,6 +7,8 @@
 
 qemu-system-x86_64 \
     -machine q35 \
+    -device qemu-xhci \
+    -device usb-mouse \
     -drive file=build/disk.img,format=raw,if=none,id=disk0 \
     -device ide-hd,drive=disk0,bus=ide.0 \
     -drive file=build/boot.img,format=raw,if=none,id=boot0 \

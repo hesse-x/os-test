@@ -1,4 +1,4 @@
-# vectors.S - ISR stubs for vector 0-63 (64-bit)
+# vectors.S - ISR stubs for vector 0-127 (64-bit)
 # 64-bit: pushq $0 (dummy error) + pushq $vector_num, then jmp __alltraps
 # CPU-exception vectors that push error code (8,10-14,17) only push the vector num
 .text
@@ -315,4 +315,324 @@ vector62:
 vector63:
   pushq $0
   pushq $63
+  jmp __alltraps
+.globl vector64
+vector64:
+  pushq $0
+  pushq $64
+  jmp __alltraps
+.globl vector65
+vector65:
+  pushq $0
+  pushq $65
+  jmp __alltraps
+.globl vector66
+vector66:
+  pushq $0
+  pushq $66
+  jmp __alltraps
+.globl vector67
+vector67:
+  pushq $0
+  pushq $67
+  jmp __alltraps
+.globl vector68
+vector68:
+  pushq $0
+  pushq $68
+  jmp __alltraps
+.globl vector69
+vector69:
+  pushq $0
+  pushq $69
+  jmp __alltraps
+.globl vector70
+vector70:
+  pushq $0
+  pushq $70
+  jmp __alltraps
+.globl vector71
+vector71:
+  pushq $0
+  pushq $71
+  jmp __alltraps
+.globl vector72
+vector72:
+  pushq $0
+  pushq $72
+  jmp __alltraps
+.globl vector73
+vector73:
+  pushq $0
+  pushq $73
+  jmp __alltraps
+.globl vector74
+vector74:
+  pushq $0
+  pushq $74
+  jmp __alltraps
+.globl vector75
+vector75:
+  pushq $0
+  pushq $75
+  jmp __alltraps
+.globl vector76
+vector76:
+  pushq $0
+  pushq $76
+  jmp __alltraps
+.globl vector77
+vector77:
+  pushq $0
+  pushq $77
+  jmp __alltraps
+.globl vector78
+vector78:
+  pushq $0
+  pushq $78
+  jmp __alltraps
+.globl vector79
+vector79:
+  pushq $0
+  pushq $79
+  jmp __alltraps
+.globl vector80
+vector80:
+  pushq $0
+  pushq $80
+  jmp __alltraps
+.globl vector81
+vector81:
+  pushq $0
+  pushq $81
+  jmp __alltraps
+.globl vector82
+vector82:
+  pushq $0
+  pushq $82
+  jmp __alltraps
+.globl vector83
+vector83:
+  pushq $0
+  pushq $83
+  jmp __alltraps
+.globl vector84
+vector84:
+  pushq $0
+  pushq $84
+  jmp __alltraps
+.globl vector85
+vector85:
+  pushq $0
+  pushq $85
+  jmp __alltraps
+.globl vector86
+vector86:
+  pushq $0
+  pushq $86
+  jmp __alltraps
+.globl vector87
+vector87:
+  pushq $0
+  pushq $87
+  jmp __alltraps
+.globl vector88
+vector88:
+  pushq $0
+  pushq $88
+  jmp __alltraps
+.globl vector89
+vector89:
+  pushq $0
+  pushq $89
+  jmp __alltraps
+.globl vector90
+vector90:
+  pushq $0
+  pushq $90
+  jmp __alltraps
+.globl vector91
+vector91:
+  pushq $0
+  pushq $91
+  jmp __alltraps
+.globl vector92
+vector92:
+  pushq $0
+  pushq $92
+  jmp __alltraps
+.globl vector93
+vector93:
+  pushq $0
+  pushq $93
+  jmp __alltraps
+.globl vector94
+vector94:
+  pushq $0
+  pushq $94
+  jmp __alltraps
+.globl vector95
+vector95:
+  pushq $0
+  pushq $95
+  jmp __alltraps
+.globl vector96
+vector96:
+  pushq $0
+  pushq $96
+  jmp __alltraps
+.globl vector97
+vector97:
+  pushq $0
+  pushq $97
+  jmp __alltraps
+.globl vector98
+vector98:
+  pushq $0
+  pushq $98
+  jmp __alltraps
+.globl vector99
+vector99:
+  pushq $0
+  pushq $99
+  jmp __alltraps
+.globl vector100
+vector100:
+  pushq $0
+  pushq $100
+  jmp __alltraps
+.globl vector101
+vector101:
+  pushq $0
+  pushq $101
+  jmp __alltraps
+.globl vector102
+vector102:
+  pushq $0
+  pushq $102
+  jmp __alltraps
+.globl vector103
+vector103:
+  pushq $0
+  pushq $103
+  jmp __alltraps
+.globl vector104
+vector104:
+  pushq $0
+  pushq $104
+  jmp __alltraps
+.globl vector105
+vector105:
+  pushq $0
+  pushq $105
+  jmp __alltraps
+.globl vector106
+vector106:
+  pushq $0
+  pushq $106
+  jmp __alltraps
+.globl vector107
+vector107:
+  pushq $0
+  pushq $107
+  jmp __alltraps
+.globl vector108
+vector108:
+  pushq $0
+  pushq $108
+  jmp __alltraps
+.globl vector109
+vector109:
+  pushq $0
+  pushq $109
+  jmp __alltraps
+.globl vector110
+vector110:
+  pushq $0
+  pushq $110
+  jmp __alltraps
+.globl vector111
+vector111:
+  pushq $0
+  pushq $111
+  jmp __alltraps
+.globl vector112
+vector112:
+  pushq $0
+  pushq $112
+  jmp __alltraps
+.globl vector113
+vector113:
+  pushq $0
+  pushq $113
+  jmp __alltraps
+.globl vector114
+vector114:
+  pushq $0
+  pushq $114
+  jmp __alltraps
+.globl vector115
+vector115:
+  pushq $0
+  pushq $115
+  jmp __alltraps
+.globl vector116
+vector116:
+  pushq $0
+  pushq $116
+  jmp __alltraps
+.globl vector117
+vector117:
+  pushq $0
+  pushq $117
+  jmp __alltraps
+.globl vector118
+vector118:
+  pushq $0
+  pushq $118
+  jmp __alltraps
+.globl vector119
+vector119:
+  pushq $0
+  pushq $119
+  jmp __alltraps
+.globl vector120
+vector120:
+  pushq $0
+  pushq $120
+  jmp __alltraps
+.globl vector121
+vector121:
+  pushq $0
+  pushq $121
+  jmp __alltraps
+.globl vector122
+vector122:
+  pushq $0
+  pushq $122
+  jmp __alltraps
+.globl vector123
+vector123:
+  pushq $0
+  pushq $123
+  jmp __alltraps
+.globl vector124
+vector124:
+  pushq $0
+  pushq $124
+  jmp __alltraps
+.globl vector125
+vector125:
+  pushq $0
+  pushq $125
+  jmp __alltraps
+.globl vector126
+vector126:
+  pushq $0
+  pushq $126
+  jmp __alltraps
+.globl vector127
+vector127:
+  pushq $0
+  pushq $127
   jmp __alltraps

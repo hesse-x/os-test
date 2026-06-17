@@ -25,6 +25,9 @@
 #define PCI_BAR_IO_SPACE    0x01
 #define PCI_BAR_MEM_TYPE_64 0x04
 
+// PCI capability IDs
+#define PCI_CAP_ID_MSIX     0x11
+
 // ===================== PCI BAR =====================
 struct pci_bar {
   uint64_t phys;       // physical address (from BAR)
@@ -44,6 +47,13 @@ struct pci_device {
   uint8_t  header_type;
   uint8_t  irq_pin;
   uint8_t  irq_line;
+  uint8_t  msix_cap_offset;  // MSI-X capability offset in config space, 0 = not found
+  uint8_t  msix_table_bar;   // BAR index for MSI-X Table
+  uint8_t  msix_pba_bar;     // BAR index for PBA
+  uint32_t msix_table_offset; // Offset within BAR for MSI-X Table
+  uint32_t msix_pba_offset;   // Offset within BAR for PBA
+  int      msix_vector_base;  // First allocated vector, -1 = not allocated
+  int      msix_num_vectors;  // Number of vectors allocated
   bool     enabled;
   struct pci_bar bar[6];
 };
@@ -66,6 +76,14 @@ struct pci_device *pci_find_device(uint16_t class_code);
 struct pci_device *pci_find_device_by_id(uint16_t vendor, uint16_t device);
 
 int pci_enable_device(struct pci_device *dev);
+
+// MSI-X API
+int pci_enable_msix(struct pci_device *dev, int num_vectors);
+void pci_msix_mask_entry(struct pci_device *dev, int entry);
+void pci_msix_unmask_entry(struct pci_device *dev, int entry);
+void *pci_msix_table_addr(struct pci_device *dev);
+void *pci_msix_pba_addr(struct pci_device *dev);
+int pci_msix_vector_base(struct pci_device *dev);
 
 // sys_pci_dev_info is declared in kernel/trap.h (extern "C")
 
