@@ -18,5 +18,6 @@
 #define EISDIR    14
 #define ENOTDIR   15
 #define EIO       16
+#define ENOSPC    17
 
 #endif // COMMON_ERRNO_H

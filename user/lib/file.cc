@@ -154,7 +154,6 @@ ssize_t file_read(int fd, void *buf, size_t count) {
     memset(&req, 0, sizeof(req));
     req.cmd = FILE_CMD_READ;
     req.fs_fd = (uint32_t)fd_table[fd].fs_fd;
-    req.offset = fd_table[fd].offset;
     req.count = (uint32_t)chunk;
 
     size_t reply_len = sizeof(struct file_resp) + chunk;
@@ -183,12 +182,54 @@ ssize_t file_read(int fd, void *buf, size_t count) {
     return (ssize_t)nread;
 }
 
-// ===================== write (file — ENOSYS stub) =====================
+// ===================== write (file) =====================
 
 ssize_t file_write(int fd, const void *buf, size_t count) {
-    (void)fd; (void)buf; (void)count;
-    errno = ENOSYS;
-    return -1;
+    if (!(fd_table[fd].flags & (O_WRONLY | O_RDWR | O_APPEND)))
+        { errno = EBADF; return -1; }
+
+    pid_t pid = get_fs_pid();
+    if (pid < 0) { errno = ENOENT; return -1; }
+
+    // Chunk to fit within sys_msg limit (64KB total)
+    size_t max_data = 65536 - sizeof(struct file_req);
+    size_t chunk = count > max_data ? max_data : count;
+
+    // Build message: file_req + inline write data
+    size_t msg_len = sizeof(struct file_req) + chunk;
+    uint8_t *msg_buf = (uint8_t *)malloc(msg_len);
+    if (!msg_buf) { errno = ENOMEM; return -1; }
+
+    struct file_req *req = (struct file_req *)msg_buf;
+    memset(req, 0, sizeof(*req));
+    req->cmd = FILE_CMD_WRITE;
+    req->fs_fd = (uint32_t)fd_table[fd].fs_fd;
+    req->count = (uint32_t)chunk;
+
+    memcpy(msg_buf + sizeof(struct file_req), buf, chunk);
+
+    struct file_resp resp;
+    int r = sys_msg(pid, msg_buf, msg_len, &resp, sizeof(resp));
+    free(msg_buf);
+
+    if (r < 0) {
+        if (r == -ESRCH) fs_pid_cache = -1;
+        errno = -r;
+        return -1;
+    }
+
+    if (resp.status != 0) { errno = -resp.status; return -1; }
+
+    size_t written = resp.count;
+    if (fd_table[fd].flags & O_APPEND) {
+        // For O_APPEND, fs_driver wrote at file_size, so offset = new file_size
+        fd_table[fd].offset = resp.file_size;
+    } else {
+        fd_table[fd].offset += written;
+    }
+    if (fd_table[fd].file_size < fd_table[fd].offset)
+        fd_table[fd].file_size = fd_table[fd].offset;
+    return (ssize_t)written;
 }
 
 // ===================== close (file) =====================

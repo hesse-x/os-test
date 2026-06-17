@@ -28,7 +28,7 @@ void kernel_init_finish() {
 // Read ELF from disk via AHCI DMA — two-phase: read header first, then allocate
 // exact-size pages and read the rest. Returns BFC-allocated buffer (caller must free_page)
 // or nullptr on failure.
-#define ELF_SLOT_SECTORS 100   // max slot size per ELF on disk (50KB)
+#define ELF_SLOT_SECTORS 200   // max slot size per ELF on disk (100KB)
 
 static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_page, size_t *out_npages) {
   // Phase 1: read first sector to parse ELF header
@@ -128,7 +128,7 @@ void kernel_main(boot_info *bi) {
   serial_puts("kernel_main: BSP idle created\n");
 
   // Load user processes from disk
-  // LBA layout: 1-100=unused(gap), 101=fs_driver(100s), 201=init(100s)
+  // LBA layout: 1-100=unused(gap), 101=fs_driver(200s), 301=init(200s), 501+=FAT32
   // kbd_driver, kms_driver, terminal, shell are spawned by init from FAT32
 
   {
@@ -146,7 +146,7 @@ void kernel_main(boot_info *bi) {
   {
     serial_puts("kernel_main: loading init...\n");
     uint64_t sz; Page *pg; size_t np;
-    uint8_t *elf = load_elf_from_disk(201, &sz, &pg, &np);
+    uint8_t *elf = load_elf_from_disk(301, &sz, &pg, &np);
     if (elf) { proc_t *init_proc = process_create_elf(elf, sz); bfc_alloc.free_page(pg, np); if (init_proc) { init_pid = init_proc->pid; serial_puts("kernel_main: init created\n"); } }
     else serial_puts("kernel_main: init.elf not found\n");
   }

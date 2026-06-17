@@ -58,16 +58,17 @@
 | 用户态驱动（3 层 kbd + req bind/unbind + 各驱动工作流） | [user_driver.md](user_driver.md) |
 | 构建系统（CMake + mkdisk + mkimg） | [cmake.md](cmake.md) |
 | Shell 设计（命令 + FS IPC + 路径执行） | [shell.md](shell.md) |
+| fs_driver 异步事件循环 + 文件写入 | [file_system.md](file_system.md) |
 
 ## 当前状态
 
-内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 3 个 ELF（disk_driver + fs_driver + init）→ init 从 FAT32 启动 kbd/kms/terminal → terminal 启动 shell → 多进程协作。
+内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 2 个 ELF（fs_driver + init）→ init 从 FAT32 启动 kbd/kms/terminal → terminal 启动 shell → 多进程协作。
 
-**统一 IPC 完成**：sys_recv/sys_req/sys_resp + sys_msg/sys_msg_resp 双层 IPC 机制。sys_recv 统一接收 IRQ/REQ/NOTIFY/MSG 四类消息（per-process 16 slot recv 队列 + 4 参数签名支持变长数据），sys_req 同步内联请求（56 字节载荷），sys_msg 同步变长消息（≤64KB，内核 kmalloc 中转拷贝）。NR_SYSCALL=26。
+**统一 IPC 完成**：sys_recv/sys_req/sys_resp + sys_msg/sys_msg_resp 双层 IPC 机制。sys_recv 统一接收 IRQ/REQ/NOTIFY/MSG 四类消息（per-process 16 slot recv 队列 + 4 参数签名支持变长数据），sys_req 同步内联请求（56 字节载荷），sys_msg 同步变长消息（≤64KB，内核 kmalloc 中转拷贝）。NR_SYSCALL=34。
 
 **Display 协议完成**：KMS 驱动重构为 display backend（创建 display SHM + back buffer flip），Terminal 作为 compositor 渲染 cell 到 back buffer（display client API），driver/display.h + driver/font.h 提取为共享组件。
 
-**文件系统重构完成**：fs_driver 从 fs_shm 共享页 IPC 迁移到 sys_msg 变长 IPC。多客户端 session（MAX_CLIENTS=16，每客户端 8 个 fd）。VFAT LFN 读写、FHS 目录结构、Shell 路径执行（替代 `run` 命令）。libc 文件 I/O（user/lib/file.cc）通过 sys_msg 实现 open/read/write/close。
+**文件系统完成**：fs_driver 异步事件循环 + sys_block_async 异步磁盘 I/O。多客户端 session（MAX_CLIENTS=16，每客户端 8 个 fd）。VFAT LFN 读写、FHS 目录结构、Shell 路径执行（替代 `run` 命令）。完整文件写入（write cmd：FAT 链遍历 + 簇分配/扩展 + 数据写入 + 目录项更新）。libc 文件 I/O（user/lib/file.cc）通过 sys_msg 实现 open/read/write/close。
 
 **时间子系统完成**：sys_gettime（全局单调时钟）+ sys_clock（per-process CPU 时间），libc timespec_get/clock 封装。
 
@@ -96,7 +97,7 @@
 
 | 功能 | 说明 | 优先级 |
 |------|------|--------|
-| 文件写入 (write) | fs_driver 支持文件内容写入（簇分配+数据写入），需将宿主机编译的 ELF 写入 FAT32 | 高 |
+| ~~文件写入 (write)~~ | ~~fs_driver 支持文件内容写入~~ | ✅ 已完成 |
 | 删除 (unlink/rmdir) | 目录项标记 0xE5 + FAT 簇释放 | 中 |
 | RTC 时间源 | UEFI 获取初始时间 → sys_gettime syscall → 真实时间戳 | 中 |
 
@@ -213,7 +214,7 @@
 
 ### 文件系统（POSIX 文件 I/O）
 
-- [ ] FAT32 完善：文件写入、删除、truncate、大文件支持
+- [ ] FAT32 完善：删除、truncate、大文件支持
 - [ ] sys_stat / sys_lseek
 - [ ] sys_mmap 文件映射：MAP_SHARED 文件后端
 - [ ] 验证: 用户程序通过 sys_open/read/write 读写文件
@@ -270,7 +271,7 @@
 
 | 功能 | 优先级 | 状态 | 说明 |
 |------|--------|------|------|
-| 异步块设备 | 中 | 待做 | 内核 kthread 处理 block 请求，fs_driver 通过 msg/msg_resp 异步访问（当前同步 syscall 在单线程下吞吐一致，多客户端并发时需要异步化） |
+| ~~异步块设备~~ | ~~中~~ | ✅ 已完成 | `sys_block_async` + RECV_NOTIFY 完成回调，fs_driver 事件循环已使用 |
 | NVMe 驱动 | 低 | 待做 | PCIe + 多队列 + PRP/SGL |
 | 块设备文件系统 `/dev/sda` | 低 | 待做 | fs_driver 通过 open + read/write 访问磁盘，而非专用 syscall |
 | `qemu-xhci` 替代遗留 USB 控制器 | 低 | 已有基础设施 | PCIe 枚举已就绪，需 xHCI 驱动实现 |
@@ -292,10 +293,11 @@
 | MSI / MSI-X | APIC | 低 | PCIe 设备中断 |
 | 用户态 SSE/FPU | 无 | 中 | lazy FPU restore，gcc 构建依赖 |
 | FSINFO 空闲簇提示 | FAT32 | 低 | 加速空闲簇查找 |
-| 多客户端 fs_driver 并发 | fs_driver 事件循环 | 高 | 已设计，见 [file_system.md](file_system.md) Phase 5 |
-| fs_driver 事件循环 → 协程迁移 | GCC ≥ 12 + 栈回溯支持 | 中 | 回调链重构为 C++20 协程，见 [file_system.md](file_system.md) 搁置项 |
+| ~~多客户端 fs_driver 并发~~ | ~~fs_driver 事件循环~~ | ~~高~~ | ✅ 已完成，见 [file_system.md](file_system.md) |
+| ~~fs_driver 事件循环~~ | — | ~~中~~ | ✅ 已完成，异步事件循环 + disk_io/pending_op |
+| 回调链 → 协程迁移 | GCC ≥ 12 + 栈回溯支持 | 中 | 见 [file_system.md](file_system.md) 搁置项 |
 | 多线程客户端 session 并发安全 | 多线程进程 | 中 | 需 per-fd 粒度锁，见 [file_system.md](file_system.md) 搁置项 |
-| 磁盘队列优先级调度 | 多客户端延迟敏感 | 低 | client read > readahead 优先级，见 [file_system.md](file_system.md) 搁置项 |
+| 磁盘队列优先级调度 | 多客户端延迟敏感 | 低 | 见 [file_system.md](file_system.md) 搁置项 |
 | VFS 层 | 无 | 低 | 支持多种文件系统类型 |
 | 页面换出 (swap) | FAT32 write | 低 | BFC 不足时换出到磁盘 |
 | 启动流程改造 | kbd 重构完成 | ✅ | init + FAT32 启动用户态服务，见 [boot.md](boot.md) |

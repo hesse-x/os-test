@@ -10,6 +10,7 @@
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/errno.h"
+#include "fcntl.h"
 
 // ===================== FS IPC via sys_msg =====================
 
@@ -93,6 +94,27 @@ static int fs_request(struct file_req *freq, size_t resp_len) {
     return (int)fresp->status;
 }
 
+// Write request: file_req + inline data, single sys_msg
+static int fs_write_request(uint32_t fs_fd, const void *data, size_t len, size_t *written) {
+    fflush(stdout);
+    size_t msg_len = sizeof(struct file_req) + len;
+    uint8_t *msg_buf = (uint8_t *)malloc(msg_len);
+    if (!msg_buf) return -ENOMEM;
+    struct file_req *freq = (struct file_req *)msg_buf;
+    memset(freq, 0, sizeof(*freq));
+    freq->cmd = FILE_CMD_WRITE;
+    freq->fs_fd = fs_fd;
+    freq->count = (uint32_t)len;
+    memcpy(msg_buf + sizeof(struct file_req), data, len);
+    int r = sys_msg(fs_pid, msg_buf, msg_len, fs_reply_buf, sizeof(struct file_resp));
+    free(msg_buf);
+    if (r < 0) return r;
+    struct file_resp *fresp = (struct file_resp *)fs_reply_buf;
+    if (fresp->status != 0) return (int)fresp->status;
+    if (written) *written = fresp->count;
+    return 0;
+}
+
 static void build_abs_path(const char *rel, char *abs) {
     int i;
     if (rel[0] == '/') {
@@ -156,8 +178,9 @@ static void format_datetime(uint32_t date, uint32_t time, char *out, int out_len
 static void cmd_ls(const char *rel_path, int long_format) {
     char abs_path[256];
     if (rel_path[0] == '\0') {
-        for (int i = 0; cwd[i] && i < 255; i++) abs_path[i] = cwd[i];
-        abs_path[255] = '\0';
+        int i;
+        for (i = 0; cwd[i] && i < 255; i++) abs_path[i] = cwd[i];
+        abs_path[i] = '\0';
     } else {
         build_abs_path(rel_path, abs_path);
     }
@@ -270,7 +293,6 @@ static void cmd_cat(const char *rel_path) {
         memset(&freq, 0, sizeof(freq));
         freq.cmd = FILE_CMD_READ;
         freq.fs_fd = fd;
-        freq.offset = offset;
         freq.count = to_read;
 
         if (fs_request(&freq, FS_REPLY_BUF_SIZE) != 0) break;
@@ -306,10 +328,11 @@ static void cmd_cd(const char *rel_path) {
         return;
     }
 
-    for (int i = 0; i < 255 && abs_path[i]; i++) cwd[i] = abs_path[i];
-    int len = 0;
-    while (cwd[len]) len++;
-    if (len > 1 && cwd[len-1] == '/') cwd[len-1] = '\0';
+    int i;
+    for (i = 0; i < 255 && abs_path[i]; i++) cwd[i] = abs_path[i];
+    cwd[i] = '\0';
+    int len = i;
+    if (len > 1 && cwd[len-1] == '/') { cwd[len-1] = '\0'; len--; }
 }
 
 static void cmd_pwd() {
@@ -332,6 +355,58 @@ static void cmd_touch(const char *rel_path) {
         else if (rc == -ENOMEM) printf("touch: no free cluster\n");
         else printf("touch: error\n");
     }
+}
+
+static void cmd_echo(const char *args) {
+    // Parse: echo TEXT > FILE  or  echo TEXT >> FILE
+    const char *text = args;
+    const char *redirect = NULL;
+    int append = 0;
+    // Find > or >>
+    for (const char *p = args; *p; p++) {
+        if (*p == '>') {
+            if (*(p+1) == '>') { append = 1; redirect = p + 2; }
+            else { append = 0; redirect = p + 1; }
+            break;
+        }
+    }
+    if (!redirect) { printf("Usage: echo TEXT > FILE  or  echo TEXT >> FILE\n"); return; }
+
+    // Extract text (everything before >)
+    int text_len = (int)(redirect - args - 1 - append);
+    if (text_len < 0) text_len = 0;
+    while (text_len > 0 && text[text_len-1] == ' ') text_len--;
+
+    // Skip spaces after >>
+    while (*redirect == ' ') redirect++;
+
+    char abs_path[256];
+    build_abs_path(redirect, abs_path);
+
+    // Open file for write
+    struct file_req freq;
+    memset(&freq, 0, sizeof(freq));
+    freq.cmd = FILE_CMD_OPEN;
+    freq.flags = O_WRONLY | (append ? O_APPEND : 0);
+    strncpy(freq.path, abs_path, 255);
+
+    if (fs_request(&freq, FS_REPLY_BUF_SIZE) != 0) {
+        printf("echo: cannot open %s\n", abs_path);
+        return;
+    }
+
+    struct file_resp *fresp = (struct file_resp *)fs_reply_buf;
+    uint32_t fd = fresp->fd;
+
+    size_t written = 0;
+    int rc = fs_write_request(fd, text, (size_t)text_len, &written);
+
+    memset(&freq, 0, sizeof(freq));
+    freq.cmd = FILE_CMD_CLOSE;
+    freq.fs_fd = fd;
+    fs_request(&freq, sizeof(struct file_resp));
+
+    if (rc != 0) printf("echo: write error (%d)\n", rc);
 }
 
 static void cmd_mkdir(const char *rel_path) {
@@ -425,7 +500,6 @@ static void exec_path(const char *rel_path) {
         memset(&freq, 0, sizeof(freq));
         freq.cmd = FILE_CMD_READ;
         freq.fs_fd = fd;
-        freq.offset = offset;
         freq.count = to_read;
 
         if (fs_request(&freq, FS_REPLY_BUF_SIZE) != 0) {
@@ -487,6 +561,7 @@ static const cmd_entry cmds[] = {
     {"cat",   cmd_cat,    1},
     {"touch", cmd_touch,  1},
     {"mkdir", cmd_mkdir,  1},
+    {"echo",  cmd_echo,   1},
 };
 
 // ===================== Main =====================
@@ -561,6 +636,7 @@ extern "C" void _start() {
             printf("cd <path>       - change directory\n");
             printf("pwd             - print working directory\n");
             printf("touch <path>    - create empty file\n");
+            printf("echo TEXT > FILE  - write text to file\n");
             printf("mkdir <path>    - create directory\n");
             printf("r LBA [COUNT]   - raw disk read\n");
             printf("<path>          - execute ELF file\n");
