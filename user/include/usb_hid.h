@@ -1,0 +1,15 @@
+#ifndef USER_USB_HID_H
+#define USER_USB_HID_H
+
+#include <stdint.h>
+#include "input.h"
+#include "common/shm.h"  // usb_hid_slot, usb_hid_shm_header, HID constants
+
+// Read keyboard events from USB HID SHM ring
+// Returns 0 if event produced, -1 if ring empty
+int get_keycode(key_event *ev);
+
+// Initialize get_keycode with SHM address
+void get_keycode_init(void *shm_addr);
+
+#endif // USER_USB_HID_H

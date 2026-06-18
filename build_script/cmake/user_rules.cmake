@@ -29,42 +29,53 @@ function(add_user_elf elf_name)
     cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS" ${ARGN})
 
     set(ELF_DIR ${CMAKE_BINARY_DIR})
-    set(OBJ_FILE ${ELF_DIR}/${elf_name}.o)
-    set(STRIPPED_OBJ_FILE ${ELF_DIR}/${elf_name}.stripped.o)
     set(ELF_FILE ${ELF_DIR}/${elf_name}.elf)
 
-    # Step 1: compile
-    set(COMPILE_DEPS "")
-    foreach(src ${ARG_SOURCES})
-        list(APPEND COMPILE_DEPS ${CMAKE_CURRENT_SOURCE_DIR}/${src})
-    endforeach()
-
+    # Compiler selection
     if(ARG_C)
         set(COMPILE_CMD ${CMAKE_C_COMPILER})
-        set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
-        set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include)
     endif()
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include)
 
-    add_custom_command(
-        OUTPUT ${OBJ_FILE}
-        COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS} -c ${CMAKE_CURRENT_SOURCE_DIR}/${ARG_SOURCES} -o ${OBJ_FILE}
-        DEPENDS ${COMPILE_DEPS}
-        COMMENT "Compiling ${elf_name}.o"
-    )
+    # Step 1: compile each source file
+    set(COMPILE_DEPS "")
+    set(OBJ_FILES "")
+    set(idx 0)
+    foreach(src ${ARG_SOURCES})
+        # Resolve path: if starts with /, use absolute; otherwise relative to CMAKE_CURRENT_SOURCE_DIR
+        if(src MATCHES "^/")
+            set(src_full ${src})
+        else()
+            set(src_full ${CMAKE_CURRENT_SOURCE_DIR}/${src})
+        endif()
 
-    # Step 2: objcopy (strip .note.gnu.property)
-    add_custom_command(
-        OUTPUT ${STRIPPED_OBJ_FILE}
-        COMMAND objcopy --remove-section .note.gnu.property ${OBJ_FILE} ${STRIPPED_OBJ_FILE}
-        DEPENDS ${OBJ_FILE}
-        COMMENT "Stripping ${elf_name}.o"
-    )
+        set(src_obj ${ELF_DIR}/${elf_name}_${idx}.o)
+        set(src_stripped ${ELF_DIR}/${elf_name}_${idx}.stripped.o)
 
-    # Step 3: ld
-    set(LD_DEPS ${STRIPPED_OBJ_FILE})
-    set(LD_ARGS ${STRIPPED_OBJ_FILE})
+        add_custom_command(
+            OUTPUT ${src_obj}
+            COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS} -c ${src_full} -o ${src_obj}
+            DEPENDS ${src_full}
+            COMMENT "Compiling ${elf_name}_${idx}.o"
+        )
+
+        add_custom_command(
+            OUTPUT ${src_stripped}
+            COMMAND objcopy --remove-section .note.gnu.property ${src_obj} ${src_stripped}
+            DEPENDS ${src_obj}
+            COMMENT "Stripping ${elf_name}_${idx}.o"
+        )
+
+        list(APPEND COMPILE_DEPS ${src_full})
+        list(APPEND OBJ_FILES ${src_stripped})
+        math(EXPR idx "${idx} + 1")
+    endforeach()
+
+    # Step 2: ld
+    set(LD_DEPS ${OBJ_FILES})
+    set(LD_ARGS ${OBJ_FILES})
 
     if(ARG_LINK_LIBS)
         foreach(lib ${ARG_LINK_LIBS})

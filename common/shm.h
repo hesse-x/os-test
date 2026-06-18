@@ -113,4 +113,42 @@ struct kbd_ring {
     uint8_t padding[48];             // pad to 128 bytes total
 };
 
+// ===================== USB HID shared memory =====================
+// 1 page (4KB) pre-allocated by kernel xHCI init, attached by kbd_driver
+// via sys_shm_attach(USB_HID_SHM_ID, 1) (kernel SHM mode).
+//
+// Layout: 32B header + 4 sub-rings (keyboard/mouse/gamepad/touchpad)
+// Each sub-ring: 100 slots × 10 bytes = 1000 bytes
+
+#define USB_HID_SHM_ID     1    // kernel SHM ID for sys_shm_attach
+#define USB_HID_SHM_MAGIC  0x55484944  // "UHID"
+#define USB_HID_SHM_VERSION 1
+
+#define HID_TYPE_KEYBOARD   1
+#define HID_TYPE_MOUSE      2
+#define HID_TYPE_GAMEPAD    3
+#define HID_TYPE_TOUCHPAD   4
+
+#define HID_SUBRING_KBD_OFFSET    32
+#define HID_SUBRING_MOUSE_OFFSET  1032
+#define HID_SUBRING_CAPACITY      100
+#define HID_SLOT_SIZE             10
+
+struct usb_hid_slot {
+    uint8_t  type;       // HID_TYPE_KEYBOARD etc.
+    uint8_t  len;        // valid bytes in data[]
+    uint8_t  data[8];    // raw HID report (keyboard: 8B Boot Protocol)
+};
+
+struct usb_hid_shm_header {
+    uint32_t magic;      // USB_HID_SHM_MAGIC
+    uint32_t version;    // USB_HID_SHM_VERSION
+    struct {
+        uint32_t head;
+        uint32_t tail;
+        uint32_t capacity;   // HID_SUBRING_CAPACITY
+        uint32_t reserved;
+    } rings[4];              // 4 sub-rings: kbd/mouse/gamepad/touchpad
+};
+
 #endif

@@ -44,7 +44,7 @@ static int fs_write_send(uint32_t fs_fd, const void *data, size_t len,
                          struct file_resp *fresp) {
     size_t msg_len = sizeof(struct file_req) + len;
     uint8_t *msg = (uint8_t *)malloc(msg_len);
-    if (!msg) return -ENOMEM;
+    if (!msg) { printf("writetest: malloc(%u) failed\n", (unsigned)msg_len); return -ENOMEM; }
     struct file_req *freq = (struct file_req *)msg;
     memset(freq, 0, sizeof(*freq));
     freq->cmd = FILE_CMD_WRITE;
@@ -53,7 +53,7 @@ static int fs_write_send(uint32_t fs_fd, const void *data, size_t len,
     memcpy(msg + sizeof(struct file_req), data, len);
     int r = sys_msg(fs_pid, msg, msg_len, fresp, sizeof(struct file_resp));
     free(msg);
-    if (r < 0) return r;
+    if (r < 0) { printf("writetest: sys_msg returned %d\n", r); return r; }
     return (int)fresp->status;
 }
 

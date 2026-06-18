@@ -689,6 +689,7 @@ static pending_op *alloc_pending_op() {
             return &pending_pool[i];
         }
     }
+    serial_write("alloc_pending_op: pool exhausted!", 33);
     return NULL;
 }
 
@@ -712,6 +713,16 @@ static void op_complete(pending_op *op, int32_t status, uint32_t count) {
     file_resp *resp = (file_resp *)op->reply_buf;
     resp->status = status;
     resp->count = count;
+    if (status != 0) {
+        if (status == -12) serial_write("op_complete: ENOMEM\n", 20);
+        else if (status == -2) serial_write("op_complete: ENOENT\n", 20);
+        else if (status == -4) serial_write("op_complete: EINTR\n", 19);
+        else if (status == -17) serial_write("op_complete: EEXIST\n", 20);
+        else if (status == -22) serial_write("op_complete: EINVAL\n", 20);
+        else if (status == -5) serial_write("op_complete: EIO\n", 17);
+        else if (status == -28) serial_write("op_complete: ENOSPC\n", 20);
+        else { serial_write("op_complete: OTHER\n", 19); }
+    }
     // op_complete: send reply and free
     msg_resp(op->reply_buf, sizeof(file_resp) + count);
     free_pending_op(op);
@@ -1365,18 +1376,27 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
             }
             serial_write("RS_SCAN: cache hit\n", 19);
             {
-                // Debug: print first entry name[0] and attr
+                // Debug: print entry_idx and first 4 entries name[0]
                 uint8_t *d = cache[slot].data;
-                char hb[8];
+                char hb[40];
                 const char *hx = "0123456789ABCDEF";
-                hb[0]='n'; hb[1]='0'; hb[2]='=';
-                hb[3]=hx[d[0]>>4]; hb[4]=hx[d[0]&0xf];
-                hb[5]=' '; hb[6]='a'; hb[7]='=';
-                serial_write(hb, 8);
-                char hb2[4];
-                hb2[0]=hx[d[11]>>4]; hb2[1]=hx[d[11]&0xf];
-                hb2[2]='\n'; hb2[3]=0;
-                serial_write(hb2, 3);
+                int pos = 0;
+                // Print entry_idx
+                hb[pos++] = 'i'; hb[pos++] = 'd'; hb[pos++] = 'x'; hb[pos++] = '=';
+                int ei = rs->entry_idx;
+                if (ei == 0) { hb[pos++] = '0'; }
+                else { char tmp[8]; int ti=0; while(ei){tmp[ti++]='0'+ei%10;ei/=10;} for(int j=ti-1;j>=0;j--)hb[pos++]=tmp[j]; }
+                hb[pos++] = ' ';
+                serial_write(hb, pos);
+                // Print first 4 name[0] bytes
+                pos = 0;
+                for (int i = 0; i < 4; i++) {
+                    hb[pos++] = 'e'; hb[pos++] = '0'+i; hb[pos++] = '=';
+                    hb[pos++] = hx[d[i*32]>>4]; hb[pos++] = hx[d[i*32]&0xf];
+                    hb[pos++] = ' ';
+                }
+                hb[pos++] = '\n';
+                serial_write(hb, pos);
             }
 
             uint8_t *data = cache[slot].data;
@@ -1399,6 +1419,10 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
                 }
                 if (de->name[0] == 0x00) {
                     // End of directory — not found
+                    { char hb[8]; const char *hx="0123456789ABCDEF";
+                      int v=rs->entry_idx; hb[0]='e'; hb[1]='o'; hb[2]='d';
+                      hb[3]=hx[(v>>4)&0xf]; hb[4]=hx[v&0xf]; hb[5]='\n';
+                      serial_write(hb,6); }
                     serial_write("RS_SCAN: end of dir\n", 20);
                     rs->found = false;
                     rs->phase = RS_DONE;
@@ -1437,6 +1461,13 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
                     rs->entry_idx = 0;
 
                     if (rs->comp_len > 0) {
+                        // In is_parent mode, stop if we've reached the leaf name
+                        // (next component is beyond the parent path)
+                        if (rs->is_parent && rs->leaf_len > 0) {
+                            rs->found = true;
+                            rs->phase = RS_DONE;
+                            return RESOLVE_DONE;
+                        }
                         // More components — descend into directory
                         if (!(de->attr & 0x10)) {
                             rs->found = false;
@@ -2186,6 +2217,7 @@ static void raw_read_complete(disk_io *io) {
 static void start_write(pending_op *op, struct client_session *sess,
                          uint32_t fs_fd, uint32_t count,
                          uint8_t *write_data, size_t data_len) {
+    serial_write("start_write: enter\n", 19);
     file_resp *resp = (file_resp *)op->reply_buf;
     resp->status = 0;
     resp->fd = 0;
@@ -2578,6 +2610,8 @@ static void resume_write(pending_op *op) {
         write_lock_release();
 
         // Reply
+        if (resp->status != 0) serial_write("write_done: ERROR\n", 18);
+        else serial_write("write_done: OK\n", 15);
         resp->status = (resp->status != 0) ? resp->status : 0;
         resp->count = op->u.write.bytes_written;
         resp->file_size = op->u.write.new_file_size;

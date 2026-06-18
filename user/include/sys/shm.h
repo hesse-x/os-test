@@ -10,6 +10,7 @@ extern "C" {
 
 int shm_create(size_t size, void **addr);
 int shm_attach(pid_t target, void **addr);
+int shm_attach_kernel(int shm_id, void **addr);
 
 #ifdef __cplusplus
 }

@@ -98,7 +98,7 @@ kernel/
 
 driver/
   CMakeLists.txt
-  kbd_driver.cc      — 用户态键盘驱动进程（IOPL=3, sys_irq_bind(33), inb(0x60), kbd_shm, sys_notify terminal, device_register(DEV_KBD)）
+  kbd_driver.cc      — 用户态键盘驱动进程（IOPL=0, shm_attach_kernel USB HID SHM, get_keycode, kbd_shm, sys_notify terminal, device_register(DEV_KBD)）
   kms_driver.cc      — 用户态 KMS 显示驱动进程（IOPL=0, display_backend_init 创建 display SHM, display_backend_poll/wait flip 循环, framebuffer 直写 0x700000）
   display.h          — Display 协议（display_shm_header + client API + backend API），terminal 和 KMS 共享
   font.h             — 8x16 字体位图（font8x16[96][16]），从 KMS/terminal 提取的共享资源
@@ -121,7 +121,9 @@ user/
     unistd.h         — POSIX 封装（getpid/_exit/read/write/close/pipe/open/sched_yield）
     sys.h            — 用户态 syscall 封装头文件（req_call 声明）
     sys/ipc.h        — IPC 封装（notify/recv/req/resp/msg/msg_resp，带 errno 设置）
+    sys/shm.h        — SHM 封装（shm_create/shm_attach/shm_attach_kernel 声明）
     input.h          — 键盘输入定义（key_event 结构体、input_key 枚举、修饰键、KBD_REQ_BIND/UNBIND 请求/回复结构体）
+    usb_hid.h        — USB HID SHM 常量 + get_keycode/get_keycode_init 声明（引用 common/shm.h 结构体）
   lib/
     stdio.cc        — FILE 实现 + stdout（line-buffered, sys_write_flush 写 pipe + 串口镜像）+ stderr（无缓冲）+ stdin（sys_read_fill 读 pipe）+ vfprintf 格式化引擎
     string.cc       — 字符串和内存操作函数实现
@@ -130,6 +132,8 @@ user/
     sys.cc           — req_call() 封装（委托 sys_req，56 字节载荷限制）
     file.cc          — libc 文件 I/O（open/read/write/close/pipe via sys_msg + 用户态 fd_table[32] 分发 FD_PIPE/FD_FILE）
     sys_ipc.cc       — IPC 封装（notify/recv/req/resp/msg/msg_resp，带 errno 设置）
+    sys_shm.cc       — shm_attach/shm_create 封装 + shm_attach_kernel（内核 SHM ID 查找，arg2 mode=1）
+    usb_kbd.cc       — USB HID keyboard get_keycode 实现（SHM ring 消费 + HID report 对比 + keycode 映射）
     time.cc          — timespec_get（sys_gettime 纳秒→timespec）+ clock（sys_clock 纳秒→微秒）
   malloctest.c     — malloc/free 测试程序（小分配/大分配/calloc/realloc，链接 libc，输出 ELF 名 malloc.elf）
 
@@ -139,7 +143,7 @@ common/
   errno.h             — 错误码定义（EOK/EPERM/ENOENT/ENOMEM/EINVAL/ENOSYS/ECHILD/EFAULT/EEXIST/EBUSY/ESRCH/ETIMEDOUT/EBADF/EMFILE/EISDIR/ENOTDIR/EIO）
   elf_loader.cc / elf_loader.h — ELF64 静态二进制加载器（elf_load_result, elf_load）
   syscall.h           — syscall 编号（SYS_GETPID 等，NR_SYSCALL=34）+ 语义封装 + sys_recv/sys_req/sys_resp/sys_notify/sys_msg/sys_msg_resp/sys_gettime/sys_clock/sys_ioperm/sys_dup2/sys_fcntl/sys_dma_alloc/sys_dma_free/sys_pci_dev_info/sys_block_read/sys_block_write
-  shm.h               — 共享内存 IPC 协议定义（disk_req_shm, disk_resp_shm, driver_shm_header, kbd_ring, fs_dirent, fs_req_request/fs_req_reply, kms_fb_info, offset 常量）
+  shm.h               — 共享内存 IPC 协议定义（disk_req_shm, disk_resp_shm, driver_shm_header, kbd_ring, fs_dirent, fs_req_request/fs_req_reply, kms_fb_info, offset 常量, USB HID SHM 结构体 usb_hid_slot/usb_hid_shm_header + 常量）
   dev.h               — 设备类型定义（DEV_NONE/DEV_DISK/DEV_KBD/DEV_KMS/DEV_FS/DEV_TERMINAL），用于 sys_load_dev/sys_lookup_dev
 
 kernel/
@@ -303,10 +307,10 @@ irq_owner[]：
 - **进程生命周期**：`sys_exit(exit_code)` 将当前进程设为 ZOMBIE（有父进程时向父进程 recv 队列入队 RECV_NOTIFY 并唤醒 WAIT_CHILD 或 WAIT_RECV）或直接回收（`parent_pid==-1` 时调用 `proc_reap`）；`sys_waitpid(pid, exit_code_ptr)` 阻塞等待子进程 ZOMBIE 后回收资源，返回子 PID 和退出码；`sys_spawn(elf_data, elf_size, iopl)` 从用户态 ELF 缓冲区创建子进程，IOPL 权限检查，设 `parent_pid`，自动继承 fd 0/1（pipe ref_count++）。sys_exit 通过 RECV_NOTIFY 唤醒父进程。proc_reap 清理进程全部 fd（pipe ref_count--，归零则 kfree pipe buf + pipe struct，wake_process 对端）+ dev_table_cleanup + 唤醒所有等待该进程 REQ/MSG reply 的进程（设 req_result/msg_result=ESRCH）+ 释放 recv 队列中的 RECV_MSG 内核缓冲区（kfree kmaddr）
 - **proc_reap**：回收进程全部资源——遍历 PML4[0-255] 释放用户页映射（跳过 SHM 页）+ 页表页（PDPT/PD/PT）+ PML4 页 + 内核栈（2 页）+ 释放动态 SHM（扫描所有进程 ref_count，无引用则释放物理页）+ 关闭所有 fd（pipe ref_count-- + wake 对端 + 归零 kfree）+ dev_table_cleanup + 唤醒 REQ/MSG reply 等待者（设 req_result/msg_result=ESRCH）+ 释放 recv 队列 RECV_MSG 内核缓冲区 + 最终 CPU 时间记账 + PCB 槽位清零。PTE 叶页物理地址提取使用 `pte & 0x000FFFFFFFFFF000`（清除 bit 63 NX 位），而非 `pte & ~0xFFF`（后者不清除 NX 位导致越界）
 - **用户态异常**：CPU 异常在 `trap_dispatch` 中判断 `tf->cs==0x2B`（用户态）时调用 `sys_exit(-1)` 替代 `halt()`，防止用户进程 crash 拖垮全机。内核态异常仍 halt
-- **IOPL 支持**：`proc_t::iopl` 字段允许 per-process IOPL。驱动进程（kbd_driver）IOPL=3，可直接 `in`/`out`；普通进程 IOPL=0，执行 I/O 指令触发 #GP
+- **IOPL 支持**：`proc_t::iopl` 字段允许 per-process IOPL。kbd_driver 现为 IOPL=0（USB HID SHM 模式，不再访问 I/O 端口）；普通进程 IOPL=0，执行 I/O 指令触发 #GP
 - **IRQ 绑定**：`sys_irq_bind(irq)` 将当前进程绑定到指定 IRQ（`__atomic_store_n` RELEASE），内核在 `irq_owner[irq]` 中记录 PID，该 IRQ 发生时内核直接获取 `scheduler_lock` 唤醒绑定进程
 - **Shell**：`shell/shell.cc` 编译为 ELF64 静态可执行文件，通过 mkdisk.sh 写入 FAT32。链接 libc.a。交互式命令行：从 fd 0 (stdin pipe) 读键盘输入（支持 readline + 退格），通过 fd 1 (stdout pipe) 输出，通过 sys_msg 与 fs_driver 通信，支持 `r` 命令直接读裸扇区。命令：`ls [-l]`（目录列表）、`cat <path>`（读文件）、`cd <path>`（切换目录）、`pwd`（打印工作目录）、`touch <path>`（创建文件）、`mkdir <path>`（创建目录）、`r LBA [COUNT]`（hex dump 裸扇区）、`<path>`（路径执行 ELF 文件）、`h`（帮助）。路径执行替代旧 `run`/`malloc`/`free`/`mtest` 命令
-- **用户态驱动**：`driver/kbd_driver.cc`（IOPL=3）绑定 IRQ1（vector 33），3 层架构（acquire→translate→push）：`kbd_irq_acquire` 从端口 0x60/0x64 读取扫描码，`kbd_translate` 转换为 `key_event`（`user/include/input.h` 定义 key 枚举和修饰键），`kbd_push` 映射为 ASCII 或 ESC 序列写入 kbd_ring。支持 REQ bind/unbind（KBD_REQ_BIND/KBD_REQ_UNBIND，通过 sys_req/sys_resp），bind 创建 1 页 SHM（含 driver_shm_header + kbd_ring[8]）并记录 consumer_pid，unbind 清除状态。consumer 已绑定时返回 -EBUSY。自注册 DEV_KBD（device_register）。`driver/kms_driver.cc`（IOPL=0, map_fb=true）调用 display_backend_init 创建 display SHM + 注册 DEV_KMS，display_backend_poll/wait flip 循环（memcpy back→front buffer + generation counter 校验）；`driver/terminal.cc`（IOPL=0）启动时通过 device_lookup(DEV_KBD) + sys_req(KBD_REQ_BIND) 绑定键盘，display_client_init attach display SHM，读键盘→sys_write(1) 到 stdin pipe，sys_read(0) 从 stdout pipe 读→VT100 状态机→cell 缓冲区→display_client_render_cell 渲染到 back buffer→display_client_flush，fd 0 为 O_RDONLY|O_NONBLOCK；`driver/fs_driver.cc`（IOPL=0）通过 sys_block_read/write 访问磁盘，通过 sys_msg/sys_msg_resp 处理客户端文件请求（多客户端 session, MAX_CLIENTS=16），执行 FAT32 操作（readdir/open/read/close/raw_read/touch/mkdir），自注册 DEV_FS
+- **用户态驱动**：`driver/kbd_driver.cc`（IOPL=0）USB HID 键盘驱动：`shm_attach_kernel(USB_HID_SHM_ID)` attach 内核预分配 HID SHM，`get_keycode_init` + `get_keycode`（`user/lib/usb_kbd.cc`）读 SHM keyboard sub-ring + HID report 对比 → key_event，`kbd_push` 映射为 ASCII 或 ESC 序列写入 kbd_ring。主循环：RECV_NOTIFY → get_keycode → kbd_push。支持 REQ bind/unbind（KBD_REQ_BIND/KBD_REQ_UNBIND，通过 sys_req/sys_resp），bind 创建 1 页 SHM（含 driver_shm_header + kbd_ring[8]）并记录 consumer_pid，unbind 清除状态。consumer 已绑定时返回 -EBUSY。自注册 DEV_KBD（device_register）。PS/2 路径已完全移除（不再 bind IRQ1、不再 ioperm、不再 inb）。`driver/kms_driver.cc`（IOPL=0, map_fb=true）调用 display_backend_init 创建 display SHM + 注册 DEV_KMS，display_backend_poll/wait flip 循环（memcpy back→front buffer + generation counter 校验）；`driver/terminal.cc`（IOPL=0）启动时通过 device_lookup(DEV_KBD) + sys_req(KBD_REQ_BIND) 绑定键盘，display_client_init attach display SHM，读键盘→sys_write(1) 到 stdin pipe，sys_read(0) 从 stdout pipe 读→VT100 状态机→cell 缓冲区→display_client_render_cell 渲染到 back buffer→display_client_flush，fd 0 为 O_RDONLY|O_NONBLOCK；`driver/fs_driver.cc`（IOPL=0）通过 sys_block_read/write 访问磁盘，通过 sys_msg/sys_msg_resp 处理客户端文件请求（多客户端 session, MAX_CLIENTS=16），执行 FAT32 操作（readdir/open/read/close/raw_read/touch/mkdir），自注册 DEV_FS
 - **Shell 构建**：通过 `add_user_elf(shell SOURCES shell.cc LINK_LIBS c)` 在 CMake 中管理。编译 flags 由 `user_rules.cmake` 统一设置（`-m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -I. -Iuser/include`），链接 `libc.a`
 - **hello 构建**：通过 `add_user_elf(hello C SOURCES hello.c LINK_LIBS c)` 在 CMake 中管理。`C` 标记指定使用 gcc 编译 C 程序。hello.elf 通过 mkdisk.sh 写入 FAT32
 - **hello 程序**：`user/hello.c` 编译为 ELF64 静态可执行文件，使用 libc 提供的 `_start`（调用 main → sys_exit）和 `printf` + `timespec_get` 计时。通过 mkdisk.sh 写入 FAT32 分区。shell 路径执行（如 `hello.elf`）可从 FAT32 加载并 spawn 执行
@@ -330,7 +334,7 @@ Phase 3 实现了最小 fd + pipe 机制，将 Shell 的 I/O 从直写 KMS ring 
 - **Terminal/Shell pipe 拓扑**：kernel_main 创建两对 pipe：
   - pipe_stdin：terminal fd_table[1](O_WRONLY) → shell fd_table[0](O_RDONLY)
   - pipe_stdout：shell fd_table[1](O_WRONLY) → terminal fd_table[0](O_RDONLY | O_NONBLOCK)
-- **数据流**：键盘 → kbd_driver → kbd_ring → terminal → sys_write(1) → stdin pipe → shell sys_read(0)；shell printf → sys_write(1) → stdout pipe → terminal sys_read(0) → VT100 → cell buffer → display_client_render_cell → back buffer → display_client_flush → KMS display_backend_poll → memcpy back→front → framebuffer
+- **数据流**：USB键盘 → xHCI Transfer Ring → ISR → SHM keyboard sub-ring → RECV_NOTIFY → kbd_driver get_keycode → kbd_push → kbd_ring → terminal → sys_write(1) → stdin pipe → shell sys_read(0)；shell printf → sys_write(1) → stdout pipe → terminal sys_read(0) → VT100 → cell buffer → display_client_render_cell → back buffer → display_client_flush → KMS display_backend_poll → memcpy back→front → framebuffer
 - **Terminal 进程**（`driver/terminal.cc`）：通过 device_lookup(DEV_KBD) + sys_req(KBD_REQ_BIND) 绑定键盘，display_client_init attach display SHM（从 header 读 fb 元信息），维护 VT100 状态机（NORMAL/ESC/CSI）+ cell 缓冲区（ch + fg_color + bg_color），支持 \033[H/\033[row;colH/\033[2J/\033[K/\033[...m。主循环轮询 kbd_ring 和 stdout pipe（fd 0 O_NONBLOCK），flush_dirty_cells 渲染 dirty cell 到 back buffer，display_client_flush 标记 dirty + 递增 generation + 检查 backend_sleeping 决定是否 notify KMS
 - **Display 协议**（`driver/display.h`）：display_shm_header（fb 元信息 + dirty_full + generation + backend_sleeping），client API（terminal 侧渲染 cell/clear/scroll/flush），backend API（KMS 侧 init/poll/wait）。generation counter 乐观锁防撕裂。详见 `doc/design/kms.md`
 
@@ -353,13 +357,16 @@ Phase 3 实现了最小 fd + pipe 机制，将 Shell 的 I/O 从直写 KMS ring 
 - `enable_paging` 在 `arch/x64/paging.cc` 中定义（物理地址运行），接受 `boot_info*` 参数（当前未使用）
 - `init_fb` 在 `init_mem` 末尾调用，依赖 bump_alloc 和 device_vma_base 就绪
 - CMake 链接步骤使用 `build_script/cmake/do_link.cmake` 脚本处理 `$<TARGET_OBJECTS>` 的分号列表问题
-- Shell 的用户态 syscall 封装定义在 `common/syscall.h`（语义封装）+ `arch/x64/utils.h`（底层 `__syscall0` 等内联汇编），共享页结构定义在 `common/shm.h`。libc 封装：`user/include/sys.h`（req_call）+ `user/include/sys/ipc.h`（notify/recv/req/resp/msg/msg_resp）+ `user/include/unistd.h`（getpid/read/write/close/pipe/open）+ `user/lib/file.cc`（用户态 fd_table + open/read/write/close）
+- Shell 的用户态 syscall 封装定义在 `common/syscall.h`（语义封装）+ `arch/x64/utils.h`（底层 `__syscall0` 等内联汇编），共享页结构定义在 `common/shm.h`。libc 封装：`user/include/sys.h`（req_call）+ `user/include/sys/ipc.h`（notify/recv/req/resp/msg/msg_resp）+ `user/include/sys/shm.h`（shm_create/shm_attach/shm_attach_kernel）+ `user/include/unistd.h`（getpid/read/write/close/pipe/open）+ `user/lib/file.cc`（用户态 fd_table + open/read/write/close）
 - libc.a 为 CMake STATIC target `c`，输出 `build/libc.a`。shell/hello/malloctest/terminal 通过 `add_user_elf(LINK_LIBS c)` 链接
 - 用户程序编译加 `-I. -Iuser/include`：`-Iuser/include` 让自定义 stdio.h/stdlib.h/string.h 优先于宿主机版本；`-I.` 让 common/syscall.h 和 arch/x64/utils.h 可用；宿主机 freestanding 头文件（stdint.h/stddef.h/stdarg.h）通过 gcc 默认路径可用
 - PTE 物理地址提取必须用 `pte & 0x000FFFFFFFFFF000`（清除 bit 63 NX 位），`& ~0xFFF` 不清除 NX 位会导致越界
 - `sys_notify` 入队 RECV_NOTIFY 消息到目标进程 recv 队列并唤醒 WAIT_RECV，不再直接操作 state/run_queue（与 `wake_process` 区分：pipe I/O 唤醒用 `wake_process` 只改状态不入队消息，避免 sys_recv 误消费）
 - `common/input.h` 已移至 `user/include/input.h`，KBD_RPC_BIND/UNBIND 已改名为 KBD_REQ_BIND/UNBIND
 - `common/elf.cc` 已移至 `kernel/elf_loader.cc`，`common/efi.h` 已移至 `kernel/efi.h`
+- `sys_shm_attach` 扩展：arg2 mode=0 为原有 PID attach，mode=1 为内核 SHM ID attach（`kernel_shm_table` + `register_kernel_shm`）
+- kbd_driver 从 PS/2 迁移到 USB HID：IOPL=0，不再 bind IRQ1/inb，改为 `shm_attach_kernel` + `get_keycode`
+- `add_user_elf` 现支持多源文件：kbd_driver = `kbd_driver.cc` + `../user/lib/usb_kbd.cc`
 - 驱动自注册：kbd_driver/kms_driver/fs_driver 通过 `device_register(getpid(), DEV_XXX)` 自注册
 
 # 编程指导原则

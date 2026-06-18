@@ -63,10 +63,6 @@ static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus
 
   device_vma_base = vma + num_2mb * 0x200000;
   flush_tlb();
-
-  serial_puts("pci: ECAM mapped vbase=");
-  serial_put_hex(ecam_vbase);
-  serial_puts("\n");
 }
 
 // ===================== Config space access =====================
@@ -198,13 +194,6 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
         d->msix_table_offset = table_info & ~0x7;
         d->msix_pba_bar = pba_info & 0x7;
         d->msix_pba_offset = pba_info & ~0x7;
-        serial_puts("pci: MSI-X cap at 0x");
-        serial_put_hex(cap_ptr);
-        serial_puts(" table_bar=");
-        serial_put_hex(d->msix_table_bar);
-        serial_puts(" table_off=0x");
-        serial_put_hex(d->msix_table_offset);
-        serial_puts("\n");
       }
       cap_ptr = next_ptr;
       if (cap_ptr < 0x40) break; // invalid, stop
@@ -219,22 +208,6 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   }
 
   pci_device_count++;
-
-  serial_puts("pci: ");
-  serial_put_hex(bus);
-  serial_puts(":");
-  serial_put_hex(dev);
-  serial_puts(".");
-  serial_put_hex(func);
-  serial_puts(" vendor=");
-  serial_put_hex(vendor);
-  serial_puts(" device=");
-  serial_put_hex(device);
-  serial_puts(" class=");
-  serial_put_hex(class_code);
-  if ((header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE)
-    serial_puts(" [BRIDGE]");
-  serial_puts("\n");
 
   // If PCI-to-PCI bridge, scan secondary bus
   if ((header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE) {
@@ -356,7 +329,7 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
   uint64_t ptr = (uint64_t)out_ptr;
   if (!ptr || ptr >= 0xFFFFFFFF80000000ULL ||
       ptr + sizeof(struct pci_dev_info) > 0xFFFFFFFF80000000ULL)
-    return (uint64_t)EFAULT;
+    return (uint64_t)-EFAULT;
 
   // Find the device
   struct pci_device *d = nullptr;
@@ -367,7 +340,7 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
       break;
     }
   }
-  if (!d) return (uint64_t)ENOENT;
+  if (!d) return (uint64_t)-ENOENT;
 
   struct pci_dev_info info = {};
   info.vendor_id = d->vendor_id;
@@ -392,8 +365,10 @@ int pci_enable_msix(struct pci_device *dev, int num_vectors) {
   if (dev->msix_cap_offset == 0) return -ENOSYS;
   if (num_vectors <= 0 || next_msix_vector + num_vectors > 128) return -ENOMEM;
 
-  // Read Message Control to get table size (bits 10:2 = N-1)
-  uint32_t msg_ctrl = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset + 2);
+  // Read Message Control to get table size (bits 10:2 of 16-bit Message Control = N-1)
+  // Message Control is at cap_offset+2, upper 16 bits of DWORD at cap_offset
+  uint32_t cap_dword = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
+  uint16_t msg_ctrl = (cap_dword >> 16) & 0xFFFF;
   int table_size = ((msg_ctrl >> 2) & 0x7FF) + 1;
   if (num_vectors > table_size) num_vectors = table_size;
 
@@ -420,20 +395,15 @@ int pci_enable_msix(struct pci_device *dev, int num_vectors) {
     table[i * 4 + 3] = 1;                                     // Vector Control: Mask bit = 1
   }
 
-  // Enable MSI-X: set Enable bit (bit 0) in Message Control
-  // Also set Function Mask (bit 1) temporarily to prevent spurious interrupts
-  msg_ctrl = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset + 2);
-  msg_ctrl |= (1 << 0);  // MSI-X Enable
-  msg_ctrl |= (1 << 1);  // Function Mask (global mask during setup)
-  // Write back: preserve upper 16 bits, write full 32-bit word
-  uint32_t cap_word = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
-  cap_word = (cap_word & 0xFFFF) | ((msg_ctrl & 0xFFFF) << 16);
-  // Actually: Message Control is at cap_offset+2, which is the upper 16 bits of the first 32-bit word
-  // Let's write directly to offset+2 as a 16-bit value within a 32-bit write
-  // PCI config writes are 32-bit aligned. cap_offset+2 is the upper halfword.
-  uint32_t orig = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
-  orig = (orig & 0xFFFF) | ((msg_ctrl & 0xFFFF) << 16);
-  pci_write_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset, orig);
+  // Enable MSI-X: set Enable bit (bit 15 of 16-bit Message Control)
+  // Also set Function Mask (bit 14) temporarily to prevent spurious interrupts
+  // ECAM requires DWORD-aligned access. Message Control is at cap_offset+2 (upper 16 bits of the DWORD at cap_offset)
+  cap_dword = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
+  msg_ctrl = (cap_dword >> 16) & 0xFFFF;
+  msg_ctrl |= (1 << 15);  // MSI-X Enable (bit 15 of 16-bit Message Control)
+  msg_ctrl |= (1 << 14);  // Function Mask (bit 14 of 16-bit Message Control)
+  cap_dword = (cap_dword & 0xFFFF) | ((uint32_t)msg_ctrl << 16);
+  pci_write_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset, cap_dword);
 
   // Disable INTx: set bit 10 (Interrupt Disable) in Command register
   uint32_t cmd = pci_read_config(dev->bus, dev->dev, dev->func, 0x04);
@@ -441,18 +411,11 @@ int pci_enable_msix(struct pci_device *dev, int num_vectors) {
   pci_write_config(dev->bus, dev->dev, dev->func, 0x04, cmd);
 
   // Clear Function Mask now that setup is done
-  msg_ctrl = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset + 2);
-  // Read the full 32-bit word at cap_offset, modify upper 16 bits (Message Control)
-  orig = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
-  msg_ctrl &= ~(1 << 1);  // Clear Function Mask
-  orig = (orig & 0xFFFF) | ((msg_ctrl & 0xFFFF) << 16);
-  pci_write_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset, orig);
-
-  serial_puts("pci: MSI-X enabled, vectors ");
-  serial_put_hex(base);
-  serial_puts("-");
-  serial_put_hex(base + num_vectors - 1);
-  serial_puts("\n");
+  cap_dword = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
+  msg_ctrl = (cap_dword >> 16) & 0xFFFF;
+  msg_ctrl &= ~(1 << 14);  // Clear Function Mask
+  cap_dword = (cap_dword & 0xFFFF) | ((uint32_t)msg_ctrl << 16);
+  pci_write_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset, cap_dword);
 
   return num_vectors;
 }
@@ -488,12 +451,7 @@ int pci_msix_vector_base(struct pci_device *dev) {
 // ===================== pci_init =====================
 
 void pci_init() {
-  serial_puts("pci_init\n");
-
-  if (g_mcfg.ecam_base == 0) {
-    serial_puts("pci: no MCFG/ECAM, skipping\n");
-    return;
-  }
+  if (g_mcfg.ecam_base == 0) return;
 
   ecam_start_bus = g_mcfg.start_bus;
   ecam_end_bus = g_mcfg.end_bus;
@@ -503,8 +461,4 @@ void pci_init() {
 
   // 2. Scan buses
   pci_scan_bus(ecam_start_bus);
-
-  serial_puts("pci: found ");
-  serial_put_hex(pci_device_count);
-  serial_puts(" devices\n");
 }

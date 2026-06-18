@@ -424,8 +424,9 @@ int main() {
     close(p_stdout[0]);  // close original (now duped to fd 0)
     close(p_stdin[1]);   // close original (now duped to fd 1)
 
-    // 11. Set fd 0 to non-blocking
+    // 11. Set fd 0 to non-blocking, fd 1 to non-blocking (don't block terminal if shell isn't reading)
     fcntl(0, F_SETFL, O_RDONLY | O_NONBLOCK);
+    fcntl(1, F_SETFL, O_WRONLY | O_NONBLOCK);
 
     // 12. Main loop
     while (1) {

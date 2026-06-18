@@ -143,8 +143,8 @@ static inline void *sys_shm_create(size_t size) {
     return (void *)__syscall1(SYS_SHM_CREATE, (int64_t)size);
 }
 
-static inline void *sys_shm_attach(int32_t target_pid) {
-    return (void *)__syscall1(SYS_SHM_ATTACH, (int64_t)target_pid);
+static inline void *sys_shm_attach(int32_t id, int mode) {
+    return (void *)__syscall2(SYS_SHM_ATTACH, (int64_t)id, (int64_t)mode);
 }
 
 static inline int sys_pipe(int *fd_ptr) {

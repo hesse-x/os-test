@@ -59,6 +59,8 @@
 | 构建系统（CMake + mkdisk + mkimg） | [cmake.md](cmake.md) |
 | Shell 设计（命令 + FS IPC + 路径执行） | [shell.md](shell.md) |
 | fs_driver 异步事件循环 + 文件写入 | [file_system.md](file_system.md) |
+| xHCI + MSI-X（PCIe USB 控制器 + MSI-X 中断分配） | [xhci.md](xhci.md) |
+| USB HID 键盘迁移（PS/2 → xHCI Transfer Ring + SHM ring） | [kbd.md](kbd.md) |
 
 ## 当前状态
 
@@ -152,8 +154,7 @@
 
 #### 鼠标驱动
 
-- [ ] PS/2 鼠标驱动（IOPL=3, irq_bind(44)，用户态进程）
-- [ ] 鼠标共享页
+- [ ] USB HID 鼠标驱动（xHCI interrupter 1 + SHM mouse sub-ring + get_mouse_event）
 - [ ] 验证: 鼠标移动事件写入 mouse_shm，compositor 可读取
 
 #### 像素渲染基础
@@ -245,7 +246,6 @@
 | # | 问题 | 位置 | 说明 |
 |---|------|------|------|
 | 9 | 进程创建失败内存泄漏 | `kernel/proc.cc` | `process_create_elf` 后续 `alloc_page` 失败时，前面已分配的页面未释放 |
-| 11 | `scancode_normal` 越界读 | `driver/kbd_driver.cc` | `scancode` 值域 0-255，数组仅 128 项 |
 
 ### 中（逻辑错误 / 健壮性）
 
@@ -272,9 +272,11 @@
 | 功能 | 优先级 | 状态 | 说明 |
 |------|--------|------|------|
 | ~~异步块设备~~ | ~~中~~ | ✅ 已完成 | `sys_block_async` + RECV_NOTIFY 完成回调，fs_driver 事件循环已使用 |
+| USB 键盘迁移 | 中 | ✅ 已完成 | xHCI Transfer Ring + HID Boot Protocol + SHM ring → 替代 PS/2 键盘，见 [kbd.md](kbd.md) |
+| xHCI 热插拔 | 低 | 待做 | 需内核工作队列机制，Port Status Change 事件处理 + 异步枚举状态机 |
 | NVMe 驱动 | 低 | 待做 | PCIe + 多队列 + PRP/SGL |
 | 块设备文件系统 `/dev/sda` | 低 | 待做 | fs_driver 通过 open + read/write 访问磁盘，而非专用 syscall |
-| `qemu-xhci` 替代遗留 USB 控制器 | 低 | 已有基础设施 | PCIe 枚举已就绪，需 xHCI 驱动实现 |
+| USB 键盘端到端验证 | 中 | 待做 | xHCI 枚举 + Transfer Ring + ISR → SHM → kbd_driver → terminal 需串口调试验证 |
 | `-vga none` | 低 | 已有基础设施 | GPU 原生 mode setting 后可移除 VGA 仿真 |
 
 ---
@@ -290,7 +292,7 @@
 | 运行时 IPI | LAPIC | 低 | reschedule / TLB shootdown |
 | KMS PAT/write-combining | KMS | 低 | framebuffer 页映射加 PCD/PAT 标记 |
 | KMS huge page 映射 | KMS | 低 | 减少 TLB miss |
-| MSI / MSI-X | APIC | 低 | PCIe 设备中断 |
+| ~~MSI / MSI-X~~ | ~~APIC~~ | ~~低~~ | ✅ 已完成，PCIe 设备 MSI-X 中断，见 [xhci.md](xhci.md) |
 | 用户态 SSE/FPU | 无 | 中 | lazy FPU restore，gcc 构建依赖 |
 | FSINFO 空闲簇提示 | FAT32 | 低 | 加速空闲簇查找 |
 | ~~多客户端 fs_driver 并发~~ | ~~fs_driver 事件循环~~ | ~~高~~ | ✅ 已完成，见 [file_system.md](file_system.md) |

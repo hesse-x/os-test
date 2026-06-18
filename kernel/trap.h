@@ -12,6 +12,7 @@ void register_irq(int vec, irq_handler_t fn);
 void trap_dispatch(trapframe_t *tf);
 void syscall_dispatch(trapframe_t *tf);
 void isr_init();
+void xhci_poll();
 
 // Syscalls
 uint64_t sys_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -55,6 +56,12 @@ void notify_and_wake(pid_t target_pid, recv_msg *msg);
 
 // Register a driver PID for a device type (kernel-internal, not a syscall)
 int register_dev(int dev_type, pid_t pid);
+
+// Register a kernel pre-allocated SHM region (called by xhci_init)
+void register_kernel_shm(int shm_id, uint64_t phys, size_t npages);
+
+// Look up a device driver PID (kernel-internal, used by ISR)
+pid_t lookup_dev(int dev_type);
 
 // Remove a PID from dev_table (called by proc_reap)
 void dev_table_cleanup(pid_t pid);

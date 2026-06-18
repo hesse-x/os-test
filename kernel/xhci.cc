@@ -3,9 +3,14 @@
 #include "kernel/serial.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/trap.h"
+#include "kernel/proc.h"
+#include "kernel/spinlock.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
 #include "common/errno.h"
+#include "common/shm.h"
+#include "common/dev.h"
+#include "common/syscall.h"
 
 // ===================== xHCI register offsets =====================
 // Capability registers (from MMIO base)
@@ -31,7 +36,8 @@
 #define XHCI_DCBAAP_HI   0x34
 #define XHCI_CONFIG      0x38
 
-// Port registers (base + 0x400 + port*0x10)
+// Port registers (op_base + 0x400 + port*0x10)
+#define XHCI_PORTSC_BASE 0x400
 #define XHCI_PORTSC      0x00
 
 // Runtime registers (base + RTSOFF)
@@ -63,25 +69,38 @@
 #define IMAN_IP          (1 << 0)
 
 // CRCR flags
-#define CRCR_RCS         (1 << 4)  // Ring Cycle State
+#define CRCR_RCS         (1 << 4)
 
 // ERDP flags
-#define ERDP_EHB         (1 << 3)  // Event Handler Busy
+#define ERDP_EHB         (1 << 3)
 
 // PORTSC
-#define PORTSC_CCS       (1 << 0)  // Current Connect Status
-#define PORTSC_PED       (1 << 1)  // Port Enabled/Disabled
-#define PORTSC_PR        (1 << 4)  // Port Reset
+#define PORTSC_CCS       (1 << 0)   // Current Connect Status
+#define PORTSC_PED       (1 << 1)   // Port Enabled/Disabled
+#define PORTSC_PR        (1 << 4)   // Port Reset
+#define PORTSC_PLS_MASK  0xF       // Port Link State (bits 5-8)
+#define PORTSC_SPEED_MASK (0xF << 10) // Port Speed (bits 10-13)
+#define PORTSC_SPEED_FS  (1 << 10)  // Full Speed
+#define PORTSC_SPEED_LS  (2 << 10)  // Low Speed
+#define PORTSC_SPEED_HS  (3 << 10)  // High Speed
 
 // ===================== TRB definitions =====================
 // TRB types (bits 10:15 of dword 3)
 #define TRB_TYPE_SHIFT   10
 #define TRB_TYPE_MASK    0x3F
 
-#define TRB_ENABLE_SLOT  9
+#define TRB_NORMAL       1
+#define TRB_SETUP_STAGE  2
+#define TRB_DATA_STAGE   3
+#define TRB_STATUS_STAGE 4
 #define TRB_LINK         6
+#define TRB_ENABLE_SLOT  9
+#define TRB_ADDRESS_DEV  11
+#define TRB_CONFIG_EP    12
+#define TRB_EVAL_CTX     13
 #define TRB_CMD_COMPLETE 33
 #define TRB_PORT_STATUS  34
+#define TRB_TRANSFER     32
 
 // TRB completion codes
 #define CC_SUCCESS       1
@@ -90,15 +109,37 @@
 // TRB flags
 #define TRB_TC           (1 << 1)   // Toggle Cycle (Link TRB)
 #define TRB_IOC          (1 << 5)   // Interrupt on Completion
+#define TRB_IDT          (1 << 6)   // Immediate Data (Setup Stage)
+#define TRB_CH           (1 << 9)   // Chain bit
+#define TRB_DIR_IN       (1 << 16)  // Direction IN (Data/Status stage)
+
+// Slot/EP state values
+#define SLOT_STATE_DISABLED  0
+#define SLOT_STATE_ENABLED   1
+#define SLOT_STATE_DEFAULT   2
+#define SLOT_STATE_CONFIGURED 3
+
+#define EP_STATE_DISABLED  0
+#define EP_STATE_RUNNING   1
+
+// EP type values (3-bit field in EP Context dword1 bits [3:5])
+// Matches xHCI spec Table 6-7 and QEMU's EPType enum
+#define EP_TYPE_ISOCH_OUT      1
+#define EP_TYPE_BULK_OUT       2
+#define EP_TYPE_INTERRUPT_OUT  3
+#define EP_TYPE_CONTROL        4  // Control (bidirectional, uses OUT DCI)
+#define EP_TYPE_ISOCH_IN       5
+#define EP_TYPE_BULK_IN        6
+#define EP_TYPE_INTERRUPT_IN   7
 
 // ===================== xHCI driver state =====================
-static uint64_t mmio_base;        // MMIO base virtual address
-static uint64_t op_base;          // Operational register base
-static uint64_t rt_base;          // Runtime register base
-static uint64_t db_base;          // Doorbell register base
+static uint64_t mmio_base;
+static uint64_t op_base;
+static uint64_t rt_base;
+static uint64_t db_base;
 static struct pci_device *xhci_dev;
 
-// DMA memory pages
+// DMA memory pages (base controller)
 static Page *dcbaa_page;
 static Page *input_ctx_page;
 static Page *cmd_ring_page;
@@ -120,14 +161,54 @@ static uint64_t event_ring_virt;
 
 // Ring state
 static int cmd_ring_enqueue = 0;
-static int cmd_ring_ccs = 1;       // Command Ring Cycle State
+static int cmd_ring_ccs = 1;
 static int event_ring_dequeue = 0;
-static int event_ring_ccs = 1;     // Event Ring Consumer Cycle State
+static int event_ring_ccs = 1;
 
 // HC parameters
 static int max_slots;
 static int max_intrs;
 static int max_ports;
+
+// ===================== USB HID / keyboard state =====================
+struct xhci_intr {
+    Page    *ring_page;
+    uint64_t ring_phys;
+    uint64_t ring_virt;
+    int      enqueue;
+    int      ccs;
+    int      slot_id;
+    int      ep_dci;       // Doorbell target (DCI): EP1-IN = 3
+    int      ep_num;       // Endpoint number for event matching: EP1-IN = 1
+};
+
+static struct xhci_intr xhci_intrs[2];  // intr 0=keyboard, 1=spare
+
+// USB HID SHM page (kernel-allocated, shared with kbd_driver)
+static Page    *usb_hid_shm_page;
+static uint64_t usb_hid_shm_phys;
+static uint64_t usb_hid_shm_virt;
+
+// HID DMA buffer (xHCI writes HID report here, <4GB)
+static Page    *hid_dma_page;
+static uint64_t hid_dma_phys;
+static uint64_t hid_dma_virt;
+
+// EP0 Transfer Ring (for control transfers: Get Descriptor, Set Protocol)
+static Page    *ep0_ring_page;
+static uint64_t ep0_ring_phys;
+static uint64_t ep0_ring_virt;
+static int      ep0_ring_enqueue = 0;
+static int      ep0_ring_ccs = 1;
+
+// Output Device Context (xHCI writes device state here)
+static Page    *dev_ctx_page;
+static uint64_t dev_ctx_phys;
+
+// Control transfer DMA buffer (for Get Descriptor data stage)
+static Page    *ctrl_dma_page;
+static uint64_t ctrl_dma_phys;
+static uint64_t ctrl_dma_virt;
 
 // ===================== Helper functions =====================
 
@@ -171,6 +252,14 @@ static inline void intr_write(int intr, uint64_t offset, uint32_t val) {
   writel((void *)(rt_intr_base(intr) + offset), val);
 }
 
+static inline uint32_t portsc_read(int port) {
+  return op_read(XHCI_PORTSC_BASE + port * 0x10 + XHCI_PORTSC);
+}
+
+static inline void portsc_write(int port, uint32_t val) {
+  op_write(XHCI_PORTSC_BASE + port * 0x10 + XHCI_PORTSC, val);
+}
+
 // ===================== TRB helpers =====================
 
 struct trb {
@@ -183,7 +272,6 @@ struct trb {
 static void cmd_ring_push(struct trb *t) {
   volatile uint32_t *ring = (volatile uint32_t *)cmd_ring_virt;
   int idx = cmd_ring_enqueue * 4;
-  // Set cycle bit in dword3 (bit 0)
   t->dword3 &= ~1;
   t->dword3 |= (cmd_ring_ccs & 1);
 
@@ -193,76 +281,72 @@ static void cmd_ring_push(struct trb *t) {
   ring[idx + 3] = t->dword3;
   cmd_ring_enqueue++;
 
-  // If we hit the Link TRB at index 255, flip CCS and wrap
   if (cmd_ring_enqueue == 255) {
     cmd_ring_enqueue = 0;
     cmd_ring_ccs ^= 1;
   }
 }
 
-static int poll_cmd_complete(uint32_t *completion_code, uint32_t *slot_id) {
+// Enqueue a TRB on a transfer ring (EP0 or EP1-IN)
+static void xfer_ring_enqueue(volatile uint32_t *ring_virt, int *enqueue, int *ccs,
+                              struct trb *t) {
+  int idx = (*enqueue) * 4;
+  t->dword3 &= ~1;
+  t->dword3 |= (*ccs & 1);
+
+  ring_virt[idx + 0] = t->dword0;
+  ring_virt[idx + 1] = t->dword1;
+  ring_virt[idx + 2] = t->dword2;
+  ring_virt[idx + 3] = t->dword3;
+  (*enqueue)++;
+
+  if (*enqueue == 255) {
+    *enqueue = 0;
+    *ccs ^= 1;
+  }
+}
+
+// Poll event ring for any completion/event (not just CMD_COMPLETE)
+// Returns 0 on success, -1 on timeout. Fills in event TRB fields.
+static int poll_event(uint32_t *completion_code, uint32_t *slot_id, uint32_t *trb_type) {
   volatile uint32_t *ring = (volatile uint32_t *)event_ring_virt;
 
-  for (int timeout = 0; timeout < 1000000; timeout++) {
-    // Check event ring for Command Completion Event
+  for (int timeout = 0; timeout < 2000000; timeout++) {
     int idx = event_ring_dequeue * 4;
     uint32_t d3 = ring[idx + 3];
     uint32_t cycle = d3 & 1;
     if (cycle != (event_ring_ccs & 1)) {
-      // No new event
       __asm__ volatile("pause");
       continue;
     }
 
-    uint32_t d0 = ring[idx + 0];
-    uint32_t d1 = ring[idx + 1];
     uint32_t d2 = ring[idx + 2];
+    *trb_type = (d3 >> TRB_TYPE_SHIFT) & TRB_TYPE_MASK;
+    *completion_code = (d2 >> 24) & 0xFF;
+    *slot_id = (d3 >> 24) & 0xFF;
 
-    int type = (d3 >> TRB_TYPE_SHIFT) & TRB_TYPE_MASK;
-
-    if (type == TRB_CMD_COMPLETE) {
-      *completion_code = (d2 >> 24) & 0xFF;
-      *slot_id = (d3 >> 24) & 0xFF;
-      event_ring_dequeue++;
-      if (event_ring_dequeue >= 255) {
-        event_ring_dequeue = 0;
-        event_ring_ccs ^= 1;
-      }
-      // Update ERDP
-      uint64_t erdp = event_ring_phys + event_ring_dequeue * 16;
-      erdp |= ERDP_EHB;
-      intr_write(0, XHCI_ERDP_LO, (uint32_t)erdp);
-      intr_write(0, XHCI_ERDP_HI, (uint32_t)(erdp >> 32));
-      return 0;
-    }
-
-    // Skip other event types
     event_ring_dequeue++;
     if (event_ring_dequeue >= 255) {
       event_ring_dequeue = 0;
       event_ring_ccs ^= 1;
     }
-    // Update ERDP
+
     uint64_t erdp = event_ring_phys + event_ring_dequeue * 16;
     erdp |= ERDP_EHB;
     intr_write(0, XHCI_ERDP_LO, (uint32_t)erdp);
     intr_write(0, XHCI_ERDP_HI, (uint32_t)(erdp >> 32));
+    return 0;
   }
 
-  return -1; // timeout
+  return -1;
 }
 
 // ===================== ISR =====================
 
 static void xhci_isr(trapframe_t *tf) {
-  serial_puts("[xHCI] MSI-X interrupt received on vector ");
-  serial_put_hex((uint64_t)tf->trapno);
-  serial_puts("\n");
-
   // Read IMAN to confirm IP
   uint32_t iman = intr_read(0, XHCI_IMAN);
   if (iman & IMAN_IP) {
-    // Clear IP + ensure IE
     intr_write(0, XHCI_IMAN, iman | IMAN_IP | IMAN_IE);
   }
 
@@ -275,15 +359,82 @@ static void xhci_isr(trapframe_t *tf) {
     if (cycle != (event_ring_ccs & 1)) break;
 
     int type = (d3 >> TRB_TYPE_SHIFT) & TRB_TYPE_MASK;
+    uint32_t d0 = ring[idx + 0];
+    uint32_t d1 = ring[idx + 1];
     uint32_t d2 = ring[idx + 2];
-    if (type == TRB_CMD_COMPLETE) {
+
+    if (type == TRB_TRANSFER) {
       uint32_t cc = (d2 >> 24) & 0xFF;
       uint32_t sid = (d3 >> 24) & 0xFF;
-      serial_puts("[xHCI] CMD_COMPLETE: cc=");
-      serial_put_hex(cc);
-      serial_puts(" slot=");
-      serial_put_hex(sid);
-      serial_puts("\n");
+      uint32_t epid = (d3 >> 16) & 0xFF;
+
+      if (sid == xhci_intrs[0].slot_id && epid == xhci_intrs[0].ep_num) {
+        // Replenish TRB regardless of completion code to keep ring alive
+        volatile uint32_t *xfer_ring = (volatile uint32_t *)xhci_intrs[0].ring_virt;
+        struct trb norm;
+        norm.dword0 = (uint32_t)hid_dma_phys;
+        norm.dword1 = (uint32_t)(hid_dma_phys >> 32);
+        norm.dword2 = 8;
+        norm.dword3 = (TRB_NORMAL << TRB_TYPE_SHIFT) | TRB_IOC;
+        xfer_ring_enqueue(xfer_ring, &xhci_intrs[0].enqueue, &xhci_intrs[0].ccs, &norm);
+        db_write(xhci_intrs[0].slot_id, xhci_intrs[0].ep_dci);
+
+        if (cc == CC_SUCCESS) {
+          // Read 8-byte HID report from DMA buffer
+          volatile uint8_t *report = (volatile uint8_t *)hid_dma_virt;
+
+          // Write to USB HID SHM keyboard sub-ring
+          volatile struct usb_hid_shm_header *hdr = (volatile struct usb_hid_shm_header *)usb_hid_shm_virt;
+          uint32_t head = __atomic_load_n(&hdr->rings[0].head, __ATOMIC_ACQUIRE);
+          uint32_t tail = __atomic_load_n(&hdr->rings[0].tail, __ATOMIC_ACQUIRE);
+          uint32_t next = (head + 1) % HID_SUBRING_CAPACITY;
+
+          if (next != tail) {  // ring not full
+            volatile struct usb_hid_slot *slot =
+                (volatile struct usb_hid_slot *)(usb_hid_shm_virt + HID_SUBRING_KBD_OFFSET + head * HID_SLOT_SIZE);
+            slot->type = HID_TYPE_KEYBOARD;
+            slot->len = 8;
+            for (int i = 0; i < 8; i++) slot->data[i] = report[i];
+            __atomic_store_n(&hdr->rings[0].head, next, __ATOMIC_RELEASE);
+          }
+
+          // Notify kbd_driver via dev_table
+          pid_t kbd_pid = lookup_dev(DEV_KBD);
+          if (kbd_pid > 0) {
+            proc_t *target = &procs[kbd_pid];
+            spin_lock(&target->recv_lock);
+            uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
+            if (next != target->recv_tail) {  // not full
+              recv_msg *slot = (recv_msg *)target->recv_buf[target->recv_head];
+              slot->type = RECV_NOTIFY;
+              slot->src = 0;
+              target->recv_head = next;
+            }
+            spin_unlock(&target->recv_lock);
+
+            // Wake kbd_driver if in WAIT_RECV
+            int target_cpu = target->assigned_cpu;
+            spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+            if (target->pid == kbd_pid && target->state == BLOCKED &&
+                target->wait_event == WAIT_RECV) {
+              if (target->wait_deadline != 0) {
+                timer_queue_remove(target);
+                target->wait_deadline = 0;
+              }
+              target->state = READY;
+              target->wait_event = WAIT_NONE;
+              target->wait_timed_out = 0;
+              list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
+              cpu_locals[target_cpu].run_count++;
+            }
+            spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+          }
+        }
+      }
+    } else if (type == TRB_CMD_COMPLETE) {
+      // No action needed at runtime
+    } else if (type == TRB_PORT_STATUS) {
+      // No action needed at runtime
     }
 
     event_ring_dequeue++;
@@ -302,16 +453,25 @@ static void xhci_isr(trapframe_t *tf) {
   lapic_eoi();
 }
 
+// Called periodically from timer_handler to ring EP1-IN doorbell.
+// This ensures QEMU's xHCI emulation retries NAK'ed interrupt transfers
+// (QEMU only retries on doorbell write, not on timer expiry after NAK).
+static int xhci_poll_initialized = 0;
+
+void xhci_poll() {
+  if (!xhci_poll_initialized) return;
+  db_write(xhci_intrs[0].slot_id, xhci_intrs[0].ep_dci);
+}
+
 // ===================== xHCI init =====================
 
-void xhci_init() {
-  serial_puts("[xHCI] init start\n");
+static void xhci_init_keyboard();  // forward declaration
 
-  // 1. Find xHCI PCI device (class=0x0C03, prog_if=0x30)
+void xhci_init() {
+  // 1. Find xHCI PCI device
   xhci_dev = nullptr;
   for (int i = 0; i < pci_device_count; i++) {
     if (pci_devices[i].class_code == PCI_CLASS_SERIAL_USB) {
-      // Check prog_if = 0x30 (xHCI)
       uint32_t rev_class = pci_read_config(pci_devices[i].bus, pci_devices[i].dev,
                                             pci_devices[i].func, 0x08);
       uint8_t prog_if = (rev_class >> 8) & 0xFF;
@@ -322,62 +482,26 @@ void xhci_init() {
     }
   }
 
-  if (!xhci_dev) {
-    serial_puts("[xHCI] No xHCI controller found, skip\n");
-    return;
-  }
+  if (!xhci_dev) return;
 
-  serial_puts("[xHCI] Found PCI device: bus=");
-  serial_put_hex(xhci_dev->bus);
-  serial_puts(" dev=");
-  serial_put_hex(xhci_dev->dev);
-  serial_puts(" func=");
-  serial_put_hex(xhci_dev->func);
-  serial_puts("\n");
-
-  // 2. Enable PCI device (map BAR0 MMIO + Bus Master + Memory Space)
-  if (pci_enable_device(xhci_dev) != 0) {
-    serial_puts("[xHCI] pci_enable_device failed\n");
-    return;
-  }
+  // 2. Enable PCI device
+  if (pci_enable_device(xhci_dev) != 0) return;
 
   mmio_base = xhci_dev->bar[0].vaddr;
-  if (mmio_base == 0) {
-    serial_puts("[xHCI] BAR0 not mapped\n");
-    return;
-  }
+  if (mmio_base == 0) return;
 
-  // 3. Check MSI-X capability
-  if (xhci_dev->msix_cap_offset == 0) {
-    serial_puts("[xHCI] No MSI-X capability, skip\n");
-    return;
-  }
-
-  serial_puts("[xHCI] MSI-X: cap_offset=0x");
-  serial_put_hex(xhci_dev->msix_cap_offset);
-  serial_puts(" table_bar=");
-  serial_put_hex(xhci_dev->msix_table_bar);
-  serial_puts(" table_offset=0x");
-  serial_put_hex(xhci_dev->msix_table_offset);
-  serial_puts("\n");
+  // 3. Check MSI-X
+  if (xhci_dev->msix_cap_offset == 0) return;
 
   // Read capability registers
   uint8_t cap_length = xhci_read(XHCI_CAPLENGTH) & 0xFF;
   op_base = mmio_base + cap_length;
   uint32_t rtsoff = xhci_read(XHCI_RTSOFF);
-  rt_base = mmio_base + (rtsoff & ~0x1F);  // align to 32 bytes
+  rt_base = mmio_base + (rtsoff & ~0x1F);
   uint32_t dboff = xhci_read(XHCI_DBOFF);
-  db_base = mmio_base + (dboff & ~0x3);     // align to 4 bytes
+  db_base = mmio_base + (dboff & ~0x3);
 
-  serial_puts("[xHCI] cap_len=");
-  serial_put_hex(cap_length);
-  serial_puts(" rtsoff=0x");
-  serial_put_hex(rtsoff);
-  serial_puts(" dboff=0x");
-  serial_put_hex(dboff);
-  serial_puts("\n");
-
-  // 4. Allocate DMA memory (6 pages)
+  // 4. Allocate DMA memory (6 base pages)
   dcbaa_page = bfc_alloc.alloc_page_low(1);
   input_ctx_page = bfc_alloc.alloc_page_low(1);
   cmd_ring_page = bfc_alloc.alloc_page_low(1);
@@ -386,10 +510,7 @@ void xhci_init() {
   scratchpad_page = bfc_alloc.alloc_page_low(1);
 
   if (!dcbaa_page || !input_ctx_page || !cmd_ring_page ||
-      !erst_page || !event_ring_page || !scratchpad_page) {
-    serial_puts("[xHCI] DMA alloc failed\n");
-    return;
-  }
+      !erst_page || !event_ring_page || !scratchpad_page) return;
 
   dcbaa_phys = page_to_phys(dcbaa_page);
   input_ctx_phys = page_to_phys(input_ctx_page);
@@ -417,45 +538,22 @@ void xhci_init() {
   max_intrs = (hcsparams1 >> 8) & 0x7FF;
   max_ports = (hcsparams1 >> 24) & 0xFF;
 
-  serial_puts("[xHCI] MaxSlots=");
-  serial_put_hex(max_slots);
-  serial_puts(" MaxIntrs=");
-  serial_put_hex(max_intrs);
-  serial_puts(" MaxPorts=");
-  serial_put_hex(max_ports);
-  serial_puts("\n");
-
   // 6. Configure MSI-X
   int nvectors = pci_enable_msix(xhci_dev, max_intrs);
-  if (nvectors <= 0) {
-    serial_puts("[xHCI] MSI-X enable failed\n");
-    return;
-  }
+  if (nvectors <= 0) return;
 
-  serial_puts("[xHCI] MSI-X enabled, vectors ");
-  serial_put_hex(xhci_dev->msix_vector_base);
-  serial_puts("-");
-  serial_put_hex(xhci_dev->msix_vector_base + nvectors - 1);
-  serial_puts("\n");
+  register_irq(xhci_dev->msix_vector_base, xhci_isr);
 
-  // Register ISR for Entry 0 vector
-  int vector0 = xhci_dev->msix_vector_base;
-  register_irq(vector0, xhci_isr);
-
-  // 7. xHC reset: USBCMD.HCRST -> poll HCRST=0 (1s timeout)
-  // First ensure controller is halted
+  // 7. Controller reset
   uint32_t usbsts = op_read(XHCI_USBSTS);
   if (!(usbsts & USBSTS_HCH)) {
-    // Stop controller
     op_write(XHCI_USBCMD, op_read(XHCI_USBCMD) & ~USBCMD_RS);
-    // Poll for HCH=1
     for (int i = 0; i < 1000000; i++) {
       if (op_read(XHCI_USBSTS) & USBSTS_HCH) break;
       __asm__ volatile("pause");
     }
   }
 
-  // Reset
   op_write(XHCI_USBCMD, USBCMD_HCRST);
   for (int i = 0; i < 1000000; i++) {
     if (!(op_read(XHCI_USBCMD) & USBCMD_HCRST) && !(op_read(XHCI_USBSTS) & USBSTS_CNR))
@@ -463,64 +561,44 @@ void xhci_init() {
     __asm__ volatile("pause");
   }
 
-  if (op_read(XHCI_USBCMD) & USBCMD_HCRST) {
-    serial_puts("[xHCI] Controller reset timeout\n");
-    serial_puts("  USBCMD=0x");
-    serial_put_hex(op_read(XHCI_USBCMD));
-    serial_puts(" USBSTS=0x");
-    serial_put_hex(op_read(XHCI_USBSTS));
-    serial_puts("\n");
-    return;
-  }
-  serial_puts("[xHCI] Controller reset done\n");
+  if (op_read(XHCI_USBCMD) & USBCMD_HCRST) return;
 
-  // 8. Program DCBAA base address
+  // 8. Program DCBAAP
   op_write(XHCI_DCBAAP_LO, (uint32_t)dcbaa_phys);
   op_write(XHCI_DCBAAP_HI, (uint32_t)(dcbaa_phys >> 32));
 
-  // 11. Scratchpad Buffer: DCBAA[0] = scratchpad page phys
   uint64_t *dcbaa = (uint64_t *)dcbaa_virt;
   dcbaa[0] = scratchpad_phys;
 
-  // 9. Command Ring: index 255 = Link TRB (TC=1), write CRCR
+  // 9. Command Ring setup
   volatile uint32_t *cmd_ring = (volatile uint32_t *)cmd_ring_virt;
-  int link_idx = 255 * 4;
-  cmd_ring[link_idx + 0] = (uint32_t)cmd_ring_phys;
-  cmd_ring[link_idx + 1] = (uint32_t)(cmd_ring_phys >> 32);
-  cmd_ring[link_idx + 2] = 0;
-  cmd_ring[link_idx + 3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC;
+  cmd_ring[255*4+0] = (uint32_t)cmd_ring_phys;
+  cmd_ring[255*4+1] = (uint32_t)(cmd_ring_phys >> 32);
+  cmd_ring[255*4+2] = 0;
+  cmd_ring[255*4+3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC;
 
-  // Write CRCR (PCS=1)
   uint64_t crcr = cmd_ring_phys | CRCR_RCS;
   op_write(XHCI_CRCR_LO, (uint32_t)crcr);
   op_write(XHCI_CRCR_HI, (uint32_t)(crcr >> 32));
 
-  // 10. Event Ring: ERST[0] = {phys, 256}, write ERSTSZ/ERSTBA/ERDP
+  // 10. Event Ring setup
   struct erst_entry {
-    uint32_t addr_lo;
-    uint32_t addr_hi;
-    uint32_t size;
-    uint32_t reserved;
+    uint32_t addr_lo; uint32_t addr_hi; uint32_t size; uint32_t reserved;
   };
-
   volatile struct erst_entry *erst = (volatile struct erst_entry *)erst_virt;
   erst[0].addr_lo = (uint32_t)event_ring_phys;
   erst[0].addr_hi = (uint32_t)(event_ring_phys >> 32);
-  erst[0].size = 256;  // TRBs in this segment (index 255 is Link TRB)
+  erst[0].size = 256;
 
-  // Link TRB at end of event ring segment
   volatile uint32_t *evt_ring = (volatile uint32_t *)event_ring_virt;
-  int evt_link_idx = 255 * 4;
-  evt_ring[evt_link_idx + 0] = (uint32_t)event_ring_phys;
-  evt_ring[evt_link_idx + 1] = (uint32_t)(event_ring_phys >> 32);
-  evt_ring[evt_link_idx + 2] = 0;
-  evt_ring[evt_link_idx + 3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC | 1; // TC=1, cycle=1
+  evt_ring[255*4+0] = (uint32_t)event_ring_phys;
+  evt_ring[255*4+1] = (uint32_t)(event_ring_phys >> 32);
+  evt_ring[255*4+2] = 0;
+  evt_ring[255*4+3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC | 1;
 
-  // Write ERSTSZ, ERSTBA, ERDP for interrupter 0
-  intr_write(0, XHCI_ERSTSZ, 1);   // 1 segment
-  uint64_t erstba = erst_phys;
-  intr_write(0, XHCI_ERSTBA_LO, (uint32_t)erstba);
-  intr_write(0, XHCI_ERSTBA_HI, (uint32_t)(erstba >> 32));
+  intr_write(0, XHCI_ERSTSZ, 1);
+  intr_write(0, XHCI_ERSTBA_LO, (uint32_t)erst_phys);
+  intr_write(0, XHCI_ERSTBA_HI, (uint32_t)(erst_phys >> 32));
   uint64_t erdp = event_ring_phys | ERDP_EHB;
   intr_write(0, XHCI_ERDP_LO, (uint32_t)erdp);
   intr_write(0, XHCI_ERDP_HI, (uint32_t)(erdp >> 32));
@@ -528,60 +606,341 @@ void xhci_init() {
   // 12. CONFIG = MaxSlots
   op_write(XHCI_CONFIG, max_slots);
 
-  // 13. USBCMD.RS=1 -> poll HCH=0 (1s timeout)
+  // 13. Start controller
   op_write(XHCI_USBCMD, op_read(XHCI_USBCMD) | USBCMD_RS);
   for (int i = 0; i < 1000000; i++) {
     if (!(op_read(XHCI_USBSTS) & USBSTS_HCH)) break;
     __asm__ volatile("pause");
   }
 
-  if (op_read(XHCI_USBSTS) & USBSTS_HCH) {
-    serial_puts("[xHCI] Controller start timeout\n");
-    serial_puts("  USBCMD=0x");
-    serial_put_hex(op_read(XHCI_USBCMD));
-    serial_puts(" USBSTS=0x");
-    serial_put_hex(op_read(XHCI_USBSTS));
-    serial_puts("\n");
-    return;
-  }
-  serial_puts("[xHCI] Controller running (HCH=0)\n");
+  if (op_read(XHCI_USBSTS) & USBSTS_HCH) return;
 
-  // 14. Enable Slot command (polling mode, MSI-X Entry mask)
-  volatile uint32_t *ring = (volatile uint32_t *)cmd_ring_virt;
-  int idx = cmd_ring_enqueue * 4;
-  ring[idx + 0] = 0;
-  ring[idx + 1] = 0;
-  ring[idx + 2] = 0;
-  ring[idx + 3] = (TRB_ENABLE_SLOT << TRB_TYPE_SHIFT) | (cmd_ring_ccs & 1);
-  cmd_ring_enqueue++;
-  if (cmd_ring_enqueue >= 255) cmd_ring_enqueue = 0;
+  // USB HID device enumeration
+  xhci_init_keyboard();
 
-  db_write(0, 0);  // Ring doorbell slot 0, target 0
-
-  uint32_t completion_code = 0, slot_id = 0;
-  int result = poll_cmd_complete(&completion_code, &slot_id);
-  if (result < 0) {
-    serial_puts("[xHCI] Enable Slot timeout\n");
-    serial_puts("  CRCR_LO=0x");
-    serial_put_hex(op_read(XHCI_CRCR_LO));
-    serial_puts(" CRCR_HI=0x");
-    serial_put_hex(op_read(XHCI_CRCR_HI));
-    serial_puts("\n");
-    return;
-  }
-
-  serial_puts("[xHCI] Enable Slot: completion_code=");
-  serial_put_hex(completion_code);
-  serial_puts(", slot_id=");
-  serial_put_hex(slot_id);
-  serial_puts("\n");
-
-  // 15. pci_msix_unmask_entry(dev, 0) — unmask Entry 0
+  // Enable interrupts (done regardless of keyboard presence)
   pci_msix_unmask_entry(xhci_dev, 0);
-
-  // 16. USBCMD.INTE=1, IMAN.IE=1
   op_write(XHCI_USBCMD, op_read(XHCI_USBCMD) | USBCMD_INTE);
   intr_write(0, XHCI_IMAN, intr_read(0, XHCI_IMAN) | IMAN_IE);
+}
 
-  serial_puts("[xHCI] init complete (INTE+IE enabled)\n");
+// ===================== USB HID keyboard enumeration =====================
+
+static void xhci_init_keyboard() {
+  uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
+
+  // Allocate additional pages for USB keyboard
+  usb_hid_shm_page = bfc_alloc.alloc_page(1);
+  hid_dma_page = bfc_alloc.alloc_page_low(1);
+  ep0_ring_page = bfc_alloc.alloc_page_low(1);
+  xhci_intrs[0].ring_page = bfc_alloc.alloc_page_low(1);
+  dev_ctx_page = bfc_alloc.alloc_page_low(1);
+  ctrl_dma_page = bfc_alloc.alloc_page_low(1);
+
+  if (!usb_hid_shm_page || !hid_dma_page || !ep0_ring_page ||
+      !xhci_intrs[0].ring_page || !dev_ctx_page || !ctrl_dma_page) return;
+
+  usb_hid_shm_phys = page_to_phys(usb_hid_shm_page);
+  usb_hid_shm_virt = phys_to_virt(usb_hid_shm_phys);
+  hid_dma_phys = page_to_phys(hid_dma_page);
+  hid_dma_virt = phys_to_virt(hid_dma_phys);
+  ep0_ring_phys = page_to_phys(ep0_ring_page);
+  ep0_ring_virt = phys_to_virt(ep0_ring_phys);
+  xhci_intrs[0].ring_phys = page_to_phys(xhci_intrs[0].ring_page);
+  xhci_intrs[0].ring_virt = phys_to_virt(xhci_intrs[0].ring_phys);
+  dev_ctx_phys = page_to_phys(dev_ctx_page);
+  ctrl_dma_phys = page_to_phys(ctrl_dma_page);
+  ctrl_dma_virt = phys_to_virt(ctrl_dma_phys);
+
+  // Zero all new pages
+  __memset((void *)usb_hid_shm_virt, 0, 4096);
+  __memset((void *)hid_dma_virt, 0, 4096);
+  __memset((void *)ep0_ring_virt, 0, 4096);
+  __memset((void *)xhci_intrs[0].ring_virt, 0, 4096);
+  __memset((void *)phys_to_virt(dev_ctx_phys), 0, 4096);
+  __memset((void *)ctrl_dma_virt, 0, 4096);
+
+  // Initialize USB HID SHM header
+  volatile struct usb_hid_shm_header *hid_hdr = (volatile struct usb_hid_shm_header *)usb_hid_shm_virt;
+  hid_hdr->magic = USB_HID_SHM_MAGIC;
+  hid_hdr->version = USB_HID_SHM_VERSION;
+  for (int i = 0; i < 4; i++) {
+    hid_hdr->rings[i].head = 0;
+    hid_hdr->rings[i].tail = 0;
+    hid_hdr->rings[i].capacity = HID_SUBRING_CAPACITY;
+    hid_hdr->rings[i].reserved = 0;
+  }
+
+  // Register kernel SHM for kbd_driver to attach
+  register_kernel_shm(USB_HID_SHM_ID, usb_hid_shm_phys, 1);
+
+  // Initialize Transfer Rings with Link TRBs
+  volatile uint32_t *ep0_ring = (volatile uint32_t *)ep0_ring_virt;
+  ep0_ring[255*4+0] = (uint32_t)ep0_ring_phys;
+  ep0_ring[255*4+1] = (uint32_t)(ep0_ring_phys >> 32);
+  ep0_ring[255*4+2] = 0;
+  ep0_ring[255*4+3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC;
+
+  volatile uint32_t *ep1_ring = (volatile uint32_t *)xhci_intrs[0].ring_virt;
+  ep1_ring[255*4+0] = (uint32_t)xhci_intrs[0].ring_phys;
+  ep1_ring[255*4+1] = (uint32_t)(xhci_intrs[0].ring_phys >> 32);
+  ep1_ring[255*4+2] = 0;
+  ep1_ring[255*4+3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC;
+
+  xhci_intrs[0].enqueue = 0;
+  xhci_intrs[0].ccs = 1;
+  xhci_intrs[0].ep_dci = 3;  // EP1-IN doorbell target (DCI)
+  xhci_intrs[0].ep_num = 3;  // EPID in transfer events (QEMU reports DCI, not EP number)
+
+  // ---- Step A: Port Discovery ----
+  int usb_port = -1;
+  for (int p = 0; p < max_ports; p++) {
+    uint32_t portsc = portsc_read(p);
+    if (portsc & PORTSC_CCS) {
+      usb_port = p;
+      break;
+    }
+  }
+
+  if (usb_port < 0) return;
+
+  // ---- Step B: Port Reset ----
+  uint32_t portsc = portsc_read(usb_port);
+  portsc &= ~PORTSC_PR;
+  portsc |= PORTSC_PR;
+  portsc_write(usb_port, portsc);
+
+  for (int i = 0; i < 1000000; i++) {
+    portsc = portsc_read(usb_port);
+    if (!(portsc & PORTSC_PR) && (portsc & PORTSC_PED)) break;
+    __asm__ volatile("pause");
+  }
+
+  portsc = portsc_read(usb_port);
+  if (portsc & PORTSC_PR) return;
+
+  int port_speed = (portsc & PORTSC_SPEED_MASK) >> 10;
+
+  // ---- Step C: Enable Slot ----
+  struct trb es_trb;
+  es_trb.dword0 = 0;
+  es_trb.dword1 = 0;
+  es_trb.dword2 = 0;
+  es_trb.dword3 = (TRB_ENABLE_SLOT << TRB_TYPE_SHIFT);
+  cmd_ring_push(&es_trb);
+  db_write(0, 0);
+
+  uint32_t cc = 0, sid = 0, etype = 0;
+  for (int tries = 0; tries < 10; tries++) {
+    if (poll_event(&cc, &sid, &etype) < 0) return;
+    if (etype == TRB_CMD_COMPLETE) break;
+  }
+
+  if (cc != CC_SUCCESS || etype != TRB_CMD_COMPLETE) return;
+
+  // ---- Step D: Address Device ----
+  uint64_t *dcbaa = (uint64_t *)dcbaa_virt;
+  dcbaa[sid] = dev_ctx_phys;
+
+  volatile uint32_t *ictx = (volatile uint32_t *)phys_to_virt(input_ctx_phys);
+  __memset((void *)ictx, 0, 4096);
+
+  ictx[1] = (1 << 0) | (1 << 1);   // Add flags: Slot + EP0
+  ictx[8]  = (port_speed << 20);
+  ictx[9]  = ((usb_port + 1) & 0xFF) << 16;
+  ictx[15] = 1;  // ctx_entries = 1
+
+  int max_pkt = (port_speed == 2) ? 8 : 64;
+  ictx[16] = 0;
+  ictx[17] = (EP_TYPE_CONTROL << 3) | (max_pkt << 16);
+  ictx[18] = (uint32_t)(ep0_ring_phys | 1);
+  ictx[19] = (uint32_t)(ep0_ring_phys >> 32);
+  ictx[22] = 8;
+
+  struct trb addr_trb;
+  addr_trb.dword0 = (uint32_t)input_ctx_phys;
+  addr_trb.dword1 = (uint32_t)(input_ctx_phys >> 32);
+  addr_trb.dword2 = 0;
+  addr_trb.dword3 = (TRB_ADDRESS_DEV << TRB_TYPE_SHIFT) | (sid << 24);
+  cmd_ring_push(&addr_trb);
+  db_write(0, 0);
+
+  for (int tries = 0; tries < 10; tries++) {
+    if (poll_event(&cc, &sid, &etype) < 0) return;
+    if (etype == TRB_CMD_COMPLETE) break;
+  }
+
+  if (cc != CC_SUCCESS || etype != TRB_CMD_COMPLETE) return;
+
+  xhci_intrs[0].slot_id = sid;
+
+  // ---- Step E: Get Descriptor (Device Descriptor) ----
+  volatile uint32_t *ep0 = (volatile uint32_t *)ep0_ring_virt;
+
+  struct trb setup_trb;
+  setup_trb.dword0 = 0x01000680;
+  setup_trb.dword1 = 0x00120000;
+  setup_trb.dword2 = 8;
+  setup_trb.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
+  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &setup_trb);
+
+  struct trb data_trb;
+  data_trb.dword0 = (uint32_t)ctrl_dma_phys;
+  data_trb.dword1 = (uint32_t)(ctrl_dma_phys >> 32);
+  data_trb.dword2 = 18;
+  data_trb.dword3 = (TRB_DATA_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
+  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &data_trb);
+
+  struct trb status_trb;
+  status_trb.dword0 = 0;
+  status_trb.dword1 = 0;
+  status_trb.dword2 = 0;
+  status_trb.dword3 = (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_IOC;
+  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &status_trb);
+
+  db_write(sid, 1);
+  for (int tries = 0; tries < 30; tries++) {
+    if (poll_event(&cc, &sid, &etype) < 0) return;
+    if (etype == TRB_TRANSFER && cc == CC_SUCCESS) break;
+    if (etype == TRB_CMD_COMPLETE) continue;
+  }
+
+  if (cc != CC_SUCCESS) return;
+
+  // ---- Step E2: Get Descriptor (Configuration Descriptor) ----
+  ep0 = (volatile uint32_t *)ep0_ring_virt;
+  struct trb cfg_setup;
+  cfg_setup.dword0 = 0x02000680;
+  cfg_setup.dword1 = 0x00400000;
+  cfg_setup.dword2 = 8;
+  cfg_setup.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
+  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &cfg_setup);
+
+  struct trb cfg_data;
+  cfg_data.dword0 = (uint32_t)ctrl_dma_phys;
+  cfg_data.dword1 = (uint32_t)(ctrl_dma_phys >> 32);
+  cfg_data.dword2 = 64;
+  cfg_data.dword3 = (TRB_DATA_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
+  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &cfg_data);
+
+  struct trb cfg_status;
+  cfg_status.dword0 = 0; cfg_status.dword1 = 0; cfg_status.dword2 = 0;
+  cfg_status.dword3 = (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_IOC;
+  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &cfg_status);
+
+  db_write(sid, 1);
+  for (int tries = 0; tries < 30; tries++) {
+    if (poll_event(&cc, &sid, &etype) < 0) return;
+    if (etype == TRB_TRANSFER && cc == CC_SUCCESS) break;
+    if (etype == TRB_CMD_COMPLETE) continue;
+  }
+  if (cc != CC_SUCCESS) return;
+
+  // Parse Configuration Descriptor to find EP1-IN max packet size
+  volatile uint8_t *cfg_buf = (volatile uint8_t *)ctrl_dma_virt;
+  int cfg_total = cfg_buf[2] | (cfg_buf[3] << 8);
+  int off = 0;
+  uint16_t ep_max_pkt = 8;
+  uint8_t ep_interval = 4;
+  while (off + 1 < 64 && off < cfg_total) {
+    uint8_t dlen = cfg_buf[off];
+    uint8_t dtype = cfg_buf[off + 1];
+    if (dlen == 0) break;
+    if (dtype == 5 && dlen >= 7 && off + 6 < 64) {
+      ep_max_pkt = cfg_buf[off + 4] | (cfg_buf[off + 5] << 8);
+      ep_interval = cfg_buf[off + 6];
+    }
+    off += dlen;
+  }
+
+  // ---- Step F: Set Protocol (Boot Protocol) ----
+  struct trb sp_setup;
+  sp_setup.dword0 = 0x00000B21;
+  sp_setup.dword1 = 0x00000000;
+  sp_setup.dword2 = 8;
+  sp_setup.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
+  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sp_setup);
+
+  struct trb sp_status;
+  sp_status.dword0 = 0;
+  sp_status.dword1 = 0;
+  sp_status.dword2 = 0;
+  sp_status.dword3 = (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
+  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sp_status);
+
+  db_write(sid, 1);
+  for (int tries = 0; tries < 10; tries++) {
+    if (poll_event(&cc, &sid, &etype) < 0) return;
+    if (etype == TRB_TRANSFER && cc == CC_SUCCESS) break;
+    if (etype == TRB_CMD_COMPLETE) continue;
+  }
+
+  if (cc != CC_SUCCESS) return;
+
+  // ---- Step F2: Set Configuration ----
+  struct trb sc_setup;
+  sc_setup.dword0 = 0x00010900;
+  sc_setup.dword1 = 0x00000000;
+  sc_setup.dword2 = 8;
+  sc_setup.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
+  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sc_setup);
+
+  struct trb sc_status;
+  sc_status.dword0 = 0; sc_status.dword1 = 0; sc_status.dword2 = 0;
+  sc_status.dword3 = (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
+  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sc_status);
+
+  db_write(sid, 1);
+  for (int tries = 0; tries < 10; tries++) {
+    if (poll_event(&cc, &sid, &etype) < 0) return;
+    if (etype == TRB_TRANSFER && cc == CC_SUCCESS) break;
+    if (etype == TRB_CMD_COMPLETE) continue;
+  }
+  if (cc != CC_SUCCESS) return;
+
+  // ---- Step G: Configure Endpoint (EP1-IN Interrupt) ----
+  __memset((void *)ictx, 0, 4096);
+
+  ictx[1] = (1 << 0) | (1 << 3);  // A0=Slot, A3=EP1-IN (DCI=3)
+
+  ictx[8]  = (port_speed << 20);
+  ictx[9]  = ((usb_port + 1) & 0xFF) << 16;
+  ictx[15] = 2;  // ctx_entries = 2
+
+  ictx[32] = 0;
+  ictx[33] = (EP_TYPE_INTERRUPT_IN << 3) | (ep_max_pkt << 16);
+  ictx[34] = (uint32_t)(xhci_intrs[0].ring_phys | 1);
+  ictx[35] = (uint32_t)(xhci_intrs[0].ring_phys >> 32);
+  ictx[39] = ep_interval;
+
+  struct trb cfg_trb;
+  cfg_trb.dword0 = (uint32_t)input_ctx_phys;
+  cfg_trb.dword1 = (uint32_t)(input_ctx_phys >> 32);
+  cfg_trb.dword2 = 0;
+  cfg_trb.dword3 = (TRB_CONFIG_EP << TRB_TYPE_SHIFT) | (sid << 24);
+  cmd_ring_push(&cfg_trb);
+  db_write(0, 0);
+
+  for (int tries = 0; tries < 10; tries++) {
+    if (poll_event(&cc, &sid, &etype) < 0) return;
+    if (etype == TRB_CMD_COMPLETE) break;
+  }
+
+  if (cc != CC_SUCCESS || etype != TRB_CMD_COMPLETE) return;
+
+  // ---- Step H: Start keyboard data transfer ----
+  struct trb norm_trb;
+  norm_trb.dword0 = (uint32_t)hid_dma_phys;
+  norm_trb.dword1 = (uint32_t)(hid_dma_phys >> 32);
+  norm_trb.dword2 = 8;
+  norm_trb.dword3 = (TRB_NORMAL << TRB_TYPE_SHIFT) | TRB_IOC;
+  xfer_ring_enqueue(ep1_ring, &xhci_intrs[0].enqueue, &xhci_intrs[0].ccs, &norm_trb);
+
+  db_write(sid, 3);
+
+  // Mask PS/2 keyboard IRQ (GSI 1) — no longer needed
+  ioapic_set_irq(1, 33, bsp_apic_id, true);
+
+  serial_puts("xhci: USB keyboard ready\n");
+  xhci_poll_initialized = 1;
 }

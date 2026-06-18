@@ -1,187 +1,24 @@
 // Keyboard driver process (user-space)
-// 3-layer architecture: acquire → translate → push
-// Supports extended keys (0xE0 prefix), Shift/CapsLock, bind/unbind RPC protocol
+// USB HID Boot Protocol: reads HID reports from kernel SHM ring via get_keycode()
+// Supports bind/unbind REQ protocol, kbd_push converts key_event → ASCII/ESC
 #include <stdint.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
-#include <sys/irq.h>
 #include <sys/device.h>
 #include <unistd.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "input.h"
+#include "usb_hid.h"
 #include "common/errno.h"
 
 static volatile kbd_ring *kbd;
 static volatile driver_shm_header *shm_hdr;
 static int32_t consumer_pid = -1;
 
-// ===================== Translation state =====================
-
-struct kbd_state {
-    bool shift_pressed;
-    bool capslock_on;
-    bool ctrl_pressed;
-    bool alt_pressed;
-    bool e0_pending;   // 0xE0 prefix seen, next scancode is extended
-};
-
-static struct kbd_state kst;
-
-// Scancode Set 1 → input_key mapping (make codes, 128 entries)
-static const uint16_t scancode_to_key[128] = {
-    KEY_RESERVED, KEY_ESC,       KEY_1,    KEY_2,    KEY_3,    KEY_4,    KEY_5,    KEY_6,
-    KEY_7,        KEY_8,         KEY_9,    KEY_0,    KEY_MINUS,KEY_EQUAL,KEY_BACKSPACE, KEY_TAB,
-    KEY_Q,        KEY_W,         KEY_E,    KEY_R,    KEY_T,    KEY_Y,    KEY_U,    KEY_I,
-    KEY_O,        KEY_P,         KEY_LEFTBRACE, KEY_RIGHTBRACE, KEY_ENTER, KEY_LEFTCTRL,
-    KEY_A,        KEY_S,         KEY_D,    KEY_F,    KEY_G,    KEY_H,    KEY_J,    KEY_K,
-    KEY_L,        KEY_SEMICOLON, KEY_APOSTROPHE, KEY_GRAVE, KEY_LEFTSHIFT, KEY_BACKSLASH,
-    KEY_Z,        KEY_X,         KEY_C,    KEY_V,    KEY_B,    KEY_N,    KEY_M,    KEY_COMMA,
-    KEY_DOT,      KEY_SLASH,     KEY_RIGHTSHIFT, 0, KEY_LEFTALT, KEY_SPACE, KEY_CAPSLOCK,
-    KEY_F1,       KEY_F2,        KEY_F3,   KEY_F4,   KEY_F5,   KEY_F6,   KEY_F7,   KEY_F8,
-    KEY_F9,       KEY_F10,       KEY_NUMLOCK, KEY_SCROLLLOCK, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, KEY_F11, KEY_F12,
-};
-
-// Extended key (0xE0 prefix) scancode → input_key mapping
-static const struct { uint8_t scancode; uint16_t key; } ext_key_map[] = {
-    { 0x1D, KEY_RIGHTCTRL },  // not tracked yet, but mapped
-    { 0x38, KEY_LEFTALT },    // right alt — treat same for now
-    { 0x47, KEY_HOME },
-    { 0x48, KEY_UP },
-    { 0x49, KEY_PAGEUP },
-    { 0x4B, KEY_LEFT },
-    { 0x4D, KEY_RIGHT },
-    { 0x4F, KEY_END },
-    { 0x50, KEY_DOWN },
-    { 0x51, KEY_PAGEDOWN },
-    { 0x52, KEY_INSERT },
-    { 0x53, KEY_DELETE },
-    { 0, 0 }  // sentinel
-};
-
-// ===================== Layer 1: Acquire =====================
-// Read scancodes from keyboard controller into buffer.
-// Returns number of scancodes read.
-static int kbd_irq_acquire(uint8_t *scancodes, int max) {
-    int count = 0;
-    while ((inb(0x64) & 0x01) && count < max) {
-        scancodes[count++] = inb(0x60);
-    }
-    return count;
-}
-
-// ===================== Layer 2: Translate =====================
-// Translate one scancode into a key_event.
-// Returns 1 if a key event was produced, 0 if only modifier state changed.
-static int kbd_translate(uint8_t scancode, struct kbd_state *st, struct key_event *ev) {
-    // Extended key prefix
-    if (scancode == 0xE0) {
-        st->e0_pending = true;
-        return 0;
-    }
-
-    bool is_extended = st->e0_pending;
-    st->e0_pending = false;
-
-    // Break code (bit 7 set): key release
-    if (scancode & 0x80) {
-        uint8_t make = scancode & 0x7F;
-
-        if (is_extended) {
-            // Extended key release — not tracked for modifiers
-            return 0;
-        }
-
-        if (make == 0x2A || make == 0x36) {
-            st->shift_pressed = false;
-            return 0;
-        }
-        if (make == 0x1D) {
-            st->ctrl_pressed = false;
-            return 0;
-        }
-        if (make == 0x38) {
-            st->alt_pressed = false;
-            return 0;
-        }
-        // Other key releases: ignored (no key-up events sent to ring)
-        return 0;
-    }
-
-    // Make code: key press
-    if (is_extended) {
-        // Look up extended key
-        for (int i = 0; ext_key_map[i].scancode; i++) {
-            if (ext_key_map[i].scancode == scancode) {
-                ev->key = ext_key_map[i].key;
-                ev->pressed = 1;
-                ev->modifiers = (st->shift_pressed ? MOD_SHIFT : 0) |
-                                (st->ctrl_pressed ? MOD_CTRL : 0) |
-                                (st->alt_pressed ? MOD_ALT : 0) |
-                                (st->capslock_on ? MOD_CAPS : 0);
-                return 1;
-            }
-        }
-        return 0;  // unmapped extended key
-    }
-
-    // Non-extended make codes: modifier keys
-    if (scancode == 0x2A || scancode == 0x36) {
-        st->shift_pressed = true;
-        return 0;
-    }
-    if (scancode == 0x3A) {
-        st->capslock_on = !st->capslock_on;
-        return 0;
-    }
-    if (scancode == 0x1D) {
-        st->ctrl_pressed = true;
-        return 0;
-    }
-    if (scancode == 0x38) {
-        st->alt_pressed = true;
-        return 0;
-    }
-
-    // Regular key: look up in table
-    if (scancode >= 128) return 0;
-    uint16_t key = scancode_to_key[scancode];
-    if (key == KEY_RESERVED) return 0;
-
-    ev->key = key;
-    ev->pressed = 1;
-    ev->modifiers = (st->shift_pressed ? MOD_SHIFT : 0) |
-                    (st->ctrl_pressed ? MOD_CTRL : 0) |
-                    (st->alt_pressed ? MOD_ALT : 0) |
-                    (st->capslock_on ? MOD_CAPS : 0);
-    return 1;
-}
-
 // ===================== Layer 3: Push =====================
 // Convert key_event to ASCII or ESC sequence and write to kbd_ring.
 
-// Normal key → ASCII
-static const uint8_t key_to_ascii_normal[] = {
-    // KEY_ESC=1 → 27
-    // KEY_1..KEY_0 = 2..11 → '1'..'0'
-    // KEY_MINUS=12 → '-', KEY_EQUAL=13 → '=', KEY_BACKSPACE=14 → 8
-    // KEY_TAB=15 → 9, KEY_Q..KEY_P = 16..25 → 'q'..'p'
-    // KEY_LEFTBRACE=26 → '[', KEY_RIGHTBRACE=27 → ']', KEY_ENTER=28 → '\n'
-    // KEY_A..KEY_L = 30..38 → 'a'..'l'
-    // KEY_SEMICOLON=39 → ';', KEY_APOSTROPHE=40 → '\'', KEY_GRAVE=41 → '`'
-    // KEY_BACKSLASH=43 → '\\'
-    // KEY_Z..KEY_M = 44..50 → 'z'..'m'
-    // KEY_COMMA=51 → ',', KEY_DOT=52 → '.', KEY_SLASH=53 → '/'
-    // KEY_SPACE=57 → ' '
-};
-
-// Helper: write one byte to kbd_ring
 static void kbd_write(uint8_t ch) {
     uint32_t head = kbd->head;
     uint32_t next = (head + 1) % 8;
@@ -192,17 +29,16 @@ static void kbd_write(uint8_t ch) {
     }
 }
 
-// Helper: write ESC sequence string (null-terminated)
 static void kbd_write_esc(const char *seq) {
     while (*seq) kbd_write((uint8_t)*seq++);
 }
 
-// Map a key_event to ASCII or ESC sequence and push to ring
 static void kbd_push(struct key_event *ev) {
+    // Only handle key press events (ignore releases)
+    if (!ev->pressed) return;
+
     // Ctrl+key: produce control character
     if (ev->modifiers & MOD_CTRL) {
-        // Ctrl+A..Ctrl+Z → 0x01..0x1A
-        // Must check all letter keys, not just KEY_A..KEY_Z range
         uint8_t letter = 0;
         switch (ev->key) {
             case KEY_Q: letter = 'q'; break; case KEY_W: letter = 'w'; break;
@@ -263,7 +99,6 @@ static void kbd_push(struct key_event *ev) {
     bool shift = ev->modifiers & MOD_SHIFT;
     bool caps = ev->modifiers & MOD_CAPS;
 
-    // Direct ASCII mapping by key code
     uint8_t ch = 0;
     switch (ev->key) {
         case KEY_1:    ch = shift ? '!' : '1'; break;
@@ -295,16 +130,6 @@ static void kbd_push(struct key_event *ev) {
     }
 
     // Letter keys: apply shift/caps
-    // Keys are numbered by keyboard position, not alphabetically:
-    // KEY_Q=16..KEY_P=25 (top row), KEY_A=30..KEY_L=38 (home row),
-    // KEY_Z=44..KEY_M=50 (bottom row). All are in 16..50 range.
-    // Non-letter keys in that range: KEY_LEFTBRACE(26), KEY_RIGHTBRACE(27),
-    // KEY_ENTER(28), KEY_LEFTCTRL(29), KEY_SEMICOLON(39), KEY_APOSTROPHE(40),
-    // KEY_GRAVE(41), KEY_LEFTSHIFT(42), KEY_BACKSLASH(43), KEY_COMMA(51),
-    // KEY_DOT(52), KEY_SLASH(53), KEY_RIGHTSHIFT(54), KEY_LEFTALT(56),
-    // KEY_SPACE(57), KEY_CAPSLOCK(58), KEY_F1-F10(59-68)
-    //
-    // So we just check each key individually with a switch:
     switch (ev->key) {
         case KEY_Q: ch = 'q'; break; case KEY_W: ch = 'w'; break;
         case KEY_E: ch = 'e'; break; case KEY_R: ch = 'r'; break;
@@ -337,19 +162,7 @@ static void handle_req(struct recv_msg *msg) {
         if (consumer_pid >= 0 && consumer_pid != (int32_t)msg->src) {
             reply.result = -EBUSY;
         } else {
-            if (consumer_pid < 0) {
-                // First bind: create SHM
-                void *shm_ptr = NULL;
-                shm_create(4096, &shm_ptr);
-                uint64_t shm_addr = (uint64_t)shm_ptr;
-                kbd = (volatile kbd_ring *)(shm_addr + KBD_RING_OFFSET);
-                shm_hdr = (volatile driver_shm_header *)shm_addr;
-                kbd->head = 0;
-                kbd->tail = 0;
-                shm_hdr->kbd_sleeping = 0;
-                shm_hdr->consumer_sleeping = 0;
-                consumer_pid = msg->src;
-            }
+            consumer_pid = msg->src;
             reply.result = 0;  // idempotent success
         }
     } else if (req->opcode == KBD_REQ_UNBIND) {
@@ -367,20 +180,26 @@ static void handle_req(struct recv_msg *msg) {
 // ===================== Main =====================
 
 extern "C" void _start() {
-    // Enable I/O ports for keyboard (0x60-0x64)
-    ioperm(0x60, 2, 1);
-    ioperm(0x64, 1, 1);
+    // Create kbd_ring SHM first (slot 0) so shm_attach finds it
+    void *shm_ptr = NULL;
+    shm_create(4096, &shm_ptr);
+    uint64_t shm_addr = (uint64_t)shm_ptr;
+    kbd = (volatile kbd_ring *)(shm_addr + KBD_RING_OFFSET);
+    shm_hdr = (volatile driver_shm_header *)shm_addr;
+    kbd->head = 0;
+    kbd->tail = 0;
+    shm_hdr->kbd_sleeping = 0;
+    shm_hdr->consumer_sleeping = 0;
 
-    // Bind to keyboard IRQ (IRQ1 = vector 33)
-    irq_bind(33);
+    // Attach to kernel pre-allocated USB HID SHM (slot 1)
+    void *hid_shm = NULL;
+    shm_attach_kernel(USB_HID_SHM_ID, &hid_shm);
+    get_keycode_init(hid_shm);
 
     // Register as KBD device
     device_register(getpid(), DEV_KBD);
 
-    // Initialize translation state
-    for (uint8_t *p = (uint8_t *)&kst; p < (uint8_t *)(&kst + 1); *p++ = 0);
-
-    // Main loop: wait for events (IRQ or REQ)
+    // Main loop: wait for events (NOTIFY from kernel ISR, or REQ)
     while (1) {
         struct recv_msg msg;
         recv(&msg, NULL, 0, 0);
@@ -390,16 +209,11 @@ extern "C" void _start() {
             continue;
         }
 
-        // RECV_IRQ or RECV_NOTIFY: process if we have a consumer
-        if (msg.type == RECV_IRQ && consumer_pid >= 0 && kbd) {
-            uint8_t scancodes[16];
-            int count = kbd_irq_acquire(scancodes, 16);
-
-            for (int i = 0; i < count; i++) {
-                struct key_event ev;
-                if (kbd_translate(scancodes[i], &kst, &ev)) {
-                    kbd_push(&ev);
-                }
+        // RECV_NOTIFY from kernel ISR: process HID reports if we have a consumer
+        if (consumer_pid >= 0 && kbd) {
+            struct key_event ev;
+            while (get_keycode(&ev) == 0) {
+                kbd_push(&ev);
             }
 
             // Notify consumer if sleeping
@@ -407,7 +221,5 @@ extern "C" void _start() {
                 notify(consumer_pid);
             }
         }
-        // RECV_IRQ without consumer: skip (don't read hardware, don't push)
-        // RECV_NOTIFY: ignore
     }
 }
