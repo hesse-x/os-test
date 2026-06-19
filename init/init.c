@@ -30,33 +30,32 @@ static int spawn_service(const char *path) {
     return (pid > 0) ? (int)pid : -1;
 }
 
-static void wait_dev_ready(int dev) {
-    while (device_lookup(dev) <= 0) {
+static void wait_dev_ready(const char *dev_path) {
+    int fd;
+    while ((fd = open(dev_path, O_RDWR)) < 0) {
         struct recv_msg m;
         recv(&m, NULL, 0, 10);  // wait 10ms, allows other processes to run
     }
+    close(fd);
 }
 
 int main(void) {
     serial_write("init: started\n", 14);
     // 1. Wait for fs_driver to be ready (device registered + initialized)
-    int32_t fs_pid;
-    while ((fs_pid = device_lookup(DEV_FS)) <= 0) {
-        struct recv_msg m;
-        recv(&m, NULL, 0, 10);
-    }
+    serial_write("init: waiting for fs_driver\n", 28);
+    wait_dev_ready("/dev/fs");
     serial_write("init: fs_driver ready\n", 22);
 
     // 2. Spawn kbd_driver, wait for DEV_KBD
     serial_write("init: spawning kbd_driver\n", 26);
     spawn_service("/driver/kbd.dev");
-    wait_dev_ready(DEV_KBD);
+    wait_dev_ready("/dev/kbd");
     serial_write("init: kbd_driver ready\n", 23);
 
     // 3. Spawn kms_driver, wait for DEV_KMS
     serial_write("init: spawning kms_driver\n", 26);
     spawn_service("/driver/kms.dev");
-    wait_dev_ready(DEV_KMS);
+    wait_dev_ready("/dev/kms");
     serial_write("init: kms_driver ready\n", 23);
 
     // 4. Spawn terminal

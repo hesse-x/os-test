@@ -12,6 +12,8 @@ extern "C" {
 
 int notify(pid_t pid);
 int notify_fd(int fd);
+int msg_fd(int fd, const void *msg_buf, size_t msg_len,
+           void *reply_buf, size_t reply_len);
 int recv(struct recv_msg *msg, void *data_buf, size_t data_buf_len, uint32_t timeout_ms);
 int req(pid_t pid, void *req, void *resp);
 int req_fd(int fd, void *req, void *resp);

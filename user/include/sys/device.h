@@ -8,7 +8,6 @@ extern "C" {
 #endif
 
 int device_register(pid_t pid, int dev_type);
-pid_t device_lookup(int dev_type);
 
 #ifdef __cplusplus
 }

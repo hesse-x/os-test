@@ -25,7 +25,7 @@
 #define SYS_READ         17
 #define SYS_CLOSE        18
 #define SYS_LOAD_DEV     19
-#define SYS_LOOKUP_DEV   20
+#define SYS_DEV_MSG      20
 #define SYS_NOTIFY       21
 #define SYS_GETTIME      22
 #define SYS_CLOCK        23
@@ -168,8 +168,11 @@ static inline int sys_load_dev(int32_t pid, int dev_type) {
     return (int)__syscall2(SYS_LOAD_DEV, (int64_t)pid, (int64_t)dev_type);
 }
 
-static inline int32_t sys_lookup_dev(int dev_type) {
-    return (int32_t)__syscall1(SYS_LOOKUP_DEV, (int64_t)dev_type);
+static inline int sys_dev_msg(int fd, void *msg_buf, size_t msg_len,
+                               void *reply_buf, size_t reply_len) {
+    return (int)__syscall5(SYS_DEV_MSG, (int64_t)fd,
+        (int64_t)(uintptr_t)msg_buf, (int64_t)msg_len,
+        (int64_t)(uintptr_t)reply_buf, (int64_t)reply_len);
 }
 
 static inline int sys_notify(int32_t pid) {
@@ -245,9 +248,11 @@ static inline int sys_block_async(uint32_t lba, void *buf, uint32_t count, uint8
         (int64_t)(uintptr_t)buf, (int64_t)count, (int64_t)dir);
 }
 
-// sys_open_dev(dev_type) — syscall 35 (open device node, returns FD_DEV fd)
-static inline int sys_open_dev(int dev_type) {
-    return (int)__syscall1(SYS_OPEN_DEV, (int64_t)dev_type);
+// sys_open_dev(dev_type) — syscall 35 (open device node)
+// Returns: (fd | target_pid << 32) on success, negative errno on failure
+// Caller: fd = (int32_t)(result & 0xFFFFFFFF), pid = (pid_t)(result >> 32)
+static inline uint64_t sys_open_dev(int dev_type) {
+    return (uint64_t)__syscall1(SYS_OPEN_DEV, (int64_t)dev_type);
 }
 
 #endif // COMMON_SYSCALL_H

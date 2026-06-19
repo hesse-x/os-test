@@ -4,9 +4,8 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/ipc.h>
-#include <sys/device.h>
 #include <sys/types.h>
-#include "common/dev.h"
+#include <stdlib.h>
 #include "common/errno.h"
 
 // Direct fs_driver message protocol (must match fs_driver)
@@ -34,13 +33,13 @@ struct file_resp {
     uint8_t  data[];
 };
 
-static pid_t fs_pid = -1;
+static int fs_fd = -1;
 
 static int fs_send(struct file_req *freq, struct file_resp *fresp, size_t resp_len) {
-    return sys_msg(fs_pid, freq, sizeof(*freq), fresp, resp_len);
+    return msg_fd(fs_fd, freq, sizeof(*freq), fresp, resp_len);
 }
 
-static int fs_write_send(uint32_t fs_fd, const void *data, size_t len,
+static int fs_write_send(uint32_t fs_fd_param, const void *data, size_t len,
                          struct file_resp *fresp) {
     size_t msg_len = sizeof(struct file_req) + len;
     uint8_t *msg = (uint8_t *)malloc(msg_len);
@@ -48,23 +47,23 @@ static int fs_write_send(uint32_t fs_fd, const void *data, size_t len,
     struct file_req *freq = (struct file_req *)msg;
     memset(freq, 0, sizeof(*freq));
     freq->cmd = FILE_CMD_WRITE;
-    freq->fs_fd = fs_fd;
+    freq->fs_fd = fs_fd_param;
     freq->count = (uint32_t)len;
     memcpy(msg + sizeof(struct file_req), data, len);
-    int r = sys_msg(fs_pid, msg, msg_len, fresp, sizeof(struct file_resp));
+    int r = msg_fd(fs_fd, msg, msg_len, fresp, sizeof(struct file_resp));
     free(msg);
-    if (r < 0) { printf("writetest: sys_msg returned %d\n", r); return r; }
+    if (r < 0) { printf("writetest: msg_fd returned %d\n", r); return r; }
     return (int)fresp->status;
 }
 
 int main() {
-    // Find fs_driver
-    fs_pid = device_lookup(DEV_FS);
-    if (fs_pid < 0) {
+    // Open fs_driver device node
+    fs_fd = open("/dev/fs", O_RDWR);
+    if (fs_fd < 0) {
         printf("writetest: fs_driver not found\n");
         return 1;
     }
-    printf("writetest: fs_pid=%d\n", (int)fs_pid);
+    printf("writetest: fs_fd=%d\n", (int)fs_fd);
 
     const char *path = "/local/writetest.txt";
     const char *msg = "Hello from writetest!";
@@ -141,7 +140,7 @@ int main() {
     freq.count = sizeof(readbuf) - 1;
 
     uint8_t reply_buf[sizeof(struct file_resp) + 256];
-    rc = sys_msg(fs_pid, &freq, sizeof(freq), reply_buf, sizeof(reply_buf));
+    rc = msg_fd(fs_fd, &freq, sizeof(freq), reply_buf, sizeof(reply_buf));
     if (rc < 0) {
         printf("writetest: read failed (rc=%d)\n", rc);
     } else {

@@ -32,7 +32,7 @@
 | `int shm_attach(pid_t target, void **addr)` | `sys_shm_attach(target)` | `sys/shm.h` | 同上 |
 | `int irq_bind(int irq)` | `sys_irq_bind(irq)` | `sys/irq.h` | 驱动专用 |
 | `int device_register(pid_t pid, int dev_type)` | `sys_load_dev(pid, dev_type)` | `sys/device.h` | |
-| `pid_t device_lookup(int dev_type)` | `sys_lookup_dev(dev_type)` | `sys/device.h` | |
+| `int msg_fd(int fd, void *msg_buf, size_t msg_len, void *reply_buf, size_t reply_len)` | `sys_dev_msg(fd, ...)` | `sys/ipc.h` | fd-based 变长消息 |
 | `int notify(pid_t pid)` | `sys_notify(pid)` | `sys/ipc.h` | |
 | `int recv(struct recv_msg *msg, uint32_t timeout_ms)` | `sys_recv(msg, timeout_ms)` | `sys/ipc.h` | |
 | `int rpc(pid_t pid, void *req, void *resp)` | `sys_rpc(pid, req, resp)` | `sys/ipc.h` | |
@@ -58,7 +58,7 @@ user/include/sys/wait.h        — waitpid
 user/include/sys/mman.h        — mmap, munmap
 user/include/sys/shm.h         — shm_create, shm_attach
 user/include/sys/irq.h         — irq_bind
-user/include/sys/device.h      — device_register, device_lookup
+user/include/sys/device.h      — device_register
 user/include/sys/ipc.h         — notify, recv, rpc, rpc_reply
 user/include/sys/serial.h      — serial_write
 user/include/sys/fb.h          — fb_info
@@ -73,7 +73,7 @@ user/lib/sys_wait.cc           — waitpid
 user/lib/sys_mman.cc           — mmap, munmap
 user/lib/sys_shm.cc            — shm_create, shm_attach
 user/lib/sys_irq.cc            — irq_bind
-user/lib/sys_device.cc         — device_register, device_lookup
+user/lib/sys_device.cc         — device_register
 user/lib/sys_ipc.cc            — notify, recv, rpc, rpc_reply
 user/lib/sys_serial.cc         — serial_write
 user/lib/sys_fb.cc             — fb_info
@@ -110,12 +110,12 @@ return (int)r;
 
 1. **新建头文件 + 实现文件**，CMake 中加入 libc
 2. **逐步替换**各模块中的 `sys_*` 调用为 POSIX 函数：
-   - shell/shell.cc：`sys_read` → `read`，`sys_write` → `write`，`sys_getpid` → `getpid`，`sys_spawn` → `spawn`，`sys_waitpid` → `waitpid`，`sys_shm_attach` → `shm_attach`，`sys_lookup_dev` → `device_lookup`，`sys_notify` → `notify`，`sys_recv` → `recv`，`sys_serial_write` → `serial_write`
-   - driver/terminal.cc：`sys_read` → `read`，`sys_write` → `write`，`sys_shm_attach` → `shm_attach`，`sys_lookup_dev` → `device_lookup`，`sys_rpc` → `rpc`，`sys_getpid` → `getpid`，`sys_mmap` → `mmap`，`sys_fb_info` → `fb_info`，`sys_notify` → `notify`，`sys_yield` → `sched_yield`，`sys_recv` → `recv`
+   - shell/shell.cc：`sys_read` → `read`，`sys_write` → `write`，`sys_getpid` → `getpid`，`sys_spawn` → `spawn`，`sys_waitpid` → `waitpid`，`sys_shm_attach` → `shm_attach`，`sys_notify` → `notify`，`sys_recv` → `recv`，`sys_serial_write` → `serial_write`
+   - driver/terminal.cc：`sys_read` → `read`，`sys_write` → `write`，`sys_shm_attach` → `shm_attach`，`sys_rpc` → `rpc`，`sys_getpid` → `getpid`，`sys_mmap` → `mmap`，`sys_fb_info` → `fb_info`，`sys_notify` → `notify`，`sys_yield` → `sched_yield`，`sys_recv` → `recv`
    - driver/kbd_driver.cc：`sys_irq_bind` → `irq_bind`，`sys_getpid` → `getpid`，`sys_load_dev` → `device_register`，`sys_recv` → `recv`，`sys_notify` → `notify`，`sys_shm_create` → `shm_create`，`sys_reply` → `rpc_reply`
    - driver/disk_driver.cc：`sys_shm_create` → `shm_create`，`sys_recv` → `recv`，`sys_notify` → `notify`
-   - driver/kms_driver.cc：`sys_shm_attach` → `shm_attach`，`sys_lookup_dev` → `device_lookup`，`sys_fb_info` → `fb_info`，`sys_recv` → `recv`
-   - driver/fs_driver.cc：`sys_shm_create` → `shm_create`，`sys_shm_attach` → `shm_attach`，`sys_getpid` → `getpid`，`sys_lookup_dev` → `device_lookup`，`sys_load_dev` → `device_register`，`sys_recv` → `recv`，`sys_notify` → `notify`，`sys_serial_write` → `serial_write`
+   - driver/kms_driver.cc：`sys_shm_attach` → `shm_attach`，`sys_fb_info` → `fb_info`，`sys_recv` → `recv`
+   - driver/fs_driver.cc：`sys_shm_create` → `shm_create`，`sys_shm_attach` → `shm_attach`，`sys_getpid` → `getpid`，`sys_load_dev` → `device_register`，`sys_recv` → `recv`，`sys_notify` → `notify`，`sys_serial_write` → `serial_write`
 3. **替换完成后**，用户态代码不再直接 `#include "common/syscall.h"`，改为使用对应 POSIX 头文件
 4. **libc 内部**（`stdio.cc`、`malloc.cc`、`start.cc`）可保留 `sys_*` 调用，因为它们是 libc 自身实现，需要直接访问底层 syscall
 
@@ -157,7 +157,7 @@ add_user_lib(c SOURCES
 #include "common/syscall.h"
 // ...
 freq->client_pid = sys_getpid();
-sys_notify(sys_lookup_dev(DEV_FS));
+	sys_notify(sys_lookup_dev(DEV_FS));
 { struct recv_msg m; sys_recv(&m, 0); }
 int64_t child_pid = sys_spawn((const void *)elf_buf, (uint64_t)file_size, 0);
 int64_t result = sys_waitpid((int32_t)child_pid, &exit_code);
@@ -170,9 +170,11 @@ int64_t result = sys_waitpid((int32_t)child_pid, &exit_code);
 #include <sys/device.h>
 #include <sys/process.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 // ...
 freq->client_pid = getpid();
-notify(device_lookup(DEV_FS));
+int fs_fd = open("/dev/fs", O_RDWR);
+msg_fd(fs_fd, &freq, sizeof(freq), &fresp, sizeof(fresp));
 { struct recv_msg m; recv(&m, 0); }
 pid_t child_pid = spawn((const void *)elf_buf, (size_t)file_size, 0);
 pid_t result = waitpid((pid_t)child_pid, &exit_code, 0);

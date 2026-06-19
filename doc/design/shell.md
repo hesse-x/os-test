@@ -6,10 +6,11 @@ Shell 是交互式用户进程，从 stdin pipe（fd 0）读键盘输入，向 s
 
 ## 启动
 
-Shell 启动后轮询 `device_lookup(DEV_FS)` 等待 fs_driver 注册就绪（1ms 超时 `sys_recv`），找到后进入命令循环。
+Shell 启动后轮询 `open("/dev/fs")` 等待 fs_driver 注册就绪（1ms 超时 `sys_recv`），找到后进入命令循环。
 
 ```c
-while ((fs_pid = device_lookup(DEV_FS)) < 0) {
+int fs_fd;
+while ((fs_fd = open("/dev/fs", O_RDWR)) < 0) {
     struct recv_msg m;
     recv(&m, NULL, 0, 1);
 }

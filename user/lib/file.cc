@@ -60,14 +60,15 @@ uint64_t fd_file_size(int fd) {
     return fd_table[fd].file.file_size;
 }
 
-// Lazy fs_driver PID cache
-static pid_t fs_pid_cache = -1;
+// Lazy fs_driver fd cache (opened via /dev/fs)
+static int fs_dev_fd = -1;
 
-static pid_t get_fs_pid() {
-    if (fs_pid_cache < 0) {
-        fs_pid_cache = device_lookup(DEV_FS);
+static int get_fs_dev_fd() {
+    if (fs_dev_fd < 0) {
+        fs_dev_fd = open("/dev/fs", O_RDWR);
+        if (fs_dev_fd < 0) return -1;
     }
-    return fs_pid_cache;
+    return fs_dev_fd;
 }
 
 // ===================== Message protocol =====================
@@ -111,10 +112,7 @@ struct file_resp {
 int open(const char *path, int flags, ...) {
     fd_table_init();
 
-    pid_t pid = get_fs_pid();
-    if (pid < 0) { errno = ENOENT; return -1; }
-
-    // Check for /dev/ prefix — open device node instead of file
+    // Check for /dev/ prefix — open device node instead of file (no fs_driver needed)
     if (path && path[0] == '/' && path[1] == 'd' && path[2] == 'e' && path[3] == 'v' && path[4] == '/') {
         const char *devname = path + 5;  // skip "/dev/"
         int dev_type = DEV_NONE;
@@ -125,11 +123,11 @@ int open(const char *path, int flags, ...) {
         else if (strcmp(devname, "terminal") == 0) dev_type = DEV_TERMINAL;
         else { errno = ENOENT; return -1; }
 
-        int fd = sys_open_dev(dev_type);
+        // sys_open_dev now returns packed (fd | target_pid << 32)
+        uint64_t result = sys_open_dev(dev_type);
+        int32_t fd = (int32_t)(result & 0xFFFFFFFFULL);
         if (fd < 0) { errno = -fd; return -1; }
-
-        // Look up driver PID for req_fd/notify_fd translation
-        pid_t target_pid = sys_lookup_dev(dev_type);
+        pid_t target_pid = (pid_t)(result >> 32);
 
         // Record FD_DEV in libc fd_table
         fd_table[fd].type = FD_DEV;
@@ -146,6 +144,9 @@ int open(const char *path, int flags, ...) {
     }
     if (fd < 0) { errno = EMFILE; return -1; }
 
+    int fs_fd = get_fs_dev_fd();
+    if (fs_fd < 0) { errno = ENOENT; return -1; }
+
     struct file_req req;
     memset(&req, 0, sizeof(req));
     req.cmd = FILE_CMD_OPEN;
@@ -155,9 +156,9 @@ int open(const char *path, int flags, ...) {
 
     uint8_t reply_buf[8192];
 
-    int r = sys_msg(pid, &req, sizeof(req), reply_buf, sizeof(reply_buf));
+    int r = msg_fd(fs_fd, &req, sizeof(req), reply_buf, sizeof(reply_buf));
     if (r < 0) {
-        if (r == -ESRCH) fs_pid_cache = -1;
+        if (r == -ESRCH) { close(fs_dev_fd); fs_dev_fd = -1; }
         errno = -r;
         return -1;
     }
@@ -179,8 +180,8 @@ ssize_t file_read(int fd, void *buf, size_t count) {
     if ((fd_table[fd].flags & O_WRONLY) && !(fd_table[fd].flags & O_RDWR))
         { errno = EBADF; return -1; }
 
-    pid_t pid = get_fs_pid();
-    if (pid < 0) { errno = ENOENT; return -1; }
+    int fs_fd = get_fs_dev_fd();
+    if (fs_fd < 0) { errno = ENOENT; return -1; }
 
     size_t chunk = count > 65536 ? 65536 : count;
 
@@ -194,9 +195,9 @@ ssize_t file_read(int fd, void *buf, size_t count) {
     uint8_t *reply_buf = (uint8_t *)malloc(reply_len);
     if (!reply_buf) { errno = ENOMEM; return -1; }
 
-    int r = sys_msg(pid, &req, sizeof(req), reply_buf, reply_len);
+    int r = msg_fd(fs_fd, &req, sizeof(req), reply_buf, reply_len);
     if (r < 0) {
-        if (r == -ESRCH) fs_pid_cache = -1;
+        if (r == -ESRCH) { close(fs_dev_fd); fs_dev_fd = -1; }
         free(reply_buf);
         errno = -r;
         return -1;
@@ -222,8 +223,8 @@ ssize_t file_write(int fd, const void *buf, size_t count) {
     if (!(fd_table[fd].flags & (O_WRONLY | O_RDWR | O_APPEND)))
         { errno = EBADF; return -1; }
 
-    pid_t pid = get_fs_pid();
-    if (pid < 0) { errno = ENOENT; return -1; }
+    int fs_fd = get_fs_dev_fd();
+    if (fs_fd < 0) { errno = ENOENT; return -1; }
 
     // Chunk to fit within sys_msg limit (64KB total)
     size_t max_data = 65536 - sizeof(struct file_req);
@@ -243,11 +244,11 @@ ssize_t file_write(int fd, const void *buf, size_t count) {
     memcpy(msg_buf + sizeof(struct file_req), buf, chunk);
 
     struct file_resp resp;
-    int r = sys_msg(pid, msg_buf, msg_len, &resp, sizeof(resp));
+    int r = msg_fd(fs_fd, msg_buf, msg_len, &resp, sizeof(resp));
     free(msg_buf);
 
     if (r < 0) {
-        if (r == -ESRCH) fs_pid_cache = -1;
+        if (r == -ESRCH) { close(fs_dev_fd); fs_dev_fd = -1; }
         errno = -r;
         return -1;
     }
@@ -269,15 +270,15 @@ ssize_t file_write(int fd, const void *buf, size_t count) {
 // ===================== close (file) =====================
 
 int file_close(int fd) {
-    pid_t pid = get_fs_pid();
-    if (pid >= 0) {
+    int fs_fd = get_fs_dev_fd();
+    if (fs_fd >= 0) {
         struct file_req req;
         memset(&req, 0, sizeof(req));
         req.cmd = FILE_CMD_CLOSE;
         req.fs_fd = (uint32_t)fd_table[fd].file.fs_fd;
 
         struct file_resp resp;
-        sys_msg(pid, &req, sizeof(req), &resp, sizeof(resp));
+        msg_fd(fs_fd, &req, sizeof(req), &resp, sizeof(resp));
     }
     fd_table[fd].type = FD_NONE;
     return 0;
@@ -395,8 +396,8 @@ int stat(const char *path, struct stat *st) {
 
     if (!path || !st) { errno = EFAULT; return -1; }
 
-    int32_t fs_pid = get_fs_pid();
-    if (fs_pid <= 0) { errno = ENOENT; return -1; }
+    int fs_fd = get_fs_dev_fd();
+    if (fs_fd < 0) { errno = ENOENT; return -1; }
 
     // FILE_CMD_STAT = 9
     struct {
@@ -414,7 +415,7 @@ int stat(const char *path, struct stat *st) {
         uint64_t size;
     } fresp;
 
-    int r = sys_msg(fs_pid, &freq, sizeof(freq), &fresp, sizeof(fresp));
+    int r = msg_fd(fs_fd, &freq, sizeof(freq), &fresp, sizeof(fresp));
     if (r < 0) { errno = -r; return -1; }
     if (fresp.status != 0) { errno = (int)fresp.status; return -1; }
 
@@ -447,6 +448,16 @@ int notify_fd(int fd) {
         return -1;
     }
     return sys_notify(fd_table[fd].target_pid);
+}
+
+// msg_fd — send variable-length message to device driver via fd
+int msg_fd(int fd, const void *msg_buf, size_t msg_len,
+           void *reply_buf, size_t reply_len) {
+    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type != FD_DEV) {
+        errno = EBADF;
+        return -1;
+    }
+    return sys_dev_msg(fd, (void*)msg_buf, msg_len, reply_buf, reply_len);
 }
 
 // poll — wait for events (simplified: wraps sys_recv with timeout)

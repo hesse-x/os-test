@@ -80,7 +80,7 @@ static uint32_t parse_u32(const char *s) {
 
 // ===================== FS IPC =====================
 
-static pid_t fs_pid;
+static int fs_fd = -1;
 
 // Reply buffer: header + up to 64KB data (same as libc and fs_driver)
 #define FS_REPLY_BUF_SIZE (sizeof(struct file_resp) + 65536)
@@ -88,7 +88,7 @@ static uint8_t fs_reply_buf[FS_REPLY_BUF_SIZE];
 
 static int fs_request(struct file_req *freq, size_t resp_len) {
     fflush(stdout);
-    int r = sys_msg(fs_pid, freq, sizeof(*freq), fs_reply_buf, resp_len);
+    int r = msg_fd(fs_fd, freq, sizeof(*freq), fs_reply_buf, resp_len);
     if (r < 0) return r;
     struct file_resp *fresp = (struct file_resp *)fs_reply_buf;
     return (int)fresp->status;
@@ -106,7 +106,7 @@ static int fs_write_request(uint32_t fs_fd, const void *data, size_t len, size_t
     freq->fs_fd = fs_fd;
     freq->count = (uint32_t)len;
     memcpy(msg_buf + sizeof(struct file_req), data, len);
-    int r = sys_msg(fs_pid, msg_buf, msg_len, fs_reply_buf, sizeof(struct file_resp));
+    int r = msg_fd(fs_fd, msg_buf, msg_len, fs_reply_buf, sizeof(struct file_resp));
     free(msg_buf);
     if (r < 0) return r;
     struct file_resp *fresp = (struct file_resp *)fs_reply_buf;
@@ -568,7 +568,7 @@ static const cmd_entry cmds[] = {
 
 extern "C" void _start() {
     serial_write("shell: waiting for fs_driver\n", 29);
-    while ((fs_pid = device_lookup(DEV_FS)) < 0) {
+    while ((fs_fd = open("/dev/fs", O_RDWR)) < 0) {
         struct recv_msg m;
         recv(&m, NULL, 0, 1);
     }

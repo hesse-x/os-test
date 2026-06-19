@@ -36,7 +36,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
 uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t);
 uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_load_dev(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t);
-uint64_t sys_lookup_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_dev_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5);
 uint64_t sys_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_clock(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_msg(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);

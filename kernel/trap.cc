@@ -302,7 +302,7 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_read,           // 17
     sys_close,          // 18
     sys_load_dev,       // 19
-    sys_lookup_dev,     // 20
+    sys_dev_msg,        // 20
     sys_notify,         // 21
     sys_gettime,        // 22
     sys_clock,          // 23
@@ -1099,7 +1099,8 @@ uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t a
 }
 
 // sys_open_dev(dev_type) — syscall 35 (open device node, returns FD_DEV fd)
-// Returns: fd (positive) on success, positive errno on failure
+// Returns: (fd | target_pid << 32) on success, negative errno on failure
+// Caller extracts: fd = (int32_t)(result & 0xFFFFFFFF), pid = (pid_t)(result >> 32)
 uint64_t sys_open_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     int dev_type = (int)arg1;
 
@@ -1127,7 +1128,8 @@ uint64_t sys_open_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     proc->fd_table[fd].pipe = nullptr;
     proc->fd_table[fd].target_pid = target_pid;
 
-    return (uint64_t)fd;
+    // Pack fd and PID into one return value — eliminates need for sys_lookup_dev
+    return (uint64_t)fd | ((uint64_t)target_pid << 32);
 }
 
 // sys_serial_write(buf, len) — syscall 11 (用户态串口输出)
@@ -1593,13 +1595,6 @@ uint64_t sys_load_dev(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t
     return (uint64_t)register_dev(dev_type, pid);
 }
 
-// sys_lookup_dev(dev_type) — syscall 20 (查询驱动 PID)
-// Returns: PID on success, 0 if not found
-uint64_t sys_lookup_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
-    int dev_type = (int)arg1;
-    if (dev_type <= DEV_NONE || dev_type >= DEV_TYPE_MAX) return 0;
-    return (uint64_t)dev_table[dev_type];
-}
 
 // Remove a PID from dev_table (called by proc_reap)
 void dev_table_cleanup(pid_t pid) {
@@ -1664,33 +1659,11 @@ uint64_t sys_clock(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     return current_proc->cpu_time_ns;
 }
 
-// sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — syscall 24 (变长消息请求)
-// 向目标发送变长数据，阻塞等待 reply
-// 返回: 0=成功, 负errno
-uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5) {
-    pid_t target_pid = (pid_t)arg1;
-    void *msg_buf = (void *)arg2;
-    size_t msg_len = (size_t)arg3;
-    void *reply_buf = (void *)arg4;
-    size_t reply_len = (size_t)arg5;
-
-    // Validate target PID
-    if (target_pid < 0 || target_pid >= MAX_PROC) return (uint64_t)-ESRCH;
-
-    // Validate msg_len
-    if (msg_len == 0 || msg_len > 65536) return (uint64_t)-EINVAL;
-
-    // Validate user pointers
-    uint64_t msg_ptr = (uint64_t)msg_buf;
-    if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
-        msg_ptr + msg_len > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
-
-    uint64_t rep_ptr = (uint64_t)reply_buf;
-    if (!rep_ptr || rep_ptr >= 0xFFFFFFFF80000000ULL ||
-        rep_ptr + reply_len > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
-
+// Inner implementation of sys_msg — shared by PID-based and fd-based variants.
+// All parameters are already validated by the caller.
+// Returns: 0 on success, positive errno on failure
+static int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
+                           void *reply_buf, size_t reply_len) {
     proc_t *target = &procs[target_pid];
     if (target->pid != target_pid) return (uint64_t)-ESRCH;
 
@@ -1753,6 +1726,72 @@ uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uin
     // Woken up by sys_msg_resp or proc_reap
     if (proc->msg_result != 0) return (uint64_t)proc->msg_result;
     return 0;
+}
+
+// sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — syscall 24 (变长消息请求)
+// PID-based variant.
+// 返回: 0=成功, 负errno
+uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5) {
+    pid_t target_pid = (pid_t)arg1;
+    void *msg_buf = (void *)arg2;
+    size_t msg_len = (size_t)arg3;
+    void *reply_buf = (void *)arg4;
+    size_t reply_len = (size_t)arg5;
+
+    // Validate target PID
+    if (target_pid < 0 || target_pid >= MAX_PROC) return (uint64_t)-ESRCH;
+
+    // Validate msg_len
+    if (msg_len == 0 || msg_len > 65536) return (uint64_t)-EINVAL;
+
+    // Validate user pointers
+    uint64_t msg_ptr = (uint64_t)msg_buf;
+    if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
+        msg_ptr + msg_len > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)-EFAULT;
+
+    uint64_t rep_ptr = (uint64_t)reply_buf;
+    if (!rep_ptr || rep_ptr >= 0xFFFFFFFF80000000ULL ||
+        rep_ptr + reply_len > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)-EFAULT;
+
+    return sys_msg_to(target_pid, msg_buf, msg_len, reply_buf, reply_len);
+}
+
+// sys_dev_msg(fd, msg_buf, msg_len, reply_buf, reply_len) — syscall 20 (fd-based 变长消息请求)
+// 从当前进程的 fd_table 中提取 target PID，委托 sys_msg_to。
+// 返回: 0=成功, 负errno
+uint64_t sys_dev_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5) {
+    int fd = (int)arg1;
+    void *msg_buf = (void *)arg2;
+    size_t msg_len = (size_t)arg3;
+    void *reply_buf = (void *)arg4;
+    size_t reply_len = (size_t)arg5;
+
+    proc_t *proc = current_proc;
+
+    // Validate fd
+    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
+    if (proc->fd_table[fd].type != FD_DEV) return (uint64_t)-EBADF;
+
+    // Validate msg_len
+    if (msg_len == 0 || msg_len > 65536) return (uint64_t)-EINVAL;
+
+    // Validate user pointers
+    uint64_t msg_ptr = (uint64_t)msg_buf;
+    if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
+        msg_ptr + msg_len > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)-EFAULT;
+
+    uint64_t rep_ptr = (uint64_t)reply_buf;
+    if (!rep_ptr || rep_ptr >= 0xFFFFFFFF80000000ULL ||
+        rep_ptr + reply_len > 0xFFFFFFFF80000000ULL)
+        return (uint64_t)-EFAULT;
+
+    pid_t target_pid = proc->fd_table[fd].target_pid;
+    if (target_pid < 0 || target_pid >= MAX_PROC) return (uint64_t)-ESRCH;
+
+    return sys_msg_to(target_pid, msg_buf, msg_len, reply_buf, reply_len);
 }
 
 // sys_msg_resp(resp_buf, resp_len) — syscall 25 (回复当前 MSG 调用者)
