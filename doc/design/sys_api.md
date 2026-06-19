@@ -124,7 +124,7 @@ return (int)r;
 以下 syscall 仅在极特殊的内核交互场景使用，不封装为 POSIX 函数：
 
 - `SYS_YIELD`：用户态极少直接调用（仅 terminal.cc 用了一次），可用 `sched_yield()` 封装（`unistd.h`）
-- `SYS_SERIAL_WRITE`：封装为 `serial_write`（`sys/serial.h`），仅驱动使用
+- `SYS_SERIAL_WRITE`：已删除，串口镜像下沉到 sys_write FD_PIPE 路径
 
 ## CMake 变更
 

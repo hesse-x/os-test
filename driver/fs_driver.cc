@@ -8,7 +8,6 @@
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/device.h>
-#include <sys/serial.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/errno.h"
@@ -689,7 +688,6 @@ static pending_op *alloc_pending_op() {
             return &pending_pool[i];
         }
     }
-    serial_write("alloc_pending_op: pool exhausted!", 33);
     return NULL;
 }
 
@@ -714,14 +712,6 @@ static void op_complete(pending_op *op, int32_t status, uint32_t count) {
     resp->status = status;
     resp->count = count;
     if (status != 0) {
-        if (status == -12) serial_write("op_complete: ENOMEM\n", 20);
-        else if (status == -2) serial_write("op_complete: ENOENT\n", 20);
-        else if (status == -4) serial_write("op_complete: EINTR\n", 19);
-        else if (status == -17) serial_write("op_complete: EEXIST\n", 20);
-        else if (status == -22) serial_write("op_complete: EINVAL\n", 20);
-        else if (status == -5) serial_write("op_complete: EIO\n", 17);
-        else if (status == -28) serial_write("op_complete: ENOSPC\n", 20);
-        else { serial_write("op_complete: OTHER\n", 19); }
     }
     // op_complete: send reply and free
     msg_resp(op->reply_buf, sizeof(file_resp) + count);
@@ -1341,7 +1331,6 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
             rs->entry_idx = 0;
             rs->lfn_buf[0] = '\0';
             rs->phase = RS_SCAN_ENTRIES;
-            { serial_write("RS_INIT: comp=", 15); serial_write(rs->path + rs->comp_start, rs->comp_len); serial_write("\n", 1); }
             continue;
         }
 
@@ -1365,16 +1354,13 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
                 hb[0]='s'; hb[1]='q'; hb[2]=hx[my_seq&0xf]; hb[3]=' ';
                 hb[4]='s'; hb[5]='c'; hb[6]='a'; hb[7]='n';
                 for(int i=11;i>=8;i--){hb[i]=hx[cc&0xf];cc>>=4;}
-                hb[12]='\n'; serial_write(hb,13);
             }
             int slot = cache_lookup(rs->current_cluster);
             if (slot < 0) {
                 // Cache miss — need to read
-                serial_write("RS_SCAN: cache miss\n", 20);
                 rs->phase = RS_READ_CLUSTER;
                 continue;
             }
-            serial_write("RS_SCAN: cache hit\n", 19);
             {
                 // Debug: print entry_idx and first 4 entries name[0]
                 uint8_t *d = cache[slot].data;
@@ -1387,7 +1373,6 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
                 if (ei == 0) { hb[pos++] = '0'; }
                 else { char tmp[8]; int ti=0; while(ei){tmp[ti++]='0'+ei%10;ei/=10;} for(int j=ti-1;j>=0;j--)hb[pos++]=tmp[j]; }
                 hb[pos++] = ' ';
-                serial_write(hb, pos);
                 // Print first 4 name[0] bytes
                 pos = 0;
                 for (int i = 0; i < 4; i++) {
@@ -1396,7 +1381,6 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
                     hb[pos++] = ' ';
                 }
                 hb[pos++] = '\n';
-                serial_write(hb, pos);
             }
 
             uint8_t *data = cache[slot].data;
@@ -1415,15 +1399,9 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
                     db[2]=hx[nv>>4]; db[3]=hx[nv&0xf];
                     db[4]='z'; db[5]=(n0==0)?'Y':'N';
                     db[6]='\n'; db[7]=0;
-                    serial_write(db,7);
                 }
                 if (de->name[0] == 0x00) {
                     // End of directory — not found
-                    { char hb[8]; const char *hx="0123456789ABCDEF";
-                      int v=rs->entry_idx; hb[0]='e'; hb[1]='o'; hb[2]='d';
-                      hb[3]=hx[(v>>4)&0xf]; hb[4]=hx[v&0xf]; hb[5]='\n';
-                      serial_write(hb,6); }
-                    serial_write("RS_SCAN: end of dir\n", 20);
                     rs->found = false;
                     rs->phase = RS_DONE;
                     return RESOLVE_DONE;
@@ -1480,12 +1458,6 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
                         rs->current_cluster = next_cluster;
                         rs->lfn_buf[0] = '\0';
                         rs->phase = RS_SCAN_ENTRIES;
-                        { serial_write("descend: comp=", 15); serial_write(rs->path + rs->comp_start, rs->comp_len);
-                          char hb[12]; const char *hx="0123456789ABCDEF";
-                          hb[0]=' '; hb[1]='c'; hb[2]='l';
-                          for(int i=7;i>=3;i--){hb[i]=hx[next_cluster&0xf];next_cluster>>=4;}
-                          hb[8]='\n'; serial_write(hb,9);
-                        }
                         break; // break out of for loop, then while(1) will re-enter RS_SCAN_ENTRIES
                     }
 
@@ -1824,7 +1796,6 @@ static void resume_read(pending_op *op) {
         uint32_t cc = op->u.read.current_cluster;
         for (int i = 7; i >= 0; i--) { hb[p++] = hx[(cc >> (i*4)) & 0xF]; }
         hb[p++] = '\n';
-        serial_write(hb, p);
     }
 
     // Phase 1: FAT chain walk to reach offset cluster
@@ -1908,12 +1879,9 @@ static void resume_read(pending_op *op) {
 // ---- OPEN ----
 static void start_open(pending_op *op, struct client_session *sess,
                         const char *path, uint32_t flags) {
-    serial_write("start_open: path=", 18);
-    serial_write(path, 0);
     {
         char buf[4];
         buf[0] = ' '; buf[1] = 't'; buf[2] = '0' + op->type; buf[3] = '\n';
-        serial_write(buf, 4);
     }
     file_resp *resp = (file_resp *)op->reply_buf;
     resp->status = 0; resp->fd = 0; resp->file_size = 0; resp->count = 0; resp->total = 0;
@@ -1960,16 +1928,13 @@ static void resume_open(pending_op *op) {
     struct client_session *sess = &sessions[op->session_idx];
 
     int r = resolve_step(rs, op);
-    { char db[4]; db[0]='r'; db[1]='='; db[2]='0'+r; db[3]='\n'; serial_write(db,4); }
     if (r == RESOLVE_ASYNC) return; // I/O pending
 
     if (r == RESOLVE_ERROR || !rs->found) {
-        serial_write("resolve: err or not found\n", 26);
         op_complete(op, rs->found ? -ENOTDIR : -ENOENT, 0);
         return;
     }
 
-    serial_write("resolve: found\n", 15);
     // Path resolved — rs->result has the dir entry, rs->result_cluster has the cluster
     fat_dir_entry &de = rs->result;
 
@@ -2022,11 +1987,9 @@ static void resume_open(pending_op *op) {
 
     if (op->type == OP_OPEN) {
         if (de.attr & 0x10) {
-            serial_write("open: is dir\n", 13);
             op_complete(op, -EISDIR, 0);
             return;
         }
-        serial_write("open: alloc fd\n", 15);
         int fd = session_alloc_fd(sess);
         if (fd < 0) { op_complete(op, -EMFILE, 0); return; }
         uint32_t cluster = ((uint32_t)de.fst_clus_hi << 16) | de.fst_clus_lo;
@@ -2063,7 +2026,6 @@ static void resume_open(pending_op *op) {
             hb[p++] = ' ';
             uint32_t fs2 = de.file_size;
             for (int i=7; i>=0; i--) { hb[p++] = hx[(fs2>>(i*4))&0xF]; }
-            hb[p++] = '\n'; serial_write(hb, p);
         }
 
         resp->status = 0;
@@ -2246,7 +2208,6 @@ static void raw_read_complete(disk_io *io) {
 static void start_write(pending_op *op, struct client_session *sess,
                          uint32_t fs_fd, uint32_t count,
                          uint8_t *write_data, size_t data_len) {
-    serial_write("start_write: enter\n", 19);
     file_resp *resp = (file_resp *)op->reply_buf;
     resp->status = 0;
     resp->fd = 0;
@@ -2639,8 +2600,6 @@ static void resume_write(pending_op *op) {
         write_lock_release();
 
         // Reply
-        if (resp->status != 0) serial_write("write_done: ERROR\n", 18);
-        else serial_write("write_done: OK\n", 15);
         resp->status = (resp->status != 0) ? resp->status : 0;
         resp->count = op->u.write.bytes_written;
         resp->file_size = op->u.write.new_file_size;
@@ -3381,7 +3340,6 @@ static bool is_valid_83(const char *name, int name_len) {
 static void fat32_init() {
     uint8_t mbr_buf[512];
     if (disk_read_sync(0, 1, mbr_buf) != 0) {
-        serial_write("fs: MBR read failed\n", 21);
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
     uint8_t *mbr = mbr_buf;
@@ -3400,7 +3358,6 @@ static void fat32_init() {
         }
     }
 
-    serial_write("fs: part_start_lba found\n", 26);
 
     disk_read_sync(part_start_lba, 1, mbr_buf);
     uint8_t *bpb = mbr_buf;
@@ -3418,19 +3375,15 @@ static void fat32_init() {
     int pos = 0;
     const char prefix[] = "bps=X sc=X spf=X rc=X\n";
     // Quick hex print
-    serial_write("fs: bpb first 4 bytes: ", 23);
     for (int i = 0; i < 4; i++) {
         char hex[3];
         hex[0] = "0123456789ABCDEF"[(bpb[i] >> 4) & 0xF];
         hex[1] = "0123456789ABCDEF"[bpb[i] & 0xF];
         hex[2] = 0;
-        serial_write(hex, 2);
     }
-    serial_write("\n", 1);
 
     if (bps != 512 || sectors_per_cluster == 0 || spf32 == 0 || root_cluster < 2) {
         const char msg[] = "EBPB\n";
-        serial_write(msg, sizeof(msg) - 1);
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
 
@@ -3448,7 +3401,6 @@ static void fat32_init() {
 
 // ===================== Main event loop =====================
 extern "C" void _start() {
-    serial_write("fs_driver: started\n", 20);
 
     // Initialize caches
     for (int i = 0; i < CACHE_SLOTS; i++) {
@@ -3472,12 +3424,9 @@ extern "C" void _start() {
     }
 
     // Sync init (MBR/BPB/FAT cache warm-up)
-    serial_write("fs_driver: calling fat32_init\n", 30);
     fat32_init();
-    serial_write("fs_driver: fat32_init done\n", 27);
 
     device_register(getpid(), DEV_FS);
-    serial_write("fs_driver: registered DEV_FS, entering event loop\n", 50);
 
     // Event loop
     while (1) {

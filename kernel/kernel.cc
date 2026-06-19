@@ -34,17 +34,14 @@ void kernel_init_finish() {
 static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_page, size_t *out_npages) {
   // Phase 1: read first sector to parse ELF header
   uint8_t hdr_buf[512];
-  serial_puts("load_elf: LBA=");
-  serial_put_hex(lba);
+  serial_printf("load_elf: LBA=%lx", lba);
   if (ahci_read_lba(lba, 1, hdr_buf) != 0) {
-    serial_puts(" READ_FAILED\n");
+    serial_printf(" READ_FAILED\n");
     return nullptr;
   }
 
   if (hdr_buf[0] != 0x7F || hdr_buf[1] != 'E' || hdr_buf[2] != 'L' || hdr_buf[3] != 'F') {
-    serial_puts(" BAD_MAGIC: got ");
-    serial_put_hex(((uint32_t *)hdr_buf)[0]);
-    serial_puts("\n");
+    serial_printf(" BAD_MAGIC: got %lx\n", ((uint32_t *)hdr_buf)[0]);
     return nullptr;
   }
 
@@ -52,7 +49,7 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
   // Validate program headers are within the first sector
   if (ehdr->e_phentsize == 0 ||
       ehdr->e_phoff + (uint64_t)ehdr->e_phnum * ehdr->e_phentsize > 512) {
-    serial_puts("load_elf_from_disk: program headers exceed first sector\n");
+    serial_printf("load_elf_from_disk: program headers exceed first sector\n");
     return nullptr;
   }
   uint64_t file_end = 0;
@@ -73,17 +70,13 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
 
   uint64_t file_size = total_sectors * 512;
 
-  serial_puts(" sectors=");
-  serial_put_hex(total_sectors);
-  serial_puts(" size=");
-  serial_put_hex(file_size);
-  serial_puts("\n");
+  serial_printf(" sectors=%lx size=%lx\n", total_sectors, file_size);
 
   // Phase 2: allocate pages and read
   size_t npages = (file_size + 4095) / 4096;
   Page *page = bfc_alloc.alloc_page(npages);
   if (!page) {
-    serial_puts("load_elf_from_disk: alloc_page failed\n");
+    serial_printf("load_elf_from_disk: alloc_page failed\n");
     return nullptr;
   }
 
@@ -124,24 +117,24 @@ void kernel_main(boot_info *bi) {
 
   smp_boot_aps();
 
-  serial_puts("kernel_main: smp_boot_aps done\n");
+  serial_printf("kernel_main: smp_boot_aps done\n");
 
   pci_init();
 
-  serial_puts("kernel_main: pci_init done\n");
+  serial_printf("kernel_main: pci_init done\n");
 
   ahci_init();
 
-  serial_puts("kernel_main: ahci_init done\n");
+  serial_printf("kernel_main: ahci_init done\n");
 
   xhci_init();
 
-  serial_puts("kernel_main: xhci_init done\n");
+  serial_printf("kernel_main: xhci_init done\n");
 
   // Create BSP idle process
   proc_t *bsp_idle = create_idle_process(0);
   if (!bsp_idle) {
-    serial_puts("kernel_main: create BSP idle failed\n");
+    serial_printf("kernel_main: create BSP idle failed\n");
     halt();
   }
   serial_puts("kernel_main: BSP idle created\n");
@@ -163,41 +156,39 @@ void kernel_main(boot_info *bi) {
 
     // Switch to this port; skip if no device detected
     if (ahci_set_active_port(port) != 0) {
-      serial_puts("kernel_main: skip port ");
-      serial_put_hex(port);
-      serial_puts(" (no device)\n");
+      serial_printf("kernel_main: skip port %x (no device)\n", port);
       continue;
     }
 
     if (!fs_loaded) {
-      serial_puts("kernel_main: loading fs_driver...\n");
+      serial_printf("kernel_main: loading fs_driver...\n");
       uint64_t sz; Page *pg; size_t np;
       uint8_t *elf = load_elf_from_disk(101, &sz, &pg, &np);
       if (elf) {
         proc_t *p = process_create_elf(elf, sz);
         bfc_alloc.free_page(pg, np);
-        if (p) { fs_loaded = true; serial_puts("kernel_main: fs_driver created\n"); }
+        if (p) { fs_loaded = true; serial_printf("kernel_main: fs_driver created\n"); }
       }
     }
 
     if (!init_loaded) {
-      serial_puts("kernel_main: loading init...\n");
+      serial_printf("kernel_main: loading init...\n");
       uint64_t sz; Page *pg; size_t np;
       uint8_t *elf = load_elf_from_disk(301, &sz, &pg, &np);
       if (elf) {
         proc_t *init_proc = process_create_elf(elf, sz);
         bfc_alloc.free_page(pg, np);
-        if (init_proc) { init_loaded = true; init_pid = init_proc->pid; serial_puts("kernel_main: init created\n"); }
+        if (init_proc) { init_loaded = true; init_pid = init_proc->pid; serial_printf("kernel_main: init created\n"); }
       }
     }
 
     if (fs_loaded && init_loaded) break;
   }
 
-  if (!fs_loaded) serial_puts("kernel_main: fs_driver.elf FAILED on all ports\n");
-  if (!init_loaded) serial_puts("kernel_main: init.elf FAILED on all ports\n");
+  if (!fs_loaded) serial_printf("kernel_main: fs_driver.elf FAILED on all ports\n");
+  if (!init_loaded) serial_printf("kernel_main: init.elf FAILED on all ports\n");
 
-  serial_puts("kernel_main: all procs loaded, entering idle\n");
+  serial_printf("kernel_main: all procs loaded, entering idle\n");
 
   sti();
 

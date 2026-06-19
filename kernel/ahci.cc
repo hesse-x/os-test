@@ -874,11 +874,8 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
             bq_count--;
             bq_head = (bq_head + 1) % BLOCK_QUEUE_SIZE;
 
-            ahci_puts("ahci: poll-complete cookie=");
-            serial_put_hex(req->cookie);
-            ahci_puts(" to pid=");
-            serial_put_hex(req->caller_pid);
-            ahci_puts("\n");
+            serial_printf("ahci: poll-complete cookie=%ld to pid=%d, bq_count=%ld\n",
+                req->cookie, req->caller_pid, bq_count);
 
             // Notify caller (safe while holding ahci_lock)
             notify_and_wake(req->caller_pid, &msg);

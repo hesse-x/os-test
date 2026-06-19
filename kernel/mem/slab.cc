@@ -64,7 +64,7 @@ void slab_init() {
         kmalloc_caches[i].lock = {0};
         kmalloc_caches[i].partial = NULL;
     }
-    serial_puts("slab_init: ok\n");
+    serial_printf("slab_init: ok\n");
 }
 
 // ===================== kmalloc =====================

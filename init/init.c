@@ -14,24 +14,24 @@
 #include "common/dev.h"
 
 static int spawn_service(const char *path) {
-    serial_write("spawn: ", 7);
-    serial_write(path, strlen(path));
-    serial_write("\n", 1);
+    printf("spawn: %s\n", path);
 
     int fd = open(path, O_RDONLY);
+    printf("open fd=%d\n", fd);
     if (fd < 0) return -1;
 
     uint64_t size = fd_file_size(fd);
-    { char hx[]="0123456789ABCDEF"; char hb[24]; int p=0; hb[p++]='s'; hb[p++]=':'; for(int i=15;i>=0;i--){hb[p++]=hx[(size>>(i*4))&0xF];} hb[p++]='\n'; serial_write(hb,p); }
+    printf("size: 0x%lx\n", size);
     void *buf = malloc(size);
     if (!buf) { close(fd); return -1; }
 
     ssize_t nread = read(fd, buf, size);
-    { char hx[]="0123456789ABCDEF"; char hb[24]; int p=0; hb[p++]='n'; hb[p++]=':'; uint64_t v=nread; for(int i=15;i>=0;i--){hb[p++]=hx[(v>>(i*4))&0xF];} hb[p++]='\n'; serial_write(hb,p); }
+    printf("nread: 0x%lx after read\n", nread);
     close(fd);
 
-    serial_write("spawn_call\n", 11);
+    printf("calling sys_spawn...\n");
     int64_t pid = sys_spawn(buf, size);
+    printf("sys_spawn returned pid=%ld\n", pid);
     free(buf);
 
     return (pid > 0) ? (int)pid : -1;
@@ -47,28 +47,28 @@ static void wait_dev_ready(const char *dev_path) {
 }
 
 int main(void) {
-    serial_write("init: started\n", 14);
+    printf("init: started\n");
     // 1. Wait for fs_driver to be ready (device registered + initialized)
-    serial_write("init: waiting for fs_driver\n", 28);
+    printf("init: waiting for fs_driver\n");
     wait_dev_ready("/dev/fs");
-    serial_write("init: fs_driver ready\n", 22);
+    printf("init: fs_driver ready\n");
 
     // 2. Spawn kbd_driver, wait for DEV_KBD
-    serial_write("init: spawning kbd_driver\n", 26);
+    printf("init: spawning kbd_driver\n");
     spawn_service("/driver/kbd.dev");
     wait_dev_ready("/dev/kbd");
-    serial_write("init: kbd_driver ready\n", 23);
+    printf("init: kbd_driver ready\n");
 
     // 3. Spawn kms_driver, wait for DEV_KMS
-    serial_write("init: spawning kms_driver\n", 26);
+    printf("init: spawning kms_driver\n");
     spawn_service("/driver/kms.dev");
     wait_dev_ready("/dev/kms");
-    serial_write("init: kms_driver ready\n", 23);
+    printf("init: kms_driver ready\n");
 
     // 4. Spawn terminal
-    serial_write("init: spawning terminal\n", 24);
+    printf("init: spawning terminal\n");
     spawn_service("/usr/bin/terminal");
-    serial_write("init: terminal spawned\n", 23);
+    printf("init: terminal spawned\n");
 
     // 5. Adopt orphans + reap children
     while (1) {

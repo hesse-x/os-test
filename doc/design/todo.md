@@ -69,7 +69,7 @@
 
 内核已完整运行：UEFI 引导 → 内核初始化 → AP 启动（参与调度）→ 加载 2 个 ELF（fs_driver + init）→ init 从 FAT32 启动 kbd/kms/terminal → terminal 启动 shell → 多进程协作。
 
-**统一 IPC 完成**：sys_recv/sys_req/sys_resp + sys_msg/sys_msg_resp + AF_UNIX SOCK_STREAM socket + SCM_RIGHTS fd 传递 + poll 事件多路复用。sys_recv 统一接收 IRQ/REQ/NOTIFY/MSG 四类消息（per-process 16 slot recv 队列 + 4 参数签名支持变长数据），sys_req 同步内联请求（56 字节载荷），sys_msg 同步变长消息（≤64KB，内核 kmalloc 中转拷贝）。NR_SYSCALL=47（0-46），含 SYS_BLOCK_ASYNC(34)、SYS_OPEN_DEV(35)、SYS_INSTALL_FD(36)、SYS_SOCKET~SYS_POLL(37-46)。
+**统一 IPC 完成**：sys_recv/sys_req/sys_resp + sys_msg/sys_msg_resp + AF_UNIX SOCK_STREAM socket + SCM_RIGHTS fd 传递 + poll 事件多路复用。sys_recv 统一接收 IRQ/REQ/NOTIFY/MSG 四类消息（per-process 16 slot recv 队列 + 4 参数签名支持变长数据），sys_req 同步内联请求（56 字节载荷），sys_msg 同步变长消息（≤64KB，内核 kmalloc 中转拷贝）。NR_SYSCALL=46（0-45），串口 syscall（SYS_SERIAL_WRITE）已删除。串口镜像下沉到 sys_write FD_PIPE 路径自动完成。内核新增 serial_printf 格式化输出。
 
 **Socket 完成**：AF_UNIX SOCK_STREAM socket（kernel/socket.h + kernel/socket.cc），10 个 syscall（SYS_SOCKET~SYS_POLL，编号 37-46），包括 socket/bind/listen/accept/connect/socketpair/sendmsg/recvmsg/shutdown/poll。SCM_RIGHTS fd 传递（lazy 安装）。sock_write/sock_read 内部辅助（write/read 对 socket fd 的兼容路径）。WAIT_POLL 阻塞状态。
 
@@ -251,37 +251,99 @@
 
 ---
 
-## 远期目标 — 支持构建 gcc
+## 远期目标 — 支持原生构建 clang/LLVM
 
-### 进程管理（POSIX 核心）
+> **最低可演示目标：** 在 Xos 上通过 `make`/`ninja` 启动 clang 编译过程，cc1 能处理一个简单 C 文件输出 .o，ld 链接成 ELF。
+>
+> **完成态目标：** Xos 自举 — 在 Xos 上用 clang 编译 clang 源码自身。
 
-- [ ] sys_fork + sys_exec
-- [ ] 信号机制完善
-- [ ] 验证: fork + exec 运行子进程
+### 🔴 P0：绝对无法绕过
 
-### 文件系统（POSIX 文件 I/O）
+| 能力 | 依赖 | 说明 | 预估 |
+|------|------|------|------|
+| **fork + execve** | kernel syscall | build system（make/ninja）必须 spawn 子进程（编译→汇编→链接）。没有 fork/exec 构建系统不能运行 | sprint 3-4 |
+| **信号机制（基础）** | kernel syscall + libc | `SIGCHLD`（waitpid 依赖它知道子进程退出）、`signal()`/`sigaction()`/`kill()`、信号投递（用户态返回前检查 pending signals） | sprint 3-4 |
+| **FPU/SSE 上下文切换** | kernel context switch | clang/LLVM **强制使用 SSE/SSE2**。当前 kernel context switch 不保存 xmm 寄存器，编译 flags `-mno-sse -mno-sse2` 必须移除。内核 context switch 需 fxsave/fxrstor 或 xsave/xrstor 保存 FPU/SSE 状态 | sprint 4-5 |
+| **environ + getenv** | libc | 构建系统用环境变量传 PATH/CC/CFLAGS/LDFLAGS。无环境变量连 `which cc` 都跑不了。需内核每进程 environ 区 + execve 继承 | sprint 5 |
+| **/dev/null** | dev_table | 构建脚本大量使用 `>/dev/null 2>&1`。最简单的新增设备 | sprint 5 |
+| **磁盘空间** | mkdisk.sh + FAT32 | LLVM 源码 ~500MB，构建产物 ~5GB。当前 disk.img 64MB 需 ≥ 8GB。另需解决 FAT32 4GB 单文件上限 | sprint 5-6 |
 
-- [ ] FAT32 完善：删除、truncate、大文件支持
-- [ ] sys_stat / sys_lseek
-- [ ] sys_mmap 文件映射：MAP_SHARED 文件后端
-- [ ] 验证: 用户程序通过 sys_open/read/write 读写文件
+### 🟡 P1：快速构建必须
 
-### Shell 增强
+| 能力 | 依赖 | 说明 | 预估 |
+|------|------|------|------|
+| **execvp / PATH 搜索** | libc | 构建系统需要根据 PATH 搜索 cc/ld/as 等可执行文件 | sprint 5 |
+| **sys_mmap 文件映射** | kernel mmap | mmap 文件 fd + MAP_SHARED。LLVM 通过 llvm::MemoryBuffer 大量使用 mmap 文件映射，当前只支持匿名映射 | sprint 5-6 |
+| **pthread (基本)** | kernel + libc | LLVM 编译不强制多线程，但 ninja 需要做并行构建。无 pthread 只能单核串行编译。需 `clone` syscall + TLS（FS_BASE） | sprint 7-9 |
+| **getrlimit/setrlimit** | kernel syscall | 构建工具检查资源限制（open files, stack size） | sprint 6 |
+| **waitpid WNOHANG** | kernel proc | 非阻塞等待子进程，ninja 依赖此实现并行调度 | sprint 3-4 |
 
-- [ ] 管道符号 `|` / 重定向 `>` / `<`
-- [ ] 环境变量 / 后台执行 `&`
-- [ ] 验证: shell 执行 `ls | cat` 管道命令
+### 🔵 P2：clang 运行时需要
 
-### libc 完善
+| 能力 | 依赖 | 说明 |
+|------|------|------|
+| **termios** | libc/驱动 | tcsetattr/tcgetattr，部分构建脚本/shell 需要 |
+| **symlink** | fs_driver | 构建系统创建链接。FAT32 不支持，需考虑其他 FS |
+| **/dev/zero** | dev_table | 一些工具需要 |
+| **Shebang `#!` 支持** | sys_exec | 脚本执行（`./configure` 等） |
+| **sigprocmask** | kernel signal | 信号阻塞掩码 |
+| **setpgid/getpgid** | kernel proc | 进程组，作业控制 |
+| **alarm/setitimer** | kernel timer | 超时控制 |
 
-- [ ] stdio/string/stdlib/unistd 完整化
-- [ ] errno + 错误处理
-- [ ] 验证: 标准 C 程序可编译链接运行
+### 里程碑路径
 
-### 磁盘扩容
+```
+sprint 1-2: POSIX 扩展波（libc 完善 + lseek + dirent + unlink/fstat 等）
+              ↓
+sprint 3-4: fork + execve + 信号机制（基础）
+              ↓
+sprint 4-5: FPU/SSE 上下文切换 + -mno-sse 移除 + 用户态 SSE 使能
+              ↓
+sprint 5-6: 环境变量 + /dev/null + disk.img 扩容 + 文件 mmap + PATH 搜索
+              ↓
+sprint 7-9: pthread + TLS（FS_BASE）+ 初步构建验证
+              ↓
+sprint 10+: 交叉编译 clang for Xos → 在 Xos 上测试 cc1 → 自举
+```
 
-- [ ] disk.img 扩大到足够容纳 gcc 源码树（至少 100MB）
-- [ ] 验证: gcc 源码树可完整放入 FAT32 文件系统
+### 替代路径：交叉编译
+
+如果仅需在 Xos 上**运行 clang**（而非在 Xos 上原生编译 clang），可跳过 SSE 和 pthread 的最困难依赖：
+
+1. 宿主机配置 `--target=x86_64-xos` 交叉编译 clang
+2. Xos 只需 fork/exec + 信号 + 环境变量 + /dev/null
+3. clang 在 Xos 上运行 cc1/as/ld 处理 C 文件
+
+这约等于 sprint 3-5 即可完成，跳过了 sprint 7-9。
+
+### 现有相关 TODO 迁移
+
+- [ ] sys_fork + sys_exec（含 ELF loader 复用）
+- [ ] sys_sigaction / sys_sigprocmask / sys_kill / sys_rt_sigreturn
+- [ ] 信号投递：进程返回用户态前检查 pending signals（trapret 路径）
+- [ ] SIGCHLD：子进程 exit 时向父进程投递
+- [ ] SIGINT（Ctrl+C）：terminal 通过 kill(pid, SIGINT) 向前台进程发中断信号
+- [ ] 验证: shell 前台进程运行时按 Ctrl+C → 进程退出 → shell 返回提示符
+- [ ] FPU/SSE lazy context switch（fxsave/ fxrstor, CR0.TS + device_not_available #NM 处理）
+- [ ] 环境变量区（process_create 扩展 environ page）+ copy on exec
+- [ ] 验证: getenv("PATH") == "/bin:/usr/bin"
+- [ ] /dev/null 设备（DEV_NULL = 6，读写丢弃/返回 EOF）
+- [ ] disk.img 扩容至 8GB + FAT32 大分区
+- [ ] sys_mmap 文件映射：MAP_SHARED file-backed mmap（在 mmap 中识别 fd→FD_FILE→kernel_msg_send 读 fs_driver）
+- [ ] 验证: mmap 文件 → 读内容 → 写回 → munmap
+- [ ] 单核验证: make 编译单文件 C 程序
+- [ ] 预置 clang-for-Xos 交叉编译器到 FAT32
+- [ ] 验证: exec clang → cc1 输出 .o → ld 链接 → 运行产物
+
+### Sprint 1-2: POSIX 扩展波（详细计划见 [[posix.md]]）
+
+- [ ] syscall 清理：重排编号 + DEV_MSG 移除 + BLOCK_READ/WRITE 合并 + SYS_LSEEK 新增
+- [ ] fs_driver: UNLINK/RMDIR/FSTAT/OPENDIR/DIRENT/CLOSEDIR/SEEK/ACCESS
+- [ ] libc: sprinft/snprintf/strtol/ctype/assert/getcwd/sleep/uname
+- [ ] libc: fopen/fclose/fread/fwrite/fseek/ftell/rewind
+- [ ] libc: opendir/readdir/closedir + struct stat 扩展
+- [ ] libc: lseek/mkdir/unlink/rmdir/access/isatty
+- [ ] libc: memcmp/strstr/strtok/strtok_r/strerror/qsort/rand/abs
 
 ---
 
@@ -334,6 +396,7 @@
 |------|------|--------|------|
 | malloc/free 加锁 | — | 中 | MALLOC_LOCK/MALLOC_UNLOCK 占位宏替换为实际锁 |
 | 串口打印统一 NDEBUG 控制 | — | 低 | 全项目串口输出用宏包装 |
+| 删除 sys_write | — | 远 | stdout 改为 SHM ring + sys_notify 零拷贝路径替代 pipe，完全绕过内核，libc 直接写 terminal。对应删除 sys_write/sys_read/sys_pipe/sys_close 等 pipe 相关 syscall。见 [libc.md](libc.md) |
 | printf %f 浮点格式化 | 用户态 SSE/FPU | 中 | 需 FPU 上下文保存 + 浮点转换算法 |
 | 动态库加载（.so 支持） | — | 远 | PIC + 动态链接器 + PLT/GOT |
 | 运行时 IPI | LAPIC | 低 | reschedule / TLB shootdown |

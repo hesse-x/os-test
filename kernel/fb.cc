@@ -14,11 +14,9 @@ kms_fb_info g_fb_info = {0};
 // ===================== init_fb =====================
 
 void init_fb(boot_info *bi) {
-  serial_puts("init_fb: fb_addr=");
-  serial_put_hex(bi->fb_addr);
-  serial_puts("\n");
+  serial_printf("init_fb: fb_addr=%lx\n", bi->fb_addr);
   if (bi->fb_addr == 0) {
-    serial_puts("init_fb: fb_addr=0, returning\n");
+    serial_printf("init_fb: fb_addr=0, returning\n");
     return;
   }
 

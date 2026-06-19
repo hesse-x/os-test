@@ -5,13 +5,7 @@
 /* ===================== sys_write based flush ===================== */
 
 static void sys_write_flush(FILE *f, const char *data, int len) {
-    (void)f;
-    sys_serial_write("stdio: sys_write_flush enter\n", 29);
     sys_write(f->fd, data, len);
-    sys_serial_write("stdio: sys_write_flush after sys_write\n", 41);
-    // Mirror output to serial port
-    sys_serial_write(data, len);
-    sys_serial_write("stdio: sys_write_flush done\n", 29);
 }
 
 /* ===================== sys_read based fill ===================== */
@@ -43,16 +37,13 @@ FILE *stderr = &stderr_file;
 
 static void file_flush(FILE *f) {
     if (f->buf_pos > 0 && f->write_fn) {
-        sys_serial_write("file_flush: calling write_fn\n", 31);
         f->write_fn(f, f->buf, f->buf_pos);
         f->buf_pos = 0;
     }
 }
 
 int fflush(FILE *f) {
-    sys_serial_write("fflush: enter\n", 15);
     if (f) file_flush(f);
-    sys_serial_write("fflush: done\n", 15);
     return 0;
 }
 
@@ -140,7 +131,6 @@ static void fmt_int(FILE *f, long val, int width, char pad) {
 /* ===================== vfprintf ===================== */
 
 int vfprintf(FILE *f, const char *fmt, va_list ap) {
-    sys_serial_write("vfprintf: enter\n", 17);
     int count = 0;
 
     while (*fmt) {
@@ -276,16 +266,11 @@ int vfprintf(FILE *f, const char *fmt, va_list ap) {
 /* ===================== printf / fprintf ===================== */
 
 int printf(const char *fmt, ...) {
-    sys_serial_write("printf: enter\n", 14);
     va_list ap;
     va_start(ap, fmt);
-    sys_serial_write("printf: before vfprintf\n", 25);
     int n = vfprintf(stdout, fmt, ap);
-    sys_serial_write("printf: after vfprintf\n", 24);
     va_end(ap);
-    sys_serial_write("printf: before fflush\n", 24);
     fflush(stdout);
-    sys_serial_write("printf: done\n", 15);
     return n;
 }
 

@@ -60,13 +60,8 @@ elf_load_result elf_load(const uint8_t *data, uint64_t size,
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)data;
     result.entry = ehdr->e_entry;
 
-    serial_puts("elf_load: phnum=");
-    serial_put_hex((uint64_t)ehdr->e_phnum);
-    serial_puts(" entry=");
-    serial_put_hex(ehdr->e_entry);
-    serial_puts(" phoff=");
-    serial_put_hex(ehdr->e_phoff);
-    serial_puts("\n");
+    serial_printf("elf_load: phnum=%lx entry=%lx phoff=%lx\n",
+        (uint64_t)ehdr->e_phnum, ehdr->e_entry, ehdr->e_phoff);
 
     // 2. Iterate program headers
     for (int i = 0; i < ehdr->e_phnum; i++) {
@@ -81,15 +76,8 @@ elf_load_result elf_load(const uint8_t *data, uint64_t size,
         if (ph->p_memsz == 0)
             continue;
 
-        serial_puts("elf_load: PT_LOAD vaddr=");
-        serial_put_hex(ph->p_vaddr);
-        serial_puts(" memsz=");
-        serial_put_hex(ph->p_memsz);
-        serial_puts(" filesz=");
-        serial_put_hex(ph->p_filesz);
-        serial_puts(" offset=");
-        serial_put_hex(ph->p_offset);
-        serial_puts("\n");
+        serial_printf("elf_load: PT_LOAD vaddr=%lx memsz=%lx filesz=%lx offset=%lx\n",
+            ph->p_vaddr, ph->p_memsz, ph->p_filesz, ph->p_offset);
 
         // 3. Map pages covering this segment
         uint64_t first_page = ph->p_vaddr & ~0xFFFULL;
@@ -115,18 +103,14 @@ elf_load_result elf_load(const uint8_t *data, uint64_t size,
             }
 
             if (!map_page(new_pml4, page_addr, src, copy_len)) {
-                serial_puts("elf_load: map_page failed for vaddr=");
-                serial_put_hex(page_addr);
-                serial_puts("\n");
+                serial_printf("elf_load: map_page failed for vaddr=%lx\n", page_addr);
                 return result;
             }
         }
     }
 
     result.success = true;
-    serial_puts("elf_load: success, entry=");
-    serial_put_hex(result.entry);
-    serial_puts("\n");
+    serial_printf("elf_load: success, entry=%lx\n", result.entry);
 
     return result;
 }

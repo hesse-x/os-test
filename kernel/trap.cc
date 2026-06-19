@@ -309,7 +309,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 47
+#define NR_SYSCALL 46
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -322,42 +322,41 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_spawn,          // 8
     sys_mmap,           // 9
     sys_munmap,         // 10
-    sys_serial_write,   // 11
-    sys_fb_info,        // 12
-    sys_shm_create,     // 13
-    sys_shm_attach,     // 14
-    sys_pipe,           // 15
-    sys_write,          // 16
-    sys_read,           // 17
-    sys_close,          // 18
-    sys_load_dev,       // 19
-    sys_dev_msg,        // 20
-    sys_notify,         // 21
-    sys_gettime,        // 22
-    sys_clock,          // 23
-    sys_msg,            // 24
-    sys_msg_resp,       // 25
-    sys_ioperm,         // 26
-    sys_dup2,           // 27
-    sys_fcntl,          // 28
-    sys_dma_alloc,      // 29
-    sys_dma_free,       // 30
-    sys_pci_dev_info,   // 31
-    sys_block_read,     // 32
-    sys_block_write,    // 33
-    sys_block_async,    // 34
-    sys_open_dev,       // 35
-    sys_install_fd_impl, // 36
-    sys_socket,         // 37
-    sys_bind,           // 38
-    sys_listen,         // 39
-    sys_accept,         // 40
-    sys_connect,        // 41
-    sys_socketpair,     // 42
-    sys_sendmsg,        // 43
-    sys_recvmsg,        // 44
-    sys_shutdown,       // 45
-    sys_poll,           // 46
+    sys_fb_info,        // 11: was SYS_SERIAL_WRITE
+    sys_shm_create,     // 12
+    sys_shm_attach,     // 13
+    sys_pipe,           // 14
+    sys_write,          // 15
+    sys_read,           // 16
+    sys_close,          // 17
+    sys_load_dev,       // 18
+    sys_dev_msg,        // 19
+    sys_notify,         // 20
+    sys_gettime,        // 21
+    sys_clock,          // 22
+    sys_msg,            // 23
+    sys_msg_resp,       // 24
+    sys_ioperm,         // 25
+    sys_dup2,           // 26
+    sys_fcntl,          // 27
+    sys_dma_alloc,      // 28
+    sys_dma_free,       // 29
+    sys_pci_dev_info,   // 30
+    sys_block_read,     // 31
+    sys_block_write,    // 32
+    sys_block_async,    // 33
+    sys_open_dev,       // 34
+    sys_install_fd_impl, // 35
+    sys_socket,         // 36
+    sys_bind,           // 37
+    sys_listen,         // 38
+    sys_accept,         // 39
+    sys_connect,        // 40
+    sys_socketpair,     // 41
+    sys_sendmsg,        // 42
+    sys_recvmsg,        // 43
+    sys_shutdown,       // 44
+    sys_poll,           // 45
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -429,6 +428,9 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         spin_lock(&proc->recv_lock);
         if (proc->recv_head != proc->recv_tail) {
             // Message available: copy to user buffer
+            serial_printf("sys_recv: pid=%d dequeues type=%d src=%d\n",
+                proc->pid, ((recv_msg *)proc->recv_buf[proc->recv_tail])->type,
+                ((recv_msg *)proc->recv_buf[proc->recv_tail])->src);
             __memcpy(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
             // If this is an REQ request, record the caller PID for sys_resp
             recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
@@ -887,6 +889,9 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, u
 
     child->parent_pid = current_proc->pid;
 
+    serial_printf("sys_spawn: parent=%d child=%d entry=%lx\n",
+        current_proc->pid, child->pid, child->entry);
+
     // Inherit all open fds from parent (including fd 0/1 for pipe stdin/stdout)
     for (int fd = 0; fd < MAX_FD; fd++) {
         if (current_proc->fd_table[fd].type != FD_NONE) {
@@ -1109,9 +1114,15 @@ uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, 
 // Shared notification helper: enqueue recv_msg and wake target if WAIT_RECV.
 // Used by AHCI IRQ completion, sys_notify, sys_req, sys_msg, IRQ dispatch.
 void notify_and_wake(pid_t target_pid, recv_msg *msg) {
-    if (target_pid < 0 || target_pid >= MAX_PROC) return;
+    if (target_pid < 0 || target_pid >= MAX_PROC) {
+        serial_printf("notify_and_wake: bad pid %d\n", target_pid);
+        return;
+    }
     proc_t *target = &procs[target_pid];
-    if (target->pid != target_pid) return;
+    if (target->pid != target_pid) {
+        serial_printf("notify_and_wake: pid mismatch %d vs %d\n", target_pid, target->pid);
+        return;
+    }
 
     // Enqueue message
     spin_lock(&target->recv_lock);
@@ -1222,7 +1233,7 @@ uint64_t sys_block_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, 
     return (uint64_t)(rc < 0 ? -rc : 0);
 }
 
-// sys_block_async(lba, buf, count, dir) — syscall 34
+// sys_block_async(lba, buf, count, dir) — syscall 33
 // Async block I/O: returns cookie (>0) on success, positive errno on error.
 // Completion delivered via RECV_NOTIFY with cookie+result+lba+count in data.
 uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t, uint64_t) {
@@ -1235,7 +1246,7 @@ uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t a
     return (uint64_t)ret;
 }
 
-// sys_open_dev(dev_type) — syscall 35 (open device node, returns FD_DEV fd)
+// sys_open_dev(dev_type) — syscall 34 (open device node, returns FD_DEV fd)
 // Returns: (fd | target_pid << 32) on success, negative errno on failure
 // Caller extracts: fd = (int32_t)(result & 0xFFFFFFFF), pid = (pid_t)(result >> 32)
 uint64_t sys_open_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
@@ -1269,7 +1280,7 @@ uint64_t sys_open_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uin
     return (uint64_t)fd | ((uint64_t)target_pid << 32);
 }
 
-// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 36
+// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 35
 // Register an FD_FILE fd in the kernel fd_table.
 // Returns: fd (>=3) on success, negative errno on failure
 // Note: named sys_install_fd_impl to avoid conflict with static inline wrapper in common/syscall.h
@@ -1313,26 +1324,7 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
     return (uint64_t)fd;
 }
 
-// sys_serial_write(buf, len) — syscall 11 (用户态串口输出)
-uint64_t sys_serial_write(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
-    const char *buf = (const char *)arg1;
-    size_t len = (size_t)arg2;
-
-    if (!buf || len == 0) return 0;
-
-    // Validate user pointer range
-    uint64_t ptr_start = (uint64_t)buf;
-    uint64_t ptr_end = ptr_start + len;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
-
-    for (size_t i = 0; i < len; i++)
-        serial_putc(buf[i]);
-
-    return 0;
-}
-
-// sys_fb_info(buf) — syscall 12 (获取 framebuffer 信息)
+// sys_fb_info(buf) — syscall 11 (获取 framebuffer 信息)
 // Returns: 0 on success, positive errno on failure
 uint64_t sys_fb_info(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     void *user_buf = (void *)arg1;
@@ -1352,7 +1344,7 @@ uint64_t sys_fb_info(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint
     return 0;
 }
 
-// sys_shm_create(size) — syscall 13 (创建共享内存，返回 fd)
+// sys_shm_create(size) — syscall 12 (创建共享内存，返回 fd)
 // Returns: fd (≥2) on success, 0 on failure
 uint64_t sys_shm_create(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     size_t size = (size_t)arg1;
@@ -1403,7 +1395,7 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, u
     return (uint64_t)fd;
 }
 
-// sys_shm_attach(id, mode) — syscall 14 (附加共享内存，返回 fd)
+// sys_shm_attach(id, mode) — syscall 13 (附加共享内存，返回 fd)
 // mode=0: id is target_pid, attach target's first FD_SHM
 // mode=1: id is kernel SHM ID, attach kernel pre-allocated SHM via struct shm*
 // Returns: fd (≥2) on success, 0 on failure
@@ -1494,7 +1486,7 @@ void wake_process(pid_t pid) {
     spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
 }
 
-// sys_pipe(fd_ptr) — syscall 15 (创建 pipe，写 [read_fd, write_fd] 到用户指针)
+// sys_pipe(fd_ptr) — syscall 14 (创建 pipe，写 [read_fd, write_fd] 到用户指针)
 uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     int *fd_ptr = (int *)arg1;
 
@@ -1549,7 +1541,7 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_
     return 0;
 }
 
-// sys_write(fd, buf, len) — syscall 16 (向 fd 写入数据)
+// sys_write(fd, buf, len) — syscall 15 (向 fd 写入数据)
 // FD_PIPE: 直写 kernel ring buffer
 // FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
 uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
@@ -1660,10 +1652,14 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
     // Wake reader if blocked
     if (p->read_pid >= 0) wake_process(p->read_pid);
 
+    // Mirror pipe output to serial port (replaces old SYS_SERIAL_WRITE)
+    for (size_t i = 0; i < written; i++)
+        serial_putc(buf[i]);
+
     return (uint64_t)written;
 }
 
-// sys_read(fd, buf, len) — syscall 17 (从 fd 读数据，阻塞直到有数据)
+// sys_read(fd, buf, len) — syscall 16 (从 fd 读数据，阻塞直到有数据)
 // FD_PIPE: 直读 kernel ring buffer
 // FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
 uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
@@ -1793,7 +1789,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_
     // FD_DEV and FD_SHM return ENOSYS (never reached via FD_FILE/pipe check above)
 }
 
-// sys_close(fd) — syscall 18 (关闭 fd，pipe ref_count--)
+// sys_close(fd) — syscall 17 (关闭 fd，pipe ref_count--)
 uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     int fd = (int)arg1;
 
@@ -1857,7 +1853,7 @@ int register_dev(int dev_type, pid_t pid) {
     return 0;
 }
 
-// sys_load_dev(pid, dev_type) — syscall 19 (注册驱动)
+// sys_load_dev(pid, dev_type) — syscall 18 (注册驱动)
 // Returns: 0 on success, positive errno on failure
 uint64_t sys_load_dev(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
     pid_t pid = (pid_t)arg1;
@@ -1879,7 +1875,7 @@ pid_t lookup_dev(int dev_type) {
     return dev_table[dev_type];
 }
 
-// sys_notify(pid) — syscall 21 (异步通知：消息入队 + 唤醒)
+// sys_notify(pid) — syscall 20 (异步通知：消息入队 + 唤醒)
 // Returns: 0 on success, positive errno on failure
 uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     pid_t target_pid = (pid_t)arg1;
@@ -1919,12 +1915,12 @@ uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint6
     return 0;
 }
 
-// sys_gettime() — syscall 22 (全局单调时钟，返回纳秒)
+// sys_gettime() — syscall 21 (全局单调时钟，返回纳秒)
 uint64_t sys_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     return sched_clock();
 }
 
-// sys_clock() — syscall 23 (per-process CPU 时间，返回纳秒)
+// sys_clock() — syscall 22 (per-process CPU 时间，返回纳秒)
 uint64_t sys_clock(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     return current_proc->cpu_time_ns;
 }
@@ -1936,6 +1932,8 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
                            void *reply_buf, size_t reply_len) {
     proc_t *target = &procs[target_pid];
     if (target->pid != target_pid) return (uint64_t)-ESRCH;
+
+    serial_printf("sys_msg_to: from %d to %d len=%ld\n", current_proc->pid, target_pid, msg_len);
 
     // Allocate kernel buffer and copy message from user space
     void *kbuf = kmalloc(msg_len);
@@ -1998,7 +1996,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
     return 0;
 }
 
-// sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — syscall 24 (变长消息请求)
+// sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — syscall 23 (变长消息请求)
 // PID-based variant.
 // 返回: 0=成功, 负errno
 uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t) {
@@ -2028,7 +2026,7 @@ uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uin
     return sys_msg_to(target_pid, msg_buf, msg_len, reply_buf, reply_len);
 }
 
-// sys_dev_msg(fd, msg_buf, msg_len, reply_buf, reply_len) — syscall 20 (fd-based 变长消息请求)
+// sys_dev_msg(fd, msg_buf, msg_len, reply_buf, reply_len) — syscall 19 (fd-based 变长消息请求)
 // 从当前进程的 fd_table 中提取 target PID，委托 sys_msg_to。
 // 返回: 0=成功, 负errno
 uint64_t sys_dev_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t) {
@@ -2064,7 +2062,7 @@ uint64_t sys_dev_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4,
     return sys_msg_to(target_pid, msg_buf, msg_len, reply_buf, reply_len);
 }
 
-// sys_msg_resp(resp_buf, resp_len) — syscall 25 (回复当前 MSG 调用者)
+// sys_msg_resp(resp_buf, resp_len) — syscall 24 (回复当前 MSG 调用者)
 // 返回: 0=成功, 正数=errno
 uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
     void *resp_buf = (void *)arg1;
@@ -2078,9 +2076,14 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t
 
     proc_t *proc = current_proc;
     pid_t caller_pid = proc->msg_caller_pid;
-    if (caller_pid < 0 || caller_pid >= MAX_PROC) return (uint64_t)-EINVAL;
+    if (caller_pid < 0 || caller_pid >= MAX_PROC) {
+        serial_printf("sys_msg_resp: pid=%d bad caller_pid=%d\n", proc->pid, caller_pid);
+        return (uint64_t)-EINVAL;
+    }
 
     proc_t *caller = &procs[caller_pid];
+    serial_printf("sys_msg_resp: pid=%d resp to caller=%d len=%ld\n",
+        proc->pid, caller_pid, resp_len);
     if (caller->pid != caller_pid) return (uint64_t)-ESRCH;
 
     // Copy response data from server user space to kernel buffer
@@ -2116,7 +2119,7 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t
     return 0;
 }
 
-// sys_ioperm(from, num, turn_on) — syscall 26 (I/O 端口权限)
+// sys_ioperm(from, num, turn_on) — syscall 25 (I/O 端口权限)
 uint64_t sys_ioperm(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
     unsigned long from = (unsigned long)arg1;
     unsigned long num = (unsigned long)arg2;
@@ -2160,7 +2163,7 @@ uint64_t sys_ioperm(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint6
 #define F_GETFL 1
 #define F_SETFL 2
 
-// sys_dup2(old_fd, new_fd) — syscall 27 (复制 fd)
+// sys_dup2(old_fd, new_fd) — syscall 26 (复制 fd)
 uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
     int old_fd = (int)arg1;
     int new_fd = (int)arg2;
@@ -2234,7 +2237,7 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, ui
     return (uint64_t)new_fd;
 }
 
-// sys_fcntl(fd, cmd, arg) — syscall 28 (文件控制)
+// sys_fcntl(fd, cmd, arg) — syscall 27 (文件控制)
 uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
     int fd = (int)arg1;
     int cmd = (int)arg2;
@@ -2265,7 +2268,7 @@ void irq_owner_cleanup(pid_t pid) {
     }
 }
 
-// sys_dma_alloc(size, vaddr_ptr, paddr_ptr) — syscall 29
+// sys_dma_alloc(size, vaddr_ptr, paddr_ptr) — syscall 28
 // 分配物理连续、<4GB 的 DMA 缓冲区，映射到调用者地址空间
 // Returns: 0 on success, positive errno on failure
 uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
@@ -2332,7 +2335,7 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, ui
     return 0;
 }
 
-// sys_dma_free(vaddr) — syscall 30
+// sys_dma_free(vaddr) — syscall 29
 // 释放 DMA 缓冲区
 // Returns: 0 on success, positive errno on failure
 uint64_t sys_dma_free(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {

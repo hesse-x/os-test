@@ -169,11 +169,11 @@ proc_t *create_idle_process(int cpu_id) {
             break;
         }
     }
-    if (!proc) { spin_unlock(&procs_lock); serial_puts("create_idle_process: no free slot\n"); return nullptr; }
+    if (!proc) { spin_unlock(&procs_lock); serial_printf("create_idle_process: no free slot\n"); return nullptr; }
 
     // Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc.alloc_page(2);
-    if (!stack_pages) { spin_unlock(&procs_lock); serial_puts("create_idle_process: alloc stack failed\n"); return nullptr; }
+    if (!stack_pages) { spin_unlock(&procs_lock); serial_printf("create_idle_process: alloc stack failed\n"); return nullptr; }
     uint64_t k_stack_phys = page_to_phys(stack_pages);
     uint64_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
 
@@ -245,10 +245,8 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
             break;
         }
     }
-    if (!proc) { spin_unlock(&procs_lock); serial_puts("process_create_elf: no free slot\n"); return nullptr; }
-    serial_puts("process_create_elf: alloc_idx=");
-    serial_put_hex((uint64_t)alloc_idx);
-    serial_puts("\n");
+    if (!proc) { spin_unlock(&procs_lock); serial_printf("process_create_elf: no free slot\n"); return nullptr; }
+    serial_printf("process_create_elf: alloc_idx=%lx\n", (uint64_t)alloc_idx);
 
     // 2. Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc.alloc_page(2);

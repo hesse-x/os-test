@@ -16,42 +16,42 @@
 #define SYS_SPAWN        8
 #define SYS_MMAP         9
 #define SYS_MUNMAP       10
-#define SYS_SERIAL_WRITE 11
-#define SYS_FB_INFO      12
-#define SYS_SHM_CREATE   13
-#define SYS_SHM_ATTACH   14
-#define SYS_PIPE         15
-#define SYS_WRITE        16
-#define SYS_READ         17
-#define SYS_CLOSE        18
-#define SYS_LOAD_DEV     19
-#define SYS_DEV_MSG      20
-#define SYS_NOTIFY       21
-#define SYS_GETTIME      22
-#define SYS_CLOCK        23
-#define SYS_MSG          24
-#define SYS_MSG_RESP     25
-#define SYS_IOPERM       26
-#define SYS_DUP2         27
-#define SYS_FCNTL        28
-#define SYS_DMA_ALLOC    29
-#define SYS_DMA_FREE     30
-#define SYS_PCI_DEV_INFO 31
-#define SYS_BLOCK_READ   32
-#define SYS_BLOCK_WRITE  33
-#define SYS_BLOCK_ASYNC  34
-#define SYS_OPEN_DEV     35
-#define SYS_INSTALL_FD   36
-#define SYS_SOCKET       37
-#define SYS_BIND         38
-#define SYS_LISTEN       39
-#define SYS_ACCEPT       40
-#define SYS_CONNECT      41
-#define SYS_SOCKETPAIR   42
-#define SYS_SENDMSG      43
-#define SYS_RECVMSG      44
-#define SYS_SHUTDOWN     45
-#define SYS_POLL         46
+// Slot 11 was SYS_SERIAL_WRITE — removed.
+#define SYS_FB_INFO      11
+#define SYS_SHM_CREATE   12
+#define SYS_SHM_ATTACH   13
+#define SYS_PIPE         14
+#define SYS_WRITE        15
+#define SYS_READ         16
+#define SYS_CLOSE        17
+#define SYS_LOAD_DEV     18
+#define SYS_DEV_MSG      19
+#define SYS_NOTIFY       20
+#define SYS_GETTIME      21
+#define SYS_CLOCK        22
+#define SYS_MSG          23
+#define SYS_MSG_RESP     24
+#define SYS_IOPERM       25
+#define SYS_DUP2         26
+#define SYS_FCNTL        27
+#define SYS_DMA_ALLOC    28
+#define SYS_DMA_FREE     29
+#define SYS_PCI_DEV_INFO 30
+#define SYS_BLOCK_READ   31
+#define SYS_BLOCK_WRITE  32
+#define SYS_BLOCK_ASYNC  33
+#define SYS_OPEN_DEV     34
+#define SYS_INSTALL_FD   35
+#define SYS_SOCKET       36
+#define SYS_BIND         37
+#define SYS_LISTEN       38
+#define SYS_ACCEPT       39
+#define SYS_CONNECT      40
+#define SYS_SOCKETPAIR   41
+#define SYS_SENDMSG      42
+#define SYS_RECVMSG      43
+#define SYS_SHUTDOWN     44
+#define SYS_POLL         45
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -141,10 +141,6 @@ static inline void *sys_mmap(void *addr, size_t size, int prot, int flags, int f
 
 static inline int sys_munmap(void *addr, size_t size) {
     return (int)__syscall2(SYS_MUNMAP, (int64_t)(uintptr_t)addr, (int64_t)size);
-}
-
-static inline int sys_serial_write(const char *buf, size_t len) {
-    return (int)__syscall2(SYS_SERIAL_WRITE, (int64_t)(uintptr_t)buf, (int64_t)len);
 }
 
 static inline int sys_fb_info(void *buf) {

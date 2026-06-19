@@ -116,42 +116,42 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_spawn,          // 8:  创建子进程
     sys_mmap,           // 9:  内存映射（6 参：addr/size/prot/flags/fd/offset）
     sys_munmap,         // 10: 解除内存映射
-    sys_serial_write,   // 11: 串口输出
-    sys_fb_info,        // 12: 获取 framebuffer 信息
-    sys_shm_create,     // 13: 创建 SHM fd（返回 fd + struct shm）
-    sys_shm_attach,     // 14: 附加 SHM（过渡期，返回 fd）
-    sys_pipe,           // 15: 创建 pipe
-    sys_write,          // 16: 写 fd（PIPE/FILE/SOCKET dispatch）
-    sys_read,           // 17: 读 fd（PIPE/FILE/SOCKET dispatch）
-    sys_close,          // 18: 关闭 fd（PIPE/FILE/SOCKET dispatch）
-    sys_load_dev,       // 19: 注册驱动到 dev_table
-    sys_dev_msg,        // 20: fd 版变长消息（替代 sys_lookup_dev）
-    sys_notify,         // 21: 异步通知（消息入队）
-    sys_gettime,        // 22: 全局单调时钟（纳秒）
-    sys_clock,          // 23: per-process CPU 时间（纳秒）
-    sys_msg,            // 24: 变长消息请求（≤64KB）
-    sys_msg_resp,       // 25: 变长消息回复
-    sys_ioperm,         // 26: I/O 端口权限
-    sys_dup2,           // 27: 复制 fd（PIPE/FILE/SOCKET dispatch）
-    sys_fcntl,          // 28: 文件控制
-    sys_dma_alloc,      // 29: 物理连续 DMA 分配
-    sys_dma_free,       // 30: 释放 DMA 缓冲区
-    sys_pci_dev_info,   // 31: PCI 设备查询（bus/dev/func → info）
-    sys_block_read,     // 32: 块设备读
-    sys_block_write,    // 33: 块设备写
-    sys_block_async,    // 34: 异步块 I/O（RECV_NOTIFY 回调）
-    sys_open_dev,       // 35: 打开设备节点（返回 fd | target_pid<<32）
-    sys_install_fd,     // 36: 注册 FD_FILE fd（libc open 用）
-    sys_socket,         // 37: socket(AF_UNIX, SOCK_STREAM, 0) → fd
-    sys_bind,           // 38: bind(fd, addr, addrlen)
-    sys_listen,         // 39: listen(fd, backlog)
-    sys_accept,         // 40: accept(fd, addr, addrlen)
-    sys_connect,        // 41: connect(fd, addr, addrlen)
-    sys_socketpair,     // 42: socketpair(domain, type, proto, sv[2])
-    sys_sendmsg,        // 43: sendmsg(fd, msg, flags)
-    sys_recvmsg,        // 44: recvmsg(fd, msg, flags)
-    sys_shutdown,       // 45: shutdown(fd, how)
-    sys_poll,           // 46: poll(fds, nfds, timeout_ms)
+    // sys_serial_write 已删除，串口镜像由 sys_write FD_PIPE 路径完成
+    sys_fb_info,        // 11: 获取 framebuffer 信息
+    sys_shm_create,     // 12: 创建 SHM fd
+    sys_shm_attach,     // 13: 附加 SHM
+    sys_pipe,           // 14: 创建 pipe
+    sys_write,          // 15: 写 fd
+    sys_read,           // 16: 读 fd
+    sys_close,          // 17: 关闭 fd
+    sys_load_dev,       // 18: 注册驱动到 dev_table
+    sys_dev_msg,        // 19: fd 版变长消息
+    sys_notify,         // 20: 异步通知
+    sys_gettime,        // 21: 全局单调时钟（纳秒）
+    sys_clock,          // 22: per-process CPU 时间
+    sys_msg,            // 23: 变长消息请求
+    sys_msg_resp,       // 24: 变长消息回复
+    sys_ioperm,         // 25: I/O 端口权限
+    sys_dup2,           // 26: 复制 fd
+    sys_fcntl,          // 27: 文件控制
+    sys_dma_alloc,      // 28: 物理连续 DMA 分配
+    sys_dma_free,       // 29: 释放 DMA 缓冲区
+    sys_pci_dev_info,   // 30: PCI 设备查询
+    sys_block_read,     // 31: 块设备读
+    sys_block_write,    // 32: 块设备写
+    sys_block_async,    // 33: 异步块 I/O
+    sys_open_dev,       // 34: 打开设备节点
+    sys_install_fd,     // 35: 注册 FD_FILE fd
+    sys_socket,         // 36: socket
+    sys_bind,           // 37: bind
+    sys_listen,         // 38: listen
+    sys_accept,         // 39: accept
+    sys_connect,        // 40: connect
+    sys_socketpair,     // 41: socketpair
+    sys_sendmsg,        // 42: sendmsg
+    sys_recvmsg,        // 43: recvmsg
+    sys_shutdown,       // 44: shutdown
+    sys_poll,           // 45: poll
 };
 ```
 

@@ -6,7 +6,6 @@
 #include <sys/device.h>
 #include <sys/process.h>
 #include <sys/wait.h>
-#include <sys/serial.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/errno.h"
@@ -567,12 +566,12 @@ static const cmd_entry cmds[] = {
 // ===================== Main =====================
 
 extern "C" void _start() {
-    serial_write("shell: waiting for fs_driver\n", 29);
+    printf("shell: waiting for fs_driver\n");
     while ((fs_fd = open("/dev/fs", O_RDWR)) < 0) {
         struct recv_msg m;
         recv(&m, NULL, 0, 1);
     }
-    serial_write("shell: fs_driver found\n", 23);
+    printf("shell: fs_driver found\n");
 
     char line[256];
 
