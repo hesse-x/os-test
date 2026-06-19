@@ -28,18 +28,16 @@ static pid_t dev_table[DEV_TYPE_MAX];
 // ===================== Kernel pre-allocated SHM table =====================
 #define MAX_KERNEL_SHM 4
 struct kernel_shm_region {
-    uint64_t phys;       // physical address
-    size_t   npages;     // number of pages
+    struct shm *shm;     // pointer to struct shm (nullptr = unused)
     int      shm_id;     // identifier (-1 = unused)
 };
 static struct kernel_shm_region kernel_shm_table[MAX_KERNEL_SHM];
 
-void register_kernel_shm(int shm_id, uint64_t phys, size_t npages) {
+void register_kernel_shm(int shm_id, struct shm *shm) {
     for (int i = 0; i < MAX_KERNEL_SHM; i++) {
         if (kernel_shm_table[i].shm_id == -1) {
             kernel_shm_table[i].shm_id = shm_id;
-            kernel_shm_table[i].phys = phys;
-            kernel_shm_table[i].npages = npages;
+            kernel_shm_table[i].shm = shm;
             return;
         }
     }
@@ -203,7 +201,7 @@ void trap_dispatch(trapframe_t *tf) {
     serial_puts(" crashed: vector ");
     serial_put_hex(tf->trapno);
     serial_puts("\n");
-    sys_exit((uint64_t)-1, 0, 0, 0, 0);
+    sys_exit((uint64_t)-1, 0, 0, 0, 0, 0);
     // sys_exit does not return
   }
   // Kernel-mode exception: unrecoverable, halt
@@ -262,6 +260,7 @@ void isr_init() {
   // Initialize kernel SHM table
   for (int i = 0; i < MAX_KERNEL_SHM; i++) {
     kernel_shm_table[i].shm_id = -1;
+    kernel_shm_table[i].shm = nullptr;
   }
 
   // Register default handlers
@@ -323,19 +322,40 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
 void syscall_dispatch(trapframe_t *tf) {
     if (tf->rax < NR_SYSCALL) {
         tf->rax = syscall_table[tf->rax](
-            tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8);
+            tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
     } else {
         tf->rax = (uint64_t)ENOSYS;
     }
 }
 
-// sys_getpid() — syscall 1
-uint64_t sys_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+// ===================== SHM reference counting =====================
+struct shm *shm_get(struct shm *shm) {
+    if (!shm) return nullptr;
+    __atomic_add_fetch(&shm->ref_count, 1, __ATOMIC_RELAXED);
+    return shm;
+}
+
+void shm_put(struct shm *shm) {
+    if (!shm) return;
+    int old = __atomic_fetch_sub(&shm->ref_count, 1, __ATOMIC_RELAXED);
+    if (old == 1) {
+        // Last reference released
+        if (!(shm->flags & SHM_KERNEL)) {
+            // Free physical pages (not kernel-managed)
+            Page *page = &BFCAllocator::frames[PHY_TO_PAGE(shm->phys)];
+            bfc_alloc.free_page(page, shm->npages);
+        }
+        kfree(shm);
+    }
+}
+
+// sys_getpid() — syscall 0
+uint64_t sys_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     return (uint64_t)current_proc->pid;
 }
 
-// sys_yield() — syscall 2
-uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+// sys_yield() — syscall 1
+uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     schedule();
     return 0;
 }
@@ -343,7 +363,7 @@ uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
 // sys_recv(buf, data_buf, data_buf_len, timeout_ms) — syscall 2 (统一事件接收：IRQ/REQ/notify/MSG)
 // timeout_ms=0: 无限等待; >0: 超时后唤醒
 // 返回: 0=成功, 正数=errno
-uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t) {
+uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t, uint64_t) {
     void *buf = (void *)arg1;
     void *data_buf = (void *)arg2;
     size_t data_buf_len = (size_t)arg3;
@@ -468,7 +488,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 // sys_req(pid, request, reply) — syscall 3 (同步 REQ)
 // 向目标发送 64 字节请求，阻塞等待 reply
 // 返回: 0=成功, 正数=errno
-uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
     pid_t target_pid = (pid_t)arg1;
     void *request = (void *)arg2;
     void *reply = (void *)arg3;
@@ -545,7 +565,7 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t
 
 // sys_resp(reply) — syscall 4 (回复当前 REQ 调用者)
 // 返回: 0=成功, 正数=errno
-uint64_t sys_resp(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_resp(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     void *reply = (void *)arg1;
 
     // Validate user pointer
@@ -591,7 +611,7 @@ uint64_t sys_resp(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 
 // sys_irq_bind(irq) — syscall 5 (绑定当前进程到指定 IRQ，自动 unmask I/O APIC)
 // irq 参数为向量号（例如 IRQ14 → vector 46 = 32+14）
-uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     int irq = (int)arg1;
     if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return (uint64_t)-EINVAL;
     __atomic_store_n(&irq_owner[irq], current_proc->pid, __ATOMIC_RELEASE);
@@ -607,7 +627,7 @@ uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 }
 
 // sys_exit(exit_code) — syscall 6 (进程退出)
-uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     proc_t *proc = current_proc;
     int32_t exit_code = (int32_t)arg1;
     proc->exit_code = exit_code;
@@ -698,9 +718,7 @@ uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     return 0;    // unreachable
 }
 
-// sys_waitpid(pid, exit_code_ptr) — syscall 7 (等待子进程退出)
-// pid=-1: wait for any child
-uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
     pid_t pid = (pid_t)arg1;
     int32_t *exit_code_ptr = (int32_t *)arg2;
 
@@ -802,8 +820,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t)
     return (uint64_t)pid;
 }
 
-// sys_spawn(elf_data, elf_size) — syscall 8 (创建子进程)
-uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
     const uint8_t *elf_data_user = (const uint8_t *)arg1;
     uint64_t elf_size = arg2;
 
@@ -843,25 +860,70 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
     return (uint64_t)child->pid;
 }
 
-// sys_mmap(addr, size, prot, flags, offset) — syscall 9 (内存映射)
-// MAP_PHYSICAL: map physical address range (no new page allocation)
-// Otherwise: anonymous private mapping (allocates new pages)
+// sys_mmap(addr, size, prot, flags, fd, offset) — syscall 9 (内存映射)
+// MAP_SHARED + fd ≥ 0: SHM fd 映射
+// MAP_PHYSICAL: offset=phys_addr, fd=-1
+// MAP_ANONYMOUS: fd=-1
 // Returns: mapped address on success, 0 on failure
 #define MAP_PHYSICAL_KERNEL 0x80000000
 
-uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5) {
+uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6) {
     uint64_t addr = arg1;
     size_t size = (size_t)arg2;
-    // int prot = (int)arg3;  // prot currently ignored
+    int prot = (int)arg3;
     int flags = (int)arg4;
-    uint64_t offset = arg5;
+    int fd = (int)arg5;
+    uint64_t offset = arg6;
 
-    if (size == 0) return 0;
-
-    size = ALIGN_UP(size, PAGE_SIZE);
     proc_t *proc = current_proc;
     uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->cr3);
 
+    // MAP_SHARED (0x01) + fd ≥ 0: SHM fd mapping (size=0 allowed — use shm->npages)
+    if ((flags & 0x01) && fd >= 0) {
+        // Validate fd
+        if (fd >= MAX_FD || proc->fd_table[fd].type != FD_SHM)
+            return 0;
+        struct shm *shm = proc->fd_table[fd].shm;
+        if (!shm) return 0;
+
+        size_t npages = shm->npages;
+        size = npages * PAGE_SIZE;
+
+        // Map SHM pages into user address space at mmap_brk
+        uint64_t vaddr = proc->mmap_brk;
+        uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+
+        for (size_t i = 0; i < npages; i++) {
+            if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE,
+                                      shm->phys + i * PAGE_SIZE, pte_flags)) {
+                for (size_t j = 0; j < i; j++)
+                    unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
+                return 0;
+            }
+        }
+
+        mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
+        if (!region) {
+            for (size_t i = 0; i < npages; i++)
+                unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE, 1);
+            return 0;
+        }
+
+        region->vaddr = vaddr;
+        region->size = size;
+        region->phys = 0;
+        region->shm_obj = shm_get(shm);  // +1 ref for mmap
+        region->next = proc->mmap_regions;
+        proc->mmap_regions = region;
+        proc->mmap_brk = vaddr + size;
+
+        return vaddr;
+    }
+
+    // Anonymous or MAP_PHYSICAL: size must be non-zero
+    if (size == 0) return 0;
+
+    // MAP_PHYSICAL
     if (flags & MAP_PHYSICAL_KERNEL) {
         // MAP_PHYSICAL: map physical address range to user address space
         // Use mmap_phys_brk (high fixed base) to avoid conflict with SHM/heap
@@ -869,12 +931,15 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         uint64_t phys_start = ALIGN_DOWN(offset, PAGE_SIZE);
         uint64_t phys_end = ALIGN_UP(offset + size, PAGE_SIZE);
         size_t npages = (phys_end - phys_start) / PAGE_SIZE;
+
         uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
 
         for (size_t i = 0; i < npages; i++) {
             if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE,
                                       phys_start + i * PAGE_SIZE, pte_flags)) {
-                // Rollback
+                serial_puts("mmap PHYSICAL: map failed at i=");
+                serial_put_hex((uint64_t)i);
+                serial_puts("\n");
                 for (size_t j = 0; j < i; j++)
                     unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
                 return 0;
@@ -891,6 +956,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         region->vaddr = vaddr;
         region->size = npages * PAGE_SIZE;
         region->phys = phys_start;  // non-zero = MAP_PHYSICAL, don't free in proc_reap
+        region->shm_obj = nullptr;
         region->next = proc->mmap_regions;
         proc->mmap_regions = region;
         proc->mmap_phys_brk = vaddr + npages * PAGE_SIZE;
@@ -899,6 +965,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
     }
 
     // Anonymous private mapping: allocate new pages
+    size = ALIGN_UP(size, PAGE_SIZE);
     uint64_t vaddr = proc->mmap_brk;
     uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
 
@@ -943,6 +1010,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
     region->vaddr = vaddr;
     region->size = size;
     region->phys = 0;
+    region->shm_obj = nullptr;
     region->next = proc->mmap_regions;
     proc->mmap_regions = region;
     proc->mmap_brk = vaddr + size;
@@ -953,7 +1021,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 
 // sys_munmap(addr, size) — syscall 10 (解除内存映射)
 // Returns: 0 on success, positive errno on failure
-uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
     uint64_t addr = arg1;
     size_t size = (size_t)arg2;
 
@@ -969,12 +1037,19 @@ uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) 
             mmap_region *region = *pp;
             size = region->size;
 
-            // 逐页解映射 + 释放物理页
+            // 逐页解映射（不释放物理页 — SHM页由shm_put管理，匿名页在下面释放）
             size_t npages = size / PAGE_SIZE;
             for (size_t i = 0; i < npages; i++) {
                 uint64_t va = addr + i * PAGE_SIZE;
                 unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
             }
+
+            // Release SHM reference if this was an SHM mapping
+            if (region->shm_obj) {
+                shm_put(region->shm_obj);
+            }
+            // else: anonymous/MAP_PHYSICAL — physical pages already freed by PML4 walk in proc_reap
+            // (for munmap, anonymous pages are leaked intentionally — proc_reap handles them)
 
             // 从链表删除
             *pp = region->next;
@@ -1029,7 +1104,7 @@ void notify_and_wake(pid_t target_pid, recv_msg *msg) {
 
 // ===================== sys_block_read / sys_block_write =====================
 // Synchronous polling path. Returns EBUSY if async request is active.
-uint64_t sys_block_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+uint64_t sys_block_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
     uint32_t lba = (uint32_t)arg1;
     void *buf = (void *)arg2;
     uint32_t count = (uint32_t)arg3;
@@ -1057,7 +1132,7 @@ uint64_t sys_block_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, u
     return (uint64_t)(rc < 0 ? -rc : 0);
 }
 
-uint64_t sys_block_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+uint64_t sys_block_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
     uint32_t lba = (uint32_t)arg1;
     const void *buf = (const void *)arg2;
     uint32_t count = (uint32_t)arg3;
@@ -1088,7 +1163,7 @@ uint64_t sys_block_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, 
 // sys_block_async(lba, buf, count, dir) — syscall 34
 // Async block I/O: returns cookie (>0) on success, positive errno on error.
 // Completion delivered via RECV_NOTIFY with cookie+result+lba+count in data.
-uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t) {
+uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t, uint64_t) {
     uint32_t lba = (uint32_t)arg1;
     void *buf = (void *)arg2;
     uint32_t count = (uint32_t)arg3;
@@ -1101,7 +1176,7 @@ uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t a
 // sys_open_dev(dev_type) — syscall 35 (open device node, returns FD_DEV fd)
 // Returns: (fd | target_pid << 32) on success, negative errno on failure
 // Caller extracts: fd = (int32_t)(result & 0xFFFFFFFF), pid = (pid_t)(result >> 32)
-uint64_t sys_open_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_open_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     int dev_type = (int)arg1;
 
     if (dev_type <= DEV_NONE || dev_type >= DEV_TYPE_MAX)
@@ -1133,7 +1208,7 @@ uint64_t sys_open_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 }
 
 // sys_serial_write(buf, len) — syscall 11 (用户态串口输出)
-uint64_t sys_serial_write(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_serial_write(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
     const char *buf = (const char *)arg1;
     size_t len = (size_t)arg2;
 
@@ -1153,7 +1228,7 @@ uint64_t sys_serial_write(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint
 
 // sys_fb_info(buf) — syscall 12 (获取 framebuffer 信息)
 // Returns: 0 on success, positive errno on failure
-uint64_t sys_fb_info(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_fb_info(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     void *user_buf = (void *)arg1;
     if (!user_buf) return (uint64_t)-EINVAL;
 
@@ -1162,13 +1237,18 @@ uint64_t sys_fb_info(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(kms_fb_info) > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
+    serial_puts("sys_fb_info: fb_phys=");
+    serial_put_hex(g_fb_info.fb_phys);
+    serial_puts(" fb_size=");
+    serial_put_hex(g_fb_info.fb_size);
+    serial_puts("\n");
     __memcpy(user_buf, &g_fb_info, sizeof(kms_fb_info));
     return 0;
 }
 
-// sys_shm_create(size) — syscall 13 (创建共享内存)
-// Returns: virtual address on success, 0 on failure
-uint64_t sys_shm_create(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+// sys_shm_create(size) — syscall 13 (创建共享内存，返回 fd)
+// Returns: fd (≥2) on success, 0 on failure
+uint64_t sys_shm_create(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     size_t size = (size_t)arg1;
     if (size == 0) return 0;
     size = ALIGN_UP(size, PAGE_SIZE);
@@ -1176,190 +1256,106 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 
     proc_t *proc = current_proc;
 
-    // Find free slot
-    int slot = -1;
-    for (int i = 0; i < MAX_SHM_PER_PROC; i++) {
-        if (proc->shm_regions[i].ref_count == 0) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot < 0) return 0;
-
     // Allocate physical pages
     Page *pages = bfc_alloc.alloc_page(npages);
     if (!pages) return 0;
-    uint64_t phys = (uint64_t)(pages - BFCAllocator::frames) * PAGE_SIZE;
+    uint64_t phys = page_to_phys(pages);
 
     // Zero the pages
     uint8_t *vptr = (uint8_t *)phys_to_virt(phys);
-    for (size_t i = 0; i < size; i++) vptr[i] = 0;
+    __memset(vptr, 0, size);
 
-    // Pick virtual address: scan existing regions, find gap above SHM_VADDR_BASE
-    uint64_t vaddr = SHM_VADDR_BASE;
-    for (int i = 0; i < MAX_SHM_PER_PROC; i++) {
-        if (proc->shm_regions[i].ref_count > 0) {
-            uint64_t end = proc->shm_regions[i].vaddr + proc->shm_regions[i].npages * PAGE_SIZE;
-            if (end > vaddr) vaddr = ALIGN_UP(end, PAGE_SIZE);
+    // Allocate shm struct
+    struct shm *shm = (struct shm *)kmalloc(sizeof(struct shm));
+    if (!shm) {
+        bfc_alloc.free_page(pages, npages);
+        return 0;
+    }
+    shm->phys = phys;
+    shm->npages = npages;
+    shm->ref_count = 1;  // fd holds initial reference
+    shm->flags = 0;
+
+    // Find free fd slot (skip 0/1 reserved for stdin/stdout)
+    int fd = -1;
+    for (int i = 2; i < MAX_FD; i++) {
+        if (proc->fd_table[i].type == FD_NONE) {
+            fd = i;
+            break;
         }
     }
-
-    // Map into caller's PML4
-    uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->cr3);
-    uint64_t flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
-    for (size_t i = 0; i < npages; i++) {
-        if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, phys + i * PAGE_SIZE, flags)) {
-            // Rollback: unmap already-mapped pages
-            for (size_t j = 0; j < i; j++)
-                unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
-            bfc_alloc.free_page(&BFCAllocator::frames[PHY_TO_PAGE(phys)], npages);
-            return 0;
-        }
+    if (fd < 0) {
+        kfree(shm);
+        bfc_alloc.free_page(pages, npages);
+        return 0;
     }
 
-    // Fill slot
-    proc->shm_regions[slot].vaddr = vaddr;
-    proc->shm_regions[slot].phys = phys;
-    proc->shm_regions[slot].npages = npages;
-    proc->shm_regions[slot].ref_count = 1;
+    proc->fd_table[fd].type = FD_SHM;
+    proc->fd_table[fd].flags = O_RDWR;
+    proc->fd_table[fd].shm = shm;
 
-    return vaddr;
+    return (uint64_t)fd;
 }
 
-// sys_shm_attach(id, mode) — syscall 14 (附加共享内存)
-// mode=0: id is target_pid, attach target's first SHM (existing behavior)
-// mode=1: id is kernel SHM ID, attach kernel pre-allocated SHM
-// Returns: virtual address on success, 0 on failure
-uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+// sys_shm_attach(id, mode) — syscall 14 (附加共享内存，返回 fd)
+// mode=0: id is target_pid, attach target's first FD_SHM
+// mode=1: id is kernel SHM ID, attach kernel pre-allocated SHM via struct shm*
+// Returns: fd (≥2) on success, 0 on failure
+// Transitional: caller must sys_mmap(fd, ...) to get vaddr
+uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
     int mode = (int)arg2;
     proc_t *proc = current_proc;
+    struct shm *target_shm = nullptr;
 
     if (mode == 1) {
         // Kernel SHM mode: arg1 is kernel SHM ID
         int shm_id = (int)arg1;
-        struct kernel_shm_region *kshm = nullptr;
         for (int i = 0; i < MAX_KERNEL_SHM; i++) {
             if (kernel_shm_table[i].shm_id == shm_id) {
-                kshm = &kernel_shm_table[i];
+                target_shm = kernel_shm_table[i].shm;
                 break;
             }
         }
-        if (!kshm) return 0;
+        if (!target_shm) return 0;
+    } else {
+        // mode=0: find target process's first FD_SHM
+        pid_t target_pid = (pid_t)arg1;
+        if (target_pid < 0 || target_pid >= MAX_PROC) return 0;
 
-        // Find free slot in caller's shm_regions
-        int slot = -1;
-        for (int i = 0; i < MAX_SHM_PER_PROC; i++) {
-            if (proc->shm_regions[i].ref_count == 0) {
-                slot = i;
+        proc_t *target = &procs[target_pid];
+        if (target->pid != target_pid) return 0;
+
+        // Scan target's fd_table for FD_SHM
+        for (int i = 0; i < MAX_FD; i++) {
+            if (target->fd_table[i].type == FD_SHM) {
+                target_shm = target->fd_table[i].shm;
                 break;
             }
         }
-        if (slot < 0) return 0;
-
-        // Pick virtual address
-        uint64_t vaddr = SHM_VADDR_BASE;
-        for (int i = 0; i < MAX_SHM_PER_PROC; i++) {
-            if (proc->shm_regions[i].ref_count > 0) {
-                uint64_t end = proc->shm_regions[i].vaddr + proc->shm_regions[i].npages * PAGE_SIZE;
-                if (end > vaddr) vaddr = ALIGN_UP(end, PAGE_SIZE);
-            }
-        }
-
-        // Map shared physical pages into caller's PML4
-        uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->cr3);
-        uint64_t flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
-        for (size_t i = 0; i < kshm->npages; i++) {
-            if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, kshm->phys + i * PAGE_SIZE, flags)) {
-                for (size_t j = 0; j < i; j++)
-                    unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
-                return 0;
-            }
-        }
-
-        // Fill caller's shm_region slot
-        proc->shm_regions[slot].vaddr = vaddr;
-        proc->shm_regions[slot].phys = kshm->phys;
-        proc->shm_regions[slot].npages = kshm->npages;
-        proc->shm_regions[slot].ref_count = 1;
-
-        return vaddr;
+        if (!target_shm) return 0;
     }
 
-    // mode=0: existing process SHM attach behavior
-    pid_t target_pid = (pid_t)arg1;
-    if (target_pid < 0 || target_pid >= MAX_PROC) return 0;
+    // Bump ref_count for the new fd
+    shm_get(target_shm);
 
-    proc_t *target = &procs[target_pid];
-
-    // Under procs_lock, find target's first active shm region
-    spin_lock(&procs_lock);
-    if (target->pid != target_pid) {
-        spin_unlock(&procs_lock);
-        return 0;
-    }
-
-    shm_region *src = nullptr;
-    for (int i = 0; i < MAX_SHM_PER_PROC; i++) {
-        if (target->shm_regions[i].ref_count > 0) {
-            src = &target->shm_regions[i];
+    // Find free fd slot (skip 0/1 reserved for stdin/stdout)
+    int fd = -1;
+    for (int i = 2; i < MAX_FD; i++) {
+        if (proc->fd_table[i].type == FD_NONE) {
+            fd = i;
             break;
         }
     }
-    if (!src) {
-        spin_unlock(&procs_lock);
+    if (fd < 0) {
+        shm_put(target_shm);
         return 0;
     }
 
-    // Find free slot in our shm_regions
-    int slot = -1;
-    for (int i = 0; i < MAX_SHM_PER_PROC; i++) {
-        if (proc->shm_regions[i].ref_count == 0) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot < 0) {
-        spin_unlock(&procs_lock);
-        return 0;
-    }
+    proc->fd_table[fd].type = FD_SHM;
+    proc->fd_table[fd].flags = O_RDWR;
+    proc->fd_table[fd].shm = target_shm;
 
-    // Increment ref_count while still under lock
-    src->ref_count++;
-    spin_unlock(&procs_lock);
-
-    // Pick virtual address
-    uint64_t vaddr = SHM_VADDR_BASE;
-    for (int i = 0; i < MAX_SHM_PER_PROC; i++) {
-        if (proc->shm_regions[i].ref_count > 0) {
-            uint64_t end = proc->shm_regions[i].vaddr + proc->shm_regions[i].npages * PAGE_SIZE;
-            if (end > vaddr) vaddr = ALIGN_UP(end, PAGE_SIZE);
-        }
-    }
-
-    // Map shared physical pages into our PML4
-    uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->cr3);
-    uint64_t flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
-    for (size_t i = 0; i < src->npages; i++) {
-        if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, src->phys + i * PAGE_SIZE, flags)) {
-            // Rollback: unmap already-mapped pages
-            for (size_t j = 0; j < i; j++)
-                unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
-            // Decrement ref_count
-            spin_lock(&procs_lock);
-            src->ref_count--;
-            spin_unlock(&procs_lock);
-            return 0;
-        }
-    }
-
-    // Fill our slot (ref_count=1 means we hold a reference; actual physical page
-    // refcount is tracked by counting entries across all procs[].shm_regions)
-    proc->shm_regions[slot].vaddr = vaddr;
-    proc->shm_regions[slot].phys = src->phys;
-    proc->shm_regions[slot].npages = src->npages;
-    proc->shm_regions[slot].ref_count = 1;
-
-    return vaddr;
+    return (uint64_t)fd;
 }
 
 // ===================== Pipe / fd syscalls =====================
@@ -1393,7 +1389,7 @@ void wake_process(pid_t pid) {
 }
 
 // sys_pipe(fd_ptr) — syscall 15 (创建 pipe，写 [read_fd, write_fd] 到用户指针)
-uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     int *fd_ptr = (int *)arg1;
 
     // Validate user pointer
@@ -1448,7 +1444,7 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 }
 
 // sys_write(fd, buf, len) — syscall 16 (向 fd 写入数据)
-uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
     int fd = (int)arg1;
     const char *buf = (const char *)arg2;
     size_t len = (size_t)arg3;
@@ -1495,7 +1491,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
 }
 
 // sys_read(fd, buf, len) — syscall 17 (从 fd 读数据，阻塞直到有数据)
-uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
     int fd = (int)arg1;
     char *buf = (char *)arg2;
     size_t len = (size_t)arg3;
@@ -1544,7 +1540,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_
 }
 
 // sys_close(fd) — syscall 18 (关闭 fd，pipe ref_count--)
-uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     int fd = (int)arg1;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EINVAL;
@@ -1566,12 +1562,18 @@ uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
             kfree(p->buf);
             kfree(p);
         }
+    } else if (current_proc->fd_table[fd].type == FD_SHM) {
+        // Release SHM reference held by this fd
+        if (current_proc->fd_table[fd].shm) {
+            shm_put(current_proc->fd_table[fd].shm);
+        }
     }
     // FD_DEV: no dynamic resources to free
 
     current_proc->fd_table[fd].type = FD_NONE;
     current_proc->fd_table[fd].flags = 0;
     current_proc->fd_table[fd].pipe = nullptr;
+    current_proc->fd_table[fd].shm = nullptr;
     current_proc->fd_table[fd].target_pid = -1;
 
     return 0;
@@ -1589,7 +1591,7 @@ int register_dev(int dev_type, pid_t pid) {
 
 // sys_load_dev(pid, dev_type) — syscall 19 (注册驱动)
 // Returns: 0 on success, positive errno on failure
-uint64_t sys_load_dev(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_load_dev(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
     pid_t pid = (pid_t)arg1;
     int dev_type = (int)arg2;
     return (uint64_t)register_dev(dev_type, pid);
@@ -1611,7 +1613,7 @@ pid_t lookup_dev(int dev_type) {
 
 // sys_notify(pid) — syscall 21 (异步通知：消息入队 + 唤醒)
 // Returns: 0 on success, positive errno on failure
-uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     pid_t target_pid = (pid_t)arg1;
     if (target_pid < 0 || target_pid >= MAX_PROC) return (uint64_t)-EINVAL;
 
@@ -1650,12 +1652,12 @@ uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
 }
 
 // sys_gettime() — syscall 22 (全局单调时钟，返回纳秒)
-uint64_t sys_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     return sched_clock();
 }
 
 // sys_clock() — syscall 23 (per-process CPU 时间，返回纳秒)
-uint64_t sys_clock(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_clock(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     return current_proc->cpu_time_ns;
 }
 
@@ -1731,7 +1733,7 @@ static int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
 // sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — syscall 24 (变长消息请求)
 // PID-based variant.
 // 返回: 0=成功, 负errno
-uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5) {
+uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t) {
     pid_t target_pid = (pid_t)arg1;
     void *msg_buf = (void *)arg2;
     size_t msg_len = (size_t)arg3;
@@ -1761,7 +1763,7 @@ uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uin
 // sys_dev_msg(fd, msg_buf, msg_len, reply_buf, reply_len) — syscall 20 (fd-based 变长消息请求)
 // 从当前进程的 fd_table 中提取 target PID，委托 sys_msg_to。
 // 返回: 0=成功, 负errno
-uint64_t sys_dev_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5) {
+uint64_t sys_dev_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t) {
     int fd = (int)arg1;
     void *msg_buf = (void *)arg2;
     size_t msg_len = (size_t)arg3;
@@ -1796,7 +1798,7 @@ uint64_t sys_dev_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4,
 
 // sys_msg_resp(resp_buf, resp_len) — syscall 25 (回复当前 MSG 调用者)
 // 返回: 0=成功, 正数=errno
-uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
     void *resp_buf = (void *)arg1;
     size_t resp_len = (size_t)arg2;
 
@@ -1847,7 +1849,7 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t
 }
 
 // sys_ioperm(from, num, turn_on) — syscall 26 (I/O 端口权限)
-uint64_t sys_ioperm(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+uint64_t sys_ioperm(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
     unsigned long from = (unsigned long)arg1;
     unsigned long num = (unsigned long)arg2;
     int turn_on = (int)arg3;
@@ -1891,7 +1893,7 @@ uint64_t sys_ioperm(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint6
 #define F_SETFL 2
 
 // sys_dup2(old_fd, new_fd) — syscall 27 (复制 fd)
-uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
     int old_fd = (int)arg1;
     int new_fd = (int)arg2;
 
@@ -1919,18 +1921,31 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
                     kfree(p);
                 }
             }
+        } else if (proc->fd_table[new_fd].type == FD_SHM) {
+            if (proc->fd_table[new_fd].shm) {
+                shm_put(proc->fd_table[new_fd].shm);
+            }
         }
         // FD_DEV: no dynamic resources to free
         proc->fd_table[new_fd].type = FD_NONE;
         proc->fd_table[new_fd].flags = 0;
         proc->fd_table[new_fd].pipe = nullptr;
+        proc->fd_table[new_fd].shm = nullptr;
         proc->fd_table[new_fd].target_pid = -1;
     }
 
     // Copy old_fd to new_fd
     proc->fd_table[new_fd] = proc->fd_table[old_fd];
+    proc->fd_table[new_fd].pipe = nullptr;  // clear union (will set below if needed)
+    proc->fd_table[new_fd].shm = nullptr;
     if (proc->fd_table[new_fd].type == FD_PIPE) {
+        proc->fd_table[new_fd].pipe = proc->fd_table[old_fd].pipe;
         proc->fd_table[new_fd].pipe->ref_count++;
+    } else if (proc->fd_table[new_fd].type == FD_SHM) {
+        proc->fd_table[new_fd].shm = proc->fd_table[old_fd].shm;
+        if (proc->fd_table[new_fd].shm) {
+            shm_get(proc->fd_table[new_fd].shm);
+        }
     }
     // FD_DEV: target_pid copied by struct assignment, no ref_count needed
 
@@ -1938,7 +1953,7 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
 }
 
 // sys_fcntl(fd, cmd, arg) — syscall 28 (文件控制)
-uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
     int fd = (int)arg1;
     int cmd = (int)arg2;
     int arg = (int)arg3;
@@ -1971,7 +1986,7 @@ void irq_owner_cleanup(pid_t pid) {
 // sys_dma_alloc(size, vaddr_ptr, paddr_ptr) — syscall 29
 // 分配物理连续、<4GB 的 DMA 缓冲区，映射到调用者地址空间
 // Returns: 0 on success, positive errno on failure
-uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t) {
+uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
     size_t size = (size_t)arg1;
     void **vaddr_ptr = (void **)arg2;
     uint64_t *paddr_ptr = (uint64_t *)arg3;
@@ -2038,7 +2053,7 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, ui
 // sys_dma_free(vaddr) — syscall 30
 // 释放 DMA 缓冲区
 // Returns: 0 on success, positive errno on failure
-uint64_t sys_dma_free(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_dma_free(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
     uint64_t vaddr = (uint64_t)arg1;
     if (!vaddr) return (uint64_t)-EINVAL;
 

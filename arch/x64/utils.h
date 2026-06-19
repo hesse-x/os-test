@@ -240,6 +240,19 @@ static inline int64_t __syscall5(int64_t num, int64_t arg1, int64_t arg2, int64_
   return ret;
 }
 
+static inline int64_t __syscall6(int64_t num, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6) {
+  int64_t ret;
+  register int64_t a4 __asm__("r10") = arg4;
+  register int64_t a5 __asm__("r8") = arg5;
+  register int64_t a6 __asm__("r9") = arg6;
+  __asm__ volatile(
+      "syscall"
+      : "=a"(ret)
+      : "a"(num), "D"(arg1), "S"(arg2), "d"(arg3), "r"(a4), "r"(a5), "r"(a6)
+      : "rcx", "r11", "memory");
+  return ret;
+}
+
 #include "common/syscall.h"
 #include "common/shm.h"
 

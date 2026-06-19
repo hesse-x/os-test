@@ -4,6 +4,7 @@
 #include "kernel/mem/alloc.h"
 #include "kernel/trap.h"
 #include "kernel/proc.h"
+#include "kernel/mem/slab.h"
 #include "kernel/spinlock.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
@@ -672,7 +673,16 @@ static void xhci_init_keyboard() {
   }
 
   // Register kernel SHM for kbd_driver to attach
-  register_kernel_shm(USB_HID_SHM_ID, usb_hid_shm_phys, 1);
+  {
+    struct shm *kshm = (struct shm *)kmalloc(sizeof(struct shm));
+    if (kshm) {
+      kshm->phys = usb_hid_shm_phys;
+      kshm->npages = 1;
+      kshm->ref_count = 0;  // kernel holds no reference; kbd_driver's attach adds ref
+      kshm->flags = SHM_KERNEL;
+      register_kernel_shm(USB_HID_SHM_ID, kshm);
+    }
+  }
 
   // Initialize Transfer Rings with Link TRBs
   volatile uint32_t *ep0_ring = (volatile uint32_t *)ep0_ring_virt;

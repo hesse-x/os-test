@@ -58,6 +58,7 @@
 | 用户态驱动（3 层 kbd + req bind/unbind + 各驱动工作流） | [user_driver.md](user_driver.md) |
 | 构建系统（CMake + mkdisk + mkimg） | [cmake.md](cmake.md) |
 | Shell 设计（命令 + FS IPC + 路径执行） | [shell.md](shell.md) |
+| Unix domain socket 设计 | [socket.md](socket.md) |
 | fs_driver 异步事件循环 + 文件写入 | [file_system.md](file_system.md) |
 | xHCI + MSI-X（PCIe USB 控制器 + MSI-X 中断分配） | [xhci.md](xhci.md) |
 | USB HID 键盘迁移（PS/2 → xHCI Transfer Ring + SHM ring） | [kbd.md](kbd.md) |
@@ -125,25 +126,33 @@
 - [ ] sys_open：VFS 层 file_ops 虚函数分派
 - [ ] 验证: 用户进程通过 sys_open("hello.txt") → sys_read(fd, buf) 读取 FAT32 文件
 
-#### pipe / Unix domain socket + fd passing
+#### Unix domain socket（内核态 AF_UNIX SOCK_STREAM）
 
-- [x] pipe：sys_pipe(fd[2]) 创建一对相联的 file
-- [ ] Unix domain socket：sys_socket(AF_UNIX) 创建 socket file
-- [ ] fd passing (SCM_RIGHTS)：sendmsg/recvmsg 支持辅助消息传递 fd
-- [ ] 验证: 两个进程通过 Unix socket 连接 → 传递 shm fd → 接收方可 mmap 访问共享内存
+详见 [socket.md](socket.md)。
 
-#### epoll（compositor 事件多路复用）
+- [ ] skb 链表（struct sk_buff + struct unix_sock）— `kernel/socket.h`, `kernel/socket.cc`
+- [ ] sys_socket(AF_UNIX, SOCK_STREAM, 0) → fd
+- [ ] sys_bind + sys_listen + sys_accept + sys_connect（命名 socket，路径绑定）
+- [ ] sys_socketpair（双向字节流 fd pair，可替换 pipe）
+- [ ] sys_sendmsg + sys_recvmsg（struct msghdr + struct iovec 100% Linux 兼容）
+- [ ] fd passing (SCM_RIGHTS)：sendmsg/recvmsg 辅助数据传递 fd
+- [ ] sys_shutdown(SHUT_RD/SHUT_WR/SHUT_RDWR)
+- [ ] 验证: 两个进程通过 Unix socket 连接 → sendmsg/recvmsg 收发数据 → SCM_RIGHTS 传递 shm fd
 
-- [ ] sys_epoll_create/ctl/wait
-- [ ] 支持 pipe/socket 可读可写事件
-- [ ] 验证: compositor 同时监听 N 个 client socket 的可读事件
+#### poll（统一事件多路复用）
 
-#### 信号机制
+- [ ] sys_poll(struct pollfd *, nfds, timeout_ms)
+- [ ] 支持 pipe 可读 (POLLIN) / 可写 (POLLOUT) 事件
+- [ ] 支持 socket 可读 (POLLIN) / 可写 (POLLOUT) / 挂起 (POLLHUP) 事件
+- [ ] 验证: compositor 用 poll 同时监听 N 个 client socket
+
+#### 信号机制（TTY Ctrl+C 依赖）
 
 - [ ] sigaction / kill 系统调用
 - [ ] 信号投递：进程返回用户态前检查 pending signals
 - [ ] SIGCHLD：子进程 exit 时向父进程投递
-- [ ] 验证: 子进程 exit → 父进程收到 SIGCHLD → handler 执行
+- [ ] SIGINT（Ctrl+C）：终端通过 kill(pid, SIGINT) 向前台进程发中断信号
+- [ ] 验证: shell 前台进程运行时按 Ctrl+C → 进程退出 → shell 返回提示符
 
 #### shm 改进
 
@@ -165,6 +174,14 @@
 - [ ] 验证: 合成器填充红色矩形到 back buffer → flip → 屏幕显示红色
 
 ### Phase 2: Wayland 用户态服务
+
+#### Terminal line discipline（用户态）
+
+- [ ] terminal 内建 TTY line discipline（echo、raw/canonical 模式切换）
+- [ ] Ctrl+C（SIGINT）→ kill shell 前台进程
+- [ ] Ctrl+Z（SIGTSTP）→ 作业停止
+- [ ] 行缓冲编辑（退格、Ctrl+U 清行），替代 shell readline
+- [ ] 验证: shell 吃原始字节流，terminal 端完成行编辑和信号生成
 
 #### Wayland 协议库（wire format）
 
@@ -202,6 +219,14 @@
 
 - [ ] 简单 test client
 - [ ] 验证: test client 运行，屏幕出现彩色矩形
+
+#### 图形终端（Terminal 重写为 Wayland 客户端）
+
+- [ ] terminal 进程改为 Wayland 客户端：`wl_display_connect` → `wl_compositor_create_surface`
+- [ ] font 渲染引擎（等宽字体 + 颜色 + Unicode）
+- [ ] 通过 wl_shm 创建共享 buffer，渲染 VT100 cell 到 surface
+- [ ] 合成器收到 keyboard focus → terminal 获得 wl_keyboard 事件
+- [ ] 验证: 图形终端启动，可输入命令、显示输出，外观类似 Ubuntu gnome-terminal
 
 ---
 

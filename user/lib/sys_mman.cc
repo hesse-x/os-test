@@ -7,22 +7,43 @@
 // Defined in file.cc: returns target_pid for FD_DEV fd, or -1 if not FD_DEV
 pid_t __fd_dev_target_pid(int fd);
 
-void *mmap(void *addr, size_t length, int prot, int flags, uint64_t fd_val) {
-    // FD_DEV mmap via MAP_SHARED: map driver SHM through fd
+// POSIX-like mmap: (addr, length, prot, flags, fd, offset)
+// For MAP_SHARED (SHM): fd is the SHM fd or FD_DEV fd
+// For MAP_PHYSICAL: fd=-1, offset is phys addr
+// For anonymous: fd=-1, offset ignored
+void *mmap(void *addr, size_t length, int prot, int flags, int fd, uint64_t offset) {
+    // FD_DEV mmap via MAP_SHARED: transitional path
+    // Opens the driver's SHM fd and maps it
     if (flags & MAP_SHARED) {
-        int fd = (int)fd_val;
         pid_t target_pid = __fd_dev_target_pid(fd);
         if (target_pid > 0) {
-            void *ptr = (void *)sys_shm_attach(target_pid, 0);
-            if (ptr) return ptr;
+            // Transitional: attach to driver's SHM, get an fd, then mmap it
+            int shm_fd = sys_shm_attach(target_pid, 0);
+            if (shm_fd <= 0) {
+                errno = EBADF;
+                return MAP_FAILED;
+            }
+            void *ptr = sys_mmap(NULL, length, prot, flags, shm_fd, 0);
+            sys_close(shm_fd);  // mmap keeps a reference
+            if (!ptr) {
+                errno = ENOMEM;
+                return MAP_FAILED;
+            }
+            return ptr;
         }
-        errno = EBADF;
-        return MAP_FAILED;
+        // Direct SHM fd mmap (fd already is an SHM fd)
+        void *r = sys_mmap(addr, length, prot, flags, fd, offset);
+        if (!r) {
+            errno = ENOMEM;
+            return MAP_FAILED;
+        }
+        return r;
     }
 
-    // Anonymous or MAP_PHYSICAL
-    void *r = sys_mmap(addr, length, prot, flags, fd_val);
-    if (r == NULL) {
+    // MAP_PHYSICAL: pass fd=-1, offset=phys_addr
+    // Anonymous: pass fd=-1, offset=0
+    void *r = sys_mmap(addr, length, prot, flags, -1, offset);
+    if (!r) {
         errno = ENOMEM;
         return MAP_FAILED;
     }

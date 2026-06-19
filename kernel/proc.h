@@ -16,23 +16,33 @@ enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WAIT_PIPE,
 #define RECV_MSG_SIZE   64
 #define RECV_QUEUE_SIZE 16
 
+// ===================== SHM fd model =====================
+#define SHM_KERNEL 1  // page managed by kernel, don't free on ref_count==0
+
+struct shm {
+    uint64_t phys;       // physical page start address
+    size_t   npages;     // number of pages
+    int      ref_count;  // reference count
+    int      flags;      // SHM_KERNEL
+};
+
 struct mmap_region {
     uint64_t vaddr;
     uint64_t size;
-    uint64_t phys;       // physical address (for DMA buffers)
+    uint64_t phys;       // physical address (for DMA buffers, non-zero = MAP_PHYSICAL)
+    struct shm *shm_obj; // non-NULL = SHM fd mmap (phys/npages from this)
     mmap_region *next;
 };
 
-#define MAX_SHM_PER_PROC 4
-#define SHM_VADDR_BASE 0x71000000
 #define MAP_PHYSICAL_BASE 0x70000000  // framebuffer MAP_PHYSICAL fixed high base
 
-// ===================== fd / pipe =====================
+// ===================== fd / pipe / shm =====================
 #define MAX_FD       32
 #define PIPE_BUF_SIZE 4096
 
 #define FD_NONE   0
 #define FD_PIPE   1
+#define FD_SHM    2
 #define FD_DEV    3
 
 #define O_RDONLY  0
@@ -50,17 +60,11 @@ struct pipe {
 };
 
 struct file {
-    int type;            // FD_NONE / FD_PIPE / FD_DEV
+    int type;            // FD_NONE / FD_PIPE / FD_SHM / FD_DEV
     int flags;           // O_RDONLY / O_WRONLY / O_RDWR
     struct pipe *pipe;   // if type == FD_PIPE
+    struct shm  *shm;    // if type == FD_SHM
     pid_t target_pid;    // if type == FD_DEV (driver PID)
-};
-
-struct shm_region {
-    uint64_t vaddr;       // virtual address in this process
-    uint64_t phys;        // physical page start address
-    size_t   npages;      // number of pages
-    uint32_t ref_count;   // reference count (0 = free slot)
 };
 
 struct proc_t {
@@ -82,7 +86,6 @@ struct proc_t {
     list_node_t wait_node; // embedded in per-CPU timer_queue (sorted by wait_deadline)
     uint64_t wait_deadline; // sched_clock() nanosecond deadline, 0 = no timeout
     uint8_t  wait_timed_out; // 1 = timer expired wakeup, 0 = notify wakeup
-    shm_region shm_regions[MAX_SHM_PER_PROC]; // dynamic shared memory regions
     struct file fd_table[MAX_FD];  // per-process file descriptor table
 
     // === 统一 recv 队列 ===
@@ -126,6 +129,10 @@ void idle_entry();
 proc_t *create_idle_process(int cpu_id);
 void proc_reap(proc_t *proc);
 }
+
+// SHM reference counting helpers
+struct shm *shm_get(struct shm *shm);
+void shm_put(struct shm *shm);
 
 // Timer queue operations (must be called under scheduler_lock)
 void timer_queue_insert(int cpu, proc_t *proc);

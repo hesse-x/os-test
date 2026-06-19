@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <sys/device.h>
 #include <sys/ipc.h>
+#include <fcntl.h>
 #include "common/macro.h"
 #include "driver/font.h"
 #include "common/dev.h"
@@ -61,7 +62,7 @@ static inline int display_client_init() {
 
     // mmap display SHM via MAP_SHARED (fd → target_pid → sys_shm_attach)
     // size=0 is ignored — MAP_SHARED maps the entire driver SHM region
-    void *shm_ptr = mmap(NULL, 0, PROT_READ | PROT_WRITE, MAP_SHARED, (uint64_t)fd);
+    void *shm_ptr = mmap(NULL, 0, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (shm_ptr == MAP_FAILED) {
         return -1;
     }
@@ -164,7 +165,7 @@ static inline int display_backend_init() {
     }
 
     // Map framebuffer physical memory via mmap MAP_PHYSICAL
-    void *fb_ptr = mmap(NULL, kfb.fb_size, PROT_READ | PROT_WRITE, MAP_PHYSICAL, kfb.fb_phys);
+    void *fb_ptr = mmap(NULL, kfb.fb_size, PROT_READ | PROT_WRITE, MAP_PHYSICAL, -1, kfb.fb_phys);
     if (fb_ptr == MAP_FAILED) {
         return -1;
     }

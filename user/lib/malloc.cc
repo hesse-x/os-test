@@ -102,7 +102,7 @@ void *malloc(size_t size) {
     // 大分配：> 2048
     if (size > 2048) {
         size_t npages = (size + sizeof(big_alloc_header) + PAGE_SIZE - 1) / PAGE_SIZE;
-        void *addr = sys_mmap(NULL, npages * PAGE_SIZE, PROT_READ | PROT_WRITE, 0, 0);
+        void *addr = sys_mmap(NULL, npages * PAGE_SIZE, PROT_READ | PROT_WRITE, 0, -1, 0);
         if (addr == NULL) return NULL;
 
         big_alloc_header *hdr = (big_alloc_header *)addr;
@@ -138,7 +138,7 @@ void *malloc(size_t size) {
     }
 
     // 3. 分配新 slab 页
-    void *page = sys_mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, 0, 0);
+    void *page = sys_mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, 0, -1, 0);
     if (page == NULL) return NULL;
 
     init_user_slab(page, c);

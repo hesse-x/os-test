@@ -1,4 +1,5 @@
 #include "kernel/fb.h"
+#include "kernel/serial.h"
 #include "arch/x64/paging.h"
 #include "common/macro.h"
 #include "common/shm.h"
@@ -13,7 +14,11 @@ kms_fb_info g_fb_info = {0};
 // ===================== init_fb =====================
 
 void init_fb(boot_info *bi) {
+  serial_puts("init_fb: fb_addr=");
+  serial_put_hex(bi->fb_addr);
+  serial_puts("\n");
   if (bi->fb_addr == 0) {
+    serial_puts("init_fb: fb_addr=0, returning\n");
     return;
   }
 

@@ -123,9 +123,9 @@ static inline int64_t sys_spawn(const void *elf_data, uint64_t elf_size) {
     return __syscall2(SYS_SPAWN, (int64_t)(uintptr_t)elf_data, (int64_t)elf_size);
 }
 
-static inline void *sys_mmap(void *addr, size_t size, int prot, int flags, uint64_t offset) {
-    return (void *)__syscall5(SYS_MMAP, (int64_t)(uintptr_t)addr, (int64_t)size,
-        (int64_t)prot, (int64_t)flags, (int64_t)offset);
+static inline void *sys_mmap(void *addr, size_t size, int prot, int flags, int fd, uint64_t offset) {
+    return (void *)__syscall6(SYS_MMAP, (int64_t)(uintptr_t)addr, (int64_t)size,
+        (int64_t)prot, (int64_t)flags, (int64_t)fd, (int64_t)offset);
 }
 
 static inline int sys_munmap(void *addr, size_t size) {
@@ -140,12 +140,12 @@ static inline int sys_fb_info(void *buf) {
     return (int)__syscall1(SYS_FB_INFO, (int64_t)(uintptr_t)buf);
 }
 
-static inline void *sys_shm_create(size_t size) {
-    return (void *)__syscall1(SYS_SHM_CREATE, (int64_t)size);
+static inline int sys_shm_create(size_t size) {
+    return (int)__syscall1(SYS_SHM_CREATE, (int64_t)size);
 }
 
-static inline void *sys_shm_attach(int32_t id, int mode) {
-    return (void *)__syscall2(SYS_SHM_ATTACH, (int64_t)id, (int64_t)mode);
+static inline int sys_shm_attach(int32_t id, int mode) {
+    return (int)__syscall2(SYS_SHM_ATTACH, (int64_t)id, (int64_t)mode);
 }
 
 static inline int sys_pipe(int *fd_ptr) {

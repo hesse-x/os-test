@@ -69,16 +69,11 @@ void proc_init() {
         procs[i].mmap_regions = nullptr;
         procs[i].wait_deadline = 0;
         procs[i].wait_timed_out = 0;
-        for (int j = 0; j < MAX_SHM_PER_PROC; j++) {
-            procs[i].shm_regions[j].vaddr = 0;
-            procs[i].shm_regions[j].phys = 0;
-            procs[i].shm_regions[j].npages = 0;
-            procs[i].shm_regions[j].ref_count = 0;
-        }
         for (int j = 0; j < MAX_FD; j++) {
             procs[i].fd_table[j].type = FD_NONE;
             procs[i].fd_table[j].flags = 0;
             procs[i].fd_table[j].pipe = nullptr;
+            procs[i].fd_table[j].shm = nullptr;
             procs[i].fd_table[j].target_pid = -1;
         }
         list_init(&procs[i].run_node);
@@ -200,6 +195,7 @@ proc_t *create_idle_process(int cpu_id) {
         proc->fd_table[j].type = FD_NONE;
         proc->fd_table[j].flags = 0;
         proc->fd_table[j].pipe = nullptr;
+        proc->fd_table[j].shm = nullptr;
         proc->fd_table[j].target_pid = -1;
     }
     list_init(&proc->run_node);
@@ -320,6 +316,7 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
         proc->fd_table[j].type = FD_NONE;
         proc->fd_table[j].flags = 0;
         proc->fd_table[j].pipe = nullptr;
+        proc->fd_table[j].shm = nullptr;
         proc->fd_table[j].target_pid = -1;
     }
     list_init(&proc->run_node);
@@ -455,27 +452,24 @@ void proc_reap(proc_t *proc) {
                     if (pte & PTE_PRESENT) {
                         // Mask: keep only physical address bits [51:12], clear flags/NX
                         uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
-                        // Skip dynamic shm regions (don't free shared pages)
+                        // Check mmap_regions: skip SHM fd mappings and MAP_PHYSICAL
                         bool is_shared = false;
-                        for (int s = 0; s < MAX_SHM_PER_PROC; s++) {
-                            if (proc->shm_regions[s].ref_count > 0) {
-                                uint64_t sphys = proc->shm_regions[s].phys;
-                                size_t snp = proc->shm_regions[s].npages;
+                        for (mmap_region *mr = proc->mmap_regions; mr; mr = mr->next) {
+                            if (mr->shm_obj != nullptr) {
+                                // This region maps an SHM fd — don't free phys pages
+                                uint64_t sphys = mr->shm_obj->phys;
+                                size_t snp = mr->shm_obj->npages;
                                 if (leaf_phys >= sphys && leaf_phys < sphys + snp * PAGE_SIZE) {
                                     is_shared = true;
                                     break;
                                 }
                             }
-                        }
-                        // Skip MAP_PHYSICAL regions (external physical memory, e.g. framebuffer)
-                        if (!is_shared) {
-                            for (mmap_region *mr = proc->mmap_regions; mr; mr = mr->next) {
-                                if (mr->phys != 0 &&
-                                    leaf_phys >= mr->phys &&
-                                    leaf_phys < mr->phys + mr->size) {
-                                    is_shared = true;
-                                    break;
-                                }
+                            // Skip MAP_PHYSICAL regions (external physical memory, e.g. framebuffer)
+                            if (mr->phys != 0 &&
+                                leaf_phys >= mr->phys &&
+                                leaf_phys < mr->phys + mr->size) {
+                                is_shared = true;
+                                break;
                             }
                         }
                         if (!is_shared) {
@@ -507,45 +501,30 @@ void proc_reap(proc_t *proc) {
     Page *stack_page = &BFCAllocator::frames[PHY_TO_PAGE(k_stack_phys_base)];
     bfc_alloc.free_page(stack_page, 2);
 
-    // 4. Free mmap region metadata (physical pages already freed in step 1)
+    // 4. Free mmap region metadata + release SHM references
     mmap_region *region = proc->mmap_regions;
     while (region) {
         mmap_region *next = region->next;
+        // Release SHM reference if this was an SHM fd mapping
+        if (region->shm_obj) {
+            shm_put(region->shm_obj);
+        }
         kfree(region);
         region = next;
     }
 
-    // 5. Handle dynamic shm regions: unmap virtual pages were already freed
-    //    in step 1 (PML4 walk skipped them). Now check if physical pages
-    //    should be freed by scanning all processes for remaining references.
-    for (int s = 0; s < MAX_SHM_PER_PROC; s++) {
-        if (proc->shm_regions[s].ref_count > 0) {
-            uint64_t sphys = proc->shm_regions[s].phys;
-            size_t snp = proc->shm_regions[s].npages;
-            // Count remaining references across all processes
-            int refs = 0;
-            spin_lock(&procs_lock);
-            for (int p = 0; p < MAX_PROC; p++) {
-                if (procs[p].pid < 0) continue;
-                for (int j = 0; j < MAX_SHM_PER_PROC; j++) {
-                    if (procs[p].shm_regions[j].ref_count > 0 &&
-                        procs[p].shm_regions[j].phys == sphys &&
-                        &procs[p] != proc) {
-                        refs++;
-                    }
-                }
-            }
-            spin_unlock(&procs_lock);
-            // If no other process references these pages, free them
-            if (refs == 0) {
-                Page *page = &BFCAllocator::frames[PHY_TO_PAGE(sphys)];
-                bfc_alloc.free_page(page, snp);
-            }
-            proc->shm_regions[s].ref_count = 0;
+    // 5. Handle SHM fd references in fd_table (physical pages freed by shm_put
+    //    when last reference drops — the PML4 walk in step 1 skipped SHM pages)
+    // FD_SHM entries already contributed to shm->ref_count; shm_put will
+    // free phys pages if no other process holds references.
+    for (int fd = 0; fd < MAX_FD; fd++) {
+        if (proc->fd_table[fd].type == FD_SHM && proc->fd_table[fd].shm) {
+            shm_put(proc->fd_table[fd].shm);
+            proc->fd_table[fd].shm = nullptr;
         }
     }
 
-    // 5b. Close all open fds
+    // 5b. Close all open fds (pipe cleanup)
     for (int fd = 0; fd < MAX_FD; fd++) {
         if (proc->fd_table[fd].type == FD_PIPE) {
             struct pipe *p = proc->fd_table[fd].pipe;
@@ -565,9 +544,11 @@ void proc_reap(proc_t *proc) {
             }
         }
         // FD_DEV and FD_NONE: no dynamic resources to free
+        // (FD_SHM already handled in step 5 above)
         proc->fd_table[fd].type = FD_NONE;
         proc->fd_table[fd].flags = 0;
         proc->fd_table[fd].pipe = nullptr;
+        proc->fd_table[fd].shm = nullptr;
         proc->fd_table[fd].target_pid = -1;
     }
 
@@ -655,12 +636,6 @@ void proc_reap(proc_t *proc) {
     proc->mmap_regions = nullptr;
     proc->wait_deadline = 0;
     proc->wait_timed_out = 0;
-    for (int j = 0; j < MAX_SHM_PER_PROC; j++) {
-        proc->shm_regions[j].vaddr = 0;
-        proc->shm_regions[j].phys = 0;
-        proc->shm_regions[j].npages = 0;
-        proc->shm_regions[j].ref_count = 0;
-    }
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
     // recv queue

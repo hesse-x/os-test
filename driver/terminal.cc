@@ -348,7 +348,7 @@ int main() {
 
     // mmap kbd SHM via MAP_SHARED (fd → target_pid → sys_shm_attach)
     // size=0 is ignored — MAP_SHARED maps the entire driver SHM region
-    void *shm_ptr = mmap(NULL, 0, PROT_READ | PROT_WRITE, MAP_SHARED, (uint64_t)kbd_fd);
+    void *shm_ptr = mmap(NULL, 0, PROT_READ | PROT_WRITE, MAP_SHARED, kbd_fd, 0);
     if (shm_ptr == MAP_FAILED) {
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
@@ -368,7 +368,7 @@ int main() {
 
     // 4. Allocate cell buffer via mmap
     int cell_bytes = vt.rows * vt.cols * sizeof(struct cell);
-    cells = (struct cell *)mmap(NULL, cell_bytes, PROT_READ | PROT_WRITE, 0, 0);
+    cells = (struct cell *)mmap(NULL, cell_bytes, PROT_READ | PROT_WRITE, 0, -1, 0);
     if (!cells) {
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
