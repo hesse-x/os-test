@@ -862,7 +862,8 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 
     if (flags & MAP_PHYSICAL_KERNEL) {
         // MAP_PHYSICAL: map physical address range to user address space
-        uint64_t vaddr = proc->mmap_brk;
+        // Use mmap_phys_brk (high fixed base) to avoid conflict with SHM/heap
+        uint64_t vaddr = proc->mmap_phys_brk;
         uint64_t phys_start = ALIGN_DOWN(offset, PAGE_SIZE);
         uint64_t phys_end = ALIGN_UP(offset + size, PAGE_SIZE);
         size_t npages = (phys_end - phys_start) / PAGE_SIZE;
@@ -887,10 +888,10 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 
         region->vaddr = vaddr;
         region->size = npages * PAGE_SIZE;
-        region->phys = 0;
+        region->phys = phys_start;  // non-zero = MAP_PHYSICAL, don't free in proc_reap
         region->next = proc->mmap_regions;
         proc->mmap_regions = region;
-        proc->mmap_brk = vaddr + npages * PAGE_SIZE;
+        proc->mmap_phys_brk = vaddr + npages * PAGE_SIZE;
 
         return vaddr;
     }

@@ -1815,6 +1815,18 @@ static void start_read(pending_op *op, struct client_session *sess,
 static void resume_read(pending_op *op) {
     file_resp *resp = (file_resp *)op->reply_buf;
 
+    // Debug: print state at entry
+    {
+        const char *hx = "0123456789ABCDEF";
+        char hb[40];
+        int p = 0;
+        hb[p++] = 'R'; hb[p++] = 'D'; hb[p++] = ' ';
+        uint32_t cc = op->u.read.current_cluster;
+        for (int i = 7; i >= 0; i--) { hb[p++] = hx[(cc >> (i*4)) & 0xF]; }
+        hb[p++] = '\n';
+        serial_write(hb, p);
+    }
+
     // Phase 1: FAT chain walk to reach offset cluster
     while (op->u.read.chain_pos < op->u.read.offset_clusters) {
         // Try to read FAT entry from cache
@@ -1846,30 +1858,34 @@ static void resume_read(pending_op *op) {
         if (to_copy > op->u.read.count - op->u.read.bytes_read)
             to_copy = op->u.read.count - op->u.read.bytes_read;
 
-        __memcpy(resp->data + op->u.read.bytes_read,
+        // Compute write offset from cluster position (not from bytes_read)
+        struct client_session *sess2 = &sessions[op->session_idx];
+        session_open_file *f2 = &sess2->open_files[op->u.read.fs_fd];
+        uint32_t cluster_idx = op->u.read.current_cluster - f2->start_cluster;
+        uint32_t file_off = op->u.read.offset + cluster_idx * bytes_per_cluster
+                           + op->u.read.in_cluster_offset;
+
+        __memcpy(resp->data + file_off,
                  cache[slot].data + op->u.read.in_cluster_offset, to_copy);
-        op->u.read.bytes_read += to_copy;
+        op->u.read.bytes_read = file_off + to_copy;
         op->u.read.in_cluster_offset = 0;
 
         // Advance to next cluster via FAT cache
         uint32_t next = fat_read_entry_cached(op->u.read.current_cluster);
         if (next == 0xFFFFFFFF) {
-            // Rare: FAT miss during data phase
             uint32_t fat_offset = op->u.read.current_cluster * 4;
             uint32_t fat_sector = fat_start_lba + (fat_offset / 512);
             if (fat_cache_read_async(fat_sector, op) < 0) return;
             continue;
         }
+        if (next >= 0x0FFFFFF8) {
+            // End of chain — all data read
+            break;
+        }
         op->u.read.current_cluster = next;
     }
 
-    // Done: set readahead info
-    if (op->u.read.ra_sequential &&
-        op->u.read.current_cluster >= 2 && op->u.read.current_cluster < 0x0FFFFFF8) {
-        op->u.read.ra_cluster = op->u.read.current_cluster;
-        op->u.read.ra_count = 4;
-    }
-
+    // Done: all data clusters read
     resp->status = 0;
     resp->count = op->u.read.bytes_read;
 
@@ -2035,6 +2051,19 @@ static void resume_open(pending_op *op) {
                 next = fat_read_entry_cached(tail);
             }
             dir_tail_update(cluster, tail);
+        }
+
+        // Debug: print the resolved cluster
+        {
+            const char *hx = "0123456789ABCDEF";
+            char hb[24]; int p = 0;
+            hb[p++] = 'O'; hb[p++] = 'K';
+            uint32_t cl2 = cluster;
+            for (int i=7; i>=0; i--) { hb[p++] = hx[(cl2>>(i*4))&0xF]; }
+            hb[p++] = ' ';
+            uint32_t fs2 = de.file_size;
+            for (int i=7; i>=0; i--) { hb[p++] = hx[(fs2>>(i*4))&0xF]; }
+            hb[p++] = '\n'; serial_write(hb, p);
         }
 
         resp->status = 0;

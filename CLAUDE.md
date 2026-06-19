@@ -105,6 +105,10 @@ driver/
   terminal.cc        — 用户态 Terminal 进程（IOPL=0, display_client_init 渲染到 back buffer, kbd_ring 读 + stdin pipe 写, stdout pipe 读 + VT100 状态机 + cell 缓冲区 + flush_dirty_cells, device_lookup(DEV_KBD) + req(KBD_REQ_BIND) 绑定键盘）
   fs_driver.cc       — 用户态 FAT32 文件系统驱动（IOPL=0, sys_block_read/write 访问磁盘, sys_msg/sys_msg_resp 处理文件请求, 多客户端 session, readdir/open/read/close/raw_read/touch/mkdir, device_register(DEV_FS)）
 
+init/
+  CMakeLists.txt
+  init.c             — 用户态 init 进程（PID 3），等待 fs_driver 就绪后依次 spawn kbd_driver/kms_driver/terminal，然后循环 waitpid(-1) 收养并回收孤儿进程
+
 shell/
   CMakeLists.txt
   shell.cc           — Shell 用户进程（ls/cat/cd/pwd/touch/mkdir 命令 + 路径执行替代 run 命令, fd 0 stdin 输入, fd 1 stdout 输出, sys_msg 与 fs_driver 通信, 裸扇区 r 命令）
@@ -148,7 +152,50 @@ common/
 
 kernel/
   efi.h               — EFI 类型定义（memory_descriptor, system_table, GOP, GUID 等）
+
+tutorial/
+  boot/
+    boot.bin          — 引导教程示例（512字节启动扇区）
 ```
+
+## 设计文档参考
+
+设计文档位于 `doc/design/`，涵盖各子系统详细设计：
+
+| 文档 | 内容 |
+|------|------|
+| `boot.md` | UEFI 启动流程细节 |
+| `syscall.md` | 系统调用设计与编号 |
+| `sys_api.md` | 系统调用 API 参考 |
+| `rpc.md` | REQ/RESP 同步 IPC 协议 |
+| `process_lifecycle.md` | 进程生命周期管理 |
+| `schedule.md` | 调度器设计 |
+| `smp.md` | SMP 多核启动与 per-CPU 数据 |
+| `mem.md` | 内存管理架构 |
+| `page.md` | 分页与地址映射 |
+| `fine_grained_lock.md` | 细粒度锁设计与锁协议 |
+| `pcie.md` | PCIe ECAM 枚举与 BAR 分配 |
+| `xhci.md` | xHCI USB 控制器驱动设计 |
+| `kbd.md` | USB HID 键盘驱动 |
+| `kms.md` | KMS 显示驱动与 Display 协议 |
+| `terminal_split.md` | Terminal 进程拆分设计 |
+| `driver_workflow.md` | 用户态驱动工作流 |
+| `file_system.md` | FAT32 文件系统驱动 |
+| `fat32.md` | FAT32 磁盘布局 |
+| `libc.md` | 用户态 libc 设计 |
+| `dynamic_shm_migration.md` | 动态共享内存 IPC 迁移 |
+| `dev_table.md` | 设备注册表与动态发现 |
+| `cmake.md` / `cmake_user_build.md` | CMake 构建系统设计 |
+| `shell.md` | Shell 命令设计 |
+| `time.md` | 时间函数设计 |
+| `spinlock.md` | 自旋锁实现 |
+| `tss_ist.md` | TSS IST 栈设计 |
+| `nx_bit.md` | NX 位与 W^X 策略 |
+| `uefi.md` | UEFI 数据类型参考 |
+| `x64_migration.md` | x86-64 迁移记录 |
+| `todo.md` | 待办事项与技术债务 |
+| `screen_plan.md` | 屏幕渲染计划 |
+| `boot.md` | 启动细节 |
 
 ## 启动流程
 
@@ -351,7 +398,7 @@ Phase 3 实现了最小 fd + pipe 机制，将 Shell 的 I/O 从直写 KMS ring 
 ## 开发备注
 
 - QEMU 调试：run.sh 注释掉的 `-s -S` 参数用于 GDB 远程调试
-- `.clang-format` = LLVM 风格
+- `.clang-format` = LLVM 风格。格式化代码：`clang-format -i <file>` 或 `find . -name '*.cc' -o -name '*.c' -o -name '*.h' | xargs clang-format -i`
 - `outb`/`inb`/`inw`/`wrmsr`/`rdmsr`/`IrqGuard` 统一在 `arch/x64/utils.h`
 - AHCI 驱动通过 ECAM 枚举 ICH9 SATA 控制器，Q35 自带 AHCI（PCI class 0x0106）
 - `enable_paging` 在 `arch/x64/paging.cc` 中定义（物理地址运行），接受 `boot_info*` 参数（当前未使用）
@@ -397,7 +444,17 @@ Phase 3 实现了最小 fd + pipe 机制，将 Shell 的 I/O 从直写 KMS ring 
 
 ### 串口打印
 
-优先考虑串口打印定位，qemu初始化时间较长约5s加上引导时间，建议等待10s以上。串口输出在 `log.txt`。
+优先考虑串口打印定位，qemu初始化时间较长约5s加上引导时间，建议等待10s以上。串口输出在 `log.txt`（`run.sh` 中 `2>&1 | tee log.txt` 重定向）。
+
+实时查看串口输出：
+```bash
+tail -f log.txt
+```
+
+常见错误信号：
+- **Page Fault (#PF)**：检查地址映射和空指针
+- **General Protection (#GP)**：检查段选择子、IOPL、MSR 访问
+- **Triple Fault (#DF)** → QEMU 重启：通常是 TSS IST 栈或 IDT 未正确设置
 
 ### Debug 模式（栈回溯）
 

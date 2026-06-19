@@ -24,7 +24,8 @@ struct mmap_region {
 };
 
 #define MAX_SHM_PER_PROC 4
-#define SHM_VADDR_BASE 0x510000
+#define SHM_VADDR_BASE 0x71000000
+#define MAP_PHYSICAL_BASE 0x70000000  // framebuffer MAP_PHYSICAL fixed high base
 
 // ===================== fd / pipe =====================
 #define MAX_FD       32
@@ -73,6 +74,7 @@ struct proc_t {
     pid_t parent_pid;      // 父进程 PID，启动时进程设为 -1
     int32_t exit_code;     // 退出码，ZOMBIE 时有效
     uint64_t mmap_brk;     // mmap 区域高水位（初始 0x800000）
+    uint64_t mmap_phys_brk; // MAP_PHYSICAL 区域高水位（初始 MAP_PHYSICAL_BASE）
     mmap_region *mmap_regions; // mmap 区域链表头
     list_node_t run_node;  // embedded in per-CPU run_queue
     list_node_t wait_node; // embedded in per-CPU timer_queue (sorted by wait_deadline)

@@ -18,6 +18,10 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir);
 // Check if AHCI has an async request in flight (for EBUSY safety check)
 bool ahci_is_busy();
 
+// Switch active port for polling I/O (re-initializes the port).
+// Returns 0 on success, -errno if port has no device.
+int ahci_set_active_port(int port);
+
 extern spinlock_t ahci_lock;
 
 #endif // KERNEL_AHCI_H

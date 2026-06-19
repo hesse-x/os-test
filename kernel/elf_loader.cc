@@ -1,6 +1,7 @@
 #include "kernel/elf_loader.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/proc.h"
+#include "kernel/serial.h"
 #include "arch/x64/paging.h"
 #include "common/macro.h"
 #include <stddef.h>
@@ -59,6 +60,14 @@ elf_load_result elf_load(const uint8_t *data, uint64_t size,
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)data;
     result.entry = ehdr->e_entry;
 
+    serial_puts("elf_load: phnum=");
+    serial_put_hex((uint64_t)ehdr->e_phnum);
+    serial_puts(" entry=");
+    serial_put_hex(ehdr->e_entry);
+    serial_puts(" phoff=");
+    serial_put_hex(ehdr->e_phoff);
+    serial_puts("\n");
+
     // 2. Iterate program headers
     for (int i = 0; i < ehdr->e_phnum; i++) {
         uint64_t ph_off = ehdr->e_phoff + i * ehdr->e_phentsize;
@@ -71,6 +80,16 @@ elf_load_result elf_load(const uint8_t *data, uint64_t size,
 
         if (ph->p_memsz == 0)
             continue;
+
+        serial_puts("elf_load: PT_LOAD vaddr=");
+        serial_put_hex(ph->p_vaddr);
+        serial_puts(" memsz=");
+        serial_put_hex(ph->p_memsz);
+        serial_puts(" filesz=");
+        serial_put_hex(ph->p_filesz);
+        serial_puts(" offset=");
+        serial_put_hex(ph->p_offset);
+        serial_puts("\n");
 
         // 3. Map pages covering this segment
         uint64_t first_page = ph->p_vaddr & ~0xFFFULL;
@@ -95,11 +114,19 @@ elf_load_result elf_load(const uint8_t *data, uint64_t size,
                 src = data + file_start + page_off;
             }
 
-            if (!map_page(new_pml4, page_addr, src, copy_len))
+            if (!map_page(new_pml4, page_addr, src, copy_len)) {
+                serial_puts("elf_load: map_page failed for vaddr=");
+                serial_put_hex(page_addr);
+                serial_puts("\n");
                 return result;
+            }
         }
     }
 
     result.success = true;
+    serial_puts("elf_load: success, entry=");
+    serial_put_hex(result.entry);
+    serial_puts("\n");
+
     return result;
 }

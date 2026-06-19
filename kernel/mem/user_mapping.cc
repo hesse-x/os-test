@@ -61,6 +61,8 @@ bool map_user_page_direct(uint64_t *new_pml4, uint64_t vaddr, uint64_t phys,
     if (!pt) return false;
 
     uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
+    // Refuse to overwrite an existing mapping (prevents silent SHM/mmap corruption)
+    if (pt[pt_idx] & PTE_PRESENT) return false;
     pt[pt_idx] = phys | flags;
     return true;
 }

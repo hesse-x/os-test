@@ -5,15 +5,15 @@
 # -serial: 串口输出到 log.txt
 # 注释掉的 -s -S 用于 GDB 远程调试
 
-~/opensource/qemu/build/qemu-system-x86_64 \
+qemu-system-x86_64 \
     -machine q35 \
+    -drive file=build/boot.img,format=raw,if=none,id=boot0 \
+    -device ide-hd,drive=boot0,bus=ide.0 \
+    -drive file=build/disk.img,format=raw,if=none,id=disk0 \
+    -device ide-hd,drive=disk0,bus=ide.1 \
     -device qemu-xhci,id=xhci \
     -device usb-kbd,bus=xhci.0 \
     -device usb-mouse,bus=xhci.0 \
-    -drive file=build/disk.img,format=raw,if=none,id=disk0 \
-    -device ide-hd,drive=disk0,bus=ide.0 \
-    -drive file=build/boot.img,format=raw,if=none,id=boot0 \
-    -device ide-hd,drive=boot0,bus=ide.1 \
     -vga std -m 512M -bios /usr/share/ovmf/OVMF.fd \
     -smp 2 \
     -serial file:log.txt

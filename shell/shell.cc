@@ -515,7 +515,7 @@ static void exec_path(const char *rel_path) {
         fresp = (struct file_resp *)fs_reply_buf;
         if (fresp->count == 0) break;
 
-        __memcpy(elf_buf + offset, fresp->data, fresp->count);
+            __memcpy(elf_buf + offset, fresp->data, fresp->count);
         offset += fresp->count;
     }
 
@@ -578,7 +578,6 @@ extern "C" void _start() {
 
     while (1) {
         printf("> ");
-
         int len = readline(line, sizeof(line));
         if (len == 0) continue;
 
@@ -630,6 +629,11 @@ extern "C" void _start() {
             continue;
         }
 
+        if (strcmp(cmd_name, "clear") == 0) {
+            printf("\033[2J\033[H");
+            continue;
+        }
+
         if (strcmp(cmd_name, "h") == 0) {
             printf("ls [-l] [path]  - list directory\n");
             printf("cat <path>      - read file\n");
@@ -639,6 +643,7 @@ extern "C" void _start() {
             printf("echo TEXT > FILE  - write text to file\n");
             printf("mkdir <path>    - create directory\n");
             printf("r LBA [COUNT]   - raw disk read\n");
+            printf("clear           - clear screen\n");
             printf("<path>          - execute ELF file\n");
             printf("h               - show help\n");
             continue;

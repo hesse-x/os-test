@@ -191,6 +191,7 @@ proc_t *create_idle_process(int cpu_id) {
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->mmap_brk = 0x800000;
+    proc->mmap_phys_brk = MAP_PHYSICAL_BASE;
     proc->mmap_regions = nullptr;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
@@ -243,7 +244,10 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
             break;
         }
     }
-    if (!proc) { spin_unlock(&procs_lock); return nullptr; }
+    if (!proc) { spin_unlock(&procs_lock); serial_puts("process_create_elf: no free slot\n"); return nullptr; }
+    serial_puts("process_create_elf: alloc_idx=");
+    serial_put_hex((uint64_t)alloc_idx);
+    serial_puts("\n");
 
     // 2. Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc.alloc_page(2);
@@ -266,7 +270,12 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
 
     // 5. Load ELF segments into user address space
     elf_load_result lr = elf_load(elf_data, elf_size, new_pml4);
-    if (!lr.success) { spin_unlock(&procs_lock); return nullptr; }
+    if (!lr.success) { spin_unlock(&procs_lock); serial_puts("process_create_elf: elf_load failed\n"); return nullptr; }
+    serial_puts("process_create_elf: entry=");
+    serial_put_hex(lr.entry);
+    serial_puts(" elf_size=");
+    serial_put_hex(elf_size);
+    serial_puts("\n");
 
     // 7. Map user stack: 128 pages (512KB) at 0x7FFFFFFF0000-0x7FFFFFFFE000
     int user_stack_pages = 128;
@@ -301,6 +310,7 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->mmap_brk = 0x800000;
+    proc->mmap_phys_brk = MAP_PHYSICAL_BASE;
     proc->mmap_regions = nullptr;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
@@ -449,6 +459,17 @@ void proc_reap(proc_t *proc) {
                                 uint64_t sphys = proc->shm_regions[s].phys;
                                 size_t snp = proc->shm_regions[s].npages;
                                 if (leaf_phys >= sphys && leaf_phys < sphys + snp * PAGE_SIZE) {
+                                    is_shared = true;
+                                    break;
+                                }
+                            }
+                        }
+                        // Skip MAP_PHYSICAL regions (external physical memory, e.g. framebuffer)
+                        if (!is_shared) {
+                            for (mmap_region *mr = proc->mmap_regions; mr; mr = mr->next) {
+                                if (mr->phys != 0 &&
+                                    leaf_phys >= mr->phys &&
+                                    leaf_phys < mr->phys + mr->size) {
                                     is_shared = true;
                                     break;
                                 }
@@ -625,6 +646,7 @@ void proc_reap(proc_t *proc) {
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->mmap_brk = 0;
+    proc->mmap_phys_brk = 0;
     proc->mmap_regions = nullptr;
     proc->wait_deadline = 0;
     proc->wait_timed_out = 0;

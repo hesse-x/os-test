@@ -34,9 +34,17 @@ void kernel_init_finish() {
 static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_page, size_t *out_npages) {
   // Phase 1: read first sector to parse ELF header
   uint8_t hdr_buf[512];
-  if (ahci_read_lba(lba, 1, hdr_buf) != 0) return nullptr;
+  serial_puts("load_elf: LBA=");
+  serial_put_hex(lba);
+  if (ahci_read_lba(lba, 1, hdr_buf) != 0) {
+    serial_puts(" READ_FAILED\n");
+    return nullptr;
+  }
 
   if (hdr_buf[0] != 0x7F || hdr_buf[1] != 'E' || hdr_buf[2] != 'L' || hdr_buf[3] != 'F') {
+    serial_puts(" BAD_MAGIC: got ");
+    serial_put_hex(((uint32_t *)hdr_buf)[0]);
+    serial_puts("\n");
     return nullptr;
   }
 
@@ -64,6 +72,12 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
   if (total_sectors < 1) total_sectors = 1;
 
   uint64_t file_size = total_sectors * 512;
+
+  serial_puts(" sectors=");
+  serial_put_hex(total_sectors);
+  serial_puts(" size=");
+  serial_put_hex(file_size);
+  serial_puts("\n");
 
   // Phase 2: allocate pages and read
   size_t npages = (file_size + 4095) / 4096;
@@ -135,26 +149,53 @@ void kernel_main(boot_info *bi) {
   // Load user processes from disk
   // LBA layout: 1-100=unused(gap), 101=fs_driver(200s), 301=init(200s), 501+=FAT32
   // kbd_driver, kms_driver, terminal, shell are spawned by init from FAT32
+  //
+  // Try active port first; if no ELF found, try other ports (disk.img may be
+  // on a different SATA port than boot.img).
 
-  {
-    serial_puts("kernel_main: loading fs_driver...\n");
-    uint64_t sz; Page *pg; size_t np;
-    uint8_t *elf = load_elf_from_disk(101, &sz, &pg, &np);
-    if (elf) {
-      proc_t *p = process_create_elf(elf, sz);
-      bfc_alloc.free_page(pg, np);
-      if (p) { serial_puts("kernel_main: fs_driver created\n"); }
+  int try_ports[] = { 0, 1, 2, 3, 4, 5 };
+
+  bool fs_loaded = false, init_loaded = false;
+
+  for (int pi = 0; pi < 6; pi++) {
+    int port = try_ports[pi];
+    if (port < 0) continue;
+
+    // Switch to this port; skip if no device detected
+    if (ahci_set_active_port(port) != 0) {
+      serial_puts("kernel_main: skip port ");
+      serial_put_hex(port);
+      serial_puts(" (no device)\n");
+      continue;
     }
-    else serial_puts("kernel_main: fs_driver.elf not found\n");
+
+    if (!fs_loaded) {
+      serial_puts("kernel_main: loading fs_driver...\n");
+      uint64_t sz; Page *pg; size_t np;
+      uint8_t *elf = load_elf_from_disk(101, &sz, &pg, &np);
+      if (elf) {
+        proc_t *p = process_create_elf(elf, sz);
+        bfc_alloc.free_page(pg, np);
+        if (p) { fs_loaded = true; serial_puts("kernel_main: fs_driver created\n"); }
+      }
+    }
+
+    if (!init_loaded) {
+      serial_puts("kernel_main: loading init...\n");
+      uint64_t sz; Page *pg; size_t np;
+      uint8_t *elf = load_elf_from_disk(301, &sz, &pg, &np);
+      if (elf) {
+        proc_t *init_proc = process_create_elf(elf, sz);
+        bfc_alloc.free_page(pg, np);
+        if (init_proc) { init_loaded = true; init_pid = init_proc->pid; serial_puts("kernel_main: init created\n"); }
+      }
+    }
+
+    if (fs_loaded && init_loaded) break;
   }
 
-  {
-    serial_puts("kernel_main: loading init...\n");
-    uint64_t sz; Page *pg; size_t np;
-    uint8_t *elf = load_elf_from_disk(301, &sz, &pg, &np);
-    if (elf) { proc_t *init_proc = process_create_elf(elf, sz); bfc_alloc.free_page(pg, np); if (init_proc) { init_pid = init_proc->pid; serial_puts("kernel_main: init created\n"); } }
-    else serial_puts("kernel_main: init.elf not found\n");
-  }
+  if (!fs_loaded) serial_puts("kernel_main: fs_driver.elf FAILED on all ports\n");
+  if (!init_loaded) serial_puts("kernel_main: init.elf FAILED on all ports\n");
 
   serial_puts("kernel_main: all procs loaded, entering idle\n");
 
