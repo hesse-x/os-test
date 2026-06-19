@@ -33,6 +33,7 @@ struct mmap_region {
 
 #define FD_NONE   0
 #define FD_PIPE   1
+#define FD_DEV    3
 
 #define O_RDONLY  0
 #define O_WRONLY  1
@@ -49,9 +50,10 @@ struct pipe {
 };
 
 struct file {
-    int type;            // FD_NONE / FD_PIPE
+    int type;            // FD_NONE / FD_PIPE / FD_DEV
     int flags;           // O_RDONLY / O_WRONLY / O_RDWR
     struct pipe *pipe;   // if type == FD_PIPE
+    pid_t target_pid;    // if type == FD_DEV (driver PID)
 };
 
 struct shm_region {

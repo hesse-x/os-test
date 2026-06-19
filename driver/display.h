@@ -47,21 +47,23 @@ struct display_shm_header {
 
 static struct display_shm_header *display_hdr;
 static uint8_t *display_back_buffer;
-static int32_t display_kms_pid;
+static int display_dev_fd;
 
-// 初始化：attach display SHM，从 header 读 fb 元信息
+// 初始化：open /dev/kms + mmap display SHM，从 header 读 fb 元信息
 static inline int display_client_init() {
-    // Wait for KMS driver to register
-    while ((display_kms_pid = device_lookup(DEV_KMS)) <= 0) {
+    // Open KMS device (wait for KMS driver to register)
+    int fd;
+    while ((fd = open("/dev/kms", O_RDWR)) < 0) {
         struct recv_msg m;
         recv(&m, NULL, 0, 1);
     }
+    display_dev_fd = fd;
 
-    // Attach display SHM
-    void *shm_ptr = NULL;
-    while (shm_attach(display_kms_pid, &shm_ptr) < 0) {
-        struct recv_msg m;
-        recv(&m, NULL, 0, 1);
+    // mmap display SHM via MAP_SHARED (fd → target_pid → sys_shm_attach)
+    // size=0 is ignored — MAP_SHARED maps the entire driver SHM region
+    void *shm_ptr = mmap(NULL, 0, PROT_READ | PROT_WRITE, MAP_SHARED, (uint64_t)fd);
+    if (shm_ptr == MAP_FAILED) {
+        return -1;
     }
 
     uint64_t shm_addr = (uint64_t)shm_ptr;
@@ -140,7 +142,7 @@ static inline void display_client_flush() {
     if (display_hdr->dirty_full == 0) return;
     display_hdr->generation++;
     if (display_hdr->backend_sleeping) {
-        notify(display_kms_pid);
+        notify_fd(display_dev_fd);
     }
 }
 

@@ -9,20 +9,27 @@
 #include <sys/types.h>
 #include <sys/ipc.h>
 #include <sys/device.h>
+#include <sys/poll.h>
 #include "common/syscall.h"
 #include "common/dev.h"
 
 #define MAX_FD  32
 
-enum fd_type_t { FD_NONE = 0, FD_PIPE, FD_FILE };
+enum fd_type_t { FD_NONE = 0, FD_PIPE, FD_FILE, FD_DEV };
 
 struct file_fd_entry {
-    enum fd_type_t type;    // FD_NONE / FD_PIPE / FD_FILE
+    enum fd_type_t type;    // FD_NONE / FD_PIPE / FD_FILE / FD_DEV
     int     flags;          // O_RDONLY / O_WRONLY / O_RDWR
-    // FD_FILE only:
-    int32_t fs_fd;          // fs_driver local fd
-    uint64_t offset;        // current read/write offset (libc maintained)
-    uint64_t file_size;     // file size (set by open)
+    union {
+        // FD_FILE only:
+        struct {
+            int32_t fs_fd;          // fs_driver local fd
+            uint64_t offset;        // current read/write offset (libc maintained)
+            uint64_t file_size;     // file size (set by open)
+        } file;
+        // FD_DEV only:
+        pid_t target_pid;    // driver PID
+    };
 };
 
 static struct file_fd_entry fd_table[MAX_FD];
@@ -35,8 +42,9 @@ static void fd_table_init() {
     for (int i = 0; i < MAX_FD; i++) {
         fd_table[i].type = FD_NONE;
         fd_table[i].flags = 0;
-        fd_table[i].fs_fd = -1;
-        fd_table[i].offset = 0;
+        fd_table[i].file.fs_fd = -1;
+        fd_table[i].file.offset = 0;
+        fd_table[i].target_pid = -1;
     }
     fd_table[0].type = FD_PIPE;
     fd_table[0].flags = O_RDONLY;
@@ -49,7 +57,7 @@ uint64_t fd_file_size(int fd) {
     fd_table_init();
     if (fd < 0 || fd >= MAX_FD || fd_table[fd].type != FD_FILE)
         return 0;
-    return fd_table[fd].file_size;
+    return fd_table[fd].file.file_size;
 }
 
 // Lazy fs_driver PID cache
@@ -106,6 +114,32 @@ int open(const char *path, int flags, ...) {
     pid_t pid = get_fs_pid();
     if (pid < 0) { errno = ENOENT; return -1; }
 
+    // Check for /dev/ prefix — open device node instead of file
+    if (path && path[0] == '/' && path[1] == 'd' && path[2] == 'e' && path[3] == 'v' && path[4] == '/') {
+        const char *devname = path + 5;  // skip "/dev/"
+        int dev_type = DEV_NONE;
+        // Map device name to dev_type
+        if (strcmp(devname, "kbd") == 0) dev_type = DEV_KBD;
+        else if (strcmp(devname, "kms") == 0) dev_type = DEV_KMS;
+        else if (strcmp(devname, "fs") == 0) dev_type = DEV_FS;
+        else if (strcmp(devname, "terminal") == 0) dev_type = DEV_TERMINAL;
+        else { errno = ENOENT; return -1; }
+
+        int fd = sys_open_dev(dev_type);
+        if (fd < 0) { errno = -fd; return -1; }
+
+        // Look up driver PID for req_fd/notify_fd translation
+        pid_t target_pid = sys_lookup_dev(dev_type);
+
+        // Record FD_DEV in libc fd_table
+        fd_table[fd].type = FD_DEV;
+        fd_table[fd].flags = O_RDWR;
+        fd_table[fd].target_pid = target_pid;
+
+        return fd;
+    }
+
+    // Normal file path: talk to fs_driver
     int fd = -1;
     for (int i = 3; i < MAX_FD; i++) {
         if (fd_table[i].type == FD_NONE) { fd = i; break; }
@@ -132,10 +166,10 @@ int open(const char *path, int flags, ...) {
     if (resp->status != 0) { errno = -resp->status; return -1; }
 
     fd_table[fd].type = FD_FILE;
-    fd_table[fd].fs_fd = (int32_t)resp->fd;
-    fd_table[fd].offset = 0;
+    fd_table[fd].file.fs_fd = (int32_t)resp->fd;
+    fd_table[fd].file.offset = 0;
     fd_table[fd].flags = flags;
-    fd_table[fd].file_size = resp->file_size;
+    fd_table[fd].file.file_size = resp->file_size;
     return fd;
 }
 
@@ -153,7 +187,7 @@ ssize_t file_read(int fd, void *buf, size_t count) {
     struct file_req req;
     memset(&req, 0, sizeof(req));
     req.cmd = FILE_CMD_READ;
-    req.fs_fd = (uint32_t)fd_table[fd].fs_fd;
+    req.fs_fd = (uint32_t)fd_table[fd].file.fs_fd;
     req.count = (uint32_t)chunk;
 
     size_t reply_len = sizeof(struct file_resp) + chunk;
@@ -177,7 +211,7 @@ ssize_t file_read(int fd, void *buf, size_t count) {
 
     memcpy(buf, resp->data, resp->count);
     size_t nread = resp->count;
-    fd_table[fd].offset += nread;
+    fd_table[fd].file.offset += nread;
     free(reply_buf);
     return (ssize_t)nread;
 }
@@ -203,7 +237,7 @@ ssize_t file_write(int fd, const void *buf, size_t count) {
     struct file_req *req = (struct file_req *)msg_buf;
     memset(req, 0, sizeof(*req));
     req->cmd = FILE_CMD_WRITE;
-    req->fs_fd = (uint32_t)fd_table[fd].fs_fd;
+    req->fs_fd = (uint32_t)fd_table[fd].file.fs_fd;
     req->count = (uint32_t)chunk;
 
     memcpy(msg_buf + sizeof(struct file_req), buf, chunk);
@@ -223,12 +257,12 @@ ssize_t file_write(int fd, const void *buf, size_t count) {
     size_t written = resp.count;
     if (fd_table[fd].flags & O_APPEND) {
         // For O_APPEND, fs_driver wrote at file_size, so offset = new file_size
-        fd_table[fd].offset = resp.file_size;
+        fd_table[fd].file.offset = resp.file_size;
     } else {
-        fd_table[fd].offset += written;
+        fd_table[fd].file.offset += written;
     }
-    if (fd_table[fd].file_size < fd_table[fd].offset)
-        fd_table[fd].file_size = fd_table[fd].offset;
+    if (fd_table[fd].file.file_size < fd_table[fd].file.offset)
+        fd_table[fd].file.file_size = fd_table[fd].file.offset;
     return (ssize_t)written;
 }
 
@@ -240,7 +274,7 @@ int file_close(int fd) {
         struct file_req req;
         memset(&req, 0, sizeof(req));
         req.cmd = FILE_CMD_CLOSE;
-        req.fs_fd = (uint32_t)fd_table[fd].fs_fd;
+        req.fs_fd = (uint32_t)fd_table[fd].file.fs_fd;
 
         struct file_resp resp;
         sys_msg(pid, &req, sizeof(req), &resp, sizeof(resp));
@@ -277,6 +311,12 @@ ssize_t read(int fd, void *buf, size_t count) {
         return (ssize_t)n;
     }
 
+    if (fd_table[fd].type == FD_DEV) {
+        // Device fds use req/notify, not read/write
+        errno = ENOSYS;
+        return -1;
+    }
+
     return file_read(fd, buf, count);
 }
 
@@ -294,6 +334,11 @@ ssize_t write(int fd, const void *buf, size_t count) {
         return (ssize_t)n;
     }
 
+    if (fd_table[fd].type == FD_DEV) {
+        errno = ENOSYS;
+        return -1;
+    }
+
     return file_write(fd, buf, count);
 }
 
@@ -308,8 +353,11 @@ int close(int fd) {
     if (fd_table[fd].type == FD_PIPE) {
         int r = sys_close(fd);
         if (r < 0) { errno = -r; return -1; }
-    } else {
+    } else if (fd_table[fd].type == FD_FILE) {
         file_close(fd);
+    } else if (fd_table[fd].type == FD_DEV) {
+        int r = sys_close(fd);
+        if (r < 0) { errno = -r; return -1; }
     }
     fd_table[fd].type = FD_NONE;
     return 0;
@@ -372,6 +420,48 @@ int stat(const char *path, struct stat *st) {
 
     st->st_size = (off_t)fresp.size;
     return 0;
+}
+
+// ===================== FD_DEV helpers =====================
+
+// Get target_pid for an FD_DEV fd (used by mmap/sys_mman.cc)
+pid_t __fd_dev_target_pid(int fd) {
+    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type != FD_DEV)
+        return -1;
+    return fd_table[fd].target_pid;
+}
+
+// req_fd — send REQ to device driver via fd
+int req_fd(int fd, void *req_ptr, void *resp) {
+    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type != FD_DEV) {
+        errno = EBADF;
+        return -1;
+    }
+    return sys_req(fd_table[fd].target_pid, req_ptr, resp);
+}
+
+// notify_fd — notify device driver via fd
+int notify_fd(int fd) {
+    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type != FD_DEV) {
+        errno = EBADF;
+        return -1;
+    }
+    return sys_notify(fd_table[fd].target_pid);
+}
+
+// poll — wait for events (simplified: wraps sys_recv with timeout)
+int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms) {
+    (void)fds;
+    (void)nfds;
+    struct recv_msg msg;
+    int r = sys_recv(&msg, NULL, 0, (uint32_t)timeout_ms);
+    if (r < 0 && r != -ETIMEDOUT) {
+        errno = -r;
+        return -1;
+    }
+    // Always return at least 1 if recv succeeded (some event was consumed)
+    // For timeout or no event: return 0
+    return (r == 0) ? 1 : 0;
 }
 
 // dup2 — duplicate fd with libc fd_table sync

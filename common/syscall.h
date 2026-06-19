@@ -40,6 +40,7 @@
 #define SYS_BLOCK_READ   32
 #define SYS_BLOCK_WRITE  33
 #define SYS_BLOCK_ASYNC  34
+#define SYS_OPEN_DEV     35
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -242,6 +243,11 @@ static inline int sys_block_write(uint32_t lba, const void *buf, uint32_t count)
 static inline int sys_block_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
     return (int)__syscall4(SYS_BLOCK_ASYNC, (int64_t)lba,
         (int64_t)(uintptr_t)buf, (int64_t)count, (int64_t)dir);
+}
+
+// sys_open_dev(dev_type) — syscall 35 (open device node, returns FD_DEV fd)
+static inline int sys_open_dev(int dev_type) {
+    return (int)__syscall1(SYS_OPEN_DEV, (int64_t)dev_type);
 }
 
 #endif // COMMON_SYSCALL_H

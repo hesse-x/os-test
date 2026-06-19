@@ -297,3 +297,168 @@ while (1) {
 | `driver/terminal.cc` | 重构 | 删 kms_ring 操作，改用 display_client 渲染到 back buffer |
 | `driver/kms_driver.cc` | 重构 | 删渲染逻辑/font/cursor/kbd SHM，改用 display_backend flip 循环 + 创建 display SHM |
 | `common/shm.h` | 修改 | 删 kms_ring/kms_msg/KMS_CMD_*/kms_sleeping |
+
+---
+
+## Phase 2：设备发现 `/dev/kms` + fd 统一接口
+
+### 设计动机
+
+与 kbd 的 fd 化动机一致——用户侧统一通过 `open("/dev/kms")` 发现设备、`req(fd)` 控制、`mmap(fd)` 取 SHM、`poll(fd)` 等事件。
+
+KMS 场景下消费者当前是 terminal（未来是独立的合成器进程）：
+
+```
+consumer  open("/dev/kms") → fd
+              │
+              ├─ req(fd, DISPLAY_REQ_*)
+              ├─ mmap(fd, ...) → display SHM
+              └─ poll(fd, POLLIN)
+
+driver(KMS 进程)  不 open 自己，照常事件循环
+```
+
+### 与 kbd fd 模型的对称性
+
+| 层面 | kbd | kms |
+|------|-----|-----|
+| 设备节点 | `/dev/kbd` | `/dev/kms` |
+| 消费者 | terminal（→ 合成器） | terminal（→ 合成器） |
+| 驱动进程 | kbd_driver | kms_driver |
+| 控制通道 | `req(fd, KBD_REQ_BIND, ...)` | `req(fd, DISPLAY_REQ_*, ...)` |
+| 数据通道 | `mmap(fd, ...)` → kbd_ring | `mmap(fd, ...)` → display SHM back buffer |
+| 事件等待 | `poll(fd, POLLIN)` 等按键 | 驱动侧不变，消费者(compositor) poll |
+| 驱动侧 | 不 open 自己，正常事件循环 | 不 open 自己，正常 flip 循环 |
+| 驱动切换 | 合成器 detect POLLERR → close →重连 | 合成器 detect POLLERR → close →重连 |
+
+### 驱动侧的视角
+
+KMS 驱动进程完全不需要感知 fd 模型的变化。它的代码不动：
+
+```c
+// kms_driver.cc — 变化极微，可能仅注册方式
+void kms_main() {
+    display_backend_init();    // shm_create → 写 header → 进入 flip 循环
+    // 内部 device_register(DEV_KMS) 保留，供 open("/dev/kms") 查到 PID
+    while (1) {
+        if (display_backend_poll()) continue;
+        display_backend_wait(16);
+    }
+}
+```
+
+`device_register(DEV_KMS)` 保留——driver 注册 dev_table，不是暴露给用户的 API，而是内核内部 open 做 PID 翻译的后端。
+
+### 消费者侧的变化
+
+当前 `display.h` 中的 `display_client_init()`：
+
+```c
+// 旧：device_lookup + shm_attach
+static inline int display_client_init() {
+    while ((display_kms_pid = device_lookup(DEV_KMS)) <= 0)
+        recv(&m, NULL, 0, 1);
+    while (shm_attach(display_kms_pid, &shm_ptr) < 0)
+        recv(&m, NULL, 0, 1);
+    display_hdr = shm_ptr;
+    display_back_buffer = shm_ptr + DISPLAY_BACK_BUFFER_OFFSET;
+}
+```
+
+改为 fd 模式：
+
+```c
+// 新：open + mmap
+static inline int display_client_init() {
+    int fd;
+    while ((fd = open("/dev/kms")) < 0)
+        poll(NULL, 0, 1);                   // 等 KMS 驱动就绪
+
+    void *shm_ptr = mmap(fd, shm_size,       // mmap 直接取 display SHM
+                         PROT_READ|PROT_WRITE,
+                         MAP_SHARED, 0);
+    display_hdr = shm_ptr;
+    display_back_buffer = shm_ptr + DISPLAY_BACK_BUFFER_OFFSET;
+    display_dev_fd = fd;                     // 缓存 fd 供后续 flush 用
+    return 0;
+}
+```
+
+`display_client_flush()`：
+
+```c
+// 旧：notify(display_kms_pid)
+static inline void display_client_flush() {
+    if (display_hdr->dirty_full == 0) return;
+    display_hdr->generation++;
+    if (display_hdr->backend_sleeping)
+        notify(display_kms_pid);    // ← 查 pid
+}
+
+// 新：notify(fd)
+static inline void display_client_flush() {
+    if (display_hdr->dirty_full == 0) return;
+    display_hdr->generation++;
+    if (display_hdr->backend_sleeping)
+        notify(display_dev_fd);     // ← 传 fd
+}
+```
+
+### 驱动切换
+
+当 KMS 驱动异常退出时：
+
+```
+合成器:
+  req(fd, ...) → ESRCH，或 poll(fd) → POLLERR
+  → close(fd)
+
+init 重新 spawn kms_driver:
+  → kms_driver 启动 → display_backend_init()
+  → shm_create（新 SHM，新物理页）
+  → device_register(DEV_KMS)
+
+合成器重试循环:
+  while ((fd = open("/dev/kms")) < 0)
+      poll(NULL, 0, 100);
+  mmap(fd, ...)     ← 新 SHM
+  // 回到正常合成循环
+```
+
+与 kbd 一致：**SHM 归驱动进程**，驱动切换时释放旧 SHM、创建新 SHM，消费者通过重连 open + mmap 拿到新 SHM。
+
+### 对 display.h 的影响
+
+`driver/display.h` 中的 API 签名更改为使用 fd：
+
+```c
+// Client API（terminal / 合成器侧）
+int display_client_init();           // 内部改为 open + mmap
+
+// 以下不变——只操作 shm 指针，不涉及通信方式
+void display_client_render_cell(...);
+void display_client_clear(uint32_t bg);
+void display_client_scroll_up(uint32_t bg);
+void display_client_set_cursor(uint32_t x, uint32_t y);
+void display_client_flush();         // 内部改为 notify(fd)
+
+// Backend API（KMS 驱动侧）——完全不变
+int  display_backend_init();
+int  display_backend_poll();
+void display_backend_wait(uint32_t timeout_ms);
+```
+
+Backend API 完全不需要改动——KMS 驱动进程不 open 自己，`device_register(DEV_KMS)` 保留为内核内部机制。`shm_create` 也保留为自己创建 SHM，不需要换成 mmap。
+
+### 与 display SHM 语义的兼容性
+
+display SHM 的一个特殊性是：**KMS 创建 SHM**，消费者 attach/mmap。kbd 则是 **kbd_driver 创建 SHM**，消费者 attach/mmap。方向相同：
+
+```
+kbd:  kbd_driver→shm_create → consumer→mmap(fd)
+kms:  kms_driver→shm_create → consumer→mmap(fd)
+                           ↑
+                     完全一致
+```
+
+所以 KMS 的 fd 化没有额外困难，与 kbd 的模式完全对称。

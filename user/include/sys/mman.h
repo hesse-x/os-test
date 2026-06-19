@@ -10,6 +10,7 @@
 #define PROT_EXEC   4
 
 #define MAP_PHYSICAL 0x80000000
+#define MAP_SHARED   0x01
 
 #define MAP_FAILED ((void *)-1)
 

@@ -50,6 +50,7 @@ uint64_t sys_pci_dev_info(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_block_read(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_block_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_block_async(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_open_dev(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 // Notify a process: enqueue recv_msg + wake if WAIT_RECV
 void notify_and_wake(pid_t target_pid, recv_msg *msg);

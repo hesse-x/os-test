@@ -280,7 +280,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 35
+#define NR_SYSCALL 36
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -317,6 +317,7 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_block_read,     // 32
     sys_block_write,    // 33
     sys_block_async,    // 34
+    sys_open_dev,       // 35
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -835,6 +836,7 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
             if (child->fd_table[fd].type == FD_PIPE) {
                 child->fd_table[fd].pipe->ref_count++;
             }
+            // FD_DEV: target_pid copied by struct assignment, no ref_count needed
         }
     }
 
@@ -1094,7 +1096,41 @@ uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t a
 
     int ret = ahci_submit_async(lba, buf, count, dir);
     return (uint64_t)ret;
-}// sys_serial_write(buf, len) — syscall 11 (用户态串口输出)
+}
+
+// sys_open_dev(dev_type) — syscall 35 (open device node, returns FD_DEV fd)
+// Returns: fd (positive) on success, positive errno on failure
+uint64_t sys_open_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
+    int dev_type = (int)arg1;
+
+    if (dev_type <= DEV_NONE || dev_type >= DEV_TYPE_MAX)
+        return (uint64_t)-EINVAL;
+
+    pid_t target_pid = dev_table[dev_type];
+    if (target_pid <= 0)
+        return (uint64_t)-ENOENT;
+
+    proc_t *proc = current_proc;
+
+    // Find free fd slot (skip 0/1 reserved for stdin/stdout)
+    int fd = -1;
+    for (int i = 2; i < MAX_FD; i++) {
+        if (proc->fd_table[i].type == FD_NONE) {
+            fd = i;
+            break;
+        }
+    }
+    if (fd < 0) return (uint64_t)-EMFILE;
+
+    proc->fd_table[fd].type = FD_DEV;
+    proc->fd_table[fd].flags = O_RDWR;
+    proc->fd_table[fd].pipe = nullptr;
+    proc->fd_table[fd].target_pid = target_pid;
+
+    return (uint64_t)fd;
+}
+
+// sys_serial_write(buf, len) — syscall 11 (用户态串口输出)
 uint64_t sys_serial_write(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
     const char *buf = (const char *)arg1;
     size_t len = (size_t)arg2;
@@ -1512,27 +1548,29 @@ uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t) {
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EINVAL;
     if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EINVAL;
 
-    struct pipe *p = current_proc->fd_table[fd].pipe;
-    p->ref_count--;
+    if (current_proc->fd_table[fd].type == FD_PIPE) {
+        struct pipe *p = current_proc->fd_table[fd].pipe;
+        p->ref_count--;
 
-    // Notify blocked peer
-    if (current_proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)) {
-        // Closing write end: wake reader (it will see EOF if ref_count indicates no writers)
-        if (p->read_pid >= 0) wake_process(p->read_pid);
-    }
-    if (current_proc->fd_table[fd].flags & (O_RDONLY | O_RDWR)) {
-        // Closing read end: wake writer (it should get EPIPE)
-        if (p->write_pid >= 0) wake_process(p->write_pid);
-    }
+        // Notify blocked peer
+        if (current_proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)) {
+            if (p->read_pid >= 0) wake_process(p->read_pid);
+        }
+        if (current_proc->fd_table[fd].flags & (O_RDONLY | O_RDWR)) {
+            if (p->write_pid >= 0) wake_process(p->write_pid);
+        }
 
-    if (p->ref_count == 0) {
-        kfree(p->buf);
-        kfree(p);
+        if (p->ref_count == 0) {
+            kfree(p->buf);
+            kfree(p);
+        }
     }
+    // FD_DEV: no dynamic resources to free
 
     current_proc->fd_table[fd].type = FD_NONE;
     current_proc->fd_table[fd].flags = 0;
     current_proc->fd_table[fd].pipe = nullptr;
+    current_proc->fd_table[fd].target_pid = -1;
 
     return 0;
 }
@@ -1827,23 +1865,27 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
 
     // Close new_fd if it's open
     if (proc->fd_table[new_fd].type != FD_NONE) {
-        struct pipe *p = proc->fd_table[new_fd].pipe;
-        if (p) {
-            p->ref_count--;
-            if (proc->fd_table[new_fd].flags & (O_WRONLY | O_RDWR)) {
-                if (p->read_pid >= 0) wake_process(p->read_pid);
-            }
-            if (proc->fd_table[new_fd].flags & (O_RDONLY | O_RDWR)) {
-                if (p->write_pid >= 0) wake_process(p->write_pid);
-            }
-            if (p->ref_count == 0) {
-                kfree(p->buf);
-                kfree(p);
+        if (proc->fd_table[new_fd].type == FD_PIPE) {
+            struct pipe *p = proc->fd_table[new_fd].pipe;
+            if (p) {
+                p->ref_count--;
+                if (proc->fd_table[new_fd].flags & (O_WRONLY | O_RDWR)) {
+                    if (p->read_pid >= 0) wake_process(p->read_pid);
+                }
+                if (proc->fd_table[new_fd].flags & (O_RDONLY | O_RDWR)) {
+                    if (p->write_pid >= 0) wake_process(p->write_pid);
+                }
+                if (p->ref_count == 0) {
+                    kfree(p->buf);
+                    kfree(p);
+                }
             }
         }
+        // FD_DEV: no dynamic resources to free
         proc->fd_table[new_fd].type = FD_NONE;
         proc->fd_table[new_fd].flags = 0;
         proc->fd_table[new_fd].pipe = nullptr;
+        proc->fd_table[new_fd].target_pid = -1;
     }
 
     // Copy old_fd to new_fd
@@ -1851,6 +1893,7 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t) {
     if (proc->fd_table[new_fd].type == FD_PIPE) {
         proc->fd_table[new_fd].pipe->ref_count++;
     }
+    // FD_DEV: target_pid copied by struct assignment, no ref_count needed
 
     return (uint64_t)new_fd;
 }

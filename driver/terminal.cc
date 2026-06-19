@@ -324,9 +324,9 @@ int main() {
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
 
-    // 2. Bind to KBD driver via REQ, then attach SHM
-    int32_t kbd_pid;
-    while ((kbd_pid = device_lookup(DEV_KBD)) <= 0) {
+    // 2. Open KBD device, bind via REQ, then mmap SHM
+    int kbd_fd;
+    while ((kbd_fd = open("/dev/kbd", O_RDWR)) < 0) {
         struct recv_msg m;
         recv(&m, NULL, 0, 1);
     }
@@ -340,14 +340,18 @@ int main() {
     for (int i = 0; i < 64; i++) ((uint8_t*)&bind_reply)[i] = 0;
 
     while (1) {
-        int rc = req(kbd_pid, &bind_req, &bind_reply);
+        int rc = req_fd(kbd_fd, &bind_req, &bind_reply);
         if (rc == 0 && bind_reply.result == 0) break;
         struct recv_msg m;
         recv(&m, NULL, 0, 100);
     }
 
-    void *shm_ptr = NULL;
-    shm_attach(kbd_pid, &shm_ptr);
+    // mmap kbd SHM via MAP_SHARED (fd → target_pid → sys_shm_attach)
+    // size=0 is ignored — MAP_SHARED maps the entire driver SHM region
+    void *shm_ptr = mmap(NULL, 0, PROT_READ | PROT_WRITE, MAP_SHARED, (uint64_t)kbd_fd);
+    if (shm_ptr == MAP_FAILED) {
+        while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
+    }
     uint64_t shm_addr = (uint64_t)shm_ptr;
     shm_hdr = (volatile driver_shm_header *)shm_addr;
     kbd = (volatile kbd_ring *)(shm_addr + KBD_RING_OFFSET);

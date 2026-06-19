@@ -206,3 +206,142 @@ Input Context（Slot Context + EP 1-IN Context, DCI=3）:
 4. 设备插入：Port Reset → Enable Slot → Address Device → Configure Endpoint（ISR 中多步 Command Ring 操作）
 
 待内核工作队列机制建立后再实现。当前键盘枚举在 xhci_init 中一步完成，QEMU 模拟的 USB 键盘在启动时已连接。
+
+---
+
+## Phase 2：设备发现 `/dev/kbd` + fd 统一接口
+
+### 动机
+
+当前设备发现通过 `device_lookup(DEV_KBD)` 查内核 dev_table 返回 PID，通信通过 `sys_req(pid, ...)` 和 `shm_attach(pid)` 完成。这存在三个问题：
+
+1. **API 不统一**：设备发现用 lookup，控制用 req，数据用 shm_attach，三个不同入口
+2. **非 POSIX**：外部程序需要理解 PID 概念而非标准 fd
+3. **驱动进程号耦合**：虽然不是静态 PID 常量了，但仍需理解「对端是一个进程」
+
+目标：**统一到 fd 模型**——open 返回 fd，用 req/mmap/poll 操作 fd，底层走 sys_req/notify/shm 不变。
+
+### 设计决策
+
+| # | 问题 | 决策 | 理由 |
+|---|------|------|------|
+| 1 | 设备节点来源 | 内核路径识别，不依赖 fs_driver | open 时路径以 `/dev/` 开头就走内核分配 FD_DEV |
+| 2 | dev_table 存留 | **保留**，作为内核内部设备注册表 | open("/dev/kbd") 时内核查 dev_table 找到驱动 PID 绑定到 fd |
+| 3 | FD_DEV 内核数据结构 | fd_table 新增 type=FD_DEV，含 target_pid | 复用现有内核 fd_table 框架，改动最小 |
+| 4 | 控制通道 | `req(fd, request, reply)` — libc 包装 | 内部做 fd→PID 翻译后走 sys_req，底层零改动 |
+| 5 | 数据通道 | `mmap(fd, size, prot, flags, offset)` | 内核根据 fd 定位 target_pid，映射驱动 SHM 物理页到本进程 |
+| 6 | 事件等待 | `poll(fd, events)` | 封装 sys_recv 或检查 ring buffer head/tail |
+| 7 | 热插拔/驱动切换 | **上层应用（合成器）主动重连** | 与 Linux 一致——compositor 负责管理设备生命周期，驱动崩溃后 init 重新 spawn 新驱动，合成器 `close` 旧 fd → 循环 `open` → `req` bind → `mmap` |
+| 8 | SHM 归属 | **进程级**（现有 shm_regions），驱动进程退出时 SHM 释放 | 合成器重连后新驱动创建新 SHM，重新 mmap。不做内核永久 SHM |
+| 9 | 是否新增 sys_open | **否**——扩展现有 open 路径 | libc open 检查路径前缀 `/dev/`，是则调用内核新 syscall 或扩展现有路径 |
+| 10 | 是否保留 sys_req/sys_resp 接口 | **保留**——libc req(fd, ...) 内部分发到 sys_req | 56B 内联零分配对控制信令（bind/unbind）足够高效 |
+
+### fd 拓扑
+
+```c
+// 内核 fd_table 新类型
+#define FD_DEV     3   // 新增
+
+struct file {
+    int type;           // FD_NONE / FD_PIPE / FD_DEV
+    int flags;
+    // FD_DEV 专用
+    pid_t target_pid;    // 驱动进程 PID
+    // FD_PIPE 专用（不变）
+    struct pipe *pipe;
+};
+```
+
+```
+终端进程 fd_table:
+  fd 0 = FD_PIPE (stdin)
+  fd 1 = FD_PIPE (stdout)
+  fd 2 = FD_DEV  → target_pid = kbd_pid    ← 新增
+  fd 3 = FD_DEV  → target_pid = fs_pid     ← 新增
+  fd 4 = FD_DEV  → target_pid = kms_pid    ← 新增
+```
+
+### 用户态 API
+
+```c
+// — 设备发现 —
+int open(const char *path, int flags);          // "/dev/kbd" → 返回 FD_DEV fd
+
+// — 控制通道（底层 sys_req） —
+int req(int fd, void *request, void *reply);    // 取代 sys_req(pid, ...)
+int notify(int fd);                             // 取代 sys_notify(pid)
+
+// — 数据通道（底层 shm） —
+void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+                                                // mmap dev_fd 取驱动 SHM
+
+// — 事件等待 —
+int poll(struct pollfd *fds, nfds_t nfds, int timeout);
+                                                // 取代 sys_recv
+```
+
+### 数据流
+
+```
+终端（合成器）:
+  fd = open("/dev/kbd")          → fd_table[2] = FD_DEV, target_pid = kbd_pid
+
+  req(fd, &BIND_REQ, &resp)      → libc: fd[2].target_pid → sys_req(kbd_pid, ...)
+                                      内核: RECV_REQ → kbd_driver → kbd_driver 创建 SHM →
+                                      sys_resp → 返回
+
+  ring = mmap(fd, 4096, ...)     → 内核: fd[2].target_pid → 找到 kbd_driver 的 SHM 物理页
+                                      映射到终端地址空间 → 返回虚拟地址
+
+  poll(fd, POLLIN)               → 等按键事件
+```
+
+### 驱动切换流程
+
+```c
+// init 检测 kbd_driver 崩溃，重新 spawn
+// 新 kbd_driver 启动 → shm_create → device_register(DEV_KBD) → 进入事件循环
+
+// 终端检测到 fd 失效
+poll(fd, POLLIN) 返回 POLLERR 或 req(fd, ...) 返回 ESRCH
+  → 终端检测到驱动崩溃
+  → close(fd)
+
+  // 重连循环
+  while ((fd = open("/dev/kbd")) < 0) {
+      poll(NULL, 0, 100);   // 等待 init 重新 spawn kbd_driver
+  }
+  req(fd, &BIND_REQ, &resp);
+  ring = mmap(fd, 4096, PROT_READ, MAP_SHARED, 0);
+  // 继续消费
+```
+
+支持 Wayland 多进程拓扑后，合成器解耦出来承担设备管理职责：
+
+```
+kbd_driver → [合成器 (Compositor)] → 各 Wayland 客户端
+                  ↑
+            终端/合成器: 管理 kbd fd
+            驱动切换时合成器重连，客户端不感知
+```
+
+### 和 Linux 的对齐
+
+| 层面 | Linux | 本方案 | 对齐？ |
+|------|-------|--------|--------|
+| 设备发现 | open("/dev/input/eventX") | open("/dev/kbd") | ✅ 接口对齐 |
+| 控制通道 | ioctl(fd, EVIOCG.../EVIOCS...) | req(fd, ...) | ⭕ 实现不同，语义等价 |
+| 数据通道 | mmap/mmap+read | mmap(fd, ...) | ✅ |
+| 事件等待 | poll(fd, POLLIN) | poll(fd, POLLIN) | ✅ |
+| 驱动切换 | libinput 监听 udev → compositor 重连 | 合成器检测 POLLERR → 循环重连 | ✅ |
+| SHM 生命周期 | evdev buffer 归内核管 | SHM 归驱动进程管，驱动死则 SHM 释放 | ⭕ 这里不同，但重连机制弥补 |
+
+### 实施步骤（建议顺序）
+
+1. **内核新增 FD_DEV 类型** — `kernel/proc.h` `struct file` 加 type 和 target_pid
+2. **扩展 open 路径** — libc open 识别 `/dev/` 前缀 → 内核分配 FD_DEV fd
+3. **libc 包装 req/notify 支持 fd** — fd→PID 翻译 → sys_req/sys_notify
+4. **libc 包装 mmap 支持 FD_DEV** — 内核映射 target_pid 的 SHM 物理页
+5. **libc 包装 poll 支持 FD_DEV** — 封装 sys_recv timeout 或检查 ring buffer
+6. **迁移 kbd_driver/terminal 到 fd API** — 替换 device_lookup + sys_req + shm_attach
+7. **驱动切换测试** — 手动 kill kbd_driver，验证终端自动重连
