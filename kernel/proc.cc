@@ -19,6 +19,14 @@
 #include "common/dev.h"
 #include "arch/x64/apic.h"
 
+// Minimal file_io_req for FD_FILE CLOSE notification (must match fs_driver struct layout)
+struct file_io_close_req {
+    uint32_t cmd;
+    uint8_t  _path[256];
+    uint32_t _flags;
+    int32_t  fs_fd;          // at offset 264, same as fs_driver's file_req.fs_fd
+};
+
 proc_t procs[MAX_PROC];
 // current_proc is per-CPU (in cpu_local_t), accessed via macro
 
@@ -70,11 +78,8 @@ void proc_init() {
         procs[i].wait_deadline = 0;
         procs[i].wait_timed_out = 0;
         for (int j = 0; j < MAX_FD; j++) {
+            __memset(&procs[i].fd_table[j], 0, sizeof(struct file));
             procs[i].fd_table[j].type = FD_NONE;
-            procs[i].fd_table[j].flags = 0;
-            procs[i].fd_table[j].pipe = nullptr;
-            procs[i].fd_table[j].shm = nullptr;
-            procs[i].fd_table[j].target_pid = -1;
         }
         list_init(&procs[i].run_node);
         list_init(&procs[i].wait_node);
@@ -192,11 +197,8 @@ proc_t *create_idle_process(int cpu_id) {
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
     for (int j = 0; j < MAX_FD; j++) {
+        __memset(&proc->fd_table[j], 0, sizeof(struct file));
         proc->fd_table[j].type = FD_NONE;
-        proc->fd_table[j].flags = 0;
-        proc->fd_table[j].pipe = nullptr;
-        proc->fd_table[j].shm = nullptr;
-        proc->fd_table[j].target_pid = -1;
     }
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
@@ -313,11 +315,8 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
     for (int j = 0; j < MAX_FD; j++) {
+        __memset(&proc->fd_table[j], 0, sizeof(struct file));
         proc->fd_table[j].type = FD_NONE;
-        proc->fd_table[j].flags = 0;
-        proc->fd_table[j].pipe = nullptr;
-        proc->fd_table[j].shm = nullptr;
-        proc->fd_table[j].target_pid = -1;
     }
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
@@ -524,7 +523,7 @@ void proc_reap(proc_t *proc) {
         }
     }
 
-    // 5b. Close all open fds (pipe cleanup)
+    // 5b. Close all open fds (pipe/file cleanup)
     for (int fd = 0; fd < MAX_FD; fd++) {
         if (proc->fd_table[fd].type == FD_PIPE) {
             struct pipe *p = proc->fd_table[fd].pipe;
@@ -542,14 +541,22 @@ void proc_reap(proc_t *proc) {
                     kfree(p);
                 }
             }
+        } else if (proc->fd_table[fd].type == FD_FILE) {
+            proc->fd_table[fd].file_data.ref_count--;
+            if (proc->fd_table[fd].file_data.ref_count == 0 && proc->fd_table[fd].file_data.fs_pid >= 0) {
+                // Notify fs_driver to close the session fd.
+                file_io_close_req req;
+                __memset(&req, 0, sizeof(req));
+                req.cmd = 4;  // FILE_CMD_CLOSE
+                req.fs_fd = proc->fd_table[fd].file_data.fs_fd;
+                kernel_msg_send(proc->fd_table[fd].file_data.fs_pid,
+                                &req, sizeof(req), nullptr, 0);
+            }
         }
         // FD_DEV and FD_NONE: no dynamic resources to free
         // (FD_SHM already handled in step 5 above)
+        __memset(&proc->fd_table[fd], 0, sizeof(struct file));
         proc->fd_table[fd].type = FD_NONE;
-        proc->fd_table[fd].flags = 0;
-        proc->fd_table[fd].pipe = nullptr;
-        proc->fd_table[fd].shm = nullptr;
-        proc->fd_table[fd].target_pid = -1;
     }
 
     // 5c. Free IOPM bitmap

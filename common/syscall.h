@@ -41,6 +41,7 @@
 #define SYS_BLOCK_WRITE  33
 #define SYS_BLOCK_ASYNC  34
 #define SYS_OPEN_DEV     35
+#define SYS_INSTALL_FD   36
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -253,6 +254,17 @@ static inline int sys_block_async(uint32_t lba, void *buf, uint32_t count, uint8
 // Caller: fd = (int32_t)(result & 0xFFFFFFFF), pid = (pid_t)(result >> 32)
 static inline uint64_t sys_open_dev(int dev_type) {
     return (uint64_t)__syscall1(SYS_OPEN_DEV, (int64_t)dev_type);
+}
+
+// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 36
+// Register an FD_FILE fd in the kernel fd_table.
+// Called by libc open() after getting fs_fd from fs_driver.
+// Returns: fd (>=3) on success, negative errno on failure
+static inline int sys_install_fd(int32_t fs_pid, int32_t fs_fd,
+                                  uint64_t offset, int flags,
+                                  uint64_t file_size) {
+    return (int)__syscall5(SYS_INSTALL_FD, (int64_t)fs_pid, (int64_t)fs_fd,
+        (int64_t)offset, (int64_t)flags, (int64_t)file_size);
 }
 
 #endif // COMMON_SYSCALL_H

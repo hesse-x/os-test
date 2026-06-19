@@ -121,10 +121,9 @@
 #### VFS + fd 抽象
 
 - [x] 内核 fd 表 + sys_pipe/sys_write/sys_read/sys_close
-- [x] libc 文件 I/O（open/read/write/close via sys_msg → fs_driver）
-- [ ] `struct file` 通用化：引用计数 + 操作向量（read/write/close/poll），统一 file/pipe/socket/shm
-- [ ] sys_open：VFS 层 file_ops 虚函数分派
-- [ ] 验证: 用户进程通过 sys_open("hello.txt") → sys_read(fd, buf) 读取 FAT32 文件
+- [ ] `struct file` 添加 FD_FILE 类型 — 设计见 [vfs.md](vfs.md)
+- [ ] sys_install_fd + libc open() 改造 — 设计见 [vfs.md](vfs.md)
+- [ ] 验证: 用户进程通过 open("hello.txt") → sys_read(fd, buf) 读取 FAT32 文件
 
 #### Unix domain socket（内核态 AF_UNIX SOCK_STREAM）
 
@@ -325,7 +324,7 @@
 | 回调链 → 协程迁移 | GCC ≥ 12 + 栈回溯支持 | 中 | 见 [file_system.md](file_system.md) 搁置项 |
 | 多线程客户端 session 并发安全 | 多线程进程 | 中 | 需 per-fd 粒度锁，见 [file_system.md](file_system.md) 搁置项 |
 | 磁盘队列优先级调度 | 多客户端延迟敏感 | 低 | 见 [file_system.md](file_system.md) 搁置项 |
-| VFS 层 | 无 | 低 | 支持多种文件系统类型 |
+| VFS 层 | 无 | 低 | fd_table 统一 FD_FILE + 内核代理 IPC + fs_driver 纯 FAT32 — 设计见 [vfs.md](vfs.md) |
 | 页面换出 (swap) | FAT32 write | 低 | BFC 不足时换出到磁盘 |
 | 启动流程改造 | kbd 重构完成 | ✅ | init + FAT32 启动用户态服务，见 [boot.md](boot.md) |
 | POSIX API 封装 | — | 中 | unistd.h/sys/wait.h/sys/mman.h 等，见 [sys_api.md](sys_api.md) |

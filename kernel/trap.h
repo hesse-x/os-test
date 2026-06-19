@@ -3,6 +3,7 @@
 
 #include "arch/x64/trap.h"
 #include "kernel/proc.h"   // pid_t
+#include <stddef.h>        // size_t
 
 typedef void (*irq_handler_t)(trapframe_t *);
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -51,6 +52,7 @@ uint64_t sys_block_read(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64
 uint64_t sys_block_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_block_async(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_open_dev(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_install_fd_impl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 // Notify a process: enqueue recv_msg + wake if WAIT_RECV
 void notify_and_wake(pid_t target_pid, recv_msg *msg);
@@ -73,6 +75,13 @@ void irq_owner_cleanup(pid_t pid);
 // Wake a process blocked on WAIT_PIPE (used by pipe close and proc_reap)
 // Enqueues a RECV_NOTIFY message and wakes if in WAIT_RECV
 void wake_process(pid_t pid);
+
+// Kernel-internal: send a message to a user-space process and wait for reply.
+// Called from syscall context (current_proc is the caller).
+// req/req_len: message buffer in kernel space; resp/resp_len: reply buffer (may be NULL).
+// Returns: 0 on success, negative errno on error.
+int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
+                    void *resp, size_t resp_len);
 }
 
 #endif // KERNEL_TRAP_H

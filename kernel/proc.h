@@ -44,6 +44,7 @@ struct mmap_region {
 #define FD_PIPE   1
 #define FD_SHM    2
 #define FD_DEV    3
+#define FD_FILE   4
 
 #define O_RDONLY  0
 #define O_WRONLY  1
@@ -60,11 +61,20 @@ struct pipe {
 };
 
 struct file {
-    int type;            // FD_NONE / FD_PIPE / FD_SHM / FD_DEV
+    int type;            // FD_NONE / FD_PIPE / FD_SHM / FD_DEV / FD_FILE
     int flags;           // O_RDONLY / O_WRONLY / O_RDWR
-    struct pipe *pipe;   // if type == FD_PIPE
-    struct shm  *shm;    // if type == FD_SHM
-    pid_t target_pid;    // if type == FD_DEV (driver PID)
+    union {
+        struct pipe *pipe;   // if type == FD_PIPE
+        struct shm  *shm;    // if type == FD_SHM
+        pid_t target_pid;    // if type == FD_DEV (driver PID)
+        struct {             // if type == FD_FILE
+            pid_t   fs_pid;
+            int32_t fs_fd;
+            uint64_t offset;
+            uint64_t file_size;
+            int      ref_count;
+        } file_data;
+    };
 };
 
 struct proc_t {

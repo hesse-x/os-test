@@ -49,6 +49,35 @@ void register_irq(int vec, irq_handler_t fn) {
   }
 }
 
+// ===================== File protocol for FD_FILE <-> fs_driver IPC =====================
+// Structs must match driver/fs_driver.cc exactly (standard ABI, no packed)
+
+#define FILE_CMD_READ      2
+#define FILE_CMD_WRITE     3
+#define FILE_CMD_CLOSE     4
+
+struct file_io_req {
+    uint32_t cmd;              // FILE_CMD_READ / WRITE / CLOSE
+    char     _path[256];       // unused for read/write/close (but must match layout)
+    uint32_t _flags;           // unused
+    uint32_t fs_fd;            // fs_driver session fd
+    uint64_t offset;           // file offset for read/write
+    uint32_t count;            // read/write length
+    uint32_t _lba;
+    uint32_t _readdir_offset;
+    uint32_t _readdir_count;
+};
+
+struct file_io_resp {
+    int32_t  status;           // 0 = success, negative = errno
+    uint32_t _fd;              // unused
+    uint64_t file_size;        // file size (for write response)
+    uint32_t count;            // bytes read/written
+    uint32_t _total;           // unused
+    // uint8_t data[] follows for READ responses
+};
+
+
 // ===================== Trap dispatch =====================
 static uint64_t tick = 0;
 
@@ -279,7 +308,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 36
+#define NR_SYSCALL 37
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -317,6 +346,7 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_block_write,    // 33
     sys_block_async,    // 34
     sys_open_dev,       // 35
+    sys_install_fd_impl, // 36
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -846,14 +876,16 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, u
 
     child->parent_pid = current_proc->pid;
 
-    // Inherit fd 0 and fd 1 from parent
-    for (int fd = 0; fd <= 1; fd++) {
+    // Inherit all open fds from parent (including fd 0/1 for pipe stdin/stdout)
+    for (int fd = 0; fd < MAX_FD; fd++) {
         if (current_proc->fd_table[fd].type != FD_NONE) {
             child->fd_table[fd] = current_proc->fd_table[fd];
             if (child->fd_table[fd].type == FD_PIPE) {
                 child->fd_table[fd].pipe->ref_count++;
+            } else if (child->fd_table[fd].type == FD_FILE) {
+                child->fd_table[fd].file_data.ref_count++;
             }
-            // FD_DEV: target_pid copied by struct assignment, no ref_count needed
+            // FD_DEV/SHM: copied by struct assignment, no ref_count needed
         }
     }
 
@@ -1102,6 +1134,25 @@ void notify_and_wake(pid_t target_pid, recv_msg *msg) {
     spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
 }
 
+// Forward declaration of sys_msg_to (defined later in this file)
+int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
+                   void *reply_buf, size_t reply_len);
+
+// ===================== kernel_msg_send =====================
+// Kernel-internal: send a msg to a user process and wait for reply.
+// req may point to kernel stack or kmalloc memory; resp may be NULL (fire-and-forget).
+// Returns: 0 on success, negative errno on error.
+int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
+                     void *resp, size_t resp_len) {
+    // Use a dummy buffer if resp is NULL (e.g. CLOSE notifications)
+    uint8_t dummy[64];
+    if (!resp) {
+        resp = dummy;
+        resp_len = sizeof(dummy);
+    }
+    return (int)sys_msg_to(target_pid, (void*)req, req_len, resp, resp_len);
+}
+
 // ===================== sys_block_read / sys_block_write =====================
 // Synchronous polling path. Returns EBUSY if async request is active.
 uint64_t sys_block_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
@@ -1205,6 +1256,50 @@ uint64_t sys_open_dev(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uin
 
     // Pack fd and PID into one return value — eliminates need for sys_lookup_dev
     return (uint64_t)fd | ((uint64_t)target_pid << 32);
+}
+
+// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 36
+// Register an FD_FILE fd in the kernel fd_table.
+// Returns: fd (>=3) on success, negative errno on failure
+// Note: named sys_install_fd_impl to avoid conflict with static inline wrapper in common/syscall.h
+uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
+                         uint64_t arg4, uint64_t arg5, uint64_t) {
+    pid_t fs_pid = (pid_t)arg1;
+    int32_t fs_fd = (int32_t)arg2;
+    uint64_t offset = arg3;
+    int flags = (int)arg4;
+    uint64_t file_size = arg5;
+
+    if (fs_pid < 0 || fs_pid >= MAX_PROC) return (uint64_t)-EINVAL;
+    if (fs_fd < 0) return (uint64_t)-EINVAL;
+    if (flags & ~(O_RDONLY | O_WRONLY | O_RDWR)) return (uint64_t)-EINVAL;
+
+    proc_t *proc = current_proc;
+
+    // Find free fd slot (start from 3 to reserve 0/1/2 for stdin/stdout/stderr)
+    int fd = -1;
+    for (int i = 3; i < MAX_FD; i++) {
+        if (proc->fd_table[i].type == FD_NONE) {
+            fd = i;
+            break;
+        }
+    }
+    if (fd < 0) return (uint64_t)-EMFILE;
+
+    proc->fd_table[fd].type = FD_FILE;
+    proc->fd_table[fd].flags = flags;
+    proc->fd_table[fd].file_data.fs_pid = fs_pid;
+    proc->fd_table[fd].file_data.fs_fd = fs_fd;
+    proc->fd_table[fd].file_data.offset = offset;
+    proc->fd_table[fd].file_data.file_size = file_size;
+    proc->fd_table[fd].file_data.ref_count = 1;
+
+    serial_puts("fd_reg:");
+    { char hx[]="0123456789ABCDEF"; char hb[24]; int p=0;
+      hb[p++]='0'+fd; hb[p++]=' '; hb[p++]='s'; hb[p++]='=';
+      uint64_t v=file_size; for(int i=15;i>=0;i--){hb[p++]=hx[(v>>(i*4))&0xF];}
+      hb[p++]='\n'; serial_puts(hb); }
+    return (uint64_t)fd;
 }
 
 // sys_serial_write(buf, len) — syscall 11 (用户态串口输出)
@@ -1444,6 +1539,8 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_
 }
 
 // sys_write(fd, buf, len) — syscall 16 (向 fd 写入数据)
+// FD_PIPE: 直写 kernel ring buffer
+// FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
 uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
     int fd = (int)arg1;
     const char *buf = (const char *)arg2;
@@ -1451,7 +1548,57 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EINVAL;
     if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EINVAL;
-    if (!(current_proc->fd_table[fd].flags & (O_WRONLY | O_RDWR))) return (uint64_t)-EINVAL;
+
+    proc_t *proc = current_proc;
+
+    // ===== FD_FILE: proxy to fs_driver =====
+    if (proc->fd_table[fd].type == FD_FILE) {
+        if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+            return (uint64_t)-EINVAL;
+
+        // Validate user buf pointer
+        if (!buf) return (uint64_t)-EFAULT;
+        uint64_t ptr_start = (uint64_t)buf;
+        uint64_t ptr_end = ptr_start + len;
+        if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
+            return (uint64_t)-EFAULT;
+
+        // Clamp to msg size limit (64KB total msg, minus req header)
+        size_t max_data = 65536 - sizeof(file_io_req);
+        if (len > max_data) len = max_data;
+        if (len == 0) return 0;
+
+        // Build write request: file_io_req + inline data
+        size_t msg_len = sizeof(file_io_req) + len;
+        uint8_t *msg_buf = (uint8_t *)kmalloc(msg_len);
+        if (!msg_buf) return (uint64_t)-ENOMEM;
+
+        file_io_req *req = (file_io_req *)msg_buf;
+        req->cmd = FILE_CMD_WRITE;
+        req->fs_fd = proc->fd_table[fd].file_data.fs_fd;
+        req->offset = proc->fd_table[fd].file_data.offset;
+        req->count = (uint32_t)len;
+        __memcpy(msg_buf + sizeof(file_io_req), buf, len);
+
+        // Reply buffer
+        file_io_resp resp;
+        int64_t ret = sys_msg_to(proc->fd_table[fd].file_data.fs_pid,
+                                  msg_buf, msg_len, &resp, sizeof(resp));
+        kfree(msg_buf);
+
+        if (ret < 0) return (uint64_t)(-ret);
+
+        if (resp.status != 0) return (uint64_t)(-resp.status);
+
+        size_t written = resp.count;
+        proc->fd_table[fd].file_data.offset += written;
+        if (proc->fd_table[fd].file_data.file_size < proc->fd_table[fd].file_data.offset)
+            proc->fd_table[fd].file_data.file_size = proc->fd_table[fd].file_data.offset;
+        return (uint64_t)written;
+    }
+
+    // ===== FD_PIPE: existing path =====
+    if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR))) return (uint64_t)-EINVAL;
 
     // Validate user buf pointer
     if (!buf) return (uint64_t)-EFAULT;
@@ -1460,21 +1607,21 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
-    struct pipe *p = current_proc->fd_table[fd].pipe;
+    struct pipe *p = proc->fd_table[fd].pipe;
     size_t written = 0;
 
     while (written < len) {
         // Check if pipe has space: full when head is one behind tail
         if ((p->head + 1) % PIPE_BUF_SIZE == p->tail) {
             // Pipe full: block or return EAGAIN if non-blocking
-            if (current_proc->fd_table[fd].flags & O_NONBLOCK) {
+            if (proc->fd_table[fd].flags & O_NONBLOCK) {
                 if (written > 0) break;  // return partial write
                 return (uint64_t)-EAGAIN;
             }
-            p->write_pid = current_proc->pid;
-            current_proc->state = BLOCKED;
-            current_proc->wait_event = WAIT_PIPE;
-            __atomic_add_fetch(&cpu_locals[current_proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
+            p->write_pid = proc->pid;
+            proc->state = BLOCKED;
+            proc->wait_event = WAIT_PIPE;
+            __atomic_add_fetch(&cpu_locals[proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
             schedule();
             p->write_pid = -1;
             continue;
@@ -1491,6 +1638,8 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
 }
 
 // sys_read(fd, buf, len) — syscall 17 (从 fd 读数据，阻塞直到有数据)
+// FD_PIPE: 直读 kernel ring buffer
+// FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
 uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
     int fd = (int)arg1;
     char *buf = (char *)arg2;
@@ -1498,8 +1647,72 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EINVAL;
     if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EINVAL;
+
+    proc_t *proc = current_proc;
+
+    // ===== FD_FILE: proxy to fs_driver =====
+    if (proc->fd_table[fd].type == FD_FILE) {
+        // Check read permission: reject O_WRONLY only (O_RDONLY=0, so must check != O_WRONLY)
+        if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
+            return (uint64_t)-EINVAL;
+
+        if (proc->fd_table[fd].file_data.offset >= proc->fd_table[fd].file_data.file_size) {
+            serial_puts("r:EOF\n");
+            return 0;  // EOF
+        }
+
+        uint64_t avail = proc->fd_table[fd].file_data.file_size - proc->fd_table[fd].file_data.offset;
+        if (len > avail) len = avail;
+        size_t max_data = 65536 - sizeof(file_io_resp);
+        if (len > max_data) len = max_data;
+        if (len == 0) return 0;
+
+        // Validate user buf pointer
+        if (!buf) return (uint64_t)-EFAULT;
+        uint64_t ptr_start = (uint64_t)buf;
+        uint64_t ptr_end = ptr_start + len;
+        if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
+            return (uint64_t)-EFAULT;
+
+        { serial_puts("r:"); char hx[]="0123456789ABCDEF"; char hb[32]; int p=0; uint64_t v=proc->fd_table[fd].file_data.offset; for(int i=15;i>=0;i--){hb[p++]=hx[(v>>(i*4))&0xF];} hb[p++]=':'; v=len; for(int i=15;i>=0;i--){hb[p++]=hx[(v>>(i*4))&0xF];} hb[p++]='\n'; serial_puts(hb); }
+
+        // Build READ request
+        file_io_req req = {};
+        req.cmd = FILE_CMD_READ;
+        req.fs_fd = proc->fd_table[fd].file_data.fs_fd;
+        req.offset = proc->fd_table[fd].file_data.offset;
+        req.count = (uint32_t)len;
+
+        // Allocate reply buffer (header + data)
+        size_t resp_size = sizeof(file_io_resp) + (size_t)len;
+        uint8_t *resp_buf = (uint8_t *)kmalloc(resp_size);
+        if (!resp_buf) return (uint64_t)-ENOMEM;
+
+        int64_t ret = sys_msg_to(proc->fd_table[fd].file_data.fs_pid,
+                                  &req, sizeof(req), resp_buf, resp_size);
+        if (ret < 0) {
+            kfree(resp_buf);
+            return (uint64_t)(-ret);  // sys_msg_to returns negative errno on failure
+        }
+
+        file_io_resp *resp = (file_io_resp *)resp_buf;
+        if (resp->status != 0) {
+            kfree(resp_buf);
+            return (uint64_t)(-resp->status);
+        }
+
+        size_t nread = resp->count;
+        if (nread > len) nread = len;
+        __memcpy(buf, resp_buf + sizeof(file_io_resp), nread);
+
+        proc->fd_table[fd].file_data.offset += nread;
+        kfree(resp_buf);
+        return (uint64_t)nread;
+    }
+
+    // ===== FD_PIPE: existing path =====
     // O_RDONLY=0, so check: must not be O_WRONLY only
-    if ((current_proc->fd_table[fd].flags & O_WRONLY) && !(current_proc->fd_table[fd].flags & O_RDWR))
+    if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
         return (uint64_t)-EINVAL;
 
     // Validate user buf pointer
@@ -1509,18 +1722,18 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
-    struct pipe *p = current_proc->fd_table[fd].pipe;
+    struct pipe *p = proc->fd_table[fd].pipe;
 
     // Block if pipe is empty
     while (p->head == p->tail) {
         // Check if write end is closed (all write fds gone)
         if (p->ref_count == 1) return 0;  // EOF: no writers left
         // Non-blocking: return EAGAIN-like indication (0 bytes read)
-        if (current_proc->fd_table[fd].flags & O_NONBLOCK) return 0;
-        p->read_pid = current_proc->pid;
-        current_proc->state = BLOCKED;
-        current_proc->wait_event = WAIT_PIPE;
-        __atomic_add_fetch(&cpu_locals[current_proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
+        if (proc->fd_table[fd].flags & O_NONBLOCK) return 0;
+        p->read_pid = proc->pid;
+        proc->state = BLOCKED;
+        proc->wait_event = WAIT_PIPE;
+        __atomic_add_fetch(&cpu_locals[proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
         schedule();
         p->read_pid = -1;
     }
@@ -1537,6 +1750,8 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_
     if (p->write_pid >= 0) wake_process(p->write_pid);
 
     return (uint64_t)nread;
+
+    // FD_DEV and FD_SHM return ENOSYS (never reached via FD_FILE/pipe check above)
 }
 
 // sys_close(fd) — syscall 18 (关闭 fd，pipe ref_count--)
@@ -1567,14 +1782,23 @@ uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64
         if (current_proc->fd_table[fd].shm) {
             shm_put(current_proc->fd_table[fd].shm);
         }
+    } else if (current_proc->fd_table[fd].type == FD_FILE) {
+        // Release ref_count; notify fs_driver on last close
+        current_proc->fd_table[fd].file_data.ref_count--;
+        if (current_proc->fd_table[fd].file_data.ref_count == 0) {
+            // Notify fs_driver to close the session fd
+            file_io_req req = {};
+            req.cmd = FILE_CMD_CLOSE;
+            req.fs_fd = current_proc->fd_table[fd].file_data.fs_fd;
+            kernel_msg_send(current_proc->fd_table[fd].file_data.fs_pid,
+                            &req, sizeof(req), nullptr, 0);
+        }
     }
     // FD_DEV: no dynamic resources to free
 
-    current_proc->fd_table[fd].type = FD_NONE;
-    current_proc->fd_table[fd].flags = 0;
-    current_proc->fd_table[fd].pipe = nullptr;
-    current_proc->fd_table[fd].shm = nullptr;
-    current_proc->fd_table[fd].target_pid = -1;
+    // Clear fd_table entry (use memset for union safety)
+    __memset(&current_proc->fd_table[fd], 0, sizeof(struct file));
+    current_proc->fd_table[fd].type = FD_NONE;  // re-assert after memset
 
     return 0;
 }
@@ -1664,7 +1888,7 @@ uint64_t sys_clock(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
 // Inner implementation of sys_msg — shared by PID-based and fd-based variants.
 // All parameters are already validated by the caller.
 // Returns: 0 on success, positive errno on failure
-static int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
+int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
                            void *reply_buf, size_t reply_len) {
     proc_t *target = &procs[target_pid];
     if (target->pid != target_pid) return (uint64_t)-ESRCH;
@@ -1925,27 +2149,33 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, ui
             if (proc->fd_table[new_fd].shm) {
                 shm_put(proc->fd_table[new_fd].shm);
             }
+        } else if (proc->fd_table[new_fd].type == FD_FILE) {
+            proc->fd_table[new_fd].file_data.ref_count--;
+            if (proc->fd_table[new_fd].file_data.ref_count == 0) {
+                file_io_req req = {};
+                req.cmd = FILE_CMD_CLOSE;
+                req.fs_fd = proc->fd_table[new_fd].file_data.fs_fd;
+                kernel_msg_send(proc->fd_table[new_fd].file_data.fs_pid,
+                                &req, sizeof(req), nullptr, 0);
+            }
         }
         // FD_DEV: no dynamic resources to free
+        __memset(&proc->fd_table[new_fd], 0, sizeof(struct file));
         proc->fd_table[new_fd].type = FD_NONE;
-        proc->fd_table[new_fd].flags = 0;
-        proc->fd_table[new_fd].pipe = nullptr;
-        proc->fd_table[new_fd].shm = nullptr;
-        proc->fd_table[new_fd].target_pid = -1;
     }
 
-    // Copy old_fd to new_fd
+    // Copy old_fd to new_fd — struct assignment copies entire union
     proc->fd_table[new_fd] = proc->fd_table[old_fd];
-    proc->fd_table[new_fd].pipe = nullptr;  // clear union (will set below if needed)
-    proc->fd_table[new_fd].shm = nullptr;
+    // Re-establish pointer/shm fields from source (struct assignment copies union bytes,
+    // but for FD_PIPE/SHM we need to also bump ref_count)
     if (proc->fd_table[new_fd].type == FD_PIPE) {
-        proc->fd_table[new_fd].pipe = proc->fd_table[old_fd].pipe;
         proc->fd_table[new_fd].pipe->ref_count++;
     } else if (proc->fd_table[new_fd].type == FD_SHM) {
-        proc->fd_table[new_fd].shm = proc->fd_table[old_fd].shm;
         if (proc->fd_table[new_fd].shm) {
             shm_get(proc->fd_table[new_fd].shm);
         }
+    } else if (proc->fd_table[new_fd].type == FD_FILE) {
+        proc->fd_table[new_fd].file_data.ref_count++;
     }
     // FD_DEV: target_pid copied by struct assignment, no ref_count needed
 

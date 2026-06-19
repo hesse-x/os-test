@@ -3559,6 +3559,11 @@ extern "C" void _start() {
             size_t write_data_len = (msg_data_len > sizeof(file_req)) ? msg_data_len - sizeof(file_req) : 0;
             uint8_t *write_data = (write_data_len > 0) ? data_buf + sizeof(file_req) : NULL;
 
+            // Use the offset from the request (kernel proxy or libc direct)
+            if (freq->fs_fd < MAX_SESSION_FDS && sess->open_files[freq->fs_fd].used) {
+                sess->open_files[freq->fs_fd].offset = freq->offset;
+            }
+
             pending_op *op = alloc_pending_op();
             if (!op) {
                 struct file_resp resp;
@@ -3575,6 +3580,11 @@ extern "C" void _start() {
         }
 
         case FILE_CMD_READ: {
+            // Use the offset from the request (kernel proxy or libc direct)
+            if (freq->fs_fd < MAX_SESSION_FDS && sess->open_files[freq->fs_fd].used) {
+                sess->open_files[freq->fs_fd].offset = freq->offset;
+            }
+
             pending_op *op = alloc_pending_op();
             if (!op) {
                 struct file_resp resp;

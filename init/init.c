@@ -14,16 +14,23 @@
 #include "common/dev.h"
 
 static int spawn_service(const char *path) {
+    serial_write("spawn: ", 7);
+    serial_write(path, strlen(path));
+    serial_write("\n", 1);
+
     int fd = open(path, O_RDONLY);
     if (fd < 0) return -1;
 
     uint64_t size = fd_file_size(fd);
+    { char hx[]="0123456789ABCDEF"; char hb[24]; int p=0; hb[p++]='s'; hb[p++]=':'; for(int i=15;i>=0;i--){hb[p++]=hx[(size>>(i*4))&0xF];} hb[p++]='\n'; serial_write(hb,p); }
     void *buf = malloc(size);
     if (!buf) { close(fd); return -1; }
 
-    read(fd, buf, size);
+    ssize_t nread = read(fd, buf, size);
+    { char hx[]="0123456789ABCDEF"; char hb[24]; int p=0; hb[p++]='n'; hb[p++]=':'; uint64_t v=nread; for(int i=15;i>=0;i--){hb[p++]=hx[(v>>(i*4))&0xF];} hb[p++]='\n'; serial_write(hb,p); }
     close(fd);
 
+    serial_write("spawn_call\n", 11);
     int64_t pid = sys_spawn(buf, size);
     free(buf);
 
