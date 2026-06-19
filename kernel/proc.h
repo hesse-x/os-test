@@ -11,7 +11,7 @@ typedef int32_t pid_t;
 
 enum proc_state_t { READY, RUNNING, BLOCKED, ZOMBIE, REAPING };
 
-enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WAIT_PIPE, WAIT_MSG_REPLY };
+enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WAIT_PIPE, WAIT_MSG_REPLY, WAIT_POLL };
 
 #define RECV_MSG_SIZE   64
 #define RECV_QUEUE_SIZE 16
@@ -45,6 +45,7 @@ struct mmap_region {
 #define FD_SHM    2
 #define FD_DEV    3
 #define FD_FILE   4
+#define FD_SOCKET 5
 
 #define O_RDONLY  0
 #define O_WRONLY  1
@@ -60,8 +61,10 @@ struct pipe {
     int ref_count;       // open fd count
 };
 
+struct unix_sock;  // forward declaration from kernel/socket.h
+
 struct file {
-    int type;            // FD_NONE / FD_PIPE / FD_SHM / FD_DEV / FD_FILE
+    int type;            // FD_NONE / FD_PIPE / FD_SHM / FD_DEV / FD_FILE / FD_SOCKET
     int flags;           // O_RDONLY / O_WRONLY / O_RDWR
     union {
         struct pipe *pipe;   // if type == FD_PIPE
@@ -74,6 +77,7 @@ struct file {
             uint64_t file_size;
             int      ref_count;
         } file_data;
+        struct unix_sock *sock; // if type == FD_SOCKET
     };
 };
 

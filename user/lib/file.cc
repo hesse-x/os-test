@@ -436,19 +436,12 @@ int msg_fd(int fd, const void *msg_buf, size_t msg_len,
     return sys_dev_msg(fd, (void*)msg_buf, msg_len, reply_buf, reply_len);
 }
 
-// poll — wait for events (simplified: wraps sys_recv with timeout)
+// poll — wait for events (kernel-implemented via SYS_POLL)
 int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms) {
-    (void)fds;
-    (void)nfds;
-    struct recv_msg msg;
-    int r = sys_recv(&msg, NULL, 0, (uint32_t)timeout_ms);
-    if (r < 0 && r != -ETIMEDOUT) {
-        errno = -r;
-        return -1;
-    }
-    // Always return at least 1 if recv succeeded (some event was consumed)
-    // For timeout or no event: return 0
-    return (r == 0) ? 1 : 0;
+    int64_t ret = __syscall3(SYS_POLL, (int64_t)(uintptr_t)fds,
+        (int64_t)nfds, (int64_t)timeout_ms);
+    if (ret < 0) { errno = (int)(-ret); return -1; }
+    return (int)ret;
 }
 
 // dup2 — duplicate fd with libc fd_table sync

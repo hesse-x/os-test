@@ -14,6 +14,7 @@
 #include "kernel/fb.h"
 #include "kernel/pci.h"
 #include "common/dev.h"
+#include "kernel/socket.h"
 
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 128
@@ -308,7 +309,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 37
+#define NR_SYSCALL 47
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -347,6 +348,16 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_block_async,    // 34
     sys_open_dev,       // 35
     sys_install_fd_impl, // 36
+    sys_socket,         // 37
+    sys_bind,           // 38
+    sys_listen,         // 39
+    sys_accept,         // 40
+    sys_connect,        // 41
+    sys_socketpair,     // 42
+    sys_sendmsg,        // 43
+    sys_recvmsg,        // 44
+    sys_shutdown,       // 45
+    sys_poll,           // 46
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -1469,7 +1480,7 @@ void wake_process(pid_t pid) {
     spin_lock(&cpu_locals[target_cpu].scheduler_lock);
     if (target->pid == pid &&
         target->state == BLOCKED &&
-        target->wait_event == WAIT_PIPE) {
+        (target->wait_event == WAIT_PIPE || target->wait_event == WAIT_POLL)) {
         if (target->wait_deadline != 0) {
             timer_queue_remove(target);
             target->wait_deadline = 0;
@@ -1597,6 +1608,21 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
         return (uint64_t)written;
     }
 
+    // ===== FD_SOCKET: delegate to sock_write =====
+    if (proc->fd_table[fd].type == FD_SOCKET) {
+        if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+            return (uint64_t)-EINVAL;
+        if (!buf) return (uint64_t)-EFAULT;
+        uint64_t ptr_start = (uint64_t)buf;
+        uint64_t ptr_end = ptr_start + len;
+        if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
+            return (uint64_t)-EFAULT;
+        struct unix_sock *sock = proc->fd_table[fd].sock;
+        if (!sock) return (uint64_t)-EBADF;
+        int64_t ret = sock_write(sock, buf, len);
+        return (uint64_t)ret;
+    }
+
     // ===== FD_PIPE: existing path =====
     if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR))) return (uint64_t)-EINVAL;
 
@@ -1710,6 +1736,19 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_
         return (uint64_t)nread;
     }
 
+    // ===== FD_SOCKET: delegate to sock_read =====
+    if (proc->fd_table[fd].type == FD_SOCKET) {
+        if (!buf) return (uint64_t)-EFAULT;
+        uint64_t ptr_start = (uint64_t)buf;
+        uint64_t ptr_end = ptr_start + len;
+        if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
+            return (uint64_t)-EFAULT;
+        struct unix_sock *sock = proc->fd_table[fd].sock;
+        if (!sock) return (uint64_t)-EBADF;
+        int64_t ret = sock_read(sock, buf, len);
+        return (uint64_t)ret;
+    }
+
     // ===== FD_PIPE: existing path =====
     // O_RDONLY=0, so check: must not be O_WRONLY only
     if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
@@ -1792,6 +1831,11 @@ uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64
             req.fs_fd = current_proc->fd_table[fd].file_data.fs_fd;
             kernel_msg_send(current_proc->fd_table[fd].file_data.fs_pid,
                             &req, sizeof(req), nullptr, 0);
+        }
+    } else if (current_proc->fd_table[fd].type == FD_SOCKET) {
+        struct unix_sock *sock = current_proc->fd_table[fd].sock;
+        if (sock) {
+            sock_close(sock);
         }
     }
     // FD_DEV: no dynamic resources to free
@@ -2158,6 +2202,10 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, ui
                 kernel_msg_send(proc->fd_table[new_fd].file_data.fs_pid,
                                 &req, sizeof(req), nullptr, 0);
             }
+        } else if (proc->fd_table[new_fd].type == FD_SOCKET) {
+            if (proc->fd_table[new_fd].sock) {
+                sock_close(proc->fd_table[new_fd].sock);
+            }
         }
         // FD_DEV: no dynamic resources to free
         __memset(&proc->fd_table[new_fd], 0, sizeof(struct file));
@@ -2176,6 +2224,10 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, ui
         }
     } else if (proc->fd_table[new_fd].type == FD_FILE) {
         proc->fd_table[new_fd].file_data.ref_count++;
+    } else if (proc->fd_table[new_fd].type == FD_SOCKET) {
+        if (proc->fd_table[new_fd].sock) {
+            unix_sock_acquire(proc->fd_table[new_fd].sock);
+        }
     }
     // FD_DEV: target_pid copied by struct assignment, no ref_count needed
 

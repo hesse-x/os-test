@@ -54,6 +54,23 @@ uint64_t sys_block_async(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint6
 uint64_t sys_open_dev(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_install_fd_impl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
+// Socket syscalls (declared in kernel/socket.cc)
+uint64_t sys_socket(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_bind(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_listen(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_accept(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_connect(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_socketpair(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_sendmsg(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_recvmsg(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_shutdown(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_poll(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
+// Socket internal helpers (for sys_write/sys_read FD_SOCKET dispatch)
+int64_t sock_write(struct unix_sock *sock, const void *buf, size_t len);
+int64_t sock_read(struct unix_sock *sock, void *buf, size_t len);
+void sock_close(struct unix_sock *sock);
+
 // Notify a process: enqueue recv_msg + wake if WAIT_RECV
 void notify_and_wake(pid_t target_pid, recv_msg *msg);
 

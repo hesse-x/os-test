@@ -20,5 +20,13 @@
 #define EIO       16
 #define ENOSPC    17
 #define EAGAIN    18
+#define EPIPE     19
+#define EMSGSIZE  20
+#define EAFNOSUPPORT 21
+#define EPROTONOSUPPORT 22
+#define ECONNREFUSED 23
+#define ENOTCONN  24
+#define EADDRINUSE 25
+#define ENOTSOCK  26
 
 #endif // COMMON_ERRNO_H

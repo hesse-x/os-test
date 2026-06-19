@@ -18,6 +18,7 @@
 #include "arch/x64/apic.h"
 #include "common/dev.h"
 #include "arch/x64/apic.h"
+#include "kernel/socket.h"
 
 // Minimal file_io_req for FD_FILE CLOSE notification (must match fs_driver struct layout)
 struct file_io_close_req {
@@ -551,6 +552,15 @@ void proc_reap(proc_t *proc) {
                 req.fs_fd = proc->fd_table[fd].file_data.fs_fd;
                 kernel_msg_send(proc->fd_table[fd].file_data.fs_pid,
                                 &req, sizeof(req), nullptr, 0);
+            }
+        } else if (proc->fd_table[fd].type == FD_SOCKET) {
+            struct unix_sock *sock = proc->fd_table[fd].sock;
+            if (sock) {
+                // sock_close handles peer wake + skb cleanup + ref release
+                // But since the process is dying, we need to handle this carefully.
+                // Just release the reference; sock_close's peer wake may not work
+                // if peer is already gone, but that's fine.
+                sock_close(sock);
             }
         }
         // FD_DEV and FD_NONE: no dynamic resources to free

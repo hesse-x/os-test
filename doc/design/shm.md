@@ -1,6 +1,6 @@
 # SHM 重构：fd 化设计
 
-> **计划中**。将共享内存从硬编码 vaddr + `shm_regions[]` 数组模型重构为 fd 模型，对齐 Linux `memfd_create` + `mmap` + `SCM_RIGHTS` 语义。
+> **已完成**。共享内存已从硬编码 vaddr + `shm_regions[]` 数组模型重构为 fd 模型，对齐 Linux `memfd_create` + `mmap` + `SCM_RIGHTS` 语义。
 
 ## 动机
 
@@ -275,74 +275,54 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 }
 ```
 
-## 实现顺序
+## 实现状态
 
-### Phase 1 — 基础设施（不改驱动行为）
-
-```
-1. kernel/proc.h
-   - 定义 struct shm
-   - struct file 加 FD_SHM + .shm 字段
-   - struct mmap_region 加 .shm_obj 字段
-   - 定义 SHM_KERNEL 常量
-   - 声明 shm_get()/shm_put() 辅助函数
-
-2. arch/x64/utils.h  + __syscall6
-
-3. kernel/trap.h
-   - syscall_fn_t 改 6 参
-
-4. kernel/trap.cc
-   - 所有 syscall 实现签名加 `, uint64_t arg6`
-   - syscall_dispatch 传 tf->r9
-```
-
-### Phase 2 — 核心逻辑
+### Phase 1 — 基础设施 ✅
 
 ```
-5. kernel/trap.cc
-   - 实现 shm_get()/shm_put()
-   - 重写 sys_shm_create → 返回 fd
-   - 重写 sys_shm_attach → 返回 fd（过渡期，与原 mode=0/1 逻辑解耦）
-   - 重写 sys_mmap → 6 参 + SHM fd 映射路径
-   - sys_munmap → 识别 mmap_region.shm_obj 并 shm_put
-   - sys_close → FD_SHM 路径 shm_put
-   - register_kernel_shm → 接受 struct shm * 指针
-
-6. common/syscall.h
-   - sys_mmap 签名改 6 参
-   - sys_shm_create/sys_shm_attach 返回 int（fd）
+1. kernel/proc.h  ✅ — struct shm、FD_SHM、mmap_region.shm_obj、SHM_KERNEL、shm_get/shm_put
+2. arch/x64/utils.h  ✅ — __syscall6 内联汇编
+3. kernel/trap.h  ✅ — syscall_fn_t 改 6 参
+4. kernel/trap.cc  ✅ — 所有 syscall 签名加 arg6，syscall_dispatch 传 r9
 ```
 
-### Phase 3 — 用户态适配
+### Phase 2 — 核心逻辑 ✅
 
 ```
-7. user/lib/sys_shm.cc — shm_create/shm_attach/shm_attach_kernel 适配新内核
-8. user/lib/sys_mman.cc — mmap 6 参
-9. driver/kbd_driver.cc — fd + mmap
-10. driver/kms_driver.cc — fd + mmap
-11. driver/terminal.cc — fd + mmap
-12. driver/fs_driver.cc — fd + mmap
-13. driver/display.h — display_backend_init/display_client_init 内联调用适配
-14. init/init.c, shell/shell.cc — 检查 SHM 调用
+5. kernel/trap.cc  ✅ — shm_get/shm_put、sys_shm_create 返回 fd、sys_mmap 6 参 SHM fd 路径、
+                        sys_munmap shm_obj、sys_close FD_SHM 路径、register_kernel_shm 新接口
+6. common/syscall.h  ✅ — sys_mmap 6 参、sys_shm_create/shm_attach 返回 int(fd)
 ```
 
-### Phase 4 — 清理
+### Phase 3 — 用户态适配 ✅
 
 ```
-15. kernel/proc.h — 删 shm_region、SHM_VADDR_BASE、MAX_SHM_PER_PROC
-16. kernel/trap.cc — 删 kernel_shm_table、register_kernel_shm 旧实现
-17. kernel/proc.cc — proc_reap 删 shm_regions 扫描、proc_init 删 shm_regions 清零
-18. common/shm.h — 确认结构体定义兼容
-19. Build & test
+7. user/lib/sys_shm.cc  ✅ — shm_create/shm_attach/shm_attach_kernel 适配 fd+mmap
+8. user/lib/sys_mman.cc  ✅ — mmap 6 参
+9. driver/kbd_driver.cc  ✅ — fd + mmap
+10. driver/kms_driver.cc  ✅ — fd + mmap
+11. driver/terminal.cc  ✅ — fd + mmap
+12. driver/fs_driver.cc  ✅ — fd + mmap
+13. driver/display.h  ✅ — 内联调用适配
+14. init/init.c, shell/shell.cc  ✅ — SHM 调用适配
+```
+
+### Phase 4 — 清理 ✅
+
+```
+15. kernel/proc.h  ✅ — 删除 shm_region、SHM_VADDR_BASE、MAX_SHM_PER_PROC
+16. kernel/trap.cc  ✅ — 删除 kernel_shm_table、register_kernel_shm 旧实现
+17. kernel/proc.cc  ✅ — proc_reap 删 shm_regions 扫描、proc_init 删 shm_regions 清零
+18. common/shm.h  ✅ — 结构体定义兼容
+19. Build & test  ✅ — 编译通过
 ```
 
 ## 与其他文档的关系
 
 | 文档 | 关系 |
 |------|------|
-| `doc/design/ipc.md` | SHM fd 化是 P1 项的前置条件（"SHM 改为 fd 模式"） |
-| `doc/design/dynamic_shm_migration.md` | 本文完成后，dynamic_shm_migration.md 描述的历史过渡方案被彻底替代 |
+| `doc/design/ipc.md` | SHM fd 化作为 P1 项的前置条件已完成（"SHM 改为 fd 模式"） |
+| `doc/design/dynamic_shm_migration.md` | 本文完成后，dynamic_shm_migration.md 描述的历史过渡方案已被彻底替代 |
 | `doc/design/kms.md` | Display SHM 从 `shm_attach` 改为 `mmap(fd, ...)` |
 | `doc/design/kbd.md` | USB HID SHM + kbd SHM 均改为 fd 模式 |
 | `doc/design/libc.md` | `sys_mmap` 签名变化影响 libc 封装 |

@@ -42,6 +42,16 @@
 #define SYS_BLOCK_ASYNC  34
 #define SYS_OPEN_DEV     35
 #define SYS_INSTALL_FD   36
+#define SYS_SOCKET       37
+#define SYS_BIND         38
+#define SYS_LISTEN       39
+#define SYS_ACCEPT       40
+#define SYS_CONNECT      41
+#define SYS_SOCKETPAIR   42
+#define SYS_SENDMSG      43
+#define SYS_RECVMSG      44
+#define SYS_SHUTDOWN     45
+#define SYS_POLL         46
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.

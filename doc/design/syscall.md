@@ -2,7 +2,7 @@
 
 ## 概述
 
-使用 SYSCALL/SYSRET 指令（MSR LSTAR）替代 int 0x80 进行系统调用，与 `__alltraps`/`__trapret` 独立。当前 NR_SYSCALL=29（编号 0-28 连续无空洞）。int 0x80 路径已移除。
+使用 SYSCALL/SYSRET 指令（MSR LSTAR）替代 int 0x80 进行系统调用，与 `__alltraps`/`__trapret` 独立。当前 NR_SYSCALL=47（编号 0-46 连续无空洞）。int 0x80 路径已移除。
 
 ## SYSCALL/SYSRET 设计决策
 
@@ -103,7 +103,7 @@ syscall_fast_entry:
 ## syscall_dispatch 与系统调用表
 
 ```c
-#define NR_SYSCALL 29
+#define NR_SYSCALL 47
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0:  获取 PID
     sys_yield,          // 1:  主动让出 CPU
@@ -114,34 +114,52 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_exit,           // 6:  进程退出
     sys_waitpid,        // 7:  等待子进程退出
     sys_spawn,          // 8:  创建子进程
-    sys_mmap,           // 9:  匿名内存映射
+    sys_mmap,           // 9:  内存映射（6 参：addr/size/prot/flags/fd/offset）
     sys_munmap,         // 10: 解除内存映射
     sys_serial_write,   // 11: 串口输出
     sys_fb_info,        // 12: 获取 framebuffer 信息
-    sys_shm_create,     // 13: 创建共享内存
-    sys_shm_attach,     // 14: 附加共享内存
+    sys_shm_create,     // 13: 创建 SHM fd（返回 fd + struct shm）
+    sys_shm_attach,     // 14: 附加 SHM（过渡期，返回 fd）
     sys_pipe,           // 15: 创建 pipe
-    sys_write,          // 16: 写 fd
-    sys_read,           // 17: 读 fd
-    sys_close,          // 18: 关闭 fd
-    sys_load_dev,       // 19: 注册驱动
-    sys_lookup_dev,     // 20: 查询驱动 PID
+    sys_write,          // 16: 写 fd（PIPE/FILE/SOCKET dispatch）
+    sys_read,           // 17: 读 fd（PIPE/FILE/SOCKET dispatch）
+    sys_close,          // 18: 关闭 fd（PIPE/FILE/SOCKET dispatch）
+    sys_load_dev,       // 19: 注册驱动到 dev_table
+    sys_dev_msg,        // 20: fd 版变长消息（替代 sys_lookup_dev）
     sys_notify,         // 21: 异步通知（消息入队）
     sys_gettime,        // 22: 全局单调时钟（纳秒）
     sys_clock,          // 23: per-process CPU 时间（纳秒）
     sys_msg,            // 24: 变长消息请求（≤64KB）
     sys_msg_resp,       // 25: 变长消息回复
     sys_ioperm,         // 26: I/O 端口权限
-    sys_dup2,           // 27: 复制 fd
+    sys_dup2,           // 27: 复制 fd（PIPE/FILE/SOCKET dispatch）
     sys_fcntl,          // 28: 文件控制
+    sys_dma_alloc,      // 29: 物理连续 DMA 分配
+    sys_dma_free,       // 30: 释放 DMA 缓冲区
+    sys_pci_dev_info,   // 31: PCI 设备查询（bus/dev/func → info）
+    sys_block_read,     // 32: 块设备读
+    sys_block_write,    // 33: 块设备写
+    sys_block_async,    // 34: 异步块 I/O（RECV_NOTIFY 回调）
+    sys_open_dev,       // 35: 打开设备节点（返回 fd | target_pid<<32）
+    sys_install_fd,     // 36: 注册 FD_FILE fd（libc open 用）
+    sys_socket,         // 37: socket(AF_UNIX, SOCK_STREAM, 0) → fd
+    sys_bind,           // 38: bind(fd, addr, addrlen)
+    sys_listen,         // 39: listen(fd, backlog)
+    sys_accept,         // 40: accept(fd, addr, addrlen)
+    sys_connect,        // 41: connect(fd, addr, addrlen)
+    sys_socketpair,     // 42: socketpair(domain, type, proto, sv[2])
+    sys_sendmsg,        // 43: sendmsg(fd, msg, flags)
+    sys_recvmsg,        // 44: recvmsg(fd, msg, flags)
+    sys_shutdown,       // 45: shutdown(fd, how)
+    sys_poll,           // 46: poll(fds, nfds, timeout_ms)
 };
 ```
 
-参数从 trapframe 提取：RDI/RSI/RDX/R10/R8（Linux 约定），返回值写回 tf->rax。超出范围返回 ENOSYS。
+参数从 trapframe 提取：RDI/RSI/RDX/R10/R8/R9（Linux 约定，6 参 syscall），返回值写回 tf->rax。超出范围返回 ENOSYS。
 
 ## 用户态封装
 
-底层 `__syscall0`-`__syscall5` 定义在 `arch/x64/utils.h`（内联汇编）。语义封装定义在 `common/syscall.h`：
+底层 `__syscall0`-`__syscall6` 定义在 `arch/x64/utils.h`（内联汇编）。语义封装定义在 `common/syscall.h`：
 
 ```c
 static inline uint64_t __syscall0(uint64_t n) {
@@ -150,6 +168,17 @@ static inline uint64_t __syscall0(uint64_t n) {
     return ret;
 }
 // syscall1..syscall5 类似，传入 1-5 个参数
+
+// 6 参数 syscall（sys_mmap 需要，传递 r9）
+static inline int64_t __syscall6(int64_t num, int64_t a1, int64_t a2, int64_t a3,
+                                 int64_t a4, int64_t a5, int64_t a6) {
+    int64_t ret;
+    __asm__ volatile("syscall"
+        : "=a"(ret)
+        : "a"(num), "D"(a1), "S"(a2), "d"(a3), "r"(a4), "r8"(a5), "r9"(a6)
+        : "rcx", "r11", "memory");
+    return ret;
+}
 ```
 
 ### 返回值约定
@@ -170,12 +199,15 @@ sys_recv 接收的消息类型（定义在 `common/syscall.h`）：
 
 sys_recv 签名：`sys_recv(buf, data_buf, data_buf_len, timeout_ms)`，timeout_ms=0 无限等待。
 
-## 双层 IPC 机制
+## IPC 机制
 
 | 层 | syscall | 载荷 | 用途 |
 |----|---------|------|------|
 | 控制信令 | sys_req/sys_resp | ≤56B 内联 | 短请求/回复（kbd bind/unbind 等） |
-| 数据传输 | sys_msg/sys_msg_resp | ≤64KB 变长 | 文件 I/O、大块数据 |
+| 数据传输 | sys_msg/sys_msg_resp | ≤64KB 变长 | 文件 I/O（待迁移 socket） |
+| 双向字节流 | socket/sendmsg/recvmsg | skb 链表 ≤64KB | AF_UNIX SOCK_STREAM + SCM_RIGHTS fd 传递 |
+| 事件多路复用 | poll | pollfd 数组 | 统一监听 pipe/socket/dev fd 事件 |
+| 匿名管道 | pipe/write/read/close | 4KB ring buffer | stdin/stdout 单向数据传输 |
 
 sys_req：同步阻塞，发送 56 字节请求到目标进程，目标进程 sys_recv 收到 RECV_REQ，处理完后 sys_resp 回复，发送方被唤醒。
 
