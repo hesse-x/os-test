@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
-#include "common/syscall.h"
+#include <sys/pci.h>
 
 static const char *bar_type_name(uint8_t type) {
     switch (type) {
@@ -19,7 +19,7 @@ int main(void) {
         for (int dev = 0; dev < 32; dev++) {
             for (int func = 0; func < 8; func++) {
                 struct pci_dev_info info;
-                int rc = sys_pci_dev_info(bus, dev, func, &info);
+                int rc = pci_dev_info(bus, dev, func, &info);
                 if (rc != 0) continue;
 
                 printf("%02x:%02x.%x vendor=%04x device=%04x class=%04x",

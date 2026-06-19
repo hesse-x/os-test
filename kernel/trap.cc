@@ -50,6 +50,15 @@ void register_irq(int vec, irq_handler_t fn) {
   }
 }
 
+// Block I/O direction constants
+#define BLOCK_DIR_READ  0
+#define BLOCK_DIR_WRITE 1
+
+// lseek whence constants
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
 // ===================== File protocol for FD_FILE <-> fs_driver IPC =====================
 // Structs must match driver/fs_driver.cc exactly (standard ABI, no packed)
 
@@ -309,7 +318,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 46
+#define NR_SYSCALL 45
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -322,7 +331,7 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_spawn,          // 8
     sys_mmap,           // 9
     sys_munmap,         // 10
-    sys_fb_info,        // 11: was SYS_SERIAL_WRITE
+    sys_fb_info,        // 11
     sys_shm_create,     // 12
     sys_shm_attach,     // 13
     sys_pipe,           // 14
@@ -330,33 +339,32 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_read,           // 16
     sys_close,          // 17
     sys_load_dev,       // 18
-    sys_dev_msg,        // 19
-    sys_notify,         // 20
-    sys_gettime,        // 21
-    sys_clock,          // 22
-    sys_msg,            // 23
-    sys_msg_resp,       // 24
-    sys_ioperm,         // 25
-    sys_dup2,           // 26
-    sys_fcntl,          // 27
-    sys_dma_alloc,      // 28
-    sys_dma_free,       // 29
-    sys_pci_dev_info,   // 30
-    sys_block_read,     // 31
-    sys_block_write,    // 32
-    sys_block_async,    // 33
-    sys_open_dev,       // 34
-    sys_install_fd_impl, // 35
-    sys_socket,         // 36
-    sys_bind,           // 37
-    sys_listen,         // 38
-    sys_accept,         // 39
-    sys_connect,        // 40
-    sys_socketpair,     // 41
-    sys_sendmsg,        // 42
-    sys_recvmsg,        // 43
-    sys_shutdown,       // 44
-    sys_poll,           // 45
+    sys_notify,         // 19
+    sys_gettime,        // 20
+    sys_clock,          // 21
+    sys_msg,            // 22
+    sys_msg_resp,       // 23
+    sys_ioperm,         // 24
+    sys_dup2,           // 25
+    sys_fcntl,          // 26
+    sys_dma_alloc,      // 27
+    sys_dma_free,       // 28
+    sys_pci_dev_info,   // 29
+    sys_block_io,       // 30
+    sys_block_async,    // 31
+    sys_open_dev,       // 32
+    sys_install_fd_impl, // 33
+    sys_socket,         // 34
+    sys_bind,           // 35
+    sys_listen,         // 36
+    sys_accept,         // 37
+    sys_connect,        // 38
+    sys_socketpair,     // 39
+    sys_sendmsg,        // 40
+    sys_recvmsg,        // 41
+    sys_shutdown,       // 42
+    sys_poll,           // 43
+    sys_lseek,          // 44
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -1175,12 +1183,14 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
     return (int)sys_msg_to(target_pid, (void*)req, req_len, resp, resp_len);
 }
 
-// ===================== sys_block_read / sys_block_write =====================
-// Synchronous polling path. Returns EBUSY if async request is active.
-uint64_t sys_block_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
+// ===================== sys_block_io =====================
+// Unified block I/O: dir=0 read, dir=1 write. Synchronous polling path.
+// Returns EBUSY if async request is active.
+uint64_t sys_block_io(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t, uint64_t) {
     uint32_t lba = (uint32_t)arg1;
     void *buf = (void *)arg2;
     uint32_t count = (uint32_t)arg3;
+    uint8_t dir = (uint8_t)arg4;
 
     uint64_t ptr = (uint64_t)buf;
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL)
@@ -1199,35 +1209,12 @@ uint64_t sys_block_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, u
 
     uint64_t flags;
     spin_lock_irqsave(&ahci_lock, &flags);
-    int rc = ahci_read_lba(lba, count, buf);
-    spin_unlock_irqrestore(&ahci_lock, flags);
-
-    return (uint64_t)(rc < 0 ? -rc : 0);
-}
-
-uint64_t sys_block_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
-    uint32_t lba = (uint32_t)arg1;
-    const void *buf = (const void *)arg2;
-    uint32_t count = (uint32_t)arg3;
-
-    uint64_t ptr = (uint64_t)buf;
-    if (!ptr || ptr >= 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
-
-    uint64_t end = ptr + (uint64_t)count * 512;
-    if (end < ptr || end > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
-
-    if (count == 0 || count > AHCI_MAX_SECTORS)
-        return (uint64_t)-EINVAL;
-
-    // Safety: refuse if async request is active
-    if (ahci_is_busy())
-        return (uint64_t)-EBUSY;
-
-    uint64_t flags;
-    spin_lock_irqsave(&ahci_lock, &flags);
-    int rc = ahci_write_lba(lba, count, buf);
+    int rc;
+    if (dir == BLOCK_DIR_WRITE) {
+        rc = ahci_write_lba(lba, count, buf);
+    } else {
+        rc = ahci_read_lba(lba, count, buf);
+    }
     spin_unlock_irqrestore(&ahci_lock, flags);
 
     return (uint64_t)(rc < 0 ? -rc : 0);
@@ -1679,7 +1666,6 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_
             return (uint64_t)-EINVAL;
 
         if (proc->fd_table[fd].file_data.offset >= proc->fd_table[fd].file_data.file_size) {
-            serial_puts("r:EOF\n");
             return 0;  // EOF
         }
 
@@ -1695,8 +1681,6 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
-
-        { serial_puts("r:"); char hx[]="0123456789ABCDEF"; char hb[32]; int p=0; uint64_t v=proc->fd_table[fd].file_data.offset; for(int i=15;i>=0;i--){hb[p++]=hx[(v>>(i*4))&0xF];} hb[p++]=':'; v=len; for(int i=15;i>=0;i--){hb[p++]=hx[(v>>(i*4))&0xF];} hb[p++]='\n'; serial_puts(hb); }
 
         // Build READ request
         file_io_req req = {};
@@ -1996,7 +1980,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
     return 0;
 }
 
-// sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — syscall 23 (变长消息请求)
+// sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — syscall 22 (变长消息请求)
 // PID-based variant.
 // 返回: 0=成功, 负errno
 uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t) {
@@ -2026,43 +2010,7 @@ uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uin
     return sys_msg_to(target_pid, msg_buf, msg_len, reply_buf, reply_len);
 }
 
-// sys_dev_msg(fd, msg_buf, msg_len, reply_buf, reply_len) — syscall 19 (fd-based 变长消息请求)
-// 从当前进程的 fd_table 中提取 target PID，委托 sys_msg_to。
-// 返回: 0=成功, 负errno
-uint64_t sys_dev_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t) {
-    int fd = (int)arg1;
-    void *msg_buf = (void *)arg2;
-    size_t msg_len = (size_t)arg3;
-    void *reply_buf = (void *)arg4;
-    size_t reply_len = (size_t)arg5;
-
-    proc_t *proc = current_proc;
-
-    // Validate fd
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->fd_table[fd].type != FD_DEV) return (uint64_t)-EBADF;
-
-    // Validate msg_len
-    if (msg_len == 0 || msg_len > 65536) return (uint64_t)-EINVAL;
-
-    // Validate user pointers
-    uint64_t msg_ptr = (uint64_t)msg_buf;
-    if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
-        msg_ptr + msg_len > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
-
-    uint64_t rep_ptr = (uint64_t)reply_buf;
-    if (!rep_ptr || rep_ptr >= 0xFFFFFFFF80000000ULL ||
-        rep_ptr + reply_len > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
-
-    pid_t target_pid = proc->fd_table[fd].target_pid;
-    if (target_pid < 0 || target_pid >= MAX_PROC) return (uint64_t)-ESRCH;
-
-    return sys_msg_to(target_pid, msg_buf, msg_len, reply_buf, reply_len);
-}
-
-// sys_msg_resp(resp_buf, resp_len) — syscall 24 (回复当前 MSG 调用者)
+// sys_msg_resp(resp_buf, resp_len) — syscall 23 (回复当前 MSG 调用者)
 // 返回: 0=成功, 正数=errno
 uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
     void *resp_buf = (void *)arg1;
@@ -2367,4 +2315,45 @@ uint64_t sys_dma_free(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uin
     }
 
     return (uint64_t)-EINVAL;
+}
+
+// sys_lseek(fd, offset, whence) — syscall 44 (文件偏移定位)
+// 更新内核 file_data.offset。FD_PIPE/SOCKET/DEV 返回 -ESPIPE。
+// Returns: new offset on success, negative errno on failure
+uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
+    int fd = (int)arg1;
+    int64_t offset = (int64_t)arg2;
+    int whence = (int)arg3;
+
+    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
+
+    proc_t *proc = current_proc;
+    if (proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
+
+    // PIPE/SOCKET/DEV do not support seek
+    if (proc->fd_table[fd].type == FD_PIPE ||
+        proc->fd_table[fd].type == FD_SOCKET ||
+        proc->fd_table[fd].type == FD_DEV)
+        return (uint64_t)-ESPIPE;
+
+    if (proc->fd_table[fd].type != FD_FILE)
+        return (uint64_t)-ESPIPE;
+
+    uint64_t new_offset;
+    switch (whence) {
+    case SEEK_SET:
+        new_offset = (uint64_t)offset;
+        break;
+    case SEEK_CUR:
+        new_offset = proc->fd_table[fd].file_data.offset + offset;
+        break;
+    case SEEK_END:
+        new_offset = proc->fd_table[fd].file_data.file_size + offset;
+        break;
+    default:
+        return (uint64_t)-EINVAL;
+    }
+
+    proc->fd_table[fd].file_data.offset = new_offset;
+    return (uint64_t)new_offset;
 }

@@ -10,7 +10,7 @@
 #include <sys/device.h>
 #include <sys/wait.h>
 #include <sys/ipc.h>
-#include "common/syscall.h"
+#include <sys/process.h>
 #include "common/dev.h"
 
 static int spawn_service(const char *path) {
@@ -29,9 +29,9 @@ static int spawn_service(const char *path) {
     printf("nread: 0x%lx after read\n", nread);
     close(fd);
 
-    printf("calling sys_spawn...\n");
-    int64_t pid = sys_spawn(buf, size);
-    printf("sys_spawn returned pid=%ld\n", pid);
+    printf("calling spawn...\n");
+    pid_t pid = spawn(buf, size);
+    printf("spawn returned pid=%d\n", pid);
     free(buf);
 
     return (pid > 0) ? (int)pid : -1;

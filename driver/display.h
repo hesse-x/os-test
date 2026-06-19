@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <sys/device.h>
 #include <sys/ipc.h>
+#include <unistd.h>
 #include <fcntl.h>
 #include "common/macro.h"
 #include "driver/font.h"
@@ -212,7 +213,7 @@ static inline int display_backend_init() {
     }
 
     // Register as DEV_KMS
-    device_register(sys_getpid(), DEV_KMS);
+    device_register(getpid(), DEV_KMS);
 
     return 0;
 }

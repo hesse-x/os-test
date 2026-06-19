@@ -20,10 +20,10 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/process.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/macro.h"
-#include "common/syscall.h"
 #include "input.h"
 #include "driver/display.h"
 
@@ -411,7 +411,7 @@ int main() {
             if (fd >= 0 && buf) {
                 read(fd, buf, st.st_size);
                 close(fd);
-                sys_spawn(buf, (uint64_t)st.st_size);
+                spawn(buf, st.st_size);
                 free(buf);
             }
         }

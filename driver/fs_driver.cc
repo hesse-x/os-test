@@ -8,10 +8,11 @@
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/device.h>
+#include <sys/block.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/errno.h"
-#include "common/syscall.h"
+/* syscall.h included via <sys/ipc.h> and <sys/block.h> */
 
 // Open flags (must match user/include/fcntl.h)
 #define O_WRONLY    1
@@ -32,13 +33,13 @@ static uint32_t spf32;
 
 // ===================== Disk I/O helpers =====================
 
-// Synchronous disk I/O via kernel syscalls
+// Synchronous disk I/O via kernel syscalls (unified BLOCK_IO)
 static int disk_read_sync(uint32_t lba, uint32_t count, void *buf) {
-    return sys_block_read(lba, buf, count);
+    return block_read(lba, buf, count);
 }
 
 static int disk_write_sync(uint32_t lba, uint32_t count, const void *data) {
-    return sys_block_write(lba, data, count);
+    return block_write(lba, data, count);
 }
 
 // ===================== disk_io: disk I/O descriptor =====================
@@ -58,7 +59,7 @@ struct disk_io {
 // Async submit: calls sys_block_async, completion arrives via RECV_NOTIFY.
 // io->complete() is NOT called here — it will be called when RECV_NOTIFY arrives.
 static void submit_disk_io(disk_io *io) {
-    int rc = sys_block_async(io->lba, io->buf, io->count, io->dir);
+    int rc = block_async(io->lba, io->buf, io->count, io->dir);
     if (rc < 0) {
         // Immediate error (queue full, etc.) — call complete with error
         io->complete(io);
@@ -362,7 +363,14 @@ struct dir_slot {
 #define FILE_CMD_MKDIR     7
 #define FILE_CMD_RAW_READ  8
 #define FILE_CMD_STAT      9
-#define FILE_CMD_PING     10
+#define FILE_CMD_UNLINK   10
+#define FILE_CMD_RMDIR    11
+#define FILE_CMD_FSTAT    12
+#define FILE_CMD_OPENDIR  13
+#define FILE_CMD_DIRENT   14
+#define FILE_CMD_CLOSEDIR 15
+#define FILE_CMD_SEEK     16
+#define FILE_CMD_ACCESS   17
 
 struct file_req {
     uint32_t cmd;
@@ -397,7 +405,12 @@ enum op_type {
     OP_CREATE,
     OP_MKDIR,
     OP_STAT,
-    OP_WRITE
+    OP_WRITE,
+    OP_UNLINK,
+    OP_RMDIR,
+    OP_FSTAT,
+    OP_OPENDIR,
+    OP_DIRENT
 };
 
 // Write state machine phases
@@ -1085,6 +1098,11 @@ struct session_open_file {
     int      dir_entry_index;     // short-name entry index in that cluster
     bool     dir_entry_valid;     // true if dir cache populated
     uint32_t flags;               // open flags (O_WRONLY, O_RDWR, O_APPEND)
+    bool     is_dir_session;      // true for opendir sessions
+    // Directory scan state (for opendir/readdir sessions)
+    uint32_t dir_cur_cluster;     // current cluster during dir scan
+    int      dir_entry_idx;       // current entry index during scan
+    char     dir_entry_lfn[256];  // LFN accumulation buffer during dir scan
     uint64_t ra_prev_offset;
     uint32_t ra_prev_count;
     bool     ra_sequential;
@@ -1111,6 +1129,10 @@ static struct client_session *get_session(pid_t pid) {
                 sessions[i].open_files[j].dir_entry_index = 0;
                 sessions[i].open_files[j].dir_entry_valid = false;
                 sessions[i].open_files[j].flags = 0;
+                sessions[i].open_files[j].is_dir_session = false;
+                sessions[i].open_files[j].dir_cur_cluster = 0;
+                sessions[i].open_files[j].dir_entry_idx = 0;
+                sessions[i].open_files[j].dir_entry_lfn[0] = 0;
             }
             return &sessions[i];
         }
@@ -3496,9 +3518,436 @@ extern "C" void _start() {
             break;
         }
 
-        case FILE_CMD_PING: {
+        case FILE_CMD_CLOSEDIR: {
+            // Close directory session fd — synchronous
             struct file_resp resp;
             resp.status = 0; resp.fd = 0; resp.file_size = 0; resp.count = 0; resp.total = 0;
+            if (freq->fs_fd < MAX_SESSION_FDS) {
+                sess->open_files[freq->fs_fd].used = false;
+                sess->open_files[freq->fs_fd].is_dir_session = false;
+            }
+            msg_resp(&resp, sizeof(resp));
+            break;
+        }
+
+        case FILE_CMD_SEEK: {
+            // Update session fd offset — synchronous
+            struct file_resp resp;
+            resp.status = 0; resp.fd = 0; resp.file_size = 0; resp.count = 0; resp.total = 0;
+            if (freq->fs_fd < MAX_SESSION_FDS && sess->open_files[freq->fs_fd].used) {
+                session_open_file *f = &sess->open_files[freq->fs_fd];
+                uint32_t new_ofs;
+                switch (freq->flags) { // reuse flags field for whence (SEEK_SET/CUR/END)
+                case 0: new_ofs = (uint32_t)freq->offset; break;        // SEEK_SET
+                case 1: new_ofs = (uint32_t)(f->offset + freq->offset); break; // SEEK_CUR
+                case 2: new_ofs = (uint32_t)(f->file_size + freq->offset); break; // SEEK_END
+                default: resp.status = -EINVAL;
+                }
+                if (resp.status == 0) f->offset = new_ofs;
+            } else { resp.status = -EBADF; }
+            msg_resp(&resp, sizeof(resp));
+            break;
+        }
+
+        case FILE_CMD_ACCESS: {
+            // Check if file exists — synchronous stat path check
+            struct file_resp resp;
+            resp.status = 0; resp.fd = 0; resp.file_size = 0; resp.count = 0; resp.total = 0;
+            // Quick sync check: resolve path non-recurisve
+            resolve_state rs;
+            memset(&rs, 0, sizeof(rs));
+            rs.path = freq->path;
+            rs.path_pos = 0; rs.comp_start = 0; rs.comp_len = 0;
+            rs.dir_cluster = root_cluster; rs.current_cluster = root_cluster;
+            rs.entry_idx = 0; rs.lfn_buf[0] = '\0';
+            rs.found = false; rs.is_parent = false; rs.leaf_len = 0;
+            rs.phase = RS_INIT;
+            int r = resolve_step(&rs, NULL);
+            if (r == RESOLVE_ERROR || !rs.found) { resp.status = -ENOENT; }
+            msg_resp(&resp, sizeof(resp));
+            break;
+        }
+
+        case FILE_CMD_FSTAT: {
+            // Stat by session fd — synchronous
+            struct file_resp resp;
+            resp.status = 0; resp.fd = 0; resp.file_size = 0; resp.count = 0; resp.total = 0;
+            if (freq->fs_fd < MAX_SESSION_FDS && sess->open_files[freq->fs_fd].used) {
+                session_open_file *f = &sess->open_files[freq->fs_fd];
+                resp.file_size = f->file_size;
+                // Also encode attr in fd field for simplicity
+                resp.fd = f->is_dir_session ? 0x10 : 0x20;
+            } else { resp.status = -EBADF; }
+            msg_resp(&resp, sizeof(resp));
+            break;
+        }
+
+        case FILE_CMD_OPENDIR: {
+            // Open directory — resolve path, allocate session fd
+            struct file_resp resp;
+            resp.status = 0; resp.fd = 0; resp.file_size = 0; resp.count = 0; resp.total = 0;
+
+            // Resolve path synchronously
+            resolve_state rs;
+            memset(&rs, 0, sizeof(rs));
+            rs.path = freq->path;
+            rs.path_pos = 0; rs.comp_start = 0; rs.comp_len = 0;
+            rs.dir_cluster = root_cluster; rs.current_cluster = root_cluster;
+            rs.entry_idx = 0; rs.lfn_buf[0] = '\0';
+            rs.found = false; rs.is_parent = false; rs.leaf_len = 0;
+            rs.phase = RS_INIT;
+
+            // Resolve path but we may need sync I/O — use sync fallback
+            // Check root first
+            if (freq->path[0] == '/' && freq->path[1] == '\0') {
+                // Root directory
+                int fd = session_alloc_fd(sess);
+                if (fd < 0) { resp.status = -EMFILE; msg_resp(&resp, sizeof(resp)); break; }
+                sess->open_files[fd].used = true;
+                sess->open_files[fd].is_dir_session = true;
+                sess->open_files[fd].start_cluster = root_cluster;
+                sess->open_files[fd].dir_cur_cluster = root_cluster;
+                sess->open_files[fd].dir_entry_idx = 0;
+                sess->open_files[fd].offset = 0;
+                resp.fd = (uint32_t)fd;
+                msg_resp(&resp, sizeof(resp));
+                break;
+            }
+
+            // Synchronous path resolution using sync disk I/O
+            rs.phase = RS_INIT;
+            int did_async = 0;
+            while (1) {
+                int r2 = resolve_step(&rs, NULL);
+                if (r2 == RESOLVE_ASYNC) {
+                    // Need sync I/O: use a simple retry approach
+                    // Since we can't do async, just try cache
+                    if (rs.phase == RS_READ_CLUSTER) {
+                        int slot = read_cluster_sync(rs.current_cluster);
+                        if (slot < 0) { resp.status = -EIO; break; }
+                        rs.phase = RS_SCAN_ENTRIES;
+                        continue;
+                    }
+                    if (rs.phase == RS_READ_FAT) {
+                        uint32_t fat_offset = rs.current_cluster * 4;
+                        uint32_t fat_sector = fat_start_lba + (fat_offset / 512);
+                        int slot = fat_cache_read_sync(fat_sector);
+                        if (slot < 0) { resp.status = -EIO; break; }
+                        continue;
+                    }
+                    resp.status = -EIO; break;
+                }
+                if (r2 == RESOLVE_ERROR || !rs.found) { resp.status = -ENOENT; break; }
+                // Found
+                if (!(rs.result.attr & 0x10)) { resp.status = -ENOTDIR; break; }
+                uint32_t dir_cluster = ((uint32_t)rs.result.fst_clus_hi << 16) | rs.result.fst_clus_lo;
+                if (dir_cluster == 0) dir_cluster = root_cluster;
+                int fd = session_alloc_fd(sess);
+                if (fd < 0) { resp.status = -EMFILE; break; }
+                sess->open_files[fd].used = true;
+                sess->open_files[fd].is_dir_session = true;
+                sess->open_files[fd].start_cluster = dir_cluster;
+                sess->open_files[fd].dir_cur_cluster = dir_cluster;
+                sess->open_files[fd].dir_entry_idx = 0;
+                sess->open_files[fd].offset = 0;
+                resp.fd = (uint32_t)fd;
+                break;
+            }
+            msg_resp(&resp, sizeof(resp));
+            break;
+        }
+
+        case FILE_CMD_DIRENT: {
+            // Read next dirent from directory session fd — synchronous
+            struct file_resp resp;
+            resp.status = 0; resp.fd = 0; resp.file_size = 0; resp.count = 0; resp.total = 0;
+
+            if (freq->fs_fd >= MAX_SESSION_FDS || !sess->open_files[freq->fs_fd].used ||
+                !sess->open_files[freq->fs_fd].is_dir_session) {
+                resp.status = -EBADF;
+                msg_resp(&resp, sizeof(resp));
+                break;
+            }
+
+            session_open_file *d = &sess->open_files[freq->fs_fd];
+            fs_dirent *out = (fs_dirent *)resp.data;
+            uint32_t out_count = 0;
+            uint32_t max_out = (MAX_REPLY_DATA - sizeof(file_resp)) / sizeof(fs_dirent);
+            if (max_out > 8) max_out = 8; // limit per call
+
+            // Scan directory entries
+            while (out_count < max_out) {
+                uint32_t cc = d->dir_cur_cluster;
+                if (cc < 2 || cc >= 0x0FFFFFF8) break; // end of chain
+
+                int slot = cache_lookup(cc);
+                if (slot < 0) {
+                    // Sync read
+                    slot = read_cluster_sync(cc);
+                    if (slot < 0) { resp.status = -EIO; break; }
+                }
+
+                uint8_t *data = cache[slot].data;
+                int entries = bytes_per_cluster / 32;
+                bool advanced = false;
+
+                for (; d->dir_entry_idx < entries; d->dir_entry_idx++) {
+                    fat_dir_entry *de = (fat_dir_entry *)(data + d->dir_entry_idx * 32);
+                    if (de->name[0] == 0x00) { goto dirent_done; }
+                    if (de->name[0] == 0xE5) { d->dir_entry_lfn[0] = 0; continue; }
+                    if (de->attr == 0x0F) {
+                        collect_lfn_entry(de, d->dir_entry_lfn);
+                        continue;
+                    }
+                    if (de->name[0] == '.') {
+                        d->dir_entry_lfn[0] = 0;
+                        continue;
+                    }
+
+                    // Valid entry — output
+                    fs_dirent *e = &out[out_count];
+                    if (d->dir_entry_lfn[0] != 0) {
+                        int j = 0;
+                        while (d->dir_entry_lfn[j] && j < 255) { e->name[j] = d->dir_entry_lfn[j]; j++; }
+                        e->name[j] = '\0';
+                    } else {
+                        convert_83_to_name(de->name, de->nt_res, e->name, 256);
+                    }
+                    e->size = de->file_size;
+                    e->date = de->wrt_date;
+                    e->time = de->wrt_time;
+                    e->attr = de->attr;
+                    out_count++;
+                    d->dir_entry_lfn[0] = 0;
+                    advanced = true;
+                    break; // return one entry per call for simplicity
+                }
+
+                if (!advanced) {
+                    // Move to next cluster
+                    uint32_t next = fat_read_entry_cached(cc);
+                    if (next == 0xFFFFFFFF) {
+                        uint32_t fat_offset = cc * 4;
+                        uint32_t fat_sector = fat_start_lba + (fat_offset / 512);
+                        if (fat_cache_read_sync(fat_sector) < 0) { break; }
+                        continue;
+                    }
+                    if (next >= 0x0FFFFFF8) break;
+                    d->dir_cur_cluster = next;
+                    d->dir_entry_idx = 0;
+                }
+            }
+
+dirent_done:
+            resp.count = out_count * sizeof(fs_dirent);
+            resp.total = out_count;
+            msg_resp(&resp, sizeof(resp));
+            break;
+        }
+
+        case FILE_CMD_UNLINK: {
+            // Delete file — synchronous implementation
+            // Resolve path, mark entry 0xE5, free FAT chain
+            struct file_resp resp;
+            resp.status = 0; resp.fd = 0; resp.file_size = 0; resp.count = 0; resp.total = 0;
+
+            // Resolve parent sync
+            resolve_state rs;
+            memset(&rs, 0, sizeof(rs));
+            rs.path = freq->path;
+            rs.path_pos = 0; rs.comp_start = 0; rs.comp_len = 0;
+            rs.dir_cluster = root_cluster; rs.current_cluster = root_cluster;
+            rs.entry_idx = 0; rs.lfn_buf[0] = '\0';
+            rs.found = false; rs.is_parent = true; rs.leaf_len = 0;
+            rs.phase = RS_INIT;
+
+            while (1) {
+                int r2 = resolve_step(&rs, NULL);
+                if (r2 == RESOLVE_ASYNC) {
+                    if (rs.phase == RS_READ_CLUSTER) {
+                        int slot = read_cluster_sync(rs.current_cluster);
+                        if (slot < 0) { resp.status = -EIO; break; }
+                        rs.phase = RS_SCAN_ENTRIES; continue;
+                    }
+                    if (rs.phase == RS_READ_FAT) {
+                        uint32_t fat_offset = rs.current_cluster * 4;
+                        uint32_t fat_sector = fat_start_lba + (fat_offset / 512);
+                        if (fat_cache_read_sync(fat_sector) < 0) { resp.status = -EIO; break; }
+                        continue;
+                    }
+                    resp.status = -EIO; break;
+                }
+                if (r2 == RESOLVE_ERROR || !rs.found) { resp.status = -ENOENT; break; }
+
+                // Found parent or entry itself
+                uint32_t parent_cluster = rs.result_cluster;
+                fat_dir_entry target = rs.result;
+                uint32_t target_cluster = ((uint32_t)target.fst_clus_hi << 16) | target.fst_clus_lo;
+
+                if (target.attr & 0x10) { resp.status = -EISDIR; break; }
+
+                // Mark entry as deleted (0xE5)
+                int slot = cache_lookup(parent_cluster);
+                if (slot < 0) {
+                    slot = read_cluster_sync(parent_cluster);
+                    if (slot < 0) { resp.status = -EIO; break; }
+                }
+                uint8_t *entry_data = cache[slot].data + rs.result_entry_idx * 32;
+                entry_data[0] = 0xE5; // mark deleted
+
+                // Write back affected sector
+                int sector_idx = (rs.result_entry_idx * 32) / 512;
+                uint32_t clba = data_start_lba + (parent_cluster - 2) * sectors_per_cluster;
+                disk_write_sync(clba + sector_idx, 1, cache[slot].data + sector_idx * 512);
+
+                // Free FAT cluster chain
+                if (target_cluster >= 2 && target_cluster < 0x0FFFFFF8) {
+                    uint32_t c = target_cluster;
+                    while (c >= 2 && c < 0x0FFFFFF8) {
+                        uint32_t next = fat_read_entry_sync(c);
+                        // Mark cluster as free
+                        fat_write_state fws;
+                        memset(&fws, 0, sizeof(fws));
+                        fws.cluster = c;
+                        fws.value = 0;
+                        fat_write_state fws_done;
+                        memset(&fws_done, 0, sizeof(fws_done));
+                        {
+                            uint32_t fat_offset2 = c * 4;
+                            uint32_t fat_sector2 = fat_start_lba + (fat_offset2 / 512);
+                            uint32_t offset_in_sector2 = fat_offset2 % 512;
+                            uint8_t sector_buf[512];
+                            disk_read_sync(fat_sector2, 1, sector_buf);
+                            uint8_t *p = sector_buf + offset_in_sector2;
+                            uint32_t old = (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
+                            uint32_t nv = old & 0xF0000000; // clear 28 bits, keep upper nibble
+                            p[0]=nv&0xFF; p[1]=(nv>>8)&0xFF; p[2]=(nv>>16)&0xFF; p[3]=(nv>>24)&0xFF;
+                            disk_write_sync(fat_sector2, 1, sector_buf);
+                            // Write FAT2
+                            disk_write_sync(fat_sector2 + spf32, 1, sector_buf);
+                        }
+                        cache_invalidate(c);
+                        if (next >= 0x0FFFFFF8) break;
+                        c = next;
+                    }
+                }
+
+                // Update next_free_hint if target_cluster is lower
+                if (target_cluster >= 2 && target_cluster < next_free_hint)
+                    next_free_hint = target_cluster;
+
+                break;
+            }
+            msg_resp(&resp, sizeof(resp));
+            break;
+        }
+
+        case FILE_CMD_RMDIR: {
+            // Remove empty directory — synchronous
+            struct file_resp resp;
+            resp.status = 0; resp.fd = 0; resp.file_size = 0; resp.count = 0; resp.total = 0;
+
+            resolve_state rs;
+            memset(&rs, 0, sizeof(rs));
+            rs.path = freq->path;
+            rs.path_pos = 0; rs.comp_start = 0; rs.comp_len = 0;
+            rs.dir_cluster = root_cluster; rs.current_cluster = root_cluster;
+            rs.entry_idx = 0; rs.lfn_buf[0] = '\0';
+            rs.found = false; rs.is_parent = false; rs.leaf_len = 0;
+            rs.phase = RS_INIT;
+
+            while (1) {
+                int r2 = resolve_step(&rs, NULL);
+                if (r2 == RESOLVE_ASYNC) {
+                    if (rs.phase == RS_READ_CLUSTER) {
+                        int slot = read_cluster_sync(rs.current_cluster);
+                        if (slot < 0) { resp.status = -EIO; break; }
+                        rs.phase = RS_SCAN_ENTRIES; continue;
+                    }
+                    if (rs.phase == RS_READ_FAT) {
+                        uint32_t fat_offset = rs.current_cluster * 4;
+                        uint32_t fat_sector = fat_start_lba + (fat_offset / 512);
+                        if (fat_cache_read_sync(fat_sector) < 0) { resp.status = -EIO; break; }
+                        continue;
+                    }
+                    resp.status = -EIO; break;
+                }
+                if (r2 == RESOLVE_ERROR || !rs.found) { resp.status = -ENOENT; break; }
+
+                fat_dir_entry target = rs.result;
+                uint32_t target_cluster = ((uint32_t)target.fst_clus_hi << 16) | target.fst_clus_lo;
+                if (target_cluster == 0) target_cluster = root_cluster;
+
+                if (!(target.attr & 0x10)) { resp.status = -ENOTDIR; break; }
+
+                // Check directory is empty (only . and ..)
+                bool is_empty = true;
+                uint32_t cc = target_cluster;
+                while (cc >= 2 && cc < 0x0FFFFFF8 && is_empty) {
+                    int slot = cache_lookup(cc);
+                    if (slot < 0) {
+                        slot = read_cluster_sync(cc);
+                        if (slot < 0) { resp.status = -EIO; break; }
+                    }
+                    uint8_t *data = cache[slot].data;
+                    int entries = bytes_per_cluster / 32;
+                    for (int i = 0; i < entries; i++) {
+                        fat_dir_entry *de = (fat_dir_entry *)(data + i * 32);
+                        if (de->name[0] == 0x00) break;
+                        if (de->name[0] == 0xE5) continue;
+                        if (de->name[0] == '.' && (de->name[1] == ' ' || de->name[1] == '.')) continue;
+                        if (de->name[0] == '.' && de->name[1] == '.') continue;
+                        is_empty = false;
+                        break;
+                    }
+                    // Next cluster
+                    uint32_t next = fat_read_entry_sync(cc);
+                    if (next >= 0x0FFFFFF8) break;
+                    cc = next;
+                }
+
+                if (!is_empty) { resp.status = -EBUSY; break; }
+
+                // Mark entry deleted (0xE5) in parent
+                uint32_t parent_cluster = rs.result_cluster;
+                int pslot = cache_lookup(parent_cluster);
+                if (pslot < 0) {
+                    pslot = read_cluster_sync(parent_cluster);
+                    if (pslot < 0) { resp.status = -EIO; break; }
+                }
+                uint8_t *entry_data = cache[pslot].data + rs.result_entry_idx * 32;
+                entry_data[0] = 0xE5;
+                int sector_idx = (rs.result_entry_idx * 32) / 512;
+                uint32_t plba = data_start_lba + (parent_cluster - 2) * sectors_per_cluster;
+                disk_write_sync(plba + sector_idx, 1, cache[pslot].data + sector_idx * 512);
+
+                // Free directory cluster chain
+                if (target_cluster >= 2 && target_cluster < 0x0FFFFFF8) {
+                    uint32_t c = target_cluster;
+                    while (c >= 2 && c < 0x0FFFFFF8) {
+                        uint32_t next = fat_read_entry_sync(c);
+                        uint32_t fat_offset2 = c * 4;
+                        uint32_t fat_sector2 = fat_start_lba + (fat_offset2 / 512);
+                        uint32_t offset_in_sector2 = fat_offset2 % 512;
+                        uint8_t sector_buf[512];
+                        disk_read_sync(fat_sector2, 1, sector_buf);
+                        uint8_t *p = sector_buf + offset_in_sector2;
+                        uint32_t old = (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
+                        uint32_t nv = old & 0xF0000000;
+                        p[0]=nv&0xFF; p[1]=(nv>>8)&0xFF; p[2]=(nv>>16)&0xFF; p[3]=(nv>>24)&0xFF;
+                        disk_write_sync(fat_sector2, 1, sector_buf);
+                        disk_write_sync(fat_sector2 + spf32, 1, sector_buf);
+                        cache_invalidate(c);
+                        if (next >= 0x0FFFFFF8) break;
+                        c = next;
+                    }
+                }
+
+                if (target_cluster >= 2 && target_cluster < next_free_hint)
+                    next_free_hint = target_cluster;
+
+                break;
+            }
             msg_resp(&resp, sizeof(resp));
             break;
         }

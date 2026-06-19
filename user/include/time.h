@@ -22,6 +22,7 @@ extern "C" {
 
 int timespec_get(struct timespec *ts, int base);
 clock_t clock(void);
+int nanosleep(const struct timespec *req, struct timespec *rem);
 
 #ifdef __cplusplus
 }

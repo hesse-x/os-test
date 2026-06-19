@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include "arch/x64/utils.h"
 
-// ===================== Syscall numbers =====================
+// ===================== Syscall numbers (NR_SYSCALL=45, 0-44 continuous) =====================
 #define SYS_GETPID       0
 #define SYS_YIELD        1
 #define SYS_RECV         2
@@ -16,7 +16,6 @@
 #define SYS_SPAWN        8
 #define SYS_MMAP         9
 #define SYS_MUNMAP       10
-// Slot 11 was SYS_SERIAL_WRITE — removed.
 #define SYS_FB_INFO      11
 #define SYS_SHM_CREATE   12
 #define SYS_SHM_ATTACH   13
@@ -25,33 +24,32 @@
 #define SYS_READ         16
 #define SYS_CLOSE        17
 #define SYS_LOAD_DEV     18
-#define SYS_DEV_MSG      19
-#define SYS_NOTIFY       20
-#define SYS_GETTIME      21
-#define SYS_CLOCK        22
-#define SYS_MSG          23
-#define SYS_MSG_RESP     24
-#define SYS_IOPERM       25
-#define SYS_DUP2         26
-#define SYS_FCNTL        27
-#define SYS_DMA_ALLOC    28
-#define SYS_DMA_FREE     29
-#define SYS_PCI_DEV_INFO 30
-#define SYS_BLOCK_READ   31
-#define SYS_BLOCK_WRITE  32
-#define SYS_BLOCK_ASYNC  33
-#define SYS_OPEN_DEV     34
-#define SYS_INSTALL_FD   35
-#define SYS_SOCKET       36
-#define SYS_BIND         37
-#define SYS_LISTEN       38
-#define SYS_ACCEPT       39
-#define SYS_CONNECT      40
-#define SYS_SOCKETPAIR   41
-#define SYS_SENDMSG      42
-#define SYS_RECVMSG      43
-#define SYS_SHUTDOWN     44
-#define SYS_POLL         45
+#define SYS_NOTIFY       19
+#define SYS_GETTIME      20
+#define SYS_CLOCK        21
+#define SYS_MSG          22
+#define SYS_MSG_RESP     23
+#define SYS_IOPERM       24
+#define SYS_DUP2         25
+#define SYS_FCNTL        26
+#define SYS_DMA_ALLOC    27
+#define SYS_DMA_FREE     28
+#define SYS_PCI_DEV_INFO 29
+#define SYS_BLOCK_IO     30
+#define SYS_BLOCK_ASYNC  31
+#define SYS_OPEN_DEV     32
+#define SYS_INSTALL_FD   33
+#define SYS_SOCKET       34
+#define SYS_BIND         35
+#define SYS_LISTEN       36
+#define SYS_ACCEPT       37
+#define SYS_CONNECT      38
+#define SYS_SOCKETPAIR   39
+#define SYS_SENDMSG      40
+#define SYS_RECVMSG      41
+#define SYS_SHUTDOWN     42
+#define SYS_POLL         43
+#define SYS_LSEEK        44
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -175,13 +173,6 @@ static inline int sys_load_dev(int32_t pid, int dev_type) {
     return (int)__syscall2(SYS_LOAD_DEV, (int64_t)pid, (int64_t)dev_type);
 }
 
-static inline int sys_dev_msg(int fd, void *msg_buf, size_t msg_len,
-                               void *reply_buf, size_t reply_len) {
-    return (int)__syscall5(SYS_DEV_MSG, (int64_t)fd,
-        (int64_t)(uintptr_t)msg_buf, (int64_t)msg_len,
-        (int64_t)(uintptr_t)reply_buf, (int64_t)reply_len);
-}
-
 static inline int sys_notify(int32_t pid) {
     return (int)__syscall1(SYS_NOTIFY, (int64_t)pid);
 }
@@ -238,14 +229,13 @@ static inline int sys_pci_dev_info(uint8_t bus, uint8_t dev, uint8_t func,
         (int64_t)func, (int64_t)(uintptr_t)out);
 }
 
-static inline int sys_block_read(uint32_t lba, void *buf, uint32_t count) {
-    return (int)__syscall3(SYS_BLOCK_READ, (int64_t)lba,
-        (int64_t)(uintptr_t)buf, (int64_t)count);
-}
+// ===================== Block I/O =====================
+#define BLOCK_DIR_READ  0
+#define BLOCK_DIR_WRITE 1
 
-static inline int sys_block_write(uint32_t lba, const void *buf, uint32_t count) {
-    return (int)__syscall3(SYS_BLOCK_WRITE, (int64_t)lba,
-        (int64_t)(uintptr_t)buf, (int64_t)count);
+static inline int sys_block_io(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
+    return (int)__syscall4(SYS_BLOCK_IO, (int64_t)lba,
+        (int64_t)(uintptr_t)buf, (int64_t)count, (int64_t)dir);
 }
 
 // Async block I/O: returns cookie (>0) on success, -errno on error.
@@ -255,14 +245,14 @@ static inline int sys_block_async(uint32_t lba, void *buf, uint32_t count, uint8
         (int64_t)(uintptr_t)buf, (int64_t)count, (int64_t)dir);
 }
 
-// sys_open_dev(dev_type) — syscall 35 (open device node)
+// sys_open_dev(dev_type) — syscall 32 (open device node)
 // Returns: (fd | target_pid << 32) on success, negative errno on failure
 // Caller: fd = (int32_t)(result & 0xFFFFFFFF), pid = (pid_t)(result >> 32)
 static inline uint64_t sys_open_dev(int dev_type) {
     return (uint64_t)__syscall1(SYS_OPEN_DEV, (int64_t)dev_type);
 }
 
-// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 36
+// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 33
 // Register an FD_FILE fd in the kernel fd_table.
 // Called by libc open() after getting fs_fd from fs_driver.
 // Returns: fd (>=3) on success, negative errno on failure
@@ -271,6 +261,15 @@ static inline int sys_install_fd(int32_t fs_pid, int32_t fs_fd,
                                   uint64_t file_size) {
     return (int)__syscall5(SYS_INSTALL_FD, (int64_t)fs_pid, (int64_t)fs_fd,
         (int64_t)offset, (int64_t)flags, (int64_t)file_size);
+}
+
+// ===================== lseek =====================
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
+static inline int64_t sys_lseek(int fd, int64_t offset, int whence) {
+    return __syscall3(SYS_LSEEK, (int64_t)fd, (int64_t)offset, (int64_t)whence);
 }
 
 #endif // COMMON_SYSCALL_H

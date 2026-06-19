@@ -3,6 +3,8 @@
 
 #include <stdarg.h>
 #include <stdint.h>
+#include <stddef.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,6 +20,7 @@ typedef struct _FILE {
     int flags;           /* _F_WRITE / _F_READ / _F_EOF / _F_ERR */
     void (*write_fn)(struct _FILE *, const char *, int len); /* output function */
     int (*read_fn)(struct _FILE *, char *, int len);        /* input function */
+    off_t offset;        /* current file offset (for fseek/ftell) */
 } FILE;
 
 /* Constants */
@@ -30,6 +33,12 @@ typedef struct _FILE {
 #define _F_READ    2
 #define _F_EOF     4
 #define _F_ERR     8
+
+#define BUFSIZ     4096
+
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
 
 /* Standard streams */
 extern FILE *stdin;
@@ -47,6 +56,24 @@ int puts(const char *s);
 int fflush(FILE *f);
 int fgetc(FILE *f);
 int getchar(void);
+
+/* sprintf family */
+int sprintf(char *buf, const char *fmt, ...);
+int snprintf(char *buf, size_t n, const char *fmt, ...);
+int vsprintf(char *buf, const char *fmt, va_list ap);
+int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
+
+/* perror */
+void perror(const char *s);
+
+/* File I/O */
+FILE *fopen(const char *path, const char *mode);
+int fclose(FILE *f);
+size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f);
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f);
+int fseek(FILE *f, long offset, int whence);
+long ftell(FILE *f);
+void rewind(FILE *f);
 
 #ifdef __cplusplus
 }

@@ -276,8 +276,8 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     serial_put_hex(elf_size);
     serial_puts("\n");
 
-    // 7. Map user stack: 128 pages (512KB) at 0x7FFFFFFF0000-0x7FFFFFFFE000
-    int user_stack_pages = 128;
+    // 7. Map user stack: 2048 pages (8MB) at 0x7FFFFFFF0000-0x7FFFFFFFE000
+    int user_stack_pages = 2048;
     Page *user_stack_page = bfc_alloc.alloc_page(user_stack_pages);
     if (!user_stack_page) { spin_unlock(&procs_lock); return nullptr; }
     uint64_t user_stack_phys = page_to_phys(user_stack_page);

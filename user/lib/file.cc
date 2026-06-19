@@ -16,6 +16,7 @@
 #include <sys/poll.h>
 #include "common/syscall.h"
 #include "common/dev.h"
+#include "common/shm.h"
 
 #define MAX_FD  32
 
@@ -358,47 +359,6 @@ int fcntl(int fd, int cmd, ...) {
     return -1;
 }
 
-// ===================== stat =====================
-// stat — get file status via fs_driver
-int stat(const char *path, struct stat *st) {
-    fd_table_init();
-
-    if (!path || !st) { errno = EFAULT; return -1; }
-
-    int fs_fd = get_fs_dev_fd();
-    if (fs_fd < 0) { errno = ENOENT; return -1; }
-
-    // FILE_CMD_STAT = 9
-    struct {
-        uint32_t cmd;
-        char path[256];
-    } freq;
-    freq.cmd = 9;
-    int i;
-    for (i = 0; path[i] && i < 255; i++)
-        freq.path[i] = path[i];
-    freq.path[i] = '\0';
-
-    struct {
-        int32_t  status;
-        uint64_t size;
-    } fresp;
-
-    int r = msg_fd(fs_fd, &freq, sizeof(freq), &fresp, sizeof(fresp));
-    if (r < 0) { errno = -r; return -1; }
-    if (fresp.status != 0) { errno = (int)fresp.status; return -1; }
-
-    memset(st, 0, sizeof(*st));
-    st->st_size = (off_t)fresp.size;
-    // Default mode: assume regular file (S_IFREG) or directory based on path
-    // For proper mode, fs_driver would need to return attr in stat response.
-    // For now, directories just have a smaller heuristic.
-    if (fresp.size == 0) {
-        // Could be a directory or empty file — check if path ends with known dir pattern
-    }
-    return 0;
-}
-
 // ===================== FD_DEV helpers =====================
 
 // Get target_pid for an FD_DEV fd (used by mmap/sys_mman.cc)
@@ -433,7 +393,8 @@ int msg_fd(int fd, const void *msg_buf, size_t msg_len,
         errno = EBADF;
         return -1;
     }
-    return sys_dev_msg(fd, (void*)msg_buf, msg_len, reply_buf, reply_len);
+    pid_t target_pid = fd_table[fd].target_pid;
+    return sys_msg(target_pid, (void*)msg_buf, msg_len, reply_buf, reply_len);
 }
 
 // poll — wait for events (kernel-implemented via SYS_POLL)
@@ -456,4 +417,402 @@ int dup2(int old_fd, int new_fd) {
         fd_table[new_fd] = fd_table[old_fd];
     }
     return r;
+}
+
+// ===================== getcwd =====================
+char *getcwd(char *buf, size_t size) {
+    if (!buf) { errno = EFAULT; return NULL; }
+    const char *cwd = __get_cwd();
+    int len = 0;
+    while (cwd[len]) len++;
+    if ((size_t)len >= size) { errno = ERANGE; return NULL; }
+    int i;
+    for (i = 0; cwd[i]; i++) buf[i] = cwd[i];
+    buf[i] = '\0';
+    return buf;
+}
+
+// ===================== lseek =====================
+off_t lseek(int fd, off_t offset, int whence) {
+    fd_table_init();
+    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type == FD_NONE)
+        { errno = EBADF; return -1; }
+    if (fd_table[fd].type == FD_FILE) {
+        // FD_FILE: use kernel sys_lseek
+        int64_t r = sys_lseek(fd, offset, whence);
+        if (r < 0) { errno = (int)(-r); return -1; }
+        return (off_t)r;
+    }
+    if (fd_table[fd].type == FD_PIPE) {
+        errno = ESPIPE;
+        return -1;
+    }
+    errno = EINVAL;
+    return -1;
+}
+
+// ===================== stat (updated for full struct stat) =====================
+int stat(const char *path, struct stat *st) {
+    fd_table_init();
+    if (!path || !st) { errno = EFAULT; return -1; }
+
+    int fs_fd = get_fs_dev_fd();
+    if (fs_fd < 0) { errno = ENOENT; return -1; }
+
+    // Resolve path to absolute
+    char abs_path[256];
+    if (path[0] != '/') {
+        int cwdi = 0;
+        while (cwd_path[cwdi] && cwdi < 254) {
+            abs_path[cwdi] = cwd_path[cwdi];
+            cwdi++;
+        }
+        if (cwdi > 0 && abs_path[cwdi-1] != '/') abs_path[cwdi++] = '/';
+        int pi = 0;
+        while (path[pi] && cwdi < 254) abs_path[cwdi++] = path[pi++];
+        abs_path[cwdi] = '\0';
+        path = abs_path;
+    }
+
+    struct {
+        uint32_t cmd;
+        char path[256];
+    } freq;
+    memset(&freq, 0, sizeof(freq));
+    freq.cmd = 9; // FILE_CMD_STAT
+
+    int i;
+    for (i = 0; path[i] && i < 255; i++)
+        freq.path[i] = path[i];
+    freq.path[i] = '\0';
+
+    struct {
+        int32_t  status;
+        uint32_t fd;
+        uint64_t file_size;
+        uint32_t count;
+        uint32_t total;
+    } fresp;
+
+    int r = msg_fd(fs_fd, &freq, sizeof(freq), &fresp, sizeof(fresp));
+    if (r < 0) { errno = -r; return -1; }
+    if (fresp.status != 0) { errno = (int)fresp.status; return -1; }
+
+    memset(st, 0, sizeof(*st));
+    st->st_size = (off_t)fresp.file_size;
+    // Default mode: regular file with 0644
+    st->st_mode = S_IFREG | 0644;
+    st->st_blksize = 512;
+    st->st_blocks = (blkcnt_t)((fresp.file_size + 511) / 512);
+    st->st_nlink = 1;
+    return 0;
+}
+
+// ===================== access =====================
+int access(const char *path, int mode) {
+    fd_table_init();
+    if (!path) { errno = EFAULT; return -1; }
+
+    // F_OK: just check if file exists via stat
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    (void)mode; // ignore R_OK/W_OK/X_OK — no permissions in FAT32
+    return 0;
+}
+
+// ===================== unlink =====================
+int unlink(const char *path) {
+    fd_table_init();
+    if (!path) { errno = EFAULT; return -1; }
+
+    char abs_path[256];
+    if (path[0] != '/') {
+        int cwdi = 0;
+        while (cwd_path[cwdi] && cwdi < 254) { abs_path[cwdi] = cwd_path[cwdi]; cwdi++; }
+        if (cwdi > 0 && abs_path[cwdi-1] != '/') abs_path[cwdi++] = '/';
+        int pi = 0;
+        while (path[pi] && cwdi < 254) abs_path[cwdi++] = path[pi++];
+        abs_path[cwdi] = '\0';
+        path = abs_path;
+    }
+
+    int fs_fd = get_fs_dev_fd();
+    if (fs_fd < 0) { errno = ENOENT; return -1; }
+
+    struct {
+        uint32_t cmd;
+        char path[256];
+        uint32_t flags;
+        uint32_t fs_fd;
+        uint64_t offset;
+        uint32_t count;
+        uint32_t lba;
+        uint32_t readdir_offset;
+        uint32_t readdir_count;
+    } req;
+    memset(&req, 0, sizeof(req));
+    req.cmd = 10; // FILE_CMD_UNLINK
+    int i;
+    for (i = 0; path[i] && i < 255; i++) req.path[i] = path[i];
+    req.path[i] = '\0';
+
+    struct file_resp resp_buf;
+    int r = msg_fd(fs_fd, &req, sizeof(req), &resp_buf, sizeof(resp_buf));
+    if (r < 0) { errno = -r; return -1; }
+    if (resp_buf.status != 0) { errno = (int)resp_buf.status; return -1; }
+    return 0;
+}
+
+// ===================== rmdir =====================
+int rmdir(const char *path) {
+    fd_table_init();
+    if (!path) { errno = EFAULT; return -1; }
+
+    char abs_path[256];
+    if (path[0] != '/') {
+        int cwdi = 0;
+        while (cwd_path[cwdi] && cwdi < 254) { abs_path[cwdi] = cwd_path[cwdi]; cwdi++; }
+        if (cwdi > 0 && abs_path[cwdi-1] != '/') abs_path[cwdi++] = '/';
+        int pi = 0;
+        while (path[pi] && cwdi < 254) abs_path[cwdi++] = path[pi++];
+        abs_path[cwdi] = '\0';
+        path = abs_path;
+    }
+
+    int fs_fd = get_fs_dev_fd();
+    if (fs_fd < 0) { errno = ENOENT; return -1; }
+
+    struct {
+        uint32_t cmd;
+        char path[256];
+        uint32_t flags;
+        uint32_t fs_fd;
+        uint64_t offset;
+        uint32_t count;
+        uint32_t lba;
+        uint32_t readdir_offset;
+        uint32_t readdir_count;
+    } req;
+    memset(&req, 0, sizeof(req));
+    req.cmd = 11; // FILE_CMD_RMDIR
+    int i;
+    for (i = 0; path[i] && i < 255; i++) req.path[i] = path[i];
+    req.path[i] = '\0';
+
+    struct file_resp resp_buf;
+    int r = msg_fd(fs_fd, &req, sizeof(req), &resp_buf, sizeof(resp_buf));
+    if (r < 0) { errno = -r; return -1; }
+    if (resp_buf.status != 0) { errno = (int)resp_buf.status; return -1; }
+    return 0;
+}
+
+// ===================== isatty =====================
+int isatty(int fd) {
+    fd_table_init();
+    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type == FD_NONE) return 0;
+    if (fd_table[fd].type == FD_DEV && fd_table[fd].target_pid == DEV_TERMINAL)
+        return 1;
+    return 0;
+}
+
+// ===================== fstat =====================
+int fstat(int fd, struct stat *st) {
+    fd_table_init();
+    if (!st) { errno = EFAULT; return -1; }
+    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type == FD_NONE)
+        { errno = EBADF; return -1; }
+
+    memset(st, 0, sizeof(*st));
+
+    if (fd_table[fd].type == FD_FILE) {
+        // For FD_FILE, get file_size from libc fd_table
+        st->st_size = (off_t)fd_file_size(fd);
+        st->st_mode = S_IFREG | 0644;
+    } else if (fd_table[fd].type == FD_DEV) {
+        st->st_mode = S_IFCHR | 0666;
+        st->st_size = 0;
+    } else if (fd_table[fd].type == FD_PIPE) {
+        st->st_mode = S_IFIFO | 0644;
+        st->st_size = 0;
+    }
+
+    st->st_blksize = 512;
+    st->st_blocks = (blkcnt_t)((st->st_size + 511) / 512);
+    st->st_nlink = 1;
+    return 0;
+}
+
+// ===================== mkdir (with mode_t, ignores mode) =====================
+int mkdir(const char *path, mode_t mode) {
+    (void)mode; // FAT32 doesn't support permissions
+    fd_table_init();
+    if (!path) { errno = EFAULT; return -1; }
+
+    // Resolve path
+    char abs_path[256];
+    if (path[0] != '/') {
+        int cwdi = 0;
+        while (cwd_path[cwdi] && cwdi < 254) { abs_path[cwdi] = cwd_path[cwdi]; cwdi++; }
+        if (cwdi > 0 && abs_path[cwdi-1] != '/') abs_path[cwdi++] = '/';
+        int pi = 0;
+        while (path[pi] && cwdi < 254) abs_path[cwdi++] = path[pi++];
+        abs_path[cwdi] = '\0';
+        path = abs_path;
+    }
+
+    int fs_fd = get_fs_dev_fd();
+    if (fs_fd < 0) { errno = ENOENT; return -1; }
+
+    struct {
+        uint32_t cmd;
+        char path[256];
+        uint32_t flags;
+        uint32_t fs_fd;
+        uint64_t offset;
+        uint32_t count;
+        uint32_t lba;
+        uint32_t readdir_offset;
+        uint32_t readdir_count;
+    } req;
+    memset(&req, 0, sizeof(req));
+    req.cmd = 7; // FILE_CMD_MKDIR
+    int i;
+    for (i = 0; path[i] && i < 255; i++) req.path[i] = path[i];
+    req.path[i] = '\0';
+
+    struct file_resp resp_buf;
+    int r = msg_fd(fs_fd, &req, sizeof(req), &resp_buf, sizeof(resp_buf));
+    if (r < 0) { errno = -r; return -1; }
+    if (resp_buf.status != 0) { errno = (int)resp_buf.status; return -1; }
+    return 0;
+}
+
+// ===================== opendir / readdir / closedir =====================
+#include <dirent.h>
+#include <stdlib.h>
+
+DIR *opendir(const char *name) {
+    fd_table_init();
+    if (!name) { errno = EFAULT; return NULL; }
+
+    // Resolve path
+    char abs_path[256];
+    if (name[0] != '/') {
+        int cwdi = 0;
+        while (cwd_path[cwdi] && cwdi < 254) { abs_path[cwdi] = cwd_path[cwdi]; cwdi++; }
+        if (cwdi > 0 && abs_path[cwdi-1] != '/') abs_path[cwdi++] = '/';
+        int pi = 0;
+        while (name[pi] && cwdi < 254) abs_path[cwdi++] = name[pi++];
+        abs_path[cwdi] = '\0';
+        name = abs_path;
+    }
+
+    int fs_fd = get_fs_dev_fd();
+    if (fs_fd < 0) { errno = ENOENT; return NULL; }
+
+    struct {
+        uint32_t cmd;
+        char path[256];
+        uint32_t flags;
+        uint32_t fs_fd;
+        uint64_t offset;
+        uint32_t count;
+        uint32_t lba;
+        uint32_t readdir_offset;
+        uint32_t readdir_count;
+    } req;
+    memset(&req, 0, sizeof(req));
+    req.cmd = 13; // FILE_CMD_OPENDIR
+    int i;
+    for (i = 0; name[i] && i < 255; i++) req.path[i] = name[i];
+    req.path[i] = '\0';
+
+    struct {
+        int32_t  status;
+        uint32_t fd;
+        uint64_t file_size;
+        uint32_t count;
+        uint32_t total;
+    } resp;
+
+    int r = msg_fd(fs_fd, &req, sizeof(req), &resp, sizeof(resp));
+    if (r < 0) { errno = -r; return NULL; }
+    if (resp.status != 0) { errno = (int)resp.status; return NULL; }
+
+    DIR *dir = (DIR *)malloc(sizeof(DIR));
+    if (!dir) { errno = ENOMEM; return NULL; }
+    dir->dd_fd = (int)resp.fd;
+    return dir;
+}
+
+struct dirent *readdir(DIR *dirp) {
+    if (!dirp) { errno = EBADF; return NULL; }
+
+    int fs_fd = get_fs_dev_fd();
+    if (fs_fd < 0) { errno = ENOENT; return NULL; }
+
+    struct {
+        uint32_t cmd;
+        char path[256];
+        uint32_t flags;
+        uint32_t fs_fd;
+        uint64_t offset;
+        uint32_t count;
+        uint32_t lba;
+        uint32_t readdir_offset;
+        uint32_t readdir_count;
+    } req;
+    memset(&req, 0, sizeof(req));
+    req.cmd = 14; // FILE_CMD_DIRENT
+    req.fs_fd = (uint32_t)dirp->dd_fd;
+
+    // Allocate space for the fs_dirent response
+    struct {
+        int32_t  status;
+        uint32_t fd;
+        uint64_t file_size;
+        uint32_t count;
+        uint32_t total;
+        uint8_t  data[sizeof(struct dirent) + 32];
+    } resp;
+
+    int r = msg_fd(fs_fd, &req, sizeof(req), &resp, sizeof(resp));
+    if (r < 0) { errno = -r; return NULL; }
+    if (resp.status != 0) { errno = (int)resp.status; return NULL; }
+    if (resp.count < sizeof(fs_dirent)) return NULL; // EOF
+
+    // Convert fs_dirent to struct dirent
+    fs_dirent *fde = (fs_dirent *)resp.data;
+    static struct dirent result;
+    result.d_ino = 0;
+    int j = 0;
+    while (fde->name[j] && j < 255) { result.d_name[j] = fde->name[j]; j++; }
+    result.d_name[j] = '\0';
+    return &result;
+}
+
+int closedir(DIR *dirp) {
+    if (!dirp) { errno = EBADF; return -1; }
+
+    int fs_fd = get_fs_dev_fd();
+    if (fs_fd < 0) { errno = ENOENT; return -1; }
+
+    struct {
+        uint32_t cmd;
+        char path[256];
+        uint32_t flags;
+        uint32_t fs_fd;
+        uint64_t offset;
+        uint32_t count;
+        uint32_t lba;
+        uint32_t readdir_offset;
+        uint32_t readdir_count;
+    } req;
+    memset(&req, 0, sizeof(req));
+    req.cmd = 15; // FILE_CMD_CLOSEDIR
+    req.fs_fd = (uint32_t)dirp->dd_fd;
+
+    msg_fd(fs_fd, &req, sizeof(req), NULL, 0);
+    free(dirp);
+    return 0;
 }

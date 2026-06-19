@@ -28,5 +28,15 @@
 #define ENOTCONN  24
 #define EADDRINUSE 25
 #define ENOTSOCK  26
+#define ENOTSUP   27
+#define ENXIO     28
+#define ESPIPE    29
+#define EROFS     30
+#define EMLINK    31
+#define EDOM      32
+#define ERANGE    33
+#define ENOTEMPTY 34
+#define ELOOP     35
+#define EWOULDBLOCK EAGAIN
 
 #endif // COMMON_ERRNO_H

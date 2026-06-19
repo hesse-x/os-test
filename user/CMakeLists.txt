@@ -7,6 +7,8 @@ add_user_lib(c
         lib/unistd.cc lib/sys_wait.cc lib/sys_mman.cc lib/sys_shm.cc
         lib/sys_irq.cc lib/sys_device.cc lib/sys_ipc.cc
         lib/sys_fb.cc lib/sys_process.cc lib/time.cc lib/file.cc
+        lib/ctype.c lib/strtol.c lib/stdlib_misc.c lib/uname.c
+        lib/sleep.c lib/assert.c lib/sys_block.cc lib/sys_pci.cc
 )
 
 add_user_elf(hello  C SOURCES hello.c  LINK_LIBS c)
