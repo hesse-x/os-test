@@ -101,6 +101,18 @@ void proc_init() {
         procs[i].msg_target_pid = -1;
         procs[i].cpu_time_ns = 0;
         procs[i].last_sched = 0;
+        // Signal state
+        procs[i].sig.pending = 0;
+        procs[i].sig.blocked = 0;
+        procs[i].sig.have_handler = 0;
+        procs[i].sig.saved_rip = 0;
+        procs[i].sig.saved_rsp = 0;
+        procs[i].sig.saved_rflags = 0;
+        for (int si = 0; si < NSIG; si++) {
+            procs[i].sig.action[si].sa_handler = SIG_DFL;
+            procs[i].sig.action[si].sa_mask = 0;
+            procs[i].sig.action[si].sa_flags = 0;
+        }
     }
     cpu_locals[0]._cur_proc = nullptr;
     cpu_locals[0].run_count = 0;
@@ -197,6 +209,18 @@ proc_t *create_idle_process(int cpu_id) {
     proc->mmap_regions = nullptr;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
+    // Signal state
+    proc->sig.pending = 0;
+    proc->sig.blocked = 0;
+    proc->sig.have_handler = 0;
+    proc->sig.saved_rip = 0;
+    proc->sig.saved_rsp = 0;
+    proc->sig.saved_rflags = 0;
+    for (int si = 0; si < NSIG; si++) {
+        proc->sig.action[si].sa_handler = SIG_DFL;
+        proc->sig.action[si].sa_mask = 0;
+        proc->sig.action[si].sa_flags = 0;
+    }
     for (int j = 0; j < MAX_FD; j++) {
         __memset(&proc->fd_table[j], 0, sizeof(struct file));
         proc->fd_table[j].type = FD_NONE;
@@ -292,6 +316,14 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
         }
     }
 
+    // Map shared trampoline page at fixed user address
+    if (sig_trampoline_phys != 0) {
+        if (!map_user_page_direct(new_pml4, SIG_TRAMPOLINE_ADDR, sig_trampoline_phys,
+                                 PTE_PRESENT | PTE_USER)) {
+            serial_printf("process_create_elf: failed to map trampoline page\n");
+        }
+    }
+
     // 8. Build trapframe + switch_to frame on kernel stack
     uint64_t k_rsp = build_kstack(k_stack_top, lr.entry);
 
@@ -313,6 +345,18 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->mmap_regions = nullptr;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
+    // Signal state
+    proc->sig.pending = 0;
+    proc->sig.blocked = 0;
+    proc->sig.have_handler = 0;
+    proc->sig.saved_rip = 0;
+    proc->sig.saved_rsp = 0;
+    proc->sig.saved_rflags = 0;
+    for (int si = 0; si < NSIG; si++) {
+        proc->sig.action[si].sa_handler = SIG_DFL;
+        proc->sig.action[si].sa_mask = 0;
+        proc->sig.action[si].sa_flags = 0;
+    }
     for (int j = 0; j < MAX_FD; j++) {
         __memset(&proc->fd_table[j], 0, sizeof(struct file));
         proc->fd_table[j].type = FD_NONE;
@@ -632,6 +676,11 @@ void proc_reap(proc_t *proc) {
     // 6d. Clear MSG caller state (server died before responding)
     proc->msg_caller_pid = -1;
 
+    // 6f. Clear signal state (pending signals die with the process)
+    proc->sig.pending = 0;
+    proc->sig.blocked = 0;
+    proc->sig.have_handler = 0;
+
     // 6e. Free any RECV_MSG entries in recv queue (kfree their kmaddr)
     spin_lock(&proc->recv_lock);
     uint32_t idx = proc->recv_tail;
@@ -682,5 +731,12 @@ void proc_reap(proc_t *proc) {
     proc->msg_target_pid = -1;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
+    // Signal state
+    proc->sig.pending = 0;
+    proc->sig.blocked = 0;
+    proc->sig.have_handler = 0;
+    proc->sig.saved_rip = 0;
+    proc->sig.saved_rsp = 0;
+    proc->sig.saved_rflags = 0;
     spin_unlock(&procs_lock);
 }

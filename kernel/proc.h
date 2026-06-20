@@ -6,6 +6,7 @@
 #include "kernel/mem/alloc.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/smp.h"
+#include "common/signal.h"
 
 typedef int32_t pid_t;
 
@@ -146,6 +147,18 @@ struct proc_t {
     // === CPU 时间记账 ===
     uint64_t cpu_time_ns;       // 累计 CPU 时间（纳秒）
     uint64_t last_sched;        // 上次被调度时的 sched_clock() 值
+
+    // === 信号状态 ===
+    struct signal_state {
+        uint64_t pending;           // bitmask: pending signals (bit N = signal N)
+        struct sigaction action[NSIG];  // per-signal action
+        uint64_t blocked;           // blocked mask (预留)
+        int      have_handler;      // 是否有用户态 handler 待调起
+        // sigreturn 恢复上下文
+        uint64_t saved_rip;
+        uint64_t saved_rsp;
+        uint64_t saved_rflags;
+    } sig;
 };
 
 #define MAX_PROC 64

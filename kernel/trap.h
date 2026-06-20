@@ -54,6 +54,11 @@ uint64_t sys_lseek(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_memfd_create(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_ftruncate(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
+// Signal syscalls
+uint64_t sys_kill(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_sigaction(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_sigreturn(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
 // Socket syscalls (declared in kernel/socket.cc)
 uint64_t sys_socket(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_bind(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -99,6 +104,11 @@ void wake_process(pid_t pid);
 // Returns: 0 on success, negative errno on error.
 int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
                     void *resp, size_t resp_len);
+
+// Signal trampoline: shared physical page mapped at SIG_TRAMPOLINE_ADDR in every process
+extern uint64_t sig_trampoline_phys;
+void sig_init();
+void check_pending_signals(trapframe_t *tf);
 }
 
 #endif // KERNEL_TRAP_H

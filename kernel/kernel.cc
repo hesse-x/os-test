@@ -113,6 +113,8 @@ void kernel_main(boot_info *bi) {
   kernel_init_finish();
   slab_init();
 
+  sig_init();   // allocate signal trampoline page (shared across all processes)
+
   proc_init();
 
   smp_boot_aps();

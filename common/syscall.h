@@ -52,6 +52,9 @@
 #define SYS_LSEEK        44
 #define SYS_MEMFD_CREATE 45
 #define SYS_FTRUNCATE    46
+#define SYS_KILL         47
+#define SYS_SIGACTION    48
+#define SYS_SIGRETURN    49
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -281,6 +284,22 @@ static inline int sys_memfd_create(const char *name, unsigned int flags) {
 
 static inline int sys_ftruncate(int fd, int64_t size) {
     return (int)__syscall2(SYS_FTRUNCATE, (int64_t)fd, (int64_t)size);
+}
+
+// ===================== Signal syscalls =====================
+struct sigaction;  // forward declaration (defined in common/signal.h or user/include/signal.h)
+static inline int sys_kill(int32_t pid, int sig) {
+    return (int)__syscall2(SYS_KILL, (int64_t)pid, (int64_t)sig);
+}
+
+static inline int sys_sigaction(int sig, const struct sigaction *act,
+                                struct sigaction *oldact) {
+    return (int)__syscall3(SYS_SIGACTION, (int64_t)sig,
+        (int64_t)(uintptr_t)act, (int64_t)(uintptr_t)oldact);
+}
+
+static inline int sys_sigreturn(void) {
+    return (int)__syscall0(SYS_SIGRETURN);
 }
 
 #endif // COMMON_SYSCALL_H

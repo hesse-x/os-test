@@ -34,6 +34,9 @@ struct kernel_shm_region {
 };
 static struct kernel_shm_region kernel_shm_table[MAX_KERNEL_SHM];
 
+// ===================== Signal trampoline =====================
+uint64_t sig_trampoline_phys = 0;
+
 void register_kernel_shm(int shm_id, struct shm *shm) {
     for (int i = 0; i < MAX_KERNEL_SHM; i++) {
         if (kernel_shm_table[i].shm_id == -1) {
@@ -317,8 +320,38 @@ void isr_init() {
   apic_init();
 }
 
+// ===================== Signal trampoline init =====================
+void sig_init() {
+    // Allocate one shared physical page for the signal trampoline.
+    // The trampoline code is: mov rax, SYS_SIGRETURN; syscall
+    // Encoding: 48 C7 C0 <31> 00 00 00  0F 05
+    // SYS_SIGRETURN = 49 (0x31)
+    Page *page = bfc_alloc.alloc_page(1);
+    if (!page) {
+        serial_puts("sig_init: failed to allocate trampoline page\n");
+        return;
+    }
+    sig_trampoline_phys = page_to_phys(page);
+    uint8_t *vaddr = (uint8_t *)phys_to_virt(sig_trampoline_phys);
+
+    // mov rax, 49  (SYS_SIGRETURN)
+    vaddr[0] = 0x48;  // REX.W prefix
+    vaddr[1] = 0xC7;  // MOV r64, imm32
+    vaddr[2] = 0xC0;  // ModRM: rax
+    vaddr[3] = 0x31;  // 49 = SYS_SIGRETURN (low byte)
+    vaddr[4] = 0x00;
+    vaddr[5] = 0x00;
+    vaddr[6] = 0x00;
+
+    // syscall
+    vaddr[7] = 0x0F;
+    vaddr[8] = 0x05;
+
+    serial_printf("sig_init: trampoline at phys=%lx\n", sig_trampoline_phys);
+}
+
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 47
+#define NR_SYSCALL 50
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -367,6 +400,9 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_lseek,          // 44
     sys_memfd_create,   // 45
     sys_ftruncate,      // 46
+    sys_kill,           // 47
+    sys_sigaction,      // 48
+    sys_sigreturn,      // 49
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -725,26 +761,17 @@ uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_
         proc->state = ZOMBIE;
         __atomic_add_fetch(&cpu_locals[cpu].run_count, -1, __ATOMIC_RELAXED);
         spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
-        // Notify parent via recv queue (for WAIT_CHILD matching)
-        // Also try sys_notify semantics: enqueue RECV_NOTIFY message
+        // Notify parent via SIGCHLD (replaces old RECV_NOTIFY)
         {
             proc_t *parent = &procs[proc->parent_pid];
-            spin_lock(&parent->recv_lock);
-            uint32_t next = (parent->recv_head + 1) % RECV_QUEUE_SIZE;
-            if (next != parent->recv_tail) {
-                recv_msg *slot = (recv_msg *)parent->recv_buf[parent->recv_head];
-                slot->type = RECV_NOTIFY;
-                slot->src = (uint32_t)proc->pid;
-                parent->recv_head = next;
-            }
-            spin_unlock(&parent->recv_lock);
+            __atomic_or_fetch(&parent->sig.pending, 1ULL << SIGCHLD, __ATOMIC_RELEASE);
 
-            // Wake parent if in WAIT_RECV or WAIT_CHILD
+            // Wake parent if in WAIT_CHILD (waitpid still works)
             int pcpu = parent->assigned_cpu;
             spin_lock(&cpu_locals[pcpu].scheduler_lock);
             if (parent->state == BLOCKED &&
-                (parent->wait_event == WAIT_RECV ||
-                 parent->wait_event == WAIT_CHILD)) {
+                (parent->wait_event == WAIT_CHILD ||
+                 parent->wait_event == WAIT_RECV)) {
                 if (parent->wait_deadline != 0) {
                     timer_queue_remove(parent);
                     parent->wait_deadline = 0;
@@ -2661,4 +2688,258 @@ uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
 
     proc->fd_table[fd].file_data.offset = new_offset;
     return (uint64_t)new_offset;
+}
+
+// ===================== Signal delivery =====================
+
+// Deliver a signal with a user-registered handler.
+// Saves the interrupted context in proc->sig and modifies the trapframe
+// to redirect execution to the handler via the sig_trampoline.
+static void deliver_signal(proc_t *proc, trapframe_t *tf, int sig, void (*handler)(int)) {
+    // 1. Save current execution context
+    proc->sig.saved_rip = tf->rip;
+    proc->sig.saved_rsp = tf->rsp;
+    proc->sig.saved_rflags = tf->rflags;
+    proc->sig.have_handler = 1;
+
+    // 2. Push trampoline return address onto user stack
+    //    (handler's 'ret' will jump to SIG_TRAMPOLINE_ADDR)
+    uint64_t user_rsp = tf->rsp;
+    user_rsp -= 8;
+
+    // Write to user stack via CR3 switch
+    uint64_t saved_cr3;
+    __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+    __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
+    *(uint64_t *)user_rsp = SIG_TRAMPOLINE_ADDR;
+    __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
+
+    // 3. Modify trapframe: iret to handler(arg=sig)
+    tf->rip = (uint64_t)handler;
+    tf->rdi = (uint64_t)(int64_t)sig;  // sign-extend int to 64-bit
+    tf->rsp = user_rsp;
+}
+
+// ===================== check_pending_signals =====================
+// Called before returning to user mode (iret/sysret).
+// Scans pending signals and executes default action or delivers to handler.
+void check_pending_signals(trapframe_t *tf) {
+    // Only deliver when returning to user mode
+    if (tf->cs != 0x2B) return;
+
+    proc_t *proc = current_proc;
+    if (!proc) return;
+
+    // Loop: handle signals one at a time in priority order (lowest bit first)
+    while (1) {
+        uint64_t pending = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
+        if (!pending) return;
+
+        // Find lowest pending signal (highest priority)
+        int sig = __builtin_ctzll(pending);
+        if (sig <= 0 || sig >= NSIG) {
+            // Invalid signal number, clear all and bail
+            __atomic_store_n(&proc->sig.pending, 0, __ATOMIC_RELEASE);
+            return;
+        }
+
+        // Clear pending bit
+        __atomic_and_fetch(&proc->sig.pending, ~(1ULL << sig), __ATOMIC_RELEASE);
+
+        void (*handler)(int) = proc->sig.action[sig].sa_handler;
+
+        if (handler == SIG_DFL) {
+            // Default action
+            switch (sig) {
+            case SIGCHLD:
+                // Ignore — waitpid still works via WAIT_CHILD
+                break;
+            case SIGSTOP:
+            case SIGTSTP:
+            case SIGCONT:
+                // Not implemented — ignore for now
+                break;
+            case SIGINT:
+            case SIGTERM:
+            case SIGKILL:
+            default:
+                // Terminate — processes that die from a signal exit with -1
+                proc->exit_code = -1;
+                serial_printf("signal: pid=%d terminated by signal %d\n", proc->pid, sig);
+                sys_exit(-1, 0, 0, 0, 0, 0);
+                // Does not return
+            }
+        } else if (handler == SIG_IGN) {
+            // Ignore — do nothing
+        } else {
+            // User-registered handler
+            deliver_signal(proc, tf, sig, handler);
+            return;  // tf modified, return to user mode to execute handler
+        }
+        // Continue checking more signals
+    }
+}
+
+// ===================== Signal syscalls =====================
+
+// sys_kill(pid, sig) — syscall 47 (发送信号)
+uint64_t sys_kill(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
+    pid_t pid = (pid_t)arg1;
+    int sig = (int)arg2;
+
+    // Validate signal number
+    if (sig < 0 || sig >= NSIG) return (uint64_t)-EINVAL;
+    // signal 0 is a null check (existence test) — always succeed
+    if (sig == 0) return 0;
+
+    // Validate target PID
+    if (pid < 0 || pid >= MAX_PROC) return (uint64_t)-ESRCH;
+
+    proc_t *target = &procs[pid];
+    if (target->pid != pid) return (uint64_t)-ESRCH;
+
+    // Set pending bit (atomic, no lock needed for a single bit)
+    __atomic_or_fetch(&target->sig.pending, 1ULL << sig, __ATOMIC_RELEASE);
+
+    serial_printf("sys_kill: %d -> %d sig=%d\n", current_proc->pid, pid, sig);
+
+    // If target is blocked in WAIT_RECV, wake it so it can check signals
+    // (But without EINTR support, waking here would just cause sys_recv to
+    //  loop back — the signal will be handled on next iret.)
+    // For SIGCHLD, the WAIT_CHILD wake is already done by sys_exit.
+
+    return 0;
+}
+
+// sys_sigaction(sig, act, oldact) — syscall 48 (注册/查询信号 handler)
+uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
+    int sig = (int)arg1;
+    const struct sigaction *act = (const struct sigaction *)arg2;
+    struct sigaction *oldact = (struct sigaction *)arg3;
+
+    // Validate signal number
+    if (sig < 0 || sig >= NSIG) return (uint64_t)-EINVAL;
+    // SIGKILL and SIGSTOP cannot be caught or ignored
+    if (sig == SIGKILL || sig == SIGSTOP) return (uint64_t)-EINVAL;
+
+    proc_t *proc = current_proc;
+
+    // If oldact is non-NULL, copy current action to user space
+    if (oldact) {
+        uint64_t ptr = (uint64_t)oldact;
+        if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(struct sigaction) > 0xFFFFFFFF80000000ULL)
+            return (uint64_t)-EFAULT;
+
+        // Write under user's CR3
+        uint64_t saved_cr3;
+        __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+        __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
+        __memcpy(oldact, &proc->sig.action[sig], sizeof(struct sigaction));
+        __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
+    }
+
+    // If act is non-NULL, copy from user space
+    if (act) {
+        uint64_t ptr = (uint64_t)act;
+        if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(struct sigaction) > 0xFFFFFFFF80000000ULL)
+            return (uint64_t)-EFAULT;
+
+        // Read from user space under user's CR3
+        struct sigaction new_act;
+        uint64_t saved_cr3;
+        __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+        __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
+        __memcpy(&new_act, act, sizeof(struct sigaction));
+        __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
+
+        proc->sig.action[sig] = new_act;
+
+        // POSIX: registering a handler discards pending signals
+        __atomic_and_fetch(&proc->sig.pending, ~(1ULL << sig), __ATOMIC_RELEASE);
+    }
+
+    return 0;
+}
+
+// sys_sigreturn() — syscall 49 (信号 handler 返回后恢复上下文)
+uint64_t sys_sigreturn(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) {
+    proc_t *proc = current_proc;
+
+    if (!proc->sig.have_handler) {
+        serial_printf("sys_sigreturn: no saved context (pid=%d)\n", proc->pid);
+        return (uint64_t)-EINVAL;
+    }
+
+    // Restore saved context into trapframe
+    // We're called from syscall context: the trapframe is on the kernel stack.
+    // Modify GP registers saved in the current syscall's trapframe so that
+    // when syscall_fast_entry does SYSRET, it returns to the saved context.
+    //
+    // However, we need direct access to the trapframe. In our syscall calling
+    // convention, syscall is dispatched via syscall_dispatch(tf) where tf is
+    // the trapframe on the kernel stack. But syscall_dispatch is called from
+    // assembly, and we don't have the trapframe pointer here.
+    //
+    // Solution: modify current_proc's sig state and the per-CPU saved trapframe.
+    // The assembly code in syscall_fast_entry will be modified after calling
+    // syscall_dispatch to check sig_return_pending and reload from saved_* fields.
+    //
+    // Cleaner approach: just overwrite the syscall-specific state.
+    // The trapframe is on the current kernel stack. We can find it by looking
+    // at the stack layout. But this is fragile.
+    //
+    // Instead, we'll modify the response in the syscall entry point assembly.
+    // For now, we save the restore state and let the assembly handle it.
+    //
+    // Actually, the simplest approach: the trampoline sets up a fake trap return.
+    // Let's just modify the current_proc state and leave the trapframe alone.
+    // The assembly code in __trapret will check for pending signal sigreturn
+    // and reload saved_rip/rsp/rflags if have_handler is set.
+
+    // Clear handler flag
+    proc->sig.have_handler = 0;
+
+    // Set up the saved state in a way that the trampoline can find it.
+    // We need to restore rip/rsp/rflags to the caller.
+    // The user-space trampoline called us via syscall — the current trapframe
+    // has rip/rsp from the trampoline call. We overwrite them with saved values.
+    // But the trapframe is on the kernel stack and we don't have its pointer!
+
+    // Simplest working approach: the trampoline issue is that after sys_sigreturn,
+    // the SYSRET goes back to the trampoline's caller. We need to redirect.
+    //
+    // Fix: Use a different approach. In check_pending_signals -> deliver_signal,
+    // we push the trampoline address on the user stack. But instead of having
+    // the trampoline call sys_sigreturn, we can make the trampoline use a
+    // different mechanism.
+    //
+    // ACTUAL SOLUTION: Instead of a trampoline, we modify the trapframe directly
+    // in deliver_signal so that the handler frame is set up as a nested function
+    // call frame. The handler returns normally (to the trampoline), the trampoline
+    // calls sys_sigreturn, and sys_sigreturn modifies the CURRENT process's
+    // trapframe (which is the trampoline's syscall frame) to restore the original
+    // rip/rsp/rflags.
+
+    // We DO have access to the trapframe! The syscall trapframe is on the kernel
+    // stack. Since we're in syscall context, RSP points into the kernel stack
+    // after the C ABI frame setup. The trapframe is below current RSP.
+    //
+    // Actually, the syscall_fast_entry builds a trapframe at the bottom of the
+    // kernel stack, then calls syscall_dispatch. Inside syscall_dispatch, the
+    // stack has: [trapframe] [return addr] [saved rbx/rbp/...] [locals].
+    // The trapframe is at a known offset from the kernel stack top.
+    //
+    // Even simpler: find the trapframe via the per-CPU saved kernel stack base.
+    // The trapframe base is at: tss_rsp0 - 176 (sizeof trapframe).
+    uint64_t tf_base = get_cpu_local()->tss_rsp0 - 176;
+    trapframe_t *tf = (trapframe_t *)tf_base;
+
+    tf->rip = proc->sig.saved_rip;
+    tf->rsp = proc->sig.saved_rsp;
+    tf->rflags = proc->sig.saved_rflags;
+
+    serial_printf("sys_sigreturn: pid=%d restore rip=%lx rsp=%lx\n",
+        proc->pid, proc->sig.saved_rip, proc->sig.saved_rsp);
+
+    return 0;
 }

@@ -44,6 +44,11 @@ __alltraps:
     # __trapret: 恢复
 .globl __trapret
 __trapret:
+    # 检查 pending signals 后再返回用户态
+    # (此时 gs 仍指向 per-CPU 数据，swapgs 尚未执行)
+    movq %rsp, %rdi
+    call check_pending_signals
+
     # swapgs if returning to user mode (CS=0x2B at offset 144)
     cmpw $0x2B, 144(%rsp)
     jne 1f
@@ -135,6 +140,10 @@ syscall_fast_entry:
     # Call syscall_dispatch(rdi = &trapframe)
     movq %rsp, %rdi
     call syscall_dispatch
+
+    # Check pending signals before returning to user mode
+    movq %rsp, %rdi
+    call check_pending_signals
 
     # After syscall_dispatch returns, RSP = trapframe base (C ABI restores RSP).
     # Use SYSRET for fast return to user mode.
