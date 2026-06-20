@@ -51,6 +51,8 @@ uint64_t sys_block_async(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint6
 uint64_t sys_open_dev(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_install_fd_impl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_lseek(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_memfd_create(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_ftruncate(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 // Socket syscalls (declared in kernel/socket.cc)
 uint64_t sys_socket(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);

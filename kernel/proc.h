@@ -17,13 +17,35 @@ enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WAIT_PIPE,
 #define RECV_QUEUE_SIZE 16
 
 // ===================== SHM fd model =====================
-#define SHM_KERNEL 1  // page managed by kernel, don't free on ref_count==0
+#define SHM_KERNEL  1  // page managed by kernel, don't free on ref_count==0
+#define SHM_SEALED  2  // MFD_ALLOW_SEALING was set (sealing allowed)
+
+// Linux-compatible memfd_create flags
+#define MFD_CLOEXEC       0x0001U
+#define MFD_ALLOW_SEALING 0x0002U
+
+// Linux-compatible sealing constants
+#define F_ADD_SEALS  1033
+#define F_GET_SEALS  1034
+#define F_SEAL_SEAL   0x0001  // further fcntl(F_ADD_SEALS) fails
+#define F_SEAL_SHRINK 0x0002  // ftruncate shrink fails
+#define F_SEAL_GROW   0x0004  // ftruncate grow fails
+#define F_SEAL_WRITE  0x0008  // mmap(PROT_WRITE) fails
+
+// fd flag for close-on-exec (stored in struct file::flags)
+#define FD_CLOEXEC 0x8000
 
 struct shm {
-    uint64_t phys;       // physical page start address
-    size_t   npages;     // number of pages
-    int      ref_count;  // reference count
-    int      flags;      // SHM_KERNEL
+    uint64_t phys;          // physical page start address (0 if page_list used)
+    size_t   npages;        // contiguous pages (0 if page_list used)
+    size_t   file_size;     // logical size set by ftruncate (≤ total * PAGE_SIZE)
+    int      ref_count;     // reference count
+    int      flags;         // SHM_KERNEL | SHM_SEALED
+    uint32_t seals;         // active F_SEAL_* bitmask
+    char     name[32];      // debug name from memfd_create (null-terminated)
+    // Discrete page support for resize (when bfc_alloc can't allocate contiguous)
+    uint64_t *page_list;    // NULL = pages in phys (contiguous), else each entry is a 4K page phys addr
+    int      num_pages;     // page_list length (0 when page_list==NULL)
 };
 
 struct mmap_region {

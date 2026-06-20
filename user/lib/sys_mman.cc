@@ -58,3 +58,12 @@ int munmap(void *addr, size_t length) {
     }
     return r;
 }
+
+int memfd_create(const char *name, unsigned int flags) {
+    int fd = sys_memfd_create(name, flags);
+    if (fd <= 0) {
+        errno = ENOMEM;
+        return -1;
+    }
+    return fd;
+}

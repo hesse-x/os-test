@@ -317,6 +317,105 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 19. Build & test  ✅ — 编译通过
 ```
 
+## Linux memfd_create 对齐
+
+### 动机
+
+当前 `sys_shm_create(size)` 返回可 mmap 的 fd，功能上等价于 Linux `memfd_create` + `ftruncate` 两步。为简化未来移植 libwayland 等依赖 Linux API 的代码，决定对齐 `memfd_create` 完整签名：
+
+```c
+// Linux UAPI 等效
+#define MFD_CLOEXEC       0x0001U
+#define MFD_ALLOW_SEALING 0x0002U
+// MFD_HUGETLB 等跳过（不相关）
+
+int sys_memfd_create(const char *name, unsigned int flags);
+// 返回 fd，size=0（需调 ftruncate 设大小）
+// flags: MFD_CLOEXEC | MFD_ALLOW_SEALING
+// name: 存入 struct shm.name[32] 供调试，可为 NULL
+
+int sys_ftruncate(int fd, off_t size);
+// 扩大：分配新物理页 + 插入 shm.phys 页表链
+// 缩小：释放超出的物理页（受 F_SEAL_SHRINK 限制）
+```
+
+### struct shm 扩展
+
+```c
+struct shm {
+    uint64_t phys;          // 物理页起始地址（或链表头）
+    size_t   npages;        // 连续页数（离散页时=0，由 page_list 管理）
+    size_t   file_size;     // ftruncate 设的逻辑大小（≤ npages * PAGE_SIZE）
+    int      ref_count;     // 引用计数
+    int      flags;         // SHM_KERNEL | SHM_SEALED
+    uint32_t seals;         // F_SEAL_SHRINK / F_SEAL_GROW / F_SEAL_WRITE / F_SEAL_SEAL
+    char     name[32];      // memfd_create 传入的调试名
+    // 离散页支持（当 bfc_alloc 无法分配连续大块时）
+    uint64_t *page_list;    // NULL 表示 phys 连续，否则每个 entry 是 4K 页物理地址
+    int      num_pages;     // page_list 长度
+};
+```
+
+`phys` 仍作为快速路径——当 `page_list == NULL` 时所有页在连续物理空间。page_list 在 shm 需要 resize 或 bfc 碎片化时按需创建。
+
+### sealing 语义
+
+Wayland 场景不需要 sealing（每个进程独立 PML4，SCM_RIGHTS 传递后接收方只能看到自己 mmap 的副本），但为 API 完整性实现全部四种 seal：
+
+| Seal | 含义 | 影响的操作 |
+|------|------|-----------|
+| `F_SEAL_SHRINK` | 禁止缩小 | `ftruncate(new_size < old_size)` → `-EPERM` |
+| `F_SEAL_GROW` | 禁止扩大 | `ftruncate(new_size > old_size)` → `-EPERM` |
+| `F_SEAL_WRITE` | 禁止写入 | `mmap(PROT_WRITE)` → `-EPERM`；已有 writable mmap 不受影响 |
+| `F_SEAL_SEAL` | 禁止再设 seal | `fcntl(F_ADD_SEALS)` → `-EPERM` |
+
+seal 一经设置不可撤销（`F_SEAL_SEAL` 锁定后连自身都不能再设）。
+
+```c
+// 新增 syscall（或通过 fcntl 扩展）
+#define F_ADD_SEALS  1033   // Linux 兼容
+#define F_GET_SEALS  1034
+
+int sys_fcntl(int fd, int cmd, uint64_t arg);
+// cmd=F_ADD_SEALS, arg=bitmask of F_SEAL_*
+// cmd=F_GET_SEALS → 返回当前 seal bitmask
+```
+
+### 生命周期变化
+
+```
+旧: shm_create(size) → fd(→mmap(→vaddr 直接读写)
+    close(fd) → ref--, munmap → ref--, 归零→释放
+
+新: memfd_create(name, flags) → fd(size=0)
+    ftruncate(fd, size) → 分配物理页
+    mmap(fd, ...) → 映射到地址空间
+    close(fd) → ref-- (不影响已 mmap)
+    munmap(vaddr) → ref--, 归零→释放
+    (同上)
+```
+
+新增 resize 路径：
+- `ftruncate(fd, new_size)`：扩大时分配新页并追加到 `page_list`；缩小时释放尾部页（除非 `F_SEAL_SHRINK`）
+- 已有 mmap 映射在新 `ftruncate` 扩大的区域上仍可访问（mmap 后追加的页通过缺页或 remap 可见）
+
+### 兼容性
+
+- `sys_shm_create(size)` — 保留作为快捷方式，等价于 `memfd_create(NULL, 0)` + `ftruncate(fd, size)` 两步
+- `sys_mmap(MAP_SHARED, fd, 0)` — 不受影响，对 memfd fd 和 shm fd 行为一致
+- 现有驱动代码不需要改（仍可调 `sys_shm_create`），新增 Wayland 代码走 `memfd_create` 路径
+
+### 实现状态
+
+- [ ] `struct shm` 扩展：file_size/seals/name/page_list 字段
+- [ ] `SYS_MEMFD_CREATE` — 新 syscall，分配空 shm 对象 + fd
+- [ ] `SYS_FTRUNCATE` — 新 syscall，扩大/缩小 shm 物理页
+- [ ] `SYS_FCNTL` F_ADD_SEALS / F_GET_SEALS — sealing 管理
+- [ ] `MFD_CLOEXEC` — 存入 fd flags，exec 时自动关闭
+- [ ] `MFD_ALLOW_SEALING` — 允许后续加 seal（否则 fcntl(F_ADD_SEALS) 返回 -EINVAL）
+- [ ] resize 的 page_list 离散页支持
+- [ ] `sys_mmap` 已映射区域在 ftruncate 扩大后的可见性（无需 remap）
+
 ## 与其他文档的关系
 
 | 文档 | 关系 |

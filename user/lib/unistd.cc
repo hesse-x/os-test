@@ -26,3 +26,12 @@ int ioperm(unsigned long from, unsigned long num, int turn_on) {
     }
     return r;
 }
+
+int ftruncate(int fd, off_t length) {
+    int r = sys_ftruncate(fd, length);
+    if (r < 0) {
+        errno = -r;
+        return -1;
+    }
+    return r;
+}

@@ -678,8 +678,13 @@ static void xhci_init_keyboard() {
     if (kshm) {
       kshm->phys = usb_hid_shm_phys;
       kshm->npages = 1;
+      kshm->file_size = 4096;
       kshm->ref_count = 0;  // kernel holds no reference; kbd_driver's attach adds ref
       kshm->flags = SHM_KERNEL;
+      kshm->seals = 0;
+      kshm->name[0] = '\0';
+      kshm->page_list = nullptr;
+      kshm->num_pages = 0;
       register_kernel_shm(USB_HID_SHM_ID, kshm);
     }
   }

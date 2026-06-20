@@ -455,11 +455,23 @@ void proc_reap(proc_t *proc) {
                         for (mmap_region *mr = proc->mmap_regions; mr; mr = mr->next) {
                             if (mr->shm_obj != nullptr) {
                                 // This region maps an SHM fd — don't free phys pages
-                                uint64_t sphys = mr->shm_obj->phys;
-                                size_t snp = mr->shm_obj->npages;
-                                if (leaf_phys >= sphys && leaf_phys < sphys + snp * PAGE_SIZE) {
-                                    is_shared = true;
-                                    break;
+                                struct shm *s = mr->shm_obj;
+                                if (s->page_list) {
+                                    // Discrete pages: check page_list
+                                    for (int pi = 0; pi < s->num_pages; pi++) {
+                                        if (leaf_phys == s->page_list[pi]) {
+                                            is_shared = true;
+                                            break;
+                                        }
+                                    }
+                                    if (is_shared) break;
+                                } else if (s->phys != 0 && s->npages > 0) {
+                                    // Contiguous pages
+                                    if (leaf_phys >= s->phys &&
+                                        leaf_phys < s->phys + s->npages * PAGE_SIZE) {
+                                        is_shared = true;
+                                        break;
+                                    }
                                 }
                             }
                             // Skip MAP_PHYSICAL regions (external physical memory, e.g. framebuffer)

@@ -169,17 +169,33 @@
 
 #### 信号机制（TTY Ctrl+C 依赖）
 
-- [ ] sigaction / kill 系统调用
-- [ ] 信号投递：进程返回用户态前检查 pending signals
-- [ ] SIGCHLD：子进程 exit 时向父进程投递
-- [ ] SIGINT（Ctrl+C）：终端通过 kill(pid, SIGINT) 向前台进程发中断信号
+**范围：Level 2** — `sys_kill` + `sys_sigaction` + `sys_sigreturn` + pending bits + default action（SIGINT/SIGTERM→exit, SIGCHLD→ignore）。sigprocmask/EINTR/SIGPIPE 预留接口，暂不实现。详见 [signal.md](signal.md)。
+
+- [ ] `sys_kill(pid, sig)` — 设置目标进程 pending bits
+- [ ] `sys_sigaction(sig, act, oldact)` — 注册/查询信号 handler
+- [ ] `sys_sigreturn()` — 信号 handler 返回后恢复上下文
+- [ ] 信号投递：iret 前检查 pending signals → 无 handler 则 default action，有 handler 则 trampoline
+- [ ] SIGCHLD：替代现有 RECV_NOTIFY 子进程退出通知（waitpid 不受影响）
+- [ ] SIGINT（Ctrl+C）：terminal 通过 kill(pid, SIGINT) 向前台进程发中断信号
 - [ ] 验证: shell 前台进程运行时按 Ctrl+C → 进程退出 → shell 返回提示符
+
+**不做**：EINTR 中断阻塞 syscall、SIGPIPE（保持 -EPIPE）、sigprocmask（按需后续加）、作业控制（Ctrl+Z/fg/bg 后续加）。
+
+#### futex（不实现）
+
+**结论：不做。** 评估后确定 futex 在当前系统上需求不存在：
+- 无用户态多线程（无 `clone`、无共享地址空间进程）→ 无用户态锁竞争
+- 所有进程间同步已有 `sys_recv(timeout)` + `sys_poll()` + `sys_notify()` 覆盖
+- Wayland compositor 是单线程事件驱动模型，不需要用户态锁
+- futex 的价值 = 用户态原子操作 + 内核 fallback 休眠，前提是有多线程争锁场景
+- 未来若引入多线程（pthread/clone），再按需实现
 
 #### shm 改进 ✅
 
 - [x] shm 与 fd 绑定：sys_shm_create 返回 fd（类似 memfd_create），通过 SCM_RIGHTS 传递
 - [x] 放宽数量限制：移除 MAX_SHM_PER_PROC=4 限制（shm_regions[] 已删除）
 - [x] sys_shm_attach 改为 fd-based（返回 fd，随后 mmap）
+- [ ] 对齐 Linux `memfd_create` 签名：新增 `SYS_MEMFD_CREATE（name, flags）+ SYS_FTRUNCATE（fd, size）`，支持 MFD_CLOEXEC + MFD_ALLOW_SEALING。保留 `sys_shm_create` 作为内部快捷方式
 - [ ] 验证: 进程 A 创建 shm fd → 通过 Unix socket 传递 → 进程 B mmap 访问
 
 #### 鼠标驱动

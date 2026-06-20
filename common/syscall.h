@@ -50,6 +50,8 @@
 #define SYS_SHUTDOWN     42
 #define SYS_POLL         43
 #define SYS_LSEEK        44
+#define SYS_MEMFD_CREATE 45
+#define SYS_FTRUNCATE    46
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -270,6 +272,15 @@ static inline int sys_install_fd(int32_t fs_pid, int32_t fs_fd,
 
 static inline int64_t sys_lseek(int fd, int64_t offset, int whence) {
     return __syscall3(SYS_LSEEK, (int64_t)fd, (int64_t)offset, (int64_t)whence);
+}
+
+// ===================== memfd_create / ftruncate =====================
+static inline int sys_memfd_create(const char *name, unsigned int flags) {
+    return (int)__syscall2(SYS_MEMFD_CREATE, (int64_t)(uintptr_t)name, (int64_t)flags);
+}
+
+static inline int sys_ftruncate(int fd, int64_t size) {
+    return (int)__syscall2(SYS_FTRUNCATE, (int64_t)fd, (int64_t)size);
 }
 
 #endif // COMMON_SYSCALL_H

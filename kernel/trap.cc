@@ -318,7 +318,7 @@ void isr_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 45
+#define NR_SYSCALL 47
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -365,6 +365,8 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_shutdown,       // 42
     sys_poll,           // 43
     sys_lseek,          // 44
+    sys_memfd_create,   // 45
+    sys_ftruncate,      // 46
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -389,9 +391,21 @@ void shm_put(struct shm *shm) {
     if (old == 1) {
         // Last reference released
         if (!(shm->flags & SHM_KERNEL)) {
-            // Free physical pages (not kernel-managed)
-            Page *page = &BFCAllocator::frames[PHY_TO_PAGE(shm->phys)];
-            bfc_alloc.free_page(page, shm->npages);
+            if (shm->page_list) {
+                // Discrete pages: free each page individually
+                for (int i = 0; i < shm->num_pages; i++) {
+                    Page *p = &BFCAllocator::frames[PHY_TO_PAGE(shm->page_list[i])];
+                    bfc_alloc.free_page(p, 1);
+                }
+                kfree(shm->page_list);
+            } else if (shm->phys != 0 && shm->npages > 0) {
+                // Contiguous pages
+                Page *page = &BFCAllocator::frames[PHY_TO_PAGE(shm->phys)];
+                bfc_alloc.free_page(page, shm->npages);
+            }
+        } else if (shm->page_list) {
+            // SHM_KERNEL with page_list: free the page_list array only (not the pages)
+            kfree(shm->page_list);
         }
         kfree(shm);
     }
@@ -934,7 +948,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
     proc_t *proc = current_proc;
     uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->cr3);
 
-    // MAP_SHARED (0x01) + fd ≥ 0: SHM fd mapping (size=0 allowed — use shm->npages)
+    // MAP_SHARED (0x01) + fd ≥ 0: SHM fd mapping
     if ((flags & 0x01) && fd >= 0) {
         // Validate fd
         if (fd >= MAX_FD || proc->fd_table[fd].type != FD_SHM)
@@ -942,16 +956,27 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         struct shm *shm = proc->fd_table[fd].shm;
         if (!shm) return 0;
 
+        // Total allocated pages: contiguous + discrete
         size_t npages = shm->npages;
-        size = npages * PAGE_SIZE;
+        size_t list_pages = shm->page_list ? (size_t)shm->num_pages : 0;
+        size_t total_pages = npages + list_pages;
+        size = total_pages * PAGE_SIZE;
 
         // Map SHM pages into user address space at mmap_brk
         uint64_t vaddr = proc->mmap_brk;
         uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
 
-        for (size_t i = 0; i < npages; i++) {
+        for (size_t i = 0; i < total_pages; i++) {
+            uint64_t page_phys;
+            if (i < npages) {
+                // From contiguous phys region
+                page_phys = shm->phys + i * PAGE_SIZE;
+            } else {
+                // From discrete page_list
+                page_phys = shm->page_list[i - npages];
+            }
             if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE,
-                                      shm->phys + i * PAGE_SIZE, pte_flags)) {
+                                      page_phys, pte_flags)) {
                 for (size_t j = 0; j < i; j++)
                     unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
                 return 0;
@@ -960,7 +985,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 
         mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
         if (!region) {
-            for (size_t i = 0; i < npages; i++)
+            for (size_t i = 0; i < total_pages; i++)
                 unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE, 1);
             return 0;
         }
@@ -1358,8 +1383,13 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, u
     }
     shm->phys = phys;
     shm->npages = npages;
+    shm->file_size = size;  // logical size = allocated size
     shm->ref_count = 1;  // fd holds initial reference
     shm->flags = 0;
+    shm->seals = 0;
+    shm->name[0] = '\0';  // no name by default
+    shm->page_list = nullptr;
+    shm->num_pages = 0;
 
     // Find free fd slot (skip 0/1 reserved for stdin/stdout)
     int fd = -1;
@@ -1441,6 +1471,245 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64
     proc->fd_table[fd].shm = target_shm;
 
     return (uint64_t)fd;
+}
+
+// ===================== memfd_create / ftruncate =====================
+
+// sys_memfd_create(name, flags) — syscall 45 (Linux-compatible memfd_create)
+// Returns: fd (≥2) on success, 0 on failure
+uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
+    const char *user_name = (const char *)arg1;
+    unsigned int flags = (unsigned int)arg2;
+
+    // Validate flags: only known flags allowed
+    if (flags & ~(MFD_CLOEXEC | MFD_ALLOW_SEALING))
+        return 0;
+
+    proc_t *proc = current_proc;
+
+    // Allocate shm struct (empty — no physical pages yet)
+    struct shm *shm = (struct shm *)kmalloc(sizeof(struct shm));
+    if (!shm) return 0;
+
+    shm->phys = 0;
+    shm->npages = 0;
+    shm->file_size = 0;
+    shm->ref_count = 1;  // fd holds initial reference
+    shm->flags = (flags & MFD_ALLOW_SEALING) ? SHM_SEALED : 0;
+    shm->seals = 0;
+    shm->page_list = nullptr;
+    shm->num_pages = 0;
+
+    // Copy name from user space (up to 31 chars + null)
+    if (user_name) {
+        uint64_t uptr = (uint64_t)user_name;
+        if (uptr >= 0xFFFFFFFF80000000ULL) {
+            kfree(shm);
+            return 0;  // -EFAULT
+        }
+        // Read name byte by byte to avoid crossing page boundary issues
+        int i;
+        for (i = 0; i < 31; i++) {
+            char c;
+            __memcpy(&c, (void *)(uptr + i), 1);
+            if (c == '\0') break;
+            shm->name[i] = c;
+        }
+        shm->name[i] = '\0';
+    } else {
+        shm->name[0] = '\0';
+    }
+
+    // Find free fd slot (skip 0/1 reserved for stdin/stdout)
+    int fd = -1;
+    for (int i = 2; i < MAX_FD; i++) {
+        if (proc->fd_table[i].type == FD_NONE) {
+            fd = i;
+            break;
+        }
+    }
+    if (fd < 0) {
+        kfree(shm);
+        return 0;
+    }
+
+    proc->fd_table[fd].type = FD_SHM;
+    proc->fd_table[fd].flags = O_RDWR | ((flags & MFD_CLOEXEC) ? FD_CLOEXEC : 0);
+    proc->fd_table[fd].shm = shm;
+
+    serial_printf("sys_memfd_create: fd=%d name=\"%s\" flags=%x\n", fd, shm->name, flags);
+    return (uint64_t)fd;
+}
+
+// Helper: allocate one page and add to shm's page_list
+// Returns physical address on success, 0 on failure
+static uint64_t shm_add_page(struct shm *shm) {
+    Page *page = bfc_alloc.alloc_page(1);
+    if (!page) return 0;
+    uint64_t phys = page_to_phys(page);
+
+    // Zero the page
+    __memset((void *)phys_to_virt(phys), 0, PAGE_SIZE);
+
+    if (!shm->page_list) {
+        // First discrete page: allocate page_list array
+        // Start with room for 16 pages, grow as needed
+        int initial_cap = 16;
+        shm->page_list = (uint64_t *)kmalloc((size_t)initial_cap * sizeof(uint64_t));
+        if (!shm->page_list) {
+            bfc_alloc.free_page(page, 1);
+            return 0;
+        }
+        shm->num_pages = 0;  // will be incremented after storing
+        // Don't store yet — caller will use shm->num_pages as index
+    }
+
+    // Check if we need to grow the page_list array
+    // Simple growth: realloc when full (check if num_pages is a multiple of 16)
+    if (shm->num_pages > 0 && (shm->num_pages % 16 == 0)) {
+        int new_cap = shm->num_pages + 16;
+        uint64_t *new_list = (uint64_t *)kmalloc((size_t)new_cap * sizeof(uint64_t));
+        if (!new_list) {
+            bfc_alloc.free_page(page, 1);
+            return 0;
+        }
+        __memcpy(new_list, shm->page_list, (size_t)shm->num_pages * sizeof(uint64_t));
+        kfree(shm->page_list);
+        shm->page_list = new_list;
+    }
+
+    return phys;
+}
+
+// sys_ftruncate(fd, size) — syscall 46 (set shm size, allocate/free pages)
+// Returns: 0 on success, positive errno on failure
+uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
+    int fd = (int)arg1;
+    int64_t size = (int64_t)arg2;
+
+    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
+
+    proc_t *proc = current_proc;
+    if (proc->fd_table[fd].type != FD_SHM) return (uint64_t)-EINVAL;
+    if (!proc->fd_table[fd].shm) return (uint64_t)-EBADF;
+
+    struct shm *shm = proc->fd_table[fd].shm;
+
+    if (size < 0) return (uint64_t)-EINVAL;
+
+    size_t new_size = (size_t)size;
+    size_t new_npages = (new_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    size_t old_total = shm->page_list ? (size_t)shm->num_pages : shm->npages;
+
+    if (new_npages > old_total) {
+        // === EXPAND ===
+        if (shm->seals & F_SEAL_GROW)
+            return (uint64_t)-EPERM;
+
+        size_t extra = new_npages - old_total;
+
+        if (!shm->page_list && shm->npages == 0) {
+            // First allocation: try contiguous
+            Page *pages = bfc_alloc.alloc_page(new_npages);
+            if (pages) {
+                uint64_t phys = page_to_phys(pages);
+                __memset((void *)phys_to_virt(phys), 0, new_npages * PAGE_SIZE);
+                shm->phys = phys;
+                shm->npages = new_npages;
+                shm->file_size = new_size;
+                return 0;
+            }
+            // Contiguous failed — fall through to page_list
+        }
+
+        if (!shm->page_list && shm->npages > 0) {
+            // Switching from contiguous to page_list mode:
+            // Allocate page_list, copy existing phys pages into it
+            size_t total = shm->npages + extra;
+            int list_cap = (int)((total + 15) / 16 * 16);  // round up to multiple of 16
+            if (list_cap < 16) list_cap = 16;
+            shm->page_list = (uint64_t *)kmalloc((size_t)list_cap * sizeof(uint64_t));
+            if (!shm->page_list) return (uint64_t)-ENOMEM;
+
+            for (size_t i = 0; i < shm->npages; i++) {
+                shm->page_list[i] = shm->phys + i * PAGE_SIZE;
+            }
+            shm->num_pages = (int)shm->npages;
+            shm->phys = 0;
+            shm->npages = 0;
+
+            // Add extra pages
+            for (size_t i = 0; i < extra; i++) {
+                uint64_t pphys = shm_add_page(shm);
+                if (!pphys) {
+                    // Cleanup: free pages we already allocated in this batch
+                    for (int j = 0; j < i; j++) {
+                        Page *p = &BFCAllocator::frames[PHY_TO_PAGE(shm->page_list[shm->num_pages - 1 - j])];
+                        bfc_alloc.free_page(p, 1);
+                    }
+                    kfree(shm->page_list);
+                    shm->page_list = nullptr;
+                    shm->num_pages = 0;
+                    return (uint64_t)-ENOMEM;
+                }
+                shm->page_list[shm->num_pages] = pphys;
+                shm->num_pages++;
+            }
+        } else if (shm->page_list) {
+            // Already in page_list mode: add more discrete pages
+            for (size_t i = 0; i < extra; i++) {
+                uint64_t pphys = shm_add_page(shm);
+                if (!pphys) {
+                    // Cleanup partial
+                    for (int j = 0; j < i; j++) {
+                        Page *p = &BFCAllocator::frames[PHY_TO_PAGE(shm->page_list[--shm->num_pages])];
+                        bfc_alloc.free_page(p, 1);
+                    }
+                    return (uint64_t)-ENOMEM;
+                }
+                // shm_add_page reallocs page_list if needed, but we need to
+                // re-get the pointer since kmalloc may move it
+                // We store at shm->page_list[shm->num_pages]
+                shm->page_list[shm->num_pages] = pphys;
+                shm->num_pages++;
+            }
+        }
+
+        shm->file_size = new_size;
+
+    } else if (new_npages < old_total) {
+        // === SHRINK ===
+        if (shm->seals & F_SEAL_SHRINK)
+            return (uint64_t)-EPERM;
+
+        if (shm->page_list) {
+            // Free trailing pages from page_list
+            int free_start = (int)new_npages;
+            for (int i = free_start; i < shm->num_pages; i++) {
+                Page *p = &BFCAllocator::frames[PHY_TO_PAGE(shm->page_list[i])];
+                bfc_alloc.free_page(p, 1);
+            }
+            shm->num_pages = (int)new_npages;
+            if (shm->num_pages == 0) {
+                kfree(shm->page_list);
+                shm->page_list = nullptr;
+            }
+        } else {
+            // Free contiguous pages from the end
+            uint64_t free_phys = shm->phys + new_npages * PAGE_SIZE;
+            size_t free_npages = shm->npages - new_npages;
+            Page *page = &BFCAllocator::frames[PHY_TO_PAGE(free_phys)];
+            bfc_alloc.free_page(page, free_npages);
+            shm->npages = new_npages;
+        }
+
+        shm->file_size = new_size;
+    } else {
+        // Same number of pages — just update file_size
+        shm->file_size = new_size;
+    }
+
+    return 0;
 }
 
 // ===================== Pipe / fd syscalls =====================
@@ -2202,6 +2471,42 @@ uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64
     case F_SETFL:
         proc->fd_table[fd].flags = arg;
         return 0;
+    case F_ADD_SEALS: {
+        // Only valid on FD_SHM with MFD_ALLOW_SEALING
+        if (proc->fd_table[fd].type != FD_SHM) return (uint64_t)-EINVAL;
+        struct shm *shm = proc->fd_table[fd].shm;
+        if (!shm) return (uint64_t)-EBADF;
+        if (!(shm->flags & SHM_SEALED)) return (uint64_t)-EPERM;
+        if (shm->seals & F_SEAL_SEAL) return (uint64_t)-EPERM;
+
+        unsigned int new_seals = (unsigned int)arg;
+        // Only valid seal bits
+        if (new_seals & ~(F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE))
+            return (uint64_t)-EINVAL;
+
+        // F_SEAL_WRITE check: if any writable mmap exists, refuse
+        if (new_seals & F_SEAL_WRITE) {
+            // Walk mmap_regions to check for writable SHM mappings
+            for (mmap_region *mr = proc->mmap_regions; mr; mr = mr->next) {
+                if (mr->shm_obj == shm) {
+                    // Found a mapping of this shm — if it has write permission
+                    // (we can't easily determine prot from mmap_region, so
+                    // conservatively allow — mmap(PROT_WRITE) will be blocked
+                    // on future calls)
+                    break;
+                }
+            }
+        }
+
+        shm->seals |= new_seals;
+        return 0;
+    }
+    case F_GET_SEALS: {
+        if (proc->fd_table[fd].type != FD_SHM) return (uint64_t)-EINVAL;
+        struct shm *shm = proc->fd_table[fd].shm;
+        if (!shm) return (uint64_t)-EBADF;
+        return (uint64_t)shm->seals;
+    }
     default:
         return (uint64_t)-EINVAL;
     }

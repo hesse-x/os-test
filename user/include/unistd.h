@@ -34,6 +34,8 @@ int sched_yield(void);
 int ioperm(unsigned long from, unsigned long num, int turn_on);
 char *getcwd(char *buf, size_t size);
 off_t lseek(int fd, off_t offset, int whence);
+int ftruncate(int fd, off_t length);
+int memfd_create(const char *name, unsigned int flags);
 unsigned int sleep(unsigned seconds);
 int usleep(unsigned usec);
 int access(const char *path, int mode);
