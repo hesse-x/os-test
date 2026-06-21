@@ -3,9 +3,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 
-extern "C" {
 void serial_init();
-}
 
 #ifdef NDEBUG
 
@@ -16,11 +14,9 @@ void serial_init();
 
 #else
 
-extern "C" {
 void serial_putc(char c);
 void serial_puts(const char *s);
 void serial_put_hex(uint64_t val);
 void serial_printf(const char *fmt, ...);
-}
 
 #endif

@@ -6,7 +6,7 @@
 
 // ===================== ACPI table structures =====================
 
-struct acpi_rsdp {
+typedef struct acpi_rsdp {
   uint8_t  signature[8];   // "RSD PTR "
   uint8_t  checksum;
   uint8_t  oem_id[6];
@@ -14,9 +14,9 @@ struct acpi_rsdp {
   uint32_t rsdt_address;
   uint32_t length;         // revision >= 2
   uint64_t xsdt_address;   // revision >= 2
-} __attribute__((packed));
+} __attribute__((packed)) acpi_rsdp_t;
 
-struct acpi_sdt_header {
+typedef struct acpi_sdt_header {
   uint8_t  signature[4];
   uint32_t length;
   uint8_t  revision;
@@ -26,71 +26,71 @@ struct acpi_sdt_header {
   uint32_t oem_revision;
   uint32_t creator_id;
   uint32_t creator_revision;
-} __attribute__((packed));
+} __attribute__((packed)) acpi_sdt_header_t;
 
-struct acpi_madt {
-  struct acpi_sdt_header header;
+typedef struct acpi_madt {
+  acpi_sdt_header_t header;
   uint32_t local_apic_address;
   uint32_t flags;
-} __attribute__((packed));
+} __attribute__((packed)) acpi_madt_t;
 
-struct acpi_madt_entry {
+typedef struct acpi_madt_entry {
   uint8_t type;
   uint8_t length;
-} __attribute__((packed));
+} __attribute__((packed)) acpi_madt_entry_t;
 
-struct acpi_madt_lapic_entry {
+typedef struct acpi_madt_lapic_entry {
   uint8_t  type;       // 0
   uint8_t  length;
   uint8_t  processor_id;
   uint8_t  apic_id;
   uint32_t flags;
-} __attribute__((packed));
+} __attribute__((packed)) acpi_madt_lapic_entry_t;
 
-struct acpi_madt_ioapic_entry {
+typedef struct acpi_madt_ioapic_entry {
   uint8_t  type;       // 1
   uint8_t  length;
   uint8_t  ioapic_id;
   uint8_t  reserved;
   uint32_t ioapic_address;
   uint32_t gsi_base;
-} __attribute__((packed));
+} __attribute__((packed)) acpi_madt_ioapic_entry_t;
 
 // MCFG table (PCI Firmware Spec 3.0)
-struct acpi_mcfg {
-  struct acpi_sdt_header header;
+typedef struct acpi_mcfg {
+  acpi_sdt_header_t header;
   uint64_t reserved;    // 8 bytes reserved
   // entries[] follow
-} __attribute__((packed));
+} __attribute__((packed)) acpi_mcfg_t;
 
-struct acpi_mcfg_entry {
+typedef struct acpi_mcfg_entry {
   uint64_t base_address;   // ECAM base physical address
   uint16_t pci_segment;
   uint8_t  start_bus;
   uint8_t  end_bus;
   uint32_t reserved2;
-} __attribute__((packed));
+} __attribute__((packed)) acpi_mcfg_entry_t;
 
 // ===================== ACPI results (set by acpi_init) =====================
 
 #define MAX_MCFG_ENTRIES 4
 
-struct acpi_madt_result {
+typedef struct acpi_madt_result {
   uint64_t lapic_base;
   uint64_t ioapic_base;
   uint32_t ncpus;
   uint32_t apic_ids[4];
-};
+} acpi_madt_result_t;
 
-struct acpi_mcfg_result {
+typedef struct acpi_mcfg_result {
   uint64_t ecam_base;
   uint16_t segment;
   uint8_t  start_bus;
   uint8_t  end_bus;
-};
+} acpi_mcfg_result_t;
 
-extern struct acpi_madt_result g_madt;
-extern struct acpi_mcfg_result g_mcfg;
+extern acpi_madt_result_t g_madt;
+extern acpi_mcfg_result_t g_mcfg;
 
 // ===================== ACPI API =====================
 
@@ -99,7 +99,7 @@ extern struct acpi_mcfg_result g_mcfg;
 void acpi_init(uint64_t rsdp_phys);
 
 // Find an ACPI table by 4-byte signature
-// Returns virtual address of the table header, or nullptr if not found
+// Returns virtual address of the table header, or NULL if not found
 void *acpi_find_table(const char signature[4]);
 
 #endif // KERNEL_ACPI_H

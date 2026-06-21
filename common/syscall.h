@@ -73,7 +73,7 @@
 #define RECV_NOTIFY 2
 #define RECV_MSG    3
 
-struct recv_msg {
+typedef struct recv_msg {
     uint32_t type;       // RECV_IRQ / RECV_REQ / RECV_NOTIFY / RECV_MSG
     uint32_t src;        // IRQ number or sender PID
     union {
@@ -83,9 +83,36 @@ struct recv_msg {
             size_t len;          // data length
         } msg;
     };
-};
+} recv_msg_t;
 
-// ===================== Semantic wrappers =====================
+// ===================== PCI device info =====================
+typedef struct pci_dev_info_bar {
+    uint64_t phys;
+    uint64_t size;
+    uint8_t  type;   // 0=MMIO32, 1=IO, 2=MMIO64
+} pci_dev_info_bar_t;
+
+typedef struct pci_dev_info {
+    uint16_t vendor_id;
+    uint16_t device_id;
+    uint16_t class_code;
+    uint8_t  irq_pin;
+    uint8_t  irq_line;
+    uint8_t  num_bars;
+    struct pci_dev_info_bar bars[6];
+} pci_dev_info_t;
+
+// ===================== Block I/O constants =====================
+#define BLOCK_DIR_READ  0
+#define BLOCK_DIR_WRITE 1
+
+// ===================== lseek constants =====================
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
+// ===================== Semantic wrappers (user-space only) =====================
+#ifndef __KERNEL__
 static inline int64_t sys_getpid() {
     return __syscall0(SYS_GETPID);
 }
@@ -211,32 +238,11 @@ static inline int sys_dma_free(void *vaddr) {
     return (int)__syscall1(SYS_DMA_FREE, (int64_t)(uintptr_t)vaddr);
 }
 
-// ===================== PCI device info =====================
-struct pci_dev_info_bar {
-    uint64_t phys;
-    uint64_t size;
-    uint8_t  type;   // 0=MMIO32, 1=IO, 2=MMIO64
-};
-
-struct pci_dev_info {
-    uint16_t vendor_id;
-    uint16_t device_id;
-    uint16_t class_code;
-    uint8_t  irq_pin;
-    uint8_t  irq_line;
-    uint8_t  num_bars;
-    struct pci_dev_info_bar bars[6];
-};
-
 static inline int sys_pci_dev_info(uint8_t bus, uint8_t dev, uint8_t func,
                                     struct pci_dev_info *out) {
     return (int)__syscall4(SYS_PCI_DEV_INFO, (int64_t)bus, (int64_t)dev,
         (int64_t)func, (int64_t)(uintptr_t)out);
 }
-
-// ===================== Block I/O =====================
-#define BLOCK_DIR_READ  0
-#define BLOCK_DIR_WRITE 1
 
 static inline int sys_block_io(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
     return (int)__syscall4(SYS_BLOCK_IO, (int64_t)lba,
@@ -268,11 +274,6 @@ static inline int sys_install_fd(int32_t fs_pid, int32_t fs_fd,
         (int64_t)offset, (int64_t)flags, (int64_t)file_size);
 }
 
-// ===================== lseek =====================
-#define SEEK_SET 0
-#define SEEK_CUR 1
-#define SEEK_END 2
-
 static inline int64_t sys_lseek(int fd, int64_t offset, int whence) {
     return __syscall3(SYS_LSEEK, (int64_t)fd, (int64_t)offset, (int64_t)whence);
 }
@@ -301,5 +302,6 @@ static inline int sys_sigaction(int sig, const struct sigaction *act,
 static inline int sys_sigreturn(void) {
     return (int)__syscall0(SYS_SIGRETURN);
 }
+#endif // __KERNEL__
 
 #endif // COMMON_SYSCALL_H

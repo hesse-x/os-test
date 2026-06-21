@@ -3,10 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-struct boot_info;
+typedef struct boot_info boot_info;
 
-extern "C" {
 void kernel_main(boot_info *bi);
 void kernel_init_finish();
-}
 #endif // KERNEL_H

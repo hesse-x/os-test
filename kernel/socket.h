@@ -7,23 +7,19 @@
 #include "kernel/spinlock.h"
 #include "common/socket.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 // ===================== sk_buff (socket buffer) =====================
 // One per sendmsg call. Flexible array member for data.
 #define MAX_SOCKET_DATA 65536  // 64KB soft limit (same as sys_msg)
 #define MAX_SCM_FDS     8      // max fd count per SCM_RIGHTS
 
-struct sk_buff {
+typedef struct sk_buff {
     struct sk_buff *next;       // linked list next
     uint32_t len;               // data length
     uint32_t consumed;          // bytes already read (SOCK_STREAM partial read)
     int      num_fds;           // number of SCM_RIGHTS fds
     int      fds[MAX_SCM_FDS];  // SCM_RIGHTS fd numbers (lazy install)
     uint8_t  data[];            // flexible array member
-};
+} sk_buff_t;
 
 // allocate: skb = kmalloc(sizeof(sk_buff) + data_len)
 // free: kfree(skb)
@@ -31,15 +27,15 @@ struct sk_buff {
 // ===================== unix_sock state =====================
 #define UNIX_MAX_BACKLOG 8
 
-enum unix_sock_state {
+typedef enum unix_sock_state {
     UNIX_FREE = 0,
     UNIX_LISTEN,
     UNIX_CONNECTED,
     UNIX_CLOSED,
-};
+} unix_sock_state_t;
 
 // ===================== unix_sock (per-socket kernel structure) =====================
-struct unix_sock {
+typedef struct unix_sock {
     int      state;                   // UNIX_* state
     pid_t    peer;                    // peer PID (CONNECTED)
     int      ref_count;               // fd ref count (dup2 sharing)
@@ -63,17 +59,17 @@ struct unix_sock {
 
     // Bind path (empty = unbound/anonymous)
     char   sun_path[108];
-};
+} unix_sock_t;
 
 // ===================== Bind name space =====================
 // Hash table: path -> unix_sock* (listener only, UNIX_LISTEN state)
 #define UNIX_HASH_SIZE 64
 
-struct unix_bind_entry {
+typedef struct unix_bind_entry {
     char   sun_path[108];
     struct unix_sock *sock;
     struct unix_bind_entry *next;  // chain for hash collisions
-};
+} unix_bind_entry_t;
 
 // ===================== Global socket lock =====================
 // Lock order: procs_lock -> socket_lock -> scheduler_lock
@@ -120,11 +116,7 @@ void sock_wake_reader(struct unix_sock *sock);
 void sock_wake_writer(struct unix_sock *sock);
 void sock_close(struct unix_sock *sock);
 
-// Forward declaration from trap.cc
+// Forward declaration from trap.c
 void wake_process(pid_t pid);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif // KERNEL_SOCKET_H

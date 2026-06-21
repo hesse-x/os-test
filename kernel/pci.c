@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include "kernel/pci.h"
 #include "kernel/acpi.h"
 #include "arch/x64/paging.h"
@@ -7,7 +8,7 @@
 #include "common/errno.h"
 #include "arch/x64/apic.h"
 
-struct pci_device pci_devices[MAX_PCI_DEV];
+pci_device_t pci_devices[MAX_PCI_DEV];
 int pci_device_count = 0;
 
 uint64_t ecam_vbase = 0;
@@ -40,7 +41,7 @@ static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus
   }
 
   // Allocate PD using bfc_alloc (bump is disabled at pci_init time)
-  Page *pd_page = bfc_alloc.alloc_page(1);
+  Page *pd_page = bfc_alloc_page(1);
   if (!pd_page) {
     serial_puts("pci: ECAM PD alloc failed\n");
     halt();
@@ -87,7 +88,7 @@ void pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset, u
 
 // ===================== BAR sizing =====================
 
-static void pci_size_bar(struct pci_device *d, int bar_idx) {
+static void pci_size_bar(pci_device_t *d, int bar_idx) {
   uint8_t bus = d->bus, dev = d->dev, func = d->func;
   uint8_t offset = 0x10 + bar_idx * 4;
 
@@ -160,7 +161,7 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   uint8_t irq_pin = (irq_info >> 8) & 0xFF;
   uint8_t irq_line = irq_info & 0xFF;
 
-  struct pci_device *d = &pci_devices[pci_device_count];
+  pci_device_t *d = &pci_devices[pci_device_count];
   d->bus = bus;
   d->dev = dev;
   d->func = func;
@@ -239,7 +240,7 @@ static void pci_scan_bus(uint8_t bus) {
 
 // ===================== BAR MMIO mapping =====================
 
-static void pci_map_bar_mmio(struct pci_device *d) {
+static void pci_map_bar_mmio(pci_device_t *d) {
   int max_bars = (d->header_type == PCI_HEADER_TYPE_BRIDGE) ? 2 : 6;
   for (int i = 0; i < max_bars; i++) {
     if (d->bar[i].size == 0) continue;
@@ -262,7 +263,7 @@ static void pci_map_bar_mmio(struct pci_device *d) {
     }
 
     // Allocate PD
-    Page *pd_page = bfc_alloc.alloc_page(1);
+    Page *pd_page = bfc_alloc_page(1);
     if (!pd_page) continue;
     uint64_t *pd = (uint64_t *)phys_to_virt(page_to_phys(pd_page));
     for (int j = 0; j < 512; j++) pd[j] = 0;
@@ -283,7 +284,7 @@ static void pci_map_bar_mmio(struct pci_device *d) {
 
 // ===================== Device enablement =====================
 
-int pci_enable_device(struct pci_device *d) {
+int pci_enable_device(pci_device_t *d) {
   if (d->enabled) return 0;
 
   // 1. Map MMIO BARs
@@ -300,26 +301,25 @@ int pci_enable_device(struct pci_device *d) {
 
 // ===================== Device lookup =====================
 
-struct pci_device *pci_find_device(uint16_t class_code) {
+pci_device_t *pci_find_device(uint16_t class_code) {
   for (int i = 0; i < pci_device_count; i++) {
     if (pci_devices[i].class_code == class_code)
       return &pci_devices[i];
   }
-  return nullptr;
+  return NULL;
 }
 
-struct pci_device *pci_find_device_by_id(uint16_t vendor, uint16_t device) {
+pci_device_t *pci_find_device_by_id(uint16_t vendor, uint16_t device) {
   for (int i = 0; i < pci_device_count; i++) {
     if (pci_devices[i].vendor_id == vendor && pci_devices[i].device_id == device)
       return &pci_devices[i];
   }
-  return nullptr;
+  return NULL;
 }
 
 // ===================== Syscall: sys_pci_dev_info =====================
 
-extern "C"
-uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t) {
+uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u5) {
   uint8_t bus = (uint8_t)arg1;
   uint8_t dev_num = (uint8_t)arg2;
   uint8_t func = (uint8_t)arg3;
@@ -332,7 +332,7 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
     return (uint64_t)-EFAULT;
 
   // Find the device
-  struct pci_device *d = nullptr;
+  pci_device_t *d = NULL;
   for (int i = 0; i < pci_device_count; i++) {
     if (pci_devices[i].bus == bus && pci_devices[i].dev == dev_num &&
         pci_devices[i].func == func) {
@@ -342,7 +342,7 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
   }
   if (!d) return (uint64_t)-ENOENT;
 
-  struct pci_dev_info info = {};
+  struct pci_dev_info info = {0};
   info.vendor_id = d->vendor_id;
   info.device_id = d->device_id;
   info.class_code = d->class_code;
@@ -361,7 +361,7 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
 
 // ===================== MSI-X =====================
 
-int pci_enable_msix(struct pci_device *dev, int num_vectors) {
+int pci_enable_msix(pci_device_t *dev, int num_vectors) {
   if (dev->msix_cap_offset == 0) return -ENOSYS;
   if (num_vectors <= 0 || next_msix_vector + num_vectors > 128) return -ENOMEM;
 
@@ -420,31 +420,31 @@ int pci_enable_msix(struct pci_device *dev, int num_vectors) {
   return num_vectors;
 }
 
-void pci_msix_mask_entry(struct pci_device *dev, int entry) {
+void pci_msix_mask_entry(pci_device_t *dev, int entry) {
   if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors) return;
   uint64_t bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
   volatile uint32_t *table = (volatile uint32_t *)(bar_vaddr + dev->msix_table_offset);
   table[entry * 4 + 3] |= 1;  // Set Mask bit
 }
 
-void pci_msix_unmask_entry(struct pci_device *dev, int entry) {
+void pci_msix_unmask_entry(pci_device_t *dev, int entry) {
   if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors) return;
   uint64_t bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
   volatile uint32_t *table = (volatile uint32_t *)(bar_vaddr + dev->msix_table_offset);
   table[entry * 4 + 3] &= ~1;  // Clear Mask bit
 }
 
-void *pci_msix_table_addr(struct pci_device *dev) {
-  if (dev->msix_cap_offset == 0) return nullptr;
+void *pci_msix_table_addr(pci_device_t *dev) {
+  if (dev->msix_cap_offset == 0) return NULL;
   return (void *)(dev->bar[dev->msix_table_bar].vaddr + dev->msix_table_offset);
 }
 
-void *pci_msix_pba_addr(struct pci_device *dev) {
-  if (dev->msix_cap_offset == 0) return nullptr;
+void *pci_msix_pba_addr(pci_device_t *dev) {
+  if (dev->msix_cap_offset == 0) return NULL;
   return (void *)(dev->bar[dev->msix_pba_bar].vaddr + dev->msix_pba_offset);
 }
 
-int pci_msix_vector_base(struct pci_device *dev) {
+int pci_msix_vector_base(pci_device_t *dev) {
   return dev->msix_vector_base;
 }
 

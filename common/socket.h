@@ -33,33 +33,33 @@ extern "C" {
 #define POLLHUP     0x010
 
 // ===================== sockaddr (generic) =====================
-struct sockaddr {
+typedef struct sockaddr {
     uint16_t sa_family;            // address family (AF_UNIX = 1)
     char     sa_data[14];          // address data
-};
+} sockaddr_t;
 
 // ===================== sockaddr_un =====================
 #define UNIX_PATH_MAX 108
 
-struct sockaddr_un {
+typedef struct sockaddr_un {
     uint16_t sun_family;            // AF_UNIX = 1
     char     sun_path[UNIX_PATH_MAX]; // path or abstract (\0 prefix)
-};
+} sockaddr_un_t;
 
 // ===================== iovec =====================
-struct iovec {
+typedef struct iovec {
     void   *iov_base;   // buffer address
     size_t  iov_len;    // buffer length
-};
+} iovec_t;
 
 // ===================== cmsghdr / CMSG macros =====================
 // Linux UAPI compatible layout (cmsg_len is socklen_t = uint32_t on x86-64)
-struct cmsghdr {
+typedef struct cmsghdr {
     uint32_t cmsg_len;    // data byte count including header (socklen_t)
     int      cmsg_level;  // originating protocol
     int      cmsg_type;   // protocol-specific type
     // followed by unsigned char cmsg_data[];
-};
+} cmsghdr_t;
 
 #define CMSG_ALIGN(len)     (((len) + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1))
 #define CMSG_DATA(cmsg)     ((void *)(((char *)(cmsg)) + sizeof(struct cmsghdr)))
@@ -74,7 +74,7 @@ struct cmsghdr {
 
 // ===================== msghdr =====================
 // Linux UAPI x86-64 exact layout
-struct msghdr {
+typedef struct msghdr {
     void            *msg_name;       // optional address
     uint32_t         msg_namelen;    // 4-byte
     unsigned int     __pad0;         // padding 4-byte
@@ -83,16 +83,16 @@ struct msghdr {
     void            *msg_control;    // ancillary data (SCM_RIGHTS)
     size_t           msg_controllen; // ancillary data size
     int              msg_flags;      // flags on received message
-};
+} msghdr_t;
 
 // ===================== pollfd =====================
 typedef unsigned long nfds_t;
 
-struct pollfd {
+typedef struct pollfd {
     int    fd;         // fd to poll
     short  events;     // requested events
     short  revents;    // returned events
-};
+} pollfd_t;
 
 // ===================== Flags for sendmsg/recvmsg =====================
 #define MSG_EOR     0x80    // end of record

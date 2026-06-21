@@ -9,7 +9,7 @@
 
 // ===================== Global fb info for KMS driver =====================
 
-kms_fb_info g_fb_info = {0};
+kms_fb_info_t g_fb_info = {0};
 
 // ===================== init_fb =====================
 

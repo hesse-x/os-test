@@ -6,8 +6,8 @@ function(add_kernel_object lib_name)
     add_library(${lib_name} OBJECT ${ARG_SOURCES} ${ARG_ASM_SOURCES})
 
     target_include_directories(${lib_name} PRIVATE ${CMAKE_SOURCE_DIR})
+    target_compile_definitions(${lib_name} PRIVATE __KERNEL__)
     set_target_properties(${lib_name} PROPERTIES
-        CXX_STANDARD 17
         POSITION_INDEPENDENT_CODE OFF
     )
 

@@ -43,11 +43,9 @@ typedef struct {
 } trapframe_t;
 
 // ===================== Export interface =====================
-extern "C" {
-void set_idt_gate(int n, uint64_t handler, uint8_t flags = 0x8E, uint8_t ist = 0);
+void set_idt_gate(int n, uint64_t handler, uint8_t flags, uint8_t ist);
 void set_idt();
 void idt_install();
 void setup_syscall();
-}
 
 #endif // ARCH_X64_TRAP_H

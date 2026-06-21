@@ -23,7 +23,7 @@
 // ===================== boot_info (stub → kernel) =====================
 #define BOOT_INFO_MAGIC 0x4F53424F544F4F42ULL  // "BOOTBOOS"
 
-struct boot_info {
+typedef struct boot_info {
   uint64_t magic;
   uint64_t kernel_phys;     // kernel physical load address
   uint64_t rsdp;            // RSDP physical address
@@ -37,7 +37,7 @@ struct boot_info {
   uint64_t mmap_size;       // total bytes
   uint64_t mmap_desc_size;  // single descriptor size
   uint64_t mmap_desc_ver;   // descriptor version
-};
+} boot_info;
 
 // ===================== GDT =====================
 // 64位 GDT entry: 8字节
@@ -76,7 +76,6 @@ typedef struct {
 #define TSS_SEL  0x30    // index 6
 
 // ===================== Global variables =====================
-extern "C" {
 extern uint64_t pml4[512];
 extern uint64_t pdpt_ident[512];
 extern uint64_t pdpt_hh[512];
@@ -95,6 +94,5 @@ void bump_init_phys(uintptr_t start);
 void bump_disable();
 uintptr_t bump_end_phys();
 void enable_nx();
-}
 
 #endif // ARCH_X64_PAGING_H

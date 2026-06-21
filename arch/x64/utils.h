@@ -108,17 +108,13 @@ static inline void local_irq_restore(uint64_t flags) {
   __asm__ volatile("pushq %0; popfq" :: "r"(flags));
 }
 
-// ===================== RAII interrupt guard =====================
-#ifdef __cplusplus
-class IrqGuard {
-  uint64_t flags_;
-public:
-  IrqGuard() : flags_(local_irq_save()) {}
-  ~IrqGuard() { local_irq_restore(flags_); }
-  IrqGuard(const IrqGuard &) = delete;
-  IrqGuard &operator=(const IrqGuard &) = delete;
-};
-#endif
+// ===================== RAII interrupt guard (C cleanup macro) =====================
+static inline void irq_guard_cleanup(uint64_t *flags) {
+  local_irq_restore(*flags);
+}
+
+#define DEFINE_IRQGUARD(name) \
+  uint64_t name __attribute__((cleanup(irq_guard_cleanup))) = local_irq_save()
 
 // ===================== MMIO helpers =====================
 static inline uint32_t readl(const void *addr) {

@@ -20,24 +20,23 @@
 #define EFER_SCE (1ULL << 0)
 #define EFER_NXE (1ULL << 11)
 
-struct proc_t; // forward declaration
-struct Page;
+struct proc_t; // forward declaration (typedef in kernel/proc.h)
 
-struct cpu_local_t {
+typedef struct cpu_local_t {
     uint64_t saved_r10;    // scratch slot: SYSCALL entry saves user R10 (arg4) here
     int cpu_id;
     uint32_t apic_id;
-    proc_t *_cur_proc;
+    struct proc_t *_cur_proc;
     uint64_t lapic_base;
     uint64_t kernel_stack;
     uint64_t tss_rsp0;
     int run_count;         // number of runnable processes on this CPU (excludes idle)
-    proc_t *idle_proc;     // this CPU's idle process
+    struct proc_t *idle_proc;     // this CPU's idle process
     spinlock_t scheduler_lock; // per-CPU scheduler lock
     list_node_t run_queue;     // per-CPU ready queue (sentinel node)
     list_node_t timer_queue;   // per-CPU timer queue (sorted by wait_deadline, sentinel node)
     Page *active_slab[NUM_KMALLOC_CLASSES]; // per-CPU active slab per size class
-};
+} cpu_local_t;
 
 extern cpu_local_t cpu_locals[MAX_CPUS];
 extern int ncpu;
@@ -59,11 +58,11 @@ static inline cpu_local_t *get_cpu_local() {
 // Must be included after proc_t is defined
 #define current_proc (get_cpu_local()->_cur_proc)
 
-extern "C" void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack);
+void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack);
 void smp_apply_cpu(int cpu_id);
 
 // AP startup
-extern "C" void ap_entry_c(int cpu_id);
+void ap_entry_c(int cpu_id);
 void smp_boot_aps();
 
 #endif // ARCH_X64_SMP_H

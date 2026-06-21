@@ -3,11 +3,11 @@
 
 #include <stdint.h>
 
-struct spinlock_t {
+typedef struct spinlock_t {
     volatile uint32_t locked;
-};
+} spinlock_t;
 
-#define SPINLOCK_INIT {0}
+#define SPINLOCK_INIT (spinlock_t){0}
 
 static inline void spin_lock(spinlock_t *lk) {
     while (__atomic_exchange_n(&lk->locked, 1, __ATOMIC_ACQUIRE) == 1)

@@ -9,12 +9,12 @@
 #define KMALLOC_SHIFT_LOW   3    // 最小 class = 8B
 #define KMALLOC_SHIFT_HIGH  11   // 最大 class = 2048B
 
-struct kmem_cache_t {
+typedef struct kmem_cache_t {
     size_t obj_size;              // 对象大小
     size_t redzone_size;          // 红区大小（当前 = 0）
     spinlock_t lock;              // per-cache 锁（保护 partial list）
     Page *partial;                // 有空闲对象的 slab 链表
-};
+} kmem_cache_t;
 
 // 全局 kmalloc cache 数组
 extern kmem_cache_t kmalloc_caches[NUM_KMALLOC_CLASSES];

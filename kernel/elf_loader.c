@@ -5,14 +5,15 @@
 #include "arch/x64/paging.h"
 #include "common/macro.h"
 #include <stddef.h>
+#include <stdbool.h>
 
-// page_to_phys, phys_to_virt — defined in kernel/mem/alloc.cc
-// ensure_pd, ensure_pt_in_pd, map_user_page_direct — defined in kernel/mem/user_mapping.cc
+// page_to_phys, phys_to_virt — defined in kernel/mem/alloc.c
+// ensure_pd, ensure_pt_in_pd, map_user_page_direct — defined in kernel/mem/user_mapping.c
 
 // Map a single 4KB page at vaddr into new_pml4, copying data from src.
 static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
                      uint64_t copy_len) {
-    Page *page = bfc_alloc.alloc_page(1);
+    Page *page = bfc_alloc_page(1);
     if (!page) return false;
     uint64_t page_phys = page_to_phys(page);
     uint64_t page_virt = phys_to_virt(page_phys);
@@ -44,9 +45,9 @@ static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
     return true;
 }
 
-elf_load_result elf_load(const uint8_t *data, uint64_t size,
+elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
                          uint64_t *new_pml4) {
-    elf_load_result result = {0, false};
+    elf_load_result_t result = {0, false};
 
     // 1. Validate ELF magic
     if (size < sizeof(Elf64_Ehdr)) return result;
@@ -90,7 +91,7 @@ elf_load_result elf_load(const uint8_t *data, uint64_t size,
 
             uint64_t page_off = page_addr - ph->p_vaddr;
 
-            const uint8_t *src = nullptr;
+            const uint8_t *src = NULL;
             uint64_t copy_len = 0;
 
             if (page_off < ph->p_filesz) {

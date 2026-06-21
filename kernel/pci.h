@@ -1,6 +1,7 @@
 #ifndef KERNEL_PCI_H
 #define KERNEL_PCI_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -29,15 +30,15 @@
 #define PCI_CAP_ID_MSIX     0x11
 
 // ===================== PCI BAR =====================
-struct pci_bar {
+typedef struct pci_bar {
   uint64_t phys;       // physical address (from BAR)
   uint64_t size;       // size of the region
   uint64_t vaddr;      // kernel virtual address after mapping (0 if not mapped)
   uint8_t  type;       // 0=MMIO32, 1=I/O, 2=MMIO64
-};
+} pci_bar_t;
 
 // ===================== PCI device =====================
-struct pci_device {
+typedef struct pci_device {
   uint8_t  bus;
   uint8_t  dev;
   uint8_t  func;
@@ -56,10 +57,10 @@ struct pci_device {
   int      msix_num_vectors;  // Number of vectors allocated
   bool     enabled;
   struct pci_bar bar[6];
-};
+} pci_device_t;
 
 // ===================== PCI global state =====================
-extern struct pci_device pci_devices[MAX_PCI_DEV];
+extern pci_device_t pci_devices[MAX_PCI_DEV];
 extern int pci_device_count;
 
 extern uint64_t ecam_vbase;
@@ -72,19 +73,19 @@ void pci_init();
 uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset);
 void     pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset, uint32_t value);
 
-struct pci_device *pci_find_device(uint16_t class_code);
-struct pci_device *pci_find_device_by_id(uint16_t vendor, uint16_t device);
+pci_device_t *pci_find_device(uint16_t class_code);
+pci_device_t *pci_find_device_by_id(uint16_t vendor, uint16_t device);
 
-int pci_enable_device(struct pci_device *dev);
+int pci_enable_device(pci_device_t *dev);
 
 // MSI-X API
-int pci_enable_msix(struct pci_device *dev, int num_vectors);
-void pci_msix_mask_entry(struct pci_device *dev, int entry);
-void pci_msix_unmask_entry(struct pci_device *dev, int entry);
-void *pci_msix_table_addr(struct pci_device *dev);
-void *pci_msix_pba_addr(struct pci_device *dev);
-int pci_msix_vector_base(struct pci_device *dev);
+int pci_enable_msix(pci_device_t *dev, int num_vectors);
+void pci_msix_mask_entry(pci_device_t *dev, int entry);
+void pci_msix_unmask_entry(pci_device_t *dev, int entry);
+void *pci_msix_table_addr(pci_device_t *dev);
+void *pci_msix_pba_addr(pci_device_t *dev);
+int pci_msix_vector_base(pci_device_t *dev);
 
-// sys_pci_dev_info is declared in kernel/trap.h (extern "C")
+// sys_pci_dev_info is declared in kernel/trap.h
 
 #endif // KERNEL_PCI_H

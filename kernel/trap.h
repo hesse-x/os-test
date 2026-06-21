@@ -8,7 +8,6 @@
 typedef void (*irq_handler_t)(trapframe_t *);
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
-extern "C" {
 void register_irq(int vec, irq_handler_t fn);
 void trap_dispatch(trapframe_t *tf);
 void syscall_dispatch(trapframe_t *tf);
@@ -59,7 +58,7 @@ uint64_t sys_kill(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_sigaction(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_sigreturn(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
-// Socket syscalls (declared in kernel/socket.cc)
+// Socket syscalls (declared in kernel/socket.c)
 uint64_t sys_socket(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_bind(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_listen(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -76,8 +75,8 @@ int64_t sock_write(struct unix_sock *sock, const void *buf, size_t len);
 int64_t sock_read(struct unix_sock *sock, void *buf, size_t len);
 void sock_close(struct unix_sock *sock);
 
-// Notify a process: enqueue recv_msg + wake if WAIT_RECV
-void notify_and_wake(pid_t target_pid, recv_msg *msg);
+// Notify a process: enqueue recv_msg_t + wake if WAIT_RECV
+void notify_and_wake(pid_t target_pid, recv_msg_t *msg);
 
 // Register a driver PID for a device type (kernel-internal, not a syscall)
 int register_dev(int dev_type, pid_t pid);
@@ -109,6 +108,5 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
 extern uint64_t sig_trampoline_phys;
 void sig_init();
 void check_pending_signals(trapframe_t *tf);
-}
 
 #endif // KERNEL_TRAP_H

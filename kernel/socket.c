@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #include "kernel/socket.h"
 #include "kernel/proc.h"
@@ -93,8 +94,8 @@ void unix_bind_unregister(struct unix_sock *sock) {
 
 struct sk_buff *skb_alloc(uint32_t data_len) {
     struct sk_buff *skb = (struct sk_buff *)kmalloc(sizeof(struct sk_buff) + data_len);
-    if (!skb) return nullptr;
-    skb->next = nullptr;
+    if (!skb) return NULL;
+    skb->next = NULL;
     skb->len = data_len;
     skb->consumed = 0;
     skb->num_fds = 0;
@@ -106,7 +107,7 @@ void skb_free(struct sk_buff *skb) {
 }
 
 void skb_enqueue(struct unix_sock *sock, struct sk_buff *skb) {
-    skb->next = nullptr;
+    skb->next = NULL;
     if (sock->recv_queue_tail) {
         sock->recv_queue_tail->next = skb;
     } else {
@@ -117,13 +118,13 @@ void skb_enqueue(struct unix_sock *sock, struct sk_buff *skb) {
 }
 
 struct sk_buff *skb_dequeue(struct unix_sock *sock) {
-    if (!sock->recv_queue_head) return nullptr;
+    if (!sock->recv_queue_head) return NULL;
     struct sk_buff *skb = sock->recv_queue_head;
     sock->recv_queue_head = skb->next;
     if (!sock->recv_queue_head) {
-        sock->recv_queue_tail = nullptr;
+        sock->recv_queue_tail = NULL;
     }
-    skb->next = nullptr;
+    skb->next = NULL;
     sock->recv_queue_len--;
     return skb;
 }
@@ -132,17 +133,17 @@ struct sk_buff *skb_dequeue(struct unix_sock *sock) {
 
 struct unix_sock *unix_sock_alloc(void) {
     struct unix_sock *sock = (struct unix_sock *)kmalloc(sizeof(struct unix_sock));
-    if (!sock) return nullptr;
+    if (!sock) return NULL;
     sock->state = UNIX_FREE;
     sock->peer = -1;
     sock->ref_count = 1;
-    sock->recv_queue_head = nullptr;
-    sock->recv_queue_tail = nullptr;
+    sock->recv_queue_head = NULL;
+    sock->recv_queue_tail = NULL;
     sock->recv_queue_len = 0;
     sock->blocked_reader = -1;
     sock->blocked_writer = -1;
-    sock->backlog_head = nullptr;
-    sock->backlog_tail = nullptr;
+    sock->backlog_head = NULL;
+    sock->backlog_tail = NULL;
     sock->backlog_len = 0;
     sock->backlog_max = 0;
     sock->shutdown_read = 0;
@@ -275,7 +276,7 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
     }
 
     // Find peer socket
-    struct unix_sock *peer = nullptr;
+    struct unix_sock *peer = NULL;
     pid_t peer_pid = sock->peer;
     if (peer_pid < 0 || peer_pid >= MAX_PROC) {
         skb_free(skb);
@@ -296,7 +297,7 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
     // We'll search peer's fd_table for an FD_SOCKET whose unix_sock has peer == current PID.
     spin_lock(&socket_lock);
 
-    struct unix_sock *peer_sock = nullptr;
+    struct unix_sock *peer_sock = NULL;
     for (int fd = 0; fd < MAX_FD; fd++) {
         if (peer_proc->fd_table[fd].type == FD_SOCKET) {
             struct unix_sock *ps = peer_proc->fd_table[fd].sock;
@@ -543,7 +544,7 @@ void sock_close(struct unix_sock *sock) {
 
 // ===================== Syscall implementations =====================
 
-uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int domain = (int)arg1;
     int type = (int)arg2;
     int protocol = (int)arg3;
@@ -584,7 +585,7 @@ uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint6
     return (uint64_t)fd;
 }
 
-uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
     const struct sockaddr_un *addr = (const struct sockaddr_un *)arg2;
     socklen_t addrlen = (socklen_t)arg3;
@@ -647,7 +648,7 @@ uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_
     return 0;
 }
 
-uint64_t sys_listen(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_listen(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     int fd = (int)arg1;
     int backlog = (int)arg2;
 
@@ -670,7 +671,7 @@ uint64_t sys_listen(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, 
     return 0;
 }
 
-uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
     struct sockaddr_un *addr = (struct sockaddr_un *)arg2;
     socklen_t *addrlen = (socklen_t *)arg3;
@@ -721,7 +722,7 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint6
         // Dequeue from backlog
         listen_sock->backlog_head = child->backlog_head;
         if (!listen_sock->backlog_head) {
-            listen_sock->backlog_tail = nullptr;
+            listen_sock->backlog_tail = NULL;
         }
         listen_sock->backlog_len--;
 
@@ -736,8 +737,8 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint6
 
         if (new_fd < 0) {
             // Put child back and return EMFILE
-            child->backlog_head = nullptr;
-            child->backlog_tail = nullptr;
+            child->backlog_head = NULL;
+            child->backlog_tail = NULL;
             listen_sock->backlog_len++;
             if (listen_sock->backlog_head) {
                 child->backlog_head = listen_sock->backlog_head;
@@ -763,7 +764,7 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint6
             __memset(&sa, 0, sizeof(sa));
             sa.sun_family = AF_UNIX;
             // Find peer's sun_path from peer socket
-            struct unix_sock *peer_sock = nullptr;
+            struct unix_sock *peer_sock = NULL;
             if (child->peer >= 0 && child->peer < MAX_PROC) {
                 proc_t *pp = &procs[child->peer];
                 if (pp->pid == child->peer) {
@@ -798,7 +799,7 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint6
     }
 }
 
-uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
     const struct sockaddr_un *addr = (const struct sockaddr_un *)arg2;
     socklen_t addrlen = (socklen_t)arg3;
@@ -831,7 +832,7 @@ uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint
     spin_lock(&socket_lock);
 
     // Look up listener
-    struct unix_sock *listener = nullptr;
+    struct unix_sock *listener = NULL;
     int ret = unix_bind_lookup(sun_path, &listener);
     if (ret != 0) {
         spin_unlock(&socket_lock);
@@ -885,8 +886,8 @@ found_listener:
     child->peer = proc->pid;
 
     // Enqueue child to listener's backlog
-    child->backlog_head = nullptr;
-    child->backlog_tail = nullptr;
+    child->backlog_head = NULL;
+    child->backlog_tail = NULL;
     if (listener->backlog_tail) {
         listener->backlog_tail->backlog_head = child;  // use backlog_head as next pointer for backlog chain
         listener->backlog_tail = child;
@@ -907,7 +908,7 @@ found_listener:
     return 0;
 }
 
-uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t, uint64_t) {
+uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u1, uint64_t _u2) {
     int domain = (int)arg1;
     int type = (int)arg2;
     int protocol = (int)arg3;
@@ -974,7 +975,7 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
     return 0;
 }
 
-uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
     const struct msghdr *msg = (const struct msghdr *)arg2;
     int flags = (int)arg3;
@@ -1017,7 +1018,7 @@ uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint
     }
 
     // Copy control data
-    void *kcontrol = nullptr;
+    void *kcontrol = NULL;
     size_t kcontrollen = 0;
     if (kmsg.msg_control && kmsg.msg_controllen > 0) {
         uint64_t ctrl_ptr = (uint64_t)kmsg.msg_control;
@@ -1048,7 +1049,7 @@ uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint
     return (uint64_t)ret;
 }
 
-uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
     struct msghdr *msg = (struct msghdr *)arg2;
     int flags = (int)arg3;
@@ -1088,7 +1089,7 @@ uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint
     }
 
     // Control buffer for SCM_RIGHTS output
-    void *kcontrol = nullptr;
+    void *kcontrol = NULL;
     size_t kcontrollen = 0;
     if (kmsg.msg_control && kmsg.msg_controllen > 0) {
         uint64_t ctrl_ptr = (uint64_t)kmsg.msg_control;
@@ -1120,7 +1121,7 @@ uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint
     return (uint64_t)ret;
 }
 
-uint64_t sys_shutdown(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_shutdown(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     int fd = (int)arg1;
     int how = (int)arg2;
 
@@ -1161,7 +1162,7 @@ uint64_t sys_shutdown(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t
     return 0;
 }
 
-uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t) {
+uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     struct pollfd *fds = (struct pollfd *)arg1;
     nfds_t nfds = (nfds_t)arg2;
     int timeout_ms = (int)arg3;
@@ -1322,12 +1323,12 @@ int64_t sock_write(struct unix_sock *sock, const void *buf, size_t len) {
     struct iovec iov;
     iov.iov_base = (void *)buf;
     iov.iov_len = len;
-    return sock_sendmsg_internal(sock, &iov, 1, nullptr, 0, 0);
+    return sock_sendmsg_internal(sock, &iov, 1, NULL, 0, 0);
 }
 
 int64_t sock_read(struct unix_sock *sock, void *buf, size_t len) {
     struct iovec iov;
     iov.iov_base = buf;
     iov.iov_len = len;
-    return sock_recvmsg_internal(sock, &iov, 1, nullptr, 0, 0);
+    return sock_recvmsg_internal(sock, &iov, 1, NULL, 0, 0);
 }

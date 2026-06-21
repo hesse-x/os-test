@@ -1,6 +1,7 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
+#include <stdbool.h>
 
 // ===================== GDT (物理地址阶段) =====================
 // start.S 调用 gdt_init() 时仍在物理地址运行，
@@ -31,12 +32,12 @@ static void set_tss_gate(int n, uint64_t base, uint32_t limit) {
   hi[1] = 0;
 }
 
-extern "C" void reload_cs(void);
+void reload_cs(void);
 
 // 临时 TSS，仅供物理地址阶段使用
 static tss_t boot_tss;
 
-extern "C" const uint8_t stack_bottom[8192]
+const uint8_t stack_bottom[8192]
     __attribute__((aligned(16))) = {0};
 
 void gdt_init() {
@@ -81,7 +82,7 @@ __attribute__((aligned(4096))) uint64_t page_dir[512];
 // 注意：此时 higher-half 不可访问，必须通过物理地址指针操作页表
 // CR3 加载后 identity map + higher-half 生效，才能访问 VMA
 // 返回: rax = &gdtr(栈/物理地址), rdx = &far_ptr(栈/物理地址)
-extern "C" __attribute__((noinline)) void enable_paging(boot_info *bi_phys) {
+__attribute__((noinline)) void enable_paging(boot_info *bi_phys) {
   (void)bi_phys;
 
   // === 构建页表 (2MB huge pages) ===
@@ -157,7 +158,7 @@ void extend_mapping(uint64_t max_phys_addr) {
 
   // PML4[510] 对应虚拟地址 0xFFFFFFFF00000000 起
   // 用于扩展 higher-half 映射（物理 2GB 以上）
-  static uint64_t *pdpt_extra = nullptr;
+  static uint64_t *pdpt_extra = NULL;
 
   for (size_t n = 1; n <= max_1gb_block; n++) {
     // 分配 PD (4KB)
@@ -204,13 +205,13 @@ void flush_tlb() {
 }
 
 // ===================== bump allocator query =====================
-extern "C" uintptr_t bump_end_phys() {
+uintptr_t bump_end_phys() {
   return bump_next_phys;
 }
 
 // ===================== NX bit enable =====================
 // Set CR4.NXDE (bit 5) and EFER.NXE (bit 11) to enable no-execute pages.
-extern "C" void enable_nx() {
+void enable_nx() {
   // Enable CR4.NXDE
   uint64_t cr4 = read_cr4();
   cr4 |= (1ULL << 5);

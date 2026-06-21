@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #include "kernel/proc.h"
 #include "kernel/serial.h"
@@ -21,17 +22,17 @@
 #include "kernel/socket.h"
 
 // Minimal file_io_req for FD_FILE CLOSE notification (must match fs_driver struct layout)
-struct file_io_close_req {
+typedef struct file_io_close_req {
     uint32_t cmd;
     uint8_t  _path[256];
     uint32_t _flags;
     int32_t  fs_fd;          // at offset 264, same as fs_driver's file_req.fs_fd
-};
+} file_io_close_req;
 
 proc_t procs[MAX_PROC];
 // current_proc is per-CPU (in cpu_local_t), accessed via macro
 
-spinlock_t procs_lock = {0};
+spinlock_t procs_lock = {.locked = 0};
 pid_t init_pid = -1;
 
 // ===================== Timer queue operations =====================
@@ -71,15 +72,15 @@ void proc_init() {
         procs[i].entry = 0;
         procs[i].wait_event = WAIT_NONE;
         procs[i].assigned_cpu = -1;
-        procs[i].iopm = nullptr;
+        procs[i].iopm = NULL;
         procs[i].parent_pid = -1;
         procs[i].exit_code = 0;
         procs[i].mmap_brk = 0;
-        procs[i].mmap_regions = nullptr;
+        procs[i].mmap_regions = NULL;
         procs[i].wait_deadline = 0;
         procs[i].wait_timed_out = 0;
         for (int j = 0; j < MAX_FD; j++) {
-            __memset(&procs[i].fd_table[j], 0, sizeof(struct file));
+            __memset(&procs[i].fd_table[j], 0, sizeof(file_t));
             procs[i].fd_table[j].type = FD_NONE;
         }
         list_init(&procs[i].run_node);
@@ -90,11 +91,11 @@ void proc_init() {
         procs[i].recv_lock = SPINLOCK_INIT;
         // REQ state
         procs[i].req_caller_pid = -1;
-        procs[i].req_reply_buf = nullptr;
+        procs[i].req_reply_buf = NULL;
         procs[i].req_result = 0;
         procs[i].req_target_pid = -1;
         // MSG state
-        procs[i].msg_reply_buf = nullptr;
+        procs[i].msg_reply_buf = NULL;
         procs[i].msg_reply_len = 0;
         procs[i].msg_caller_pid = -1;
         procs[i].msg_result = 0;
@@ -114,16 +115,16 @@ void proc_init() {
             procs[i].sig.action[si].sa_flags = 0;
         }
     }
-    cpu_locals[0]._cur_proc = nullptr;
+    cpu_locals[0]._cur_proc = NULL;
     cpu_locals[0].run_count = 0;
-    cpu_locals[0].idle_proc = nullptr;
+    cpu_locals[0].idle_proc = NULL;
     for (int c = 0; c < NUM_KMALLOC_CLASSES; c++) {
-        cpu_locals[0].active_slab[c] = nullptr;
+        cpu_locals[0].active_slab[c] = NULL;
     }
 }
 
 // switch_to 恢复帧：callee-saved 寄存器 + 返回地址
-struct switch_frame_t {
+typedef struct switch_frame_t {
     uint64_t rbx;
     uint64_t rbp;
     uint64_t r12;
@@ -131,11 +132,11 @@ struct switch_frame_t {
     uint64_t r14;
     uint64_t r15;
     uint64_t ret_addr;
-};
+} switch_frame_t;
 
 // 在内核栈顶构建 trapframe + switch_frame，返回 k_rsp
 static uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
-    trapframe_t tf = {};
+    trapframe_t tf = {0};
     tf.ss      = 0x23;                   // USER_DS
     tf.rsp     = 0x00007FFFFFFFE000;      // user stack top (top of mapped page at 0x7FFFFFFFD000)
     tf.rflags  = 0x202;                  // IF=1, IOPL=0
@@ -144,7 +145,7 @@ static uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
     tf.err_code = 0;
     tf.trapno  = 0;
 
-    switch_frame_t sf = {};
+    switch_frame_t sf = {0};
     sf.ret_addr = (uint64_t)process_entry;
 
     uint8_t *sp = (uint8_t *)k_stack_top;
@@ -159,7 +160,7 @@ static uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
 
 // Build idle kernel stack: only switch_frame (no trapframe), ret_addr = idle_entry
 static uint64_t build_idle_kstack(uint64_t k_stack_top) {
-    switch_frame_t sf = {};
+    switch_frame_t sf = {0};
     sf.ret_addr = (uint64_t)idle_entry;
 
     uint8_t *sp = (uint8_t *)k_stack_top;
@@ -172,7 +173,7 @@ static uint64_t build_idle_kstack(uint64_t k_stack_top) {
 // Create idle process for the specified CPU
 proc_t *create_idle_process(int cpu_id) {
     spin_lock(&procs_lock);
-    proc_t *proc = nullptr;
+    proc_t *proc = NULL;
     int alloc_idx = -1;
     for (int i = 0; i < MAX_PROC; i++) {
         if (procs[i].pid < 0) {
@@ -181,11 +182,11 @@ proc_t *create_idle_process(int cpu_id) {
             break;
         }
     }
-    if (!proc) { spin_unlock(&procs_lock); serial_printf("create_idle_process: no free slot\n"); return nullptr; }
+    if (!proc) { spin_unlock(&procs_lock); serial_printf("create_idle_process: no free slot\n"); return NULL; }
 
     // Allocate kernel stack (8KB = 2 pages)
-    Page *stack_pages = bfc_alloc.alloc_page(2);
-    if (!stack_pages) { spin_unlock(&procs_lock); serial_printf("create_idle_process: alloc stack failed\n"); return nullptr; }
+    Page *stack_pages = bfc_alloc_page(2);
+    if (!stack_pages) { spin_unlock(&procs_lock); serial_printf("create_idle_process: alloc stack failed\n"); return NULL; }
     uint64_t k_stack_phys = page_to_phys(stack_pages);
     uint64_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
 
@@ -201,12 +202,12 @@ proc_t *create_idle_process(int cpu_id) {
     proc->entry = (uint64_t)idle_entry;
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = cpu_id;
-    proc->iopm = nullptr;
+    proc->iopm = NULL;
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->mmap_brk = 0x800000;
     proc->mmap_phys_brk = MAP_PHYSICAL_BASE;
-    proc->mmap_regions = nullptr;
+    proc->mmap_regions = NULL;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
     // Signal state
@@ -222,7 +223,7 @@ proc_t *create_idle_process(int cpu_id) {
         proc->sig.action[si].sa_flags = 0;
     }
     for (int j = 0; j < MAX_FD; j++) {
-        __memset(&proc->fd_table[j], 0, sizeof(struct file));
+        __memset(&proc->fd_table[j], 0, sizeof(file_t));
         proc->fd_table[j].type = FD_NONE;
     }
     list_init(&proc->run_node);
@@ -260,7 +261,7 @@ static int pick_cpu() {
 proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     // 1. Find free slot under procs_lock
     spin_lock(&procs_lock);
-    proc_t *proc = nullptr;
+    proc_t *proc = NULL;
     int alloc_idx = -1;
     for (int i = 0; i < MAX_PROC; i++) {
         if (procs[i].pid < 0) {
@@ -269,18 +270,18 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
             break;
         }
     }
-    if (!proc) { spin_unlock(&procs_lock); serial_printf("process_create_elf: no free slot\n"); return nullptr; }
+    if (!proc) { spin_unlock(&procs_lock); serial_printf("process_create_elf: no free slot\n"); return NULL; }
     serial_printf("process_create_elf: alloc_idx=%lx\n", (uint64_t)alloc_idx);
 
     // 2. Allocate kernel stack (8KB = 2 pages)
-    Page *stack_pages = bfc_alloc.alloc_page(2);
-    if (!stack_pages) { spin_unlock(&procs_lock); return nullptr; }
+    Page *stack_pages = bfc_alloc_page(2);
+    if (!stack_pages) { spin_unlock(&procs_lock); return NULL; }
     uint64_t k_stack_phys = page_to_phys(stack_pages);
     uint64_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
 
     // 3. Allocate per-process PML4
-    Page *pml4_page = bfc_alloc.alloc_page(1);
-    if (!pml4_page) { spin_unlock(&procs_lock); return nullptr; }
+    Page *pml4_page = bfc_alloc_page(1);
+    if (!pml4_page) { spin_unlock(&procs_lock); return NULL; }
     uint64_t pml4_phys = page_to_phys(pml4_page);
     uint64_t pml4_virt = phys_to_virt(pml4_phys);
 
@@ -292,8 +293,8 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     new_pml4[511] = pml4[511];
 
     // 5. Load ELF segments into user address space
-    elf_load_result lr = elf_load(elf_data, elf_size, new_pml4);
-    if (!lr.success) { spin_unlock(&procs_lock); serial_puts("process_create_elf: elf_load failed\n"); return nullptr; }
+    elf_load_result_t lr = elf_load(elf_data, elf_size, new_pml4);
+    if (!lr.success) { spin_unlock(&procs_lock); serial_puts("process_create_elf: elf_load failed\n"); return NULL; }
     serial_puts("process_create_elf: entry=");
     serial_put_hex(lr.entry);
     serial_puts(" elf_size=");
@@ -302,8 +303,8 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
 
     // 7. Map user stack: 2048 pages (8MB) at 0x7FFFFFFF0000-0x7FFFFFFFE000
     int user_stack_pages = 2048;
-    Page *user_stack_page = bfc_alloc.alloc_page(user_stack_pages);
-    if (!user_stack_page) { spin_unlock(&procs_lock); return nullptr; }
+    Page *user_stack_page = bfc_alloc_page(user_stack_pages);
+    if (!user_stack_page) { spin_unlock(&procs_lock); return NULL; }
     uint64_t user_stack_phys = page_to_phys(user_stack_page);
     uint64_t stack_base = 0x00007FFFFFFFE000 - (uint64_t)user_stack_pages * PAGE_SIZE;
 
@@ -312,7 +313,7 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
                                  user_stack_phys + i * PAGE_SIZE,
                                  PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
             spin_unlock(&procs_lock);
-            return nullptr;
+            return NULL;
         }
     }
 
@@ -337,12 +338,12 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->entry = lr.entry;
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = assigned_cpu;
-    proc->iopm = nullptr;
+    proc->iopm = NULL;
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->mmap_brk = 0x800000;
     proc->mmap_phys_brk = MAP_PHYSICAL_BASE;
-    proc->mmap_regions = nullptr;
+    proc->mmap_regions = NULL;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
     // Signal state
@@ -358,7 +359,7 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
         proc->sig.action[si].sa_flags = 0;
     }
     for (int j = 0; j < MAX_FD; j++) {
-        __memset(&proc->fd_table[j], 0, sizeof(struct file));
+        __memset(&proc->fd_table[j], 0, sizeof(file_t));
         proc->fd_table[j].type = FD_NONE;
     }
     list_init(&proc->run_node);
@@ -453,8 +454,8 @@ void schedule() {
 
 // Free a page table page by physical address
 static void free_table_page(uint64_t phys) {
-    Page *p = &BFCAllocator::frames[PHY_TO_PAGE(phys)];
-    bfc_alloc.free_page(p, 1);
+    Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
+    bfc_free_page(p, 1);
 }
 
 // proc_reap: reclaim all resources of a process
@@ -496,10 +497,10 @@ void proc_reap(proc_t *proc) {
                         uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
                         // Check mmap_regions: skip SHM fd mappings and MAP_PHYSICAL
                         bool is_shared = false;
-                        for (mmap_region *mr = proc->mmap_regions; mr; mr = mr->next) {
-                            if (mr->shm_obj != nullptr) {
+                        for (mmap_region_t *mr = proc->mmap_regions; mr; mr = mr->next) {
+                            if (mr->shm_obj != NULL) {
                                 // This region maps an SHM fd — don't free phys pages
-                                struct shm *s = mr->shm_obj;
+                                shm_t *s = mr->shm_obj;
                                 if (s->page_list) {
                                     // Discrete pages: check page_list
                                     for (int pi = 0; pi < s->num_pages; pi++) {
@@ -527,8 +528,8 @@ void proc_reap(proc_t *proc) {
                             }
                         }
                         if (!is_shared) {
-                            Page *leaf_page = &BFCAllocator::frames[PHY_TO_PAGE(leaf_phys)];
-                            bfc_alloc.free_page(leaf_page, 1);
+                            Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
+                            bfc_free_page(leaf_page, 1);
                         }
                         pt_virt[pt_idx] = 0;
                     }
@@ -552,13 +553,13 @@ void proc_reap(proc_t *proc) {
     // 3. Free kernel stack (2 pages)
     // k_stack_top is the virtual address of stack top; compute physical base
     uint64_t k_stack_phys_base = PHY_ADDR(proc->k_stack_top - 2 * PAGE_SIZE);
-    Page *stack_page = &BFCAllocator::frames[PHY_TO_PAGE(k_stack_phys_base)];
-    bfc_alloc.free_page(stack_page, 2);
+    Page *stack_page = &bfc_frames[PHY_TO_PAGE(k_stack_phys_base)];
+    bfc_free_page(stack_page, 2);
 
     // 4. Free mmap region metadata + release SHM references
-    mmap_region *region = proc->mmap_regions;
+    mmap_region_t *region = proc->mmap_regions;
     while (region) {
-        mmap_region *next = region->next;
+        mmap_region_t *next = region->next;
         // Release SHM reference if this was an SHM fd mapping
         if (region->shm_obj) {
             shm_put(region->shm_obj);
@@ -574,14 +575,14 @@ void proc_reap(proc_t *proc) {
     for (int fd = 0; fd < MAX_FD; fd++) {
         if (proc->fd_table[fd].type == FD_SHM && proc->fd_table[fd].shm) {
             shm_put(proc->fd_table[fd].shm);
-            proc->fd_table[fd].shm = nullptr;
+            proc->fd_table[fd].shm = NULL;
         }
     }
 
     // 5b. Close all open fds (pipe/file cleanup)
     for (int fd = 0; fd < MAX_FD; fd++) {
         if (proc->fd_table[fd].type == FD_PIPE) {
-            struct pipe *p = proc->fd_table[fd].pipe;
+            pipe_t *p = proc->fd_table[fd].pipe;
             if (p) {
                 p->ref_count--;
                 // Notify blocked peer
@@ -605,7 +606,7 @@ void proc_reap(proc_t *proc) {
                 req.cmd = 4;  // FILE_CMD_CLOSE
                 req.fs_fd = proc->fd_table[fd].file_data.fs_fd;
                 kernel_msg_send(proc->fd_table[fd].file_data.fs_pid,
-                                &req, sizeof(req), nullptr, 0);
+                                &req, sizeof(req), NULL, 0);
             }
         } else if (proc->fd_table[fd].type == FD_SOCKET) {
             struct unix_sock *sock = proc->fd_table[fd].sock;
@@ -619,14 +620,14 @@ void proc_reap(proc_t *proc) {
         }
         // FD_DEV and FD_NONE: no dynamic resources to free
         // (FD_SHM already handled in step 5 above)
-        __memset(&proc->fd_table[fd], 0, sizeof(struct file));
+        __memset(&proc->fd_table[fd], 0, sizeof(file_t));
         proc->fd_table[fd].type = FD_NONE;
     }
 
     // 5c. Free IOPM bitmap
     if (proc->iopm) {
         kfree(proc->iopm);
-        proc->iopm = nullptr;
+        proc->iopm = NULL;
     }
 
     // 6. Clear dev_table entries for this PID
@@ -685,10 +686,10 @@ void proc_reap(proc_t *proc) {
     spin_lock(&proc->recv_lock);
     uint32_t idx = proc->recv_tail;
     while (idx != proc->recv_head) {
-        recv_msg *m = (recv_msg *)proc->recv_buf[idx];
+        recv_msg_t *m = (recv_msg_t *)proc->recv_buf[idx];
         if (m->type == RECV_MSG && m->msg.kmaddr) {
             kfree(m->msg.kmaddr);
-            m->msg.kmaddr = nullptr;
+            m->msg.kmaddr = NULL;
         }
         idx = (idx + 1) % RECV_QUEUE_SIZE;
     }
@@ -704,12 +705,12 @@ void proc_reap(proc_t *proc) {
     proc->entry = 0;
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = -1;
-    proc->iopm = nullptr;
+    proc->iopm = NULL;
     proc->parent_pid = -1;
     proc->exit_code = 0;
     proc->mmap_brk = 0;
     proc->mmap_phys_brk = 0;
-    proc->mmap_regions = nullptr;
+    proc->mmap_regions = NULL;
     proc->wait_deadline = 0;
     proc->wait_timed_out = 0;
     list_init(&proc->run_node);
@@ -720,11 +721,11 @@ void proc_reap(proc_t *proc) {
     proc->recv_lock = SPINLOCK_INIT;
     // REQ state
     proc->req_caller_pid = -1;
-    proc->req_reply_buf = nullptr;
+    proc->req_reply_buf = NULL;
     proc->req_result = 0;
     proc->req_target_pid = -1;
     // MSG state
-    proc->msg_reply_buf = nullptr;
+    proc->msg_reply_buf = NULL;
     proc->msg_reply_len = 0;
     proc->msg_caller_pid = -1;
     proc->msg_result = 0;

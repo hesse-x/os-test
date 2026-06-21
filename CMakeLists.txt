@@ -7,9 +7,10 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 project(myos C CXX ASM)
 
-# Common C++ flags (for kernel, not for boot/)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fPIE -mno-red-zone -mno-sse -mno-sse2 -mno-mmx")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding -nostdlib -fno-pic -fno-pie -mno-red-zone -mno-sse -mno-sse2 -mno-mmx")
+# Common C flags (kernel uses C with -fPIE; user-space uses C/C++ with -fno-pie)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fPIE -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -std=gnu17")
+# C++ flags for user-space only (driver, shell, libc .cc files)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone -mno-sse -mno-sse2 -mno-mmx")
 
 # Debug 模式：加调试信息 + 保留帧指针（栈回溯需要）
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

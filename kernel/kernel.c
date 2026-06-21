@@ -2,6 +2,7 @@
 // kernel_main: 虚拟地址运行，init_mem + 串口 + framebuffer 输出
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "common/macro.h"
 #include "kernel/kernel.h"
@@ -19,7 +20,6 @@
 #include "kernel/pci.h"
 #include "common/dev.h"
 
-extern "C" {
 
 void kernel_init_finish() {
   // 禁止 bump 分配器
@@ -28,7 +28,7 @@ void kernel_init_finish() {
 
 // Read ELF from disk via AHCI DMA — two-phase: read header first, then allocate
 // exact-size pages and read the rest. Returns BFC-allocated buffer (caller must free_page)
-// or nullptr on failure.
+// or NULL on failure.
 #define ELF_SLOT_SECTORS 200   // max slot size per ELF on disk (100KB)
 
 static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_page, size_t *out_npages) {
@@ -37,12 +37,12 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
   serial_printf("load_elf: LBA=%lx", lba);
   if (ahci_read_lba(lba, 1, hdr_buf) != 0) {
     serial_printf(" READ_FAILED\n");
-    return nullptr;
+    return NULL;
   }
 
   if (hdr_buf[0] != 0x7F || hdr_buf[1] != 'E' || hdr_buf[2] != 'L' || hdr_buf[3] != 'F') {
     serial_printf(" BAD_MAGIC: got %lx\n", ((uint32_t *)hdr_buf)[0]);
-    return nullptr;
+    return NULL;
   }
 
   Elf64_Ehdr *ehdr = (Elf64_Ehdr *)hdr_buf;
@@ -50,7 +50,7 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
   if (ehdr->e_phentsize == 0 ||
       ehdr->e_phoff + (uint64_t)ehdr->e_phnum * ehdr->e_phentsize > 512) {
     serial_printf("load_elf_from_disk: program headers exceed first sector\n");
-    return nullptr;
+    return NULL;
   }
   uint64_t file_end = 0;
   for (int i = 0; i < ehdr->e_phnum; i++) {
@@ -64,7 +64,7 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
   uint32_t total_sectors = (uint32_t)((file_end + 511) / 512);
   if (total_sectors > ELF_SLOT_SECTORS) {
     serial_puts("load_elf_from_disk: ELF too large\n");
-    return nullptr;
+    return NULL;
   }
   if (total_sectors < 1) total_sectors = 1;
 
@@ -74,10 +74,10 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
 
   // Phase 2: allocate pages and read
   size_t npages = (file_size + 4095) / 4096;
-  Page *page = bfc_alloc.alloc_page(npages);
+  Page *page = bfc_alloc_page(npages);
   if (!page) {
     serial_printf("load_elf_from_disk: alloc_page failed\n");
-    return nullptr;
+    return NULL;
   }
 
   uint8_t *buf = (uint8_t *)phys_to_virt(page_to_phys(page));
@@ -88,8 +88,8 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
   // Read remaining sectors
   if (total_sectors > 1) {
     if (ahci_read_lba(lba + 1, total_sectors - 1, buf + 512) != 0) {
-      bfc_alloc.free_page(page, npages);
-      return nullptr;
+      bfc_free_page(page, npages);
+      return NULL;
     }
   }
 
@@ -168,7 +168,7 @@ void kernel_main(boot_info *bi) {
       uint8_t *elf = load_elf_from_disk(101, &sz, &pg, &np);
       if (elf) {
         proc_t *p = process_create_elf(elf, sz);
-        bfc_alloc.free_page(pg, np);
+        bfc_free_page(pg, np);
         if (p) { fs_loaded = true; serial_printf("kernel_main: fs_driver created\n"); }
       }
     }
@@ -179,7 +179,7 @@ void kernel_main(boot_info *bi) {
       uint8_t *elf = load_elf_from_disk(301, &sz, &pg, &np);
       if (elf) {
         proc_t *init_proc = process_create_elf(elf, sz);
-        bfc_alloc.free_page(pg, np);
+        bfc_free_page(pg, np);
         if (init_proc) { init_loaded = true; init_pid = init_proc->pid; serial_printf("kernel_main: init created\n"); }
       }
     }
@@ -213,5 +213,4 @@ void kernel_main(boot_info *bi) {
       :: "r"(idle_rsp)
       : "memory");
   // never reaches here
-}
 }

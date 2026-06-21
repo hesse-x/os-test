@@ -8,58 +8,57 @@
 
 // ===================== Global variable definitions =====================
 size_t total_page_frames = 0;
-Page *BFCAllocator::frames = NULL;
-Page *BFCAllocator::free_list = NULL;
+Page *bfc_frames = NULL;
+Page *bfc_free_list = NULL;
 
-BFCAllocator bfc_alloc;
 spinlock_t bfc_lock = {0};
 
-// ===================== BFCAllocator implementation =====================
-void BFCAllocator::init() {
+// ===================== BFC allocator implementation =====================
+void bfc_init(void) {
   // init_mem 中完成初始化
 }
 
-Page *BFCAllocator::alloc_page(size_t n) {
+Page *bfc_alloc_page(size_t n) {
   if (n == 0) return NULL;
 
   uint64_t flags;
   spin_lock_irqsave(&bfc_lock, &flags);
 
-  if (free_list == NULL) {
+  if (bfc_free_list == NULL) {
     spin_unlock_irqrestore(&bfc_lock, flags);
     return NULL;
   }
 
-  Page *cur = free_list;
+  Page *cur = bfc_free_list;
   Page *prev = NULL;
 
   while (cur != NULL) {
     if (cur->bfc.cont_page_num >= n) {
       if (cur->bfc.cont_page_num == n) {
         if (prev == NULL) {
-          free_list = cur->bfc.next;
+          bfc_free_list = cur->bfc.next;
         } else {
           prev->bfc.next = cur->bfc.next;
         }
         if (cur->bfc.next != NULL) {
           cur->bfc.next->bfc.prev = prev;
         }
-        cur->status = PageStatus::USED;
+        cur->status = PAGE_USED;
         spin_unlock_irqrestore(&bfc_lock, flags);
         return cur;
       } else {
         size_t remaining = cur->bfc.cont_page_num - n;
         cur->bfc.cont_page_num = n;
-        cur->status = PageStatus::USED;
+        cur->status = PAGE_USED;
 
         Page *new_block = cur + n;
-        new_block->status = PageStatus::FREE;
+        new_block->status = PAGE_FREE;
         new_block->bfc.cont_page_num = remaining;
         new_block->bfc.prev = prev;
         new_block->bfc.next = cur->bfc.next;
 
         if (prev == NULL) {
-          free_list = new_block;
+          bfc_free_list = new_block;
         } else {
           prev->bfc.next = new_block;
         }
@@ -81,7 +80,7 @@ Page *BFCAllocator::alloc_page(size_t n) {
   return NULL;
 }
 
-Page *BFCAllocator::free_page(Page *page, size_t n) {
+Page *bfc_free_page(Page *page, size_t n) {
   if (page == NULL || n == 0) {
     return NULL;
   }
@@ -89,18 +88,18 @@ Page *BFCAllocator::free_page(Page *page, size_t n) {
   uint64_t flags;
   spin_lock_irqsave(&bfc_lock, &flags);
 
-  page->status = PageStatus::FREE;
+  page->status = PAGE_FREE;
   page->bfc.cont_page_num = n;
 
-  if (free_list == NULL) {
+  if (bfc_free_list == NULL) {
     page->bfc.prev = NULL;
     page->bfc.next = NULL;
-    free_list = page;
+    bfc_free_list = page;
     spin_unlock_irqrestore(&bfc_lock, flags);
     return page;
   }
 
-  Page *cur = free_list;
+  Page *cur = bfc_free_list;
   Page *prev = NULL;
 
   while (cur != NULL && cur < page) {
@@ -112,7 +111,7 @@ Page *BFCAllocator::free_page(Page *page, size_t n) {
   page->bfc.next = cur;
 
   if (prev == NULL) {
-    free_list = page;
+    bfc_free_list = page;
   } else {
     prev->bfc.next = page;
   }
@@ -142,49 +141,49 @@ Page *BFCAllocator::free_page(Page *page, size_t n) {
   return page;
 }
 
-Page *BFCAllocator::alloc_page_low(size_t n) {
+Page *bfc_alloc_page_low(size_t n) {
   if (n == 0) return NULL;
 
   uint64_t flags;
   spin_lock_irqsave(&bfc_lock, &flags);
 
-  if (free_list == NULL) {
+  if (bfc_free_list == NULL) {
     spin_unlock_irqrestore(&bfc_lock, flags);
     return NULL;
   }
 
-  Page *cur = free_list;
+  Page *cur = bfc_free_list;
   Page *prev = NULL;
 
   while (cur != NULL) {
-    uint64_t phys = (uint64_t)(cur - frames) * PAGE_SIZE;
+    uint64_t phys = (uint64_t)(cur - bfc_frames) * PAGE_SIZE;
     if (cur->bfc.cont_page_num >= n && phys + (uint64_t)n * PAGE_SIZE <= 0x100000000ULL) {
       // Same split logic as alloc_page
       if (cur->bfc.cont_page_num == n) {
         if (prev == NULL) {
-          free_list = cur->bfc.next;
+          bfc_free_list = cur->bfc.next;
         } else {
           prev->bfc.next = cur->bfc.next;
         }
         if (cur->bfc.next != NULL) {
           cur->bfc.next->bfc.prev = prev;
         }
-        cur->status = PageStatus::USED;
+        cur->status = PAGE_USED;
         spin_unlock_irqrestore(&bfc_lock, flags);
         return cur;
       } else {
         size_t remaining = cur->bfc.cont_page_num - n;
         cur->bfc.cont_page_num = n;
-        cur->status = PageStatus::USED;
+        cur->status = PAGE_USED;
 
         Page *new_block = cur + n;
-        new_block->status = PageStatus::FREE;
+        new_block->status = PAGE_FREE;
         new_block->bfc.cont_page_num = remaining;
         new_block->bfc.prev = prev;
         new_block->bfc.next = cur->bfc.next;
 
         if (prev == NULL) {
-          free_list = new_block;
+          bfc_free_list = new_block;
         } else {
           prev->bfc.next = new_block;
         }
@@ -206,11 +205,11 @@ Page *BFCAllocator::alloc_page_low(size_t n) {
   return NULL;
 }
 
-size_t BFCAllocator::free_page_nums() const {
+size_t bfc_free_page_nums(void) {
   uint64_t flags;
   spin_lock_irqsave(&bfc_lock, &flags);
   size_t total = 0;
-  Page *cur = free_list;
+  Page *cur = bfc_free_list;
 
   while (cur != NULL) {
     total += cur->bfc.cont_page_num;
@@ -261,7 +260,7 @@ void init_mem(boot_info *bi) {
 
   // 4. 初始化 frames 为 RESERVED
   for (size_t i = 0; i < total_page_frames; i++) {
-    frames[i].status = PageStatus::RESERVED;
+    frames[i].status = PAGE_RESERVED;
     frames[i].bfc.cont_page_num = 1;
     frames[i].bfc.prev = NULL;
     frames[i].bfc.next = NULL;
@@ -277,7 +276,7 @@ void init_mem(boot_info *bi) {
       size_t page_idx = PHY_TO_PAGE(ALIGN_UP(addr, PAGE_SIZE));
       for (size_t j = 0; j < page_num && page_idx + j < total_page_frames;
            j++) {
-        frames[page_idx + j].status = PageStatus::FREE;
+        frames[page_idx + j].status = PAGE_FREE;
       }
     }
   }
@@ -295,19 +294,19 @@ void init_mem(boot_info *bi) {
   size_t used_page_idx_end = PHY_TO_PAGE(ALIGN_UP(used_end, PAGE_SIZE));
   for (size_t i = used_page_idx_start;
        i < used_page_idx_end && i < total_page_frames; i++) {
-    frames[i].status = PageStatus::USED;
+    frames[i].status = PAGE_USED;
   }
 
   // 9. 建立 free list
   int state = 0;
   Page *prev = NULL;
-  Page **cur_page = &BFCAllocator::free_list;
+  Page **cur_page = &bfc_free_list;
   size_t cont_page_num = 0;
   for (size_t i = 0; i < total_page_frames; i++) {
-    PageStatus status = frames[i].status;
+    page_status_t status = frames[i].status;
     switch (state) {
     case 0: {
-      if (status == PageStatus::FREE) {
+      if (status == PAGE_FREE) {
         state = 1;
         *cur_page = frames + i;
         (*cur_page)->bfc.prev = prev;
@@ -317,7 +316,7 @@ void init_mem(boot_info *bi) {
       break;
     }
     case 1: {
-      if (status != PageStatus::FREE) {
+      if (status != PAGE_FREE) {
         state = 0;
         (*cur_page)->bfc.cont_page_num = cont_page_num;
         cont_page_num = 0;
@@ -333,8 +332,8 @@ void init_mem(boot_info *bi) {
     (*cur_page)->bfc.cont_page_num = cont_page_num;
   }
 
-  // 10. 设置 BFCAllocator::frames
-  BFCAllocator::frames = frames;
+  // 10. 设置 bfc_frames
+  bfc_frames = frames;
 
   // 11. 初始化 framebuffer
   init_fb(bi);
@@ -342,7 +341,7 @@ void init_mem(boot_info *bi) {
 
 // ===================== Address conversion =====================
 uint64_t page_to_phys(Page *p) {
-    return (uint64_t)(p - BFCAllocator::frames) * PAGE_SIZE;
+    return (uint64_t)(p - bfc_frames) * PAGE_SIZE;
 }
 
 uint64_t phys_to_virt(uint64_t phys) {

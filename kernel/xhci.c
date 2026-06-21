@@ -138,7 +138,7 @@ static uint64_t mmio_base;
 static uint64_t op_base;
 static uint64_t rt_base;
 static uint64_t db_base;
-static struct pci_device *xhci_dev;
+static pci_device_t *xhci_dev;
 
 // DMA memory pages (base controller)
 static Page *dcbaa_page;
@@ -172,7 +172,7 @@ static int max_intrs;
 static int max_ports;
 
 // ===================== USB HID / keyboard state =====================
-struct xhci_intr {
+typedef struct xhci_intr {
     Page    *ring_page;
     uint64_t ring_phys;
     uint64_t ring_virt;
@@ -181,9 +181,9 @@ struct xhci_intr {
     int      slot_id;
     int      ep_dci;       // Doorbell target (DCI): EP1-IN = 3
     int      ep_num;       // Endpoint number for event matching: EP1-IN = 1
-};
+} xhci_intr_t;
 
-static struct xhci_intr xhci_intrs[2];  // intr 0=keyboard, 1=spare
+static xhci_intr_t xhci_intrs[2];  // intr 0=keyboard, 1=spare
 
 // USB HID SHM page (kernel-allocated, shared with kbd_driver)
 static Page    *usb_hid_shm_page;
@@ -263,14 +263,14 @@ static inline void portsc_write(int port, uint32_t val) {
 
 // ===================== TRB helpers =====================
 
-struct trb {
+typedef struct trb {
   uint32_t dword0;
   uint32_t dword1;
   uint32_t dword2;
   uint32_t dword3;
-};
+} trb_t;
 
-static void cmd_ring_push(struct trb *t) {
+static void cmd_ring_push(trb_t *t) {
   volatile uint32_t *ring = (volatile uint32_t *)cmd_ring_virt;
   int idx = cmd_ring_enqueue * 4;
   t->dword3 &= ~1;
@@ -290,7 +290,7 @@ static void cmd_ring_push(struct trb *t) {
 
 // Enqueue a TRB on a transfer ring (EP0 or EP1-IN)
 static void xfer_ring_enqueue(volatile uint32_t *ring_virt, int *enqueue, int *ccs,
-                              struct trb *t) {
+                              trb_t *t) {
   int idx = (*enqueue) * 4;
   t->dword3 &= ~1;
   t->dword3 |= (*ccs & 1);
@@ -372,7 +372,7 @@ static void xhci_isr(trapframe_t *tf) {
       if (sid == xhci_intrs[0].slot_id && epid == xhci_intrs[0].ep_num) {
         // Replenish TRB regardless of completion code to keep ring alive
         volatile uint32_t *xfer_ring = (volatile uint32_t *)xhci_intrs[0].ring_virt;
-        struct trb norm;
+        trb_t norm;
         norm.dword0 = (uint32_t)hid_dma_phys;
         norm.dword1 = (uint32_t)(hid_dma_phys >> 32);
         norm.dword2 = 8;
@@ -406,7 +406,7 @@ static void xhci_isr(trapframe_t *tf) {
             spin_lock(&target->recv_lock);
             uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
             if (next != target->recv_tail) {  // not full
-              recv_msg *slot = (recv_msg *)target->recv_buf[target->recv_head];
+              recv_msg_t *slot = (recv_msg_t *)target->recv_buf[target->recv_head];
               slot->type = RECV_NOTIFY;
               slot->src = 0;
               target->recv_head = next;
@@ -470,7 +470,7 @@ static void xhci_init_keyboard();  // forward declaration
 
 void xhci_init() {
   // 1. Find xHCI PCI device
-  xhci_dev = nullptr;
+  xhci_dev = NULL;
   for (int i = 0; i < pci_device_count; i++) {
     if (pci_devices[i].class_code == PCI_CLASS_SERIAL_USB) {
       uint32_t rev_class = pci_read_config(pci_devices[i].bus, pci_devices[i].dev,
@@ -503,12 +503,12 @@ void xhci_init() {
   db_base = mmio_base + (dboff & ~0x3);
 
   // 4. Allocate DMA memory (6 base pages)
-  dcbaa_page = bfc_alloc.alloc_page_low(1);
-  input_ctx_page = bfc_alloc.alloc_page_low(1);
-  cmd_ring_page = bfc_alloc.alloc_page_low(1);
-  erst_page = bfc_alloc.alloc_page_low(1);
-  event_ring_page = bfc_alloc.alloc_page_low(1);
-  scratchpad_page = bfc_alloc.alloc_page_low(1);
+  dcbaa_page = bfc_alloc_page_low(1);
+  input_ctx_page = bfc_alloc_page_low(1);
+  cmd_ring_page = bfc_alloc_page_low(1);
+  erst_page = bfc_alloc_page_low(1);
+  event_ring_page = bfc_alloc_page_low(1);
+  scratchpad_page = bfc_alloc_page_low(1);
 
   if (!dcbaa_page || !input_ctx_page || !cmd_ring_page ||
       !erst_page || !event_ring_page || !scratchpad_page) return;
@@ -631,12 +631,12 @@ static void xhci_init_keyboard() {
   uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
 
   // Allocate additional pages for USB keyboard
-  usb_hid_shm_page = bfc_alloc.alloc_page(1);
-  hid_dma_page = bfc_alloc.alloc_page_low(1);
-  ep0_ring_page = bfc_alloc.alloc_page_low(1);
-  xhci_intrs[0].ring_page = bfc_alloc.alloc_page_low(1);
-  dev_ctx_page = bfc_alloc.alloc_page_low(1);
-  ctrl_dma_page = bfc_alloc.alloc_page_low(1);
+  usb_hid_shm_page = bfc_alloc_page(1);
+  hid_dma_page = bfc_alloc_page_low(1);
+  ep0_ring_page = bfc_alloc_page_low(1);
+  xhci_intrs[0].ring_page = bfc_alloc_page_low(1);
+  dev_ctx_page = bfc_alloc_page_low(1);
+  ctrl_dma_page = bfc_alloc_page_low(1);
 
   if (!usb_hid_shm_page || !hid_dma_page || !ep0_ring_page ||
       !xhci_intrs[0].ring_page || !dev_ctx_page || !ctrl_dma_page) return;
@@ -683,7 +683,7 @@ static void xhci_init_keyboard() {
       kshm->flags = SHM_KERNEL;
       kshm->seals = 0;
       kshm->name[0] = '\0';
-      kshm->page_list = nullptr;
+      kshm->page_list = NULL;
       kshm->num_pages = 0;
       register_kernel_shm(USB_HID_SHM_ID, kshm);
     }
@@ -737,7 +737,7 @@ static void xhci_init_keyboard() {
   int port_speed = (portsc & PORTSC_SPEED_MASK) >> 10;
 
   // ---- Step C: Enable Slot ----
-  struct trb es_trb;
+  trb_t es_trb;
   es_trb.dword0 = 0;
   es_trb.dword1 = 0;
   es_trb.dword2 = 0;
@@ -772,7 +772,7 @@ static void xhci_init_keyboard() {
   ictx[19] = (uint32_t)(ep0_ring_phys >> 32);
   ictx[22] = 8;
 
-  struct trb addr_trb;
+  trb_t addr_trb;
   addr_trb.dword0 = (uint32_t)input_ctx_phys;
   addr_trb.dword1 = (uint32_t)(input_ctx_phys >> 32);
   addr_trb.dword2 = 0;
@@ -792,21 +792,21 @@ static void xhci_init_keyboard() {
   // ---- Step E: Get Descriptor (Device Descriptor) ----
   volatile uint32_t *ep0 = (volatile uint32_t *)ep0_ring_virt;
 
-  struct trb setup_trb;
+  trb_t setup_trb;
   setup_trb.dword0 = 0x01000680;
   setup_trb.dword1 = 0x00120000;
   setup_trb.dword2 = 8;
   setup_trb.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &setup_trb);
 
-  struct trb data_trb;
+  trb_t data_trb;
   data_trb.dword0 = (uint32_t)ctrl_dma_phys;
   data_trb.dword1 = (uint32_t)(ctrl_dma_phys >> 32);
   data_trb.dword2 = 18;
   data_trb.dword3 = (TRB_DATA_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &data_trb);
 
-  struct trb status_trb;
+  trb_t status_trb;
   status_trb.dword0 = 0;
   status_trb.dword1 = 0;
   status_trb.dword2 = 0;
@@ -824,21 +824,21 @@ static void xhci_init_keyboard() {
 
   // ---- Step E2: Get Descriptor (Configuration Descriptor) ----
   ep0 = (volatile uint32_t *)ep0_ring_virt;
-  struct trb cfg_setup;
+  trb_t cfg_setup;
   cfg_setup.dword0 = 0x02000680;
   cfg_setup.dword1 = 0x00400000;
   cfg_setup.dword2 = 8;
   cfg_setup.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &cfg_setup);
 
-  struct trb cfg_data;
+  trb_t cfg_data;
   cfg_data.dword0 = (uint32_t)ctrl_dma_phys;
   cfg_data.dword1 = (uint32_t)(ctrl_dma_phys >> 32);
   cfg_data.dword2 = 64;
   cfg_data.dword3 = (TRB_DATA_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &cfg_data);
 
-  struct trb cfg_status;
+  trb_t cfg_status;
   cfg_status.dword0 = 0; cfg_status.dword1 = 0; cfg_status.dword2 = 0;
   cfg_status.dword3 = (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &cfg_status);
@@ -869,14 +869,14 @@ static void xhci_init_keyboard() {
   }
 
   // ---- Step F: Set Protocol (Boot Protocol) ----
-  struct trb sp_setup;
+  trb_t sp_setup;
   sp_setup.dword0 = 0x00000B21;
   sp_setup.dword1 = 0x00000000;
   sp_setup.dword2 = 8;
   sp_setup.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sp_setup);
 
-  struct trb sp_status;
+  trb_t sp_status;
   sp_status.dword0 = 0;
   sp_status.dword1 = 0;
   sp_status.dword2 = 0;
@@ -893,14 +893,14 @@ static void xhci_init_keyboard() {
   if (cc != CC_SUCCESS) return;
 
   // ---- Step F2: Set Configuration ----
-  struct trb sc_setup;
+  trb_t sc_setup;
   sc_setup.dword0 = 0x00010900;
   sc_setup.dword1 = 0x00000000;
   sc_setup.dword2 = 8;
   sc_setup.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sc_setup);
 
-  struct trb sc_status;
+  trb_t sc_status;
   sc_status.dword0 = 0; sc_status.dword1 = 0; sc_status.dword2 = 0;
   sc_status.dword3 = (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sc_status);
@@ -928,7 +928,7 @@ static void xhci_init_keyboard() {
   ictx[35] = (uint32_t)(xhci_intrs[0].ring_phys >> 32);
   ictx[39] = ep_interval;
 
-  struct trb cfg_trb;
+  trb_t cfg_trb;
   cfg_trb.dword0 = (uint32_t)input_ctx_phys;
   cfg_trb.dword1 = (uint32_t)(input_ctx_phys >> 32);
   cfg_trb.dword2 = 0;
@@ -944,7 +944,7 @@ static void xhci_init_keyboard() {
   if (cc != CC_SUCCESS || etype != TRB_CMD_COMPLETE) return;
 
   // ---- Step H: Start keyboard data transfer ----
-  struct trb norm_trb;
+  trb_t norm_trb;
   norm_trb.dword0 = (uint32_t)hid_dma_phys;
   norm_trb.dword1 = (uint32_t)(hid_dma_phys >> 32);
   norm_trb.dword2 = 8;

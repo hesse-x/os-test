@@ -15,7 +15,7 @@ static const size_t class_sizes[NUM_KMALLOC_CLASSES] = {
 
 // ===================== Slab 页初始化 =====================
 static void slab_page_init(Page *page, kmem_cache_t *cache, int cpu_id) {
-    page->status = PageStatus::SLAB;
+    page->status = PAGE_SLAB;
     page->slab.cache = cache;
     page->slab.inuse = 0;
     page->slab.obj_count = PAGE_SIZE / cache->obj_size;
@@ -61,7 +61,7 @@ void slab_init() {
     for (int i = 0; i < NUM_KMALLOC_CLASSES; i++) {
         kmalloc_caches[i].obj_size = class_sizes[i];
         kmalloc_caches[i].redzone_size = 0;
-        kmalloc_caches[i].lock = {0};
+        kmalloc_caches[i].lock.locked = 0;
         kmalloc_caches[i].partial = NULL;
     }
     serial_printf("slab_init: ok\n");
@@ -74,7 +74,7 @@ void *kmalloc(size_t size) {
     // 大分配：走 BFC
     if (size > 2048) {
         size_t npages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-        Page *page = bfc_alloc.alloc_page(npages);
+        Page *page = bfc_alloc_page(npages);
         if (!page) return NULL;
         return (void *)phys_to_virt(page_to_phys(page));
     }
@@ -112,7 +112,7 @@ void *kmalloc(size_t size) {
     }
 
     // partial 也空：从 BFC 分配新页
-    Page *new_page = bfc_alloc.alloc_page(1);
+    Page *new_page = bfc_alloc_page(1);
     if (!new_page) {
         spin_unlock_irqrestore(&cache->lock, flags);
         return NULL;
@@ -134,15 +134,15 @@ void kfree(const void *ptr) {
 
     uint64_t addr = (uint64_t)ptr;
     uint64_t phys = PHY_ADDR(addr);
-    Page *page = &BFCAllocator::frames[PHY_TO_PAGE(phys)];
+    Page *page = &bfc_frames[PHY_TO_PAGE(phys)];
 
-    if (page->status == PageStatus::USED) {
+    if (page->status == PAGE_USED) {
         // BFC 大分配释放
-        bfc_alloc.free_page(page, page->bfc.cont_page_num);
+        bfc_free_page(page, page->bfc.cont_page_num);
         return;
     }
 
-    if (page->status != PageStatus::SLAB) {
+    if (page->status != PAGE_SLAB) {
         serial_puts("kfree: bad page status\n");
         return;
     }
@@ -205,10 +205,10 @@ void *krealloc(void *ptr, size_t new_size) {
     // 获取旧大小
     uint64_t addr = (uint64_t)ptr;
     uint64_t phys = PHY_ADDR(addr);
-    Page *page = &BFCAllocator::frames[PHY_TO_PAGE(phys)];
+    Page *page = &bfc_frames[PHY_TO_PAGE(phys)];
 
     size_t old_size;
-    if (page->status == PageStatus::SLAB) {
+    if (page->status == PAGE_SLAB) {
         old_size = page->slab.cache->obj_size;
     } else {
         old_size = page->bfc.cont_page_num * PAGE_SIZE;

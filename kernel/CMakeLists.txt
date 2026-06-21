@@ -1,5 +1,5 @@
 add_subdirectory(mem)
 
 add_kernel_object(kernel_obj
-    SOURCES kernel.cc serial.cc trap.cc proc.cc fb.cc ahci.cc elf_loader.cc acpi.cc pci.cc xhci.cc socket.cc
+    SOURCES kernel.c serial.c trap.c proc.c fb.c ahci.c elf_loader.c acpi.c pci.c xhci.c socket.c
 )

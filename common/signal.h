@@ -32,11 +32,11 @@
 // Kernel copies the struct directly from user space.
 #ifndef __ASSEMBLER__
 
-struct sigaction {
+typedef struct sigaction {
     void   (*sa_handler)(int);  // SIG_DFL=0, SIG_IGN=1, or user fn
     uint64_t sa_mask;           // blocked mask during handler (for sigprocmask)
     int      sa_flags;          // SA_RESTART, etc.
-};
+} sigaction_t;
 
 // ===================== Default actions =====================
 #define SIG_DFL ((void (*)(int))0)   // default action (terminate)

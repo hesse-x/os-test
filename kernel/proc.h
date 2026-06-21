@@ -10,9 +10,9 @@
 
 typedef int32_t pid_t;
 
-enum proc_state_t { READY, RUNNING, BLOCKED, ZOMBIE, REAPING };
+typedef enum proc_state_t { READY, RUNNING, BLOCKED, ZOMBIE, REAPING } proc_state_t;
 
-enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WAIT_PIPE, WAIT_MSG_REPLY, WAIT_POLL };
+typedef enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WAIT_PIPE, WAIT_MSG_REPLY, WAIT_POLL } wait_event_t;
 
 #define RECV_MSG_SIZE   64
 #define RECV_QUEUE_SIZE 16
@@ -36,7 +36,7 @@ enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WAIT_PIPE,
 // fd flag for close-on-exec (stored in struct file::flags)
 #define FD_CLOEXEC 0x8000
 
-struct shm {
+typedef struct shm {
     uint64_t phys;          // physical page start address (0 if page_list used)
     size_t   npages;        // contiguous pages (0 if page_list used)
     size_t   file_size;     // logical size set by ftruncate (≤ total * PAGE_SIZE)
@@ -47,15 +47,15 @@ struct shm {
     // Discrete page support for resize (when bfc_alloc can't allocate contiguous)
     uint64_t *page_list;    // NULL = pages in phys (contiguous), else each entry is a 4K page phys addr
     int      num_pages;     // page_list length (0 when page_list==NULL)
-};
+} shm_t;
 
-struct mmap_region {
+typedef struct mmap_region {
     uint64_t vaddr;
     uint64_t size;
     uint64_t phys;       // physical address (for DMA buffers, non-zero = MAP_PHYSICAL)
     struct shm *shm_obj; // non-NULL = SHM fd mmap (phys/npages from this)
-    mmap_region *next;
-};
+    struct mmap_region *next;
+} mmap_region_t;
 
 #define MAP_PHYSICAL_BASE 0x70000000  // framebuffer MAP_PHYSICAL fixed high base
 
@@ -76,18 +76,18 @@ struct mmap_region {
 #define O_NONBLOCK 4
 #define O_APPEND  8
 
-struct pipe {
+typedef struct pipe {
     uint8_t *buf;        // 4KB ring buffer (kmalloc)
     uint32_t head;       // write position
     uint32_t tail;       // read position
     pid_t read_pid;      // reader blocked process PID (-1 if none)
     pid_t write_pid;     // writer blocked process PID (-1 if none)
     int ref_count;       // open fd count
-};
+} pipe_t;
 
 struct unix_sock;  // forward declaration from kernel/socket.h
 
-struct file {
+typedef struct file {
     int type;            // FD_NONE / FD_PIPE / FD_SHM / FD_DEV / FD_FILE / FD_SOCKET
     int flags;           // O_RDONLY / O_WRONLY / O_RDWR
     union {
@@ -103,9 +103,9 @@ struct file {
         } file_data;
         struct unix_sock *sock; // if type == FD_SOCKET
     };
-};
+} file_t;
 
-struct proc_t {
+typedef struct proc_t {
     pid_t pid;
     proc_state_t state;
     uint64_t k_rsp;        // saved kernel RSP (for switch_to)
@@ -119,7 +119,7 @@ struct proc_t {
     int32_t exit_code;     // 退出码，ZOMBIE 时有效
     uint64_t mmap_brk;     // mmap 区域高水位（初始 0x800000）
     uint64_t mmap_phys_brk; // MAP_PHYSICAL 区域高水位（初始 MAP_PHYSICAL_BASE）
-    mmap_region *mmap_regions; // mmap 区域链表头
+    struct mmap_region *mmap_regions; // mmap 区域链表头
     list_node_t run_node;  // embedded in per-CPU run_queue
     list_node_t wait_node; // embedded in per-CPU timer_queue (sorted by wait_deadline)
     uint64_t wait_deadline; // sched_clock() nanosecond deadline, 0 = no timeout
@@ -152,7 +152,7 @@ struct proc_t {
     // === 信号状态 ===
     struct signal_state {
         uint64_t pending;           // bitmask: pending signals (bit N = signal N)
-        struct sigaction action[NSIG];  // per-signal action
+        sigaction_t action[NSIG];  // per-signal action
         uint64_t blocked;           // blocked mask (预留)
         int      have_handler;      // 是否有用户态 handler 待调起
         // sigreturn 恢复上下文
@@ -160,7 +160,7 @@ struct proc_t {
         uint64_t saved_rsp;
         uint64_t saved_rflags;
     } sig;
-};
+} proc_t;
 
 #define MAX_PROC 64
 
@@ -169,16 +169,14 @@ extern spinlock_t procs_lock;
 extern pid_t init_pid;
 // current_proc is now per-CPU, accessed via macro in smp.h
 
-extern "C" {
-void proc_init();
+void proc_init(void);
 proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);
-void schedule();
+void schedule(void);
 void switch_to(proc_t *prev, proc_t *next);
-void process_entry();
-void idle_entry();
+void process_entry(void);
+void idle_entry(void);
 proc_t *create_idle_process(int cpu_id);
 void proc_reap(proc_t *proc);
-}
 
 // SHM reference counting helpers
 struct shm *shm_get(struct shm *shm);

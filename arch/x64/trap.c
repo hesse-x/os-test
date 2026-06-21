@@ -4,7 +4,7 @@
 #include "arch/x64/paging.h"
 
 // Vector stubs defined in vectors.S
-#define V(N) extern "C" void vector##N();
+#define V(N) void vector##N();
 V(0) V(1) V(2) V(3) V(4) V(5) V(6) V(7)
 V(8) V(9) V(10) V(11) V(12) V(13) V(14) V(15)
 V(16) V(17) V(18) V(19) V(20) V(21) V(22) V(23)
@@ -75,7 +75,7 @@ void set_idt() {
 
 void idt_install() {
   for (int i = 0; i < 128; i++) {
-    set_idt_gate(i, __vectors[i]);
+    set_idt_gate(i, __vectors[i], 0x8E, 0);
   }
   // IST assignments for critical exceptions
   set_idt_gate(2, (uint64_t)vector2, 0x8E, 1);   // NMI → IST1
@@ -85,7 +85,7 @@ void idt_install() {
 }
 
 // ===================== SYSCALL/SYSRET MSR setup =====================
-extern "C" void syscall_fast_entry(void);
+void syscall_fast_entry(void);
 
 void setup_syscall() {
   // MSR_STAR: [47:32] = kernel CS (0x08), [63:48] = SYSRET base (0x18)

@@ -7,7 +7,7 @@
 #define EI_NIDENT 16
 #define PT_LOAD 1
 
-struct Elf64_Ehdr {
+typedef struct Elf64_Ehdr {
     uint8_t  e_ident[EI_NIDENT];
     uint16_t e_type;
     uint16_t e_machine;
@@ -22,9 +22,9 @@ struct Elf64_Ehdr {
     uint16_t e_shentsize;
     uint16_t e_shnum;
     uint16_t e_shstrndx;
-};
+} Elf64_Ehdr;
 
-struct Elf64_Phdr {
+typedef struct Elf64_Phdr {
     uint32_t p_type;
     uint32_t p_flags;
     uint64_t p_offset;
@@ -33,6 +33,5 @@ struct Elf64_Phdr {
     uint64_t p_filesz;
     uint64_t p_memsz;
     uint64_t p_align;
-};
-
+} Elf64_Phdr;
 #endif // COMMON_ELF_H

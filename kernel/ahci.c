@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include "kernel/ahci.h"
 #include "kernel/pci.h"
 #include "kernel/serial.h"
@@ -62,7 +63,7 @@ static uint64_t bounce_phys, bounce_virt;
 // ===================== Block request queue (async I/O) =====================
 #define BLOCK_QUEUE_SIZE 32
 
-struct block_req {
+typedef struct block_req {
     pid_t       caller_pid;
     uint32_t    lba;
     uint32_t    count;          // sector count (1..AHCI_MAX_SECTORS)
@@ -70,13 +71,13 @@ struct block_req {
     void       *user_buf;       // user-space virtual address
     uint32_t    cookie;         // monotonic ID for completion matching
     int         result;         // 0=ok, EIO=error
-};
+} block_req;
 
 static block_req block_pool[BLOCK_QUEUE_SIZE];
 static int bq_head = 0;     // next slot to dequeue
 static int bq_tail = 0;     // next slot to enqueue
 static int bq_count = 0;    // number of queued requests
-block_req *ahci_current_req = nullptr;  // in-flight request
+block_req *ahci_current_req = NULL;  // in-flight request
 static uint32_t ahci_cookie_counter = 0;
 
 // ===================== Helpers =====================
@@ -143,10 +144,10 @@ static bool bounce_to_user_pages(pid_t pid, void *user_buf, uint32_t byte_len) {
 
 // ===================== DMA allocation =====================
 static void ahci_alloc_dma() {
-  cmd_list_page = bfc_alloc.alloc_page_low(1);
-  fis_recv_page = bfc_alloc.alloc_page_low(1);
-  cmd_table_page = bfc_alloc.alloc_page_low(1);
-  bounce_page = bfc_alloc.alloc_page_low(AHCI_BOUNCE_PAGES);
+  cmd_list_page = bfc_alloc_page_low(1);
+  fis_recv_page = bfc_alloc_page_low(1);
+  cmd_table_page = bfc_alloc_page_low(1);
+  bounce_page = bfc_alloc_page_low(AHCI_BOUNCE_PAGES);
 
   if (!cmd_list_page || !fis_recv_page || !cmd_table_page || !bounce_page) {
     ahci_puts("ahci: DMA alloc failed\n");
@@ -326,7 +327,7 @@ static void ahci_irq_handler(trapframe_t *tf) {
     ahci_current_req->result = error ? EIO : 0;
 
     // Build RECV_NOTIFY completion message
-    recv_msg msg;
+    recv_msg_t msg;
     msg.type = RECV_NOTIFY;
     msg.src = 0;  // kernel disk completion
     __memset(msg.data, 0, 56);
@@ -337,7 +338,7 @@ static void ahci_irq_handler(trapframe_t *tf) {
     __memcpy(msg.data + 12, &ahci_current_req->count, 4);
 
     pid_t caller = ahci_current_req->caller_pid;
-    ahci_current_req = nullptr;
+    ahci_current_req = NULL;
     bq_count--;
     bq_head = (bq_head + 1) % BLOCK_QUEUE_SIZE;
 
@@ -501,7 +502,7 @@ int ahci_set_active_port(int port) {
 // ===================== ahci_init =====================
 void ahci_init() {
   // Find AHCI controller (class 0x0106 = SATA/AHCI)
-  struct pci_device *dev = pci_find_device(PCI_CLASS_STORAGE_AHCI);
+  pci_device_t *dev = pci_find_device(PCI_CLASS_STORAGE_AHCI);
   if (!dev) {
     ahci_puts("ahci: no AHCI controller found\n");
     halt();
@@ -783,7 +784,7 @@ int ahci_write_lba(uint32_t lba, uint32_t count, const void *buf) {
 // ===================== Async block I/O interface =====================
 
 bool ahci_is_busy() {
-    return ahci_current_req != nullptr;
+    return ahci_current_req != NULL;
 }
 
 // Submit async block request. Returns cookie (>0) on success, -errno on error.
@@ -861,7 +862,7 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
             req->result = error ? EIO : 0;
 
             // Build notification message
-            recv_msg msg;
+            recv_msg_t msg;
             msg.type = RECV_NOTIFY;
             msg.src = 0;
             __memset(msg.data, 0, 56);
@@ -870,7 +871,7 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
             __memcpy(msg.data + 8, &req->lba, 4);
             __memcpy(msg.data + 12, &req->count, 4);
 
-            ahci_current_req = nullptr;
+            ahci_current_req = NULL;
             bq_count--;
             bq_head = (bq_head + 1) % BLOCK_QUEUE_SIZE;
 

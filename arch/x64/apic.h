@@ -1,6 +1,7 @@
 #ifndef ARCH_X64_APIC_H
 #define ARCH_X64_APIC_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 // LAPIC register offsets (MMIO)

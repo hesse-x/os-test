@@ -1,6 +1,7 @@
 #ifndef KERNEL_AHCI_H
 #define KERNEL_AHCI_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "kernel/spinlock.h"
 #include "arch/x64/trap.h"

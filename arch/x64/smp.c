@@ -27,8 +27,8 @@ uint64_t per_cpu_ist_stack[MAX_CPUS][3]; // IST1=NMI, IST2=DF, IST3=MCE
 #define TRAMP_CPU_ID    0xD8  // uint32_t: cpu_id
 
 // Trampoline code (defined in ap_trampoline.S)
-extern "C" uint8_t ap_trampoline_start[];
-extern "C" uint8_t ap_trampoline_end[];
+extern uint8_t ap_trampoline_start[];
+extern uint8_t ap_trampoline_end[];
 
 static void set_gdt_gate(gdt_entry_t *gdt, int n, uint32_t base, uint32_t limit,
                          uint8_t access, uint8_t gran) {
@@ -53,22 +53,22 @@ static void set_tss_gate(gdt_entry_t *gdt, int n, uint64_t base, uint32_t limit)
     hi[1] = 0;
 }
 
-extern "C" void reload_cs(void);
+void reload_cs(void);
 
 void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     // Fill cpu_local
     cpu_locals[cpu_id].cpu_id = cpu_id;
     cpu_locals[cpu_id].apic_id = apic_id;
-    cpu_locals[cpu_id]._cur_proc = nullptr;
+    cpu_locals[cpu_id]._cur_proc = NULL;
     cpu_locals[cpu_id].lapic_base = 0;
     cpu_locals[cpu_id].kernel_stack = kernel_stack;
     cpu_locals[cpu_id].tss_rsp0 = kernel_stack;
     cpu_locals[cpu_id].run_count = 0;
-    cpu_locals[cpu_id].scheduler_lock = {0};
+    cpu_locals[cpu_id].scheduler_lock.locked = 0;
     list_init(&cpu_locals[cpu_id].run_queue);
     list_init(&cpu_locals[cpu_id].timer_queue);
     for (int c = 0; c < NUM_KMALLOC_CLASSES; c++) {
-        cpu_locals[cpu_id].active_slab[c] = nullptr;
+        cpu_locals[cpu_id].active_slab[c] = NULL;
     }
 
     // Set up per-CPU GDT (8 entries)
@@ -92,12 +92,12 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
 
     // Allocate per-CPU IST stacks (1 page each: NMI, Double Fault, Machine Check)
     for (int i = 0; i < 3; i++) {
-        Page *ist_page = bfc_alloc.alloc_page(1);
+        Page *ist_page = bfc_alloc_page(1);
         if (!ist_page) {
             serial_puts("smp_init_cpu: IST alloc failed\n");
             halt();
         }
-        uint64_t ist_phys = (uint64_t)(ist_page - BFCAllocator::frames) * PAGE_SIZE;
+        uint64_t ist_phys = (uint64_t)(ist_page - bfc_frames) * PAGE_SIZE;
         per_cpu_ist_stack[cpu_id][i] = ist_phys + VMA_BASE + PAGE_SIZE; // top of page
     }
     tss->ist[0] = per_cpu_ist_stack[cpu_id][0]; // IST1 = NMI (#2)
@@ -135,7 +135,7 @@ void smp_apply_cpu(int cpu_id) {
 }
 
 // ===================== AP entry (called from trampoline code) =====================
-extern "C" void ap_entry_c(int cpu_id) {
+void ap_entry_c(int cpu_id) {
     // Apply per-CPU state (GDT, GS base, TR) to this AP
     smp_apply_cpu(cpu_id);
 
@@ -253,12 +253,12 @@ void smp_boot_aps() {
         uint32_t apic_id = g_madt.apic_ids[i];
 
         // Allocate kernel stack (8KB)
-        Page *stack_pages = bfc_alloc.alloc_page(2);
+        Page *stack_pages = bfc_alloc_page(2);
         if (!stack_pages) {
             ncpu = i;
             break;
         }
-        uint64_t k_stack_phys = (uint64_t)(stack_pages - BFCAllocator::frames) * PAGE_SIZE;
+        uint64_t k_stack_phys = (uint64_t)(stack_pages - bfc_frames) * PAGE_SIZE;
         uint64_t k_stack_top = k_stack_phys + VMA_BASE + 2 * PAGE_SIZE;
 
         // Initialize per-CPU data structures (fills cpu_locals, GDT, TSS)

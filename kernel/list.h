@@ -1,13 +1,14 @@
 #ifndef KERNEL_LIST_H
 #define KERNEL_LIST_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-struct list_node_t {
-    list_node_t *prev;
-    list_node_t *next;
-};
+typedef struct list_node_t {
+    struct list_node_t *prev;
+    struct list_node_t *next;
+} list_node_t;
 
 static inline void list_init(list_node_t *head) {
     head->prev = head;
