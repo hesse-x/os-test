@@ -74,6 +74,7 @@ struct mmap_region {
 #define O_WRONLY  1
 #define O_RDWR    2
 #define O_NONBLOCK 4
+#define O_APPEND  8
 
 struct pipe {
     uint8_t *buf;        // 4KB ring buffer (kmalloc)

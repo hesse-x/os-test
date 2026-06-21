@@ -5,7 +5,8 @@
 # -serial: 串口输出到 log.txt
 # 注释掉的 -s -S 用于 GDB 远程调试
 
-qemu-system-x86_64 \
+# qemu-system-x86_64 \
+~/opensource/qemu/build/qemu-system-x86_64 \
     -machine q35 \
     -drive file=build/boot.img,format=raw,if=none,id=boot0 \
     -device ide-hd,drive=boot0,bus=ide.0 \
