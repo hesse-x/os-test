@@ -1333,7 +1333,7 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
 
     if (fs_pid < 0 || fs_pid >= MAX_PROC) return (uint64_t)-EINVAL;
     if (fs_fd < 0) return (uint64_t)-EINVAL;
-    if (flags & ~(O_RDONLY | O_WRONLY | O_RDWR)) return (uint64_t)-EINVAL;
+    if (flags & ~(O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK)) return (uint64_t)-EINVAL;
 
     proc_t *proc = current_proc;
 
@@ -1356,9 +1356,11 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
     proc->fd_table[fd].file_data.ref_count = 1;
 
     serial_puts("fd_reg:");
-    { char hx[]="0123456789ABCDEF"; char hb[24]; int p=0;
-      hb[p++]='0'+fd; hb[p++]=' '; hb[p++]='s'; hb[p++]='=';
-      uint64_t v=file_size; for(int i=15;i>=0;i--){hb[p++]=hx[(v>>(i*4))&0xF];}
+    { char hx[]="0123456789ABCDEF"; char hb[32]; int p=0;
+      hb[p++]='0'+fd; hb[p++]=' '; hb[p++]='f'; hb[p++]='=';
+      uint32_t v=(uint32_t)fs_fd; for(int i=7;i>=0;i--){hb[p++]=hx[(v>>(i*4))&0xF];}
+      hb[p++]=' '; hb[p++]='s'; hb[p++]='=';
+      uint64_t vs=file_size; for(int i=15;i>=0;i--){hb[p++]=hx[(vs>>(i*4))&0xF];}
       hb[p++]='\n'; serial_puts(hb); }
     return (uint64_t)fd;
 }

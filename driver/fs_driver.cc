@@ -126,7 +126,7 @@ static void cache_unpin(uint32_t cluster) {
 }
 
 // ===================== FAT sector cache (4 pages, fixed) =====================
-#define FAT_CACHE_PAGES 4
+#define FAT_CACHE_PAGES 16
 
 struct fat_cache_entry {
     uint32_t sector_lba;
@@ -475,6 +475,7 @@ struct resolve_state {
     uint32_t result_cluster; // cluster where result entry was found
     int result_entry_idx;  // entry index within result_cluster
     bool is_parent;        // true=resolve to parent dir, extract leaf_name
+    int is_parent_end;     // path index where parent path ends (= last_slash)
     char leaf_name[256];   // extracted leaf name (when is_parent=true)
     int leaf_len;          // length of leaf_name
     int phase;             // RS_INIT..RS_DONE
@@ -508,6 +509,7 @@ struct find_slots_state {
     uint32_t tail_cluster;   // tail of dir chain (via dir_tail_lookup or traversal)
     bool tail_traversing;    // true when traversing chain to find tail (on cache miss)
     uint32_t traverse_cluster; // current cluster during tail traversal
+    bool end_of_dir;         // true if allocated slots include/extend past original 0x00 marker
     int phase;               // FS_SCAN_CLUSTER..FS_DONE
 };
 
@@ -522,6 +524,7 @@ struct find_slots_state {
 #define CD_WRITE_SHORT       6
 #define CD_UPDATE_TIMESTAMP  7
 #define CD_DONE              8
+#define CD_WRITE_EOD         10  // write end-of-directory 0x00 terminator
 
 // gen_short_name async phases (embedded in create_dir_context)
 #define GS_SCAN      0  // Scan entries in current cluster
@@ -884,6 +887,29 @@ static void fat_dual_write_start(fat_write_state *fws, pending_op *op) {
 // Called when an async FAT write I/O completes. Advances through phases.
 // Returns true if FAT dual-write is done (phase=3).
 static bool fat_dual_write_resume(fat_write_state *fws, pending_op *op) {
+    if (fws->phase == 1) {
+        // Phase 0 read completed (cache miss path) — modify entry and write FAT1
+        uint8_t *p = fws->sector_buf + fws->offset_in_sector;
+        uint32_t old = (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
+        uint32_t nv = (old & 0xF0000000) | (fws->value & 0x0FFFFFFF);
+        p[0]=nv&0xFF; p[1]=(nv>>8)&0xFF; p[2]=(nv>>16)&0xFF; p[3]=(nv>>24)&0xFF;
+
+        op->io.lba = fws->fat_sector;
+        op->io.count = 1;
+        op->io.buf = fws->sector_buf;
+        op->io.dir = 1;
+        op->io.complete = [](disk_io *io) {
+            pending_op *o = (pending_op *)io->ctx;
+            o->io_active = false;
+            o->u.write.fws.phase = 2;
+            o->resume(o);
+        };
+        op->io.ctx = op;
+        op->io.next = NULL;
+        op->io_active = true;
+        submit_disk_io(&op->io);
+        return false;
+    }
     if (fws->phase == 2) {
         // Phase 2: write FAT2
         op->io.lba = fws->fat2_sector;
@@ -1253,8 +1279,6 @@ static void readahead_complete(disk_io *io) {
 // Caller re-enters on async I/O completion by calling resolve_step again.
 
 static int resolve_step(resolve_state *rs, pending_op *op) {
-    static int resolve_seq = 0;
-    int my_seq = resolve_seq++;
     while (1) {
         switch (rs->phase) {
 
@@ -1268,6 +1292,7 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
                     if (rs->path[path_len] == '/') last_slash = path_len;
                     path_len++;
                 }
+                rs->is_parent_end = last_slash;  // parent path ends here
                 if (path_len == 1) {
                     // Path is just "/" — no parent to resolve
                     rs->found = false;
@@ -1370,41 +1395,12 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
 
         case RS_SCAN_ENTRIES: {
             // Scan entries in current cluster
-            {
-                char hb[16]; const char *hx="0123456789ABCDEF";
-                uint32_t cc = rs->current_cluster;
-                hb[0]='s'; hb[1]='q'; hb[2]=hx[my_seq&0xf]; hb[3]=' ';
-                hb[4]='s'; hb[5]='c'; hb[6]='a'; hb[7]='n';
-                for(int i=11;i>=8;i--){hb[i]=hx[cc&0xf];cc>>=4;}
-            }
             int slot = cache_lookup(rs->current_cluster);
             if (slot < 0) {
                 // Cache miss — need to read
                 rs->phase = RS_READ_CLUSTER;
                 continue;
             }
-            {
-                // Debug: print entry_idx and first 4 entries name[0]
-                uint8_t *d = cache[slot].data;
-                char hb[40];
-                const char *hx = "0123456789ABCDEF";
-                int pos = 0;
-                // Print entry_idx
-                hb[pos++] = 'i'; hb[pos++] = 'd'; hb[pos++] = 'x'; hb[pos++] = '=';
-                int ei = rs->entry_idx;
-                if (ei == 0) { hb[pos++] = '0'; }
-                else { char tmp[8]; int ti=0; while(ei){tmp[ti++]='0'+ei%10;ei/=10;} for(int j=ti-1;j>=0;j--)hb[pos++]=tmp[j]; }
-                hb[pos++] = ' ';
-                // Print first 4 name[0] bytes
-                pos = 0;
-                for (int i = 0; i < 4; i++) {
-                    hb[pos++] = 'e'; hb[pos++] = '0'+i; hb[pos++] = '=';
-                    hb[pos++] = hx[d[i*32]>>4]; hb[pos++] = hx[d[i*32]&0xf];
-                    hb[pos++] = ' ';
-                }
-                hb[pos++] = '\n';
-            }
-
             uint8_t *data = cache[slot].data;
             int entries = bytes_per_cluster / 32;
             int comp_start = rs->comp_start;
@@ -1412,16 +1408,6 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
 
             for (; rs->entry_idx < entries; rs->entry_idx++) {
                 fat_dir_entry *de = (fat_dir_entry *)(data + rs->entry_idx * 32);
-                if (rs->entry_idx == 0) {
-                    // Debug: verify de points to the right place
-                    volatile char n0 = de->name[0];
-                    char db[8]; const char *hx="0123456789ABCDEF";
-                    uint8_t nv = (uint8_t)n0;
-                    db[0]='n'; db[1]='v';
-                    db[2]=hx[nv>>4]; db[3]=hx[nv&0xf];
-                    db[4]='z'; db[5]=(n0==0)?'Y':'N';
-                    db[6]='\n'; db[7]=0;
-                }
                 if (de->name[0] == 0x00) {
                     // End of directory — not found
                     rs->found = false;
@@ -1461,13 +1447,6 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
                     rs->entry_idx = 0;
 
                     if (rs->comp_len > 0) {
-                        // In is_parent mode, stop if we've reached the leaf name
-                        // (next component is beyond the parent path)
-                        if (rs->is_parent && rs->leaf_len > 0) {
-                            rs->found = true;
-                            rs->phase = RS_DONE;
-                            return RESOLVE_DONE;
-                        }
                         // More components — descend into directory
                         if (!(de->attr & 0x10)) {
                             rs->found = false;
@@ -1476,6 +1455,17 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
                         }
                         uint32_t next_cluster = ((uint32_t)de->fst_clus_hi << 16) | de->fst_clus_lo;
                         if (next_cluster == 0) next_cluster = root_cluster;
+
+                        // In is_parent mode: check if the next component is the
+                        // leaf name (beyond the parent path). If so, we've
+                        // resolved the parent directory — return immediately.
+                        if (rs->is_parent && rs->comp_start >= rs->is_parent_end) {
+                            rs->result_cluster = next_cluster;
+                            rs->found = true;
+                            rs->phase = RS_DONE;
+                            return RESOLVE_DONE;
+                        }
+
                         rs->dir_cluster = next_cluster;
                         rs->current_cluster = next_cluster;
                         rs->lfn_buf[0] = '\0';
@@ -1562,12 +1552,29 @@ static int find_slots_step(find_slots_state *fss, pending_op *op,
 
             for (; fss->entry_idx < epc; fss->entry_idx++) {
                 fat_dir_entry *de = (fat_dir_entry *)(data + fss->entry_idx * 32);
-                bool is_free = (de->name[0] == 0x00 || de->name[0] == 0xE5);
-                if (is_free) {
+                if (de->name[0] == 0x00) {
+                    // End-of-directory marker — this slot and all subsequent
+                    // slots in this cluster are free (FAT32 spec: all entries
+                    // after the first 0x00 are also 0x00).
+                    if (fss->run_len == 0) fss->run_start = fss->entry_idx;
+                    fss->end_of_dir = true;
+                    // Count remaining entries in this cluster as free
+                    fss->run_len += (epc - fss->entry_idx);
+                    fss->entry_idx = epc;  // skip to end of cluster
+                    if (fss->run_len >= fss->needed) {
+                        for (int j = 0; j < fss->needed; j++) {
+                            fss->slots[j].cluster = fss->current_cluster;
+                            fss->slots[j].index = fss->run_start + j;
+                        }
+                        fss->phase = FS_FOUND;
+                        return FIND_SLOTS_DONE;
+                    }
+                    // Not enough even with all remaining — fall through
+                } else if (de->name[0] == 0xE5) {
+                    // Deleted entry — reusable free slot
                     if (fss->run_len == 0) fss->run_start = fss->entry_idx;
                     fss->run_len++;
                     if (fss->run_len >= fss->needed) {
-                        // Found enough contiguous free slots
                         for (int j = 0; j < fss->needed; j++) {
                             fss->slots[j].cluster = fss->current_cluster;
                             fss->slots[j].index = fss->run_start + j;
@@ -1578,6 +1585,13 @@ static int find_slots_step(find_slots_state *fss, pending_op *op,
                 } else {
                     fss->run_len = 0;
                 }
+            }
+
+            // If past end-of-directory with insufficient contiguous slots,
+            // skip directly to extending the directory chain.
+            if (fss->end_of_dir && fss->run_len < fss->needed) {
+                fss->phase = FS_READ_FAT;  // find chain tail via normal path
+                continue;
             }
 
             // All entries in this cluster scanned — follow FAT chain
@@ -1607,6 +1621,7 @@ static int find_slots_step(find_slots_state *fss, pending_op *op,
             fss->current_cluster = next;
             fss->entry_idx = 0;
             fss->run_len = 0;
+            fss->end_of_dir = false;  // reset for new cluster scan
             fss->phase = FS_SCAN_CLUSTER;
             continue;
         }
@@ -1723,6 +1738,7 @@ static int find_slots_step(find_slots_state *fss, pending_op *op,
                 fss->slots[j].cluster = fss->new_cluster;
                 fss->slots[j].index = j;
             }
+            fss->end_of_dir = true;  // new cluster is past end-of-directory
             fss->phase = FS_FOUND;
             return FIND_SLOTS_DONE;
         }
@@ -1809,17 +1825,6 @@ static void start_read(pending_op *op, struct client_session *sess,
 static void resume_read(pending_op *op) {
     file_resp *resp = (file_resp *)op->reply_buf;
 
-    // Debug: print state at entry
-    {
-        const char *hx = "0123456789ABCDEF";
-        char hb[40];
-        int p = 0;
-        hb[p++] = 'R'; hb[p++] = 'D'; hb[p++] = ' ';
-        uint32_t cc = op->u.read.current_cluster;
-        for (int i = 7; i >= 0; i--) { hb[p++] = hx[(cc >> (i*4)) & 0xF]; }
-        hb[p++] = '\n';
-    }
-
     // Phase 1: FAT chain walk to reach offset cluster
     while (op->u.read.chain_pos < op->u.read.offset_clusters) {
         // Try to read FAT entry from cache
@@ -1901,10 +1906,6 @@ static void resume_read(pending_op *op) {
 // ---- OPEN ----
 static void start_open(pending_op *op, struct client_session *sess,
                         const char *path, uint32_t flags) {
-    {
-        char buf[4];
-        buf[0] = ' '; buf[1] = 't'; buf[2] = '0' + op->type; buf[3] = '\n';
-    }
     file_resp *resp = (file_resp *)op->reply_buf;
     resp->status = 0; resp->fd = 0; resp->file_size = 0; resp->count = 0; resp->total = 0;
 
@@ -2036,18 +2037,6 @@ static void resume_open(pending_op *op) {
                 next = fat_read_entry_cached(tail);
             }
             dir_tail_update(cluster, tail);
-        }
-
-        // Debug: print the resolved cluster
-        {
-            const char *hx = "0123456789ABCDEF";
-            char hb[24]; int p = 0;
-            hb[p++] = 'O'; hb[p++] = 'K';
-            uint32_t cl2 = cluster;
-            for (int i=7; i>=0; i--) { hb[p++] = hx[(cl2>>(i*4))&0xF]; }
-            hb[p++] = ' ';
-            uint32_t fs2 = de.file_size;
-            for (int i=7; i>=0; i--) { hb[p++] = hx[(fs2>>(i*4))&0xF]; }
         }
 
         resp->status = 0;
@@ -2267,6 +2256,8 @@ static void start_write(pending_op *op, struct client_session *sess,
     op->u.write.tail_cluster = 0;
     op->u.write.chain_pos = 0;
     op->u.write.wds.cluster = 0;  // marks wds as not started
+    op->u.write.fws.phase = 0;    // reset fws (union may have stale data from CREATE)
+    op->u.write.link_started = false;
 
     // O_APPEND: set offset to file_size
     if (open_flags & O_APPEND) {
@@ -2297,7 +2288,9 @@ static void start_write(pending_op *op, struct client_session *sess,
     // Acquire write_lock
     op->u.write.phase = WPHASE_ACQUIRE_LOCK;
     if (!write_lock_acquire(op)) {
-        // Queued — resume_write will be called when lock is released
+        // Queued — set phase so resume_write proceeds correctly when lock is granted
+        op->u.write.phase = WPHASE_LOCATE;
+        op->u.write.link_started = false;
         return;
     }
 
@@ -2369,7 +2362,14 @@ static void resume_write(pending_op *op) {
             resp->status = -ENOSPC;
             goto write_done;
         }
-        op->u.write.phase = WPHASE_EXTEND_ZERO;
+        // allocate_cluster_async returned -1 (async I/O submitted).
+        // If allocated_cluster is set, a free cluster was found and fat_dual_write
+        // has been started — advance to EXTEND_ZERO to await its completion.
+        // Otherwise, a FAT cache read is in progress and we must stay in
+        // WPHASE_EXTEND_ALLOC so the resume re-enters the allocation scan.
+        if (op->u.write.allocated_cluster != 0) {
+            op->u.write.phase = WPHASE_EXTEND_ZERO;
+        }
         return;
     }
 
@@ -2594,7 +2594,8 @@ static void resume_write(pending_op *op) {
         }
         if (op->u.write.wds.phase > 0 && op->u.write.wds.phase < 3) {
             write_dir_entry_resume(op, &op->u.write.wds);
-            return;
+            if (op->u.write.wds.phase < 3) return;
+            // Dir entry write done — fall through to phase==3 check
         }
         if (op->u.write.wds.phase == 3) {
             // Dir entry write complete
@@ -3079,6 +3080,7 @@ gen_short_done: {
         cd->fss.run_len = 0;
         cd->fss.new_cluster = 0;
         cd->fss.tail_traversing = false;
+        cd->fss.end_of_dir = false;
         cd->fss.phase = FS_SCAN_CLUSTER;
 
         int r = find_slots_step(&cd->fss, op, &cd->fws, cd->cluster_buf);
@@ -3089,7 +3091,6 @@ gen_short_done: {
             return;
         }
 
-        // Slots found
         if (cd->lfn_count > 0) {
             cd->lfn_written_count = 0;
             cd->phase = CD_WRITE_LFN;
@@ -3121,6 +3122,8 @@ gen_short_done: {
                 // Write next LFN entry
             } else {
                 // All LFN entries written
+                cd->wds.phase = 0;   // reset so CD_WRITE_SHORT doesn't see stale phase=3
+                cd->wds.cluster = 0;
                 cd->phase = CD_WRITE_SHORT;
                 resume_create_dir(op);
                 return;
@@ -3176,7 +3179,14 @@ gen_short_done: {
         }
         if (cd->wds.phase == 3) {
             // Short name entry write done
-            cd->phase = CD_DONE;
+            if (cd->fss.end_of_dir) {
+                // Allocated past original end-of-directory — write new 0x00 terminator
+                cd->wds.phase = 0;  // reset wds so CD_WRITE_EOD starts fresh
+                cd->wds.cluster = 0;
+                cd->phase = CD_WRITE_EOD;
+            } else {
+                cd->phase = CD_DONE;
+            }
             resume_create_dir(op);
             return;
         }
@@ -3306,6 +3316,64 @@ gen_short_done: {
         return;
     }
 
+    case CD_WRITE_EOD: {
+        // Write end-of-directory 0x00 terminator after the new short name entry.
+        // The slot after the short entry is slots[total_slots] (total_slots = lfn_count + 1).
+        // Handle wds progression from previous write (if resuming after async I/O)
+        if (cd->wds.phase > 0 && cd->wds.phase < 3) {
+            write_dir_entry_resume(op, &cd->wds);
+            if (cd->wds.phase < 3) return;
+        }
+        if (cd->wds.phase == 0 && cd->wds.cluster != 0) {
+            write_dir_entry_async(op, &cd->wds,
+                cd->wds.cluster, cd->wds.index, &cd->wds.entry);
+            return;
+        }
+        if (cd->wds.phase == 3) {
+            // End-of-directory terminator write done
+            cd->phase = CD_DONE;
+            resume_create_dir(op);
+            return;
+        }
+
+        // Determine the slot for the 0x00 terminator: it's the slot right after the short entry
+        int eod_slot_idx = cd->total_slots;  // total_slots = lfn_count + 1
+        uint32_t eod_cluster;
+        int eod_index;
+
+        if (eod_slot_idx < cd->fss.needed + 1) {
+            // Check if the slot after short entry is still within our allocated run
+            // The allocated run is slots[0..needed-1], so the EOD goes at index = needed
+            // (which is one past the short entry = slots[needed-1])
+            eod_cluster = cd->fss.slots[cd->fss.needed - 1].cluster;
+            eod_index = cd->fss.slots[cd->fss.needed - 1].index + 1;
+        } else {
+            // Shouldn't happen, but handle gracefully
+            eod_cluster = cd->fss.slots[cd->lfn_count].cluster;
+            eod_index = cd->fss.slots[cd->lfn_count].index + 1;
+        }
+
+        // Check if eod_index is within the same cluster
+        int epc = bytes_per_cluster / 32;
+        if (eod_index >= epc) {
+            // The EOD would be in the next cluster. Since end_of_dir was true,
+            // the entry after the 0x00 marker should already be 0x00 (FAT32 spec),
+            // and if we're at the last entry in the cluster, the next cluster (if any)
+            // starts with 0x00 entries. If there's no next cluster, we'd need to
+            // extend — but for simplicity, if we're at the cluster boundary, the
+            // next cluster (if it exists) is already zeroed. Skip writing EOD.
+            cd->phase = CD_DONE;
+            resume_create_dir(op);
+            return;
+        }
+
+        // Write a zero entry (0x00 in name[0] = end-of-directory marker)
+        fat_dir_entry eod_entry;
+        __memset(&eod_entry, 0, 32);
+        write_dir_entry_async(op, &cd->wds, eod_cluster, eod_index, &eod_entry);
+        return;
+    }
+
     case CD_DONE:
         write_lock_release();
         resp->status = 0;
@@ -3392,18 +3460,6 @@ static void fat32_init() {
     root_cluster = (uint32_t)bpb[44] | ((uint32_t)bpb[45] << 8) |
                    ((uint32_t)bpb[46] << 16) | ((uint32_t)bpb[47] << 24);
 
-    // Debug: print key BPB values
-    char dbg[64];
-    int pos = 0;
-    const char prefix[] = "bps=X sc=X spf=X rc=X\n";
-    // Quick hex print
-    for (int i = 0; i < 4; i++) {
-        char hex[3];
-        hex[0] = "0123456789ABCDEF"[(bpb[i] >> 4) & 0xF];
-        hex[1] = "0123456789ABCDEF"[bpb[i] & 0xF];
-        hex[2] = 0;
-    }
-
     if (bps != 512 || sectors_per_cluster == 0 || spf32 == 0 || root_cluster < 2) {
         const char msg[] = "EBPB\n";
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
@@ -3416,7 +3472,7 @@ static void fat32_init() {
     uint32_t data_sectors = part_total_sectors - (data_start_lba - part_start_lba);
     total_data_clusters = data_sectors / sectors_per_cluster;
 
-    for (uint32_t s = 0; s < spf32 && s < FAT_CACHE_PAGES; s++) {
+    for (uint32_t s = 0; s < spf32; s++) {
         fat_cache_read_sync(fat_start_lba + s);
     }
 }

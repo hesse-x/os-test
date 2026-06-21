@@ -170,6 +170,7 @@ int open(const char *path, int flags, ...) {
     int fs_fd = get_fs_dev_fd();
     if (fs_fd < 0) { errno = ENOENT; return -1; }
 
+    // If O_CREAT and open fails with ENOENT, create the file first
     struct file_req req;
     memset(&req, 0, sizeof(req));
     req.cmd = FILE_CMD_OPEN;
@@ -187,11 +188,49 @@ int open(const char *path, int flags, ...) {
     }
 
     struct file_resp *resp = (struct file_resp *)reply_buf;
+    if (resp->status != 0 && (flags & O_CREAT) && resp->status == -ENOENT) {
+        // File doesn't exist and O_CREAT is set — create it first
+        struct file_req creq;
+        memset(&creq, 0, sizeof(creq));
+        creq.cmd = FILE_CMD_CREATE;
+        strncpy(creq.path, path, 255);
+        creq.path[255] = '\0';
+
+        int cr = msg_fd(fs_fd, &creq, sizeof(creq), reply_buf, sizeof(reply_buf));
+        if (cr < 0) {
+            if (cr == -ESRCH) { close(fs_dev_fd); fs_dev_fd = -1; }
+            errno = -cr;
+            return -1;
+        }
+        resp = (struct file_resp *)reply_buf;
+        if (resp->status != 0 && resp->status != -EEXIST) {
+            errno = -resp->status;
+            return -1;
+        }
+
+        // File created — retry open
+        memset(&req, 0, sizeof(req));
+        req.cmd = FILE_CMD_OPEN;
+        req.flags = (uint32_t)flags;
+        strncpy(req.path, path, 255);
+        req.path[255] = '\0';
+
+        r = msg_fd(fs_fd, &req, sizeof(req), reply_buf, sizeof(reply_buf));
+        if (r < 0) {
+            if (r == -ESRCH) { close(fs_dev_fd); fs_dev_fd = -1; }
+            errno = -r;
+            return -1;
+        }
+        resp = (struct file_resp *)reply_buf;
+    }
+
     if (resp->status != 0) { errno = -resp->status; return -1; }
 
     // Register FD_FILE in kernel fd_table via sys_install_fd
+    // Strip create/trunc flags — they only matter at open time, not for the kernel fd
+    int install_flags = flags & (O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK);
     pid_t fs_pid = fd_table[fs_fd].target_pid;
-    int fd = sys_install_fd(fs_pid, (int32_t)resp->fd, 0, flags, resp->file_size);
+    int fd = sys_install_fd(fs_pid, (int32_t)resp->fd, 0, install_flags, resp->file_size);
     if (fd < 0) {
         // Registration failed — tell fs_driver to close the session fd
         struct file_req close_req;
