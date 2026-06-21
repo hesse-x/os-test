@@ -177,10 +177,10 @@ syscall_fast_entry:
     sysretq
 
 # ===================== context switch =====================
-# void switch_to(proc_t *prev, proc_t *next)
+# void switch_to(task_t *prev, task_t *next)
 # System V AMD64: rdi = prev, rsi = next
-# proc_t layout (64-bit, no padding):
-#   pid(0) state(4) k_rsp(8) k_stack_top(16) cr3(24) entry(32) wait_event(40)
+# task_t layout (first fields, must match C struct):
+#   tid(0) state(4) k_rsp(8) k_stack_top(16) cr3(24) tgid(32) ...
 .globl switch_to
 switch_to:
     # 保存 callee-saved 寄存器
@@ -197,9 +197,12 @@ switch_to:
     # RSP = next->k_rsp
     movq 8(%rsi), %rsp
 
-    # Switch CR3 to next process's PML4
+    # Switch CR3 to next process's PML4 (skip if same address space)
     movq 24(%rsi), %rax
+    cmpq 24(%rdi), %rax
+    je 1f
     movq %rax, %cr3
+1:
 
     # 恢复 callee-saved 寄存器
     popq %r15

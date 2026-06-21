@@ -134,6 +134,16 @@ static inline void load_cr3(uint64_t addr) {
   __asm__ volatile("movq %0, %%cr3" :: "r"(addr) : "memory");
 }
 
+static inline uint64_t read_cr0() {
+  uint64_t val;
+  __asm__ volatile("movq %%cr0, %0" : "=r"(val));
+  return val;
+}
+
+static inline void write_cr0(uint64_t val) {
+  __asm__ volatile("movq %0, %%cr0" :: "r"(val) : "memory");
+}
+
 static inline uint64_t read_cr4() {
   uint64_t val;
   __asm__ volatile("movq %%cr4, %0" : "=r"(val));

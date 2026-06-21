@@ -55,6 +55,14 @@
 #define SYS_KILL         47
 #define SYS_SIGACTION    48
 #define SYS_SIGRETURN    49
+#define SYS_CLONE        50
+#define SYS_EXECV        51
+#define SYS_FUTEX        52
+#define SYS_ARCH_PRCTL   53
+#define SYS_TGKILL       54
+#define SYS_EXIT_GROUP   55
+#define SYS_SET_TID_ADDRESS 56
+#define SYS_GETTID       57
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -300,6 +308,66 @@ static inline int sys_sigaction(int sig, const struct sigaction *act,
 
 static inline int sys_sigreturn(void) {
     return (int)__syscall0(SYS_SIGRETURN);
+}
+
+// ===================== clone flags =====================
+#define CLONE_VM             0x00000100
+#define CLONE_FILES          0x00000400
+#define CLONE_SIGHAND        0x00000800
+#define CLONE_THREAD         0x00010000
+#define CLONE_PARENT_SETTID  0x00100000
+#define CLONE_CHILD_CLEARTID 0x00200000
+#define CLONE_SETTLS         0x00080000
+
+// ===================== futex operations =====================
+#define FUTEX_WAIT  0
+#define FUTEX_WAKE  1
+
+// ===================== arch_prctl codes =====================
+#define ARCH_SET_FS  0x1002
+#define ARCH_GET_FS  0x1003
+
+// ===================== Thread syscalls =====================
+static inline int64_t sys_clone(uint64_t flags, uint64_t stack,
+                                 int32_t *parent_tid, int32_t *child_tid,
+                                 uint64_t tls) {
+    return __syscall5(SYS_CLONE, (int64_t)flags, (int64_t)stack,
+        (int64_t)(uintptr_t)parent_tid, (int64_t)(uintptr_t)child_tid,
+        (int64_t)tls);
+}
+
+static inline int sys_execv(const char *pathname, const uint8_t *elf_data,
+                             uint64_t elf_size) {
+    return (int)__syscall3(SYS_EXECV, (int64_t)(uintptr_t)pathname,
+        (int64_t)(uintptr_t)elf_data, (int64_t)elf_size);
+}
+
+static inline int sys_futex(uint32_t *uaddr, int op, uint32_t val,
+                             const uint64_t *timeout,
+                             uint32_t *uaddr2, uint32_t val3) {
+    return (int)__syscall6(SYS_FUTEX, (int64_t)(uintptr_t)uaddr, (int64_t)op,
+        (int64_t)val, (int64_t)(uintptr_t)timeout,
+        (int64_t)(uintptr_t)uaddr2, (int64_t)val3);
+}
+
+static inline int sys_arch_prctl(int code, uint64_t addr) {
+    return (int)__syscall2(SYS_ARCH_PRCTL, (int64_t)code, (int64_t)addr);
+}
+
+static inline int sys_tgkill(int tgid, int tid, int sig) {
+    return (int)__syscall3(SYS_TGKILL, (int64_t)tgid, (int64_t)tid, (int64_t)sig);
+}
+
+static inline void sys_exit_group(int status) {
+    __syscall1(SYS_EXIT_GROUP, (int64_t)status);
+}
+
+static inline int sys_set_tid_address(int *tidptr) {
+    return (int)__syscall1(SYS_SET_TID_ADDRESS, (int64_t)(uintptr_t)tidptr);
+}
+
+static inline int32_t sys_gettid(void) {
+    return (int32_t)__syscall0(SYS_GETTID);
 }
 
 #endif // COMMON_SYSCALL_H

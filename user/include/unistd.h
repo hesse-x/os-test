@@ -23,6 +23,7 @@ extern "C" {
 #define STDERR_FILENO 2
 
 pid_t getpid(void);
+pid_t gettid(void);
 void _exit(int status);
 ssize_t read(int fd, void *buf, size_t count);
 ssize_t write(int fd, const void *buf, size_t count);

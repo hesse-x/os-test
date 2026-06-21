@@ -2,15 +2,16 @@
 #include <sys.h>
 
 extern "C" int main(void);
+extern "C" void __libc_tls_init();
 
 extern "C" void _start() {
-    /* stdout/stderr are already initialized via static constructors
-     * or static initialization; call stdio_init as a placeholder
-     * for future dynamic initialization (e.g. sys_write setup) */
+    // Initialize TLS (FS_BASE + set_tid_address for main thread)
+    __libc_tls_init();
+
     fflush(stdout);
 
     int ret = main();
 
     fflush(stdout);
-    sys_exit(ret);
+    sys_exit_group(ret);
 }

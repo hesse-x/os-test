@@ -20,19 +20,20 @@
 #define EFER_SCE (1ULL << 0)
 #define EFER_NXE (1ULL << 11)
 
-struct proc_t; // forward declaration
+struct task_t; // forward declaration
 struct Page;
 
 struct cpu_local_t {
     uint64_t saved_r10;    // scratch slot: SYSCALL entry saves user R10 (arg4) here
     int cpu_id;
     uint32_t apic_id;
-    proc_t *_cur_proc;
+    task_t *_cur_task;
     uint64_t lapic_base;
     uint64_t kernel_stack;
     uint64_t tss_rsp0;
     int run_count;         // number of runnable processes on this CPU (excludes idle)
-    proc_t *idle_proc;     // this CPU's idle process
+    void *current_tf;      // saved trapframe pointer (trapframe_t*) for syscall/trap context
+    task_t *idle_task;     // this CPU's idle task
     spinlock_t scheduler_lock; // per-CPU scheduler lock
     list_node_t run_queue;     // per-CPU ready queue (sentinel node)
     list_node_t timer_queue;   // per-CPU timer queue (sorted by wait_deadline, sentinel node)
@@ -56,8 +57,8 @@ static inline cpu_local_t *get_cpu_local() {
     return (cpu_local_t *)rdmsr(MSR_GS_BASE);
 }
 
-// Must be included after proc_t is defined
-#define current_proc (get_cpu_local()->_cur_proc)
+// Must be included after task_t is defined
+#define current_task (get_cpu_local()->_cur_task)
 
 extern "C" void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack);
 void smp_apply_cpu(int cpu_id);

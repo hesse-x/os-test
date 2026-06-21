@@ -402,7 +402,7 @@ static void xhci_isr(trapframe_t *tf) {
           // Notify kbd_driver via dev_table
           pid_t kbd_pid = lookup_dev(DEV_KBD);
           if (kbd_pid > 0) {
-            proc_t *target = &procs[kbd_pid];
+            task_t *target = &tasks[kbd_pid];
             spin_lock(&target->recv_lock);
             uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
             if (next != target->recv_tail) {  // not full
@@ -416,7 +416,7 @@ static void xhci_isr(trapframe_t *tf) {
             // Wake kbd_driver if in WAIT_RECV
             int target_cpu = target->assigned_cpu;
             spin_lock(&cpu_locals[target_cpu].scheduler_lock);
-            if (target->pid == kbd_pid && target->state == BLOCKED &&
+            if (target->tid == kbd_pid && target->state == BLOCKED &&
                 target->wait_event == WAIT_RECV) {
               if (target->wait_deadline != 0) {
                 timer_queue_remove(target);

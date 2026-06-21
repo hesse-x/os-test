@@ -9,10 +9,11 @@ add_user_lib(c
         lib/sys_fb.cc lib/sys_process.cc lib/time.cc lib/file.cc
         lib/ctype.c lib/strtol.c lib/stdlib_misc.c lib/uname.c
         lib/sleep.c lib/assert.c lib/sys_block.cc lib/sys_pci.cc
-        lib/signal.cc
+        lib/signal.cc lib/pthread.cc
 )
 
 add_user_elf(hello  C SOURCES hello.c  LINK_LIBS c)
 add_user_elf(malloc C SOURCES malloctest.c LINK_LIBS c)
 add_user_elf(pcie C SOURCES test_pcie.c LINK_LIBS c)
 add_user_elf(write C SOURCES writetest.c LINK_LIBS c)
+add_user_elf(pthreadtest C SOURCES pthread_test.c LINK_LIBS c)

@@ -59,7 +59,8 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     // Fill cpu_local
     cpu_locals[cpu_id].cpu_id = cpu_id;
     cpu_locals[cpu_id].apic_id = apic_id;
-    cpu_locals[cpu_id]._cur_proc = nullptr;
+    cpu_locals[cpu_id]._cur_task = nullptr;
+    cpu_locals[cpu_id].current_tf = nullptr;
     cpu_locals[cpu_id].lapic_base = 0;
     cpu_locals[cpu_id].kernel_stack = kernel_stack;
     cpu_locals[cpu_id].tss_rsp0 = kernel_stack;
@@ -169,9 +170,9 @@ extern "C" void ap_entry_c(int cpu_id) {
     serial_put_hex(cpu_id);
     serial_puts(" init finish\n");
 
-    // Switch to idle process: set current_proc, switch to idle kernel stack
-    proc_t *idle = cpu_locals[cpu_id].idle_proc;
-    current_proc = idle;
+    // Switch to idle task: set current_task, switch to idle kernel stack
+    task_t *idle = cpu_locals[cpu_id].idle_task;
+    current_task = idle;
     idle->state = RUNNING;
     per_cpu_tss[cpu_id].rsp0 = idle->k_stack_top;
     cpu_locals[cpu_id].tss_rsp0 = idle->k_stack_top;

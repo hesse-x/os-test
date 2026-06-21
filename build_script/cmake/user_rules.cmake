@@ -1,7 +1,7 @@
 # user_rules.cmake — add_user_lib() / add_user_elf() 封装用户态编译规则
 
 # 用户态公共编译 flags (CMake list, semicolon-separated)
-set(USER_COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -mno-red-zone -mno-sse -mno-sse2 -mno-mmx)
+set(USER_COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -mno-red-zone)
 
 # add_user_lib: 用户态静态库（如 libc.a）
 # 用法: add_user_lib(lib_name SOURCES source1 source2 ...)

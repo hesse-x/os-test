@@ -181,14 +181,15 @@
 
 **不做**：EINTR 中断阻塞 syscall、SIGPIPE（保持 -EPIPE）、sigprocmask（按需后续加）、作业控制（Ctrl+Z/fg/bg 后续加）。
 
-#### futex（不实现）
+#### futex（与 pthread 同步实现）
 
-**结论：不做。** 评估后确定 futex 在当前系统上需求不存在：
-- 无用户态多线程（无 `clone`、无共享地址空间进程）→ 无用户态锁竞争
-- 所有进程间同步已有 `sys_recv(timeout)` + `sys_poll()` + `sys_notify()` 覆盖
-- Wayland compositor 是单线程事件驱动模型，不需要用户态锁
-- futex 的价值 = 用户态原子操作 + 内核 fallback 休眠，前提是有多线程争锁场景
-- 未来若引入多线程（pthread/clone），再按需实现
+**结论：必须做。** 评估更新：有了 clone + pthread，futex 是用户态互斥同步的基石：
+- glibc `pthread_mutex_lock/unlock` 底层用 `futex(FUTEX_WAIT/WAKE)`
+- `pthread_join` 通过 `CLONE_CHILD_CLEARTID` + futex 唤醒 joiner
+- `pthread_condvar` 底层也依赖 futex
+- 无 futex → pthread 编译能过但运行时所有锁操作卡死
+- 第一版只需 `FUTEX_WAIT` + `FUTEX_WAKE` 两个操作
+- **后续**: FUTEX_REQUEUE、FUTEX_CMP_REQUEUE、FUTEX_PRIVATE、robust futex
 
 #### shm 改进 ✅
 
@@ -335,6 +336,7 @@ sprint 10+: 交叉编译 clang for Xos → 在 Xos 上测试 cc1 → 自举
 ### 现有相关 TODO 迁移
 
 - [ ] sys_fork + sys_exec（含 ELF loader 复用）
+- [ ] fork COW（Copy-on-Write）：fork 时父子共享物理页标只读 → 写时 #PF 拷贝 → 物理页引用计数。第一版 fork 用全页拷贝，COW 作为性能优化后续补上
 - [ ] sys_sigaction / sys_sigprocmask / sys_kill / sys_rt_sigreturn
 - [ ] 信号投递：进程返回用户态前检查 pending signals（trapret 路径）
 - [ ] SIGCHLD：子进程 exit 时向父进程投递
@@ -424,6 +426,7 @@ sprint 10+: 交叉编译 clang for Xos → 在 Xos 上测试 cc1 → 自举
 | ~~多客户端 fs_driver 并发~~ | ~~fs_driver 事件循环~~ | ~~高~~ | ✅ 已完成，见 [file_system.md](file_system.md) |
 | ~~fs_driver 事件循环~~ | — | ~~中~~ | ✅ 已完成，异步事件循环 + disk_io/pending_op |
 | 回调链 → 协程迁移 | GCC ≥ 12 + 栈回溯支持 | 中 | 见 [file_system.md](file_system.md) 搁置项 |
+| 调度器线程感知 | 多线程进程 | 低 | per-tgid 时间片配额、调度亲和性（同 tgid 线程尽量同 CPU）、sched_setaffinity syscall |
 | 多线程客户端 session 并发安全 | 多线程进程 | 中 | 需 per-fd 粒度锁，见 [file_system.md](file_system.md) 搁置项 |
 | 磁盘队列优先级调度 | 多客户端延迟敏感 | 低 | 见 [file_system.md](file_system.md) 搁置项 |
 | ~~VFS 层~~ | 无 | 低 | ✅ 已完成 — fd_table 统一 FD_FILE + 内核代理 IPC + fs_driver 纯 FAT32，设计见 [vfs.md](vfs.md) |
