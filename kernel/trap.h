@@ -9,6 +9,7 @@ typedef void (*irq_handler_t)(trapframe_t *);
 typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 void register_irq(int vec, irq_handler_t fn);
+void unregister_irq(int vec);
 void trap_dispatch(trapframe_t *tf);
 void syscall_dispatch(trapframe_t *tf);
 void isr_init();

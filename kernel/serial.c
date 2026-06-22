@@ -1,13 +1,65 @@
 #include "kernel/serial.h"
+#include "kernel/trap.h"
 #include "arch/x64/utils.h"
 
-#define COM1 0x3F8
+// ===================== TX lock =====================
+spinlock_t serial_tx_lock;
 
-void serial_init() {}
+// ===================== RX ring buffer =====================
+
+uint8_t serial_rx_buf[SERIAL_RX_BUF_SIZE];
+uint32_t serial_rx_head = 0;  // ISR write position
+uint32_t serial_rx_tail = 0;  // sys_read read position
+spinlock_t serial_rx_lock;
+int32_t serial_read_waiter = -1;
+int serial_fd_count = 0;
+bool serial_irq_registered = false;
+
+void serial_init(void) {
+    outb(COM1_IER, 0x00);    // Disable all interrupts
+    outb(COM1_LCR, 0x80);    // Enable DLAB
+    outb(COM1,     0x01);    // Divisor low byte: 115200 baud
+    outb(COM1_IER, 0x00);    // Divisor high byte
+    outb(COM1_LCR, 0x03);    // 8N1, disable DLAB
+    outb(COM1_FCR, 0xC7);    // Enable FIFO, clear, 14-byte threshold
+    outb(COM1_MCR, 0x03);    // DTR + RTS
+    // IER RX enable deferred to sys_open_dev(DEV_SERIAL)
+}
 
 #ifndef NSERIAL
 
-void serial_putc(char c) { outb(COM1, c); }
+void serial_putc(char c) {
+    uint64_t flags;
+    spin_lock_irqsave(&serial_tx_lock, &flags);
+    while (!(inb(COM1_LSR) & LSR_THRE))
+        ;
+    outb(COM1, c);
+    spin_unlock_irqrestore(&serial_tx_lock, flags);
+}
+
+// ISR: drain all available bytes from UART FIFO into kernel ring buffer
+void serial_irq_handler(trapframe_t *tf) {
+    uint64_t flags;
+    spin_lock_irqsave(&serial_rx_lock, &flags);
+    // Drain all available bytes from FIFO (Linux: read LSR in loop)
+    while (inb(COM1_LSR) & LSR_DR) {
+        uint8_t c = inb(COM1);
+        uint32_t next = (serial_rx_head + 1) % SERIAL_RX_BUF_SIZE;
+        if (next != serial_rx_tail) {  // drop if full
+            serial_rx_buf[serial_rx_head] = c;
+            serial_rx_head = next;
+        }
+    }
+    // Wake blocked reader (like Linux tty_flip_buffer_push → wait queue wake)
+    if (serial_read_waiter >= 0) {
+        int32_t waiter = serial_read_waiter;
+        serial_read_waiter = -1;
+        spin_unlock_irqrestore(&serial_rx_lock, flags);
+        wake_process(waiter);
+        return;
+    }
+    spin_unlock_irqrestore(&serial_rx_lock, flags);
+}
 
 void serial_puts(const char *s) {
   while (*s) {

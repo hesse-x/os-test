@@ -29,7 +29,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./build.sh -d       # Debug 模式（-g -fno-omit-frame-pointer，异常时栈回溯）
 ./build.sh --test   # 测试构建（Unity 测试 ELF + test_runner）
 ./build.sh --no-serial  # 禁用串口打印（NSERIAL 宏）
-./run.sh            # QEMU 启动（OVMF UEFI, 512MB, -smp 2, 串口→log.txt）
+./run.sh            # QEMU 启动（OVMF UEFI, 512MB, -smp 2, 串口→stdio）
+./run.sh --log-serial  # 串口走 Unix socket，用 socat 连接捕获日志
 ./run.sh -s         # QEMU + GDB 远程调试服务器
 ```
 
@@ -176,7 +177,7 @@ tutorial/
 
 ## 开发备注
 
-- 串口输出在 `log.txt`，实时查看：`tail -f log.txt`
+- 默认串口输出到 stdio（终端）；`--log-serial` 时串口走 Unix socket `/tmp/qemu-serial.sock`，另开终端用 `socat -,rawer UNIX-CONNECT:/tmp/qemu-serial.sock | tee log.txt` 捕获
 - `.clang-format` = LLVM 风格
 - `outb/inb/wrmsr/rdmsr/IrqGuard` 统一在 `arch/x64/utils.h`
 - 驱动自注册：`device_register(getpid(), DEV_XXX)`
@@ -209,9 +210,16 @@ tutorial/
 
 ### 串口打印
 
-优先考虑串口打印定位，QEMU 初始化约 5s + 引导时间，建议等待 10s 以上。串口输出在 `log.txt`。
+优先考虑串口打印定位，QEMU 初始化约 5s + 引导时间，建议等待 10s 以上。
 
-实时查看：`tail -f log.txt`
+默认串口输出到终端（`-serial mon:stdio`），直接可见。需要持久日志时用 `--log-serial` + socat：
+
+```bash
+# 终端1: 启动 QEMU
+./run.sh --log-serial
+# 终端2: 连接串口 socket 并记录
+socat -,rawer UNIX-CONNECT:/tmp/qemu-serial.sock | tee log.txt
+```
 
 常见错误信号：
 - **Page Fault (#PF)**：检查地址映射和空指针
@@ -224,7 +232,7 @@ tutorial/
 
 ```bash
 ./build.sh -d
-./run.sh
+./run.sh --log-serial    # 另开终端 socat ..., 捕获到 log.txt
 cat log.txt            # 找 BACKTRACE 段
 addr2line -e build/myos.elf -f -C 0xFFFFFFFF8010XXXX
 ```
@@ -240,7 +248,7 @@ gdb -ex "target remote localhost:1234" build/myos.elf
 
 ```bash
 rm -f log.txt
-tmux new-session -d -s qemu './run.sh -s 2>&1'
+tmux new-session -d -s qemu './run.sh -s --log-serial 2>&1'
 tmux new-session -d -s gdb 'gdb -ex "target remote localhost:1234" build/myos.elf'
 tmux send-keys -t gdb 'continue' Enter
 sleep 20

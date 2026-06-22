@@ -70,6 +70,7 @@ typedef struct mmap_region {
 #define FD_DEV    3
 #define FD_FILE   4
 #define FD_SOCKET 5
+#define FD_SERIAL 6
 
 #define O_RDONLY  0
 #define O_WRONLY  1

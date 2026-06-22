@@ -54,6 +54,12 @@ void register_irq(int vec, irq_handler_t fn) {
   }
 }
 
+void unregister_irq(int vec) {
+  if (vec >= 0 && vec < MAX_IRQ_HANDLERS) {
+    irq_handlers[vec] = NULL;
+  }
+}
+
 // Block I/O direction constants
 #define BLOCK_DIR_READ  0
 #define BLOCK_DIR_WRITE 1
@@ -711,6 +717,8 @@ uint64_t sys_resp(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
 uint64_t sys_irq_bind(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
     int irq = (int)arg1;
     if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return (uint64_t)-EINVAL;
+    // Mutual exclusion: cannot share IRQ with kernel ISR (e.g., FD_SERIAL)
+    if (irq_handlers[irq] != NULL) return (uint64_t)-EBUSY;
     __atomic_store_n(&irq_owner[irq], current_proc->pid, __ATOMIC_RELEASE);
 
     // Auto-unmask I/O APIC for this IRQ (GSI = vector - 32)
@@ -1295,6 +1303,35 @@ uint64_t sys_open_dev(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, u
 
     if (dev_type <= DEV_NONE || dev_type >= DEV_TYPE_MAX)
         return (uint64_t)-EINVAL;
+
+    // ===== DEV_SERIAL: kernel-side serial console (like Linux uart_open) =====
+    if (dev_type == DEV_SERIAL) {
+        // Mutual exclusion: cannot coexist with user-space irq_bind on vector 36
+        if (irq_owner[36] >= 0) return (uint64_t)-EBUSY;
+
+        proc_t *proc = current_proc;
+        int fd = -1;
+        for (int i = 0; i < MAX_FD; i++) {  // allow fd 0/1 (serial shell needs them)
+            if (proc->fd_table[i].type == FD_NONE) { fd = i; break; }
+        }
+        if (fd < 0) return (uint64_t)-EMFILE;
+
+        proc->fd_table[fd].type = FD_SERIAL;
+        proc->fd_table[fd].flags = O_RDWR;
+
+        serial_fd_count++;
+        if (!serial_irq_registered) {
+            register_irq(36, serial_irq_handler);
+            // Unmask GSI 4 (COM1 IRQ4) in I/O APIC
+            uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
+            ioapic_set_irq(4, 36, bsp_apic_id, false);  // edge-triggered
+            // Enable RX interrupt in UART IER
+            outb(COM1_IER, IER_RX_ENABLE);
+            serial_irq_registered = true;
+        }
+
+        return (uint64_t)fd;
+    }
 
     pid_t target_pid = dev_table[dev_type];
     if (target_pid <= 0) {
@@ -1894,6 +1931,17 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         return (uint64_t)ret;
     }
 
+    // ===== FD_SERIAL: write to UART TX =====
+    if (proc->fd_table[fd].type == FD_SERIAL) {
+        if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+            return (uint64_t)-EINVAL;
+        if (!buf) return (uint64_t)-EFAULT;
+        // serial_putc internally has tx_lock + LSR wait
+        for (size_t i = 0; i < len; i++)
+            serial_putc(((const char __force *)buf)[i]);
+        return (uint64_t)len;
+    }
+
     // ===== FD_PIPE: existing path =====
     if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR))) return (uint64_t)-EINVAL;
 
@@ -1929,10 +1977,6 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
 
     // Wake reader if blocked
     if (p->read_pid >= 0) wake_process(p->read_pid);
-
-    // Mirror pipe output to serial port (replaces old SYS_SERIAL_WRITE)
-    for (size_t i = 0; i < written; i++)
-        serial_putc(((const char __force *)buf)[i]);
 
     return (uint64_t)written;
 }
@@ -2018,6 +2062,44 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         if (!sock) return (uint64_t)-EBADF;
         int64_t ret = sock_read(sock, (void __force *)buf, len);
         return (uint64_t)ret;
+    }
+
+    // ===== FD_SERIAL: read from kernel RX ring buffer =====
+    if (proc->fd_table[fd].type == FD_SERIAL) {
+        if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
+            return (uint64_t)-EINVAL;
+        if (!buf) return (uint64_t)-EFAULT;
+        uint64_t ptr_start = (__force uint64_t)buf;
+        uint64_t ptr_end = ptr_start + len;
+        if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL
+            || ptr_end > 0xFFFFFFFF80000000ULL)
+            return (uint64_t)-EFAULT;
+
+        uint64_t rx_flags;
+        spin_lock_irqsave(&serial_rx_lock, &rx_flags);
+        while (serial_rx_head == serial_rx_tail) {
+            // Buffer empty: block or EAGAIN
+            if (proc->fd_table[fd].flags & O_NONBLOCK) {
+                spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
+                return (uint64_t)-EAGAIN;
+            }
+            serial_read_waiter = proc->pid;
+            proc->state = BLOCKED;
+            proc->wait_event = WAIT_PIPE;  // reuse WAIT_PIPE, same semantics
+            spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
+            schedule();
+            spin_lock_irqsave(&serial_rx_lock, &rx_flags);
+        }
+
+        // Read available bytes
+        size_t nread = 0;
+        while (nread < len && serial_rx_head != serial_rx_tail) {
+            ((char __force *)buf)[nread] = serial_rx_buf[serial_rx_tail];
+            serial_rx_tail = (serial_rx_tail + 1) % SERIAL_RX_BUF_SIZE;
+            nread++;
+        }
+        spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
+        return (uint64_t)nread;
     }
 
     // ===== FD_PIPE: existing path =====
@@ -2106,6 +2188,21 @@ uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint
         struct unix_sock *sock = current_proc->fd_table[fd].sock;
         if (sock) {
             sock_close(sock);
+        }
+    } else if (current_proc->fd_table[fd].type == FD_SERIAL) {
+        serial_fd_count--;
+        // Clear waiter if this process was the waiter
+        uint64_t rx_flags;
+        spin_lock_irqsave(&serial_rx_lock, &rx_flags);
+        if (serial_read_waiter == current_proc->pid)
+            serial_read_waiter = -1;
+        spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
+        // Last close: mask IRQ + unregister ISR
+        if (serial_fd_count == 0) {
+            outb(COM1_IER, 0x00);           // Disable UART interrupts
+            ioapic_set_irq(4, 36, 0, true); // Mask GSI 4 in I/O APIC
+            unregister_irq(36);          // Unregister kernel ISR
+            serial_irq_registered = false;
         }
     }
     // FD_DEV: no dynamic resources to free
@@ -2402,6 +2499,8 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
     if (old_fd < 0 || old_fd >= MAX_FD || new_fd < 0 || new_fd >= MAX_FD)
         return (uint64_t)-EBADF;
 
+    if (old_fd == new_fd) return (uint64_t)new_fd;
+
     proc_t *proc = current_proc;
     if (proc->fd_table[old_fd].type == FD_NONE)
         return (uint64_t)-EBADF;
@@ -2440,6 +2539,19 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
             if (proc->fd_table[new_fd].sock) {
                 sock_close(proc->fd_table[new_fd].sock);
             }
+        } else if (proc->fd_table[new_fd].type == FD_SERIAL) {
+            serial_fd_count--;
+            uint64_t rx_flags;
+            spin_lock_irqsave(&serial_rx_lock, &rx_flags);
+            if (serial_read_waiter == current_proc->pid)
+                serial_read_waiter = -1;
+            spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
+            if (serial_fd_count == 0) {
+                outb(COM1_IER, 0x00);
+                ioapic_set_irq(4, 36, 0, true);
+                unregister_irq(36);
+                serial_irq_registered = false;
+            }
         }
         // FD_DEV: no dynamic resources to free
         __memset(&proc->fd_table[new_fd], 0, sizeof(struct file));
@@ -2462,6 +2574,8 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
         if (proc->fd_table[new_fd].sock) {
             unix_sock_acquire(proc->fd_table[new_fd].sock);
         }
+    } else if (proc->fd_table[new_fd].type == FD_SERIAL) {
+        serial_fd_count++;
     }
     // FD_DEV: target_pid copied by struct assignment, no ref_count needed
 

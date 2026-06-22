@@ -10,5 +10,6 @@
 #define DEV_KMS       3
 #define DEV_FS        4
 #define DEV_TERMINAL  5
+#define DEV_SERIAL    6
 
 #endif // COMMON_DEV_H

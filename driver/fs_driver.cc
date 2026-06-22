@@ -318,9 +318,14 @@ static bool collect_lfn_entry(const fat_dir_entry *de, char *lfn_buf) {
 
         lfn_buf[base + c] = (char)lo;
     }
-    // Name exactly fills all 13 slots (e.g. 13-char name in single entry).
-    // Null-terminate so match_lfn_name works correctly.
-    lfn_buf[base + n_chars] = '\0';
+    // Only the last LFN entry (0x40 flag) can have a name that exactly fills
+    // all 13 slots without an internal null terminator. Non-last entries always
+    // fill 13 chars and their null terminator resides in a later entry.
+    // Writing it unconditionally would clobber characters from higher-sequence
+    // entries that were already processed (they appear earlier on disk).
+    bool is_last = raw[0] & 0x40;
+    if (is_last)
+        lfn_buf[base + n_chars] = '\0';
     return true;
 }
 
@@ -727,8 +732,6 @@ static void op_complete(pending_op *op, int32_t status, uint32_t count) {
     file_resp *resp = (file_resp *)op->reply_buf;
     resp->status = status;
     resp->count = count;
-    if (status != 0) {
-    }
     // op_complete: send reply and free
     msg_resp(op->reply_buf, sizeof(file_resp) + count);
     free_pending_op(op);

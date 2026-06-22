@@ -616,6 +616,19 @@ void proc_reap(proc_t *proc) {
                 // if peer is already gone, but that's fine.
                 sock_close(sock);
             }
+        } else if (proc->fd_table[fd].type == FD_SERIAL) {
+            serial_fd_count--;
+            uint64_t rx_flags;
+            spin_lock_irqsave(&serial_rx_lock, &rx_flags);
+            if (serial_read_waiter == proc->pid)
+                serial_read_waiter = -1;
+            spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
+            if (serial_fd_count == 0) {
+                outb(COM1_IER, 0x00);
+                ioapic_set_irq(4, 36, 0, true);
+                unregister_irq(36);
+                serial_irq_registered = false;
+            }
         }
         // FD_DEV and FD_NONE: no dynamic resources to free
         // (FD_SHM already handled in step 5 above)

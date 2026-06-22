@@ -17,21 +17,16 @@ static int spawn_service(const char *path) {
     printf("spawn: %s\n", path);
 
     int fd = open(path, O_RDONLY);
-    printf("open fd=%d\n", fd);
     if (fd < 0) return -1;
 
     uint64_t size = fd_file_size(fd);
-    printf("size: 0x%lx\n", size);
     void *buf = malloc(size);
     if (!buf) { close(fd); return -1; }
 
     ssize_t nread = read(fd, buf, size);
-    printf("nread: 0x%lx after read\n", nread);
     close(fd);
 
-    printf("calling spawn...\n");
     pid_t pid = spawn(buf, size);
-    printf("spawn returned pid=%d\n", pid);
     free(buf);
 
     return (pid > 0) ? (int)pid : -1;
@@ -47,6 +42,17 @@ static void wait_dev_ready(const char *dev_path) {
 }
 
 int main(void) {
+    // Set up serial as stdin/stdout/stderr first so printf works
+    {
+        int sfd = (int)sys_open_dev(DEV_SERIAL);
+        if (sfd >= 0) {
+            dup2(sfd, 0);
+            dup2(sfd, 1);
+            dup2(sfd, 2);
+            if (sfd > 2) close(sfd);
+        }
+    }
+
     printf("init: started\n");
     // 1. Wait for fs_driver to be ready (device registered + initialized)
     printf("init: waiting for fs_driver\n");
@@ -65,7 +71,7 @@ int main(void) {
     wait_dev_ready("/dev/kms");
     printf("init: kms_driver ready\n");
 
-    // 4. Spawn terminal
+    // 4. Spawn terminal (which spawns shell internally)
     printf("init: spawning terminal\n");
     spawn_service("/usr/bin/terminal");
     printf("init: terminal spawned\n");

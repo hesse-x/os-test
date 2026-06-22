@@ -1258,6 +1258,20 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
                     f->file_data.offset < f->file_data.file_size) {
                     kfds[i].revents |= POLLIN;
                 }
+            } else if (f->type == FD_SERIAL) {
+                uint64_t rx_flags;
+                spin_lock_irqsave(&serial_rx_lock, &rx_flags);
+                // POLLIN: RX buffer has data
+                if (serial_rx_head != serial_rx_tail) {
+                    if (kfds[i].events & POLLIN) kfds[i].revents |= POLLIN;
+                    ready++;
+                }
+                // POLLOUT: always ready (UART TX is non-blocking with LSR wait)
+                if (kfds[i].events & POLLOUT) {
+                    kfds[i].revents |= POLLOUT;
+                    ready++;
+                }
+                spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
             } else {
                 // FD_DEV, FD_SHM: always ready
                 if (kfds[i].events & POLLIN) kfds[i].revents |= POLLIN;
