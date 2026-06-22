@@ -65,7 +65,7 @@ void timer_queue_remove(proc_t *proc) {
 void proc_init() {
     for (int i = 0; i < MAX_PROC; i++) {
         procs[i].pid = -1;
-        procs[i].state = READY;
+        procs[i].state = UNUSED;
         procs[i].k_rsp = 0;
         procs[i].k_stack_top = 0;
         procs[i].cr3 = 0;
@@ -697,7 +697,7 @@ void proc_reap(proc_t *proc) {
     // 7. Clear PCB slot
     spin_lock(&procs_lock);
     proc->pid = -1;
-    proc->state = READY;
+    proc->state = UNUSED;
     proc->k_rsp = 0;
     proc->k_stack_top = 0;
     proc->cr3 = 0;

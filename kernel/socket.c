@@ -388,10 +388,8 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             // Block reader
             sock->blocked_reader = current_proc->pid;
             proc_t *proc = current_proc;
-            int cpu = proc->assigned_cpu;
             proc->state = BLOCKED;
             proc->wait_event = WAIT_POLL;
-            __atomic_add_fetch(&cpu_locals[cpu].run_count, -1, __ATOMIC_RELAXED);
             spin_unlock(&socket_lock);
             schedule();
             spin_lock(&socket_lock);
@@ -709,7 +707,6 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
             listen_sock->blocked_reader = proc->pid;
             proc->state = BLOCKED;
             proc->wait_event = WAIT_POLL;
-            __atomic_add_fetch(&cpu_locals[proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
             spin_unlock(&socket_lock);
             schedule();
             spin_lock(&socket_lock);
@@ -1302,7 +1299,6 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         proc->state = BLOCKED;
         proc->wait_event = WAIT_POLL;
         proc->wait_timed_out = 0;
-        __atomic_add_fetch(&cpu_locals[proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
         schedule();
 
         if (proc->wait_timed_out && timeout_ms > 0) {

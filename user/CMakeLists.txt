@@ -12,7 +12,13 @@ add_user_lib(c
         lib/signal.cc
 )
 
+# Unity test framework (static library)
+add_user_lib(unity SOURCES ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c)
+target_include_directories(unity PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/user/include
+    ${CMAKE_SOURCE_DIR}/third_party/Unity/src
+)
+target_compile_definitions(unity PRIVATE UNITY_EXCLUDE_SETJMP_H)
+
 add_user_elf(hello  C SOURCES hello.c  LINK_LIBS c)
-add_user_elf(malloc C SOURCES malloctest.c LINK_LIBS c)
-add_user_elf(pcie C SOURCES test_pcie.c LINK_LIBS c)
-add_user_elf(write C SOURCES writetest.c LINK_LIBS c)

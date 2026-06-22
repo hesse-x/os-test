@@ -11,7 +11,7 @@
 
 typedef int32_t pid_t;
 
-typedef enum proc_state_t { READY, RUNNING, BLOCKED, ZOMBIE, REAPING } proc_state_t;
+typedef enum proc_state_t { UNUSED, READY, RUNNING, BLOCKED, ZOMBIE, REAPING } proc_state_t;
 
 typedef enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WAIT_PIPE, WAIT_MSG_REPLY, WAIT_POLL } wait_event_t;
 

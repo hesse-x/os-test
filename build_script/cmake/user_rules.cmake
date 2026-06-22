@@ -24,9 +24,9 @@ function(add_user_lib lib_name)
 endfunction()
 
 # add_user_elf: 用户态 ELF（compile → objcopy → ld）
-# 用法: add_user_elf(name [C] SOURCES source1 ... [LINK_LIBS lib1 ...])
+# 用法: add_user_elf(name [C] SOURCES source1 ... [LINK_LIBS lib1 ...] [DEFS def1 ...])
 function(add_user_elf elf_name)
-    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS" ${ARGN})
+    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS" ${ARGN})
 
     set(ELF_DIR ${CMAKE_BINARY_DIR})
     set(ELF_FILE ${ELF_DIR}/${elf_name}.elf)
@@ -37,7 +37,14 @@ function(add_user_elf elf_name)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+
+    # Extra compile definitions (-D flags)
+    if(ARG_DEFS)
+        foreach(def ${ARG_DEFS})
+            list(APPEND COMPILE_FLAGS -D${def})
+        endforeach()
+    endif()
 
     # Step 1: compile each source file
     set(COMPILE_DEPS "")

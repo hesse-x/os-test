@@ -70,6 +70,13 @@ int main(void) {
     spawn_service("/usr/bin/terminal");
     printf("init: terminal spawned\n");
 
+#ifdef TEST
+    // Test build: run automated test suite after all services are ready
+    printf("init: spawning test_runner\n");
+    spawn_service("/test/test_runner.elf");
+    printf("init: test_runner spawned\n");
+#endif
+
     // 5. Adopt orphans + reap children
     while (1) {
         int status;

@@ -55,6 +55,7 @@
 #define SYS_KILL         47
 #define SYS_SIGACTION    48
 #define SYS_SIGRETURN    49
+#define SYS_DEBUG_PRINT  50
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -301,6 +302,10 @@ static inline int sys_sigaction(int sig, const struct sigaction *act,
 
 static inline int sys_sigreturn(void) {
     return (int)__syscall0(SYS_SIGRETURN);
+}
+
+static inline int sys_debug_print(const char *buf, int len) {
+    return (int)__syscall2(SYS_DEBUG_PRINT, (int64_t)(uintptr_t)buf, (int64_t)len);
 }
 #endif // __KERNEL__
 

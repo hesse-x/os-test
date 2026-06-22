@@ -1,5 +1,13 @@
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+
+void exit(int status) {
+    fflush(stdout);
+    fflush(stderr);
+    _exit(status);
+}
 
 static unsigned long next_rand = 1;
 

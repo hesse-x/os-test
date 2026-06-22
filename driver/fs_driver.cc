@@ -12,7 +12,7 @@
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/errno.h"
-/* syscall.h included via <sys/ipc.h> and <sys/block.h> */
+#include "common/syscall.h"
 
 // Open flags (must match user/include/fcntl.h)
 #define O_WRONLY    1
@@ -1469,8 +1469,10 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
                         rs->dir_cluster = next_cluster;
                         rs->current_cluster = next_cluster;
                         rs->lfn_buf[0] = '\0';
+                        rs->entry_idx = 0;
                         rs->phase = RS_SCAN_ENTRIES;
-                        break; // break out of for loop, then while(1) will re-enter RS_SCAN_ENTRIES
+                        // Break out of for-loop, re-enter while(1) to scan the new directory
+                        break;
                     }
 
                     // No more components — found!
@@ -1480,12 +1482,12 @@ static int resolve_step(resolve_state *rs, pending_op *op) {
                 }
             }
 
-            // If we broke out of the for-loop due to a directory descent,
-            // rs->phase is already RS_SCAN_ENTRIES — continue the while(1) loop.
-            if (rs->phase == RS_SCAN_ENTRIES) continue;
-
-            // All entries scanned in this cluster — follow FAT chain
-            rs->phase = RS_READ_FAT;
+            // After for-loop: if a match caused a break (entry_idx < entries),
+            // the phase was already set by the match handler — just continue.
+            // Otherwise, all entries scanned without match — follow FAT chain.
+            if (rs->entry_idx >= entries) {
+                rs->phase = RS_READ_FAT;
+            }
             continue;
         }
 

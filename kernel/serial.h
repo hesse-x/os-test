@@ -5,7 +5,7 @@
 
 void serial_init();
 
-#ifdef NDEBUG
+#ifdef NSERIAL
 
 #define serial_putc(c)    ((void)0)
 #define serial_puts(s)    ((void)0)

@@ -38,6 +38,11 @@ add_subdirectory(shell)
 add_subdirectory(user)
 add_subdirectory(init)
 
+# Test targets (only when --test is enabled)
+if(TEST)
+    add_subdirectory(user/test)
+endif()
+
 # 链接内核 ELF
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/build_script/linker.ld)
 set(BIN_FILE ${CMAKE_BINARY_DIR}/myos.elf)

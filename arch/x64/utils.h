@@ -79,7 +79,7 @@ static inline void *__memset(void *dst, int val, size_t n) {
 }
 
 // ===================== Early serial output =====================
-#ifdef NDEBUG
+#ifdef NSERIAL
 static inline void serial_early_out(char c) { (void)c; }
 #else
 static inline void serial_early_out(char c) { outb(0x3F8, c); }

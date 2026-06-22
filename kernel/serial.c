@@ -5,7 +5,7 @@
 
 void serial_init() {}
 
-#ifndef NDEBUG
+#ifndef NSERIAL
 
 void serial_putc(char c) { outb(COM1, c); }
 

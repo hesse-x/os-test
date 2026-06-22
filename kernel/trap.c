@@ -351,7 +351,8 @@ void sig_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 50
+#define NR_SYSCALL 51
+static uint64_t sys_debug_print(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -403,6 +404,7 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_kill,           // 47
     sys_sigaction,      // 48
     sys_sigreturn,      // 49
+    sys_debug_print,    // 50
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -486,9 +488,6 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         spin_lock(&proc->recv_lock);
         if (proc->recv_head != proc->recv_tail) {
             // Message available: copy to user buffer
-            serial_printf("sys_recv: pid=%d dequeues type=%d src=%d\n",
-                proc->pid, ((recv_msg_t *)proc->recv_buf[proc->recv_tail])->type,
-                ((recv_msg_t *)proc->recv_buf[proc->recv_tail])->src);
             __memcpy((void __force *)buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
             // If this is an REQ request, record the caller PID for sys_resp
             recv_msg_t *msg = (recv_msg_t *)proc->recv_buf[proc->recv_tail];
@@ -542,7 +541,6 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
             proc->wait_deadline = 0;
         }
 
-        __atomic_add_fetch(&cpu_locals[cpu].run_count, -1, __ATOMIC_RELAXED);
         schedule();
 
         // Woken up: check if timed out
@@ -647,7 +645,6 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
 
     // Block caller on WAIT_REQ_REPLY
     proc_t *proc = current_proc;
-    int cpu = proc->assigned_cpu;
     proc->state = BLOCKED;
     proc->wait_event = WAIT_REQ_REPLY;
     proc->wait_timed_out = 0;
@@ -656,7 +653,6 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
     proc->req_reply_buf = reply;
     proc->req_result = 0;
 
-    __atomic_add_fetch(&cpu_locals[cpu].run_count, -1, __ATOMIC_RELAXED);
     schedule();
 
     // Woken up by sys_resp or proc_reap
@@ -759,7 +755,6 @@ uint64_t sys_exit(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
         uint64_t flags;
         spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
         proc->state = ZOMBIE;
-        __atomic_add_fetch(&cpu_locals[cpu].run_count, -1, __ATOMIC_RELAXED);
         spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
         // Notify parent via SIGCHLD (replaces old RECV_NOTIFY)
         {
@@ -854,7 +849,6 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
             // No zombie child: block on WAIT_CHILD
             current_proc->wait_event = WAIT_CHILD;
             current_proc->state = BLOCKED;
-            __atomic_add_fetch(&cpu_locals[current_proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
             schedule();
         }
     }
@@ -887,7 +881,6 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
         // Child not yet exited: block on WAIT_CHILD
         current_proc->wait_event = WAIT_CHILD;
         current_proc->state = BLOCKED;
-        __atomic_add_fetch(&cpu_locals[current_proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
         schedule();
 
         // Woken up by notify — re-validate child still exists
@@ -937,9 +930,6 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uin
     if (!child) return (uint64_t)-ENOMEM;
 
     child->parent_pid = current_proc->pid;
-
-    serial_printf("sys_spawn: parent=%d child=%d entry=%lx\n",
-        current_proc->pid, child->pid, child->entry);
 
     // Inherit all open fds from parent (including fd 0/1 for pipe stdin/stdout)
     for (int fd = 0; fd < MAX_FD; fd++) {
@@ -1284,6 +1274,19 @@ uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t a
     return (uint64_t)ret;
 }
 
+// sys_debug_print(buf, len) — temporary debug: print user string to serial
+// syscall 50
+uint64_t sys_debug_print(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+    const char __user *buf = (const char __user * __force)arg1;
+    size_t len = (size_t)arg2;
+    if (!buf || len > 256) return (uint64_t)-EINVAL;
+    char kbuf[257];
+    __memcpy(kbuf, (const void __force *)buf, len);
+    kbuf[len] = '\0';
+    serial_printf("DBG:%s", kbuf);
+    return 0;
+}
+
 // sys_open_dev(dev_type) — syscall 34 (open device node, returns FD_DEV fd)
 // Returns: (fd | target_pid << 32) on success, negative errno on failure
 // Caller extracts: fd = (int32_t)(result & 0xFFFFFFFF), pid = (pid_t)(result >> 32)
@@ -1294,8 +1297,9 @@ uint64_t sys_open_dev(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, u
         return (uint64_t)-EINVAL;
 
     pid_t target_pid = dev_table[dev_type];
-    if (target_pid <= 0)
+    if (target_pid <= 0) {
         return (uint64_t)-ENOENT;
+    }
 
     proc_t *proc = current_proc;
 
@@ -1353,7 +1357,6 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
     proc->fd_table[fd].file_data.file_size = file_size;
     proc->fd_table[fd].file_data.ref_count = 1;
 
-    serial_printf("fd_reg: %d f=%x s=%lx\n", fd, (uint32_t)fs_fd, file_size);
     return (uint64_t)fd;
 }
 
@@ -1558,7 +1561,6 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
     proc->fd_table[fd].flags = O_RDWR | ((flags & MFD_CLOEXEC) ? FD_CLOEXEC : 0);
     proc->fd_table[fd].shm = shm;
 
-    serial_printf("sys_memfd_create: fd=%d name=\"%s\" flags=%x\n", fd, shm->name, flags);
     return (uint64_t)fd;
 }
 
@@ -1916,7 +1918,6 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
             p->write_pid = proc->pid;
             proc->state = BLOCKED;
             proc->wait_event = WAIT_PIPE;
-            __atomic_add_fetch(&cpu_locals[proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
             schedule();
             p->write_pid = -1;
             continue;
@@ -2042,7 +2043,6 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         p->read_pid = proc->pid;
         proc->state = BLOCKED;
         proc->wait_event = WAIT_PIPE;
-        __atomic_add_fetch(&cpu_locals[proc->assigned_cpu].run_count, -1, __ATOMIC_RELAXED);
         schedule();
         p->read_pid = -1;
     }
@@ -2207,8 +2207,6 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
     proc_t *target = &procs[target_pid];
     if (target->pid != target_pid) return (uint64_t)-ESRCH;
 
-    serial_printf("sys_msg_to: from %d to %d len=%ld\n", current_proc->pid, target_pid, msg_len);
-
     // Allocate kernel buffer and copy message from user space
     void *kbuf = kmalloc(msg_len);
     if (!kbuf) return (uint64_t)-ENOMEM;
@@ -2252,7 +2250,6 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
 
     // Block caller on WAIT_MSG_REPLY
     proc_t *proc = current_proc;
-    int cpu = proc->assigned_cpu;
     proc->state = BLOCKED;
     proc->wait_event = WAIT_MSG_REPLY;
     proc->wait_timed_out = 0;
@@ -2262,7 +2259,6 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
     proc->msg_reply_len = reply_len;
     proc->msg_result = 0;
 
-    __atomic_add_fetch(&cpu_locals[cpu].run_count, -1, __ATOMIC_RELAXED);
     schedule();
 
     // Woken up by sys_msg_resp or proc_reap
@@ -2315,13 +2311,10 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
     proc_t *proc = current_proc;
     pid_t caller_pid = proc->msg_caller_pid;
     if (caller_pid < 0 || caller_pid >= MAX_PROC) {
-        serial_printf("sys_msg_resp: pid=%d bad caller_pid=%d\n", proc->pid, caller_pid);
         return (uint64_t)-EINVAL;
     }
 
     proc_t *caller = &procs[caller_pid];
-    serial_printf("sys_msg_resp: pid=%d resp to caller=%d len=%ld\n",
-        proc->pid, caller_pid, resp_len);
     if (caller->pid != caller_pid) return (uint64_t)-ESRCH;
 
     // Copy response data from server user space to kernel buffer
@@ -2795,8 +2788,6 @@ uint64_t sys_kill(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
     // Set pending bit (atomic, no lock needed for a single bit)
     __atomic_or_fetch(&target->sig.pending, 1ULL << sig, __ATOMIC_RELEASE);
 
-    serial_printf("sys_kill: %d -> %d sig=%d\n", current_proc->pid, pid, sig);
-
     // If target is blocked in WAIT_RECV, wake it so it can check signals
     // (But without EINTR support, waking here would just cause sys_recv to
     //  loop back — the signal will be handled on next iret.)
@@ -2931,9 +2922,6 @@ uint64_t sys_sigreturn(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, u
     tf->rip = proc->sig.saved_rip;
     tf->rsp = proc->sig.saved_rsp;
     tf->rflags = proc->sig.saved_rflags;
-
-    serial_printf("sys_sigreturn: pid=%d restore rip=%lx rsp=%lx\n",
-        proc->pid, proc->sig.saved_rip, proc->sig.saved_rsp);
 
     return 0;
 }

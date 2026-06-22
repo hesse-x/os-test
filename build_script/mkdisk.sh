@@ -52,9 +52,16 @@ mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/terminal.elf"     ::usr/bin/term
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/shell.elf"        ::usr/bin/shell
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.a"           ::usr/lib/libc.a
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello.elf"        ::local/hello.elf
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/malloc.elf"       ::local/malloc.elf
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/pcie.elf"         ::local/pcie.elf
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/write.elf"          ::local/write.elf
+
+# Copy test ELFs to /test/ directory (test build only)
+if [ "$TEST" = "1" ]; then
+    mmd -i "${BUILD_DIR}/part2.img" ::test
+    for elf in test_runner.elf pipe.elf fcntl.elf string.elf malloc.elf \
+               stdio.elf mmap.elf ipc.elf socket.elf process.elf \
+               signal.elf poll.elf pci.elf; do
+        mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
+    done
+fi
 
 # 保留根目录 README
 mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/README" ::README
