@@ -15,8 +15,8 @@ static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
                      uint64_t copy_len) {
     Page *page = bfc_alloc_page(1);
     if (!page) return false;
-    uint64_t page_phys = page_to_phys(page);
-    uint64_t page_virt = phys_to_virt(page_phys);
+    uint64_t page_phys = (__force uint64_t)page_to_phys(page);
+    uint64_t page_virt = (__force uint64_t)phys_to_virt((__force phys_addr_t)page_phys);
 
     // Clear page first (handles BSS zeroing)
     uint8_t *dst = (uint8_t *)page_virt;
@@ -87,7 +87,6 @@ elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
         for (uint64_t page_addr = first_page; page_addr <= last_page;
              page_addr += PAGE_SIZE) {
             uint64_t file_start = ph->p_offset;
-            uint64_t file_end = ph->p_offset + ph->p_filesz;
 
             uint64_t page_off = page_addr - ph->p_vaddr;
 

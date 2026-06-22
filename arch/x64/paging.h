@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "kernel/sparse.h"
 #include "arch/x64/utils.h"
 #include "common/macro.h"
 #include "arch/x64/memlayout.h"
@@ -18,7 +19,7 @@
 #define VMA_BASE 0xFFFFFFFF80000000ULL
 #define KERNEL_LMA_BASE 0x100000
 #define KERNEL_VMA_BASE 0xFFFFFFFF80100000ULL
-#define PHY_ADDR(addr) ((uintptr_t)(addr) - VMA_BASE)
+#define PHY_ADDR(addr) ((__force phys_addr_t)((uintptr_t)(addr) - VMA_BASE))
 
 // ===================== boot_info (stub → kernel) =====================
 #define BOOT_INFO_MAGIC 0x4F53424F544F4F42ULL  // "BOOTBOOS"

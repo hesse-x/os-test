@@ -27,7 +27,7 @@ typedef struct cpu_local_t {
     int cpu_id;
     uint32_t apic_id;
     struct proc_t *_cur_proc;
-    uint64_t lapic_base;
+    void __iomem *lapic_base;
     uint64_t kernel_stack;
     uint64_t tss_rsp0;
     int run_count;         // number of runnable processes on this CPU (excludes idle)

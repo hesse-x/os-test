@@ -25,7 +25,7 @@ static void slab_page_init(Page *page, kmem_cache_t *cache, int cpu_id) {
     page->slab.partial_prev = NULL;
 
     // 侵入式空闲链表：每个空闲对象首 8 字节存 next
-    char *base = (char *)phys_to_virt(page_to_phys(page));
+    char *base = (__force char *)phys_to_virt((__force phys_addr_t)page_to_phys(page));
     for (uint32_t i = 0; i < page->slab.obj_count; i++) {
         void *obj = base + i * cache->obj_size;
         *(void **)obj = page->slab.freelist;
@@ -76,7 +76,7 @@ void *kmalloc(size_t size) {
         size_t npages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
         Page *page = bfc_alloc_page(npages);
         if (!page) return NULL;
-        return (void *)phys_to_virt(page_to_phys(page));
+        return (__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(page));
     }
 
     int c = size_to_class(size);
@@ -133,7 +133,7 @@ void kfree(const void *ptr) {
     if (!ptr) return;
 
     uint64_t addr = (uint64_t)ptr;
-    uint64_t phys = PHY_ADDR(addr);
+    uint64_t phys = (__force uint64_t)PHY_ADDR(addr);
     Page *page = &bfc_frames[PHY_TO_PAGE(phys)];
 
     if (page->status == PAGE_USED) {
@@ -204,7 +204,7 @@ void *krealloc(void *ptr, size_t new_size) {
 
     // 获取旧大小
     uint64_t addr = (uint64_t)ptr;
-    uint64_t phys = PHY_ADDR(addr);
+    uint64_t phys = (__force uint64_t)PHY_ADDR(addr);
     Page *page = &bfc_frames[PHY_TO_PAGE(phys)];
 
     size_t old_size;

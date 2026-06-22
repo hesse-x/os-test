@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "kernel/sparse.h"
 #include "kernel/spinlock.h"
 
 #define NUM_KMALLOC_CLASSES 9
@@ -59,16 +60,16 @@ void init_mem(boot_info *bi);
 extern spinlock_t bfc_lock;
 
 // ===================== Address conversion =====================
-uint64_t page_to_phys(Page *p);
-uint64_t phys_to_virt(uint64_t phys);
+phys_addr_t page_to_phys(Page *p);
+kern_vaddr_t phys_to_virt(phys_addr_t phys);
 
 // ===================== User page mapping =====================
 uint64_t *ensure_pd(uint64_t *new_pml4, uint64_t vaddr);
 uint64_t *ensure_pt_in_pd(uint64_t *pd_or_pdpt, uint64_t vaddr, int level);
 bool map_user_page_direct(uint64_t *new_pml4, uint64_t vaddr, uint64_t phys,
-                          uint64_t flags);
+                          uint64_t flags) __must_check;
 bool map_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
-                    uint64_t flags, int *pages_mapped);
+                    uint64_t flags, int *pages_mapped) __must_check;
 void unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
                       int count);
 

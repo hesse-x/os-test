@@ -206,7 +206,7 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     while (1) __asm__ volatile("hlt");
   }
 
-  UINT64 entry_vaddr;
+  UINT64 entry_vaddr = 0;
   st = load_elf(kernel_file, &entry_vaddr);
   if (EFI_ERROR(st)) {
     Print(L"stub: load ELF failed, halting\n");

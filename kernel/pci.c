@@ -7,11 +7,12 @@
 #include "common/macro.h"
 #include "common/errno.h"
 #include "arch/x64/apic.h"
+#include "kernel/trap.h"
 
 pci_device_t pci_devices[MAX_PCI_DEV];
 int pci_device_count = 0;
 
-uint64_t ecam_vbase = 0;
+void __iomem *ecam_vbase = NULL;
 uint8_t  ecam_start_bus = 0;
 uint8_t  ecam_end_bus = 0;
 
@@ -46,7 +47,7 @@ static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus
     serial_puts("pci: ECAM PD alloc failed\n");
     halt();
   }
-  uint64_t *pd = (uint64_t *)phys_to_virt(page_to_phys(pd_page));
+  uint64_t *pd = (__force uint64_t *)phys_to_virt((__force phys_addr_t)page_to_phys(pd_page));
   for (int i = 0; i < 512; i++) pd[i] = 0;
 
   // Fill PD with 2MB huge pages, PCD+PWT for uncacheable MMIO
@@ -55,12 +56,12 @@ static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus
     pd[n] = (region_start + n * 0x200000) | 0x9B;
   }
 
-  pdpt_hh[pdpt_idx] = page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
+  pdpt_hh[pdpt_idx] = (__force uint64_t)page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
 
   // Compute ecam_vbase so ecam_vbase + bus<<20 + dev<<15 + func<<12 + offset
   // addresses the config register
   uint64_t vma = VMA_BASE + (uint64_t)(pdpt_idx - 510) * 0x40000000;
-  ecam_vbase = vma + (ecam_phys - region_start);
+  ecam_vbase = (void __iomem __force *)(vma + (ecam_phys - region_start));
 
   device_vma_base = vma + num_2mb * 0x200000;
   flush_tlb();
@@ -69,21 +70,21 @@ static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus
 // ===================== Config space access =====================
 
 uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset) {
-  uint64_t addr = ecam_vbase
-                + ((uint64_t)bus << 20)
+  volatile uint32_t __iomem *addr = (volatile uint32_t __iomem *)ecam_vbase
+                + (((uint64_t)bus << 20)
                 + ((uint64_t)dev << 15)
                 + ((uint64_t)func << 12)
-                + offset;
-  return *(volatile uint32_t *)addr;
+                + offset) / 4;
+  return *(volatile uint32_t __force *)addr;
 }
 
 void pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset, uint32_t value) {
-  uint64_t addr = ecam_vbase
-                + ((uint64_t)bus << 20)
+  volatile uint32_t __iomem *addr = (volatile uint32_t __iomem *)ecam_vbase
+                + (((uint64_t)bus << 20)
                 + ((uint64_t)dev << 15)
                 + ((uint64_t)func << 12)
-                + offset;
-  *(volatile uint32_t *)addr = value;
+                + offset) / 4;
+  *(volatile uint32_t __force *)addr = value;
 }
 
 // ===================== BAR sizing =====================
@@ -214,7 +215,7 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   if ((header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE) {
     uint32_t bus_info = pci_read_config(bus, dev, func, 0x18);
     uint8_t secondary = (bus_info >> 8) & 0xFF;
-    if (secondary != bus && secondary < PCI_MAX_BUS) {
+    if (secondary != bus) {
       pci_scan_bus(secondary);
     }
   }
@@ -265,7 +266,7 @@ static void pci_map_bar_mmio(pci_device_t *d) {
     // Allocate PD
     Page *pd_page = bfc_alloc_page(1);
     if (!pd_page) continue;
-    uint64_t *pd = (uint64_t *)phys_to_virt(page_to_phys(pd_page));
+    uint64_t *pd = (__force uint64_t *)phys_to_virt((__force phys_addr_t)page_to_phys(pd_page));
     for (int j = 0; j < 512; j++) pd[j] = 0;
 
     // Fill with 2MB huge pages, PCD+PWT for MMIO
@@ -273,10 +274,10 @@ static void pci_map_bar_mmio(pci_device_t *d) {
       pd[n] = (region_start + n * 0x200000) | 0x9B;
     }
 
-    pdpt_hh[pdpt_idx] = page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
+    pdpt_hh[pdpt_idx] = (__force uint64_t)page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
 
     uint64_t vma = VMA_BASE + (uint64_t)(pdpt_idx - 510) * 0x40000000;
-    d->bar[i].vaddr = vma + (phys - region_start);
+    d->bar[i].vaddr = (void __iomem __force *)(vma + (phys - region_start));
     device_vma_base = vma + num_2mb * 0x200000;
     flush_tlb();
   }
@@ -319,7 +320,7 @@ pci_device_t *pci_find_device_by_id(uint16_t vendor, uint16_t device) {
 
 // ===================== Syscall: sys_pci_dev_info =====================
 
-uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u5) {
+uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u5, uint64_t _u6) {
   uint8_t bus = (uint8_t)arg1;
   uint8_t dev_num = (uint8_t)arg2;
   uint8_t func = (uint8_t)arg3;
@@ -380,19 +381,19 @@ int pci_enable_msix(pci_device_t *dev, int num_vectors) {
 
   // Get MSI-X Table address (BAR vaddr + offset)
   // BAR should already be mapped by pci_enable_device
-  uint64_t bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
-  if (bar_vaddr == 0) return -EFAULT;
+  void __iomem *bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
+  if (!bar_vaddr) return -EFAULT;
 
-  volatile uint32_t *table = (volatile uint32_t *)(bar_vaddr + dev->msix_table_offset);
+  volatile uint32_t __iomem *table = (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr + dev->msix_table_offset);
   uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
 
   // Write all Table Entries: masked, with vector numbers
   for (int i = 0; i < num_vectors; i++) {
     uint32_t vector = base + i;
-    table[i * 4 + 0] = 0xFEE00000 | (bsp_apic_id << 12);  // Message Address low
-    table[i * 4 + 1] = 0;                                    // Message Address high
-    table[i * 4 + 2] = vector;                                // Message Data (vector, Fixed, Edge)
-    table[i * 4 + 3] = 1;                                     // Vector Control: Mask bit = 1
+    *(volatile uint32_t __force *)&table[i * 4 + 0] = 0xFEE00000 | (bsp_apic_id << 12);  // Message Address low
+    *(volatile uint32_t __force *)&table[i * 4 + 1] = 0;                                    // Message Address high
+    *(volatile uint32_t __force *)&table[i * 4 + 2] = vector;                                // Message Data (vector, Fixed, Edge)
+    *(volatile uint32_t __force *)&table[i * 4 + 3] = 1;                                     // Vector Control: Mask bit = 1
   }
 
   // Enable MSI-X: set Enable bit (bit 15 of 16-bit Message Control)
@@ -422,26 +423,26 @@ int pci_enable_msix(pci_device_t *dev, int num_vectors) {
 
 void pci_msix_mask_entry(pci_device_t *dev, int entry) {
   if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors) return;
-  uint64_t bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
-  volatile uint32_t *table = (volatile uint32_t *)(bar_vaddr + dev->msix_table_offset);
-  table[entry * 4 + 3] |= 1;  // Set Mask bit
+  void __iomem *bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
+  volatile uint32_t __iomem *table = (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr + dev->msix_table_offset);
+  *(volatile uint32_t __force *)&table[entry * 4 + 3] |= 1;  // Set Mask bit
 }
 
 void pci_msix_unmask_entry(pci_device_t *dev, int entry) {
   if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors) return;
-  uint64_t bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
-  volatile uint32_t *table = (volatile uint32_t *)(bar_vaddr + dev->msix_table_offset);
-  table[entry * 4 + 3] &= ~1;  // Clear Mask bit
+  void __iomem *bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
+  volatile uint32_t __iomem *table = (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr + dev->msix_table_offset);
+  *(volatile uint32_t __force *)&table[entry * 4 + 3] &= ~1;  // Clear Mask bit
 }
 
-void *pci_msix_table_addr(pci_device_t *dev) {
+void __iomem *pci_msix_table_addr(pci_device_t *dev) {
   if (dev->msix_cap_offset == 0) return NULL;
-  return (void *)(dev->bar[dev->msix_table_bar].vaddr + dev->msix_table_offset);
+  return (void __iomem *)((uint8_t __iomem *)dev->bar[dev->msix_table_bar].vaddr + dev->msix_table_offset);
 }
 
-void *pci_msix_pba_addr(pci_device_t *dev) {
+void __iomem *pci_msix_pba_addr(pci_device_t *dev) {
   if (dev->msix_cap_offset == 0) return NULL;
-  return (void *)(dev->bar[dev->msix_pba_bar].vaddr + dev->msix_pba_offset);
+  return (void __iomem *)((uint8_t __iomem *)dev->bar[dev->msix_pba_bar].vaddr + dev->msix_pba_offset);
 }
 
 int pci_msix_vector_base(pci_device_t *dev) {

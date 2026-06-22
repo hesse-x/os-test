@@ -80,7 +80,7 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
     return NULL;
   }
 
-  uint8_t *buf = (uint8_t *)phys_to_virt(page_to_phys(page));
+  uint8_t *buf = (__force uint8_t *)phys_to_virt((__force phys_addr_t)page_to_phys(page));
 
   // Copy header sector already read
   __builtin_memcpy(buf, hdr_buf, 512);

@@ -2,6 +2,7 @@
 #define KERNEL_PROC_H
 
 #include <stdint.h>
+#include "kernel/sparse.h"
 #include "kernel/list.h"
 #include "kernel/mem/alloc.h"
 #include "arch/x64/trap.h"
@@ -134,12 +135,12 @@ typedef struct proc_t {
 
     // === REQ 状态 ===
     pid_t    req_caller_pid;    // current REQ caller PID (-1 = none)
-    void    *req_reply_buf;     // caller's reply buffer user-space address
+    void __user *req_reply_buf;     // caller's reply buffer user-space address
     int32_t  req_result;        // 0 = success, positive errno on error
     pid_t    req_target_pid;    // for crash cleanup: who we're waiting on
 
     // === MSG 状态（独立于 req 字段） ===
-    void    *msg_reply_buf;     // caller's reply buffer user-space address
+    void __user *msg_reply_buf;     // caller's reply buffer user-space address
     size_t   msg_reply_len;     // caller's reply buffer size
     pid_t    msg_caller_pid;    // server side: who sent the msg (-1 = none)
     int32_t  msg_result;        // 0 = success, negative errno on error

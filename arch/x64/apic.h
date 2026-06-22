@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "kernel/sparse.h"
 
 // LAPIC register offsets (MMIO)
 #define LAPIC_ID        0x020
@@ -64,16 +65,16 @@
 // Timer frequency (Hz)
 #define LAPIC_TIMER_HZ 100
 
-extern uint64_t lapic_vaddr;
-extern uint64_t ioapic_vaddr;
+extern void __iomem *lapic_vaddr;
+extern void __iomem *ioapic_vaddr;
 
 // LAPIC register access
 static inline uint32_t lapic_read(uint32_t offset) {
-  return *(volatile uint32_t *)(lapic_vaddr + offset);
+  return *(volatile uint32_t __force *)(lapic_vaddr + offset);
 }
 
 static inline void lapic_write(uint32_t offset, uint32_t val) {
-  *(volatile uint32_t *)(lapic_vaddr + offset) = val;
+  *(volatile uint32_t __force *)(lapic_vaddr + offset) = val;
 }
 
 static inline void lapic_eoi() {
@@ -82,13 +83,13 @@ static inline void lapic_eoi() {
 
 // I/O APIC register access
 static inline uint32_t ioapic_read(uint32_t reg) {
-  *(volatile uint32_t *)(ioapic_vaddr + IOAPIC_REG) = reg;
-  return *(volatile uint32_t *)(ioapic_vaddr + IOAPIC_DATA);
+  *(volatile uint32_t __force *)(ioapic_vaddr + IOAPIC_REG) = reg;
+  return *(volatile uint32_t __force *)(ioapic_vaddr + IOAPIC_DATA);
 }
 
 static inline void ioapic_write(uint32_t reg, uint32_t val) {
-  *(volatile uint32_t *)(ioapic_vaddr + IOAPIC_REG) = reg;
-  *(volatile uint32_t *)(ioapic_vaddr + IOAPIC_DATA) = val;
+  *(volatile uint32_t __force *)(ioapic_vaddr + IOAPIC_REG) = reg;
+  *(volatile uint32_t __force *)(ioapic_vaddr + IOAPIC_DATA) = val;
 }
 
 void apic_init();

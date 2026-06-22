@@ -45,7 +45,7 @@
 #define AHCI_BOUNCE_PAGES 16
 
 // ===================== Module state =====================
-static uint64_t abar;
+static void __iomem *abar;
 static int active_port = -1;
 
 spinlock_t ahci_lock = SPINLOCK_INIT;
@@ -55,10 +55,14 @@ static Page *fis_recv_page;
 static Page *cmd_table_page;
 static Page *bounce_page;
 
-static uint64_t cmd_list_phys, cmd_list_virt;
-static uint64_t fis_recv_phys, fis_recv_virt;
-static uint64_t cmd_table_phys, cmd_table_virt;
-static uint64_t bounce_phys, bounce_virt;
+static uint64_t cmd_list_phys;
+static void *cmd_list_virt;
+static uint64_t fis_recv_phys;
+static void *fis_recv_virt;
+static uint64_t cmd_table_phys;
+static void *cmd_table_virt;
+static uint64_t bounce_phys;
+static void *bounce_virt;
 
 // ===================== Block request queue (async I/O) =====================
 #define BLOCK_QUEUE_SIZE 32
@@ -77,12 +81,12 @@ static block_req block_pool[BLOCK_QUEUE_SIZE];
 static int bq_head = 0;     // next slot to dequeue
 static int bq_tail = 0;     // next slot to enqueue
 static int bq_count = 0;    // number of queued requests
-block_req *ahci_current_req = NULL;  // in-flight request
+static block_req *ahci_current_req = NULL;  // in-flight request
 static uint32_t ahci_cookie_counter = 0;
 
 // ===================== Helpers =====================
-static inline void *port_reg(int port, uint32_t offset) {
-  return (void *)(abar + 0x100 + port * 0x80 + offset);
+static inline void __iomem *port_reg(int port, uint32_t offset) {
+  return (void __iomem *)((uint8_t __iomem *)abar + 0x100 + port * 0x80 + offset);
 }
 
 static void ahci_puts(const char *s) { serial_puts(s); }
@@ -93,23 +97,23 @@ static void ahci_puts(const char *s) { serial_puts(s); }
 // data via kernel higher-half mapping. Safe in IRQ context (no CR3 switch).
 
 static uint64_t walk_user_pt(uint64_t cr3_phys, uint64_t vaddr) {
-    uint64_t *pml4 = (uint64_t *)phys_to_virt(cr3_phys);
+    uint64_t *pml4 = (__force uint64_t *)phys_to_virt((__force phys_addr_t)cr3_phys);
     int pml4_idx = (vaddr >> 39) & 0x1FF;
     if (!(pml4[pml4_idx] & PTE_PRESENT)) return 0;
 
-    uint64_t *pdpt = (uint64_t *)phys_to_virt(pml4[pml4_idx] & 0x000FFFFFFFFFF000ULL);
+    uint64_t *pdpt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)(pml4[pml4_idx] & 0x000FFFFFFFFFF000ULL));
     int pdpt_idx = (vaddr >> 30) & 0x1FF;
     if (!(pdpt[pdpt_idx] & PTE_PRESENT)) return 0;
     if (pdpt[pdpt_idx] & PTE_PS)  // 1GB huge page
         return (pdpt[pdpt_idx] & 0x000FFFFFFFFFF000ULL) + (vaddr & 0x3FFFFFFF);
 
-    uint64_t *pd = (uint64_t *)phys_to_virt(pdpt[pdpt_idx] & 0x000FFFFFFFFFF000ULL);
+    uint64_t *pd = (__force uint64_t *)phys_to_virt((__force phys_addr_t)(pdpt[pdpt_idx] & 0x000FFFFFFFFFF000ULL));
     int pd_idx = (vaddr >> 21) & 0x1FF;
     if (!(pd[pd_idx] & PTE_PRESENT)) return 0;
     if (pd[pd_idx] & PTE_PS)  // 2MB huge page
         return (pd[pd_idx] & 0x000FFFFFFFFFF000ULL) + (vaddr & 0x1FFFFF);
 
-    uint64_t *pt = (uint64_t *)phys_to_virt(pd[pd_idx] & 0x000FFFFFFFFFF000ULL);
+    uint64_t *pt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)(pd[pd_idx] & 0x000FFFFFFFFFF000ULL));
     int pt_idx = (vaddr >> 12) & 0x1FF;
     if (!(pt[pt_idx] & PTE_PRESENT)) return 0;
     return (pt[pt_idx] & 0x000FFFFFFFFFF000ULL) + (vaddr & 0xFFF);  // 4KB page
@@ -135,8 +139,8 @@ static bool bounce_to_user_pages(pid_t pid, void *user_buf, uint32_t byte_len) {
         uint64_t phys = walk_user_pt(cr3, page_va);
         if (phys == 0) return false;
 
-        __memcpy((void *)(phys_to_virt(phys) + page_offset),
-                 (const void *)(bounce_virt + offset), chunk);
+        __memcpy((void __force *)((__force uint64_t)phys_to_virt((__force phys_addr_t)phys) + page_offset),
+                 (const void *)((uint8_t *)bounce_virt + offset), chunk);
         offset += chunk;
     }
     return true;
@@ -154,15 +158,15 @@ static void ahci_alloc_dma() {
     halt();
   }
 
-  cmd_list_phys = page_to_phys(cmd_list_page);
-  fis_recv_phys = page_to_phys(fis_recv_page);
-  cmd_table_phys = page_to_phys(cmd_table_page);
-  bounce_phys = page_to_phys(bounce_page);
+  cmd_list_phys = (__force uint64_t)page_to_phys(cmd_list_page);
+  fis_recv_phys = (__force uint64_t)page_to_phys(fis_recv_page);
+  cmd_table_phys = (__force uint64_t)page_to_phys(cmd_table_page);
+  bounce_phys = (__force uint64_t)page_to_phys(bounce_page);
 
-  cmd_list_virt = phys_to_virt(cmd_list_phys);
-  fis_recv_virt = phys_to_virt(fis_recv_phys);
-  cmd_table_virt = phys_to_virt(cmd_table_phys);
-  bounce_virt = phys_to_virt(bounce_phys);
+  cmd_list_virt = (__force void *)phys_to_virt((__force phys_addr_t)cmd_list_phys);
+  fis_recv_virt = (__force void *)phys_to_virt((__force phys_addr_t)fis_recv_phys);
+  cmd_table_virt = (__force void *)phys_to_virt((__force phys_addr_t)cmd_table_phys);
+  bounce_virt = (__force void *)phys_to_virt((__force phys_addr_t)bounce_phys);
 
   __memset((void *)cmd_list_virt, 0, 4096);
   __memset((void *)fis_recv_virt, 0, 4096);
@@ -172,7 +176,7 @@ static void ahci_alloc_dma() {
 
 // ===================== Port stop =====================
 static void port_stop(int port) {
-  void *cmd = port_reg(port, PxCMD);
+  void __iomem *cmd = port_reg(port, PxCMD);
 
   // Clear ST, wait for CR=0
   writel(cmd, readl(cmd) & ~(uint32_t)1);
@@ -210,7 +214,7 @@ static void port_init(int port) {
   writel(port_reg(port, PxIE), (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
 
   // Enable FIS receive: set FRE, wait for FR=1
-  void *cmd = port_reg(port, PxCMD);
+  void __iomem *cmd = port_reg(port, PxCMD);
   writel(cmd, readl(cmd) | (1 << 4));
   for (int i = 0; i < 500000; i++) {
     if (readl(cmd) & (1 << 14)) break;
@@ -246,7 +250,7 @@ static int ahci_identify_device(int port, void *buf) {
   fis[13] = 0x00;   // Sector Count high
 
   // PRD: point to bounce buffer, dbc=511 (512 bytes - 1)
-  uint32_t *prd = (uint32_t *)(cmd_table_virt + 0x80);
+  uint32_t *prd = (uint32_t *)((uint8_t *)cmd_table_virt + 0x80);
   prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);
   prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);
   prd[2] = 0;
@@ -291,7 +295,7 @@ static void ahci_irq_handler(trapframe_t *tf) {
     uint32_t pxis = readl(port_reg(active_port, PxIS));
     if (pxis == 0) {
         // Not our interrupt — still acknowledge and EOI
-        writel((void *)(abar + AHCI_IS), readl((void *)(abar + AHCI_IS)));
+        writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS), readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS)));
         lapic_eoi();
         return;
     }
@@ -305,7 +309,7 @@ static void ahci_irq_handler(trapframe_t *tf) {
     // Acknowledge port interrupt status
     writel(port_reg(active_port, PxIS), pxis);
     // Acknowledge global IS
-    writel((void *)(abar + AHCI_IS), readl((void *)(abar + AHCI_IS)));
+    writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS), readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS)));
 
     // Check if a command was in flight
     if (!ahci_current_req) {
@@ -408,7 +412,7 @@ void ahci_issue_cmd(block_req *req) {
     fis[13] = (uint8_t)((chunk >> 8) & 0xFF);
 
     // PRD entry at offset 0x80 in command table
-    uint32_t *prd = (uint32_t *)(cmd_table_virt + 0x80);
+    uint32_t *prd = (uint32_t *)((uint8_t *)cmd_table_virt + 0x80);
     prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);
     prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);
     prd[2] = 0;
@@ -446,7 +450,7 @@ void ahci_issue_cmd(block_req *req) {
 // Returns 0 on success, -EIO if device not detected after reset.
 static int ahci_comreset_port(int port) {
   // Stop port before reset
-  void *cmd = port_reg(port, PxCMD);
+  void __iomem *cmd = port_reg(port, PxCMD);
   writel(cmd, readl(cmd) & ~(uint32_t)1);  // clear ST
   for (int i = 0; i < 500000; i++) {
     if (!(readl(cmd) & (1 << 15))) break;  // wait CR=0
@@ -519,20 +523,20 @@ void ahci_init() {
   abar = dev->bar[5].vaddr;
 
   ahci_puts("ahci: ABAR vaddr=");
-  serial_put_hex(abar);
+  serial_put_hex((uint64_t)abar);
   ahci_puts("\n");
 
   // HBA reset: set GHC.HR (bit 0)
-  uint32_t ghc = readl((void *)(abar + AHCI_GHC));
-  writel((void *)(abar + AHCI_GHC), ghc | 1);
+  uint32_t ghc = readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_GHC));
+  writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_GHC), ghc | 1);
 
   // Poll until HR clears
   for (int i = 0; i < 1000000; i++) {
-    if (!(readl((void *)(abar + AHCI_GHC)) & 1)) break;
+    if (!(readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_GHC)) & 1)) break;
   }
 
   // Enable AHCI mode: GHC.AE (bit 31)
-  writel((void *)(abar + AHCI_GHC), readl((void *)(abar + AHCI_GHC)) | (1U << 31));
+  writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_GHC), readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_GHC)) | (1U << 31));
 
   // One-time DMA allocation (shared by all candidate ports)
   ahci_alloc_dma();
@@ -543,7 +547,7 @@ void ahci_init() {
   uint8_t idbuf[512];
   int disk_count = 0;
   active_port = -1;
-  uint32_t pi = readl((void *)(abar + AHCI_PI));
+  uint32_t pi = readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_PI));
   ahci_puts("ahci: PI=0x");
   serial_put_hex(pi);
   ahci_puts("\n");
@@ -622,7 +626,7 @@ void ahci_init() {
   register_irq(ahci_irq_vec, ahci_irq_handler);
 
   // 2. Enable GHC.IE (global HBA interrupt enable, bit 1)
-  writel((void *)(abar + AHCI_GHC), readl((void *)(abar + AHCI_GHC)) | (1U << 1));
+  writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_GHC), readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_GHC)) | (1U << 1));
 
   // 3. Route I/O APIC GSI → AHCI vector, unmasked, to BSP
   uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
@@ -670,7 +674,7 @@ int ahci_read_lba(uint32_t lba, uint32_t count, void *buf) {
     fis[12] = (uint8_t)(chunk & 0xFF);
     fis[13] = (uint8_t)((chunk >> 8) & 0xFF);
 
-    uint32_t *prd = (uint32_t *)(cmd_table_virt + 0x80);
+    uint32_t *prd = (uint32_t *)((uint8_t *)cmd_table_virt + 0x80);
     prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);
     prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);
     prd[2] = 0;
@@ -693,8 +697,10 @@ int ahci_read_lba(uint32_t lba, uint32_t count, void *buf) {
     }
     if (timed_out) {
       ahci_puts("ahci_read_lba: TIMEOUT (PxCI stuck)\n");
-      uint32_t tfd = readl(port_reg(active_port, PxTFD));
-      ahci_puts("  PxTFD=0x"); serial_put_hex(tfd); ahci_puts(" PxCMD=0x"); serial_put_hex(readl(port_reg(active_port, PxCMD))); ahci_puts(" PxIS=0x"); serial_put_hex(readl(port_reg(active_port, PxIS))); ahci_puts("\n");
+      serial_printf("  PxTFD=0x%x PxCMD=0x%x PxIS=0x%x\n",
+          readl(port_reg(active_port, PxTFD)),
+          readl(port_reg(active_port, PxCMD)),
+          readl(port_reg(active_port, PxIS)));
       return -EIO;
     }
 
@@ -742,7 +748,7 @@ int ahci_write_lba(uint32_t lba, uint32_t count, const void *buf) {
     fis[12] = (uint8_t)(chunk & 0xFF);
     fis[13] = (uint8_t)((chunk >> 8) & 0xFF);
 
-    uint32_t *prd = (uint32_t *)(cmd_table_virt + 0x80);
+    uint32_t *prd = (uint32_t *)((uint8_t *)cmd_table_virt + 0x80);
     prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);
     prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);
     prd[2] = 0;

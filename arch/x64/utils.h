@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "kernel/sparse.h"
 
 // ===================== I/O port helpers =====================
 static inline void outb(uint16_t port, uint8_t val) {
@@ -37,8 +38,8 @@ static inline void outl(uint16_t port, uint32_t val) {
 
 // ===================== MSR helpers =====================
 static inline void wrmsr(uint32_t msr, uint64_t val) {
-  uint32_t lo = (uint32_t)val;
-  uint32_t hi = (uint32_t)(val >> 32);
+  uint32_t lo = val & 0xFFFFFFFF;
+  uint32_t hi = (val >> 32) & 0xFFFFFFFF;
   __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
 }
 
@@ -117,12 +118,12 @@ static inline void irq_guard_cleanup(uint64_t *flags) {
   uint64_t name __attribute__((cleanup(irq_guard_cleanup))) = local_irq_save()
 
 // ===================== MMIO helpers =====================
-static inline uint32_t readl(const void *addr) {
-  return *(volatile const uint32_t *)addr;
+static inline uint32_t readl(const void __iomem *addr) {
+  return *(volatile const uint32_t __force *)addr;
 }
 
-static inline void writel(void *addr, uint32_t val) {
-  *(volatile uint32_t *)addr = val;
+static inline void writel(void __iomem *addr, uint32_t val) {
+  *(volatile uint32_t __force *)addr = val;
 }
 
 // ===================== System register helpers =====================

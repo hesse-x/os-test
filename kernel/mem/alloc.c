@@ -251,7 +251,7 @@ void init_mem(boot_info *bi) {
   total_page_frames = GET_PAGE_NUM(max_phys_addr);
 
   // 2. Bump 分配器初始化
-  uintptr_t kernel_end_phys = PHY_ADDR((uintptr_t)kernel_end);
+  uintptr_t kernel_end_phys = (__force uintptr_t)PHY_ADDR((uintptr_t)kernel_end);
   bump_init_phys(kernel_end_phys);
 
   // 3. Bump 分配 frames 数组
@@ -340,10 +340,10 @@ void init_mem(boot_info *bi) {
 }
 
 // ===================== Address conversion =====================
-uint64_t page_to_phys(Page *p) {
-    return (uint64_t)(p - bfc_frames) * PAGE_SIZE;
+phys_addr_t page_to_phys(Page *p) {
+    return (__force phys_addr_t)((uint64_t)(p - bfc_frames) * PAGE_SIZE);
 }
 
-uint64_t phys_to_virt(uint64_t phys) {
-    return phys + VMA_BASE;
+kern_vaddr_t phys_to_virt(phys_addr_t phys) {
+    return (__force kern_vaddr_t)((__force uint64_t)phys + VMA_BASE);
 }

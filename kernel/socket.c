@@ -276,7 +276,6 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
     }
 
     // Find peer socket
-    struct unix_sock *peer = NULL;
     pid_t peer_pid = sock->peer;
     if (peer_pid < 0 || peer_pid >= MAX_PROC) {
         skb_free(skb);
@@ -1330,5 +1329,5 @@ int64_t sock_read(struct unix_sock *sock, void *buf, size_t len) {
     struct iovec iov;
     iov.iov_base = buf;
     iov.iov_len = len;
-    return sock_recvmsg_internal(sock, &iov, 1, NULL, 0, 0);
+    return sock_recvmsg_internal(sock, &iov, 1, NULL, NULL, 0);
 }

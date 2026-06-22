@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "kernel/sparse.h"
 #include "kernel/spinlock.h"
 #include "kernel/mem/alloc.h"
 
@@ -32,9 +33,9 @@ static inline int size_to_class(size_t size) {
 }
 
 void slab_init(void);
-void *kmalloc(size_t size);
+void *kmalloc(size_t size) __must_check;
 void kfree(const void *ptr);
-void *kcalloc(size_t n, size_t size);
-void *krealloc(void *ptr, size_t new_size);
+void *kcalloc(size_t n, size_t size) __must_check;
+void *krealloc(void *ptr, size_t new_size) __must_check;
 
 #endif // KERNEL_MEM_SLAB_H

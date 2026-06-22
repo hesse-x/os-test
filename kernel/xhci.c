@@ -134,10 +134,10 @@
 #define EP_TYPE_INTERRUPT_IN   7
 
 // ===================== xHCI driver state =====================
-static uint64_t mmio_base;
-static uint64_t op_base;
-static uint64_t rt_base;
-static uint64_t db_base;
+static void __iomem *mmio_base;
+static void __iomem *op_base;
+static void __iomem *rt_base;
+static void __iomem *db_base;
 static pci_device_t *xhci_dev;
 
 // DMA memory pages (base controller)
@@ -155,10 +155,10 @@ static uint64_t erst_phys;
 static uint64_t event_ring_phys;
 static uint64_t scratchpad_phys;
 
-static uint64_t dcbaa_virt;
-static uint64_t cmd_ring_virt;
-static uint64_t erst_virt;
-static uint64_t event_ring_virt;
+static void *dcbaa_virt;
+static void *cmd_ring_virt;
+static void *erst_virt;
+static void *event_ring_virt;
 
 // Ring state
 static int cmd_ring_enqueue = 0;
@@ -175,7 +175,7 @@ static int max_ports;
 typedef struct xhci_intr {
     Page    *ring_page;
     uint64_t ring_phys;
-    uint64_t ring_virt;
+    void    *ring_virt;
     int      enqueue;
     int      ccs;
     int      slot_id;
@@ -188,17 +188,17 @@ static xhci_intr_t xhci_intrs[2];  // intr 0=keyboard, 1=spare
 // USB HID SHM page (kernel-allocated, shared with kbd_driver)
 static Page    *usb_hid_shm_page;
 static uint64_t usb_hid_shm_phys;
-static uint64_t usb_hid_shm_virt;
+static void *usb_hid_shm_virt;
 
 // HID DMA buffer (xHCI writes HID report here, <4GB)
 static Page    *hid_dma_page;
 static uint64_t hid_dma_phys;
-static uint64_t hid_dma_virt;
+static void *hid_dma_virt;
 
 // EP0 Transfer Ring (for control transfers: Get Descriptor, Set Protocol)
 static Page    *ep0_ring_page;
 static uint64_t ep0_ring_phys;
-static uint64_t ep0_ring_virt;
+static void *ep0_ring_virt;
 static int      ep0_ring_enqueue = 0;
 static int      ep0_ring_ccs = 1;
 
@@ -209,48 +209,48 @@ static uint64_t dev_ctx_phys;
 // Control transfer DMA buffer (for Get Descriptor data stage)
 static Page    *ctrl_dma_page;
 static uint64_t ctrl_dma_phys;
-static uint64_t ctrl_dma_virt;
+static void *ctrl_dma_virt;
 
 // ===================== Helper functions =====================
 
 static inline uint32_t xhci_read(uint64_t offset) {
-  return readl((void *)(mmio_base + offset));
+  return readl((void __iomem *)((uint8_t __iomem *)mmio_base + offset));
 }
 
 static inline void xhci_write(uint64_t offset, uint32_t val) {
-  writel((void *)(mmio_base + offset), val);
+  writel((void __iomem *)((uint8_t __iomem *)mmio_base + offset), val);
 }
 
 static inline uint32_t op_read(uint64_t offset) {
-  return readl((void *)(op_base + offset));
+  return readl((void __iomem *)((uint8_t __iomem *)op_base + offset));
 }
 
 static inline void op_write(uint64_t offset, uint32_t val) {
-  writel((void *)(op_base + offset), val);
+  writel((void __iomem *)((uint8_t __iomem *)op_base + offset), val);
 }
 
 static inline uint32_t rt_read(uint64_t offset) {
-  return readl((void *)(rt_base + offset));
+  return readl((void __iomem *)((uint8_t __iomem *)rt_base + offset));
 }
 
 static inline void rt_write(uint64_t offset, uint32_t val) {
-  writel((void *)(rt_base + offset), val);
+  writel((void __iomem *)((uint8_t __iomem *)rt_base + offset), val);
 }
 
 static inline void db_write(uint32_t slot, uint32_t target) {
-  writel((void *)(db_base + slot * 4), target);
+  writel((void __iomem *)((uint8_t __iomem *)db_base + slot * 4), target);
 }
 
-static uint64_t rt_intr_base(int intr) {
-  return rt_base + 0x20 + intr * 0x20;
+static void __iomem *rt_intr_base(int intr) {
+  return (void __iomem *)((uint8_t __iomem *)rt_base + 0x20 + intr * 0x20);
 }
 
 static inline uint32_t intr_read(int intr, uint64_t offset) {
-  return readl((void *)(rt_intr_base(intr) + offset));
+  return readl((void __iomem *)((uint8_t __iomem *)rt_intr_base(intr) + offset));
 }
 
 static inline void intr_write(int intr, uint64_t offset, uint32_t val) {
-  writel((void *)(rt_intr_base(intr) + offset), val);
+  writel((void __iomem *)((uint8_t __iomem *)rt_intr_base(intr) + offset), val);
 }
 
 static inline uint32_t portsc_read(int port) {
@@ -360,8 +360,6 @@ static void xhci_isr(trapframe_t *tf) {
     if (cycle != (event_ring_ccs & 1)) break;
 
     int type = (d3 >> TRB_TYPE_SHIFT) & TRB_TYPE_MASK;
-    uint32_t d0 = ring[idx + 0];
-    uint32_t d1 = ring[idx + 1];
     uint32_t d2 = ring[idx + 2];
 
     if (type == TRB_TRANSFER) {
@@ -369,7 +367,7 @@ static void xhci_isr(trapframe_t *tf) {
       uint32_t sid = (d3 >> 24) & 0xFF;
       uint32_t epid = (d3 >> 16) & 0xFF;
 
-      if (sid == xhci_intrs[0].slot_id && epid == xhci_intrs[0].ep_num) {
+      if (sid == (uint32_t)xhci_intrs[0].slot_id && epid == (uint32_t)xhci_intrs[0].ep_num) {
         // Replenish TRB regardless of completion code to keep ring alive
         volatile uint32_t *xfer_ring = (volatile uint32_t *)xhci_intrs[0].ring_virt;
         trb_t norm;
@@ -392,7 +390,7 @@ static void xhci_isr(trapframe_t *tf) {
 
           if (next != tail) {  // ring not full
             volatile struct usb_hid_slot *slot =
-                (volatile struct usb_hid_slot *)(usb_hid_shm_virt + HID_SUBRING_KBD_OFFSET + head * HID_SLOT_SIZE);
+                (volatile struct usb_hid_slot *)((uint8_t *)usb_hid_shm_virt + HID_SUBRING_KBD_OFFSET + head * HID_SLOT_SIZE);
             slot->type = HID_TYPE_KEYBOARD;
             slot->len = 8;
             for (int i = 0; i < 8; i++) slot->data[i] = report[i];
@@ -489,18 +487,18 @@ void xhci_init() {
   if (pci_enable_device(xhci_dev) != 0) return;
 
   mmio_base = xhci_dev->bar[0].vaddr;
-  if (mmio_base == 0) return;
+  if (!mmio_base) return;
 
   // 3. Check MSI-X
   if (xhci_dev->msix_cap_offset == 0) return;
 
   // Read capability registers
   uint8_t cap_length = xhci_read(XHCI_CAPLENGTH) & 0xFF;
-  op_base = mmio_base + cap_length;
+  op_base = (void __iomem *)((uint8_t __iomem *)mmio_base + cap_length);
   uint32_t rtsoff = xhci_read(XHCI_RTSOFF);
-  rt_base = mmio_base + (rtsoff & ~0x1F);
+  rt_base = (void __iomem *)((uint8_t __iomem *)mmio_base + (rtsoff & ~0x1F));
   uint32_t dboff = xhci_read(XHCI_DBOFF);
-  db_base = mmio_base + (dboff & ~0x3);
+  db_base = (void __iomem *)((uint8_t __iomem *)mmio_base + (dboff & ~0x3));
 
   // 4. Allocate DMA memory (6 base pages)
   dcbaa_page = bfc_alloc_page_low(1);
@@ -513,25 +511,25 @@ void xhci_init() {
   if (!dcbaa_page || !input_ctx_page || !cmd_ring_page ||
       !erst_page || !event_ring_page || !scratchpad_page) return;
 
-  dcbaa_phys = page_to_phys(dcbaa_page);
-  input_ctx_phys = page_to_phys(input_ctx_page);
-  cmd_ring_phys = page_to_phys(cmd_ring_page);
-  erst_phys = page_to_phys(erst_page);
-  event_ring_phys = page_to_phys(event_ring_page);
-  scratchpad_phys = page_to_phys(scratchpad_page);
+  dcbaa_phys = (__force uint64_t)page_to_phys(dcbaa_page);
+  input_ctx_phys = (__force uint64_t)page_to_phys(input_ctx_page);
+  cmd_ring_phys = (__force uint64_t)page_to_phys(cmd_ring_page);
+  erst_phys = (__force uint64_t)page_to_phys(erst_page);
+  event_ring_phys = (__force uint64_t)page_to_phys(event_ring_page);
+  scratchpad_phys = (__force uint64_t)page_to_phys(scratchpad_page);
 
-  dcbaa_virt = phys_to_virt(dcbaa_phys);
-  cmd_ring_virt = phys_to_virt(cmd_ring_phys);
-  erst_virt = phys_to_virt(erst_phys);
-  event_ring_virt = phys_to_virt(event_ring_phys);
+  dcbaa_virt = (__force void *)phys_to_virt((__force phys_addr_t)dcbaa_phys);
+  cmd_ring_virt = (__force void *)phys_to_virt((__force phys_addr_t)cmd_ring_phys);
+  erst_virt = (__force void *)phys_to_virt((__force phys_addr_t)erst_phys);
+  event_ring_virt = (__force void *)phys_to_virt((__force phys_addr_t)event_ring_phys);
 
   // Zero all DMA buffers
   __memset((void *)dcbaa_virt, 0, 4096);
-  __memset((void *)phys_to_virt(input_ctx_phys), 0, 4096);
+  __memset((__force void *)phys_to_virt((__force phys_addr_t)input_ctx_phys), 0, 4096);
   __memset((void *)cmd_ring_virt, 0, 4096);
   __memset((void *)erst_virt, 0, 4096);
   __memset((void *)event_ring_virt, 0, 4096);
-  __memset((void *)phys_to_virt(scratchpad_phys), 0, 4096);
+  __memset((__force void *)phys_to_virt((__force phys_addr_t)scratchpad_phys), 0, 4096);
 
   // 5. Read HCSPARAMS1
   uint32_t hcsparams1 = xhci_read(XHCI_HCSPARAMS1);
@@ -641,24 +639,24 @@ static void xhci_init_keyboard() {
   if (!usb_hid_shm_page || !hid_dma_page || !ep0_ring_page ||
       !xhci_intrs[0].ring_page || !dev_ctx_page || !ctrl_dma_page) return;
 
-  usb_hid_shm_phys = page_to_phys(usb_hid_shm_page);
-  usb_hid_shm_virt = phys_to_virt(usb_hid_shm_phys);
-  hid_dma_phys = page_to_phys(hid_dma_page);
-  hid_dma_virt = phys_to_virt(hid_dma_phys);
-  ep0_ring_phys = page_to_phys(ep0_ring_page);
-  ep0_ring_virt = phys_to_virt(ep0_ring_phys);
-  xhci_intrs[0].ring_phys = page_to_phys(xhci_intrs[0].ring_page);
-  xhci_intrs[0].ring_virt = phys_to_virt(xhci_intrs[0].ring_phys);
-  dev_ctx_phys = page_to_phys(dev_ctx_page);
-  ctrl_dma_phys = page_to_phys(ctrl_dma_page);
-  ctrl_dma_virt = phys_to_virt(ctrl_dma_phys);
+  usb_hid_shm_phys = (__force uint64_t)page_to_phys(usb_hid_shm_page);
+  usb_hid_shm_virt = (__force void *)phys_to_virt((__force phys_addr_t)usb_hid_shm_phys);
+  hid_dma_phys = (__force uint64_t)page_to_phys(hid_dma_page);
+  hid_dma_virt = (__force void *)phys_to_virt((__force phys_addr_t)hid_dma_phys);
+  ep0_ring_phys = (__force uint64_t)page_to_phys(ep0_ring_page);
+  ep0_ring_virt = (__force void *)phys_to_virt((__force phys_addr_t)ep0_ring_phys);
+  xhci_intrs[0].ring_phys = (__force uint64_t)page_to_phys(xhci_intrs[0].ring_page);
+  xhci_intrs[0].ring_virt = (__force void *)phys_to_virt((__force phys_addr_t)xhci_intrs[0].ring_phys);
+  dev_ctx_phys = (__force uint64_t)page_to_phys(dev_ctx_page);
+  ctrl_dma_phys = (__force uint64_t)page_to_phys(ctrl_dma_page);
+  ctrl_dma_virt = (__force void *)phys_to_virt((__force phys_addr_t)ctrl_dma_phys);
 
   // Zero all new pages
   __memset((void *)usb_hid_shm_virt, 0, 4096);
   __memset((void *)hid_dma_virt, 0, 4096);
   __memset((void *)ep0_ring_virt, 0, 4096);
   __memset((void *)xhci_intrs[0].ring_virt, 0, 4096);
-  __memset((void *)phys_to_virt(dev_ctx_phys), 0, 4096);
+  __memset((__force void *)phys_to_virt((__force phys_addr_t)dev_ctx_phys), 0, 4096);
   __memset((void *)ctrl_dma_virt, 0, 4096);
 
   // Initialize USB HID SHM header
@@ -757,7 +755,7 @@ static void xhci_init_keyboard() {
   uint64_t *dcbaa = (uint64_t *)dcbaa_virt;
   dcbaa[sid] = dev_ctx_phys;
 
-  volatile uint32_t *ictx = (volatile uint32_t *)phys_to_virt(input_ctx_phys);
+  volatile uint32_t *ictx = (__force volatile uint32_t *)phys_to_virt((__force phys_addr_t)input_ctx_phys);
   __memset((void *)ictx, 0, 4096);
 
   ictx[1] = (1 << 0) | (1 << 1);   // Add flags: Slot + EP0

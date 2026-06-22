@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "kernel/sparse.h"
 
 // ===================== PCI constants =====================
 #define MAX_PCI_DEV       64
@@ -33,7 +34,7 @@
 typedef struct pci_bar {
   uint64_t phys;       // physical address (from BAR)
   uint64_t size;       // size of the region
-  uint64_t vaddr;      // kernel virtual address after mapping (0 if not mapped)
+  void __iomem *vaddr; // kernel virtual address after mapping (NULL if not mapped)
   uint8_t  type;       // 0=MMIO32, 1=I/O, 2=MMIO64
 } pci_bar_t;
 
@@ -63,7 +64,7 @@ typedef struct pci_device {
 extern pci_device_t pci_devices[MAX_PCI_DEV];
 extern int pci_device_count;
 
-extern uint64_t ecam_vbase;
+extern void __iomem *ecam_vbase;
 extern uint8_t  ecam_start_bus;
 extern uint8_t  ecam_end_bus;
 
@@ -82,8 +83,8 @@ int pci_enable_device(pci_device_t *dev);
 int pci_enable_msix(pci_device_t *dev, int num_vectors);
 void pci_msix_mask_entry(pci_device_t *dev, int entry);
 void pci_msix_unmask_entry(pci_device_t *dev, int entry);
-void *pci_msix_table_addr(pci_device_t *dev);
-void *pci_msix_pba_addr(pci_device_t *dev);
+void __iomem *pci_msix_table_addr(pci_device_t *dev);
+void __iomem *pci_msix_pba_addr(pci_device_t *dev);
 int pci_msix_vector_base(pci_device_t *dev);
 
 // sys_pci_dev_info is declared in kernel/trap.h

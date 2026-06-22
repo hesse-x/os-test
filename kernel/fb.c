@@ -43,7 +43,7 @@ void init_fb(boot_info *bi) {
 
   // Allocate a PD for the framebuffer
   uint64_t *fb_pd = (uint64_t *)bump_alloc(4096);
-  uintptr_t fb_pd_phys = PHY_ADDR((uintptr_t)fb_pd);
+  uintptr_t fb_pd_phys = (__force uintptr_t)PHY_ADDR((uintptr_t)fb_pd);
 
   // Clear PD
   for (int i = 0; i < 512; i++) {
@@ -59,7 +59,6 @@ void init_fb(boot_info *bi) {
   // Install PD into PDPT_hh
   pdpt_hh[pdpt_start] = fb_pd_phys | 0x03;
 
-  uint64_t fb_vma_base = device_vma_base;
   device_vma_base += (uint64_t)num_fb_2mb * 0x200000;
 
   flush_tlb();

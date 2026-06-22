@@ -227,11 +227,10 @@ void trap_dispatch(trapframe_t *tf) {
   serial_puts("BACKTRACE:\n");
   uint64_t *rbp = (uint64_t *)tf->rbp;
   for (int i = 0; i < 16 && (uint64_t)rbp >= 0xFFFFFFFF80000000ULL; i++) {
-    uint64_t ret_addr = rbp[1];
     serial_puts("  #");
     serial_put_hex((uint64_t)i);
     serial_puts(" ");
-    serial_put_hex(ret_addr);
+    serial_put_hex((uint64_t)rbp[1]);
     serial_puts("\n");
     rbp = (uint64_t *)rbp[0];
     if (!rbp) break;
@@ -332,8 +331,8 @@ void sig_init() {
         serial_puts("sig_init: failed to allocate trampoline page\n");
         return;
     }
-    sig_trampoline_phys = page_to_phys(page);
-    uint8_t *vaddr = (uint8_t *)phys_to_virt(sig_trampoline_phys);
+    sig_trampoline_phys = (__force uint64_t)page_to_phys(page);
+    uint8_t *vaddr = (__force uint8_t *)phys_to_virt((__force phys_addr_t)sig_trampoline_phys);
 
     // mov rax, 49  (SYS_SIGRETURN)
     vaddr[0] = 0x48;  // REX.W prefix
@@ -463,20 +462,20 @@ uint64_t sys_yield(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint6
 // timeout_ms=0: 无限等待; >0: 超时后唤醒
 // 返回: 0=成功, 正数=errno
 uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u1, uint64_t _u2) {
-    void *buf = (void *)arg1;
-    void *data_buf = (void *)arg2;
+    void __user *buf = (void __user * __force)arg1;
+    void __user *data_buf = (void __user * __force)arg2;
     size_t data_buf_len = (size_t)arg3;
     uint32_t timeout_ms = (uint32_t)arg4;
 
     // Validate user pointer
-    uint64_t ptr = (uint64_t)buf;
+    uint64_t ptr = (__force uint64_t)buf;
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
     // Validate data_buf if provided
     if (data_buf && (data_buf_len == 0 ||
-        (uint64_t)data_buf >= 0xFFFFFFFF80000000ULL ||
-        (uint64_t)data_buf + data_buf_len > 0xFFFFFFFF80000000ULL))
+        (__force uint64_t)data_buf >= 0xFFFFFFFF80000000ULL ||
+        (__force uint64_t)data_buf + data_buf_len > 0xFFFFFFFF80000000ULL))
         return (uint64_t)-EFAULT;
 
     proc_t *proc = current_proc;
@@ -490,7 +489,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
             serial_printf("sys_recv: pid=%d dequeues type=%d src=%d\n",
                 proc->pid, ((recv_msg_t *)proc->recv_buf[proc->recv_tail])->type,
                 ((recv_msg_t *)proc->recv_buf[proc->recv_tail])->src);
-            __memcpy(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
+            __memcpy((void __force *)buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
             // If this is an REQ request, record the caller PID for sys_resp
             recv_msg_t *msg = (recv_msg_t *)proc->recv_buf[proc->recv_tail];
             if (msg->type == RECV_REQ) {
@@ -506,7 +505,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                     // User didn't provide enough buffer — free kernel buf and return error
                     kfree(kmaddr);
                     // Write msg.len into data field so user knows the required size
-                    recv_msg_t *umsg = (recv_msg_t *)buf;
+                    recv_msg_t *umsg = (recv_msg_t __force *)buf;
                     umsg->msg.kmaddr = NULL;
                     umsg->msg.len = len;
                     proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
@@ -515,11 +514,11 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                 }
 
                 // Copy data to user buffer under current CR3
-                __memcpy(data_buf, kmaddr, len);
+                __memcpy((void __force *)data_buf, kmaddr, len);
                 kfree(kmaddr);
 
                 // Rewrite recv_msg_t for user: put len in data field
-                recv_msg_t *umsg = (recv_msg_t *)buf;
+                recv_msg_t *umsg = (recv_msg_t __force *)buf;
                 umsg->msg.kmaddr = NULL;
                 umsg->msg.len = len;
             }
@@ -551,7 +550,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
             // Re-check queue before returning timeout (race: message may have arrived)
             spin_lock(&proc->recv_lock);
             if (proc->recv_head != proc->recv_tail) {
-                __memcpy(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
+                __memcpy((void __force *)buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
                 recv_msg_t *msg = (recv_msg_t *)proc->recv_buf[proc->recv_tail];
                 if (msg->type == RECV_REQ) {
                     proc->req_caller_pid = (pid_t)msg->src;
@@ -563,16 +562,16 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 
                     if (!data_buf || data_buf_len < len) {
                         kfree(kmaddr);
-                        recv_msg_t *umsg = (recv_msg_t *)buf;
+                        recv_msg_t *umsg = (recv_msg_t __force *)buf;
                         umsg->msg.kmaddr = NULL;
                         umsg->msg.len = len;
                         proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
                         spin_unlock(&proc->recv_lock);
                         return (uint64_t)-EINVAL;
                     }
-                    __memcpy(data_buf, kmaddr, len);
+                    __memcpy((void __force *)data_buf, kmaddr, len);
                     kfree(kmaddr);
-                    recv_msg_t *umsg = (recv_msg_t *)buf;
+                    recv_msg_t *umsg = (recv_msg_t __force *)buf;
                     umsg->msg.kmaddr = NULL;
                     umsg->msg.len = len;
                 }
@@ -592,15 +591,15 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 // 返回: 0=成功, 正数=errno
 uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     pid_t target_pid = (pid_t)arg1;
-    void *request = (void *)arg2;
-    void *reply = (void *)arg3;
+    void __user *request = (void __user * __force)arg2;
+    void __user *reply = (void __user * __force)arg3;
 
     // Validate target PID
     if (target_pid < 0 || target_pid >= MAX_PROC) return (uint64_t)-ESRCH;
 
     // Validate user pointers
-    uint64_t req_ptr = (uint64_t)request;
-    uint64_t rep_ptr = (uint64_t)reply;
+    uint64_t req_ptr = (__force uint64_t)request;
+    uint64_t rep_ptr = (__force uint64_t)reply;
     if (!req_ptr || req_ptr >= 0xFFFFFFFF80000000ULL ||
         req_ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
@@ -617,7 +616,7 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
     hdr->type = RECV_REQ;
     hdr->src = (uint32_t)current_proc->pid;
     // Copy request payload from user space
-    __memcpy(hdr->data, request, 56);
+    __memcpy(hdr->data, (const void __force *)request, 56);
 
     // Enqueue to target's recv queue
     spin_lock(&target->recv_lock);
@@ -668,10 +667,10 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
 // sys_resp(reply) — syscall 4 (回复当前 REQ 调用者)
 // 返回: 0=成功, 正数=errno
 uint64_t sys_resp(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
-    void *reply = (void *)arg1;
+    void __user *reply = (void __user * __force)arg1;
 
     // Validate user pointer
-    uint64_t ptr = (uint64_t)reply;
+    uint64_t ptr = (__force uint64_t)reply;
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
@@ -686,12 +685,12 @@ uint64_t sys_resp(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     // We must first copy to a kernel buffer under the server's CR3,
     // then switch to caller's CR3 to write to the caller's user-space buffer.
     uint8_t kbuf[RECV_MSG_SIZE];
-    __memcpy(kbuf, reply, RECV_MSG_SIZE);
+    __memcpy(kbuf, (const void __force *)reply, RECV_MSG_SIZE);
 
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)caller->cr3) : "memory");
-    __memcpy(caller->req_reply_buf, kbuf, RECV_MSG_SIZE);
+    __memcpy((void __force *)caller->req_reply_buf, kbuf, RECV_MSG_SIZE);
     __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
     // Wake caller
@@ -813,7 +812,7 @@ uint64_t sys_exit(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
 
 uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     pid_t pid = (pid_t)arg1;
-    int32_t *exit_code_ptr = (int32_t *)arg2;
+    int32_t __user *exit_code_ptr = (int32_t __user * __force)arg2;
 
     if (pid == -1) {
         // Wait for any child to become ZOMBIE
@@ -842,10 +841,10 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
                 }
                 pid_t zpid = zombie->pid;
                 if (exit_code_ptr) {
-                    uint64_t ptr_val = (uint64_t)exit_code_ptr;
+                    uint64_t ptr_val = (__force uint64_t)exit_code_ptr;
                     if (ptr_val < 0xFFFFFFFF80000000ULL && ptr_val &&
                         (ptr_val + sizeof(int32_t) - 1) < 0xFFFFFFFF80000000ULL)
-                        *exit_code_ptr = zombie->exit_code;
+                        *(__force int32_t *)exit_code_ptr = zombie->exit_code;
                 }
                 proc_reap(zombie);
                 return (uint64_t)zpid;
@@ -904,17 +903,17 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
     // Reap child resources
     if (exit_code_ptr) {
         // Validate user pointer: must be in user canonical low half, not kernel space
-        uint64_t ptr_val = (uint64_t)exit_code_ptr;
+        uint64_t ptr_val = (__force uint64_t)exit_code_ptr;
         if (ptr_val >= 0xFFFFFFFF80000000ULL || !ptr_val || (ptr_val + sizeof(int32_t) - 1) >= 0xFFFFFFFF80000000ULL)
             return 0;  // EFAULT
-        *exit_code_ptr = child->exit_code;
+        *(__force int32_t *)exit_code_ptr = child->exit_code;
     }
     proc_reap(child);
     return (uint64_t)pid;
 }
 
 uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
-    const uint8_t *elf_data_user = (const uint8_t *)arg1;
+    const uint8_t __user *elf_data_user = (const uint8_t __user * __force)arg1;
     uint64_t elf_size = arg2;
 
     // Basic parameter validation
@@ -922,7 +921,7 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uin
         return (uint64_t)-EINVAL;
 
     // Validate user pointer range
-    uint64_t ptr_start = (uint64_t)elf_data_user;
+    uint64_t ptr_start = (__force uint64_t)elf_data_user;
     uint64_t ptr_end = ptr_start + elf_size;
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
@@ -930,7 +929,7 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uin
     // Copy ELF data from user space to kernel buffer to prevent TOCTOU
     uint8_t *elf_buf = (uint8_t *)kmalloc(elf_size);
     if (!elf_buf) return (uint64_t)-ENOMEM;
-    __memcpy(elf_buf, elf_data_user, elf_size);
+    __memcpy(elf_buf, (const void __force *)elf_data_user, elf_size);
 
     // Create child process from ELF
     proc_t *child = process_create_elf(elf_buf, elf_size);
@@ -966,15 +965,14 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uin
 #define MAP_PHYSICAL_KERNEL 0x80000000
 
 uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6) {
-    uint64_t addr = arg1;
+    (void)arg1; (void)arg3; // addr, prot — not yet used
     size_t size = (size_t)arg2;
-    int prot = (int)arg3;
     int flags = (int)arg4;
     int fd = (int)arg5;
     uint64_t offset = arg6;
 
     proc_t *proc = current_proc;
-    uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->cr3);
+    uint64_t *pml4 = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
     // MAP_SHARED (0x01) + fd ≥ 0: SHM fd mapping
     if ((flags & 0x01) && fd >= 0) {
@@ -1093,7 +1091,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
             kfree(phys_pages);
             return 0;
         }
-        phys_pages[i] = page_to_phys(page);
+        phys_pages[i] = (__force uint64_t)page_to_phys(page);
         if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, phys_pages[i], pte_flags)) {
             bfc_free_page(&bfc_frames[PHY_TO_PAGE(phys_pages[i])], 1);
             for (size_t j = 0; j < mapped; j++) {
@@ -1137,7 +1135,7 @@ uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, ui
     if (size == 0) return (uint64_t)-EINVAL;
 
     proc_t *proc = current_proc;
-    uint64_t *pml4 = (uint64_t *)phys_to_virt(proc->cr3);
+    uint64_t *pml4 = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
     // 查找匹配的 mmap_region_t
     mmap_region_t **pp = &proc->mmap_regions;
@@ -1241,11 +1239,11 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
 // Returns EBUSY if async request is active.
 uint64_t sys_block_io(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u1, uint64_t _u2) {
     uint32_t lba = (uint32_t)arg1;
-    void *buf = (void *)arg2;
+    void __user *buf = (void __user * __force)arg2;
     uint32_t count = (uint32_t)arg3;
     uint8_t dir = (uint8_t)arg4;
 
-    uint64_t ptr = (uint64_t)buf;
+    uint64_t ptr = (__force uint64_t)buf;
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
@@ -1264,9 +1262,9 @@ uint64_t sys_block_io(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4
     spin_lock_irqsave(&ahci_lock, &flags);
     int rc;
     if (dir == BLOCK_DIR_WRITE) {
-        rc = ahci_write_lba(lba, count, buf);
+        rc = ahci_write_lba(lba, count, (const void __force *)buf);
     } else {
-        rc = ahci_read_lba(lba, count, buf);
+        rc = ahci_read_lba(lba, count, (void __force *)buf);
     }
     spin_unlock_irqrestore(&ahci_lock, flags);
 
@@ -1278,11 +1276,11 @@ uint64_t sys_block_io(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4
 // Completion delivered via RECV_NOTIFY with cookie+result+lba+count in data.
 uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u1, uint64_t _u2) {
     uint32_t lba = (uint32_t)arg1;
-    void *buf = (void *)arg2;
+    void __user *buf = (void __user * __force)arg2;
     uint32_t count = (uint32_t)arg3;
     uint8_t dir = (uint8_t)arg4;
 
-    int ret = ahci_submit_async(lba, buf, count, dir);
+    int ret = ahci_submit_async(lba, (void __force *)buf, count, dir);
     return (uint64_t)ret;
 }
 
@@ -1355,24 +1353,18 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
     proc->fd_table[fd].file_data.file_size = file_size;
     proc->fd_table[fd].file_data.ref_count = 1;
 
-    serial_puts("fd_reg:");
-    { char hx[]="0123456789ABCDEF"; char hb[32]; int p=0;
-      hb[p++]='0'+fd; hb[p++]=' '; hb[p++]='f'; hb[p++]='=';
-      uint32_t v=(uint32_t)fs_fd; for(int i=7;i>=0;i--){hb[p++]=hx[(v>>(i*4))&0xF];}
-      hb[p++]=' '; hb[p++]='s'; hb[p++]='=';
-      uint64_t vs=file_size; for(int i=15;i>=0;i--){hb[p++]=hx[(vs>>(i*4))&0xF];}
-      hb[p++]='\n'; serial_puts(hb); }
+    serial_printf("fd_reg: %d f=%x s=%lx\n", fd, (uint32_t)fs_fd, file_size);
     return (uint64_t)fd;
 }
 
 // sys_fb_info(buf) — syscall 11 (获取 framebuffer 信息)
 // Returns: 0 on success, positive errno on failure
 uint64_t sys_fb_info(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
-    void *user_buf = (void *)arg1;
+    void __user *user_buf = (void __user * __force)arg1;
     if (!user_buf) return (uint64_t)-EINVAL;
 
     // Validate user pointer range
-    uint64_t ptr = (uint64_t)user_buf;
+    uint64_t ptr = (__force uint64_t)user_buf;
     if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(kms_fb_info_t) > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
@@ -1381,7 +1373,7 @@ uint64_t sys_fb_info(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, ui
     serial_puts(" fb_size=");
     serial_put_hex(g_fb_info.fb_size);
     serial_puts("\n");
-    __memcpy(user_buf, &g_fb_info, sizeof(kms_fb_info_t));
+    __memcpy((void __force *)user_buf, &g_fb_info, sizeof(kms_fb_info_t));
     return 0;
 }
 
@@ -1398,10 +1390,10 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3,
     // Allocate physical pages
     Page *pages = bfc_alloc_page(npages);
     if (!pages) return 0;
-    uint64_t phys = page_to_phys(pages);
+    uint64_t phys = (__force uint64_t)page_to_phys(pages);
 
     // Zero the pages
-    uint8_t *vptr = (uint8_t *)phys_to_virt(phys);
+    uint8_t *vptr = (__force uint8_t *)phys_to_virt((__force phys_addr_t)phys);
     __memset(vptr, 0, size);
 
     // Allocate shm struct
@@ -1507,7 +1499,7 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2
 // sys_memfd_create(name, flags) — syscall 45 (Linux-compatible memfd_create)
 // Returns: fd (≥2) on success, 0 on failure
 uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
-    const char *user_name = (const char *)arg1;
+    const char __user *user_name = (const char __user * __force)arg1;
     unsigned int flags = (unsigned int)arg2;
 
     // Validate flags: only known flags allowed
@@ -1531,7 +1523,7 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
 
     // Copy name from user space (up to 31 chars + null)
     if (user_name) {
-        uint64_t uptr = (uint64_t)user_name;
+        uint64_t uptr = (__force uint64_t)user_name;
         if (uptr >= 0xFFFFFFFF80000000ULL) {
             kfree(shm);
             return 0;  // -EFAULT
@@ -1540,7 +1532,7 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
         int i;
         for (i = 0; i < 31; i++) {
             char c;
-            __memcpy(&c, (void *)(uptr + i), 1);
+            __memcpy(&c, (const void __force *)(uptr + i), 1);
             if (c == '\0') break;
             shm->name[i] = c;
         }
@@ -1575,10 +1567,10 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
 static uint64_t shm_add_page(struct shm *shm) {
     Page *page = bfc_alloc_page(1);
     if (!page) return 0;
-    uint64_t phys = page_to_phys(page);
+    uint64_t phys = (__force uint64_t)page_to_phys(page);
 
     // Zero the page
-    __memset((void *)phys_to_virt(phys), 0, PAGE_SIZE);
+    __memset((__force void *)phys_to_virt((__force phys_addr_t)phys), 0, PAGE_SIZE);
 
     if (!shm->page_list) {
         // First discrete page: allocate page_list array
@@ -1641,8 +1633,8 @@ uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2,
             // First allocation: try contiguous
             Page *pages = bfc_alloc_page(new_npages);
             if (pages) {
-                uint64_t phys = page_to_phys(pages);
-                __memset((void *)phys_to_virt(phys), 0, new_npages * PAGE_SIZE);
+                uint64_t phys = (__force uint64_t)page_to_phys(pages);
+                __memset((__force void *)phys_to_virt((__force phys_addr_t)phys), 0, new_npages * PAGE_SIZE);
                 shm->phys = phys;
                 shm->npages = new_npages;
                 shm->file_size = new_size;
@@ -1672,7 +1664,7 @@ uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2,
                 uint64_t pphys = shm_add_page(shm);
                 if (!pphys) {
                     // Cleanup: free pages we already allocated in this batch
-                    for (int j = 0; j < i; j++) {
+                    for (size_t j = 0; j < i; j++) {
                         Page *p = &bfc_frames[PHY_TO_PAGE(shm->page_list[shm->num_pages - 1 - j])];
                         bfc_free_page(p, 1);
                     }
@@ -1690,7 +1682,7 @@ uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2,
                 uint64_t pphys = shm_add_page(shm);
                 if (!pphys) {
                     // Cleanup partial
-                    for (int j = 0; j < i; j++) {
+                    for (size_t j = 0; j < i; j++) {
                         Page *p = &bfc_frames[PHY_TO_PAGE(shm->page_list[--shm->num_pages])];
                         bfc_free_page(p, 1);
                     }
@@ -1773,10 +1765,10 @@ void wake_process(pid_t pid) {
 
 // sys_pipe(fd_ptr) — syscall 14 (创建 pipe，写 [read_fd, write_fd] 到用户指针)
 uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
-    int *fd_ptr = (int *)arg1;
+    int __user *fd_ptr = (int __user * __force)arg1;
 
     // Validate user pointer
-    uint64_t ptr = (uint64_t)fd_ptr;
+    uint64_t ptr = (__force uint64_t)fd_ptr;
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || ptr + 2 * sizeof(int) > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
@@ -1820,8 +1812,8 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     proc->fd_table[write_fd].pipe = p;
 
     // Write fd pair to user space
-    fd_ptr[0] = read_fd;
-    fd_ptr[1] = write_fd;
+    ((__force int *)fd_ptr)[0] = read_fd;
+    ((__force int *)fd_ptr)[1] = write_fd;
 
     return 0;
 }
@@ -1831,7 +1823,7 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
 // FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
 uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
-    const char *buf = (const char *)arg2;
+    const char __user *buf = (const char __user * __force)arg2;
     size_t len = (size_t)arg3;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EINVAL;
@@ -1846,7 +1838,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
 
         // Validate user buf pointer
         if (!buf) return (uint64_t)-EFAULT;
-        uint64_t ptr_start = (uint64_t)buf;
+        uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
@@ -1866,7 +1858,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         req->fs_fd = proc->fd_table[fd].file_data.fs_fd;
         req->offset = proc->fd_table[fd].file_data.offset;
         req->count = (uint32_t)len;
-        __memcpy(msg_buf + sizeof(file_t_io_req), buf, len);
+        __memcpy(msg_buf + sizeof(file_t_io_req), (const void __force *)buf, len);
 
         // Reply buffer
         file_t_io_resp resp;
@@ -1890,13 +1882,13 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
             return (uint64_t)-EINVAL;
         if (!buf) return (uint64_t)-EFAULT;
-        uint64_t ptr_start = (uint64_t)buf;
+        uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
-        struct unix_sock_t *sock = proc->fd_table[fd].sock;
+        struct unix_sock *sock = proc->fd_table[fd].sock;
         if (!sock) return (uint64_t)-EBADF;
-        int64_t ret = sock_write(sock, buf, len);
+        int64_t ret = sock_write(sock, (const void __force *)buf, len);
         return (uint64_t)ret;
     }
 
@@ -1905,7 +1897,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
 
     // Validate user buf pointer
     if (!buf) return (uint64_t)-EFAULT;
-    uint64_t ptr_start = (uint64_t)buf;
+    uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
@@ -1929,7 +1921,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
             p->write_pid = -1;
             continue;
         }
-        p->buf[p->head] = buf[written];
+        p->buf[p->head] = ((const char __force *)buf)[written];
         p->head = (p->head + 1) % PIPE_BUF_SIZE;
         written++;
     }
@@ -1939,7 +1931,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
 
     // Mirror pipe output to serial port (replaces old SYS_SERIAL_WRITE)
     for (size_t i = 0; i < written; i++)
-        serial_putc(buf[i]);
+        serial_putc(((const char __force *)buf)[i]);
 
     return (uint64_t)written;
 }
@@ -1949,7 +1941,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
 // FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
 uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
-    char *buf = (char *)arg2;
+    char __user *buf = (char __user * __force)arg2;
     size_t len = (size_t)arg3;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EINVAL;
@@ -1975,7 +1967,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
 
         // Validate user buf pointer
         if (!buf) return (uint64_t)-EFAULT;
-        uint64_t ptr_start = (uint64_t)buf;
+        uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
@@ -2007,7 +1999,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
 
         size_t nread = resp->count;
         if (nread > len) nread = len;
-        __memcpy(buf, resp_buf + sizeof(file_t_io_resp), nread);
+        __memcpy((void __force *)buf, resp_buf + sizeof(file_t_io_resp), nread);
 
         proc->fd_table[fd].file_data.offset += nread;
         kfree(resp_buf);
@@ -2017,13 +2009,13 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     // ===== FD_SOCKET: delegate to sock_read =====
     if (proc->fd_table[fd].type == FD_SOCKET) {
         if (!buf) return (uint64_t)-EFAULT;
-        uint64_t ptr_start = (uint64_t)buf;
+        uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
-        struct unix_sock_t *sock = proc->fd_table[fd].sock;
+        struct unix_sock *sock = proc->fd_table[fd].sock;
         if (!sock) return (uint64_t)-EBADF;
-        int64_t ret = sock_read(sock, buf, len);
+        int64_t ret = sock_read(sock, (void __force *)buf, len);
         return (uint64_t)ret;
     }
 
@@ -2034,7 +2026,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
 
     // Validate user buf pointer
     if (!buf) return (uint64_t)-EFAULT;
-    uint64_t ptr_start = (uint64_t)buf;
+    uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
@@ -2058,7 +2050,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     // Read as much as available (up to len)
     size_t nread = 0;
     while (nread < len && p->head != p->tail) {
-        buf[nread] = p->buf[p->tail];
+        ((char __force *)buf)[nread] = p->buf[p->tail];
         p->tail = (p->tail + 1) % PIPE_BUF_SIZE;
         nread++;
     }
@@ -2111,7 +2103,7 @@ uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint
                             &req, sizeof(req), NULL, 0);
         }
     } else if (current_proc->fd_table[fd].type == FD_SOCKET) {
-        struct unix_sock_t *sock = current_proc->fd_table[fd].sock;
+        struct unix_sock *sock = current_proc->fd_table[fd].sock;
         if (sock) {
             sock_close(sock);
         }
@@ -2266,7 +2258,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
     proc->wait_timed_out = 0;
     proc->wait_deadline = 0;
     proc->msg_target_pid = target_pid;
-    proc->msg_reply_buf = reply_buf;
+    proc->msg_reply_buf = (void __user * __force)reply_buf;
     proc->msg_reply_len = reply_len;
     proc->msg_result = 0;
 
@@ -2283,9 +2275,9 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
 // 返回: 0=成功, 负errno
 uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t _u1) {
     pid_t target_pid = (pid_t)arg1;
-    void *msg_buf = (void *)arg2;
+    void __user *msg_buf = (void __user * __force)arg2;
     size_t msg_len = (size_t)arg3;
-    void *reply_buf = (void *)arg4;
+    void __user *reply_buf = (void __user * __force)arg4;
     size_t reply_len = (size_t)arg5;
 
     // Validate target PID
@@ -2295,27 +2287,27 @@ uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uin
     if (msg_len == 0 || msg_len > 65536) return (uint64_t)-EINVAL;
 
     // Validate user pointers
-    uint64_t msg_ptr = (uint64_t)msg_buf;
+    uint64_t msg_ptr = (__force uint64_t)msg_buf;
     if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
         msg_ptr + msg_len > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
-    uint64_t rep_ptr = (uint64_t)reply_buf;
+    uint64_t rep_ptr = (__force uint64_t)reply_buf;
     if (!rep_ptr || rep_ptr >= 0xFFFFFFFF80000000ULL ||
         rep_ptr + reply_len > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
-    return sys_msg_to(target_pid, msg_buf, msg_len, reply_buf, reply_len);
+    return sys_msg_to(target_pid, (void __force *)msg_buf, msg_len, (void __force *)reply_buf, reply_len);
 }
 
 // sys_msg_resp(resp_buf, resp_len) — syscall 23 (回复当前 MSG 调用者)
 // 返回: 0=成功, 正数=errno
 uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
-    void *resp_buf = (void *)arg1;
+    void __user *resp_buf = (void __user * __force)arg1;
     size_t resp_len = (size_t)arg2;
 
     // Validate user pointer
-    uint64_t ptr = (uint64_t)resp_buf;
+    uint64_t ptr = (__force uint64_t)resp_buf;
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || resp_len == 0 ||
         ptr + resp_len > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
@@ -2335,7 +2327,7 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
     // Copy response data from server user space to kernel buffer
     void *kbuf = kmalloc(resp_len);
     if (!kbuf) return (uint64_t)-ENOMEM;
-    __memcpy(kbuf, resp_buf, resp_len);
+    __memcpy(kbuf, (const void __force *)resp_buf, resp_len);
 
     // Copy to caller's reply buffer under caller's CR3
     size_t copy_len = resp_len < caller->msg_reply_len ? resp_len : caller->msg_reply_len;
@@ -2343,7 +2335,7 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)caller->cr3) : "memory");
-    __memcpy(caller->msg_reply_buf, kbuf, copy_len);
+    __memcpy((void __force *)caller->msg_reply_buf, kbuf, copy_len);
     __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
     kfree(kbuf);
@@ -2555,14 +2547,14 @@ void irq_owner_cleanup(pid_t pid) {
 // Returns: 0 on success, positive errno on failure
 uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     size_t size = (size_t)arg1;
-    void **vaddr_ptr = (void **)arg2;
-    uint64_t *paddr_ptr = (uint64_t *)arg3;
+    void __user * __user *vaddr_ptr = (void __user * __user * __force)arg2;
+    uint64_t __user *paddr_ptr = (uint64_t __user * __force)arg3;
 
     if (size == 0) return (uint64_t)-EINVAL;
 
     // Validate user pointers
-    uint64_t vp = (uint64_t)vaddr_ptr;
-    uint64_t pp = (uint64_t)paddr_ptr;
+    uint64_t vp = (__force uint64_t)vaddr_ptr;
+    uint64_t pp = (__force uint64_t)paddr_ptr;
     if (!vp || vp >= 0xFFFFFFFF80000000ULL || vp + sizeof(void *) > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
     if (!pp || pp >= 0xFFFFFFFF80000000ULL || pp + sizeof(uint64_t) > 0xFFFFFFFF80000000ULL)
@@ -2575,7 +2567,7 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     Page *pages = bfc_alloc_page_low(npages);
     if (!pages) return (uint64_t)-ENOMEM;
 
-    uint64_t phys = page_to_phys(pages);
+    uint64_t phys = (__force uint64_t)page_to_phys(pages);
     proc_t *proc = current_proc;
 
     // Pick virtual address from mmap_brk
@@ -2586,10 +2578,10 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     for (size_t i = 0; i < npages; i++) {
         uint64_t page_phys = phys + i * PAGE_SIZE;
         uint64_t page_vaddr = vaddr + i * PAGE_SIZE;
-        if (!map_user_page_direct((uint64_t *)phys_to_virt(proc->cr3), page_vaddr, page_phys,
+        if (!map_user_page_direct((__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3), page_vaddr, page_phys,
                                   PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
             // Cleanup: unmap already-mapped pages
-            if (i > 0) unmap_user_pages((uint64_t *)phys_to_virt(proc->cr3), vaddr, vaddr + i * PAGE_SIZE, i);
+            if (i > 0) unmap_user_pages((__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3), vaddr, vaddr + i * PAGE_SIZE, i);
             bfc_free_page(pages, npages);
             return (uint64_t)-ENOMEM;
         }
@@ -2600,7 +2592,7 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     // Track in mmap_regions for cleanup
     mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
     if (!region) {
-        unmap_user_pages((uint64_t *)phys_to_virt(proc->cr3), vaddr, vaddr_end, npages);
+        unmap_user_pages((__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3), vaddr, vaddr_end, npages);
         bfc_free_page(pages, npages);
         return (uint64_t)-ENOMEM;
     }
@@ -2611,8 +2603,8 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     proc->mmap_regions = region;
 
     // Write results to user space
-    *vaddr_ptr = (void *)vaddr;
-    *paddr_ptr = phys;
+    *(__force void __user **)vaddr_ptr = (void __user * __force)vaddr;
+    *(__force uint64_t *)paddr_ptr = phys;
 
     return 0;
 }
@@ -2634,7 +2626,7 @@ uint64_t sys_dma_free(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, u
             size_t npages = r->size / PAGE_SIZE;
 
             // Unmap from user address space
-            unmap_user_pages((uint64_t *)phys_to_virt(proc->cr3), r->vaddr, r->vaddr + r->size, npages);
+            unmap_user_pages((__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3), r->vaddr, r->vaddr + r->size, npages);
 
             // Free physical pages
             Page *page = bfc_frames + (r->phys / PAGE_SIZE);
@@ -2816,8 +2808,8 @@ uint64_t sys_kill(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
 // sys_sigaction(sig, act, oldact) — syscall 48 (注册/查询信号 handler)
 uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int sig = (int)arg1;
-    const struct sigaction *act = (const struct sigaction *)arg2;
-    struct sigaction *oldact = (struct sigaction *)arg3;
+    const struct sigaction __user *act = (const struct sigaction __user * __force)arg2;
+    struct sigaction __user *oldact = (struct sigaction __user * __force)arg3;
 
     // Validate signal number
     if (sig < 0 || sig >= NSIG) return (uint64_t)-EINVAL;
@@ -2828,7 +2820,7 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
 
     // If oldact is non-NULL, copy current action to user space
     if (oldact) {
-        uint64_t ptr = (uint64_t)oldact;
+        uint64_t ptr = (__force uint64_t)oldact;
         if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(struct sigaction) > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
 
@@ -2836,13 +2828,13 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
         uint64_t saved_cr3;
         __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
         __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
-        __memcpy(oldact, &proc->sig.action[sig], sizeof(struct sigaction));
+        __memcpy((void __force *)oldact, &proc->sig.action[sig], sizeof(struct sigaction));
         __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
     }
 
     // If act is non-NULL, copy from user space
     if (act) {
-        uint64_t ptr = (uint64_t)act;
+        uint64_t ptr = (__force uint64_t)act;
         if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(struct sigaction) > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
 
@@ -2851,7 +2843,7 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
         uint64_t saved_cr3;
         __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
         __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
-        __memcpy(&new_act, act, sizeof(struct sigaction));
+        __memcpy(&new_act, (const void __force *)act, sizeof(struct sigaction));
         __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
         proc->sig.action[sig] = new_act;

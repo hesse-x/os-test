@@ -187,8 +187,8 @@ proc_t *create_idle_process(int cpu_id) {
     // Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc_page(2);
     if (!stack_pages) { spin_unlock(&procs_lock); serial_printf("create_idle_process: alloc stack failed\n"); return NULL; }
-    uint64_t k_stack_phys = page_to_phys(stack_pages);
-    uint64_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
+    uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
+    uint64_t k_stack_top = (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) + 2 * PAGE_SIZE;
 
     // Build idle switch_frame on kernel stack (no trapframe, no user mode)
     uint64_t k_rsp = build_idle_kstack(k_stack_top);
@@ -198,7 +198,7 @@ proc_t *create_idle_process(int cpu_id) {
     proc->state = RUNNING;  // idle starts as RUNNING on its CPU
     proc->k_rsp = k_rsp;
     proc->k_stack_top = k_stack_top;
-    proc->cr3 = PHY_ADDR((uintptr_t)pml4); // kernel PML4 physical address
+    proc->cr3 = (__force uint64_t)PHY_ADDR((uintptr_t)pml4); // kernel PML4 physical address
     proc->entry = (uint64_t)idle_entry;
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = cpu_id;
@@ -276,18 +276,17 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     // 2. Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc_page(2);
     if (!stack_pages) { spin_unlock(&procs_lock); return NULL; }
-    uint64_t k_stack_phys = page_to_phys(stack_pages);
-    uint64_t k_stack_top = phys_to_virt(k_stack_phys) + 2 * PAGE_SIZE;
+    uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
+    uint64_t k_stack_top = (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) + 2 * PAGE_SIZE;
 
     // 3. Allocate per-process PML4
     Page *pml4_page = bfc_alloc_page(1);
     if (!pml4_page) { spin_unlock(&procs_lock); return NULL; }
-    uint64_t pml4_phys = page_to_phys(pml4_page);
-    uint64_t pml4_virt = phys_to_virt(pml4_phys);
+    uint64_t pml4_phys = (__force uint64_t)page_to_phys(pml4_page);
+    uint64_t pml4_virt = (__force uint64_t)phys_to_virt((__force phys_addr_t)pml4_phys);
 
     // 4. Clear PML4 + copy kernel entries
-    uint64_t *new_pml4 = (uint64_t *)pml4_virt;
-    for (int i = 0; i < 512; i++) {
+    uint64_t *new_pml4 = (uint64_t *)pml4_virt;    for (int i = 0; i < 512; i++) {
         new_pml4[i] = 0;
     }
     new_pml4[511] = pml4[511];
@@ -305,7 +304,7 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     int user_stack_pages = 2048;
     Page *user_stack_page = bfc_alloc_page(user_stack_pages);
     if (!user_stack_page) { spin_unlock(&procs_lock); return NULL; }
-    uint64_t user_stack_phys = page_to_phys(user_stack_page);
+    uint64_t user_stack_phys = (__force uint64_t)page_to_phys(user_stack_page);
     uint64_t stack_base = 0x00007FFFFFFFE000 - (uint64_t)user_stack_pages * PAGE_SIZE;
 
     for (int i = 0; i < user_stack_pages; i++) {
@@ -334,7 +333,7 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->state = READY;
     proc->k_rsp = k_rsp;
     proc->k_stack_top = k_stack_top;
-    proc->cr3 = pml4_phys;
+    proc->cr3 = (__force uint64_t)pml4_phys;
     proc->entry = lr.entry;
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = assigned_cpu;
@@ -461,7 +460,7 @@ static void free_table_page(uint64_t phys) {
 // proc_reap: reclaim all resources of a process
 // Called by sys_exit (no-parent path) or sys_waitpid
 void proc_reap(proc_t *proc) {
-    uint64_t *pml4_virt = (uint64_t *)phys_to_virt(proc->cr3);
+    uint64_t *pml4_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
     // 1. Walk user PML4 entries (0-255, canonical low half), free leaf pages + page table pages
     for (int pml4_idx = 0; pml4_idx < 256; pml4_idx++) {
@@ -469,7 +468,7 @@ void proc_reap(proc_t *proc) {
         if (!(pdpt_entry & PTE_PRESENT)) continue;
 
         uint64_t pdpt_phys = pdpt_entry & 0x000FFFFFFFFFF000ULL;
-        uint64_t *pdpt_virt = (uint64_t *)phys_to_virt(pdpt_phys);
+        uint64_t *pdpt_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)pdpt_phys);
 
         for (int pdpt_idx = 0; pdpt_idx < 512; pdpt_idx++) {
             uint64_t pd_entry = pdpt_virt[pdpt_idx];
@@ -478,7 +477,7 @@ void proc_reap(proc_t *proc) {
             if (pd_entry & PTE_PS) continue;
 
             uint64_t pd_phys = pd_entry & 0x000FFFFFFFFFF000ULL;
-            uint64_t *pd_virt = (uint64_t *)phys_to_virt(pd_phys);
+            uint64_t *pd_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)pd_phys);
 
             for (int pd_idx = 0; pd_idx < 512; pd_idx++) {
                 uint64_t pt_entry = pd_virt[pd_idx];
@@ -487,7 +486,7 @@ void proc_reap(proc_t *proc) {
                 if (pt_entry & PTE_PS) continue;
 
                 uint64_t pt_phys = pt_entry & 0x000FFFFFFFFFF000ULL;
-                uint64_t *pt_virt = (uint64_t *)phys_to_virt(pt_phys);
+                uint64_t *pt_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)pt_phys);
 
                 // Free all leaf pages in PT
                 for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
@@ -548,11 +547,11 @@ void proc_reap(proc_t *proc) {
     }
 
     // 2. Free PML4 page itself
-    free_table_page(proc->cr3);
+    free_table_page((__force uint64_t)proc->cr3);
 
     // 3. Free kernel stack (2 pages)
     // k_stack_top is the virtual address of stack top; compute physical base
-    uint64_t k_stack_phys_base = PHY_ADDR(proc->k_stack_top - 2 * PAGE_SIZE);
+    uint64_t k_stack_phys_base = (__force uint64_t)PHY_ADDR(proc->k_stack_top - 2 * PAGE_SIZE);
     Page *stack_page = &bfc_frames[PHY_TO_PAGE(k_stack_phys_base)];
     bfc_free_page(stack_page, 2);
 

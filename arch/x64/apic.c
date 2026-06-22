@@ -5,8 +5,8 @@
 #include "kernel/acpi.h"
 #include "kernel/serial.h"
 
-uint64_t lapic_vaddr = 0;
-uint64_t ioapic_vaddr = 0;
+void __iomem *lapic_vaddr = NULL;
+void __iomem *ioapic_vaddr = NULL;
 uint32_t lapic_timer_ticks_calibrated = 0;
 
 // TSC calibration results
@@ -111,7 +111,7 @@ static void map_apic_mmio(uint64_t lapic_phys, uint64_t ioapic_phys) {
 
   // Allocate and fill a PD for the APIC MMIO region
   uint64_t *pd = (uint64_t *)bump_alloc(4096);
-  uintptr_t pd_phys = PHY_ADDR((uintptr_t)pd);
+  uintptr_t pd_phys = (__force uintptr_t)PHY_ADDR((uintptr_t)pd);
   for (int i = 0; i < 512; i++) pd[i] = 0;
 
   // Fill PD with 2MB pages. Mark PCD+PWT for uncacheable MMIO.
@@ -132,8 +132,8 @@ static void map_apic_mmio(uint64_t lapic_phys, uint64_t ioapic_phys) {
 
   flush_tlb();
 
-  lapic_vaddr = apic_vma + (lapic_phys - region_start);
-  ioapic_vaddr = apic_vma + (ioapic_phys - region_start);
+  lapic_vaddr = (void __iomem __force *)(apic_vma + (lapic_phys - region_start));
+  ioapic_vaddr = (void __iomem __force *)(apic_vma + (ioapic_phys - region_start));
 }
 
 // ===================== APIC init =====================

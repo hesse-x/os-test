@@ -163,7 +163,7 @@ void extend_mapping(uint64_t max_phys_addr) {
   for (size_t n = 1; n <= max_1gb_block; n++) {
     // 分配 PD (4KB)
     uint64_t *pd = (uint64_t *)bump_alloc(4096);
-    uintptr_t pd_phys = PHY_ADDR((uintptr_t)pd);
+    uintptr_t pd_phys = (__force uintptr_t)PHY_ADDR((uintptr_t)pd);
 
     // 填充 PD: 512个 2MB huge pages 映射物理 n*1GB 到 (n+1)*1GB
     uint64_t phys_base = (uint64_t)n * 0x40000000;
@@ -183,7 +183,7 @@ void extend_mapping(uint64_t max_phys_addr) {
       if (!pdpt_extra) {
         // 分配扩展 PDPT 页
         pdpt_extra = (uint64_t *)bump_alloc(4096);
-        uintptr_t pdpt_phys = PHY_ADDR((uintptr_t)pdpt_extra);
+        uintptr_t pdpt_phys = (__force uintptr_t)PHY_ADDR((uintptr_t)pdpt_extra);
         for (int i = 0; i < 512; i++)
           pdpt_extra[i] = 0;
         // PML4[510] 映射虚拟地址 0xFFFFFFFF00000000 起
@@ -201,7 +201,7 @@ void extend_mapping(uint64_t max_phys_addr) {
 
 // ===================== flush_tlb =====================
 void flush_tlb() {
-  load_cr3(PHY_ADDR((uintptr_t)pml4));
+  load_cr3((__force uint64_t)PHY_ADDR((uintptr_t)pml4));
 }
 
 // ===================== bump allocator query =====================

@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
@@ -60,7 +61,7 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     cpu_locals[cpu_id].cpu_id = cpu_id;
     cpu_locals[cpu_id].apic_id = apic_id;
     cpu_locals[cpu_id]._cur_proc = NULL;
-    cpu_locals[cpu_id].lapic_base = 0;
+    cpu_locals[cpu_id].lapic_base = NULL;
     cpu_locals[cpu_id].kernel_stack = kernel_stack;
     cpu_locals[cpu_id].tss_rsp0 = kernel_stack;
     cpu_locals[cpu_id].run_count = 0;
@@ -98,7 +99,7 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
             halt();
         }
         uint64_t ist_phys = (uint64_t)(ist_page - bfc_frames) * PAGE_SIZE;
-        per_cpu_ist_stack[cpu_id][i] = ist_phys + VMA_BASE + PAGE_SIZE; // top of page
+        per_cpu_ist_stack[cpu_id][i] = (__force uint64_t)phys_to_virt((__force phys_addr_t)ist_phys) + PAGE_SIZE; // top of page
     }
     tss->ist[0] = per_cpu_ist_stack[cpu_id][0]; // IST1 = NMI (#2)
     tss->ist[1] = per_cpu_ist_stack[cpu_id][1]; // IST2 = Double Fault (#8)
@@ -259,7 +260,7 @@ void smp_boot_aps() {
             break;
         }
         uint64_t k_stack_phys = (uint64_t)(stack_pages - bfc_frames) * PAGE_SIZE;
-        uint64_t k_stack_top = k_stack_phys + VMA_BASE + 2 * PAGE_SIZE;
+        uint64_t k_stack_top = (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) + 2 * PAGE_SIZE;
 
         // Initialize per-CPU data structures (fills cpu_locals, GDT, TSS)
         smp_init_cpu(i, apic_id, k_stack_top);
@@ -273,7 +274,7 @@ void smp_boot_aps() {
         volatile uint64_t *t_entry  = (volatile uint64_t *)(trampoline_dst + TRAMP_ENTRY);
         volatile uint32_t *t_cpuid = (volatile uint32_t *)(trampoline_dst + TRAMP_CPU_ID);
 
-        *t_pml4  = PHY_ADDR((uintptr_t)pml4);
+        *t_pml4  = (__force uint64_t)PHY_ADDR((uintptr_t)pml4);
         *t_stack = k_stack_top;
         *t_entry = (uint64_t)ap_entry_c;
         *t_cpuid = (uint32_t)i;
