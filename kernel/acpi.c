@@ -23,6 +23,7 @@ static bool sig4_match(const uint8_t *a, const char *b) {
   return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3];
 }
 
+__attribute__((no_sanitize("kernel-address")))
 void *acpi_find_table(const char signature[4]) {
   if (xsdt_virt == 0) return NULL;
 
@@ -82,6 +83,7 @@ static void parse_mcfg(const acpi_mcfg_t *mcfg) {
   g_mcfg.end_bus = entry->end_bus;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 void acpi_init(uint64_t rsdp_phys) {
   serial_puts("acpi_init: rsdp_phys=");
   serial_put_hex(rsdp_phys);

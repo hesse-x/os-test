@@ -16,12 +16,16 @@ while [[ $# -gt 0 ]]; do
             CMAKE_EXTRA="$CMAKE_EXTRA -DTEST=1"
             shift
             ;;
+        --sanitizer)
+            CMAKE_EXTRA="$CMAKE_EXTRA -DSANITIZE=1"
+            shift
+            ;;
         --no-serial)
             CMAKE_EXTRA="$CMAKE_EXTRA -DNSERIAL"
             shift
             ;;
         *)
-            echo "Usage: $0 [-d] [--test] [--no-serial]"
+            echo "Usage: $0 [-d] [--test] [--sanitizer] [--no-serial]"
             exit 1
             ;;
     esac

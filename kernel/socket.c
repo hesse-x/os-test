@@ -10,6 +10,7 @@
 #include "kernel/spinlock.h"
 #include "common/errno.h"
 #include "common/socket.h"
+#include "kernel/mem/kasan.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
 
@@ -237,7 +238,7 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
     uint32_t offset = 0;
     for (size_t i = 0; i < iovlen; i++) {
         if (iov[i].iov_base && iov[i].iov_len > 0) {
-            __memcpy(skb->data + offset, iov[i].iov_base, iov[i].iov_len);
+            copy_from_user(skb->data + offset, (const void __user *)iov[i].iov_base, iov[i].iov_len);
             offset += iov[i].iov_len;
         }
     }
@@ -415,7 +416,7 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             if (iov[i].iov_base && iov[i].iov_len > 0) {
                 uint32_t copy = (uint32_t)iov[i].iov_len;
                 if (copy > remaining) copy = remaining;
-                __memcpy(iov[i].iov_base, skb->data + data_offset, copy);
+                copy_to_user((void __user *)iov[i].iov_base, skb->data + data_offset, copy);
                 data_offset += copy;
                 remaining -= copy;
             }
@@ -601,7 +602,7 @@ uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
 
     // Read sun_family
     uint16_t sun_family;
-    __memcpy(&sun_family, addr, sizeof(sun_family));
+    copy_from_user(&sun_family, addr, sizeof(sun_family));
     if (sun_family != AF_UNIX) return (uint64_t)-EAFNOSUPPORT;
 
     // Read sun_path (max 108 bytes)
@@ -610,7 +611,7 @@ uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     size_t path_len = addrlen - sizeof(sun_family);
     if (path_len > 107) path_len = 107;
     if (path_len > 0)
-        __memcpy(sun_path, (const char *)addr + sizeof(sun_family), path_len);
+        copy_from_user(sun_path, (const char __user *)addr + sizeof(sun_family), path_len);
     sun_path[107] = '\0';
 
     if (sun_path[0] == '\0') return (uint64_t)-EINVAL;  // empty path
@@ -784,10 +785,10 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
             }
             // Copy to user
             socklen_t user_alen;
-            __memcpy(&user_alen, addrlen, sizeof(socklen_t));
+            copy_from_user(&user_alen, addrlen, sizeof(socklen_t));
             if (user_alen > alen) user_alen = alen;
-            __memcpy(addr, &sa, user_alen);
-            __memcpy(addrlen, &alen, sizeof(socklen_t));
+            copy_to_user(addr, &sa, user_alen);
+            copy_to_user(addrlen, &alen, sizeof(socklen_t));
         }
 
         spin_unlock(&socket_lock);
@@ -812,7 +813,7 @@ uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
         return (uint64_t)-EFAULT;
 
     uint16_t sun_family;
-    __memcpy(&sun_family, addr, sizeof(sun_family));
+    copy_from_user(&sun_family, addr, sizeof(sun_family));
     if (sun_family != AF_UNIX) return (uint64_t)-EAFNOSUPPORT;
 
     char sun_path[108];
@@ -820,7 +821,7 @@ uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     size_t path_len = addrlen - sizeof(sun_family);
     if (path_len > 107) path_len = 107;
     if (path_len > 0)
-        __memcpy(sun_path, (const char *)addr + sizeof(sun_family), path_len);
+        copy_from_user(sun_path, (const char __user *)addr + sizeof(sun_family), path_len);
     sun_path[107] = '\0';
 
     if (sun_path[0] == '\0') return (uint64_t)-EINVAL;
@@ -908,7 +909,7 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
     int domain = (int)arg1;
     int type = (int)arg2;
     int protocol = (int)arg3;
-    int *sv = (int *)arg4;
+    int __user *sv = (int __user *)arg4;
 
     if (domain != AF_UNIX) return (uint64_t)-EAFNOSUPPORT;
     if (type != SOCK_STREAM) return (uint64_t)-EPROTONOSUPPORT;
@@ -965,8 +966,9 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
     spin_unlock(&socket_lock);
 
     // Write fd pair to user space
-    sv[0] = fd_a;
-    sv[1] = fd_b;
+    int fds[2] = { fd_a, fd_b };
+    if (copy_to_user(sv, fds, sizeof(fds)))
+        return (uint64_t)-EFAULT;
 
     return 0;
 }
@@ -988,7 +990,7 @@ uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
         return (uint64_t)-EFAULT;
 
     struct msghdr kmsg;
-    __memcpy(&kmsg, msg, sizeof(struct msghdr));
+    copy_from_user(&kmsg, msg, sizeof(struct msghdr));
 
     // Validate iov
     uint64_t iov_ptr = (uint64_t)kmsg.msg_iov;
@@ -1000,7 +1002,7 @@ uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     // Copy iovec array to kernel
     struct iovec *kiov = (struct iovec *)kmalloc(kmsg.msg_iovlen * sizeof(struct iovec));
     if (!kiov) return (uint64_t)-ENOMEM;
-    __memcpy(kiov, kmsg.msg_iov, kmsg.msg_iovlen * sizeof(struct iovec));
+    copy_from_user(kiov, (const void __user *)kmsg.msg_iov, kmsg.msg_iovlen * sizeof(struct iovec));
 
     // Validate each iov base pointer
     for (size_t i = 0; i < kmsg.msg_iovlen; i++) {
@@ -1029,7 +1031,7 @@ uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
         }
         kcontrol = kmalloc(kmsg.msg_controllen);
         if (!kcontrol) { kfree(kiov); return (uint64_t)-ENOMEM; }
-        __memcpy(kcontrol, kmsg.msg_control, kmsg.msg_controllen);
+        copy_from_user(kcontrol, (const void __user *)kmsg.msg_control, kmsg.msg_controllen);
         kcontrollen = kmsg.msg_controllen;
     }
 
@@ -1061,7 +1063,7 @@ uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
         return (uint64_t)-EFAULT;
 
     struct msghdr kmsg;
-    __memcpy(&kmsg, msg, sizeof(struct msghdr));
+    copy_from_user(&kmsg, msg, sizeof(struct msghdr));
 
     // Validate iov
     uint64_t iov_ptr = (uint64_t)kmsg.msg_iov;
@@ -1072,7 +1074,7 @@ uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
 
     struct iovec *kiov = (struct iovec *)kmalloc(kmsg.msg_iovlen * sizeof(struct iovec));
     if (!kiov) return (uint64_t)-ENOMEM;
-    __memcpy(kiov, kmsg.msg_iov, kmsg.msg_iovlen * sizeof(struct iovec));
+    copy_from_user(kiov, (const void __user *)kmsg.msg_iov, kmsg.msg_iovlen * sizeof(struct iovec));
 
     for (size_t i = 0; i < kmsg.msg_iovlen; i++) {
         if (kiov[i].iov_base) {
@@ -1104,12 +1106,11 @@ uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     int64_t ret = sock_recvmsg_internal(sock, kiov, kmsg.msg_iovlen,
                                          kcontrol, &kcontrollen, flags);
 
-    // Update msg_controllen and msg_flags in user space
-    // (kernel runs on user's CR3 during syscall, so direct access works)
+    // Update msg_controllen in user space
     if (ret >= 0) {
         if (kmsg.msg_control && kmsg.msg_controllen > 0) {
             // struct msghdr: offset 40 = msg_controllen (size_t)
-            *(size_t *)((char *)msg + 40) = kcontrollen;
+            copy_to_user((void __user *)((char *)msg + 40), &kcontrollen, sizeof(size_t));
         }
     }
 
@@ -1174,7 +1175,7 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     // Copy pollfd array to kernel
     struct pollfd *kfds = (struct pollfd *)kmalloc(nfds * sizeof(struct pollfd));
     if (!kfds) return (uint64_t)-ENOMEM;
-    __memcpy(kfds, fds, nfds * sizeof(struct pollfd));
+    copy_from_user(kfds, fds, nfds * sizeof(struct pollfd));
 
     uint64_t deadline = 0;
     if (timeout_ms > 0) {
@@ -1282,13 +1283,13 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
 
         if (ready > 0) {
             // Copy results back to user
-            __memcpy(fds, kfds, nfds * sizeof(struct pollfd));
+            copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
             kfree(kfds);
             return (uint64_t)ready;
         }
 
         if (timeout_ms == 0) {
-            __memcpy(fds, kfds, nfds * sizeof(struct pollfd));
+            copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
             kfree(kfds);
             return 0;
         }
@@ -1298,7 +1299,7 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
             uint64_t now = sched_clock();
             if (now >= deadline) {
                 __memset(kfds, 0, nfds * sizeof(struct pollfd));
-                __memcpy(fds, kfds, nfds * sizeof(struct pollfd));
+                copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
                 kfree(kfds);
                 return 0;  // timeout
             }
@@ -1317,7 +1318,7 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
 
         if (proc->wait_timed_out && timeout_ms > 0) {
             __memset(kfds, 0, nfds * sizeof(struct pollfd));
-            __memcpy(fds, kfds, nfds * sizeof(struct pollfd));
+            copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
             kfree(kfds);
             return 0;  // timeout
         }

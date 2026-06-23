@@ -50,6 +50,7 @@ static inline uint64_t rdmsr(uint32_t msr) {
 }
 
 // ===================== Memory helpers =====================
+__attribute__((no_sanitize("kernel-address")))
 static inline void *__memcpy(void *dst, const void *src, size_t n) {
   size_t nq = n >> 3;
   uint64_t *dq = (uint64_t *)dst;
@@ -64,6 +65,7 @@ static inline void *__memcpy(void *dst, const void *src, size_t n) {
   return dst;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 static inline void *__memset(void *dst, int val, size_t n) {
   size_t nq = n >> 3;
   uint64_t *dq = (uint64_t *)dst;
@@ -75,6 +77,19 @@ static inline void *__memset(void *dst, int val, size_t n) {
   n &= 7;
   while (n--)
     *db++ = (uint8_t)val;
+  return dst;
+}
+
+__attribute__((no_sanitize("kernel-address")))
+static inline void *__memmove(void *dst, const void *src, size_t n) {
+  char *d = (char *)dst;
+  const char *s = (const char *)src;
+  if (d < s) {
+    while (n--) *d++ = *s++;
+  } else {
+    d += n; s += n;
+    while (n--) *--d = *--s;
+  }
   return dst;
 }
 
@@ -118,10 +133,12 @@ static inline void irq_guard_cleanup(uint64_t *flags) {
   uint64_t name __attribute__((cleanup(irq_guard_cleanup))) = local_irq_save()
 
 // ===================== MMIO helpers =====================
+__attribute__((no_sanitize("kernel-address")))
 static inline uint32_t readl(const void __iomem *addr) {
   return *(volatile const uint32_t __force *)addr;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 static inline void writel(void __iomem *addr, uint32_t val) {
   *(volatile uint32_t __force *)addr = val;
 }

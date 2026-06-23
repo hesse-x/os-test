@@ -236,6 +236,7 @@ proc_t *create_idle_process(int cpu_id) {
     return proc;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 void idle_entry() {
     sti();
     while (1) {
@@ -291,6 +292,11 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
         new_pml4[i] = 0;
     }
     new_pml4[511] = pml4[511];
+    #ifdef SANITIZER
+    // Copy KASAN shadow mapping (PML4[503]) so kernel code in syscall context
+    // can access shadow memory while running on user CR3
+    new_pml4[503] = pml4[503];
+    #endif
 
     // 5. Load ELF segments into user address space
     elf_load_result_t lr = elf_load(elf_data, elf_size, new_pml4);
@@ -405,6 +411,7 @@ static void update_tss_iopm(proc_t *proc) {
     }
 }
 
+__attribute__((no_sanitize("kernel-address")))
 void schedule() {
     int my_cpu = get_cpu_local()->cpu_id;
     proc_t *idle = get_cpu_local()->idle_proc;

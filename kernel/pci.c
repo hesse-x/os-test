@@ -4,6 +4,7 @@
 #include "arch/x64/paging.h"
 #include "kernel/serial.h"
 #include "kernel/mem/alloc.h"
+#include "kernel/mem/kasan.h"
 #include "common/macro.h"
 #include "common/errno.h"
 #include "arch/x64/apic.h"
@@ -21,6 +22,7 @@ static int next_msix_vector = 64;
 
 // ===================== ECAM MMIO mapping =====================
 
+__attribute__((no_sanitize("kernel-address")))
 static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus) {
   uint64_t region_start = ecam_phys + (uint64_t)start_bus * 0x100000;
   uint64_t region_end = ecam_phys + ((uint64_t)end_bus + 1) * 0x100000;
@@ -69,6 +71,7 @@ static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus
 
 // ===================== Config space access =====================
 
+__attribute__((no_sanitize("kernel-address")))
 uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset) {
   volatile uint32_t __iomem *addr = (volatile uint32_t __iomem *)ecam_vbase
                 + (((uint64_t)bus << 20)
@@ -78,6 +81,7 @@ uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset
   return *(volatile uint32_t __force *)addr;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 void pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset, uint32_t value) {
   volatile uint32_t __iomem *addr = (volatile uint32_t __iomem *)ecam_vbase
                 + (((uint64_t)bus << 20)
@@ -146,6 +150,7 @@ static void pci_size_bar(pci_device_t *d, int bar_idx) {
 
 static void pci_scan_bus(uint8_t bus);
 
+__attribute__((no_sanitize("kernel-address")))
 static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   if (pci_device_count >= MAX_PCI_DEV) return;
 
@@ -221,6 +226,7 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   }
 }
 
+__attribute__((no_sanitize("kernel-address")))
 static void pci_scan_bus(uint8_t bus) {
   for (int dev = 0; dev < PCI_MAX_DEV; dev++) {
     uint32_t vd = pci_read_config(bus, dev, 0, 0x00);
@@ -241,6 +247,7 @@ static void pci_scan_bus(uint8_t bus) {
 
 // ===================== BAR MMIO mapping =====================
 
+__attribute__((no_sanitize("kernel-address")))
 static void pci_map_bar_mmio(pci_device_t *d) {
   int max_bars = (d->header_type == PCI_HEADER_TYPE_BRIDGE) ? 2 : 6;
   for (int i = 0; i < max_bars; i++) {
@@ -285,6 +292,7 @@ static void pci_map_bar_mmio(pci_device_t *d) {
 
 // ===================== Device enablement =====================
 
+__attribute__((no_sanitize("kernel-address")))
 int pci_enable_device(pci_device_t *d) {
   if (d->enabled) return 0;
 
@@ -302,6 +310,7 @@ int pci_enable_device(pci_device_t *d) {
 
 // ===================== Device lookup =====================
 
+__attribute__((no_sanitize("kernel-address")))
 pci_device_t *pci_find_device(uint16_t class_code) {
   for (int i = 0; i < pci_device_count; i++) {
     if (pci_devices[i].class_code == class_code)
@@ -310,6 +319,7 @@ pci_device_t *pci_find_device(uint16_t class_code) {
   return NULL;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 pci_device_t *pci_find_device_by_id(uint16_t vendor, uint16_t device) {
   for (int i = 0; i < pci_device_count; i++) {
     if (pci_devices[i].vendor_id == vendor && pci_devices[i].device_id == device)
@@ -324,7 +334,7 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
   uint8_t bus = (uint8_t)arg1;
   uint8_t dev_num = (uint8_t)arg2;
   uint8_t func = (uint8_t)arg3;
-  void *out_ptr = (void *)arg4;
+  void __user *out_ptr = (void __user *)arg4;
 
   // Validate user pointer
   uint64_t ptr = (uint64_t)out_ptr;
@@ -356,12 +366,14 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
     info.bars[i].type = d->bar[i].type;
   }
 
-  __memcpy(out_ptr, &info, sizeof(info));
+  if (copy_to_user(out_ptr, &info, sizeof(info)))
+    return (uint64_t)-EFAULT;
   return 0;
 }
 
 // ===================== MSI-X =====================
 
+__attribute__((no_sanitize("kernel-address")))
 int pci_enable_msix(pci_device_t *dev, int num_vectors) {
   if (dev->msix_cap_offset == 0) return -ENOSYS;
   if (num_vectors <= 0 || next_msix_vector + num_vectors > 128) return -ENOMEM;
@@ -421,6 +433,7 @@ int pci_enable_msix(pci_device_t *dev, int num_vectors) {
   return num_vectors;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 void pci_msix_mask_entry(pci_device_t *dev, int entry) {
   if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors) return;
   void __iomem *bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
@@ -428,6 +441,7 @@ void pci_msix_mask_entry(pci_device_t *dev, int entry) {
   *(volatile uint32_t __force *)&table[entry * 4 + 3] |= 1;  // Set Mask bit
 }
 
+__attribute__((no_sanitize("kernel-address")))
 void pci_msix_unmask_entry(pci_device_t *dev, int entry) {
   if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors) return;
   void __iomem *bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
@@ -435,22 +449,26 @@ void pci_msix_unmask_entry(pci_device_t *dev, int entry) {
   *(volatile uint32_t __force *)&table[entry * 4 + 3] &= ~1;  // Clear Mask bit
 }
 
+__attribute__((no_sanitize("kernel-address")))
 void __iomem *pci_msix_table_addr(pci_device_t *dev) {
   if (dev->msix_cap_offset == 0) return NULL;
   return (void __iomem *)((uint8_t __iomem *)dev->bar[dev->msix_table_bar].vaddr + dev->msix_table_offset);
 }
 
+__attribute__((no_sanitize("kernel-address")))
 void __iomem *pci_msix_pba_addr(pci_device_t *dev) {
   if (dev->msix_cap_offset == 0) return NULL;
   return (void __iomem *)((uint8_t __iomem *)dev->bar[dev->msix_pba_bar].vaddr + dev->msix_pba_offset);
 }
 
+__attribute__((no_sanitize("kernel-address")))
 int pci_msix_vector_base(pci_device_t *dev) {
   return dev->msix_vector_base;
 }
 
 // ===================== pci_init =====================
 
+__attribute__((no_sanitize("kernel-address")))
 void pci_init() {
   if (g_mcfg.ecam_base == 0) return;
 

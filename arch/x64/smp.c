@@ -56,6 +56,7 @@ static void set_tss_gate(gdt_entry_t *gdt, int n, uint64_t base, uint32_t limit)
 
 void reload_cs(void);
 
+__attribute__((no_sanitize("kernel-address")))
 void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     // Fill cpu_local
     cpu_locals[cpu_id].cpu_id = cpu_id;
@@ -113,6 +114,7 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
 }
 
 // Apply per-CPU state to the currently running CPU.
+__attribute__((no_sanitize("kernel-address")))
 void smp_apply_cpu(int cpu_id) {
     lgdt(&per_cpu_gdtr[cpu_id]);
     reload_cs();
@@ -136,6 +138,7 @@ void smp_apply_cpu(int cpu_id) {
 }
 
 // ===================== AP entry (called from trampoline code) =====================
+__attribute__((no_sanitize("kernel-address")))
 void ap_entry_c(int cpu_id) {
     // Apply per-CPU state (GDT, GS base, TR) to this AP
     smp_apply_cpu(cpu_id);
@@ -196,6 +199,7 @@ void ap_entry_c(int cpu_id) {
 // ===================== LAPIC IPI helpers =====================
 
 // Send INIT IPI to an AP
+__attribute__((no_sanitize("kernel-address")))
 static void lapic_send_init(uint32_t apic_id) {
     // Wait until ICR delivery status is idle
     while (lapic_read(LAPIC_ICR_LOW) & 0x1000)
@@ -209,6 +213,7 @@ static void lapic_send_init(uint32_t apic_id) {
 }
 
 // Send SIPI (Startup IPI) to an AP at given vector (page-aligned)
+__attribute__((no_sanitize("kernel-address")))
 static void lapic_send_sipi(uint32_t apic_id, uint8_t vector) {
     while (lapic_read(LAPIC_ICR_LOW) & 0x1000)
         __asm__ volatile("pause");
@@ -219,6 +224,7 @@ static void lapic_send_sipi(uint32_t apic_id, uint8_t vector) {
 }
 
 // Microsecond delay using LAPIC timer (one-shot mode)
+__attribute__((no_sanitize("kernel-address")))
 static void udelay(uint32_t us) {
     if (lapic_timer_ticks_calibrated == 0) return;
     // ticks per 10ms = lapic_timer_ticks_calibrated
@@ -237,6 +243,7 @@ static void udelay(uint32_t us) {
 
 // ===================== Boot all APs via SIPI (called by BSP) =====================
 
+__attribute__((no_sanitize("kernel-address")))
 void smp_boot_aps() {
     if (g_madt.ncpus <= 1) return;
 

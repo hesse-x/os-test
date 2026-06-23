@@ -178,10 +178,10 @@ extern pid_t init_pid;
 
 void proc_init(void);
 proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);
-void schedule(void);
+void schedule(void) __attribute__((no_sanitize("kernel-address")));
 void switch_to(proc_t *prev, proc_t *next);
 void process_entry(void);
-void idle_entry(void);
+void idle_entry(void) __attribute__((no_sanitize("kernel-address")));
 proc_t *create_idle_process(int cpu_id);
 void proc_reap(proc_t *proc);
 

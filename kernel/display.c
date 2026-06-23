@@ -18,6 +18,7 @@ static struct dev_ops kms_dev_ops = {
     .device_type = DEV_KMS,
 };
 
+__attribute__((no_sanitize("kernel-address")))
 int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
                         void *resp_data, uint32_t resp_len) {
     if (req_type == DISPLAY_REQ_CREATE_BUF) {
@@ -79,6 +80,7 @@ int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
     return -EINVAL;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 uint64_t display_mmap_handler(struct proc_t *proc, size_t size) {
     if (!g_display.initialized) return 0;
 

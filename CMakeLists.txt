@@ -12,6 +12,11 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror -ffreestanding -nostdl
 # C++ flags for user-space only (driver, shell, libc .cc files)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone -mno-sse -mno-sse2 -mno-mmx")
 
+# KASAN sanitizer flags (applied only to kernel OBJECT libraries via kernel_rules.cmake)
+if(SANITIZE)
+  set(KASAN_CFLAGS "-fsanitize=kernel-address" "-DKASAN_SHADOW_OFFSET=0xDFFFFC0000000000ULL" "-DSANITIZER=1")
+endif()
+
 # Debug 模式：加调试信息 + 保留帧指针（栈回溯需要）
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fno-omit-frame-pointer")

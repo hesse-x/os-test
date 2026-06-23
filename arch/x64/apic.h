@@ -69,24 +69,29 @@ extern void __iomem *lapic_vaddr;
 extern void __iomem *ioapic_vaddr;
 
 // LAPIC register access
+__attribute__((no_sanitize("kernel-address")))
 static inline uint32_t lapic_read(uint32_t offset) {
   return *(volatile uint32_t __force *)(lapic_vaddr + offset);
 }
 
+__attribute__((no_sanitize("kernel-address")))
 static inline void lapic_write(uint32_t offset, uint32_t val) {
   *(volatile uint32_t __force *)(lapic_vaddr + offset) = val;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 static inline void lapic_eoi() {
   lapic_write(LAPIC_EOI, 0);
 }
 
 // I/O APIC register access
+__attribute__((no_sanitize("kernel-address")))
 static inline uint32_t ioapic_read(uint32_t reg) {
   *(volatile uint32_t __force *)(ioapic_vaddr + IOAPIC_REG) = reg;
   return *(volatile uint32_t __force *)(ioapic_vaddr + IOAPIC_DATA);
 }
 
+__attribute__((no_sanitize("kernel-address")))
 static inline void ioapic_write(uint32_t reg, uint32_t val) {
   *(volatile uint32_t __force *)(ioapic_vaddr + IOAPIC_REG) = reg;
   *(volatile uint32_t __force *)(ioapic_vaddr + IOAPIC_DATA) = val;

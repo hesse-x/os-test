@@ -8,6 +8,12 @@ function(add_kernel_object lib_name)
     target_include_directories(${lib_name} PRIVATE ${CMAKE_SOURCE_DIR})
     target_compile_definitions(${lib_name} PRIVATE __KERNEL__)
     target_compile_options(${lib_name} PRIVATE -Wno-unused-parameter)
+
+    # KASAN sanitizer flags (kernel-only)
+    if(KASAN_CFLAGS)
+        target_compile_options(${lib_name} PRIVATE ${KASAN_CFLAGS})
+    endif()
+
     set_target_properties(${lib_name} PROPERTIES
         POSITION_INDEPENDENT_CODE OFF
     )

@@ -32,6 +32,13 @@ SECTIONS {
         *(.got.plt)
     }
 
+    /* KASAN global variable redzone metadata */
+    __start_kasan_globals = .;
+    .kasan_globals : AT(ADDR(.kasan_globals) - 0xFFFFFFFF80000000) {
+        KEEP(*(__kasan_globals))
+    }
+    __stop_kasan_globals = .;
+
     . = ALIGN(4096);
     /* 未初始化数据段（BSS） - 4KB对齐供页表使用 */
     .bss (NOLOAD) : AT(ADDR(.bss) - 0xFFFFFFFF80000000) {

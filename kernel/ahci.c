@@ -121,6 +121,7 @@ static uint64_t walk_user_pt(uint64_t cr3_phys, uint64_t vaddr) {
 
 // Copy bounce buffer data to a user process's buffer via page-table walk.
 // Returns true on success, false if page walk failed.
+__attribute__((no_sanitize("kernel-address")))
 static bool bounce_to_user_pages(pid_t pid, void *user_buf, uint32_t byte_len) {
     if (pid < 0 || pid >= MAX_PROC) return false;
     proc_t *proc = &procs[pid];
@@ -471,6 +472,7 @@ int ahci_set_active_port(int port) {
 }
 
 // ===================== ahci_init =====================
+__attribute__((no_sanitize("kernel-address")))
 void ahci_init() {
   // Find AHCI controller (class 0x0106 = SATA/AHCI)
   pci_device_t *dev = pci_find_device(PCI_CLASS_STORAGE_AHCI);

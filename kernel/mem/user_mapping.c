@@ -8,6 +8,7 @@
 
 // Ensure a PDPT entry exists for the given virtual address in user PML4.
 // Returns the virtual address of the PD, or allocates a new one.
+__attribute__((no_sanitize("kernel-address")))
 uint64_t *ensure_pd(uint64_t *new_pml4, uint64_t vaddr) {
     uint64_t pml4_idx = (vaddr >> 39) & 0x1FF;
     if (new_pml4[pml4_idx] & 0x01) {
@@ -28,6 +29,7 @@ uint64_t *ensure_pd(uint64_t *new_pml4, uint64_t vaddr) {
 
 // Ensure a PD entry exists for the given virtual address.
 // Returns the virtual address of the PT.
+__attribute__((no_sanitize("kernel-address")))
 uint64_t *ensure_pt_in_pd(uint64_t *pd_or_pdpt, uint64_t vaddr, int level) {
     // level 2 = PDPT (need PD), level 1 = PD (need PT)
     uint64_t idx;
@@ -52,6 +54,7 @@ uint64_t *ensure_pt_in_pd(uint64_t *pd_or_pdpt, uint64_t vaddr, int level) {
     return table;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 bool map_user_page_direct(uint64_t *new_pml4, uint64_t vaddr, uint64_t phys,
                           uint64_t flags) {
     uint64_t *pdpt = ensure_pd(new_pml4, vaddr);
@@ -68,6 +71,7 @@ bool map_user_page_direct(uint64_t *new_pml4, uint64_t vaddr, uint64_t phys,
     return true;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 bool map_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
                     uint64_t flags, int *pages_mapped) {
     *pages_mapped = 0;
@@ -101,6 +105,7 @@ bool map_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
     return true;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 void unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
                       int count) {
     uint64_t vaddr = ALIGN_UP(vaddr_start, PAGE_SIZE);

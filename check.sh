@@ -84,6 +84,39 @@ if [ -s "$WARNFILE" ]; then
     cat "$WARNFILE"
     echo ""
     echo "Sparse check failed with $(wc -l < "$WARNFILE") warning(s)."
+    rm -f "$SPARSE_COMPAT"
     exit 1
 fi
 echo "Sparse check passed."
+rm -f "$SPARSE_COMPAT"
+
+# ===================== Step 2: Sanitizer check =====================
+echo ""
+echo "=== Step 2: Sanitizer build + boot test ==="
+
+./build.sh --sanitizer
+
+# Start QEMU in background, wait for boot
+rm -f log.txt
+timeout 30 ./run.sh &
+QEMU_PID=$!
+
+# Wait for QEMU to boot and stabilize
+sleep 20
+
+# Kill QEMU
+kill $QEMU_PID 2>/dev/null || true
+wait $QEMU_PID 2>/dev/null || true
+
+# Check log.txt for KASAN/KCSAN reports
+if [ ! -f log.txt ]; then
+    echo "Error: log.txt not found (QEMU may have failed to start)"
+    exit 1
+fi
+
+if grep -q "KASAN:" log.txt || grep -q "KCSAN:" log.txt; then
+    echo "Sanitizer detected issues:"
+    grep -E "KASAN:|KCSAN:" log.txt
+    exit 1
+fi
+echo "Sanitizer check passed: no issues detected during boot."

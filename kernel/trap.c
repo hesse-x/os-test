@@ -10,6 +10,7 @@
 #include "arch/x64/apic.h"
 #include "kernel/serial.h"
 #include "kernel/mem/slab.h"
+#include "kernel/mem/kasan.h"
 #include "kernel/mem/alloc.h"
 #include "common/errno.h"
 #include "kernel/fb.h"
@@ -176,6 +177,16 @@ void trap_dispatch(trapframe_t *tf) {
     serial_put_hex(cr2);
   } else if (tf->trapno == 6) {
     serial_puts("UNDEFINED OPCODE");
+  } else if (tf->trapno == 13) {
+    serial_puts("GENERAL PROTECTION");
+    #ifdef SANITIZER
+    if (kasan_shadow_exists()) {
+      uint64_t fault_addr;
+      __asm__ volatile("movq %%cr2, %0" : "=r"(fault_addr));
+      serial_puts("\n  KASAN: possible shadow access to non-canonical address");
+      serial_puts("\n  Check if __user pointer was used without copy_from_user/to_user");
+    }
+    #endif
   } else {
     serial_puts("EXCEPTION: vector ");
     serial_put_hex(tf->trapno);
@@ -540,7 +551,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         spin_lock(&proc->recv_lock);
         if (proc->recv_head != proc->recv_tail) {
             // Message available: copy to user buffer
-            __memcpy((void __force *)buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
+            copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
             // If this is an REQ request, record the caller PID for sys_resp
             recv_msg_t *msg = (recv_msg_t *)proc->recv_buf[proc->recv_tail];
             if (msg->type == RECV_REQ) {
@@ -565,7 +576,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                 }
 
                 // Copy data to user buffer under current CR3
-                __memcpy((void __force *)data_buf, kmaddr, len);
+                copy_to_user(data_buf, kmaddr, len);
                 kfree(kmaddr);
 
                 // Rewrite recv_msg_t for user: put len in data field
@@ -600,7 +611,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
             // Re-check queue before returning timeout (race: message may have arrived)
             spin_lock(&proc->recv_lock);
             if (proc->recv_head != proc->recv_tail) {
-                __memcpy((void __force *)buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
+                copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
                 recv_msg_t *msg = (recv_msg_t *)proc->recv_buf[proc->recv_tail];
                 if (msg->type == RECV_REQ) {
                     proc->req_caller_pid = (pid_t)msg->src;
@@ -619,7 +630,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                         spin_unlock(&proc->recv_lock);
                         return (uint64_t)-EINVAL;
                     }
-                    __memcpy((void __force *)data_buf, kmaddr, len);
+                    copy_to_user(data_buf, kmaddr, len);
                     kfree(kmaddr);
                     recv_msg_t *umsg = (recv_msg_t __force *)buf;
                     umsg->msg.kmaddr = NULL;
@@ -666,7 +677,7 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
     hdr->type = RECV_REQ;
     hdr->src = (uint32_t)current_proc->pid;
     // Copy request payload from user space
-    __memcpy(hdr->data, (const void __force *)request, 56);
+    copy_from_user(hdr->data, request, 56);
 
     // Enqueue to target's recv queue
     spin_lock(&target->recv_lock);
@@ -733,12 +744,12 @@ uint64_t sys_resp(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     // We must first copy to a kernel buffer under the server's CR3,
     // then switch to caller's CR3 to write to the caller's user-space buffer.
     uint8_t kbuf[RECV_MSG_SIZE];
-    __memcpy(kbuf, (const void __force *)reply, RECV_MSG_SIZE);
+    copy_from_user(kbuf, reply, RECV_MSG_SIZE);
 
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)caller->cr3) : "memory");
-    __memcpy((void __force *)caller->req_reply_buf, kbuf, RECV_MSG_SIZE);
+    copy_to_user(caller->req_reply_buf, kbuf, RECV_MSG_SIZE);
     __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
     // Wake caller
@@ -976,7 +987,7 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uin
     // Copy ELF data from user space to kernel buffer to prevent TOCTOU
     uint8_t *elf_buf = (uint8_t *)kmalloc(elf_size);
     if (!elf_buf) return (uint64_t)-ENOMEM;
-    __memcpy(elf_buf, (const void __force *)elf_data_user, elf_size);
+    copy_from_user(elf_buf, elf_data_user, elf_size);
 
     // Create child process from ELF
     proc_t *child = process_create_elf(elf_buf, elf_size);
@@ -1351,7 +1362,7 @@ uint64_t sys_debug_print(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u
     size_t len = (size_t)arg2;
     if (!buf || len > 256) return (uint64_t)-EINVAL;
     char kbuf[257];
-    __memcpy(kbuf, (const void __force *)buf, len);
+    copy_from_user(kbuf, buf, len);
     kbuf[len] = '\0';
     serial_printf("DBG:%s", kbuf);
     return 0;
@@ -1498,7 +1509,7 @@ uint64_t sys_dev_req(uint64_t arg1, uint64_t arg2, uint64_t arg3,
         if (ops->driver_pid == 0) {
             // Kernel device: synchronous dispatch
             uint8_t req_buf[56];
-            __memcpy(req_buf, (const void __force *)request, 56);
+            copy_from_user(req_buf, request, 56);
 
             uint32_t req_type = *(uint32_t *)req_buf;
 
@@ -1513,7 +1524,7 @@ uint64_t sys_dev_req(uint64_t arg1, uint64_t arg2, uint64_t arg3,
                 return (uint64_t)-ENODEV;
             }
 
-            __memcpy((void __force *)reply, resp_buf, 64);
+            copy_to_user(reply, resp_buf, 64);
             return (uint64_t)result;
         }
     }
@@ -1679,7 +1690,7 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
         int i;
         for (i = 0; i < 31; i++) {
             char c;
-            __memcpy(&c, (const void __force *)(uptr + i), 1);
+            copy_from_user(&c, (const char __user *)(uptr + i), 1);
             if (c == '\0') break;
             shm->name[i] = c;
         }
@@ -2025,7 +2036,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         req->fs_fd = proc->fd_table[fd].file_data.fs_fd;
         req->offset = proc->fd_table[fd].file_data._offset;
         req->count = (uint32_t)len;
-        __memcpy(msg_buf + sizeof(file_t_io_req), (const void __force *)buf, len);
+        copy_from_user(msg_buf + sizeof(file_t_io_req), buf, len);
 
         // Reply buffer
         file_t_io_resp resp;
@@ -2199,7 +2210,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
 
         size_t nread = resp->count;
         if (nread > len) nread = len;
-        __memcpy((void __force *)buf, resp_buf + sizeof(file_t_io_resp), nread);
+        copy_to_user(buf, resp_buf + sizeof(file_t_io_resp), nread);
 
         proc->fd_table[fd].file_data._offset += nread;
         kfree(resp_buf);
@@ -2577,7 +2588,7 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
     // Copy response data from server user space to kernel buffer
     void *kbuf = kmalloc(resp_len);
     if (!kbuf) return (uint64_t)-ENOMEM;
-    __memcpy(kbuf, (const void __force *)resp_buf, resp_len);
+    copy_from_user(kbuf, resp_buf, resp_len);
 
     // Copy to caller's reply buffer under caller's CR3
     size_t copy_len = resp_len < caller->msg_reply_len ? resp_len : caller->msg_reply_len;
@@ -2585,7 +2596,7 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)caller->cr3) : "memory");
-    __memcpy((void __force *)caller->msg_reply_buf, kbuf, copy_len);
+    copy_to_user(caller->msg_reply_buf, kbuf, copy_len);
     __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
     kfree(kbuf);
@@ -2874,8 +2885,13 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     proc->mmap_regions = region;
 
     // Write results to user space
-    *(__force void __user **)vaddr_ptr = (void __user * __force)vaddr;
-    *(__force uint64_t *)paddr_ptr = phys;
+    {
+        uint64_t vaddr_val = vaddr;
+        if (copy_to_user(vaddr_ptr, &vaddr_val, sizeof(vaddr_val)))
+            return (uint64_t)-EFAULT;
+    }
+    if (copy_to_user(paddr_ptr, &phys, sizeof(phys)))
+        return (uint64_t)-EFAULT;
 
     return 0;
 }
@@ -3116,7 +3132,7 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
         uint64_t saved_cr3;
         __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
         __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
-        __memcpy((void __force *)oldact, &proc->sig.action[sig], sizeof(struct sigaction));
+        copy_to_user(oldact, &proc->sig.action[sig], sizeof(struct sigaction));
         __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
     }
 
@@ -3131,7 +3147,7 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
         uint64_t saved_cr3;
         __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
         __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
-        __memcpy(&new_act, (const void __force *)act, sizeof(struct sigaction));
+        copy_from_user(&new_act, act, sizeof(struct sigaction));
         __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
         proc->sig.action[sig] = new_act;

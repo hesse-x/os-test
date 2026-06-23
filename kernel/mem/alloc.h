@@ -44,24 +44,24 @@ typedef struct Page {
 extern Page *bfc_frames;
 extern Page *bfc_free_list;
 
-void bfc_init(void);
-Page *bfc_alloc_page(size_t n);
-Page *bfc_alloc_page_low(size_t n);
-Page *bfc_free_page(Page *page, size_t n);
-size_t bfc_free_page_nums(void);
+void bfc_init(void) __attribute__((no_sanitize("kernel-address")));
+Page *bfc_alloc_page(size_t n) __attribute__((no_sanitize("kernel-address")));
+Page *bfc_alloc_page_low(size_t n) __attribute__((no_sanitize("kernel-address")));
+Page *bfc_free_page(Page *page, size_t n) __attribute__((no_sanitize("kernel-address")));
+size_t bfc_free_page_nums(void) __attribute__((no_sanitize("kernel-address")));
 
 // ===================== Global variables =====================
 extern size_t total_page_frames;
 
 typedef struct boot_info boot_info;
 
-void init_mem(boot_info *bi);
+void init_mem(boot_info *bi) __attribute__((no_sanitize("kernel-address")));
 
 extern spinlock_t bfc_lock;
 
 // ===================== Address conversion =====================
-phys_addr_t page_to_phys(Page *p);
-kern_vaddr_t phys_to_virt(phys_addr_t phys);
+phys_addr_t page_to_phys(Page *p) __attribute__((no_sanitize("kernel-address")));
+kern_vaddr_t phys_to_virt(phys_addr_t phys) __attribute__((no_sanitize("kernel-address")));
 
 // ===================== User page mapping =====================
 uint64_t *ensure_pd(uint64_t *new_pml4, uint64_t vaddr);

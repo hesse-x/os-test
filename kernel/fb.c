@@ -9,6 +9,7 @@
 
 // ===================== init_fb =====================
 
+__attribute__((no_sanitize("kernel-address")))
 void init_fb(boot_info *bi) {
   serial_printf("init_fb: fb_addr=%lx\n", bi->fb_addr);
   if (bi->fb_addr == 0) {

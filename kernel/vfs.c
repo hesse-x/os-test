@@ -8,6 +8,8 @@
 #include "kernel/proc.h"
 #include "kernel/serial.h"
 #include "kernel/sparse.h"
+#include "kernel/mem/kasan.h"
+#include "kernel/mem/slab.h"
 #include "common/errno.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/smp.h"
@@ -47,13 +49,8 @@ uint64_t sys_open(uint64_t arg1, uint64_t arg2, uint64_t arg3,
     /* 1. Copy user path */
     if (!upath) return (uint64_t)(-(uint64_t)EFAULT);
     char path[256];
-    int i;
-    for (i = 0; i < 255; i++) {
-        char c = ((const char __force *)upath)[i];
-        if (c == '\0') break;
-        path[i] = c;
-    }
-    path[i] = '\0';
+    if (copy_from_user(path, upath, 255)) return (uint64_t)(-(uint64_t)EFAULT);
+    path[255] = '\0';
 
     /* 2. /dev/ prefix — delegate to devtmpfs */
     if (path[0] == '/' && path[1] == 'd' && path[2] == 'e' &&
@@ -98,16 +95,13 @@ uint64_t sys_stat(uint64_t arg1, uint64_t arg2, uint64_t _u1,
 
     if (!upath) return (uint64_t)(-(uint64_t)EFAULT);
     char path[256];
-    int i;
-    for (i = 0; i < 255; i++) {
-        char c = ((const char __force *)upath)[i];
-        if (c == '\0') break;
-        path[i] = c;
-    }
-    path[i] = '\0';
+    if (copy_from_user(path, upath, 255)) return (uint64_t)(-(uint64_t)EFAULT);
+    path[255] = '\0';
 
-    int rc = fat32_stat(path, (void __force *)stat_buf);
+    uint8_t kstat_buf[256];
+    int rc = fat32_stat(path, kstat_buf);
     if (rc != 0) return (uint64_t)(-(uint64_t)(-rc));
+    if (copy_to_user(stat_buf, kstat_buf, 256)) return (uint64_t)(-(uint64_t)EFAULT);
     return 0;
 }
 
@@ -118,13 +112,8 @@ uint64_t sys_mkdir(uint64_t arg1, uint64_t arg2, uint64_t _u1,
 
     if (!upath) return (uint64_t)(-(uint64_t)EFAULT);
     char path[256];
-    int i;
-    for (i = 0; i < 255; i++) {
-        char c = ((const char __force *)upath)[i];
-        if (c == '\0') break;
-        path[i] = c;
-    }
-    path[i] = '\0';
+    if (copy_from_user(path, upath, 255)) return (uint64_t)(-(uint64_t)EFAULT);
+    path[255] = '\0';
 
     int rc = fat32_mkdir(path);
     if (rc != 0) return (uint64_t)(-(uint64_t)(-rc));
@@ -138,13 +127,8 @@ uint64_t sys_unlink(uint64_t arg1, uint64_t _u1, uint64_t _u2,
 
     if (!upath) return (uint64_t)(-(uint64_t)EFAULT);
     char path[256];
-    int i;
-    for (i = 0; i < 255; i++) {
-        char c = ((const char __force *)upath)[i];
-        if (c == '\0') break;
-        path[i] = c;
-    }
-    path[i] = '\0';
+    if (copy_from_user(path, upath, 255)) return (uint64_t)(-(uint64_t)EFAULT);
+    path[255] = '\0';
 
     int rc = fat32_unlink(path);
     if (rc != 0) return (uint64_t)(-(uint64_t)(-rc));
@@ -158,13 +142,8 @@ uint64_t sys_rmdir(uint64_t arg1, uint64_t _u1, uint64_t _u2,
 
     if (!upath) return (uint64_t)(-(uint64_t)EFAULT);
     char path[256];
-    int i;
-    for (i = 0; i < 255; i++) {
-        char c = ((const char __force *)upath)[i];
-        if (c == '\0') break;
-        path[i] = c;
-    }
-    path[i] = '\0';
+    if (copy_from_user(path, upath, 255)) return (uint64_t)(-(uint64_t)EFAULT);
+    path[255] = '\0';
 
     int rc = fat32_rmdir(path);
     if (rc != 0) return (uint64_t)(-(uint64_t)(-rc));
@@ -180,15 +159,13 @@ uint64_t sys_dev_create(uint64_t arg1, uint64_t arg2, uint64_t arg3,
 
     if (!uname) return (uint64_t)(-(uint64_t)EFAULT);
     char name[32];
-    int i;
-    for (i = 0; i < 31; i++) {
-        char c = ((const char __force *)uname)[i];
-        if (c == '\0') break;
-        name[i] = c;
-    }
-    name[i] = '\0';
+    if (copy_from_user(name, uname, 31)) return (uint64_t)(-(uint64_t)EFAULT);
+    name[31] = '\0';
 
-    int rc = devtmpfs_create(name, dev_type, (struct dev_ops __force *)ops);
+    struct dev_ops kops;
+    if (copy_from_user(&kops, ops, sizeof(struct dev_ops))) return (uint64_t)(-(uint64_t)EFAULT);
+
+    int rc = devtmpfs_create(name, dev_type, &kops);
     if (rc != 0) return (uint64_t)(-(uint64_t)(-rc));
     return 0;
 }
@@ -208,7 +185,11 @@ uint64_t sys_getdents(uint64_t arg1, uint64_t arg2, uint64_t arg3,
     struct inode *ip = current_proc->fd_table[fd].inode;
     if (!ip) return (uint64_t)-EBADF;
 
-    int ret = fat32_getdents(ip->start_cluster, &current_proc->fd_table[fd].offset, (void __force *)buf, len);
-    if (ret < 0) return (uint64_t)(-(uint64_t)(-ret));
+    void *kbuf = kmalloc(len);
+    if (!kbuf) return (uint64_t)-ENOMEM;
+    int ret = fat32_getdents(ip->start_cluster, &current_proc->fd_table[fd].offset, kbuf, len);
+    if (ret < 0) { kfree(kbuf); return (uint64_t)(-(uint64_t)(-ret)); }
+    if (copy_to_user(buf, kbuf, ret)) { kfree(kbuf); return (uint64_t)(-(uint64_t)EFAULT); }
+    kfree(kbuf);
     return (uint64_t)ret;
 }

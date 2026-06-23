@@ -1,5 +1,6 @@
 #include "kernel/mem/slab.h"
 #include "kernel/mem/alloc.h"
+#include "kernel/mem/kasan.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "kernel/serial.h"
@@ -14,6 +15,7 @@ static const size_t class_sizes[NUM_KMALLOC_CLASSES] = {
 };
 
 // ===================== Slab 页初始化 =====================
+__attribute__((no_sanitize("kernel-address")))
 static void slab_page_init(Page *page, kmem_cache_t *cache, int cpu_id) {
     page->status = PAGE_SLAB;
     page->slab.cache = cache;
@@ -34,6 +36,7 @@ static void slab_page_init(Page *page, kmem_cache_t *cache, int cpu_id) {
 }
 
 // ===================== partial list 操作 =====================
+__attribute__((no_sanitize("kernel-address")))
 static void partial_add(kmem_cache_t *cache, Page *page) {
     page->slab.partial_next = cache->partial;
     page->slab.partial_prev = NULL;
@@ -43,6 +46,7 @@ static void partial_add(kmem_cache_t *cache, Page *page) {
     cache->partial = page;
 }
 
+__attribute__((no_sanitize("kernel-address")))
 static void partial_remove(kmem_cache_t *cache, Page *page) {
     if (page->slab.partial_prev) {
         page->slab.partial_prev->slab.partial_next = page->slab.partial_next;
@@ -57,6 +61,7 @@ static void partial_remove(kmem_cache_t *cache, Page *page) {
 }
 
 // ===================== slab_init =====================
+__attribute__((no_sanitize("kernel-address")))
 void slab_init() {
     for (int i = 0; i < NUM_KMALLOC_CLASSES; i++) {
         kmalloc_caches[i].obj_size = class_sizes[i];
@@ -68,6 +73,7 @@ void slab_init() {
 }
 
 // ===================== kmalloc =====================
+__attribute__((no_sanitize("kernel-address")))
 void *kmalloc(size_t size) {
     if (size == 0) return NULL;
 
@@ -76,7 +82,8 @@ void *kmalloc(size_t size) {
         size_t npages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
         Page *page = bfc_alloc_page(npages);
         if (!page) return NULL;
-        return (__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(page));
+        void *ptr = (__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(page));
+        return ptr;
     }
 
     int c = size_to_class(size);
@@ -89,6 +96,7 @@ void *kmalloc(size_t size) {
         void *obj = active->slab.freelist;
         active->slab.freelist = *(void **)obj;
         active->slab.inuse++;
+        kasan_slab_alloc(obj, cache->obj_size);
         return obj;
     }
 
@@ -108,6 +116,7 @@ void *kmalloc(size_t size) {
         page->slab.freelist = *(void **)obj;
         page->slab.inuse++;
         spin_unlock_irqrestore(&cache->lock, flags);
+        kasan_slab_alloc(obj, cache->obj_size);
         return obj;
     }
 
@@ -125,10 +134,12 @@ void *kmalloc(size_t size) {
     new_page->slab.freelist = *(void **)obj;
     new_page->slab.inuse++;
     spin_unlock_irqrestore(&cache->lock, flags);
+    kasan_slab_alloc(obj, cache->obj_size);
     return obj;
 }
 
 // ===================== kfree =====================
+__attribute__((no_sanitize("kernel-address")))
 void kfree(const void *ptr) {
     if (!ptr) return;
 
@@ -138,6 +149,7 @@ void kfree(const void *ptr) {
 
     if (page->status == PAGE_USED) {
         // BFC 大分配释放
+        kasan_bfc_free(ptr, page->bfc.cont_page_num * PAGE_SIZE);
         bfc_free_page(page, page->bfc.cont_page_num);
         return;
     }
@@ -146,6 +158,8 @@ void kfree(const void *ptr) {
         serial_puts("kfree: bad page status\n");
         return;
     }
+
+    kasan_slab_free(ptr, page->slab.cache->obj_size);
 
     kmem_cache_t *cache = page->slab.cache;
     int my_cpu = get_cpu_local()->cpu_id;
@@ -185,6 +199,7 @@ void kfree(const void *ptr) {
 }
 
 // ===================== kcalloc =====================
+__attribute__((no_sanitize("kernel-address")))
 void *kcalloc(size_t n, size_t size) {
     if (n && size && n > (size_t)-1 / size) return NULL;
     size_t total = n * size;
@@ -198,6 +213,7 @@ void *kcalloc(size_t n, size_t size) {
 }
 
 // ===================== krealloc =====================
+__attribute__((no_sanitize("kernel-address")))
 void *krealloc(void *ptr, size_t new_size) {
     if (!ptr) return kmalloc(new_size);
     if (new_size == 0) { kfree(ptr); return NULL; }

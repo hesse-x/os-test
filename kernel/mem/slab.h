@@ -32,10 +32,10 @@ static inline int size_to_class(size_t size) {
     return 8;  // <= 2048
 }
 
-void slab_init(void);
-void *kmalloc(size_t size) __must_check;
-void kfree(const void *ptr);
-void *kcalloc(size_t n, size_t size) __must_check;
-void *krealloc(void *ptr, size_t new_size) __must_check;
+void slab_init(void) __attribute__((no_sanitize("kernel-address")));
+void *kmalloc(size_t size) __must_check __attribute__((no_sanitize("kernel-address")));
+void kfree(const void *ptr) __attribute__((no_sanitize("kernel-address")));
+void *kcalloc(size_t n, size_t size) __must_check __attribute__((no_sanitize("kernel-address")));
+void *krealloc(void *ptr, size_t new_size) __must_check __attribute__((no_sanitize("kernel-address")));
 
 #endif // KERNEL_MEM_SLAB_H

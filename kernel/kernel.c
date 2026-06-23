@@ -20,8 +20,10 @@
 #include "kernel/acpi.h"
 #include "kernel/pci.h"
 #include "common/dev.h"
+#include "kernel/mem/kasan.h"
 
 
+__attribute__((no_sanitize("kernel-address")))
 void kernel_init_finish() {
   // 禁止 bump 分配器
   bump_disable();
@@ -112,6 +114,7 @@ void kernel_main(boot_info *bi) {
   acpi_init(bi->rsdp);
   isr_init();
   kernel_init_finish();
+  kasan_init();
   slab_init();
 
   sig_init();   // allocate signal trampoline page (shared across all processes)

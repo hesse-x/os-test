@@ -40,7 +40,7 @@ static tss_t boot_tss;
 const uint8_t stack_bottom[8192]
     __attribute__((aligned(16))) = {0};
 
-void gdt_init() {
+__attribute__((no_sanitize("kernel-address"))) void gdt_init() {
   // 物理地址阶段：使用静态 GDT（RIP-relative 自动给出物理地址）
   set_gdt_gate(0, 0, 0, 0, 0);
   set_gdt_gate(1, 0, 0, 0x9A, 0x02);    // kernel code64 (L=1)
@@ -82,7 +82,7 @@ __attribute__((aligned(4096))) uint64_t page_dir[512];
 // 注意：此时 higher-half 不可访问，必须通过物理地址指针操作页表
 // CR3 加载后 identity map + higher-half 生效，才能访问 VMA
 // 返回: rax = &gdtr(栈/物理地址), rdx = &far_ptr(栈/物理地址)
-__attribute__((noinline)) void enable_paging(boot_info *bi_phys) {
+__attribute__((noinline, no_sanitize("kernel-address"))) void enable_paging(boot_info *bi_phys) {
   (void)bi_phys;
 
   // === 构建页表 (2MB huge pages) ===
@@ -124,11 +124,11 @@ uintptr_t device_vma_base = 0;
 static uintptr_t bump_next_phys;
 static bool bump_disabled = false;
 
-void bump_init_phys(uintptr_t start) {
+__attribute__((no_sanitize("kernel-address"))) void bump_init_phys(uintptr_t start) {
   bump_next_phys = ALIGN_UP(start, PAGE_SIZE);
 }
 
-void *bump_alloc(size_t size) {
+__attribute__((no_sanitize("kernel-address"))) void *bump_alloc(size_t size) {
   if (bump_disabled) {
     halt();
   }
@@ -137,7 +137,7 @@ void *bump_alloc(size_t size) {
   return (void *)(phys + VMA_BASE);
 }
 
-void bump_disable() { bump_disabled = true; }
+__attribute__((no_sanitize("kernel-address"))) void bump_disable() { bump_disabled = true; }
 
 // ===================== extend_mapping =====================
 // 扩展 higher-half 映射：为超出初始 1GB 的物理 RAM 分配 PDPT+PD
@@ -147,7 +147,7 @@ void bump_disable() { bump_disabled = true; }
 //   所以 higher-half 从 PDPT_hh[510] 开始
 //   后续 1GB 块使用 PDPT_hh[511], PDPT_hh[512-overflow]...
 //   注意: PDPT_hh[511] 已被 PML4 自映射占用时需要换 PDPT
-void extend_mapping(uint64_t max_phys_addr) {
+__attribute__((no_sanitize("kernel-address"))) void extend_mapping(uint64_t max_phys_addr) {
   // 计算需要多少个 1GB 块
   size_t max_1gb_block = (size_t)(max_phys_addr / 0x40000000);
 
@@ -205,13 +205,13 @@ void flush_tlb() {
 }
 
 // ===================== bump allocator query =====================
-uintptr_t bump_end_phys() {
+__attribute__((no_sanitize("kernel-address"))) uintptr_t bump_end_phys() {
   return bump_next_phys;
 }
 
 // ===================== NX bit enable =====================
 // Set CR4.NXDE (bit 5) and EFER.NXE (bit 11) to enable no-execute pages.
-void enable_nx() {
+__attribute__((no_sanitize("kernel-address"))) void enable_nx() {
   // Enable CR4.NXDE
   uint64_t cr4 = read_cr4();
   cr4 |= (1ULL << 5);
