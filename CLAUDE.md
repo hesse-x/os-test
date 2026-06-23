@@ -16,8 +16,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 微内核设计原则
 
-- **最小内核**：内核仅包含调度、内存管理、中断分发、系统调用等不可替代的机制。AHCI 在内核空间，键盘/KMS 渲染/文件系统等驱动在用户态运行
-- **用户态服务**：shell 及驱动进程作为独立用户进程从磁盘加载，拥有独立地址空间，通过 syscall 和 IPC 通信
+- **最小内核**：内核仅包含调度、内存管理、中断分发、系统调用、FAT32 文件系统、块设备抽象等不可替代的机制。AHCI 在内核空间，键盘等驱动在用户态运行
+- **用户态服务**：shell 及部分驱动进程作为独立用户进程从磁盘加载，拥有独立地址空间，通过 syscall 和 IPC 通信
 - **四层 IPC**：req/resp（≤56B 内联）+ msg/msg_resp（≤64KB 变长）+ AF_UNIX SOCK_STREAM socket（双向字节流 + SCM_RIGHTS）+ pipe（匿名单向）。详见 `doc/design/rpc.md`、`doc/design/socket.md`
 - **用户态 libc**：libc.a 提供 printf/malloc/string/FILE 等标准库函数。详见 `doc/design/libc.md`
 - **进程隔离**：每进程独立地址空间和 PML4，共享内核映射。详见 `doc/design/process_lifecycle.md`
@@ -36,7 +36,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 构建体系为 CMake + 自定义链接脚本。详见 `doc/design/cmake_user_build.md`。
 
-**磁盘布局**：disk.img（64MB），LBA 0=MBR，LBA 101-200=fs_driver.elf，LBA 201-300=init.elf，LBA 301+=FAT32。详见 `doc/design/fat32.md`。
+**磁盘布局**：disk.img（64MB），LBA 0=MBR，LBA 101-200=init.elf，LBA 201+=FAT32。详见 `doc/design/fat32.md`。
 
 **重要：** `add_library(OBJECT)` 不能设置 `POSITION_INDEPENDENT_CODE ON`，否则加 `-fPIC` 破坏 RIP-relative 寻址。
 
@@ -47,7 +47,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 启动流程
 
 ```
-UEFI → BOOTX64.EFI → 加载 myos.elf → ExitBootServices → _start(物理地址) → enable_paging → kernel_main → 用户进程
+UEFI → BOOTX64.EFI → 加载 myos.elf → ExitBootServices → _start(物理地址) → enable_paging → kernel_main（VFS/FAT32初始化）→ 用户进程
 ```
 
 详见 `doc/design/boot.md`。
@@ -84,28 +84,32 @@ arch/x64/
 
 kernel/
   CMakeLists.txt
-  kernel.cc / kernel.h — kernel_main
-  serial.cc / serial.h — COM1 串口（NSERIAL 门控）
-  trap.cc / trap.h    — trap_dispatch + syscall_dispatch + 46个syscall + IRQ注册表
-  proc.cc / proc.h    — PCB, switch_to, schedule, proc_reap
-  fb.cc / fb.h        — init_fb（framebuffer 物理页映射）
-  ahci.cc / ahci.h    — AHCI DMA 驱动
-  socket.cc / socket.h — AF_UNIX SOCK_STREAM + SCM_RIGHTS
-  list.h              — 内嵌双向链表
-  spinlock.h          — spinlock_t
+  kernel.c / kernel.h   — kernel_main
+  serial.c / serial.h   — COM1 串口（NSERIAL 门控）
+  trap.c / trap.h       — trap_dispatch + syscall_dispatch + 57个syscall + IRQ注册表
+  proc.c / proc.h       — PCB, switch_to, schedule, proc_reap
+  fb.c / fb.h           — init_fb（framebuffer 物理页映射）
+  ahci.c / ahci.h       — AHCI DMA 驱动
+  socket.c / socket.h   — AF_UNIX SOCK_STREAM + SCM_RIGHTS
+  vfs.c / vfs.h         — VFS 层（sys_open/sys_stat/sys_mkdir/sys_unlink/sys_rmdir/sys_dev_create）
+  fat32.c / fat32.h     — FAT32 内核文件系统（路径解析/读写/创建/删除/目录操作）
+  inode.c / inode.h     — inode cache（hash 表+引用计数+inode_put）
+  page_cache.c / page_cache.h — 4KB page cache（LRU淘汰+写回）
+  blk_dev.c / blk_dev.h — 块设备抽象层（AHCI 同步封装+spinlock）
+  devtmpfs.c / devtmpfs.h — /dev/ 内存伪文件系统（设备节点注册+open）
+  list.h                — 内嵌双向链表
+  spinlock.h            — spinlock_t
   mem/
-    alloc.cc / alloc.h — Bump/BFC 分配器
-    slab.cc / slab.h   — Slab 分配器
-    user_mapping.cc    — 用户页映射辅助
+    alloc.c / alloc.h   — Bump/BFC 分配器
+    slab.c / slab.h     — Slab 分配器
+    user_mapping.c      — 用户页映射辅助
 
 driver/
   CMakeLists.txt
   kbd_driver.cc       — 用户态键盘驱动（USB HID SHM）
-  kms_driver.cc       — 用户态 KMS 显示驱动
-  display.h           — Display 协议（SHM + generation counter）
+  display.h           — Display 协议（req CREATE_BUF/FLIP + client API）
   font.h              — 8x16 字体
   terminal.cc         — 用户态 Terminal（VT100 + Display client）
-  fs_driver.cc        — 用户态 FAT32 文件系统驱动
 
 init/
   init.c              — init 进程（spawn 驱动 + waitpid）
@@ -150,14 +154,14 @@ tutorial/
 | `pcie.md` | PCIe ECAM 枚举与 BAR 分配 |
 | `xhci.md` | xHCI USB 控制器驱动 |
 | `kbd.md` | USB HID 键盘驱动 |
-| `kms.md` | KMS 显示驱动与 Display 协议 |
+| `kms.md` | KMS 内核态驱动（display buffer 分配 + req flip + devtmpfs /dev/kms） |
 | `terminal_split.md` | Terminal 进程设计 |
 | `driver_workflow.md` | 用户态驱动工作流 |
-| `file_system.md` / `fat32.md` | FAT32 文件系统 |
+| `file_system.md` / `fat32.md` | FAT32 文件系统（内核化，详见 vfs.md） |
 | `libc.md` | 用户态 libc 设计 |
 | `shm.md` | SHM fd + mmap 模型 |
 | `socket.md` | AF_UNIX SOCK_STREAM + SCM_RIGHTS + poll |
-| `vfs.md` | VFS 统一 I/O（FD_FILE + 内核代理 IPC） |
+| `vfs.md` | VFS 统一 I/O（FAT32 内核化 + inode + page cache + devtmpfs） |
 | `dev_table.md` | 设备注册表与动态发现 |
 | `cmake.md` / `cmake_user_build.md` | CMake 构建系统 |
 | `shell.md` | Shell 命令设计 |
@@ -174,13 +178,15 @@ tutorial/
 - `add_library(OBJECT)` 不能设 `POSITION_INDEPENDENT_CODE ON`
 - 用户程序编译加 `-I. -Iuser/include` 让自定义头文件优先
 - libc.a 为 CMake target `c`，用户 ELF 通过 `LINK_LIBS c` 链接
+- FAT32 锁获取顺序：`i_lock → fat_lock → ahci_lock`（固定，防死锁）
+- inode 号 (ino) = FAT32 start_cluster（自然唯一），设备 inode 自动递增分配
 
 ## 开发备注
 
 - 默认串口输出到 stdio（终端）；`--log-serial` 时串口走 Unix socket `/tmp/qemu-serial.sock`，另开终端用 `socat -,rawer UNIX-CONNECT:/tmp/qemu-serial.sock | tee log.txt` 捕获
 - `.clang-format` = LLVM 风格
 - `outb/inb/wrmsr/rdmsr/IrqGuard` 统一在 `arch/x64/utils.h`
-- 驱动自注册：`device_register(getpid(), DEV_XXX)`
+- 驱动自注册：`dev_create("/dev/xxx", DEV_XXX, &ops)` → devtmpfs inode
 
 # 编程指导原则
 

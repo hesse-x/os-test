@@ -307,6 +307,38 @@ static inline int sys_sigreturn(void) {
 static inline int sys_debug_print(const char *buf, int len) {
     return (int)__syscall2(SYS_DEBUG_PRINT, (int64_t)(uintptr_t)buf, (int64_t)len);
 }
+
+// ===================== VFS syscalls =====================
+#define SYS_OPEN        51
+#define SYS_STAT        52
+#define SYS_MKDIR       53
+#define SYS_UNLINK      54
+#define SYS_RMDIR       55
+#define SYS_DEV_CREATE  56
+
+static inline int sys_open(const char *path, int flags, ...) {
+    return (int)__syscall2(SYS_OPEN, (int64_t)(uintptr_t)path, (int64_t)flags);
+}
+
+static inline int sys_stat(const char *path, void *stat_buf) {
+    return (int)__syscall2(SYS_STAT, (int64_t)(uintptr_t)path, (int64_t)(uintptr_t)stat_buf);
+}
+
+static inline int sys_mkdir(const char *path, uint32_t mode) {
+    return (int)__syscall2(SYS_MKDIR, (int64_t)(uintptr_t)path, (int64_t)mode);
+}
+
+static inline int sys_unlink(const char *path) {
+    return (int)__syscall1(SYS_UNLINK, (int64_t)(uintptr_t)path);
+}
+
+static inline int sys_rmdir(const char *path) {
+    return (int)__syscall1(SYS_RMDIR, (int64_t)(uintptr_t)path);
+}
+
+static inline int sys_dev_create(const char *name, uint32_t dev_type, uintptr_t ops) {
+    return (int)__syscall3(SYS_DEV_CREATE, (int64_t)(uintptr_t)name, (int64_t)dev_type, (int64_t)ops);
+}
 #endif // __KERNEL__
 
 #endif // COMMON_SYSCALL_H

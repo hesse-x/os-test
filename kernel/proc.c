@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "kernel/proc.h"
+#include "kernel/inode.h"
 #include "kernel/serial.h"
 #include "kernel/trap.h"
 #include "kernel/trap.h"
@@ -596,6 +597,9 @@ void proc_reap(proc_t *proc) {
                     kfree(p);
                 }
             }
+        } else if (proc->fd_table[fd].type == FD_REGULAR) {
+            struct inode *ip = proc->fd_table[fd].inode;
+            if (ip) inode_put(ip);
         } else if (proc->fd_table[fd].type == FD_FILE) {
             proc->fd_table[fd].file_data.ref_count--;
             if (proc->fd_table[fd].file_data.ref_count == 0 && proc->fd_table[fd].file_data.fs_pid >= 0) {

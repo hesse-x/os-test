@@ -1,12 +1,18 @@
-# KMS 用户态驱动设计
+# KMS 内核态驱动设计
 
 ## 概述
 
-将内核态 framebuffer 渲染（`kernel/fb.cc`）移至用户态 KMS 驱动进程。内核完全不参与 framebuffer 管理，文本渲染、光标管理、滚动逻辑、显示设备初始化均在用户态完成。
+将 KMS 显示驱动从用户态进程搬入内核，与 Linux/Mac 模型对齐：内核负责显示设备初始化、back buffer 分配、page flip；用户态 compositor（terminal）负责像素渲染。
 
-**定位**：KMS 只负责 framebuffer 输出（back buffer → front buffer flip）和显示设备初始化（PCI VBE modeset），不负责渲染。Terminal 作为 compositor 负责像素渲染（cell → glyph → 像素 → back buffer）。此架构与 Linux 模型一致：compositor 渲染像素，KMS/DRM 只做 scanout/flip。Buffer 由 KMS 分配（与 Linux DRM 模型一致），compositor 通过 attach 访问。
+**动机**：
+- 与 Linux DRM/KMS 模型一致——Linux 的 KMS 在内核，compositor 在用户态通过 ioctl 请求 flip
+- 性能优化——消除 KMS 用户进程的 IPC 上下文切换开销，flip 在内核同步完成
 
-**FB 来源**：KMS 驱动通过 PCI ECAM 枚举 bochs-display 设备，mmap BAR0（VBE MMIO 寄存器）和 BAR1（帧缓冲内存），自主初始化显示设备。不再依赖 UEFI GOP 传递 framebuffer 物理地址。详见 [Phase 3: PCI VBE 原生显示驱动](#phase-3-pci-vbe-原生显示驱动)。
+**定位**：KMS 只负责 framebuffer 输出（back buffer → front buffer flip）和显示设备初始化，不负责渲染。Terminal 作为 compositor 负责像素渲染（cell → glyph → 像素 → back buffer），通过 req(fd, FLIP) 请求内核做 flip。此架构与 Linux DRM 模型一致：compositor 渲染像素，内核 KMS 做 scanout/flip。
+
+**不做完整 DRM**：当前实现最小 KMS 功能集（buffer 创建 + flip），不支持 DRM 的 CRTC/Plane/Connector 模型、GEM buffer manager、fence/sync、多客户端仲裁。未来需要时再扩展。
+
+**依赖**：本设计建立在 VFS 重构（devtmpfs + dev_ops）之后。详见 [vfs.md](vfs.md)。
 
 ## 架构
 
@@ -18,660 +24,455 @@ Shell (PID 6)
 Terminal (PID 5, compositor)
   │
   │ 1. 读 pipe → VT100 parse → 更新 cell buffer (内部)
-  │ 2. 渲染 cell → glyph → 像素 → 写入 back buffer (display SHM)
-  │ 3. 标记 dirty_full + 递增 generation → notify KMS
+  │ 2. 渲染 cell → glyph → 像素 → 写入 back buffer (mmap'd)
+  │ 3. req(fd, DISPLAY_REQ_FLIP) → 内核同步 memcpy back → front
   ▼
-KMS Driver (PID 4, IOPL=0)
+内核 KMS (kernel/display.cc)
   │
-  │ 读 generation → memcpy back buffer → front buffer → 验证 generation
+  │ 同步 memcpy back buffer → front buffer
   ▼
 Framebuffer 硬件 (front buffer)
 ```
 
-KMS 是 IOPL=0 的普通用户态进程，不绑 IRQ。Framebuffer 由 KMS 驱动通过 PCI BAR1 `mmap(MAP_PHYSICAL)` 获取，KMS 驱动只做 memcpy flip。
+KMS 是内核子系统，不是独立进程。Terminal 通过 `/dev/kms` 设备节点与内核 KMS 交互：
+
+```
+open("/dev/kms") → fd (devtmpfs inode, dev_ops.kernel_owned=true)
+  │
+  ├─ req(fd, DISPLAY_REQ_CREATE_BUF, {width, height, bpp})
+  │    → 内核分配 back buffer，返回 {pitch, size, rows, cols}
+  │
+  ├─ mmap(fd, size)
+  │    → 映射内核分配的 back buffer（纯像素数据，无 header）
+  │
+  └─ req(fd, DISPLAY_REQ_FLIP)
+     → 内核同步 memcpy back → front，返回成功
+```
 
 ## Display 协议
 
-### 设计动机
+### 与 Linux DRM 的对应关系
 
-旧协议是逐字符命令流（KMS_CMD_PUTC），terminal 每个字符发一条 16 字节消息到 kms_ring（容量 240 条）。一次 scroll 刷新 = 80×45 = 3600 条消息，远超 ring 容量，导致 terminal 在 `write_kms_ring` 里 busy-wait（`sched_yield` 循环），无法读 pipe 和 kbd_ring，整条流水线阻塞。
+| Linux DRM | 本 OS | 说明 |
+|-----------|-------|------|
+| `/dev/dri/card0` | `/dev/kms` | devtmpfs 设备节点 |
+| `DRM_IOCTL_MODE_CREATE_DUMB` | `req(fd, DISPLAY_REQ_CREATE_BUF)` | compositor 指定分辨率，内核分配 buffer |
+| `DRM_IOCTL_MODE_MAP_DUMB` | `mmap(fd, size)` | 映射纯像素 buffer（当前只有一个 buffer，无需 handle→offset 间接层） |
+| `DRM_IOCTL_MODE_PAGE_FLIP` | `req(fd, DISPLAY_REQ_FLIP)` | 同步 flip（未来扩展异步+vblank） |
+| 内核 DRM driver 分配 buffer | 内核 display.cc 分配 | 物理页分配，compositor mmap |
+| 内核 CRTC page flip | 内核 memcpy back→front | 当前软件 flip，未来硬件 page flip |
 
-新协议让 terminal 直接渲染像素到共享 back buffer，KMS 只做 dirty 区域 flip。一次 scroll = 1 次 dirty 标记 + notify，彻底解耦生产与消费。
+### req 协议定义
+
+```c
+// driver/display.h
+
+// ===== Display request 常量 =====
+#define DISPLAY_REQ_CREATE_BUF  1   // 创建 back buffer
+#define DISPLAY_REQ_FLIP        2   // 请求 page flip
+
+// ===== CREATE_BUF request =====
+struct display_create_buf_req {
+    uint32_t width;      // compositor 指定（当前只接受 800）
+    uint32_t height;     // compositor 指定（当前只接受 600）
+    uint32_t bpp;        // compositor 指定（当前只接受 32）
+};
+
+// ===== CREATE_BUF response =====
+struct display_create_buf_resp {
+    uint32_t pitch;      // 内核返回（width * bytes_per_pixel）
+    uint32_t size;       // 内核返回（pitch * height）
+    uint32_t rows;       // 内核返回（height / FONT_HEIGHT）
+    uint32_t cols;       // 内核返回（width / FONT_WIDTH）
+    int32_t  result;     // 0=成功, -EINVAL=不支持分辨率
+};
+
+// ===== FLIP request =====
+// 无额外参数，req type = DISPLAY_REQ_FLIP 即可
+
+// ===== FLIP response =====
+struct display_flip_resp {
+    int32_t result;      // 0=成功
+};
+```
 
 ### Buffer 所有权
 
-与 Linux DRM 模型一致，**KMS 创建 display SHM**（back buffer），terminal 通过 `sys_lookup_dev(DEV_KMS)` + `sys_shm_attach` 访问。KMS 拥有 buffer 生命周期，因为：
+与 Linux DRM 模型一致，**内核分配 back buffer**。Compositor 通过 `req(fd, CREATE_BUF)` 请求分配，通过 `mmap(fd)` 映射访问。
 
-- KMS 是 flip 引擎，了解硬件约束
-- 未来硬件 page flip 时 KMS 需要控制 buffer 物理地址对齐
-- 与 Linux 模型一致：DRM 分配 framebuffer object，compositor 通过 GBM/DRM ioctl 请求分配
+- 内核是 flip 引擎，了解硬件约束，拥有 buffer 生命周期
+- 与 Linux 一致：DRM 分配 framebuffer object，compositor 通过 ioctl 请求分配
+- Compositor 不调 `sys_fb_info`——元信息从 CREATE_BUF response 获取
 
-Terminal 从 display SHM header 读取 fb 元信息（width/height/pitch/bpp/rows/cols），**不再调 `sys_fb_info`**——KMS 是 fb_info 的唯一权威来源。
+### Buffer 布局
 
-### 接口封装
-
-#### driver/display.h（统一文件，双侧 API）
-
-```c
-// ===== display_shm_header（KMS 和 terminal 共享）=====
-
-struct display_shm_header {
-    // 元信息（KMS 写，terminal 读）
-    uint32_t fb_width;          // 像素宽
-    uint32_t fb_height;         // 像素高
-    uint32_t fb_pitch;          // 字节/行
-    uint32_t fb_bpp;            // 位/像素（当前仅支持 32）
-    uint32_t rows;              // 文本行数 (fb_height / FONT_HEIGHT)
-    uint32_t cols;              // 文本列数 (fb_width / FONT_WIDTH)
-    uint32_t cursor_x;          // 光标列（保留，未来硬件光标）
-    uint32_t cursor_y;          // 光标行（保留，未来硬件光标）
-
-    // dirty 追踪（terminal 写，KMS 读后清零）
-    uint32_t dirty_full;        // 1 = 全屏 dirty
-
-    // 并发同步
-    uint32_t generation;        // terminal flush 时递增，KMS flip 前后校验
-    uint8_t  backend_sleeping;  // KMS 设 1 后进 recv，terminal 据此决定是否 notify
-    uint8_t  reserved[3];
-
-    // 保留
-    uint8_t  reserved2[28];
-};
-
-// ===== Client API（terminal 侧）=====
-
-// 初始化：attach display SHM，从 header 读 fb 元信息
-int display_client_init();
-
-// 渲染单个 cell 到 back buffer（ch 为 ASCII，fg/bg 为 32bit 颜色）
-// 纯像素渲染，不处理特殊字符（\n/\r/\b/\t 由 VT100 层处理）
-void display_client_render_cell(uint32_t row, uint32_t col,
-                                uint8_t ch, uint32_t fg, uint32_t bg);
-
-// 清空 back buffer（填 bg 颜色），标记 dirty_full
-void display_client_clear(uint32_t bg);
-
-// 在 back buffer 上执行 scroll（memmove 向上搬像素行，uint32_t 循环清末行）
-void display_client_scroll_up(uint32_t bg);
-
-// 设置光标位置（更新 header 元信息，供未来硬件光标）
-void display_client_set_cursor(uint32_t x, uint32_t y);
-
-// 标记 dirty_full + 递增 generation + 检查 backend_sleeping 决定是否 notify
-// 内部守卫：dirty_full==0 时直接返回，不递增 generation 也不 notify
-void display_client_flush();
-
-// ===== Backend API（KMS 侧）=====
-
-// 初始化：PCI 遍历发现 bochs-display → mmap BAR0(VBE regs) + BAR1(fb) →
-// VBE modeset 800x600x32 → sys_shm_create 创建 display SHM →
-// 写入 header 元信息 → 注册 DEV_KMS
-int display_backend_init();
-
-// 轮询：检查 dirty_full，memcpy back → front，验证 generation
-// 返回是否有工作（1=处理了 dirty，0=无 dirty）
-int display_backend_poll();
-
-// 等待：设 backend_sleeping=1 → double-check dirty → recv 超时等待
-void display_backend_wait(uint32_t timeout_ms);
-```
-
-### Display SHM 布局
-
-由 KMS 通过 `sys_shm_create` 创建，terminal 通过 `sys_lookup_dev(DEV_KMS)` + `sys_shm_attach` 访问。
+纯像素 buffer，无 header 嵌入。与 Linux DRM `CREATE_DUMB` 一致：buffer 是纯像素数据，元信息来自 ioctl/response。
 
 ```
-page 0 (offset 0):      display_shm_header (64 bytes) + 保留 (4032 bytes)
-page 1+ (offset 4096):  back buffer (fb_height × fb_pitch 字节，页对齐)
+back buffer: fb_height × fb_pitch 字节，纯像素数据（32bpp RGBA）
 ```
 
-Header 占一整页（4096 字节），back buffer 从第二页开始，页对齐。为未来 huge page 映射预留空间。
+ mmap(fd) 直接返回指向 buffer 起始地址的指针，无 header 页。
 
-### 并发同步：generation counter
+### 分辨率协商
 
-Terminal 和 KMS 并发访问 back buffer，存在竞争窗口：terminal flush 后继续渲染新内容，同时 KMS 正在 memcpy 旧内容到 front buffer。
+Compositor 在 CREATE_BUF req 中指定 width/height/bpp。内核验证是否支持，当前只接受 800×600×32，其他返回 `-EINVAL`。
 
-解法：**乐观锁（generation counter）**。
-
-- Terminal `display_client_flush()` 操作顺序：**先扩展 dirty，再递增 generation**。KMS 看到 generation 变化时，dirty 一定已更新完毕
-- Terminal 只扩展 dirty 标记（不清零），KMS 在 g1==g2 时清零 `dirty_full`
-- KMS 在 memcpy 前读 `generation`（g1），memcpy 后再读一次（g2）
-- 若 g1 == g2：清零 `dirty_full`，返回有工作
-- 若 g1 != g2：不清零，返回有工作（主循环 `continue` 再进 poll，此时 dirty_full 仍为 1）
-- 无阻塞，无锁竞争，scroll 等大范围 dirty 时最多多拷一次
-- 比三缓冲省一半内存
-
-### dirty 追踪
-
-当前阶段只支持 `dirty_full`（全屏 dirty），不支持行级 dirty。理由：
-
-- Shell 文本输出场景下，scroll 和满行 wrap 几乎总是全屏 dirty，行级 dirty 收益小
-- Wayland 场景下天然是像素级 damage region，届时再加行级 dirty（`dirty_y_start`/`dirty_y_end` 像素行单位）是局部改动
+未来扩展可变分辨率时：
+- 内核维护支持的 mode 列表
+- Compositor 可 req(fd, DISPLAY_REQ_GET_MODES) 查询
+- CREATE_BUF 验证逻辑改为查 mode 列表
 
 ### Bpp 支持
 
-当前仅支持 32bpp。`display_client_init` 检查 `fb_bpp`，非 32 则报错。未来真机适配时再加 24bpp 路径。
+当前仅支持 32bpp。CREATE_BUF req 传 bpp=32，内核验证非 32 则返回 `-EINVAL`。未来真机适配时再加 24bpp。
 
 ### 光标渲染
 
-Terminal（compositor）负责所有像素渲染，包括光标。光标在 back buffer 上渲染（反色块或下划线），KMS 纯 flip 不知道光标。`cursor_x`/`cursor_y` 保留在 header 中供未来硬件光标用。
+Compositor（terminal）负责所有像素渲染，包括光标。光标在 back buffer 上渲染（反色块或下划线），内核 KMS 只做 flip，不知道光标。
 
-## IPC 拓扑（更新后）
+## req 分发路径
+
+基于 VFS devtmpfs + dev_ops 模型。`/dev/kms` 是 devtmpfs inode（`INODE_DEV`），`dev_ops` 标记为内核设备：
+
+```c
+// kernel/devtmpfs.c — KMS 设备注册
+struct dev_ops kms_dev_ops = {
+    .driver_pid = 0,           // 0 = 内核设备，不走 IPC 代理
+    .device_type = DEV_KMS,
+};
+dev_create("/dev/kms", S_IFCHR, &kms_dev_ops);
+```
+
+`sys_req` 分发逻辑：
+
+```c
+// kernel/trap.c — sys_req 内部
+if (fd->type == FD_DEV) {
+    dev_ops *ops = (dev_ops*)fd->inode->i_priv;
+    if (ops->driver_pid == 0) {
+        // 内核设备：直接处理，不走 IPC
+        return kernel_dev_req_dispatch(fd, req_type, req_data, req_len,
+                                       resp_data, resp_len);
+    } else {
+        // 用户态驱动：IPC 代理转发（现有逻辑）
+        return ipc_proxy_req(fd, ...);
+}
+```
+
+`kernel_dev_req_dispatch` 内部根据 `ops->dev_type` 分发：
+
+```c
+int kernel_dev_req_dispatch(...) {
+    if (ops->device_type == DEV_KMS) {
+        return display_req_handler(req_type, req_data, req_len, resp_data, resp_len);
+    }
+    return -ENODEV;
+}
+```
+
+`sys_mmap` 同理：发现 `driver_pid == 0` 的 FD_DEV → 映射内核分配的 display buffer 物理页到用户 PML4。
+
+## IPC 拓扑
 
 ```
-kbd_driver(PID3) ── SHM + notify ──→ terminal(PID5) ── pipe ──→ shell(PID6)
-                                            │
-                                            │ display SHM + notify
-                                            ▼
-                                     kms_driver(PID4)
-                                            │
-                                            │ memcpy flip
-                                            ▼
-                                     framebuffer (front buffer)
+kbd_driver(PID3) ── SHM + req ──→ terminal(PID5) ── pipe ──→ shell(PID6)
+                                        │
+                                        │ open("/dev/kms") → fd
+                                        │ req(fd, CREATE_BUF) → back buffer 元信息
+                                        │ mmap(fd) → back buffer 映射
+                                        │ req(fd, FLIP) → 内核 flip
+                                        ▼
+                                 内核 KMS (display.cc)
+                                        │
+                                        │ 同步 memcpy
+                                        ▼
+                                 framebuffer (front buffer)
 ```
 
-KMS 不再 attach kbd_driver SHM，与 kbd_driver 完全解耦。Terminal attach 两个 SHM：kbd SHM（键盘输入）+ display SHM（显示输出）。
+KMS 不再是用户进程，与 kbd_driver 完全解耦。Terminal 交互对象从两个用户进程变为：kbd_driver（用户态 SHM）+ 内核 KMS（req + mmap）。
+
+## 内核实现
+
+### kernel/display.c + kernel/display.h（新增）
+
+```c
+// kernel/display.h
+
+// 内核 display 子系统
+struct display_state {
+    uint8_t  *front_fb;        // front buffer 内核虚拟地址（BAR1 映射或 init_fb 映射）
+    uint8_t  *back_buffer;     // back buffer 内核虚拟地址（内核分配）
+    uint64_t  back_buffer_phys; // back buffer 物理地址（mmap 映射时需要）
+    uint32_t  fb_width;        // 当前 mode
+    uint32_t  fb_height;
+    uint32_t  fb_pitch;
+    uint32_t  fb_bpp;
+    uint32_t  fb_size;         // pitch * height
+    uint32_t  rows;
+    uint32_t  cols;
+    bool      initialized;     // back buffer 是否已分配
+};
+
+// 初始化：映射 front buffer（当前从 bootloader fb_info，未来 PCI VBE）
+void display_init(boot_info_t *bi);
+
+// req 处理：CREATE_BUF / FLIP
+int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
+                        void *resp_data, uint32_t resp_len);
+
+// mmap 处理：映射 back buffer 到用户 PML4
+int display_mmap_handler(proc_t *proc, uint64_t size, uint64_t *out_vaddr);
+
+// devtmpfs 注册
+void display_dev_register();
+```
+
+### display_req_handler 实现
+
+```c
+int display_req_handler(uint32_t req_type, ...) {
+    switch (req_type) {
+    case DISPLAY_REQ_CREATE_BUF: {
+        display_create_buf_req *req = (display_create_buf_req *)req_data;
+        // 验证分辨率（当前硬编码只接受 800×600×32）
+        if (req->width != 800 || req->height != 600 || req->bpp != 32)
+            return -EINVAL;
+        // 分配 back buffer
+        g_display.back_buffer = alloc_contiguous_pages(g_display.fb_size);
+        g_display.back_buffer_phys = vaddr_to_phys(g_display.back_buffer);
+        g_display.initialized = true;
+        // 构造 response
+        display_create_buf_resp *resp = (display_create_buf_resp *)resp_data;
+        resp->pitch  = g_display.fb_pitch;
+        resp->size   = g_display.fb_size;
+        resp->rows   = g_display.fb_height / FONT_HEIGHT;
+        resp->cols   = g_display.fb_width / FONT_WIDTH;
+        resp->result = 0;
+        return 0;
+    }
+    case DISPLAY_REQ_FLIP: {
+        if (!g_display.initialized)
+            return -ENOENT;
+        // 同步 memcpy back → front
+        memcpy(g_display.front_fb, g_display.back_buffer, g_display.fb_size);
+        display_flip_resp *resp = (display_flip_resp *)resp_data;
+        resp->result = 0;
+        return 0;
+    }
+    default:
+        return -EINVAL;
+    }
+}
+```
+
+### display_mmap_handler 实现
+
+```c
+int display_mmap_handler(proc_t *proc, uint64_t size, uint64_t *out_vaddr) {
+    if (!g_display.initialized)
+        return -ENOENT;
+    // 映射 back buffer 物理页到用户地址空间
+    *out_vaddr = map_physical_pages_to_user(proc, g_display.back_buffer_phys,
+                                            g_display.fb_size);
+    return 0;
+}
+```
+
+### kernel/fb.c（保留，职责缩减）
+
+`init_fb` 保留——映射 front buffer 物理页到内核地址空间（从 bootloader 获取 fb 物理地址）。未来 PCI VBE Phase 后，`init_fb` 改为从 PCI BAR1 获取。
+
+```c
+// kernel/fb.c — 只做 front buffer 物理页映射
+void init_fb(boot_info_t *bi) {
+    // 从 bootloader 获取 framebuffer 物理地址
+    uint64_t fb_phys = bi->fb_addr;
+    uint64_t fb_size = bi->fb_size;
+    // 映射到内核 high-half 地址空间（pdpt_hh，2MB huge pages）
+    front_fb_vaddr = map_physical_to_kernel(fb_phys, fb_size);
+    // 保存到 g_display
+    g_display.front_fb = front_fb_vaddr;
+    g_display.fb_width  = bi->fb_width;
+    g_display.fb_height = bi->fb_height;
+    g_display.fb_pitch  = bi->fb_pitch;
+    g_display.fb_bpp    = bi->fb_bpp;
+    g_display.fb_size   = fb_size;
+}
+```
+
+### sys_fb_info — 删除
+
+`SYS_FB_INFO` syscall 不再需要——内核内部直接有 `g_display`，元信息通过 CREATE_BUF req response 传递给 compositor，不需要单独 syscall。
+
+### sys_req — 扩展
+
+`sys_req` 增加 `driver_pid == 0` 的内核设备分发路径。详见 [req 分发路径](#req-分发路径)。
+
+### sys_mmap — 扩展
+
+`sys_mmap` 对 FD_DEV（`driver_pid == 0`）增加内核设备 mmap 路径，调用 `display_mmap_handler` 映射 back buffer。
 
 ## 组件改动
 
 ### Terminal 改动
 
-- **删除**：`write_kms_ring()`、`kms_notify_driver()`、对 `kms_ring` 的直接操作、`font8x16` 字体表副本
-- **新增**：`display_client_init()`、`display_client_render_cell()`、`display_client_clear()`、`display_client_scroll_up()`、`display_client_flush()`
-- **`flush_dirty_cells()` 改造**：删除逐字符写 kms_ring 的逻辑，改为遍历 dirty 行的 cell → `display_client_render_cell()` 渲染到 back buffer → `display_client_flush()`
-- **scroll 改为 back buffer memmove**：不再发 KMS_CMD_SCROLL 命令，terminal 直接在 back buffer 上 `memmove` 像素行 + `uint32_t` 循环清空末行 + 标记 `dirty_full`
-- **fb_info 来源**：不再调 `sys_fb_info`，从 display SHM header 读取
-- **字体表**：使用 `common/font.h`（共享字体表）
-- **主循环**：`display_client_flush()` 每次迭代末尾调用，内部守卫（`dirty_full==0` 直接返回）避免无谓操作；只在有 dirty 时检查 `backend_sleeping` 并 notify KMS
+- **`display_client_init()`**：改为 `open("/dev/kms")` + `req(fd, CREATE_BUF, {800,600,32})` + 存元信息到本地变量 + `mmap(fd, size)`
+- **`display_client_flush()`**：改为 `req(fd, DISPLAY_REQ_FLIP)`（同步 flip，内核 memcpy 后返回）
+- **删除**：对 `display_shm_header` 的依赖（`dirty_full` / `generation` / `backend_sleeping`）
+- **保留不变**：`display_client_render_cell()`、`display_client_clear()`、`display_client_scroll_up()`、`display_client_set_cursor()`——仍操作 mmap'd back buffer 指针
+- **scroll**：terminal 直接在 back buffer 上 `memmove` 像素行（不变）
+- **光标**：terminal 在 back buffer 上渲染光标像素（不变）
+- **元信息来源**：从 CREATE_BUF response 存本地变量，不从 buffer header 读
 
-### KMS 驱动改动
+### driver/display.h（重构）
 
-- **删除**：`fb_putc()`、`scroll_up()`、`advance_line()`、`font8x16` 字体表、kms_ring 消费循环、所有渲染逻辑、光标状态
-- **删除**：对 kbd_driver SHM 的 attach（完全解耦）
-- **新增**：`display_backend_init()`、`display_backend_poll()`、`display_backend_wait()`
-- **启动流程**：PCI 遍历(寻找 class=0x0300, vendor=0x1234, device=0x1111) → mmap BAR0(VBE regs) → mmap BAR1(fb) → VBE modeset(800x600x32) → `sys_shm_create(n)` 创建 display SHM → 写 header 元信息 → `device_register(DEV_KMS)` → 进入 flip 主循环
-- **主循环**：
+统一文件，包含 req 常量 + request/response 结构体 + client API。**Backend API 删除**（内核内部，不暴露）。
 
 ```c
-while (1) {
-    if (display_backend_poll()) {
-        continue;  // 还有 dirty，继续处理
-    }
-    display_backend_wait(16);  // 无 dirty，等 16ms 或被 notify
-}
+// ===== Display request 常量 =====
+#define DISPLAY_REQ_CREATE_BUF  1
+#define DISPLAY_REQ_FLIP        2
+
+// ===== Request/Response 结构体 =====
+struct display_create_buf_req { ... };
+struct display_create_buf_resp { ... };
+struct display_flip_resp { ... };
+
+// ===== Client API（compositor 侧）=====
+
+// 初始化：open("/dev/kms") + req(CREATE_BUF) + mmap(fd)
+// 元信息存到本地变量，back_buffer 指针从 mmap 获得
+int display_client_init();
+
+// 渲染单个 cell 到 back buffer（纯像素操作，不涉及通信）
+void display_client_render_cell(uint32_t row, uint32_t col,
+                                uint8_t ch, uint32_t fg, uint32_t bg);
+
+// 清空 back buffer（填 bg 颜色）
+void display_client_clear(uint32_t bg);
+
+// 在 back buffer 上执行 scroll（memmove 像素行）
+void display_client_scroll_up(uint32_t bg);
+
+// 设置光标位置（纯本地状态，供 VT100 层使用）
+void display_client_set_cursor(uint32_t x, uint32_t y);
+
+// 请求内核 flip：req(fd, DISPLAY_REQ_FLIP)
+// 同步 memcpy back→front，调用返回时 flip 已完成
+void display_client_flush();
 ```
 
-- `display_backend_poll()` 内部：
-  1. 读 `generation`（g1）
-  2. 检查 `dirty_full == 1`，若无 dirty → 返回 0
-  3. memcpy 整个 back buffer → front buffer
-  4. 读 `generation`（g2）
-  5. 若 g1 == g2：清零 `dirty_full`，返回 1
-  6. 若 g1 != g2：不清零，返回 1（主循环 continue → 再进 poll 重拷）
+### common/font.h（保留）
 
-- `display_backend_wait()` 内部（double-check 防 lost-wakeup）：
-  1. 设 `backend_sleeping = 1`
-  2. 再 poll 一次，若有 dirty → 清 sleeping → 返回
-  3. 否则 `recv(timeout_ms)`
-  4. 醒来后清 `backend_sleeping = 0`
+`font8x16[96][16]` 字体表，terminal 像素渲染使用。KMS 进程删除后，只有 terminal 使用，但仍作为共享资源保留（未来 Wayland compositor 也需要）。
 
-### common/shm.h 改动
+### driver/kms_driver.cc（删除）
 
-- **删除**：`KMS_CMD_*` 常量、`kms_msg`、`kms_ring`、`KMS_RING_OFFSET`、`KMS_RING_SIZE`
-- **删除**：`driver_shm_header.kms_sleeping` 字段
-- **删除**：`driver_shm_header.kms_sleeping` 字段
-- **保留**：`driver_shm_header`（精简后：`kbd_sleeping` + `consumer_sleeping`）、`kbd_ring`、`kbd_msg`、`KBD_RING_OFFSET`
-- **删除**：`kms_fb_info`（fb 元信息改由 display_shm_header 提供）
-- **注意**：`display_shm_header` 放在 `driver/display.h`，不在 `common/shm.h`
+KMS 用户态进程不再存在，整文件删除。
 
-### driver/display.h（新增）
+### common/shm.h（清理）
 
-统一文件，包含 `display_shm_header` 结构体 + client API + backend API。只被 terminal 和 KMS 使用，不属于内核/用户态共享接口。
+- **删除**：`kms_fb_info` 结构体（fb 元信息改由 CREATE_BUF response 提供）
+- **保留**：`driver_shm_header`（kbd SHM）、`kbd_ring`、`kbd_msg`
 
-### common/font.h（新增）
+### init/init.c（修改）
 
-`font8x16[96][16]` 字体表，从 KMS 和 terminal 中提取为共享资源。任何需要像素渲染的组件都可使用。
+- **删除**：`spawn_service("/driver/kms.dev")` 和 `wait_dev_ready("/dev/kms")` —— KMS 不再是用户进程
+- `/dev/kms` 由内核在启动时通过 devtmpfs 注册，compositor `open("/dev/kms")` 即可获取
 
-## Framebuffer 映射细节
+### CMakeLists.txt（修改）
 
-- Front buffer：KMS 驱动通过 `sys_pci_dev_info` 读取 bochs-display BAR1 的物理地址和大小，通过 `mmap(MAP_PHYSICAL, bar1_phys, fb_size)` 映射到 KMS 进程地址空间
-- 映射标志：`MAP_PHYSICAL` + NX（不可执行），back buffer 用 `MAP_SHARED`
-- Back buffer：display SHM（KMS 通过 `sys_shm_create` 创建，terminal 通过 `mmap(fd, MAP_SHARED)` 访问），大小 = `fb_height × fb_pitch`，从 display SHM 第二页开始页对齐
-- VBE 寄存器：KMS 驱动通过 `sys_pci_dev_info` 读取 BAR0 的物理地址和大小，通过 `mmap(MAP_PHYSICAL, bar0_phys, 4096)` 映射到 KMS 进程地址空间
-- **内核完全不做 framebuffer 映射**，不再有 `init_fb`、`g_fb_info`、`map_fb` 参数
-
-## 内核改动
-
-### fb.cc
-
-**删除** `init_fb`。内核不再映射 framebuffer 物理页，不再保存 `g_fb_info`。
-
-### kernel_main
-
-- 删除 `init_fb(bi)` 调用
-- 删除 `process_create_elf` 的 `map_fb` 参数——KMS 驱动自行 mmap BAR
-- KMS 驱动不再需要内核预映射 framebuffer
-
-### common/syscall.h & kernel/trap.cc
-
-- **删除** `SYS_FB_INFO` syscall（编号 #11，后续保持编号连续）
-- **删除** `sys_fb_info()` 实现
-- `kms_fb_info` 结构体不再由内核维护
-
-### boot/stub.c
-
-- **删除** `read_gop()` 调用——EFI stub 不再读 GOP 信息填入 `boot_info`
-- `boot_info.fb_addr` 等 fb 字段不再使用
-
-## 启动阶段输出
-
-- KMS 驱动启动前屏幕为黑，串口有输出（QEMU `-device bochs-display` 默认禁能，KMS 驱动做完 VBE modeset 后屏幕激活）
-- 内核 panic 走串口
+- **删除**：`kms_driver.elf` 构建目标
+- **新增**：`kernel/display.cc` 作为内核源文件
 
 ## 性能分析
 
-### scroll 场景
+### 与旧方案对比
 
-当前方案：KMS 收到 `KMS_CMD_SCROLL` 后 front buffer memmove（1.92MB）+ 逐字符 `KMS_CMD_PUTC` 重绘所有行（25×80=2000 条消息解析 + 逐像素渲染）。
+旧方案（KMS 用户进程）：
+- Terminal flush：写 `dirty_full` + 递增 `generation` + `notify_fd` → KMS 进程唤醒 → schedule → switch_to → KMS 读 generation → memcpy → schedule → switch_to → 返回 terminal
+- 一次 flip = 2 次上下文切换 + IPC 通知开销
 
-新方案：terminal back buffer memmove（1.92MB）+ 标记 dirty_full + KMS memcpy back→front（1.92MB）= 共 3.84MB 内存操作。
-
-虽然总内存操作量翻倍，但当前方案的 2000 条消息解析 + 逐像素渲染开销远超 3.84MB 的两次 memcpy。新方案实际更快。
+新方案（内核 KMS）：
+- Terminal flush：`req(fd, FLIP)` → 内核 trap → memcpy → trapret
+- 一次 flip = 0 次上下文切换，纯 syscall 开销
 
 ### 常规输出
 
-当前方案：每字符一条 kms_ring 消息（16 字节）+ KMS 逐字符渲染。
+Terminal 渲染像素到 back buffer + `req(fd, FLIP)` 同步 flip。减少消息开销和上下文切换。
 
-新方案：terminal 直接写 back buffer 像素 + 一次 dirty_full + 一次 memcpy。减少消息开销和上下文切换。
+### scroll 场景
+
+Terminal back buffer memmove（1.92MB）+ `req(fd, FLIP)` 内核 memcpy back→front（1.92MB）= 共 3.84MB 内存操作 + 1 次 syscall。无上下文切换。
 
 ## 已知限制
 
-- **撕裂**：KMS memcpy 期间硬件同时在 scanout，可能产生半新半旧的撕裂帧。当前 QEMU 验证无影响，真机撕裂留待 VSync 扩展解决
-- **全屏 dirty**：当前只支持 `dirty_full`，不支持行级 dirty。Wayland 场景下再加
+- **撕裂**：内核 memcpy 期间硬件同时在 scanout，可能产生半新半旧的撕裂帧。当前 QEMU 验证无影响，真机撕裂留待 VSync 扩展解决
 - **32bpp only**：当前仅支持 32bpp，真机适配时再加 24bpp
-- **无存活检测**：KMS/terminal 崩溃 = 屏幕冻结，当前阶段靠修复崩溃而非恢复机制
-- **硬编码分辨率**：800×600×32，后续可通过配置参数支持可变分辨率
-- **QEMU bochs-display only**：当前只支持 PCI 1234:1111，真实硬件需额外驱动
-- **I/O 端口未使用**：Bochs VBE 控制寄存器走 BAR0 MMIO，避免了 sys_ioperm 依赖
+- **硬编码分辨率**：800×600×32，CREATE_BUF 验证只接受此值
+- **QEMU bochs-display only**：当前只支持 PCI 1234:1111（PCI VBE Phase 后），真机需额外驱动
+- **单 buffer**：只支持一个 back buffer per fd，不支持多 buffer（double/triple buffering）
+- **单 compositor**：只支持一个 compositor 连接 `/dev/kms`
 
-## 将来扩展
+## 实现分步
 
-- **硬件 page flip**：当前只能软件 flip（memcpy），bochs-display 无 CRTC 切换支持。若后续驱动真实 GPU，可改用硬件 page flip（写 CRTC 寄存器切换扫描地址，零拷贝）
-- **VSync / VBLANK**：KMS 绑定显卡 IRQ，terminal 请求 flip 后等 vblank 回调，避免撕裂
-- **行级 dirty**：`display_shm_header` 加 `dirty_y_start`/`dirty_y_end`（像素行单位），Wayland damage region 场景使用
-- **可变分辨率**：`display_shm_header` 扩充分辨率协商字段，支持 compositor 请求切换分辨率
-- **多客户端**：display 协议支持多个 compositor 连接（当前一对一）
-- **PAT / write-combining**：framebuffer 页映射加 PCD/PAT 标记，优化真机性能
-- **Huge page 映射**：用户态 framebuffer 映射改用 2MB huge page，减少 TLB miss（back buffer 页对齐已预留）
-- **24bpp 支持**：`display_client_render_cell` 加 24bpp 渲染路径
-- **其他真实显卡**：基于 BAR mmap 模式增加 AMD/Intel 驱动支持，mmap(MAP_PHYSICAL) + 寄存器 MMIO 模式可复用
+### Step 1：KMS 搬入内核（保持 bootloader fb）
 
-## 实现状态
-
-### Phase 1（display SHM + flip 循环协议）
-
-已实现。
+KMS 用户态进程功能搬入内核，front buffer 来源仍从 bootloader fb_info。Terminal 改用 req + mmap 模型。
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `driver/display.h` | 新增 | display 协议（header 结构体 + client/backend API） |
-| `common/font.h` | 新增 | font8x16 字体表（从 KMS/terminal 提取） |
-| `driver/terminal.cc` | 重构 | 删 kms_ring 操作，改用 display_client 渲染到 back buffer |
-| `driver/kms_driver.cc` | 重构 | 删渲染逻辑/font/cursor/kbd SHM，改用 display_backend flip 循环 + 创建 display SHM |
-| `common/shm.h` | 修改 | 删 kms_ring/kms_msg/KMS_CMD_*/kms_sleeping |
+| `kernel/display.c` | 新增 | display 子系统（buffer 分配 + flip + req 处理 + mmap 处理） |
+| `kernel/display.h` | 新增 | display_state 结构体 + 接口声明 |
+| `kernel/fb.c` | 修改 | 保留 init_fb（front buffer 映射），删 g_fb_info/sys_fb_info 相关 |
+| `kernel/fb.h` | 修改 | 精简，只保留 init_fb 声明 |
+| `kernel/trap.c` | 修改 | 删 sys_fb_info；扩展 sys_req/sys_mmap 支持内核设备分发 |
+| `kernel/proc.h` | 修改 | struct file 支持内核设备 fd（基于 VFS dev_ops） |
+| `kernel/kernel.c` | 修改 | 加 display_init(bi) 调用 |
+| `common/syscall.h` | 修改 | 删 SYS_FB_INFO |
+| `driver/display.h` | 重构 | 删 display_shm_header/backend API，加 req 常量 + struct + 新 client API |
+| `driver/kms_driver.cc` | 删除 | 整文件删除 |
+| `driver/terminal.cc` | 修改 | 改用 req(fd, CREATE_BUF) + mmap(fd) + req(fd, FLIP) |
+| `init/init.c` | 修改 | 删 KMS spawn + wait |
+| CMakeLists.txt | 修改 | 删 kms_driver.elf，加 kernel/display.cc |
 
-### Phase 2（`/dev/kms` fd 化）
+### Step 2：PCI VBE 原生显示驱动
 
-已实现。
+内核自主初始化显示设备（PCI ECAM 遍历 + BAR mmap + VBE modeset），移除 bootloader GOP 依赖。
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `driver/display.h` | 修改 | `display_client_init()` 改为 `open("/dev/kms")` + `mmap(fd, MAP_SHARED)`；`display_client_flush()` 改为 `notify_fd(fd)` |
-| `driver/kms_driver.cc` | 不变 | KMS 驱动侧无需感知 fd 模型变化 |
-
-### Phase 3（PCI VBE 原生显示驱动）
-
-已实现。
-
-| 文件 | 改动类型 | 说明 |
-|------|---------|------|
+| `kernel/display.c` | 修改 | display_init 改为 PCI 遍历 + BAR1 mmap + VBE modeset |
+| `kernel/fb.c` | 修改 | init_fb 改为从 PCI BAR1 获取 fb 物理地址（或合并到 display_init） |
 | `run.sh` | 修改 | `-vga std` → `-vga none -device bochs-display` |
 | `boot/stub.c` | 修改 | 删除 `read_gop()` 调用 |
-| `kernel/fb.cc` | 删除 | `init_fb` 不再需要 |
-| `kernel/fb.h` | 删除 | |
-| `kernel/mem/alloc.cc` | 修改 | 删 `init_fb(bi)` 调用 |
-| `kernel/trap.cc` | 修改 | 删 `sys_fb_info()` 实现，slot 11 置 nullptr |
-| `common/syscall.h` | 修改 | 删 `SYS_FB_INFO` 定义 |
-| `kernel/proc.cc` | 修改 | 删 `map_fb` 参数 |
-| `kernel/proc.h` | 修改 | 删 `map_fb` 参数声明 |
-| `driver/display.h` | 修改 | `display_backend_init()` 改为 PCI ECAM 发现 bochs-display + BAR mmap + VBE modeset |
-| `driver/kms_driver.cc` | 重构 | 删除旧 `sys_fb_info` / `shm_attach` 依赖，改用 PCI + BAR mmap |
+| `kernel/kernel.cc` | 修改 | display_init 不再依赖 boot_info fb 字段 |
 
----
-
-## Phase 2：设备发现 `/dev/kms` + fd 统一接口
-
-### 设计动机
-
-与 kbd 的 fd 化动机一致——用户侧统一通过 `open("/dev/kms")` 发现设备、`req(fd)` 控制、`mmap(fd)` 取 SHM、`poll(fd)` 等事件。
-
-KMS 场景下消费者当前是 terminal（未来是独立的合成器进程）：
-
-```
-consumer  open("/dev/kms") → fd
-              │
-              ├─ req(fd, DISPLAY_REQ_*)
-              ├─ mmap(fd, ...) → display SHM
-              └─ poll(fd, POLLIN)
-
-driver(KMS 进程)  不 open 自己，照常事件循环
-```
-
-### 与 kbd fd 模型的对称性
-
-| 层面 | kbd | kms |
-|------|-----|-----|
-| 设备节点 | `/dev/kbd` | `/dev/kms` |
-| 消费者 | terminal（→ 合成器） | terminal（→ 合成器） |
-| 驱动进程 | kbd_driver | kms_driver |
-| 控制通道 | `req(fd, KBD_REQ_BIND, ...)` | `req(fd, DISPLAY_REQ_*, ...)` |
-| 数据通道 | `mmap(fd, ...)` → kbd_ring | `mmap(fd, ...)` → display SHM back buffer |
-| 事件等待 | `poll(fd, POLLIN)` 等按键 | 驱动侧不变，消费者(compositor) poll |
-| 驱动侧 | 不 open 自己，正常事件循环 | 不 open 自己，正常 flip 循环 |
-| 驱动切换 | 合成器 detect POLLERR → close →重连 | 合成器 detect POLLERR → close →重连 |
-
-### 驱动侧的视角
-
-KMS 驱动进程完全不需要感知 fd 模型的变化。它的代码不动：
+PCI VBE 寄存器常量定义（Step 2 时使用）：
 
 ```c
-// kms_driver.cc — 变化极微，可能仅注册方式
-void kms_main() {
-    display_backend_init();    // shm_create → 写 header → 进入 flip 循环
-    // 内部 device_register(DEV_KMS) 保留，供 open("/dev/kms") 查到 PID
-    while (1) {
-        if (display_backend_poll()) continue;
-        display_backend_wait(16);
-    }
-}
-```
-
-`device_register(DEV_KMS)` 保留——driver 注册 dev_table，不是暴露给用户的 API，而是内核内部 open 做 PID 翻译的后端。
-
-### 消费者侧的变化
-
-当前 `display.h` 中的 `display_client_init()`：
-
-```c
-// 旧：device_lookup + shm_attach
-static inline int display_client_init() {
-    while ((display_kms_pid = device_lookup(DEV_KMS)) <= 0)
-        recv(&m, NULL, 0, 1);
-    while (shm_attach(display_kms_pid, &shm_ptr) < 0)
-        recv(&m, NULL, 0, 1);
-    display_hdr = shm_ptr;
-    display_back_buffer = shm_ptr + DISPLAY_BACK_BUFFER_OFFSET;
-}
-```
-
-改为 fd 模式：
-
-```c
-// 新：open + mmap
-static inline int display_client_init() {
-    int fd;
-    while ((fd = open("/dev/kms", O_RDWR)) < 0)
-        recv(&m, NULL, 0, 1);                 // 等 KMS 驱动就绪
-
-    // mmap display SHM via MAP_SHARED (fd → target_pid → sys_shm_attach)
-    // size=0 is ignored — MAP_SHARED maps the entire driver SHM region
-    void *shm_ptr = mmap(NULL, 0,
-                         PROT_READ|PROT_WRITE,
-                         MAP_SHARED, fd, 0);
-    display_hdr = shm_ptr;
-    display_back_buffer = shm_ptr + DISPLAY_BACK_BUFFER_OFFSET;
-    display_dev_fd = fd;                     // 缓存 fd 供后续 flush 用
-    return 0;
-}
-```
-
-`display_client_flush()`：
-
-```c
-// 旧：notify(display_kms_pid)
-static inline void display_client_flush() {
-    if (display_hdr->dirty_full == 0) return;
-    display_hdr->generation++;
-    if (display_hdr->backend_sleeping)
-        notify(display_kms_pid);    // ← 查 pid
-}
-
-// 新：notify_fd(fd)
-static inline void display_client_flush() {
-    if (display_hdr->dirty_full == 0) return;
-    display_hdr->generation++;
-    if (display_hdr->backend_sleeping)
-        notify_fd(display_dev_fd);     // ← 传 fd
-}
-```
-
-### 驱动切换
-
-当 KMS 驱动异常退出时：
-
-```
-合成器:
-  req(fd, ...) → ESRCH，或 poll(fd) → POLLERR
-  → close(fd)
-
-init 重新 spawn kms_driver:
-  → kms_driver 启动 → display_backend_init()
-  → shm_create（新 SHM，新物理页）
-  → device_register(DEV_KMS)
-
-合成器重试循环:
-  while ((fd = open("/dev/kms")) < 0)
-      poll(NULL, 0, 100);
-  mmap(fd, ...)     ← 新 SHM
-  // 回到正常合成循环
-```
-
-与 kbd 一致：**SHM 归驱动进程**，驱动切换时释放旧 SHM、创建新 SHM，消费者通过重连 open + mmap 拿到新 SHM。
-
-### 对 display.h 的影响
-
-`driver/display.h` 中的 API 签名更改为使用 fd：
-
-```c
-// Client API（terminal / 合成器侧）
-int display_client_init();           // 内部改为 open + mmap
-
-// 以下不变——只操作 shm 指针，不涉及通信方式
-void display_client_render_cell(...);
-void display_client_clear(uint32_t bg);
-void display_client_scroll_up(uint32_t bg);
-void display_client_set_cursor(uint32_t x, uint32_t y);
-void display_client_flush();         // 内部改为 notify(fd)
-
-// Backend API（KMS 驱动侧）——完全不变
-int  display_backend_init();
-int  display_backend_poll();
-void display_backend_wait(uint32_t timeout_ms);
-```
-
-Backend API 完全不需要改动——KMS 驱动进程不 open 自己，`device_register(DEV_KMS)` 保留为内核内部机制。`shm_create` 也保留为自己创建 SHM，不需要换成 mmap。
-
-### 与 display SHM 语义的兼容性
-
-display SHM 的一个特殊性是：**KMS 创建 SHM**，消费者 attach/mmap。kbd 则是 **kbd_driver 创建 SHM**，消费者 attach/mmap。方向相同：
-
-```
-kbd:  kbd_driver→shm_create → consumer→mmap(fd)
-kms:  kms_driver→shm_create → consumer→mmap(fd)
-                           ↑
-                     完全一致
-```
-
-所以 KMS 的 fd 化没有额外困难，与 kbd 的模式完全对称。
-
----
-
-## Phase 3：PCI VBE 原生显示驱动
-
-### 设计动机
-
-移除 UEFI GOP 依赖，framebuffer 的发现与初始化全部走 PCI 总线。KMS 驱动通过 PCI ECAM 发现 bochs-display 设备，mmap BAR0（VBE 寄存器）和 BAR1（帧缓冲内存），自主完成显示初始化。
-
-### QEMU 配置
-
-```bash
-# run.sh 改动：不再使用 UEFI GOP 提供的 framebuffer
--vga none -device bochs-display
-```
-
-`bochs-display` 是 QEMU 的纯 PCI 显示设备，无 VGA 兼容层，无 I/O 端口寄存器，所有控制通过 BAR0 MMIO 完成。BAR1 提供线性帧缓冲内存。
-
-### PCI 设备信息
-
-| 属性 | 值 |
-|------|-----|
-| vendor_id | 0x1234 (QEMU) |
-| device_id | 0x1111 (Bochs VBE) |
-| class_code | 0x0300 (Display Controller / VGA) |
-| BAR0 | VBE MMIO 寄存器（4KB） |
-| BAR1 | 线性帧缓冲（~128MB，物理地址由 QEMU 分配） |
-
-### KMS 驱动初始化流程
-
-```
-kms_driver 启动
-  │
-  ├─ 1. PCI 设备发现
-  │      for bus 0..255:
-  │        for dev 0..31:
-  │          for func 0..7:
-  │            sys_pci_dev_info(bus, dev, func, &info)
-  │            if info.class_code == 0x0300
-  │               && info.vendor_id == 0x1234
-  │               && info.device_id == 0x1111 → 匹配
-  │              记录 (bus, dev, func) 和 BAR0/BAR1 物理地址
-  │
-  ├─ 2. mmap BAR0（VBE 寄存器）
-  │      vbe_regs = mmap(NULL, 4096, PROT_READ|PROT_WRITE,
-  │                      MAP_PHYSICAL, -1, bar0_phys);
-  │
-  ├─ 3. mmap BAR1（帧缓冲）
-  │      front_fb = mmap(NULL, bar1_size, PROT_READ|PROT_WRITE,
-  │                      MAP_PHYSICAL, -1, bar1_phys);
-  │
-  ├─ 4. VBE 初始化（写 MMIO 寄存器）
-  │      writew(vbe_regs + VBE_DISPI_INDEX_XRES,  800);
-  │      writew(vbe_regs + VBE_DISPI_INDEX_YRES,  600);
-  │      writew(vbe_regs + VBE_DISPI_INDEX_BPP,   32);
-  │      writew(vbe_regs + VBE_DISPI_INDEX_ENABLE,
-  │             VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
-  │
-  ├─ 5. 读回确认分辨率
-  │      width  = readw(vbe_regs + VBE_DISPI_INDEX_XRES);  // 800
-  │      pitch  = width * 4;                                // 3200
-  │      height = readw(vbe_regs + VBE_DISPI_INDEX_YRES);  // 600
-  │
-  ├─ 6. 创建 display SHM
-  │      shm_create(4096 + pitch * height, &shm_ptr);
-  │      hdr = (display_shm_header *)shm_ptr;
-  │      hdr->fb_width  = 800;
-  │      hdr->fb_height = 600;
-  │      hdr->fb_pitch  = 3200;
-  │      hdr->fb_bpp    = 32;
-  │      hdr->rows      = 600 / 16;   // FONT_HEIGHT
-  │      hdr->cols      = 800 / 8;    // FONT_WIDTH
-  │
-  ├─ 7. device_register(DEV_KMS)
-  │
-  └─ 8. Flip 主循环（不变）
-         while (1) {
-           if (display_backend_poll()) continue;
-           display_backend_wait(16);
-         }
-```
-
-### VBE MMIO 寄存器常量定义
-
-```c
-// bochs-display VBE MMIO 寄存器（通过 BAR0 访问）
+// kernel/display.h — VBE MMIO 寄存器（bochs-display BAR0）
 #define VBE_DISPI_INDEX_ID          0x00
 #define VBE_DISPI_INDEX_XRES        0x01
 #define VBE_DISPI_INDEX_YRES        0x02
 #define VBE_DISPI_INDEX_BPP         0x03
 #define VBE_DISPI_INDEX_ENABLE      0x04
 #define VBE_DISPI_INDEX_BANK        0x05
-#define VBE_DISPI_INDEX_VIRT_WIDTH  0x06
-#define VBE_DISPI_INDEX_VIRT_HEIGHT 0x07
-#define VBE_DISPI_INDEX_X_OFFSET    0x08
-#define VBE_DISPI_INDEX_Y_OFFSET    0x09
-#define VBE_DISPI_INDEX_VIDEO_MEMORY_64K 0x0A
-#define VBE_DISPI_INDEX_REG_COUNT   0x0B
-
-// 寄存器访问：BAR0 中每寄存器占 2 字节（uint16_t），连续排列
-// 寄存器 index 0x00 → offset 0x00，index 0x01 → offset 0x02，以此类推
 #define VBE_DISPI_MMIO_OFFSET(idx)  ((idx) * 2)
+#define VBE_DISPI_ENABLED           0x01
+#define VBE_DISPI_LFB_ENABLED       0x40
 ```
 
-注：`-device bochs-display` 的 BAR0 采用直接 MMIO 模式（寄存器按 index 连续排列，非索引/数据端口模型），`readw`/`writew` 可直接按 offset 访问。
+## 将来扩展
 
-### display_backend_poll() — 更新
-
-flip 循环的 front buffer 来源从 `mmap(MAP_PHYSICAL)` 得到的 BAR1 映射变为直接使用 `front_fb` 指针：
-
-```c
-int display_backend_poll() {
-    uint32_t g1 = display_hdr->generation;
-    if (!display_hdr->dirty_full)
-        return 0;
-
-    // 从 display SHM 的 back buffer 拷贝到 BAR1 front buffer
-    memcpy(front_fb, back_buffer, fb_size);
-
-    uint32_t g2 = display_hdr->generation;
-    if (g1 == g2) {
-        display_hdr->dirty_full = 0;  // 没有新 dirty，清零
-    }
-    // g1 != g2：不清零，让主循环 continue 再拷一次
-    return 1;
-}
-```
-
-### Display SHM 布局（不变）
-
-```
-page 0 (offset 0):      display_shm_header (64 bytes) + 保留 (4032 bytes)
-page 1+ (offset 4096):  back buffer (fb_height × fb_pitch 字节，页对齐)
-```
-
-### 与 Phase 1/2 的关系
-
-- **Phase 1 的 display 协议（`display_shm_header` + back buffer + generation counter）完全不变**——terminal 无感知
-- **Phase 2 的 fd 化**与 Phase 3 正交，可独立推进或合并实现
-- Phase 3 唯一改变的是 `display_backend_init()` 和 `display_backend_poll()` 中 front buffer 的来源
-
-### 涉及文件清单
-
-| 文件 | 改动类型 | 说明 |
-|------|---------|------|
-| `run.sh` | 修改 | `-vga std` → `-vga none -device bochs-display` |
-| `boot/stub.c` | 修改 | 删除 `read_gop()` 调用 |
-| `kernel/fb.cc` | 删除 | `init_fb` 不再需要 |
-| `kernel/fb.h` | 删除 | |
-| `kernel/mem/alloc.cc` | 修改 | 删 `init_fb(bi)` 调用 |
-| `kernel/trap.cc` | 修改 | 删 `sys_fb_info()` 实现 |
-| `common/syscall.h` | 修改 | 删 `SYS_FB_INFO` 定义，保持编号连续 |
-| `kernel/proc.cc` | 修改 | 删 `map_fb` 参数 |
-| `kernel/proc.h` | 修改 | 删 `map_fb` 参数声明 |
-| `driver/kms_driver.cc` | 重构 | PCI 遍历 + BAR mmap + VBE modeset + front buffer 来源切换 |
-| | | 不再需要 `map_fb=true` 内核预映射 |
-
-### 后续扩展
-
-- **可变分辨率**：从 display_shm_header 或配置文件读取分辨率参数，传递给 `display_backend_init()` 而非硬编码
-- **真实硬件（AMD/Intel）**：基于 PCI 发现 + BAR mmap + MMIO 寄存器访问的同一模式，替换 VBE 初始化逻辑为对应硬件的初始化序列
-- **24bpp 支持**：VBE 寄存器设 BPP=24，调整 pitch 计算和 memcpy 路径
+- **异步 flip + VSync/VBLANK**：req(fd, FLIP) 立即返回，内核 deferred flip（下次 vblank 时）。需要显卡 IRQ + vblank callback 机制
+- **硬件 page flip**：当前只能软件 flip（memcpy），若后续驱动真实 GPU，可改用硬件 page flip（写 CRTC 寄存器切换扫描地址，零拷贝）
+- **行级 dirty / damage region**：Wayland compositor 场景下 req(fd, FLIP) 可附带 dirty 区域参数，内核只拷 dirty 部分
+- **多 buffer**：req(fd, CREATE_BUF) 支持创建多个 dumb buffer，req(fd, MAP_BUF, handle) 返回 mmap offset，支持 double/triple buffering
+- **完整 DRM**：CRTC/Plane/Connector 模型 + GEM buffer manager + fence/sync + 多客户端仲裁
+- **可变分辨率**：CREATE_BUF 验证改为查 mode 列表，支持 compositor 请求切换分辨率
+- **PAT / write-combining**：framebuffer 页映射加 PCD/PAT 标记，优化真机性能
+- **Huge page 映射**：framebuffer 映射改用 2MB huge page，减少 TLB miss
+- **24bpp 支持**：CREATE_BUF bpp 参数支持 24，内核分配 buffer 调整 pitch
+- **其他真实显卡**：基于 PCI 发现 + BAR mmap + MMIO 寄存器访问模式，替换 VBE 初始化逻辑

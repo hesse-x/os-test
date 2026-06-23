@@ -1255,7 +1255,7 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
                 ready++;
                 // For POLLIN: check if offset < file_size
                 if ((kfds[i].events & POLLIN) &&
-                    f->file_data.offset < f->file_data.file_size) {
+                    f->file_data._offset < f->file_data.file_size) {
                     kfds[i].revents |= POLLIN;
                 }
             } else if (f->type == FD_SERIAL) {

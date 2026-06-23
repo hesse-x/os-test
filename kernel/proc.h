@@ -71,6 +71,7 @@ typedef struct mmap_region {
 #define FD_FILE   4
 #define FD_SOCKET 5
 #define FD_SERIAL 6
+#define FD_REGULAR 7
 
 #define O_RDONLY  0
 #define O_WRONLY  1
@@ -88,10 +89,13 @@ typedef struct pipe {
 } pipe_t;
 
 struct unix_sock;  // forward declaration from kernel/socket.h
+struct inode;      // forward declaration from kernel/inode.h
 
 typedef struct file {
-    int type;            // FD_NONE / FD_PIPE / FD_SHM / FD_DEV / FD_FILE / FD_SOCKET
+    int type;            // FD_NONE / FD_PIPE / FD_SHM / FD_DEV / FD_FILE / FD_SOCKET / FD_REGULAR
     int flags;           // O_RDONLY / O_WRONLY / O_RDWR
+    struct inode *inode; // FD_REGULAR and FD_DEV (devtmpfs) shared field
+    uint64_t offset;     // per-open offset (FD_REGULAR)
     union {
         struct pipe *pipe;   // if type == FD_PIPE
         struct shm  *shm;    // if type == FD_SHM
@@ -99,7 +103,7 @@ typedef struct file {
         struct {             // if type == FD_FILE
             pid_t   fs_pid;
             int32_t fs_fd;
-            uint64_t offset;
+            uint64_t _offset; // renamed from offset to avoid conflict with top-level
             uint64_t file_size;
             int      ref_count;
         } file_data;

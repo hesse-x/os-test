@@ -16,6 +16,9 @@
 #include "kernel/pci.h"
 #include "common/dev.h"
 #include "kernel/socket.h"
+#include "kernel/vfs.h"
+#include "kernel/inode.h"
+#include "kernel/fat32.h"
 
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 128
@@ -357,7 +360,7 @@ void sig_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 51
+#define NR_SYSCALL 57
 static uint64_t sys_debug_print(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
@@ -411,6 +414,12 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_sigaction,      // 48
     sys_sigreturn,      // 49
     sys_debug_print,    // 50
+    sys_open,            // 51
+    sys_stat,            // 52
+    sys_mkdir,           // 53
+    sys_unlink,          // 54
+    sys_rmdir,           // 55
+    sys_dev_create,      // 56
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -947,6 +956,8 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uin
                 child->fd_table[fd].pipe->ref_count++;
             } else if (child->fd_table[fd].type == FD_FILE) {
                 child->fd_table[fd].file_data.ref_count++;
+            } else if (child->fd_table[fd].type == FD_REGULAR) {
+                if (child->fd_table[fd].inode) inode_get(child->fd_table[fd].inode);
             }
             // FD_DEV/SHM: copied by struct assignment, no ref_count needed
         }
@@ -1390,7 +1401,7 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
     proc->fd_table[fd].flags = flags;
     proc->fd_table[fd].file_data.fs_pid = fs_pid;
     proc->fd_table[fd].file_data.fs_fd = fs_fd;
-    proc->fd_table[fd].file_data.offset = offset;
+    proc->fd_table[fd].file_data._offset = offset;
     proc->fd_table[fd].file_data.file_size = file_size;
     proc->fd_table[fd].file_data.ref_count = 1;
 
@@ -1858,6 +1869,7 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
 }
 
 // sys_write(fd, buf, len) — syscall 15 (向 fd 写入数据)
+// FD_REGULAR: kernel FAT32 via page cache
 // FD_PIPE: 直写 kernel ring buffer
 // FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
 uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
@@ -1869,6 +1881,26 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
     if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EINVAL;
 
     proc_t *proc = current_proc;
+
+    // ===== FD_REGULAR: kernel FAT32 via page cache =====
+    if (proc->fd_table[fd].type == FD_REGULAR) {
+        if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+            return (uint64_t)-EINVAL;
+        struct inode *ip = proc->fd_table[fd].inode;
+        if (!ip) return (uint64_t)-EBADF;
+
+        if (!buf) return (uint64_t)-EFAULT;
+        uint64_t ptr_start = (__force uint64_t)buf;
+        uint64_t ptr_end = ptr_start + len;
+        if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
+            return (uint64_t)-EFAULT;
+
+        uint64_t offset = proc->fd_table[fd].offset;
+        int written = fat32_write(ip, offset, (const void __force *)buf, len);
+        if (written < 0) return (uint64_t)(-written);
+        proc->fd_table[fd].offset = offset + written;
+        return (uint64_t)written;
+    }
 
     // ===== FD_FILE: proxy to fs_driver =====
     if (proc->fd_table[fd].type == FD_FILE) {
@@ -1895,7 +1927,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         file_t_io_req *req = (file_t_io_req *)msg_buf;
         req->cmd = FILE_CMD_WRITE;
         req->fs_fd = proc->fd_table[fd].file_data.fs_fd;
-        req->offset = proc->fd_table[fd].file_data.offset;
+        req->offset = proc->fd_table[fd].file_data._offset;
         req->count = (uint32_t)len;
         __memcpy(msg_buf + sizeof(file_t_io_req), (const void __force *)buf, len);
 
@@ -1910,9 +1942,9 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         if (resp.status != 0) return (uint64_t)(-resp.status);
 
         size_t written = resp.count;
-        proc->fd_table[fd].file_data.offset += written;
-        if (proc->fd_table[fd].file_data.file_size < proc->fd_table[fd].file_data.offset)
-            proc->fd_table[fd].file_data.file_size = proc->fd_table[fd].file_data.offset;
+        proc->fd_table[fd].file_data._offset += written;
+        if (proc->fd_table[fd].file_data.file_size < proc->fd_table[fd].file_data._offset)
+            proc->fd_table[fd].file_data.file_size = proc->fd_table[fd].file_data._offset;
         return (uint64_t)written;
     }
 
@@ -1982,6 +2014,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
 }
 
 // sys_read(fd, buf, len) — syscall 16 (从 fd 读数据，阻塞直到有数据)
+// FD_REGULAR: kernel FAT32 via page cache
 // FD_PIPE: 直读 kernel ring buffer
 // FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
 uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
@@ -1994,17 +2027,41 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
 
     proc_t *proc = current_proc;
 
+    // ===== FD_REGULAR: kernel FAT32 via page cache =====
+    if (proc->fd_table[fd].type == FD_REGULAR) {
+        if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
+            return (uint64_t)-EINVAL;
+        struct inode *ip = proc->fd_table[fd].inode;
+        if (!ip) return (uint64_t)-EBADF;
+        uint64_t offset = proc->fd_table[fd].offset;
+        if (offset >= ip->size) return 0;
+
+        if (!buf) return (uint64_t)-EFAULT;
+        uint64_t ptr_start = (__force uint64_t)buf;
+        uint64_t ptr_end = ptr_start + len;
+        if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
+            return (uint64_t)-EFAULT;
+
+        uint64_t avail = ip->size - offset;
+        if (len > avail) len = avail;
+
+        int nread = fat32_read(ip, offset, (void __force *)buf, len);
+        if (nread < 0) return (uint64_t)(-nread);
+        proc->fd_table[fd].offset = offset + nread;
+        return (uint64_t)nread;
+    }
+
     // ===== FD_FILE: proxy to fs_driver =====
     if (proc->fd_table[fd].type == FD_FILE) {
         // Check read permission: reject O_WRONLY only (O_RDONLY=0, so must check != O_WRONLY)
         if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
             return (uint64_t)-EINVAL;
 
-        if (proc->fd_table[fd].file_data.offset >= proc->fd_table[fd].file_data.file_size) {
+        if (proc->fd_table[fd].file_data._offset >= proc->fd_table[fd].file_data.file_size) {
             return 0;  // EOF
         }
 
-        uint64_t avail = proc->fd_table[fd].file_data.file_size - proc->fd_table[fd].file_data.offset;
+        uint64_t avail = proc->fd_table[fd].file_data.file_size - proc->fd_table[fd].file_data._offset;
         if (len > avail) len = avail;
         size_t max_data = 65536 - sizeof(file_t_io_resp);
         if (len > max_data) len = max_data;
@@ -2021,7 +2078,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         file_t_io_req req = {0};
         req.cmd = FILE_CMD_READ;
         req.fs_fd = proc->fd_table[fd].file_data.fs_fd;
-        req.offset = proc->fd_table[fd].file_data.offset;
+        req.offset = proc->fd_table[fd].file_data._offset;
         req.count = (uint32_t)len;
 
         // Allocate reply buffer (header + data)
@@ -2046,7 +2103,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         if (nread > len) nread = len;
         __memcpy((void __force *)buf, resp_buf + sizeof(file_t_io_resp), nread);
 
-        proc->fd_table[fd].file_data.offset += nread;
+        proc->fd_table[fd].file_data._offset += nread;
         kfree(resp_buf);
         return (uint64_t)nread;
     }
@@ -2173,6 +2230,10 @@ uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint
         if (current_proc->fd_table[fd].shm) {
             shm_put(current_proc->fd_table[fd].shm);
         }
+    } else if (current_proc->fd_table[fd].type == FD_REGULAR) {
+        // Release inode reference
+        struct inode *ip = current_proc->fd_table[fd].inode;
+        if (ip) inode_put(ip);
     } else if (current_proc->fd_table[fd].type == FD_FILE) {
         // Release ref_count; notify fs_driver on last close
         current_proc->fd_table[fd].file_data.ref_count--;
@@ -2526,6 +2587,8 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
             if (proc->fd_table[new_fd].shm) {
                 shm_put(proc->fd_table[new_fd].shm);
             }
+        } else if (proc->fd_table[new_fd].type == FD_REGULAR) {
+            if (proc->fd_table[new_fd].inode) inode_put(proc->fd_table[new_fd].inode);
         } else if (proc->fd_table[new_fd].type == FD_FILE) {
             proc->fd_table[new_fd].file_data.ref_count--;
             if (proc->fd_table[new_fd].file_data.ref_count == 0) {
@@ -2570,6 +2633,8 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
         }
     } else if (proc->fd_table[new_fd].type == FD_FILE) {
         proc->fd_table[new_fd].file_data.ref_count++;
+    } else if (proc->fd_table[new_fd].type == FD_REGULAR) {
+        if (proc->fd_table[new_fd].inode) inode_get(proc->fd_table[new_fd].inode);
     } else if (proc->fd_table[new_fd].type == FD_SOCKET) {
         if (proc->fd_table[new_fd].sock) {
             unix_sock_acquire(proc->fd_table[new_fd].sock);
@@ -2751,7 +2816,7 @@ uint64_t sys_dma_free(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, u
 }
 
 // sys_lseek(fd, offset, whence) — syscall 44 (文件偏移定位)
-// 更新内核 file_data.offset。FD_PIPE/SOCKET/DEV 返回 -ESPIPE。
+// 更新内核 file_data._offset。FD_PIPE/SOCKET/DEV 返回 -ESPIPE。
 // Returns: new offset on success, negative errno on failure
 uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
@@ -2769,6 +2834,22 @@ uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         proc->fd_table[fd].type == FD_DEV)
         return (uint64_t)-ESPIPE;
 
+    // FD_REGULAR: kernel VFS file seek
+    if (proc->fd_table[fd].type == FD_REGULAR) {
+        struct inode *ip = proc->fd_table[fd].inode;
+        if (!ip) return (uint64_t)-EBADF;
+        int64_t new_offset;
+        switch (whence) {
+        case SEEK_SET: new_offset = offset; break;
+        case SEEK_CUR: new_offset = (int64_t)proc->fd_table[fd].offset + offset; break;
+        case SEEK_END: new_offset = (int64_t)ip->size + offset; break;
+        default: return (uint64_t)-EINVAL;
+        }
+        if (new_offset < 0) return (uint64_t)-EINVAL;
+        proc->fd_table[fd].offset = (uint64_t)new_offset;
+        return (uint64_t)new_offset;
+    }
+
     if (proc->fd_table[fd].type != FD_FILE)
         return (uint64_t)-ESPIPE;
 
@@ -2778,7 +2859,7 @@ uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         new_offset = (uint64_t)offset;
         break;
     case SEEK_CUR:
-        new_offset = proc->fd_table[fd].file_data.offset + offset;
+        new_offset = proc->fd_table[fd].file_data._offset + offset;
         break;
     case SEEK_END:
         new_offset = proc->fd_table[fd].file_data.file_size + offset;
@@ -2787,7 +2868,7 @@ uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         return (uint64_t)-EINVAL;
     }
 
-    proc->fd_table[fd].file_data.offset = new_offset;
+    proc->fd_table[fd].file_data._offset = new_offset;
     return (uint64_t)new_offset;
 }
 

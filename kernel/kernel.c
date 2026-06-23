@@ -13,6 +13,7 @@
 #include "arch/x64/paging.h"
 #include "kernel/proc.h"
 #include "kernel/ahci.h"
+#include "kernel/vfs.h"
 #include "kernel/xhci.h"
 #include "arch/x64/smp.h"
 #include "kernel/elf_loader.h"
@@ -128,6 +129,10 @@ void kernel_main(boot_info *bi) {
   ahci_init();
 
   serial_printf("kernel_main: ahci_init done\n");
+
+  vfs_init();
+
+  serial_printf("kernel_main: vfs_init done\n");
 
   xhci_init();
 
