@@ -1,15 +1,11 @@
 #include "kernel/fb.h"
+#include "kernel/display.h"
 #include "kernel/serial.h"
 #include "arch/x64/paging.h"
 #include "common/macro.h"
-#include "common/shm.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-
-// ===================== Global fb info for KMS driver =====================
-
-kms_fb_info_t g_fb_info = {0};
 
 // ===================== init_fb =====================
 
@@ -59,16 +55,20 @@ void init_fb(boot_info *bi) {
   // Install PD into PDPT_hh
   pdpt_hh[pdpt_start] = fb_pd_phys | 0x03;
 
+  // Compute virtual address for this PDPT slot
+  // pdpt_hh[i] maps virtual: VMA_BASE + (i - 510) * 0x40000000
+  uint64_t fb_vma = VMA_BASE + (uint64_t)(pdpt_start - 510) * 0x40000000;
+  uint8_t *front_fb_vaddr = (uint8_t *)(fb_vma + (fb_phys - fb_2mb_start));
+
   device_vma_base += (uint64_t)num_fb_2mb * 0x200000;
 
   flush_tlb();
 
-  // Save fb info for KMS driver
-  g_fb_info.width = fb_w;
-  g_fb_info.height = fb_h;
-  g_fb_info.pitch = fb_pitch;
-  g_fb_info.bpp = fb_bpp;
-  g_fb_info.fb_vaddr = 0x700000;  // fixed user-space address for KMS process
-  g_fb_info.fb_size = fb_bytes;
-  g_fb_info.fb_phys = fb_phys;
+  // Write fb info into g_display
+  g_display.front_fb = front_fb_vaddr;
+  g_display.fb_width = fb_w;
+  g_display.fb_height = fb_h;
+  g_display.fb_pitch = fb_pitch;
+  g_display.fb_bpp = fb_bpp;
+  g_display.fb_size = fb_bytes;
 }

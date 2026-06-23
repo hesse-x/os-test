@@ -47,7 +47,6 @@ mmd -i "${BUILD_DIR}/part2.img" ::local
 
 # 复制文件到目录结构
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/kbd_driver.elf"   ::driver/kbd.dev
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/kms_driver.elf"   ::driver/kms.dev
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/terminal.elf"     ::usr/bin/terminal
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/shell.elf"        ::usr/bin/shell
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.a"           ::usr/lib/libc.a

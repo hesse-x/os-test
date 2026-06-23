@@ -89,7 +89,7 @@ static inline void __iomem *port_reg(int port, uint32_t offset) {
   return (void __iomem *)((uint8_t __iomem *)abar + 0x100 + port * 0x80 + offset);
 }
 
-static void ahci_puts(const char *s) { serial_puts(s); }
+static void ahci_puts(const char *s) { (void)s; }
 
 // ===================== Page-table walk: bounce → user pages =====================
 // Walk target process's page tables from proc->cr3 (physical address)

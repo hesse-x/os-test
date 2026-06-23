@@ -15,7 +15,6 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/ipc.h>
-#include <sys/shm.h>
 #include <sys/device.h>
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -310,8 +309,7 @@ static void flush_dirty_cells() {
     dirty_row_start = vt.rows;
     dirty_row_end = 0;
 
-    // Mark dirty + increment generation + notify KMS if sleeping
-    display_hdr->dirty_full = 1;
+    // Flush to kernel KMS
     display_client_flush();
 }
 
@@ -319,7 +317,9 @@ static void flush_dirty_cells() {
 
 int main() {
     // 1. Initialize display client (attach display SHM from KMS)
+    printf("terminal: calling display_client_init\n");
     if (display_client_init() < 0) {
+        printf("terminal: display_client_init FAILED\n");
         // Unsupported bpp or no display
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
@@ -356,9 +356,9 @@ int main() {
     shm_hdr = (volatile driver_shm_header *)shm_addr;
     kbd = (volatile kbd_ring *)(shm_addr + KBD_RING_OFFSET);
 
-    // 3. Initialize VT100 state from display SHM header
-    vt.cols = display_hdr->cols;
-    vt.rows = display_hdr->rows;
+    // 3. Initialize VT100 state from display metadata
+    vt.cols = display_cols;
+    vt.rows = display_rows;
     vt.cursor_x = 0;
     vt.cursor_y = 0;
     vt.fg_color = 0xFFFFFF;

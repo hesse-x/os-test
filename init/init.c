@@ -65,13 +65,8 @@ int main(void) {
     wait_dev_ready("/dev/kbd");
     printf("init: kbd_driver ready\n");
 
-    // 3. Spawn kms_driver, wait for DEV_KMS
-    printf("init: spawning kms_driver\n");
-    spawn_service("/driver/kms.dev");
-    wait_dev_ready("/dev/kms");
-    printf("init: kms_driver ready\n");
-
-    // 4. Spawn terminal (which spawns shell internally)
+    // 3. Spawn terminal (which spawns shell internally)
+    // /dev/kms is now registered by the kernel — no need to spawn kms_driver
     printf("init: spawning terminal\n");
     spawn_service("/usr/bin/terminal");
     printf("init: terminal spawned\n");

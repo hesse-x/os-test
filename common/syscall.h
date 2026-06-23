@@ -57,6 +57,15 @@
 #define SYS_SIGRETURN    49
 #define SYS_DEBUG_PRINT  50
 
+// ===================== VFS syscall numbers =====================
+#define SYS_OPEN        51
+#define SYS_STAT        52
+#define SYS_MKDIR       53
+#define SYS_UNLINK      54
+#define SYS_RMDIR       55
+#define SYS_DEV_CREATE  56
+#define SYS_DEV_REQ     57
+
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
 
@@ -174,8 +183,9 @@ static inline int sys_munmap(void *addr, size_t size) {
     return (int)__syscall2(SYS_MUNMAP, (int64_t)(uintptr_t)addr, (int64_t)size);
 }
 
-static inline int sys_fb_info(void *buf) {
-    return (int)__syscall1(SYS_FB_INFO, (int64_t)(uintptr_t)buf);
+static inline int sys_dev_req(int fd, void *request, void *reply) {
+    return (int)__syscall3(SYS_DEV_REQ, (int64_t)fd,
+        (int64_t)(uintptr_t)request, (int64_t)(uintptr_t)reply);
 }
 
 static inline int sys_shm_create(size_t size) {
@@ -309,13 +319,6 @@ static inline int sys_debug_print(const char *buf, int len) {
 }
 
 // ===================== VFS syscalls =====================
-#define SYS_OPEN        51
-#define SYS_STAT        52
-#define SYS_MKDIR       53
-#define SYS_UNLINK      54
-#define SYS_RMDIR       55
-#define SYS_DEV_CREATE  56
-
 static inline int sys_open(const char *path, int flags, ...) {
     return (int)__syscall2(SYS_OPEN, (int64_t)(uintptr_t)path, (int64_t)flags);
 }

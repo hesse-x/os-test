@@ -37,6 +37,7 @@
 #define ERANGE    33
 #define ENOTEMPTY 34
 #define ELOOP     35
+#define ENODEV    36
 #define EWOULDBLOCK EAGAIN
 
 #endif // COMMON_ERRNO_H

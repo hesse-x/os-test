@@ -75,17 +75,6 @@ typedef struct fs_shm_header {
     uint8_t reserved[8];
 } fs_shm_header_t;
 
-// KMS framebuffer info (returned by sys_fb_info)
-typedef struct kms_fb_info {
-    uint32_t width;      // pixel width
-    uint32_t height;     // pixel height
-    uint32_t pitch;      // bytes per line
-    uint32_t bpp;        // bits per pixel
-    uint64_t fb_vaddr;   // framebuffer virtual address in KMS process (0x700000)
-    uint64_t fb_size;    // framebuffer size in bytes
-    uint64_t fb_phys;    // framebuffer physical address (for KMS driver reference)
-} kms_fb_info_t;
-
 // ===================== Driver shared page layout =====================
 // One 4K page created by kbd_driver via sys_shm_create(4096),
 // attached by terminal via sys_shm_attach(sys_lookup_dev(DEV_KBD)).

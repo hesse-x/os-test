@@ -409,11 +409,7 @@ pid_t __fd_dev_target_pid(int fd) {
 
 // req_fd — send REQ to device driver via fd
 int req_fd(int fd, void *req_ptr, void *resp) {
-    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type != FD_DEV) {
-        errno = EBADF;
-        return -1;
-    }
-    return sys_req(fd_table[fd].target_pid, req_ptr, resp);
+    return sys_dev_req(fd, req_ptr, resp);
 }
 
 // notify_fd — notify device driver via fd

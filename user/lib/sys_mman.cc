@@ -12,12 +12,11 @@ pid_t __fd_dev_target_pid(int fd);
 // For MAP_PHYSICAL: fd=-1, offset is phys addr
 // For anonymous: fd=-1, offset ignored
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, uint64_t offset) {
-    // FD_DEV mmap via MAP_SHARED: transitional path
-    // Opens the driver's SHM fd and maps it
+    // FD_DEV mmap via MAP_SHARED
     if (flags & MAP_SHARED) {
         pid_t target_pid = __fd_dev_target_pid(fd);
         if (target_pid > 0) {
-            // Transitional: attach to driver's SHM, get an fd, then mmap it
+            // User-space driver: attach to driver's SHM, get an fd, then mmap it
             int shm_fd = sys_shm_attach(target_pid, 0);
             if (shm_fd <= 0) {
                 errno = EBADF;
@@ -31,7 +30,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, uint64_t offs
             }
             return ptr;
         }
-        // Direct SHM fd mmap (fd already is an SHM fd)
+        // Kernel device or direct SHM fd mmap
         void *r = sys_mmap(addr, length, prot, flags, fd, offset);
         if (!r) {
             errno = ENOMEM;

@@ -13,6 +13,8 @@
 #include "kernel/mem/alloc.h"
 #include "common/errno.h"
 #include "kernel/fb.h"
+#include "kernel/display.h"
+#include "kernel/devtmpfs.h"
 #include "kernel/pci.h"
 #include "common/dev.h"
 #include "kernel/socket.h"
@@ -360,7 +362,7 @@ void sig_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 57
+#define NR_SYSCALL 58
 static uint64_t sys_debug_print(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
@@ -420,6 +422,7 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_unlink,          // 54
     sys_rmdir,           // 55
     sys_dev_create,      // 56
+    sys_dev_req,         // 57
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -983,10 +986,24 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
     proc_t *proc = current_proc;
     uint64_t *pml4 = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
-    // MAP_SHARED (0x01) + fd ≥ 0: SHM fd mapping
+    // MAP_SHARED (0x01) + fd ≥ 0: SHM or DEV fd mapping
     if ((flags & 0x01) && fd >= 0) {
-        // Validate fd
-        if (fd >= MAX_FD || proc->fd_table[fd].type != FD_SHM)
+        if (fd >= MAX_FD) return 0;
+
+        // FD_DEV: dispatch to device mmap handler (devtmpfs path with inode)
+        if (proc->fd_table[fd].type == FD_DEV) {
+            struct inode *ip = proc->fd_table[fd].inode;
+            if (ip && ip->i_priv) {
+                struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+                if (ops->driver_pid == 0 && ops->device_type == DEV_KMS) {
+                    return display_mmap_handler(proc, size);
+                }
+            }
+            return 0;  // user drivers: mmap via SHM attach path in libc
+        }
+
+        // FD_SHM: existing SHM mapping path
+        if (proc->fd_table[fd].type != FD_SHM)
             return 0;
         struct shm *shm = proc->fd_table[fd].shm;
         if (!shm) return 0;
@@ -1344,6 +1361,14 @@ uint64_t sys_open_dev(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, u
         return (uint64_t)fd;
     }
 
+    // ===== DEV_KMS: kernel-side KMS display (registered via devtmpfs) =====
+    if (dev_type == DEV_KMS) {
+        uint64_t fd = devtmpfs_open("kms", O_RDWR);
+        if ((int64_t)fd < 0) return fd;
+        // driver_pid=0 for kernel device — return fd only (no target_pid)
+        return fd;
+    }
+
     pid_t target_pid = dev_table[dev_type];
     if (target_pid <= 0) {
         return (uint64_t)-ENOENT;
@@ -1408,24 +1433,61 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
     return (uint64_t)fd;
 }
 
-// sys_fb_info(buf) — syscall 11 (获取 framebuffer 信息)
-// Returns: 0 on success, positive errno on failure
+// sys_fb_info(buf) — syscall 11 (deprecated, returns -ENOSYS)
 uint64_t sys_fb_info(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
-    void __user *user_buf = (void __user * __force)arg1;
-    if (!user_buf) return (uint64_t)-EINVAL;
+    (void)arg1;
+    return (uint64_t)-ENOSYS;
+}
 
-    // Validate user pointer range
-    uint64_t ptr = (__force uint64_t)user_buf;
-    if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(kms_fb_info_t) > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+// sys_dev_req(fd, request, reply) — syscall 57 (synchronous device request via fd)
+uint64_t sys_dev_req(uint64_t arg1, uint64_t arg2, uint64_t arg3,
+                     uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+    int fd = (int)arg1;
+    void __user *request = (void __user * __force)arg2;
+    void __user *reply = (void __user * __force)arg3;
 
-    serial_puts("sys_fb_info: fb_phys=");
-    serial_put_hex(g_fb_info.fb_phys);
-    serial_puts(" fb_size=");
-    serial_put_hex(g_fb_info.fb_size);
-    serial_puts("\n");
-    __memcpy((void __force *)user_buf, &g_fb_info, sizeof(kms_fb_info_t));
-    return 0;
+    // Validate fd
+    if (fd < 0 || fd >= MAX_FD) {
+        serial_printf("sys_dev_req: fd=%d out of range\n", fd);
+        return (uint64_t)-EBADF;
+    }
+    proc_t *proc = current_proc;
+    if (proc->fd_table[fd].type != FD_DEV) {
+        serial_printf("sys_dev_req: fd=%d type=%d != FD_DEV\n", fd, proc->fd_table[fd].type);
+        return (uint64_t)-EINVAL;
+    }
+
+    // Get dev_ops from inode (devtmpfs path), or fall back to target_pid (legacy dev_table path)
+    struct inode *ip = proc->fd_table[fd].inode;
+    if (ip && ip->i_priv) {
+        struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+        if (ops->driver_pid == 0) {
+            // Kernel device: synchronous dispatch
+            uint8_t req_buf[56];
+            __memcpy(req_buf, (const void __force *)request, 56);
+
+            uint32_t req_type = *(uint32_t *)req_buf;
+
+            uint8_t resp_buf[64];
+            __memset(resp_buf, 0, 64);
+
+            int result;
+            if (ops->device_type == DEV_KMS) {
+                result = display_req_handler(req_type, req_buf + 4, 52,
+                                             resp_buf, 64);
+            } else {
+                return (uint64_t)-ENODEV;
+            }
+
+            __memcpy((void __force *)reply, resp_buf, 64);
+            return (uint64_t)result;
+        }
+    }
+
+    // Legacy path: IPC proxy via target_pid
+    pid_t target_pid = proc->fd_table[fd].target_pid;
+    if (target_pid <= 0) return (uint64_t)-EBADF;
+    return sys_req((uint64_t)target_pid, arg2, arg3, 0, 0, 0);
 }
 
 // sys_shm_create(size) — syscall 12 (创建共享内存，返回 fd)

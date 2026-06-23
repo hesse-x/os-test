@@ -108,6 +108,8 @@ uint64_t devtmpfs_open(const char *name, int flags) {
 
     proc->fd_table[fd].type = FD_DEV;
     proc->fd_table[fd].flags = O_RDWR;
+    proc->fd_table[fd].inode = ip;
+    inode_get(ip);
     if (ip->i_priv) {
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         proc->fd_table[fd].target_pid = ops->driver_pid;

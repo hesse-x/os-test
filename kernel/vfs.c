@@ -3,6 +3,7 @@
 #include "kernel/page_cache.h"
 #include "kernel/fat32.h"
 #include "kernel/devtmpfs.h"
+#include "kernel/display.h"
 #include "kernel/proc.h"
 #include "kernel/serial.h"
 #include "common/errno.h"
@@ -13,12 +14,14 @@
 void vfs_init(void) {
     inode_init();
     page_cache_init();
+    devtmpfs_init();
+    display_dev_register();
+
     int rc = fat32_init();
     if (rc != 0) {
         serial_printf("vfs_init: FAT32 init failed (rc=%d)\n", rc);
         return;
     }
-    devtmpfs_init();
     serial_printf("vfs_init: done, FAT32 mounted\n");
 }
 

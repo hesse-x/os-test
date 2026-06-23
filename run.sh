@@ -3,27 +3,15 @@
 # disk.img 在 ICH9 port 0，boot.img 在 port 1
 # UEFI 从 port 1 的 FAT32 引导 BOOTX64.EFI → 加载 myos.elf
 #
-# 默认: -serial mon:stdio（串口+monitor 合并在终端）
-# --log-serial: 串口走 Unix socket (/tmp/qemu-serial.sock)，
-#   monitor 在 stdio。另开 tmux pane 连接:
-#     socat -,rawer UNIX-CONNECT:/tmp/qemu-serial.sock 2>&1 | tee log.txt
-#   即可交互 + 日志。纯日志不显示: 去掉 tee，用 > log.txt
+# 串口输出始终写入 log.txt，串口输入需通过 socat 连接:
+#   socat -,rawer UNIX-CONNECT:/tmp/qemu-serial.sock 2>&1 | tee -a log.txt
+# monitor 在 stdio（可输入 QEMU monitor 命令）
 #
 # -s: 启用 GDB 远程调试（默认关闭）
 
-LOG_SERIAL=0
-for arg in "$@"; do
-    case $arg in
-        --log-serial) LOG_SERIAL=1; shift;;
-    esac
-done
+rm -f /tmp/qemu-serial.sock log.txt
 
-SERIAL_OPTS="-serial mon:stdio"
-
-if [ $LOG_SERIAL -eq 1 ]; then
-    rm -f /tmp/qemu-serial.sock
-    SERIAL_OPTS="-chardev socket,id=s0,path=/tmp/qemu-serial.sock,server=on,wait=off -serial chardev:s0 -monitor stdio"
-fi
+SERIAL_OPTS="-chardev socket,id=s0,path=/tmp/qemu-serial.sock,server=on,wait=off,logfile=log.txt -serial chardev:s0 -monitor stdio"
 
 # qemu-system-x86_64 \
 ~/opensource/qemu/build/qemu-system-x86_64 \
