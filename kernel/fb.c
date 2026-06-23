@@ -58,7 +58,7 @@ void init_fb(boot_info *bi) {
   // Compute virtual address for this PDPT slot
   // pdpt_hh[i] maps virtual: VMA_BASE + (i - 510) * 0x40000000
   uint64_t fb_vma = VMA_BASE + (uint64_t)(pdpt_start - 510) * 0x40000000;
-  uint8_t *front_fb_vaddr = (uint8_t *)(fb_vma + (fb_phys - fb_2mb_start));
+  uint8_t __iomem *front_fb_vaddr = (uint8_t __iomem *)(fb_vma + (fb_phys - fb_2mb_start));
 
   device_vma_base += (uint64_t)num_fb_2mb * 0x200000;
 

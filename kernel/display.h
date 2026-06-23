@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "kernel/sparse.h"
 
 struct proc_t;
 
@@ -35,8 +36,8 @@ struct display_flip_resp {
 
 // Kernel display subsystem state
 struct display_state {
-    uint8_t  *front_fb;          // front buffer kernel virtual address
-    uint8_t  *back_buffer;       // back buffer kernel virtual address
+    uint8_t __iomem *front_fb;      // front buffer MMIO address
+    uint8_t  *back_buffer;          // back buffer kernel virtual address
     uint64_t  back_buffer_phys;  // back buffer physical address
     uint64_t  back_buffer_npages;// back buffer page count
     uint32_t  fb_width;

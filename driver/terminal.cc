@@ -447,10 +447,11 @@ int main() {
         // Clear consumer_sleeping after consuming
         shm_hdr->consumer_sleeping = 0;
 
-        // Read shell stdout pipe (fd 0) → VT100 parse → cell buffer
+        // Read shell stdout pipe (fd 0) → VT100 parse → cell buffer + serial echo
         char buf[256];
         int64_t n = read(0, buf, sizeof(buf));
         if (n > 0) {
+            write(2, buf, (size_t)n);  // echo to serial (fd 2 = FD_SERIAL from init)
             for (int64_t i = 0; i < n; i++) {
                 vt100_feed(buf[i]);
             }

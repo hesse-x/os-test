@@ -33,6 +33,7 @@ extern uint8_t serial_rx_buf[];
 extern uint32_t serial_rx_head;
 extern uint32_t serial_rx_tail;
 extern spinlock_t serial_rx_lock;
+extern spinlock_t serial_tx_lock;
 extern int32_t serial_read_waiter;   // pid_t is int32_t, avoid proc.h include
 extern int serial_fd_count;
 extern bool serial_irq_registered;

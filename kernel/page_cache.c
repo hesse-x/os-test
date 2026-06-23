@@ -190,16 +190,30 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
 
     /* Read from disk — need to walk FAT chain to find the right cluster */
     if (ip->type == INODE_REGULAR || ip->type == INODE_DIR) {
-        uint32_t target_cluster = fat32_walk_chain(ip->start_cluster, page_index);
+        /* page_index is in 4096-byte units; each cluster may be smaller.
+           Convert to cluster index: cluster_idx = page_index * (4096 / bytes_per_cluster) */
+        uint32_t clusters_per_page = 4096 / fat32_bytes_per_cluster();
+        uint32_t cluster_idx = page_index * clusters_per_page;
+        uint32_t target_cluster = fat32_walk_chain(ip->start_cluster, cluster_idx);
         if (target_cluster < 2 || target_cluster >= 0x0FFFFFF8) {
             /* Beyond file — zero fill (for write extend) */
             __memset(new_cp->data, 0, 4096);
         } else {
-            uint32_t lba = fat32_data_start_lba() +
-                           (target_cluster - 2) * fat32_sectors_per_cluster();
-            if (blk_read(lba, fat32_sectors_per_cluster(), new_cp->data) != 0) {
-                /* Read error — zero fill */
-                __memset(new_cp->data, 0, 4096);
+            /* Read all clusters that fit in this 4096-byte page */
+            uint8_t *dst = new_cp->data;
+            for (uint32_t ci = 0; ci < clusters_per_page; ci++) {
+                uint32_t cl = fat32_walk_chain(ip->start_cluster, cluster_idx + ci);
+                if (cl < 2 || cl >= 0x0FFFFFF8) {
+                    /* No more clusters — zero remaining */
+                    __memset(dst, 0, fat32_bytes_per_cluster());
+                } else {
+                    uint32_t lba = fat32_data_start_lba() +
+                                   (cl - 2) * fat32_sectors_per_cluster();
+                    if (blk_read(lba, fat32_sectors_per_cluster(), dst) != 0) {
+                        __memset(dst, 0, fat32_bytes_per_cluster());
+                    }
+                }
+                dst += fat32_bytes_per_cluster();
             }
         }
     } else {
@@ -221,12 +235,21 @@ int page_cache_writeback(struct cache_page *cp) {
     struct inode *ip = cp->inode;
     if (ip->type != INODE_REGULAR && ip->type != INODE_DIR) return 0;
 
-    uint32_t target_cluster = fat32_walk_chain(ip->start_cluster, cp->page_index);
-    if (target_cluster < 2 || target_cluster >= 0x0FFFFFF8) return -EIO;
+    uint32_t clusters_per_page = 4096 / fat32_bytes_per_cluster();
+    uint32_t cluster_idx = cp->page_index * clusters_per_page;
+    uint8_t *src = cp->data;
 
-    uint32_t lba = fat32_data_start_lba() +
-                   (target_cluster - 2) * fat32_sectors_per_cluster();
-    int rc = blk_write(lba, fat32_sectors_per_cluster(), cp->data);
+    for (uint32_t ci = 0; ci < clusters_per_page; ci++) {
+        uint32_t cl = fat32_walk_chain(ip->start_cluster, cluster_idx + ci);
+        if (cl < 2 || cl >= 0x0FFFFFF8) break;
+
+        uint32_t lba = fat32_data_start_lba() +
+                       (cl - 2) * fat32_sectors_per_cluster();
+        blk_write(lba, fat32_sectors_per_cluster(), src);
+        src += fat32_bytes_per_cluster();
+    }
+
+    int rc = 0;
     if (rc == 0) {
         spin_lock(&page_cache_lock);
         cp->dirty = false;

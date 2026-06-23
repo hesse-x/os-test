@@ -147,15 +147,16 @@ void kernel_main(boot_info *bi) {
   serial_puts("kernel_main: BSP idle created\n");
 
   // Load user processes from disk
-  // LBA layout: 1-100=unused(gap), 101=fs_driver(200s), 301=init(200s), 501+=FAT32
-  // kbd_driver, kms_driver, terminal, shell are spawned by init from FAT32
+  // LBA layout: 1-100=unused(gap), 101=init(100s), 201+=FAT32
+  // fs_driver removed — VFS/FAT32 now runs in-kernel via vfs_init()
+  // kbd_driver, terminal, shell are spawned by init from FAT32
   //
   // Try active port first; if no ELF found, try other ports (disk.img may be
   // on a different SATA port than boot.img).
 
   int try_ports[] = { 0, 1, 2, 3, 4, 5 };
 
-  bool fs_loaded = false, init_loaded = false;
+  bool init_loaded = false;
 
   for (int pi = 0; pi < 6; pi++) {
     int port = try_ports[pi];
@@ -167,21 +168,10 @@ void kernel_main(boot_info *bi) {
       continue;
     }
 
-    if (!fs_loaded) {
-      serial_printf("kernel_main: loading fs_driver...\n");
-      uint64_t sz; Page *pg; size_t np;
-      uint8_t *elf = load_elf_from_disk(101, &sz, &pg, &np);
-      if (elf) {
-        proc_t *p = process_create_elf(elf, sz);
-        bfc_free_page(pg, np);
-        if (p) { fs_loaded = true; serial_printf("kernel_main: fs_driver created\n"); }
-      }
-    }
-
     if (!init_loaded) {
       serial_printf("kernel_main: loading init...\n");
       uint64_t sz; Page *pg; size_t np;
-      uint8_t *elf = load_elf_from_disk(301, &sz, &pg, &np);
+      uint8_t *elf = load_elf_from_disk(101, &sz, &pg, &np);
       if (elf) {
         proc_t *init_proc = process_create_elf(elf, sz);
         bfc_free_page(pg, np);
@@ -189,10 +179,9 @@ void kernel_main(boot_info *bi) {
       }
     }
 
-    if (fs_loaded && init_loaded) break;
+    if (init_loaded) break;
   }
 
-  if (!fs_loaded) serial_printf("kernel_main: fs_driver.elf FAILED on all ports\n");
   if (!init_loaded) serial_printf("kernel_main: init.elf FAILED on all ports\n");
 
   serial_printf("kernel_main: all procs loaded, entering idle\n");

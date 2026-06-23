@@ -336,6 +336,23 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->k_stack_top = k_stack_top;
     proc->cr3 = (__force uint64_t)pml4_phys;
     proc->entry = lr.entry;
+    serial_printf("process_create_elf: cr3=%lx pml4_virt=%lx pml4[0]=%lx pml4[511]=%lx\n",
+                   pml4_phys, pml4_virt, new_pml4[0], new_pml4[511]);
+    // Verify 0x400000 mapping in the final PML4
+    {
+        uint64_t pml4e = new_pml4[(0x400000UL >> 39) & 0x1FF];
+        uint64_t *pdpt_v = (__force uint64_t *)phys_to_virt((__force phys_addr_t)(pml4e & ~0xFFF));
+        uint64_t pdpte = pdpt_v[(0x400000UL >> 30) & 0x1FF];
+        uint64_t *pd_v = (__force uint64_t *)phys_to_virt((__force phys_addr_t)(pdpte & ~0xFFF));
+        uint64_t pde = pd_v[(0x400000UL >> 21) & 0x1FF];
+        uint64_t *pt_v = (__force uint64_t *)phys_to_virt((__force phys_addr_t)(pde & ~0xFFF));
+        uint64_t pte = pt_v[(0x400000UL >> 12) & 0x1FF];
+        serial_printf("process_create_elf: verify 0x400000: pml4e=%lx pdpte=%lx pde=%lx pte=%lx\n",
+                       pml4e, pdpte, pde, pte);
+        // Also dump first 8 bytes at the mapped page
+        uint64_t *page_v = (__force uint64_t *)phys_to_virt((__force phys_addr_t)(pte & ~0xFFF));
+        serial_printf("process_create_elf: page content: %lx %lx\n", page_v[0], page_v[1]);
+    }
     proc->wait_event = WAIT_NONE;
     proc->assigned_cpu = assigned_cpu;
     proc->iopm = NULL;

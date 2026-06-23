@@ -42,6 +42,19 @@ static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
     uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
     pt[pt_idx] = page_phys | PTE_PRESENT | PTE_RW | PTE_USER;
 
+    // Verify page content after copy
+    if (vaddr == 0x400000) {
+        serial_printf("map_page: vaddr=%lx phys=%lx src=%lx clen=%lx\n",
+                       vaddr, page_phys, (uint64_t)src, copy_len);
+        if (src) {
+            uint64_t s0 = *(const uint64_t *)(uintptr_t)src;
+            uint64_t s1 = *(((const uint64_t *)(uintptr_t)src)+1);
+            serial_printf("map_page: src=%lx %lx\n", s0, s1);
+        }
+        uint64_t d0 = *(uint64_t *)(uintptr_t)page_virt;
+        uint64_t d1 = *(((uint64_t *)(uintptr_t)page_virt)+1);
+        serial_printf("map_page: dst=%lx %lx\n", d0, d1);
+    }
     return true;
 }
 

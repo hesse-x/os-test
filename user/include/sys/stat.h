@@ -3,11 +3,15 @@
 
 #include <sys/types.h>
 #include <time.h>
+#include <stddef.h>
+#include "common/stat.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/* Userspace struct stat — mirrors struct kstat from common/stat.h.
+ * Kept as a separate type so user code uses standard POSIX names. */
 struct stat {
     dev_t     st_dev;
     ino_t     st_ino;
@@ -22,6 +26,11 @@ struct stat {
     struct timespec st_mtim;
     struct timespec st_ctim;
 };
+
+/* Compile-time assertion: struct stat and struct kstat must have identical layout.
+ * We check key offsets that previously diverged (st_size). */
+static_assert(offsetof(struct stat, st_size) == offsetof(struct kstat, st_size),
+    "struct stat and struct kstat st_size offset mismatch");
 
 // File type constants
 #define S_IFMT   0170000

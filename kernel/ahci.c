@@ -300,12 +300,6 @@ static void ahci_irq_handler(trapframe_t *tf) {
         return;
     }
 
-    ahci_puts("ahci: IRQ on port ");
-    serial_putc('0' + active_port);
-    ahci_puts(" pxis=0x");
-    serial_put_hex(pxis);
-    ahci_puts("\n");
-
     // Acknowledge port interrupt status
     writel(port_reg(active_port, PxIS), pxis);
     // Acknowledge global IS
@@ -346,12 +340,6 @@ static void ahci_irq_handler(trapframe_t *tf) {
     bq_count--;
     bq_head = (bq_head + 1) % BLOCK_QUEUE_SIZE;
 
-    ahci_puts("ahci: complete cookie=");
-    serial_put_hex(*(uint32_t*)msg.data);
-    ahci_puts(" to pid=");
-    serial_put_hex(caller);
-    ahci_puts("\n");
-
     // Notify caller process
     notify_and_wake(caller, &msg);
 
@@ -382,14 +370,6 @@ void ahci_issue_cmd(block_req *req) {
     uint32_t lba = req->lba;
     uint32_t chunk = req->count;
     uint8_t cmd_byte = (req->dir == 0) ? CMD_READ_DMA_EXT : CMD_WRITE_DMA_EXT;
-
-    ahci_puts("ahci: issue port=");
-    serial_putc('0' + active_port);
-    ahci_puts(" lba=0x");
-    serial_put_hex(lba);
-    ahci_puts(" cnt=");
-    serial_put_hex(chunk);
-    ahci_puts("\n");
 
     // Build Command Table: zero FIS area
     __memset((void *)cmd_table_virt, 0, 0x80);
@@ -429,20 +409,8 @@ void ahci_issue_cmd(block_req *req) {
     // Clear port interrupt status before issuing
     writel(port_reg(active_port, PxIS), 0xFFFFFFFF);
 
-    ahci_puts("ahci: issue PxCI before=");
-    serial_put_hex(readl(port_reg(active_port, PxCI)));
-    ahci_puts("\n");
-
     // Issue command with memory barrier
     ahci_issue_command();
-
-    ahci_puts("ahci: issue PxCI after=");
-    serial_put_hex(readl(port_reg(active_port, PxCI)));
-    ahci_puts(" PxCMD=");
-    serial_put_hex(readl(port_reg(active_port, PxCMD)));
-    ahci_puts(" PxTFD=");
-    serial_put_hex(readl(port_reg(active_port, PxTFD)));
-    ahci_puts("\n");
 }
 
 // ===================== Port COMRESET =====================
@@ -475,8 +443,7 @@ static int ahci_comreset_port(int port) {
     if (det == 3) break;
     __asm__ volatile("pause");
   }
-  ahci_puts("ahci: comreset port "); serial_put_hex(port);
-  ahci_puts(" DET="); serial_put_hex(det); ahci_puts("\n");
+  serial_printf("ahci: comreset port %d DET=%d\n", port, det);
 
   writel(port_reg(port, PxSERR), 0xFFFFFFFF);
   writel(port_reg(port, PxIS), 0xFFFFFFFF);
@@ -491,13 +458,13 @@ int ahci_set_active_port(int port) {
   uint32_t ssts = readl(port_reg(port, PxSSTS));
   uint32_t det = ssts & 0xF;
   if (det != 3) {
-    ahci_puts("ahci: port "); serial_put_hex(port); ahci_puts(" DET="); serial_put_hex(det); ahci_puts(" trying COMRESET...\n");
+    serial_printf("ahci: port %d DET=%d trying COMRESET...\n", port, det);
     if (ahci_comreset_port(port) != 0) {
-      ahci_puts("ahci: port "); serial_put_hex(port); ahci_puts(" no device after COMRESET\n");
+      serial_printf("ahci: port %d no device after COMRESET\n", port);
       return -EIO;
     }
   }
-  ahci_puts("ahci: switching to port "); serial_put_hex(port); ahci_puts("\n");
+  serial_printf("ahci: switching to port %d\n", port);
   port_init(port);
   active_port = port;
   return 0;
@@ -512,19 +479,11 @@ void ahci_init() {
     halt();
   }
 
-  ahci_puts("ahci: found at bus ");
-  serial_put_hex(dev->bus);
-  ahci_puts(" dev ");
-  serial_put_hex(dev->dev);
-  ahci_puts("\n");
+  serial_printf("ahci: found at bus %x dev %x\n", dev->bus, dev->dev);
 
   // Enable device: map BAR MMIO + Bus Master
   pci_enable_device(dev);
   abar = dev->bar[5].vaddr;
-
-  ahci_puts("ahci: ABAR vaddr=");
-  serial_put_hex((uint64_t)abar);
-  ahci_puts("\n");
 
   // HBA reset: set GHC.HR (bit 0)
   uint32_t ghc = readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_GHC));
@@ -548,16 +507,12 @@ void ahci_init() {
   int disk_count = 0;
   active_port = -1;
   uint32_t pi = readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_PI));
-  ahci_puts("ahci: PI=0x");
-  serial_put_hex(pi);
-  ahci_puts("\n");
+  serial_printf("ahci: PI=%x\n", pi);
   for (int i = 0; i < 32; i++) {
     if (!(pi & (1 << i))) continue;
     uint32_t ssts = readl(port_reg(i, PxSSTS));
     uint32_t det = ssts & 0xF;
-    ahci_puts("ahci: port "); serial_put_hex(i);
-    ahci_puts(" PI=1 SSTS=0x"); serial_put_hex(ssts);
-    ahci_puts(" DET="); serial_put_hex(det);
+    serial_printf("ahci: port %d SSTS=%x DET=%d", i, ssts, det);
     if (det != 3) { ahci_puts(" (no device)\n"); continue; }
 
     port_init(i);
@@ -580,8 +535,7 @@ void ahci_init() {
       if (i == active_port) continue;  // already scanned
       uint32_t ssts = readl(port_reg(i, PxSSTS));
       uint32_t det = ssts & 0xF;
-      ahci_puts("ahci: re-scan port "); serial_put_hex(i);
-      ahci_puts(" DET="); serial_put_hex(det);
+      serial_printf("ahci: re-scan port %d DET=%d", i, det);
       if (det != 3) {
         // Try COMRESET to force device detection
         if (ahci_comreset_port(i) != 0) {
@@ -593,21 +547,17 @@ void ahci_init() {
       }
       port_init(i);
       if (ahci_identify_device(i, idbuf) == 0) {
-        ahci_puts("ahci: port "); serial_put_hex(i); ahci_puts(": SATA disk (fallback)\n");
+        serial_printf("ahci: port %d: SATA disk (fallback)\n", i);
         if (active_port < 0) active_port = i;
         disk_count++;
       } else {
-        ahci_puts("ahci: port "); serial_put_hex(i); ahci_puts(": IDENTIFY failed\n");
+        serial_printf("ahci: port %d: IDENTIFY failed\n", i);
         port_stop(i);
       }
     }
   }
 
-  ahci_puts("ahci: disks found=");
-  serial_put_hex(disk_count);
-  ahci_puts(" active=");
-  serial_put_hex(active_port);
-  ahci_puts("\n");
+  serial_printf("ahci: disks=%d active=%d\n", disk_count, active_port);
 
   if (active_port < 0) {
     ahci_puts("ahci: no SATA disk found\n");
@@ -632,11 +582,7 @@ void ahci_init() {
   uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
   ioapic_set_irq(ahci_gsi, ahci_irq_vec, bsp_apic_id, false);
 
-  ahci_puts("ahci: interrupts enabled (GSI=");
-  serial_put_hex(ahci_gsi);
-  ahci_puts(" vec=");
-  serial_put_hex(ahci_irq_vec);
-  ahci_puts(")\n");
+  serial_printf("ahci: interrupts enabled (GSI=%d vec=%d)\n", ahci_gsi, ahci_irq_vec);
 
   ahci_puts("ahci: init done\n");
 }
@@ -644,14 +590,6 @@ void ahci_init() {
 // ===================== ahci_read_lba (polling, for init-time ELF loading) =====================
 int ahci_read_lba(uint32_t lba, uint32_t count, void *buf) {
   uint8_t *dst = (uint8_t *)buf;
-
-  ahci_puts("ahci_read_lba: port=");
-  serial_put_hex(active_port);
-  ahci_puts(" lba=0x");
-  serial_put_hex(lba);
-  ahci_puts(" count=0x");
-  serial_put_hex(count);
-  ahci_puts("\n");
 
   while (count > 0) {
     uint32_t chunk = count > AHCI_MAX_SECTORS ? AHCI_MAX_SECTORS : count;
@@ -706,9 +644,8 @@ int ahci_read_lba(uint32_t lba, uint32_t count, void *buf) {
 
     uint32_t pxis = readl(port_reg(active_port, PxIS));
     if (pxis & (1 << 30)) {
-      ahci_puts("ahci: task file error on port ");
-      serial_put_hex(active_port);
-      ahci_puts(" PxIS=0x"); serial_put_hex(pxis); ahci_puts(" PxTFD=0x"); serial_put_hex(readl(port_reg(active_port, PxTFD))); ahci_puts("\n");
+      serial_printf("ahci: task file error port=%d PxIS=%x PxTFD=%x\n",
+          active_port, pxis, readl(port_reg(active_port, PxTFD)));
       return -EIO;
     }
 
@@ -774,9 +711,7 @@ int ahci_write_lba(uint32_t lba, uint32_t count, const void *buf) {
 
     uint32_t pxis = readl(port_reg(active_port, PxIS));
     if (pxis & (1 << 30)) {
-      ahci_puts("ahci: write task file error on port ");
-      serial_put_hex(active_port);
-      ahci_puts(" PxIS=0x"); serial_put_hex(pxis); ahci_puts("\n");
+      serial_printf("ahci: write task file error port=%d PxIS=%x\n", active_port, pxis);
       return -EIO;
     }
 
@@ -835,11 +770,6 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
     // Issue immediately if AHCI idle, else queue
     if (!ahci_current_req) {
         ahci_current_req = req;
-        ahci_puts("ahci: submit cookie=");
-        serial_put_hex(req->cookie);
-        ahci_puts(" caller=");
-        serial_put_hex(req->caller_pid);
-        ahci_puts("\n");
         ahci_issue_cmd(req);
 
         // Short polling fallback: spin briefly to check if command completes
@@ -880,9 +810,6 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
             ahci_current_req = NULL;
             bq_count--;
             bq_head = (bq_head + 1) % BLOCK_QUEUE_SIZE;
-
-            serial_printf("ahci: poll-complete cookie=%ld to pid=%d, bq_count=%ld\n",
-                req->cookie, req->caller_pid, bq_count);
 
             // Notify caller (safe while holding ahci_lock)
             notify_and_wake(req->caller_pid, &msg);

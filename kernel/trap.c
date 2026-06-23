@@ -235,16 +235,50 @@ void trap_dispatch(trapframe_t *tf) {
   serial_puts("\n");
 
   // 栈回溯：遍历 RBP 链（需 -fno-omit-frame-pointer）
+  // #0 始终是 crash 点 (tf->rip)，之后走 RBP 链取 caller 返回地址
+  // 用户态异常时：先展示内核 trap path（固定几帧），再走用户态帧到 main/_start
   serial_puts("BACKTRACE:\n");
-  uint64_t *rbp = (uint64_t *)tf->rbp;
-  for (int i = 0; i < 16 && (uint64_t)rbp >= 0xFFFFFFFF80000000ULL; i++) {
-    serial_puts("  #");
-    serial_put_hex((uint64_t)i);
-    serial_puts(" ");
-    serial_put_hex((uint64_t)rbp[1]);
-    serial_puts("\n");
-    rbp = (uint64_t *)rbp[0];
-    if (!rbp) break;
+  int frame_idx = 0;
+
+  // #0: crash point — tf->rip（不在 RBP 链中，必须单独打印）
+  serial_puts("  #0 ");
+  serial_put_hex(tf->rip);
+  serial_puts("  ← crash point\n");
+  frame_idx = 1;
+
+  if (tf->cs == 0x2B) {
+    // 用户态异常：内核 trap path 是固定路径，不走 RBP 链
+    // （__alltraps 不创建标准 RBP 帧，链在 trapframe 边界断裂）
+    serial_puts("  [kernel trap path]\n");
+    serial_puts("  #1 trap_dispatch\n");
+    serial_puts("  #2 __alltraps\n");
+    serial_puts("  --- user/kernel boundary ---\n");
+    // 用户态帧从 trapframe.rbp 展开
+    serial_puts("  [user]\n");
+    uint64_t *rbp = (uint64_t *)tf->rbp;
+    for (int i = 0; i < 64 && rbp && (uint64_t)rbp >= 0x1000 && (uint64_t)rbp < 0xFFFFFFFF80000000ULL; i++) {
+      serial_puts("  #");
+      serial_put_hex((uint64_t)frame_idx);
+      serial_puts(" ");
+      serial_put_hex((uint64_t)rbp[1]);  // caller return address
+      serial_puts("\n");
+      frame_idx++;
+      rbp = (uint64_t *)rbp[0];
+      if (!rbp) break;
+    }
+  } else {
+    // 内核态异常：从 trapframe.rbp 走 RBP 链，可一路到 kernel_main/_start
+    uint64_t *rbp = (uint64_t *)tf->rbp;
+    for (int i = 0; i < 64 && rbp && (uint64_t)rbp >= 0xFFFFFFFF80000000ULL; i++) {
+      serial_puts("  #");
+      serial_put_hex((uint64_t)frame_idx);
+      serial_puts(" ");
+      serial_put_hex((uint64_t)rbp[1]);  // caller return address
+      serial_puts("\n");
+      frame_idx++;
+      rbp = (uint64_t *)rbp[0];
+      if (!rbp) break;
+    }
   }
 
   if (tf->cs == 0x2B) {
@@ -362,8 +396,7 @@ void sig_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 58
-static uint64_t sys_debug_print(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+#define NR_SYSCALL 59
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -423,6 +456,7 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_rmdir,           // 55
     sys_dev_create,      // 56
     sys_dev_req,         // 57
+    sys_getdents,        // 58
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -2108,6 +2142,8 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         if (len > avail) len = avail;
 
         int nread = fat32_read(ip, offset, (void __force *)buf, len);
+        serial_printf("sys_read: fd=%d off=%lu len=%lu nread=%d isize=%lu\n",
+                       fd, offset, len, nread, ip->size);
         if (nread < 0) return (uint64_t)(-nread);
         proc->fd_table[fd].offset = offset + nread;
         return (uint64_t)nread;
@@ -2292,7 +2328,8 @@ uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint
         if (current_proc->fd_table[fd].shm) {
             shm_put(current_proc->fd_table[fd].shm);
         }
-    } else if (current_proc->fd_table[fd].type == FD_REGULAR) {
+    } else if (current_proc->fd_table[fd].type == FD_REGULAR ||
+               current_proc->fd_table[fd].type == FD_DIR) {
         // Release inode reference
         struct inode *ip = current_proc->fd_table[fd].inode;
         if (ip) inode_put(ip);
@@ -2896,8 +2933,9 @@ uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         proc->fd_table[fd].type == FD_DEV)
         return (uint64_t)-ESPIPE;
 
-    // FD_REGULAR: kernel VFS file seek
-    if (proc->fd_table[fd].type == FD_REGULAR) {
+    // FD_REGULAR/FD_DIR: kernel VFS file seek
+    if (proc->fd_table[fd].type == FD_REGULAR ||
+        proc->fd_table[fd].type == FD_DIR) {
         struct inode *ip = proc->fd_table[fd].inode;
         if (!ip) return (uint64_t)-EBADF;
         int64_t new_offset;
@@ -2907,6 +2945,8 @@ uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         case SEEK_END: new_offset = (int64_t)ip->size + offset; break;
         default: return (uint64_t)-EINVAL;
         }
+        serial_printf("sys_lseek: fd=%d whence=%d off=%ld → %ld (isize=%lu)\n",
+                       fd, whence, offset, new_offset, ip->size);
         if (new_offset < 0) return (uint64_t)-EINVAL;
         proc->fd_table[fd].offset = (uint64_t)new_offset;
         return (uint64_t)new_offset;

@@ -2,47 +2,15 @@
 #include "string.h"
 #include "stdlib.h"
 #include <unistd.h>
-#include <sys/ipc.h>
-#include <sys/device.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <errno.h>
 #include <sys/process.h>
 #include <sys/wait.h>
-#include "common/shm.h"
 #include "common/dev.h"
 #include "common/errno.h"
-#include "fcntl.h"
-
-// ===================== FS IPC via sys_msg =====================
-
-// Message protocol (must match fs_driver and libc file.cc)
-#define FILE_CMD_OPEN      1
-#define FILE_CMD_READ      2
-#define FILE_CMD_WRITE     3
-#define FILE_CMD_CLOSE     4
-#define FILE_CMD_READDIR   5
-#define FILE_CMD_CREATE    6
-#define FILE_CMD_MKDIR     7
-#define FILE_CMD_RAW_READ  8
-
-struct file_req {
-    uint32_t cmd;
-    char     path[256];
-    uint32_t flags;
-    uint32_t fs_fd;
-    uint64_t offset;
-    uint32_t count;
-    uint32_t lba;
-    uint32_t readdir_offset;
-    uint32_t readdir_count;
-};
-
-struct file_resp {
-    int32_t  status;
-    uint32_t fd;
-    uint64_t file_size;
-    uint32_t count;
-    uint32_t total;
-    uint8_t  data[];
-};
 
 // Current working directory
 static char cwd[256] = "/";
@@ -75,43 +43,6 @@ static uint32_t parse_u32(const char *s) {
     uint32_t v = 0;
     while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
     return v;
-}
-
-// ===================== FS IPC =====================
-
-static int fs_fd = -1;
-
-// Reply buffer: header + up to 64KB data (same as libc and fs_driver)
-#define FS_REPLY_BUF_SIZE (sizeof(struct file_resp) + 65536)
-static uint8_t fs_reply_buf[FS_REPLY_BUF_SIZE];
-
-static int fs_request(struct file_req *freq, size_t resp_len) {
-    fflush(stdout);
-    int r = msg_fd(fs_fd, freq, sizeof(*freq), fs_reply_buf, resp_len);
-    if (r < 0) return r;
-    struct file_resp *fresp = (struct file_resp *)fs_reply_buf;
-    return (int)fresp->status;
-}
-
-// Write request: file_req + inline data, single sys_msg
-static int fs_write_request(uint32_t fs_fd, const void *data, size_t len, size_t *written) {
-    fflush(stdout);
-    size_t msg_len = sizeof(struct file_req) + len;
-    uint8_t *msg_buf = (uint8_t *)malloc(msg_len);
-    if (!msg_buf) return -ENOMEM;
-    struct file_req *freq = (struct file_req *)msg_buf;
-    memset(freq, 0, sizeof(*freq));
-    freq->cmd = FILE_CMD_WRITE;
-    freq->fs_fd = fs_fd;
-    freq->count = (uint32_t)len;
-    memcpy(msg_buf + sizeof(struct file_req), data, len);
-    int r = msg_fd(fs_fd, msg_buf, msg_len, fs_reply_buf, sizeof(struct file_resp));
-    free(msg_buf);
-    if (r < 0) return r;
-    struct file_resp *fresp = (struct file_resp *)fs_reply_buf;
-    if (fresp->status != 0) return (int)fresp->status;
-    if (written) *written = fresp->count;
-    return 0;
 }
 
 static void build_abs_path(const char *rel, char *abs) {
@@ -184,145 +115,74 @@ static void cmd_ls(const char *rel_path, int long_format) {
         build_abs_path(rel_path, abs_path);
     }
 
-    struct file_req freq;
-    memset(&freq, 0, sizeof(freq));
-    freq.cmd = FILE_CMD_READDIR;
-    strncpy(freq.path, abs_path, 255);
-    freq.readdir_offset = 0;
-    freq.readdir_count = 30;
-
-    int rc = fs_request(&freq, FS_REPLY_BUF_SIZE);
-    if (rc == -ENOTDIR) {
-        printf("ls: not a directory\n");
-        return;
-    }
-    if (rc != 0) {
-        printf("ls: cannot access\n");
+    DIR *dir = opendir(abs_path);
+    if (!dir) {
+        if (errno == ENOTDIR)
+            printf("ls: not a directory\n");
+        else
+            printf("ls: cannot access\n");
         return;
     }
 
-    struct file_resp *fresp = (struct file_resp *)fs_reply_buf;
-    fs_dirent *entries = (fs_dirent *)fresp->data;
-    uint32_t total = fresp->total;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (long_format) {
+            // Get file info via stat
+            char entry_path[512];
+            int ei = 0;
+            for (int j = 0; abs_path[j] && ei < 255; j++) entry_path[ei++] = abs_path[j];
+            if (ei > 0 && entry_path[ei-1] != '/') entry_path[ei++] = '/';
+            for (int j = 0; entry->d_name[j] && ei < 511; j++) entry_path[ei++] = entry->d_name[j];
+            entry_path[ei] = '\0';
 
-    // Paginated readdir loop
-    uint32_t offset = total;
-    bool first = true;
-    while (true) {
-        for (uint32_t i = 0; i < total; i++) {
-            if (long_format) {
-                if (entries[i].attr & 0x10)
+            struct stat st;
+            if (stat(entry_path, &st) == 0) {
+                if (S_ISDIR(st.st_mode))
                     printf("drwxr-xr-x");
-                else if (entries[i].attr & 0x01)
-                    printf("-r--r--r--");
                 else
                     printf("-rw-r--r--");
-                printf(" %u", (entries[i].attr & 0x10) ? 2 : 1);
+                printf(" %u", S_ISDIR(st.st_mode) ? 2 : 1);
                 printf(" root root");
-                printf(" %u", entries[i].size);
-                char dt[20];
-                format_datetime(entries[i].date, entries[i].time, dt, sizeof(dt));
-                printf(" %s", dt);
-                printf(" %s", entries[i].name);
-                putchar('\n');
+                printf(" %u", (unsigned)st.st_size);
+                printf(" %s", entry->d_name);
             } else {
-                printf("%s\n", entries[i].name);
+                printf("?????????? 1 root root 0 %s", entry->d_name);
             }
-        }
-
-        if (first) {
-            first = false;
-            if (total < 30) break;
-
-            // Fetch next page
-            memset(&freq, 0, sizeof(freq));
-            freq.cmd = FILE_CMD_READDIR;
-            strncpy(freq.path, abs_path, 255);
-            freq.readdir_offset = offset;
-            freq.readdir_count = 30;
-            rc = fs_request(&freq, FS_REPLY_BUF_SIZE);
-            if (rc != 0) break;
-            fresp = (struct file_resp *)fs_reply_buf;
-            entries = (fs_dirent *)fresp->data;
-            total = fresp->total;
-            offset += total;
-            if (total < 30) break;
+            putchar('\n');
         } else {
-            if (total < 30) break;
-
-            memset(&freq, 0, sizeof(freq));
-            freq.cmd = FILE_CMD_READDIR;
-            strncpy(freq.path, abs_path, 255);
-            freq.readdir_offset = offset;
-            freq.readdir_count = 30;
-            rc = fs_request(&freq, FS_REPLY_BUF_SIZE);
-            if (rc != 0) break;
-            fresp = (struct file_resp *)fs_reply_buf;
-            entries = (fs_dirent *)fresp->data;
-            total = fresp->total;
-            offset += total;
+            printf("%s\n", entry->d_name);
         }
     }
+
+    closedir(dir);
 }
 
 static void cmd_cat(const char *rel_path) {
     char abs_path[256];
     build_abs_path(rel_path, abs_path);
 
-    struct file_req freq;
-    memset(&freq, 0, sizeof(freq));
-    freq.cmd = FILE_CMD_OPEN;
-    freq.flags = 0;  // O_RDONLY
-    strncpy(freq.path, abs_path, 255);
-
-    if (fs_request(&freq, FS_REPLY_BUF_SIZE) != 0) {
+    int fd = open(abs_path, O_RDONLY);
+    if (fd < 0) {
         printf("cat: cannot open\n");
         return;
     }
 
-    struct file_resp *fresp = (struct file_resp *)fs_reply_buf;
-    uint32_t fd = fresp->fd;
-    uint32_t file_size = (uint32_t)fresp->file_size;
-
-    uint32_t offset = 0;
-    while (offset < file_size) {
-        uint32_t to_read = file_size - offset;
-        if (to_read > 65536) to_read = 65536;
-
-        memset(&freq, 0, sizeof(freq));
-        freq.cmd = FILE_CMD_READ;
-        freq.fs_fd = fd;
-        freq.count = to_read;
-
-        if (fs_request(&freq, FS_REPLY_BUF_SIZE) != 0) break;
-
-        fresp = (struct file_resp *)fs_reply_buf;
-        if (fresp->count == 0) break;
-
-        for (uint32_t i = 0; i < fresp->count; i++) {
-            putchar(fresp->data[i]);
-        }
-        offset += fresp->count;
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+        for (ssize_t i = 0; i < n; i++) putchar(buf[i]);
     }
 
-    memset(&freq, 0, sizeof(freq));
-    freq.cmd = FILE_CMD_CLOSE;
-    freq.fs_fd = fd;
-    fs_request(&freq, sizeof(struct file_resp));
+    close(fd);
 }
 
 static void cmd_cd(const char *rel_path) {
     char abs_path[256];
     build_abs_path(rel_path, abs_path);
 
-    struct file_req freq;
-    memset(&freq, 0, sizeof(freq));
-    freq.cmd = FILE_CMD_READDIR;
-    strncpy(freq.path, abs_path, 255);
-    freq.readdir_offset = 0;
-    freq.readdir_count = 1;
-
-    if (fs_request(&freq, FS_REPLY_BUF_SIZE) != 0) {
+    // Verify it's a directory via stat
+    struct stat st;
+    if (stat(abs_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
         printf("cd: not a directory\n");
         return;
     }
@@ -342,18 +202,14 @@ static void cmd_touch(const char *rel_path) {
     char abs_path[256];
     build_abs_path(rel_path, abs_path);
 
-    struct file_req freq;
-    memset(&freq, 0, sizeof(freq));
-    freq.cmd = FILE_CMD_CREATE;
-    strncpy(freq.path, abs_path, 255);
-
-    int rc = fs_request(&freq, sizeof(struct file_resp));
-    if (rc != 0) {
-        if (rc == -ENOENT) printf("touch: parent directory not found\n");
-        else if (rc == -ENOTDIR) printf("touch: parent is not a directory\n");
-        else if (rc == -ENOMEM) printf("touch: no free cluster\n");
+    int fd = open(abs_path, O_WRONLY | O_CREAT);
+    if (fd < 0) {
+        if (errno == ENOENT) printf("touch: parent directory not found\n");
+        else if (errno == ENOTDIR) printf("touch: parent is not a directory\n");
         else printf("touch: error\n");
+        return;
     }
+    close(fd);
 }
 
 static void cmd_echo(const char *args) {
@@ -382,72 +238,30 @@ static void cmd_echo(const char *args) {
     char abs_path[256];
     build_abs_path(redirect, abs_path);
 
-    // Open file for write
-    struct file_req freq;
-    memset(&freq, 0, sizeof(freq));
-    freq.cmd = FILE_CMD_OPEN;
-    freq.flags = O_WRONLY | (append ? O_APPEND : 0);
-    strncpy(freq.path, abs_path, 255);
-
-    if (fs_request(&freq, FS_REPLY_BUF_SIZE) != 0) {
+    int flags = O_WRONLY | O_CREAT;
+    if (append) flags |= O_APPEND;
+    int fd = open(abs_path, flags);
+    if (fd < 0) {
         printf("echo: cannot open %s\n", abs_path);
         return;
     }
 
-    struct file_resp *fresp = (struct file_resp *)fs_reply_buf;
-    uint32_t fd = fresp->fd;
+    ssize_t written = write(fd, text, (size_t)text_len);
+    close(fd);
 
-    size_t written = 0;
-    int rc = fs_write_request(fd, text, (size_t)text_len, &written);
-
-    memset(&freq, 0, sizeof(freq));
-    freq.cmd = FILE_CMD_CLOSE;
-    freq.fs_fd = fd;
-    fs_request(&freq, sizeof(struct file_resp));
-
-    if (rc != 0) printf("echo: write error (%d)\n", rc);
+    if (written < 0) printf("echo: write error\n");
 }
 
 static void cmd_mkdir(const char *rel_path) {
     char abs_path[256];
     build_abs_path(rel_path, abs_path);
 
-    struct file_req freq;
-    memset(&freq, 0, sizeof(freq));
-    freq.cmd = FILE_CMD_MKDIR;
-    strncpy(freq.path, abs_path, 255);
-
-    int rc = fs_request(&freq, sizeof(struct file_resp));
-    if (rc != 0) {
-        if (rc == -ENOENT) printf("mkdir: parent directory not found\n");
-        else if (rc == -EEXIST) printf("mkdir: already exists\n");
-        else if (rc == -ENOMEM) printf("mkdir: no free cluster\n");
+    if (mkdir(abs_path, 0755) != 0) {
+        if (errno == ENOENT) printf("mkdir: parent directory not found\n");
+        else if (errno == EEXIST) printf("mkdir: already exists\n");
+        else if (errno == ENOMEM) printf("mkdir: no free cluster\n");
         else printf("mkdir: error\n");
     }
-}
-
-static void cmd_raw_read(uint32_t lba, uint32_t count) {
-    struct file_req freq;
-    memset(&freq, 0, sizeof(freq));
-    freq.cmd = FILE_CMD_RAW_READ;
-    freq.lba = lba;
-    freq.count = count;
-
-    if (fs_request(&freq, FS_REPLY_BUF_SIZE) != 0) {
-        printf("ERR\n");
-        return;
-    }
-
-    struct file_resp *fresp = (struct file_resp *)fs_reply_buf;
-    printf("OK\n");
-    uint32_t bytes = fresp->count;
-    const uint8_t *data = (const uint8_t *)fresp->data;
-    for (uint32_t i = 0; i < bytes; i++) {
-        printf("%02X", data[i]);
-        if ((i + 1) % 16 == 0) putchar('\n');
-        else if ((i + 1) % 8 == 0) putchar(' ');
-    }
-    if (bytes % 16 != 0) putchar('\n');
 }
 
 // Execute a file as an ELF: open, read, spawn, wait
@@ -455,73 +269,43 @@ static void exec_path(const char *rel_path) {
     char abs_path[256];
     build_abs_path(rel_path, abs_path);
 
-    // Open file
-    struct file_req freq;
-    memset(&freq, 0, sizeof(freq));
-    freq.cmd = FILE_CMD_OPEN;
-    freq.flags = 0;  // O_RDONLY
-    strncpy(freq.path, abs_path, 255);
-
-    if (fs_request(&freq, FS_REPLY_BUF_SIZE) != 0) {
+    int fd = open(abs_path, O_RDONLY);
+    if (fd < 0) {
         printf("%s: file not found\n", rel_path);
         return;
     }
 
-    struct file_resp *fresp = (struct file_resp *)fs_reply_buf;
-    uint32_t fd = fresp->fd;
-    uint32_t file_size = (uint32_t)fresp->file_size;
-
-    if (file_size == 0) {
+    // Get file size via fstat
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size == 0) {
         printf("%s: empty file\n", rel_path);
-        memset(&freq, 0, sizeof(freq));
-        freq.cmd = FILE_CMD_CLOSE;
-        freq.fs_fd = fd;
-        fs_request(&freq, sizeof(struct file_resp));
+        close(fd);
         return;
     }
 
+    size_t file_size = (size_t)st.st_size;
     uint8_t *elf_buf = (uint8_t *)malloc(file_size);
     if (!elf_buf) {
         printf("%s: malloc failed\n", rel_path);
-        memset(&freq, 0, sizeof(freq));
-        freq.cmd = FILE_CMD_CLOSE;
-        freq.fs_fd = fd;
-        fs_request(&freq, sizeof(struct file_resp));
+        close(fd);
         return;
     }
 
     // Read entire file
-    uint32_t offset = 0;
+    size_t offset = 0;
     while (offset < file_size) {
-        uint32_t to_read = file_size - offset;
-        if (to_read > 65536) to_read = 65536;
-
-        memset(&freq, 0, sizeof(freq));
-        freq.cmd = FILE_CMD_READ;
-        freq.fs_fd = fd;
-        freq.count = to_read;
-
-        if (fs_request(&freq, FS_REPLY_BUF_SIZE) != 0) {
-            printf("%s: read error\n", rel_path);
-            free(elf_buf);
-            memset(&freq, 0, sizeof(freq));
-            freq.cmd = FILE_CMD_CLOSE;
-            freq.fs_fd = fd;
-            fs_request(&freq, sizeof(struct file_resp));
-            return;
-        }
-
-        fresp = (struct file_resp *)fs_reply_buf;
-        if (fresp->count == 0) break;
-
-            __memcpy(elf_buf + offset, fresp->data, fresp->count);
-        offset += fresp->count;
+        ssize_t n = read(fd, elf_buf + offset, file_size - offset);
+        if (n <= 0) break;
+        offset += (size_t)n;
     }
 
-    memset(&freq, 0, sizeof(freq));
-    freq.cmd = FILE_CMD_CLOSE;
-    freq.fs_fd = fd;
-    fs_request(&freq, sizeof(struct file_resp));
+    close(fd);
+
+    if (offset < file_size) {
+        printf("%s: read error\n", rel_path);
+        free(elf_buf);
+        return;
+    }
 
     // ELF magic check
     if (elf_buf[0] != 0x7F || elf_buf[1] != 'E' || elf_buf[2] != 'L' || elf_buf[3] != 'F') {
@@ -530,7 +314,7 @@ static void exec_path(const char *rel_path) {
         return;
     }
 
-    pid_t child_pid = spawn((const void *)elf_buf, (size_t)file_size);
+    pid_t child_pid = spawn((const void *)elf_buf, file_size);
     free(elf_buf);
 
     if (child_pid < 0) {
@@ -566,12 +350,8 @@ static const cmd_entry cmds[] = {
 // ===================== Main =====================
 
 extern "C" void _start() {
-    printf("shell: waiting for fs_driver\n");
-    while ((fs_fd = open("/dev/fs", O_RDWR)) < 0) {
-        struct recv_msg m;
-        recv(&m, NULL, 0, 1);
-    }
-    printf("shell: fs_driver found\n");
+    // VFS is in-kernel, no need to wait for fs_driver
+    printf("shell: ready\n");
 
     char line[256];
 
@@ -604,19 +384,6 @@ extern "C" void _start() {
             continue;
         }
 
-        if (strcmp(cmd_name, "r") == 0) {
-            uint32_t lba = 0;
-            uint32_t count = 1;
-            if (*p) {
-                lba = parse_u32(p);
-                const char *q = p;
-                while (*q >= '0' && *q <= '9') q++;
-                if (*q == ' ') count = parse_u32(q + 1);
-            }
-            cmd_raw_read(lba, count);
-            continue;
-        }
-
         if (strcmp(cmd_name, "cd") == 0) {
             if (*p == '\0') cmd_cd("/");
             else cmd_cd(p);
@@ -641,7 +408,6 @@ extern "C" void _start() {
             printf("touch <path>    - create empty file\n");
             printf("echo TEXT > FILE  - write text to file\n");
             printf("mkdir <path>    - create directory\n");
-            printf("r LBA [COUNT]   - raw disk read\n");
             printf("clear           - clear screen\n");
             printf("<path>          - execute ELF file\n");
             printf("h               - show help\n");

@@ -10,7 +10,7 @@
 #include <string.h>
 
 // Global display state
-struct display_state g_display = {0};
+struct display_state g_display;
 
 // KMS device ops (driver_pid=0 means kernel device)
 static struct dev_ops kms_dev_ops = {
@@ -71,7 +71,7 @@ int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
             return -ENOENT;
         }
 
-        __memcpy(g_display.front_fb, g_display.back_buffer, g_display.fb_size);
+        __memcpy((void __force *)g_display.front_fb, g_display.back_buffer, g_display.fb_size);
         resp->result = 0;
         return 0;
     }

@@ -1,5 +1,5 @@
-// init process — PID 3
-// Waits for fs_driver, then spawns kbd_driver, kms_driver, terminal
+// init process — PID 2 (VFS in-kernel)
+// Spawns kbd_driver, terminal, and optionally test_runner
 // Adopts orphan children and reaps them via waitpid(-1)
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,7 +44,7 @@ static void wait_dev_ready(const char *dev_path) {
 int main(void) {
     // Set up serial as stdin/stdout/stderr first so printf works
     {
-        int sfd = (int)sys_open_dev(DEV_SERIAL);
+        int sfd = open("/dev/serial", O_RDWR);
         if (sfd >= 0) {
             dup2(sfd, 0);
             dup2(sfd, 1);
@@ -54,10 +54,6 @@ int main(void) {
     }
 
     printf("init: started\n");
-    // 1. Wait for fs_driver to be ready (device registered + initialized)
-    printf("init: waiting for fs_driver\n");
-    wait_dev_ready("/dev/fs");
-    printf("init: fs_driver ready\n");
 
     // 2. Spawn kbd_driver, wait for DEV_KBD
     printf("init: spawning kbd_driver\n");

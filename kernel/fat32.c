@@ -8,6 +8,8 @@
 #include "kernel/blk_dev.h"
 #include "kernel/inode.h"
 #include "kernel/page_cache.h"
+#include "common/stat.h"
+#include "common/dirent.h"
 #include "kernel/spinlock.h"
 #include "kernel/serial.h"
 #include "kernel/mem/slab.h"
@@ -286,6 +288,7 @@ static int match_lfn_name(const char *lfn_buf, const char *name, int name_len) {
 
 uint32_t fat32_data_start_lba(void) { return data_start_lba; }
 uint32_t fat32_sectors_per_cluster(void) { return sectors_per_cluster; }
+uint32_t fat32_bytes_per_cluster(void) { return bytes_per_cluster; }
 
 /* ==================== Path resolution (synchronous) ==================== */
 
@@ -357,7 +360,7 @@ int fat32_resolve_path(const char *path, uint32_t *out_cluster,
         int found = 0;
         uint32_t scan_cluster = cluster;
         char lfn_buf[256];
-        lfn_buf[0] = '\0';
+        __memset(lfn_buf, 0, sizeof(lfn_buf));
 
         while (scan_cluster >= 2 && scan_cluster < 0x0FFFFFF8) {
             uint32_t lba = data_start_lba + (scan_cluster - 2) * sectors_per_cluster;
@@ -515,10 +518,10 @@ int fat32_init(void) {
         }
     }
 
-    /* Fallback: if no partition found, try LBA 501 (current disk layout) */
+    /* Fallback: if no partition found, try LBA 201 (current disk layout) */
     if (part_start_lba == 0) {
-        serial_printf("fat32_init: no FAT32 partition in MBR, trying LBA 501\n");
-        part_start_lba = 501;
+        serial_printf("fat32_init: no FAT32 partition in MBR, trying LBA 201\n");
+        part_start_lba = 201;
     }
 
     /* Read BPB */
@@ -591,10 +594,25 @@ struct inode *fat32_open(const char *path, int flags, int *out_errno) {
         file_size = 0;
     }
 
+    /* Determine if this is a directory */
+    int is_dir = 0;
+    if (dir_idx < 0) {
+        /* Root directory */
+        is_dir = 1;
+    } else {
+        uint8_t *dir_buf = read_cluster_buf(dir_cluster);
+        if (dir_buf) {
+            struct fat_dir_entry *de = (struct fat_dir_entry *)(dir_buf + dir_idx * 32);
+            if (de->attr & 0x10) is_dir = 1;
+            kfree(dir_buf);
+        }
+    }
+
     /* Look up or create inode */
+    int ino_type = is_dir ? INODE_DIR : INODE_REGULAR;
     struct inode *ip = inode_lookup(cluster);
     if (!ip) {
-        ip = inode_create(cluster, INODE_REGULAR, file_size,
+        ip = inode_create(cluster, ino_type, file_size,
                           cluster, dir_cluster, dir_idx);
     }
     return ip;
@@ -640,8 +658,12 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf, size_t count
         uint32_t chunk = 4096 - page_off;
         if (chunk > count - written) chunk = count - written;
 
-        /* Ensure the cluster for this page exists */
-        uint32_t target_cluster = fat32_walk_chain(ip->start_cluster, page_idx);
+        /* Convert page_idx to cluster index for FAT chain walk */
+        uint32_t clusters_per_page = 4096 / bytes_per_cluster;
+        uint32_t cluster_idx = page_idx * clusters_per_page;
+        /* For write, we need the cluster corresponding to the write offset within the page */
+        uint32_t cluster_in_page = page_off / bytes_per_cluster;
+        uint32_t target_cluster = fat32_walk_chain(ip->start_cluster, cluster_idx + cluster_in_page);
         if (target_cluster < 2 || target_cluster >= 0x0FFFFFF8) {
             /* Need to allocate a new cluster */
             spin_lock(&fat_lock);
@@ -981,19 +1003,7 @@ int fat32_stat(const char *path, void *stat_buf) {
     if (!dir_buf) return -EIO;
     struct fat_dir_entry *de = (struct fat_dir_entry *)(dir_buf + dir_idx * 32);
 
-    /* Fill stat buffer (struct stat layout from user/include/sys/stat.h) */
-    struct {
-        uint32_t st_dev;
-        uint32_t st_ino;
-        uint32_t st_mode;
-        uint32_t st_nlink;
-        uint32_t st_uid;
-        uint32_t st_gid;
-        uint32_t st_rdev;
-        uint64_t st_size;
-        uint32_t st_blksize;
-        uint64_t st_blocks;
-    } *st = (void *)stat_buf;
+    struct kstat *st = (void *)stat_buf;
 
     __memset(st, 0, sizeof(*st));
     st->st_ino = cluster;
@@ -1004,4 +1014,115 @@ int fat32_stat(const char *path, void *stat_buf) {
 
     kfree(dir_buf);
     return 0;
+}
+
+/* ==================== getdents: read directory entries into user buffer ==================== */
+/* Each entry: struct dirent64 — defined in common/dirent.h
+ * pos tracks how many dir entries we've consumed so far.
+ * Returns total bytes written, or negative errno. */
+
+int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
+    uint8_t *out = (uint8_t *)buf;
+    size_t written = 0;
+    uint64_t entry_idx = 0;
+    uint32_t scan_cluster = dir_cluster;
+    char lfn_buf[256];
+    __memset(lfn_buf, 0, sizeof(lfn_buf));
+
+    while (scan_cluster >= 2 && scan_cluster < 0x0FFFFFF8) {
+        uint8_t *cbuf = read_cluster_buf(scan_cluster);
+        if (!cbuf) return -EIO;
+
+        int entries = bytes_per_cluster / 32;
+        for (int i = 0; i < entries; i++) {
+            struct fat_dir_entry *de = (struct fat_dir_entry *)(cbuf + i * 32);
+            if (de->name[0] == 0x00) {
+                /* End of directory */
+                kfree(cbuf);
+                *pos = (uint64_t)-1; /* signal EOF */
+                return (int)written;
+            }
+            if (de->name[0] == 0xE5) {
+                lfn_buf[0] = '\0';
+                continue;
+            }
+            if (de->attr == 0x0F) {
+                collect_lfn_entry(de, lfn_buf);
+                continue;
+            }
+
+            /* Skip entries we've already consumed (for resuming after pos) */
+            if (entry_idx < *pos) {
+                entry_idx++;
+                lfn_buf[0] = '\0';
+                continue;
+            }
+
+            /* Build name */
+            char name[256];
+            if (lfn_buf[0] != '\0') {
+                int j;
+                for (j = 0; lfn_buf[j] && j < 255; j++) name[j] = lfn_buf[j];
+                name[j] = '\0';
+            } else {
+                /* Convert 8.3 name */
+                int j = 0;
+                for (int k = 0; k < 8 && de->name[k] != ' '; k++) {
+                    char c = de->name[k];
+                    if (c >= 'A' && c <= 'Z') c += 32;
+                    name[j++] = c;
+                }
+                if (de->name[8] != ' ') {
+                    name[j++] = '.';
+                    for (int k = 8; k < 11 && de->name[k] != ' '; k++) {
+                        char c = de->name[k];
+                        if (c >= 'A' && c <= 'Z') c += 32;
+                        name[j++] = c;
+                    }
+                }
+                name[j] = '\0';
+            }
+            lfn_buf[0] = '\0';
+
+            /* Compute entry size: dirent64 header + name + null + padding to 8-byte align */
+            int name_len = 0;
+            while (name[name_len]) name_len++;
+            uint16_t reclen = (uint16_t)(sizeof(struct dirent64) + name_len + 1);
+            reclen = (reclen + 7) & ~7; /* 8-byte align */
+
+            /* If this entry doesn't fit, stop here */
+            if (written + reclen > len) {
+                kfree(cbuf);
+                *pos = entry_idx;
+                return (int)written;
+            }
+
+            /* Fill entry */
+            struct dirent64 *d = (struct dirent64 *)(out + written);
+            uint32_t entry_cluster = ((uint32_t)de->fst_clus_hi << 16) | de->fst_clus_lo;
+            if (entry_cluster == 0) entry_cluster = root_cluster;
+            d->d_ino = entry_cluster;
+            d->d_reclen = reclen;
+            d->d_type = (de->attr & 0x10) ? 4 : 8; /* DT_DIR=4, DT_REG=8 */
+            int j;
+            for (j = 0; j < name_len; j++) d->d_name[j] = name[j];
+            d->d_name[j] = '\0';
+
+            written += reclen;
+            entry_idx++;
+        }
+
+        kfree(cbuf);
+
+        /* Follow FAT chain */
+        uint32_t next = fat_read_entry(scan_cluster);
+        if (next >= 0x0FFFFFF8) {
+            *pos = (uint64_t)-1; /* EOF */
+            return (int)written;
+        }
+        scan_cluster = next;
+    }
+
+    *pos = (uint64_t)-1;
+    return (int)written;
 }

@@ -65,6 +65,7 @@
 #define SYS_RMDIR       55
 #define SYS_DEV_CREATE  56
 #define SYS_DEV_REQ     57
+#define SYS_GETDENTS    58
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -341,6 +342,10 @@ static inline int sys_rmdir(const char *path) {
 
 static inline int sys_dev_create(const char *name, uint32_t dev_type, uintptr_t ops) {
     return (int)__syscall3(SYS_DEV_CREATE, (int64_t)(uintptr_t)name, (int64_t)dev_type, (int64_t)ops);
+}
+
+static inline int sys_getdents(int fd, void *buf, size_t len) {
+    return (int)__syscall3(SYS_GETDENTS, (int64_t)fd, (int64_t)(uintptr_t)buf, (int64_t)len);
 }
 #endif // __KERNEL__
 

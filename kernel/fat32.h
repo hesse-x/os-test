@@ -23,6 +23,7 @@ struct fat_dir_entry {
 /* Volume geometry accessors (used by page_cache) */
 uint32_t fat32_data_start_lba(void);
 uint32_t fat32_sectors_per_cluster(void);
+uint32_t fat32_bytes_per_cluster(void);
 
 /* Core operations */
 int     fat32_init(void);
@@ -44,6 +45,7 @@ int  fat32_mkdir(const char *path);
 int  fat32_unlink(const char *path);
 int  fat32_rmdir(const char *path);
 int  fat32_stat(const char *path, void *stat_buf);
+int  fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len);
 int  fat32_truncate(uint32_t cluster, uint32_t dir_cluster, int dir_idx);
 
 /* FAT allocation */
