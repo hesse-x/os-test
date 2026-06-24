@@ -18,12 +18,6 @@ struct boot_info {
   UINT64 magic;
   UINT64 kernel_phys;
   UINT64 rsdp;
-  UINT64 fb_addr;
-  UINT32 fb_width;
-  UINT32 fb_height;
-  UINT32 fb_pitch;
-  UINT32 fb_bpp;
-  UINT32 fb_pixel_format;
   UINT64 mmap_addr;
   UINT64 mmap_size;
   UINT64 mmap_desc_size;
@@ -113,26 +107,6 @@ static EFI_STATUS open_file(EFI_SYSTEM_TABLE *SystemTable,
   return st;
 }
 
-// ===================== 获取 GOP =====================
-static void read_gop(EFI_SYSTEM_TABLE *SystemTable) {
-  EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
-  EFI_STATUS st = uefi_call_wrapper(SystemTable->BootServices->LocateProtocol, 3,
-      &gEfiGraphicsOutputProtocolGuid, NULL, (void **)&gop);
-  if (EFI_ERROR(st) || gop == NULL || gop->Mode == NULL) {
-    return;
-  }
-  bi.fb_addr = gop->Mode->FrameBufferBase;
-  if (gop->Mode->Info) {
-    bi.fb_width = gop->Mode->Info->HorizontalResolution;
-    bi.fb_height = gop->Mode->Info->VerticalResolution;
-    bi.fb_pitch = gop->Mode->Info->PixelsPerScanLine * 4;
-    bi.fb_bpp = 32;
-    bi.fb_pixel_format = gop->Mode->Info->PixelFormat;
-  }
-  Print(L"stub: GOP %dx%d pitch=%d bpp=%d fb=0x%lx\n",
-        bi.fb_width, bi.fb_height, bi.fb_pitch, bi.fb_bpp, bi.fb_addr);
-}
-
 // ===================== 获取 RSDP =====================
 static void read_rsdp(EFI_SYSTEM_TABLE *SystemTable) {
   for (UINTN i = 0; i < SystemTable->NumberOfTableEntries; i++) {
@@ -196,7 +170,6 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   bi.magic = BOOT_INFO_MAGIC;
   bi.kernel_phys = KERNEL_LOAD_ADDR;
 
-  read_gop(SystemTable);
   read_rsdp(SystemTable);
 
   EFI_FILE_PROTOCOL *kernel_file;

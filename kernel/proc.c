@@ -13,7 +13,7 @@
 #include "common/shm.h"
 #include "common/macro.h"
 #include "common/errno.h"
-#include "kernel/fb.h"
+#include "kernel/display.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"

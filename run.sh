@@ -23,7 +23,7 @@ SERIAL_OPTS="-chardev socket,id=s0,path=/tmp/qemu-serial.sock,server=on,wait=off
     -device qemu-xhci,id=xhci \
     -device usb-kbd,bus=xhci.0 \
     -device usb-mouse,bus=xhci.0 \
-    -vga std -m 512M -bios /usr/share/ovmf/OVMF.fd \
+    -vga none -device bochs-display -m 512M -bios /usr/share/ovmf/OVMF.fd \
     -smp 2 \
     $SERIAL_OPTS \
     "$@"

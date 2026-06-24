@@ -31,6 +31,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Ensure SANITIZE is explicitly set so CMake cache doesn't retain stale values
+if ! echo "$CMAKE_EXTRA" | grep -q "SANITIZE="; then
+    CMAKE_EXTRA="$CMAKE_EXTRA -DSANITIZE=0"
+fi
+
 # 1. CMake 编译（内核 + 用户态）
 mkdir -p build && cd build
 cmake -DCMAKE_TOOLCHAIN_FILE=../build_script/cmake/toolchain-x86_64.cmake \

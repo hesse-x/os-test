@@ -1,10 +1,12 @@
 #include "kernel/display.h"
 #include "kernel/proc.h"
+#include "kernel/pci.h"
 #include "kernel/devtmpfs.h"
 #include "kernel/serial.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/mem/slab.h"
 #include "arch/x64/paging.h"
+#include "arch/x64/utils.h"
 #include "common/dev.h"
 #include "common/errno.h"
 #include <string.h>
@@ -17,6 +19,94 @@ static struct dev_ops kms_dev_ops = {
     .driver_pid = 0,
     .device_type = DEV_KMS,
 };
+
+// ===================== display_init =====================
+// PCI discovery + VBE modeset + BAR mapping. No boot_info dependency.
+
+__attribute__((no_sanitize("kernel-address")))
+void display_init(void) {
+    // 1. PCI discovery: find bochs-display by vendor/device ID
+    // (class code is 0x0380 "Display/Other", not 0x0300 VGA)
+    pci_device_t *dev = pci_find_device_by_id(0x1234, 0x1111);
+    if (!dev) {
+        serial_puts("display_init: no display device found\n");
+        halt();
+    }
+
+    serial_printf("display_init: found display vendor=%x device=%x class=%x\n",
+                   dev->vendor_id, dev->device_id, dev->class_code);
+
+    // 2. Enable device (map all BARs into kernel address space)
+    int rc = pci_enable_device(dev);
+    if (rc) {
+        serial_puts("display_init: pci_enable_device failed\n");
+        halt();
+    }
+
+    // 3. Identify BARs: bochs-display has BAR0=framebuffer (large MMIO),
+    //    BAR2=VBE MMIO registers (small MMIO). BAR1 consumed by 64-bit BAR0.
+    //    Walk BARs to find framebuffer (largest) and VBE MMIO (has DISPI ID).
+    uint8_t __iomem *fb_vaddr = NULL;
+    uint16_t __iomem *vbe_mmio = NULL;
+    uint64_t fb_size = 0;
+
+    for (int i = 0; i < 6; i++) {
+        serial_printf("  BAR%d: phys=%lx size=%lx type=%x vaddr=%p\n",
+                      i, dev->bar[i].phys, dev->bar[i].size,
+                      dev->bar[i].type, dev->bar[i].vaddr);
+        if (dev->bar[i].size == 0) continue;
+        if (dev->bar[i].type == 1) continue; // skip I/O BAR
+
+        // Try to read VBE DISPI ID from small BARs (< 8KB)
+        // QEMU bochs-display: VBE registers at BAR2 offset 0x500 (PCI_VGA_BOCHS_OFFSET)
+        if (dev->bar[i].size <= 0x2000 && dev->bar[i].vaddr) {
+            uint8_t __iomem *mmio_base = (uint8_t __iomem *)dev->bar[i].vaddr;
+            uint16_t id = mmio_read16((uint16_t __iomem *)(mmio_base + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_ID)));
+            if (id == VBE_DISPI_ID_VERSION) {
+                vbe_mmio = (uint16_t __iomem *)mmio_base;
+                serial_printf("display_init: VBE MMIO at BAR%d, ID=%x\n", i, id);
+            }
+        }
+
+        // Largest MMIO BAR is the framebuffer
+        if (dev->bar[i].size > fb_size) {
+            fb_vaddr = (uint8_t __iomem *)dev->bar[i].vaddr;
+            fb_size = dev->bar[i].size;
+        }
+    }
+
+    if (!vbe_mmio) {
+        serial_puts("display_init: VBE MMIO BAR not found\n");
+        halt();
+    }
+    if (!fb_vaddr) {
+        serial_puts("display_init: framebuffer BAR not found\n");
+        halt();
+    }
+
+    // 4. VBE modeset: 800x600x32
+    uint8_t __iomem *mmio = (uint8_t __iomem *)vbe_mmio;
+    mmio_write16((uint16_t __iomem *)(mmio + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_ENABLE)), 0);   // disable first
+    mmio_write16((uint16_t __iomem *)(mmio + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_XRES)),  800);
+    mmio_write16((uint16_t __iomem *)(mmio + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_YRES)),  600);
+    mmio_write16((uint16_t __iomem *)(mmio + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_BPP)),   32);
+    mmio_write16((uint16_t __iomem *)(mmio + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_ENABLE)),
+                 VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+
+    // 5. Fill g_display
+    g_display.front_fb    = fb_vaddr;
+    g_display.vbe_mmio    = vbe_mmio;
+    g_display.pci_dev     = dev;
+    g_display.fb_width    = 800;
+    g_display.fb_height   = 600;
+    g_display.fb_pitch    = 800 * 4;   // 32bpp = 4 bytes per pixel
+    g_display.fb_bpp      = 32;
+    g_display.fb_size     = 800 * 4 * 600;
+
+    serial_puts("display_init: 800x600x32 done\n");
+}
+
+// ===================== display_req_handler =====================
 
 __attribute__((no_sanitize("kernel-address")))
 int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
@@ -80,6 +170,8 @@ int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
     return -EINVAL;
 }
 
+// ===================== display_mmap_handler =====================
+
 __attribute__((no_sanitize("kernel-address")))
 uint64_t display_mmap_handler(struct proc_t *proc, size_t size) {
     if (!g_display.initialized) return 0;
@@ -118,6 +210,8 @@ uint64_t display_mmap_handler(struct proc_t *proc, size_t size) {
 
     return vaddr;
 }
+
+// ===================== display_dev_register =====================
 
 void display_dev_register(void) {
     int rc = devtmpfs_create("kms", DEV_KMS, &kms_dev_ops);

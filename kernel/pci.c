@@ -62,7 +62,7 @@ static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus
 
   // Compute ecam_vbase so ecam_vbase + bus<<20 + dev<<15 + func<<12 + offset
   // addresses the config register
-  uint64_t vma = VMA_BASE + (uint64_t)(pdpt_idx - 510) * 0x40000000;
+  uint64_t vma = (0xFFFFULL << 48) | (511ULL << 39) | ((uint64_t)pdpt_idx << 30);
   ecam_vbase = (void __iomem __force *)(vma + (ecam_phys - region_start));
 
   device_vma_base = vma + num_2mb * 0x200000;
@@ -106,28 +106,29 @@ static void pci_size_bar(pci_device_t *d, int bar_idx) {
   }
 
   bool is_io = (orig & PCI_BAR_IO_SPACE);
-  bool is_64 = (!is_io && (orig & PCI_BAR_MEM_TYPE_64));
 
-  // Write all 1s, read back mask, restore original
+  // Write all 1s, read back mask (hardwired bits survive, decode bits read as 0)
   pci_write_config(bus, dev, func, offset, 0xFFFFFFFF);
   uint32_t mask = pci_read_config(bus, dev, func, offset);
-  pci_write_config(bus, dev, func, offset, orig);
+
+  // Determine 64-bit from mask's type bits (more reliable than orig)
+  // PCI spec: hardwired bits [3:0] for MMIO always survive the all-1s write
+  bool is_64 = (!is_io && (mask & PCI_BAR_MEM_TYPE_64));
 
   if (is_io) {
+    pci_write_config(bus, dev, func, offset, orig);
     uint16_t io_size = ~(uint16_t)(mask & ~0x3) + 1;
     d->bar[bar_idx].phys = orig & ~0x3;
     d->bar[bar_idx].size = io_size;
     d->bar[bar_idx].type = 1; // I/O
   } else if (is_64) {
-    // Also read/write the high 32 bits
+    // Also size the high 32 bits (next BAR) before restoring low
     uint32_t orig_hi = pci_read_config(bus, dev, func, offset + 4);
     pci_write_config(bus, dev, func, offset + 4, 0xFFFFFFFF);
     uint32_t mask_hi = pci_read_config(bus, dev, func, offset + 4);
+    // Restore both halves
     pci_write_config(bus, dev, func, offset + 4, orig_hi);
-
-    // Restore low first (already done above, but ensure)
     pci_write_config(bus, dev, func, offset, orig);
-    pci_write_config(bus, dev, func, offset + 4, orig_hi);
 
     uint64_t size64 = ((uint64_t)mask_hi << 32) | (mask & ~0xFU);
     size64 = ~size64 + 1;
@@ -139,6 +140,7 @@ static void pci_size_bar(pci_device_t *d, int bar_idx) {
     d->bar[bar_idx + 1].size = 0;
     d->bar[bar_idx + 1].type = 0;
   } else {
+    pci_write_config(bus, dev, func, offset, orig);
     uint32_t size32 = ~(mask & ~0xFU) + 1;
     d->bar[bar_idx].phys = orig & ~0xFU;
     d->bar[bar_idx].size = size32;
@@ -256,9 +258,6 @@ static void pci_map_bar_mmio(pci_device_t *d) {
 
     uint64_t phys = d->bar[i].phys;
     uint64_t size = d->bar[i].size;
-    uint64_t region_start = phys & ~0x1FFFFFULL;
-    uint64_t region_end = ALIGN_UP(phys + size, 0x200000);
-    size_t num_2mb = (region_end - region_start) / 0x200000;
 
     // Find free PDPT_hh slot
     int pdpt_idx = -1;
@@ -269,6 +268,10 @@ static void pci_map_bar_mmio(pci_device_t *d) {
       serial_puts("pci: no free PDPT_hh slot for BAR\n");
       continue;
     }
+
+    uint64_t region_start = phys & ~0x1FFFFFULL;
+    uint64_t region_end = ALIGN_UP(phys + size, 0x200000);
+    size_t num_2mb = (region_end - region_start) / 0x200000;
 
     // Allocate PD
     Page *pd_page = bfc_alloc_page(1);
@@ -283,7 +286,7 @@ static void pci_map_bar_mmio(pci_device_t *d) {
 
     pdpt_hh[pdpt_idx] = (__force uint64_t)page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
 
-    uint64_t vma = VMA_BASE + (uint64_t)(pdpt_idx - 510) * 0x40000000;
+    uint64_t vma = (0xFFFFULL << 48) | (511ULL << 39) | ((uint64_t)pdpt_idx << 30);
     d->bar[i].vaddr = (void __iomem __force *)(vma + (phys - region_start));
     device_vma_base = vma + num_2mb * 0x200000;
     flush_tlb();

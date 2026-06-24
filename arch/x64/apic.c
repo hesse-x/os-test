@@ -124,7 +124,7 @@ static void map_apic_mmio(uint64_t lapic_phys, uint64_t ioapic_phys) {
 
   // Compute virtual address for this PDPT slot
   // pdpt_hh[i] maps virtual: VMA_BASE + (i - 510) * 0x40000000
-  uint64_t vma = VMA_BASE + (uint64_t)(pdpt_idx - 510) * 0x40000000;
+  uint64_t vma = (0xFFFFULL << 48) | (511ULL << 39) | ((uint64_t)pdpt_idx << 30);
   // Account for device_vma_base tracking (must be within this PDPT slot's range)
   // The PD starts at the beginning of the PDPT slot's 1GB region
   uint64_t apic_vma = vma; // PD entry 0 = start of this 1GB region

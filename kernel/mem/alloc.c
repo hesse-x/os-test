@@ -3,7 +3,6 @@
 #include "kernel/efi.h"
 #include "kernel/memlayout.h"
 #include "common/macro.h"
-#include "kernel/fb.h"
 #include "kernel/serial.h"
 #include "kernel/mem/kasan.h"
 
@@ -344,9 +343,6 @@ void init_mem(boot_info *bi) {
 
   // 10. 设置 bfc_frames
   bfc_frames = frames;
-
-  // 11. 初始化 framebuffer
-  init_fb(bi);
 }
 
 // ===================== Address conversion =====================

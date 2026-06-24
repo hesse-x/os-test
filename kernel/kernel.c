@@ -19,6 +19,7 @@
 #include "kernel/elf_loader.h"
 #include "kernel/acpi.h"
 #include "kernel/pci.h"
+#include "kernel/display.h"
 #include "common/dev.h"
 #include "kernel/mem/kasan.h"
 
@@ -128,6 +129,10 @@ void kernel_main(boot_info *bi) {
   pci_init();
 
   serial_printf("kernel_main: pci_init done\n");
+
+  display_init();
+
+  serial_printf("kernel_main: display_init done\n");
 
   ahci_init();
 

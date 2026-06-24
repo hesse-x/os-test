@@ -134,6 +134,16 @@ static inline void irq_guard_cleanup(uint64_t *flags) {
 
 // ===================== MMIO helpers =====================
 __attribute__((no_sanitize("kernel-address")))
+static inline uint16_t mmio_read16(const volatile void __iomem *addr) {
+  return *(volatile const uint16_t __force *)addr;
+}
+
+__attribute__((no_sanitize("kernel-address")))
+static inline void mmio_write16(volatile void __iomem *addr, uint16_t val) {
+  *(volatile uint16_t __force *)addr = val;
+}
+
+__attribute__((no_sanitize("kernel-address")))
 static inline uint32_t readl(const void __iomem *addr) {
   return *(volatile const uint32_t __force *)addr;
 }

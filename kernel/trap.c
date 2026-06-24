@@ -13,7 +13,6 @@
 #include "kernel/mem/kasan.h"
 #include "kernel/mem/alloc.h"
 #include "common/errno.h"
-#include "kernel/fb.h"
 #include "kernel/display.h"
 #include "kernel/devtmpfs.h"
 #include "kernel/pci.h"

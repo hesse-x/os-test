@@ -28,12 +28,6 @@ typedef struct boot_info {
   uint64_t magic;
   uint64_t kernel_phys;     // kernel physical load address
   uint64_t rsdp;            // RSDP physical address
-  uint64_t fb_addr;         // framebuffer physical address
-  uint32_t fb_width;
-  uint32_t fb_height;
-  uint32_t fb_pitch;
-  uint32_t fb_bpp;
-  uint32_t fb_pixel_format; // 0=RGB, 1=BGR
   uint64_t mmap_addr;       // EFI memory descriptor array (physical)
   uint64_t mmap_size;       // total bytes
   uint64_t mmap_desc_size;  // single descriptor size
