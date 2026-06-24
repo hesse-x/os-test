@@ -101,8 +101,8 @@ int puts(const char *s) {
 
 /* ===================== Number formatting helpers ===================== */
 
-static void fmt_uint(FILE *f, unsigned long val, int base, int uppercase,
-                     int width, char pad) {
+static int fmt_uint(FILE *f, unsigned long val, int base, int uppercase,
+                     int width, char pad, int left_align) {
     const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
     char buf[20];
     int pos = 0;
@@ -116,19 +116,26 @@ static void fmt_uint(FILE *f, unsigned long val, int base, int uppercase,
         }
     }
 
-    /* pad to width */
-    while (pos < width) buf[pos++] = pad;
+    int ndigits = pos;
 
-    /* reverse and output */
-    while (--pos >= 0) file_putc_internal(f, buf[pos]);
+    if (left_align) {
+        /* output digits first, then pad */
+        while (--pos >= 0) file_putc_internal(f, buf[pos]);
+        for (int i = ndigits; i < width; i++) file_putc_internal(f, ' ');
+    } else {
+        /* pad to width, then output digits */
+        while (pos < width) buf[pos++] = pad;
+        while (--pos >= 0) file_putc_internal(f, buf[pos]);
+    }
+    return ndigits > width ? ndigits : width;
 }
 
-static void fmt_int(FILE *f, long val, int width, char pad) {
+static int fmt_int(FILE *f, long val, int width, char pad, int left_align) {
     if (val < 0) {
         file_putc_internal(f, '-');
-        fmt_uint(f, (unsigned long)(-val), 10, 0, width > 0 ? width - 1 : 0, pad);
+        return 1 + fmt_uint(f, (unsigned long)(-val), 10, 0, width > 0 ? width - 1 : 0, pad, left_align);
     } else {
-        fmt_uint(f, (unsigned long)val, 10, 0, width, pad);
+        return fmt_uint(f, (unsigned long)val, 10, 0, width, pad, left_align);
     }
 }
 
@@ -146,15 +153,19 @@ int vfprintf(FILE *f, const char *fmt, va_list ap) {
 
         fmt++; /* skip '%' */
 
+        /* flags */
+        int left_align = 0;
+        if (*fmt == '-') { left_align = 1; fmt++; }
+
         /* width and pad */
         int width = 0;
         char pad = ' ';
 
-        if (*fmt == '0') {
+        if (*fmt == '0' && !left_align) {
             pad = '0';
             fmt++;
         }
-        while (*fmt >= '1' && *fmt <= '9') {
+        while (*fmt >= '0' && *fmt <= '9') {
             width = width * 10 + (*fmt - '0');
             fmt++;
         }
@@ -183,58 +194,60 @@ int vfprintf(FILE *f, const char *fmt, va_list ap) {
         case 's': {
             const char *s = va_arg(ap, const char *);
             if (!s) s = "(null)";
-            while (*s) {
-                file_putc_internal(f, *s++);
-                count++;
+            int slen = 0;
+            while (s[slen]) slen++;
+            if (left_align) {
+                for (int i = 0; i < slen; i++) file_putc_internal(f, s[i]);
+                for (int i = slen; i < width; i++) file_putc_internal(f, ' ');
+            } else {
+                for (int i = slen; i < width; i++) file_putc_internal(f, ' ');
+                for (int i = 0; i < slen; i++) file_putc_internal(f, s[i]);
             }
+            count += slen > width ? slen : width;
             break;
         }
 
         case 'd': {
             if (is_long) {
                 long val = va_arg(ap, long);
-                fmt_int(f, val, width, pad);
+                count += fmt_int(f, val, width, pad, left_align);
             } else {
                 int val = va_arg(ap, int);
-                fmt_int(f, (long)val, width, pad);
+                count += fmt_int(f, (long)val, width, pad, left_align);
             }
-            count++;
             break;
         }
 
         case 'u': {
             if (is_long) {
                 unsigned long val = va_arg(ap, unsigned long);
-                fmt_uint(f, val, 10, 0, width, pad);
+                count += fmt_uint(f, val, 10, 0, width, pad, left_align);
             } else {
                 unsigned int val = va_arg(ap, unsigned int);
-                fmt_uint(f, (unsigned long)val, 10, 0, width, pad);
+                count += fmt_uint(f, (unsigned long)val, 10, 0, width, pad, left_align);
             }
-            count++;
             break;
         }
 
         case 'x': {
             if (is_long) {
                 unsigned long val = va_arg(ap, unsigned long);
-                fmt_uint(f, val, 16, 0, width, pad);
+                count += fmt_uint(f, val, 16, 0, width, pad, left_align);
             } else {
                 unsigned int val = va_arg(ap, unsigned int);
-                fmt_uint(f, (unsigned long)val, 16, 0, width, pad);
+                count += fmt_uint(f, (unsigned long)val, 16, 0, width, pad, left_align);
             }
-            count++;
             break;
         }
 
         case 'X': {
             if (is_long) {
                 unsigned long val = va_arg(ap, unsigned long);
-                fmt_uint(f, val, 16, 1, width, pad);
+                count += fmt_uint(f, val, 16, 1, width, pad, left_align);
             } else {
                 unsigned int val = va_arg(ap, unsigned int);
-                fmt_uint(f, (unsigned long)val, 16, 1, width, pad);
+                count += fmt_uint(f, (unsigned long)val, 16, 1, width, pad, left_align);
             }
-            count++;
             break;
         }
 
@@ -242,8 +255,7 @@ int vfprintf(FILE *f, const char *fmt, va_list ap) {
             unsigned long val = (unsigned long)va_arg(ap, void *);
             file_putc_internal(f, '0');
             file_putc_internal(f, 'x');
-            fmt_uint(f, val, 16, 0, 0, '0');
-            count++;
+            count += 2 + fmt_uint(f, val, 16, 0, 0, '0', 0);
             break;
         }
 

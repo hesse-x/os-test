@@ -207,22 +207,20 @@ void test_pipe_big_transfer(void) {
     char wbuf[8192];
     for (int i = 0; i < 8192; i++) wbuf[i] = (char)(i & 0xFF);
 
-    /* Write in chunks since pipe buffer is 4KB */
-    ssize_t w1 = write(fd[1], wbuf, 4096);
-    TEST_ASSERT_EQUAL_INT(4096, (int)w1);
-
-    /* Read first chunk */
+    /* Pipe buffer is 4096 with 4095 usable bytes.
+     * Single-process: must interleave write/read so writes don't block. */
     char rbuf[8192] = {0};
-    ssize_t r1 = read(fd[0], rbuf, 4096);
-    TEST_ASSERT_EQUAL_INT(4096, (int)r1);
+    int off = 0;
+    while (off < 8192) {
+        int wchunk = 8192 - off;
+        if (wchunk > 4000) wchunk = 4000;
+        ssize_t w = write(fd[1], wbuf + off, wchunk);
+        TEST_ASSERT_EQUAL_INT(wchunk, (int)w);
 
-    /* Write second chunk */
-    ssize_t w2 = write(fd[1], wbuf + 4096, 4096);
-    TEST_ASSERT_EQUAL_INT(4096, (int)w2);
-
-    /* Read second chunk */
-    ssize_t r2 = read(fd[0], rbuf + 4096, 4096);
-    TEST_ASSERT_EQUAL_INT(4096, (int)r2);
+        ssize_t r = read(fd[0], rbuf + off, wchunk);
+        TEST_ASSERT_EQUAL_INT(wchunk, (int)r);
+        off += wchunk;
+    }
 
     TEST_ASSERT_EQUAL_INT(0, memcmp(wbuf, rbuf, 8192));
 

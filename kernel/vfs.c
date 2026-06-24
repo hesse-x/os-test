@@ -11,6 +11,7 @@
 #include "kernel/mem/kasan.h"
 #include "kernel/mem/slab.h"
 #include "common/errno.h"
+#include "common/stat.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/smp.h"
 #include <stddef.h>
@@ -60,7 +61,9 @@ uint64_t sys_open(uint64_t arg1, uint64_t arg2, uint64_t arg3,
     /* 3. FAT32 path resolution */
     int errno_val = 0;
     struct inode *ip = fat32_open(path, flags, &errno_val);
-    if (!ip) return (uint64_t)(-(uint64_t)errno_val);
+    if (!ip) {
+        return (uint64_t)errno_val;
+    }
 
     /* 4. Allocate fd */
     proc_t *proc = current_proc;
@@ -82,8 +85,6 @@ uint64_t sys_open(uint64_t arg1, uint64_t arg2, uint64_t arg3,
         proc->fd_table[fd].inode = ip;
         proc->fd_table[fd].offset = 0;
     }
-    serial_printf("sys_open: path='%s' flags=%d → fd=%d type=%d ino=%u size=%lu\n",
-                   path, flags, fd, ip->type, ip->ino, ip->size);
     return (uint64_t)fd;
 }
 
@@ -101,7 +102,7 @@ uint64_t sys_stat(uint64_t arg1, uint64_t arg2, uint64_t _u1,
     uint8_t kstat_buf[256];
     int rc = fat32_stat(path, kstat_buf);
     if (rc != 0) return (uint64_t)(-(uint64_t)(-rc));
-    if (copy_to_user(stat_buf, kstat_buf, 256)) return (uint64_t)(-(uint64_t)EFAULT);
+    if (copy_to_user(stat_buf, kstat_buf, sizeof(struct kstat))) return (uint64_t)(-(uint64_t)EFAULT);
     return 0;
 }
 

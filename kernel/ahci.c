@@ -401,7 +401,9 @@ void ahci_issue_cmd(block_req *req) {
 
     // Command Header (slot 0)
     uint32_t *hdr = (uint32_t *)cmd_list_virt;
-    hdr[0] = (5 << 0) | (1 << 16);  // CFL=5 DW, PRDTL=1
+    uint32_t cmd_flags = (5 << 0) | (1 << 16);  // CFL=5 DW, PRDTL=1
+    if (req->dir == 1) cmd_flags |= (1 << 6);    // W=1 for write
+    hdr[0] = cmd_flags;
     hdr[1] = 0;
     hdr[2] = (uint32_t)(cmd_table_phys & 0xFFFFFFFF);
     hdr[3] = (uint32_t)((cmd_table_phys >> 32) & 0xFFFFFFFF);
@@ -694,7 +696,7 @@ int ahci_write_lba(uint32_t lba, uint32_t count, const void *buf) {
     prd[3] = ((chunk * 512 - 1) & 0x3FFFFF) | (1U << 31);
 
     uint32_t *hdr = (uint32_t *)cmd_list_virt;
-    hdr[0] = (5 << 0) | (1 << 16);
+    hdr[0] = (5 << 0) | (1 << 6) | (1 << 16);  // CFL=5 DW, W=1 (write), PRDTL=1
     hdr[1] = 0;
     hdr[2] = (uint32_t)(cmd_table_phys & 0xFFFFFFFF);
     hdr[3] = (uint32_t)((cmd_table_phys >> 32) & 0xFFFFFFFF);

@@ -78,6 +78,8 @@ void proc_init() {
         procs[i].exit_code = 0;
         procs[i].mmap_brk = 0;
         procs[i].mmap_regions = NULL;
+        procs[i].u_stack_phys = 0;
+        procs[i].u_stack_pages = 0;
         procs[i].wait_deadline = 0;
         procs[i].wait_timed_out = 0;
         for (int j = 0; j < MAX_FD; j++) {
@@ -209,6 +211,8 @@ proc_t *create_idle_process(int cpu_id) {
     proc->mmap_brk = 0x800000;
     proc->mmap_phys_brk = MAP_PHYSICAL_BASE;
     proc->mmap_regions = NULL;
+    proc->u_stack_phys = 0;
+    proc->u_stack_pages = 0;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
     // Signal state
@@ -367,6 +371,8 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->mmap_brk = 0x800000;
     proc->mmap_phys_brk = MAP_PHYSICAL_BASE;
     proc->mmap_regions = NULL;
+    proc->u_stack_phys = user_stack_phys;
+    proc->u_stack_pages = user_stack_pages;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
     // Signal state
@@ -553,6 +559,18 @@ void proc_reap(proc_t *proc) {
                         }
                         if (!is_shared) {
                             Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
+                            // Skip user stack pages — freed as one contiguous block later
+                            if (proc->u_stack_pages > 0 &&
+                                leaf_phys >= proc->u_stack_phys &&
+                                leaf_phys < proc->u_stack_phys + proc->u_stack_pages * PAGE_SIZE) {
+                                pt_virt[pt_idx] = 0;
+                                continue;
+                            }
+                            // Skip shared sig trampoline page — not owned by this process
+                            if (sig_trampoline_phys != 0 && leaf_phys == sig_trampoline_phys) {
+                                pt_virt[pt_idx] = 0;
+                                continue;
+                            }
                             bfc_free_page(leaf_page, 1);
                         }
                         pt_virt[pt_idx] = 0;
@@ -573,6 +591,12 @@ void proc_reap(proc_t *proc) {
 
     // 2. Free PML4 page itself
     free_table_page((__force uint64_t)proc->cr3);
+
+    // 2b. Free user stack as one contiguous block
+    if (proc->u_stack_pages > 0) {
+        Page *stack_page = &bfc_frames[PHY_TO_PAGE(proc->u_stack_phys)];
+        bfc_free_page(stack_page, proc->u_stack_pages);
+    }
 
     // 3. Free kernel stack (2 pages)
     // k_stack_top is the virtual address of stack top; compute physical base
@@ -751,6 +775,8 @@ void proc_reap(proc_t *proc) {
     proc->mmap_brk = 0;
     proc->mmap_phys_brk = 0;
     proc->mmap_regions = NULL;
+    proc->u_stack_phys = 0;
+    proc->u_stack_pages = 0;
     proc->wait_deadline = 0;
     proc->wait_timed_out = 0;
     list_init(&proc->run_node);

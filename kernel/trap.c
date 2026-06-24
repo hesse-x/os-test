@@ -911,8 +911,29 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
             spin_unlock(&procs_lock);
 
             // No zombie child: block on WAIT_CHILD
+            // Must set wait_event + BLOCKED under parent's scheduler_lock
+            // to prevent race with child's sys_exit checking our state.
+            int pcpu = current_proc->assigned_cpu;
+            spin_lock(&cpu_locals[pcpu].scheduler_lock);
+            // Re-scan under parent lock to avoid missed wakeup
+            spin_lock(&procs_lock);
+            zombie = NULL;
+            for (int i = 0; i < MAX_PROC; i++) {
+                if (procs[i].pid >= 0 && procs[i].parent_pid == current_proc->pid &&
+                    procs[i].state == ZOMBIE) {
+                    zombie = &procs[i];
+                    break;
+                }
+            }
+            if (zombie) {
+                spin_unlock(&procs_lock);
+                spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+                continue;  // retry the outer loop
+            }
+            spin_unlock(&procs_lock);
             current_proc->wait_event = WAIT_CHILD;
             current_proc->state = BLOCKED;
+            spin_unlock(&cpu_locals[pcpu].scheduler_lock);
             schedule();
         }
     }
@@ -943,8 +964,23 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
         spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
 
         // Child not yet exited: block on WAIT_CHILD
+        // Must set wait_event + BLOCKED under parent's scheduler_lock
+        // to prevent race with child's sys_exit checking our state.
+        int pcpu = current_proc->assigned_cpu;
+        spin_lock(&cpu_locals[pcpu].scheduler_lock);
+        // Re-check child state under parent lock: child may have exited
+        // between our unlock above and acquiring parent lock.
+        spin_lock(&cpu_locals[cpu].scheduler_lock);
+        if (child->state == ZOMBIE) {
+            child->state = REAPING;
+            spin_unlock(&cpu_locals[cpu].scheduler_lock);
+            spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+            break;
+        }
+        spin_unlock(&cpu_locals[cpu].scheduler_lock);
         current_proc->wait_event = WAIT_CHILD;
         current_proc->state = BLOCKED;
+        spin_unlock(&cpu_locals[pcpu].scheduler_lock);
         schedule();
 
         // Woken up by notify — re-validate child still exists
@@ -2094,6 +2130,11 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
     size_t written = 0;
 
     while (written < len) {
+        // Check if read end is closed (no readers left)
+        if (p->ref_count <= 1) {
+            if (written > 0) break;
+            return (uint64_t)-EPIPE;
+        }
         // Check if pipe has space: full when head is one behind tail
         if ((p->head + 1) % PIPE_BUF_SIZE == p->tail) {
             // Pipe full: block or return EAGAIN if non-blocking
@@ -2286,7 +2327,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         // Check if write end is closed (all write fds gone)
         if (p->ref_count == 1) return 0;  // EOF: no writers left
         // Non-blocking: return EAGAIN-like indication (0 bytes read)
-        if (proc->fd_table[fd].flags & O_NONBLOCK) return 0;
+        if (proc->fd_table[fd].flags & O_NONBLOCK) return (uint64_t)-EAGAIN;
         p->read_pid = proc->pid;
         proc->state = BLOCKED;
         proc->wait_event = WAIT_PIPE;
@@ -2771,7 +2812,7 @@ uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
     case F_GETFL:
         return (uint64_t)proc->fd_table[fd].flags;
     case F_SETFL:
-        proc->fd_table[fd].flags = arg;
+        proc->fd_table[fd].flags = (proc->fd_table[fd].flags & ~O_SETFL_MASK) | (arg & O_SETFL_MASK);
         return 0;
     case F_ADD_SEALS: {
         // Only valid on FD_SHM with MFD_ALLOW_SEALING

@@ -1,18 +1,8 @@
 #ifndef _FCNTL_H
 #define _FCNTL_H
 
+#include "common/fcntl.h"
 #include <stdint.h>
-
-#define O_RDONLY    0
-#define O_WRONLY    1
-#define O_RDWR      2
-#define O_NONBLOCK  4
-#define O_APPEND    8
-#define O_CREAT    16
-#define O_TRUNC    32
-
-#define F_GETFL     1
-#define F_SETFL     2
 
 // Sealing constants (for memfd_create + fcntl)
 #define F_ADD_SEALS   1033

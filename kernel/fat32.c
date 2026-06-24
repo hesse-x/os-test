@@ -14,6 +14,7 @@
 #include "kernel/serial.h"
 #include "kernel/mem/slab.h"
 #include "common/errno.h"
+#include "common/fcntl.h"
 #include "arch/x64/utils.h"
 #include <stddef.h>
 
@@ -347,13 +348,71 @@ int fat32_resolve_path(const char *path, uint32_t *out_cluster,
 
         int is_last = (*p == '\0');
 
-        /* In is_parent mode: if this component goes past the parent path, stop */
-        if (is_parent && (p - path - 1) >= parent_end) {
-            *out_cluster = cluster;
-            *out_dir_cluster = prev_dir_cluster;
-            *out_dir_entry_idx = -1;
-            *out_file_size = 0;
-            return 0;
+        /* In is_parent mode: if the remaining path is past parent_end,
+         * treat this component as the last one (it's the parent directory) */
+        int is_parent_last = 0;
+        if (is_parent && (p - path) > parent_end) {
+            is_parent_last = 1;
+        }
+
+        /* Handle "." and ".." */
+        if (component[0] == '.' && component[1] == '\0') {
+            /* "." — stay in current directory */
+            if (is_last || is_parent_last) {
+                *out_cluster = cluster;
+                *out_dir_cluster = prev_dir_cluster;
+                *out_dir_entry_idx = -1;
+                *out_file_size = 0;
+                return 0;
+            }
+            continue;
+        }
+        if (component[0] == '.' && component[1] == '.' && component[2] == '\0') {
+            /* ".." — go to parent directory.
+             * Read the ".." entry to find parent cluster.
+             * For root, ".." points to root itself. */
+            if (cluster != root_cluster) {
+                /* Scan current dir for ".." entry to get parent cluster */
+                uint32_t parent_cluster = root_cluster; /* default */
+                uint32_t scan2 = cluster;
+                while (scan2 >= 2 && scan2 < 0x0FFFFFF8) {
+                    uint32_t lba2 = data_start_lba + (scan2 - 2) * sectors_per_cluster;
+                    uint8_t *buf2 = (uint8_t *)kmalloc(bytes_per_cluster);
+                    if (!buf2) return -ENOMEM;
+                    if (blk_read(lba2, sectors_per_cluster, buf2) != 0) {
+                        kfree(buf2);
+                        return -EIO;
+                    }
+                    int entries2 = bytes_per_cluster / 32;
+                    for (int j = 0; j < entries2; j++) {
+                        struct fat_dir_entry *de2 = (struct fat_dir_entry *)(buf2 + j * 32);
+                        if (de2->name[0] == 0x00) break;
+                        if (de2->name[0] == 0xE5) continue;
+                        if (de2->attr == 0x0F) continue;
+                        if (de2->name[0] == '.' && de2->name[1] == '.') {
+                            uint32_t pc = ((uint32_t)de2->fst_clus_hi << 16) | de2->fst_clus_lo;
+                            if (pc == 0) pc = root_cluster;
+                            parent_cluster = pc;
+                            kfree(buf2);
+                            goto dotdot_done;
+                        }
+                    }
+                    kfree(buf2);
+                    scan2 = fat_read_entry(scan2);
+                }
+dotdot_done:
+                prev_dir_cluster = cluster;
+                cluster = parent_cluster;
+            }
+            /* else: already at root, stay */
+            if (is_last || is_parent_last) {
+                *out_cluster = cluster;
+                *out_dir_cluster = prev_dir_cluster;
+                *out_dir_entry_idx = -1;
+                *out_file_size = 0;
+                return 0;
+            }
+            continue;
         }
 
         /* Scan current directory for this component */
@@ -398,9 +457,9 @@ int fat32_resolve_path(const char *path, uint32_t *out_cluster,
 
                 if (matched) {
                     uint32_t entry_cluster = ((uint32_t)de->fst_clus_hi << 16) | de->fst_clus_lo;
-                    if (entry_cluster == 0) entry_cluster = root_cluster;
+                    if (entry_cluster == 0 && (de->attr & 0x10)) entry_cluster = root_cluster;
 
-                    if (is_last || (is_parent && (p - path - 1) >= parent_end)) {
+                    if (is_last || is_parent_last) {
                         /* Found the target */
                         *out_cluster = entry_cluster;
                         *out_dir_cluster = scan_cluster;
@@ -578,18 +637,19 @@ struct inode *fat32_open(const char *path, int flags, int *out_errno) {
     int rc = fat32_resolve_path(path, &cluster, &dir_cluster, &dir_idx,
                                 &file_size, 0);
     /* O_CREAT: create file if not found */
-    if (rc != 0 && (flags & 0x40 /* O_CREAT */)) {
+    if (rc != 0 && (flags & O_CREAT)) {
         spin_lock(&fat_lock);
         rc = fat32_create_file(path);
         spin_unlock(&fat_lock);
         if (rc != 0) { *out_errno = rc; return NULL; }
         rc = fat32_resolve_path(path, &cluster, &dir_cluster, &dir_idx,
                                 &file_size, 0);
+        if (rc != 0) { *out_errno = rc; return NULL; }
     }
     if (rc != 0) { *out_errno = rc; return NULL; }
 
     /* O_TRUNC: truncate file */
-    if ((flags & 0x200 /* O_TRUNC */) && file_size > 0) {
+    if ((flags & O_TRUNC) && file_size > 0) {
         fat32_truncate(cluster, dir_cluster, dir_idx);
         file_size = 0;
     }
@@ -647,7 +707,7 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf, size_t count
     spin_lock(&ip->i_lock);
 
     /* O_APPEND: write at end of file */
-    if (ip->mode & 0x400 /* O_APPEND bit — checked via fd flags instead */) {
+    if (ip->mode & O_APPEND) {
         offset = ip->size;
     }
 
@@ -733,7 +793,9 @@ int fat32_create_file(const char *path) {
     uint64_t dummy_size;
     int rc = fat32_resolve_path(path, &dummy_cluster, &parent_cluster,
                                 &dummy_idx, &dummy_size, 1);
-    if (rc != 0) return rc;
+    if (rc != 0) {
+        return rc;
+    }
 
     /* Extract leaf name */
     int path_len = 0;
@@ -748,14 +810,20 @@ int fat32_create_file(const char *path) {
     if (leaf_len == 0) return -ENOENT;
 
     /* Find a free directory entry slot in parent */
-    uint8_t *dir_buf = read_cluster_buf(parent_cluster);
+    uint8_t *dir_buf = read_cluster_buf(dummy_cluster);
     if (!dir_buf) return -EIO;
 
     int entries = bytes_per_cluster / 32;
     int free_idx = -1;
+    int was_end_of_dir = 0;
     for (int i = 0; i < entries; i++) {
         struct fat_dir_entry *de = (struct fat_dir_entry *)(dir_buf + i * 32);
-        if (de->name[0] == 0x00 || de->name[0] == 0xE5) {
+        if (de->name[0] == 0x00) {
+            free_idx = i;
+            was_end_of_dir = 1;
+            break;
+        }
+        if (de->name[0] == 0xE5) {
             free_idx = i;
             break;
         }
@@ -778,11 +846,25 @@ int fat32_create_file(const char *path) {
     /* Write entry to directory */
     __memcpy(dir_buf + free_idx * 32, &new_entry, 32);
 
-    /* Write back the affected sector */
+    /* If we replaced the end-of-directory marker, write a new one after */
+    if (was_end_of_dir && free_idx + 1 < entries) {
+        __memset(dir_buf + (free_idx + 1) * 32, 0, 32);
+    }
+
+    /* Write back the affected sector(s) */
     int sector_idx = (free_idx * 32) / 512;
-    int wrc = write_cluster_sector(parent_cluster, sector_idx, dir_buf + sector_idx * 512);
+    int wrc = write_cluster_sector(dummy_cluster, sector_idx, dir_buf + sector_idx * 512);
+    if (wrc != 0) { kfree(dir_buf); return -EIO; }
+    /* Also write next sector if end-of-dir marker crosses the boundary */
+    if (was_end_of_dir && free_idx + 1 < entries) {
+        int next_sector = ((free_idx + 1) * 32) / 512;
+        if (next_sector != sector_idx) {
+            wrc = write_cluster_sector(dummy_cluster, next_sector, dir_buf + next_sector * 512);
+            if (wrc != 0) { kfree(dir_buf); return -EIO; }
+        }
+    }
     kfree(dir_buf);
-    return wrc == 0 ? 0 : -EIO;
+    return 0;
 }
 
 /* ==================== Mkdir ==================== */
@@ -844,7 +926,7 @@ int fat32_mkdir(const char *path) {
     kfree(dir_buf);
 
     /* Add entry in parent directory */
-    uint8_t *parent_buf = read_cluster_buf(parent_cluster);
+    uint8_t *parent_buf = read_cluster_buf(dummy_cluster);
     if (!parent_buf) return -EIO;
 
     int entries = bytes_per_cluster / 32;
@@ -872,7 +954,7 @@ int fat32_mkdir(const char *path) {
 
     __memcpy(parent_buf + free_idx * 32, &new_entry, 32);
     int sector_idx = (free_idx * 32) / 512;
-    int wrc = write_cluster_sector(parent_cluster, sector_idx, parent_buf + sector_idx * 512);
+    int wrc = write_cluster_sector(dummy_cluster, sector_idx, parent_buf + sector_idx * 512);
     kfree(parent_buf);
     return wrc == 0 ? 0 : -EIO;
 }
@@ -998,15 +1080,24 @@ int fat32_stat(const char *path, void *stat_buf) {
     int rc = fat32_resolve_path(path, &cluster, &dir_cluster, &dir_idx, &file_size, 0);
     if (rc != 0) return rc;
 
+    struct kstat *st = (void *)stat_buf;
+    __memset(st, 0, sizeof(*st));
+    st->st_ino = cluster;
+
+    if (dir_idx < 0) {
+        /* Reached via root, "." or ".." — no parent dir entry; treat as directory */
+        st->st_mode = 0040755;
+        st->st_nlink = 1;
+        st->st_size = 0;
+        st->st_blksize = bytes_per_cluster;
+        return 0;
+    }
+
     /* Read directory entry for attributes */
     uint8_t *dir_buf = read_cluster_buf(dir_cluster);
     if (!dir_buf) return -EIO;
     struct fat_dir_entry *de = (struct fat_dir_entry *)(dir_buf + dir_idx * 32);
 
-    struct kstat *st = (void *)stat_buf;
-
-    __memset(st, 0, sizeof(*st));
-    st->st_ino = cluster;
     st->st_mode = (de->attr & 0x10) ? 0040755 : 0100644;
     st->st_nlink = 1;
     st->st_size = file_size;
@@ -1100,7 +1191,7 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
             /* Fill entry */
             struct dirent64 *d = (struct dirent64 *)(out + written);
             uint32_t entry_cluster = ((uint32_t)de->fst_clus_hi << 16) | de->fst_clus_lo;
-            if (entry_cluster == 0) entry_cluster = root_cluster;
+            if (entry_cluster == 0 && (de->attr & 0x10)) entry_cluster = root_cluster;
             d->d_ino = entry_cluster;
             d->d_reclen = reclen;
             d->d_type = (de->attr & 0x10) ? 4 : 8; /* DT_DIR=4, DT_REG=8 */

@@ -134,11 +134,11 @@ void test_lseek_cur(void) {
     char tmp[4];
     read(fd, tmp, 3);
 
-    /* SEEK_CUR +2 → skip DE, land on G */
+    /* SEEK_CUR +2 → skip DE, land on F */
     lseek(fd, 2, SEEK_CUR);
     char buf[4] = {0};
     read(fd, buf, 3);
-    TEST_ASSERT_EQUAL_STRING("GHI", buf);
+    TEST_ASSERT_EQUAL_STRING("FGH", buf);
 
     close(fd);
 }

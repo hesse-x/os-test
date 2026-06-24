@@ -74,11 +74,7 @@ typedef struct mmap_region {
 #define FD_REGULAR 7
 #define FD_DIR     8
 
-#define O_RDONLY  0
-#define O_WRONLY  1
-#define O_RDWR    2
-#define O_NONBLOCK 4
-#define O_APPEND  8
+#include "common/fcntl.h"
 
 typedef struct pipe {
     uint8_t *buf;        // 4KB ring buffer (kmalloc)
@@ -127,6 +123,8 @@ typedef struct proc_t {
     uint64_t mmap_brk;     // mmap 区域高水位（初始 0x800000）
     uint64_t mmap_phys_brk; // MAP_PHYSICAL 区域高水位（初始 MAP_PHYSICAL_BASE）
     struct mmap_region *mmap_regions; // mmap 区域链表头
+    uint64_t u_stack_phys;   // 用户栈物理基址
+    size_t   u_stack_pages;  // 用户栈页数
     list_node_t run_node;  // embedded in per-CPU run_queue
     list_node_t wait_node; // embedded in per-CPU timer_queue (sorted by wait_deadline)
     uint64_t wait_deadline; // sched_clock() nanosecond deadline, 0 = no timeout

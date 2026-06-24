@@ -114,7 +114,6 @@ static void cmd_ls(const char *rel_path, int long_format) {
     } else {
         build_abs_path(rel_path, abs_path);
     }
-
     DIR *dir = opendir(abs_path);
     if (!dir) {
         if (errno == ENOTDIR)
@@ -126,6 +125,9 @@ static void cmd_ls(const char *rel_path, int long_format) {
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
+        /* Skip dot-files by default (like Ubuntu ls) */
+        if (entry->d_name[0] == '.') continue;
+
         if (long_format) {
             // Get file info via stat
             char entry_path[512];
