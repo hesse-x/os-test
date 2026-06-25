@@ -4,33 +4,17 @@
 #include <unistd.h>
 #include "common/syscall.h"
 
-// Defined in file.cc: returns target_pid for FD_DEV fd, or -1 if not FD_DEV
-pid_t __fd_dev_target_pid(int fd);
-
 // POSIX-like mmap: (addr, length, prot, flags, fd, offset)
 // For MAP_SHARED (SHM): fd is the SHM fd or FD_DEV fd
 // For MAP_PHYSICAL: fd=-1, offset is phys addr
 // For anonymous: fd=-1, offset ignored
+//
+// Kernel handles FD_DEV mmap internally (both kernel device ops->mmap
+// and user-space driver auto shm_attach). Libc no longer needs
+// __fd_dev_target_pid.
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, uint64_t offset) {
-    // FD_DEV mmap via MAP_SHARED
+    // MAP_SHARED: SHM or DEV fd mapping (kernel handles both)
     if (flags & MAP_SHARED) {
-        pid_t target_pid = __fd_dev_target_pid(fd);
-        if (target_pid > 0) {
-            // User-space driver: attach to driver's SHM, get an fd, then mmap it
-            int shm_fd = sys_shm_attach(target_pid, 0);
-            if (shm_fd <= 0) {
-                errno = EBADF;
-                return MAP_FAILED;
-            }
-            void *ptr = sys_mmap(NULL, length, prot, flags, shm_fd, 0);
-            sys_close(shm_fd);  // mmap keeps a reference
-            if (!ptr) {
-                errno = ENOMEM;
-                return MAP_FAILED;
-            }
-            return ptr;
-        }
-        // Kernel device or direct SHM fd mmap
         void *r = sys_mmap(addr, length, prot, flags, fd, offset);
         if (!r) {
             errno = ENOMEM;

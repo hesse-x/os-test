@@ -13,6 +13,7 @@
 #include "kernel/mem/kasan.h"
 #include "kernel/mem/alloc.h"
 #include "common/errno.h"
+#include "common/ioctl.h"
 #include "kernel/display.h"
 #include "kernel/devtmpfs.h"
 #include "kernel/pci.h"
@@ -21,6 +22,7 @@
 #include "kernel/vfs.h"
 #include "kernel/inode.h"
 #include "kernel/fat32.h"
+#include "common/stat.h"
 
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 128
@@ -28,9 +30,6 @@ static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS];
 
 // ===================== IRQ owner (user-space driver binding) =====================
 static pid_t irq_owner[MAX_IRQ_HANDLERS];
-
-// ===================== Device table (dev_type → PID) =====================
-static pid_t dev_table[DEV_TYPE_MAX];
 
 // ===================== Kernel pre-allocated SHM table =====================
 #define MAX_KERNEL_SHM 4
@@ -349,11 +348,6 @@ void isr_init() {
     irq_owner[i] = -1;
   }
 
-  // Initialize device table
-  for (int i = 0; i < DEV_TYPE_MAX; i++) {
-    dev_table[i] = 0;
-  }
-
   // Initialize kernel SHM table
   for (int i = 0; i < MAX_KERNEL_SHM; i++) {
     kernel_shm_table[i].shm_id = -1;
@@ -406,7 +400,7 @@ void sig_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 59
+#define NR_SYSCALL 61
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -419,54 +413,56 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_spawn,          // 8
     sys_mmap,           // 9
     sys_munmap,         // 10
-    sys_fb_info,        // 11
-    sys_shm_create,     // 12
-    sys_shm_attach,     // 13
-    sys_pipe,           // 14
-    sys_write,          // 15
-    sys_read,           // 16
-    sys_close,          // 17
-    sys_load_dev,       // 18
-    sys_notify,         // 19
-    sys_gettime,        // 20
-    sys_clock,          // 21
-    sys_msg,            // 22
-    sys_msg_resp,       // 23
-    sys_ioperm,         // 24
-    sys_dup2,           // 25
-    sys_fcntl,          // 26
-    sys_dma_alloc,      // 27
-    sys_dma_free,       // 28
-    sys_pci_dev_info,   // 29
-    sys_block_io,       // 30
-    sys_block_async,    // 31
-    sys_open_dev,       // 32
-    sys_install_fd_impl, // 33
-    sys_socket,         // 34
-    sys_bind,           // 35
-    sys_listen,         // 36
-    sys_accept,         // 37
-    sys_connect,        // 38
-    sys_socketpair,     // 39
-    sys_sendmsg,        // 40
-    sys_recvmsg,        // 41
-    sys_shutdown,       // 42
-    sys_poll,           // 43
-    sys_lseek,          // 44
-    sys_memfd_create,   // 45
-    sys_ftruncate,      // 46
-    sys_kill,           // 47
-    sys_sigaction,      // 48
-    sys_sigreturn,      // 49
-    sys_debug_print,    // 50
-    sys_open,            // 51
-    sys_stat,            // 52
-    sys_mkdir,           // 53
-    sys_unlink,          // 54
-    sys_rmdir,           // 55
-    sys_dev_create,      // 56
-    sys_dev_req,         // 57
-    sys_getdents,        // 58
+    sys_shm_create,     // 11
+    sys_shm_attach,     // 12
+    sys_pipe,           // 13
+    sys_write,          // 14
+    sys_read,           // 15
+    sys_close,          // 16
+    sys_load_dev,       // 17
+    sys_notify,         // 18
+    sys_gettime,        // 19
+    sys_clock,          // 20
+    sys_msg,            // 21
+    sys_msg_resp,       // 22
+    sys_ioperm,         // 23
+    sys_dup2,           // 24
+    sys_fcntl,          // 25
+    sys_dma_alloc,      // 26
+    sys_dma_free,       // 27
+    sys_pci_dev_info,   // 28
+    sys_block_io,       // 29
+    sys_block_async,    // 30
+    sys_open_dev,       // 31
+    sys_install_fd_impl, // 32
+    sys_socket,         // 33
+    sys_bind,           // 34
+    sys_listen,         // 35
+    sys_accept,         // 36
+    sys_connect,        // 37
+    sys_socketpair,     // 38
+    sys_sendmsg,        // 39
+    sys_recvmsg,        // 40
+    sys_shutdown,       // 41
+    sys_poll,           // 42
+    sys_lseek,          // 43
+    sys_memfd_create,   // 44
+    sys_ftruncate,      // 45
+    sys_kill,           // 46
+    sys_sigaction,      // 47
+    sys_sigreturn,      // 48
+    sys_debug_print,    // 49
+    sys_open,            // 50
+    sys_stat,            // 51
+    sys_mkdir,           // 52
+    sys_unlink,          // 53
+    sys_rmdir,           // 54
+    sys_dev_create,      // 55
+    sys_dev_req,         // 56
+    sys_getdents,        // 57
+    sys_ioctl,           // 58
+    sys_fstat,           // 59
+    sys_fdev_pid,        // 60
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -544,7 +540,6 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 
     proc_t *proc = current_proc;
     int cpu = proc->assigned_cpu;
-
     while (1) {
         // Try to dequeue a message from recv queue
         spin_lock(&proc->recv_lock);
@@ -604,6 +599,43 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         }
 
         schedule();
+
+        // Woken up: check if ISR interrupted (EINTR)
+        if (proc->recv_intr) {
+            proc->recv_intr = 0;
+            // Re-check queue: a message may have arrived before/during wake
+            spin_lock(&proc->recv_lock);
+            if (proc->recv_head != proc->recv_tail) {
+                copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
+                recv_msg_t *msg = (recv_msg_t *)proc->recv_buf[proc->recv_tail];
+                if (msg->type == RECV_REQ)
+                    proc->req_caller_pid = (pid_t)msg->src;
+                if (msg->type == RECV_MSG) {
+                    void *kmaddr = msg->msg.kmaddr;
+                    size_t len = msg->msg.len;
+                    proc->msg_caller_pid = (pid_t)msg->src;
+                    if (!data_buf || data_buf_len < len) {
+                        kfree(kmaddr);
+                        recv_msg_t *umsg = (recv_msg_t __force *)buf;
+                        umsg->msg.kmaddr = NULL;
+                        umsg->msg.len = len;
+                        proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+                        spin_unlock(&proc->recv_lock);
+                        return (uint64_t)-EINVAL;
+                    }
+                    copy_to_user(data_buf, kmaddr, len);
+                    kfree(kmaddr);
+                    recv_msg_t *umsg = (recv_msg_t __force *)buf;
+                    umsg->msg.kmaddr = NULL;
+                    umsg->msg.len = len;
+                }
+                proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+                spin_unlock(&proc->recv_lock);
+                return 0;
+            }
+            spin_unlock(&proc->recv_lock);
+            return (uint64_t)-EINTR;
+        }
 
         // Woken up: check if timed out
         if (proc->wait_timed_out) {
@@ -683,11 +715,13 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
     uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
     if (next == target->recv_tail) {
         spin_unlock(&target->recv_lock);
+        serial_printf("sys_req: target_pid=%d recv queue full!\n", target_pid);
         return (uint64_t)-EBUSY;  // queue full
     }
     __memcpy(target->recv_buf[target->recv_head], msg, RECV_MSG_SIZE);
     target->recv_head = next;
     spin_unlock(&target->recv_lock);
+    serial_printf("sys_req: from pid=%d to pid=%d (REQ enqueued)\n", current_proc->pid, target_pid);
 
     // Wake target if in WAIT_RECV
     int target_cpu = target->assigned_cpu;
@@ -713,11 +747,13 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
     proc->wait_deadline = 0;
     proc->req_target_pid = target_pid;
     proc->req_reply_buf = reply;
+    proc->req_reply_len = RECV_MSG_SIZE;
     proc->req_result = 0;
 
     schedule();
 
     // Woken up by sys_resp or proc_reap
+    serial_printf("sys_req: pid=%d woken up, req_result=%ld\n", proc->pid, (long)proc->req_result);
     if (proc->req_result != 0) return (uint64_t)proc->req_result;
     return 0;
 }
@@ -742,13 +778,16 @@ uint64_t sys_resp(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     // Copy reply data to caller's reply buffer (user space)
     // We must first copy to a kernel buffer under the server's CR3,
     // then switch to caller's CR3 to write to the caller's user-space buffer.
+    size_t reply_len = caller->req_reply_len;
+    if (reply_len == 0) reply_len = RECV_MSG_SIZE;  // compat: default
+    if (reply_len > RECV_MSG_SIZE) reply_len = RECV_MSG_SIZE;
     uint8_t kbuf[RECV_MSG_SIZE];
     copy_from_user(kbuf, reply, RECV_MSG_SIZE);
-
+    // Only write reply_len bytes to avoid overflowing small ioctl arg buffers
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)caller->cr3) : "memory");
-    copy_to_user(caller->req_reply_buf, kbuf, RECV_MSG_SIZE);
+    copy_to_user(caller->req_reply_buf, kbuf, reply_len);
     __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
     // Wake caller
@@ -773,7 +812,7 @@ uint64_t sys_resp(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
 uint64_t sys_irq_bind(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
     int irq = (int)arg1;
     if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return (uint64_t)-EINVAL;
-    // Mutual exclusion: cannot share IRQ with kernel ISR (e.g., FD_SERIAL)
+    // Mutual exclusion: cannot share IRQ with kernel ISR (e.g., serial dev)
     if (irq_handlers[irq] != NULL) return (uint64_t)-EBUSY;
     __atomic_store_n(&irq_owner[irq], current_proc->pid, __ATOMIC_RELEASE);
 
@@ -876,15 +915,22 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
     if (pid == -1) {
         // Wait for any child to become ZOMBIE
         while (1) {
-            // Scan for a ZOMBIE child
+            // Scan for a ZOMBIE child and count total children
             spin_lock(&procs_lock);
             proc_t *zombie = NULL;
+            bool has_children = false;
             for (int i = 0; i < MAX_PROC; i++) {
-                if (procs[i].pid >= 0 && procs[i].parent_pid == current_proc->pid &&
-                    procs[i].state == ZOMBIE) {
-                    zombie = &procs[i];
-                    break;
+                if (procs[i].pid >= 0 && procs[i].parent_pid == current_proc->pid) {
+                    has_children = true;
+                    if (procs[i].state == ZOMBIE) {
+                        zombie = &procs[i];
+                        break;
+                    }
                 }
+            }
+            if (!has_children) {
+                spin_unlock(&procs_lock);
+                return (uint64_t)-ECHILD;
             }
             if (zombie) {
                 int cpu = zombie->assigned_cpu;
@@ -918,12 +964,20 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
             // Re-scan under parent lock to avoid missed wakeup
             spin_lock(&procs_lock);
             zombie = NULL;
+            has_children = false;
             for (int i = 0; i < MAX_PROC; i++) {
-                if (procs[i].pid >= 0 && procs[i].parent_pid == current_proc->pid &&
-                    procs[i].state == ZOMBIE) {
-                    zombie = &procs[i];
-                    break;
+                if (procs[i].pid >= 0 && procs[i].parent_pid == current_proc->pid) {
+                    has_children = true;
+                    if (procs[i].state == ZOMBIE) {
+                        zombie = &procs[i];
+                        break;
+                    }
                 }
+            }
+            if (!has_children) {
+                spin_unlock(&procs_lock);
+                spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+                return (uint64_t)-ECHILD;
             }
             if (zombie) {
                 spin_unlock(&procs_lock);
@@ -967,20 +1021,32 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
         // Must set wait_event + BLOCKED under parent's scheduler_lock
         // to prevent race with child's sys_exit checking our state.
         int pcpu = current_proc->assigned_cpu;
-        spin_lock(&cpu_locals[pcpu].scheduler_lock);
-        // Re-check child state under parent lock: child may have exited
-        // between our unlock above and acquiring parent lock.
-        spin_lock(&cpu_locals[cpu].scheduler_lock);
-        if (child->state == ZOMBIE) {
-            child->state = REAPING;
-            spin_unlock(&cpu_locals[cpu].scheduler_lock);
+        if (pcpu == cpu) {
+            // Same CPU: single lock covers both parent and child state
+            spin_lock(&cpu_locals[pcpu].scheduler_lock);
+            if (child->state == ZOMBIE) {
+                child->state = REAPING;
+                spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+                break;
+            }
+            current_proc->wait_event = WAIT_CHILD;
+            current_proc->state = BLOCKED;
             spin_unlock(&cpu_locals[pcpu].scheduler_lock);
-            break;
+        } else {
+            // Different CPUs: need both locks to prevent race
+            spin_lock(&cpu_locals[pcpu].scheduler_lock);
+            spin_lock(&cpu_locals[cpu].scheduler_lock);
+            if (child->state == ZOMBIE) {
+                child->state = REAPING;
+                spin_unlock(&cpu_locals[cpu].scheduler_lock);
+                spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+                break;
+            }
+            spin_unlock(&cpu_locals[cpu].scheduler_lock);
+            current_proc->wait_event = WAIT_CHILD;
+            current_proc->state = BLOCKED;
+            spin_unlock(&cpu_locals[pcpu].scheduler_lock);
         }
-        spin_unlock(&cpu_locals[cpu].scheduler_lock);
-        current_proc->wait_event = WAIT_CHILD;
-        current_proc->state = BLOCKED;
-        spin_unlock(&cpu_locals[pcpu].scheduler_lock);
         schedule();
 
         // Woken up by notify — re-validate child still exists
@@ -1039,10 +1105,11 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uin
                 child->fd_table[fd].pipe->ref_count++;
             } else if (child->fd_table[fd].type == FD_FILE) {
                 child->fd_table[fd].file_data.ref_count++;
-            } else if (child->fd_table[fd].type == FD_REGULAR) {
+            } else if (child->fd_table[fd].type == FD_REGULAR ||
+                       child->fd_table[fd].type == FD_DEV ||
+                       child->fd_table[fd].type == FD_DIR) {
                 if (child->fd_table[fd].inode) inode_get(child->fd_table[fd].inode);
             }
-            // FD_DEV/SHM: copied by struct assignment, no ref_count needed
         }
     }
 
@@ -1075,11 +1142,73 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
             struct inode *ip = proc->fd_table[fd].inode;
             if (ip && ip->i_priv) {
                 struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-                if (ops->driver_pid == 0 && ops->device_type == DEV_KMS) {
-                    return display_mmap_handler(proc, size);
+                if (ops->driver_pid == 0 && ops->mmap) {
+                    uint64_t ret = ops->mmap(proc, size);
+                    return ret;
+                }
+                // User-space driver: auto shm_attach to driver's SHM
+                if (ops->driver_pid > 0) {
+                    pid_t drv_pid = ops->driver_pid;
+                    if (drv_pid < 0 || drv_pid >= MAX_PROC) return 0;
+                    proc_t *drv_proc = &procs[drv_pid];
+                    if (drv_proc->pid != drv_pid) return 0;
+
+                    // Find driver's FD_SHM
+                    struct shm *target_shm = NULL;
+                    for (int i = 0; i < MAX_FD; i++) {
+                        if (drv_proc->fd_table[i].type == FD_SHM) {
+                            target_shm = drv_proc->fd_table[i].shm;
+                            break;
+                        }
+                    }
+                    if (!target_shm) return 0;
+
+                    shm_get(target_shm);  // +1 for our mapping
+
+                    size_t npages = target_shm->npages;
+                    size_t list_pages = target_shm->page_list ? (size_t)target_shm->num_pages : 0;
+                    size_t total_pages = npages + list_pages;
+                    size = total_pages * PAGE_SIZE;
+
+                    uint64_t vaddr = proc->mmap_brk;
+                    uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+
+                    for (size_t i = 0; i < total_pages; i++) {
+                        uint64_t page_phys;
+                        if (i < npages) {
+                            page_phys = target_shm->phys + i * PAGE_SIZE;
+                        } else {
+                            page_phys = target_shm->page_list[i - npages];
+                        }
+                        if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE,
+                                                  page_phys, pte_flags)) {
+                            for (size_t j = 0; j < i; j++)
+                                unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
+                            shm_put(target_shm);
+                            return 0;
+                        }
+                    }
+
+                    mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+                    if (!region) {
+                        for (size_t i = 0; i < total_pages; i++)
+                            unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE, 1);
+                        shm_put(target_shm);
+                        return 0;
+                    }
+
+                    region->vaddr = vaddr;
+                    region->size = size;
+                    region->phys = 0;
+                    region->shm_obj = target_shm;  // ref already bumped above
+                    region->next = proc->mmap_regions;
+                    proc->mmap_regions = region;
+                    proc->mmap_brk = vaddr + size;
+
+                    return vaddr;
                 }
             }
-            return 0;  // user drivers: mmap via SHM attach path in libc
+            return 0;  // fallback: no mmap handler
         }
 
         // FD_SHM: existing SHM mapping path
@@ -1250,19 +1379,36 @@ uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, ui
             mmap_region_t *region = *pp;
             size = region->size;
 
-            // 逐页解映射（不释放物理页 — SHM页由shm_put管理，匿名页在下面释放）
+            // 逐页解映射
+            // SHM/MAP_PHYSICAL: 只清除PTE，不释放物理页（物理页由shm_put/外部管理）
+            // 匿名映射: 清除PTE并释放物理页
             size_t npages = size / PAGE_SIZE;
-            for (size_t i = 0; i < npages; i++) {
-                uint64_t va = addr + i * PAGE_SIZE;
-                unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
+            if (region->shm_obj || region->phys) {
+                // SHM or MAP_PHYSICAL: only unmap PTE, don't free physical pages
+                for (size_t i = 0; i < npages; i++) {
+                    uint64_t va = addr + i * PAGE_SIZE;
+                    uint64_t *pdpt = ensure_pd(pml4, va);
+                    if (!pdpt) continue;
+                    uint64_t *pd = ensure_pt_in_pd(pdpt, va, 2);
+                    if (!pd) continue;
+                    uint64_t *pt = ensure_pt_in_pd(pd, va, 1);
+                    if (!pt) continue;
+                    uint64_t pt_idx = (va >> 12) & 0x1FF;
+                    pt[pt_idx] = 0;  // clear PTE only
+                }
+            } else {
+                // Anonymous: unmap + free physical pages
+                for (size_t i = 0; i < npages; i++) {
+                    uint64_t va = addr + i * PAGE_SIZE;
+                    unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
+                }
             }
 
             // Release SHM reference if this was an SHM mapping
             if (region->shm_obj) {
                 shm_put(region->shm_obj);
             }
-            // else: anonymous/MAP_PHYSICAL — physical pages already freed by PML4 walk in proc_reap
-            // (for munmap, anonymous pages are leaked intentionally — proc_reap handles them)
+            // Anonymous/MAP_PHYSICAL: physical pages already freed above or externally managed
 
             // 从链表删除
             *pp = region->next;
@@ -1377,7 +1523,7 @@ uint64_t sys_block_io(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4
     return (uint64_t)(rc < 0 ? -rc : 0);
 }
 
-// sys_block_async(lba, buf, count, dir) — syscall 33
+// sys_block_async(lba, buf, count, dir) — syscall 30
 // Async block I/O: returns cookie (>0) on success, positive errno on error.
 // Completion delivered via RECV_NOTIFY with cookie+result+lba+count in data.
 uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u1, uint64_t _u2) {
@@ -1391,7 +1537,7 @@ uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t a
 }
 
 // sys_debug_print(buf, len) — temporary debug: print user string to serial
-// syscall 50
+// syscall 49
 uint64_t sys_debug_print(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     const char __user *buf = (const char __user * __force)arg1;
     size_t len = (size_t)arg2;
@@ -1403,79 +1549,12 @@ uint64_t sys_debug_print(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u
     return 0;
 }
 
-// sys_open_dev(dev_type) — syscall 34 (open device node, returns FD_DEV fd)
-// Returns: (fd | target_pid << 32) on success, negative errno on failure
-// Caller extracts: fd = (int32_t)(result & 0xFFFFFFFF), pid = (pid_t)(result >> 32)
+// sys_open_dev(dev_type) — syscall 31 (DEPRECATED: use sys_open("/dev/<name>") instead)
 uint64_t sys_open_dev(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
-    int dev_type = (int)arg1;
-
-    if (dev_type <= DEV_NONE || dev_type >= DEV_TYPE_MAX)
-        return (uint64_t)-EINVAL;
-
-    // ===== DEV_SERIAL: kernel-side serial console (like Linux uart_open) =====
-    if (dev_type == DEV_SERIAL) {
-        // Mutual exclusion: cannot coexist with user-space irq_bind on vector 36
-        if (irq_owner[36] >= 0) return (uint64_t)-EBUSY;
-
-        proc_t *proc = current_proc;
-        int fd = -1;
-        for (int i = 0; i < MAX_FD; i++) {  // allow fd 0/1 (serial shell needs them)
-            if (proc->fd_table[i].type == FD_NONE) { fd = i; break; }
-        }
-        if (fd < 0) return (uint64_t)-EMFILE;
-
-        proc->fd_table[fd].type = FD_SERIAL;
-        proc->fd_table[fd].flags = O_RDWR;
-
-        serial_fd_count++;
-        if (!serial_irq_registered) {
-            register_irq(36, serial_irq_handler);
-            // Unmask GSI 4 (COM1 IRQ4) in I/O APIC
-            uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
-            ioapic_set_irq(4, 36, bsp_apic_id, false);  // edge-triggered
-            // Enable RX interrupt in UART IER
-            outb(COM1_IER, IER_RX_ENABLE);
-            serial_irq_registered = true;
-        }
-
-        return (uint64_t)fd;
-    }
-
-    // ===== DEV_KMS: kernel-side KMS display (registered via devtmpfs) =====
-    if (dev_type == DEV_KMS) {
-        uint64_t fd = devtmpfs_open("kms", O_RDWR);
-        if ((int64_t)fd < 0) return fd;
-        // driver_pid=0 for kernel device — return fd only (no target_pid)
-        return fd;
-    }
-
-    pid_t target_pid = dev_table[dev_type];
-    if (target_pid <= 0) {
-        return (uint64_t)-ENOENT;
-    }
-
-    proc_t *proc = current_proc;
-
-    // Find free fd slot (skip 0/1 reserved for stdin/stdout)
-    int fd = -1;
-    for (int i = 2; i < MAX_FD; i++) {
-        if (proc->fd_table[i].type == FD_NONE) {
-            fd = i;
-            break;
-        }
-    }
-    if (fd < 0) return (uint64_t)-EMFILE;
-
-    proc->fd_table[fd].type = FD_DEV;
-    proc->fd_table[fd].flags = O_RDWR;
-    proc->fd_table[fd].pipe = NULL;
-    proc->fd_table[fd].target_pid = target_pid;
-
-    // Pack fd and PID into one return value — eliminates need for sys_lookup_dev
-    return (uint64_t)fd | ((uint64_t)target_pid << 32);
+    return (uint64_t)(-(uint64_t)ENOSYS);
 }
 
-// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 35
+// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 32
 // Register an FD_FILE fd in the kernel fd_table.
 // Returns: fd (>=3) on success, negative errno on failure
 // Note: named sys_install_fd_impl to avoid conflict with static inline wrapper in common/syscall.h
@@ -1513,64 +1592,241 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
     return (uint64_t)fd;
 }
 
-// sys_fb_info(buf) — syscall 11 (deprecated, returns -ENOSYS)
-uint64_t sys_fb_info(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
-    (void)arg1;
-    return (uint64_t)-ENOSYS;
-}
 
-// sys_dev_req(fd, request, reply) — syscall 57 (synchronous device request via fd)
+// sys_dev_req(fd, request, reply) — syscall 56 (DEPRECATED: use sys_ioctl instead)
 uint64_t sys_dev_req(uint64_t arg1, uint64_t arg2, uint64_t arg3,
                      uint64_t _u1, uint64_t _u2, uint64_t _u3) {
-    int fd = (int)arg1;
-    void __user *request = (void __user * __force)arg2;
-    void __user *reply = (void __user * __force)arg3;
-
-    // Validate fd
-    if (fd < 0 || fd >= MAX_FD) {
-        serial_printf("sys_dev_req: fd=%d out of range\n", fd);
-        return (uint64_t)-EBADF;
-    }
-    proc_t *proc = current_proc;
-    if (proc->fd_table[fd].type != FD_DEV) {
-        serial_printf("sys_dev_req: fd=%d type=%d != FD_DEV\n", fd, proc->fd_table[fd].type);
-        return (uint64_t)-EINVAL;
-    }
-
-    // Get dev_ops from inode (devtmpfs path), or fall back to target_pid (legacy dev_table path)
-    struct inode *ip = proc->fd_table[fd].inode;
-    if (ip && ip->i_priv) {
-        struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-        if (ops->driver_pid == 0) {
-            // Kernel device: synchronous dispatch
-            uint8_t req_buf[56];
-            copy_from_user(req_buf, request, 56);
-
-            uint32_t req_type = *(uint32_t *)req_buf;
-
-            uint8_t resp_buf[64];
-            __memset(resp_buf, 0, 64);
-
-            int result;
-            if (ops->device_type == DEV_KMS) {
-                result = display_req_handler(req_type, req_buf + 4, 52,
-                                             resp_buf, 64);
-            } else {
-                return (uint64_t)-ENODEV;
-            }
-
-            copy_to_user(reply, resp_buf, 64);
-            return (uint64_t)result;
-        }
-    }
-
-    // Legacy path: IPC proxy via target_pid
-    pid_t target_pid = proc->fd_table[fd].target_pid;
-    if (target_pid <= 0) return (uint64_t)-EBADF;
-    return sys_req((uint64_t)target_pid, arg2, arg3, 0, 0, 0);
+    return (uint64_t)(-(uint64_t)ENOSYS);
 }
 
-// sys_shm_create(size) — syscall 12 (创建共享内存，返回 fd)
+// sys_ioctl(fd, cmd, arg) — syscall 58 (device ioctl)
+uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
+                    uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+    int fd = (int)arg1;
+    uint32_t cmd = (uint32_t)arg2;
+    void __user *arg = (void __user * __force)arg3;
+
+    proc_t *proc = current_proc;
+    if (fd < 0 || fd >= MAX_FD || proc->fd_table[fd].type == FD_NONE)
+        return (uint64_t)(-(uint64_t)EBADF);
+
+    switch (proc->fd_table[fd].type) {
+    case FD_DEV: {
+        struct inode *ip = proc->fd_table[fd].inode;
+        if (!ip || !ip->i_priv) return (uint64_t)(-(uint64_t)ENODEV);
+        struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+        if (ops->driver_pid == 0) {
+            // Kernel device: copy arg to kernel buffer, call ops->ioctl, copy back
+            if (!ops->ioctl) return (uint64_t)(-(uint64_t)ENOTTY);
+
+            uint8_t kbuf[64];
+            __memset(kbuf, 0, sizeof(kbuf));
+
+            // Copy arg from user if direction includes WRITE (user -> kernel)
+            // arg_size > 48: reject — such ioctl needs MSG path (future),
+            // not silently truncated. TODO: add assert/error log for invalid size.
+            if ((_IOC_DIR(cmd) & _IOC_WRITE) && (__force uint64_t)arg != 0) {
+                uint16_t arg_size = _IOC_SIZE(cmd);
+                if (arg_size > 48) return (uint64_t)(-(uint64_t)EINVAL);
+                if (arg_size > 0)
+                    copy_from_user(kbuf, arg, arg_size);
+            }
+
+            long result = ops->ioctl(cmd, kbuf);
+
+            // Copy result back to user if direction includes READ (kernel -> user)
+            if ((_IOC_DIR(cmd) & _IOC_READ) && (__force uint64_t)arg != 0 && result >= 0) {
+                uint16_t arg_size = _IOC_SIZE(cmd);
+                if (arg_size > 0 && arg_size <= 48)
+                    copy_to_user(arg, kbuf, arg_size);
+            }
+
+            return (uint64_t)result;
+        }
+        // User-space driver: IPC proxy
+        // Pack cmd + arg into a REQ message, send to driver_pid
+        pid_t target_pid = ops->driver_pid;
+        if (target_pid <= 0) return (uint64_t)(-(uint64_t)ENODEV);
+
+        // Build REQ payload: [4 bytes cmd] [arg_size bytes arg data]
+        // arg_size > 48: reject — such ioctl needs MSG path (future),
+        // not silently truncated. TODO: add assert/error log for invalid size.
+        if ((_IOC_DIR(cmd) & _IOC_WRITE) && (__force uint64_t)arg != 0) {
+            uint16_t arg_size = _IOC_SIZE(cmd);
+            if (arg_size > 48) return (uint64_t)(-(uint64_t)EINVAL);
+        }
+        uint8_t req_data[56];
+        __memset(req_data, 0, 56);
+        *(uint32_t *)req_data = cmd;
+        if ((_IOC_DIR(cmd) & _IOC_WRITE) && (__force uint64_t)arg != 0) {
+            uint16_t arg_size = _IOC_SIZE(cmd);
+            if (arg_size > 0)
+                copy_from_user(req_data + 4, arg, arg_size);
+        }
+
+        // Validate target PID
+        if (target_pid < 0 || target_pid >= MAX_PROC)
+            return (uint64_t)(-(uint64_t)ESRCH);
+        proc_t *target = &procs[target_pid];
+        if (target->pid != target_pid)
+            return (uint64_t)(-(uint64_t)ESRCH);
+
+        // Build RECV_REQ message
+        uint8_t msg[RECV_MSG_SIZE];
+        recv_msg_t *hdr = (recv_msg_t *)msg;
+        hdr->type = RECV_REQ;
+        hdr->src = (uint32_t)current_proc->pid;
+        __memcpy(hdr->data, req_data, 56);
+
+        // Enqueue to target's recv queue
+        spin_lock(&target->recv_lock);
+        uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
+        if (next == target->recv_tail) {
+            spin_unlock(&target->recv_lock);
+            return (uint64_t)(-(uint64_t)EBUSY);
+        }
+        __memcpy(target->recv_buf[target->recv_head], msg, RECV_MSG_SIZE);
+        target->recv_head = next;
+        spin_unlock(&target->recv_lock);
+
+        // Wake target if in WAIT_RECV
+        int target_cpu = target->assigned_cpu;
+        spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+        if (target->state == BLOCKED && target->wait_event == WAIT_RECV) {
+            if (target->wait_deadline != 0) {
+                timer_queue_remove(target);
+                target->wait_deadline = 0;
+            }
+            target->state = READY;
+            target->wait_event = WAIT_NONE;
+            target->wait_timed_out = 0;
+            list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
+            cpu_locals[target_cpu].run_count++;
+        }
+        spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+
+        // Block caller on WAIT_REQ_REPLY
+        // Use the arg as reply buffer so driver's resp writes back to user space
+        // arg is a 64B buffer allocated by userspace ioctl(), always >= 56B
+        proc->state = BLOCKED;
+        proc->wait_event = WAIT_REQ_REPLY;
+        proc->wait_timed_out = 0;
+        proc->wait_deadline = 0;
+        proc->req_target_pid = target_pid;
+        proc->req_reply_buf = arg;  // driver resp will be copy_to_user'd here
+        proc->req_reply_len = 56;   // REQ payload size, not RECV_MSG_SIZE (avoids stack overflow on small ioctl arg)
+        proc->req_result = 0;
+
+        schedule();
+
+        // Woken up by sys_resp or proc_reap
+        if (proc->req_result != 0)
+            return (uint64_t)proc->req_result;
+
+        // Driver reply layout: [int32_t result(4B) | arg_data(52B)]
+        // libc ioctl expects: [arg_data(arg_size B)] at offset 0
+        // For _IOWR/_IOR: strip the result prefix, move arg_data from offset 4 to 0
+        // so libc's copy-out (arg_size bytes from buf) matches the ioctl arg layout.
+        int32_t ioctl_result = 0;
+        if ((__force uint64_t)arg != 0) {
+            // Read result from reply offset 0 (before we shift data)
+            copy_from_user(&ioctl_result, arg, 4);
+
+            if ((_IOC_DIR(cmd) & _IOC_READ) && _IOC_SIZE(cmd) > 0 && _IOC_SIZE(cmd) <= 48) {
+                uint16_t arg_size = _IOC_SIZE(cmd);
+                uint8_t tmp[48];
+                // Read arg_data from reply offset 4
+                copy_from_user(tmp, (void __user * __force)((__force uint64_t)arg + 4), arg_size);
+                // Write arg_data to offset 0 (where libc expects it)
+                copy_to_user((void __user * __force)arg, tmp, arg_size);
+            }
+        }
+        return (uint64_t)(long)ioctl_result;
+    }
+    case FD_SOCKET:
+    case FD_PIPE:
+    case FD_REGULAR:
+    case FD_DIR:
+    case FD_FILE:
+    case FD_SHM:
+        return (uint64_t)(-(uint64_t)ENOTTY);
+    default:
+        return (uint64_t)(-(uint64_t)EBADF);
+    }
+}
+
+// sys_fstat(fd, buf) — syscall 59 (file status)
+uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
+                    uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+    int fd = (int)arg1;
+    struct kstat __user *ust = (struct kstat __user * __force)arg2;
+
+    proc_t *proc = current_proc;
+    if (fd < 0 || fd >= MAX_FD || proc->fd_table[fd].type == FD_NONE)
+        return (uint64_t)(-(uint64_t)EBADF);
+
+    struct kstat ks;
+    __memset(&ks, 0, sizeof(ks));
+    ks.st_nlink = 1;
+    ks.st_blksize = 512;
+
+    switch (proc->fd_table[fd].type) {
+    case FD_REGULAR: {
+        struct inode *ip = proc->fd_table[fd].inode;
+        if (!ip) return (uint64_t)(-(uint64_t)EBADF);
+        ks.st_ino = ip->ino;
+        ks.st_size = ip->size;
+        ks.st_mode = S_IFREG | 0644;
+        ks.st_blocks = (ip->size + 511) / 512;
+        break;
+    }
+    case FD_DIR: {
+        struct inode *ip = proc->fd_table[fd].inode;
+        if (!ip) return (uint64_t)(-(uint64_t)EBADF);
+        ks.st_ino = ip->ino;
+        ks.st_mode = S_IFDIR | 0755;
+        ks.st_blocks = 0;
+        break;
+    }
+    case FD_DEV: {
+        struct inode *ip = proc->fd_table[fd].inode;
+        if (!ip) return (uint64_t)(-(uint64_t)EBADF);
+        ks.st_ino = ip->ino;
+        ks.st_mode = S_IFCHR | 0666;
+        break;
+    }
+    case FD_PIPE:
+        ks.st_mode = S_IFIFO | 0644;
+        break;
+    case FD_SHM:
+        ks.st_mode = S_IFREG | 0666;
+        break;
+    default:
+        return (uint64_t)(-(uint64_t)EBADF);
+    }
+
+    if (copy_to_user(ust, &ks, sizeof(ks)))
+        return (uint64_t)(-(uint64_t)EFAULT);
+    return 0;
+}
+
+// sys_fdev_pid(fd) — syscall 60
+// Returns driver_pid for FD_DEV fd (0 for kernel device, >0 for user-space driver).
+// Used by libc notify_fd/msg_fd/mmap to find target PID without a local fd_table.
+uint64_t sys_fdev_pid(uint64_t arg1, uint64_t _u2, uint64_t _u3,
+                       uint64_t _u4, uint64_t _u5, uint64_t _u6) {
+    int fd = (int)arg1;
+    proc_t *proc = current_proc;
+    if (fd < 0 || fd >= MAX_FD || proc->fd_table[fd].type != FD_DEV)
+        return (uint64_t)(-(uint64_t)EBADF);
+
+    struct inode *ip = proc->fd_table[fd].inode;
+    if (!ip || !ip->i_priv) return 0;  // kernel device, no driver_pid
+    struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+    return (uint64_t)ops->driver_pid;
+}
+
+// sys_shm_create(size) — syscall 11 (创建共享内存，返回 fd)
 // Returns: fd (≥2) on success, 0 on failure
 uint64_t sys_shm_create(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
     size_t size = (size_t)arg1;
@@ -1626,7 +1882,7 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3,
     return (uint64_t)fd;
 }
 
-// sys_shm_attach(id, mode) — syscall 13 (附加共享内存，返回 fd)
+// sys_shm_attach(id, mode) — syscall 12 (附加共享内存，返回 fd)
 // mode=0: id is target_pid, attach target's first FD_SHM
 // mode=1: id is kernel SHM ID, attach kernel pre-allocated SHM via struct shm*
 // Returns: fd (≥2) on success, 0 on failure
@@ -1689,7 +1945,7 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2
 
 // ===================== memfd_create / ftruncate =====================
 
-// sys_memfd_create(name, flags) — syscall 45 (Linux-compatible memfd_create)
+// sys_memfd_create(name, flags) — syscall 44 (Linux-compatible memfd_create)
 // Returns: fd (≥2) on success, 0 on failure
 uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     const char __user *user_name = (const char __user * __force)arg1;
@@ -1794,7 +2050,7 @@ static uint64_t shm_add_page(struct shm *shm) {
     return phys;
 }
 
-// sys_ftruncate(fd, size) — syscall 46 (set shm size, allocate/free pages)
+// sys_ftruncate(fd, size) — syscall 45 (set shm size, allocate/free pages)
 // Returns: 0 on success, positive errno on failure
 uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     int fd = (int)arg1;
@@ -1927,12 +2183,9 @@ uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2,
 
 // ===================== Pipe / fd syscalls =====================
 
-// Wake a process that is BLOCKED on WAIT_PIPE (pipe I/O)
-// Note: we do NOT enqueue a RECV_NOTIFY message here. Pipe I/O wakeups
-// only need to change the process state; the process resumes in its
-// sys_read/sys_write loop which never checks the recv queue. Enqueuing
-// RECV_NOTIFY would leave stale messages that sys_recv can mistakenly
-// consume, causing IPC protocols to see false responses.
+// Wake a process that is BLOCKED on WAIT_PIPE, WAIT_POLL, or WAIT_RECV.
+// For WAIT_PIPE/WAIT_POLL: only changes state (pipe I/O resumes its loop).
+// For WAIT_RECV: sets recv_intr flag so sys_recv returns -EINTR (ISR notification).
 void wake_process(pid_t pid) {
     if (pid < 0 || pid >= MAX_PROC) return;
     proc_t *target = &procs[pid];
@@ -1941,11 +2194,15 @@ void wake_process(pid_t pid) {
     spin_lock(&cpu_locals[target_cpu].scheduler_lock);
     if (target->pid == pid &&
         target->state == BLOCKED &&
-        (target->wait_event == WAIT_PIPE || target->wait_event == WAIT_POLL)) {
+        (target->wait_event == WAIT_PIPE ||
+         target->wait_event == WAIT_POLL ||
+         target->wait_event == WAIT_RECV)) {
         if (target->wait_deadline != 0) {
             timer_queue_remove(target);
             target->wait_deadline = 0;
         }
+        if (target->wait_event == WAIT_RECV)
+            target->recv_intr = 1;
         target->state = READY;
         target->wait_event = WAIT_NONE;
         target->wait_timed_out = 0;
@@ -1955,7 +2212,7 @@ void wake_process(pid_t pid) {
     spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
 }
 
-// sys_pipe(fd_ptr) — syscall 14 (创建 pipe，写 [read_fd, write_fd] 到用户指针)
+// sys_pipe(fd_ptr) — syscall 13 (创建 pipe，写 [read_fd, write_fd] 到用户指针)
 uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
     int __user *fd_ptr = (int __user * __force)arg1;
 
@@ -2010,7 +2267,7 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     return 0;
 }
 
-// sys_write(fd, buf, len) — syscall 15 (向 fd 写入数据)
+// sys_write(fd, buf, len) — syscall 14 (向 fd 写入数据)
 // FD_REGULAR: kernel FAT32 via page cache
 // FD_PIPE: 直写 kernel ring buffer
 // FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
@@ -2019,8 +2276,8 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
     const char __user *buf = (const char __user * __force)arg2;
     size_t len = (size_t)arg3;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EINVAL;
-    if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EINVAL;
+    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
+    if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
 
     proc_t *proc = current_proc;
 
@@ -2039,7 +2296,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
 
         uint64_t offset = proc->fd_table[fd].offset;
         int written = fat32_write(ip, offset, (const void __force *)buf, len);
-        if (written < 0) return (uint64_t)(-written);
+        if (written < 0) return (uint64_t)written;
         proc->fd_table[fd].offset = offset + written;
         return (uint64_t)written;
     }
@@ -2105,15 +2362,21 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         return (uint64_t)ret;
     }
 
-    // ===== FD_SERIAL: write to UART TX =====
-    if (proc->fd_table[fd].type == FD_SERIAL) {
+    // ===== FD_DEV: write via dev_ops callback =====
+    if (proc->fd_table[fd].type == FD_DEV) {
         if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
             return (uint64_t)-EINVAL;
         if (!buf) return (uint64_t)-EFAULT;
-        // serial_putc internally has tx_lock + LSR wait
-        for (size_t i = 0; i < len; i++)
-            serial_putc(((const char __force *)buf)[i]);
-        return (uint64_t)len;
+        struct inode *ip = proc->fd_table[fd].inode;
+        if (!ip || !ip->i_priv) return (uint64_t)-ENODEV;
+        struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+        // Kernel device: call write callback
+        if (ops->driver_pid == 0 && ops->write) {
+            ssize_t ret = ops->write(proc, fd, (const void __force *)buf, len);
+            return (uint64_t)ret;
+        }
+        // User-space driver: not supported via write (use IPC)
+        return (uint64_t)-ENOSYS;
     }
 
     // ===== FD_PIPE: existing path =====
@@ -2160,7 +2423,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
     return (uint64_t)written;
 }
 
-// sys_read(fd, buf, len) — syscall 16 (从 fd 读数据，阻塞直到有数据)
+// sys_read(fd, buf, len) — syscall 15 (从 fd 读数据，阻塞直到有数据)
 // FD_REGULAR: kernel FAT32 via page cache
 // FD_PIPE: 直读 kernel ring buffer
 // FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
@@ -2169,8 +2432,8 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     char __user *buf = (char __user * __force)arg2;
     size_t len = (size_t)arg3;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EINVAL;
-    if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EINVAL;
+    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
+    if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
 
     proc_t *proc = current_proc;
 
@@ -2270,8 +2533,8 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         return (uint64_t)ret;
     }
 
-    // ===== FD_SERIAL: read from kernel RX ring buffer =====
-    if (proc->fd_table[fd].type == FD_SERIAL) {
+    // ===== FD_DEV: read via dev_ops callback =====
+    if (proc->fd_table[fd].type == FD_DEV) {
         if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
             return (uint64_t)-EINVAL;
         if (!buf) return (uint64_t)-EFAULT;
@@ -2280,32 +2543,16 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL
             || ptr_end > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
-
-        uint64_t rx_flags;
-        spin_lock_irqsave(&serial_rx_lock, &rx_flags);
-        while (serial_rx_head == serial_rx_tail) {
-            // Buffer empty: block or EAGAIN
-            if (proc->fd_table[fd].flags & O_NONBLOCK) {
-                spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
-                return (uint64_t)-EAGAIN;
-            }
-            serial_read_waiter = proc->pid;
-            proc->state = BLOCKED;
-            proc->wait_event = WAIT_PIPE;  // reuse WAIT_PIPE, same semantics
-            spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
-            schedule();
-            spin_lock_irqsave(&serial_rx_lock, &rx_flags);
+        struct inode *ip = proc->fd_table[fd].inode;
+        if (!ip || !ip->i_priv) return (uint64_t)-ENODEV;
+        struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+        // Kernel device: call read callback
+        if (ops->driver_pid == 0 && ops->read) {
+            ssize_t ret = ops->read(proc, fd, (void __force *)buf, len);
+            return (uint64_t)ret;
         }
-
-        // Read available bytes
-        size_t nread = 0;
-        while (nread < len && serial_rx_head != serial_rx_tail) {
-            ((char __force *)buf)[nread] = serial_rx_buf[serial_rx_tail];
-            serial_rx_tail = (serial_rx_tail + 1) % SERIAL_RX_BUF_SIZE;
-            nread++;
-        }
-        spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
-        return (uint64_t)nread;
+        // User-space driver: not supported via read (use IPC)
+        return (uint64_t)-ENOSYS;
     }
 
     // ===== FD_PIPE: existing path =====
@@ -2351,12 +2598,12 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     // FD_DEV and FD_SHM return ENOSYS (never reached via FD_FILE/pipe check above)
 }
 
-// sys_close(fd) — syscall 17 (关闭 fd，pipe ref_count--)
+// sys_close(fd) — syscall 16 (关闭 fd，pipe ref_count--)
 uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
     int fd = (int)arg1;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EINVAL;
-    if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EINVAL;
+    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
+    if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
 
     if (current_proc->fd_table[fd].type == FD_PIPE) {
         struct pipe *p = current_proc->fd_table[fd].pipe;
@@ -2400,21 +2647,15 @@ uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint
         if (sock) {
             sock_close(sock);
         }
-    } else if (current_proc->fd_table[fd].type == FD_SERIAL) {
-        serial_fd_count--;
-        // Clear waiter if this process was the waiter
-        uint64_t rx_flags;
-        spin_lock_irqsave(&serial_rx_lock, &rx_flags);
-        if (serial_read_waiter == current_proc->pid)
-            serial_read_waiter = -1;
-        spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
-        // Last close: mask IRQ + unregister ISR
-        if (serial_fd_count == 0) {
-            outb(COM1_IER, 0x00);           // Disable UART interrupts
-            ioapic_set_irq(4, 36, 0, true); // Mask GSI 4 in I/O APIC
-            unregister_irq(36);          // Unregister kernel ISR
-            serial_irq_registered = false;
+    } else if (current_proc->fd_table[fd].type == FD_DEV) {
+        // Kernel device: call close callback + inode_put
+        struct inode *ip = current_proc->fd_table[fd].inode;
+        if (ip && ip->i_priv) {
+            struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+            if (ops->driver_pid == 0 && ops->close)
+                ops->close(current_proc, fd);
         }
+        if (ip) inode_put(ip);
     }
     // FD_DEV: no dynamic resources to free
 
@@ -2425,39 +2666,13 @@ uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint
     return 0;
 }
 
-// ===================== Device table syscalls =====================
-
-// Kernel-internal: register a driver PID for a device type
-int register_dev(int dev_type, pid_t pid) {
-    if (dev_type <= DEV_NONE || dev_type >= DEV_TYPE_MAX) return EINVAL;
-    if (dev_table[dev_type] != 0) return EEXIST;
-    dev_table[dev_type] = pid;
-    return 0;
+// ===================== Device notification =====================
+// sys_load_dev — syscall 17 (DEPRECATED: returns -ENOSYS)
+uint64_t sys_load_dev(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
+    return (uint64_t)(-(uint64_t)ENOSYS);
 }
 
-// sys_load_dev(pid, dev_type) — syscall 18 (注册驱动)
-// Returns: 0 on success, positive errno on failure
-uint64_t sys_load_dev(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
-    pid_t pid = (pid_t)arg1;
-    int dev_type = (int)arg2;
-    return (uint64_t)register_dev(dev_type, pid);
-}
-
-
-// Remove a PID from dev_table (called by proc_reap)
-void dev_table_cleanup(pid_t pid) {
-    for (int i = 0; i < DEV_TYPE_MAX; i++) {
-        if (dev_table[i] == pid) dev_table[i] = 0;
-    }
-}
-
-// Look up device driver PID (kernel-internal, used by xHCI ISR)
-pid_t lookup_dev(int dev_type) {
-    if (dev_type <= DEV_NONE || dev_type >= DEV_TYPE_MAX) return 0;
-    return dev_table[dev_type];
-}
-
-// sys_notify(pid) — syscall 20 (异步通知：消息入队 + 唤醒)
+// sys_notify(pid) — syscall 18 (异步通知：消息入队 + 唤醒)
 // Returns: 0 on success, positive errno on failure
 uint64_t sys_notify(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
     pid_t target_pid = (pid_t)arg1;
@@ -2497,12 +2712,12 @@ uint64_t sys_notify(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uin
     return 0;
 }
 
-// sys_gettime() — syscall 21 (全局单调时钟，返回纳秒)
+// sys_gettime() — syscall 19 (全局单调时钟，返回纳秒)
 uint64_t sys_gettime(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
     return sched_clock();
 }
 
-// sys_clock() — syscall 22 (per-process CPU 时间，返回纳秒)
+// sys_clock() — syscall 20 (per-process CPU 时间，返回纳秒)
 uint64_t sys_clock(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
     return current_proc->cpu_time_ns;
 }
@@ -2574,7 +2789,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
     return 0;
 }
 
-// sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — syscall 22 (变长消息请求)
+// sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — syscall 21 (变长消息请求)
 // PID-based variant.
 // 返回: 0=成功, 负errno
 uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t _u1) {
@@ -2604,7 +2819,7 @@ uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uin
     return sys_msg_to(target_pid, (void __force *)msg_buf, msg_len, (void __force *)reply_buf, reply_len);
 }
 
-// sys_msg_resp(resp_buf, resp_len) — syscall 23 (回复当前 MSG 调用者)
+// sys_msg_resp(resp_buf, resp_len) — syscall 22 (回复当前 MSG 调用者)
 // 返回: 0=成功, 正数=errno
 uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     void __user *resp_buf = (void __user * __force)arg1;
@@ -2658,7 +2873,7 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
     return 0;
 }
 
-// sys_ioperm(from, num, turn_on) — syscall 25 (I/O 端口权限)
+// sys_ioperm(from, num, turn_on) — syscall 23 (I/O 端口权限)
 uint64_t sys_ioperm(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     unsigned long from = (unsigned long)arg1;
     unsigned long num = (unsigned long)arg2;
@@ -2702,7 +2917,7 @@ uint64_t sys_ioperm(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
 #define F_GETFL 1
 #define F_SETFL 2
 
-// sys_dup2(old_fd, new_fd) — syscall 26 (复制 fd)
+// sys_dup2(old_fd, new_fd) — syscall 24 (复制 fd)
 uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     int old_fd = (int)arg1;
     int new_fd = (int)arg2;
@@ -2752,19 +2967,15 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
             if (proc->fd_table[new_fd].sock) {
                 sock_close(proc->fd_table[new_fd].sock);
             }
-        } else if (proc->fd_table[new_fd].type == FD_SERIAL) {
-            serial_fd_count--;
-            uint64_t rx_flags;
-            spin_lock_irqsave(&serial_rx_lock, &rx_flags);
-            if (serial_read_waiter == current_proc->pid)
-                serial_read_waiter = -1;
-            spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
-            if (serial_fd_count == 0) {
-                outb(COM1_IER, 0x00);
-                ioapic_set_irq(4, 36, 0, true);
-                unregister_irq(36);
-                serial_irq_registered = false;
+        } else if (proc->fd_table[new_fd].type == FD_DEV) {
+            // Kernel device: call close callback + inode_put
+            struct inode *ip = proc->fd_table[new_fd].inode;
+            if (ip && ip->i_priv) {
+                struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+                if (ops->driver_pid == 0 && ops->close)
+                    ops->close(current_proc, new_fd);
             }
+            if (ip) inode_put(ip);
         }
         // FD_DEV: no dynamic resources to free
         __memset(&proc->fd_table[new_fd], 0, sizeof(struct file));
@@ -2783,21 +2994,29 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
         }
     } else if (proc->fd_table[new_fd].type == FD_FILE) {
         proc->fd_table[new_fd].file_data.ref_count++;
-    } else if (proc->fd_table[new_fd].type == FD_REGULAR) {
+    } else if (proc->fd_table[new_fd].type == FD_REGULAR ||
+               proc->fd_table[new_fd].type == FD_DIR) {
         if (proc->fd_table[new_fd].inode) inode_get(proc->fd_table[new_fd].inode);
     } else if (proc->fd_table[new_fd].type == FD_SOCKET) {
         if (proc->fd_table[new_fd].sock) {
             unix_sock_acquire(proc->fd_table[new_fd].sock);
         }
-    } else if (proc->fd_table[new_fd].type == FD_SERIAL) {
-        serial_fd_count++;
+    } else if (proc->fd_table[new_fd].type == FD_DEV) {
+        // Kernel device: call open callback (e.g., serial_fd_count++) + inode_get
+        struct inode *ip = proc->fd_table[new_fd].inode;
+        if (ip && ip->i_priv) {
+            struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+            if (ops->driver_pid == 0 && ops->open)
+                ops->open(proc, new_fd);
+        }
+        if (ip) inode_get(ip);
     }
-    // FD_DEV: target_pid copied by struct assignment, no ref_count needed
+    // FD_DEV: target_pid copied by struct assignment
 
     return (uint64_t)new_fd;
 }
 
-// sys_fcntl(fd, cmd, arg) — syscall 27 (文件控制)
+// sys_fcntl(fd, cmd, arg) — syscall 25 (文件控制)
 uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
     int cmd = (int)arg2;
@@ -2864,7 +3083,13 @@ void irq_owner_cleanup(pid_t pid) {
     }
 }
 
-// sys_dma_alloc(size, vaddr_ptr, paddr_ptr) — syscall 28
+// Check if an IRQ is owned by a user-space driver (returns owner pid, or -1 if free)
+int irq_owner_check(int irq) {
+    if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return -1;
+    return __atomic_load_n(&irq_owner[irq], __ATOMIC_ACQUIRE);
+}
+
+// sys_dma_alloc(size, vaddr_ptr, paddr_ptr) — syscall 26
 // 分配物理连续、<4GB 的 DMA 缓冲区，映射到调用者地址空间
 // Returns: 0 on success, positive errno on failure
 uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
@@ -2936,7 +3161,7 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     return 0;
 }
 
-// sys_dma_free(vaddr) — syscall 29
+// sys_dma_free(vaddr) — syscall 27
 // 释放 DMA 缓冲区
 // Returns: 0 on success, positive errno on failure
 uint64_t sys_dma_free(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
@@ -2970,7 +3195,7 @@ uint64_t sys_dma_free(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, u
     return (uint64_t)-EINVAL;
 }
 
-// sys_lseek(fd, offset, whence) — syscall 44 (文件偏移定位)
+// sys_lseek(fd, offset, whence) — syscall 43 (文件偏移定位)
 // 更新内核 file_data._offset。FD_PIPE/SOCKET/DEV 返回 -ESPIPE。
 // Returns: new offset on success, negative errno on failure
 uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
@@ -3122,7 +3347,7 @@ void check_pending_signals(trapframe_t *tf) {
 
 // ===================== Signal syscalls =====================
 
-// sys_kill(pid, sig) — syscall 47 (发送信号)
+// sys_kill(pid, sig) — syscall 46 (发送信号)
 uint64_t sys_kill(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     pid_t pid = (pid_t)arg1;
     int sig = (int)arg2;
@@ -3149,7 +3374,7 @@ uint64_t sys_kill(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
     return 0;
 }
 
-// sys_sigaction(sig, act, oldact) — syscall 48 (注册/查询信号 handler)
+// sys_sigaction(sig, act, oldact) — syscall 47 (注册/查询信号 handler)
 uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int sig = (int)arg1;
     const struct sigaction __user *act = (const struct sigaction __user * __force)arg2;
@@ -3199,7 +3424,7 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     return 0;
 }
 
-// sys_sigreturn() — syscall 49 (信号 handler 返回后恢复上下文)
+// sys_sigreturn() — syscall 48 (信号 handler 返回后恢复上下文)
 uint64_t sys_sigreturn(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
     proc_t *proc = current_proc;
 

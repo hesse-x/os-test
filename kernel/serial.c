@@ -1,6 +1,15 @@
 #include "kernel/serial.h"
+#include "kernel/devtmpfs.h"
+#include "kernel/proc.h"
 #include "kernel/trap.h"
+#include "kernel/inode.h"
 #include "arch/x64/utils.h"
+#include "arch/x64/apic.h"
+#include "common/errno.h"
+#include "common/dev.h"     // DEV_SERIAL
+#include "common/socket.h"  // POLLIN/POLLOUT
+
+#include "common/ioctl.h"   // TCGETS
 
 // ===================== TX lock =====================
 spinlock_t serial_tx_lock;
@@ -88,6 +97,15 @@ void serial_printf(const char *fmt, ...) {
     }
     fmt++;  // skip '%'
 
+    // Parse width and zero-fill (e.g. %02x, %3d, %8u)
+    int width = 0;
+    int zero_fill = 0;
+    if (*fmt == '0') { zero_fill = 1; fmt++; }
+    while (*fmt >= '0' && *fmt <= '9') {
+      width = width * 10 + (*fmt - '0');
+      fmt++;
+    }
+
     // Handle length modifier 'l'
     int is_long = 0;
     if (*fmt == 'l') { is_long = 1; fmt++; }
@@ -96,6 +114,11 @@ void serial_printf(const char *fmt, ...) {
     case 's': {
       const char *s = va_arg(ap, const char *);
       if (!s) s = "(null)";
+      int slen = 0;
+      while (s[slen]) slen++;
+      // Right-pad with spaces if width > slen
+      int pad = width > slen ? width - slen : 0;
+      for (int j = 0; j < pad && pos < 255; j++) buf[pos++] = ' ';
       while (*s && pos < 255) buf[pos++] = *s++;
       break;
     }
@@ -107,7 +130,17 @@ void serial_printf(const char *fmt, ...) {
       if (val == 0) { tmp[i++] = '0'; }
       while (val > 0 && i < 23) { tmp[i++] = '0' + val % 10; val /= 10; }
       if (neg) tmp[i++] = '-';
-      while (i > 0 && pos < 255) buf[pos++] = tmp[--i];
+      int num_len = i;
+      char fill_char = zero_fill ? '0' : ' ';
+      // For zero-fill, sign goes before fill; for space-fill, sign after fill
+      if (neg && zero_fill) {
+        buf[pos++] = '-';
+        num_len--;
+      }
+      int pad = width > num_len ? width - num_len : 0;
+      for (int j = 0; j < pad && pos < 255; j++) buf[pos++] = fill_char;
+      if (neg && !zero_fill) buf[pos++] = '-';
+      while (num_len > 0 && pos < 255) buf[pos++] = tmp[--i];
       break;
     }
     case 'u': {
@@ -116,19 +149,41 @@ void serial_printf(const char *fmt, ...) {
       int i = 0;
       if (val == 0) { tmp[i++] = '0'; }
       while (val > 0 && i < 23) { tmp[i++] = '0' + val % 10; val /= 10; }
+      int num_len = i;
+      char fill_char = zero_fill ? '0' : ' ';
+      int pad = width > num_len ? width - num_len : 0;
+      for (int j = 0; j < pad && pos < 255; j++) buf[pos++] = fill_char;
+      while (i > 0 && pos < 255) buf[pos++] = tmp[--i];
+      break;
+    }
+    case 'o': {
+      unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
+      char tmp[24];
+      int i = 0;
+      if (val == 0) { tmp[i++] = '0'; }
+      while (val > 0 && i < 23) { tmp[i++] = '0' + val % 8; val /= 8; }
+      int num_len = i;
+      char fill_char = zero_fill ? '0' : ' ';
+      int pad = width > num_len ? width - num_len : 0;
+      for (int j = 0; j < pad && pos < 255; j++) buf[pos++] = fill_char;
       while (i > 0 && pos < 255) buf[pos++] = tmp[--i];
       break;
     }
     case 'x':
     case 'X': {
       unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
+      const char *hex_digits = (*fmt == 'X') ? "0123456789ABCDEF" : "0123456789abcdef";
       char tmp[24];
       int i = 0;
       if (val == 0) { tmp[i++] = '0'; }
       while (val > 0 && i < 23) {
-        tmp[i++] = "0123456789abcdef"[val & 0xF];
+        tmp[i++] = hex_digits[val & 0xF];
         val >>= 4;
       }
+      int num_len = i;
+      char fill_char = zero_fill ? '0' : ' ';
+      int pad = width > num_len ? width - num_len : 0;
+      for (int j = 0; j < pad && pos < 255; j++) buf[pos++] = fill_char;
       while (i > 0 && pos < 255) buf[pos++] = tmp[--i];
       break;
     }
@@ -164,6 +219,114 @@ void serial_printf(const char *fmt, ...) {
   va_end(ap);
   buf[pos] = '\0';
   serial_puts(buf);
+}
+
+// ===================== Serial dev_ops (VFS callback dispatch) =====================
+
+static int serial_dev_open(struct proc_t *proc, int fd) {
+    // Mutual exclusion: cannot coexist with user-space irq_bind on vector 36
+    // But if serial IRQ is already registered (by a previous open), it's fine —
+    // just bump the fd count.
+    if (!serial_irq_registered && irq_owner_check(36) >= 0) return -EBUSY;
+
+    serial_fd_count++;
+    if (!serial_irq_registered) {
+        register_irq(36, serial_irq_handler);
+        uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
+        ioapic_set_irq(4, 36, bsp_apic_id, false);  // edge-triggered
+        outb(COM1_IER, IER_RX_ENABLE);
+        serial_irq_registered = true;
+    }
+    return 0;
+}
+
+static int serial_dev_close(struct proc_t *proc, int fd) {
+    serial_fd_count--;
+    uint64_t rx_flags;
+    spin_lock_irqsave(&serial_rx_lock, &rx_flags);
+    if (serial_read_waiter == proc->pid)
+        serial_read_waiter = -1;
+    spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
+    if (serial_fd_count == 0) {
+        outb(COM1_IER, 0x00);           // Disable UART interrupts
+        ioapic_set_irq(4, 36, 0, true); // Mask GSI 4 in I/O APIC
+        unregister_irq(36);
+        serial_irq_registered = false;
+    }
+    return 0;
+}
+
+static ssize_t serial_dev_read(struct proc_t *proc, int fd, void *buf, size_t count) {
+    if (!buf) return -EFAULT;
+
+    uint64_t rx_flags;
+    spin_lock_irqsave(&serial_rx_lock, &rx_flags);
+    while (serial_rx_head == serial_rx_tail) {
+        if (proc->fd_table[fd].flags & O_NONBLOCK) {
+            spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
+            return -EAGAIN;
+        }
+        serial_read_waiter = proc->pid;
+        proc->state = BLOCKED;
+        proc->wait_event = WAIT_PIPE;  // reuse WAIT_PIPE, same semantics
+        spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
+        schedule();
+        spin_lock_irqsave(&serial_rx_lock, &rx_flags);
+    }
+
+    size_t nread = 0;
+    char *dst = (char __force *)buf;
+    while (nread < count && serial_rx_head != serial_rx_tail) {
+        dst[nread] = serial_rx_buf[serial_rx_tail];
+        serial_rx_tail = (serial_rx_tail + 1) % SERIAL_RX_BUF_SIZE;
+        nread++;
+    }
+    spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
+    return (ssize_t)nread;
+}
+
+static ssize_t serial_dev_write(struct proc_t *proc, int fd, const void *buf, size_t count) {
+    if (!buf) return -EFAULT;
+    const char *src = (const char __force *)buf;
+    for (size_t i = 0; i < count; i++)
+        serial_putc(src[i]);
+    return (ssize_t)count;
+}
+
+static long serial_dev_ioctl(uint32_t cmd, void *arg) {
+    if (cmd == TCGETS) return 0;  // serial is a tty
+    return -ENOTTY;
+}
+
+static __poll_t serial_dev_poll(struct proc_t *proc, int events) {
+    __poll_t revents = 0;
+    uint64_t rx_flags;
+    spin_lock_irqsave(&serial_rx_lock, &rx_flags);
+    if (serial_rx_head != serial_rx_tail) {
+        if (events & POLLIN) revents |= POLLIN;
+    }
+    spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
+    // POLLOUT: always ready
+    if (events & POLLOUT) revents |= POLLOUT;
+    return revents;
+}
+
+static struct dev_ops serial_ops = {
+    .driver_pid  = 0,
+    .device_type = DEV_SERIAL,
+    .open        = serial_dev_open,
+    .close       = serial_dev_close,
+    .read        = serial_dev_read,
+    .write       = serial_dev_write,
+    .ioctl       = serial_dev_ioctl,
+    .poll        = serial_dev_poll,
+};
+
+void serial_dev_register(void) {
+    int rc = devtmpfs_create("serial", DEV_SERIAL, &serial_ops);
+    if (rc != 0) {
+        serial_printf("serial_dev_register: failed (rc=%d)\n", rc);
+    }
 }
 
 #endif

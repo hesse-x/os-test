@@ -1,6 +1,8 @@
 #ifndef KERNEL_SPARSE_H
 #define KERNEL_SPARSE_H
 
+#include <stdint.h>
+
 #ifdef __CHECKER__
 #define __user      __attribute__((noderef, address_space(1)))
 #define __iomem     __attribute__((noderef, address_space(2)))

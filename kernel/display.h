@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "kernel/sparse.h"
+#include "common/ioctl.h"
 
 struct proc_t;
 struct pci_device;
@@ -12,11 +13,25 @@ struct pci_device;
 #define DISPLAY_FONT_WIDTH   8
 #define DISPLAY_FONT_HEIGHT  16
 
-// Display request constants
+// Legacy request constants (still used by display_req_handler)
 #define DISPLAY_REQ_CREATE_BUF  1
 #define DISPLAY_REQ_FLIP        2
 
-// Request/Response structures
+// Unified ioctl arg for KMS_IOCTL_CREATE_BUF (_IOWR, 32 bytes)
+struct display_ioctl_create_buf_arg {
+    // input
+    uint32_t width;
+    uint32_t height;
+    uint32_t bpp;
+    // output (filled by kernel)
+    uint32_t pitch;
+    uint32_t size;
+    uint32_t rows;
+    uint32_t cols;
+    int32_t  result;
+};
+
+// Request/Response structures (legacy, used by display_req_handler)
 struct display_create_buf_req {
     uint32_t width;
     uint32_t height;
@@ -73,12 +88,16 @@ extern struct display_state g_display;
 // PCI discovery + VBE modeset + BAR mapping (no boot_info dependency)
 void display_init(void);
 
-// Request handler
+// Request handler (legacy, called by sys_dev_req fallback)
 int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
                         void *resp_data, uint32_t resp_len);
 
+// ioctl handler (new, called via dev_ops callback)
+long display_ioctl(uint32_t cmd, void *arg);
+
 // mmap handler: returns mapped address, 0=failure
 uint64_t display_mmap_handler(struct proc_t *proc, size_t size);
+uint64_t display_mmap_handler_ioctl(struct proc_t *proc, uint64_t size);
 
 // Device registration (called from vfs_init)
 void display_dev_register(void);

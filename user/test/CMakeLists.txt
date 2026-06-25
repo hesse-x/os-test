@@ -34,3 +34,9 @@ add_user_elf(poll C SOURCES test_poll.c LINK_LIBS c unity)
 
 # Layer 10: PCI/device
 add_user_elf(pci C SOURCES test_pci.c LINK_LIBS c unity)
+
+# Layer 11: ioctl/fstat/isatty
+add_user_elf(ioctl C SOURCES test_ioctl.c LINK_LIBS c unity)
+
+# Layer 12: device VFS unified path
+add_user_elf(dev_vfs C SOURCES test_dev_vfs.c LINK_LIBS c unity)

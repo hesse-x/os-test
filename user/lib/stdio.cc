@@ -1,6 +1,6 @@
 #include "stdio.h"
 #include "string.h"
-#include <sys.h>
+#include "common/syscall.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>

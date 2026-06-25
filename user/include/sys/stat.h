@@ -29,8 +29,13 @@ struct stat {
 
 /* Compile-time assertion: struct stat and struct kstat must have identical layout.
  * We check key offsets that previously diverged (st_size). */
+#if defined(__cplusplus)
 static_assert(offsetof(struct stat, st_size) == offsetof(struct kstat, st_size),
     "struct stat and struct kstat st_size offset mismatch");
+#else
+_Static_assert(offsetof(struct stat, st_size) == offsetof(struct kstat, st_size),
+    "struct stat and struct kstat st_size offset mismatch");
+#endif
 
 // File type constants
 #define S_IFMT   0170000

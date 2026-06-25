@@ -14,8 +14,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <sys/ipc.h>
-#include <sys/device.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -324,26 +324,25 @@ int main() {
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
 
-    // 2. Open KBD device, bind via REQ, then mmap SHM
+    // 2. Open KBD device, bind via ioctl, then mmap SHM
     int kbd_fd;
     while ((kbd_fd = open("/dev/kbd", O_RDWR)) < 0) {
         struct recv_msg m;
         recv(&m, NULL, 0, 1);
     }
 
-    struct kbd_req_request bind_req;
-    for (int i = 0; i < 56; i++) ((uint8_t*)&bind_req)[i] = 0;
-    bind_req.opcode = KBD_REQ_BIND;
-    bind_req.pid = getpid();
-
-    struct kbd_req_reply bind_reply;
-    for (int i = 0; i < 64; i++) ((uint8_t*)&bind_reply)[i] = 0;
+    // Bind via ioctl
+    struct kbd_ioctl_bind_arg bind_arg;
+    for (int i = 0; i < (int)sizeof(bind_arg); i++) ((uint8_t*)&bind_arg)[i] = 0;
+    bind_arg.pid = getpid();
 
     while (1) {
-        int rc = req_fd(kbd_fd, &bind_req, &bind_reply);
-        if (rc == 0 && bind_reply.result == 0) break;
+        int rc = ioctl(kbd_fd, KBD_IOCTL_BIND, &bind_arg);
+        if (rc == 0 && bind_arg.result == 0) break;
         struct recv_msg m;
         recv(&m, NULL, 0, 100);
+        // Re-init bind_arg for retry
+        bind_arg.pid = getpid();
     }
 
     // mmap kbd SHM via MAP_SHARED (fd → target_pid → sys_shm_attach)
@@ -451,7 +450,7 @@ int main() {
         char buf[256];
         int64_t n = read(0, buf, sizeof(buf));
         if (n > 0) {
-            write(2, buf, (size_t)n);  // echo to serial (fd 2 = FD_SERIAL from init)
+            write(2, buf, (size_t)n);  // echo to serial (fd 2 = FD_DEV from init)
             for (int64_t i = 0; i < n; i++) {
                 vt100_feed(buf[i]);
             }

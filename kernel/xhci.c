@@ -11,6 +11,7 @@
 #include "common/errno.h"
 #include "common/shm.h"
 #include "common/dev.h"
+#include "kernel/devtmpfs.h"
 #include "common/syscall.h"
 
 // ===================== xHCI register offsets =====================
@@ -397,36 +398,10 @@ static void xhci_isr(trapframe_t *tf) {
             __atomic_store_n(&hdr->rings[0].head, next, __ATOMIC_RELEASE);
           }
 
-          // Notify kbd_driver via dev_table
-          pid_t kbd_pid = lookup_dev(DEV_KBD);
+          // Notify kbd_driver: wake so sys_recv returns -EINTR
+          pid_t kbd_pid = isr_lookup_driver(DEV_KBD);
           if (kbd_pid > 0) {
-            proc_t *target = &procs[kbd_pid];
-            spin_lock(&target->recv_lock);
-            uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
-            if (next != target->recv_tail) {  // not full
-              recv_msg_t *slot = (recv_msg_t *)target->recv_buf[target->recv_head];
-              slot->type = RECV_NOTIFY;
-              slot->src = 0;
-              target->recv_head = next;
-            }
-            spin_unlock(&target->recv_lock);
-
-            // Wake kbd_driver if in WAIT_RECV
-            int target_cpu = target->assigned_cpu;
-            spin_lock(&cpu_locals[target_cpu].scheduler_lock);
-            if (target->pid == kbd_pid && target->state == BLOCKED &&
-                target->wait_event == WAIT_RECV) {
-              if (target->wait_deadline != 0) {
-                timer_queue_remove(target);
-                target->wait_deadline = 0;
-              }
-              target->state = READY;
-              target->wait_event = WAIT_NONE;
-              target->wait_timed_out = 0;
-              list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
-              cpu_locals[target_cpu].run_count++;
-            }
-            spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+            wake_process(kbd_pid);
           }
         }
       }

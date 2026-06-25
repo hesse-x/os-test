@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -165,6 +167,38 @@ void test_write_read_lseek(void) {
     close(fd);
 }
 
+/* 10. fstat on regular file → S_ISREG + size */
+void test_fstat_regular(void) {
+    int fd = open("/local/fcntl_fstat.txt", O_WRONLY | O_CREAT);
+    TEST_ASSERT_TRUE(fd >= 0);
+    const char *data = "fstat_test_data";
+    write(fd, data, strlen(data));
+    close(fd);
+
+    fd = open("/local/fcntl_fstat.txt", O_RDONLY);
+    TEST_ASSERT_TRUE(fd >= 0);
+
+    struct stat st;
+    int r = fstat(fd, &st);
+    TEST_ASSERT_EQUAL_INT(0, r);
+    TEST_ASSERT_TRUE(S_ISREG(st.st_mode));
+    TEST_ASSERT_EQUAL_INT((int)strlen(data), (int)st.st_size);
+
+    close(fd);
+}
+
+/* 11. isatty on pipe → 0 */
+void test_isatty_pipe(void) {
+    int fd[2];
+    pipe(fd);
+
+    int r = isatty(fd[0]);
+    TEST_ASSERT_EQUAL_INT(0, r);
+
+    close(fd[0]);
+    close(fd[1]);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_open_create_read);
@@ -176,5 +210,7 @@ int main(void) {
     RUN_TEST(test_lseek_set);
     RUN_TEST(test_lseek_cur);
     RUN_TEST(test_write_read_lseek);
+    RUN_TEST(test_fstat_regular);
+    RUN_TEST(test_isatty_pipe);
     return UNITY_END();
 }

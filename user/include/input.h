@@ -51,10 +51,23 @@ enum input_key {
     BTN_BASE = 0x100,
 };
 
-// REQ opcodes for kbd_driver
+// REQ opcodes for kbd_driver (legacy, for req_fd compatibility)
 #define KBD_REQ_BIND    1
 #define KBD_REQ_UNBIND  2
 
+// ioctl commands for kbd_driver (_IOC-encoded, from common/ioctl.h)
+// KBD_IOCTL_BIND: _IOWR, arg = struct kbd_ioctl_bind_arg (8B)
+// KBD_IOCTL_UNBIND: _IO, no arg
+
+#include "common/ioctl.h"
+
+// ioctl arg for KBD_IOCTL_BIND
+struct kbd_ioctl_bind_arg {
+    uint32_t pid;    // consumer PID
+    int32_t  result; // output: 0 on success
+};
+
+// Legacy REQ structures (for req_fd compatibility)
 struct kbd_req_request {
     uint32_t opcode;
     uint32_t pid;

@@ -4,6 +4,7 @@
 
 #include "kernel/proc.h"
 #include "kernel/inode.h"
+#include "kernel/devtmpfs.h"
 #include "kernel/serial.h"
 #include "kernel/trap.h"
 #include "kernel/trap.h"
@@ -82,6 +83,7 @@ void proc_init() {
         procs[i].u_stack_pages = 0;
         procs[i].wait_deadline = 0;
         procs[i].wait_timed_out = 0;
+        procs[i].recv_intr = 0;
         for (int j = 0; j < MAX_FD; j++) {
             __memset(&procs[i].fd_table[j], 0, sizeof(file_t));
             procs[i].fd_table[j].type = FD_NONE;
@@ -668,19 +670,14 @@ void proc_reap(proc_t *proc) {
                 // if peer is already gone, but that's fine.
                 sock_close(sock);
             }
-        } else if (proc->fd_table[fd].type == FD_SERIAL) {
-            serial_fd_count--;
-            uint64_t rx_flags;
-            spin_lock_irqsave(&serial_rx_lock, &rx_flags);
-            if (serial_read_waiter == proc->pid)
-                serial_read_waiter = -1;
-            spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
-            if (serial_fd_count == 0) {
-                outb(COM1_IER, 0x00);
-                ioapic_set_irq(4, 36, 0, true);
-                unregister_irq(36);
-                serial_irq_registered = false;
+        } else if (proc->fd_table[fd].type == FD_DEV) {
+            struct inode *ip = proc->fd_table[fd].inode;
+            if (ip && ip->i_priv) {
+                struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+                if (ops->driver_pid == 0 && ops->close)
+                    ops->close(proc, fd);
             }
+            if (ip) inode_put(ip);
         }
         // FD_DEV and FD_NONE: no dynamic resources to free
         // (FD_SHM already handled in step 5 above)
@@ -694,8 +691,8 @@ void proc_reap(proc_t *proc) {
         proc->iopm = NULL;
     }
 
-    // 6. Clear dev_table entries for this PID
-    dev_table_cleanup(proc->pid);
+    // 6. Clear devtmpfs entries and ISR driver PID for this PID
+    devtmpfs_cleanup_pid(proc->pid);
 
     // 6a. Clear irq_owner entries for this PID
     irq_owner_cleanup(proc->pid);

@@ -1,11 +1,11 @@
-// libc file I/O: fd_table + open/read/write/close/pipe dispatch
-// VFS unified: all file operations go through syscalls directly.
+// libc file I/O: all file operations go through syscalls directly.
 // Kernel handles FAT32, devtmpfs, pipes, sockets, etc.
-// FD_DEV: device driver interaction via req/notify/msg IPC.
+// No libc-side fd_table — kernel's proc->fd_table is the single source of truth.
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -17,50 +17,12 @@
 #include "common/dev.h"
 #include "common/shm.h"
 
-#define MAX_FD  32
-
-enum fd_type_t { FD_NONE = 0, FD_PIPE, FD_FILE, FD_DEV };
-
-struct file_fd_entry {
-    enum fd_type_t type;    // FD_NONE / FD_PIPE / FD_FILE / FD_DEV
-    int     flags;          // O_RDONLY / O_WRONLY / O_RDWR
-    union {
-        // FD_FILE only:
-        uint64_t file_size;  // file size (set by open)
-        // FD_DEV only:
-        pid_t target_pid;    // driver PID
-    };
-};
-
-static struct file_fd_entry fd_table[MAX_FD];
-
 // ===================== Working directory (per-process) =====================
 static char cwd_path[256] = "/";
 
 const char *__get_cwd(void) { return cwd_path; }
 
-// Auto-init fd 0/1 as FD_PIPE (stdin/stdout)
-static bool fd_table_inited;
-
-static void fd_table_init() {
-    if (fd_table_inited) return;
-    memset(fd_table, 0, sizeof(fd_table));
-    for (int i = 0; i < MAX_FD; i++) {
-        fd_table[i].type = FD_NONE;
-    }
-    fd_table[0].type = FD_PIPE;
-    fd_table[0].flags = O_RDONLY;
-    fd_table[1].type = FD_PIPE;
-    fd_table[1].flags = O_WRONLY;
-    fd_table[2].type = FD_PIPE;
-    fd_table[2].flags = O_WRONLY;
-    fd_table_inited = true;
-}
-
 uint64_t fd_file_size(int fd) {
-    fd_table_init();
-    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type != FD_FILE)
-        return 0;
     // Use sys_lseek(SEEK_END) to get file size from kernel
     int64_t size = sys_lseek(fd, 0, SEEK_END);
     if (size < 0) return 0;
@@ -72,8 +34,6 @@ uint64_t fd_file_size(int fd) {
 // ===================== open =====================
 
 int open(const char *path, int flags, ...) {
-    fd_table_init();
-
     // Handle relative paths by prepending cwd
     char abs_path[256];
     if (path && path[0] != '/') {
@@ -94,113 +54,49 @@ int open(const char *path, int flags, ...) {
         path = abs_path;
     }
 
-    // /dev/ paths use sys_open_dev which returns target_pid
-    if (path && path[0] == '/' && path[1] == 'd' && path[2] == 'e' &&
-        path[3] == 'v' && path[4] == '/') {
-        const char *devname = path + 5;  // skip "/dev/"
-        int dev_type = DEV_NONE;
-        if (strcmp(devname, "kbd") == 0) dev_type = DEV_KBD;
-        else if (strcmp(devname, "kms") == 0) dev_type = DEV_KMS;
-        else if (strcmp(devname, "terminal") == 0) dev_type = DEV_TERMINAL;
-        else if (strcmp(devname, "serial") == 0) dev_type = DEV_SERIAL;
-        else { errno = ENOENT; return -1; }
-
-        // sys_open_dev returns packed (fd | target_pid << 32)
-        uint64_t result = sys_open_dev(dev_type);
-        int32_t fd = (int32_t)(result & 0xFFFFFFFFULL);
-        if (fd < 0) { errno = -fd; return -1; }
-        pid_t target_pid = (pid_t)(result >> 32);
-
-        fd_table[fd].type = FD_DEV;
-        fd_table[fd].flags = O_RDWR;
-        fd_table[fd].target_pid = target_pid;
-        return fd;
-    }
-
-    // Regular file path: sys_open handles FAT32
-    int fd = sys_open(path, flags);
+    // All paths go through sys_open — kernel dispatches FAT32 and devtmpfs internally
+    uint64_t result = sys_open(path, flags);
+    int32_t fd = (int32_t)(result & 0xFFFFFFFFULL);
     if (fd < 0) { errno = -fd; return -1; }
-
-    fd_table[fd].type = FD_FILE;
-    fd_table[fd].flags = flags & (O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK);
-    fd_table[fd].file_size = 0;
 
     return fd;
 }
 
-// ===================== read (unified — kernel dispatches) =====================
+// ===================== read =====================
 
 ssize_t read(int fd, void *buf, size_t count) {
-    fd_table_init();
-
-    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type == FD_NONE)
-        { errno = EBADF; return -1; }
-
-    if (fd_table[fd].type == FD_DEV) {
-        // Device fds use req/notify, not read/write
-        errno = ENOSYS;
-        return -1;
-    }
-
-    // FD_PIPE, FD_FILE, FD_DIR: unified sys_read, kernel dispatches internally
     int64_t n = sys_read(fd, buf, count);
     if (n < 0) { errno = (int)(-n); return -1; }
     return (ssize_t)n;
 }
 
-// ===================== write (unified — kernel dispatches) =====================
+// ===================== write =====================
 
 ssize_t write(int fd, const void *buf, size_t count) {
-    fd_table_init();
-
-    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type == FD_NONE)
-        { errno = EBADF; return -1; }
-
-    if (fd_table[fd].type == FD_DEV) {
-        errno = ENOSYS;
-        return -1;
-    }
-
-    // FD_PIPE and FD_FILE: unified sys_write, kernel dispatches internally
     int64_t n = sys_write(fd, buf, count);
     if (n < 0) { errno = (int)(-n); return -1; }
     return (ssize_t)n;
 }
 
-// ===================== close (unified — kernel dispatches) =====================
+// ===================== close =====================
 
 int close(int fd) {
-    fd_table_init();
-
-    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type == FD_NONE)
-        { errno = EBADF; return -1; }
-
-    // All fd types go through sys_close — kernel handles dispatch and cleanup
     int r = sys_close(fd);
     if (r < 0) { errno = -r; return -1; }
-    fd_table[fd].type = FD_NONE;
     return 0;
 }
 
 // ===================== pipe =====================
 
 int pipe(int fd[2]) {
-    fd_table_init();
-
     int r = sys_pipe(fd);
     if (r < 0) { errno = -r; return -1; }
-    fd_table[fd[0]].type = FD_PIPE;
-    fd_table[fd[0]].flags = O_RDONLY;
-    fd_table[fd[1]].type = FD_PIPE;
-    fd_table[fd[1]].flags = O_WRONLY;
     return 0;
 }
 
 // ===================== chdir =====================
 
 int chdir(const char *path) {
-    fd_table_init();
-
     if (!path) { errno = EFAULT; return -1; }
 
     // Resolve path: if it doesn't start with '/', prepend cwd
@@ -252,24 +148,15 @@ int chdir(const char *path) {
 // ===================== fcntl =====================
 
 int fcntl(int fd, int cmd, ...) {
-    fd_table_init();
-
-    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type == FD_NONE)
-        { errno = EBADF; return -1; }
-
     if (cmd == F_GETFL) {
-        return fd_table[fd].flags;
+        return sys_fcntl(fd, F_GETFL, 0);
     } else if (cmd == F_SETFL) {
         va_list ap;
         va_start(ap, cmd);
         int arg = va_arg(ap, int);
         va_end(ap);
-        // If FD_PIPE or FD_FILE, update kernel-side flags too
-        if (fd_table[fd].type == FD_PIPE || fd_table[fd].type == FD_FILE) {
-            int r = sys_fcntl(fd, cmd, arg);
-            if (r < 0) { errno = -r; return -1; }
-        }
-        fd_table[fd].flags = arg;
+        int r = sys_fcntl(fd, cmd, arg);
+        if (r < 0) { errno = -r; return -1; }
         return 0;
     }
 
@@ -279,35 +166,26 @@ int fcntl(int fd, int cmd, ...) {
 
 // ===================== FD_DEV helpers =====================
 
-// Get target_pid for an FD_DEV fd (used by mmap/sys_mman.cc)
-pid_t __fd_dev_target_pid(int fd) {
-    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type != FD_DEV)
-        return -1;
-    return fd_table[fd].target_pid;
-}
-
-// req_fd — send REQ to device driver via fd
+// req_fd — DEPRECATED: use ioctl(fd, cmd, arg) instead.
+// Still provided for backward compatibility with drivers not yet migrated.
 int req_fd(int fd, void *req_ptr, void *resp) {
     return sys_dev_req(fd, req_ptr, resp);
 }
 
-// notify_fd — notify device driver via fd
+// notify_fd — notify device driver via fd (uses sys_fdev_pid to find target)
 int notify_fd(int fd) {
-    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type != FD_DEV) {
-        errno = EBADF;
-        return -1;
-    }
-    return sys_notify(fd_table[fd].target_pid);
+    pid_t target_pid = sys_fdev_pid(fd);
+    if (target_pid < 0) { errno = EBADF; return -1; }
+    if (target_pid == 0) { errno = ENODEV; return -1; }
+    return sys_notify(target_pid);
 }
 
 // msg_fd — send variable-length message to device driver via fd
 int msg_fd(int fd, const void *msg_buf, size_t msg_len,
            void *reply_buf, size_t reply_len) {
-    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type != FD_DEV) {
-        errno = EBADF;
-        return -1;
-    }
-    pid_t target_pid = fd_table[fd].target_pid;
+    pid_t target_pid = sys_fdev_pid(fd);
+    if (target_pid < 0) { errno = EBADF; return -1; }
+    if (target_pid == 0) { errno = ENODEV; return -1; }
     return sys_msg(target_pid, (void*)msg_buf, msg_len, reply_buf, reply_len);
 }
 
@@ -319,17 +197,10 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms) {
     return (int)ret;
 }
 
-// dup2 — duplicate fd with libc fd_table sync
+// dup2 — duplicate fd
 int dup2(int old_fd, int new_fd) {
-    fd_table_init();
-
     int r = sys_dup2(old_fd, new_fd);
     if (r < 0) { errno = -r; return -1; }
-
-    // Sync libc fd_table: copy old_fd entry to new_fd
-    if (new_fd >= 0 && new_fd < MAX_FD && old_fd >= 0 && old_fd < MAX_FD) {
-        fd_table[new_fd] = fd_table[old_fd];
-    }
     return r;
 }
 
@@ -348,25 +219,13 @@ char *getcwd(char *buf, size_t size) {
 
 // ===================== lseek =====================
 off_t lseek(int fd, off_t offset, int whence) {
-    fd_table_init();
-    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type == FD_NONE)
-        { errno = EBADF; return -1; }
-    if (fd_table[fd].type == FD_FILE) {
-        int64_t r = sys_lseek(fd, offset, whence);
-        if (r < 0) { errno = (int)(-r); return -1; }
-        return (off_t)r;
-    }
-    if (fd_table[fd].type == FD_PIPE) {
-        errno = ESPIPE;
-        return -1;
-    }
-    errno = EINVAL;
-    return -1;
+    int64_t r = sys_lseek(fd, offset, whence);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (off_t)r;
 }
 
 // ===================== stat (via sys_stat syscall) =====================
 int stat(const char *path, struct stat *st) {
-    fd_table_init();
     if (!path || !st) { errno = EFAULT; return -1; }
 
     // Resolve path to absolute
@@ -391,7 +250,6 @@ int stat(const char *path, struct stat *st) {
 
 // ===================== access =====================
 int access(const char *path, int mode) {
-    fd_table_init();
     if (!path) { errno = EFAULT; return -1; }
 
     // F_OK: just check if file exists via stat
@@ -403,7 +261,6 @@ int access(const char *path, int mode) {
 
 // ===================== unlink (via sys_unlink syscall) =====================
 int unlink(const char *path) {
-    fd_table_init();
     if (!path) { errno = EFAULT; return -1; }
 
     char abs_path[256];
@@ -424,7 +281,6 @@ int unlink(const char *path) {
 
 // ===================== rmdir (via sys_rmdir syscall) =====================
 int rmdir(const char *path) {
-    fd_table_init();
     if (!path) { errno = EFAULT; return -1; }
 
     char abs_path[256];
@@ -445,46 +301,52 @@ int rmdir(const char *path) {
 
 // ===================== isatty =====================
 int isatty(int fd) {
-    fd_table_init();
-    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type == FD_NONE) return 0;
-    if (fd_table[fd].type == FD_DEV && fd_table[fd].target_pid == DEV_TERMINAL)
-        return 1;
-    return 0;
+    // Use ioctl TCGETS to detect tty devices
+    long rc = sys_ioctl(fd, TCGETS, 0);
+    return (rc == 0) ? 1 : 0;
+}
+
+// ===================== ioctl =====================
+int ioctl(int fd, uint32_t cmd, ...) {
+    va_list ap;
+    va_start(ap, cmd);
+    uint64_t arg = va_arg(ap, uint64_t);
+    va_end(ap);
+
+    // Always use a 64B stack buffer for kernel communication.
+    // For proxy path, kernel writes 56B reply into this buffer via sys_resp.
+    // This avoids the caller's original arg being smaller than 56B.
+    uint8_t buf[64];
+    __builtin_memset(buf, 0, sizeof(buf));
+
+    uint16_t arg_size = _IOC_SIZE(cmd);
+    if (arg_size > 48) { errno = EINVAL; return -1; }
+
+    // Copy-in: user arg → buf (only if direction includes WRITE)
+    if ((_IOC_DIR(cmd) & _IOC_WRITE) && arg != 0 && arg_size > 0)
+        __builtin_memcpy(buf, (const void *)arg, arg_size);
+
+    long rc = sys_ioctl(fd, cmd, (uint64_t)(uintptr_t)buf);
+    if (rc < 0) { errno = (int)(-rc); return -1; }
+
+    // Copy-out: buf → user arg (only if direction includes READ)
+    if ((_IOC_DIR(cmd) & _IOC_READ) && arg != 0 && arg_size > 0)
+        __builtin_memcpy((void *)arg, buf, arg_size);
+
+    return (int)rc;
 }
 
 // ===================== fstat =====================
 int fstat(int fd, struct stat *st) {
-    fd_table_init();
     if (!st) { errno = EFAULT; return -1; }
-    if (fd < 0 || fd >= MAX_FD || fd_table[fd].type == FD_NONE)
-        { errno = EBADF; return -1; }
-
-    memset(st, 0, sizeof(*st));
-
-    if (fd_table[fd].type == FD_FILE) {
-        // Use sys_lseek(SEEK_END) to get file size from kernel
-        int64_t size = sys_lseek(fd, 0, SEEK_END);
-        sys_lseek(fd, 0, SEEK_SET);
-        st->st_size = (size > 0) ? (off_t)size : 0;
-        st->st_mode = S_IFREG | 0644;
-    } else if (fd_table[fd].type == FD_DEV) {
-        st->st_mode = S_IFCHR | 0666;
-        st->st_size = 0;
-    } else if (fd_table[fd].type == FD_PIPE) {
-        st->st_mode = S_IFIFO | 0644;
-        st->st_size = 0;
-    }
-
-    st->st_blksize = 512;
-    st->st_blocks = (blkcnt_t)((st->st_size + 511) / 512);
-    st->st_nlink = 1;
+    long rc = sys_fstat(fd, (uint64_t)st);
+    if (rc < 0) { errno = (int)(-rc); return -1; }
     return 0;
 }
 
 // ===================== mkdir (via sys_mkdir syscall) =====================
 int mkdir(const char *path, mode_t mode) {
     (void)mode; // FAT32 doesn't support permissions
-    fd_table_init();
     if (!path) { errno = EFAULT; return -1; }
 
     char abs_path[256];
@@ -518,7 +380,6 @@ struct __dir {
 };
 
 DIR *opendir(const char *name) {
-    fd_table_init();
     if (!name) { errno = EFAULT; return NULL; }
 
     // Resolve path

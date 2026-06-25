@@ -2,9 +2,10 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <string.h>
-#include <sys/shm.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include "test_helpers.h"
+#include "common/syscall.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -59,9 +60,9 @@ void test_mmap_addr_hint(void) {
 
 /* 6. shm_create + mmap shared between processes */
 void test_mmap_shm_fd(void) {
-    void *addr = NULL;
-    int fd = shm_create(4096, &addr);
-    TEST_ASSERT_TRUE(fd >= 0);
+    int fd = sys_shm_create(4096);
+    TEST_ASSERT_TRUE(fd > 0);
+    void *addr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     TEST_ASSERT_NOT_NULL(addr);
 
     /* Write data */
@@ -123,6 +124,61 @@ void test_mmap_prot_exec(void) {
     TEST_ASSERT_TRUE(1); /* no crash = pass */
 }
 
+/* 11. Two memfd mmap MAP_SHARED: write via mmap, verify cross-visibility */
+void test_mmap_memfd_shared_cross(void) {
+    int fd = memfd_create("cross_vis", 0);
+    TEST_ASSERT_TRUE(fd >= 0);
+    TEST_ASSERT_EQUAL_INT(0, ftruncate(fd, 4096));
+
+    void *p1 = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    TEST_ASSERT_TRUE(p1 != NULL && p1 != MAP_FAILED);
+
+    /* Second mapping of same memfd — writes should be visible in both */
+    void *p2 = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    TEST_ASSERT_TRUE(p2 != NULL && p2 != MAP_FAILED);
+
+    memset(p1, 'A', 4096);
+    TEST_ASSERT_EQUAL_INT('A', ((char *)p2)[0]);
+    TEST_ASSERT_EQUAL_INT('A', ((char *)p2)[4095]);
+
+    ((char *)p2)[0] = 'B';
+    TEST_ASSERT_EQUAL_INT('B', ((char *)p1)[0]);
+
+    munmap(p1, 4096);
+    munmap(p2, 4096);
+    close(fd);
+}
+
+/* 12. mmap on nonexistent fd → graceful failure */
+void test_mmap_bad_fd(void) {
+    void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, 999, 0);
+    TEST_ASSERT_TRUE(p == NULL || p == MAP_FAILED);
+}
+
+/* 13. mmap memfd: ftruncate + mmap, verify via direct mmap write/read */
+void test_mmap_memfd_verify(void) {
+    int fd = memfd_create("verify_buf", 0);
+    TEST_ASSERT_TRUE(fd >= 0);
+
+    /* Grow to one page */
+    TEST_ASSERT_EQUAL_INT(0, ftruncate(fd, 4096));
+
+    /* mmap and write known data */
+    void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    TEST_ASSERT_TRUE(p != NULL && p != MAP_FAILED);
+
+    const char *msg = "mmap_verify";
+    memcpy(p, msg, strlen(msg) + 1);
+    TEST_ASSERT_EQUAL_STRING(msg, (char *)p);
+
+    /* Modify via mmap and verify persistence in same mapping */
+    ((char *)p)[0] = 'M';
+    TEST_ASSERT_EQUAL_STRING("Mmap_verify", (char *)p);
+
+    munmap(p, 4096);
+    close(fd);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mmap_anon);
@@ -135,5 +191,8 @@ int main(void) {
     RUN_TEST(test_memfd_mmap);
     RUN_TEST(test_ftruncate_grow);
     RUN_TEST(test_mmap_prot_exec);
+    RUN_TEST(test_mmap_memfd_shared_cross);
+    RUN_TEST(test_mmap_bad_fd);
+    RUN_TEST(test_mmap_memfd_verify);
     return UNITY_END();
 }

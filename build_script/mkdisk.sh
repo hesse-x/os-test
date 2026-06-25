@@ -54,7 +54,7 @@ if [ "$TEST" = "1" ]; then
     mmd -i "${BUILD_DIR}/part2.img" ::test
     for elf in test_runner.elf pipe.elf fcntl.elf string.elf malloc.elf \
                stdio.elf mmap.elf ipc.elf socket.elf process.elf \
-               signal.elf poll.elf pci.elf; do
+               signal.elf poll.elf pci.elf ioctl.elf dev_vfs.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
     done
 fi

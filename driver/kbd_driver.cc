@@ -3,14 +3,17 @@
 // Supports bind/unbind REQ protocol, kbd_push converts key_event → ASCII/ESC
 #include <stdint.h>
 #include <sys/ipc.h>
-#include <sys/shm.h>
+#include <sys/mman.h>
 #include <sys/device.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 #include "common/shm.h"
 #include "common/dev.h"
+#include "common/syscall.h"
 #include "input.h"
 #include "usb_hid.h"
 #include "common/errno.h"
+#include <cerrno>
 
 static volatile kbd_ring *kbd;
 static volatile driver_shm_header *shm_hdr;
@@ -154,18 +157,35 @@ static void kbd_push(struct key_event *ev) {
 // ===================== REQ handlers =====================
 
 static void handle_req(struct recv_msg *msg) {
-    struct kbd_req_request *req = (struct kbd_req_request *)msg->data;
+    // First 4 bytes = opcode/cmd
+    uint32_t opcode = *(uint32_t *)msg->data;
     struct kbd_req_reply reply;
     for (int i = 0; i < 64; i++) ((uint8_t*)&reply)[i] = 0;
 
-    if (req->opcode == KBD_REQ_BIND) {
+    if (opcode == KBD_REQ_BIND || opcode == KBD_IOCTL_BIND) {
         if (consumer_pid >= 0 && consumer_pid != (int32_t)msg->src) {
             reply.result = -EBUSY;
+            // For ioctl _IOWR path: write arg data into reply+4 region
+            if (opcode == KBD_IOCTL_BIND) {
+                struct kbd_ioctl_bind_arg *out = (struct kbd_ioctl_bind_arg *)((uint8_t *)&reply + 4);
+                out->pid = *(uint32_t *)(msg->data + 4);
+                out->result = -EBUSY;
+            }
         } else {
-            consumer_pid = msg->src;
+            // For ioctl-style, pid is at data+4 (first field of kbd_ioctl_bind_arg)
+            // For legacy REQ, pid is at opcode+4 in kbd_req_request
+            // Both layouts have pid at offset 4 of the data payload
+            consumer_pid = (int32_t)(*(uint32_t *)(msg->data + 4));
+            if (consumer_pid <= 0) consumer_pid = (int32_t)msg->src;
             reply.result = 0;  // idempotent success
+            // For ioctl _IOWR path: write arg data into reply+4 region
+            if (opcode == KBD_IOCTL_BIND) {
+                struct kbd_ioctl_bind_arg *out = (struct kbd_ioctl_bind_arg *)((uint8_t *)&reply + 4);
+                out->pid = (uint32_t)consumer_pid;
+                out->result = 0;
+            }
         }
-    } else if (req->opcode == KBD_REQ_UNBIND) {
+    } else if (opcode == KBD_REQ_UNBIND || opcode == KBD_IOCTL_UNBIND) {
         consumer_pid = -1;
         kbd = nullptr;
         shm_hdr = nullptr;
@@ -181,8 +201,8 @@ static void handle_req(struct recv_msg *msg) {
 
 extern "C" void _start() {
     // Create kbd_ring SHM first (slot 0) so shm_attach finds it
-    void *shm_ptr = NULL;
-    shm_create(4096, &shm_ptr);
+    int shm_fd = sys_shm_create(4096);
+    void *shm_ptr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     uint64_t shm_addr = (uint64_t)shm_ptr;
     kbd = (volatile kbd_ring *)(shm_addr + KBD_RING_OFFSET);
     shm_hdr = (volatile driver_shm_header *)shm_addr;
@@ -192,34 +212,38 @@ extern "C" void _start() {
     shm_hdr->consumer_sleeping = 0;
 
     // Attach to kernel pre-allocated USB HID SHM (slot 1)
-    void *hid_shm = NULL;
-    shm_attach_kernel(USB_HID_SHM_ID, &hid_shm);
+    int hid_fd = sys_shm_attach(USB_HID_SHM_ID, 1);
+    void *hid_shm = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, hid_fd, 0);
     get_keycode_init(hid_shm);
 
     // Register as KBD device
-    device_register(getpid(), DEV_KBD);
+    device_register("kbd", DEV_KBD);
 
-    // Main loop: wait for events (NOTIFY from kernel ISR, or REQ)
+    // Main loop: wait for events (EINTR from kernel ISR, or REQ from consumers)
     while (1) {
         struct recv_msg msg;
-        recv(&msg, NULL, 0, 0);
+        int rc = recv(&msg, NULL, 0, 0);
+
+        if (rc < 0) {
+            // EINTR: ISR woke us — process HID reports if we have a consumer
+            if (errno != EINTR) continue;
+            if (consumer_pid >= 0 && kbd) {
+                struct key_event ev;
+                while (get_keycode(&ev) == 0) {
+                    kbd_push(&ev);
+                }
+
+                // Notify consumer if sleeping
+                if (shm_hdr && shm_hdr->consumer_sleeping) {
+                    notify(consumer_pid);
+                }
+            }
+            continue;
+        }
 
         if (msg.type == RECV_REQ) {
             handle_req(&msg);
             continue;
-        }
-
-        // RECV_NOTIFY from kernel ISR: process HID reports if we have a consumer
-        if (consumer_pid >= 0 && kbd) {
-            struct key_event ev;
-            while (get_keycode(&ev) == 0) {
-                kbd_push(&ev);
-            }
-
-            // Notify consumer if sleeping
-            if (shm_hdr && shm_hdr->consumer_sleeping) {
-                notify(consumer_pid);
-            }
         }
     }
 }

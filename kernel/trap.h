@@ -28,7 +28,6 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t,
 uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6);
 uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_fb_info(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_dev_req(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_shm_create(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_shm_attach(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -56,6 +55,11 @@ uint64_t sys_memfd_create(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint
 uint64_t sys_ftruncate(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_debug_print(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
+// VFS extended syscalls
+uint64_t sys_ioctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_fstat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_fdev_pid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
 // Signal syscalls
 uint64_t sys_kill(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_sigaction(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -81,20 +85,14 @@ void sock_close(struct unix_sock *sock);
 // Notify a process: enqueue recv_msg_t + wake if WAIT_RECV
 void notify_and_wake(pid_t target_pid, recv_msg_t *msg);
 
-// Register a driver PID for a device type (kernel-internal, not a syscall)
-int register_dev(int dev_type, pid_t pid);
-
 // Register a kernel pre-allocated SHM region (called by xhci_init)
 void register_kernel_shm(int shm_id, struct shm *shm);
 
-// Look up a device driver PID (kernel-internal, used by ISR)
-pid_t lookup_dev(int dev_type);
-
-// Remove a PID from dev_table (called by proc_reap)
-void dev_table_cleanup(pid_t pid);
-
 // Remove a PID from irq_owner (called by proc_reap)
 void irq_owner_cleanup(pid_t pid);
+
+// Check if an IRQ vector is owned by a user-space driver (returns owner PID, or -1 if free)
+int irq_owner_check(int irq);
 
 // Wake a process blocked on WAIT_PIPE (used by pipe close and proc_reap)
 // Enqueues a RECV_NOTIFY message and wakes if in WAIT_RECV

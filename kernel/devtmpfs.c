@@ -3,6 +3,7 @@
 #include "kernel/proc.h"
 #include "kernel/serial.h"
 #include "kernel/spinlock.h"
+#include "kernel/mem/slab.h"
 #include "common/errno.h"
 #include "common/dev.h"
 #include "arch/x64/smp.h"
@@ -22,10 +23,15 @@ static struct dev_entry *dev_list = NULL;
 static int dev_count = 0;
 static spinlock_t devtmpfs_lock = SPINLOCK_INIT;
 
+// ISR-facing driver PID lookup (replaces dev_table for ISR wake)
+static pid_t isr_driver_pid[DEV_TYPE_MAX];
+
 void devtmpfs_init(void) {
     spin_lock(&devtmpfs_lock);
     dev_list = NULL;
     dev_count = 0;
+    for (int i = 0; i < DEV_TYPE_MAX; i++)
+        isr_driver_pid[i] = 0;
     for (int i = 0; i < MAX_DEV_ENTRIES; i++) {
         dev_entries[i].name[0] = '\0';
         dev_entries[i].ip = NULL;
@@ -89,17 +95,21 @@ int devtmpfs_create(const char *name, int dev_type, struct dev_ops *ops) {
     dev_list = &dev_entries[slot];
     dev_count++;
 
+    // Populate ISR driver PID table for user-space drivers
+    if (ops->driver_pid > 0)
+        isr_driver_pid[ops->device_type] = ops->driver_pid;
+
     spin_unlock(&devtmpfs_lock);
     serial_printf("devtmpfs: created /dev/%s (type=%d)\n", name, dev_type);
     return 0;
 }
 
-uint64_t devtmpfs_open(const char *name, int flags) {
+uint64_t devtmpfs_open(struct proc_t *proc, const char *name, int flags) {
+    serial_printf("devtmpfs_open: name='%s' pid=%d\n", name, proc->pid);
     struct inode *ip = devtmpfs_lookup(name);
     if (!ip) return (uint64_t)(-(uint64_t)ENOENT);
 
     /* Allocate fd */
-    proc_t *proc = current_proc;
     int fd = -1;
     for (int j = 3; j < MAX_FD; j++) {
         if (proc->fd_table[j].type == FD_NONE) { fd = j; break; }
@@ -107,13 +117,25 @@ uint64_t devtmpfs_open(const char *name, int flags) {
     if (fd < 0) return (uint64_t)(-(uint64_t)EMFILE);
 
     proc->fd_table[fd].type = FD_DEV;
-    proc->fd_table[fd].flags = O_RDWR;
+    proc->fd_table[fd].flags = flags;
     proc->fd_table[fd].inode = ip;
     inode_get(ip);
     if (ip->i_priv) {
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         proc->fd_table[fd].target_pid = ops->driver_pid;
+        // Kernel device: call open callback
+        if (ops->driver_pid == 0 && ops->open) {
+            int rc = ops->open(proc, fd);
+            if (rc < 0) {
+                // Open failed: undo fd allocation
+                inode_put(ip);
+                __memset(&proc->fd_table[fd], 0, sizeof(struct file));
+                proc->fd_table[fd].type = FD_NONE;
+                return (uint64_t)(-(uint64_t)(-rc));
+            }
+        }
     }
+    serial_printf("devtmpfs_open: '%s' allocated fd=%d driver_pid=%d\n", name, fd, ip->i_priv ? ((struct dev_ops *)ip->i_priv)->driver_pid : -1);
     return (uint64_t)fd;
 }
 
@@ -127,6 +149,11 @@ void devtmpfs_cleanup_pid(pid_t pid) {
             if (ops->driver_pid == pid) {
                 /* Remove from list */
                 *pp = e->next;
+                /* Clear ISR driver PID table entry */
+                if (ops->driver_pid > 0)
+                    isr_driver_pid[ops->device_type] = 0;
+                /* Free kmalloc'd dev_ops (user-space driver) */
+                if (ops->driver_pid > 0) kfree(ops);
                 /* Free inode */
                 inode_put(e->ip);
                 e->ip = NULL;
@@ -138,4 +165,9 @@ void devtmpfs_cleanup_pid(pid_t pid) {
         pp = &e->next;
     }
     spin_unlock(&devtmpfs_lock);
+}
+
+pid_t isr_lookup_driver(uint32_t dev_type) {
+    if (dev_type >= DEV_TYPE_MAX) return 0;
+    return isr_driver_pid[dev_type];
 }

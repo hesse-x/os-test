@@ -16,8 +16,10 @@ struct display_state g_display;
 
 // KMS device ops (driver_pid=0 means kernel device)
 static struct dev_ops kms_dev_ops = {
-    .driver_pid = 0,
+    .driver_pid  = 0,
     .device_type = DEV_KMS,
+    .ioctl       = display_ioctl,
+    .mmap        = display_mmap_handler_ioctl,
 };
 
 // ===================== display_init =====================
@@ -106,7 +108,68 @@ void display_init(void) {
     serial_puts("display_init: 800x600x32 done\n");
 }
 
-// ===================== display_req_handler =====================
+// ===================== display_ioctl =====================
+// Converts (cmd, arg) ioctl pattern to display_req_handler logic.
+// Phase 1: called by sys_dev_req via ops->ioctl, arg points to kernel stack buffer.
+
+long display_ioctl(uint32_t cmd, void *arg) {
+    bool is_create = (cmd == KMS_IOCTL_CREATE_BUF || cmd == DISPLAY_REQ_CREATE_BUF);
+    bool is_flip   = (cmd == KMS_IOCTL_FLIP || cmd == DISPLAY_REQ_FLIP);
+
+    serial_printf("display_ioctl: cmd=%u is_create=%d is_flip=%d\n", cmd, is_create, is_flip);
+
+    if (is_create) {
+        // Use unified struct layout: input at offsets 0-11, output at offsets 12-31
+        struct display_ioctl_create_buf_arg *uarg = (struct display_ioctl_create_buf_arg *)arg;
+        uint32_t width  = uarg->width;
+        uint32_t height = uarg->height;
+        uint32_t bpp    = uarg->bpp;
+
+        // Validate parameters
+        if (width != 800 || height != 600 || bpp != 32)
+            return -EINVAL;
+
+        // Already initialized
+        if (g_display.initialized)
+            return -EBUSY;
+
+        // Allocate back buffer
+        uint32_t pitch = width * 4;
+        uint32_t size = pitch * height;
+        size_t npages = (size + 4095) / 4096;
+
+        Page *pages = bfc_alloc_page(npages);
+        if (!pages) return -ENOMEM;
+
+        uint64_t phys = (__force uint64_t)page_to_phys(pages);
+        uint8_t *vaddr = (__force uint8_t *)phys_to_virt((__force phys_addr_t)phys);
+        __memset(vaddr, 0, npages * PAGE_SIZE);
+
+        g_display.back_buffer = vaddr;
+        g_display.back_buffer_phys = phys;
+        g_display.back_buffer_npages = npages;
+        g_display.initialized = true;
+
+        // Fill output fields in unified struct (at offsets 12-31)
+        uarg->pitch  = pitch;
+        uarg->size   = size;
+        uarg->rows   = height / DISPLAY_FONT_HEIGHT;
+        uarg->cols   = width / DISPLAY_FONT_WIDTH;
+        uarg->result = 0;
+        serial_printf("display_ioctl CREATE_BUF: pitch=%u size=%u rows=%u cols=%u result=%d\n",
+                       uarg->pitch, uarg->size, uarg->rows, uarg->cols, uarg->result);
+        return 0;
+
+    } else if (is_flip) {
+        if (!g_display.initialized)
+            return -ENOENT;
+
+        __memcpy((void __force *)g_display.front_fb, g_display.back_buffer, g_display.fb_size);
+        return 0;
+    }
+
+    return -EINVAL;
+}
 
 __attribute__((no_sanitize("kernel-address")))
 int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
@@ -170,6 +233,13 @@ int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
     return -EINVAL;
 }
 
+// ===================== display_mmap_handler_ioctl =====================
+// Wrapper to adapt display_mmap_handler to dev_ops.mmap signature (uint64_t size)
+
+uint64_t display_mmap_handler_ioctl(struct proc_t *proc, uint64_t size) {
+    return display_mmap_handler(proc, (size_t)size);
+}
+
 // ===================== display_mmap_handler =====================
 
 __attribute__((no_sanitize("kernel-address")))
@@ -202,7 +272,7 @@ uint64_t display_mmap_handler(struct proc_t *proc, size_t size) {
 
     region->vaddr = vaddr;
     region->size = npages * PAGE_SIZE;
-    region->phys = 0;
+    region->phys = g_display.back_buffer_phys;  // Mark as externally-managed physical mapping
     region->shm_obj = NULL;
     region->next = proc->mmap_regions;
     proc->mmap_regions = region;

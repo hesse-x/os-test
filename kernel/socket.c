@@ -4,6 +4,7 @@
 
 #include "kernel/socket.h"
 #include "kernel/proc.h"
+#include "kernel/devtmpfs.h"
 #include "kernel/serial.h"
 #include "kernel/trap.h"
 #include "kernel/mem/slab.h"
@@ -137,6 +138,7 @@ struct unix_sock *unix_sock_alloc(void) {
     if (!sock) return NULL;
     sock->state = UNIX_FREE;
     sock->peer = -1;
+    sock->peer_sock = NULL;
     sock->ref_count = 1;
     sock->recv_queue_head = NULL;
     sock->recv_queue_tail = NULL;
@@ -220,8 +222,10 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
                                const struct iovec *iov, size_t iovlen,
                                const void *control, size_t controllen,
                                int flags) {
-    // Check shutdown_write
+    // Check shutdown_write on our socket
     if (sock->shutdown_write) return -EPIPE;
+    // Check peer shutdown_read — sending to a socket whose read side is shut down should EPIPE
+    if (sock->peer_sock && sock->peer_sock->shutdown_read) return -EPIPE;
 
     // Calculate total data length
     uint32_t total = 0;
@@ -276,36 +280,31 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
         }
     }
 
-    // Find peer socket
-    pid_t peer_pid = sock->peer;
-    if (peer_pid < 0 || peer_pid >= MAX_PROC) {
-        skb_free(skb);
-        return -ENOTCONN;
-    }
-    proc_t *peer_proc = &procs[peer_pid];
-    if (peer_proc->pid != peer_pid) {
-        skb_free(skb);
-        return -ENOTCONN;
-    }
-
-    // Lock: find the socket fd in peer's fd_table
-    // We need the peer's unix_sock. We stored it in sock->peer, but the peer might
-    // have it in its fd_table. We'll iterate peer's fd_table to find the matching
-    // unix_sock that has sock as its peer.
-    // Actually, let's store a direct pointer: we need to find the peer's unix_sock.
-    // The peer is identified by sock->peer (PID). But we need the struct unix_sock*.
-    // We'll search peer's fd_table for an FD_SOCKET whose unix_sock has peer == current PID.
-    spin_lock(&socket_lock);
-
-    struct unix_sock *peer_sock = NULL;
-    for (int fd = 0; fd < MAX_FD; fd++) {
-        if (peer_proc->fd_table[fd].type == FD_SOCKET) {
-            struct unix_sock *ps = peer_proc->fd_table[fd].sock;
-            if (ps && ps->peer == current_proc->pid && ps->state == UNIX_CONNECTED) {
-                peer_sock = ps;
-                break;
+    // Find peer socket via direct pointer (socketpair) or PID-based lookup (connect)
+    struct unix_sock *peer_sock = sock->peer_sock;
+    if (!peer_sock) {
+        pid_t peer_pid = sock->peer;
+        if (peer_pid < 0 || peer_pid >= MAX_PROC) {
+            skb_free(skb);
+            return -ENOTCONN;
+        }
+        proc_t *peer_proc = &procs[peer_pid];
+        if (peer_proc->pid != peer_pid) {
+            skb_free(skb);
+            return -ENOTCONN;
+        }
+        spin_lock(&socket_lock);
+        for (int fd = 0; fd < MAX_FD; fd++) {
+            if (peer_proc->fd_table[fd].type == FD_SOCKET) {
+                struct unix_sock *ps = peer_proc->fd_table[fd].sock;
+                if (ps && ps != sock && ps->peer == current_proc->pid && ps->state == UNIX_CONNECTED) {
+                    peer_sock = ps;
+                    break;
+                }
             }
         }
+    } else {
+        spin_lock(&socket_lock);
     }
 
     if (!peer_sock) {
@@ -355,19 +354,31 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
 
         if (!skb) {
             // Queue empty: check EOF conditions
-            if (sock->shutdown_read ||
-                sock->state == UNIX_CLOSED ||
+            // 1) Our own shutdown_read
+            if (sock->shutdown_read) {
+                spin_unlock(&socket_lock);
+                return 0;  // EOF
+            }
+            // 2) Peer shutdown_write (we will never receive more data)
+            if (sock->peer_sock && sock->peer_sock->shutdown_write) {
+                spin_unlock(&socket_lock);
+                return 0;  // EOF — peer shut down write side
+            }
+            // 3) Socket closed or peer zombie
+            if (sock->state == UNIX_CLOSED ||
                 (sock->peer >= 0 && procs[sock->peer].pid == sock->peer &&
                  procs[sock->peer].state == ZOMBIE)) {
                 // Check if peer has closed
                 bool peer_closed = true;
-                if (sock->peer >= 0 && sock->peer < MAX_PROC) {
+                if (sock->peer_sock) {
+                    peer_closed = (sock->peer_sock->state != UNIX_CONNECTED);
+                } else if (sock->peer >= 0 && sock->peer < MAX_PROC) {
                     proc_t *pp = &procs[sock->peer];
                     if (pp->pid == sock->peer) {
-                        // Scan peer's fd_table for a socket pointing back to us
                         for (int fd = 0; fd < MAX_FD; fd++) {
                             if (pp->fd_table[fd].type == FD_SOCKET &&
                                 pp->fd_table[fd].sock &&
+                                pp->fd_table[fd].sock != sock &&
                                 pp->fd_table[fd].sock->peer == current_proc->pid) {
                                 peer_closed = false;
                                 break;
@@ -523,7 +534,15 @@ void sock_close(struct unix_sock *sock) {
     // Wake blocked reader/writer and notify peer
     pid_t reader = sock->blocked_reader;
     pid_t writer = sock->blocked_writer;
+    struct unix_sock *peer_s = sock->peer_sock;
     pid_t peer_pid = sock->peer;
+    pid_t peer_reader = -1, peer_writer = -1;
+    if (peer_s) {
+        peer_reader = peer_s->blocked_reader;
+        peer_writer = peer_s->blocked_writer;
+        peer_s->blocked_reader = -1;
+        peer_s->blocked_writer = -1;
+    }
     sock->blocked_reader = -1;
     sock->blocked_writer = -1;
 
@@ -533,8 +552,11 @@ void sock_close(struct unix_sock *sock) {
     if (reader >= 0) wake_process(reader);
     if (writer >= 0) wake_process(writer);
 
-    // Wake peer process so it can detect EOF/EPIPE
-    if (peer_pid >= 0) wake_process(peer_pid);
+    // Wake peer's blocked reader/writer so it can detect EOF/EPIPE
+    if (peer_reader >= 0) wake_process(peer_reader);
+    if (peer_writer >= 0) wake_process(peer_writer);
+    // Also wake peer process itself (PID-based fallback for cross-process)
+    if (!peer_s && peer_pid >= 0) wake_process(peer_pid);
 
     // Release reference (actual free when ref_count hits 0)
     unix_sock_release(sock);
@@ -585,7 +607,7 @@ uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
 
 uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
-    const struct sockaddr_un *addr = (const struct sockaddr_un *)arg2;
+    const struct sockaddr_un __user *addr = (const struct sockaddr_un __user *)arg2;
     socklen_t addrlen = (socklen_t)arg3;
 
     proc_t *proc = current_proc;
@@ -671,8 +693,8 @@ uint64_t sys_listen(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, ui
 
 uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
-    struct sockaddr_un *addr = (struct sockaddr_un *)arg2;
-    socklen_t *addrlen = (socklen_t *)arg3;
+    struct sockaddr_un __user *addr = (struct sockaddr_un __user *)arg2;
+    socklen_t __user *addrlen = (socklen_t __user *)arg3;
 
     proc_t *proc = current_proc;
 
@@ -761,16 +783,20 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
             __memset(&sa, 0, sizeof(sa));
             sa.sun_family = AF_UNIX;
             // Find peer's sun_path from peer socket
-            struct unix_sock *peer_sock = NULL;
-            if (child->peer >= 0 && child->peer < MAX_PROC) {
-                proc_t *pp = &procs[child->peer];
-                if (pp->pid == child->peer) {
-                    for (int pfd = 0; pfd < MAX_FD; pfd++) {
-                        if (pp->fd_table[pfd].type == FD_SOCKET &&
-                            pp->fd_table[pfd].sock &&
-                            pp->fd_table[pfd].sock->peer == proc->pid) {
-                            peer_sock = pp->fd_table[pfd].sock;
-                            break;
+            struct unix_sock *peer_sock = child->peer_sock;
+            if (!peer_sock) {
+                // Fallback: PID-based lookup for cross-process connections
+                if (child->peer >= 0 && child->peer < MAX_PROC) {
+                    proc_t *pp = &procs[child->peer];
+                    if (pp->pid == child->peer) {
+                        for (int pfd = 0; pfd < MAX_FD; pfd++) {
+                            if (pp->fd_table[pfd].type == FD_SOCKET &&
+                                pp->fd_table[pfd].sock &&
+                                pp->fd_table[pfd].sock != child &&
+                                pp->fd_table[pfd].sock->peer == proc->pid) {
+                                peer_sock = pp->fd_table[pfd].sock;
+                                break;
+                            }
                         }
                     }
                 }
@@ -798,7 +824,7 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
 
 uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
-    const struct sockaddr_un *addr = (const struct sockaddr_un *)arg2;
+    const struct sockaddr_un __user *addr = (const struct sockaddr_un __user *)arg2;
     socklen_t addrlen = (socklen_t)arg3;
 
     proc_t *proc = current_proc;
@@ -880,7 +906,9 @@ uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
 found_listener:
 
     client_sock->peer = listener_pid;
+    client_sock->peer_sock = child;  // client's peer is the child (server-side)
     child->peer = proc->pid;
+    child->peer_sock = client_sock;  // child's peer is the client
 
     // Enqueue child to listener's backlog
     child->backlog_head = NULL;
@@ -948,12 +976,11 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
     }
 
     a->state = UNIX_CONNECTED;
-    a->peer = proc->pid;  // will be corrected below
+    a->peer = proc->pid;
+    a->peer_sock = b;
     b->state = UNIX_CONNECTED;
     b->peer = proc->pid;
-
-    a->peer = proc->pid;  // peer PID is ourselves (both in same process)
-    b->peer = proc->pid;
+    b->peer_sock = a;
 
     proc->fd_table[fd_a].type = FD_SOCKET;
     proc->fd_table[fd_a].flags = O_RDWR;
@@ -975,7 +1002,7 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
 
 uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
-    const struct msghdr *msg = (const struct msghdr *)arg2;
+    const struct msghdr __user *msg = (const struct msghdr __user *)arg2;
     int flags = (int)arg3;
 
     proc_t *proc = current_proc;
@@ -1049,7 +1076,7 @@ uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
 
 uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
     int fd = (int)arg1;
-    struct msghdr *msg = (struct msghdr *)arg2;
+    struct msghdr __user *msg = (struct msghdr __user *)arg2;
     int flags = (int)arg3;
 
     proc_t *proc = current_proc;
@@ -1110,7 +1137,7 @@ uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     if (ret >= 0) {
         if (kmsg.msg_control && kmsg.msg_controllen > 0) {
             // struct msghdr: offset 40 = msg_controllen (size_t)
-            copy_to_user((void __user *)((char *)msg + 40), &kcontrollen, sizeof(size_t));
+            copy_to_user((void __user *)((char __user *)msg + 40), &kcontrollen, sizeof(size_t));
         }
     }
 
@@ -1148,6 +1175,19 @@ uint64_t sys_shutdown(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
 
     pid_t reader = sock->blocked_reader;
     pid_t writer = sock->blocked_writer;
+    // If we shut down write, peer's recvmsg should return EOF — wake peer's blocked reader
+    // If we shut down read, peer's sendmsg should return EPIPE — wake peer's blocked writer
+    pid_t peer_reader = -1, peer_writer = -1;
+    if (sock->peer_sock) {
+        if (how == SHUT_WR || how == SHUT_RDWR) {
+            peer_reader = sock->peer_sock->blocked_reader;
+            sock->peer_sock->blocked_reader = -1;
+        }
+        if (how == SHUT_RD || how == SHUT_RDWR) {
+            peer_writer = sock->peer_sock->blocked_writer;
+            sock->peer_sock->blocked_writer = -1;
+        }
+    }
     sock->blocked_reader = -1;
     sock->blocked_writer = -1;
 
@@ -1155,12 +1195,14 @@ uint64_t sys_shutdown(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
 
     if (reader >= 0) wake_process(reader);
     if (writer >= 0) wake_process(writer);
+    if (peer_reader >= 0) wake_process(peer_reader);
+    if (peer_writer >= 0) wake_process(peer_writer);
 
     return 0;
 }
 
 uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
-    struct pollfd *fds = (struct pollfd *)arg1;
+    struct pollfd __user *fds = (struct pollfd __user *)arg1;
     nfds_t nfds = (nfds_t)arg2;
     int timeout_ms = (int)arg3;
 
@@ -1209,12 +1251,10 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
                     // POLLIN: data available or EOF (no writers)
                     if (p->head != p->tail || p->ref_count <= 1) {
                         if (kfds[i].events & POLLIN) kfds[i].revents |= POLLIN;
-                        ready++;
                     }
                     // POLLOUT: space available or peer closed
                     if ((p->head + 1) % PIPE_BUF_SIZE != p->tail || p->ref_count <= 1) {
                         if (kfds[i].events & POLLOUT) kfds[i].revents |= POLLOUT;
-                        ready++;
                     }
                 }
             } else if (f->type == FD_SOCKET) {
@@ -1225,27 +1265,23 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
                     // POLLIN: data available or shutdown_read
                     if (sock->recv_queue_head || sock->shutdown_read) {
                         if (kfds[i].events & POLLIN) kfds[i].revents |= POLLIN;
-                        ready++;
                     }
 
                     // POLLOUT: not shutdown_write
                     if (!sock->shutdown_write && sock->state == UNIX_CONNECTED) {
                         if (kfds[i].events & POLLOUT) kfds[i].revents |= POLLOUT;
-                        ready++;
                     }
 
-                    // POLLHUP: peer gone
+                    // POLLHUP: peer gone (always reported regardless of events mask)
                     if (sock->state == UNIX_CLOSED ||
                         (sock->peer >= 0 && sock->peer < MAX_PROC &&
                          procs[sock->peer].pid != sock->peer)) {
                         kfds[i].revents |= POLLHUP;
-                        ready++;
                     }
 
                     // For LISTEN socket: POLLIN = has pending connections
                     if (sock->state == UNIX_LISTEN && sock->backlog_len > 0) {
                         if (kfds[i].events & POLLIN) kfds[i].revents |= POLLIN;
-                        ready++;
                     }
 
                     spin_unlock(&socket_lock);
@@ -1253,32 +1289,32 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
             } else if (f->type == FD_FILE) {
                 // FD_FILE: always writable (buffered), POLLIN if not at EOF
                 if (kfds[i].events & POLLOUT) kfds[i].revents |= POLLOUT;
-                ready++;
                 // For POLLIN: check if offset < file_size
                 if ((kfds[i].events & POLLIN) &&
                     f->file_data._offset < f->file_data.file_size) {
                     kfds[i].revents |= POLLIN;
                 }
-            } else if (f->type == FD_SERIAL) {
-                uint64_t rx_flags;
-                spin_lock_irqsave(&serial_rx_lock, &rx_flags);
-                // POLLIN: RX buffer has data
-                if (serial_rx_head != serial_rx_tail) {
+            } else if (f->type == FD_DEV) {
+                // FD_DEV: call dev_ops.poll callback for kernel devices
+                struct inode *ip = f->inode;
+                if (ip && ip->i_priv) {
+                    struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+                    if (ops->driver_pid == 0 && ops->poll) {
+                        __poll_t revents = ops->poll(current_proc, kfds[i].events);
+                        kfds[i].revents |= revents;
+                    }
+                }
+                // User-space driver: always ready (IPC handles events)
+                if (f->target_pid > 0) {
                     if (kfds[i].events & POLLIN) kfds[i].revents |= POLLIN;
-                    ready++;
+                    if (kfds[i].events & POLLOUT) kfds[i].revents |= POLLOUT;
                 }
-                // POLLOUT: always ready (UART TX is non-blocking with LSR wait)
-                if (kfds[i].events & POLLOUT) {
-                    kfds[i].revents |= POLLOUT;
-                    ready++;
-                }
-                spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
             } else {
-                // FD_DEV, FD_SHM: always ready
+                // FD_SHM etc: always ready
                 if (kfds[i].events & POLLIN) kfds[i].revents |= POLLIN;
                 if (kfds[i].events & POLLOUT) kfds[i].revents |= POLLOUT;
-                ready++;
             }
+            if (kfds[i].revents) ready++;
         }
 
         if (ready > 0) {

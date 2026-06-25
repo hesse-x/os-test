@@ -1,8 +1,21 @@
 #!/bin/bash
-# Sparse static analysis for kernel code
+# Sparse static analysis + sanitizer boot test for kernel code
 # Usage: ./check.sh
 
-set -e
+SPARSE_COMPAT=""
+WARNFILE=/tmp/sparse-output.txt
+
+cleanup() {
+    rm -f "$SPARSE_COMPAT" "$WARNFILE"
+    # Kill QEMU process group if still running
+    if [ -n "$QEMU_PGID" ]; then
+        kill -- -"$QEMU_PGID" 2>/dev/null || true
+        wait "$QEMU_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+# ===================== Step 1: Sparse check =====================
 
 # Check if sparse is available
 if ! command -v sparse &> /dev/null; then
@@ -63,13 +76,10 @@ done
 
 if [ ${#KERNEL_SOURCES[@]} -eq 0 ]; then
     echo "Error: No kernel source files found"
-    rm -f "$SPARSE_COMPAT"
     exit 1
 fi
 
 # Run sparse per-file to avoid __bitwise type state leakage across translation units
-FAILED=0
-WARNFILE=/tmp/sparse-output.txt
 > "$WARNFILE"
 for f in "${KERNEL_SOURCES[@]}"; do
     sparse "${SPARSE_FLAGS[@]}" "$f" 2>&1 \
@@ -78,17 +88,17 @@ for f in "${KERNEL_SOURCES[@]}"; do
         >> "$WARNFILE" || true
 done
 
+# Clean up sparse compat header early (no longer needed)
 rm -f "$SPARSE_COMPAT"
+SPARSE_COMPAT=""
 
 if [ -s "$WARNFILE" ]; then
     cat "$WARNFILE"
     echo ""
     echo "Sparse check failed with $(wc -l < "$WARNFILE") warning(s)."
-    rm -f "$SPARSE_COMPAT"
     exit 1
 fi
 echo "Sparse check passed."
-rm -f "$SPARSE_COMPAT"
 
 # ===================== Step 2: Sanitizer check =====================
 echo ""
@@ -96,17 +106,19 @@ echo "=== Step 2: Sanitizer build + boot test ==="
 
 ./build.sh --sanitizer
 
-# Start QEMU in background, wait for boot
+# Start QEMU in a new process group so we can kill the whole group
 rm -f log.txt
-timeout 30 ./run.sh &
+setsid timeout 30 ./run.sh &
 QEMU_PID=$!
+QEMU_PGID=$(ps -o pgid= -p "$QEMU_PID" | tr -d ' ')
 
 # Wait for QEMU to boot and stabilize
 sleep 20
 
-# Kill QEMU
-kill $QEMU_PID 2>/dev/null || true
-wait $QEMU_PID 2>/dev/null || true
+# Kill entire QEMU process group
+kill -- -"$QEMU_PGID" 2>/dev/null || true
+wait "$QEMU_PID" 2>/dev/null || true
+QEMU_PGID=""
 
 # Check log.txt for KASAN/KCSAN reports
 if [ ! -f log.txt ]; then

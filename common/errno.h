@@ -38,6 +38,8 @@
 #define ENOTEMPTY 34
 #define ELOOP     35
 #define ENODEV    36
+#define ENOTTY    37
+#define EINTR     38
 #define EWOULDBLOCK EAGAIN
 
 #endif // COMMON_ERRNO_H

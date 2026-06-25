@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-int device_register(pid_t pid, int dev_type);
+int device_register(const char *name, int dev_type);
 
 // Device type constants (must match common/dev.h)
 #define DEV_SERIAL   6

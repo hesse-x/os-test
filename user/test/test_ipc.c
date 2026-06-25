@@ -1,42 +1,45 @@
 #include <unity.h>
 #include <sys/ipc.h>
-#include <sys/shm.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include "test_helpers.h"
+#include "common/syscall.h"
 
 void setUp(void) {}
 void tearDown(void) {}
 
 /* 1. shm_create returns valid fd */
 void test_shm_create(void) {
-    void *addr = NULL;
-    int fd = shm_create(4096, &addr);
-    TEST_ASSERT_TRUE(fd >= 0);
+    int fd = sys_shm_create(4096);
+    TEST_ASSERT_TRUE(fd > 0);
+    void *addr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     TEST_ASSERT_NOT_NULL(addr);
     close(fd);
 }
 
 /* 2. shm_attach to own process */
 void test_shm_attach(void) {
-    void *addr = NULL;
-    int fd = shm_create(4096, &addr);
-    TEST_ASSERT_TRUE(fd >= 0);
+    int fd = sys_shm_create(4096);
+    TEST_ASSERT_TRUE(fd > 0);
 
-    void *addr2 = NULL;
-    int r = shm_attach(getpid(), &addr2);
+    void *addr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    TEST_ASSERT_NOT_NULL(addr);
+
+    int attach_fd = sys_shm_attach(getpid(), 0);
     /* Attach may succeed or fail depending on implementation */
-    (void)r;
-    (void)addr2;
+    (void)attach_fd;
     close(fd);
 }
 
 /* 3. Cross-process SHM (multi-process — simplified: test same-process write/read) */
 void test_shm_cross_process(void) {
-    void *addr = NULL;
-    int fd = shm_create(4096, &addr);
-    TEST_ASSERT_TRUE(fd >= 0);
+    int fd = sys_shm_create(4096);
+    TEST_ASSERT_TRUE(fd > 0);
+    void *addr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    TEST_ASSERT_NOT_NULL(addr);
 
     memset(addr, 'H', 4096);
     TEST_ASSERT_EQUAL_INT('H', ((char *)addr)[0]);
@@ -47,9 +50,10 @@ void test_shm_cross_process(void) {
 
 /* 4. SHM refcount — close fd, verify mapping still accessible */
 void test_shm_refcount(void) {
-    void *addr = NULL;
-    int fd = shm_create(4096, &addr);
-    TEST_ASSERT_TRUE(fd >= 0);
+    int fd = sys_shm_create(4096);
+    TEST_ASSERT_TRUE(fd > 0);
+    void *addr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    TEST_ASSERT_NOT_NULL(addr);
 
     memset(addr, 'R', 4096);
     close(fd);
@@ -109,6 +113,58 @@ void test_req_timeout(void) {
     TEST_ASSERT_TRUE(1);
 }
 
+/* 11. shm_create size verification — write to full range */
+void test_shm_size_verify(void) {
+    int fd = sys_shm_create(8192);
+    TEST_ASSERT_TRUE(fd > 0);
+    void *addr = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    TEST_ASSERT_NOT_NULL(addr);
+
+    /* Touch every page */
+    memset(addr, 0xAA, 8192);
+    TEST_ASSERT_EQUAL_INT(0xAA, ((unsigned char *)addr)[0]);
+    TEST_ASSERT_EQUAL_INT(0xAA, ((unsigned char *)addr)[4095]);
+    TEST_ASSERT_EQUAL_INT(0xAA, ((unsigned char *)addr)[4096]);
+    TEST_ASSERT_EQUAL_INT(0xAA, ((unsigned char *)addr)[8191]);
+
+    close(fd);
+}
+
+/* 12. notify + recv data verification */
+void test_notify_recv_data(void) {
+    int r = notify(getpid());
+    TEST_ASSERT_EQUAL_INT(0, r);
+
+    struct recv_msg m;
+    memset(&m, 0, sizeof(m));
+    int rr = recv(&m, NULL, 0, 1000);
+    TEST_ASSERT_TRUE(rr >= 0);
+    TEST_ASSERT_EQUAL_INT(RECV_NOTIFY, (int)m.type);
+}
+
+/* 13. recv with short timeout (non-blocking-like) */
+void test_recv_zero_timeout(void) {
+    struct recv_msg m;
+    int r = recv(&m, NULL, 0, 1);
+    /* No pending message → should return -ETIMEDOUT or error */
+    (void)r;
+    TEST_ASSERT_TRUE(1);  /* No crash = pass */
+}
+
+/* 14. shm_create + fstat → S_ISREG */
+void test_shm_fstat(void) {
+    int fd = sys_shm_create(4096);
+    if (fd > 0) {
+        struct stat st;
+        int r = fstat(fd, &st);
+        TEST_ASSERT_EQUAL_INT(0, r);
+        TEST_ASSERT_TRUE(S_ISREG(st.st_mode));
+        close(fd);
+    } else {
+        TEST_ASSERT_TRUE(1);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_shm_create);
@@ -121,5 +177,9 @@ int main(void) {
     RUN_TEST(test_msg_large);
     RUN_TEST(test_msg_max_size);
     RUN_TEST(test_req_timeout);
+    RUN_TEST(test_shm_size_verify);
+    RUN_TEST(test_notify_recv_data);
+    RUN_TEST(test_recv_zero_timeout);
+    RUN_TEST(test_shm_fstat);
     return UNITY_END();
 }

@@ -64,15 +64,14 @@ typedef struct mmap_region {
 #define MAX_FD       32
 #define PIPE_BUF_SIZE 4096
 
-#define FD_NONE   0
-#define FD_PIPE   1
-#define FD_SHM    2
-#define FD_DEV    3
-#define FD_FILE   4
-#define FD_SOCKET 5
-#define FD_SERIAL 6
-#define FD_REGULAR 7
-#define FD_DIR     8
+#define FD_NONE    0
+#define FD_PIPE    1
+#define FD_REGULAR 2
+#define FD_DEV     3
+#define FD_DIR     4
+#define FD_SOCKET  5
+#define FD_SHM     6
+#define FD_FILE    7
 
 #include "common/fcntl.h"
 
@@ -89,22 +88,22 @@ struct unix_sock;  // forward declaration from kernel/socket.h
 struct inode;      // forward declaration from kernel/inode.h
 
 typedef struct file {
-    int type;            // FD_NONE / FD_PIPE / FD_SHM / FD_DEV / FD_FILE / FD_SOCKET / FD_REGULAR / FD_DIR
+    int type;            // FD_NONE / FD_PIPE / FD_REGULAR / FD_DEV / FD_DIR / FD_SOCKET / FD_SHM / FD_FILE
     int flags;           // O_RDONLY / O_WRONLY / O_RDWR
-    struct inode *inode; // FD_REGULAR and FD_DEV (devtmpfs) shared field
+    struct inode *inode; // FD_REGULAR, FD_DEV, FD_DIR shared field
     uint64_t offset;     // per-open offset (FD_REGULAR)
     union {
-        struct pipe *pipe;   // if type == FD_PIPE
-        struct shm  *shm;    // if type == FD_SHM
-        pid_t target_pid;    // if type == FD_DEV (driver PID)
-        struct {             // if type == FD_FILE
+        struct pipe *pipe;       // if type == FD_PIPE
+        struct shm  *shm;        // if type == FD_SHM
+        pid_t target_pid;        // if type == FD_DEV (driver PID, user-space driver only)
+        struct {                  // if type == FD_FILE (user-space FS proxy)
             pid_t   fs_pid;
             int32_t fs_fd;
-            uint64_t _offset; // renamed from offset to avoid conflict with top-level
+            uint64_t _offset;
             uint64_t file_size;
             int      ref_count;
         } file_data;
-        struct unix_sock *sock; // if type == FD_SOCKET
+        struct unix_sock *sock;  // if type == FD_SOCKET
     };
 } file_t;
 
@@ -129,6 +128,7 @@ typedef struct proc_t {
     list_node_t wait_node; // embedded in per-CPU timer_queue (sorted by wait_deadline)
     uint64_t wait_deadline; // sched_clock() nanosecond deadline, 0 = no timeout
     uint8_t  wait_timed_out; // 1 = timer expired wakeup, 0 = notify wakeup
+    uint8_t  recv_intr;      // set by wake_process when WAIT_RECV, checked by sys_recv for EINTR
     struct file fd_table[MAX_FD];  // per-process file descriptor table
 
     // === 统一 recv 队列 ===
@@ -140,6 +140,7 @@ typedef struct proc_t {
     // === REQ 状态 ===
     pid_t    req_caller_pid;    // current REQ caller PID (-1 = none)
     void __user *req_reply_buf;     // caller's reply buffer user-space address
+    size_t   req_reply_len;     // reply buffer size (RECV_MSG_SIZE for sys_req, 56 for ioctl proxy)
     int32_t  req_result;        // 0 = success, positive errno on error
     pid_t    req_target_pid;    // for crash cleanup: who we're waiting on
 

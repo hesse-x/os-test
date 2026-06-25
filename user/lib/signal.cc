@@ -1,5 +1,5 @@
 #include <signal.h>
-#include <sys.h>       // sys_kill, sys_sigaction, sys_sigreturn
+#include "common/syscall.h"       // sys_kill, sys_sigaction, sys_sigreturn
 
 int kill(int pid, int sig) {
     return sys_kill((int)pid, sig);

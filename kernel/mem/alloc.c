@@ -44,14 +44,14 @@ Page *bfc_alloc_page(size_t n) {
         if (cur->bfc.next != NULL) {
           cur->bfc.next->bfc.prev = prev;
         }
-        cur->status = PAGE_USED;
+        for (size_t i = 0; i < n; i++) cur[i].status = PAGE_USED;
         spin_unlock_irqrestore(&bfc_lock, flags);
         kasan_bfc_alloc((__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(cur)), n * PAGE_SIZE);
         return cur;
       } else {
         size_t remaining = cur->bfc.cont_page_num - n;
         cur->bfc.cont_page_num = n;
-        cur->status = PAGE_USED;
+        for (size_t i = 0; i < n; i++) cur[i].status = PAGE_USED;
 
         Page *new_block = cur + n;
         new_block->status = PAGE_FREE;
@@ -173,14 +173,14 @@ Page *bfc_alloc_page_low(size_t n) {
         if (cur->bfc.next != NULL) {
           cur->bfc.next->bfc.prev = prev;
         }
-        cur->status = PAGE_USED;
+        for (size_t i = 0; i < n; i++) cur[i].status = PAGE_USED;
         spin_unlock_irqrestore(&bfc_lock, flags);
         kasan_bfc_alloc((__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(cur)), n * PAGE_SIZE);
         return cur;
       } else {
         size_t remaining = cur->bfc.cont_page_num - n;
         cur->bfc.cont_page_num = n;
-        cur->status = PAGE_USED;
+        for (size_t i = 0; i < n; i++) cur[i].status = PAGE_USED;
 
         Page *new_block = cur + n;
         new_block->status = PAGE_FREE;

@@ -63,12 +63,13 @@ static inline void kasan_poison_shadow(const void *a, size_t s, uint8_t v) { (vo
 static inline void kasan_check_read(const void *a, size_t s) { (void)a; (void)s; }
 static inline void kasan_check_write(const void *a, size_t s) { (void)a; (void)s; }
 static inline bool kasan_shadow_exists(void) { return false; }
-static inline size_t copy_from_user(void *d, const void __user *s, size_t n) {
-    __memcpy(d, (const void __force *)s, n); return 0;
-}
-static inline size_t copy_to_user(void __user *d, const void *s, size_t n) {
-    __memcpy((void __force *)d, s, n); return 0;
-}
+
+// copy_from_user / copy_to_user are out-of-line (defined in kasan.c)
+// to prevent the compiler from inlining __memcpy and mis-optimizing
+// source writes via strict-aliasing violations.
+size_t copy_from_user(void *d, const void __user *s, size_t n);
+size_t copy_to_user(void __user *d, const void *s, size_t n);
+
 static inline void kasan_slab_alloc(const void *a, size_t s) { (void)a; (void)s; }
 static inline void kasan_slab_free(const void *a, size_t s) { (void)a; (void)s; }
 static inline void kasan_bfc_alloc(const void *a, size_t s) { (void)a; (void)s; }

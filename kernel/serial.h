@@ -55,4 +55,7 @@ void serial_puts(const char *s);
 void serial_put_hex(uint64_t val);
 void serial_printf(const char *fmt, ...);
 
+// Register serial device in devtmpfs (called by vfs_init)
+void serial_dev_register(void);
+
 #endif

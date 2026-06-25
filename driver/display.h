@@ -4,19 +4,32 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <sys/ipc.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include "driver/font.h"
 #include "common/dev.h"
 
-// ===== Display request constants =====
-#define DISPLAY_REQ_CREATE_BUF  1
-#define DISPLAY_REQ_FLIP        2
+// ===== ioctl commands from <sys/ioctl.h> (common/ioctl.h) =====
+// KMS_IOCTL_CREATE_BUF and KMS_IOCTL_FLIP are defined via _IOC encoding in common/ioctl.h
 
-// ===== Request/Response structures =====
+// ===== Unified ioctl arg for CREATE_BUF (input + output) =====
+struct display_ioctl_create_buf_arg {
+    // input
+    uint32_t width;
+    uint32_t height;
+    uint32_t bpp;
+    // output (filled by kernel)
+    uint32_t pitch;
+    uint32_t size;
+    uint32_t rows;
+    uint32_t cols;
+    int32_t  result;
+};
+
+// ===== Legacy structures (kept for compatibility) =====
 struct display_create_buf_req {
-    uint32_t req_type;
     uint32_t width;
     uint32_t height;
     uint32_t bpp;
@@ -30,10 +43,6 @@ struct display_create_buf_resp {
     int32_t  result;
 };
 
-struct display_flip_resp {
-    int32_t result;
-};
-
 // ===== Client API (compositor side) =====
 
 // Local metadata (from CREATE_BUF response)
@@ -45,7 +54,7 @@ static uint32_t display_cols;
 static uint8_t *display_back_buffer;
 static int display_dev_fd;
 
-// Initialize: open("/dev/kms") + req(CREATE_BUF) + mmap(fd)
+// Initialize: open("/dev/kms") + ioctl(CREATE_BUF) + mmap(fd)
 static inline int display_client_init() {
     int fd;
     while ((fd = open("/dev/kms", O_RDWR)) < 0) {
@@ -54,32 +63,27 @@ static inline int display_client_init() {
     }
     display_dev_fd = fd;
 
-    // Send CREATE_BUF request
-    uint8_t req_buf[56];
-    uint8_t resp_buf[64];
-    for (int i = 0; i < 56; i++) req_buf[i] = 0;
-    for (int i = 0; i < 64; i++) resp_buf[i] = 0;
+    // Send CREATE_BUF via ioctl
+    struct display_ioctl_create_buf_arg arg;
+    for (int i = 0; i < (int)sizeof(arg); i++) ((uint8_t*)&arg)[i] = 0;
+    arg.width = 800;
+    arg.height = 600;
+    arg.bpp = 32;
 
-    struct display_create_buf_req *req = (struct display_create_buf_req *)req_buf;
-    req->req_type = DISPLAY_REQ_CREATE_BUF;
-    req->width = 800;
-    req->height = 600;
-    req->bpp = 32;
+    int rc = ioctl(fd, KMS_IOCTL_CREATE_BUF, &arg);
+    if (rc < 0) return -1;
 
-    int rc = req_fd(fd, req_buf, resp_buf);
-    if (rc != 0) return -1;
+    // Read response from arg (kernel fills output fields via copy_to_user)
+    if (arg.result != 0) return -1;
 
-    struct display_create_buf_resp *resp = (struct display_create_buf_resp *)resp_buf;
-    if (resp->result != 0) return -1;
-
-    display_pitch = resp->pitch;
+    display_pitch = arg.pitch;
     display_fb_width = 800;
     display_fb_height = 600;
-    display_rows = resp->rows;
-    display_cols = resp->cols;
+    display_rows = arg.rows;
+    display_cols = arg.cols;
 
     // mmap back buffer
-    void *buf = mmap(NULL, resp->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    void *buf = mmap(NULL, arg.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (buf == MAP_FAILED) return -1;
 
     display_back_buffer = (uint8_t *)buf;
@@ -137,16 +141,9 @@ static inline void display_client_set_cursor(uint32_t x, uint32_t y) {
     (void)x; (void)y;
 }
 
-// Request kernel flip: req(fd, FLIP)
+// Request kernel flip: ioctl(fd, FLIP)
 static inline void display_client_flush() {
-    uint8_t req_buf[56];
-    uint8_t resp_buf[64];
-    for (int i = 0; i < 56; i++) req_buf[i] = 0;
-    for (int i = 0; i < 64; i++) resp_buf[i] = 0;
-
-    *(uint32_t *)req_buf = DISPLAY_REQ_FLIP;  // FLIP has no payload, req_type at offset 0 is correct
-
-    req_fd(display_dev_fd, req_buf, resp_buf);
+    ioctl(display_dev_fd, KMS_IOCTL_FLIP, 0);
 }
 
 #endif

@@ -10,6 +10,7 @@
 #include "kernel/sparse.h"
 #include "kernel/mem/kasan.h"
 #include "kernel/mem/slab.h"
+#include "kernel/trap.h"
 #include "common/errno.h"
 #include "common/stat.h"
 #include "arch/x64/utils.h"
@@ -21,6 +22,7 @@ void vfs_init(void) {
     page_cache_init();
     devtmpfs_init();
     display_dev_register();
+    serial_dev_register();
 
     /* Try FAT32 on each AHCI port (disk.img may be on a different port
        than boot.img, just like ELF loading in kernel_main). */
@@ -56,13 +58,13 @@ uint64_t sys_open(uint64_t arg1, uint64_t arg2, uint64_t arg3,
     /* 2. /dev/ prefix — delegate to devtmpfs */
     if (path[0] == '/' && path[1] == 'd' && path[2] == 'e' &&
         path[3] == 'v' && path[4] == '/')
-        return devtmpfs_open(path + 5, flags);
+        return devtmpfs_open(current_proc, path + 5, flags);
 
     /* 3. FAT32 path resolution */
     int errno_val = 0;
     struct inode *ip = fat32_open(path, flags, &errno_val);
     if (!ip) {
-        return (uint64_t)errno_val;
+        return (uint64_t)(int64_t)errno_val;
     }
 
     /* 4. Allocate fd */
@@ -151,23 +153,36 @@ uint64_t sys_rmdir(uint64_t arg1, uint64_t _u1, uint64_t _u2,
     return 0;
 }
 
-/* sys_dev_create(name, dev_type, ops_ptr) — syscall 56 */
-uint64_t sys_dev_create(uint64_t arg1, uint64_t arg2, uint64_t arg3,
-                        uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+/* sys_dev_create(name, dev_type) — syscall 55
+ * Kernel auto-fills driver_pid=current_proc->pid, all callbacks NULL (user-space driver) */
+uint64_t sys_dev_create(uint64_t arg1, uint64_t arg2, uint64_t _u1,
+                        uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     const char __user *uname = (const char __user * __force)arg1;
     int dev_type = (int)arg2;
-    struct dev_ops __user *ops = (struct dev_ops __user * __force)arg3;
 
     if (!uname) return (uint64_t)(-(uint64_t)EFAULT);
     char name[32];
     if (copy_from_user(name, uname, 31)) return (uint64_t)(-(uint64_t)EFAULT);
     name[31] = '\0';
 
-    struct dev_ops kops;
-    if (copy_from_user(&kops, ops, sizeof(struct dev_ops))) return (uint64_t)(-(uint64_t)EFAULT);
+    struct dev_ops *kops = kmalloc(sizeof(struct dev_ops));
+    if (!kops) return (uint64_t)(-(uint64_t)ENOMEM);
+    __memset(kops, 0, sizeof(struct dev_ops));
 
-    int rc = devtmpfs_create(name, dev_type, &kops);
-    if (rc != 0) return (uint64_t)(-(uint64_t)(-rc));
+    // Force driver_pid to current process — user-space can't set this
+    kops->driver_pid = current_proc->pid;
+    kops->device_type = dev_type;
+    // All callbacks remain NULL for user-space drivers (IPC proxy handles requests)
+
+    int rc = devtmpfs_create(name, dev_type, kops);
+    if (rc != 0) {
+        kfree(kops);
+        return (uint64_t)(-(uint64_t)(-rc));
+    }
+
+    // isr_driver_pid is populated inside devtmpfs_create for user-space drivers
+    // (no separate register_dev call needed)
+
     return 0;
 }
 

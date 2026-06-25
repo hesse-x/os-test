@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include "arch/x64/utils.h"
 
-// ===================== Syscall numbers (NR_SYSCALL=45, 0-44 continuous) =====================
+// ===================== Syscall numbers (NR_SYSCALL=61, 0-60 continuous) =====================
 #define SYS_GETPID       0
 #define SYS_YIELD        1
 #define SYS_RECV         2
@@ -16,56 +16,60 @@
 #define SYS_SPAWN        8
 #define SYS_MMAP         9
 #define SYS_MUNMAP       10
-#define SYS_FB_INFO      11
-#define SYS_SHM_CREATE   12
-#define SYS_SHM_ATTACH   13
-#define SYS_PIPE         14
-#define SYS_WRITE        15
-#define SYS_READ         16
-#define SYS_CLOSE        17
-#define SYS_LOAD_DEV     18
-#define SYS_NOTIFY       19
-#define SYS_GETTIME      20
-#define SYS_CLOCK        21
-#define SYS_MSG          22
-#define SYS_MSG_RESP     23
-#define SYS_IOPERM       24
-#define SYS_DUP2         25
-#define SYS_FCNTL        26
-#define SYS_DMA_ALLOC    27
-#define SYS_DMA_FREE     28
-#define SYS_PCI_DEV_INFO 29
-#define SYS_BLOCK_IO     30
-#define SYS_BLOCK_ASYNC  31
-#define SYS_OPEN_DEV     32
-#define SYS_INSTALL_FD   33
-#define SYS_SOCKET       34
-#define SYS_BIND         35
-#define SYS_LISTEN       36
-#define SYS_ACCEPT       37
-#define SYS_CONNECT      38
-#define SYS_SOCKETPAIR   39
-#define SYS_SENDMSG      40
-#define SYS_RECVMSG      41
-#define SYS_SHUTDOWN     42
-#define SYS_POLL         43
-#define SYS_LSEEK        44
-#define SYS_MEMFD_CREATE 45
-#define SYS_FTRUNCATE    46
-#define SYS_KILL         47
-#define SYS_SIGACTION    48
-#define SYS_SIGRETURN    49
-#define SYS_DEBUG_PRINT  50
+#define SYS_SHM_CREATE   11
+#define SYS_SHM_ATTACH   12
+#define SYS_PIPE         13
+#define SYS_WRITE        14
+#define SYS_READ         15
+#define SYS_CLOSE        16
+#define SYS_LOAD_DEV     17
+#define SYS_NOTIFY       18
+#define SYS_GETTIME      19
+#define SYS_CLOCK        20
+#define SYS_MSG          21
+#define SYS_MSG_RESP     22
+#define SYS_IOPERM       23
+#define SYS_DUP2         24
+#define SYS_FCNTL        25
+#define SYS_DMA_ALLOC    26
+#define SYS_DMA_FREE     27
+#define SYS_PCI_DEV_INFO 28
+#define SYS_BLOCK_IO     29
+#define SYS_BLOCK_ASYNC  30
+#define SYS_OPEN_DEV     31
+#define SYS_INSTALL_FD   32
+#define SYS_SOCKET       33
+#define SYS_BIND         34
+#define SYS_LISTEN       35
+#define SYS_ACCEPT       36
+#define SYS_CONNECT      37
+#define SYS_SOCKETPAIR   38
+#define SYS_SENDMSG      39
+#define SYS_RECVMSG      40
+#define SYS_SHUTDOWN     41
+#define SYS_POLL         42
+#define SYS_LSEEK        43
+#define SYS_MEMFD_CREATE 44
+#define SYS_FTRUNCATE    45
+#define SYS_KILL         46
+#define SYS_SIGACTION    47
+#define SYS_SIGRETURN    48
+#define SYS_DEBUG_PRINT  49
 
 // ===================== VFS syscall numbers =====================
-#define SYS_OPEN        51
-#define SYS_STAT        52
-#define SYS_MKDIR       53
-#define SYS_UNLINK      54
-#define SYS_RMDIR       55
-#define SYS_DEV_CREATE  56
-#define SYS_DEV_REQ     57
-#define SYS_GETDENTS    58
+#define SYS_OPEN        50
+#define SYS_STAT        51
+#define SYS_MKDIR       52
+#define SYS_UNLINK      53
+#define SYS_RMDIR       54
+#define SYS_DEV_CREATE  55
+#define SYS_DEV_REQ     56
+#define SYS_GETDENTS    57
+#define SYS_IOCTL       58
+#define SYS_FSTAT       59
+#define SYS_FDEV_PID    60
+
+#include "common/ioctl.h"
 
 // ===================== Syscall helpers (arch-specific) =====================
 // Defined in arch/x64/utils.h as __syscall0, __syscall1, etc.
@@ -320,8 +324,8 @@ static inline int sys_debug_print(const char *buf, int len) {
 }
 
 // ===================== VFS syscalls =====================
-static inline int sys_open(const char *path, int flags, ...) {
-    return (int)__syscall2(SYS_OPEN, (int64_t)(uintptr_t)path, (int64_t)flags);
+static inline uint64_t sys_open(const char *path, int flags, ...) {
+    return (uint64_t)__syscall2(SYS_OPEN, (int64_t)(uintptr_t)path, (int64_t)flags);
 }
 
 static inline int sys_stat(const char *path, void *stat_buf) {
@@ -340,12 +344,24 @@ static inline int sys_rmdir(const char *path) {
     return (int)__syscall1(SYS_RMDIR, (int64_t)(uintptr_t)path);
 }
 
-static inline int sys_dev_create(const char *name, uint32_t dev_type, uintptr_t ops) {
-    return (int)__syscall3(SYS_DEV_CREATE, (int64_t)(uintptr_t)name, (int64_t)dev_type, (int64_t)ops);
+static inline int sys_dev_create(const char *name, uint32_t dev_type) {
+    return (int)__syscall2(SYS_DEV_CREATE, (int64_t)(uintptr_t)name, (int64_t)dev_type);
 }
 
 static inline int sys_getdents(int fd, void *buf, size_t len) {
     return (int)__syscall3(SYS_GETDENTS, (int64_t)fd, (int64_t)(uintptr_t)buf, (int64_t)len);
+}
+
+static inline long sys_ioctl(int fd, uint32_t cmd, uint64_t arg) {
+    return __syscall3(SYS_IOCTL, (int64_t)fd, (int64_t)cmd, arg);
+}
+
+static inline long sys_fstat(int fd, uint64_t buf) {
+    return __syscall2(SYS_FSTAT, (int64_t)fd, buf);
+}
+
+static inline long sys_fdev_pid(int fd) {
+    return __syscall1(SYS_FDEV_PID, (int64_t)fd);
 }
 #endif // __KERNEL__
 

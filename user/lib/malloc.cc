@@ -1,6 +1,6 @@
 #include "stdlib.h"
 #include "string.h"
-#include <sys.h>
+#include "common/syscall.h"
 #include <sys/mman.h>
 #include "common/errno.h"
 #include "common/macro.h"
