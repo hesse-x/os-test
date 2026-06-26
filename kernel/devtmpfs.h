@@ -2,9 +2,10 @@
 #define KERNEL_DEVTMPFS_H
 
 #include <stdint.h>
-#include <sys/types.h>
+#include "kernel/proc.h"    // pid_t
 #include "kernel/inode.h"
 
+typedef int64_t ssize_t;
 typedef uint32_t __poll_t;
 
 struct proc_t;

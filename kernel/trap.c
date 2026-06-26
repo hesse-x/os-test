@@ -105,6 +105,9 @@ typedef struct file_t_io_resp {
 // ===================== Trap dispatch =====================
 static uint64_t tick = 0;
 
+// Forward declaration of force_sig (defined after signal syscalls section)
+static void force_sig(proc_t *proc, int sig, int si_code, void *si_addr);
+
 void trap_dispatch(trapframe_t *tf) {
   // Hardware IRQ: check user-space driver binding first
   if (tf->trapno >= 32 && tf->trapno < MAX_IRQ_HANDLERS &&
@@ -291,14 +294,41 @@ void trap_dispatch(trapframe_t *tf) {
   }
 
   if (tf->cs == 0x2B) {
-    // User-mode exception: kill process, don't halt the machine
-    serial_puts("Process ");
-    serial_put_hex((uint64_t)current_proc->pid);
-    serial_puts(" crashed: vector ");
-    serial_put_hex(tf->trapno);
-    serial_puts("\n");
-    sys_exit((uint64_t)-1, 0, 0, 0, 0, 0);
-    // sys_exit does not return
+    // User-mode exception: translate to signal instead of killing process
+    int sig = 0;
+    int si_code = SI_KERNEL;
+    void *si_addr = NULL;
+
+    switch (tf->trapno) {
+    case 0:   // #DE divide error
+        sig = SIGFPE; si_code = FPE_INTDIV; si_addr = NULL;
+        break;
+    case 6:   // #UD illegal opcode
+        sig = SIGILL; si_code = ILL_ILLOPC; si_addr = (void *)tf->rip;
+        break;
+    case 13:  // #GP general protection
+        sig = SIGSEGV; si_code = SEGV_MAPERR; si_addr = (void *)tf->rip;
+        break;
+    case 14:  // #PF page fault
+        sig = SIGSEGV;
+        uint64_t cr2;
+        __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
+        si_addr = (void *)cr2;
+        if (tf->err_code & 1)  // present bit
+            si_code = SEGV_ACCERR;
+        else
+            si_code = SEGV_MAPERR;
+        break;
+    default:
+        sig = SIGSEGV; si_code = SI_KERNEL; si_addr = (void *)tf->rip;
+        break;
+    }
+
+    serial_printf("exception: pid=%d vector=%d sig=%d addr=%p\n",
+        current_proc->pid, tf->trapno, sig, si_addr);
+
+    force_sig(current_proc, sig, si_code, si_addr);
+    return;  // Don't kill process; check_pending_signals will handle it
   }
   // Kernel-mode exception: unrecoverable, halt
   halt();
@@ -374,7 +404,7 @@ void sig_init() {
     // Allocate one shared physical page for the signal trampoline.
     // The trampoline code is: mov rax, SYS_SIGRETURN; syscall
     // Encoding: 48 C7 C0 <31> 00 00 00  0F 05
-    // SYS_SIGRETURN = 49 (0x31)
+    // SYS_SIGRETURN = 48 (0x30)
     Page *page = bfc_alloc_page(1);
     if (!page) {
         serial_puts("sig_init: failed to allocate trampoline page\n");
@@ -383,11 +413,11 @@ void sig_init() {
     sig_trampoline_phys = (__force uint64_t)page_to_phys(page);
     uint8_t *vaddr = (__force uint8_t *)phys_to_virt((__force phys_addr_t)sig_trampoline_phys);
 
-    // mov rax, 49  (SYS_SIGRETURN)
+    // mov rax, 48  (SYS_SIGRETURN)
     vaddr[0] = 0x48;  // REX.W prefix
     vaddr[1] = 0xC7;  // MOV r64, imm32
     vaddr[2] = 0xC0;  // ModRM: rax
-    vaddr[3] = 0x31;  // 49 = SYS_SIGRETURN (low byte)
+    vaddr[3] = 0x30;  // 48 = SYS_SIGRETURN (low byte)
     vaddr[4] = 0x00;
     vaddr[5] = 0x00;
     vaddr[6] = 0x00;
@@ -600,42 +630,17 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 
         schedule();
 
-        // Woken up: check if ISR interrupted (EINTR)
+        // EINTR check: ISR notification (recv_intr set by wake_process from kernel ISR)
         if (proc->recv_intr) {
             proc->recv_intr = 0;
-            // Re-check queue: a message may have arrived before/during wake
-            spin_lock(&proc->recv_lock);
-            if (proc->recv_head != proc->recv_tail) {
-                copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
-                recv_msg_t *msg = (recv_msg_t *)proc->recv_buf[proc->recv_tail];
-                if (msg->type == RECV_REQ)
-                    proc->req_caller_pid = (pid_t)msg->src;
-                if (msg->type == RECV_MSG) {
-                    void *kmaddr = msg->msg.kmaddr;
-                    size_t len = msg->msg.len;
-                    proc->msg_caller_pid = (pid_t)msg->src;
-                    if (!data_buf || data_buf_len < len) {
-                        kfree(kmaddr);
-                        recv_msg_t *umsg = (recv_msg_t __force *)buf;
-                        umsg->msg.kmaddr = NULL;
-                        umsg->msg.len = len;
-                        proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
-                        spin_unlock(&proc->recv_lock);
-                        return (uint64_t)-EINVAL;
-                    }
-                    copy_to_user(data_buf, kmaddr, len);
-                    kfree(kmaddr);
-                    recv_msg_t *umsg = (recv_msg_t __force *)buf;
-                    umsg->msg.kmaddr = NULL;
-                    umsg->msg.len = len;
-                }
-                proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
-                spin_unlock(&proc->recv_lock);
-                return 0;
-            }
-            spin_unlock(&proc->recv_lock);
             return (uint64_t)-EINTR;
         }
+
+        // EINTR check: signal pending and deliverable
+        uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
+        uint64_t deliv = pend & ~proc->sig.blocked;
+        deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+        if (deliv) return (uint64_t)-EINTR;
 
         // Woken up: check if timed out
         if (proc->wait_timed_out) {
@@ -752,6 +757,14 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
 
     schedule();
 
+    // EINTR check
+    {
+        uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
+        uint64_t deliv = pend & ~proc->sig.blocked;
+        deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+        if (deliv) return (uint64_t)-EINTR;
+    }
+
     // Woken up by sys_resp or proc_reap
     serial_printf("sys_req: pid=%d woken up, req_result=%ld\n", proc->pid, (long)proc->req_result);
     if (proc->req_result != 0) return (uint64_t)proc->req_result;
@@ -864,12 +877,11 @@ uint64_t sys_exit(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
             proc_t *parent = &procs[proc->parent_pid];
             __atomic_or_fetch(&parent->sig.pending, 1ULL << SIGCHLD, __ATOMIC_RELEASE);
 
-            // Wake parent if in WAIT_CHILD (waitpid still works)
+            // Wake parent if in WAIT_CHILD (waitpid)
             int pcpu = parent->assigned_cpu;
             spin_lock(&cpu_locals[pcpu].scheduler_lock);
             if (parent->state == BLOCKED &&
-                (parent->wait_event == WAIT_CHILD ||
-                 parent->wait_event == WAIT_RECV)) {
+                parent->wait_event == WAIT_CHILD) {
                 if (parent->wait_deadline != 0) {
                     timer_queue_remove(parent);
                     parent->wait_deadline = 0;
@@ -989,6 +1001,13 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
             current_proc->state = BLOCKED;
             spin_unlock(&cpu_locals[pcpu].scheduler_lock);
             schedule();
+            // EINTR check
+            {
+                uint64_t pend = __atomic_load_n(&current_proc->sig.pending, __ATOMIC_ACQUIRE);
+                uint64_t deliv = pend & ~current_proc->sig.blocked;
+                deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+                if (deliv) return (uint64_t)-EINTR;
+            }
         }
     }
 
@@ -1048,6 +1067,14 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
             spin_unlock(&cpu_locals[pcpu].scheduler_lock);
         }
         schedule();
+
+        // EINTR check
+        {
+            uint64_t pend = __atomic_load_n(&current_proc->sig.pending, __ATOMIC_ACQUIRE);
+            uint64_t deliv = pend & ~current_proc->sig.blocked;
+            deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+            if (deliv) return (uint64_t)-EINTR;
+        }
 
         // Woken up by notify — re-validate child still exists
         spin_lock(&procs_lock);
@@ -2410,6 +2437,16 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
             proc->wait_event = WAIT_PIPE;
             schedule();
             p->write_pid = -1;
+            // EINTR check
+            {
+                uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
+                uint64_t deliv = pend & ~proc->sig.blocked;
+                deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+                if (deliv) {
+                    if (written > 0) break;  // return partial write
+                    return (uint64_t)-EINTR;
+                }
+            }
             continue;
         }
         p->buf[p->head] = ((const char __force *)buf)[written];
@@ -2580,6 +2617,13 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         proc->wait_event = WAIT_PIPE;
         schedule();
         p->read_pid = -1;
+        // EINTR check
+        {
+            uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
+            uint64_t deliv = pend & ~proc->sig.blocked;
+            deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+            if (deliv) return (uint64_t)-EINTR;
+        }
     }
 
     // Read as much as available (up to len)
@@ -2783,6 +2827,14 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
     proc->msg_result = 0;
 
     schedule();
+
+    // EINTR check
+    {
+        uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
+        uint64_t deliv = pend & ~proc->sig.blocked;
+        deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+        if (deliv) return (uint64_t)-EINTR;
+    }
 
     // Woken up by sys_msg_resp or proc_reap
     if (proc->msg_result != 0) return (uint64_t)proc->msg_result;
@@ -3257,32 +3309,84 @@ uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
 
 // ===================== Signal delivery =====================
 
-// Deliver a signal with a user-registered handler.
-// Saves the interrupted context in proc->sig and modifies the trapframe
-// to redirect execution to the handler via the sig_trampoline.
-static void deliver_signal(proc_t *proc, trapframe_t *tf, int sig, void (*handler)(int)) {
-    // 1. Save current execution context
-    proc->sig.saved_rip = tf->rip;
-    proc->sig.saved_rsp = tf->rsp;
-    proc->sig.saved_rflags = tf->rflags;
-    proc->sig.have_handler = 1;
+// Deliver a signal with a user-registered handler via sigframe on user stack.
+static void deliver_signal(proc_t *proc, trapframe_t *tf, int sig, sigaction_t *sa) {
+    // 1. Build rt_sigframe
+    struct rt_sigframe frame;
+    __memset(&frame, 0, sizeof(frame));
+    frame.pretcode = SIG_TRAMPOLINE_ADDR;
 
-    // 2. Push trampoline return address onto user stack
-    //    (handler's 'ret' will jump to SIG_TRAMPOLINE_ADDR)
-    uint64_t user_rsp = tf->rsp;
-    user_rsp -= 8;
+    // siginfo
+    frame.info.si_signo = sig;
+    frame.info.si_errno = 0;
+    frame.info.si_code = SI_KERNEL;  // default; force_sig fills this
+    // If sig_force_info matches, use it
+    if (proc->sig_force_info.si_signo == sig) {
+        frame.info = proc->sig_force_info;
+    }
 
-    // Write to user stack via CR3 switch
+    // sigcontext — fill all GP registers from trapframe
+    frame.uc.uc_mcontext.r8  = tf->r8;
+    frame.uc.uc_mcontext.r9  = tf->r9;
+    frame.uc.uc_mcontext.r10 = tf->r10;
+    frame.uc.uc_mcontext.r11 = tf->r11;
+    frame.uc.uc_mcontext.r12 = tf->r12;
+    frame.uc.uc_mcontext.r13 = tf->r13;
+    frame.uc.uc_mcontext.r14 = tf->r14;
+    frame.uc.uc_mcontext.r15 = tf->r15;
+    frame.uc.uc_mcontext.rdi = tf->rdi;
+    frame.uc.uc_mcontext.rsi = tf->rsi;
+    frame.uc.uc_mcontext.rbp = tf->rbp;
+    frame.uc.uc_mcontext.rbx = tf->rbx;
+    frame.uc.uc_mcontext.rdx = tf->rdx;
+    frame.uc.uc_mcontext.rax = tf->rax;
+    frame.uc.uc_mcontext.rcx = tf->rcx;
+    frame.uc.uc_mcontext.rsp = tf->rsp;
+    frame.uc.uc_mcontext.rip = tf->rip;
+    frame.uc.uc_mcontext.eflags = tf->rflags;
+    frame.uc.uc_mcontext.cs = tf->cs;
+    frame.uc.uc_mcontext.ss = tf->ss;
+    // cr2: filled by force_sig if SIGSEGV
+    frame.uc.uc_mcontext.cr2 = (proc->sig_force_info.si_signo == sig) ?
+        (uint64_t)proc->sig_force_info._sifields.si_addr : 0;
+
+    // Save current blocked mask to sigframe (sigreturn restores it)
+    frame.uc.uc_sigmask = proc->sig.blocked;
+    frame.uc.uc_flags = 0;
+    frame.uc.uc_link = NULL;
+
+    // 2. Update blocked: mask sa_mask + current signal during handler
+    proc->sig.blocked |= sa->sa_mask | (1ULL << sig);
+    // SIGKILL/SIGSTOP never blocked
+    proc->sig.blocked &= ~(1ULL << SIGKILL);
+    proc->sig.blocked &= ~(1ULL << SIGSTOP);
+
+    // Clear sig_force_info (consumed)
+    if (proc->sig_force_info.si_signo == sig)
+        proc->sig_force_info.si_signo = 0;
+
+    // 3. Push sigframe to user stack (CR3 switch)
+    uint64_t user_rsp = tf->rsp - sizeof(struct rt_sigframe);
+    user_rsp &= ~0xFULL;  // 16-byte aligned (x86-64 ABI)
+
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
-    *(uint64_t *)user_rsp = SIG_TRAMPOLINE_ADDR;
+    __memcpy((void *)user_rsp, &frame, sizeof(struct rt_sigframe));
     __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
-    // 3. Modify trapframe: iret to handler(arg=sig)
-    tf->rip = (uint64_t)handler;
-    tf->rdi = (uint64_t)(int64_t)sig;  // sign-extend int to 64-bit
+    // 4. Modify trapframe → jump to handler
+    tf->rip = (uint64_t)sa->__sigaction_handler._sa_handler;
     tf->rsp = user_rsp;
+
+    // Handler arguments
+    if (sa->sa_flags & SA_SIGINFO) {
+        tf->rdi = (uint64_t)sig;
+        tf->rsi = (uint64_t)(user_rsp + offsetof(struct rt_sigframe, info));
+        tf->rdx = (uint64_t)(user_rsp + offsetof(struct rt_sigframe, uc));
+    } else {
+        tf->rdi = (uint64_t)sig;
+    }
 }
 
 // ===================== check_pending_signals =====================
@@ -3298,10 +3402,13 @@ void check_pending_signals(trapframe_t *tf) {
     // Loop: handle signals one at a time in priority order (lowest bit first)
     while (1) {
         uint64_t pending = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
-        if (!pending) return;
+        // Deliverable = pending & ~blocked, but SIGKILL/SIGSTOP always deliverable
+        uint64_t deliverable = pending & ~proc->sig.blocked;
+        deliverable |= (pending & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+        if (!deliverable) return;
 
-        // Find lowest pending signal (highest priority)
-        int sig = __builtin_ctzll(pending);
+        // Find lowest deliverable signal (highest priority)
+        int sig = __builtin_ctzll(deliverable);
         if (sig <= 0 || sig >= NSIG) {
             // Invalid signal number, clear all and bail
             __atomic_store_n(&proc->sig.pending, 0, __ATOMIC_RELEASE);
@@ -3311,37 +3418,58 @@ void check_pending_signals(trapframe_t *tf) {
         // Clear pending bit
         __atomic_and_fetch(&proc->sig.pending, ~(1ULL << sig), __ATOMIC_RELEASE);
 
-        void (*handler)(int) = proc->sig.action[sig].sa_handler;
+        sigaction_t *sa = &proc->sig.action[sig];
 
-        if (handler == SIG_DFL) {
+        if (sa->__sigaction_handler._sa_handler == SIG_DFL) {
             // Default action
             switch (sig) {
             case SIGCHLD:
-                // Ignore — waitpid still works via WAIT_CHILD
-                break;
             case SIGSTOP:
             case SIGTSTP:
             case SIGCONT:
-                // Not implemented — ignore for now
-                break;
+                break;  // ignore
+            case SIGKILL:
             case SIGINT:
             case SIGTERM:
-            case SIGKILL:
+            case SIGSEGV:
+            case SIGILL:
+            case SIGFPE:
+            case SIGABRT:
             default:
-                // Terminate — processes that die from a signal exit with -1
                 proc->exit_code = -1;
                 serial_printf("signal: pid=%d terminated by signal %d\n", proc->pid, sig);
                 sys_exit(-1, 0, 0, 0, 0, 0);
                 // Does not return
             }
-        } else if (handler == SIG_IGN) {
-            // Ignore — do nothing
+        } else if (sa->__sigaction_handler._sa_handler == SIG_IGN) {
+            continue;  // skip, check next signal
         } else {
-            // User-registered handler
-            deliver_signal(proc, tf, sig, handler);
+            deliver_signal(proc, tf, sig, sa);
             return;  // tf modified, return to user mode to execute handler
         }
-        // Continue checking more signals
+    }
+}
+
+// ===================== force_sig =====================
+// Force delivery of a synchronous signal (bypasses SIG_IGN and blocked mask).
+// Used for kernel exceptions (SIGSEGV/SIGILL/SIGFPE) and SIGKILL.
+static void force_sig(proc_t *proc, int sig, int si_code, void *si_addr) {
+    // 1. Set pending bit
+    __atomic_or_fetch(&proc->sig.pending, 1ULL << sig, __ATOMIC_RELEASE);
+
+    // 2. Unblock this signal (ensure deliverable)
+    __atomic_and_fetch(&proc->sig.blocked, ~(1ULL << sig), __ATOMIC_RELEASE);
+
+    // 3. Fill sig_force_info (temporary, consumed by deliver_signal)
+    proc->sig_force_info.si_signo = sig;
+    proc->sig_force_info.si_errno = 0;
+    proc->sig_force_info.si_code = si_code;
+    proc->sig_force_info._sifields.si_addr = si_addr;
+
+    // 4. If handler == SIG_IGN → force SIG_DFL
+    //    Synchronous signals ignored would cause infinite fault re-execution
+    if (proc->sig.action[sig].__sigaction_handler._sa_handler == SIG_IGN) {
+        proc->sig.action[sig].__sigaction_handler._sa_handler = SIG_DFL;
     }
 }
 
@@ -3366,10 +3494,23 @@ uint64_t sys_kill(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
     // Set pending bit (atomic, no lock needed for a single bit)
     __atomic_or_fetch(&target->sig.pending, 1ULL << sig, __ATOMIC_RELEASE);
 
-    // If target is blocked in WAIT_RECV, wake it so it can check signals
-    // (But without EINTR support, waking here would just cause sys_recv to
-    //  loop back — the signal will be handled on next iret.)
-    // For SIGCHLD, the WAIT_CHILD wake is already done by sys_exit.
+    // Wake blocked target so it can check signals (EINTR path)
+    if (target->state == BLOCKED) {
+        int target_cpu = target->assigned_cpu;
+        spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+        if (target->pid == pid && target->state == BLOCKED) {
+            if (target->wait_deadline != 0) {
+                timer_queue_remove(target);
+                target->wait_deadline = 0;
+            }
+            target->state = READY;
+            target->wait_event = WAIT_NONE;
+            target->wait_timed_out = 0;
+            list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
+            cpu_locals[target_cpu].run_count++;
+        }
+        spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+    }
 
     return 0;
 }
@@ -3415,6 +3556,10 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
         copy_from_user(&new_act, act, sizeof(struct sigaction));
         __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
+        // Validate: sa_mask must not contain SIGKILL/SIGSTOP
+        if (new_act.sa_mask & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)))
+            return (uint64_t)-EINVAL;
+
         proc->sig.action[sig] = new_act;
 
         // POSIX: registering a handler discards pending signals
@@ -3428,78 +3573,41 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
 uint64_t sys_sigreturn(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
     proc_t *proc = current_proc;
 
-    if (!proc->sig.have_handler) {
-        serial_printf("sys_sigreturn: no saved context (pid=%d)\n", proc->pid);
-        return (uint64_t)-EINVAL;
-    }
-
-    // Restore saved context into trapframe
-    // We're called from syscall context: the trapframe is on the kernel stack.
-    // Modify GP registers saved in the current syscall's trapframe so that
-    // when syscall_fast_entry does SYSRET, it returns to the saved context.
-    //
-    // However, we need direct access to the trapframe. In our syscall calling
-    // convention, syscall is dispatched via syscall_dispatch(tf) where tf is
-    // the trapframe on the kernel stack. But syscall_dispatch is called from
-    // assembly, and we don't have the trapframe pointer here.
-    //
-    // Solution: modify current_proc's sig state and the per-CPU saved trapframe.
-    // The assembly code in syscall_fast_entry will be modified after calling
-    // syscall_dispatch to check sig_return_pending and reload from saved_* fields.
-    //
-    // Cleaner approach: just overwrite the syscall-specific state.
-    // The trapframe is on the current kernel stack. We can find it by looking
-    // at the stack layout. But this is fragile.
-    //
-    // Instead, we'll modify the response in the syscall entry point assembly.
-    // For now, we save the restore state and let the assembly handle it.
-    //
-    // Actually, the simplest approach: the trampoline sets up a fake trap return.
-    // Let's just modify the current_proc state and leave the trapframe alone.
-    // The assembly code in __trapret will check for pending signal sigreturn
-    // and reload saved_rip/rsp/rflags if have_handler is set.
-
-    // Clear handler flag
-    proc->sig.have_handler = 0;
-
-    // Set up the saved state in a way that the trampoline can find it.
-    // We need to restore rip/rsp/rflags to the caller.
-    // The user-space trampoline called us via syscall — the current trapframe
-    // has rip/rsp from the trampoline call. We overwrite them with saved values.
-    // But the trapframe is on the kernel stack and we don't have its pointer!
-
-    // Simplest working approach: the trampoline issue is that after sys_sigreturn,
-    // the SYSRET goes back to the trampoline's caller. We need to redirect.
-    //
-    // Fix: Use a different approach. In check_pending_signals -> deliver_signal,
-    // we push the trampoline address on the user stack. But instead of having
-    // the trampoline call sys_sigreturn, we can make the trampoline use a
-    // different mechanism.
-    //
-    // ACTUAL SOLUTION: Instead of a trampoline, we modify the trapframe directly
-    // in deliver_signal so that the handler frame is set up as a nested function
-    // call frame. The handler returns normally (to the trampoline), the trampoline
-    // calls sys_sigreturn, and sys_sigreturn modifies the CURRENT process's
-    // trapframe (which is the trampoline's syscall frame) to restore the original
-    // rip/rsp/rflags.
-
-    // We DO have access to the trapframe! The syscall trapframe is on the kernel
-    // stack. Since we're in syscall context, RSP points into the kernel stack
-    // after the C ABI frame setup. The trapframe is below current RSP.
-    //
-    // Actually, the syscall_fast_entry builds a trapframe at the bottom of the
-    // kernel stack, then calls syscall_dispatch. Inside syscall_dispatch, the
-    // stack has: [trapframe] [return addr] [saved rbx/rbp/...] [locals].
-    // The trapframe is at a known offset from the kernel stack top.
-    //
-    // Even simpler: find the trapframe via the per-CPU saved kernel stack base.
-    // The trapframe base is at: tss_rsp0 - 176 (sizeof trapframe).
-    uint64_t tf_base = get_cpu_local()->tss_rsp0 - 176;
+    // Locate trapframe (syscall path: tss_rsp0 - sizeof(trapframe_t))
+    uint64_t tf_base = get_cpu_local()->tss_rsp0 - sizeof(trapframe_t);
     trapframe_t *tf = (trapframe_t *)tf_base;
 
-    tf->rip = proc->sig.saved_rip;
-    tf->rsp = proc->sig.saved_rsp;
-    tf->rflags = proc->sig.saved_rflags;
+    // Read sigframe from user stack (CR3 switch)
+    // RSP was adjusted by handler's RET which popped the pretcode (8 bytes),
+    // so the sigframe starts 8 bytes below the current RSP.
+    struct rt_sigframe frame;
+    uint64_t user_rsp = tf->rsp - 8;
+
+    uint64_t saved_cr3;
+    __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+    __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
+    __memcpy(&frame, (void *)user_rsp, sizeof(struct rt_sigframe));
+    __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
+
+    // Restore all GP registers from sigcontext
+    struct sigcontext *sc = &frame.uc.uc_mcontext;
+    tf->r8  = sc->r8;   tf->r9  = sc->r9;
+    tf->r10 = sc->r10;  tf->r11 = sc->r11;
+    tf->r12 = sc->r12;  tf->r13 = sc->r13;
+    tf->r14 = sc->r14;  tf->r15 = sc->r15;
+    tf->rdi = sc->rdi;  tf->rsi = sc->rsi;
+    tf->rbp = sc->rbp;  tf->rbx = sc->rbx;
+    tf->rdx = sc->rdx;  tf->rax = sc->rax;
+    tf->rcx = sc->rcx;  tf->rsp = sc->rsp;
+    tf->rip = sc->rip;
+    tf->rflags = sc->eflags;
+    tf->cs = sc->cs;  tf->ss = sc->ss;
+
+    // Restore blocked mask
+    proc->sig.blocked = frame.uc.uc_sigmask;
+    // SIGKILL/SIGSTOP never blocked
+    proc->sig.blocked &= ~(1ULL << SIGKILL);
+    proc->sig.blocked &= ~(1ULL << SIGSTOP);
 
     return 0;
 }

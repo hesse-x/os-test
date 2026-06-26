@@ -404,6 +404,18 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             proc->wait_event = WAIT_POLL;
             spin_unlock(&socket_lock);
             schedule();
+            // EINTR check
+            {
+                uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
+                uint64_t deliv = pend & ~proc->sig.blocked;
+                deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+                if (deliv) {
+                    spin_lock(&socket_lock);
+                    sock->blocked_reader = -1;
+                    spin_unlock(&socket_lock);
+                    return (uint64_t)-EINTR;
+                }
+            }
             spin_lock(&socket_lock);
             sock->blocked_reader = -1;
             // Re-try after wake
@@ -732,6 +744,18 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
             proc->wait_event = WAIT_POLL;
             spin_unlock(&socket_lock);
             schedule();
+            // EINTR check
+            {
+                uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
+                uint64_t deliv = pend & ~proc->sig.blocked;
+                deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+                if (deliv) {
+                    spin_lock(&socket_lock);
+                    listen_sock->blocked_reader = -1;
+                    spin_unlock(&socket_lock);
+                    return (uint64_t)-EINTR;
+                }
+            }
             spin_lock(&socket_lock);
             listen_sock->blocked_reader = -1;
             spin_unlock(&socket_lock);
@@ -1351,6 +1375,17 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         proc->wait_event = WAIT_POLL;
         proc->wait_timed_out = 0;
         schedule();
+
+        // EINTR check (before timeout check: signal priority over timeout)
+        {
+            uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
+            uint64_t deliv = pend & ~proc->sig.blocked;
+            deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+            if (deliv) {
+                kfree(kfds);
+                return (uint64_t)-EINTR;
+            }
+        }
 
         if (proc->wait_timed_out && timeout_ms > 0) {
             __memset(kfds, 0, nfds * sizeof(struct pollfd));

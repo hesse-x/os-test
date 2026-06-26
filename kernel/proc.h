@@ -157,15 +157,13 @@ typedef struct proc_t {
 
     // === 信号状态 ===
     struct signal_state {
-        uint64_t pending;           // bitmask: pending signals (bit N = signal N)
-        sigaction_t action[NSIG];  // per-signal action
-        uint64_t blocked;           // blocked mask (预留)
-        int      have_handler;      // 是否有用户态 handler 待调起
-        // sigreturn 恢复上下文
-        uint64_t saved_rip;
-        uint64_t saved_rsp;
-        uint64_t saved_rflags;
+        uint64_t      pending;           // bitmask: pending signals
+        sigset_t      blocked;           // currently blocked signal set
+        struct sigaction action[NSIG];   // per-signal handler
     } sig;
+
+    // === force_sig 临时数据 ===
+    siginfo_t sig_force_info;  // force_sig temp siginfo (kernel-stack scope)
 } proc_t;
 
 #define MAX_PROC 64

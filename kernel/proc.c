@@ -110,15 +110,8 @@ void proc_init() {
         // Signal state
         procs[i].sig.pending = 0;
         procs[i].sig.blocked = 0;
-        procs[i].sig.have_handler = 0;
-        procs[i].sig.saved_rip = 0;
-        procs[i].sig.saved_rsp = 0;
-        procs[i].sig.saved_rflags = 0;
-        for (int si = 0; si < NSIG; si++) {
-            procs[i].sig.action[si].sa_handler = SIG_DFL;
-            procs[i].sig.action[si].sa_mask = 0;
-            procs[i].sig.action[si].sa_flags = 0;
-        }
+        __memset(&procs[i].sig_force_info, 0, sizeof(siginfo_t));
+        __memset(procs[i].sig.action, 0, sizeof(procs[i].sig.action));
     }
     cpu_locals[0]._cur_proc = NULL;
     cpu_locals[0].run_count = 0;
@@ -220,15 +213,8 @@ proc_t *create_idle_process(int cpu_id) {
     // Signal state
     proc->sig.pending = 0;
     proc->sig.blocked = 0;
-    proc->sig.have_handler = 0;
-    proc->sig.saved_rip = 0;
-    proc->sig.saved_rsp = 0;
-    proc->sig.saved_rflags = 0;
-    for (int si = 0; si < NSIG; si++) {
-        proc->sig.action[si].sa_handler = SIG_DFL;
-        proc->sig.action[si].sa_mask = 0;
-        proc->sig.action[si].sa_flags = 0;
-    }
+    __memset(&proc->sig_force_info, 0, sizeof(siginfo_t));
+    __memset(proc->sig.action, 0, sizeof(proc->sig.action));
     for (int j = 0; j < MAX_FD; j++) {
         __memset(&proc->fd_table[j], 0, sizeof(file_t));
         proc->fd_table[j].type = FD_NONE;
@@ -380,15 +366,8 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     // Signal state
     proc->sig.pending = 0;
     proc->sig.blocked = 0;
-    proc->sig.have_handler = 0;
-    proc->sig.saved_rip = 0;
-    proc->sig.saved_rsp = 0;
-    proc->sig.saved_rflags = 0;
-    for (int si = 0; si < NSIG; si++) {
-        proc->sig.action[si].sa_handler = SIG_DFL;
-        proc->sig.action[si].sa_mask = 0;
-        proc->sig.action[si].sa_flags = 0;
-    }
+    __memset(&proc->sig_force_info, 0, sizeof(siginfo_t));
+    __memset(proc->sig.action, 0, sizeof(proc->sig.action));
     for (int j = 0; j < MAX_FD; j++) {
         __memset(&proc->fd_table[j], 0, sizeof(file_t));
         proc->fd_table[j].type = FD_NONE;
@@ -741,7 +720,6 @@ void proc_reap(proc_t *proc) {
     // 6f. Clear signal state (pending signals die with the process)
     proc->sig.pending = 0;
     proc->sig.blocked = 0;
-    proc->sig.have_handler = 0;
 
     // 6e. Free any RECV_MSG entries in recv queue (kfree their kmaddr)
     spin_lock(&proc->recv_lock);
@@ -798,9 +776,6 @@ void proc_reap(proc_t *proc) {
     // Signal state
     proc->sig.pending = 0;
     proc->sig.blocked = 0;
-    proc->sig.have_handler = 0;
-    proc->sig.saved_rip = 0;
-    proc->sig.saved_rsp = 0;
-    proc->sig.saved_rflags = 0;
+    __memset(&proc->sig_force_info, 0, sizeof(siginfo_t));
     spin_unlock(&procs_lock);
 }
