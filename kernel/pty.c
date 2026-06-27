@@ -70,7 +70,7 @@ int pty_ring_read(uint8_t *buf, uint32_t head, uint32_t *tail,
 }
 
 // ===================== Helpers =====================
-static int pty_eintr_check(proc_t *proc) {
+static int pty_eintr_check(task_t *proc) {
     uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
     uint64_t deliv = pend & ~proc->sig.blocked;
     deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
@@ -86,11 +86,12 @@ static int pty_ring_write1(uint8_t *buf, uint32_t *head, uint32_t tail, uint8_t 
 }
 
 // Check O_NONBLOCK for a PTY fd of given master/slave type in this proc
-static int pty_is_nonblock(proc_t *proc, struct pty *pty, int is_master) {
+static int pty_is_nonblock(task_t *proc, struct pty *pty, int is_master) {
+    files_t *files = proc->mm->files;
     for (int i = 0; i < MAX_FD; i++) {
-        if (proc->fd_table[i].type == FD_TTY && proc->fd_table[i].pty == pty) {
-            if (pty_fd_is_master(proc, i) == is_master)
-                return (proc->fd_table[i].flags & O_NONBLOCK) ? 1 : 0;
+        if (files->fd_table[i].type == FD_TTY && files->fd_table[i].pty == pty) {
+            if (pty_fd_is_master(files, i) == is_master)
+                return (files->fd_table[i].flags & O_NONBLOCK) ? 1 : 0;
         }
     }
     return 0;
@@ -162,17 +163,16 @@ void pty_free(struct pty *pty) {
 }
 
 // ===================== ptmx_open =====================
-int ptmx_open(struct proc_t *proc, int fd) {
+int ptmx_open(struct task_t *proc, int fd) {
     int index;
     struct pty *pty = pty_alloc(&index);
     if (!pty) return -ENOMEM;
 
     pty->master_refs = 1;
 
-    // Change fd to FD_TTY, keep inode pointing to ptmx for identification
-    proc->fd_table[fd].type = FD_TTY;
-    proc->fd_table[fd].pty = pty;
-    proc->fd_table[fd].flags = O_RDWR;
+    proc->mm->files->fd_table[fd].type = FD_TTY;
+    proc->mm->files->fd_table[fd].pty = pty;
+    proc->mm->files->fd_table[fd].flags = O_RDWR;
 
     // Create pts_dev_priv for slave device
     struct pts_dev_priv *priv = (struct pts_dev_priv *)kmalloc(sizeof(struct pts_dev_priv));
@@ -206,8 +206,8 @@ int ptmx_open(struct proc_t *proc, int fd) {
 }
 
 // ===================== pts_open =====================
-int pts_open(struct proc_t *proc, int fd) {
-    struct inode *ip = proc->fd_table[fd].inode;
+int pts_open(struct task_t *proc, int fd) {
+    struct inode *ip = proc->mm->files->fd_table[fd].inode;
     if (!ip || !ip->i_priv) return -ENODEV;
 
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
@@ -218,9 +218,9 @@ int pts_open(struct proc_t *proc, int fd) {
     if (pty->slave_opened) return -EBUSY;
 
     // Change fd to FD_TTY, keep inode pointing to ptsN
-    proc->fd_table[fd].type = FD_TTY;
-    proc->fd_table[fd].pty = pty;
-    proc->fd_table[fd].flags = O_RDWR;
+    proc->mm->files->fd_table[fd].type = FD_TTY;
+    proc->mm->files->fd_table[fd].pty = pty;
+    proc->mm->files->fd_table[fd].flags = O_RDWR;
 
     pty->slave_refs = 1;
     pty->slave_opened = 1;
@@ -230,12 +230,12 @@ int pts_open(struct proc_t *proc, int fd) {
 }
 
 // ===================== pty_fd_is_master =====================
-int pty_fd_is_master(struct proc_t *proc, int fd) {
-    return (proc->fd_table[fd].inode == ptmx_inode) ? 1 : 0;
+int pty_fd_is_master(files_t *files, int fd) {
+    return (files->fd_table[fd].inode == ptmx_inode) ? 1 : 0;
 }
 
 // ===================== pty_master_read =====================
-int64_t pty_master_read(struct pty *pty, struct proc_t *proc,
+int64_t pty_master_read(struct pty *pty, struct task_t *proc,
                         void *buf, size_t len) {
     while (pty_ring_avail(pty->s_to_m_head, pty->s_to_m_tail) == 0) {
         if (pty->slave_refs == 0) return 0;  // EOF
@@ -256,7 +256,7 @@ int64_t pty_master_read(struct pty *pty, struct proc_t *proc,
 }
 
 // ===================== pty_master_write =====================
-int64_t pty_master_write(struct pty *pty, struct proc_t *proc,
+int64_t pty_master_write(struct pty *pty, struct task_t *proc,
                          const void *buf, size_t len) {
     size_t written = 0;
 
@@ -292,7 +292,7 @@ int64_t pty_master_write(struct pty *pty, struct proc_t *proc,
 }
 
 // ===================== pty_slave_read =====================
-int64_t pty_slave_read(struct pty *pty, struct proc_t *proc,
+int64_t pty_slave_read(struct pty *pty, struct task_t *proc,
                         void *buf, size_t len) {
     if (pty->master_refs == 0) return -EPIPE;
 
@@ -316,7 +316,7 @@ int64_t pty_slave_read(struct pty *pty, struct proc_t *proc,
 }
 
 // ===================== pty_slave_write (with OPOST+ONLCR) =====================
-int64_t pty_slave_write(struct pty *pty, struct proc_t *proc,
+int64_t pty_slave_write(struct pty *pty, struct task_t *proc,
                          const void *buf, size_t len) {
     if (pty->master_refs == 0) return -EPIPE;
 
@@ -368,11 +368,12 @@ int64_t pty_slave_write(struct pty *pty, struct proc_t *proc,
 }
 
 // ===================== pty_close_fd =====================
-void pty_close_fd(struct proc_t *proc, int fd) {
-    struct pty *pty = proc->fd_table[fd].pty;
+void pty_close_fd(struct task_t *proc, int fd) {
+    files_t *files = proc->mm->files;
+    struct pty *pty = files->fd_table[fd].pty;
     if (!pty) return;
 
-    int is_master = pty_fd_is_master(proc, fd);
+    int is_master = pty_fd_is_master(files, fd);
 
     if (is_master) {
         pty->master_refs--;
@@ -419,11 +420,11 @@ void pty_close_fd(struct proc_t *proc, int fd) {
 }
 
 // ===================== pty_dup_fd =====================
-void pty_dup_fd(struct proc_t *proc, int old_fd, int new_fd) {
-    struct pty *pty = proc->fd_table[old_fd].pty;
+void pty_dup_fd(files_t *files, int fd) {
+    struct pty *pty = files->fd_table[fd].pty;
     if (!pty) return;
 
-    int is_master = pty_fd_is_master(proc, old_fd);
+    int is_master = pty_fd_is_master(files, fd);
     if (is_master)
         pty->master_refs++;
     else

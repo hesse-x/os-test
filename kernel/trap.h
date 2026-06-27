@@ -25,7 +25,6 @@ uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uin
 uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6);
 uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_shm_create(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -60,6 +59,10 @@ uint64_t sys_fdev_pid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t
 uint64_t sys_kill(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_sigaction(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_sigreturn(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
+// Fork/execve syscalls
+uint64_t sys_fork(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_execve(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 // Socket syscalls (declared in kernel/socket.c)
 uint64_t sys_socket(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -105,7 +108,7 @@ static inline void wake_pipe_peers(pipe_t *p, int fd_flags) {
 }
 
 // Kernel-internal: send a message to a user-space process and wait for reply.
-// Called from syscall context (current_proc is the caller).
+// Called from syscall context (current_task is the caller).
 // req/req_len: message buffer in kernel space; resp/resp_len: reply buffer (may be NULL).
 // Returns: 0 on success, negative errno on error.
 int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,

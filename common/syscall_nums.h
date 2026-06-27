@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include "common/ioctl.h"
 
-// ===================== Syscall numbers (NR_SYSCALL=57, 0-56 continuous) =====================
+// ===================== Syscall numbers (NR_SYSCALL=59, 0-58 continuous) =====================
 #define SYS_GETPID       0
 #define SYS_YIELD        1
 #define SYS_RECV         2
@@ -14,7 +14,7 @@
 #define SYS_IRQ_BIND     5
 #define SYS_EXIT         6
 #define SYS_WAITPID      7
-#define SYS_SPAWN        8
+// SYS_SPAWN (8) removed — use fork+execve
 #define SYS_MMAP         9
 #define SYS_MUNMAP       10
 #define SYS_SHM_CREATE   11
@@ -65,6 +65,8 @@
 #define SYS_IOCTL       54
 #define SYS_FSTAT       55
 #define SYS_FDEV_PID    56
+#define SYS_FORK        57
+#define SYS_EXECVE      58
 
 // ===================== recv_msg (shared between kernel and user) =====================
 #define RECV_IRQ    0

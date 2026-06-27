@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "arch/x64/paging.h"
+#include "arch/x64/trap.h"
 #include "kernel/spinlock.h"
 #include "kernel/list.h"
 #include "kernel/mem/alloc.h"
@@ -20,18 +21,19 @@
 #define EFER_SCE (1ULL << 0)
 #define EFER_NXE (1ULL << 11)
 
-struct proc_t; // forward declaration (typedef in kernel/proc.h)
+struct task_t; // forward declaration (typedef in kernel/proc.h)
 
 typedef struct cpu_local_t {
     uint64_t saved_r10;    // scratch slot: SYSCALL entry saves user R10 (arg4) here
     int cpu_id;
     uint32_t apic_id;
-    struct proc_t *_cur_proc;
+    struct task_t *_cur_proc;
+    trapframe_t *cur_tf; // current trapframe (set by syscall/irq entry)
     void __iomem *lapic_base;
     uint64_t kernel_stack;
     uint64_t tss_rsp0;
     int run_count;         // number of runnable processes on this CPU (excludes idle)
-    struct proc_t *idle_proc;     // this CPU's idle process
+    struct task_t *idle_proc;     // this CPU's idle process
     spinlock_t scheduler_lock; // per-CPU scheduler lock
     list_node_t run_queue;     // per-CPU ready queue (sentinel node)
     list_node_t timer_queue;   // per-CPU timer queue (sorted by wait_deadline, sentinel node)
@@ -55,8 +57,7 @@ static inline cpu_local_t *get_cpu_local() {
     return (cpu_local_t *)rdmsr(MSR_GS_BASE);
 }
 
-// Must be included after proc_t is defined
-#define current_proc (get_cpu_local()->_cur_proc)
+#define current_task (get_cpu_local()->_cur_proc)
 
 void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack);
 void smp_apply_cpu(int cpu_id);

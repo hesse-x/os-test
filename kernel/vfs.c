@@ -62,8 +62,11 @@ uint64_t sys_open(uint64_t arg1, uint64_t arg2, uint64_t arg3,
 
     /* 2. /dev/ prefix — delegate to devtmpfs */
     if (path[0] == '/' && path[1] == 'd' && path[2] == 'e' &&
-        path[3] == 'v' && path[4] == '/')
-        return devtmpfs_open(current_proc, path + 5, flags);
+        path[3] == 'v' && path[4] == '/') {
+        uint64_t dev_ret = devtmpfs_open(current_task, path + 5, flags);
+        serial_printf("sys_open: /dev/%s pid=%d ret=%lu\n", path + 5, current_task->pid, dev_ret);
+        return dev_ret;
+    }
 
     /* 3. FAT32 path resolution */
     int errno_val = 0;
@@ -73,24 +76,24 @@ uint64_t sys_open(uint64_t arg1, uint64_t arg2, uint64_t arg3,
     }
 
     /* 4. Allocate fd */
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
     int fd = -1;
     for (int j = 3; j < MAX_FD; j++) {
-        if (proc->fd_table[j].type == FD_NONE) { fd = j; break; }
+        if (proc->mm->files->fd_table[j].type == FD_NONE) { fd = j; break; }
     }
     if (fd < 0) { inode_put(ip); return (uint64_t)(-(uint64_t)EMFILE); }
 
     /* 5. Set up fd entry */
     if (ip->type == INODE_DIR) {
-        proc->fd_table[fd].type = FD_DIR;
-        proc->fd_table[fd].flags = O_RDONLY;
-        proc->fd_table[fd].inode = ip;
-        proc->fd_table[fd].offset = 0;  /* directory scan position */
+        proc->mm->files->fd_table[fd].type = FD_DIR;
+        proc->mm->files->fd_table[fd].flags = O_RDONLY;
+        proc->mm->files->fd_table[fd].inode = ip;
+        proc->mm->files->fd_table[fd].offset = 0;  /* directory scan position */
     } else {
-        proc->fd_table[fd].type = FD_REGULAR;
-        proc->fd_table[fd].flags = flags & (O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK);
-        proc->fd_table[fd].inode = ip;
-        proc->fd_table[fd].offset = 0;
+        proc->mm->files->fd_table[fd].type = FD_REGULAR;
+        proc->mm->files->fd_table[fd].flags = flags & (O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK);
+        proc->mm->files->fd_table[fd].inode = ip;
+        proc->mm->files->fd_table[fd].offset = 0;
     }
     return (uint64_t)fd;
 }
@@ -159,7 +162,7 @@ uint64_t sys_rmdir(uint64_t arg1, uint64_t _u1, uint64_t _u2,
 }
 
 /* sys_dev_create(name, dev_type) — syscall 55
- * Kernel auto-fills driver_pid=current_proc->pid, all callbacks NULL (user-space driver) */
+ * Kernel auto-fills driver_pid=current_task->pid, all callbacks NULL (user-space driver) */
 uint64_t sys_dev_create(uint64_t arg1, uint64_t arg2, uint64_t _u1,
                         uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     const char __user *uname = (const char __user * __force)arg1;
@@ -175,7 +178,7 @@ uint64_t sys_dev_create(uint64_t arg1, uint64_t arg2, uint64_t _u1,
     __memset(kops, 0, sizeof(struct dev_ops));
 
     // Force driver_pid to current process — user-space can't set this
-    kops->driver_pid = current_proc->pid;
+    kops->driver_pid = current_task->pid;
     kops->device_type = dev_type;
     // All callbacks remain NULL for user-space drivers (IPC proxy handles requests)
 
@@ -201,14 +204,14 @@ uint64_t sys_getdents(uint64_t arg1, uint64_t arg2, uint64_t arg3,
     size_t len = (size_t)arg3;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EINVAL;
-    if (current_proc->fd_table[fd].type != FD_DIR) return (uint64_t)-ENOTDIR;
+    if (current_task->mm->files->fd_table[fd].type != FD_DIR) return (uint64_t)-ENOTDIR;
 
-    struct inode *ip = current_proc->fd_table[fd].inode;
+    struct inode *ip = current_task->mm->files->fd_table[fd].inode;
     if (!ip) return (uint64_t)-EBADF;
 
     void *kbuf = kmalloc(len);
     if (!kbuf) return (uint64_t)-ENOMEM;
-    int ret = fat32_getdents(ip->start_cluster, &current_proc->fd_table[fd].offset, kbuf, len);
+    int ret = fat32_getdents(ip->start_cluster, &current_task->mm->files->fd_table[fd].offset, kbuf, len);
     if (ret < 0) { kfree(kbuf); return (uint64_t)(-(uint64_t)(-ret)); }
     if (copy_to_user(buf, kbuf, ret)) { kfree(kbuf); return (uint64_t)(-(uint64_t)EFAULT); }
     kfree(kbuf);

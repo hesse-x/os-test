@@ -98,96 +98,125 @@ typedef struct file {
     };
 } file_t;
 
-typedef struct proc_t {
-    pid_t pid;
-    proc_state_t state;
-    uint64_t k_rsp;        // saved kernel RSP (for switch_to)
-    uint64_t k_stack_top;  // kernel stack top (8KB region high end)
-    uint64_t cr3;          // PML4 physical address
-    uint64_t entry;        // user entry RIP
-    wait_event_t wait_event; // 阻塞原因
-    int assigned_cpu;      // which CPU this process runs on
-    uint8_t *iopm;         // IOPM bitmap (NULL = deny all), 8KB if allocated
-    pid_t parent_pid;      // 父进程 PID，启动时进程设为 -1
-    int32_t exit_code;     // 退出码，ZOMBIE 时有效
-    uint64_t mmap_brk;     // mmap 区域高水位（初始 0x800000）
-    uint64_t mmap_phys_brk; // MAP_PHYSICAL 区域高水位（初始 MAP_PHYSICAL_BASE）
-    struct mmap_region *mmap_regions; // mmap 区域链表头
-    uint64_t u_stack_phys;   // 用户栈物理基址
-    size_t   u_stack_pages;  // 用户栈页数
-    list_node_t run_node;  // embedded in per-CPU run_queue
-    list_node_t wait_node; // embedded in per-CPU timer_queue (sorted by wait_deadline)
-    uint64_t wait_deadline; // sched_clock() nanosecond deadline, 0 = no timeout
-    uint8_t  wait_timed_out; // 1 = timer expired wakeup, 0 = notify wakeup
-    uint8_t  recv_intr;      // set by wake_process when WAIT_RECV, checked by sys_recv for EINTR
-    struct file fd_table[MAX_FD];  // per-process file descriptor table
+// ===================== files_t (file descriptor table, independent refcount) =====================
+typedef struct files_t {
+    struct file fd_table[MAX_FD];     // per-process file descriptor table
+    int ref_count;                    // reference count, initial=1; CLONE_FILES shares +1
+} files_t;
 
-    // === 统一 recv 队列 ===
+// ===================== mm_t (address space) =====================
+typedef struct mm_t {
+    uint64_t cr3;                     // authoritative PML4 physical address (task_t.cr3 is cached copy)
+    int ref_count;                    // COW/CLONE_VM reserved, initial=1
+    struct files_t *files;            // file descriptor table pointer (independent refcount)
+    uint64_t mmap_brk;               // mmap area high watermark (initial 0x800000)
+    uint64_t mmap_phys_brk;          // MAP_PHYSICAL area high watermark (initial MAP_PHYSICAL_BASE)
+    struct mmap_region *mmap_regions; // mmap region list head (includes user stack region)
+    pid_t    parent_pid;             // parent process PID
+} mm_t;
+
+typedef struct task_t {
+    pid_t pid;                  // offset 0 (switch_to compatible)
+    proc_state_t state;         // offset 4
+    // 4 bytes padding
+    uint64_t k_rsp;             // offset 16 (switch_to: movq %rsp, 8(%rdi))
+    uint64_t k_stack_top;       // offset 24
+    uint64_t cr3;               // offset 32 (cached PML4 phys, authoritative copy in mm->cr3)
+    uint64_t entry;             // user entry RIP
+    wait_event_t wait_event;    // block reason
+    pid_t tgid;                 // thread group ID (== pid for single-threaded)
+    struct mm_t *mm;            // address space pointer (NULL for idle)
+    int assigned_cpu;           // which CPU this process runs on
+    uint8_t *iopm;              // IOPM bitmap (NULL = deny all), 8KB if allocated
+    int32_t exit_code;          // exit code, valid when ZOMBIE
+    list_node_t run_node;       // embedded in per-CPU run_queue
+    list_node_t wait_node;      // embedded in per-CPU timer_queue (sorted by wait_deadline)
+    uint64_t wait_deadline;     // sched_clock() nanosecond deadline, 0 = no timeout
+    uint8_t  wait_timed_out;    // 1 = timer expired wakeup, 0 = notify wakeup
+    uint8_t  recv_intr;         // set by wake_process when WAIT_RECV, checked by sys_recv for EINTR
+
+    // === unified recv queue ===
     uint8_t  recv_buf[RECV_QUEUE_SIZE][RECV_MSG_SIZE]; // 16 × 64B = 1KB
     uint32_t recv_head;         // producer write position
     uint32_t recv_tail;         // consumer read position
     spinlock_t recv_lock;       // protects recv_buf/head/tail
 
-    // === REQ 状态 ===
+    // === REQ state ===
     pid_t    req_caller_pid;    // current REQ caller PID (-1 = none)
-    void __user *req_reply_buf;     // caller's reply buffer user-space address
+    void __user *req_reply_buf; // caller's reply buffer user-space address
     size_t   req_reply_len;     // reply buffer size (RECV_MSG_SIZE for sys_req, 56 for ioctl proxy)
     int32_t  req_result;        // 0 = success, positive errno on error
     pid_t    req_target_pid;    // for crash cleanup: who we're waiting on
 
-    // === MSG 状态（独立于 req 字段） ===
-    void __user *msg_reply_buf;     // caller's reply buffer user-space address
+    // === MSG state (independent of req fields) ===
+    void __user *msg_reply_buf; // caller's reply buffer user-space address
     size_t   msg_reply_len;     // caller's reply buffer size
     pid_t    msg_caller_pid;    // server side: who sent the msg (-1 = none)
     int32_t  msg_result;        // 0 = success, negative errno on error
     pid_t    msg_target_pid;    // caller side: who we're waiting on (crash cleanup)
 
-    // === CPU 时间记账 ===
-    uint64_t cpu_time_ns;       // 累计 CPU 时间（纳秒）
-    uint64_t last_sched;        // 上次被调度时的 sched_clock() 值
+    // === CPU time accounting ===
+    uint64_t cpu_time_ns;       // accumulated CPU time (nanoseconds)
+    uint64_t last_sched;        // sched_clock() value at last scheduling
 
-    // === 信号状态 ===
+    // === signal state ===
     struct signal_state {
         uint64_t      pending;           // bitmask: pending signals
         sigset_t      blocked;           // currently blocked signal set
         struct sigaction action[NSIG];   // per-signal handler
     } sig;
 
-    // === force_sig 临时数据 ===
+    // === force_sig temp data ===
     siginfo_t sig_force_info;  // force_sig temp siginfo (kernel-stack scope)
 
     // === Session / controlling terminal (reserved for job control) ===
     pid_t    sid;              // session ID (0 = no session)
     pid_t    pgid;             // process group ID (0 = none)
     struct pty *ctty;          // controlling terminal (NULL = none)
-} proc_t;
+} task_t;
 
 #define MAX_PROC 64
 
-extern proc_t procs[MAX_PROC];
-extern spinlock_t procs_lock;
+extern task_t tasks[MAX_PROC];
+extern spinlock_t tasks_lock;
 extern pid_t init_pid;
-// current_proc is now per-CPU, accessed via macro in smp.h
+// current_task is per-CPU, accessed via macro in smp.h
 
 void proc_init(void);
-proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);
+task_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);
 void schedule(void) __attribute__((no_sanitize("kernel-address")));
-void switch_to(proc_t *prev, proc_t *next);
+void switch_to(task_t *prev, task_t *next);
 void process_entry(void);
 void idle_entry(void) __attribute__((no_sanitize("kernel-address")));
-proc_t *create_idle_process(int cpu_id);
-void proc_reap(proc_t *proc);
+task_t *create_idle_process(int cpu_id);
+void task_reap(task_t *proc);
+
+// ===================== mm_t lifecycle =====================
+mm_t *mm_create(void);                      // kmalloc + ref_count=1 + allocate PML4
+void  mm_put(mm_t *mm);                     // atomic --ref_count; if==0 call mm_release
+void  mm_release(mm_t *mm, pid_t owner_pid); // free user page tables+phys pages+PML4+mmap+SHM+files
+void  mm_release_pages(mm_t *mm);           // free user page tables+phys pages+PML4 only (for execve)
+
+// ===================== files_t lifecycle =====================
+files_t *files_create(void);                // kmalloc + ref_count=1 + fd_table init FD_NONE
+void     files_put(files_t *files);         // atomic --ref_count; if==0 close all fds + kfree
 
 // SHM reference counting helpers
 struct shm *shm_get(struct shm *shm);
 void shm_put(struct shm *shm);
 
+// Page table deep copy (for fork)
+int copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4, mmap_region_t *mmap_regions);
+
 // mmap region allocation helper
-mmap_region_t *add_mmap_region(proc_t *proc, uint64_t vaddr, uint64_t size,
+mmap_region_t *add_mmap_region(task_t *proc, uint64_t vaddr, uint64_t size,
                                 uint64_t phys, struct shm *shm_obj);
 
 // Timer queue operations (must be called under scheduler_lock)
-void timer_queue_insert(int cpu, proc_t *proc);
-void timer_queue_remove(proc_t *proc);
+void timer_queue_insert(int cpu, task_t *proc);
+void timer_queue_remove(task_t *proc);
+
+// Internal helper: close a single fd in a files_t
+void close_fd_internal(files_t *files, int fd);
 
 #endif // KERNEL_PROC_H

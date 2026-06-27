@@ -147,7 +147,7 @@ void kernel_main(boot_info *bi) {
   serial_printf("kernel_main: xhci_init done\n");
 
   // Create BSP idle process
-  proc_t *bsp_idle = create_idle_process(0);
+  task_t *bsp_idle = create_idle_process(0);
   if (!bsp_idle) {
     serial_printf("kernel_main: create BSP idle failed\n");
     halt();
@@ -181,7 +181,7 @@ void kernel_main(boot_info *bi) {
       uint64_t sz; Page *pg; size_t np;
       uint8_t *elf = load_elf_from_disk(101, &sz, &pg, &np);
       if (elf) {
-        proc_t *init_proc = process_create_elf(elf, sz);
+        task_t *init_proc = process_create_elf(elf, sz);
         bfc_free_page(pg, np);
         if (init_proc) { init_loaded = true; init_pid = init_proc->pid; serial_printf("kernel_main: init created\n"); }
       }
@@ -192,10 +192,12 @@ void kernel_main(boot_info *bi) {
 
   if (!init_loaded) serial_printf("kernel_main: init.elf FAILED on all ports\n");
 
-  serial_printf("kernel_main: all procs loaded, entering idle\n");
+  serial_printf("kernel_main: all tasks loaded, entering idle\n");
 
-  // Set current_proc to BSP idle, switch to idle kernel stack, enter idle_entry
-  current_proc = bsp_idle;
+  sti();
+
+  // Set current_task to BSP idle, switch to idle kernel stack, enter idle_entry
+  current_task = bsp_idle;
   bsp_idle->state = RUNNING;
   per_cpu_tss[0].rsp0 = bsp_idle->k_stack_top;
   cpu_locals[0].tss_rsp0 = bsp_idle->k_stack_top;

@@ -158,24 +158,24 @@ int  pty_ring_avail(uint32_t head, uint32_t tail);
 int  pty_ring_space(uint32_t head, uint32_t tail);
 
 // /dev/ptmx open callback
-int  ptmx_open(struct proc_t *proc, int fd);
+int  ptmx_open(struct task_t *proc, int fd);
 
 // /dev/ptsN slave open callback
-int  pts_open(struct proc_t *proc, int fd);
+int  pts_open(struct task_t *proc, int fd);
 
 // PTY read/write
-int64_t pty_master_read(struct pty *pty, struct proc_t *proc,
+int64_t pty_master_read(struct pty *pty, struct task_t *proc,
                          void *buf, size_t len);
-int64_t pty_master_write(struct pty *pty, struct proc_t *proc,
+int64_t pty_master_write(struct pty *pty, struct task_t *proc,
                           const void *buf, size_t len);
-int64_t pty_slave_read(struct pty *pty, struct proc_t *proc,
+int64_t pty_slave_read(struct pty *pty, struct task_t *proc,
                         void *buf, size_t len);
-int64_t pty_slave_write(struct pty *pty, struct proc_t *proc,
+int64_t pty_slave_write(struct pty *pty, struct task_t *proc,
                          const void *buf, size_t len);
 
 // PTY close/dup helpers
-void pty_close_fd(struct proc_t *proc, int fd);
-void pty_dup_fd(struct proc_t *proc, int old_fd, int new_fd);
+void pty_close_fd(struct task_t *proc, int fd);
+void pty_dup_fd(files_t *files, int fd);
 
 // PTY ioctl
 long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg);
@@ -184,6 +184,6 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg);
 uint32_t pty_poll(struct pty *pty, int is_master, uint32_t events);
 
 // Determine if fd is master or slave side
-int pty_fd_is_master(struct proc_t *proc, int fd);
+int pty_fd_is_master(files_t *files, int fd);
 
 #endif // KERNEL_PTY_H

@@ -3,18 +3,31 @@
 #include <stdbool.h>
 
 #include "kernel/proc.h"
+
+// Validate assembly offset assumptions in trapentry.S (switch_to uses hardcoded offsets)
+_Static_assert(offsetof(task_t, k_rsp) == 8,  "switch_to asm: k_rsp offset mismatch");
+_Static_assert(offsetof(task_t, cr3)   == 24, "switch_to asm: cr3 offset mismatch");
+_Static_assert(sizeof(trapframe_t)   == 176, "trapframe size must be 176 (22 × uint64_t)");
+_Static_assert(offsetof(cpu_local_t, tss_rsp0) == 48,
+               "syscall_fast_entry asm: tss_rsp0 offset mismatch (expected 48)");
+
 #include "kernel/pty.h"
 #include "kernel/inode.h"
 #include "kernel/devtmpfs.h"
 #include "kernel/serial.h"
 #include "kernel/trap.h"
+#include "kernel/vfs.h"
+#include "arch/x64/smp.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/mem/slab.h"
 #include "kernel/elf_loader.h"
 #include "common/shm.h"
 #include "common/macro.h"
 #include "common/errno.h"
+#include "common/stat.h"
+#include "common/fcntl.h"
 #include "kernel/display.h"
+#include "kernel/fat32.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
@@ -30,116 +43,387 @@ typedef struct file_io_close_req {
     int32_t  fs_fd;          // at offset 264, same as fs_driver's file_req.fs_fd
 } file_io_close_req;
 
-proc_t procs[MAX_PROC];
-// current_proc is per-CPU (in cpu_local_t), accessed via macro
+task_t tasks[MAX_PROC];
+// current_task is per-CPU (in cpu_local_t), accessed via macro
 
-spinlock_t procs_lock = {.locked = 0};
+spinlock_t tasks_lock = {.locked = 0};
 pid_t init_pid = -1;
 
-// ===================== Timer queue operations =====================
-// Must be called under scheduler_lock of the target CPU
+// ===================== files_t lifecycle =====================
 
-// Insert process into per-CPU timer queue, sorted by wait_deadline ascending
-// Must be called under scheduler_lock of the target CPU
-void timer_queue_insert(int cpu, proc_t *proc) {
-    list_node_t *head = &cpu_locals[cpu].timer_queue;
-    list_node_t *node = head->next;
-    while (node != head) {
-        proc_t *p = LIST_ENTRY(node, proc_t, wait_node);
-        if (p->wait_deadline > proc->wait_deadline) break;
-        node = node->next;
+files_t *files_create(void) {
+    files_t *files = (files_t *)kmalloc(sizeof(files_t));
+    if (!files) return NULL;
+    __memset(files, 0, sizeof(files_t));
+    files->ref_count = 1;
+    for (int j = 0; j < MAX_FD; j++) {
+        files->fd_table[j].type = FD_NONE;
     }
-    // Insert before node
-    proc->wait_node.prev = node->prev;
-    proc->wait_node.next = node;
-    node->prev->next = &proc->wait_node;
-    node->prev = &proc->wait_node;
+    return files;
 }
 
-// Remove process from timer queue (no-op if not on any queue)
-void timer_queue_remove(proc_t *proc) {
-    list_remove(&proc->wait_node);
-}
-
-// ===================== mmap region allocation =====================
-
-mmap_region_t *add_mmap_region(proc_t *proc, uint64_t vaddr, uint64_t size,
-                                uint64_t phys, struct shm *shm_obj) {
-    mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
-    if (!region) return NULL;
-    region->vaddr = vaddr;
-    region->size = size;
-    region->phys = phys;
-    region->shm_obj = shm_obj;
-    region->next = proc->mmap_regions;
-    proc->mmap_regions = region;
-    return region;
-}
-
-// ===================== Process table =====================
-
-void proc_init() {
-    for (int i = 0; i < MAX_PROC; i++) {
-        procs[i].pid = -1;
-        procs[i].state = UNUSED;
-        procs[i].k_rsp = 0;
-        procs[i].k_stack_top = 0;
-        procs[i].cr3 = 0;
-        procs[i].entry = 0;
-        procs[i].wait_event = WAIT_NONE;
-        procs[i].assigned_cpu = -1;
-        procs[i].iopm = NULL;
-        procs[i].parent_pid = -1;
-        procs[i].exit_code = 0;
-        procs[i].mmap_brk = 0;
-        procs[i].mmap_regions = NULL;
-        procs[i].u_stack_phys = 0;
-        procs[i].u_stack_pages = 0;
-        procs[i].wait_deadline = 0;
-        procs[i].wait_timed_out = 0;
-        procs[i].recv_intr = 0;
-        for (int j = 0; j < MAX_FD; j++) {
-            __memset(&procs[i].fd_table[j], 0, sizeof(file_t));
-            procs[i].fd_table[j].type = FD_NONE;
+// Internal helper: close a single fd in a files_t
+void close_fd_internal(files_t *files, int fd) {
+    file_t *f = &files->fd_table[fd];
+    if (f->type == FD_NONE) return;
+    if (f->type == FD_PIPE) {
+        pipe_t *p = f->pipe;
+        if (p) {
+            p->ref_count--;
+            wake_pipe_peers(p, f->flags);
+            if (p->ref_count == 0) {
+                kfree(p->buf);
+                kfree(p);
+            }
         }
-        list_init(&procs[i].run_node);
-        list_init(&procs[i].wait_node);
-        // recv queue
-        procs[i].recv_head = 0;
-        procs[i].recv_tail = 0;
-        procs[i].recv_lock = SPINLOCK_INIT;
-        // REQ state
-        procs[i].req_caller_pid = -1;
-        procs[i].req_reply_buf = NULL;
-        procs[i].req_result = 0;
-        procs[i].req_target_pid = -1;
-        // MSG state
-        procs[i].msg_reply_buf = NULL;
-        procs[i].msg_reply_len = 0;
-        procs[i].msg_caller_pid = -1;
-        procs[i].msg_result = 0;
-        procs[i].msg_target_pid = -1;
-        procs[i].cpu_time_ns = 0;
-        procs[i].last_sched = 0;
-        // Signal state
-        procs[i].sig.pending = 0;
-        procs[i].sig.blocked = 0;
-        __memset(&procs[i].sig_force_info, 0, sizeof(siginfo_t));
-        __memset(procs[i].sig.action, 0, sizeof(procs[i].sig.action));
-        // Session / controlling terminal
-        procs[i].sid = 0;
-        procs[i].pgid = 0;
-        procs[i].ctty = NULL;
+    } else if (f->type == FD_SHM) {
+        if (f->shm) { shm_put(f->shm); f->shm = NULL; }
+    } else if (f->type == FD_REGULAR || f->type == FD_DIR || f->type == FD_DEV) {
+        if (f->inode) inode_put(f->inode);
+    } else if (f->type == FD_FILE) {
+        f->file_data.ref_count--;
+        if (f->file_data.ref_count == 0 && f->file_data.fs_pid >= 0) {
+            file_io_close_req req;
+            __memset(&req, 0, sizeof(req));
+            req.cmd = 4;  // FILE_CMD_CLOSE
+            req.fs_fd = f->file_data.fs_fd;
+            kernel_msg_send(f->file_data.fs_pid, &req, sizeof(req), NULL, 0);
+        }
+    } else if (f->type == FD_SOCKET) {
+        if (f->sock) sock_close(f->sock);
+    } else if (f->type == FD_TTY) {
+        pty_close_fd(current_task, fd);
     }
-    cpu_locals[0]._cur_proc = NULL;
-    cpu_locals[0].run_count = 0;
-    cpu_locals[0].idle_proc = NULL;
-    for (int c = 0; c < NUM_KMALLOC_CLASSES; c++) {
-        cpu_locals[0].active_slab[c] = NULL;
+    __memset(f, 0, sizeof(file_t));
+    f->type = FD_NONE;
+}
+
+void files_put(files_t *files) {
+    if (!files) return;
+    if (__atomic_sub_fetch(&files->ref_count, 1, __ATOMIC_SEQ_CST) == 0) {
+        for (int fd = 0; fd < MAX_FD; fd++) {
+            file_t *f = &files->fd_table[fd];
+            if (f->type == FD_NONE) continue;
+            // Close FD_DEV via dev_ops->close if kernel device
+            if (f->type == FD_DEV) {
+                struct inode *ip = f->inode;
+                if (ip && ip->i_priv) {
+                    struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+                    if (ops->driver_pid == 0 && ops->close)
+                        ops->close(current_task, fd);
+                }
+                if (ip) inode_put(ip);
+                __memset(f, 0, sizeof(file_t));
+                f->type = FD_NONE;
+                continue;
+            }
+            close_fd_internal(files, fd);
+        }
+        kfree(files);
     }
 }
 
-// switch_to 恢复帧：callee-saved 寄存器 + 返回地址
+// Free a page table page by physical address
+static void free_table_page(uint64_t phys) {
+    Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
+    bfc_free_page(p, 1);
+}
+
+// ===================== mm_t lifecycle =====================
+
+mm_t *mm_create(void) {
+    mm_t *mm = (mm_t *)kmalloc(sizeof(mm_t));
+    if (!mm) return NULL;
+    __memset(mm, 0, sizeof(mm_t));
+
+    // Allocate PML4
+    Page *pml4_page = bfc_alloc_page(1);
+    if (!pml4_page) { kfree(mm); return NULL; }
+    uint64_t pml4_phys = (__force uint64_t)page_to_phys(pml4_page);
+    uint64_t pml4_virt = (__force uint64_t)phys_to_virt((__force phys_addr_t)pml4_phys);
+
+    uint64_t *new_pml4 = (uint64_t *)pml4_virt;
+    for (int i = 0; i < 512; i++) new_pml4[i] = 0;
+    new_pml4[511] = pml4[511]; // kernel mapping
+    #ifdef SANITIZER
+    new_pml4[503] = pml4[503]; // KASAN shadow
+    #endif
+
+    mm->cr3 = pml4_phys;
+    mm->ref_count = 1;
+    mm->parent_pid = -1;
+    mm->mmap_brk = 0x800000;
+    mm->mmap_phys_brk = MAP_PHYSICAL_BASE;
+
+    // Create independent files_t
+    mm->files = files_create();
+    if (!mm->files) {
+        free_table_page(mm->cr3);
+        kfree(mm);
+        return NULL;
+    }
+
+    return mm;
+}
+
+void mm_release(mm_t *mm, pid_t owner_pid) {
+    if (!mm) return;
+    uint64_t *pml4_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)mm->cr3);
+
+    // 1. Walk user PML4 entries (0-255, canonical low half), free leaf pages + page table pages
+    for (int pml4_idx = 0; pml4_idx < 256; pml4_idx++) {
+        uint64_t pdpt_entry = pml4_virt[pml4_idx];
+        if (!(pdpt_entry & PTE_PRESENT)) continue;
+
+        uint64_t pdpt_phys = pdpt_entry & 0x000FFFFFFFFFF000ULL;
+        uint64_t *pdpt_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)pdpt_phys);
+
+        for (int pdpt_idx = 0; pdpt_idx < 512; pdpt_idx++) {
+            uint64_t pd_entry = pdpt_virt[pdpt_idx];
+            if (!(pd_entry & PTE_PRESENT)) continue;
+            if (pd_entry & PTE_PS) continue;
+
+            uint64_t pd_phys = pd_entry & 0x000FFFFFFFFFF000ULL;
+            uint64_t *pd_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)pd_phys);
+
+            for (int pd_idx = 0; pd_idx < 512; pd_idx++) {
+                uint64_t pt_entry = pd_virt[pd_idx];
+                if (!(pt_entry & PTE_PRESENT)) continue;
+                if (pt_entry & PTE_PS) continue;
+
+                uint64_t pt_phys = pt_entry & 0x000FFFFFFFFFF000ULL;
+                uint64_t *pt_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)pt_phys);
+
+                for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
+                    uint64_t pte = pt_virt[pt_idx];
+                    if (pte & PTE_PRESENT) {
+                        uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
+                        // Check mmap_regions: skip SHM fd mappings and MAP_PHYSICAL
+                        bool is_shared = false;
+                        for (mmap_region_t *mr = mm->mmap_regions; mr; mr = mr->next) {
+                            if (mr->shm_obj != NULL) {
+                                shm_t *s = mr->shm_obj;
+                                if (s->page_list) {
+                                    for (int pi = 0; pi < s->num_pages; pi++) {
+                                        if (leaf_phys == s->page_list[pi]) {
+                                            is_shared = true;
+                                            break;
+                                        }
+                                    }
+                                    if (is_shared) break;
+                                } else if (s->phys != 0 && s->npages > 0) {
+                                    if (leaf_phys >= s->phys &&
+                                        leaf_phys < s->phys + s->npages * PAGE_SIZE) {
+                                        is_shared = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (mr->phys != 0 &&
+                                leaf_phys >= mr->phys &&
+                                leaf_phys < mr->phys + mr->size) {
+                                is_shared = true;
+                                break;
+                            }
+                        }
+                        // Skip shared sig trampoline page
+                        if (sig_trampoline_phys != 0 && leaf_phys == sig_trampoline_phys) {
+                            pt_virt[pt_idx] = 0;
+                            continue;
+                        }
+                        if (!is_shared) {
+                            Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
+                            bfc_free_page(leaf_page, 1);
+                        }
+                        pt_virt[pt_idx] = 0;
+                    }
+                }
+                free_table_page(pt_phys);
+                pd_virt[pd_idx] = 0;
+            }
+            free_table_page(pd_phys);
+            pdpt_virt[pdpt_idx] = 0;
+        }
+        free_table_page(pdpt_phys);
+        pml4_virt[pml4_idx] = 0;
+    }
+
+    // 2. Free PML4 page itself
+    free_table_page(mm->cr3);
+
+    // 3. Free mmap region metadata + release SHM references
+    mmap_region_t *region = mm->mmap_regions;
+    while (region) {
+        mmap_region_t *next = region->next;
+        if (region->shm_obj) {
+            shm_put(region->shm_obj);
+        }
+        kfree(region);
+        region = next;
+    }
+
+    // 4. Release files (closes all fds)
+    files_put(mm->files);
+    mm->files = NULL;
+
+    // 5. Clear devtmpfs entries and ISR driver PID for this PID
+    if (owner_pid >= 0) {
+        devtmpfs_cleanup_pid(owner_pid);
+        irq_owner_cleanup(owner_pid);
+
+        // Wake any processes waiting for REQ reply from this process
+        for (int i = 0; i < MAX_PROC; i++) {
+            if (tasks[i].pid >= 0 &&
+                tasks[i].state == BLOCKED &&
+                tasks[i].wait_event == WAIT_REQ_REPLY &&
+                tasks[i].req_target_pid == owner_pid) {
+                int wcpu = tasks[i].assigned_cpu;
+                spin_lock(&cpu_locals[wcpu].scheduler_lock);
+                if (tasks[i].state == BLOCKED && tasks[i].wait_event == WAIT_REQ_REPLY) {
+                    tasks[i].state = READY;
+                    tasks[i].wait_event = WAIT_NONE;
+                    tasks[i].req_result = ESRCH;
+                    list_push_back(&cpu_locals[wcpu].run_queue, &tasks[i].run_node);
+                    cpu_locals[wcpu].run_count++;
+                }
+                spin_unlock(&cpu_locals[wcpu].scheduler_lock);
+            }
+        }
+
+        // Wake any processes waiting for MSG reply from this process
+        for (int i = 0; i < MAX_PROC; i++) {
+            if (tasks[i].pid >= 0 &&
+                tasks[i].state == BLOCKED &&
+                tasks[i].wait_event == WAIT_MSG_REPLY &&
+                tasks[i].msg_target_pid == owner_pid) {
+                int wcpu = tasks[i].assigned_cpu;
+                spin_lock(&cpu_locals[wcpu].scheduler_lock);
+                if (tasks[i].state == BLOCKED && tasks[i].wait_event == WAIT_MSG_REPLY) {
+                    tasks[i].state = READY;
+                    tasks[i].wait_event = WAIT_NONE;
+                    tasks[i].msg_result = -ESRCH;
+                    list_push_back(&cpu_locals[wcpu].run_queue, &tasks[i].run_node);
+                    cpu_locals[wcpu].run_count++;
+                }
+                spin_unlock(&cpu_locals[wcpu].scheduler_lock);
+            }
+        }
+    }
+
+    kfree(mm);
+}
+
+void mm_put(mm_t *mm) {
+    if (!mm) return;
+    if (__atomic_sub_fetch(&mm->ref_count, 1, __ATOMIC_SEQ_CST) == 0) {
+        mm_release(mm, -1);
+    }
+}
+
+void mm_release_pages(mm_t *mm) {
+    if (!mm) return;
+    uint64_t *pml4_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)mm->cr3);
+
+    for (int pml4_idx = 0; pml4_idx < 256; pml4_idx++) {
+        uint64_t pdpt_entry = pml4_virt[pml4_idx];
+        if (!(pdpt_entry & PTE_PRESENT)) continue;
+
+        uint64_t pdpt_phys = pdpt_entry & 0x000FFFFFFFFFF000ULL;
+        uint64_t *pdpt_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)pdpt_phys);
+
+        for (int pdpt_idx = 0; pdpt_idx < 512; pdpt_idx++) {
+            uint64_t pd_entry = pdpt_virt[pdpt_idx];
+            if (!(pd_entry & PTE_PRESENT)) continue;
+            if (pd_entry & PTE_PS) continue;
+
+            uint64_t pd_phys = pd_entry & 0x000FFFFFFFFFF000ULL;
+            uint64_t *pd_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)pd_phys);
+
+            for (int pd_idx = 0; pd_idx < 512; pd_idx++) {
+                uint64_t pt_entry = pd_virt[pd_idx];
+                if (!(pt_entry & PTE_PRESENT)) continue;
+                if (pt_entry & PTE_PS) continue;
+
+                uint64_t pt_phys = pt_entry & 0x000FFFFFFFFFF000ULL;
+                uint64_t *pt_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)pt_phys);
+
+                for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
+                    uint64_t pte = pt_virt[pt_idx];
+                    if (pte & PTE_PRESENT) {
+                        uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
+                        bool skip = false;
+                        for (mmap_region_t *mr = mm->mmap_regions; mr; mr = mr->next) {
+                            if (mr->shm_obj) {
+                                shm_t *s = mr->shm_obj;
+                                if (s->page_list) {
+                                    for (int pi = 0; pi < s->num_pages; pi++)
+                                        if (leaf_phys == s->page_list[pi]) { skip = true; break; }
+                                } else if (s->phys && s->npages) {
+                                    if (leaf_phys >= s->phys && leaf_phys < s->phys + s->npages * PAGE_SIZE) { skip = true; break; }
+                                }
+                            }
+                            if (mr->phys && leaf_phys >= mr->phys && leaf_phys < mr->phys + mr->size) { skip = true; break; }
+                        }
+                        if (sig_trampoline_phys && leaf_phys == sig_trampoline_phys) skip = true;
+                        if (!skip) {
+                            Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
+                            bfc_free_page(leaf_page, 1);
+                        }
+                        pt_virt[pt_idx] = 0;
+                    }
+                }
+                free_table_page(pt_phys);
+                pd_virt[pd_idx] = 0;
+            }
+            free_table_page(pd_phys);
+            pdpt_virt[pdpt_idx] = 0;
+        }
+        free_table_page(pdpt_phys);
+        pml4_virt[pml4_idx] = 0;
+    }
+
+    // Free PML4
+    free_table_page(mm->cr3);
+}
+
+// ===================== fork helpers =====================
+
+// Deep-copy fd_table from parent_files to child_files.
+// Bumps ref counts for pipe, SHM, file, inode, socket, TTY.
+static void __attribute__((unused)) copy_fd_table(files_t *parent_files, files_t *child_files) {
+    for (int fd = 0; fd < MAX_FD; fd++) {
+        child_files->fd_table[fd] = parent_files->fd_table[fd];
+        file_t *f = &child_files->fd_table[fd];
+        if (f->type == FD_NONE) continue;
+        if (f->type == FD_PIPE && f->pipe) f->pipe->ref_count++;
+        if (f->type == FD_SHM && f->shm) shm_get(f->shm);
+        if (f->type == FD_FILE) f->file_data.ref_count++;
+        if (f->type == FD_REGULAR || f->type == FD_DIR || f->type == FD_DEV) {
+            if (f->inode) inode_get(f->inode);
+        }
+        if (f->type == FD_TTY) pty_dup_fd(child_files, fd);
+    }
+}
+
+// Deep-copy mmap_regions linked list from parent to child.
+// SHM refs are bumped.
+__attribute__((unused))
+static mmap_region_t *copy_mmap_regions(mmap_region_t *src) {
+    mmap_region_t *head = NULL, *tail = NULL;
+    for (mmap_region_t *mr = src; mr; mr = mr->next) {
+        mmap_region_t *new_mr = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+        if (!new_mr) return head; // partial copy, caller handles
+        *new_mr = *mr;
+        new_mr->next = NULL;
+        if (mr->shm_obj) shm_get(mr->shm_obj);
+        if (!head) head = new_mr;
+        else tail->next = new_mr;
+        tail = new_mr;
+    }
+    return head;
+}
+
+// switch_to restore frame: callee-saved registers + return address
 typedef struct switch_frame_t {
     uint64_t rbx;
     uint64_t rbp;
@@ -150,11 +434,350 @@ typedef struct switch_frame_t {
     uint64_t ret_addr;
 } switch_frame_t;
 
-// 在内核栈顶构建 trapframe + switch_frame，返回 k_rsp
+_Static_assert(sizeof(switch_frame_t) == 56,  "switch_frame size must be 56 (7 × uint64_t)");
+
+static int pick_cpu(void);
+
+// ===================== sys_fork =====================
+
+uint64_t sys_fork(uint64_t a1, uint64_t a2, uint64_t a3,
+                   uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a1;(void)a2;(void)a3;(void)a4;(void)a5;(void)a6;
+    task_t *parent = current_task;
+
+    // 1. Allocate new task_t slot
+    spin_lock(&tasks_lock);
+    task_t *child = NULL;
+    int alloc_idx = -1;
+    for (int i = 0; i < MAX_PROC; i++) {
+        if (tasks[i].pid < 0) { child = &tasks[i]; alloc_idx = i; break; }
+    }
+    if (!child) { spin_unlock(&tasks_lock); return (uint64_t)-ENOMEM; }
+
+    // 2. Allocate new mm_t
+    mm_t *child_mm = mm_create();
+    if (!child_mm) { spin_unlock(&tasks_lock); return (uint64_t)-ENOMEM; }
+
+    // 3. Deep-copy parent user page tables
+    uint64_t *src_pml4 = (uint64_t *)phys_to_virt((__force phys_addr_t)parent->mm->cr3);
+    uint64_t *dst_pml4 = (uint64_t *)phys_to_virt((__force phys_addr_t)child_mm->cr3);
+    int ret = copy_page_table(src_pml4, dst_pml4, parent->mm->mmap_regions);
+    if (ret < 0) { mm_put(child_mm); spin_unlock(&tasks_lock); return (uint64_t)ret; }
+
+    // 4. Copy fd_table (through files_t)
+    copy_fd_table(parent->mm->files, child_mm->files);
+
+    // 5. Copy mmap_regions (including user stack region)
+    child_mm->mmap_regions = copy_mmap_regions(parent->mm->mmap_regions);
+    child_mm->mmap_brk = parent->mm->mmap_brk;
+    child_mm->mmap_phys_brk = parent->mm->mmap_phys_brk;
+    child_mm->parent_pid = parent->pid;
+
+    // 6. Allocate new kernel stack, copy parent trapframe (rax=0 for child return)
+    Page *stack_pages = bfc_alloc_page(2);
+    if (!stack_pages) { mm_put(child_mm); spin_unlock(&tasks_lock); return (uint64_t)-ENOMEM; }
+    uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
+    uint64_t k_stack_top = (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) + 2 * PAGE_SIZE;
+
+    // Copy current trapframe (from per-CPU cur_tf set by syscall/irq entry)
+    trapframe_t tf;
+    trapframe_t *parent_tf = get_cpu_local()->cur_tf;
+    __memcpy(&tf, parent_tf, sizeof(trapframe_t));
+    tf.rax = 0; // child returns 0
+
+    switch_frame_t sf = {0};
+    sf.ret_addr = (uint64_t)process_entry;
+
+    uint8_t *sp = (uint8_t *)k_stack_top;
+    sp -= sizeof(trapframe_t);
+    __memcpy(sp, &tf, sizeof(trapframe_t));
+    sp -= sizeof(switch_frame_t);
+    __memcpy(sp, &sf, sizeof(switch_frame_t));
+    uint64_t k_rsp = (uint64_t)sp;
+
+    // 7. Fill child task_t
+    child->pid = alloc_idx;
+    child->state = READY;
+    child->k_rsp = k_rsp;
+    child->k_stack_top = k_stack_top;
+    child->cr3 = child_mm->cr3; // cached
+    child->entry = parent->entry;
+    child->wait_event = WAIT_NONE;
+    child->tgid = child->pid;
+    child->mm = child_mm;
+    child->assigned_cpu = pick_cpu();
+    child->iopm = NULL; // fork does not inherit IOPM
+    child->exit_code = 0;
+    child->recv_head = 0; child->recv_tail = 0; child->recv_lock = SPINLOCK_INIT;
+    child->req_caller_pid = -1; child->req_reply_buf = NULL;
+    child->msg_caller_pid = -1; child->msg_reply_buf = NULL;
+    child->cpu_time_ns = 0; child->last_sched = 0;
+    child->sig.pending = 0; child->sig.blocked = parent->sig.blocked;
+    __memcpy(child->sig.action, parent->sig.action, sizeof(parent->sig.action));
+    child->sid = parent->sid; child->pgid = parent->pgid; child->ctty = parent->ctty;
+    list_init(&child->run_node); list_init(&child->wait_node);
+
+    spin_unlock(&tasks_lock);
+
+    serial_printf("fork: child_pid=%d parent_pid=%d child_kstack_phys=0x%lx child_kstack_top=0x%lx\n",
+        child->pid, parent->pid, k_stack_phys, k_stack_top);
+
+    // 8. Enqueue to scheduler
+    int cpu = child->assigned_cpu;
+    spin_lock(&cpu_locals[cpu].scheduler_lock);
+    list_push_back(&cpu_locals[cpu].run_queue, &child->run_node);
+    cpu_locals[cpu].run_count++;
+    spin_unlock(&cpu_locals[cpu].scheduler_lock);
+
+    // 9. Parent returns child PID
+    return (uint64_t)child->pid;
+}
+
+// ===================== sys_execve =====================
+
+uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
+                     uint64_t a4, uint64_t a5, uint64_t a6) {
+    (void)a2;(void)a3;(void)a4;(void)a5;(void)a6;
+    const char *pathname = (const char *)a1;
+    task_t *proc = current_task;
+    if (!proc->mm) { serial_printf("execve: no mm pid=%d\n", proc->pid); return (uint64_t)-EINVAL; }
+    serial_printf("execve: pid=%d path=%s\n", proc->pid, pathname);
+
+    // 1. Open pathname via VFS
+    uint64_t open_result = sys_open((uint64_t)(uintptr_t)pathname, O_RDONLY, 0, 0, 0, 0);
+    int32_t fd = (int32_t)(open_result & 0xFFFFFFFFULL);
+    if (fd < 0) { serial_printf("execve: open %s failed fd=%d pid=%d\n", pathname, fd, proc->pid); return (uint64_t)fd; }
+    serial_printf("execve: opened %s fd=%d pid=%d\n", pathname, fd, proc->pid);
+
+    // 2. Get file size from inode directly (sys_fstat uses copy_to_user which
+    //    would just memcpy, but we avoid the round-trip)
+    if (proc->mm->files->fd_table[fd].type != FD_REGULAR) {
+        sys_close((uint64_t)fd, 0, 0, 0, 0, 0);
+        return (uint64_t)-EIO;
+    }
+    struct inode *ip = proc->mm->files->fd_table[fd].inode;
+    if (!ip) { sys_close((uint64_t)fd, 0, 0, 0, 0, 0); return (uint64_t)-EBADF; }
+    uint64_t file_size = ip->size;
+
+    // 3. kmalloc buffer, read entire ELF into kernel
+    uint8_t *elf_buf = (uint8_t *)kmalloc(file_size);
+    if (!elf_buf) { sys_close((uint64_t)fd, 0, 0, 0, 0, 0); return (uint64_t)-ENOMEM; }
+
+    // Use fat32_read directly (sys_read rejects kernel-space buffers)
+    int nread = fat32_read(ip, 0, (void *)elf_buf, file_size);
+    sys_close((uint64_t)fd, 0, 0, 0, 0, 0);
+    if (nread < 0 || (uint64_t)nread < file_size) { kfree(elf_buf); serial_printf("execve: read failed nread=%d pid=%d\n", nread, proc->pid); return (uint64_t)-EIO; }
+    serial_printf("execve: read %d bytes pid=%d\n", nread, proc->pid);
+
+    // 4. Validate ELF magic
+    if (elf_buf[0] != 0x7F || elf_buf[1] != 'E' || elf_buf[2] != 'L' || elf_buf[3] != 'F') {
+        kfree(elf_buf);
+        return (uint64_t)-ENOEXEC;
+    }
+
+    // 5. Allocate new PML4, copy kernel entries (before releasing old space)
+    Page *pml4_page = bfc_alloc_page(1);
+    if (!pml4_page) { kfree(elf_buf); return (uint64_t)-ENOMEM; }
+    uint64_t pml4_phys = (__force uint64_t)page_to_phys(pml4_page);
+    uint64_t pml4_virt = (__force uint64_t)phys_to_virt((__force phys_addr_t)pml4_phys);
+    uint64_t *new_pml4 = (uint64_t *)pml4_virt;
+    for (int i = 0; i < 512; i++) new_pml4[i] = 0;
+    new_pml4[511] = pml4[511];
+
+    // 6. elf_load into new PML4 (old address space still intact, failure can roll back)
+    elf_load_result_t lr = elf_load(elf_buf, file_size, new_pml4);
+    if (!lr.success) {
+        kfree(elf_buf);
+        free_table_page(pml4_phys);
+        serial_printf("execve: elf_load failed pid=%d\n", proc->pid);
+        return (uint64_t)-ENOEXEC;
+    }
+    serial_printf("execve: elf_load ok entry=%lx pid=%d\n", lr.entry, proc->pid);
+
+    // 7. Allocate new user stack
+    int user_stack_pages = 2048;
+    Page *user_stack_page = bfc_alloc_page(user_stack_pages);
+    if (!user_stack_page) {
+        kfree(elf_buf);
+        sys_exit((uint64_t)-ENOMEM, 0, 0, 0, 0, 0);
+        __builtin_unreachable();
+    }
+    uint64_t user_stack_phys = (__force uint64_t)page_to_phys(user_stack_page);
+    uint64_t stack_base = 0x00007FFFFFFFE000 - (uint64_t)user_stack_pages * PAGE_SIZE;
+    for (int i = 0; i < user_stack_pages; i++) {
+        if (!map_user_page_direct(new_pml4, stack_base + i * PAGE_SIZE,
+                                  user_stack_phys + i * PAGE_SIZE,
+                                  PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
+            kfree(elf_buf);
+            sys_exit((uint64_t)-ENOMEM, 0, 0, 0, 0, 0);
+            __builtin_unreachable();
+        }
+    }
+
+    // Map signal trampoline page
+    if (sig_trampoline_phys != 0) {
+        map_user_page_direct(new_pml4, SIG_TRAMPOLINE_ADDR, sig_trampoline_phys,
+                            PTE_PRESENT | PTE_USER);
+    }
+
+    // === Point of no return: old address space will be replaced ===
+
+    // 8. Close FD_CLOEXEC fds (before releasing old space)
+    for (int i = 0; i < MAX_FD; i++) {
+        if (proc->mm->files->fd_table[i].type != FD_NONE &&
+            (proc->mm->files->fd_table[i].flags & FD_CLOEXEC)) {
+            close_fd_internal(proc->mm->files, i);
+            __memset(&proc->mm->files->fd_table[i], 0, sizeof(file_t));
+            proc->mm->files->fd_table[i].type = FD_NONE;
+        }
+    }
+
+    // 9. Release old address space (page tables + physical pages only)
+    mm_release_pages(proc->mm);
+
+    // 10. Free old mmap_regions list
+    mmap_region_t *region = proc->mm->mmap_regions;
+    while (region) {
+        mmap_region_t *next = region->next;
+        if (region->shm_obj) shm_put(region->shm_obj);
+        kfree(region);
+        region = next;
+    }
+    proc->mm->mmap_regions = NULL;
+
+    // 11. Create user stack mmap_region
+    mmap_region_t *stack_region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+    if (stack_region) {
+        __memset(stack_region, 0, sizeof(mmap_region_t));
+        stack_region->vaddr = stack_base;
+        stack_region->size = (uint64_t)user_stack_pages * PAGE_SIZE;
+        stack_region->phys = 0; // not MAP_PHYSICAL — anonymous stack
+        stack_region->next = NULL;
+        proc->mm->mmap_regions = stack_region;
+    }
+
+    // 12. Modify current trapframe: rip=entry, rsp=stack_top
+    trapframe_t *tf = get_cpu_local()->cur_tf;
+    tf->rip = lr.entry;
+    tf->rsp = 0x00007FFFFFFFE000;
+    tf->rax = 0;
+
+    // 13. Update mm_t fields
+    proc->mm->cr3 = pml4_phys;
+    proc->cr3 = pml4_phys; // cached
+    proc->mm->mmap_brk = 0x800000;
+    proc->mm->mmap_phys_brk = MAP_PHYSICAL_BASE;
+    proc->entry = lr.entry;
+
+    // 14. kfree ELF buffer
+    kfree(elf_buf);
+
+    // 15. Flush CR3
+    __asm__ volatile("movq %0, %%cr3" :: "r"(pml4_phys) : "memory");
+
+    serial_printf("execve: done pid=%d entry=%lx\n", proc->pid, lr.entry);
+    return 0;
+}
+
+// ===================== Timer queue operations =====================
+// Must be called under scheduler_lock of the target CPU
+
+void timer_queue_insert(int cpu, task_t *proc) {
+    list_node_t *head = &cpu_locals[cpu].timer_queue;
+    list_node_t *node = head->next;
+    while (node != head) {
+        task_t *p = LIST_ENTRY(node, task_t, wait_node);
+        if (p->wait_deadline > proc->wait_deadline) break;
+        node = node->next;
+    }
+    // Insert before node
+    proc->wait_node.prev = node->prev;
+    proc->wait_node.next = node;
+    node->prev->next = &proc->wait_node;
+    node->prev = &proc->wait_node;
+}
+
+void timer_queue_remove(task_t *proc) {
+    list_remove(&proc->wait_node);
+}
+
+// ===================== mmap region allocation =====================
+
+mmap_region_t *add_mmap_region(task_t *proc, uint64_t vaddr, uint64_t size,
+                                uint64_t phys, struct shm *shm_obj) {
+    if (!proc->mm) return NULL;
+    mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+    if (!region) return NULL;
+    region->vaddr = vaddr;
+    region->size = size;
+    region->phys = phys;
+    region->shm_obj = shm_obj;
+    region->next = proc->mm->mmap_regions;
+    proc->mm->mmap_regions = region;
+    return region;
+}
+
+// ===================== Process table =====================
+
+void proc_init() {
+    for (int i = 0; i < MAX_PROC; i++) {
+        tasks[i].pid = -1;
+        tasks[i].state = UNUSED;
+        tasks[i].k_rsp = 0;
+        tasks[i].k_stack_top = 0;
+        tasks[i].cr3 = 0;
+        tasks[i].entry = 0;
+        tasks[i].wait_event = WAIT_NONE;
+        tasks[i].tgid = -1;
+        tasks[i].mm = NULL;
+        tasks[i].assigned_cpu = -1;
+        tasks[i].iopm = NULL;
+        tasks[i].exit_code = 0;
+        tasks[i].wait_deadline = 0;
+        tasks[i].wait_timed_out = 0;
+        tasks[i].recv_intr = 0;
+        list_init(&tasks[i].run_node);
+        list_init(&tasks[i].wait_node);
+        // recv queue
+        tasks[i].recv_head = 0;
+        tasks[i].recv_tail = 0;
+        tasks[i].recv_lock = SPINLOCK_INIT;
+        // REQ state
+        tasks[i].req_caller_pid = -1;
+        tasks[i].req_reply_buf = NULL;
+        tasks[i].req_result = 0;
+        tasks[i].req_target_pid = -1;
+        // MSG state
+        tasks[i].msg_reply_buf = NULL;
+        tasks[i].msg_reply_len = 0;
+        tasks[i].msg_caller_pid = -1;
+        tasks[i].msg_result = 0;
+        tasks[i].msg_target_pid = -1;
+        tasks[i].cpu_time_ns = 0;
+        tasks[i].last_sched = 0;
+        // Signal state
+        tasks[i].sig.pending = 0;
+        tasks[i].sig.blocked = 0;
+        __memset(&tasks[i].sig_force_info, 0, sizeof(siginfo_t));
+        __memset(tasks[i].sig.action, 0, sizeof(tasks[i].sig.action));
+        // Session / controlling terminal
+        tasks[i].sid = 0;
+        tasks[i].pgid = 0;
+        tasks[i].ctty = NULL;
+    }
+    cpu_locals[0]._cur_proc = NULL;
+    cpu_locals[0].run_count = 0;
+    cpu_locals[0].idle_proc = NULL;
+    for (int c = 0; c < NUM_KMALLOC_CLASSES; c++) {
+        cpu_locals[0].active_slab[c] = NULL;
+    }
+}
+
+// Build trapframe + switch_frame on kernel stack, return k_rsp
 static uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
     trapframe_t tf = {0};
     tf.ss      = 0x23;                   // USER_DS
-    tf.rsp     = 0x00007FFFFFFFE000;      // user stack top (top of mapped page at 0x7FFFFFFFD000)
+    tf.rsp     = 0x00007FFFFFFFE000;      // user stack top
     tf.rflags  = 0x202;                  // IF=1, IOPL=0
     tf.cs      = 0x2B;                   // USER_CS
     tf.rip     = entry_rip;
@@ -187,22 +810,22 @@ static uint64_t build_idle_kstack(uint64_t k_stack_top) {
 }
 
 // Create idle process for the specified CPU
-proc_t *create_idle_process(int cpu_id) {
-    spin_lock(&procs_lock);
-    proc_t *proc = NULL;
+task_t *create_idle_process(int cpu_id) {
+    spin_lock(&tasks_lock);
+    task_t *proc = NULL;
     int alloc_idx = -1;
     for (int i = 0; i < MAX_PROC; i++) {
-        if (procs[i].pid < 0) {
-            proc = &procs[i];
+        if (tasks[i].pid < 0) {
+            proc = &tasks[i];
             alloc_idx = i;
             break;
         }
     }
-    if (!proc) { spin_unlock(&procs_lock); serial_printf("create_idle_process: no free slot\n"); return NULL; }
+    if (!proc) { spin_unlock(&tasks_lock); serial_printf("create_idle_process: no free slot\n"); return NULL; }
 
     // Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc_page(2);
-    if (!stack_pages) { spin_unlock(&procs_lock); serial_printf("create_idle_process: alloc stack failed\n"); return NULL; }
+    if (!stack_pages) { spin_unlock(&tasks_lock); serial_printf("create_idle_process: alloc stack failed\n"); return NULL; }
     uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
     uint64_t k_stack_top = (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) + 2 * PAGE_SIZE;
 
@@ -214,18 +837,14 @@ proc_t *create_idle_process(int cpu_id) {
     proc->state = RUNNING;  // idle starts as RUNNING on its CPU
     proc->k_rsp = k_rsp;
     proc->k_stack_top = k_stack_top;
-    proc->cr3 = (__force uint64_t)PHY_ADDR((uintptr_t)pml4); // kernel PML4 physical address
+    proc->cr3 = (__force uint64_t)PHY_ADDR((uintptr_t)pml4); // kernel PML4 physical address (cached)
     proc->entry = (uint64_t)idle_entry;
     proc->wait_event = WAIT_NONE;
+    proc->tgid = proc->pid;
+    proc->mm = NULL;  // idle has no address space
     proc->assigned_cpu = cpu_id;
     proc->iopm = NULL;
-    proc->parent_pid = -1;
     proc->exit_code = 0;
-    proc->mmap_brk = 0x800000;
-    proc->mmap_phys_brk = MAP_PHYSICAL_BASE;
-    proc->mmap_regions = NULL;
-    proc->u_stack_phys = 0;
-    proc->u_stack_pages = 0;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
     // Signal state
@@ -237,13 +856,9 @@ proc_t *create_idle_process(int cpu_id) {
     proc->sid = 0;
     proc->pgid = 0;
     proc->ctty = NULL;
-    for (int j = 0; j < MAX_FD; j++) {
-        __memset(&proc->fd_table[j], 0, sizeof(file_t));
-        proc->fd_table[j].type = FD_NONE;
-    }
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
-    spin_unlock(&procs_lock);
+    spin_unlock(&tasks_lock);
 
     cpu_locals[cpu_id].idle_proc = proc;
 
@@ -274,53 +889,40 @@ static int pick_cpu() {
     return best;
 }
 
-proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
-    // 1. Find free slot under procs_lock
-    spin_lock(&procs_lock);
-    proc_t *proc = NULL;
+task_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
+    // 1. Find free slot under tasks_lock
+    spin_lock(&tasks_lock);
+    task_t *proc = NULL;
     int alloc_idx = -1;
     for (int i = 0; i < MAX_PROC; i++) {
-        if (procs[i].pid < 0) {
-            proc = &procs[i];
+        if (tasks[i].pid < 0) {
+            proc = &tasks[i];
             alloc_idx = i;
             break;
         }
     }
-    if (!proc) { spin_unlock(&procs_lock); serial_printf("process_create_elf: no free slot\n"); return NULL; }
-    serial_printf("process_create_elf: alloc_idx=%lx\n", (uint64_t)alloc_idx);
-
+    if (!proc) { spin_unlock(&tasks_lock); serial_printf("process_create_elf: no free slot\n"); return NULL; }
     // 2. Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc_page(2);
-    if (!stack_pages) { spin_unlock(&procs_lock); return NULL; }
+    if (!stack_pages) { spin_unlock(&tasks_lock); return NULL; }
     uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
     uint64_t k_stack_top = (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) + 2 * PAGE_SIZE;
 
-    // 3. Allocate per-process PML4
-    Page *pml4_page = bfc_alloc_page(1);
-    if (!pml4_page) { spin_unlock(&procs_lock); return NULL; }
-    uint64_t pml4_phys = (__force uint64_t)page_to_phys(pml4_page);
+    // 3. Create mm_t (allocates PML4 + files_t)
+    mm_t *mm = mm_create();
+    if (!mm) { spin_unlock(&tasks_lock); return NULL; }
+    uint64_t pml4_phys = mm->cr3;
     uint64_t pml4_virt = (__force uint64_t)phys_to_virt((__force phys_addr_t)pml4_phys);
+    uint64_t *new_pml4 = (uint64_t *)pml4_virt;
 
-    // 4. Clear PML4 + copy kernel entries
-    uint64_t *new_pml4 = (uint64_t *)pml4_virt;    for (int i = 0; i < 512; i++) {
-        new_pml4[i] = 0;
-    }
-    new_pml4[511] = pml4[511];
-    #ifdef SANITIZER
-    // Copy KASAN shadow mapping (PML4[503]) so kernel code in syscall context
-    // can access shadow memory while running on user CR3
-    new_pml4[503] = pml4[503];
-    #endif
-
-    // 5. Load ELF segments into user address space
+    // 4. Load ELF segments into user address space
     elf_load_result_t lr = elf_load(elf_data, elf_size, new_pml4);
-    if (!lr.success) { spin_unlock(&procs_lock); serial_printf("process_create_elf: elf_load failed\n"); return NULL; }
-    serial_printf("process_create_elf: entry=0x%016X elf_size=0x%016X\n", lr.entry, elf_size);
+    if (!lr.success) { mm_put(mm); spin_unlock(&tasks_lock); serial_printf("process_create_elf: elf_load failed\n"); return NULL; }
 
-    // 7. Map user stack: 2048 pages (8MB) at 0x7FFFFFFF0000-0x7FFFFFFFE000
+    // 5. Map user stack: 2048 pages (8MB) at 0x7FFFFFFF0000-0x7FFFFFFFE000
     int user_stack_pages = 2048;
     Page *user_stack_page = bfc_alloc_page(user_stack_pages);
-    if (!user_stack_page) { spin_unlock(&procs_lock); return NULL; }
+    if (!user_stack_page) { mm_put(mm); spin_unlock(&tasks_lock); return NULL; }
     uint64_t user_stack_phys = (__force uint64_t)page_to_phys(user_stack_page);
     uint64_t stack_base = 0x00007FFFFFFFE000 - (uint64_t)user_stack_pages * PAGE_SIZE;
 
@@ -328,7 +930,8 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
         if (!map_user_page_direct(new_pml4, stack_base + i * PAGE_SIZE,
                                  user_stack_phys + i * PAGE_SIZE,
                                  PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
-            spin_unlock(&procs_lock);
+            mm_put(mm);
+            spin_unlock(&tasks_lock);
             return NULL;
         }
     }
@@ -341,44 +944,23 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
         }
     }
 
-    // 8. Build trapframe + switch_to frame on kernel stack
+    // 6. Build trapframe + switch_to frame on kernel stack
     uint64_t k_rsp = build_kstack(k_stack_top, lr.entry);
 
-    // 9. Fill PCB (still under procs_lock)
+    // 7. Fill PCB (still under tasks_lock)
     int assigned_cpu = pick_cpu();
     proc->pid = alloc_idx;
     proc->state = READY;
     proc->k_rsp = k_rsp;
     proc->k_stack_top = k_stack_top;
-    proc->cr3 = (__force uint64_t)pml4_phys;
+    proc->cr3 = pml4_phys;  // cached
     proc->entry = lr.entry;
-    serial_printf("process_create_elf: cr3=%lx pml4_virt=%lx pml4[0]=%lx pml4[511]=%lx\n",
-                   pml4_phys, pml4_virt, new_pml4[0], new_pml4[511]);
-    // Verify 0x400000 mapping in the final PML4
-    {
-        uint64_t pml4e = new_pml4[(0x400000UL >> 39) & 0x1FF];
-        uint64_t *pdpt_v = (__force uint64_t *)phys_to_virt((__force phys_addr_t)(pml4e & ~0xFFF));
-        uint64_t pdpte = pdpt_v[(0x400000UL >> 30) & 0x1FF];
-        uint64_t *pd_v = (__force uint64_t *)phys_to_virt((__force phys_addr_t)(pdpte & ~0xFFF));
-        uint64_t pde = pd_v[(0x400000UL >> 21) & 0x1FF];
-        uint64_t *pt_v = (__force uint64_t *)phys_to_virt((__force phys_addr_t)(pde & ~0xFFF));
-        uint64_t pte = pt_v[(0x400000UL >> 12) & 0x1FF];
-        serial_printf("process_create_elf: verify 0x400000: pml4e=%lx pdpte=%lx pde=%lx pte=%lx\n",
-                       pml4e, pdpte, pde, pte);
-        // Also dump first 8 bytes at the mapped page
-        uint64_t *page_v = (__force uint64_t *)phys_to_virt((__force phys_addr_t)(pte & ~0xFFF));
-        serial_printf("process_create_elf: page content: %lx %lx\n", page_v[0], page_v[1]);
-    }
     proc->wait_event = WAIT_NONE;
+    proc->tgid = proc->pid;
+    proc->mm = mm;
     proc->assigned_cpu = assigned_cpu;
     proc->iopm = NULL;
-    proc->parent_pid = -1;
     proc->exit_code = 0;
-    proc->mmap_brk = 0x800000;
-    proc->mmap_phys_brk = MAP_PHYSICAL_BASE;
-    proc->mmap_regions = NULL;
-    proc->u_stack_phys = user_stack_phys;
-    proc->u_stack_pages = user_stack_pages;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
     // Signal state
@@ -390,13 +972,24 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->sid = 0;
     proc->pgid = 0;
     proc->ctty = NULL;
-    for (int j = 0; j < MAX_FD; j++) {
-        __memset(&proc->fd_table[j], 0, sizeof(file_t));
-        proc->fd_table[j].type = FD_NONE;
-    }
     list_init(&proc->run_node);
     list_init(&proc->wait_node);
-    spin_unlock(&procs_lock);
+
+    // Create stack mmap_region
+    mmap_region_t *stack_region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+    if (stack_region) {
+        __memset(stack_region, 0, sizeof(mmap_region_t));
+        stack_region->vaddr = stack_base;
+        stack_region->size = (uint64_t)user_stack_pages * PAGE_SIZE;
+        stack_region->phys = 0; // not MAP_PHYSICAL — anonymous stack
+        stack_region->next = NULL;
+        mm->mmap_regions = stack_region;
+    }
+
+    serial_printf("process_create_elf: pid=%d kstack_phys=0x%lx kstack_top=0x%lx\n",
+        proc->pid, k_stack_phys, k_stack_top);
+
+    spin_unlock(&tasks_lock);
 
     // Enqueue to target CPU's run_queue under scheduler_lock
     spin_lock(&cpu_locals[assigned_cpu].scheduler_lock);
@@ -408,7 +1001,7 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
 }
 
 // Update TSS IOPM for the current CPU to match the given process
-static void update_tss_iopm(proc_t *proc) {
+static void update_tss_iopm(task_t *proc) {
     int cpu = get_cpu_local()->cpu_id;
     tss_t *tss = &per_cpu_tss[cpu];
     if (proc->iopm) {
@@ -423,8 +1016,8 @@ static void update_tss_iopm(proc_t *proc) {
 __attribute__((no_sanitize("kernel-address")))
 void schedule() {
     int my_cpu = get_cpu_local()->cpu_id;
-    proc_t *idle = get_cpu_local()->idle_proc;
-    proc_t *prev = current_proc;
+    task_t *idle = get_cpu_local()->idle_proc;
+    task_t *prev = current_task;
 
     uint64_t flags;
     spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
@@ -438,11 +1031,11 @@ void schedule() {
             if (prev->last_sched != 0) {
                 prev->cpu_time_ns += sched_clock() - prev->last_sched;
             }
-            current_proc = idle;
+            current_task = idle;
             per_cpu_tss[my_cpu].rsp0 = idle->k_stack_top;
             get_cpu_local()->tss_rsp0 = idle->k_stack_top;
             update_tss_iopm(idle);
-            spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
+            spin_unlock(&cpu_locals[my_cpu].scheduler_lock);
             switch_to(prev, idle);
             spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
             spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
@@ -454,7 +1047,7 @@ void schedule() {
 
     // Dequeue next process from head (FIFO round-robin)
     list_node_t *next_node = list_front(&cpu_locals[my_cpu].run_queue);
-    proc_t *next = LIST_ENTRY(next_node, proc_t, run_node);
+    task_t *next = LIST_ENTRY(next_node, task_t, run_node);
     list_remove(&next->run_node);
 
     // Account prev's CPU time before switching out
@@ -473,274 +1066,53 @@ void schedule() {
     next->state = RUNNING;
     next->last_sched = sched_clock();
     cpu_locals[my_cpu].run_count--;
-    current_proc = next;
+    current_task = next;
     per_cpu_tss[my_cpu].rsp0 = next->k_stack_top;
     get_cpu_local()->tss_rsp0 = next->k_stack_top;
     update_tss_iopm(next);
 
-    // Release lock before switch_to, re-acquire after — same pattern as old BKL
-    spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
+    // Release lock but keep interrupts disabled — switch_to must run under cli
+    // to prevent interrupt handlers from corrupting the stack during RSP/CR3 switch.
+    // After switch_to returns (prev is resumed on prev's stack), re-acquire and
+    // restore interrupts via flags saved on prev's stack by spin_lock_irqsave.
+    spin_unlock(&cpu_locals[my_cpu].scheduler_lock);
     switch_to(prev, next);
     spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
     spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
 }
 
-// Free a page table page by physical address
-static void free_table_page(uint64_t phys) {
-    Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
-    bfc_free_page(p, 1);
-}
-
-// proc_reap: reclaim all resources of a process
+// task_reap: reclaim all resources of a process
 // Called by sys_exit (no-parent path) or sys_waitpid
-void proc_reap(proc_t *proc) {
-    uint64_t *pml4_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
+void task_reap(task_t *proc) {
+    pid_t owner_pid = proc->pid;
 
-    // 1. Walk user PML4 entries (0-255, canonical low half), free leaf pages + page table pages
-    for (int pml4_idx = 0; pml4_idx < 256; pml4_idx++) {
-        uint64_t pdpt_entry = pml4_virt[pml4_idx];
-        if (!(pdpt_entry & PTE_PRESENT)) continue;
-
-        uint64_t pdpt_phys = pdpt_entry & 0x000FFFFFFFFFF000ULL;
-        uint64_t *pdpt_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)pdpt_phys);
-
-        for (int pdpt_idx = 0; pdpt_idx < 512; pdpt_idx++) {
-            uint64_t pd_entry = pdpt_virt[pdpt_idx];
-            if (!(pd_entry & PTE_PRESENT)) continue;
-            // Skip huge pages (shouldn't exist in user PML4, but safe check)
-            if (pd_entry & PTE_PS) continue;
-
-            uint64_t pd_phys = pd_entry & 0x000FFFFFFFFFF000ULL;
-            uint64_t *pd_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)pd_phys);
-
-            for (int pd_idx = 0; pd_idx < 512; pd_idx++) {
-                uint64_t pt_entry = pd_virt[pd_idx];
-                if (!(pt_entry & PTE_PRESENT)) continue;
-                // Skip huge pages at PT level (2MB pages mapped as PD entries with PS bit)
-                if (pt_entry & PTE_PS) continue;
-
-                uint64_t pt_phys = pt_entry & 0x000FFFFFFFFFF000ULL;
-                uint64_t *pt_virt = (__force uint64_t *)phys_to_virt((__force phys_addr_t)pt_phys);
-
-                // Free all leaf pages in PT
-                for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
-                    uint64_t pte = pt_virt[pt_idx];
-                    if (pte & PTE_PRESENT) {
-                        // Mask: keep only physical address bits [51:12], clear flags/NX
-                        uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
-                        // Check mmap_regions: skip SHM fd mappings and MAP_PHYSICAL
-                        bool is_shared = false;
-                        for (mmap_region_t *mr = proc->mmap_regions; mr; mr = mr->next) {
-                            if (mr->shm_obj != NULL) {
-                                // This region maps an SHM fd — don't free phys pages
-                                shm_t *s = mr->shm_obj;
-                                if (s->page_list) {
-                                    // Discrete pages: check page_list
-                                    for (int pi = 0; pi < s->num_pages; pi++) {
-                                        if (leaf_phys == s->page_list[pi]) {
-                                            is_shared = true;
-                                            break;
-                                        }
-                                    }
-                                    if (is_shared) break;
-                                } else if (s->phys != 0 && s->npages > 0) {
-                                    // Contiguous pages
-                                    if (leaf_phys >= s->phys &&
-                                        leaf_phys < s->phys + s->npages * PAGE_SIZE) {
-                                        is_shared = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            // Skip MAP_PHYSICAL regions (external physical memory, e.g. framebuffer)
-                            if (mr->phys != 0 &&
-                                leaf_phys >= mr->phys &&
-                                leaf_phys < mr->phys + mr->size) {
-                                is_shared = true;
-                                break;
-                            }
-                        }
-                        if (!is_shared) {
-                            Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
-                            // Skip user stack pages — freed as one contiguous block later
-                            if (proc->u_stack_pages > 0 &&
-                                leaf_phys >= proc->u_stack_phys &&
-                                leaf_phys < proc->u_stack_phys + proc->u_stack_pages * PAGE_SIZE) {
-                                pt_virt[pt_idx] = 0;
-                                continue;
-                            }
-                            // Skip shared sig trampoline page — not owned by this process
-                            if (sig_trampoline_phys != 0 && leaf_phys == sig_trampoline_phys) {
-                                pt_virt[pt_idx] = 0;
-                                continue;
-                            }
-                            bfc_free_page(leaf_page, 1);
-                        }
-                        pt_virt[pt_idx] = 0;
-                    }
-                }
-                // Free PT page itself
-                free_table_page(pt_phys);
-                pd_virt[pd_idx] = 0;
-            }
-            // Free PD page itself
-            free_table_page(pd_phys);
-            pdpt_virt[pdpt_idx] = 0;
-        }
-        // Free PDPT page itself
-        free_table_page(pdpt_phys);
-        pml4_virt[pml4_idx] = 0;
-    }
-
-    // 2. Free PML4 page itself
-    free_table_page((__force uint64_t)proc->cr3);
-
-    // 2b. Free user stack as one contiguous block
-    if (proc->u_stack_pages > 0) {
-        Page *stack_page = &bfc_frames[PHY_TO_PAGE(proc->u_stack_phys)];
-        bfc_free_page(stack_page, proc->u_stack_pages);
-    }
-
-    // 3. Free kernel stack (2 pages)
-    // k_stack_top is the virtual address of stack top; compute physical base
+    // 1. Free kernel stack (2 pages)
     uint64_t k_stack_phys_base = (__force uint64_t)PHY_ADDR(proc->k_stack_top - 2 * PAGE_SIZE);
     Page *stack_page = &bfc_frames[PHY_TO_PAGE(k_stack_phys_base)];
     bfc_free_page(stack_page, 2);
 
-    // 4. Free mmap region metadata + release SHM references
-    mmap_region_t *region = proc->mmap_regions;
-    while (region) {
-        mmap_region_t *next = region->next;
-        // Release SHM reference if this was an SHM fd mapping
-        if (region->shm_obj) {
-            shm_put(region->shm_obj);
-        }
-        kfree(region);
-        region = next;
-    }
-
-    // 5. Handle SHM fd references in fd_table (physical pages freed by shm_put
-    //    when last reference drops — the PML4 walk in step 1 skipped SHM pages)
-    // FD_SHM entries already contributed to shm->ref_count; shm_put will
-    // free phys pages if no other process holds references.
-    for (int fd = 0; fd < MAX_FD; fd++) {
-        if (proc->fd_table[fd].type == FD_SHM && proc->fd_table[fd].shm) {
-            shm_put(proc->fd_table[fd].shm);
-            proc->fd_table[fd].shm = NULL;
-        }
-    }
-
-    // 5b. Close all open fds (pipe/file cleanup)
-    for (int fd = 0; fd < MAX_FD; fd++) {
-        if (proc->fd_table[fd].type == FD_PIPE) {
-            pipe_t *p = proc->fd_table[fd].pipe;
-            if (p) {
-                p->ref_count--;
-                // Notify blocked peer
-                wake_pipe_peers(p, proc->fd_table[fd].flags);
-                if (p->ref_count == 0) {
-                    kfree(p->buf);
-                    kfree(p);
-                }
-            }
-        } else if (proc->fd_table[fd].type == FD_REGULAR) {
-            struct inode *ip = proc->fd_table[fd].inode;
-            if (ip) inode_put(ip);
-        } else if (proc->fd_table[fd].type == FD_FILE) {
-            proc->fd_table[fd].file_data.ref_count--;
-            if (proc->fd_table[fd].file_data.ref_count == 0 && proc->fd_table[fd].file_data.fs_pid >= 0) {
-                // Notify fs_driver to close the session fd.
-                file_io_close_req req;
-                __memset(&req, 0, sizeof(req));
-                req.cmd = 4;  // FILE_CMD_CLOSE
-                req.fs_fd = proc->fd_table[fd].file_data.fs_fd;
-                kernel_msg_send(proc->fd_table[fd].file_data.fs_pid,
-                                &req, sizeof(req), NULL, 0);
-            }
-        } else if (proc->fd_table[fd].type == FD_SOCKET) {
-            struct unix_sock *sock = proc->fd_table[fd].sock;
-            if (sock) {
-                // sock_close handles peer wake + skb cleanup + ref release
-                // But since the process is dying, we need to handle this carefully.
-                // Just release the reference; sock_close's peer wake may not work
-                // if peer is already gone, but that's fine.
-                sock_close(sock);
-            }
-        } else if (proc->fd_table[fd].type == FD_DEV) {
-            struct inode *ip = proc->fd_table[fd].inode;
-            if (ip && ip->i_priv) {
-                struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-                if (ops->driver_pid == 0 && ops->close)
-                    ops->close(proc, fd);
-            }
-            if (ip) inode_put(ip);
-        } else if (proc->fd_table[fd].type == FD_TTY) {
-            pty_close_fd(proc, fd);
-        }
-        // FD_DEV and FD_NONE: no dynamic resources to free
-        // (FD_SHM already handled in step 5 above)
-        __memset(&proc->fd_table[fd], 0, sizeof(file_t));
-        proc->fd_table[fd].type = FD_NONE;
-    }
-
-    // 5c. Free IOPM bitmap
+    // 2. Free IOPM bitmap
     if (proc->iopm) {
         kfree(proc->iopm);
         proc->iopm = NULL;
     }
 
-    // 6. Clear devtmpfs entries and ISR driver PID for this PID
-    devtmpfs_cleanup_pid(proc->pid);
-
-    // 6a. Clear irq_owner entries for this PID
-    irq_owner_cleanup(proc->pid);
-
-    // 6b. Wake any processes waiting for REQ reply from this process
-    for (int i = 0; i < MAX_PROC; i++) {
-        if (procs[i].pid >= 0 &&
-            procs[i].state == BLOCKED &&
-            procs[i].wait_event == WAIT_REQ_REPLY &&
-            procs[i].req_target_pid == proc->pid) {
-            int wcpu = procs[i].assigned_cpu;
-            spin_lock(&cpu_locals[wcpu].scheduler_lock);
-            if (procs[i].state == BLOCKED && procs[i].wait_event == WAIT_REQ_REPLY) {
-                procs[i].state = READY;
-                procs[i].wait_event = WAIT_NONE;
-                procs[i].req_result = ESRCH;
-                list_push_back(&cpu_locals[wcpu].run_queue, &procs[i].run_node);
-                cpu_locals[wcpu].run_count++;
-            }
-            spin_unlock(&cpu_locals[wcpu].scheduler_lock);
+    // 3. mm_put (decrement triggers mm_release when ref_count hits 0)
+    //    mm_release will: free user pages+PML4+mmap+SHM+files+devtmpfs+irq_owner+wake waiters
+    if (proc->mm) {
+        pid_t pid_for_cleanup = owner_pid;
+        mm_t *mm = proc->mm;
+        proc->mm = NULL;
+        if (__atomic_sub_fetch(&mm->ref_count, 1, __ATOMIC_SEQ_CST) == 0) {
+            mm_release(mm, pid_for_cleanup);
         }
+    } else {
+        // idle process: still need cleanup for devtmpfs/irq_owner
+        devtmpfs_cleanup_pid(owner_pid);
+        irq_owner_cleanup(owner_pid);
     }
 
-    // 6c. Wake any processes waiting for MSG reply from this process
-    for (int i = 0; i < MAX_PROC; i++) {
-        if (procs[i].pid >= 0 &&
-            procs[i].state == BLOCKED &&
-            procs[i].wait_event == WAIT_MSG_REPLY &&
-            procs[i].msg_target_pid == proc->pid) {
-            int wcpu = procs[i].assigned_cpu;
-            spin_lock(&cpu_locals[wcpu].scheduler_lock);
-            if (procs[i].state == BLOCKED && procs[i].wait_event == WAIT_MSG_REPLY) {
-                procs[i].state = READY;
-                procs[i].wait_event = WAIT_NONE;
-                procs[i].msg_result = -ESRCH;
-                list_push_back(&cpu_locals[wcpu].run_queue, &procs[i].run_node);
-                cpu_locals[wcpu].run_count++;
-            }
-            spin_unlock(&cpu_locals[wcpu].scheduler_lock);
-        }
-    }
-
-    // 6d. Clear MSG caller state (server died before responding)
-    proc->msg_caller_pid = -1;
-
-    // 6f. Clear signal state (pending signals die with the process)
-    proc->sig.pending = 0;
-    proc->sig.blocked = 0;
-
-    // 6e. Free any RECV_MSG entries in recv queue (kfree their kmaddr)
+    // 4. Free any RECV_MSG entries in recv queue (kfree their kmaddr)
     spin_lock(&proc->recv_lock);
     uint32_t idx = proc->recv_tail;
     while (idx != proc->recv_head) {
@@ -753,8 +1125,15 @@ void proc_reap(proc_t *proc) {
     }
     spin_unlock(&proc->recv_lock);
 
+    // 5. Clear MSG caller state (server died before responding)
+    proc->msg_caller_pid = -1;
+
+    // 6. Clear signal state (pending signals die with the process)
+    proc->sig.pending = 0;
+    proc->sig.blocked = 0;
+
     // 7. Clear PCB slot
-    spin_lock(&procs_lock);
+    spin_lock(&tasks_lock);
     proc->pid = -1;
     proc->state = UNUSED;
     proc->k_rsp = 0;
@@ -762,15 +1141,11 @@ void proc_reap(proc_t *proc) {
     proc->cr3 = 0;
     proc->entry = 0;
     proc->wait_event = WAIT_NONE;
+    proc->tgid = -1;
+    proc->mm = NULL;
     proc->assigned_cpu = -1;
     proc->iopm = NULL;
-    proc->parent_pid = -1;
     proc->exit_code = 0;
-    proc->mmap_brk = 0;
-    proc->mmap_phys_brk = 0;
-    proc->mmap_regions = NULL;
-    proc->u_stack_phys = 0;
-    proc->u_stack_pages = 0;
     proc->wait_deadline = 0;
     proc->wait_timed_out = 0;
     list_init(&proc->run_node);
@@ -800,5 +1175,5 @@ void proc_reap(proc_t *proc) {
     proc->sid = 0;
     proc->pgid = 0;
     proc->ctty = NULL;
-    spin_unlock(&procs_lock);
+    spin_unlock(&tasks_lock);
 }

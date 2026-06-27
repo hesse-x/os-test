@@ -32,9 +32,9 @@
 // ===================== Helper functions =====================
 
 // Find the first free fd slot starting from min_fd. Returns fd index or -EMFILE.
-static int alloc_fd(proc_t *proc, int min_fd) {
+static int alloc_fd(task_t *proc, int min_fd) {
     for (int i = min_fd; i < MAX_FD; i++) {
-        if (proc->fd_table[i].type == FD_NONE)
+        if (proc->mm->files->fd_table[i].type == FD_NONE)
             return i;
     }
     return -EMFILE;
@@ -42,9 +42,11 @@ static int alloc_fd(proc_t *proc, int min_fd) {
 
 // Close an fd: release resources (pipe/shm/inode/socket/dev) and zero the slot.
 // FD_FILE notification is NOT handled here (different structs per caller).
+// This is a local static duplicate of the global close_fd_internal in proc.c,
+// adapted to take files_t* instead of task_t*.
 // Returns 0 on success.
-static int close_fd_internal(proc_t *proc, int fd) {
-    struct file *f = &proc->fd_table[fd];
+static int close_fd_trap(files_t *files, int fd) {
+    struct file *f = &files->fd_table[fd];
     if (f->type == FD_PIPE) {
         struct pipe *p = f->pipe;
         if (p) {
@@ -66,11 +68,11 @@ static int close_fd_internal(proc_t *proc, int fd) {
         if (ip && ip->i_priv) {
             struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
             if (ops->driver_pid == 0 && ops->close)
-                ops->close(proc, fd);
+                ops->close(current_task, fd);
         }
         if (ip) inode_put(ip);
     } else if (f->type == FD_TTY) {
-        pty_close_fd(proc, fd);
+        pty_close_fd(current_task, fd);
     }
     __memset(f, 0, sizeof(struct file));
     f->type = FD_NONE;
@@ -150,16 +152,17 @@ typedef struct file_t_io_resp {
 static uint64_t tick = 0;
 
 // Forward declaration of force_sig (defined after signal syscalls section)
-static void force_sig(proc_t *proc, int sig, int si_code, void *si_addr);
+static void force_sig(task_t *proc, int sig, int si_code, void *si_addr);
 
 void trap_dispatch(trapframe_t *tf) {
+  get_cpu_local()->cur_tf = tf;
   // Hardware IRQ: check user-space driver binding first
   if (tf->trapno >= 32 && tf->trapno < MAX_IRQ_HANDLERS &&
       __atomic_load_n(&irq_owner[tf->trapno], __ATOMIC_ACQUIRE) >= 0) {
     pid_t owner_pid = __atomic_load_n(&irq_owner[tf->trapno], __ATOMIC_ACQUIRE);
     // Direct index by PID — no scan needed
     if (owner_pid >= 0 && owner_pid < MAX_PROC) {
-      proc_t *target = &procs[owner_pid];
+      task_t *target = &tasks[owner_pid];
 
       // Enqueue RECV_IRQ message to target's recv queue
       spin_lock(&target->recv_lock);
@@ -247,9 +250,9 @@ void trap_dispatch(trapframe_t *tf) {
   uint64_t cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(cr3));
   serial_printf("\n  cr3=0x%016lX", cr3);
-  if (current_proc) {
+  if (current_task) {
     serial_printf(" pid=%d proc_cr3=0x%016lX",
-                  current_proc->pid, current_proc->cr3);
+                  current_task->pid, current_task->cr3);
   }
   serial_printf("\n");
 
@@ -290,6 +293,39 @@ void trap_dispatch(trapframe_t *tf) {
     }
   }
 
+  // === DEBUG: dump faulting instruction bytes and kernel stack ===
+  if (tf->cs == 0x08) {
+    // Dump 16 bytes at faulting rip (what "code" is the CPU trying to execute?)
+    serial_printf("  RIP bytes:");
+    uint8_t *rip_ptr = (uint8_t *)tf->rip;
+    for (int i = 0; i < 16 && rip_ptr; i++) {
+      serial_printf(" %02X", rip_ptr[i]);
+    }
+    serial_printf("\n");
+
+    // Dump current_task kernel stack top area (trapframe + switch_frame)
+    if (current_task && current_task->k_stack_top) {
+      uint64_t stack_base = current_task->k_stack_top - 2 * PAGE_SIZE;
+      uint64_t *sp = (uint64_t *)stack_base;
+      serial_printf("  Kernel stack dump (bottom→top):\n");
+      // Only dump the top 24 words (176 bytes trapframe + 56 bytes switch_frame)
+      int start = (2 * PAGE_SIZE / 8) - 24;
+      for (int i = start; i < 2 * PAGE_SIZE / 8; i++) {
+        serial_printf("    [0x%016lX] 0x%016lX\n", stack_base + i * 8, sp[i]);
+      }
+      // Also dump k_rsp and the words around it
+      serial_printf("  k_rsp=0x%016lX k_stack_top=0x%016lX\n",
+                    current_task->k_rsp, current_task->k_stack_top);
+      // Dump 8 words starting at k_rsp
+      serial_printf("  At k_rsp:\n");
+      uint64_t *krsp_ptr = (uint64_t *)current_task->k_rsp;
+      for (int i = 0; i < 16; i++) {
+        serial_printf("    [0x%016lX] 0x%016lX\n",
+                      current_task->k_rsp + i * 8, krsp_ptr[i]);
+      }
+    }
+  }
+
   if (tf->cs == 0x2B) {
     // User-mode exception: translate to signal instead of killing process
     int sig = 0;
@@ -322,9 +358,9 @@ void trap_dispatch(trapframe_t *tf) {
     }
 
     serial_printf("exception: pid=%d vector=%d sig=%d addr=%p\n",
-        current_proc->pid, tf->trapno, sig, si_addr);
+        current_task->pid, tf->trapno, sig, si_addr);
 
-    force_sig(current_proc, sig, si_code, si_addr);
+    force_sig(current_task, sig, si_code, si_addr);
     return;  // Don't kill process; check_pending_signals will handle it
   }
   // Kernel-mode exception: unrecoverable, halt
@@ -347,7 +383,7 @@ static void timer_handler(trapframe_t *tf) {
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
   list_node_t *head = &cpu_locals[cpu].timer_queue;
   while (!list_empty(head)) {
-    proc_t *p = LIST_ENTRY(list_front(head), proc_t, wait_node);
+    task_t *p = LIST_ENTRY(list_front(head), task_t, wait_node);
     if (p->wait_deadline > now) break;  // sorted, stop at first unexpired
     list_remove(&p->wait_node);
     if (p->state == BLOCKED) {
@@ -437,7 +473,7 @@ void sig_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 57
+#define NR_SYSCALL 59
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -447,7 +483,7 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_irq_bind,       // 5
     sys_exit,           // 6
     sys_waitpid,        // 7
-    sys_spawn,          // 8
+    NULL,               // 8 (sys_spawn removed, use fork+execve)
     sys_mmap,           // 9
     sys_munmap,         // 10
     sys_shm_create,     // 11
@@ -496,9 +532,12 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_ioctl,          // 54
     sys_fstat,          // 55
     sys_fdev_pid,       // 56
+    sys_fork,           // 57
+    sys_execve,         // 58
 };
 
 void syscall_dispatch(trapframe_t *tf) {
+    get_cpu_local()->cur_tf = tf;
     if (tf->rax < NR_SYSCALL) {
         tf->rax = syscall_table[tf->rax](
             tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
@@ -542,7 +581,7 @@ void shm_put(struct shm *shm) {
 
 // sys_getpid() — syscall 0
 uint64_t sys_getpid(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
-    return (uint64_t)current_proc->pid;
+    return (uint64_t)current_task->pid;
 }
 
 // sys_yield() — syscall 1
@@ -571,7 +610,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         (__force uint64_t)data_buf + data_buf_len > 0xFFFFFFFF80000000ULL))
         return (uint64_t)-EFAULT;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
     int cpu = proc->assigned_cpu;
     while (1) {
         // Try to dequeue a message from recv queue
@@ -707,14 +746,14 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
         rep_ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
-    proc_t *target = &procs[target_pid];
+    task_t *target = &tasks[target_pid];
     if (target->pid != target_pid) return (uint64_t)-ESRCH;
 
     // Build RECV_REQ message
     uint8_t msg[RECV_MSG_SIZE];
     recv_msg_t *hdr = (recv_msg_t *)msg;
     hdr->type = RECV_REQ;
-    hdr->src = (uint32_t)current_proc->pid;
+    hdr->src = (uint32_t)current_task->pid;
     // Copy request payload from user space
     copy_from_user(hdr->data, request, 56);
 
@@ -729,7 +768,7 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
     __memcpy(target->recv_buf[target->recv_head], msg, RECV_MSG_SIZE);
     target->recv_head = next;
     spin_unlock(&target->recv_lock);
-    serial_printf("sys_req: from pid=%d to pid=%d (REQ enqueued)\n", current_proc->pid, target_pid);
+    serial_printf("sys_req: from pid=%d to pid=%d (REQ enqueued)\n", current_task->pid, target_pid);
 
     // Wake target if in WAIT_RECV
     int target_cpu = target->assigned_cpu;
@@ -748,7 +787,7 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
     spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
 
     // Block caller on WAIT_REQ_REPLY
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
     proc->state = BLOCKED;
     proc->wait_event = WAIT_REQ_REPLY;
     proc->wait_timed_out = 0;
@@ -784,11 +823,11 @@ uint64_t sys_resp(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
     pid_t caller_pid = proc->req_caller_pid;
     if (caller_pid < 0 || caller_pid >= MAX_PROC) return (uint64_t)-EINVAL;
 
-    proc_t *caller = &procs[caller_pid];
+    task_t *caller = &tasks[caller_pid];
     if (caller->pid != caller_pid) return (uint64_t)-ESRCH;
 
     // Copy reply data to caller's reply buffer (user space)
@@ -830,7 +869,7 @@ uint64_t sys_irq_bind(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, u
     if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return (uint64_t)-EINVAL;
     // Mutual exclusion: cannot share IRQ with kernel ISR (e.g., serial dev)
     if (irq_handlers[irq] != NULL) return (uint64_t)-EBUSY;
-    __atomic_store_n(&irq_owner[irq], current_proc->pid, __ATOMIC_RELEASE);
+    __atomic_store_n(&irq_owner[irq], current_task->pid, __ATOMIC_RELEASE);
 
     // Auto-unmask I/O APIC for this IRQ (GSI = vector - 32)
     int gsi = irq - 32;
@@ -847,7 +886,7 @@ uint64_t sys_irq_bind(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, u
 
 // sys_exit(exit_code) — syscall 6 (进程退出)
 uint64_t sys_exit(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
     int32_t exit_code = (int32_t)arg1;
     proc->exit_code = exit_code;
 
@@ -859,18 +898,18 @@ uint64_t sys_exit(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
 
     // Orphan adoption: reparent children to init
     if (init_pid >= 0) {
-        spin_lock(&procs_lock);
+        spin_lock(&tasks_lock);
         for (int i = 0; i < MAX_PROC; i++) {
-            if (procs[i].pid >= 0 && procs[i].parent_pid == proc->pid) {
-                procs[i].parent_pid = init_pid;
+            if (tasks[i].pid >= 0 && tasks[i].mm && tasks[i].mm->parent_pid == proc->pid) {
+                tasks[i].mm->parent_pid = init_pid;
             }
         }
-        spin_unlock(&procs_lock);
+        spin_unlock(&tasks_lock);
     }
 
-    if (proc->parent_pid < 0) {
+    if (!proc->mm || proc->mm->parent_pid < 0) {
         // No parent: directly reap all resources
-        proc_reap(proc);
+        task_reap(proc);
     } else {
         // Has parent: become ZOMBIE, wait for sys_waitpid to reap
         int cpu = proc->assigned_cpu;
@@ -880,7 +919,7 @@ uint64_t sys_exit(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
         spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
         // Notify parent via SIGCHLD (replaces old RECV_NOTIFY)
         {
-            proc_t *parent = &procs[proc->parent_pid];
+            task_t *parent = &tasks[proc->mm->parent_pid];
             __atomic_or_fetch(&parent->sig.pending, 1ULL << SIGCHLD, __ATOMIC_RELEASE);
 
             // Wake parent if in WAIT_CHILD (waitpid)
@@ -903,7 +942,7 @@ uint64_t sys_exit(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
 
         // Wake any processes waiting for our REQ reply
         for (int i = 0; i < MAX_PROC; i++) {
-            proc_t *waiter = &procs[i];
+            task_t *waiter = &tasks[i];
             if (waiter->pid >= 0 &&
                 waiter->state == BLOCKED &&
                 waiter->wait_event == WAIT_REQ_REPLY &&
@@ -934,25 +973,25 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
         // Wait for any child to become ZOMBIE
         while (1) {
             // Scan for a ZOMBIE child and count total children
-            spin_lock(&procs_lock);
-            proc_t *zombie = NULL;
+            spin_lock(&tasks_lock);
+            task_t *zombie = NULL;
             bool has_children = false;
             for (int i = 0; i < MAX_PROC; i++) {
-                if (procs[i].pid >= 0 && procs[i].parent_pid == current_proc->pid) {
+                if (tasks[i].pid >= 0 && tasks[i].mm && tasks[i].mm->parent_pid == current_task->pid) {
                     has_children = true;
-                    if (procs[i].state == ZOMBIE) {
-                        zombie = &procs[i];
+                    if (tasks[i].state == ZOMBIE) {
+                        zombie = &tasks[i];
                         break;
                     }
                 }
             }
             if (!has_children) {
-                spin_unlock(&procs_lock);
+                spin_unlock(&tasks_lock);
                 return (uint64_t)-ECHILD;
             }
             if (zombie) {
                 int cpu = zombie->assigned_cpu;
-                spin_unlock(&procs_lock);
+                spin_unlock(&tasks_lock);
                 uint64_t flags;
                 spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
                 if (zombie->state == ZOMBIE) {
@@ -969,48 +1008,48 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
                         (ptr_val + sizeof(int32_t) - 1) < 0xFFFFFFFF80000000ULL)
                         *(__force int32_t *)exit_code_ptr = zombie->exit_code;
                 }
-                proc_reap(zombie);
+                task_reap(zombie);
                 return (uint64_t)zpid;
             }
-            spin_unlock(&procs_lock);
+            spin_unlock(&tasks_lock);
 
             // No zombie child: block on WAIT_CHILD
             // Must set wait_event + BLOCKED under parent's scheduler_lock
             // to prevent race with child's sys_exit checking our state.
-            int pcpu = current_proc->assigned_cpu;
+            int pcpu = current_task->assigned_cpu;
             spin_lock(&cpu_locals[pcpu].scheduler_lock);
             // Re-scan under parent lock to avoid missed wakeup
-            spin_lock(&procs_lock);
+            spin_lock(&tasks_lock);
             zombie = NULL;
             has_children = false;
             for (int i = 0; i < MAX_PROC; i++) {
-                if (procs[i].pid >= 0 && procs[i].parent_pid == current_proc->pid) {
+                if (tasks[i].pid >= 0 && tasks[i].mm && tasks[i].mm->parent_pid == current_task->pid) {
                     has_children = true;
-                    if (procs[i].state == ZOMBIE) {
-                        zombie = &procs[i];
+                    if (tasks[i].state == ZOMBIE) {
+                        zombie = &tasks[i];
                         break;
                     }
                 }
             }
             if (!has_children) {
-                spin_unlock(&procs_lock);
+                spin_unlock(&tasks_lock);
                 spin_unlock(&cpu_locals[pcpu].scheduler_lock);
                 return (uint64_t)-ECHILD;
             }
             if (zombie) {
-                spin_unlock(&procs_lock);
+                spin_unlock(&tasks_lock);
                 spin_unlock(&cpu_locals[pcpu].scheduler_lock);
                 continue;  // retry the outer loop
             }
-            spin_unlock(&procs_lock);
-            current_proc->wait_event = WAIT_CHILD;
-            current_proc->state = BLOCKED;
+            spin_unlock(&tasks_lock);
+            current_task->wait_event = WAIT_CHILD;
+            current_task->state = BLOCKED;
             spin_unlock(&cpu_locals[pcpu].scheduler_lock);
             schedule();
             // EINTR check
             {
-                uint64_t pend = __atomic_load_n(&current_proc->sig.pending, __ATOMIC_ACQUIRE);
-                uint64_t deliv = pend & ~current_proc->sig.blocked;
+                uint64_t pend = __atomic_load_n(&current_task->sig.pending, __ATOMIC_ACQUIRE);
+                uint64_t deliv = pend & ~current_task->sig.blocked;
                 deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
                 if (deliv) return (uint64_t)-EINTR;
             }
@@ -1019,15 +1058,15 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
 
     if (pid < 0 || pid >= MAX_PROC) return 0;  // EINVAL
 
-    proc_t *child = &procs[pid];
+    task_t *child = &tasks[pid];
 
-    // Validate: pid must be our child (under procs_lock to prevent reap)
-    spin_lock(&procs_lock);
-    if (child->pid != pid || child->parent_pid != current_proc->pid) {
-        spin_unlock(&procs_lock);
+    // Validate: pid must be our child (under tasks_lock to prevent reap)
+    spin_lock(&tasks_lock);
+    if (child->pid != pid || !child->mm || child->mm->parent_pid != current_task->pid) {
+        spin_unlock(&tasks_lock);
         return 0;  // ECHILD
     }
-    spin_unlock(&procs_lock);
+    spin_unlock(&tasks_lock);
 
     while (1) {
         // Check if child is ZOMBIE under its scheduler_lock
@@ -1043,9 +1082,11 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
         spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
 
         // Child not yet exited: block on WAIT_CHILD
-        // Must set wait_event + BLOCKED under parent's scheduler_lock
-        // to prevent race with child's sys_exit checking our state.
-        int pcpu = current_proc->assigned_cpu;
+        // Must set wait_event + BLOCKED under both parent and child locks
+        // (or at least before releasing child's lock) to prevent race:
+        // child on another CPU could exit, set ZOMBIE, check parent state,
+        // find it still RUNNING, and never wake this process.
+        int pcpu = current_task->assigned_cpu;
         if (pcpu == cpu) {
             // Same CPU: single lock covers both parent and child state
             spin_lock(&cpu_locals[pcpu].scheduler_lock);
@@ -1054,8 +1095,8 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
                 spin_unlock(&cpu_locals[pcpu].scheduler_lock);
                 break;
             }
-            current_proc->wait_event = WAIT_CHILD;
-            current_proc->state = BLOCKED;
+            current_task->wait_event = WAIT_CHILD;
+            current_task->state = BLOCKED;
             spin_unlock(&cpu_locals[pcpu].scheduler_lock);
         } else {
             // Different CPUs: need both locks to prevent race
@@ -1067,29 +1108,29 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
                 spin_unlock(&cpu_locals[pcpu].scheduler_lock);
                 break;
             }
+            current_task->wait_event = WAIT_CHILD;
+            current_task->state = BLOCKED;
             spin_unlock(&cpu_locals[cpu].scheduler_lock);
-            current_proc->wait_event = WAIT_CHILD;
-            current_proc->state = BLOCKED;
             spin_unlock(&cpu_locals[pcpu].scheduler_lock);
         }
         schedule();
 
         // EINTR check
         {
-            uint64_t pend = __atomic_load_n(&current_proc->sig.pending, __ATOMIC_ACQUIRE);
-            uint64_t deliv = pend & ~current_proc->sig.blocked;
+            uint64_t pend = __atomic_load_n(&current_task->sig.pending, __ATOMIC_ACQUIRE);
+            uint64_t deliv = pend & ~current_task->sig.blocked;
             deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
             if (deliv) return (uint64_t)-EINTR;
         }
 
         // Woken up by notify — re-validate child still exists
-        spin_lock(&procs_lock);
+        spin_lock(&tasks_lock);
         if (child->pid != pid) {
             // Child was reaped by someone else — should not happen
-            spin_unlock(&procs_lock);
+            spin_unlock(&tasks_lock);
             return 0;  // ECHILD
         }
-        spin_unlock(&procs_lock);
+        spin_unlock(&tasks_lock);
     }
 
     // Reap child resources
@@ -1100,55 +1141,8 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
             return 0;  // EFAULT
         *(__force int32_t *)exit_code_ptr = child->exit_code;
     }
-    proc_reap(child);
+    task_reap(child);
     return (uint64_t)pid;
-}
-
-uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
-    const uint8_t __user *elf_data_user = (const uint8_t __user * __force)arg1;
-    uint64_t elf_size = arg2;
-
-    // Basic parameter validation
-    if (!elf_data_user || elf_size == 0)
-        return (uint64_t)-EINVAL;
-
-    // Validate user pointer range
-    uint64_t ptr_start = (__force uint64_t)elf_data_user;
-    uint64_t ptr_end = ptr_start + elf_size;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
-
-    // Copy ELF data from user space to kernel buffer to prevent TOCTOU
-    uint8_t *elf_buf = (uint8_t *)kmalloc(elf_size);
-    if (!elf_buf) return (uint64_t)-ENOMEM;
-    copy_from_user(elf_buf, elf_data_user, elf_size);
-
-    // Create child process from ELF
-    proc_t *child = process_create_elf(elf_buf, elf_size);
-    kfree(elf_buf);
-    if (!child) return (uint64_t)-ENOMEM;
-
-    child->parent_pid = current_proc->pid;
-
-    // Inherit all open fds from parent (including fd 0/1 for pipe stdin/stdout)
-    for (int fd = 0; fd < MAX_FD; fd++) {
-        if (current_proc->fd_table[fd].type != FD_NONE) {
-            child->fd_table[fd] = current_proc->fd_table[fd];
-            if (child->fd_table[fd].type == FD_PIPE) {
-                child->fd_table[fd].pipe->ref_count++;
-            } else if (child->fd_table[fd].type == FD_FILE) {
-                child->fd_table[fd].file_data.ref_count++;
-            } else if (child->fd_table[fd].type == FD_REGULAR ||
-                       child->fd_table[fd].type == FD_DEV ||
-                       child->fd_table[fd].type == FD_DIR) {
-                if (child->fd_table[fd].inode) inode_get(child->fd_table[fd].inode);
-            } else if (child->fd_table[fd].type == FD_TTY) {
-                pty_dup_fd(current_proc, fd, fd);
-            }
-        }
-    }
-
-    return (uint64_t)child->pid;
 }
 
 // sys_mmap(addr, size, prot, flags, fd, offset) — syscall 9 (内存映射)
@@ -1163,7 +1157,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
     int fd = (int)arg5;
     uint64_t offset = arg6;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
     uint64_t *pml4 = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
     // MAP_SHARED (0x01) + fd ≥ 0: SHM or DEV fd mapping
@@ -1171,8 +1165,8 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         if (fd >= MAX_FD) return 0;
 
         // FD_DEV: dispatch to device mmap handler (devtmpfs path with inode)
-        if (proc->fd_table[fd].type == FD_DEV) {
-            struct inode *ip = proc->fd_table[fd].inode;
+        if (proc->mm->files->fd_table[fd].type == FD_DEV) {
+            struct inode *ip = proc->mm->files->fd_table[fd].inode;
             if (ip && ip->i_priv) {
                 struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
                 if (ops->driver_pid == 0 && ops->mmap) {
@@ -1183,14 +1177,14 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                 if (ops->driver_pid > 0) {
                     pid_t drv_pid = ops->driver_pid;
                     if (drv_pid < 0 || drv_pid >= MAX_PROC) return 0;
-                    proc_t *drv_proc = &procs[drv_pid];
+                    task_t *drv_proc = &tasks[drv_pid];
                     if (drv_proc->pid != drv_pid) return 0;
 
                     // Find driver's FD_SHM
                     struct shm *target_shm = NULL;
                     for (int i = 0; i < MAX_FD; i++) {
-                        if (drv_proc->fd_table[i].type == FD_SHM) {
-                            target_shm = drv_proc->fd_table[i].shm;
+                        if (drv_proc->mm && drv_proc->mm->files->fd_table[i].type == FD_SHM) {
+                            target_shm = drv_proc->mm->files->fd_table[i].shm;
                             break;
                         }
                     }
@@ -1203,7 +1197,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                     size_t total_pages = npages + list_pages;
                     size = total_pages * PAGE_SIZE;
 
-                    uint64_t vaddr = proc->mmap_brk;
+                    uint64_t vaddr = proc->mm->mmap_brk;
                     uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
 
                     for (size_t i = 0; i < total_pages; i++) {
@@ -1234,9 +1228,9 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                     region->size = size;
                     region->phys = 0;
                     region->shm_obj = target_shm;  // ref already bumped above
-                    region->next = proc->mmap_regions;
-                    proc->mmap_regions = region;
-                    proc->mmap_brk = vaddr + size;
+                    region->next = proc->mm->mmap_regions;
+                    proc->mm->mmap_regions = region;
+                    proc->mm->mmap_brk = vaddr + size;
 
                     return vaddr;
                 }
@@ -1245,9 +1239,9 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         }
 
         // FD_SHM: existing SHM mapping path
-        if (proc->fd_table[fd].type != FD_SHM)
+        if (proc->mm->files->fd_table[fd].type != FD_SHM)
             return 0;
-        struct shm *shm = proc->fd_table[fd].shm;
+        struct shm *shm = proc->mm->files->fd_table[fd].shm;
         if (!shm) return 0;
 
         // Total allocated pages: contiguous + discrete
@@ -1257,7 +1251,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         size = total_pages * PAGE_SIZE;
 
         // Map SHM pages into user address space at mmap_brk
-        uint64_t vaddr = proc->mmap_brk;
+        uint64_t vaddr = proc->mm->mmap_brk;
         uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
 
         for (size_t i = 0; i < total_pages; i++) {
@@ -1288,9 +1282,9 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         region->size = size;
         region->phys = 0;
         region->shm_obj = shm_get(shm);  // +1 ref for mmap
-        region->next = proc->mmap_regions;
-        proc->mmap_regions = region;
-        proc->mmap_brk = vaddr + size;
+        region->next = proc->mm->mmap_regions;
+        proc->mm->mmap_regions = region;
+        proc->mm->mmap_brk = vaddr + size;
 
         return vaddr;
     }
@@ -1302,7 +1296,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
     if (flags & MAP_PHYSICAL) {
         // MAP_PHYSICAL: map physical address range to user address space
         // Use mmap_phys_brk (high fixed base) to avoid conflict with SHM/heap
-        uint64_t vaddr = proc->mmap_phys_brk;
+        uint64_t vaddr = proc->mm->mmap_phys_brk;
         uint64_t phys_start = ALIGN_DOWN(offset, PAGE_SIZE);
         uint64_t phys_end = ALIGN_UP(offset + size, PAGE_SIZE);
         size_t npages = (phys_end - phys_start) / PAGE_SIZE;
@@ -1333,16 +1327,16 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         region->size = npages * PAGE_SIZE;
         region->phys = phys_start;  // non-zero = MAP_PHYSICAL, don't free in proc_reap
         region->shm_obj = NULL;
-        region->next = proc->mmap_regions;
-        proc->mmap_regions = region;
-        proc->mmap_phys_brk = vaddr + npages * PAGE_SIZE;
+        region->next = proc->mm->mmap_regions;
+        proc->mm->mmap_regions = region;
+        proc->mm->mmap_phys_brk = vaddr + npages * PAGE_SIZE;
 
         return vaddr;
     }
 
     // Anonymous private mapping: allocate new pages
     size = ALIGN_UP(size, PAGE_SIZE);
-    uint64_t vaddr = proc->mmap_brk;
+    uint64_t vaddr = proc->mm->mmap_brk;
     uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
 
     size_t npages = size / PAGE_SIZE;
@@ -1387,9 +1381,9 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
     region->size = size;
     region->phys = 0;
     region->shm_obj = NULL;
-    region->next = proc->mmap_regions;
-    proc->mmap_regions = region;
-    proc->mmap_brk = vaddr + size;
+    region->next = proc->mm->mmap_regions;
+    proc->mm->mmap_regions = region;
+    proc->mm->mmap_brk = vaddr + size;
 
     kfree(phys_pages);
     return vaddr;
@@ -1403,11 +1397,11 @@ uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, ui
 
     if (size == 0) return (uint64_t)-EINVAL;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
     uint64_t *pml4 = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
     // 查找匹配的 mmap_region_t
-    mmap_region_t **pp = &proc->mmap_regions;
+    mmap_region_t **pp = &proc->mm->mmap_regions;
     while (*pp) {
         if ((*pp)->vaddr == addr) {
             mmap_region_t *region = *pp;
@@ -1463,7 +1457,7 @@ void notify_and_wake(pid_t target_pid, recv_msg_t *msg) {
         serial_printf("notify_and_wake: bad pid %d\n", target_pid);
         return;
     }
-    proc_t *target = &procs[target_pid];
+    task_t *target = &tasks[target_pid];
     if (target->pid != target_pid) {
         serial_printf("notify_and_wake: pid mismatch %d vs %d\n", target_pid, target->pid);
         return;
@@ -1542,7 +1536,6 @@ uint64_t sys_debug_print(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u
     char kbuf[257];
     copy_from_user(kbuf, buf, len);
     kbuf[len] = '\0';
-    serial_printf("DBG:%s", kbuf);
     return 0;
 }
 
@@ -1561,19 +1554,19 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
     if (fs_fd < 0) return (uint64_t)-EINVAL;
     if (flags & ~(O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK)) return (uint64_t)-EINVAL;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // Find free fd slot (start from 3 to reserve 0/1/2 for stdin/stdout/stderr)
     int fd = alloc_fd(proc, 3);
     if (fd < 0) return (uint64_t)-EMFILE;
 
-    proc->fd_table[fd].type = FD_FILE;
-    proc->fd_table[fd].flags = flags;
-    proc->fd_table[fd].file_data.fs_pid = fs_pid;
-    proc->fd_table[fd].file_data.fs_fd = fs_fd;
-    proc->fd_table[fd].file_data._offset = offset;
-    proc->fd_table[fd].file_data.file_size = file_size;
-    proc->fd_table[fd].file_data.ref_count = 1;
+    proc->mm->files->fd_table[fd].type = FD_FILE;
+    proc->mm->files->fd_table[fd].flags = flags;
+    proc->mm->files->fd_table[fd].file_data.fs_pid = fs_pid;
+    proc->mm->files->fd_table[fd].file_data.fs_fd = fs_fd;
+    proc->mm->files->fd_table[fd].file_data._offset = offset;
+    proc->mm->files->fd_table[fd].file_data.file_size = file_size;
+    proc->mm->files->fd_table[fd].file_data.ref_count = 1;
 
     return (uint64_t)fd;
 }
@@ -1586,13 +1579,13 @@ uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
     uint32_t cmd = (uint32_t)arg2;
     void __user *arg = (void __user * __force)arg3;
 
-    proc_t *proc = current_proc;
-    if (fd < 0 || fd >= MAX_FD || proc->fd_table[fd].type == FD_NONE)
+    task_t *proc = current_task;
+    if (fd < 0 || fd >= MAX_FD || proc->mm->files->fd_table[fd].type == FD_NONE)
         return (uint64_t)(-(uint64_t)EBADF);
 
-    switch (proc->fd_table[fd].type) {
+    switch (proc->mm->files->fd_table[fd].type) {
     case FD_DEV: {
-        struct inode *ip = proc->fd_table[fd].inode;
+        struct inode *ip = proc->mm->files->fd_table[fd].inode;
         if (!ip || !ip->i_priv) return (uint64_t)(-(uint64_t)ENODEV);
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         if (ops->driver_pid == 0) {
@@ -1647,7 +1640,7 @@ uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
         // Validate target PID
         if (target_pid < 0 || target_pid >= MAX_PROC)
             return (uint64_t)(-(uint64_t)ESRCH);
-        proc_t *target = &procs[target_pid];
+        task_t *target = &tasks[target_pid];
         if (target->pid != target_pid)
             return (uint64_t)(-(uint64_t)ESRCH);
 
@@ -1655,7 +1648,7 @@ uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
         uint8_t msg[RECV_MSG_SIZE];
         recv_msg_t *hdr = (recv_msg_t *)msg;
         hdr->type = RECV_REQ;
-        hdr->src = (uint32_t)current_proc->pid;
+        hdr->src = (uint32_t)current_task->pid;
         __memcpy(hdr->data, req_data, 56);
 
         // Enqueue to target's recv queue
@@ -1724,7 +1717,7 @@ uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
         return (uint64_t)(long)ioctl_result;
     }
     case FD_TTY: {
-        struct pty *pty = proc->fd_table[fd].pty;
+        struct pty *pty = proc->mm->files->fd_table[fd].pty;
         if (!pty) return (uint64_t)(-(uint64_t)EBADF);
         return (uint64_t)pty_ioctl(pty, cmd, arg);
     }
@@ -1746,8 +1739,8 @@ uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
     int fd = (int)arg1;
     struct kstat __user *ust = (struct kstat __user * __force)arg2;
 
-    proc_t *proc = current_proc;
-    if (fd < 0 || fd >= MAX_FD || proc->fd_table[fd].type == FD_NONE)
+    task_t *proc = current_task;
+    if (fd < 0 || fd >= MAX_FD || proc->mm->files->fd_table[fd].type == FD_NONE)
         return (uint64_t)(-(uint64_t)EBADF);
 
     struct kstat ks;
@@ -1755,9 +1748,9 @@ uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
     ks.st_nlink = 1;
     ks.st_blksize = 512;
 
-    switch (proc->fd_table[fd].type) {
+    switch (proc->mm->files->fd_table[fd].type) {
     case FD_REGULAR: {
-        struct inode *ip = proc->fd_table[fd].inode;
+        struct inode *ip = proc->mm->files->fd_table[fd].inode;
         if (!ip) return (uint64_t)(-(uint64_t)EBADF);
         ks.st_ino = ip->ino;
         ks.st_size = ip->size;
@@ -1766,7 +1759,7 @@ uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
         break;
     }
     case FD_DIR: {
-        struct inode *ip = proc->fd_table[fd].inode;
+        struct inode *ip = proc->mm->files->fd_table[fd].inode;
         if (!ip) return (uint64_t)(-(uint64_t)EBADF);
         ks.st_ino = ip->ino;
         ks.st_mode = S_IFDIR | 0755;
@@ -1774,7 +1767,7 @@ uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
         break;
     }
     case FD_DEV: {
-        struct inode *ip = proc->fd_table[fd].inode;
+        struct inode *ip = proc->mm->files->fd_table[fd].inode;
         if (!ip) return (uint64_t)(-(uint64_t)EBADF);
         ks.st_ino = ip->ino;
         if (ip->i_priv && ((struct dev_ops *)ip->i_priv)->device_type == DEV_BLOCK)
@@ -1807,11 +1800,11 @@ uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
 uint64_t sys_fdev_pid(uint64_t arg1, uint64_t _u2, uint64_t _u3,
                        uint64_t _u4, uint64_t _u5, uint64_t _u6) {
     int fd = (int)arg1;
-    proc_t *proc = current_proc;
-    if (fd < 0 || fd >= MAX_FD || proc->fd_table[fd].type != FD_DEV)
+    task_t *proc = current_task;
+    if (fd < 0 || fd >= MAX_FD || proc->mm->files->fd_table[fd].type != FD_DEV)
         return (uint64_t)(-(uint64_t)EBADF);
 
-    struct inode *ip = proc->fd_table[fd].inode;
+    struct inode *ip = proc->mm->files->fd_table[fd].inode;
     if (!ip || !ip->i_priv) return 0;  // kernel device, no driver_pid
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
     return (uint64_t)ops->driver_pid;
@@ -1825,7 +1818,7 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3,
     size = ALIGN_UP(size, PAGE_SIZE);
     size_t npages = size / PAGE_SIZE;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // Allocate physical pages
     Page *pages = bfc_alloc_page(npages);
@@ -1860,9 +1853,9 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3,
         return 0;
     }
 
-    proc->fd_table[fd].type = FD_SHM;
-    proc->fd_table[fd].flags = O_RDWR;
-    proc->fd_table[fd].shm = shm;
+    proc->mm->files->fd_table[fd].type = FD_SHM;
+    proc->mm->files->fd_table[fd].flags = O_RDWR;
+    proc->mm->files->fd_table[fd].shm = shm;
 
     return (uint64_t)fd;
 }
@@ -1874,7 +1867,7 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3,
 // Transitional: caller must sys_mmap(fd, ...) to get vaddr
 uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     int mode = (int)arg2;
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
     struct shm *target_shm = NULL;
 
     if (mode == 1) {
@@ -1892,13 +1885,13 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2
         pid_t target_pid = (pid_t)arg1;
         if (target_pid < 0 || target_pid >= MAX_PROC) return 0;
 
-        proc_t *target = &procs[target_pid];
+        task_t *target = &tasks[target_pid];
         if (target->pid != target_pid) return 0;
 
         // Scan target's fd_table for FD_SHM
         for (int i = 0; i < MAX_FD; i++) {
-            if (target->fd_table[i].type == FD_SHM) {
-                target_shm = target->fd_table[i].shm;
+            if (target->mm && target->mm->files->fd_table[i].type == FD_SHM) {
+                target_shm = target->mm->files->fd_table[i].shm;
                 break;
             }
         }
@@ -1915,9 +1908,9 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2
         return 0;
     }
 
-    proc->fd_table[fd].type = FD_SHM;
-    proc->fd_table[fd].flags = O_RDWR;
-    proc->fd_table[fd].shm = target_shm;
+    proc->mm->files->fd_table[fd].type = FD_SHM;
+    proc->mm->files->fd_table[fd].flags = O_RDWR;
+    proc->mm->files->fd_table[fd].shm = target_shm;
 
     return (uint64_t)fd;
 }
@@ -1934,7 +1927,7 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
     if (flags & ~(MFD_CLOEXEC | MFD_ALLOW_SEALING))
         return 0;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // Allocate shm struct (empty — no physical pages yet)
     struct shm *shm = (struct shm *)kmalloc(sizeof(struct shm));
@@ -1976,9 +1969,9 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
         return 0;
     }
 
-    proc->fd_table[fd].type = FD_SHM;
-    proc->fd_table[fd].flags = O_RDWR | ((flags & MFD_CLOEXEC) ? FD_CLOEXEC : 0);
-    proc->fd_table[fd].shm = shm;
+    proc->mm->files->fd_table[fd].type = FD_SHM;
+    proc->mm->files->fd_table[fd].flags = O_RDWR | ((flags & MFD_CLOEXEC) ? FD_CLOEXEC : 0);
+    proc->mm->files->fd_table[fd].shm = shm;
 
     return (uint64_t)fd;
 }
@@ -2031,11 +2024,11 @@ uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2,
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
 
-    proc_t *proc = current_proc;
-    if (proc->fd_table[fd].type != FD_SHM) return (uint64_t)-EINVAL;
-    if (!proc->fd_table[fd].shm) return (uint64_t)-EBADF;
+    task_t *proc = current_task;
+    if (proc->mm->files->fd_table[fd].type != FD_SHM) return (uint64_t)-EINVAL;
+    if (!proc->mm->files->fd_table[fd].shm) return (uint64_t)-EBADF;
 
-    struct shm *shm = proc->fd_table[fd].shm;
+    struct shm *shm = proc->mm->files->fd_table[fd].shm;
 
     if (size < 0) return (uint64_t)-EINVAL;
 
@@ -2161,7 +2154,7 @@ uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2,
 // For WAIT_RECV: sets recv_intr flag so sys_recv returns -EINTR (ISR notification).
 void wake_process(pid_t pid) {
     if (pid < 0 || pid >= MAX_PROC) return;
-    proc_t *target = &procs[pid];
+    task_t *target = &tasks[pid];
 
     int target_cpu = target->assigned_cpu;
     spin_lock(&cpu_locals[target_cpu].scheduler_lock);
@@ -2194,7 +2187,7 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || ptr + 2 * sizeof(int) > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // Find two free fd slots (skip 0/1, reserved for stdin/stdout)
     int read_fd = alloc_fd(proc, 3);
@@ -2220,13 +2213,13 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     p->ref_count = 2;  // read end + write end
 
     // Fill fd table entries
-    proc->fd_table[read_fd].type = FD_PIPE;
-    proc->fd_table[read_fd].flags = O_RDONLY;
-    proc->fd_table[read_fd].pipe = p;
+    proc->mm->files->fd_table[read_fd].type = FD_PIPE;
+    proc->mm->files->fd_table[read_fd].flags = O_RDONLY;
+    proc->mm->files->fd_table[read_fd].pipe = p;
 
-    proc->fd_table[write_fd].type = FD_PIPE;
-    proc->fd_table[write_fd].flags = O_WRONLY;
-    proc->fd_table[write_fd].pipe = p;
+    proc->mm->files->fd_table[write_fd].type = FD_PIPE;
+    proc->mm->files->fd_table[write_fd].flags = O_WRONLY;
+    proc->mm->files->fd_table[write_fd].pipe = p;
 
     // Write fd pair to user space
     ((__force int *)fd_ptr)[0] = read_fd;
@@ -2245,15 +2238,15 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
     size_t len = (size_t)arg3;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
+    if (current_task->mm->files->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // ===== FD_REGULAR: kernel FAT32 via page cache =====
-    if (proc->fd_table[fd].type == FD_REGULAR) {
-        if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+    if (proc->mm->files->fd_table[fd].type == FD_REGULAR) {
+        if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
             return (uint64_t)-EINVAL;
-        struct inode *ip = proc->fd_table[fd].inode;
+        struct inode *ip = proc->mm->files->fd_table[fd].inode;
         if (!ip) return (uint64_t)-EBADF;
 
         if (!buf) return (uint64_t)-EFAULT;
@@ -2262,16 +2255,16 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
 
-        uint64_t offset = proc->fd_table[fd].offset;
+        uint64_t offset = proc->mm->files->fd_table[fd].offset;
         int written = fat32_write(ip, offset, (const void __force *)buf, len);
         if (written < 0) return (uint64_t)written;
-        proc->fd_table[fd].offset = offset + written;
+        proc->mm->files->fd_table[fd].offset = offset + written;
         return (uint64_t)written;
     }
 
     // ===== FD_FILE: proxy to fs_driver =====
-    if (proc->fd_table[fd].type == FD_FILE) {
-        if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+    if (proc->mm->files->fd_table[fd].type == FD_FILE) {
+        if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
             return (uint64_t)-EINVAL;
 
         // Validate user buf pointer
@@ -2293,14 +2286,14 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
 
         file_t_io_req *req = (file_t_io_req *)msg_buf;
         req->cmd = FILE_CMD_WRITE;
-        req->fs_fd = proc->fd_table[fd].file_data.fs_fd;
-        req->offset = proc->fd_table[fd].file_data._offset;
+        req->fs_fd = proc->mm->files->fd_table[fd].file_data.fs_fd;
+        req->offset = proc->mm->files->fd_table[fd].file_data._offset;
         req->count = (uint32_t)len;
         copy_from_user(msg_buf + sizeof(file_t_io_req), buf, len);
 
         // Reply buffer
         file_t_io_resp resp;
-        int64_t ret = sys_msg_to(proc->fd_table[fd].file_data.fs_pid,
+        int64_t ret = sys_msg_to(proc->mm->files->fd_table[fd].file_data.fs_pid,
                                   msg_buf, msg_len, &resp, sizeof(resp));
         kfree(msg_buf);
 
@@ -2309,33 +2302,33 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         if (resp.status != 0) return (uint64_t)(-resp.status);
 
         size_t written = resp.count;
-        proc->fd_table[fd].file_data._offset += written;
-        if (proc->fd_table[fd].file_data.file_size < proc->fd_table[fd].file_data._offset)
-            proc->fd_table[fd].file_data.file_size = proc->fd_table[fd].file_data._offset;
+        proc->mm->files->fd_table[fd].file_data._offset += written;
+        if (proc->mm->files->fd_table[fd].file_data.file_size < proc->mm->files->fd_table[fd].file_data._offset)
+            proc->mm->files->fd_table[fd].file_data.file_size = proc->mm->files->fd_table[fd].file_data._offset;
         return (uint64_t)written;
     }
 
     // ===== FD_SOCKET: delegate to sock_write =====
-    if (proc->fd_table[fd].type == FD_SOCKET) {
-        if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+    if (proc->mm->files->fd_table[fd].type == FD_SOCKET) {
+        if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
             return (uint64_t)-EINVAL;
         if (!buf) return (uint64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
-        struct unix_sock *sock = proc->fd_table[fd].sock;
+        struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
         if (!sock) return (uint64_t)-EBADF;
         int64_t ret = sock_write(sock, (const void __force *)buf, len);
         return (uint64_t)ret;
     }
 
     // ===== FD_DEV: write via dev_ops callback =====
-    if (proc->fd_table[fd].type == FD_DEV) {
-        if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+    if (proc->mm->files->fd_table[fd].type == FD_DEV) {
+        if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
             return (uint64_t)-EINVAL;
         if (!buf) return (uint64_t)-EFAULT;
-        struct inode *ip = proc->fd_table[fd].inode;
+        struct inode *ip = proc->mm->files->fd_table[fd].inode;
         if (!ip || !ip->i_priv) return (uint64_t)-ENODEV;
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         // Kernel device: call write callback
@@ -2348,17 +2341,17 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
     }
 
     // ===== FD_TTY: PTY write =====
-    if (proc->fd_table[fd].type == FD_TTY) {
-        if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+    if (proc->mm->files->fd_table[fd].type == FD_TTY) {
+        if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
             return (uint64_t)-EINVAL;
         if (!buf) return (uint64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
-        struct pty *pty = proc->fd_table[fd].pty;
+        struct pty *pty = proc->mm->files->fd_table[fd].pty;
         if (!pty) return (uint64_t)-EBADF;
-        int is_master = pty_fd_is_master(proc, fd);
+        int is_master = pty_fd_is_master(proc->mm->files, fd);
         int64_t ret;
         if (is_master)
             ret = pty_master_write(pty, proc, (const void __force *)buf, len);
@@ -2368,7 +2361,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
     }
 
     // ===== FD_PIPE: existing path =====
-    if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR))) return (uint64_t)-EINVAL;
+    if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR))) return (uint64_t)-EINVAL;
 
     // Validate user buf pointer
     if (!buf) return (uint64_t)-EFAULT;
@@ -2377,7 +2370,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
-    struct pipe *p = proc->fd_table[fd].pipe;
+    struct pipe *p = proc->mm->files->fd_table[fd].pipe;
     size_t written = 0;
 
     while (written < len) {
@@ -2389,7 +2382,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         // Check if pipe has space: full when head is one behind tail
         if ((p->head + 1) % PIPE_BUF_SIZE == p->tail) {
             // Pipe full: block or return EAGAIN if non-blocking
-            if (proc->fd_table[fd].flags & O_NONBLOCK) {
+            if (proc->mm->files->fd_table[fd].flags & O_NONBLOCK) {
                 if (written > 0) break;  // return partial write
                 return (uint64_t)-EAGAIN;
             }
@@ -2431,17 +2424,17 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     size_t len = (size_t)arg3;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
+    if (current_task->mm->files->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // ===== FD_REGULAR: kernel FAT32 via page cache =====
-    if (proc->fd_table[fd].type == FD_REGULAR) {
-        if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
+    if (proc->mm->files->fd_table[fd].type == FD_REGULAR) {
+        if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
             return (uint64_t)-EINVAL;
-        struct inode *ip = proc->fd_table[fd].inode;
+        struct inode *ip = proc->mm->files->fd_table[fd].inode;
         if (!ip) return (uint64_t)-EBADF;
-        uint64_t offset = proc->fd_table[fd].offset;
+        uint64_t offset = proc->mm->files->fd_table[fd].offset;
         if (offset >= ip->size) return 0;
 
         if (!buf) return (uint64_t)-EFAULT;
@@ -2454,24 +2447,24 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         if (len > avail) len = avail;
 
         int nread = fat32_read(ip, offset, (void __force *)buf, len);
-        serial_printf("sys_read: fd=%d off=%lu len=%lu nread=%d isize=%lu\n",
-                       fd, offset, len, nread, ip->size);
+        serial_printf("sys_read: pid=%d fd=%d off=%lu len=%lu nread=%d isize=%lu\n",
+                       current_task->pid, fd, offset, len, nread, ip->size);
         if (nread < 0) return (uint64_t)(-nread);
-        proc->fd_table[fd].offset = offset + nread;
+        proc->mm->files->fd_table[fd].offset = offset + nread;
         return (uint64_t)nread;
     }
 
     // ===== FD_FILE: proxy to fs_driver =====
-    if (proc->fd_table[fd].type == FD_FILE) {
+    if (proc->mm->files->fd_table[fd].type == FD_FILE) {
         // Check read permission: reject O_WRONLY only (O_RDONLY=0, so must check != O_WRONLY)
-        if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
+        if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
             return (uint64_t)-EINVAL;
 
-        if (proc->fd_table[fd].file_data._offset >= proc->fd_table[fd].file_data.file_size) {
+        if (proc->mm->files->fd_table[fd].file_data._offset >= proc->mm->files->fd_table[fd].file_data.file_size) {
             return 0;  // EOF
         }
 
-        uint64_t avail = proc->fd_table[fd].file_data.file_size - proc->fd_table[fd].file_data._offset;
+        uint64_t avail = proc->mm->files->fd_table[fd].file_data.file_size - proc->mm->files->fd_table[fd].file_data._offset;
         if (len > avail) len = avail;
         size_t max_data = 65536 - sizeof(file_t_io_resp);
         if (len > max_data) len = max_data;
@@ -2487,8 +2480,8 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         // Build READ request
         file_t_io_req req = {0};
         req.cmd = FILE_CMD_READ;
-        req.fs_fd = proc->fd_table[fd].file_data.fs_fd;
-        req.offset = proc->fd_table[fd].file_data._offset;
+        req.fs_fd = proc->mm->files->fd_table[fd].file_data.fs_fd;
+        req.offset = proc->mm->files->fd_table[fd].file_data._offset;
         req.count = (uint32_t)len;
 
         // Allocate reply buffer (header + data)
@@ -2496,7 +2489,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         uint8_t *resp_buf = (uint8_t *)kmalloc(resp_size);
         if (!resp_buf) return (uint64_t)-ENOMEM;
 
-        int64_t ret = sys_msg_to(proc->fd_table[fd].file_data.fs_pid,
+        int64_t ret = sys_msg_to(proc->mm->files->fd_table[fd].file_data.fs_pid,
                                   &req, sizeof(req), resp_buf, resp_size);
         if (ret < 0) {
             kfree(resp_buf);
@@ -2513,27 +2506,27 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         if (nread > len) nread = len;
         copy_to_user(buf, resp_buf + sizeof(file_t_io_resp), nread);
 
-        proc->fd_table[fd].file_data._offset += nread;
+        proc->mm->files->fd_table[fd].file_data._offset += nread;
         kfree(resp_buf);
         return (uint64_t)nread;
     }
 
     // ===== FD_SOCKET: delegate to sock_read =====
-    if (proc->fd_table[fd].type == FD_SOCKET) {
+    if (proc->mm->files->fd_table[fd].type == FD_SOCKET) {
         if (!buf) return (uint64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
-        struct unix_sock *sock = proc->fd_table[fd].sock;
+        struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
         if (!sock) return (uint64_t)-EBADF;
         int64_t ret = sock_read(sock, (void __force *)buf, len);
         return (uint64_t)ret;
     }
 
     // ===== FD_DEV: read via dev_ops callback =====
-    if (proc->fd_table[fd].type == FD_DEV) {
-        if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
+    if (proc->mm->files->fd_table[fd].type == FD_DEV) {
+        if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
             return (uint64_t)-EINVAL;
         if (!buf) return (uint64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
@@ -2541,7 +2534,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL
             || ptr_end > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
-        struct inode *ip = proc->fd_table[fd].inode;
+        struct inode *ip = proc->mm->files->fd_table[fd].inode;
         if (!ip || !ip->i_priv) return (uint64_t)-ENODEV;
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         // Kernel device: call read callback
@@ -2554,17 +2547,17 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     }
 
     // ===== FD_TTY: PTY read =====
-    if (proc->fd_table[fd].type == FD_TTY) {
-        if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
+    if (proc->mm->files->fd_table[fd].type == FD_TTY) {
+        if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
             return (uint64_t)-EINVAL;
         if (!buf) return (uint64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (uint64_t)-EFAULT;
-        struct pty *pty = proc->fd_table[fd].pty;
+        struct pty *pty = proc->mm->files->fd_table[fd].pty;
         if (!pty) return (uint64_t)-EBADF;
-        int is_master = pty_fd_is_master(proc, fd);
+        int is_master = pty_fd_is_master(proc->mm->files, fd);
         int64_t ret;
         if (is_master)
             ret = pty_master_read(pty, proc, (void __force *)buf, len);
@@ -2575,7 +2568,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
 
     // ===== FD_PIPE: existing path =====
     // O_RDONLY=0, so check: must not be O_WRONLY only
-    if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
+    if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
         return (uint64_t)-EINVAL;
 
     // Validate user buf pointer
@@ -2585,14 +2578,14 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
-    struct pipe *p = proc->fd_table[fd].pipe;
+    struct pipe *p = proc->mm->files->fd_table[fd].pipe;
 
     // Block if pipe is empty
     while (p->head == p->tail) {
         // Check if write end is closed (all write fds gone)
         if (p->ref_count == 1) return 0;  // EOF: no writers left
         // Non-blocking: return EAGAIN-like indication (0 bytes read)
-        if (proc->fd_table[fd].flags & O_NONBLOCK) return (uint64_t)-EAGAIN;
+        if (proc->mm->files->fd_table[fd].flags & O_NONBLOCK) return (uint64_t)-EAGAIN;
         p->read_pid = proc->pid;
         proc->state = BLOCKED;
         proc->wait_event = WAIT_PIPE;
@@ -2628,23 +2621,23 @@ uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint
     int fd = (int)arg1;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (current_proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
+    if (current_task->mm->files->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
 
-    if (current_proc->fd_table[fd].type == FD_FILE) {
+    if (current_task->mm->files->fd_table[fd].type == FD_FILE) {
         // Release ref_count; notify fs_driver on last close
-        current_proc->fd_table[fd].file_data.ref_count--;
-        if (current_proc->fd_table[fd].file_data.ref_count == 0) {
+        current_task->mm->files->fd_table[fd].file_data.ref_count--;
+        if (current_task->mm->files->fd_table[fd].file_data.ref_count == 0) {
             // Notify fs_driver to close the session fd
             file_t_io_req req = {0};
             req.cmd = FILE_CMD_CLOSE;
-            req.fs_fd = current_proc->fd_table[fd].file_data.fs_fd;
-            kernel_msg_send(current_proc->fd_table[fd].file_data.fs_pid,
+            req.fs_fd = current_task->mm->files->fd_table[fd].file_data.fs_fd;
+            kernel_msg_send(current_task->mm->files->fd_table[fd].file_data.fs_pid,
                             &req, sizeof(req), NULL, 0);
         }
-        __memset(&current_proc->fd_table[fd], 0, sizeof(struct file));
-        current_proc->fd_table[fd].type = FD_NONE;
+        __memset(&current_task->mm->files->fd_table[fd], 0, sizeof(struct file));
+        current_task->mm->files->fd_table[fd].type = FD_NONE;
     } else {
-        close_fd_internal(current_proc, fd);
+        close_fd_trap(current_task->mm->files, fd);
     }
 
     return 0;
@@ -2656,7 +2649,7 @@ uint64_t sys_notify(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uin
     pid_t target_pid = (pid_t)arg1;
     if (target_pid < 0 || target_pid >= MAX_PROC) return (uint64_t)-EINVAL;
 
-    proc_t *target = &procs[target_pid];
+    task_t *target = &tasks[target_pid];
     if (target->pid != target_pid) return (uint64_t)-ESRCH;
 
     // Enqueue RECV_NOTIFY message
@@ -2668,7 +2661,7 @@ uint64_t sys_notify(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uin
     }
     recv_msg_t *slot = (recv_msg_t *)target->recv_buf[target->recv_head];
     slot->type = RECV_NOTIFY;
-    slot->src = (uint32_t)current_proc->pid;
+    slot->src = (uint32_t)current_task->pid;
     target->recv_head = next;
     spin_unlock(&target->recv_lock);
 
@@ -2697,7 +2690,7 @@ uint64_t sys_gettime(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uin
 
 // sys_clock() — syscall 20 (per-process CPU 时间，返回纳秒)
 uint64_t sys_clock(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
-    return current_proc->cpu_time_ns;
+    return current_task->cpu_time_ns;
 }
 
 // Inner implementation of sys_msg — shared by PID-based and fd-based variants.
@@ -2705,7 +2698,7 @@ uint64_t sys_clock(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint6
 // Returns: 0 on success, positive errno on failure
 int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
                            void *reply_buf, size_t reply_len) {
-    proc_t *target = &procs[target_pid];
+    task_t *target = &tasks[target_pid];
     if (target->pid != target_pid) return (uint64_t)-ESRCH;
 
     // Allocate kernel buffer and copy message from user space
@@ -2717,7 +2710,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
     uint8_t msg[RECV_MSG_SIZE];
     recv_msg_t *hdr = (recv_msg_t *)msg;
     hdr->type = RECV_MSG;
-    hdr->src = (uint32_t)current_proc->pid;
+    hdr->src = (uint32_t)current_task->pid;
     hdr->msg.kmaddr = kbuf;
     hdr->msg.len = msg_len;
 
@@ -2750,7 +2743,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
     spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
 
     // Block caller on WAIT_MSG_REPLY
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
     proc->state = BLOCKED;
     proc->wait_event = WAIT_MSG_REPLY;
     proc->wait_timed_out = 0;
@@ -2817,13 +2810,13 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
         ptr + resp_len > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
     pid_t caller_pid = proc->msg_caller_pid;
     if (caller_pid < 0 || caller_pid >= MAX_PROC) {
         return (uint64_t)-EINVAL;
     }
 
-    proc_t *caller = &procs[caller_pid];
+    task_t *caller = &tasks[caller_pid];
     if (caller->pid != caller_pid) return (uint64_t)-ESRCH;
 
     // Copy response data from server user space to kernel buffer
@@ -2867,7 +2860,7 @@ uint64_t sys_ioperm(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
 
     if (from + num > 65536) return (uint64_t)-EINVAL;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // Lazy-allocate IOPM if needed
     if (!proc->iopm) {
@@ -2909,58 +2902,58 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
 
     if (old_fd == new_fd) return (uint64_t)new_fd;
 
-    proc_t *proc = current_proc;
-    if (proc->fd_table[old_fd].type == FD_NONE)
+    task_t *proc = current_task;
+    if (proc->mm->files->fd_table[old_fd].type == FD_NONE)
         return (uint64_t)-EBADF;
 
     // Close new_fd if it's open
-    if (proc->fd_table[new_fd].type != FD_NONE) {
-        if (proc->fd_table[new_fd].type == FD_FILE) {
-            proc->fd_table[new_fd].file_data.ref_count--;
-            if (proc->fd_table[new_fd].file_data.ref_count == 0) {
+    if (proc->mm->files->fd_table[new_fd].type != FD_NONE) {
+        if (proc->mm->files->fd_table[new_fd].type == FD_FILE) {
+            proc->mm->files->fd_table[new_fd].file_data.ref_count--;
+            if (proc->mm->files->fd_table[new_fd].file_data.ref_count == 0) {
                 file_t_io_req req = {0};
                 req.cmd = FILE_CMD_CLOSE;
-                req.fs_fd = proc->fd_table[new_fd].file_data.fs_fd;
-                kernel_msg_send(proc->fd_table[new_fd].file_data.fs_pid,
+                req.fs_fd = proc->mm->files->fd_table[new_fd].file_data.fs_fd;
+                kernel_msg_send(proc->mm->files->fd_table[new_fd].file_data.fs_pid,
                                 &req, sizeof(req), NULL, 0);
             }
-            __memset(&proc->fd_table[new_fd], 0, sizeof(struct file));
-            proc->fd_table[new_fd].type = FD_NONE;
+            __memset(&proc->mm->files->fd_table[new_fd], 0, sizeof(struct file));
+            proc->mm->files->fd_table[new_fd].type = FD_NONE;
         } else {
-            close_fd_internal(proc, new_fd);
+            close_fd_trap(proc->mm->files, new_fd);
         }
     }
 
     // Copy old_fd to new_fd — struct assignment copies entire union
-    proc->fd_table[new_fd] = proc->fd_table[old_fd];
+    proc->mm->files->fd_table[new_fd] = proc->mm->files->fd_table[old_fd];
     // Re-establish pointer/shm fields from source (struct assignment copies union bytes,
     // but for FD_PIPE/SHM we need to also bump ref_count)
-    if (proc->fd_table[new_fd].type == FD_PIPE) {
-        proc->fd_table[new_fd].pipe->ref_count++;
-    } else if (proc->fd_table[new_fd].type == FD_SHM) {
-        if (proc->fd_table[new_fd].shm) {
-            shm_get(proc->fd_table[new_fd].shm);
+    if (proc->mm->files->fd_table[new_fd].type == FD_PIPE) {
+        proc->mm->files->fd_table[new_fd].pipe->ref_count++;
+    } else if (proc->mm->files->fd_table[new_fd].type == FD_SHM) {
+        if (proc->mm->files->fd_table[new_fd].shm) {
+            shm_get(proc->mm->files->fd_table[new_fd].shm);
         }
-    } else if (proc->fd_table[new_fd].type == FD_FILE) {
-        proc->fd_table[new_fd].file_data.ref_count++;
-    } else if (proc->fd_table[new_fd].type == FD_REGULAR ||
-               proc->fd_table[new_fd].type == FD_DIR) {
-        if (proc->fd_table[new_fd].inode) inode_get(proc->fd_table[new_fd].inode);
-    } else if (proc->fd_table[new_fd].type == FD_SOCKET) {
-        if (proc->fd_table[new_fd].sock) {
-            unix_sock_acquire(proc->fd_table[new_fd].sock);
+    } else if (proc->mm->files->fd_table[new_fd].type == FD_FILE) {
+        proc->mm->files->fd_table[new_fd].file_data.ref_count++;
+    } else if (proc->mm->files->fd_table[new_fd].type == FD_REGULAR ||
+               proc->mm->files->fd_table[new_fd].type == FD_DIR) {
+        if (proc->mm->files->fd_table[new_fd].inode) inode_get(proc->mm->files->fd_table[new_fd].inode);
+    } else if (proc->mm->files->fd_table[new_fd].type == FD_SOCKET) {
+        if (proc->mm->files->fd_table[new_fd].sock) {
+            unix_sock_acquire(proc->mm->files->fd_table[new_fd].sock);
         }
-    } else if (proc->fd_table[new_fd].type == FD_DEV) {
+    } else if (proc->mm->files->fd_table[new_fd].type == FD_DEV) {
         // Kernel device: call open callback (e.g., serial_fd_count++) + inode_get
-        struct inode *ip = proc->fd_table[new_fd].inode;
+        struct inode *ip = proc->mm->files->fd_table[new_fd].inode;
         if (ip && ip->i_priv) {
             struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
             if (ops->driver_pid == 0 && ops->open)
                 ops->open(proc, new_fd);
         }
         if (ip) inode_get(ip);
-    } else if (proc->fd_table[new_fd].type == FD_TTY) {
-        pty_dup_fd(proc, old_fd, new_fd);
+    } else if (proc->mm->files->fd_table[new_fd].type == FD_TTY) {
+        pty_dup_fd(proc->mm->files, new_fd);
     }
     // FD_DEV: target_pid copied by struct assignment
 
@@ -2975,19 +2968,19 @@ uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
 
-    proc_t *proc = current_proc;
-    if (proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
+    task_t *proc = current_task;
+    if (proc->mm->files->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
 
     switch (cmd) {
     case F_GETFL:
-        return (uint64_t)proc->fd_table[fd].flags;
+        return (uint64_t)proc->mm->files->fd_table[fd].flags;
     case F_SETFL:
-        proc->fd_table[fd].flags = (proc->fd_table[fd].flags & ~O_SETFL_MASK) | (arg & O_SETFL_MASK);
+        proc->mm->files->fd_table[fd].flags = (proc->mm->files->fd_table[fd].flags & ~O_SETFL_MASK) | (arg & O_SETFL_MASK);
         return 0;
     case F_ADD_SEALS: {
         // Only valid on FD_SHM with MFD_ALLOW_SEALING
-        if (proc->fd_table[fd].type != FD_SHM) return (uint64_t)-EINVAL;
-        struct shm *shm = proc->fd_table[fd].shm;
+        if (proc->mm->files->fd_table[fd].type != FD_SHM) return (uint64_t)-EINVAL;
+        struct shm *shm = proc->mm->files->fd_table[fd].shm;
         if (!shm) return (uint64_t)-EBADF;
         if (!(shm->flags & SHM_SEALED)) return (uint64_t)-EPERM;
         if (shm->seals & F_SEAL_SEAL) return (uint64_t)-EPERM;
@@ -3000,7 +2993,7 @@ uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         // F_SEAL_WRITE check: if any writable mmap exists, refuse
         if (new_seals & F_SEAL_WRITE) {
             // Walk mmap_regions to check for writable SHM mappings
-            for (mmap_region_t *mr = proc->mmap_regions; mr; mr = mr->next) {
+            for (mmap_region_t *mr = proc->mm->mmap_regions; mr; mr = mr->next) {
                 if (mr->shm_obj == shm) {
                     // Found a mapping of this shm — if it has write permission
                     // (we can't easily determine prot from mmap_region_t, so
@@ -3015,8 +3008,8 @@ uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         return 0;
     }
     case F_GET_SEALS: {
-        if (proc->fd_table[fd].type != FD_SHM) return (uint64_t)-EINVAL;
-        struct shm *shm = proc->fd_table[fd].shm;
+        if (proc->mm->files->fd_table[fd].type != FD_SHM) return (uint64_t)-EINVAL;
+        struct shm *shm = proc->mm->files->fd_table[fd].shm;
         if (!shm) return (uint64_t)-EBADF;
         return (uint64_t)shm->seals;
     }
@@ -3066,10 +3059,10 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     if (!pages) return (uint64_t)-ENOMEM;
 
     uint64_t phys = (__force uint64_t)page_to_phys(pages);
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // Pick virtual address from mmap_brk
-    uint64_t vaddr = proc->mmap_brk;
+    uint64_t vaddr = proc->mm->mmap_brk;
     uint64_t vaddr_end = vaddr + size;
 
     // Map pages into user address space using map_user_page_direct
@@ -3085,7 +3078,7 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
         }
     }
 
-    proc->mmap_brk = vaddr_end;
+    proc->mm->mmap_brk = vaddr_end;
 
     // Track in mmap_regions for cleanup
     mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
@@ -3097,8 +3090,8 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     region->vaddr = vaddr;
     region->size = size;
     region->phys = phys;
-    region->next = proc->mmap_regions;
-    proc->mmap_regions = region;
+    region->next = proc->mm->mmap_regions;
+    proc->mm->mmap_regions = region;
 
     // Write results to user space
     {
@@ -3119,10 +3112,10 @@ uint64_t sys_dma_free(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, u
     uint64_t vaddr = (uint64_t)arg1;
     if (!vaddr) return (uint64_t)-EINVAL;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // Find and remove from mmap_regions
-    mmap_region_t **pp = &proc->mmap_regions;
+    mmap_region_t **pp = &proc->mm->mmap_regions;
     while (*pp) {
         mmap_region_t *r = *pp;
         if (r->vaddr == vaddr) {
@@ -3156,37 +3149,35 @@ uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
 
-    proc_t *proc = current_proc;
-    if (proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
+    task_t *proc = current_task;
+    if (proc->mm->files->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
 
-    // PIPE/SOCKET do not support seek
-    if (proc->fd_table[fd].type == FD_PIPE ||
-        proc->fd_table[fd].type == FD_SOCKET)
+    // PIPE/SOCKET/DEV do not support seek
+    if (proc->mm->files->fd_table[fd].type == FD_PIPE ||
+        proc->mm->files->fd_table[fd].type == FD_SOCKET ||
+        proc->mm->files->fd_table[fd].type == FD_DEV)
         return (uint64_t)-ESPIPE;
 
-    // FD_REGULAR/FD_DIR/FD_DEV: seek via fd offset
-    if (proc->fd_table[fd].type == FD_REGULAR ||
-        proc->fd_table[fd].type == FD_DIR ||
-        proc->fd_table[fd].type == FD_DEV) {
-        if (proc->fd_table[fd].type == FD_DEV && whence == SEEK_END)
-            return (uint64_t)-EINVAL;
-        struct inode *ip = proc->fd_table[fd].inode;
+    // FD_REGULAR/FD_DIR: kernel VFS file seek
+    if (proc->mm->files->fd_table[fd].type == FD_REGULAR ||
+        proc->mm->files->fd_table[fd].type == FD_DIR) {
+        struct inode *ip = proc->mm->files->fd_table[fd].inode;
         if (!ip) return (uint64_t)-EBADF;
         int64_t new_offset;
         switch (whence) {
         case SEEK_SET: new_offset = offset; break;
-        case SEEK_CUR: new_offset = (int64_t)proc->fd_table[fd].offset + offset; break;
+        case SEEK_CUR: new_offset = (int64_t)proc->mm->files->fd_table[fd].offset + offset; break;
         case SEEK_END: new_offset = (int64_t)ip->size + offset; break;
         default: return (uint64_t)-EINVAL;
         }
-        serial_printf("sys_lseek: fd=%d whence=%d off=%ld → %ld (isize=%lu)\n",
-                       fd, whence, offset, new_offset, ip->size);
+        serial_printf("sys_lseek: pid=%d fd=%d whence=%d off=%ld → %ld (isize=%lu)\n",
+                       current_task->pid, fd, whence, offset, new_offset, ip->size);
         if (new_offset < 0) return (uint64_t)-EINVAL;
-        proc->fd_table[fd].offset = (uint64_t)new_offset;
+        proc->mm->files->fd_table[fd].offset = (uint64_t)new_offset;
         return (uint64_t)new_offset;
     }
 
-    if (proc->fd_table[fd].type != FD_FILE)
+    if (proc->mm->files->fd_table[fd].type != FD_FILE)
         return (uint64_t)-ESPIPE;
 
     uint64_t new_offset;
@@ -3195,23 +3186,23 @@ uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         new_offset = (uint64_t)offset;
         break;
     case SEEK_CUR:
-        new_offset = proc->fd_table[fd].file_data._offset + offset;
+        new_offset = proc->mm->files->fd_table[fd].file_data._offset + offset;
         break;
     case SEEK_END:
-        new_offset = proc->fd_table[fd].file_data.file_size + offset;
+        new_offset = proc->mm->files->fd_table[fd].file_data.file_size + offset;
         break;
     default:
         return (uint64_t)-EINVAL;
     }
 
-    proc->fd_table[fd].file_data._offset = new_offset;
+    proc->mm->files->fd_table[fd].file_data._offset = new_offset;
     return (uint64_t)new_offset;
 }
 
 // ===================== Signal delivery =====================
 
 // Deliver a signal with a user-registered handler via sigframe on user stack.
-static void deliver_signal(proc_t *proc, trapframe_t *tf, int sig, sigaction_t *sa) {
+static void deliver_signal(task_t *proc, trapframe_t *tf, int sig, sigaction_t *sa) {
     // 1. Build rt_sigframe
     struct rt_sigframe frame;
     __memset(&frame, 0, sizeof(frame));
@@ -3293,11 +3284,12 @@ static void deliver_signal(proc_t *proc, trapframe_t *tf, int sig, sigaction_t *
 // ===================== check_pending_signals =====================
 // Called before returning to user mode (iret/sysret).
 // Scans pending signals and executes default action or delivers to handler.
+// Debug helpers for fork child trapframe corruption (Bug 2)
 void check_pending_signals(trapframe_t *tf) {
     // Only deliver when returning to user mode
     if (tf->cs != 0x2B) return;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
     if (!proc) return;
 
     // Loop: handle signals one at a time in priority order (lowest bit first)
@@ -3354,7 +3346,7 @@ void check_pending_signals(trapframe_t *tf) {
 // ===================== force_sig =====================
 // Force delivery of a synchronous signal (bypasses SIG_IGN and blocked mask).
 // Used for kernel exceptions (SIGSEGV/SIGILL/SIGFPE) and SIGKILL.
-static void force_sig(proc_t *proc, int sig, int si_code, void *si_addr) {
+static void force_sig(task_t *proc, int sig, int si_code, void *si_addr) {
     // 1. Set pending bit
     __atomic_or_fetch(&proc->sig.pending, 1ULL << sig, __ATOMIC_RELEASE);
 
@@ -3389,7 +3381,7 @@ uint64_t sys_kill(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
     // Validate target PID
     if (pid < 0 || pid >= MAX_PROC) return (uint64_t)-ESRCH;
 
-    proc_t *target = &procs[pid];
+    task_t *target = &tasks[pid];
     if (target->pid != pid) return (uint64_t)-ESRCH;
 
     // Set pending bit (atomic, no lock needed for a single bit)
@@ -3427,7 +3419,7 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     // SIGKILL and SIGSTOP cannot be caught or ignored
     if (sig == SIGKILL || sig == SIGSTOP) return (uint64_t)-EINVAL;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // If oldact is non-NULL, copy current action to user space
     if (oldact) {
@@ -3472,7 +3464,7 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
 
 // sys_sigreturn() — syscall 48 (信号 handler 返回后恢复上下文)
 uint64_t sys_sigreturn(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // Locate trapframe (syscall path: tss_rsp0 - sizeof(trapframe_t))
     uint64_t tf_base = get_cpu_local()->tss_rsp0 - sizeof(trapframe_t);

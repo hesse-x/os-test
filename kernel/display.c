@@ -228,20 +228,20 @@ int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
 // ===================== display_mmap_handler_ioctl =====================
 // Wrapper to adapt display_mmap_handler to dev_ops.mmap signature (uint64_t size)
 
-uint64_t display_mmap_handler_ioctl(struct proc_t *proc, uint64_t size) {
+uint64_t display_mmap_handler_ioctl(struct task_t *proc, uint64_t size) {
     return display_mmap_handler(proc, (size_t)size);
 }
 
 // ===================== display_mmap_handler =====================
 
 __attribute__((no_sanitize("kernel-address")))
-uint64_t display_mmap_handler(struct proc_t *proc, size_t size) {
+uint64_t display_mmap_handler(struct task_t *proc, size_t size) {
     if (!g_display.initialized) return 0;
 
     // Map back buffer physical pages into user address space
     size_t npages = g_display.back_buffer_npages;
-    uint64_t *pml4 = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
-    uint64_t vaddr = proc->mmap_brk;
+    uint64_t *pml4 = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->mm->cr3);
+    uint64_t vaddr = proc->mm->mmap_brk;
     uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
 
     for (size_t i = 0; i < npages; i++) {
@@ -266,9 +266,9 @@ uint64_t display_mmap_handler(struct proc_t *proc, size_t size) {
     region->size = npages * PAGE_SIZE;
     region->phys = g_display.back_buffer_phys;  // Mark as externally-managed physical mapping
     region->shm_obj = NULL;
-    region->next = proc->mmap_regions;
-    proc->mmap_regions = region;
-    proc->mmap_brk = vaddr + npages * PAGE_SIZE;
+    region->next = proc->mm->mmap_regions;
+    proc->mm->mmap_regions = region;
+    proc->mm->mmap_brk = vaddr + npages * PAGE_SIZE;
 
     return vaddr;
 }

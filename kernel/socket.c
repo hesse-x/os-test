@@ -167,7 +167,7 @@ void unix_sock_free(struct unix_sock *sock) {
         struct unix_sock *next = bp->backlog_head;  // backlog_head is next in chain
         // Tell peer we're closing
         if (bp->peer >= 0) {
-            proc_t *peer = &procs[bp->peer];
+            task_t *peer = &tasks[bp->peer];
             if (peer->pid == bp->peer) {
                 // Wake peer if waiting on this socket
                 sock_wake_reader(bp);
@@ -264,7 +264,7 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
                     int *fds = (int *)CMSG_DATA(cmsg);
                     for (int i = 0; i < num_fds; i++) {
                         if (fds[i] < 0 || fds[i] >= MAX_FD ||
-                            current_proc->fd_table[fds[i]].type == FD_NONE) {
+                            current_task->mm->files->fd_table[fds[i]].type == FD_NONE) {
                             skb_free(skb);
                             return -EBADF;
                         }
@@ -287,18 +287,20 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
             skb_free(skb);
             return -ENOTCONN;
         }
-        proc_t *peer_proc = &procs[peer_pid];
+        task_t *peer_proc = &tasks[peer_pid];
         if (peer_proc->pid != peer_pid) {
             skb_free(skb);
             return -ENOTCONN;
         }
         spin_lock(&socket_lock);
-        for (int fd = 0; fd < MAX_FD; fd++) {
-            if (peer_proc->fd_table[fd].type == FD_SOCKET) {
-                struct unix_sock *ps = peer_proc->fd_table[fd].sock;
-                if (ps && ps != sock && ps->peer == current_proc->pid && ps->state == UNIX_CONNECTED) {
-                    peer_sock = ps;
-                    break;
+        if (peer_proc->mm && peer_proc->mm->files) {
+            for (int fd = 0; fd < MAX_FD; fd++) {
+                if (peer_proc->mm->files->fd_table[fd].type == FD_SOCKET) {
+                    struct unix_sock *ps = peer_proc->mm->files->fd_table[fd].sock;
+                    if (ps && ps != sock && ps->peer == current_task->pid && ps->state == UNIX_CONNECTED) {
+                        peer_sock = ps;
+                        break;
+                    }
                 }
             }
         }
@@ -365,20 +367,20 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             }
             // 3) Socket closed or peer zombie
             if (sock->state == UNIX_CLOSED ||
-                (sock->peer >= 0 && procs[sock->peer].pid == sock->peer &&
-                 procs[sock->peer].state == ZOMBIE)) {
+                (sock->peer >= 0 && tasks[sock->peer].pid == sock->peer &&
+                 tasks[sock->peer].state == ZOMBIE)) {
                 // Check if peer has closed
                 bool peer_closed = true;
                 if (sock->peer_sock) {
                     peer_closed = (sock->peer_sock->state != UNIX_CONNECTED);
                 } else if (sock->peer >= 0 && sock->peer < MAX_PROC) {
-                    proc_t *pp = &procs[sock->peer];
-                    if (pp->pid == sock->peer) {
+                    task_t *pp = &tasks[sock->peer];
+                    if (pp->pid == sock->peer && pp->mm && pp->mm->files) {
                         for (int fd = 0; fd < MAX_FD; fd++) {
-                            if (pp->fd_table[fd].type == FD_SOCKET &&
-                                pp->fd_table[fd].sock &&
-                                pp->fd_table[fd].sock != sock &&
-                                pp->fd_table[fd].sock->peer == current_proc->pid) {
+                            if (pp->mm->files->fd_table[fd].type == FD_SOCKET &&
+                                pp->mm->files->fd_table[fd].sock &&
+                                pp->mm->files->fd_table[fd].sock != sock &&
+                                pp->mm->files->fd_table[fd].sock->peer == current_task->pid) {
                                 peer_closed = false;
                                 break;
                             }
@@ -397,8 +399,8 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             }
 
             // Block reader
-            sock->blocked_reader = current_proc->pid;
-            proc_t *proc = current_proc;
+            sock->blocked_reader = current_task->pid;
+            task_t *proc = current_task;
             proc->state = BLOCKED;
             proc->wait_event = WAIT_POLL;
             spin_unlock(&socket_lock);
@@ -451,13 +453,13 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
         int num_fds_installed = 0;
         int installed_fds[SCM_MAX_FD];
         if (skb->num_fds > 0 && skb_consumed) {
-            proc_t *proc = current_proc;
+            task_t *proc = current_task;
             for (int i = 0; i < skb->num_fds && num_fds_installed < SCM_MAX_FD; i++) {
                 int orig_fd = skb->fds[i];
                 // Find free fd slot in receiver
                 int new_fd = -1;
                 for (int f = 3; f < MAX_FD; f++) {
-                    if (proc->fd_table[f].type == FD_NONE) {
+                    if (proc->mm->files->fd_table[f].type == FD_NONE) {
                         new_fd = f;
                         break;
                     }
@@ -467,20 +469,20 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
                 // Copy the sender's fd entry (validate it still exists)
                 pid_t sender_pid = sock->peer;
                 if (sender_pid >= 0 && sender_pid < MAX_PROC) {
-                    proc_t *sender = &procs[sender_pid];
-                    if (sender->pid == sender_pid && orig_fd >= 0 && orig_fd < MAX_FD) {
-                        proc->fd_table[new_fd] = sender->fd_table[orig_fd];
+                    task_t *sender = &tasks[sender_pid];
+                    if (sender->pid == sender_pid && sender->mm && sender->mm->files && orig_fd >= 0 && orig_fd < MAX_FD) {
+                        proc->mm->files->fd_table[new_fd] = sender->mm->files->fd_table[orig_fd];
                         // Bump ref counts
-                        if (proc->fd_table[new_fd].type == FD_PIPE && proc->fd_table[new_fd].pipe) {
-                            proc->fd_table[new_fd].pipe->ref_count++;
-                        } else if (proc->fd_table[new_fd].type == FD_SHM && proc->fd_table[new_fd].shm) {
-                            shm_get(proc->fd_table[new_fd].shm);
-                        } else if (proc->fd_table[new_fd].type == FD_FILE) {
-                            proc->fd_table[new_fd].file_data.ref_count++;
+                        if (proc->mm->files->fd_table[new_fd].type == FD_PIPE && proc->mm->files->fd_table[new_fd].pipe) {
+                            proc->mm->files->fd_table[new_fd].pipe->ref_count++;
+                        } else if (proc->mm->files->fd_table[new_fd].type == FD_SHM && proc->mm->files->fd_table[new_fd].shm) {
+                            shm_get(proc->mm->files->fd_table[new_fd].shm);
+                        } else if (proc->mm->files->fd_table[new_fd].type == FD_FILE) {
+                            proc->mm->files->fd_table[new_fd].file_data.ref_count++;
                         }
                         // FD_SOCKET: acquire ref
-                        if (proc->fd_table[new_fd].type == FD_SOCKET && proc->fd_table[new_fd].sock) {
-                            unix_sock_acquire(proc->fd_table[new_fd].sock);
+                        if (proc->mm->files->fd_table[new_fd].type == FD_SOCKET && proc->mm->files->fd_table[new_fd].sock) {
+                            unix_sock_acquire(proc->mm->files->fd_table[new_fd].sock);
                         }
                         installed_fds[num_fds_installed++] = new_fd;
                     }
@@ -588,14 +590,14 @@ uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
     struct unix_sock *sock = unix_sock_alloc();
     if (!sock) return (uint64_t)-ENOMEM;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     spin_lock(&socket_lock);
 
     // Find free fd slot
     int fd = -1;
     for (int i = 3; i < MAX_FD; i++) {
-        if (proc->fd_table[i].type == FD_NONE) {
+        if (proc->mm->files->fd_table[i].type == FD_NONE) {
             fd = i;
             break;
         }
@@ -606,9 +608,9 @@ uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
         return (uint64_t)-EMFILE;
     }
 
-    proc->fd_table[fd].type = FD_SOCKET;
-    proc->fd_table[fd].flags = O_RDWR;
-    proc->fd_table[fd].sock = sock;
+    proc->mm->files->fd_table[fd].type = FD_SOCKET;
+    proc->mm->files->fd_table[fd].flags = O_RDWR;
+    proc->mm->files->fd_table[fd].sock = sock;
     sock->state = UNIX_FREE;
 
     spin_unlock(&socket_lock);
@@ -621,11 +623,11 @@ uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     const struct sockaddr_un __user *addr = (const struct sockaddr_un __user *)arg2;
     socklen_t addrlen = (socklen_t)arg3;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // Validate fd
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
 
     // Validate addr
     uint64_t addr_ptr = (uint64_t)addr;
@@ -649,7 +651,7 @@ uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
 
     if (sun_path[0] == '\0') return (uint64_t)-EINVAL;  // empty path
 
-    struct unix_sock *sock = proc->fd_table[fd].sock;
+    struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
     if (!sock) return (uint64_t)-EBADF;
 
     spin_lock(&socket_lock);
@@ -683,12 +685,12 @@ uint64_t sys_listen(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, ui
     int fd = (int)arg1;
     int backlog = (int)arg2;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
 
-    struct unix_sock *sock = proc->fd_table[fd].sock;
+    struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
     if (!sock) return (uint64_t)-EBADF;
 
     if (backlog <= 0) backlog = 1;
@@ -707,12 +709,12 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
     struct sockaddr_un __user *addr = (struct sockaddr_un __user *)arg2;
     socklen_t __user *addrlen = (socklen_t __user *)arg3;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
 
-    struct unix_sock *listen_sock = proc->fd_table[fd].sock;
+    struct unix_sock *listen_sock = proc->mm->files->fd_table[fd].sock;
     if (!listen_sock) return (uint64_t)-EBADF;
 
     // Validate addr pointers if non-null
@@ -771,7 +773,7 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
         // Allocate new fd for this child socket
         int new_fd = -1;
         for (int i = 3; i < MAX_FD; i++) {
-            if (proc->fd_table[i].type == FD_NONE) {
+            if (proc->mm->files->fd_table[i].type == FD_NONE) {
                 new_fd = i;
                 break;
             }
@@ -795,9 +797,9 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
         // Transfer ownership to new fd (initial ref_count=1 from socket allocation)
         child->state = UNIX_CONNECTED;
 
-        proc->fd_table[new_fd].type = FD_SOCKET;
-        proc->fd_table[new_fd].flags = O_RDWR;
-        proc->fd_table[new_fd].sock = child;
+        proc->mm->files->fd_table[new_fd].type = FD_SOCKET;
+        proc->mm->files->fd_table[new_fd].flags = O_RDWR;
+        proc->mm->files->fd_table[new_fd].sock = child;
 
         // Write peer address if requested
         if (addr && addrlen) {
@@ -810,14 +812,14 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
             if (!peer_sock) {
                 // Fallback: PID-based lookup for cross-process connections
                 if (child->peer >= 0 && child->peer < MAX_PROC) {
-                    proc_t *pp = &procs[child->peer];
-                    if (pp->pid == child->peer) {
+                    task_t *pp = &tasks[child->peer];
+                    if (pp->pid == child->peer && pp->mm && pp->mm->files) {
                         for (int pfd = 0; pfd < MAX_FD; pfd++) {
-                            if (pp->fd_table[pfd].type == FD_SOCKET &&
-                                pp->fd_table[pfd].sock &&
-                                pp->fd_table[pfd].sock != child &&
-                                pp->fd_table[pfd].sock->peer == proc->pid) {
-                                peer_sock = pp->fd_table[pfd].sock;
+                            if (pp->mm->files->fd_table[pfd].type == FD_SOCKET &&
+                                pp->mm->files->fd_table[pfd].sock &&
+                                pp->mm->files->fd_table[pfd].sock != child &&
+                                pp->mm->files->fd_table[pfd].sock->peer == proc->pid) {
+                                peer_sock = pp->mm->files->fd_table[pfd].sock;
                                 break;
                             }
                         }
@@ -850,10 +852,10 @@ uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     const struct sockaddr_un __user *addr = (const struct sockaddr_un __user *)arg2;
     socklen_t addrlen = (socklen_t)arg3;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
 
     // Validate addr
     uint64_t addr_ptr = (uint64_t)addr;
@@ -906,7 +908,7 @@ uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     child->peer = proc->pid;
 
     // Update our socket to CONNECTED and set peer
-    struct unix_sock *client_sock = proc->fd_table[fd].sock;
+    struct unix_sock *client_sock = proc->mm->files->fd_table[fd].sock;
     if (!client_sock) {
         spin_unlock(&socket_lock);
         unix_sock_free(child);
@@ -916,11 +918,11 @@ uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     // Find the PID that owns this listener socket.
     pid_t listener_pid = -1;
     for (int i = 0; i < MAX_PROC; i++) {
-        if (procs[i].pid >= 0) {
+        if (tasks[i].pid >= 0 && tasks[i].mm && tasks[i].mm->files) {
             for (int pf = 0; pf < MAX_FD; pf++) {
-                if (procs[i].fd_table[pf].type == FD_SOCKET &&
-                    procs[i].fd_table[pf].sock == listener) {
-                    listener_pid = procs[i].pid;
+                if (tasks[i].mm->files->fd_table[pf].type == FD_SOCKET &&
+                    tasks[i].mm->files->fd_table[pf].sock == listener) {
+                    listener_pid = tasks[i].pid;
                     goto found_listener;
                 }
             }
@@ -971,7 +973,7 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
     if (!sv_ptr || sv_ptr >= 0xFFFFFFFF80000000ULL || sv_ptr + 2 * sizeof(int) > 0xFFFFFFFF80000000ULL)
         return (uint64_t)-EFAULT;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     struct unix_sock *a = unix_sock_alloc();
     struct unix_sock *b = unix_sock_alloc();
@@ -985,7 +987,7 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
 
     int fd_a = -1, fd_b = -1;
     for (int i = 3; i < MAX_FD; i++) {
-        if (proc->fd_table[i].type == FD_NONE) {
+        if (proc->mm->files->fd_table[i].type == FD_NONE) {
             if (fd_a < 0) fd_a = i;
             else if (fd_b < 0) { fd_b = i; break; }
         }
@@ -1005,13 +1007,13 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
     b->peer = proc->pid;
     b->peer_sock = a;
 
-    proc->fd_table[fd_a].type = FD_SOCKET;
-    proc->fd_table[fd_a].flags = O_RDWR;
-    proc->fd_table[fd_a].sock = a;
+    proc->mm->files->fd_table[fd_a].type = FD_SOCKET;
+    proc->mm->files->fd_table[fd_a].flags = O_RDWR;
+    proc->mm->files->fd_table[fd_a].sock = a;
 
-    proc->fd_table[fd_b].type = FD_SOCKET;
-    proc->fd_table[fd_b].flags = O_RDWR;
-    proc->fd_table[fd_b].sock = b;
+    proc->mm->files->fd_table[fd_b].type = FD_SOCKET;
+    proc->mm->files->fd_table[fd_b].flags = O_RDWR;
+    proc->mm->files->fd_table[fd_b].sock = b;
 
     spin_unlock(&socket_lock);
 
@@ -1028,10 +1030,10 @@ uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     const struct msghdr __user *msg = (const struct msghdr __user *)arg2;
     int flags = (int)arg3;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
 
     // Validate msghdr pointer
     uint64_t msg_ptr = (uint64_t)msg;
@@ -1085,7 +1087,7 @@ uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
         kcontrollen = kmsg.msg_controllen;
     }
 
-    struct unix_sock *sock = proc->fd_table[fd].sock;
+    struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
     if (!sock) { kfree(kiov); if (kcontrol) kfree(kcontrol); return (uint64_t)-EBADF; }
 
     int64_t ret = sock_sendmsg_internal(sock, kiov, kmsg.msg_iovlen,
@@ -1102,10 +1104,10 @@ uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     struct msghdr __user *msg = (struct msghdr __user *)arg2;
     int flags = (int)arg3;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
 
     uint64_t msg_ptr = (uint64_t)msg;
     if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
@@ -1150,7 +1152,7 @@ uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
         kcontrollen = kmsg.msg_controllen;
     }
 
-    struct unix_sock *sock = proc->fd_table[fd].sock;
+    struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
     if (!sock) { kfree(kiov); return (uint64_t)-EBADF; }
 
     int64_t ret = sock_recvmsg_internal(sock, kiov, kmsg.msg_iovlen,
@@ -1172,12 +1174,12 @@ uint64_t sys_shutdown(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
     int fd = (int)arg1;
     int how = (int)arg2;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
 
-    struct unix_sock *sock = proc->fd_table[fd].sock;
+    struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
     if (!sock) return (uint64_t)-EBADF;
 
     if (how < 0 || how > 2) return (uint64_t)-EINVAL;
@@ -1229,7 +1231,7 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     nfds_t nfds = (nfds_t)arg2;
     int timeout_ms = (int)arg3;
 
-    proc_t *proc = current_proc;
+    task_t *proc = current_task;
 
     // Validate user pointer
     uint64_t fds_ptr = (uint64_t)fds;
@@ -1261,7 +1263,7 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
                 continue;
             }
 
-            struct file *f = &proc->fd_table[pfd];
+            struct file *f = &proc->mm->files->fd_table[pfd];
             if (f->type == FD_NONE) {
                 kfds[i].revents = POLLERR;
                 ready++;
@@ -1298,7 +1300,7 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
                     // POLLHUP: peer gone (always reported regardless of events mask)
                     if (sock->state == UNIX_CLOSED ||
                         (sock->peer >= 0 && sock->peer < MAX_PROC &&
-                         procs[sock->peer].pid != sock->peer)) {
+                         tasks[sock->peer].pid != sock->peer)) {
                         kfds[i].revents |= POLLHUP;
                     }
 
@@ -1323,7 +1325,7 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
                 if (ip && ip->i_priv) {
                     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
                     if (ops->driver_pid == 0 && ops->poll) {
-                        __poll_t revents = ops->poll(current_proc, kfds[i].events);
+                        __poll_t revents = ops->poll(current_task, kfds[i].events);
                         kfds[i].revents |= revents;
                     }
                 }

@@ -125,7 +125,7 @@ static uint64_t walk_user_pt(uint64_t cr3_phys, uint64_t vaddr) {
 __attribute__((no_sanitize("kernel-address")))
 static bool bounce_to_user_pages(pid_t pid, void *user_buf, uint32_t byte_len) {
     if (pid < 0 || pid >= MAX_PROC) return false;
-    proc_t *proc = &procs[pid];
+    task_t *proc = &tasks[pid];
     if (proc->pid != pid || proc->state == ZOMBIE || proc->state == REAPING) return false;
 
     uint64_t cr3 = proc->cr3;  // physical address of PML4
@@ -826,7 +826,7 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
 
     // Allocate request from pool
     block_req *req = &block_pool[bq_tail];
-    req->caller_pid = current_proc->pid;
+    req->caller_pid = current_task->pid;
     req->lba = lba;
     req->count = count;
     req->dir = dir;

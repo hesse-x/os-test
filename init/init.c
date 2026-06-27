@@ -15,29 +15,23 @@
 
 static int spawn_service(const char *path) {
     printf("spawn: %s\n", path);
-
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return -1;
-
-    uint64_t size = fd_file_size(fd);
-    void *buf = malloc(size);
-    if (!buf) { close(fd); return -1; }
-
-    ssize_t nread = read(fd, buf, size);
-    close(fd);
-
-    pid_t pid = spawn(buf, size);
-    free(buf);
-
+    pid_t pid = spawn(path);
     return (pid > 0) ? (int)pid : -1;
 }
 
 static void wait_dev_ready(const char *dev_path) {
     int fd;
-    while ((fd = open(dev_path, O_RDWR)) < 0) {
+    for (int tries = 0; ; tries++) {
+        printf("wait_dev_ready: calling open %s try=%d\n", dev_path, tries);
+        fd = open(dev_path, O_RDWR);
+        printf("wait_dev_ready: open %s try=%d ret=%d\n", dev_path, tries, fd);
+        if (fd >= 0) break;
+        printf("wait_dev_ready: calling recv try=%d\n", tries);
         struct recv_msg m;
-        recv(&m, NULL, 0, 10);  // wait 10ms, allows other processes to run
+        recv(&m, NULL, 0, 10);
+        printf("wait_dev_ready: recv returned try=%d\n", tries);
     }
+    printf("wait_dev_ready: %s opened fd=%d\n", dev_path, fd);
     close(fd);
 }
 
@@ -57,7 +51,10 @@ int main(void) {
 
     // 2. Spawn kbd_driver, wait for DEV_KBD
     printf("init: spawning kbd_driver\n");
-    spawn_service("/driver/kbd.dev");
+    {
+        pid_t p = spawn("/driver/kbd.dev");
+        printf("init: spawn kbd returned pid=%d\n", (int)p);
+    }
     wait_dev_ready("/dev/kbd");
     printf("init: kbd_driver ready\n");
 

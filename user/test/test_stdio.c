@@ -235,7 +235,7 @@ void test_d_neg_zero_fill_large(void) {
 void test_d_neg_zero_fill_large2(void) {
     char b[64];
     sprintf(b, "%015d", -12345);
-    TEST_ASSERT_EQUAL_STRING("-000000000012345", b);
+    TEST_ASSERT_EQUAL_STRING("-00000000012345", b);
 }
 
 int main(void) {

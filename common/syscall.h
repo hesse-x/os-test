@@ -9,7 +9,7 @@
 // positive errno = error (for status-only syscalls)
 // For value-returning syscalls: 0 = failure, nonzero = success
 //   sys_mmap: returns mapped address on success, NULL on failure
-//   sys_spawn/sys_waitpid: returns pid on success, 0 on failure
+//   sys_waitpid: returns pid on success, 0 on failure
 //   sys_getpid: always succeeds (returns pid >= 1)
 
 // ===================== Semantic wrappers (user-space only) =====================
@@ -61,8 +61,13 @@ static inline int64_t sys_waitpid(int32_t pid, int32_t *exit_code) {
     return __syscall2(SYS_WAITPID, (int64_t)pid, (int64_t)(uintptr_t)exit_code);
 }
 
-static inline int64_t sys_spawn(const void *elf_data, uint64_t elf_size) {
-    return __syscall2(SYS_SPAWN, (int64_t)(uintptr_t)elf_data, (int64_t)elf_size);
+static inline int64_t sys_fork(void) {
+    return __syscall0(SYS_FORK);
+}
+
+static inline int sys_execve(const char *pathname, char *const argv[], char *const envp[]) {
+    return (int)__syscall3(SYS_EXECVE, (int64_t)(uintptr_t)pathname,
+                            (int64_t)(uintptr_t)argv, (int64_t)(uintptr_t)envp);
 }
 
 static inline void *sys_mmap(void *addr, size_t size, int prot, int flags, int fd, uint64_t offset) {

@@ -97,7 +97,7 @@ void serial_printf(const char *fmt, ...) {
 
 // ===================== Serial dev_ops (VFS callback dispatch) =====================
 
-static int serial_dev_open(struct proc_t *proc, int fd) {
+static int serial_dev_open(struct task_t *proc, int fd) {
     // Mutual exclusion: cannot coexist with user-space irq_bind on vector 36
     // But if serial IRQ is already registered (by a previous open), it's fine —
     // just bump the fd count.
@@ -114,7 +114,7 @@ static int serial_dev_open(struct proc_t *proc, int fd) {
     return 0;
 }
 
-static int serial_dev_close(struct proc_t *proc, int fd) {
+static int serial_dev_close(struct task_t *proc, int fd) {
     serial_fd_count--;
     uint64_t rx_flags;
     spin_lock_irqsave(&serial_rx_lock, &rx_flags);
@@ -130,13 +130,13 @@ static int serial_dev_close(struct proc_t *proc, int fd) {
     return 0;
 }
 
-static ssize_t serial_dev_read(struct proc_t *proc, int fd, void *buf, size_t count) {
+static ssize_t serial_dev_read(struct task_t *proc, int fd, void *buf, size_t count) {
     if (!buf) return -EFAULT;
 
     uint64_t rx_flags;
     spin_lock_irqsave(&serial_rx_lock, &rx_flags);
     while (serial_rx_head == serial_rx_tail) {
-        if (proc->fd_table[fd].flags & O_NONBLOCK) {
+        if (proc->mm->files->fd_table[fd].flags & O_NONBLOCK) {
             spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
             return -EAGAIN;
         }
@@ -159,7 +159,7 @@ static ssize_t serial_dev_read(struct proc_t *proc, int fd, void *buf, size_t co
     return (ssize_t)nread;
 }
 
-static ssize_t serial_dev_write(struct proc_t *proc, int fd, const void *buf, size_t count) {
+static ssize_t serial_dev_write(struct task_t *proc, int fd, const void *buf, size_t count) {
     if (!buf) return -EFAULT;
     const char *src = (const char __force *)buf;
     for (size_t i = 0; i < count; i++)
@@ -172,7 +172,7 @@ static long serial_dev_ioctl(uint32_t cmd, void *arg) {
     return -ENOTTY;
 }
 
-static __poll_t serial_dev_poll(struct proc_t *proc, int events) {
+static __poll_t serial_dev_poll(struct task_t *proc, int events) {
     __poll_t revents = 0;
     uint64_t rx_flags;
     spin_lock_irqsave(&serial_rx_lock, &rx_flags);

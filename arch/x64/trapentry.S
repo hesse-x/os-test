@@ -49,6 +49,12 @@ __trapret:
     movq %rsp, %rdi
     call check_pending_signals
 
+    # Disable interrupts before swapgs — if a timer interrupt fires between
+    # swapgs and iretq, the ISR's conditional swapgs (checks CS=kernel) would
+    # skip swapgs, leaving GS_BASE=0 and corrupting per-CPU state.
+    # iretq will re-enable interrupts when it loads RFLAGS with IF=1.
+    cli
+
     # swapgs if returning to user mode (CS=0x2B at offset 144)
     cmpw $0x2B, 144(%rsp)
     jne 1f
@@ -100,7 +106,7 @@ syscall_fast_entry:
 
     # Now R10 is free — use it to save user RSP before switching stacks
     movq %rsp, %r10
-    movq %gs:40, %rsp          # switch to kernel stack (tss_rsp0 at offset 40)
+    movq %gs:48, %rsp          # switch to per-process kernel stack (tss_rsp0 at offset 48)
 
     # Build trapframe on kernel stack (176 bytes)
     subq $176, %rsp
@@ -150,6 +156,11 @@ syscall_fast_entry:
     # Note: blocking syscalls (getc) also return here after being rescheduled,
     # because schedule() -> switch_to saves/restores the full call chain.
 
+    ## Disable interrupts before swapgs — same swapgs race as __trapret:
+    ## if an interrupt fires between swapgs and sysretq with GS_BASE=0,
+    ## the ISR runs with broken per-CPU pointers.
+    cli
+
     # Restore GP registers from trapframe
     movq 112(%rsp), %rax
     movq 104(%rsp), %rbx
@@ -177,13 +188,11 @@ syscall_fast_entry:
     sysretq
 
 # ===================== context switch =====================
-# void switch_to(proc_t *prev, proc_t *next)
+# void switch_to(task_t *prev, task_t *next)
 # System V AMD64: rdi = prev, rsi = next
-# proc_t layout (64-bit, no padding):
-#   pid(0) state(4) k_rsp(8) k_stack_top(16) cr3(24) entry(32) wait_event(40)
+# task_t offsets validated by _Static_assert in kernel/proc.c
 .globl switch_to
 switch_to:
-    # 保存 callee-saved 寄存器
     pushq %rbx
     pushq %rbp
     pushq %r12
@@ -191,24 +200,17 @@ switch_to:
     pushq %r14
     pushq %r15
 
-    # prev->k_rsp = current RSP
-    movq %rsp, 8(%rdi)
-
-    # RSP = next->k_rsp
-    movq 8(%rsi), %rsp
-
-    # Switch CR3 to next process's PML4
-    movq 24(%rsi), %rax
+    movq %rsp, 8(%rdi)       /* prev->k_rsp = RSP  */
+    movq 8(%rsi), %rsp       /* RSP = next->k_rsp  */
+    movq 24(%rsi), %rax      /* rax = next->cr3     */
     movq %rax, %cr3
 
-    # 恢复 callee-saved 寄存器
     popq %r15
     popq %r14
     popq %r13
     popq %r12
     popq %rbp
     popq %rbx
-
     ret
 
 # process_entry: first return target for new processes

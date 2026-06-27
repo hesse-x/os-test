@@ -174,9 +174,9 @@ void ap_entry_c(int cpu_id) {
 
     serial_printf("AP 0x%016X init finish\n", cpu_id);
 
-    // Switch to idle process: set current_proc, switch to idle kernel stack
-    proc_t *idle = cpu_locals[cpu_id].idle_proc;
-    current_proc = idle;
+    // Switch to idle process: set current_task, switch to idle kernel stack
+    task_t *idle = cpu_locals[cpu_id].idle_proc;
+    current_task = idle;
     idle->state = RUNNING;
     per_cpu_tss[cpu_id].rsp0 = idle->k_stack_top;
     cpu_locals[cpu_id].tss_rsp0 = idle->k_stack_top;

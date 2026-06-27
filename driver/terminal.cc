@@ -402,19 +402,7 @@ int main() {
     dup2(p_stdout[1], 1);  // fd 1 = stdout pipe write end
 
     // 9. Spawn shell — it inherits fd 0 (stdin read) and fd 1 (stdout write)
-    {
-        struct stat st;
-        if (stat("/usr/bin/shell", &st) >= 0) {
-            void *buf = malloc(st.st_size);
-            int fd = open("/usr/bin/shell", O_RDONLY);
-            if (fd >= 0 && buf) {
-                read(fd, buf, st.st_size);
-                close(fd);
-                spawn(buf, st.st_size);
-                free(buf);
-            }
-        }
-    }
+    spawn("/usr/bin/shell");
 
     // 10. Close pipe ends owned by shell, set up terminal's own fd 0/1
     close(p_stdin[0]);   // close read end (shell owns it)

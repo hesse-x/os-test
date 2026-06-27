@@ -5,7 +5,6 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/process.h>
-#include <fcntl.h>
 
 struct test_entry {
     const char *name;
@@ -31,38 +30,6 @@ static struct test_entry tests[] = {
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))
 
-static pid_t spawn_elf(const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        printf("[ERROR] cannot open %s (fd=%d)\n", path, fd);
-        return -1;
-    }
-
-    uint64_t size = fd_file_size(fd);
-    if (size == 0) {
-        close(fd);
-        return -1;
-    }
-
-    void *buf = malloc((size_t)size);
-    if (!buf) {
-        close(fd);
-        return -1;
-    }
-
-    ssize_t nread = read(fd, buf, (size_t)size);
-    close(fd);
-
-    if ((uint64_t)nread != size) {
-        free(buf);
-        return -1;
-    }
-
-    pid_t pid = spawn(buf, (size_t)size);
-    free(buf);
-    return pid;
-}
-
 int main(void) {
     printf("=== Test Runner ===\n");
 
@@ -76,7 +43,7 @@ int main(void) {
 
         printf("[RUN]  %-20s ... running\n", name);
 
-        pid_t pid = spawn_elf(path);
+        pid_t pid = spawn(path);
         if (pid <= 0) {
             printf("[SKIP] %-20s (cannot spawn)\n", name);
             skip_count++;

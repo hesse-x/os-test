@@ -46,6 +46,13 @@ function(add_user_elf elf_name)
         endforeach()
     endif()
 
+    # Determine dependency scanner language
+    if(ARG_C)
+        set(DEP_LANG "C")
+    else()
+        set(DEP_LANG "CXX")
+    endif()
+
     # Step 1: compile each source file
     set(COMPILE_DEPS "")
     set(OBJ_FILES "")
@@ -65,6 +72,7 @@ function(add_user_elf elf_name)
             OUTPUT ${src_obj}
             COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS} -c ${src_full} -o ${src_obj}
             DEPENDS ${src_full}
+            IMPLICIT_DEPENDS ${DEP_LANG} ${src_full}
             COMMENT "Compiling ${elf_name}_${idx}.o"
         )
 

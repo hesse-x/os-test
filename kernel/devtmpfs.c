@@ -104,38 +104,36 @@ int devtmpfs_create(const char *name, int dev_type, struct dev_ops *ops) {
     return 0;
 }
 
-uint64_t devtmpfs_open(struct proc_t *proc, const char *name, int flags) {
-    serial_printf("devtmpfs_open: name='%s' pid=%d\n", name, proc->pid);
+uint64_t devtmpfs_open(struct task_t *proc, const char *name, int flags) {
     struct inode *ip = devtmpfs_lookup(name);
     if (!ip) return (uint64_t)(-(uint64_t)ENOENT);
 
     /* Allocate fd */
     int fd = -1;
     for (int j = 3; j < MAX_FD; j++) {
-        if (proc->fd_table[j].type == FD_NONE) { fd = j; break; }
+        if (proc->mm->files->fd_table[j].type == FD_NONE) { fd = j; break; }
     }
     if (fd < 0) return (uint64_t)(-(uint64_t)EMFILE);
 
-    proc->fd_table[fd].type = FD_DEV;
-    proc->fd_table[fd].flags = flags;
-    proc->fd_table[fd].inode = ip;
+    proc->mm->files->fd_table[fd].type = FD_DEV;
+    proc->mm->files->fd_table[fd].flags = flags;
+    proc->mm->files->fd_table[fd].inode = ip;
     inode_get(ip);
     if (ip->i_priv) {
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-        proc->fd_table[fd].target_pid = ops->driver_pid;
+        proc->mm->files->fd_table[fd].target_pid = ops->driver_pid;
         // Kernel device: call open callback
         if (ops->driver_pid == 0 && ops->open) {
             int rc = ops->open(proc, fd);
             if (rc < 0) {
                 // Open failed: undo fd allocation
                 inode_put(ip);
-                __memset(&proc->fd_table[fd], 0, sizeof(struct file));
-                proc->fd_table[fd].type = FD_NONE;
+                __memset(&proc->mm->files->fd_table[fd], 0, sizeof(struct file));
+                proc->mm->files->fd_table[fd].type = FD_NONE;
                 return (uint64_t)(-(uint64_t)(-rc));
             }
         }
     }
-    serial_printf("devtmpfs_open: '%s' allocated fd=%d driver_pid=%d\n", name, fd, ip->i_priv ? ((struct dev_ops *)ip->i_priv)->driver_pid : -1);
     return (uint64_t)fd;
 }
 

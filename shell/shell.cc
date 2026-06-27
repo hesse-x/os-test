@@ -265,59 +265,12 @@ static void cmd_mkdir(const char *rel_path) {
     }
 }
 
-// Execute a file as an ELF: open, read, spawn, wait
+// Execute a file: spawn(path), wait
 static void exec_path(const char *rel_path) {
     char abs_path[256];
     build_abs_path(rel_path, abs_path);
 
-    int fd = open(abs_path, O_RDONLY);
-    if (fd < 0) {
-        printf("%s: file not found\n", rel_path);
-        return;
-    }
-
-    // Get file size via fstat
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size == 0) {
-        printf("%s: empty file\n", rel_path);
-        close(fd);
-        return;
-    }
-
-    size_t file_size = (size_t)st.st_size;
-    uint8_t *elf_buf = (uint8_t *)malloc(file_size);
-    if (!elf_buf) {
-        printf("%s: malloc failed\n", rel_path);
-        close(fd);
-        return;
-    }
-
-    // Read entire file
-    size_t offset = 0;
-    while (offset < file_size) {
-        ssize_t n = read(fd, elf_buf + offset, file_size - offset);
-        if (n <= 0) break;
-        offset += (size_t)n;
-    }
-
-    close(fd);
-
-    if (offset < file_size) {
-        printf("%s: read error\n", rel_path);
-        free(elf_buf);
-        return;
-    }
-
-    // ELF magic check
-    if (elf_buf[0] != 0x7F || elf_buf[1] != 'E' || elf_buf[2] != 'L' || elf_buf[3] != 'F') {
-        printf("%s: not an executable file\n", rel_path);
-        free(elf_buf);
-        return;
-    }
-
-    pid_t child_pid = spawn((const void *)elf_buf, file_size);
-    free(elf_buf);
-
+    pid_t child_pid = spawn(abs_path);
     if (child_pid < 0) {
         printf("%s: spawn failed\n", rel_path);
         return;

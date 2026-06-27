@@ -73,7 +73,7 @@ typedef struct unix_bind_entry {
 } unix_bind_entry_t;
 
 // ===================== Global socket lock =====================
-// Lock order: procs_lock -> socket_lock -> scheduler_lock
+// Lock order: tasks_lock -> socket_lock -> scheduler_lock
 extern spinlock_t socket_lock;
 
 // ===================== Socket operations (internal) =====================

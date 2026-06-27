@@ -8,7 +8,9 @@
 extern "C" {
 #endif
 
-pid_t spawn(const void *elf, size_t size);
+pid_t fork(void);
+int   execve(const char *pathname, char *const argv[], char *const envp[]);
+pid_t spawn(const char *path);
 
 #ifdef __cplusplus
 }

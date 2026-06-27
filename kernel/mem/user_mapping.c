@@ -2,9 +2,14 @@
 // Used by proc.c (process creation) and trap.c (sys_mmap/sys_munmap/sys_spawn)
 
 #include <stdbool.h>
+#include <stdint.h>
 #include "kernel/mem/alloc.h"
 #include "arch/x64/paging.h"
 #include "common/macro.h"
+#include "common/errno.h"
+#include "common/shm.h"
+#include "kernel/proc.h"
+#include "kernel/trap.h"
 
 // Ensure a PDPT entry exists for the given virtual address in user PML4.
 // Returns the virtual address of the PD, or allocates a new one.
@@ -128,4 +133,117 @@ void unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
         }
         vaddr += PAGE_SIZE;
     }
+}
+
+// Deep-copy user page tables from src_pml4 to dst_pml4.
+// dst_pml4 must already have kernel entries copied.
+// For each present user PTE, allocates new physical page and memcpys content.
+// SHM/MAP_PHYSICAL pages: shares physical page (NO shm_get here — ref bump done in copy_mmap_regions).
+// Sig trampoline page: shares physical page (no ref bump, global).
+// Returns: 0 on success, negative errno on failure (dst partially filled).
+__attribute__((no_sanitize("kernel-address")))
+int copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
+                    mmap_region_t *mmap_regions) {
+    for (int pml4_idx = 0; pml4_idx < 256; pml4_idx++) {
+        if (!(src_pml4[pml4_idx] & PTE_PRESENT)) continue;
+
+        uint64_t pdpt_phys = src_pml4[pml4_idx] & 0x000FFFFFFFFFF000ULL;
+        uint64_t *src_pdpt = (uint64_t *)phys_to_virt((__force phys_addr_t)pdpt_phys);
+
+        // Allocate new PDPT
+        Page *new_pdpt_page = bfc_alloc_page(1);
+        if (!new_pdpt_page) return -ENOMEM;
+        uint64_t new_pdpt_phys = (__force uint64_t)page_to_phys(new_pdpt_page);
+        uint64_t *dst_pdpt = (uint64_t *)phys_to_virt((__force phys_addr_t)new_pdpt_phys);
+        for (int i = 0; i < 512; i++) dst_pdpt[i] = 0;
+
+        dst_pml4[pml4_idx] = new_pdpt_phys | (src_pml4[pml4_idx] & 0xFFF);
+
+        for (int pdpt_idx = 0; pdpt_idx < 512; pdpt_idx++) {
+            if (!(src_pdpt[pdpt_idx] & PTE_PRESENT)) continue;
+            if (src_pdpt[pdpt_idx] & PTE_PS) {
+                dst_pdpt[pdpt_idx] = src_pdpt[pdpt_idx]; // huge page: share
+                continue;
+            }
+
+            uint64_t pd_phys = src_pdpt[pdpt_idx] & 0x000FFFFFFFFFF000ULL;
+            uint64_t *src_pd = (uint64_t *)phys_to_virt((__force phys_addr_t)pd_phys);
+
+            Page *new_pd_page = bfc_alloc_page(1);
+            if (!new_pd_page) return -ENOMEM;
+            uint64_t new_pd_phys = (__force uint64_t)page_to_phys(new_pd_page);
+            uint64_t *dst_pd = (uint64_t *)phys_to_virt((__force phys_addr_t)new_pd_phys);
+            for (int i = 0; i < 512; i++) dst_pd[i] = 0;
+
+            dst_pdpt[pdpt_idx] = new_pd_phys | (src_pdpt[pdpt_idx] & 0xFFF);
+
+            for (int pd_idx = 0; pd_idx < 512; pd_idx++) {
+                if (!(src_pd[pd_idx] & PTE_PRESENT)) continue;
+                if (src_pd[pd_idx] & PTE_PS) {
+                    dst_pd[pd_idx] = src_pd[pd_idx];
+                    continue;
+                }
+
+                uint64_t pt_phys = src_pd[pd_idx] & 0x000FFFFFFFFFF000ULL;
+                uint64_t *src_pt = (uint64_t *)phys_to_virt((__force phys_addr_t)pt_phys);
+
+                Page *new_pt_page = bfc_alloc_page(1);
+                if (!new_pt_page) return -ENOMEM;
+                uint64_t new_pt_phys = (__force uint64_t)page_to_phys(new_pt_page);
+                uint64_t *dst_pt = (uint64_t *)phys_to_virt((__force phys_addr_t)new_pt_phys);
+                for (int i = 0; i < 512; i++) dst_pt[i] = 0;
+
+                dst_pd[pd_idx] = new_pt_phys | (src_pd[pd_idx] & 0xFFF);
+
+                for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
+                    uint64_t pte = src_pt[pt_idx];
+                    if (!(pte & PTE_PRESENT)) continue;
+
+                    uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
+
+                    // Skip sig trampoline — shared physical page
+                    if (sig_trampoline_phys != 0 && leaf_phys == sig_trampoline_phys) {
+                        dst_pt[pt_idx] = pte; // share
+                        continue;
+                    }
+
+                    // Check if this is an SHM/MAP_PHYSICAL page
+                    bool is_shared = false;
+                    for (mmap_region_t *mr = mmap_regions; mr; mr = mr->next) {
+                        if (mr->shm_obj != NULL) {
+                            shm_t *s = mr->shm_obj;
+                            if (s->page_list) {
+                                for (int pi = 0; pi < s->num_pages; pi++) {
+                                    if (leaf_phys == s->page_list[pi]) { is_shared = true; break; }
+                                }
+                            } else if (s->phys != 0 && s->npages > 0) {
+                                if (leaf_phys >= s->phys && leaf_phys < s->phys + s->npages * PAGE_SIZE) {
+                                    is_shared = true;
+                                }
+                            }
+                        }
+                        if (mr->phys != 0 && leaf_phys >= mr->phys && leaf_phys < mr->phys + mr->size) {
+                            is_shared = true;
+                        }
+                        if (is_shared) break;
+                    }
+
+                    if (is_shared) {
+                        dst_pt[pt_idx] = pte; // share PTE
+                        continue;
+                    }
+
+                    // Private page: allocate new physical page, copy content
+                    Page *new_page = bfc_alloc_page(1);
+                    if (!new_page) return -ENOMEM;
+                    uint64_t new_phys = (__force uint64_t)page_to_phys(new_page);
+                    uint8_t *src_v = (uint8_t *)phys_to_virt((__force phys_addr_t)leaf_phys);
+                    uint8_t *dst_v = (uint8_t *)phys_to_virt((__force phys_addr_t)new_phys);
+                    for (size_t i = 0; i < PAGE_SIZE; i++) dst_v[i] = src_v[i];
+                    dst_pt[pt_idx] = new_phys | (pte & 0xFFF); // same flags
+                }
+            }
+        }
+    }
+    return 0;
 }
