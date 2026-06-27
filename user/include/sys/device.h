@@ -2,15 +2,13 @@
 #define _SYS_DEVICE_H
 
 #include <sys/types.h>
+#include "common/dev.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 int device_register(const char *name, int dev_type);
-
-// Device type constants (must match common/dev.h)
-#define DEV_SERIAL   6
 
 #ifdef __cplusplus
 }

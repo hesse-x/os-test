@@ -25,9 +25,9 @@ struct dev_ops {
 };
 
 void    devtmpfs_init(void);
-struct inode *devtmpfs_lookup(const char *name);
 int     devtmpfs_create(const char *name, int dev_type, struct dev_ops *ops);
 uint64_t devtmpfs_open(struct proc_t *proc, const char *name, int flags);
+struct inode *devtmpfs_lookup(const char *name);
 void    devtmpfs_cleanup_pid(pid_t pid);
 void    devtmpfs_remove(const char *name);
 pid_t   isr_lookup_driver(uint32_t dev_type);

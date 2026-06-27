@@ -18,6 +18,9 @@
 #include "arch/x64/utils.h"
 #include <stddef.h>
 
+/* Forward declarations for static functions used before definition */
+static int fat32_create_file(const char *path);
+
 /* ==================== FAT32 volume state ==================== */
 static uint32_t part_start_lba;
 static uint32_t fat_start_lba;
@@ -95,7 +98,7 @@ static void fat_cache_invalidate_sector(uint32_t sector_lba) {
 /* ==================== FAT entry read/write ==================== */
 
 /* Read a FAT entry (synchronous, uses FAT cache) */
-uint32_t fat_read_entry(uint32_t cluster) {
+static uint32_t fat_read_entry(uint32_t cluster) {
     uint32_t fat_offset = cluster * 4;
     uint32_t fat_sector = fat_start_lba + (fat_offset / 512);
     uint32_t offset_in_sector = fat_offset % 512;
@@ -110,7 +113,7 @@ uint32_t fat_read_entry(uint32_t cluster) {
 }
 
 /* Write a FAT entry (dual-write to FAT1 and FAT2) */
-int fat32_write_fat_entry(uint32_t cluster, uint32_t value) {
+static int fat32_write_fat_entry(uint32_t cluster, uint32_t value) {
     uint32_t fat_offset = cluster * 4;
     uint32_t fat_sector = fat_start_lba + (fat_offset / 512);
     uint32_t offset_in_sector = fat_offset % 512;
@@ -156,7 +159,7 @@ uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index) {
 /* ==================== Cluster allocation ==================== */
 
 /* Find a free cluster and mark it as EOF. Returns cluster number or 0 on failure. */
-uint32_t fat32_allocate_cluster(void) {
+static uint32_t fat32_allocate_cluster(void) {
     for (uint32_t sector = 0; sector < spf32; sector++) {
         uint32_t abs_sector = ((next_free_hint / 128) + sector) % spf32;
         int slot = fat_cache_read(fat_start_lba + abs_sector);
@@ -182,7 +185,7 @@ uint32_t fat32_allocate_cluster(void) {
 }
 
 /* Free an entire cluster chain starting from start_cluster */
-void fat32_free_chain(uint32_t start_cluster) {
+static void fat32_free_chain(uint32_t start_cluster) {
     uint32_t c = start_cluster;
     while (c >= 2 && c < 0x0FFFFFF8) {
         uint32_t next = fat_read_entry(c);
@@ -194,7 +197,7 @@ void fat32_free_chain(uint32_t start_cluster) {
 }
 
 /* Link a new cluster after tail_cluster in the FAT chain */
-int fat32_link_cluster(uint32_t tail_cluster, uint32_t new_cluster) {
+static int fat32_link_cluster(uint32_t tail_cluster, uint32_t new_cluster) {
     return fat32_write_fat_entry(tail_cluster, new_cluster);
 }
 
@@ -293,7 +296,7 @@ uint32_t fat32_bytes_per_cluster(void) { return bytes_per_cluster; }
 
 /* ==================== Path resolution (synchronous) ==================== */
 
-int fat32_resolve_path(const char *path, uint32_t *out_cluster,
+static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
                        uint32_t *out_dir_cluster, int *out_dir_entry_idx,
                        uint64_t *out_file_size, int is_parent) {
     if (!path || path[0] != '/') return -ENOENT;
@@ -517,7 +520,7 @@ static int write_cluster_sector(uint32_t cluster, int sector_idx, const uint8_t 
 }
 
 /* Update directory entry on disk */
-int fat32_update_dir_entry(uint32_t dir_cluster, int dir_idx,
+static int fat32_update_dir_entry(uint32_t dir_cluster, int dir_idx,
                            uint32_t start_cluster, uint32_t file_size) {
     uint8_t *buf = read_cluster_buf(dir_cluster);
     if (!buf) return -EIO;
@@ -535,7 +538,7 @@ int fat32_update_dir_entry(uint32_t dir_cluster, int dir_idx,
 
 /* ==================== Truncate (free cluster chain, zero size) ==================== */
 
-int fat32_truncate(uint32_t cluster, uint32_t dir_cluster, int dir_idx) {
+static int fat32_truncate(uint32_t cluster, uint32_t dir_cluster, int dir_idx) {
     spin_lock(&fat_lock);
     fat32_free_chain(cluster);
     spin_unlock(&fat_lock);
@@ -786,7 +789,7 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf, size_t count
 
 /* ==================== Create file ==================== */
 
-int fat32_create_file(const char *path) {
+static int fat32_create_file(const char *path) {
     /* Resolve parent directory */
     uint32_t parent_cluster, dummy_cluster;
     int dummy_idx;

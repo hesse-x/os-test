@@ -8,7 +8,6 @@
 #include "kernel/devtmpfs.h"
 #include "kernel/serial.h"
 #include "kernel/trap.h"
-#include "kernel/trap.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/mem/slab.h"
 #include "kernel/elf_loader.h"
@@ -21,7 +20,6 @@
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
 #include "common/dev.h"
-#include "arch/x64/apic.h"
 #include "kernel/socket.h"
 
 // Minimal file_io_req for FD_FILE CLOSE notification (must match fs_driver struct layout)
@@ -61,6 +59,21 @@ void timer_queue_insert(int cpu, proc_t *proc) {
 // Remove process from timer queue (no-op if not on any queue)
 void timer_queue_remove(proc_t *proc) {
     list_remove(&proc->wait_node);
+}
+
+// ===================== mmap region allocation =====================
+
+mmap_region_t *add_mmap_region(proc_t *proc, uint64_t vaddr, uint64_t size,
+                                uint64_t phys, struct shm *shm_obj) {
+    mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+    if (!region) return NULL;
+    region->vaddr = vaddr;
+    region->size = size;
+    region->phys = phys;
+    region->shm_obj = shm_obj;
+    region->next = proc->mmap_regions;
+    proc->mmap_regions = region;
+    return region;
 }
 
 // ===================== Process table =====================
@@ -628,12 +641,7 @@ void proc_reap(proc_t *proc) {
             if (p) {
                 p->ref_count--;
                 // Notify blocked peer
-                if (proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)) {
-                    if (p->read_pid >= 0) wake_process(p->read_pid);
-                }
-                if (proc->fd_table[fd].flags & (O_RDONLY | O_RDWR)) {
-                    if (p->write_pid >= 0) wake_process(p->write_pid);
-                }
+                wake_pipe_peers(p, proc->fd_table[fd].flags);
                 if (p->ref_count == 0) {
                     kfree(p->buf);
                     kfree(p);

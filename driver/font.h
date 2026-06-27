@@ -2,10 +2,7 @@
 #define DRIVER_FONT_H
 
 #include <stdint.h>
-
-#define FONT_WIDTH  8
-#define FONT_HEIGHT 16
-#define FONT_CHARS_START 0x20
+#include "common/font_metrics.h"
 
 static const uint8_t font8x16[96][16] = {
     // 0x20 ' '

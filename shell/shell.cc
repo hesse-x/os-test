@@ -10,7 +10,6 @@
 #include <sys/process.h>
 #include <sys/wait.h>
 #include "common/dev.h"
-#include "common/errno.h"
 
 // Current working directory
 static char cwd[256] = "/";

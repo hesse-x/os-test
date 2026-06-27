@@ -10,7 +10,6 @@
 #include "kernel/mem/slab.h"
 #include "kernel/spinlock.h"
 #include "common/errno.h"
-#include "common/socket.h"
 #include "kernel/mem/kasan.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"

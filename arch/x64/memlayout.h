@@ -9,4 +9,7 @@
 #define PHY_TO_PAGE(addr)  ((addr) >> PAGE_SHIFT)
 #define GET_PAGE_NUM(len)  (((len) + PAGE_SIZE - 1) / PAGE_SIZE)
 
+// Linker symbol: end of kernel image (used by allocators)
+extern uint8_t kernel_end[];
+
 #endif // ARCH_X64_MEMLAYOUT_H

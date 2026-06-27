@@ -55,7 +55,7 @@ static uint32_t calibrate_lapic_timer() {
 
   // Set LAPIC timer: one-shot, divide by 1, masked (no interrupt)
   lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
-  lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_TIMER_MASKED);
+  lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_MASKED);
 
   // Set PIT channel 0 to mode 4 (software strobe): write divisor starts
   // countdown, counter stops at 0 (does not wrap/reload).

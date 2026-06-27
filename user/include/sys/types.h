@@ -2,8 +2,8 @@
 #define _SYS_TYPES_H
 
 #include <stdint.h>
+#include "common/types.h"
 
-typedef int32_t pid_t;
 typedef int64_t off_t;
 typedef uint32_t dev_t;
 typedef uint32_t ino_t;

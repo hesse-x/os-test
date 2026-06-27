@@ -1,7 +1,7 @@
 #include "kernel/mem/alloc.h"
 #include "arch/x64/paging.h"
 #include "kernel/efi.h"
-#include "kernel/memlayout.h"
+#include "arch/x64/memlayout.h"
 #include "common/macro.h"
 #include "kernel/serial.h"
 #include "kernel/mem/kasan.h"

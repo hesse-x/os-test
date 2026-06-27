@@ -6,6 +6,7 @@
 #include "kernel/sparse.h"
 #include "arch/x64/utils.h"
 #include "common/macro.h"
+#include "common/boot.h"
 #include "arch/x64/memlayout.h"
 
 // ===================== Page table entry flags =====================
@@ -16,23 +17,7 @@
 #define PTE_NX       (1ULL << 63)  // No-execute
 
 // ===================== Constants =====================
-#define VMA_BASE 0xFFFFFFFF80000000ULL
-#define KERNEL_LMA_BASE 0x100000
-#define KERNEL_VMA_BASE 0xFFFFFFFF80100000ULL
 #define PHY_ADDR(addr) ((__force phys_addr_t)((uintptr_t)(addr) - VMA_BASE))
-
-// ===================== boot_info (stub → kernel) =====================
-#define BOOT_INFO_MAGIC 0x4F53424F544F4F42ULL  // "BOOTBOOS"
-
-typedef struct boot_info {
-  uint64_t magic;
-  uint64_t kernel_phys;     // kernel physical load address
-  uint64_t rsdp;            // RSDP physical address
-  uint64_t mmap_addr;       // EFI memory descriptor array (physical)
-  uint64_t mmap_size;       // total bytes
-  uint64_t mmap_desc_size;  // single descriptor size
-  uint64_t mmap_desc_ver;   // descriptor version
-} boot_info;
 
 // ===================== GDT =====================
 // 64位 GDT entry: 8字节

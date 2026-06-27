@@ -10,38 +10,9 @@
 #include <unistd.h>
 #include "driver/font.h"
 #include "common/dev.h"
+#include "common/display.h"
 
 // ===== ioctl commands from <sys/ioctl.h> (common/ioctl.h) =====
-// KMS_IOCTL_CREATE_BUF and KMS_IOCTL_FLIP are defined via _IOC encoding in common/ioctl.h
-
-// ===== Unified ioctl arg for CREATE_BUF (input + output) =====
-struct display_ioctl_create_buf_arg {
-    // input
-    uint32_t width;
-    uint32_t height;
-    uint32_t bpp;
-    // output (filled by kernel)
-    uint32_t pitch;
-    uint32_t size;
-    uint32_t rows;
-    uint32_t cols;
-    int32_t  result;
-};
-
-// ===== Legacy structures (kept for compatibility) =====
-struct display_create_buf_req {
-    uint32_t width;
-    uint32_t height;
-    uint32_t bpp;
-};
-
-struct display_create_buf_resp {
-    uint32_t pitch;
-    uint32_t size;
-    uint32_t rows;
-    uint32_t cols;
-    int32_t  result;
-};
 
 // ===== Client API (compositor side) =====
 

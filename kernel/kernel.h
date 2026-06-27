@@ -2,9 +2,7 @@
 #define KERNEL_H
 #include <stddef.h>
 #include <stdint.h>
-#include "kernel/sparse.h"
-
-typedef struct boot_info boot_info;
+#include "common/boot.h"
 
 void kernel_main(boot_info *bi);
 void kernel_init_finish();

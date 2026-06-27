@@ -4,14 +4,6 @@
 #include "common/fcntl.h"
 #include <stdint.h>
 
-// Sealing constants (for memfd_create + fcntl)
-#define F_ADD_SEALS   1033
-#define F_GET_SEALS   1034
-#define F_SEAL_SEAL   0x0001
-#define F_SEAL_SHRINK 0x0002
-#define F_SEAL_GROW   0x0004
-#define F_SEAL_WRITE  0x0008
-
 #ifdef __cplusplus
 extern "C" {
 #endif

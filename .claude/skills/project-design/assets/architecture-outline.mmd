@@ -1,0 +1,7 @@
+graph TD
+    A[Bootloader] --> B[内核初始化层]
+    B --> C[硬件抽象层：串口、内存、KMS驱动]
+    C --> D[内核核心：调度器、VFS、内存管理、IPC]
+    D --> E[ELF加载器]
+    E --> F[用户态进程]
+    D --> G[调试子系统：日志+断言+CoreDump]

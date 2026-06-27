@@ -104,7 +104,7 @@ struct cache_page *page_cache_lookup(struct inode *ip, uint64_t page_index) {
     return NULL;
 }
 
-int page_cache_evict(void) {
+static int page_cache_evict(void) {
     /* Walk from LRU tail (least recently used), find first evictable page */
     struct cache_page *cp = lru_tail.lru_prev;
     while (cp != &lru_head) {

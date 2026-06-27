@@ -7,7 +7,7 @@
 .global _entry64
 .type _start, @function
 
-#define VMA_BASE 0xFFFFFFFF80000000
+#define VMA_BASE 0xFFFFFFFF80000000  // mirrors common/boot.h — keep in sync
 
 _start:
     # rdi = boot_info* (物理地址, 由 EFI stub 传递)

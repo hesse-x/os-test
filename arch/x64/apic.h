@@ -25,7 +25,6 @@
 
 // LAPIC LVT timer modes
 #define LAPIC_LVT_TIMER_PERIODIC  0x20000
-#define LAPIC_LVT_TIMER_MASKED    0x10000
 
 // LAPIC LVT mask bit
 #define LAPIC_LVT_MASKED  0x10000

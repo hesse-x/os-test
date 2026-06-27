@@ -98,6 +98,16 @@ int irq_owner_check(int irq);
 // Enqueues a RECV_NOTIFY message and wakes if in WAIT_RECV
 void wake_process(pid_t pid);
 
+// Wake blocked pipe peers based on fd direction flags
+static inline void wake_pipe_peers(pipe_t *p, int fd_flags) {
+    if (fd_flags & (O_WRONLY | O_RDWR)) {
+        if (p->read_pid >= 0) wake_process(p->read_pid);
+    }
+    if (fd_flags & (O_RDONLY | O_RDWR)) {
+        if (p->write_pid >= 0) wake_process(p->write_pid);
+    }
+}
+
 // Kernel-internal: send a message to a user-space process and wait for reply.
 // Called from syscall context (current_proc is the caller).
 // req/req_len: message buffer in kernel space; resp/resp_len: reply buffer (may be NULL).

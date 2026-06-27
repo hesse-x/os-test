@@ -2,6 +2,7 @@
 #define USER_INPUT_H
 
 #include <stdint.h>
+#include "common/input.h"
 
 // Modifier key flags
 #define MOD_SHIFT  0x01
@@ -60,12 +61,6 @@ enum input_key {
 // KBD_IOCTL_UNBIND: _IO, no arg
 
 #include "common/ioctl.h"
-
-// ioctl arg for KBD_IOCTL_BIND
-struct kbd_ioctl_bind_arg {
-    uint32_t pid;    // consumer PID
-    int32_t  result; // output: 0 on success
-};
 
 // Legacy REQ structures (for req_fd compatibility)
 struct kbd_req_request {

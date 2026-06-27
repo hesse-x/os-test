@@ -10,7 +10,7 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/utils.h"
 #include "kernel/serial.h"
-#include "kernel/memlayout.h"
+#include "arch/x64/memlayout.h"
 
 // ===================== State =====================
 static bool kasan_ready = false;

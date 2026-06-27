@@ -233,7 +233,7 @@ static void udelay(uint32_t us) {
     uint32_t ticks = lapic_timer_ticks_calibrated * us / 10000;
 
     lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
-    lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_TIMER_MASKED); // one-shot, masked
+    lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_MASKED); // one-shot, masked
     lapic_write(LAPIC_TIMER_ICR, ticks);
 
     // Wait for timer to expire (CCR reaches 0)

@@ -8,8 +8,12 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/smp.h"
 #include "common/signal.h"
+#include "common/mman.h"
+#include "common/types.h"
 
-typedef int32_t pid_t;
+// ===================== SHM fd model =====================
+#define SHM_KERNEL  1  // page managed by kernel, don't free on ref_count==0
+#define SHM_SEALED  2  // MFD_ALLOW_SEALING was set (sealing allowed)
 
 typedef enum proc_state_t { UNUSED, READY, RUNNING, BLOCKED, ZOMBIE, REAPING } proc_state_t;
 
@@ -17,22 +21,6 @@ typedef enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WA
 
 #define RECV_MSG_SIZE   64
 #define RECV_QUEUE_SIZE 16
-
-// ===================== SHM fd model =====================
-#define SHM_KERNEL  1  // page managed by kernel, don't free on ref_count==0
-#define SHM_SEALED  2  // MFD_ALLOW_SEALING was set (sealing allowed)
-
-// Linux-compatible memfd_create flags
-#define MFD_CLOEXEC       0x0001U
-#define MFD_ALLOW_SEALING 0x0002U
-
-// Linux-compatible sealing constants
-#define F_ADD_SEALS  1033
-#define F_GET_SEALS  1034
-#define F_SEAL_SEAL   0x0001  // further fcntl(F_ADD_SEALS) fails
-#define F_SEAL_SHRINK 0x0002  // ftruncate shrink fails
-#define F_SEAL_GROW   0x0004  // ftruncate grow fails
-#define F_SEAL_WRITE  0x0008  // mmap(PROT_WRITE) fails
 
 // fd flag for close-on-exec (stored in struct file::flags)
 #define FD_CLOEXEC 0x8000
@@ -193,6 +181,10 @@ void proc_reap(proc_t *proc);
 // SHM reference counting helpers
 struct shm *shm_get(struct shm *shm);
 void shm_put(struct shm *shm);
+
+// mmap region allocation helper
+mmap_region_t *add_mmap_region(proc_t *proc, uint64_t vaddr, uint64_t size,
+                                uint64_t phys, struct shm *shm_obj);
 
 // Timer queue operations (must be called under scheduler_lock)
 void timer_queue_insert(int cpu, proc_t *proc);

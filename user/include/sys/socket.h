@@ -87,9 +87,6 @@ static inline int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms) {
 // ===================== sockaddr compat =====================
 // In our kernel, struct sockaddr is the same as struct sockaddr_un for AF_UNIX.
 // Define a minimal generic sockaddr for API compatibility.
-#ifndef _SYS_TYPES_H
-// sockaddr definition already in types.h
-#endif
 
 #ifdef __cplusplus
 }

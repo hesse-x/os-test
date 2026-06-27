@@ -4,7 +4,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "arch/x64/utils.h"
+#include "kernel/sparse.h"  // __user, __force
+#include "arch/x64/utils.h" // __memcpy (static inline, must be visible for copy_from_user/copy_to_user)
 
 #ifdef SANITIZER
 

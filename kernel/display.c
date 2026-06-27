@@ -153,8 +153,8 @@ long display_ioctl(uint32_t cmd, void *arg) {
         // Fill output fields in unified struct (at offsets 12-31)
         uarg->pitch  = pitch;
         uarg->size   = size;
-        uarg->rows   = height / DISPLAY_FONT_HEIGHT;
-        uarg->cols   = width / DISPLAY_FONT_WIDTH;
+        uarg->rows   = height / FONT_HEIGHT;
+        uarg->cols   = width / FONT_WIDTH;
         uarg->result = 0;
         serial_printf("display_ioctl CREATE_BUF: pitch=%u size=%u rows=%u cols=%u result=%d\n",
                        uarg->pitch, uarg->size, uarg->rows, uarg->cols, uarg->result);
@@ -179,55 +179,33 @@ int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
             resp_len < sizeof(struct display_create_buf_resp))
             return -EINVAL;
 
+        // Construct unified ioctl arg from legacy req, call display_ioctl
+        struct display_ioctl_create_buf_arg arg = {0};
         struct display_create_buf_req *req = (struct display_create_buf_req *)req_data;
+        arg.width = req->width;
+        arg.height = req->height;
+        arg.bpp = req->bpp;
+
+        long rc = display_ioctl(KMS_IOCTL_CREATE_BUF, &arg);
+        if (rc < 0) return rc;
+
+        // Copy result from unified arg to legacy resp
         struct display_create_buf_resp *resp = (struct display_create_buf_resp *)resp_data;
-
-        // Validate parameters
-        if (req->width != 800 || req->height != 600 || req->bpp != 32)
-            return -EINVAL;
-
-        // Already initialized
-        if (g_display.initialized)
-            return -EBUSY;
-
-        // Allocate back buffer
-        uint32_t pitch = req->width * 4;
-        uint32_t size = pitch * req->height;
-        size_t npages = (size + 4095) / 4096;
-
-        Page *pages = bfc_alloc_page(npages);
-        if (!pages) return -ENOMEM;
-
-        uint64_t phys = (__force uint64_t)page_to_phys(pages);
-        uint8_t *vaddr = (__force uint8_t *)phys_to_virt((__force phys_addr_t)phys);
-        __memset(vaddr, 0, npages * PAGE_SIZE);
-
-        g_display.back_buffer = vaddr;
-        g_display.back_buffer_phys = phys;
-        g_display.back_buffer_npages = npages;
-        g_display.initialized = true;
-
-        resp->pitch = pitch;
-        resp->size = size;
-        resp->rows = req->height / DISPLAY_FONT_HEIGHT;
-        resp->cols = req->width / DISPLAY_FONT_WIDTH;
-        resp->result = 0;
+        resp->pitch = arg.pitch;
+        resp->size = arg.size;
+        resp->rows = arg.rows;
+        resp->cols = arg.cols;
+        resp->result = arg.result;
         return 0;
 
     } else if (req_type == DISPLAY_REQ_FLIP) {
         if (resp_len < sizeof(struct display_flip_resp))
             return -EINVAL;
 
+        long rc = display_ioctl(KMS_IOCTL_FLIP, NULL);
         struct display_flip_resp *resp = (struct display_flip_resp *)resp_data;
-
-        if (!g_display.initialized) {
-            resp->result = -ENOENT;
-            return -ENOENT;
-        }
-
-        __memcpy((void __force *)g_display.front_fb, g_display.back_buffer, g_display.fb_size);
-        resp->result = 0;
-        return 0;
+        resp->result = (rc < 0) ? rc : 0;
+        return rc;
     }
 
     return -EINVAL;

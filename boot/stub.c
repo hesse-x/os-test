@@ -4,25 +4,7 @@
 #include <efilib.h>
 #include <elf.h>
 #include <stdint.h>
-
-// 内核加载的物理地址
-#define KERNEL_LOAD_ADDR  0x100000
-// VMA_BASE，和内核链接脚本一致
-#define VMA_BASE          0xFFFFFFFF80000000ULL
-#define KERNEL_VMA_BASE   0xFFFFFFFF80100000ULL
-
-// boot_info 魔数和结构，和 paging.h 一致
-#define BOOT_INFO_MAGIC   0x4F53424F544F4F42ULL
-
-struct boot_info {
-  UINT64 magic;
-  UINT64 kernel_phys;
-  UINT64 rsdp;
-  UINT64 mmap_addr;
-  UINT64 mmap_size;
-  UINT64 mmap_desc_size;
-  UINT64 mmap_desc_ver;
-};
+#include "common/boot.h"
 
 // EFI 内存映射缓冲区
 #define MMAP_BUF_SIZE (4096 * 4)

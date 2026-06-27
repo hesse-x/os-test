@@ -22,7 +22,6 @@ struct cache_page {
 void    page_cache_init(void);
 struct cache_page *page_cache_lookup(struct inode *ip, uint64_t page_index);
 struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index);
-int     page_cache_evict(void);
 void    page_cache_mark_dirty(struct cache_page *cp);
 int     page_cache_writeback(struct cache_page *cp);
 void    page_cache_invalidate_inode(struct inode *ip);

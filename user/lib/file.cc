@@ -410,7 +410,6 @@ int mkdir(const char *path, mode_t mode) {
 
 // ===================== opendir / readdir / closedir =====================
 #include <dirent.h>
-#include <stdlib.h>
 #include "common/dirent.h"
 
 #define GETDENTS_BUF_SIZE 4096

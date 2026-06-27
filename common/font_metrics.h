@@ -1,0 +1,8 @@
+#ifndef COMMON_FONT_METRICS_H
+#define COMMON_FONT_METRICS_H
+
+#define FONT_WIDTH       8
+#define FONT_HEIGHT      16
+#define FONT_CHARS_START 0x20
+
+#endif /* COMMON_FONT_METRICS_H */
