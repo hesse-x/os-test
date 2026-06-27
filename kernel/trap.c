@@ -218,106 +218,63 @@ void trap_dispatch(trapframe_t *tf) {
   if (tf->trapno == 14) {
     uint64_t cr2;
     __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
-    serial_puts("PAGE FAULT: fault addr=");
-    serial_put_hex(cr2);
+    serial_printf("PAGE FAULT: fault addr=0x%016X", cr2);
   } else if (tf->trapno == 6) {
-    serial_puts("UNDEFINED OPCODE");
+    serial_printf("UNDEFINED OPCODE");
   } else if (tf->trapno == 13) {
-    serial_puts("GENERAL PROTECTION");
+    serial_printf("GENERAL PROTECTION");
     #ifdef SANITIZER
     if (kasan_shadow_exists()) {
       uint64_t fault_addr;
       __asm__ volatile("movq %%cr2, %0" : "=r"(fault_addr));
-      serial_puts("\n  KASAN: possible shadow access to non-canonical address");
-      serial_puts("\n  Check if __user pointer was used without copy_from_user/to_user");
+      serial_printf("\n  KASAN: possible shadow access to non-canonical address");
+      serial_printf("\n  Check if __user pointer was used without copy_from_user/to_user");
     }
     #endif
   } else {
-    serial_puts("EXCEPTION: vector ");
-    serial_put_hex(tf->trapno);
+    serial_printf("EXCEPTION: vector 0x%016X", tf->trapno);
   }
-  serial_puts("\n  rip=");
-  serial_put_hex(tf->rip);
-  serial_puts(" cs=");
-  serial_put_hex(tf->cs);
-  serial_puts(" rfl=");
-  serial_put_hex(tf->rflags);
-  serial_puts(" rsp=");
-  serial_put_hex(tf->rsp);
-  serial_puts(" ss=");
-  serial_put_hex(tf->ss);
-  serial_puts("\n  rax=");
-  serial_put_hex(tf->rax);
-  serial_puts(" rbx=");
-  serial_put_hex(tf->rbx);
-  serial_puts(" rcx=");
-  serial_put_hex(tf->rcx);
-  serial_puts(" rdx=");
-  serial_put_hex(tf->rdx);
-  serial_puts("\n  rsi=");
-  serial_put_hex(tf->rsi);
-  serial_puts(" rdi=");
-  serial_put_hex(tf->rdi);
-  serial_puts(" rbp=");
-  serial_put_hex(tf->rbp);
-  serial_puts(" r08=");
-  serial_put_hex(tf->r8);
-  serial_puts("\n  r09=");
-  serial_put_hex(tf->r9);
-  serial_puts(" r10=");
-  serial_put_hex(tf->r10);
-  serial_puts(" r11=");
-  serial_put_hex(tf->r11);
-  serial_puts(" r12=");
-  serial_put_hex(tf->r12);
-  serial_puts("\n  r13=");
-  serial_put_hex(tf->r13);
-  serial_puts(" r14=");
-  serial_put_hex(tf->r14);
-  serial_puts(" r15=");
-  serial_put_hex(tf->r15);
-  serial_puts(" err=");
-  serial_put_hex(tf->err_code);
-  serial_puts("\n  cr3=");
+  serial_printf("\n  rip=0x%016X cs=0x%016X rfl=0x%016X rsp=0x%016X ss=0x%016X",
+                tf->rip, tf->cs, tf->rflags, tf->rsp, tf->ss);
+  serial_printf("\n  rax=0x%016X rbx=0x%016X rcx=0x%016X rdx=0x%016X",
+                tf->rax, tf->rbx, tf->rcx, tf->rdx);
+  serial_printf("\n  rsi=0x%016X rdi=0x%016X rbp=0x%016X r08=0x%016X",
+                tf->rsi, tf->rdi, tf->rbp, tf->r8);
+  serial_printf("\n  r09=0x%016X r10=0x%016X r11=0x%016X r12=0x%016X",
+                tf->r9, tf->r10, tf->r11, tf->r12);
+  serial_printf("\n  r13=0x%016X r14=0x%016X r15=0x%016X err=0x%016X",
+                tf->r13, tf->r14, tf->r15, tf->err_code);
   uint64_t cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(cr3));
-  serial_put_hex(cr3);
+  serial_printf("\n  cr3=0x%016X", cr3);
   if (current_proc) {
-    serial_puts(" pid=");
-    serial_put_hex((uint64_t)current_proc->pid);
-    serial_puts(" proc_cr3=");
-    serial_put_hex(current_proc->cr3);
+    serial_printf(" pid=%d proc_cr3=0x%016X",
+                  current_proc->pid, current_proc->cr3);
   }
-  serial_puts("\n");
+  serial_printf("\n");
 
   // 栈回溯：遍历 RBP 链（需 -fno-omit-frame-pointer）
   // #0 始终是 crash 点 (tf->rip)，之后走 RBP 链取 caller 返回地址
   // 用户态异常时：先展示内核 trap path（固定几帧），再走用户态帧到 main/_start
-  serial_puts("BACKTRACE:\n");
+  serial_printf("BACKTRACE:\n");
   int frame_idx = 0;
 
   // #0: crash point — tf->rip（不在 RBP 链中，必须单独打印）
-  serial_puts("  #0 ");
-  serial_put_hex(tf->rip);
-  serial_puts("  ← crash point\n");
+  serial_printf("  #0 0x%016X  ← crash point\n", tf->rip);
   frame_idx = 1;
 
   if (tf->cs == 0x2B) {
     // 用户态异常：内核 trap path 是固定路径，不走 RBP 链
     // （__alltraps 不创建标准 RBP 帧，链在 trapframe 边界断裂）
-    serial_puts("  [kernel trap path]\n");
-    serial_puts("  #1 trap_dispatch\n");
-    serial_puts("  #2 __alltraps\n");
-    serial_puts("  --- user/kernel boundary ---\n");
+    serial_printf("  [kernel trap path]\n");
+    serial_printf("  #1 trap_dispatch\n");
+    serial_printf("  #2 __alltraps\n");
+    serial_printf("  --- user/kernel boundary ---\n");
     // 用户态帧从 trapframe.rbp 展开
-    serial_puts("  [user]\n");
+    serial_printf("  [user]\n");
     uint64_t *rbp = (uint64_t *)tf->rbp;
     for (int i = 0; i < 64 && rbp && (uint64_t)rbp >= 0x1000 && (uint64_t)rbp < 0xFFFFFFFF80000000ULL; i++) {
-      serial_puts("  #");
-      serial_put_hex((uint64_t)frame_idx);
-      serial_puts(" ");
-      serial_put_hex((uint64_t)rbp[1]);  // caller return address
-      serial_puts("\n");
+      serial_printf("  #%d 0x%016X\n", frame_idx, (uint64_t)rbp[1]);
       frame_idx++;
       rbp = (uint64_t *)rbp[0];
       if (!rbp) break;
@@ -326,11 +283,7 @@ void trap_dispatch(trapframe_t *tf) {
     // 内核态异常：从 trapframe.rbp 走 RBP 链，可一路到 kernel_main/_start
     uint64_t *rbp = (uint64_t *)tf->rbp;
     for (int i = 0; i < 64 && rbp && (uint64_t)rbp >= 0xFFFFFFFF80000000ULL; i++) {
-      serial_puts("  #");
-      serial_put_hex((uint64_t)frame_idx);
-      serial_puts(" ");
-      serial_put_hex((uint64_t)rbp[1]);  // caller return address
-      serial_puts("\n");
+      serial_printf("  #%d 0x%016X\n", frame_idx, (uint64_t)rbp[1]);
       frame_idx++;
       rbp = (uint64_t *)rbp[0];
       if (!rbp) break;
@@ -461,7 +414,7 @@ void sig_init() {
     // SYS_SIGRETURN = 48 (0x30)
     Page *page = bfc_alloc_page(1);
     if (!page) {
-        serial_puts("sig_init: failed to allocate trampoline page\n");
+        serial_printf("sig_init: failed to allocate trampoline page\n");
         return;
     }
     sig_trampoline_phys = (__force uint64_t)page_to_phys(page);
@@ -1362,9 +1315,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         for (size_t i = 0; i < npages; i++) {
             if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE,
                                       phys_start + i * PAGE_SIZE, pte_flags)) {
-                serial_puts("mmap PHYSICAL: map failed at i=");
-                serial_put_hex((uint64_t)i);
-                serial_puts("\n");
+                serial_printf("mmap PHYSICAL: map failed at i=%lu\n", (unsigned long)i);
                 for (size_t j = 0; j < i; j++)
                     unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
                 return 0;

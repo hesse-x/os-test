@@ -92,7 +92,7 @@ const acpi_iso_override_t *acpi_find_iso(uint8_t isa_irq) {
 static void parse_mcfg(const acpi_mcfg_t *mcfg) {
   size_t offset = sizeof(acpi_mcfg_t);
   if (offset + sizeof(acpi_mcfg_entry_t) > mcfg->header.length) {
-    serial_puts("acpi: MCFG has no entries\n");
+    serial_printf("acpi: MCFG has no entries\n");
     return;
   }
   const acpi_mcfg_entry_t *entry =
@@ -105,9 +105,7 @@ static void parse_mcfg(const acpi_mcfg_t *mcfg) {
 
 __attribute__((no_sanitize("kernel-address")))
 void acpi_init(uint64_t rsdp_phys) {
-  serial_puts("acpi_init: rsdp_phys=");
-  serial_put_hex(rsdp_phys);
-  serial_puts("\n");
+  serial_printf("acpi_init: rsdp_phys=0x%016X\n", rsdp_phys);
 
   // 1. Map RSDP (ACPI tables in RAM, already mapped by extend_mapping)
   uint64_t rsdp_virt = rsdp_phys + VMA_BASE;
@@ -117,7 +115,7 @@ void acpi_init(uint64_t rsdp_phys) {
   static const char expected_sig[] = "RSD PTR ";
   for (int i = 0; i < 8; i++) {
     if (rsdp->signature[i] != expected_sig[i]) {
-      serial_puts("acpi: RSDP signature mismatch\n");
+      serial_printf("acpi: RSDP signature mismatch\n");
       return;
     }
   }
@@ -125,13 +123,11 @@ void acpi_init(uint64_t rsdp_phys) {
   // 3. Validate RSDP checksum
   size_t rsdp_len = (rsdp->revision < 2) ? 20 : rsdp->length;
   if (!acpi_checksum(rsdp, rsdp_len)) {
-    serial_puts("acpi: RSDP checksum failed\n");
+    serial_printf("acpi: RSDP checksum failed\n");
     return;
   }
 
-  serial_puts("acpi: RSDP valid, revision=");
-  serial_put_hex(rsdp->revision);
-  serial_puts("\n");
+  serial_printf("acpi: RSDP valid, revision=0x%016X\n", rsdp->revision);
 
   // 4. Follow XSDT or RSDT
   uint64_t sdt_phys = 0;
@@ -146,54 +142,32 @@ void acpi_init(uint64_t rsdp_phys) {
   const acpi_sdt_header_t *sdt_hdr = (const acpi_sdt_header_t *)xsdt_virt;
   xsdt_entry_count = (sdt_hdr->length - sizeof(acpi_sdt_header_t)) / xsdt_entry_size;
 
-  serial_puts("acpi: SDT at ");
-  serial_put_hex(sdt_phys);
-  serial_puts(" entries=");
-  serial_put_hex(xsdt_entry_count);
-  serial_puts("\n");
+  serial_printf("acpi: SDT at 0x%016X entries=0x%016X\n", sdt_phys, xsdt_entry_count);
 
   // 5. Parse MADT
   void *madt_ptr = acpi_find_table("APIC");
   if (madt_ptr) {
     parse_madt((const struct acpi_madt *)madt_ptr);
-    serial_puts("acpi: MADT lapic=");
-    serial_put_hex(g_madt.lapic_base);
-    serial_puts(" ioapic=");
-    serial_put_hex(g_madt.ioapic_base);
-    serial_puts(" gsi_base=");
-    serial_put_hex(g_madt.ioapic_gsi_base);
-    serial_puts(" ncpus=");
-    serial_put_hex(g_madt.ncpus);
-    serial_puts(" iso=");
-    serial_put_hex(g_madt.num_iso);
-    serial_puts("\n");
+    serial_printf("acpi: MADT lapic=0x%016X ioapic=0x%016X gsi_base=0x%016X ncpus=%u iso=%u\n",
+                   g_madt.lapic_base, g_madt.ioapic_base, g_madt.ioapic_gsi_base,
+                   g_madt.ncpus, g_madt.num_iso);
     for (uint32_t i = 0; i < g_madt.num_iso; i++) {
-      serial_puts("  ISO: irq=");
-      serial_put_hex(g_madt.iso[i].irq);
-      serial_puts(" gsi=");
-      serial_put_hex(g_madt.iso[i].gsi);
-      serial_puts(" low=");
-      serial_put_hex(g_madt.iso[i].active_low ? 1 : 0);
-      serial_puts(" level=");
-      serial_put_hex(g_madt.iso[i].level_triggered ? 1 : 0);
-      serial_puts("\n");
+      serial_printf("  ISO: irq=0x%016X gsi=0x%016X low=%d level=%d\n",
+                     g_madt.iso[i].irq, g_madt.iso[i].gsi,
+                     g_madt.iso[i].active_low ? 1 : 0,
+                     g_madt.iso[i].level_triggered ? 1 : 0);
     }
   } else {
-    serial_puts("acpi: MADT not found\n");
+    serial_printf("acpi: MADT not found\n");
   }
 
   // 6. Parse MCFG
   void *mcfg_ptr = acpi_find_table("MCFG");
   if (mcfg_ptr) {
     parse_mcfg((const struct acpi_mcfg *)mcfg_ptr);
-    serial_puts("acpi: MCFG ecam_base=");
-    serial_put_hex(g_mcfg.ecam_base);
-    serial_puts(" bus ");
-    serial_put_hex(g_mcfg.start_bus);
-    serial_puts("-");
-    serial_put_hex(g_mcfg.end_bus);
-    serial_puts("\n");
+    serial_printf("acpi: MCFG ecam_base=0x%016X bus=0x%016X-0x%016X\n",
+                   g_mcfg.ecam_base, g_mcfg.start_bus, g_mcfg.end_bus);
   } else {
-    serial_puts("acpi: MCFG not found\n");
+    serial_printf("acpi: MCFG not found\n");
   }
 }

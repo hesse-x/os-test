@@ -929,6 +929,6 @@ static void xhci_init_keyboard() {
   // Mask PS/2 keyboard IRQ (GSI 1) — no longer needed
   ioapic_set_irq(1, 33, bsp_apic_id, true, false, false);
 
-  serial_puts("xhci: USB keyboard ready\n");
+  serial_printf("xhci: USB keyboard ready\n");
   xhci_poll_initialized = 1;
 }

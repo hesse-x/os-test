@@ -31,7 +31,7 @@ void display_init(void) {
     // (class code is 0x0380 "Display/Other", not 0x0300 VGA)
     pci_device_t *dev = pci_find_device_by_id(0x1234, 0x1111);
     if (!dev) {
-        serial_puts("display_init: no display device found\n");
+        serial_printf("display_init: no display device found\n");
         halt();
     }
 
@@ -49,7 +49,7 @@ void display_init(void) {
     }
     int rc = pci_enable_device_wc(dev, fb_bar_idx);
     if (rc) {
-        serial_puts("display_init: pci_enable_device_wc failed\n");
+        serial_printf("display_init: pci_enable_device_wc failed\n");
         halt();
     }
     serial_printf("display_init: framebuffer BAR%d mapped WC\n", fb_bar_idx);
@@ -87,11 +87,11 @@ void display_init(void) {
     }
 
     if (!vbe_mmio) {
-        serial_puts("display_init: VBE MMIO BAR not found\n");
+        serial_printf("display_init: VBE MMIO BAR not found\n");
         halt();
     }
     if (!fb_vaddr) {
-        serial_puts("display_init: framebuffer BAR not found\n");
+        serial_printf("display_init: framebuffer BAR not found\n");
         halt();
     }
 
@@ -114,7 +114,7 @@ void display_init(void) {
     g_display.fb_bpp      = 32;
     g_display.fb_size     = 800 * 4 * 600;
 
-    serial_puts("display_init: 800x600x32 done\n");
+    serial_printf("display_init: 800x600x32 done\n");
 }
 
 // ===================== display_ioctl =====================

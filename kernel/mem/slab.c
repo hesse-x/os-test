@@ -157,14 +157,12 @@ void kfree(const void *ptr) {
     if (page->status != PAGE_SLAB) {
         serial_printf("kfree: bad page status ptr=%p phys=%lx page=%p status=%d\n",
                       ptr, phys, page, page->status);
-        serial_puts("  backtrace:\n");
+        serial_printf("  backtrace:\n");
         uint64_t *rbp;
         __asm__ volatile("movq %%rbp, %0" : "=r"(rbp));
         for (int depth = 0; depth < 16 && (uint64_t)rbp > 0xFFFFFFFF80000000ULL; depth++) {
             uint64_t ret_addr = rbp[1];
-            serial_puts("    0x");
-            serial_put_hex(ret_addr);
-            serial_puts("\n");
+            serial_printf("    0x%016X\n", ret_addr);
             rbp = (uint64_t *)rbp[0];
             if (!rbp) break;
         }

@@ -39,14 +39,14 @@ static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus
     }
   }
   if (pdpt_idx < 0) {
-    serial_puts("pci: no free PDPT_hh slot for ECAM\n");
+    serial_printf("pci: no free PDPT_hh slot for ECAM\n");
     halt();
   }
 
   // Allocate PD using bfc_alloc (bump is disabled at pci_init time)
   Page *pd_page = bfc_alloc_page(1);
   if (!pd_page) {
-    serial_puts("pci: ECAM PD alloc failed\n");
+    serial_printf("pci: ECAM PD alloc failed\n");
     halt();
   }
   uint64_t *pd = (__force uint64_t *)phys_to_virt((__force phys_addr_t)page_to_phys(pd_page));
@@ -261,7 +261,7 @@ static void pci_map_bar_mmio(pci_device_t *d, int wc_bar_idx) {
       if (pdpt_hh[j] == 0) { pdpt_idx = j; break; }
     }
     if (pdpt_idx < 0) {
-      serial_puts("pci: no free PDPT_hh slot for BAR\n");
+      serial_printf("pci: no free PDPT_hh slot for BAR\n");
       continue;
     }
 

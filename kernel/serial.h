@@ -35,23 +35,16 @@ extern uint8_t serial_rx_buf[];
 extern uint32_t serial_rx_head;
 extern uint32_t serial_rx_tail;
 extern spinlock_t serial_rx_lock;
-extern spinlock_t serial_tx_lock;
 extern pid_t serial_read_waiter;
 extern int serial_fd_count;
 extern bool serial_irq_registered;
 
 #ifdef NSERIAL
 
-#define serial_putc(c)    ((void)0)
-#define serial_puts(s)    ((void)0)
-#define serial_put_hex(v) ((void)0)
 #define serial_printf(...) ((void)0)
 
 #else
 
-void serial_putc(char c);
-void serial_puts(const char *s);
-void serial_put_hex(uint64_t val);
 void serial_printf(const char *fmt, ...);
 
 // Register serial device in devtmpfs (called by vfs_init)

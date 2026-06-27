@@ -10,6 +10,7 @@ lib/sys_process.cc lib/time.cc lib/file.cc
         lib/ctype.c lib/strtol.c lib/stdlib_misc.c lib/uname.c
         lib/sleep.c lib/assert.c lib/sys_pci.cc
         lib/signal.cc
+        ${CMAKE_SOURCE_DIR}/common/kvformat.c
 )
 
 # Unity test framework (static library)

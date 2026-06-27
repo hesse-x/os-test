@@ -96,7 +96,7 @@ static bool kasan_map_page(uint64_t vaddr, uint64_t phys, uint64_t flags) {
 // ===================== kasan_init =====================
 __attribute__((no_sanitize("kernel-address")))
 void kasan_init(void) {
-    serial_puts("kasan_init: mapping shadow memory...\n");
+    serial_printf("kasan_init: mapping shadow memory...\n");
 
     // 1. Allocate physical pages and map them to the shadow range
     uint64_t shadow_start = (uint64_t)KASAN_SHADOW_START;
@@ -206,52 +206,34 @@ void kasan_check_write(const void *addr, size_t size) {
 // ===================== Report =====================
 __attribute__((no_sanitize("kernel-address")))
 static void kasan_report(const void *addr, size_t size, bool is_write) {
-    serial_puts("\n=== KASAN ERROR ===\n");
+    serial_printf("\n=== KASAN ERROR ===\n");
     if (is_write)
-        serial_puts("  out-of-bounds WRITE");
+        serial_printf("  out-of-bounds WRITE");
     else
-        serial_puts("  out-of-bounds READ");
+        serial_printf("  out-of-bounds READ");
 
     uint8_t *shadow = KASAN_MEM_TO_SHADOW(addr);
     uint8_t sv = *shadow;
     if (sv == KASAN_SHADOW_FREED)
-        serial_puts(" (use-after-free)");
+        serial_printf(" (use-after-free)");
     else if (sv == KASAN_SHADOW_REDZONE)
-        serial_puts(" (global-redzone)");
+        serial_printf(" (global-redzone)");
 
-    serial_puts("\n  addr=0x");
-    serial_put_hex((uint64_t)addr);
-    serial_puts(" size=");
-    // Simple decimal print for size
-    char buf[20];
-    size_t n = size;
-    int pos = 0;
-    if (n == 0) { buf[pos++] = '0'; }
-    else { char tmp[20]; int t = 0; while (n) { tmp[t++] = '0' + (n % 10); n /= 10; } for (int j = t-1; j >= 0; j--) buf[pos++] = tmp[j]; }
-    buf[pos] = '\0';
-    serial_puts(buf);
-
-    serial_puts(" shadow=0x");
-    char hex[3] = "00";
-    hex[0] = "0123456789ABCDEF"[sv >> 4];
-    hex[1] = "0123456789ABCDEF"[sv & 0xF];
-    serial_puts(hex);
-    serial_puts("\n");
+    serial_printf("\n  addr=0x%016X size=%lu shadow=0x%02X\n",
+                  (uint64_t)addr, (unsigned long)size, sv);
 
     // Stack trace via RBP chain
-    serial_puts("  backtrace:\n");
+    serial_printf("  backtrace:\n");
     uint64_t *rbp;
     __asm__ volatile("movq %%rbp, %0" : "=r"(rbp));
     for (int depth = 0; depth < 16 && (uint64_t)rbp > 0xFFFFFFFF80000000ULL; depth++) {
         uint64_t ret_addr = rbp[1];
-        serial_puts("    0x");
-        serial_put_hex(ret_addr);
-        serial_puts("\n");
+        serial_printf("    0x%016X\n", ret_addr);
         rbp = (uint64_t *)rbp[0];
         if (!rbp) break;
     }
 
-    serial_puts("===================\n");
+    serial_printf("===================\n");
     halt();
 }
 

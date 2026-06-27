@@ -106,7 +106,7 @@ static void map_apic_mmio(uint64_t lapic_phys, uint64_t ioapic_phys) {
     }
   }
   if (pdpt_idx < 0) {
-    serial_puts("apic: no free PDPT_hh slot\n");
+    serial_printf("apic: no free PDPT_hh slot\n");
     halt();
   }
 

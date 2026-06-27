@@ -1,6 +1,7 @@
 #include "stdio.h"
 #include "string.h"
 #include "common/syscall.h"
+#include "common/kvformat.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -99,184 +100,17 @@ int puts(const char *s) {
     return 0;
 }
 
-/* ===================== Number formatting helpers ===================== */
-
-static int fmt_uint(FILE *f, unsigned long val, int base, int uppercase,
-                     int width, char pad, int left_align) {
-    const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
-    char buf[20];
-    int pos = 0;
-
-    if (val == 0) {
-        buf[pos++] = '0';
-    } else {
-        while (val) {
-            buf[pos++] = digits[val % base];
-            val /= base;
-        }
-    }
-
-    int ndigits = pos;
-
-    if (left_align) {
-        /* output digits first, then pad */
-        while (--pos >= 0) file_putc_internal(f, buf[pos]);
-        for (int i = ndigits; i < width; i++) file_putc_internal(f, ' ');
-    } else {
-        /* pad to width, then output digits */
-        while (pos < width) buf[pos++] = pad;
-        while (--pos >= 0) file_putc_internal(f, buf[pos]);
-    }
-    return ndigits > width ? ndigits : width;
-}
-
-static int fmt_int(FILE *f, long val, int width, char pad, int left_align) {
-    if (val < 0) {
-        file_putc_internal(f, '-');
-        return 1 + fmt_uint(f, (unsigned long)(-val), 10, 0, width > 0 ? width - 1 : 0, pad, left_align);
-    } else {
-        return fmt_uint(f, (unsigned long)val, 10, 0, width, pad, left_align);
-    }
-}
-
 /* ===================== vfprintf ===================== */
 
+struct file_writer { FILE *f; };
+
+static void file_putc_wrapper(char c, void *arg) {
+    file_putc_internal(((struct file_writer *)arg)->f, c);
+}
+
 int vfprintf(FILE *f, const char *fmt, va_list ap) {
-    int count = 0;
-
-    while (*fmt) {
-        if (*fmt != '%') {
-            file_putc_internal(f, *fmt++);
-            count++;
-            continue;
-        }
-
-        fmt++; /* skip '%' */
-
-        /* flags */
-        int left_align = 0;
-        if (*fmt == '-') { left_align = 1; fmt++; }
-
-        /* width and pad */
-        int width = 0;
-        char pad = ' ';
-
-        if (*fmt == '0' && !left_align) {
-            pad = '0';
-            fmt++;
-        }
-        while (*fmt >= '0' && *fmt <= '9') {
-            width = width * 10 + (*fmt - '0');
-            fmt++;
-        }
-
-        /* length modifier */
-        int is_long = 0;
-        if (*fmt == 'l') {
-            is_long = 1;
-            fmt++;
-        }
-
-        /* specifier */
-        switch (*fmt) {
-        case '%':
-            file_putc_internal(f, '%');
-            count++;
-            break;
-
-        case 'c': {
-            char c = (char)va_arg(ap, int);
-            file_putc_internal(f, c);
-            count++;
-            break;
-        }
-
-        case 's': {
-            const char *s = va_arg(ap, const char *);
-            if (!s) s = "(null)";
-            int slen = 0;
-            while (s[slen]) slen++;
-            if (left_align) {
-                for (int i = 0; i < slen; i++) file_putc_internal(f, s[i]);
-                for (int i = slen; i < width; i++) file_putc_internal(f, ' ');
-            } else {
-                for (int i = slen; i < width; i++) file_putc_internal(f, ' ');
-                for (int i = 0; i < slen; i++) file_putc_internal(f, s[i]);
-            }
-            count += slen > width ? slen : width;
-            break;
-        }
-
-        case 'd': {
-            if (is_long) {
-                long val = va_arg(ap, long);
-                count += fmt_int(f, val, width, pad, left_align);
-            } else {
-                int val = va_arg(ap, int);
-                count += fmt_int(f, (long)val, width, pad, left_align);
-            }
-            break;
-        }
-
-        case 'u': {
-            if (is_long) {
-                unsigned long val = va_arg(ap, unsigned long);
-                count += fmt_uint(f, val, 10, 0, width, pad, left_align);
-            } else {
-                unsigned int val = va_arg(ap, unsigned int);
-                count += fmt_uint(f, (unsigned long)val, 10, 0, width, pad, left_align);
-            }
-            break;
-        }
-
-        case 'x': {
-            if (is_long) {
-                unsigned long val = va_arg(ap, unsigned long);
-                count += fmt_uint(f, val, 16, 0, width, pad, left_align);
-            } else {
-                unsigned int val = va_arg(ap, unsigned int);
-                count += fmt_uint(f, (unsigned long)val, 16, 0, width, pad, left_align);
-            }
-            break;
-        }
-
-        case 'X': {
-            if (is_long) {
-                unsigned long val = va_arg(ap, unsigned long);
-                count += fmt_uint(f, val, 16, 1, width, pad, left_align);
-            } else {
-                unsigned int val = va_arg(ap, unsigned int);
-                count += fmt_uint(f, (unsigned long)val, 16, 1, width, pad, left_align);
-            }
-            break;
-        }
-
-        case 'p': {
-            unsigned long val = (unsigned long)va_arg(ap, void *);
-            file_putc_internal(f, '0');
-            file_putc_internal(f, 'x');
-            count += 2 + fmt_uint(f, val, 16, 0, 0, '0', 0);
-            break;
-        }
-
-        default:
-            /* unknown specifier: output as-is */
-            file_putc_internal(f, '%');
-            if (is_long) file_putc_internal(f, 'l');
-            file_putc_internal(f, *fmt);
-            count++;
-            break;
-        }
-
-        fmt++;
-    }
-
-    /* line-buffered: may need final flush if no trailing newline */
-    if (f->buf_mode == _IOLBF && f->buf_pos > 0) {
-        /* don't auto-flush here; only fflush or newline triggers flush */
-    }
-
-    return count;
+    struct file_writer w = { f };
+    return kvformat(file_putc_wrapper, &w, fmt, ap);
 }
 
 /* ===================== printf / fprintf ===================== */

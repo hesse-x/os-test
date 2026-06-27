@@ -116,6 +116,128 @@ void test_vfprintf_custom(void) {
     TEST_ASSERT_TRUE(r > 0);
 }
 
+/* ========== %d format precision tests via sprintf ========== */
+
+void test_d_basic(void) {
+    char b[64];
+    sprintf(b, "%d", 42);
+    TEST_ASSERT_EQUAL_STRING("42", b);
+}
+
+void test_d_negative(void) {
+    char b[64];
+    sprintf(b, "%d", -42);
+    TEST_ASSERT_EQUAL_STRING("-42", b);
+}
+
+void test_d_zero(void) {
+    char b[64];
+    sprintf(b, "%d", 0);
+    TEST_ASSERT_EQUAL_STRING("0", b);
+}
+
+void test_d_width(void) {
+    char b[64];
+    sprintf(b, "%5d", 42);
+    TEST_ASSERT_EQUAL_STRING("   42", b);
+}
+
+void test_d_negative_width(void) {
+    char b[64];
+    sprintf(b, "%5d", -42);
+    TEST_ASSERT_EQUAL_STRING("  -42", b);
+}
+
+void test_d_zero_fill(void) {
+    char b[64];
+    sprintf(b, "%05d", 42);
+    TEST_ASSERT_EQUAL_STRING("00042", b);
+}
+
+void test_d_negative_zero_fill(void) {
+    char b[64];
+    sprintf(b, "%05d", -42);
+    TEST_ASSERT_EQUAL_STRING("-0042", b);
+}
+
+void test_d_zero_zero_fill(void) {
+    char b[64];
+    sprintf(b, "%05d", 0);
+    TEST_ASSERT_EQUAL_STRING("00000", b);
+}
+
+void test_d_left_align(void) {
+    char b[64];
+    sprintf(b, "%-5d", 42);
+    TEST_ASSERT_EQUAL_STRING("42   ", b);
+}
+
+void test_d_negative_left_align(void) {
+    char b[64];
+    sprintf(b, "%-5d", -42);
+    TEST_ASSERT_EQUAL_STRING("-42  ", b);
+}
+
+void test_d_long(void) {
+    char b[64];
+    sprintf(b, "%ld", 1234567890123L);
+    TEST_ASSERT_EQUAL_STRING("1234567890123", b);
+}
+
+void test_d_long_negative(void) {
+    char b[64];
+    sprintf(b, "%ld", -1234567890123L);
+    TEST_ASSERT_EQUAL_STRING("-1234567890123", b);
+}
+
+void test_d_int_max(void) {
+    char b[64];
+    sprintf(b, "%d", 2147483647);
+    TEST_ASSERT_EQUAL_STRING("2147483647", b);
+}
+
+void test_d_int_min(void) {
+    char b[64];
+    sprintf(b, "%d", -2147483648);
+    TEST_ASSERT_EQUAL_STRING("-2147483648", b);
+}
+
+void test_d_long_max(void) {
+    char b[64];
+    sprintf(b, "%ld", 9223372036854775807L);
+    TEST_ASSERT_EQUAL_STRING("9223372036854775807", b);
+}
+
+void test_d_long_min(void) {
+    char b[64];
+    sprintf(b, "%ld", -9223372036854775807L - 1);
+    TEST_ASSERT_EQUAL_STRING("-9223372036854775808", b);
+}
+
+void test_d_width_larger(void) {
+    char b[64];
+    sprintf(b, "%10d", 42);
+    TEST_ASSERT_EQUAL_STRING("        42", b);
+}
+
+void test_d_neg_width_larger(void) {
+    char b[64];
+    sprintf(b, "%10d", -42);
+    TEST_ASSERT_EQUAL_STRING("       -42", b);
+}
+
+void test_d_neg_zero_fill_large(void) {
+    char b[64];
+    sprintf(b, "%010d", -42);
+    TEST_ASSERT_EQUAL_STRING("-000000042", b);
+}
+
+void test_d_neg_zero_fill_large2(void) {
+    char b[64];
+    sprintf(b, "%015d", -12345);
+    TEST_ASSERT_EQUAL_STRING("-000000000012345", b);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_printf_string);
@@ -128,5 +250,25 @@ int main(void) {
     RUN_TEST(test_stdin_fgetc);
     RUN_TEST(test_stdin_getchar);
     RUN_TEST(test_vfprintf_custom);
+    RUN_TEST(test_d_basic);
+    RUN_TEST(test_d_negative);
+    RUN_TEST(test_d_zero);
+    RUN_TEST(test_d_width);
+    RUN_TEST(test_d_negative_width);
+    RUN_TEST(test_d_zero_fill);
+    RUN_TEST(test_d_negative_zero_fill);
+    RUN_TEST(test_d_zero_zero_fill);
+    RUN_TEST(test_d_left_align);
+    RUN_TEST(test_d_negative_left_align);
+    RUN_TEST(test_d_long);
+    RUN_TEST(test_d_long_negative);
+    RUN_TEST(test_d_int_max);
+    RUN_TEST(test_d_int_min);
+    RUN_TEST(test_d_long_max);
+    RUN_TEST(test_d_long_min);
+    RUN_TEST(test_d_width_larger);
+    RUN_TEST(test_d_neg_width_larger);
+    RUN_TEST(test_d_neg_zero_fill_large);
+    RUN_TEST(test_d_neg_zero_fill_large2);
     return UNITY_END();
 }

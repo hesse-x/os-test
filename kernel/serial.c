@@ -8,6 +8,7 @@
 #include "common/errno.h"
 #include "common/dev.h"     // DEV_SERIAL
 #include "common/socket.h"  // POLLIN/POLLOUT
+#include "common/kvformat.h"
 
 #include "common/ioctl.h"   // TCGETS
 
@@ -37,7 +38,7 @@ void serial_init(void) {
 
 #ifndef NSERIAL
 
-void serial_putc(char c) {
+static void serial_putc(char c) {
     uint64_t flags;
     spin_lock_irqsave(&serial_tx_lock, &flags);
     while (!(inb(COM1_LSR) & LSR_THRE))
@@ -70,154 +71,27 @@ static void serial_irq_handler(trapframe_t *tf) {
     spin_unlock_irqrestore(&serial_rx_lock, flags);
 }
 
-void serial_puts(const char *s) {
+static void serial_puts(const char *s) {
   while (*s) {
     serial_putc(*s++);
   }
 }
 
-void serial_put_hex(uint64_t val) {
-  const char hex[] = "0123456789ABCDEF";
-  serial_puts("0x");
-  for (int i = 60; i >= 0; i -= 4) {
-    serial_putc(hex[(val >> i) & 0xF]);
-  }
+struct serial_buf_arg { char *buf; int pos; int cap; };
+
+static void serial_buf_putc(char c, void *arg) {
+    struct serial_buf_arg *a = (struct serial_buf_arg *)arg;
+    if (a->pos < a->cap) a->buf[a->pos++] = c;
 }
 
 void serial_printf(const char *fmt, ...) {
   char buf[256];
-  int pos = 0;
+  struct serial_buf_arg a = { buf, 0, 255 };
   va_list ap;
   va_start(ap, fmt);
-
-  while (*fmt && pos < 255) {
-    if (*fmt != '%') {
-      buf[pos++] = *fmt++;
-      continue;
-    }
-    fmt++;  // skip '%'
-
-    // Parse width and zero-fill (e.g. %02x, %3d, %8u)
-    int width = 0;
-    int zero_fill = 0;
-    if (*fmt == '0') { zero_fill = 1; fmt++; }
-    while (*fmt >= '0' && *fmt <= '9') {
-      width = width * 10 + (*fmt - '0');
-      fmt++;
-    }
-
-    // Handle length modifier 'l'
-    int is_long = 0;
-    if (*fmt == 'l') { is_long = 1; fmt++; }
-
-    switch (*fmt) {
-    case 's': {
-      const char *s = va_arg(ap, const char *);
-      if (!s) s = "(null)";
-      int slen = 0;
-      while (s[slen]) slen++;
-      // Right-pad with spaces if width > slen
-      int pad = width > slen ? width - slen : 0;
-      for (int j = 0; j < pad && pos < 255; j++) buf[pos++] = ' ';
-      while (*s && pos < 255) buf[pos++] = *s++;
-      break;
-    }
-    case 'd': {
-      long val = is_long ? va_arg(ap, long) : (long)va_arg(ap, int);
-      char tmp[24];
-      int i = 0, neg = 0;
-      if (val < 0) { neg = 1; val = -val; }
-      if (val == 0) { tmp[i++] = '0'; }
-      while (val > 0 && i < 23) { tmp[i++] = '0' + val % 10; val /= 10; }
-      if (neg) tmp[i++] = '-';
-      int num_len = i;
-      char fill_char = zero_fill ? '0' : ' ';
-      // For zero-fill, sign goes before fill; for space-fill, sign after fill
-      if (neg && zero_fill) {
-        buf[pos++] = '-';
-        num_len--;
-      }
-      int pad = width > num_len ? width - num_len : 0;
-      for (int j = 0; j < pad && pos < 255; j++) buf[pos++] = fill_char;
-      if (neg && !zero_fill) buf[pos++] = '-';
-      while (num_len > 0 && pos < 255) buf[pos++] = tmp[--i];
-      break;
-    }
-    case 'u': {
-      unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
-      char tmp[24];
-      int i = 0;
-      if (val == 0) { tmp[i++] = '0'; }
-      while (val > 0 && i < 23) { tmp[i++] = '0' + val % 10; val /= 10; }
-      int num_len = i;
-      char fill_char = zero_fill ? '0' : ' ';
-      int pad = width > num_len ? width - num_len : 0;
-      for (int j = 0; j < pad && pos < 255; j++) buf[pos++] = fill_char;
-      while (i > 0 && pos < 255) buf[pos++] = tmp[--i];
-      break;
-    }
-    case 'o': {
-      unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
-      char tmp[24];
-      int i = 0;
-      if (val == 0) { tmp[i++] = '0'; }
-      while (val > 0 && i < 23) { tmp[i++] = '0' + val % 8; val /= 8; }
-      int num_len = i;
-      char fill_char = zero_fill ? '0' : ' ';
-      int pad = width > num_len ? width - num_len : 0;
-      for (int j = 0; j < pad && pos < 255; j++) buf[pos++] = fill_char;
-      while (i > 0 && pos < 255) buf[pos++] = tmp[--i];
-      break;
-    }
-    case 'x':
-    case 'X': {
-      unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
-      const char *hex_digits = (*fmt == 'X') ? "0123456789ABCDEF" : "0123456789abcdef";
-      char tmp[24];
-      int i = 0;
-      if (val == 0) { tmp[i++] = '0'; }
-      while (val > 0 && i < 23) {
-        tmp[i++] = hex_digits[val & 0xF];
-        val >>= 4;
-      }
-      int num_len = i;
-      char fill_char = zero_fill ? '0' : ' ';
-      int pad = width > num_len ? width - num_len : 0;
-      for (int j = 0; j < pad && pos < 255; j++) buf[pos++] = fill_char;
-      while (i > 0 && pos < 255) buf[pos++] = tmp[--i];
-      break;
-    }
-    case 'p': {
-      uint64_t val = (uint64_t)va_arg(ap, void *);
-      buf[pos++] = '0'; buf[pos++] = 'x';
-      int started = 0;
-      for (int j = 60; j >= 0; j -= 4) {
-        int nibble = (val >> j) & 0xF;
-        if (nibble || started || j == 0) {
-          started = 1;
-          if (pos < 255) buf[pos++] = "0123456789abcdef"[nibble];
-        }
-      }
-      break;
-    }
-    case 'c': {
-      char c = (char)va_arg(ap, int);
-      if (pos < 255) buf[pos++] = c;
-      break;
-    }
-    case '%':
-      buf[pos++] = '%';
-      break;
-    default:
-      buf[pos++] = '%';
-      if (pos < 255) buf[pos++] = *fmt;
-      break;
-    }
-    fmt++;
-  }
-
+  kvformat(serial_buf_putc, &a, fmt, ap);
   va_end(ap);
-  buf[pos] = '\0';
+  buf[a.pos] = '\0';
   serial_puts(buf);
 }
 

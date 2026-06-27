@@ -314,12 +314,8 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
 
     // 5. Load ELF segments into user address space
     elf_load_result_t lr = elf_load(elf_data, elf_size, new_pml4);
-    if (!lr.success) { spin_unlock(&procs_lock); serial_puts("process_create_elf: elf_load failed\n"); return NULL; }
-    serial_puts("process_create_elf: entry=");
-    serial_put_hex(lr.entry);
-    serial_puts(" elf_size=");
-    serial_put_hex(elf_size);
-    serial_puts("\n");
+    if (!lr.success) { spin_unlock(&procs_lock); serial_printf("process_create_elf: elf_load failed\n"); return NULL; }
+    serial_printf("process_create_elf: entry=0x%016X elf_size=0x%016X\n", lr.entry, elf_size);
 
     // 7. Map user stack: 2048 pages (8MB) at 0x7FFFFFFF0000-0x7FFFFFFFE000
     int user_stack_pages = 2048;

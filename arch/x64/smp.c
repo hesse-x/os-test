@@ -96,7 +96,7 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     for (int i = 0; i < 3; i++) {
         Page *ist_page = bfc_alloc_page(1);
         if (!ist_page) {
-            serial_puts("smp_init_cpu: IST alloc failed\n");
+            serial_printf("smp_init_cpu: IST alloc failed\n");
             halt();
         }
         uint64_t ist_phys = (uint64_t)(ist_page - bfc_frames) * PAGE_SIZE;
@@ -172,9 +172,7 @@ void ap_entry_c(int cpu_id) {
     // Set this AP's lapic_base in cpu_local
     cpu_locals[cpu_id].lapic_base = lapic_vaddr;
 
-    serial_puts("AP ");
-    serial_put_hex(cpu_id);
-    serial_puts(" init finish\n");
+    serial_printf("AP 0x%016X init finish\n", cpu_id);
 
     // Switch to idle process: set current_proc, switch to idle kernel stack
     proc_t *idle = cpu_locals[cpu_id].idle_proc;

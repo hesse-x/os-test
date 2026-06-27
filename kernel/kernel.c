@@ -67,7 +67,7 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
 
   uint32_t total_sectors = (uint32_t)((file_end + 511) / 512);
   if (total_sectors > ELF_SLOT_SECTORS) {
-    serial_puts("load_elf_from_disk: ELF too large\n");
+    serial_printf("load_elf_from_disk: ELF too large\n");
     return NULL;
   }
   if (total_sectors < 1) total_sectors = 1;
@@ -107,7 +107,7 @@ void kernel_main(boot_info *bi) {
   serial_init();
 
   if (bi->magic != BOOT_INFO_MAGIC) {
-    serial_puts("kernel_main: bad boot_info magic!\n");
+    serial_printf("kernel_main: bad boot_info magic!\n");
     halt();
   }
 
@@ -152,7 +152,7 @@ void kernel_main(boot_info *bi) {
     serial_printf("kernel_main: create BSP idle failed\n");
     halt();
   }
-  serial_puts("kernel_main: BSP idle created\n");
+  serial_printf("kernel_main: BSP idle created\n");
 
   // Load user processes from disk
   // LBA layout: 1-100=unused(gap), 101=init(100s), 201+=FAT32
