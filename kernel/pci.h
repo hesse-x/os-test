@@ -29,6 +29,7 @@
 
 // PCI capability IDs
 #define PCI_CAP_ID_MSIX     0x11
+#define PCI_CAP_ID_MSI      0x05
 
 // ===================== PCI BAR =====================
 typedef struct pci_bar {
@@ -47,8 +48,7 @@ typedef struct pci_device {
   uint16_t device_id;
   uint16_t class_code;    // (class << 8) | subclass
   uint8_t  header_type;
-  uint8_t  irq_pin;
-  uint8_t  irq_line;
+  uint8_t  msi_cap_offset;   // MSI capability offset in config space, 0 = not found
   uint8_t  msix_cap_offset;  // MSI-X capability offset in config space, 0 = not found
   uint8_t  msix_table_bar;   // BAR index for MSI-X Table
   uint8_t  msix_pba_bar;     // BAR index for PBA
@@ -78,6 +78,8 @@ pci_device_t *pci_find_device(uint16_t class_code);
 pci_device_t *pci_find_device_by_id(uint16_t vendor, uint16_t device);
 
 int pci_enable_device(pci_device_t *dev);
+int pci_enable_device_wc(pci_device_t *dev, int wc_bar_idx);
+int pci_enable_msi(pci_device_t *dev);
 
 // MSI-X API
 int pci_enable_msix(pci_device_t *dev, int num_vectors);

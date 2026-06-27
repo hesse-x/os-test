@@ -8,6 +8,7 @@
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
+#include "kernel/acpi.h"
 #include "common/errno.h"
 
 // ===================== AHCI register offsets (from ABAR) =====================
@@ -175,6 +176,15 @@ static void ahci_alloc_dma() {
   __memset((void *)bounce_virt, 0, AHCI_BOUNCE_PAGES * 4096);
 }
 
+// ===================== Port interrupt disable =====================
+// Disable port-level interrupts and clear pending status.
+// Used when switching ports, shutting down, or as a safety guard.
+static void port_disable_interrupts(int port) {
+  writel(port_reg(port, PxIE), 0);
+  writel(port_reg(port, PxSERR), readl(port_reg(port, PxSERR)));
+  writel(port_reg(port, PxIS), 0xFFFFFFFF);
+}
+
 // ===================== Port stop =====================
 static void port_stop(int port) {
   void __iomem *cmd = port_reg(port, PxCMD);
@@ -191,9 +201,8 @@ static void port_stop(int port) {
     if (!(readl(cmd) & (1 << 14))) break;
   }
 
-  // Clear PxSERR and PxIS
-  writel(port_reg(port, PxSERR), readl(port_reg(port, PxSERR)));
-  writel(port_reg(port, PxIS), 0xFFFFFFFF);
+  // Disable interrupts and clear pending status
+  port_disable_interrupts(port);
 }
 
 // ===================== Port init (idempotent) =====================
@@ -210,9 +219,9 @@ static void port_init(int port) {
   writel(port_reg(port, PxSERR), readl(port_reg(port, PxSERR)));
   writel(port_reg(port, PxIS), 0xFFFFFFFF);
 
-  // Enable port interrupts: DHRE (bit0) for command completion notification
-  // + error bits: TFEE (bit30), HBFE (bit31), HBDIE (bit29)
-  writel(port_reg(port, PxIE), (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
+  // Do NOT enable PxIE here — only the active port should have interrupts
+  // enabled (done after ahci_init determines active_port). Enabling PxIE
+  // on all probed ports causes a storm of spurious MSI from idle devices.
 
   // Enable FIS receive: set FRE, wait for FR=1
   void __iomem *cmd = port_reg(port, PxCMD);
@@ -288,6 +297,8 @@ done:
 // ===================== AHCI IRQ handler =====================
 // Called when AHCI port interrupt fires (command completion).
 // Completes the current async request, notifies caller, issues next queued request.
+// EOI is issued early (after clearing PxIS + IS) so that higher-priority
+// interrupts (e.g. LAPIC timer) can preempt the handler's work.
 
 void ahci_issue_cmd(block_req *req);  // forward declaration
 
@@ -295,8 +306,19 @@ static void ahci_irq_handler(trapframe_t *tf) {
     // Check if our port generated the interrupt
     uint32_t pxis = readl(port_reg(active_port, PxIS));
     if (pxis == 0) {
-        // Not our interrupt — still acknowledge and EOI
-        writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS), readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS)));
+        // Spurious interrupt from a non-active port — safety guard:
+        // scan all PI ports and disable any with PxIE still set (shouldn't
+        // happen, but prevents interrupt storms if PxIE leaks).
+        uint32_t pi = readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_PI));
+        for (int i = 0; i < 32; i++) {
+            if ((pi & (1 << i)) && i != active_port) {
+                uint32_t ie = readl(port_reg(i, PxIE));
+                if (ie) port_disable_interrupts(i);
+            }
+        }
+        // Acknowledge global IS and EOI
+        writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS),
+               readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS)));
         lapic_eoi();
         return;
     }
@@ -306,9 +328,16 @@ static void ahci_irq_handler(trapframe_t *tf) {
     // Acknowledge global IS
     writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS), readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS)));
 
+    // EOI early — allows LAPIC timer and other high-priority interrupts
+    // to preempt our completion processing
+    lapic_eoi();
+
+    // Re-enable CPU interrupts (IF=1) so the LAPIC can deliver higher-priority
+    // interrupts (e.g. timer at priority class 7) while we process completion.
+    __asm__ volatile("sti");
+
     // Check if a command was in flight
     if (!ahci_current_req) {
-        lapic_eoi();
         return;
     }
 
@@ -349,8 +378,6 @@ static void ahci_irq_handler(trapframe_t *tf) {
         ahci_current_req = &block_pool[bq_head];
         ahci_issue_cmd(ahci_current_req);
     }
-
-    lapic_eoi();
 }
 
 // ===================== Command issue with memory barrier =====================
@@ -467,9 +494,17 @@ int ahci_set_active_port(int port) {
       return -EIO;
     }
   }
+  // Disable interrupts on old active port to prevent spurious interrupts
+  if (active_port >= 0 && active_port != port) {
+    port_disable_interrupts(active_port);
+  }
   serial_printf("ahci: switching to port %d\n", port);
   port_init(port);
   active_port = port;
+  // Re-enable PxIE on the new active port (port_init leaves PxIE=0)
+  writel(port_reg(port, PxIE), (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
+  // Clear global IS to remove any stale bits from the old port
+  writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS), 0xFFFFFFFF);
   return 0;
 }
 
@@ -571,22 +606,53 @@ void ahci_init() {
   // Idempotent re-initialize the active port
   port_init(active_port);
 
-  // Use the interrupt line programmed by firmware (OVMF sets this correctly for ICH9)
-  uint8_t ahci_gsi = dev->irq_line;
-  uint8_t ahci_irq_vec = 32 + ahci_gsi;
+  // Enable port interrupts only on the active port (DHRE + error bits).
+  // Non-active ports have PxIE=0 so they cannot generate interrupts.
+  writel(port_reg(active_port, PxIE), (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
 
-  // Enable AHCI interrupts:
-  // 1. Register IRQ handler for AHCI vector
-  register_irq(ahci_irq_vec, ahci_irq_handler);
+  // Enable AHCI interrupts via MSI (bypasses I/O APIC entirely):
+  // pci_enable_msi allocates a vector, writes Message Address/Data to the
+  // device's MSI capability, enables MSI, and disables INTx.
+  // Timer vector (0x78, priority class 7) is higher than MSI vectors
+  // (64-95, priority class 4-5), so the LAPIC timer can always preempt
+  // AHCI interrupt processing. The handler also does EOI early to minimize
+  // the non-preemptible window.
+  int msi_ret = pci_enable_msi(dev);
+  if (msi_ret < 0) {
+    // MSI unavailable — fall back to INTx via I/O APIC
+    uint8_t ahci_gsi = (uint8_t)pci_read_config(dev->bus, dev->dev, dev->func, 0x3C) & 0xFF;
+    uint8_t ahci_irq_vec = 32 + ahci_gsi;
+    register_irq(ahci_irq_vec, ahci_irq_handler);
 
-  // 2. Enable GHC.IE (global HBA interrupt enable, bit 1)
+    uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
+    const acpi_iso_override_t *iso = acpi_find_iso(ahci_gsi);
+    bool level = iso ? iso->level_triggered : false;
+    bool low   = iso ? iso->active_low : false;
+    ioapic_set_irq(ahci_gsi, ahci_irq_vec, bsp_apic_id, false, level, low);
+
+    serial_printf("ahci: INTx fallback (GSI=%d vec=%d)\n", ahci_gsi, ahci_irq_vec);
+  } else {
+    uint8_t msi_vec = (uint8_t)dev->msix_vector_base;
+    register_irq(msi_vec, ahci_irq_handler);
+
+    serial_printf("ahci: MSI enabled (vec=%d)\n", msi_vec);
+  }
+
+  // Clear ALL port interrupt status before enabling GHC.IE.
+  // Even with PxIE=0, QEMU AHCI can set PxIS bits (e.g. D2H FIS on FRE),
+  // which sets GHC.IS bits. If we enable GHC.IE with stale IS bits,
+  // MSI fires immediately in a storm: handler clears IS, EOI, but QEMU
+  // regenerates the edge from the port's PxIS that we never cleared.
+  for (int i = 0; i < 32; i++) {
+    if (pi & (1 << i)) {
+      port_disable_interrupts(i);
+    }
+  }
+  // Clear global IS last
+  writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS), 0xFFFFFFFF);
+
+  // Enable GHC.IE (global HBA interrupt enable, bit 1)
   writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_GHC), readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_GHC)) | (1U << 1));
-
-  // 3. Route I/O APIC GSI → AHCI vector, unmasked, to BSP
-  uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
-  ioapic_set_irq(ahci_gsi, ahci_irq_vec, bsp_apic_id, false);
-
-  serial_printf("ahci: interrupts enabled (GSI=%d vec=%d)\n", ahci_gsi, ahci_irq_vec);
 
   ahci_puts("ahci: init done\n");
 }

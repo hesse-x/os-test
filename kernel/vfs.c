@@ -1,4 +1,5 @@
 #include "kernel/ahci.h"
+#include "kernel/blk_dev.h"
 #include "kernel/vfs.h"
 #include "kernel/inode.h"
 #include "kernel/page_cache.h"
@@ -13,6 +14,7 @@
 #include "kernel/mem/slab.h"
 #include "kernel/trap.h"
 #include "common/errno.h"
+#include "common/dev.h"
 #include "common/stat.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/smp.h"
@@ -35,6 +37,7 @@ void vfs_init(void) {
         rc = fat32_init();
         if (rc == 0) {
             serial_printf("vfs_init: FAT32 mounted on port %d\n", try_ports[pi]);
+            devtmpfs_create("sda", DEV_BLOCK, &blk_dev_ops);
             break;
         }
     }

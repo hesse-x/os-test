@@ -194,13 +194,13 @@ void kernel_main(boot_info *bi) {
 
   serial_printf("kernel_main: all procs loaded, entering idle\n");
 
-  sti();
-
   // Set current_proc to BSP idle, switch to idle kernel stack, enter idle_entry
   current_proc = bsp_idle;
   bsp_idle->state = RUNNING;
   per_cpu_tss[0].rsp0 = bsp_idle->k_stack_top;
   cpu_locals[0].tss_rsp0 = bsp_idle->k_stack_top;
+
+  sti();
 
   uint64_t idle_rsp = bsp_idle->k_rsp;
   __asm__ volatile(

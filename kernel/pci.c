@@ -52,10 +52,9 @@ static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus
   uint64_t *pd = (__force uint64_t *)phys_to_virt((__force phys_addr_t)page_to_phys(pd_page));
   for (int i = 0; i < 512; i++) pd[i] = 0;
 
-  // Fill PD with 2MB huge pages, PCD+PWT for uncacheable MMIO
-  // 0x9B = Present + RW + PS + PCD + PWT
+  // Fill PD with 2MB huge pages, UC for MMIO
   for (size_t n = 0; n < num_2mb; n++) {
-    pd[n] = (region_start + n * 0x200000) | 0x9B;
+    pd[n] = (region_start + n * 0x200000) | PTE_PRESENT | PTE_RW | PTE_PS | PTE_UC;
   }
 
   pdpt_hh[pdpt_idx] = (__force uint64_t)page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
@@ -165,10 +164,6 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   uint8_t header_type = (pci_read_config(bus, dev, func, 0x0C) >> 16) & 0xFF;
   uint16_t class_code = (rev_class >> 16) & 0xFFFF;
 
-  uint32_t irq_info = pci_read_config(bus, dev, func, 0x3C);
-  uint8_t irq_pin = (irq_info >> 8) & 0xFF;
-  uint8_t irq_line = irq_info & 0xFF;
-
   pci_device_t *d = &pci_devices[pci_device_count];
   d->bus = bus;
   d->dev = dev;
@@ -177,9 +172,8 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   d->device_id = device;
   d->class_code = class_code;
   d->header_type = header_type & 0x7F;
-  d->irq_pin = irq_pin;
-  d->irq_line = irq_line;
   d->msix_cap_offset = 0;
+  d->msi_cap_offset = 0;
   d->msix_table_bar = 0;
   d->msix_pba_bar = 0;
   d->msix_table_offset = 0;
@@ -203,6 +197,8 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
         d->msix_table_offset = table_info & ~0x7;
         d->msix_pba_bar = pba_info & 0x7;
         d->msix_pba_offset = pba_info & ~0x7;
+      } else if (cap_id == PCI_CAP_ID_MSI) {
+        d->msi_cap_offset = cap_ptr;
       }
       cap_ptr = next_ptr;
       if (cap_ptr < 0x40) break; // invalid, stop
@@ -250,7 +246,7 @@ static void pci_scan_bus(uint8_t bus) {
 // ===================== BAR MMIO mapping =====================
 
 __attribute__((no_sanitize("kernel-address")))
-static void pci_map_bar_mmio(pci_device_t *d) {
+static void pci_map_bar_mmio(pci_device_t *d, int wc_bar_idx) {
   int max_bars = (d->header_type == PCI_HEADER_TYPE_BRIDGE) ? 2 : 6;
   for (int i = 0; i < max_bars; i++) {
     if (d->bar[i].size == 0) continue;
@@ -279,9 +275,10 @@ static void pci_map_bar_mmio(pci_device_t *d) {
     uint64_t *pd = (__force uint64_t *)phys_to_virt((__force phys_addr_t)page_to_phys(pd_page));
     for (int j = 0; j < 512; j++) pd[j] = 0;
 
-    // Fill with 2MB huge pages, PCD+PWT for MMIO
+    // Fill with 2MB huge pages: WC for specified BAR, UC for others
+    uint64_t cache_flags = (i == wc_bar_idx) ? PTE_WC : PTE_UC;
     for (size_t n = 0; n < num_2mb; n++) {
-      pd[n] = (region_start + n * 0x200000) | 0x9B;
+      pd[n] = (region_start + n * 0x200000) | PTE_PRESENT | PTE_RW | PTE_PS | cache_flags;
     }
 
     pdpt_hh[pdpt_idx] = (__force uint64_t)page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
@@ -300,7 +297,23 @@ int pci_enable_device(pci_device_t *d) {
   if (d->enabled) return 0;
 
   // 1. Map MMIO BARs
-  pci_map_bar_mmio(d);
+  pci_map_bar_mmio(d, -1);  // all BARs UC
+
+  // 2. Enable Bus Master + Memory Space
+  uint32_t cmd = pci_read_config(d->bus, d->dev, d->func, 0x04);
+  cmd |= (1 << 1) | (1 << 2);  // Bus Master + Memory Space
+  pci_write_config(d->bus, d->dev, d->func, 0x04, cmd);
+
+  d->enabled = true;
+  return 0;
+}
+
+__attribute__((no_sanitize("kernel-address")))
+int pci_enable_device_wc(pci_device_t *d, int wc_bar_idx) {
+  if (d->enabled) return 0;
+
+  // 1. Map MMIO BARs (specified BAR uses WC, others UC)
+  pci_map_bar_mmio(d, wc_bar_idx);
 
   // 2. Enable Bus Master + Memory Space
   uint32_t cmd = pci_read_config(d->bus, d->dev, d->func, 0x04);
@@ -360,8 +373,6 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
   info.vendor_id = d->vendor_id;
   info.device_id = d->device_id;
   info.class_code = d->class_code;
-  info.irq_pin = d->irq_pin;
-  info.irq_line = d->irq_line;
   info.num_bars = (d->header_type == PCI_HEADER_TYPE_BRIDGE) ? 2 : 6;
   for (int i = 0; i < info.num_bars; i++) {
     info.bars[i].phys = d->bar[i].phys;
@@ -374,12 +385,60 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
   return 0;
 }
 
+// ===================== MSI =====================
+
+__attribute__((no_sanitize("kernel-address")))
+int pci_enable_msi(pci_device_t *dev) {
+  if (dev->msi_cap_offset == 0) return -ENOSYS;
+  if (next_msix_vector > 95) return -ENOMEM;  // cap at vec 95 (priority class 5)
+
+  // Read Message Control (upper 16 bits of DWORD at cap_offset)
+  uint32_t cap_dword = pci_read_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset);
+  uint16_t msg_ctrl = (cap_dword >> 16) & 0xFFFF;
+  bool is_64bit = (msg_ctrl & (1 << 7)) != 0;  // 64-bit Address Capable
+
+  // Allocate one vector
+  int vector = next_msix_vector++;
+  dev->msix_vector_base = vector;  // reuse field for MSI vector base
+  dev->msix_num_vectors = 1;
+
+  uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
+
+  // Write Message Address (DWORD at cap_offset + 4)
+  pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset + 4,
+                   0xFEE00000 | (bsp_apic_id << 12));
+
+  if (is_64bit) {
+    // Write Message Upper Address (DWORD at cap_offset + 8) = 0
+    pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset + 8, 0);
+    // Write Message Data (DWORD at cap_offset + 12)
+    pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset + 12, vector);
+  } else {
+    // Write Message Data (DWORD at cap_offset + 8)
+    pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset + 8, vector);
+  }
+
+  // Enable MSI: set Enable bit (bit 0 of 16-bit Message Control)
+  cap_dword = pci_read_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset);
+  msg_ctrl = (cap_dword >> 16) & 0xFFFF;
+  msg_ctrl |= (1 << 0);  // MSI Enable
+  cap_dword = (cap_dword & 0xFFFF) | ((uint32_t)msg_ctrl << 16);
+  pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset, cap_dword);
+
+  // Disable INTx: set bit 10 (Interrupt Disable) in Command register
+  uint32_t cmd = pci_read_config(dev->bus, dev->dev, dev->func, 0x04);
+  cmd |= (1 << 10);
+  pci_write_config(dev->bus, dev->dev, dev->func, 0x04, cmd);
+
+  return 0;
+}
+
 // ===================== MSI-X =====================
 
 __attribute__((no_sanitize("kernel-address")))
 int pci_enable_msix(pci_device_t *dev, int num_vectors) {
   if (dev->msix_cap_offset == 0) return -ENOSYS;
-  if (num_vectors <= 0 || next_msix_vector + num_vectors > 128) return -ENOMEM;
+  if (num_vectors <= 0 || next_msix_vector + num_vectors > 96) return -ENOMEM;
 
   // Read Message Control to get table size (bits 10:2 of 16-bit Message Control = N-1)
   // Message Control is at cap_offset+2, upper 16 bits of DWORD at cap_offset

@@ -56,6 +56,26 @@ typedef struct acpi_madt_ioapic_entry {
   uint32_t gsi_base;
 } __attribute__((packed)) acpi_madt_ioapic_entry_t;
 
+// MADT Interrupt Source Override entry (type 2)
+typedef struct acpi_madt_iso_entry {
+  uint8_t  type;       // 2
+  uint8_t  length;     // 10
+  uint8_t  bus;        // 0 = ISA
+  uint8_t  irq;        // ISA IRQ number
+  uint32_t gsi;        // Global System Interrupt
+  uint16_t flags;      // bit 0: polarity (0=high, 1=low), bit 1: trigger (0=edge, 1=level)
+} __attribute__((packed)) acpi_madt_iso_entry_t;
+
+// Parsed ISO override record
+typedef struct acpi_iso_override {
+  uint8_t  irq;        // ISA IRQ
+  uint32_t gsi;        // mapped GSI
+  bool     active_low; // polarity
+  bool     level_triggered;
+} acpi_iso_override_t;
+
+#define MAX_ISO_OVERRIDES 16
+
 // MCFG table (PCI Firmware Spec 3.0)
 typedef struct acpi_mcfg {
   acpi_sdt_header_t header;
@@ -78,8 +98,11 @@ typedef struct acpi_mcfg_entry {
 typedef struct acpi_madt_result {
   uint64_t lapic_base;
   uint64_t ioapic_base;
+  uint32_t ioapic_gsi_base;
   uint32_t ncpus;
   uint32_t apic_ids[4];
+  uint32_t num_iso;
+  acpi_iso_override_t iso[MAX_ISO_OVERRIDES];
 } acpi_madt_result_t;
 
 typedef struct acpi_mcfg_result {
@@ -93,6 +116,9 @@ extern acpi_madt_result_t g_madt;
 extern acpi_mcfg_result_t g_mcfg;
 
 // ===================== ACPI API =====================
+
+// Look up ISO override for an ISA IRQ. Returns NULL if no override.
+const acpi_iso_override_t *acpi_find_iso(uint8_t isa_irq);
 
 // Initialize ACPI: parse RSDP -> XSDT -> find MADT + MCFG
 // Must be called after init_mem, before isr_init

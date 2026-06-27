@@ -32,10 +32,11 @@ void pic_disable() {
 
 // ===================== I/O APIC =====================
 void ioapic_set_irq(uint32_t gsi, uint8_t vector, uint32_t apic_id,
-                    bool masked) {
+                    bool masked, bool level_triggered, bool active_low) {
   uint32_t reg = IOAPIC_REDIR_OFFSET(gsi);
   uint64_t entry = IOAPIC_DELIVERY_FIXED | IOAPIC_DEST_MODE_PHYS |
-                   IOAPIC_TRIGGER_EDGE | IOAPIC_POLARITY_HIGH |
+                   (level_triggered ? IOAPIC_TRIGGER_LEVEL : IOAPIC_TRIGGER_EDGE) |
+                   (active_low ? IOAPIC_POLARITY_LOW : IOAPIC_POLARITY_HIGH) |
                    (uint64_t)vector;
   if (masked) entry |= IOAPIC_INTR_MASKED;
   entry |= (uint64_t)apic_id << 56;
@@ -114,10 +115,9 @@ static void map_apic_mmio(uint64_t lapic_phys, uint64_t ioapic_phys) {
   uintptr_t pd_phys = (__force uintptr_t)PHY_ADDR((uintptr_t)pd);
   for (int i = 0; i < 512; i++) pd[i] = 0;
 
-  // Fill PD with 2MB pages. Mark PCD+PWT for uncacheable MMIO.
-  // 0x83 = Present + RW + PS (2MB), + 0x18 = PCD + PWT
+  // Fill PD with 2MB pages, UC for APIC MMIO
   for (size_t n = 0; n < num_2mb; n++) {
-    pd[n] = (region_start + n * 0x200000) | 0x9B; // Present+RW+PS+PCD+PWT
+    pd[n] = (region_start + n * 0x200000) | PTE_PRESENT | PTE_RW | PTE_PS | PTE_UC;
   }
 
   pdpt_hh[pdpt_idx] = pd_phys | PTE_PRESENT | PTE_RW;
@@ -171,12 +171,33 @@ void apic_init() {
   // 6. Configure I/O APIC: mask all, then unmask timer + keyboard
   uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
 
-  for (int i = 0; i < 24; i++) {
-    ioapic_set_irq(i, 32 + i, bsp_apic_id, true);
+  uint32_t ver = ioapic_read(IOAPIC_VER);
+  int max_redir = ((ver >> 16) & 0xFF) + 1;
+  serial_printf("apic: IOAPIC max_redir=%d\n", max_redir);
+
+  for (int i = 0; i < max_redir; i++) {
+    ioapic_set_irq(i, 32 + i, bsp_apic_id, true, false, false);
   }
-  ioapic_set_irq(0, 32, bsp_apic_id, false); // timer, edge
-  // Keyboard: GSI 1, edge-triggered (PS/2 keyboard is edge-triggered)
-  ioapic_set_irq(1, 33, bsp_apic_id, false);
+  // PIT timer: ISO override maps IRQ0 → GSI 2, but BSP uses LAPIC timer
+  // for scheduling so the PIT I/O APIC interrupt is unneeded. Mask GSI 2
+  // to prevent spurious vec 34 interrupts.
+  {
+    const acpi_iso_override_t *iso = acpi_find_iso(0);
+    uint32_t gsi = iso ? iso->gsi : 0;
+    bool level = iso ? iso->level_triggered : false;
+    bool low   = iso ? iso->active_low : false;
+    ioapic_set_irq(gsi, 32 + gsi, bsp_apic_id, true, level, low);
+    serial_printf("apic: PIT IRQ0 gsi=%d masked (LAPIC timer used)\n", gsi);
+  }
+  // Unmask keyboard (ISA IRQ 1 → GSI per ISO)
+  {
+    const acpi_iso_override_t *iso = acpi_find_iso(1);
+    uint32_t gsi = iso ? iso->gsi : 1;
+    bool level = iso ? iso->level_triggered : false;
+    bool low   = iso ? iso->active_low : false;
+    ioapic_set_irq(gsi, 32 + gsi, bsp_apic_id, false, level, low);
+    serial_printf("apic: kbd IRQ1 gsi=%d level=%d low=%d\n", gsi, level, low);
+  }
 
   // 7. Calibrate and start LAPIC timer
   uint32_t ticks = calibrate_lapic_timer();
@@ -214,6 +235,7 @@ void apic_init() {
 
   // Start LAPIC periodic timer
   lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
-  lapic_write(LAPIC_LVT_TIMER, 32 | LAPIC_LVT_TIMER_PERIODIC);
+  lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_VECTOR | LAPIC_LVT_TIMER_PERIODIC);
   lapic_write(LAPIC_TIMER_ICR, ticks);
+  serial_printf("apic: BSP timer started vec=0x%x ticks=%u\n", LAPIC_TIMER_VECTOR, ticks);
 }

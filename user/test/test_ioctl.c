@@ -227,21 +227,7 @@ void test_ioctl_serial_tcgets(void) {
     }
 }
 
-/* ---- Phase 3: open("/dev/") unified + sys_open_dev deprecated ---- */
-
-/* 16. sys_open_dev returns -ENOSYS (deprecated) */
-void test_open_dev_deprecated(void) {
-    uint64_t r = sys_open_dev(DEV_SERIAL);
-    /* Should return packed negative errno or just -ENOSYS */
-    int32_t fd = (int32_t)(r & 0xFFFFFFFFULL);
-    TEST_ASSERT_TRUE(fd < 0);
-}
-
-/* 17. sys_load_dev returns -ENOSYS (deprecated) */
-void test_load_dev_deprecated(void) {
-    int r = sys_load_dev(1, DEV_KBD);
-    TEST_ASSERT_TRUE(r < 0);
-}
+/* ---- Phase 3: open("/dev/") unified ---- */
 
 /* 18. open("/dev/serial") → close → open again (serial open/close lifecycle) */
 void test_serial_reopen(void) {
@@ -363,7 +349,7 @@ void test_fstat_dev_fs(void) {
     }
 }
 
-/* ===== Phase 8: ioctl IPC proxy + sys_dev_req deprecated + _IOC macros ===== */
+/* ===== Phase 8: ioctl IPC proxy + _IOC macros ===== */
 
 /* 27. _IOC macros produce correct encoding */
 void test_ioc_macros(void) {
@@ -388,20 +374,6 @@ void test_ioc_macros(void) {
     /* _IOWR: bidirectional */
     uint32_t cmd_iowr = _IOWR('K', 4, int);
     TEST_ASSERT_EQUAL_INT(_IOC_READ | _IOC_WRITE, _IOC_DIR(cmd_iowr));
-}
-
-/* 28. sys_dev_req returns -ENOSYS (deprecated) */
-void test_dev_req_deprecated(void) {
-    int fd = open("/dev/serial", O_RDWR);
-    if (fd >= 0) {
-        uint8_t req[56] = {0};
-        uint8_t resp[64] = {0};
-        int r = sys_dev_req(fd, req, resp);
-        TEST_ASSERT_TRUE(r < 0);
-        close(fd);
-    } else {
-        TEST_ASSERT_TRUE(1);
-    }
 }
 
 /* 29. KMS ioctl CREATE_BUF with struct arg (via sys_ioctl) */
@@ -484,8 +456,6 @@ int main(void) {
     RUN_TEST(test_open_dev_serial);
     RUN_TEST(test_isatty_dev_serial);
     RUN_TEST(test_ioctl_serial_tcgets);
-    RUN_TEST(test_open_dev_deprecated);
-    RUN_TEST(test_load_dev_deprecated);
     RUN_TEST(test_serial_reopen);
     RUN_TEST(test_fstat_dev_serial);
     RUN_TEST(test_fstat_shm);
@@ -497,7 +467,6 @@ int main(void) {
     RUN_TEST(test_fstat_dev_fs);
     /* Phase 8 */
     RUN_TEST(test_ioc_macros);
-    RUN_TEST(test_dev_req_deprecated);
     RUN_TEST(test_ioctl_kms_create_buf_arg);
     RUN_TEST(test_ioctl_kbd_bind);
     RUN_TEST(test_ioctl_serial_ioc_cmd);

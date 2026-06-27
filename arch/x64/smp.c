@@ -143,6 +143,9 @@ void ap_entry_c(int cpu_id) {
     // Apply per-CPU state (GDT, GS base, TR) to this AP
     smp_apply_cpu(cpu_id);
 
+    // Program PAT MSR for this AP (must be done after paging enabled)
+    pat_init();
+
     // Load IDT (same IDT as BSP, shared kernel address space)
     idt_install();
 
@@ -163,7 +166,7 @@ void ap_entry_c(int cpu_id) {
 
     // Start LAPIC timer (periodic, same config as BSP)
     lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
-    lapic_write(LAPIC_LVT_TIMER, 32 | LAPIC_LVT_TIMER_PERIODIC);
+    lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_VECTOR | LAPIC_LVT_TIMER_PERIODIC);
     lapic_write(LAPIC_TIMER_ICR, lapic_timer_ticks_calibrated);
 
     // Set this AP's lapic_base in cpu_local
@@ -301,6 +304,7 @@ void smp_boot_aps() {
 
     // Restore BSP LAPIC timer (udelay clobbers it to masked one-shot)
     lapic_write(LAPIC_TIMER_DCR, 0x0B);
-    lapic_write(LAPIC_LVT_TIMER, 32 | LAPIC_LVT_TIMER_PERIODIC);
+    lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_VECTOR | LAPIC_LVT_TIMER_PERIODIC);
     lapic_write(LAPIC_TIMER_ICR, lapic_timer_ticks_calibrated);
+    serial_printf("smp: BSP timer restored vec=0x%x\n", LAPIC_TIMER_VECTOR);
 }

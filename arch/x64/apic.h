@@ -64,6 +64,10 @@
 // Timer frequency (Hz)
 #define LAPIC_TIMER_HZ 100
 
+// LAPIC timer vector — must be high priority (class 7+) so it can preempt
+// any device interrupt (MSI vectors 64-95 = class 4-5). Vector 120 = 0x78.
+#define LAPIC_TIMER_VECTOR 0x78
+
 extern void __iomem *lapic_vaddr;
 extern void __iomem *ioapic_vaddr;
 
@@ -100,7 +104,8 @@ void apic_init();
 void pic_disable();
 
 // I/O APIC IRQ configuration (called by sys_irq_bind to unmask)
-void ioapic_set_irq(uint32_t gsi, uint8_t vector, uint32_t apic_id, bool masked);
+void ioapic_set_irq(uint32_t gsi, uint8_t vector, uint32_t apic_id,
+                    bool masked, bool level_triggered, bool active_low);
 
 // BSP-calibrated LAPIC timer ticks (set by apic_init, used by AP init)
 extern uint32_t lapic_timer_ticks_calibrated;

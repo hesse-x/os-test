@@ -4,7 +4,7 @@
 #include "kernel/serial.h"
 #include "common/macro.h"
 
-acpi_madt_result_t g_madt = {0, 0, 0, {0}};
+acpi_madt_result_t g_madt = {0, 0, 0, 0, {0}, 0, {{0}}};
 acpi_mcfg_result_t g_mcfg = {0, 0, 0, 0};
 
 // Internal XSDT state for acpi_find_table
@@ -64,9 +64,29 @@ static void parse_madt(const acpi_madt_t *madt) {
       const acpi_madt_ioapic_entry_t *ioapic =
           (const acpi_madt_ioapic_entry_t *)e;
       g_madt.ioapic_base = ioapic->ioapic_address;
+      g_madt.ioapic_gsi_base = ioapic->gsi_base;
+    } else if (e->type == 2 && g_madt.num_iso < MAX_ISO_OVERRIDES) {
+      const acpi_madt_iso_entry_t *iso =
+          (const acpi_madt_iso_entry_t *)e;
+      if (iso->bus == 0) {  // only ISA overrides
+        acpi_iso_override_t *o = &g_madt.iso[g_madt.num_iso];
+        o->irq = iso->irq;
+        o->gsi = iso->gsi;
+        o->active_low = (iso->flags & 1) != 0;
+        o->level_triggered = (iso->flags & 2) != 0;
+        g_madt.num_iso++;
+      }
     }
     offset += e->length;
   }
+}
+
+const acpi_iso_override_t *acpi_find_iso(uint8_t isa_irq) {
+  for (uint32_t i = 0; i < g_madt.num_iso; i++) {
+    if (g_madt.iso[i].irq == isa_irq)
+      return &g_madt.iso[i];
+  }
+  return NULL;
 }
 
 static void parse_mcfg(const acpi_mcfg_t *mcfg) {
@@ -140,9 +160,24 @@ void acpi_init(uint64_t rsdp_phys) {
     serial_put_hex(g_madt.lapic_base);
     serial_puts(" ioapic=");
     serial_put_hex(g_madt.ioapic_base);
+    serial_puts(" gsi_base=");
+    serial_put_hex(g_madt.ioapic_gsi_base);
     serial_puts(" ncpus=");
     serial_put_hex(g_madt.ncpus);
+    serial_puts(" iso=");
+    serial_put_hex(g_madt.num_iso);
     serial_puts("\n");
+    for (uint32_t i = 0; i < g_madt.num_iso; i++) {
+      serial_puts("  ISO: irq=");
+      serial_put_hex(g_madt.iso[i].irq);
+      serial_puts(" gsi=");
+      serial_put_hex(g_madt.iso[i].gsi);
+      serial_puts(" low=");
+      serial_put_hex(g_madt.iso[i].active_low ? 1 : 0);
+      serial_puts(" level=");
+      serial_put_hex(g_madt.iso[i].level_triggered ? 1 : 0);
+      serial_puts("\n");
+    }
   } else {
     serial_puts("acpi: MADT not found\n");
   }

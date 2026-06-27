@@ -15,6 +15,14 @@
 #define PTE_USER     (1ULL << 2)
 #define PTE_PS       (1ULL << 7)   // Page size (2MB huge page at PD level)
 #define PTE_NX       (1ULL << 63)  // No-execute
+#define PTE_PWT     (1ULL << 3)   // Page-level Write-Through
+#define PTE_PCD     (1ULL << 4)   // Page-level Cache Disable
+
+// PAT index selection via PCD+PWT (for 2MB huge pages at PD level)
+#define PTE_UC      (PTE_PCD | PTE_PWT)   // PAT index 3 = UC
+#define PTE_WC      (PTE_PCD)              // PAT index 2 = WC (after PAT MSR reprogram)
+#define PTE_WT      (PTE_PWT)              // PAT index 1 = WT
+// PAT index 0 = WB (no PCD, no PWT) — default, no flag needed
 
 // ===================== Constants =====================
 #define PHY_ADDR(addr) ((__force phys_addr_t)((uintptr_t)(addr) - VMA_BASE))
@@ -74,5 +82,6 @@ void bump_init_phys(uintptr_t start);
 void bump_disable();
 uintptr_t bump_end_phys();
 void enable_nx();
+void pat_init();
 
 #endif // ARCH_X64_PAGING_H

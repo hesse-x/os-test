@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include "common/ioctl.h"
 
-// ===================== Syscall numbers (NR_SYSCALL=61, 0-60 continuous) =====================
+// ===================== Syscall numbers (NR_SYSCALL=57, 0-56 continuous) =====================
 #define SYS_GETPID       0
 #define SYS_YIELD        1
 #define SYS_RECV         2
@@ -23,52 +23,48 @@
 #define SYS_WRITE        14
 #define SYS_READ         15
 #define SYS_CLOSE        16
-#define SYS_LOAD_DEV     17
-#define SYS_NOTIFY       18
-#define SYS_GETTIME      19
-#define SYS_CLOCK        20
-#define SYS_MSG          21
-#define SYS_MSG_RESP     22
-#define SYS_IOPERM       23
-#define SYS_DUP2         24
-#define SYS_FCNTL        25
-#define SYS_DMA_ALLOC    26
-#define SYS_DMA_FREE     27
-#define SYS_PCI_DEV_INFO 28
-#define SYS_BLOCK_IO     29
-#define SYS_BLOCK_ASYNC  30
-#define SYS_OPEN_DEV     31
-#define SYS_INSTALL_FD   32
-#define SYS_SOCKET       33
-#define SYS_BIND         34
-#define SYS_LISTEN       35
-#define SYS_ACCEPT       36
-#define SYS_CONNECT      37
-#define SYS_SOCKETPAIR   38
-#define SYS_SENDMSG      39
-#define SYS_RECVMSG      40
-#define SYS_SHUTDOWN     41
-#define SYS_POLL         42
-#define SYS_LSEEK        43
-#define SYS_MEMFD_CREATE 44
-#define SYS_FTRUNCATE    45
-#define SYS_KILL         46
-#define SYS_SIGACTION    47
-#define SYS_SIGRETURN    48
-#define SYS_DEBUG_PRINT  49
+#define SYS_NOTIFY       17
+#define SYS_GETTIME      18
+#define SYS_CLOCK        19
+#define SYS_MSG          20
+#define SYS_MSG_RESP     21
+#define SYS_IOPERM       22
+#define SYS_DUP2         23
+#define SYS_FCNTL        24
+#define SYS_DMA_ALLOC    25
+#define SYS_DMA_FREE     26
+#define SYS_PCI_DEV_INFO 27
+#define SYS_BLOCK_ASYNC  28
+#define SYS_INSTALL_FD   29
+#define SYS_SOCKET       30
+#define SYS_BIND         31
+#define SYS_LISTEN       32
+#define SYS_ACCEPT       33
+#define SYS_CONNECT      34
+#define SYS_SOCKETPAIR   35
+#define SYS_SENDMSG      36
+#define SYS_RECVMSG      37
+#define SYS_SHUTDOWN     38
+#define SYS_POLL         39
+#define SYS_LSEEK        40
+#define SYS_MEMFD_CREATE 41
+#define SYS_FTRUNCATE    42
+#define SYS_KILL         43
+#define SYS_SIGACTION    44
+#define SYS_SIGRETURN    45
+#define SYS_DEBUG_PRINT  46
 
 // ===================== VFS syscall numbers =====================
-#define SYS_OPEN        50
-#define SYS_STAT        51
-#define SYS_MKDIR       52
-#define SYS_UNLINK      53
-#define SYS_RMDIR       54
-#define SYS_DEV_CREATE  55
-#define SYS_DEV_REQ     56
-#define SYS_GETDENTS    57
-#define SYS_IOCTL       58
-#define SYS_FSTAT       59
-#define SYS_FDEV_PID    60
+#define SYS_OPEN        47
+#define SYS_STAT        48
+#define SYS_MKDIR       49
+#define SYS_UNLINK      50
+#define SYS_RMDIR       51
+#define SYS_DEV_CREATE  52
+#define SYS_GETDENTS    53
+#define SYS_IOCTL       54
+#define SYS_FSTAT       55
+#define SYS_FDEV_PID    56
 
 // ===================== recv_msg (shared between kernel and user) =====================
 #define RECV_IRQ    0
@@ -99,8 +95,6 @@ typedef struct pci_dev_info {
     uint16_t vendor_id;
     uint16_t device_id;
     uint16_t class_code;
-    uint8_t  irq_pin;
-    uint8_t  irq_line;
     uint8_t  num_bars;
     struct pci_dev_info_bar bars[6];
 } pci_dev_info_t;

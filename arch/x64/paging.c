@@ -114,6 +114,9 @@ __attribute__((noinline, no_sanitize("kernel-address"))) void enable_paging(boot
 
   // 加载 CR3 — 此后 identity map + higher-half 均生效
   load_cr3(pml4_phys);
+
+  // Program PAT MSR after paging is enabled
+  pat_init();
 }
 
 // ===================== 全局变量定义 =====================
@@ -221,4 +224,20 @@ __attribute__((no_sanitize("kernel-address"))) void enable_nx() {
   uint64_t efer = rdmsr(MSR_EFER);
   efer |= EFER_NXE;
   wrmsr(MSR_EFER, efer);
+}
+
+// ===================== PAT MSR programming =====================
+#define MSR_IA32_PAT 0x277
+#define PAT_MSR_LO   0x0001040600010406ULL
+#define PAT_MSR_HI   0x0001040600010406ULL
+
+void pat_init(void) {
+    // Check CPUID.01H:EDX[16] for PAT support
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
+    if (!(edx & (1 << 16))) {
+        // PAT not supported, skip programming
+        return;
+    }
+    wrmsr(MSR_IA32_PAT, (PAT_MSR_HI << 32) | PAT_MSR_LO);
 }

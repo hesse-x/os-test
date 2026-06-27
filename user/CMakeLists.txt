@@ -8,7 +8,7 @@ add_user_lib(c
         lib/sys_irq.cc lib/sys_device.cc lib/sys_ipc.cc
 lib/sys_process.cc lib/time.cc lib/file.cc
         lib/ctype.c lib/strtol.c lib/stdlib_misc.c lib/uname.c
-        lib/sleep.c lib/assert.c lib/sys_block.cc lib/sys_pci.cc
+        lib/sleep.c lib/assert.c lib/sys_pci.cc
         lib/signal.cc
 )
 

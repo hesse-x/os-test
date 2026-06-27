@@ -32,7 +32,7 @@ void serial_init(void) {
     outb(COM1_LCR, 0x03);    // 8N1, disable DLAB
     outb(COM1_FCR, 0xC7);    // Enable FIFO, clear, 14-byte threshold
     outb(COM1_MCR, 0x03);    // DTR + RTS
-    // IER RX enable deferred to sys_open_dev(DEV_SERIAL)
+    // IER RX enable deferred to first serial open
 }
 
 #ifndef NSERIAL
@@ -233,7 +233,7 @@ static int serial_dev_open(struct proc_t *proc, int fd) {
     if (!serial_irq_registered) {
         register_irq(36, serial_irq_handler);
         uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
-        ioapic_set_irq(4, 36, bsp_apic_id, false);  // edge-triggered
+        ioapic_set_irq(4, 36, bsp_apic_id, false, false, false);  // edge-triggered
         outb(COM1_IER, IER_RX_ENABLE);
         serial_irq_registered = true;
     }
@@ -249,7 +249,7 @@ static int serial_dev_close(struct proc_t *proc, int fd) {
     spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
     if (serial_fd_count == 0) {
         outb(COM1_IER, 0x00);           // Disable UART interrupts
-        ioapic_set_irq(4, 36, 0, true); // Mask GSI 4 in I/O APIC
+        ioapic_set_irq(4, 36, 0, true, false, false); // Mask GSI 4 in I/O APIC
         unregister_irq(36);
         serial_irq_registered = false;
     }

@@ -38,12 +38,21 @@ void display_init(void) {
     serial_printf("display_init: found display vendor=%x device=%x class=%x\n",
                    dev->vendor_id, dev->device_id, dev->class_code);
 
-    // 2. Enable device (map all BARs into kernel address space)
-    int rc = pci_enable_device(dev);
+    // 2. Enable device: framebuffer BAR mapped WC, other BARs UC
+    int fb_bar_idx = -1;
+    uint64_t max_size = 0;
+    for (int i = 0; i < 6; i++) {
+        if (dev->bar[i].size > max_size && dev->bar[i].type != 1) {
+            max_size = dev->bar[i].size;
+            fb_bar_idx = i;
+        }
+    }
+    int rc = pci_enable_device_wc(dev, fb_bar_idx);
     if (rc) {
-        serial_puts("display_init: pci_enable_device failed\n");
+        serial_puts("display_init: pci_enable_device_wc failed\n");
         halt();
     }
+    serial_printf("display_init: framebuffer BAR%d mapped WC\n", fb_bar_idx);
 
     // 3. Identify BARs: bochs-display has BAR0=framebuffer (large MMIO),
     //    BAR2=VBE MMIO registers (small MMIO). BAR1 consumed by 64-bit BAR0.

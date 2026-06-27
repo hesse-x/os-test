@@ -8,6 +8,7 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/apic.h"
+#include "kernel/acpi.h"
 #include "kernel/serial.h"
 #include "kernel/mem/slab.h"
 #include "kernel/mem/kasan.h"
@@ -201,7 +202,7 @@ void trap_dispatch(trapframe_t *tf) {
   }
 
   // Default: timer EOI
-  if (tf->trapno == 32) {
+  if (tf->trapno == LAPIC_TIMER_VECTOR) {
     tick++;
     lapic_eoi();
     return;
@@ -428,7 +429,7 @@ void isr_init() {
   }
 
   // Register default handlers
-  register_irq(32, timer_handler);
+  register_irq(LAPIC_TIMER_VECTOR, timer_handler);
 
   // Re-initialize GDT with per-CPU setup (now running at virtual address)
   smp_init_cpu(0, 0, (uint64_t)&stack_bottom + 8192);
@@ -440,6 +441,16 @@ void isr_init() {
   idt_install();
   setup_syscall();
   apic_init();
+
+  // Verify BSP LAPIC timer is counting down
+  {
+    uint32_t ccr1 = lapic_read(LAPIC_TIMER_CCR);
+    for (volatile int i = 0; i < 100000; i++);  // brief delay
+    uint32_t ccr2 = lapic_read(LAPIC_TIMER_CCR);
+    serial_printf("isr_init: BSP timer CCR %u->%u LVT=0x%x (counting=%s)\n",
+                   ccr1, ccr2, lapic_read(LAPIC_LVT_TIMER),
+                   ccr1 != ccr2 ? "yes" : "NO!");
+  }
 }
 
 // ===================== Signal trampoline init =====================
@@ -456,11 +467,11 @@ void sig_init() {
     sig_trampoline_phys = (__force uint64_t)page_to_phys(page);
     uint8_t *vaddr = (__force uint8_t *)phys_to_virt((__force phys_addr_t)sig_trampoline_phys);
 
-    // mov rax, 48  (SYS_SIGRETURN)
+    // mov rax, 45  (SYS_SIGRETURN)
     vaddr[0] = 0x48;  // REX.W prefix
     vaddr[1] = 0xC7;  // MOV r64, imm32
     vaddr[2] = 0xC0;  // ModRM: rax
-    vaddr[3] = 0x30;  // 48 = SYS_SIGRETURN (low byte)
+    vaddr[3] = 0x2D;  // 45 = SYS_SIGRETURN (low byte)
     vaddr[4] = 0x00;
     vaddr[5] = 0x00;
     vaddr[6] = 0x00;
@@ -473,7 +484,7 @@ void sig_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 61
+#define NR_SYSCALL 57
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -492,50 +503,46 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_write,          // 14
     sys_read,           // 15
     sys_close,          // 16
-    sys_load_dev,       // 17
-    sys_notify,         // 18
-    sys_gettime,        // 19
-    sys_clock,          // 20
-    sys_msg,            // 21
-    sys_msg_resp,       // 22
-    sys_ioperm,         // 23
-    sys_dup2,           // 24
-    sys_fcntl,          // 25
-    sys_dma_alloc,      // 26
-    sys_dma_free,       // 27
-    sys_pci_dev_info,   // 28
-    sys_block_io,       // 29
-    sys_block_async,    // 30
-    sys_open_dev,       // 31
-    sys_install_fd_impl, // 32
-    sys_socket,         // 33
-    sys_bind,           // 34
-    sys_listen,         // 35
-    sys_accept,         // 36
-    sys_connect,        // 37
-    sys_socketpair,     // 38
-    sys_sendmsg,        // 39
-    sys_recvmsg,        // 40
-    sys_shutdown,       // 41
-    sys_poll,           // 42
-    sys_lseek,          // 43
-    sys_memfd_create,   // 44
-    sys_ftruncate,      // 45
-    sys_kill,           // 46
-    sys_sigaction,      // 47
-    sys_sigreturn,      // 48
-    sys_debug_print,    // 49
-    sys_open,            // 50
-    sys_stat,            // 51
-    sys_mkdir,           // 52
-    sys_unlink,          // 53
-    sys_rmdir,           // 54
-    sys_dev_create,      // 55
-    sys_dev_req,         // 56
-    sys_getdents,        // 57
-    sys_ioctl,           // 58
-    sys_fstat,           // 59
-    sys_fdev_pid,        // 60
+    sys_notify,         // 17
+    sys_gettime,        // 18
+    sys_clock,          // 19
+    sys_msg,            // 20
+    sys_msg_resp,       // 21
+    sys_ioperm,         // 22
+    sys_dup2,           // 23
+    sys_fcntl,          // 24
+    sys_dma_alloc,      // 25
+    sys_dma_free,       // 26
+    sys_pci_dev_info,   // 27
+    sys_block_async,    // 28
+    sys_install_fd_impl, // 29
+    sys_socket,         // 30
+    sys_bind,           // 31
+    sys_listen,         // 32
+    sys_accept,         // 33
+    sys_connect,        // 34
+    sys_socketpair,     // 35
+    sys_sendmsg,        // 36
+    sys_recvmsg,        // 37
+    sys_shutdown,       // 38
+    sys_poll,           // 39
+    sys_lseek,          // 40
+    sys_memfd_create,   // 41
+    sys_ftruncate,      // 42
+    sys_kill,           // 43
+    sys_sigaction,      // 44
+    sys_sigreturn,      // 45
+    sys_debug_print,    // 46
+    sys_open,           // 47
+    sys_stat,           // 48
+    sys_mkdir,          // 49
+    sys_unlink,         // 50
+    sys_rmdir,          // 51
+    sys_dev_create,     // 52
+    sys_getdents,       // 53
+    sys_ioctl,          // 54
+    sys_fstat,          // 55
+    sys_fdev_pid,       // 56
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -876,7 +883,10 @@ uint64_t sys_irq_bind(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, u
     int gsi = irq - 32;
     if (gsi >= 0 && gsi < 24) {
         uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
-        ioapic_set_irq(gsi, irq, bsp_apic_id, false);
+        const acpi_iso_override_t *iso = acpi_find_iso((uint8_t)gsi);
+        bool level = iso ? iso->level_triggered : false;
+        bool low   = iso ? iso->active_low : false;
+        ioapic_set_irq(gsi, irq, bsp_apic_id, false, level, low);
     }
 
     return 0;
@@ -1345,6 +1355,9 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         size_t npages = (phys_end - phys_start) / PAGE_SIZE;
 
         uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+        if (flags & MAP_UC) {
+            pte_flags |= PTE_PCD | PTE_PWT;  // UC
+        }
 
         for (size_t i = 0; i < npages; i++) {
             if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE,
@@ -1556,43 +1569,6 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
     return (int)sys_msg_to(target_pid, (void*)req, req_len, resp, resp_len);
 }
 
-// ===================== sys_block_io =====================
-// Unified block I/O: dir=0 read, dir=1 write. Synchronous polling path.
-// Returns EBUSY if async request is active.
-uint64_t sys_block_io(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u1, uint64_t _u2) {
-    uint32_t lba = (uint32_t)arg1;
-    void __user *buf = (void __user * __force)arg2;
-    uint32_t count = (uint32_t)arg3;
-    uint8_t dir = (uint8_t)arg4;
-
-    uint64_t ptr = (__force uint64_t)buf;
-    if (!ptr || ptr >= 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
-
-    uint64_t end = ptr + (uint64_t)count * 512;
-    if (end < ptr || end > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
-
-    if (count == 0 || count > AHCI_MAX_SECTORS)
-        return (uint64_t)-EINVAL;
-
-    // Safety: refuse if async request is active (would deadlock with polling + IRQ)
-    if (ahci_is_busy())
-        return (uint64_t)-EBUSY;
-
-    uint64_t flags;
-    spin_lock_irqsave(&ahci_lock, &flags);
-    int rc;
-    if (dir == BLOCK_DIR_WRITE) {
-        rc = ahci_write_lba(lba, count, (const void __force *)buf);
-    } else {
-        rc = ahci_read_lba(lba, count, (void __force *)buf);
-    }
-    spin_unlock_irqrestore(&ahci_lock, flags);
-
-    return (uint64_t)(rc < 0 ? -rc : 0);
-}
-
 // sys_block_async(lba, buf, count, dir) — syscall 30
 // Async block I/O: returns cookie (>0) on success, positive errno on error.
 // Completion delivered via RECV_NOTIFY with cookie+result+lba+count in data.
@@ -1617,11 +1593,6 @@ uint64_t sys_debug_print(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u
     kbuf[len] = '\0';
     serial_printf("DBG:%s", kbuf);
     return 0;
-}
-
-// sys_open_dev(dev_type) — syscall 31 (DEPRECATED: use sys_open("/dev/<name>") instead)
-uint64_t sys_open_dev(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
-    return (uint64_t)(-(uint64_t)ENOSYS);
 }
 
 // sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 32
@@ -1656,12 +1627,6 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
     return (uint64_t)fd;
 }
 
-
-// sys_dev_req(fd, request, reply) — syscall 56 (DEPRECATED: use sys_ioctl instead)
-uint64_t sys_dev_req(uint64_t arg1, uint64_t arg2, uint64_t arg3,
-                     uint64_t _u1, uint64_t _u2, uint64_t _u3) {
-    return (uint64_t)(-(uint64_t)ENOSYS);
-}
 
 // sys_ioctl(fd, cmd, arg) — syscall 58 (device ioctl)
 uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
@@ -1861,7 +1826,10 @@ uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
         struct inode *ip = proc->fd_table[fd].inode;
         if (!ip) return (uint64_t)(-(uint64_t)EBADF);
         ks.st_ino = ip->ino;
-        ks.st_mode = S_IFCHR | 0666;
+        if (ip->i_priv && ((struct dev_ops *)ip->i_priv)->device_type == DEV_BLOCK)
+            ks.st_mode = S_IFBLK | 0666;
+        else
+            ks.st_mode = S_IFCHR | 0666;
         break;
     }
     case FD_PIPE:
@@ -2731,12 +2699,6 @@ uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint
     return 0;
 }
 
-// ===================== Device notification =====================
-// sys_load_dev — syscall 17 (DEPRECATED: returns -ENOSYS)
-uint64_t sys_load_dev(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
-    return (uint64_t)(-(uint64_t)ENOSYS);
-}
-
 // sys_notify(pid) — syscall 18 (异步通知：消息入队 + 唤醒)
 // Returns: 0 on success, positive errno on failure
 uint64_t sys_notify(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
@@ -3246,15 +3208,17 @@ uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
     proc_t *proc = current_proc;
     if (proc->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
 
-    // PIPE/SOCKET/DEV do not support seek
+    // PIPE/SOCKET do not support seek
     if (proc->fd_table[fd].type == FD_PIPE ||
-        proc->fd_table[fd].type == FD_SOCKET ||
-        proc->fd_table[fd].type == FD_DEV)
+        proc->fd_table[fd].type == FD_SOCKET)
         return (uint64_t)-ESPIPE;
 
-    // FD_REGULAR/FD_DIR: kernel VFS file seek
+    // FD_REGULAR/FD_DIR/FD_DEV: seek via fd offset
     if (proc->fd_table[fd].type == FD_REGULAR ||
-        proc->fd_table[fd].type == FD_DIR) {
+        proc->fd_table[fd].type == FD_DIR ||
+        proc->fd_table[fd].type == FD_DEV) {
+        if (proc->fd_table[fd].type == FD_DEV && whence == SEEK_END)
+            return (uint64_t)-EINVAL;
         struct inode *ip = proc->fd_table[fd].inode;
         if (!ip) return (uint64_t)-EBADF;
         int64_t new_offset;

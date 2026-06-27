@@ -128,6 +128,6 @@ struct rt_sigframe {
 
 // SYS_SIGRETURN syscall number (from common/syscall.h, but needed by trampoline)
 // The trampoline code is:  mov rax, SYS_SIGRETURN; syscall
-// SYS_SIGRETURN = 48
+// SYS_SIGRETURN = 45
 
 #endif // COMMON_SIGNAL_H

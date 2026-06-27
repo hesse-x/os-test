@@ -203,19 +203,6 @@ void test_dev_vfs_open_nonexistent(void) {
     TEST_ASSERT_EQUAL_INT(ENOENT, errno);
 }
 
-/* 14. sys_open_dev deprecated → returns -ENOSYS */
-void test_dev_vfs_open_dev_deprecated(void) {
-    uint64_t r = sys_open_dev(DEV_SERIAL);
-    int32_t val = (int32_t)(r & 0xFFFFFFFFULL);
-    TEST_ASSERT_TRUE(val < 0);
-}
-
-/* 15. sys_load_dev deprecated → returns -ENOSYS */
-void test_dev_vfs_load_dev_deprecated(void) {
-    int r = sys_load_dev(1, DEV_KBD);
-    TEST_ASSERT_TRUE(r < 0);
-}
-
 /* ===== Phase 4: sys_ioctl + sys_fstat ===== */
 
 /* 16. fstat on /dev/serial → S_ISCHR, st_ino > 0 */
@@ -558,21 +545,7 @@ void test_dev_vfs_fstat_fs(void) {
     }
 }
 
-/* ===== Phase 8: ioctl IPC proxy + sys_dev_req deprecated ===== */
-
-/* 35. sys_dev_req returns -ENOSYS for kernel device (deprecated) */
-void test_dev_vfs_dev_req_deprecated(void) {
-    int fd = open("/dev/serial", O_RDWR);
-    if (fd >= 0) {
-        uint8_t req[56] = {0};
-        uint8_t resp[64] = {0};
-        int r = sys_dev_req(fd, req, resp);
-        TEST_ASSERT_TRUE(r < 0);
-        close(fd);
-    } else {
-        TEST_ASSERT_TRUE(1);
-    }
-}
+/* ===== Phase 8: ioctl IPC proxy ===== */
 
 /* 36. KMS ioctl via sys_ioctl with struct arg (copy_to_user path) */
 void test_dev_vfs_kms_ioctl_struct_arg(void) {
@@ -648,12 +621,10 @@ int main(void) {
     RUN_TEST(test_dev_vfs_serial_close_reopen);
     RUN_TEST(test_dev_vfs_serial_multi_open);
 
-    /* Phase 3: devtmpfs unified + sys_open_dev deprecated */
+    /* Phase 3: devtmpfs unified */
     RUN_TEST(test_dev_vfs_serial_devtmpfs_path);
     RUN_TEST(test_dev_vfs_kms_devtmpfs_path);
     RUN_TEST(test_dev_vfs_open_nonexistent);
-    RUN_TEST(test_dev_vfs_open_dev_deprecated);
-    RUN_TEST(test_dev_vfs_load_dev_deprecated);
 
     /* Phase 4: sys_ioctl + sys_fstat */
     RUN_TEST(test_dev_vfs_fstat_serial);
@@ -684,8 +655,7 @@ int main(void) {
     RUN_TEST(test_dev_vfs_distinct_inodes);
     RUN_TEST(test_dev_vfs_fstat_fs);
 
-    /* Phase 8: ioctl IPC proxy + sys_dev_req deprecated */
-    RUN_TEST(test_dev_vfs_dev_req_deprecated);
+    /* Phase 8: ioctl IPC proxy */
     RUN_TEST(test_dev_vfs_kms_ioctl_struct_arg);
     RUN_TEST(test_dev_vfs_kbd_ioctl_proxy);
     RUN_TEST(test_dev_vfs_kms_flip_ioctl);

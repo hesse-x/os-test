@@ -74,10 +74,7 @@ static inline int sys_munmap(void *addr, size_t size) {
     return (int)__syscall2(SYS_MUNMAP, (int64_t)(uintptr_t)addr, (int64_t)size);
 }
 
-static inline int sys_dev_req(int fd, void *request, void *reply) {
-    return (int)__syscall3(SYS_DEV_REQ, (int64_t)fd,
-        (int64_t)(uintptr_t)request, (int64_t)(uintptr_t)reply);
-}
+// DEPRECATED: sys_dev_req removed — use sys_ioctl instead
 
 static inline int sys_shm_create(size_t size) {
     return (int)__syscall1(SYS_SHM_CREATE, (int64_t)size);
@@ -101,10 +98,6 @@ static inline int64_t sys_read(int fd, void *buf, size_t len) {
 
 static inline int sys_close(int fd) {
     return (int)__syscall1(SYS_CLOSE, (int64_t)fd);
-}
-
-static inline int sys_load_dev(int32_t pid, int dev_type) {
-    return (int)__syscall2(SYS_LOAD_DEV, (int64_t)pid, (int64_t)dev_type);
 }
 
 static inline int sys_notify(int32_t pid) {
@@ -146,11 +139,6 @@ static inline int sys_pci_dev_info(uint8_t bus, uint8_t dev, uint8_t func,
         (int64_t)func, (int64_t)(uintptr_t)out);
 }
 
-static inline int sys_block_io(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
-    return (int)__syscall4(SYS_BLOCK_IO, (int64_t)lba,
-        (int64_t)(uintptr_t)buf, (int64_t)count, (int64_t)dir);
-}
-
 // Async block I/O: returns cookie (>0) on success, -errno on error.
 // Completion delivered via RECV_NOTIFY with cookie+result+lba+count in data.
 static inline int sys_block_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
@@ -158,14 +146,7 @@ static inline int sys_block_async(uint32_t lba, void *buf, uint32_t count, uint8
         (int64_t)(uintptr_t)buf, (int64_t)count, (int64_t)dir);
 }
 
-// sys_open_dev(dev_type) — syscall 32 (open device node)
-// Returns: (fd | target_pid << 32) on success, negative errno on failure
-// Caller: fd = (int32_t)(result & 0xFFFFFFFF), pid = (pid_t)(result >> 32)
-static inline uint64_t sys_open_dev(int dev_type) {
-    return (uint64_t)__syscall1(SYS_OPEN_DEV, (int64_t)dev_type);
-}
-
-// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 33
+// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 29
 // Register an FD_FILE fd in the kernel fd_table.
 // Called by libc open() after getting fs_fd from fs_driver.
 // Returns: fd (>=3) on success, negative errno on failure

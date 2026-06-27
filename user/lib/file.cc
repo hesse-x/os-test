@@ -167,12 +167,6 @@ int fcntl(int fd, int cmd, ...) {
 
 // ===================== FD_DEV helpers =====================
 
-// req_fd — DEPRECATED: use ioctl(fd, cmd, arg) instead.
-// Still provided for backward compatibility with drivers not yet migrated.
-int req_fd(int fd, void *req_ptr, void *resp) {
-    return sys_dev_req(fd, req_ptr, resp);
-}
-
 // notify_fd — notify device driver via fd (uses sys_fdev_pid to find target)
 int notify_fd(int fd) {
     pid_t target_pid = sys_fdev_pid(fd);
