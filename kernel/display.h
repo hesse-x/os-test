@@ -19,6 +19,10 @@ struct pci_device;
 #define VBE_DISPI_INDEX_BPP         0x03
 #define VBE_DISPI_INDEX_ENABLE      0x04
 #define VBE_DISPI_INDEX_BANK        0x05
+#define VBE_DISPI_INDEX_VIRT_WIDTH  0x06
+#define VBE_DISPI_INDEX_VIRT_HEIGHT 0x07
+#define VBE_DISPI_INDEX_X_OFFSET    0x08
+#define VBE_DISPI_INDEX_Y_OFFSET    0x09
 // VBE DISPI MMIO register layout (QEMU bochs-display BAR2):
 // VBE registers start at PCI_VGA_BOCHS_OFFSET = 0x500 within BAR2
 // Each register is 16-bit, at offset 0x500 + index * 2

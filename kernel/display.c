@@ -90,7 +90,9 @@ void display_init(void) {
         serial_printf("display_init: VBE MMIO BAR not found\n");
         halt();
     }
+    serial_printf("fb_vaddr: %p\n", fb_vaddr);
     if (!fb_vaddr) {
+        serial_printf("?????????\n");
         serial_printf("display_init: framebuffer BAR not found\n");
         halt();
     }
@@ -101,6 +103,9 @@ void display_init(void) {
     mmio_write16((uint16_t __iomem *)(mmio + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_XRES)),  800);
     mmio_write16((uint16_t __iomem *)(mmio + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_YRES)),  600);
     mmio_write16((uint16_t __iomem *)(mmio + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_BPP)),   32);
+    mmio_write16((uint16_t __iomem *)(mmio + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_VIRT_WIDTH)),  800);
+    mmio_write16((uint16_t __iomem *)(mmio + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_X_OFFSET)),  0);
+    mmio_write16((uint16_t __iomem *)(mmio + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_Y_OFFSET)),  0);
     mmio_write16((uint16_t __iomem *)(mmio + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_ENABLE)),
                  VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
 
