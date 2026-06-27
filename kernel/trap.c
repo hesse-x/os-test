@@ -218,7 +218,7 @@ void trap_dispatch(trapframe_t *tf) {
   if (tf->trapno == 14) {
     uint64_t cr2;
     __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
-    serial_printf("PAGE FAULT: fault addr=0x%016X", cr2);
+    serial_printf("PAGE FAULT: fault addr=0x%016lX", cr2);
   } else if (tf->trapno == 6) {
     serial_printf("UNDEFINED OPCODE");
   } else if (tf->trapno == 13) {
@@ -232,23 +232,23 @@ void trap_dispatch(trapframe_t *tf) {
     }
     #endif
   } else {
-    serial_printf("EXCEPTION: vector 0x%016X", tf->trapno);
+    serial_printf("EXCEPTION: vector 0x%016lX", tf->trapno);
   }
-  serial_printf("\n  rip=0x%016X cs=0x%016X rfl=0x%016X rsp=0x%016X ss=0x%016X",
+  serial_printf("\n  rip=0x%016lX cs=0x%016lX rfl=0x%016lX rsp=0x%016lX ss=0x%016lX",
                 tf->rip, tf->cs, tf->rflags, tf->rsp, tf->ss);
-  serial_printf("\n  rax=0x%016X rbx=0x%016X rcx=0x%016X rdx=0x%016X",
+  serial_printf("\n  rax=0x%016lX rbx=0x%016lX rcx=0x%016lX rdx=0x%016lX",
                 tf->rax, tf->rbx, tf->rcx, tf->rdx);
-  serial_printf("\n  rsi=0x%016X rdi=0x%016X rbp=0x%016X r08=0x%016X",
+  serial_printf("\n  rsi=0x%016lX rdi=0x%016lX rbp=0x%016lX r08=0x%016lX",
                 tf->rsi, tf->rdi, tf->rbp, tf->r8);
-  serial_printf("\n  r09=0x%016X r10=0x%016X r11=0x%016X r12=0x%016X",
+  serial_printf("\n  r09=0x%016lX r10=0x%016lX r11=0x%016lX r12=0x%016lX",
                 tf->r9, tf->r10, tf->r11, tf->r12);
-  serial_printf("\n  r13=0x%016X r14=0x%016X r15=0x%016X err=0x%016X",
+  serial_printf("\n  r13=0x%016lX r14=0x%016lX r15=0x%016lX err=0x%016lX",
                 tf->r13, tf->r14, tf->r15, tf->err_code);
   uint64_t cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(cr3));
-  serial_printf("\n  cr3=0x%016X", cr3);
+  serial_printf("\n  cr3=0x%016lX", cr3);
   if (current_proc) {
-    serial_printf(" pid=%d proc_cr3=0x%016X",
+    serial_printf(" pid=%d proc_cr3=0x%016lX",
                   current_proc->pid, current_proc->cr3);
   }
   serial_printf("\n");
@@ -260,7 +260,7 @@ void trap_dispatch(trapframe_t *tf) {
   int frame_idx = 0;
 
   // #0: crash point — tf->rip（不在 RBP 链中，必须单独打印）
-  serial_printf("  #0 0x%016X  ← crash point\n", tf->rip);
+  serial_printf("  #0 0x%016lX  ← crash point\n", tf->rip);
   frame_idx = 1;
 
   if (tf->cs == 0x2B) {
@@ -274,7 +274,7 @@ void trap_dispatch(trapframe_t *tf) {
     serial_printf("  [user]\n");
     uint64_t *rbp = (uint64_t *)tf->rbp;
     for (int i = 0; i < 64 && rbp && (uint64_t)rbp >= 0x1000 && (uint64_t)rbp < 0xFFFFFFFF80000000ULL; i++) {
-      serial_printf("  #%d 0x%016X\n", frame_idx, (uint64_t)rbp[1]);
+      serial_printf("  #%d 0x%016lX\n", frame_idx, (uint64_t)rbp[1]);
       frame_idx++;
       rbp = (uint64_t *)rbp[0];
       if (!rbp) break;
@@ -283,7 +283,7 @@ void trap_dispatch(trapframe_t *tf) {
     // 内核态异常：从 trapframe.rbp 走 RBP 链，可一路到 kernel_main/_start
     uint64_t *rbp = (uint64_t *)tf->rbp;
     for (int i = 0; i < 64 && rbp && (uint64_t)rbp >= 0xFFFFFFFF80000000ULL; i++) {
-      serial_printf("  #%d 0x%016X\n", frame_idx, (uint64_t)rbp[1]);
+      serial_printf("  #%d 0x%016lX\n", frame_idx, (uint64_t)rbp[1]);
       frame_idx++;
       rbp = (uint64_t *)rbp[0];
       if (!rbp) break;
