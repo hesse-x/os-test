@@ -22,7 +22,17 @@
 // ===== ioctl command definitions (_IOC-encoded) =====
 
 // Terminal (Linux-compatible, already encoded)
-#define TCGETS  0x5401
+#define TCGETS   0x5401
+#define TCSETS   0x5402
+#define TCSETSW  0x5403
+#define TCSETSF  0x5404
+#define TIOCSCTTY  0x540E
+#define TIOCGPGRP  0x540F
+#define TIOCSPGRP  0x5410
+#define TIOCGPTN   0x5406
+#define TIOCSPTLCK 0x5407
+#define TIOCGWINSZ 0x5413
+#define TIOCSWINSZ 0x5414
 
 // KMS display
 #define KMS_IOCTL_CREATE_BUF  _IOWR('K', 1, char[32])   // unified struct = 32B

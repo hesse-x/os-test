@@ -72,6 +72,7 @@ typedef struct mmap_region {
 #define FD_SOCKET  5
 #define FD_SHM     6
 #define FD_FILE    7
+#define FD_TTY     8
 
 #include "common/fcntl.h"
 
@@ -86,6 +87,7 @@ typedef struct pipe {
 
 struct unix_sock;  // forward declaration from kernel/socket.h
 struct inode;      // forward declaration from kernel/inode.h
+struct pty;        // forward declaration from kernel/pty.h
 
 typedef struct file {
     int type;            // FD_NONE / FD_PIPE / FD_REGULAR / FD_DEV / FD_DIR / FD_SOCKET / FD_SHM / FD_FILE
@@ -104,6 +106,7 @@ typedef struct file {
             int      ref_count;
         } file_data;
         struct unix_sock *sock;  // if type == FD_SOCKET
+        struct pty *pty;         // if type == FD_TTY
     };
 } file_t;
 
@@ -164,6 +167,11 @@ typedef struct proc_t {
 
     // === force_sig 临时数据 ===
     siginfo_t sig_force_info;  // force_sig temp siginfo (kernel-stack scope)
+
+    // === Session / controlling terminal (reserved for job control) ===
+    pid_t    sid;              // session ID (0 = no session)
+    pid_t    pgid;             // process group ID (0 = none)
+    struct pty *ctty;          // controlling terminal (NULL = none)
 } proc_t;
 
 #define MAX_PROC 64

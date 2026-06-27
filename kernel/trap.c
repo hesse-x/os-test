@@ -16,6 +16,7 @@
 #include "common/ioctl.h"
 #include "kernel/display.h"
 #include "kernel/devtmpfs.h"
+#include "kernel/pty.h"
 #include "kernel/pci.h"
 #include "common/dev.h"
 #include "kernel/socket.h"
@@ -1136,6 +1137,8 @@ uint64_t sys_spawn(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uin
                        child->fd_table[fd].type == FD_DEV ||
                        child->fd_table[fd].type == FD_DIR) {
                 if (child->fd_table[fd].inode) inode_get(child->fd_table[fd].inode);
+            } else if (child->fd_table[fd].type == FD_TTY) {
+                pty_dup_fd(current_proc, fd, fd);
             }
         }
     }
@@ -1770,6 +1773,11 @@ uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
         }
         return (uint64_t)(long)ioctl_result;
     }
+    case FD_TTY: {
+        struct pty *pty = proc->fd_table[fd].pty;
+        if (!pty) return (uint64_t)(-(uint64_t)EBADF);
+        return (uint64_t)pty_ioctl(pty, cmd, arg);
+    }
     case FD_SOCKET:
     case FD_PIPE:
     case FD_REGULAR:
@@ -1824,6 +1832,9 @@ uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
     }
     case FD_PIPE:
         ks.st_mode = S_IFIFO | 0644;
+        break;
+    case FD_TTY:
+        ks.st_mode = S_IFCHR | 0666;
         break;
     case FD_SHM:
         ks.st_mode = S_IFREG | 0666;
@@ -2406,6 +2417,26 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         return (uint64_t)-ENOSYS;
     }
 
+    // ===== FD_TTY: PTY write =====
+    if (proc->fd_table[fd].type == FD_TTY) {
+        if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+            return (uint64_t)-EINVAL;
+        if (!buf) return (uint64_t)-EFAULT;
+        uint64_t ptr_start = (__force uint64_t)buf;
+        uint64_t ptr_end = ptr_start + len;
+        if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
+            return (uint64_t)-EFAULT;
+        struct pty *pty = proc->fd_table[fd].pty;
+        if (!pty) return (uint64_t)-EBADF;
+        int is_master = pty_fd_is_master(proc, fd);
+        int64_t ret;
+        if (is_master)
+            ret = pty_master_write(pty, proc, (const void __force *)buf, len);
+        else
+            ret = pty_slave_write(pty, proc, (const void __force *)buf, len);
+        return (uint64_t)ret;
+    }
+
     // ===== FD_PIPE: existing path =====
     if (!(proc->fd_table[fd].flags & (O_WRONLY | O_RDWR))) return (uint64_t)-EINVAL;
 
@@ -2592,6 +2623,26 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         return (uint64_t)-ENOSYS;
     }
 
+    // ===== FD_TTY: PTY read =====
+    if (proc->fd_table[fd].type == FD_TTY) {
+        if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
+            return (uint64_t)-EINVAL;
+        if (!buf) return (uint64_t)-EFAULT;
+        uint64_t ptr_start = (__force uint64_t)buf;
+        uint64_t ptr_end = ptr_start + len;
+        if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
+            return (uint64_t)-EFAULT;
+        struct pty *pty = proc->fd_table[fd].pty;
+        if (!pty) return (uint64_t)-EBADF;
+        int is_master = pty_fd_is_master(proc, fd);
+        int64_t ret;
+        if (is_master)
+            ret = pty_master_read(pty, proc, (void __force *)buf, len);
+        else
+            ret = pty_slave_read(pty, proc, (void __force *)buf, len);
+        return (uint64_t)ret;
+    }
+
     // ===== FD_PIPE: existing path =====
     // O_RDONLY=0, so check: must not be O_WRONLY only
     if ((proc->fd_table[fd].flags & O_WRONLY) && !(proc->fd_table[fd].flags & O_RDWR))
@@ -2700,6 +2751,8 @@ uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint
                 ops->close(current_proc, fd);
         }
         if (ip) inode_put(ip);
+    } else if (current_proc->fd_table[fd].type == FD_TTY) {
+        pty_close_fd(current_proc, fd);
     }
     // FD_DEV: no dynamic resources to free
 
@@ -3028,8 +3081,9 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
                     ops->close(current_proc, new_fd);
             }
             if (ip) inode_put(ip);
+        } else if (proc->fd_table[new_fd].type == FD_TTY) {
+            pty_close_fd(proc, new_fd);
         }
-        // FD_DEV: no dynamic resources to free
         __memset(&proc->fd_table[new_fd], 0, sizeof(struct file));
         proc->fd_table[new_fd].type = FD_NONE;
     }
@@ -3062,6 +3116,8 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
                 ops->open(proc, new_fd);
         }
         if (ip) inode_get(ip);
+    } else if (proc->fd_table[new_fd].type == FD_TTY) {
+        pty_dup_fd(proc, old_fd, new_fd);
     }
     // FD_DEV: target_pid copied by struct assignment
 

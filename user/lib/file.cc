@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <termios.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -304,6 +305,48 @@ int isatty(int fd) {
     // Use ioctl TCGETS to detect tty devices
     long rc = sys_ioctl(fd, TCGETS, 0);
     return (rc == 0) ? 1 : 0;
+}
+
+// ===================== tcgetattr / tcsetattr =====================
+int tcgetattr(int fd, struct termios *termios_p) {
+    long rc = sys_ioctl(fd, TCGETS, (uint64_t)termios_p);
+    if (rc < 0) { errno = (int)(-rc); return -1; }
+    return 0;
+}
+
+int tcsetattr(int fd, int optional_actions, const struct termios *termios_p) {
+    uint32_t cmd;
+    switch (optional_actions) {
+    case TCSANOW:   cmd = TCSETS;  break;
+    case TCSADRAIN: cmd = TCSETSW; break;
+    case TCSAFLUSH: cmd = TCSETSF; break;
+    default: errno = EINVAL; return -1;
+    }
+    long rc = sys_ioctl(fd, cmd, (uint64_t)termios_p);
+    if (rc < 0) { errno = (int)(-rc); return -1; }
+    return 0;
+}
+
+// ===================== ttyname =====================
+char *ttyname(int fd) {
+    if (!isatty(fd)) return NULL;
+    static char name[32];
+    int index = -1;
+    long rc = sys_ioctl(fd, TIOCGPTN, (uint64_t)&index);
+    if (rc < 0 || index < 0) return NULL;
+    // Build "/dev/ptsN"
+    const char *prefix = "/dev/pts";
+    int pos = 0;
+    for (int i = 0; prefix[i]; i++) name[pos++] = prefix[i];
+    if (index == 0) {
+        name[pos++] = '0';
+    } else {
+        char tmp[8]; int tpos = 0; int n = index;
+        while (n > 0) { tmp[tpos++] = '0' + (n % 10); n /= 10; }
+        for (int i = tpos - 1; i >= 0; i--) name[pos++] = tmp[i];
+    }
+    name[pos] = '\0';
+    return name;
 }
 
 // ===================== ioctl =====================

@@ -171,3 +171,26 @@ pid_t isr_lookup_driver(uint32_t dev_type) {
     if (dev_type >= DEV_TYPE_MAX) return 0;
     return isr_driver_pid[dev_type];
 }
+
+void devtmpfs_remove(const char *name) {
+    spin_lock(&devtmpfs_lock);
+    struct dev_entry **pp = &dev_list;
+    while (*pp) {
+        struct dev_entry *e = *pp;
+        int i;
+        for (i = 0; name[i] && e->name[i]; i++) {
+            if (name[i] != e->name[i]) break;
+        }
+        if (name[i] == '\0' && e->name[i] == '\0') {
+            *pp = e->next;
+            if (e->ip) inode_put(e->ip);
+            e->ip = NULL;
+            e->name[0] = '\0';
+            dev_count--;
+            spin_unlock(&devtmpfs_lock);
+            return;
+        }
+        pp = &e->next;
+    }
+    spin_unlock(&devtmpfs_lock);
+}

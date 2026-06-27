@@ -42,6 +42,7 @@ int access(const char *path, int mode);
 int unlink(const char *path);
 int rmdir(const char *path);
 int isatty(int fd);
+char *ttyname(int fd);
 int mkdir(const char *path, mode_t mode);
 
 #ifdef __cplusplus

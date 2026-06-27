@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "kernel/proc.h"
+#include "kernel/pty.h"
 #include "kernel/inode.h"
 #include "kernel/devtmpfs.h"
 #include "kernel/serial.h"
@@ -112,6 +113,10 @@ void proc_init() {
         procs[i].sig.blocked = 0;
         __memset(&procs[i].sig_force_info, 0, sizeof(siginfo_t));
         __memset(procs[i].sig.action, 0, sizeof(procs[i].sig.action));
+        // Session / controlling terminal
+        procs[i].sid = 0;
+        procs[i].pgid = 0;
+        procs[i].ctty = NULL;
     }
     cpu_locals[0]._cur_proc = NULL;
     cpu_locals[0].run_count = 0;
@@ -215,6 +220,10 @@ proc_t *create_idle_process(int cpu_id) {
     proc->sig.blocked = 0;
     __memset(&proc->sig_force_info, 0, sizeof(siginfo_t));
     __memset(proc->sig.action, 0, sizeof(proc->sig.action));
+    // Session / controlling terminal
+    proc->sid = 0;
+    proc->pgid = 0;
+    proc->ctty = NULL;
     for (int j = 0; j < MAX_FD; j++) {
         __memset(&proc->fd_table[j], 0, sizeof(file_t));
         proc->fd_table[j].type = FD_NONE;
@@ -368,6 +377,10 @@ proc_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->sig.blocked = 0;
     __memset(&proc->sig_force_info, 0, sizeof(siginfo_t));
     __memset(proc->sig.action, 0, sizeof(proc->sig.action));
+    // Session / controlling terminal
+    proc->sid = 0;
+    proc->pgid = 0;
+    proc->ctty = NULL;
     for (int j = 0; j < MAX_FD; j++) {
         __memset(&proc->fd_table[j], 0, sizeof(file_t));
         proc->fd_table[j].type = FD_NONE;
@@ -657,6 +670,8 @@ void proc_reap(proc_t *proc) {
                     ops->close(proc, fd);
             }
             if (ip) inode_put(ip);
+        } else if (proc->fd_table[fd].type == FD_TTY) {
+            pty_close_fd(proc, fd);
         }
         // FD_DEV and FD_NONE: no dynamic resources to free
         // (FD_SHM already handled in step 5 above)
@@ -777,5 +792,9 @@ void proc_reap(proc_t *proc) {
     proc->sig.pending = 0;
     proc->sig.blocked = 0;
     __memset(&proc->sig_force_info, 0, sizeof(siginfo_t));
+    // Session / controlling terminal
+    proc->sid = 0;
+    proc->pgid = 0;
+    proc->ctty = NULL;
     spin_unlock(&procs_lock);
 }

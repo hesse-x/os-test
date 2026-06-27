@@ -11,5 +11,7 @@
 #define DEV_FS        4
 #define DEV_TERMINAL  5
 #define DEV_SERIAL    6
+#define DEV_PTMX      7
+#define DEV_PTS_SLAVE 8
 
 #endif // COMMON_DEV_H

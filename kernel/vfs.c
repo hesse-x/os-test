@@ -5,6 +5,7 @@
 #include "kernel/fat32.h"
 #include "kernel/devtmpfs.h"
 #include "kernel/display.h"
+#include "kernel/pty.h"
 #include "kernel/proc.h"
 #include "kernel/serial.h"
 #include "kernel/sparse.h"
@@ -23,6 +24,7 @@ void vfs_init(void) {
     devtmpfs_init();
     display_dev_register();
     serial_dev_register();
+    pty_init();
 
     /* Try FAT32 on each AHCI port (disk.img may be on a different port
        than boot.img, just like ELF loading in kernel_main). */

@@ -548,6 +548,160 @@ Wayland compositor 运行 terminal emulator → open("/dev/ptmx") → 拿 master
 - PTY 解决"进程输出如何到达 terminal emulator 的输入"
 - Wayland 解决"terminal emulator 如何把渲染结果送到屏幕"
 
+## fork+exec 迁移方案
+
+前置条件：fork+exec 系统调用已实现。本方案基于此设计，与 Linux 对齐。
+
+### 设计决策
+
+| 决策 | 结论 | 理由 |
+|------|------|------|
+| PTY master 谁开 | terminal: `open("/dev/ptmx")` | Linux 标准：terminal emulator 持有 master |
+| 子进程怎么拿 slave | fork+exec: 子进程 `open("/dev/pts0")` + dup2 0/1/2 + exec | Linux 标准：fork 后子进程自行 open slave |
+| master fd 管理 | 存变量 `master_fd`，不 dup2 到 0/1 | Linux 做法：master 是普通 fd，和 terminal 自身 stdin/stderr 无关 |
+| terminal fd 2 | 保持 serial（继承自 init） | Linux 做法：terminal emulator 的 stderr 不走 PTY master，保留 serial debug echo |
+| test_runner 谁启动 | shell fork 子进程 exec，共享 PTY slave | Linux 做法：init 不分配 PTY，需要终端 I/O 的进程必须是 terminal 会话的后代 |
+| TEST 模式传递 | 编译宏 `#ifdef TEST`，shell 启动时自动 fork test_runner | 简单直接，shell 和 init 共享编译开关 |
+| init fd 0/1/2 | 保持 /dev/serial | init/驱动是内核服务进程，不需要 PTY |
+| spawn 去留 | 遗留机制，用户态最终统一 fork+exec | Linux 没有 spawn 系统调用，所有用户进程创建走 fork+exec |
+| terminal 主循环 | 保持轮询模型：O_NONBLOCK read master_fd + 轮询 kbd SHM + recv sleep | 当前模型已 work，未来合成器接管 KMS/kbd 后 terminal 不再直接交互，无需复杂 poll 抽象 |
+
+### 进程树与 fd 分配
+
+```
+init (PID 1)
+  fd 0/1/2 = /dev/serial
+  ├── fork → kbd_driver
+  │     fd 0/1/2 = /dev/serial（继承自 init）
+  ├── fork → terminal
+  │     fd 0/1/2 = /dev/serial（继承自 init）
+  │     master_fd = open("/dev/ptmx")  ← 存变量，不 dup2
+  │     ├── fork → shell
+  │     │     fd 0/1/2 = /dev/pts0（子进程 open slave + dup2）
+  │     │     #ifdef TEST: fork → test_runner
+  │     │           fd 0/1/2 = /dev/pts0（继承自 shell）
+  │     │     fork → user_program (ls, cat, ...)
+  │     │           fd 0/1/2 = /dev/pts0（继承自 shell）
+  └── (no longer spawns test_runner)
+```
+
+### terminal 流程（fork+exec 版）
+
+```c
+int master_fd = open("/dev/ptmx", O_RDWR);   // 创建 PTY 对 + /dev/pts0
+
+pid_t shell_pid = fork();
+if (shell_pid == 0) {
+    // 子进程：打开 slave，设置 fd 0/1/2，exec shell
+    int slave_fd = open("/dev/pts0", O_RDWR);
+    dup2(slave_fd, 0);
+    dup2(slave_fd, 1);
+    dup2(slave_fd, 2);
+    close(slave_fd);       // 原始 fd 已 dup2，关闭
+    close(master_fd);      // 子进程不需要 master
+    exec("/usr/bin/shell");
+}
+
+// 父进程：terminal 持有 master_fd，不持有 slave fd
+// fd 0/1/2 保持 serial（继承自 init）
+
+// 主循环
+while (1) {
+    int did_work = 0;
+
+    // 键盘输入 → master write（ldisc 处理）
+    struct termios t;
+    ioctl(master_fd, TCGETS, &t);
+    while (kbd->head != kbd->tail) {
+        char ch = (char)kbd->msgs[kbd->tail].ch;
+        kbd->tail = (kbd->tail + 1) % 8;
+        // ldisc: Ctrl-C → sys_kill, canonical → 行编辑, raw → 立即写
+        if ((t.c_lflag & ISIG) && ch == t.c_cc[VINTR]) {
+            sys_kill(shell_pid, SIGINT);
+        } else if (t.c_lflag & ICANON) {
+            linebuf_push(ch);
+            if (ch == '\n' || ch == t.c_cc[VEOF]) {
+                write(master_fd, linebuf, linebuf_len);
+                linebuf_reset();
+            }
+        } else {
+            write(master_fd, &ch, 1);
+        }
+        did_work = 1;
+    }
+
+    // shell 输出 ← master read → VT100 渲染 + serial echo
+    char buf[256];
+    int n = read(master_fd, buf, sizeof(buf));
+    if (n > 0) {
+        write(2, buf, n);           // serial echo (fd 2 = serial)
+        for (int i = 0; i < n; i++)
+            vt100_feed(buf[i]);
+        did_work = 1;
+    } else if (n == 0) {
+        // shell 退出 → 重新 fork
+        // TODO: 重新 fork shell
+    }
+
+    flush_dirty_cells();
+
+    if (!did_work) {
+        shm_hdr->consumer_sleeping = 1;
+        if (kbd->head != kbd->tail) {
+            shm_hdr->consumer_sleeping = 0;
+            continue;
+        }
+        struct recv_msg m;
+        recv(&m, NULL, 0, 1);
+        shm_hdr->consumer_sleeping = 0;
+    }
+}
+```
+
+### shell TEST 模式
+
+```c
+// shell.cc main()
+#ifdef TEST
+{
+    pid_t test_pid = fork();
+    if (test_pid == 0) {
+        exec("/test/test_runner.elf");
+    }
+    // test_runner 继承 shell 的 fd 0/1/2 = PTY slave
+    // 输出自动走 PTY slave → master → terminal → 屏幕
+    int status;
+    waitpid(test_pid, &status, 0);
+}
+#endif
+
+// 正常 shell 交互循环...
+```
+
+### init.c 变更
+
+```c
+// 删除 #ifdef TEST spawn test_runner 逻辑
+// test_runner 改由 shell 启动
+
+// 未来 spawn → fork+exec 迁移：
+// spawn_service("/driver/kbd.dev")  →  fork + exec("/driver/kbd.dev")
+// spawn_service("/usr/bin/terminal") →  fork + exec("/usr/bin/terminal")
+```
+
+### 改动文件清单
+
+| 文件 | 变更 |
+|------|------|
+| `driver/terminal.cc` | 删除 pipe 逻辑，改为 `open("/dev/ptmx")` + fork+exec shell；主循环 `read(master_fd)` / `write(master_fd)` 替代 `read(0)` / `write(1)`；添加 ldisc 逻辑 |
+| `shell/shell.cc` | 添加 `#ifdef TEST` fork+exec test_runner；spawn 用户程序改 fork+exec |
+| `init/init.c` | 删除 `#ifdef TEST` spawn test_runner 逻辑；spawn_service 改 fork+exec（后续 spawn 迁移） |
+| `user/test/test_runner.c` | spawn_elf 改 fork+exec（后续 spawn 迁移） |
+
+### 与合成器的关系
+
+未来合成器（compositor）接管 KMS/kbd 后，terminal/shell 不再直接与硬件交互。当前 terminal 中的 KMS SHM、kbd SHM 代码都是过渡性质，设计时无需为其做复杂抽象，保持简单即可。PTY 机制本身与合成器解耦 — compositor 下的 terminal emulator 仍然 `open("/dev/ptmx")` 持有 master，只是渲染从直接 KMS flip 变为向 compositor 提交 buffer。
+
 ## 未来扩展
 
 | 项目 | 说明 | 优先级 |
