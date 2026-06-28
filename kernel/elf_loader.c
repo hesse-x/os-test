@@ -1,7 +1,7 @@
 #include "kernel/elf_loader.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/proc.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "arch/x64/paging.h"
 #include "common/macro.h"
 #include <stddef.h>
@@ -97,7 +97,7 @@ elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
             }
 
             if (!map_page(new_pml4, page_addr, src, copy_len)) {
-                serial_printf("elf_load: map_page failed for vaddr=%lx\n", page_addr);
+                printk(LOG_ERROR, "elf_load: map_page failed for vaddr=%lx\n", page_addr);
                 return result;
             }
         }

@@ -1,5 +1,5 @@
 #include "kernel/pty.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "kernel/mem/slab.h"
 #include "kernel/inode.h"
 #include "kernel/proc.h"
@@ -112,7 +112,7 @@ void pty_init(void) {
 
     ptmx_inode = devtmpfs_lookup("ptmx");
 
-    serial_printf("pty_init: /dev/ptmx registered\n");
+    printk(LOG_INFO, "pty_init: /dev/ptmx registered\n");
 }
 
 // ===================== pty_alloc / pty_free =====================

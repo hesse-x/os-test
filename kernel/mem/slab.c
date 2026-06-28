@@ -3,7 +3,7 @@
 #include "kernel/mem/kasan.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "common/macro.h"
 
 // 全局 kmalloc cache 数组
@@ -66,10 +66,10 @@ void slab_init() {
     for (int i = 0; i < NUM_KMALLOC_CLASSES; i++) {
         kmalloc_caches[i].obj_size = class_sizes[i];
         kmalloc_caches[i].redzone_size = 0;
-        kmalloc_caches[i].lock.locked = 0;
+        kmalloc_caches[i].lock = SPINLOCK_INIT;
         kmalloc_caches[i].partial = NULL;
     }
-    serial_printf("slab_init: ok\n");
+    printk(LOG_INFO, "slab_init: ok\n");
 }
 
 // ===================== kmalloc =====================
@@ -160,14 +160,14 @@ void kfree(const void *ptr) {
     }
 
     if (page->status != PAGE_SLAB) {
-        serial_printf("kfree: bad page status ptr=%p phys=%lx page=%p status=%d\n",
+        printk(LOG_ERROR, "kfree: bad page status ptr=%p phys=%lx page=%p status=%d\n",
                       ptr, phys, page, page->status);
-        serial_printf("  backtrace:\n");
+        printk(LOG_ERROR, "  backtrace:\n");
         uint64_t *rbp;
         __asm__ volatile("movq %%rbp, %0" : "=r"(rbp));
         for (int depth = 0; depth < 16 && (uint64_t)rbp > 0xFFFFFFFF80000000ULL; depth++) {
             uint64_t ret_addr = rbp[1];
-            serial_printf("    0x%016X\n", ret_addr);
+            printk(LOG_ERROR, "    0x%016X\n", ret_addr);
             rbp = (uint64_t *)rbp[0];
             if (!rbp) break;
         }

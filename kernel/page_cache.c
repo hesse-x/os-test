@@ -2,7 +2,7 @@
 #include "kernel/blk_dev.h"
 #include "kernel/fat32.h"
 #include "kernel/spinlock.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "kernel/mem/slab.h"
 #include "common/errno.h"
 #include "arch/x64/utils.h"
@@ -84,7 +84,7 @@ void page_cache_init(void) {
         cp->dirty = false;
         free_list_push(cp);
     }
-    serial_printf("page_cache_init: %d cache_page structs pre-allocated\n", free_count);
+    printk(LOG_INFO, "page_cache_init: %d cache_page structs pre-allocated\n", free_count);
 }
 
 struct cache_page *page_cache_lookup(struct inode *ip, uint64_t page_index) {
@@ -282,6 +282,7 @@ int page_cache_writeback(struct cache_page *cp) {
 
 void page_cache_release(struct cache_page *cp) {
     if (!cp) return;
+    WARN_ON(cp->pin_count <= 0);
     spin_lock(&page_cache_lock);
     if (cp->pin_count > 0) cp->pin_count--;
     spin_unlock(&page_cache_lock);

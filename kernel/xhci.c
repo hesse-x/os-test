@@ -1,6 +1,6 @@
 #include "kernel/xhci.h"
 #include "kernel/pci.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/trap.h"
 #include "kernel/proc.h"
@@ -929,6 +929,6 @@ static void xhci_init_keyboard() {
   // Mask PS/2 keyboard IRQ (GSI 1) — no longer needed
   ioapic_set_irq(1, 33, bsp_apic_id, true, false, false);
 
-  serial_printf("xhci: USB keyboard ready\n");
+  printk(LOG_INFO, "xhci: USB keyboard ready\n");
   xhci_poll_initialized = 1;
 }

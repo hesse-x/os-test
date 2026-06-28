@@ -1,7 +1,7 @@
 #include <stdbool.h>
 #include "kernel/ahci.h"
 #include "kernel/pci.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/proc.h"
 #include "kernel/trap.h"
@@ -473,7 +473,7 @@ static int ahci_comreset_port(int port) {
     if (det == 3) break;
     __asm__ volatile("pause");
   }
-  serial_printf("ahci: comreset port %d DET=%d\n", port, det);
+  printk(LOG_WARN, "ahci: comreset port %d DET=%d\n", port, det);
 
   writel(port_reg(port, PxSERR), 0xFFFFFFFF);
   writel(port_reg(port, PxIS), 0xFFFFFFFF);
@@ -488,9 +488,9 @@ int ahci_set_active_port(int port) {
   uint32_t ssts = readl(port_reg(port, PxSSTS));
   uint32_t det = ssts & 0xF;
   if (det != 3) {
-    serial_printf("ahci: port %d DET=%d trying COMRESET...\n", port, det);
+    printk(LOG_WARN, "ahci: port %d DET=%d trying COMRESET...\n", port, det);
     if (ahci_comreset_port(port) != 0) {
-      serial_printf("ahci: port %d no device after COMRESET\n", port);
+      printk(LOG_WARN, "ahci: port %d no device after COMRESET\n", port);
       return -EIO;
     }
   }
@@ -498,7 +498,7 @@ int ahci_set_active_port(int port) {
   if (active_port >= 0 && active_port != port) {
     port_disable_interrupts(active_port);
   }
-  serial_printf("ahci: switching to port %d\n", port);
+  printk(LOG_INFO, "ahci: switching to port %d\n", port);
   port_init(port);
   active_port = port;
   // Re-enable PxIE on the new active port (port_init leaves PxIE=0)
@@ -518,7 +518,7 @@ void ahci_init() {
     halt();
   }
 
-  serial_printf("ahci: found at bus %x dev %x\n", dev->bus, dev->dev);
+  printk(LOG_INFO, "ahci: found at bus %x dev %x\n", dev->bus, dev->dev);
 
   // Enable device: map BAR MMIO + Bus Master
   pci_enable_device(dev);
@@ -546,12 +546,12 @@ void ahci_init() {
   int disk_count = 0;
   active_port = -1;
   uint32_t pi = readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_PI));
-  serial_printf("ahci: PI=%x\n", pi);
+  printk(LOG_INFO, "ahci: PI=%x\n", pi);
   for (int i = 0; i < 32; i++) {
     if (!(pi & (1 << i))) continue;
     uint32_t ssts = readl(port_reg(i, PxSSTS));
     uint32_t det = ssts & 0xF;
-    serial_printf("ahci: port %d SSTS=%x DET=%d", i, ssts, det);
+    printk(LOG_INFO, "ahci: port %d SSTS=%x DET=%d", i, ssts, det);
     if (det != 3) { ahci_puts(" (no device)\n"); continue; }
 
     port_init(i);
@@ -574,7 +574,7 @@ void ahci_init() {
       if (i == active_port) continue;  // already scanned
       uint32_t ssts = readl(port_reg(i, PxSSTS));
       uint32_t det = ssts & 0xF;
-      serial_printf("ahci: re-scan port %d DET=%d", i, det);
+      printk(LOG_WARN, "ahci: re-scan port %d DET=%d", i, det);
       if (det != 3) {
         // Try COMRESET to force device detection
         if (ahci_comreset_port(i) != 0) {
@@ -586,17 +586,17 @@ void ahci_init() {
       }
       port_init(i);
       if (ahci_identify_device(i, idbuf) == 0) {
-        serial_printf("ahci: port %d: SATA disk (fallback)\n", i);
+        printk(LOG_INFO, "ahci: port %d: SATA disk (fallback)\n", i);
         if (active_port < 0) active_port = i;
         disk_count++;
       } else {
-        serial_printf("ahci: port %d: IDENTIFY failed\n", i);
+        printk(LOG_ERROR, "ahci: port %d: IDENTIFY failed\n", i);
         port_stop(i);
       }
     }
   }
 
-  serial_printf("ahci: disks=%d active=%d\n", disk_count, active_port);
+  printk(LOG_INFO, "ahci: disks=%d active=%d\n", disk_count, active_port);
 
   if (active_port < 0) {
     ahci_puts("ahci: no SATA disk found\n");
@@ -630,12 +630,12 @@ void ahci_init() {
     bool low   = iso ? iso->active_low : false;
     ioapic_set_irq(ahci_gsi, ahci_irq_vec, bsp_apic_id, false, level, low);
 
-    serial_printf("ahci: INTx fallback (GSI=%d vec=%d)\n", ahci_gsi, ahci_irq_vec);
+    printk(LOG_WARN, "ahci: INTx fallback (GSI=%d vec=%d)\n", ahci_gsi, ahci_irq_vec);
   } else {
     uint8_t msi_vec = (uint8_t)dev->msix_vector_base;
     register_irq(msi_vec, ahci_irq_handler);
 
-    serial_printf("ahci: MSI enabled (vec=%d)\n", msi_vec);
+    printk(LOG_INFO, "ahci: MSI enabled (vec=%d)\n", msi_vec);
   }
 
   // Clear ALL port interrupt status before enabling GHC.IE.
@@ -705,7 +705,7 @@ int ahci_read_lba(uint32_t lba, uint32_t count, void *buf) {
     }
     if (timed_out) {
       ahci_puts("ahci_read_lba: TIMEOUT (PxCI stuck)\n");
-      serial_printf("  PxTFD=0x%x PxCMD=0x%x PxIS=0x%x\n",
+      printk(LOG_ERROR, "  PxTFD=0x%x PxCMD=0x%x PxIS=0x%x\n",
           readl(port_reg(active_port, PxTFD)),
           readl(port_reg(active_port, PxCMD)),
           readl(port_reg(active_port, PxIS)));
@@ -714,7 +714,7 @@ int ahci_read_lba(uint32_t lba, uint32_t count, void *buf) {
 
     uint32_t pxis = readl(port_reg(active_port, PxIS));
     if (pxis & (1 << 30)) {
-      serial_printf("ahci: task file error port=%d PxIS=%x PxTFD=%x\n",
+      printk(LOG_ERROR, "ahci: task file error port=%d PxIS=%x PxTFD=%x\n",
           active_port, pxis, readl(port_reg(active_port, PxTFD)));
       return -EIO;
     }
@@ -781,7 +781,7 @@ int ahci_write_lba(uint32_t lba, uint32_t count, const void *buf) {
 
     uint32_t pxis = readl(port_reg(active_port, PxIS));
     if (pxis & (1 << 30)) {
-      serial_printf("ahci: write task file error port=%d PxIS=%x\n", active_port, pxis);
+      printk(LOG_ERROR, "ahci: write task file error port=%d PxIS=%x\n", active_port, pxis);
       return -EIO;
     }
 

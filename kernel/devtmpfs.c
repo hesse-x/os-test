@@ -1,7 +1,7 @@
 #include "kernel/devtmpfs.h"
 #include "kernel/inode.h"
 #include "kernel/proc.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "kernel/spinlock.h"
 #include "kernel/mem/slab.h"
 #include "common/errno.h"
@@ -38,7 +38,7 @@ void devtmpfs_init(void) {
         dev_entries[i].next = NULL;
     }
     spin_unlock(&devtmpfs_lock);
-    serial_printf("devtmpfs_init: done\n");
+    printk(LOG_INFO, "devtmpfs_init: done\n");
 }
 
 struct inode *devtmpfs_lookup(const char *name) {
@@ -100,7 +100,7 @@ int devtmpfs_create(const char *name, int dev_type, struct dev_ops *ops) {
         isr_driver_pid[ops->device_type] = ops->driver_pid;
 
     spin_unlock(&devtmpfs_lock);
-    serial_printf("devtmpfs: created /dev/%s (type=%d)\n", name, dev_type);
+    printk(LOG_INFO, "devtmpfs: created /dev/%s (type=%d)\n", name, dev_type);
     return 0;
 }
 

@@ -9,7 +9,7 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/apic.h"
 #include "kernel/acpi.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "kernel/mem/slab.h"
 #include "kernel/mem/kasan.h"
 #include "kernel/mem/alloc.h"
@@ -221,106 +221,71 @@ void trap_dispatch(trapframe_t *tf) {
   if (tf->trapno == 14) {
     uint64_t cr2;
     __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
-    serial_printf("PAGE FAULT: fault addr=0x%016lX", cr2);
+    printk(LOG_ERROR, "PAGE FAULT: fault addr=0x%016lX", cr2);
   } else if (tf->trapno == 6) {
-    serial_printf("UNDEFINED OPCODE");
+    printk(LOG_ERROR, "UNDEFINED OPCODE");
   } else if (tf->trapno == 13) {
-    serial_printf("GENERAL PROTECTION");
+    printk(LOG_ERROR, "GENERAL PROTECTION");
     #ifdef SANITIZER
     if (kasan_shadow_exists()) {
       uint64_t fault_addr;
       __asm__ volatile("movq %%cr2, %0" : "=r"(fault_addr));
-      serial_printf("\n  KASAN: possible shadow access to non-canonical address");
-      serial_printf("\n  Check if __user pointer was used without copy_from_user/to_user");
+      printk(LOG_WARN, "\n  KASAN: possible shadow access to non-canonical address");
+      printk(LOG_WARN, "\n  Check if __user pointer was used without copy_from_user/to_user");
     }
     #endif
   } else {
-    serial_printf("EXCEPTION: vector 0x%016lX", tf->trapno);
+    printk(LOG_ERROR, "EXCEPTION: vector 0x%016lX", tf->trapno);
   }
-  serial_printf("\n  rip=0x%016lX cs=0x%016lX rfl=0x%016lX rsp=0x%016lX ss=0x%016lX",
+  printk(LOG_ERROR, "\n  rip=0x%016lX cs=0x%016lX rfl=0x%016lX rsp=0x%016lX ss=0x%016lX",
                 tf->rip, tf->cs, tf->rflags, tf->rsp, tf->ss);
-  serial_printf("\n  rax=0x%016lX rbx=0x%016lX rcx=0x%016lX rdx=0x%016lX",
+  printk(LOG_ERROR, "\n  rax=0x%016lX rbx=0x%016lX rcx=0x%016lX rdx=0x%016lX",
                 tf->rax, tf->rbx, tf->rcx, tf->rdx);
-  serial_printf("\n  rsi=0x%016lX rdi=0x%016lX rbp=0x%016lX r08=0x%016lX",
+  printk(LOG_ERROR, "\n  rsi=0x%016lX rdi=0x%016lX rbp=0x%016lX r08=0x%016lX",
                 tf->rsi, tf->rdi, tf->rbp, tf->r8);
-  serial_printf("\n  r09=0x%016lX r10=0x%016lX r11=0x%016lX r12=0x%016lX",
+  printk(LOG_ERROR, "\n  r09=0x%016lX r10=0x%016lX r11=0x%016lX r12=0x%016lX",
                 tf->r9, tf->r10, tf->r11, tf->r12);
-  serial_printf("\n  r13=0x%016lX r14=0x%016lX r15=0x%016lX err=0x%016lX",
+  printk(LOG_ERROR, "\n  r13=0x%016lX r14=0x%016lX r15=0x%016lX err=0x%016lX",
                 tf->r13, tf->r14, tf->r15, tf->err_code);
   uint64_t cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(cr3));
-  serial_printf("\n  cr3=0x%016lX", cr3);
+  printk(LOG_ERROR, "\n  cr3=0x%016lX", cr3);
   if (current_task) {
-    serial_printf(" pid=%d proc_cr3=0x%016lX",
+    printk(LOG_ERROR, " pid=%d proc_cr3=0x%016lX",
                   current_task->pid, current_task->cr3);
   }
-  serial_printf("\n");
+  printk(LOG_ERROR, "\n");
 
-  // 栈回溯：遍历 RBP 链（需 -fno-omit-frame-pointer）
-  // #0 始终是 crash 点 (tf->rip)，之后走 RBP 链取 caller 返回地址
-  // 用户态异常时：先展示内核 trap path（固定几帧），再走用户态帧到 main/_start
-  serial_printf("BACKTRACE:\n");
-  int frame_idx = 0;
-
-  // #0: crash point — tf->rip（不在 RBP 链中，必须单独打印）
-  serial_printf("  #0 0x%016lX  ← crash point\n", tf->rip);
-  frame_idx = 1;
-
-  if (tf->cs == 0x2B) {
-    // 用户态异常：内核 trap path 是固定路径，不走 RBP 链
-    // （__alltraps 不创建标准 RBP 帧，链在 trapframe 边界断裂）
-    serial_printf("  [kernel trap path]\n");
-    serial_printf("  #1 trap_dispatch\n");
-    serial_printf("  #2 __alltraps\n");
-    serial_printf("  --- user/kernel boundary ---\n");
-    // 用户态帧从 trapframe.rbp 展开
-    serial_printf("  [user]\n");
-    uint64_t *rbp = (uint64_t *)tf->rbp;
-    for (int i = 0; i < 64 && rbp && (uint64_t)rbp >= 0x1000 && (uint64_t)rbp < 0xFFFFFFFF80000000ULL; i++) {
-      serial_printf("  #%d 0x%016lX\n", frame_idx, (uint64_t)rbp[1]);
-      frame_idx++;
-      rbp = (uint64_t *)rbp[0];
-      if (!rbp) break;
-    }
-  } else {
-    // 内核态异常：从 trapframe.rbp 走 RBP 链，可一路到 kernel_main/_start
-    uint64_t *rbp = (uint64_t *)tf->rbp;
-    for (int i = 0; i < 64 && rbp && (uint64_t)rbp >= 0xFFFFFFFF80000000ULL; i++) {
-      serial_printf("  #%d 0x%016lX\n", frame_idx, (uint64_t)rbp[1]);
-      frame_idx++;
-      rbp = (uint64_t *)rbp[0];
-      if (!rbp) break;
-    }
-  }
+  dump_stack_trace();
 
   // === DEBUG: dump faulting instruction bytes and kernel stack ===
   if (tf->cs == 0x08) {
     // Dump 16 bytes at faulting rip (what "code" is the CPU trying to execute?)
-    serial_printf("  RIP bytes:");
+    printk(LOG_DEBUG, "  RIP bytes:");
     uint8_t *rip_ptr = (uint8_t *)tf->rip;
     for (int i = 0; i < 16 && rip_ptr; i++) {
-      serial_printf(" %02X", rip_ptr[i]);
+      printk(LOG_DEBUG, " %02X", rip_ptr[i]);
     }
-    serial_printf("\n");
+    printk(LOG_DEBUG, "\n");
 
     // Dump current_task kernel stack top area (trapframe + switch_frame)
     if (current_task && current_task->k_stack_top) {
       uint64_t stack_base = current_task->k_stack_top - 2 * PAGE_SIZE;
       uint64_t *sp = (uint64_t *)stack_base;
-      serial_printf("  Kernel stack dump (bottom→top):\n");
+      printk(LOG_DEBUG, "  Kernel stack dump (bottom→top):\n");
       // Only dump the top 24 words (176 bytes trapframe + 56 bytes switch_frame)
       int start = (2 * PAGE_SIZE / 8) - 24;
       for (int i = start; i < 2 * PAGE_SIZE / 8; i++) {
-        serial_printf("    [0x%016lX] 0x%016lX\n", stack_base + i * 8, sp[i]);
+        printk(LOG_DEBUG, "    [0x%016lX] 0x%016lX\n", stack_base + i * 8, sp[i]);
       }
       // Also dump k_rsp and the words around it
-      serial_printf("  k_rsp=0x%016lX k_stack_top=0x%016lX\n",
+      printk(LOG_DEBUG, "  k_rsp=0x%016lX k_stack_top=0x%016lX\n",
                     current_task->k_rsp, current_task->k_stack_top);
       // Dump 8 words starting at k_rsp
-      serial_printf("  At k_rsp:\n");
+      printk(LOG_DEBUG, "  At k_rsp:\n");
       uint64_t *krsp_ptr = (uint64_t *)current_task->k_rsp;
       for (int i = 0; i < 16; i++) {
-        serial_printf("    [0x%016lX] 0x%016lX\n",
+        printk(LOG_DEBUG, "    [0x%016lX] 0x%016lX\n",
                       current_task->k_rsp + i * 8, krsp_ptr[i]);
       }
     }
@@ -357,14 +322,15 @@ void trap_dispatch(trapframe_t *tf) {
         break;
     }
 
-    serial_printf("exception: pid=%d vector=%d sig=%d addr=%p\n",
+    printk(LOG_INFO, "exception: pid=%d vector=%d sig=%d addr=%p\n",
         current_task->pid, tf->trapno, sig, si_addr);
 
     force_sig(current_task, sig, si_code, si_addr);
     return;  // Don't kill process; check_pending_signals will handle it
   }
-  // Kernel-mode exception: unrecoverable, halt
-  halt();
+  // Kernel-mode exception: unrecoverable, panic
+  panic("kernel-mode exception: vector=%lu rip=0x%lx cr3=0x%lx",
+        tf->trapno, tf->rip, cr3);
 }
 
 // ===================== Timer IRQ handler =====================
@@ -436,7 +402,7 @@ void isr_init() {
     uint32_t ccr1 = lapic_read(LAPIC_TIMER_CCR);
     for (volatile int i = 0; i < 100000; i++);  // brief delay
     uint32_t ccr2 = lapic_read(LAPIC_TIMER_CCR);
-    serial_printf("isr_init: BSP timer CCR %u->%u LVT=0x%x (counting=%s)\n",
+    printk(LOG_INFO, "isr_init: BSP timer CCR %u->%u LVT=0x%x (counting=%s)\n",
                    ccr1, ccr2, lapic_read(LAPIC_LVT_TIMER),
                    ccr1 != ccr2 ? "yes" : "NO!");
   }
@@ -450,7 +416,7 @@ void sig_init() {
     // SYS_SIGRETURN = 48 (0x30)
     Page *page = bfc_alloc_page(1);
     if (!page) {
-        serial_printf("sig_init: failed to allocate trampoline page\n");
+        printk(LOG_ERROR, "sig_init: failed to allocate trampoline page\n");
         return;
     }
     sig_trampoline_phys = (__force uint64_t)page_to_phys(page);
@@ -469,7 +435,7 @@ void sig_init() {
     vaddr[7] = 0x0F;
     vaddr[8] = 0x05;
 
-    serial_printf("sig_init: trampoline at phys=%lx\n", sig_trampoline_phys);
+    printk(LOG_INFO, "sig_init: trampoline at phys=%lx\n", sig_trampoline_phys);
 }
 
 // ===================== Syscall dispatch =====================
@@ -752,6 +718,7 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
 
     task_t *target = &tasks[target_pid];
     if (target->pid != target_pid) return (uint64_t)-ESRCH;
+    WARN_ON(target->state == UNUSED);
 
     // Build RECV_REQ message
     uint8_t msg[RECV_MSG_SIZE];
@@ -766,7 +733,7 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
     uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
     if (next == target->recv_tail) {
         spin_unlock(&target->recv_lock);
-        serial_printf("sys_req: target_pid=%d recv queue full!\n", target_pid);
+        printk(LOG_WARN, "sys_req: target_pid=%d recv queue full!\n", target_pid);
         return (uint64_t)-EBUSY;  // queue full
     }
     __memcpy(target->recv_buf[target->recv_head], msg, RECV_MSG_SIZE);
@@ -1060,7 +1027,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
     }
 
     if (pid < 0 || pid >= MAX_PROC) {
-        serial_printf("waitpid: pid=%d out of range\n", pid);
+        printk(LOG_WARN, "waitpid: pid=%d out of range\n", pid);
         return 0;  // EINVAL
     }
 
@@ -1069,7 +1036,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
     // Validate: pid must be our child (under tasks_lock to prevent reap)
     spin_lock(&tasks_lock);
     if (child->pid != pid || !child->mm || child->mm->parent_pid != current_task->pid) {
-        serial_printf("waitpid: pid=%d validation fail: child_pid=%d mm=%p parent_pid=%d caller=%d\n",
+        printk(LOG_WARN, "waitpid: pid=%d validation fail: child_pid=%d mm=%p parent_pid=%d caller=%d\n",
             pid, child->pid, child->mm, child->mm ? child->mm->parent_pid : -1, current_task->pid);
         spin_unlock(&tasks_lock);
         return 0;  // ECHILD
@@ -1131,7 +1098,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
             deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
             deliv &= ~(1ULL << SIGCHLD);
             if (deliv) {
-                serial_printf("waitpid: pid=%d EINTR pending=0x%lx\n", pid, pend);
+                printk(LOG_WARN, "waitpid: pid=%d EINTR pending=0x%lx\n", pid, pend);
                 return (uint64_t)-EINTR;
             }
         }
@@ -1140,7 +1107,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
         spin_lock(&tasks_lock);
         if (child->pid != pid) {
             // Child was reaped by someone else — should not happen
-            serial_printf("waitpid: pid=%d child reaped by someone else\n", pid);
+            printk(LOG_WARN, "waitpid: pid=%d child reaped by someone else\n", pid);
             spin_unlock(&tasks_lock);
             return 0;  // ECHILD
         }
@@ -1152,7 +1119,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
         // Validate user pointer: must be in user canonical low half, not kernel space
         uint64_t ptr_val = (__force uint64_t)exit_code_ptr;
         if (ptr_val >= 0xFFFFFFFF80000000ULL || !ptr_val || (ptr_val + sizeof(int32_t) - 1) >= 0xFFFFFFFF80000000ULL) {
-            serial_printf("waitpid: pid=%d bad exit_code_ptr=0x%lx\n", pid, ptr_val);
+            printk(LOG_WARN, "waitpid: pid=%d bad exit_code_ptr=0x%lx\n", pid, ptr_val);
             return 0;  // EFAULT
         }
         *(__force int32_t *)exit_code_ptr = child->exit_code;
@@ -1325,7 +1292,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         for (size_t i = 0; i < npages; i++) {
             if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE,
                                       phys_start + i * PAGE_SIZE, pte_flags)) {
-                serial_printf("mmap PHYSICAL: map failed at i=%lu\n", (unsigned long)i);
+                printk(LOG_ERROR, "mmap PHYSICAL: map failed at i=%lu\n", (unsigned long)i);
                 for (size_t j = 0; j < i; j++)
                     unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
                 return 0;
@@ -3346,7 +3313,7 @@ void check_pending_signals(trapframe_t *tf) {
             case SIGSTKFLT:
             default:
                 proc->exit_code = -1;
-                serial_printf("signal: pid=%d terminated by signal %d\n", proc->pid, sig);
+                printk(LOG_ERROR, "signal: pid=%d terminated by signal %d\n", proc->pid, sig);
                 sys_exit(-1, 0, 0, 0, 0, 0);
                 // Does not return
             }

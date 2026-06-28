@@ -11,7 +11,7 @@
 #include "common/stat.h"
 #include "common/dirent.h"
 #include "kernel/spinlock.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "kernel/mem/slab.h"
 #include "common/errno.h"
 #include "common/fcntl.h"
@@ -550,7 +550,7 @@ static int fat32_truncate(uint32_t cluster, uint32_t dir_cluster, int dir_idx) {
 /* ==================== FAT32 init ==================== */
 
 int fat32_init(void) {
-    serial_printf("fat32_init: starting\n");
+    printk(LOG_INFO, "fat32_init: starting\n");
 
     /* Initialize FAT cache */
     for (int i = 0; i < FAT_CACHE_PAGES; i++) {
@@ -561,7 +561,7 @@ int fat32_init(void) {
     /* Read MBR (LBA 0) */
     uint8_t mbr[512];
     if (blk_read_sector(0, mbr) != 0) {
-        serial_printf("fat32_init: MBR read failed\n");
+        printk(LOG_ERROR, "fat32_init: MBR read failed\n");
         return -EIO;
     }
 
@@ -582,14 +582,14 @@ int fat32_init(void) {
 
     /* Fallback: if no partition found, try LBA 201 (current disk layout) */
     if (part_start_lba == 0) {
-        serial_printf("fat32_init: no FAT32 partition in MBR, trying LBA 201\n");
+        printk(LOG_WARN, "fat32_init: no FAT32 partition in MBR, trying LBA 201\n");
         part_start_lba = 201;
     }
 
     /* Read BPB */
     uint8_t bpb[512];
     if (blk_read_sector(part_start_lba, bpb) != 0) {
-        serial_printf("fat32_init: BPB read failed\n");
+        printk(LOG_ERROR, "fat32_init: BPB read failed\n");
         return -EIO;
     }
 
@@ -602,7 +602,7 @@ int fat32_init(void) {
                    ((uint32_t)bpb[46] << 16) | ((uint32_t)bpb[47] << 24);
 
     if (bps != 512 || sectors_per_cluster == 0 || spf32 == 0 || root_cluster < 2) {
-        serial_printf("fat32_init: invalid BPB (bps=%u spc=%u spf=%u root=%u)\n",
+        printk(LOG_ERROR, "fat32_init: invalid BPB (bps=%u spc=%u spf=%u root=%u)\n",
                        bps, sectors_per_cluster, spf32, root_cluster);
         return -EINVAL;
     }
@@ -623,7 +623,7 @@ int fat32_init(void) {
         fat_cache_read(fat_start_lba + s);
     }
 
-    serial_printf("fat32_init: part=%u fat=%u data=%u root=%u spc=%u bpc=%u total_cl=%u\n",
+    printk(LOG_INFO, "fat32_init: part=%u fat=%u data=%u root=%u spc=%u bpc=%u total_cl=%u\n",
                    part_start_lba, fat_start_lba, data_start_lba,
                    root_cluster, sectors_per_cluster, bytes_per_cluster,
                    total_data_clusters);

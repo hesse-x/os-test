@@ -14,7 +14,7 @@ _Static_assert(offsetof(cpu_local_t, tss_rsp0) == 48,
 #include "kernel/pty.h"
 #include "kernel/inode.h"
 #include "kernel/devtmpfs.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "kernel/trap.h"
 #include "kernel/vfs.h"
 #include "arch/x64/smp.h"
@@ -46,7 +46,7 @@ typedef struct file_io_close_req {
 task_t tasks[MAX_PROC];
 // current_task is per-CPU (in cpu_local_t), accessed via macro
 
-spinlock_t tasks_lock = {.locked = 0};
+spinlock_t tasks_lock = SPINLOCK_INIT;
 pid_t init_pid = -1;
 
 // ===================== files_t lifecycle =====================
@@ -568,7 +568,7 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
 
     // 4. Validate ELF magic
     if (elf_buf[0] != 0x7F || elf_buf[1] != 'E' || elf_buf[2] != 'L' || elf_buf[3] != 'F') {
-        serial_printf("execve: pid=%d path=%s ino=%lu size=%lu bad magic: %02x %02x %02x %02x\n",
+        printk(LOG_ERROR, "execve: pid=%d path=%s ino=%lu size=%lu bad magic: %02x %02x %02x %02x\n",
             proc->pid, pathname, (unsigned long)saved_ino, (unsigned long)file_size,
             elf_buf[0], elf_buf[1], elf_buf[2], elf_buf[3]);
         kfree(elf_buf);
@@ -589,7 +589,7 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
     if (!lr.success) {
         kfree(elf_buf);
         free_table_page(pml4_phys);
-        serial_printf("execve: elf_load failed pid=%d\n", proc->pid);
+        printk(LOG_ERROR, "execve: elf_load failed pid=%d\n", proc->pid);
         return (uint64_t)-ENOEXEC;
     }
 
@@ -890,11 +890,11 @@ task_t *create_idle_process(int cpu_id) {
             break;
         }
     }
-    if (!proc) { spin_unlock(&tasks_lock); serial_printf("create_idle_process: no free slot\n"); return NULL; }
+    if (!proc) { spin_unlock(&tasks_lock); printk(LOG_ERROR, "create_idle_process: no free slot\n"); return NULL; }
 
     // Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc_page(2);
-    if (!stack_pages) { spin_unlock(&tasks_lock); serial_printf("create_idle_process: alloc stack failed\n"); return NULL; }
+    if (!stack_pages) { spin_unlock(&tasks_lock); printk(LOG_ERROR, "create_idle_process: alloc stack failed\n"); return NULL; }
     uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
     uint64_t k_stack_top = (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) + 2 * PAGE_SIZE;
 
@@ -970,7 +970,7 @@ task_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
             break;
         }
     }
-    if (!proc) { spin_unlock(&tasks_lock); serial_printf("process_create_elf: no free slot\n"); return NULL; }
+    if (!proc) { spin_unlock(&tasks_lock); printk(LOG_ERROR, "process_create_elf: no free slot\n"); return NULL; }
     // 2. Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc_page(2);
     if (!stack_pages) { spin_unlock(&tasks_lock); return NULL; }
@@ -986,7 +986,7 @@ task_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
 
     // 4. Load ELF segments into user address space
     elf_load_result_t lr = elf_load(elf_data, elf_size, new_pml4);
-    if (!lr.success) { mm_put(mm); spin_unlock(&tasks_lock); serial_printf("process_create_elf: elf_load failed\n"); return NULL; }
+    if (!lr.success) { mm_put(mm); spin_unlock(&tasks_lock); printk(LOG_ERROR, "process_create_elf: elf_load failed\n"); return NULL; }
 
     // 5. Map user stack: 2048 pages (8MB) at 0x7FFFFFFF0000-0x7FFFFFFFE000
     int user_stack_pages = 2048;
@@ -1009,7 +1009,7 @@ task_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     if (sig_trampoline_phys != 0) {
         if (!map_user_page_direct(new_pml4, SIG_TRAMPOLINE_ADDR, sig_trampoline_phys,
                                  PTE_PRESENT | PTE_USER)) {
-            serial_printf("process_create_elf: failed to map trampoline page\n");
+            printk(LOG_ERROR, "process_create_elf: failed to map trampoline page\n");
         }
     }
 
@@ -1055,7 +1055,7 @@ task_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
         mm->mmap_regions = stack_region;
     }
 
-    serial_printf("process_create_elf: pid=%d kstack_phys=0x%lx kstack_top=0x%lx\n",
+    printk(LOG_DEBUG, "process_create_elf: pid=%d kstack_phys=0x%lx kstack_top=0x%lx\n",
         proc->pid, k_stack_phys, k_stack_top);
 
     spin_unlock(&tasks_lock);
@@ -1153,6 +1153,7 @@ void schedule() {
 // task_reap: reclaim all resources of a process
 // Called by sys_exit (no-parent path) or sys_waitpid
 void task_reap(task_t *proc) {
+    ASSERT(proc->state == ZOMBIE || proc->state == REAPING);
     pid_t owner_pid = proc->pid;
 
     // 1. Free kernel stack (2 pages)

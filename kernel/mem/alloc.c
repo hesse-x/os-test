@@ -3,7 +3,7 @@
 #include "kernel/efi.h"
 #include "arch/x64/memlayout.h"
 #include "common/macro.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "kernel/mem/kasan.h"
 
 // ===================== Global variable definitions =====================
@@ -11,7 +11,7 @@ size_t total_page_frames = 0;
 Page *bfc_frames = NULL;
 Page *bfc_free_list = NULL;
 
-spinlock_t bfc_lock = {0};
+spinlock_t bfc_lock = SPINLOCK_INIT;
 
 // ===================== BFC allocator implementation =====================
 void bfc_init(void) {
@@ -238,7 +238,7 @@ static efi_memory_descriptor_t *get_efi_desc(boot_info *bi, size_t index) {
 // ===================== init_mem =====================
 __attribute__((no_sanitize("kernel-address")))
 void init_mem(boot_info *bi) {
-  serial_printf("init_mem: mmap_addr=0x%016X mmap_size=0x%016X desc_size=0x%016X\n",
+  printk(LOG_INFO, "init_mem: mmap_addr=0x%016X mmap_size=0x%016X desc_size=0x%016X\n",
                  bi->mmap_addr, bi->mmap_size, bi->mmap_desc_size);
 
   size_t desc_count = bi->mmap_size / bi->mmap_desc_size;

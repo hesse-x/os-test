@@ -9,7 +9,7 @@
 #include "kernel/mem/slab.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/utils.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "arch/x64/memlayout.h"
 
 // ===================== State =====================
@@ -96,7 +96,7 @@ static bool kasan_map_page(uint64_t vaddr, uint64_t phys, uint64_t flags) {
 // ===================== kasan_init =====================
 __attribute__((no_sanitize("kernel-address")))
 void kasan_init(void) {
-    serial_printf("kasan_init: mapping shadow memory...\n");
+    printk(LOG_INFO, "kasan_init: mapping shadow memory...\n");
 
     // 1. Allocate physical pages and map them to the shadow range
     uint64_t shadow_start = (uint64_t)KASAN_SHADOW_START;
@@ -104,20 +104,20 @@ void kasan_init(void) {
     // Round up to page granularity
     size_t num_pages = (shadow_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
-    serial_printf("  shadow_start=0x%lx size=%luMB pages=%lu\n",
+    printk(LOG_INFO, "  shadow_start=0x%lx size=%luMB pages=%lu\n",
                   shadow_start, shadow_size / (1024 * 1024), num_pages);
 
     for (size_t i = 0; i < num_pages; i++) {
         Page *pg = bfc_alloc_page(1);
         if (!pg) {
-            serial_printf("kasan_init: OOM at shadow page %lu\n", i);
+            printk(LOG_ERROR, "kasan_init: OOM at shadow page %lu\n", i);
             halt();
         }
         uint64_t phys = (__force uint64_t)page_to_phys(pg);
         uint64_t vaddr = shadow_start + i * PAGE_SIZE;
 
         if (!kasan_map_page(vaddr, phys, PTE_PRESENT | PTE_RW)) {
-            serial_printf("kasan_init: map failed at 0x%lx\n", vaddr);
+            printk(LOG_ERROR, "kasan_init: map failed at 0x%lx\n", vaddr);
             halt();
         }
     }
@@ -136,7 +136,7 @@ void kasan_init(void) {
 
     kasan_ready = true;
 
-    serial_printf("kasan_init: done, shadow 0x%lx-0x%lx\n",
+    printk(LOG_INFO, "kasan_init: done, shadow 0x%lx-0x%lx\n",
                   shadow_start, shadow_start + shadow_size);
 }
 
@@ -206,34 +206,34 @@ void kasan_check_write(const void *addr, size_t size) {
 // ===================== Report =====================
 __attribute__((no_sanitize("kernel-address")))
 static void kasan_report(const void *addr, size_t size, bool is_write) {
-    serial_printf("\n=== KASAN ERROR ===\n");
+    printk(LOG_ERROR, "\n=== KASAN ERROR ===\n");
     if (is_write)
-        serial_printf("  out-of-bounds WRITE");
+        printk(LOG_ERROR, "  out-of-bounds WRITE");
     else
-        serial_printf("  out-of-bounds READ");
+        printk(LOG_ERROR, "  out-of-bounds READ");
 
     uint8_t *shadow = KASAN_MEM_TO_SHADOW(addr);
     uint8_t sv = *shadow;
     if (sv == KASAN_SHADOW_FREED)
-        serial_printf(" (use-after-free)");
+        printk(LOG_ERROR, " (use-after-free)");
     else if (sv == KASAN_SHADOW_REDZONE)
-        serial_printf(" (global-redzone)");
+        printk(LOG_ERROR, " (global-redzone)");
 
-    serial_printf("\n  addr=0x%016X size=%lu shadow=0x%02X\n",
+    printk(LOG_ERROR, "\n  addr=0x%016X size=%lu shadow=0x%02X\n",
                   (uint64_t)addr, (unsigned long)size, sv);
 
     // Stack trace via RBP chain
-    serial_printf("  backtrace:\n");
+    printk(LOG_ERROR, "  backtrace:\n");
     uint64_t *rbp;
     __asm__ volatile("movq %%rbp, %0" : "=r"(rbp));
     for (int depth = 0; depth < 16 && (uint64_t)rbp > 0xFFFFFFFF80000000ULL; depth++) {
         uint64_t ret_addr = rbp[1];
-        serial_printf("    0x%016X\n", ret_addr);
+        printk(LOG_ERROR, "    0x%016X\n", ret_addr);
         rbp = (uint64_t *)rbp[0];
         if (!rbp) break;
     }
 
-    serial_printf("===================\n");
+    printk(LOG_ERROR, "===================\n");
     halt();
 }
 

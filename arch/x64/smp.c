@@ -5,7 +5,7 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
 #include "kernel/acpi.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/proc.h"
 
@@ -66,7 +66,7 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     cpu_locals[cpu_id].kernel_stack = kernel_stack;
     cpu_locals[cpu_id].tss_rsp0 = kernel_stack;
     cpu_locals[cpu_id].run_count = 0;
-    cpu_locals[cpu_id].scheduler_lock.locked = 0;
+    cpu_locals[cpu_id].scheduler_lock = SPINLOCK_INIT;
     list_init(&cpu_locals[cpu_id].run_queue);
     list_init(&cpu_locals[cpu_id].timer_queue);
     for (int c = 0; c < NUM_KMALLOC_CLASSES; c++) {
@@ -96,7 +96,7 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     for (int i = 0; i < 3; i++) {
         Page *ist_page = bfc_alloc_page(1);
         if (!ist_page) {
-            serial_printf("smp_init_cpu: IST alloc failed\n");
+            printk(LOG_ERROR, "smp_init_cpu: IST alloc failed\n");
             halt();
         }
         uint64_t ist_phys = (uint64_t)(ist_page - bfc_frames) * PAGE_SIZE;
@@ -172,7 +172,7 @@ void ap_entry_c(int cpu_id) {
     // Set this AP's lapic_base in cpu_local
     cpu_locals[cpu_id].lapic_base = lapic_vaddr;
 
-    serial_printf("AP 0x%016X init finish\n", cpu_id);
+    printk(LOG_INFO, "AP 0x%016X init finish\n", cpu_id);
 
     // Switch to idle process: set current_task, switch to idle kernel stack
     task_t *idle = cpu_locals[cpu_id].idle_proc;
@@ -304,5 +304,5 @@ void smp_boot_aps() {
     lapic_write(LAPIC_TIMER_DCR, 0x0B);
     lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_VECTOR | LAPIC_LVT_TIMER_PERIODIC);
     lapic_write(LAPIC_TIMER_ICR, lapic_timer_ticks_calibrated);
-    serial_printf("smp: BSP timer restored vec=0x%x\n", LAPIC_TIMER_VECTOR);
+    printk(LOG_INFO, "smp: BSP timer restored vec=0x%x\n", LAPIC_TIMER_VECTOR);
 }

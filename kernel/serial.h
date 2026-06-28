@@ -42,10 +42,12 @@ extern bool serial_irq_registered;
 #ifdef NSERIAL
 
 #define serial_printf(...) ((void)0)
+#define serial_vprintf(fmt, ap) ((void)0)
 
 #else
 
 void serial_printf(const char *fmt, ...);
+void serial_vprintf(const char *fmt, va_list ap);
 
 // Register serial device in devtmpfs (called by vfs_init)
 void serial_dev_register(void);

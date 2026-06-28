@@ -2,7 +2,7 @@
 #include "kernel/proc.h"
 #include "kernel/pci.h"
 #include "kernel/devtmpfs.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 #include "kernel/mem/alloc.h"
 #include "kernel/mem/slab.h"
 #include "arch/x64/paging.h"
@@ -31,11 +31,11 @@ void display_init(void) {
     // (class code is 0x0380 "Display/Other", not 0x0300 VGA)
     pci_device_t *dev = pci_find_device_by_id(0x1234, 0x1111);
     if (!dev) {
-        serial_printf("display_init: no display device found\n");
+        printk(LOG_WARN, "display_init: no display device found\n");
         halt();
     }
 
-    serial_printf("display_init: found display vendor=%x device=%x class=%x\n",
+    printk(LOG_INFO, "display_init: found display vendor=%x device=%x class=%x\n",
                    dev->vendor_id, dev->device_id, dev->class_code);
 
     // 2. Enable device: framebuffer BAR mapped WC, other BARs UC
@@ -49,10 +49,10 @@ void display_init(void) {
     }
     int rc = pci_enable_device_wc(dev, fb_bar_idx);
     if (rc) {
-        serial_printf("display_init: pci_enable_device_wc failed\n");
+        printk(LOG_ERROR, "display_init: pci_enable_device_wc failed\n");
         halt();
     }
-    serial_printf("display_init: framebuffer BAR%d mapped WC\n", fb_bar_idx);
+    printk(LOG_INFO, "display_init: framebuffer BAR%d mapped WC\n", fb_bar_idx);
 
     // 3. Identify BARs: bochs-display has BAR0=framebuffer (large MMIO),
     //    BAR2=VBE MMIO registers (small MMIO). BAR1 consumed by 64-bit BAR0.
@@ -62,7 +62,7 @@ void display_init(void) {
     uint64_t fb_size = 0;
 
     for (int i = 0; i < 6; i++) {
-        serial_printf("  BAR%d: phys=%lx size=%lx type=%x vaddr=%p\n",
+        printk(LOG_INFO, "  BAR%d: phys=%lx size=%lx type=%x vaddr=%p\n",
                       i, dev->bar[i].phys, dev->bar[i].size,
                       dev->bar[i].type, dev->bar[i].vaddr);
         if (dev->bar[i].size == 0) continue;
@@ -75,7 +75,7 @@ void display_init(void) {
             uint16_t id = mmio_read16((uint16_t __iomem *)(mmio_base + VBE_DISPI_MMIO_OFFSET(VBE_DISPI_INDEX_ID)));
             if (id == VBE_DISPI_ID_VERSION) {
                 vbe_mmio = (uint16_t __iomem *)mmio_base;
-                serial_printf("display_init: VBE MMIO at BAR%d, ID=%x\n", i, id);
+                printk(LOG_INFO, "display_init: VBE MMIO at BAR%d, ID=%x\n", i, id);
             }
         }
 
@@ -87,13 +87,13 @@ void display_init(void) {
     }
 
     if (!vbe_mmio) {
-        serial_printf("display_init: VBE MMIO BAR not found\n");
+        printk(LOG_WARN, "display_init: VBE MMIO BAR not found\n");
         halt();
     }
-    serial_printf("fb_vaddr: %p\n", fb_vaddr);
+    printk(LOG_DEBUG, "fb_vaddr: %p\n", fb_vaddr);
     if (!fb_vaddr) {
-        serial_printf("?????????\n");
-        serial_printf("display_init: framebuffer BAR not found\n");
+        printk(LOG_ERROR, "?????????\n");
+        printk(LOG_ERROR, "display_init: framebuffer BAR not found\n");
         halt();
     }
 
@@ -119,7 +119,7 @@ void display_init(void) {
     g_display.fb_bpp      = 32;
     g_display.fb_size     = 800 * 4 * 600;
 
-    serial_printf("display_init: 800x600x32 done\n");
+    printk(LOG_INFO, "display_init: 800x600x32 done\n");
 }
 
 // ===================== display_ioctl =====================
@@ -274,8 +274,8 @@ uint64_t display_mmap_handler(struct task_t *proc, size_t size) {
 void display_dev_register(void) {
     int rc = devtmpfs_create("kms", DEV_KMS, &kms_dev_ops);
     if (rc != 0) {
-        serial_printf("display_dev_register: failed (rc=%d)\n", rc);
+        printk(LOG_ERROR, "display_dev_register: failed (rc=%d)\n", rc);
     } else {
-        serial_printf("display_dev_register: /dev/kms registered\n");
+        printk(LOG_INFO, "display_dev_register: /dev/kms registered\n");
     }
 }

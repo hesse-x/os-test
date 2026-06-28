@@ -5,7 +5,6 @@
 #include "kernel/socket.h"
 #include "kernel/proc.h"
 #include "kernel/devtmpfs.h"
-#include "kernel/serial.h"
 #include "kernel/trap.h"
 #include "kernel/mem/slab.h"
 #include "kernel/spinlock.h"
@@ -16,7 +15,7 @@
 #include "arch/x64/apic.h"
 
 // ===================== Global socket lock =====================
-spinlock_t socket_lock = {0};
+spinlock_t socket_lock = SPINLOCK_INIT;
 
 // ===================== Bind name space =====================
 static struct unix_bind_entry *unix_bind_table[UNIX_HASH_SIZE];

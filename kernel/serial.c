@@ -1,3 +1,4 @@
+#include "kernel/log.h"
 #include "kernel/serial.h"
 #include "kernel/devtmpfs.h"
 #include "kernel/proc.h"
@@ -13,14 +14,14 @@
 #include "common/ioctl.h"   // TCGETS
 
 // ===================== TX lock =====================
-spinlock_t serial_tx_lock;
+spinlock_t serial_tx_lock = SPINLOCK_INIT;
 
 // ===================== RX ring buffer =====================
 
 uint8_t serial_rx_buf[SERIAL_RX_BUF_SIZE];
 uint32_t serial_rx_head = 0;  // ISR write position
 uint32_t serial_rx_tail = 0;  // sys_read read position
-spinlock_t serial_rx_lock;
+spinlock_t serial_rx_lock = SPINLOCK_INIT;
 int32_t serial_read_waiter = -1;
 int serial_fd_count = 0;
 bool serial_irq_registered = false;
@@ -91,6 +92,14 @@ void serial_printf(const char *fmt, ...) {
   va_start(ap, fmt);
   kvformat(serial_buf_putc, &a, fmt, ap);
   va_end(ap);
+  buf[a.pos] = '\0';
+  serial_puts(buf);
+}
+
+void serial_vprintf(const char *fmt, va_list ap) {
+  char buf[256];
+  struct serial_buf_arg a = { buf, 0, 255 };
+  kvformat(serial_buf_putc, &a, fmt, ap);
   buf[a.pos] = '\0';
   serial_puts(buf);
 }
@@ -199,7 +208,7 @@ static struct dev_ops serial_ops = {
 void serial_dev_register(void) {
     int rc = devtmpfs_create("serial", DEV_SERIAL, &serial_ops);
     if (rc != 0) {
-        serial_printf("serial_dev_register: failed (rc=%d)\n", rc);
+        printk(LOG_ERROR, "serial_dev_register: failed (rc=%d)\n", rc);
     }
 }
 

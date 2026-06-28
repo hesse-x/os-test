@@ -3,7 +3,7 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "kernel/acpi.h"
-#include "kernel/serial.h"
+#include "kernel/log.h"
 
 void __iomem *lapic_vaddr = NULL;
 void __iomem *ioapic_vaddr = NULL;
@@ -106,7 +106,7 @@ static void map_apic_mmio(uint64_t lapic_phys, uint64_t ioapic_phys) {
     }
   }
   if (pdpt_idx < 0) {
-    serial_printf("apic: no free PDPT_hh slot\n");
+    printk(LOG_ERROR, "apic: no free PDPT_hh slot\n");
     halt();
   }
 
@@ -173,7 +173,7 @@ void apic_init() {
 
   uint32_t ver = ioapic_read(IOAPIC_VER);
   int max_redir = ((ver >> 16) & 0xFF) + 1;
-  serial_printf("apic: IOAPIC max_redir=%d\n", max_redir);
+  printk(LOG_INFO, "apic: IOAPIC max_redir=%d\n", max_redir);
 
   for (int i = 0; i < max_redir; i++) {
     ioapic_set_irq(i, 32 + i, bsp_apic_id, true, false, false);
@@ -187,7 +187,7 @@ void apic_init() {
     bool level = iso ? iso->level_triggered : false;
     bool low   = iso ? iso->active_low : false;
     ioapic_set_irq(gsi, 32 + gsi, bsp_apic_id, true, level, low);
-    serial_printf("apic: PIT IRQ0 gsi=%d masked (LAPIC timer used)\n", gsi);
+    printk(LOG_INFO, "apic: PIT IRQ0 gsi=%d masked (LAPIC timer used)\n", gsi);
   }
   // Unmask keyboard (ISA IRQ 1 → GSI per ISO)
   {
@@ -196,7 +196,7 @@ void apic_init() {
     bool level = iso ? iso->level_triggered : false;
     bool low   = iso ? iso->active_low : false;
     ioapic_set_irq(gsi, 32 + gsi, bsp_apic_id, false, level, low);
-    serial_printf("apic: kbd IRQ1 gsi=%d level=%d low=%d\n", gsi, level, low);
+    printk(LOG_INFO, "apic: kbd IRQ1 gsi=%d level=%d low=%d\n", gsi, level, low);
   }
 
   // 7. Calibrate and start LAPIC timer
@@ -237,5 +237,5 @@ void apic_init() {
   lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
   lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_VECTOR | LAPIC_LVT_TIMER_PERIODIC);
   lapic_write(LAPIC_TIMER_ICR, ticks);
-  serial_printf("apic: BSP timer started vec=0x%x ticks=%u\n", LAPIC_TIMER_VECTOR, ticks);
+  printk(LOG_INFO, "apic: BSP timer started vec=0x%x ticks=%u\n", LAPIC_TIMER_VECTOR, ticks);
 }

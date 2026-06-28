@@ -1,7 +1,7 @@
 #include "kernel/inode.h"
 #include "kernel/mem/slab.h"
-#include "kernel/serial.h"
 #include "kernel/page_cache.h"
+#include "kernel/log.h"
 #include <stddef.h>
 
 static struct inode *inode_hash_table[INODE_HASH_SIZE];
@@ -23,6 +23,7 @@ struct inode *inode_lookup(uint32_t ino) {
     struct inode *ip = inode_hash_table[idx];
     while (ip) {
         if (ip->ino == ino) {
+            ASSERT(ip->ref_count > 0);
             ip->ref_count++;
             spin_unlock(&inode_hash_lock);
             return ip;
@@ -105,12 +106,14 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
 }
 
 struct inode *inode_get(struct inode *ip) {
+    ASSERT(ip->ref_count > 0);
     __atomic_add_fetch(&ip->ref_count, 1, __ATOMIC_SEQ_CST);
     return ip;
 }
 
 void inode_put(struct inode *ip) {
     if (!ip) return;
+    BUG_ON(ip->ref_count < 0);
     spin_lock(&inode_hash_lock);
     ip->ref_count--;
     if (ip->ref_count <= 0) {

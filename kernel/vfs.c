@@ -8,6 +8,7 @@
 #include "kernel/display.h"
 #include "kernel/pty.h"
 #include "kernel/proc.h"
+#include "kernel/log.h"
 #include "kernel/serial.h"
 #include "kernel/sparse.h"
 #include "kernel/mem/kasan.h"
@@ -36,13 +37,13 @@ void vfs_init(void) {
         if (ahci_set_active_port(try_ports[pi]) != 0) continue;
         rc = fat32_init();
         if (rc == 0) {
-            serial_printf("vfs_init: FAT32 mounted on port %d\n", try_ports[pi]);
+            printk(LOG_INFO, "vfs_init: FAT32 mounted on port %d\n", try_ports[pi]);
             devtmpfs_create("sda", DEV_BLOCK, &blk_dev_ops);
             break;
         }
     }
     if (rc != 0) {
-        serial_printf("vfs_init: FAT32 init failed on all ports\n");
+        printk(LOG_ERROR, "vfs_init: FAT32 init failed on all ports\n");
         return;
     }
 }
