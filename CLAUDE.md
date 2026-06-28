@@ -74,10 +74,10 @@ arch/x64/
   vectors.S           — 48个中断向量桩
   trapentry.S         — __alltraps/__trapret, syscall_fast_entry/SYSRET, switch_to, process_entry
   ap_trampoline.S     — AP 实模式→长模式 trampoline
-  paging.cc / paging.h — GDT, enable_paging, 4级页表, bump_alloc
-  trap.cc / trap.h    — IDT, PIC, PIT
-  smp.cc / smp.h      — Per-CPU 数据/GDT/TSS, AP 启动
-  apic.cc / apic.h    — LAPIC/I/O APIC, 定时器校准
+  paging.c / paging.h — GDT, enable_paging, 4级页表, bump_alloc
+  trap.c / trap.h     — IDT, PIC, PIT
+  smp.c / smp.h       — Per-CPU 数据/GDT/TSS, AP 启动
+  apic.c / apic.h     — LAPIC/I/O APIC, 定时器校准
   utils.h             — outb/inb, wrmsr/rdmsr, IrqGuard, syscall 内联汇编
   memlayout.h         — PAGE_SIZE/PHY_TO_PAGE 等常量
 
@@ -85,10 +85,18 @@ kernel/
   CMakeLists.txt
   kernel.c / kernel.h   — kernel_main
   serial.c / serial.h   — COM1 串口（NSERIAL 门控）
-  trap.c / trap.h       — trap_dispatch + syscall_dispatch + 57个syscall + IRQ注册表
-  proc.c / proc.h       — PCB, switch_to, schedule, proc_reap
-  fb.c / fb.h           — init_fb（framebuffer 物理页映射）
+  trap.c / trap.h       — trap_dispatch + syscall_dispatch + 59个syscall + IRQ注册表
+  proc.c / proc.h       — task_t/mm_t, switch_to, schedule, task_reap
   ahci.c / ahci.h       — AHCI DMA 驱动
+  acpi.c / acpi.h       — ACPI 表解析
+  pci.c / pci.h         — PCI/PCIe ECAM 枚举与 BAR 分配
+  xhci.c / xhci.h       — xHCI USB 主控驱动
+  display.c / display.h — KMS 内核态 display（bochs-display, req flip）
+  pty.c / pty.h         — PTY/TTY 子系统（pseudoterminal master/slave）
+  log.c / log.h         — printk/panic/dump_stack_trace/BUG_ON/WARN_ON/ASSERT
+  sparse.h              — Sparse 注解（__user, __iomem, phys_addr_t, kern_vaddr_t）
+  user_check.h          — 用户态缓冲区/指针验证
+  elf_loader.c / elf_loader.h — ELF 加载器
   socket.c / socket.h   — AF_UNIX SOCK_STREAM + SCM_RIGHTS
   vfs.c / vfs.h         — VFS 层（sys_open/sys_stat/sys_mkdir/sys_unlink/sys_rmdir/sys_dev_create）
   fat32.c / fat32.h     — FAT32 内核文件系统（路径解析/读写/创建/删除/目录操作）
@@ -102,6 +110,8 @@ kernel/
     alloc.c / alloc.h   — Bump/BFC 分配器
     slab.c / slab.h     — Slab 分配器
     user_mapping.c      — 用户页映射辅助
+    copy_user.c         — copy_to_user/copy_from_user
+    kasan.c / kasan.h   — KASAN（SANITIZE=1 条件编译）
 
 driver/
   CMakeLists.txt
@@ -111,7 +121,7 @@ driver/
   terminal.cc         — 用户态 Terminal（VT100 + Display client）
 
 init/
-  init.c              — init 进程（spawn 驱动 + waitpid）
+  init.c              — init 进程（fork+exec 驱动 + waitpid）
 
 shell/
   shell.cc            — Shell（ls/cat/cd/pwd/touch/mkdir + 路径执行）
@@ -119,20 +129,27 @@ shell/
 user/
   CMakeLists.txt
   hello.c             — 最小用户程序
-  include/             — libc 头文件（stdio.h, stdlib.h, string.h, fcntl.h, time.h, unistd.h, sys.h, sys/*.h, input.h, usb_hid.h）
+  include/             — libc 头文件（stdio.h, stdlib.h, string.h, fcntl.h, time.h, unistd.h,
+                         sys.h, sys/*.h, input.h, usb_hid.h, assert.h, ctype.h, dirent.h,
+                         errno.h, signal.h, termios.h）
   lib/
-    stdio.cc, string.cc, start.cc, malloc.cc, sys.cc, file.cc, sys_ipc.cc, sys_shm.cc, usb_kbd.cc, time.cc
-  test/                — 13个测试 ELF（test_runner + 12子系统测试）
-  lib/unity/           — Unity v2.6.1
+    stdio.cc, string.cc, start.cc, malloc.cc, file.cc, sys_ipc.cc, sys_shm.cc,
+    usb_kbd.cc, time.cc, unistd.cc, sys_wait.cc, sys_mman.cc, sys_irq.cc,
+    sys_device.cc, sys_process.cc, sys_pci.cc, signal.cc, ctype.c, strtol.c,
+    stdlib_misc.c, uname.c, sleep.c, assert.c
+  test/                — 15个测试 ELF（test_runner + 14子系统测试）
+  lib/unity/           — Unity wrapper（源码在 third_party/Unity 子模块）
+
+third_party/
+  Unity/               — Unity v2.6.1 测试框架（git submodule）
 
 common/
-  common.h, macro.h, errno.h, elf_loader.cc/h, syscall.h, shm.h, dev.h, socket.h
+  boot.h, macro.h, errno.h, syscall.h, syscall_nums.h, shm.h, dev.h, socket.h,
+  elf.h, dirent.h, stat.h, ioctl.h, input.h, font_metrics.h, display.h,
+  fcntl.h, mman.h, signal.h, types.h, kvformat.c, kvformat.h
 
 kernel/
   efi.h               — EFI 类型定义
-
-tutorial/
-  boot/boot.bin       — 引导教程示例
 ```
 
 ## 设计文档索引
@@ -142,9 +159,11 @@ tutorial/
 | 文档 | 内容 |
 |------|------|
 | `boot.md` | UEFI 启动流程、GDT/IDT/TSS、中断架构 |
+| `uefi.md` | UEFI 引导详细设计 |
 | `syscall.md` / `sys_api.md` | 系统调用编号与 API 参考 |
 | `rpc.md` | REQ/RESP 同步 IPC 协议 |
 | `process_lifecycle.md` | 进程创建/退出/waitpid/proc_reap |
+| `fork_exec.md` | fork+execve 设计（task_t/mm_t 拆分） |
 | `schedule.md` | 调度器、run_queue、switch_to、idle |
 | `smp.md` | SMP 多核、Per-CPU 数据、AP 启动 |
 | `mem.md` | Bump/BFC/Slab 分配器 |
@@ -156,18 +175,30 @@ tutorial/
 | `kms.md` | KMS 内核态驱动（display buffer 分配 + req flip + devtmpfs /dev/kms） |
 | `terminal_split.md` | Terminal 进程设计 |
 | `driver_workflow.md` | 用户态驱动工作流 |
+| `user_driver.md` | 用户态驱动详细设计 |
 | `file_system.md` / `fat32.md` | FAT32 文件系统（内核化，详见 vfs.md） |
 | `libc.md` | 用户态 libc 设计 |
 | `shm.md` | SHM fd + mmap 模型 |
 | `socket.md` | AF_UNIX SOCK_STREAM + SCM_RIGHTS + poll |
 | `vfs.md` | VFS 统一 I/O（FAT32 内核化 + inode + page cache + devtmpfs） |
 | `dev_table.md` | 设备注册表与动态发现 |
+| `dev_vfs.md` | 设备 VFS 统一路径（迁移计划） |
+| `signal.md` | 信号机制设计（sigframe/EINTR/force_sig） |
+| `tty.md` | PTY/TTY 子系统设计 |
+| `posix.md` | POSIX 接口覆盖现状与实现方案 |
 | `cmake.md` / `cmake_user_build.md` | CMake 构建系统 |
 | `shell.md` | Shell 命令设计 |
 | `time.md` | 时间函数 |
 | `spinlock.md` | 自旋锁实现 |
 | `tss_ist.md` | TSS IST 栈 |
 | `nx_bit.md` | NX 位与 W^X 策略 |
+| `thread.md` | 线程设计（CLONE_VM 预留） |
+| `x64_migration.md` | x86-64 迁移记录 |
+| `sparse.md` | Sparse 注解设计 |
+| `sanitize.md` | KASAN sanitizer 设计 |
+| `serial.md` | 串口设计 |
+| `kernel_exception.md` | 内核异常处理基础设施 |
+| `test.md` | 测试框架设计 |
 | `todo.md` | 待办事项与技术债务 |
 
 ## 关键陷阱

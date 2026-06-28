@@ -1,5 +1,34 @@
 # PTY 子系统设计
 
+## 实现状态
+
+| 组件 | 状态 | 说明 |
+|------|------|------|
+| `kernel/pty.h` + `kernel/pty.c` | ✅ 完成 | struct pty、ring buffer、ptmx_open、pts_open、pty read/write/close/dup、OPOST+ONLCR |
+| `struct termios` / `struct winsize` | ✅ 完成 | 内核 `kernel/pty.h` + 用户态 `user/include/termios.h` 一致 |
+| `FD_TTY` + proc_t sid/pgid/ctty | ✅ 完成 | `kernel/proc.h`；fork 时正确复制 sid/pgid/ctty |
+| `/dev/ptmx` 注册 + PTY 创建 | ✅ 完成 | `pty_init()` → `devtmpfs_create("ptmx", ...)` |
+| TCGETS/TCSETS/TCSETSW/TCSETSF | ✅ 完成 | `pty_ioctl()` |
+| TIOCGWINSZ/TIOCSWINSZ | ✅ 完成 | TIOCSWINSZ 不发 SIGWINCH（待补） |
+| TIOCGPTN/TIOCSPTLCK | ✅ 完成 | TIOCSPTLCK 为 stub（返回 0） |
+| TIOCGPGRP/TIOCSPGRP | ✅ 完成 | TIOCSPGRP 未验证 pgid 属于 session |
+| OPOST+ONLCR（slave write） | ✅ 完成 | `pty_slave_write()` 中 `do_opost` |
+| pty_close_fd / pty_dup_fd | ✅ 完成 | 引用计数 + EOF/EPIPE 语义 |
+| libc 封装 | ✅ 完成 | termios.h / sys/ioctl.h / isatty / tcgetattr / tcsetattr / ttyname |
+| fork + execve | ✅ 完成 | sys_fork + sys_execve |
+| **terminal.cc PTY 改造** | ✅ 完成 | open ptmx + fork shell + ldisc + re-fork on exit |
+| **sys_poll FD_TTY 分支** | ✅ 完成 | `pty_poll()` 已接入 `sys_poll()` |
+| **sys_kill pid < 0** | ✅ 完成 | pgsignal(pgid, sig) + kill(0, sig) + kill(-1, -EPERM) |
+| **TIOCSCTTY** | ✅ 完成 | session leader 调 ioctl(0, TIOCSCTTY, 0) 设置 ctty |
+| **TIOCSWINSZ → SIGWINCH** | ✅ 完成 | winsize 变化 → 前台 pgid 收到 SIGWINCH |
+| **master close → SIGHUP** | ✅ 完成 | master_refs==0 时向 slave session 前台 pgid 发 SIGHUP |
+| **eof_pending** | ✅ 完成 | master write len=0 → slave read 返回 0 (EOF) |
+| **winsize 默认 0x0** | ✅ 完成 | pty_alloc 初始化 ws_row/ws_col=0，Terminal 通过 TIOCSWINSZ 设真实值 |
+| **init test_runner → shell 迁移** | ✅ 完成 | init 不再 spawn test_runner，shell TEST 模式 fork+exec |
+| **setsid/setpgid 等 syscall** | ✅ 完成 | SYS_SETSID/SETPGID/GETPGID/GETSID + libc 封装 |
+| **shell setsid + TIOCSCTTY** | ✅ 完成 | shell 启动后 setsid() + ioctl(0, TIOCSCTTY, 0) |
+| **shell readline ECHO 检查** | ✅ 完成 | ECHO 开时 shell 不 echo（Terminal 本地 echo），ECHO 关时 shell 自己 echo |
+
 ## 概述
 
 实现 POSIX PTY（伪终端 master/slave 对），内核提供双向字节管道机制 + termios 存储 + fd 管理，用户态 Terminal 提供 line discipline 策略（VT100 解析、Ctrl-C→SIGINT、echo、行编辑）。对外接口与 Linux 一致（/dev/ptmx、TCGETS/TCSETS、isatty），内部遵循微内核原则（策略在用户态）。
@@ -292,7 +321,7 @@ Shell 的 fd 0/1/2 都是同一 slave fd（dup2 复制），slave_refs += 3。
 
 ### sys_ioctl(fd, request, arg)
 
-当前 sys_ioctl 只支持 FD_DEV。扩展支持 FD_TTY：
+当前 sys_ioctl 支持 FD_DEV 和 FD_TTY。FD_TTY 通过 `pty_ioctl()` 处理：
 
 ```
 FD_TTY ioctl:
@@ -302,10 +331,10 @@ FD_TTY ioctl:
   TCSETSF (0x5404): 同 TCSETS + 清空 m_to_s_buf 和 s_to_m_buf
   TIOCGPGRP (0x540F): 返回 pty->t_pgid
   TIOCSPGRP (0x540E): 设置 pty->t_pgid（验证 pgid 属于 pty 的 session）
-  TIOCSCTTY (0x540E): 设置进程的 ctty = pty（session leader 才能调用）
+  TIOCSCTTY (0x540E): 设置进程的 ctty = pty（session leader 才能调用）— ❌ 未实现
   TIOCGWINSZ (0x5413): 拷贝 pty->t_winsize 到用户空间
   TIOCSWINSZ (0x5414): 从用户空间拷贝 winsize → pty->t_winsize
-                     → 如果大小变化，向 slave session 发 SIGWINCH
+                     → 如果大小变化，向 slave session 发 SIGWINCH — ❌ 未投递
   TIOCGPTN:          返回 pty->index
   TIOCSPTLCK:        lock/unlock slave（暂不实现）
 
@@ -382,7 +411,9 @@ Terminal 维护 foreground pgid（记录 Shell 的 pid），Ctrl-C 时 sys_kill(
 
 ## Terminal 进程改造
 
-### 当前架构（两条 pipe）
+### 当前架构（两条 pipe）— 待替换
+
+当前 `driver/terminal.cc` 仍使用两条 pipe：
 
 ```c
 pipe(p_stdout);  // shell stdout → terminal 读
@@ -394,7 +425,7 @@ dup2(p_stdout[0], 0);   // terminal 读 shell 输出
 dup2(p_stdin[1], 1);     // terminal 写键盘输入
 ```
 
-### 新架构（PTY pair）
+### 新架构（PTY pair）— 待实现
 
 ```c
 master_fd = open("/dev/ptmx");          // 内核创建 PTY 对 + /dev/pts0
@@ -453,84 +484,115 @@ kernel_main → sig_init() → devtmpfs_init() → 注册 /dev/ptmx (ptmx_ops)
 
 内核注册 /dev/ptmx 后不参与 PTY 创建决策 — Terminal 进程自行决定何时创建 PTY、spawn Shell。
 
-## sys_kill 扩展（未来）
+## sys_kill 扩展
 
-| pid 值 | 语义 |
-|--------|------|
-| pid > 0 | 发信号到指定进程 |
-| pid == 0 | 发信号到同进程组 |
-| pid == -1 | 发信号到所有进程（暂不实现，返回 -EPERM） |
-| pid < -1 | 发信号到进程组 abs(pid) — pgsignal(abs(pid), sig) |
+当前只实现 pid > 0。需扩展：
 
-本阶段只实现 pid > 0。Terminal 用 sys_kill(shell_pid, SIGINT) 替代 kill(-pgid, SIGINT)。
+| pid 值 | 语义 | 状态 |
+|--------|------|------|
+| pid > 0 | 发信号到指定进程 | ✅ 已实现 |
+| pid == 0 | 发信号到同进程组 | ❌ 未实现 |
+| pid == -1 | 发信号到所有进程（暂不实现，返回 -EPERM） | ❌ 未实现 |
+| pid < -1 | 发信号到进程组 abs(pid) — pgsignal(abs(pid), sig) | ❌ 未实现 |
+
+Terminal 当前用 `sys_kill(shell_pid, SIGINT)` 临时替代 `kill(-pgid, SIGINT)`，只能杀 shell 本身，无法杀前台进程组。
 
 ## 新增/修改的文件
 
-| 文件 | 变更 |
-|------|------|
-| `kernel/pty.h` | **新增** — struct pty, struct termios, struct winsize, PTY 常量 |
-| `kernel/pty.c` | **新增** — ptmx_open, slave_open, pty read/write/close, TCGETS/TCSETS ioctl, pty_alloc |
-| `kernel/devtmpfs.c` | 注册 /dev/ptmx (ptmx_ops)，支持 "ptsN" slave 设备节点动态创建/删除 |
-| `kernel/proc.h` | FD_TTY=8, fd_table union 加 pty*, proc_t 加 sid/pgid/ctty（预留） |
-| `kernel/trap.c` | sys_read/sys_write/sys_close/sys_dup2/sys_ioctl 新增 FD_TTY 分支, sys_poll FD_TTY 支持 |
-| `kernel/proc.c` | proc_reap 新增 FD_TTY 分支 |
-| `common/dev.h` | 新增 DEV_PTMX, DEV_PTS_SLAVE 设备类型 |
-| `driver/terminal.cc` | 改为 PTY master holder，移除两条 pipe |
-| `user/include/termios.h` | **新增** — struct termios, tcgetattr/tcsetattr/isatty |
-| `user/include/sys/ioctl.h` | **新增** — ioctl() 声明 |
+| 文件 | 变更 | 状态 |
+|------|------|------|
+| `kernel/pty.h` | struct pty, struct termios, struct winsize, PTY 常量 | ✅ |
+| `kernel/pty.c` | ptmx_open, pts_open, pty read/write/close/dup, pty_ioctl, pty_poll, OPOST+ONLCR | ✅ |
+| `kernel/devtmpfs.c` | 注册 /dev/ptmx (ptmx_ops)，支持 "ptsN" slave 设备节点动态创建/删除 | ✅ |
+| `kernel/proc.h` | FD_TTY=8, fd_table union 加 pty*, proc_t 加 sid/pgid/ctty | ✅ |
+| `kernel/trap.c` | sys_read/sys_write/sys_close/sys_dup2/sys_ioctl FD_TTY 分支 | ✅ |
+| `kernel/proc.c` | proc_reap FD_TTY 分支，fork 复制 sid/pgid/ctty | ✅ |
+| `common/dev.h` | DEV_PTMX, DEV_PTS_SLAVE 设备类型 | ✅ |
+| `driver/terminal.cc` | 改为 PTY master holder，移除两条 pipe | ✅ |
+| `user/include/termios.h` | struct termios, tcgetattr/tcsetattr/isatty | ✅ |
+| `user/include/sys/ioctl.h` | ioctl() 声明 | ✅ |
+| `user/lib/file.cc` | isatty/tcgetattr/tcsetattr/ttyname/ioctl 实现 | ✅ |
+| `kernel/socket.c` | sys_poll FD_TTY 分支（pty_poll 接入） | ✅ |
+| `common/signal.h` | SIGWINCH 信号定义 | ✅ |
+| `kernel/trap.c` | sys_kill pid<0 (pgsignal), setsid/setpgid/getpgid/getsid | ✅ |
+| `common/syscall_nums.h` | SYS_SETSID/SETPGID/GETPGID/GETSID, NR_SYSCALL=63 | ✅ |
+| `common/syscall.h` | sys_setsid/setpgid/getpgid/getsid inline wrappers | ✅ |
+| `user/include/sys/process.h` | setsid/setpgid/getpgid/getsid 声明 | ✅ |
+| `user/lib/sys_process.cc` | setsid/setpgid/getpgid/getsid libc 封装 | ✅ |
+| `init/init.c` | 删除 TEST spawn test_runner | ✅ |
+| `shell/shell.cc` | setsid+TIOCSCTTY, TEST fork test_runner, readline ECHO 检查 | ✅ |
 
 ## 实现步骤
 
-### Step 1: 内核 pty 数据结构 + /dev/ptmx + slave fd
+### Step 1: 内核 pty 数据结构 + /dev/ptmx + slave fd — ✅ 已完成
 
-- 新建 `kernel/pty.h` + `kernel/pty.c`
-- 实现 struct pty 初始化、ring buffer 读写辅助函数
-- 注册 /dev/ptmx 到 devtmpfs，实现 ptmx_open（创建 PTY 对 + /dev/ptsN slave 节点）
+- `kernel/pty.h` + `kernel/pty.c` 已实现
+- struct pty 初始化、ring buffer 读写辅助函数
+- /dev/ptmx 注册到 devtmpfs，ptmx_open 创建 PTY 对 + /dev/ptsN slave 节点
 - FD_TTY 类型，sys_read/sys_write/sys_close/sys_dup2 FD_TTY 分支
-- proc_t 加 sid/pgid/ctty 预留字段（初始化为 0）
+- proc_t 加 sid/pgid/ctty 预留字段（初始化为 0，fork 时复制）
 
-**验证**: Terminal open("/dev/ptmx") + open("/dev/pts0") + spawn Shell → Shell 输出到屏幕
+**验证**: Terminal open("/dev/ptmx") + open("/dev/pts0") + fork shell → Shell 输出到屏幕
 
-### Step 2: termios + ioctl
+### Step 2: termios + ioctl — ✅ 已完成
 
 - TCGETS/TCSETS/TCSETSW/TCSETSF ioctl
 - TIOCGWINSZ/TIOCSWINSZ
 - TIOCGPTN (返回 PTY index)
+- TIOCSPTLCK (stub，返回 0)
+- TIOCGPGRP/TIOCSPGRP
 - OPOST+ONLCR 在 slave write 路径
 
 **验证**: Shell tcgetattr(0) + tcsetattr(0, raw) → Terminal 检查 termios → 切换到 raw 模式
 
-### Step 3: Terminal 改造
+### Step 3: Terminal 改造 — ✅ 完成
 
-- terminal.cc 改为 PTY master holder
-- 移除两条 pipe + dup2 重排逻辑
-- 添加 ldisc 逻辑：canonical/raw 模式切换、Ctrl-C→sys_kill
+- terminal.cc 改用 PTY：open("/dev/ptmx") → fork+exec shell → ldisc（canonical/raw、Ctrl-C→sys_kill、行编辑）
 - 设置 TIOCSWINSZ
+- Shell 退出后自动 re-fork
 
 **验证**: Ctrl-C → Shell 子进程收到 SIGINT 退出；vi 类程序 raw 模式正常
 
-### Step 4: libc 封装
+### Step 4: libc 封装 — ✅ 已完成
 
-- user/include/termios.h
-- user/include/sys/ioctl.h
-- tcgetattr/tcsetattr/isatty/ttyname
+- user/include/termios.h — struct termios, tcgetattr/tcsetattr
+- user/include/sys/ioctl.h — ioctl() 声明
+- user/lib/file.cc — isatty/tcgetattr/tcsetattr/ttyname/ioctl 实现
 
 **验证**: 用户程序 isatty(0) 返回 1；tcgetattr 获取 termios 正确
 
-### Step 5: Poll 扩展 + close 语义
+### Step 5: Poll 扩展 + close 语义 — ✅ 完成
 
-- sys_poll FD_TTY 支持（POLLIN/POLLOUT/POLLHUP）
-- master close → SIGHUP to slave session
-- slave close → master read EOF
+已完成：
+- `pty_poll()` 函数实现（POLLIN/POLLOUT/POLLHUP）
+- `pty_close_fd()` 引用计数 + EOF/EPIPE 语义 + SIGHUP to slave session
+- `sys_poll()`（kernel/socket.c）FD_TTY 分支已接入 pty_poll
+- master close → SIGHUP to slave session foreground pgid
 
-**验证**: Terminal poll(master_fd) 阻塞等待 Shell 输出；Shell 退出 → Terminal 检测到重新 spawn
+**验证**: Terminal poll(master_fd) 阻塞等待 Shell 输出；Shell 退出 → Terminal 检测到重新 fork
 
-### Step 6: session/pgid（未来）
+### Step 6: session/pgid — ✅ 完成
 
 - sys_setsid/sys_setpgid/sys_getpgid/sys_getsid
 - pgsignal(pgid, sig)
 - sys_kill 扩展 pid<0
-- TIOCSCTTY/TIOCSPGRP/TIOCGPGRP
+- TIOCSCTTY
+- shell 启动后 setsid() + ioctl(0, TIOCSCTTY, 0)
+- TIOCSWINSZ → SIGWINCH
+- eof_pending（master write len=0 → slave read 返回 0）
+- winsize 默认 0x0，Terminal 通过 TIOCSWINSZ 设真实值
+
+### 剩余工作优先级
+
+```
+1. sys_poll 加 FD_TTY 分支          ← 前置，terminal 改造需要
+2. terminal.cc 改造                  ← 核心：open ptmx + ldisc + fork shell
+3. sys_kill pid<0 (pgsignal)         ← Ctrl-C 杀前台进程组
+4. TIOCSCTTY                         ← shell setsid + set controlling tty
+5. TIOCSWINSZ → SIGWINCH             ← vi 类程序需要
+6. init test_runner → shell 迁移     ← 让 test_runner 走 PTY 输出
+7. setsid/setpgid 等 syscall         ← 完整 job control
+```
 
 ## 与其他系统的关系
 
@@ -706,10 +768,13 @@ while (1) {
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| /dev/pts/N 子目录 | devtmpfs 加目录层级支持，路径从 /dev/pts0 改为 /dev/pts/0 | 中 |
-| session/pgid/controlling terminal | setsid/TIOCSCTTY/TIOCSPGRP | 中 |
+| sys_poll FD_TTY 分支 | pty_poll() 已实现，需接入 sys_poll() | 高 |
+| terminal.cc PTY 改造 | open ptmx + ldisc + fork shell | 高 |
 | sys_kill pid<0 | pgsignal(pgid, sig) | 中 |
-| SIGWINCH | 窗口大小变化投递 | 中 |
-| pgsignal | 按 pgid 遍历 procs[] 投递信号 | 中 |
+| TIOCSCTTY | shell setsid + set controlling tty | 中 |
+| TIOCSWINSZ → SIGWINCH | 窗口大小变化投递 | 中 |
+| init test_runner → shell 迁移 | test_runner 走 PTY 输出 | 中 |
+| setsid/setpgid 等 syscall | 完整 job control | 中 |
+| /dev/pts/N 子目录 | devtmpfs 加目录层级支持，路径从 /dev/pts0 改为 /dev/pts/0 | 低 |
 | Serial console tty | COM1 作为 console tty | 低 |
 | 多终端 | 多个 PTY 对，多个 Terminal session | 低 |

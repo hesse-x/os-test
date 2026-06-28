@@ -2,10 +2,10 @@
 
 ## 现状概述
 
-- **系统调用：** 46 个（编号 0-45），全部在 `kernel/trap.cc` 中有真实 handler（无 ENOSYS 桩）
-- **kernel syscall 分布：** `trap.cc` 32 个（0-35）+ `socket.cc` 10 个（36-45）+ `pci.cc` 1 个（30）
-- **libc 头文件：** 12 个（`user/include/` 下 + `sys/` 子目录 13 个）
-- **libc 实现：** 17 个 `.cc` 源文件（`user/lib/`）
+- **系统调用：** 59 个（编号 0-58，slot 8 为 NULL），全部在 `kernel/trap.c` 中有真实 handler
+- **kernel syscall 分布：** `trap.c` 核心 + `socket.c`（30-39）+ `vfs.c`/`fat32.c`/`devtmpfs.c`（47-56）
+- **libc 头文件：** `user/include/` 下 + `sys/` 子目录
+- **libc 实现：** `user/lib/` 下
 
 ---
 
@@ -22,14 +22,14 @@
 | `write()` | `unistd.h` | `SYS_WRITE` | 用户态 fd_table 分发 |
 | `close()` | `unistd.h` | `SYS_CLOSE` | 用户态 fd_table 同步 |
 | `pipe()` | `unistd.h` | `SYS_PIPE` | |
-| `open()` | `fcntl.h` | `SYS_INSTALL_FD` + `SYS_MSG` | 支持 `/dev/xxx` 设备节点 |
+| `open()` | `fcntl.h` | `SYS_OPEN` | VFS/FAT32 直通（不再走 IPC） |
 | `dup2()` | `unistd.h` | `SYS_DUP2` | |
 | `fcntl()` | `fcntl.h` | `SYS_FCNTL` | F_GETFL/F_SETFL 实现 |
 | `waitpid()` | `sys/wait.h` | `SYS_WAITPID` | options 参数暂不使用 |
 | `mmap()` | `sys/mman.h` | `SYS_MMAP` | |
 | `munmap()` | `sys/mman.h` | `SYS_MUNMAP` | |
-| `stat()` | `sys/stat.h` | `SYS_MSG` (→ fs_driver) | 仅 st_size，其他字段留空 |
-| `chdir()` | — | `SYS_MSG` (→ fs_driver) | 实现在 `file.cc` 中 |
+| `stat()` | `sys/stat.h` | `SYS_STAT` | VFS/FAT32 直通 |
+| `chdir()` | — | `SYS_MSG` (→ fs_driver) | 实现在 `file.cc` 中（待迁移到内核） |
 | `poll()` | `sys/poll.h` | `SYS_POLL` | 支持 pipe/socket/dev fd |
 | `socket()` | `sys/socket.h` | `SYS_SOCKET` | AF_UNIX only |
 | `bind()` | `sys/socket.h` | `SYS_BIND` | |
@@ -87,90 +87,73 @@
 
 ---
 
-## Syscall 编号表（最终方案）
+## Syscall 编号表（当前实际编号）
 
-**NR_SYSCALL = 45**（0-44 连续无空洞）。
+**NR_SYSCALL = 59**（0-58，slot 8 为 NULL）。
 
-| 编号 | 名称 | 来源 | 实现位置 |
-|---|---|---|---|
-| 0 | `SYS_GETPID` | 不变 | `trap.cc` |
-| 1 | `SYS_YIELD` | 不变 | `trap.cc` |
-| 2 | `SYS_RECV` | 不变 | `trap.cc` |
-| 3 | `SYS_REQ` | 不变 | `trap.cc` |
-| 4 | `SYS_RESP` | 不变 | `trap.cc` |
-| 5 | `SYS_IRQ_BIND` | 不变 | `trap.cc` |
-| 6 | `SYS_EXIT` | 不变 | `trap.cc` |
-| 7 | `SYS_WAITPID` | 不变 | `trap.cc` |
-| 8 | `SYS_SPAWN` | 不变 | `trap.cc` |
-| 9 | `SYS_MMAP` | 不变 | `trap.cc` |
-| 10 | `SYS_MUNMAP` | 不变 | `trap.cc` |
-| 11 | `SYS_FB_INFO` | 不变 | `trap.cc` |
-| 12 | `SYS_SHM_CREATE` | 不变 | `trap.cc` |
-| 13 | `SYS_SHM_ATTACH` | 不变 | `trap.cc` |
-| 14 | `SYS_PIPE` | 不变 | `trap.cc` |
-| 15 | `SYS_WRITE` | 不变 | `trap.cc` |
-| 16 | `SYS_READ` | 不变 | `trap.cc` |
-| 17 | `SYS_CLOSE` | 不变 | `trap.cc` |
-| 18 | `SYS_LOAD_DEV` | 不变 | `trap.cc` |
-| 19 | `SYS_NOTIFY` | ← 原 20 | `trap.cc` |
-| 20 | `SYS_GETTIME` | ← 原 21 | `trap.cc` |
-| 21 | `SYS_CLOCK` | ← 原 22 | `trap.cc` |
-| 22 | `SYS_MSG` | ← 原 23 | `trap.cc` |
-| 23 | `SYS_MSG_RESP` | ← 原 24 | `trap.cc` |
-| 24 | `SYS_IOPERM` | ← 原 25 | `trap.cc` |
-| 25 | `SYS_DUP2` | ← 原 26 | `trap.cc` |
-| 26 | `SYS_FCNTL` | ← 原 27 | `trap.cc` |
-| 27 | `SYS_DMA_ALLOC` | ← 原 28 | `trap.cc` |
-| 28 | `SYS_DMA_FREE` | ← 原 29 | `trap.cc` |
-| 29 | `SYS_PCI_DEV_INFO` | ← 原 30 | `pci.cc` |
-| **30** | **`SYS_BLOCK_IO`** | **← 合并原 31+32** | **`trap.cc`** |
-| 31 | `SYS_BLOCK_ASYNC` | ← 原 33 | `trap.cc` |
-| 32 | `SYS_OPEN_DEV` | ← 原 34 | `trap.cc` |
-| 33 | `SYS_INSTALL_FD` | ← 原 35 | `trap.cc` |
-| 34 | `SYS_SOCKET` | ← 原 36 | `socket.cc` |
-| 35 | `SYS_BIND` | ← 原 37 | `socket.cc` |
-| 36 | `SYS_LISTEN` | ← 原 38 | `socket.cc` |
-| 37 | `SYS_ACCEPT` | ← 原 39 | `socket.cc` |
-| 38 | `SYS_CONNECT` | ← 原 40 | `socket.cc` |
-| 39 | `SYS_SOCKETPAIR` | ← 原 41 | `socket.cc` |
-| 40 | `SYS_SENDMSG` | ← 原 42 | `socket.cc` |
-| 41 | `SYS_RECVMSG` | ← 原 43 | `socket.cc` |
-| 42 | `SYS_SHUTDOWN` | ← 原 44 | `socket.cc` |
-| 43 | `SYS_POLL` | ← 原 45 | `socket.cc` |
-| **44** | **`SYS_LSEEK`** | **新增** | **`trap.cc`** |
-
-### Syscall 变更明细
-
-| 操作 | syscall | 说明 |
+| 编号 | 名称 | 实现位置 |
 |---|---|---|
-| ❌ 移除 | `SYS_DEV_MSG` (原 19) | 与 `SYS_MSG` 完全重复。`msg_fd()` 改用 `sys_msg(fd_table[fd].target_pid, ...)` |
-| ❌ 移除 | `SYS_BLOCK_WRITE` (原 32) | 与 `SYS_BLOCK_READ` 合并为带方向标志的统一接口 |
-| **新** | **`SYS_BLOCK_IO`** (30) | `sys_block_io(lba, buf, count, dir)`，`dir=0` 读 `dir=1` 写 |
-| **新** | **`SYS_LSEEK`** (44) | `sys_lseek(fd, offset, whence)`，更新内核 `file_data.offset` 缓存。FD_PIPE/SOCKET/DEV 返回 `-ESPIPE`。支持 `SEEK_SET(0)/SEEK_CUR(1)/SEEK_END(2)` |
+| 0 | `SYS_GETPID` | `trap.c` |
+| 1 | `SYS_YIELD` | `trap.c` |
+| 2 | `SYS_RECV` | `trap.c` |
+| 3 | `SYS_REQ` | `trap.c` |
+| 4 | `SYS_RESP` | `trap.c` |
+| 5 | `SYS_IRQ_BIND` | `trap.c` |
+| 6 | `SYS_EXIT` | `trap.c` |
+| 7 | `SYS_WAITPID` | `trap.c` |
+| 8 | ~~SYS_SPAWN~~（已删除，slot NULL） | — |
+| 9 | `SYS_MMAP` | `trap.c` |
+| 10 | `SYS_MUNMAP` | `trap.c` |
+| 11 | `SYS_SHM_CREATE` | `trap.c` |
+| 12 | `SYS_SHM_ATTACH` | `trap.c` |
+| 13 | `SYS_PIPE` | `trap.c` |
+| 14 | `SYS_WRITE` | `trap.c` |
+| 15 | `SYS_READ` | `trap.c` |
+| 16 | `SYS_CLOSE` | `trap.c` |
+| 17 | `SYS_NOTIFY` | `trap.c` |
+| 18 | `SYS_GETTIME` | `trap.c` |
+| 19 | `SYS_CLOCK` | `trap.c` |
+| 20 | `SYS_MSG` | `trap.c` |
+| 21 | `SYS_MSG_RESP` | `trap.c` |
+| 22 | `SYS_IOPERM` | `trap.c` |
+| 23 | `SYS_DUP2` | `trap.c` |
+| 24 | `SYS_FCNTL` | `trap.c` |
+| 25 | `SYS_DMA_ALLOC` | `trap.c` |
+| 26 | `SYS_DMA_FREE` | `trap.c` |
+| 27 | `SYS_PCI_DEV_INFO` | `trap.c` |
+| 28 | `SYS_BLOCK_ASYNC` | `trap.c` |
+| 29 | `SYS_INSTALL_FD` | `trap.c` |
+| 30 | `SYS_SOCKET` | `socket.c` |
+| 31 | `SYS_BIND` | `socket.c` |
+| 32 | `SYS_LISTEN` | `socket.c` |
+| 33 | `SYS_ACCEPT` | `socket.c` |
+| 34 | `SYS_CONNECT` | `socket.c` |
+| 35 | `SYS_SOCKETPAIR` | `socket.c` |
+| 36 | `SYS_SENDMSG` | `socket.c` |
+| 37 | `SYS_RECVMSG` | `socket.c` |
+| 38 | `SYS_SHUTDOWN` | `socket.c` |
+| 39 | `SYS_POLL` | `socket.c` |
+| 40 | `SYS_LSEEK` | `trap.c` |
+| 41 | `SYS_MEMFD_CREATE` | `trap.c` |
+| 42 | `SYS_FTRUNCATE` | `trap.c` |
+| 43 | `SYS_KILL` | `trap.c` |
+| 44 | `SYS_SIGACTION` | `trap.c` |
+| 45 | `SYS_SIGRETURN` | `trap.c` |
+| 46 | `SYS_DEBUG_PRINT` | `trap.c` |
+| 47 | `SYS_OPEN` | `vfs.c` |
+| 48 | `SYS_STAT` | `vfs.c` |
+| 49 | `SYS_MKDIR` | `vfs.c` |
+| 50 | `SYS_UNLINK` | `vfs.c` |
+| 51 | `SYS_RMDIR` | `vfs.c` |
+| 52 | `SYS_DEV_CREATE` | `vfs.c` |
+| 53 | `SYS_GETDENTS` | `vfs.c` |
+| 54 | `SYS_IOCTL` | `trap.c` |
+| 55 | `SYS_FSTAT` | `vfs.c` |
+| 56 | `SYS_FDEV_PID` | `trap.c` |
+| 57 | `SYS_FORK` | `trap.c` |
+| 58 | `SYS_EXECVE` | `trap.c` |
 
-### `SYS_BLOCK_IO` 封装接口
-
-```c
-#define BLOCK_DIR_READ  0
-#define BLOCK_DIR_WRITE 1
-
-static inline int sys_block_io(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
-    return (int)__syscall4(SYS_BLOCK_IO, (int64_t)lba,
-        (int64_t)(uintptr_t)buf, (int64_t)count, (int64_t)dir);
-}
-```
-
-### `SYS_LSEEK` 封装接口
-
-```c
-#define SEEK_SET 0
-#define SEEK_CUR 1
-#define SEEK_END 2
-
-static inline int64_t sys_lseek(int fd, int64_t offset, int whence) {
-    return __syscall3(SYS_LSEEK, (int64_t)fd, (int64_t)offset, (int64_t)whence);
-}
-```
+> **注：** 早期 posix.md 曾提议重排编号（合并 DEV_MSG、合并 BLOCK_READ/WRITE 等），该重排方案未实施。当前 syscall 编号为增量追加，与 `common/syscall_nums.h` 一致。
 
 ---
 
@@ -567,3 +550,61 @@ FAT32 attr 到 `st_mode` 映射：
 | 7. FILE I/O 完整 | fopen/fclose/fread/fwrite/fseek/ftell/rewind | 读写文件验证 |
 | 8. struct stat + dirent | stat 扩展 + opendir/readdir/closedir + fstat | ls -l 正常 |
 | 9. uname | sys/utsname.h + uname.c | 返回 Xos |
+
+---
+
+## errno 处理
+
+当前 syscall 返回负 errno（`-ENOMEM` 等）。POSIX 函数约定：返回 -1 并设置 `errno`。
+
+封装层统一模式：
+```c
+int64_t r = sys_xxx(args);
+if (r < 0) {
+    errno = (int)(-r);
+    return -1;
+}
+return (int)r;
+```
+
+`errno` 定义在 `user/include/errno.h`，当前为单线程全局变量。
+
+---
+
+## 迁移策略
+
+1. 用户态代码不再直接 `#include "common/syscall.h"`，改为使用对应 POSIX 头文件
+2. libc 内部（`stdio.cc`、`malloc.cc`、`start.cc`）可保留 `sys_*` 调用，因为它们是 libc 自身实现，需要直接访问底层 syscall
+3. 驱动专用接口（`recv/resp/req/msg/msg_resp`）降级到 `<driver/ipc.h>`，公共 libc 头只保留 POSIX 标准接口
+
+---
+
+## 替换示例
+
+替换前（shell/shell.cc）：
+```cpp
+#include "common/syscall.h"
+// ...
+freq->client_pid = sys_getpid();
+sys_notify(sys_lookup_dev(DEV_FS));
+{ struct recv_msg m; sys_recv(&m, 0); }
+int64_t child_pid = sys_spawn((const void *)elf_buf, (uint64_t)file_size, 0);
+int64_t result = sys_waitpid((int32_t)child_pid, &exit_code);
+```
+
+替换后：
+```cpp
+#include <unistd.h>
+#include <sys/ipc.h>
+#include <sys/device.h>
+#include <sys/process.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+// ...
+freq->client_pid = getpid();
+int fs_fd = open("/dev/fs", O_RDWR);
+msg_fd(fs_fd, &freq, sizeof(freq), &fresp, sizeof(fresp));
+{ struct recv_msg m; recv(&m, 0); }
+pid_t child_pid = spawn((const void *)elf_buf, (size_t)file_size, 0);
+pid_t result = waitpid((pid_t)child_pid, &exit_code, 0);
+```

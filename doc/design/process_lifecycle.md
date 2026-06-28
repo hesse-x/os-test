@@ -11,12 +11,12 @@
 | sys_spawn 返回值 | 成功返回子 PID，失败返回负 errno | shell 需要 PID 调 waitpid |
 | sys_spawn 创建方式 | 同步 | hello.elf 很小，非抢占内核态，同步不是瓶颈 |
 | sys_spawn iopl 安全 | 调用者 IOPL < 请求 IOPL 时返回 -EPERM | 防止普通进程 spawn IOPL=3 子进程打破隔离 |
-| 共享页映射 | 动态 SHM（sys_shm_create/attach） | 详见 [dynamic_shm_migration.md](dynamic_shm_migration.md) |
+| 共享页映射 | 动态 SHM（sys_shm_create/attach） | 详见 [ipc.md](ipc.md) 四、SHM 共享内存 |
 | 资源回收时机 | 全部延迟到 sys_waitpid | 避免 sys_exit 中解映射 PML4 后 schedule 切换 CR3 前的时序问题；每个 ZOMBIE 多占 4KB PML4 可接受 |
 | 无父进程的进程退出 | parent_pid == -1 时跳过 ZOMBIE 直接回收 | 启动时 4 个进程无父进程，避免 PCB 槽位永久泄漏 |
 | 异常进程退出 | CPU 异常 → ZOMBIE + notify 父 + schedule（替代 halt） | 用户程序 crash 不应拖垮全机；改动极小 |
 | 退出码类型 | int32_t | 与 Linux 一致 |
-| syscall 编号 | SYS_EXIT=8, SYS_WAITPID=9, SYS_SPAWN=10 | 顺序追加，零破坏性 |
+| syscall 编号 | SYS_EXIT=6, SYS_WAITPID=7, SYS_SPAWN=8 | 顺序追加，零破坏性 |
 
 ## proc_t 扩展
 
@@ -32,8 +32,12 @@ typedef enum {
 // 新增等待事件
 typedef enum {
     WAIT_NONE,
-    WAIT_NOTIFY,
-    WAIT_CHILD           // 新增：等待子进程退出
+    WAIT_RECV,
+    WAIT_REQ_REPLY,
+    WAIT_MSG_REPLY,
+    WAIT_CHILD,
+    WAIT_PIPE,
+    WAIT_POLL,
 } wait_event_t;
 
 // 新增字段
@@ -222,9 +226,9 @@ if (tf->cs == 0x2B) {
 ### common/syscall.h 新增
 
 ```c
-#define SYS_EXIT      8
-#define SYS_WAITPID   9
-#define SYS_SPAWN     10
+#define SYS_EXIT      6
+#define SYS_WAITPID   7
+#define SYS_SPAWN     8
 
 static inline void sys_exit(int32_t exit_code) {
     __syscall1(SYS_EXIT, exit_code);

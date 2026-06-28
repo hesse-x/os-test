@@ -37,10 +37,10 @@
 | SYSCALL/SYSRET 快速系统调用 | [syscall.md](syscall.md) |
 | TSS IST 栈 | [tss_ist.md](tss_ist.md) |
 | NX 位 | [nx_bit.md](nx_bit.md) |
-| 自旋锁原语 | [spinlock.md](spinlock.md) |
+| 自旋锁原语 | [kernel_lock.md](kernel_lock.md) |
 | AP 参与调度（idle 进程模型 + pick_cpu） | [schedule.md](schedule.md) |
-| 细粒度锁拆分（BKL 移除） | [fine_grained_lock.md](fine_grained_lock.md) |
-| FAT32 文件系统 | [fat32.md](fat32.md) |
+| 细粒度锁拆分（BKL 移除） | [kernel_lock.md](kernel_lock.md) |
+| FAT32 文件系统 | [vfs.md](vfs.md) |
 | 内存管理系统（slab + mmap + 用户态 malloc 重写） | [mem.md](mem.md) |
 | 进程生命周期管理（sys_exit/sys_waitpid/sys_spawn） | [process_lifecycle.md](process_lifecycle.md) |
 | libc.a 静态库（printf + FILE + _start） | [libc.md](libc.md) |
@@ -49,20 +49,20 @@
 | 定时等待队列 + sys_wait(timeout_ms) | [driver_workflow.md](driver_workflow.md) |
 | sys_fb_info / sys_shm_create / sys_shm_attach | [driver_workflow.md](driver_workflow.md) |
 | 共享页重构（KBD/KMS 硬编码→动态 shm） | [driver_workflow.md](driver_workflow.md) |
-| Phase 3: 最小 fd + VT100 + Terminal/Shell 拆分 | [terminal_split.md](terminal_split.md) |
-| 设备管理器（devtmpfs + sys_dev_create） | [dev_table.md](dev_table.md) / [vfs.md](vfs.md) |
-| 统一 IPC 机制（sys_recv/sys_req/sys_resp + sys_msg/sys_msg_resp） | [rpc.md](rpc.md) |
+| Phase 3: 最小 fd + VT100 + Terminal/Shell 拆分 | [terminal_shell.md](terminal_shell.md) |
+| 设备管理器（devtmpfs + sys_dev_create） | [vfs.md](vfs.md) |
+| 统一 IPC 机制（sys_recv/sys_req/sys_resp + sys_msg/sys_msg_resp） | [ipc.md](ipc.md) |
 | 时间子系统（sys_gettime/sys_clock + libc timespec_get/clock） | [time.md](time.md) |
 | 文件系统重构（LFN + FHS 目录结构 + Shell 路径执行） | [fs_restructure.md](fs_restructure.md) |
 | libc 文件 I/O（open/read/write/close via sys_open/FD_REGULAR） | [vfs.md](vfs.md) |
 | 用户态驱动（3 层 kbd + req bind/unbind + 各驱动工作流） | [user_driver.md](user_driver.md) |
 | 构建系统（CMake + mkdisk + mkimg） | [cmake.md](cmake.md) |
-| Shell 设计（命令 + FS IPC + 路径执行） | [shell.md](shell.md) |
-| Unix domain socket 设计 | [socket.md](socket.md) |
+| Shell 设计（命令 + FS IPC + 路径执行） | [terminal_shell.md](terminal_shell.md) |
+| Unix domain socket 设计 | [ipc.md](ipc.md) |
 | VFS + fd 系统重构（FAT32 内核化 + inode+page cache+devtmpfs） | [vfs.md](vfs.md) |
 | VFS 内核模块实现（blk_dev+fat32+inode+page_cache+vfs+devtmpfs） | [vfs.md](vfs.md) |
-| SHM fd 化重构（fd + mmap 模式替代 vaddr + shm_regions） | [shm.md](shm.md) |
-| ~~fs_driver 异步事件循环~~ | ~~file_system.md~~ | ✅ 已完成 → 已删除，FAT32 搬入内核 |
+| SHM fd 化重构（fd + mmap 模式替代 vaddr + shm_regions） | [ipc.md](ipc.md) |
+| ~~fs_driver 异步事件循环~~ | ~~vfs.md~~ | ✅ 已完成 → FAT32 搬入内核 |
 | xHCI + MSI-X（PCIe USB 控制器 + MSI-X 中断分配） | [xhci.md](xhci.md) |
 | USB HID 键盘迁移（PS/2 → xHCI Transfer Ring + SHM ring） | [kbd.md](kbd.md) |
 
@@ -70,9 +70,9 @@
 
 内核已完整运行：UEFI 引导 → 内核初始化（VFS/FAT32 + AHCI）→ AP 启动（参与调度）→ 加载 init.elf → init 从 FAT32 启动 kbd/terminal → terminal 启动 shell → 多进程协作。
 
-**统一 IPC 完成**：sys_recv/sys_req/sys_resp + sys_msg/sys_msg_resp + AF_UNIX SOCK_STREAM socket + SCM_RIGHTS fd 传递 + poll 事件多路复用。sys_recv 统一接收 IRQ/REQ/NOTIFY/MSG 四类消息（per-process 16 slot recv 队列 + 4 参数签名支持变长数据），sys_req 同步内联请求（56 字节载荷），sys_msg 同步变长消息（≤64KB，内核 kmalloc 中转拷贝）。NR_SYSCALL=57（0-56），含 6 个 VFS syscall（sys_open/sys_stat/sys_mkdir/sys_unlink/sys_rmdir/sys_dev_create，编号 51-56）。
+**统一 IPC 完成**：sys_recv/sys_req/sys_resp + sys_msg/sys_msg_resp + AF_UNIX SOCK_STREAM socket + SCM_RIGHTS fd 传递 + poll 事件多路复用。sys_recv 统一接收 IRQ/REQ/NOTIFY/MSG 四类消息（per-process 16 slot recv 队列 + 4 参数签名支持变长数据），sys_req 同步内联请求（56 字节载荷），sys_msg 同步变长消息（≤64KB，内核 kmalloc 中转拷贝）。NR_SYSCALL=59（0-58），含 12 个 VFS syscall（sys_open/sys_stat/sys_mkdir/sys_unlink/sys_rmdir/sys_dev_create/sys_getdents/sys_ioctl/sys_fstat/sys_fdev_pid，编号 47-56）+ fork+execve（编号 57-58）+ signal（sys_kill/sys_sigaction/sys_sigreturn，编号 43-45）。
 
-**Socket 完成**：AF_UNIX SOCK_STREAM socket（kernel/socket.h + kernel/socket.c），10 个 syscall（SYS_SOCKET~SYS_POLL，编号 37-46），包括 socket/bind/listen/accept/connect/socketpair/sendmsg/recvmsg/shutdown/poll。SCM_RIGHTS fd 传递（支持 FD_REGULAR inode ref bump）。sock_write/sock_read 内部辅助（write/read 对 socket fd 的兼容路径）。WAIT_POLL 阻塞状态。
+**Socket 完成**：AF_UNIX SOCK_STREAM socket（kernel/socket.h + kernel/socket.c），10 个 syscall（SYS_SOCKET~SYS_POLL，编号 30-39），包括 socket/bind/listen/accept/connect/socketpair/sendmsg/recvmsg/shutdown/poll。SCM_RIGHTS fd 传递（支持 FD_REGULAR inode ref bump）。sock_write/sock_read 内部辅助（write/read 对 socket fd 的兼容路径）。WAIT_POLL 阻塞状态。per-socket mutex（替代全局 socket_lock）。
 
 **VFS 重构 Phase 1 完成**：FAT32 搬入内核，inode + page cache + devtmpfs 统一 I/O。fs_driver 已删除。6 个新 VFS syscall。FD_REGULAR 类型直通内核 FAT32，零 IPC 文件 I/O。详见 [vfs.md](vfs.md)。
 
@@ -91,7 +91,7 @@
 ### 步骤 1: 自旋锁原语 ✅
 ### 步骤 2: BKL 大内核锁 ✅（已移除，替换为细粒度锁）
 ### 步骤 3: AP 参与调度 ✅ — [schedule.md](schedule.md)
-### 步骤 4: 细粒度锁拆分 ✅ — [fine_grained_lock.md](fine_grained_lock.md)
+### 步骤 4: 细粒度锁拆分 ✅ — [kernel_lock.md](kernel_lock.md)
 
 ---
 
@@ -143,7 +143,7 @@
 
 #### Unix domain socket（内核态 AF_UNIX SOCK_STREAM）✅
 
-详见 [socket.md](socket.md)。
+详见 [ipc.md](ipc.md) 二、AF_UNIX SOCK_STREAM Socket。
 
 - [x] skb 链表（struct sk_buff + struct unix_sock）— `kernel/socket.h`, `kernel/socket.cc`
 - [x] 全局 socket_lock（spinlock_t，锁顺序：procs_lock → socket_lock → scheduler_lock）
@@ -169,16 +169,19 @@
 - [x] `user/include/sys/socket.h` — libc poll() 封装
 - [ ] 验证: compositor 用 poll 同时监听 N 个 client socket
 
-#### 信号机制（TTY Ctrl+C 依赖）
+#### 信号机制（已完成）
 
-**范围：Level 2** — `sys_kill` + `sys_sigaction` + `sys_sigreturn` + pending bits + default action（SIGINT/SIGTERM→exit, SIGCHLD→ignore）。sigprocmask/EINTR/SIGPIPE 预留接口，暂不实现。详见 [signal.md](signal.md)。
+**范围：Level 2** — `sys_kill` + `sys_sigaction` + `sys_sigreturn` + pending bits + default action（SIGINT/SIGTERM→exit, SIGCHLD→ignore）。sigframe 栈帧投递 + EINTR + force_sig + 内核异常翻译。详见 [ipc.md](ipc.md) 五、信号机制。
 
-- [ ] `sys_kill(pid, sig)` — 设置目标进程 pending bits
-- [ ] `sys_sigaction(sig, act, oldact)` — 注册/查询信号 handler
-- [ ] `sys_sigreturn()` — 信号 handler 返回后恢复上下文
-- [ ] 信号投递：iret 前检查 pending signals → 无 handler 则 default action，有 handler 则 trampoline
-- [ ] SIGCHLD：替代现有 RECV_NOTIFY 子进程退出通知（waitpid 不受影响）
-- [ ] SIGINT（Ctrl+C）：terminal 通过 kill(pid, SIGINT) 向前台进程发中断信号
+- [x] `sys_kill(pid, sig)` — 设置目标进程 pending bits
+- [x] `sys_sigaction(sig, act, oldact)` — 注册/查询信号 handler
+- [x] `sys_sigreturn()` — 信号 handler 返回后恢复上下文
+- [x] 信号投递：iret 前检查 pending signals → 无 handler 则 default action，有 handler 则 trampoline
+- [x] SIGCHLD：替代现有 RECV_NOTIFY 子进程退出通知（waitpid 不受影响）
+- [x] SIGINT（Ctrl+C）：terminal 通过 kill(pid, SIGINT) 向前台进程发中断信号
+- [x] EINTR：阻塞 syscall 被信号中断返回 -EINTR
+- [x] force_sig：同步信号绕过 SIG_IGN
+- [x] 内核异常翻译：#PF→SIGSEGV, #GP→SIGSEGV, #UD→SIGILL, #DE→SIGFPE
 - [ ] 验证: shell 前台进程运行时按 Ctrl+C → 进程退出 → shell 返回提示符
 
 **不做**：EINTR 中断阻塞 syscall、SIGPIPE（保持 -EPIPE）、sigprocmask（按需后续加）、作业控制（Ctrl+Z/fg/bg 后续加）。
@@ -336,12 +339,11 @@ sprint 10+: 交叉编译 clang for Xos → 在 Xos 上测试 cc1 → 自举
 
 ### 现有相关 TODO 迁移
 
-- [ ] sys_fork + sys_exec（含 ELF loader 复用）
-- [ ] sys_sigaction / sys_sigprocmask / sys_kill / sys_rt_sigreturn
-- [ ] 信号投递：进程返回用户态前检查 pending signals（trapret 路径）
-- [ ] SIGCHLD：子进程 exit 时向父进程投递
-- [ ] SIGINT（Ctrl+C）：terminal 通过 kill(pid, SIGINT) 向前台进程发中断信号
-- [ ] 验证: shell 前台进程运行时按 Ctrl+C → 进程退出 → shell 返回提示符
+- [x] sys_fork + sys_exec（含 ELF loader 复用）— 已实现，详见 [fork_exec.md](fork_exec.md)
+- [x] sys_sigaction / sys_kill / sys_sigreturn — 已实现，详见 [signal.md](signal.md)
+- [x] 信号投递：进程返回用户态前检查 pending signals（trapret 路径）— 已实现
+- [x] SIGCHLD：子进程 exit 时向父进程投递 — 已实现
+- [x] SIGINT（Ctrl+C）：terminal 通过 kill(pid, SIGINT) 向前台进程发中断信号 — 已实现
 - [ ] FPU/SSE lazy context switch（fxsave/ fxrstor, CR0.TS + device_not_available #NM 处理）
 - [ ] 环境变量区（process_create 扩展 environ page）+ copy on exec
 - [ ] 验证: getenv("PATH") == "/bin:/usr/bin"
@@ -483,8 +485,8 @@ sprint 10+: 交叉编译 clang for Xos → 在 Xos 上测试 cc1 → 自举
 
 
 | ~~VFS 层~~ | 无 | ~~低~~ | ✅ 已完成 — FAT32 搬入内核 + inode + page cache + devtmpfs， 统一 I/O 零 IPC，设计见 [vfs.md](vfs.md) |
-| ~~Unix domain socket~~ | — | ~~高~~ | ✅ 已完成 — per-socket mutex + SCM_RIGHTS unix_inflight，见 [socket.md](socket.md) |
-| ~~SHM fd 化~~ | — | ~~高~~ | ✅ 已完成 — sys_shm_create 返回 fd + mmap(MAP_SHARED) 映射，见 [shm.md](shm.md) |
+| ~~Unix domain socket~~ | — | ~~高~~ | ✅ 已完成 — per-socket mutex + SCM_RIGHTS unix_inflight，见 [ipc.md](ipc.md) |
+| ~~SHM fd 化~~ | — | ~~高~~ | ✅ 已完成 — sys_shm_create 返回 fd + mmap(MAP_SHARED) 映射，见 [ipc.md](ipc.md) |
 | 页面换出 (swap) | FAT32 write | 低 | BFC 不足时换出到磁盘 |
 | ~~启动流程改造~~ | kbd 重构完成 | ~~✅~~ | ✅ 已完成 — init + 内核 FAT32 启动用户态服务（不再 spawn fs_driver），见 [boot.md](boot.md) |
-| POSIX API 封装 | — | 中 | unistd.h/sys/wait.h/sys/mman.h 等，见 [sys_api.md](sys_api.md) |
+| POSIX API 封装 | — | 中 | unistd.h/sys/wait.h/sys/mman.h 等，见 [posix.md](posix.md) |

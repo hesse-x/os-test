@@ -2,7 +2,7 @@
 
 ## 概述
 
-使用 SYSCALL/SYSRET 指令（MSR LSTAR）替代 int 0x80 进行系统调用，与 `__alltraps`/`__trapret` 独立。当前 NR_SYSCALL=47（编号 0-46 连续无空洞）。int 0x80 路径已移除。
+使用 SYSCALL/SYSRET 指令（MSR LSTAR）替代 int 0x80 进行系统调用，与 `__alltraps`/`__trapret` 独立。当前 NR_SYSCALL=59（编号 0-58 连续，slot 8 为 NULL）。int 0x80 路径已移除。
 
 ## SYSCALL/SYSRET 设计决策
 
@@ -103,7 +103,7 @@ syscall_fast_entry:
 ## syscall_dispatch 与系统调用表
 
 ```c
-#define NR_SYSCALL 47
+#define NR_SYSCALL 59
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0:  获取 PID
     sys_yield,          // 1:  主动让出 CPU
@@ -113,45 +113,58 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_irq_bind,       // 5:  绑定当前进程到指定 IRQ
     sys_exit,           // 6:  进程退出
     sys_waitpid,        // 7:  等待子进程退出
-    sys_spawn,          // 8:  创建子进程
+    NULL,               // 8:  sys_spawn 已删除，使用 fork+execve
     sys_mmap,           // 9:  内存映射（6 参：addr/size/prot/flags/fd/offset）
     sys_munmap,         // 10: 解除内存映射
-    // sys_serial_write 已删除，串口镜像由 sys_write FD_PIPE 路径完成
-    sys_fb_info,        // 11: 获取 framebuffer 信息
-    sys_shm_create,     // 12: 创建 SHM fd
-    sys_shm_attach,     // 13: 附加 SHM
-    sys_pipe,           // 14: 创建 pipe
-    sys_write,          // 15: 写 fd
-    sys_read,           // 16: 读 fd
-    sys_close,          // 17: 关闭 fd
-    sys_load_dev,       // 18: 注册驱动到 dev_table
-    sys_dev_msg,        // 19: fd 版变长消息
-    sys_notify,         // 20: 异步通知
-    sys_gettime,        // 21: 全局单调时钟（纳秒）
-    sys_clock,          // 22: per-process CPU 时间
-    sys_msg,            // 23: 变长消息请求
-    sys_msg_resp,       // 24: 变长消息回复
-    sys_ioperm,         // 25: I/O 端口权限
-    sys_dup2,           // 26: 复制 fd
-    sys_fcntl,          // 27: 文件控制
-    sys_dma_alloc,      // 28: 物理连续 DMA 分配
-    sys_dma_free,       // 29: 释放 DMA 缓冲区
-    sys_pci_dev_info,   // 30: PCI 设备查询
-    sys_block_read,     // 31: 块设备读
-    sys_block_write,    // 32: 块设备写
-    sys_block_async,    // 33: 异步块 I/O
-    sys_open_dev,       // 34: 打开设备节点
-    sys_install_fd,     // 35: 注册 FD_FILE fd
-    sys_socket,         // 36: socket
-    sys_bind,           // 37: bind
-    sys_listen,         // 38: listen
-    sys_accept,         // 39: accept
-    sys_connect,        // 40: connect
-    sys_socketpair,     // 41: socketpair
-    sys_sendmsg,        // 42: sendmsg
-    sys_recvmsg,        // 43: recvmsg
-    sys_shutdown,       // 44: shutdown
-    sys_poll,           // 45: poll
+    sys_shm_create,     // 11: 创建 SHM fd
+    sys_shm_attach,     // 12: 附加 SHM
+    sys_pipe,           // 13: 创建 pipe
+    sys_write,          // 14: 写 fd
+    sys_read,           // 15: 读 fd
+    sys_close,          // 16: 关闭 fd
+    sys_notify,         // 17: 异步通知
+    sys_gettime,        // 18: 全局单调时钟（纳秒）
+    sys_clock,          // 19: per-process CPU 时间
+    sys_msg,            // 20: 变长消息请求
+    sys_msg_resp,       // 21: 变长消息回复
+    sys_ioperm,         // 22: I/O 端口权限
+    sys_dup2,           // 23: 复制 fd
+    sys_fcntl,          // 24: 文件控制
+    sys_dma_alloc,      // 25: 物理连续 DMA 分配
+    sys_dma_free,       // 26: 释放 DMA 缓冲区
+    sys_pci_dev_info,   // 27: PCI 设备查询
+    sys_block_async,    // 28: 异步块 I/O
+    sys_install_fd,     // 29: 注册 FD_FILE fd
+    sys_socket,         // 30: socket
+    sys_bind,           // 31: bind
+    sys_listen,         // 32: listen
+    sys_accept,         // 33: accept
+    sys_connect,        // 34: connect
+    sys_socketpair,     // 35: socketpair
+    sys_sendmsg,        // 36: sendmsg
+    sys_recvmsg,        // 37: recvmsg
+    sys_shutdown,       // 38: shutdown
+    sys_poll,           // 39: poll
+    sys_lseek,          // 40: 文件偏移设置
+    sys_memfd_create,   // 41: 创建 memfd
+    sys_ftruncate,      // 42: 截断文件
+    sys_kill,           // 43: 发送信号
+    sys_sigaction,      // 44: 注册信号 handler
+    sys_sigreturn,      // 45: 信号返回
+    sys_debug_print,    // 46: 内核调试打印
+    // VFS syscall (47-58)
+    sys_open,           // 47: 打开文件
+    sys_stat,           // 48: 获取文件状态
+    sys_mkdir,          // 49: 创建目录
+    sys_unlink,         // 50: 删除文件
+    sys_rmdir,          // 51: 删除目录
+    sys_dev_create,     // 52: 创建设备节点
+    sys_getdents,       // 53: 读取目录项
+    sys_ioctl,          // 54: 设备控制
+    sys_fstat,          // 55: 基于fd获取文件状态
+    sys_fdev_pid,       // 56: 获取设备驱动PID
+    sys_fork,           // 57: fork
+    sys_execve,         // 58: execve
 };
 ```
 
@@ -184,7 +197,7 @@ static inline int64_t __syscall6(int64_t num, int64_t a1, int64_t a2, int64_t a3
 ### 返回值约定
 
 - 状态型 syscall（recv/req/resp/notify/exit/irq_bind/munmap）：0=成功，正数=errno
-- 值返回型 syscall：sys_mmap 返回地址（NULL 失败），sys_spawn/sys_waitpid 返回 pid（0 失败），sys_getpid 始终成功
+- 值返回型 syscall：sys_mmap 返回地址（NULL 失败），sys_fork 返回子PID（父进程）或0（子进程），sys_waitpid 返回 pid（0 失败），sys_getpid 始终成功
 
 ### recv_msg 结构
 
@@ -213,4 +226,4 @@ sys_req：同步阻塞，发送 56 字节请求到目标进程，目标进程 sy
 
 sys_msg：同步变长，发送方 kmalloc 内核缓冲区拷贝数据，接收方 sys_recv 收到 RECV_MSG（含 kmaddr），接收方 sys_msg_resp 回复后内核 kfree 缓冲区。
 
-IPC 机制设计详见 [rpc.md](rpc.md)。
+IPC 机制设计详见 [ipc.md](ipc.md)。

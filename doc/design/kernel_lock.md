@@ -1,14 +1,64 @@
-# 步骤 4：BKL → 细粒度锁拆分
+# 内核锁设计
+
+## 1. 自旋锁原语
+
+> **已实现**。`spin_lock_irqsave` / `spin_unlock_irqrestore` 已添加，用于 per-CPU `scheduler_lock`。
+
+### 设计决策
+
+| # | 决策 | 选择 | 理由 |
+|---|------|------|------|
+| 1 | 原子操作实现 | GCC `__atomic` builtins | freestanding 可用，编译器自动 lowering 为 `xchg`，自动插入内存屏障 |
+| 2 | `spin_lock` 是否内含 `cli` | 否 | 中断控制由调用者负责，锁本身保持纯自旋语义 |
+| 3 | 结构体字段 | 仅 `volatile uint32_t locked` | YAGNI |
+| 4 | 放置文件 | `kernel/spinlock.h` | 锁是内核同步原语，非架构特定 |
+| 5 | unlock 内存序 | `__ATOMIC_RELEASE` | 与 lock 端 `__ATOMIC_ACQUIRE` 配对，精确表达 acquire-release 同步语义 |
+| 6 | 自旋循环 | `exchange` + `pause` | 2-4 核场景无竞争瓶颈，简单优先 |
+| 7 | 初始化 | `SPINLOCK_INIT {0}` 宏 | 单字段无复杂初始化逻辑，无需 `spin_init()` |
+| 8 | `locked` 类型 | `uint32_t` | x86-64 上生成 `xchgll`，显式表达宽度意图 |
+
+### 实现
+
+```c
+struct spinlock_t {
+    volatile uint32_t locked;
+};
+
+#define SPINLOCK_INIT {0}
+
+static inline void spin_lock(spinlock_t *lk) {
+    while (__atomic_exchange_n(&lk->locked, 1, __ATOMIC_ACQUIRE) == 1)
+        __asm__ volatile("pause");
+}
+
+static inline void spin_unlock(spinlock_t *lk) {
+    __atomic_store_n(&lk->locked, 0, __ATOMIC_RELEASE);
+}
+
+static inline void spin_lock_irqsave(spinlock_t *lk, uint64_t *flags) {
+    uint64_t f;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(f));
+    *flags = f;
+    spin_lock(lk);
+}
+
+static inline void spin_unlock_irqrestore(spinlock_t *lk, uint64_t flags) {
+    spin_unlock(lk);
+    __asm__ volatile("pushq %0; popfq" : : "r"(flags));
+}
+```
+
+## 2. BKL → 细粒度锁拆分
 
 > **已实现**。BKL 已完全移除，替换为 per-CPU `scheduler_lock` + 全局 `procs_lock` + `fb_lock` + `irq_owner[]` atomic。`kernel/list.h` 已添加（`list_node_t` + `LIST_ENTRY`），`proc_t` 新增 `run_node`/`wait_node`，`cpu_local_t` 新增 `scheduler_lock`/`run_queue`。汇编入口/出口不再有 `kernel_lock_acquire/release`。
 
-## 目标
+### 目标
 
 将 BKL（大内核锁）拆分为 per-CPU `scheduler_lock` + 全局 `procs_lock` + `fb_lock` + `irq_owner` atomic 化，最终完全移除 BKL。
 
 策略：**渐进拆分** — 先加细粒度锁（BKL 兜底），验证后再删 BKL。
 
-## 当前 BKL 保护范围
+### 当前 BKL 保护范围
 
 BKL 在所有用户态内核入口 acquire、返回用户态 release，串行化以下操作：
 
@@ -22,9 +72,9 @@ BKL 在所有用户态内核入口 acquire、返回用户态 release，串行化
 
 **已知隐患**：`trap_dispatch` 在 kernel-mode IRQ 路径读 `irq_owner[]` 不持 BKL，存在数据竞争。
 
-## 新锁方案
+### 新锁方案
 
-### 锁一览
+#### 锁一览
 
 | 锁 | 粒度 | 保护对象 | irqsave? |
 |----|------|---------|----------|
@@ -33,7 +83,7 @@ BKL 在所有用户态内核入口 acquire、返回用户态 release，串行化
 | `fb_lock` | 全局 | `fb_putc` cursor 位置 + VGA 文本缓冲区 | 否 |
 | `irq_owner[]` | 无锁 | `__atomic_store_n` 写 / `__atomic_load_n` 读 | N/A |
 
-### 锁协议
+#### 锁协议
 
 ```
 scheduler_lock[cpu] 保护：
@@ -57,7 +107,7 @@ irq_owner[]：
   - trap_dispatch 读：__atomic_load_n(&irq_owner[trapno], __ATOMIC_ACQUIRE)
 ```
 
-### 锁获取顺序（防死锁）
+#### 锁获取顺序（防死锁）
 
 当需要同时持多把锁时，按以下顺序获取：
 
@@ -66,9 +116,9 @@ irq_owner[]：
 
 不存在需要同时持 `fb_lock` + `scheduler_lock` 或 `fb_lock` + `procs_lock` 的路径。
 
-## 数据结构变更
+### 数据结构变更
 
-### list_node_t — 内嵌双向链表节点
+#### list_node_t — 内嵌双向链表节点
 
 ```c
 // kernel/list.h（新文件）
@@ -113,7 +163,7 @@ static inline list_node_t *list_front(list_node_t *head) {
     ((type *)((char *)(node) - offsetof(type, member)))
 ```
 
-### proc_t 变更
+#### proc_t 变更
 
 ```c
 struct proc_t {
@@ -126,12 +176,12 @@ struct proc_t {
     wait_event_t wait_event;
     int assigned_cpu;
     uint8_t iopl;
-    list_node_t run_node;    // 新增：嵌入 per-CPU run_queue
-    list_node_t wait_node;   // 新增：嵌入 wait_queue（当前预留）
+    list_node_t run_node;    // 嵌入 per-CPU run_queue
+    list_node_t wait_node;   // 嵌入 wait_queue（预留）
 };
 ```
 
-### cpu_local_t 变更
+#### cpu_local_t 变更
 
 ```c
 struct cpu_local_t {
@@ -143,33 +193,14 @@ struct cpu_local_t {
     uint64_t tss_rsp0;
     int run_count;
     proc_t *idle_proc;
-    // 新增
     spinlock_t scheduler_lock;  // per-CPU 调度器锁
     list_node_t run_queue;      // per-CPU 就绪队列（哨兵节点）
 };
 ```
 
-### spinlock.h 变更
+### schedule() 新设计
 
-新增 `spin_lock_irqsave` / `spin_unlock_irqrestore`：
-
-```c
-static inline void spin_lock_irqsave(spinlock_t *lk, uint64_t *flags) {
-    uint64_t f;
-    __asm__ volatile("pushfq; popq %0; cli" : "=r"(f));
-    *flags = f;
-    spin_lock(lk);
-}
-
-static inline void spin_unlock_irqrestore(spinlock_t *lk, uint64_t flags) {
-    spin_unlock(lk);
-    __asm__ volatile("pushq %0; popfq" : : "r"(flags));
-}
-```
-
-## schedule() 新设计
-
-### 当前流程（BKL 下）
+#### 当前流程（BKL 下）
 
 ```
 schedule():
@@ -184,7 +215,7 @@ schedule():
     // BKL 仍被持有
 ```
 
-### 新流程
+#### 新流程
 
 ```
 schedule():
@@ -223,9 +254,9 @@ schedule():
 2. `irqsave` 保证 switch_to 期间中断关闭，timer_handler 不会在本 CPU 重入 schedule
 3. switch_to 返回后在新进程的栈上，`flags` 是新进程调用 schedule() 时保存的 IF，irqrestore 正确恢复
 
-## 各操作的新锁协议
+### 各操作的新锁协议
 
-### process_create_elf(path)
+#### process_create_elf(path)
 
 ```
 lock(procs_lock)
@@ -242,7 +273,7 @@ lock(scheduler_lock[assigned_cpu])     // 可能跨 CPU
 unlock(scheduler_lock[assigned_cpu])
 ```
 
-### sys_wait()
+#### sys_wait()
 
 ```
 lock(scheduler_lock[my_cpu])
@@ -252,7 +283,7 @@ unlock(scheduler_lock[my_cpu])
 // schedule() 将切走当前进程，不入队（state != RUNNING）
 ```
 
-### sys_notify(target_pid)
+#### sys_notify(target_pid)
 
 ```
 lock(scheduler_lock[target_cpu])       // 可能跨 CPU
@@ -263,7 +294,7 @@ lock(scheduler_lock[target_cpu])       // 可能跨 CPU
 unlock(scheduler_lock[target_cpu])
 ```
 
-### trap_dispatch() wake（IRQ → 用户态驱动）
+#### trap_dispatch() wake（IRQ → 用户态驱动）
 
 ```
 pid = __atomic_load_n(&irq_owner[trapno], __ATOMIC_ACQUIRE)
@@ -280,7 +311,7 @@ if pid >= 0:
 
 **注意**：`trap_dispatch` 在 kernel-mode IRQ 路径也安全 — `irq_owner` atomic 读无数据竞争，`scheduler_lock` 远程加锁是 spinlock 标准操作。
 
-### sys_yield()
+#### sys_yield()
 
 ```
 lock(scheduler_lock[my_cpu])
@@ -290,7 +321,7 @@ unlock(scheduler_lock[my_cpu])
 schedule()
 ```
 
-### sys_putc()
+#### sys_putc()
 
 ```
 lock(fb_lock)
@@ -299,18 +330,17 @@ unlock(fb_lock)
 serial_putc(ch)  // 无需锁
 ```
 
-### sys_irq_bind(irq)
+#### sys_irq_bind(irq)
 
 ```
 // procs_lock 不需要 — 只写 irq_owner，不改 procs[] 槽位
 __atomic_store_n(&irq_owner[irq], current_proc->pid, __ATOMIC_RELEASE)
 ```
 
-### pick_cpu()
+#### pick_cpu()
 
 ```
-// 读所有 CPU 的 run_count，需锁每个 scheduler_lock
-// 或：因 run_count 只在 scheduler_lock 下修改，用 __atomic_load_n 读近似值即可
+// 读所有 CPU 的 run_count，用 __atomic_load_n 读近似值即可
 best_cpu = 0
 for i in 0..ncpu:
     r = __atomic_load_n(&cpu_locals[i].run_count, __ATOMIC_RELAXED)
@@ -322,9 +352,9 @@ return best_cpu
 
 **说明**：`pick_cpu()` 只在 `process_create` 时调用，用于选择负载最低的 CPU。用 `RELAXED` 读 `run_count` 是安全的 — 选到的 CPU 可能在读后 run_count 变化了，但这只影响负载均衡质量，不影响正确性。
 
-## BKL 移除
+### BKL 移除
 
-### 汇编变更
+#### 汇编变更
 
 **`__alltraps`（trapentry.S）**：
 ```asm
@@ -363,7 +393,7 @@ process_entry:
     jmp __trapret
 ```
 
-### C 代码变更
+#### C 代码变更
 
 **`idle_entry()`（proc.cc）**：
 ```c
@@ -382,7 +412,7 @@ void idle_entry() {
 - `kernel/spinlock.h` 中的 `kernel_lock` extern（如有）
 - `proc.cc` 中所有 `kernel_lock_acquire/release` 调用
 
-## idle_entry 与中断安全
+### idle_entry 与中断安全
 
 BKL 移除后，`idle_entry` 的 `hlt` 指令在 IF=1 时执行。中断唤醒 CPU 后：
 1. CPU 清 IF，切内核栈，进入 `__alltraps`
@@ -392,9 +422,9 @@ BKL 移除后，`idle_entry` 的 `hlt` 指令在 IF=1 时执行。中断唤醒 C
 
 **timer_handler 在内核态不调 schedule**：保持现有逻辑 — `tf->cs != 0x2B` 时只做 EOI。idle 进程回到循环后调 `schedule()` 检查是否有新就绪进程。最差延迟 ~10ms（100Hz timer），对当前场景可接受。
 
-## 实现步骤
+### 实现步骤
 
-### 步骤 4.1：spin_lock_irqsave + scheduler_lock + per-CPU run queue
+#### 步骤 4.1：spin_lock_irqsave + scheduler_lock + per-CPU run queue
 
 **新增**：
 - `kernel/list.h`：`list_node_t` + 内联操作
@@ -416,7 +446,7 @@ BKL 移除后，`idle_entry` 的 `hlt` 指令在 IF=1 时执行。中断唤醒 C
 
 **验证**：`-smp 2`，多进程调度正常，BKL 仍兜底。
 
-### 步骤 4.2：procs_lock
+#### 步骤 4.2：procs_lock
 
 **修改**：
 - `proc.cc`：
@@ -424,7 +454,7 @@ BKL 移除后，`idle_entry` 的 `hlt` 指令在 IF=1 时执行。中断唤醒 C
 
 **验证**：`-smp 2`，进程创建正常。
 
-### 步骤 4.3：irq_owner atomic 化
+#### 步骤 4.3：irq_owner atomic 化
 
 **修改**：
 - `trap.cc`：
@@ -434,7 +464,7 @@ BKL 移除后，`idle_entry` 的 `hlt` 指令在 IF=1 时执行。中断唤醒 C
 
 **验证**：`-smp 2`，kbd/disk 驱动正常。
 
-### 步骤 4.4：fb_lock
+#### 步骤 4.4：fb_lock
 
 **新增**：
 - `kernel/spinlock.h` 或 `kernel/fb.cc`：`spinlock_t fb_lock = {0}`
@@ -444,7 +474,7 @@ BKL 移除后，`idle_entry` 的 `hlt` 指令在 IF=1 时执行。中断唤醒 C
 
 **验证**：`-smp 2`，输出正常，无 cursor 错乱。
 
-### 步骤 4.5：移除 BKL
+#### 步骤 4.5：移除 BKL
 
 **删除**：
 - `kernel/trap.cc`：`kernel_lock` 定义 + `kernel_lock_acquire/release` 函数
@@ -454,7 +484,7 @@ BKL 移除后，`idle_entry` 的 `hlt` 指令在 IF=1 时执行。中断唤醒 C
 
 **验证**：`-smp 2`，全系统压力测试 — 多进程调度 + shell 交互 + kbd/disk 驱动 + 串口输出。
 
-## 未覆盖项（后续步骤）
+### 未覆盖项（后续步骤）
 
 | 项目 | 原因 |
 |------|------|
