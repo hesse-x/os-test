@@ -1,11 +1,11 @@
-# 微内核实现进度
+# 项目路线图
 
 ## 项目目标
 
 | 目标 | 阶段 | 验收标准 |
 |------|------|----------|
-| **支持简单 ELF 可执行文件的执行** | 短期 | 在宿主机编译 hello world，静态链接 libc.a，在 OS 上执行并输出字符 |
-| **支持 Wayland 核心协议** | 中期 | 见下方 [Wayland 验收标准](#wayland-验收标准) |
+| **支持简单 ELF 可执行文件的执行** | 短期 ✅ | 在宿主机编译 hello world，静态链接 libc.a，在 OS 上执行并输出字符 |
+| **支持 Wayland 核心协议** | 中期 | 见下方 Wayland 验收标准 |
 | **支持构建 gcc** | 远期 | 成功在 OS 上构建出 gcc |
 
 ### Wayland 验收标准
@@ -25,195 +25,7 @@
 
 **不在验收范围内**：wl_pointer/鼠标、xdg-shell/window decoration、wl_output 详细模式通告、客户端库封装（验收只需要 test client）
 
-## 已完成（设计文档索引）
-
-| 功能 | 设计文档 |
-|------|----------|
-| x86-64 迁移 | [x64_migration.md](x64_migration.md) |
-| UEFI 引导 | [uefi.md](uefi.md) |
-| 多核 SMP — Per-CPU 基础设施 | [smp.md](smp.md) |
-| 多核 SMP — APIC 替换 PIC | [smp.md](smp.md) |
-| 多核 SMP — AP 启动 | [smp.md](smp.md) |
-| SYSCALL/SYSRET 快速系统调用 | [syscall.md](syscall.md) |
-| TSS IST 栈 | [tss_ist.md](tss_ist.md) |
-| NX 位 | [nx_bit.md](nx_bit.md) |
-| 自旋锁原语 | [kernel_lock.md](kernel_lock.md) |
-| AP 参与调度（idle 进程模型 + pick_cpu） | [schedule.md](schedule.md) |
-| 细粒度锁拆分（BKL 移除） | [kernel_lock.md](kernel_lock.md) |
-| FAT32 文件系统 | [vfs.md](vfs.md) |
-| 内存管理系统（slab + mmap + 用户态 malloc 重写） | [mem.md](mem.md) |
-| 进程生命周期管理（sys_exit/sys_waitpid/sys_spawn） | [process_lifecycle.md](process_lifecycle.md) |
-| libc.a 静态库（printf + FILE + _start） | [libc.md](libc.md) |
-| KMS 内核态驱动（display buffer 分配 + req flip + devtmpfs /dev/kms） | [kms.md](kms.md) |
-| TSC 时钟 + sched_clock + udelay 修复 | [driver_workflow.md](driver_workflow.md) |
-| 定时等待队列 + sys_wait(timeout_ms) | [driver_workflow.md](driver_workflow.md) |
-| sys_fb_info / sys_shm_create / sys_shm_attach | [driver_workflow.md](driver_workflow.md) |
-| 共享页重构（KBD/KMS 硬编码→动态 shm） | [driver_workflow.md](driver_workflow.md) |
-| Phase 3: 最小 fd + VT100 + Terminal/Shell 拆分 | [terminal_shell.md](terminal_shell.md) |
-| 设备管理器（devtmpfs + sys_dev_create） | [vfs.md](vfs.md) |
-| 统一 IPC 机制（sys_recv/sys_req/sys_resp + sys_msg/sys_msg_resp） | [ipc.md](ipc.md) |
-| 时间子系统（sys_gettime/sys_clock + libc timespec_get/clock） | [time.md](time.md) |
-| 文件系统重构（LFN + FHS 目录结构 + Shell 路径执行） | [fs_restructure.md](fs_restructure.md) |
-| libc 文件 I/O（open/read/write/close via sys_open/FD_REGULAR） | [vfs.md](vfs.md) |
-| 用户态驱动（3 层 kbd + req bind/unbind + 各驱动工作流） | [user_driver.md](user_driver.md) |
-| 构建系统（CMake + mkdisk + mkimg） | [cmake.md](cmake.md) |
-| Shell 设计（命令 + FS IPC + 路径执行） | [terminal_shell.md](terminal_shell.md) |
-| Unix domain socket 设计 | [ipc.md](ipc.md) |
-| VFS + fd 系统重构（FAT32 内核化 + inode+page cache+devtmpfs） | [vfs.md](vfs.md) |
-| VFS 内核模块实现（blk_dev+fat32+inode+page_cache+vfs+devtmpfs） | [vfs.md](vfs.md) |
-| SHM fd 化重构（fd + mmap 模式替代 vaddr + shm_regions） | [ipc.md](ipc.md) |
-| ~~fs_driver 异步事件循环~~ | ~~vfs.md~~ | ✅ 已完成 → FAT32 搬入内核 |
-| xHCI + MSI-X（PCIe USB 控制器 + MSI-X 中断分配） | [xhci.md](xhci.md) |
-| USB HID 键盘迁移（PS/2 → xHCI Transfer Ring + SHM ring） | [kbd.md](kbd.md) |
-
-## 当前状态
-
-内核已完整运行：UEFI 引导 → 内核初始化（VFS/FAT32 + AHCI）→ AP 启动（参与调度）→ 加载 init.elf → init 从 FAT32 启动 kbd/terminal → terminal 启动 shell → 多进程协作。
-
-**统一 IPC 完成**：sys_recv/sys_req/sys_resp + sys_msg/sys_msg_resp + AF_UNIX SOCK_STREAM socket + SCM_RIGHTS fd 传递 + poll 事件多路复用。sys_recv 统一接收 IRQ/REQ/NOTIFY/MSG 四类消息（per-process 16 slot recv 队列 + 4 参数签名支持变长数据），sys_req 同步内联请求（56 字节载荷），sys_msg 同步变长消息（≤64KB，内核 kmalloc 中转拷贝）。NR_SYSCALL=59（0-58），含 12 个 VFS syscall（sys_open/sys_stat/sys_mkdir/sys_unlink/sys_rmdir/sys_dev_create/sys_getdents/sys_ioctl/sys_fstat/sys_fdev_pid，编号 47-56）+ fork+execve（编号 57-58）+ signal（sys_kill/sys_sigaction/sys_sigreturn，编号 43-45）。
-
-**Socket 完成**：AF_UNIX SOCK_STREAM socket（kernel/socket.h + kernel/socket.c），10 个 syscall（SYS_SOCKET~SYS_POLL，编号 30-39），包括 socket/bind/listen/accept/connect/socketpair/sendmsg/recvmsg/shutdown/poll。SCM_RIGHTS fd 传递（支持 FD_REGULAR inode ref bump）。sock_write/sock_read 内部辅助（write/read 对 socket fd 的兼容路径）。WAIT_POLL 阻塞状态。per-socket mutex（替代全局 socket_lock）。
-
-**VFS 重构 Phase 1 完成**：FAT32 搬入内核，inode + page cache + devtmpfs 统一 I/O。fs_driver 已删除。6 个新 VFS syscall。FD_REGULAR 类型直通内核 FAT32，零 IPC 文件 I/O。详见 [vfs.md](vfs.md)。
-
-**SHM fd 化完成**：sys_shm_create 返回 fd，sys_mmap 6 参支持 MAP_SHARED + fd。struct shm 引用计数管理（fd/vma 各保活）。sys_munmap 识别 shm_obj 并 shm_put。kernel SHM（USB HID）标记 SHM_KERNEL。
-
-**Display 协议重构进行中**：KMS 从用户态搬入内核，terminal 通过 open("/dev/kms") + req(fd, CREATE_BUF) + mmap(fd) + req(fd, FLIP) 与内核交互。与 Linux DRM/KMS 模型一致。详见 [kms.md](kms.md)。
-
-**文件系统完成**：FAT32 已搬入内核（kernel/fat32.c），支持 open/read/write/close/stat/mkdir/unlink/rmdir。page cache 4KB LRU 淘汰 + 写回。LFN 路径解析 + FHS 目录结构 + Shell 路径执行。
-
-**时间子系统完成**：sys_gettime（全局单调时钟）+ sys_clock（per-process CPU 时间），libc timespec_get/clock 封装。
-
-**设备自注册**：所有驱动通过 device_register(getpid(), DEV_XXX) 自注册（kbd_driver、disk_driver、kms_driver、fs_driver）。
-
-## 多核 SMP — 调度与锁（全部完成）
-
-### 步骤 1: 自旋锁原语 ✅
-### 步骤 2: BKL 大内核锁 ✅（已移除，替换为细粒度锁）
-### 步骤 3: AP 参与调度 ✅ — [schedule.md](schedule.md)
-### 步骤 4: 细粒度锁拆分 ✅ — [kernel_lock.md](kernel_lock.md)
-
----
-
-## 短期目标 — 支持简单 ELF 可执行文件的执行 ✅
-
-核心机制已具备，验收流程可走通：宿主机编写 hello.c → gcc 编译 + 静态链接 libc.a → hello.elf 写入 FAT32 → shell `hello.elf` 路径执行 → 输出 "Hello, World!"。
-
-### 进程退出 + 资源回收（sys_exit / sys_waitpid） ✅ — [process_lifecycle.md](process_lifecycle.md)
-### 运行时加载新进程（sys_spawn） ✅
-### 异常退出路径改造 ✅
-### libc.a 静态库 ✅ — [libc.md](libc.md)
-### KMS 内核化驱动 ✅ — [kms.md](kms.md)
-
-### FAT32 完善
-
-| 功能 | 说明 | 优先级 |
-|------|------|--------|
-| ~~文件写入 (write)~~ | ~~fs_driver 支持文件内容写入~~ | ✅ 已完成 |
-| ~~删除 (unlink/rmdir)~~ | ~~目录项标记 0xE5 + FAT 簇释放~~ | ✅ 已完成（内核 FAT32） |
-| RTC 时间源 | UEFI 获取初始时间 → sys_gettime syscall → 真实时间戳 | 中 |
-
----
-
-## 中期目标 — 支持 Wayland 核心协议
-
-需建立 IPC 通道 + mmap + 双缓冲 + compositor 等基础设施。
-
-### Phase 1: 内核基础设施 ✅
-
-#### sys_mmap / sys_munmap ✅
-
-- [x] sys_mmap(size)：匿名私有映射（设计见 [mem.md](mem.md) Phase 3）
-- [x] sys_munmap(addr, size)：解除映射 + 归还物理页
-- [x] sys_mmap 6 参（addr/size/prot/flags/fd/offset）+ MAP_SHARED + fd 映射
-- **后续**: 共享映射（MAP_SHARED + refcount），见 [mem.md](mem.md) Phase 6
-
-#### VFS + fd 抽象 ✅
-
-- [x] 内核 fd 表 + sys_pipe/sys_write/sys_read/sys_close
-- [x] `struct file` 添加 FD_FILE 类型 + file_data（fs_pid/fs_fd/offset/file_size/ref_count）
-- [x] `kernel_msg_send()` 内部接口 — 内核向 fs_driver 代理 IPC
-- [x] sys_install_fd (#36) + libc open() 改造（sys_msg → 注册 FD_FILE → 统一 syscall I/O）
-- [x] sys_read/sys_write/sys_close/sys_dup2 扩展 FD_FILE 分支（kernel_msg_send 代理）
-- [x] `struct file` 添加 FD_SOCKET 类型 + struct unix_sock *sock
-- [x] sys_read/sys_write/sys_close 扩展 FD_SOCKET 分支（sock_write/sock_read/sock_close）
-- [x] 统一 read()/write()/close() 在 libc 中不再分类型，全部委托内核 syscall 分发
-- [x] FD_REGULAR: 内核 FAT32 直通（sys_open/sys_read/sys_write/sys_close）— 见 [vfs.md](vfs.md)
-- [ ] 验证: 用户进程通过 open("hello.txt") → sys_read(fd, buf) 读取 FAT32 文件
-
-#### Unix domain socket（内核态 AF_UNIX SOCK_STREAM）✅
-
-详见 [ipc.md](ipc.md) 二、AF_UNIX SOCK_STREAM Socket。
-
-- [x] skb 链表（struct sk_buff + struct unix_sock）— `kernel/socket.h`, `kernel/socket.cc`
-- [x] 全局 socket_lock（spinlock_t，锁顺序：procs_lock → socket_lock → scheduler_lock）
-- [x] bind 名字空间表（hash map: sun_path → struct unix_sock*）
-- [x] sys_socket(AF_UNIX, SOCK_STREAM, 0) → fd
-- [x] sys_bind + sys_listen + sys_accept + sys_connect（命名 socket，路径绑定）
-- [x] sys_socketpair（双向字节流 fd pair，可替换 pipe）
-- [x] sys_sendmsg + sys_recvmsg（struct msghdr + struct iovec 100% Linux 兼容）
-- [x] SOCK_STREAM consumed 部分读 + skb 生命周期管理
-- [x] fd passing (SCM_RIGHTS)：sendmsg 验证 fd, recvmsg 时 lazy 安装到接收方
-- [x] sys_shutdown(SHUT_RD/SHUT_WR/SHUT_RDWR) + EOF/EPIPE 处理
-- [x] sock_write/sock_read 内部辅助（write/read 在 socket fd 上的兼容路径）
-- [x] WAIT_POLL 阻塞状态 + wake_process 扩展
-- [ ] 验证: 两个进程通过 Unix socket 连接 → sendmsg/recvmsg 收发数据 → SCM_RIGHTS 传递 shm fd
-
-#### poll（统一事件多路复用）✅
-
-- [x] sys_poll(struct pollfd *, nfds, timeout_ms) — 核心实现（kernel/socket.cc）
-- [x] 支持 pipe 可读 (POLLIN) / 可写 (POLLOUT) 事件
-- [x] 支持 socket 可读 (POLLIN) / 可写 (POLLOUT) / 挂起 (POLLHUP) 事件
-- [x] 全部未就绪 → 阻塞（WAIT_POLL + wait_deadline）+ 超时唤醒
-- [x] `common/socket.h` — pollfd + POLLIN/POLLOUT/POLLERR/POLLHUP 定义
-- [x] `user/include/sys/socket.h` — libc poll() 封装
-- [ ] 验证: compositor 用 poll 同时监听 N 个 client socket
-
-#### 信号机制（已完成）
-
-**范围：Level 2** — `sys_kill` + `sys_sigaction` + `sys_sigreturn` + pending bits + default action（SIGINT/SIGTERM→exit, SIGCHLD→ignore）。sigframe 栈帧投递 + EINTR + force_sig + 内核异常翻译。详见 [ipc.md](ipc.md) 五、信号机制。
-
-- [x] `sys_kill(pid, sig)` — 设置目标进程 pending bits
-- [x] `sys_sigaction(sig, act, oldact)` — 注册/查询信号 handler
-- [x] `sys_sigreturn()` — 信号 handler 返回后恢复上下文
-- [x] 信号投递：iret 前检查 pending signals → 无 handler 则 default action，有 handler 则 trampoline
-- [x] SIGCHLD：替代现有 RECV_NOTIFY 子进程退出通知（waitpid 不受影响）
-- [x] SIGINT（Ctrl+C）：terminal 通过 kill(pid, SIGINT) 向前台进程发中断信号
-- [x] EINTR：阻塞 syscall 被信号中断返回 -EINTR
-- [x] force_sig：同步信号绕过 SIG_IGN
-- [x] 内核异常翻译：#PF→SIGSEGV, #GP→SIGSEGV, #UD→SIGILL, #DE→SIGFPE
-- [ ] 验证: shell 前台进程运行时按 Ctrl+C → 进程退出 → shell 返回提示符
-
-**不做**：EINTR 中断阻塞 syscall、SIGPIPE（保持 -EPIPE）、sigprocmask（按需后续加）、作业控制（Ctrl+Z/fg/bg 后续加）。
-
-#### futex（不实现）
-
-**结论：不做。** 评估后确定 futex 在当前系统上需求不存在：
-- 无用户态多线程（无 `clone`、无共享地址空间进程）→ 无用户态锁竞争
-- 所有进程间同步已有 `sys_recv(timeout)` + `sys_poll()` + `sys_notify()` 覆盖
-- Wayland compositor 是单线程事件驱动模型，不需要用户态锁
-- futex 的价值 = 用户态原子操作 + 内核 fallback 休眠，前提是有多线程争锁场景
-- 未来若引入多线程（pthread/clone），再按需实现
-
-#### shm 改进 ✅
-
-- [x] shm 与 fd 绑定：sys_shm_create 返回 fd（类似 memfd_create），通过 SCM_RIGHTS 传递
-- [x] 放宽数量限制：移除 MAX_SHM_PER_PROC=4 限制（shm_regions[] 已删除）
-- [x] sys_shm_attach 改为 fd-based（返回 fd，随后 mmap）
-- [ ] 对齐 Linux `memfd_create` 签名：新增 `SYS_MEMFD_CREATE（name, flags）+ SYS_FTRUNCATE（fd, size）`，支持 MFD_CLOEXEC + MFD_ALLOW_SEALING。保留 `sys_shm_create` 作为内部快捷方式
-- [ ] 验证: 进程 A 创建 shm fd → 通过 Unix socket 传递 → 进程 B mmap 访问
-
-#### 鼠标驱动
-
-- [ ] USB HID 鼠标驱动（xHCI interrupter 1 + SHM mouse sub-ring + get_mouse_event）
-- [ ] 验证: 鼠标移动事件写入 mouse_shm，compositor 可读取
-
-#### 像素渲染基础
-
-- [x] Display 协议（req CREATE_BUF + req FLIP + 内核 back buffer + 同步 memcpy）— [kms.md](kms.md)
-- [ ] 合成器进程像素级绘制原语：fill_rect / blit
-- [ ] KMS 驱动改造：搬入内核，req(fd, DISPLAY_REQ_FLIP) 同步 page flip（详见 [kms.md](kms.md)）
-- [ ] 验证: compositor 填充红色矩形到 back buffer → req flip → 屏幕显示红色
+## 中期目标 — Wayland 核心协议
 
 ### Phase 2: Wayland 用户态服务
 
@@ -268,44 +80,42 @@
 - [ ] font 渲染引擎（等宽字体 + 颜色 + Unicode）
 - [ ] 通过 wl_shm 创建共享 buffer，渲染 VT100 cell 到 surface
 - [ ] 合成器收到 keyboard focus → terminal 获得 wl_keyboard 事件
-- [ ] 验证: 图形终端启动，可输入命令、显示输出，外观类似 Ubuntu gnome-terminal
+- [ ] 验证: 图形终端启动，可输入命令、显示输出，外观类似 gnome-terminal
 
----
-
-## 远期目标 — 支持原生构建 clang/LLVM
+## 远期目标 — 支持构建 clang/LLVM
 
 > **最低可演示目标：** 在 Xos 上通过 `make`/`ninja` 启动 clang 编译过程，cc1 能处理一个简单 C 文件输出 .o，ld 链接成 ELF。
 >
 > **完成态目标：** Xos 自举 — 在 Xos 上用 clang 编译 clang 源码自身。
 
-### 🔴 P0：绝对无法绕过
+### P0：绝对无法绕过
 
-| 能力 | 依赖 | 说明 | 预估 |
-|------|------|------|------|
-| **fork + execve** | kernel syscall | build system（make/ninja）必须 spawn 子进程（编译→汇编→链接）。没有 fork/exec 构建系统不能运行 | sprint 3-4 |
-| **信号机制（基础）** | kernel syscall + libc | `SIGCHLD`（waitpid 依赖它知道子进程退出）、`signal()`/`sigaction()`/`kill()`、信号投递（用户态返回前检查 pending signals） | sprint 3-4 |
-| **FPU/SSE 上下文切换** | kernel context switch | clang/LLVM **强制使用 SSE/SSE2**。当前 kernel context switch 不保存 xmm 寄存器，编译 flags `-mno-sse -mno-sse2` 必须移除。内核 context switch 需 fxsave/fxrstor 或 xsave/xrstor 保存 FPU/SSE 状态 | sprint 4-5 |
-| **environ + getenv** | libc | 构建系统用环境变量传 PATH/CC/CFLAGS/LDFLAGS。无环境变量连 `which cc` 都跑不了。需内核每进程 environ 区 + execve 继承 | sprint 5 |
-| **/dev/null** | dev_table | 构建脚本大量使用 `>/dev/null 2>&1`。最简单的新增设备 | sprint 5 |
-| **磁盘空间** | mkdisk.sh + FAT32 | LLVM 源码 ~500MB，构建产物 ~5GB。当前 disk.img 64MB 需 ≥ 8GB。另需解决 FAT32 4GB 单文件上限 | sprint 5-6 |
+| 能力 | 依赖 | 说明 |
+|------|------|------|
+| **fork + execve** ✅ | kernel syscall | build system 必须 spawn 子进程 |
+| **信号机制（基础）** ✅ | kernel syscall + libc | SIGCHLD、sigaction、kill、信号投递 |
+| **FPU/SSE 上下文切换** | kernel context switch | clang 强制 SSE/SSE2，当前不保存 xmm；需 fxsave/fxrstor |
+| **environ + getenv** | libc | 构建系统用环境变量传 PATH/CC/CFLAGS；需内核 environ 区 + execve 继承 |
+| **/dev/null** | devtmpfs | 构建脚本大量使用 `>/dev/null 2>&1` |
+| **磁盘空间** | mkdisk + FAT32 | LLVM ~500MB 源码 + ~5GB 产物；当前 64MB 需 ≥8GB；FAT32 4GB 单文件上限 |
 
-### 🟡 P1：快速构建必须
+### P1：快速构建必须
 
-| 能力 | 依赖 | 说明 | 预估 |
-|------|------|------|------|
-| **execvp / PATH 搜索** | libc | 构建系统需要根据 PATH 搜索 cc/ld/as 等可执行文件 | sprint 5 |
-| **sys_mmap 文件映射** | kernel mmap | mmap 文件 fd + MAP_SHARED。LLVM 通过 llvm::MemoryBuffer 大量使用 mmap 文件映射，当前只支持匿名映射 | sprint 5-6 |
-| **pthread (基本)** | kernel + libc | LLVM 编译不强制多线程，但 ninja 需要做并行构建。无 pthread 只能单核串行编译。需 `clone` syscall + TLS（FS_BASE） | sprint 7-9 |
-| **getrlimit/setrlimit** | kernel syscall | 构建工具检查资源限制（open files, stack size） | sprint 6 |
-| **waitpid WNOHANG** | kernel proc | 非阻塞等待子进程，ninja 依赖此实现并行调度 | sprint 3-4 |
+| 能力 | 依赖 | 说明 |
+|------|------|------|
+| **execvp / PATH 搜索** | libc | 构建系统需根据 PATH 搜索可执行文件 |
+| **sys_mmap 文件映射** | kernel mmap | LLVM 大量使用 mmap 文件映射，当前只支持匿名映射 |
+| **pthread (基本)** | kernel + libc | ninja 需并行构建；需 clone syscall + TLS（FS_BASE） |
+| **getrlimit/setrlimit** | kernel syscall | 构建工具检查资源限制 |
+| **waitpid WNOHANG** | kernel proc | 非阻塞等待子进程，ninja 依赖并行调度 |
 
-### 🔵 P2：clang 运行时需要
+### P2：clang 运行时需要
 
 | 能力 | 依赖 | 说明 |
 |------|------|------|
 | **termios** | libc/驱动 | tcsetattr/tcgetattr，部分构建脚本/shell 需要 |
-| **symlink** | FAT32 | 构建系统创建链接。FAT32 不支持，需考虑其他 FS |
-| **/dev/zero** | dev_table | 一些工具需要 |
+| **symlink** | FAT32 | FAT32 不支持，需考虑其他 FS |
+| **/dev/zero** | devtmpfs | 一些工具需要 |
 | **Shebang `#!` 支持** | sys_exec | 脚本执行（`./configure` 等） |
 | **sigprocmask** | kernel signal | 信号阻塞掩码 |
 | **setpgid/getpgid** | kernel proc | 进程组，作业控制 |
@@ -316,7 +126,7 @@
 ```
 sprint 1-2: POSIX 扩展波（libc 完善 + lseek + dirent + unlink/fstat 等）
               ↓
-sprint 3-4: fork + execve + 信号机制（基础）
+sprint 3-4: fork + execve + 信号机制（基础） ✅
               ↓
 sprint 4-5: FPU/SSE 上下文切换 + -mno-sse 移除 + 用户态 SSE 使能
               ↓
@@ -337,156 +147,28 @@ sprint 10+: 交叉编译 clang for Xos → 在 Xos 上测试 cc1 → 自举
 
 这约等于 sprint 3-5 即可完成，跳过了 sprint 7-9。
 
-### 现有相关 TODO 迁移
+## 已知 Bug 与技术债务
 
-- [x] sys_fork + sys_exec（含 ELF loader 复用）— 已实现，详见 [fork_exec.md](fork_exec.md)
-- [x] sys_sigaction / sys_kill / sys_sigreturn — 已实现，详见 [signal.md](signal.md)
-- [x] 信号投递：进程返回用户态前检查 pending signals（trapret 路径）— 已实现
-- [x] SIGCHLD：子进程 exit 时向父进程投递 — 已实现
-- [x] SIGINT（Ctrl+C）：terminal 通过 kill(pid, SIGINT) 向前台进程发中断信号 — 已实现
-- [ ] FPU/SSE lazy context switch（fxsave/ fxrstor, CR0.TS + device_not_available #NM 处理）
-- [ ] 环境变量区（process_create 扩展 environ page）+ copy on exec
-- [ ] 验证: getenv("PATH") == "/bin:/usr/bin"
-- [ ] /dev/null 设备（DEV_NULL = 6，读写丢弃/返回 EOF）
-- [ ] disk.img 扩容至 8GB + FAT32 大分区
-- [ ] sys_mmap 文件映射：MAP_SHARED file-backed mmap（FD_REGULAR → page_cache_lookup 共享物理页）
-- [ ] 验证: mmap 文件 → 读内容 → 写回 → munmap
-- [ ] 单核验证: make 编译单文件 C 程序
-- [ ] 预置 clang-for-Xos 交叉编译器到 FAT32
-- [ ] 验证: exec clang → cc1 输出 .o → ld 链接 → 运行产物
+| # | 问题 | 位置 | 说明 | 归属文档 |
+|---|------|------|------|----------|
+| 9 | 进程创建失败内存泄漏 | kernel/proc.cc | process_create_elf 后续 alloc_page 失败时，前面已分配页面未释放 | [mem.md](mem.md) |
+| 16 | 用户栈仅 4KB 无 guard page | kernel/proc.cc | 栈溢出触发 #PF 被 kill | [proc.md](proc.md) |
+| 17 | 内核栈仅 8KB | kernel/proc.cc | 深层调用路径偏紧 | [proc.md](proc.md) |
+| 21 | pid 未校验上界 | kernel/trap.cc | procs[pid] 未检查 pid >= MAX_PROC | [proc.md](proc.md) |
+| 22 | malloc free 不验证指针合法性 | user/lib/malloc.cc | 任意指针损坏空闲链表 | [mem.md](mem.md) |
+| 25 | 缺少 -mcmodel=kernel | CMakeLists.txt | C 用 -fno-pie 绝对寻址错误 | [cmake.md](cmake.md) |
+| 26 | 链接脚本缺 section 对齐 | build_script/linker.ld | 无法设置不同页权限 | [cmake.md](cmake.md) |
+| 28 | boot_info 复制硬编码 128B | arch/x64/start.S | 结构体扩展会截断 | [uefi.md](uefi.md) |
 
-### Sprint 1-2: POSIX 扩展波（详细计划见 [[posix.md]]）
+各 Bug 详细说明见归属文档的待完成项。已修复的 Bug（#30 socket 锁粒度）不再列出。
+
+## Sprint 1-2: POSIX 扩展波
+
+详细计划见 [posix.md](posix.md)。
 
 - [ ] syscall 清理：重排编号 + DEV_MSG 移除 + BLOCK_READ/WRITE 合并
-- [ ] FAT32 内核模块: UNLINK/RMDIR/FSTAT/OPENDIR/DIRENT/CLOSEDIR/SEEK/ACCESS（unlink/rmdir/stat 已完成）
-- [ ] libc: sprinft/snprintf/strtol/ctype/assert/getcwd/sleep/uname
+- [ ] libc: sprintf/snprintf/strtol/ctype/assert/getcwd/sleep/uname
 - [ ] libc: fopen/fclose/fread/fwrite/fseek/ftell/rewind
 - [ ] libc: opendir/readdir/closedir + struct stat 扩展
 - [ ] libc: lseek/mkdir/unlink/rmdir/access/isatty
 - [ ] libc: memcmp/strstr/strtok/strtok_r/strerror/qsort/rand/abs
-
----
-
-## 已知 Bug 与技术债务
-
-### 高（SMP 竞态 / 内存安全）
-
-| # | 问题 | 位置 | 说明 |
-|---|------|------|------|
-| 9 | 进程创建失败内存泄漏 | `kernel/proc.cc` | `process_create_elf` 后续 `alloc_page` 失败时，前面已分配的页面未释放 |
-
-### 中（逻辑错误 / 健壮性）
-
-| # | 问题 | 位置 | 说明 |
-|---|------|------|------|
-| 16 | 用户栈仅 4KB 无 guard page | `kernel/proc.cc` | 栈溢出触发 #PF 被 kill |
-| 17 | 内核栈仅 8KB | `kernel/proc.cc` | 深层调用路径偏紧 |
-| 20 | `pick_cpu` 总倾向 CPU 0 | `kernel/proc.cc` | 所有 CPU run_count 相同时返回 0 |
-| 21 | `pid` 未校验上界 | `kernel/trap.cc` | `procs[pid]` 未检查 `pid >= MAX_PROC` |
-| 22 | `malloc free` 不验证指针合法性 | `user/lib/malloc.cc` | 任意指针损坏空闲链表 |
-| 30 | ~~socket 全局锁粒度~~ | ~~`kernel/socket.cc`~~ | ✅ 已修复 — per-socket mutex 替代全局 socket_lock |
-
-### 低（构建 / 代码质量）
-
-| # | 问题 | 位置 | 说明 |
-|---|------|------|------|
-| 25 | 缺少 `-mcmodel=kernel` | `CMakeLists.txt` | C 用 `-fno-pie` 绝对寻址错误 |
-| 26 | 链接脚本缺 section 对齐 | `build_script/linker.ld` | 无法设置不同页权限 |
-| 28 | `boot_info` 复制硬编码 128B | `arch/x64/start.S` | 结构体扩展会截断 |
-
----
-
-## Q35 + AHCI 后续
-
-| 功能 | 优先级 | 状态 | 说明 |
-|------|--------|------|------|
-| ~~异步块设备~~ | ~~中~~ | ✅ 已完成 | `sys_block_async` + RECV_NOTIFY 完成回调，fs_driver 事件循环已使用 |
-| USB 键盘迁移 | 中 | ✅ 已完成 | xHCI Transfer Ring + HID Boot Protocol + SHM ring → 替代 PS/2 键盘，见 [kbd.md](kbd.md) |
-| xHCI 热插拔 | 低 | 待做 | 需内核工作队列机制，Port Status Change 事件处理 + 异步枚举状态机 |
-| NVMe 驱动 | 低 | 待做 | PCIe + 多队列 + PRP/SGL |
-| 块设备文件系统 `/dev/sda` | 低 | 待做 | 内核通过 blk_dev 抽象层访问磁盘，用户态可通过 open + read/write 访问原始磁盘设备 |
-| USB 键盘端到端验证 | 中 | 待做 | xHCI 枚举 + Transfer Ring + ISR → SHM → kbd_driver → terminal 需串口调试验证 |
-| `-vga none` | 低 | 已有基础设施 | GPU 原生 mode setting 后可移除 VGA 仿真（PCI VBE Phase of KMS 内核化） |
-
----
-
-## 其他扩展
-
-| 功能 | 依赖 | 优先级 | 说明 |
-|------|------|--------|------|
-| malloc/free 加锁 | — | 中 | MALLOC_LOCK/MALLOC_UNLOCK 占位宏替换为实际锁 |
-| 串口打印统一 NDEBUG 控制 | — | 低 | 全项目串口输出用宏包装 |
-| 删除 sys_write | — | 远 | stdout 改为 SHM ring + sys_notify 零拷贝路径替代 pipe，完全绕过内核，libc 直接写 terminal。对应删除 sys_write/sys_read/sys_pipe/sys_close 等 pipe 相关 syscall。见 [libc.md](libc.md) |
-| printf %f 浮点格式化 | 用户态 SSE/FPU | 中 | 需 FPU 上下文保存 + 浮点转换算法 |
-| 动态库加载（.so 支持） | — | 远 | PIC + 动态链接器 + PLT/GOT |
-| 运行时 IPI | LAPIC | 低 | reschedule / TLB shootdown |
-| KMS PAT/write-combining | KMS内核 | 低 | framebuffer 页映射加 PCD/PAT 标记 |
-| KMS huge page 映射 | KMS内核 | 低 | 减少 TLB miss |
-| KMS 异步 flip + vblank | KMS内核 | 中 | req FLIP 立即返回，内核 deferred flip + vblank callback |
-| 完整 DRM（CRTC/Plane/Connector + GEM + fence） | KMS内核 | 低 | 多屏/多平面/多客户端场景才需要 |
-| 内核态驱动模块化组织 | VFS完成 | 低 | kernel/driver/ 目录集中管理内核驱动，独立编译单元（add_kernel_object），当前 built-in，未来可加 .ko 动态加载机制。与 Linux drivers/ + Kconfig 模型对齐 |
-| 动态内核模块加载（.ko） | 驱动模块化组织 | 远 | insmod/rmmod + 符号导出 + 模块依赖。与 Linux =m 等效 |
-| ~~MSI / MSI-X~~ | ~~APIC~~ | ~~低~~ | ✅ 已完成，PCIe 设备 MSI-X 中断，见 [xhci.md](xhci.md) |
-| 用户态 SSE/FPU | 无 | 中 | lazy FPU restore，gcc 构建依赖 |
-| FSINFO 空闲簇提示 | FAT32 | 低 | 加速空闲簇查找 |
-| ~~fs_driver 异步事件循环~~ | — | ~~中~~ | ✅ 已完成，已删除 fs_driver，FAT32 搬入内核 |
-| ~~多客户端 fs_driver 并发~~ | ~~fs_driver 事件循环~~ | ~~高~~ | ✅ 已完成 — 已删除 fs_driver，FAT32 搬入内核 |
-
-## VFS + fd 系统重构
-
-> FAT32 从用户态 fs_driver 搬入内核，建立 inode + page cache + VFS 统一 I/O 架构。详细设计见 [vfs.md](vfs.md)。
-
-### Phase 0: 删除旧组件
-- [x] 删除 `driver/fs_driver.cc`（4167 行）
-- [ ] 删除 `kernel/trap.c` 中 kernel_msg_send / sys_install_fd（过渡保留）
-- [ ] 删除 `user/lib/file.cc` 中 libc fd_table + msg_fd IPC 路径（过渡保留）
-- [ ] 删除 `user/lib/sys_device.cc` sys_load_dev wrapper（过渡保留）
-- [x] 删除磁盘布局中 fs_driver.elf slot（mkdisk.sh LBA 101-200）
-- [x] 删除 `init/init.c` 中 spawn fs_driver + waitpid(fs_driver_pid)
-- [x] 删除 `common/dev.h` 中 DEV_FS + dev_table 数组
-- [x] 更新 CMakeLists.txt 构建规则
-
-### Phase 1: 内核基础设施 ✅
-- [x] `kernel/inode.c/h` — struct inode + inode hash cache+引用计数+inode_put
-- [x] `kernel/page_cache.c/h` — 4KB page cache + (inode, page_index) key + 4MB LRU
-- [x] `kernel/fat32.c/h` — FAT32 内核模块（从 fs_driver.cc 迁入核心逻辑）
-- [x] `kernel/blk_dev.c/h` — 块设备抽象层（AHCI 接口）
-- [x] `kernel/vfs.c/h` — sys_open/sys_stat/sys_mkdir/sys_unlink/sys_rmdir 路径解析
-- [x] `kernel/devtmpfs.c/h` — /dev/ 内存伪文件系统 + dev_create + inode(INODE_DEV)
-- [x] `kernel/proc.h` — struct file 添加 inode* + offset + FD_REGULAR
-- [x] `kernel/proc.c` — proc_reap FD_REGULAR: inode_put
-- [x] `kernel/trap.c` — syscall 分发 FD_REGULAR 路径 + 6 个 VFS syscall (51-56)
-- [x] `kernel/socket.c` — SCM_RIGHTS 支持 FD_REGULAR inode_get
-- [ ] `kernel/pipe.c`（或 proc.c pipe 部分）— 64KB buffer + batch memcpy
-- [ ] SCM_RIGHTS: unix_inflight ref bump at sendmsg time
-
-### Phase 2: libc 改造
-- [ ] `user/lib/file.cc` — 删除 libc fd_table, read/write/close 统一走 syscall
-- [ ] `user/lib/file.cc` — open() 改为 sys_open（不再 msg_fd IPC）
-- [ ] `user/lib/sys_ipc.cc` — 删除 msg_fd/fs_driver 相关
-- [ ] 新增 dev_create() wrapper
-
-### Phase 3: 验证
-- [ ] open("hello.txt") → sys_read(fd) 读取 FAT32 文件
-- [ ] open("/dev/kbd") → devtmpfs → FD_DEV read/write
-- [ ] pipe 64KB + batch memcpy 性能验证
-- [ ] SCM_RIGHTS + unix_inflight 验证
-- [ ] proc_reap FD_DEV close 异步通知验证
-
-### 性能优化项（后续）
-| 优化 | 当前 | 目标 | 优先级 |
-|------|------|------|--------|
-| FAT 锁细化 | 全局 fat_lock | per-FAT-sector spinlock | 中 |
-| dentry cache | 无（每次 open 读磁盘） | (path, inode) hash + LRU | 高 |
-| readahead | 无 | 顺序检测 + 预取 4 簇 | 中 |
-| page cache 动态 | 固定 4MB | 按空闲内存比例 reclaim | 低 |
-| dirty writeback | 写时立即写磁盘（write-through） | 延迟写回+定时 flush | 中 |
-| poll SHM 状态检查 | 硬编码 always ready | SHM generation counter + sys_notify | 高 |
-
-
-| ~~VFS 层~~ | 无 | ~~低~~ | ✅ 已完成 — FAT32 搬入内核 + inode + page cache + devtmpfs， 统一 I/O 零 IPC，设计见 [vfs.md](vfs.md) |
-| ~~Unix domain socket~~ | — | ~~高~~ | ✅ 已完成 — per-socket mutex + SCM_RIGHTS unix_inflight，见 [ipc.md](ipc.md) |
-| ~~SHM fd 化~~ | — | ~~高~~ | ✅ 已完成 — sys_shm_create 返回 fd + mmap(MAP_SHARED) 映射，见 [ipc.md](ipc.md) |
-| 页面换出 (swap) | FAT32 write | 低 | BFC 不足时换出到磁盘 |
-| ~~启动流程改造~~ | kbd 重构完成 | ~~✅~~ | ✅ 已完成 — init + 内核 FAT32 启动用户态服务（不再 spawn fs_driver），见 [boot.md](boot.md) |
-| POSIX API 封装 | — | 中 | unistd.h/sys/wait.h/sys/mman.h 等，见 [posix.md](posix.md) |

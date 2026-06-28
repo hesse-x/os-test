@@ -18,9 +18,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **最小内核**：内核仅包含调度、内存管理、中断分发、系统调用、FAT32 文件系统、块设备抽象等不可替代的机制。AHCI 在内核空间，键盘等驱动在用户态运行
 - **用户态服务**：shell 及部分驱动进程作为独立用户进程从磁盘加载，拥有独立地址空间，通过 syscall 和 IPC 通信
-- **四层 IPC**：req/resp（≤56B 内联）+ msg/msg_resp（≤64KB 变长）+ AF_UNIX SOCK_STREAM socket（双向字节流 + SCM_RIGHTS）+ pipe（匿名单向）。详见 `doc/design/rpc.md`、`doc/design/socket.md`
+- **四层 IPC**：req/resp（≤56B 内联）+ msg/msg_resp（≤64KB 变长）+ AF_UNIX SOCK_STREAM socket（双向字节流 + SCM_RIGHTS）+ pipe（匿名单向）。详见 `doc/design/ipc.md`
 - **用户态 libc**：libc.a 提供 printf/malloc/string/FILE 等标准库函数。详见 `doc/design/libc.md`
-- **进程隔离**：每进程独立地址空间和 PML4，共享内核映射。详见 `doc/design/process_lifecycle.md`
+- **进程隔离**：每进程独立地址空间和 PML4，共享内核映射。详见 `doc/design/proc.md`
 
 ## 构建与运行
 
@@ -33,9 +33,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./run.sh -s         # QEMU + GDB 远程调试服务器
 ```
 
-构建体系为 CMake + 自定义链接脚本。详见 `doc/design/cmake_user_build.md`。
+构建体系为 CMake + 自定义链接脚本。详见 `doc/design/cmake.md`。
 
-**磁盘布局**：disk.img（64MB），LBA 0=MBR，LBA 101-200=init.elf，LBA 201+=FAT32。详见 `doc/design/fat32.md`。
+**磁盘布局**：disk.img（64MB），LBA 0=MBR，LBA 101-200=init.elf，LBA 201+=FAT32。详见 `doc/design/vfs.md`。
 
 **重要：** `add_library(OBJECT)` 不能设置 `POSITION_INDEPENDENT_CODE ON`，否则加 `-fPIC` 破坏 RIP-relative 寻址。
 
@@ -158,48 +158,33 @@ kernel/
 
 | 文档 | 内容 |
 |------|------|
-| `boot.md` | UEFI 启动流程、GDT/IDT/TSS、中断架构 |
-| `uefi.md` | UEFI 引导详细设计 |
-| `syscall.md` / `sys_api.md` | 系统调用编号与 API 参考 |
-| `rpc.md` | REQ/RESP 同步 IPC 协议 |
-| `process_lifecycle.md` | 进程创建/退出/waitpid/proc_reap |
-| `fork_exec.md` | fork+execve 设计（task_t/mm_t 拆分） |
+| `boot.md` | 启动流程（UEFI→内核→init→服务，ioperm/IOPM，孤儿收养） |
+| `uefi.md` | UEFI 引导设计（EFI stub、boot_info、内存映射安全） |
+| `syscall.md` | 系统调用（SYSCALL/SYSRET、59个syscall编号表） |
+| `proc.md` | 进程管理（task_t/mm_t/files_t、fork/execve/exit/waitpid） |
+| `ipc.md` | IPC 统一设计（REQ/RESP + MSG/MSG_RESP + socket + pipe + SHM + signal） |
 | `schedule.md` | 调度器、run_queue、switch_to、idle |
-| `smp.md` | SMP 多核、Per-CPU 数据、AP 启动 |
-| `mem.md` | Bump/BFC/Slab 分配器 |
-| `page.md` | 地址映射、higher-half、huge pages |
-| `fine_grained_lock.md` | 细粒度锁、锁协议、获取顺序 |
+| `smp.md` | SMP 多核（Per-CPU 数据、AP 启动、中断控制器、TSS IST 栈、锁模型） |
+| `mem.md` | 内存管理（Bump/BFC/Slab、sys_mmap/munmap、用户态 malloc） |
+| `page.md` | 分页设计（higher-half、2MB huge pages、RIP-relative、NX 保护 W^X） |
+| `kernel_lock.md` | 内核锁设计（spinlock + 细粒度锁模型） |
 | `pcie.md` | PCIe ECAM 枚举与 BAR 分配 |
 | `xhci.md` | xHCI USB 控制器驱动 |
 | `kbd.md` | USB HID 键盘驱动 |
 | `kms.md` | KMS 内核态驱动（display buffer 分配 + req flip + devtmpfs /dev/kms） |
-| `terminal_split.md` | Terminal 进程设计 |
+| `terminal.md` | Terminal/PTY/串口设计（内核 PTY + 内核串口 + 用户态 ldisc + Shell） |
 | `driver_workflow.md` | 用户态驱动工作流 |
 | `user_driver.md` | 用户态驱动详细设计 |
-| `file_system.md` / `fat32.md` | FAT32 文件系统（内核化，详见 vfs.md） |
-| `libc.md` | 用户态 libc 设计 |
-| `shm.md` | SHM fd + mmap 模型 |
-| `socket.md` | AF_UNIX SOCK_STREAM + SCM_RIGHTS + poll |
-| `vfs.md` | VFS 统一 I/O（FAT32 内核化 + inode + page cache + devtmpfs） |
-| `dev_table.md` | 设备注册表与动态发现 |
-| `dev_vfs.md` | 设备 VFS 统一路径（迁移计划） |
-| `signal.md` | 信号机制设计（sigframe/EINTR/force_sig） |
-| `tty.md` | PTY/TTY 子系统设计 |
-| `posix.md` | POSIX 接口覆盖现状与实现方案 |
-| `cmake.md` / `cmake_user_build.md` | CMake 构建系统 |
-| `shell.md` | Shell 命令设计 |
-| `time.md` | 时间函数 |
-| `spinlock.md` | 自旋锁实现 |
-| `tss_ist.md` | TSS IST 栈 |
-| `nx_bit.md` | NX 位与 W^X 策略 |
+| `vfs.md` | VFS + 文件系统设计（FAT32 + inode + page cache + devtmpfs） |
+| `libc.md` | libc 设计（FILE/printf/malloc/time，含时间函数） |
+| `posix.md` | POSIX 接口覆盖现状 |
+| `cmake.md` | 构建系统（CMake 规则、工具链、磁盘映像，含用户态构建） |
+| `test.md` | 测试框架设计（Unity + test_runner） |
+| `todo.md` | 项目路线图（Wayland 验收 + clang/LLVM 里程碑 + 已知 Bug） |
 | `thread.md` | 线程设计（CLONE_VM 预留） |
-| `x64_migration.md` | x86-64 迁移记录 |
 | `sparse.md` | Sparse 注解设计 |
 | `sanitize.md` | KASAN sanitizer 设计 |
-| `serial.md` | 串口设计 |
 | `kernel_exception.md` | 内核异常处理基础设施 |
-| `test.md` | 测试框架设计 |
-| `todo.md` | 待办事项与技术债务 |
 
 ## 关键陷阱
 

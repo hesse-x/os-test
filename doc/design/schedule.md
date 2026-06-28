@@ -1,266 +1,224 @@
 # 进程调度
 
-> **已实现**。每 CPU 有独立 idle 进程和 run_queue，AP 参与调度。`timer_handler` 用 `tf->cs == 0x2B` 判断抢占，`pick_cpu()` 按 run_count 分配进程。BKL 已移除，idle_entry 不再操作 BKL。以下描述当前实现；末尾附 x86-32 阶段历史方案供参考。
-
-## 当前实现（x86-64）
+## 当前架构设计
 
 ### 设计决策
 
 | # | 决策 | 选择 | 理由 |
 |---|------|------|------|
-| 1 | idle 进程模型 | Linux 风格：每 CPU 一个 idle 内核线程 | `schedule()` 语义干净（永远返回），idle 是正规进程走 `switch_to`，未来扩展自然 |
-| 2 | `schedule()` 语义 | 纯挑选+切换，**总是返回** | 对 idle：schedule() 返回后 hlt；对抢占：schedule() 返回后 iretq 回用户态。不含 hlt 循环 |
+| 1 | idle 进程模型 | Linux 风格：每 CPU 一个 idle 内核线程 | schedule() 语义干净（永远返回），idle 是正规进程走 switch_to |
+| 2 | `schedule()` 语义 | 纯挑选+切换，**总是返回** | 对 idle：返回后 hlt；对抢占：返回后 iretq 回用户态。不含 hlt 循环 |
 | 3 | idle 入口 | `while(1) { schedule(); sti(); hlt; }` | hlt 期间中断允许，任何中断唤醒后重新 schedule |
 | 4 | BSP idle 进程重构 | 分配独立内核栈 + switch_frame，统一创建流程 | 所有 idle 进程结构一致，消除 `prev == nullptr` 特殊路径 |
-| 5 | `run_count` 语义 | 动态可运行计数（READY + RUNNING 之和） | 大量 BLOCKED 驱动/服务进程下，静态计数严重失真；scheduler_lock 下更新，跨 CPU 用 `__atomic_add_fetch` RELAXED |
+| 5 | `run_count` 语义 | 动态可运行计数（READY + RUNNING 之和） | 大量 BLOCKED 驱动/服务进程下，静态计数严重失真；scheduler_lock 下更新，跨 CPU 用 `__atomic_load_n` RELAXED |
 | 6 | `pick_cpu()` | 遍历 `cpu_locals[].run_count`，选最小值 | 简单有效，拆锁后可替换为更精细的策略 |
-| 7 | `assigned_cpu` | 静态绑定，不迁移 | 步骤 3 目标是跑通多核调度；work stealing 是后续优化 |
-| 8 | IRQ 路由 | 全部留在 BSP | AP 靠定时器轮询（~10ms 延迟）拾取 woken 进程；低延迟需 IPI |
+| 7 | `assigned_cpu` | 静态绑定，不迁移 | work stealing 是后续优化 |
+| 8 | IRQ 路由 | 全部留在 BSP | AP 靠定时器轮询拾取 woken 进程；低延迟需 IPI |
 | 9 | timer_handler 抢占条件 | `tf->cs == 0x2B`（从用户态来则抢占） | 用户态中断时可安全调 schedule()；内核态中断（idle hlt）不调 schedule()，仅 EOI |
 | 10 | idle 不计入 `run_count` | idle 永远可运行但不计入 | idle 是"兜底"，不是负载；`pick_cpu()` 只看用户进程负载 |
-| 11 | `process_entry` | `jmp __trapret` | BKL 移除后无需补偿 |
+| 11 | `process_entry` | `jmp __trapret` | 无需额外操作 |
 | 12 | AP idle 栈 | 创建独立内核栈，ap_entry_c 末尾切换到 idle 栈后进入 idle_entry | smp_boot_aps 分配的临时栈仅用于 AP 初始化 |
+| 13 | CPU 时间统计 | `sched_clock()` 基于 TSC | schedule() 入口和出口更新 `cpu_time_ns` 和 `last_sched` |
 
 ### PCB 结构
 
-```c
-struct proc_t {
-    pid_t pid;
-    proc_state_t state;          // READY / RUNNING / BLOCKED / ZOMBIE / REAPING
-    uint64_t k_rsp;              // saved kernel RSP（switch_to 用）
-    uint64_t k_stack_top;        // kernel stack 虚拟地址顶部（2 页 = 8KB）
-    uint64_t cr3;                // PML4 物理地址
-    uint64_t entry;              // 用户态入口 RIP
-    int assigned_cpu;            // 进程分配的 CPU
-    int iopl;                    // IOPL 级别（0=普通，3=驱动）
-    pid_t parent_pid;
-    int32_t exit_code;
-    uint64_t mmap_brk;           // mmap 高水位
-    list_node_t mmap_regions;    // 已映射区域链表
-    list_node_t run_node;        // per-CPU run_queue 节点
-    list_node_t wait_node;
-    uint64_t wait_deadline;
-    bool wait_timed_out;
-    wait_event_t wait_event;     // WAIT_RECV / WAIT_REQ_REPLY / WAIT_MSG_REPLY / WAIT_CHILD / WAIT_PIPE
-    struct file fd_table[MAX_FD];
-    shm_region_t shm_regions[MAX_SHM_PER_PROC];
-    uint64_t cpu_time_ns;        // per-process CPU 时间
-    uint64_t last_sched;         // 上次调度时间戳
-    // IPC 状态：recv_buf[16][64] + req_*/msg_* 字段
-    spinlock_t recv_lock;
-    // ...
-};
-```
+进程控制块拆分为三层：`task_t`（调度 + IPC + 信号）、`mm_t`（地址空间 + fd）、`files_t`（fd 表，引用计数支持 fork 共享）。
 
-最多 64 个进程（`MAX_PROC=64`）。
+**task_t**（kernel/proc.h : task_t）
+  pid : pid_t — 进程 ID
+  state : proc_state_t — READY / RUNNING / BLOCKED / ZOMBIE / REAPING
+  k_rsp : uint64_t — 内核栈保存的 RSP（switch_to 用）
+  k_stack_top : uint64_t — 内核栈虚拟地址顶部（2 页 = 8KB）
+  entry : uint64_t — 用户态入口 RIP
+  assigned_cpu : int — 进程分配的 CPU
+  iopm : uint8_t* — IOPM bitmap 指针（8KB，ioperm 用，NULL=无权限）
+  tgid : pid_t — 线程组 ID（CLONE_VM 预留）
+  exit_code : int32_t
+  cpu_time_ns : uint64_t — per-process CPU 时间
+  last_sched : uint64_t — 上次调度时间戳（sched_clock TSC）
+  mm : mm_t* — 地址空间（独立引用计数，fork 共享）
+  run_node : list_node_t — per-CPU run_queue 节点
+  wait_node : list_node_t
+  wait_deadline : uint64_t
+  wait_timed_out : uint8_t
+  wait_event : wait_event_t — WAIT_RECV / WAIT_REQ_REPLY / WAIT_MSG_REPLY / WAIT_CHILD / WAIT_PIPE / WAIT_POLL
+  recv_lock : spinlock_t
+  recv_buf[16][64] : uint8_t — 16 槽 × 64 字节 = 1KB 固定 recv 队列
+  recv_head / recv_tail : uint32_t
+  recv_intr : uint8_t — ISR 唤醒标志（wake_process 设，sys_recv 检查后返回 -EINTR）
+  req_caller_pid : pid_t — 当前 req 调用者（-1=无）
+  req_reply_buf : void* — 调用者 reply buffer 用户态地址
+  req_reply_len : size_t — reply buffer 大小（sys_req 路径=RECV_MSG_SIZE，ioctl proxy 路径=56）
+  req_result : int32_t
+  req_target_pid : pid_t — 崩溃清理用
+  msg_reply_buf : void* / msg_reply_len : size_t
+  msg_caller_pid : pid_t（-1 = 无） / msg_result : int32_t / msg_target_pid : pid_t
+  sig : signal_state — 信号子系统（pending/blocked/action[]）
+  sig_force_info : siginfo_t — force_sig 同步信号信息
+  sid : pid_t / pgid : pid_t / ctty : pty* — 会话/进程组/控制终端
+
+**mm_t**（kernel/proc.h : mm_t）
+  cr3 : uint64_t — PML4 物理地址
+  ref_count : int — fork 共享引用计数
+  parent_pid : pid_t
+  mmap_brk : uint64_t — mmap 高水位
+  mmap_regions : mmap_region* — 已映射区域链表
+  files : files_t* — fd 表（独立引用计数）
+
+**files_t**（kernel/proc.h : files_t）
+  fd_table[MAX_FD] : struct file — 固定 32 项数组（MAX_FD=32）
+  ref_count : int — fork 共享引用计数
+
+最多 64 个进程（MAX_PROC=64）。
 
 ### 内核栈布局
 
 **被抢占进程**（时钟中断自然产生）：
 
-```
 高地址 ← k_stack_top
-  trapframe_t                ← CPU + __alltraps 保存
-  ── __alltraps 调用返回地址
-  ── trap_dispatch 调用返回地址
-  ── timer_handler 调用返回地址
-  ── schedule() 调用返回地址
-  callee-saved (rbx, rbp, r12-r15)  ← switch_to 保存
+  trapframe_t ← CPU + __alltraps 保存
+  __alltraps / trap_dispatch / timer_handler / schedule() 调用返回地址
+  callee-saved (rbx, rbp, r12-r15) ← switch_to 保存
 低地址 ← k_rsp
-```
 
 **新建进程**（手工构建）：
 
-```
 高地址 ← k_stack_top
   trapframe_t（全 0，RIP=用户入口，CS=0x2B, RFLAGS=0x202, RSP=0x7FFFFFFFE000, SS=0x23）
-  process_entry 地址            ← switch_to ret 目标
+  process_entry 地址 ← switch_to ret 目标
   rbp=0, rbx=0, r12-r15=0
 低地址 ← k_rsp
-```
 
 **idle 进程**（无用户态）：
 
-```
 高地址 ← k_stack_top
-  switch_frame: rbx=0, rbp=0, r12-r15=0, ret_addr=idle_entry  ← k_rsp
-```
+  switch_frame: rbx=0, rbp=0, r12-r15=0, ret_addr=idle_entry ← k_rsp
 
 ### switch_to
 
-```asm
-switch_to:
-    pushq %rbx
-    pushq %rbp
-    pushq %r12
-    pushq %r13
-    pushq %r14
-    pushq %r15
+保存 callee-saved 寄存器（rbx, rbp, r12-r15），切换 RSP 到 next->k_rsp（偏移 8，_Static_assert 验证），无条件写 next->cr3（偏移 24）到 CR3（同页表时为 no-op），恢复寄存器后 ret。
 
-    movq %rsp, proc_t.k_rsp_offset(%rdi)   # prev->k_rsp = RSP
-    movq proc_t.k_rsp_offset(%rsi), %rsp   # RSP = next->k_rsp
-
-    movq proc_t.cr3_offset(%rsi), %rax     # 切换 CR3（如果页表不同）
-    movq %rax, %cr3
-
-    popq %r15
-    popq %r14
-    popq %r13
-    popq %r12
-    popq %rbp
-    popq %rbx
-    ret
-```
+实现：arch/x64/trapentry.S : switch_to
 
 ### Idle 进程
 
 每个 CPU 一个 idle 进程（内核线程），特征：
 
 - **无用户态**：永不 iretq/sysretq，纯内核循环
-- **无独立 PML4**：`cr3 = PHY_ADDR(pml4)`（内核 PML4 物理地址）
+- **无独立 PML4**：`cr3 = PHY_ADDR(pml4)`（内核 PML4 物理地址），`mm = NULL`
 - **无 trapframe**：内核栈上只有 switch_frame，ret_addr = idle_entry
 - **不计入 `run_count`**：通过 `cpu_locals[cpu_id].idle_proc` 指针识别
 - **状态**：始终可运行，schedule() 切换 FROM idle 时不设为 READY
 
-```c
-void idle_entry() {
-    sti();
-    while (1) {
-        schedule();
-        sti();
-        __asm__ volatile("hlt");
-    }
-}
-```
+入口：kernel/proc.c : idle_entry
 
 ### schedule()
 
-```c
-void schedule() {
-    int my_cpu = get_cpu_local()->cpu_id;
-    proc_t *idle = get_cpu_local()->idle_proc;
-    proc_t *prev = current_proc;
+实现：kernel/proc.c : schedule()
 
-    spin_lock_irqsave(&scheduler_lock);
+步骤：
 
-    // 从 per-CPU run_queue 取下一个进程
-    proc_t *next = nullptr;
-    if (!list_empty(&cpu_locals[my_cpu].run_queue)) {
-        next = LIST_ENTRY(list_front(&cpu_locals[my_cpu].run_queue), proc_t, run_node);
-        list_remove(&next->run_node);
-    }
-
-    // 没有用户进程可运行，切到 idle
-    if (next == nullptr) next = idle;
-
-    // prev == next：无需切换
-    if (prev == next) { spin_unlock_irqrestore(&scheduler_lock); return; }
-
-    // 切换 FROM idle 时不改状态（idle 永远可运行）
-    if (prev != idle && prev->state == RUNNING) {
-        prev->state = READY;
-        list_push_back(&cpu_locals[my_cpu].run_queue, &prev->run_node);
-    }
-
-    next->state = RUNNING;
-    cpu_locals[my_cpu].run_count--;
-    per_cpu_tss[my_cpu].rsp0 = next->k_stack_top;
-    get_cpu_local()->tss_rsp0 = next->k_stack_top;
-    current_proc = next;
-
-    spin_unlock_irqrestore(&scheduler_lock);
-    switch_to(prev, next);
-    spin_lock_irqsave(&scheduler_lock);
-    spin_unlock_irqrestore(&scheduler_lock);
-}
-```
+1. 获取 per-CPU scheduler_lock（irqsave）
+2. CPU 时间统计：`prev->cpu_time_ns += sched_clock() - prev->last_sched`（idle 除外）
+3. **BLOCKED/ZOMBIE/REAPING 快速路径**：prev 不可运行且 run_queue 为空 → 直接切到 idle，return
+4. 从 per-CPU run_queue 取下一个进程（FIFO，front 取出 remove）
+5. run_queue 空：prev==idle 则 return（idle→idle 无需切换），否则 next=idle
+6. prev==next：return
+7. prev 重新入队：`prev->state = READY; list_push_back; run_count++`（idle 除外）
+8. next 出队：`next->state = RUNNING; run_count--`
+9. 更新 `next->last_sched = sched_clock()`
+10. 更新 TSS RSP0 + `current_task = next`
+11. `update_tss_iopm(next)` — 切换 IOPM bitmap
+12. **spin_unlock（不恢复中断）→ switch_to → spin_lock_irqsave → spin_unlock_irqrestore**
+    - switch_to 期间中断必须禁用（RSP/CR3 不一致窗口）
+    - 切换完成后 lock+unlock 恢复原始中断状态
 
 ### timer_handler
 
-```c
-static void timer_handler(trapframe_t *tf) {
-    tick++;
-    lapic_eoi();
-    if (tf->cs == 0x2B) {   // 从用户态来，可安全调 schedule()
-        schedule();
-    }
-    // 从内核态来（idle hlt）：仅 EOI，idle 醒来后自行调 schedule()
-}
-```
+实现：kernel/trap.c : timer_handler
+
+步骤：
+
+1. tick++，lapic_eoi()
+2. xHCI 轮询：每 10 tick 调 `xhci_poll()`
+3. 定时器队列到期处理（scheduler_lock 下）：遍历 `cpu_locals[cpu].timer_queue`，到期进程 state→READY，入 run_queue，run_count++
+4. 用户态抢占：`tf->cs == 0x2B` 时调 schedule()；内核态中断（idle hlt）不调
+
+### check_pending_signals
+
+在 `__trapret`（中断返回用户态前）和 `syscall_fast_entry`（syscall 返回用户态前）调用。
+
+实现：kernel/trap.c : check_pending_signals
+
+步骤：
+
+1. `tf->cs != USER_CS` 则 return
+2. 计算 `deliverable = pending & ~blocked`，为空则 return
+3. 取最低位信号 `sig = __builtin_ctzll(deliverable)`，清除 pending 位
+4. SIG_IGN → continue；SIG_DFL → 默认动作；有 handler → `deliver_signal(proc, tf, sig, sa)` 后 return（一次只投递一个）
+
+详见 doc/design/ipc.md 信号机制部分。
 
 ### pick_cpu()
 
-```c
-static int pick_cpu() {
-    int best = 0;
-    for (int i = 1; i < ncpu; i++) {
-        if (cpu_locals[i].run_count < cpu_locals[best].run_count) {
-            best = i;
-        }
-    }
-    return best;
-}
-```
+实现：kernel/proc.c : pick_cpu()
+
+遍历所有 CPU 的 `cpu_locals[i].run_count`（`__atomic_load_n` RELAXED），选最小值。
 
 ### run_count 维护
 
-所有修改在 scheduler_lock 保护下，跨 CPU 操作用 `__atomic_add_fetch` RELAXED。idle 进程不计入。
+所有修改在 scheduler_lock 保护下，跨 CPU 操作用 `__atomic_load_n` RELAXED。idle 进程不计入。
 
 | 位置 | 操作 | 说明 |
 |------|------|------|
-| `process_create` | `cpu_locals[assigned_cpu].run_count++` | 新进程 READY |
-| `process_create_elf` | `cpu_locals[assigned_cpu].run_count++` | 新进程 READY |
-| `sys_wait` BLOCKED | `cpu_locals[assigned_cpu].run_count--` | RUNNING → BLOCKED |
-| `sys_notify` 唤醒 | `cpu_locals[assigned_cpu].run_count++` | BLOCKED → READY |
-| trap_dispatch IRQ owner 唤醒 | `cpu_locals[assigned_cpu].run_count++` | BLOCKED → READY |
-| schedule() RUNNING↔READY | 不变 | run_count 计 READY+RUNNING 之和，两者转换不影响 |
-| 进程退出 | `cpu_locals[assigned_cpu].run_count--` | 移除一个可运行进程 |
+| process_create / process_create_elf | run_count++ | 新进程 READY |
+| sys_waitpid BLOCKED | schedule() 中不重新入队 | RUNNING → BLOCKED，不出队不计数 |
+| sys_notify / sys_req / sys_resp 唤醒 | run_count++ | BLOCKED → READY |
+| IRQ owner 唤醒 | run_count++ | BLOCKED → READY |
+| timer_queue 到期 | run_count++ | BLOCKED → READY |
+| pipe wake | run_count++ | BLOCKED → READY |
+| schedule() prev 重新入队 | run_count++（入队） | READY 重新入队 |
+| schedule() next 出队 | run_count--（出队） | RUNNING 消费一个槽位 |
+| 进程退出 | run_count-- | 移除一个可运行进程 |
 
 ### 初始化序列
 
 #### BSP（kernel_main）
 
-```
-1. init_mem, isr_init, kernel_init_finish, proc_init
-2. create_idle_process(0)                          （BSP idle）
-3. smp_boot_aps():
-     对每个 AP (cpu_id 1..ncpu-1):
-       - 分配临时栈 + smp_init_cpu
-       - create_idle_process(i)                    （AP idle）
-       - 填充 trampoline + SIPI
-4. 加载用户进程 process_create_elf
-5. current_proc = cpu_locals[0].idle_proc
-6. idle->state = RUNNING
-7. 更新 TSS RSP0
+实现：kernel/kernel.c : kernel_main
+
+1. serial_init, init_mem, acpi_init, isr_init, kernel_init_finish
+2. kasan_init, slab_init, sig_init, proc_init
+3. smp_boot_aps()：对每个 AP 分配临时栈 + smp_init_cpu + create_idle_process(i) + 填充 trampoline + SIPI
+4. pci_init, display_init, ahci_init, vfs_init, xhci_init
+5. create_idle_process(0)（BSP idle，在 smp_boot_aps 之后）
+6. 加载 init.elf from disk → process_create_elf
+7. sti, current_task = bsp_idle, idle->state = RUNNING, 更新 TSS RSP0
 8. 切换到 idle 内核栈，进入 idle_entry()（永不返回）
-```
 
 #### AP（ap_entry_c）
 
-```
-1. smp_apply_cpu, idt_install, LAPIC, timer
-2. current_proc = cpu_locals[cpu_id].idle_proc
-3. idle->state = RUNNING
-4. 更新 TSS RSP0
-5. 切换到 idle 内核栈，进入 idle_entry()
-```
+实现：arch/x64/smp.c : ap_entry_c
 
----
+1. smp_apply_cpu(cpu_id)
+2. pat_init(), idt_install(), setup_syscall()（MSR STAR/LSTAR/SFMASK）
+3. enable LAPIC via MSR + software enable + mask LVT + start LAPIC timer
+4. cpu_locals[cpu_id].lapic_base = LAPIC_BASE
+5. current_task = idle, idle->state = RUNNING, 更新 TSS RSP0
+6. 切换到 idle 内核栈，进入 idle_entry()
 
-## 历史：x86-32 阶段调度方案
+### sched_clock
 
-### Ring 3 特权级切换（阶段一）
+基于 TSC 的单调时钟，用于 CPU 时间统计和定时器队列。实现：arch/x64/apic.c : sched_clock
 
-GDT 6 项（null/kcode/kdata/ucode/udata/TSS），TSS 静态全局变量，IDT 48+1 项（vector128=syscall，DPL=3，flags=0xEE）。trapframe_t 扩展增加 esp/ss（struct 尾部，eflags 之后）。`__alltraps` 不手动 push SS/ESP，iret 在特权级变化时自动 pop。syscall 独立入口 `syscall_entry`（不走 `__alltraps`）。USER_CS=0x1B, USER_DS=0x23, TSS_SEL=0x28。
+当前直接返回 TSC cycle，未转换为纳秒。
 
-ring 3 验证：内核栈上手动构造 iret 帧（EIP=not-present, CS=0x1B, ESP=假值, SS=0x23）→ iret → #PF 证明切换成功。
+## 待完成项
 
-`kernel_init_finish`：清除 PD[0] identity map + 禁 bump 分配器。
-
-### 进程与调度（阶段二）
-
-PCB：32 位字段（k_esp, k_stack_top, cr3, entry 均为 uint32_t），状态仅 READY/RUNNING。switch_to 保存 callee-saved（ebx/esi/edi/ebp），进程创建时在内核栈顶构建 trapframe + switch_to 恢复帧（ret_addr=process_entry）。process_entry 为 `jmp __trapret`。
-
-idle 进程使用 boot stack（不分配新栈），PID 0，schedule() 找不到 READY 进程时 idle 继续。调度器用 `procs[]` 数组环形扫描（2-3 个进程，无需链表）。TSS.esp0 在 schedule() 中更新。每进程独立 PD，拷贝内核 PDE（PD[768-1023]）共享内核映射。
-
-用户代码来源：内核硬编码字节数组（阶段二验证目标为进程切换，非构建加载基础设施）。用户栈不分配，ESP 假值 0xBFFFFFFC（hlt 循环不访问栈）。
+| 项目 | 说明 | 优先级 |
+|------|------|--------|
+| work stealing | assigned_cpu 静态绑定改为动态负载均衡，idle CPU 从繁忙 CPU steal 进程 | 中 |
+| IPI 唤醒 | IRQ 全留在 BSP，AP 靠定时器轮询拾取 woken 进程（~10ms 延迟）；低延迟需 IPI 通知目标 CPU | 中 |
+| 调度策略 | 当前 FIFO（run_queue 顺序），无优先级/时间片；需 O(1) 或 CFS 调度器 | 低 |
+| per-CPU run_count 优化 | pick_cpu() 遍历所有 CPU；大核数时可用 cache line 对齐 + NUMA 感知 | 低 |
+| sched_clock 精度 | 当前直接用 TSC cycle，未转换为纳秒；需校准 tsc_khz | 低 |

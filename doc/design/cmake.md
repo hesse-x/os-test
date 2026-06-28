@@ -1,91 +1,82 @@
 # 构建系统
 
-## 概述
+## 当前架构设计
 
-CMake + 自定义链接脚本构建体系。内核和用户态统一由 CMake 管理，编译规则封装在 `kernel_rules.cmake`（`add_kernel_object`）和 `user_rules.cmake`（`add_user_lib` + `add_user_elf`）。磁盘映像由 `mkdisk.sh` 和 `mkimg.sh` 生成。
+### 设计决策
 
-## 构建入口
+| # | 决策 | 选择 | 理由 |
+|---|------|------|------|
+| 1 | 构建体系 | CMake + 自定义链接脚本 | 统一管理内核和用户态，编译规则封装在 cmake 函数中 |
+| 2 | 内核寻址 | -fPIE + RIP-relative | x86-64 RIP-relative 不需要 GOT，物理/虚拟地址阶段自动正确 |
+| 3 | 用户态寻址 | -fno-pie + -Ttext 0x400000 | 用户态用绝对地址，链接脚本指定入口 |
+| 4 | POSITION_INDEPENDENT_CODE | OFF（内核 OBJECT library） | 防止 add_library(OBJECT) 自动加 -fPIC，破坏 RIP-relative 寻址 |
+| 5 | objcopy | --remove-section .note.gnu.property | 移除 GNU property note，避免 ld 警告 |
+| 6 | 磁盘映像 | 脚本生成（mkdisk.sh + mkimg.sh） | mkdisk.sh 生成 disk.img（裸 ELF + FAT32），mkimg.sh 生成 boot.img（UEFI 启动） |
+
+### 构建入口
 
 ```bash
-./build.sh          # CMake 编译内核 + EFI bootloader + 用户态 ELF + 生成 disk.img + boot.img
-./build.sh -d       # Debug 模式（加 -g -fno-omit-frame-pointer，异常时打印栈回溯）
+./build.sh          # 编译内核 + EFI bootloader + 用户态 ELF + 生成 disk.img + boot.img
+./build.sh -d       # Debug 模式（-g -fno-omit-frame-pointer）
+./build.sh --test   # 测试构建（Unity 测试 ELF + test_runner）
+./build.sh --no-serial  # 禁用串口打印（NSERIAL 宏）
 ```
 
-`build.sh` 三步流程：
+build.sh 三步流程：CMake configure + make → mkdisk.sh → mkimg.sh
 
-1. CMake configure + make（内核 + 用户态）
-2. `mkdisk.sh` 生成 `disk.img`
-3. `mkimg.sh` 生成 `boot.img`
+### 工具链
 
-## 工具链
+build_script/cmake/toolchain-x86_64.cmake：
 
-`build_script/cmake/toolchain-x86_64.cmake`：
-
-- `CMAKE_SYSTEM_NAME = Generic`（裸机，无 OS）
+- CMAKE_SYSTEM_NAME = Generic（裸机，无 OS）
 - 编译器：gcc / g++ / gcc（ASM）
-- 全局 `-m64`
-- `CMAKE_TRY_COMPILE_TARGET_TYPE = STATIC_LIBRARY`（跳过 link check）
+- 全局 -m64
+- CMAKE_TRY_COMPILE_TARGET_TYPE = STATIC_LIBRARY（跳过 link check）
 
-## 内核编译规则
+### 内核编译规则
 
-`build_script/cmake/kernel_rules.cmake` — `add_kernel_object(lib_name SOURCES ... ASM_SOURCES ...)`
+build_script/cmake/kernel_rules.cmake — add_kernel_object(lib_name SOURCES ... ASM_SOURCES ...)
 
-- 创建 OBJECT library（不链接，仅编译为 .o）
-- C++ flags：`-ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fPIE -mno-red-zone -mno-sse -mno-sse2 -mno-mmx`（顶层 CMakeLists.txt 设置）
-- C flags：`-ffreestanding -nostdlib -fno-pic -fno-pie -mno-red-zone -mno-sse -mno-sse2 -mno-mmx`
-- ASM flags：`-m64`（不走 -fPIE，纯汇编手动使用 `symbol(%rip)`）
-- `POSITION_INDEPENDENT_CODE OFF`：防止 `add_library(OBJECT)` 自动加 `-fPIC`，破坏 RIP-relative 寻址
-- Debug 模式：`CMAKE_BUILD_TYPE=Debug` 时追加 `-g -fno-omit-frame-pointer`
+创建 OBJECT library，flags：
+- C++：-ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fPIE -mno-red-zone -mno-sse -mno-sse2 -mno-mmx
+- C：-ffreestanding -nostdlib -fno-pic -fno-pie -mno-red-zone -mno-sse -mno-sse2 -mno-mmx
+- ASM：-m64（纯汇编手动使用 symbol(%rip)）
+- POSITION_INDEPENDENT_CODE OFF
+- Debug：CMAKE_BUILD_TYPE=Debug 时追加 -g -fno-omit-frame-pointer
 
-内核当前 OBJECT library：
+内核 OBJECT library：
 
 | target | 源码 |
 |--------|------|
-| `arch_x64` | arch/x64/ 下所有 .cc/.S |
-| `kernel_mem` | kernel/mem/ 下所有 .cc |
-| `kernel_obj` | kernel/ 下其余 .cc |
+| arch_x64 | arch/x64/ 下所有 .cc/.S |
+| kernel_mem | kernel/mem/ 下所有 .cc |
+| kernel_obj | kernel/ 下其余 .cc |
 
-## 内核链接
+### 内核链接
 
-顶层 CMakeLists.txt 中 `add_custom_target(link)` 调用 `do_link.cmake`：
+顶层 CMakeLists.txt add_custom_target(link) 调 do_link.cmake：
 
-```cmake
 ld -m elf_x86_64 -T build_script/linker.ld <obj_files> -o build/myos.elf
-```
 
-`do_link.cmake` 处理 `$<TARGET_OBJECTS>` 的分号/空格混合分隔问题，统一为 CMake list 后传给 `ld`。
+do_link.cmake 处理 $<TARGET_OBJECTS> 的分号/空格混合分隔，统一为 CMake list 后传 ld。
 
-链接脚本 `build_script/linker.ld`：VMA=0xFFFFFFFF80100000，LMA 用 `AT(ADDR(.section) - 0xFFFFFFFF80000000)` 指定。段顺序：`.text` → `.rodata` → `.data`（含 GOT）→ `.got` → `.bss`（4KB 对齐）。导出 `kernel_end`。
+链接脚本 build_script/linker.ld：VMA=0xFFFFFFFF80100000，LMA 用 AT(ADDR(.section) - VMA_BASE) 指定。段顺序 .text → .rodata → .data → .got → .bss。导出 kernel_end。
 
-## 用户态编译规则
+### 用户态编译规则
 
-`build_script/cmake/user_rules.cmake` — `add_user_lib()` 和 `add_user_elf()`
+build_script/cmake/user_rules.cmake — add_user_lib() 和 add_user_elf()
 
-### 公共编译 flags
+公共 flags：-m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -mno-red-zone -mno-sse -mno-sse2 -mno-mmx
 
-```
--m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector
--mno-red-zone -mno-sse -mno-sse2 -mno-mmx
-```
+与内核区别：-fno-pie（用户态绝对地址）而非 -fPIE。
 
-与内核的区别：`-fno-pie`（用户态用绝对地址，`-Ttext 0x400000`）而非 `-fPIE`。
+add_user_lib(lib_name SOURCES ...) — 创建 STATIC library（如 libc.a，target 名 c → libc.a）。
 
-### add_user_lib(lib_name SOURCES ...)
-
-创建 STATIC library（如 `libc.a`）。
-
-- 输出目录：`build/`（`ARCHIVE_OUTPUT_DIRECTORY`）
-- include 路径：项目根 + `user/include/`
-
-### add_user_elf(name [C] SOURCES ... [LINK_LIBS ...])
-
-三步管线：compile → objcopy → ld。
-
-1. **compile**：`C` 标记选择 gcc/g++，flags 为 `USER_COMPILE_FLAGS` + `-I. -Iuser/include`
-2. **objcopy**：`objcopy --remove-section .note.gnu.property`（移除 GNU property note，避免 ld 警告）
-3. **ld**：`ld -m elf_x86_64 -Ttext 0x400000 <obj> [libs] -o <name>.elf`
-
-`LINK_LIBS` 声明依赖的库（如 `c` 即 libc.a），自动添加依赖和链接参数。
+add_user_elf(name [C] SOURCES ... [LINK_LIBS ...]) — 三步管线：compile → objcopy → ld
+- C 标记选择 gcc/g++
+- objcopy --remove-section .note.gnu.property
+- ld -m elf_x86_64 -Ttext 0x400000 <obj> [libs] -o <name>.elf
+- LINK_LIBS 声明依赖（如 c 即 libc.a）
 
 当前用户态 ELF：
 
@@ -93,55 +84,44 @@ ld -m elf_x86_64 -T build_script/linker.ld <obj_files> -o build/myos.elf
 |--------|------|-----------|
 | shell | shell.cc | c |
 | hello | hello.c (C) | c |
-| malloctest | malloctest.c (C) | c |
+| init | init.c (C) | c |
+| terminal | terminal.cc | — |
+| kbd_driver | kbd_driver.cc | — |
 
-Terminal 和各驱动不链接 libc，直接使用 syscall 原语。
+Terminal 和驱动不链接 libc，使用 syscall 原语。
 
-## 磁盘映像生成
+### 磁盘映像生成
 
-### mkdisk.sh
+mkdisk.sh 生成 build/disk.img（64MB）：
+- dd 写 ELF 到裸 LBA 区域（每槽 100 扇区）
+- sfdisk 创建 MBR 分区表（分区1: 裸 ELF 存储，分区2: FAT32）
+- mkfs.fat 格式化 FAT32 分区（4KB 簇）
+- mmd + mcopy 创建 FHS 目录结构并复制文件
 
-生成 `build/disk.img`（64MB, 131072 扇区）：
+mkimg.sh 生成 build/boot.img（128MB FAT32），包含 \EFI\BOOT\BOOTX64.EFI + myos.elf。
 
-1. 创建零填充映像
-2. dd 写入 6 个 ELF 到裸 LBA 区域（每槽 100 扇区 = 50KB）：
+### 添加新源文件
 
-| LBA | ELF |
-|-----|-----|
-| 1-100 | disk_driver.elf |
-| 101-200 | kbd_driver.elf |
-| 201-300 | kms_driver.elf |
-| 301-400 | terminal.elf |
-| 401-500 | shell.elf |
-| 501-600 | fs_driver.elf |
+- 内核：add_kernel_object(lib_name SOURCES ... ASM_SOURCES ...)
+- 用户态库：add_user_lib(lib_name SOURCES ...)
+- 用户态 ELF：add_user_elf(name [C] SOURCES ... [LINK_LIBS ...])
 
-3. `sfdisk` 创建 MBR 分区表：
-   - 分区1: LBA 1-600, type=0xDA（裸 ELF 存储）
-   - 分区2: LBA 601-131071, type=0x0C（FAT32）
-4. 提取分区2 → `mkfs.fat -F 32 -s 8` 格式化（4KB 簇）
-5. `mmd` + `mcopy` 创建 FHS 目录结构并复制文件：
+### 关键源码位置
 
-```
-/                    根目录
-├── README           测试用文本文件
-├── boot/
-│   ├── bin/         init（boot 改造后）
-│   └── driver/      disk.dev, fs.dev
-├── driver/          kbd.dev, kms.dev
-├── usr/
-│   ├── bin/         terminal, shell
-│   └── lib/         libc.a
-└── local/           hello.elf, malloc.elf
-```
+- 工具链：build_script/cmake/toolchain-x86_64.cmake
+- 内核规则：build_script/cmake/kernel_rules.cmake
+- 用户态规则：build_script/cmake/user_rules.cmake
+- 链接脚本：build_script/linker.ld
+- 链接辅助：build_script/cmake/do_link.cmake
+- 磁盘映像：build_script/mkdisk.sh / mkimg.sh
+- 顶层构建：CMakeLists.txt / build.sh
 
-6. 写回 FAT32 分区到 disk.img
+## 待完成项
 
-### mkimg.sh
-
-生成 `build/boot.img`（128MB FAT32），包含 `\EFI\BOOT\BOOTX64.EFI` + `myos.elf`，供 QEMU UEFI 启动。
-
-## 添加新源文件
-
-- **内核**：在对应目录 CMakeLists.txt 中调用 `add_kernel_object(lib_name SOURCES ... ASM_SOURCES ...)`。
-- **用户态库**：调用 `add_user_lib(lib_name SOURCES ...)`。
-- **用户态 ELF**：调用 `add_user_elf(name [C] SOURCES ... [LINK_LIBS ...])`。`C` 标记表示使用 C 编译器。
+| 项目 | 说明 | 优先级 |
+|------|------|--------|
+| ld --remove-section 替代 objcopy | ld 命令中加 --remove-section .note.gnu.property，省掉中间 stripped.o | 低 |
+| 用户态放开 red zone / SSE | 内核实现 FXSAVE/RXRSTORE 后，用户态可移除 -mno-red-zone -mno-sse -mno-sse2 -mno-mmx | 中 |
+| 缺少 -mcmodel=kernel | C 文件用 -fno-pie 绝对寻址，应改为 -mcmodel=kernel | 低 |
+| 链接脚本缺 section 对齐 | linker.ld 无 section 对齐声明，无法设置不同页权限 | 低 |
+| disk.img 扩容至 ≥8GB | 当前 64MB 不足 clang/LLVM 构建（~5GB 产物），需解决 FAT32 4GB 单文件上限 | 中 |

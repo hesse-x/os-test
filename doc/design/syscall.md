@@ -1,229 +1,161 @@
 # 系统调用
 
-## 概述
+## 当前架构设计
 
-使用 SYSCALL/SYSRET 指令（MSR LSTAR）替代 int 0x80 进行系统调用，与 `__alltraps`/`__trapret` 独立。当前 NR_SYSCALL=59（编号 0-58 连续，slot 8 为 NULL）。int 0x80 路径已移除。
-
-## SYSCALL/SYSRET 设计决策
+### 设计决策
 
 | # | 决策 | 选择 | 理由 |
 |---|------|------|------|
-| 1 | 系统调用指令 | SYSCALL/SYSRET（MSR） | x86-64 标准快速系统调用，不经过 IDT，无需 push 段寄存器，比 int 0x80 快 |
-| 2 | syscall 与 trap 独立 | `syscall_fast_entry` 不走 `__alltraps` | 职责分离，SYSCALL 不自动 push SS/RSP/RFLAGS，需要手动构建 trapframe |
-| 3 | trapframe 统一 | 手动构建与 `__alltraps` 相同布局的 trapframe | `syscall_dispatch` 共用 trapframe_t* 参数，无需额外分发表 |
-| 4 | 用户栈保存 | SYSCALL 前先 movq %rsp, %r10 | SYSCALL 不自动保存用户 RSP，R10 是 scratch 寄存器（不保留） |
-| 5 | 内核栈切换 | `swapgs` → `%gs:32` 读 `tss_rsp0` | tss_rsp0 由 `schedule()` 更新为当前进程内核栈顶，per-CPU 安全 |
-| 6 | swapgs 策略 | syscall 入口无条件 swapgs，出口无条件 swapgs | SYSCALL 只从用户态进入（EFER.SCE 只允许 ring 3 触发） |
-| 7 | STAR 设置 | `[47:32]=0x08, [63:48]=0x18` | SYSCALL: CS=0x08, SS=0x10; SYSRET64: CS=0x2B, SS=0x23 |
-| 8 | SFMASK | IF(bit 9) | SYSCALL 进入后 IF=0，中断自动关闭，与 interrupt gate 行为一致 |
-| 9 | 阻塞 syscall 返回 | SYSRET 路径也适用于被 reschedule 的进程 | `schedule()` → `switch_to` 保存完整调用链，恢复后自然回到 SYSRET 部分 |
-| 10 | 调用约定 | RAX=syscall#, RDI/RSI/RDX/R10/R8/R9 = args | Linux x86-64 syscall 约定；R10 替代 RCX（RCX 被 SYSCALL 用作 return RIP） |
+| 1 | 系统调用指令 | SYSCALL/SYSRET（MSR LSTAR） | x86-64 标准快速系统调用，比 int 0x80 快，不经过 IDT |
+| 2 | syscall 与 trap 独立 | syscall_fast_entry 不走 __alltraps | 职责分离，SYSCALL 不自动 push SS/RSP/RFLAGS |
+| 3 | trapframe 统一 | 手动构建与 __alltraps 相同布局的 trapframe | syscall_dispatch 共用 trapframe_t* 参数 |
+| 4 | 用户栈保存 | SYSCALL 前 movq %rsp, %r10 | SYSCALL 不自动保存用户 RSP，R10 是 scratch 寄存器 |
+| 5 | 内核栈切换 | swapgs → %gs:32 读 tss_rsp0 | per-CPU 安全，schedule() 更新 |
+| 6 | swapgs 策略 | syscall 入口无条件 swapgs，出口无条件 swapgs | SYSCALL 只从 ring 3 来，无条件安全 |
+| 7 | STAR 设置 | [47:32]=0x08, [63:48]=0x18 | SYSCALL CS=0x08/SS=0x10; SYSRET64 CS=0x2B/SS=0x23 |
+| 8 | SFMASK | IF(bit 9) | SYSCALL 进入后 IF=0，与 interrupt gate 行为一致 |
+| 9 | 调用约定 | RAX=syscall#, RDI/RSI/RDX/R10/R8/R9=args | Linux x86-64 syscall 约定 |
+| 10 | 阻塞 syscall 返回 | SYSRET 路径也适用于被 reschedule 的进程 | switch_to 保存完整调用链，恢复后自然回到 SYSRET |
 
-## MSR 设置（`setup_syscall()`，kernel/trap.cc）
+### SYSCALL/SYSRET 机制
 
-```c
-// STAR: SYSCALL CS=0x08/SS=0x10, SYSRET64 CS=0x2B/SS=0x23
-uint64_t star = ((uint64_t)0x08 << 32) | ((uint64_t)0x18 << 48);
-wrmsr(MSR_STAR, star);
+syscall_fast_entry（arch/x64/trapentry.S）：
+- SYSCALL 自动做：RCX=RIP, R11=RFLAGS，不 push 任何内容
+- 保存用户 RSP 到 R10 → swapgs → %gs:32 读内核栈 → subq $176 构建 trapframe → 保存 CPU 自动字段（ss/rsp/rflags/cs/rip/err_code/trapno）→ 保存 16 个 GP 寄存器 → 设 DS/ES → call syscall_dispatch
 
-// LSTAR: SYSCALL 入口地址
-wrmsr(MSR_LSTAR, (uint64_t)syscall_fast_entry);
+SYSRET 返回（arch/x64/trapentry.S）：
+- 恢复 GP 寄存器 → rcx→用户RIP, r11→用户RFLAGS, rsp→用户RSP → swapgs → sysretq
 
-// CSTAR: 32 位兼容入口（未使用，设为 0）
-wrmsr(MSR_CSTAR, 0);
+MSR 设置：kernel/trap.cc : setup_syscall() — STAR/LSTAR/CSTAR/SFMASK/EFER.SCE
 
-// SFMASK: 清除 IF(bit 9)
-wrmsr(MSR_SFMASK, (1 << 9));
+### syscall_dispatch 与系统调用表
 
-// EFER.SCE: 启用 SYSCALL/SYSRET
-uint64_t efer = rdmsr(MSR_EFER);
-efer |= EFER_SCE;
-wrmsr(MSR_EFER, efer);
-```
+NR_SYSCALL=59，syscall_table[] 定义在 kernel/trap.cc。
 
-## syscall_fast_entry（arch/x64/trapentry.S）
+参数从 trapframe 提取：RDI/RSI/RDX/R10/R8/R9（6 参），返回值写回 tf->rax。超出范围返回 ENOSYS。
 
-SYSCALL 指令自动做：RCX = RIP, R11 = RFLAGS，然后加载 CS/SS（来自 STAR）。不自动 push 任何内容到栈、不自动切换栈。
+| 编号 | 名称 | 说明 |
+|------|------|------|
+| 0 | sys_getpid | 获取 PID |
+| 1 | sys_yield | 主动让出 CPU |
+| 2 | sys_recv | 统一事件接收（IRQ/REQ/NOTIFY/MSG） |
+| 3 | sys_req | 同步 REQ（≤56B 内联载荷） |
+| 4 | sys_resp | 回复当前 REQ 调用者 |
+| 5 | sys_irq_bind | 绑定当前进程到指定 IRQ |
+| 6 | sys_exit | 进程退出 |
+| 7 | sys_waitpid | 等待子进程退出 |
+| 8 | — | slot 已空（原 sys_spawn，已改用 fork+execve） |
+| 9 | sys_mmap | 内存映射（6 参） |
+| 10 | sys_munmap | 解除内存映射 |
+| 11 | sys_shm_create | 创建 SHM fd |
+| 12 | sys_shm_attach | 附加 SHM |
+| 13 | sys_pipe | 创建 pipe |
+| 14 | sys_write | 写 fd |
+| 15 | sys_read | 读 fd |
+| 16 | sys_close | 关闭 fd |
+| 17 | sys_notify | 异步通知 |
+| 18 | sys_gettime | 全局单调时钟（纳秒） |
+| 19 | sys_clock | per-process CPU 时间 |
+| 20 | sys_msg | 变长消息请求 |
+| 21 | sys_msg_resp | 变长消息回复 |
+| 22 | sys_ioperm | I/O 端口权限 |
+| 23 | sys_dup2 | 复制 fd |
+| 24 | sys_fcntl | 文件控制 |
+| 25 | sys_dma_alloc | 物理连续 DMA 分配 |
+| 26 | sys_dma_free | 释放 DMA 缓冲区 |
+| 27 | sys_pci_dev_info | PCI 设备查询 |
+| 28 | sys_block_async | 异步块 I/O |
+| 29 | sys_install_fd | 注册 FD_FILE fd |
+| 30 | sys_socket | socket |
+| 31 | sys_bind | bind |
+| 32 | sys_listen | listen |
+| 33 | sys_accept | accept |
+| 34 | sys_connect | connect |
+| 35 | sys_socketpair | socketpair |
+| 36 | sys_sendmsg | sendmsg |
+| 37 | sys_recvmsg | recvmsg |
+| 38 | sys_shutdown | shutdown |
+| 39 | sys_poll | poll |
+| 40 | sys_lseek | 文件偏移设置 |
+| 41 | sys_memfd_create | 创建 memfd |
+| 42 | sys_ftruncate | 截断文件 |
+| 43 | sys_kill | 发送信号 |
+| 44 | sys_sigaction | 注册信号 handler |
+| 45 | sys_sigreturn | 信号返回 |
+| 46 | sys_debug_print | 内核调试打印 |
+| 47 | sys_open | 打开文件 |
+| 48 | sys_stat | 获取文件状态 |
+| 49 | sys_mkdir | 创建目录 |
+| 50 | sys_unlink | 删除文件 |
+| 51 | sys_rmdir | 删除目录 |
+| 52 | sys_dev_create | 创建设备节点 |
+| 53 | sys_getdents | 读取目录项 |
+| 54 | sys_ioctl | 设备控制 |
+| 55 | sys_fstat | 基于 fd 获取文件状态 |
+| 56 | sys_fdev_pid | 获取设备驱动 PID |
+| 57 | sys_fork | fork |
+| 58 | sys_execve | execve |
 
-```asm
-syscall_fast_entry:
-    movq %rsp, %r10           # 保存用户 RSP（R10 是 scratch）
-    swapgs                    # GS_BASE ↔ KERNEL_GS_BASE → GS_BASE = cpu_local*
-    movq %gs:32, %rsp         # 切内核栈（cpu_local.tss_rsp0，偏移 32）
+### recv_msg 类型
 
-    subq $176, %rsp           # 在内核栈构建 trapframe（176 bytes）
-
-    # CPU 自动保存的字段
-    movq $0x23, 168(%rsp)     # ss = USER_DS
-    movq %r10, 160(%rsp)      # rsp = 用户 RSP
-    movq %r11, 152(%rsp)      # rflags（SYSCALL 保存到 R11）
-    movq $0x2B, 144(%rsp)     # cs = USER_CS
-    movq %rcx, 136(%rsp)      # rip（SYSCALL 保存到 RCX）
-    movq $0, 128(%rsp)        # err_code = 0
-    movq $128, 120(%rsp)      # trapno = 128
-
-    # 保存所有 16 个 GP 寄存器
-    movq %r15, 0(%rsp) ... movq %rax, 112(%rsp)
-
-    movw $0x10, %ax
-    movw %ax, %ds
-    movw %ax, %es
-
-    movq %rsp, %rdi
-    call syscall_dispatch
-```
-
-## SYSRET 返回
-
-阻塞 syscall 也走此路径：被 reschedule 后恢复时，switch_to 返回到 syscall_dispatch 调用之后，继续执行 SYSRET 恢复逻辑。
-
-```asm
-    # 恢复 GP 寄存器（除 RCX/R11，它们用于 SYSRET）
-    movq 112(%rsp), %rax ... movq 0(%rsp), %r15
-
-    movq 136(%rsp), %rcx      # 用户 RIP（SYSRET 加载 RCX → RIP）
-    movq 152(%rsp), %r11      # 用户 RFLAGS（SYSRET 加载 R11 → RFLAGS）
-    movq 160(%rsp), %rsp      # 用户 RSP（必须在 swapgs 之前加载）
-
-    swapgs                    # 换回用户 GS base
-    sysretq                   # RCX→RIP, R11→RFLAGS, CS/SS 从 STAR 加载
-```
-
-## 与 __alltraps/__trapret 的差异
-
-| 方面 | __alltraps/__trapret | syscall_fast_entry/SYSRET |
-|------|---------------------|--------------------------|
-| 触发方式 | 硬件中断/异常 → IDT | SYSCALL 指令 → MSR LSTAR |
-| CPU 自动保存 | SS, RSP, RFLAGS, CS, RIP, [err] | RCX=RIP, R11=RFLAGS（无栈操作） |
-| 栈切换 | CPU 自动切到 TSS RSP0 | 手动 swapgs + %gs:32 读 tss_rsp0 |
-| swapgs | 条件性（检查 CS 判断来源） | 无条件（SYSCALL 只从 ring 3 来） |
-| trapframe 构建 | push 寄存器到栈 | subq + movq 写入固定偏移 |
-| 返回 | iretq（自动 pop SS/RSP/RFLAGS/CS/RIP） | sysretq（RCX→RIP, R11→RFLAGS, CS/SS 从 STAR） |
-
-## syscall_dispatch 与系统调用表
-
-```c
-#define NR_SYSCALL 59
-static syscall_fn_t syscall_table[NR_SYSCALL] = {
-    sys_getpid,         // 0:  获取 PID
-    sys_yield,          // 1:  主动让出 CPU
-    sys_recv,           // 2:  统一事件接收（IRQ/REQ/NOTIFY/MSG）
-    sys_req,            // 3:  同步 REQ（56 字节内联载荷）
-    sys_resp,           // 4:  回复当前 REQ 调用者
-    sys_irq_bind,       // 5:  绑定当前进程到指定 IRQ
-    sys_exit,           // 6:  进程退出
-    sys_waitpid,        // 7:  等待子进程退出
-    NULL,               // 8:  sys_spawn 已删除，使用 fork+execve
-    sys_mmap,           // 9:  内存映射（6 参：addr/size/prot/flags/fd/offset）
-    sys_munmap,         // 10: 解除内存映射
-    sys_shm_create,     // 11: 创建 SHM fd
-    sys_shm_attach,     // 12: 附加 SHM
-    sys_pipe,           // 13: 创建 pipe
-    sys_write,          // 14: 写 fd
-    sys_read,           // 15: 读 fd
-    sys_close,          // 16: 关闭 fd
-    sys_notify,         // 17: 异步通知
-    sys_gettime,        // 18: 全局单调时钟（纳秒）
-    sys_clock,          // 19: per-process CPU 时间
-    sys_msg,            // 20: 变长消息请求
-    sys_msg_resp,       // 21: 变长消息回复
-    sys_ioperm,         // 22: I/O 端口权限
-    sys_dup2,           // 23: 复制 fd
-    sys_fcntl,          // 24: 文件控制
-    sys_dma_alloc,      // 25: 物理连续 DMA 分配
-    sys_dma_free,       // 26: 释放 DMA 缓冲区
-    sys_pci_dev_info,   // 27: PCI 设备查询
-    sys_block_async,    // 28: 异步块 I/O
-    sys_install_fd,     // 29: 注册 FD_FILE fd
-    sys_socket,         // 30: socket
-    sys_bind,           // 31: bind
-    sys_listen,         // 32: listen
-    sys_accept,         // 33: accept
-    sys_connect,        // 34: connect
-    sys_socketpair,     // 35: socketpair
-    sys_sendmsg,        // 36: sendmsg
-    sys_recvmsg,        // 37: recvmsg
-    sys_shutdown,       // 38: shutdown
-    sys_poll,           // 39: poll
-    sys_lseek,          // 40: 文件偏移设置
-    sys_memfd_create,   // 41: 创建 memfd
-    sys_ftruncate,      // 42: 截断文件
-    sys_kill,           // 43: 发送信号
-    sys_sigaction,      // 44: 注册信号 handler
-    sys_sigreturn,      // 45: 信号返回
-    sys_debug_print,    // 46: 内核调试打印
-    // VFS syscall (47-58)
-    sys_open,           // 47: 打开文件
-    sys_stat,           // 48: 获取文件状态
-    sys_mkdir,          // 49: 创建目录
-    sys_unlink,         // 50: 删除文件
-    sys_rmdir,          // 51: 删除目录
-    sys_dev_create,     // 52: 创建设备节点
-    sys_getdents,       // 53: 读取目录项
-    sys_ioctl,          // 54: 设备控制
-    sys_fstat,          // 55: 基于fd获取文件状态
-    sys_fdev_pid,       // 56: 获取设备驱动PID
-    sys_fork,           // 57: fork
-    sys_execve,         // 58: execve
-};
-```
-
-参数从 trapframe 提取：RDI/RSI/RDX/R10/R8/R9（Linux 约定，6 参 syscall），返回值写回 tf->rax。超出范围返回 ENOSYS。
-
-## 用户态封装
-
-底层 `__syscall0`-`__syscall6` 定义在 `arch/x64/utils.h`（内联汇编）。语义封装定义在 `common/syscall.h`：
-
-```c
-static inline uint64_t __syscall0(uint64_t n) {
-    uint64_t ret;
-    __asm__ volatile("syscall" : "=a"(ret) : "a"(n) : "rcx", "r11", "memory");
-    return ret;
-}
-// syscall1..syscall5 类似，传入 1-5 个参数
-
-// 6 参数 syscall（sys_mmap 需要，传递 r9）
-static inline int64_t __syscall6(int64_t num, int64_t a1, int64_t a2, int64_t a3,
-                                 int64_t a4, int64_t a5, int64_t a6) {
-    int64_t ret;
-    __asm__ volatile("syscall"
-        : "=a"(ret)
-        : "a"(num), "D"(a1), "S"(a2), "d"(a3), "r"(a4), "r8"(a5), "r9"(a6)
-        : "rcx", "r11", "memory");
-    return ret;
-}
-```
-
-### 返回值约定
-
-- 状态型 syscall（recv/req/resp/notify/exit/irq_bind/munmap）：0=成功，正数=errno
-- 值返回型 syscall：sys_mmap 返回地址（NULL 失败），sys_fork 返回子PID（父进程）或0（子进程），sys_waitpid 返回 pid（0 失败），sys_getpid 始终成功
-
-### recv_msg 结构
-
-sys_recv 接收的消息类型（定义在 `common/syscall.h`）：
+common/syscall.h 定义：
 
 | type | 名称 | src | data |
 |------|------|-----|------|
 | 0 | RECV_IRQ | IRQ 号 | 56 字节 |
 | 1 | RECV_REQ | 发送者 PID | 56 字节请求载荷 |
 | 2 | RECV_NOTIFY | 发送者 PID | 56 字节 |
-| 3 | RECV_MSG | 发送者 PID | kmaddr + len（内核 kmalloc 缓冲区指针） |
+| 3 | RECV_MSG | 发送者 PID | kmaddr + len（内核缓冲区指针） |
 
-sys_recv 签名：`sys_recv(buf, data_buf, data_buf_len, timeout_ms)`，timeout_ms=0 无限等待。
+sys_recv 签名：sys_recv(buf, data_buf, data_buf_len, timeout_ms)，timeout_ms=0 无限等待。
 
-## IPC 机制
+### 返回值约定
 
-| 层 | syscall | 载荷 | 用途 |
-|----|---------|------|------|
-| 控制信令 | sys_req/sys_resp | ≤56B 内联 | 短请求/回复（kbd bind/unbind 等） |
-| 数据传输 | sys_msg/sys_msg_resp | ≤64KB 变长 | 文件 I/O（待迁移 socket） |
-| 双向字节流 | socket/sendmsg/recvmsg | skb 链表 ≤64KB | AF_UNIX SOCK_STREAM + SCM_RIGHTS fd 传递 |
-| 事件多路复用 | poll | pollfd 数组 | 统一监听 pipe/socket/dev fd 事件 |
-| 匿名管道 | pipe/write/read/close | 4KB ring buffer | stdin/stdout 单向数据传输 |
+- 状态型 syscall：0=成功，负数=errno
+- 值返回型：sys_mmap 返回地址，sys_fork 返回子 PID（父）/0（子），sys_waitpid 返回 pid
 
-sys_req：同步阻塞，发送 56 字节请求到目标进程，目标进程 sys_recv 收到 RECV_REQ，处理完后 sys_resp 回复，发送方被唤醒。
+### 用户态封装
 
-sys_msg：同步变长，发送方 kmalloc 内核缓冲区拷贝数据，接收方 sys_recv 收到 RECV_MSG（含 kmaddr），接收方 sys_msg_resp 回复后内核 kfree 缓冲区。
+arch/x64/utils.h — __syscall0 至 __syscall6（内联汇编）。语义封装在 common/syscall.h。
 
-IPC 机制设计详见 [ipc.md](ipc.md)。
+### 与 __alltraps/__trapret 的差异
+
+| 方面 | __alltraps | syscall_fast_entry |
+|------|-----------|-------------------|
+| 触发 | 硬件中断/异常 → IDT | SYSCALL 指令 → MSR LSTAR |
+| CPU 自动保存 | SS/RSP/RFLAGS/CS/RIP/[err] | RCX=RIP, R11=RFLAGS（无栈操作） |
+| 栈切换 | CPU 自动切 TSS RSP0 | 手动 swapgs + %gs:32 |
+| swapgs | 条件性（检查 CS） | 无条件 |
+| 返回 | iretq | sysretq |
+
+### IPC 机制概览
+
+详见 [ipc.md](ipc.md)。
+
+| 层 | syscall | 用途 |
+|----|---------|------|
+| 控制信令 | req/resp | 短请求/回复 |
+| 数据传输 | msg/msg_resp | ≤64KB 变长 |
+| 双向字节流 | socket/sendmsg/recvmsg | AF_UNIX SOCK_STREAM + SCM_RIGHTS |
+| 事件多路复用 | poll | 统一监听 pipe/socket/dev |
+| 匿名管道 | pipe/write/read/close | stdin/stdout 单向 |
+
+### 关键源码位置
+
+- syscall 入口：arch/x64/trapentry.S : syscall_fast_entry
+- syscall 分发：kernel/trap.cc : syscall_dispatch / syscall_table
+- MSR 设置：kernel/trap.cc : setup_syscall
+- trapframe 定义：arch/x64/trap.h : trapframe_t
+- 用户态封装：arch/x64/utils.h : __syscall0-6
+- syscall 编号和语义：common/syscall.h / common/syscall_nums.h
+
+## 待完成项
+
+| 项目 | 说明 | 优先级 |
+|------|------|--------|
+| clone | 线程创建（CLONE_VM 等），需完整 pthread 支持 | 中 |
+| futex | 线程同步原语，pthread mutex 底层 | 中 |
+| arch_prctl | 线程本地存储（FS/GS base 管理） | 中 |
+| set_tid_address / gettid | 线程 ID 管理 | 低 |
+| tgkill | 线程级信号发送 | 低 |
+| exit_group | 进程组退出 | 低 |
