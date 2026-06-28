@@ -257,6 +257,24 @@ size_t copy_to_user(void __user *dst, const void *src, size_t size) {
     return 0;
 }
 
+// strncpy_from_user — copy a string from user space byte-by-byte.
+// Stops at '\0' or maxlen, never crosses page boundaries for short strings
+// near page edges (unlike copy_from_user which reads a fixed block).
+// Returns: length of string (excluding '\0'), or -EFAULT if src is NULL.
+__attribute__((no_sanitize("kernel-address")))
+long strncpy_from_user(char *dst, const char __user *src, long maxlen) {
+    if (!src || maxlen <= 0) return -EFAULT;
+    long len = 0;
+    while (len < maxlen) {
+        char c = *(volatile const char __force *)(src + len);
+        dst[len] = c;
+        if (c == '\0') return len;
+        len++;
+    }
+    dst[maxlen - 1] = '\0';
+    return len;
+}
+
 // ===================== Global variable poisoning =====================
 __attribute__((no_sanitize("kernel-address")))
 void kasan_poison_globals(void) {

@@ -130,8 +130,6 @@ long display_ioctl(uint32_t cmd, void *arg) {
     bool is_create = (cmd == KMS_IOCTL_CREATE_BUF || cmd == DISPLAY_REQ_CREATE_BUF);
     bool is_flip   = (cmd == KMS_IOCTL_FLIP || cmd == DISPLAY_REQ_FLIP);
 
-    serial_printf("display_ioctl: cmd=%u is_create=%d is_flip=%d\n", cmd, is_create, is_flip);
-
     if (is_create) {
         // Use unified struct layout: input at offsets 0-11, output at offsets 12-31
         struct display_ioctl_create_buf_arg *uarg = (struct display_ioctl_create_buf_arg *)arg;
@@ -170,8 +168,6 @@ long display_ioctl(uint32_t cmd, void *arg) {
         uarg->rows   = height / FONT_HEIGHT;
         uarg->cols   = width / FONT_WIDTH;
         uarg->result = 0;
-        serial_printf("display_ioctl CREATE_BUF: pitch=%u size=%u rows=%u cols=%u result=%d\n",
-                       uarg->pitch, uarg->size, uarg->rows, uarg->cols, uarg->result);
         return 0;
 
     } else if (is_flip) {

@@ -519,9 +519,6 @@ uint64_t sys_fork(uint64_t a1, uint64_t a2, uint64_t a3,
 
     spin_unlock(&tasks_lock);
 
-    serial_printf("fork: child_pid=%d parent_pid=%d child_kstack_phys=0x%lx child_kstack_top=0x%lx\n",
-        child->pid, parent->pid, k_stack_phys, k_stack_top);
-
     // 8. Enqueue to scheduler
     int cpu = child->assigned_cpu;
     spin_lock(&cpu_locals[cpu].scheduler_lock);
@@ -540,14 +537,12 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
     (void)a2;(void)a3;(void)a4;(void)a5;(void)a6;
     const char *pathname = (const char *)a1;
     task_t *proc = current_task;
-    if (!proc->mm) { serial_printf("execve: no mm pid=%d\n", proc->pid); return (uint64_t)-EINVAL; }
-    serial_printf("execve: pid=%d path=%s\n", proc->pid, pathname);
+    if (!proc->mm) return (uint64_t)-EINVAL;
 
     // 1. Open pathname via VFS
     uint64_t open_result = sys_open((uint64_t)(uintptr_t)pathname, O_RDONLY, 0, 0, 0, 0);
     int32_t fd = (int32_t)(open_result & 0xFFFFFFFFULL);
-    if (fd < 0) { serial_printf("execve: open %s failed fd=%d pid=%d\n", pathname, fd, proc->pid); return (uint64_t)fd; }
-    serial_printf("execve: opened %s fd=%d pid=%d\n", pathname, fd, proc->pid);
+    if (fd < 0) return (uint64_t)fd;
 
     // 2. Get file size from inode directly (sys_fstat uses copy_to_user which
     //    would just memcpy, but we avoid the round-trip)
@@ -557,6 +552,7 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
     }
     struct inode *ip = proc->mm->files->fd_table[fd].inode;
     if (!ip) { sys_close((uint64_t)fd, 0, 0, 0, 0, 0); return (uint64_t)-EBADF; }
+    uint32_t saved_ino = ip->ino;
     uint64_t file_size = ip->size;
 
     // 3. kmalloc buffer, read entire ELF into kernel
@@ -566,11 +562,15 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
     // Use fat32_read directly (sys_read rejects kernel-space buffers)
     int nread = fat32_read(ip, 0, (void *)elf_buf, file_size);
     sys_close((uint64_t)fd, 0, 0, 0, 0, 0);
-    if (nread < 0 || (uint64_t)nread < file_size) { kfree(elf_buf); serial_printf("execve: read failed nread=%d pid=%d\n", nread, proc->pid); return (uint64_t)-EIO; }
-    serial_printf("execve: read %d bytes pid=%d\n", nread, proc->pid);
+    ip = NULL;  /* ip is now dangling after sys_close — do not dereference */
+
+    if (nread < 0 || (uint64_t)nread < file_size) { kfree(elf_buf); return (uint64_t)-EIO; }
 
     // 4. Validate ELF magic
     if (elf_buf[0] != 0x7F || elf_buf[1] != 'E' || elf_buf[2] != 'L' || elf_buf[3] != 'F') {
+        serial_printf("execve: pid=%d path=%s ino=%lu size=%lu bad magic: %02x %02x %02x %02x\n",
+            proc->pid, pathname, (unsigned long)saved_ino, (unsigned long)file_size,
+            elf_buf[0], elf_buf[1], elf_buf[2], elf_buf[3]);
         kfree(elf_buf);
         return (uint64_t)-ENOEXEC;
     }
@@ -592,7 +592,6 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
         serial_printf("execve: elf_load failed pid=%d\n", proc->pid);
         return (uint64_t)-ENOEXEC;
     }
-    serial_printf("execve: elf_load ok entry=%lx pid=%d\n", lr.entry, proc->pid);
 
     // 7. Allocate new user stack
     int user_stack_pages = 2048;
@@ -632,20 +631,28 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
         }
     }
 
-    // 9. Release old address space (page tables + physical pages only)
-    mm_release_pages(proc->mm);
+    // 9. Switch to new address space FIRST, then free old pages.
+    //    If we free before switching, subsequent kmalloc/kfree can reuse
+    //    the old PML4 page and corrupt page tables still loaded in CR3.
 
-    // 10. Free old mmap_regions list
-    mmap_region_t *region = proc->mm->mmap_regions;
-    while (region) {
-        mmap_region_t *next = region->next;
-        if (region->shm_obj) shm_put(region->shm_obj);
-        kfree(region);
-        region = next;
-    }
+    // 9a. Modify current trapframe: rip=entry, rsp=stack_top
+    trapframe_t *tf = get_cpu_local()->cur_tf;
+    tf->rip = lr.entry;
+    tf->rsp = 0x00007FFFFFFFE000;
+    tf->rax = 0;
+
+    // 9b. Update mm_t fields
+    uint64_t old_cr3 = proc->mm->cr3;
+    mmap_region_t *old_regions = proc->mm->mmap_regions;
     proc->mm->mmap_regions = NULL;
+    proc->mm->cr3 = pml4_phys;
+    proc->cr3 = pml4_phys; // cached
+    proc->mm->mmap_brk = 0x800000;
+    proc->mm->mmap_phys_brk = MAP_PHYSICAL_BASE;
+    proc->entry = lr.entry;
 
-    // 11. Create user stack mmap_region
+    // 9c. Create user stack mmap_region (must be before CR3 flush — kmalloc
+    //     may trigger page table walks on old CR3 that are still valid)
     mmap_region_t *stack_region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
     if (stack_region) {
         __memset(stack_region, 0, sizeof(mmap_region_t));
@@ -656,26 +663,88 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
         proc->mm->mmap_regions = stack_region;
     }
 
-    // 12. Modify current trapframe: rip=entry, rsp=stack_top
-    trapframe_t *tf = get_cpu_local()->cur_tf;
-    tf->rip = lr.entry;
-    tf->rsp = 0x00007FFFFFFFE000;
-    tf->rax = 0;
-
-    // 13. Update mm_t fields
-    proc->mm->cr3 = pml4_phys;
-    proc->cr3 = pml4_phys; // cached
-    proc->mm->mmap_brk = 0x800000;
-    proc->mm->mmap_phys_brk = MAP_PHYSICAL_BASE;
-    proc->entry = lr.entry;
-
-    // 14. kfree ELF buffer
-    kfree(elf_buf);
-
-    // 15. Flush CR3
+    // 9d. Flush CR3 — now we are on the new address space
     __asm__ volatile("movq %0, %%cr3" :: "r"(pml4_phys) : "memory");
 
-    serial_printf("execve: done pid=%d entry=%lx\n", proc->pid, lr.entry);
+    // 10. Release old address space (safe now: CR3 points to new PML4)
+    //     We inline mm_release_pages using old_cr3/old_regions since
+    //     proc->mm->cr3 already points to the new PML4.
+    {
+        uint64_t *old_pml4_virt = (uint64_t *)phys_to_virt((__force phys_addr_t)old_cr3);
+        for (int pml4_idx = 0; pml4_idx < 256; pml4_idx++) {
+            uint64_t pdpt_entry = old_pml4_virt[pml4_idx];
+            if (!(pdpt_entry & PTE_PRESENT)) continue;
+
+            uint64_t pdpt_phys = pdpt_entry & 0x000FFFFFFFFFF000ULL;
+            uint64_t *pdpt_virt = (uint64_t *)phys_to_virt((__force phys_addr_t)pdpt_phys);
+
+            for (int pdpt_idx = 0; pdpt_idx < 512; pdpt_idx++) {
+                uint64_t pd_entry = pdpt_virt[pdpt_idx];
+                if (!(pd_entry & PTE_PRESENT)) continue;
+                if (pd_entry & PTE_PS) continue;
+
+                uint64_t pd_phys = pd_entry & 0x000FFFFFFFFFF000ULL;
+                uint64_t *pd_virt = (uint64_t *)phys_to_virt((__force phys_addr_t)pd_phys);
+
+                for (int pd_idx = 0; pd_idx < 512; pd_idx++) {
+                    uint64_t pt_entry = pd_virt[pd_idx];
+                    if (!(pt_entry & PTE_PRESENT)) continue;
+                    if (pt_entry & PTE_PS) continue;
+
+                    uint64_t pt_phys = pt_entry & 0x000FFFFFFFFFF000ULL;
+                    uint64_t *pt_virt = (uint64_t *)phys_to_virt((__force phys_addr_t)pt_phys);
+
+                    for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
+                        uint64_t pte = pt_virt[pt_idx];
+                        if (pte & PTE_PRESENT) {
+                            uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
+                            bool skip = false;
+                            for (mmap_region_t *mr = old_regions; mr; mr = mr->next) {
+                                if (mr->shm_obj) {
+                                    shm_t *s = mr->shm_obj;
+                                    if (s->page_list) {
+                                        for (int pi = 0; pi < s->num_pages; pi++)
+                                            if (leaf_phys == s->page_list[pi]) { skip = true; break; }
+                                    } else if (s->phys && s->npages) {
+                                        if (leaf_phys >= s->phys && leaf_phys < s->phys + s->npages * PAGE_SIZE) { skip = true; break; }
+                                    }
+                                }
+                                if (mr->phys && leaf_phys >= mr->phys && leaf_phys < mr->phys + mr->size) { skip = true; break; }
+                            }
+                            if (sig_trampoline_phys && leaf_phys == sig_trampoline_phys) skip = true;
+                            if (!skip) {
+                                Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
+                                bfc_free_page(leaf_page, 1);
+                            }
+                            pt_virt[pt_idx] = 0;
+                        }
+                    }
+                    free_table_page(pt_phys);
+                    pd_virt[pd_idx] = 0;
+                }
+                free_table_page(pd_phys);
+                pdpt_virt[pdpt_idx] = 0;
+            }
+            free_table_page(pdpt_phys);
+            old_pml4_virt[pml4_idx] = 0;
+        }
+        free_table_page(old_cr3);
+    }
+
+    // 11. Free old mmap_regions + release SHM references
+    {
+        mmap_region_t *region = old_regions;
+        while (region) {
+            mmap_region_t *next = region->next;
+            if (region->shm_obj) shm_put(region->shm_obj);
+            kfree(region);
+            region = next;
+        }
+    }
+
+    // 12. kfree ELF buffer
+    kfree(elf_buf);
+
     return 0;
 }
 

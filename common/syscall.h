@@ -235,6 +235,20 @@ static inline long sys_fstat(int fd, uint64_t buf) {
 static inline long sys_fdev_pid(int fd) {
     return __syscall1(SYS_FDEV_PID, (int64_t)fd);
 }
+
+// ===================== Session/pgid syscalls =====================
+static inline int64_t sys_setsid() {
+    return __syscall0(SYS_SETSID);
+}
+static inline int sys_setpgid(uint64_t pid, uint64_t pgid) {
+    return (int)__syscall2(SYS_SETPGID, (int64_t)pid, (int64_t)pgid);
+}
+static inline int64_t sys_getpgid(uint64_t pid) {
+    return __syscall1(SYS_GETPGID, (int64_t)pid);
+}
+static inline int64_t sys_getsid(uint64_t pid) {
+    return __syscall1(SYS_GETSID, (int64_t)pid);
+}
 #endif // __KERNEL__
 
 #endif // COMMON_SYSCALL_H

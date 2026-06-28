@@ -57,14 +57,12 @@ uint64_t sys_open(uint64_t arg1, uint64_t arg2, uint64_t arg3,
     /* 1. Copy user path */
     if (!upath) return (uint64_t)(-(uint64_t)EFAULT);
     char path[256];
-    if (copy_from_user(path, upath, 255)) return (uint64_t)(-(uint64_t)EFAULT);
-    path[255] = '\0';
+    if (strncpy_from_user(path, upath, 256) < 0) return (uint64_t)(-(uint64_t)EFAULT);
 
     /* 2. /dev/ prefix — delegate to devtmpfs */
     if (path[0] == '/' && path[1] == 'd' && path[2] == 'e' &&
         path[3] == 'v' && path[4] == '/') {
         uint64_t dev_ret = devtmpfs_open(current_task, path + 5, flags);
-        serial_printf("sys_open: /dev/%s pid=%d ret=%lu\n", path + 5, current_task->pid, dev_ret);
         return dev_ret;
     }
 
@@ -106,8 +104,7 @@ uint64_t sys_stat(uint64_t arg1, uint64_t arg2, uint64_t _u1,
 
     if (!upath) return (uint64_t)(-(uint64_t)EFAULT);
     char path[256];
-    if (copy_from_user(path, upath, 255)) return (uint64_t)(-(uint64_t)EFAULT);
-    path[255] = '\0';
+    if (strncpy_from_user(path, upath, 256) < 0) return (uint64_t)(-(uint64_t)EFAULT);
 
     uint8_t kstat_buf[256];
     int rc = fat32_stat(path, kstat_buf);
@@ -123,8 +120,7 @@ uint64_t sys_mkdir(uint64_t arg1, uint64_t arg2, uint64_t _u1,
 
     if (!upath) return (uint64_t)(-(uint64_t)EFAULT);
     char path[256];
-    if (copy_from_user(path, upath, 255)) return (uint64_t)(-(uint64_t)EFAULT);
-    path[255] = '\0';
+    if (strncpy_from_user(path, upath, 256) < 0) return (uint64_t)(-(uint64_t)EFAULT);
 
     int rc = fat32_mkdir(path);
     if (rc != 0) return (uint64_t)(-(uint64_t)(-rc));
@@ -138,8 +134,7 @@ uint64_t sys_unlink(uint64_t arg1, uint64_t _u1, uint64_t _u2,
 
     if (!upath) return (uint64_t)(-(uint64_t)EFAULT);
     char path[256];
-    if (copy_from_user(path, upath, 255)) return (uint64_t)(-(uint64_t)EFAULT);
-    path[255] = '\0';
+    if (strncpy_from_user(path, upath, 256) < 0) return (uint64_t)(-(uint64_t)EFAULT);
 
     int rc = fat32_unlink(path);
     if (rc != 0) return (uint64_t)(-(uint64_t)(-rc));
@@ -153,8 +148,7 @@ uint64_t sys_rmdir(uint64_t arg1, uint64_t _u1, uint64_t _u2,
 
     if (!upath) return (uint64_t)(-(uint64_t)EFAULT);
     char path[256];
-    if (copy_from_user(path, upath, 255)) return (uint64_t)(-(uint64_t)EFAULT);
-    path[255] = '\0';
+    if (strncpy_from_user(path, upath, 256) < 0) return (uint64_t)(-(uint64_t)EFAULT);
 
     int rc = fat32_rmdir(path);
     if (rc != 0) return (uint64_t)(-(uint64_t)(-rc));
@@ -170,8 +164,7 @@ uint64_t sys_dev_create(uint64_t arg1, uint64_t arg2, uint64_t _u1,
 
     if (!uname) return (uint64_t)(-(uint64_t)EFAULT);
     char name[32];
-    if (copy_from_user(name, uname, 31)) return (uint64_t)(-(uint64_t)EFAULT);
-    name[31] = '\0';
+    if (strncpy_from_user(name, uname, 32) < 0) return (uint64_t)(-(uint64_t)EFAULT);
 
     struct dev_ops *kops = kmalloc(sizeof(struct dev_ops));
     if (!kops) return (uint64_t)(-(uint64_t)ENOMEM);

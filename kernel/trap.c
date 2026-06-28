@@ -473,7 +473,7 @@ void sig_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 59
+#define NR_SYSCALL 63
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_getpid,         // 0
     sys_yield,          // 1
@@ -534,6 +534,10 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_fdev_pid,       // 56
     sys_fork,           // 57
     sys_execve,         // 58
+    sys_setsid,         // 59
+    sys_setpgid,        // 60
+    sys_getpgid,        // 61
+    sys_getsid,         // 62
 };
 
 void syscall_dispatch(trapframe_t *tf) {
@@ -768,7 +772,6 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
     __memcpy(target->recv_buf[target->recv_head], msg, RECV_MSG_SIZE);
     target->recv_head = next;
     spin_unlock(&target->recv_lock);
-    serial_printf("sys_req: from pid=%d to pid=%d (REQ enqueued)\n", current_task->pid, target_pid);
 
     // Wake target if in WAIT_RECV
     int target_cpu = target->assigned_cpu;
@@ -808,7 +811,6 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
     }
 
     // Woken up by sys_resp or proc_reap
-    serial_printf("sys_req: pid=%d woken up, req_result=%ld\n", proc->pid, (long)proc->req_result);
     if (proc->req_result != 0) return (uint64_t)proc->req_result;
     return 0;
 }
@@ -1046,23 +1048,29 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
             current_task->state = BLOCKED;
             spin_unlock(&cpu_locals[pcpu].scheduler_lock);
             schedule();
-            // EINTR check
+            // EINTR check: SIGCHLD does not interrupt waitpid
             {
                 uint64_t pend = __atomic_load_n(&current_task->sig.pending, __ATOMIC_ACQUIRE);
                 uint64_t deliv = pend & ~current_task->sig.blocked;
                 deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+                deliv &= ~(1ULL << SIGCHLD);
                 if (deliv) return (uint64_t)-EINTR;
             }
         }
     }
 
-    if (pid < 0 || pid >= MAX_PROC) return 0;  // EINVAL
+    if (pid < 0 || pid >= MAX_PROC) {
+        serial_printf("waitpid: pid=%d out of range\n", pid);
+        return 0;  // EINVAL
+    }
 
     task_t *child = &tasks[pid];
 
     // Validate: pid must be our child (under tasks_lock to prevent reap)
     spin_lock(&tasks_lock);
     if (child->pid != pid || !child->mm || child->mm->parent_pid != current_task->pid) {
+        serial_printf("waitpid: pid=%d validation fail: child_pid=%d mm=%p parent_pid=%d caller=%d\n",
+            pid, child->pid, child->mm, child->mm ? child->mm->parent_pid : -1, current_task->pid);
         spin_unlock(&tasks_lock);
         return 0;  // ECHILD
     }
@@ -1115,18 +1123,24 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
         }
         schedule();
 
-        // EINTR check
+        // EINTR check: SIGCHLD does not interrupt waitpid (it IS the
+        // notification we're waiting for). Other signals do interrupt.
         {
             uint64_t pend = __atomic_load_n(&current_task->sig.pending, __ATOMIC_ACQUIRE);
             uint64_t deliv = pend & ~current_task->sig.blocked;
             deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
-            if (deliv) return (uint64_t)-EINTR;
+            deliv &= ~(1ULL << SIGCHLD);
+            if (deliv) {
+                serial_printf("waitpid: pid=%d EINTR pending=0x%lx\n", pid, pend);
+                return (uint64_t)-EINTR;
+            }
         }
 
         // Woken up by notify — re-validate child still exists
         spin_lock(&tasks_lock);
         if (child->pid != pid) {
             // Child was reaped by someone else — should not happen
+            serial_printf("waitpid: pid=%d child reaped by someone else\n", pid);
             spin_unlock(&tasks_lock);
             return 0;  // ECHILD
         }
@@ -1137,8 +1151,10 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
     if (exit_code_ptr) {
         // Validate user pointer: must be in user canonical low half, not kernel space
         uint64_t ptr_val = (__force uint64_t)exit_code_ptr;
-        if (ptr_val >= 0xFFFFFFFF80000000ULL || !ptr_val || (ptr_val + sizeof(int32_t) - 1) >= 0xFFFFFFFF80000000ULL)
+        if (ptr_val >= 0xFFFFFFFF80000000ULL || !ptr_val || (ptr_val + sizeof(int32_t) - 1) >= 0xFFFFFFFF80000000ULL) {
+            serial_printf("waitpid: pid=%d bad exit_code_ptr=0x%lx\n", pid, ptr_val);
             return 0;  // EFAULT
+        }
         *(__force int32_t *)exit_code_ptr = child->exit_code;
     }
     task_reap(child);
@@ -1453,15 +1469,9 @@ uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, ui
 // Shared notification helper: enqueue recv_msg_t and wake target if WAIT_RECV.
 // Used by AHCI IRQ completion, sys_notify, sys_req, sys_msg, IRQ dispatch.
 void notify_and_wake(pid_t target_pid, recv_msg_t *msg) {
-    if (target_pid < 0 || target_pid >= MAX_PROC) {
-        serial_printf("notify_and_wake: bad pid %d\n", target_pid);
-        return;
-    }
+    if (target_pid < 0 || target_pid >= MAX_PROC) return;
     task_t *target = &tasks[target_pid];
-    if (target->pid != target_pid) {
-        serial_printf("notify_and_wake: pid mismatch %d vs %d\n", target_pid, target->pid);
-        return;
-    }
+    if (target->pid != target_pid) return;
 
     // Enqueue message
     spin_lock(&target->recv_lock);
@@ -2447,8 +2457,6 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         if (len > avail) len = avail;
 
         int nread = fat32_read(ip, offset, (void __force *)buf, len);
-        serial_printf("sys_read: pid=%d fd=%d off=%lu len=%lu nread=%d isize=%lu\n",
-                       current_task->pid, fd, offset, len, nread, ip->size);
         if (nread < 0) return (uint64_t)(-nread);
         proc->mm->files->fd_table[fd].offset = offset + nread;
         return (uint64_t)nread;
@@ -3170,8 +3178,6 @@ uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         case SEEK_END: new_offset = (int64_t)ip->size + offset; break;
         default: return (uint64_t)-EINVAL;
         }
-        serial_printf("sys_lseek: pid=%d fd=%d whence=%d off=%ld → %ld (isize=%lu)\n",
-                       current_task->pid, fd, whence, offset, new_offset, ip->size);
         if (new_offset < 0) return (uint64_t)-EINVAL;
         proc->mm->files->fd_table[fd].offset = (uint64_t)new_offset;
         return (uint64_t)new_offset;
@@ -3320,14 +3326,24 @@ void check_pending_signals(trapframe_t *tf) {
             case SIGSTOP:
             case SIGTSTP:
             case SIGCONT:
-                break;  // ignore
+            case SIGWINCH:
+                break;  // default ignore
             case SIGKILL:
             case SIGINT:
+            case SIGQUIT:
+            case SIGHUP:
             case SIGTERM:
             case SIGSEGV:
             case SIGILL:
             case SIGFPE:
             case SIGABRT:
+            case SIGBUS:
+            case SIGTRAP:
+            case SIGPIPE:
+            case SIGALRM:
+            case SIGUSR1:
+            case SIGUSR2:
+            case SIGSTKFLT:
             default:
                 proc->exit_code = -1;
                 serial_printf("signal: pid=%d terminated by signal %d\n", proc->pid, sig);
@@ -3368,44 +3384,80 @@ static void force_sig(task_t *proc, int sig, int si_code, void *si_addr) {
 
 // ===================== Signal syscalls =====================
 
-// sys_kill(pid, sig) — syscall 46 (发送信号)
+static void deliver_signal_to(task_t *target, int sig) {
+    __atomic_or_fetch(&target->sig.pending, 1ULL << sig, __ATOMIC_RELEASE);
+    if (target->state == BLOCKED) wake_process(target->pid);
+}
+
+static int pgsignal(pid_t pgid, int sig) {
+    int found = 0;
+    for (int p = 0; p < MAX_PROC; p++) {
+        if (tasks[p].pid == p && tasks[p].pgid == pgid) {
+            deliver_signal_to(&tasks[p], sig);
+            found++;
+        }
+    }
+    return found > 0 ? 0 : -ESRCH;
+}
+
 uint64_t sys_kill(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
     pid_t pid = (pid_t)arg1;
     int sig = (int)arg2;
-
-    // Validate signal number
     if (sig < 0 || sig >= NSIG) return (uint64_t)-EINVAL;
-    // signal 0 is a null check (existence test) — always succeed
     if (sig == 0) return 0;
 
-    // Validate target PID
-    if (pid < 0 || pid >= MAX_PROC) return (uint64_t)-ESRCH;
-
-    task_t *target = &tasks[pid];
-    if (target->pid != pid) return (uint64_t)-ESRCH;
-
-    // Set pending bit (atomic, no lock needed for a single bit)
-    __atomic_or_fetch(&target->sig.pending, 1ULL << sig, __ATOMIC_RELEASE);
-
-    // Wake blocked target so it can check signals (EINTR path)
-    if (target->state == BLOCKED) {
-        int target_cpu = target->assigned_cpu;
-        spin_lock(&cpu_locals[target_cpu].scheduler_lock);
-        if (target->pid == pid && target->state == BLOCKED) {
-            if (target->wait_deadline != 0) {
-                timer_queue_remove(target);
-                target->wait_deadline = 0;
-            }
-            target->state = READY;
-            target->wait_event = WAIT_NONE;
-            target->wait_timed_out = 0;
-            list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
-            cpu_locals[target_cpu].run_count++;
-        }
-        spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+    if (pid > 0) {
+        if (pid >= MAX_PROC) return (uint64_t)-ESRCH;
+        task_t *target = &tasks[pid];
+        if (target->pid != pid) return (uint64_t)-ESRCH;
+        deliver_signal_to(target, sig);
+        return 0;
+    } else if (pid == 0) {
+        pid_t my_pgid = current_task->pgid;
+        if (my_pgid == 0) return (uint64_t)-ESRCH;
+        return (uint64_t)pgsignal(my_pgid, sig);
+    } else if (pid == -1) {
+        return (uint64_t)-EPERM;
+    } else {
+        return (uint64_t)pgsignal(-pid, sig);
     }
+}
 
+// ===================== Session/pgid syscalls =====================
+
+uint64_t sys_setsid(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
+    if (current_task->sid == current_task->pid) return (uint64_t)-EPERM;
+    current_task->sid = current_task->pid;
+    current_task->pgid = current_task->pid;
+    return (uint64_t)current_task->sid;
+}
+
+uint64_t sys_setpgid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+    pid_t pid = (pid_t)arg1; pid_t pgid = (pid_t)arg2;
+    if (pid < 0 || pgid < 0) return (uint64_t)-EINVAL;
+    if (pid == 0) pid = current_task->pid;
+    if (pgid == 0) pgid = pid;
+    if (pid >= MAX_PROC || tasks[pid].pid != pid) return (uint64_t)-ESRCH;
+    if (pid != current_task->pid) {
+        if (tasks[pid].mm->parent_pid != current_task->pid) return (uint64_t)-ESRCH;
+        if (tasks[pid].sid != current_task->sid) return (uint64_t)-EPERM;
+    }
+    tasks[pid].pgid = pgid;
     return 0;
+}
+
+uint64_t sys_getpgid(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
+    pid_t pid = (pid_t)arg1;
+    if (pid == 0) pid = current_task->pid;
+    if (pid < 0 || pid >= MAX_PROC || tasks[pid].pid != pid) return (uint64_t)-ESRCH;
+    return (uint64_t)tasks[pid].pgid;
+}
+
+uint64_t sys_getsid(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
+    pid_t pid = (pid_t)arg1;
+    if (pid == 0) pid = current_task->pid;
+    if (pid < 0 || pid >= MAX_PROC || tasks[pid].pid != pid) return (uint64_t)-ESRCH;
+    return (uint64_t)tasks[pid].sid;
 }
 
 // sys_sigaction(sig, act, oldact) — syscall 47 (注册/查询信号 handler)

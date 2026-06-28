@@ -24,3 +24,24 @@ pid_t spawn(const char *path) {
     }
     return pid;
 }
+
+pid_t setsid(void) {
+    int64_t r = sys_setsid();
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (pid_t)r;
+}
+int setpgid(pid_t pid, pid_t pgid) {
+    int r = sys_setpgid((uint64_t)pid, (uint64_t)pgid);
+    if (r < 0) { errno = -r; return -1; }
+    return r;
+}
+pid_t getpgid(pid_t pid) {
+    int64_t r = sys_getpgid((uint64_t)pid);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (pid_t)r;
+}
+pid_t getsid(pid_t pid) {
+    int64_t r = sys_getsid((uint64_t)pid);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (pid_t)r;
+}

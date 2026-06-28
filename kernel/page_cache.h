@@ -11,6 +11,7 @@ struct cache_page {
     uint8_t        *data;          /* kmalloc(4096) on fill, kfree on evict */
     int             pin_count;
     bool            dirty;
+    bool            filling;       /* true while disk I/O in progress — others must wait */
     struct cache_page *hash_next;
     struct cache_page *lru_prev;
     struct cache_page *lru_next;

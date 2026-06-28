@@ -671,13 +671,10 @@ struct inode *fat32_open(const char *path, int flags, int *out_errno) {
         }
     }
 
-    /* Look up or create inode */
+    /* Look up or create inode — atomic to prevent TOCTOU race */
     int ino_type = is_dir ? INODE_DIR : INODE_REGULAR;
-    struct inode *ip = inode_lookup(cluster);
-    if (!ip) {
-        ip = inode_create(cluster, ino_type, file_size,
-                          cluster, dir_cluster, dir_idx);
-    }
+    struct inode *ip = inode_get_or_create(cluster, ino_type, file_size,
+                                           cluster, dir_cluster, dir_idx);
     return ip;
 }
 

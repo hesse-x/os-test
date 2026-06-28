@@ -135,8 +135,10 @@ struct pty *pty_alloc(int *out_index) {
     __memset(pty, 0, sizeof(struct pty));
 
     pty->t_termios = default_termios;
-    pty->t_winsize.ws_row = 80;
-    pty->t_winsize.ws_col = 25;
+    pty->t_winsize.ws_row = 0;
+    pty->t_winsize.ws_col = 0;
+    pty->t_winsize.ws_xpixel = 0;
+    pty->t_winsize.ws_ypixel = 0;
     pty->m_read_pid = -1;
     pty->m_write_pid = -1;
     pty->s_read_pid = -1;
@@ -145,6 +147,7 @@ struct pty *pty_alloc(int *out_index) {
     pty->master_refs = 0;
     pty->slave_refs = 0;
     pty->slave_opened = 0;
+    pty->eof_pending = 0;
     pty->t_sid = 0;
     pty->t_pgid = 0;
     pty->pts_priv = NULL;
@@ -201,7 +204,6 @@ int ptmx_open(struct task_t *proc, int fd) {
     name[pos] = '\0';
     devtmpfs_create(name, DEV_PTS_SLAVE, &priv->ops);
 
-    serial_printf("pty: allocated pty%d, master fd=%d\n", index, fd);
     return 0;
 }
 
@@ -225,7 +227,6 @@ int pts_open(struct task_t *proc, int fd) {
     pty->slave_refs = 1;
     pty->slave_opened = 1;
 
-    serial_printf("pty: opened slave pty%d, fd=%d\n", pty->index, fd);
     return 0;
 }
 
@@ -258,6 +259,13 @@ int64_t pty_master_read(struct pty *pty, struct task_t *proc,
 // ===================== pty_master_write =====================
 int64_t pty_master_write(struct pty *pty, struct task_t *proc,
                          const void *buf, size_t len) {
+    // len==0: EOF signal (Ctrl-D empty linebuf → slave read returns 0)
+    if (len == 0) {
+        pty->eof_pending = 1;
+        if (pty->s_read_pid >= 0) wake_process(pty->s_read_pid);
+        return 0;
+    }
+
     size_t written = 0;
 
     while (written < len) {
@@ -295,6 +303,12 @@ int64_t pty_master_write(struct pty *pty, struct task_t *proc,
 int64_t pty_slave_read(struct pty *pty, struct task_t *proc,
                         void *buf, size_t len) {
     if (pty->master_refs == 0) return -EPIPE;
+
+    // eof_pending: Ctrl-D EOF (master write len=0 set this)
+    if (pty->eof_pending) {
+        pty->eof_pending = 0;
+        return 0;  // EOF — returns 0 once then clears flag
+    }
 
     while (pty_ring_avail(pty->m_to_s_head, pty->m_to_s_tail) == 0) {
         if (pty->master_refs == 0) return 0;  // EOF
@@ -378,7 +392,15 @@ void pty_close_fd(struct task_t *proc, int fd) {
     if (is_master) {
         pty->master_refs--;
         if (pty->master_refs == 0) {
-            // Wake slave read/write — they get EPIPE
+            // Send SIGHUP to slave session foreground pgid
+            if (pty->t_sid != 0) {
+                for (int p = 0; p < MAX_PROC; p++) {
+                    if (tasks[p].pid == p && tasks[p].pgid == pty->t_pgid && tasks[p].sid == pty->t_sid) {
+                        __atomic_or_fetch(&tasks[p].sig.pending, 1ULL << SIGHUP, __ATOMIC_RELEASE);
+                        if (tasks[p].state == BLOCKED) wake_process(p);
+                    }
+                }
+            }
             if (pty->s_read_pid >= 0) wake_process(pty->s_read_pid);
             if (pty->s_write_pid >= 0) wake_process(pty->s_write_pid);
         }
@@ -484,8 +506,16 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
             struct winsize old_ws = pty->t_winsize;
             if (copy_from_user(&pty->t_winsize, (const void __user *)arg, sizeof(struct winsize)))
                 return -EFAULT;
-            // Future: if size changed and t_sid!=0, send SIGWINCH to session
-            (void)old_ws;
+            // If size changed and session exists, send SIGWINCH to foreground pgid
+            if ((old_ws.ws_row != pty->t_winsize.ws_row || old_ws.ws_col != pty->t_winsize.ws_col)
+                && pty->t_sid != 0) {
+                for (int p = 0; p < MAX_PROC; p++) {
+                    if (tasks[p].pid == p && tasks[p].pgid == pty->t_pgid && tasks[p].sid == pty->t_sid) {
+                        __atomic_or_fetch(&tasks[p].sig.pending, 1ULL << SIGWINCH, __ATOMIC_RELEASE);
+                        if (tasks[p].state == BLOCKED) wake_process(p);
+                    }
+                }
+            }
             return 0;
         }
 
@@ -499,6 +529,17 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
 
     case TIOCSPTLCK: // 0x5407 — lock/unlock slave (stub)
         return 0;
+
+    case TIOCSCTTY: // 0x540E — set controlling terminal
+        {
+            if (current_task->sid != current_task->pid) return -EPERM;
+            int force = (int)(uintptr_t)arg;
+            if (current_task->ctty && !force) return -EINVAL;
+            current_task->ctty = pty;
+            pty->t_sid = current_task->sid;
+            pty->t_pgid = current_task->pgid;
+            return 0;
+        }
 
     default:
         return -ENOTTY;

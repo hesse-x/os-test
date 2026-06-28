@@ -11,6 +11,7 @@
 #include "kernel/spinlock.h"
 #include "common/errno.h"
 #include "kernel/mem/kasan.h"
+#include "kernel/pty.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
 
@@ -1318,6 +1319,13 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
                 if ((kfds[i].events & POLLIN) &&
                     f->file_data._offset < f->file_data.file_size) {
                     kfds[i].revents |= POLLIN;
+                }
+            } else if (f->type == FD_TTY) {
+                struct pty *pty = f->pty;
+                if (pty) {
+                    int is_master = pty_fd_is_master(proc->mm->files, i);
+                    __poll_t revents = pty_poll(pty, is_master, kfds[i].events);
+                    kfds[i].revents |= revents;
                 }
             } else if (f->type == FD_DEV) {
                 // FD_DEV: call dev_ops.poll callback for kernel devices

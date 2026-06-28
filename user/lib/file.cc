@@ -350,14 +350,26 @@ int ioctl(int fd, uint32_t cmd, ...) {
     uint64_t arg = va_arg(ap, uint64_t);
     va_end(ap);
 
-    // Always use a 64B stack buffer for kernel communication.
+    uint16_t arg_size = _IOC_SIZE(cmd);
+
+    // Legacy ioctl commands (TCGETS, TCSETS, TIOCGPGRP, etc.) don't encode
+    // direction/size in the _IOC format — _IOC_SIZE=0, _IOC_DIR=_IOC_NONE.
+    // The buf intermediary relies on these fields to copy data, so it silently
+    // drops data transfer for legacy commands. Pass the user pointer directly
+    // so the kernel's copy_to_user/copy_from_user handle it correctly.
+    if (arg_size == 0) {
+        long rc = sys_ioctl(fd, cmd, arg);
+        if (rc < 0) { errno = (int)(-rc); return -1; }
+        return (int)rc;
+    }
+
+    // Properly encoded ioctls: use 64B stack buffer for kernel communication.
     // For proxy path, kernel writes 56B reply into this buffer via sys_resp.
     // This avoids the caller's original arg being smaller than 56B.
+    if (arg_size > 48) { errno = EINVAL; return -1; }
+
     uint8_t buf[64];
     __builtin_memset(buf, 0, sizeof(buf));
-
-    uint16_t arg_size = _IOC_SIZE(cmd);
-    if (arg_size > 48) { errno = EINVAL; return -1; }
 
     // Copy-in: user arg → buf (only if direction includes WRITE)
     if ((_IOC_DIR(cmd) & _IOC_WRITE) && arg != 0 && arg_size > 0)

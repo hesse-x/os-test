@@ -135,6 +135,7 @@ struct pty {
     // Session / foreground pgid (reserved for future job control)
     pid_t    t_sid;         // session ID (0 = no session)
     pid_t    t_pgid;        // foreground process group ID
+    int      eof_pending;   // Ctrl-D EOF flag: master write len=0 → slave read returns 0
 
     // Pointer to slave device priv (for cleanup)
     struct pts_dev_priv *pts_priv;

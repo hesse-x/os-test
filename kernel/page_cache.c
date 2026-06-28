@@ -90,15 +90,24 @@ void page_cache_init(void) {
 struct cache_page *page_cache_lookup(struct inode *ip, uint64_t page_index) {
     unsigned idx = page_cache_hashfn(ip, page_index);
     spin_lock(&page_cache_lock);
-    struct cache_page *cp = page_cache_hash[idx];
-    while (cp) {
-        if (cp->inode == ip && cp->page_index == page_index && cp->data) {
-            cp->pin_count++;
-            lru_touch(cp);
-            spin_unlock(&page_cache_lock);
-            return cp;
+    for (;;) {
+        struct cache_page *cp = page_cache_hash[idx];
+        while (cp) {
+            if (cp->inode == ip && cp->page_index == page_index && cp->data) {
+                /* Wait while page is being filled from disk.
+                 * We hold page_cache_lock; the filler clears filling
+                 * with an atomic store (no lock needed), so we will
+                 * see the update via atomic loads. */
+                while (__atomic_load_n(&cp->filling, __ATOMIC_ACQUIRE))
+                    __asm__ volatile("pause");
+                cp->pin_count++;
+                lru_touch(cp);
+                spin_unlock(&page_cache_lock);
+                return cp;
+            }
+            cp = cp->hash_next;
         }
-        cp = cp->hash_next;
+        break; /* not found in hash */
     }
     spin_unlock(&page_cache_lock);
     return NULL;
@@ -141,24 +150,31 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
 
     /* Double-check under lock */
     unsigned idx = page_cache_hashfn(ip, page_index);
-    struct cache_page *existing = page_cache_hash[idx];
-    while (existing) {
-        if (existing->inode == ip && existing->page_index == page_index && existing->data) {
-            existing->pin_count++;
-            lru_touch(existing);
-            spin_unlock(&page_cache_lock);
-            return existing;
+    for (;;) {
+        struct cache_page *existing = page_cache_hash[idx];
+        while (existing) {
+            if (existing->inode == ip && existing->page_index == page_index && existing->data) {
+                /* Wait while another CPU is filling this page */
+                while (__atomic_load_n(&existing->filling, __ATOMIC_ACQUIRE))
+                    __asm__ volatile("pause");
+                existing->pin_count++;
+                lru_touch(existing);
+                spin_unlock(&page_cache_lock);
+                return existing;
+            }
+            existing = existing->hash_next;
         }
-        existing = existing->hash_next;
+        break;
     }
 
     /* Get a free cache_page struct */
     struct cache_page *new_cp = free_list_pop();
     if (!new_cp) {
-        /* Evict and retry */
-        spin_unlock(&page_cache_lock);
-        if (page_cache_evict() != 0) return NULL;
-        spin_lock(&page_cache_lock);
+        /* Evict under lock and retry */
+        if (page_cache_evict() != 0) {
+            spin_unlock(&page_cache_lock);
+            return NULL;
+        }
         new_cp = free_list_pop();
         if (!new_cp) {
             spin_unlock(&page_cache_lock);
@@ -178,6 +194,7 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
     new_cp->page_index = page_index;
     new_cp->pin_count = 1;
     new_cp->dirty = false;
+    new_cp->filling = true;   /* visible in hash but data not ready yet */
 
     /* Insert into hash */
     new_cp->hash_next = page_cache_hash[idx];
@@ -219,6 +236,11 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
     } else {
         __memset(new_cp->data, 0, 4096);
     }
+
+    /* Data is now ready — clear filling flag so others can use this page.
+     * No lock needed: filling only transitions true→false, and waiters
+     * spin-read it with atomic loads for visibility. */
+    __atomic_store_n(&new_cp->filling, false, __ATOMIC_RELEASE);
 
     return new_cp;
 }

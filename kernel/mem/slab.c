@@ -104,10 +104,15 @@ void *kmalloc(size_t size) {
     uint64_t flags;
     spin_lock_irqsave(&cache->lock, &flags);
 
-    // 如果 active slab 刚变满（freelist 空），移到 partial 或标记 full
-    // 先检查 partial list
-    if (cache->partial) {
+    // 先检查 partial list — 跳过 freelist==NULL 的 page（SMP 竞争下，
+    // partial page 可能同时是某 CPU 的 active_slab，被 fast path 耗空）
+    while (cache->partial) {
         Page *page = cache->partial;
+        if (page->slab.freelist == NULL) {
+            // Page is actually full — remove from partial and skip
+            partial_remove(cache, page);
+            continue;
+        }
         partial_remove(cache, page);
         page->slab.cpu_id = (int8_t)cpu->cpu_id;
         cpu->active_slab[c] = page;

@@ -15,6 +15,8 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <termios.h>
+#include <signal.h>
 #include <sys/ipc.h>
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -30,6 +32,9 @@
 
 static volatile kbd_ring *kbd;
 static volatile driver_shm_header *shm_hdr;
+
+static int master_fd = -1;
+static pid_t shell_pid = -1;
 
 // ===================== VT100 state =====================
 
@@ -387,80 +392,149 @@ int main() {
     display_client_clear(0x000000);
     display_client_flush();
 
-    // 7. Create pipes for terminal ↔ shell communication
-    // p_stdin:  [0]=read end (shell reads), [1]=write end (terminal writes keystrokes)
-    // p_stdout: [0]=read end (terminal reads shell output), [1]=write end (shell writes)
-    int p_stdin[2];
-    int p_stdout[2];
-    pipe(p_stdin);
-    pipe(p_stdout);
+    // 7. Create PTY pair
+    master_fd = open("/dev/ptmx", O_RDWR);
+    if (master_fd < 0) { printf("terminal: failed to open /dev/ptmx\n"); return 1; }
 
-    // 8. Set up fd 0 and fd 1 for shell to inherit via spawn
-    // Shell fd 0 = p_stdin[0] (reads keystrokes from terminal)
-    // Shell fd 1 = p_stdout[1] (writes output to terminal)
-    dup2(p_stdin[0], 0);   // fd 0 = stdin pipe read end
-    dup2(p_stdout[1], 1);  // fd 1 = stdout pipe write end
+    // 8. Get PTY index for dynamic slave path
+    int pty_idx;
+    ioctl(master_fd, TIOCGPTN, &pty_idx);
+    char pts_path[16];
+    snprintf(pts_path, sizeof(pts_path), "/dev/pts%d", pty_idx);
 
-    // 9. Spawn shell — it inherits fd 0 (stdin read) and fd 1 (stdout write)
-    spawn("/usr/bin/shell");
+    // 9. Fork shell — child opens slave, dup2 0/1/2, exec
+    shell_pid = fork();
+    if (shell_pid == 0) {
+        int slave_fd = open(pts_path, O_RDWR);
+        if (slave_fd < 0) { write(2, "shell: failed to open slave\n", 29); _exit(127); }
+        dup2(slave_fd, 0); dup2(slave_fd, 1); dup2(slave_fd, 2);
+        if (slave_fd > 2) close(slave_fd);
+        close(master_fd);
+        execve("/usr/bin/shell", NULL, NULL);
+        _exit(127);
+    }
 
-    // 10. Close pipe ends owned by shell, set up terminal's own fd 0/1
-    close(p_stdin[0]);   // close read end (shell owns it)
-    close(p_stdout[1]);  // close write end (shell owns it)
+    // 10. Parent: master_fd non-blocking
+    fcntl(master_fd, F_SETFL, O_RDWR | O_NONBLOCK);
 
-    // Terminal fd 0 = p_stdout[0] (read shell output, non-blocking)
-    // Terminal fd 1 = p_stdin[1]  (write keystrokes to shell stdin)
-    dup2(p_stdout[0], 0);
-    dup2(p_stdin[1], 1);
-    close(p_stdout[0]);  // close original (now duped to fd 0)
-    close(p_stdin[1]);   // close original (now duped to fd 1)
+    // 11. Set PTY winsize to actual display dimensions
+    struct winsize ws;
+    ws.ws_row = display_rows;
+    ws.ws_col = display_cols;
+    ws.ws_xpixel = 0; ws.ws_ypixel = 0;
+    ioctl(master_fd, TIOCSWINSZ, &ws);
 
-    // 11. Set fd 0 to non-blocking, fd 1 to non-blocking (don't block terminal if shell isn't reading)
-    fcntl(0, F_SETFL, O_RDONLY | O_NONBLOCK);
-    fcntl(1, F_SETFL, O_WRONLY | O_NONBLOCK);
+    // 12. Main loop — PTY master holder + line discipline
+    char linebuf[256];
+    int linebuf_len = 0;
 
-    // 12. Main loop
     while (1) {
         int did_work = 0;
-
-        // Read kbd_ring → write to shell stdin pipe (fd 1)
+        struct termios t;
+        ioctl(master_fd, TCGETS, &t);
+        // kbd_ring → ldisc → master write
         while (kbd->head != kbd->tail) {
             char ch = (char)kbd->msgs[kbd->tail].ch;
             kbd->tail = (kbd->tail + 1) % 8;
-            write(1, &ch, 1);
-            did_work = 1;
-        }
 
-        // Clear consumer_sleeping after consuming
-        shm_hdr->consumer_sleeping = 0;
+            // Get foreground pgid for signal delivery
+            pid_t fg_pgid = shell_pid;
+            int tmp_pgid;
+            if (ioctl(master_fd, TIOCGPGRP, &tmp_pgid) == 0 && tmp_pgid > 0)
+                fg_pgid = tmp_pgid;
 
-        // Read shell stdout pipe (fd 0) → VT100 parse → cell buffer + serial echo
-        char buf[256];
-        int64_t n = read(0, buf, sizeof(buf));
-        if (n > 0) {
-            write(2, buf, (size_t)n);  // echo to serial (fd 2 = FD_DEV from init)
-            for (int64_t i = 0; i < n; i++) {
-                vt100_feed(buf[i]);
+            if ((t.c_lflag & ISIG) && ch == (char)t.c_cc[VINTR]) {
+                kill(-fg_pgid, SIGINT); did_work = 1; continue;
             }
-            did_work = 1;
-        }
+            if ((t.c_lflag & ISIG) && ch == (char)t.c_cc[VSUSP]) {
+                kill(-fg_pgid, SIGTSTP); did_work = 1; continue;
+            }
 
-        // Flush dirty cells to back buffer + notify KMS
-        flush_dirty_cells();
-
-        // If no work, sleep briefly
-        if (!did_work) {
-            shm_hdr->consumer_sleeping = 1;
-            // Double-check kbd_ring (prevent lost-wakeup)
-            if (kbd->head != kbd->tail) {
-                shm_hdr->consumer_sleeping = 0;
+            if (t.c_lflag & ICANON) {
+                if (ch == '\n') {
+                    linebuf[linebuf_len++] = '\n';
+                    write(master_fd, linebuf, linebuf_len);
+                    vt100_feed('\r'); vt100_feed('\n');
+                    linebuf_len = 0; did_work = 1; continue;
+                }
+                if (ch == (char)t.c_cc[VEOF]) {
+                    if (linebuf_len > 0) {
+                        write(master_fd, linebuf, linebuf_len);
+                        linebuf_len = 0; did_work = 1;
+                    } else {
+                        write(master_fd, "", 0);  // eof_pending → slave EOF
+                        did_work = 1;
+                    }
+                    continue;
+                }
+                if (ch == (char)t.c_cc[VERASE]) {
+                    if (linebuf_len > 0) {
+                        linebuf_len--;
+                        vt100_feed('\b'); vt100_feed(' '); vt100_feed('\b');
+                        did_work = 1;
+                    }
+                    continue;
+                }
+                if (ch == (char)t.c_cc[VKILL]) {
+                    linebuf_len = 0;
+                    vt100_feed('\r'); vt100_feed('\n');
+                    did_work = 1; continue;
+                }
+                if (linebuf_len < (int)sizeof(linebuf) - 2) {
+                    linebuf[linebuf_len++] = ch;
+                    if (t.c_lflag & ECHO) vt100_feed(ch);
+                    did_work = 1;
+                }
                 continue;
             }
+
+            // Raw mode
+            write(master_fd, &ch, 1);
+            if (t.c_lflag & ECHO) vt100_feed(ch);
+            did_work = 1;
+        }
+
+        shm_hdr->consumer_sleeping = 0;
+
+        // Shell output ← master read → VT100 + serial echo
+        char buf[256];
+        int64_t n = read(master_fd, buf, sizeof(buf));
+        if (n > 0) {
+            write(2, buf, (size_t)n);
+            for (int64_t i = 0; i < n; i++) vt100_feed(buf[i]);
+            did_work = 1;
+        } else if (n == 0) {
+            // Shell exited → re-fork
+            close(master_fd);
+            master_fd = open("/dev/ptmx", O_RDWR);
+            if (master_fd < 0) continue;
+            fcntl(master_fd, F_SETFL, O_RDWR | O_NONBLOCK);
+            ioctl(master_fd, TIOCGPTN, &pty_idx);
+            snprintf(pts_path, sizeof(pts_path), "/dev/pts%d", pty_idx);
+            ws.ws_row = display_rows; ws.ws_col = display_cols;
+            ioctl(master_fd, TIOCSWINSZ, &ws);
+            shell_pid = fork();
+            if (shell_pid == 0) {
+                int slave_fd = open(pts_path, O_RDWR);
+                if (slave_fd < 0) _exit(127);
+                dup2(slave_fd, 0); dup2(slave_fd, 1); dup2(slave_fd, 2);
+                if (slave_fd > 2) close(slave_fd);
+                close(master_fd);
+                execve("/usr/bin/shell", NULL, NULL);
+                _exit(127);
+            }
+            linebuf_len = 0; did_work = 1;
+        }
+
+        flush_dirty_cells();
+
+        if (!did_work) {
+            shm_hdr->consumer_sleeping = 1;
+            if (kbd->head != kbd->tail) { shm_hdr->consumer_sleeping = 0; continue; }
             struct recv_msg m;
             recv(&m, NULL, 0, 1);
             shm_hdr->consumer_sleeping = 0;
         }
     }
-
     return 0;
 }

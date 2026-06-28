@@ -45,6 +45,7 @@ bool kasan_shadow_exists(void);
 // copy_from_user / copy_to_user (bypass shadow check for user addresses)
 size_t copy_from_user(void *dst, const void __user *src, size_t size);
 size_t copy_to_user(void __user *dst, const void *src, size_t size);
+long strncpy_from_user(char *dst, const char __user *src, long maxlen);
 
 // Global variable poisoning (called from kasan_init)
 void kasan_poison_globals(void);
@@ -70,6 +71,7 @@ static inline bool kasan_shadow_exists(void) { return false; }
 // source writes via strict-aliasing violations.
 size_t copy_from_user(void *d, const void __user *s, size_t n);
 size_t copy_to_user(void __user *d, const void *s, size_t n);
+long strncpy_from_user(char *dst, const char __user *src, long maxlen);
 
 static inline void kasan_slab_alloc(const void *a, size_t s) { (void)a; (void)s; }
 static inline void kasan_slab_free(const void *a, size_t s) { (void)a; (void)s; }

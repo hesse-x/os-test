@@ -64,6 +64,14 @@ struct termios {
 #define TCSADRAIN 1
 #define TCSAFLUSH 2
 
+// struct winsize (sync with kernel/pty.h)
+struct winsize {
+    unsigned short ws_row;
+    unsigned short ws_col;
+    unsigned short ws_xpixel;
+    unsigned short ws_ypixel;
+};
+
 // Functions
 int tcgetattr(int fd, struct termios *termios_p);
 int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);

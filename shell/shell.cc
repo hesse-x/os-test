@@ -3,6 +3,8 @@
 #include "stdlib.h"
 #include <unistd.h>
 #include <fcntl.h>
+#include <termios.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
@@ -21,16 +23,20 @@ static char getc() {
 }
 
 static int readline(char *buf, int len) {
+    struct termios t;
+    tcgetattr(0, &t);
+    int do_echo = !(t.c_lflag & ECHO);  // echo only if Terminal ldisc is NOT doing it
+
     int i = 0;
     while (i < len - 1) {
         char c = getc();
-        if (c == '\n') { putchar(c); break; }
+        if (c == '\n') { if (do_echo) putchar(c); break; }
         if (c == 8) {
-            if (i > 0) { i--; putchar(c); putchar(' '); putchar(c); }
+            if (i > 0) { i--; if (do_echo) { putchar(c); putchar(' '); putchar(c); } }
             continue;
         }
         buf[i++] = c;
-        putchar(c);
+        if (do_echo) putchar(c);
     }
     buf[i] = '\0';
     return i;
@@ -306,6 +312,20 @@ static const cmd_entry cmds[] = {
 extern "C" void _start() {
     // VFS is in-kernel, no need to wait for fs_driver
     printf("shell: ready\n");
+
+    // Become session leader and set controlling terminal
+    setsid();
+    ioctl(0, TIOCSCTTY, 0);
+
+#ifdef TEST
+    pid_t test_pid = fork();
+    if (test_pid == 0) {
+        execve("/test/test_runner.elf", NULL, NULL);
+        _exit(127);
+    }
+    int test_status = 0;
+    waitpid(test_pid, &test_status, 0);
+#endif
 
     char line[256];
 

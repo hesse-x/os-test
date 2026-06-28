@@ -64,6 +64,12 @@ uint64_t sys_sigreturn(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_
 uint64_t sys_fork(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_execve(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
+// Session/pgid syscalls
+uint64_t sys_setsid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_setpgid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_getpgid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t sys_getsid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
 // Socket syscalls (declared in kernel/socket.c)
 uint64_t sys_socket(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t sys_bind(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
