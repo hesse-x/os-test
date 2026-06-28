@@ -386,7 +386,7 @@ void isr_init() {
   register_irq(LAPIC_TIMER_VECTOR, timer_handler);
 
   // Re-initialize GDT with per-CPU setup (now running at virtual address)
-  smp_init_cpu(0, 0, (uint64_t)&stack_bottom + 8192);
+  smp_init_cpu(0, 0, (int64_t)&stack_bottom + 8192);
   smp_apply_cpu(0);
 
   // Enable NX bit (CR4.NXDE + EFER.NXE) before IDT install
@@ -511,7 +511,7 @@ void syscall_dispatch(trapframe_t *tf) {
         tf->rax = syscall_table[tf->rax](
             tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
     } else {
-        tf->rax = (uint64_t)ENOSYS;
+        tf->rax = (int64_t)-ENOSYS;
     }
 }
 
@@ -548,12 +548,12 @@ void shm_put(struct shm *shm) {
 }
 
 // sys_getpid() — syscall 0
-uint64_t sys_getpid(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
-    return (uint64_t)current_task->pid;
+int64_t sys_getpid(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
+    return (int64_t)current_task->pid;
 }
 
 // sys_yield() — syscall 1
-uint64_t sys_yield(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
+int64_t sys_yield(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
     schedule();
     return 0;
 }
@@ -561,7 +561,7 @@ uint64_t sys_yield(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint6
 // sys_recv(buf, data_buf, data_buf_len, timeout_ms) — syscall 2 (统一事件接收：IRQ/REQ/notify/MSG)
 // timeout_ms=0: 无限等待; >0: 超时后唤醒
 // 返回: 0=成功, 正数=errno
-uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u1, uint64_t _u2) {
+int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t _u1, int64_t _u2) {
     void __user *buf = (void __user * __force)arg1;
     void __user *data_buf = (void __user * __force)arg2;
     size_t data_buf_len = (size_t)arg3;
@@ -570,13 +570,13 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
     // Validate user pointer
     uint64_t ptr = (__force uint64_t)buf;
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     // Validate data_buf if provided
     if (data_buf && (data_buf_len == 0 ||
         (__force uint64_t)data_buf >= 0xFFFFFFFF80000000ULL ||
         (__force uint64_t)data_buf + data_buf_len > 0xFFFFFFFF80000000ULL))
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     task_t *proc = current_task;
     int cpu = proc->assigned_cpu;
@@ -606,7 +606,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                     umsg->msg.len = len;
                     proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
                     spin_unlock(&proc->recv_lock);
-                    return (uint64_t)-EINVAL;
+                    return (int64_t)-EINVAL;
                 }
 
                 // Copy data to user buffer under current CR3
@@ -630,7 +630,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         proc->wait_timed_out = 0;
 
         if (timeout_ms > 0) {
-            proc->wait_deadline = sched_clock() + (uint64_t)timeout_ms * 1000000ULL;
+            proc->wait_deadline = sched_clock() + (int64_t)timeout_ms * 1000000ULL;
             spin_lock(&cpu_locals[cpu].scheduler_lock);
             timer_queue_insert(cpu, proc);
             spin_unlock(&cpu_locals[cpu].scheduler_lock);
@@ -643,14 +643,14 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         // EINTR check: ISR notification (recv_intr set by wake_process from kernel ISR)
         if (proc->recv_intr) {
             proc->recv_intr = 0;
-            return (uint64_t)-EINTR;
+            return (int64_t)-EINTR;
         }
 
         // EINTR check: signal pending and deliverable
         uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
         uint64_t deliv = pend & ~proc->sig.blocked;
         deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
-        if (deliv) return (uint64_t)-EINTR;
+        if (deliv) return (int64_t)-EINTR;
 
         // Woken up: check if timed out
         if (proc->wait_timed_out) {
@@ -674,7 +674,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                         umsg->msg.len = len;
                         proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
                         spin_unlock(&proc->recv_lock);
-                        return (uint64_t)-EINVAL;
+                        return (int64_t)-EINVAL;
                     }
                     copy_to_user(data_buf, kmaddr, len);
                     kfree(kmaddr);
@@ -687,7 +687,7 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                 return 0;
             }
             spin_unlock(&proc->recv_lock);
-            return (uint64_t)-ETIMEDOUT;
+            return (int64_t)-ETIMEDOUT;
         }
         // Non-timeout wakeup: a message was enqueued, loop back to dequeue it
     }
@@ -696,26 +696,26 @@ uint64_t sys_recv(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 // sys_req(pid, request, reply) — syscall 3 (同步 REQ)
 // 向目标发送 64 字节请求，阻塞等待 reply
 // 返回: 0=成功, 正数=errno
-uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     pid_t target_pid = (pid_t)arg1;
     void __user *request = (void __user * __force)arg2;
     void __user *reply = (void __user * __force)arg3;
 
     // Validate target PID
-    if (target_pid < 0 || target_pid >= MAX_PROC) return (uint64_t)-ESRCH;
+    if (target_pid < 0 || target_pid >= MAX_PROC) return (int64_t)-ESRCH;
 
     // Validate user pointers
     uint64_t req_ptr = (__force uint64_t)request;
     uint64_t rep_ptr = (__force uint64_t)reply;
     if (!req_ptr || req_ptr >= 0xFFFFFFFF80000000ULL ||
         req_ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
     if (!rep_ptr || rep_ptr >= 0xFFFFFFFF80000000ULL ||
         rep_ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     task_t *target = &tasks[target_pid];
-    if (target->pid != target_pid) return (uint64_t)-ESRCH;
+    if (target->pid != target_pid) return (int64_t)-ESRCH;
     WARN_ON(target->state == UNUSED);
 
     // Build RECV_REQ message
@@ -732,7 +732,7 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
     if (next == target->recv_tail) {
         spin_unlock(&target->recv_lock);
         printk(LOG_WARN, "sys_req: target_pid=%d recv queue full!\n", target_pid);
-        return (uint64_t)-EBUSY;  // queue full
+        return (int64_t)-EBUSY;  // queue full
     }
     __memcpy(target->recv_buf[target->recv_head], msg, RECV_MSG_SIZE);
     target->recv_head = next;
@@ -772,30 +772,30 @@ uint64_t sys_req(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint
         uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
         uint64_t deliv = pend & ~proc->sig.blocked;
         deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
-        if (deliv) return (uint64_t)-EINTR;
+        if (deliv) return (int64_t)-EINTR;
     }
 
     // Woken up by sys_resp or proc_reap
-    if (proc->req_result != 0) return (uint64_t)proc->req_result;
+    if (proc->req_result != 0) return (int64_t)proc->req_result;
     return 0;
 }
 
 // sys_resp(reply) — syscall 4 (回复当前 REQ 调用者)
 // 返回: 0=成功, 正数=errno
-uint64_t sys_resp(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
+int64_t sys_resp(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     void __user *reply = (void __user * __force)arg1;
 
     // Validate user pointer
     uint64_t ptr = (__force uint64_t)reply;
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     task_t *proc = current_task;
     pid_t caller_pid = proc->req_caller_pid;
-    if (caller_pid < 0 || caller_pid >= MAX_PROC) return (uint64_t)-EINVAL;
+    if (caller_pid < 0 || caller_pid >= MAX_PROC) return (int64_t)-EINVAL;
 
     task_t *caller = &tasks[caller_pid];
-    if (caller->pid != caller_pid) return (uint64_t)-ESRCH;
+    if (caller->pid != caller_pid) return (int64_t)-ESRCH;
 
     // Copy reply data to caller's reply buffer (user space)
     // We must first copy to a kernel buffer under the server's CR3,
@@ -808,7 +808,7 @@ uint64_t sys_resp(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     // Only write reply_len bytes to avoid overflowing small ioctl arg buffers
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
-    __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)caller->cr3) : "memory");
+    __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)caller->cr3) : "memory");
     copy_to_user(caller->req_reply_buf, kbuf, reply_len);
     __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
@@ -831,11 +831,11 @@ uint64_t sys_resp(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
 
 // sys_irq_bind(irq) — syscall 5 (绑定当前进程到指定 IRQ，自动 unmask I/O APIC)
 // irq 参数为向量号（例如 IRQ14 → vector 46 = 32+14）
-uint64_t sys_irq_bind(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
+int64_t sys_irq_bind(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     int irq = (int)arg1;
-    if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return (uint64_t)-EINVAL;
+    if (irq < 0 || irq >= MAX_IRQ_HANDLERS) return (int64_t)-EINVAL;
     // Mutual exclusion: cannot share IRQ with kernel ISR (e.g., serial dev)
-    if (irq_handlers[irq] != NULL) return (uint64_t)-EBUSY;
+    if (irq_handlers[irq] != NULL) return (int64_t)-EBUSY;
     __atomic_store_n(&irq_owner[irq], current_task->pid, __ATOMIC_RELEASE);
 
     // Auto-unmask I/O APIC for this IRQ (GSI = vector - 32)
@@ -852,7 +852,7 @@ uint64_t sys_irq_bind(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, u
 }
 
 // sys_exit(exit_code) — syscall 6 (进程退出)
-uint64_t sys_exit(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
+int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     task_t *proc = current_task;
     int32_t exit_code = (int32_t)arg1;
     proc->exit_code = exit_code;
@@ -932,7 +932,7 @@ uint64_t sys_exit(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     return 0;    // unreachable
 }
 
-uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     pid_t pid = (pid_t)arg1;
     int32_t __user *exit_code_ptr = (int32_t __user * __force)arg2;
 
@@ -954,7 +954,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
             }
             if (!has_children) {
                 spin_unlock(&tasks_lock);
-                return (uint64_t)-ECHILD;
+                return (int64_t)-ECHILD;
             }
             if (zombie) {
                 int cpu = zombie->assigned_cpu;
@@ -976,7 +976,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
                         *(__force int32_t *)exit_code_ptr = zombie->exit_code;
                 }
                 task_reap(zombie);
-                return (uint64_t)zpid;
+                return (int64_t)zpid;
             }
             spin_unlock(&tasks_lock);
 
@@ -1001,7 +1001,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
             if (!has_children) {
                 spin_unlock(&tasks_lock);
                 spin_unlock(&cpu_locals[pcpu].scheduler_lock);
-                return (uint64_t)-ECHILD;
+                return (int64_t)-ECHILD;
             }
             if (zombie) {
                 spin_unlock(&tasks_lock);
@@ -1019,14 +1019,14 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
                 uint64_t deliv = pend & ~current_task->sig.blocked;
                 deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
                 deliv &= ~(1ULL << SIGCHLD);
-                if (deliv) return (uint64_t)-EINTR;
+                if (deliv) return (int64_t)-EINTR;
             }
         }
     }
 
     if (pid < 0 || pid >= MAX_PROC) {
         printk(LOG_WARN, "waitpid: pid=%d out of range\n", pid);
-        return 0;  // EINVAL
+        return -EINVAL;
     }
 
     task_t *child = &tasks[pid];
@@ -1037,7 +1037,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
         printk(LOG_WARN, "waitpid: pid=%d validation fail: child_pid=%d mm=%p parent_pid=%d caller=%d\n",
             pid, child->pid, child->mm, child->mm ? child->mm->parent_pid : -1, current_task->pid);
         spin_unlock(&tasks_lock);
-        return 0;  // ECHILD
+        return -ECHILD;
     }
     spin_unlock(&tasks_lock);
 
@@ -1097,7 +1097,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
             deliv &= ~(1ULL << SIGCHLD);
             if (deliv) {
                 printk(LOG_WARN, "waitpid: pid=%d EINTR pending=0x%lx\n", pid, pend);
-                return (uint64_t)-EINTR;
+                return (int64_t)-EINTR;
             }
         }
 
@@ -1107,7 +1107,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
             // Child was reaped by someone else — should not happen
             printk(LOG_WARN, "waitpid: pid=%d child reaped by someone else\n", pid);
             spin_unlock(&tasks_lock);
-            return 0;  // ECHILD
+            return -ECHILD;
         }
         spin_unlock(&tasks_lock);
     }
@@ -1118,12 +1118,12 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
         uint64_t ptr_val = (__force uint64_t)exit_code_ptr;
         if (ptr_val >= 0xFFFFFFFF80000000ULL || !ptr_val || (ptr_val + sizeof(int32_t) - 1) >= 0xFFFFFFFF80000000ULL) {
             printk(LOG_WARN, "waitpid: pid=%d bad exit_code_ptr=0x%lx\n", pid, ptr_val);
-            return 0;  // EFAULT
+            return -EFAULT;
         }
         *(__force int32_t *)exit_code_ptr = child->exit_code;
     }
     task_reap(child);
-    return (uint64_t)pid;
+    return (int64_t)pid;
 }
 
 // sys_mmap(addr, size, prot, flags, fd, offset) — syscall 9 (内存映射)
@@ -1131,7 +1131,7 @@ uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, u
 // MAP_PHYSICAL: offset=phys_addr, fd=-1// MAP_ANONYMOUS: fd=-1
 // Returns: mapped address on success, 0 on failure
 
-uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6) {
+int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6) {
     (void)arg1; (void)arg3; // addr, prot — not yet used
     size_t size = (size_t)arg2;
     int flags = (int)arg4;
@@ -1143,7 +1143,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 
     // MAP_SHARED (0x01) + fd ≥ 0: SHM or DEV fd mapping
     if ((flags & 0x01) && fd >= 0) {
-        if (fd >= MAX_FD) return 0;
+        if (fd >= MAX_FD) return -EBADF;
 
         // FD_DEV: dispatch to device mmap handler (devtmpfs path with inode)
         if (proc->mm->files->fd_table[fd].type == FD_DEV) {
@@ -1157,9 +1157,9 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                 // User-space driver: auto shm_attach to driver's SHM
                 if (ops->driver_pid > 0) {
                     pid_t drv_pid = ops->driver_pid;
-                    if (drv_pid < 0 || drv_pid >= MAX_PROC) return 0;
+                    if (drv_pid < 0 || drv_pid >= MAX_PROC) return -ESRCH;
                     task_t *drv_proc = &tasks[drv_pid];
-                    if (drv_proc->pid != drv_pid) return 0;
+                    if (drv_proc->pid != drv_pid) return -ESRCH;
 
                     // Find driver's FD_SHM
                     struct shm *target_shm = NULL;
@@ -1169,7 +1169,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                             break;
                         }
                     }
-                    if (!target_shm) return 0;
+                    if (!target_shm) return -ENOENT;
 
                     shm_get(target_shm);  // +1 for our mapping
 
@@ -1193,7 +1193,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                             for (size_t j = 0; j < i; j++)
                                 unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
                             shm_put(target_shm);
-                            return 0;
+                            return -ENOMEM;
                         }
                     }
 
@@ -1202,7 +1202,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                         for (size_t i = 0; i < total_pages; i++)
                             unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE, 1);
                         shm_put(target_shm);
-                        return 0;
+                        return -ENOMEM;
                     }
 
                     region->vaddr = vaddr;
@@ -1216,14 +1216,14 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                     return vaddr;
                 }
             }
-            return 0;  // fallback: no mmap handler
+            return -ENODEV;  // fallback: no mmap handler
         }
 
         // FD_SHM: existing SHM mapping path
         if (proc->mm->files->fd_table[fd].type != FD_SHM)
-            return 0;
+            return -EINVAL;
         struct shm *shm = proc->mm->files->fd_table[fd].shm;
-        if (!shm) return 0;
+        if (!shm) return -EBADF;
 
         // Total allocated pages: contiguous + discrete
         size_t npages = shm->npages;
@@ -1248,7 +1248,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                                       page_phys, pte_flags)) {
                 for (size_t j = 0; j < i; j++)
                     unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
-                return 0;
+                return -ENOMEM;
             }
         }
 
@@ -1256,7 +1256,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         if (!region) {
             for (size_t i = 0; i < total_pages; i++)
                 unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE, 1);
-            return 0;
+            return -ENOMEM;
         }
 
         region->vaddr = vaddr;
@@ -1271,7 +1271,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
     }
 
     // Anonymous or MAP_PHYSICAL: size must be non-zero
-    if (size == 0) return 0;
+    if (size == 0) return -EINVAL;
 
     // MAP_PHYSICAL
     if (flags & MAP_PHYSICAL) {
@@ -1293,7 +1293,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                 printk(LOG_ERROR, "mmap PHYSICAL: map failed at i=%lu\n", (unsigned long)i);
                 for (size_t j = 0; j < i; j++)
                     unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
-                return 0;
+                return -ENOMEM;
             }
         }
 
@@ -1301,7 +1301,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
         if (!region) {
             for (size_t i = 0; i < npages; i++)
                 unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE, 1);
-            return 0;
+            return -ENOMEM;
         }
 
         region->vaddr = vaddr;
@@ -1322,7 +1322,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 
     size_t npages = size / PAGE_SIZE;
     uint64_t *phys_pages = (uint64_t *)kmalloc(npages * sizeof(uint64_t));
-    if (!phys_pages) return 0;
+    if (!phys_pages) return -ENOMEM;
 
     size_t mapped = 0;
     for (size_t i = 0; i < npages; i++) {
@@ -1333,7 +1333,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                 unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
             }
             kfree(phys_pages);
-            return 0;
+            return -ENOMEM;
         }
         phys_pages[i] = (__force uint64_t)page_to_phys(page);
         if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, phys_pages[i], pte_flags)) {
@@ -1343,7 +1343,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
                 unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
             }
             kfree(phys_pages);
-            return 0;
+            return -ENOMEM;
         }
         mapped++;
     }
@@ -1355,7 +1355,7 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
             unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
         }
         kfree(phys_pages);
-        return 0;
+        return -ENOMEM;
     }
 
     region->vaddr = vaddr;
@@ -1372,11 +1372,11 @@ uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, ui
 
 // sys_munmap(addr, size) — syscall 10 (解除内存映射)
 // Returns: 0 on success, positive errno on failure
-uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     uint64_t addr = arg1;
     size_t size = (size_t)arg2;
 
-    if (size == 0) return (uint64_t)-EINVAL;
+    if (size == 0) return (int64_t)-EINVAL;
 
     task_t *proc = current_task;
     uint64_t *pml4 = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
@@ -1427,7 +1427,7 @@ uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, ui
         pp = &(*pp)->next;
     }
 
-    return (uint64_t)-EINVAL;
+    return (int64_t)-EINVAL;
 }
 
 // ===================== notify_and_wake =====================
@@ -1492,22 +1492,22 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
 // sys_block_async(lba, buf, count, dir) — syscall 30
 // Async block I/O: returns cookie (>0) on success, positive errno on error.
 // Completion delivered via RECV_NOTIFY with cookie+result+lba+count in data.
-uint64_t sys_block_async(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u1, uint64_t _u2) {
+int64_t sys_block_async(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t _u1, int64_t _u2) {
     uint32_t lba = (uint32_t)arg1;
     void __user *buf = (void __user * __force)arg2;
     uint32_t count = (uint32_t)arg3;
     uint8_t dir = (uint8_t)arg4;
 
     int ret = ahci_submit_async(lba, (void __force *)buf, count, dir);
-    return (uint64_t)ret;
+    return (int64_t)ret;
 }
 
 // sys_debug_print(buf, len) — temporary debug: print user string to serial
 // syscall 49
-uint64_t sys_debug_print(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_debug_print(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     const char __user *buf = (const char __user * __force)arg1;
     size_t len = (size_t)arg2;
-    if (!buf || len > 256) return (uint64_t)-EINVAL;
+    if (!buf || len > 256) return (int64_t)-EINVAL;
     char kbuf[257];
     copy_from_user(kbuf, buf, len);
     kbuf[len] = '\0';
@@ -1518,16 +1518,16 @@ uint64_t sys_debug_print(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u
 // Register an FD_FILE fd in the kernel fd_table.
 // Returns: fd (>=3) on success, negative errno on failure
 // Note: named sys_install_fd_impl to avoid conflict with static inline wrapper in common/syscall.h
-uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t _u1) {
+int64_t sys_install_fd_impl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t _u1) {
     pid_t fs_pid = (pid_t)arg1;
     int32_t fs_fd = (int32_t)arg2;
     uint64_t offset = arg3;
     int flags = (int)arg4;
     uint64_t file_size = arg5;
 
-    if (fs_pid < 0 || fs_pid >= MAX_PROC) return (uint64_t)-EINVAL;
-    if (fs_fd < 0) return (uint64_t)-EINVAL;
-    if (flags & ~(O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK)) return (uint64_t)-EINVAL;
+    if (fs_pid < 0 || fs_pid >= MAX_PROC) return (int64_t)-EINVAL;
+    if (fs_fd < 0) return (int64_t)-EINVAL;
+    if (flags & ~(O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK)) return (int64_t)-EINVAL;
 
     task_t *proc = current_task;
 
@@ -1536,7 +1536,7 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
     int fd = alloc_fd(proc, 3);
     if (fd < 0) {
         spin_unlock(fdlk);
-        return (uint64_t)-EMFILE;
+        return (int64_t)-EMFILE;
     }
 
     proc->mm->files->fd_table[fd].type = FD_FILE;
@@ -1548,29 +1548,29 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
     refcount_set(&proc->mm->files->fd_table[fd].file_data.f_count, 1);
 
     spin_unlock(fdlk);
-    return (uint64_t)fd;
+    return (int64_t)fd;
 }
 
 
 // sys_ioctl(fd, cmd, arg) — syscall 58 (device ioctl)
-uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
-                    uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
+                    int64_t _u1, int64_t _u2, int64_t _u3) {
     int fd = (int)arg1;
     uint32_t cmd = (uint32_t)arg2;
     void __user *arg = (void __user * __force)arg3;
 
     task_t *proc = current_task;
     if (fd < 0 || fd >= MAX_FD || proc->mm->files->fd_table[fd].type == FD_NONE)
-        return (uint64_t)(-(uint64_t)EBADF);
+        return (int64_t)(-(int64_t)EBADF);
 
     switch (proc->mm->files->fd_table[fd].type) {
     case FD_DEV: {
         struct inode *ip = proc->mm->files->fd_table[fd].inode;
-        if (!ip || !ip->i_priv) return (uint64_t)(-(uint64_t)ENODEV);
+        if (!ip || !ip->i_priv) return (int64_t)(-(int64_t)ENODEV);
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         if (ops->driver_pid == 0) {
             // Kernel device: copy arg to kernel buffer, call ops->ioctl, copy back
-            if (!ops->ioctl) return (uint64_t)(-(uint64_t)ENOTTY);
+            if (!ops->ioctl) return (int64_t)(-(int64_t)ENOTTY);
 
             uint8_t kbuf[64];
             __memset(kbuf, 0, sizeof(kbuf));
@@ -1580,7 +1580,7 @@ uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
             // not silently truncated. TODO: add assert/error log for invalid size.
             if ((_IOC_DIR(cmd) & _IOC_WRITE) && (__force uint64_t)arg != 0) {
                 uint16_t arg_size = _IOC_SIZE(cmd);
-                if (arg_size > 48) return (uint64_t)(-(uint64_t)EINVAL);
+                if (arg_size > 48) return (int64_t)(-(int64_t)EINVAL);
                 if (arg_size > 0)
                     copy_from_user(kbuf, arg, arg_size);
             }
@@ -1594,19 +1594,19 @@ uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
                     copy_to_user(arg, kbuf, arg_size);
             }
 
-            return (uint64_t)result;
+            return (int64_t)result;
         }
         // User-space driver: IPC proxy
         // Pack cmd + arg into a REQ message, send to driver_pid
         pid_t target_pid = ops->driver_pid;
-        if (target_pid <= 0) return (uint64_t)(-(uint64_t)ENODEV);
+        if (target_pid <= 0) return (int64_t)(-(int64_t)ENODEV);
 
         // Build REQ payload: [4 bytes cmd] [arg_size bytes arg data]
         // arg_size > 48: reject — such ioctl needs MSG path (future),
         // not silently truncated. TODO: add assert/error log for invalid size.
         if ((_IOC_DIR(cmd) & _IOC_WRITE) && (__force uint64_t)arg != 0) {
             uint16_t arg_size = _IOC_SIZE(cmd);
-            if (arg_size > 48) return (uint64_t)(-(uint64_t)EINVAL);
+            if (arg_size > 48) return (int64_t)(-(int64_t)EINVAL);
         }
         uint8_t req_data[56];
         __memset(req_data, 0, 56);
@@ -1619,10 +1619,10 @@ uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
 
         // Validate target PID
         if (target_pid < 0 || target_pid >= MAX_PROC)
-            return (uint64_t)(-(uint64_t)ESRCH);
+            return (int64_t)(-(int64_t)ESRCH);
         task_t *target = &tasks[target_pid];
         if (target->pid != target_pid)
-            return (uint64_t)(-(uint64_t)ESRCH);
+            return (int64_t)(-(int64_t)ESRCH);
 
         // Build RECV_REQ message
         uint8_t msg[RECV_MSG_SIZE];
@@ -1636,7 +1636,7 @@ uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
         uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
         if (next == target->recv_tail) {
             spin_unlock(&target->recv_lock);
-            return (uint64_t)(-(uint64_t)EBUSY);
+            return (int64_t)(-(int64_t)EBUSY);
         }
         __memcpy(target->recv_buf[target->recv_head], msg, RECV_MSG_SIZE);
         target->recv_head = next;
@@ -1674,7 +1674,7 @@ uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
 
         // Woken up by sys_resp or proc_reap
         if (proc->req_result != 0)
-            return (uint64_t)proc->req_result;
+            return (int64_t)proc->req_result;
 
         // Driver reply layout: [int32_t result(4B) | arg_data(52B)]
         // libc ioctl expects: [arg_data(arg_size B)] at offset 0
@@ -1694,12 +1694,12 @@ uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
                 copy_to_user((void __user * __force)arg, tmp, arg_size);
             }
         }
-        return (uint64_t)(long)ioctl_result;
+        return (int64_t)(long)ioctl_result;
     }
     case FD_TTY: {
         struct pty *pty = proc->mm->files->fd_table[fd].pty;
-        if (!pty) return (uint64_t)(-(uint64_t)EBADF);
-        return (uint64_t)pty_ioctl(pty, cmd, arg);
+        if (!pty) return (int64_t)(-(int64_t)EBADF);
+        return (int64_t)pty_ioctl(pty, cmd, arg);
     }
     case FD_SOCKET:
     case FD_PIPE:
@@ -1707,21 +1707,21 @@ uint64_t sys_ioctl(uint64_t arg1, uint64_t arg2, uint64_t arg3,
     case FD_DIR:
     case FD_FILE:
     case FD_SHM:
-        return (uint64_t)(-(uint64_t)ENOTTY);
+        return (int64_t)(-(int64_t)ENOTTY);
     default:
-        return (uint64_t)(-(uint64_t)EBADF);
+        return (int64_t)(-(int64_t)EBADF);
     }
 }
 
 // sys_fstat(fd, buf) — syscall 59 (file status)
-uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
-                    uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_fstat(int64_t arg1, int64_t arg2,
+                    int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     int fd = (int)arg1;
     struct kstat __user *ust = (struct kstat __user * __force)arg2;
 
     task_t *proc = current_task;
     if (fd < 0 || fd >= MAX_FD || proc->mm->files->fd_table[fd].type == FD_NONE)
-        return (uint64_t)(-(uint64_t)EBADF);
+        return (int64_t)(-(int64_t)EBADF);
 
     struct kstat ks;
     __memset(&ks, 0, sizeof(ks));
@@ -1731,7 +1731,7 @@ uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
     switch (proc->mm->files->fd_table[fd].type) {
     case FD_REGULAR: {
         struct inode *ip = proc->mm->files->fd_table[fd].inode;
-        if (!ip) return (uint64_t)(-(uint64_t)EBADF);
+        if (!ip) return (int64_t)(-(int64_t)EBADF);
         ks.st_ino = ip->ino;
         ks.st_size = ip->size;
         ks.st_mode = S_IFREG | 0644;
@@ -1740,7 +1740,7 @@ uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
     }
     case FD_DIR: {
         struct inode *ip = proc->mm->files->fd_table[fd].inode;
-        if (!ip) return (uint64_t)(-(uint64_t)EBADF);
+        if (!ip) return (int64_t)(-(int64_t)EBADF);
         ks.st_ino = ip->ino;
         ks.st_mode = S_IFDIR | 0755;
         ks.st_blocks = 0;
@@ -1748,7 +1748,7 @@ uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
     }
     case FD_DEV: {
         struct inode *ip = proc->mm->files->fd_table[fd].inode;
-        if (!ip) return (uint64_t)(-(uint64_t)EBADF);
+        if (!ip) return (int64_t)(-(int64_t)EBADF);
         ks.st_ino = ip->ino;
         if (ip->i_priv && ((struct dev_ops *)ip->i_priv)->device_type == DEV_BLOCK)
             ks.st_mode = S_IFBLK | 0666;
@@ -1766,35 +1766,35 @@ uint64_t sys_fstat(uint64_t arg1, uint64_t arg2,
         ks.st_mode = S_IFREG | 0666;
         break;
     default:
-        return (uint64_t)(-(uint64_t)EBADF);
+        return (int64_t)(-(int64_t)EBADF);
     }
 
     if (copy_to_user(ust, &ks, sizeof(ks)))
-        return (uint64_t)(-(uint64_t)EFAULT);
+        return (int64_t)(-(int64_t)EFAULT);
     return 0;
 }
 
 // sys_fdev_pid(fd) — syscall 60
 // Returns driver_pid for FD_DEV fd (0 for kernel device, >0 for user-space driver).
 // Used by libc notify_fd/msg_fd/mmap to find target PID without a local fd_table.
-uint64_t sys_fdev_pid(uint64_t arg1, uint64_t _u2, uint64_t _u3,
-                       uint64_t _u4, uint64_t _u5, uint64_t _u6) {
+int64_t sys_fdev_pid(int64_t arg1, int64_t _u2, int64_t _u3,
+                       int64_t _u4, int64_t _u5, int64_t _u6) {
     int fd = (int)arg1;
     task_t *proc = current_task;
     if (fd < 0 || fd >= MAX_FD || proc->mm->files->fd_table[fd].type != FD_DEV)
-        return (uint64_t)(-(uint64_t)EBADF);
+        return (int64_t)(-(int64_t)EBADF);
 
     struct inode *ip = proc->mm->files->fd_table[fd].inode;
     if (!ip || !ip->i_priv) return 0;  // kernel device, no driver_pid
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-    return (uint64_t)ops->driver_pid;
+    return (int64_t)ops->driver_pid;
 }
 
 // sys_shm_create(size) — syscall 11 (创建共享内存，返回 fd)
 // Returns: fd (≥2) on success, 0 on failure
-uint64_t sys_shm_create(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
+int64_t sys_shm_create(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     size_t size = (size_t)arg1;
-    if (size == 0) return 0;
+    if (size == 0) return -EINVAL;
     size = ALIGN_UP(size, PAGE_SIZE);
     size_t npages = size / PAGE_SIZE;
 
@@ -1802,7 +1802,7 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3,
 
     // Allocate physical pages
     Page *pages = bfc_alloc_page(npages);
-    if (!pages) return 0;
+    if (!pages) return -ENOMEM;
     uint64_t phys = (__force uint64_t)page_to_phys(pages);
 
     // Zero the pages
@@ -1813,7 +1813,7 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3,
     struct shm *shm = (struct shm *)kmalloc(sizeof(struct shm));
     if (!shm) {
         bfc_free_page(pages, npages);
-        return 0;
+        return -ENOMEM;
     }
     shm->phys = phys;
     shm->npages = npages;
@@ -1830,14 +1830,14 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3,
     if (fd < 0) {
         kfree(shm);
         bfc_free_page(pages, npages);
-        return 0;
+        return -EMFILE;
     }
 
     proc->mm->files->fd_table[fd].type = FD_SHM;
     proc->mm->files->fd_table[fd].flags = O_RDWR;
     proc->mm->files->fd_table[fd].shm = shm;
 
-    return (uint64_t)fd;
+    return (int64_t)fd;
 }
 
 // sys_shm_attach(id, mode) — syscall 12 (附加共享内存，返回 fd)
@@ -1845,7 +1845,7 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3,
 // mode=1: id is kernel SHM ID, attach kernel pre-allocated SHM via struct shm*
 // Returns: fd (≥2) on success, 0 on failure
 // Transitional: caller must sys_mmap(fd, ...) to get vaddr
-uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_shm_attach(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     int mode = (int)arg2;
     task_t *proc = current_task;
     struct shm *target_shm = NULL;
@@ -1859,14 +1859,14 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2
                 break;
             }
         }
-        if (!target_shm) return 0;
+        if (!target_shm) return -ENOENT;
     } else {
         // mode=0: find target process's first FD_SHM
         pid_t target_pid = (pid_t)arg1;
-        if (target_pid < 0 || target_pid >= MAX_PROC) return 0;
+        if (target_pid < 0 || target_pid >= MAX_PROC) return -ESRCH;
 
         task_t *target = &tasks[target_pid];
-        if (target->pid != target_pid) return 0;
+        if (target->pid != target_pid) return -ESRCH;
 
         // Scan target's fd_table for FD_SHM (under target's fd_lock)
         spinlock_t *target_fdlk = &target->mm->files->fd_lock;
@@ -1878,7 +1878,7 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2
             }
         }
         spin_unlock(target_fdlk);
-        if (!target_shm) return 0;
+        if (!target_shm) return -ENOENT;
     }
 
     // Bump ref_count for the new fd
@@ -1891,7 +1891,7 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2
     if (fd < 0) {
         spin_unlock(fdlk);
         shm_put(target_shm);
-        return 0;
+        return -EMFILE;
     }
 
     proc->mm->files->fd_table[fd].type = FD_SHM;
@@ -1899,26 +1899,26 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2
     proc->mm->files->fd_table[fd].shm = target_shm;
     spin_unlock(fdlk);
 
-    return (uint64_t)fd;
+    return (int64_t)fd;
 }
 
 // ===================== memfd_create / ftruncate =====================
 
 // sys_memfd_create(name, flags) — syscall 44 (Linux-compatible memfd_create)
 // Returns: fd (≥2) on success, 0 on failure
-uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_memfd_create(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     const char __user *user_name = (const char __user * __force)arg1;
     unsigned int flags = (unsigned int)arg2;
 
     // Validate flags: only known flags allowed
     if (flags & ~(MFD_CLOEXEC | MFD_ALLOW_SEALING))
-        return 0;
+        return -EINVAL;
 
     task_t *proc = current_task;
 
     // Allocate shm struct (empty — no physical pages yet)
     struct shm *shm = (struct shm *)kmalloc(sizeof(struct shm));
-    if (!shm) return 0;
+    if (!shm) return -ENOMEM;
 
     shm->phys = 0;
     shm->npages = 0;
@@ -1934,7 +1934,7 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
         uint64_t uptr = (__force uint64_t)user_name;
         if (uptr >= 0xFFFFFFFF80000000ULL) {
             kfree(shm);
-            return 0;  // -EFAULT
+            return -EFAULT;
         }
         // Read name byte by byte to avoid crossing page boundary issues
         int i;
@@ -1956,7 +1956,7 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
     if (fd < 0) {
         spin_unlock(fdlk);
         kfree(shm);
-        return 0;
+        return -EMFILE;
     }
 
     proc->mm->files->fd_table[fd].type = FD_SHM;
@@ -1964,7 +1964,7 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
     proc->mm->files->fd_table[fd].shm = shm;
     spin_unlock(fdlk);
 
-    return (uint64_t)fd;
+    return (int64_t)fd;
 }
 
 // Helper: allocate one page and add to shm's page_list
@@ -2009,19 +2009,19 @@ static uint64_t shm_add_page(struct shm *shm) {
 
 // sys_ftruncate(fd, size) — syscall 45 (set shm size, allocate/free pages)
 // Returns: 0 on success, positive errno on failure
-uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     int fd = (int)arg1;
     int64_t size = (int64_t)arg2;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
-    if (proc->mm->files->fd_table[fd].type != FD_SHM) return (uint64_t)-EINVAL;
-    if (!proc->mm->files->fd_table[fd].shm) return (uint64_t)-EBADF;
+    if (proc->mm->files->fd_table[fd].type != FD_SHM) return (int64_t)-EINVAL;
+    if (!proc->mm->files->fd_table[fd].shm) return (int64_t)-EBADF;
 
     struct shm *shm = proc->mm->files->fd_table[fd].shm;
 
-    if (size < 0) return (uint64_t)-EINVAL;
+    if (size < 0) return (int64_t)-EINVAL;
 
     size_t new_size = (size_t)size;
     size_t new_npages = (new_size + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -2030,7 +2030,7 @@ uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2,
     if (new_npages > old_total) {
         // === EXPAND ===
         if (shm->seals & F_SEAL_GROW)
-            return (uint64_t)-EPERM;
+            return (int64_t)-EPERM;
 
         size_t extra = new_npages - old_total;
 
@@ -2055,7 +2055,7 @@ uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2,
             int list_cap = (int)((total + 15) / 16 * 16);  // round up to multiple of 16
             if (list_cap < 16) list_cap = 16;
             shm->page_list = (uint64_t *)kmalloc((size_t)list_cap * sizeof(uint64_t));
-            if (!shm->page_list) return (uint64_t)-ENOMEM;
+            if (!shm->page_list) return (int64_t)-ENOMEM;
 
             for (size_t i = 0; i < shm->npages; i++) {
                 shm->page_list[i] = shm->phys + i * PAGE_SIZE;
@@ -2076,7 +2076,7 @@ uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2,
                     kfree(shm->page_list);
                     shm->page_list = NULL;
                     shm->num_pages = 0;
-                    return (uint64_t)-ENOMEM;
+                    return (int64_t)-ENOMEM;
                 }
                 shm->page_list[shm->num_pages] = pphys;
                 shm->num_pages++;
@@ -2091,7 +2091,7 @@ uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2,
                         Page *p = &bfc_frames[PHY_TO_PAGE(shm->page_list[--shm->num_pages])];
                         bfc_free_page(p, 1);
                     }
-                    return (uint64_t)-ENOMEM;
+                    return (int64_t)-ENOMEM;
                 }
                 // shm_add_page reallocs page_list if needed, but we need to
                 // re-get the pointer since kmalloc may move it
@@ -2106,7 +2106,7 @@ uint64_t sys_ftruncate(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2,
     } else if (new_npages < old_total) {
         // === SHRINK ===
         if (shm->seals & F_SEAL_SHRINK)
-            return (uint64_t)-EPERM;
+            return (int64_t)-EPERM;
 
         if (shm->page_list) {
             // Free trailing pages from page_list
@@ -2170,13 +2170,13 @@ void wake_process(pid_t pid) {
 }
 
 // sys_pipe(fd_ptr) — syscall 13 (创建 pipe，写 [read_fd, write_fd] 到用户指针)
-uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
+int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     int __user *fd_ptr = (int __user * __force)arg1;
 
     // Validate user pointer
     uint64_t ptr = (__force uint64_t)fd_ptr;
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || ptr + 2 * sizeof(int) > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     task_t *proc = current_task;
 
@@ -2186,16 +2186,16 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     int write_fd = (read_fd >= 0) ? alloc_fd(proc, read_fd + 1) : -EMFILE;
     if (read_fd < 0 || write_fd < 0) {
         spin_unlock(fdlk);
-        return (uint64_t)-EMFILE;
+        return (int64_t)-EMFILE;
     }
 
     // Allocate pipe buffer (1 page)
     uint8_t *buf = (uint8_t *)kmalloc(PIPE_BUF_SIZE);
-    if (!buf) return (uint64_t)-ENOMEM;
+    if (!buf) return (int64_t)-ENOMEM;
 
     // Allocate pipe struct
     struct pipe *p = (struct pipe *)kmalloc(sizeof(struct pipe));
-    if (!p) { kfree(buf); return (uint64_t)-ENOMEM; }
+    if (!p) { kfree(buf); return (int64_t)-ENOMEM; }
 
     // Zero the buffer
     for (int i = 0; i < PIPE_BUF_SIZE; i++) buf[i] = 0;
@@ -2228,47 +2228,47 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
 // FD_REGULAR: kernel FAT32 via page cache
 // FD_PIPE: 直写 kernel ring buffer
 // FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
-uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int fd = (int)arg1;
     const char __user *buf = (const char __user * __force)arg2;
     size_t len = (size_t)arg3;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (current_task->mm->files->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
+    if (current_task->mm->files->fd_table[fd].type == FD_NONE) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
 
     // ===== FD_REGULAR: kernel FAT32 via page cache =====
     if (proc->mm->files->fd_table[fd].type == FD_REGULAR) {
         if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
-            return (uint64_t)-EINVAL;
+            return (int64_t)-EINVAL;
         struct inode *ip = proc->mm->files->fd_table[fd].inode;
-        if (!ip) return (uint64_t)-EBADF;
+        if (!ip) return (int64_t)-EBADF;
 
-        if (!buf) return (uint64_t)-EFAULT;
+        if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
 
         uint64_t offset = proc->mm->files->fd_table[fd].offset;
         int written = fat32_write(ip, offset, (const void __force *)buf, len);
-        if (written < 0) return (uint64_t)written;
+        if (written < 0) return (int64_t)written;
         proc->mm->files->fd_table[fd].offset = offset + written;
-        return (uint64_t)written;
+        return (int64_t)written;
     }
 
     // ===== FD_FILE: proxy to fs_driver =====
     if (proc->mm->files->fd_table[fd].type == FD_FILE) {
         if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
-            return (uint64_t)-EINVAL;
+            return (int64_t)-EINVAL;
 
         // Validate user buf pointer
-        if (!buf) return (uint64_t)-EFAULT;
+        if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
 
         // Clamp to msg size limit (64KB total msg, minus req header)
         size_t max_data = 65536 - sizeof(file_t_io_req);
@@ -2278,7 +2278,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         // Build write request: file_t_io_req + inline data
         size_t msg_len = sizeof(file_t_io_req) + len;
         uint8_t *msg_buf = (uint8_t *)kmalloc(msg_len);
-        if (!msg_buf) return (uint64_t)-ENOMEM;
+        if (!msg_buf) return (int64_t)-ENOMEM;
 
         file_t_io_req *req = (file_t_io_req *)msg_buf;
         req->cmd = FILE_CMD_WRITE;
@@ -2293,78 +2293,78 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
                                   msg_buf, msg_len, &resp, sizeof(resp));
         kfree(msg_buf);
 
-        if (ret < 0) return (uint64_t)(-ret);
+        if (ret < 0) return (int64_t)(-ret);
 
-        if (resp.status != 0) return (uint64_t)(-resp.status);
+        if (resp.status != 0) return (int64_t)(-resp.status);
 
         size_t written = resp.count;
         proc->mm->files->fd_table[fd].file_data._offset += written;
         if (proc->mm->files->fd_table[fd].file_data.file_size < proc->mm->files->fd_table[fd].file_data._offset)
             proc->mm->files->fd_table[fd].file_data.file_size = proc->mm->files->fd_table[fd].file_data._offset;
-        return (uint64_t)written;
+        return (int64_t)written;
     }
 
     // ===== FD_SOCKET: delegate to sock_write =====
     if (proc->mm->files->fd_table[fd].type == FD_SOCKET) {
         if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
-            return (uint64_t)-EINVAL;
-        if (!buf) return (uint64_t)-EFAULT;
+            return (int64_t)-EINVAL;
+        if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
         struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
-        if (!sock) return (uint64_t)-EBADF;
+        if (!sock) return (int64_t)-EBADF;
         int64_t ret = sock_write(sock, (const void __force *)buf, len);
-        return (uint64_t)ret;
+        return (int64_t)ret;
     }
 
     // ===== FD_DEV: write via dev_ops callback =====
     if (proc->mm->files->fd_table[fd].type == FD_DEV) {
         if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
-            return (uint64_t)-EINVAL;
-        if (!buf) return (uint64_t)-EFAULT;
+            return (int64_t)-EINVAL;
+        if (!buf) return (int64_t)-EFAULT;
         struct inode *ip = proc->mm->files->fd_table[fd].inode;
-        if (!ip || !ip->i_priv) return (uint64_t)-ENODEV;
+        if (!ip || !ip->i_priv) return (int64_t)-ENODEV;
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         // Kernel device: call write callback
         if (ops->driver_pid == 0 && ops->write) {
             ssize_t ret = ops->write(proc, fd, (const void __force *)buf, len);
-            return (uint64_t)ret;
+            return (int64_t)ret;
         }
         // User-space driver: not supported via write (use IPC)
-        return (uint64_t)-ENOSYS;
+        return (int64_t)-ENOSYS;
     }
 
     // ===== FD_TTY: PTY write =====
     if (proc->mm->files->fd_table[fd].type == FD_TTY) {
         if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
-            return (uint64_t)-EINVAL;
-        if (!buf) return (uint64_t)-EFAULT;
+            return (int64_t)-EINVAL;
+        if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
         struct pty *pty = proc->mm->files->fd_table[fd].pty;
-        if (!pty) return (uint64_t)-EBADF;
+        if (!pty) return (int64_t)-EBADF;
         int is_master = pty_fd_is_master(proc->mm->files, fd);
         int64_t ret;
         if (is_master)
             ret = pty_master_write(pty, proc, (const void __force *)buf, len);
         else
             ret = pty_slave_write(pty, proc, (const void __force *)buf, len);
-        return (uint64_t)ret;
+        return (int64_t)ret;
     }
 
     // ===== FD_PIPE: existing path =====
-    if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR))) return (uint64_t)-EINVAL;
+    if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR))) return (int64_t)-EINVAL;
 
     // Validate user buf pointer
-    if (!buf) return (uint64_t)-EFAULT;
+    if (!buf) return (int64_t)-EFAULT;
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     struct pipe *p = proc->mm->files->fd_table[fd].pipe;
     size_t written = 0;
@@ -2373,14 +2373,14 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         // Check if read end is closed (no readers left)
         if (refcount_read(&p->p_count) <= 1) {
             if (written > 0) break;
-            return (uint64_t)-EPIPE;
+            return (int64_t)-EPIPE;
         }
         // Check if pipe has space: full when head is one behind tail
         if ((p->head + 1) % PIPE_BUF_SIZE == p->tail) {
             // Pipe full: block or return EAGAIN if non-blocking
             if (proc->mm->files->fd_table[fd].flags & O_NONBLOCK) {
                 if (written > 0) break;  // return partial write
-                return (uint64_t)-EAGAIN;
+                return (int64_t)-EAGAIN;
             }
             p->write_pid = proc->pid;
             proc->state = BLOCKED;
@@ -2394,7 +2394,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
                 deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
                 if (deliv) {
                     if (written > 0) break;  // return partial write
-                    return (uint64_t)-EINTR;
+                    return (int64_t)-EINTR;
                 }
             }
             continue;
@@ -2407,52 +2407,52 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
     // Wake reader if blocked
     if (p->read_pid >= 0) wake_process(p->read_pid);
 
-    return (uint64_t)written;
+    return (int64_t)written;
 }
 
 // sys_read(fd, buf, len) — syscall 15 (从 fd 读数据，阻塞直到有数据)
 // FD_REGULAR: kernel FAT32 via page cache
 // FD_PIPE: 直读 kernel ring buffer
 // FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
-uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int fd = (int)arg1;
     char __user *buf = (char __user * __force)arg2;
     size_t len = (size_t)arg3;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (current_task->mm->files->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
+    if (current_task->mm->files->fd_table[fd].type == FD_NONE) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
 
     // ===== FD_REGULAR: kernel FAT32 via page cache =====
     if (proc->mm->files->fd_table[fd].type == FD_REGULAR) {
         if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
-            return (uint64_t)-EINVAL;
+            return (int64_t)-EINVAL;
         struct inode *ip = proc->mm->files->fd_table[fd].inode;
-        if (!ip) return (uint64_t)-EBADF;
+        if (!ip) return (int64_t)-EBADF;
         uint64_t offset = proc->mm->files->fd_table[fd].offset;
         if (offset >= ip->size) return 0;
 
-        if (!buf) return (uint64_t)-EFAULT;
+        if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
 
         uint64_t avail = ip->size - offset;
         if (len > avail) len = avail;
 
         int nread = fat32_read(ip, offset, (void __force *)buf, len);
-        if (nread < 0) return (uint64_t)(-nread);
+        if (nread < 0) return (int64_t)(-nread);
         proc->mm->files->fd_table[fd].offset = offset + nread;
-        return (uint64_t)nread;
+        return (int64_t)nread;
     }
 
     // ===== FD_FILE: proxy to fs_driver =====
     if (proc->mm->files->fd_table[fd].type == FD_FILE) {
         // Check read permission: reject O_WRONLY only (O_RDONLY=0, so must check != O_WRONLY)
         if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
-            return (uint64_t)-EINVAL;
+            return (int64_t)-EINVAL;
 
         if (proc->mm->files->fd_table[fd].file_data._offset >= proc->mm->files->fd_table[fd].file_data.file_size) {
             return 0;  // EOF
@@ -2465,11 +2465,11 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         if (len == 0) return 0;
 
         // Validate user buf pointer
-        if (!buf) return (uint64_t)-EFAULT;
+        if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
 
         // Build READ request
         file_t_io_req req = {0};
@@ -2481,19 +2481,19 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         // Allocate reply buffer (header + data)
         size_t resp_size = sizeof(file_t_io_resp) + (size_t)len;
         uint8_t *resp_buf = (uint8_t *)kmalloc(resp_size);
-        if (!resp_buf) return (uint64_t)-ENOMEM;
+        if (!resp_buf) return (int64_t)-ENOMEM;
 
         int64_t ret = sys_msg_to(proc->mm->files->fd_table[fd].file_data.fs_pid,
                                   &req, sizeof(req), resp_buf, resp_size);
         if (ret < 0) {
             kfree(resp_buf);
-            return (uint64_t)(-ret);  // sys_msg_to returns negative errno on failure
+            return (int64_t)(-ret);  // sys_msg_to returns negative errno on failure
         }
 
         file_t_io_resp *resp = (file_t_io_resp *)resp_buf;
         if (resp->status != 0) {
             kfree(resp_buf);
-            return (uint64_t)(-resp->status);
+            return (int64_t)(-resp->status);
         }
 
         size_t nread = resp->count;
@@ -2502,75 +2502,75 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
 
         proc->mm->files->fd_table[fd].file_data._offset += nread;
         kfree(resp_buf);
-        return (uint64_t)nread;
+        return (int64_t)nread;
     }
 
     // ===== FD_SOCKET: delegate to sock_read =====
     if (proc->mm->files->fd_table[fd].type == FD_SOCKET) {
-        if (!buf) return (uint64_t)-EFAULT;
+        if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
         struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
-        if (!sock) return (uint64_t)-EBADF;
+        if (!sock) return (int64_t)-EBADF;
         int64_t ret = sock_read(sock, (void __force *)buf, len);
-        return (uint64_t)ret;
+        return (int64_t)ret;
     }
 
     // ===== FD_DEV: read via dev_ops callback =====
     if (proc->mm->files->fd_table[fd].type == FD_DEV) {
         if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
-            return (uint64_t)-EINVAL;
-        if (!buf) return (uint64_t)-EFAULT;
+            return (int64_t)-EINVAL;
+        if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL
             || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
         struct inode *ip = proc->mm->files->fd_table[fd].inode;
-        if (!ip || !ip->i_priv) return (uint64_t)-ENODEV;
+        if (!ip || !ip->i_priv) return (int64_t)-ENODEV;
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         // Kernel device: call read callback
         if (ops->driver_pid == 0 && ops->read) {
             ssize_t ret = ops->read(proc, fd, (void __force *)buf, len);
-            return (uint64_t)ret;
+            return (int64_t)ret;
         }
         // User-space driver: not supported via read (use IPC)
-        return (uint64_t)-ENOSYS;
+        return (int64_t)-ENOSYS;
     }
 
     // ===== FD_TTY: PTY read =====
     if (proc->mm->files->fd_table[fd].type == FD_TTY) {
         if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
-            return (uint64_t)-EINVAL;
-        if (!buf) return (uint64_t)-EFAULT;
+            return (int64_t)-EINVAL;
+        if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
         struct pty *pty = proc->mm->files->fd_table[fd].pty;
-        if (!pty) return (uint64_t)-EBADF;
+        if (!pty) return (int64_t)-EBADF;
         int is_master = pty_fd_is_master(proc->mm->files, fd);
         int64_t ret;
         if (is_master)
             ret = pty_master_read(pty, proc, (void __force *)buf, len);
         else
             ret = pty_slave_read(pty, proc, (void __force *)buf, len);
-        return (uint64_t)ret;
+        return (int64_t)ret;
     }
 
     // ===== FD_PIPE: existing path =====
     // O_RDONLY=0, so check: must not be O_WRONLY only
     if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
-        return (uint64_t)-EINVAL;
+        return (int64_t)-EINVAL;
 
     // Validate user buf pointer
-    if (!buf) return (uint64_t)-EFAULT;
+    if (!buf) return (int64_t)-EFAULT;
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     struct pipe *p = proc->mm->files->fd_table[fd].pipe;
 
@@ -2579,7 +2579,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         // Check if write end is closed (all write fds gone)
         if (refcount_read(&p->p_count) == 1) return 0;  // EOF: no writers left
         // Non-blocking: return EAGAIN-like indication (0 bytes read)
-        if (proc->mm->files->fd_table[fd].flags & O_NONBLOCK) return (uint64_t)-EAGAIN;
+        if (proc->mm->files->fd_table[fd].flags & O_NONBLOCK) return (int64_t)-EAGAIN;
         p->read_pid = proc->pid;
         proc->state = BLOCKED;
         proc->wait_event = WAIT_PIPE;
@@ -2590,7 +2590,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
             uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
             uint64_t deliv = pend & ~proc->sig.blocked;
             deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
-            if (deliv) return (uint64_t)-EINTR;
+            if (deliv) return (int64_t)-EINTR;
         }
     }
 
@@ -2605,22 +2605,22 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     // Wake writer if blocked
     if (p->write_pid >= 0) wake_process(p->write_pid);
 
-    return (uint64_t)nread;
+    return (int64_t)nread;
 
     // FD_DEV and FD_SHM return ENOSYS (never reached via FD_FILE/pipe check above)
 }
 
 // sys_close(fd) — syscall 16 (关闭 fd，pipe ref_count--)
-uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
+int64_t sys_close(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     int fd = (int)arg1;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
 
     spinlock_t *fdlk = &current_task->mm->files->fd_lock;
     spin_lock(fdlk);
     if (current_task->mm->files->fd_table[fd].type == FD_NONE) {
         spin_unlock(fdlk);
-        return (uint64_t)-EBADF;
+        return (int64_t)-EBADF;
     }
 
     if (current_task->mm->files->fd_table[fd].type == FD_FILE) {
@@ -2645,19 +2645,19 @@ uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint
 
 // sys_notify(pid) — syscall 18 (异步通知：消息入队 + 唤醒)
 // Returns: 0 on success, positive errno on failure
-uint64_t sys_notify(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
+int64_t sys_notify(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     pid_t target_pid = (pid_t)arg1;
-    if (target_pid < 0 || target_pid >= MAX_PROC) return (uint64_t)-EINVAL;
+    if (target_pid < 0 || target_pid >= MAX_PROC) return (int64_t)-EINVAL;
 
     task_t *target = &tasks[target_pid];
-    if (target->pid != target_pid) return (uint64_t)-ESRCH;
+    if (target->pid != target_pid) return (int64_t)-ESRCH;
 
     // Enqueue RECV_NOTIFY message
     spin_lock(&target->recv_lock);
     uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
     if (next == target->recv_tail) {
         spin_unlock(&target->recv_lock);
-        return (uint64_t)-EBUSY;  // queue full
+        return (int64_t)-EBUSY;  // queue full
     }
     recv_msg_t *slot = (recv_msg_t *)target->recv_buf[target->recv_head];
     slot->type = RECV_NOTIFY;
@@ -2684,12 +2684,12 @@ uint64_t sys_notify(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uin
 }
 
 // sys_gettime() — syscall 19 (全局单调时钟，返回纳秒)
-uint64_t sys_gettime(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
+int64_t sys_gettime(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
     return sched_clock();
 }
 
 // sys_clock() — syscall 20 (per-process CPU 时间，返回纳秒)
-uint64_t sys_clock(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
+int64_t sys_clock(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
     return current_task->cpu_time_ns;
 }
 
@@ -2699,11 +2699,11 @@ uint64_t sys_clock(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint6
 int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
                            void *reply_buf, size_t reply_len) {
     task_t *target = &tasks[target_pid];
-    if (target->pid != target_pid) return (uint64_t)-ESRCH;
+    if (target->pid != target_pid) return (int64_t)-ESRCH;
 
     // Allocate kernel buffer and copy message from user space
     void *kbuf = kmalloc(msg_len);
-    if (!kbuf) return (uint64_t)-ENOMEM;
+    if (!kbuf) return (int64_t)-ENOMEM;
     __memcpy(kbuf, msg_buf, msg_len);
 
     // Build RECV_MSG
@@ -2720,7 +2720,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
     if (next == target->recv_tail) {
         spin_unlock(&target->recv_lock);
         kfree(kbuf);
-        return (uint64_t)-EBUSY;  // queue full
+        return (int64_t)-EBUSY;  // queue full
     }
     __memcpy(target->recv_buf[target->recv_head], msg, RECV_MSG_SIZE);
     target->recv_head = next;
@@ -2760,18 +2760,18 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
         uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
         uint64_t deliv = pend & ~proc->sig.blocked;
         deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
-        if (deliv) return (uint64_t)-EINTR;
+        if (deliv) return (int64_t)-EINTR;
     }
 
     // Woken up by sys_msg_resp or proc_reap
-    if (proc->msg_result != 0) return (uint64_t)proc->msg_result;
+    if (proc->msg_result != 0) return (int64_t)proc->msg_result;
     return 0;
 }
 
 // sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — syscall 21 (变长消息请求)
 // PID-based variant.
 // 返回: 0=成功, 负errno
-uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t _u1) {
+int64_t sys_msg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t _u1) {
     pid_t target_pid = (pid_t)arg1;
     void __user *msg_buf = (void __user * __force)arg2;
     size_t msg_len = (size_t)arg3;
@@ -2779,28 +2779,28 @@ uint64_t sys_msg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uin
     size_t reply_len = (size_t)arg5;
 
     // Validate target PID
-    if (target_pid < 0 || target_pid >= MAX_PROC) return (uint64_t)-ESRCH;
+    if (target_pid < 0 || target_pid >= MAX_PROC) return (int64_t)-ESRCH;
 
     // Validate msg_len
-    if (msg_len == 0 || msg_len > 65536) return (uint64_t)-EINVAL;
+    if (msg_len == 0 || msg_len > 65536) return (int64_t)-EINVAL;
 
     // Validate user pointers
     uint64_t msg_ptr = (__force uint64_t)msg_buf;
     if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
         msg_ptr + msg_len > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     uint64_t rep_ptr = (__force uint64_t)reply_buf;
     if (!rep_ptr || rep_ptr >= 0xFFFFFFFF80000000ULL ||
         rep_ptr + reply_len > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     return sys_msg_to(target_pid, (void __force *)msg_buf, msg_len, (void __force *)reply_buf, reply_len);
 }
 
 // sys_msg_resp(resp_buf, resp_len) — syscall 22 (回复当前 MSG 调用者)
 // 返回: 0=成功, 正数=errno
-uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     void __user *resp_buf = (void __user * __force)arg1;
     size_t resp_len = (size_t)arg2;
 
@@ -2808,20 +2808,20 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
     uint64_t ptr = (__force uint64_t)resp_buf;
     if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || resp_len == 0 ||
         ptr + resp_len > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     task_t *proc = current_task;
     pid_t caller_pid = proc->msg_caller_pid;
     if (caller_pid < 0 || caller_pid >= MAX_PROC) {
-        return (uint64_t)-EINVAL;
+        return (int64_t)-EINVAL;
     }
 
     task_t *caller = &tasks[caller_pid];
-    if (caller->pid != caller_pid) return (uint64_t)-ESRCH;
+    if (caller->pid != caller_pid) return (int64_t)-ESRCH;
 
     // Copy response data from server user space to kernel buffer
     void *kbuf = kmalloc(resp_len);
-    if (!kbuf) return (uint64_t)-ENOMEM;
+    if (!kbuf) return (int64_t)-ENOMEM;
     copy_from_user(kbuf, resp_buf, resp_len);
 
     // Copy to caller's reply buffer under caller's CR3
@@ -2829,7 +2829,7 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
 
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
-    __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)caller->cr3) : "memory");
+    __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)caller->cr3) : "memory");
     copy_to_user(caller->msg_reply_buf, kbuf, copy_len);
     __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
@@ -2853,19 +2853,19 @@ uint64_t sys_msg_resp(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
 }
 
 // sys_ioperm(from, num, turn_on) — syscall 23 (I/O 端口权限)
-uint64_t sys_ioperm(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_ioperm(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     unsigned long from = (unsigned long)arg1;
     unsigned long num = (unsigned long)arg2;
     int turn_on = (int)arg3;
 
-    if (from + num > 65536) return (uint64_t)-EINVAL;
+    if (from + num > 65536) return (int64_t)-EINVAL;
 
     task_t *proc = current_task;
 
     // Lazy-allocate IOPM if needed
     if (!proc->iopm) {
         uint8_t *iopm = (uint8_t *)kmalloc(IOPM_SIZE);
-        if (!iopm) return (uint64_t)-ENOMEM;
+        if (!iopm) return (int64_t)-ENOMEM;
         // Initialize to deny all
         for (int i = 0; i < IOPM_SIZE; i++)
             iopm[i] = 0xFF;
@@ -2893,14 +2893,14 @@ uint64_t sys_ioperm(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
 }
 
 // sys_dup2(old_fd, new_fd) — syscall 24 (复制 fd)
-uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     int old_fd = (int)arg1;
     int new_fd = (int)arg2;
 
     if (old_fd < 0 || old_fd >= MAX_FD || new_fd < 0 || new_fd >= MAX_FD)
-        return (uint64_t)-EBADF;
+        return (int64_t)-EBADF;
 
-    if (old_fd == new_fd) return (uint64_t)new_fd;
+    if (old_fd == new_fd) return (int64_t)new_fd;
 
     task_t *proc = current_task;
 
@@ -2909,7 +2909,7 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
 
     if (proc->mm->files->fd_table[old_fd].type == FD_NONE) {
         spin_unlock(fdlk);
-        return (uint64_t)-EBADF;
+        return (int64_t)-EBADF;
     }
 
     // Close new_fd if it's open
@@ -2962,38 +2962,38 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
     }
 
     spin_unlock(fdlk);
-    return (uint64_t)new_fd;
+    return (int64_t)new_fd;
 }
 
 // sys_fcntl(fd, cmd, arg) — syscall 25 (文件控制)
-uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int fd = (int)arg1;
     int cmd = (int)arg2;
     int arg = (int)arg3;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
-    if (proc->mm->files->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
+    if (proc->mm->files->fd_table[fd].type == FD_NONE) return (int64_t)-EBADF;
 
     switch (cmd) {
     case F_GETFL:
-        return (uint64_t)proc->mm->files->fd_table[fd].flags;
+        return (int64_t)proc->mm->files->fd_table[fd].flags;
     case F_SETFL:
         proc->mm->files->fd_table[fd].flags = (proc->mm->files->fd_table[fd].flags & ~O_SETFL_MASK) | (arg & O_SETFL_MASK);
         return 0;
     case F_ADD_SEALS: {
         // Only valid on FD_SHM with MFD_ALLOW_SEALING
-        if (proc->mm->files->fd_table[fd].type != FD_SHM) return (uint64_t)-EINVAL;
+        if (proc->mm->files->fd_table[fd].type != FD_SHM) return (int64_t)-EINVAL;
         struct shm *shm = proc->mm->files->fd_table[fd].shm;
-        if (!shm) return (uint64_t)-EBADF;
-        if (!(shm->flags & SHM_SEALED)) return (uint64_t)-EPERM;
-        if (shm->seals & F_SEAL_SEAL) return (uint64_t)-EPERM;
+        if (!shm) return (int64_t)-EBADF;
+        if (!(shm->flags & SHM_SEALED)) return (int64_t)-EPERM;
+        if (shm->seals & F_SEAL_SEAL) return (int64_t)-EPERM;
 
         unsigned int new_seals = (unsigned int)arg;
         // Only valid seal bits
         if (new_seals & ~(F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE))
-            return (uint64_t)-EINVAL;
+            return (int64_t)-EINVAL;
 
         // F_SEAL_WRITE check: if any writable mmap exists, refuse
         if (new_seals & F_SEAL_WRITE) {
@@ -3013,13 +3013,13 @@ uint64_t sys_fcntl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         return 0;
     }
     case F_GET_SEALS: {
-        if (proc->mm->files->fd_table[fd].type != FD_SHM) return (uint64_t)-EINVAL;
+        if (proc->mm->files->fd_table[fd].type != FD_SHM) return (int64_t)-EINVAL;
         struct shm *shm = proc->mm->files->fd_table[fd].shm;
-        if (!shm) return (uint64_t)-EBADF;
-        return (uint64_t)shm->seals;
+        if (!shm) return (int64_t)-EBADF;
+        return (int64_t)shm->seals;
     }
     default:
-        return (uint64_t)-EINVAL;
+        return (int64_t)-EINVAL;
     }
 }
 
@@ -3041,27 +3041,27 @@ int irq_owner_check(int irq) {
 // sys_dma_alloc(size, vaddr_ptr, paddr_ptr) — syscall 26
 // 分配物理连续、<4GB 的 DMA 缓冲区，映射到调用者地址空间
 // Returns: 0 on success, positive errno on failure
-uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     size_t size = (size_t)arg1;
     void __user * __user *vaddr_ptr = (void __user * __user * __force)arg2;
     uint64_t __user *paddr_ptr = (uint64_t __user * __force)arg3;
 
-    if (size == 0) return (uint64_t)-EINVAL;
+    if (size == 0) return (int64_t)-EINVAL;
 
     // Validate user pointers
     uint64_t vp = (__force uint64_t)vaddr_ptr;
     uint64_t pp = (__force uint64_t)paddr_ptr;
     if (!vp || vp >= 0xFFFFFFFF80000000ULL || vp + sizeof(void *) > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
-    if (!pp || pp >= 0xFFFFFFFF80000000ULL || pp + sizeof(uint64_t) > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
+    if (!pp || pp >= 0xFFFFFFFF80000000ULL || pp + sizeof(int64_t) > 0xFFFFFFFF80000000ULL)
+        return (int64_t)-EFAULT;
 
     size = ALIGN_UP(size, PAGE_SIZE);
     size_t npages = size / PAGE_SIZE;
 
     // Allocate contiguous physical pages below 4GB
     Page *pages = bfc_alloc_page_low(npages);
-    if (!pages) return (uint64_t)-ENOMEM;
+    if (!pages) return (int64_t)-ENOMEM;
 
     uint64_t phys = (__force uint64_t)page_to_phys(pages);
     task_t *proc = current_task;
@@ -3079,7 +3079,7 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
             // Cleanup: unmap already-mapped pages
             if (i > 0) unmap_user_pages((__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3), vaddr, vaddr + i * PAGE_SIZE, i);
             bfc_free_page(pages, npages);
-            return (uint64_t)-ENOMEM;
+            return (int64_t)-ENOMEM;
         }
     }
 
@@ -3090,7 +3090,7 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     if (!region) {
         unmap_user_pages((__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3), vaddr, vaddr_end, npages);
         bfc_free_page(pages, npages);
-        return (uint64_t)-ENOMEM;
+        return (int64_t)-ENOMEM;
     }
     region->vaddr = vaddr;
     region->size = size;
@@ -3102,10 +3102,10 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     {
         uint64_t vaddr_val = vaddr;
         if (copy_to_user(vaddr_ptr, &vaddr_val, sizeof(vaddr_val)))
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
     }
     if (copy_to_user(paddr_ptr, &phys, sizeof(phys)))
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     return 0;
 }
@@ -3113,9 +3113,9 @@ uint64_t sys_dma_alloc(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
 // sys_dma_free(vaddr) — syscall 27
 // 释放 DMA 缓冲区
 // Returns: 0 on success, positive errno on failure
-uint64_t sys_dma_free(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
-    uint64_t vaddr = (uint64_t)arg1;
-    if (!vaddr) return (uint64_t)-EINVAL;
+int64_t sys_dma_free(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
+    uint64_t vaddr = (int64_t)arg1;
+    if (!vaddr) return (int64_t)-EINVAL;
 
     task_t *proc = current_task;
 
@@ -3141,52 +3141,52 @@ uint64_t sys_dma_free(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, u
         pp = &r->next;
     }
 
-    return (uint64_t)-EINVAL;
+    return (int64_t)-EINVAL;
 }
 
 // sys_lseek(fd, offset, whence) — syscall 43 (文件偏移定位)
 // 更新内核 file_data._offset。FD_PIPE/SOCKET/DEV 返回 -ESPIPE。
 // Returns: new offset on success, negative errno on failure
-uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_lseek(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int fd = (int)arg1;
     int64_t offset = (int64_t)arg2;
     int whence = (int)arg3;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
-    if (proc->mm->files->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
+    if (proc->mm->files->fd_table[fd].type == FD_NONE) return (int64_t)-EBADF;
 
     // PIPE/SOCKET/DEV do not support seek
     if (proc->mm->files->fd_table[fd].type == FD_PIPE ||
         proc->mm->files->fd_table[fd].type == FD_SOCKET ||
         proc->mm->files->fd_table[fd].type == FD_DEV)
-        return (uint64_t)-ESPIPE;
+        return (int64_t)-ESPIPE;
 
     // FD_REGULAR/FD_DIR: kernel VFS file seek
     if (proc->mm->files->fd_table[fd].type == FD_REGULAR ||
         proc->mm->files->fd_table[fd].type == FD_DIR) {
         struct inode *ip = proc->mm->files->fd_table[fd].inode;
-        if (!ip) return (uint64_t)-EBADF;
+        if (!ip) return (int64_t)-EBADF;
         int64_t new_offset;
         switch (whence) {
         case SEEK_SET: new_offset = offset; break;
         case SEEK_CUR: new_offset = (int64_t)proc->mm->files->fd_table[fd].offset + offset; break;
         case SEEK_END: new_offset = (int64_t)ip->size + offset; break;
-        default: return (uint64_t)-EINVAL;
+        default: return (int64_t)-EINVAL;
         }
-        if (new_offset < 0) return (uint64_t)-EINVAL;
-        proc->mm->files->fd_table[fd].offset = (uint64_t)new_offset;
-        return (uint64_t)new_offset;
+        if (new_offset < 0) return (int64_t)-EINVAL;
+        proc->mm->files->fd_table[fd].offset = (int64_t)new_offset;
+        return (int64_t)new_offset;
     }
 
     if (proc->mm->files->fd_table[fd].type != FD_FILE)
-        return (uint64_t)-ESPIPE;
+        return (int64_t)-ESPIPE;
 
     uint64_t new_offset;
     switch (whence) {
     case SEEK_SET:
-        new_offset = (uint64_t)offset;
+        new_offset = (int64_t)offset;
         break;
     case SEEK_CUR:
         new_offset = proc->mm->files->fd_table[fd].file_data._offset + offset;
@@ -3195,11 +3195,11 @@ uint64_t sys_lseek(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
         new_offset = proc->mm->files->fd_table[fd].file_data.file_size + offset;
         break;
     default:
-        return (uint64_t)-EINVAL;
+        return (int64_t)-EINVAL;
     }
 
     proc->mm->files->fd_table[fd].file_data._offset = new_offset;
-    return (uint64_t)new_offset;
+    return (int64_t)new_offset;
 }
 
 // ===================== Signal delivery =====================
@@ -3243,7 +3243,7 @@ static void deliver_signal(task_t *proc, trapframe_t *tf, int sig, sigaction_t *
     frame.uc.uc_mcontext.ss = tf->ss;
     // cr2: filled by force_sig if SIGSEGV
     frame.uc.uc_mcontext.cr2 = (proc->sig_force_info.si_signo == sig) ?
-        (uint64_t)proc->sig_force_info._sifields.si_addr : 0;
+        (int64_t)proc->sig_force_info._sifields.si_addr : 0;
 
     // Save current blocked mask to sigframe (sigreturn restores it)
     frame.uc.uc_sigmask = proc->sig.blocked;
@@ -3266,21 +3266,21 @@ static void deliver_signal(task_t *proc, trapframe_t *tf, int sig, sigaction_t *
 
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
-    __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
+    __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)proc->cr3) : "memory");
     __memcpy((void *)user_rsp, &frame, sizeof(struct rt_sigframe));
     __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
     // 4. Modify trapframe → jump to handler
-    tf->rip = (uint64_t)sa->__sigaction_handler._sa_handler;
+    tf->rip = (int64_t)sa->__sigaction_handler._sa_handler;
     tf->rsp = user_rsp;
 
     // Handler arguments
     if (sa->sa_flags & SA_SIGINFO) {
-        tf->rdi = (uint64_t)sig;
-        tf->rsi = (uint64_t)(user_rsp + offsetof(struct rt_sigframe, info));
-        tf->rdx = (uint64_t)(user_rsp + offsetof(struct rt_sigframe, uc));
+        tf->rdi = (int64_t)sig;
+        tf->rsi = (int64_t)(user_rsp + offsetof(struct rt_sigframe, info));
+        tf->rdx = (int64_t)(user_rsp + offsetof(struct rt_sigframe, uc));
     } else {
-        tf->rdi = (uint64_t)sig;
+        tf->rdi = (int64_t)sig;
     }
 }
 
@@ -3397,76 +3397,76 @@ static int pgsignal(pid_t pgid, int sig) {
     return found > 0 ? 0 : -ESRCH;
 }
 
-uint64_t sys_kill(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     pid_t pid = (pid_t)arg1;
     int sig = (int)arg2;
-    if (sig < 0 || sig >= NSIG) return (uint64_t)-EINVAL;
+    if (sig < 0 || sig >= NSIG) return (int64_t)-EINVAL;
     if (sig == 0) return 0;
 
     if (pid > 0) {
-        if (pid >= MAX_PROC) return (uint64_t)-ESRCH;
+        if (pid >= MAX_PROC) return (int64_t)-ESRCH;
         task_t *target = &tasks[pid];
-        if (target->pid != pid) return (uint64_t)-ESRCH;
+        if (target->pid != pid) return (int64_t)-ESRCH;
         deliver_signal_to(target, sig);
         return 0;
     } else if (pid == 0) {
         pid_t my_pgid = current_task->pgid;
-        if (my_pgid == 0) return (uint64_t)-ESRCH;
-        return (uint64_t)pgsignal(my_pgid, sig);
+        if (my_pgid == 0) return (int64_t)-ESRCH;
+        return (int64_t)pgsignal(my_pgid, sig);
     } else if (pid == -1) {
-        return (uint64_t)-EPERM;
+        return (int64_t)-EPERM;
     } else {
-        return (uint64_t)pgsignal(-pid, sig);
+        return (int64_t)pgsignal(-pid, sig);
     }
 }
 
 // ===================== Session/pgid syscalls =====================
 
-uint64_t sys_setsid(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
-    if (current_task->sid == current_task->pid) return (uint64_t)-EPERM;
+int64_t sys_setsid(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
+    if (current_task->sid == current_task->pid) return (int64_t)-EPERM;
     current_task->sid = current_task->pid;
     current_task->pgid = current_task->pid;
-    return (uint64_t)current_task->sid;
+    return (int64_t)current_task->sid;
 }
 
-uint64_t sys_setpgid(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_setpgid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     pid_t pid = (pid_t)arg1; pid_t pgid = (pid_t)arg2;
-    if (pid < 0 || pgid < 0) return (uint64_t)-EINVAL;
+    if (pid < 0 || pgid < 0) return (int64_t)-EINVAL;
     if (pid == 0) pid = current_task->pid;
     if (pgid == 0) pgid = pid;
-    if (pid >= MAX_PROC || tasks[pid].pid != pid) return (uint64_t)-ESRCH;
+    if (pid >= MAX_PROC || tasks[pid].pid != pid) return (int64_t)-ESRCH;
     if (pid != current_task->pid) {
-        if (tasks[pid].mm->parent_pid != current_task->pid) return (uint64_t)-ESRCH;
-        if (tasks[pid].sid != current_task->sid) return (uint64_t)-EPERM;
+        if (tasks[pid].mm->parent_pid != current_task->pid) return (int64_t)-ESRCH;
+        if (tasks[pid].sid != current_task->sid) return (int64_t)-EPERM;
     }
     tasks[pid].pgid = pgid;
     return 0;
 }
 
-uint64_t sys_getpgid(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
+int64_t sys_getpgid(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     pid_t pid = (pid_t)arg1;
     if (pid == 0) pid = current_task->pid;
-    if (pid < 0 || pid >= MAX_PROC || tasks[pid].pid != pid) return (uint64_t)-ESRCH;
-    return (uint64_t)tasks[pid].pgid;
+    if (pid < 0 || pid >= MAX_PROC || tasks[pid].pid != pid) return (int64_t)-ESRCH;
+    return (int64_t)tasks[pid].pgid;
 }
 
-uint64_t sys_getsid(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5) {
+int64_t sys_getsid(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     pid_t pid = (pid_t)arg1;
     if (pid == 0) pid = current_task->pid;
-    if (pid < 0 || pid >= MAX_PROC || tasks[pid].pid != pid) return (uint64_t)-ESRCH;
-    return (uint64_t)tasks[pid].sid;
+    if (pid < 0 || pid >= MAX_PROC || tasks[pid].pid != pid) return (int64_t)-ESRCH;
+    return (int64_t)tasks[pid].sid;
 }
 
 // sys_sigaction(sig, act, oldact) — syscall 47 (注册/查询信号 handler)
-uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int sig = (int)arg1;
     const struct sigaction __user *act = (const struct sigaction __user * __force)arg2;
     struct sigaction __user *oldact = (struct sigaction __user * __force)arg3;
 
     // Validate signal number
-    if (sig < 0 || sig >= NSIG) return (uint64_t)-EINVAL;
+    if (sig < 0 || sig >= NSIG) return (int64_t)-EINVAL;
     // SIGKILL and SIGSTOP cannot be caught or ignored
-    if (sig == SIGKILL || sig == SIGSTOP) return (uint64_t)-EINVAL;
+    if (sig == SIGKILL || sig == SIGSTOP) return (int64_t)-EINVAL;
 
     task_t *proc = current_task;
 
@@ -3474,12 +3474,12 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     if (oldact) {
         uint64_t ptr = (__force uint64_t)oldact;
         if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(struct sigaction) > 0xFFFFFFFF80000000ULL)
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
 
         // Write under user's CR3
         uint64_t saved_cr3;
         __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
-        __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
+        __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)proc->cr3) : "memory");
         copy_to_user(oldact, &proc->sig.action[sig], sizeof(struct sigaction));
         __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
     }
@@ -3488,19 +3488,19 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
     if (act) {
         uint64_t ptr = (__force uint64_t)act;
         if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(struct sigaction) > 0xFFFFFFFF80000000ULL)
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
 
         // Read from user space under user's CR3
         struct sigaction new_act;
         uint64_t saved_cr3;
         __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
-        __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
+        __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)proc->cr3) : "memory");
         copy_from_user(&new_act, act, sizeof(struct sigaction));
         __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 
         // Validate: sa_mask must not contain SIGKILL/SIGSTOP
         if (new_act.sa_mask & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)))
-            return (uint64_t)-EINVAL;
+            return (int64_t)-EINVAL;
 
         proc->sig.action[sig] = new_act;
 
@@ -3512,7 +3512,7 @@ uint64_t sys_sigaction(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1
 }
 
 // sys_sigreturn() — syscall 48 (信号 handler 返回后恢复上下文)
-uint64_t sys_sigreturn(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, uint64_t _u5, uint64_t _u6) {
+int64_t sys_sigreturn(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
     task_t *proc = current_task;
 
     // Locate trapframe (syscall path: tss_rsp0 - sizeof(trapframe_t))
@@ -3527,7 +3527,7 @@ uint64_t sys_sigreturn(uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4, u
 
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
-    __asm__ volatile("movq %0, %%cr3" :: "r"((uint64_t)proc->cr3) : "memory");
+    __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)proc->cr3) : "memory");
     __memcpy(&frame, (void *)user_rsp, sizeof(struct rt_sigframe));
     __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
 

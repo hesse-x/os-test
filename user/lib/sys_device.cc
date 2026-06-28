@@ -8,9 +8,8 @@ int device_register(const char *name, int dev_type) {
     // Create devtmpfs node so open("/dev/<name>") works
     // Kernel auto-fills driver_pid=current_task->pid, callbacks=NULL
     int r = sys_dev_create(name, dev_type);
-    if (r < 0 && r != -EEXIST) {
-        errno = -r;
-        return -1;
-    }
+    // sys_dev_create returns -1 on error with errno set.
+    // EEXIST means device already exists — treat as success.
+    if (r < 0 && errno != EEXIST) return -1;
     return 0;
 }

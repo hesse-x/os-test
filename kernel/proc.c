@@ -440,8 +440,8 @@ static int pick_cpu(void);
 
 // ===================== sys_fork =====================
 
-uint64_t sys_fork(uint64_t a1, uint64_t a2, uint64_t a3,
-                   uint64_t a4, uint64_t a5, uint64_t a6) {
+int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
+                   int64_t a4, int64_t a5, int64_t a6) {
     (void)a1;(void)a2;(void)a3;(void)a4;(void)a5;(void)a6;
     task_t *parent = current_task;
 
@@ -452,17 +452,17 @@ uint64_t sys_fork(uint64_t a1, uint64_t a2, uint64_t a3,
     for (int i = 0; i < MAX_PROC; i++) {
         if (tasks[i].pid < 0) { child = &tasks[i]; alloc_idx = i; break; }
     }
-    if (!child) { spin_unlock(&tasks_lock); return (uint64_t)-ENOMEM; }
+    if (!child) { spin_unlock(&tasks_lock); return (int64_t)-ENOMEM; }
 
     // 2. Allocate new mm_t
     mm_t *child_mm = mm_create();
-    if (!child_mm) { spin_unlock(&tasks_lock); return (uint64_t)-ENOMEM; }
+    if (!child_mm) { spin_unlock(&tasks_lock); return (int64_t)-ENOMEM; }
 
     // 3. Deep-copy parent user page tables
     uint64_t *src_pml4 = (uint64_t *)phys_to_virt((__force phys_addr_t)parent->mm->cr3);
     uint64_t *dst_pml4 = (uint64_t *)phys_to_virt((__force phys_addr_t)child_mm->cr3);
     int ret = copy_page_table(src_pml4, dst_pml4, parent->mm->mmap_regions);
-    if (ret < 0) { mm_put(child_mm); spin_unlock(&tasks_lock); return (uint64_t)ret; }
+    if (ret < 0) { mm_put(child_mm); spin_unlock(&tasks_lock); return (int64_t)ret; }
 
     // 4. Copy fd_table (through files_t)
     copy_fd_table(parent->mm->files, child_mm->files);
@@ -475,7 +475,7 @@ uint64_t sys_fork(uint64_t a1, uint64_t a2, uint64_t a3,
 
     // 6. Allocate new kernel stack, copy parent trapframe (rax=0 for child return)
     Page *stack_pages = bfc_alloc_page(2);
-    if (!stack_pages) { mm_put(child_mm); spin_unlock(&tasks_lock); return (uint64_t)-ENOMEM; }
+    if (!stack_pages) { mm_put(child_mm); spin_unlock(&tasks_lock); return (int64_t)-ENOMEM; }
     uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
     uint64_t k_stack_top = (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) + 2 * PAGE_SIZE;
 
@@ -527,44 +527,44 @@ uint64_t sys_fork(uint64_t a1, uint64_t a2, uint64_t a3,
     spin_unlock(&cpu_locals[cpu].scheduler_lock);
 
     // 9. Parent returns child PID
-    return (uint64_t)child->pid;
+    return (int64_t)child->pid;
 }
 
 // ===================== sys_execve =====================
 
-uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
-                     uint64_t a4, uint64_t a5, uint64_t a6) {
+int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
+                     int64_t a4, int64_t a5, int64_t a6) {
     (void)a2;(void)a3;(void)a4;(void)a5;(void)a6;
     const char *pathname = (const char *)a1;
     task_t *proc = current_task;
-    if (!proc->mm) return (uint64_t)-EINVAL;
+    if (!proc->mm) return (int64_t)-EINVAL;
 
     // 1. Open pathname via VFS
-    uint64_t open_result = sys_open((uint64_t)(uintptr_t)pathname, O_RDONLY, 0, 0, 0, 0);
+    int64_t open_result = sys_open((int64_t)(uintptr_t)pathname, O_RDONLY, 0, 0, 0, 0);
     int32_t fd = (int32_t)(open_result & 0xFFFFFFFFULL);
-    if (fd < 0) return (uint64_t)fd;
+    if (fd < 0) return (int64_t)fd;
 
     // 2. Get file size from inode directly (sys_fstat uses copy_to_user which
     //    would just memcpy, but we avoid the round-trip)
     if (proc->mm->files->fd_table[fd].type != FD_REGULAR) {
-        sys_close((uint64_t)fd, 0, 0, 0, 0, 0);
-        return (uint64_t)-EIO;
+        sys_close((int64_t)fd, 0, 0, 0, 0, 0);
+        return (int64_t)-EIO;
     }
     struct inode *ip = proc->mm->files->fd_table[fd].inode;
-    if (!ip) { sys_close((uint64_t)fd, 0, 0, 0, 0, 0); return (uint64_t)-EBADF; }
+    if (!ip) { sys_close((int64_t)fd, 0, 0, 0, 0, 0); return (int64_t)-EBADF; }
     uint32_t saved_ino = ip->ino;
     uint64_t file_size = ip->size;
 
     // 3. kmalloc buffer, read entire ELF into kernel
     uint8_t *elf_buf = (uint8_t *)kmalloc(file_size);
-    if (!elf_buf) { sys_close((uint64_t)fd, 0, 0, 0, 0, 0); return (uint64_t)-ENOMEM; }
+    if (!elf_buf) { sys_close((int64_t)fd, 0, 0, 0, 0, 0); return (int64_t)-ENOMEM; }
 
     // Use fat32_read directly (sys_read rejects kernel-space buffers)
     int nread = fat32_read(ip, 0, (void *)elf_buf, file_size);
-    sys_close((uint64_t)fd, 0, 0, 0, 0, 0);
+    sys_close((int64_t)fd, 0, 0, 0, 0, 0);
     ip = NULL;  /* ip is now dangling after sys_close — do not dereference */
 
-    if (nread < 0 || (uint64_t)nread < file_size) { kfree(elf_buf); return (uint64_t)-EIO; }
+    if (nread < 0 || (uint64_t)nread < file_size) { kfree(elf_buf); return (int64_t)-EIO; }
 
     // 4. Validate ELF magic
     if (elf_buf[0] != 0x7F || elf_buf[1] != 'E' || elf_buf[2] != 'L' || elf_buf[3] != 'F') {
@@ -572,12 +572,12 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
             proc->pid, pathname, (unsigned long)saved_ino, (unsigned long)file_size,
             elf_buf[0], elf_buf[1], elf_buf[2], elf_buf[3]);
         kfree(elf_buf);
-        return (uint64_t)-ENOEXEC;
+        return (int64_t)-ENOEXEC;
     }
 
     // 5. Allocate new PML4, copy kernel entries (before releasing old space)
     Page *pml4_page = bfc_alloc_page(1);
-    if (!pml4_page) { kfree(elf_buf); return (uint64_t)-ENOMEM; }
+    if (!pml4_page) { kfree(elf_buf); return (int64_t)-ENOMEM; }
     uint64_t pml4_phys = (__force uint64_t)page_to_phys(pml4_page);
     uint64_t pml4_virt = (__force uint64_t)phys_to_virt((__force phys_addr_t)pml4_phys);
     uint64_t *new_pml4 = (uint64_t *)pml4_virt;
@@ -590,7 +590,7 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
         kfree(elf_buf);
         free_table_page(pml4_phys);
         printk(LOG_ERROR, "execve: elf_load failed pid=%d\n", proc->pid);
-        return (uint64_t)-ENOEXEC;
+        return (int64_t)-ENOEXEC;
     }
 
     // 7. Allocate new user stack
@@ -598,7 +598,7 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
     Page *user_stack_page = bfc_alloc_page(user_stack_pages);
     if (!user_stack_page) {
         kfree(elf_buf);
-        sys_exit((uint64_t)-ENOMEM, 0, 0, 0, 0, 0);
+        sys_exit((int64_t)-ENOMEM, 0, 0, 0, 0, 0);
         __builtin_unreachable();
     }
     uint64_t user_stack_phys = (__force uint64_t)page_to_phys(user_stack_page);
@@ -608,7 +608,7 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
                                   user_stack_phys + i * PAGE_SIZE,
                                   PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
             kfree(elf_buf);
-            sys_exit((uint64_t)-ENOMEM, 0, 0, 0, 0, 0);
+            sys_exit((int64_t)-ENOMEM, 0, 0, 0, 0, 0);
             __builtin_unreachable();
         }
     }

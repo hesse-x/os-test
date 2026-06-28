@@ -36,7 +36,7 @@ void    inode_init(void);
 struct inode *inode_lookup(uint32_t ino);
 struct inode *inode_create(uint32_t ino, int type, uint64_t size,
                            uint32_t start_cluster, uint32_t dir_cluster,
-                           int dir_entry_idx);
+                           int dir_entry_idx) __must_check;
 struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
                                   uint32_t start_cluster, uint32_t dir_cluster,
                                   int dir_entry_idx);

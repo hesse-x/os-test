@@ -16,37 +16,23 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, uint64_t offs
     // MAP_SHARED: SHM or DEV fd mapping (kernel handles both)
     if (flags & MAP_SHARED) {
         void *r = sys_mmap(addr, length, prot, flags, fd, offset);
-        if (!r) {
-            errno = ENOMEM;
-            return MAP_FAILED;
-        }
+        if (r == MAP_FAILED) return MAP_FAILED;
         return r;
     }
 
     // MAP_PHYSICAL: pass fd=-1, offset=phys_addr
     // Anonymous: pass fd=-1, offset=0
     void *r = sys_mmap(addr, length, prot, flags, -1, offset);
-    if (!r) {
-        errno = ENOMEM;
-        return MAP_FAILED;
-    }
+    if (r == MAP_FAILED) return MAP_FAILED;
     return r;
 }
 
 int munmap(void *addr, size_t length) {
-    int r = sys_munmap(addr, length);
-    if (r < 0) {
-        errno = -r;
-        return -1;
-    }
-    return r;
+    return sys_munmap(addr, length);
 }
 
 int memfd_create(const char *name, unsigned int flags) {
     int fd = sys_memfd_create(name, flags);
-    if (fd <= 0) {
-        errno = ENOMEM;
-        return -1;
-    }
+    if (fd < 0) return -1;
     return fd;
 }

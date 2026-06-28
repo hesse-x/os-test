@@ -6,7 +6,7 @@
 #include <stddef.h>        // size_t
 
 typedef void (*irq_handler_t)(trapframe_t *);
-typedef uint64_t (*syscall_fn_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+typedef int64_t (*syscall_fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 void register_irq(int vec, irq_handler_t fn);
 void unregister_irq(int vec);
@@ -16,71 +16,71 @@ void isr_init();
 void xhci_poll();
 
 // Syscalls (all 6-arg signatures — arg6 unused by most, compiler optimizes away)
-uint64_t sys_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_recv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_req(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_resp(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_irq_bind(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_exit(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_notify(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_waitpid(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_mmap(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6);
-uint64_t sys_munmap(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_shm_create(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_shm_attach(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_pipe(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t);
-uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t);
-uint64_t sys_close(uint64_t arg1, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_clock(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_msg(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_msg_resp(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_ioperm(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_dup2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_dma_alloc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_dma_free(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_pci_dev_info(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_block_async(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_install_fd_impl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_lseek(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_memfd_create(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_ftruncate(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_debug_print(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_getpid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_yield(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_recv(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_req(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_resp(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_irq_bind(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_exit(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_notify(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6);
+int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_shm_create(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_shm_attach(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_pipe(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t, int64_t);
+int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t, int64_t);
+int64_t sys_close(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_gettime(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_clock(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_msg(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_msg_resp(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_ioperm(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_dup2(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_fcntl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_dma_alloc(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_dma_free(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_pci_dev_info(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_block_async(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_install_fd_impl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_lseek(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_memfd_create(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_ftruncate(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_debug_print(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // VFS extended syscalls
-uint64_t sys_ioctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_fstat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_fdev_pid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_ioctl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_fstat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_fdev_pid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // Signal syscalls
-uint64_t sys_kill(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_sigaction(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_sigreturn(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_kill(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_sigaction(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_sigreturn(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // Fork/execve syscalls
-uint64_t sys_fork(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_execve(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_fork(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_execve(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // Session/pgid syscalls
-uint64_t sys_setsid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_setpgid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_getpgid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_getsid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_setsid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_setpgid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_getpgid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_getsid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // Socket syscalls (declared in kernel/socket.c)
-uint64_t sys_socket(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_bind(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_listen(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_accept(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_connect(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_socketpair(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_sendmsg(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_recvmsg(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_shutdown(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_poll(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_socket(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_bind(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_listen(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_accept(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_connect(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_socketpair(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_sendmsg(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_recvmsg(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_shutdown(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_poll(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // Socket internal helpers (for sys_write/sys_read FD_SOCKET dispatch)
 int64_t sock_write(struct unix_sock *sock, const void *buf, size_t len);

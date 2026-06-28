@@ -457,7 +457,7 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
                     spin_lock(&socket_lock);
                     sock->blocked_reader = -1;
                     spin_unlock(&socket_lock);
-                    return (uint64_t)-EINTR;
+                    return (int64_t)-EINTR;
                 }
             }
             spin_lock(&socket_lock);
@@ -647,18 +647,18 @@ void sock_close(struct unix_sock *sock) {
 
 // ===================== Syscall implementations =====================
 
-uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int domain = (int)arg1;
     int type = (int)arg2;
     int protocol = (int)arg3;
 
     // Only AF_UNIX SOCK_STREAM supported
-    if (domain != AF_UNIX) return (uint64_t)-EAFNOSUPPORT;
-    if (type != SOCK_STREAM) return (uint64_t)-EPROTONOSUPPORT;
-    if (protocol != 0) return (uint64_t)-EPROTONOSUPPORT;
+    if (domain != AF_UNIX) return (int64_t)-EAFNOSUPPORT;
+    if (type != SOCK_STREAM) return (int64_t)-EPROTONOSUPPORT;
+    if (protocol != 0) return (int64_t)-EPROTONOSUPPORT;
 
     struct unix_sock *sock = unix_sock_alloc();
-    if (!sock) return (uint64_t)-ENOMEM;
+    if (!sock) return (int64_t)-ENOMEM;
 
     task_t *proc = current_task;
 
@@ -678,7 +678,7 @@ uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
     if (fd < 0) {
         spin_unlock(fdlk);
         unix_sock_release(sock);
-        return (uint64_t)-EMFILE;
+        return (int64_t)-EMFILE;
     }
 
     proc->mm->files->fd_table[fd].type = FD_SOCKET;
@@ -687,10 +687,10 @@ uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
 
     spin_unlock(fdlk);
 
-    return (uint64_t)fd;
+    return (int64_t)fd;
 }
 
-uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int fd = (int)arg1;
     const struct sockaddr_un __user *addr = (const struct sockaddr_un __user *)arg2;
     socklen_t addrlen = (socklen_t)arg3;
@@ -698,19 +698,19 @@ uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     task_t *proc = current_task;
 
     // Validate fd
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
     // Validate addr
-    uint64_t addr_ptr = (uint64_t)addr;
+    uint64_t addr_ptr = (int64_t)addr;
     if (!addr_ptr || addr_ptr >= 0xFFFFFFFF80000000ULL ||
         addr_ptr + addrlen > 0xFFFFFFFF80000000ULL || addrlen <= 0)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     // Read sun_family
     uint16_t sun_family;
     copy_from_user(&sun_family, addr, sizeof(sun_family));
-    if (sun_family != AF_UNIX) return (uint64_t)-EAFNOSUPPORT;
+    if (sun_family != AF_UNIX) return (int64_t)-EAFNOSUPPORT;
 
     // Read sun_path (max 108 bytes)
     char sun_path[108];
@@ -721,23 +721,23 @@ uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
         copy_from_user(sun_path, (const char __user *)addr + sizeof(sun_family), path_len);
     sun_path[107] = '\0';
 
-    if (sun_path[0] == '\0') return (uint64_t)-EINVAL;  // empty path
+    if (sun_path[0] == '\0') return (int64_t)-EINVAL;  // empty path
 
     struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
-    if (!sock) return (uint64_t)-EBADF;
+    if (!sock) return (int64_t)-EBADF;
 
     spin_lock(&socket_lock);
 
     if (sock->state != UNIX_FREE) {
         spin_unlock(&socket_lock);
-        return (uint64_t)-EINVAL;
+        return (int64_t)-EINVAL;
     }
 
     // Register in name space
     int ret = unix_bind_register(sun_path, sock);
     if (ret != 0) {
         spin_unlock(&socket_lock);
-        return (uint64_t)(-ret);
+        return (int64_t)(-ret);
     }
 
     // Save sun_path in sock
@@ -753,17 +753,17 @@ uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     return 0;
 }
 
-uint64_t sys_listen(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_listen(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     int fd = (int)arg1;
     int backlog = (int)arg2;
 
     task_t *proc = current_task;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
     struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
-    if (!sock) return (uint64_t)-EBADF;
+    if (!sock) return (int64_t)-EBADF;
 
     if (backlog <= 0) backlog = 1;
     if (backlog > UNIX_MAX_BACKLOG) backlog = UNIX_MAX_BACKLOG;
@@ -776,28 +776,28 @@ uint64_t sys_listen(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, ui
     return 0;
 }
 
-uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int fd = (int)arg1;
     struct sockaddr_un __user *addr = (struct sockaddr_un __user *)arg2;
     socklen_t __user *addrlen = (socklen_t __user *)arg3;
 
     task_t *proc = current_task;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
     struct unix_sock *listen_sock = proc->mm->files->fd_table[fd].sock;
-    if (!listen_sock) return (uint64_t)-EBADF;
+    if (!listen_sock) return (int64_t)-EBADF;
 
     // Validate addr pointers if non-null
     if (addr) {
-        uint64_t aptr = (uint64_t)addr;
-        if (aptr >= 0xFFFFFFFF80000000ULL) return (uint64_t)-EFAULT;
+        uint64_t aptr = (int64_t)addr;
+        if (aptr >= 0xFFFFFFFF80000000ULL) return (int64_t)-EFAULT;
     }
     if (addrlen) {
-        uint64_t alptr = (uint64_t)addrlen;
+        uint64_t alptr = (int64_t)addrlen;
         if (alptr >= 0xFFFFFFFF80000000ULL || alptr + sizeof(socklen_t) > 0xFFFFFFFF80000000ULL)
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
     }
 
     while (1) {
@@ -805,7 +805,7 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
 
         if (listen_sock->state != UNIX_LISTEN) {
             spin_unlock(&socket_lock);
-            return (uint64_t)-EINVAL;
+            return (int64_t)-EINVAL;
         }
 
         struct unix_sock *child = listen_sock->backlog_head;
@@ -826,7 +826,7 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
                     spin_lock(&socket_lock);
                     listen_sock->blocked_reader = -1;
                     spin_unlock(&socket_lock);
-                    return (uint64_t)-EINTR;
+                    return (int64_t)-EINTR;
                 }
             }
             spin_lock(&socket_lock);
@@ -868,7 +868,7 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
                 listen_sock->backlog_head = listen_sock->backlog_tail = child;
             }
             spin_unlock(&socket_lock);
-            return (uint64_t)-EMFILE;
+            return (int64_t)-EMFILE;
         }
 
         // Transfer ownership to new fd (initial ref_count=1 from socket allocation)
@@ -924,29 +924,29 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
             copy_to_user(addrlen, &alen, sizeof(socklen_t));
         }
 
-        return (uint64_t)new_fd;
+        return (int64_t)new_fd;
     }
 }
 
-uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int fd = (int)arg1;
     const struct sockaddr_un __user *addr = (const struct sockaddr_un __user *)arg2;
     socklen_t addrlen = (socklen_t)arg3;
 
     task_t *proc = current_task;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
     // Validate addr
-    uint64_t addr_ptr = (uint64_t)addr;
+    uint64_t addr_ptr = (int64_t)addr;
     if (!addr_ptr || addr_ptr >= 0xFFFFFFFF80000000ULL ||
         addr_ptr + addrlen > 0xFFFFFFFF80000000ULL || addrlen <= 0)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     uint16_t sun_family;
     copy_from_user(&sun_family, addr, sizeof(sun_family));
-    if (sun_family != AF_UNIX) return (uint64_t)-EAFNOSUPPORT;
+    if (sun_family != AF_UNIX) return (int64_t)-EAFNOSUPPORT;
 
     char sun_path[108];
     __memset(sun_path, 0, sizeof(sun_path));
@@ -956,7 +956,7 @@ uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
         copy_from_user(sun_path, (const char __user *)addr + sizeof(sun_family), path_len);
     sun_path[107] = '\0';
 
-    if (sun_path[0] == '\0') return (uint64_t)-EINVAL;
+    if (sun_path[0] == '\0') return (int64_t)-EINVAL;
 
     spin_lock(&socket_lock);
 
@@ -965,24 +965,24 @@ uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     int ret = unix_bind_lookup(sun_path, &listener);
     if (ret != 0) {
         spin_unlock(&socket_lock);
-        return (uint64_t)(-ret);
+        return (int64_t)(-ret);
     }
 
     if (listener->state != UNIX_LISTEN) {
         spin_unlock(&socket_lock);
-        return (uint64_t)-ECONNREFUSED;
+        return (int64_t)-ECONNREFUSED;
     }
 
     if (listener->backlog_len >= listener->backlog_max) {
         spin_unlock(&socket_lock);
-        return (uint64_t)-ECONNREFUSED;
+        return (int64_t)-ECONNREFUSED;
     }
 
     // Create child socket for this connection
     struct unix_sock *child = unix_sock_alloc();
     if (!child) {
         spin_unlock(&socket_lock);
-        return (uint64_t)-ENOMEM;
+        return (int64_t)-ENOMEM;
     }
 
     child->state = UNIX_CONNECTED;
@@ -993,7 +993,7 @@ uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     if (!client_sock) {
         spin_unlock(&socket_lock);
         unix_sock_free(child);
-        return (uint64_t)-EBADF;
+        return (int64_t)-EBADF;
     }
     client_sock->state = UNIX_CONNECTED;
     // LOCK NESTING EXCEPTION (6.4): socket_lock → peer_fd_lock nested here.
@@ -1047,20 +1047,20 @@ found_listener:
     return 0;
 }
 
-uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u1, uint64_t _u2) {
+int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t _u1, int64_t _u2) {
     int domain = (int)arg1;
     int type = (int)arg2;
     int protocol = (int)arg3;
     int __user *sv = (int __user *)arg4;
 
-    if (domain != AF_UNIX) return (uint64_t)-EAFNOSUPPORT;
-    if (type != SOCK_STREAM) return (uint64_t)-EPROTONOSUPPORT;
-    if (protocol != 0) return (uint64_t)-EPROTONOSUPPORT;
+    if (domain != AF_UNIX) return (int64_t)-EAFNOSUPPORT;
+    if (type != SOCK_STREAM) return (int64_t)-EPROTONOSUPPORT;
+    if (protocol != 0) return (int64_t)-EPROTONOSUPPORT;
 
     // Validate user pointer
-    uint64_t sv_ptr = (uint64_t)sv;
+    uint64_t sv_ptr = (int64_t)sv;
     if (!sv_ptr || sv_ptr >= 0xFFFFFFFF80000000ULL || sv_ptr + 2 * sizeof(int) > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     task_t *proc = current_task;
 
@@ -1069,7 +1069,7 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
     if (!a || !b) {
         if (a) unix_sock_free(a);
         if (b) unix_sock_free(b);
-        return (uint64_t)-ENOMEM;
+        return (int64_t)-ENOMEM;
     }
 
     a->state = UNIX_CONNECTED;
@@ -1094,7 +1094,7 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
         spin_unlock(fdlk);
         unix_sock_free(a);
         unix_sock_free(b);
-        return (uint64_t)-EMFILE;
+        return (int64_t)-EMFILE;
     }
 
     a->state = UNIX_CONNECTED;
@@ -1117,49 +1117,49 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
     // Write fd pair to user space
     int fds[2] = { fd_a, fd_b };
     if (copy_to_user(sv, fds, sizeof(fds)))
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     return 0;
 }
 
-uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int fd = (int)arg1;
     const struct msghdr __user *msg = (const struct msghdr __user *)arg2;
     int flags = (int)arg3;
 
     task_t *proc = current_task;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
     // Validate msghdr pointer
-    uint64_t msg_ptr = (uint64_t)msg;
+    uint64_t msg_ptr = (int64_t)msg;
     if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
         msg_ptr + sizeof(struct msghdr) > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     struct msghdr kmsg;
     copy_from_user(&kmsg, msg, sizeof(struct msghdr));
 
     // Validate iov
-    uint64_t iov_ptr = (uint64_t)kmsg.msg_iov;
+    uint64_t iov_ptr = (int64_t)kmsg.msg_iov;
     if (!iov_ptr || iov_ptr >= 0xFFFFFFFF80000000ULL ||
         iov_ptr + kmsg.msg_iovlen * sizeof(struct iovec) > 0xFFFFFFFF80000000ULL ||
         kmsg.msg_iovlen == 0 || kmsg.msg_iovlen > 1024)
-        return (uint64_t)-EINVAL;
+        return (int64_t)-EINVAL;
 
     // Copy iovec array to kernel
     struct iovec *kiov = (struct iovec *)kmalloc(kmsg.msg_iovlen * sizeof(struct iovec));
-    if (!kiov) return (uint64_t)-ENOMEM;
+    if (!kiov) return (int64_t)-ENOMEM;
     copy_from_user(kiov, (const void __user *)kmsg.msg_iov, kmsg.msg_iovlen * sizeof(struct iovec));
 
     // Validate each iov base pointer
     for (size_t i = 0; i < kmsg.msg_iovlen; i++) {
         if (kiov[i].iov_base) {
-            uint64_t base = (uint64_t)kiov[i].iov_base;
+            uint64_t base = (int64_t)kiov[i].iov_base;
             if (base >= 0xFFFFFFFF80000000ULL || base + kiov[i].iov_len > 0xFFFFFFFF80000000ULL) {
                 kfree(kiov);
-                return (uint64_t)-EFAULT;
+                return (int64_t)-EFAULT;
             }
         }
     }
@@ -1168,24 +1168,24 @@ uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     void *kcontrol = NULL;
     size_t kcontrollen = 0;
     if (kmsg.msg_control && kmsg.msg_controllen > 0) {
-        uint64_t ctrl_ptr = (uint64_t)kmsg.msg_control;
+        uint64_t ctrl_ptr = (int64_t)kmsg.msg_control;
         if (ctrl_ptr >= 0xFFFFFFFF80000000ULL ||
             ctrl_ptr + kmsg.msg_controllen > 0xFFFFFFFF80000000ULL) {
             kfree(kiov);
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
         }
         if (kmsg.msg_controllen > 4096) {
             kfree(kiov);
-            return (uint64_t)-EINVAL;
+            return (int64_t)-EINVAL;
         }
         kcontrol = kmalloc(kmsg.msg_controllen);
-        if (!kcontrol) { kfree(kiov); return (uint64_t)-ENOMEM; }
+        if (!kcontrol) { kfree(kiov); return (int64_t)-ENOMEM; }
         copy_from_user(kcontrol, (const void __user *)kmsg.msg_control, kmsg.msg_controllen);
         kcontrollen = kmsg.msg_controllen;
     }
 
     struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
-    if (!sock) { kfree(kiov); if (kcontrol) kfree(kcontrol); return (uint64_t)-EBADF; }
+    if (!sock) { kfree(kiov); if (kcontrol) kfree(kcontrol); return (int64_t)-EBADF; }
 
     int64_t ret = sock_sendmsg_internal(sock, kiov, kmsg.msg_iovlen,
                                          kcontrol, kcontrollen, flags);
@@ -1193,44 +1193,44 @@ uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     kfree(kiov);
     if (kcontrol) kfree(kcontrol);
 
-    return (uint64_t)ret;
+    return (int64_t)ret;
 }
 
-uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int fd = (int)arg1;
     struct msghdr __user *msg = (struct msghdr __user *)arg2;
     int flags = (int)arg3;
 
     task_t *proc = current_task;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
-    uint64_t msg_ptr = (uint64_t)msg;
+    uint64_t msg_ptr = (int64_t)msg;
     if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
         msg_ptr + sizeof(struct msghdr) > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     struct msghdr kmsg;
     copy_from_user(&kmsg, msg, sizeof(struct msghdr));
 
     // Validate iov
-    uint64_t iov_ptr = (uint64_t)kmsg.msg_iov;
+    uint64_t iov_ptr = (int64_t)kmsg.msg_iov;
     if (!iov_ptr || iov_ptr >= 0xFFFFFFFF80000000ULL ||
         iov_ptr + kmsg.msg_iovlen * sizeof(struct iovec) > 0xFFFFFFFF80000000ULL ||
         kmsg.msg_iovlen == 0 || kmsg.msg_iovlen > 1024)
-        return (uint64_t)-EINVAL;
+        return (int64_t)-EINVAL;
 
     struct iovec *kiov = (struct iovec *)kmalloc(kmsg.msg_iovlen * sizeof(struct iovec));
-    if (!kiov) return (uint64_t)-ENOMEM;
+    if (!kiov) return (int64_t)-ENOMEM;
     copy_from_user(kiov, (const void __user *)kmsg.msg_iov, kmsg.msg_iovlen * sizeof(struct iovec));
 
     for (size_t i = 0; i < kmsg.msg_iovlen; i++) {
         if (kiov[i].iov_base) {
-            uint64_t base = (uint64_t)kiov[i].iov_base;
+            uint64_t base = (int64_t)kiov[i].iov_base;
             if (base >= 0xFFFFFFFF80000000ULL || base + kiov[i].iov_len > 0xFFFFFFFF80000000ULL) {
                 kfree(kiov);
-                return (uint64_t)-EFAULT;
+                return (int64_t)-EFAULT;
             }
         }
     }
@@ -1239,18 +1239,18 @@ uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     void *kcontrol = NULL;
     size_t kcontrollen = 0;
     if (kmsg.msg_control && kmsg.msg_controllen > 0) {
-        uint64_t ctrl_ptr = (uint64_t)kmsg.msg_control;
+        uint64_t ctrl_ptr = (int64_t)kmsg.msg_control;
         if (ctrl_ptr >= 0xFFFFFFFF80000000ULL ||
             ctrl_ptr + kmsg.msg_controllen > 0xFFFFFFFF80000000ULL) {
             kfree(kiov);
-            return (uint64_t)-EFAULT;
+            return (int64_t)-EFAULT;
         }
         kcontrol = (void *)ctrl_ptr;  // write directly to user space (lazy install writes fds there)
         kcontrollen = kmsg.msg_controllen;
     }
 
     struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
-    if (!sock) { kfree(kiov); return (uint64_t)-EBADF; }
+    if (!sock) { kfree(kiov); return (int64_t)-EBADF; }
 
     int64_t ret = sock_recvmsg_internal(sock, kiov, kmsg.msg_iovlen,
                                          kcontrol, &kcontrollen, flags);
@@ -1264,22 +1264,22 @@ uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
     }
 
     kfree(kiov);
-    return (uint64_t)ret;
+    return (int64_t)ret;
 }
 
-uint64_t sys_shutdown(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint64_t _u4) {
+int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     int fd = (int)arg1;
     int how = (int)arg2;
 
     task_t *proc = current_task;
 
-    if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (uint64_t)-ENOTSOCK;
+    if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
+    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
     struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
-    if (!sock) return (uint64_t)-EBADF;
+    if (!sock) return (int64_t)-EBADF;
 
-    if (how < 0 || how > 2) return (uint64_t)-EINVAL;
+    if (how < 0 || how > 2) return (int64_t)-EINVAL;
 
     spin_lock(&socket_lock);
 
@@ -1323,7 +1323,7 @@ uint64_t sys_shutdown(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, 
     return 0;
 }
 
-uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uint64_t _u2, uint64_t _u3) {
+int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     struct pollfd __user *fds = (struct pollfd __user *)arg1;
     nfds_t nfds = (nfds_t)arg2;
     int timeout_ms = (int)arg3;
@@ -1331,19 +1331,19 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     task_t *proc = current_task;
 
     // Validate user pointer
-    uint64_t fds_ptr = (uint64_t)fds;
+    uint64_t fds_ptr = (int64_t)fds;
     if (!fds_ptr || fds_ptr >= 0xFFFFFFFF80000000ULL ||
         fds_ptr + nfds * sizeof(struct pollfd) > 0xFFFFFFFF80000000ULL)
-        return (uint64_t)-EFAULT;
+        return (int64_t)-EFAULT;
 
     // Copy pollfd array to kernel
     struct pollfd *kfds = (struct pollfd *)kmalloc(nfds * sizeof(struct pollfd));
-    if (!kfds) return (uint64_t)-ENOMEM;
+    if (!kfds) return (int64_t)-ENOMEM;
     copy_from_user(kfds, fds, nfds * sizeof(struct pollfd));
 
     uint64_t deadline = 0;
     if (timeout_ms > 0) {
-        deadline = sched_clock() + (uint64_t)timeout_ms * 1000000ULL;
+        deadline = sched_clock() + (int64_t)timeout_ms * 1000000ULL;
     }
 
     while (1) {
@@ -1450,7 +1450,7 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
             // Copy results back to user
             copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
             kfree(kfds);
-            return (uint64_t)ready;
+            return (int64_t)ready;
         }
 
         if (timeout_ms == 0) {
@@ -1488,7 +1488,7 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
             deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
             if (deliv) {
                 kfree(kfds);
-                return (uint64_t)-EINTR;
+                return (int64_t)-EINTR;
             }
         }
 

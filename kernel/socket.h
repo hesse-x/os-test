@@ -102,16 +102,16 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
                                int flags);
 
 // Syscall implementations
-uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t);
-uint64_t sys_bind(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t);
-uint64_t sys_listen(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t);
-uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t);
-uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t, uint64_t);
-uint64_t sys_sendmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t);
-uint64_t sys_recvmsg(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t);
-uint64_t sys_shutdown(uint64_t arg1, uint64_t arg2, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t, uint64_t, uint64_t);
+int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t, int64_t);
+int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t, int64_t);
+int64_t sys_listen(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t, int64_t);
+int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t, int64_t);
+int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t, int64_t);
+int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t, int64_t);
+int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t, int64_t);
+int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t, int64_t);
 
 // Internal helpers for sock_write/sock_read
 void sock_wake_reader(struct unix_sock *sock);

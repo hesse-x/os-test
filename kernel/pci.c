@@ -346,7 +346,7 @@ pci_device_t *pci_find_device_by_id(uint16_t vendor, uint16_t device) {
 
 // ===================== Syscall: sys_pci_dev_info =====================
 
-uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t _u5, uint64_t _u6) {
+int64_t sys_pci_dev_info(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t _u5, int64_t _u6) {
   uint8_t bus = (uint8_t)arg1;
   uint8_t dev_num = (uint8_t)arg2;
   uint8_t func = (uint8_t)arg3;
@@ -356,7 +356,7 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
   uint64_t ptr = (uint64_t)out_ptr;
   if (!ptr || ptr >= 0xFFFFFFFF80000000ULL ||
       ptr + sizeof(struct pci_dev_info) > 0xFFFFFFFF80000000ULL)
-    return (uint64_t)-EFAULT;
+    return (int64_t)-EFAULT;
 
   // Find the device
   pci_device_t *d = NULL;
@@ -367,7 +367,7 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
       break;
     }
   }
-  if (!d) return (uint64_t)-ENOENT;
+  if (!d) return (int64_t)-ENOENT;
 
   struct pci_dev_info info = {0};
   info.vendor_id = d->vendor_id;
@@ -381,7 +381,7 @@ uint64_t sys_pci_dev_info(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t 
   }
 
   if (copy_to_user(out_ptr, &info, sizeof(info)))
-    return (uint64_t)-EFAULT;
+    return (int64_t)-EFAULT;
   return 0;
 }
 

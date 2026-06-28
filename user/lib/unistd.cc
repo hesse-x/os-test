@@ -19,19 +19,9 @@ int sched_yield(void) {
 }
 
 int ioperm(unsigned long from, unsigned long num, int turn_on) {
-    int r = sys_ioperm(from, num, turn_on);
-    if (r < 0) {
-        errno = -r;
-        return -1;
-    }
-    return r;
+    return sys_ioperm(from, num, turn_on);
 }
 
 int ftruncate(int fd, off_t length) {
-    int r = sys_ftruncate(fd, length);
-    if (r < 0) {
-        errno = -r;
-        return -1;
-    }
-    return r;
+    return sys_ftruncate(fd, length);
 }

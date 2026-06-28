@@ -56,43 +56,32 @@ int open(const char *path, int flags, ...) {
     }
 
     // All paths go through sys_open — kernel dispatches FAT32 and devtmpfs internally
-    uint64_t result = sys_open(path, flags);
-    int32_t fd = (int32_t)(result & 0xFFFFFFFFULL);
-    if (fd < 0) { errno = -fd; return -1; }
-
+    int fd = sys_open(path, flags);
     return fd;
 }
 
 // ===================== read =====================
 
 ssize_t read(int fd, void *buf, size_t count) {
-    int64_t n = sys_read(fd, buf, count);
-    if (n < 0) { errno = (int)(-n); return -1; }
-    return (ssize_t)n;
+    return (ssize_t)sys_read(fd, buf, count);
 }
 
 // ===================== write =====================
 
 ssize_t write(int fd, const void *buf, size_t count) {
-    int64_t n = sys_write(fd, buf, count);
-    if (n < 0) { errno = (int)(-n); return -1; }
-    return (ssize_t)n;
+    return (ssize_t)sys_write(fd, buf, count);
 }
 
 // ===================== close =====================
 
 int close(int fd) {
-    int r = sys_close(fd);
-    if (r < 0) { errno = -r; return -1; }
-    return 0;
+    return sys_close(fd);
 }
 
 // ===================== pipe =====================
 
 int pipe(int fd[2]) {
-    int r = sys_pipe(fd);
-    if (r < 0) { errno = -r; return -1; }
-    return 0;
+    return sys_pipe(fd);
 }
 
 // ===================== chdir =====================
@@ -157,8 +146,7 @@ int fcntl(int fd, int cmd, ...) {
         int arg = va_arg(ap, int);
         va_end(ap);
         int r = sys_fcntl(fd, cmd, arg);
-        if (r < 0) { errno = -r; return -1; }
-        return 0;
+        return r;
     }
 
     errno = EINVAL;
@@ -169,8 +157,8 @@ int fcntl(int fd, int cmd, ...) {
 
 // notify_fd — notify device driver via fd (uses sys_fdev_pid to find target)
 int notify_fd(int fd) {
-    pid_t target_pid = sys_fdev_pid(fd);
-    if (target_pid < 0) { errno = EBADF; return -1; }
+    int64_t target_pid = sys_fdev_pid(fd);
+    if (target_pid < 0) return -1;
     if (target_pid == 0) { errno = ENODEV; return -1; }
     return sys_notify(target_pid);
 }
@@ -178,8 +166,8 @@ int notify_fd(int fd) {
 // msg_fd — send variable-length message to device driver via fd
 int msg_fd(int fd, const void *msg_buf, size_t msg_len,
            void *reply_buf, size_t reply_len) {
-    pid_t target_pid = sys_fdev_pid(fd);
-    if (target_pid < 0) { errno = EBADF; return -1; }
+    int64_t target_pid = sys_fdev_pid(fd);
+    if (target_pid < 0) return -1;
     if (target_pid == 0) { errno = ENODEV; return -1; }
     return sys_msg(target_pid, (void*)msg_buf, msg_len, reply_buf, reply_len);
 }
@@ -194,9 +182,7 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms) {
 
 // dup2 — duplicate fd
 int dup2(int old_fd, int new_fd) {
-    int r = sys_dup2(old_fd, new_fd);
-    if (r < 0) { errno = -r; return -1; }
-    return r;
+    return sys_dup2(old_fd, new_fd);
 }
 
 // ===================== getcwd =====================
@@ -214,9 +200,7 @@ char *getcwd(char *buf, size_t size) {
 
 // ===================== lseek =====================
 off_t lseek(int fd, off_t offset, int whence) {
-    int64_t r = sys_lseek(fd, offset, whence);
-    if (r < 0) { errno = (int)(-r); return -1; }
-    return (off_t)r;
+    return (off_t)sys_lseek(fd, offset, whence);
 }
 
 // ===================== stat (via sys_stat syscall) =====================
@@ -239,8 +223,7 @@ int stat(const char *path, struct stat *st) {
     }
 
     int r = sys_stat(path, st);
-    if (r < 0) { errno = -r; return -1; }
-    return 0;
+    return r;
 }
 
 // ===================== access =====================
@@ -270,8 +253,7 @@ int unlink(const char *path) {
     }
 
     int r = sys_unlink(path);
-    if (r < 0) { errno = -r; return -1; }
-    return 0;
+    return r;
 }
 
 // ===================== rmdir (via sys_rmdir syscall) =====================
@@ -290,8 +272,7 @@ int rmdir(const char *path) {
     }
 
     int r = sys_rmdir(path);
-    if (r < 0) { errno = -r; return -1; }
-    return 0;
+    return r;
 }
 
 // ===================== isatty =====================
@@ -304,8 +285,7 @@ int isatty(int fd) {
 // ===================== tcgetattr / tcsetattr =====================
 int tcgetattr(int fd, struct termios *termios_p) {
     long rc = sys_ioctl(fd, TCGETS, (uint64_t)termios_p);
-    if (rc < 0) { errno = (int)(-rc); return -1; }
-    return 0;
+    return (int)rc;
 }
 
 int tcsetattr(int fd, int optional_actions, const struct termios *termios_p) {
@@ -317,8 +297,7 @@ int tcsetattr(int fd, int optional_actions, const struct termios *termios_p) {
     default: errno = EINVAL; return -1;
     }
     long rc = sys_ioctl(fd, cmd, (uint64_t)termios_p);
-    if (rc < 0) { errno = (int)(-rc); return -1; }
-    return 0;
+    return (int)rc;
 }
 
 // ===================== ttyname =====================
@@ -359,7 +338,6 @@ int ioctl(int fd, uint32_t cmd, ...) {
     // so the kernel's copy_to_user/copy_from_user handle it correctly.
     if (arg_size == 0) {
         long rc = sys_ioctl(fd, cmd, arg);
-        if (rc < 0) { errno = (int)(-rc); return -1; }
         return (int)rc;
     }
 
@@ -376,7 +354,7 @@ int ioctl(int fd, uint32_t cmd, ...) {
         __builtin_memcpy(buf, (const void *)arg, arg_size);
 
     long rc = sys_ioctl(fd, cmd, (uint64_t)(uintptr_t)buf);
-    if (rc < 0) { errno = (int)(-rc); return -1; }
+    if (rc < 0) return (int)rc;
 
     // Copy-out: buf → user arg (only if direction includes READ)
     if ((_IOC_DIR(cmd) & _IOC_READ) && arg != 0 && arg_size > 0)
@@ -389,8 +367,7 @@ int ioctl(int fd, uint32_t cmd, ...) {
 int fstat(int fd, struct stat *st) {
     if (!st) { errno = EFAULT; return -1; }
     long rc = sys_fstat(fd, (uint64_t)st);
-    if (rc < 0) { errno = (int)(-rc); return -1; }
-    return 0;
+    return (int)rc;
 }
 
 // ===================== mkdir (via sys_mkdir syscall) =====================
@@ -410,8 +387,7 @@ int mkdir(const char *path, mode_t mode) {
     }
 
     int r = sys_mkdir(path, 0);
-    if (r < 0) { errno = -r; return -1; }
-    return 0;
+    return r;
 }
 
 // ===================== opendir / readdir / closedir =====================
