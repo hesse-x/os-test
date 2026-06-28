@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "kernel/log.h"
 
 typedef struct list_node_t {
     struct list_node_t *prev;
@@ -23,6 +24,8 @@ static inline void list_push_back(list_node_t *head, list_node_t *node) {
 }
 
 static inline void list_remove(list_node_t *node) {
+    // Self-referencing node = not in any list; remove is no-op but suspicious
+    WARN_ON(node->prev == node && node->next == node);
     node->prev->next = node->next;
     node->next->prev = node->prev;
     node->prev = node->next = node;

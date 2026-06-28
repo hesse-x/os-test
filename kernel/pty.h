@@ -119,6 +119,7 @@ struct pty {
     pid_t    m_write_pid;   // master write blocked
     pid_t    s_read_pid;    // slave read blocked
     pid_t    s_write_pid;   // slave write blocked
+    pid_t    master_owner_pid; // process holding master fd (for wakeup)
 
     // termios (kernel stored, user reads via TCGETS)
     struct termios t_termios;

@@ -5,6 +5,7 @@
 #include "common/macro.h"
 #include "kernel/log.h"
 #include "kernel/mem/kasan.h"
+#include "kernel/mem/slab.h"
 
 // ===================== Global variable definitions =====================
 size_t total_page_frames = 0;
@@ -49,6 +50,7 @@ Page *bfc_alloc_page(size_t n) {
           refcount_set(&cur[i].p_refcount, 1);
         }
         spin_unlock_irqrestore(&bfc_lock, flags);
+        memstat_add(&kernel_mem_stats.used_pages, (int)n);
         kasan_bfc_alloc((__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(cur)), n * PAGE_SIZE);
         return cur;
       } else {
@@ -77,6 +79,7 @@ Page *bfc_alloc_page(size_t n) {
         cur->bfc.prev = NULL;
         cur->bfc.next = NULL;
         spin_unlock_irqrestore(&bfc_lock, flags);
+        memstat_add(&kernel_mem_stats.used_pages, (int)n);
         kasan_bfc_alloc((__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(cur)), n * PAGE_SIZE);
         return cur;
       }
@@ -98,6 +101,7 @@ Page *bfc_free_page(Page *page, size_t n) {
   uint64_t flags;
   spin_lock_irqsave(&bfc_lock, &flags);
 
+  memstat_sub(&kernel_mem_stats.used_pages, (int)n);
   page->status = PAGE_FREE;
   page->bfc.cont_page_num = n;
 
@@ -184,6 +188,7 @@ Page *bfc_alloc_page_low(size_t n) {
           refcount_set(&cur[i].p_refcount, 1);
         }
         spin_unlock_irqrestore(&bfc_lock, flags);
+        memstat_add(&kernel_mem_stats.used_pages, (int)n);
         kasan_bfc_alloc((__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(cur)), n * PAGE_SIZE);
         return cur;
       } else {
@@ -212,6 +217,7 @@ Page *bfc_alloc_page_low(size_t n) {
         cur->bfc.prev = NULL;
         cur->bfc.next = NULL;
         spin_unlock_irqrestore(&bfc_lock, flags);
+        memstat_add(&kernel_mem_stats.used_pages, (int)n);
         kasan_bfc_alloc((__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(cur)), n * PAGE_SIZE);
         return cur;
       }

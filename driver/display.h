@@ -28,10 +28,13 @@ static int display_dev_fd;
 // Initialize: open("/dev/kms") + ioctl(CREATE_BUF) + mmap(fd)
 static inline int display_client_init() {
     int fd;
+    printf("display_client_init: opening /dev/kms\n");
     while ((fd = open("/dev/kms", O_RDWR)) < 0) {
+        printf("display_client_init: open failed, recv wait\n");
         struct recv_msg m;
         recv(&m, NULL, 0, 1);
     }
+    printf("display_client_init: /dev/kms opened fd=%d\n", fd);
     display_dev_fd = fd;
 
     // Send CREATE_BUF via ioctl
@@ -41,7 +44,9 @@ static inline int display_client_init() {
     arg.height = 600;
     arg.bpp = 32;
 
+    printf("display_client_init: calling ioctl CREATE_BUF\n");
     int rc = ioctl(fd, KMS_IOCTL_CREATE_BUF, &arg);
+    printf("display_client_init: ioctl returned rc=%d\n", rc);
     if (rc < 0) return -1;
 
     // Read response from arg (kernel fills output fields via copy_to_user)
@@ -54,7 +59,9 @@ static inline int display_client_init() {
     display_cols = arg.cols;
 
     // mmap back buffer
+    printf("display_client_init: calling mmap size=%d\n", arg.size);
     void *buf = mmap(NULL, arg.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    printf("display_client_init: mmap returned buf=%p\n", buf);
     if (buf == MAP_FAILED) return -1;
 
     display_back_buffer = (uint8_t *)buf;

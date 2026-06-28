@@ -28,6 +28,7 @@
 #include "common/syscall.h"
 #include "common/input.h"
 #include "kernel/user_check.h"
+#include "common/boot.h"
 
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 128
@@ -159,21 +160,14 @@ void trap_dispatch(trapframe_t *tf) {
 
       // Wake target if in WAIT_RECV
       int target_cpu = target->assigned_cpu;
-      spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+      uint64_t flags;
+      spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
       if (target->pid == owner_pid &&
           target->state == BLOCKED &&
           target->wait_event == WAIT_RECV) {
-        if (target->wait_deadline != 0) {
-          timer_queue_remove(target);
-          target->wait_deadline = 0;
-        }
-        target->state = READY;
-        target->wait_event = WAIT_NONE;
-        target->wait_timed_out = 0;
-        list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
-        cpu_locals[target_cpu].run_count++;
+        wake_from_wait(target);
       }
-      spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+      spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
     }
     lapic_eoi();
     return;
@@ -364,6 +358,9 @@ static void timer_handler(trapframe_t *tf) {
       p->wait_deadline = 0;
       list_push_back(&cpu_locals[cpu].run_queue, &p->run_node);
       cpu_locals[cpu].run_count++;
+    } else {
+      // Stale entry: process was woken but timer_queue_remove was skipped
+      WARN_ON(1);
     }
   }
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
@@ -492,7 +489,7 @@ static syscall_fn_t syscall_table[NR_SYSCALL] = {
     sys_kill,           // 43
     sys_sigaction,      // 44
     sys_sigreturn,      // 45
-    sys_debug_print,    // 46
+    sys_debug_memstat,    // 46
     sys_open,           // 47
     sys_stat,           // 48
     sys_mkdir,          // 49
@@ -637,9 +634,10 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
 
         if (timeout_ms > 0) {
             proc->wait_deadline = sched_clock() + (int64_t)timeout_ms * 1000000ULL;
-            spin_lock(&cpu_locals[cpu].scheduler_lock);
+            uint64_t flags;
+            spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
             timer_queue_insert(cpu, proc);
-            spin_unlock(&cpu_locals[cpu].scheduler_lock);
+            spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
         } else {
             proc->wait_deadline = 0;
         }
@@ -706,6 +704,7 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _
     pid_t target_pid = (pid_t)arg1;
     void __user *request = (void __user * __force)arg2;
     void __user *reply = (void __user * __force)arg3;
+    printk(LOG_DEBUG, "sys_req: pid=%d -> target_pid=%d\n", current_task->pid, target_pid);
 
     // Validate target PID
     if (target_pid < 0 || target_pid >= MAX_PROC) return (int64_t)-ESRCH;
@@ -746,32 +745,36 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _
 
     // Wake target if in WAIT_RECV
     int target_cpu = target->assigned_cpu;
-    spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
     if (target->state == BLOCKED && target->wait_event == WAIT_RECV) {
-        if (target->wait_deadline != 0) {
-            timer_queue_remove(target);
-            target->wait_deadline = 0;
-        }
-        target->state = READY;
-        target->wait_event = WAIT_NONE;
-        target->wait_timed_out = 0;
-        list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
-        cpu_locals[target_cpu].run_count++;
+        wake_from_wait(target);
     }
-    spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+    spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
     // Block caller on WAIT_REQ_REPLY
     task_t *proc = current_task;
     proc->state = BLOCKED;
     proc->wait_event = WAIT_REQ_REPLY;
     proc->wait_timed_out = 0;
-    proc->wait_deadline = 0;
+    proc->wait_deadline = sched_clock() + 5000000000ULL;  // 5 second timeout
     proc->req_target_pid = target_pid;
     proc->req_reply_buf = reply;
     proc->req_reply_len = RECV_MSG_SIZE;
     proc->req_result = 0;
 
+    int cpu = proc->assigned_cpu;
+    uint64_t flags2;
+    spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
+    timer_queue_insert(cpu, proc);
+    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
+
     schedule();
+
+    // Timeout check
+    if (proc->wait_timed_out) {
+        return (int64_t)-ETIMEDOUT;
+    }
 
     // EINTR check
     {
@@ -820,16 +823,13 @@ int64_t sys_resp(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
 
     // Wake caller
     int caller_cpu = caller->assigned_cpu;
-    spin_lock(&cpu_locals[caller_cpu].scheduler_lock);
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[caller_cpu].scheduler_lock, &flags);
     if (caller->state == BLOCKED && caller->wait_event == WAIT_REQ_REPLY) {
-        caller->state = READY;
-        caller->wait_event = WAIT_NONE;
-        caller->wait_timed_out = 0;
         caller->req_result = 0;
-        list_push_back(&cpu_locals[caller_cpu].run_queue, &caller->run_node);
-        cpu_locals[caller_cpu].run_count++;
+        wake_from_wait(caller);
     }
-    spin_unlock(&cpu_locals[caller_cpu].scheduler_lock);
+    spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
 
     proc->req_caller_pid = -1;  // clear
     return 0;
@@ -862,6 +862,7 @@ int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
     task_t *proc = current_task;
     int32_t exit_code = (int32_t)arg1;
     proc->exit_code = exit_code;
+    printk(LOG_ERROR, "sys_exit: pid=%d exit_code=%d\n", proc->pid, exit_code);
 
     // Final CPU time accounting: ensure last running slice is recorded
     if (proc->last_sched != 0) {
@@ -897,20 +898,13 @@ int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
 
             // Wake parent if in WAIT_CHILD (waitpid)
             int pcpu = parent->assigned_cpu;
-            spin_lock(&cpu_locals[pcpu].scheduler_lock);
+            uint64_t pflags;
+            spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
             if (parent->state == BLOCKED &&
                 parent->wait_event == WAIT_CHILD) {
-                if (parent->wait_deadline != 0) {
-                    timer_queue_remove(parent);
-                    parent->wait_deadline = 0;
-                }
-                parent->state = READY;
-                parent->wait_event = WAIT_NONE;
-                parent->wait_timed_out = 0;
-                list_push_back(&cpu_locals[pcpu].run_queue, &parent->run_node);
-                cpu_locals[pcpu].run_count++;
+                wake_from_wait(parent);
             }
-            spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+            spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
         }
 
         // Wake any processes waiting for our REQ reply
@@ -921,15 +915,13 @@ int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
                 waiter->wait_event == WAIT_REQ_REPLY &&
                 waiter->req_target_pid == proc->pid) {
                 int wcpu = waiter->assigned_cpu;
-                spin_lock(&cpu_locals[wcpu].scheduler_lock);
+                uint64_t wflags;
+                spin_lock_irqsave(&cpu_locals[wcpu].scheduler_lock, &wflags);
                 if (waiter->state == BLOCKED && waiter->wait_event == WAIT_REQ_REPLY) {
-                    waiter->state = READY;
-                    waiter->wait_event = WAIT_NONE;
                     waiter->req_result = ESRCH;
-                    list_push_back(&cpu_locals[wcpu].run_queue, &waiter->run_node);
-                    cpu_locals[wcpu].run_count++;
+                    wake_from_wait(waiter);
                 }
-                spin_unlock(&cpu_locals[wcpu].scheduler_lock);
+                spin_unlock_irqrestore(&cpu_locals[wcpu].scheduler_lock, wflags);
             }
         }
     }
@@ -990,7 +982,8 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
             // Must set wait_event + BLOCKED under parent's scheduler_lock
             // to prevent race with child's sys_exit checking our state.
             int pcpu = current_task->assigned_cpu;
-            spin_lock(&cpu_locals[pcpu].scheduler_lock);
+            uint64_t pflags;
+            spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
             // Re-scan under parent lock to avoid missed wakeup
             spin_lock(&tasks_lock);
             zombie = NULL;
@@ -1006,18 +999,18 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
             }
             if (!has_children) {
                 spin_unlock(&tasks_lock);
-                spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+                spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
                 return (int64_t)-ECHILD;
             }
             if (zombie) {
                 spin_unlock(&tasks_lock);
-                spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+                spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
                 continue;  // retry the outer loop
             }
             spin_unlock(&tasks_lock);
             current_task->wait_event = WAIT_CHILD;
             current_task->state = BLOCKED;
-            spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+            spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
             schedule();
             // EINTR check: SIGCHLD does not interrupt waitpid
             {
@@ -1068,29 +1061,31 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
         int pcpu = current_task->assigned_cpu;
         if (pcpu == cpu) {
             // Same CPU: single lock covers both parent and child state
-            spin_lock(&cpu_locals[pcpu].scheduler_lock);
+            uint64_t pflags;
+            spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
             if (child->state == ZOMBIE) {
                 child->state = REAPING;
-                spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+                spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
                 break;
             }
             current_task->wait_event = WAIT_CHILD;
             current_task->state = BLOCKED;
-            spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+            spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
         } else {
             // Different CPUs: need both locks to prevent race
-            spin_lock(&cpu_locals[pcpu].scheduler_lock);
-            spin_lock(&cpu_locals[cpu].scheduler_lock);
+            uint64_t pflags, cflags;
+            spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
+            spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &cflags);
             if (child->state == ZOMBIE) {
                 child->state = REAPING;
-                spin_unlock(&cpu_locals[cpu].scheduler_lock);
-                spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+                spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, cflags);
+                spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
                 break;
             }
             current_task->wait_event = WAIT_CHILD;
             current_task->state = BLOCKED;
-            spin_unlock(&cpu_locals[cpu].scheduler_lock);
-            spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+            spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, cflags);
+            spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
         }
         schedule();
 
@@ -1145,7 +1140,11 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
     int fd = (int)arg5;
     uint64_t offset = arg6;
 
+    if (size == 0 && ((flags & 0x01) == 0 || fd < 0)) return -EINVAL;  // anonymous mmap requires size > 0
+    if (size > 128 * 1024 * 1024) return -EINVAL;  // max 128MB
+
     task_t *proc = current_task;
+    printk(LOG_DEBUG, "sys_mmap: pid=%d size=%zu flags=%d fd=%d offset=%llu\n", proc->pid, size, flags, fd, (unsigned long long)offset);
     uint64_t *pml4 = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
     // MAP_SHARED (0x01) + fd ≥ 0: SHM or DEV fd mapping
@@ -1277,9 +1276,6 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
         return vaddr;
     }
 
-    // Anonymous or MAP_PHYSICAL: size must be non-zero
-    if (size == 0) return -EINVAL;
-
     // MAP_PHYSICAL
     if (flags & MAP_PHYSICAL) {
         // MAP_PHYSICAL: map physical address range to user address space
@@ -1288,6 +1284,24 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
         uint64_t phys_start = ALIGN_DOWN(offset, PAGE_SIZE);
         uint64_t phys_end = ALIGN_UP(offset + size, PAGE_SIZE);
         size_t npages = (phys_end - phys_start) / PAGE_SIZE;
+
+        // Dynamic physical offset validation
+        uint64_t max_phys_addr = (uint64_t)total_page_frames * PAGE_SIZE;
+        uint64_t kernel_phys_start = KERNEL_LOAD_ADDR;
+        uint64_t kernel_phys_end = bump_end_phys();
+
+        // Block mapping of kernel physical memory
+        if (phys_start >= kernel_phys_start && phys_start < kernel_phys_end) {
+            return -EINVAL;
+        }
+
+        if (flags & MAP_UC) {
+            // MAP_UC: allow device MMIO, but cap at 4GB to prevent absurd addresses
+            if (phys_start >= 0x100000000ULL) return -EINVAL;
+        } else {
+            // No MAP_UC: only allow RAM region
+            if (phys_start >= max_phys_addr) return -EINVAL;
+        }
 
         uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
         if (flags & MAP_UC) {
@@ -1462,22 +1476,14 @@ void notify_and_wake(pid_t target_pid, recv_msg_t *msg) {
 
     // Wake target if blocked on WAIT_RECV
     int target_cpu = target->assigned_cpu;
-    spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
     if (target->pid == target_pid &&
         target->state == BLOCKED &&
         target->wait_event == WAIT_RECV) {
-        if (target->wait_deadline != 0) {
-            // Remove from timer queue
-            list_remove(&target->wait_node);
-            target->wait_deadline = 0;
-        }
-        target->state = READY;
-        target->wait_event = WAIT_NONE;
-        target->wait_timed_out = 0;
-        list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
-        cpu_locals[target_cpu].run_count++;
+        wake_from_wait(target);
     }
-    spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+    spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 }
 
 // Forward declaration of sys_msg_to (defined later in this file)
@@ -1512,16 +1518,24 @@ int64_t sys_block_async(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, 
     return (int64_t)ret;
 }
 
-// sys_debug_print(buf, len) — temporary debug: print user string to serial
-// syscall 49
-int64_t sys_debug_print(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
-    const char __user *buf = (const char __user * __force)arg1;
+// sys_debug_memstat(buf, len) — return kernel memory stats to user space
+// syscall 46 (replaces sys_debug_print which was unused)
+int64_t sys_debug_memstat(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
+    void __user *buf = (void __user * __force)(uintptr_t)arg1;
     size_t len = (size_t)arg2;
-    if (!buf || len > 256) return (int64_t)-EINVAL;
-    char kbuf[257];
-    copy_from_user(kbuf, buf, len);
-    kbuf[len] = '\0';
-    return 0;
+    if (!buf || len < sizeof(struct kernel_mem_stats)) return (int64_t)-EINVAL;
+
+    struct kernel_mem_stats stats;
+    __memset(&stats, 0, sizeof(stats));
+    stats.total_pages = kernel_mem_stats.total_pages;
+    stats.used_pages = kernel_mem_stats.used_pages;
+    stats.slab_used_bytes = kernel_mem_stats.slab_used_bytes;
+    stats.slab_peak_bytes = kernel_mem_stats.slab_peak_bytes;
+    stats.kmalloc_calls = kernel_mem_stats.kmalloc_calls;
+    stats.kfree_calls = kernel_mem_stats.kfree_calls;
+
+    if (copy_to_user(buf, &stats, sizeof(stats))) return (int64_t)-EFAULT;
+    return (int64_t)sizeof(stats);
 }
 
 // sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 32
@@ -1588,6 +1602,7 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
         struct inode *ip = f->inode;
         if (!ip || !ip->i_priv) return (int64_t)(-(int64_t)ENODEV);
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+        printk(LOG_DEBUG, "sys_ioctl: pid=%d fd=%d cmd=0x%x driver_pid=%d\n", proc->pid, fd, cmd, ops->driver_pid);
         if (ops->driver_pid == 0) {
             // Kernel device: copy arg to kernel buffer, call ops->ioctl, copy back
             if (!ops->ioctl) return (int64_t)(-(int64_t)ENOTTY);
@@ -1620,6 +1635,7 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
         // Pack cmd + arg into a REQ message, send to driver_pid
         pid_t target_pid = ops->driver_pid;
         if (target_pid <= 0) return (int64_t)(-(int64_t)ENODEV);
+        printk(LOG_DEBUG, "sys_ioctl: fd=%d cmd=0x%x driver_pid=%d (req path)\n", fd, cmd, target_pid);
 
         // Build REQ payload: [4 bytes cmd] [arg_size bytes arg data]
         // arg_size > 48: reject — such ioctl needs MSG path (future),
@@ -1664,19 +1680,12 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
 
         // Wake target if in WAIT_RECV
         int target_cpu = target->assigned_cpu;
-        spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+        uint64_t flags;
+        spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
         if (target->state == BLOCKED && target->wait_event == WAIT_RECV) {
-            if (target->wait_deadline != 0) {
-                timer_queue_remove(target);
-                target->wait_deadline = 0;
-            }
-            target->state = READY;
-            target->wait_event = WAIT_NONE;
-            target->wait_timed_out = 0;
-            list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
-            cpu_locals[target_cpu].run_count++;
+            wake_from_wait(target);
         }
-        spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+        spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
         // Block caller on WAIT_REQ_REPLY
         // Use the arg as reply buffer so driver's resp writes back to user space
@@ -1684,13 +1693,24 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
         proc->state = BLOCKED;
         proc->wait_event = WAIT_REQ_REPLY;
         proc->wait_timed_out = 0;
-        proc->wait_deadline = 0;
+        proc->wait_deadline = sched_clock() + 3000000000ULL;  // 3 second timeout (driver should respond fast)
         proc->req_target_pid = target_pid;
         proc->req_reply_buf = arg;  // driver resp will be copy_to_user'd here
         proc->req_reply_len = 56;   // REQ payload size, not RECV_MSG_SIZE (avoids stack overflow on small ioctl arg)
         proc->req_result = 0;
 
+        int cpu = proc->assigned_cpu;
+        uint64_t flags2;
+        spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
+        timer_queue_insert(cpu, proc);
+        spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
+
         schedule();
+
+        // Timeout check
+        if (proc->wait_timed_out) {
+            return (int64_t)-ETIMEDOUT;
+        }
 
         // Woken up by sys_resp or proc_reap
         if (proc->req_result != 0)
@@ -2204,25 +2224,18 @@ void wake_process(pid_t pid) {
     task_t *target = &tasks[pid];
 
     int target_cpu = target->assigned_cpu;
-    spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
     if (target->pid == pid &&
         target->state == BLOCKED &&
         (target->wait_event == WAIT_PIPE ||
          target->wait_event == WAIT_POLL ||
          target->wait_event == WAIT_RECV)) {
-        if (target->wait_deadline != 0) {
-            timer_queue_remove(target);
-            target->wait_deadline = 0;
-        }
         if (target->wait_event == WAIT_RECV)
             target->recv_intr = 1;
-        target->state = READY;
-        target->wait_event = WAIT_NONE;
-        target->wait_timed_out = 0;
-        list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
-        cpu_locals[target_cpu].run_count++;
+        wake_from_wait(target);
     }
-    spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+    spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 }
 
 // sys_pipe(fd_ptr) — syscall 13 (创建 pipe，写 [read_fd, write_fd] 到用户指针)
@@ -2308,9 +2321,17 @@ int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
     fw->pipe = p;
     fd_install(proc->mm->files, write_fd, fw);
 
-    // Write fd pair to user space
-    ((__force int *)fd_ptr)[0] = read_fd;
-    ((__force int *)fd_ptr)[1] = write_fd;
+    // Write fd pair to user space via copy_to_user (hardened: no direct user pointer writes)
+    int fd_pair[2] = { read_fd, write_fd };
+    if (copy_to_user(fd_ptr, fd_pair, sizeof(fd_pair))) {
+        // copy_to_user failed — cleanup pipe and fd slots
+        struct file *f_r = fd_uninstall(proc->mm->files, read_fd);
+        struct file *f_w = fd_uninstall(proc->mm->files, write_fd);
+        file_put(f_r);
+        file_put(f_w);
+        spin_unlock(fdlk);
+        return (int64_t)-EFAULT;
+    }
 
     spin_unlock(fdlk);
     return 0;
@@ -2324,6 +2345,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
     int fd = (int)arg1;
     const char __user *buf = (const char __user * __force)arg2;
     size_t len = (size_t)arg3;
+    if (len > 65536) len = 65536;  // cap at 64KB
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
     if (!current_task->mm->files->fd_table[fd]) return (int64_t)-EBADF;
@@ -2478,8 +2500,22 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
             p->write_pid = proc->pid;
             proc->state = BLOCKED;
             proc->wait_event = WAIT_PIPE;
+            proc->wait_deadline = sched_clock() + 5000000000ULL;  // 5s pipe write timeout
+            {
+                int cpu = proc->assigned_cpu;
+                uint64_t flags;
+                spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+                timer_queue_insert(cpu, proc);
+                spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+            }
             schedule();
             p->write_pid = -1;
+            // Timeout check
+            if (proc->wait_timed_out) {
+                p->write_pid = -1;
+                if (written > 0) break;  // return partial write
+                return (int64_t)-ETIMEDOUT;
+            }
             // EINTR check
             {
                 uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
@@ -2511,6 +2547,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
     int fd = (int)arg1;
     char __user *buf = (char __user * __force)arg2;
     size_t len = (size_t)arg3;
+    if (len > 65536) len = 65536;  // cap at 64KB
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
     if (!current_task->mm->files->fd_table[fd]) return (int64_t)-EBADF;
@@ -2677,8 +2714,21 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
         p->read_pid = proc->pid;
         proc->state = BLOCKED;
         proc->wait_event = WAIT_PIPE;
+        proc->wait_deadline = sched_clock() + 5000000000ULL;  // 5s pipe read timeout
+        {
+            int cpu = proc->assigned_cpu;
+            uint64_t flags;
+            spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+            timer_queue_insert(cpu, proc);
+            spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+        }
         schedule();
         p->read_pid = -1;
+        // Timeout check
+        if (proc->wait_timed_out) {
+            p->read_pid = -1;
+            return (int64_t)-ETIMEDOUT;
+        }
         // EINTR check
         {
             uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
@@ -2746,19 +2796,12 @@ int64_t sys_notify(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t 
 
     // Wake target if in WAIT_RECV
     int target_cpu = target->assigned_cpu;
-    spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
     if (target->state == BLOCKED && target->wait_event == WAIT_RECV) {
-        if (target->wait_deadline != 0) {
-            timer_queue_remove(target);
-            target->wait_deadline = 0;
-        }
-        target->state = READY;
-        target->wait_event = WAIT_NONE;
-        target->wait_timed_out = 0;
-        list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
-        cpu_locals[target_cpu].run_count++;
+        wake_from_wait(target);
     }
-    spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+    spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
     return 0;
 }
 
@@ -2807,32 +2850,36 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
 
     // Wake target if in WAIT_RECV
     int target_cpu = target->assigned_cpu;
-    spin_lock(&cpu_locals[target_cpu].scheduler_lock);
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
     if (target->state == BLOCKED && target->wait_event == WAIT_RECV) {
-        if (target->wait_deadline != 0) {
-            timer_queue_remove(target);
-            target->wait_deadline = 0;
-        }
-        target->state = READY;
-        target->wait_event = WAIT_NONE;
-        target->wait_timed_out = 0;
-        list_push_back(&cpu_locals[target_cpu].run_queue, &target->run_node);
-        cpu_locals[target_cpu].run_count++;
+        wake_from_wait(target);
     }
-    spin_unlock(&cpu_locals[target_cpu].scheduler_lock);
+    spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
     // Block caller on WAIT_MSG_REPLY
     task_t *proc = current_task;
     proc->state = BLOCKED;
     proc->wait_event = WAIT_MSG_REPLY;
     proc->wait_timed_out = 0;
-    proc->wait_deadline = 0;
+    proc->wait_deadline = sched_clock() + 5000000000ULL;  // 5 second timeout
     proc->msg_target_pid = target_pid;
     proc->msg_reply_buf = (void __user * __force)reply_buf;
     proc->msg_reply_len = reply_len;
     proc->msg_result = 0;
 
+    int cpu = proc->assigned_cpu;
+    uint64_t flags2;
+    spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
+    timer_queue_insert(cpu, proc);
+    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
+
     schedule();
+
+    // Timeout check
+    if (proc->wait_timed_out) {
+        return (int64_t)-ETIMEDOUT;
+    }
 
     // EINTR check
     {
@@ -2916,16 +2963,13 @@ int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64
 
     // Wake caller
     int caller_cpu = caller->assigned_cpu;
-    spin_lock(&cpu_locals[caller_cpu].scheduler_lock);
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[caller_cpu].scheduler_lock, &flags);
     if (caller->state == BLOCKED && caller->wait_event == WAIT_MSG_REPLY) {
-        caller->state = READY;
-        caller->wait_event = WAIT_NONE;
-        caller->wait_timed_out = 0;
         caller->msg_result = 0;
-        list_push_back(&cpu_locals[caller_cpu].run_queue, &caller->run_node);
-        cpu_locals[caller_cpu].run_count++;
+        wake_from_wait(caller);
     }
-    spin_unlock(&cpu_locals[caller_cpu].scheduler_lock);
+    spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
 
     proc->msg_caller_pid = -1;  // clear
     return 0;

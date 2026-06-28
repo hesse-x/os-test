@@ -496,3 +496,11 @@ for (int i = 0; i < MAX_PROC; i++) {
 - NR_SYSCALL 从 57 升到 58
 - **验证**：编译通过（release + debug）
 - **验证**：pthread_create/mutex/join 跑通
+
+### 待办：fd_table RCU 读路径完善（CLONE_FILES 前置）
+
+当前 fd_table RCU 读路径（per-fd 短临界区 + 局部拷贝）依赖单线程前提：同一进程的 fd_table 不会被并发修改。CLONE_FILES 引入共享 fd_table 后，需补齐以下内容以完全对齐 Linux：
+
+- **per-fd refcount 保护对象生命周期**：RCU 拷贝 `struct file` 后，`inode`/`sock`/`pipe`/`pty` 指针可能被 close 释放。Linux 通过 `get_file()`（bump `f_count`）保护，我们在 RCU unlock 后到操作完成期间持有引用计数，操作完毕 `fput()` 释放。需给 `unix_sock` 和 `pty` 补充 refcount（当前仅 `inode` 和 `pipe` 有）。
+- **offset 写回原子性**：当前 offset 写回持 `fd_lock`（与 Linux `f_pos_lock` 粒度对齐），CLONE_FILES 后多线程共享 fd_table 时可能竞争。如竞争严重，可细化到 per-file `f_pos_lock`。
+- **close + `synchronize_rcu`**：close 设置 `fd_table[fd].type = FD_NONE` 后需 `synchronize_rcu()` 确保所有 RCU 读者完成，再释放底层对象（inode/sock/pipe）。当前单线程下天然安全，CLONE_FILES 后必须显式等待。

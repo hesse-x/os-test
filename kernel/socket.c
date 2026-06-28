@@ -448,8 +448,21 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             task_t *proc = current_task;
             proc->state = BLOCKED;
             proc->wait_event = WAIT_POLL;
+            proc->wait_deadline = sched_clock() + 30000000000ULL;  // 30s default timeout
             spin_unlock(&socket_lock);
+            int cpu = proc->assigned_cpu;
+            uint64_t rflags;
+            spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
+            timer_queue_insert(cpu, proc);
+            spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
             schedule();
+            // Timeout check
+            if (proc->wait_timed_out) {
+                spin_lock(&socket_lock);
+                sock->blocked_reader = -1;
+                spin_unlock(&socket_lock);
+                return -ETIMEDOUT;
+            }
             // EINTR check
             {
                 uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
@@ -805,8 +818,21 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
             listen_sock->blocked_reader = proc->pid;
             proc->state = BLOCKED;
             proc->wait_event = WAIT_POLL;
+            proc->wait_deadline = sched_clock() + 30000000000ULL;  // 30 second timeout
             spin_unlock(&socket_lock);
+            int cpu = proc->assigned_cpu;
+            uint64_t rflags;
+            spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
+            timer_queue_insert(cpu, proc);
+            spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
             schedule();
+            // Timeout check
+            if (proc->wait_timed_out) {
+                spin_lock(&socket_lock);
+                listen_sock->blocked_reader = -1;
+                spin_unlock(&socket_lock);
+                return (int64_t)-ETIMEDOUT;
+            }
             // EINTR check
             {
                 uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
@@ -1497,9 +1523,10 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
                 return 0;  // timeout
             }
             proc->wait_deadline = deadline;
-            spin_lock(&cpu_locals[proc->assigned_cpu].scheduler_lock);
+            uint64_t pflags;
+            spin_lock_irqsave(&cpu_locals[proc->assigned_cpu].scheduler_lock, &pflags);
             timer_queue_insert(proc->assigned_cpu, proc);
-            spin_unlock(&cpu_locals[proc->assigned_cpu].scheduler_lock);
+            spin_unlock_irqrestore(&cpu_locals[proc->assigned_cpu].scheduler_lock, pflags);
         } else {
             proc->wait_deadline = 0;
         }

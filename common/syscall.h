@@ -11,6 +11,16 @@
 //   Failure: return -errno (negative value)
 // All __syscallN return int64_t from kernel; wrappers cast as needed.
 
+// ===================== Kernel memory stats (shared with user space) =====================
+struct kernel_mem_stats {
+    int total_pages;       // atomic_t: physical total pages
+    int used_pages;        // atomic_t: pages allocated
+    int slab_used_bytes;   // atomic_t: slab bytes in use
+    size_t slab_peak_bytes; // slab peak usage
+    int kmalloc_calls;     // atomic_t: kmalloc call count
+    int kfree_calls;       // atomic_t: kfree call count
+};
+
 // ===================== Semantic wrappers (user-space only) =====================
 #ifndef __KERNEL__
 
@@ -273,10 +283,10 @@ static inline int sys_sigreturn(void) {
     return 0;
 }
 
-static inline int sys_debug_print(const char *buf, int len) {
-    int64_t r = __syscall2(SYS_DEBUG_PRINT, (int64_t)(uintptr_t)buf, (int64_t)len);
+static inline int sys_debug_memstat(struct kernel_mem_stats *buf, int len) {
+    int64_t r = __syscall2(SYS_DEBUG_MEMSTAT, (int64_t)(uintptr_t)buf, (int64_t)len);
     if (r < 0) { errno = -(int)r; return -1; }
-    return 0;
+    return (int)r;
 }
 
 // --- VFS syscalls ---

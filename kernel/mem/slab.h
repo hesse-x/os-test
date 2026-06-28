@@ -5,10 +5,35 @@
 #include <stddef.h>
 #include "kernel/sparse.h"
 #include "kernel/spinlock.h"
+#include "kernel/atomic.h"
 #include "kernel/mem/alloc.h"
 
 #define KMALLOC_SHIFT_LOW   3    // 最小 class = 8B
 #define KMALLOC_SHIFT_HIGH  11   // 最大 class = 2048B
+
+// ===================== Kernel memory accounting =====================
+// struct kernel_mem_stats is defined in common/syscall.h (shared kernel/user layout).
+// Kernel code accesses atomic fields via cast: (atomic_t*)&field, since atomic_t = { int counter }
+// and layout is identical to plain int.
+struct kernel_mem_stats;
+extern struct kernel_mem_stats kernel_mem_stats;
+
+// Helpers for atomic access to kernel_mem_stats int fields (cast int* → atomic_t*)
+static inline int memstat_read(int *field) {
+    return atomic_read((atomic_t *)field);
+}
+static inline int memstat_add(int *field, int val) {
+    return atomic_add_return((atomic_t *)field, val);
+}
+static inline int memstat_sub(int *field, int val) {
+    return atomic_sub_return((atomic_t *)field, val);
+}
+static inline void memstat_inc(int *field) {
+    atomic_inc((atomic_t *)field);
+}
+static inline void memstat_set(int *field, int val) {
+    atomic_set((atomic_t *)field, val);
+}
 
 typedef struct kmem_cache_t {
     size_t obj_size;              // 对象大小

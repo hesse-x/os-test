@@ -9,6 +9,9 @@
 // 全局 kmalloc cache 数组
 kmem_cache_t kmalloc_caches[NUM_KMALLOC_CLASSES];
 
+// 全局内核内存统计
+struct kernel_mem_stats kernel_mem_stats;
+
 // Size class 对应的对象大小
 static const size_t class_sizes[NUM_KMALLOC_CLASSES] = {
     8, 16, 32, 64, 128, 256, 512, 1024, 2048
@@ -69,6 +72,14 @@ void slab_init() {
         kmalloc_caches[i].lock = SPINLOCK_INIT;
         kmalloc_caches[i].partial = NULL;
     }
+    // Initialize kernel_mem_stats
+    extern size_t total_page_frames;  // from kernel/mem/alloc.c
+    memstat_set(&kernel_mem_stats.total_pages, (int)total_page_frames);
+    memstat_set(&kernel_mem_stats.used_pages, 0);
+    memstat_set(&kernel_mem_stats.kmalloc_calls, 0);
+    memstat_set(&kernel_mem_stats.kfree_calls, 0);
+    memstat_set(&kernel_mem_stats.slab_used_bytes, 0);
+    kernel_mem_stats.slab_peak_bytes = 0;
     printk(LOG_INFO, "slab_init: ok\n");
 }
 
@@ -77,11 +88,19 @@ __attribute__((no_sanitize("kernel-address")))
 void *kmalloc(size_t size) {
     if (size == 0) return NULL;
 
+    memstat_inc(&kernel_mem_stats.kmalloc_calls);
+
     // 大分配：走 BFC
     if (size > 2048) {
         size_t npages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
         Page *page = bfc_alloc_page(npages);
-        if (!page) return NULL;
+        if (!page) {
+            printk(LOG_WARN, "kmalloc(%zu) failed, slab_used=%d, free_pages=%d\n",
+                    size, memstat_read(&kernel_mem_stats.slab_used_bytes),
+                    memstat_read(&kernel_mem_stats.total_pages) - memstat_read(&kernel_mem_stats.used_pages));
+            return NULL;
+        }
+        memstat_add(&kernel_mem_stats.slab_used_bytes, (int)(npages * PAGE_SIZE));
         void *ptr = (__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(page));
         return ptr;
     }
@@ -102,6 +121,7 @@ void *kmalloc(size_t size) {
         active->slab.inuse++;
         spin_unlock_irqrestore(&cache->lock, flags);
         kasan_slab_alloc(obj, cache->obj_size);
+        memstat_add(&kernel_mem_stats.slab_used_bytes, (int)cache->obj_size);
         return obj;
     }
 
@@ -122,6 +142,7 @@ void *kmalloc(size_t size) {
         page->slab.inuse++;
         spin_unlock_irqrestore(&cache->lock, flags);
         kasan_slab_alloc(obj, cache->obj_size);
+        memstat_add(&kernel_mem_stats.slab_used_bytes, (int)cache->obj_size);
         return obj;
     }
 
@@ -129,6 +150,9 @@ void *kmalloc(size_t size) {
     Page *new_page = bfc_alloc_page(1);
     if (!new_page) {
         spin_unlock_irqrestore(&cache->lock, flags);
+        printk(LOG_WARN, "kmalloc(%zu) failed (slab path), slab_used=%d, free_pages=%d\n",
+                size, memstat_read(&kernel_mem_stats.slab_used_bytes),
+                memstat_read(&kernel_mem_stats.total_pages) - memstat_read(&kernel_mem_stats.used_pages));
         return NULL;
     }
 
@@ -140,6 +164,7 @@ void *kmalloc(size_t size) {
     new_page->slab.inuse++;
     spin_unlock_irqrestore(&cache->lock, flags);
     kasan_slab_alloc(obj, cache->obj_size);
+    memstat_add(&kernel_mem_stats.slab_used_bytes, (int)cache->obj_size);
     return obj;
 }
 
@@ -148,6 +173,8 @@ __attribute__((no_sanitize("kernel-address")))
 void kfree(const void *ptr) {
     if (!ptr) return;
 
+    memstat_inc(&kernel_mem_stats.kfree_calls);
+
     uint64_t addr = (uint64_t)ptr;
     uint64_t phys = (__force uint64_t)PHY_ADDR(addr);
     Page *page = &bfc_frames[PHY_TO_PAGE(phys)];
@@ -155,6 +182,7 @@ void kfree(const void *ptr) {
     if (page->status == PAGE_USED) {
         // BFC 大分配释放
         kasan_bfc_free(ptr, page->bfc.cont_page_num * PAGE_SIZE);
+        memstat_sub(&kernel_mem_stats.slab_used_bytes, (int)(page->bfc.cont_page_num * PAGE_SIZE));
         bfc_free_page(page, page->bfc.cont_page_num);
         return;
     }
@@ -178,6 +206,7 @@ void kfree(const void *ptr) {
         *(void **)ptr = page->slab.freelist;
         page->slab.freelist = (void *)ptr;
         page->slab.inuse--;
+        memstat_sub(&kernel_mem_stats.slab_used_bytes, (int)cache->obj_size);
 
         if (page->slab.inuse == page->slab.obj_count - 1) {
             partial_add(cache, page);
@@ -190,6 +219,7 @@ void kfree(const void *ptr) {
         *(void **)ptr = page->slab.freelist;
         page->slab.freelist = (void *)ptr;
         page->slab.inuse--;
+        memstat_sub(&kernel_mem_stats.slab_used_bytes, (int)cache->obj_size);
 
         if (page->slab.inuse == page->slab.obj_count - 1) {
             partial_add(cache, page);

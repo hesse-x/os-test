@@ -332,19 +332,24 @@ int main() {
     }
 
     // 2. Open KBD device, bind via ioctl, then mmap SHM
+    printf("terminal: opening /dev/kbd\n");
     int kbd_fd;
     while ((kbd_fd = open("/dev/kbd", O_RDWR)) < 0) {
+        printf("terminal: open /dev/kbd failed, recv wait\n");
         struct recv_msg m;
         recv(&m, NULL, 0, 1);
     }
+    printf("terminal: /dev/kbd opened fd=%d\n", kbd_fd);
 
     // Bind via ioctl
     struct kbd_ioctl_bind_arg bind_arg;
     for (int i = 0; i < (int)sizeof(bind_arg); i++) ((uint8_t*)&bind_arg)[i] = 0;
     bind_arg.pid = getpid();
 
+    printf("terminal: calling ioctl KBD_IOCTL_BIND\n");
     while (1) {
         int rc = ioctl(kbd_fd, KBD_IOCTL_BIND, &bind_arg);
+        printf("terminal: ioctl BIND rc=%d result=%d\n", rc, bind_arg.result);
         if (rc == 0 && bind_arg.result == 0) break;
         struct recv_msg m;
         recv(&m, NULL, 0, 100);
@@ -354,7 +359,9 @@ int main() {
 
     // mmap kbd SHM via MAP_SHARED (fd → target_pid → sys_shm_attach)
     // size=0 is ignored — MAP_SHARED maps the entire driver SHM region
+    printf("terminal: mmap kbd SHM\n");
     void *shm_ptr = mmap(NULL, 0, PROT_READ | PROT_WRITE, MAP_SHARED, kbd_fd, 0);
+    printf("terminal: mmap SHM returned %p\n", shm_ptr);
     if (shm_ptr == MAP_FAILED) {
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
@@ -374,7 +381,9 @@ int main() {
 
     // 4. Allocate cell buffer via mmap
     int cell_bytes = vt.rows * vt.cols * sizeof(struct cell);
+    printf("terminal: mmap cells size=%d\n", cell_bytes);
     cells = (struct cell *)mmap(NULL, cell_bytes, PROT_READ | PROT_WRITE, 0, -1, 0);
+    printf("terminal: mmap cells returned %p\n", cells);
     if (!cells) {
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
@@ -395,7 +404,9 @@ int main() {
     display_client_flush(0, display_rows);
 
     // 7. Create PTY pair
+    printf("terminal: opening /dev/ptmx\n");
     master_fd = open("/dev/ptmx", O_RDWR);
+    printf("terminal: /dev/ptmx opened fd=%d\n", master_fd);
     if (master_fd < 0) { printf("terminal: failed to open /dev/ptmx\n"); return 1; }
 
     // 8. Get PTY index for dynamic slave path
@@ -405,18 +416,26 @@ int main() {
     snprintf(pts_path, sizeof(pts_path), "/dev/pts%d", pty_idx);
 
     // 9. Fork shell — child opens slave, dup2 0/1/2, exec
+    printf("terminal: forking shell\n");
     shell_pid = fork();
     if (shell_pid == 0) {
+        write(2, "shell_child: forked, opening slave\n", 35);
         int slave_fd = open(pts_path, O_RDWR);
+        write(2, "shell_child: slave_fd=", 22);
+        { char tmp[8]; int n = snprintf(tmp, 8, "%d", slave_fd); write(2, tmp, n); write(2, "\n", 1); }
         if (slave_fd < 0) { write(2, "shell: failed to open slave\n", 29); _exit(127); }
+        write(2, "shell_child: dup2 0/1/2\n", 24);
         dup2(slave_fd, 0); dup2(slave_fd, 1); dup2(slave_fd, 2);
         if (slave_fd > 2) close(slave_fd);
         close(master_fd);
+        write(2, "shell_child: calling execve /usr/bin/shell\n", 43);
         execve("/usr/bin/shell", NULL, NULL);
+        write(2, "shell_child: execve FAILED\n", 28);
         _exit(127);
     }
 
     // 10. Parent: master_fd non-blocking
+    printf("terminal: shell forked pid=%d, entering main loop\n", shell_pid);
     fcntl(master_fd, F_SETFL, O_RDWR | O_NONBLOCK);
 
     // 11. Set PTY winsize to actual display dimensions
@@ -512,6 +531,7 @@ int main() {
             did_work = 1;
         } else if (n == 0) {
             // Shell exited → re-fork
+            printf("terminal: shell exited (n=0), re-forking\n");
             close(master_fd);
             master_fd = open("/dev/ptmx", O_RDWR);
             if (master_fd < 0) continue;

@@ -48,7 +48,7 @@ int64_t sys_install_fd_impl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t
 int64_t sys_lseek(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_memfd_create(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_ftruncate(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-int64_t sys_debug_print(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_debug_memstat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // VFS extended syscalls
 int64_t sys_ioctl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);

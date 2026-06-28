@@ -143,6 +143,7 @@ struct pty *pty_alloc(int *out_index) {
     pty->m_write_pid = -1;
     pty->s_read_pid = -1;
     pty->s_write_pid = -1;
+    pty->master_owner_pid = -1;
     pty->index = index;
     pty->master_refs = 0;
     pty->slave_refs = 0;
@@ -261,11 +262,22 @@ int64_t pty_master_read(struct pty *pty, struct task_t *proc,
                         void *buf, size_t len) {
     while (pty_ring_avail(pty->s_to_m_head, pty->s_to_m_tail) == 0) {
         // EOF only after slave was opened and then closed.
-        // Before slave is ever opened, block so that a master read racing
-        // with the child's pts_open doesn't falsely see EOF.
-        if (pty->slave_opened && pty->slave_refs == 0) {
-            printk(LOG_INFO, "pty_master_read: EOF pty=%d (slave closed)\n", pty->index);
-            return 0;
+        // If slave has never been opened, avoid false EOF that triggers
+        // premature re-fork in terminal — block or return EAGAIN instead.
+        if (pty->slave_refs == 0) {
+            if (pty->slave_opened) {
+                printk(LOG_INFO, "pty_master_read: EOF pty=%d (slave closed)\n", pty->index);
+                return 0;  // real EOF
+            }
+            // Slave not yet opened: block or EAGAIN
+            if (pty_is_nonblock(proc, pty, 1)) return -EAGAIN;
+            pty->m_read_pid = proc->pid;
+            proc->state = BLOCKED;
+            proc->wait_event = WAIT_PIPE;
+            schedule();
+            pty->m_read_pid = -1;
+            if (pty_eintr_check(proc)) return -EINTR;
+            continue;  // re-check conditions after wake
         }
         if (pty_is_nonblock(proc, pty, 1)) return -EAGAIN;
 
@@ -385,6 +397,7 @@ int64_t pty_slave_write(struct pty *pty, struct task_t *proc,
         if (wrote) {
             written++;
             if (pty->m_read_pid >= 0) wake_process(pty->m_read_pid);
+            if (pty->master_owner_pid >= 0) wake_process(pty->master_owner_pid);
             continue;
         }
 

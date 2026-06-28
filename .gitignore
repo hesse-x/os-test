@@ -6,7 +6,7 @@
 *.swn
 *.bin
 tmp
-log*
+log.txt
 *.out
 
 build

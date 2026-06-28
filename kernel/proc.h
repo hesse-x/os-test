@@ -243,5 +243,35 @@ mmap_region_t *add_mmap_region(task_t *proc, uint64_t vaddr, uint64_t size,
 // Timer queue operations (must be called under scheduler_lock)
 void timer_queue_insert(int cpu, task_t *proc);
 void timer_queue_remove(task_t *proc);
+static inline void timer_queue_cancel(task_t *proc) {
+    if (proc->wait_deadline != 0) {
+        timer_queue_remove(proc);
+        proc->wait_deadline = 0;
+    }
+}
+
+/*
+ * wake_from_wait - 将阻塞进程从 timer_queue 移除并唤醒至 READY，入 run_queue。
+ *
+ * 前置条件：
+ *   - p->state == BLOCKED（调用者应在 if (p->state == BLOCKED && ...) 内调用）
+ *   - 持有 p->assigned_cpu 对应的 scheduler_lock + 关中断
+ *     （即 spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags)）
+ *
+ * 后置条件：
+ *   - p 不在 timer_queue 上（wait_deadline == 0）
+ *   - p->state == READY，p->wait_event == WAIT_NONE，p->wait_timed_out == 0
+ *   - p 在 assigned_cpu 的 run_queue 上
+ *   - cpu_locals[assigned_cpu].run_count 已递增
+ */
+static inline void wake_from_wait(task_t *p) {
+    timer_queue_cancel(p);
+    p->state = READY;
+    p->wait_event = WAIT_NONE;
+    p->wait_timed_out = 0;
+    int cpu = p->assigned_cpu;
+    list_push_back(&cpu_locals[cpu].run_queue, &p->run_node);
+    cpu_locals[cpu].run_count++;
+}
 
 #endif // KERNEL_PROC_H

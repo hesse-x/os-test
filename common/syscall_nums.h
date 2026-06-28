@@ -52,7 +52,7 @@
 #define SYS_KILL         43
 #define SYS_SIGACTION    44
 #define SYS_SIGRETURN    45
-#define SYS_DEBUG_PRINT  46
+#define SYS_DEBUG_MEMSTAT 46
 
 // ===================== VFS syscall numbers =====================
 #define SYS_OPEN        47

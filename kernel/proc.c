@@ -364,15 +364,13 @@ void mm_release(mm_t *mm, pid_t owner_pid) {
                 tasks[i].wait_event == WAIT_REQ_REPLY &&
                 tasks[i].req_target_pid == owner_pid) {
                 int wcpu = tasks[i].assigned_cpu;
-                spin_lock(&cpu_locals[wcpu].scheduler_lock);
+                uint64_t wflags;
+                spin_lock_irqsave(&cpu_locals[wcpu].scheduler_lock, &wflags);
                 if (tasks[i].state == BLOCKED && tasks[i].wait_event == WAIT_REQ_REPLY) {
-                    tasks[i].state = READY;
-                    tasks[i].wait_event = WAIT_NONE;
                     tasks[i].req_result = ESRCH;
-                    list_push_back(&cpu_locals[wcpu].run_queue, &tasks[i].run_node);
-                    cpu_locals[wcpu].run_count++;
+                    wake_from_wait(&tasks[i]);
                 }
-                spin_unlock(&cpu_locals[wcpu].scheduler_lock);
+                spin_unlock_irqrestore(&cpu_locals[wcpu].scheduler_lock, wflags);
             }
         }
 
@@ -383,15 +381,13 @@ void mm_release(mm_t *mm, pid_t owner_pid) {
                 tasks[i].wait_event == WAIT_MSG_REPLY &&
                 tasks[i].msg_target_pid == owner_pid) {
                 int wcpu = tasks[i].assigned_cpu;
-                spin_lock(&cpu_locals[wcpu].scheduler_lock);
+                uint64_t wflags;
+                spin_lock_irqsave(&cpu_locals[wcpu].scheduler_lock, &wflags);
                 if (tasks[i].state == BLOCKED && tasks[i].wait_event == WAIT_MSG_REPLY) {
-                    tasks[i].state = READY;
-                    tasks[i].wait_event = WAIT_NONE;
                     tasks[i].msg_result = -ESRCH;
-                    list_push_back(&cpu_locals[wcpu].run_queue, &tasks[i].run_node);
-                    cpu_locals[wcpu].run_count++;
+                    wake_from_wait(&tasks[i]);
                 }
-                spin_unlock(&cpu_locals[wcpu].scheduler_lock);
+                spin_unlock_irqrestore(&cpu_locals[wcpu].scheduler_lock, wflags);
             }
         }
     }
@@ -609,12 +605,14 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
 
     // 8. Enqueue to scheduler
     int cpu = child->assigned_cpu;
-    spin_lock(&cpu_locals[cpu].scheduler_lock);
+    uint64_t rflags;
+    spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
     list_push_back(&cpu_locals[cpu].run_queue, &child->run_node);
     cpu_locals[cpu].run_count++;
-    spin_unlock(&cpu_locals[cpu].scheduler_lock);
+    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
 
     // 9. Parent returns child PID
+    printk(LOG_INFO, "sys_fork: parent=%d → child=%d\n", parent->pid, child->pid);
     return (int64_t)child->pid;
 }
 
@@ -666,6 +664,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
         kfree(elf_buf);
         return (int64_t)-ENOEXEC;
     }
+    printk(LOG_INFO, "execve: pid=%d path=%s size=%lu magic OK\n", proc->pid, pathname, (unsigned long)file_size);
 
     // 5. Allocate new PML4, copy kernel entries (before releasing old space)
     Page *pml4_page = bfc_alloc_page(1);
@@ -849,6 +848,10 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
 // Must be called under scheduler_lock of the target CPU
 
 void timer_queue_insert(int cpu, task_t *proc) {
+    // Remove from any existing list first to prevent duplicate insertion
+    // (safe no-op if wait_node is already self-referencing / not in any list)
+    list_remove(&proc->wait_node);
+
     list_node_t *head = &cpu_locals[cpu].timer_queue;
     list_node_t *node = head->next;
     while (node != head) {
@@ -1057,9 +1060,14 @@ static int pick_cpu() {
 }
 
 task_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
+    task_t *proc = NULL;
+    Page *stack_pages = NULL;
+    mm_t *mm = NULL;
+    Page *user_stack_page = NULL;
+    int user_stack_mapped = 0;  // number of user stack pages successfully mapped
+
     // 1. Find free slot under tasks_lock
     spin_lock(&tasks_lock);
-    task_t *proc = NULL;
     int alloc_idx = -1;
     for (int i = 0; i < MAX_PROC; i++) {
         if (tasks[i].pid < 0) {
@@ -1068,28 +1076,36 @@ task_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
             break;
         }
     }
-    if (!proc) { spin_unlock(&tasks_lock); printk(LOG_ERROR, "process_create_elf: no free slot\n"); return NULL; }
+    if (!proc) {
+        spin_unlock(&tasks_lock);
+        printk(LOG_ERROR, "process_create_elf: no free slot\n");
+        return NULL;
+    }
+
     // 2. Allocate kernel stack (8KB = 2 pages)
-    Page *stack_pages = bfc_alloc_page(2);
-    if (!stack_pages) { spin_unlock(&tasks_lock); return NULL; }
+    stack_pages = bfc_alloc_page(2);
+    if (!stack_pages) goto fail_slot;
     uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
     uint64_t k_stack_top = (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) + 2 * PAGE_SIZE;
 
     // 3. Create mm_t (allocates PML4 + files_t)
-    mm_t *mm = mm_create();
-    if (!mm) { spin_unlock(&tasks_lock); return NULL; }
+    mm = mm_create();
+    if (!mm) goto fail_stack;
     uint64_t pml4_phys = mm->cr3;
     uint64_t pml4_virt = (__force uint64_t)phys_to_virt((__force phys_addr_t)pml4_phys);
     uint64_t *new_pml4 = (uint64_t *)pml4_virt;
 
     // 4. Load ELF segments into user address space
     elf_load_result_t lr = elf_load(elf_data, elf_size, new_pml4);
-    if (!lr.success) { mm_put(mm); spin_unlock(&tasks_lock); printk(LOG_ERROR, "process_create_elf: elf_load failed\n"); return NULL; }
+    if (!lr.success) {
+        printk(LOG_ERROR, "process_create_elf: elf_load failed\n");
+        goto fail_mm;
+    }
 
     // 5. Map user stack: 2048 pages (8MB) at 0x7FFFFFFF0000-0x7FFFFFFFE000
     int user_stack_pages = 2048;
-    Page *user_stack_page = bfc_alloc_page(user_stack_pages);
-    if (!user_stack_page) { mm_put(mm); spin_unlock(&tasks_lock); return NULL; }
+    user_stack_page = bfc_alloc_page(user_stack_pages);
+    if (!user_stack_page) goto fail_mm;
     uint64_t user_stack_phys = (__force uint64_t)page_to_phys(user_stack_page);
     uint64_t stack_base = 0x00007FFFFFFFE000 - (uint64_t)user_stack_pages * PAGE_SIZE;
 
@@ -1097,13 +1113,13 @@ task_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
         if (!map_user_page_direct(new_pml4, stack_base + i * PAGE_SIZE,
                                  user_stack_phys + i * PAGE_SIZE,
                                  PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
-            mm_put(mm);
-            spin_unlock(&tasks_lock);
-            return NULL;
+            user_stack_mapped = i;  // remember how many were mapped for partial cleanup
+            goto fail_user_stack;
         }
     }
+    user_stack_mapped = user_stack_pages;
 
-    // Map shared trampoline page at fixed user address
+    // Map shared trampoline page at fixed user address (failure is non-critical, just log)
     if (sig_trampoline_phys != 0) {
         if (!map_user_page_direct(new_pml4, SIG_TRAMPOLINE_ADDR, sig_trampoline_phys,
                                  PTE_PRESENT | PTE_USER)) {
@@ -1160,12 +1176,32 @@ task_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     spin_unlock(&tasks_lock);
 
     // Enqueue to target CPU's run_queue under scheduler_lock
-    spin_lock(&cpu_locals[assigned_cpu].scheduler_lock);
+    uint64_t rflags;
+    spin_lock_irqsave(&cpu_locals[assigned_cpu].scheduler_lock, &rflags);
     list_push_back(&cpu_locals[assigned_cpu].run_queue, &proc->run_node);
     cpu_locals[assigned_cpu].run_count++;
-    spin_unlock(&cpu_locals[assigned_cpu].scheduler_lock);
+    spin_unlock_irqrestore(&cpu_locals[assigned_cpu].scheduler_lock, rflags);
 
     return proc;
+
+    // === Error cleanup paths ===
+fail_user_stack:
+    // Unmap partially-mapped user stack pages (mm_put will free PML4 + page table pages)
+    for (int i = 0; i < user_stack_mapped; i++) {
+        unmap_user_pages(new_pml4, stack_base + i * PAGE_SIZE, stack_base + (i + 1) * PAGE_SIZE, 1);
+    }
+    bfc_free_page(user_stack_page, user_stack_pages);
+    // fall through to mm cleanup
+fail_mm:
+    mm_put(mm);  // releases PML4 + page table pages + files_t
+    // fall through to stack cleanup
+fail_stack:
+    bfc_free_page(stack_pages, 2);
+    // fall through to slot cleanup
+fail_slot:
+    // proc slot was never modified (pid still -1, state still UNUSED)
+    spin_unlock(&tasks_lock);
+    return NULL;
 }
 
 // Update TSS IOPM for the current CPU to match the given process
@@ -1205,7 +1241,7 @@ void schedule() {
             update_tss_iopm(idle);
             spin_unlock(&cpu_locals[my_cpu].scheduler_lock);
             switch_to(prev, idle);
-            spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
+            spin_lock(&cpu_locals[my_cpu].scheduler_lock);
             spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
             return;
         }
@@ -1241,11 +1277,13 @@ void schedule() {
 
     // Release lock but keep interrupts disabled — switch_to must run under cli
     // to prevent interrupt handlers from corrupting the stack during RSP/CR3 switch.
-    // After switch_to returns (prev is resumed on prev's stack), re-acquire and
-    // restore interrupts via flags saved on prev's stack by spin_lock_irqsave.
+    // After switch_to returns (prev is resumed on prev's stack), re-acquire lock
+    // WITHOUT saving flags (spin_lock, not spin_lock_irqsave) so the original
+    // flags saved before the context switch remain intact. Then unlock+irqrestore
+    // using those original flags to correctly restore the interrupt state.
     spin_unlock(&cpu_locals[my_cpu].scheduler_lock);
     switch_to(prev, next);
-    spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
+    spin_lock(&cpu_locals[my_cpu].scheduler_lock);
     spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
 }
 
@@ -1318,6 +1356,8 @@ void task_reap(task_t *proc) {
     proc->wait_deadline = 0;
     proc->wait_timed_out = 0;
     list_init(&proc->run_node);
+    // If wait_node is still linked in a list, list_init silently corrupts it
+    WARN_ON(proc->wait_node.prev != &proc->wait_node);
     list_init(&proc->wait_node);
     // recv queue
     proc->recv_head = 0;

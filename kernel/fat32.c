@@ -147,8 +147,13 @@ static int fat32_write_fat_entry(uint32_t cluster, uint32_t value) {
 /* Walk FAT chain from start_cluster, return the cluster at page_index */
 uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index) {
     uint32_t c = start_cluster;
+    uint64_t max_walk = page_index * 2 + 1;  // safety limit: chain should not be longer than 2x page_index
     for (uint64_t i = 0; i < page_index; i++) {
         if (c < 2 || c >= 0x0FFFFFF8) return c;
+        if (i > max_walk) {
+            WARN_ON(1);  // FAT chain loop detected
+            return 0x0FFFFFF8;  // treat as EOF to prevent infinite loop
+        }
         uint32_t next = fat_read_entry(c);
         if (next >= 0x0FFFFFF8) return next;
         c = next;
@@ -187,7 +192,12 @@ static uint32_t fat32_allocate_cluster(void) {
 /* Free an entire cluster chain starting from start_cluster */
 static void fat32_free_chain(uint32_t start_cluster) {
     uint32_t c = start_cluster;
+    int max_free = 1024;  // safety limit: max clusters in a single chain
     while (c >= 2 && c < 0x0FFFFFF8) {
+        if (--max_free <= 0) {
+            WARN_ON(1);  // FAT chain loop detected
+            break;
+        }
         uint32_t next = fat_read_entry(c);
         fat32_write_fat_entry(c, 0);
         if (c < next_free_hint) next_free_hint = c;
@@ -747,10 +757,16 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf, size_t count
             } else {
                 /* Find tail of chain and link */
                 uint32_t tail = ip->start_cluster;
-                while (1) {
+                int max_tail_walk = 1024;
+                while (max_tail_walk-- > 0) {
                     uint32_t next = fat_read_entry(tail);
                     if (next >= 0x0FFFFFF8) break;
                     tail = next;
+                }
+                if (max_tail_walk <= 0) {
+                    WARN_ON(1);
+                    spin_unlock(&fat_lock);
+                    return -EIO;
                 }
                 fat32_link_cluster(tail, new_cluster);
             }

@@ -63,7 +63,9 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3,
     /* 2. /dev/ prefix — delegate to devtmpfs */
     if (path[0] == '/' && path[1] == 'd' && path[2] == 'e' &&
         path[3] == 'v' && path[4] == '/') {
+        printk(LOG_DEBUG, "sys_open: pid=%d path=%s\n", current_task->pid, path);
         int64_t dev_ret = devtmpfs_open(current_task, path + 5, flags);
+        printk(LOG_DEBUG, "sys_open: devtmpfs_open returned %lld\n", (long long)dev_ret);
         return dev_ret;
     }
 
@@ -206,6 +208,7 @@ int64_t sys_getdents(int64_t arg1, int64_t arg2, int64_t arg3,
     size_t len = (size_t)arg3;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EINVAL;
+    if (len == 0 || len > 4096) return (int64_t)-EINVAL;
 
     struct file *f = current_task->mm->files->fd_table[fd];
     if (!f || f->type != FD_DIR) return (int64_t)-ENOTDIR;
