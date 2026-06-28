@@ -8,10 +8,16 @@
 
 typedef struct spinlock_t {
     volatile uint32_t locked;
-    int cpu_id;  // -1 = unlocked; debug builds track owner, release builds ignore
+#ifndef NDEBUG
+    int cpu_id;       // debug: track owner, recursive deadlock detection
+#endif
 } spinlock_t;
 
-#define SPINLOCK_INIT (spinlock_t){0, -1}
+#ifdef NDEBUG
+#define SPINLOCK_INIT (spinlock_t){.locked = 0}
+#else
+#define SPINLOCK_INIT (spinlock_t){.locked = 0, .cpu_id = -1}
+#endif
 
 #ifdef NDEBUG
 

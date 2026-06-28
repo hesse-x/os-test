@@ -108,12 +108,14 @@ uint64_t devtmpfs_open(struct task_t *proc, const char *name, int flags) {
     struct inode *ip = devtmpfs_lookup(name);
     if (!ip) return (uint64_t)(-(uint64_t)ENOENT);
 
-    /* Allocate fd */
+    /* Allocate fd (under fd_lock) */
+    spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    spin_lock(fdlk);
     int fd = -1;
     for (int j = 3; j < MAX_FD; j++) {
         if (proc->mm->files->fd_table[j].type == FD_NONE) { fd = j; break; }
     }
-    if (fd < 0) return (uint64_t)(-(uint64_t)EMFILE);
+    if (fd < 0) { spin_unlock(fdlk); return (uint64_t)(-(uint64_t)EMFILE); }
 
     proc->mm->files->fd_table[fd].type = FD_DEV;
     proc->mm->files->fd_table[fd].flags = flags;
@@ -130,10 +132,12 @@ uint64_t devtmpfs_open(struct task_t *proc, const char *name, int flags) {
                 inode_put(ip);
                 __memset(&proc->mm->files->fd_table[fd], 0, sizeof(struct file));
                 proc->mm->files->fd_table[fd].type = FD_NONE;
+                spin_unlock(fdlk);
                 return (uint64_t)(-(uint64_t)(-rc));
             }
         }
     }
+    spin_unlock(fdlk);
     return (uint64_t)fd;
 }
 

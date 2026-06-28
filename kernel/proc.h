@@ -10,6 +10,7 @@
 #include "common/signal.h"
 #include "common/mman.h"
 #include "common/types.h"
+#include "kernel/atomic.h"
 
 // ===================== SHM fd model =====================
 #define SHM_KERNEL  1  // page managed by kernel, don't free on ref_count==0
@@ -29,7 +30,7 @@ typedef struct shm {
     uint64_t phys;          // physical page start address (0 if page_list used)
     size_t   npages;        // contiguous pages (0 if page_list used)
     size_t   file_size;     // logical size set by ftruncate (≤ total * PAGE_SIZE)
-    int      ref_count;     // reference count
+    refcount_t s_count;     // reference count
     int      flags;         // SHM_KERNEL | SHM_SEALED
     uint32_t seals;         // active F_SEAL_* bitmask
     char     name[32];      // debug name from memfd_create (null-terminated)
@@ -70,7 +71,7 @@ typedef struct pipe {
     uint32_t tail;       // read position
     pid_t read_pid;      // reader blocked process PID (-1 if none)
     pid_t write_pid;     // writer blocked process PID (-1 if none)
-    int ref_count;       // open fd count
+    refcount_t p_count;       // open fd count
 } pipe_t;
 
 struct unix_sock;  // forward declaration from kernel/socket.h
@@ -91,7 +92,7 @@ typedef struct file {
             int32_t fs_fd;
             uint64_t _offset;
             uint64_t file_size;
-            int      ref_count;
+            refcount_t f_count;
         } file_data;
         struct unix_sock *sock;  // if type == FD_SOCKET
         struct pty *pty;         // if type == FD_TTY
@@ -100,14 +101,15 @@ typedef struct file {
 
 // ===================== files_t (file descriptor table, independent refcount) =====================
 typedef struct files_t {
+    spinlock_t fd_lock;               // protects fd_table modifications and cross-process reads
     struct file fd_table[MAX_FD];     // per-process file descriptor table
-    int ref_count;                    // reference count, initial=1; CLONE_FILES shares +1
+    refcount_t f_count;               // reference count, initial=1; CLONE_FILES shares +1
 } files_t;
 
 // ===================== mm_t (address space) =====================
 typedef struct mm_t {
     uint64_t cr3;                     // authoritative PML4 physical address (task_t.cr3 is cached copy)
-    int ref_count;                    // COW/CLONE_VM reserved, initial=1
+    refcount_t m_count;                    // COW/CLONE_VM reserved, initial=1
     struct files_t *files;            // file descriptor table pointer (independent refcount)
     uint64_t mmap_brk;               // mmap area high watermark (initial 0x800000)
     uint64_t mmap_phys_brk;          // MAP_PHYSICAL area high watermark (initial MAP_PHYSICAL_BASE)

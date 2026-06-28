@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "kernel/spinlock.h"
+#include "kernel/atomic.h"
 
 #define INODE_REGULAR  1
 #define INODE_DIR      2
@@ -14,7 +15,7 @@ struct inode {
     uint64_t size;
     uint32_t mode;
     int      nlink;
-    int      ref_count;
+    refcount_t i_count;
     spinlock_t i_lock;
     void    *i_priv;          /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
 

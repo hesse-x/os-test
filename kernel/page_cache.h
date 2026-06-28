@@ -4,12 +4,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "kernel/inode.h"
+#include "kernel/atomic.h"
 
 struct cache_page {
     struct inode   *inode;
     uint64_t        page_index;
     uint8_t        *data;          /* kmalloc(4096) on fill, kfree on evict */
-    int             pin_count;
+    atomic_t         pin_count;
     bool            dirty;
     bool            filling;       /* true while disk I/O in progress — others must wait */
     struct cache_page *hash_next;

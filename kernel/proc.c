@@ -55,7 +55,8 @@ files_t *files_create(void) {
     files_t *files = (files_t *)kmalloc(sizeof(files_t));
     if (!files) return NULL;
     __memset(files, 0, sizeof(files_t));
-    files->ref_count = 1;
+    files->fd_lock = SPINLOCK_INIT;
+    refcount_set(&files->f_count, 1);
     for (int j = 0; j < MAX_FD; j++) {
         files->fd_table[j].type = FD_NONE;
     }
@@ -69,9 +70,8 @@ void close_fd_internal(files_t *files, int fd) {
     if (f->type == FD_PIPE) {
         pipe_t *p = f->pipe;
         if (p) {
-            p->ref_count--;
             wake_pipe_peers(p, f->flags);
-            if (p->ref_count == 0) {
+            if (refcount_dec_and_test(&p->p_count)) {
                 kfree(p->buf);
                 kfree(p);
             }
@@ -81,8 +81,7 @@ void close_fd_internal(files_t *files, int fd) {
     } else if (f->type == FD_REGULAR || f->type == FD_DIR || f->type == FD_DEV) {
         if (f->inode) inode_put(f->inode);
     } else if (f->type == FD_FILE) {
-        f->file_data.ref_count--;
-        if (f->file_data.ref_count == 0 && f->file_data.fs_pid >= 0) {
+        if (refcount_dec_and_test(&f->file_data.f_count) && f->file_data.fs_pid >= 0) {
             file_io_close_req req;
             __memset(&req, 0, sizeof(req));
             req.cmd = 4;  // FILE_CMD_CLOSE
@@ -100,7 +99,8 @@ void close_fd_internal(files_t *files, int fd) {
 
 void files_put(files_t *files) {
     if (!files) return;
-    if (__atomic_sub_fetch(&files->ref_count, 1, __ATOMIC_SEQ_CST) == 0) {
+    if (refcount_dec_and_test(&files->f_count)) {
+        // f_count=0 means no other thread holds a reference — no racing fd operations
         for (int fd = 0; fd < MAX_FD; fd++) {
             file_t *f = &files->fd_table[fd];
             if (f->type == FD_NONE) continue;
@@ -150,7 +150,7 @@ mm_t *mm_create(void) {
     #endif
 
     mm->cr3 = pml4_phys;
-    mm->ref_count = 1;
+    refcount_set(&mm->m_count, 1);
     mm->parent_pid = -1;
     mm->mmap_brk = 0x800000;
     mm->mmap_phys_brk = MAP_PHYSICAL_BASE;
@@ -315,7 +315,7 @@ void mm_release(mm_t *mm, pid_t owner_pid) {
 
 void mm_put(mm_t *mm) {
     if (!mm) return;
-    if (__atomic_sub_fetch(&mm->ref_count, 1, __ATOMIC_SEQ_CST) == 0) {
+    if (refcount_dec_and_test(&mm->m_count)) {
         mm_release(mm, -1);
     }
 }
@@ -395,9 +395,9 @@ static void __attribute__((unused)) copy_fd_table(files_t *parent_files, files_t
         child_files->fd_table[fd] = parent_files->fd_table[fd];
         file_t *f = &child_files->fd_table[fd];
         if (f->type == FD_NONE) continue;
-        if (f->type == FD_PIPE && f->pipe) f->pipe->ref_count++;
+        if (f->type == FD_PIPE && f->pipe) refcount_inc(&f->pipe->p_count);
         if (f->type == FD_SHM && f->shm) shm_get(f->shm);
-        if (f->type == FD_FILE) f->file_data.ref_count++;
+        if (f->type == FD_FILE) refcount_inc(&f->file_data.f_count);
         if (f->type == FD_REGULAR || f->type == FD_DIR || f->type == FD_DEV) {
             if (f->inode) inode_get(f->inode);
         }
@@ -622,6 +622,8 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
     // === Point of no return: old address space will be replaced ===
 
     // 8. Close FD_CLOEXEC fds (before releasing old space)
+    spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    spin_lock(fdlk);
     for (int i = 0; i < MAX_FD; i++) {
         if (proc->mm->files->fd_table[i].type != FD_NONE &&
             (proc->mm->files->fd_table[i].flags & FD_CLOEXEC)) {
@@ -630,6 +632,7 @@ uint64_t sys_execve(uint64_t a1, uint64_t a2, uint64_t a3,
             proc->mm->files->fd_table[i].type = FD_NONE;
         }
     }
+    spin_unlock(fdlk);
 
     // 9. Switch to new address space FIRST, then free old pages.
     //    If we free before switching, subsequent kmalloc/kfree can reuse
@@ -1173,7 +1176,7 @@ void task_reap(task_t *proc) {
         pid_t pid_for_cleanup = owner_pid;
         mm_t *mm = proc->mm;
         proc->mm = NULL;
-        if (__atomic_sub_fetch(&mm->ref_count, 1, __ATOMIC_SEQ_CST) == 0) {
+        if (refcount_dec_and_test(&mm->m_count)) {
             mm_release(mm, pid_for_cleanup);
         }
     } else {

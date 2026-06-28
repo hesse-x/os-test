@@ -80,7 +80,7 @@ void page_cache_init(void) {
         __memset(cp, 0, sizeof(*cp));
         cp->inode = NULL;
         cp->data = NULL;
-        cp->pin_count = 0;
+        atomic_set(&cp->pin_count, 0);
         cp->dirty = false;
         free_list_push(cp);
     }
@@ -100,7 +100,7 @@ struct cache_page *page_cache_lookup(struct inode *ip, uint64_t page_index) {
                  * see the update via atomic loads. */
                 while (__atomic_load_n(&cp->filling, __ATOMIC_ACQUIRE))
                     __asm__ volatile("pause");
-                cp->pin_count++;
+                atomic_inc(&cp->pin_count);
                 lru_touch(cp);
                 spin_unlock(&page_cache_lock);
                 return cp;
@@ -117,7 +117,7 @@ static int page_cache_evict(void) {
     /* Walk from LRU tail (least recently used), find first evictable page */
     struct cache_page *cp = lru_tail.lru_prev;
     while (cp != &lru_head) {
-        if (cp->pin_count == 0 && !cp->dirty && cp->data) {
+        if (atomic_read(&cp->pin_count) == 0 && !cp->dirty && cp->data) {
             /* Remove from hash */
             unsigned idx = page_cache_hashfn(cp->inode, cp->page_index);
             struct cache_page **pp = &page_cache_hash[idx];
@@ -157,7 +157,7 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
                 /* Wait while another CPU is filling this page */
                 while (__atomic_load_n(&existing->filling, __ATOMIC_ACQUIRE))
                     __asm__ volatile("pause");
-                existing->pin_count++;
+                atomic_inc(&existing->pin_count);
                 lru_touch(existing);
                 spin_unlock(&page_cache_lock);
                 return existing;
@@ -192,7 +192,7 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
 
     new_cp->inode = ip;
     new_cp->page_index = page_index;
-    new_cp->pin_count = 1;
+    atomic_set(&new_cp->pin_count, 1);
     new_cp->dirty = false;
     new_cp->filling = true;   /* visible in hash but data not ready yet */
 
@@ -282,9 +282,10 @@ int page_cache_writeback(struct cache_page *cp) {
 
 void page_cache_release(struct cache_page *cp) {
     if (!cp) return;
-    WARN_ON(cp->pin_count <= 0);
+    WARN_ON(atomic_read(&cp->pin_count) <= 0);
     spin_lock(&page_cache_lock);
-    if (cp->pin_count > 0) cp->pin_count--;
+    int old = atomic_dec_return(&cp->pin_count);
+    WARN_ON(old < 0);
     spin_unlock(&page_cache_lock);
 }
 

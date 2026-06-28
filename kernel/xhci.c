@@ -652,7 +652,7 @@ static void xhci_init_keyboard() {
       kshm->phys = usb_hid_shm_phys;
       kshm->npages = 1;
       kshm->file_size = 4096;
-      kshm->ref_count = 0;  // kernel holds no reference; kbd_driver's attach adds ref
+      refcount_set(&kshm->s_count, 1);  // kernel holds permanent reference; kbd_driver attach bumps to 2
       kshm->flags = SHM_KERNEL;
       kshm->seals = 0;
       kshm->name[0] = '\0';

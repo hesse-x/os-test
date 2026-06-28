@@ -5,6 +5,7 @@
 #include "kernel/list.h"
 #include "kernel/proc.h"
 #include "kernel/spinlock.h"
+#include "kernel/atomic.h"
 #include "common/socket.h"
 
 // ===================== sk_buff (socket buffer) =====================
@@ -39,7 +40,7 @@ typedef struct unix_sock {
     int      state;                   // UNIX_* state
     pid_t    peer;                    // peer PID (CONNECTED)
     struct unix_sock *peer_sock;      // direct pointer to peer socket (socketpair/connect)
-    int      ref_count;               // fd ref count (dup2 sharing)
+    refcount_t u_count;               // fd ref count (dup2 sharing)
 
     // Receive queue (skb linked list)
     struct sk_buff *recv_queue_head;

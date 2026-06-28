@@ -14,13 +14,13 @@
 | 2.2 BUG_ON/WARN_ON/ASSERT | ✅❌ | 宏已定义（`log.h:27-42`），零调用点 |
 | 2.3 panic() | ✅❌ | `log.c:22-36` 已实现，`trap_dispatch` 内核态异常仍调 `halt()` 而非 `panic()` |
 | 2.4 栈回溯通用化 | ✅❌ | `dump_stack_trace()` 已提取为独立函数（`log.c:38-51`），`trap_dispatch` 仍有独立回溯代码未复用 |
-| 3.1 atomic_t/refcount_t | ❌ | 无 `kernel/atomic.h`；`__atomic_*` builtins 散落各处 |
-| 3.2 替换 plain ref_count | ❌ | 全部 8 个 ref_count/pin_count 字段仍为 `int`（含 `files_t::ref_count`、`mm_t::ref_count`、`unix_sock::ref_count`） |
-| 3.3 slab 并发修复 | ❌ | kmalloc 快路径（`slab.c:95-101`）和 kfree 同 CPU 路径（`slab.c:177-195`）仍无锁 |
-| 3.4 inode lookup/create 竞态 | 🔶 | `inode_hash_lock` 已存在；但 `fat32_open` 中 `lookup` + `create` 非原子（`fat32.c:676-680`） |
-| 3.5 fd_table 并发 | ❌ | 无 `fd_lock`；socket peer scan/SCM_RIGHTS 跨进程访问无保护 |
-| 3.6 spinlock 增强 | ❌ | `spinlock_t` 无 `cpu_id` 字段（`spinlock.h:7-9`） |
-| 3.7 锁协议文档化 | ❌ | |
+| 3.1 atomic_t/refcount_t | ✅ | `kernel/atomic.h` 已创建，包含 atomic_t/refcount_t 全部定义 |
+| 3.2 替换 plain ref_count | ✅ | 8 个 ref_count/pin_count 字段已替换为 refcount_t/atomic_t |
+| 3.3 slab 并发修复 | ✅ | kmalloc/kfree 全路径持 cache->lock |
+| 3.4 inode lookup/create 竞态 | ✅ | `inode_get_or_create` 已实现并被 `fat32_open` 使用；`inode_lookup/inode_create` 不再有串联调用 |
+| 3.5 fd_table 并发 | ✅ | `fd_lock` 已添加并保护所有 fd_table 操作（sys_close/dup2/open/pipe/install_fd/socket/shm） |
+| 3.6 spinlock 增强 | ✅ | `spinlock_t` debug 构建含 `cpu_id` 字段 + 递归死锁检测 |
+| 3.7 锁协议文档化 | ✅ | 完整 15 层锁层级表 + fd_lock 条目 + socket_lock→fd_lock 特例标注 |
 | 4.1 IPC 阻塞超时 | ❌ | `sys_req/sys_msg_to/sys_ioctl` 均设 `wait_deadline=0`（`trap.c:797,2744,1683`） |
 | 4.2 socket 阻塞超时 | ❌ | `accept/recvmsg` 阻塞无 `wait_deadline` |
 | 4.3 FAT chain 循环检测 | ❌ | `walk_chain/free_chain/write tail loop` 均无循环计数器 |

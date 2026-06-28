@@ -23,8 +23,8 @@ struct inode *inode_lookup(uint32_t ino) {
     struct inode *ip = inode_hash_table[idx];
     while (ip) {
         if (ip->ino == ino) {
-            ASSERT(ip->ref_count > 0);
-            ip->ref_count++;
+            ASSERT(refcount_read(&ip->i_count) > 0);
+            refcount_inc(&ip->i_count);
             spin_unlock(&inode_hash_lock);
             return ip;
         }
@@ -44,7 +44,7 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
     ip->size = size;
     ip->mode = (type == INODE_DIR) ? 0040755 : (type == INODE_DEV) ? 0020000 : 0100644;
     ip->nlink = 1;
-    ip->ref_count = 1;
+    refcount_set(&ip->i_count, 1);
     ip->i_lock = SPINLOCK_INIT;
     ip->i_priv = NULL;
     ip->start_cluster = start_cluster;
@@ -72,7 +72,7 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
     struct inode *ip = inode_hash_table[idx];
     while (ip) {
         if (ip->ino == ino) {
-            ip->ref_count++;
+            refcount_inc(&ip->i_count);
             spin_unlock(&inode_hash_lock);
             return ip;
         }
@@ -90,7 +90,7 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
     ip->size = size;
     ip->mode = (type == INODE_DIR) ? 0040755 : (type == INODE_DEV) ? 0020000 : 0100644;
     ip->nlink = 1;
-    ip->ref_count = 1;
+    refcount_set(&ip->i_count, 1);
     ip->i_lock = SPINLOCK_INIT;
     ip->i_priv = NULL;
     ip->start_cluster = start_cluster;
@@ -106,17 +106,15 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
 }
 
 struct inode *inode_get(struct inode *ip) {
-    ASSERT(ip->ref_count > 0);
-    __atomic_add_fetch(&ip->ref_count, 1, __ATOMIC_SEQ_CST);
+    ASSERT(refcount_read(&ip->i_count) > 0);
+    refcount_inc(&ip->i_count);
     return ip;
 }
 
 void inode_put(struct inode *ip) {
     if (!ip) return;
-    BUG_ON(ip->ref_count < 0);
     spin_lock(&inode_hash_lock);
-    ip->ref_count--;
-    if (ip->ref_count <= 0) {
+    if (refcount_dec_and_test(&ip->i_count)) {
         unsigned idx = inode_hash(ip->ino);
         if (inode_hash_table[idx] == ip)
             inode_hash_table[idx] = ip->hash_next;

@@ -50,9 +50,8 @@ static int close_fd_trap(files_t *files, int fd) {
     if (f->type == FD_PIPE) {
         struct pipe *p = f->pipe;
         if (p) {
-            p->ref_count--;
             wake_pipe_peers(p, f->flags);
-            if (p->ref_count == 0) {
+            if (refcount_dec_and_test(&p->p_count)) {
                 kfree(p->buf);
                 kfree(p);
             }
@@ -519,14 +518,13 @@ void syscall_dispatch(trapframe_t *tf) {
 // ===================== SHM reference counting =====================
 struct shm *shm_get(struct shm *shm) {
     if (!shm) return NULL;
-    __atomic_add_fetch(&shm->ref_count, 1, __ATOMIC_RELAXED);
+    refcount_inc(&shm->s_count);
     return shm;
 }
 
 void shm_put(struct shm *shm) {
     if (!shm) return;
-    int old = __atomic_fetch_sub(&shm->ref_count, 1, __ATOMIC_RELAXED);
-    if (old == 1) {
+    if (refcount_dec_and_test(&shm->s_count)) {
         // Last reference released
         if (!(shm->flags & SHM_KERNEL)) {
             if (shm->page_list) {
@@ -1533,9 +1531,13 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
 
     task_t *proc = current_task;
 
-    // Find free fd slot (start from 3 to reserve 0/1/2 for stdin/stdout/stderr)
+    spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    spin_lock(fdlk);
     int fd = alloc_fd(proc, 3);
-    if (fd < 0) return (uint64_t)-EMFILE;
+    if (fd < 0) {
+        spin_unlock(fdlk);
+        return (uint64_t)-EMFILE;
+    }
 
     proc->mm->files->fd_table[fd].type = FD_FILE;
     proc->mm->files->fd_table[fd].flags = flags;
@@ -1543,8 +1545,9 @@ uint64_t sys_install_fd_impl(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
     proc->mm->files->fd_table[fd].file_data.fs_fd = fs_fd;
     proc->mm->files->fd_table[fd].file_data._offset = offset;
     proc->mm->files->fd_table[fd].file_data.file_size = file_size;
-    proc->mm->files->fd_table[fd].file_data.ref_count = 1;
+    refcount_set(&proc->mm->files->fd_table[fd].file_data.f_count, 1);
 
+    spin_unlock(fdlk);
     return (uint64_t)fd;
 }
 
@@ -1815,7 +1818,7 @@ uint64_t sys_shm_create(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3,
     shm->phys = phys;
     shm->npages = npages;
     shm->file_size = size;  // logical size = allocated size
-    shm->ref_count = 1;  // fd holds initial reference
+    refcount_set(&shm->s_count, 1);  // fd holds initial reference
     shm->flags = 0;
     shm->seals = 0;
     shm->name[0] = '\0';  // no name by default
@@ -1865,22 +1868,28 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2
         task_t *target = &tasks[target_pid];
         if (target->pid != target_pid) return 0;
 
-        // Scan target's fd_table for FD_SHM
+        // Scan target's fd_table for FD_SHM (under target's fd_lock)
+        spinlock_t *target_fdlk = &target->mm->files->fd_lock;
+        spin_lock(target_fdlk);
         for (int i = 0; i < MAX_FD; i++) {
             if (target->mm && target->mm->files->fd_table[i].type == FD_SHM) {
                 target_shm = target->mm->files->fd_table[i].shm;
                 break;
             }
         }
+        spin_unlock(target_fdlk);
         if (!target_shm) return 0;
     }
 
     // Bump ref_count for the new fd
     shm_get(target_shm);
 
-    // Find free fd slot (skip 0/1 reserved for stdin/stdout)
+    // Find free fd slot (under current process's fd_lock)
+    spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    spin_lock(fdlk);
     int fd = alloc_fd(proc, 2);
     if (fd < 0) {
+        spin_unlock(fdlk);
         shm_put(target_shm);
         return 0;
     }
@@ -1888,6 +1897,7 @@ uint64_t sys_shm_attach(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2
     proc->mm->files->fd_table[fd].type = FD_SHM;
     proc->mm->files->fd_table[fd].flags = O_RDWR;
     proc->mm->files->fd_table[fd].shm = target_shm;
+    spin_unlock(fdlk);
 
     return (uint64_t)fd;
 }
@@ -1913,7 +1923,7 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
     shm->phys = 0;
     shm->npages = 0;
     shm->file_size = 0;
-    shm->ref_count = 1;  // fd holds initial reference
+    refcount_set(&shm->s_count, 1);  // fd holds initial reference
     shm->flags = (flags & MFD_ALLOW_SEALING) ? SHM_SEALED : 0;
     shm->seals = 0;
     shm->page_list = NULL;
@@ -1939,9 +1949,12 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
         shm->name[0] = '\0';
     }
 
-    // Find free fd slot (skip 0/1 reserved for stdin/stdout)
+    // Find free fd slot (under fd_lock, skip 0/1 reserved for stdin/stdout)
+    spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    spin_lock(fdlk);
     int fd = alloc_fd(proc, 2);
     if (fd < 0) {
+        spin_unlock(fdlk);
         kfree(shm);
         return 0;
     }
@@ -1949,6 +1962,7 @@ uint64_t sys_memfd_create(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _
     proc->mm->files->fd_table[fd].type = FD_SHM;
     proc->mm->files->fd_table[fd].flags = O_RDWR | ((flags & MFD_CLOEXEC) ? FD_CLOEXEC : 0);
     proc->mm->files->fd_table[fd].shm = shm;
+    spin_unlock(fdlk);
 
     return (uint64_t)fd;
 }
@@ -2166,10 +2180,14 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
 
     task_t *proc = current_task;
 
-    // Find two free fd slots (skip 0/1, reserved for stdin/stdout)
+    spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    spin_lock(fdlk);
     int read_fd = alloc_fd(proc, 3);
     int write_fd = (read_fd >= 0) ? alloc_fd(proc, read_fd + 1) : -EMFILE;
-    if (read_fd < 0 || write_fd < 0) return (uint64_t)-EMFILE;
+    if (read_fd < 0 || write_fd < 0) {
+        spin_unlock(fdlk);
+        return (uint64_t)-EMFILE;
+    }
 
     // Allocate pipe buffer (1 page)
     uint8_t *buf = (uint8_t *)kmalloc(PIPE_BUF_SIZE);
@@ -2187,7 +2205,7 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     p->tail = 0;
     p->read_pid = -1;
     p->write_pid = -1;
-    p->ref_count = 2;  // read end + write end
+    refcount_set(&p->p_count, 2);  // read end + write end
 
     // Fill fd table entries
     proc->mm->files->fd_table[read_fd].type = FD_PIPE;
@@ -2202,6 +2220,7 @@ uint64_t sys_pipe(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint6
     ((__force int *)fd_ptr)[0] = read_fd;
     ((__force int *)fd_ptr)[1] = write_fd;
 
+    spin_unlock(fdlk);
     return 0;
 }
 
@@ -2352,7 +2371,7 @@ uint64_t sys_write(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, ui
 
     while (written < len) {
         // Check if read end is closed (no readers left)
-        if (p->ref_count <= 1) {
+        if (refcount_read(&p->p_count) <= 1) {
             if (written > 0) break;
             return (uint64_t)-EPIPE;
         }
@@ -2558,7 +2577,7 @@ uint64_t sys_read(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
     // Block if pipe is empty
     while (p->head == p->tail) {
         // Check if write end is closed (all write fds gone)
-        if (p->ref_count == 1) return 0;  // EOF: no writers left
+        if (refcount_read(&p->p_count) == 1) return 0;  // EOF: no writers left
         // Non-blocking: return EAGAIN-like indication (0 bytes read)
         if (proc->mm->files->fd_table[fd].flags & O_NONBLOCK) return (uint64_t)-EAGAIN;
         p->read_pid = proc->pid;
@@ -2596,12 +2615,17 @@ uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint
     int fd = (int)arg1;
 
     if (fd < 0 || fd >= MAX_FD) return (uint64_t)-EBADF;
-    if (current_task->mm->files->fd_table[fd].type == FD_NONE) return (uint64_t)-EBADF;
+
+    spinlock_t *fdlk = &current_task->mm->files->fd_lock;
+    spin_lock(fdlk);
+    if (current_task->mm->files->fd_table[fd].type == FD_NONE) {
+        spin_unlock(fdlk);
+        return (uint64_t)-EBADF;
+    }
 
     if (current_task->mm->files->fd_table[fd].type == FD_FILE) {
         // Release ref_count; notify fs_driver on last close
-        current_task->mm->files->fd_table[fd].file_data.ref_count--;
-        if (current_task->mm->files->fd_table[fd].file_data.ref_count == 0) {
+        if (refcount_dec_and_test(&current_task->mm->files->fd_table[fd].file_data.f_count)) {
             // Notify fs_driver to close the session fd
             file_t_io_req req = {0};
             req.cmd = FILE_CMD_CLOSE;
@@ -2615,6 +2639,7 @@ uint64_t sys_close(uint64_t arg1, uint64_t _u1, uint64_t _u2, uint64_t _u3, uint
         close_fd_trap(current_task->mm->files, fd);
     }
 
+    spin_unlock(fdlk);
     return 0;
 }
 
@@ -2878,14 +2903,19 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
     if (old_fd == new_fd) return (uint64_t)new_fd;
 
     task_t *proc = current_task;
-    if (proc->mm->files->fd_table[old_fd].type == FD_NONE)
+
+    spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    spin_lock(fdlk);
+
+    if (proc->mm->files->fd_table[old_fd].type == FD_NONE) {
+        spin_unlock(fdlk);
         return (uint64_t)-EBADF;
+    }
 
     // Close new_fd if it's open
     if (proc->mm->files->fd_table[new_fd].type != FD_NONE) {
         if (proc->mm->files->fd_table[new_fd].type == FD_FILE) {
-            proc->mm->files->fd_table[new_fd].file_data.ref_count--;
-            if (proc->mm->files->fd_table[new_fd].file_data.ref_count == 0) {
+            if (refcount_dec_and_test(&proc->mm->files->fd_table[new_fd].file_data.f_count)) {
                 file_t_io_req req = {0};
                 req.cmd = FILE_CMD_CLOSE;
                 req.fs_fd = proc->mm->files->fd_table[new_fd].file_data.fs_fd;
@@ -2904,13 +2934,13 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
     // Re-establish pointer/shm fields from source (struct assignment copies union bytes,
     // but for FD_PIPE/SHM we need to also bump ref_count)
     if (proc->mm->files->fd_table[new_fd].type == FD_PIPE) {
-        proc->mm->files->fd_table[new_fd].pipe->ref_count++;
+        refcount_inc(&proc->mm->files->fd_table[new_fd].pipe->p_count);
     } else if (proc->mm->files->fd_table[new_fd].type == FD_SHM) {
         if (proc->mm->files->fd_table[new_fd].shm) {
             shm_get(proc->mm->files->fd_table[new_fd].shm);
         }
     } else if (proc->mm->files->fd_table[new_fd].type == FD_FILE) {
-        proc->mm->files->fd_table[new_fd].file_data.ref_count++;
+        refcount_inc(&proc->mm->files->fd_table[new_fd].file_data.f_count);
     } else if (proc->mm->files->fd_table[new_fd].type == FD_REGULAR ||
                proc->mm->files->fd_table[new_fd].type == FD_DIR) {
         if (proc->mm->files->fd_table[new_fd].inode) inode_get(proc->mm->files->fd_table[new_fd].inode);
@@ -2930,8 +2960,8 @@ uint64_t sys_dup2(uint64_t arg1, uint64_t arg2, uint64_t _u1, uint64_t _u2, uint
     } else if (proc->mm->files->fd_table[new_fd].type == FD_TTY) {
         pty_dup_fd(proc->mm->files, new_fd);
     }
-    // FD_DEV: target_pid copied by struct assignment
 
+    spin_unlock(fdlk);
     return (uint64_t)new_fd;
 }
 

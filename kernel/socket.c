@@ -138,7 +138,7 @@ struct unix_sock *unix_sock_alloc(void) {
     sock->state = UNIX_FREE;
     sock->peer = -1;
     sock->peer_sock = NULL;
-    sock->ref_count = 1;
+    refcount_set(&sock->u_count, 1);
     sock->recv_queue_head = NULL;
     sock->recv_queue_tail = NULL;
     sock->recv_queue_len = 0;
@@ -189,13 +189,12 @@ void unix_sock_free(struct unix_sock *sock) {
 }
 
 void unix_sock_acquire(struct unix_sock *sock) {
-    if (sock) sock->ref_count++;
+    if (sock) refcount_inc(&sock->u_count);
 }
 
 void unix_sock_release(struct unix_sock *sock) {
     if (!sock) return;
-    sock->ref_count--;
-    if (sock->ref_count <= 0) {
+    if (refcount_dec_and_test(&sock->u_count)) {
         unix_bind_unregister(sock);
         unix_sock_free(sock);
     }
@@ -292,8 +291,10 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
             skb_free(skb);
             return -ENOTCONN;
         }
-        spin_lock(&socket_lock);
+        // peer_fd_lock acquired separately after socket_lock — no nesting
         if (peer_proc->mm && peer_proc->mm->files) {
+            spinlock_t *peer_fdlk = &peer_proc->mm->files->fd_lock;
+            spin_lock(peer_fdlk);
             for (int fd = 0; fd < MAX_FD; fd++) {
                 if (peer_proc->mm->files->fd_table[fd].type == FD_SOCKET) {
                     struct unix_sock *ps = peer_proc->mm->files->fd_table[fd].sock;
@@ -303,18 +304,45 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
                     }
                 }
             }
+            spin_unlock(peer_fdlk);
         }
-    } else {
+
+        if (!peer_sock) {
+            skb_free(skb);
+            return -EPIPE;
+        }
+
+        // Check peer shutdown (under socket_lock)
         spin_lock(&socket_lock);
-    }
+        if (peer_sock->shutdown_read) {
+            spin_unlock(&socket_lock);
+            skb_free(skb);
+            return -EPIPE;
+        }
 
-    if (!peer_sock) {
+        // If O_NONBLOCK and queue is "full" (more than a reasonable limit), return EAGAIN
+        if ((flags & MSG_DONTWAIT) && peer_sock->recv_queue_len > 128) {
+            spin_unlock(&socket_lock);
+            skb_free(skb);
+            return -EAGAIN;
+        }
+
+        // Enqueue
+        skb_enqueue(peer_sock, skb);
+        pid_t blocked_reader = peer_sock->blocked_reader;
         spin_unlock(&socket_lock);
-        skb_free(skb);
-        return -EPIPE;
+
+        // Wake reader outside socket_lock
+        if (blocked_reader >= 0) {
+            wake_process(blocked_reader);
+        }
+
+        return (int64_t)total;
     }
 
-    // Check peer shutdown
+    // peer_sock via direct pointer — only need socket_lock for enqueue
+    spin_lock(&socket_lock);
+
     if (peer_sock->shutdown_read) {
         spin_unlock(&socket_lock);
         skb_free(skb);
@@ -330,12 +358,12 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
 
     // Enqueue
     skb_enqueue(peer_sock, skb);
-    pid_t blocked_reader = peer_sock->blocked_reader;
+    pid_t br = peer_sock->blocked_reader;
     spin_unlock(&socket_lock);
 
     // Wake reader outside socket_lock
-    if (blocked_reader >= 0) {
-        wake_process(blocked_reader);
+    if (br >= 0) {
+        wake_process(br);
     }
 
     return (int64_t)total;
@@ -369,23 +397,38 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             if (sock->state == UNIX_CLOSED ||
                 (sock->peer >= 0 && tasks[sock->peer].pid == sock->peer &&
                  tasks[sock->peer].state == ZOMBIE)) {
-                // Check if peer has closed
+                // Check if peer has closed — release socket_lock first to avoid nesting
+                pid_t peer_pid = sock->peer;
                 bool peer_closed = true;
                 if (sock->peer_sock) {
                     peer_closed = (sock->peer_sock->state != UNIX_CONNECTED);
-                } else if (sock->peer >= 0 && sock->peer < MAX_PROC) {
-                    task_t *pp = &tasks[sock->peer];
-                    if (pp->pid == sock->peer && pp->mm && pp->mm->files) {
-                        for (int fd = 0; fd < MAX_FD; fd++) {
-                            if (pp->mm->files->fd_table[fd].type == FD_SOCKET &&
-                                pp->mm->files->fd_table[fd].sock &&
-                                pp->mm->files->fd_table[fd].sock != sock &&
-                                pp->mm->files->fd_table[fd].sock->peer == current_task->pid) {
-                                peer_closed = false;
-                                break;
+                } else {
+                    spin_unlock(&socket_lock);
+                    if (peer_pid >= 0 && peer_pid < MAX_PROC) {
+                        task_t *pp = &tasks[peer_pid];
+                        if (pp->pid == peer_pid && pp->mm && pp->mm->files) {
+                            spinlock_t *peer_fdlk = &pp->mm->files->fd_lock;
+                            spin_lock(peer_fdlk);
+                            for (int fd = 0; fd < MAX_FD; fd++) {
+                                if (pp->mm->files->fd_table[fd].type == FD_SOCKET &&
+                                    pp->mm->files->fd_table[fd].sock &&
+                                    pp->mm->files->fd_table[fd].sock != sock &&
+                                    pp->mm->files->fd_table[fd].sock->peer == current_task->pid) {
+                                    peer_closed = false;
+                                    break;
+                                }
                             }
+                            spin_unlock(peer_fdlk);
                         }
                     }
+                    if (peer_closed) {
+                        return 0;  // EOF
+                    }
+                    // Peer still alive — re-acquire socket_lock and re-check
+                    spin_lock(&socket_lock);
+                    skb = sock->recv_queue_head;
+                    if (skb) goto have_data;
+                    // Still no data — continue to blocking logic below
                 }
                 if (peer_closed) {
                     spin_unlock(&socket_lock);
@@ -424,7 +467,8 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             continue;
         }
 
-        // We have data. Calculate how much to read.
+        have_data:
+        ; // We have data. Calculate how much to read.
         uint32_t avail = skb->len - skb->consumed;
         uint32_t to_read = 0;
         for (size_t i = 0; i < iovlen && to_read < avail; i++) {
@@ -449,48 +493,18 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
         skb->consumed += to_read;
         bool skb_consumed = (skb->consumed >= skb->len);
 
-        // Process SCM_RIGHTS (lazy install — only when skb fully consumed, or at first recvmsg)
-        int num_fds_installed = 0;
-        int installed_fds[SCM_MAX_FD];
+        // Extract SCM_RIGHTS data from skb before releasing socket_lock
+        int num_fds_to_install = 0;
+        int orig_fds[SCM_MAX_FD];
+        pid_t sender_pid = sock->peer;
         if (skb->num_fds > 0 && skb_consumed) {
-            task_t *proc = current_task;
-            for (int i = 0; i < skb->num_fds && num_fds_installed < SCM_MAX_FD; i++) {
-                int orig_fd = skb->fds[i];
-                // Find free fd slot in receiver
-                int new_fd = -1;
-                for (int f = 3; f < MAX_FD; f++) {
-                    if (proc->mm->files->fd_table[f].type == FD_NONE) {
-                        new_fd = f;
-                        break;
-                    }
-                }
-                if (new_fd < 0) break;
-
-                // Copy the sender's fd entry (validate it still exists)
-                pid_t sender_pid = sock->peer;
-                if (sender_pid >= 0 && sender_pid < MAX_PROC) {
-                    task_t *sender = &tasks[sender_pid];
-                    if (sender->pid == sender_pid && sender->mm && sender->mm->files && orig_fd >= 0 && orig_fd < MAX_FD) {
-                        proc->mm->files->fd_table[new_fd] = sender->mm->files->fd_table[orig_fd];
-                        // Bump ref counts
-                        if (proc->mm->files->fd_table[new_fd].type == FD_PIPE && proc->mm->files->fd_table[new_fd].pipe) {
-                            proc->mm->files->fd_table[new_fd].pipe->ref_count++;
-                        } else if (proc->mm->files->fd_table[new_fd].type == FD_SHM && proc->mm->files->fd_table[new_fd].shm) {
-                            shm_get(proc->mm->files->fd_table[new_fd].shm);
-                        } else if (proc->mm->files->fd_table[new_fd].type == FD_FILE) {
-                            proc->mm->files->fd_table[new_fd].file_data.ref_count++;
-                        }
-                        // FD_SOCKET: acquire ref
-                        if (proc->mm->files->fd_table[new_fd].type == FD_SOCKET && proc->mm->files->fd_table[new_fd].sock) {
-                            unix_sock_acquire(proc->mm->files->fd_table[new_fd].sock);
-                        }
-                        installed_fds[num_fds_installed++] = new_fd;
-                    }
-                }
+            for (int i = 0; i < skb->num_fds && num_fds_to_install < SCM_MAX_FD; i++) {
+                orig_fds[num_fds_to_install++] = skb->fds[i];
             }
         }
 
-        // Remove consumed skb
+        // Remove consumed skb and release socket_lock
+        bool do_scm = (num_fds_to_install > 0);
         if (skb_consumed) {
             skb_dequeue(sock);
             skb_free(skb);
@@ -502,6 +516,62 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
         // Wake writer outside lock
         if (blocked_writer >= 0) {
             wake_process(blocked_writer);
+        }
+
+        // Process SCM_RIGHTS — sequential locks, no nesting
+        int num_fds_installed = 0;
+        int installed_fds[SCM_MAX_FD];
+        if (do_scm) {
+            task_t *proc = current_task;
+            for (int i = 0; i < num_fds_to_install && num_fds_installed < SCM_MAX_FD; i++) {
+                int orig_fd = orig_fds[i];
+                // Step 1: sender_fd_lock — validate + copy source fd entry
+                struct file src_entry;
+                bool src_valid = false;
+                if (sender_pid >= 0 && sender_pid < MAX_PROC) {
+                    task_t *sender = &tasks[sender_pid];
+                    if (sender->pid == sender_pid && sender->mm && sender->mm->files && orig_fd >= 0 && orig_fd < MAX_FD) {
+                        spinlock_t *sender_fdlk = &sender->mm->files->fd_lock;
+                        spin_lock(sender_fdlk);
+                        if (sender->mm->files->fd_table[orig_fd].type != FD_NONE) {
+                            src_entry = sender->mm->files->fd_table[orig_fd];
+                            src_valid = true;
+                        }
+                        spin_unlock(sender_fdlk);
+                    }
+                }
+                if (!src_valid) continue;
+
+                // Step 2: receiver_fd_lock — find free slot + write fd entry
+                spinlock_t *fdlk = &proc->mm->files->fd_lock;
+                spin_lock(fdlk);
+                int new_fd = -1;
+                for (int f = 3; f < MAX_FD; f++) {
+                    if (proc->mm->files->fd_table[f].type == FD_NONE) {
+                        new_fd = f;
+                        break;
+                    }
+                }
+                if (new_fd < 0) {
+                    spin_unlock(fdlk);
+                    break;  // no free fd slots
+                }
+                proc->mm->files->fd_table[new_fd] = src_entry;
+                spin_unlock(fdlk);
+
+                // Bump ref counts (outside locks — refcount ops are atomic)
+                if (proc->mm->files->fd_table[new_fd].type == FD_PIPE && proc->mm->files->fd_table[new_fd].pipe) {
+                    refcount_inc(&proc->mm->files->fd_table[new_fd].pipe->p_count);
+                } else if (proc->mm->files->fd_table[new_fd].type == FD_SHM && proc->mm->files->fd_table[new_fd].shm) {
+                    shm_get(proc->mm->files->fd_table[new_fd].shm);
+                } else if (proc->mm->files->fd_table[new_fd].type == FD_FILE) {
+                    refcount_inc(&proc->mm->files->fd_table[new_fd].file_data.f_count);
+                }
+                if (proc->mm->files->fd_table[new_fd].type == FD_SOCKET && proc->mm->files->fd_table[new_fd].sock) {
+                    unix_sock_acquire(proc->mm->files->fd_table[new_fd].sock);
+                }
+                installed_fds[num_fds_installed++] = new_fd;
+            }
         }
 
         // Write SCM_RIGHTS to control buffer
@@ -592,7 +662,10 @@ uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
 
     task_t *proc = current_task;
 
-    spin_lock(&socket_lock);
+    sock->state = UNIX_FREE;
+
+    spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    spin_lock(fdlk);
 
     // Find free fd slot
     int fd = -1;
@@ -603,7 +676,7 @@ uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
         }
     }
     if (fd < 0) {
-        spin_unlock(&socket_lock);
+        spin_unlock(fdlk);
         unix_sock_release(sock);
         return (uint64_t)-EMFILE;
     }
@@ -611,9 +684,8 @@ uint64_t sys_socket(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
     proc->mm->files->fd_table[fd].type = FD_SOCKET;
     proc->mm->files->fd_table[fd].flags = O_RDWR;
     proc->mm->files->fd_table[fd].sock = sock;
-    sock->state = UNIX_FREE;
 
-    spin_unlock(&socket_lock);
+    spin_unlock(fdlk);
 
     return (uint64_t)fd;
 }
@@ -769,8 +841,11 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
             listen_sock->backlog_tail = NULL;
         }
         listen_sock->backlog_len--;
+        spin_unlock(&socket_lock);
 
-        // Allocate new fd for this child socket
+        // Allocate new fd for this child socket (fd_lock only, no socket_lock nesting)
+        spinlock_t *fdlk = &proc->mm->files->fd_lock;
+        spin_lock(fdlk);
         int new_fd = -1;
         for (int i = 3; i < MAX_FD; i++) {
             if (proc->mm->files->fd_table[i].type == FD_NONE) {
@@ -780,7 +855,9 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
         }
 
         if (new_fd < 0) {
-            // Put child back and return EMFILE
+            spin_unlock(fdlk);
+            // Put child back into backlog
+            spin_lock(&socket_lock);
             child->backlog_head = NULL;
             child->backlog_tail = NULL;
             listen_sock->backlog_len++;
@@ -801,7 +878,7 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
         proc->mm->files->fd_table[new_fd].flags = O_RDWR;
         proc->mm->files->fd_table[new_fd].sock = child;
 
-        // Write peer address if requested
+        spin_unlock(fdlk);
         if (addr && addrlen) {
             socklen_t alen = sizeof(struct sockaddr_un);
             struct sockaddr_un sa;
@@ -811,9 +888,13 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
             struct unix_sock *peer_sock = child->peer_sock;
             if (!peer_sock) {
                 // Fallback: PID-based lookup for cross-process connections
+                // NOTE: peer_fd_lock acquired separately after socket_lock release — documented exception
+                // for nested pattern (6.5). Long-term TODO: sun_path hash table to eliminate full fd scan.
                 if (child->peer >= 0 && child->peer < MAX_PROC) {
                     task_t *pp = &tasks[child->peer];
                     if (pp->pid == child->peer && pp->mm && pp->mm->files) {
+                        spinlock_t *peer_fdlk = &pp->mm->files->fd_lock;
+                        spin_lock(peer_fdlk);
                         for (int pfd = 0; pfd < MAX_FD; pfd++) {
                             if (pp->mm->files->fd_table[pfd].type == FD_SOCKET &&
                                 pp->mm->files->fd_table[pfd].sock &&
@@ -823,6 +904,7 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
                                 break;
                             }
                         }
+                        spin_unlock(peer_fdlk);
                     }
                 }
             }
@@ -842,7 +924,6 @@ uint64_t sys_accept(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, u
             copy_to_user(addrlen, &alen, sizeof(socklen_t));
         }
 
-        spin_unlock(&socket_lock);
         return (uint64_t)new_fd;
     }
 }
@@ -915,17 +996,25 @@ uint64_t sys_connect(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, 
         return (uint64_t)-EBADF;
     }
     client_sock->state = UNIX_CONNECTED;
+    // LOCK NESTING EXCEPTION (6.4): socket_lock → peer_fd_lock nested here.
+    // Requires atomic lookup+connect — cannot split into sequential acquisitions without
+    // risking the listener being closed/unbound between lookup and connect.
+    // Long-term TODO: sun_path hash table to eliminate full fd_table scan.
     // Find the PID that owns this listener socket.
     pid_t listener_pid = -1;
     for (int i = 0; i < MAX_PROC; i++) {
         if (tasks[i].pid >= 0 && tasks[i].mm && tasks[i].mm->files) {
+            spinlock_t *peer_fdlk = &tasks[i].mm->files->fd_lock;
+            spin_lock(peer_fdlk);
             for (int pf = 0; pf < MAX_FD; pf++) {
                 if (tasks[i].mm->files->fd_table[pf].type == FD_SOCKET &&
                     tasks[i].mm->files->fd_table[pf].sock == listener) {
                     listener_pid = tasks[i].pid;
+                    spin_unlock(peer_fdlk);
                     goto found_listener;
                 }
             }
+            spin_unlock(peer_fdlk);
         }
     }
 found_listener:
@@ -983,7 +1072,15 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
         return (uint64_t)-ENOMEM;
     }
 
-    spin_lock(&socket_lock);
+    a->state = UNIX_CONNECTED;
+    a->peer = proc->pid;
+    a->peer_sock = b;
+    b->state = UNIX_CONNECTED;
+    b->peer = proc->pid;
+    b->peer_sock = a;
+
+    spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    spin_lock(fdlk);
 
     int fd_a = -1, fd_b = -1;
     for (int i = 3; i < MAX_FD; i++) {
@@ -994,7 +1091,7 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
     }
 
     if (fd_a < 0 || fd_b < 0) {
-        spin_unlock(&socket_lock);
+        spin_unlock(fdlk);
         unix_sock_free(a);
         unix_sock_free(b);
         return (uint64_t)-EMFILE;
@@ -1015,7 +1112,7 @@ uint64_t sys_socketpair(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t ar
     proc->mm->files->fd_table[fd_b].flags = O_RDWR;
     proc->mm->files->fd_table[fd_b].sock = b;
 
-    spin_unlock(&socket_lock);
+    spin_unlock(fdlk);
 
     // Write fd pair to user space
     int fds[2] = { fd_a, fd_b };
@@ -1274,11 +1371,11 @@ uint64_t sys_poll(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t _u1, uin
                 struct pipe *p = f->pipe;
                 if (p) {
                     // POLLIN: data available or EOF (no writers)
-                    if (p->head != p->tail || p->ref_count <= 1) {
+                    if (p->head != p->tail || refcount_read(&p->p_count) <= 1) {
                         if (kfds[i].events & POLLIN) kfds[i].revents |= POLLIN;
                     }
                     // POLLOUT: space available or peer closed
-                    if ((p->head + 1) % PIPE_BUF_SIZE != p->tail || p->ref_count <= 1) {
+                    if ((p->head + 1) % PIPE_BUF_SIZE != p->tail || refcount_read(&p->p_count) <= 1) {
                         if (kfds[i].events & POLLOUT) kfds[i].revents |= POLLOUT;
                     }
                 }

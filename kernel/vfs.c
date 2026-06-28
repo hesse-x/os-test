@@ -74,13 +74,15 @@ uint64_t sys_open(uint64_t arg1, uint64_t arg2, uint64_t arg3,
         return (uint64_t)(int64_t)errno_val;
     }
 
-    /* 4. Allocate fd */
+    /* 4. Allocate fd (under fd_lock) */
     task_t *proc = current_task;
+    spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    spin_lock(fdlk);
     int fd = -1;
     for (int j = 3; j < MAX_FD; j++) {
         if (proc->mm->files->fd_table[j].type == FD_NONE) { fd = j; break; }
     }
-    if (fd < 0) { inode_put(ip); return (uint64_t)(-(uint64_t)EMFILE); }
+    if (fd < 0) { spin_unlock(fdlk); inode_put(ip); return (uint64_t)(-(uint64_t)EMFILE); }
 
     /* 5. Set up fd entry */
     if (ip->type == INODE_DIR) {
@@ -94,6 +96,7 @@ uint64_t sys_open(uint64_t arg1, uint64_t arg2, uint64_t arg3,
         proc->mm->files->fd_table[fd].inode = ip;
         proc->mm->files->fd_table[fd].offset = 0;
     }
+    spin_unlock(fdlk);
     return (uint64_t)fd;
 }
 

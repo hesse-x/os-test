@@ -91,21 +91,21 @@ void *kmalloc(size_t size) {
     cpu_local_t *cpu = get_cpu_local();
     Page *active = cpu->active_slab[c];
 
-    // Fast path：active slab 有空闲对象
+    // All paths hold lock (方案 A: remove fast path lock-free optimization)
+    uint64_t flags;
+    spin_lock_irqsave(&cache->lock, &flags);
+
+    // Check active slab (原 fast path，现持锁)
     if (active && active->slab.freelist) {
         void *obj = active->slab.freelist;
         active->slab.freelist = *(void **)obj;
         active->slab.inuse++;
+        spin_unlock_irqrestore(&cache->lock, flags);
         kasan_slab_alloc(obj, cache->obj_size);
         return obj;
     }
 
-    // Slow path：需要获取新 slab 页
-    uint64_t flags;
-    spin_lock_irqsave(&cache->lock, &flags);
-
-    // 先检查 partial list — 跳过 freelist==NULL 的 page（SMP 竞争下，
-    // partial page 可能同时是某 CPU 的 active_slab，被 fast path 耗空）
+    // Slow path: check partial list (already under lock, no extra locking needed)
     while (cache->partial) {
         Page *page = cache->partial;
         if (page->slab.freelist == NULL) {
@@ -162,15 +162,7 @@ void kfree(const void *ptr) {
     if (page->status != PAGE_SLAB) {
         printk(LOG_ERROR, "kfree: bad page status ptr=%p phys=%lx page=%p status=%d\n",
                       ptr, phys, page, page->status);
-        printk(LOG_ERROR, "  backtrace:\n");
-        uint64_t *rbp;
-        __asm__ volatile("movq %%rbp, %0" : "=r"(rbp));
-        for (int depth = 0; depth < 16 && (uint64_t)rbp > 0xFFFFFFFF80000000ULL; depth++) {
-            uint64_t ret_addr = rbp[1];
-            printk(LOG_ERROR, "    0x%016X\n", ret_addr);
-            rbp = (uint64_t *)rbp[0];
-            if (!rbp) break;
-        }
+        dump_stack_trace();
         return;
     }
 
@@ -180,24 +172,17 @@ void kfree(const void *ptr) {
     int my_cpu = get_cpu_local()->cpu_id;
 
     if (page->slab.cpu_id == my_cpu) {
-        // 同 CPU：无锁释放
+        // 同 CPU: 全程持锁（方案 A: eliminate data race）
+        uint64_t flags;
+        spin_lock_irqsave(&cache->lock, &flags);
         *(void **)ptr = page->slab.freelist;
         page->slab.freelist = (void *)ptr;
         page->slab.inuse--;
 
-        // 如果从 full 变为 partial，加入 partial list
-        // full = inuse == obj_count - 1 (释放前)，释放后 inuse == obj_count - 1
-        // 实际上：freelist 刚变非空意味着这个页从 full 变为 partial
-        // 判断：如果释放前 freelist 为 NULL（即 inuse == obj_count）
         if (page->slab.inuse == page->slab.obj_count - 1) {
-            // 从 full 变为 partial，加入 partial list
-            uint64_t flags;
-            spin_lock_irqsave(&cache->lock, &flags);
             partial_add(cache, page);
-            spin_unlock_irqrestore(&cache->lock, flags);
         }
-        // inuse == 0 且是 active_slab → 保留（下次分配直接用）
-        // inuse == 0 且在 partial list → 暂不回收
+        spin_unlock_irqrestore(&cache->lock, flags);
     } else {
         // 跨 CPU 释放：持锁
         uint64_t flags;
