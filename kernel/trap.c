@@ -29,6 +29,7 @@
 #include "common/input.h"
 #include "kernel/user_check.h"
 #include "common/boot.h"
+#include "kernel/rcu.h"
 
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 128
@@ -1152,30 +1153,38 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
         if (fd >= MAX_FD) return -EBADF;
 
         // FD_DEV: dispatch to device mmap handler (devtmpfs path with inode)
-        if (proc->mm->files->fd_table[fd] && proc->mm->files->fd_table[fd]->type == FD_DEV) {
-            struct inode *ip = proc->mm->files->fd_table[fd]->inode;
+        rcu_read_lock();
+        struct file *f = fd_lookup(proc->mm->files, fd);
+        if (f) file_get(f);
+        rcu_read_unlock();
+        if (f && f->type == FD_DEV) {
+            struct inode *ip = f->inode;
             if (ip && ip->i_priv) {
                 struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
                 if (ops->driver_pid == 0 && ops->mmap) {
                     uint64_t ret = ops->mmap(proc, size);
+                    file_put(f);
                     return ret;
                 }
                 // User-space driver: auto shm_attach to driver's SHM
                 if (ops->driver_pid > 0) {
                     pid_t drv_pid = ops->driver_pid;
-                    if (drv_pid < 0 || drv_pid >= MAX_PROC) return -ESRCH;
+                    if (drv_pid < 0 || drv_pid >= MAX_PROC) { file_put(f); return -ESRCH; }
                     task_t *drv_proc = &tasks[drv_pid];
-                    if (drv_proc->pid != drv_pid) return -ESRCH;
+                    if (drv_proc->pid != drv_pid) { file_put(f); return -ESRCH; }
 
                     // Find driver's FD_SHM
                     struct shm *target_shm = NULL;
+                    rcu_read_lock();
                     for (int i = 0; i < MAX_FD; i++) {
-                        if (drv_proc->mm && drv_proc->mm->files->fd_table[i] && drv_proc->mm->files->fd_table[i]->type == FD_SHM) {
-                            target_shm = drv_proc->mm->files->fd_table[i]->shm;
+                        struct file *tf = fd_lookup(drv_proc->mm->files, i);
+                        if (tf && tf->type == FD_SHM) {
+                            target_shm = tf->shm;
                             break;
                         }
                     }
-                    if (!target_shm) return -ENOENT;
+                    rcu_read_unlock();
+                    if (!target_shm) { file_put(f); return -ENOENT; }
 
                     shm_get(target_shm);  // +1 for our mapping
 
@@ -1199,6 +1208,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                             for (size_t j = 0; j < i; j++)
                                 unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
                             shm_put(target_shm);
+                            file_put(f);
                             return -ENOMEM;
                         }
                     }
@@ -1208,6 +1218,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                         for (size_t i = 0; i < total_pages; i++)
                             unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE, 1);
                         shm_put(target_shm);
+                        file_put(f);
                         return -ENOMEM;
                     }
 
@@ -1219,17 +1230,18 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                     proc->mm->mmap_regions = region;
                     proc->mm->mmap_brk = vaddr + size;
 
+                    file_put(f);
                     return vaddr;
                 }
             }
+            file_put(f);
             return -ENODEV;  // fallback: no mmap handler
         }
 
         // FD_SHM: existing SHM mapping path
-        if (!proc->mm->files->fd_table[fd] || proc->mm->files->fd_table[fd]->type != FD_SHM)
-            return -EINVAL;
-        struct shm *shm = proc->mm->files->fd_table[fd]->shm;
-        if (!shm) return -EBADF;
+        if (!f || f->type != FD_SHM) { if (f) file_put(f); return -EINVAL; }
+        struct shm *shm = f->shm;
+        if (!shm) { file_put(f); return -EBADF; }
 
         // Total allocated pages: contiguous + discrete
         size_t npages = shm->npages;
@@ -1593,29 +1605,33 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
     void __user *arg = (void __user * __force)arg3;
 
     task_t *proc = current_task;
-    if (fd < 0 || fd >= MAX_FD || !proc->mm->files->fd_table[fd])
+    if (fd < 0 || fd >= MAX_FD)
         return (int64_t)(-(int64_t)EBADF);
 
-    struct file *f = proc->mm->files->fd_table[fd];
+    rcu_read_lock();
+    struct file *f = fd_lookup(proc->mm->files, fd);
+    if (!f) { rcu_read_unlock(); return (int64_t)(-(int64_t)EBADF); }
+    file_get(f);
+    rcu_read_unlock();
+
+    int64_t ret;
     switch (f->type) {
     case FD_DEV: {
         struct inode *ip = f->inode;
-        if (!ip || !ip->i_priv) return (int64_t)(-(int64_t)ENODEV);
+        if (!ip || !ip->i_priv) { ret = -(int64_t)ENODEV; goto out; }
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         printk(LOG_DEBUG, "sys_ioctl: pid=%d fd=%d cmd=0x%x driver_pid=%d\n", proc->pid, fd, cmd, ops->driver_pid);
         if (ops->driver_pid == 0) {
             // Kernel device: copy arg to kernel buffer, call ops->ioctl, copy back
-            if (!ops->ioctl) return (int64_t)(-(int64_t)ENOTTY);
+            if (!ops->ioctl) { ret = -(int64_t)ENOTTY; goto out; }
 
             uint8_t kbuf[64];
             __memset(kbuf, 0, sizeof(kbuf));
 
             // Copy arg from user if direction includes WRITE (user -> kernel)
-            // arg_size > 48: reject — such ioctl needs MSG path (future),
-            // not silently truncated. TODO: add assert/error log for invalid size.
             if ((_IOC_DIR(cmd) & _IOC_WRITE) && (__force uint64_t)arg != 0) {
                 uint16_t arg_size = _IOC_SIZE(cmd);
-                if (arg_size > 48) return (int64_t)(-(int64_t)EINVAL);
+                if (arg_size > 48) { ret = -(int64_t)EINVAL; goto out; }
                 if (arg_size > 0)
                     copy_from_user(kbuf, arg, arg_size);
             }
@@ -1629,20 +1645,18 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
                     copy_to_user(arg, kbuf, arg_size);
             }
 
-            return (int64_t)result;
+            ret = (int64_t)result;
+            goto out;
         }
         // User-space driver: IPC proxy
-        // Pack cmd + arg into a REQ message, send to driver_pid
         pid_t target_pid = ops->driver_pid;
-        if (target_pid <= 0) return (int64_t)(-(int64_t)ENODEV);
+        if (target_pid <= 0) { ret = -(int64_t)ENODEV; goto out; }
         printk(LOG_DEBUG, "sys_ioctl: fd=%d cmd=0x%x driver_pid=%d (req path)\n", fd, cmd, target_pid);
 
         // Build REQ payload: [4 bytes cmd] [arg_size bytes arg data]
-        // arg_size > 48: reject — such ioctl needs MSG path (future),
-        // not silently truncated. TODO: add assert/error log for invalid size.
         if ((_IOC_DIR(cmd) & _IOC_WRITE) && (__force uint64_t)arg != 0) {
             uint16_t arg_size = _IOC_SIZE(cmd);
-            if (arg_size > 48) return (int64_t)(-(int64_t)EINVAL);
+            if (arg_size > 48) { ret = -(int64_t)EINVAL; goto out; }
         }
         uint8_t req_data[56];
         __memset(req_data, 0, 56);
@@ -1655,10 +1669,10 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
 
         // Validate target PID
         if (target_pid < 0 || target_pid >= MAX_PROC)
-            return (int64_t)(-(int64_t)ESRCH);
+            { ret = -(int64_t)ESRCH; goto out; }
         task_t *target = &tasks[target_pid];
         if (target->pid != target_pid)
-            return (int64_t)(-(int64_t)ESRCH);
+            { ret = -(int64_t)ESRCH; goto out; }
 
         // Build RECV_REQ message
         uint8_t msg[RECV_MSG_SIZE];
@@ -1672,7 +1686,8 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
         uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
         if (next == target->recv_tail) {
             spin_unlock(&target->recv_lock);
-            return (int64_t)(-(int64_t)EBUSY);
+            ret = -(int64_t)EBUSY;
+            goto out;
         }
         __memcpy(target->recv_buf[target->recv_head], msg, RECV_MSG_SIZE);
         target->recv_head = next;
@@ -1688,15 +1703,13 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
         spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
         // Block caller on WAIT_REQ_REPLY
-        // Use the arg as reply buffer so driver's resp writes back to user space
-        // arg is a 64B buffer allocated by userspace ioctl(), always >= 56B
         proc->state = BLOCKED;
         proc->wait_event = WAIT_REQ_REPLY;
         proc->wait_timed_out = 0;
-        proc->wait_deadline = sched_clock() + 3000000000ULL;  // 3 second timeout (driver should respond fast)
+        proc->wait_deadline = sched_clock() + 3000000000ULL;  // 3 second timeout
         proc->req_target_pid = target_pid;
-        proc->req_reply_buf = arg;  // driver resp will be copy_to_user'd here
-        proc->req_reply_len = 56;   // REQ payload size, not RECV_MSG_SIZE (avoids stack overflow on small ioctl arg)
+        proc->req_reply_buf = arg;
+        proc->req_reply_len = 56;
         proc->req_result = 0;
 
         int cpu = proc->assigned_cpu;
@@ -1705,6 +1718,9 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
         timer_queue_insert(cpu, proc);
         spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
 
+        // Release file ref before schedule — file won't be freed while kernel refs exist
+        file_put(f);
+        f = NULL;
         schedule();
 
         // Timeout check
@@ -1717,20 +1733,14 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
             return (int64_t)proc->req_result;
 
         // Driver reply layout: [int32_t result(4B) | arg_data(52B)]
-        // libc ioctl expects: [arg_data(arg_size B)] at offset 0
-        // For _IOWR/_IOR: strip the result prefix, move arg_data from offset 4 to 0
-        // so libc's copy-out (arg_size bytes from buf) matches the ioctl arg layout.
         int32_t ioctl_result = 0;
         if ((__force uint64_t)arg != 0) {
-            // Read result from reply offset 0 (before we shift data)
             copy_from_user(&ioctl_result, arg, 4);
 
             if ((_IOC_DIR(cmd) & _IOC_READ) && _IOC_SIZE(cmd) > 0 && _IOC_SIZE(cmd) <= 48) {
                 uint16_t arg_size = _IOC_SIZE(cmd);
                 uint8_t tmp[48];
-                // Read arg_data from reply offset 4
                 copy_from_user(tmp, (void __user * __force)((__force uint64_t)arg + 4), arg_size);
-                // Write arg_data to offset 0 (where libc expects it)
                 copy_to_user((void __user * __force)arg, tmp, arg_size);
             }
         }
@@ -1738,8 +1748,9 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
     }
     case FD_TTY: {
         struct pty *pty = f->pty;
-        if (!pty) return (int64_t)(-(int64_t)EBADF);
-        return (int64_t)pty_ioctl(pty, cmd, arg);
+        if (!pty) { ret = -(int64_t)EBADF; goto out; }
+        ret = (int64_t)pty_ioctl(pty, cmd, arg);
+        goto out;
     }
     case FD_SOCKET:
     case FD_PIPE:
@@ -1747,10 +1758,15 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
     case FD_DIR:
     case FD_FILE:
     case FD_SHM:
-        return (int64_t)(-(int64_t)ENOTTY);
+        ret = -(int64_t)ENOTTY;
+        goto out;
     default:
-        return (int64_t)(-(int64_t)EBADF);
+        ret = -(int64_t)EBADF;
+        goto out;
     }
+out:
+    if (f) file_put(f);
+    return ret;
 }
 
 // sys_fstat(fd, buf) — syscall 59 (file status)
@@ -1760,19 +1776,25 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2,
     struct kstat __user *ust = (struct kstat __user * __force)arg2;
 
     task_t *proc = current_task;
-    if (fd < 0 || fd >= MAX_FD || !proc->mm->files->fd_table[fd])
+    if (fd < 0 || fd >= MAX_FD)
         return (int64_t)(-(int64_t)EBADF);
 
-    struct file *f = proc->mm->files->fd_table[fd];
+    rcu_read_lock();
+    struct file *f = fd_lookup(proc->mm->files, fd);
+    if (!f) { rcu_read_unlock(); return (int64_t)(-(int64_t)EBADF); }
+    file_get(f);
+    rcu_read_unlock();
+
     struct kstat ks;
     __memset(&ks, 0, sizeof(ks));
     ks.st_nlink = 1;
     ks.st_blksize = 512;
 
+    int64_t ret;
     switch (f->type) {
     case FD_REGULAR: {
         struct inode *ip = f->inode;
-        if (!ip) return (int64_t)(-(int64_t)EBADF);
+        if (!ip) { ret = -(int64_t)EBADF; goto out; }
         ks.st_ino = ip->ino;
         ks.st_size = ip->size;
         ks.st_mode = S_IFREG | 0644;
@@ -1781,7 +1803,7 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2,
     }
     case FD_DIR: {
         struct inode *ip = f->inode;
-        if (!ip) return (int64_t)(-(int64_t)EBADF);
+        if (!ip) { ret = -(int64_t)EBADF; goto out; }
         ks.st_ino = ip->ino;
         ks.st_mode = S_IFDIR | 0755;
         ks.st_blocks = 0;
@@ -1789,7 +1811,7 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2,
     }
     case FD_DEV: {
         struct inode *ip = f->inode;
-        if (!ip) return (int64_t)(-(int64_t)EBADF);
+        if (!ip) { ret = -(int64_t)EBADF; goto out; }
         ks.st_ino = ip->ino;
         if (ip->i_priv && ((struct dev_ops *)ip->i_priv)->device_type == DEV_BLOCK)
             ks.st_mode = S_IFBLK | 0666;
@@ -1807,12 +1829,16 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2,
         ks.st_mode = S_IFREG | 0666;
         break;
     default:
-        return (int64_t)(-(int64_t)EBADF);
+        ret = -(int64_t)EBADF;
+        goto out;
     }
 
     if (copy_to_user(ust, &ks, sizeof(ks)))
-        return (int64_t)(-(int64_t)EFAULT);
-    return 0;
+        { ret = -(int64_t)EFAULT; goto out; }
+    ret = 0;
+out:
+    file_put(f);
+    return ret;
 }
 
 // sys_fdev_pid(fd) — syscall 60
@@ -1822,13 +1848,25 @@ int64_t sys_fdev_pid(int64_t arg1, int64_t _u2, int64_t _u3,
                        int64_t _u4, int64_t _u5, int64_t _u6) {
     int fd = (int)arg1;
     task_t *proc = current_task;
-    if (fd < 0 || fd >= MAX_FD || !proc->mm->files->fd_table[fd] || proc->mm->files->fd_table[fd]->type != FD_DEV)
+    if (fd < 0 || fd >= MAX_FD)
         return (int64_t)(-(int64_t)EBADF);
 
-    struct inode *ip = proc->mm->files->fd_table[fd]->inode;
-    if (!ip || !ip->i_priv) return 0;  // kernel device, no driver_pid
+    rcu_read_lock();
+    struct file *f = fd_lookup(proc->mm->files, fd);
+    if (!f) { rcu_read_unlock(); return (int64_t)(-(int64_t)EBADF); }
+    file_get(f);
+    rcu_read_unlock();
+
+    int64_t ret;
+    if (f->type != FD_DEV) { ret = -(int64_t)EBADF; goto out; }
+
+    struct inode *ip = f->inode;
+    if (!ip || !ip->i_priv) { ret = 0; goto out; }  // kernel device, no driver_pid
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-    return (int64_t)ops->driver_pid;
+    ret = (int64_t)ops->driver_pid;
+out:
+    file_put(f);
+    return ret;
 }
 
 // sys_shm_create(size) — syscall 11 (创建共享内存，返回 fd)
@@ -1924,16 +1962,16 @@ int64_t sys_shm_attach(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int
         task_t *target = &tasks[target_pid];
         if (target->pid != target_pid) return -ESRCH;
 
-        // Scan target's fd_table for FD_SHM (under target's fd_lock)
-        spinlock_t *target_fdlk = &target->mm->files->fd_lock;
-        spin_lock(target_fdlk);
+        // Scan target's fd_table for FD_SHM (under RCU read lock)
+        rcu_read_lock();
         for (int i = 0; i < MAX_FD; i++) {
-            if (target->mm && target->mm->files->fd_table[i] && target->mm->files->fd_table[i]->type == FD_SHM) {
-                target_shm = target->mm->files->fd_table[i]->shm;
+            struct file *tf = fd_lookup(target->mm->files, i);
+            if (tf && tf->type == FD_SHM) {
+                target_shm = tf->shm;
                 break;
             }
         }
-        spin_unlock(target_fdlk);
+        rcu_read_unlock();
         if (!target_shm) return -ENOENT;
     }
 
@@ -2092,10 +2130,13 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int6
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
-    if (!proc->mm->files->fd_table[fd] || proc->mm->files->fd_table[fd]->type != FD_SHM) return (int64_t)-EINVAL;
-    if (!proc->mm->files->fd_table[fd]->shm) return (int64_t)-EBADF;
 
-    struct shm *shm = proc->mm->files->fd_table[fd]->shm;
+    rcu_read_lock();
+    struct file *f = fd_lookup(proc->mm->files, fd);
+    if (!f || f->type != FD_SHM) { rcu_read_unlock(); return (int64_t)-EINVAL; }
+    if (!f->shm) { rcu_read_unlock(); return (int64_t)-EBADF; }
+    struct shm *shm = f->shm;
+    rcu_read_unlock();
 
     if (size < 0) return (int64_t)-EINVAL;
 
@@ -2308,7 +2349,7 @@ int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
     if (!fw) {
         fd_uninstall(proc->mm->files, write_fd);
         file_put(fr);
-        proc->mm->files->fd_table[read_fd] = NULL;
+        fd_uninstall(proc->mm->files, read_fd);
         kfree(p);
         kfree(buf);
         spin_unlock(fdlk);
@@ -2327,9 +2368,10 @@ int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
         // copy_to_user failed — cleanup pipe and fd slots
         struct file *f_r = fd_uninstall(proc->mm->files, read_fd);
         struct file *f_w = fd_uninstall(proc->mm->files, write_fd);
+        spin_unlock(fdlk);
+        synchronize_rcu();
         file_put(f_r);
         file_put(f_w);
-        spin_unlock(fdlk);
         return (int64_t)-EFAULT;
     }
 
@@ -2348,52 +2390,58 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
     if (len > 65536) len = 65536;  // cap at 64KB
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    if (!current_task->mm->files->fd_table[fd]) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
-    struct file *f = proc->mm->files->fd_table[fd];
+    rcu_read_lock();
+    struct file *f = fd_lookup(proc->mm->files, fd);
+    if (!f) { rcu_read_unlock(); return (int64_t)-EBADF; }
+    file_get(f);
+    rcu_read_unlock();
+
+    int64_t ret;
 
     // ===== FD_REGULAR: kernel FAT32 via page cache =====
     if (f->type == FD_REGULAR) {
         if (!(f->flags & (O_WRONLY | O_RDWR)))
-            return (int64_t)-EINVAL;
+            { ret = -EINVAL; goto out; }
         struct inode *ip = f->inode;
-        if (!ip) return (int64_t)-EBADF;
+        if (!ip) { ret = -EBADF; goto out; }
 
-        if (!buf) return (int64_t)-EFAULT;
+        if (!buf) { ret = -EFAULT; goto out; }
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (int64_t)-EFAULT;
+            { ret = -EFAULT; goto out; }
 
         uint64_t offset = f->offset;
         int written = fat32_write(ip, offset, (const void __force *)buf, len);
-        if (written < 0) return (int64_t)written;
+        if (written < 0) { ret = (int64_t)written; goto out; }
         f->offset = offset + written; // TODO: CLONE_FILES 后需 f_pos_lock
-        return (int64_t)written;
+        ret = (int64_t)written;
+        goto out;
     }
 
     // ===== FD_FILE: proxy to fs_driver =====
     if (f->type == FD_FILE) {
         if (!(f->flags & (O_WRONLY | O_RDWR)))
-            return (int64_t)-EINVAL;
+            { ret = -EINVAL; goto out; }
 
         // Validate user buf pointer
-        if (!buf) return (int64_t)-EFAULT;
+        if (!buf) { ret = -EFAULT; goto out; }
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (int64_t)-EFAULT;
+            { ret = -EFAULT; goto out; }
 
         // Clamp to msg size limit (64KB total msg, minus req header)
         size_t max_data = 65536 - sizeof(file_t_io_req);
         if (len > max_data) len = max_data;
-        if (len == 0) return 0;
+        if (len == 0) { ret = 0; goto out; }
 
         // Build write request: file_t_io_req + inline data
         size_t msg_len = sizeof(file_t_io_req) + len;
         uint8_t *msg_buf = (uint8_t *)kmalloc(msg_len);
-        if (!msg_buf) return (int64_t)-ENOMEM;
+        if (!msg_buf) { ret = -ENOMEM; goto out; }
 
         file_t_io_req *req = (file_t_io_req *)msg_buf;
         req->cmd = FILE_CMD_WRITE;
@@ -2404,82 +2452,83 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
 
         // Reply buffer
         file_t_io_resp resp;
-        int64_t ret = sys_msg_to(f->file_data.fs_pid,
+        int64_t msg_ret = sys_msg_to(f->file_data.fs_pid,
                                   msg_buf, msg_len, &resp, sizeof(resp));
         kfree(msg_buf);
 
-        if (ret < 0) return (int64_t)(-ret);
+        if (msg_ret < 0) { ret = -msg_ret; goto out; }
 
-        if (resp.status != 0) return (int64_t)(-resp.status);
+        if (resp.status != 0) { ret = -(int64_t)resp.status; goto out; }
 
         size_t written = resp.count;
         f->file_data._offset += written;
         if (f->file_data.file_size < f->file_data._offset)
             f->file_data.file_size = f->file_data._offset;
-        return (int64_t)written;
+        ret = (int64_t)written;
+        goto out;
     }
 
     // ===== FD_SOCKET: delegate to sock_write =====
     if (f->type == FD_SOCKET) {
         if (!(f->flags & (O_WRONLY | O_RDWR)))
-            return (int64_t)-EINVAL;
-        if (!buf) return (int64_t)-EFAULT;
+            { ret = -EINVAL; goto out; }
+        if (!buf) { ret = -EFAULT; goto out; }
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (int64_t)-EFAULT;
+            { ret = -EFAULT; goto out; }
         struct unix_sock *sock = f->sock;
-        if (!sock) return (int64_t)-EBADF;
-        int64_t ret = sock_write(sock, (const void __force *)buf, len);
-        return (int64_t)ret;
+        if (!sock) { ret = -EBADF; goto out; }
+        ret = sock_write(sock, (const void __force *)buf, len);
+        goto out;
     }
 
     // ===== FD_DEV: write via dev_ops callback =====
     if (f->type == FD_DEV) {
         if (!(f->flags & (O_WRONLY | O_RDWR)))
-            return (int64_t)-EINVAL;
-        if (!buf) return (int64_t)-EFAULT;
+            { ret = -EINVAL; goto out; }
+        if (!buf) { ret = -EFAULT; goto out; }
         struct inode *ip = f->inode;
-        if (!ip || !ip->i_priv) return (int64_t)-ENODEV;
+        if (!ip || !ip->i_priv) { ret = -ENODEV; goto out; }
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         // Kernel device: call write callback
         if (ops->driver_pid == 0 && ops->write) {
-            ssize_t ret = ops->write(proc, fd, (const void __force *)buf, len);
-            return (int64_t)ret;
+            ret = (int64_t)ops->write(proc, fd, (const void __force *)buf, len);
+            goto out;
         }
         // User-space driver: not supported via write (use IPC)
-        return (int64_t)-ENOSYS;
+        ret = -ENOSYS;
+        goto out;
     }
 
     // ===== FD_TTY: PTY write =====
     if (f->type == FD_TTY) {
         if (!(f->flags & (O_WRONLY | O_RDWR)))
-            return (int64_t)-EINVAL;
-        if (!buf) return (int64_t)-EFAULT;
+            { ret = -EINVAL; goto out; }
+        if (!buf) { ret = -EFAULT; goto out; }
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (int64_t)-EFAULT;
+            { ret = -EFAULT; goto out; }
         struct pty *pty = f->pty;
-        if (!pty) return (int64_t)-EBADF;
-        int is_master = pty_fd_is_master(proc->mm->files, fd);
-        int64_t ret;
+        if (!pty) { ret = -EBADF; goto out; }
+        int is_master = pty_is_master_inode(f->inode);
         if (is_master)
             ret = pty_master_write(pty, proc, (const void __force *)buf, len);
         else
             ret = pty_slave_write(pty, proc, (const void __force *)buf, len);
-        return (int64_t)ret;
+        goto out;
     }
 
     // ===== FD_PIPE: existing path =====
-    if (!(f->flags & (O_WRONLY | O_RDWR))) return (int64_t)-EINVAL;
+    if (!(f->flags & (O_WRONLY | O_RDWR))) { ret = -EINVAL; goto out; }
 
     // Validate user buf pointer
-    if (!buf) return (int64_t)-EFAULT;
+    if (!buf) { ret = -EFAULT; goto out; }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-        return (int64_t)-EFAULT;
+        { ret = -EFAULT; goto out; }
 
     struct pipe *p = f->pipe;
     size_t written = 0;
@@ -2488,14 +2537,16 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
         // Check if read end is closed (no readers left)
         if (refcount_read(&p->p_count) <= 1) {
             if (written > 0) break;
-            return (int64_t)-EPIPE;
+            ret = -EPIPE;
+            goto out;
         }
         // Check if pipe has space: full when head is one behind tail
         if ((p->head + 1) % PIPE_BUF_SIZE == p->tail) {
             // Pipe full: block or return EAGAIN if non-blocking
             if (f->flags & O_NONBLOCK) {
                 if (written > 0) break;  // return partial write
-                return (int64_t)-EAGAIN;
+                ret = -EAGAIN;
+                goto out;
             }
             p->write_pid = proc->pid;
             proc->state = BLOCKED;
@@ -2514,7 +2565,8 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
             if (proc->wait_timed_out) {
                 p->write_pid = -1;
                 if (written > 0) break;  // return partial write
-                return (int64_t)-ETIMEDOUT;
+                ret = -ETIMEDOUT;
+                goto out;
             }
             // EINTR check
             {
@@ -2523,7 +2575,8 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
                 deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
                 if (deliv) {
                     if (written > 0) break;  // return partial write
-                    return (int64_t)-EINTR;
+                    ret = -EINTR;
+                    goto out;
                 }
             }
             continue;
@@ -2536,7 +2589,11 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
     // Wake reader if blocked
     if (p->read_pid >= 0) wake_process(p->read_pid);
 
-    return (int64_t)written;
+    ret = (int64_t)written;
+
+out:
+    file_put(f);
+    return ret;
 }
 
 // sys_read(fd, buf, len) — syscall 15 (从 fd 读数据，阻塞直到有数据)
@@ -2550,57 +2607,64 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
     if (len > 65536) len = 65536;  // cap at 64KB
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    if (!current_task->mm->files->fd_table[fd]) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
-    struct file *f = proc->mm->files->fd_table[fd];
+    rcu_read_lock();
+    struct file *f = fd_lookup(proc->mm->files, fd);
+    if (!f) { rcu_read_unlock(); return (int64_t)-EBADF; }
+    file_get(f);
+    rcu_read_unlock();
+
+    int64_t ret;
 
     // ===== FD_REGULAR: kernel FAT32 via page cache =====
     if (f->type == FD_REGULAR) {
         if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR))
-            return (int64_t)-EINVAL;
+            { ret = -EINVAL; goto out; }
         struct inode *ip = f->inode;
-        if (!ip) return (int64_t)-EBADF;
+        if (!ip) { ret = -EBADF; goto out; }
         uint64_t offset = f->offset;
-        if (offset >= ip->size) return 0;
+        if (offset >= ip->size) { ret = 0; goto out; }
 
-        if (!buf) return (int64_t)-EFAULT;
+        if (!buf) { ret = -EFAULT; goto out; }
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (int64_t)-EFAULT;
+            { ret = -EFAULT; goto out; }
 
         uint64_t avail = ip->size - offset;
         if (len > avail) len = avail;
 
         int nread = fat32_read(ip, offset, (void __force *)buf, len);
-        if (nread < 0) return (int64_t)(-nread);
+        if (nread < 0) { ret = -(int64_t)nread; goto out; }
         f->offset = offset + nread; // TODO: CLONE_FILES 后需 f_pos_lock
-        return (int64_t)nread;
+        ret = (int64_t)nread;
+        goto out;
     }
 
     // ===== FD_FILE: proxy to fs_driver =====
     if (f->type == FD_FILE) {
         // Check read permission: reject O_WRONLY only (O_RDONLY=0, so must check != O_WRONLY)
         if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR))
-            return (int64_t)-EINVAL;
+            { ret = -EINVAL; goto out; }
 
         if (f->file_data._offset >= f->file_data.file_size) {
-            return 0;  // EOF
+            ret = 0;  // EOF
+            goto out;
         }
 
         uint64_t avail = f->file_data.file_size - f->file_data._offset;
         if (len > avail) len = avail;
         size_t max_data = 65536 - sizeof(file_t_io_resp);
         if (len > max_data) len = max_data;
-        if (len == 0) return 0;
+        if (len == 0) { ret = 0; goto out; }
 
         // Validate user buf pointer
-        if (!buf) return (int64_t)-EFAULT;
+        if (!buf) { ret = -EFAULT; goto out; }
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (int64_t)-EFAULT;
+            { ret = -EFAULT; goto out; }
 
         // Build READ request
         file_t_io_req req = {0};
@@ -2612,19 +2676,21 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
         // Allocate reply buffer (header + data)
         size_t resp_size = sizeof(file_t_io_resp) + (size_t)len;
         uint8_t *resp_buf = (uint8_t *)kmalloc(resp_size);
-        if (!resp_buf) return (int64_t)-ENOMEM;
+        if (!resp_buf) { ret = -ENOMEM; goto out; }
 
-        int64_t ret = sys_msg_to(f->file_data.fs_pid,
+        int64_t msg_ret = sys_msg_to(f->file_data.fs_pid,
                                   &req, sizeof(req), resp_buf, resp_size);
-        if (ret < 0) {
+        if (msg_ret < 0) {
             kfree(resp_buf);
-            return (int64_t)(-ret);  // sys_msg_to returns negative errno on failure
+            ret = -msg_ret;  // sys_msg_to returns negative errno on failure
+            goto out;
         }
 
         file_t_io_resp *resp = (file_t_io_resp *)resp_buf;
         if (resp->status != 0) {
             kfree(resp_buf);
-            return (int64_t)(-resp->status);
+            ret = -(int64_t)resp->status;
+            goto out;
         }
 
         size_t nread = resp->count;
@@ -2633,84 +2699,85 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
 
         f->file_data._offset += nread; // TODO: CLONE_FILES 后需 f_pos_lock
         kfree(resp_buf);
-        return (int64_t)nread;
+        ret = (int64_t)nread;
+        goto out;
     }
 
     // ===== FD_SOCKET: delegate to sock_read =====
     if (f->type == FD_SOCKET) {
-        if (!buf) return (int64_t)-EFAULT;
+        if (!buf) { ret = -EFAULT; goto out; }
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (int64_t)-EFAULT;
+            { ret = -EFAULT; goto out; }
         struct unix_sock *sock = f->sock;
-        if (!sock) return (int64_t)-EBADF;
-        int64_t ret = sock_read(sock, (void __force *)buf, len);
-        return (int64_t)ret;
+        if (!sock) { ret = -EBADF; goto out; }
+        ret = sock_read(sock, (void __force *)buf, len);
+        goto out;
     }
 
     // ===== FD_DEV: read via dev_ops callback =====
     if (f->type == FD_DEV) {
         if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR))
-            return (int64_t)-EINVAL;
-        if (!buf) return (int64_t)-EFAULT;
+            { ret = -EINVAL; goto out; }
+        if (!buf) { ret = -EFAULT; goto out; }
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL
             || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (int64_t)-EFAULT;
+            { ret = -EFAULT; goto out; }
         struct inode *ip = f->inode;
-        if (!ip || !ip->i_priv) return (int64_t)-ENODEV;
+        if (!ip || !ip->i_priv) { ret = -ENODEV; goto out; }
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         // Kernel device: call read callback
         if (ops->driver_pid == 0 && ops->read) {
-            ssize_t ret = ops->read(proc, fd, (void __force *)buf, len);
-            return (int64_t)ret;
+            ret = (int64_t)ops->read(proc, fd, (void __force *)buf, len);
+            goto out;
         }
         // User-space driver: not supported via read (use IPC)
-        return (int64_t)-ENOSYS;
+        ret = -ENOSYS;
+        goto out;
     }
 
     // ===== FD_TTY: PTY read =====
     if (f->type == FD_TTY) {
         if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR))
-            return (int64_t)-EINVAL;
-        if (!buf) return (int64_t)-EFAULT;
+            { ret = -EINVAL; goto out; }
+        if (!buf) { ret = -EFAULT; goto out; }
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-            return (int64_t)-EFAULT;
+            { ret = -EFAULT; goto out; }
         struct pty *pty = f->pty;
-        if (!pty) return (int64_t)-EBADF;
-        int is_master = pty_fd_is_master(proc->mm->files, fd);
-        int64_t ret;
+        if (!pty) { ret = -EBADF; goto out; }
+        int is_master = pty_is_master_inode(f->inode);
         if (is_master)
             ret = pty_master_read(pty, proc, (void __force *)buf, len);
         else
             ret = pty_slave_read(pty, proc, (void __force *)buf, len);
-        return (int64_t)ret;
+        goto out;
     }
 
     // ===== FD_PIPE: existing path =====
     // O_RDONLY=0, so check: must not be O_WRONLY only
     if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR))
-        return (int64_t)-EINVAL;
+        { ret = -EINVAL; goto out; }
 
     // Validate user buf pointer
-    if (!buf) return (int64_t)-EFAULT;
+    if (!buf) { ret = -EFAULT; goto out; }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
-        return (int64_t)-EFAULT;
+        { ret = -EFAULT; goto out; }
 
     struct pipe *p = f->pipe;
 
     // Block if pipe is empty
     while (p->head == p->tail) {
         // Check if write end is closed (all write fds gone)
-        if (refcount_read(&p->p_count) == 1) return 0;  // EOF: no writers left
+        if (refcount_read(&p->p_count) == 1) { ret = 0; goto out; }  // EOF: no writers left
         // Non-blocking: return EAGAIN-like indication (0 bytes read)
-        if (f->flags & O_NONBLOCK) return (int64_t)-EAGAIN;
+        if (f->flags & O_NONBLOCK) { ret = -EAGAIN; goto out; }
         p->read_pid = proc->pid;
         proc->state = BLOCKED;
         proc->wait_event = WAIT_PIPE;
@@ -2727,31 +2794,37 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
         // Timeout check
         if (proc->wait_timed_out) {
             p->read_pid = -1;
-            return (int64_t)-ETIMEDOUT;
+            ret = -ETIMEDOUT;
+            goto out;
         }
         // EINTR check
         {
             uint64_t pend = __atomic_load_n(&proc->sig.pending, __ATOMIC_ACQUIRE);
             uint64_t deliv = pend & ~proc->sig.blocked;
             deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
-            if (deliv) return (int64_t)-EINTR;
+            if (deliv) { ret = -EINTR; goto out; }
         }
     }
 
     // Read as much as available (up to len)
-    size_t nread = 0;
-    while (nread < len && p->head != p->tail) {
-        ((char __force *)buf)[nread] = p->buf[p->tail];
-        p->tail = (p->tail + 1) % PIPE_BUF_SIZE;
-        nread++;
+    {
+        size_t nread = 0;
+        while (nread < len && p->head != p->tail) {
+            ((char __force *)buf)[nread] = p->buf[p->tail];
+            p->tail = (p->tail + 1) % PIPE_BUF_SIZE;
+            nread++;
+        }
+
+        // Wake writer if blocked
+        if (p->write_pid >= 0) wake_process(p->write_pid);
+
+        ret = (int64_t)nread;
+        goto out;
     }
 
-    // Wake writer if blocked
-    if (p->write_pid >= 0) wake_process(p->write_pid);
-
-    return (int64_t)nread;
-
-    // FD_DEV and FD_SHM return ENOSYS (never reached via FD_FILE/pipe check above)
+out:
+    file_put(f);
+    return ret;
 }
 
 // sys_close(fd) — syscall 16 (关闭 fd，pipe ref_count--)
@@ -2763,12 +2836,10 @@ int64_t sys_close(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _
     spinlock_t *fdlk = &current_task->mm->files->fd_lock;
     spin_lock(fdlk);
     struct file *f = fd_uninstall(current_task->mm->files, fd);
-    if (!f) {
-        spin_unlock(fdlk);
-        return (int64_t)-EBADF;
-    }
-    file_put(f);
     spin_unlock(fdlk);
+    if (!f) return (int64_t)-EBADF;
+    synchronize_rcu();   // wait for RCU readers to finish
+    file_put(f);
     return 0;
 }
 
@@ -3037,9 +3108,8 @@ int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _
         return (int64_t)-EBADF;
     }
 
-    // Close new_fd if occupied
+    // Close new_fd if occupied (deferred free: RCU readers may still hold old pointer)
     struct file *victim = fd_uninstall(proc->mm->files, new_fd);
-    if (victim) file_put(victim);
 
     // Install copy
     fd_install(proc->mm->files, new_fd, old_f);
@@ -3047,6 +3117,7 @@ int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _
     if (old_f->type == FD_TTY) pty_dup_file(old_f);
 
     spin_unlock(fdlk);
+    if (victim) { synchronize_rcu(); file_put(victim); }
     return (int64_t)new_fd;
 }
 
@@ -3059,27 +3130,34 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
-    if (!proc->mm->files->fd_table[fd]) return (int64_t)-EBADF;
 
-    struct file *f = proc->mm->files->fd_table[fd];
+    rcu_read_lock();
+    struct file *f = fd_lookup(proc->mm->files, fd);
+    if (!f) { rcu_read_unlock(); return (int64_t)-EBADF; }
+    file_get(f);
+    rcu_read_unlock();
+
+    int64_t ret;
     switch (cmd) {
     case F_GETFL:
-        return (int64_t)f->flags;
+        ret = (int64_t)f->flags;
+        goto out;
     case F_SETFL:
         f->flags = (f->flags & ~O_SETFL_MASK) | (arg & O_SETFL_MASK);
-        return 0;
+        ret = 0;
+        goto out;
     case F_ADD_SEALS: {
         // Only valid on FD_SHM with MFD_ALLOW_SEALING
-        if (f->type != FD_SHM) return (int64_t)-EINVAL;
+        if (f->type != FD_SHM) { ret = -EINVAL; goto out; }
         struct shm *shm = f->shm;
-        if (!shm) return (int64_t)-EBADF;
-        if (!(shm->flags & SHM_SEALED)) return (int64_t)-EPERM;
-        if (shm->seals & F_SEAL_SEAL) return (int64_t)-EPERM;
+        if (!shm) { ret = -EBADF; goto out; }
+        if (!(shm->flags & SHM_SEALED)) { ret = -EPERM; goto out; }
+        if (shm->seals & F_SEAL_SEAL) { ret = -EPERM; goto out; }
 
         unsigned int new_seals = (unsigned int)arg;
         // Only valid seal bits
         if (new_seals & ~(F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE))
-            return (int64_t)-EINVAL;
+            { ret = -EINVAL; goto out; }
 
         // F_SEAL_WRITE check: if any writable mmap exists, refuse
         if (new_seals & F_SEAL_WRITE) {
@@ -3096,17 +3174,23 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
         }
 
         shm->seals |= new_seals;
-        return 0;
+        ret = 0;
+        goto out;
     }
     case F_GET_SEALS: {
-        if (f->type != FD_SHM) return (int64_t)-EINVAL;
+        if (f->type != FD_SHM) { ret = -EINVAL; goto out; }
         struct shm *shm = f->shm;
-        if (!shm) return (int64_t)-EBADF;
-        return (int64_t)shm->seals;
+        if (!shm) { ret = -EBADF; goto out; }
+        ret = (int64_t)shm->seals;
+        goto out;
     }
     default:
-        return (int64_t)-EINVAL;
+        ret = -EINVAL;
+        goto out;
     }
+out:
+    file_put(f);
+    return ret;
 }
 
 // Remove a PID from irq_owner[] (called by proc_reap)
@@ -3241,36 +3325,43 @@ int64_t sys_lseek(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
-    if (!proc->mm->files->fd_table[fd]) return (int64_t)-EBADF;
 
-    struct file *f = proc->mm->files->fd_table[fd];
+    rcu_read_lock();
+    struct file *f = fd_lookup(proc->mm->files, fd);
+    if (!f) { rcu_read_unlock(); return (int64_t)-EBADF; }
+    file_get(f);
+    rcu_read_unlock();
+
+    int64_t ret;
 
     // PIPE/SOCKET/DEV do not support seek
     if (f->type == FD_PIPE ||
         f->type == FD_SOCKET ||
         f->type == FD_DEV)
-        return (int64_t)-ESPIPE;
+        { ret = -ESPIPE; goto out; }
 
     // FD_REGULAR/FD_DIR: kernel VFS file seek
     if (f->type == FD_REGULAR ||
         f->type == FD_DIR) {
         struct inode *ip = f->inode;
-        if (!ip) return (int64_t)-EBADF;
+        if (!ip) { ret = -EBADF; goto out; }
         int64_t new_offset;
         switch (whence) {
         case SEEK_SET: new_offset = offset; break;
         case SEEK_CUR: new_offset = (int64_t)f->offset + offset; break;
         case SEEK_END: new_offset = (int64_t)ip->size + offset; break;
-        default: return (int64_t)-EINVAL;
+        default: { ret = -EINVAL; goto out; }
         }
-        if (new_offset < 0) return (int64_t)-EINVAL;
-        f->offset = (int64_t)new_offset; // TODO: CLONE_FILES 后需 f_pos_lock
-        return (int64_t)new_offset;
+        if (new_offset < 0) { ret = -EINVAL; goto out; }
+        f->offset = (int64_t)new_offset;
+        ret = (int64_t)new_offset;
+        goto out;
     }
 
     if (f->type != FD_FILE)
-        return (int64_t)-ESPIPE;
+        { ret = -ESPIPE; goto out; }
 
+    {
     uint64_t new_offset;
     switch (whence) {
     case SEEK_SET:
@@ -3283,11 +3374,15 @@ int64_t sys_lseek(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
         new_offset = f->file_data.file_size + offset;
         break;
     default:
-        return (int64_t)-EINVAL;
+        { ret = -EINVAL; goto out; }
     }
 
-    f->file_data._offset = new_offset; // TODO: CLONE_FILES 后需 f_pos_lock
-    return (int64_t)new_offset;
+    f->file_data._offset = new_offset;
+    ret = (int64_t)new_offset;
+    }
+out:
+    file_put(f);
+    return ret;
 }
 
 // ===================== Signal delivery =====================

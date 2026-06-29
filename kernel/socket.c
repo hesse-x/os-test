@@ -13,6 +13,7 @@
 #include "kernel/pty.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
+#include "kernel/rcu.h"
 
 // ===================== Global socket lock =====================
 spinlock_t socket_lock = SPINLOCK_INIT;
@@ -28,7 +29,7 @@ static uint32_t unix_hash(const char *path) {
     return h % UNIX_HASH_SIZE;
 }
 
-int unix_bind_lookup(const char *sun_path, struct unix_sock **out) {
+int unix_bind_lookup(const char *sun_path, struct unix_sock **out, pid_t *owner_pid) {
     uint32_t h = unix_hash(sun_path);
     for (struct unix_bind_entry *e = unix_bind_table[h]; e; e = e->next) {
         int i = 0;
@@ -39,6 +40,7 @@ int unix_bind_lookup(const char *sun_path, struct unix_sock **out) {
         if (i < 108 && sun_path[i] == '\0' && e->sun_path[i] == '\0') {
             if (e->sock && e->sock->state == UNIX_LISTEN) {
                 *out = e->sock;
+                *owner_pid = e->owner_pid;
                 return 0;
             }
             return -ENOENT;  // exists but not listening
@@ -47,7 +49,7 @@ int unix_bind_lookup(const char *sun_path, struct unix_sock **out) {
     return -ENOENT;
 }
 
-int unix_bind_register(const char *sun_path, struct unix_sock *sock) {
+int unix_bind_register(const char *sun_path, struct unix_sock *sock, pid_t owner_pid) {
     // Check for duplicate (already bound to some socket — not necessarily LISTEN)
     uint32_t h = unix_hash(sun_path);
     for (struct unix_bind_entry *e = unix_bind_table[h]; e; e = e->next) {
@@ -71,6 +73,7 @@ int unix_bind_register(const char *sun_path, struct unix_sock *sock) {
     }
     entry->sun_path[i] = '\0';
     entry->sock = sock;
+    entry->owner_pid = owner_pid;
     entry->next = unix_bind_table[h];
     unix_bind_table[h] = entry;
     return 0;
@@ -261,14 +264,22 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
                 }
                 if (num_fds > 0) {
                     int *fds = (int *)CMSG_DATA(cmsg);
+                    rcu_read_lock();
                     for (int i = 0; i < num_fds; i++) {
-                        if (fds[i] < 0 || fds[i] >= MAX_FD ||
-                            !current_task->mm->files->fd_table[fds[i]]) {
+                        if (fds[i] < 0 || fds[i] >= MAX_FD) {
+                            rcu_read_unlock();
+                            skb_free(skb);
+                            return -EBADF;
+                        }
+                        struct file *tf = fd_lookup(current_task->mm->files, fds[i]);
+                        if (!tf) {
+                            rcu_read_unlock();
                             skb_free(skb);
                             return -EBADF;
                         }
                         skb->fds[skb->num_fds++] = fds[i];
                     }
+                    rcu_read_unlock();
                 }
             } else {
                 skb_free(skb);
@@ -281,69 +292,14 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
     // Find peer socket via direct pointer (socketpair) or PID-based lookup (connect)
     struct unix_sock *peer_sock = sock->peer_sock;
     if (!peer_sock) {
-        pid_t peer_pid = sock->peer;
-        if (peer_pid < 0 || peer_pid >= MAX_PROC) {
-            skb_free(skb);
-            return -ENOTCONN;
-        }
-        task_t *peer_proc = &tasks[peer_pid];
-        if (peer_proc->pid != peer_pid) {
-            skb_free(skb);
-            return -ENOTCONN;
-        }
-        // peer_fd_lock acquired separately after socket_lock — no nesting
-        if (peer_proc->mm && peer_proc->mm->files) {
-            spinlock_t *peer_fdlk = &peer_proc->mm->files->fd_lock;
-            spin_lock(peer_fdlk);
-            for (int fd = 0; fd < MAX_FD; fd++) {
-                if (peer_proc->mm->files->fd_table[fd] &&
-                    peer_proc->mm->files->fd_table[fd]->type == FD_SOCKET) {
-                    struct unix_sock *ps = peer_proc->mm->files->fd_table[fd]->sock;
-                    if (ps && ps != sock && ps->peer == current_task->pid && ps->state == UNIX_CONNECTED) {
-                        peer_sock = ps;
-                        break;
-                    }
-                }
-            }
-            spin_unlock(peer_fdlk);
-        }
-
-        if (!peer_sock) {
-            skb_free(skb);
-            return -EPIPE;
-        }
-
-        // Check peer shutdown (under socket_lock)
-        spin_lock(&socket_lock);
-        if (peer_sock->shutdown_read) {
-            spin_unlock(&socket_lock);
-            skb_free(skb);
-            return -EPIPE;
-        }
-
-        // If O_NONBLOCK and queue is "full" (more than a reasonable limit), return EAGAIN
-        if ((flags & MSG_DONTWAIT) && peer_sock->recv_queue_len > 128) {
-            spin_unlock(&socket_lock);
-            skb_free(skb);
-            return -EAGAIN;
-        }
-
-        // Enqueue
-        skb_enqueue(peer_sock, skb);
-        pid_t blocked_reader = peer_sock->blocked_reader;
-        spin_unlock(&socket_lock);
-
-        // Wake reader outside socket_lock
-        if (blocked_reader >= 0) {
-            wake_process(blocked_reader);
-        }
-
-        return (int64_t)total;
+        // peer_sock is always set during connect/socketpair; this should not be reached
+        WARN_ON(!peer_sock);
+        skb_free(skb);
+        return -EPIPE;
     }
 
-    // peer_sock via direct pointer — only need socket_lock for enqueue
+    // Check peer shutdown (under socket_lock)
     spin_lock(&socket_lock);
-
     if (peer_sock->shutdown_read) {
         spin_unlock(&socket_lock);
         skb_free(skb);
@@ -359,12 +315,12 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
 
     // Enqueue
     skb_enqueue(peer_sock, skb);
-    pid_t br = peer_sock->blocked_reader;
+    pid_t blocked_reader = peer_sock->blocked_reader;
     spin_unlock(&socket_lock);
 
     // Wake reader outside socket_lock
-    if (br >= 0) {
-        wake_process(br);
+    if (blocked_reader >= 0) {
+        wake_process(blocked_reader);
     }
 
     return (int64_t)total;
@@ -398,39 +354,16 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             if (sock->state == UNIX_CLOSED ||
                 (sock->peer >= 0 && tasks[sock->peer].pid == sock->peer &&
                  tasks[sock->peer].state == ZOMBIE)) {
-                // Check if peer has closed — release socket_lock first to avoid nesting
-                pid_t peer_pid = sock->peer;
+                // Check if peer has closed
                 bool peer_closed = true;
                 if (sock->peer_sock) {
                     peer_closed = (sock->peer_sock->state != UNIX_CONNECTED);
                 } else {
                     spin_unlock(&socket_lock);
-                    if (peer_pid >= 0 && peer_pid < MAX_PROC) {
-                        task_t *pp = &tasks[peer_pid];
-                        if (pp->pid == peer_pid && pp->mm && pp->mm->files) {
-                            spinlock_t *peer_fdlk = &pp->mm->files->fd_lock;
-                            spin_lock(peer_fdlk);
-                            for (int fd = 0; fd < MAX_FD; fd++) {
-                                struct file *pf = pp->mm->files->fd_table[fd];
-                                if (pf && pf->type == FD_SOCKET &&
-                                    pf->sock &&
-                                    pf->sock != sock &&
-                                    pf->sock->peer == current_task->pid) {
-                                    peer_closed = false;
-                                    break;
-                                }
-                            }
-                            spin_unlock(peer_fdlk);
-                        }
-                    }
-                    if (peer_closed) {
-                        return 0;  // EOF
-                    }
-                    // Peer still alive — re-acquire socket_lock and re-check
-                    spin_lock(&socket_lock);
-                    skb = sock->recv_queue_head;
-                    if (skb) goto have_data;
-                    // Still no data — continue to blocking logic below
+                    // peer_sock is always set during connect/socketpair; this should not be reached
+                    WARN_ON(!sock->peer_sock);
+                    // without peer_sock, assume peer closed
+                    return 0;  // EOF
                 }
                 if (peer_closed) {
                     spin_unlock(&socket_lock);
@@ -482,7 +415,6 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             continue;
         }
 
-        have_data:
         ; // We have data. Calculate how much to read.
         uint32_t avail = skb->len - skb->consumed;
         uint32_t to_read = 0;
@@ -540,16 +472,15 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             task_t *proc = current_task;
             for (int i = 0; i < num_fds_to_install && num_fds_installed < SCM_MAX_FD; i++) {
                 int orig_fd = orig_fds[i];
-                // Step 1: sender_fd_lock — validate + file_get (atomic verify+hold, no TOCTOU)
+                // Step 1: RCU read — validate + file_get (atomic verify+hold, no TOCTOU)
                 struct file *src = NULL;
                 if (sender_pid >= 0 && sender_pid < MAX_PROC) {
                     task_t *sender = &tasks[sender_pid];
                     if (sender->pid == sender_pid && sender->mm && sender->mm->files && orig_fd >= 0 && orig_fd < MAX_FD) {
-                        spinlock_t *sender_fdlk = &sender->mm->files->fd_lock;
-                        spin_lock(sender_fdlk);
+                        rcu_read_lock();
                         src = fd_lookup(sender->mm->files, orig_fd);
                         if (src) file_get(src);   // hold ref, sender close won't free
-                        spin_unlock(sender_fdlk);
+                        rcu_read_unlock();
                     }
                 }
                 if (!src) continue;
@@ -564,8 +495,8 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
                     break;  // no free fd slots
                 }
                 fd_install(proc->mm->files, new_fd, src);  // install pointer directly, no extra bump needed
+                if (src->type == FD_TTY) pty_dup_file(src);
                 spin_unlock(fdlk);
-                // No per-type refcount bump needed — file_get already handled it
 
                 installed_fds[num_fds_installed++] = new_fd;
             }
@@ -699,19 +630,22 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
 
     // Validate fd
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    struct file *bf = proc->mm->files->fd_table[fd];
-    if (!bf || bf->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    rcu_read_lock();
+    struct file *bf = fd_lookup(proc->mm->files, fd);
+    if (!bf || bf->type != FD_SOCKET) { rcu_read_unlock(); return (int64_t)-ENOTSOCK; }
+    file_get(bf);
+    rcu_read_unlock();
 
     // Validate addr
     uint64_t addr_ptr = (int64_t)addr;
     if (!addr_ptr || addr_ptr >= 0xFFFFFFFF80000000ULL ||
         addr_ptr + addrlen > 0xFFFFFFFF80000000ULL || addrlen <= 0)
-        return (int64_t)-EFAULT;
+        { file_put(bf); return (int64_t)-EFAULT; }
 
     // Read sun_family
     uint16_t sun_family;
     copy_from_user(&sun_family, addr, sizeof(sun_family));
-    if (sun_family != AF_UNIX) return (int64_t)-EAFNOSUPPORT;
+    if (sun_family != AF_UNIX) { file_put(bf); return (int64_t)-EAFNOSUPPORT; }
 
     // Read sun_path (max 108 bytes)
     char sun_path[108];
@@ -722,22 +656,24 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
         copy_from_user(sun_path, (const char __user *)addr + sizeof(sun_family), path_len);
     sun_path[107] = '\0';
 
-    if (sun_path[0] == '\0') return (int64_t)-EINVAL;  // empty path
+    if (sun_path[0] == '\0') { file_put(bf); return (int64_t)-EINVAL; }  // empty path
 
     struct unix_sock *sock = bf->sock;
-    if (!sock) return (int64_t)-EBADF;
+    if (!sock) { file_put(bf); return (int64_t)-EBADF; }
 
     spin_lock(&socket_lock);
 
     if (sock->state != UNIX_FREE) {
         spin_unlock(&socket_lock);
+        file_put(bf);
         return (int64_t)-EINVAL;
     }
 
     // Register in name space
-    int ret = unix_bind_register(sun_path, sock);
+    int ret = unix_bind_register(sun_path, sock, current_task->pid);
     if (ret != 0) {
         spin_unlock(&socket_lock);
+        file_put(bf);
         return (int64_t)(-ret);
     }
 
@@ -751,6 +687,7 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
 
     spin_unlock(&socket_lock);
 
+    file_put(bf);
     return 0;
 }
 
@@ -761,11 +698,14 @@ int64_t sys_listen(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t
     task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    struct file *lf = proc->mm->files->fd_table[fd];
-    if (!lf || lf->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    rcu_read_lock();
+    struct file *lf = fd_lookup(proc->mm->files, fd);
+    if (!lf || lf->type != FD_SOCKET) { rcu_read_unlock(); return (int64_t)-ENOTSOCK; }
+    file_get(lf);
+    rcu_read_unlock();
 
     struct unix_sock *sock = lf->sock;
-    if (!sock) return (int64_t)-EBADF;
+    if (!sock) { file_put(lf); return (int64_t)-EBADF; }
 
     if (backlog <= 0) backlog = 1;
     if (backlog > UNIX_MAX_BACKLOG) backlog = UNIX_MAX_BACKLOG;
@@ -775,6 +715,7 @@ int64_t sys_listen(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t
     sock->backlog_max = backlog;
     spin_unlock(&socket_lock);
 
+    file_put(lf);
     return 0;
 }
 
@@ -786,29 +727,34 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
     task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    struct file *af = proc->mm->files->fd_table[fd];
-    if (!af || af->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    rcu_read_lock();
+    struct file *af = fd_lookup(proc->mm->files, fd);
+    if (!af || af->type != FD_SOCKET) { rcu_read_unlock(); return (int64_t)-ENOTSOCK; }
+    file_get(af);
+    rcu_read_unlock();
 
     struct unix_sock *listen_sock = af->sock;
-    if (!listen_sock) return (int64_t)-EBADF;
+    if (!listen_sock) { file_put(af); return (int64_t)-EBADF; }
 
     // Validate addr pointers if non-null
     if (addr) {
         uint64_t aptr = (int64_t)addr;
-        if (aptr >= 0xFFFFFFFF80000000ULL) return (int64_t)-EFAULT;
+        if (aptr >= 0xFFFFFFFF80000000ULL) { file_put(af); return (int64_t)-EFAULT; }
     }
     if (addrlen) {
         uint64_t alptr = (int64_t)addrlen;
         if (alptr >= 0xFFFFFFFF80000000ULL || alptr + sizeof(socklen_t) > 0xFFFFFFFF80000000ULL)
-            return (int64_t)-EFAULT;
+            { file_put(af); return (int64_t)-EFAULT; }
     }
 
+    int64_t ret;
     while (1) {
         spin_lock(&socket_lock);
 
         if (listen_sock->state != UNIX_LISTEN) {
             spin_unlock(&socket_lock);
-            return (int64_t)-EINVAL;
+            ret = -EINVAL;
+            goto out;
         }
 
         struct unix_sock *child = listen_sock->backlog_head;
@@ -831,7 +777,8 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
                 spin_lock(&socket_lock);
                 listen_sock->blocked_reader = -1;
                 spin_unlock(&socket_lock);
-                return (int64_t)-ETIMEDOUT;
+                ret = -ETIMEDOUT;
+                goto out;
             }
             // EINTR check
             {
@@ -842,7 +789,8 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
                     spin_lock(&socket_lock);
                     listen_sock->blocked_reader = -1;
                     spin_unlock(&socket_lock);
-                    return (int64_t)-EINTR;
+                    ret = -EINTR;
+                    goto out;
                 }
             }
             spin_lock(&socket_lock);
@@ -878,7 +826,8 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
                 listen_sock->backlog_head = listen_sock->backlog_tail = child;
             }
             spin_unlock(&socket_lock);
-            return (int64_t)-EMFILE;
+            ret = -EMFILE;
+            goto out;
         }
 
         // Transfer ownership to new fd (initial ref_count=1 from socket allocation)
@@ -900,7 +849,8 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
                 listen_sock->backlog_head = listen_sock->backlog_tail = child;
             }
             spin_unlock(&socket_lock);
-            return (int64_t)-ENOMEM;
+            ret = -ENOMEM;
+            goto out;
         }
         __memset(f, 0, sizeof(*f));
         refcount_set(&f->f_count, 1);
@@ -915,31 +865,8 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
             struct sockaddr_un sa;
             __memset(&sa, 0, sizeof(sa));
             sa.sun_family = AF_UNIX;
-            // Find peer's sun_path from peer socket
+            // Find peer's sun_path from peer socket (direct pointer, set during connect)
             struct unix_sock *peer_sock = child->peer_sock;
-            if (!peer_sock) {
-                // Fallback: PID-based lookup for cross-process connections
-                // NOTE: peer_fd_lock acquired separately after socket_lock release — documented exception
-                // for nested pattern (6.5). Long-term TODO: sun_path hash table to eliminate full fd scan.
-                if (child->peer >= 0 && child->peer < MAX_PROC) {
-                    task_t *pp = &tasks[child->peer];
-                    if (pp->pid == child->peer && pp->mm && pp->mm->files) {
-                        spinlock_t *peer_fdlk = &pp->mm->files->fd_lock;
-                        spin_lock(peer_fdlk);
-                        for (int pfd = 0; pfd < MAX_FD; pfd++) {
-                            struct file *pf = pp->mm->files->fd_table[pfd];
-                            if (pf && pf->type == FD_SOCKET &&
-                                pf->sock &&
-                                pf->sock != child &&
-                                pf->sock->peer == proc->pid) {
-                                peer_sock = pf->sock;
-                                break;
-                            }
-                        }
-                        spin_unlock(peer_fdlk);
-                    }
-                }
-            }
             if (peer_sock && peer_sock->sun_path[0]) {
                 int pi = 0;
                 while (peer_sock->sun_path[pi] && pi < 107) {
@@ -956,8 +883,12 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
             copy_to_user(addrlen, &alen, sizeof(socklen_t));
         }
 
-        return (int64_t)new_fd;
+        ret = (int64_t)new_fd;
+        goto out;
     }
+out:
+    file_put(af);
+    return ret;
 }
 
 int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
@@ -968,18 +899,21 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
     task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    struct file *cf = proc->mm->files->fd_table[fd];
-    if (!cf || cf->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    rcu_read_lock();
+    struct file *cf = fd_lookup(proc->mm->files, fd);
+    if (!cf || cf->type != FD_SOCKET) { rcu_read_unlock(); return (int64_t)-ENOTSOCK; }
+    file_get(cf);
+    rcu_read_unlock();
 
     // Validate addr
     uint64_t addr_ptr = (int64_t)addr;
     if (!addr_ptr || addr_ptr >= 0xFFFFFFFF80000000ULL ||
         addr_ptr + addrlen > 0xFFFFFFFF80000000ULL || addrlen <= 0)
-        return (int64_t)-EFAULT;
+        { file_put(cf); return (int64_t)-EFAULT; }
 
     uint16_t sun_family;
     copy_from_user(&sun_family, addr, sizeof(sun_family));
-    if (sun_family != AF_UNIX) return (int64_t)-EAFNOSUPPORT;
+    if (sun_family != AF_UNIX) { file_put(cf); return (int64_t)-EAFNOSUPPORT; }
 
     char sun_path[108];
     __memset(sun_path, 0, sizeof(sun_path));
@@ -989,25 +923,29 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
         copy_from_user(sun_path, (const char __user *)addr + sizeof(sun_family), path_len);
     sun_path[107] = '\0';
 
-    if (sun_path[0] == '\0') return (int64_t)-EINVAL;
+    if (sun_path[0] == '\0') { file_put(cf); return (int64_t)-EINVAL; }
 
     spin_lock(&socket_lock);
 
-    // Look up listener
+    // Look up listener and owner PID via sun_path hash
     struct unix_sock *listener = NULL;
-    int ret = unix_bind_lookup(sun_path, &listener);
+    pid_t listener_pid = -1;
+    int ret = unix_bind_lookup(sun_path, &listener, &listener_pid);
     if (ret != 0) {
         spin_unlock(&socket_lock);
+        file_put(cf);
         return (int64_t)(-ret);
     }
 
     if (listener->state != UNIX_LISTEN) {
         spin_unlock(&socket_lock);
+        file_put(cf);
         return (int64_t)-ECONNREFUSED;
     }
 
     if (listener->backlog_len >= listener->backlog_max) {
         spin_unlock(&socket_lock);
+        file_put(cf);
         return (int64_t)-ECONNREFUSED;
     }
 
@@ -1015,6 +953,7 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
     struct unix_sock *child = unix_sock_alloc();
     if (!child) {
         spin_unlock(&socket_lock);
+        file_put(cf);
         return (int64_t)-ENOMEM;
     }
 
@@ -1026,32 +965,10 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
     if (!client_sock) {
         spin_unlock(&socket_lock);
         unix_sock_free(child);
+        file_put(cf);
         return (int64_t)-EBADF;
     }
     client_sock->state = UNIX_CONNECTED;
-    // LOCK NESTING EXCEPTION (6.4): socket_lock → peer_fd_lock nested here.
-    // Requires atomic lookup+connect — cannot split into sequential acquisitions without
-    // risking the listener being closed/unbound between lookup and connect.
-    // Long-term TODO: sun_path hash table to eliminate full fd_table scan.
-    // Find the PID that owns this listener socket.
-    pid_t listener_pid = -1;
-    for (int i = 0; i < MAX_PROC; i++) {
-        if (tasks[i].pid >= 0 && tasks[i].mm && tasks[i].mm->files) {
-            spinlock_t *peer_fdlk = &tasks[i].mm->files->fd_lock;
-            spin_lock(peer_fdlk);
-            for (int pf = 0; pf < MAX_FD; pf++) {
-                struct file *pf_file = tasks[i].mm->files->fd_table[pf];
-                if (pf_file && pf_file->type == FD_SOCKET &&
-                    pf_file->sock == listener) {
-                    listener_pid = tasks[i].pid;
-                    spin_unlock(peer_fdlk);
-                    goto found_listener;
-                }
-            }
-            spin_unlock(peer_fdlk);
-        }
-    }
-found_listener:
 
     client_sock->peer = listener_pid;
     client_sock->peer_sock = child;  // client's peer is the child (server-side)
@@ -1062,7 +979,7 @@ found_listener:
     child->backlog_head = NULL;
     child->backlog_tail = NULL;
     if (listener->backlog_tail) {
-        listener->backlog_tail->backlog_head = child;  // use backlog_head as next pointer for backlog chain
+        listener->backlog_tail->backlog_head = child;
         listener->backlog_tail = child;
     } else {
         listener->backlog_head = child;
@@ -1078,6 +995,7 @@ found_listener:
         wake_process(blocked_reader);
     }
 
+    file_put(cf);
     return 0;
 }
 
@@ -1181,14 +1099,17 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
     task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    struct file *sf = proc->mm->files->fd_table[fd];
-    if (!sf || sf->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    rcu_read_lock();
+    struct file *sf = fd_lookup(proc->mm->files, fd);
+    if (!sf || sf->type != FD_SOCKET) { rcu_read_unlock(); return (int64_t)-ENOTSOCK; }
+    file_get(sf);
+    rcu_read_unlock();
 
     // Validate msghdr pointer
     uint64_t msg_ptr = (int64_t)msg;
     if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
         msg_ptr + sizeof(struct msghdr) > 0xFFFFFFFF80000000ULL)
-        return (int64_t)-EFAULT;
+        { file_put(sf); return (int64_t)-EFAULT; }
 
     struct msghdr kmsg;
     copy_from_user(&kmsg, msg, sizeof(struct msghdr));
@@ -1198,11 +1119,11 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
     if (!iov_ptr || iov_ptr >= 0xFFFFFFFF80000000ULL ||
         iov_ptr + kmsg.msg_iovlen * sizeof(struct iovec) > 0xFFFFFFFF80000000ULL ||
         kmsg.msg_iovlen == 0 || kmsg.msg_iovlen > 1024)
-        return (int64_t)-EINVAL;
+        { file_put(sf); return (int64_t)-EINVAL; }
 
     // Copy iovec array to kernel
     struct iovec *kiov = (struct iovec *)kmalloc(kmsg.msg_iovlen * sizeof(struct iovec));
-    if (!kiov) return (int64_t)-ENOMEM;
+    if (!kiov) { file_put(sf); return (int64_t)-ENOMEM; }
     copy_from_user(kiov, (const void __user *)kmsg.msg_iov, kmsg.msg_iovlen * sizeof(struct iovec));
 
     // Validate each iov base pointer
@@ -1211,6 +1132,7 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
             uint64_t base = (int64_t)kiov[i].iov_base;
             if (base >= 0xFFFFFFFF80000000ULL || base + kiov[i].iov_len > 0xFFFFFFFF80000000ULL) {
                 kfree(kiov);
+                file_put(sf);
                 return (int64_t)-EFAULT;
             }
         }
@@ -1224,27 +1146,29 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
         if (ctrl_ptr >= 0xFFFFFFFF80000000ULL ||
             ctrl_ptr + kmsg.msg_controllen > 0xFFFFFFFF80000000ULL) {
             kfree(kiov);
+            file_put(sf);
             return (int64_t)-EFAULT;
         }
         if (kmsg.msg_controllen > 4096) {
             kfree(kiov);
+            file_put(sf);
             return (int64_t)-EINVAL;
         }
         kcontrol = kmalloc(kmsg.msg_controllen);
-        if (!kcontrol) { kfree(kiov); return (int64_t)-ENOMEM; }
+        if (!kcontrol) { kfree(kiov); file_put(sf); return (int64_t)-ENOMEM; }
         copy_from_user(kcontrol, (const void __user *)kmsg.msg_control, kmsg.msg_controllen);
         kcontrollen = kmsg.msg_controllen;
     }
 
     struct unix_sock *sock = sf->sock;
-    if (!sock) { kfree(kiov); if (kcontrol) kfree(kcontrol); return (int64_t)-EBADF; }
+    if (!sock) { kfree(kiov); if (kcontrol) kfree(kcontrol); file_put(sf); return (int64_t)-EBADF; }
 
     int64_t ret = sock_sendmsg_internal(sock, kiov, kmsg.msg_iovlen,
                                          kcontrol, kcontrollen, flags);
 
     kfree(kiov);
     if (kcontrol) kfree(kcontrol);
-
+    file_put(sf);
     return (int64_t)ret;
 }
 
@@ -1256,13 +1180,16 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
     task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    struct file *rf = proc->mm->files->fd_table[fd];
-    if (!rf || rf->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    rcu_read_lock();
+    struct file *rf = fd_lookup(proc->mm->files, fd);
+    if (!rf || rf->type != FD_SOCKET) { rcu_read_unlock(); return (int64_t)-ENOTSOCK; }
+    file_get(rf);
+    rcu_read_unlock();
 
     uint64_t msg_ptr = (int64_t)msg;
     if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
         msg_ptr + sizeof(struct msghdr) > 0xFFFFFFFF80000000ULL)
-        return (int64_t)-EFAULT;
+        { file_put(rf); return (int64_t)-EFAULT; }
 
     struct msghdr kmsg;
     copy_from_user(&kmsg, msg, sizeof(struct msghdr));
@@ -1272,10 +1199,10 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
     if (!iov_ptr || iov_ptr >= 0xFFFFFFFF80000000ULL ||
         iov_ptr + kmsg.msg_iovlen * sizeof(struct iovec) > 0xFFFFFFFF80000000ULL ||
         kmsg.msg_iovlen == 0 || kmsg.msg_iovlen > 1024)
-        return (int64_t)-EINVAL;
+        { file_put(rf); return (int64_t)-EINVAL; }
 
     struct iovec *kiov = (struct iovec *)kmalloc(kmsg.msg_iovlen * sizeof(struct iovec));
-    if (!kiov) return (int64_t)-ENOMEM;
+    if (!kiov) { file_put(rf); return (int64_t)-ENOMEM; }
     copy_from_user(kiov, (const void __user *)kmsg.msg_iov, kmsg.msg_iovlen * sizeof(struct iovec));
 
     for (size_t i = 0; i < kmsg.msg_iovlen; i++) {
@@ -1283,6 +1210,7 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
             uint64_t base = (int64_t)kiov[i].iov_base;
             if (base >= 0xFFFFFFFF80000000ULL || base + kiov[i].iov_len > 0xFFFFFFFF80000000ULL) {
                 kfree(kiov);
+                file_put(rf);
                 return (int64_t)-EFAULT;
             }
         }
@@ -1296,14 +1224,15 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
         if (ctrl_ptr >= 0xFFFFFFFF80000000ULL ||
             ctrl_ptr + kmsg.msg_controllen > 0xFFFFFFFF80000000ULL) {
             kfree(kiov);
+            file_put(rf);
             return (int64_t)-EFAULT;
         }
-        kcontrol = (void *)ctrl_ptr;  // write directly to user space (lazy install writes fds there)
+        kcontrol = (void *)ctrl_ptr;  // write directly to user space
         kcontrollen = kmsg.msg_controllen;
     }
 
     struct unix_sock *sock = rf->sock;
-    if (!sock) { kfree(kiov); return (int64_t)-EBADF; }
+    if (!sock) { kfree(kiov); file_put(rf); return (int64_t)-EBADF; }
 
     int64_t ret = sock_recvmsg_internal(sock, kiov, kmsg.msg_iovlen,
                                          kcontrol, &kcontrollen, flags);
@@ -1317,6 +1246,7 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
     }
 
     kfree(kiov);
+    file_put(rf);
     return (int64_t)ret;
 }
 
@@ -1327,13 +1257,16 @@ int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64
     task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    struct file *shf = proc->mm->files->fd_table[fd];
-    if (!shf || shf->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    rcu_read_lock();
+    struct file *shf = fd_lookup(proc->mm->files, fd);
+    if (!shf || shf->type != FD_SOCKET) { rcu_read_unlock(); return (int64_t)-ENOTSOCK; }
+    file_get(shf);
+    rcu_read_unlock();
 
     struct unix_sock *sock = shf->sock;
-    if (!sock) return (int64_t)-EBADF;
+    if (!sock) { file_put(shf); return (int64_t)-EBADF; }
 
-    if (how < 0 || how > 2) return (int64_t)-EINVAL;
+    if (how < 0 || how > 2) { file_put(shf); return (int64_t)-EINVAL; }
 
     spin_lock(&socket_lock);
 
@@ -1374,6 +1307,7 @@ int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64
     if (peer_reader >= 0) wake_process(peer_reader);
     if (peer_writer >= 0) wake_process(peer_writer);
 
+    file_put(shf);
     return 0;
 }
 
@@ -1414,7 +1348,11 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
                 continue;
             }
 
-            struct file *f = proc->mm->files->fd_table[pfd];
+            struct file *f;
+            rcu_read_lock();
+            f = fd_lookup(proc->mm->files, pfd);
+            if (f) file_get(f);
+            rcu_read_unlock();
             if (!f) {
                 kfds[i].revents = POLLERR;
                 ready++;
@@ -1498,6 +1436,7 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
                 if (kfds[i].events & POLLOUT) kfds[i].revents |= POLLOUT;
             }
             if (kfds[i].revents) ready++;
+            file_put(f);
         }
 
         if (ready > 0) {

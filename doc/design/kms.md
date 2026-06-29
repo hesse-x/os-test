@@ -221,6 +221,7 @@ Partial flip 行分布：rows=4（10次），rows=1（5次），rows=3（2次）
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
+| KMS PAT/write-combining | framebuffer 页映射需加 PCD/PAT 标记改为 WC，当前映射为 WB 对帧缓冲性能有影响 | 中 |
 | 可变分辨率 | CREATE_BUF 验证改为查 mode 列表，支持 compositor 请求切换分辨率 | 中 |
 | 真实 GPU 驱动 | AMD Oland (1002:6611) 或其他真实显卡；真实 GPU 下硬件 page-flip（Y_OFFSET / CRTC 地址切换）、vblank 同步、vsync 等才有实际意义 | 中 |
 | 异步 flip + VSync/VBLANK | ioctl(FLIP) 立即返回，内核 deferred flip（下次 vblank 时）；需要显卡 IRQ + vblank callback 机制；真实 GPU 场景 | 低 |

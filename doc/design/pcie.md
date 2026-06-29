@@ -126,8 +126,13 @@ xhci_init()         — PCI 发现 xHCI + MSI-X + USB 键盘枚举
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| boot_info 瘦身 | 移除 fb_*/lapic_base/ioapic_base/ncpus/apic_ids，仅保留 magic/kernel_phys/rsdp/mmap_* | 中 |
-| MADT 解析从 stub.c 迁移到内核 | 当前 stub.c 已解析 MADT 通过 boot_info 传递，内核 acpi_init 重新解析；统一由内核解析，boot_info 只传 RSDP | 中 |
+| ~~boot_info 瘦身~~ | ✅ fb_*/lapic_base/ioapic_base/ncpus/apic_ids 已移除，仅保留 magic/kernel_phys/rsdp/mmap_* | 中 |
+| ~~MADT 解析从 stub.c 迁移到内核~~ | ✅ 统一由内核 acpi_init 解析，boot_info 只传 RSDP | 中 |
+| MADT Interrupt Source Override | 解析 MADT type 2 ISO 项，将 ISA IRQ 重映射到正确 GSI；QEMU 下碰巧能工作，实机中断路由可能出错 | 高 |
+| HPET 支持 | Q35 提供 HPET（ACPI 表发现），内核当前只用 PIT + TSC 校准 LAPIC 定时器；低优先级 | 低 |
+| RTC 时间源 | ICH9 LPC RTC 寄存器访问获取实时时钟；当前 FAT32 时间戳硬编码，libc time() 无真实时间源 | 低 |
+| NVMe 驱动 | PCIe NVMe 设备驱动：多队列 + PRP/SGL；依赖 PCIe 枚举 + MSI-X（均已就绪） | 低 |
+| ICH9 LPC 桥驱动 | Q35 ICH9 LPC 桥未显式编程，依赖 QEMU/OVMF 默认配置；RTC/电源管理/GPIO 等依赖此桥 | 低 |
 | 用户态 GPU 驱动 BAR 映射 | `sys_pci_dev_info` + `mmap(MAP_PHYSICAL)` 支持用户态驱动（如 AMD GPU）映射 BAR | 低 |
 | AMD Oland 原生 GPU 驱动 | PCI 1002:6611，CRTC 编程 → 替换 UEFI GOP | 低 |
 | 多 segment group 支持 | 当前只解析 MCFG 第一个 entry，多 segment 需遍历所有 entry | 低 |

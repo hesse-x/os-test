@@ -23,6 +23,7 @@
 #include "kernel/display.h"
 #include "common/dev.h"
 #include "kernel/mem/kasan.h"
+#include "kernel/rcu.h"
 
 
 __attribute__((no_sanitize("kernel-address")))
@@ -118,6 +119,7 @@ void kernel_main(boot_info *bi) {
   kernel_init_finish();
   kasan_init();
   slab_init();
+  rcu_init();
 
   sig_init();   // allocate signal trampoline page (shared across all processes)
 

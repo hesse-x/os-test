@@ -23,6 +23,12 @@
 
 struct task_t; // forward declaration (typedef in kernel/proc.h)
 
+// RCU per-CPU nesting state (defined in kernel/rcu.h)
+typedef struct rcu_local {
+    int nesting;
+    uint64_t saved_if;
+} rcu_local_t;
+
 typedef struct cpu_local_t {
     uint64_t saved_r10;    // scratch slot: SYSCALL entry saves user R10 (arg4) here
     int cpu_id;
@@ -38,6 +44,9 @@ typedef struct cpu_local_t {
     list_node_t run_queue;     // per-CPU ready queue (sentinel node)
     list_node_t timer_queue;   // per-CPU timer queue (sorted by wait_deadline, sentinel node)
     Page *active_slab[NUM_KMALLOC_CLASSES]; // per-CPU active slab per size class
+
+    // RCU read-side nesting state
+    rcu_local_t rcu;                       // nesting count + saved IF
 } cpu_local_t;
 
 extern cpu_local_t cpu_locals[MAX_CPUS];

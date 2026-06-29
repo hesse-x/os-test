@@ -176,4 +176,5 @@ fork:
 | 用户栈仅 4KB 无 guard page | 栈溢出触发 #PF 被 kill，应扩栈 + 加 guard page | 中 |
 | 内核栈仅 8KB | 深层调用路径偏紧，应扩栈或加溢出检测 | 中 |
 | pid 未校验上界 | procs[pid] 未检查 pid >= MAX_PROC，可越界访问 | 高 |
+| cross-process files_t UAF | SCM_RIGHTS/shm_attach 跨进程读 fd_table 时，目标进程 exit + kfree(files_t) 导致 UAF。缓解：`files_put` 中 `synchronize_rcu()` 保证 grace period 后才 kfree | 低 |
 | FPU/SSE lazy context switch | 当前不保存 xmm 寄存器，需 fxsave/fxrstor + CR0.TS + #NM handler | 高 |

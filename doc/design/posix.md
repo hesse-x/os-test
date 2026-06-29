@@ -130,3 +130,5 @@ syscall 返回负 errno（-ENOMEM 等），POSIX 函数约定返回 -1 并设置
 | perror errno 映射 | 当前 perror 只输出字符串，需 errno→字符串完整映射 | 低 |
 | strftime | 时间格式化，需时区支持（当前无时区概念） | 低 |
 | opendir/readdir 内核化 | 当前 opendir 通过 sys_open + sys_getdents 实现，readdir 需 dirent 结构转换 | 低 |
+| fs_driver 源码删除 | driver/fs_driver.cc 文件仍存在于磁盘（CMake 构建目标已移除） | 中 |
+| IPC 接口降级到驱动专用 | recv/resp/req/msg 从公共 libc 头移到 driver/ipc.h，详见 [ipc.md](ipc.md) | 低 |

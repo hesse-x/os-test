@@ -70,6 +70,7 @@ typedef struct unix_sock {
 typedef struct unix_bind_entry {
     char   sun_path[108];
     struct unix_sock *sock;
+    pid_t  owner_pid;           // PID of the process that bound this socket
     struct unix_bind_entry *next;  // chain for hash collisions
 } unix_bind_entry_t;
 
@@ -88,8 +89,8 @@ void skb_free(struct sk_buff *skb);
 void skb_enqueue(struct unix_sock *sock, struct sk_buff *skb);
 struct sk_buff *skb_dequeue(struct unix_sock *sock);
 
-int  unix_bind_lookup(const char *sun_path, struct unix_sock **out);
-int  unix_bind_register(const char *sun_path, struct unix_sock *sock);
+int  unix_bind_lookup(const char *sun_path, struct unix_sock **out, pid_t *owner_pid);
+int  unix_bind_register(const char *sun_path, struct unix_sock *sock, pid_t owner_pid);
 void unix_bind_unregister(struct unix_sock *sock);
 
 int64_t sock_sendmsg_internal(struct unix_sock *sock,

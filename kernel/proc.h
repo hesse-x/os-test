@@ -11,6 +11,7 @@
 #include "common/mman.h"
 #include "common/types.h"
 #include "kernel/atomic.h"
+#include "kernel/rcu.h"
 
 // ===================== SHM fd model =====================
 #define SHM_KERNEL  1  // page managed by kernel, don't free on ref_count==0
@@ -216,17 +217,17 @@ static inline void file_get(struct file *f) {
 }
 
 static inline void fd_install(files_t *files, int fd, struct file *f) {
-    files->fd_table[fd] = f;
+    rcu_assign_pointer(files->fd_table[fd], f);
 }
 
 static inline struct file *fd_uninstall(files_t *files, int fd) {
     struct file *f = files->fd_table[fd];
-    files->fd_table[fd] = NULL;
+    rcu_assign_pointer(files->fd_table[fd], NULL);
     return f;
 }
 
 static inline struct file *fd_lookup(files_t *files, int fd) {
-    return files->fd_table[fd];
+    return rcu_dereference(files->fd_table[fd]);
 }
 
 // SHM reference counting helpers

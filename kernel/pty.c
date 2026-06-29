@@ -88,12 +88,17 @@ static int pty_ring_write1(uint8_t *buf, uint32_t *head, uint32_t tail, uint8_t 
 // Check O_NONBLOCK for a PTY fd of given master/slave type in this proc
 static int pty_is_nonblock(task_t *proc, struct pty *pty, int is_master) {
     files_t *files = proc->mm->files;
+    rcu_read_lock();
     for (int i = 0; i < MAX_FD; i++) {
-        if (files->fd_table[i] && files->fd_table[i]->type == FD_TTY && files->fd_table[i]->pty == pty) {
-            if (pty_fd_is_master(files, i) == is_master)
-                return (files->fd_table[i]->flags & O_NONBLOCK) ? 1 : 0;
+        struct file *f = fd_lookup(files, i);
+        if (f && f->type == FD_TTY && f->pty == pty) {
+            if (pty_is_master_inode(f->inode) == is_master) {
+                rcu_read_unlock();
+                return (f->flags & O_NONBLOCK) ? 1 : 0;
+            }
         }
     }
+    rcu_read_unlock();
     return 0;
 }
 
@@ -193,7 +198,7 @@ int ptmx_open(struct task_t *proc, int fd) {
     // Keep its inode (ptmx_inode) so pty_fd_is_master / pty_close_file identify
     // this fd as master. The inode ref held by devtmpfs_open is released on
     // close via file_put(FD_TTY) → inode_put.
-    struct file *f = proc->mm->files->fd_table[fd];
+    struct file *f = fd_lookup(proc->mm->files, fd);
     f->type = FD_TTY;
     f->pty = pty;
     f->flags = O_RDWR;
@@ -216,7 +221,7 @@ int ptmx_open(struct task_t *proc, int fd) {
 
 // ===================== pts_open =====================
 int pts_open(struct task_t *proc, int fd) {
-    struct file *f = proc->mm->files->fd_table[fd];
+    struct file *f = fd_lookup(proc->mm->files, fd);
     if (!f) return -EBADF;
     struct inode *ip = f->inode;
     if (!ip || !ip->i_priv) return -ENODEV;
@@ -247,9 +252,12 @@ int pts_open(struct task_t *proc, int fd) {
 
 // ===================== pty_fd_is_master =====================
 int pty_fd_is_master(files_t *files, int fd) {
-    struct file *f = files->fd_table[fd];
-    if (!f) return 0;
-    return (f->inode == ptmx_inode) ? 1 : 0;
+    rcu_read_lock();
+    struct file *f = fd_lookup(files, fd);
+    int result = 0;
+    if (f) result = (f->inode == ptmx_inode) ? 1 : 0;
+    rcu_read_unlock();
+    return result;
 }
 
 // Check if inode is the ptmx master inode

@@ -8,6 +8,7 @@
 #include "kernel/display.h"
 #include "kernel/pty.h"
 #include "kernel/proc.h"
+#include "kernel/rcu.h"
 #include "kernel/log.h"
 #include "kernel/serial.h"
 #include "kernel/sparse.h"
@@ -210,17 +211,21 @@ int64_t sys_getdents(int64_t arg1, int64_t arg2, int64_t arg3,
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EINVAL;
     if (len == 0 || len > 4096) return (int64_t)-EINVAL;
 
-    struct file *f = current_task->mm->files->fd_table[fd];
-    if (!f || f->type != FD_DIR) return (int64_t)-ENOTDIR;
+    rcu_read_lock();
+    struct file *f = fd_lookup(current_task->mm->files, fd);
+    if (!f || f->type != FD_DIR) { rcu_read_unlock(); return (int64_t)-ENOTDIR; }
+    file_get(f);
+    rcu_read_unlock();
 
     struct inode *ip = f->inode;
-    if (!ip) return (int64_t)-EBADF;
+    if (!ip) { file_put(f); return (int64_t)-EBADF; }
 
     void *kbuf = kmalloc(len);
-    if (!kbuf) return (int64_t)-ENOMEM;
+    if (!kbuf) { file_put(f); return (int64_t)-ENOMEM; }
     int ret = fat32_getdents(ip->start_cluster, &f->offset, kbuf, len);
-    if (ret < 0) { kfree(kbuf); return ret; }
-    if (copy_to_user(buf, kbuf, ret)) { kfree(kbuf); return (int64_t)-EFAULT; }
+    if (ret < 0) { kfree(kbuf); file_put(f); return ret; }
+    if (copy_to_user(buf, kbuf, ret)) { kfree(kbuf); file_put(f); return (int64_t)-EFAULT; }
     kfree(kbuf);
+    file_put(f);
     return (int64_t)ret;
 }

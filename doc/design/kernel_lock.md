@@ -44,7 +44,8 @@ API：
 | recv_lock（per-task） | per-task | recv_buf/head/tail 队列 | 否 |
 | bfc_lock | 全局 | BFC 物理页分配器 | 否 |
 | slab lock（per-cache） | per-cache | slab partial list + 全路径分配/释放 | 否 |
-| fd_lock（per-files_t） | per-process（files_t 内） | fd_table 修改 + 跨进程读取 | 否 |
+| fd_lock（per-files_t） | per-process（files_t 内） | fd_table **写路径**（open/close/dup2/socket/SCM_RIGHTS install）；读路径走 RCU | 否 |
+| RCU read-side（rcu_read_lock） | per-CPU cli | fd_table **读路径**（sys_read/sys_write/peer scan/SCM_RIGHTS 验证/sys_poll/sys_getdents） | — |
 | fat_cache_lock | 全局 | FAT 表缓存 | 否 |
 
 锁获取顺序（防死锁）—— 全局层级（从外到内，必须按此顺序获取）：
@@ -67,8 +68,7 @@ API：
 不存在需要同时持 fat_lock + scheduler_lock、ahci_lock + scheduler_lock 等路径。
 FAT32 内部顺序固定：i_lock → fat_lock → ahci_lock。
 新增约束：scheduler_lock → fd_lock（proc_reap 先 scheduler_lock 再 fd_lock）。
-**过渡方案**：尽量拆开 socket_lock/fd_lock 嵌套——sys_accept/sendmsg/recvmsg peer scan/SCM_RIGHTS 先拿 socket_lock 获取必要信息，释放后再拿 fd_lock。sys_connect 仍嵌套 socket_lock → peer_fd_lock（需原子查找+连接），标注为已知特例。
-**最终方案**：sun_path hash（connect 直接获取 listener PID，消灭全进程 fd_table 扫描）+ RCU（fd_table 读无锁，消除所有 peer_fd_lock 读路径），彻底消除嵌套。详见下方 §RCU 设计 和 §sun_path hash 设计。
+**已完成**：sun_path hash（connect 通过 hash 直接获取 listener PID，消灭全进程 fd_table 扫描）+ RCU（fd_table 读走 rcu_read_lock + file_get/file_put 指针引用，消除所有 peer_fd_lock 读路径），socket_lock → fd_lock 嵌套彻底消除。详见下方 §RCU 设计 和 §sun_path hash 设计。
 任何违反此顺序的代码路径必须标注原因和替代方案。
 
 ### irq_owner[] — 无锁 atomic
@@ -97,8 +97,8 @@ FAT32 内部顺序固定：i_lock → fat_lock → ahci_lock。
 | sys_exit 唤醒父 | scheduler_lock[pcpu] | 入队父进程 |
 | sys_waitpid 查找 | tasks_lock → scheduler_lock[cpu] | 扫描子进程 → 设 REAPING |
 | sys_fork 分配 | tasks_lock → scheduler_lock[cpu] | 分配槽位 → 入队 |
-| sys_connect listener PID lookup | socket_lock → peer_fd_lock（**已知特例**） | 需原子查找+连接，无法拆开；长远 TODO: sun_path hash 消灭全进程扫描 |
-| sys_accept peer 地址查找 | peer_fd_lock（socket_lock 释放后） | 6.1 已拆开 backlog dequeue 与 fd 分配；peer 地址查找取 peer_fd_lock 无嵌套 |
+| sys_connect listener PID lookup | socket_lock | sun_path hash 直接返回 listener + owner PID，无需 fd_table 扫描 |
+| sys_accept peer 地址查找 | 无锁（child->peer_sock 直接指针） | peer_sock 在 connect 时已设置，直接读 sun_path 无需 fd_table 扫描 |
 | sys_notify / wake_process | scheduler_lock[target_cpu] | 远程入队唤醒 |
 | IRQ wake | scheduler_lock[target_cpu] | irq_owner atomic → 唤醒驱动 |
 | sys_yield | scheduler_lock[my_cpu] | state=READY，不入队 |
@@ -585,5 +585,6 @@ if (!peer_sock) {
 | TLB shootdown IPI | mm_release_pages 释放用户页后需通知其他 CPU flush stale TLB（当前 CR3 reload 自动 flush 本 CPU） | 中 |
 | work stealing | idle CPU 从繁忙 CPU steal 进程，当前进程不迁移 CPU | 低 |
 | wait_queue | wait_node 已预留，替代 WAIT_CHILD/WAIT_RECV 等线性扫描 tasks[] 的唤醒逻辑 | 低 |
-| ~~RCU~~ | ~~fdtable 读走 RCU（无锁），消除所有 fd_lock 读路径，彻底避免 socket_lock/fd_lock 嵌套。过度方案拆开嵌套后 RCU 是最终解~~ → 已设计，见 §RCU 设计 | 中→已设计 |
-| ~~sun_path hash~~ | ~~AF_UNIX bind/listen 注册路径 hash 表，connect/accept 通过 hash 查找 listener，消灭 sys_connect 全进程 fd_table 扫描~~ → 已设计，见 §sun_path hash 设计 | 中→已设计 |
+| ~~RCU~~ | ~~fdtable 读走 RCU（无锁），消除所有 fd_lock 读路径，彻底避免 socket_lock/fd_lock 嵌套~~ → **已实现**，见 §RCU 设计 | 中→已完成 |
+| ~~sun_path hash~~ | ~~AF_UNIX bind/listen 注册路径 hash 表，connect/accept 通过 hash 查找 listener，消灭 sys_connect 全进程 fd_table 扫描~~ → **已实现**，见 §sun_path hash 设计 | 中→已完成 |
+| call_rcu 异步回调 | 当前 `synchronize_rcu()` 同步等待 grace period（4核约数十微秒），高频 close 场景下开销累积。引入 `call_rcu` + `struct file` 内嵌 `struct rcu_head`，close 时异步延迟释放，避免阻塞调用者 | 低 |

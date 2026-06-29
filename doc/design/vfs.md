@@ -296,3 +296,4 @@ UEFI → kernel_main → FAT32 初始化 → spawn init.elf → init spawn kbd/k
 | mount 支持 | 前缀拦截 → mount_table + 挂载点穿越 | 低 |
 | 通用块设备层 | AHCI 直接调用 → 通用 blk_dev 接口（支持 NVMe 等） | 低 |
 | page cache + mmap 共享 | sys_mmap(FD_REGULAR) 映射 page cache 物理页到用户地址空间，同一文件 read + mmap 共享数据 | 中 |
+| dev_ops->close 签名妥协 | `file_put` FD_DEV 路径传 `current_task` + `fd=-1` 给 `ops->close`；当前 blk_dev_close 不使用参数，安全。未来新设备驱动 close handler 如需 file 信息，改签名为 `int (*close)(struct file *f)` | 低 |

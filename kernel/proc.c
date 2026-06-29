@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "kernel/proc.h"
+#include "kernel/rcu.h"
 
 // Validate assembly offset assumptions in trapentry.S (switch_to uses hardcoded offsets)
 _Static_assert(offsetof(task_t, k_rsp) == 8,  "switch_to asm: k_rsp offset mismatch");
@@ -124,7 +125,7 @@ void file_put(struct file *f) {
 
 int alloc_fd(files_t *files, int min_fd) {
     for (int i = min_fd; i < MAX_FD; i++) {
-        if (files->fd_table[i] == NULL)
+        if (fd_lookup(files, i) == NULL)
             return i;
     }
     return -EMFILE;
@@ -199,9 +200,13 @@ void pty_close_file(struct file *f) {
 void files_put(files_t *files) {
     if (!files) return;
     if (refcount_dec_and_test(&files->f_count)) {
+        struct file *entries[MAX_FD];
         for (int fd = 0; fd < MAX_FD; fd++) {
-            struct file *f = fd_uninstall(files, fd);
-            if (f) file_put(f);
+            entries[fd] = fd_uninstall(files, fd);
+        }
+        synchronize_rcu();
+        for (int fd = 0; fd < MAX_FD; fd++) {
+            if (entries[fd]) file_put(entries[fd]);
         }
         kfree(files);
     }
@@ -636,11 +641,11 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
 
     // 2. Get file size from inode directly (sys_fstat uses copy_to_user which
     //    would just memcpy, but we avoid the round-trip)
-    if (!proc->mm->files->fd_table[fd] || proc->mm->files->fd_table[fd]->type != FD_REGULAR) {
+    if (!fd_lookup(proc->mm->files, fd) || fd_lookup(proc->mm->files, fd)->type != FD_REGULAR) {
         sys_close((int64_t)fd, 0, 0, 0, 0, 0);
         return (int64_t)-EIO;
     }
-    struct inode *ip = proc->mm->files->fd_table[fd]->inode;
+    struct inode *ip = fd_lookup(proc->mm->files, fd)->inode;
     if (!ip) { sys_close((int64_t)fd, 0, 0, 0, 0, 0); return (int64_t)-EBADF; }
     uint32_t saved_ino = ip->ino;
     uint64_t file_size = ip->size;
@@ -714,15 +719,22 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
 
     // 8. Close FD_CLOEXEC fds (before releasing old space)
     spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    struct file *cloexec_entries[MAX_FD];
+    int cloexec_count = 0;
     spin_lock(fdlk);
     for (int i = 0; i < MAX_FD; i++) {
-        struct file *f = proc->mm->files->fd_table[i];
+        struct file *f = fd_lookup(proc->mm->files, i);
         if (f && (f->flags & FD_CLOEXEC)) {
             fd_uninstall(proc->mm->files, i);
-            file_put(f);
+            cloexec_entries[cloexec_count++] = f;
         }
     }
     spin_unlock(fdlk);
+    if (cloexec_count > 0) {
+        synchronize_rcu();
+        for (int i = 0; i < cloexec_count; i++)
+            file_put(cloexec_entries[i]);
+    }
 
     // 9. Switch to new address space FIRST, then free old pages.
     //    If we free before switching, subsequent kmalloc/kfree can reuse
@@ -848,9 +860,10 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
 // Must be called under scheduler_lock of the target CPU
 
 void timer_queue_insert(int cpu, task_t *proc) {
-    // Remove from any existing list first to prevent duplicate insertion
-    // (safe no-op if wait_node is already self-referencing / not in any list)
-    list_remove(&proc->wait_node);
+    // Remove from any existing list first to prevent duplicate insertion.
+    // Skip if wait_node is self-referencing (never inserted into a list).
+    if (!list_empty(&proc->wait_node))
+        list_remove(&proc->wait_node);
 
     list_node_t *head = &cpu_locals[cpu].timer_queue;
     list_node_t *node = head->next;
@@ -1039,6 +1052,10 @@ __attribute__((no_sanitize("kernel-address")))
 void idle_entry() {
     sti();
     while (1) {
+        // Idle is a quiescent state — report RCU quiescence so
+        // synchronize_rcu() doesn't spin forever waiting for this CPU.
+        rcu_read_lock();
+        rcu_read_unlock();
         schedule();
         sti();
         __asm__ volatile("hlt");
@@ -1240,6 +1257,7 @@ void schedule() {
             get_cpu_local()->tss_rsp0 = idle->k_stack_top;
             update_tss_iopm(idle);
             spin_unlock(&cpu_locals[my_cpu].scheduler_lock);
+            ASSERT(get_cpu_local()->rcu.nesting == 0);  // must not schedule inside RCU read-side CS
             switch_to(prev, idle);
             spin_lock(&cpu_locals[my_cpu].scheduler_lock);
             spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
@@ -1282,6 +1300,7 @@ void schedule() {
     // flags saved before the context switch remain intact. Then unlock+irqrestore
     // using those original flags to correctly restore the interrupt state.
     spin_unlock(&cpu_locals[my_cpu].scheduler_lock);
+    ASSERT(get_cpu_local()->rcu.nesting == 0);  // must not schedule inside RCU read-side CS
     switch_to(prev, next);
     spin_lock(&cpu_locals[my_cpu].scheduler_lock);
     spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
