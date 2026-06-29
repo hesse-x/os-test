@@ -10,6 +10,10 @@
 #include "common/dev.h"
 #include "common/errno.h"
 #include <string.h>
+#ifdef PERF
+#include "kernel/serial.h"
+#include "arch/x64/apic.h"
+#endif
 
 // Global display state
 struct display_state g_display;
@@ -174,7 +178,17 @@ long display_ioctl(uint32_t cmd, void *arg) {
         if (!g_display.initialized)
             return -ENOENT;
 
+#ifdef PERF
+        uint64_t t0 = rdtsc64();
+#endif
         __memcpy((void __force *)g_display.front_fb, g_display.back_buffer, g_display.fb_size);
+#ifdef PERF
+        uint64_t t1 = rdtsc64();
+        uint64_t delta = t1 - t0;
+        uint64_t us = delta / (tsc_per_ms / 1000);
+        serial_printf("flip: bytes=%u tsc=%lu us=%lu\n",
+                       g_display.fb_size, delta, us);
+#endif
         return 0;
     }
 
