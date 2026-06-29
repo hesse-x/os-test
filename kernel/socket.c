@@ -263,7 +263,7 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
                     int *fds = (int *)CMSG_DATA(cmsg);
                     for (int i = 0; i < num_fds; i++) {
                         if (fds[i] < 0 || fds[i] >= MAX_FD ||
-                            current_task->mm->files->fd_table[fds[i]].type == FD_NONE) {
+                            !current_task->mm->files->fd_table[fds[i]]) {
                             skb_free(skb);
                             return -EBADF;
                         }
@@ -296,8 +296,9 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock,
             spinlock_t *peer_fdlk = &peer_proc->mm->files->fd_lock;
             spin_lock(peer_fdlk);
             for (int fd = 0; fd < MAX_FD; fd++) {
-                if (peer_proc->mm->files->fd_table[fd].type == FD_SOCKET) {
-                    struct unix_sock *ps = peer_proc->mm->files->fd_table[fd].sock;
+                if (peer_proc->mm->files->fd_table[fd] &&
+                    peer_proc->mm->files->fd_table[fd]->type == FD_SOCKET) {
+                    struct unix_sock *ps = peer_proc->mm->files->fd_table[fd]->sock;
                     if (ps && ps != sock && ps->peer == current_task->pid && ps->state == UNIX_CONNECTED) {
                         peer_sock = ps;
                         break;
@@ -410,10 +411,11 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
                             spinlock_t *peer_fdlk = &pp->mm->files->fd_lock;
                             spin_lock(peer_fdlk);
                             for (int fd = 0; fd < MAX_FD; fd++) {
-                                if (pp->mm->files->fd_table[fd].type == FD_SOCKET &&
-                                    pp->mm->files->fd_table[fd].sock &&
-                                    pp->mm->files->fd_table[fd].sock != sock &&
-                                    pp->mm->files->fd_table[fd].sock->peer == current_task->pid) {
+                                struct file *pf = pp->mm->files->fd_table[fd];
+                                if (pf && pf->type == FD_SOCKET &&
+                                    pf->sock &&
+                                    pf->sock != sock &&
+                                    pf->sock->peer == current_task->pid) {
                                     peer_closed = false;
                                     break;
                                 }
@@ -525,51 +527,33 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             task_t *proc = current_task;
             for (int i = 0; i < num_fds_to_install && num_fds_installed < SCM_MAX_FD; i++) {
                 int orig_fd = orig_fds[i];
-                // Step 1: sender_fd_lock — validate + copy source fd entry
-                struct file src_entry;
-                bool src_valid = false;
+                // Step 1: sender_fd_lock — validate + file_get (atomic verify+hold, no TOCTOU)
+                struct file *src = NULL;
                 if (sender_pid >= 0 && sender_pid < MAX_PROC) {
                     task_t *sender = &tasks[sender_pid];
                     if (sender->pid == sender_pid && sender->mm && sender->mm->files && orig_fd >= 0 && orig_fd < MAX_FD) {
                         spinlock_t *sender_fdlk = &sender->mm->files->fd_lock;
                         spin_lock(sender_fdlk);
-                        if (sender->mm->files->fd_table[orig_fd].type != FD_NONE) {
-                            src_entry = sender->mm->files->fd_table[orig_fd];
-                            src_valid = true;
-                        }
+                        src = fd_lookup(sender->mm->files, orig_fd);
+                        if (src) file_get(src);   // hold ref, sender close won't free
                         spin_unlock(sender_fdlk);
                     }
                 }
-                if (!src_valid) continue;
+                if (!src) continue;
 
-                // Step 2: receiver_fd_lock — find free slot + write fd entry
+                // Step 2: receiver_fd_lock — find free slot + install pointer
                 spinlock_t *fdlk = &proc->mm->files->fd_lock;
                 spin_lock(fdlk);
-                int new_fd = -1;
-                for (int f = 3; f < MAX_FD; f++) {
-                    if (proc->mm->files->fd_table[f].type == FD_NONE) {
-                        new_fd = f;
-                        break;
-                    }
-                }
+                int new_fd = alloc_fd(proc->mm->files, 0);
                 if (new_fd < 0) {
                     spin_unlock(fdlk);
+                    file_put(src);
                     break;  // no free fd slots
                 }
-                proc->mm->files->fd_table[new_fd] = src_entry;
+                fd_install(proc->mm->files, new_fd, src);  // install pointer directly, no extra bump needed
                 spin_unlock(fdlk);
+                // No per-type refcount bump needed — file_get already handled it
 
-                // Bump ref counts (outside locks — refcount ops are atomic)
-                if (proc->mm->files->fd_table[new_fd].type == FD_PIPE && proc->mm->files->fd_table[new_fd].pipe) {
-                    refcount_inc(&proc->mm->files->fd_table[new_fd].pipe->p_count);
-                } else if (proc->mm->files->fd_table[new_fd].type == FD_SHM && proc->mm->files->fd_table[new_fd].shm) {
-                    shm_get(proc->mm->files->fd_table[new_fd].shm);
-                } else if (proc->mm->files->fd_table[new_fd].type == FD_FILE) {
-                    refcount_inc(&proc->mm->files->fd_table[new_fd].file_data.f_count);
-                }
-                if (proc->mm->files->fd_table[new_fd].type == FD_SOCKET && proc->mm->files->fd_table[new_fd].sock) {
-                    unix_sock_acquire(proc->mm->files->fd_table[new_fd].sock);
-                }
                 installed_fds[num_fds_installed++] = new_fd;
             }
         }
@@ -668,22 +652,25 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
     spin_lock(fdlk);
 
     // Find free fd slot
-    int fd = -1;
-    for (int i = 3; i < MAX_FD; i++) {
-        if (proc->mm->files->fd_table[i].type == FD_NONE) {
-            fd = i;
-            break;
-        }
-    }
+    int fd = alloc_fd(proc->mm->files, 3);
     if (fd < 0) {
         spin_unlock(fdlk);
         unix_sock_release(sock);
         return (int64_t)-EMFILE;
     }
 
-    proc->mm->files->fd_table[fd].type = FD_SOCKET;
-    proc->mm->files->fd_table[fd].flags = O_RDWR;
-    proc->mm->files->fd_table[fd].sock = sock;
+    struct file *f = (struct file *)kmalloc(sizeof(struct file));
+    if (!f) {
+        spin_unlock(fdlk);
+        unix_sock_release(sock);
+        return (int64_t)-ENOMEM;
+    }
+    __memset(f, 0, sizeof(*f));
+    refcount_set(&f->f_count, 1);
+    f->type = FD_SOCKET;
+    f->flags = O_RDWR;
+    f->sock = sock;
+    fd_install(proc->mm->files, fd, f);
 
     spin_unlock(fdlk);
 
@@ -699,7 +686,8 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
 
     // Validate fd
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    struct file *bf = proc->mm->files->fd_table[fd];
+    if (!bf || bf->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
     // Validate addr
     uint64_t addr_ptr = (int64_t)addr;
@@ -723,7 +711,7 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
 
     if (sun_path[0] == '\0') return (int64_t)-EINVAL;  // empty path
 
-    struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
+    struct unix_sock *sock = bf->sock;
     if (!sock) return (int64_t)-EBADF;
 
     spin_lock(&socket_lock);
@@ -760,9 +748,10 @@ int64_t sys_listen(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t
     task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    struct file *lf = proc->mm->files->fd_table[fd];
+    if (!lf || lf->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
-    struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
+    struct unix_sock *sock = lf->sock;
     if (!sock) return (int64_t)-EBADF;
 
     if (backlog <= 0) backlog = 1;
@@ -784,9 +773,10 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
     task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    struct file *af = proc->mm->files->fd_table[fd];
+    if (!af || af->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
-    struct unix_sock *listen_sock = proc->mm->files->fd_table[fd].sock;
+    struct unix_sock *listen_sock = af->sock;
     if (!listen_sock) return (int64_t)-EBADF;
 
     // Validate addr pointers if non-null
@@ -846,13 +836,7 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
         // Allocate new fd for this child socket (fd_lock only, no socket_lock nesting)
         spinlock_t *fdlk = &proc->mm->files->fd_lock;
         spin_lock(fdlk);
-        int new_fd = -1;
-        for (int i = 3; i < MAX_FD; i++) {
-            if (proc->mm->files->fd_table[i].type == FD_NONE) {
-                new_fd = i;
-                break;
-            }
-        }
+        int new_fd = alloc_fd(proc->mm->files, 3);
 
         if (new_fd < 0) {
             spin_unlock(fdlk);
@@ -874,9 +858,30 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
         // Transfer ownership to new fd (initial ref_count=1 from socket allocation)
         child->state = UNIX_CONNECTED;
 
-        proc->mm->files->fd_table[new_fd].type = FD_SOCKET;
-        proc->mm->files->fd_table[new_fd].flags = O_RDWR;
-        proc->mm->files->fd_table[new_fd].sock = child;
+        struct file *f = (struct file *)kmalloc(sizeof(struct file));
+        if (!f) {
+            fd_uninstall(proc->mm->files, new_fd);
+            spin_unlock(fdlk);
+            // Put child back into backlog
+            spin_lock(&socket_lock);
+            child->backlog_head = NULL;
+            child->backlog_tail = NULL;
+            listen_sock->backlog_len++;
+            if (listen_sock->backlog_head) {
+                child->backlog_head = listen_sock->backlog_head;
+                listen_sock->backlog_head = child;
+            } else {
+                listen_sock->backlog_head = listen_sock->backlog_tail = child;
+            }
+            spin_unlock(&socket_lock);
+            return (int64_t)-ENOMEM;
+        }
+        __memset(f, 0, sizeof(*f));
+        refcount_set(&f->f_count, 1);
+        f->type = FD_SOCKET;
+        f->flags = O_RDWR;
+        f->sock = child;
+        fd_install(proc->mm->files, new_fd, f);
 
         spin_unlock(fdlk);
         if (addr && addrlen) {
@@ -896,11 +901,12 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
                         spinlock_t *peer_fdlk = &pp->mm->files->fd_lock;
                         spin_lock(peer_fdlk);
                         for (int pfd = 0; pfd < MAX_FD; pfd++) {
-                            if (pp->mm->files->fd_table[pfd].type == FD_SOCKET &&
-                                pp->mm->files->fd_table[pfd].sock &&
-                                pp->mm->files->fd_table[pfd].sock != child &&
-                                pp->mm->files->fd_table[pfd].sock->peer == proc->pid) {
-                                peer_sock = pp->mm->files->fd_table[pfd].sock;
+                            struct file *pf = pp->mm->files->fd_table[pfd];
+                            if (pf && pf->type == FD_SOCKET &&
+                                pf->sock &&
+                                pf->sock != child &&
+                                pf->sock->peer == proc->pid) {
+                                peer_sock = pf->sock;
                                 break;
                             }
                         }
@@ -936,7 +942,8 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
     task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    struct file *cf = proc->mm->files->fd_table[fd];
+    if (!cf || cf->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
     // Validate addr
     uint64_t addr_ptr = (int64_t)addr;
@@ -989,7 +996,7 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
     child->peer = proc->pid;
 
     // Update our socket to CONNECTED and set peer
-    struct unix_sock *client_sock = proc->mm->files->fd_table[fd].sock;
+    struct unix_sock *client_sock = cf->sock;
     if (!client_sock) {
         spin_unlock(&socket_lock);
         unix_sock_free(child);
@@ -1007,8 +1014,9 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
             spinlock_t *peer_fdlk = &tasks[i].mm->files->fd_lock;
             spin_lock(peer_fdlk);
             for (int pf = 0; pf < MAX_FD; pf++) {
-                if (tasks[i].mm->files->fd_table[pf].type == FD_SOCKET &&
-                    tasks[i].mm->files->fd_table[pf].sock == listener) {
+                struct file *pf_file = tasks[i].mm->files->fd_table[pf];
+                if (pf_file && pf_file->type == FD_SOCKET &&
+                    pf_file->sock == listener) {
                     listener_pid = tasks[i].pid;
                     spin_unlock(peer_fdlk);
                     goto found_listener;
@@ -1082,12 +1090,10 @@ int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, i
     spinlock_t *fdlk = &proc->mm->files->fd_lock;
     spin_lock(fdlk);
 
-    int fd_a = -1, fd_b = -1;
-    for (int i = 3; i < MAX_FD; i++) {
-        if (proc->mm->files->fd_table[i].type == FD_NONE) {
-            if (fd_a < 0) fd_a = i;
-            else if (fd_b < 0) { fd_b = i; break; }
-        }
+    int fd_a = alloc_fd(proc->mm->files, 3);
+    int fd_b = -1;
+    if (fd_a >= 0) {
+        fd_b = alloc_fd(proc->mm->files, fd_a + 1);
     }
 
     if (fd_a < 0 || fd_b < 0) {
@@ -1104,13 +1110,32 @@ int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, i
     b->peer = proc->pid;
     b->peer_sock = a;
 
-    proc->mm->files->fd_table[fd_a].type = FD_SOCKET;
-    proc->mm->files->fd_table[fd_a].flags = O_RDWR;
-    proc->mm->files->fd_table[fd_a].sock = a;
+    struct file *fa = (struct file *)kmalloc(sizeof(struct file));
+    struct file *fb = (struct file *)kmalloc(sizeof(struct file));
+    if (!fa || !fb) {
+        if (fa) kfree(fa);
+        if (fb) kfree(fb);
+        fd_uninstall(proc->mm->files, fd_a);
+        fd_uninstall(proc->mm->files, fd_b);
+        spin_unlock(fdlk);
+        unix_sock_free(a);
+        unix_sock_free(b);
+        return (int64_t)-ENOMEM;
+    }
 
-    proc->mm->files->fd_table[fd_b].type = FD_SOCKET;
-    proc->mm->files->fd_table[fd_b].flags = O_RDWR;
-    proc->mm->files->fd_table[fd_b].sock = b;
+    __memset(fa, 0, sizeof(*fa));
+    refcount_set(&fa->f_count, 1);
+    fa->type = FD_SOCKET;
+    fa->flags = O_RDWR;
+    fa->sock = a;
+    fd_install(proc->mm->files, fd_a, fa);
+
+    __memset(fb, 0, sizeof(*fb));
+    refcount_set(&fb->f_count, 1);
+    fb->type = FD_SOCKET;
+    fb->flags = O_RDWR;
+    fb->sock = b;
+    fd_install(proc->mm->files, fd_b, fb);
 
     spin_unlock(fdlk);
 
@@ -1130,7 +1155,8 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
     task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    struct file *sf = proc->mm->files->fd_table[fd];
+    if (!sf || sf->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
     // Validate msghdr pointer
     uint64_t msg_ptr = (int64_t)msg;
@@ -1184,7 +1210,7 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
         kcontrollen = kmsg.msg_controllen;
     }
 
-    struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
+    struct unix_sock *sock = sf->sock;
     if (!sock) { kfree(kiov); if (kcontrol) kfree(kcontrol); return (int64_t)-EBADF; }
 
     int64_t ret = sock_sendmsg_internal(sock, kiov, kmsg.msg_iovlen,
@@ -1204,7 +1230,8 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
     task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    struct file *rf = proc->mm->files->fd_table[fd];
+    if (!rf || rf->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
     uint64_t msg_ptr = (int64_t)msg;
     if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
@@ -1249,7 +1276,7 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64
         kcontrollen = kmsg.msg_controllen;
     }
 
-    struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
+    struct unix_sock *sock = rf->sock;
     if (!sock) { kfree(kiov); return (int64_t)-EBADF; }
 
     int64_t ret = sock_recvmsg_internal(sock, kiov, kmsg.msg_iovlen,
@@ -1274,9 +1301,10 @@ int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64
     task_t *proc = current_task;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    if (proc->mm->files->fd_table[fd].type != FD_SOCKET) return (int64_t)-ENOTSOCK;
+    struct file *shf = proc->mm->files->fd_table[fd];
+    if (!shf || shf->type != FD_SOCKET) return (int64_t)-ENOTSOCK;
 
-    struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
+    struct unix_sock *sock = shf->sock;
     if (!sock) return (int64_t)-EBADF;
 
     if (how < 0 || how > 2) return (int64_t)-EINVAL;
@@ -1360,8 +1388,8 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
                 continue;
             }
 
-            struct file *f = &proc->mm->files->fd_table[pfd];
-            if (f->type == FD_NONE) {
+            struct file *f = proc->mm->files->fd_table[pfd];
+            if (!f) {
                 kfds[i].revents = POLLERR;
                 ready++;
                 continue;

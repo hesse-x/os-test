@@ -80,6 +80,7 @@ struct inode;      // forward declaration from kernel/inode.h
 struct pty;        // forward declaration from kernel/pty.h
 
 typedef struct file {
+    refcount_t f_count;    // fd_table pointer count + RCU reader refs
     int type;            // FD_NONE / FD_PIPE / FD_REGULAR / FD_DEV / FD_DIR / FD_SOCKET / FD_SHM / FD_FILE
     int flags;           // O_RDONLY / O_WRONLY / O_RDWR
     struct inode *inode; // FD_REGULAR, FD_DEV, FD_DIR shared field
@@ -103,7 +104,7 @@ typedef struct file {
 // ===================== files_t (file descriptor table, independent refcount) =====================
 typedef struct files_t {
     spinlock_t fd_lock;               // protects fd_table modifications and cross-process reads
-    struct file fd_table[MAX_FD];     // per-process file descriptor table
+    struct file *fd_table[MAX_FD];    // per-process file descriptor table (pointer array)
     refcount_t f_count;               // reference count, initial=1; CLONE_FILES shares +1
 } files_t;
 
@@ -201,8 +202,32 @@ void  mm_release(mm_t *mm, pid_t owner_pid); // free user page tables+phys pages
 void  mm_release_pages(mm_t *mm);           // free user page tables+phys pages+PML4 only (for execve)
 
 // ===================== files_t lifecycle =====================
-files_t *files_create(void);                // kmalloc + ref_count=1 + fd_table init FD_NONE
+files_t *files_create(void);                // kmalloc + ref_count=1 + fd_table init NULL
 void     files_put(files_t *files);         // atomic --ref_count; if==0 close all fds + kfree
+
+// ===================== unified fd lifecycle =====================
+void file_put(struct file *f);              // dec f_count, free resources+kfree when zero
+int  alloc_fd(files_t *files, int min_fd);  // scan for NULL slot, return fd or -EMFILE
+void pty_dup_file(struct file *f);          // pty master/slave ref bump
+void pty_close_file(struct file *f);        // pty master/slave ref dec + signal
+
+static inline void file_get(struct file *f) {
+    if (f) refcount_inc(&f->f_count);
+}
+
+static inline void fd_install(files_t *files, int fd, struct file *f) {
+    files->fd_table[fd] = f;
+}
+
+static inline struct file *fd_uninstall(files_t *files, int fd) {
+    struct file *f = files->fd_table[fd];
+    files->fd_table[fd] = NULL;
+    return f;
+}
+
+static inline struct file *fd_lookup(files_t *files, int fd) {
+    return files->fd_table[fd];
+}
 
 // SHM reference counting helpers
 struct shm *shm_get(struct shm *shm);
@@ -218,8 +243,5 @@ mmap_region_t *add_mmap_region(task_t *proc, uint64_t vaddr, uint64_t size,
 // Timer queue operations (must be called under scheduler_lock)
 void timer_queue_insert(int cpu, task_t *proc);
 void timer_queue_remove(task_t *proc);
-
-// Internal helper: close a single fd in a files_t
-void close_fd_internal(files_t *files, int fd);
 
 #endif // KERNEL_PROC_H

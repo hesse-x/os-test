@@ -38,7 +38,8 @@ static int blk_dev_close(struct task_t *proc, int fd) {
 }
 
 static ssize_t blk_dev_read(struct task_t *proc, int fd, void *buf, size_t count) {
-    struct file *f = &proc->mm->files->fd_table[fd];
+    struct file *f = proc->mm->files->fd_table[fd];
+    if (!f) return -EBADF;
     uint64_t off = f->offset;
 
     if (off % 512 != 0 || count % 512 != 0)
@@ -60,7 +61,8 @@ static ssize_t blk_dev_read(struct task_t *proc, int fd, void *buf, size_t count
 }
 
 static ssize_t blk_dev_write(struct task_t *proc, int fd, const void *buf, size_t count) {
-    struct file *f = &proc->mm->files->fd_table[fd];
+    struct file *f = proc->mm->files->fd_table[fd];
+    if (!f) return -EBADF;
     uint64_t off = f->offset;
 
     if (off % 512 != 0 || count % 512 != 0)

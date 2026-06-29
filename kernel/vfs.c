@@ -76,26 +76,31 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3,
 
     /* 4. Allocate fd (under fd_lock) */
     task_t *proc = current_task;
-    spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    files_t *files = proc->mm->files;
+    spinlock_t *fdlk = &files->fd_lock;
     spin_lock(fdlk);
-    int fd = -1;
-    for (int j = 3; j < MAX_FD; j++) {
-        if (proc->mm->files->fd_table[j].type == FD_NONE) { fd = j; break; }
-    }
+    int fd = alloc_fd(files, 3);
     if (fd < 0) { spin_unlock(fdlk); inode_put(ip); return (int64_t)-EMFILE; }
 
-    /* 5. Set up fd entry */
+    /* 5. Allocate struct file */
+    struct file *f = (struct file *)kmalloc(sizeof(struct file));
+    if (!f) { spin_unlock(fdlk); inode_put(ip); return (int64_t)-ENOMEM; }
+    __memset(f, 0, sizeof(*f));
+    refcount_set(&f->f_count, 1);
+
+    /* 6. Set up fd entry */
     if (ip->type == INODE_DIR) {
-        proc->mm->files->fd_table[fd].type = FD_DIR;
-        proc->mm->files->fd_table[fd].flags = O_RDONLY;
-        proc->mm->files->fd_table[fd].inode = ip;
-        proc->mm->files->fd_table[fd].offset = 0;  /* directory scan position */
+        f->type = FD_DIR;
+        f->flags = O_RDONLY;
+        f->inode = ip;
+        f->offset = 0;  /* directory scan position */
     } else {
-        proc->mm->files->fd_table[fd].type = FD_REGULAR;
-        proc->mm->files->fd_table[fd].flags = flags & (O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK);
-        proc->mm->files->fd_table[fd].inode = ip;
-        proc->mm->files->fd_table[fd].offset = 0;
+        f->type = FD_REGULAR;
+        f->flags = flags & (O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK);
+        f->inode = ip;
+        f->offset = 0;
     }
+    fd_install(files, fd, f);
     spin_unlock(fdlk);
     return (int64_t)fd;
 }
@@ -201,14 +206,16 @@ int64_t sys_getdents(int64_t arg1, int64_t arg2, int64_t arg3,
     size_t len = (size_t)arg3;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EINVAL;
-    if (current_task->mm->files->fd_table[fd].type != FD_DIR) return (int64_t)-ENOTDIR;
 
-    struct inode *ip = current_task->mm->files->fd_table[fd].inode;
+    struct file *f = current_task->mm->files->fd_table[fd];
+    if (!f || f->type != FD_DIR) return (int64_t)-ENOTDIR;
+
+    struct inode *ip = f->inode;
     if (!ip) return (int64_t)-EBADF;
 
     void *kbuf = kmalloc(len);
     if (!kbuf) return (int64_t)-ENOMEM;
-    int ret = fat32_getdents(ip->start_cluster, &current_task->mm->files->fd_table[fd].offset, kbuf, len);
+    int ret = fat32_getdents(ip->start_cluster, &f->offset, kbuf, len);
     if (ret < 0) { kfree(kbuf); return ret; }
     if (copy_to_user(buf, kbuf, ret)) { kfree(kbuf); return (int64_t)-EFAULT; }
     kfree(kbuf);

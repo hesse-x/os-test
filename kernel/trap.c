@@ -29,55 +29,6 @@
 #include "common/input.h"
 #include "kernel/user_check.h"
 
-// ===================== Helper functions =====================
-
-// Find the first free fd slot starting from min_fd. Returns fd index or -EMFILE.
-static int alloc_fd(task_t *proc, int min_fd) {
-    for (int i = min_fd; i < MAX_FD; i++) {
-        if (proc->mm->files->fd_table[i].type == FD_NONE)
-            return i;
-    }
-    return -EMFILE;
-}
-
-// Close an fd: release resources (pipe/shm/inode/socket/dev) and zero the slot.
-// FD_FILE notification is NOT handled here (different structs per caller).
-// This is a local static duplicate of the global close_fd_internal in proc.c,
-// adapted to take files_t* instead of task_t*.
-// Returns 0 on success.
-static int close_fd_trap(files_t *files, int fd) {
-    struct file *f = &files->fd_table[fd];
-    if (f->type == FD_PIPE) {
-        struct pipe *p = f->pipe;
-        if (p) {
-            wake_pipe_peers(p, f->flags);
-            if (refcount_dec_and_test(&p->p_count)) {
-                kfree(p->buf);
-                kfree(p);
-            }
-        }
-    } else if (f->type == FD_SHM) {
-        if (f->shm) shm_put(f->shm);
-    } else if (f->type == FD_REGULAR || f->type == FD_DIR) {
-        if (f->inode) inode_put(f->inode);
-    } else if (f->type == FD_SOCKET) {
-        if (f->sock) sock_close(f->sock);
-    } else if (f->type == FD_DEV) {
-        struct inode *ip = f->inode;
-        if (ip && ip->i_priv) {
-            struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-            if (ops->driver_pid == 0 && ops->close)
-                ops->close(current_task, fd);
-        }
-        if (ip) inode_put(ip);
-    } else if (f->type == FD_TTY) {
-        pty_close_fd(current_task, fd);
-    }
-    __memset(f, 0, sizeof(struct file));
-    f->type = FD_NONE;
-    return 0;
-}
-
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 128
 static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS];
@@ -248,6 +199,22 @@ void trap_dispatch(trapframe_t *tf) {
     return;
   }
 
+  // Early COW fault resolution — silently handle recoverable COW faults
+  // before any error logging, to avoid log noise from benign page faults.
+  if (tf->trapno == 14 && current_task) {
+    uint64_t fault_addr = read_cr2();
+    uint64_t error_code = tf->err_code;
+    bool is_write = error_code & 2;
+    bool is_present = error_code & 1;
+    if (is_present && is_write) {
+      uint64_t *pte = lookup_pte(current_task->mm->cr3, fault_addr);
+      if (pte && (*pte & PTE_COW)) {
+        resolve_cow_fault(current_task, pte, fault_addr);
+        return;  // COW resolved, retry faulting instruction
+      }
+    }
+  }
+
   // CPU exception: kill user process, halt for kernel exceptions
   if (tf->trapno == 14) {
     uint64_t cr2;
@@ -338,29 +305,18 @@ void trap_dispatch(trapframe_t *tf) {
     case 13:  // #GP general protection
         sig = SIGSEGV; si_code = SEGV_MAPERR; si_addr = (void *)tf->rip;
         break;
-    case 14:  // #PF page fault — check COW first
+    case 14:  // #PF page fault — COW already resolved above; only genuine faults reach here
         {
             uint64_t fault_addr = read_cr2();
-            uint64_t error_code = tf->err_code;
-            bool is_write = error_code & 2;
-            bool is_present = error_code & 1;
+            bool is_present = tf->err_code & 1;
 
             si_addr = (void *)fault_addr;
 
-            if (is_present && is_write) {
-                // Write to present page: check if COW
-                uint64_t *pte = lookup_pte(current_task->mm->cr3, fault_addr);
-                if (pte && (*pte & PTE_COW)) {
-                    resolve_cow_fault(current_task, pte, fault_addr);
-                    return;  // COW resolved, retry faulting instruction
-                }
-                // Not COW: genuine protection violation
-                sig = SIGSEGV; si_code = SEGV_ACCERR;
-            } else if (!is_present) {
+            if (!is_present) {
                 // Not-present: genuine mapping error
                 sig = SIGSEGV; si_code = SEGV_MAPERR;
             } else {
-                // Read from present page with insufficient privilege
+                // Present but insufficient privilege: genuine protection violation
                 sig = SIGSEGV; si_code = SEGV_ACCERR;
             }
         }
@@ -376,21 +332,8 @@ void trap_dispatch(trapframe_t *tf) {
     force_sig(current_task, sig, si_code, si_addr);
     return;  // Don't kill process; check_pending_signals will handle it
   }
-  // Kernel-mode exception: unrecoverable, panic (unless COW fault)
-  if (tf->trapno == 14) {
-    uint64_t fault_addr = read_cr2();
-    uint64_t error_code = tf->err_code;
-    bool is_write = error_code & 2;
-    bool is_present = error_code & 1;
-
-    if (is_present && is_write) {
-      uint64_t *pte = lookup_pte(current_task->mm->cr3, fault_addr);
-      if (pte && (*pte & PTE_COW)) {
-        resolve_cow_fault(current_task, pte, fault_addr);
-        return;  // COW resolved, return to faulting instruction
-      }
-    }
-  }
+  // Kernel-mode exception: unrecoverable, panic
+  // (COW faults were already resolved above; genuine kernel #PF falls through.)
   panic("kernel-mode exception: vector=%lu rip=0x%lx cr3=0x%lx",
         tf->trapno, tf->rip, cr3);
 }
@@ -1210,8 +1153,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
         if (fd >= MAX_FD) return -EBADF;
 
         // FD_DEV: dispatch to device mmap handler (devtmpfs path with inode)
-        if (proc->mm->files->fd_table[fd].type == FD_DEV) {
-            struct inode *ip = proc->mm->files->fd_table[fd].inode;
+        if (proc->mm->files->fd_table[fd] && proc->mm->files->fd_table[fd]->type == FD_DEV) {
+            struct inode *ip = proc->mm->files->fd_table[fd]->inode;
             if (ip && ip->i_priv) {
                 struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
                 if (ops->driver_pid == 0 && ops->mmap) {
@@ -1228,8 +1171,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                     // Find driver's FD_SHM
                     struct shm *target_shm = NULL;
                     for (int i = 0; i < MAX_FD; i++) {
-                        if (drv_proc->mm && drv_proc->mm->files->fd_table[i].type == FD_SHM) {
-                            target_shm = drv_proc->mm->files->fd_table[i].shm;
+                        if (drv_proc->mm && drv_proc->mm->files->fd_table[i] && drv_proc->mm->files->fd_table[i]->type == FD_SHM) {
+                            target_shm = drv_proc->mm->files->fd_table[i]->shm;
                             break;
                         }
                     }
@@ -1284,9 +1227,9 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
         }
 
         // FD_SHM: existing SHM mapping path
-        if (proc->mm->files->fd_table[fd].type != FD_SHM)
+        if (!proc->mm->files->fd_table[fd] || proc->mm->files->fd_table[fd]->type != FD_SHM)
             return -EINVAL;
-        struct shm *shm = proc->mm->files->fd_table[fd].shm;
+        struct shm *shm = proc->mm->files->fd_table[fd]->shm;
         if (!shm) return -EBADF;
 
         // Total allocated pages: contiguous + discrete
@@ -1600,19 +1543,28 @@ int64_t sys_install_fd_impl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t ar
 
     spinlock_t *fdlk = &proc->mm->files->fd_lock;
     spin_lock(fdlk);
-    int fd = alloc_fd(proc, 3);
+    int fd = alloc_fd(proc->mm->files, 3);
     if (fd < 0) {
         spin_unlock(fdlk);
         return (int64_t)-EMFILE;
     }
 
-    proc->mm->files->fd_table[fd].type = FD_FILE;
-    proc->mm->files->fd_table[fd].flags = flags;
-    proc->mm->files->fd_table[fd].file_data.fs_pid = fs_pid;
-    proc->mm->files->fd_table[fd].file_data.fs_fd = fs_fd;
-    proc->mm->files->fd_table[fd].file_data._offset = offset;
-    proc->mm->files->fd_table[fd].file_data.file_size = file_size;
-    refcount_set(&proc->mm->files->fd_table[fd].file_data.f_count, 1);
+    struct file *f = (struct file *)kmalloc(sizeof(struct file));
+    if (!f) {
+        fd_uninstall(proc->mm->files, fd);
+        spin_unlock(fdlk);
+        return (int64_t)-ENOMEM;
+    }
+    __memset(f, 0, sizeof(*f));
+    refcount_set(&f->f_count, 1);
+    f->type = FD_FILE;
+    f->flags = flags;
+    f->file_data.fs_pid = fs_pid;
+    f->file_data.fs_fd = fs_fd;
+    f->file_data._offset = offset;
+    f->file_data.file_size = file_size;
+    refcount_set(&f->file_data.f_count, 1);
+    fd_install(proc->mm->files, fd, f);
 
     spin_unlock(fdlk);
     return (int64_t)fd;
@@ -1627,12 +1579,13 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
     void __user *arg = (void __user * __force)arg3;
 
     task_t *proc = current_task;
-    if (fd < 0 || fd >= MAX_FD || proc->mm->files->fd_table[fd].type == FD_NONE)
+    if (fd < 0 || fd >= MAX_FD || !proc->mm->files->fd_table[fd])
         return (int64_t)(-(int64_t)EBADF);
 
-    switch (proc->mm->files->fd_table[fd].type) {
+    struct file *f = proc->mm->files->fd_table[fd];
+    switch (f->type) {
     case FD_DEV: {
-        struct inode *ip = proc->mm->files->fd_table[fd].inode;
+        struct inode *ip = f->inode;
         if (!ip || !ip->i_priv) return (int64_t)(-(int64_t)ENODEV);
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         if (ops->driver_pid == 0) {
@@ -1764,7 +1717,7 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
         return (int64_t)(long)ioctl_result;
     }
     case FD_TTY: {
-        struct pty *pty = proc->mm->files->fd_table[fd].pty;
+        struct pty *pty = f->pty;
         if (!pty) return (int64_t)(-(int64_t)EBADF);
         return (int64_t)pty_ioctl(pty, cmd, arg);
     }
@@ -1787,17 +1740,18 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2,
     struct kstat __user *ust = (struct kstat __user * __force)arg2;
 
     task_t *proc = current_task;
-    if (fd < 0 || fd >= MAX_FD || proc->mm->files->fd_table[fd].type == FD_NONE)
+    if (fd < 0 || fd >= MAX_FD || !proc->mm->files->fd_table[fd])
         return (int64_t)(-(int64_t)EBADF);
 
+    struct file *f = proc->mm->files->fd_table[fd];
     struct kstat ks;
     __memset(&ks, 0, sizeof(ks));
     ks.st_nlink = 1;
     ks.st_blksize = 512;
 
-    switch (proc->mm->files->fd_table[fd].type) {
+    switch (f->type) {
     case FD_REGULAR: {
-        struct inode *ip = proc->mm->files->fd_table[fd].inode;
+        struct inode *ip = f->inode;
         if (!ip) return (int64_t)(-(int64_t)EBADF);
         ks.st_ino = ip->ino;
         ks.st_size = ip->size;
@@ -1806,7 +1760,7 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2,
         break;
     }
     case FD_DIR: {
-        struct inode *ip = proc->mm->files->fd_table[fd].inode;
+        struct inode *ip = f->inode;
         if (!ip) return (int64_t)(-(int64_t)EBADF);
         ks.st_ino = ip->ino;
         ks.st_mode = S_IFDIR | 0755;
@@ -1814,7 +1768,7 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2,
         break;
     }
     case FD_DEV: {
-        struct inode *ip = proc->mm->files->fd_table[fd].inode;
+        struct inode *ip = f->inode;
         if (!ip) return (int64_t)(-(int64_t)EBADF);
         ks.st_ino = ip->ino;
         if (ip->i_priv && ((struct dev_ops *)ip->i_priv)->device_type == DEV_BLOCK)
@@ -1848,10 +1802,10 @@ int64_t sys_fdev_pid(int64_t arg1, int64_t _u2, int64_t _u3,
                        int64_t _u4, int64_t _u5, int64_t _u6) {
     int fd = (int)arg1;
     task_t *proc = current_task;
-    if (fd < 0 || fd >= MAX_FD || proc->mm->files->fd_table[fd].type != FD_DEV)
+    if (fd < 0 || fd >= MAX_FD || !proc->mm->files->fd_table[fd] || proc->mm->files->fd_table[fd]->type != FD_DEV)
         return (int64_t)(-(int64_t)EBADF);
 
-    struct inode *ip = proc->mm->files->fd_table[fd].inode;
+    struct inode *ip = proc->mm->files->fd_table[fd]->inode;
     if (!ip || !ip->i_priv) return 0;  // kernel device, no driver_pid
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
     return (int64_t)ops->driver_pid;
@@ -1893,16 +1847,31 @@ int64_t sys_shm_create(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int6
     shm->num_pages = 0;
 
     // Find free fd slot (skip 0/1 reserved for stdin/stdout)
-    int fd = alloc_fd(proc, 2);
+    spinlock_t *fdlk = &proc->mm->files->fd_lock;
+    spin_lock(fdlk);
+    int fd = alloc_fd(proc->mm->files, 2);
     if (fd < 0) {
+        spin_unlock(fdlk);
         kfree(shm);
         bfc_free_page(pages, npages);
         return -EMFILE;
     }
 
-    proc->mm->files->fd_table[fd].type = FD_SHM;
-    proc->mm->files->fd_table[fd].flags = O_RDWR;
-    proc->mm->files->fd_table[fd].shm = shm;
+    struct file *f = (struct file *)kmalloc(sizeof(struct file));
+    if (!f) {
+        fd_uninstall(proc->mm->files, fd);
+        spin_unlock(fdlk);
+        kfree(shm);
+        bfc_free_page(pages, npages);
+        return -ENOMEM;
+    }
+    __memset(f, 0, sizeof(*f));
+    refcount_set(&f->f_count, 1);
+    f->type = FD_SHM;
+    f->flags = O_RDWR;
+    f->shm = shm;
+    fd_install(proc->mm->files, fd, f);
+    spin_unlock(fdlk);
 
     return (int64_t)fd;
 }
@@ -1939,8 +1908,8 @@ int64_t sys_shm_attach(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int
         spinlock_t *target_fdlk = &target->mm->files->fd_lock;
         spin_lock(target_fdlk);
         for (int i = 0; i < MAX_FD; i++) {
-            if (target->mm && target->mm->files->fd_table[i].type == FD_SHM) {
-                target_shm = target->mm->files->fd_table[i].shm;
+            if (target->mm && target->mm->files->fd_table[i] && target->mm->files->fd_table[i]->type == FD_SHM) {
+                target_shm = target->mm->files->fd_table[i]->shm;
                 break;
             }
         }
@@ -1954,16 +1923,26 @@ int64_t sys_shm_attach(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int
     // Find free fd slot (under current process's fd_lock)
     spinlock_t *fdlk = &proc->mm->files->fd_lock;
     spin_lock(fdlk);
-    int fd = alloc_fd(proc, 2);
+    int fd = alloc_fd(proc->mm->files, 2);
     if (fd < 0) {
         spin_unlock(fdlk);
         shm_put(target_shm);
         return -EMFILE;
     }
 
-    proc->mm->files->fd_table[fd].type = FD_SHM;
-    proc->mm->files->fd_table[fd].flags = O_RDWR;
-    proc->mm->files->fd_table[fd].shm = target_shm;
+    struct file *f = (struct file *)kmalloc(sizeof(struct file));
+    if (!f) {
+        fd_uninstall(proc->mm->files, fd);
+        spin_unlock(fdlk);
+        shm_put(target_shm);
+        return -ENOMEM;
+    }
+    __memset(f, 0, sizeof(*f));
+    refcount_set(&f->f_count, 1);
+    f->type = FD_SHM;
+    f->flags = O_RDWR;
+    f->shm = target_shm;
+    fd_install(proc->mm->files, fd, f);
     spin_unlock(fdlk);
 
     return (int64_t)fd;
@@ -2019,16 +1998,26 @@ int64_t sys_memfd_create(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, i
     // Find free fd slot (under fd_lock, skip 0/1 reserved for stdin/stdout)
     spinlock_t *fdlk = &proc->mm->files->fd_lock;
     spin_lock(fdlk);
-    int fd = alloc_fd(proc, 2);
+    int fd = alloc_fd(proc->mm->files, 2);
     if (fd < 0) {
         spin_unlock(fdlk);
         kfree(shm);
         return -EMFILE;
     }
 
-    proc->mm->files->fd_table[fd].type = FD_SHM;
-    proc->mm->files->fd_table[fd].flags = O_RDWR | ((flags & MFD_CLOEXEC) ? FD_CLOEXEC : 0);
-    proc->mm->files->fd_table[fd].shm = shm;
+    struct file *f = (struct file *)kmalloc(sizeof(struct file));
+    if (!f) {
+        fd_uninstall(proc->mm->files, fd);
+        spin_unlock(fdlk);
+        kfree(shm);
+        return -ENOMEM;
+    }
+    __memset(f, 0, sizeof(*f));
+    refcount_set(&f->f_count, 1);
+    f->type = FD_SHM;
+    f->flags = O_RDWR | ((flags & MFD_CLOEXEC) ? FD_CLOEXEC : 0);
+    f->shm = shm;
+    fd_install(proc->mm->files, fd, f);
     spin_unlock(fdlk);
 
     return (int64_t)fd;
@@ -2083,10 +2072,10 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int6
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
-    if (proc->mm->files->fd_table[fd].type != FD_SHM) return (int64_t)-EINVAL;
-    if (!proc->mm->files->fd_table[fd].shm) return (int64_t)-EBADF;
+    if (!proc->mm->files->fd_table[fd] || proc->mm->files->fd_table[fd]->type != FD_SHM) return (int64_t)-EINVAL;
+    if (!proc->mm->files->fd_table[fd]->shm) return (int64_t)-EBADF;
 
-    struct shm *shm = proc->mm->files->fd_table[fd].shm;
+    struct shm *shm = proc->mm->files->fd_table[fd]->shm;
 
     if (size < 0) return (int64_t)-EINVAL;
 
@@ -2249,8 +2238,8 @@ int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
 
     spinlock_t *fdlk = &proc->mm->files->fd_lock;
     spin_lock(fdlk);
-    int read_fd = alloc_fd(proc, 3);
-    int write_fd = (read_fd >= 0) ? alloc_fd(proc, read_fd + 1) : -EMFILE;
+    int read_fd = alloc_fd(proc->mm->files, 3);
+    int write_fd = (read_fd >= 0) ? alloc_fd(proc->mm->files, read_fd + 1) : -EMFILE;
     if (read_fd < 0 || write_fd < 0) {
         spin_unlock(fdlk);
         return (int64_t)-EMFILE;
@@ -2258,11 +2247,22 @@ int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
 
     // Allocate pipe buffer (1 page)
     uint8_t *buf = (uint8_t *)kmalloc(PIPE_BUF_SIZE);
-    if (!buf) return (int64_t)-ENOMEM;
+    if (!buf) {
+        fd_uninstall(proc->mm->files, read_fd);
+        fd_uninstall(proc->mm->files, write_fd);
+        spin_unlock(fdlk);
+        return (int64_t)-ENOMEM;
+    }
 
     // Allocate pipe struct
     struct pipe *p = (struct pipe *)kmalloc(sizeof(struct pipe));
-    if (!p) { kfree(buf); return (int64_t)-ENOMEM; }
+    if (!p) {
+        fd_uninstall(proc->mm->files, read_fd);
+        fd_uninstall(proc->mm->files, write_fd);
+        kfree(buf);
+        spin_unlock(fdlk);
+        return (int64_t)-ENOMEM;
+    }
 
     // Zero the buffer
     for (int i = 0; i < PIPE_BUF_SIZE; i++) buf[i] = 0;
@@ -2275,13 +2275,38 @@ int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
     refcount_set(&p->p_count, 2);  // read end + write end
 
     // Fill fd table entries
-    proc->mm->files->fd_table[read_fd].type = FD_PIPE;
-    proc->mm->files->fd_table[read_fd].flags = O_RDONLY;
-    proc->mm->files->fd_table[read_fd].pipe = p;
+    struct file *fr = (struct file *)kmalloc(sizeof(struct file));
+    if (!fr) {
+        fd_uninstall(proc->mm->files, read_fd);
+        fd_uninstall(proc->mm->files, write_fd);
+        kfree(p);
+        kfree(buf);
+        spin_unlock(fdlk);
+        return (int64_t)-ENOMEM;
+    }
+    __memset(fr, 0, sizeof(*fr));
+    refcount_set(&fr->f_count, 1);
+    fr->type = FD_PIPE;
+    fr->flags = O_RDONLY;
+    fr->pipe = p;
+    fd_install(proc->mm->files, read_fd, fr);
 
-    proc->mm->files->fd_table[write_fd].type = FD_PIPE;
-    proc->mm->files->fd_table[write_fd].flags = O_WRONLY;
-    proc->mm->files->fd_table[write_fd].pipe = p;
+    struct file *fw = (struct file *)kmalloc(sizeof(struct file));
+    if (!fw) {
+        fd_uninstall(proc->mm->files, write_fd);
+        file_put(fr);
+        proc->mm->files->fd_table[read_fd] = NULL;
+        kfree(p);
+        kfree(buf);
+        spin_unlock(fdlk);
+        return (int64_t)-ENOMEM;
+    }
+    __memset(fw, 0, sizeof(*fw));
+    refcount_set(&fw->f_count, 1);
+    fw->type = FD_PIPE;
+    fw->flags = O_WRONLY;
+    fw->pipe = p;
+    fd_install(proc->mm->files, write_fd, fw);
 
     // Write fd pair to user space
     ((__force int *)fd_ptr)[0] = read_fd;
@@ -2301,15 +2326,16 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
     size_t len = (size_t)arg3;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    if (current_task->mm->files->fd_table[fd].type == FD_NONE) return (int64_t)-EBADF;
+    if (!current_task->mm->files->fd_table[fd]) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
+    struct file *f = proc->mm->files->fd_table[fd];
 
     // ===== FD_REGULAR: kernel FAT32 via page cache =====
-    if (proc->mm->files->fd_table[fd].type == FD_REGULAR) {
-        if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+    if (f->type == FD_REGULAR) {
+        if (!(f->flags & (O_WRONLY | O_RDWR)))
             return (int64_t)-EINVAL;
-        struct inode *ip = proc->mm->files->fd_table[fd].inode;
+        struct inode *ip = f->inode;
         if (!ip) return (int64_t)-EBADF;
 
         if (!buf) return (int64_t)-EFAULT;
@@ -2318,16 +2344,16 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (int64_t)-EFAULT;
 
-        uint64_t offset = proc->mm->files->fd_table[fd].offset;
+        uint64_t offset = f->offset;
         int written = fat32_write(ip, offset, (const void __force *)buf, len);
         if (written < 0) return (int64_t)written;
-        proc->mm->files->fd_table[fd].offset = offset + written;
+        f->offset = offset + written; // TODO: CLONE_FILES 后需 f_pos_lock
         return (int64_t)written;
     }
 
     // ===== FD_FILE: proxy to fs_driver =====
-    if (proc->mm->files->fd_table[fd].type == FD_FILE) {
-        if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+    if (f->type == FD_FILE) {
+        if (!(f->flags & (O_WRONLY | O_RDWR)))
             return (int64_t)-EINVAL;
 
         // Validate user buf pointer
@@ -2349,14 +2375,14 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
 
         file_t_io_req *req = (file_t_io_req *)msg_buf;
         req->cmd = FILE_CMD_WRITE;
-        req->fs_fd = proc->mm->files->fd_table[fd].file_data.fs_fd;
-        req->offset = proc->mm->files->fd_table[fd].file_data._offset;
+        req->fs_fd = f->file_data.fs_fd;
+        req->offset = f->file_data._offset;
         req->count = (uint32_t)len;
         copy_from_user(msg_buf + sizeof(file_t_io_req), buf, len);
 
         // Reply buffer
         file_t_io_resp resp;
-        int64_t ret = sys_msg_to(proc->mm->files->fd_table[fd].file_data.fs_pid,
+        int64_t ret = sys_msg_to(f->file_data.fs_pid,
                                   msg_buf, msg_len, &resp, sizeof(resp));
         kfree(msg_buf);
 
@@ -2365,33 +2391,33 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
         if (resp.status != 0) return (int64_t)(-resp.status);
 
         size_t written = resp.count;
-        proc->mm->files->fd_table[fd].file_data._offset += written;
-        if (proc->mm->files->fd_table[fd].file_data.file_size < proc->mm->files->fd_table[fd].file_data._offset)
-            proc->mm->files->fd_table[fd].file_data.file_size = proc->mm->files->fd_table[fd].file_data._offset;
+        f->file_data._offset += written;
+        if (f->file_data.file_size < f->file_data._offset)
+            f->file_data.file_size = f->file_data._offset;
         return (int64_t)written;
     }
 
     // ===== FD_SOCKET: delegate to sock_write =====
-    if (proc->mm->files->fd_table[fd].type == FD_SOCKET) {
-        if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+    if (f->type == FD_SOCKET) {
+        if (!(f->flags & (O_WRONLY | O_RDWR)))
             return (int64_t)-EINVAL;
         if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (int64_t)-EFAULT;
-        struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
+        struct unix_sock *sock = f->sock;
         if (!sock) return (int64_t)-EBADF;
         int64_t ret = sock_write(sock, (const void __force *)buf, len);
         return (int64_t)ret;
     }
 
     // ===== FD_DEV: write via dev_ops callback =====
-    if (proc->mm->files->fd_table[fd].type == FD_DEV) {
-        if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+    if (f->type == FD_DEV) {
+        if (!(f->flags & (O_WRONLY | O_RDWR)))
             return (int64_t)-EINVAL;
         if (!buf) return (int64_t)-EFAULT;
-        struct inode *ip = proc->mm->files->fd_table[fd].inode;
+        struct inode *ip = f->inode;
         if (!ip || !ip->i_priv) return (int64_t)-ENODEV;
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         // Kernel device: call write callback
@@ -2404,15 +2430,15 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
     }
 
     // ===== FD_TTY: PTY write =====
-    if (proc->mm->files->fd_table[fd].type == FD_TTY) {
-        if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR)))
+    if (f->type == FD_TTY) {
+        if (!(f->flags & (O_WRONLY | O_RDWR)))
             return (int64_t)-EINVAL;
         if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (int64_t)-EFAULT;
-        struct pty *pty = proc->mm->files->fd_table[fd].pty;
+        struct pty *pty = f->pty;
         if (!pty) return (int64_t)-EBADF;
         int is_master = pty_fd_is_master(proc->mm->files, fd);
         int64_t ret;
@@ -2424,7 +2450,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
     }
 
     // ===== FD_PIPE: existing path =====
-    if (!(proc->mm->files->fd_table[fd].flags & (O_WRONLY | O_RDWR))) return (int64_t)-EINVAL;
+    if (!(f->flags & (O_WRONLY | O_RDWR))) return (int64_t)-EINVAL;
 
     // Validate user buf pointer
     if (!buf) return (int64_t)-EFAULT;
@@ -2433,7 +2459,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
         return (int64_t)-EFAULT;
 
-    struct pipe *p = proc->mm->files->fd_table[fd].pipe;
+    struct pipe *p = f->pipe;
     size_t written = 0;
 
     while (written < len) {
@@ -2445,7 +2471,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
         // Check if pipe has space: full when head is one behind tail
         if ((p->head + 1) % PIPE_BUF_SIZE == p->tail) {
             // Pipe full: block or return EAGAIN if non-blocking
-            if (proc->mm->files->fd_table[fd].flags & O_NONBLOCK) {
+            if (f->flags & O_NONBLOCK) {
                 if (written > 0) break;  // return partial write
                 return (int64_t)-EAGAIN;
             }
@@ -2487,17 +2513,18 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
     size_t len = (size_t)arg3;
 
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
-    if (current_task->mm->files->fd_table[fd].type == FD_NONE) return (int64_t)-EBADF;
+    if (!current_task->mm->files->fd_table[fd]) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
+    struct file *f = proc->mm->files->fd_table[fd];
 
     // ===== FD_REGULAR: kernel FAT32 via page cache =====
-    if (proc->mm->files->fd_table[fd].type == FD_REGULAR) {
-        if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
+    if (f->type == FD_REGULAR) {
+        if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR))
             return (int64_t)-EINVAL;
-        struct inode *ip = proc->mm->files->fd_table[fd].inode;
+        struct inode *ip = f->inode;
         if (!ip) return (int64_t)-EBADF;
-        uint64_t offset = proc->mm->files->fd_table[fd].offset;
+        uint64_t offset = f->offset;
         if (offset >= ip->size) return 0;
 
         if (!buf) return (int64_t)-EFAULT;
@@ -2511,21 +2538,21 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
 
         int nread = fat32_read(ip, offset, (void __force *)buf, len);
         if (nread < 0) return (int64_t)(-nread);
-        proc->mm->files->fd_table[fd].offset = offset + nread;
+        f->offset = offset + nread; // TODO: CLONE_FILES 后需 f_pos_lock
         return (int64_t)nread;
     }
 
     // ===== FD_FILE: proxy to fs_driver =====
-    if (proc->mm->files->fd_table[fd].type == FD_FILE) {
+    if (f->type == FD_FILE) {
         // Check read permission: reject O_WRONLY only (O_RDONLY=0, so must check != O_WRONLY)
-        if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
+        if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR))
             return (int64_t)-EINVAL;
 
-        if (proc->mm->files->fd_table[fd].file_data._offset >= proc->mm->files->fd_table[fd].file_data.file_size) {
+        if (f->file_data._offset >= f->file_data.file_size) {
             return 0;  // EOF
         }
 
-        uint64_t avail = proc->mm->files->fd_table[fd].file_data.file_size - proc->mm->files->fd_table[fd].file_data._offset;
+        uint64_t avail = f->file_data.file_size - f->file_data._offset;
         if (len > avail) len = avail;
         size_t max_data = 65536 - sizeof(file_t_io_resp);
         if (len > max_data) len = max_data;
@@ -2541,8 +2568,8 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
         // Build READ request
         file_t_io_req req = {0};
         req.cmd = FILE_CMD_READ;
-        req.fs_fd = proc->mm->files->fd_table[fd].file_data.fs_fd;
-        req.offset = proc->mm->files->fd_table[fd].file_data._offset;
+        req.fs_fd = f->file_data.fs_fd;
+        req.offset = f->file_data._offset;
         req.count = (uint32_t)len;
 
         // Allocate reply buffer (header + data)
@@ -2550,7 +2577,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
         uint8_t *resp_buf = (uint8_t *)kmalloc(resp_size);
         if (!resp_buf) return (int64_t)-ENOMEM;
 
-        int64_t ret = sys_msg_to(proc->mm->files->fd_table[fd].file_data.fs_pid,
+        int64_t ret = sys_msg_to(f->file_data.fs_pid,
                                   &req, sizeof(req), resp_buf, resp_size);
         if (ret < 0) {
             kfree(resp_buf);
@@ -2567,27 +2594,27 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
         if (nread > len) nread = len;
         copy_to_user(buf, resp_buf + sizeof(file_t_io_resp), nread);
 
-        proc->mm->files->fd_table[fd].file_data._offset += nread;
+        f->file_data._offset += nread; // TODO: CLONE_FILES 后需 f_pos_lock
         kfree(resp_buf);
         return (int64_t)nread;
     }
 
     // ===== FD_SOCKET: delegate to sock_read =====
-    if (proc->mm->files->fd_table[fd].type == FD_SOCKET) {
+    if (f->type == FD_SOCKET) {
         if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (int64_t)-EFAULT;
-        struct unix_sock *sock = proc->mm->files->fd_table[fd].sock;
+        struct unix_sock *sock = f->sock;
         if (!sock) return (int64_t)-EBADF;
         int64_t ret = sock_read(sock, (void __force *)buf, len);
         return (int64_t)ret;
     }
 
     // ===== FD_DEV: read via dev_ops callback =====
-    if (proc->mm->files->fd_table[fd].type == FD_DEV) {
-        if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
+    if (f->type == FD_DEV) {
+        if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR))
             return (int64_t)-EINVAL;
         if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
@@ -2595,7 +2622,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL
             || ptr_end > 0xFFFFFFFF80000000ULL)
             return (int64_t)-EFAULT;
-        struct inode *ip = proc->mm->files->fd_table[fd].inode;
+        struct inode *ip = f->inode;
         if (!ip || !ip->i_priv) return (int64_t)-ENODEV;
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         // Kernel device: call read callback
@@ -2608,15 +2635,15 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
     }
 
     // ===== FD_TTY: PTY read =====
-    if (proc->mm->files->fd_table[fd].type == FD_TTY) {
-        if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
+    if (f->type == FD_TTY) {
+        if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR))
             return (int64_t)-EINVAL;
         if (!buf) return (int64_t)-EFAULT;
         uint64_t ptr_start = (__force uint64_t)buf;
         uint64_t ptr_end = ptr_start + len;
         if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
             return (int64_t)-EFAULT;
-        struct pty *pty = proc->mm->files->fd_table[fd].pty;
+        struct pty *pty = f->pty;
         if (!pty) return (int64_t)-EBADF;
         int is_master = pty_fd_is_master(proc->mm->files, fd);
         int64_t ret;
@@ -2629,7 +2656,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
 
     // ===== FD_PIPE: existing path =====
     // O_RDONLY=0, so check: must not be O_WRONLY only
-    if ((proc->mm->files->fd_table[fd].flags & O_WRONLY) && !(proc->mm->files->fd_table[fd].flags & O_RDWR))
+    if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR))
         return (int64_t)-EINVAL;
 
     // Validate user buf pointer
@@ -2639,14 +2666,14 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
     if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL || ptr_end > 0xFFFFFFFF80000000ULL)
         return (int64_t)-EFAULT;
 
-    struct pipe *p = proc->mm->files->fd_table[fd].pipe;
+    struct pipe *p = f->pipe;
 
     // Block if pipe is empty
     while (p->head == p->tail) {
         // Check if write end is closed (all write fds gone)
         if (refcount_read(&p->p_count) == 1) return 0;  // EOF: no writers left
         // Non-blocking: return EAGAIN-like indication (0 bytes read)
-        if (proc->mm->files->fd_table[fd].flags & O_NONBLOCK) return (int64_t)-EAGAIN;
+        if (f->flags & O_NONBLOCK) return (int64_t)-EAGAIN;
         p->read_pid = proc->pid;
         proc->state = BLOCKED;
         proc->wait_event = WAIT_PIPE;
@@ -2685,27 +2712,12 @@ int64_t sys_close(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _
 
     spinlock_t *fdlk = &current_task->mm->files->fd_lock;
     spin_lock(fdlk);
-    if (current_task->mm->files->fd_table[fd].type == FD_NONE) {
+    struct file *f = fd_uninstall(current_task->mm->files, fd);
+    if (!f) {
         spin_unlock(fdlk);
         return (int64_t)-EBADF;
     }
-
-    if (current_task->mm->files->fd_table[fd].type == FD_FILE) {
-        // Release ref_count; notify fs_driver on last close
-        if (refcount_dec_and_test(&current_task->mm->files->fd_table[fd].file_data.f_count)) {
-            // Notify fs_driver to close the session fd
-            file_t_io_req req = {0};
-            req.cmd = FILE_CMD_CLOSE;
-            req.fs_fd = current_task->mm->files->fd_table[fd].file_data.fs_fd;
-            kernel_msg_send(current_task->mm->files->fd_table[fd].file_data.fs_pid,
-                            &req, sizeof(req), NULL, 0);
-        }
-        __memset(&current_task->mm->files->fd_table[fd], 0, sizeof(struct file));
-        current_task->mm->files->fd_table[fd].type = FD_NONE;
-    } else {
-        close_fd_trap(current_task->mm->files, fd);
-    }
-
+    file_put(f);
     spin_unlock(fdlk);
     return 0;
 }
@@ -2974,59 +2986,21 @@ int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _
     spinlock_t *fdlk = &proc->mm->files->fd_lock;
     spin_lock(fdlk);
 
-    if (proc->mm->files->fd_table[old_fd].type == FD_NONE) {
+    // Check old_fd valid
+    struct file *old_f = fd_lookup(proc->mm->files, old_fd);
+    if (!old_f) {
         spin_unlock(fdlk);
         return (int64_t)-EBADF;
     }
 
-    // Close new_fd if it's open
-    if (proc->mm->files->fd_table[new_fd].type != FD_NONE) {
-        if (proc->mm->files->fd_table[new_fd].type == FD_FILE) {
-            if (refcount_dec_and_test(&proc->mm->files->fd_table[new_fd].file_data.f_count)) {
-                file_t_io_req req = {0};
-                req.cmd = FILE_CMD_CLOSE;
-                req.fs_fd = proc->mm->files->fd_table[new_fd].file_data.fs_fd;
-                kernel_msg_send(proc->mm->files->fd_table[new_fd].file_data.fs_pid,
-                                &req, sizeof(req), NULL, 0);
-            }
-            __memset(&proc->mm->files->fd_table[new_fd], 0, sizeof(struct file));
-            proc->mm->files->fd_table[new_fd].type = FD_NONE;
-        } else {
-            close_fd_trap(proc->mm->files, new_fd);
-        }
-    }
+    // Close new_fd if occupied
+    struct file *victim = fd_uninstall(proc->mm->files, new_fd);
+    if (victim) file_put(victim);
 
-    // Copy old_fd to new_fd — struct assignment copies entire union
-    proc->mm->files->fd_table[new_fd] = proc->mm->files->fd_table[old_fd];
-    // Re-establish pointer/shm fields from source (struct assignment copies union bytes,
-    // but for FD_PIPE/SHM we need to also bump ref_count)
-    if (proc->mm->files->fd_table[new_fd].type == FD_PIPE) {
-        refcount_inc(&proc->mm->files->fd_table[new_fd].pipe->p_count);
-    } else if (proc->mm->files->fd_table[new_fd].type == FD_SHM) {
-        if (proc->mm->files->fd_table[new_fd].shm) {
-            shm_get(proc->mm->files->fd_table[new_fd].shm);
-        }
-    } else if (proc->mm->files->fd_table[new_fd].type == FD_FILE) {
-        refcount_inc(&proc->mm->files->fd_table[new_fd].file_data.f_count);
-    } else if (proc->mm->files->fd_table[new_fd].type == FD_REGULAR ||
-               proc->mm->files->fd_table[new_fd].type == FD_DIR) {
-        if (proc->mm->files->fd_table[new_fd].inode) inode_get(proc->mm->files->fd_table[new_fd].inode);
-    } else if (proc->mm->files->fd_table[new_fd].type == FD_SOCKET) {
-        if (proc->mm->files->fd_table[new_fd].sock) {
-            unix_sock_acquire(proc->mm->files->fd_table[new_fd].sock);
-        }
-    } else if (proc->mm->files->fd_table[new_fd].type == FD_DEV) {
-        // Kernel device: call open callback (e.g., serial_fd_count++) + inode_get
-        struct inode *ip = proc->mm->files->fd_table[new_fd].inode;
-        if (ip && ip->i_priv) {
-            struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-            if (ops->driver_pid == 0 && ops->open)
-                ops->open(proc, new_fd);
-        }
-        if (ip) inode_get(ip);
-    } else if (proc->mm->files->fd_table[new_fd].type == FD_TTY) {
-        pty_dup_fd(proc->mm->files, new_fd);
-    }
+    // Install copy
+    fd_install(proc->mm->files, new_fd, old_f);
+    file_get(old_f);
+    if (old_f->type == FD_TTY) pty_dup_file(old_f);
 
     spin_unlock(fdlk);
     return (int64_t)new_fd;
@@ -3041,18 +3015,19 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
-    if (proc->mm->files->fd_table[fd].type == FD_NONE) return (int64_t)-EBADF;
+    if (!proc->mm->files->fd_table[fd]) return (int64_t)-EBADF;
 
+    struct file *f = proc->mm->files->fd_table[fd];
     switch (cmd) {
     case F_GETFL:
-        return (int64_t)proc->mm->files->fd_table[fd].flags;
+        return (int64_t)f->flags;
     case F_SETFL:
-        proc->mm->files->fd_table[fd].flags = (proc->mm->files->fd_table[fd].flags & ~O_SETFL_MASK) | (arg & O_SETFL_MASK);
+        f->flags = (f->flags & ~O_SETFL_MASK) | (arg & O_SETFL_MASK);
         return 0;
     case F_ADD_SEALS: {
         // Only valid on FD_SHM with MFD_ALLOW_SEALING
-        if (proc->mm->files->fd_table[fd].type != FD_SHM) return (int64_t)-EINVAL;
-        struct shm *shm = proc->mm->files->fd_table[fd].shm;
+        if (f->type != FD_SHM) return (int64_t)-EINVAL;
+        struct shm *shm = f->shm;
         if (!shm) return (int64_t)-EBADF;
         if (!(shm->flags & SHM_SEALED)) return (int64_t)-EPERM;
         if (shm->seals & F_SEAL_SEAL) return (int64_t)-EPERM;
@@ -3080,8 +3055,8 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
         return 0;
     }
     case F_GET_SEALS: {
-        if (proc->mm->files->fd_table[fd].type != FD_SHM) return (int64_t)-EINVAL;
-        struct shm *shm = proc->mm->files->fd_table[fd].shm;
+        if (f->type != FD_SHM) return (int64_t)-EINVAL;
+        struct shm *shm = f->shm;
         if (!shm) return (int64_t)-EBADF;
         return (int64_t)shm->seals;
     }
@@ -3222,32 +3197,34 @@ int64_t sys_lseek(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
     if (fd < 0 || fd >= MAX_FD) return (int64_t)-EBADF;
 
     task_t *proc = current_task;
-    if (proc->mm->files->fd_table[fd].type == FD_NONE) return (int64_t)-EBADF;
+    if (!proc->mm->files->fd_table[fd]) return (int64_t)-EBADF;
+
+    struct file *f = proc->mm->files->fd_table[fd];
 
     // PIPE/SOCKET/DEV do not support seek
-    if (proc->mm->files->fd_table[fd].type == FD_PIPE ||
-        proc->mm->files->fd_table[fd].type == FD_SOCKET ||
-        proc->mm->files->fd_table[fd].type == FD_DEV)
+    if (f->type == FD_PIPE ||
+        f->type == FD_SOCKET ||
+        f->type == FD_DEV)
         return (int64_t)-ESPIPE;
 
     // FD_REGULAR/FD_DIR: kernel VFS file seek
-    if (proc->mm->files->fd_table[fd].type == FD_REGULAR ||
-        proc->mm->files->fd_table[fd].type == FD_DIR) {
-        struct inode *ip = proc->mm->files->fd_table[fd].inode;
+    if (f->type == FD_REGULAR ||
+        f->type == FD_DIR) {
+        struct inode *ip = f->inode;
         if (!ip) return (int64_t)-EBADF;
         int64_t new_offset;
         switch (whence) {
         case SEEK_SET: new_offset = offset; break;
-        case SEEK_CUR: new_offset = (int64_t)proc->mm->files->fd_table[fd].offset + offset; break;
+        case SEEK_CUR: new_offset = (int64_t)f->offset + offset; break;
         case SEEK_END: new_offset = (int64_t)ip->size + offset; break;
         default: return (int64_t)-EINVAL;
         }
         if (new_offset < 0) return (int64_t)-EINVAL;
-        proc->mm->files->fd_table[fd].offset = (int64_t)new_offset;
+        f->offset = (int64_t)new_offset; // TODO: CLONE_FILES 后需 f_pos_lock
         return (int64_t)new_offset;
     }
 
-    if (proc->mm->files->fd_table[fd].type != FD_FILE)
+    if (f->type != FD_FILE)
         return (int64_t)-ESPIPE;
 
     uint64_t new_offset;
@@ -3256,16 +3233,16 @@ int64_t sys_lseek(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
         new_offset = (int64_t)offset;
         break;
     case SEEK_CUR:
-        new_offset = proc->mm->files->fd_table[fd].file_data._offset + offset;
+        new_offset = f->file_data._offset + offset;
         break;
     case SEEK_END:
-        new_offset = proc->mm->files->fd_table[fd].file_data.file_size + offset;
+        new_offset = f->file_data.file_size + offset;
         break;
     default:
         return (int64_t)-EINVAL;
     }
 
-    proc->mm->files->fd_table[fd].file_data._offset = new_offset;
+    f->file_data._offset = new_offset; // TODO: CLONE_FILES 后需 f_pos_lock
     return (int64_t)new_offset;
 }
 

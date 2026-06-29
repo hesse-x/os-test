@@ -111,27 +111,36 @@ uint64_t devtmpfs_open(struct task_t *proc, const char *name, int flags) {
     /* Allocate fd (under fd_lock) */
     spinlock_t *fdlk = &proc->mm->files->fd_lock;
     spin_lock(fdlk);
-    int fd = -1;
-    for (int j = 3; j < MAX_FD; j++) {
-        if (proc->mm->files->fd_table[j].type == FD_NONE) { fd = j; break; }
-    }
+    int fd = alloc_fd(proc->mm->files, 3);
     if (fd < 0) { spin_unlock(fdlk); return (uint64_t)(-(uint64_t)EMFILE); }
 
-    proc->mm->files->fd_table[fd].type = FD_DEV;
-    proc->mm->files->fd_table[fd].flags = flags;
-    proc->mm->files->fd_table[fd].inode = ip;
+    struct file *f = kmalloc(sizeof(struct file));
+    if (!f) { spin_unlock(fdlk); return (uint64_t)(-(uint64_t)ENOMEM); }
+    __memset(f, 0, sizeof(*f));
+    refcount_set(&f->f_count, 1);
+    f->type = FD_DEV;
+    f->flags = flags;
+    f->inode = ip;
     inode_get(ip);
+
+    // Install FD_DEV BEFORE ops->open so callbacks (e.g. pts_open/ptmx_open)
+    // can access it via fd_table[fd] and mutate it into FD_TTY in place.
+    fd_install(proc->mm->files, fd, f);
+
     if (ip->i_priv) {
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-        proc->mm->files->fd_table[fd].target_pid = ops->driver_pid;
-        // Kernel device: call open callback
+        f->target_pid = ops->driver_pid;
+        // Kernel device: call open callback. Callbacks mutate the FD_DEV file
+        // in place (do not replace the pointer), so fd_table[fd] stays valid.
         if (ops->driver_pid == 0 && ops->open) {
             int rc = ops->open(proc, fd);
             if (rc < 0) {
-                // Open failed: undo fd allocation
+                // Open failed: undo fd installation.
+                // Manual cleanup (not file_put) to avoid calling ops->close
+                // when ops->open itself failed.
+                fd_uninstall(proc->mm->files, fd);
                 inode_put(ip);
-                __memset(&proc->mm->files->fd_table[fd], 0, sizeof(struct file));
-                proc->mm->files->fd_table[fd].type = FD_NONE;
+                kfree(f);
                 spin_unlock(fdlk);
                 return (uint64_t)(-(uint64_t)(-rc));
             }

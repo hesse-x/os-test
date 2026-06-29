@@ -17,10 +17,10 @@ if(SANITIZE)
   set(KASAN_CFLAGS "-fsanitize=kernel-address" "-DKASAN_SHADOW_OFFSET=0xDFFFFC0000000000ULL" "-DSANITIZER=1")
 endif()
 
-# Debug 模式：加调试信息 + 保留帧指针（栈回溯需要）
+# Debug 模式：加调试信息 + 保留帧指针（栈回溯需要）+ 放行所有日志级别
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fno-omit-frame-pointer")
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -fno-omit-frame-pointer")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG")
 endif()
 
 # Include project root for #include "arch/x64/..." etc.

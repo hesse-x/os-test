@@ -174,10 +174,6 @@ int64_t pty_slave_read(struct pty *pty, struct task_t *proc,
 int64_t pty_slave_write(struct pty *pty, struct task_t *proc,
                          const void *buf, size_t len);
 
-// PTY close/dup helpers
-void pty_close_fd(struct task_t *proc, int fd);
-void pty_dup_fd(files_t *files, int fd);
-
 // PTY ioctl
 long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg);
 
@@ -186,5 +182,8 @@ uint32_t pty_poll(struct pty *pty, int is_master, uint32_t events);
 
 // Determine if fd is master or slave side
 int pty_fd_is_master(files_t *files, int fd);
+
+// Check if inode is the ptmx master inode (for pty_close_file/pty_dup_file)
+int pty_is_master_inode(struct inode *inode);
 
 #endif // KERNEL_PTY_H

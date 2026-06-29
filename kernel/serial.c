@@ -145,7 +145,8 @@ static ssize_t serial_dev_read(struct task_t *proc, int fd, void *buf, size_t co
     uint64_t rx_flags;
     spin_lock_irqsave(&serial_rx_lock, &rx_flags);
     while (serial_rx_head == serial_rx_tail) {
-        if (proc->mm->files->fd_table[fd].flags & O_NONBLOCK) {
+        struct file *f = proc->mm->files->fd_table[fd];
+        if (f && (f->flags & O_NONBLOCK)) {
             spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
             return -EAGAIN;
         }

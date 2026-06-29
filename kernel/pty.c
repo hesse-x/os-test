@@ -89,9 +89,9 @@ static int pty_ring_write1(uint8_t *buf, uint32_t *head, uint32_t tail, uint8_t 
 static int pty_is_nonblock(task_t *proc, struct pty *pty, int is_master) {
     files_t *files = proc->mm->files;
     for (int i = 0; i < MAX_FD; i++) {
-        if (files->fd_table[i].type == FD_TTY && files->fd_table[i].pty == pty) {
+        if (files->fd_table[i] && files->fd_table[i]->type == FD_TTY && files->fd_table[i]->pty == pty) {
             if (pty_fd_is_master(files, i) == is_master)
-                return (files->fd_table[i].flags & O_NONBLOCK) ? 1 : 0;
+                return (files->fd_table[i]->flags & O_NONBLOCK) ? 1 : 0;
         }
     }
     return 0;
@@ -171,25 +171,31 @@ int ptmx_open(struct task_t *proc, int fd) {
     struct pty *pty = pty_alloc(&index);
     if (!pty) return -ENOMEM;
 
-    pty->master_refs = 1;
-
-    proc->mm->files->fd_table[fd].type = FD_TTY;
-    proc->mm->files->fd_table[fd].pty = pty;
-    proc->mm->files->fd_table[fd].flags = O_RDWR;
-
     // Create pts_dev_priv for slave device
     struct pts_dev_priv *priv = (struct pts_dev_priv *)kmalloc(sizeof(struct pts_dev_priv));
     if (!priv) {
-        pty->master_refs = 0;
         pty_free(pty);
         return -ENOMEM;
     }
+
+    // All allocations succeeded — commit state
+    pty->master_refs = 1;
+
     __memset(priv, 0, sizeof(struct pts_dev_priv));
     priv->ops.driver_pid = 0;
     priv->ops.device_type = DEV_PTS_SLAVE;
     priv->ops.open = pts_open;
     priv->pty = pty;
     pty->pts_priv = priv;
+
+    // Mutate the FD_DEV file (installed by devtmpfs_open) into FD_TTY master.
+    // Keep its inode (ptmx_inode) so pty_fd_is_master / pty_close_file identify
+    // this fd as master. The inode ref held by devtmpfs_open is released on
+    // close via file_put(FD_TTY) → inode_put.
+    struct file *f = proc->mm->files->fd_table[fd];
+    f->type = FD_TTY;
+    f->pty = pty;
+    f->flags = O_RDWR;
 
     // Register /dev/ptsN
     char name[16] = "pts";
@@ -209,7 +215,9 @@ int ptmx_open(struct task_t *proc, int fd) {
 
 // ===================== pts_open =====================
 int pts_open(struct task_t *proc, int fd) {
-    struct inode *ip = proc->mm->files->fd_table[fd].inode;
+    struct file *f = proc->mm->files->fd_table[fd];
+    if (!f) return -EBADF;
+    struct inode *ip = f->inode;
     if (!ip || !ip->i_priv) return -ENODEV;
 
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
@@ -219,27 +227,46 @@ int pts_open(struct task_t *proc, int fd) {
 
     if (pty->slave_opened) return -EBUSY;
 
-    // Change fd to FD_TTY, keep inode pointing to ptsN
-    proc->mm->files->fd_table[fd].type = FD_TTY;
-    proc->mm->files->fd_table[fd].pty = pty;
-    proc->mm->files->fd_table[fd].flags = O_RDWR;
+    // Mutate the FD_DEV file (installed by devtmpfs_open) into FD_TTY slave.
+    // Keep its inode (pts_slave inode); the ref held by devtmpfs_open is
+    // released on close via file_put(FD_TTY) → inode_put.
+    f->type = FD_TTY;
+    f->pty = pty;
+    f->flags = O_RDWR;
 
     pty->slave_refs = 1;
     pty->slave_opened = 1;
+
+    // Wake a master blocked in pty_master_read waiting for slave to open,
+    // so it re-checks slave_refs and proceeds to block for data.
+    if (pty->m_read_pid >= 0) wake_process(pty->m_read_pid);
 
     return 0;
 }
 
 // ===================== pty_fd_is_master =====================
 int pty_fd_is_master(files_t *files, int fd) {
-    return (files->fd_table[fd].inode == ptmx_inode) ? 1 : 0;
+    struct file *f = files->fd_table[fd];
+    if (!f) return 0;
+    return (f->inode == ptmx_inode) ? 1 : 0;
+}
+
+// Check if inode is the ptmx master inode
+int pty_is_master_inode(struct inode *inode) {
+    return (inode == ptmx_inode) ? 1 : 0;
 }
 
 // ===================== pty_master_read =====================
 int64_t pty_master_read(struct pty *pty, struct task_t *proc,
                         void *buf, size_t len) {
     while (pty_ring_avail(pty->s_to_m_head, pty->s_to_m_tail) == 0) {
-        if (pty->slave_refs == 0) return 0;  // EOF
+        // EOF only after slave was opened and then closed.
+        // Before slave is ever opened, block so that a master read racing
+        // with the child's pts_open doesn't falsely see EOF.
+        if (pty->slave_opened && pty->slave_refs == 0) {
+            printk(LOG_INFO, "pty_master_read: EOF pty=%d (slave closed)\n", pty->index);
+            return 0;
+        }
         if (pty_is_nonblock(proc, pty, 1)) return -EAGAIN;
 
         pty->m_read_pid = proc->pid;
@@ -379,78 +406,6 @@ int64_t pty_slave_write(struct pty *pty, struct task_t *proc,
     }
 
     return (int64_t)written;
-}
-
-// ===================== pty_close_fd =====================
-void pty_close_fd(struct task_t *proc, int fd) {
-    files_t *files = proc->mm->files;
-    struct pty *pty = files->fd_table[fd].pty;
-    if (!pty) return;
-
-    int is_master = pty_fd_is_master(files, fd);
-
-    if (is_master) {
-        pty->master_refs--;
-        if (pty->master_refs == 0) {
-            // Send SIGHUP to slave session foreground pgid
-            if (pty->t_sid != 0) {
-                for (int p = 0; p < MAX_PROC; p++) {
-                    if (tasks[p].pid == p && tasks[p].pgid == pty->t_pgid && tasks[p].sid == pty->t_sid) {
-                        __atomic_or_fetch(&tasks[p].sig.pending, 1ULL << SIGHUP, __ATOMIC_RELEASE);
-                        if (tasks[p].state == BLOCKED) wake_process(p);
-                    }
-                }
-            }
-            if (pty->s_read_pid >= 0) wake_process(pty->s_read_pid);
-            if (pty->s_write_pid >= 0) wake_process(pty->s_write_pid);
-        }
-    } else {
-        pty->slave_refs--;
-        if (pty->slave_refs == 0) {
-            // Clear m_to_s buffer so master read won't get stale data
-            pty->m_to_s_head = 0;
-            pty->m_to_s_tail = 0;
-            // Wake master read — it gets EOF
-            if (pty->m_read_pid >= 0) wake_process(pty->m_read_pid);
-            pty->slave_opened = 0;
-
-            // Remove /dev/ptsN from devtmpfs
-            char name[16] = "pts";
-            int pos = 3;
-            int idx = pty->index;
-            if (idx == 0) {
-                name[pos++] = '0';
-            } else {
-                char tmp[8]; int tpos = 0; int n = idx;
-                while (n > 0) { tmp[tpos++] = '0' + (n % 10); n /= 10; }
-                for (int i = tpos - 1; i >= 0; i--) name[pos++] = tmp[i];
-            }
-            name[pos] = '\0';
-            devtmpfs_remove(name);
-
-            if (pty->pts_priv) {
-                kfree(pty->pts_priv);
-                pty->pts_priv = NULL;
-            }
-        }
-    }
-
-    // Free pty when both sides are fully closed
-    if (pty->master_refs == 0 && pty->slave_refs == 0) {
-        pty_free(pty);
-    }
-}
-
-// ===================== pty_dup_fd =====================
-void pty_dup_fd(files_t *files, int fd) {
-    struct pty *pty = files->fd_table[fd].pty;
-    if (!pty) return;
-
-    int is_master = pty_fd_is_master(files, fd);
-    if (is_master)
-        pty->master_refs++;
-    else
-        pty->slave_refs++;
 }
 
 // ===================== pty_ioctl =====================

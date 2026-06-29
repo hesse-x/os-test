@@ -58,16 +58,21 @@ files_t *files_create(void) {
     files->fd_lock = SPINLOCK_INIT;
     refcount_set(&files->f_count, 1);
     for (int j = 0; j < MAX_FD; j++) {
-        files->fd_table[j].type = FD_NONE;
+        files->fd_table[j] = NULL;
     }
     return files;
 }
 
-// Internal helper: close a single fd in a files_t
-void close_fd_internal(files_t *files, int fd) {
-    file_t *f = &files->fd_table[fd];
-    if (f->type == FD_NONE) return;
-    if (f->type == FD_PIPE) {
+// ===================== unified fd lifecycle =====================
+
+void file_put(struct file *f) {
+    if (!f) return;
+    if (!refcount_dec_and_test(&f->f_count)) return;
+
+    switch (f->type) {
+    case FD_NONE:
+        break;
+    case FD_PIPE: {
         pipe_t *p = f->pipe;
         if (p) {
             wake_pipe_peers(p, f->flags);
@@ -76,11 +81,28 @@ void close_fd_internal(files_t *files, int fd) {
                 kfree(p);
             }
         }
-    } else if (f->type == FD_SHM) {
-        if (f->shm) { shm_put(f->shm); f->shm = NULL; }
-    } else if (f->type == FD_REGULAR || f->type == FD_DIR || f->type == FD_DEV) {
+        break;
+    }
+    case FD_SHM:
+        if (f->shm) shm_put(f->shm);
+        break;
+    case FD_REGULAR:
+    case FD_DIR:
         if (f->inode) inode_put(f->inode);
-    } else if (f->type == FD_FILE) {
+        break;
+    case FD_DEV: {
+        struct inode *ip = f->inode;
+        if (ip) {
+            if (ip->i_priv) {
+                struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+                if (ops->driver_pid == 0 && ops->close)
+                    ops->close(current_task, -1);
+            }
+            inode_put(ip);
+        }
+        break;
+    }
+    case FD_FILE:
         if (refcount_dec_and_test(&f->file_data.f_count) && f->file_data.fs_pid >= 0) {
             file_io_close_req req;
             __memset(&req, 0, sizeof(req));
@@ -88,36 +110,98 @@ void close_fd_internal(files_t *files, int fd) {
             req.fs_fd = f->file_data.fs_fd;
             kernel_msg_send(f->file_data.fs_pid, &req, sizeof(req), NULL, 0);
         }
-    } else if (f->type == FD_SOCKET) {
+        break;
+    case FD_SOCKET:
         if (f->sock) sock_close(f->sock);
-    } else if (f->type == FD_TTY) {
-        pty_close_fd(current_task, fd);
+        break;
+    case FD_TTY:
+        pty_close_file(f);
+        if (f->inode) inode_put(f->inode);
+        break;
     }
-    __memset(f, 0, sizeof(file_t));
-    f->type = FD_NONE;
+    kfree(f);
+}
+
+int alloc_fd(files_t *files, int min_fd) {
+    for (int i = min_fd; i < MAX_FD; i++) {
+        if (files->fd_table[i] == NULL)
+            return i;
+    }
+    return -EMFILE;
+}
+
+void pty_dup_file(struct file *f) {
+    struct pty *pty = f->pty;
+    if (!pty) return;
+    if (pty_is_master_inode(f->inode))
+        pty->master_refs++;
+    else
+        pty->slave_refs++;
+}
+
+void pty_close_file(struct file *f) {
+    struct pty *pty = f->pty;
+    if (!pty) return;
+    int is_master = pty_is_master_inode(f->inode);
+
+    if (is_master) {
+        pty->master_refs--;
+        if (pty->master_refs == 0) {
+            if (pty->t_sid != 0) {
+                for (int p = 0; p < MAX_PROC; p++) {
+                    if (tasks[p].pid == p && tasks[p].pgid == pty->t_pgid
+                        && tasks[p].sid == pty->t_sid) {
+                        __atomic_or_fetch(&tasks[p].sig.pending, 1ULL << SIGHUP, __ATOMIC_RELEASE);
+                        if (tasks[p].state == BLOCKED) wake_process(p);
+                    }
+                }
+            }
+            if (pty->s_read_pid >= 0) wake_process(pty->s_read_pid);
+            if (pty->s_write_pid >= 0) wake_process(pty->s_write_pid);
+        }
+    } else {
+        pty->slave_refs--;
+        if (pty->slave_refs == 0) {
+            // Clear m_to_s buffer so master read won't get stale data
+            pty->m_to_s_head = 0;
+            pty->m_to_s_tail = 0;
+            // Wake master read — it gets EOF
+            if (pty->m_read_pid >= 0) wake_process(pty->m_read_pid);
+            pty->slave_opened = 0;
+
+            // Remove /dev/ptsN from devtmpfs
+            char name[16] = "pts";
+            int pos = 3;
+            int idx = pty->index;
+            if (idx == 0) {
+                name[pos++] = '0';
+            } else {
+                char tmp[8]; int tpos = 0; int n = idx;
+                while (n > 0) { tmp[tpos++] = '0' + (n % 10); n /= 10; }
+                for (int i = tpos - 1; i >= 0; i--) name[pos++] = tmp[i];
+            }
+            name[pos] = '\0';
+            devtmpfs_remove(name);
+
+            if (pty->pts_priv) {
+                kfree(pty->pts_priv);
+                pty->pts_priv = NULL;
+            }
+        }
+    }
+
+    // Free pty when both sides are fully closed
+    if (pty->master_refs == 0 && pty->slave_refs == 0) {
+        pty_free(pty);
+    }
 }
 
 void files_put(files_t *files) {
     if (!files) return;
     if (refcount_dec_and_test(&files->f_count)) {
-        // f_count=0 means no other thread holds a reference — no racing fd operations
         for (int fd = 0; fd < MAX_FD; fd++) {
-            file_t *f = &files->fd_table[fd];
-            if (f->type == FD_NONE) continue;
-            // Close FD_DEV via dev_ops->close if kernel device
-            if (f->type == FD_DEV) {
-                struct inode *ip = f->inode;
-                if (ip && ip->i_priv) {
-                    struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-                    if (ops->driver_pid == 0 && ops->close)
-                        ops->close(current_task, fd);
-                }
-                if (ip) inode_put(ip);
-                __memset(f, 0, sizeof(file_t));
-                f->type = FD_NONE;
-                continue;
-            }
-            close_fd_internal(files, fd);
+            struct file *f = fd_uninstall(files, fd);
+            if (f) file_put(f);
         }
         kfree(files);
     }
@@ -396,16 +480,12 @@ void mm_release_pages(mm_t *mm) {
 // Bumps ref counts for pipe, SHM, file, inode, socket, TTY.
 static void __attribute__((unused)) copy_fd_table(files_t *parent_files, files_t *child_files) {
     for (int fd = 0; fd < MAX_FD; fd++) {
-        child_files->fd_table[fd] = parent_files->fd_table[fd];
-        file_t *f = &child_files->fd_table[fd];
-        if (f->type == FD_NONE) continue;
-        if (f->type == FD_PIPE && f->pipe) refcount_inc(&f->pipe->p_count);
-        if (f->type == FD_SHM && f->shm) shm_get(f->shm);
-        if (f->type == FD_FILE) refcount_inc(&f->file_data.f_count);
-        if (f->type == FD_REGULAR || f->type == FD_DIR || f->type == FD_DEV) {
-            if (f->inode) inode_get(f->inode);
+        struct file *f = parent_files->fd_table[fd];
+        child_files->fd_table[fd] = f;
+        if (f) {
+            file_get(f);
+            if (f->type == FD_TTY) pty_dup_file(f);
         }
-        if (f->type == FD_TTY) pty_dup_fd(child_files, fd);
     }
 }
 
@@ -546,19 +626,23 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
     const char *pathname = (const char *)a1;
     task_t *proc = current_task;
     if (!proc->mm) return (int64_t)-EINVAL;
+    printk(LOG_INFO, "execve: pid=%d path=%s\n", proc->pid, pathname);
 
     // 1. Open pathname via VFS
     int64_t open_result = sys_open((int64_t)(uintptr_t)pathname, O_RDONLY, 0, 0, 0, 0);
     int32_t fd = (int32_t)(open_result & 0xFFFFFFFFULL);
-    if (fd < 0) return (int64_t)fd;
+    if (fd < 0) {
+        printk(LOG_ERROR, "execve: open failed pid=%d path=%s err=%d\n", proc->pid, pathname, fd);
+        return (int64_t)fd;
+    }
 
     // 2. Get file size from inode directly (sys_fstat uses copy_to_user which
     //    would just memcpy, but we avoid the round-trip)
-    if (proc->mm->files->fd_table[fd].type != FD_REGULAR) {
+    if (!proc->mm->files->fd_table[fd] || proc->mm->files->fd_table[fd]->type != FD_REGULAR) {
         sys_close((int64_t)fd, 0, 0, 0, 0, 0);
         return (int64_t)-EIO;
     }
-    struct inode *ip = proc->mm->files->fd_table[fd].inode;
+    struct inode *ip = proc->mm->files->fd_table[fd]->inode;
     if (!ip) { sys_close((int64_t)fd, 0, 0, 0, 0, 0); return (int64_t)-EBADF; }
     uint32_t saved_ino = ip->ino;
     uint64_t file_size = ip->size;
@@ -633,11 +717,10 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
     spinlock_t *fdlk = &proc->mm->files->fd_lock;
     spin_lock(fdlk);
     for (int i = 0; i < MAX_FD; i++) {
-        if (proc->mm->files->fd_table[i].type != FD_NONE &&
-            (proc->mm->files->fd_table[i].flags & FD_CLOEXEC)) {
-            close_fd_internal(proc->mm->files, i);
-            __memset(&proc->mm->files->fd_table[i], 0, sizeof(file_t));
-            proc->mm->files->fd_table[i].type = FD_NONE;
+        struct file *f = proc->mm->files->fd_table[i];
+        if (f && (f->flags & FD_CLOEXEC)) {
+            fd_uninstall(proc->mm->files, i);
+            file_put(f);
         }
     }
     spin_unlock(fdlk);

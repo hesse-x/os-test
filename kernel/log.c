@@ -7,7 +7,7 @@
 #ifdef LOG_LEVEL_DEBUG
 int log_level = LOG_DEBUG;
 #else
-int log_level = LOG_WARN;
+int log_level = LOG_INFO;
 #endif
 
 static const char *level_tags[] = { "DEBUG", "INFO", "WARN", "ERROR", "PANIC" };
