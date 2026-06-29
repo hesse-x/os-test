@@ -40,4 +40,10 @@ struct display_flip_resp {
     int32_t result;
 };
 
+// FLIP argument (8 bytes) — dirty-rect row range
+struct display_ioctl_flip_arg {
+    uint32_t dirty_row_start;  // dirty row start (inclusive), = rows means full frame
+    uint32_t dirty_row_end;    // dirty row end (exclusive), = 0 means full frame
+};
+
 #endif /* COMMON_DISPLAY_H */

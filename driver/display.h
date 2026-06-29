@@ -112,9 +112,13 @@ static inline void display_client_set_cursor(uint32_t x, uint32_t y) {
     (void)x; (void)y;
 }
 
-// Request kernel flip: ioctl(fd, FLIP)
-static inline void display_client_flush() {
-    ioctl(display_dev_fd, KMS_IOCTL_FLIP, 0);
+// Request kernel flip: ioctl(fd, FLIP, dirty_range)
+static inline void display_client_flush(uint32_t dirty_row_start,
+                                         uint32_t dirty_row_end) {
+    struct display_ioctl_flip_arg arg;
+    arg.dirty_row_start = dirty_row_start;
+    arg.dirty_row_end   = dirty_row_end;
+    ioctl(display_dev_fd, KMS_IOCTL_FLIP, &arg);
 }
 
 #endif

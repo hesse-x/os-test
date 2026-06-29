@@ -36,7 +36,7 @@
 
 // KMS display
 #define KMS_IOCTL_CREATE_BUF  _IOWR('K', 1, char[32])   // unified struct = 32B
-#define KMS_IOCTL_FLIP        _IO('K', 2)
+#define KMS_IOCTL_FLIP        _IOWR('K', 2, char[8])
 
 // Keyboard
 #define KBD_IOCTL_BIND        _IOWR('K', 0x11, char[8])  // kbd_ioctl_bind_arg = 8B

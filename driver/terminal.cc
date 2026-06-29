@@ -311,11 +311,13 @@ static void flush_dirty_cells() {
     // Update cursor position in display header
     display_client_set_cursor(vt.cursor_x, vt.cursor_y);
 
+    int rs = dirty_row_start;
+    int re = dirty_row_end;
     dirty_row_start = vt.rows;
     dirty_row_end = 0;
 
-    // Flush to kernel KMS
-    display_client_flush();
+    // Flush to kernel KMS with dirty row range
+    display_client_flush(rs, re);
 }
 
 // ===================== Main =====================
@@ -390,7 +392,7 @@ int main() {
 
     // 6. Clear screen (back buffer)
     display_client_clear(0x000000);
-    display_client_flush();
+    display_client_flush(0, display_rows);
 
     // 7. Create PTY pair
     master_fd = open("/dev/ptmx", O_RDWR);
@@ -497,11 +499,16 @@ int main() {
         shm_hdr->consumer_sleeping = 0;
 
         // Shell output ← master read → VT100 + serial echo
-        char buf[256];
+        char buf[4096];
         int64_t n = read(master_fd, buf, sizeof(buf));
         if (n > 0) {
             write(2, buf, (size_t)n);
-            for (int64_t i = 0; i < n; i++) vt100_feed(buf[i]);
+            for (int64_t i = 0; i < n; i++) {
+                vt100_feed(buf[i]);
+                // Flush every few dirty rows to keep display responsive
+                if (dirty_row_end - dirty_row_start >= 4)
+                    flush_dirty_cells();
+            }
             did_work = 1;
         } else if (n == 0) {
             // Shell exited → re-fork

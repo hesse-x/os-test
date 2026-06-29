@@ -45,6 +45,7 @@ struct display_state {
     uint32_t  fb_pitch;
     uint32_t  fb_bpp;
     uint32_t  fb_size;
+    uint32_t  fb_rows;            // total text rows = fb_height / FONT_HEIGHT
     bool      initialized;          // back buffer allocated
 };
 

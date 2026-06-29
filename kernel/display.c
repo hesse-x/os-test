@@ -122,6 +122,7 @@ void display_init(void) {
     g_display.fb_pitch    = 800 * 4;   // 32bpp = 4 bytes per pixel
     g_display.fb_bpp      = 32;
     g_display.fb_size     = 800 * 4 * 600;
+    g_display.fb_rows     = 600 / FONT_HEIGHT;
 
     printk(LOG_INFO, "display_init: 800x600x32 done\n");
 }
@@ -132,7 +133,7 @@ void display_init(void) {
 
 long display_ioctl(uint32_t cmd, void *arg) {
     bool is_create = (cmd == KMS_IOCTL_CREATE_BUF || cmd == DISPLAY_REQ_CREATE_BUF);
-    bool is_flip   = (cmd == KMS_IOCTL_FLIP || cmd == DISPLAY_REQ_FLIP);
+    bool is_flip   = (_IOC_NR(cmd) == 2 || cmd == DISPLAY_REQ_FLIP);
 
     if (is_create) {
         // Use unified struct layout: input at offsets 0-11, output at offsets 12-31
@@ -178,16 +179,43 @@ long display_ioctl(uint32_t cmd, void *arg) {
         if (!g_display.initialized)
             return -ENOENT;
 
+        struct display_ioctl_flip_arg *farg = (struct display_ioctl_flip_arg *)arg;
+        uint32_t row_start = farg->dirty_row_start;
+        uint32_t row_end   = farg->dirty_row_end;
+        uint32_t rows      = g_display.fb_rows;
+        uint32_t pitch     = g_display.fb_pitch;
+
+        // Full-frame fallback: invalid range or legacy no-arg call
+        if (row_start >= row_end || row_end > rows) {
+            row_start = 0;
+            row_end = rows;
+        }
+
 #ifdef PERF
+        uint32_t copy_rows = row_end - row_start;
+        uint32_t copy_bytes = copy_rows * FONT_HEIGHT * pitch;
         uint64_t t0 = rdtsc64();
 #endif
-        __memcpy((void __force *)g_display.front_fb, g_display.back_buffer, g_display.fb_size);
+
+        if (row_start == 0 && row_end == rows) {
+            // Full frame copy
+            __memcpy((void __force *)g_display.front_fb,
+                     g_display.back_buffer, g_display.fb_size);
+        } else {
+            // Row-level copy
+            uint32_t y_start = row_start * FONT_HEIGHT;
+            uint32_t y_end   = row_end * FONT_HEIGHT;
+            __memcpy((void __force *)(g_display.front_fb + y_start * pitch),
+                     g_display.back_buffer + y_start * pitch,
+                     (y_end - y_start) * pitch);
+        }
+
 #ifdef PERF
         uint64_t t1 = rdtsc64();
         uint64_t delta = t1 - t0;
         uint64_t us = delta / (tsc_per_ms / 1000);
-        serial_printf("flip: bytes=%u tsc=%lu us=%lu\n",
-                       g_display.fb_size, delta, us);
+        serial_printf("flip: rows=%u/%u bytes=%u tsc=%lu us=%lu\n",
+               copy_rows, rows, copy_bytes, delta, us);
 #endif
         return 0;
     }
@@ -226,7 +254,8 @@ int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
         if (resp_len < sizeof(struct display_flip_resp))
             return -EINVAL;
 
-        long rc = display_ioctl(KMS_IOCTL_FLIP, NULL);
+        struct display_ioctl_flip_arg flip_arg = {0};
+        long rc = display_ioctl(KMS_IOCTL_FLIP, &flip_arg);
         struct display_flip_resp *resp = (struct display_flip_resp *)resp_data;
         resp->result = (rc < 0) ? rc : 0;
         return rc;
