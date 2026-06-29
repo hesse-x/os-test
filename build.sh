@@ -24,8 +24,12 @@ while [[ $# -gt 0 ]]; do
             CMAKE_EXTRA="$CMAKE_EXTRA -DNSERIAL"
             shift
             ;;
+        --perf)
+            CMAKE_EXTRA="$CMAKE_EXTRA -DPERF=1"
+            shift
+            ;;
         *)
-            echo "Usage: $0 [-d] [--test] [--sanitizer] [--no-serial]"
+            echo "Usage: $0 [-d] [--test] [--sanitizer] [--no-serial] [--perf]"
             exit 1
             ;;
     esac

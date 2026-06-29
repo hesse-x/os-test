@@ -7,6 +7,10 @@ function(add_kernel_object lib_name)
 
     target_include_directories(${lib_name} PRIVATE ${CMAKE_SOURCE_DIR})
     target_compile_definitions(${lib_name} PRIVATE __KERNEL__)
+
+    if(PERF)
+        target_compile_definitions(${lib_name} PRIVATE PERF)
+    endif()
     target_compile_options(${lib_name} PRIVATE -Wno-unused-parameter)
 
     # KASAN sanitizer flags (kernel-only)
