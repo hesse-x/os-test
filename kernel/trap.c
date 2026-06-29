@@ -153,6 +153,38 @@ static uint64_t tick = 0;
 // Forward declaration of force_sig (defined after signal syscalls section)
 static void force_sig(task_t *proc, int sig, int si_code, void *si_addr);
 
+// ===================== COW fault resolution =====================
+__attribute__((no_sanitize("kernel-address")))
+static void resolve_cow_fault(task_t *task, uint64_t *pte, uint64_t fault_addr) {
+    uint64_t old_phys = *pte & PTE_PHYS_MASK;
+    Page *old_page = &bfc_frames[PHY_TO_PAGE(old_phys)];
+
+    if (refcount_read(&old_page->p_refcount) == 1) {
+        // Only owner: restore write permission without copy
+        *pte = (*pte & ~PTE_COW) | PTE_RW;
+        *pte &= ~PTE_DIRTY;
+        invlpg(fault_addr);
+        return;
+    }
+
+    // Shared page: allocate new page and copy content
+    Page *new_page = bfc_alloc_page(1);
+    if (!new_page) {
+        force_sig(task, SIGSEGV, SEGV_MAPERR, (void *)fault_addr);
+        return;
+    }
+    uint64_t new_phys = (__force uint64_t)page_to_phys(new_page);
+    __memcpy((__force void *)phys_to_virt((__force phys_addr_t)new_phys),
+             (__force void *)phys_to_virt((__force phys_addr_t)old_phys), PAGE_SIZE);
+
+    // Update PTE: new physical page, writable, clear COW/DIRTY, preserve NX/ACCESSED
+    *pte = new_phys | PTE_PRESENT | PTE_RW | PTE_USER
+           | (*pte & PTE_NX) | (*pte & PTE_ACCESSED);
+
+    (void)refcount_dec_and_test(&old_page->p_refcount);  // decrement, don't free (new page already allocated)
+    invlpg(fault_addr);
+}
+
 void trap_dispatch(trapframe_t *tf) {
   get_cpu_local()->cur_tf = tf;
   // Hardware IRQ: check user-space driver binding first
@@ -306,15 +338,32 @@ void trap_dispatch(trapframe_t *tf) {
     case 13:  // #GP general protection
         sig = SIGSEGV; si_code = SEGV_MAPERR; si_addr = (void *)tf->rip;
         break;
-    case 14:  // #PF page fault
-        sig = SIGSEGV;
-        uint64_t cr2;
-        __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
-        si_addr = (void *)cr2;
-        if (tf->err_code & 1)  // present bit
-            si_code = SEGV_ACCERR;
-        else
-            si_code = SEGV_MAPERR;
+    case 14:  // #PF page fault — check COW first
+        {
+            uint64_t fault_addr = read_cr2();
+            uint64_t error_code = tf->err_code;
+            bool is_write = error_code & 2;
+            bool is_present = error_code & 1;
+
+            si_addr = (void *)fault_addr;
+
+            if (is_present && is_write) {
+                // Write to present page: check if COW
+                uint64_t *pte = lookup_pte(current_task->mm->cr3, fault_addr);
+                if (pte && (*pte & PTE_COW)) {
+                    resolve_cow_fault(current_task, pte, fault_addr);
+                    return;  // COW resolved, retry faulting instruction
+                }
+                // Not COW: genuine protection violation
+                sig = SIGSEGV; si_code = SEGV_ACCERR;
+            } else if (!is_present) {
+                // Not-present: genuine mapping error
+                sig = SIGSEGV; si_code = SEGV_MAPERR;
+            } else {
+                // Read from present page with insufficient privilege
+                sig = SIGSEGV; si_code = SEGV_ACCERR;
+            }
+        }
         break;
     default:
         sig = SIGSEGV; si_code = SI_KERNEL; si_addr = (void *)tf->rip;
@@ -327,7 +376,21 @@ void trap_dispatch(trapframe_t *tf) {
     force_sig(current_task, sig, si_code, si_addr);
     return;  // Don't kill process; check_pending_signals will handle it
   }
-  // Kernel-mode exception: unrecoverable, panic
+  // Kernel-mode exception: unrecoverable, panic (unless COW fault)
+  if (tf->trapno == 14) {
+    uint64_t fault_addr = read_cr2();
+    uint64_t error_code = tf->err_code;
+    bool is_write = error_code & 2;
+    bool is_present = error_code & 1;
+
+    if (is_present && is_write) {
+      uint64_t *pte = lookup_pte(current_task->mm->cr3, fault_addr);
+      if (pte && (*pte & PTE_COW)) {
+        resolve_cow_fault(current_task, pte, fault_addr);
+        return;  // COW resolved, return to faulting instruction
+      }
+    }
+  }
   panic("kernel-mode exception: vector=%lu rip=0x%lx cr3=0x%lx",
         tf->trapno, tf->rip, cr3);
 }
@@ -1132,8 +1195,9 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
 // Returns: mapped address on success, 0 on failure
 
 int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6) {
-    (void)arg1; (void)arg3; // addr, prot — not yet used
+    (void)arg1; // addr — not yet used
     size_t size = (size_t)arg2;
+    uint32_t prot = (uint32_t)arg3;
     int flags = (int)arg4;
     int fd = (int)arg5;
     uint64_t offset = arg6;
@@ -1318,7 +1382,9 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
     // Anonymous private mapping: allocate new pages
     size = ALIGN_UP(size, PAGE_SIZE);
     uint64_t vaddr = proc->mm->mmap_brk;
-    uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+    uint64_t pte_flags = PTE_PRESENT | PTE_USER;
+    if (prot & PROT_WRITE) pte_flags |= PTE_RW;
+    if (!(prot & PROT_EXEC)) pte_flags |= PTE_NX;
 
     size_t npages = size / PAGE_SIZE;
     uint64_t *phys_pages = (uint64_t *)kmalloc(npages * sizeof(uint64_t));
@@ -1362,6 +1428,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
     region->size = size;
     region->phys = 0;
     region->shm_obj = NULL;
+    region->prot = prot;
     region->next = proc->mm->mmap_regions;
     proc->mm->mmap_regions = region;
     proc->mm->mmap_brk = vaddr + size;

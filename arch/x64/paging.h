@@ -13,10 +13,16 @@
 #define PTE_PRESENT  (1ULL << 0)
 #define PTE_RW       (1ULL << 1)
 #define PTE_USER     (1ULL << 2)
-#define PTE_PS       (1ULL << 7)   // Page size (2MB huge page at PD level)
-#define PTE_NX       (1ULL << 63)  // No-execute
 #define PTE_PWT     (1ULL << 3)   // Page-level Write-Through
 #define PTE_PCD     (1ULL << 4)   // Page-level Cache Disable
+#define PTE_ACCESSED (1ULL << 5)  // HW: set by CPU on any access
+#define PTE_DIRTY    (1ULL << 6)  // HW: set by CPU on write
+#define PTE_PS       (1ULL << 7)   // Page size (2MB huge page at PD level)
+#define PTE_GLOBAL   (1ULL << 8)  // Global page (not flushed on CR3 reload)
+#define PTE_COW      (1ULL << 9)  // SW: Copy-on-Write marker
+#define PTE_NX       (1ULL << 63)  // No-execute
+
+#define PTE_PHYS_MASK 0x000FFFFFFFFFF000ULL  // Extract physical address from PTE
 
 // PAT index selection via PCD+PWT (for 2MB huge pages at PD level)
 #define PTE_UC      (PTE_PCD | PTE_PWT)   // PAT index 3 = UC

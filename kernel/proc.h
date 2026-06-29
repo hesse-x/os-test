@@ -44,6 +44,7 @@ typedef struct mmap_region {
     uint64_t size;
     uint64_t phys;       // physical address (for DMA buffers, non-zero = MAP_PHYSICAL)
     struct shm *shm_obj; // non-NULL = SHM fd mmap (phys/npages from this)
+    uint32_t prot;       // PROT_READ|PROT_WRITE|PROT_EXEC protection flags
     struct mmap_region *next;
 } mmap_region_t;
 
@@ -212,7 +213,7 @@ int copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4, mmap_region_t *mmap_
 
 // mmap region allocation helper
 mmap_region_t *add_mmap_region(task_t *proc, uint64_t vaddr, uint64_t size,
-                                uint64_t phys, struct shm *shm_obj);
+                                uint64_t phys, struct shm *shm_obj, uint32_t prot);
 
 // Timer queue operations (must be called under scheduler_lock)
 void timer_queue_insert(int cpu, task_t *proc);

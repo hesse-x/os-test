@@ -233,7 +233,9 @@ void mm_release(mm_t *mm, pid_t owner_pid) {
                         }
                         if (!is_shared) {
                             Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
-                            bfc_free_page(leaf_page, 1);
+                            if (refcount_dec_and_test(&leaf_page->p_refcount)) {
+                                bfc_free_page(leaf_page, 1);
+                            }
                         }
                         pt_virt[pt_idx] = 0;
                     }
@@ -367,7 +369,9 @@ void mm_release_pages(mm_t *mm) {
                         if (sig_trampoline_phys && leaf_phys == sig_trampoline_phys) skip = true;
                         if (!skip) {
                             Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
-                            bfc_free_page(leaf_page, 1);
+                            if (refcount_dec_and_test(&leaf_page->p_refcount)) {
+                                bfc_free_page(leaf_page, 1);
+                            }
                         }
                         pt_virt[pt_idx] = 0;
                     }
@@ -463,6 +467,10 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
     uint64_t *dst_pml4 = (uint64_t *)phys_to_virt((__force phys_addr_t)child_mm->cr3);
     int ret = copy_page_table(src_pml4, dst_pml4, parent->mm->mmap_regions);
     if (ret < 0) { mm_put(child_mm); spin_unlock(&tasks_lock); return (int64_t)ret; }
+
+    // Flush parent's TLB — copy_page_table modified parent's RW PTEs to COW,
+    // stale TLB entries would still show the old writable mappings
+    load_cr3(parent->mm->cr3);
 
     // 4. Copy fd_table (through files_t)
     copy_fd_table(parent->mm->files, child_mm->files);
@@ -662,6 +670,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
         stack_region->vaddr = stack_base;
         stack_region->size = (uint64_t)user_stack_pages * PAGE_SIZE;
         stack_region->phys = 0; // not MAP_PHYSICAL — anonymous stack
+        stack_region->prot = PROT_READ | PROT_WRITE;
         stack_region->next = NULL;
         proc->mm->mmap_regions = stack_region;
     }
@@ -717,7 +726,9 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
                             if (sig_trampoline_phys && leaf_phys == sig_trampoline_phys) skip = true;
                             if (!skip) {
                                 Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
-                                bfc_free_page(leaf_page, 1);
+                                if (refcount_dec_and_test(&leaf_page->p_refcount)) {
+                                    bfc_free_page(leaf_page, 1);
+                                }
                             }
                             pt_virt[pt_idx] = 0;
                         }
@@ -776,7 +787,7 @@ void timer_queue_remove(task_t *proc) {
 // ===================== mmap region allocation =====================
 
 mmap_region_t *add_mmap_region(task_t *proc, uint64_t vaddr, uint64_t size,
-                                uint64_t phys, struct shm *shm_obj) {
+                                uint64_t phys, struct shm *shm_obj, uint32_t prot) {
     if (!proc->mm) return NULL;
     mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
     if (!region) return NULL;
@@ -784,6 +795,7 @@ mmap_region_t *add_mmap_region(task_t *proc, uint64_t vaddr, uint64_t size,
     region->size = size;
     region->phys = phys;
     region->shm_obj = shm_obj;
+    region->prot = prot;
     region->next = proc->mm->mmap_regions;
     proc->mm->mmap_regions = region;
     return region;
@@ -1054,6 +1066,7 @@ task_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
         stack_region->vaddr = stack_base;
         stack_region->size = (uint64_t)user_stack_pages * PAGE_SIZE;
         stack_region->phys = 0; // not MAP_PHYSICAL — anonymous stack
+        stack_region->prot = PROT_READ | PROT_WRITE;
         stack_region->next = NULL;
         mm->mmap_regions = stack_region;
     }

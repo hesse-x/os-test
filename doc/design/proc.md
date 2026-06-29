@@ -11,7 +11,7 @@
 | 3 | 资源回收时机 | 全部延迟到 sys_waitpid | 避免 sys_exit 中解映射 PML4 后 schedule 切换 CR3 前的时序问题 |
 | 4 | 孤儿进程 | reparent 到 init（mm->parent_pid = init_pid） | init 调 waitpid(-1) 兜底回收所有孤儿 |
 | 5 | 进程创建 | fork + execve（替代旧 sys_spawn） | 与 Linux 语义一致；spawn 已删除（slot 8 为 NULL） |
-| 6 | fork 页拷贝 | 全量拷贝（非 COW） | 当前进程普遍小，全量拷贝开销可接受；mm_t ref_count 已预留 COW |
+| 6 | fork 页拷贝 | COW（共享物理页 + PTE_COW 标记） | fork 延迟 O(PTE 修改) vs O(memcpy)，内存不翻倍；详见 [page.md](page.md) COW 章节 |
 | 7 | execve 失败处理 | 先验证 ELF 再替换地址空间 | ELF 无效返回 -ENOEXEC，旧地址空间不受影响 |
 | 8 | idle 进程 | task->mm = NULL，使用内核 PML4 | idle 无用户地址空间；所有访问 task->mm 的代码必须先检查 NULL |
 
@@ -77,7 +77,7 @@ files_t（kernel/proc.h : files_t）— fd 表，独立引用计数
 #### sys_fork（kernel/proc.c : sys_fork）
 
 1. 分配新 task_t 槽位（tasks_lock 保护）
-2. 深拷贝 mm_t：分配新 PML4，copy_page_table 深拷贝用户页表
+2. 创建新 mm_t：分配新 PML4，copy_page_table COW 共享用户页表（父 RW PTE 改为只读+PTE_COW，子 PTE 同样只读+PTE_COW，物理页 p_refcount++），flush 父 TLB
 3. 深拷贝 files_t：逐 fd 复制 file_t，对应资源 ref_count++（pipe/shm/inode 等）
 4. 深拷贝 mmap_regions 链表
 5. 分配新内核栈，拷贝父进程 trapframe（rax=0 表示子进程返回值）
@@ -108,7 +108,7 @@ files_t（kernel/proc.h : files_t）— fd 表，独立引用计数
   files_create() → kmalloc files_t, ref_count=1, fd_table init FD_NONE
 
 fork:
-  新 mm_t, ref_count=1（全量拷贝，不共享）
+  新 mm_t, ref_count=1（COW 共享物理页，独立 PML4；详见 [page.md](page.md) COW 章节）
   新 files_t, ref_count=1（逐 fd 复制 + ref_count++）
 
 释放:
@@ -116,7 +116,7 @@ fork:
     → >0: 不做任何事
     → ==0: mm_release(mm, owner_pid)
   mm_release(mm, owner_pid):
-    mm_release_pages(): 释放用户页表+物理页+PML4
+    mm_release_pages(): 释放用户页表+物理页（叶页 refcount_dec_and_test，减到 0 才 free；共享页减到 >0 不释放）+PML4
     files_put(mm->files): 递减 fd 表引用，归零则关闭所有 fd + kfree
     释放 mmap_regions + SHM 引用
     devtmpfs_cleanup_pid / irq_owner_cleanup
@@ -167,7 +167,7 @@ fork:
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| COW 页拷贝 | fork 全量拷贝开销大，共享 mm_t + ref_count++ + 写时拷贝可大幅减少内存和拷贝时间 | 中 |
+| COW fault handler | #PF 需识别 PTE_COW 并 resolve（分配新页/恢复 RW），当前写共享页仍 SIGSEGV | 高 |
 | CLONE_VM / 线程 | task_t/mm_t/files_t 拆分已预留，需实现 pthread 级别的线程创建（共享地址空间） | 中 |
 | WNOHANG 非阻塞 waitpid | 当前 waitpid 只有阻塞模式，添加 WNOHANG 选项避免 shell 等子进程时卡死 | 高 |
 | execve argv/envp 传递 | 当前 argv=NULL, envp=NULL，需支持命令行参数和环境变量传入新进程 | 高 |

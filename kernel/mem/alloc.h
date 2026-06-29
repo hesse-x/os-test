@@ -7,6 +7,8 @@
 #include "kernel/sparse.h"
 #include "kernel/spinlock.h"
 
+#include "kernel/atomic.h"
+
 #define NUM_KMALLOC_CLASSES 9
 
 // ===================== Page frame descriptor =====================
@@ -21,6 +23,7 @@ struct kmem_cache_t;
 
 typedef struct Page {
   page_status_t status;
+  refcount_t p_refcount;           // physical page reference count (0=free, 1=exclusive, >1=shared)
   union {
     struct {
       size_t cont_page_num;   // 连续页数（BFC 空闲/已分配大块）
@@ -72,5 +75,6 @@ bool map_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
                     uint64_t flags, int *pages_mapped) __must_check;
 void unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
                       int count);
+uint64_t *lookup_pte(uint64_t cr3_phys, uint64_t vaddr);
 
 #endif // KERNEL_MEM_ALLOC_H

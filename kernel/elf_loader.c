@@ -12,7 +12,7 @@
 
 // Map a single 4KB page at vaddr into new_pml4, copying data from src.
 static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
-                     uint64_t copy_len) {
+                     uint64_t copy_len, uint64_t elf_flags) {
     Page *page = bfc_alloc_page(1);
     if (!page) return false;
     uint64_t page_phys = (__force uint64_t)page_to_phys(page);
@@ -39,8 +39,13 @@ static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
     uint64_t *pt = ensure_pt_in_pd(pd, vaddr, 1);
     if (!pt) return false;
 
+    // Compute PTE flags from ELF segment flags
+    uint64_t pte_flags = PTE_PRESENT | PTE_USER;
+    if (elf_flags & PF_W) pte_flags |= PTE_RW;
+    if (!(elf_flags & PF_X)) pte_flags |= PTE_NX;
+
     uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
-    pt[pt_idx] = page_phys | PTE_PRESENT | PTE_RW | PTE_USER;
+    pt[pt_idx] = page_phys | pte_flags;
 
     return true;
 }
@@ -96,7 +101,7 @@ elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
                 src = data + file_start + page_off;
             }
 
-            if (!map_page(new_pml4, page_addr, src, copy_len)) {
+            if (!map_page(new_pml4, page_addr, src, copy_len, ph->p_flags)) {
                 printk(LOG_ERROR, "elf_load: map_page failed for vaddr=%lx\n", page_addr);
                 return result;
             }

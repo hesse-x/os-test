@@ -180,6 +180,16 @@ static inline void ltr(uint16_t sel) {
   __asm__ volatile("ltr %w0" :: "r"(sel));
 }
 
+static inline void invlpg(uint64_t vaddr) {
+  __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+}
+
+static inline uint64_t read_cr2() {
+  uint64_t val;
+  __asm__ volatile("movq %%cr2, %0" : "=r"(val));
+  return val;
+}
+
 // ===================== TSC helpers =====================
 static inline uint64_t rdtsc64() {
   uint32_t lo, hi;

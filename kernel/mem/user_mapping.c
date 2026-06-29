@@ -10,6 +10,31 @@
 #include "common/shm.h"
 #include "kernel/proc.h"
 #include "kernel/trap.h"
+#include "kernel/atomic.h"
+
+// Lookup the leaf PTE for a given virtual address in a page table hierarchy.
+// cr3_phys is the physical address of the PML4 (as stored in mm->cr3 or CR3).
+// Returns pointer to the leaf PTE if all intermediate levels exist, NULL otherwise.
+__attribute__((no_sanitize("kernel-address")))
+uint64_t *lookup_pte(uint64_t cr3_phys, uint64_t vaddr) {
+    uint64_t *pml4 = (uint64_t *)phys_to_virt((__force phys_addr_t)cr3_phys);
+    uint64_t pml4_idx = (vaddr >> 39) & 0x1FF;
+    if (!(pml4[pml4_idx] & PTE_PRESENT)) return NULL;
+
+    uint64_t *pdpt = (uint64_t *)phys_to_virt((__force phys_addr_t)(pml4[pml4_idx] & PTE_PHYS_MASK));
+    uint64_t pdpt_idx = (vaddr >> 30) & 0x1FF;
+    if (!(pdpt[pdpt_idx] & PTE_PRESENT)) return NULL;
+
+    uint64_t *pd = (uint64_t *)phys_to_virt((__force phys_addr_t)(pdpt[pdpt_idx] & PTE_PHYS_MASK));
+    uint64_t pd_idx = (vaddr >> 21) & 0x1FF;
+    if (!(pd[pd_idx] & PTE_PRESENT)) return NULL;
+
+    uint64_t *pt = (uint64_t *)phys_to_virt((__force phys_addr_t)(pd[pd_idx] & PTE_PHYS_MASK));
+    uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
+    if (!(pt[pt_idx] & PTE_PRESENT)) return NULL;
+
+    return &pt[pt_idx];
+}
 
 // Ensure a PDPT entry exists for the given virtual address in user PML4.
 // Returns the virtual address of the PD, or allocates a new one.
@@ -125,9 +150,11 @@ void unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
 
         uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
         if (pt[pt_idx] & PTE_PRESENT) {
-            uint64_t phys = pt[pt_idx] & 0x000FFFFFFFFFF000ULL;
+            uint64_t phys = pt[pt_idx] & PTE_PHYS_MASK;
             Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
-            bfc_free_page(p, 1);
+            if (refcount_dec_and_test(&p->p_refcount)) {
+                bfc_free_page(p, 1);
+            }
             pt[pt_idx] = 0;
             freed++;
         }
@@ -199,9 +226,9 @@ int copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
                     uint64_t pte = src_pt[pt_idx];
                     if (!(pte & PTE_PRESENT)) continue;
 
-                    uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
+                    uint64_t leaf_phys = pte & PTE_PHYS_MASK;
 
-                    // Skip sig trampoline — shared physical page
+                    // Skip sig trampoline — shared physical page (global, no refcount bump)
                     if (sig_trampoline_phys != 0 && leaf_phys == sig_trampoline_phys) {
                         dst_pt[pt_idx] = pte; // share
                         continue;
@@ -229,18 +256,25 @@ int copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
                     }
 
                     if (is_shared) {
-                        dst_pt[pt_idx] = pte; // share PTE
+                        dst_pt[pt_idx] = pte; // share PTE unchanged
                         continue;
                     }
 
-                    // Private page: allocate new physical page, copy content
-                    Page *new_page = bfc_alloc_page(1);
-                    if (!new_page) return -ENOMEM;
-                    uint64_t new_phys = (__force uint64_t)page_to_phys(new_page);
-                    uint8_t *src_v = (uint8_t *)phys_to_virt((__force phys_addr_t)leaf_phys);
-                    uint8_t *dst_v = (uint8_t *)phys_to_virt((__force phys_addr_t)new_phys);
-                    for (size_t i = 0; i < PAGE_SIZE; i++) dst_v[i] = src_v[i];
-                    dst_pt[pt_idx] = new_phys | (pte & 0xFFF); // same flags
+                    // COW: mark writable pages as read-only with COW flag
+                    Page *phys_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
+                    refcount_inc(&phys_page->p_refcount);
+
+                    if (pte & PTE_RW) {
+                        // Writable page: both parent and child get COW|~RW
+                        dst_pt[pt_idx] = leaf_phys | PTE_PRESENT | PTE_USER | PTE_COW
+                                          | (pte & PTE_NX) | (pte & PTE_ACCESSED);
+                        // Also modify parent PTE: clear RW, set COW
+                        src_pt[pt_idx] = leaf_phys | PTE_PRESENT | PTE_USER | PTE_COW
+                                          | (pte & PTE_NX) | (pte & PTE_ACCESSED);
+                    } else {
+                        // Read-only/execute-only page: share directly (already non-writable)
+                        dst_pt[pt_idx] = pte; // copy PTE as-is
+                    }
                 }
             }
         }

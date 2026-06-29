@@ -7,6 +7,10 @@
 #define EI_NIDENT 16
 #define PT_LOAD 1
 
+#define PF_X 0x1
+#define PF_W 0x2
+#define PF_R 0x4
+
 typedef struct Elf64_Ehdr {
     uint8_t  e_ident[EI_NIDENT];
     uint16_t e_type;
