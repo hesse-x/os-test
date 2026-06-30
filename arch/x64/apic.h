@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include "kernel/sparse.h"
+#include "kernel/xcore/sparse.h"
 
 // LAPIC register offsets (MMIO)
 #define LAPIC_ID        0x020

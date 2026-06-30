@@ -85,7 +85,7 @@ __trapret:
 # ===================== syscall fast entry/exit (SYSCALL/SYSRET) =====================
 # SYSCALL instruction: RCX = return RIP, R11 = RFLAGS, CS/SS loaded from STAR.
 # No stack switch, no swapgs — we must do it manually.
-# We build the same trapframe_t as int 0x80 so syscall_dispatch can be shared.
+# We build the same trapframe_t as int 0x80 so xcall_dispatch can be shared.
 #
 # trapframe_t layout (C struct, offsets from base):
 #   0:   r15, r14, r13, r12, r11, r10, r9, r8
@@ -143,15 +143,15 @@ syscall_fast_entry:
     movw %ax, %ds
     movw %ax, %es
 
-    # Call syscall_dispatch(rdi = &trapframe)
+    # Call xcall_dispatch(rdi = &trapframe)
     movq %rsp, %rdi
-    call syscall_dispatch
+    call xcall_dispatch
 
     # Check pending signals before returning to user mode
     movq %rsp, %rdi
     call check_pending_signals
 
-    # After syscall_dispatch returns, RSP = trapframe base (C ABI restores RSP).
+    # After xcall_dispatch returns, RSP = trapframe base (C ABI restores RSP).
     # Use SYSRET for fast return to user mode.
     # Note: blocking syscalls (getc) also return here after being rescheduled,
     # because schedule() -> switch_to saves/restores the full call chain.

@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "kernel/sparse.h"
+#include "kernel/xcore/sparse.h"
 
 // ===================== I/O port helpers =====================
 static inline void outb(uint16_t port, uint8_t val) {

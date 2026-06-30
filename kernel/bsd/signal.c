@@ -1,0 +1,326 @@
+// kernel/bsd/signal.c — Signal delivery and session syscalls
+// Extracted from kernel/trap.c (phase 3 step 3.2)
+
+#include "kernel/bsd/syscall.h"
+#include "kernel/bsd/proc.h"
+#include "kernel/bsd/types.h"
+#include "kernel/xcore/xtask.h"
+#include "kernel/xcore/trap.h"
+#include "kernel/xcore/kpi.h"
+#include "kernel/xcore/xtask.h"
+#include "kernel/xcore/log.h"
+#include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/mem/slab.h"
+#include "kernel/user_check.h"
+#include "kernel/xcore/spinlock.h"
+#include "arch/x64/utils.h"
+#include "arch/x64/smp.h"
+#include "arch/x64/trap.h"
+#include "arch/x64/paging.h"
+#include "common/signal.h"
+#include "common/syscall_nums.h"
+#include "common/errno.h"
+
+// ===================== Signal trampoline =====================
+uint64_t sig_trampoline_phys = 0;
+
+void sig_init() {
+    // Allocate one shared physical page for the signal trampoline.
+    Page *page = bfc_alloc_page(1);
+    if (!page) {
+        printk(LOG_ERROR, "sig_init: failed to allocate trampoline page\n");
+        return;
+    }
+    sig_trampoline_phys = (__force uint64_t)page_to_phys(page);
+    uint8_t *vaddr = (__force uint8_t *)phys_to_virt((__force phys_addr_t)sig_trampoline_phys);
+
+    // mov rax, SYS_SIGRETURN
+    vaddr[0] = 0x48;  // REX.W prefix
+    vaddr[1] = 0xC7;  // MOV r64, imm32
+    vaddr[2] = 0xC0;  // ModRM: rax
+    vaddr[3] = SYS_SIGRETURN;
+    vaddr[4] = 0x00;
+    vaddr[5] = 0x00;
+    vaddr[6] = 0x00;
+
+    // syscall
+    vaddr[7] = 0x0F;
+    vaddr[8] = 0x05;
+
+    printk(LOG_INFO, "sig_init: trampoline at phys=%lx\n", sig_trampoline_phys);
+}
+
+// ===================== Signal delivery =====================
+
+// Deliver a signal with a user-registered handler via sigframe on user stack.
+static void deliver_signal(xtask_t *proc, trapframe_t *tf, int sig, sigaction_t *sa) {
+    struct rt_sigframe frame;
+    __memset(&frame, 0, sizeof(frame));
+    frame.pretcode = SIG_TRAMPOLINE_ADDR;
+
+    // siginfo
+    frame.info.si_signo = sig;
+    frame.info.si_errno = 0;
+    frame.info.si_code = SI_KERNEL;
+    if (proc->proc->sig_force_info.si_signo == sig) {
+        frame.info = proc->proc->sig_force_info;
+    }
+
+    // sigcontext — fill all GP registers from trapframe
+    frame.uc.uc_mcontext.r8  = tf->r8;
+    frame.uc.uc_mcontext.r9  = tf->r9;
+    frame.uc.uc_mcontext.r10 = tf->r10;
+    frame.uc.uc_mcontext.r11 = tf->r11;
+    frame.uc.uc_mcontext.r12 = tf->r12;
+    frame.uc.uc_mcontext.r13 = tf->r13;
+    frame.uc.uc_mcontext.r14 = tf->r14;
+    frame.uc.uc_mcontext.r15 = tf->r15;
+    frame.uc.uc_mcontext.rdi = tf->rdi;
+    frame.uc.uc_mcontext.rsi = tf->rsi;
+    frame.uc.uc_mcontext.rbp = tf->rbp;
+    frame.uc.uc_mcontext.rbx = tf->rbx;
+    frame.uc.uc_mcontext.rdx = tf->rdx;
+    frame.uc.uc_mcontext.rax = tf->rax;
+    frame.uc.uc_mcontext.rcx = tf->rcx;
+    frame.uc.uc_mcontext.rsp = tf->rsp;
+    frame.uc.uc_mcontext.rip = tf->rip;
+    frame.uc.uc_mcontext.eflags = tf->rflags;
+    frame.uc.uc_mcontext.cs = tf->cs;
+    frame.uc.uc_mcontext.ss = tf->ss;
+    frame.uc.uc_mcontext.cr2 = (proc->proc->sig_force_info.si_signo == sig) ?
+        (int64_t)proc->proc->sig_force_info._sifields.si_addr : 0;
+
+    frame.uc.uc_sigmask = proc->proc->sig.blocked;
+    frame.uc.uc_flags = 0;
+    frame.uc.uc_link = NULL;
+
+    // Update blocked: mask sa_mask + current signal during handler
+    proc->proc->sig.blocked |= sa->sa_mask | (1ULL << sig);
+    proc->proc->sig.blocked &= ~(1ULL << SIGKILL);
+    proc->proc->sig.blocked &= ~(1ULL << SIGSTOP);
+
+    // Clear sig_force_info (consumed)
+    if (proc->proc->sig_force_info.si_signo == sig)
+        proc->proc->sig_force_info.si_signo = 0;
+
+    // Push sigframe to user stack (CR3 switch)
+    uint64_t user_rsp = tf->rsp - sizeof(struct rt_sigframe);
+    user_rsp &= ~0xFULL;  // 16-byte aligned
+
+    uint64_t saved_cr3;
+    __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+    __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)proc->cr3) : "memory");
+    __memcpy((void *)user_rsp, &frame, sizeof(struct rt_sigframe));
+    __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
+
+    // Modify trapframe → jump to handler
+    tf->rip = (int64_t)sa->__sigaction_handler._sa_handler;
+    tf->rsp = user_rsp;
+
+    if (sa->sa_flags & SA_SIGINFO) {
+        tf->rdi = (int64_t)sig;
+        tf->rsi = (int64_t)(user_rsp + offsetof(struct rt_sigframe, info));
+        tf->rdx = (int64_t)(user_rsp + offsetof(struct rt_sigframe, uc));
+    } else {
+        tf->rdi = (int64_t)sig;
+    }
+}
+
+// ===================== check_pending_signals =====================
+void check_pending_signals(trapframe_t *tf) {
+    if (tf->cs != 0x2B) return;
+
+    xtask_t *proc = current_task;
+    if (!proc) return;
+
+    while (1) {
+        uint64_t pending = __atomic_load_n(&proc->proc->sig.pending, __ATOMIC_ACQUIRE);
+        uint64_t deliverable = pending & ~proc->proc->sig.blocked;
+        deliverable |= (pending & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+        if (!deliverable) return;
+
+        int sig = __builtin_ctzll(deliverable);
+        if (sig <= 0 || sig >= NSIG) {
+            __atomic_store_n(&proc->proc->sig.pending, 0, __ATOMIC_RELEASE);
+            return;
+        }
+
+        __atomic_and_fetch(&proc->proc->sig.pending, ~(1ULL << sig), __ATOMIC_RELEASE);
+
+        sigaction_t *sa = &proc->proc->sig.action[sig];
+
+        if (sa->__sigaction_handler._sa_handler == SIG_DFL) {
+            switch (sig) {
+            case SIGCHLD:
+            case SIGSTOP:
+            case SIGTSTP:
+            case SIGCONT:
+            case SIGWINCH:
+                break;
+            case SIGKILL:
+            case SIGINT:
+            case SIGQUIT:
+            case SIGHUP:
+            case SIGTERM:
+            case SIGSEGV:
+            case SIGILL:
+            case SIGFPE:
+            case SIGABRT:
+            case SIGBUS:
+            case SIGTRAP:
+            case SIGPIPE:
+            case SIGALRM:
+            case SIGUSR1:
+            case SIGUSR2:
+            case SIGSTKFLT:
+            default:
+                proc->proc->exit_code = -1;
+                printk(LOG_ERROR, "signal: pid=%d terminated by signal %d\n", proc->pid, sig);
+                sys_exit(-1, 0, 0, 0, 0, 0);
+            }
+        } else if (sa->__sigaction_handler._sa_handler == SIG_IGN) {
+            continue;
+        } else {
+            deliver_signal(proc, tf, sig, sa);
+            return;
+        }
+    }
+}
+
+// ===================== force_sig =====================
+void force_sig(xtask_t *proc, int sig, int si_code, void *si_addr) {
+    __atomic_or_fetch(&proc->proc->sig.pending, 1ULL << sig, __ATOMIC_RELEASE);
+    __atomic_and_fetch(&proc->proc->sig.blocked, ~(1ULL << sig), __ATOMIC_RELEASE);
+
+    proc->proc->sig_force_info.si_signo = sig;
+    proc->proc->sig_force_info.si_errno = 0;
+    proc->proc->sig_force_info.si_code = si_code;
+    proc->proc->sig_force_info._sifields.si_addr = si_addr;
+
+    if (proc->proc->sig.action[sig].__sigaction_handler._sa_handler == SIG_IGN) {
+        proc->proc->sig.action[sig].__sigaction_handler._sa_handler = SIG_DFL;
+    }
+}
+
+// ===================== Signal delivery helpers =====================
+
+void deliver_signal_to(xtask_t *target, int sig) {
+    __atomic_or_fetch(&target->proc->sig.pending, 1ULL << sig, __ATOMIC_RELEASE);
+    if (target->state == BLOCKED) wake_process(target->pid);
+}
+
+int pgsignal(pid_t pgid, int sig) {
+    int found = 0;
+    for (int p = 0; p < MAX_PROC; p++) {
+        if (tasks[p].pid == p && tasks[p].proc && tasks[p].proc->pgid == pgid) {
+            deliver_signal_to(&tasks[p], sig);
+            found++;
+        }
+    }
+    return found > 0 ? 0 : -ESRCH;
+}
+
+// ===================== BSD syscall: kill =====================
+int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
+    pid_t pid = (pid_t)arg1;
+    int sig = (int)arg2;
+    if (sig < 0 || sig >= NSIG) return (int64_t)-EINVAL;
+    if (sig == 0) return 0;
+
+    if (pid > 0) {
+        if (pid >= MAX_PROC) return (int64_t)-ESRCH;
+        xtask_t *target = &tasks[pid];
+        if (target->pid != pid) return (int64_t)-ESRCH;
+        deliver_signal_to(target, sig);
+        return 0;
+    } else if (pid == 0) {
+        pid_t my_pgid = current_proc->pgid;
+        if (my_pgid == 0) return (int64_t)-ESRCH;
+        return (int64_t)pgsignal(my_pgid, sig);
+    } else if (pid == -1) {
+        return (int64_t)-EPERM;
+    } else {
+        return (int64_t)pgsignal(-pid, sig);
+    }
+}
+
+// ===================== BSD syscall: sigaction =====================
+int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
+    int sig = (int)arg1;
+    const struct sigaction __user *act = (const struct sigaction __user * __force)arg2;
+    struct sigaction __user *oldact = (struct sigaction __user * __force)arg3;
+
+    if (sig < 0 || sig >= NSIG) return (int64_t)-EINVAL;
+    if (sig == SIGKILL || sig == SIGSTOP) return (int64_t)-EINVAL;
+
+    xtask_t *proc = current_task;
+
+    if (oldact) {
+        uint64_t ptr = (__force uint64_t)oldact;
+        if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(struct sigaction) > 0xFFFFFFFF80000000ULL)
+            return (int64_t)-EFAULT;
+
+        uint64_t saved_cr3;
+        __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+        __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)proc->cr3) : "memory");
+        copy_to_user(oldact, &proc->proc->sig.action[sig], sizeof(struct sigaction));
+        __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
+    }
+
+    if (act) {
+        uint64_t ptr = (__force uint64_t)act;
+        if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(struct sigaction) > 0xFFFFFFFF80000000ULL)
+            return (int64_t)-EFAULT;
+
+        struct sigaction new_act;
+        uint64_t saved_cr3;
+        __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+        __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)proc->cr3) : "memory");
+        copy_from_user(&new_act, act, sizeof(struct sigaction));
+        __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
+
+        if (new_act.sa_mask & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)))
+            return (int64_t)-EINVAL;
+
+        proc->proc->sig.action[sig] = new_act;
+        __atomic_and_fetch(&proc->proc->sig.pending, ~(1ULL << sig), __ATOMIC_RELEASE);
+    }
+
+    return 0;
+}
+
+// ===================== BSD syscall: sigreturn =====================
+int64_t sys_sigreturn(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
+    xtask_t *proc = current_task;
+
+    uint64_t tf_base = get_cpu_local()->tss_rsp0 - sizeof(trapframe_t);
+    trapframe_t *tf = (trapframe_t *)tf_base;
+
+    struct rt_sigframe frame;
+    uint64_t user_rsp = tf->rsp - 8;
+
+    uint64_t saved_cr3;
+    __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+    __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)proc->cr3) : "memory");
+    __memcpy(&frame, (void *)user_rsp, sizeof(struct rt_sigframe));
+    __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
+
+    struct sigcontext *sc = &frame.uc.uc_mcontext;
+    tf->r8  = sc->r8;   tf->r9  = sc->r9;
+    tf->r10 = sc->r10;  tf->r11 = sc->r11;
+    tf->r12 = sc->r12;  tf->r13 = sc->r13;
+    tf->r14 = sc->r14;  tf->r15 = sc->r15;
+    tf->rdi = sc->rdi;  tf->rsi = sc->rsi;
+    tf->rbp = sc->rbp;  tf->rbx = sc->rbx;
+    tf->rdx = sc->rdx;  tf->rax = sc->rax;
+    tf->rcx = sc->rcx;  tf->rsp = sc->rsp;
+    tf->rip = sc->rip;
+    tf->rflags = sc->eflags;
+    tf->cs = sc->cs;  tf->ss = sc->ss;
+
+    proc->proc->sig.blocked = frame.uc.uc_sigmask;
+    proc->proc->sig.blocked &= ~(1ULL << SIGKILL);
+    proc->proc->sig.blocked &= ~(1ULL << SIGSTOP);
+
+    return 0;
+}

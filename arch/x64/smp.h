@@ -4,9 +4,9 @@
 #include <stdint.h>
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
-#include "kernel/spinlock.h"
-#include "kernel/list.h"
-#include "kernel/mem/alloc.h"
+#include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/list.h"
+#include "kernel/xcore/mem/alloc.h"
 
 #define MAX_CPUS 4
 #define MSR_GS_BASE 0xC0000101
@@ -21,7 +21,7 @@
 #define EFER_SCE (1ULL << 0)
 #define EFER_NXE (1ULL << 11)
 
-struct task_t; // forward declaration (typedef in kernel/proc.h)
+struct xtask_t; // forward declaration (typedef xtask_t in kernel/xcore/xtask.h)
 
 // RCU per-CPU nesting state (defined in kernel/rcu.h)
 typedef struct rcu_local {
@@ -33,13 +33,13 @@ typedef struct cpu_local_t {
     uint64_t saved_r10;    // scratch slot: SYSCALL entry saves user R10 (arg4) here
     int cpu_id;
     uint32_t apic_id;
-    struct task_t *_cur_proc;
+    struct xtask_t *_cur_proc;
     trapframe_t *cur_tf; // current trapframe (set by syscall/irq entry)
     void __iomem *lapic_base;
     uint64_t kernel_stack;
     uint64_t tss_rsp0;
     int run_count;         // number of runnable processes on this CPU (excludes idle)
-    struct task_t *idle_proc;     // this CPU's idle process
+    struct xtask_t *idle_proc;     // this CPU's idle process
     spinlock_t scheduler_lock; // per-CPU scheduler lock
     list_node_t run_queue;     // per-CPU ready queue (sentinel node)
     list_node_t timer_queue;   // per-CPU timer queue (sorted by wait_deadline, sentinel node)

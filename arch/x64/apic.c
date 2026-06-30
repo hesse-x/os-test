@@ -2,8 +2,8 @@
 #include "arch/x64/utils.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
-#include "kernel/acpi.h"
-#include "kernel/log.h"
+#include "kernel/xcore/acpi.h"
+#include "kernel/xcore/log.h"
 
 void __iomem *lapic_vaddr = NULL;
 void __iomem *ioapic_vaddr = NULL;

@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "kernel/sparse.h"
+#include "kernel/xcore/sparse.h"
 #include "arch/x64/utils.h"
 #include "common/macro.h"
 #include "common/boot.h"

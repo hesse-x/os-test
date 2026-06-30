@@ -84,34 +84,57 @@ arch/x64/
 kernel/
   CMakeLists.txt
   kernel.c / kernel.h   — kernel_main
-  serial.c / serial.h   — COM1 串口（NSERIAL 门控）
-  trap.c / trap.h       — trap_dispatch + syscall_dispatch + 59个syscall + IRQ注册表
-  proc.c / proc.h       — task_t/mm_t, switch_to, schedule, task_reap
-  ahci.c / ahci.h       — AHCI DMA 驱动
-  acpi.c / acpi.h       — ACPI 表解析
-  pci.c / pci.h         — PCI/PCIe ECAM 枚举与 BAR 分配
-  xhci.c / xhci.h       — xHCI USB 主控驱动
-  display.c / display.h — KMS 内核态 display（bochs-display, req flip）
-  pty.c / pty.h         — PTY/TTY 子系统（pseudoterminal master/slave）
-  log.c / log.h         — printk/panic/dump_stack_trace/BUG_ON/WARN_ON/ASSERT
-  sparse.h              — Sparse 注解（__user, __iomem, phys_addr_t, kern_vaddr_t）
-  user_check.h          — 用户态缓冲区/指针验证
-  elf_loader.c / elf_loader.h — ELF 加载器
-  socket.c / socket.h   — AF_UNIX SOCK_STREAM + SCM_RIGHTS
-  vfs.c / vfs.h         — VFS 层（sys_open/sys_stat/sys_mkdir/sys_unlink/sys_rmdir/sys_dev_create）
-  fat32.c / fat32.h     — FAT32 内核文件系统（路径解析/读写/创建/删除/目录操作）
-  inode.c / inode.h     — inode cache（hash 表+引用计数+inode_put）
-  page_cache.c / page_cache.h — 4KB page cache（LRU淘汰+写回）
-  blk_dev.c / blk_dev.h — 块设备抽象层（AHCI 同步封装+spinlock）
-  devtmpfs.c / devtmpfs.h — /dev/ 内存伪文件系统（设备节点注册+open）
-  list.h                — 内嵌双向链表
-  spinlock.h            — spinlock_t
-  mem/
-    alloc.c / alloc.h   — Bump/BFC 分配器
-    slab.c / slab.h     — Slab 分配器
-    user_mapping.c      — 用户页映射辅助
-    copy_user.c         — copy_to_user/copy_from_user
-    kasan.c / kasan.h   — KASAN（SANITIZE=1 条件编译）
+
+  xcore/                  — Xcore 层：调度器、IPC、内存管理、中断分发
+    CMakeLists.txt
+    init.c               — xcore_init（serial_init, mem, ACPI, ISR, proc, SMP）
+    sched.c / sched.h    — xtask_t, switch_to, schedule, task_reap, idle_entry
+    xtask.h              — xtask_t 定义（PCB）、bsd_proc 前向声明
+    proc.c               — create_process (ELF 加载+调度入队)
+    trap.c / trap.h      — trap_dispatch + syscall_dispatch + IRQ注册表 + BSD hook 调用点
+    ipc.c                — IPC 原语实现（sys_recv/req/resp/msg/msg_to）
+    kpi.h                — Xcore KPI 导出声明
+    log.c / log.h        — printk/panic/dump_stack_trace/BUG_ON/WARN_ON/ASSERT
+    rcu.c / rcu.h        — RCU 机制
+    acpi.c / acpi.h      — ACPI 表解析
+    atomic.h             — 原子操作
+    list.h               — 内嵌双向链表
+    spinlock.h           — spinlock_t
+    sparse.h             — Sparse 注解（__user, __iomem, phys_addr_t, kern_vaddr_t）
+    mem/
+      alloc.c / alloc.h — Bump/BFC 分配器
+      slab.c / slab.h   — Slab 分配器
+      user_mapping.c    — 用户页映射辅助
+      copy_user.c       — copy_to_user/copy_from_user
+      kasan.c / kasan.h — KASAN（SANITIZE=1 条件编译）
+
+  bsd/                    — BSD 层：POSIX 语义、VFS、syscall
+    CMakeLists.txt
+    init.c               — bsd_init（vfs_init, hook 注册）
+    proc.c / proc.h      — bsd_proc_t, files_t, sys_fork, sys_execve, bsd_proc_reap
+    syscall.c / syscall.h — BSD syscall 分发（60个 syscall）
+    types.h              — fd/pipe/shm/mm/file/files_t 类型定义
+    signal.c             — 信号处理（force_sig, check_pending_signals）
+    vfs.c / vfs.h        — VFS 层（sys_open/sys_stat/sys_mkdir/sys_unlink/sys_rmdir/sys_dev_create）
+    fat32.c / fat32.h    — FAT32 内核文件系统
+    inode.c / inode.h    — inode cache（hash 表+引用计数+inode_put）
+    page_cache.c / page_cache.h — 4KB page cache（LRU淘汰+写回）
+    devtmpfs.c / devtmpfs.h — /dev/ 内存伪文件系统（设备节点注册+open）
+    elf_loader.c / elf_loader.h — ELF 加载器
+    socket.c / socket.h  — AF_UNIX SOCK_STREAM + SCM_RIGHTS
+    pty.c / pty.h        — PTY/TTY 子系统
+
+  driver/                 — 驱动层：PCI 设备驱动、块设备抽象
+    CMakeLists.txt
+    init.c               — driver_init（pci_init, driver_register, driver_pci_match）
+    registry.c / driver.h — dev_driver_t 注册表 + PCI 自动匹配
+    ahci.c / ahci.h      — AHCI DMA 驱动
+    xhci.c / xhci.h      — xHCI USB 主控驱动
+    display.c / display.h — KMS 内核态 display（bochs-display, req flip）
+    serial.c / serial.h   — COM1 串口（NSERIAL 门控）
+    pci.c / pci.h         — PCI/PCIe ECAM 枚举与 BAR 分配
+    blk_dev.c / blk_dev.h — 块设备抽象层（AHCI 同步封装+spinlock）
+    user_check.h          — 用户态缓冲区/指针验证
 
 driver/
   CMakeLists.txt
@@ -160,31 +183,37 @@ kernel/
 |------|------|
 | `boot.md` | 启动流程（UEFI→内核→init→服务，ioperm/IOPM，孤儿收养） |
 | `uefi.md` | UEFI 引导设计（EFI stub、boot_info、内存映射安全） |
-| `syscall.md` | 系统调用（SYSCALL/SYSRET、59个syscall编号表） |
-| `proc.md` | 进程管理（task_t/mm_t/files_t、fork/execve/exit/waitpid） |
-| `ipc.md` | IPC 统一设计（REQ/RESP + MSG/MSG_RESP + socket + pipe + SHM + signal） |
-| `schedule.md` | 调度器、run_queue、switch_to、idle |
-| `smp.md` | SMP 多核（Per-CPU 数据、AP 启动、中断控制器、TSS IST 栈、锁模型） |
-| `mem.md` | 内存管理（Bump/BFC/Slab、sys_mmap/munmap、用户态 malloc） |
-| `page.md` | 分页设计（higher-half、2MB huge pages、RIP-relative、NX 保护 W^X） |
-| `kernel_lock.md` | 内核锁设计（spinlock + 细粒度锁模型） |
-| `pcie.md` | PCIe ECAM 枚举与 BAR 分配 |
-| `xhci.md` | xHCI USB 控制器驱动 |
-| `kbd.md` | USB HID 键盘驱动 |
-| `kms.md` | KMS 内核态驱动（display buffer 分配 + req flip + devtmpfs /dev/kms） |
-| `terminal.md` | Terminal/PTY/串口设计（内核 PTY + 内核串口 + 用户态 ldisc + Shell） |
-| `driver_workflow.md` | 用户态驱动工作流 |
-| `user_driver.md` | 用户态驱动详细设计 |
-| `vfs.md` | VFS + 文件系统设计（FAT32 + inode + page cache + devtmpfs） |
 | `libc.md` | libc 设计（FILE/printf/malloc/time，含时间函数） |
-| `posix.md` | POSIX 接口覆盖现状 |
 | `cmake.md` | 构建系统（CMake 规则、工具链、磁盘映像，含用户态构建） |
 | `test.md` | 测试框架设计（Unity + test_runner） |
 | `todo.md` | 项目路线图（Wayland 验收 + clang/LLVM 里程碑 + 已知 Bug） |
-| `thread.md` | 线程设计（CLONE_VM 预留） |
-| `sparse.md` | Sparse 注解设计 |
-| `sanitize.md` | KASAN sanitizer 设计 |
-| `kernel_exception.md` | 内核异常处理基础设施 |
+| `kbd.md` | USB HID 键盘驱动（用户态） |
+| `driver_workflow.md` | 用户态驱动工作流 |
+| `user_driver.md` | 用户态驱动详细设计 |
+| `terminal.md` | Terminal/PTY/串口设计（内核 PTY + 内核串口 + 用户态 ldisc + Shell） |
+
+内核设计见 `doc/design/kernel/`：
+
+| 文档 | 内容 | 层级 |
+|------|------|------|
+| `structure.md` | 内核架构（Xcore/BSD/Driver 三层分层、KPI、hook、syscall 归属） | 总体 |
+| `schedule.md` | 调度器、run_queue、switch_to、idle | Xcore |
+| `ipc.md` | IPC 统一设计（REQ/RESP + MSG/MSG_RESP + socket + pipe + SHM + signal） | Xcore/BSD |
+| `mem.md` | 内存管理（Bump/BFC/Slab、sys_mmap/munmap、用户态 malloc） | Xcore |
+| `page.md` | 分页设计（higher-half、2MB huge pages、RIP-relative、NX 保护 W^X） | Xcore |
+| `smp.md` | SMP 多核（Per-CPU 数据、AP 启动、中断控制器、TSS IST 栈、锁模型） | Xcore |
+| `kernel_lock.md` | 内核锁设计（spinlock + 细粒度锁模型） | Xcore |
+| `sparse.md` | Sparse 注解设计 | Xcore |
+| `sanitize.md` | KASAN sanitizer 设计 | Xcore |
+| `kernel_exception.md` | 内核异常处理基础设施 | Xcore |
+| `proc.md` | 进程管理（xtask_t/bsd_proc_t/files_t、fork/execve/exit/waitpid） | BSD |
+| `syscall.md` | 系统调用（SYSCALL/SYSRET、syscall 编号表、Xcore/BSD 分发） | BSD |
+| `vfs.md` | VFS + 文件系统设计（FAT32 + inode + page cache + devtmpfs） | BSD |
+| `posix.md` | POSIX 接口覆盖现状 | BSD |
+| `thread.md` | 线程设计（CLONE_VM 预留） | BSD/Xcore |
+| `pcie.md` | PCIe ECAM 枚举与 BAR 分配 | Driver |
+| `xhci.md` | xHCI USB 控制器驱动 | Driver |
+| `kms.md` | KMS 内核态驱动（display buffer 分配 + req flip + devtmpfs /dev/kms） | Driver |
 
 ## 关键陷阱
 

@@ -4,10 +4,11 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
-#include "kernel/acpi.h"
-#include "kernel/log.h"
-#include "kernel/mem/alloc.h"
-#include "kernel/proc.h"
+#include "kernel/xcore/acpi.h"
+#include "kernel/xcore/log.h"
+#include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/xtask.h"
+#include "kernel/xcore/sched.h"
 
 cpu_local_t cpu_locals[MAX_CPUS];
 int ncpu = 1;
@@ -175,7 +176,7 @@ void ap_entry_c(int cpu_id) {
     printk(LOG_INFO, "AP 0x%016X init finish\n", cpu_id);
 
     // Switch to idle process: set current_task, switch to idle kernel stack
-    task_t *idle = cpu_locals[cpu_id].idle_proc;
+    xtask_t *idle = cpu_locals[cpu_id].idle_proc;
     current_task = idle;
     idle->state = RUNNING;
     per_cpu_tss[cpu_id].rsp0 = idle->k_stack_top;

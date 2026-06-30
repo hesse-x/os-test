@@ -5,5 +5,10 @@
 #include "common/boot.h"
 
 void kernel_main(boot_info *bi);
-void kernel_init_finish();
+void kernel_init_finish(void);
+
+// Layered init functions (defined in their own .c files)
+void xcore_init(boot_info *bi);
+void driver_init(void);
+void bsd_init(void);
 #endif // KERNEL_H

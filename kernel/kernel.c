@@ -1,36 +1,27 @@
 // 64位 higher-half内核，-mcmodel=kernel编译
-// kernel_main: 虚拟地址运行，init_mem + 串口 + framebuffer 输出
+// kernel_main: 虚拟地址运行，xcore_init + driver_init + bsd_init + idle + ELF加载
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 
 #include "common/macro.h"
+#include "common/boot.h"
 #include "kernel/kernel.h"
-#include "kernel/mem/alloc.h"
-#include "kernel/mem/slab.h"
-#include "kernel/log.h"
-#include "kernel/serial.h"
-#include "kernel/trap.h"
+#include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/log.h"
+#include "kernel/driver/serial.h"
+#include "kernel/xcore/trap.h"
+#include "kernel/xcore/sched.h"
+#include "kernel/bsd/proc.h"
+#include "kernel/driver/ahci.h"
+#include "common/elf.h"
 #include "arch/x64/paging.h"
-#include "kernel/proc.h"
-#include "kernel/ahci.h"
-#include "kernel/vfs.h"
-#include "kernel/xhci.h"
 #include "arch/x64/smp.h"
-#include "kernel/elf_loader.h"
-#include "kernel/acpi.h"
-#include "kernel/pci.h"
-#include "kernel/display.h"
-#include "common/dev.h"
-#include "kernel/mem/kasan.h"
-#include "kernel/rcu.h"
 
-
-__attribute__((no_sanitize("kernel-address")))
-void kernel_init_finish() {
-  // 禁止 bump 分配器
-  bump_disable();
-}
+// VFS data structure init (must run before driver_init so devtmpfs_create works)
+void inode_init(void);
+void page_cache_init(void);
+void devtmpfs_init(void);
 
 // Read ELF from disk via AHCI DMA — two-phase: read header first, then allocate
 // exact-size pages and read the rest. Returns BFC-allocated buffer (caller must free_page)
@@ -106,51 +97,22 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
 }
 
 void kernel_main(boot_info *bi) {
-  serial_init();
+  // Layered initialization
+  xcore_init(bi);
 
-  if (bi->magic != BOOT_INFO_MAGIC) {
-    printk(LOG_ERROR, "kernel_main: bad boot_info magic!\n");
-    halt();
-  }
+  // VFS data structures must be initialized before driver_init
+  // so that devtmpfs_create() calls during driver_init survive
+  inode_init();
+  page_cache_init();
+  devtmpfs_init();
 
-  init_mem(bi);
-  acpi_init(bi->rsdp);
-  isr_init();
-  kernel_init_finish();
-  kasan_init();
-  slab_init();
-  rcu_init();
+  driver_init();
+  bsd_init();
 
-  sig_init();   // allocate signal trampoline page (shared across all processes)
-
-  proc_init();
-
-  smp_boot_aps();
-
-  printk(LOG_INFO, "kernel_main: smp_boot_aps done\n");
-
-  pci_init();
-
-  printk(LOG_INFO, "kernel_main: pci_init done\n");
-
-  display_init();
-
-  printk(LOG_INFO, "kernel_main: display_init done\n");
-
-  ahci_init();
-
-  printk(LOG_INFO, "kernel_main: ahci_init done\n");
-
-  vfs_init();
-
-  printk(LOG_INFO, "kernel_main: vfs_init done\n");
-
-  xhci_init();
-
-  printk(LOG_INFO, "kernel_main: xhci_init done\n");
+  printk(LOG_INFO, "kernel_main: all subsystems initialized\n");
 
   // Create BSP idle process
-  task_t *bsp_idle = create_idle_process(0);
+  xtask_t *bsp_idle = create_idle_process(0);
   if (!bsp_idle) {
     printk(LOG_ERROR, "kernel_main: create BSP idle failed\n");
     halt();
@@ -159,12 +121,6 @@ void kernel_main(boot_info *bi) {
 
   // Load user processes from disk
   // LBA layout: 1-100=unused(gap), 101=init(100s), 201+=FAT32
-  // fs_driver removed — VFS/FAT32 now runs in-kernel via vfs_init()
-  // kbd_driver, terminal, shell are spawned by init from FAT32
-  //
-  // Try active port first; if no ELF found, try other ports (disk.img may be
-  // on a different SATA port than boot.img).
-
   int try_ports[] = { 0, 1, 2, 3, 4, 5 };
 
   bool init_loaded = false;
@@ -184,7 +140,7 @@ void kernel_main(boot_info *bi) {
       uint64_t sz; Page *pg; size_t np;
       uint8_t *elf = load_elf_from_disk(101, &sz, &pg, &np);
       if (elf) {
-        task_t *init_proc = process_create_elf(elf, sz);
+        xtask_t *init_proc = process_create_elf(elf, sz);
         bfc_free_page(pg, np);
         if (init_proc) { init_loaded = true; init_pid = init_proc->pid; printk(LOG_INFO, "kernel_main: init created\n"); }
       }
