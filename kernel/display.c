@@ -315,7 +315,7 @@ uint64_t display_mmap_handler(struct task_t *proc, size_t size) {
 // ===================== display_dev_register =====================
 
 void display_dev_register(void) {
-    int rc = devtmpfs_create("kms", DEV_KMS, &kms_dev_ops);
+    int rc = devtmpfs_create("kms", DEV_KMS, &kms_dev_ops, NULL);
     if (rc != 0) {
         printk(LOG_ERROR, "display_dev_register: failed (rc=%d)\n", rc);
     } else {

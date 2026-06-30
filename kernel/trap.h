@@ -27,8 +27,6 @@ int64_t sys_notify(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6);
 int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t, int64_t);
-int64_t sys_shm_create(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t);
-int64_t sys_shm_attach(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_pipe(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t, int64_t);
 int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t, int64_t);
@@ -90,8 +88,9 @@ void sock_close(struct unix_sock *sock);
 // Notify a process: enqueue recv_msg_t + wake if WAIT_RECV
 void notify_and_wake(pid_t target_pid, recv_msg_t *msg);
 
-// Register a kernel pre-allocated SHM region (called by xhci_init)
-void register_kernel_shm(int shm_id, struct shm *shm);
+// Internal SHM allocation (for kernel drivers like xHCI)
+uint64_t shm_alloc_pages(uint64_t npages);
+struct shm *shm_create_internal(uint64_t npages);
 
 // Remove a PID from irq_owner (called by proc_reap)
 void irq_owner_cleanup(pid_t pid);
@@ -124,5 +123,8 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
 extern uint64_t sig_trampoline_phys;
 void sig_init();
 void check_pending_signals(trapframe_t *tf);
+
+// Lookup syscall name by number (for panic/debug output)
+const char *syscall_name(uint64_t nr);
 
 #endif // KERNEL_TRAP_H

@@ -95,9 +95,10 @@ void *kmalloc(size_t size) {
         size_t npages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
         Page *page = bfc_alloc_page(npages);
         if (!page) {
-            printk(LOG_WARN, "kmalloc(%zu) failed, slab_used=%d, free_pages=%d\n",
+            printk(LOG_WARN, "kmalloc(%zu) failed, slab_used=%d, free_pages=%d, caller=%p\n",
                     size, memstat_read(&kernel_mem_stats.slab_used_bytes),
-                    memstat_read(&kernel_mem_stats.total_pages) - memstat_read(&kernel_mem_stats.used_pages));
+                    memstat_read(&kernel_mem_stats.total_pages) - memstat_read(&kernel_mem_stats.used_pages),
+                    __builtin_return_address(0));
             return NULL;
         }
         memstat_add(&kernel_mem_stats.slab_used_bytes, (int)(npages * PAGE_SIZE));
@@ -150,9 +151,10 @@ void *kmalloc(size_t size) {
     Page *new_page = bfc_alloc_page(1);
     if (!new_page) {
         spin_unlock_irqrestore(&cache->lock, flags);
-        printk(LOG_WARN, "kmalloc(%zu) failed (slab path), slab_used=%d, free_pages=%d\n",
+        printk(LOG_WARN, "kmalloc(%zu) failed (slab path), slab_used=%d, free_pages=%d, caller=%p\n",
                 size, memstat_read(&kernel_mem_stats.slab_used_bytes),
-                memstat_read(&kernel_mem_stats.total_pages) - memstat_read(&kernel_mem_stats.used_pages));
+                memstat_read(&kernel_mem_stats.total_pages) - memstat_read(&kernel_mem_stats.used_pages),
+                __builtin_return_address(0));
         return NULL;
     }
 

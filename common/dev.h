@@ -12,5 +12,6 @@
 #define DEV_SERIAL    6
 #define DEV_PTMX      7
 #define DEV_PTS_SLAVE 8
+#define DEV_USB_HID   9
 
 #endif // COMMON_DEV_H

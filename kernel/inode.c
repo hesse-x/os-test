@@ -2,6 +2,7 @@
 #include "kernel/mem/slab.h"
 #include "kernel/page_cache.h"
 #include "kernel/log.h"
+#include "kernel/trap.h"
 #include <stddef.h>
 
 static struct inode *inode_hash_table[INODE_HASH_SIZE];
@@ -47,6 +48,7 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
     refcount_set(&ip->i_count, 1);
     ip->i_lock = SPINLOCK_INIT;
     ip->i_priv = NULL;
+    ip->shm = NULL;
     ip->start_cluster = start_cluster;
     ip->dir_start_cluster = dir_cluster;
     ip->dir_entry_index = dir_entry_idx;
@@ -93,6 +95,7 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
     refcount_set(&ip->i_count, 1);
     ip->i_lock = SPINLOCK_INIT;
     ip->i_priv = NULL;
+    ip->shm = NULL;
     ip->start_cluster = start_cluster;
     ip->dir_start_cluster = dir_cluster;
     ip->dir_entry_index = dir_entry_idx;
@@ -126,6 +129,11 @@ void inode_put(struct inode *ip) {
          * a dangling pointer.  If slab reuses the same address for a new
          * inode, page_cache_lookup would match the stale cp by address. */
         page_cache_invalidate_inode(ip);
+
+        if (ip->shm) {
+            shm_put(ip->shm);
+            ip->shm = NULL;
+        }
 
         kfree(ip);
     } else {

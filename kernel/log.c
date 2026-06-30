@@ -1,7 +1,8 @@
 #include "kernel/log.h"
 #include "kernel/serial.h"
+#include "kernel/trap.h"       // syscall_name()
 #include "arch/x64/utils.h"    // halt()
-#include "arch/x64/smp.h"      // cpu_locals, get_cpu_local
+#include "arch/x64/smp.h"      // cpu_locals, get_cpu_local, cur_tf
 #include <stdint.h>
 
 #ifdef LOG_LEVEL_DEBUG
@@ -31,7 +32,15 @@ void panic(const char *fmt, ...) {
 
     printk(LOG_PANIC, "--- PANIC ---");
 
-    serial_printf("\nCPU %d\n", get_cpu_local()->cpu_id);
+    // Print current syscall name if in syscall context
+    trapframe_t *tf = get_cpu_local()->cur_tf;
+    if (tf) {
+        serial_printf("\nCPU %d  syscall=%s(%lu)\n",
+                      get_cpu_local()->cpu_id,
+                      syscall_name(tf->rax), (unsigned long)tf->rax);
+    } else {
+        serial_printf("\nCPU %d  (no trapframe)\n", get_cpu_local()->cpu_id);
+    }
 
     dump_stack_trace();
 

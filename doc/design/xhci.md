@@ -101,7 +101,7 @@
 
 - **PCIe**：xhci_init 依赖 `pci_find_device`、`pci_enable_device`、`pci_enable_msix`。详见 [pcie.md](pcie.md)
 - **键盘驱动**：xHCI ISR 写 USB HID SHM → wake kbd_driver。详见 [kbd.md](kbd.md)
-- **共享内存**：USB HID SHM 通过 `register_kernel_shm` 注册，kbd_driver 通过 `sys_shm_attach(USB_HID_SHM_ID, 1)` attach。详见 [ipc.md](ipc.md)
+- **共享内存**：USB HID SHM 通过 `shm_create_internal` + `devtmpfs_create("usb_hid", ..., shm)` 注册，kbd_driver 通过 `open("/dev/usb_hid")` + `mmap` 访问。详见 [ipc.md](ipc.md)
 - **中断分发**：MSI-X 向量分配 + ISR 注册。详见 [boot.md](boot.md)
 
 ## 待完成项

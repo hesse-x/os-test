@@ -5,6 +5,8 @@
 #include "kernel/spinlock.h"
 #include "kernel/atomic.h"
 
+struct shm;  /* forward declaration */
+
 #define INODE_REGULAR  1
 #define INODE_DIR      2
 #define INODE_DEV      3
@@ -18,6 +20,7 @@ struct inode {
     refcount_t i_count;
     spinlock_t i_lock;
     void    *i_priv;          /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
+    struct shm *shm;          /* INODE_DEV -> shared memory (NULL = no SHM) */
 
     /* FAT32 metadata (REGULAR/DIR only) */
     uint32_t start_cluster;

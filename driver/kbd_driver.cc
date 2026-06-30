@@ -7,6 +7,7 @@
 #include <sys/device.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include "common/shm.h"
 #include "common/dev.h"
 #include "common/syscall.h"
@@ -200,8 +201,9 @@ static void handle_req(struct recv_msg *msg) {
 // ===================== Main =====================
 
 extern "C" void _start() {
-    // Create kbd_ring SHM first (slot 0) so shm_attach finds it
-    int shm_fd = sys_shm_create(4096);
+    // Create kbd_ring SHM via memfd_create + ftruncate
+    int shm_fd = memfd_create("kbd_ring", 0);
+    ftruncate(shm_fd, 4096);
     void *shm_ptr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     uint64_t shm_addr = (uint64_t)shm_ptr;
     kbd = (volatile kbd_ring *)(shm_addr + KBD_RING_OFFSET);
@@ -211,13 +213,13 @@ extern "C" void _start() {
     shm_hdr->kbd_sleeping = 0;
     shm_hdr->consumer_sleeping = 0;
 
-    // Attach to kernel pre-allocated USB HID SHM (slot 1)
-    int hid_fd = sys_shm_attach(USB_HID_SHM_ID, 1);
+    // Open /dev/usb_hid and mmap the kernel HID SHM
+    int hid_fd = open("/dev/usb_hid", O_RDWR);
     void *hid_shm = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, hid_fd, 0);
     get_keycode_init(hid_shm);
 
-    // Register as KBD device
-    device_register("kbd", DEV_KBD);
+    // Register as KBD device, binding kbd_ring SHM to the /dev/kbd inode
+    device_register_shm("kbd", DEV_KBD, shm_fd);
 
     // Main loop: wait for events (EINTR from kernel ISR, or REQ from consumers)
     while (1) {

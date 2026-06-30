@@ -40,14 +40,14 @@ void kernel_init_finish() {
 static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_page, size_t *out_npages) {
   // Phase 1: read first sector to parse ELF header
   uint8_t hdr_buf[512];
-  printk(LOG_DEBUG, "load_elf: LBA=%lx", lba);
+  printk(LOG_DEBUG, "load_elf: LBA=%x", lba);
   if (ahci_read_lba(lba, 1, hdr_buf) != 0) {
     printk(LOG_ERROR, "load_elf: READ_FAILED\n");
     return NULL;
   }
 
   if (hdr_buf[0] != 0x7F || hdr_buf[1] != 'E' || hdr_buf[2] != 'L' || hdr_buf[3] != 'F') {
-    printk(LOG_ERROR, "load_elf: BAD_MAGIC got %lx\n", ((uint32_t *)hdr_buf)[0]);
+    printk(LOG_ERROR, "load_elf: BAD_MAGIC got %x\n", ((uint32_t *)hdr_buf)[0]);
     return NULL;
   }
 
@@ -76,7 +76,7 @@ static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_
 
   uint64_t file_size = total_sectors * 512;
 
-  printk(LOG_DEBUG, "load_elf_from_disk: sectors=%lx size=%lx\n", total_sectors, file_size);
+  printk(LOG_DEBUG, "load_elf_from_disk: sectors=%x size=%lx\n", total_sectors, (unsigned long)file_size);
 
   // Phase 2: allocate pages and read
   size_t npages = (file_size + 4095) / 4096;

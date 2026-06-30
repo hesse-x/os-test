@@ -276,7 +276,7 @@ void test_dev_vfs_serial_dup2(void) {
 /* 21. sys_dev_create simplified (2-arg, kernel fills driver_pid) */
 void test_dev_vfs_dev_create(void) {
     /* Create a test user-space device node via sys_dev_create */
-    int r = sys_dev_create("test_dev", DEV_TERMINAL);
+    int r = sys_dev_create("test_dev", DEV_TERMINAL, -1);
     /* May succeed (0) or fail if name collision / no permission */
     if (r == 0) {
         /* Verify the device node exists */

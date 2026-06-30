@@ -14,6 +14,7 @@
 #include "kernel/mem/kasan.h"
 #include "kernel/mem/alloc.h"
 #include "common/errno.h"
+#include "common/syscall_nums.h"
 #include "common/ioctl.h"
 #include "kernel/display.h"
 #include "kernel/devtmpfs.h"
@@ -38,26 +39,8 @@ static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS];
 // ===================== IRQ owner (user-space driver binding) =====================
 static pid_t irq_owner[MAX_IRQ_HANDLERS];
 
-// ===================== Kernel pre-allocated SHM table =====================
-#define MAX_KERNEL_SHM 4
-typedef struct kernel_shm_region {
-    struct shm *shm;     // pointer to struct shm (NULL = unused)
-    int      shm_id;     // identifier (-1 = unused)
-} kernel_shm_region_t;
-static kernel_shm_region_t kernel_shm_table[MAX_KERNEL_SHM];
-
 // ===================== Signal trampoline =====================
 uint64_t sig_trampoline_phys = 0;
-
-void register_kernel_shm(int shm_id, struct shm *shm) {
-    for (int i = 0; i < MAX_KERNEL_SHM; i++) {
-        if (kernel_shm_table[i].shm_id == -1) {
-            kernel_shm_table[i].shm_id = shm_id;
-            kernel_shm_table[i].shm = shm;
-            return;
-        }
-    }
-}
 
 void register_irq(int vec, irq_handler_t fn) {
   if (vec >= 0 && vec < MAX_IRQ_HANDLERS) {
@@ -321,8 +304,8 @@ void trap_dispatch(trapframe_t *tf) {
         break;
     }
 
-    printk(LOG_INFO, "exception: pid=%d vector=%d sig=%d addr=%p\n",
-        current_task->pid, tf->trapno, sig, si_addr);
+    printk(LOG_INFO, "exception: pid=%d vector=%lu sig=%d addr=%p\n",
+        current_task->pid, (unsigned long)tf->trapno, sig, si_addr);
 
     force_sig(current_task, sig, si_code, si_addr);
     return;  // Don't kill process; check_pending_signals will handle it
@@ -380,12 +363,6 @@ void isr_init() {
     irq_owner[i] = -1;
   }
 
-  // Initialize kernel SHM table
-  for (int i = 0; i < MAX_KERNEL_SHM; i++) {
-    kernel_shm_table[i].shm_id = -1;
-    kernel_shm_table[i].shm = NULL;
-  }
-
   // Register default handlers
   register_irq(LAPIC_TIMER_VECTOR, timer_handler);
 
@@ -415,8 +392,7 @@ void isr_init() {
 void sig_init() {
     // Allocate one shared physical page for the signal trampoline.
     // The trampoline code is: mov rax, SYS_SIGRETURN; syscall
-    // Encoding: 48 C7 C0 <31> 00 00 00  0F 05
-    // SYS_SIGRETURN = 48 (0x30)
+    // Encoding: 48 C7 C0 <SYS_SIGRETURN> 00 00 00  0F 05
     Page *page = bfc_alloc_page(1);
     if (!page) {
         printk(LOG_ERROR, "sig_init: failed to allocate trampoline page\n");
@@ -425,11 +401,11 @@ void sig_init() {
     sig_trampoline_phys = (__force uint64_t)page_to_phys(page);
     uint8_t *vaddr = (__force uint8_t *)phys_to_virt((__force phys_addr_t)sig_trampoline_phys);
 
-    // mov rax, 45  (SYS_SIGRETURN)
+    // mov rax, SYS_SIGRETURN
     vaddr[0] = 0x48;  // REX.W prefix
     vaddr[1] = 0xC7;  // MOV r64, imm32
     vaddr[2] = 0xC0;  // ModRM: rax
-    vaddr[3] = 0x2D;  // 45 = SYS_SIGRETURN (low byte)
+    vaddr[3] = SYS_SIGRETURN;
     vaddr[4] = 0x00;
     vaddr[5] = 0x00;
     vaddr[6] = 0x00;
@@ -442,72 +418,138 @@ void sig_init() {
 }
 
 // ===================== Syscall dispatch =====================
-#define NR_SYSCALL 63
+#define NR_SYSCALL (SYS_GETSID + 1)
 static syscall_fn_t syscall_table[NR_SYSCALL] = {
-    sys_getpid,         // 0
-    sys_yield,          // 1
-    sys_recv,           // 2
-    sys_req,            // 3
-    sys_resp,           // 4
-    sys_irq_bind,       // 5
-    sys_exit,           // 6
-    sys_waitpid,        // 7
-    NULL,               // 8 (sys_spawn removed, use fork+execve)
-    sys_mmap,           // 9
-    sys_munmap,         // 10
-    sys_shm_create,     // 11
-    sys_shm_attach,     // 12
-    sys_pipe,           // 13
-    sys_write,          // 14
-    sys_read,           // 15
-    sys_close,          // 16
-    sys_notify,         // 17
-    sys_gettime,        // 18
-    sys_clock,          // 19
-    sys_msg,            // 20
-    sys_msg_resp,       // 21
-    sys_ioperm,         // 22
-    sys_dup2,           // 23
-    sys_fcntl,          // 24
-    sys_dma_alloc,      // 25
-    sys_dma_free,       // 26
-    sys_pci_dev_info,   // 27
-    sys_block_async,    // 28
-    sys_install_fd_impl, // 29
-    sys_socket,         // 30
-    sys_bind,           // 31
-    sys_listen,         // 32
-    sys_accept,         // 33
-    sys_connect,        // 34
-    sys_socketpair,     // 35
-    sys_sendmsg,        // 36
-    sys_recvmsg,        // 37
-    sys_shutdown,       // 38
-    sys_poll,           // 39
-    sys_lseek,          // 40
-    sys_memfd_create,   // 41
-    sys_ftruncate,      // 42
-    sys_kill,           // 43
-    sys_sigaction,      // 44
-    sys_sigreturn,      // 45
-    sys_debug_memstat,    // 46
-    sys_open,           // 47
-    sys_stat,           // 48
-    sys_mkdir,          // 49
-    sys_unlink,         // 50
-    sys_rmdir,          // 51
-    sys_dev_create,     // 52
-    sys_getdents,       // 53
-    sys_ioctl,          // 54
-    sys_fstat,          // 55
-    sys_fdev_pid,       // 56
-    sys_fork,           // 57
-    sys_execve,         // 58
-    sys_setsid,         // 59
-    sys_setpgid,        // 60
-    sys_getpgid,        // 61
-    sys_getsid,         // 62
+    [SYS_GETPID]       = sys_getpid,
+    [SYS_YIELD]        = sys_yield,
+    [SYS_RECV]         = sys_recv,
+    [SYS_REQ]          = sys_req,
+    [SYS_RESP]         = sys_resp,
+    [SYS_IRQ_BIND]     = sys_irq_bind,
+    [SYS_EXIT]         = sys_exit,
+    [SYS_WAITPID]      = sys_waitpid,
+    [SYS_MMAP]         = sys_mmap,
+    [SYS_MUNMAP]       = sys_munmap,
+    [SYS_PIPE]         = sys_pipe,
+    [SYS_WRITE]        = sys_write,
+    [SYS_READ]         = sys_read,
+    [SYS_CLOSE]        = sys_close,
+    [SYS_NOTIFY]       = sys_notify,
+    [SYS_GETTIME]      = sys_gettime,
+    [SYS_CLOCK]        = sys_clock,
+    [SYS_MSG]          = sys_msg,
+    [SYS_MSG_RESP]     = sys_msg_resp,
+    [SYS_IOPERM]       = sys_ioperm,
+    [SYS_DUP2]         = sys_dup2,
+    [SYS_FCNTL]        = sys_fcntl,
+    [SYS_DMA_ALLOC]    = sys_dma_alloc,
+    [SYS_DMA_FREE]     = sys_dma_free,
+    [SYS_PCI_DEV_INFO] = sys_pci_dev_info,
+    [SYS_BLOCK_ASYNC]  = sys_block_async,
+    [SYS_INSTALL_FD]   = sys_install_fd_impl,
+    [SYS_SOCKET]       = sys_socket,
+    [SYS_BIND]         = sys_bind,
+    [SYS_LISTEN]       = sys_listen,
+    [SYS_ACCEPT]       = sys_accept,
+    [SYS_CONNECT]      = sys_connect,
+    [SYS_SOCKETPAIR]   = sys_socketpair,
+    [SYS_SENDMSG]      = sys_sendmsg,
+    [SYS_RECVMSG]      = sys_recvmsg,
+    [SYS_SHUTDOWN]     = sys_shutdown,
+    [SYS_POLL]         = sys_poll,
+    [SYS_LSEEK]        = sys_lseek,
+    [SYS_MEMFD_CREATE] = sys_memfd_create,
+    [SYS_FTRUNCATE]    = sys_ftruncate,
+    [SYS_KILL]         = sys_kill,
+    [SYS_SIGACTION]    = sys_sigaction,
+    [SYS_SIGRETURN]    = sys_sigreturn,
+    [SYS_DEBUG_MEMSTAT]= sys_debug_memstat,
+    [SYS_OPEN]         = sys_open,
+    [SYS_STAT]         = sys_stat,
+    [SYS_MKDIR]        = sys_mkdir,
+    [SYS_UNLINK]       = sys_unlink,
+    [SYS_RMDIR]        = sys_rmdir,
+    [SYS_DEV_CREATE]   = sys_dev_create,
+    [SYS_GETDENTS]     = sys_getdents,
+    [SYS_IOCTL]        = sys_ioctl,
+    [SYS_FSTAT]        = sys_fstat,
+    [SYS_FDEV_PID]     = sys_fdev_pid,
+    [SYS_FORK]         = sys_fork,
+    [SYS_EXECVE]       = sys_execve,
+    [SYS_SETSID]       = sys_setsid,
+    [SYS_SETPGID]      = sys_setpgid,
+    [SYS_GETPGID]      = sys_getpgid,
+    [SYS_GETSID]       = sys_getsid,
 };
+
+static const char *syscall_names[NR_SYSCALL] = {
+    [SYS_GETPID]       = "getpid",
+    [SYS_YIELD]        = "yield",
+    [SYS_RECV]         = "recv",
+    [SYS_REQ]          = "req",
+    [SYS_RESP]         = "resp",
+    [SYS_IRQ_BIND]     = "irq_bind",
+    [SYS_EXIT]         = "exit",
+    [SYS_WAITPID]      = "waitpid",
+    [SYS_MMAP]         = "mmap",
+    [SYS_MUNMAP]       = "munmap",
+    [SYS_PIPE]         = "pipe",
+    [SYS_WRITE]        = "write",
+    [SYS_READ]         = "read",
+    [SYS_CLOSE]        = "close",
+    [SYS_NOTIFY]       = "notify",
+    [SYS_GETTIME]      = "gettime",
+    [SYS_CLOCK]        = "clock",
+    [SYS_MSG]          = "msg",
+    [SYS_MSG_RESP]     = "msg_resp",
+    [SYS_IOPERM]       = "ioperm",
+    [SYS_DUP2]         = "dup2",
+    [SYS_FCNTL]        = "fcntl",
+    [SYS_DMA_ALLOC]    = "dma_alloc",
+    [SYS_DMA_FREE]     = "dma_free",
+    [SYS_PCI_DEV_INFO] = "pci_dev_info",
+    [SYS_BLOCK_ASYNC]  = "block_async",
+    [SYS_INSTALL_FD]   = "install_fd",
+    [SYS_SOCKET]       = "socket",
+    [SYS_BIND]         = "bind",
+    [SYS_LISTEN]       = "listen",
+    [SYS_ACCEPT]       = "accept",
+    [SYS_CONNECT]      = "connect",
+    [SYS_SOCKETPAIR]   = "socketpair",
+    [SYS_SENDMSG]      = "sendmsg",
+    [SYS_RECVMSG]      = "recvmsg",
+    [SYS_SHUTDOWN]     = "shutdown",
+    [SYS_POLL]         = "poll",
+    [SYS_LSEEK]        = "lseek",
+    [SYS_MEMFD_CREATE] = "memfd_create",
+    [SYS_FTRUNCATE]    = "ftruncate",
+    [SYS_KILL]         = "kill",
+    [SYS_SIGACTION]    = "sigaction",
+    [SYS_SIGRETURN]    = "sigreturn",
+    [SYS_DEBUG_MEMSTAT]= "debug_memstat",
+    [SYS_OPEN]         = "open",
+    [SYS_STAT]         = "stat",
+    [SYS_MKDIR]        = "mkdir",
+    [SYS_UNLINK]       = "unlink",
+    [SYS_RMDIR]        = "rmdir",
+    [SYS_DEV_CREATE]   = "dev_create",
+    [SYS_GETDENTS]     = "getdents",
+    [SYS_IOCTL]        = "ioctl",
+    [SYS_FSTAT]        = "fstat",
+    [SYS_FDEV_PID]     = "fdev_pid",
+    [SYS_FORK]         = "fork",
+    [SYS_EXECVE]       = "execve",
+    [SYS_SETSID]       = "setsid",
+    [SYS_SETPGID]      = "setpgid",
+    [SYS_GETPGID]      = "getpgid",
+    [SYS_GETSID]       = "getsid",
+};
+
+const char *syscall_name(uint64_t nr) {
+    if (nr < NR_SYSCALL && syscall_names[nr])
+        return syscall_names[nr];
+    return "unknown";
+}
 
 void syscall_dispatch(trapframe_t *tf) {
     get_cpu_local()->cur_tf = tf;
@@ -515,6 +557,8 @@ void syscall_dispatch(trapframe_t *tf) {
         tf->rax = syscall_table[tf->rax](
             tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
     } else {
+        printk(LOG_WARN, "syscall_dispatch: unknown syscall nr=%lu pid=%d\n",
+                (unsigned long)tf->rax, current_task->pid);
         tf->rax = (int64_t)-ENOSYS;
     }
 }
@@ -529,40 +573,87 @@ struct shm *shm_get(struct shm *shm) {
 void shm_put(struct shm *shm) {
     if (!shm) return;
     if (refcount_dec_and_test(&shm->s_count)) {
-        // Last reference released
-        if (!(shm->flags & SHM_KERNEL)) {
-            if (shm->page_list) {
-                // Discrete pages: free each page individually
-                for (int i = 0; i < shm->num_pages; i++) {
-                    Page *p = &bfc_frames[PHY_TO_PAGE(shm->page_list[i])];
-                    bfc_free_page(p, 1);
-                }
-                kfree(shm->page_list);
-            } else if (shm->phys != 0 && shm->npages > 0) {
-                // Contiguous pages
-                Page *page = &bfc_frames[PHY_TO_PAGE(shm->phys)];
-                bfc_free_page(page, shm->npages);
+        // Last reference released — free all pages and struct
+        if (shm->page_list) {
+            for (int i = 0; i < shm->num_pages; i++) {
+                Page *p = &bfc_frames[PHY_TO_PAGE(shm->page_list[i])];
+                bfc_free_page(p, 1);
             }
-        } else if (shm->page_list) {
-            // SHM_KERNEL with page_list: free the page_list array only (not the pages)
             kfree(shm->page_list);
+        } else if (shm->phys != 0 && shm->npages > 0) {
+            // Contiguous pages (legacy: shm_create_internal uses page_list,
+            // but sys_ftruncate first allocation may use phys for small sizes)
+            Page *page = &bfc_frames[PHY_TO_PAGE(shm->phys)];
+            bfc_free_page(page, shm->npages);
         }
         kfree(shm);
     }
 }
 
-// sys_getpid() — syscall 0
+// ===================== Internal SHM allocation API =====================
+
+// shm_alloc_pages(npages) — allocate contiguous physical pages, zeroed
+uint64_t shm_alloc_pages(uint64_t npages) {
+    if (npages == 0) return 0;
+    Page *pages = bfc_alloc_page(npages);
+    if (!pages) return 0;
+    uint64_t phys = (__force uint64_t)page_to_phys(pages);
+    __memset((__force void *)phys_to_virt((__force phys_addr_t)phys), 0, npages * PAGE_SIZE);
+    return phys;
+}
+
+// shm_create_internal(npages) — kernel-internal SHM creation
+// Allocates contiguous pages + page_list array + struct shm.
+// npages must be > 0.
+// Returns: struct shm* on success, NULL on failure
+struct shm *shm_create_internal(uint64_t npages) {
+    if (npages == 0) return NULL;
+
+    uint64_t phys = shm_alloc_pages(npages);
+    if (!phys) return NULL;
+
+    // Allocate page_list pointing to each contiguous page
+    uint64_t *page_list = (uint64_t *)kmalloc((size_t)npages * sizeof(uint64_t));
+    if (!page_list) {
+        Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
+        bfc_free_page(p, npages);
+        return NULL;
+    }
+    for (uint64_t i = 0; i < npages; i++)
+        page_list[i] = phys + i * PAGE_SIZE;
+
+    struct shm *shm = (struct shm *)kmalloc(sizeof(struct shm));
+    if (!shm) {
+        Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
+        bfc_free_page(p, npages);
+        kfree(page_list);
+        return NULL;
+    }
+
+    shm->phys = 0;              // pure page_list model (phys/npages unused)
+    shm->npages = 0;
+    shm->file_size = npages * PAGE_SIZE;
+    refcount_set(&shm->s_count, 1);
+    shm->flags = 0;  // no SHM_KERNEL — unified page_list release in shm_put
+    shm->seals = 0;
+    shm->name[0] = '\0';
+    shm->page_list = page_list;
+    shm->num_pages = (int)npages;
+    return shm;
+}
+
+// sys_getpid() — SYS_GETPID
 int64_t sys_getpid(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
     return (int64_t)current_task->pid;
 }
 
-// sys_yield() — syscall 1
+// sys_yield() — SYS_YIELD
 int64_t sys_yield(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
     schedule();
     return 0;
 }
 
-// sys_recv(buf, data_buf, data_buf_len, timeout_ms) — syscall 2 (统一事件接收：IRQ/REQ/notify/MSG)
+// sys_recv(buf, data_buf, data_buf_len, timeout_ms) — SYS_RECV (统一事件接收：IRQ/REQ/notify/MSG)
 // timeout_ms=0: 无限等待; >0: 超时后唤醒
 // 返回: 0=成功, 正数=errno
 int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t _u1, int64_t _u2) {
@@ -698,7 +789,7 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
     }
 }
 
-// sys_req(pid, request, reply) — syscall 3 (同步 REQ)
+// sys_req(pid, request, reply) — SYS_REQ (同步 REQ)
 // 向目标发送 64 字节请求，阻塞等待 reply
 // 返回: 0=成功, 正数=errno
 int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
@@ -790,7 +881,7 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _
     return 0;
 }
 
-// sys_resp(reply) — syscall 4 (回复当前 REQ 调用者)
+// sys_resp(reply) — SYS_RESP (回复当前 REQ 调用者)
 // 返回: 0=成功, 正数=errno
 int64_t sys_resp(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     void __user *reply = (void __user * __force)arg1;
@@ -836,7 +927,7 @@ int64_t sys_resp(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
     return 0;
 }
 
-// sys_irq_bind(irq) — syscall 5 (绑定当前进程到指定 IRQ，自动 unmask I/O APIC)
+// sys_irq_bind(irq) — SYS_IRQ_BIND (绑定当前进程到指定 IRQ，自动 unmask I/O APIC)
 // irq 参数为向量号（例如 IRQ14 → vector 46 = 32+14）
 int64_t sys_irq_bind(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     int irq = (int)arg1;
@@ -858,7 +949,7 @@ int64_t sys_irq_bind(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_
     return 0;
 }
 
-// sys_exit(exit_code) — syscall 6 (进程退出)
+// sys_exit(exit_code) — SYS_EXIT (进程退出)
 int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     task_t *proc = current_task;
     int32_t exit_code = (int32_t)arg1;
@@ -1128,7 +1219,7 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
     return (int64_t)pid;
 }
 
-// sys_mmap(addr, size, prot, flags, fd, offset) — syscall 9 (内存映射)
+// sys_mmap(addr, size, prot, flags, fd, offset) — SYS_MMAP (内存映射)
 // MAP_SHARED + fd ≥ 0: SHM fd 映射
 // MAP_PHYSICAL: offset=phys_addr, fd=-1// MAP_ANONYMOUS: fd=-1
 // Returns: mapped address on success, 0 on failure
@@ -1166,26 +1257,9 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                     file_put(f);
                     return ret;
                 }
-                // User-space driver: auto shm_attach to driver's SHM
-                if (ops->driver_pid > 0) {
-                    pid_t drv_pid = ops->driver_pid;
-                    if (drv_pid < 0 || drv_pid >= MAX_PROC) { file_put(f); return -ESRCH; }
-                    task_t *drv_proc = &tasks[drv_pid];
-                    if (drv_proc->pid != drv_pid) { file_put(f); return -ESRCH; }
-
-                    // Find driver's FD_SHM
-                    struct shm *target_shm = NULL;
-                    rcu_read_lock();
-                    for (int i = 0; i < MAX_FD; i++) {
-                        struct file *tf = fd_lookup(drv_proc->mm->files, i);
-                        if (tf && tf->type == FD_SHM) {
-                            target_shm = tf->shm;
-                            break;
-                        }
-                    }
-                    rcu_read_unlock();
-                    if (!target_shm) { file_put(f); return -ENOENT; }
-
+                // User-space or kernel driver with inode->shm: map from inode->shm
+                if (ip->shm) {
+                    struct shm *target_shm = ip->shm;
                     shm_get(target_shm);  // +1 for our mapping
 
                     size_t npages = target_shm->npages;
@@ -1406,7 +1480,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
     return vaddr;
 }
 
-// sys_munmap(addr, size) — syscall 10 (解除内存映射)
+// sys_munmap(addr, size) — SYS_MUNMAP (解除内存映射)
 // Returns: 0 on success, positive errno on failure
 int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     uint64_t addr = arg1;
@@ -1517,7 +1591,7 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
     return (int)sys_msg_to(target_pid, (void*)req, req_len, resp, resp_len);
 }
 
-// sys_block_async(lba, buf, count, dir) — syscall 30
+// sys_block_async(lba, buf, count, dir) — SYS_BLOCK_ASYNC
 // Async block I/O: returns cookie (>0) on success, positive errno on error.
 // Completion delivered via RECV_NOTIFY with cookie+result+lba+count in data.
 int64_t sys_block_async(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t _u1, int64_t _u2) {
@@ -1531,7 +1605,7 @@ int64_t sys_block_async(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, 
 }
 
 // sys_debug_memstat(buf, len) — return kernel memory stats to user space
-// syscall 46 (replaces sys_debug_print which was unused)
+// sys_debug_memstat(buf, len) — SYS_DEBUG_MEMSTAT
 int64_t sys_debug_memstat(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     void __user *buf = (void __user * __force)(uintptr_t)arg1;
     size_t len = (size_t)arg2;
@@ -1550,7 +1624,7 @@ int64_t sys_debug_memstat(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, 
     return (int64_t)sizeof(stats);
 }
 
-// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 32
+// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — SYS_INSTALL_FD
 // Register an FD_FILE fd in the kernel fd_table.
 // Returns: fd (>=3) on success, negative errno on failure
 // Note: named sys_install_fd_impl to avoid conflict with static inline wrapper in common/syscall.h
@@ -1597,7 +1671,7 @@ int64_t sys_install_fd_impl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t ar
 }
 
 
-// sys_ioctl(fd, cmd, arg) — syscall 58 (device ioctl)
+// sys_ioctl(fd, cmd, arg) — SYS_IOCTL (device ioctl)
 int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
                     int64_t _u1, int64_t _u2, int64_t _u3) {
     int fd = (int)arg1;
@@ -1769,7 +1843,7 @@ out:
     return ret;
 }
 
-// sys_fstat(fd, buf) — syscall 59 (file status)
+// sys_fstat(fd, buf) — SYS_FSTAT (file status)
 int64_t sys_fstat(int64_t arg1, int64_t arg2,
                     int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     int fd = (int)arg1;
@@ -1841,7 +1915,7 @@ out:
     return ret;
 }
 
-// sys_fdev_pid(fd) — syscall 60
+// sys_fdev_pid(fd) — SYS_FDEV_PID
 // Returns driver_pid for FD_DEV fd (0 for kernel device, >0 for user-space driver).
 // Used by libc notify_fd/msg_fd/mmap to find target PID without a local fd_table.
 int64_t sys_fdev_pid(int64_t arg1, int64_t _u2, int64_t _u3,
@@ -1869,146 +1943,10 @@ out:
     return ret;
 }
 
-// sys_shm_create(size) — syscall 11 (创建共享内存，返回 fd)
-// Returns: fd (≥2) on success, 0 on failure
-int64_t sys_shm_create(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
-    size_t size = (size_t)arg1;
-    if (size == 0) return -EINVAL;
-    size = ALIGN_UP(size, PAGE_SIZE);
-    size_t npages = size / PAGE_SIZE;
-
-    task_t *proc = current_task;
-
-    // Allocate physical pages
-    Page *pages = bfc_alloc_page(npages);
-    if (!pages) return -ENOMEM;
-    uint64_t phys = (__force uint64_t)page_to_phys(pages);
-
-    // Zero the pages
-    uint8_t *vptr = (__force uint8_t *)phys_to_virt((__force phys_addr_t)phys);
-    __memset(vptr, 0, size);
-
-    // Allocate shm struct
-    struct shm *shm = (struct shm *)kmalloc(sizeof(struct shm));
-    if (!shm) {
-        bfc_free_page(pages, npages);
-        return -ENOMEM;
-    }
-    shm->phys = phys;
-    shm->npages = npages;
-    shm->file_size = size;  // logical size = allocated size
-    refcount_set(&shm->s_count, 1);  // fd holds initial reference
-    shm->flags = 0;
-    shm->seals = 0;
-    shm->name[0] = '\0';  // no name by default
-    shm->page_list = NULL;
-    shm->num_pages = 0;
-
-    // Find free fd slot (skip 0/1 reserved for stdin/stdout)
-    spinlock_t *fdlk = &proc->mm->files->fd_lock;
-    spin_lock(fdlk);
-    int fd = alloc_fd(proc->mm->files, 2);
-    if (fd < 0) {
-        spin_unlock(fdlk);
-        kfree(shm);
-        bfc_free_page(pages, npages);
-        return -EMFILE;
-    }
-
-    struct file *f = (struct file *)kmalloc(sizeof(struct file));
-    if (!f) {
-        fd_uninstall(proc->mm->files, fd);
-        spin_unlock(fdlk);
-        kfree(shm);
-        bfc_free_page(pages, npages);
-        return -ENOMEM;
-    }
-    __memset(f, 0, sizeof(*f));
-    refcount_set(&f->f_count, 1);
-    f->type = FD_SHM;
-    f->flags = O_RDWR;
-    f->shm = shm;
-    fd_install(proc->mm->files, fd, f);
-    spin_unlock(fdlk);
-
-    return (int64_t)fd;
-}
-
-// sys_shm_attach(id, mode) — syscall 12 (附加共享内存，返回 fd)
-// mode=0: id is target_pid, attach target's first FD_SHM
-// mode=1: id is kernel SHM ID, attach kernel pre-allocated SHM via struct shm*
-// Returns: fd (≥2) on success, 0 on failure
-// Transitional: caller must sys_mmap(fd, ...) to get vaddr
-int64_t sys_shm_attach(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
-    int mode = (int)arg2;
-    task_t *proc = current_task;
-    struct shm *target_shm = NULL;
-
-    if (mode == 1) {
-        // Kernel SHM mode: arg1 is kernel SHM ID
-        int shm_id = (int)arg1;
-        for (int i = 0; i < MAX_KERNEL_SHM; i++) {
-            if (kernel_shm_table[i].shm_id == shm_id) {
-                target_shm = kernel_shm_table[i].shm;
-                break;
-            }
-        }
-        if (!target_shm) return -ENOENT;
-    } else {
-        // mode=0: find target process's first FD_SHM
-        pid_t target_pid = (pid_t)arg1;
-        if (target_pid < 0 || target_pid >= MAX_PROC) return -ESRCH;
-
-        task_t *target = &tasks[target_pid];
-        if (target->pid != target_pid) return -ESRCH;
-
-        // Scan target's fd_table for FD_SHM (under RCU read lock)
-        rcu_read_lock();
-        for (int i = 0; i < MAX_FD; i++) {
-            struct file *tf = fd_lookup(target->mm->files, i);
-            if (tf && tf->type == FD_SHM) {
-                target_shm = tf->shm;
-                break;
-            }
-        }
-        rcu_read_unlock();
-        if (!target_shm) return -ENOENT;
-    }
-
-    // Bump ref_count for the new fd
-    shm_get(target_shm);
-
-    // Find free fd slot (under current process's fd_lock)
-    spinlock_t *fdlk = &proc->mm->files->fd_lock;
-    spin_lock(fdlk);
-    int fd = alloc_fd(proc->mm->files, 2);
-    if (fd < 0) {
-        spin_unlock(fdlk);
-        shm_put(target_shm);
-        return -EMFILE;
-    }
-
-    struct file *f = (struct file *)kmalloc(sizeof(struct file));
-    if (!f) {
-        fd_uninstall(proc->mm->files, fd);
-        spin_unlock(fdlk);
-        shm_put(target_shm);
-        return -ENOMEM;
-    }
-    __memset(f, 0, sizeof(*f));
-    refcount_set(&f->f_count, 1);
-    f->type = FD_SHM;
-    f->flags = O_RDWR;
-    f->shm = target_shm;
-    fd_install(proc->mm->files, fd, f);
-    spin_unlock(fdlk);
-
-    return (int64_t)fd;
-}
 
 // ===================== memfd_create / ftruncate =====================
 
-// sys_memfd_create(name, flags) — syscall 44 (Linux-compatible memfd_create)
+// sys_memfd_create(name, flags) — SYS_MEMFD_CREATE (Linux-compatible memfd_create)
 // Returns: fd (≥2) on success, 0 on failure
 int64_t sys_memfd_create(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     const char __user *user_name = (const char __user * __force)arg1;
@@ -2121,7 +2059,7 @@ static uint64_t shm_add_page(struct shm *shm) {
     return phys;
 }
 
-// sys_ftruncate(fd, size) — syscall 45 (set shm size, allocate/free pages)
+// sys_ftruncate(fd, size) — SYS_FTRUNCATE (set shm size, allocate/free pages)
 // Returns: 0 on success, positive errno on failure
 int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     int fd = (int)arg1;
@@ -2279,7 +2217,7 @@ void wake_process(pid_t pid) {
     spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 }
 
-// sys_pipe(fd_ptr) — syscall 13 (创建 pipe，写 [read_fd, write_fd] 到用户指针)
+// sys_pipe(fd_ptr) — SYS_PIPE (创建 pipe，写 [read_fd, write_fd] 到用户指针)
 int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     int __user *fd_ptr = (int __user * __force)arg1;
 
@@ -2379,7 +2317,7 @@ int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
     return 0;
 }
 
-// sys_write(fd, buf, len) — syscall 14 (向 fd 写入数据)
+// sys_write(fd, buf, len) — SYS_WRITE (向 fd 写入数据)
 // FD_REGULAR: kernel FAT32 via page cache
 // FD_PIPE: 直写 kernel ring buffer
 // FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
@@ -2596,7 +2534,7 @@ out:
     return ret;
 }
 
-// sys_read(fd, buf, len) — syscall 15 (从 fd 读数据，阻塞直到有数据)
+// sys_read(fd, buf, len) — SYS_READ (从 fd 读数据，阻塞直到有数据)
 // FD_REGULAR: kernel FAT32 via page cache
 // FD_PIPE: 直读 kernel ring buffer
 // FD_FILE: 通过 kernel_msg_send 代理到 fs_driver
@@ -2827,7 +2765,7 @@ out:
     return ret;
 }
 
-// sys_close(fd) — syscall 16 (关闭 fd，pipe ref_count--)
+// sys_close(fd) — SYS_CLOSE (关闭 fd，pipe ref_count--)
 int64_t sys_close(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     int fd = (int)arg1;
 
@@ -2843,7 +2781,7 @@ int64_t sys_close(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _
     return 0;
 }
 
-// sys_notify(pid) — syscall 18 (异步通知：消息入队 + 唤醒)
+// sys_notify(pid) — SYS_NOTIFY (异步通知：消息入队 + 唤醒)
 // Returns: 0 on success, positive errno on failure
 int64_t sys_notify(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     pid_t target_pid = (pid_t)arg1;
@@ -2876,12 +2814,12 @@ int64_t sys_notify(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t 
     return 0;
 }
 
-// sys_gettime() — syscall 19 (全局单调时钟，返回纳秒)
+// sys_gettime() — SYS_GETTIME (全局单调时钟，返回纳秒)
 int64_t sys_gettime(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
     return sched_clock();
 }
 
-// sys_clock() — syscall 20 (per-process CPU 时间，返回纳秒)
+// sys_clock() — SYS_CLOCK (per-process CPU 时间，返回纳秒)
 int64_t sys_clock(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
     return current_task->cpu_time_ns;
 }
@@ -2965,7 +2903,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
     return 0;
 }
 
-// sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — syscall 21 (变长消息请求)
+// sys_msg(target_pid, msg_buf, msg_len, reply_buf, reply_len) — SYS_MSG (变长消息请求)
 // PID-based variant.
 // 返回: 0=成功, 负errno
 int64_t sys_msg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t _u1) {
@@ -2995,7 +2933,7 @@ int64_t sys_msg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t 
     return sys_msg_to(target_pid, (void __force *)msg_buf, msg_len, (void __force *)reply_buf, reply_len);
 }
 
-// sys_msg_resp(resp_buf, resp_len) — syscall 22 (回复当前 MSG 调用者)
+// sys_msg_resp(resp_buf, resp_len) — SYS_MSG_RESP (回复当前 MSG 调用者)
 // 返回: 0=成功, 正数=errno
 int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     void __user *resp_buf = (void __user * __force)arg1;
@@ -3046,7 +2984,7 @@ int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64
     return 0;
 }
 
-// sys_ioperm(from, num, turn_on) — syscall 23 (I/O 端口权限)
+// sys_ioperm(from, num, turn_on) — SYS_IOPERM (I/O 端口权限)
 int64_t sys_ioperm(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     unsigned long from = (unsigned long)arg1;
     unsigned long num = (unsigned long)arg2;
@@ -3086,7 +3024,7 @@ int64_t sys_ioperm(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
     return 0;
 }
 
-// sys_dup2(old_fd, new_fd) — syscall 24 (复制 fd)
+// sys_dup2(old_fd, new_fd) — SYS_DUP2 (复制 fd)
 int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
     int old_fd = (int)arg1;
     int new_fd = (int)arg2;
@@ -3121,7 +3059,7 @@ int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _
     return (int64_t)new_fd;
 }
 
-// sys_fcntl(fd, cmd, arg) — syscall 25 (文件控制)
+// sys_fcntl(fd, cmd, arg) — SYS_FCNTL (文件控制)
 int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int fd = (int)arg1;
     int cmd = (int)arg2;
@@ -3208,7 +3146,7 @@ int irq_owner_check(int irq) {
     return __atomic_load_n(&irq_owner[irq], __ATOMIC_ACQUIRE);
 }
 
-// sys_dma_alloc(size, vaddr_ptr, paddr_ptr) — syscall 26
+// sys_dma_alloc(size, vaddr_ptr, paddr_ptr) — SYS_DMA_ALLOC
 // 分配物理连续、<4GB 的 DMA 缓冲区，映射到调用者地址空间
 // Returns: 0 on success, positive errno on failure
 int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
@@ -3280,7 +3218,7 @@ int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int
     return 0;
 }
 
-// sys_dma_free(vaddr) — syscall 27
+// sys_dma_free(vaddr) — SYS_DMA_FREE
 // 释放 DMA 缓冲区
 // Returns: 0 on success, positive errno on failure
 int64_t sys_dma_free(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
@@ -3314,7 +3252,7 @@ int64_t sys_dma_free(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_
     return (int64_t)-EINVAL;
 }
 
-// sys_lseek(fd, offset, whence) — syscall 43 (文件偏移定位)
+// sys_lseek(fd, offset, whence) — SYS_LSEEK (文件偏移定位)
 // 更新内核 file_data._offset。FD_PIPE/SOCKET/DEV 返回 -ESPIPE。
 // Returns: new offset on success, negative errno on failure
 int64_t sys_lseek(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
@@ -3640,7 +3578,7 @@ int64_t sys_getsid(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t 
     return (int64_t)tasks[pid].sid;
 }
 
-// sys_sigaction(sig, act, oldact) — syscall 47 (注册/查询信号 handler)
+// sys_sigaction(sig, act, oldact) — SYS_SIGACTION (注册/查询信号 handler)
 int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int sig = (int)arg1;
     const struct sigaction __user *act = (const struct sigaction __user * __force)arg2;
@@ -3694,7 +3632,7 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int
     return 0;
 }
 
-// sys_sigreturn() — syscall 48 (信号 handler 返回后恢复上下文)
+// sys_sigreturn() — SYS_SIGRETURN (信号 handler 返回后恢复上下文)
 int64_t sys_sigreturn(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
     task_t *proc = current_task;
 

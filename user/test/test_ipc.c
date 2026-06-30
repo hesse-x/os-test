@@ -11,33 +11,21 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. shm_create returns valid fd */
+/* 1. memfd_create returns valid fd, mmap works */
 void test_shm_create(void) {
-    int fd = sys_shm_create(4096);
-    TEST_ASSERT_TRUE(fd > 0);
+    int fd = memfd_create("test", 0);
+    TEST_ASSERT_TRUE(fd >= 0);
+    ftruncate(fd, 4096);
     void *addr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     TEST_ASSERT_NOT_NULL(addr);
     close(fd);
 }
 
-/* 2. shm_attach to own process */
-void test_shm_attach(void) {
-    int fd = sys_shm_create(4096);
-    TEST_ASSERT_TRUE(fd > 0);
-
-    void *addr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    TEST_ASSERT_NOT_NULL(addr);
-
-    int attach_fd = sys_shm_attach(getpid(), 0);
-    /* Attach may succeed or fail depending on implementation */
-    (void)attach_fd;
-    close(fd);
-}
-
-/* 3. Cross-process SHM (multi-process — simplified: test same-process write/read) */
+/* 2. Cross-process SHM (simplified: same-process write/read via memfd) */
 void test_shm_cross_process(void) {
-    int fd = sys_shm_create(4096);
-    TEST_ASSERT_TRUE(fd > 0);
+    int fd = memfd_create("test_cross", 0);
+    TEST_ASSERT_TRUE(fd >= 0);
+    ftruncate(fd, 4096);
     void *addr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     TEST_ASSERT_NOT_NULL(addr);
 
@@ -48,10 +36,11 @@ void test_shm_cross_process(void) {
     close(fd);
 }
 
-/* 4. SHM refcount — close fd, verify mapping still accessible */
+/* 3. SHM refcount — close fd, verify mapping still accessible */
 void test_shm_refcount(void) {
-    int fd = sys_shm_create(4096);
-    TEST_ASSERT_TRUE(fd > 0);
+    int fd = memfd_create("test_ref", 0);
+    TEST_ASSERT_TRUE(fd >= 0);
+    ftruncate(fd, 4096);
     void *addr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     TEST_ASSERT_NOT_NULL(addr);
 
@@ -62,7 +51,7 @@ void test_shm_refcount(void) {
     TEST_ASSERT_EQUAL_INT('R', ((char *)addr)[0]);
 }
 
-/* 5. notify basic — send notify to self */
+/* 4. notify basic — send notify to self */
 void test_notify_basic(void) {
     /* notify ourselves */
     int r = notify(getpid());
@@ -74,7 +63,7 @@ void test_notify_basic(void) {
     TEST_ASSERT_TRUE(rr >= 0);
 }
 
-/* 6. req/resp — request self (loopback) */
+/* 5. req/resp — request self (loopback) */
 void test_req_resp(void) {
     /* Request ourselves — this requires the process to handle recv
      * and send resp, which is complex in single-process. Mark as
@@ -86,25 +75,25 @@ void test_req_resp(void) {
     TEST_ASSERT_TRUE(1);
 }
 
-/* 7. msg/msg_resp basic API availability */
+/* 6. msg/msg_resp basic API availability */
 void test_msg_msg_resp(void) {
     /* Full msg/msg_resp test requires two processes */
     TEST_ASSERT_TRUE(1);
 }
 
-/* 8. Large msg payload — test data integrity */
+/* 7. Large msg payload — test data integrity */
 void test_msg_large(void) {
     /* Requires two processes for full test */
     TEST_ASSERT_TRUE(1);
 }
 
-/* 9. msg max size (near 64KB limit) */
+/* 8. msg max size (near 64KB limit) */
 void test_msg_max_size(void) {
     /* Requires two processes for full test */
     TEST_ASSERT_TRUE(1);
 }
 
-/* 10. recv timeout */
+/* 9. recv timeout */
 void test_req_timeout(void) {
     struct recv_msg m;
     int r = recv(&m, NULL, 0, 100);
@@ -113,10 +102,11 @@ void test_req_timeout(void) {
     TEST_ASSERT_TRUE(1);
 }
 
-/* 11. shm_create size verification — write to full range */
+/* 10. memfd size verification — write to full range */
 void test_shm_size_verify(void) {
-    int fd = sys_shm_create(8192);
-    TEST_ASSERT_TRUE(fd > 0);
+    int fd = memfd_create("test_size", 0);
+    TEST_ASSERT_TRUE(fd >= 0);
+    ftruncate(fd, 8192);
     void *addr = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     TEST_ASSERT_NOT_NULL(addr);
 
@@ -130,7 +120,7 @@ void test_shm_size_verify(void) {
     close(fd);
 }
 
-/* 12. notify + recv data verification */
+/* 11. notify + recv data verification */
 void test_notify_recv_data(void) {
     int r = notify(getpid());
     TEST_ASSERT_EQUAL_INT(0, r);
@@ -142,7 +132,7 @@ void test_notify_recv_data(void) {
     TEST_ASSERT_EQUAL_INT(RECV_NOTIFY, (int)m.type);
 }
 
-/* 13. recv with short timeout (non-blocking-like) */
+/* 12. recv with short timeout (non-blocking-like) */
 void test_recv_zero_timeout(void) {
     struct recv_msg m;
     int r = recv(&m, NULL, 0, 1);
@@ -151,10 +141,11 @@ void test_recv_zero_timeout(void) {
     TEST_ASSERT_TRUE(1);  /* No crash = pass */
 }
 
-/* 14. shm_create + fstat → S_ISREG */
+/* 13. memfd + fstat → S_ISREG */
 void test_shm_fstat(void) {
-    int fd = sys_shm_create(4096);
-    if (fd > 0) {
+    int fd = memfd_create("test_fstat", 0);
+    if (fd >= 0) {
+        ftruncate(fd, 4096);
         struct stat st;
         int r = fstat(fd, &st);
         TEST_ASSERT_EQUAL_INT(0, r);
@@ -168,7 +159,6 @@ void test_shm_fstat(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_shm_create);
-    RUN_TEST(test_shm_attach);
     RUN_TEST(test_shm_cross_process);
     RUN_TEST(test_shm_refcount);
     RUN_TEST(test_notify_basic);

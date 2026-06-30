@@ -256,7 +256,7 @@ static efi_memory_descriptor_t *get_efi_desc(boot_info *bi, size_t index) {
 // ===================== init_mem =====================
 __attribute__((no_sanitize("kernel-address")))
 void init_mem(boot_info *bi) {
-  printk(LOG_INFO, "init_mem: mmap_addr=0x%016X mmap_size=0x%016X desc_size=0x%016X\n",
+  printk(LOG_INFO, "init_mem: mmap_addr=0x%016lX mmap_size=0x%016lX desc_size=0x%016lX\n",
                  bi->mmap_addr, bi->mmap_size, bi->mmap_desc_size);
 
   size_t desc_count = bi->mmap_size / bi->mmap_desc_size;

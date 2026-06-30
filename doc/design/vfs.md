@@ -57,6 +57,7 @@ files_t 包含 fd_table[MAX_FD=32] 固定数组和 ref_count（fork 共享引用
   ref_count : int — 打开 fd 数 + dentry 引用
   i_lock : spinlock_t — per-inode spinlock
   i_priv : void* — INODE_DEV: 指向 dev_ops*; INODE_REGULAR/DIR: NULL
+  shm : shm* — INODE_DEV 关联的 SHM（dev_create 时设置），mmap 从此取物理页
   start_cluster / dir_start_cluster : uint32_t — FAT32 专属
   dir_entry_index : int — 在目录中的短名 entry index
   hash_next / hash_prev : inode* — hash chain
@@ -138,7 +139,7 @@ NULL 回调 = 默认行为（ops->read==NULL → sys_read 返回 -EINVAL）。
 
 ### devtmpfs 操作
 
-- devtmpfs_create(name, dev_type, &ops) — 创建 INODE_DEV inode，i_priv=ops，同步填 isr_driver_pid[dev_type]
+- devtmpfs_create(name, dev_type, &ops, shm) — 创建 INODE_DEV inode，i_priv=ops，shm!=NULL 时设置 inode->shm 并 shm_get 增加引用，同步填 isr_driver_pid[dev_type]
 - devtmpfs_lookup(name) — 链表线性扫描
 - devtmpfs_open(name, flags) — 分配 FD_DEV fd，内核设备调 ops->open()
 - devtmpfs_cleanup_pid(pid) — 删除 driver_pid 匹配的所有 inode，清零 isr_driver_pid[]

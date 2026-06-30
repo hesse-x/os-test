@@ -645,20 +645,37 @@ static void xhci_init_keyboard() {
     hid_hdr->rings[i].reserved = 0;
   }
 
-  // Register kernel SHM for kbd_driver to attach
+  // Register /dev/usb_hid device with SHM — kbd_driver opens it via open + mmap
   {
-    struct shm *kshm = (struct shm *)kmalloc(sizeof(struct shm));
-    if (kshm) {
-      kshm->phys = usb_hid_shm_phys;
-      kshm->npages = 1;
-      kshm->file_size = 4096;
-      refcount_set(&kshm->s_count, 1);  // kernel holds permanent reference; kbd_driver attach bumps to 2
-      kshm->flags = SHM_KERNEL;
-      kshm->seals = 0;
-      kshm->name[0] = '\0';
-      kshm->page_list = NULL;
-      kshm->num_pages = 0;
-      register_kernel_shm(USB_HID_SHM_ID, kshm);
+    struct shm *hid_shm = shm_create_internal(1);
+    if (hid_shm) {
+      // Initialize HID SHM header in the new page (same as original init)
+      void *new_virt = (__force void *)phys_to_virt((__force phys_addr_t)hid_shm->page_list[0]);
+      usb_hid_shm_header_t *hdr = (usb_hid_shm_header_t *)new_virt;
+      hdr->magic = USB_HID_SHM_MAGIC;
+      hdr->version = USB_HID_SHM_VERSION;
+      // Sub-ring descriptors (same offsets as original init)
+      for (int i = 0; i < 4; i++) {
+        hdr->rings[i].head = 0;
+        hdr->rings[i].tail = 0;
+        hdr->rings[i].capacity = HID_SUBRING_CAPACITY;
+        hdr->rings[i].reserved = 0;
+      }
+      // Update usb_hid_shm_virt to point to the new page
+      // (xHCI DMA continues using the original hid_dma_page, not this SHM;
+      //  xHCI ISR copies from hid_dma_virt into usb_hid_shm_virt)
+      usb_hid_shm_phys = hid_shm->page_list[0];
+      usb_hid_shm_virt = new_virt;
+      // Free the original bfc page (no longer used)
+      bfc_free_page(usb_hid_shm_page, 1);
+      usb_hid_shm_page = NULL;
+
+      static struct dev_ops usb_hid_ops;
+      __memset(&usb_hid_ops, 0, sizeof(usb_hid_ops));
+      usb_hid_ops.driver_pid = 0;  // kernel device
+      usb_hid_ops.device_type = DEV_USB_HID;
+      devtmpfs_create("usb_hid", DEV_USB_HID, &usb_hid_ops, hid_shm);
+      shm_put(hid_shm);  // devtmpfs_create took a reference via shm_get
     }
   }
 

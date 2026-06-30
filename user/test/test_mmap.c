@@ -58,10 +58,11 @@ void test_mmap_addr_hint(void) {
     munmap(p, 4096);
 }
 
-/* 6. shm_create + mmap shared between processes */
+/* 6. memfd_create + ftruncate + mmap shared */
 void test_mmap_shm_fd(void) {
-    int fd = sys_shm_create(4096);
-    TEST_ASSERT_TRUE(fd > 0);
+    int fd = memfd_create("test_shm_fd", 0);
+    TEST_ASSERT_TRUE(fd >= 0);
+    ftruncate(fd, 4096);
     void *addr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     TEST_ASSERT_NOT_NULL(addr);
 
@@ -69,7 +70,6 @@ void test_mmap_shm_fd(void) {
     memset(addr, 'S', 4096);
     TEST_ASSERT_EQUAL_INT('S', ((char *)addr)[0]);
 
-    /* Attach from same process (trivial test) */
     munmap(addr, 4096);
     close(fd);
 }

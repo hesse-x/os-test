@@ -254,10 +254,11 @@ void test_fstat_dev_serial(void) {
     }
 }
 
-/* 20. fstat on SHM fd → S_ISREG */
+/* 20. fstat on memfd → S_ISREG */
 void test_fstat_shm(void) {
-    int fd = sys_shm_create(4096);
-    if (fd > 0) {
+    int fd = memfd_create("test_fstat_shm", 0);
+    if (fd >= 0) {
+        ftruncate(fd, 4096);
         struct stat st;
         int r = fstat(fd, &st);
         TEST_ASSERT_EQUAL_INT(0, r);

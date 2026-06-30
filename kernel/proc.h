@@ -14,7 +14,6 @@
 #include "kernel/rcu.h"
 
 // ===================== SHM fd model =====================
-#define SHM_KERNEL  1  // page managed by kernel, don't free on ref_count==0
 #define SHM_SEALED  2  // MFD_ALLOW_SEALING was set (sealing allowed)
 
 typedef enum proc_state_t { UNUSED, READY, RUNNING, BLOCKED, ZOMBIE, REAPING } proc_state_t;
@@ -32,7 +31,7 @@ typedef struct shm {
     size_t   npages;        // contiguous pages (0 if page_list used)
     size_t   file_size;     // logical size set by ftruncate (≤ total * PAGE_SIZE)
     refcount_t s_count;     // reference count
-    int      flags;         // SHM_KERNEL | SHM_SEALED
+    int      flags;         // SHM_SEALED
     uint32_t seals;         // active F_SEAL_* bitmask
     char     name[32];      // debug name from memfd_create (null-terminated)
     // Discrete page support for resize (when bfc_alloc can't allocate contiguous)

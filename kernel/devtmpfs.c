@@ -59,7 +59,7 @@ struct inode *devtmpfs_lookup(const char *name) {
     return NULL;
 }
 
-int devtmpfs_create(const char *name, int dev_type, struct dev_ops *ops) {
+int devtmpfs_create(const char *name, int dev_type, struct dev_ops *ops, struct shm *shm) {
     if (dev_count >= MAX_DEV_ENTRIES) return -ENOMEM;
 
     /* Check if already exists */
@@ -84,6 +84,12 @@ int devtmpfs_create(const char *name, int dev_type, struct dev_ops *ops) {
         return -ENOMEM;
     }
     ip->i_priv = ops;
+    if (shm) {
+        shm_get(shm);       // +1 for inode reference
+        ip->shm = shm;
+    } else {
+        ip->shm = NULL;
+    }
 
     /* Fill entry */
     int i;

@@ -39,7 +39,7 @@ void vfs_init(void) {
         rc = fat32_init();
         if (rc == 0) {
             printk(LOG_INFO, "vfs_init: FAT32 mounted on port %d\n", try_ports[pi]);
-            devtmpfs_create("sda", DEV_BLOCK, &blk_dev_ops);
+            devtmpfs_create("sda", DEV_BLOCK, &blk_dev_ops, NULL);
             break;
         }
     }
@@ -49,7 +49,7 @@ void vfs_init(void) {
     }
 }
 
-/* sys_open(path, flags, mode) — syscall 51 */
+/* sys_open(path, flags, mode) — SYS_OPEN */
 int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3,
                   int64_t _u1, int64_t _u2, int64_t _u3) {
     const char __user *upath = (const char __user * __force)arg1;
@@ -108,7 +108,7 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3,
     return (int64_t)fd;
 }
 
-/* sys_stat(path, stat_buf) — syscall 52 */
+/* sys_stat(path, stat_buf) — SYS_STAT */
 int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t _u1,
                   int64_t _u2, int64_t _u3, int64_t _u4) {
     const char __user *upath = (const char __user * __force)arg1;
@@ -125,7 +125,7 @@ int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t _u1,
     return 0;
 }
 
-/* sys_mkdir(path, mode) — syscall 53 */
+/* sys_mkdir(path, mode) — SYS_MKDIR */
 int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t _u1,
                    int64_t _u2, int64_t _u3, int64_t _u4) {
     const char __user *upath = (const char __user * __force)arg1;
@@ -139,7 +139,7 @@ int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t _u1,
     return 0;
 }
 
-/* sys_unlink(path) — syscall 54 */
+/* sys_unlink(path) — SYS_UNLINK */
 int64_t sys_unlink(int64_t arg1, int64_t _u1, int64_t _u2,
                     int64_t _u3, int64_t _u4, int64_t _u5) {
     const char __user *upath = (const char __user * __force)arg1;
@@ -153,7 +153,7 @@ int64_t sys_unlink(int64_t arg1, int64_t _u1, int64_t _u2,
     return 0;
 }
 
-/* sys_rmdir(path) — syscall 55 */
+/* sys_rmdir(path) — SYS_RMDIR */
 int64_t sys_rmdir(int64_t arg1, int64_t _u1, int64_t _u2,
                    int64_t _u3, int64_t _u4, int64_t _u5) {
     const char __user *upath = (const char __user * __force)arg1;
@@ -167,12 +167,14 @@ int64_t sys_rmdir(int64_t arg1, int64_t _u1, int64_t _u2,
     return 0;
 }
 
-/* sys_dev_create(name, dev_type) — syscall 55
+/* sys_dev_create(name, dev_type, shm_fd) — SYS_DEV_CREATE
  * Kernel auto-fills driver_pid=current_task->pid, all callbacks NULL (user-space driver) */
-int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t _u1,
-                        int64_t _u2, int64_t _u3, int64_t _u4) {
+int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3,
+                        int64_t _u1, int64_t _u2, int64_t _u3) {
     const char __user *uname = (const char __user * __force)arg1;
     int dev_type = (int)arg2;
+    int shm_fd = (int)arg3;
+    struct shm *dev_shm = NULL;
 
     if (!uname) return (int64_t)-EFAULT;
     char name[32];
@@ -187,7 +189,26 @@ int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t _u1,
     kops->device_type = dev_type;
     // All callbacks remain NULL for user-space drivers (IPC proxy handles requests)
 
-    int rc = devtmpfs_create(name, dev_type, kops);
+    // Resolve shm_fd to struct shm* (if provided)
+    if (shm_fd >= 0) {
+        task_t *proc = current_task;
+        if (shm_fd >= MAX_FD) {
+            kfree(kops);
+            return (int64_t)-EBADF;
+        }
+        spinlock_t *fdlk = &proc->mm->files->fd_lock;
+        spin_lock(fdlk);
+        struct file *sf = proc->mm->files->fd_table[shm_fd];
+        if (!sf || sf->type != FD_SHM) {
+            spin_unlock(fdlk);
+            kfree(kops);
+            return (int64_t)-EINVAL;
+        }
+        dev_shm = sf->shm;
+        spin_unlock(fdlk);
+    }
+
+    int rc = devtmpfs_create(name, dev_type, kops, dev_shm);
     if (rc != 0) {
         kfree(kops);
         return rc;
@@ -199,7 +220,7 @@ int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t _u1,
     return 0;
 }
 
-/* sys_getdents(fd, buf, len) — syscall 58
+/* sys_getdents(fd, buf, len) — SYS_GETDENTS
  * Read directory entries into user buffer.
  * fd must be FD_DIR. Returns bytes written, 0 on EOF, or negative errno. */
 int64_t sys_getdents(int64_t arg1, int64_t arg2, int64_t arg3,

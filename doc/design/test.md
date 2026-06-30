@@ -36,7 +36,7 @@ mkdisk.sh TEST 构建时额外 mcopy 测试 ELF 到 /test/。
 | malloc | malloc.elf | mmap, munmap |
 | stdio | stdio.elf | write/read |
 | mmap | mmap.elf | mmap, munmap, memfd_create, ftruncate |
-| IPC | ipc.elf | shm_create, shm_attach, notify, req, resp, msg, msg_resp |
+| IPC | ipc.elf | memfd_create, ftruncate, SCM_RIGHTS, notify, req, resp, msg, msg_resp |
 | socket | socket.elf | socket, bind, listen, accept, connect, socketpair, sendmsg, recvmsg, shutdown |
 | process | process.elf | fork, execve, waitpid, exit |
 | signal | signal.elf | kill, sigaction, sigreturn |

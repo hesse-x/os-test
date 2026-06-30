@@ -94,9 +94,9 @@ NR_SYSCALL=63（编号 0-62，slot 8 为 NULL/已删除 sys_spawn）。
 
 | 函数 | 头文件 | 用途 |
 |------|--------|------|
-| shm_create / shm_attach / shm_attach_kernel | sys/shm.h | 共享内存 fd |
 | irq_bind | sys/irq.h | 绑定 IRQ 到进程 |
 | device_register | sys/device.h | 驱动自注册 |
+| dev_create | sys/device.h | 创建设备节点（含 shm_fd 关联） |
 | ioperm | unistd.h | I/O 端口权限 |
 | recv / req / resp / notify / msg / msg_resp | sys/ipc.h | 微内核 IPC 四层 |
 | req_fd / notify_fd / msg_fd | sys/ipc.h | 基于 fd 的 IPC 便利封装 |

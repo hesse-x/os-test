@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 int device_register(const char *name, int dev_type);
+int device_register_shm(const char *name, int dev_type, int shm_fd);
 
 #ifdef __cplusplus
 }

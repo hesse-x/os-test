@@ -103,7 +103,10 @@ int kvformat(void (*putc)(char c, void *arg), void *arg,
 
         /* --- length modifier --- */
         int is_long = 0;
-        if (*fmt == 'l') { is_long = 1; fmt++; }
+        int is_long_long = 0;
+        int is_size = 0;
+        if (*fmt == 'l') { is_long = 1; fmt++; if (*fmt == 'l') { is_long_long = 1; fmt++; } }
+        if (*fmt == 'z') { is_size = 1; fmt++; }
 
         /* --- specifier --- */
         switch (*fmt) {
@@ -137,7 +140,9 @@ int kvformat(void (*putc)(char c, void *arg), void *arg,
 
         case 'd': {
             long val;
-            if (is_long)
+            if (is_long_long)
+                val = va_arg(ap, long long);
+            else if (is_long || is_size)
                 val = va_arg(ap, long);
             else
                 val = (long)va_arg(ap, int);
@@ -147,7 +152,9 @@ int kvformat(void (*putc)(char c, void *arg), void *arg,
 
         case 'u': {
             unsigned long val;
-            if (is_long)
+            if (is_long_long)
+                val = va_arg(ap, unsigned long long);
+            else if (is_long || is_size)
                 val = va_arg(ap, unsigned long);
             else
                 val = (unsigned long)va_arg(ap, unsigned int);
@@ -157,7 +164,9 @@ int kvformat(void (*putc)(char c, void *arg), void *arg,
 
         case 'o': {
             unsigned long val;
-            if (is_long)
+            if (is_long_long)
+                val = va_arg(ap, unsigned long long);
+            else if (is_long || is_size)
                 val = va_arg(ap, unsigned long);
             else
                 val = (unsigned long)va_arg(ap, unsigned int);
@@ -169,7 +178,9 @@ int kvformat(void (*putc)(char c, void *arg), void *arg,
         case 'X': {
             int upper = (*fmt == 'X');
             unsigned long val;
-            if (is_long)
+            if (is_long_long)
+                val = va_arg(ap, unsigned long long);
+            else if (is_long || is_size)
                 val = va_arg(ap, unsigned long);
             else
                 val = (unsigned long)va_arg(ap, unsigned int);
@@ -189,7 +200,9 @@ int kvformat(void (*putc)(char c, void *arg), void *arg,
             /* unknown specifier: output % + char as-is */
             putc('%', arg);
             count++;
-            if (is_long) { putc('l', arg); count++; }
+            if (is_long_long) { putc('l', arg); putc('l', arg); count += 2; }
+            else if (is_long) { putc('l', arg); count++; }
+            if (is_size) { putc('z', arg); count++; }
             putc(*fmt, arg);
             count++;
             break;

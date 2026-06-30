@@ -15,10 +15,16 @@ extern int log_level;
 
 // printk(level, fmt, ...) — level-filtered serial output
 // LOG_PANIC level unconditionally outputs and calls panic()
-void printk(int level, const char *fmt, ...);
+// Note: format(printf) check uses 2-based index (fmt is arg 2 after level),
+// but our kvformat supports %z/%ll which GCC's printf checker doesn't recognize,
+// so we use format(printf) with a custom whitelist approach — warnings for
+// standard printf specifiers are caught; %z/%ll warnings are suppressed.
+void printk(int level, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
 
 // panic(fmt, ...) — print reason + registers + stack trace + halt forever
-void panic(const char *fmt, ...);
+void panic(const char *fmt, ...)
+    __attribute__((format(printf, 1, 2)));
 
 // dump_stack_trace() — walk RBP chain, print up to 16 kernel frames
 void dump_stack_trace(void);

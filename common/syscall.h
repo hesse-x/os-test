@@ -122,19 +122,7 @@ static inline int sys_munmap(void *addr, size_t size) {
     return 0;
 }
 
-// --- shm_create/shm_attach/memfd_create/ftruncate ---
-static inline int sys_shm_create(size_t size) {
-    int64_t r = __syscall1(SYS_SHM_CREATE, (int64_t)size);
-    if (r < 0) { errno = -(int)r; return -1; }
-    return (int)r;
-}
-
-static inline int sys_shm_attach(int32_t id, int mode) {
-    int64_t r = __syscall2(SYS_SHM_ATTACH, (int64_t)id, (int64_t)mode);
-    if (r < 0) { errno = -(int)r; return -1; }
-    return (int)r;
-}
-
+// --- memfd_create/ftruncate ---
 static inline int sys_pipe(int *fd_ptr) {
     int64_t r = __syscall1(SYS_PIPE, (int64_t)(uintptr_t)fd_ptr);
     if (r < 0) { errno = -(int)r; return -1; }
@@ -229,7 +217,7 @@ static inline int sys_block_async(uint32_t lba, void *buf, uint32_t count, uint8
 }
 
 // --- install_fd (returns fd on success) ---
-// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — syscall 29
+// sys_install_fd(fs_pid, fs_fd, offset, flags, file_size) — SYS_INSTALL_FD
 // Register an FD_FILE fd in the kernel fd_table.
 // Returns: fd (>=3) on success, -1 on failure (errno set)
 static inline int sys_install_fd(int32_t fs_pid, int32_t fs_fd,
@@ -320,8 +308,8 @@ static inline int sys_rmdir(const char *path) {
     return 0;
 }
 
-static inline int sys_dev_create(const char *name, uint32_t dev_type) {
-    int64_t r = __syscall2(SYS_DEV_CREATE, (int64_t)(uintptr_t)name, (int64_t)dev_type);
+static inline int sys_dev_create(const char *name, uint32_t dev_type, int shm_fd) {
+    int64_t r = __syscall3(SYS_DEV_CREATE, (int64_t)(uintptr_t)name, (int64_t)dev_type, (int64_t)shm_fd);
     if (r < 0) { errno = -(int)r; return -1; }
     return 0;
 }

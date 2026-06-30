@@ -25,7 +25,7 @@ struct dev_ops {
 };
 
 void    devtmpfs_init(void);
-int     devtmpfs_create(const char *name, int dev_type, struct dev_ops *ops);
+int     devtmpfs_create(const char *name, int dev_type, struct dev_ops *ops, struct shm *shm);
 uint64_t devtmpfs_open(struct task_t *proc, const char *name, int flags);
 struct inode *devtmpfs_lookup(const char *name);
 void    devtmpfs_cleanup_pid(pid_t pid);

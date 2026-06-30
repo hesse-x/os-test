@@ -38,9 +38,10 @@ cpu_local_t 新增字段：
 
 ### 动态共享内存
 
-- `sys_shm_create(size)` — Syscall 11：创建共享内存区域，分配物理页，映射到调用者 PML4，返回虚拟地址
-- `sys_shm_attach(target, mode)` — Syscall 12：附加到共享内存。mode=0 按 PID attach，mode=1 按内核 SHM ID attach
-- SHM 区域通过 `mm_t->mmap_regions` 链表管理（含 `shm_obj` 引用计数），proc_reap 时递减 ref_count，归零释放物理页
+- `memfd_create(name, flags)` + `ftruncate(fd, size)` — 创建 SHM 区域，分配物理页，返回 fd
+- `open("/dev/xxx")` + `mmap(fd, ...)` — 访问设备关联的 SHM（从 inode->shm 取物理页映射）
+- `dev_create(name, dev_type, shm_fd)` — 用户态驱动将 memfd 关联到设备 inode，consumer 通过 open+mmap 访问
+- SHM 区域通过 `mm_t->mmap_regions` 链表管理（含 `shm_obj` 引用计数），proc_reap 时递减 s_count，归零释放物理页
 
 ### Sleeping Flag 协议
 
@@ -70,7 +71,7 @@ cpu_local_t 新增字段：
 kbd_driver（driver/kbd_driver.cc）是 IOPL=0 的用户态驱动，通过 RECV_NOTIFY 驱动（非轮询）：
 
 1. `device_register(DEV_KBD)` — 注册设备
-2. `sys_shm_attach(USB_HID_SHM_ID, 1)` — attach 内核 USB HID SHM
+2. `open("/dev/usb_hid")` + `mmap(...)` — 映射内核 USB HID SHM
 3. `get_keycode_init(hid_shm)` — 初始化
 4. 主循环：
    - `sys_recv(&msg, NULL, 0, 0)` — 深度睡眠，等 RECV_NOTIFY（xHCI ISR wake）
@@ -81,10 +82,10 @@ kbd_driver 自身不需要轮询窗口（数据源是硬件中断通知）。`kb
 
 ### fs_driver 工作流
 
-fs_driver 创建 4 页 FS SHM，attach Disk SHM，FAT32 文件系统服务：
+fs_driver 创建 4 页 FS SHM，SCM_RIGHTS 传 fd 给 shell，FAT32 文件系统服务：
 
-1. `sys_shm_create(4 * 4096)` — 创建 FS SHM
-2. `sys_shm_attach(disk_pid, 0)` — attach Disk SHM
+1. `memfd_create("fs_shm", 0)` + `ftruncate(shm_fd, 4 * 4096)` — 创建 FS SHM
+2. SCM_RIGHTS 传 FS SHM fd 给 shell
 3. `device_register(DEV_BLOCK)` — 注册设备
 4. 主循环 `sys_recv` 等待 RECV_NOTIFY（shell 通知）：
    - 收到通知后读 `fs_req_shm`，执行 readdir/open/read/close/raw_read/touch/mkdir
@@ -93,7 +94,7 @@ fs_driver 创建 4 页 FS SHM，attach Disk SHM，FAT32 文件系统服务：
 
 ### shell 工作流
 
-shell attach FS SHM，通过 fd 0/1 pipe 与 terminal 通信：
+shell 通过 SCM_RIGHTS 接收 FS SHM fd，通过 fd 0/1 pipe 与 terminal 通信：
 
 - 键盘输入：`sys_read(0, ...)` 从 stdin pipe 读
 - 输出：printf → sys_write(1, ...) → stdout pipe → terminal

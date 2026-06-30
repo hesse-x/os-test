@@ -30,7 +30,7 @@ MSR 设置：kernel/trap.cc : setup_syscall() — STAR/LSTAR/CSTAR/SFMASK/EFER.S
 
 ### syscall_dispatch 与系统调用表
 
-NR_SYSCALL=59，syscall_table[] 定义在 kernel/trap.cc。
+NR_SYSCALL=60，syscall_table[] 定义在 kernel/trap.cc。
 
 参数从 trapframe 提取：RDI/RSI/RDX/R10/R8/R9（6 参），返回值写回 tf->rax。超出范围返回 ENOSYS。
 
@@ -44,57 +44,58 @@ NR_SYSCALL=59，syscall_table[] 定义在 kernel/trap.cc。
 | 5 | sys_irq_bind | 绑定当前进程到指定 IRQ |
 | 6 | sys_exit | 进程退出 |
 | 7 | sys_waitpid | 等待子进程退出 |
-| 8 | — | slot 已空（原 sys_spawn，已改用 fork+execve） |
-| 9 | sys_mmap | 内存映射（6 参） |
-| 10 | sys_munmap | 解除内存映射 |
-| 11 | sys_shm_create | 创建 SHM fd |
-| 12 | sys_shm_attach | 附加 SHM |
-| 13 | sys_pipe | 创建 pipe |
-| 14 | sys_write | 写 fd |
-| 15 | sys_read | 读 fd |
-| 16 | sys_close | 关闭 fd |
-| 17 | sys_notify | 异步通知 |
-| 18 | sys_gettime | 全局单调时钟（纳秒） |
-| 19 | sys_clock | per-process CPU 时间 |
-| 20 | sys_msg | 变长消息请求 |
-| 21 | sys_msg_resp | 变长消息回复 |
-| 22 | sys_ioperm | I/O 端口权限 |
-| 23 | sys_dup2 | 复制 fd |
-| 24 | sys_fcntl | 文件控制 |
-| 25 | sys_dma_alloc | 物理连续 DMA 分配 |
-| 26 | sys_dma_free | 释放 DMA 缓冲区 |
-| 27 | sys_pci_dev_info | PCI 设备查询 |
-| 28 | sys_block_async | 异步块 I/O |
-| 29 | sys_install_fd | 注册 FD_FILE fd |
-| 30 | sys_socket | socket |
-| 31 | sys_bind | bind |
-| 32 | sys_listen | listen |
-| 33 | sys_accept | accept |
-| 34 | sys_connect | connect |
-| 35 | sys_socketpair | socketpair |
-| 36 | sys_sendmsg | sendmsg |
-| 37 | sys_recvmsg | recvmsg |
-| 38 | sys_shutdown | shutdown |
-| 39 | sys_poll | poll |
-| 40 | sys_lseek | 文件偏移设置 |
-| 41 | sys_memfd_create | 创建 memfd |
-| 42 | sys_ftruncate | 截断文件 |
-| 43 | sys_kill | 发送信号 |
-| 44 | sys_sigaction | 注册信号 handler |
-| 45 | sys_sigreturn | 信号返回 |
-| 46 | sys_debug_print | 内核调试打印 |
-| 47 | sys_open | 打开文件 |
-| 48 | sys_stat | 获取文件状态 |
-| 49 | sys_mkdir | 创建目录 |
-| 50 | sys_unlink | 删除文件 |
-| 51 | sys_rmdir | 删除目录 |
-| 52 | sys_dev_create | 创建设备节点 |
-| 53 | sys_getdents | 读取目录项 |
-| 54 | sys_ioctl | 设备控制 |
-| 55 | sys_fstat | 基于 fd 获取文件状态 |
-| 56 | sys_fdev_pid | 获取设备驱动 PID |
-| 57 | sys_fork | fork |
-| 58 | sys_execve | execve |
+| 8 | sys_mmap | 内存映射（6 参：匿名/SHM/设备/物理） |
+| 9 | sys_munmap | 解除内存映射 |
+| 10 | sys_pipe | 创建 pipe |
+| 11 | sys_write | 写 fd |
+| 12 | sys_read | 读 fd |
+| 13 | sys_close | 关闭 fd |
+| 14 | sys_notify | 异步通知 |
+| 15 | sys_gettime | 全局单调时钟（纳秒） |
+| 16 | sys_clock | per-process CPU 时间 |
+| 17 | sys_msg | 变长消息请求 |
+| 18 | sys_msg_resp | 变长消息回复 |
+| 19 | sys_ioperm | I/O 端口权限 |
+| 20 | sys_dup2 | 复制 fd |
+| 21 | sys_fcntl | 文件控制 |
+| 22 | sys_dma_alloc | 物理连续 DMA 分配 |
+| 23 | sys_dma_free | 释放 DMA 缓冲区 |
+| 24 | sys_pci_dev_info | PCI 设备查询 |
+| 25 | sys_block_async | 异步块 I/O |
+| 26 | sys_install_fd | 注册 FD_FILE fd |
+| 27 | sys_socket | socket |
+| 28 | sys_bind | bind |
+| 29 | sys_listen | listen |
+| 30 | sys_accept | accept |
+| 31 | sys_connect | connect |
+| 32 | sys_socketpair | socketpair |
+| 33 | sys_sendmsg | sendmsg |
+| 34 | sys_recvmsg | recvmsg |
+| 35 | sys_shutdown | shutdown |
+| 36 | sys_poll | poll |
+| 37 | sys_lseek | 文件偏移设置 |
+| 38 | sys_memfd_create | 创建 memfd |
+| 39 | sys_ftruncate | 截断文件 |
+| 40 | sys_kill | 发送信号 |
+| 41 | sys_sigaction | 注册信号 handler |
+| 42 | sys_sigreturn | 信号返回 |
+| 43 | sys_debug_print | 内核调试打印 |
+| 44 | sys_open | 打开文件 |
+| 45 | sys_stat | 获取文件状态 |
+| 46 | sys_mkdir | 创建目录 |
+| 47 | sys_unlink | 删除文件 |
+| 48 | sys_rmdir | 删除目录 |
+| 49 | sys_dev_create | 创建设备节点（含 shm_fd） |
+| 50 | sys_getdents | 读取目录项 |
+| 51 | sys_ioctl | 设备控制 |
+| 52 | sys_fstat | 基于 fd 获取文件状态 |
+| 53 | sys_fdev_pid | 获取设备驱动 PID |
+| 54 | sys_fork | fork |
+| 55 | sys_execve | execve |
+| 56 | sys_setsid | 创建新会话 |
+| 57 | sys_setpgid | 设置进程组 |
+| 58 | sys_getpgid | 获取进程组 |
+| 59 | sys_getsid | 获取会话 ID |
 
 ### recv_msg 类型
 
@@ -112,7 +113,7 @@ sys_recv 签名：sys_recv(buf, data_buf, data_buf_len, timeout_ms)，timeout_ms
 ### 返回值约定
 
 - 状态型 syscall：0=成功，负数=errno
-- 值返回型：sys_mmap 返回地址，sys_fork 返回子 PID（父）/0（子），sys_waitpid 返回 pid
+- 值返回型：sys_mmap 返回地址，sys_fork 返回子 PID（父）/0（子），sys_waitpid 返回 pid，sys_memfd_create 返回 fd
 
 ### 用户态封装
 

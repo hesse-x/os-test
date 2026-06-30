@@ -14,8 +14,8 @@ PS/2 路径已完全移除。键盘输入链路：USB 键盘 → xHCI Transfer R
 | 4 | SHM 数据格式 | 原始字节 + 类型标记 `{type, len, data[8]}` | 内核只搬运数据，语义解析在用户态，符合微内核原则 |
 | 5 | Ring 槽位大小 | 固定 10 字节/槽位 | 简化 head/tail 计算，与 HID 8B 报告 + 2B 头部对齐 |
 | 6 | 单 ring vs 多 ring | 1 页 4KB 内 4 个子 ring（键盘/鼠标/手柄/触控板） | 不同设备由不同驱动进程消费，独立 head/tail |
-| 7 | SHM 创建方 | 内核 xhci_init 预分配 | 内核是 ring 生产者（ISR 写数据），内核创建更自然 |
-| 8 | SHM attach 方式 | `sys_shm_attach(shm_id, mode=1)` 内核 SHM 模式 | arg2=0 为原有 PID 模式，arg2=1 为内核 SHM ID 查找，零新增 syscall |
+| 7 | SHM 创建方 | 内核 xhci_init 预分配，通过 devtmpfs_create 注册 | 内核是 ring 生产者（ISR 写数据），内核创建更自然；对齐 Linux 设备 mmap 模型 |
+| 8 | SHM 访问方式 | `open("/dev/usb_hid")` + `mmap` | 替代 sys_shm_attach，对齐 Linux 设备 mmap 语义 |
 | 9 | get_keycode 位置 | 封装在 `user/lib/usb_kbd.cc` | 用户态做状态→事件转换，HID keycode 映射 |
 | 10 | ISR 写入模式 | 无条件写完整 HID 报告，不去重 | 重复报告用户态对比后自然得出 0 事件，内核不做语义判断 |
 | 11 | MSI-X vector | 2 个（interrupter 0=keyboard, interrupter 1=spare） | 机制建立即可，不为未存在的设备提前预留 |
@@ -34,7 +34,7 @@ USB 键盘 → xHCI Transfer Ring → xHCI ISR (内核)
   → wake_process()
 
 kbd_driver (用户态, IOPL=0):
-  sys_shm_attach(USB_HID_SHM_ID, 1) → get_keycode_init()
+  open("/dev/usb_hid") + mmap → get_keycode_init()
   sys_recv → RECV_NOTIFY
   → get_keycode() 读 SHM ring + 对比 last_report + HID keycode→input_key → key_event
   → kbd_push() → kbd_ring SHM → notify terminal
@@ -44,7 +44,7 @@ terminal: 读 kbd_ring → VT100 → display back buffer → ioctl(FLIP)
 
 ### USB HID SHM 页布局（1 页 4KB）
 
-内核预分配 1 页物理内存，通过 `register_kernel_shm(USB_HID_SHM_ID=1, phys, 1)` 注册，用户态通过 `sys_shm_attach(1, &addr, 1)` attach。
+内核通过 `shm_create_internal(1)` 分配 1 页物理内存，通过 `devtmpfs_create("usb_hid", DEV_USB_HID, &usb_hid_ops, shm)` 注册到 devtmpfs。用户态通过 `open("/dev/usb_hid")` + `mmap` 访问。
 
 **Header**（offset 0, 32 字节）— common/shm.h : usb_hid_shm_header_t：
   magic : uint32_t — 0x55484944 ("UHID")
@@ -97,7 +97,7 @@ terminal: 读 kbd_ring → VT100 → display back buffer → ioctl(FLIP)
 - `KBD_IOCTL_UNBIND` — `_IO('K', 0x12)`
 
 bind 语义：
-- 首次 bind：kbd_driver 调 `sys_shm_create(4096)` 创建 KBD SHM，初始化 ring + sleeping flags
+- 首次 bind：kbd_driver 调 `memfd_create("kbd_ring", 0)` + `ftruncate(shm_fd, 4096)` 创建 KBD SHM，初始化 ring + sleeping flags，`dev_create("/dev/kbd", DEV_KBD, &kbd_ops, shm_fd)` 关联 SHM 到设备 inode
 - 重复 bind 同一 PID：幂等，直接返回成功
 - bind 不同 PID：返回 -EBUSY（单消费者模型，替换需先 unbind）
 - unbind：清 consumer_pid，SHM 由 proc_reap 自动回收
@@ -105,7 +105,7 @@ bind 语义：
 terminal 端绑定流程：
 1. `open("/dev/kbd")` → fd
 2. `ioctl(fd, KBD_IOCTL_BIND, &arg)` → 绑定
-3. `mmap(NULL, 0, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)` → 映射 kbd SHM
+3. `mmap(NULL, 0, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)` → 从 inode->shm 映射 kbd SHM
 
 ### 扩展键 ESC 序列映射
 
@@ -122,8 +122,8 @@ terminal 端绑定流程：
 
 kernel/xhci.c : xhci_init_keyboard 完整流程：
 
-1. 分配页：USB HID SHM + HID DMA buffer + EP0 ring + EP1-IN transfer ring + device context + control DMA buffer
-2. 初始化 USB HID SHM header（magic, version, 4 sub-rings），`register_kernel_shm(USB_HID_SHM_ID, kshm)`
+1. 分配页：HID DMA buffer + EP0 ring + EP1-IN transfer ring + device context + control DMA buffer
+2. `shm_create_internal(1)` 分配 USB HID SHM，初始化 header（magic, version, 4 sub-rings），`devtmpfs_create("usb_hid", DEV_USB_HID, &usb_hid_ops, shm)` 注册到 devtmpfs
 3. Port Discovery → Port Reset → Enable Slot → Address Device（Slot Context + EP0 Control）
 4. Get Descriptor（Device Descriptor + Configuration Descriptor）→ 解析 EP1-IN max_packet_size/interval
 5. Set Protocol(Boot)：bmRequestType=0x21, bRequest=0x0B, wValue=0
@@ -138,7 +138,7 @@ kernel/xhci.c : xhci_init_keyboard 完整流程：
 |------|------|
 | kernel/xhci.c / kernel/xhci.h | xHCI 控制器驱动 + USB 键盘枚举 + ISR |
 | kernel/pci.c | MSI-X 向量分配 + Table/PBA 操作 |
-| common/shm.h | usb_hid_shm_header_t + usb_hid_slot_t + USB_HID_SHM_ID 常量 |
+| common/shm.h | usb_hid_shm_header_t + usb_hid_slot_t |
 | common/input.h | key_event + input_key 枚举 + modifier 常量 |
 | common/ioctl.h | KBD_IOCTL_BIND / UNBIND 命令编码 |
 | user/lib/usb_kbd.cc | get_keycode / get_keycode_init（HID→key_event 转换） |
@@ -149,14 +149,13 @@ kernel/xhci.c : xhci_init_keyboard 完整流程：
 
 - **xHCI**：ISR 写 USB HID SHM，wake kbd_driver。详见 [xhci.md](xhci.md)
 - **Terminal**：kbd_driver 通过 kbd_ring SHM + notify 与 terminal 交互。详见 [terminal.md](terminal.md)
-- **IPC/SHM**：USB HID SHM 为内核预分配共享内存，kbd_ring 为用户态动态 SHM。详见 [ipc.md](ipc.md)
+- **IPC/SHM**：USB HID SHM 为内核通过 shm_create_internal + devtmpfs_create 注册的共享内存，kbd_ring 为用户态 memfd + dev_create SHM。详见 [ipc.md](ipc.md)
 - **用户态驱动**：kbd_driver 是 IOPL=0 的用户态驱动进程。详见 [user_driver.md](user_driver.md)
 
 ## 待完成项
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| `/dev/kbd` fd 统一接口 | 设备发现统一到 fd 模型：open→fd，req(fd,...)/mmap(fd)/poll(fd) 替代 device_lookup+sys_req+shm_attach；底层 sys_req/notify/shm 不变 | 高 |
 | 热插拔 | Port Status Change 事件处理 + 内核工作队列；当前枚举在 xhci_init 一步完成 | 中 |
 | USB mouse | 第二设备 slot / 第二 endpoint / mouse sub-ring | 低 |
 | 驱动崩溃自动重连 | 终端检测 POLLERR → close(fd) → 循环 open 重连；需 Wayland compositor 架构 | 低 |

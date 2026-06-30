@@ -113,7 +113,7 @@ void pty_init(void) {
     ptmx_ops.driver_pid = 0;
     ptmx_ops.device_type = DEV_PTMX;
     ptmx_ops.open = ptmx_open;
-    devtmpfs_create("ptmx", DEV_PTMX, &ptmx_ops);
+    devtmpfs_create("ptmx", DEV_PTMX, &ptmx_ops, NULL);
 
     ptmx_inode = devtmpfs_lookup("ptmx");
 
@@ -214,7 +214,7 @@ int ptmx_open(struct task_t *proc, int fd) {
         for (int i = tpos - 1; i >= 0; i--) name[pos++] = tmp[i];
     }
     name[pos] = '\0';
-    devtmpfs_create(name, DEV_PTS_SLAVE, &priv->ops);
+    devtmpfs_create(name, DEV_PTS_SLAVE, &priv->ops, NULL);
 
     return 0;
 }

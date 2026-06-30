@@ -17,23 +17,23 @@
 
 | ELF | PID | IOPL | 功能 | SHM 角色 |
 |-----|-----|------|------|---------|
-| kbd_driver | 动态 | 0 | 键盘翻译推送（USB HID SHM → kbd_ring SHM） | attach USB HID SHM，创建 kbd_ring SHM |
-| terminal | 动态 | 0 | VT100 终端 + 输入分发 + 显示渲染 | attach kbd_ring SHM |
-| fs_driver | 动态 | 0 | FAT32 文件系统 | 创建 FS SHM，attach Disk SHM |
-| shell | 动态 | 0 | 命令行交互 | attach FS SHM |
+| kbd_driver | 动态 | 0 | 键盘翻译推送（USB HID SHM → kbd_ring SHM） | open("/dev/usb_hid")+mmap 读 HID SHM，memfd_create 创建 kbd_ring SHM + dev_create 关联到 /dev/kbd |
+| terminal | 动态 | 0 | VT100 终端 + 输入分发 + 显示渲染 | open("/dev/kbd")+mmap 读 kbd SHM |
+| fs_driver | 动态 | 0 | FAT32 文件系统 | memfd_create 创建 FS SHM，SCM_RIGHTS 传 fd |
+| shell | 动态 | 0 | 命令行交互 | SCM_RIGHTS 接收 FS SHM fd |
 
 设备注册/发现：`device_register(dev_type)` 注册 + `open("/dev/xxx")` 打开设备节点，设备类型定义在 common/dev.h（DEV_KBD=2, DEV_KMS=3, DEV_BLOCK=4, DEV_TERMINAL=5, DEV_SERIAL=6, DEV_PTMX=7, DEV_PTS_SLAVE=8）。
 
 ### SHM IPC 拓扑
 
-所有驱动间 IPC 统一使用动态共享内存（`sys_shm_create`/`sys_shm_attach`），数据结构定义在 common/shm.h。
+所有驱动间 IPC 统一使用共享内存，对齐 Linux memfd + 设备 mmap 模型。数据结构定义在 common/shm.h。
 
-| SHM Region | 创建者 | 大小 | 接入者 | 内容 |
-|------------|--------|------|--------|------|
-| USB HID SHM | 内核 xhci_init | 1 页 | kbd_driver | usb_hid_shm_header + 4 sub-rings（keyboard/mouse/gamepad/touchpad） |
-| KBD SHM | kbd_driver | 1 页 | terminal | driver_shm_header + kbd_ring(8 slots) + sleeping flags |
+| SHM Region | 创建者 | 大小 | 接入方式 | 内容 |
+|------------|--------|------|---------|------|
+| USB HID SHM | 内核 xhci_init（shm_create_internal + devtmpfs_create） | 1 页 | kbd_driver: `open("/dev/usb_hid")` + `mmap` | usb_hid_shm_header + 4 sub-rings（keyboard/mouse/gamepad/touchpad） |
+| KBD SHM | kbd_driver（memfd_create + ftruncate + dev_create） | 1 页 | terminal: `open("/dev/kbd")` + `mmap` | driver_shm_header + kbd_ring(8 slots) + sleeping flags |
 | Disk SHM | 内核 AHCI | — | fs_driver | disk 请求/响应（同步 syscall 模式） |
-| FS SHM | fs_driver | 4 页 | shell | fs_shm_header + fs_req_shm + fs_resp_shm |
+| FS SHM | fs_driver（memfd_create + ftruncate） | 4 页 | shell: SCM_RIGHTS 传 fd | fs_shm_header + fs_req_shm + fs_resp_shm |
 
 Sleeping flag 协议和驱动工作流详见 [driver_workflow.md](driver_workflow.md)。
 
@@ -51,27 +51,27 @@ Sleeping flag 协议和驱动工作流详见 [driver_workflow.md](driver_workflo
 **kbd_driver**（driver/kbd_driver.cc）— RECV_NOTIFY 驱动：
 
 1. `device_register(DEV_KBD)` → `open("/dev/kbd")` 可发现
-2. `sys_shm_attach(USB_HID_SHM_ID, 1)` → attach 内核 HID SHM → `get_keycode_init()`
+2. `open("/dev/usb_hid")` + `mmap(...)` → 映射内核 HID SHM → `get_keycode_init()`
 3. 主循环：`sys_recv` → RECV_NOTIFY → `get_keycode()` 循环 → `kbd_push()` → 写 kbd_ring → 检查 consumer_sleeping → notify terminal
-4. RECV_REQ：处理 KBD_IOCTL_BIND/UNBIND（创建/销毁 kbd_ring SHM）
+4. RECV_REQ：处理 KBD_IOCTL_BIND/UNBIND（首次 bind 时 memfd_create + ftruncate 创建 kbd_ring SHM，dev_create("/dev/kbd", DEV_KBD, &kbd_ops, shm_fd) 关联 SHM）
 
 **terminal**（driver/terminal.cc）— pipe + SHM 驱动：
 
-1. `open("/dev/kbd")` → `ioctl(fd, KBD_IOCTL_BIND)` → `mmap(fd)` 映射 kbd SHM
+1. `open("/dev/kbd")` → `ioctl(fd, KBD_IOCTL_BIND)` → `mmap(fd)` 从 inode->shm 映射 kbd SHM
 2. `display_client_init()` → `open("/dev/kms")` + `ioctl(KMS_IOCTL_CREATE_BUF)` + `mmap` back buffer
 3. 键盘输入：读 kbd_ring → `sys_write(1, ...)` 写 stdin pipe → shell 的 fd 0 收到
 4. Shell 输出：`sys_read(0, ...)` 从 stdout pipe 读 → VT100 状态机 → 渲染到 back buffer → `display_client_flush()` → `ioctl(KMS_IOCTL_FLIP)`
 
 **fs_driver**（driver/fs_driver.cc）— SHM + notify 驱动：
 
-1. `sys_shm_create` 创建 FS SHM，`sys_shm_attach(disk_pid, 0)` attach Disk SHM
+1. `memfd_create("fs_shm")` + `ftruncate(fd, 4*4096)` 创建 FS SHM，SCM_RIGHTS 传 fd 给 shell
 2. 主循环 `sys_recv` 等待 RECV_NOTIFY（shell 通知）
 3. 读 fs_req_shm → 执行文件操作 → 写 fs_resp_shm → 检查 client_sleeping → notify shell
 4. 与磁盘通信：写 disk_req_shm → notify → recv 等响应 → 读 disk_resp_shm
 
 **shell**（shell/shell.cc）— pipe + SHM 驱动：
 
-1. attach FS SHM
+1. SCM_RIGHTS 接收 FS SHM fd
 2. 键盘输入：`sys_read(0, ...)` 从 stdin pipe 读
 3. 输出：printf → sys_write(1, ...) → stdout pipe → terminal
 4. 文件操作：写 fs_req_shm → notify fs_driver → recv 等响应 → 读 fs_resp_shm
@@ -100,6 +100,5 @@ init/init.c : main：
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| `/dev/xxx` fd 统一接口 | 设备发现统一到 fd 模型：open→fd，req(fd)/mmap(fd)/poll(fd) 替代 device_lookup+sys_req+shm_attach | 高 |
 | disk_driver 移除 | fs_driver 直接通过 sys_block_async 访问内核 AHCI，移除用户态 disk_driver 进程 | 中 |
 | 驱动崩溃自动重连 | init 检测驱动崩溃 → respawn → 客户端 close 旧 fd → 循环 open 重连 | 低 |

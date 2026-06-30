@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include "common/ioctl.h"
 
-// ===================== Syscall numbers (NR_SYSCALL=63, 0-62 continuous) =====================
+// ===================== Syscall numbers (NR_SYSCALL=60, 0-59 continuous) =====================
 #define SYS_GETPID       0
 #define SYS_YIELD        1
 #define SYS_RECV         2
@@ -14,63 +14,60 @@
 #define SYS_IRQ_BIND     5
 #define SYS_EXIT         6
 #define SYS_WAITPID      7
-// SYS_SPAWN (8) removed — use fork+execve
-#define SYS_MMAP         9
-#define SYS_MUNMAP       10
-#define SYS_SHM_CREATE   11
-#define SYS_SHM_ATTACH   12
-#define SYS_PIPE         13
-#define SYS_WRITE        14
-#define SYS_READ         15
-#define SYS_CLOSE        16
-#define SYS_NOTIFY       17
-#define SYS_GETTIME      18
-#define SYS_CLOCK        19
-#define SYS_MSG          20
-#define SYS_MSG_RESP     21
-#define SYS_IOPERM       22
-#define SYS_DUP2         23
-#define SYS_FCNTL        24
-#define SYS_DMA_ALLOC    25
-#define SYS_DMA_FREE     26
-#define SYS_PCI_DEV_INFO 27
-#define SYS_BLOCK_ASYNC  28
-#define SYS_INSTALL_FD   29
-#define SYS_SOCKET       30
-#define SYS_BIND         31
-#define SYS_LISTEN       32
-#define SYS_ACCEPT       33
-#define SYS_CONNECT      34
-#define SYS_SOCKETPAIR   35
-#define SYS_SENDMSG      36
-#define SYS_RECVMSG      37
-#define SYS_SHUTDOWN     38
-#define SYS_POLL         39
-#define SYS_LSEEK        40
-#define SYS_MEMFD_CREATE 41
-#define SYS_FTRUNCATE    42
-#define SYS_KILL         43
-#define SYS_SIGACTION    44
-#define SYS_SIGRETURN    45
-#define SYS_DEBUG_MEMSTAT 46
+#define SYS_MMAP         8
+#define SYS_MUNMAP       9
+#define SYS_PIPE         10
+#define SYS_WRITE        11
+#define SYS_READ         12
+#define SYS_CLOSE        13
+#define SYS_NOTIFY       14
+#define SYS_GETTIME      15
+#define SYS_CLOCK        16
+#define SYS_MSG          17
+#define SYS_MSG_RESP     18
+#define SYS_IOPERM       19
+#define SYS_DUP2         20
+#define SYS_FCNTL        21
+#define SYS_DMA_ALLOC    22
+#define SYS_DMA_FREE     23
+#define SYS_PCI_DEV_INFO 24
+#define SYS_BLOCK_ASYNC  25
+#define SYS_INSTALL_FD   26
+#define SYS_SOCKET       27
+#define SYS_BIND         28
+#define SYS_LISTEN       29
+#define SYS_ACCEPT       30
+#define SYS_CONNECT      31
+#define SYS_SOCKETPAIR   32
+#define SYS_SENDMSG      33
+#define SYS_RECVMSG      34
+#define SYS_SHUTDOWN     35
+#define SYS_POLL         36
+#define SYS_LSEEK        37
+#define SYS_MEMFD_CREATE 38
+#define SYS_FTRUNCATE    39
+#define SYS_KILL         40
+#define SYS_SIGACTION    41
+#define SYS_SIGRETURN    42
+#define SYS_DEBUG_MEMSTAT 43
 
 // ===================== VFS syscall numbers =====================
-#define SYS_OPEN        47
-#define SYS_STAT        48
-#define SYS_MKDIR       49
-#define SYS_UNLINK      50
-#define SYS_RMDIR       51
-#define SYS_DEV_CREATE  52
-#define SYS_GETDENTS    53
-#define SYS_IOCTL       54
-#define SYS_FSTAT       55
-#define SYS_FDEV_PID    56
-#define SYS_FORK        57
-#define SYS_EXECVE      58
-#define SYS_SETSID      59
-#define SYS_SETPGID     60
-#define SYS_GETPGID     61
-#define SYS_GETSID      62
+#define SYS_OPEN        44
+#define SYS_STAT        45
+#define SYS_MKDIR       46
+#define SYS_UNLINK      47
+#define SYS_RMDIR       48
+#define SYS_DEV_CREATE  49
+#define SYS_GETDENTS    50
+#define SYS_IOCTL       51
+#define SYS_FSTAT       52
+#define SYS_FDEV_PID    53
+#define SYS_FORK        54
+#define SYS_EXECVE      55
+#define SYS_SETSID      56
+#define SYS_SETPGID     57
+#define SYS_GETPGID     58
+#define SYS_GETSID      59
 
 // ===================== recv_msg (shared between kernel and user) =====================
 #define RECV_IRQ    0

@@ -105,7 +105,7 @@ static void parse_mcfg(const acpi_mcfg_t *mcfg) {
 
 __attribute__((no_sanitize("kernel-address")))
 void acpi_init(uint64_t rsdp_phys) {
-  printk(LOG_INFO, "acpi_init: rsdp_phys=0x%016X\n", rsdp_phys);
+  printk(LOG_INFO, "acpi_init: rsdp_phys=0x%016lX\n", rsdp_phys);
 
   // 1. Map RSDP (ACPI tables in RAM, already mapped by extend_mapping)
   uint64_t rsdp_virt = rsdp_phys + VMA_BASE;
@@ -127,7 +127,7 @@ void acpi_init(uint64_t rsdp_phys) {
     return;
   }
 
-  printk(LOG_INFO, "acpi: RSDP valid, revision=0x%016X\n", rsdp->revision);
+  printk(LOG_INFO, "acpi: RSDP valid, revision=%u\n", rsdp->revision);
 
   // 4. Follow XSDT or RSDT
   uint64_t sdt_phys = 0;
@@ -142,17 +142,17 @@ void acpi_init(uint64_t rsdp_phys) {
   const acpi_sdt_header_t *sdt_hdr = (const acpi_sdt_header_t *)xsdt_virt;
   xsdt_entry_count = (sdt_hdr->length - sizeof(acpi_sdt_header_t)) / xsdt_entry_size;
 
-  printk(LOG_INFO, "acpi: SDT at 0x%016X entries=0x%016X\n", sdt_phys, xsdt_entry_count);
+  printk(LOG_INFO, "acpi: SDT at 0x%016lX entries=%u\n", sdt_phys, xsdt_entry_count);
 
   // 5. Parse MADT
   void *madt_ptr = acpi_find_table("APIC");
   if (madt_ptr) {
     parse_madt((const struct acpi_madt *)madt_ptr);
-    printk(LOG_INFO, "acpi: MADT lapic=0x%016X ioapic=0x%016X gsi_base=0x%016X ncpus=%u iso=%u\n",
+    printk(LOG_INFO, "acpi: MADT lapic=0x%016lX ioapic=0x%016lX gsi_base=0x%08X ncpus=%u iso=%u\n",
                    g_madt.lapic_base, g_madt.ioapic_base, g_madt.ioapic_gsi_base,
                    g_madt.ncpus, g_madt.num_iso);
     for (uint32_t i = 0; i < g_madt.num_iso; i++) {
-      printk(LOG_INFO, "  ISO: irq=0x%016X gsi=0x%016X low=%d level=%d\n",
+      printk(LOG_INFO, "  ISO: irq=%u gsi=%u low=%d level=%d\n",
                      g_madt.iso[i].irq, g_madt.iso[i].gsi,
                      g_madt.iso[i].active_low ? 1 : 0,
                      g_madt.iso[i].level_triggered ? 1 : 0);
@@ -165,7 +165,7 @@ void acpi_init(uint64_t rsdp_phys) {
   void *mcfg_ptr = acpi_find_table("MCFG");
   if (mcfg_ptr) {
     parse_mcfg((const struct acpi_mcfg *)mcfg_ptr);
-    printk(LOG_INFO, "acpi: MCFG ecam_base=0x%016X bus=0x%016X-0x%016X\n",
+    printk(LOG_INFO, "acpi: MCFG ecam_base=0x%016lX bus=%u-%u\n",
                    g_mcfg.ecam_base, g_mcfg.start_bus, g_mcfg.end_bus);
   } else {
     printk(LOG_WARN, "acpi: MCFG not found\n");

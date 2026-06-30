@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-// Disk and FS shared memory are now dynamic (sys_shm_create/sys_shm_attach)
+// Disk and FS shared memory are now dynamic (memfd_create + ftruncate)
 // KBD/KMS shared memory is also dynamic
 // Internal offsets within each SHM region:
 
@@ -76,8 +76,9 @@ typedef struct fs_shm_header {
 } fs_shm_header_t;
 
 // ===================== Driver shared page layout =====================
-// One 4K page created by kbd_driver via sys_shm_create(4096),
-// attached by terminal via sys_shm_attach(sys_lookup_dev(DEV_KBD)).
+// One 4K page created by kbd_driver via memfd_create + ftruncate,
+// bound to /dev/kbd inode via device_register_shm. terminal accesses
+// via open("/dev/kbd") + mmap(MAP_SHARED).
 //
 // Offset 0:   driver_shm_header (8 bytes)
 // Offset 8:   kbd ring buffer (head + tail + msgs[8] = 72 bytes, padded to 128)
@@ -107,13 +108,13 @@ typedef struct kbd_ring {
 } kbd_ring_t;
 
 // ===================== USB HID shared memory =====================
-// 1 page (4KB) pre-allocated by kernel xHCI init, attached by kbd_driver
-// via sys_shm_attach(USB_HID_SHM_ID, 1) (kernel SHM mode).
+// 1 page (4KB) allocated by kernel xHCI init via shm_create_internal(1),
+// registered as /dev/usb_hid via devtmpfs_create. kbd_driver opens it
+// via open("/dev/usb_hid") + mmap(MAP_SHARED).
 //
 // Layout: 32B header + 4 sub-rings (keyboard/mouse/gamepad/touchpad)
 // Each sub-ring: 100 slots × 10 bytes = 1000 bytes
 
-#define USB_HID_SHM_ID     1    // kernel SHM ID for sys_shm_attach
 #define USB_HID_SHM_MAGIC  0x55484944  // "UHID"
 #define USB_HID_SHM_VERSION 1
 

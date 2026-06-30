@@ -207,7 +207,7 @@ static struct dev_ops serial_ops = {
 };
 
 void serial_dev_register(void) {
-    int rc = devtmpfs_create("serial", DEV_SERIAL, &serial_ops);
+    int rc = devtmpfs_create("serial", DEV_SERIAL, &serial_ops, NULL);
     if (rc != 0) {
         printk(LOG_ERROR, "serial_dev_register: failed (rc=%d)\n", rc);
     }

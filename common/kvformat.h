@@ -13,7 +13,7 @@ extern "C" {
  * Supports: %%, %c, %s, %d, %u, %o, %x, %X, %p
  * Flags:  '-' (left align), '0' (zero pad)
  * Width:  numeric digits after '%' / '%0'
- * Length: 'l' (long)
+ * Length: 'l' (long), 'll' (long long), 'z' (size_t)
  *
  * Calls putc(c, arg) for each output character.
  * Returns total character count.
