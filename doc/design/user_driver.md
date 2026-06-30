@@ -17,23 +17,25 @@
 
 | ELF | PID | IOPL | 功能 | SHM 角色 |
 |-----|-----|------|------|---------|
-| kbd_driver | 动态 | 0 | 键盘翻译推送（USB HID SHM → kbd_ring SHM） | open("/dev/usb_hid")+mmap 读 HID SHM，memfd_create 创建 kbd_ring SHM + dev_create 关联到 /dev/kbd |
-| terminal | 动态 | 0 | VT100 终端 + 输入分发 + 显示渲染 | open("/dev/kbd")+mmap 读 kbd SHM |
+| kbd_driver | 动态 | 0 | 键盘翻译推送（USB HID SHM → input SHM ring） | open("/dev/usb_hid_kbd")+mmap 读 HID SHM；memfd_create 创建 input SHM + device_register_shm 绑定到 /dev/kbd inode |
+| terminal | 动态 | 0 | VT100 终端 + 输入分发 + 显示渲染 | open("/dev/kbd")+INPUT_BIND+mmap(MAP_SHARED, kbd_fd) 读 input SHM |
 | fs_driver | 动态 | 0 | FAT32 文件系统 | memfd_create 创建 FS SHM，SCM_RIGHTS 传 fd |
 | shell | 动态 | 0 | 命令行交互 | SCM_RIGHTS 接收 FS SHM fd |
 
-设备注册/发现：`device_register(dev_type)` 注册 + `open("/dev/xxx")` 打开设备节点，设备类型定义在 common/dev.h（DEV_KBD=2, DEV_KMS=3, DEV_BLOCK=4, DEV_TERMINAL=5, DEV_SERIAL=6, DEV_PTMX=7, DEV_PTS_SLAVE=8）。
+设备注册/发现：`device_register(name)` 注册 + `open("/dev/xxx")` 打开设备节点，设备类型定义在 common/dev.h（DEV_KBD=2, DEV_KMS=3, DEV_BLOCK=4, DEV_TERMINAL=5, DEV_SERIAL=6, DEV_PTMX=7, DEV_PTS_SLAVE=8）。
 
 ### SHM IPC 拓扑
 
-所有驱动间 IPC 统一使用共享内存，对齐 Linux memfd + 设备 mmap 模型。数据结构定义在 common/shm.h。
+所有驱动间 IPC 统一使用共享内存，对齐 Linux memfd + 设备 mmap 模型。数据结构定义在 common/shm.h 和 common/input.h。
 
 | SHM Region | 创建者 | 大小 | 接入方式 | 内容 |
 |------------|--------|------|---------|------|
-| USB HID SHM | 内核 xhci_init（shm_create_internal + devtmpfs_create） | 1 页 | kbd_driver: `open("/dev/usb_hid")` + `mmap` | usb_hid_shm_header + 4 sub-rings（keyboard/mouse/gamepad/touchpad） |
-| KBD SHM | kbd_driver（memfd_create + ftruncate + dev_create） | 1 页 | terminal: `open("/dev/kbd")` + `mmap` | driver_shm_header + kbd_ring(8 slots) + sleeping flags |
+| USB HID SHM | 内核 xhci_init（shm_create_internal + devtmpfs_create） | 1 页 | kbd_driver: `open("/dev/usb_hid_kbd")` + `mmap` | usb_hid_shm_header + 4 sub-rings（keyboard/mouse/gamepad/touchpad） |
+| input SHM | kbd_driver（memfd_create + ftruncate + device_register_shm） | 1 页 | terminal: `open("/dev/kbd")` + `INPUT_BIND` + `mmap(MAP_SHARED, fd)` | input_shm_header_t + input_event_t ring（128 slots，evdev-style） |
 | Disk SHM | 内核 AHCI | — | fs_driver | disk 请求/响应（同步 syscall 模式） |
 | FS SHM | fs_driver（memfd_create + ftruncate） | 4 页 | shell: SCM_RIGHTS 传 fd | fs_shm_header + fs_req_shm + fs_resp_shm |
+
+input SHM 采用 Direction A：driver 创建并绑定到 /dev/kbd inode，consumer 通过 open+mmap 从 inode->shm 获取映射，无需跨进程 fd 传递。notify 无条件广播给所有 bound consumer pid（无 sleeping flag）。
 
 Sleeping flag 协议和驱动工作流详见 [driver_workflow.md](driver_workflow.md)。
 
@@ -48,18 +50,19 @@ Sleeping flag 协议和驱动工作流详见 [driver_workflow.md](driver_workflo
 
 ### 各驱动工作流摘要
 
-**kbd_driver**（driver/kbd_driver.cc）— RECV_NOTIFY 驱动：
+**kbd_driver**（driver/kbd_driver.cc）— RECV_NOTIFY 驱动（基于 input_driver_run 库）：
 
-1. `device_register(DEV_KBD)` → `open("/dev/kbd")` 可发现
-2. `open("/dev/usb_hid")` + `mmap(...)` → 映射内核 HID SHM → `get_keycode_init()`
-3. 主循环：`sys_recv` → RECV_NOTIFY → `get_keycode()` 循环 → `kbd_push()` → 写 kbd_ring → 检查 consumer_sleeping → notify terminal
-4. RECV_REQ：处理 KBD_IOCTL_BIND/UNBIND（首次 bind 时 memfd_create + ftruncate 创建 kbd_ring SHM，dev_create("/dev/kbd", DEV_KBD, &kbd_ops, shm_fd) 关联 SHM）
+1. `input_driver_run(INPUT_DEV_KBD, "kbd", "/dev/usb_hid_kbd", on_key_event, kbd_hid_init)` 进入主循环，库负责：
+   - `open("/dev/usb_hid_kbd")` + `mmap` → 映射内核 HID SHM → `kbd_hid_init` → `get_keycode_init()`
+   - `memfd_create("input_ring")` + `ftruncate(shm_fd, 4096)` 创建 input SHM，初始化 input_shm_header_t，`device_register_shm("kbd", shm_fd)` 绑定到 /dev/kbd inode
+2. 主循环：`sys_recv` → EINTR（ISR wake）→ `on_key_event()` 循环填 input_event_t → `broadcast_event()` 写 input SHM ring + notify 所有 bound consumers
+3. RECV_REQ：处理 INPUT_BIND（注册 consumer pid 到 `consumers[]`）/ INPUT_UNBIND
 
 **terminal**（driver/terminal.cc）— pipe + SHM 驱动：
 
-1. `open("/dev/kbd")` → `ioctl(fd, KBD_IOCTL_BIND)` → `mmap(fd)` 从 inode->shm 映射 kbd SHM
-2. `display_client_init()` → `open("/dev/kms")` + `ioctl(KMS_IOCTL_CREATE_BUF)` + `mmap` back buffer
-3. 键盘输入：读 kbd_ring → `sys_write(1, ...)` 写 stdin pipe → shell 的 fd 0 收到
+1. `display_client_init()` → `open("/dev/kms")` + `ioctl(KMS_IOCTL_CREATE_BUF)` + `mmap` back buffer
+2. `open("/dev/kbd")` → `ioctl(kbd_fd, INPUT_BIND, &arg)`（arg.shm_fd=-1，driver 注册 consumer pid）→ `mmap(MAP_SHARED, kbd_fd)` 从 inode->shm 映射 input SHM
+3. 键盘输入：`input_client_poll(input_shm, evs, 64)` drain ring → `input_event_to_ascii` → ldisc → `sys_write(1, ...)` 写 stdin pipe → shell 的 fd 0 收到
 4. Shell 输出：`sys_read(0, ...)` 从 stdout pipe 读 → VT100 状态机 → 渲染到 back buffer → `display_client_flush()` → `ioctl(KMS_IOCTL_FLIP)`
 
 **fs_driver**（driver/fs_driver.cc）— SHM + notify 驱动：

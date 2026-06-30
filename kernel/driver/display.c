@@ -8,7 +8,6 @@
 #include "kernel/xcore/mem/slab.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/utils.h"
-#include "common/dev.h"
 #include "common/errno.h"
 #include <string.h>
 #ifdef PERF
@@ -22,7 +21,7 @@ struct display_state g_display;
 // KMS device ops (driver_pid=0 means kernel device)
 static struct dev_ops kms_dev_ops = {
     .driver_pid  = 0,
-    .device_type = DEV_KMS,
+    .is_block    = false,
     .ioctl       = display_ioctl,
     .mmap        = display_mmap_handler_ioctl,
 };
@@ -316,7 +315,7 @@ uint64_t display_mmap_handler(xtask_t *proc, size_t size) {
 // ===================== display_dev_register =====================
 
 void display_dev_register(void) {
-    int rc = devtmpfs_create("kms", DEV_KMS, &kms_dev_ops, NULL);
+    int rc = devtmpfs_create("kms", &kms_dev_ops, NULL);
     if (rc != 0) {
         printk(LOG_ERROR, "display_dev_register: failed (rc=%d)\n", rc);
     } else {

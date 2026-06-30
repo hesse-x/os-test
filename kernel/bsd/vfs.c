@@ -18,7 +18,6 @@
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/trap.h"
 #include "common/errno.h"
-#include "common/dev.h"
 #include "common/stat.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/smp.h"
@@ -39,7 +38,7 @@ void vfs_init(void) {
         rc = fat32_init();
         if (rc == 0) {
             printk(LOG_INFO, "vfs_init: FAT32 mounted on port %d\n", try_ports[pi]);
-            devtmpfs_create("sda", DEV_BLOCK, &blk_dev_ops, NULL);
+            devtmpfs_create("sda", &blk_dev_ops, NULL);
             break;
         }
     }
@@ -167,13 +166,12 @@ int64_t sys_rmdir(int64_t arg1, int64_t _u1, int64_t _u2,
     return 0;
 }
 
-/* sys_dev_create(name, dev_type, shm_fd) — SYS_DEV_CREATE
- * Kernel auto-fills driver_pid=current_task->pid, all callbacks NULL (user-space driver) */
+/* sys_dev_create(name, shm_fd) — SYS_DEV_CREATE
+ * Kernel auto-fills driver_pid=current_task->pid, is_block=false, callbacks NULL (user-space driver) */
 int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3,
                         int64_t _u1, int64_t _u2, int64_t _u3) {
     const char __user *uname = (const char __user * __force)arg1;
-    int dev_type = (int)arg2;
-    int shm_fd = (int)arg3;
+    int shm_fd = (int)arg2;
     struct shm *dev_shm = NULL;
 
     if (!uname) return (int64_t)-EFAULT;
@@ -186,7 +184,7 @@ int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3,
 
     // Force driver_pid to current process — user-space can't set this
     kops->driver_pid = current_task->pid;
-    kops->device_type = dev_type;
+    kops->is_block = false;
     // All callbacks remain NULL for user-space drivers (IPC proxy handles requests)
 
     // Resolve shm_fd to struct shm* (if provided)
@@ -208,14 +206,11 @@ int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3,
         spin_unlock(fdlk);
     }
 
-    int rc = devtmpfs_create(name, dev_type, kops, dev_shm);
+    int rc = devtmpfs_create(name, kops, dev_shm);
     if (rc != 0) {
         kfree(kops);
         return rc;
     }
-
-    // isr_driver_pid is populated inside devtmpfs_create for user-space drivers
-    // (no separate register_dev call needed)
 
     return 0;
 }

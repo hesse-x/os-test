@@ -408,12 +408,14 @@ void test_ioctl_kms_create_buf_arg(void) {
 void test_ioctl_kbd_bind(void) {
     int fd = open("/dev/kbd", O_RDWR);
     if (fd >= 0) {
-        struct kbd_ioctl_bind_arg arg;
-        memset(&arg, 0, sizeof(arg));
-        arg.pid = getpid();
+        /* Direction A: driver owns SHM, consumer just registers pid for notify.
+         * No memfd_create / shm_fd passing. */
+        struct input_bind_arg arg;
+        arg.shm_fd = -1;
+        arg.result = -1;
 
-        int r = ioctl(fd, KBD_IOCTL_BIND, &arg);
-        /* If kbd_driver is running: should succeed or -EBUSY (already bound) */
+        int r = ioctl(fd, INPUT_BIND, &arg);
+        /* If kbd_driver is running: should succeed */
         /* If kbd_driver is not running: -ESRCH or similar */
         if (r == 0) {
             TEST_ASSERT_EQUAL_INT(0, arg.result);

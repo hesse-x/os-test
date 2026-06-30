@@ -22,16 +22,10 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/process.h>
-#include "common/shm.h"
-#include "common/dev.h"
 #include "common/macro.h"
 #include "input.h"
+#include "common/input.h"
 #include "driver/display.h"
-
-// ===================== Shared memory (kbd only) =====================
-
-static volatile kbd_ring *kbd;
-static volatile driver_shm_header *shm_hdr;
 
 static int master_fd = -1;
 static pid_t shell_pid = -1;
@@ -324,50 +318,40 @@ static void flush_dirty_cells() {
 
 int main() {
     // 1. Initialize display client (attach display SHM from KMS)
-    printf("terminal: calling display_client_init\n");
     if (display_client_init() < 0) {
         printf("terminal: display_client_init FAILED\n");
-        // Unsupported bpp or no display
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
 
-    // 2. Open KBD device, bind via ioctl, then mmap SHM
-    printf("terminal: opening /dev/kbd\n");
+    // 2. Open /dev/kbd, bind (register pid for notify), mmap driver's SHM via inode.
+    //    Direction A: driver owns SHM and bound it to /dev/kbd inode via
+    //    device_register_shm. Consumer accesses via open + mmap(MAP_SHARED, fd).
     int kbd_fd;
     while ((kbd_fd = open("/dev/kbd", O_RDWR)) < 0) {
-        printf("terminal: open /dev/kbd failed, recv wait\n");
         struct recv_msg m;
         recv(&m, NULL, 0, 1);
     }
-    printf("terminal: /dev/kbd opened fd=%d\n", kbd_fd);
 
-    // Bind via ioctl
-    struct kbd_ioctl_bind_arg bind_arg;
-    for (int i = 0; i < (int)sizeof(bind_arg); i++) ((uint8_t*)&bind_arg)[i] = 0;
-    bind_arg.pid = getpid();
-
-    printf("terminal: calling ioctl KBD_IOCTL_BIND\n");
+    // BIND: register consumer pid (Direction A — no shm_fd passing).
+    struct input_bind_arg bind_arg;
+    bind_arg.shm_fd = -1;
+    bind_arg.result = -1;
     while (1) {
-        int rc = ioctl(kbd_fd, KBD_IOCTL_BIND, &bind_arg);
-        printf("terminal: ioctl BIND rc=%d result=%d\n", rc, bind_arg.result);
+        int rc = ioctl(kbd_fd, INPUT_BIND, &bind_arg);
         if (rc == 0 && bind_arg.result == 0) break;
         struct recv_msg m;
         recv(&m, NULL, 0, 100);
-        // Re-init bind_arg for retry
-        bind_arg.pid = getpid();
+        bind_arg.shm_fd = -1;
+        bind_arg.result = -1;
     }
 
-    // mmap kbd SHM via MAP_SHARED (fd → target_pid → sys_shm_attach)
-    // size=0 is ignored — MAP_SHARED maps the entire driver SHM region
-    printf("terminal: mmap kbd SHM\n");
-    void *shm_ptr = mmap(NULL, 0, PROT_READ | PROT_WRITE, MAP_SHARED, kbd_fd, 0);
-    printf("terminal: mmap SHM returned %p\n", shm_ptr);
-    if (shm_ptr == MAP_FAILED) {
+    // Access driver's SHM through /dev/kbd inode (kernel sys_mmap FD_DEV + ip->shm path).
+    volatile void *input_shm = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                     MAP_SHARED, kbd_fd, 0);
+    if (input_shm == MAP_FAILED) {
+        printf("terminal: mmap /dev/kbd SHM FAILED\n");
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
-    uint64_t shm_addr = (uint64_t)shm_ptr;
-    shm_hdr = (volatile driver_shm_header *)shm_addr;
-    kbd = (volatile kbd_ring *)(shm_addr + KBD_RING_OFFSET);
 
     // 3. Initialize VT100 state from display metadata
     vt.cols = display_cols;
@@ -381,10 +365,9 @@ int main() {
 
     // 4. Allocate cell buffer via mmap
     int cell_bytes = vt.rows * vt.cols * sizeof(struct cell);
-    printf("terminal: mmap cells size=%d\n", cell_bytes);
     cells = (struct cell *)mmap(NULL, cell_bytes, PROT_READ | PROT_WRITE, 0, -1, 0);
-    printf("terminal: mmap cells returned %p\n", cells);
     if (!cells) {
+        printf("terminal: mmap cells FAILED\n");
         while (1) { struct recv_msg m; recv(&m, NULL, 0, 0); }
     }
 
@@ -404,9 +387,7 @@ int main() {
     display_client_flush(0, display_rows);
 
     // 7. Create PTY pair
-    printf("terminal: opening /dev/ptmx\n");
     master_fd = open("/dev/ptmx", O_RDWR);
-    printf("terminal: /dev/ptmx opened fd=%d\n", master_fd);
     if (master_fd < 0) { printf("terminal: failed to open /dev/ptmx\n"); return 1; }
 
     // 8. Get PTY index for dynamic slave path
@@ -416,26 +397,19 @@ int main() {
     snprintf(pts_path, sizeof(pts_path), "/dev/pts%d", pty_idx);
 
     // 9. Fork shell — child opens slave, dup2 0/1/2, exec
-    printf("terminal: forking shell\n");
     shell_pid = fork();
     if (shell_pid == 0) {
-        write(2, "shell_child: forked, opening slave\n", 35);
         int slave_fd = open(pts_path, O_RDWR);
-        write(2, "shell_child: slave_fd=", 22);
-        { char tmp[8]; int n = snprintf(tmp, 8, "%d", slave_fd); write(2, tmp, n); write(2, "\n", 1); }
         if (slave_fd < 0) { write(2, "shell: failed to open slave\n", 29); _exit(127); }
-        write(2, "shell_child: dup2 0/1/2\n", 24);
         dup2(slave_fd, 0); dup2(slave_fd, 1); dup2(slave_fd, 2);
         if (slave_fd > 2) close(slave_fd);
         close(master_fd);
-        write(2, "shell_child: calling execve /usr/bin/shell\n", 43);
         execve("/usr/bin/shell", NULL, NULL);
         write(2, "shell_child: execve FAILED\n", 28);
         _exit(127);
     }
 
     // 10. Parent: master_fd non-blocking
-    printf("terminal: shell forked pid=%d, entering main loop\n", shell_pid);
     fcntl(master_fd, F_SETFL, O_RDWR | O_NONBLOCK);
 
     // 11. Set PTY winsize to actual display dimensions
@@ -453,10 +427,14 @@ int main() {
         int did_work = 0;
         struct termios t;
         ioctl(master_fd, TCGETS, &t);
-        // kbd_ring → ldisc → master write
-        while (kbd->head != kbd->tail) {
-            char ch = (char)kbd->msgs[kbd->tail].ch;
-            kbd->tail = (kbd->tail + 1) % 8;
+        // input_event → ASCII → ldisc → master write
+        input_event_t evs[64];
+        int nev = input_client_poll(input_shm, evs, 64);
+        for (int ei = 0; ei < nev; ei++) {
+            uint8_t ascii_buf[4];
+            int ascii_len = input_event_to_ascii(&evs[ei], ascii_buf, sizeof(ascii_buf));
+            if (ascii_len <= 0) continue;  // non-ASCII (modifier/extended) — ldisc handles via caller
+            char ch = (char)ascii_buf[0];
 
             // Get foreground pgid for signal delivery
             pid_t fg_pgid = shell_pid;
@@ -515,8 +493,6 @@ int main() {
             did_work = 1;
         }
 
-        shm_hdr->consumer_sleeping = 0;
-
         // Shell output ← master read → VT100 + serial echo
         char buf[4096];
         int64_t n = read(master_fd, buf, sizeof(buf));
@@ -556,11 +532,13 @@ int main() {
         flush_dirty_cells();
 
         if (!did_work) {
-            shm_hdr->consumer_sleeping = 1;
-            if (kbd->head != kbd->tail) { shm_hdr->consumer_sleeping = 0; continue; }
+            // Sleeping/race check managed locally via head/tail re-read (no cross-process flag).
+            if (input_shm) {
+                volatile input_shm_header_t *hdr = (volatile input_shm_header_t *)input_shm;
+                if (hdr->head != hdr->tail) continue;  // race: new event arrived
+            }
             struct recv_msg m;
             recv(&m, NULL, 0, 1);
-            shm_hdr->consumer_sleeping = 0;
         }
     }
     return 0;

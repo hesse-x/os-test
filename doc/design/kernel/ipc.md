@@ -477,18 +477,19 @@ void shm_put(struct shm *shm) {
 
 ### 内核 SHM（USB HID）注册方式
 
-内核初始化时 `shm_create_internal(1)` 分配 USB HID SHM，通过 `devtmpfs_create("usb_hid", DEV_USB_HID, &usb_hid_ops, shm)` 注册到 devtmpfs。kbd_driver 通过 `open("/dev/usb_hid")` + `mmap` 访问，不再使用 `register_kernel_shm` / `sys_shm_attach`。
+内核初始化时 `shm_create_internal(1)` 分配 USB HID SHM，通过 `devtmpfs_create("usb_hid_kbd", DEV_USB_HID, &usb_hid_ops, shm)` 注册到 devtmpfs。kbd_driver 通过 `open("/dev/usb_hid_kbd")` + `mmap` 访问，不再使用 `register_kernel_shm` / `sys_shm_attach`。
 
 ### 用户态驱动 SHM 关联
 
-用户态驱动通过 `dev_create` 将 memfd 关联到设备 inode：
+用户态驱动通过 `sys_dev_create` 将 memfd 关联到设备 inode：
 
 ```c
-int sys_dev_create(const char *name, int dev_type, int shm_fd);
+int sys_dev_create(const char *name, int shm_fd);
 ```
 
 - `shm_fd == -1`：无 SHM 关联
 - `shm_fd >= 0`：校验 fd 类型为 FD_SHM，从 fd_table 取出 struct shm，`shm_get(shm)` 增加引用，设置 `inode->shm = shm`
+- 内核自动填充 `dev_ops.driver_pid = current_task->pid`（调用者即 driver），callbacks 全 NULL（用户态驱动通过 ioctl REQ 代理）
 
 consumer 通过 `open("/dev/xxx")` + `mmap(fd, ...)` 访问，mmap 从 `inode->shm` 取物理页映射。这是微内核下 `.mmap` 回调的替代——用户态驱动无法提供内核回调，通过 shm_fd 声明"mmap 时映射这块内存"。
 
@@ -501,7 +502,7 @@ mmap 设备 fd 时 fd 类型不变（仍为 FD_DEV），用户态驱动的 mmap 
 - sys_memfd_create(name, flags)（syscall #38）— 返回 fd，size=0；MFD_CLOEXEC 存入 fd flags；MFD_ALLOW_SEALING 允许后续加 seal
 - sys_ftruncate(fd, size)（syscall #39）— 扩大：逐页分配新物理页；缩小：释放超出的物理页（受 F_SEAL_SHRINK 限制）
 - sys_mmap(addr, size, prot, flags, fd, offset)（syscall #8）— MAP_SHARED+fd≥0 映射 SHM fd；MAP_ANONYMOUS 匿名映射；MAP_PHYSICAL 物理地址映射；设备 fd 从 inode->shm 映射
-- sys_dev_create(name, dev_type, shm_fd)（syscall #49）— 创建设备节点，shm_fd=-1 无 SHM，shm_fd≥0 关联 SHM
+- sys_dev_create(name, shm_fd)（syscall #49）— 创建设备节点，shm_fd=-1 无 SHM，shm_fd≥0 关联 SHM；内核自动填充 driver_pid
 
 ### memfd_create + ftruncate + sealing
 

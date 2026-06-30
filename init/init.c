@@ -49,7 +49,7 @@ int main(void) {
 
     printf("init: started\n");
 
-    // 2. Spawn kbd_driver, wait for DEV_KBD
+    // 2. Spawn kbd_driver, wait for /dev/kbd
     printf("init: spawning kbd_driver\n");
     {
         pid_t p = spawn("/driver/kbd.dev");

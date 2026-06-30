@@ -2,7 +2,6 @@
 #define USER_INPUT_H
 
 #include <stdint.h>
-#include "common/input.h"
 
 // Modifier key flags
 #define MOD_SHIFT  0x01
@@ -52,26 +51,44 @@ enum input_key {
     BTN_BASE = 0x100,
 };
 
-// REQ opcodes for kbd_driver (legacy, for req_fd compatibility)
-#define KBD_REQ_BIND    1
-#define KBD_REQ_UNBIND  2
+// evdev-aligned button/axis codes (linux/input-event-codes.h subset)
+#define BTN_LEFT     0x110
+#define BTN_RIGHT    0x111
+#define BTN_MIDDLE   0x112
+#define BTN_TOUCH    0x14A
+#define BTN_TOOL_FINGER 0x14B
 
-// ioctl commands for kbd_driver (_IOC-encoded, from common/ioctl.h)
-// KBD_IOCTL_BIND: _IOWR, arg = struct kbd_ioctl_bind_arg (8B)
-// KBD_IOCTL_UNBIND: _IO, no arg
+#define REL_X        0x00
+#define REL_Y        0x01
+#define REL_WHEEL    0x08
+
+#define ABS_X        0x00
+#define ABS_Y        0x01
+#define ABS_PRESSURE 0x18
 
 #include "common/ioctl.h"
+#include "common/input.h"
 
-// Legacy REQ structures (for req_fd compatibility)
-struct kbd_req_request {
-    uint32_t opcode;
-    uint32_t pid;
-    uint8_t  reserved[48];
-};
+// ===================== libinput_client public API =====================
 
-struct kbd_req_reply {
-    int32_t  result;
-    uint8_t  reserved[60];
-};
+// Poll ring: drain all pending events into caller buffer (pure drain, no sleeping flag).
+// Returns number of events read (0 if ring empty).
+int input_client_poll(volatile void *shm, input_event_t *events, int max_events);
+
+// Helper: input_event → basic single-byte ASCII (lowercase letters, digits, symbols without shift,
+// space/enter/bs/tab/esc). shift/caps/ESC-seq/Ctrl combos are caller's responsibility.
+// Returns bytes written to buf (0 = no basic ASCII mapping for this event).
+int input_event_to_ascii(const input_event_t *ev, uint8_t *buf, int buf_len);
+
+// ===================== libinput_driver public API =====================
+
+// Init and enter main loop (does not return).
+// on_event: each callback fills one event into *ev, returns 1=has event / 0=HID empty;
+// library loops calling it, and after each fill writes to all consumer rings + unconditional notify.
+// hid_init: optional callback invoked after the library mmaps the HID SHM, receives the shm address.
+void input_driver_run(uint32_t device_type, const char *dev_name,
+                      const char *hid_dev_path,
+                      int (*on_event)(input_event_t *ev),
+                      void (*hid_init)(void *hid_shm));
 
 #endif // USER_INPUT_H

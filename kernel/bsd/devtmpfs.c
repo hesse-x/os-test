@@ -8,7 +8,6 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/mem/slab.h"
 #include "common/errno.h"
-#include "common/dev.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include <stddef.h>
@@ -26,8 +25,6 @@ static struct dev_entry *dev_list = NULL;
 static int dev_count = 0;
 static spinlock_t devtmpfs_lock = SPINLOCK_INIT;
 
-// ISR-facing driver PID lookup (replaces dev_table for ISR wake)
-static pid_t isr_driver_pid[DEV_TYPE_MAX];
 static bool devtmpfs_initialized = false;
 
 void devtmpfs_init(void) {
@@ -38,8 +35,6 @@ void devtmpfs_init(void) {
     spin_lock(&devtmpfs_lock);
     dev_list = NULL;
     dev_count = 0;
-    for (int i = 0; i < DEV_TYPE_MAX; i++)
-        isr_driver_pid[i] = 0;
     for (int i = 0; i < MAX_DEV_ENTRIES; i++) {
         dev_entries[i].name[0] = '\0';
         dev_entries[i].ip = NULL;
@@ -68,7 +63,7 @@ struct inode *devtmpfs_lookup(const char *name) {
     return NULL;
 }
 
-int devtmpfs_create(const char *name, int dev_type, struct dev_ops *ops, struct shm *shm) {
+int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
     WARN_ON(!devtmpfs_initialized);  // catch order bugs: create before init
     if (dev_count >= MAX_DEV_ENTRIES) return -ENOMEM;
 
@@ -111,12 +106,8 @@ int devtmpfs_create(const char *name, int dev_type, struct dev_ops *ops, struct 
     dev_list = &dev_entries[slot];
     dev_count++;
 
-    // Populate ISR driver PID table for user-space drivers
-    if (ops->driver_pid > 0)
-        isr_driver_pid[ops->device_type] = ops->driver_pid;
-
     spin_unlock(&devtmpfs_lock);
-    printk(LOG_INFO, "devtmpfs: created /dev/%s (type=%d)\n", name, dev_type);
+    printk(LOG_INFO, "devtmpfs: created /dev/%s\n", name);
     return 0;
 }
 
@@ -176,9 +167,6 @@ void devtmpfs_cleanup_pid(pid_t pid) {
             if (ops->driver_pid == pid) {
                 /* Remove from list */
                 *pp = e->next;
-                /* Clear ISR driver PID table entry */
-                if (ops->driver_pid > 0)
-                    isr_driver_pid[ops->device_type] = 0;
                 /* Free kmalloc'd dev_ops (user-space driver) */
                 if (ops->driver_pid > 0) kfree(ops);
                 /* Free inode */
@@ -192,11 +180,6 @@ void devtmpfs_cleanup_pid(pid_t pid) {
         pp = &e->next;
     }
     spin_unlock(&devtmpfs_lock);
-}
-
-pid_t isr_lookup_driver(uint32_t dev_type) {
-    if (dev_type >= DEV_TYPE_MAX) return 0;
-    return isr_driver_pid[dev_type];
 }
 
 void devtmpfs_remove(const char *name) {

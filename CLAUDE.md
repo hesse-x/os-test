@@ -210,7 +210,7 @@ kernel/
 | `syscall.md` | 系统调用（SYSCALL/SYSRET、syscall 编号表、Xcore/BSD 分发） | BSD |
 | `vfs.md` | VFS + 文件系统设计（FAT32 + inode + page cache + devtmpfs） | BSD |
 | `posix.md` | POSIX 接口覆盖现状 | BSD |
-| `thread.md` | 线程设计（CLONE_VM 预留） | BSD/Xcore |
+| `thread.md` | 多线程设计（xtask_t + proc_t + signal_struct + clone + pthread，含 TLS/FPU lazy switch/futex/两级信号） | BSD/Xcore |
 | `pcie.md` | PCIe ECAM 枚举与 BAR 分配 | Driver |
 | `xhci.md` | xHCI USB 控制器驱动 | Driver |
 | `kms.md` | KMS 内核态驱动（display buffer 分配 + req flip + devtmpfs /dev/kms） | Driver |

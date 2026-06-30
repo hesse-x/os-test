@@ -11,7 +11,6 @@
 #include <sys/shm.h>
 #include <sys/device.h>
 #include "common/syscall.h"
-#include "common/dev.h"
 #include "common/errno.h"
 #include "driver/display.h"
 #include "input.h"
@@ -276,7 +275,7 @@ void test_dev_vfs_serial_dup2(void) {
 /* 21. sys_dev_create simplified (2-arg, kernel fills driver_pid) */
 void test_dev_vfs_dev_create(void) {
     /* Create a test user-space device node via sys_dev_create */
-    int r = sys_dev_create("test_dev", DEV_TERMINAL, -1);
+    int r = sys_dev_create("test_dev", -1);
     /* May succeed (0) or fail if name collision / no permission */
     if (r == 0) {
         /* Verify the device node exists */
@@ -297,22 +296,6 @@ void test_dev_vfs_dev_create(void) {
 }
 
 /* ===== Phase 6: dev_table elimination + ISR redesign ===== */
-
-/* 22. isr_lookup_driver: kbd driver registered via devtmpfs (indirect test) */
-void test_dev_vfs_isr_kbd_driver(void) {
-    /* If kbd_driver is running, /dev/kbd should exist */
-    int fd = open("/dev/kbd", O_RDWR);
-    if (fd >= 0) {
-        struct stat st;
-        int r = fstat(fd, &st);
-        TEST_ASSERT_EQUAL_INT(0, r);
-        TEST_ASSERT_TRUE(S_ISCHR(st.st_mode));
-        close(fd);
-    } else {
-        /* kbd_driver may not be running in test env */
-        TEST_ASSERT_TRUE(1);
-    }
-}
 
 /* 23. devtmpfs_cleanup_pid: device nodes removed when driver exits (indirect) */
 void test_dev_vfs_cleanup(void) {
@@ -573,15 +556,17 @@ void test_dev_vfs_kms_ioctl_struct_arg(void) {
     }
 }
 
-/* 37. ioctl KBD_IOCTL_BIND on /dev/kbd (IPC proxy path) */
+/* 37. ioctl INPUT_BIND on /dev/kbd (IPC proxy path) */
 void test_dev_vfs_kbd_ioctl_proxy(void) {
     int fd = open("/dev/kbd", O_RDWR);
     if (fd >= 0) {
-        struct kbd_ioctl_bind_arg arg;
-        memset(&arg, 0, sizeof(arg));
-        arg.pid = getpid();
+        /* Direction A: driver owns SHM, consumer just registers pid for notify.
+         * No memfd_create / shm_fd passing. */
+        struct input_bind_arg arg;
+        arg.shm_fd = -1;
+        arg.result = -1;
 
-        int r = ioctl(fd, KBD_IOCTL_BIND, &arg);
+        int r = ioctl(fd, INPUT_BIND, &arg);
         /* kbd_driver may or may not be running in test env */
         if (r == 0) {
             TEST_ASSERT_EQUAL_INT(0, arg.result);
@@ -637,7 +622,6 @@ int main(void) {
     RUN_TEST(test_dev_vfs_dev_create);
 
     /* Phase 6: dev_table elimination */
-    RUN_TEST(test_dev_vfs_isr_kbd_driver);
     RUN_TEST(test_dev_vfs_cleanup);
 
     /* Phase 7: libc fd_table elimination */

@@ -2,6 +2,7 @@
 #define KERNEL_DEVTMPFS_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "kernel/xcore/xtask.h"    // pid_t
 #include "kernel/bsd/inode.h"
 
@@ -12,7 +13,7 @@ struct xxtask_t;
 
 struct dev_ops {
     pid_t    driver_pid;     // 0 = kernel device, >0 = user-space driver
-    uint32_t device_type;    // DEV_KMS, DEV_SERIAL, etc.
+    bool     is_block;       // true = block device, false = char device
 
     // VFS callbacks (only called when driver_pid == 0)
     int      (*open)(xtask_t *proc, int fd);
@@ -25,11 +26,10 @@ struct dev_ops {
 };
 
 void    devtmpfs_init(void);
-int     devtmpfs_create(const char *name, int dev_type, struct dev_ops *ops, struct shm *shm);
+int     devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm);
 uint64_t devtmpfs_open(xtask_t *proc, const char *name, int flags);
 struct inode *devtmpfs_lookup(const char *name);
 void    devtmpfs_cleanup_pid(pid_t pid);
 void    devtmpfs_remove(const char *name);
-pid_t   isr_lookup_driver(uint32_t dev_type);
 
 #endif

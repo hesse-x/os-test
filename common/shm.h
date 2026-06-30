@@ -75,38 +75,6 @@ typedef struct fs_shm_header {
     uint8_t reserved[8];
 } fs_shm_header_t;
 
-// ===================== Driver shared page layout =====================
-// One 4K page created by kbd_driver via memfd_create + ftruncate,
-// bound to /dev/kbd inode via device_register_shm. terminal accesses
-// via open("/dev/kbd") + mmap(MAP_SHARED).
-//
-// Offset 0:   driver_shm_header (8 bytes)
-// Offset 8:   kbd ring buffer (head + tail + msgs[8] = 72 bytes, padded to 128)
-
-#define KBD_RING_OFFSET  0
-
-typedef struct driver_shm_header {
-    uint8_t kbd_sleeping;      // 1 = kbd_driver is sleeping
-    uint8_t consumer_sleeping;  // 1 = consumer (terminal) is sleeping
-    uint8_t reserved[6];
-} driver_shm_header_t;
-
-typedef struct kbd_msg {
-    uint8_t type;       // 1=key event
-    uint8_t ch;         // ASCII character
-    uint8_t reserved[6];
-} kbd_msg_t;
-
-// KBD ring buffer at offset 0:
-//   driver_shm_header (8B) + head(4B) + tail(4B) + kbd_msg[8] (64B) + padding (48B) = 128B
-typedef struct kbd_ring {
-    struct driver_shm_header header;  // 8 bytes at offset 0
-    uint32_t head;                    // write position (0..7)
-    uint32_t tail;                    // read position (0..7)
-    struct kbd_msg msgs[8];           // 8 slots × 8 bytes = 64 bytes
-    uint8_t padding[48];             // pad to 128 bytes total
-} kbd_ring_t;
-
 // ===================== USB HID shared memory =====================
 // 1 page (4KB) allocated by kernel xHCI init via shm_create_internal(1),
 // registered as /dev/usb_hid via devtmpfs_create. kbd_driver opens it

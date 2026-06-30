@@ -34,7 +34,6 @@
 #include "common/syscall.h"
 #include "common/ioctl.h"
 #include "common/stat.h"
-#include "common/dev.h"
 #include "common/input.h"
 #include "common/shm.h"
 
@@ -1284,6 +1283,21 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
                 copy_from_user(req_data + 4, arg, arg_size);
         }
 
+        // Defensive: warn if ioctl REQ arg carries a cross-process fd that won't
+        // translate. Direction A keeps SHM on the inode (no fd passing), so this
+        // is purely diagnostic — surfaces misconfigured protocols early instead
+        // of silently failing in the driver's mmap(EBADF).
+        if (cmd == INPUT_BIND && (_IOC_DIR(cmd) & _IOC_WRITE)) {
+            int passed_fd = *(int *)(req_data + 4);  // input_bind_arg.shm_fd at offset 0
+            if (passed_fd >= 0) {
+                if (passed_fd >= MAX_FD || !fd_lookup(proc->proc->files, passed_fd)) {
+                    printk(LOG_WARN, "ioctl REQ: INPUT_BIND fd=%d not valid in caller pid=%d "
+                                     "(cross-proc fd passing unsupported; use inode-bound SHM)\n",
+                           passed_fd, proc->pid);
+                }
+            }
+        }
+
         if (target_pid < 0 || target_pid >= MAX_PROC)
             { ret = -(int64_t)ESRCH; goto out; }
         xtask_t *target = &tasks[target_pid];
@@ -1421,7 +1435,7 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2,
         struct inode *ip = f->inode;
         if (!ip) { ret = -(int64_t)EBADF; goto out; }
         ks.st_ino = ip->ino;
-        if (ip->i_priv && ((struct dev_ops *)ip->i_priv)->device_type == DEV_BLOCK)
+        if (ip->i_priv && ((struct dev_ops *)ip->i_priv)->is_block)
             ks.st_mode = S_IFBLK | 0666;
         else
             ks.st_mode = S_IFCHR | 0666;

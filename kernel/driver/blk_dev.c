@@ -26,7 +26,6 @@ int blk_read_sector(uint32_t lba, void *buf) {
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/xcore/xtask.h"
 #include "kernel/driver/bsd_types.h"
-#include "common/dev.h"
 #include "common/errno.h"
 
 static int blk_dev_open(xtask_t *proc, int fd) {
@@ -85,7 +84,7 @@ static ssize_t blk_dev_write(xtask_t *proc, int fd, const void *buf, size_t coun
 
 struct dev_ops blk_dev_ops = {
     .driver_pid  = 0,
-    .device_type = DEV_BLOCK,
+    .is_block    = true,
     .open        = blk_dev_open,
     .close       = blk_dev_close,
     .read        = blk_dev_read,

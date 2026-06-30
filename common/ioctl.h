@@ -38,8 +38,8 @@
 #define KMS_IOCTL_CREATE_BUF  _IOWR('K', 1, char[32])   // unified struct = 32B
 #define KMS_IOCTL_FLIP        _IOWR('K', 2, char[8])
 
-// Keyboard
-#define KBD_IOCTL_BIND        _IOWR('K', 0x11, char[8])  // kbd_ioctl_bind_arg = 8B
-#define KBD_IOCTL_UNBIND      _IO('K', 0x12)
+// Input (generic, evdev-style)
+#define INPUT_BIND            _IOWR('I', 0x01, char[8])   // input_bind_arg = 8B
+#define INPUT_UNBIND          _IO('I', 0x02)
 
 #endif

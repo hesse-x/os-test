@@ -8,7 +8,6 @@
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
 #include "common/errno.h"
-#include "common/dev.h"     // DEV_SERIAL
 #include "common/socket.h"  // POLLIN/POLLOUT
 #include "common/kvformat.h"
 
@@ -198,7 +197,7 @@ static __poll_t serial_dev_poll(xtask_t *proc, int events) {
 
 static struct dev_ops serial_ops = {
     .driver_pid  = 0,
-    .device_type = DEV_SERIAL,
+    .is_block    = false,
     .open        = serial_dev_open,
     .close       = serial_dev_close,
     .read        = serial_dev_read,
@@ -208,7 +207,7 @@ static struct dev_ops serial_ops = {
 };
 
 void serial_dev_register(void) {
-    int rc = devtmpfs_create("serial", DEV_SERIAL, &serial_ops, NULL);
+    int rc = devtmpfs_create("serial", &serial_ops, NULL);
     if (rc != 0) {
         printk(LOG_ERROR, "serial_dev_register: failed (rc=%d)\n", rc);
     }

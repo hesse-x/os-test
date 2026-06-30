@@ -11,7 +11,6 @@
 #include "arch/x64/apic.h"
 #include "common/errno.h"
 #include "common/shm.h"
-#include "common/dev.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "common/syscall.h"
 
@@ -191,6 +190,10 @@ static xhci_intr_t xhci_intrs[2];  // intr 0=keyboard, 1=spare
 static Page    *usb_hid_shm_page;
 static uint64_t usb_hid_shm_phys;
 static void *usb_hid_shm_virt;
+
+// kbd opener tracking: xhci module self-managed, replaces the old
+// global type-keyed driver lookup used by the ISR to wake the kbd driver
+static pid_t kbd_openers[8];
 
 // HID DMA buffer (xHCI writes HID report here, <4GB)
 static Page    *hid_dma_page;
@@ -399,10 +402,10 @@ static void xhci_isr(trapframe_t *tf) {
             __atomic_store_n(&hdr->rings[0].head, next, __ATOMIC_RELEASE);
           }
 
-          // Notify kbd_driver: wake so sys_recv returns -EINTR
-          pid_t kbd_pid = isr_lookup_driver(DEV_KBD);
-          if (kbd_pid > 0) {
-            wake_process(kbd_pid);
+          // Notify kbd openers: wake so sys_recv returns -EINTR
+          for (int i = 0; i < 8; i++) {
+            pid_t p = kbd_openers[i];
+            if (p > 0) wake_process(p);
           }
         }
       }
@@ -601,6 +604,18 @@ void xhci_init() {
 
 // ===================== USB HID keyboard enumeration =====================
 
+static int usb_hid_kbd_open(xtask_t *proc, int fd) {
+    for (int i = 0; i < 8; i++)
+        if (kbd_openers[i] == 0) { kbd_openers[i] = proc->pid; break; }
+    return 0;
+}
+
+static int usb_hid_kbd_close(xtask_t *proc, int fd) {
+    for (int i = 0; i < 8; i++)
+        if (kbd_openers[i] == proc->pid) { kbd_openers[i] = 0; break; }
+    return 0;
+}
+
 static void xhci_init_keyboard() {
   uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
 
@@ -674,8 +689,10 @@ static void xhci_init_keyboard() {
       static struct dev_ops usb_hid_ops;
       __memset(&usb_hid_ops, 0, sizeof(usb_hid_ops));
       usb_hid_ops.driver_pid = 0;  // kernel device
-      usb_hid_ops.device_type = DEV_USB_HID;
-      devtmpfs_create("usb_hid", DEV_USB_HID, &usb_hid_ops, hid_shm);
+      usb_hid_ops.is_block = false;
+      usb_hid_ops.open  = usb_hid_kbd_open;
+      usb_hid_ops.close = usb_hid_kbd_close;
+      devtmpfs_create("usb_hid_kbd", &usb_hid_ops, hid_shm);
       shm_put(hid_shm);  // devtmpfs_create took a reference via shm_get
     }
   }

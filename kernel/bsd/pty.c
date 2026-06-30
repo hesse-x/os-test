@@ -8,7 +8,6 @@
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "common/errno.h"
-#include "common/dev.h"
 #include "common/signal.h"
 #include "common/socket.h"
 #include <stddef.h>
@@ -113,9 +112,9 @@ void pty_init(void) {
     pty_alloc_lock = SPINLOCK_INIT;
 
     ptmx_ops.driver_pid = 0;
-    ptmx_ops.device_type = DEV_PTMX;
+    ptmx_ops.is_block = false;
     ptmx_ops.open = ptmx_open;
-    devtmpfs_create("ptmx", DEV_PTMX, &ptmx_ops, NULL);
+    devtmpfs_create("ptmx", &ptmx_ops, NULL);
 
     ptmx_inode = devtmpfs_lookup("ptmx");
 
@@ -191,7 +190,7 @@ int ptmx_open(xtask_t *proc, int fd) {
 
     __memset(priv, 0, sizeof(struct pts_dev_priv));
     priv->ops.driver_pid = 0;
-    priv->ops.device_type = DEV_PTS_SLAVE;
+    priv->ops.is_block = false;
     priv->ops.open = pts_open;
     priv->pty = pty;
     pty->pts_priv = priv;
@@ -216,7 +215,7 @@ int ptmx_open(xtask_t *proc, int fd) {
         for (int i = tpos - 1; i >= 0; i--) name[pos++] = tmp[i];
     }
     name[pos] = '\0';
-    devtmpfs_create(name, DEV_PTS_SLAVE, &priv->ops, NULL);
+    devtmpfs_create(name, &priv->ops, NULL);
 
     return 0;
 }
