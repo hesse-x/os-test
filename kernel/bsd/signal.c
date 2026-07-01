@@ -348,6 +348,26 @@ int64_t sys_set_tid_address(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
     return (int64_t)current_task->pid;  // 返回 tid
 }
 
+// ===================== BSD syscall: arch_prctl =====================
+#define ARCH_SET_FS  0x1002
+#define ARCH_GET_FS  0x1003
+
+int64_t sys_arch_prctl(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4) {
+    (void)_u1;(void)_u2;(void)_u3;(void)_u4;
+    int code = (int)arg1;
+    uint64_t addr = (uint64_t)arg2;
+    switch (code) {
+    case ARCH_SET_FS:
+        current_task->fs_base = addr;
+        wrmsr(MSR_FS_BASE, addr);
+        return 0;
+    case ARCH_GET_FS:
+        return (int64_t)current_task->fs_base;
+    default:
+        return (int64_t)-EINVAL;
+    }
+}
+
 // ===================== BSD syscall: sigaction =====================
 int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int sig = (int)arg1;

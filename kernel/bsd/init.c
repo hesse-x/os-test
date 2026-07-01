@@ -5,11 +5,13 @@
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/syscall.h"
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/bsd/futex.h"
 #include "kernel/kernel.h"
 #include "kernel/xcore/xtask.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/bsd/vfs.h"
 #include "kernel/xcore/log.h"
+#include "kernel/xcore/spinlock.h"
 
 // Wrapper to adapt check_pending_signals(trapframe_t*) to signal_check_fn(xtask_t*, trapframe_t*)
 // check_pending_signals uses current_task internally, so the xtask_t argument is redundant but
@@ -31,6 +33,12 @@ static bool check_signal_pending(xtask_t *t) {
 void bsd_init(void) {
     vfs_init();
     printk(LOG_INFO, "bsd_init: vfs_init done\n");
+
+    // futex_table 初始化（64 bucket + lock）
+    for (int i = 0; i < FUTEX_HASH_SIZE; i++) {
+        list_init(&futex_table[i].waiters);
+        futex_table[i].lock = SPINLOCK_INIT;
+    }
 
     // Register hooks: BSD layer provides implementations, Xcore calls them at trap/syscall return
     signal_check_hook = check_signals;

@@ -6,6 +6,7 @@
 // ELF64 fixed header
 #define EI_NIDENT 16
 #define PT_LOAD 1
+#define PT_TLS 7
 
 #define PF_X 0x1
 #define PF_W 0x2

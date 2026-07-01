@@ -53,7 +53,7 @@ static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
 
 elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
                          uint64_t *new_pml4) {
-    elf_load_result_t result = {0, false};
+    elf_load_result_t result = {0};
 
     // 1. Validate ELF magic
     if (size < sizeof(Elf64_Ehdr)) return result;
@@ -73,6 +73,14 @@ elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
         if (ph_off + sizeof(Elf64_Phdr) > size) return result;
 
         Elf64_Phdr *ph = (Elf64_Phdr *)(data + ph_off);
+
+        if (ph->p_type == PT_TLS) {
+            result.tls_tdata_size = ph->p_filesz;
+            result.tls_tbss_size = ph->p_memsz - ph->p_filesz;
+            result.tls_align = ph->p_align;
+            result.tls_template_off = ph->p_offset;
+            continue;
+        }
 
         if (ph->p_type != PT_LOAD)
             continue;

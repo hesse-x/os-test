@@ -7,6 +7,11 @@
 typedef struct elf_load_result {
     uint64_t entry;
     bool     success;
+    // TLS 模板信息（PT_TLS）；无 PT_TLS 段时各字段为 0
+    uint64_t tls_tdata_size;   // .tdata 初始镜像大小
+    uint64_t tls_tbss_size;    // .tbss 清零区大小
+    uint64_t tls_align;        // 对齐
+    uint64_t tls_template_off; // ELF 文件内 .tdata 偏移
 } elf_load_result_t;
 
 // Load ELF64 static binary into user address space

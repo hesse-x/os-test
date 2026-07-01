@@ -71,6 +71,7 @@ void fpu_lazy_switch(xtask_t *t) {
     }
 
     if (t->fpu_page) {
+        ASSERT(t->fpu_page->status == PAGE_USED);
         void *fpu_data = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(t->fpu_page));
         // 防御：fxrstor 源必须是 BFC 数据页虚拟地址（见 fpu_context_switch 同款 ASSERT）
         uint64_t vma_start __attribute__((unused)) = (__force uint64_t)phys_to_virt(0);

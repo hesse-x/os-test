@@ -548,6 +548,34 @@ void mm_release_pages(mm_t *mm) {
 
 // ===================== fork helpers =====================
 
+// Build child kernel stack from parent trapframe: trapframe (rax=new_rax) + switch_frame.
+// Returns k_rsp. Used by sys_fork and sys_clone.
+uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe_t *parent_tf, uint64_t new_rax) {
+    trapframe_t tf;
+    __memcpy(&tf, parent_tf, sizeof(trapframe_t));
+    tf.rax = new_rax;
+
+    typedef struct {
+        uint64_t rbx;
+        uint64_t rbp;
+        uint64_t r12;
+        uint64_t r13;
+        uint64_t r14;
+        uint64_t r15;
+        uint64_t ret_addr;
+    } local_switch_frame_t;
+
+    local_switch_frame_t sf = {0};
+    sf.ret_addr = (uint64_t)process_entry;
+
+    uint8_t *sp = (uint8_t *)k_stack_top;
+    sp -= sizeof(trapframe_t);
+    __memcpy(sp, &tf, sizeof(trapframe_t));
+    sp -= sizeof(local_switch_frame_t);
+    __memcpy(sp, &sf, sizeof(local_switch_frame_t));
+    return (uint64_t)sp;
+}
+
 // Deep-copy fd_table from parent_files to child_files.
 // Bumps ref counts for pipe, SHM, file, inode, socket, TTY.
 static void __attribute__((unused)) copy_fd_table(files_t *parent_files, files_t *child_files) {
@@ -643,32 +671,9 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
     kernel_fpu_save(parent_fpu);  // 存 parent 当前 live xmm（fxsave 不改寄存器，parent 继续跑）
     __memcpy(child_fpu, parent_fpu, PAGE_SIZE);
 
-    // Copy current trapframe (from per-CPU cur_tf set by syscall/irq entry)
-    trapframe_t tf;
+    // 6. Build child kernel stack (reuse build_kstack_from_tf helper)
     trapframe_t *parent_tf = get_cpu_local()->cur_tf;
-    __memcpy(&tf, parent_tf, sizeof(trapframe_t));
-    tf.rax = 0; // child returns 0
-
-    // switch_to restore frame: callee-saved registers + return address
-    typedef struct {
-        uint64_t rbx;
-        uint64_t rbp;
-        uint64_t r12;
-        uint64_t r13;
-        uint64_t r14;
-        uint64_t r15;
-        uint64_t ret_addr;
-    } local_switch_frame_t;
-
-    local_switch_frame_t sf = {0};
-    sf.ret_addr = (uint64_t)process_entry;
-
-    uint8_t *sp = (uint8_t *)k_stack_top;
-    sp -= sizeof(trapframe_t);
-    __memcpy(sp, &tf, sizeof(trapframe_t));
-    sp -= sizeof(local_switch_frame_t);
-    __memcpy(sp, &sf, sizeof(local_switch_frame_t));
-    uint64_t k_rsp = (uint64_t)sp;
+    uint64_t k_rsp = build_kstack_from_tf(k_stack_top, parent_tf, 0);
 
     // 7. Fill child xtask_t
     child->pid = alloc_idx;
@@ -729,6 +734,204 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
 
     // 9. Parent returns child PID
     printk(LOG_INFO, "sys_fork: parent=%d → child=%d\n", parent->pid, child->pid);
+    return (int64_t)child->pid;
+}
+
+// ===================== sys_clone =====================
+
+// clone flag definitions (与 Linux 一致)
+#define CLONE_VM              0x00000100
+#define CLONE_FILES           0x00000400
+#define CLONE_SIGHAND         0x00000800
+#define CLONE_THREAD          0x00010000
+#define CLONE_PARENT_SETTID   0x00100000
+#define CLONE_CHILD_CLEARTID  0x00200000
+#define CLONE_SETTLS          0x00080000
+
+int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3,
+                  int64_t arg4, int64_t arg5, int64_t _u6) {
+    (void)_u6;
+    uint64_t flags = (uint64_t)arg1;
+    uint64_t stack = (uint64_t)arg2;
+    uint64_t parent_tid = (uint64_t)arg3;
+    uint64_t child_tid = (uint64_t)arg4;
+    uint64_t tls = (uint64_t)arg5;
+    xtask_t *parent = current_task;
+
+    // flag 组合约束校验
+    if ((flags & CLONE_SIGHAND) && !(flags & CLONE_VM)) return (int64_t)-EINVAL;
+    if ((flags & CLONE_THREAD) && !(flags & CLONE_SIGHAND)) return (int64_t)-EINVAL;
+    if ((flags & CLONE_VM) && stack == 0) return (int64_t)-EINVAL;
+
+    // 1. 分配 xtask slot
+    spin_lock(&tasks_lock);
+    xtask_t *child = NULL;
+    int alloc_idx = -1;
+    for (int i = 0; i < MAX_PROC; i++) {
+        if (tasks[i].pid < 0) { child = &tasks[i]; alloc_idx = i; break; }
+    }
+    if (!child) { spin_unlock(&tasks_lock); return (int64_t)-ENOMEM; }
+
+    // 2. 分配内核栈
+    Page *stack_pages = bfc_alloc_page(2);
+    if (!stack_pages) { spin_unlock(&tasks_lock); return (int64_t)-ENOMEM; }
+    uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
+    uint64_t k_stack_top = (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) + 2 * PAGE_SIZE;
+
+    // 2b. FPU 状态：子线程预分配 fpu_page + 复制父线程当前 FPU 快照
+    if (!xcore_fpu_alloc(child)) {
+        bfc_free_page(stack_pages, 2);
+        spin_unlock(&tasks_lock);
+        return (int64_t)-ENOMEM;
+    }
+    ASSERT(parent->fpu_page != NULL);
+    void *parent_fpu = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(parent->fpu_page));
+    void *child_fpu  = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(child->fpu_page));
+    kernel_fpu_save(parent_fpu);
+    __memcpy(child_fpu, parent_fpu, PAGE_SIZE);
+
+    // 3. mm_t
+    mm_t *child_mm;
+    if (flags & CLONE_VM) {
+        child_mm = parent->mm;
+        refcount_inc(&child_mm->m_count);
+        child->cr3 = parent->cr3;
+    } else {
+        child_mm = mm_create();
+        if (!child_mm) {
+            bfc_free_page(child->fpu_page, 1); child->fpu_page = NULL;
+            bfc_free_page(stack_pages, 2);
+            spin_unlock(&tasks_lock);
+            return (int64_t)-ENOMEM;
+        }
+        uint64_t *src_pml4 = (uint64_t *)phys_to_virt((__force phys_addr_t)parent->mm->cr3);
+        uint64_t *dst_pml4 = (uint64_t *)phys_to_virt((__force phys_addr_t)child_mm->cr3);
+        int ret = copy_page_table(src_pml4, dst_pml4, parent->mm->mmap_regions);
+        if (ret < 0) {
+            mm_put(child_mm);
+            bfc_free_page(child->fpu_page, 1); child->fpu_page = NULL;
+            bfc_free_page(stack_pages, 2);
+            spin_unlock(&tasks_lock);
+            return (int64_t)ret;
+        }
+        load_cr3(parent->mm->cr3);
+        child_mm->mmap_regions = copy_mmap_regions(parent->mm->mmap_regions);
+        child_mm->mmap_brk = parent->mm->mmap_brk;
+        child_mm->mmap_phys_brk = parent->mm->mmap_phys_brk;
+        child_mm->parent_pid = parent->pid;
+        child->cr3 = child_mm->cr3;
+    }
+
+    // 4. files_t
+    proc_t *child_bp = proc_create();
+    if (!child_bp) {
+        if (!(flags & CLONE_VM)) mm_put(child_mm);
+        bfc_free_page(child->fpu_page, 1); child->fpu_page = NULL;
+        bfc_free_page(stack_pages, 2);
+        spin_unlock(&tasks_lock);
+        return (int64_t)-ENOMEM;
+    }
+    child->proc = child_bp;
+    child_bp->xtask = child;
+    if (flags & CLONE_FILES) {
+        files_put(child_bp->files);  // 释放 proc_create 默认创建的
+        child_bp->files = parent->proc->files;
+        refcount_inc(&child_bp->files->f_count);
+    } else {
+        copy_fd_table(parent->proc->files, child_bp->files);
+    }
+
+    // 5. signal_struct
+    if (flags & CLONE_SIGHAND) {
+        signal_put(child_bp->signal);  // 释放 proc_create 默认创建的
+        child_bp->signal = parent->proc->signal;
+        refcount_inc(&child_bp->signal->sig_count);
+    } else {
+        __memcpy(child_bp->signal->action, parent->proc->signal->action, sizeof(parent->proc->signal->action));
+        child_bp->signal->shared_pending = 0;
+        child_bp->signal->group_exit = 0;
+        child_bp->signal->group_exit_code = 0;
+        child_bp->signal->parent_pid = parent->pid;
+        atomic_set(&child_bp->signal->thread_count, 1);
+        atomic_set(&child_bp->signal->live_count, 1);
+    }
+
+    // 6. tgid + 线程组计数
+    if (flags & CLONE_THREAD) {
+        child->tgid = parent->tgid;
+        atomic_inc(&child_bp->signal->thread_count);
+        atomic_inc(&child_bp->signal->live_count);
+    } else {
+        child->tgid = child->pid;
+    }
+
+    // 7. trapframe: rax=0, rsp=(CLONE_VM? stack : parent_tf->rsp)
+    trapframe_t *parent_tf = get_cpu_local()->cur_tf;
+    uint64_t new_rsp = (flags & CLONE_VM) ? stack : parent_tf->rsp;
+    // 临时改 parent_tf->rsp 以复用 build_kstack_from_tf
+    uint64_t saved_rsp = parent_tf->rsp;
+    parent_tf->rsp = new_rsp;
+    uint64_t k_rsp = build_kstack_from_tf(k_stack_top, parent_tf, 0);
+    parent_tf->rsp = saved_rsp;
+
+    // 8. fs_base + proc_t 线程级字段
+    child->fs_base = (flags & CLONE_SETTLS) ? tls : parent->fs_base;
+    child_bp->sig_pending = 0;
+    child_bp->sig_blocked = parent->proc->sig_blocked;
+    child_bp->exit_code = 0;
+    child_bp->futex_uaddr = 0;
+    list_init(&child_bp->futex_node);
+    child_bp->clear_tid_addr = (flags & CLONE_CHILD_CLEARTID) ? (pid_t)child_tid : 0;
+
+    // 9. CLONE_PARENT_SETTID
+    if (flags & CLONE_PARENT_SETTID) {
+        *((pid_t *)parent_tid) = (pid_t)alloc_idx;
+    }
+
+    // 10. 填充 child xtask_t
+    child->pid = alloc_idx;
+    child->state = READY;
+    child->k_rsp = k_rsp;
+    child->k_stack_top = k_stack_top;
+    child->entry = parent->entry;
+    child->wait_event = WAIT_NONE;
+    child->mm = child_mm;
+    child->assigned_cpu = -1;
+    child->iopm = NULL;
+    child->recv_head = 0; child->recv_tail = 0; child->recv_lock = SPINLOCK_INIT;
+    child->req_caller_pid = -1; child->req_reply_buf = NULL;
+    child->msg_caller_pid = -1; child->msg_reply_buf = NULL;
+    child->cpu_time_ns = 0; child->last_sched = 0;
+    child->exit_code = 0;
+    list_init(&child->run_node); list_init(&child->wait_node);
+
+    // 非 CLONE_THREAD 时继承 session/job control
+    if (!(flags & CLONE_THREAD)) {
+        child_bp->sid = parent->proc->sid;
+        child_bp->pgid = parent->proc->pgid;
+        child_bp->ctty = parent->proc->ctty;
+    }
+
+    // Pick CPU
+    int best = 0;
+    int min_run = __atomic_load_n(&cpu_locals[0].run_count, __ATOMIC_RELAXED);
+    for (int i = 1; i < ncpu; i++) {
+        int r = __atomic_load_n(&cpu_locals[i].run_count, __ATOMIC_RELAXED);
+        if (r < min_run) { min_run = r; best = i; }
+    }
+    child->assigned_cpu = best;
+
+    spin_unlock(&tasks_lock);
+
+    // 11. 入队调度
+    int cpu = child->assigned_cpu;
+    uint64_t rflags;
+    spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
+    list_push_back(&cpu_locals[cpu].run_queue, &child->run_node);
+    cpu_locals[cpu].run_count++;
+    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
+
+    printk(LOG_INFO, "sys_clone: parent=%d → child=%d flags=0x%lx\n", parent->pid, child->pid, flags);
     return (int64_t)child->pid;
 }
 

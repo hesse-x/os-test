@@ -61,6 +61,13 @@ void proc_reap_idle(void);      // idle hook: scan for orphaned zombies
 // Process creation (kernel/bsd/proc_create.c)
 xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);
 
+// Build child kernel stack from parent trapframe (used by sys_fork/sys_clone)
+uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe_t *parent_tf, uint64_t new_rax);
+
+// sys_clone (阶段 3b)
+int64_t sys_clone(int64_t flags, int64_t stack, int64_t parent_tid,
+                  int64_t child_tid, int64_t tls, int64_t _u6);
+
 // Convenience macros (gradually replace current_task, eventually delete current_task alias)
 #define current_xtask  get_cpu_local()->_cur_proc  // Xcore perspective (defined in arch/x64/smp.h)
 #define current_proc  (current_xtask->proc)          // BSD perspective

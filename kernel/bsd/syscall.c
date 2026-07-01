@@ -4,6 +4,8 @@
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/syscall.h"
+#include "kernel/bsd/futex.h"
+#include "kernel/bsd/signal.h"
 #include "kernel/xcore/xtask.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/trap.h"
@@ -2061,6 +2063,9 @@ int64_t syscall_dispatch(trapframe_t *tf) {
     case SYS_TGKILL:         return sys_tgkill(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
     case SYS_SIGPROCMASK:    return sys_sigprocmask(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
     case SYS_SET_TID_ADDRESS:return sys_set_tid_address(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+    case SYS_CLONE:         return sys_clone(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+    case SYS_FUTEX:         return sys_futex(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+    case SYS_ARCH_PRCTL:    return sys_arch_prctl(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
     // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) 在阶段 3b 实现，此阶段返回 -ENOSYS
     default:
         printk(LOG_WARN, "syscall_dispatch: unknown syscall nr=%lu pid=%d\n",

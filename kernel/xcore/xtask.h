@@ -11,7 +11,7 @@
 #include "kernel/xcore/atomic.h"
 
 typedef enum proc_state_t { UNUSED, READY, RUNNING, BLOCKED, ZOMBIE, REAPING } proc_state_t;
-typedef enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WAIT_PIPE, WAIT_MSG_REPLY, WAIT_POLL } wait_event_t;
+typedef enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WAIT_PIPE, WAIT_MSG_REPLY, WAIT_POLL, WAIT_FUTEX } wait_event_t;
 
 #define RECV_MSG_SIZE   64
 #define RECV_QUEUE_SIZE 16
@@ -86,6 +86,11 @@ STATIC_ASSERT(offsetof(xtask_t, state) == 4, "xtask_t.state offset must be 4");
 STATIC_ASSERT(offsetof(xtask_t, k_rsp) == 8, "xtask_t.k_rsp offset must be 8");
 STATIC_ASSERT(offsetof(xtask_t, k_stack_top) == 16, "xtask_t.k_stack_top offset must be 16");
 STATIC_ASSERT(offsetof(xtask_t, cr3) == 24, "xtask_t.cr3 offset must be 24");
+
+// fs_base offset is consumed by arch/x64/trapentry.S (wrmsr FS_BASE on
+// return to user mode). Export as a linker symbol so asm can load it
+// without hardcoding the constant (struct layout may drift).
+extern const uint64_t xtask_fs_base_offset;
 
 extern xtask_t tasks[MAX_PROC];
 extern spinlock_t tasks_lock;

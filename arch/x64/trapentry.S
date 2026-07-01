@@ -49,6 +49,17 @@ __trapret:
     movq %rsp, %rdi
     call check_pending_signals
 
+    # Load current_task->fs_base into MSR_FS_BASE (TLS base for user mode).
+    # cpu_local._cur_proc is at GS:16; xtask_fs_base_offset is a linker symbol
+    # holding offsetof(xtask_t, fs_base). wrmsr: ecx=MSR, edx=hi32, eax=lo32.
+    movq %gs:16, %rax
+    movq xtask_fs_base_offset(%rip), %rcx
+    movq (%rax,%rcx), %rdx          # rdx = current_task->fs_base
+    movl $0xC0000100, %ecx          # MSR_FS_BASE
+    movl %edx, %eax                 # eax = lo32
+    shrq $32, %rdx                  # rdx = hi32
+    wrmsr
+
     # Disable interrupts before swapgs — if a timer interrupt fires between
     # swapgs and iretq, the ISR's conditional swapgs (checks CS=kernel) would
     # skip swapgs, leaving GS_BASE=0 and corrupting per-CPU state.
@@ -150,6 +161,16 @@ syscall_fast_entry:
     # Check pending signals before returning to user mode
     movq %rsp, %rdi
     call check_pending_signals
+
+    # Load current_task->fs_base into MSR_FS_BASE (TLS base for user mode).
+    # Same logic as __trapret; see comment there.
+    movq %gs:16, %rax
+    movq xtask_fs_base_offset(%rip), %rcx
+    movq (%rax,%rcx), %rdx          # rdx = current_task->fs_base
+    movl $0xC0000100, %ecx          # MSR_FS_BASE
+    movl %edx, %eax                 # eax = lo32
+    shrq $32, %rdx                  # rdx = hi32
+    wrmsr
 
     # After xcall_dispatch returns, RSP = trapframe base (C ABI restores RSP).
     # Use SYSRET for fast return to user mode.

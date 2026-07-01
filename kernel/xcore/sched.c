@@ -32,6 +32,10 @@ _Static_assert(sizeof(trapframe_t)   == 176, "trapframe size must be 176 (22 × 
 _Static_assert(offsetof(cpu_local_t, tss_rsp0) == 48,
                "syscall_fast_entry asm: tss_rsp0 offset mismatch (expected 48)");
 
+// fs_base offset consumed by trapentry.S (wrmsr FS_BASE before returning to
+// user mode). Pinned by static_assert at the bottom of this file.
+const uint64_t xtask_fs_base_offset = offsetof(xtask_t, fs_base);
+
 xtask_t tasks[MAX_PROC];
 // current_task is per-CPU (in cpu_local_t), accessed via macro
 
@@ -45,23 +49,32 @@ pid_t init_pid = -1;
 // Caller must hold tasks_lock; on success the slot's pid is still -1
 // (caller sets it after allocating resources).
 //
-// If the slot's k_stack_top is nonzero, it holds the kernel stack of a
-// previously-reaped process (task_reap deliberately leaves the stack in
-// place — see the comment there for the SMP race that forbids freeing it
-// at reap time). We free it now: by the time a slot is reused, the dead
-// process switched off its stack long ago, so the pages are safe to
-// reclaim.
+// reclaim_lazy_resources: 释放 task_reap 延迟处理的资源。
+//
+// 延迟释放清单（SMP 竞态防护）——这些资源在 schedule() 的切换路径中被引用，
+// task_reap 与 schedule() 无共享锁，立即释放会 UAF。留到 slot 复用时此处统一释放：
+//   - k_stack (2 pages)  : switch_to 汇编在子进程栈上执行 ret
+//   - fpu_page (1 page)  : fpu_context_switch 在 prev 分支 fxsave 该页
+// slot 复用意味着子进程早已切走，安全。新增同类资源（如扩展 FPU 状态页）请加入此函数。
+static void reclaim_lazy_resources(xtask_t *t) {
+    if (t->k_stack_top != 0) {
+        uint64_t k_stack_phys_base = (__force uint64_t)PHY_ADDR(
+            t->k_stack_top - 2 * PAGE_SIZE);
+        Page *stack_page = &bfc_frames[PHY_TO_PAGE(k_stack_phys_base)];
+        bfc_free_page(stack_page, 2);
+        t->k_stack_top = 0;
+    }
+    if (t->fpu_page) {
+        bfc_free_page(t->fpu_page, 1);
+        t->fpu_page = NULL;
+    }
+}
+
 xtask_t *xtask_alloc(void) {
     for (int i = 0; i < MAX_PROC; i++) {
         if (tasks[i].pid < 0) {
             xtask_t *t = &tasks[i];
-            if (t->k_stack_top != 0) {
-                uint64_t k_stack_phys_base = (__force uint64_t)PHY_ADDR(
-                    t->k_stack_top - 2 * PAGE_SIZE);
-                Page *stack_page = &bfc_frames[PHY_TO_PAGE(k_stack_phys_base)];
-                bfc_free_page(stack_page, 2);
-                t->k_stack_top = 0;
-            }
+            reclaim_lazy_resources(t);
             return t;
         }
     }
@@ -257,8 +270,13 @@ static void update_tss_iopm(xtask_t *proc) {
 // FPU 上下文切换 C helper（eager 模式，不修改 switch_to 汇编）
 // 在 switch_to(prev, next) 之前调用：fxsave prev 的 FPU 状态 + fxrstor next 的 FPU 状态。
 // 不设 CR0.TS，用户态 SSE 指令直接执行不触发 #NM。idle 进程 fpu_page=NULL，自动跳过。
+//
+// UAF 防御：fpu_page 的释放是延迟的（见 task_reap 资源清单），但若有人错误地在
+// task_reap 立即释放，schedule() 此处会 UAF。ASSERT page->status == PAGE_USED 可在
+// DEBUG 构建下立即捕获——bfc_free_page 释放后 status 变 PAGE_FREE，fxsave 前暴露。
 void fpu_context_switch(xtask_t *prev, xtask_t *next) {
     if (prev && prev->fpu_page) {
+        ASSERT(prev->fpu_page->status == PAGE_USED);
         void *fpu_data = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(prev->fpu_page));
         // 防御：fxsave 目标必须是 BFC 数据页虚拟地址，不能是 Page* 元数据指针
         // （历史 bug：误把 bfc_alloc_page 返回的 Page* 直接当数据指针，fxsave 覆盖
@@ -269,6 +287,7 @@ void fpu_context_switch(xtask_t *prev, xtask_t *next) {
         kernel_fpu_save(fpu_data);  // 内部先 clts 再 fxsave
     }
     if (next && next->fpu_page) {
+        ASSERT(next->fpu_page->status == PAGE_USED);
         void *fpu_data = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(next->fpu_page));
         uint64_t vma_start __attribute__((unused)) = (__force uint64_t)phys_to_virt(0);
         ASSERT((uint64_t)fpu_data >= vma_start &&
@@ -399,28 +418,37 @@ void timer_queue_remove(xtask_t *proc) {
 
 // task_reap: reclaim all resources of a process
 // Called by sys_exit (no-parent path) or sys_waitpid
+//
+// 资源释放清单（注意 SMP 竞态）：
+//   immediate（无 schedule() 路径引用）:
+//     - iopm           : 仅 update_tss_iopm 在 sched_lock 下读
+//     - mm (mm_put)    : refcount 管理，最后释放者负责
+//     - recv queue     : 仅本进程访问
+//   lazy（schedule() 切换路径仍引用，延迟到 xtask_alloc 复用 slot 时释放）:
+//     - k_stack (2pg)  : switch_to 汇编在子进程栈上 ret
+//     - fpu_page (1pg) : fpu_context_switch 在 prev 分支 fxsave 该页
+//   由 BSD 层释放（proc_reap_hook）:
+//     - fds/signal/proc_t
+//
+// 立即释放 lazy 类资源会与 schedule() 竞态 UAF（task_reap 与 schedule() 无共享锁）。
+// 新增同类资源请归入对应类别，lazy 类资源统一在 xtask_alloc 的 reclaim_lazy_resources 释放。
 void task_reap(xtask_t *proc) {
     ASSERT(proc->state == ZOMBIE || proc->state == REAPING);
 
-    // NOTE: kernel stack is NOT freed here. sys_exit sets ZOMBIE and notifies
-    // the parent BEFORE calling schedule(); on SMP the parent's waitpid→
-    // task_reap can run concurrently while the child is still in
-    // fpu_context_switch/switch_to using its kernel stack. Freeing the stack
-    // at that moment corrupts the child's ret address → #GP. The stack is
-    // freed lazily in xtask_alloc() when this slot is reused for a new fork
-    // — by then the child has long since switched off.
-
-    // 1. Free IOPM bitmap
+    // 1. Free IOPM bitmap (immediate)
     if (proc->iopm) {
         kfree(proc->iopm);
         proc->iopm = NULL;
     }
 
     // 2b. Free FPU state page (lazy-allocated via bfc_alloc_page)
-    if (proc->fpu_page) {
-        bfc_free_page(proc->fpu_page, 1);
-        proc->fpu_page = NULL;
-    }
+    //     延迟到 xtask_alloc 复用 slot 时释放（与内核栈同理，见函数顶部清单）：
+    //     子进程在 schedule() 的 fpu_context_switch 中可能仍持有 fpu_page 引用，
+    //     此处立即释放会与 schedule() 竞态 UAF。slot 复用时子进程早已切走。
+    //     if (proc->fpu_page) {
+    //     bfc_free_page(proc->fpu_page, 1);
+    //     proc->fpu_page = NULL;
+    // }
 
     // 3. mm_put (decrement triggers mm_release when ref_count hits 0)
     //    mm_release will: free user pages+PML4+mmap+SHM+devtmpfs+irq_owner+wake waiters
@@ -452,15 +480,15 @@ void task_reap(xtask_t *proc) {
     // 6. POSIX cleanup: close fds, signal_put, free proc
     if (proc_reap_hook) proc_reap_hook(proc);
 
-    // 7. Clear PCB slot — EXCEPT k_stack_top, which task_reap deliberately
-    //    leaves set so xtask_alloc can lazily free the stack when the slot is
-    //    reused (see the comment at the top of this function and in
-    //    xtask_alloc).
+    // 7. Clear PCB slot — EXCEPT lazy-reclaim resources (k_stack_top, fpu_page),
+    //    which task_reap deliberately leaves set so xtask_alloc's
+    //    reclaim_lazy_resources can free them when the slot is reused
+    //    (SMP race: schedule() may still be referencing them — see top of function).
     spin_lock(&tasks_lock);
     proc->pid = -1;
     proc->state = UNUSED;
     proc->k_rsp = 0;
-    // proc->k_stack_top intentionally preserved (see above)
+    // proc->k_stack_top intentionally preserved (lazy reclaim)
     proc->cr3 = 0;
     proc->entry = 0;
     proc->wait_event = WAIT_NONE;
@@ -493,6 +521,6 @@ void task_reap(xtask_t *proc) {
     proc->last_sched = 0;
     // Clear threading fields
     proc->fs_base = 0;
-    proc->fpu_page = NULL;
+    // proc->fpu_page intentionally preserved (lazy reclaim, 见函数顶部清单)
     spin_unlock(&tasks_lock);
 }
