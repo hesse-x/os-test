@@ -11,6 +11,7 @@ lib/sys_process.cc lib/time.cc lib/file.cc
         lib/sleep.c lib/assert.c lib/sys_pci.cc
         lib/signal.cc
         lib/input_client.cc
+        lib/tls.cc
         ${CMAKE_SOURCE_DIR}/common/kvformat.c
 )
 

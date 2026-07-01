@@ -37,6 +37,17 @@ static inline int64_t sys_getpid() {
     return __syscall0(SYS_GETPID);
 }
 
+#ifndef ARCH_SET_FS
+#define ARCH_SET_FS  0x1002
+#endif
+#ifndef ARCH_GET_FS
+#define ARCH_GET_FS  0x1003
+#endif
+
+static inline int64_t sys_arch_prctl(int64_t code, int64_t addr) {
+    return __syscall2(SYS_ARCH_PRCTL, code, addr);
+}
+
 static inline void sys_yield() {
     __syscall0(SYS_YIELD);
 }

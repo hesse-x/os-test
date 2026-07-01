@@ -127,7 +127,7 @@ function(add_user_elf elf_name)
 
     add_custom_command(
         OUTPUT ${ELF_FILE}
-        COMMAND ld -m elf_x86_64 -Ttext 0x400000 ${LD_ARGS} -o ${ELF_FILE}
+        COMMAND ld -m elf_x86_64 -T ${CMAKE_SOURCE_DIR}/build_script/user_linker.ld ${LD_ARGS} -o ${ELF_FILE}
         DEPENDS ${LD_DEPS}
         COMMENT "Linking ${elf_name}.elf"
     )
