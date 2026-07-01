@@ -88,6 +88,8 @@ void bump_init_phys(uintptr_t start);
 void bump_disable();
 uintptr_t bump_end_phys();
 void enable_nx();
+void enable_sse();
 void pat_init();
+void log_cpu_caps(const char *tag);
 
 #endif // ARCH_X64_PAGING_H

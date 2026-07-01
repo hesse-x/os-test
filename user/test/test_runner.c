@@ -26,6 +26,8 @@ static struct test_entry tests[] = {
     {"pci",     "/test/pci.elf"},
     {"ioctl",   "/test/ioctl.elf"},
     {"dev_vfs", "/test/dev_vfs.elf"},
+    {"fpu",     "/test/test_fpu.elf"},
+    {"sse_smoke", "/test/test_sse_smoke.elf"},
 };
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))

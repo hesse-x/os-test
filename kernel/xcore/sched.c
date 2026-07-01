@@ -234,6 +234,27 @@ static void update_tss_iopm(xtask_t *proc) {
     }
 }
 
+// FPU 上下文切换 C helper（不修改 switch_to 汇编）
+// 在 switch_to(prev, next) 之前调用：保存 prev 的 FPU 状态 + 设 CR0.TS
+void fpu_context_switch(xtask_t *prev, xtask_t *next) {
+    (void)next;
+    if (prev && prev->used_fpu) {
+        if (!prev->fpu_state) {
+            // lazy 分配，页对齐满足 fxsave 16 字节要求
+            prev->fpu_state = bfc_alloc_page(1);
+        }
+        if (prev->fpu_state) {
+            __asm__ volatile("fxsave (%0)" :: "r"(prev->fpu_state));
+        }
+    }
+    // 设 TS=1，新线程首次用 SSE 触发 #NM
+    __asm__ volatile("clts");  // 先清，确保 fxsave 之后的状态干净
+    uint64_t cr0;
+    __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
+    cr0 |= (1ULL << 3);  // CR0.TS
+    __asm__ volatile("movq %0, %%cr0" :: "r"(cr0));
+}
+
 __attribute__((no_sanitize("kernel-address")))
 void schedule() {
     int my_cpu = get_cpu_local()->cpu_id;
@@ -264,6 +285,7 @@ void schedule() {
             update_tss_iopm(idle);
             spin_unlock(&cpu_locals[my_cpu].scheduler_lock);
             ASSERT(get_cpu_local()->rcu.nesting == 0);  // must not schedule inside RCU read-side CS
+            fpu_context_switch(prev, idle);
             switch_to(prev, idle);
             spin_lock(&cpu_locals[my_cpu].scheduler_lock);
             spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
@@ -307,6 +329,7 @@ void schedule() {
     // using those original flags to correctly restore the interrupt state.
     spin_unlock(&cpu_locals[my_cpu].scheduler_lock);
     ASSERT(get_cpu_local()->rcu.nesting == 0);  // must not schedule inside RCU read-side CS
+    fpu_context_switch(prev, next);
     switch_to(prev, next);
     spin_lock(&cpu_locals[my_cpu].scheduler_lock);
     spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);

@@ -54,6 +54,19 @@ timer_poll_fn timer_poll_hook = NULL;
 // ===================== Trap dispatch =====================
 static uint64_t tick = 0;
 
+// #NM handler: Device Not Available — lazy FPU 上下文切换
+void fpu_lazy_switch(xtask_t *t) {
+    uint64_t cr0;
+    __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
+    if (!(cr0 & (1ULL << 3))) return;  // TS 已清，无需处理
+    if (t->fpu_state) {
+        __asm__ volatile("fxrstor (%0)" :: "r"(t->fpu_state));
+    }
+    // 若 fpu_state == NULL，说明线程还没用过 FPU，不需要恢复
+    t->used_fpu = 1;  // 标记本线程用过 FPU
+    __asm__ volatile("clts");  // 清 CR0.TS
+}
+
 // ===================== COW fault resolution =====================
 __attribute__((no_sanitize("kernel-address")))
 static void resolve_cow_fault(xtask_t *task, uint64_t *pte, uint64_t fault_addr) {
@@ -165,14 +178,27 @@ void trap_dispatch(trapframe_t *tf) {
   }
 
   // CPU exception: kill user process, halt for kernel exceptions
+  // vector 7: #NM (Device Not Available) — lazy FPU switch
+  if (tf->trapno == 7) {
+    printk(LOG_INFO, "#NM (lazy FPU trap) pid=%d\n",
+           current_task ? current_task->pid : -1);
+    fpu_lazy_switch(current_task);
+    return;
+  }
   if (tf->trapno == 14) {
     uint64_t cr2;
     __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
     printk(LOG_ERROR, "PAGE FAULT: fault addr=0x%016lX", cr2);
+    printk(LOG_WARN, "  hint: check pte present/write/user bits, COW resolution, "
+                     "and copy_from_user/copy_to_user for bad __user pointer\n");
   } else if (tf->trapno == 6) {
     printk(LOG_ERROR, "UNDEFINED OPCODE");
+    printk(LOG_WARN, "  hint: user SSE/SSE2 needs CR4.OSFXSR (bit 9) + CR0.TS clear; "
+                     "kernel #UD often illegal insn or wrong CS\n");
   } else if (tf->trapno == 13) {
     printk(LOG_ERROR, "GENERAL PROTECTION");
+    printk(LOG_WARN, "  hint: check segment selectors / IOPL / non-canonical MSR or RIP, "
+                     "and RPL/TI bits of any segment load\n");
     #ifdef SANITIZER
     if (kasan_shadow_exists()) {
       uint64_t fault_addr;
@@ -239,6 +265,18 @@ void trap_dispatch(trapframe_t *tf) {
   }
 
   if (tf->cs == 0x2B) {
+    // User-mode: dump faulting instruction bytes so SSE/illegal-insn are
+    // recognizable without offline objdump (e.g. f2 0f 10 = movsd).
+    // User rip is mapped in the current CR3; safe to read from kernel.
+    {
+      uint8_t *rip_ptr = (uint8_t *)tf->rip;
+      printk(LOG_ERROR, "  user RIP bytes:");
+      for (int i = 0; i < 16; i++) {
+        printk(LOG_ERROR, " %02X", rip_ptr[i]);
+      }
+      printk(LOG_ERROR, "\n");
+    }
+
     // User-mode exception: translate to signal instead of killing process
     int sig = 0;
     int si_code = SI_KERNEL;
@@ -344,13 +382,9 @@ void isr_init() {
 
   // Re-initialize GDT with per-CPU setup (now running at virtual address)
   smp_init_cpu(0, 0, (int64_t)&stack_bottom + 8192);
-  smp_apply_cpu(0);
-
-  // Enable NX bit (CR4.NXDE + EFER.NXE) before IDT install
-  enable_nx();
-
-  idt_install();
-  setup_syscall();
+  // Shared per-CPU bringup (GDT apply, NX/SSE, PAT, IDT, syscall MSRs, caps log)
+  cpu_bringup_common(0);
+  // BSP-only: global APIC initialization (IOAPIC, interrupt routing, PIT mask)
   apic_init();
 
   // Verify BSP LAPIC timer is counting down
@@ -362,6 +396,12 @@ void isr_init() {
                    ccr1, ccr2, lapic_read(LAPIC_LVT_TIMER),
                    ccr1 != ccr2 ? "yes" : "NO!");
   }
+
+    // 设置 CR0.TS（Task Switched 位），用户态首次用 SSE 触发 #NM
+    uint64_t cr0;
+    __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
+    cr0 |= (1ULL << 3);  // CR0.TS = bit 3
+    __asm__ volatile("movq %0, %%cr0" :: "r"(cr0));
 }
 
 // ===================== Syscall dispatch =====================

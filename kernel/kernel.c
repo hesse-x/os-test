@@ -111,6 +111,34 @@ void kernel_main(boot_info *bi) {
 
   printk(LOG_INFO, "kernel_main: all subsystems initialized\n");
 
+  // Early BSP-side SSE self-test: verify CR4.OSFXSR lets SSE instructions
+  // execute without #UD. This is the exact failure mode seen when APs
+  // missed enable_sse() — catching it here gives a clear kernel-side
+  // panic instead of a mysterious user-mode #UD later.
+  // current_task is not set yet (assigned at line ~159), so we must NOT
+  // trigger #NM: clts() first, run SSE, then restore CR0.TS (set by
+  // isr_init) to preserve lazy FPU semantics.
+  {
+    uint64_t saved_cr0;
+    __asm__ volatile("movq %%cr0, %0" : "=r"(saved_cr0));
+    __asm__ volatile("clts");
+
+    double src = 3.14, dst = 0.0;
+    // Note: no "xmm0" clobber — kernel is compiled with -mno-sse, so gcc
+    // rejects listing xmm0. Safe because the kernel never uses SSE regs
+    // for its own computation; xmm0 is only touched by this snippet.
+    __asm__ volatile("movsd %1, %%xmm0\n"
+                     "movsd %%xmm0, %0\n"
+                     : "=m"(dst) : "m"(src));
+
+    if (dst != 3.14) {
+      panic("kernel_sse_selftest: SSE result wrong, got %f\n", dst);
+    }
+    // Restore original CR0 (keeps TS=1 set by isr_init for lazy FPU)
+    __asm__ volatile("movq %0, %%cr0" :: "r"(saved_cr0) : "memory");
+    printk(LOG_INFO, "kernel_sse_selftest: PASS (BSP)\n");
+  }
+
   // Create BSP idle process
   xtask_t *bsp_idle = create_idle_process(0);
   if (!bsp_idle) {

@@ -40,3 +40,7 @@ add_user_elf(ioctl C SOURCES test_ioctl.c LINK_LIBS c unity)
 
 # Layer 12: device VFS unified path
 add_user_elf(dev_vfs C SOURCES test_dev_vfs.c LINK_LIBS c unity)
+
+# FPU/SSE smoke test: explicit inline-asm movsd+mulsd to verify user-mode
+# SSE path (CR4.OSFXSR + lazy FPU #NM handler). No Unity — simple printf+exit.
+add_user_elf(test_sse_smoke C SOURCES test_sse_smoke.c LINK_LIBS c)

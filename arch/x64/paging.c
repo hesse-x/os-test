@@ -226,6 +226,37 @@ __attribute__((no_sanitize("kernel-address"))) void enable_nx() {
   wrmsr(MSR_EFER, efer);
 }
 
+// ===================== SSE/FPU enable =====================
+// Set CR4.OSFXSR (bit 9) + CR4.OSXMMEXCPT (bit 10).
+//   OSFXSR: fxsave/fxrstor 保存/恢复 SSE 寄存器；不设则用户态 SSE 指令触发 #UD
+//   OSXMMEXCPT: SSE #XM(向量 19)异常走标准 IDT 路径
+// 必须在每个 CPU（BSP + AP）启动时调用。
+__attribute__((no_sanitize("kernel-address"))) void enable_sse() {
+  uint64_t cr4 = read_cr4();
+  cr4 |= (1ULL << 9) | (1ULL << 10);
+  write_cr4(cr4);
+}
+
+// ===================== per-CPU capability logging =====================
+// 打印 CR0/CR4/EFER 摘要 + 关键 bit 解读（TS/PE/MP/EM、OSFXSR/OSXMMEXCPT/NXDE、NXE/SCE）。
+// 在 BSP（isr_init）和 AP（cpu_bringup_common）的 bringup 末尾各调一次。
+// 出 "必备 bit 缺失" 类 bug 时（如本次 AP 缺 CR4.OSFXSR 导致 #UD），一眼可见。
+void log_cpu_caps(const char *tag) {
+    uint64_t cr0 = read_cr0();
+    uint64_t cr4 = read_cr4();
+    uint64_t efer = rdmsr(MSR_EFER);
+    printk(LOG_INFO, "cpu[%s] caps: CR0=0x%016lX TS=%d PE=%d MP=%d EM=%d | "
+                     "CR4=0x%016lX OSFXSR=%d OSXMMEXCPT=%d NXDE=%d | "
+                     "EFER=0x%016lX NXE=%d SCE=%d LME=%d\n",
+           tag, cr0,
+           (int)((cr0 >> 3) & 1), (int)((cr0 >> 0) & 1),
+           (int)((cr0 >> 1) & 1), (int)((cr0 >> 2) & 1),
+           cr4,
+           (int)((cr4 >> 9) & 1), (int)((cr4 >> 10) & 1), (int)((cr4 >> 5) & 1),
+           efer,
+           (int)((efer >> 11) & 1), (int)((efer >> 0) & 1), (int)((efer >> 8) & 1));
+}
+
 // ===================== PAT MSR programming =====================
 #define MSR_IA32_PAT 0x277
 #define PAT_MSR_LO   0x0001040600010406ULL
