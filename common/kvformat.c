@@ -1,4 +1,5 @@
 #include "common/kvformat.h"
+#include <stdint.h>
 
 /* Helper: emit unsigned integer in given base */
 static int kvfmt_uint(void (*putc)(char c, void *arg), void *arg,
@@ -72,6 +73,123 @@ static int kvfmt_int(void (*putc)(char c, void *arg), void *arg,
     }
 }
 
+/* ===================== floating-point (%f) =====================
+ * Freestanding, no <math.h> dependency. Handles sign, integer/fraction
+ * split, precision-driven rounding (round-half-up), and the special
+ * values nan / +inf / -inf. Width + pad + left_align reuse the same
+ * semantics as integer specifiers. Default precision is 6.
+ *
+ * User-space only. The kernel is built with -mno-sse, and the x86-64
+ * ABI requires SSE (XMM) for double arguments/returns — so a `double`
+ * in the signature, or even va_arg(ap, double), would fail to compile.
+ * The %f branch in kvformat() is likewise excluded under __KERNEL__.
+ */
+#ifndef __KERNEL__
+static int kvfmt_emit_str(void (*putc)(char c, void *arg), void *arg,
+                          const char *s) {
+    int n = 0;
+    while (*s) { putc(*s++, arg); n++; }
+    return n;
+}
+
+static int kvfmt_double(void (*putc)(char c, void *arg), void *arg,
+                        uint64_t bits, int width, char pad, int left_align,
+                        int precision) {
+    if (precision < 0) precision = 6;
+    if (precision > 60) precision = 60;  /* cap to fbuf[] size */
+
+    int exp_bits  = (int)((bits >> 52) & 0x7FF);
+    uint64_t man  = bits & 0xFFFFFFFFFFFFFULL;
+    int sign      = (int)(bits >> 63) & 1;
+
+    if (exp_bits == 0x7FF) {
+        const char *s = man ? "nan" : (sign ? "-inf" : "inf");
+        int slen = 0;
+        while (s[slen]) slen++;
+        if (left_align) {
+            int n = kvfmt_emit_str(putc, arg, s);
+            for (int i = slen; i < width; i++) { putc(' ', arg); n++; }
+            return n;
+        }
+        for (int i = slen; i < width; i++) putc(pad == '0' ? ' ' : pad, arg);
+        return (width > slen ? width : slen) - slen + kvfmt_emit_str(putc, arg, s);
+    }
+
+    /* Reconstruct the double; arithmetic stays in local registers so the
+     * -mno-sse kernel build uses x87 and never touches XMM. */
+    double val;
+    __builtin_memcpy(&val, &bits, sizeof(val));
+
+    int neg = sign && val < 0;
+    if (val < 0) val = -val;
+
+    /* Round at the requested precision: add 0.5 * 10^(-precision). */
+    double round_unit = 0.5;
+    for (int i = 0; i < precision; i++) round_unit *= 0.1;
+    val += round_unit;
+
+    uint64_t int_part = (uint64_t)val;
+    double frac = val - (double)int_part;
+
+    /* Render integer part. */
+    char ibuf[24];
+    int ipos = 0;
+    if (int_part == 0) {
+        ibuf[ipos++] = '0';
+    } else {
+        while (int_part) {
+            ibuf[ipos++] = '0' + (int)(int_part % 10);
+            int_part /= 10;
+        }
+    }
+
+    /* Render fractional digits into fbuf (precision digits). */
+    char fbuf[64];
+    for (int i = 0; i < precision; i++) {
+        frac *= 10.0;
+        int d = (int)frac;
+        if (d < 0) d = 0;
+        if (d > 9) d = 9;
+        fbuf[i] = '0' + d;
+        frac -= d;
+    }
+
+    /* Total = sign + integer digits + (precision>0 ? 1 + precision : 0). */
+    int int_len = ipos;
+    int frac_len = precision > 0 ? 1 + precision : 0;
+    int total = (neg ? 1 : 0) + int_len + frac_len;
+    int pad_count = width > total ? width - total : 0;
+
+    int emitted = 0;
+    if (left_align) {
+        if (neg) { putc('-', arg); emitted++; }
+        for (int i = ipos - 1; i >= 0; i--) { putc(ibuf[i], arg); emitted++; }
+        if (precision > 0) {
+            putc('.', arg); emitted++;
+            for (int i = 0; i < precision; i++) { putc(fbuf[i], arg); emitted++; }
+        }
+        for (int i = 0; i < pad_count; i++) { putc(' ', arg); emitted++; }
+    } else if (pad == '0') {
+        if (neg) { putc('-', arg); emitted++; }
+        for (int i = 0; i < pad_count; i++) { putc('0', arg); emitted++; }
+        for (int i = ipos - 1; i >= 0; i--) { putc(ibuf[i], arg); emitted++; }
+        if (precision > 0) {
+            putc('.', arg); emitted++;
+            for (int i = 0; i < precision; i++) { putc(fbuf[i], arg); emitted++; }
+        }
+    } else {
+        for (int i = 0; i < pad_count; i++) { putc(' ', arg); emitted++; }
+        if (neg) { putc('-', arg); emitted++; }
+        for (int i = ipos - 1; i >= 0; i--) { putc(ibuf[i], arg); emitted++; }
+        if (precision > 0) {
+            putc('.', arg); emitted++;
+            for (int i = 0; i < precision; i++) { putc(fbuf[i], arg); emitted++; }
+        }
+    }
+    return emitted;
+}
+#endif /* !__KERNEL__ */
+
 int kvformat(void (*putc)(char c, void *arg), void *arg,
              const char *fmt, va_list ap) {
     int count = 0;
@@ -99,6 +217,17 @@ int kvformat(void (*putc)(char c, void *arg), void *arg,
         while (*fmt >= '0' && *fmt <= '9') {
             width = width * 10 + (*fmt - '0');
             fmt++;
+        }
+
+        /* --- precision --- */
+        int precision = -1;
+        if (*fmt == '.') {
+            fmt++;
+            precision = 0;
+            while (*fmt >= '0' && *fmt <= '9') {
+                precision = precision * 10 + (*fmt - '0');
+                fmt++;
+            }
         }
 
         /* --- length modifier --- */
@@ -194,6 +323,28 @@ int kvformat(void (*putc)(char c, void *arg), void *arg,
             putc('x', arg);
             count += 2 + kvfmt_uint(putc, arg, val, 16, 0, 0, '0', 0);
             break;
+        }
+
+        case 'f':
+        case 'F': {
+            /* In C, float arguments are promoted to double in variadic
+             * calls, so %f and %lf both consume a double. The 'l' length
+             * modifier is a no-op for 'f' in printf.
+             *
+             * User-space only: the kernel is built with -mno-sse, and
+             * va_arg(ap, double) itself requires the SSE ABI, so the
+             * kernel build excludes this branch. */
+#ifndef __KERNEL__
+            (void)is_long; (void)is_long_long; (void)is_size;
+            double val = va_arg(ap, double);
+            uint64_t bits;
+            __builtin_memcpy(&bits, &val, sizeof(bits));
+            count += kvfmt_double(putc, arg, bits, width, pad, left_align,
+                                  precision);
+            break;
+#else
+            /* fall through to default for the kernel build */
+#endif
         }
 
         default:

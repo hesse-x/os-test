@@ -238,6 +238,80 @@ void test_d_neg_zero_fill_large2(void) {
     TEST_ASSERT_EQUAL_STRING("-00000000012345", b);
 }
 
+/* ========== %f format tests ========== */
+
+void test_f_basic(void) {
+    char b[64];
+    sprintf(b, "%f", 3.14);
+    TEST_ASSERT_EQUAL_STRING("3.140000", b);
+}
+
+void test_f_default_precision(void) {
+    char b[64];
+    sprintf(b, "%f", 1.0);
+    TEST_ASSERT_EQUAL_STRING("1.000000", b);
+}
+
+void test_f_precision_2(void) {
+    char b[64];
+    sprintf(b, "%.2f", 3.14);
+    TEST_ASSERT_EQUAL_STRING("3.14", b);
+}
+
+void test_f_precision_4(void) {
+    char b[64];
+    sprintf(b, "%.4f", 8.5094);
+    TEST_ASSERT_EQUAL_STRING("8.5094", b);
+}
+
+void test_f_negative(void) {
+    char b[64];
+    sprintf(b, "%.2f", -1.5);
+    TEST_ASSERT_EQUAL_STRING("-1.50", b);
+}
+
+void test_f_zero(void) {
+    char b[64];
+    sprintf(b, "%f", 0.0);
+    TEST_ASSERT_EQUAL_STRING("0.000000", b);
+}
+
+void test_f_precision_0(void) {
+    char b[64];
+    sprintf(b, "%.0f", 42.7);
+    TEST_ASSERT_EQUAL_STRING("43", b);
+}
+
+void test_f_round_carry(void) {
+    char b[64];
+    sprintf(b, "%.2f", 9.999);
+    TEST_ASSERT_EQUAL_STRING("10.00", b);
+}
+
+void test_f_width_pad(void) {
+    char b[64];
+    sprintf(b, "%8.2f", 3.14);
+    TEST_ASSERT_EQUAL_STRING("    3.14", b);
+}
+
+void test_f_zero_fill(void) {
+    char b[64];
+    sprintf(b, "%08.2f", 3.14);
+    TEST_ASSERT_EQUAL_STRING("00003.14", b);
+}
+
+void test_f_left_align(void) {
+    char b[64];
+    sprintf(b, "%-8.2f|", 3.14);
+    TEST_ASSERT_EQUAL_STRING("3.14    |", b);
+}
+
+void test_f_neg_zero_fill(void) {
+    char b[64];
+    sprintf(b, "%08.2f", -3.14);
+    TEST_ASSERT_EQUAL_STRING("-0003.14", b);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_printf_string);
@@ -270,5 +344,17 @@ int main(void) {
     RUN_TEST(test_d_neg_width_larger);
     RUN_TEST(test_d_neg_zero_fill_large);
     RUN_TEST(test_d_neg_zero_fill_large2);
+    RUN_TEST(test_f_basic);
+    RUN_TEST(test_f_default_precision);
+    RUN_TEST(test_f_precision_2);
+    RUN_TEST(test_f_precision_4);
+    RUN_TEST(test_f_negative);
+    RUN_TEST(test_f_zero);
+    RUN_TEST(test_f_precision_0);
+    RUN_TEST(test_f_round_carry);
+    RUN_TEST(test_f_width_pad);
+    RUN_TEST(test_f_zero_fill);
+    RUN_TEST(test_f_left_align);
+    RUN_TEST(test_f_neg_zero_fill);
     return UNITY_END();
 }

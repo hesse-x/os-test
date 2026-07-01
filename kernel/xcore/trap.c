@@ -59,17 +59,29 @@ void fpu_lazy_switch(xtask_t *t) {
     uint64_t cr0;
     __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
     if (!(cr0 & (1ULL << 3))) return;  // TS 已清，无需处理
+
+    // 嵌套检测：正常 #NM 只触发一次，clts 后即返回。若 handler 内部又触发
+    // #NM（典型原因：fxrstor/fxsave 在 TS=1 下执行），会嵌套并撑爆内核栈
+    // 导致 #DF。立即 panic 给出明确提示，不让 #DF 毁掉现场。
+    cpu_local_t *cl = get_cpu_local();
+    if (++cl->nm_nesting_depth > 1) {
+        panic("#NM nested (depth=%d) — fxrstor/fxsave executed with CR0.TS=1? "
+              "use kernel_fpu_save/restore helpers (they clts first)\n",
+              cl->nm_nesting_depth);
+    }
+
     if (t->fpu_page) {
         void *fpu_data = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(t->fpu_page));
         // 防御：fxrstor 源必须是 BFC 数据页虚拟地址（见 fpu_context_switch 同款 ASSERT）
-        uint64_t vma_start = (__force uint64_t)phys_to_virt(0);
-        uint64_t vma_end = vma_start + total_page_frames * PAGE_SIZE;
-        ASSERT((uint64_t)fpu_data >= vma_start && (uint64_t)fpu_data < vma_end);
-        __asm__ volatile("fxrstor (%0)" :: "r"(fpu_data));
+        uint64_t vma_start __attribute__((unused)) = (__force uint64_t)phys_to_virt(0);
+        ASSERT((uint64_t)fpu_data >= vma_start &&
+               (uint64_t)fpu_data < vma_start + total_page_frames * PAGE_SIZE);
+        kernel_fpu_restore(fpu_data);  // 内部先 clts 再 fxrstor
+    } else {
+        // fpu_page == NULL：线程还没用过 FPU，只需清 TS
+        __asm__ volatile("clts");
     }
-    // 若 fpu_page == NULL，说明线程还没用过 FPU，不需要恢复
-    t->used_fpu = 1;  // 标记本线程用过 FPU
-    __asm__ volatile("clts");  // 清 CR0.TS
+    cl->nm_nesting_depth = 0;
 }
 
 // ===================== COW fault resolution =====================
@@ -185,7 +197,7 @@ void trap_dispatch(trapframe_t *tf) {
   // CPU exception: kill user process, halt for kernel exceptions
   // vector 7: #NM (Device Not Available) — lazy FPU switch
   if (tf->trapno == 7) {
-    printk(LOG_INFO, "#NM (lazy FPU trap) pid=%d\n",
+    printk(LOG_DEBUG, "#NM (eager FPU fallback) pid=%d\n",
            current_task ? current_task->pid : -1);
     fpu_lazy_switch(current_task);
     return;
@@ -401,12 +413,6 @@ void isr_init() {
                    ccr1, ccr2, lapic_read(LAPIC_LVT_TIMER),
                    ccr1 != ccr2 ? "yes" : "NO!");
   }
-
-    // 设置 CR0.TS（Task Switched 位），用户态首次用 SSE 触发 #NM
-    uint64_t cr0;
-    __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
-    cr0 |= (1ULL << 3);  // CR0.TS = bit 3
-    __asm__ volatile("movq %0, %%cr0" :: "r"(cr0));
 }
 
 // ===================== Syscall dispatch =====================

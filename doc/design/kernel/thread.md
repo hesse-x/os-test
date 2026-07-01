@@ -15,7 +15,7 @@
 | 5 | 退出语义 | 贴 Linux `do_exit`：所有线程 `do_exit` 做 `clear_tid` + `futex_wake`（唤醒 joiner）。`signal_struct.thread_count` atomic dec 判最后线程，最后线程通知父进程。`exit_group` 设 `group_exit` 标志，同组线程在 `check_pending_signals` 入口自行退出。`do_exit` 接管 `mm_put`/`files_put`/`signal_put`，`task_reap` 只清调度器资源 |
 | 6 | fork + execve | 与线程解耦。`sys_fork` 保留 master 现有 COW 路径（见 `proc.md`），`sys_clone` 的 fork 分支（flags=0）复用 `copy_page_table`/`copy_fd_table`/`copy_mmap_regions`/`build_kstack_from_tf` 辅助函数（从 `sys_fork` 抽出为独立函数）但入口独立。两路径并存，helper 共享，入口编排不同 |
 | 7 | TLS | 完整加载 ELF `.tdata`/`.tbss` 段 + TCB。**variant II 布局**（TCB 在 TLS 页高地址端，`FS_BASE = &TCB`，TLS 变量 `%fs:(-offset)` 访问，与 musl/glibc x86-64 一致）。`elf_loader` 加 PT_TLS 解析，`clone(CLONE_SETTLS)` 分配 TLS 页，`__trapret`/`syscall_fast_entry` 返回用户态前加载 fs_base（不动 `switch_to` 汇编）。主线程 TLS 由用户态 `_start` 调 `__libc_tls_init()` 初始化，通过 `linker.ld` 导出的 `__tls_template_*` 符号定位模板（无 auxv） |
-| 8 | FPU/SSE | lazy FPU 上下文切换（CR0.TS + #NM handler）。`schedule()` 的 C helper `fpu_context_switch` 设 TS + fxsave prev；#NM handler `fpu_lazy_switch` fxrstor + lazy 分配 `fpu_page`（`bfc_alloc_page(1)`，页对齐满足 fxsave 16 字节要求）。内核仍 `-mno-sse`，用户态移除 |
+| 8 | FPU/SSE | eager FPU 上下文切换（创建时预分配 fpu_page + schedule 时 fxsave prev/fxrstor next）。`xcore_fpu_alloc` 在 `process_create_elf`/`sys_fork` 时调用 `bfc_alloc_page(1)` 并初始化为合法 fxsave 镜像（memset 0 + MXCSR=0x1F80）。`schedule()` 的 C helper `fpu_context_switch` 直接 fxsave prev + fxrstor next，不设 CR0.TS，用户态 SSE 零 trap。`#NM` handler `fpu_lazy_switch` 保留作兜底（TS 意外泄漏时 clts + fxrstor）。fork 时 child memcpy parent 当前 FPU 快照（POSIX 语义）。内核仍 `-mno-sse`，用户态移除 |
 | 9 | clone 签名 | `clone(flags, stack, parent_tid, child_tid, tls)`，与 Linux 一致 |
 | 10 | task 表大小 | 维持 `MAX_PROC=64`，`pid==数组下标`。`tgid` 字段已存在于 `xtask_t`，单线程时 `tgid==pid`，多线程时 `tgid=leader.pid`。动态扩容后续 |
 | 11 | fd_table 归属 | `files_t` 已从 `mm_t` 独立（master commit 9279262），`CLONE_FILES` 时 `files_t.f_count++`，与 `CLONE_VM` 解耦。第一版 `CLONE_FILES` 和 `CLONE_VM` 绑定一起用，但结构上不耦合 |
@@ -49,15 +49,14 @@ typedef struct xtask_t {
 
     // === 新增：线程支持 ===
     uint64_t fs_base;           // TLS 基址（FS_BASE MSR 镜像），__trapret 加载
-    Page    *fpu_page;          // fxsave 区页（lazy 分配：首次用 FPU 时 bfc_alloc_page(1)）。存 Page* 而非数据指针，类型层面防误用；使用时 phys_to_virt(page_to_phys(fpu_page)) 取数据页虚拟地址喂 fxsave/fxrstor
-    uint8_t  used_fpu;          // 该 task 是否使用过 FPU（0=未用，1=用过，决定 fxsave 是否要存）
+    Page    *fpu_page;          // fxsave 区页（创建时预分配：xcore_fpu_alloc 在 process_create_elf/sys_fork 调用 bfc_alloc_page(1)）。存 Page* 而非数据指针，类型层面防误用；使用时 phys_to_virt(page_to_phys(fpu_page)) 取数据页虚拟地址喂 fxsave/fxrstor。NULL = idle（无 FPU 状态）
 } xtask_t;
 ```
 
 **为什么 fs_base 和 fpu_page 在 xtask_t 而非 proc_t**：
 约束是依赖方向单向：某个字段进了 xcore，外部（BSD 层）就通过 xcore 的接口访问它，xcore 不反过来为访问这些字段解引用 `proc_t`。
 - `fs_base`：`__trapret`/`syscall_fast_entry` 汇编要 `wrmsr(MSR_FS_BASE, current_task->fs_base)`。放 `proc_t` 多一次解引用（`current_task->proc->fs_base`），且 `proc` 可能为 NULL（idle）要判空——汇编里判空很丑。放 `xtask_t` 汇编直接 `movq offset(%rax), %rdx`，xcore 不回解引用 `proc_t`，依赖干净。
-- `fpu_page`：#NM handler 在 `trap_dispatch`（Xcore 层）直接拿 `current_task`。lazy FPU 的核心是"当前线程首次用 SSE 时 #NM → 把 fpu_page 换成当前线程的"，这条路径不碰 BSD 语义，纯调度器职责。放 `xtask_t` 不需要 `trap_dispatch` 解引用 `proc_t`。
+- `fpu_page`：`fpu_context_switch` 在 `schedule()`（Xcore 层）直接拿 `current_task`。eager FPU 的核心是"创建时预分配 + 切换时直接 fxsave/fxrstor"，这条路径不碰 BSD 语义，纯调度器职责。放 `xtask_t` 不需要 `trap_dispatch` 解引用 `proc_t`。
 
 POSIX 纯线程语义（`tgid` 线程组、`sig_pending`、`clear_tid_addr`、`futex_node`）仍优先 `proc_t`，因为这些不会被 xcore 快路径直接碰。
 
@@ -205,7 +204,7 @@ sys_clone(flags, stack, parent_tid, child_tid, tls):
   8. xtask_t 新字段初始化:
        fs_base = (CLONE_SETTLS? tls : parent->fs_base)
        clear_tid_addr = (CLONE_CHILD_CLEARTID? child_tid : 0)
-       fpu_page=NULL, used_fpu=0
+       fpu_page=xcore_fpu_alloc(child)（预分配，见 FPU/SSE 节）
   9. proc_t 线程级:
        sig_pending=0, sig_blocked=parent->proc->sig_blocked
        exit_code=0
@@ -602,59 +601,58 @@ void __libc_tls_init() {
 
 **TLS 模板发现机制**：现有进程无 ELF auxv（`process_create_elf` 不构造 auxv），`__libc_tls_init` 通过 `linker.ld` 导出的 `__tls_template_start`/`__tls_template_end`/`__tdata_size`/`__tbss_size`/`__tls_align` 符号定位 PT_TLS 模板。零运行时查找开销，与 musl 静态链接模式一致。`linker.ld` 在 `.tdata`/`.tbss` 段周围定义这些符号。
 
-## FPU/SSE lazy 上下文切换
+## FPU/SSE eager 上下文切换
 
 ### 初始化
 
 ```
-// kernel/xcore/trap.c — isr_init 末尾
-cr0 |= CR0_TS;  // 设置 Task Switched 位，用户态首次用 SSE 触发 #NM
-// 注册 #NM handler (vector 7)
+// kernel/xcore/sched.c — xcore_fpu_alloc（process_create_elf / sys_fork 调用）
+// 分配 fpu_page 并初始化为合法 fxsave 镜像（memset 0 + MXCSR=0x1F80）
+// 纯内存操作，无 SSE 指令，不破坏调用者 xmm
 ```
 
-### #NM handler (Device Not Available)
-
-```c
-// kernel/xcore/trap.c — trap_dispatch 加 case 7
-void fpu_lazy_switch(xtask_t *t) {
-    uint64_t cr0;
-    __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
-    if (!(cr0 & CR0_TS)) return;  // TS 已清，无需处理
-    if (t->fpu_page) {
-        void *data = phys_to_virt(page_to_phys(t->fpu_page));  // Page* → 数据页虚拟地址
-        fxrstor(data);  // 恢复保存的 FPU 状态
-    }
-    // 若 fpu_page == NULL，说明线程还没用过 FPU，不需要恢复
-    t->used_fpu = 1;  // 标记本线程用过 FPU
-    cr0 &= ~CR0_TS;
-    __asm__ volatile("movq %0, %%cr0" :: "r"(cr0));
-}
-```
+eager 模式下 `isr_init` 不再设置 `CR0.TS`（TS 恒为 0），用户态 SSE 指令直接执行不触发 `#NM`。
 
 ### schedule() 中的 fpu_context_switch（C helper，不修改 switch_to 汇编）
 
 ```c
 // kernel/xcore/sched.c — schedule() 中，switch_to(prev, next) 之前调用
 void fpu_context_switch(xtask_t *prev, xtask_t *next) {
-    if (prev->used_fpu) {
-        if (!prev->fpu_page) prev->fpu_page = bfc_alloc_page(1);  // lazy 分配，页对齐满足 fxsave 16 字节要求
-        if (prev->fpu_page) {
-            void *data = phys_to_virt(page_to_phys(prev->fpu_page));  // Page* → 数据页虚拟地址
-            fxsave(data);  // 保存 prev 的 FPU 状态
-        }
+    if (prev && prev->fpu_page) {
+        void *data = phys_to_virt(page_to_phys(prev->fpu_page));  // Page* → 数据页虚拟地址
+        kernel_fpu_save(data);  // clts + fxsave，保存 prev 的 FPU 状态
     }
-    // 设 TS=1，新线程首次用 SSE 触发 #NM
-    uint64_t cr0;
-    __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
-    cr0 |= CR0_TS;
-    __asm__ volatile("movq %0, %%cr0" :: "r"(cr0));
-    // 不需要主动 fxrstor next——#NM handler 会在 next 首次用 SSE 时做
+    if (next && next->fpu_page) {
+        void *data = phys_to_virt(page_to_phys(next->fpu_page));
+        kernel_fpu_restore(data);  // clts + fxrstor，恢复 next 的 FPU 状态
+    }
+    // 不设 CR0.TS，用户态 SSE 零 trap
 }
 ```
 
-**为什么 fpu_context_switch 在 schedule() 而非 switch_to 汇编**：和 master 现有的 "switch_to 汇编极简，复杂逻辑在 C helper" 风格一致（FS_BASE 也是放 `__trapret` 不放 `switch_to`）。不动 `trapentry.S` 的 `switch_to`，`_Static_assert` 的 offset 8/24 不变，汇编复杂度不涨。
+idle 进程 `fpu_page=NULL`，自动跳过 save/restore。
 
-**CLONE_VM 线程切换的优化**：同进程线程切换时 CR3 不变（`switch_to` 已经有 CLONE_VM 优化跳过 CR3 切换），但 FPU 状态仍然要切（不同线程有不同 xmm）。所以 `fpu_context_switch` 不管 CR3 是否相同都要做。
+### #NM handler（兜底防御）
+
+```c
+// kernel/xcore/trap.c — trap_dispatch 的 case 7 保留
+// eager 模式下 TS 恒为 0，#NM 不应触发。若 TS 被意外设置（bug），
+// fpu_lazy_switch 兜底：clts + fxrstor 恢复当前线程 FPU 状态
+```
+
+`nm_nesting_depth` 防护保留（检测 fxrstor/fxsave 在 TS=1 下嵌套 #NM → #DF）。
+
+### fork FPU 继承
+
+```c
+// kernel/bsd/proc.c — sys_fork 中，stack 分配后
+xcore_fpu_alloc(child);  // child 预分配 fpu_page
+ASSERT(parent->fpu_page != NULL);
+kernel_fpu_save(parent_data);  // 存 parent 当前 live xmm（fxsave 不改寄存器）
+__memcpy(child_data, parent_data, PAGE_SIZE);  // child 继承 parent FPU 快照
+```
+
+POSIX fork 语义：child 拿到 parent 当前 FPU 状态快照。`fxsave` 不修改 xmm 寄存器，parent syscall 返回后继续跑不受影响。
 
 ### 编译 flags 变更
 
@@ -813,7 +811,7 @@ NR_SYSCALL: 60 → 68。`xcore_syscall_table` 不动（0-19），新 syscall 全
 
 - 定义 `signal_struct`（`kernel/bsd/signal.h`），`signal_create`/`signal_put`
 - `proc_t` 改造：`sig_pending`/`sig_blocked`/`signal`/`clear_tid_addr`/`futex_node`/`futex_uaddr`，`sig.action[]` 挪到 `signal_struct`
-- `xtask_t` 新增：`fs_base`/`fpu_page`/`used_fpu`，`tgid` 真正启用
+- `xtask_t` 新增：`fs_base`/`fpu_page`，`tgid` 真正启用
 - 现有进程创建路径适配：`proc_create`/`process_create_elf` 初始化 `signal_struct`（`thread_count=1`，`parent_pid` 镜像）
 - **`sys_fork` 同步适配（P1 强制项）**：现有 `sys_fork` 用 `proc_t.sig.action[]` 内嵌数组，改造后必须改成 `signal_create()` + `memcpy(action[])` + `thread_count=1` + `parent_pid` 镜像 + `tgid=child.pid`。否则 fork 出的子进程没有 `signal_struct`，所有信号路径崩
 - `check_pending_signals` 适配两级 pending（先私有后共享）
@@ -821,12 +819,12 @@ NR_SYSCALL: 60 → 68。`xcore_syscall_table` 不动（0-19），新 syscall 全
 - `signal.c` 所有 `proc->proc->sig.action[sig]` 改为 `proc->proc->signal->action[sig]`
 - **验证**：编译通过 + shell/hello 正常运行（单线程行为不变）
 
-### 阶段 2：FPU/SSE lazy switch
+### 阶段 2：FPU/SSE eager switch（已实现）
 
-- `isr_init` 中 `cr0 |= CR0.TS`
-- `trap_dispatch` 添加 #NM (trapno==7) 处理：`fpu_lazy_switch`
-- `schedule()` 中 `fpu_context_switch`：fxsave prev + 设 CR0.TS（C helper，不修改 `switch_to` 汇编）
-- `fpu_page` lazy 分配用 `bfc_alloc_page(1)`（页对齐满足 fxsave 16 字节要求，不用 kmalloc）
+- `xcore_fpu_alloc`：`bfc_alloc_page(1)` + memset 0 + MXCSR=0x1F80，在 `process_create_elf`/`sys_fork` 创建时预分配 `fpu_page`
+- `schedule()` 中 `fpu_context_switch`：fxsave prev + fxrstor next（C helper，不修改 `switch_to` 汇编），不设 `CR0.TS`
+- `isr_init` 不设 `CR0.TS`；`#NM` handler `fpu_lazy_switch` 保留作兜底（TS 意外泄漏时 clts + fxrstor），`nm_nesting_depth` 防护保留
+- `sys_fork` FPU 继承：child `memcpy` parent 当前 FPU 快照（POSIX fork 语义）
 - 移除用户态编译 `-mno-sse -mno-sse2 -mno-mmx`（`user_rules.cmake`）
 - **验证**：编译通过 + 用户态浮点程序正常运行
 

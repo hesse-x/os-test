@@ -3,6 +3,30 @@
 # 用户态公共编译 flags (CMake list, semicolon-separated)
 set(USER_COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -mno-red-zone)
 
+# 防御：用户态需要 SSE（double/printf/FPU 都依赖），任何 -mno-sse* 都是
+# 全局 CMAKE_C_FLAGS 泄漏的信号（典型来源：内核-only flag 误放全局）。
+# 检查 target 的 COMPILE_OPTIONS + 继承的 CMAKE_C_FLAGS，命中即 FATAL_ERROR。
+function(user_assert_no_sse_disable target_name)
+    # 收集 target 自身 options
+    get_target_property(_opts ${target_name} COMPILE_OPTIONS)
+    # 合并全局 C flags（CMake 把 CMAKE_C_FLAGS 当作 directory property）
+    get_directory_property(_global_cflags COMPILE_OPTIONS)
+    set(_all_flags ${_opts} ${_global_cflags})
+    # CMAKE_C_FLAGS 是字符串，转成 list 用空格分
+    separate_arguments(_global_c_flags UNIX_COMMAND "${CMAKE_C_FLAGS}")
+    set(_all_flags ${_all_flags} ${_global_c_flags})
+    foreach(_f ${_all_flags})
+        if(_f MATCHES "^-mno-(sse|sse2|mmx)$")
+            message(FATAL_ERROR
+                "user-space target '${target_name}' got '${_f}' — SSE disabled.\n"
+                "  user-space requires SSE for double/float/printf %f.\n"
+                "  This usually means a kernel-only flag leaked into global\n"
+                "  CMAKE_C_FLAGS. Move -mno-sse* to kernel_rules.cmake's\n"
+                "  target_compile_options instead of the global flags.")
+        endif()
+    endforeach()
+endfunction()
+
 # add_user_lib: 用户态静态库（如 libc.a）
 # 用法: add_user_lib(lib_name SOURCES source1 source2 ...)
 function(add_user_lib lib_name)
@@ -21,6 +45,8 @@ function(add_user_lib lib_name)
     set_target_properties(${lib_name} PROPERTIES
         ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
+
+    user_assert_no_sse_disable(${lib_name})
 endfunction()
 
 # add_user_elf: 用户态 ELF（compile → objcopy → ld）

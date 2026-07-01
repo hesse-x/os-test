@@ -115,14 +115,8 @@ void kernel_main(boot_info *bi) {
   // execute without #UD. This is the exact failure mode seen when APs
   // missed enable_sse() — catching it here gives a clear kernel-side
   // panic instead of a mysterious user-mode #UD later.
-  // current_task is not set yet (assigned at line ~159), so we must NOT
-  // trigger #NM: clts() first, run SSE, then restore CR0.TS (set by
-  // isr_init) to preserve lazy FPU semantics.
+  // eager FPU: CR0.TS 恒为 0，无需 clts/恢复 TS。
   {
-    uint64_t saved_cr0;
-    __asm__ volatile("movq %%cr0, %0" : "=r"(saved_cr0));
-    __asm__ volatile("clts");
-
     double src = 3.14, dst = 0.0;
     // Note: no "xmm0" clobber — kernel is compiled with -mno-sse, so gcc
     // rejects listing xmm0. Safe because the kernel never uses SSE regs
@@ -132,10 +126,10 @@ void kernel_main(boot_info *bi) {
                      : "=m"(dst) : "m"(src));
 
     if (dst != 3.14) {
-      panic("kernel_sse_selftest: SSE result wrong, got %f\n", dst);
+      /* Kernel printk does not support %f (built with -mno-sse); the
+       * self-test only needs a pass/fail signal. */
+      panic("kernel_sse_selftest: SSE result wrong\n");
     }
-    // Restore original CR0 (keeps TS=1 set by isr_init for lazy FPU)
-    __asm__ volatile("movq %0, %%cr0" :: "r"(saved_cr0) : "memory");
     printk(LOG_INFO, "kernel_sse_selftest: PASS (BSP)\n");
   }
 

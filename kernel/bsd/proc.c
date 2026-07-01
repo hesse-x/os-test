@@ -621,6 +621,21 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
     uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
     uint64_t k_stack_top = (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) + 2 * PAGE_SIZE;
 
+    // 6b. FPU 继承：child 预分配 fpu_page + 复制 parent 当前 FPU 快照（POSIX fork 语义）
+    if (!xcore_fpu_alloc(child)) {
+        bfc_free_page(stack_pages, 2);
+        proc_free(child_bp);
+        child->proc = NULL;
+        mm_put(child_mm);
+        spin_unlock(&tasks_lock);
+        return (int64_t)-ENOMEM;
+    }
+    ASSERT(parent->fpu_page != NULL);
+    void *parent_fpu = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(parent->fpu_page));
+    void *child_fpu  = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(child->fpu_page));
+    kernel_fpu_save(parent_fpu);  // 存 parent 当前 live xmm（fxsave 不改寄存器，parent 继续跑）
+    __memcpy(child_fpu, parent_fpu, PAGE_SIZE);
+
     // Copy current trapframe (from per-CPU cur_tf set by syscall/irq entry)
     trapframe_t tf;
     trapframe_t *parent_tf = get_cpu_local()->cur_tf;
@@ -829,6 +844,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
     trapframe_t *tf = get_cpu_local()->cur_tf;
     tf->rip = lr.entry;
     tf->rsp = 0x00007FFFFFFFE000;
+    // 用户栈顶必须 16 字节对齐（见 build_kstack 同款 ASSERT）
+    ASSERT(tf->rsp % 16 == 0);
     tf->rax = 0;
 
     // 9b. Update mm_t fields

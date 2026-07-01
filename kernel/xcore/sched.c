@@ -116,6 +116,10 @@ uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
     trapframe_t tf = {0};
     tf.ss      = 0x23;                   // USER_DS
     tf.rsp     = 0x00007FFFFFFFE000;      // user stack top
+    // 用户栈顶必须 16 字节对齐：iret 进入 _start 时 rsp%16==0，
+    // _start 用 andq $-16 兜底后符合 ABI（call 后 rsp%16==8）。
+    // 若此处不对齐，用户态 movaps/movdqa 会 #GP。
+    ASSERT(tf.rsp % 16 == 0);
     tf.rflags  = 0x202;                  // IF=1, IOPL=0
     tf.cs      = 0x2B;                   // USER_CS
     tf.rip     = entry_rip;
@@ -234,32 +238,40 @@ static void update_tss_iopm(xtask_t *proc) {
     }
 }
 
-// FPU 上下文切换 C helper（不修改 switch_to 汇编）
-// 在 switch_to(prev, next) 之前调用：保存 prev 的 FPU 状态 + 设 CR0.TS
+// FPU 上下文切换 C helper（eager 模式，不修改 switch_to 汇编）
+// 在 switch_to(prev, next) 之前调用：fxsave prev 的 FPU 状态 + fxrstor next 的 FPU 状态。
+// 不设 CR0.TS，用户态 SSE 指令直接执行不触发 #NM。idle 进程 fpu_page=NULL，自动跳过。
 void fpu_context_switch(xtask_t *prev, xtask_t *next) {
-    (void)next;
-    if (prev && prev->used_fpu) {
-        if (!prev->fpu_page) {
-            // lazy 分配，页对齐满足 fxsave 16 字节要求
-            prev->fpu_page = bfc_alloc_page(1);
-        }
-        if (prev->fpu_page) {
-            void *fpu_data = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(prev->fpu_page));
-            // 防御：fxsave 目标必须是 BFC 数据页虚拟地址，不能是 Page* 元数据指针
-            // （历史 bug：误把 bfc_alloc_page 返回的 Page* 直接当数据指针，fxsave 覆盖
-            //  Page 元数据，后续 kfree 检测 page->status 异常才暴露，定位困难）
-            uint64_t vma_start = (__force uint64_t)phys_to_virt(0);
-            uint64_t vma_end = vma_start + total_page_frames * PAGE_SIZE;
-            ASSERT((uint64_t)fpu_data >= vma_start && (uint64_t)fpu_data < vma_end);
-            __asm__ volatile("fxsave (%0)" :: "r"(fpu_data));
-        }
+    if (prev && prev->fpu_page) {
+        void *fpu_data = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(prev->fpu_page));
+        // 防御：fxsave 目标必须是 BFC 数据页虚拟地址，不能是 Page* 元数据指针
+        // （历史 bug：误把 bfc_alloc_page 返回的 Page* 直接当数据指针，fxsave 覆盖
+        //  Page 元数据，后续 kfree 检测 page->status 异常才暴露，定位困难）
+        uint64_t vma_start __attribute__((unused)) = (__force uint64_t)phys_to_virt(0);
+        ASSERT((uint64_t)fpu_data >= vma_start &&
+               (uint64_t)fpu_data < vma_start + total_page_frames * PAGE_SIZE);
+        kernel_fpu_save(fpu_data);  // 内部先 clts 再 fxsave
     }
-    // 设 TS=1，新线程首次用 SSE 触发 #NM
-    __asm__ volatile("clts");  // 先清，确保 fxsave 之后的状态干净
-    uint64_t cr0;
-    __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
-    cr0 |= (1ULL << 3);  // CR0.TS
-    __asm__ volatile("movq %0, %%cr0" :: "r"(cr0));
+    if (next && next->fpu_page) {
+        void *fpu_data = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(next->fpu_page));
+        uint64_t vma_start __attribute__((unused)) = (__force uint64_t)phys_to_virt(0);
+        ASSERT((uint64_t)fpu_data >= vma_start &&
+               (uint64_t)fpu_data < vma_start + total_page_frames * PAGE_SIZE);
+        kernel_fpu_restore(fpu_data);  // 内部先 clts 再 fxrstor
+    }
+}
+
+// 分配 FPU 状态页并初始化为合法 fxsave 镜像。
+// fxsave 512 字节布局中 MXCSR 位于 offset 24，必须为合法值（否则 fxrstor 触发 #GP）。
+// memset 0 + 设 MXCSR=0x1F80（默认值：异常屏蔽位全 1，舍入=nearest）等价于 fninit+ldmxcsr 后的 init state。
+// 纯内存操作，无 SSE 指令，不破坏调用者 xmm 寄存器。
+int xcore_fpu_alloc(xtask_t *t) {
+    t->fpu_page = bfc_alloc_page(1);
+    if (!t->fpu_page) return 0;
+    void *fpu_data = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(t->fpu_page));
+    __memset(fpu_data, 0, 512);
+    *(uint32_t *)((uint8_t *)fpu_data + 24) = 0x1F80;  // MXCSR default
+    return 1;
 }
 
 __attribute__((no_sanitize("kernel-address")))
@@ -465,6 +477,5 @@ void task_reap(xtask_t *proc) {
     // Clear threading fields
     proc->fs_base = 0;
     proc->fpu_page = NULL;
-    proc->used_fpu = 0;
     spin_unlock(&tasks_lock);
 }

@@ -47,6 +47,10 @@ typedef struct cpu_local_t {
 
     // RCU read-side nesting state
     rcu_local_t rcu;                       // nesting count + saved IF
+
+    // #NM nesting guard: detects fxrstor/fxsave executed with CR0.TS=1
+    // (would nest #NM and blow the kernel stack into #DF). See fpu_lazy_switch.
+    int nm_nesting_depth;
 } cpu_local_t;
 
 extern cpu_local_t cpu_locals[MAX_CPUS];

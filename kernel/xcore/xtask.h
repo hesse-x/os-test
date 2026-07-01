@@ -64,11 +64,11 @@ typedef struct xtask_t {
 
     // === threading support (appended at end, preserves existing offsets) ===
     uint64_t fs_base;           // TLS base (FS_BASE MSR mirror), loaded by __trapret
-    Page    *fpu_page;          // fxsave area page (lazy alloc: bfc_alloc_page(1) on first FPU use).
+    Page    *fpu_page;          // fxsave area page (创建时预分配：xcore_fpu_alloc 在
+                                // process_create_elf/sys_fork 时调用 bfc_alloc_page(1))。
                                 // Stores Page* (NOT data pointer) — use page_to_phys/phys_to_virt
                                 // to obtain the fxsave area virtual address. Type prevents feeding
-                                // a Page* to fxsave/fxrstor by accident.
-    uint8_t  used_fpu;          // whether this task has used FPU (0=no, 1=yes)
+                                // a Page* to fxsave/fxrstor by accident. NULL = idle (无 FPU 状态)。
 
     // === pointer to BSD extension data (Xcore does not interpret contents) ===
     struct proc *proc;  // NULL = idle/task without POSIX semantics

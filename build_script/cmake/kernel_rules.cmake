@@ -13,6 +13,11 @@ function(add_kernel_object lib_name)
     endif()
     target_compile_options(${lib_name} PRIVATE -Wno-unused-parameter)
 
+    # Kernel is built without SSE/SSE2/MMX: the x86-64 ABI would otherwise
+    # pass/return double via XMM, and the kernel deliberately never touches
+    # vector registers. User-space targets do NOT get these flags.
+    target_compile_options(${lib_name} PRIVATE -mno-sse -mno-sse2 -mno-mmx)
+
     # KASAN sanitizer flags (kernel-only)
     if(KASAN_CFLAGS)
         target_compile_options(${lib_name} PRIVATE ${KASAN_CFLAGS})

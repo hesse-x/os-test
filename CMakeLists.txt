@@ -8,9 +8,12 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 project(myos C CXX ASM)
 
 # Common C flags (kernel uses C with -fPIE; user-space uses C/C++ with -fno-pie)
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fPIE -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -std=gnu17")
+# Note: -mno-sse/-mno-sse2/-mno-mmx are kernel-only (applied via
+# kernel_rules.cmake). User-space needs SSE for double/float in printf
+# and general floating-point, so they must NOT be global.
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fPIE -mno-red-zone -std=gnu17")
 # C++ flags for user-space only (driver, shell, libc .cc files)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone -mno-sse -mno-sse2 -mno-mmx")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone")
 
 # KASAN sanitizer flags (applied only to kernel OBJECT libraries via kernel_rules.cmake)
 if(SANITIZE)

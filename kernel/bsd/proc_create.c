@@ -45,6 +45,9 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
     uint64_t k_stack_top = (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) + 2 * PAGE_SIZE;
 
+    // 2b. Pre-allocate FPU state page (eager FPU: every user task gets one)
+    if (!xcore_fpu_alloc(proc)) goto fail_stack;
+
     // 3. Create mm_t (allocates PML4 + files_t)
     mm = mm_create();
     if (!mm) goto fail_stack;
@@ -155,6 +158,8 @@ fail_mm:
     // fall through to stack cleanup
 fail_stack:
     bfc_free_page(stack_pages, 2);
+    // Free FPU state page if allocated (eager FPU pre-allocation)
+    if (proc->fpu_page) { bfc_free_page(proc->fpu_page, 1); proc->fpu_page = NULL; }
     // fall through to slot cleanup
 fail_slot:
     // proc slot was never modified (pid still -1, state still UNUSED)
