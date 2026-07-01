@@ -31,6 +31,9 @@ typedef struct proc {
     pid_t    clear_tid_addr;    // CLONE_CHILD_CLEARTID user address (0 = none)
     list_node_t futex_node;     // futex bucket list node
     uint64_t futex_uaddr;       // user address being waited on (0 = not waiting on futex)
+
+    // === pthread cancel (Phase 4) ===
+    uint64_t cancel_handler;   // __pthread_cancel_check 函数地址，0 = 未注册
 } proc_t;
 
 // ABI drift guard: kernel/driver/bsd_types.h maintains a parallel proc_t for
@@ -47,7 +50,7 @@ STATIC_ASSERT(offsetof(proc_t, files) == 184,
 STATIC_ASSERT(offsetof(proc_t, signal) == 176,
               "proc_t.signal must be a POINTER to a separately-allocated signal_struct, "
               "not an inline struct — inlining shifts the offset of files");
-STATIC_ASSERT(sizeof(proc_t) == 224,
+STATIC_ASSERT(sizeof(proc_t) == 232,
               "proc_t size changed — update kernel/driver/bsd_types.h to match");
 #undef STATIC_ASSERT
 

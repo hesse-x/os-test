@@ -94,11 +94,12 @@ int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
         spin_unlock(&tasks_lock);
     }
 
-    // 4. clear_tid_addr: 写 0 + futex_wake（futex 未实现前 futex_wake 为 stub）
+    // 4. clear_tid_addr: 写 0 + futex_wake（pthread_join 依赖此唤醒）
     //    BEFORE ZOMBIE — proc_t is alive, no concurrent task_reap possible.
     if (proc->proc->clear_tid_addr) {
         *((pid_t *)(uintptr_t)proc->proc->clear_tid_addr) = 0;
-        // futex_wake(proc->proc->clear_tid_addr, 1);  // 阶段 3b 实现
+        sys_futex((int64_t)proc->proc->clear_tid_addr,
+                  (int64_t)FUTEX_WAKE, 1, 0, 0, 0);
     }
 
     // 5. Thread-group bookkeeping BEFORE ZOMBIE (proc_t/signal alive).
@@ -557,9 +558,16 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
     // Anonymous private mapping
     size = ALIGN_UP(size, PAGE_SIZE);
     uint64_t vaddr = proc->mm->mmap_brk;
-    uint64_t pte_flags = PTE_PRESENT | PTE_USER;
-    if (prot & PROT_WRITE) pte_flags |= PTE_RW;
-    if (!(prot & PROT_EXEC)) pte_flags |= PTE_NX;
+    // prot=0 (PROT_NONE) → guard page: map page but NOT present.
+    // Access triggers #PF (desired for stack-overflow detection).
+    uint64_t pte_flags = PTE_USER;
+    if (prot == 0) {
+        pte_flags |= PTE_NX;
+    } else {
+        pte_flags |= PTE_PRESENT;
+        if (prot & PROT_WRITE) pte_flags |= PTE_RW;
+        if (!(prot & PROT_EXEC)) pte_flags |= PTE_NX;
+    }
 
     size_t npages = size / PAGE_SIZE;
     uint64_t *phys_pages = (uint64_t *)kmalloc(npages * sizeof(uint64_t));
@@ -2066,6 +2074,8 @@ int64_t syscall_dispatch(trapframe_t *tf) {
     case SYS_CLONE:         return sys_clone(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
     case SYS_FUTEX:         return sys_futex(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
     case SYS_ARCH_PRCTL:    return sys_arch_prctl(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+    case SYS_PTHREAD_SET_CANCEL_HANDLER:
+        return sys_pthread_set_cancel_handler(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
     // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) 在阶段 3b 实现，此阶段返回 -ENOSYS
     default:
         printk(LOG_WARN, "syscall_dispatch: unknown syscall nr=%lu pid=%d\n",

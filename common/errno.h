@@ -42,5 +42,6 @@
 #define EINTR     38
 #define ENOEXEC   39
 #define EWOULDBLOCK EAGAIN
+#define EDEADLK   35   // PTHREAD_MUTEX_ERRORCHECK 用（与 ELOOP 共用值，ELOOP 当前无引用）
 
 #endif // COMMON_ERRNO_H

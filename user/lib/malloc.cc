@@ -5,6 +5,7 @@
 #include "common/errno.h"
 #include "common/macro.h"
 #include "arch/x64/memlayout.h"
+#include <unistd.h>
 
 // ===================== Size class 定义 =====================
 #define NUM_KMALLOC_CLASSES 9
@@ -46,6 +47,16 @@ struct big_alloc_header {
 // ===================== 全局状态 =====================
 static void *class_freelist[NUM_KMALLOC_CLASSES];
 static user_slab_header *class_partial[NUM_KMALLOC_CLASSES];
+// Phase 4: 全局锁保护单线程 slab 分配器（多线程安全）
+static volatile int __malloc_spinlock = 0;
+static inline void __malloc_lock(void) {
+    while (!__atomic_test_and_set(&__malloc_spinlock, __ATOMIC_ACQUIRE)) {
+        sched_yield();
+    }
+}
+static inline void __malloc_unlock(void) {
+    __atomic_clear(&__malloc_spinlock, __ATOMIC_RELEASE);
+}
 
 // ===================== 辅助函数 =====================
 static inline void *page_start(void *ptr) {
@@ -102,17 +113,20 @@ void *malloc(size_t size) {
     // 大分配：> 2048
     if (size > 2048) {
         size_t npages = (size + sizeof(big_alloc_header) + PAGE_SIZE - 1) / PAGE_SIZE;
+        __malloc_lock();
         void *addr = sys_mmap(NULL, npages * PAGE_SIZE, PROT_READ | PROT_WRITE, 0, -1, 0);
-        if (addr == MAP_FAILED) return NULL;
+        if (addr == MAP_FAILED) { __malloc_unlock(); return NULL; }
 
         big_alloc_header *hdr = (big_alloc_header *)addr;
         hdr->magic = BIG_ALLOC_MAGIC;
         hdr->npages = (uint32_t)npages;
+        __malloc_unlock();
         return (char *)addr + sizeof(big_alloc_header);
     }
 
     // 小分配：slab
     int c = size_to_class(size);
+    __malloc_lock();
 
     // 1. 从 class_freelist 取
     if (class_freelist[c]) {
@@ -120,6 +134,7 @@ void *malloc(size_t size) {
         class_freelist[c] = *(void **)obj;
         user_slab_header *hdr = (user_slab_header *)page_start(obj);
         hdr->inuse++;
+        __malloc_unlock();
         return obj;
     }
 
@@ -134,12 +149,13 @@ void *malloc(size_t size) {
         void *obj = class_freelist[c];
         class_freelist[c] = *(void **)obj;
         hdr->inuse++;
+        __malloc_unlock();
         return obj;
     }
 
     // 3. 分配新 slab 页
     void *page = sys_mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, 0, -1, 0);
-    if (page == MAP_FAILED) return NULL;
+    if (page == MAP_FAILED) { __malloc_unlock(); return NULL; }
 
     init_user_slab(page, c);
 
@@ -152,6 +168,7 @@ void *malloc(size_t size) {
     class_freelist[c] = ((user_slab_header *)page)->freelist;
     ((user_slab_header *)page)->freelist = NULL;
 
+    __malloc_unlock();
     return obj;
 }
 
@@ -165,9 +182,11 @@ void free(void *ptr) {
     if (hdr->magic == USER_SLAB_MAGIC) {
         // slab 释放
         int c = hdr->class_idx;
+        __malloc_lock();
         *(void **)ptr = class_freelist[c];
         class_freelist[c] = ptr;
         hdr->inuse--;
+        __malloc_unlock();
     } else if (hdr->magic == BIG_ALLOC_MAGIC) {
         // 大分配释放
         big_alloc_header *bhdr = (big_alloc_header *)ps;

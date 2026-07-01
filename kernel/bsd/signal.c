@@ -164,6 +164,23 @@ void check_pending_signals(trapframe_t *tf) {
 
         if (sig <= 0 || sig >= NSIG) return;
 
+        // SIGCANCEL: 不走 sigaction 表，内核直接投递到 cancel_handler
+        if (sig == SIGCANCEL) {
+            uint64_t handler = proc->proc->cancel_handler;
+            if (handler == 0) {
+                proc->proc->exit_code = -1;
+                sys_exit(-1, 0, 0, 0, 0, 0);
+                return;
+            }
+            sigaction_t sa;
+            __memset(&sa, 0, sizeof(sa));
+            sa.__sigaction_handler._sa_handler = (void (*)(int))handler;
+            sa.sa_mask = 0;
+            sa.sa_flags = 0;
+            deliver_signal(proc, tf, sig, &sa);
+            return;
+        }
+
         sigaction_t *sa = &proc->proc->signal->action[sig];
 
         if (sa->__sigaction_handler._sa_handler == SIG_DFL) {
@@ -368,6 +385,15 @@ int64_t sys_arch_prctl(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int
     }
 }
 
+// ===================== BSD syscall: pthread_set_cancel_handler =====================
+int64_t sys_pthread_set_cancel_handler(int64_t arg1, int64_t _u1, int64_t _u2,
+                                       int64_t _u3, int64_t _u4, int64_t _u5) {
+    (void)_u1;(void)_u2;(void)_u3;(void)_u4;(void)_u5;
+    uint64_t handler = (uint64_t)arg1;
+    current_task->proc->cancel_handler = handler;
+    return 0;
+}
+
 // ===================== BSD syscall: sigaction =====================
 int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
     int sig = (int)arg1;
@@ -376,6 +402,7 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int
 
     if (sig < 0 || sig >= NSIG) return (int64_t)-EINVAL;
     if (sig == SIGKILL || sig == SIGSTOP) return (int64_t)-EINVAL;
+    if (sig == SIGCANCEL) return (int64_t)-EINVAL;
 
     xtask_t *proc = current_task;
 
