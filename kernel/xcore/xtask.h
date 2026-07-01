@@ -62,6 +62,11 @@ typedef struct xtask_t {
     uint64_t cpu_time_ns;
     uint64_t last_sched;
 
+    // === threading support (appended at end, preserves existing offsets) ===
+    uint64_t fs_base;           // TLS base (FS_BASE MSR mirror), loaded by __trapret
+    void    *fpu_state;         // fxsave area (512B, lazy alloc: bfc_alloc_page(1) on first FPU use)
+    uint8_t  used_fpu;          // whether this task has used FPU (0=no, 1=yes)
+
     // === pointer to BSD extension data (Xcore does not interpret contents) ===
     struct proc *proc;  // NULL = idle/task without POSIX semantics
 } xtask_t;

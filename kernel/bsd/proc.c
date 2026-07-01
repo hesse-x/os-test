@@ -6,6 +6,7 @@
 #include <stdbool.h>
 
 #include "kernel/bsd/proc.h"
+#include "kernel/bsd/signal.h"
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/syscall.h"
 #include "kernel/xcore/xtask.h"
@@ -60,6 +61,20 @@ proc_t *proc_create(void) {
         return NULL;
     }
 
+    // Create signal_struct (independent copy on fork; CLONE_SIGHAND refs separately)
+    bp->signal = signal_create();
+    if (!bp->signal) {
+        files_put(bp->files);
+        kfree(bp);
+        return NULL;
+    }
+
+    // Per-task signal fields + threading fields
+    list_init(&bp->futex_node);
+    bp->futex_uaddr = 0;
+    bp->clear_tid_addr = 0;
+    bp->sig_pending = 0;
+    bp->sig_blocked = 0;
     return bp;
 }
 
@@ -91,6 +106,11 @@ void proc_reap(xtask_t *proc) {
     }
 
     // Free proc struct
+    // Release signal_struct (independent refcount)
+    if (proc->proc->signal) {
+        signal_put(proc->proc->signal);
+        proc->proc->signal = NULL;
+    }
     kfree(proc->proc);
     proc->proc = NULL;
 }
@@ -205,7 +225,7 @@ void pty_close_file(struct file *f) {
                 for (int p = 0; p < MAX_PROC; p++) {
                     if (tasks[p].pid == p && tasks[p].proc && tasks[p].proc->pgid == pty->t_pgid
                         && tasks[p].proc->sid == pty->t_sid) {
-                        __atomic_or_fetch(&tasks[p].proc->sig.pending, 1ULL << SIGHUP, __ATOMIC_RELEASE);
+                        __atomic_or_fetch(&tasks[p].proc->sig_pending, 1ULL << SIGHUP, __ATOMIC_RELEASE);
                         if (tasks[p].state == BLOCKED) wake_process(p);
                     }
                 }
@@ -646,8 +666,22 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
     child->cpu_time_ns = 0; child->last_sched = 0;
     // POSIX fields are in proc
     child_bp->exit_code = 0;
-    child_bp->sig.pending = 0; child_bp->sig.blocked = parent->proc->sig.blocked;
-    __memcpy(child_bp->sig.action, parent->proc->sig.action, sizeof(parent->proc->sig.action));
+    // signal_struct: fork independent copy (no CLONE_SIGHAND)
+    // proc_create already allocated a fresh signal_struct; deep-copy action[]
+    __memcpy(child_bp->signal->action, parent->proc->signal->action, sizeof(parent->proc->signal->action));
+    child_bp->signal->shared_pending = 0;
+    child_bp->signal->group_exit = 0;
+    child_bp->signal->group_exit_code = 0;
+    child_bp->signal->parent_pid = parent->pid;
+    atomic_set(&child_bp->signal->thread_count, 1);
+    atomic_set(&child_bp->signal->live_count, 1);
+    // per-task signal fields
+    child_bp->sig_pending = 0;
+    child_bp->sig_blocked = parent->proc->sig_blocked;
+    // threading fields
+    child_bp->clear_tid_addr = 0;
+    list_init(&child_bp->futex_node);
+    child_bp->futex_uaddr = 0;
     child_bp->sid = parent->proc->sid; child_bp->pgid = parent->proc->pgid; child_bp->ctty = parent->proc->ctty;
     list_init(&child->run_node); list_init(&child->wait_node);
 

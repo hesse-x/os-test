@@ -1,5 +1,6 @@
 #include "kernel/driver/blk_dev.h"
 #include "kernel/driver/ahci.h"
+#include "kernel/xcore/log.h"
 #include "kernel/xcore/spinlock.h"
 #include "arch/x64/utils.h"
 
@@ -38,7 +39,7 @@ static int blk_dev_close(xtask_t *proc, int fd) {
 
 static ssize_t blk_dev_read(xtask_t *proc, int fd, void *buf, size_t count) {
     struct file *f = fd_lookup(proc->proc->files, fd);
-    if (!f) return -EBADF;
+    if (WARN_ON_ONCE(!f)) return -EBADF;
     uint64_t off = f->offset;
 
     if (off % 512 != 0 || count % 512 != 0)
@@ -61,7 +62,7 @@ static ssize_t blk_dev_read(xtask_t *proc, int fd, void *buf, size_t count) {
 
 static ssize_t blk_dev_write(xtask_t *proc, int fd, const void *buf, size_t count) {
     struct file *f = fd_lookup(proc->proc->files, fd);
-    if (!f) return -EBADF;
+    if (WARN_ON_ONCE(!f)) return -EBADF;
     uint64_t off = f->offset;
 
     if (off % 512 != 0 || count % 512 != 0)

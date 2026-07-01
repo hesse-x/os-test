@@ -400,8 +400,8 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             }
             // EINTR check
             {
-                uint64_t pend = __atomic_load_n(&proc->proc->sig.pending, __ATOMIC_ACQUIRE);
-                uint64_t deliv = pend & ~proc->proc->sig.blocked;
+                uint64_t pend = __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
+                uint64_t deliv = pend & ~proc->proc->sig_blocked;
                 deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
                 if (deliv) {
                     spin_lock(&socket_lock);
@@ -784,8 +784,8 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
             }
             // EINTR check
             {
-                uint64_t pend = __atomic_load_n(&proc->proc->sig.pending, __ATOMIC_ACQUIRE);
-                uint64_t deliv = pend & ~proc->proc->sig.blocked;
+                uint64_t pend = __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
+                uint64_t deliv = pend & ~proc->proc->sig_blocked;
                 deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
                 if (deliv) {
                     spin_lock(&socket_lock);
@@ -1479,8 +1479,8 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
 
         // EINTR check (before timeout check: signal priority over timeout)
         {
-            uint64_t pend = __atomic_load_n(&proc->proc->sig.pending, __ATOMIC_ACQUIRE);
-            uint64_t deliv = pend & ~proc->proc->sig.blocked;
+            uint64_t pend = __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
+            uint64_t deliv = pend & ~proc->proc->sig_blocked;
             deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
             if (deliv) {
                 kfree(kfds);

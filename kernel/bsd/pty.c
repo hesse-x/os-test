@@ -72,8 +72,8 @@ int pty_ring_read(uint8_t *buf, uint32_t head, uint32_t *tail,
 
 // ===================== Helpers =====================
 static int pty_eintr_check(xtask_t *proc) {
-    uint64_t pend = __atomic_load_n(&proc->proc->sig.pending, __ATOMIC_ACQUIRE);
-    uint64_t deliv = pend & ~proc->proc->sig.blocked;
+    uint64_t pend = __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
+    uint64_t deliv = pend & ~proc->proc->sig_blocked;
     deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
     return deliv ? 1 : 0;
 }
@@ -488,7 +488,7 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
                 && pty->t_sid != 0) {
                 for (int p = 0; p < MAX_PROC; p++) {
                     if (tasks[p].pid == p && tasks[p].proc->pgid == pty->t_pgid && tasks[p].proc->sid == pty->t_sid) {
-                        __atomic_or_fetch(&tasks[p].proc->sig.pending, 1ULL << SIGWINCH, __ATOMIC_RELEASE);
+                        __atomic_or_fetch(&tasks[p].proc->sig_pending, 1ULL << SIGWINCH, __ATOMIC_RELEASE);
                         if (tasks[p].state == BLOCKED) wake_process(p);
                     }
                 }

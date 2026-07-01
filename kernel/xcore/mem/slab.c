@@ -83,6 +83,29 @@ void slab_init() {
     printk(LOG_INFO, "slab_init: ok\n");
 }
 
+// ===================== slab poison (debug build) =====================
+// In debug builds, fill freshly-allocated and freshly-freed slab objects with
+// 0xAA. This turns "out-of-bounds read returns a plausible-looking pointer"
+// into "OOB read returns 0xAAAAAAAAAAAAAAAA", which is obviously garbage and
+// faults immediately when dereferenced. Zero cost in release builds.
+//
+// This is deliberately NOT a redzone between objects — it fills the whole
+// object, so it also catches use-after-free (freed object becomes 0xAA) and
+// uninitialized-field bugs (caller sees 0xAA... instead of a stale pointer
+// left over from the freelist linked list or a previous allocation).
+#ifndef NDEBUG
+#define SLAB_POISON_VALUE 0xAA
+static inline void slab_poison_alloc(void *obj, size_t obj_size) {
+    __memset(obj, SLAB_POISON_VALUE, obj_size);
+}
+static inline void slab_poison_free(void *obj, size_t obj_size) {
+    __memset(obj, SLAB_POISON_VALUE, obj_size);
+}
+#else
+static inline void slab_poison_alloc(void *obj, size_t obj_size) { (void)obj; (void)obj_size; }
+static inline void slab_poison_free(void *obj, size_t obj_size) { (void)obj; (void)obj_size; }
+#endif
+
 // ===================== kmalloc =====================
 __attribute__((no_sanitize("kernel-address")))
 void *kmalloc(size_t size) {
@@ -122,6 +145,7 @@ void *kmalloc(size_t size) {
         active->slab.inuse++;
         spin_unlock_irqrestore(&cache->lock, flags);
         kasan_slab_alloc(obj, cache->obj_size);
+        slab_poison_alloc(obj, cache->obj_size);
         memstat_add(&kernel_mem_stats.slab_used_bytes, (int)cache->obj_size);
         return obj;
     }
@@ -143,6 +167,7 @@ void *kmalloc(size_t size) {
         page->slab.inuse++;
         spin_unlock_irqrestore(&cache->lock, flags);
         kasan_slab_alloc(obj, cache->obj_size);
+        slab_poison_alloc(obj, cache->obj_size);
         memstat_add(&kernel_mem_stats.slab_used_bytes, (int)cache->obj_size);
         return obj;
     }
@@ -166,6 +191,7 @@ void *kmalloc(size_t size) {
     new_page->slab.inuse++;
     spin_unlock_irqrestore(&cache->lock, flags);
     kasan_slab_alloc(obj, cache->obj_size);
+    slab_poison_alloc(obj, cache->obj_size);
     memstat_add(&kernel_mem_stats.slab_used_bytes, (int)cache->obj_size);
     return obj;
 }
@@ -197,6 +223,7 @@ void kfree(const void *ptr) {
     }
 
     kasan_slab_free(ptr, page->slab.cache->obj_size);
+    slab_poison_free((void *)ptr, page->slab.cache->obj_size);
 
     kmem_cache_t *cache = page->slab.cache;
     int my_cpu = get_cpu_local()->cpu_id;

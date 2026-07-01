@@ -113,6 +113,9 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->proc = bp;
     bp->xtask = proc;
 
+    // Main thread (leader): tgid == pid (set above), signal->parent_pid = -1 (root process)
+    bp->signal->parent_pid = -1;
+
     // Create stack mmap_region
     mmap_region_t *stack_region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
     if (stack_region) {

@@ -248,6 +248,12 @@ void schedule() {
         // If prev is BLOCKED, ZOMBIE, or REAPING, it cannot continue running —
         // switch to idle so the CPU halts until an IRQ wakes a process.
         if (prev != idle && (prev->state == BLOCKED || prev->state == ZOMBIE || prev->state == REAPING)) {
+#ifndef NDEBUG
+            if (prev->state == BLOCKED) {
+                printk(LOG_DEBUG, "schedule: pid=%d BLOCKED wait_event=%d\n",
+                       prev->pid, (int)prev->wait_event);
+            }
+#endif
             // Account prev's CPU time before switching to idle
             if (prev->last_sched != 0) {
                 prev->cpu_time_ns += sched_clock() - prev->last_sched;
@@ -420,5 +426,9 @@ void task_reap(xtask_t *proc) {
     proc->msg_target_pid = -1;
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
+    // Clear threading fields
+    proc->fs_base = 0;
+    proc->fpu_state = NULL;
+    proc->used_fpu = 0;
     spin_unlock(&tasks_lock);
 }

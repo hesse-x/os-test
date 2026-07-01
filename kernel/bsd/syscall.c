@@ -95,7 +95,7 @@ int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
         spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
         {
             xtask_t *parent = &tasks[proc->mm->parent_pid];
-            __atomic_or_fetch(&parent->proc->sig.pending, 1ULL << SIGCHLD, __ATOMIC_RELEASE);
+            __atomic_or_fetch(&parent->proc->sig_pending, 1ULL << SIGCHLD, __ATOMIC_RELEASE);
 
             int pcpu = parent->assigned_cpu;
             uint64_t pflags;
@@ -207,8 +207,8 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
             spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
             schedule();
             {
-                uint64_t pend = __atomic_load_n(&current_proc->sig.pending, __ATOMIC_ACQUIRE);
-                uint64_t deliv = pend & ~current_proc->sig.blocked;
+                uint64_t pend = __atomic_load_n(&current_proc->sig_pending, __ATOMIC_ACQUIRE);
+                uint64_t deliv = pend & ~current_proc->sig_blocked;
                 deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
                 deliv &= ~(1ULL << SIGCHLD);
                 if (deliv) return (int64_t)-EINTR;
@@ -273,8 +273,8 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
         schedule();
 
         {
-            uint64_t pend = __atomic_load_n(&current_proc->sig.pending, __ATOMIC_ACQUIRE);
-            uint64_t deliv = pend & ~current_proc->sig.blocked;
+            uint64_t pend = __atomic_load_n(&current_proc->sig_pending, __ATOMIC_ACQUIRE);
+            uint64_t deliv = pend & ~current_proc->sig_blocked;
             deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
             deliv &= ~(1ULL << SIGCHLD);
             if (deliv) {
@@ -867,8 +867,8 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t
                 goto out;
             }
             {
-                uint64_t pend = __atomic_load_n(&proc->proc->sig.pending, __ATOMIC_ACQUIRE);
-                uint64_t deliv = pend & ~proc->proc->sig.blocked;
+                uint64_t pend = __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
+                uint64_t deliv = pend & ~proc->proc->sig_blocked;
                 deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
                 if (deliv) {
                     if (written > 0) break;
@@ -1079,8 +1079,8 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
             goto out;
         }
         {
-            uint64_t pend = __atomic_load_n(&proc->proc->sig.pending, __ATOMIC_ACQUIRE);
-            uint64_t deliv = pend & ~proc->proc->sig.blocked;
+            uint64_t pend = __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
+            uint64_t deliv = pend & ~proc->proc->sig_blocked;
             deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
             if (deliv) { ret = -EINTR; goto out; }
         }

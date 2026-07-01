@@ -22,8 +22,8 @@ static void check_signals(xtask_t *task, trapframe_t *tf) {
 // Check if a signal is pending and deliverable for the given task
 static bool check_signal_pending(xtask_t *t) {
     if (!t->proc) return false;
-    uint64_t pend = __atomic_load_n(&t->proc->sig.pending, __ATOMIC_ACQUIRE);
-    uint64_t deliv = pend & ~t->proc->sig.blocked;
+    uint64_t pend = __atomic_load_n(&t->proc->sig_pending, __ATOMIC_ACQUIRE);
+    uint64_t deliv = pend & ~t->proc->sig_blocked;
     deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
     return deliv != 0;
 }

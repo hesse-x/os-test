@@ -40,6 +40,22 @@ void dump_stack_trace(void);
     __ret_warn_on; \
 })
 
+// WARN_ON_ONCE(cond): like WARN_ON but prints at most once per callsite.
+// Use for invariant checks on hot paths (e.g. driver dev_ops callbacks) where
+// a silent failure would deadlock (block-then-never-wake) but a repeated WARN
+// would flood the log. Keyed by __FILE__:__LINE__ string literal address.
+#define WARN_ON_ONCE(cond) ({ \
+    static bool __warned_once = false; \
+    bool __ret = false; \
+    if ((cond) && !__warned_once) { \
+        __warned_once = true; \
+        __ret = true; \
+        printk(LOG_WARN, "WARN_ON_ONCE: %s at %s:%d", #cond, __FILE__, __LINE__); \
+        dump_stack_trace(); \
+    } \
+    __ret; \
+})
+
 // ASSERT(cond): debug build = BUG_ON, release build = no-op
 #ifdef NDEBUG
 #define ASSERT(cond) ((void)0)

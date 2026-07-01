@@ -9,6 +9,7 @@
 // its guard KERNEL_BSD_TYPES_H prevents duplicate definitions here.
 
 #include <stdint.h>
+#include <stddef.h>
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/rcu.h"
@@ -74,8 +75,15 @@ typedef struct files_t {
 // ===================== proc =====================
 // Must match kernel/bsd/proc.h exactly.
 // Driver callbacks need proc->proc->files to access the fd table.
+//
+// The layout below must stay byte-for-byte identical to kernel/bsd/proc.h.
+// In particular, `signal` is a POINTER to a separately-allocated signal_struct
+// (NOT an inline struct) — inlining it here would shift the offset of `files`
+// and cause out-of-bounds reads in driver callbacks.
 
 #ifndef KERNEL_BSD_PROC_H
+
+struct signal_struct;
 
 typedef struct proc {
     struct xtask_t *xtask;
@@ -85,15 +93,28 @@ typedef struct proc {
     pid_t pgid;
     struct pty *ctty;
 
-    struct signal_state {
-        uint64_t      pending;
-        sigset_t      blocked;
-        struct sigaction action[NSIG];
-    } sig;
-    siginfo_t sig_force_info;
+    uint64_t      sig_pending;
+    sigset_t      sig_blocked;
+    siginfo_t     sig_force_info;
+    struct signal_struct *signal;
 
     struct files_t *files;
+
+    pid_t    clear_tid_addr;
+    list_node_t futex_node;
+    uint64_t futex_uaddr;
 } proc_t;
+
+// ABI drift guard: must match kernel/bsd/proc.h byte-for-byte.
+// If this assert fails, the driver-side proc_t copy has drifted from the
+// canonical definition in kernel/bsd/proc.h — fix this struct to match.
+// The numbers are duplicated here on purpose: if either side changes without
+// the other, BOTH files fail to compile, which is impossible to miss.
+#define DRV_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+DRV_STATIC_ASSERT(offsetof(proc_t, files) == 184, "driver proc_t.files offset drift");
+DRV_STATIC_ASSERT(offsetof(proc_t, signal) == 176, "driver proc_t.signal must be POINTER not inline");
+DRV_STATIC_ASSERT(sizeof(proc_t) == 224, "driver proc_t size drift");
+#undef DRV_STATIC_ASSERT
 
 #endif /* KERNEL_BSD_PROC_H */
 

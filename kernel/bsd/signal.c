@@ -3,6 +3,7 @@
 
 #include "kernel/bsd/syscall.h"
 #include "kernel/bsd/proc.h"
+#include "kernel/bsd/signal.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/xtask.h"
 #include "kernel/xcore/trap.h"
@@ -11,6 +12,7 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/slab.h"
+#include "kernel/xcore/mm_types.h"
 #include "kernel/user_check.h"
 #include "kernel/xcore/spinlock.h"
 #include "arch/x64/utils.h"
@@ -90,14 +92,14 @@ static void deliver_signal(xtask_t *proc, trapframe_t *tf, int sig, sigaction_t 
     frame.uc.uc_mcontext.cr2 = (proc->proc->sig_force_info.si_signo == sig) ?
         (int64_t)proc->proc->sig_force_info._sifields.si_addr : 0;
 
-    frame.uc.uc_sigmask = proc->proc->sig.blocked;
+    frame.uc.uc_sigmask = proc->proc->sig_blocked;
     frame.uc.uc_flags = 0;
     frame.uc.uc_link = NULL;
 
     // Update blocked: mask sa_mask + current signal during handler
-    proc->proc->sig.blocked |= sa->sa_mask | (1ULL << sig);
-    proc->proc->sig.blocked &= ~(1ULL << SIGKILL);
-    proc->proc->sig.blocked &= ~(1ULL << SIGSTOP);
+    proc->proc->sig_blocked |= sa->sa_mask | (1ULL << sig);
+    proc->proc->sig_blocked &= ~(1ULL << SIGKILL);
+    proc->proc->sig_blocked &= ~(1ULL << SIGSTOP);
 
     // Clear sig_force_info (consumed)
     if (proc->proc->sig_force_info.si_signo == sig)
@@ -131,23 +133,32 @@ void check_pending_signals(trapframe_t *tf) {
     if (tf->cs != 0x2B) return;
 
     xtask_t *proc = current_task;
-    if (!proc) return;
+    if (!proc || !proc->proc) return;
 
     while (1) {
-        uint64_t pending = __atomic_load_n(&proc->proc->sig.pending, __ATOMIC_ACQUIRE);
-        uint64_t deliverable = pending & ~proc->proc->sig.blocked;
+        // 1. Check per-task private pending first
+        uint64_t pending = __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
+        uint64_t deliverable = pending & ~proc->proc->sig_blocked;
         deliverable |= (pending & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
-        if (!deliverable) return;
-
-        int sig = __builtin_ctzll(deliverable);
-        if (sig <= 0 || sig >= NSIG) {
-            __atomic_store_n(&proc->proc->sig.pending, 0, __ATOMIC_RELEASE);
-            return;
+        int sig = 0;
+        if (deliverable) {
+            sig = __builtin_ctzll(deliverable);
+            __atomic_and_fetch(&proc->proc->sig_pending, ~(1ULL << sig), __ATOMIC_RELEASE);
+        } else {
+            // 2. Then check thread-group shared pending
+            spin_lock(&proc->proc->signal->sig_lock);
+            pending = proc->proc->signal->shared_pending & ~proc->proc->sig_blocked;
+            pending |= (proc->proc->signal->shared_pending & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+            if (pending) {
+                sig = __builtin_ctzll(pending);
+                proc->proc->signal->shared_pending &= ~(1ULL << sig);
+            }
+            spin_unlock(&proc->proc->signal->sig_lock);
         }
 
-        __atomic_and_fetch(&proc->proc->sig.pending, ~(1ULL << sig), __ATOMIC_RELEASE);
+        if (sig <= 0 || sig >= NSIG) return;
 
-        sigaction_t *sa = &proc->proc->sig.action[sig];
+        sigaction_t *sa = &proc->proc->signal->action[sig];
 
         if (sa->__sigaction_handler._sa_handler == SIG_DFL) {
             switch (sig) {
@@ -189,23 +200,23 @@ void check_pending_signals(trapframe_t *tf) {
 
 // ===================== force_sig =====================
 void force_sig(xtask_t *proc, int sig, int si_code, void *si_addr) {
-    __atomic_or_fetch(&proc->proc->sig.pending, 1ULL << sig, __ATOMIC_RELEASE);
-    __atomic_and_fetch(&proc->proc->sig.blocked, ~(1ULL << sig), __ATOMIC_RELEASE);
+    __atomic_or_fetch(&proc->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
+    __atomic_and_fetch(&proc->proc->sig_blocked, ~(1ULL << sig), __ATOMIC_RELEASE);
 
     proc->proc->sig_force_info.si_signo = sig;
     proc->proc->sig_force_info.si_errno = 0;
     proc->proc->sig_force_info.si_code = si_code;
     proc->proc->sig_force_info._sifields.si_addr = si_addr;
 
-    if (proc->proc->sig.action[sig].__sigaction_handler._sa_handler == SIG_IGN) {
-        proc->proc->sig.action[sig].__sigaction_handler._sa_handler = SIG_DFL;
+    if (proc->proc->signal->action[sig].__sigaction_handler._sa_handler == SIG_IGN) {
+        proc->proc->signal->action[sig].__sigaction_handler._sa_handler = SIG_DFL;
     }
 }
 
 // ===================== Signal delivery helpers =====================
 
 void deliver_signal_to(xtask_t *target, int sig) {
-    __atomic_or_fetch(&target->proc->sig.pending, 1ULL << sig, __ATOMIC_RELEASE);
+    __atomic_or_fetch(&target->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
     if (target->state == BLOCKED) wake_process(target->pid);
 }
 
@@ -229,9 +240,16 @@ int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _
 
     if (pid > 0) {
         if (pid >= MAX_PROC) return (int64_t)-ESRCH;
-        xtask_t *target = &tasks[pid];
-        if (target->pid != pid) return (int64_t)-ESRCH;
-        deliver_signal_to(target, sig);
+        xtask_t *leader = &tasks[pid];
+        if (leader->pid != pid || !leader->proc) return (int64_t)-ESRCH;
+        // Deliver to process-level shared_pending
+        spin_lock(&leader->proc->signal->sig_lock);
+        leader->proc->signal->shared_pending |= (1ULL << sig);
+        spin_unlock(&leader->proc->signal->sig_lock);
+        // Wake the leader if signal not blocked and currently blocked (single-thread stage)
+        if (!(leader->proc->sig_blocked & (1ULL << sig)) && leader->state == BLOCKED) {
+            wake_process(leader->pid);
+        }
         return 0;
     } else if (pid == 0) {
         pid_t my_pgid = current_proc->pgid;
@@ -263,7 +281,7 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int
         uint64_t saved_cr3;
         __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
         __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)proc->cr3) : "memory");
-        copy_to_user(oldact, &proc->proc->sig.action[sig], sizeof(struct sigaction));
+        copy_to_user(oldact, &proc->proc->signal->action[sig], sizeof(struct sigaction));
         __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
     }
 
@@ -282,8 +300,8 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int
         if (new_act.sa_mask & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)))
             return (int64_t)-EINVAL;
 
-        proc->proc->sig.action[sig] = new_act;
-        __atomic_and_fetch(&proc->proc->sig.pending, ~(1ULL << sig), __ATOMIC_RELEASE);
+        proc->proc->signal->action[sig] = new_act;
+        __atomic_and_fetch(&proc->proc->sig_pending, ~(1ULL << sig), __ATOMIC_RELEASE);
     }
 
     return 0;
@@ -318,9 +336,32 @@ int64_t sys_sigreturn(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_
     tf->rflags = sc->eflags;
     tf->cs = sc->cs;  tf->ss = sc->ss;
 
-    proc->proc->sig.blocked = frame.uc.uc_sigmask;
-    proc->proc->sig.blocked &= ~(1ULL << SIGKILL);
-    proc->proc->sig.blocked &= ~(1ULL << SIGSTOP);
+    proc->proc->sig_blocked = frame.uc.uc_sigmask;
+    proc->proc->sig_blocked &= ~(1ULL << SIGKILL);
+    proc->proc->sig_blocked &= ~(1ULL << SIGSTOP);
 
     return 0;
+}
+
+// ===================== signal_struct lifecycle =====================
+struct signal_struct *signal_create(void) {
+    struct signal_struct *sig = (struct signal_struct *)kmalloc(sizeof(struct signal_struct));
+    if (!sig) return NULL;
+    __memset(sig, 0, sizeof(struct signal_struct));
+    refcount_set(&sig->sig_count, 1);
+    atomic_set(&sig->thread_count, 1);
+    atomic_set(&sig->live_count, 1);
+    sig->sig_lock = SPINLOCK_INIT;
+    sig->shared_pending = 0;
+    sig->group_exit = 0;
+    sig->group_exit_code = 0;
+    sig->parent_pid = -1;
+    return sig;
+}
+
+void signal_put(struct signal_struct *sig) {
+    if (!sig) return;
+    if (refcount_dec_and_test(&sig->sig_count)) {
+        kfree(sig);
+    }
 }
