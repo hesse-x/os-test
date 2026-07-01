@@ -13,6 +13,7 @@
 #include "common/errno.h"
 #include "common/syscall_nums.h"
 #include "common/signal.h"
+#include "kernel/xcore/perf.h"
 
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 128
@@ -119,6 +120,15 @@ static void resolve_cow_fault(xtask_t *task, uint64_t *pte, uint64_t fault_addr)
 
 void trap_dispatch(trapframe_t *tf) {
   get_cpu_local()->cur_tf = tf;
+
+  // NMI 早路由：绕过 IRQ owner / EOI 逻辑（NMI 不需要 EOI）。
+  // NMI 用于 perf 高频采样（PIT 2000Hz → I/O APIC GSI 2 NMI delivery），
+  // 必须在最早期处理，避免与普通中断的 irq_owner 路由 / EOI 逻辑冲突。
+  if (tf->trapno == 2) {
+      perf_nmi_handler(tf);
+      return;
+  }
+
   // Hardware IRQ: check user-space driver binding first
   if (tf->trapno >= 32 && tf->trapno < MAX_IRQ_HANDLERS &&
       __atomic_load_n(&irq_owner[tf->trapno], __ATOMIC_ACQUIRE) >= 0) {
@@ -352,9 +362,17 @@ static void timer_handler(trapframe_t *tf) {
   tick++;
   lapic_eoi();
 
-  // Poll xHCI doorbell every ~10ms (every 10th tick at ~100Hz)
+  // Perf sampling hook (no-op unless sys_perf_ctl(START) was called)
+  perf_timer_handler(tf);
+
+  // Perf NMI 采样触发：每 tick 发 1 次 self-NMI IPI（2000Hz 采样）。
+  // self-NMI 在发送后立刻触发，打断 timer_handler 本身；NMI 不可屏蔽，
+  // 能采到关中断代码。
+  perf_nmi_kick();
+
+  // Poll xHCI doorbell every ~100ms (every 200th tick at 2000Hz)
   // This ensures QEMU retries NAK'ed interrupt transfers
-  if (tick % 10 == 0 && timer_poll_hook) timer_poll_hook();
+  if (tick % 200 == 0 && timer_poll_hook) timer_poll_hook();
 
   // Check timer queue for expired deadlines
   int cpu = get_cpu_local()->cpu_id;
@@ -380,7 +398,9 @@ static void timer_handler(trapframe_t *tf) {
   }
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
 
-  if (tf->cs == 0x2B) {   // from user mode
+  // 调度降频：定时器 2000Hz（用于 perf NMI 采样），但调度时间片保持 10ms。
+  // 每 20 个 tick（2000Hz / 20 = 100Hz）才触发一次 schedule()。
+  if (tf->cs == 0x2B && (tick % 20) == 0) {   // from user mode
     // Check pending signals before rescheduling
     if (signal_check_hook && current_task->proc) {
         signal_check_hook(current_task, tf);
@@ -419,7 +439,8 @@ void isr_init() {
 // ===================== Syscall dispatch =====================
 // Xcore IPC syscalls are dispatched directly via syscall_table.
 // All other syscalls are delegated to syscall_dispatch.
-#define NR_XCORE_SYSCALL (SYS_GETTID + 1)
+// SYS_PERF_CTL (69) is included in the xcore table; entries past it go to BSD dispatch.
+#define NR_XCORE_SYSCALL 70
 
 static syscall_fn_t xcore_syscall_table[NR_XCORE_SYSCALL] = {
     [SYS_GETPID]       = sys_getpid,
@@ -435,6 +456,7 @@ static syscall_fn_t xcore_syscall_table[NR_XCORE_SYSCALL] = {
     [SYS_MSG_RESP]     = sys_msg_resp,
     [SYS_IOPERM]       = sys_ioperm,
     [SYS_GETTID]       = sys_gettid,
+    [SYS_PERF_CTL]     = sys_perf_ctl,
 };
 
 static const char *xcore_syscall_names[NR_XCORE_SYSCALL] = {
@@ -451,6 +473,7 @@ static const char *xcore_syscall_names[NR_XCORE_SYSCALL] = {
     [SYS_MSG_RESP]     = "msg_resp",
     [SYS_IOPERM]       = "ioperm",
     [SYS_GETTID]       = "gettid",
+    [SYS_PERF_CTL]     = "perf_ctl",
 };
 
 const char *syscall_name(uint64_t nr) {

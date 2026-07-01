@@ -318,13 +318,16 @@ extern "C" void _start() {
     ioctl(0, TIOCSCTTY, 0);
 
 #ifdef TEST
-    pid_t test_pid = fork();
-    if (test_pid == 0) {
-        execve("/test/test_runner.elf", NULL, NULL);
+    // Test build: run perf under the terminal/shell session so test output
+    // goes to the terminal screen. perf → spawn test_runner → waitpid →
+    // STOP_DUMP (samples dumped to serial log.txt).
+    pid_t perf_pid = fork();
+    if (perf_pid == 0) {
+        execve("/usr/bin/perf", NULL, NULL);
         _exit(127);
     }
-    int test_status = 0;
-    waitpid(test_pid, &test_status, 0);
+    int perf_status = 0;
+    waitpid(perf_pid, &perf_status, 0);
 #endif
 
     char line[256];

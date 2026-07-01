@@ -80,6 +80,16 @@
 #define SYS_SIGPROCMASK    67
 #define SYS_PTHREAD_SET_CANCEL_HANDLER 68
 
+// ===================== Perf sampling control =====================
+#define SYS_PERF_CTL        69
+#define NR_SYSCALL          70  // total number of syscalls
+
+// Perf control commands (for sys_perf_ctl)
+#define PERF_CTL_START     0   // 清空 buffer + 开启采样
+#define PERF_CTL_STOP      1   // 停止采样（不 dump）
+#define PERF_CTL_STOP_DUMP 2   // 停止采样 + 串口 dump 全部样本
+#define PERF_CTL_MARK      3   // 标记测试边界: arg=name(用户态指针, 可空), 内核记录 sched_clock+buffer head
+
 // ===================== recv_msg (shared between kernel and user) =====================
 #define RECV_IRQ    0
 #define RECV_REQ     1

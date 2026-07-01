@@ -61,8 +61,10 @@
 #define APIC_BASE_ENABLE    0x800
 #define APIC_BASE_BSP       0x100
 
-// Timer frequency (Hz)
-#define LAPIC_TIMER_HZ 100
+// Timer frequency (Hz) — 2000Hz = 0.5ms interval.
+// 高频用于 perf NMI 采样（每 tick 发 1 次 self-NMI = 2000Hz 采样）。
+// 调度时间片通过 tick % 20 降频到 100Hz（10ms），见 trap.c timer_handler。
+#define LAPIC_TIMER_HZ 2000
 
 // LAPIC timer vector — must be high priority (class 7+) so it can preempt
 // any device interrupt (MSI vectors 64-95 = class 4-5). Vector 120 = 0x78.
@@ -102,6 +104,18 @@ static inline void ioapic_write(uint32_t reg, uint32_t val) {
 
 void apic_init();
 void pic_disable();
+
+// Perf NMI 采样触发：基于 LAPIC self-IPI NMI。
+// pit_nmi_start() 在 sys_perf_ctl START 时调用（日志确认）；
+// pit_nmi_stop() 在 STOP/STOP_DUMP 时调用；
+// 实际触发由 perf_nmi_kick()（perf.c）在每个 timer tick 调 lapic_send_self_nmi。
+// 调度定时器 2000Hz，每 tick 1 个 self-NMI = 2000Hz 采样；
+// 调度时间片通过 timer_handler 里 tick % 20 降频到 100Hz（10ms）。
+// 用 self-IPI NMI 而非 PIT：QEMU 下 PIT→I/O APIC/LINT0 NMI delivery 不可靠，
+// 而 LAPIC ICR self-NMI 是标准机制（SMP INIT-SIPI 同走 ICR），确定可用。
+void pit_nmi_start(void);
+void pit_nmi_stop(void);
+void lapic_send_self_nmi(void);
 
 // I/O APIC IRQ configuration (called by sys_irq_bind to unmask)
 void ioapic_set_irq(uint32_t gsi, uint8_t vector, uint32_t apic_id,

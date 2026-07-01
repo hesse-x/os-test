@@ -26,6 +26,14 @@ int32_t serial_read_waiter = -1;
 int serial_fd_count = 0;
 bool serial_irq_registered = false;
 
+// ===================== TX ring buffer (async) =====================
+uint8_t serial_tx_buf[SERIAL_TX_BUF_SIZE];
+volatile uint32_t serial_tx_head = 0;   // producer (printk context)
+volatile uint32_t serial_tx_tail = 0;   // ISR (THRE interrupt)
+volatile bool serial_tx_busy = false;   // UART currently transmitting (TX IRQ enabled)
+bool serial_tx_irq_enabled = false;     // set true once serial_irq_handler is registered
+volatile uint64_t serial_tx_full_count = 0;  // TX ring full → busy-wait fallback count
+
 void serial_init(void) {
     outb(COM1_IER, 0x00);    // Disable all interrupts
     outb(COM1_LCR, 0x80);    // Enable DLAB
@@ -39,17 +47,70 @@ void serial_init(void) {
 
 #ifndef NSERIAL
 
+// Drain TX ring buffer into UART until empty or UART not ready.
+// Called from THRE interrupt and from serial_putc to kick-start transmission.
+// Caller must hold serial_tx_lock.
+static void serial_tx_drain(void) {
+    while (serial_tx_head != serial_tx_tail) {
+        if (!(inb(COM1_LSR) & LSR_THRE)) break;   // UART busy, wait for next THRE IRQ
+        outb(COM1, serial_tx_buf[serial_tx_tail]);
+        serial_tx_tail = (serial_tx_tail + 1) % SERIAL_TX_BUF_SIZE;
+    }
+    if (serial_tx_head == serial_tx_tail) {
+        serial_tx_busy = false;
+        outb(COM1_IER, IER_RX_ENABLE);   // disable TX IRQ, keep RX
+    }
+}
+
 static void serial_putc(char c) {
+    // Before TX IRQ is registered (early boot / serial_init phase), busy-wait
+    // the old way — THRE interrupt has no handler yet.
+    if (!serial_tx_irq_enabled) {
+        uint64_t flags;
+        spin_lock_irqsave(&serial_tx_lock, &flags);
+        while (!(inb(COM1_LSR) & LSR_THRE))
+            ;
+        outb(COM1, c);
+        spin_unlock_irqrestore(&serial_tx_lock, flags);
+        return;
+    }
+
     uint64_t flags;
     spin_lock_irqsave(&serial_tx_lock, &flags);
-    while (!(inb(COM1_LSR) & LSR_THRE))
-        ;
-    outb(COM1, c);
+    uint32_t next = (serial_tx_head + 1) % SERIAL_TX_BUF_SIZE;
+    if (next == serial_tx_tail) {
+        // buffer full: degenerate path, busy-wait and send directly
+        serial_tx_full_count++;
+        spin_unlock_irqrestore(&serial_tx_lock, flags);
+        while (!(inb(COM1_LSR) & LSR_THRE))
+            ;
+        outb(COM1, c);
+        return;
+    }
+    serial_tx_buf[serial_tx_head] = c;
+    serial_tx_head = next;
+    if (!serial_tx_busy) {
+        serial_tx_busy = true;
+        outb(COM1_IER, IER_RX_ENABLE | IER_TX_ENABLE);   // enable THRE IRQ
+        // Kick-start: send first byte now rather than waiting for the IRQ
+        serial_tx_drain();
+    }
     spin_unlock_irqrestore(&serial_tx_lock, flags);
 }
 
 // ISR: drain all available bytes from UART FIFO into kernel ring buffer
 static void serial_irq_handler(trapframe_t *tf) {
+    uint8_t iir = inb(COM1_IIR);
+    (void)tf;
+
+    // TX holding register empty → drain more bytes from TX ring buffer
+    if (iir & 0x02) {
+        uint64_t flags;
+        spin_lock_irqsave(&serial_tx_lock, &flags);
+        serial_tx_drain();
+        spin_unlock_irqrestore(&serial_tx_lock, flags);
+    }
+
     uint64_t flags;
     spin_lock_irqsave(&serial_rx_lock, &flags);
     // Drain all available bytes from FIFO (Linux: read LSR in loop)
@@ -119,6 +180,7 @@ static int serial_dev_open(xtask_t *proc, int fd) {
         ioapic_set_irq(4, 36, bsp_apic_id, false, false, false);  // edge-triggered
         outb(COM1_IER, IER_RX_ENABLE);
         serial_irq_registered = true;
+        serial_tx_irq_enabled = true;   // THRE IRQ handler now live; putc goes async
     }
     return 0;
 }
@@ -131,10 +193,15 @@ static int serial_dev_close(xtask_t *proc, int fd) {
         serial_read_waiter = -1;
     spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
     if (serial_fd_count == 0) {
+        // Wait for TX ring buffer to drain before disabling UART interrupts
+        while (serial_tx_head != serial_tx_tail)
+            ;
         outb(COM1_IER, 0x00);           // Disable UART interrupts
         ioapic_set_irq(4, 36, 0, true, false, false); // Mask GSI 4 in I/O APIC
         unregister_irq(36);
         serial_irq_registered = false;
+        serial_tx_irq_enabled = false;
+        serial_tx_busy = false;
     }
     return 0;
 }

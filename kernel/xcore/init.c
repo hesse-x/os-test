@@ -16,6 +16,7 @@
 #include "kernel/xcore/rcu.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
+#include "kernel/xcore/perf.h"
 
 __attribute__((no_sanitize("kernel-address")))
 void xcore_init(boot_info *bi) {
@@ -42,6 +43,8 @@ void xcore_init(boot_info *bi) {
     proc_init();      // initialize process table + cpu_locals
 
     smp_boot_aps();
+
+    perf_init();
 
     printk(LOG_INFO, "xcore_init: done\n");
 }

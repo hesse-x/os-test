@@ -233,9 +233,46 @@ void apic_init() {
   // Record TSC baseline for sched_clock()
   tsc_base = rdtsc64();
 
-  // Start LAPIC periodic timer
+  // Start LAPIC periodic timer (2000Hz = ticks / 20)
+  // lapic_timer_ticks_calibrated 语义是 10ms 内 LAPIC ticks（udelay 依赖）；
+  // 2000Hz 周期 0.5ms → ICR = ticks / 20。
+  uint32_t timer_icr = ticks / 20;
+  if (timer_icr == 0) timer_icr = 1;  // safety: ensure non-zero
   lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
   lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_VECTOR | LAPIC_LVT_TIMER_PERIODIC);
-  lapic_write(LAPIC_TIMER_ICR, ticks);
-  printk(LOG_INFO, "apic: BSP timer started vec=0x%x ticks=%u\n", LAPIC_TIMER_VECTOR, ticks);
+  lapic_write(LAPIC_TIMER_ICR, timer_icr);
+  printk(LOG_INFO, "apic: BSP timer started vec=0x%x ticks=%u (2000Hz)\n", LAPIC_TIMER_VECTOR, timer_icr);
+}
+
+// ===================== NMI 采样触发（self-IPI NMI）=====================
+// 设计：调度定时器 2000Hz，每个 tick 发 1 次 self-NMI IPI = 2000Hz NMI 采样。
+// 调度时间片通过 timer_handler 里 tick % 20 降频到 100Hz（10ms）。
+// 用 self-IPI NMI 而非 PIT：QEMU 下 PIT→I/O APIC/LINT0 NMI delivery 不可靠，
+// 而 LAPIC ICR self-NMI 是标准机制（SMP INIT-SIPI 同走 ICR），确定可用。
+// NMI 不可屏蔽，能采到关中断/持锁/CPU 密集循环代码。
+//
+// 为什么不用 100Hz 定时器 + 每 tick 发 burst 次 self-NMI 倍频：
+// 连续发多个 self-NMI 会让 NMI 嵌套打断 ICR 写入循环（lapic_send_self_nmi
+// 的 delivery status poll），导致 ICR 状态损坏、后续 NMI 行为异常
+//（实测大量 pid=0 rip=0x0 的损坏样本）。
+
+void pit_nmi_start(void) {
+  // 实际 NMI 触发由 perf_nmi_kick() 在每个 timer tick 调 lapic_send_self_nmi。
+  // 调度定时器已配 2000Hz（apic_init），每 tick 1 个 self-NMI = 2000Hz 采样。
+  printk(LOG_INFO, "perf_nmi: self-IPI NMI on every timer tick (%uHz)\n", LAPIC_TIMER_HZ);
+}
+
+void pit_nmi_stop(void) {
+  // 无需操作 —— perf_nmi_kick 在 perf_active=false 时为 no-op
+}
+
+// 在 timer_handler 中调用：每个调度 tick 发 1 次 self-NMI IPI。
+// 实现在 kernel/xcore/perf.c（需访问 perf_active 标志）。
+void lapic_send_self_nmi(void) {
+  // ICR_LOW: delivery=NMI(0x400) | level=assert(0x4000) | dest_shorthand=self(0x40000)
+  // vector 字段被 NMI delivery 忽略
+  while (lapic_read(LAPIC_ICR_LOW) & 0x1000)
+    __asm__ volatile("pause");
+  lapic_write(LAPIC_ICR_HIGH, 0);
+  lapic_write(LAPIC_ICR_LOW, 0x44400);
 }

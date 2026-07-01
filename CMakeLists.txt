@@ -46,10 +46,9 @@ add_subdirectory(shell)
 add_subdirectory(user)
 add_subdirectory(init)
 
-# Test targets (only when --test is enabled)
-if(TEST)
-    add_subdirectory(user/test)
-endif()
+# Perf sampling wrapper + test targets (always built)
+add_subdirectory(user/perf)
+add_subdirectory(user/test)
 
 # 链接内核 ELF
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/build_script/linker.ld)

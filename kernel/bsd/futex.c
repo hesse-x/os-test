@@ -6,6 +6,7 @@
 #include "kernel/xcore/xtask.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/kpi.h"
+#include "kernel/xcore/trap.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/spinlock.h"
 #include "arch/x64/smp.h"
@@ -101,5 +102,8 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3,
         cur->proc->futex_uaddr = 0;
     }
     spin_unlock(&bucket->lock);
+
+    // 4. 检查是否被 signal 中断
+    if (signal_pending_hook && signal_pending_hook(cur)) return (int64_t)-EINTR;
     return 0;
 }

@@ -8,6 +8,7 @@
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/log.h"
+#include "kernel/xcore/perf.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/user_check.h"
@@ -474,10 +475,17 @@ void wake_process(pid_t pid) {
         target->state == BLOCKED &&
         (target->wait_event == WAIT_PIPE ||
          target->wait_event == WAIT_POLL ||
-         target->wait_event == WAIT_RECV)) {
+         target->wait_event == WAIT_RECV ||
+         target->wait_event == WAIT_FUTEX ||
+         target->wait_event == WAIT_CHILD ||
+         target->wait_event == WAIT_REQ_REPLY ||
+         target->wait_event == WAIT_MSG_REPLY)) {
         if (target->wait_event == WAIT_RECV)
             target->recv_intr = 1;
         wake_from_wait(target);
+    } else if (target->pid == pid && target->state == BLOCKED) {
+        // 唤醒丢失：记录用于诊断
+        perf_record_wake_lost(target);
     }
     spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 }

@@ -74,6 +74,9 @@ void irq_owner_cleanup(pid_t pid);
 int irq_has_handler(int irq);
 extern pid_t irq_owner[MAX_IRQ_HANDLERS];
 
+// Perf sampling control (dispatch via Xcore syscall table)
+int64_t sys_perf_ctl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
 // IPC primitives (exported by Xcore layer)
 void notify_and_wake(pid_t target_pid, recv_msg_t *msg);
 void wake_process(pid_t pid);

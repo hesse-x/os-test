@@ -5,6 +5,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/process.h>
+#include "common/syscall.h"
+#include "common/syscall_nums.h"
 
 struct test_entry {
     const char *name;
@@ -44,16 +46,24 @@ int main(void) {
         const char *path = tests[i].path;
 
         printf("[RUN]  %-20s ... running\n", name);
+        fflush(stdout);
+
+        // Mark test start for perf segmentation (no-op if perf inactive)
+        sys_perf_ctl_mark(name);
 
         pid_t pid = spawn(path);
         if (pid <= 0) {
             printf("[SKIP] %-20s (cannot spawn)\n", name);
             skip_count++;
+            sys_perf_ctl_mark(NULL);
             continue;
         }
 
         int status;
         waitpid(pid, &status, 0);
+
+        // Mark test end for perf segmentation
+        sys_perf_ctl_mark(NULL);
 
         if (status == 0) {
             printf("[PASS] %-20s (exit 0)\n", name);
@@ -62,6 +72,7 @@ int main(void) {
             printf("[FAIL] %-20s (exit %d) -- check serial log\n", name, status);
             fail_count++;
         }
+        fflush(stdout);
     }
 
     printf("=== Summary: PASS=%d FAIL=%d SKIP=%d ===\n",

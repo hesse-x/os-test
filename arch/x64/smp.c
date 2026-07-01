@@ -171,10 +171,10 @@ void ap_entry_c(int cpu_id) {
     lapic_write(LAPIC_LVT_LINT0, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_LVT_LINT1, LAPIC_LVT_MASKED);
 
-    // Start LAPIC timer (periodic, same config as BSP)
+    // Start LAPIC timer (periodic, same config as BSP: 2000Hz = ticks / 20)
     lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
     lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_VECTOR | LAPIC_LVT_TIMER_PERIODIC);
-    lapic_write(LAPIC_TIMER_ICR, lapic_timer_ticks_calibrated);
+    lapic_write(LAPIC_TIMER_ICR, lapic_timer_ticks_calibrated / 20);
 
     // Set this AP's lapic_base in cpu_local
     cpu_locals[cpu_id].lapic_base = lapic_vaddr;
@@ -307,9 +307,9 @@ void smp_boot_aps() {
         udelay(200);
     }
 
-    // Restore BSP LAPIC timer (udelay clobbers it to masked one-shot)
+    // Restore BSP LAPIC timer (udelay clobbers it to masked one-shot; restore to 2000Hz)
     lapic_write(LAPIC_TIMER_DCR, 0x0B);
     lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_VECTOR | LAPIC_LVT_TIMER_PERIODIC);
-    lapic_write(LAPIC_TIMER_ICR, lapic_timer_ticks_calibrated);
+    lapic_write(LAPIC_TIMER_ICR, lapic_timer_ticks_calibrated / 20);
     printk(LOG_INFO, "smp: BSP timer restored vec=0x%x\n", LAPIC_TIMER_VECTOR);
 }

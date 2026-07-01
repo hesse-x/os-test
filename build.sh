@@ -24,12 +24,8 @@ while [[ $# -gt 0 ]]; do
             CMAKE_EXTRA="$CMAKE_EXTRA -DNSERIAL"
             shift
             ;;
-        --perf)
-            CMAKE_EXTRA="$CMAKE_EXTRA -DPERF=1"
-            shift
-            ;;
         *)
-            echo "Usage: $0 [-d] [--test] [--sanitizer] [--no-serial] [--perf]"
+            echo "Usage: $0 [-d] [--test] [--sanitizer] [--no-serial]"
             exit 1
             ;;
     esac
@@ -38,6 +34,13 @@ done
 # Ensure SANITIZE is explicitly set so CMake cache doesn't retain stale values
 if ! echo "$CMAKE_EXTRA" | grep -q "SANITIZE="; then
     CMAKE_EXTRA="$CMAKE_EXTRA -DSANITIZE=0"
+fi
+
+# Same for TEST — without an explicit -DTEST=0, CMake would reuse the cached
+# value from a previous --test build, silently keeping the shell's #ifdef TEST
+# branch (auto-running perf) even under a plain ./build.sh.
+if ! echo "$CMAKE_EXTRA" | grep -q "TEST="; then
+    CMAKE_EXTRA="$CMAKE_EXTRA -DTEST=0"
 fi
 
 # 1. CMake 编译（内核 + 用户态）

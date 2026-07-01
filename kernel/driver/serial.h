@@ -28,6 +28,9 @@
 // RX ring buffer
 #define SERIAL_RX_BUF_SIZE 256
 
+// TX ring buffer (async output)
+#define SERIAL_TX_BUF_SIZE 4096   // 4KB, covers a full printk burst
+
 void serial_init(void);
 
 // RX state (for trap.c and proc.c)
@@ -39,6 +42,14 @@ extern spinlock_t serial_tx_lock;
 extern pid_t serial_read_waiter;
 extern int serial_fd_count;
 extern bool serial_irq_registered;
+
+// TX state (async drain via THRE interrupt)
+extern uint8_t serial_tx_buf[];
+extern volatile uint32_t serial_tx_head;   // producer (printk context)
+extern volatile uint32_t serial_tx_tail;   // ISR (THRE interrupt)
+extern volatile bool serial_tx_busy;       // UART currently transmitting (TX IRQ enabled)
+extern bool serial_tx_irq_enabled;         // TX IRQ registered; before this, putc busy-waits
+extern volatile uint64_t serial_tx_full_count;  // TX ring buffer full → busy-wait fallback count
 
 #ifdef NSERIAL
 

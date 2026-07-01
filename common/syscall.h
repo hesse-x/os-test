@@ -426,6 +426,20 @@ static inline int sys_pthread_set_cancel_handler(uint64_t handler) {
     return (int)r;
 }
 
+// --- Perf sampling control ---
+static inline int sys_perf_ctl(int cmd) {
+    int64_t r = __syscall1(SYS_PERF_CTL, (int64_t)cmd);
+    if (r < 0) { errno = -(int)r; return -1; }
+    return (int)r;
+}
+
+// PERF_CTL_MARK: mark a test boundary. name=NULL marks test end.
+static inline int sys_perf_ctl_mark(const char *name) {
+    int64_t r = __syscall2(SYS_PERF_CTL, (int64_t)PERF_CTL_MARK, (int64_t)name);
+    if (r < 0) { errno = -(int)r; return -1; }
+    return (int)r;
+}
+
 #endif // __KERNEL__
 
 #endif // COMMON_SYSCALL_H
