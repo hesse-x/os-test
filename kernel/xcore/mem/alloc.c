@@ -370,3 +370,24 @@ __attribute__((no_sanitize("kernel-address")))
 kern_vaddr_t phys_to_virt(phys_addr_t phys) {
     return (__force kern_vaddr_t)((__force uint64_t)phys + VMA_BASE);
 }
+
+// ===================== Data-pointer wrappers =====================
+// bfc_alloc_page_data: allocate n pages and return the writable data-page
+// virtual address (instead of the Page metadata pointer). Use for callers
+// that immediately write to the page (fxsave area, kernel stack data, etc.).
+__attribute__((no_sanitize("kernel-address")))
+void *bfc_alloc_page_data(size_t n) {
+    Page *p = bfc_alloc_page(n);
+    if (!p) return NULL;
+    return (void *)(__force uintptr_t)phys_to_virt(page_to_phys(p));
+}
+
+// bfc_free_page_data: free pages given a data-page virtual address.
+// Inverse of bfc_alloc_page_data; recovers the Page* via phys conversion.
+__attribute__((no_sanitize("kernel-address")))
+void bfc_free_page_data(void *data, size_t n) {
+    if (!data) return;
+    uint64_t phys = (__force uint64_t)PHY_ADDR((uintptr_t)data);
+    Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
+    bfc_free_page(p, n);
+}

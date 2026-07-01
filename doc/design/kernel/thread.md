@@ -15,7 +15,7 @@
 | 5 | 退出语义 | 贴 Linux `do_exit`：所有线程 `do_exit` 做 `clear_tid` + `futex_wake`（唤醒 joiner）。`signal_struct.thread_count` atomic dec 判最后线程，最后线程通知父进程。`exit_group` 设 `group_exit` 标志，同组线程在 `check_pending_signals` 入口自行退出。`do_exit` 接管 `mm_put`/`files_put`/`signal_put`，`task_reap` 只清调度器资源 |
 | 6 | fork + execve | 与线程解耦。`sys_fork` 保留 master 现有 COW 路径（见 `proc.md`），`sys_clone` 的 fork 分支（flags=0）复用 `copy_page_table`/`copy_fd_table`/`copy_mmap_regions`/`build_kstack_from_tf` 辅助函数（从 `sys_fork` 抽出为独立函数）但入口独立。两路径并存，helper 共享，入口编排不同 |
 | 7 | TLS | 完整加载 ELF `.tdata`/`.tbss` 段 + TCB。**variant II 布局**（TCB 在 TLS 页高地址端，`FS_BASE = &TCB`，TLS 变量 `%fs:(-offset)` 访问，与 musl/glibc x86-64 一致）。`elf_loader` 加 PT_TLS 解析，`clone(CLONE_SETTLS)` 分配 TLS 页，`__trapret`/`syscall_fast_entry` 返回用户态前加载 fs_base（不动 `switch_to` 汇编）。主线程 TLS 由用户态 `_start` 调 `__libc_tls_init()` 初始化，通过 `linker.ld` 导出的 `__tls_template_*` 符号定位模板（无 auxv） |
-| 8 | FPU/SSE | lazy FPU 上下文切换（CR0.TS + #NM handler）。`schedule()` 的 C helper `fpu_context_switch` 设 TS + fxsave prev；#NM handler `fpu_lazy_switch` fxrstor + lazy 分配 `fpu_state`（`bfc_alloc_page(1)`，页对齐满足 fxsave 16 字节要求）。内核仍 `-mno-sse`，用户态移除 |
+| 8 | FPU/SSE | lazy FPU 上下文切换（CR0.TS + #NM handler）。`schedule()` 的 C helper `fpu_context_switch` 设 TS + fxsave prev；#NM handler `fpu_lazy_switch` fxrstor + lazy 分配 `fpu_page`（`bfc_alloc_page(1)`，页对齐满足 fxsave 16 字节要求）。内核仍 `-mno-sse`，用户态移除 |
 | 9 | clone 签名 | `clone(flags, stack, parent_tid, child_tid, tls)`，与 Linux 一致 |
 | 10 | task 表大小 | 维持 `MAX_PROC=64`，`pid==数组下标`。`tgid` 字段已存在于 `xtask_t`，单线程时 `tgid==pid`，多线程时 `tgid=leader.pid`。动态扩容后续 |
 | 11 | fd_table 归属 | `files_t` 已从 `mm_t` 独立（master commit 9279262），`CLONE_FILES` 时 `files_t.f_count++`，与 `CLONE_VM` 解耦。第一版 `CLONE_FILES` 和 `CLONE_VM` 绑定一起用，但结构上不耦合 |
@@ -28,7 +28,7 @@
 | 18 | waitpid | 只回收线程组 leader（`tgid==pid`），非 leader 由 `pthread_join` 回收 |
 | 19 | 锁协议 | 零嵌套。`sig_lock` 和 futex bucket lock 都不与其他锁同时持有。`sys_kill`/`exit_group`/`futex_wake` 采用"先改状态后释放再唤醒"模式（局部数组收集 waiter）。debug 模式加 `ASSERT(!holding_any_other_lock())` 运行时校验（per-CPU nesting counter，违反 panic） |
 | 20 | 设计约束代码化 | flag 组合约束、锁序、refcount 释放顺序等约束落到运行时校验（返回 -EINVAL + printk）或 `BUG_ON`/`ASSERT`，不只写文档 |
-| 21 | xcore/posix 边界 | `fs_base`/`fpu_state` 放 `xtask_t`（xcore 快路径直接访问，不为"xcore 纯度"塞 `proc_t` 让汇编多解引用+判 NULL）。约束：字段进 xcore 后依赖单向——xcore 不为访问这些字段回解引用 `proc_t`。POSIX 纯线程语义（tgid 线程组、sig_pending、clear_tid、futex_node）仍优先 `proc_t` |
+| 21 | xcore/posix 边界 | `fs_base`/`fpu_page` 放 `xtask_t`（xcore 快路径直接访问，不为"xcore 纯度"塞 `proc_t` 让汇编多解引用+判 NULL）。约束：字段进 xcore 后依赖单向——xcore 不为访问这些字段回解引用 `proc_t`。POSIX 纯线程语义（tgid 线程组、sig_pending、clear_tid、futex_node）仍优先 `proc_t` |
 | 22 | pthread 范围 | practical complete：create/exit/join/detach/cancel + mutex(3 types)+timed/try + cond+timed + rwlock + barrier + once + TSD(pthread_key) + pthread_kill/sigmask + attr(stack/stacksize/detachstate/guardsize) + setname_np。延后：atfork/spin/sigqueue/schedparam/affinity_np/process-shared |
 | 23 | cancel 模型 | 信号驱动推迟式。`pthread_cancel` → `tgkill(tgid, tid, SIGCANCEL)`，`SIGCANCEL=32`（`NSIG` 从 32 扩到 33）。目标线程在取消点检查 cancelstate，走 cleanup stack 后 `pthread_exit`。异步取消（PTHREAD_CANCEL_ASYNCHRONOUS）第一版推迟到下一取消点 |
 | 24 | detached 回收 | detached 线程 `do_exit` 自回收：非 leader 或最后线程（`thread_count==0`）时在 `do_exit` 末尾调 `task_reap` 自清。`exit_group` 遍历同组只读 `xtask_t.tgid`（不读 `proc`），自回收 UAF 安全 |
@@ -49,15 +49,15 @@ typedef struct xtask_t {
 
     // === 新增：线程支持 ===
     uint64_t fs_base;           // TLS 基址（FS_BASE MSR 镜像），__trapret 加载
-    void    *fpu_state;         // fxsave 区域（512B，lazy 分配：首次用 FPU 时 bfc_alloc_page(1)，页对齐满足 fxsave 16 字节要求）
+    Page    *fpu_page;          // fxsave 区页（lazy 分配：首次用 FPU 时 bfc_alloc_page(1)）。存 Page* 而非数据指针，类型层面防误用；使用时 phys_to_virt(page_to_phys(fpu_page)) 取数据页虚拟地址喂 fxsave/fxrstor
     uint8_t  used_fpu;          // 该 task 是否使用过 FPU（0=未用，1=用过，决定 fxsave 是否要存）
 } xtask_t;
 ```
 
-**为什么 fs_base 和 fpu_state 在 xtask_t 而非 proc_t**：
+**为什么 fs_base 和 fpu_page 在 xtask_t 而非 proc_t**：
 约束是依赖方向单向：某个字段进了 xcore，外部（BSD 层）就通过 xcore 的接口访问它，xcore 不反过来为访问这些字段解引用 `proc_t`。
 - `fs_base`：`__trapret`/`syscall_fast_entry` 汇编要 `wrmsr(MSR_FS_BASE, current_task->fs_base)`。放 `proc_t` 多一次解引用（`current_task->proc->fs_base`），且 `proc` 可能为 NULL（idle）要判空——汇编里判空很丑。放 `xtask_t` 汇编直接 `movq offset(%rax), %rdx`，xcore 不回解引用 `proc_t`，依赖干净。
-- `fpu_state`：#NM handler 在 `trap_dispatch`（Xcore 层）直接拿 `current_task`。lazy FPU 的核心是"当前线程首次用 SSE 时 #NM → 把 fpu_state 换成当前线程的"，这条路径不碰 BSD 语义，纯调度器职责。放 `xtask_t` 不需要 `trap_dispatch` 解引用 `proc_t`。
+- `fpu_page`：#NM handler 在 `trap_dispatch`（Xcore 层）直接拿 `current_task`。lazy FPU 的核心是"当前线程首次用 SSE 时 #NM → 把 fpu_page 换成当前线程的"，这条路径不碰 BSD 语义，纯调度器职责。放 `xtask_t` 不需要 `trap_dispatch` 解引用 `proc_t`。
 
 POSIX 纯线程语义（`tgid` 线程组、`sig_pending`、`clear_tid_addr`、`futex_node`）仍优先 `proc_t`，因为这些不会被 xcore 快路径直接碰。
 
@@ -205,7 +205,7 @@ sys_clone(flags, stack, parent_tid, child_tid, tls):
   8. xtask_t 新字段初始化:
        fs_base = (CLONE_SETTLS? tls : parent->fs_base)
        clear_tid_addr = (CLONE_CHILD_CLEARTID? child_tid : 0)
-       fpu_state=NULL, used_fpu=0
+       fpu_page=NULL, used_fpu=0
   9. proc_t 线程级:
        sig_pending=0, sig_blocked=parent->proc->sig_blocked
        exit_code=0
@@ -352,7 +352,7 @@ int pthread_join(pthread_t thread, void **retval) {
 task_reap(leader_task):  // waitpid 触发
   1. 释放 leader 内核栈（2 页 bfc_free_page）
   2. 释放 leader IOPM
-  3. 释放 leader FPU state（fpu_state，如果非 NULL）
+  3. 释放 leader FPU state（fpu_page，如果非 NULL）
   4. 释放 leader recv 队列 RECV_MSG 缓冲
   5. 遍历同 tgid 的非 leader ZOMBIE 线程：
      for each non-leader task where task.tgid == leader.tgid && task.pid != leader.pid:
@@ -620,10 +620,11 @@ void fpu_lazy_switch(xtask_t *t) {
     uint64_t cr0;
     __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
     if (!(cr0 & CR0_TS)) return;  // TS 已清，无需处理
-    if (t->fpu_state) {
-        fxrstor(t->fpu_state);  // 恢复保存的 FPU 状态
+    if (t->fpu_page) {
+        void *data = phys_to_virt(page_to_phys(t->fpu_page));  // Page* → 数据页虚拟地址
+        fxrstor(data);  // 恢复保存的 FPU 状态
     }
-    // 若 fpu_state == NULL，说明线程还没用过 FPU，不需要恢复
+    // 若 fpu_page == NULL，说明线程还没用过 FPU，不需要恢复
     t->used_fpu = 1;  // 标记本线程用过 FPU
     cr0 &= ~CR0_TS;
     __asm__ volatile("movq %0, %%cr0" :: "r"(cr0));
@@ -636,8 +637,11 @@ void fpu_lazy_switch(xtask_t *t) {
 // kernel/xcore/sched.c — schedule() 中，switch_to(prev, next) 之前调用
 void fpu_context_switch(xtask_t *prev, xtask_t *next) {
     if (prev->used_fpu) {
-        if (!prev->fpu_state) prev->fpu_state = bfc_alloc_page(1);  // lazy 分配，页对齐满足 fxsave 16 字节要求
-        fxsave(prev->fpu_state);  // 保存 prev 的 FPU 状态
+        if (!prev->fpu_page) prev->fpu_page = bfc_alloc_page(1);  // lazy 分配，页对齐满足 fxsave 16 字节要求
+        if (prev->fpu_page) {
+            void *data = phys_to_virt(page_to_phys(prev->fpu_page));  // Page* → 数据页虚拟地址
+            fxsave(data);  // 保存 prev 的 FPU 状态
+        }
     }
     // 设 TS=1，新线程首次用 SSE 触发 #NM
     uint64_t cr0;
@@ -809,7 +813,7 @@ NR_SYSCALL: 60 → 68。`xcore_syscall_table` 不动（0-19），新 syscall 全
 
 - 定义 `signal_struct`（`kernel/bsd/signal.h`），`signal_create`/`signal_put`
 - `proc_t` 改造：`sig_pending`/`sig_blocked`/`signal`/`clear_tid_addr`/`futex_node`/`futex_uaddr`，`sig.action[]` 挪到 `signal_struct`
-- `xtask_t` 新增：`fs_base`/`fpu_state`/`used_fpu`，`tgid` 真正启用
+- `xtask_t` 新增：`fs_base`/`fpu_page`/`used_fpu`，`tgid` 真正启用
 - 现有进程创建路径适配：`proc_create`/`process_create_elf` 初始化 `signal_struct`（`thread_count=1`，`parent_pid` 镜像）
 - **`sys_fork` 同步适配（P1 强制项）**：现有 `sys_fork` 用 `proc_t.sig.action[]` 内嵌数组，改造后必须改成 `signal_create()` + `memcpy(action[])` + `thread_count=1` + `parent_pid` 镜像 + `tgid=child.pid`。否则 fork 出的子进程没有 `signal_struct`，所有信号路径崩
 - `check_pending_signals` 适配两级 pending（先私有后共享）
@@ -822,7 +826,7 @@ NR_SYSCALL: 60 → 68。`xcore_syscall_table` 不动（0-19），新 syscall 全
 - `isr_init` 中 `cr0 |= CR0.TS`
 - `trap_dispatch` 添加 #NM (trapno==7) 处理：`fpu_lazy_switch`
 - `schedule()` 中 `fpu_context_switch`：fxsave prev + 设 CR0.TS（C helper，不修改 `switch_to` 汇编）
-- `fpu_state` lazy 分配用 `bfc_alloc_page(1)`（页对齐满足 fxsave 16 字节要求，不用 kmalloc）
+- `fpu_page` lazy 分配用 `bfc_alloc_page(1)`（页对齐满足 fxsave 16 字节要求，不用 kmalloc）
 - 移除用户态编译 `-mno-sse -mno-sse2 -mno-mmx`（`user_rules.cmake`）
 - **验证**：编译通过 + 用户态浮点程序正常运行
 

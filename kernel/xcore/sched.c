@@ -239,12 +239,19 @@ static void update_tss_iopm(xtask_t *proc) {
 void fpu_context_switch(xtask_t *prev, xtask_t *next) {
     (void)next;
     if (prev && prev->used_fpu) {
-        if (!prev->fpu_state) {
+        if (!prev->fpu_page) {
             // lazy 分配，页对齐满足 fxsave 16 字节要求
-            prev->fpu_state = bfc_alloc_page(1);
+            prev->fpu_page = bfc_alloc_page(1);
         }
-        if (prev->fpu_state) {
-            __asm__ volatile("fxsave (%0)" :: "r"(prev->fpu_state));
+        if (prev->fpu_page) {
+            void *fpu_data = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(prev->fpu_page));
+            // 防御：fxsave 目标必须是 BFC 数据页虚拟地址，不能是 Page* 元数据指针
+            // （历史 bug：误把 bfc_alloc_page 返回的 Page* 直接当数据指针，fxsave 覆盖
+            //  Page 元数据，后续 kfree 检测 page->status 异常才暴露，定位困难）
+            uint64_t vma_start = (__force uint64_t)phys_to_virt(0);
+            uint64_t vma_end = vma_start + total_page_frames * PAGE_SIZE;
+            ASSERT((uint64_t)fpu_data >= vma_start && (uint64_t)fpu_data < vma_end);
+            __asm__ volatile("fxsave (%0)" :: "r"(fpu_data));
         }
     }
     // 设 TS=1，新线程首次用 SSE 触发 #NM
@@ -379,6 +386,12 @@ void task_reap(xtask_t *proc) {
         proc->iopm = NULL;
     }
 
+    // 2b. Free FPU state page (lazy-allocated via bfc_alloc_page)
+    if (proc->fpu_page) {
+        bfc_free_page(proc->fpu_page, 1);
+        proc->fpu_page = NULL;
+    }
+
     // 3. mm_put (decrement triggers mm_release when ref_count hits 0)
     //    mm_release will: free user pages+PML4+mmap+SHM+files+devtmpfs+irq_owner+wake waiters
     if (proc->mm) {
@@ -451,7 +464,7 @@ void task_reap(xtask_t *proc) {
     proc->last_sched = 0;
     // Clear threading fields
     proc->fs_base = 0;
-    proc->fpu_state = NULL;
+    proc->fpu_page = NULL;
     proc->used_fpu = 0;
     spin_unlock(&tasks_lock);
 }

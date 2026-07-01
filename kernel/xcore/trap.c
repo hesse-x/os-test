@@ -59,10 +59,15 @@ void fpu_lazy_switch(xtask_t *t) {
     uint64_t cr0;
     __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
     if (!(cr0 & (1ULL << 3))) return;  // TS 已清，无需处理
-    if (t->fpu_state) {
-        __asm__ volatile("fxrstor (%0)" :: "r"(t->fpu_state));
+    if (t->fpu_page) {
+        void *fpu_data = (void *)(__force uintptr_t)phys_to_virt(page_to_phys(t->fpu_page));
+        // 防御：fxrstor 源必须是 BFC 数据页虚拟地址（见 fpu_context_switch 同款 ASSERT）
+        uint64_t vma_start = (__force uint64_t)phys_to_virt(0);
+        uint64_t vma_end = vma_start + total_page_frames * PAGE_SIZE;
+        ASSERT((uint64_t)fpu_data >= vma_start && (uint64_t)fpu_data < vma_end);
+        __asm__ volatile("fxrstor (%0)" :: "r"(fpu_data));
     }
-    // 若 fpu_state == NULL，说明线程还没用过 FPU，不需要恢复
+    // 若 fpu_page == NULL，说明线程还没用过 FPU，不需要恢复
     t->used_fpu = 1;  // 标记本线程用过 FPU
     __asm__ volatile("clts");  // 清 CR0.TS
 }

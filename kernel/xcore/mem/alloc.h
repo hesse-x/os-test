@@ -53,6 +53,13 @@ Page *bfc_alloc_page_low(size_t n) __attribute__((no_sanitize("kernel-address"))
 Page *bfc_free_page(Page *page, size_t n) __attribute__((no_sanitize("kernel-address")));
 size_t bfc_free_page_nums(void) __attribute__((no_sanitize("kernel-address")));
 
+// Convenience wrappers: return/accept data-page virtual address directly.
+// Use these when the caller wants the writable page data, not the Page metadata.
+// Avoids the common bug of feeding a Page* to code that expects a data pointer
+// (e.g. fxsave, memset on a kernel stack buffer).
+void *bfc_alloc_page_data(size_t n) __attribute__((no_sanitize("kernel-address")));
+void bfc_free_page_data(void *data, size_t n) __attribute__((no_sanitize("kernel-address")));
+
 // ===================== Global variables =====================
 extern size_t total_page_frames;
 
