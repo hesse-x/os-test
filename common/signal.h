@@ -25,8 +25,9 @@
 #define SIGSTOP   19
 #define SIGTSTP   20
 #define SIGWINCH  28
+#define SIGCANCEL 32  // pthread_cancel 用（与 Linux glibc 一致）
 
-#define NSIG      32
+#define NSIG      33
 
 // ===================== Default actions =====================
 #define SIG_DFL ((void (*)(int))0)   // default action (terminate)

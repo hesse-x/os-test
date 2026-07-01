@@ -86,32 +86,33 @@ void proc_free(proc_t *bp) {
 }
 
 // proc_reap: POSIX cleanup part of task_reap
-// Called directly from task_reap() for synchronous per-process cleanup
+// Called directly from task_reap() for synchronous per-process cleanup.
+// Owns all POSIX resource freeing: files_put (closes all fds), signal_put,
+// kfree(proc_t). do_exit does NOT put these — it only sets ZOMBIE and
+// notifies parent; task_reap/proc_reap is the sole owner of proc_t lifetime.
 void proc_reap(xtask_t *proc) {
     if (!proc->proc) return;
+    proc_t *bp = proc->proc;
 
-    // Close all fds
-    files_t *files = proc->proc->files;
-    if (files) {
+    if (bp->files) {
         struct file *entries[MAX_FD];
         for (int fd = 0; fd < MAX_FD; fd++) {
-            entries[fd] = fd_uninstall(files, fd);
+            entries[fd] = fd_uninstall(bp->files, fd);
         }
         synchronize_rcu();
         for (int fd = 0; fd < MAX_FD; fd++) {
             if (entries[fd]) file_put(entries[fd]);
         }
-        files_put(files);
-        proc->proc->files = NULL;
+        files_put(bp->files);
+        bp->files = NULL;
     }
 
-    // Free proc struct
-    // Release signal_struct (independent refcount)
-    if (proc->proc->signal) {
-        signal_put(proc->proc->signal);
-        proc->proc->signal = NULL;
+    if (bp->signal) {
+        signal_put(bp->signal);
+        bp->signal = NULL;
     }
-    kfree(proc->proc);
+
+    kfree(bp);
     proc->proc = NULL;
 }
 
@@ -288,6 +289,9 @@ void files_put(files_t *files) {
 // Free a page table page by physical address
 static void free_table_page(uint64_t phys) {
     Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
+    // 不可恢复: 页表页被当成 slab 页或已空闲页,说明 Page 描述符或页表已损坏。
+    // DEBUG 直接 panic 定位, release 不做检查。
+    ASSERT(p->status != PAGE_SLAB && p->status != PAGE_FREE);
     bfc_free_page(p, 1);
 }
 
@@ -388,6 +392,9 @@ void mm_release(mm_t *mm, pid_t owner_pid) {
                         }
                         if (!is_shared) {
                             Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
+                            // 不可恢复: 用户页表 leaf 指向了 slab 页,说明页表或 Page 描述符已损坏。
+                            // DEBUG 直接 panic 定位, release 不做检查。
+                            ASSERT(leaf_page->status != PAGE_SLAB);
                             if (refcount_dec_and_test(&leaf_page->p_refcount)) {
                                 bfc_free_page(leaf_page, 1);
                             }
@@ -679,6 +686,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
     child->req_caller_pid = -1; child->req_reply_buf = NULL;
     child->msg_caller_pid = -1; child->msg_reply_buf = NULL;
     child->cpu_time_ns = 0; child->last_sched = 0;
+    child->exit_code = 0;
     // POSIX fields are in proc
     child_bp->exit_code = 0;
     // signal_struct: fork independent copy (no CLONE_SIGHAND)

@@ -106,6 +106,7 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->proc = NULL;  // created below
     proc->cpu_time_ns = 0;
     proc->last_sched = 0;
+    proc->exit_code = 0;
     // POSIX fields are in proc (created separately)
     list_init(&proc->run_node);
     list_init(&proc->wait_node);

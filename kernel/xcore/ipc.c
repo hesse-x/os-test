@@ -140,7 +140,12 @@ uint64_t shm_add_page(struct shm *shm) {
 
 // ===================== Xcore IPC syscall: getpid =====================
 int64_t sys_getpid(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
-    return (int64_t)current_task->pid;
+    return (int64_t)current_task->tgid;  // 返回 tgid（进程 ID）
+}
+
+// ===================== Xcore IPC syscall: gettid =====================
+int64_t sys_gettid(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5, int64_t _u6) {
+    return (int64_t)current_task->pid;  // 返回 tid（线程 ID）
 }
 
 // ===================== Xcore IPC syscall: yield =====================

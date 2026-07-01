@@ -135,6 +135,12 @@ void check_pending_signals(trapframe_t *tf) {
     xtask_t *proc = current_task;
     if (!proc || !proc->proc) return;
 
+    // group_exit 检查（最高优先级）
+    if (proc->proc->signal->group_exit) {
+        sys_exit_group(proc->proc->signal->group_exit_code, 0, 0, 0, 0, 0);
+        return;  // unreachable
+    }
+
     while (1) {
         // 1. Check per-task private pending first
         uint64_t pending = __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
@@ -260,6 +266,86 @@ int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _
     } else {
         return (int64_t)pgsignal(-pid, sig);
     }
+}
+
+// ===================== BSD syscall: tgkill =====================
+int64_t sys_tgkill(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
+    pid_t tgid = (pid_t)arg1;
+    pid_t tid = (pid_t)arg2;
+    int sig = (int)arg3;
+    if (sig < 0 || sig >= NSIG) return (int64_t)-EINVAL;
+    if (sig == 0) return 0;
+    if (tid < 0 || tid >= MAX_PROC) return (int64_t)-ESRCH;
+    xtask_t *target = &tasks[tid];
+    if (target->pid != tid || target->tgid != tgid || !target->proc) return (int64_t)-ESRCH;
+    // 投递到线程级 sig_pending（atomic，无 sig_lock）
+    __atomic_or_fetch(&target->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
+    if (target->state == BLOCKED) wake_process(target->pid);
+    return 0;
+}
+
+// ===================== BSD syscall: sigprocmask =====================
+#define SIG_BLOCK     0
+#define SIG_UNBLOCK   1
+#define SIG_SETMASK   2
+
+int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _u2, int64_t _u3) {
+    int how = (int)arg1;
+    const sigset_t *set = (const sigset_t *)arg2;
+    sigset_t *oldset = (sigset_t *)arg3;
+    xtask_t *proc = current_task;
+
+    if (set == NULL && oldset == NULL) return 0;
+
+    sigset_t old = proc->proc->sig_blocked;
+
+    if (set) {
+        uint64_t ptr = (uint64_t)set;
+        if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(sigset_t) > 0xFFFFFFFF80000000ULL)
+            return (int64_t)-EFAULT;
+
+        sigset_t newset;
+        uint64_t saved_cr3;
+        __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+        __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)proc->cr3) : "memory");
+        copy_from_user(&newset, set, sizeof(sigset_t));
+        __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
+
+        switch (how) {
+        case SIG_BLOCK:
+            proc->proc->sig_blocked |= newset;
+            break;
+        case SIG_UNBLOCK:
+            proc->proc->sig_blocked &= ~newset;
+            break;
+        case SIG_SETMASK:
+            proc->proc->sig_blocked = newset;
+            break;
+        default:
+            return (int64_t)-EINVAL;
+        }
+        // SIGKILL/SIGSTOP 不可阻塞
+        proc->proc->sig_blocked &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
+    }
+
+    if (oldset) {
+        uint64_t ptr = (uint64_t)oldset;
+        if (ptr >= 0xFFFFFFFF80000000ULL || ptr + sizeof(sigset_t) > 0xFFFFFFFF80000000ULL)
+            return (int64_t)-EFAULT;
+
+        uint64_t saved_cr3;
+        __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+        __asm__ volatile("movq %0, %%cr3" :: "r"((int64_t)proc->cr3) : "memory");
+        copy_to_user(oldset, &old, sizeof(sigset_t));
+        __asm__ volatile("movq %0, %%cr3" :: "r"(saved_cr3) : "memory");
+    }
+    return 0;
+}
+
+// ===================== BSD syscall: set_tid_address =====================
+int64_t sys_set_tid_address(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
+    current_task->proc->clear_tid_addr = (pid_t)arg1;
+    return (int64_t)current_task->pid;  // 返回 tid
 }
 
 // ===================== BSD syscall: sigaction =====================

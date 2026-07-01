@@ -20,6 +20,7 @@ int64_t sys_fcntl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // process semantics
 int64_t sys_exit(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_exit_group(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_waitpid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_fork(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_execve(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);

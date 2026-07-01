@@ -418,7 +418,7 @@ void isr_init() {
 // ===================== Syscall dispatch =====================
 // Xcore IPC syscalls are dispatched directly via syscall_table.
 // All other syscalls are delegated to syscall_dispatch.
-#define NR_XCORE_SYSCALL (SYS_IOPERM + 1)
+#define NR_XCORE_SYSCALL (SYS_GETTID + 1)
 
 static syscall_fn_t xcore_syscall_table[NR_XCORE_SYSCALL] = {
     [SYS_GETPID]       = sys_getpid,
@@ -433,6 +433,7 @@ static syscall_fn_t xcore_syscall_table[NR_XCORE_SYSCALL] = {
     [SYS_MSG]          = sys_msg,
     [SYS_MSG_RESP]     = sys_msg_resp,
     [SYS_IOPERM]       = sys_ioperm,
+    [SYS_GETTID]       = sys_gettid,
 };
 
 static const char *xcore_syscall_names[NR_XCORE_SYSCALL] = {
@@ -448,6 +449,7 @@ static const char *xcore_syscall_names[NR_XCORE_SYSCALL] = {
     [SYS_MSG]          = "msg",
     [SYS_MSG_RESP]     = "msg_resp",
     [SYS_IOPERM]       = "ioperm",
+    [SYS_GETTID]       = "gettid",
 };
 
 const char *syscall_name(uint64_t nr) {

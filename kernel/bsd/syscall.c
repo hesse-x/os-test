@@ -63,18 +63,25 @@ typedef struct file_t_io_resp {
 } file_t_io_resp;
 
 // ===================== BSD syscall: exit =====================
+// Key safety: all proc_t/signal reads happen BEFORE setting ZOMBIE (stored in
+// locals). After ZOMBIE, do_exit only uses locals + xtask_t array fields —
+// never proc->proc or sig, which may be kfree'd by concurrent task_reap on
+// another CPU. do_exit does NOT do mm_put/files_put/signal_put — task_reap/
+// proc_reap owns all resource freeing (original design; 3b will revisit).
 int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     xtask_t *proc = current_task;
     int32_t exit_code = (int32_t)arg1;
-    proc->proc->exit_code = exit_code;
-    printk(LOG_ERROR, "sys_exit: pid=%d exit_code=%d\n", proc->pid, exit_code);
+    proc->exit_code = exit_code;           // xtask_t (UAF-safe for waitpid)
+    proc->proc->exit_code = exit_code;     // proc_t (legacy, waitpid 已改读 xtask_t)
+    printk(LOG_INFO, "do_exit: pid=%d tid=%d exit_code=%d\n", proc->tgid, proc->pid, exit_code);
 
+    // 2. CPU 时间记账
     if (proc->last_sched != 0) {
         proc->cpu_time_ns += sched_clock() - proc->last_sched;
         proc->last_sched = 0;
     }
 
-    // Orphan adoption: reparent children to init
+    // 3. 孤儿收养（用 mm->parent_pid，不用 signal->parent_pid）
     if (init_pid >= 0) {
         spin_lock(&tasks_lock);
         for (int i = 0; i < MAX_PROC; i++) {
@@ -85,48 +92,102 @@ int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
         spin_unlock(&tasks_lock);
     }
 
-    if (!proc->mm || proc->mm->parent_pid < 0) {
-        task_reap(proc);
-    } else {
-        int cpu = proc->assigned_cpu;
-        uint64_t flags;
-        spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
-        proc->state = ZOMBIE;
-        spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
-        {
-            xtask_t *parent = &tasks[proc->mm->parent_pid];
-            __atomic_or_fetch(&parent->proc->sig_pending, 1ULL << SIGCHLD, __ATOMIC_RELEASE);
+    // 4. clear_tid_addr: 写 0 + futex_wake（futex 未实现前 futex_wake 为 stub）
+    //    BEFORE ZOMBIE — proc_t is alive, no concurrent task_reap possible.
+    if (proc->proc->clear_tid_addr) {
+        *((pid_t *)(uintptr_t)proc->proc->clear_tid_addr) = 0;
+        // futex_wake(proc->proc->clear_tid_addr, 1);  // 阶段 3b 实现
+    }
 
+    // 5. Thread-group bookkeeping BEFORE ZOMBIE (proc_t/signal alive).
+    //    Read signal fields into locals — after ZOMBIE we must not touch sig.
+    struct signal_struct *sig = proc->proc->signal;
+    pid_t ppid = sig->parent_pid;
+    atomic_dec(&sig->live_count);
+    int notify_parent = atomic_dec_and_test(&sig->thread_count);
+
+    // 6. 设 ZOMBIE
+    //    GATE: after this, task_reap/proc_reap on another CPU may kfree proc_t
+    //    and signal_put signal_struct. Do NOT dereference proc->proc or sig.
+    int cpu = proc->assigned_cpu;
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+    proc->state = ZOMBIE;
+    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+
+    // 7. 通知父进程（最后线程）— uses local ppid, not sig->parent_pid
+    if (notify_parent) {
+        if (ppid >= 0 && ppid < MAX_PROC && tasks[ppid].pid == ppid) {
+            xtask_t *parent = &tasks[ppid];
+            __atomic_or_fetch(&parent->proc->sig_pending, 1ULL << SIGCHLD, __ATOMIC_RELEASE);
             int pcpu = parent->assigned_cpu;
             uint64_t pflags;
             spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
-            if (parent->state == BLOCKED &&
-                parent->wait_event == WAIT_CHILD) {
+            if (parent->state == BLOCKED && parent->wait_event == WAIT_CHILD) {
                 wake_from_wait(parent);
             }
             spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
         }
+    }
 
-        for (int i = 0; i < MAX_PROC; i++) {
-            xtask_t *waiter = &tasks[i];
-            if (waiter->pid >= 0 &&
-                waiter->state == BLOCKED &&
-                waiter->wait_event == WAIT_REQ_REPLY &&
-                waiter->req_target_pid == proc->pid) {
-                int wcpu = waiter->assigned_cpu;
-                uint64_t wflags;
-                spin_lock_irqsave(&cpu_locals[wcpu].scheduler_lock, &wflags);
-                if (waiter->state == BLOCKED && waiter->wait_event == WAIT_REQ_REPLY) {
-                    waiter->req_result = ESRCH;
-                    wake_from_wait(waiter);
-                }
-                spin_unlock_irqrestore(&cpu_locals[wcpu].scheduler_lock, wflags);
+    // 8. 唤醒等待本线程 REQ/MSG reply 的进程 — xtask_t fields only, no proc_t
+    for (int i = 0; i < MAX_PROC; i++) {
+        xtask_t *waiter = &tasks[i];
+        if (waiter->pid >= 0 &&
+            waiter->state == BLOCKED &&
+            waiter->wait_event == WAIT_REQ_REPLY &&
+            waiter->req_target_pid == proc->pid) {
+            int wcpu = waiter->assigned_cpu;
+            uint64_t wflags;
+            spin_lock_irqsave(&cpu_locals[wcpu].scheduler_lock, &wflags);
+            if (waiter->state == BLOCKED && waiter->wait_event == WAIT_REQ_REPLY) {
+                waiter->req_result = ESRCH;
+                wake_from_wait(waiter);
             }
+            spin_unlock_irqrestore(&cpu_locals[wcpu].scheduler_lock, wflags);
         }
     }
 
+    // 9. schedule() — never returns.
+    //    do_exit does NOT do mm_put/files_put/signal_put — task_reap/proc_reap
+    //    owns all freeing. 3b will revisit do_exit ownership with proper
+    //    proc_t lifetime (RCU or per-task reap lock).
     schedule();
     return 0;
+}
+
+// ===================== BSD syscall: exit_group =====================
+int64_t sys_exit_group(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
+    xtask_t *current = current_task;
+    struct signal_struct *sig = current->proc->signal;
+    int32_t status = (int32_t)arg1;
+
+    // 1. 设 group_exit 标志
+    spin_lock(&sig->sig_lock);
+    sig->group_exit = 1;
+    sig->group_exit_code = status;
+    spin_unlock(&sig->sig_lock);
+
+    // 2. 遍历 tasks[]，唤醒同 tgid 且 != current 的 BLOCKED 线程
+    for (int i = 0; i < MAX_PROC; i++) {
+        if (tasks[i].pid >= 0 && tasks[i].tgid == current->tgid && tasks[i].pid != current->pid) {
+            int tcpu = tasks[i].assigned_cpu;
+            uint64_t tflags;
+            spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &tflags);
+            if (tasks[i].state == BLOCKED) {
+                timer_queue_cancel(&tasks[i]);
+                tasks[i].state = READY;
+                tasks[i].wait_event = WAIT_NONE;
+                tasks[i].wait_timed_out = 0;
+                list_push_back(&cpu_locals[tcpu].run_queue, &tasks[i].run_node);
+                cpu_locals[tcpu].run_count++;
+            }
+            spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, tflags);
+        }
+    }
+
+    // 3. 当前线程退出
+    return sys_exit(status, 0, 0, 0, 0, 0);
 }
 
 // ===================== BSD syscall: waitpid =====================
@@ -169,7 +230,7 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
                     uint64_t ptr_val = (__force uint64_t)exit_code_ptr;
                     if (ptr_val < 0xFFFFFFFF80000000ULL && ptr_val &&
                         (ptr_val + sizeof(int32_t) - 1) < 0xFFFFFFFF80000000ULL)
-                        *(__force int32_t *)exit_code_ptr = zombie->proc->exit_code;
+                        *(__force int32_t *)exit_code_ptr = zombie->exit_code;
                 }
                 task_reap(zombie);
                 return (int64_t)zpid;
@@ -292,13 +353,14 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
         spin_unlock(&tasks_lock);
     }
 
+    // exit_code lives in xtask_t (static array) — safe to read without proc_t ref.
     if (exit_code_ptr) {
         uint64_t ptr_val = (__force uint64_t)exit_code_ptr;
         if (ptr_val >= 0xFFFFFFFF80000000ULL || !ptr_val || (ptr_val + sizeof(int32_t) - 1) >= 0xFFFFFFFF80000000ULL) {
             printk(LOG_WARN, "waitpid: pid=%d bad exit_code_ptr=0x%lx\n", pid, ptr_val);
             return -EFAULT;
         }
-        *(__force int32_t *)exit_code_ptr = child->proc->exit_code;
+        *(__force int32_t *)exit_code_ptr = child->exit_code;
     }
     task_reap(child);
     return (int64_t)pid;
@@ -1994,6 +2056,12 @@ int64_t syscall_dispatch(trapframe_t *tf) {
     case SYS_RECVMSG:      return sys_recvmsg(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
     case SYS_SHUTDOWN:     return sys_shutdown(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
     case SYS_POLL:         return sys_poll(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+    // Thread syscalls
+    case SYS_EXIT_GROUP:     return sys_exit_group(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+    case SYS_TGKILL:         return sys_tgkill(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+    case SYS_SIGPROCMASK:    return sys_sigprocmask(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+    case SYS_SET_TID_ADDRESS:return sys_set_tid_address(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+    // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) 在阶段 3b 实现，此阶段返回 -ENOSYS
     default:
         printk(LOG_WARN, "syscall_dispatch: unknown syscall nr=%lu pid=%d\n",
                 (unsigned long)nr, current_task->pid);

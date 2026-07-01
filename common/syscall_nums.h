@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include "common/ioctl.h"
 
-// ===================== Syscall numbers (NR_SYSCALL=60, 0-59 continuous) =====================
+// ===================== Syscall numbers (NR_SYSCALL=68, 0-67 continuous) =====================
 #define SYS_GETPID       0
 #define SYS_YIELD        1
 #define SYS_RECV         2
@@ -68,6 +68,16 @@
 #define SYS_SETPGID     57
 #define SYS_GETPGID     58
 #define SYS_GETSID      59
+
+// ===================== Thread syscalls (阶段 3a/3b) =====================
+#define SYS_CLONE          60
+#define SYS_FUTEX          61
+#define SYS_ARCH_PRCTL     62
+#define SYS_TGKILL         63
+#define SYS_EXIT_GROUP     64
+#define SYS_SET_TID_ADDRESS 65
+#define SYS_GETTID         66
+#define SYS_SIGPROCMASK    67
 
 // ===================== recv_msg (shared between kernel and user) =====================
 #define RECV_IRQ    0

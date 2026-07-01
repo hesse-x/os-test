@@ -44,10 +44,25 @@ pid_t init_pid = -1;
 // Returns pointer to the free xtask_t, or NULL if no free slot.
 // Caller must hold tasks_lock; on success the slot's pid is still -1
 // (caller sets it after allocating resources).
+//
+// If the slot's k_stack_top is nonzero, it holds the kernel stack of a
+// previously-reaped process (task_reap deliberately leaves the stack in
+// place — see the comment there for the SMP race that forbids freeing it
+// at reap time). We free it now: by the time a slot is reused, the dead
+// process switched off its stack long ago, so the pages are safe to
+// reclaim.
 xtask_t *xtask_alloc(void) {
     for (int i = 0; i < MAX_PROC; i++) {
         if (tasks[i].pid < 0) {
-            return &tasks[i];
+            xtask_t *t = &tasks[i];
+            if (t->k_stack_top != 0) {
+                uint64_t k_stack_phys_base = (__force uint64_t)PHY_ADDR(
+                    t->k_stack_top - 2 * PAGE_SIZE);
+                Page *stack_page = &bfc_frames[PHY_TO_PAGE(k_stack_phys_base)];
+                bfc_free_page(stack_page, 2);
+                t->k_stack_top = 0;
+            }
+            return t;
         }
     }
     return NULL;
@@ -89,6 +104,7 @@ void proc_init() {
         tasks[i].msg_target_pid = -1;
         tasks[i].cpu_time_ns = 0;
         tasks[i].last_sched = 0;
+        tasks[i].exit_code = 0;
         // POSIX fields (sig, sid, pgid, ctty, exit_code) are in proc (NULL = no POSIX semantics)
     }
     cpu_locals[0]._cur_proc = NULL;
@@ -385,14 +401,16 @@ void timer_queue_remove(xtask_t *proc) {
 // Called by sys_exit (no-parent path) or sys_waitpid
 void task_reap(xtask_t *proc) {
     ASSERT(proc->state == ZOMBIE || proc->state == REAPING);
-    pid_t owner_pid = proc->pid;
 
-    // 1. Free kernel stack (2 pages)
-    uint64_t k_stack_phys_base = (__force uint64_t)PHY_ADDR(proc->k_stack_top - 2 * PAGE_SIZE);
-    Page *stack_page = &bfc_frames[PHY_TO_PAGE(k_stack_phys_base)];
-    bfc_free_page(stack_page, 2);
+    // NOTE: kernel stack is NOT freed here. sys_exit sets ZOMBIE and notifies
+    // the parent BEFORE calling schedule(); on SMP the parent's waitpid→
+    // task_reap can run concurrently while the child is still in
+    // fpu_context_switch/switch_to using its kernel stack. Freeing the stack
+    // at that moment corrupts the child's ret address → #GP. The stack is
+    // freed lazily in xtask_alloc() when this slot is reused for a new fork
+    // — by then the child has long since switched off.
 
-    // 2. Free IOPM bitmap
+    // 1. Free IOPM bitmap
     if (proc->iopm) {
         kfree(proc->iopm);
         proc->iopm = NULL;
@@ -405,18 +423,14 @@ void task_reap(xtask_t *proc) {
     }
 
     // 3. mm_put (decrement triggers mm_release when ref_count hits 0)
-    //    mm_release will: free user pages+PML4+mmap+SHM+files+devtmpfs+irq_owner+wake waiters
+    //    mm_release will: free user pages+PML4+mmap+SHM+devtmpfs+irq_owner+wake waiters
     if (proc->mm) {
-        pid_t pid_for_cleanup = owner_pid;
+        pid_t pid_for_cleanup = proc->pid;
         mm_t *mm = proc->mm;
         proc->mm = NULL;
         if (refcount_dec_and_test(&mm->m_count)) {
             mm_release(mm, pid_for_cleanup);
         }
-    } else {
-        // idle process: still need cleanup for devtmpfs/irq_owner
-        if (devtmpfs_cleanup_hook) devtmpfs_cleanup_hook(owner_pid);
-        irq_owner_cleanup(owner_pid);
     }
 
     // 4. Free any RECV_MSG entries in recv queue (kfree their kmaddr)
@@ -435,15 +449,18 @@ void task_reap(xtask_t *proc) {
     // 5. Clear MSG caller state (server died before responding)
     proc->msg_caller_pid = -1;
 
-    // 6. POSIX cleanup: close fds, free proc
+    // 6. POSIX cleanup: close fds, signal_put, free proc
     if (proc_reap_hook) proc_reap_hook(proc);
 
-    // 7. Clear PCB slot
+    // 7. Clear PCB slot — EXCEPT k_stack_top, which task_reap deliberately
+    //    leaves set so xtask_alloc can lazily free the stack when the slot is
+    //    reused (see the comment at the top of this function and in
+    //    xtask_alloc).
     spin_lock(&tasks_lock);
     proc->pid = -1;
     proc->state = UNUSED;
     proc->k_rsp = 0;
-    proc->k_stack_top = 0;
+    // proc->k_stack_top intentionally preserved (see above)
     proc->cr3 = 0;
     proc->entry = 0;
     proc->wait_event = WAIT_NONE;

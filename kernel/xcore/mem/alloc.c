@@ -101,6 +101,10 @@ Page *bfc_free_page(Page *page, size_t n) {
   uint64_t flags;
   spin_lock_irqsave(&bfc_lock, &flags);
 
+  // 不可恢复: slab 页被当 BFC 大块释放,说明 page->status 已被破坏。
+  // DEBUG 直接 panic 定位根因, release 不做检查。
+  ASSERT(page->status != PAGE_SLAB);
+
   memstat_sub(&kernel_mem_stats.used_pages, (int)n);
   page->status = PAGE_FREE;
   page->bfc.cont_page_num = n;

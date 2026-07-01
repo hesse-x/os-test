@@ -23,4 +23,9 @@ struct signal_struct {
 struct signal_struct *signal_create(void);
 void signal_put(struct signal_struct *sig);
 
+// Thread syscalls (阶段 3a)
+int64_t sys_tgkill(int64_t tgid, int64_t tid, int64_t sig, int64_t, int64_t, int64_t);
+int64_t sys_sigprocmask(int64_t how, int64_t set, int64_t oldset, int64_t, int64_t, int64_t);
+int64_t sys_set_tid_address(int64_t tidptr, int64_t, int64_t, int64_t, int64_t, int64_t);
+
 #endif // KERNEL_BSD_SIGNAL_H

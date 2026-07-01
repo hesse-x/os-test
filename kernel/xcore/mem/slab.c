@@ -216,9 +216,22 @@ void kfree(const void *ptr) {
     }
 
     if (page->status != PAGE_SLAB) {
-        printk(LOG_ERROR, "kfree: bad page status ptr=%p phys=%lx page=%p status=%d\n",
-                      ptr, phys, page, page->status);
-        dump_stack_trace();
+        // page->status 既不是 PAGE_USED 也不是 PAGE_SLAB,说明 Page 描述符已损坏。
+        // 不可恢复, DEBUG 直接 panic 定位, release 不做检查。
+#ifndef NDEBUG
+        printk(LOG_ERROR, "kfree: bad page status ptr=%p phys=%lx page=%p status=%d sizeof(Page)=%zu bfc_frames=%p\n",
+                      ptr, phys, page, page->status, sizeof(Page), bfc_frames);
+        printk(LOG_ERROR, "  page desc: refcount=%d cache=%p freelist=%p inuse=%u obj_count=%u\n",
+            refcount_read(&page->p_refcount),
+            page->slab.cache, page->slab.freelist,
+            page->slab.inuse, page->slab.obj_count);
+        uint8_t *raw = (uint8_t *)page;
+        printk(LOG_ERROR, "  page raw: %02x %02x %02x %02x | %02x %02x %02x %02x | %02x %02x %02x %02x %02x %02x %02x %02x | %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            raw[0],raw[1],raw[2],raw[3], raw[4],raw[5],raw[6],raw[7],
+            raw[8],raw[9],raw[10],raw[11],raw[12],raw[13],raw[14],raw[15],
+            raw[16],raw[17],raw[18],raw[19],raw[20],raw[21],raw[22],raw[23]);
+#endif
+        ASSERT(page->status == PAGE_SLAB);
         return;
     }
 

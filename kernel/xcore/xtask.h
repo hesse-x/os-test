@@ -70,6 +70,11 @@ typedef struct xtask_t {
                                 // to obtain the fxsave area virtual address. Type prevents feeding
                                 // a Page* to fxsave/fxrstor by accident. NULL = idle (无 FPU 状态)。
 
+    // === exit code (valid when state == ZOMBIE) ===
+    // Lives in xtask_t (static array, slot lifetime by tasks_lock) not proc_t
+    // (kmalloc'd) so waitpid can read it safely without holding a proc_t ref.
+    int32_t  exit_code;
+
     // === pointer to BSD extension data (Xcore does not interpret contents) ===
     struct proc *proc;  // NULL = idle/task without POSIX semantics
 } xtask_t;
