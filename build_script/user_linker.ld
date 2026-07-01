@@ -27,18 +27,21 @@ SECTIONS
         *(.tdata .tdata.*)
         __tls_template_end = .;
     }
+    __tdata_start = __tls_template_start;
+    __tdata_end = __tls_template_end;
+    __tdata_size = SIZEOF(.tdata);
+    __tdata_align = ALIGNOF(.tdata);
 
     /* TLS BSS 段（运行时清零） */
-    .tbss : {
-        __tls_tbss_start = .;
+    .tbss (NOLOAD) : {
+        __tbss_start = .;
         *(.tbss .tbss.*)
-        __tls_tbss_end = .;
+        __tbss_end = .;
     }
+    __tbss_size = SIZEOF(.tbss);
+    __tbss_align = ALIGNOF(.tbss);
 
-    /* TLS 大小符号（链接器算后写入） */
-    __tls_tdata_size = SIZEOF(.tdata);
-    __tls_tbss_size = SIZEOF(.tbss);
-    __tls_align = ALIGNOF(.tdata);
+    __tls_align = MAX(__tdata_align, __tbss_align);
 
     .init_array : {
         __init_array_start = .;
@@ -59,7 +62,6 @@ SECTIONS
     }
 
     /DISCARD/ : {
-        *(.eh_frame)
         *(.note.gnu.property)
         *(.note.gnu.build-id)
         *(.comment)

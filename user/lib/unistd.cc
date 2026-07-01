@@ -8,6 +8,10 @@ pid_t getpid(void) {
     return (pid_t)sys_getpid();
 }
 
+pid_t gettid(void) {
+    return (pid_t)sys_gettid();
+}
+
 void _exit(int status) {
     sys_exit(status);
     __builtin_unreachable();

@@ -4,6 +4,7 @@
 #include "common/syscall_nums.h"
 #include "common/errno.h"
 #include "common/mman.h"
+#include "common/signal.h"
 #include "arch/x64/utils.h"
 
 // ===================== Unified syscall return convention =====================
@@ -373,6 +374,56 @@ static inline int64_t sys_getsid(uint64_t pid) {
     int64_t r = __syscall1(SYS_GETSID, (int64_t)pid);
     if (r < 0) { errno = -(int)r; return -1; }
     return r;
+}
+
+// --- Thread syscalls (Phase 4 pthread support) ---
+static inline int64_t sys_clone(uint64_t flags, uint64_t stack, uint64_t parent_tid,
+                                uint64_t child_tid, uint64_t tls) {
+    return __syscall5(SYS_CLONE, (int64_t)flags, (int64_t)stack,
+                      (int64_t)parent_tid, (int64_t)child_tid, (int64_t)tls);
+}
+
+static inline int sys_futex(uint32_t *uaddr, int op, uint32_t val,
+                            const void *timeout, uint32_t *uaddr2, uint32_t val3) {
+    int64_t r = __syscall6(SYS_FUTEX, (int64_t)(uintptr_t)uaddr, (int64_t)op,
+                           (int64_t)val, (int64_t)(uintptr_t)timeout,
+                           (int64_t)(uintptr_t)uaddr2, (int64_t)val3);
+    if (r < 0) { errno = -(int)r; return -1; }
+    return (int)r;
+}
+
+static inline int sys_tgkill(int32_t tgid, int32_t tid, int sig) {
+    int64_t r = __syscall3(SYS_TGKILL, (int64_t)tgid, (int64_t)tid, (int64_t)sig);
+    if (r < 0) { errno = -(int)r; return -1; }
+    return 0;
+}
+
+static inline void sys_exit_group(int32_t status) {
+    __syscall1(SYS_EXIT_GROUP, (int64_t)status);
+    __builtin_unreachable();
+}
+
+static inline int sys_set_tid_address(uint64_t tidptr) {
+    int64_t r = __syscall1(SYS_SET_TID_ADDRESS, (int64_t)tidptr);
+    if (r < 0) { errno = -(int)r; return -1; }
+    return (int)r;
+}
+
+static inline int64_t sys_gettid(void) {
+    return __syscall0(SYS_GETTID);
+}
+
+static inline int sys_sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
+    int64_t r = __syscall3(SYS_SIGPROCMASK, (int64_t)how,
+                           (int64_t)(uintptr_t)set, (int64_t)(uintptr_t)oldset);
+    if (r < 0) { errno = -(int)r; return -1; }
+    return 0;
+}
+
+static inline int sys_pthread_set_cancel_handler(uint64_t handler) {
+    int64_t r = __syscall1(SYS_PTHREAD_SET_CANCEL_HANDLER, (int64_t)handler);
+    if (r < 0) { errno = -(int)r; return -1; }
+    return (int)r;
 }
 
 #endif // __KERNEL__
