@@ -68,6 +68,8 @@ void process_entry(void);
 // Internal helpers
 int pick_cpu(void);
 uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip);
+// Variant allowing caller-supplied user rsp (e.g. for argc/argv/auxv stack layout)
+uint64_t build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip, uint64_t user_rsp);
 
 // ===================== FPU state save/restore =====================
 // fxsave/fxrstor 本身是 FPU 指令，在 CR0.TS=1 时会触发 #NM。eager 模式下 TS 恒为 0，

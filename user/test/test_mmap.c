@@ -179,7 +179,8 @@ void test_mmap_memfd_verify(void) {
     close(fd);
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_mmap_anon);
     RUN_TEST(test_mmap_write_read);

@@ -271,7 +271,8 @@ void test_poll_multiple_dev(void) {
     }
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_poll_pipe_readable);
     RUN_TEST(test_poll_pipe_writable);

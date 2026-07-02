@@ -317,7 +317,8 @@ static void flush_dirty_cells() {
 
 // ===================== Main =====================
 
-int main() {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     // 1. Initialize display client (attach display SHM from KMS)
     if (display_client_init() < 0) {
         printf("terminal: display_client_init FAILED\n");

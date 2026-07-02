@@ -589,7 +589,8 @@ void test_dev_vfs_kms_flip_ioctl(void) {
     }
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
 
     /* Phase 1: dev_ops callback dispatch */

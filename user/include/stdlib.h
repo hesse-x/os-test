@@ -18,6 +18,8 @@ void *realloc(void *ptr, size_t size);
 
 void exit(int status);
 
+int atexit(void (*func)(void));
+
 int atoi(const char *s);
 long atol(const char *s);
 long strtol(const char *s, char **endptr, int base);

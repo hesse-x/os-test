@@ -147,9 +147,14 @@ typedef struct switch_frame_t {
 _Static_assert(sizeof(switch_frame_t) == 56,  "switch_frame size must be 56 (7 × uint64_t)");
 
 uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
+    return build_kstack_user_rsp(k_stack_top, entry_rip, 0x00007FFFFFFFE000ULL);
+}
+
+uint64_t build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip, uint64_t user_rsp) {
     trapframe_t tf = {0};
     tf.ss      = 0x23;                   // USER_DS
-    tf.rsp     = 0x00007FFFFFFFE000;      // user stack top
+    if (user_rsp == 0) user_rsp = 0x00007FFFFFFFE000ULL;
+    tf.rsp     = user_rsp;               // user stack pointer
     // 用户栈顶必须 16 字节对齐：iret 进入 _start 时 rsp%16==0，
     // _start 用 andq $-16 兜底后符合 ABI（call 后 rsp%16==8）。
     // 若此处不对齐，用户态 movaps/movdqa 会 #GP。

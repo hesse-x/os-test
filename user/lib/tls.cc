@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include "sys/tls.h"
@@ -28,6 +29,8 @@ extern "C" char __tls_align[];
 
 // 读链接器符号填 __g_tls_info（进程级模板元数据）
 // 对应 ld.md §3.5.3 collect_tls_from_linker_symbols
+// 仅静态路径（-DDYNAMIC=0）编译；动态路径用 collect_tls_from_link_map
+#if !DYNAMIC
 extern "C" void __libc_tls_init_first(void) {
     __g_tls_info.tdata_template = (void *)__tls_template_start;
     __g_tls_info.tdata_size = (size_t)__tdata_size;
@@ -41,6 +44,7 @@ extern "C" void __libc_tls_init_first(void) {
                             & ~(__g_tls_info.alignment - 1);
     }
 }
+#endif
 
 // Allocate TLS block + TCB for a thread (main or child).
 // Returns TCB pointer (= FS_BASE). tls_page_out/tls_total_out for later munmap.
@@ -109,10 +113,12 @@ extern "C" void __libc_tls_init_rest(void) {
 // 主线程 TLS 初始化（静态路径入口）：填 __g_tls_info + alloc TCB + FS_BASE + ...
 // 动态路径不调此函数，直接调 __libc_tls_init_rest（__g_tls_info 由
 // collect_tls_from_link_map 填充，见 ld2b3 T11/T12）。
+#if !DYNAMIC
 extern "C" void __libc_tls_init(void) {
     __libc_tls_init_first();
     __libc_tls_init_rest();
 }
+#endif
 
 extern "C" struct tcb *__pthread_current_tcb(void) {
     void *self;
@@ -132,3 +138,36 @@ extern "C" void __pthread_cancel_check(int sig) {
     }
     // DISABLE: return to sigreturn trampoline, resume original context
 }
+
+// === 动态路径 TLS 收集（plan_ld2b3 T12 / ld.md §3.5.3） ===
+#if DYNAMIC
+#include "sys/link_map.h"
+
+// 动态路径：遍历 _dl_link_map 合并 PT_TLS 填 tls_info
+// 链表顺序：主 ELF → libc.so → ld.so（ld.so 通常无 PT_TLS，跳过）
+extern "C" struct tls_info collect_tls_from_link_map(struct link_map *lmap) {
+    struct tls_info ti = {0};
+    size_t offset = 0;
+    // 第一遍：计算总 size、最大对齐
+    for (struct link_map *l = lmap; l; l = l->l_next) {
+        if (l->tls_tdata_size + l->tls_tbss_size == 0) continue;
+        if (l->tls_align > ti.alignment) ti.alignment = l->tls_align;
+        offset += (l->tls_tdata_size + l->tls_tbss_size + l->tls_align - 1)
+                  & ~((size_t)l->tls_align - 1);
+    }
+    ti.size = offset;
+    // 第二遍：分配合并模板
+    if (ti.size > 0) {
+        ti.tdata_template = malloc(ti.size);
+        size_t off = 0;
+        for (struct link_map *l = lmap; l; l = l->l_next) {
+            if (l->tls_tdata_size + l->tls_tbss_size == 0) continue;
+            if (l->tls_tdata_size > 0)
+                memcpy((char *)ti.tdata_template + off, l->tls_template, l->tls_tdata_size);
+            off += (l->tls_tdata_size + l->tls_tbss_size + l->tls_align - 1)
+                   & ~((size_t)l->tls_align - 1);
+        }
+    }
+    return ti;
+}
+#endif

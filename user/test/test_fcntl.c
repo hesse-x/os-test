@@ -199,7 +199,8 @@ void test_isatty_pipe(void) {
     close(fd[1]);
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_open_create_read);
     RUN_TEST(test_open_nonexist);

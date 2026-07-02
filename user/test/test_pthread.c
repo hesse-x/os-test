@@ -327,7 +327,8 @@ void test_pthread_join_cancel(void) {
     pthread_join(b, NULL);
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_pthread_create_join);
     RUN_TEST(test_pthread_self);

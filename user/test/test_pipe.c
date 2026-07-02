@@ -269,7 +269,8 @@ void test_pipe_fd_limit(void) {
     }
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_pipe_create);
     RUN_TEST(test_pipe_write_read);

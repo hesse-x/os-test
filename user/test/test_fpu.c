@@ -1,7 +1,8 @@
 #include <stdio.h>
 #include <unistd.h>
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     double a = 3.14, b = 2.71, c;
     c = a * b;
     printf("fpu test: %.2f * %.2f = %.4f\n", a, b, c);

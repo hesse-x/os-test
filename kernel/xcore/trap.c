@@ -208,8 +208,21 @@ void trap_dispatch(trapframe_t *tf) {
     uint64_t cr2;
     __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
     printk(LOG_ERROR, "PAGE FAULT: fault addr=0x%016lX", cr2);
-    printk(LOG_WARN, "  hint: check pte present/write/user bits, COW resolution, "
-                     "and copy_from_user/copy_to_user for bad __user pointer\n");
+    // err code 含义解码：加速定位 NX/写保护/缺页类问题
+    // bit0: 0=not present(缺页) 1=protection(权限违例)
+    // bit1: 0=read 1=write
+    // bit2: 0=kernel 1=user
+    // bit4: 0=data access 1=instruction fetch(NX 典型)
+    {
+        const char *acc = (tf->err_code & 0x10) ? "instruction fetch" : "data access";
+        const char *cause = (tf->err_code & 0x1) ? "protection violation" : "page not present";
+        const char *rw = (tf->err_code & 0x2) ? "write" : "read";
+        const char *ring = (tf->err_code & 0x4) ? "user" : "kernel";
+        printk(LOG_WARN, "  [%s %s %s, %s] err=0x%lX\n", ring, rw, acc, cause, tf->err_code);
+    }
+    printk(LOG_WARN, "  hint: NX(instruction fetch/protection) → check PROT_EXEC; "
+                     "not present → check mapping/ptr; "
+                     "write/protection → check PTE_RW / COW / __user ptr\n");
   } else if (tf->trapno == 6) {
     printk(LOG_ERROR, "UNDEFINED OPCODE");
     printk(LOG_WARN, "  hint: user SSE/SSE2 needs CR4.OSFXSR (bit 9) + CR0.TS clear; "

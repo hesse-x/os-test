@@ -309,7 +309,8 @@ static const cmd_entry cmds[] = {
 
 // ===================== Main =====================
 
-extern "C" void _start() {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     // VFS is in-kernel, no need to wait for fs_driver
     printf("shell: ready\n");
 

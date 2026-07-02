@@ -78,7 +78,8 @@ void test_spawn_orphan(void) {
     TEST_ASSERT_TRUE(1);
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_spawn_basic);
     RUN_TEST(test_waitpid_child);

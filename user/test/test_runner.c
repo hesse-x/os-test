@@ -34,7 +34,8 @@ static struct test_entry tests[] = {
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     printf("=== Test Runner ===\n");
 
     int pass_count = 0;

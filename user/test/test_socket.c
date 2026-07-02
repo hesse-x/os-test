@@ -175,7 +175,8 @@ void test_sendmsg_recvmsg_cmsg(void) {
     close(sv[1]);
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_socket_create);
     RUN_TEST(test_bind_listen);

@@ -156,7 +156,8 @@ void test_shm_fstat(void) {
     }
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_shm_create);
     RUN_TEST(test_shm_cross_process);

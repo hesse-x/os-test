@@ -24,7 +24,8 @@ static void kbd_hid_init(void *hid_shm) {
     get_keycode_init(hid_shm);
 }
 
-extern "C" void _start() {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     // Library opens /dev/usb_hid_kbd, mmaps HID SHM, registers /dev/kbd (no shm),
     // enters main loop. on_key_event called repeatedly to drain HID reports.
     input_driver_run(INPUT_DEV_KBD, "kbd", "/dev/usb_hid_kbd", on_key_event, kbd_hid_init);

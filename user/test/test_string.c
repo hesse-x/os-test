@@ -102,7 +102,8 @@ void test_memmove_overlap(void) {
     TEST_ASSERT_EQUAL_INT('e', buf[6]);
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_strlen_basic);
     RUN_TEST(test_strlen_empty);

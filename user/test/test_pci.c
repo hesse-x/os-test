@@ -132,7 +132,8 @@ void test_isatty_dev_kms(void) {
     }
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_pci_dev_info_valid);
     RUN_TEST(test_pci_dev_info_invalid);

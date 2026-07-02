@@ -173,7 +173,8 @@ void test_sigterm_child(void) {
     /* Child terminated by signal */
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_kill_invalid_pid);
     RUN_TEST(test_sigaction_register);

@@ -142,7 +142,8 @@ void test_double_free(void) {
     TEST_ASSERT_TRUE(1);
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_malloc_small);
     RUN_TEST(test_malloc_size_classes);

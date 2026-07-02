@@ -18,7 +18,9 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
+#include "arch/x64/memlayout.h"
 #include "common/signal.h"
+#include "common/elf.h"
 #include "common/macro.h"
 
 // process_create_elf: create user process from ELF data
@@ -87,8 +89,92 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
         }
     }
 
+    // === argc/argv/envp/auxv 栈构建（标准 SysV ABI） ===
+    // 内核直接创建的 init 进程没有 execve 路径，注入 argv[0]="/init"。
+    // 栈是连续物理内存，用户态地址 [stack_base, USER_STACK_TOP) 映射连续。
+    #define ARG_MAX 128
+    char (*argv_strings)[256] = (char (*)[256])kmalloc(sizeof(char[ARG_MAX][256]));
+    uint64_t *argv_str_vaddrs = (uint64_t *)kmalloc(sizeof(uint64_t) * ARG_MAX);
+    if (!argv_strings || !argv_str_vaddrs) {
+        if (argv_strings) kfree(argv_strings);
+        if (argv_str_vaddrs) kfree(argv_str_vaddrs);
+        goto fail_mm;
+    }
+    // argv[0] = "/init"
+    static const char init_path[] = "/init";
+    int argc = 1;
+    for (int k = 0; init_path[k]; k++) argv_strings[0][k] = init_path[k];
+    argv_strings[0][sizeof(init_path) - 1] = '\0';
+    int envc = 0;
+
+    // STACK_KV: sp_user 用户态地址 → 内核虚拟地址
+    #define STACK_KV(sp_user) \
+        ((void *)((__force uint64_t)phys_to_virt((__force phys_addr_t)(user_stack_phys \
+            + (uint64_t)user_stack_pages * PAGE_SIZE - (USER_STACK_TOP - (sp_user))))))
+
+    uint64_t sp_user = USER_STACK_TOP;
+
+    // 1. AT_RANDOM 16 字节（填 0）
+    sp_user -= 16;
+    __memset(STACK_KV(sp_user), 0, 16);
+    uint64_t at_random_vaddr = sp_user;
+
+    // 2. AT_EXECFN
+    int execfn_len = sizeof(init_path) - 1;
+    sp_user -= (execfn_len + 1);
+    __memcpy(STACK_KV(sp_user), init_path, execfn_len + 1);
+    uint64_t at_execfn_vaddr = sp_user;
+
+    // 3. argv 字符串
+    for (int i = argc - 1; i >= 0; i--) {
+        int len = 0;
+        while (argv_strings[i][len]) len++;
+        sp_user -= (len + 1);
+        __memcpy(STACK_KV(sp_user), argv_strings[i], len + 1);
+        argv_str_vaddrs[i] = sp_user;
+    }
+
+    // 4. 16 字节对齐
+    while ((sp_user % 16) != 0) sp_user--;
+
+    // 5. auxv（6 对 + AT_NULL）
+    int auxc = 6;
+    sp_user -= (auxc + 1) * 16;
+    uint64_t *auxv = (uint64_t *)STACK_KV(sp_user);
+    int ai = 0;
+    auxv[ai++] = AT_PHDR;   auxv[ai++] = lr.phdr_vaddr;
+    auxv[ai++] = AT_PHENT;  auxv[ai++] = lr.phent;
+    auxv[ai++] = AT_PHNUM;  auxv[ai++] = lr.phnum;
+    auxv[ai++] = AT_ENTRY;  auxv[ai++] = lr.entry;
+    auxv[ai++] = AT_PAGESZ; auxv[ai++] = PAGE_SIZE;
+    auxv[ai++] = AT_RANDOM; auxv[ai++] = at_random_vaddr;
+    auxv[ai++] = AT_EXECFN; auxv[ai++] = at_execfn_vaddr;
+    auxv[ai++] = AT_NULL;   auxv[ai++] = 0;
+
+    // 6. envp 指针数组 + NULL
+    sp_user -= (envc + 1) * 8;
+    uint64_t *envp_arr = (uint64_t *)STACK_KV(sp_user);
+    envp_arr[envc] = 0;
+
+    // 7. argv 指针数组 + NULL
+    sp_user -= (argc + 1) * 8;
+    uint64_t *argv_arr = (uint64_t *)STACK_KV(sp_user);
+    argv_arr[argc] = 0;
+    for (int i = 0; i < argc; i++) argv_arr[i] = argv_str_vaddrs[i];
+
+    // 8. argc
+    sp_user -= 8;
+    *(uint64_t *)STACK_KV(sp_user) = (uint64_t)argc;
+
+    uint64_t user_sp = sp_user;
+    #undef STACK_KV
+    #undef ARG_MAX
+
+    kfree(argv_strings);
+    kfree(argv_str_vaddrs);
+
     // 6. Build trapframe + switch_to frame on kernel stack
-    uint64_t k_rsp = build_kstack(k_stack_top, lr.entry);
+    uint64_t k_rsp = build_kstack_user_rsp(k_stack_top, lr.entry, user_sp);
 
     // 7. Fill PCB (still under tasks_lock)
     int assigned_cpu = pick_cpu();

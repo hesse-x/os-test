@@ -1,7 +1,8 @@
 #include <stdio.h>
 #include <time.h>
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     struct timespec start, end;
     timespec_get(&start, TIME_UTC);
     printf("Hello, World!");

@@ -442,7 +442,8 @@ void test_ioctl_serial_ioc_cmd(void) {
     }
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     UNITY_BEGIN();
     RUN_TEST(test_fstat_regular);
     RUN_TEST(test_fstat_pipe);

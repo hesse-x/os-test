@@ -42,17 +42,41 @@ typedef struct Elf64_Phdr {
     uint64_t p_align;
 } Elf64_Phdr;
 
-// 重定位类型
-#define R_X86_64_RELATIVE  8
+// 重定位类型（x86-64 PIC 全集 9 种，plan_ld2b3 T20）
+#define R_X86_64_64         1
+#define R_X86_64_PC32       2
+#define R_X86_64_PLT32      4
+#define R_X86_64_GLOB_DAT   6
+#define R_X86_64_JUMP_SLOT  7
+#define R_X86_64_RELATIVE   8
+#define R_X86_64_GOTPCREL   9
+#define R_X86_64_32         10
+#define R_X86_64_32S        11
 
-// .dynamic 标签
-#define DT_NULL    0
-#define DT_RELA    7
-#define DT_RELASZ  8
+// .dynamic 标签（plan_ld2b3 T20）
+#define DT_NULL     0
+#define DT_NEEDED   1
+#define DT_STRTAB   5
+#define DT_SYMTAB   6
+#define DT_RELA     7
+#define DT_RELASZ   8
+#define DT_JMPREL   23
+#define DT_PLTRELSZ 2
+#define DT_GNU_HASH 0x6ffffef5
 
 // ELF64 重定位宏
 #define ELF64_R_TYPE(info)  ((info) & 0xffffffff)
 #define ELF64_R_SYM(info)   ((info) >> 32)
+
+// ELF 符号表项
+typedef struct {
+    uint32_t st_name;
+    uint8_t  st_info;
+    uint8_t  st_other;
+    uint16_t st_shndx;
+    uint64_t st_value;
+    uint64_t st_size;
+} Elf64_Sym;
 
 typedef struct {
     uint64_t r_offset;

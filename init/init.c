@@ -36,7 +36,8 @@ static void wait_dev_ready(const char *dev_path) {
     close(fd);
 }
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     // Set up serial as stdin/stdout/stderr first so printf works
     {
         int sfd = open("/dev/serial", O_RDWR);

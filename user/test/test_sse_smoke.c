@@ -1,6 +1,7 @@
 #include <stdio.h>
 
-int main(void) {
+int main(int argc, char** argv, char** envp) {
+    (void)argc; (void)argv; (void)envp;
     double a = 3.14, b = 2.71, c;
     // Explicit inline asm: guarantee movsd + mulsd execute, regardless of
     // compiler optimization level (Release may keep vars in SSE regs but
