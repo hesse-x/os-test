@@ -136,7 +136,12 @@ Linux 内核的 SRCU/RCU 机制过于复杂。本项目 2-4 核、MAX_PROC=64、
 | 写者侧回收 | call_rcu 延迟回调 | `synchronize_rcu()` 同步等待（spin 直到所有 CPU 过宽限期） |
 | 适用场景 | 通用 | 内核不可抢占、2-4 核、写者极少 |
 
-**核心约束**：当前内核不可抢占（schedule 仅在 syscall/irq 返回用户态时检查），因此 `rcu_read_lock()` = `cli` 即可保证读者在内核态期间不会发生上下文切换，宽限期内所有 CPU 必然经过 quiescent state。
+**核心约束**：当前内核不可抢占（schedule 仅在 syscall/irq 返回用户态时检查），因此 `rcu_read_lock()` = `cli` 即可保证读者在内核态期间不会发生上下文切换。
+
+**quiescent state 推进触发点**（缺一不可，否则 synchronize_rcu 会 stall）：
+1. `rcu_read_unlock()` — 退出显式 read-side CS 时推进
+2. `idle_entry()` 循环 — idle 调用 `rcu_read_lock/unlock` 推进（CPU 无 runnable 进程时）
+3. `timer_handler()` — 每次定时器中断调 `rcu_quiescent()`，让持续在用户态运行的 CPU 也能推进（关键：缺此项时，若某 CPU 上进程持续 runnable 不阻塞，idle 永不被调度，`cpu_gen` 永不推进 → stall）
 
 ### 数据结构
 
@@ -176,6 +181,10 @@ static inline void rcu_read_unlock(void) {
 // 写者侧
 void synchronize_rcu(void);  // 等待所有 CPU 过宽限期
 void rcu_init(void);
+
+// 中断上下文调用：若本 CPU 不在 read-side CS，推进 cpu_gen 到当前 global_gen
+// 用于 timer_handler，让持续在用户态运行的 CPU 也能推进宽限期
+static inline void rcu_quiescent(void);
 
 // 受 RCU 保护的指针访问
 #define rcu_dereference(p) \

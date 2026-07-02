@@ -44,3 +44,6 @@ add_user_elf(dev_vfs C SOURCES test_dev_vfs.c LINK_LIBS c unity)
 # FPU/SSE smoke test: explicit inline-asm movsd+mulsd to verify user-mode
 # SSE path (CR4.OSFXSR + lazy FPU #NM handler). No Unity — simple printf+exit.
 add_user_elf(test_sse_smoke C SOURCES test_sse_smoke.c LINK_LIBS c)
+
+# Layer 13: pthread
+add_user_elf(pthread C SOURCES test_pthread.c LINK_LIBS c unity)

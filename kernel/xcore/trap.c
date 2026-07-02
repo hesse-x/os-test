@@ -5,6 +5,7 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/log.h"
+#include "kernel/xcore/rcu.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
@@ -351,6 +352,13 @@ void trap_dispatch(trapframe_t *tf) {
 static void timer_handler(trapframe_t *tf) {
   tick++;
   lapic_eoi();
+
+  // Advance this CPU's RCU grace-period counter.  Without this, a CPU that
+  // stays runnable in user mode (e.g. terminal flushing PTY output) never
+  // enters idle_entry and thus never calls rcu_read_unlock(); synchronize_rcu
+  // would spin forever waiting on cpu_gen[cpu].  IRQ context (IF=0) is a
+  // quiescent state as long as we're not inside a read-side CS.
+  rcu_quiescent();
 
   // Poll xHCI doorbell every ~10ms (every 10th tick at ~100Hz)
   // This ensures QEMU retries NAK'ed interrupt transfers

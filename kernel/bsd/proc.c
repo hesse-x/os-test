@@ -746,6 +746,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
 #define CLONE_THREAD          0x00010000
 #define CLONE_PARENT_SETTID   0x00100000
 #define CLONE_CHILD_CLEARTID  0x00200000
+#define CLONE_CHILD_SETTID    0x01000000
 #define CLONE_SETTLS          0x00080000
 
 int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3,
@@ -883,9 +884,14 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3,
     list_init(&child_bp->futex_node);
     child_bp->clear_tid_addr = (flags & CLONE_CHILD_CLEARTID) ? (pid_t)child_tid : 0;
 
-    // 9. CLONE_PARENT_SETTID
+    // 9. CLONE_PARENT_SETTID / CLONE_CHILD_SETTID
+    //    CHILD_SETTID 必须在子线程被调度前写入，否则子线程退出时 clear_tid_addr
+    //    写 0 + futex_wake 会丢失（父线程 clone 返回后才写 tid，覆盖 0 → lost wake-up）。
     if (flags & CLONE_PARENT_SETTID) {
         *((pid_t *)parent_tid) = (pid_t)alloc_idx;
+    }
+    if (flags & CLONE_CHILD_SETTID) {
+        *((pid_t *)child_tid) = (pid_t)alloc_idx;
     }
 
     // 10. 填充 child xtask_t
@@ -931,7 +937,6 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3,
     cpu_locals[cpu].run_count++;
     spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
 
-    printk(LOG_INFO, "sys_clone: parent=%d → child=%d flags=0x%lx\n", parent->pid, child->pid, flags);
     return (int64_t)child->pid;
 }
 

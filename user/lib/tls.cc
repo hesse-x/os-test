@@ -11,7 +11,9 @@
 #include "common/signal.h"
 
 // 全局 TLS 模板信息单例（pthread_create 读取）
-extern "C" struct tls_info __g_tls_info = {0};
+extern "C" {
+struct tls_info __g_tls_info = {0};
+}
 
 // 链接器符号（user_linker.ld 定义）
 // 链接脚本中 `__xxx = SIZEOF(...)` 的符号，其地址即值，故声明为 char[]，
@@ -42,7 +44,8 @@ extern "C" void __libc_tls_init_first(void) {
 
 // Allocate TLS block + TCB for a thread (main or child).
 // Returns TCB pointer (= FS_BASE). tls_page_out/tls_total_out for later munmap.
-static struct tcb *alloc_tls_block(void **tls_page_out, size_t *tls_total_out) {
+// Exported (non-static) — pthread_create in pthread.cc calls this for child threads.
+struct tcb *alloc_tls_block(void **tls_page_out, size_t *tls_total_out) {
     size_t tdata_size = __g_tls_info.tdata_size;
     size_t tbss_size = __g_tls_info.tbss_size;
     size_t tls_align = __g_tls_info.alignment;
@@ -82,10 +85,11 @@ static struct tcb *alloc_tls_block(void **tls_page_out, size_t *tls_total_out) {
     return tcb;
 }
 
-// 主线程 TLS 初始化：填 __g_tls_info + 分配 TCB + 设 FS_BASE + set_tid_address + 注册 cancel handler
-extern "C" void __libc_tls_init(void) {
-    __libc_tls_init_first();
-
+// Allocate main thread TCB + set FS_BASE + set_tid_address + register cancel handler.
+// Called by __libc_tls_init (static path, after __libc_tls_init_first fills __g_tls_info)
+// AND by __libc_start_main (dynamic path, after collect_tls_from_link_map fills __g_tls_info).
+// Does NOT touch __g_tls_info — caller is responsible for filling it first.
+extern "C" void __libc_tls_init_rest(void) {
     void *tls_page;
     size_t tls_total;
     struct tcb *tcb = alloc_tls_block(&tls_page, &tls_total);
@@ -99,6 +103,14 @@ extern "C" void __libc_tls_init(void) {
 
     // 注册 cancel check handler（内核投递 SIGCANCEL 时调用）
     sys_pthread_set_cancel_handler((uint64_t)__pthread_cancel_check);
+}
+
+// 主线程 TLS 初始化（静态路径入口）：填 __g_tls_info + alloc TCB + FS_BASE + ...
+// 动态路径不调此函数，直接调 __libc_tls_init_rest（__g_tls_info 由
+// collect_tls_from_link_map 填充，见 ld2b3 T11/T12）。
+extern "C" void __libc_tls_init(void) {
+    __libc_tls_init_first();
+    __libc_tls_init_rest();
 }
 
 extern "C" struct tcb *__pthread_current_tcb(void) {
@@ -115,8 +127,7 @@ extern "C" void __pthread_cancel_check(int sig) {
     if (tcb->cancel_state == PTHREAD_CANCEL_ENABLE) {
         // Phase 3（第 3 步）改为 pthread_exit(PTHREAD_CANCELED)
         // 此步 pthread_exit 尚未实现，先用 sys_exit
-        sys_exit(-1);
-        __builtin_unreachable();
+        pthread_exit(PTHREAD_CANCELED);
     }
     // DISABLE: return to sigreturn trampoline, resume original context
 }

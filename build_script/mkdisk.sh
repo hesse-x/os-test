@@ -55,7 +55,7 @@ if [ "$TEST" = "1" ]; then
     for elf in test_runner.elf pipe.elf fcntl.elf string.elf malloc.elf \
                stdio.elf mmap.elf ipc.elf socket.elf process.elf \
                signal.elf poll.elf pci.elf ioctl.elf dev_vfs.elf \
-               test_fpu.elf test_sse_smoke.elf; do
+               test_fpu.elf test_sse_smoke.elf pthread.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
     done
 fi

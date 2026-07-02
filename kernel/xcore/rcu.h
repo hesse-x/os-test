@@ -41,6 +41,23 @@ static inline void rcu_read_unlock(void) {
     }
 }
 
+// Report a quiescent state from a CPU that is NOT in an RCU read-side
+// critical section.  Used by timer_handler to advance grace periods on
+// CPUs that stay runnable in user mode and would otherwise never pass
+// through idle_entry's rcu_read_unlock().  If the CPU is inside a
+// read-side CS (nesting > 0), this is a no-op — the in-flight
+// rcu_read_unlock() will publish the quiescence when the CS ends.
+//
+// Caller context: IRQs disabled (e.g. timer IRQ).  No lock taken — only
+// an atomic store to this CPU's cpu_gen slot.
+static inline void rcu_quiescent(void) {
+    rcu_local_t *r = &get_cpu_local()->rcu;
+    if (r->nesting != 0) return;
+    int gen = atomic_read(&rcu_state.global_gen);
+    int cpu = get_cpu_local()->cpu_id;
+    atomic_set(&rcu_state.cpu_gen[cpu], gen);
+}
+
 // Writer-side
 void synchronize_rcu(void);  // wait for all CPUs to pass through a grace period
 void rcu_init(void);

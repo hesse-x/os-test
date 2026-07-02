@@ -218,6 +218,26 @@ sys_clone(flags, stack, parent_tid, child_tid, tls):
 
 **fork 等价性**：`fork() = clone(0, 0, 0, 0, 0)` —— 全部 flag=0，走 else 分支，全部深拷贝。`sys_fork` 保留独立实现（master COW 路径稳定，见 `proc.md`），`sys_clone` 的 fork 分支复用 `copy_page_table`/`copy_fd_table`/`copy_mmap_regions` 辅助函数但入口独立。两条路径语义等价，实现上解耦避免把稳定路径和新增路径耦合在一个函数里。
 
+### clone wrapper 的汇编 trampoline（实现陷阱）
+
+`pthread_create` 不能用纯 C wrapper 调 `sys_clone`。`__syscall5` 的 epilogue（`leave; ret`）会把 rsp 切回父栈，clone child 从 syscall 返回 0 后**仍在父线程栈帧里执行**，并发时父栈被覆盖，child ret 到垃圾地址。
+
+`__libc_clone_thread` 用内联汇编直接发 syscall，child 返回 0 后在汇编里：
+
+1. 重设 rsp 到 child_stack_top（与内核 trapframe 一致）
+2. 清 rbp（child 栈是空的，无栈帧）
+3. 从 TCB（`%fs:0`）读 start_routine / arg
+4. `movq 0x438(%%rdi), %%rdi` —— arg 放到 rdi（C 调用约定第一参数），同时覆盖 tcb
+5. `callq *%%rax` 调用 start_routine，再 `callq pthread_exit`
+
+**arg 必须放 rdi 而非 rsi**：早期实现把 `tcb->arg` 放到 rsi（第二参数），但 `callq *%%rax` 时 rdi 仍是 tcb，start_routine 把 tcb 当 arg，写 `*p = 42` 会覆盖 `tcb->self`，后续 `__pthread_current_tcb()` 读 `%fs:0` 得到 `0x2a`(=42)，tcb->tsd 偏移算出非法地址 page fault。
+
+### CLONE_CHILD_SETTID 的时序约束（实现陷阱）
+
+`pthread_create` **不能**在 clone 返回后由父线程写 `new_tcb->tid = tid`。`clear_tid_addr = &new_tcb->tid`，子线程可能在父线程写 tid 前就退出（写 0 + futex_wake），父线程后写的 tid 覆盖 0，join 永远等不到 0（lost wake-up）。
+
+正确做法：flags 加 `CLONE_CHILD_SETTID (0x01000000)`，内核 `sys_clone` 在子线程被调度前写 `*(pid_t*)child_tid = child->pid`。父线程 clone 返回后不再覆盖 `new_tcb->tid`。
+
 ## exit 语义
 
 ### do_exit（所有线程退出都走这个）

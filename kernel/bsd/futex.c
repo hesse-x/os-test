@@ -62,9 +62,18 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3,
             }
         }
         spin_unlock(&bucket->lock);
-        // 2. 释放后唤醒（bucket lock 外调用 wake_process，防锁序逆序）
+        // 2. 释放后唤醒（bucket lock 外调用 wake_from_wait，防锁序逆序）。
+        //    注意：不能用 wake_process —— 它只处理 WAIT_PIPE/WAIT_POLL/WAIT_RECV，
+        //    对 WAIT_FUTEX 无效，会导致 futex waiter 永不唤醒。
         for (int i = 0; i < nwake; i++) {
-            wake_process(to_wake[i]->pid);
+            xtask_t *t = to_wake[i];
+            int tcpu = t->assigned_cpu;
+            uint64_t tflags;
+            spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &tflags);
+            if (t->state == BLOCKED && t->wait_event == WAIT_FUTEX) {
+                wake_from_wait(t);
+            }
+            spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, tflags);
         }
         return (int64_t)nwake;
     }
