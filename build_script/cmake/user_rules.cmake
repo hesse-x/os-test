@@ -139,3 +139,84 @@ function(add_user_elf elf_name)
         add_dependencies(${elf_name}_elf ${ARG_LINK_LIBS})
     endif()
 endfunction()
+
+# add_user_ldso: ld.so 专用（-shared -fPIC，自带 minilibc，不链 libc.a）
+# ld.md §3.4.4
+function(add_user_ldso name)
+    cmake_parse_arguments(ARG "" "" "SOURCES" ${ARGN})
+    set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
+    set(COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin
+                      -fPIC -fno-stack-protector -mno-red-zone
+                      -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include)
+    set(OBJ_FILES "")
+    set(idx 0)
+    foreach(src ${ARG_SOURCES})
+        if(src MATCHES "^/")
+            set(src_full ${src})
+        else()
+            set(src_full ${CMAKE_CURRENT_SOURCE_DIR}/${src})
+        endif()
+        set(src_obj ${ELF_FILE}.${idx}.o)
+        add_custom_command(OUTPUT ${src_obj}
+            COMMAND gcc ${COMPILE_FLAGS} -c ${src_full} -o ${src_obj}
+            DEPENDS ${src_full})
+        list(APPEND OBJ_FILES ${src_obj})
+        math(EXPR idx "${idx} + 1")
+    endforeach()
+    add_custom_command(OUTPUT ${ELF_FILE}
+        COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
+                -Wl,-e,_start -Wl,--hash-style=gnu
+                -o ${ELF_FILE} ${OBJ_FILES}
+        DEPENDS ${OBJ_FILES}
+        COMMENT "Linking ld.so (${name}.elf)")
+    add_custom_target(${name}_elf ALL DEPENDS ${ELF_FILE})
+endfunction()
+
+# add_user_dyn_elf: 动态主 ELF，gcc driver 链接
+# ld.md §3.4.4
+# 阶段 2a 最小版本：仅生成 PT_INTERP + DT_NEEDED，不含完整 libc.so
+function(add_user_dyn_elf name)
+    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS" ${ARGN})
+    set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
+    set(COMPILE_CMD ${CMAKE_C_COMPILER})
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include)
+
+    set(OBJ_FILES "")
+    set(idx 0)
+    foreach(src ${ARG_SOURCES})
+        if(src MATCHES "^/")
+            set(src_full ${src})
+        else()
+            set(src_full ${CMAKE_CURRENT_SOURCE_DIR}/${src})
+        endif()
+        set(src_obj ${ELF_FILE}.${idx}.o)
+        add_custom_command(OUTPUT ${src_obj}
+            COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS} -c ${src_full} -o ${src_obj}
+            DEPENDS ${src_full})
+        list(APPEND OBJ_FILES ${src_obj})
+        math(EXPR idx "${idx} + 1")
+    endforeach()
+
+    set(LD_ARGS ${OBJ_FILES})
+    if(ARG_LINK_LIBS)
+        foreach(lib ${ARG_LINK_LIBS})
+            list(APPEND LD_ARGS -L${CMAKE_BINARY_DIR} -l${lib})
+        endforeach()
+    endif()
+    # 生成空 stub 共享库，强制 gcc 生成动态可执行文件（PT_INTERP + PT_DYNAMIC）
+    # 否则 -nostdlib + 无动态依赖时 ld 会丢弃 --dynamic-linker 指定的 .interp 段
+    set(STUB_SO ${CMAKE_BINARY_DIR}/libdyn_stub.so)
+    add_custom_command(OUTPUT ${STUB_SO}
+        COMMAND gcc -shared -fPIC -nostdlib -o ${STUB_SO} -x c /dev/null
+        COMMENT "Generating dyn stub shared library")
+    add_custom_command(OUTPUT ${ELF_FILE}
+        COMMAND gcc -fno-pie -no-pie
+                -Wl,--dynamic-linker,/lib/ld.so
+                -Wl,--hash-style=gnu
+                -Wl,--no-as-needed
+                -nostdlib -nodefaultlibs
+                -o ${ELF_FILE} ${LD_ARGS} -L${CMAKE_BINARY_DIR} -ldyn_stub
+        DEPENDS ${OBJ_FILES} ${ARG_LINK_LIBS} ${STUB_SO}
+        COMMENT "Linking dynamic ${name}.elf")
+    add_custom_target(${name}_dyn_elf ALL DEPENDS ${ELF_FILE})
+endfunction()

@@ -42,6 +42,37 @@ typedef struct Elf64_Phdr {
     uint64_t p_align;
 } Elf64_Phdr;
 
+// 重定位类型
+#define R_X86_64_RELATIVE  8
+
+// .dynamic 标签
+#define DT_NULL    0
+#define DT_RELA    7
+#define DT_RELASZ  8
+
+// ELF64 重定位宏
+#define ELF64_R_TYPE(info)  ((info) & 0xffffffff)
+#define ELF64_R_SYM(info)   ((info) >> 32)
+
+typedef struct {
+    uint64_t r_offset;
+    uint64_t r_info;
+    int64_t  r_addend;
+} Elf64_Rela;
+
+typedef union {
+    uint64_t d_val;
+    uint64_t d_ptr;
+} Elf64_Dyn_v;
+
+typedef struct {
+    int64_t  d_tag;
+    union {
+        uint64_t d_val;
+        uint64_t d_ptr;
+    } d_un;
+} Elf64_Dyn;
+
 // Auxiliary vector types (AT_*)
 #define AT_NULL     0
 #define AT_PHDR     3

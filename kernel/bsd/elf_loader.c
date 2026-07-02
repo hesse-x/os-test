@@ -100,25 +100,30 @@ static elf_load_result_t elf_load_internal(const uint8_t *data, uint64_t size,
         }
 
         // 3. Map pages covering this segment
+        // ELF 规范：p_vaddr & 0xFFF == p_offset & 0xFFF（段在页内对齐）
+        // 页 page_addr 对应文件偏移 file_off_at_page = p_offset 的页对齐部分 + 页内偏移
+        // 即 src = data + (p_offset & ~0xFFF) + (page_addr - first_page)
+        //     copy_len = 从该位置到 filesz 末尾（截断到 PAGE_SIZE）
+        // 页内段前部分（seg_page_off 之前）属于其他段或文件头，整页拷贝可保留正确内容
         uint64_t first_page = base + (ph->p_vaddr & ~0xFFFULL);
         uint64_t last_page = base + ((ph->p_vaddr + ph->p_memsz - 1) & ~0xFFFULL);
+        uint64_t file_page_base = ph->p_offset & ~0xFFFULL;  // 段起始文件偏移的页对齐
 
         for (uint64_t page_addr = first_page; page_addr <= last_page;
              page_addr += PAGE_SIZE) {
-            uint64_t file_start = ph->p_offset;
-
-            uint64_t page_off = (page_addr - base) - ph->p_vaddr;
-
+            // 该页在文件中的起始偏移（相对 file_page_base）
+            uint64_t page_file_off = (page_addr - first_page);
+            // 该页需要拷贝的文件范围：[file_page_base + page_file_off, p_offset + filesz)
             const uint8_t *src = NULL;
             uint64_t copy_len = 0;
-
-            if (page_off < ph->p_filesz) {
-                uint64_t page_file_start = page_off;
-                uint64_t page_file_end = page_off + PAGE_SIZE;
-                if (page_file_end > ph->p_filesz)
-                    page_file_end = ph->p_filesz;
+            uint64_t file_end = ph->p_offset + ph->p_filesz;  // 段文件数据结束
+            uint64_t page_file_start = file_page_base + page_file_off;
+            if (page_file_start < file_end) {
+                src = data + page_file_start;
+                uint64_t page_file_end = page_file_start + PAGE_SIZE;
+                if (page_file_end > file_end)
+                    page_file_end = file_end;
                 copy_len = page_file_end - page_file_start;
-                src = data + file_start + page_off;
             }
 
             if (!map_page(new_pml4, page_addr, src, copy_len, ph->p_flags)) {

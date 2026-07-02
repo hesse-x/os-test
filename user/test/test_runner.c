@@ -29,6 +29,7 @@ static struct test_entry tests[] = {
     {"fpu",     "/test/test_fpu.elf"},
     {"sse_smoke", "/test/test_sse_smoke.elf"},
     {"pthread",  "/test/pthread.elf"},
+    {"hello_dyn", "/local/hello_dyn.elf"},
 };
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))

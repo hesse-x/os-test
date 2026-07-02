@@ -27,3 +27,14 @@ target_compile_definitions(unity PRIVATE UNITY_EXCLUDE_SETJMP_H)
 
 add_user_elf(hello  C SOURCES hello.c  LINK_LIBS c)
 add_user_elf(test_fpu C SOURCES test/test_fpu.c LINK_LIBS c)
+
+# ld.so（阶段 2a：bootstrap-only，不含完整加载逻辑）
+add_user_ldso(ldso SOURCES
+    ldso/start.S
+    ldso/dls3.c
+    ldso/dl_puts.c
+    ldso/minilibc.c
+)
+
+# hello_dyn（阶段 2a：仅触发 ld.so bootstrap）
+add_user_dyn_elf(hello_dyn C SOURCES hello_dyn.c)

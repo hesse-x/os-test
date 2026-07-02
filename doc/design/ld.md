@@ -475,6 +475,7 @@ ld.so 用 `gcc -shared -fPIC` 构建，自身是共享 ELF，有自己的 `.rela
 // user/ldso/start.S（汇编入口，避免任何 C 运行时依赖）
 
 .section .text
+.hidden __dls3          // 阶段 2a 实测：避免 call 走 PLT（bootstrap 前 GOT 未填）
 .global _start
 _start:
     // rsp 指向 argc，不动栈
@@ -496,15 +497,22 @@ _start:
 
 extern Elf64_Dyn _DYNAMIC[];  // 链接器提供的 .dynamic 起始符号
 
+// 阶段 2a 实测：用 asm 取 _DYNAMIC 运行时地址，避免 C 代码经 GOT 读取
+// （gcc -shared -fPIC 下 extern 数组取址走 GOT，bootstrap 前 GOT 未填）
+static Elf64_Dyn *get_dynamic(void) {
+    Elf64_Dyn *p;
+    __asm__("leaq _DYNAMIC(%%rip), %0" : "=r"(p));
+    return p;
+}
+
 // bootstrap 入口
 void __dls3(uintptr_t *sp) {
     // 1. 从 auxv 取 AT_BASE（自己的基址）
     //    sp 指向 argc，跳过 argc/argv/envp 找 auxv
     uintptr_t ld_base = find_auxv(sp, AT_BASE);
 
-    // 2. 定位 .dynamic（_DYNAMIC 是链接器符号，RIP-relative 取址即运行时地址，
-    //    无需 GOT，bootstrap 早期可用）
-    Elf64_Dyn *dyn = (Elf64_Dyn *)((char *)_DYNAMIC);
+    // 2. 定位 .dynamic（用 asm RIP-relative 取运行时地址，不走 GOT）
+    Elf64_Dyn *dyn = get_dynamic();
 
     // 3. **glibc/musl bootstrap 顺序**：
     //    先遍历 .dynamic raw（d_ptr 是 link-time 相对 vaddr，不被 RELATIVE 修复），
@@ -544,34 +552,44 @@ void __dls3(uintptr_t *sp) {
 
 **关键技术点：**
 
-- `_DYNAMIC` 是链接器符号，`gcc -shared` 导出；RIP-relative 取址给运行时地址，bootstrap 早期可用（不依赖 GOT）。
+- `_DYNAMIC` 是链接器符号，`gcc -shared` 导出。**阶段 2a 实测**：C 代码 `extern Elf64_Dyn _DYNAMIC[]` 取址会走 GOT（`mov .got(%rip), %rax`），bootstrap 前 GOT 未填会读到 0。改用 `asm("leaq _DYNAMIC(%rip), %0")` 直接 RIP-relative 取运行时地址，绕过 GOT。
 - `AT_BASE` 是内核传来的 ld.so 基址，bootstrap 用它计算绝对地址。
 - bootstrap **只处理 `R_X86_64_RELATIVE`**（自重定位），其他类型（GLOB_DAT/JUMP_SLOT）依赖符号查找，留给 `__dls_init` 处理。
 - `find_auxv` 用纯算术遍历栈，不依赖任何未重定位数据。
+- **阶段 2a 实测**：`start.S` 的 `call __dls3` 默认走 PLT（`call __dls3@plt`），PLT entry 跳 GOT 槽（bootstrap 前 GOT 未填）。给 `__dls3` 加 `.hidden` 标记，gcc 改用直接 `call`（RIP-relative），消除 PLT。同理 `dl_puts`/`dl_put_hex` 用 `__attribute__((visibility("hidden")))` 避免走 PLT。
 
 #### 3.2.4 dl_puts 调试输出
 
 ```c
 // user/ldso/dl_puts.c
 
-#include "common/syscall.h"
+#include <stddef.h>
+#include <stdint.h>
+#include "common/syscall_nums.h"
+// 阶段 2a 实测：用 syscall_nums.h 而非 syscall.h
+// syscall.h 拉 arch/x64/utils.h（含内核态 cli/sti/cr3 等），ld.so 用户态不需要
+// 只需 SYS_WRITE/SYS_EXIT 常量
 
 // bootstrap 阶段可用：纯 syscall，不依赖 GOT/printf
 // fd=2 是 stderr，execve 后 fd 表保留 stdin/stdout/stderr
-static void dl_puts(const char *s) {
+// hidden visibility：跨文件可见但不导出动态符号表，避免走 PLT（bootstrap 前 GOT 未填）
+__attribute__((visibility("hidden")))
+void dl_puts(const char *s) {
     size_t len = 0;
     while (s[len]) len++;
     // 直接 syscall，不走 PLT
+    long ret;
     asm volatile("syscall"
-                 : "+a"(SYS_write)
-                 : "D"(2), "S"(s), "d"(len)
+                 : "=a"(ret)
+                 : "a"(SYS_WRITE), "D"(2), "S"(s), "d"(len)
                  : "rcx", "r11", "memory");
 }
 
 // dl_put_hex：打印寄存器值/地址，bootstrap 早期可用
 // hexdigits 用局部数组（栈上），不依赖 .rodata 重定位
 // （字符串字面量本身 RIP-relative 可用，但局部数组更直观）
-static void dl_put_hex(uint64_t val) {
+__attribute__((visibility("hidden")))
+void dl_put_hex(uint64_t val) {
     char buf[17];
     const char hexdigits[] = "0123456789abcdef";  // 局部数组，栈上
     for (int i = 15; i >= 0; i--) {
@@ -579,9 +597,10 @@ static void dl_put_hex(uint64_t val) {
         val >>= 4;
     }
     buf[16] = '\n';
+    long ret;
     asm volatile("syscall"
-                 : "+a"(SYS_write)
-                 : "D"(2), "S"(buf), "d"(17)
+                 : "=a"(ret)
+                 : "a"(SYS_WRITE), "D"(2), "S"(buf), "d"(17)
                  : "rcx", "r11", "memory");
 }
 ```
@@ -1153,13 +1172,20 @@ function(add_user_dyn_elf name)
             list(APPEND LD_ARGS -L${CMAKE_BINARY_DIR} -l${lib})
         endforeach()
     endif()
+    # 阶段 2a 实测：-nostdlib + 无动态依赖时 ld 丢弃 --dynamic-linker 指定的 .interp 段
+    # 生成空 stub 共享库 + --no-as-needed 强制动态链接，保留 PT_INTERP + PT_DYNAMIC
+    set(STUB_SO ${CMAKE_BINARY_DIR}/libdyn_stub.so)
+    add_custom_command(OUTPUT ${STUB_SO}
+        COMMAND gcc -shared -fPIC -nostdlib -o ${STUB_SO} -x c /dev/null
+        COMMENT "Generating dyn stub shared library")
     add_custom_command(OUTPUT ${ELF_FILE}
         COMMAND gcc -fno-pie -no-pie
                 -Wl,--dynamic-linker,/lib/ld.so
                 -Wl,--hash-style=gnu
+                -Wl,--no-as-needed
                 -nostdlib -nodefaultlibs
-                -o ${ELF_FILE} ${LD_ARGS}
-        DEPENDS ${OBJ_FILES} ${CMAKE_BINARY_DIR}/crt0.o ${ARG_LINK_LIBS}
+                -o ${ELF_FILE} ${LD_ARGS} -L${CMAKE_BINARY_DIR} -ldyn_stub
+        DEPENDS ${OBJ_FILES} ${CMAKE_BINARY_DIR}/crt0.o ${ARG_LINK_LIBS} ${STUB_SO}
         COMMENT "Linking dynamic ${name}.elf")
     add_custom_target(${name}_dyn_elf ALL DEPENDS ${ELF_FILE})
 endfunction()
@@ -1753,6 +1779,26 @@ dl: jump to entry 0x401000
 - 串口看到 `dl: self-relocate done` + `dl: ld_base = 0x7FFFFF000000`
 - 进程正常 exit（无崩溃）
 - GDB 观察 `.data`/`.rodata` 全局变量值正确
+
+**阶段 2a 实施偏离（实测修正，回写 §3.2/§3.4.4）：**
+
+1. **`start.S` 加 `.hidden __dls3`**：`gcc -shared` 默认把 `call __dls3` 编成 `call __dls3@plt`，PLT entry 跳 GOT 槽，bootstrap 前 GOT 未填导致跳 0x1016 page fault。加 `.hidden` 后 gcc 改用直接 `call`（RIP-relative），消除 PLT。
+2. **`dl_puts`/`dl_put_hex` 加 `visibility("hidden")`**：同上，避免 `__dls3` 调它们走 PLT。不能用 `static`（跨文件），`hidden` 是"文件内可见但不导出动态符号表"。
+3. **`dls3.c` 用 `asm("leaq _DYNAMIC(%rip)")` 取 `.dynamic` 地址**：C 代码 `extern Elf64_Dyn _DYNAMIC[]` + `(char *)_DYNAMIC` 在 `-fPIC` 下走 GOT（`mov .got(%rip), %rax`），bootstrap 前 GOT 未填读到 0。改 asm 直接 RIP-relative 取运行时地址。
+4. **`dl_puts.c`/`dls3.c` include `common/syscall_nums.h` 而非 `common/syscall.h`**：`syscall.h` 拉 `arch/x64/utils.h`（含内核态 cli/sti/cr3/load_cr3 等），ld.so 用户态不需要；只需 `SYS_WRITE`/`SYS_EXIT` 常量。
+5. **`add_user_dyn_elf` 加 stub 共享库**：`-nostdlib -nodefaultlibs` + 无动态依赖时，即使传 `-Wl,--dynamic-linker,/lib/ld.so`，ld 也丢弃 `.interp` 段（不生成 PT_INTERP）。生成空 `libdyn_stub.so` + `-Wl,--no-as-needed -ldyn_stub` 强制动态链接，保留 PT_INTERP + PT_DYNAMIC。
+6. **内核 `elf_load_internal` 非页对齐段映射 bug 修复**（plan_ld1 遗留）：原 `page_off = (page_addr - base) - p_vaddr` 对 `p_vaddr` 非页对齐的段（如 ld.so 的 `.dynamic`/`.data` 段 `p_vaddr=0x3f20`）算出负值（uint64 下溢），导致 `copy_len=0`，段所在页映射为全 0，bootstrap 读 `.dynamic` 全 0 找不到 DT_RELA。改为按 `p_offset & ~0xFFF` 页对齐基准 + 整页拷贝（页内段前部分属于其他段或文件头，整页拷贝保留正确内容）。此修复属于 plan_ld1 内核 execve 范围，但阶段 2a 首次触发（静态 ELF 段都页对齐，未暴露）。
+
+**实测结果：**
+
+```
+exec: ld.so @ 0x7fffff000000, entry 0x7fffff001000, main @ 0x401000
+dl: self-relocate done
+dl: ld_base = 00007fffff000000
+dl: self_ptr = 00007fffff00123f   ← 高位 0x7FFFFF 证明 RELATIVE 重定位正确
+[PASS] hello_dyn (exit 0)
+Summary: PASS=18 FAIL=0 SKIP=0   ← 静态 hello + 17 测试全回归通过
+```
 
 ### 6.4 阶段 2b+3：ld.so + libc.so + __libc_start_main 完整链路
 
