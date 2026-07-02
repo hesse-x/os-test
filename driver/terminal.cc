@@ -22,6 +22,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/process.h>
+#include <sys/poll.h>
 #include "common/macro.h"
 #include "input.h"
 #include "common/input.h"
@@ -531,15 +532,11 @@ int main() {
 
         flush_dirty_cells();
 
-        if (!did_work) {
-            // Sleeping/race check managed locally via head/tail re-read (no cross-process flag).
-            if (input_shm) {
-                volatile input_shm_header_t *hdr = (volatile input_shm_header_t *)input_shm;
-                if (hdr->head != hdr->tail) continue;  // race: new event arrived
-            }
-            struct recv_msg m;
-            recv(&m, NULL, 0, 1);
-        }
+        // 用 poll 替代 recv 超时：阻塞等 master_fd 可读，10ms 超时回来检查键盘 SHM。
+        // 键盘 SHM 无 notify 机制，只能轮询；10ms 超时平衡键盘延迟与 CPU 占用。
+        // shell 写数据 → slave_write → wake_process(master_owner_pid) 立刻唤醒。
+        struct pollfd pfd = { .fd = master_fd, .events = POLLIN, .revents = 0 };
+        poll(&pfd, 1, 10);
     }
     return 0;
 }

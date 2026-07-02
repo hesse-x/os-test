@@ -187,6 +187,7 @@ int ptmx_open(xtask_t *proc, int fd) {
 
     // All allocations succeeded — commit state
     pty->master_refs = 1;
+    pty->master_owner_pid = proc->pid;
 
     __memset(priv, 0, sizeof(struct pts_dev_priv));
     priv->ops.driver_pid = 0;
