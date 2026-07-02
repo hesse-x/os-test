@@ -390,12 +390,14 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
     if (size > 128 * 1024 * 1024) return -EINVAL;
 
     xtask_t *proc = current_task;
+    uint64_t mmap_flags;
+    spin_lock_irqsave(&proc->mm->mmap_lock, &mmap_flags);
     printk(LOG_DEBUG, "sys_mmap: pid=%d size=%zu flags=%d fd=%d offset=%llu\n", proc->pid, size, flags, fd, (unsigned long long)offset);
     uint64_t *pml4 = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
     // MAP_SHARED + fd >= 0: SHM or DEV fd mapping
     if ((flags & 0x01) && fd >= 0) {
-        if (fd >= MAX_FD) return -EBADF;
+        if (fd >= MAX_FD) { spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags); return -EBADF; }
 
         rcu_read_lock();
         struct file *f = fd_lookup(proc->proc->files, fd);
@@ -408,6 +410,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                 if (ops->driver_pid == 0 && ops->mmap) {
                     uint64_t ret = ops->mmap(proc, size);
                     file_put(f);
+                    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
                     return ret;
                 }
                 if (ip->shm) {
@@ -435,6 +438,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                                 unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
                             shm_put(target_shm);
                             file_put(f);
+                            spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
                             return -ENOMEM;
                         }
                     }
@@ -445,6 +449,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                             unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE, 1);
                         shm_put(target_shm);
                         file_put(f);
+                        spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
                         return -ENOMEM;
                     }
 
@@ -457,16 +462,18 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                     proc->mm->mmap_brk = vaddr + size;
 
                     file_put(f);
+                    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
                     return vaddr;
                 }
             }
             file_put(f);
+            spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
             return -ENODEV;
         }
 
-        if (!f || f->type != FD_SHM) { if (f) file_put(f); return -EINVAL; }
+        if (!f || f->type != FD_SHM) { if (f) file_put(f); spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags); return -EINVAL; }
         struct shm *shm = f->shm;
-        if (!shm) { file_put(f); return -EBADF; }
+        if (!shm) { file_put(f); spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags); return -EBADF; }
 
         size_t npages = shm->npages;
         size_t list_pages = shm->page_list ? (size_t)shm->num_pages : 0;
@@ -487,6 +494,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                                       page_phys, pte_flags)) {
                 for (size_t j = 0; j < i; j++)
                     unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
+                spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
                 return -ENOMEM;
             }
         }
@@ -495,6 +503,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
         if (!region) {
             for (size_t i = 0; i < total_pages; i++)
                 unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE, 1);
+            spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
             return -ENOMEM;
         }
 
@@ -506,6 +515,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
         proc->mm->mmap_regions = region;
         proc->mm->mmap_brk = vaddr + size;
 
+        spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
         return vaddr;
     }
 
@@ -521,13 +531,14 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
         uint64_t kernel_phys_end = bump_end_phys();
 
         if (phys_start >= kernel_phys_start && phys_start < kernel_phys_end) {
+            spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
             return -EINVAL;
         }
 
         if (flags & MAP_UC) {
-            if (phys_start >= 0x100000000ULL) return -EINVAL;
+            if (phys_start >= 0x100000000ULL) { spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags); return -EINVAL; }
         } else {
-            if (phys_start >= max_phys_addr) return -EINVAL;
+            if (phys_start >= max_phys_addr) { spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags); return -EINVAL; }
         }
 
         uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
@@ -541,6 +552,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                 printk(LOG_ERROR, "mmap PHYSICAL: map failed at i=%lu\n", (unsigned long)i);
                 for (size_t j = 0; j < i; j++)
                     unmap_user_pages(pml4, vaddr + j * PAGE_SIZE, vaddr + (j + 1) * PAGE_SIZE, 1);
+                spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
                 return -ENOMEM;
             }
         }
@@ -549,6 +561,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
         if (!region) {
             for (size_t i = 0; i < npages; i++)
                 unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE, 1);
+            spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
             return -ENOMEM;
         }
 
@@ -560,6 +573,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
         proc->mm->mmap_regions = region;
         proc->mm->mmap_phys_brk = vaddr + npages * PAGE_SIZE;
 
+        spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
         return vaddr;
     }
 
@@ -579,7 +593,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
 
     size_t npages = size / PAGE_SIZE;
     uint64_t *phys_pages = (uint64_t *)kmalloc(npages * sizeof(uint64_t));
-    if (!phys_pages) return -ENOMEM;
+    if (!phys_pages) { spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags); return -ENOMEM; }
 
     size_t mapped = 0;
     for (size_t i = 0; i < npages; i++) {
@@ -590,6 +604,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                 unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
             }
             kfree(phys_pages);
+            spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
             return -ENOMEM;
         }
         phys_pages[i] = (__force uint64_t)page_to_phys(page);
@@ -600,6 +615,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
                 unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
             }
             kfree(phys_pages);
+            spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
             return -ENOMEM;
         }
         mapped++;
@@ -612,6 +628,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
             unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
         }
         kfree(phys_pages);
+        spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
         return -ENOMEM;
     }
 
@@ -625,6 +642,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t
     proc->mm->mmap_brk = vaddr + size;
 
     kfree(phys_pages);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
     return vaddr;
 }
 

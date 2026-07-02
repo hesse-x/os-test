@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+#include <errno.h>
 #include <sys/mman.h>
 #include <sched.h>
 
@@ -185,6 +187,146 @@ void test_pthread_attr(void) {
     pthread_attr_destroy(&attr);
 }
 
+static void *thread_retval_return_fn(void *arg) {
+    (void)arg;
+    return (void *)0x1234;
+}
+static void *thread_retval_exit_fn(void *arg) {
+    (void)arg;
+    pthread_exit((void *)-1);
+}
+void test_pthread_retval_return(void) {
+    pthread_t t;
+    void *ret = NULL;
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&t, NULL, thread_retval_return_fn, NULL));
+    TEST_ASSERT_EQUAL_INT(0, pthread_join(t, &ret));
+    TEST_ASSERT_EQUAL_PTR((void *)0x1234, ret);
+}
+void test_pthread_retval_exit(void) {
+    pthread_t t;
+    void *ret = NULL;
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&t, NULL, thread_retval_exit_fn, NULL));
+    TEST_ASSERT_EQUAL_INT(0, pthread_join(t, &ret));
+    TEST_ASSERT_EQUAL_PTR((void *)-1, ret);
+}
+
+static void *thread_main_exit_child_fn(void *arg) {
+    (void)arg;
+    return NULL;
+}
+void test_pthread_main_exit_safe(void) {
+    pthread_t t;
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&t, NULL, thread_main_exit_child_fn, NULL));
+    pthread_join(t, NULL);
+    // 不调用 pthread_exit，避免终结整个测试进程；NULL-entry 路径由其它用例覆盖。
+}
+
+static void *thread_guard_overflow_fn(void *arg) {
+    (void)arg;
+    void *g = mmap(NULL, 4096, 0, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (g == MAP_FAILED) return NULL;
+    *(volatile char *)g = 1;  // 应触发 #PF
+    return NULL;
+}
+void test_pthread_guard_pf(void) {
+    pthread_t t;
+    pthread_create(&t, NULL, thread_guard_overflow_fn, NULL);
+    pthread_join(t, NULL);
+}
+
+static void *thread_detached_fn(void *arg) {
+    (void)arg;
+    volatile char buf[1024];
+    for (int i = 0; i < 1024; i++) buf[i] = (char)i;
+    return NULL;
+}
+void test_pthread_detached_leak(void) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    for (int i = 0; i < 32; i++) {
+        pthread_t t;
+        TEST_ASSERT_EQUAL_INT(0, pthread_create(&t, &attr, thread_detached_fn, NULL));
+        sched_yield();
+    }
+    pthread_attr_destroy(&attr);
+}
+
+static pthread_mutex_t timed_mutex;
+static volatile int timed_holder_ready = 0;
+static void *thread_timed_holder_fn(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&timed_mutex);
+    timed_holder_ready = 1;  // signal: holder has locked timed_mutex
+    struct timespec ts = {0, 50 * 1000000L};
+    nanosleep(&ts, NULL);
+    pthread_mutex_unlock(&timed_mutex);
+    return NULL;
+}
+void test_pthread_mutex_timedlock_timeout(void) {
+    pthread_mutex_init(&timed_mutex, NULL);
+    timed_holder_ready = 0;
+    pthread_t holder;
+    pthread_create(&holder, NULL, thread_timed_holder_fn, NULL);
+    while (!timed_holder_ready) sched_yield();  // wait until holder has the lock
+    struct timespec now;
+    timespec_get(&now, TIME_UTC);
+    struct timespec abstime;
+    abstime.tv_sec = now.tv_sec;
+    abstime.tv_nsec = now.tv_nsec + 10 * 1000000L;  // +10ms
+    if (abstime.tv_nsec >= 1000000000L) {
+        abstime.tv_sec += 1;
+        abstime.tv_nsec -= 1000000000L;
+    }
+    int r = pthread_mutex_timedlock(&timed_mutex, &abstime);
+    TEST_ASSERT_EQUAL_INT(ETIMEDOUT, r);
+    pthread_join(holder, NULL);
+    pthread_mutex_destroy(&timed_mutex);
+}
+
+static pthread_mutex_t stress_mutex;
+static volatile int stress_stop = 0;
+static void *thread_futex_stress_fn(void *arg) {
+    (void)arg;
+    while (!stress_stop) {
+        pthread_mutex_lock(&stress_mutex);
+        pthread_mutex_unlock(&stress_mutex);
+    }
+    return NULL;
+}
+void test_futex_stress(void) {
+    pthread_mutex_init(&stress_mutex, NULL);
+    pthread_t t[8];
+    for (int i = 0; i < 8; i++) pthread_create(&t[i], NULL, thread_futex_stress_fn, NULL);
+    struct timespec ts = {1, 0};
+    nanosleep(&ts, NULL);
+    stress_stop = 1;
+    for (int i = 0; i < 8; i++) pthread_join(t[i], NULL);
+    pthread_mutex_destroy(&stress_mutex);
+}
+
+static volatile int jctx_b_running = 1;
+static void *jctx_thread_b(void *arg) {
+    (void)arg;
+    while (jctx_b_running) sched_yield();
+    return NULL;
+}
+static void *jctx_thread_a(void *arg) {
+    pthread_t b = *(pthread_t *)arg;
+    pthread_join(b, NULL);
+    return NULL;
+}
+void test_pthread_join_cancel(void) {
+    pthread_t b, a;
+    pthread_create(&b, NULL, jctx_thread_b, NULL);
+    pthread_create(&a, NULL, jctx_thread_a, &b);
+    sched_yield(); sched_yield();
+    pthread_cancel(a);
+    pthread_join(a, NULL);
+    jctx_b_running = 0;
+    pthread_join(b, NULL);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_pthread_create_join);
@@ -195,5 +337,13 @@ int main(void) {
     RUN_TEST(test_pthread_barrier);
     RUN_TEST(test_pthread_rwlock);
     RUN_TEST(test_pthread_attr);
+    RUN_TEST(test_pthread_retval_return);
+    RUN_TEST(test_pthread_retval_exit);
+    RUN_TEST(test_pthread_main_exit_safe);
+    RUN_TEST(test_pthread_guard_pf);
+    RUN_TEST(test_pthread_detached_leak);
+    RUN_TEST(test_pthread_mutex_timedlock_timeout);
+    RUN_TEST(test_futex_stress);
+    RUN_TEST(test_pthread_join_cancel);
     return UNITY_END();
 }

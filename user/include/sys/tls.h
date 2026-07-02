@@ -7,6 +7,8 @@
 extern "C" {
 #endif
 
+struct thread_entry;
+
 // TLS 模板信息（variant II 布局）
 // 阶段一裁剪到最小：pthread_create 只需拷贝合并后的模板，
 // 不需 per-object 偏移。未来 dlopen + __tls_get_addr 再加 per-object 信息。
@@ -38,6 +40,7 @@ struct tcb {
     void *tsd[PTHREAD_KEYS_MAX];         // TSD values (pthread_key)
     __pthread_cleanup_handler_t *cleanup_head;
     int detached;
+    struct thread_entry *entry;          // back-pointer to slot (NULL for main thread)
     // === child thread start info (set by pthread_create, read by __pthread_start) ===
     void *(*start_routine)(void *);
     void *arg;

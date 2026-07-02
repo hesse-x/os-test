@@ -1,5 +1,5 @@
 // kernel/bsd/futex.c — Futex implementation (anon key: cr3 + page_off)
-// 阶段 3b：FUTEX_WAIT / FUTEX_WAKE only (no timeout, no private/shared flag).
+// 阶段 3b→C5: FUTEX_WAIT / FUTEX_WAKE + timeout + EINTR + bucket lock irqsave
 
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/proc.h"
@@ -8,8 +8,10 @@
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/trap.h"
 #include "arch/x64/smp.h"
 #include "common/errno.h"
+#include "common/time.h"
 
 struct futex_bucket futex_table[FUTEX_HASH_SIZE];
 
@@ -32,7 +34,7 @@ static void get_futex_key(uint64_t uaddr, mm_t *mm, struct futex_key *key) {
 
 int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3,
                   int64_t arg4, int64_t arg5, int64_t arg6) {
-    (void)arg4;(void)arg5;(void)arg6;
+    (void)arg5;(void)arg6;
     uint64_t uaddr = (uint64_t)arg1;
     int op = (int)arg2;
     uint32_t val = (uint32_t)arg3;
@@ -50,7 +52,8 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3,
         // 1. 持 bucket lock 收集 waiter
         xtask_t *to_wake[MAX_PROC];
         int nwake = 0;
-        spin_lock(&bucket->lock);
+        uint64_t bflags;
+        spin_lock_irqsave(&bucket->lock, &bflags);
         list_node_t *node = bucket->waiters.next;
         while (node != &bucket->waiters && nwake < (int)val) {
             proc_t *p = LIST_ENTRY(node, proc_t, futex_node);
@@ -61,15 +64,10 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3,
                 p->futex_uaddr = 0;
             }
         }
-        spin_unlock(&bucket->lock);
-        // 卡死定位辅助：默认 LOG_DEBUG 不输出，构建时开 LOG_LEVEL_DEBUG 才打。
-        // 卡死时看 log 是"只有 WAIT 没 WAKE"（wakeup 路径丢）还是"WAKE 了但 nwake=0"
-        //（waiter 没入队 / uaddr 不匹配）。纯观测点，不改唤醒语义。
+        spin_unlock_irqrestore(&bucket->lock, bflags);
         printk(LOG_DEBUG, "futex WAKE: pid=%d uaddr=%p val=%d nwake=%d\n",
                (int)cur->pid, (void *)uaddr, (int)val, nwake);
-        // 2. 释放后唤醒（bucket lock 外调用，防锁序逆序）。
-        //    用 wake_with_event(t, WAIT_FUTEX) 收敛"持 scheduler_lock + check + wake"
-        //    语义（见 kernel/xcore/sched.h），不再 open-code。
+        // 2. 释放后唤醒
         for (int i = 0; i < nwake; i++) {
             wake_with_event(to_wake[i], WAIT_FUTEX);
         }
@@ -77,43 +75,65 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3,
     }
 
     // FUTEX_WAIT
-    // 1. 持锁验值（防 lost wake-up）
-    spin_lock(&bucket->lock);
+    // 1. 持锁验值（防 lost wake-up）+ 入队
+    uint64_t bflags;
+    spin_lock_irqsave(&bucket->lock, &bflags);
     uint32_t cur_val;
     if (copy_from_user(&cur_val, (void __user *)uaddr, 4) != 0) {
-        spin_unlock(&bucket->lock);
+        spin_unlock_irqrestore(&bucket->lock, bflags);
         return (int64_t)-EFAULT;
     }
     if (cur_val != val) {
-        spin_unlock(&bucket->lock);
-        // 卡死定位辅助：val 不匹配说明 waker 已改值，waiter 直接 EAGAIN 返回。
-        // 若卡死时只看到 WAIT 没有对应 WAKE 且这条 EAGAIN 频繁出现，说明
-        // waiter 和 waker 对 *uaddr 的观测不一致（典型：缺少 memory barrier）。
+        spin_unlock_irqrestore(&bucket->lock, bflags);
         printk(LOG_DEBUG, "futex WAIT EAGAIN: pid=%d uaddr=%p val=%d cur=%d\n",
                (int)cur->pid, (void *)uaddr, (int)val, (int)cur_val);
         return (int64_t)-EAGAIN;
     }
     cur->proc->futex_uaddr = uaddr;
     list_push_back(&bucket->waiters, &cur->proc->futex_node);
-    spin_unlock(&bucket->lock);
     printk(LOG_DEBUG, "futex WAIT: pid=%d uaddr=%p val=%d\n",
            (int)cur->pid, (void *)uaddr, (int)val);
 
-    // 2. 设 BLOCKED + WAIT_FUTEX + schedule
+    // timeout: arg4 = absolute abstime ns (struct timespec * passed as int64_t)
+    int64_t abstime_ns = 0;
+    int has_timeout = 0;
+    if (arg4 != 0) {
+        struct timespec ts;
+        if (copy_from_user(&ts, (void __user *)arg4, sizeof(ts)) != 0) {
+            list_remove(&cur->proc->futex_node);
+            cur->proc->futex_uaddr = 0;
+            spin_unlock_irqrestore(&bucket->lock, bflags);
+            return (int64_t)-EFAULT;
+        }
+        abstime_ns = (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+        has_timeout = 1;
+    }
+
+    // 2. 设 BLOCKED（持 bucket lock 防 lost-wakeup 窗口）
     int cpu = cur->assigned_cpu;
     uint64_t flags;
     spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+    cur->wait_timed_out = 0;
+    if (has_timeout) {
+        cur->wait_deadline = abstime_ns;  // absolute abstime
+        timer_queue_insert(cpu, cur);
+    }
     cur->wait_event = WAIT_FUTEX;
     cur->state = BLOCKED;
     spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+    spin_unlock_irqrestore(&bucket->lock, bflags);
     schedule();
 
-    // 3. 唤醒后清理（若 FUTEX_WAKE 未摘除节点，自摘）
-    spin_lock(&bucket->lock);
+    // 3. 唤醒后清理 + 返回值判定
+    int64_t ret_val = 0;
+    if (signal_pending_hook && signal_pending_hook(cur)) ret_val = (int64_t)-EINTR;
+    else if (cur->wait_timed_out) ret_val = (int64_t)-ETIMEDOUT;
+
+    spin_lock_irqsave(&bucket->lock, &bflags);
     if (cur->proc->futex_uaddr) {
         list_remove(&cur->proc->futex_node);
         cur->proc->futex_uaddr = 0;
     }
-    spin_unlock(&bucket->lock);
-    return 0;
+    spin_unlock_irqrestore(&bucket->lock, bflags);
+    return ret_val;
 }

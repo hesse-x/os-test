@@ -15,7 +15,7 @@ typedef enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WA
 
 #define RECV_MSG_SIZE   64
 #define RECV_QUEUE_SIZE 16
-#define MAX_PROC 64
+#define MAX_PROC 256
 
 struct proc;  // forward declaration — Xcore does not interpret contents
 
@@ -74,6 +74,13 @@ typedef struct xtask_t {
     // Lives in xtask_t (static array, slot lifetime by tasks_lock) not proc_t
     // (kmalloc'd) so waitpid can read it safely without holding a proc_t ref.
     int32_t  exit_code;
+
+    // === thread cleanup ownership (set by clone, read by task_reap) ===
+    int      detached;              // 1 = task_reap owns tls/stack unmap
+    uint64_t tls_page;              // user vaddr of TLS+TCB page (0 if N/A)
+    size_t   tls_total;             // size of TLS+TCB mapping
+    uint64_t user_stack_base;       // user vaddr of stack base (incl guard)
+    size_t   user_stack_size;       // stack+guard total size
 
     // === pointer to BSD extension data (Xcore does not interpret contents) ===
     struct proc *proc;  // NULL = idle/task without POSIX semantics

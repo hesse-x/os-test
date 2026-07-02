@@ -46,6 +46,7 @@ typedef struct mm_t {
     uint64_t mmap_phys_brk;
     struct mmap_region *mmap_regions;
     pid_t    parent_pid;
+    spinlock_t mmap_lock;
 } mm_t;
 
 void mm_release(mm_t *mm, pid_t owner_pid);

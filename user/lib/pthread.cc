@@ -13,6 +13,7 @@
 #include "common/syscall.h"
 #include "common/mman.h"
 #include "common/signal.h"
+#include "common/thread.h"
 
 #ifndef FUTEX_WAIT
 #define FUTEX_WAIT 0
@@ -37,13 +38,30 @@
 // - pthread_join reads after join (child already reaped).
 // - pthread_detach marks detached.
 // tid is reused by kernel after task_reap; entry cleared on join/detach.
-#define MAX_PROC 64
+#define MAX_PROC 256
+enum thread_slot_state { SLOT_FREE, SLOT_CLAIMED, SLOT_LIVE, SLOT_JOINED };
+
 struct thread_entry {
     pid_t tid;
     volatile int32_t *clear_tid_addr;
     int detached;
+    void *exit_retval;
+    enum thread_slot_state state;
+    void *guard_base;
+    void *stack_base;
+    size_t stack_alloc_size;
 };
 static struct thread_entry thread_table[MAX_PROC];
+
+static volatile int __thread_table_lock = 0;
+static inline void __thread_table_lock_fn(void) {
+    while (!__atomic_test_and_set(&__thread_table_lock, __ATOMIC_ACQUIRE)) {
+        sched_yield();
+    }
+}
+static inline void __thread_table_unlock_fn(void) {
+    __atomic_clear(&__thread_table_lock, __ATOMIC_RELEASE);
+}
 
 static void thread_table_insert(pid_t tid, volatile int32_t *clear_tid_addr) {
     if (tid >= 0 && tid < MAX_PROC) {
@@ -53,9 +71,44 @@ static void thread_table_insert(pid_t tid, volatile int32_t *clear_tid_addr) {
     }
 }
 
+// 认领一个空闲 slot，置 CLAIMED。持 __thread_table_lock 调用。
+static struct thread_entry *thread_table_claim(struct tcb *tcb) {
+    __thread_table_lock_fn();
+    for (int i = 0; i < MAX_PROC; i++) {
+        if (thread_table[i].state == SLOT_FREE) {
+            thread_table[i].state = SLOT_CLAIMED;
+            thread_table[i].detached = 0;
+            thread_table[i].exit_retval = NULL;
+            thread_table[i].tid = 0;
+            thread_table[i].clear_tid_addr = NULL;
+            thread_table[i].guard_base = NULL;
+            thread_table[i].stack_base = NULL;
+            thread_table[i].stack_alloc_size = 0;
+            tcb->entry = &thread_table[i];
+            __thread_table_unlock_fn();
+            return &thread_table[i];
+        }
+    }
+    __thread_table_unlock_fn();
+    return NULL;
+}
+
+// clone 后回填 tid 并置 LIVE。持 __thread_table_lock 调用。
+static void thread_table_activate(struct thread_entry *e, pid_t tid,
+                                  volatile int32_t *clear_tid_addr) {
+    __thread_table_lock_fn();
+    e->tid = tid;
+    e->clear_tid_addr = clear_tid_addr;
+    e->state = SLOT_LIVE;
+    __thread_table_unlock_fn();
+}
+
 static struct thread_entry *thread_table_find(pid_t tid) {
-    if (tid >= 0 && tid < MAX_PROC && thread_table[tid].tid == tid)
-        return &thread_table[tid];
+    // 无锁读：tid 在 LIVE 期间不变，调用方持引用
+    for (int i = 0; i < MAX_PROC; i++) {
+        if (thread_table[i].state == SLOT_LIVE && thread_table[i].tid == tid)
+            return &thread_table[i];
+    }
     return NULL;
 }
 
@@ -71,10 +124,16 @@ static struct thread_entry *thread_table_find(pid_t tid) {
 // 父线程正常返回 rax（child tid 或负 errno）。
 extern "C" int64_t __libc_clone_thread(uint64_t flags, uint64_t stack_top,
                                        uint64_t parent_tid, uint64_t child_tid,
-                                       uint64_t tls) {
+                                       uint64_t tls, uint64_t clone_info) {
     int64_t r;
     register uint64_t r10 __asm__("r10") = child_tid;
     register uint64_t r8 __asm__("r8") = tls;
+    register uint64_t r9 __asm__("r9") = clone_info;
+    // Lock TCB field offsets used by the asm trampoline below.
+    static_assert(offsetof(struct tcb, start_routine) == 0x438,
+                  "tcb.start_routine offset changed — update asm offsets");
+    static_assert(offsetof(struct tcb, arg) == 0x440,
+                  "tcb.arg offset changed — update asm offsets");
     __asm__ volatile(
         "syscall\n"
         "testq %%rax, %%rax\n"
@@ -83,8 +142,8 @@ extern "C" int64_t __libc_clone_thread(uint64_t flags, uint64_t stack_top,
         "movq %%rsi, %%rsp\n"            // rsp = stack_top（child 栈）
         "xorq %%rbp, %%rbp\n"            // 清 rbp（无栈帧）
         "movq %%fs:0, %%rdi\n"           // rdi = tcb = %fs:0
-        "movq 0x430(%%rdi), %%rax\n"     // rax = tcb->start_routine
-        "movq 0x438(%%rdi), %%rdi\n"     // rdi = tcb->arg（同时覆盖 tcb，作为 start_routine 的第一参数）
+        "movq 0x438(%%rdi), %%rax\n"     // rax = tcb->start_routine
+        "movq 0x440(%%rdi), %%rdi\n"     // rdi = tcb->arg（同时覆盖 tcb，作为 start_routine 的第一参数）
         "callq *%%rax\n"                 // start_routine(arg)
         "movq %%rax, %%rdi\n"            // pthread_exit(retval)
         "callq pthread_exit\n"
@@ -95,7 +154,8 @@ extern "C" int64_t __libc_clone_thread(uint64_t flags, uint64_t stack_top,
           "S"((int64_t)stack_top),
           "d"((int64_t)parent_tid),
           "r"(r10),
-          "r"(r8)
+          "r"(r8),
+          "r"(r9)
         : "rcx", "r11", "memory"
     );
     return r;
@@ -116,22 +176,31 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
     void *stack_base;
     size_t stack_alloc_size = 0;
+    void *guard_base = NULL;
     int stack_allocated = 0;
     if (user_stack) {
         stack_base = user_stack;
     } else {
-        stack_alloc_size = stacksize;
-        stack_base = mmap(NULL, stacksize, PROT_READ | PROT_WRITE,
-                          MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-        if (stack_base == MAP_FAILED) return ENOMEM;
-        stack_allocated = 1;
-        // Guard page: separate mmap (kernel has no mprotect/MAP_FIXED).
-        // Not adjacent to stack — documented deviation (todo).
         if (guardsize > 0) {
             void *guard = mmap(NULL, guardsize, 0 /* PROT_NONE */,
                                MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-            (void)guard;  // best-effort
+            if (guard == MAP_FAILED) return ENOMEM;
+            stack_base = mmap(NULL, stacksize, PROT_READ | PROT_WRITE,
+                              MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+            if (stack_base == MAP_FAILED) {
+                munmap(guard, guardsize);
+                return ENOMEM;
+            }
+            assert(stack_base == (char *)guard + guardsize);
+            guard_base = guard;
+            stack_alloc_size = guardsize + stacksize;
+        } else {
+            stack_alloc_size = stacksize;
+            stack_base = mmap(NULL, stacksize, PROT_READ | PROT_WRITE,
+                              MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+            if (stack_base == MAP_FAILED) return ENOMEM;
         }
+        stack_allocated = 1;
     }
     void *stack_top = (char *)stack_base + stacksize;
 
@@ -150,6 +219,23 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     new_tcb->start_routine = start_routine;
     new_tcb->arg = arg;
 
+    struct thread_entry *slot = thread_table_claim(new_tcb);
+    if (!slot) {
+        munmap(tls_page, tls_total);
+        if (stack_allocated) munmap(stack_base, stack_alloc_size);
+        return EAGAIN;
+    }
+    slot->guard_base = guard_base;
+    slot->stack_base = stack_base;
+    slot->stack_alloc_size = stack_alloc_size;
+
+    struct thread_clone_info clone_info;
+    clone_info.detached = new_tcb->detached;
+    clone_info.tls_page = (uint64_t)tls_page;
+    clone_info.tls_total = tls_total;
+    clone_info.user_stack_base = (uint64_t)(guard_base ? guard_base : stack_base);
+    clone_info.user_stack_size = stack_alloc_size;
+
     uint64_t flags = 0x100 /*CLONE_VM*/ | 0x400 /*CLONE_FILES*/ |
                      0x800 /*CLONE_SIGHAND*/ | 0x10000 /*CLONE_THREAD*/ |
                      0x80000 /*CLONE_SETTLS*/ | 0x00200000 /*CLONE_CHILD_CLEARTID*/ |
@@ -158,10 +244,14 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     int64_t r = __libc_clone_thread(flags, (uint64_t)stack_top,
                                     (uint64_t)&parent_tid_buf,
                                     (uint64_t)&new_tcb->tid,
-                                    (uint64_t)new_tcb);
+                                    (uint64_t)new_tcb,
+                                    (uint64_t)&clone_info);
     if (r < 0) {
         munmap(tls_page, tls_total);
-        if (stack_allocated) munmap(stack_base, stack_alloc_size);
+        if (stack_allocated) {
+            void *unmap_base = guard_base ? guard_base : stack_base;
+            munmap(unmap_base, stack_alloc_size);
+        }
         return (int)-r;
     }
 
@@ -174,7 +264,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     // 纯检查，不改语义。
     pid_t observed = __atomic_load_n(&new_tcb->tid, __ATOMIC_ACQUIRE);
     assert(observed == tid || observed == 0);
-    thread_table_insert(tid, &new_tcb->tid);
+    thread_table_activate(slot, tid, &new_tcb->tid);
     if (new_tcb->detached) {
         struct thread_entry *e = thread_table_find(tid);
         if (e) e->detached = 1;
@@ -210,7 +300,20 @@ void pthread_exit(void *retval) {
         h->routine(h->arg);
         free(h);
     }
-    (void)retval;
+    if (tcb->entry) {
+        tcb->entry->exit_retval = retval;
+        // Detached thread: recycle slot immediately (no joiner will ever claim it).
+        // Must do BEFORE sys_exit — after that the kernel unmaps TLS/stack,
+        // so tcb and clear_tid_addr become inaccessible (UAF/page fault).
+        if (tcb->entry->detached) {
+            __thread_table_lock_fn();
+            tcb->entry->state = SLOT_FREE;
+            tcb->entry->tid = 0;
+            tcb->entry->clear_tid_addr = NULL;
+            tcb->entry->detached = 0;
+            __thread_table_unlock_fn();
+        }
+    }
 
     // tid == tgid → main thread → exit_group
     // tid != tgid → child thread → sys_exit (kernel clears *clear_tid_addr + futex_wake)
@@ -236,7 +339,12 @@ int pthread_join(pthread_t thread, void **retval) {
         if (val == 0) break;
         sys_futex((uint32_t *)tid_addr, FUTEX_WAIT, (uint32_t)val, NULL, NULL, 0);
     }
-    if (retval) *retval = NULL;  // first version: no return value propagation (todo)
+    if (retval) *retval = e->exit_retval;
+    e->state = SLOT_JOINED;
+    if (!e->detached && e->stack_alloc_size > 0) {
+        void *unmap_base = e->guard_base ? e->guard_base : e->stack_base;
+        munmap(unmap_base, e->stack_alloc_size);
+    }
     e->tid = 0;
     e->clear_tid_addr = NULL;
     e->detached = 0;
@@ -384,9 +492,46 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex) {
     return 0;
 }
 
-int pthread_mutex_timedlock(pthread_mutex_t *mutex, const void *abstime) {
-    (void)abstime;  // kernel futex has no timeout; fallback to blocking (todo)
-    return pthread_mutex_lock(mutex);
+int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *abstime) {
+    pid_t tid = (pid_t)sys_gettid();
+    if (mutex->type == PTHREAD_MUTEX_RECURSIVE && mutex->owner == tid) {
+        mutex->count++;
+        return 0;
+    }
+    if (mutex->type == PTHREAD_MUTEX_ERRORCHECK && mutex->owner == tid) {
+        return EDEADLK;
+    }
+    uint32_t expected = 0;
+    while (!__atomic_compare_exchange_n(&mutex->state, &expected, 1, 0,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        if (expected == 1) {
+            uint32_t prev = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
+            if (prev == 0) {
+                __atomic_store_n(&mutex->state, 0, __ATOMIC_RELEASE);
+                expected = 0;
+                continue;
+            } else if (prev != 1) {
+                // prev==2: 他人已标记 contention
+            }
+            int64_t r = sys_futex((uint32_t *)&mutex->state, FUTEX_WAIT, 2,
+                                  (const void *)abstime, NULL, 0);
+            // sys_futex wrapper: negative kernel return → errno = -r, return -1
+            if (r < 0 && errno == ETIMEDOUT) {
+                // 内核已自摘节点；用户态 CAS 2→0 + wake
+                uint32_t exp = 2;
+                if (__atomic_compare_exchange_n(&mutex->state, &exp, 0, 0,
+                                                __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+                    sys_futex((uint32_t *)&mutex->state, FUTEX_WAKE, 1, NULL, NULL, 0);
+                }
+                return ETIMEDOUT;
+            }
+            // r == 0 (wake) 或 r == -EINTR (signal): 重试，不返回 EINTR
+        }
+        expected = 0;
+    }
+    mutex->owner = tid;
+    mutex->count = 1;
+    return 0;
 }
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attr) { attr->type = PTHREAD_MUTEX_NORMAL; return 0; }

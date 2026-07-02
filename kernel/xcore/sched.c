@@ -118,6 +118,11 @@ void proc_init() {
         tasks[i].cpu_time_ns = 0;
         tasks[i].last_sched = 0;
         tasks[i].exit_code = 0;
+        tasks[i].detached = 0;
+        tasks[i].tls_page = 0;
+        tasks[i].tls_total = 0;
+        tasks[i].user_stack_base = 0;
+        tasks[i].user_stack_size = 0;
         // POSIX fields (sig, sid, pgid, ctty, exit_code) are in proc (NULL = no POSIX semantics)
     }
     cpu_locals[0]._cur_proc = NULL;
@@ -450,6 +455,26 @@ void task_reap(xtask_t *proc) {
     //     proc->fpu_page = NULL;
     // }
 
+    // 2c. Detached thread: unmap user TLS + stack BEFORE mm_put
+    //     (after mm_put, pml4 may be freed by mm_release → UAF)
+    if (proc->detached && proc->mm) {
+        uint64_t *pml4 = (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
+        if (proc->tls_page && proc->tls_total) {
+            size_t npages = proc->tls_total / PAGE_SIZE;
+            for (size_t i = 0; i < npages; i++) {
+                unmap_user_pages(pml4, proc->tls_page + i * PAGE_SIZE,
+                                 proc->tls_page + (i + 1) * PAGE_SIZE, 1);
+            }
+        }
+        if (proc->user_stack_base && proc->user_stack_size) {
+            size_t npages = proc->user_stack_size / PAGE_SIZE;
+            for (size_t i = 0; i < npages; i++) {
+                unmap_user_pages(pml4, proc->user_stack_base + i * PAGE_SIZE,
+                                 proc->user_stack_base + (i + 1) * PAGE_SIZE, 1);
+            }
+        }
+    }
+
     // 3. mm_put (decrement triggers mm_release when ref_count hits 0)
     //    mm_release will: free user pages+PML4+mmap+SHM+devtmpfs+irq_owner+wake waiters
     if (proc->mm) {
@@ -521,6 +546,11 @@ void task_reap(xtask_t *proc) {
     proc->last_sched = 0;
     // Clear threading fields
     proc->fs_base = 0;
+    proc->detached = 0;
+    proc->tls_page = 0;
+    proc->tls_total = 0;
+    proc->user_stack_base = 0;
+    proc->user_stack_size = 0;
     // proc->fpu_page intentionally preserved (lazy reclaim, 见函数顶部清单)
     spin_unlock(&tasks_lock);
 }

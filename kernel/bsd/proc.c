@@ -38,6 +38,7 @@
 #include "common/stat.h"
 #include "common/dev.h"
 #include "common/signal.h"
+#include "common/thread.h"
 
 // Minimal file_io_req for FD_FILE CLOSE notification (must match fs_driver struct layout)
 typedef struct file_io_close_req {
@@ -320,6 +321,7 @@ mm_t *mm_create(void) {
     mm->cr3 = pml4_phys;
     refcount_set(&mm->m_count, 1);
     mm->parent_pid = -1;
+    mm->mmap_lock = SPINLOCK_INIT;
     mm->mmap_brk = 0x800000;
     mm->mmap_phys_brk = MAP_PHYSICAL_BASE;
 
@@ -753,7 +755,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
 
 int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3,
                   int64_t arg4, int64_t arg5, int64_t _u6) {
-    (void)_u6;
+    uint64_t clone_info_ptr = (uint64_t)_u6;
     uint64_t flags = (uint64_t)arg1;
     uint64_t stack = (uint64_t)arg2;
     uint64_t parent_tid = (uint64_t)arg3;
@@ -879,6 +881,16 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3,
 
     // 8. fs_base + proc_t 线程级字段
     child->fs_base = (flags & CLONE_SETTLS) ? tls : parent->fs_base;
+    if ((flags & CLONE_THREAD) && clone_info_ptr) {
+        struct thread_clone_info ci;
+        if (copy_from_user(&ci, (void __user *)clone_info_ptr, sizeof(ci)) == 0) {
+            child->detached = ci.detached;
+            child->tls_page = ci.tls_page;
+            child->tls_total = ci.tls_total;
+            child->user_stack_base = ci.user_stack_base;
+            child->user_stack_size = ci.user_stack_size;
+        }
+    }
     child_bp->sig_pending = 0;
     child_bp->sig_blocked = parent->proc->sig_blocked;
     child_bp->exit_code = 0;

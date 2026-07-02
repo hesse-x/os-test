@@ -75,6 +75,7 @@ struct tcb *alloc_tls_block(void **tls_page_out, size_t *tls_total_out) {
     tcb->cancel_type = PTHREAD_CANCEL_DEFERRED;
     tcb->cleanup_head = NULL;
     tcb->detached = 0;
+    tcb->entry = NULL;
     tcb->start_routine = NULL;
     tcb->arg = NULL;
     tcb->tls_page = tls_page;
