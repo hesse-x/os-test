@@ -33,6 +33,34 @@ static inline void wake_from_wait(xtask_t *p) {
     cpu_locals[cpu].run_count++;
 }
 
+// wake_with_event: 持 target 的 scheduler_lock，仅当 target 处于 BLOCKED 且
+// wait_event == expected_event 时唤醒。event 不匹配则 no-op（lost wake-up 安全：
+// target 已被其它路径唤醒或不在该类等待）。在 bucket lock / socket_lock 外调用。
+// 收敛 futex.c / ipc.c 的"持 scheduler_lock + check + wake_from_wait"重复写法。
+static inline void wake_with_event(xtask_t *target, wait_event_t expected_event) {
+    int tcpu = target->assigned_cpu;
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &flags);
+    if (target->state == BLOCKED && target->wait_event == expected_event) {
+        wake_from_wait(target);
+    }
+    spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, flags);
+}
+
+// wake_process_any: 中断任意阻塞态（用于 signal 投递——signal 应能打断
+// WAIT_FUTEX/WAIT_CHILD/WAIT_PIPE 等任意等待）。与 wake_process 的区别：
+// wake_process 窄语义只处理 IPC 类等待（PIPE/POLL/RECV），命中其它 event 即 ASSERT；
+// wake_process_any 不区分 event，无条件唤醒 BLOCKED 状态的 target。
+static inline void wake_process_any(xtask_t *target) {
+    int tcpu = target->assigned_cpu;
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &flags);
+    if (target->state == BLOCKED) {
+        wake_from_wait(target);
+    }
+    spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, flags);
+}
+
 // Assembly entry points
 void switch_to(xtask_t *prev, xtask_t *next);
 void process_entry(void);

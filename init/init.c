@@ -12,6 +12,7 @@
 #include <sys/ipc.h>
 #include <sys/process.h>
 #include "common/dev.h"
+#include "common/syscall.h"
 
 static int spawn_service(const char *path) {
     printf("spawn: %s\n", path);

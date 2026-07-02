@@ -491,16 +491,10 @@ int get_futex_key(uint64_t uaddr, mm_t *mm, struct futex_key *key);
 4. 遍历 bucket->waiters，找 futex_key 匹配的 waiter
 5. 收集到局部数组（最多 count 个，数组大小 MAX_PROC=64 指针）
 6. spin_unlock(&bucket->lock)  ← 释放后再唤醒（零嵌套锁序）
-7. 遍历局部数组，对每个 waiter:
-   - 拿 waiter->xtask->assigned_cpu 的 scheduler_lock
-   - if (state == BLOCKED && wait_event == WAIT_FUTEX):
-       list_remove(&waiter->futex_node)  ← 从 bucket 链表移除
-       waiter->futex_uaddr = 0
-       wake_from_wait(xtask)  ← 设 READY + 入 run_queue
-   - if (state == READY):  ← 已被其他路径唤醒但还没清理节点
-       list_remove(&waiter->futex_node)  ← 顺手清理
-       waiter->futex_uaddr = 0
-   - 释放 scheduler_lock
+7. 遍历局部数组，对每个 waiter 调用 `wake_with_event(xtask, WAIT_FUTEX)`
+   （收敛在 `kernel/xcore/sched.h` 的 inline：持 waiter 的 scheduler_lock，
+   检查 state==BLOCKED && wait_event==WAIT_FUTEX 后 wake_from_wait）。
+   bucket 链表节点的清理在 waiter 被唤醒后自行从 WAIT 路径末尾摘除（见 FUTEX_WAIT 第 14 步）。
 8. return 实际唤醒数
 ```
 
@@ -741,7 +735,7 @@ int sys_kill(pid_t pid, int sig) {
             if (tasks[i].pid >= 0 && tasks[i].tgid == pid
                 && !(tasks[i].proc->sig_blocked & (1UL << sig))
                 && tasks[i].state == BLOCKED) {
-                wake_process(tasks[i].pid);  // 拿 scheduler_lock 唤醒
+                wake_process_any(&tasks[i]);  // signal 打断任意阻塞态（含 WAIT_FUTEX）
             }
         }
         return 0;
@@ -762,7 +756,7 @@ int sys_tgkill(pid_t tgid, pid_t tid, int sig) {
     if (target->pid != tid || target->tgid != tgid) return -ESRCH;
     // 投递到线程级 sig_pending（atomic，无 sig_lock）
     __atomic_or_fetch(&target->proc->sig_pending, 1UL << sig, __ATOMIC_RELEASE);
-    if (target->state == BLOCKED) wake_process(tid);  // 拿 scheduler_lock 唤醒
+    if (target->state == BLOCKED) wake_process_any(target);  // signal 打断任意阻塞态（含 WAIT_FUTEX，pthread_cancel 路径）
     return 0;
 }
 ```

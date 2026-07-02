@@ -590,10 +590,10 @@ int fat32_init(void) {
         }
     }
 
-    /* Fallback: if no partition found, try LBA 201 (current disk layout) */
+    /* Fallback: if no partition found, try LBA 2149 (current disk layout) */
     if (part_start_lba == 0) {
-        printk(LOG_WARN, "fat32_init: no FAT32 partition in MBR, trying LBA 201\n");
-        part_start_lba = 201;
+        printk(LOG_WARN, "fat32_init: no FAT32 partition in MBR, trying LBA 2149\n");
+        part_start_lba = 2149;
     }
 
     /* Read BPB */

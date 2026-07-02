@@ -26,7 +26,7 @@ void devtmpfs_init(void);
 // Read ELF from disk via AHCI DMA — two-phase: read header first, then allocate
 // exact-size pages and read the rest. Returns BFC-allocated buffer (caller must free_page)
 // or NULL on failure.
-#define ELF_SLOT_SECTORS 200   // max slot size per ELF on disk (100KB)
+#define ELF_SLOT_SECTORS 2048  // max slot size per ELF on disk (1MB)
 
 static uint8_t *load_elf_from_disk(uint32_t lba, uint64_t *out_size, Page **out_page, size_t *out_npages) {
   // Phase 1: read first sector to parse ELF header
@@ -142,7 +142,7 @@ void kernel_main(boot_info *bi) {
   printk(LOG_INFO, "kernel_main: BSP idle created\n");
 
   // Load user processes from disk
-  // LBA layout: 1-100=unused(gap), 101=init(100s), 201+=FAT32
+  // LBA layout: 1-100=unused(gap), 101-2148=init.elf (up to 1MB), 2149+=FAT32
   int try_ports[] = { 0, 1, 2, 3, 4, 5 };
 
   bool init_loaded = false;

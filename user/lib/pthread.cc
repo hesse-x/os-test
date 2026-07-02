@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <assert.h>
 #include <sys/mman.h>
 #include <pthread.h>
 #include "sys/tls.h"
@@ -170,11 +171,9 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     // 不变量：clone 返回后 tid 只可能是 tid（内核写入值）或 0（子线程已退出
     // 并经 clear_tid_addr 清 0）。若出现第三种值，说明有人多写了一次
     // （bug.md Bug 2 根因之一）或 CLONE_CHILD_SETTID 写入了错误的值。
-    // 纯检查，不改语义。用 __builtin_trap 而非 assert——libc 历史上从未引用
-    // __assert_fail，首次引用会改变 libc.a 布局，触发 init file_flush 的既有
-    // latent bug（bug.md "定位时踩到的坑"）。trap 不引入新符号，零布局影响。
+    // 纯检查，不改语义。
     pid_t observed = __atomic_load_n(&new_tcb->tid, __ATOMIC_ACQUIRE);
-    if (observed != tid && observed != 0) __builtin_trap();
+    assert(observed == tid || observed == 0);
     thread_table_insert(tid, &new_tcb->tid);
     if (new_tcb->detached) {
         struct thread_entry *e = thread_table_find(tid);
@@ -333,12 +332,14 @@ int pthread_mutex_lock(pthread_mutex_t *mutex) {
                                         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
         if (expected == 1) {
             // 尝试标记 contention：state 1→2。若返回 0 说明 holder 在此间隙 unlock
-            // 了（state 已被设为 0），此时不能 futex_wait（val=2≠0 会 EAGAIN 且无 waker），
-            // 也不能遗留 state=2（否则后续 CAS 永远失败 → 永久自旋）。必须还原 state=0
-            // 再回到 CAS fast-path 重试。
+            // 了（state 已被设为 0），此时不能 futex_wait（val=2≠0 必 EAGAIN 且无 waker），
+            // 也不能遗留 state=2（否则后续 CAS 永远失败 → 永久自旋）。还原 state=0
+            // 后跳过 futex_wait 回 fast-path 重试（避免一次注定 EAGAIN 的 syscall）。
             uint32_t prev = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
             if (prev == 0) {
                 __atomic_store_n(&mutex->state, 0, __ATOMIC_RELEASE);
+                expected = 0;
+                continue;
             } else if (prev != 1) {
                 // prev==2：他人已标记 contention，直接 wait
             }

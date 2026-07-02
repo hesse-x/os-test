@@ -178,9 +178,13 @@ IRQ 到达时向绑定进程的 recv 队列入 RECV_IRQ 消息，然后唤醒（
 
 向目标 recv 队列入 RECV_NOTIFY 消息 + 唤醒 WAIT_RECV 进程。
 
-#### wake_process（内核内部，pipe/socket 用）
+#### 唤醒原语（内核内部）
 
-设置 `recv_intr` 标志 + 唤醒 WAIT_PIPE / WAIT_POLL 进程。pipe 阻塞使用 `WAIT_PIPE`，poll 使用 `WAIT_POLL`，与 `WAIT_RECV` 隔离。被 `wake_process` 唤醒的 `sys_recv` 检查 `recv_intr` 后返回 -EINTR。
+三个收敛在 `kernel/xcore/sched.h` 的 inline，统一"持 scheduler_lock + 检查 + wake_from_wait"语义，避免各处 open-code：
+
+- **`wake_process(pid)`**（窄语义，pipe/socket/PTY 等 IPC 用）：仅处理 `WAIT_PIPE / WAIT_POLL / WAIT_RECV`，命中其它 event 触发 `ASSERT` panic（约束代码化：调用者若需唤醒其它 event 应改用 `wake_with_event`；若需打断任意阻塞态应改用 `wake_process_any`）。`WAIT_RECV` 时额外设 `recv_intr`，被 `wake_process` 唤醒的 `sys_recv` 检查后返回 `-EINTR`。
+- **`wake_with_event(target, expected_event)`**（精确 event 匹配）：仅当 target 处于 `BLOCKED` 且 `wait_event == expected_event` 时唤醒。futex WAKE 路径用 `wake_with_event(t, WAIT_FUTEX)`。
+- **`wake_process_any(target)`**（中断任意阻塞态）：不区分 event，无条件唤醒 `BLOCKED` 的 target。signal 投递路径（`deliver_signal_to`/`sys_kill`/`sys_tgkill`）及扫任意 BLOCKED 线程投递信号的循环（`proc.c` SIGHUP、`pty.c` SIGWINCH）用此——signal 需能打断 `WAIT_FUTEX`（pthread_cancel 路径）等任意等待。
 
 #### proc_reap 崩溃清理
 

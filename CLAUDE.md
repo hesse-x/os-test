@@ -35,7 +35,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 构建体系为 CMake + 自定义链接脚本。详见 `doc/design/cmake.md`。
 
-**磁盘布局**：disk.img（64MB），LBA 0=MBR，LBA 101-200=init.elf，LBA 201+=FAT32。详见 `doc/design/vfs.md`。
+**磁盘布局**：disk.img（64MB），LBA 0=MBR，LBA 101-2148=init.elf（1MB 裸 ELF slot），LBA 2149+=FAT32。详见 `doc/design/vfs.md`。
 
 **重要：** `add_library(OBJECT)` 不能设置 `POSITION_INDEPENDENT_CODE ON`，否则加 `-fPIC` 破坏 RIP-relative 寻址。
 

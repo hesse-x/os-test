@@ -101,7 +101,9 @@ int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
         // 在子线程被调度前写入）。若为 0，说明父线程 clone 返回后还没来得及让
         // 内核写 tid，子线程就退出了——这是 bug.md Bug 2 的时序竞态特征。
         // 命中即 panic，避免 join 永远等不到 0 的静默死锁。纯检查，不改语义。
-        pid_t cur_tid_val = *((pid_t *)(uintptr_t)proc->proc->clear_tid_addr);
+        // __attribute__((unused))：release 构建 ASSERT 是 no-op，cur_tid_val 零引用；
+        // debug 构建下 ASSERT 消费它。
+        pid_t cur_tid_val __attribute__((unused)) = *((pid_t *)(uintptr_t)proc->proc->clear_tid_addr);
         ASSERT(cur_tid_val == proc->pid);
         *((pid_t *)(uintptr_t)proc->proc->clear_tid_addr) = 0;
         sys_futex((int64_t)proc->proc->clear_tid_addr,

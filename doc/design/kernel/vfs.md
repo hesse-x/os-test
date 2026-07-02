@@ -236,7 +236,7 @@ kernel/fat32.c/h — FAT32 实现；kernel/vfs.c/h — VFS 层；kernel/devtmpfs
 
 ### 磁盘布局
 
-disk.img (64MB, 131072 扇区)：LBA 0=MBR 分区表；MBR 分区1(type=0xDA) LBA 1-300 裸 ELF 存储（init.elf 在 LBA 201-300）；MBR 分区2(type=0x0C) LBA 301-131071 FAT32 文件系统。FAT32 使用 -s 8（4KB/簇）。
+disk.img (64MB, 131072 扇区)：LBA 0=MBR 分区表；MBR 分区1(type=0xDA) LBA 1-2148 裸 ELF 存储（init.elf 在 LBA 101，1MB slot）；MBR 分区2(type=0x0C) LBA 2149-131071 FAT32 文件系统。FAT32 使用 -s 1（512B/簇）。
 
 ### 启动流程
 

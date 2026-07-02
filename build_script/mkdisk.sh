@@ -17,24 +17,24 @@ fi
 # 注意: -F 32 -s 8 (4KB/簇) 在 64MB 下簇数不足 65525 下限，新版 mtools 拒绝操作。
 # 改用 -s 1 (512B/簇) 确保簇数达标。
 DISK_SECTORS=$((64 * 1024 * 1024 / 512))      # 131072
-PART2_SECTORS=$((DISK_SECTORS - 201))           # FAT32 分区扇区数
+PART2_SECTORS=$((DISK_SECTORS - 2149))          # FAT32 分区扇区数
 dd if=/dev/zero of="${BUILD_DIR}/disk.img" bs=512 count=${DISK_SECTORS} status=none
 
-# 写入 ELF 到裸 LBA 区域 (init: LBA 101, fs_driver removed)
+# 写入 ELF 到裸 LBA 区域 (init: LBA 101, slot 2048 扇区 = 1MB)
 dd if="${BUILD_DIR}/init.elf"         of="${BUILD_DIR}/disk.img" bs=512 seek=101 conv=notrunc status=none
 
 # 创建 MBR 分区表
-# 分区1: LBA 1-200 (裸 ELF: init at LBA 101), 分区2: LBA 201+ (FAT32)
+# 分区1: LBA 1-2148 (裸 ELF: init at LBA 101, 1MB slot), 分区2: LBA 2149+ (FAT32)
 sfdisk "${BUILD_DIR}/disk.img" <<EOF
 label: dos
 unit: sectors
 
-${BUILD_DIR}/disk.img1 : start=1, size=200, type=da
-${BUILD_DIR}/disk.img2 : start=201, size=${PART2_SECTORS}, type=0c
+${BUILD_DIR}/disk.img1 : start=1, size=2148, type=da
+${BUILD_DIR}/disk.img2 : start=2149, size=${PART2_SECTORS}, type=0c
 EOF
 
 # 提取 FAT32 分区区域，格式化，写入文件，写回
-dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part2.img" bs=512 skip=201 count=${PART2_SECTORS} status=none
+dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part2.img" bs=512 skip=2149 count=${PART2_SECTORS} status=none
 mkfs.fat -F 32 -s 1 "${BUILD_DIR}/part2.img" >/dev/null
 
 # 创建目录结构
@@ -64,7 +64,7 @@ fi
 mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/README" ::README
 
 # 写回 FAT32 分区
-dd if="${BUILD_DIR}/part2.img" of="${BUILD_DIR}/disk.img" bs=512 seek=201 conv=notrunc status=none
+dd if="${BUILD_DIR}/part2.img" of="${BUILD_DIR}/disk.img" bs=512 seek=2149 conv=notrunc status=none
 
 # 清理临时文件
 rm -f "${BUILD_DIR}/part2.img"

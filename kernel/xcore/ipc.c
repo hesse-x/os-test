@@ -463,6 +463,11 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
 }
 
 // ===================== wake_process =====================
+// 窄语义：仅处理 IPC 类等待（WAIT_PIPE/WAIT_POLL/WAIT_RECV）。
+// 命中其它 event（如 WAIT_FUTEX/WAIT_CHILD/WAIT_REQ_REPLY/WAIT_MSG_REPLY）说明
+// 调用者语义错误——应改用 wake_with_event（精确 event 匹配）或 wake_process_any
+// （signal 路径，需打断任意阻塞态）。约束代码化：debug build 触发 ASSERT panic，
+// 防止下次再加 wait_event 时重蹈 Bug 1 覆辙（memory: feedback_constraint_in_code）。
 void wake_process(pid_t pid) {
     if (pid < 0 || pid >= MAX_PROC) return;
     xtask_t *target = &tasks[pid];
@@ -470,12 +475,10 @@ void wake_process(pid_t pid) {
     int target_cpu = target->assigned_cpu;
     uint64_t flags;
     spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
-    if (target->pid == pid &&
-        target->state == BLOCKED &&
-        (target->wait_event == WAIT_PIPE ||
-         target->wait_event == WAIT_POLL ||
-         target->wait_event == WAIT_RECV)) {
-        if (target->wait_event == WAIT_RECV)
+    if (target->pid == pid && target->state == BLOCKED) {
+        wait_event_t ev = target->wait_event;
+        ASSERT(ev == WAIT_PIPE || ev == WAIT_POLL || ev == WAIT_RECV);
+        if (ev == WAIT_RECV)
             target->recv_intr = 1;
         wake_from_wait(target);
     }

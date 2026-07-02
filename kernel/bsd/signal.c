@@ -240,7 +240,9 @@ void force_sig(xtask_t *proc, int sig, int si_code, void *si_addr) {
 
 void deliver_signal_to(xtask_t *target, int sig) {
     __atomic_or_fetch(&target->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
-    if (target->state == BLOCKED) wake_process(target->pid);
+    // signal 应能打断任意阻塞态（含 WAIT_FUTEX，pthread_cancel 路径），
+    // 用 wake_process_any 而非窄语义 wake_process（后者只处理 IPC 类等待）。
+    if (target->state == BLOCKED) wake_process_any(target);
 }
 
 int pgsignal(pid_t pgid, int sig) {
@@ -271,7 +273,7 @@ int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _
         spin_unlock(&leader->proc->signal->sig_lock);
         // Wake the leader if signal not blocked and currently blocked (single-thread stage)
         if (!(leader->proc->sig_blocked & (1ULL << sig)) && leader->state == BLOCKED) {
-            wake_process(leader->pid);
+            wake_process_any(leader);
         }
         return 0;
     } else if (pid == 0) {
@@ -297,7 +299,8 @@ int64_t sys_tgkill(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
     if (target->pid != tid || target->tgid != tgid || !target->proc) return (int64_t)-ESRCH;
     // 投递到线程级 sig_pending（atomic，无 sig_lock）
     __atomic_or_fetch(&target->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
-    if (target->state == BLOCKED) wake_process(target->pid);
+    // tgkill 投递的 signal 应能打断任意阻塞态（含 WAIT_FUTEX，pthread_cancel 走此路径）。
+    if (target->state == BLOCKED) wake_process_any(target);
     return 0;
 }
 

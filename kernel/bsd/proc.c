@@ -227,7 +227,9 @@ void pty_close_file(struct file *f) {
                     if (tasks[p].pid == p && tasks[p].proc && tasks[p].proc->pgid == pty->t_pgid
                         && tasks[p].proc->sid == pty->t_sid) {
                         __atomic_or_fetch(&tasks[p].proc->sig_pending, 1ULL << SIGHUP, __ATOMIC_RELEASE);
-                        if (tasks[p].state == BLOCKED) wake_process(p);
+                        // SIGHUP 需打断任意阻塞态（含 WAIT_FUTEX/WAIT_CHILD），
+                        // 用 wake_process_any 而非窄语义 wake_process。
+                        if (tasks[p].state == BLOCKED) wake_process_any(&tasks[p]);
                     }
                 }
             }
