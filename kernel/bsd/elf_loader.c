@@ -51,9 +51,10 @@ static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
     return true;
 }
 
-elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
-                         uint64_t *new_pml4) {
+static elf_load_result_t elf_load_internal(const uint8_t *data, uint64_t size,
+                                  uint64_t *new_pml4, uint64_t base) {
     elf_load_result_t result = {0};
+    result.load_base = base;
 
     // 1. Validate ELF magic
     if (size < sizeof(Elf64_Ehdr)) return result;
@@ -65,9 +66,12 @@ elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
     if (data[4] != 2) return result;
 
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)data;
-    result.entry = ehdr->e_entry;
+    result.entry = base + ehdr->e_entry;
+    result.phnum = ehdr->e_phnum;
+    result.phent = ehdr->e_phentsize;
 
     // 2. Iterate program headers
+    bool phdr_found = false;
     for (int i = 0; i < ehdr->e_phnum; i++) {
         uint64_t ph_off = ehdr->e_phoff + i * ehdr->e_phentsize;
         if (ph_off + sizeof(Elf64_Phdr) > size) return result;
@@ -88,15 +92,22 @@ elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
         if (ph->p_memsz == 0)
             continue;
 
+        // 记录第一个 PT_LOAD 用于 AT_PHDR：p_vaddr + e_phoff - p_offset
+        // PHDR 表位于 ELF 文件 e_phoff 处，与首个 PT_LOAD 的文件偏移对齐
+        if (!phdr_found) {
+            result.phdr_vaddr = base + (ph->p_vaddr + ehdr->e_phoff - ph->p_offset);
+            phdr_found = true;
+        }
+
         // 3. Map pages covering this segment
-        uint64_t first_page = ph->p_vaddr & ~0xFFFULL;
-        uint64_t last_page = (ph->p_vaddr + ph->p_memsz - 1) & ~0xFFFULL;
+        uint64_t first_page = base + (ph->p_vaddr & ~0xFFFULL);
+        uint64_t last_page = base + ((ph->p_vaddr + ph->p_memsz - 1) & ~0xFFFULL);
 
         for (uint64_t page_addr = first_page; page_addr <= last_page;
              page_addr += PAGE_SIZE) {
             uint64_t file_start = ph->p_offset;
 
-            uint64_t page_off = page_addr - ph->p_vaddr;
+            uint64_t page_off = (page_addr - base) - ph->p_vaddr;
 
             const uint8_t *src = NULL;
             uint64_t copy_len = 0;
@@ -120,4 +131,14 @@ elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
     result.success = true;
 
     return result;
+}
+
+elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
+                         uint64_t *new_pml4) {
+    return elf_load_internal(data, size, new_pml4, 0);
+}
+
+elf_load_result_t elf_load_at(const uint8_t *data, uint64_t size,
+                              uint64_t *new_pml4, uint64_t base) {
+    return elf_load_internal(data, size, new_pml4, base);
 }

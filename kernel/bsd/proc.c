@@ -31,6 +31,7 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/smp.h"
+#include "arch/x64/memlayout.h"
 #include "common/macro.h"
 #include "common/errno.h"
 #include "common/shm.h"
@@ -47,6 +48,9 @@ typedef struct file_io_close_req {
     uint32_t _flags;
     int32_t  fs_fd;          // at offset 264, same as fs_driver's file_req.fs_fd
 } file_io_close_req;
+
+// Forward declaration: defined in kernel/xcore/mem/copy_user.c
+long strncpy_from_user(char *dst, const char __user *src, long maxlen);
 
 // ===================== proc lifecycle =====================
 
@@ -958,8 +962,10 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3,
 
 int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
                      int64_t a4, int64_t a5, int64_t a6) {
-    (void)a2;(void)a3;(void)a4;(void)a5;(void)a6;
+    (void)a4;(void)a5;(void)a6;
     const char *pathname = (const char *)a1;
+    char **argv_ptr = (char **)a2;  // 用户态 argv[]
+    char **envp_ptr = (char **)a3;  // 用户态 envp[]
     xtask_t *proc = current_task;
     if (!proc->mm) return (int64_t)-EINVAL;
     printk(LOG_INFO, "execve: pid=%d path=%s\n", proc->pid, pathname);
@@ -1021,6 +1027,73 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
         return (int64_t)-ENOEXEC;
     }
 
+    // 6b. Parse PT_INTERP — detect dynamic executable
+    char interp_path[256] = {0};
+    bool is_dynamic = false;
+    {
+        Elf64_Ehdr *eh = (Elf64_Ehdr *)elf_buf;
+        for (int i = 0; i < eh->e_phnum; i++) {
+            Elf64_Phdr *ph = (Elf64_Phdr *)(elf_buf + eh->e_phoff + i * eh->e_phentsize);
+            if (ph->p_type == PT_INTERP) {
+                if (ph->p_filesz >= sizeof(interp_path)) {
+                    kfree(elf_buf);
+                    free_table_page(pml4_phys);
+                    return (int64_t)-ENOENT;
+                }
+                __memcpy(interp_path, elf_buf + ph->p_offset, ph->p_filesz);
+                interp_path[ph->p_filesz] = '\0';
+                is_dynamic = true;
+                break;
+            }
+        }
+    }
+
+    // 6c. Dynamic path: load ld.so at LD_SO_BASE
+    elf_load_result_t ld_lr = {0};
+    if (is_dynamic) {
+        int64_t ld_open_res = sys_open((int64_t)(uintptr_t)interp_path, O_RDONLY, 0, 0, 0, 0);
+        int32_t ld_fd = (int32_t)(ld_open_res & 0xFFFFFFFFULL);
+        if (ld_fd < 0) {
+            kfree(elf_buf);
+            free_table_page(pml4_phys);
+            printk(LOG_ERROR, "execve: ld.so open failed pid=%d path=%s err=%d\n",
+                   proc->pid, interp_path, ld_fd);
+            return (int64_t)ld_open_res;
+        }
+        struct file *ld_file = fd_lookup(proc->proc->files, ld_fd);
+        if (!ld_file || ld_file->type != FD_REGULAR || !ld_file->inode) {
+            sys_close((int64_t)ld_fd, 0, 0, 0, 0, 0);
+            kfree(elf_buf);
+            free_table_page(pml4_phys);
+            return (int64_t)-EIO;
+        }
+        struct inode *ld_ip = ld_file->inode;
+        uint64_t ld_size = ld_ip->size;
+        uint8_t *ld_buf = (uint8_t *)kmalloc(ld_size);
+        if (!ld_buf) {
+            sys_close((int64_t)ld_fd, 0, 0, 0, 0, 0);
+            kfree(elf_buf);
+            free_table_page(pml4_phys);
+            return (int64_t)-ENOMEM;
+        }
+        int ld_nread = fat32_read(ld_ip, 0, (void *)ld_buf, ld_size);
+        sys_close((int64_t)ld_fd, 0, 0, 0, 0, 0);
+        if (ld_nread < 0 || (uint64_t)ld_nread < ld_size) {
+            kfree(ld_buf);
+            kfree(elf_buf);
+            free_table_page(pml4_phys);
+            return (int64_t)-EIO;
+        }
+        ld_lr = elf_load_at(ld_buf, ld_size, new_pml4, LD_SO_BASE);
+        kfree(ld_buf);
+        if (!ld_lr.success) {
+            kfree(elf_buf);
+            free_table_page(pml4_phys);
+            printk(LOG_ERROR, "execve: ld.so load failed pid=%d\n", proc->pid);
+            return (int64_t)-ENOEXEC;
+        }
+    }
+
     // 7. Allocate new user stack
     int user_stack_pages = 2048;
     Page *user_stack_page = bfc_alloc_page(user_stack_pages);
@@ -1030,7 +1103,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
         __builtin_unreachable();
     }
     uint64_t user_stack_phys = (__force uint64_t)page_to_phys(user_stack_page);
-    uint64_t stack_base = 0x00007FFFFFFFE000 - (uint64_t)user_stack_pages * PAGE_SIZE;
+    uint64_t stack_base = USER_STACK_TOP - (uint64_t)user_stack_pages * PAGE_SIZE;
     for (int i = 0; i < user_stack_pages; i++) {
         if (!map_user_page_direct(new_pml4, stack_base + i * PAGE_SIZE,
                                   user_stack_phys + i * PAGE_SIZE,
@@ -1046,6 +1119,134 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
         map_user_page_direct(new_pml4, SIG_TRAMPOLINE_ADDR, sig_trampoline_phys,
                             PTE_PRESENT | PTE_USER);
     }
+
+    // === argc/argv/envp/auxv 栈构建（标准 SysV ABI） ===
+    // 栈是连续物理内存（user_stack_phys 起 user_stack_pages 页），用户态地址 [stack_base, USER_STACK_TOP] 映射连续。
+    // 注意：argv/envp 字符串缓冲较大（ARG_MAX*256*2 ≈ 64KB），不能用内核栈（仅 8KB），改用 kmalloc。
+    #define ARG_MAX 128
+    char (*argv_strings)[256] = (char (*)[256])kmalloc(sizeof(char[ARG_MAX][256]));
+    char (*envp_strings)[256] = (char (*)[256])kmalloc(sizeof(char[ARG_MAX][256]));
+    uint64_t *argv_str_vaddrs = (uint64_t *)kmalloc(sizeof(uint64_t) * ARG_MAX);
+    uint64_t *envp_str_vaddrs = (uint64_t *)kmalloc(sizeof(uint64_t) * ARG_MAX);
+    if (!argv_strings || !envp_strings || !argv_str_vaddrs || !envp_str_vaddrs) {
+        if (argv_strings) kfree(argv_strings);
+        if (envp_strings) kfree(envp_strings);
+        if (argv_str_vaddrs) kfree(argv_str_vaddrs);
+        if (envp_str_vaddrs) kfree(envp_str_vaddrs);
+        kfree(elf_buf);
+        free_table_page(pml4_phys);
+        return (int64_t)-ENOMEM;
+    }
+    int argc = 0;
+    if (argv_ptr) {
+        while (argc < ARG_MAX) {
+            char *p;
+            if (copy_from_user(&p, argv_ptr + argc, sizeof(p))) break;
+            if (!p) break;
+            if (strncpy_from_user(argv_strings[argc], p, 255) < 0) break;
+            argv_strings[argc][255] = '\0';
+            argc++;
+        }
+    }
+    // 若 argv 为空，按 POSIX 约定注入 pathname 作为 argv[0]
+    if (argc == 0 && pathname) {
+        int plen = 0;
+        while (pathname[plen] && plen < 255) { argv_strings[0][plen] = pathname[plen]; plen++; }
+        argv_strings[0][plen] = '\0';
+        argc = 1;
+    }
+
+    int envc = 0;
+    if (envp_ptr) {
+        while (envc < ARG_MAX) {
+            char *p;
+            if (copy_from_user(&p, envp_ptr + envc, sizeof(p))) break;
+            if (!p) break;
+            if (strncpy_from_user(envp_strings[envc], p, 255) < 0) break;
+            envp_strings[envc][255] = '\0';
+            envc++;
+        }
+    }
+
+    // STACK_KV: sp_user 用户态地址 → 内核虚拟地址（支持跨页）
+    #define STACK_KV(sp_user) \
+        ((void *)((__force uint64_t)phys_to_virt((__force phys_addr_t)(user_stack_phys \
+            + (uint64_t)user_stack_pages * PAGE_SIZE - (USER_STACK_TOP - (sp_user))))))
+
+    uint64_t sp_user = USER_STACK_TOP;
+
+    // 1. AT_RANDOM 16 字节（先填全 0）
+    sp_user -= 16;
+    __memset(STACK_KV(sp_user), 0, 16);
+    uint64_t at_random_vaddr = sp_user;
+
+    // 2. AT_EXECFN：execve path 字符串副本
+    int execfn_len = 0;
+    while (pathname[execfn_len]) execfn_len++;
+    sp_user -= (execfn_len + 1);
+    __memcpy(STACK_KV(sp_user), pathname, execfn_len + 1);
+    uint64_t at_execfn_vaddr = sp_user;
+
+    // 3. envp 字符串（高地址→低地址）
+    for (int i = envc - 1; i >= 0; i--) {
+        int len = 0;
+        while (envp_strings[i][len]) len++;
+        sp_user -= (len + 1);
+        __memcpy(STACK_KV(sp_user), envp_strings[i], len + 1);
+        envp_str_vaddrs[i] = sp_user;
+    }
+
+    // 4. argv 字符串
+    for (int i = argc - 1; i >= 0; i--) {
+        int len = 0;
+        while (argv_strings[i][len]) len++;
+        sp_user -= (len + 1);
+        __memcpy(STACK_KV(sp_user), argv_strings[i], len + 1);
+        argv_str_vaddrs[i] = sp_user;
+    }
+
+    // 5. 16 字节对齐 sp_user
+    while ((sp_user % 16) != 0) sp_user--;
+
+    // 6. 写 auxv（8 对 + AT_NULL）
+    int auxc = 8;
+    sp_user -= (auxc + 1) * 16;
+    uint64_t *auxv = (uint64_t *)STACK_KV(sp_user);
+    int ai = 0;
+    auxv[ai++] = AT_PHDR;   auxv[ai++] = lr.phdr_vaddr;
+    auxv[ai++] = AT_PHENT;  auxv[ai++] = lr.phent;
+    auxv[ai++] = AT_PHNUM;  auxv[ai++] = lr.phnum;
+    auxv[ai++] = AT_ENTRY;  auxv[ai++] = lr.entry;
+    auxv[ai++] = AT_BASE;   auxv[ai++] = is_dynamic ? ld_lr.load_base : 0;
+    auxv[ai++] = AT_PAGESZ; auxv[ai++] = PAGE_SIZE;
+    auxv[ai++] = AT_RANDOM; auxv[ai++] = at_random_vaddr;
+    auxv[ai++] = AT_EXECFN; auxv[ai++] = at_execfn_vaddr;
+    auxv[ai++] = AT_NULL;   auxv[ai++] = 0;
+
+    // 7. envp 指针数组 + NULL
+    sp_user -= (envc + 1) * 8;
+    uint64_t *envp_arr = (uint64_t *)STACK_KV(sp_user);
+    envp_arr[envc] = 0;
+    for (int i = 0; i < envc; i++) envp_arr[i] = envp_str_vaddrs[i];
+
+    // 8. argv 指针数组 + NULL
+    sp_user -= (argc + 1) * 8;
+    uint64_t *argv_arr = (uint64_t *)STACK_KV(sp_user);
+    argv_arr[argc] = 0;
+    for (int i = 0; i < argc; i++) argv_arr[i] = argv_str_vaddrs[i];
+
+    // 9. argc
+    sp_user -= 8;
+    *(uint64_t *)STACK_KV(sp_user) = (uint64_t)argc;
+
+    uint64_t user_sp = sp_user;
+    #undef STACK_KV
+    #undef ARG_MAX
+
+    kfree(argv_strings);
+    kfree(envp_strings);
+    kfree(argv_str_vaddrs);
+    kfree(envp_str_vaddrs);
 
     // === Point of no return: old address space will be replaced ===
 
@@ -1070,10 +1271,17 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3,
 
     // 9. Switch to new address space
 
-    // 9a. Modify current trapframe: rip=entry, rsp=stack_top
+    // 9a. Modify current trapframe: rip=entry, rsp=user_sp
     trapframe_t *tf = get_cpu_local()->cur_tf;
-    tf->rip = lr.entry;
-    tf->rsp = 0x00007FFFFFFFE000;
+    if (is_dynamic) {
+        tf->rip = ld_lr.entry;       // ld.so entry
+        tf->rsp = user_sp;            // 指向 argc
+        printk(LOG_INFO, "exec: ld.so @ 0x%lx, entry 0x%lx, main @ 0x%lx\n",
+               ld_lr.load_base, ld_lr.entry, lr.entry);
+    } else {
+        tf->rip = lr.entry;           // 主 ELF entry（静态路径）
+        tf->rsp = user_sp;            // 指向 argc
+    }
     // 用户栈顶必须 16 字节对齐（见 build_kstack 同款 ASSERT）
     ASSERT(tf->rsp % 16 == 0);
     tf->rax = 0;

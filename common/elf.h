@@ -6,6 +6,8 @@
 // ELF64 fixed header
 #define EI_NIDENT 16
 #define PT_LOAD 1
+#define PT_DYNAMIC 2   // Dynamic linking information
+#define PT_INTERP 3    // Program interpreter path name
 #define PT_TLS 7
 
 #define PF_X 0x1
@@ -39,4 +41,16 @@ typedef struct Elf64_Phdr {
     uint64_t p_memsz;
     uint64_t p_align;
 } Elf64_Phdr;
+
+// Auxiliary vector types (AT_*)
+#define AT_NULL     0
+#define AT_PHDR     3
+#define AT_PHENT    4
+#define AT_PHNUM    5
+#define AT_PAGESZ   6
+#define AT_BASE     7
+#define AT_ENTRY    9
+#define AT_RANDOM   25
+#define AT_EXECFN   31
+
 #endif // COMMON_ELF_H
