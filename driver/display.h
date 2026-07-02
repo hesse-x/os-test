@@ -77,12 +77,13 @@ static inline void display_client_render_cell(uint32_t row, uint32_t col,
     uint32_t py = row * FONT_HEIGHT;
     const uint8_t *glyph = font8x16[ch - FONT_CHARS_START];
 
+    // cols × FONT_WIDTH = fb_width，px+c 不会越界，移除内层边界检查。
+    // 预计算每行的 fg/bg 指针，内层循环只剩位测试 + 条件写。
     for (int r = 0; r < FONT_HEIGHT; r++) {
         if (py + r >= display_fb_height) break;
         uint8_t bits = glyph[r];
         uint32_t *dst = (uint32_t *)(display_back_buffer + (py + r) * display_pitch + px * 4);
         for (int c = 0; c < FONT_WIDTH; c++) {
-            if (px + c >= display_fb_width) break;
             dst[c] = (bits & (0x80 >> c)) ? fg : bg;
         }
     }
@@ -101,13 +102,23 @@ static inline void display_client_clear(uint32_t bg) {
 static inline void display_client_scroll_up(uint32_t bg) {
     uint32_t line_bytes = display_pitch * FONT_HEIGHT;
     uint32_t fb_bytes = display_fb_height * display_pitch;
+    uint32_t move_bytes = fb_bytes - line_bytes;
 
-    uint8_t *buf = display_back_buffer;
-    for (uint32_t i = 0; i < fb_bytes - line_bytes; i++) {
-        buf[i] = buf[i + line_bytes];
+    // uint64_t 搬运（8 字节步进），尾部按字节兜底。
+    // display_pitch (3200) 和 line_bytes (51200) 均为 8 的倍数，正常无尾部。
+    uint64_t *dst64 = (uint64_t *)display_back_buffer;
+    const uint64_t *src64 = (const uint64_t *)(display_back_buffer + line_bytes);
+    uint32_t n64 = move_bytes / 8;
+    for (uint32_t i = 0; i < n64; i++) dst64[i] = src64[i];
+
+    uint32_t tail = move_bytes - n64 * 8;
+    if (tail) {
+        uint8_t *d = display_back_buffer + n64 * 8;
+        const uint8_t *s = display_back_buffer + line_bytes + n64 * 8;
+        for (uint32_t i = 0; i < tail; i++) d[i] = s[i];
     }
 
-    uint32_t *last_line = (uint32_t *)(buf + fb_bytes - line_bytes);
+    uint32_t *last_line = (uint32_t *)(display_back_buffer + fb_bytes - line_bytes);
     uint32_t pixels_per_line = line_bytes / 4;
     for (uint32_t i = 0; i < pixels_per_line; i++) {
         last_line[i] = bg;
