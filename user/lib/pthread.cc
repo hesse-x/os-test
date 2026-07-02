@@ -167,6 +167,14 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     pid_t tid = (pid_t)r;
     // new_tcb->tid 已由内核 CLONE_CHILD_SETTID 写入；此处不再覆盖，
     // 否则子线程先退出写 0 后会被父线程覆盖成非 0，join 永远等不到 0。
+    // 不变量：clone 返回后 tid 只可能是 tid（内核写入值）或 0（子线程已退出
+    // 并经 clear_tid_addr 清 0）。若出现第三种值，说明有人多写了一次
+    // （bug.md Bug 2 根因之一）或 CLONE_CHILD_SETTID 写入了错误的值。
+    // 纯检查，不改语义。用 __builtin_trap 而非 assert——libc 历史上从未引用
+    // __assert_fail，首次引用会改变 libc.a 布局，触发 init file_flush 的既有
+    // latent bug（bug.md "定位时踩到的坑"）。trap 不引入新符号，零布局影响。
+    pid_t observed = __atomic_load_n(&new_tcb->tid, __ATOMIC_ACQUIRE);
+    if (observed != tid && observed != 0) __builtin_trap();
     thread_table_insert(tid, &new_tcb->tid);
     if (new_tcb->detached) {
         struct thread_entry *e = thread_table_find(tid);

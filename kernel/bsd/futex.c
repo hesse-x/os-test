@@ -62,7 +62,12 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3,
             }
         }
         spin_unlock(&bucket->lock);
-        // 2. 释放后唤醒（bucket lock 外调用 wake_from_wait，防锁序逆序）。
+        // 卡死定位辅助：默认 LOG_DEBUG 不输出，构建时开 LOG_LEVEL_DEBUG 才打。
+        // 卡死时看 log 是"只有 WAIT 没 WAKE"（wakeup 路径丢）还是"WAKE 了但 nwake=0"
+        //（waiter 没入队 / uaddr 不匹配）。纯观测点，不改唤醒语义。
+        printk(LOG_DEBUG, "futex WAKE: pid=%d uaddr=%p val=%d nwake=%d\n",
+               (int)cur->pid, (void *)uaddr, (int)val, nwake);
+        // 2. 释放后唤醒（bucket lock 外调用，防锁序逆序）。
         //    注意：不能用 wake_process —— 它只处理 WAIT_PIPE/WAIT_POLL/WAIT_RECV，
         //    对 WAIT_FUTEX 无效，会导致 futex waiter 永不唤醒。
         for (int i = 0; i < nwake; i++) {
@@ -88,11 +93,18 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3,
     }
     if (cur_val != val) {
         spin_unlock(&bucket->lock);
+        // 卡死定位辅助：val 不匹配说明 waker 已改值，waiter 直接 EAGAIN 返回。
+        // 若卡死时只看到 WAIT 没有对应 WAKE 且这条 EAGAIN 频繁出现，说明
+        // waiter 和 waker 对 *uaddr 的观测不一致（典型：缺少 memory barrier）。
+        printk(LOG_DEBUG, "futex WAIT EAGAIN: pid=%d uaddr=%p val=%d cur=%d\n",
+               (int)cur->pid, (void *)uaddr, (int)val, (int)cur_val);
         return (int64_t)-EAGAIN;
     }
     cur->proc->futex_uaddr = uaddr;
     list_push_back(&bucket->waiters, &cur->proc->futex_node);
     spin_unlock(&bucket->lock);
+    printk(LOG_DEBUG, "futex WAIT: pid=%d uaddr=%p val=%d\n",
+           (int)cur->pid, (void *)uaddr, (int)val);
 
     // 2. 设 BLOCKED + WAIT_FUTEX + schedule
     int cpu = cur->assigned_cpu;
