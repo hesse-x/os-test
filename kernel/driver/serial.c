@@ -39,12 +39,58 @@ void serial_init(void) {
 
 #ifndef NSERIAL
 
-static void serial_putc(char c) {
-    uint64_t flags;
-    spin_lock_irqsave(&serial_tx_lock, &flags);
+static void serial_putc_raw(char c) {
     while (!(inb(COM1_LSR) & LSR_THRE))
         ;
     outb(COM1, c);
+}
+
+// Line-start flag: next non-newline char gets a timestamp prefix.
+// Protected by serial_tx_lock; \n sets it true, \r is transparent.
+static bool serial_line_start = true;
+
+// Emit boot-time prefix [  sec.mmm] at line starts.
+// No-op until TSC is calibrated (early boot output skips the prefix).
+static void emit_timestamp_locked(void) {
+    if (tsc_freq == 0) return;
+    uint64_t ns = sched_clock();
+    uint64_t ms_total = ns / 1000000ULL;
+    uint64_t sec = ms_total / 1000;
+    uint64_t ms = ms_total % 1000;
+    char buf[16];
+    int p = 0;
+    buf[p++] = '[';
+    // seconds, right-aligned width 5, space-padded
+    char tmp[6];
+    int tl = 0;
+    uint64_t s = sec;
+    if (s == 0) tmp[tl++] = '0';
+    else while (s) { tmp[tl++] = '0' + (s % 10); s /= 10; }
+    while (tl < 5) tmp[tl++] = ' ';
+    while (tl > 0) buf[p++] = tmp[--tl];
+    buf[p++] = '.';
+    // milliseconds, zero-padded width 3
+    char mtmp[4];
+    int ml = 0;
+    uint64_t m = ms;
+    if (m == 0) mtmp[ml++] = '0';
+    else while (m) { mtmp[ml++] = '0' + (m % 10); m /= 10; }
+    while (ml < 3) mtmp[ml++] = '0';
+    while (ml > 0) buf[p++] = mtmp[--ml];
+    buf[p++] = ']';
+    buf[p++] = ' ';
+    for (int i = 0; i < p; i++) serial_putc_raw(buf[i]);
+}
+
+static void serial_putc(char c) {
+    uint64_t flags;
+    spin_lock_irqsave(&serial_tx_lock, &flags);
+    if (serial_line_start && c != '\n' && c != '\r') {
+        emit_timestamp_locked();
+        serial_line_start = false;
+    }
+    serial_putc_raw(c);
+    if (c == '\n') serial_line_start = true;
     spin_unlock_irqrestore(&serial_tx_lock, flags);
 }
 
