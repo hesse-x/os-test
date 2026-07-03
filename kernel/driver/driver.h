@@ -17,6 +17,7 @@ typedef struct dev_driver {
   uint32_t pci_class;  // (class_subclass << 8) | prog_if, 0 = no PCI matching
   uint32_t pci_vendor; // 0 = match by class only
   uint32_t pci_device; // 0 = match by class only
+  uint32_t pci_subsystem_id; // 0 = ignore subsystem id (default)
   void (*init)(void);
   struct dev_ops *ops;
 } dev_driver;

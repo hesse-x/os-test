@@ -28,6 +28,17 @@ struct dev_entry {
   struct dev_entry *next;
 };
 
+/* Directory entry for subdirectory support (e.g. "dri") */
+struct dev_dir {
+  char name[32];
+  struct inode *ip; /* INODE_DIR inode */
+  struct dev_dir *next;
+};
+
+static struct dev_dir dev_dirs[16]; /* max 16 subdirectories */
+static struct dev_dir *dir_list = NULL;
+static int dir_count = 0;
+
 static struct dev_entry dev_entries[MAX_DEV_ENTRIES];
 static struct dev_entry *dev_list = NULL;
 static int dev_count = 0;
@@ -43,17 +54,108 @@ void devtmpfs_init(void) {
   spin_lock(&devtmpfs_lock);
   dev_list = NULL;
   dev_count = 0;
+  dir_list = NULL;
+  dir_count = 0;
   for (int i = 0; i < MAX_DEV_ENTRIES; i++) {
     dev_entries[i].name[0] = '\0';
     dev_entries[i].ip = NULL;
     dev_entries[i].next = NULL;
+  }
+  for (int i = 0; i < 16; i++) {
+    dev_dirs[i].name[0] = '\0';
+    dev_dirs[i].ip = NULL;
+    dev_dirs[i].next = NULL;
   }
   spin_unlock(&devtmpfs_lock);
   devtmpfs_initialized = true;
   printk(LOG_INFO, "devtmpfs_init: done\n");
 }
 
+/* Find or create a subdirectory dev_dir entry by name (no slash in name) */
+static struct dev_dir *devtmpfs_find_dir(const char *name) {
+  for (struct dev_dir *d = dir_list; d; d = d->next) {
+    int i;
+    for (i = 0; name[i] && d->name[i]; i++) {
+      if (name[i] != d->name[i])
+        break;
+    }
+    if (name[i] == '\0' && d->name[i] == '\0')
+      return d;
+  }
+  return NULL;
+}
+
+static struct dev_dir *devtmpfs_get_or_create_dir(const char *name, int len) {
+  char tmp[32];
+  if (len >= 31)
+    return NULL;
+  for (int i = 0; i < len; i++)
+    tmp[i] = name[i];
+  tmp[len] = '\0';
+  struct dev_dir *d = devtmpfs_find_dir(tmp);
+  if (d)
+    return d;
+  if (dir_count >= 16)
+    return NULL;
+  /* find free slot */
+  for (int i = 0; i < 16; i++) {
+    if (dev_dirs[i].ip == NULL) {
+      struct inode *ip = inode_create(0, INODE_DIR, 0, 0, 0, 0);
+      if (!ip)
+        return NULL;
+      for (int j = 0; j < len; j++)
+        dev_dirs[i].name[j] = tmp[j];
+      dev_dirs[i].name[len] = '\0';
+      dev_dirs[i].ip = ip;
+      dev_dirs[i].next = dir_list;
+      dir_list = &dev_dirs[i];
+      dir_count++;
+      return &dev_dirs[i];
+    }
+  }
+  return NULL;
+}
+
 struct inode *devtmpfs_lookup(const char *name) {
+  /* If path contains '/', split into dir + leaf */
+  const char *slash = name;
+  while (*slash && *slash != '/')
+    slash++;
+  if (*slash == '/') {
+    int dir_len = slash - name;
+    char dir_name[32];
+    if (dir_len >= 31)
+      return NULL;
+    for (int i = 0; i < dir_len; i++)
+      dir_name[i] = name[i];
+    dir_name[dir_len] = '\0';
+    spin_lock(&devtmpfs_lock);
+    struct dev_dir *d = devtmpfs_find_dir(dir_name);
+    spin_unlock(&devtmpfs_lock);
+    if (!d)
+      return NULL;
+    /* lookup leaf inside dir's dev entries: leaf is flat name, scan dev_list
+       but only those whose name matches leaf AND whose parent dir is d.
+       For simplicity in first version: store full path "dir/leaf" in
+       dev_entry.name and match by full path here. */
+    spin_lock(&devtmpfs_lock);
+    struct dev_entry *e = dev_list;
+    while (e) {
+      int i;
+      for (i = 0; name[i] && e->name[i]; i++) {
+        if (name[i] != e->name[i])
+          break;
+      }
+      if (name[i] == '\0' && e->name[i] == '\0') {
+        spin_unlock(&devtmpfs_lock);
+        return e->ip;
+      }
+      e = e->next;
+    }
+    spin_unlock(&devtmpfs_lock);
+    return NULL;
+  }
+  /* No slash: flat lookup (original behavior) */
   spin_lock(&devtmpfs_lock);
   struct dev_entry *e = dev_list;
   while (e) {
@@ -77,9 +179,20 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
   if (dev_count >= MAX_DEV_ENTRIES)
     return -ENOMEM;
 
-  /* Check if already exists */
+  /* Check if already exists (full path) */
   if (devtmpfs_lookup(name))
     return -EEXIST;
+
+  /* If path contains '/', create the subdirectory first */
+  const char *slash = name;
+  while (*slash && *slash != '/')
+    slash++;
+  if (*slash == '/') {
+    int dir_len = slash - name;
+    spin_lock(&devtmpfs_lock);
+    devtmpfs_get_or_create_dir(name, dir_len);
+    spin_unlock(&devtmpfs_lock);
+  }
 
   spin_lock(&devtmpfs_lock);
 
@@ -110,7 +223,7 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
     ip->shm = NULL;
   }
 
-  /* Fill entry */
+  /* Fill entry — store full path including any '/' */
   int i;
   for (i = 0; name[i] && i < 31; i++)
     dev_entries[slot].name[i] = name[i];

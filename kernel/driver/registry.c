@@ -36,6 +36,12 @@ void driver_pci_match(void) {
       pci_device *dev = pci_find_device_by_id((uint16_t)drv->pci_vendor,
                                               (uint16_t)drv->pci_device);
       if (dev) {
+        if (drv->pci_subsystem_id != 0) {
+          /* Read subsystem id from config space (offset 0x2C bits 16-31) */
+          uint32_t sub = pci_read_config(dev->bus, dev->dev, dev->func, 0x2C);
+          if ((sub >> 16) != drv->pci_subsystem_id)
+            continue; /* skip: subsystem mismatch */
+        }
         printk(LOG_INFO,
                "driver_pci_match: %s -> PCI %02x:%02x.%02x (vendor/device)\n",
                drv->name, dev->bus, dev->dev, dev->func);
