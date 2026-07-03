@@ -63,14 +63,6 @@ static inline void __thread_table_unlock_fn(void) {
     __atomic_clear(&__thread_table_lock, __ATOMIC_RELEASE);
 }
 
-static void thread_table_insert(pid_t tid, volatile int32_t *clear_tid_addr) {
-    if (tid >= 0 && tid < MAX_PROC) {
-        thread_table[tid].tid = tid;
-        thread_table[tid].clear_tid_addr = clear_tid_addr;
-        thread_table[tid].detached = 0;
-    }
-}
-
 // 认领一个空闲 slot，置 CLAIMED。持 __thread_table_lock 调用。
 static struct thread_entry *thread_table_claim(struct tcb *tcb) {
     __thread_table_lock_fn();
