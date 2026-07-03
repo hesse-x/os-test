@@ -123,6 +123,7 @@ void proc_init() {
         tasks[i].tls_total = 0;
         tasks[i].user_stack_base = 0;
         tasks[i].user_stack_size = 0;
+        tasks[i].need_resched = 0;
         // POSIX fields (sig, sid, pgid, ctty, exit_code) are in proc (NULL = no POSIX semantics)
     }
     cpu_locals[0]._cur_proc = NULL;
@@ -384,6 +385,7 @@ void schedule() {
 
     uint64_t flags;
     spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
+    prev->need_resched = 0;  // consume flag: schedule() called = flag cleared
 
     // Check if run_queue has a runnable process
     if (list_empty(&cpu_locals[my_cpu].run_queue)) {
@@ -633,6 +635,7 @@ void task_reap(xtask_t *proc) {
     proc->tls_total = 0;
     proc->user_stack_base = 0;
     proc->user_stack_size = 0;
+    proc->need_resched = 0;
     // proc->fpu_page intentionally preserved (lazy reclaim, 见函数顶部清单)
     spin_unlock(&tasks_lock);
 }

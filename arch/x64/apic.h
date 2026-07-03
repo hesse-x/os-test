@@ -68,6 +68,9 @@
 // any device interrupt (MSI vectors 64-95 = class 4-5). Vector 120 = 0x78.
 #define LAPIC_TIMER_VECTOR 0x78
 
+// Reschedule IPI vector — 0xec (236), same as Linux RESCHEDULE_VECTOR
+#define RESCHEDULE_VECTOR 0xec
+
 extern void __iomem *lapic_vaddr;
 extern void __iomem *ioapic_vaddr;
 
@@ -116,5 +119,8 @@ extern uint64_t tsc_per_ms;     // TSC ticks per millisecond
 
 // Monotonic nanosecond clock since boot (TSC-based)
 uint64_t sched_clock();
+
+// Reschedule IPI
+void lapic_send_reschedule(int target_cpu);
 
 #endif // ARCH_X64_APIC_H

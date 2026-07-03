@@ -49,29 +49,46 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3,
     struct futex_bucket *bucket = &futex_table[futex_hash(&key)];
 
     if (real_op == FUTEX_WAKE) {
-        // 1. 持 bucket lock 收集 waiter
-        xtask_t *to_wake[MAX_PROC];
-        int nwake = 0;
-        uint64_t bflags;
-        spin_lock_irqsave(&bucket->lock, &bflags);
-        list_node_t *node = bucket->waiters.next;
-        while (node != &bucket->waiters && nwake < (int)val) {
-            proc_t *p = LIST_ENTRY(node, proc_t, futex_node);
-            node = node->next;
-            if (p->futex_uaddr == uaddr) {
-                to_wake[nwake++] = p->xtask;
-                list_remove(&p->futex_node);
-                p->futex_uaddr = 0;
+        // 收集 waiter 后释放 bucket lock 再唤醒：wake_with_event 会取 target 的
+        // scheduler_lock，持 bucket lock 唤醒会形成 bucket→scheduler 锁序嵌套。
+        //
+        // 注意：曾在栈上分配 xtask_t *to_wake[MAX_PROC]（8KB）收集 waiter，但
+        // 内核栈仅 2 页（8KB），该数组直接占满整栈并向下溢出，踩坏栈下方相邻的
+        // slab 对象（典型现象：sys_exit 的 clear_tid futex_wake 后 signal->parent_pid
+        // 变成栈残留垃圾，do_exit 访问 parent->proc->sig_pending 触发 #PF）。
+        // 改为分批：每批用小固定数组收集 ≤32 个并唤醒，循环至 wake 满 val 个
+        // 或 bucket 无更多匹配 waiter。futex wake 语义是"最多唤醒 val 个"，分批
+        // 等价。val 来自用户态不可信，分批同时规避了大 val 的栈/堆开销。
+        #define FUTEX_WAKE_BATCH 32
+        int total_woken = 0;
+        while (total_woken < (int)val) {
+            xtask_t *to_wake[FUTEX_WAKE_BATCH];
+            int nwake = 0;
+            uint64_t bflags;
+            spin_lock_irqsave(&bucket->lock, &bflags);
+            list_node_t *node = bucket->waiters.next;
+            int batch = (int)val - total_woken;
+            if (batch > FUTEX_WAKE_BATCH) batch = FUTEX_WAKE_BATCH;
+            while (node != &bucket->waiters && nwake < batch) {
+                proc_t *p = LIST_ENTRY(node, proc_t, futex_node);
+                node = node->next;
+                if (p->futex_uaddr == uaddr) {
+                    to_wake[nwake++] = p->xtask;
+                    list_remove(&p->futex_node);
+                    p->futex_uaddr = 0;
+                }
             }
+            spin_unlock_irqrestore(&bucket->lock, bflags);
+            for (int i = 0; i < nwake; i++) {
+                wake_with_event(to_wake[i], WAIT_FUTEX);
+            }
+            total_woken += nwake;
+            if (nwake < batch) break;  // bucket 已无更多匹配 waiter
         }
-        spin_unlock_irqrestore(&bucket->lock, bflags);
         printk(LOG_DEBUG, "futex WAKE: pid=%d uaddr=%p val=%d nwake=%d\n",
-               (int)cur->pid, (void *)uaddr, (int)val, nwake);
-        // 2. 释放后唤醒
-        for (int i = 0; i < nwake; i++) {
-            wake_with_event(to_wake[i], WAIT_FUTEX);
-        }
-        return (int64_t)nwake;
+               (int)cur->pid, (void *)uaddr, (int)val, total_woken);
+        return (int64_t)total_woken;
+        #undef FUTEX_WAKE_BATCH
     }
 
     // FUTEX_WAIT

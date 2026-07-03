@@ -7,6 +7,7 @@
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/xtask.h"
 #include "kernel/xcore/trap.h"
+#include "kernel/xcore/sched.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/xtask.h"
 #include "kernel/xcore/log.h"
@@ -162,7 +163,10 @@ void check_pending_signals(trapframe_t *tf) {
             spin_unlock(&proc->proc->signal->sig_lock);
         }
 
-        if (sig <= 0 || sig >= NSIG) return;
+        // bug.md Bug 2 (ls 卡死): 无信号也要返用户态,必须 break 落到循环后的
+        // 抢占点 while(need_resched) schedule()。原 `return` 使该点对所有"返用户态"
+        // 路径不可达 → need_resched 置了不兑现 → shell 永不被调度。
+        if (sig <= 0 || sig >= NSIG) break;
 
         // SIGCANCEL: 不走 sigaction 表，内核直接投递到 cancel_handler
         if (sig == SIGCANCEL) {
@@ -180,7 +184,7 @@ void check_pending_signals(trapframe_t *tf) {
             sa.sa_mask = 0;
             sa.sa_flags = 0;
             deliver_signal(proc, tf, sig, &sa);
-            return;
+            break;  // 投递后返用户态跑 handler:落到抢占点
         }
 
         sigaction_t *sa = &proc->proc->signal->action[sig];
@@ -218,8 +222,15 @@ void check_pending_signals(trapframe_t *tf) {
             continue;
         } else {
             deliver_signal(proc, tf, sig, sa);
-            return;
+            break;  // 投递后返用户态跑 handler:落到抢占点
         }
+    }
+
+    // Reschedule loop: keep calling schedule() until need_resched is cleared.
+    // schedule() clears need_resched at entry; if re-set by another IPI/wake
+    // before returning to user mode, loop continues until no resched needed.
+    while (current_task->need_resched) {
+        schedule();
     }
 }
 

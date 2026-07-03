@@ -64,7 +64,7 @@ int64_t sys_ioperm(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_gettid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // IRQ registration
-#define MAX_IRQ_HANDLERS 128
+#define MAX_IRQ_HANDLERS 256
 typedef void (*irq_handler_t)(trapframe_t *);
 typedef int64_t (*syscall_fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 void register_irq(int vec, irq_handler_t fn);

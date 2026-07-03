@@ -136,6 +136,17 @@ static void map_apic_mmio(uint64_t lapic_phys, uint64_t ioapic_phys) {
   ioapic_vaddr = (void __iomem __force *)(apic_vma + (ioapic_phys - region_start));
 }
 
+// Send reschedule IPI to target CPU (Fixed delivery, physical destination, vector 0xec)
+__attribute__((no_sanitize("kernel-address")))
+void lapic_send_reschedule(int target_cpu) {
+    uint32_t apic_id = cpu_locals[target_cpu].apic_id;
+    while (lapic_read(LAPIC_ICR_LOW) & 0x1000)  // wait delivery idle
+        __asm__ volatile("pause");
+    lapic_write(LAPIC_ICR_HIGH, (uint64_t)apic_id << 24);
+    // Fixed IPI, physical destination, vector = RESCHEDULE_VECTOR (0xec)
+    lapic_write(LAPIC_ICR_LOW, 0x00004000 | RESCHEDULE_VECTOR);
+}
+
 // ===================== APIC init =====================
 void apic_init() {
   uint64_t lapic_phys = g_madt.lapic_base;

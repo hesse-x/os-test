@@ -637,4 +637,10 @@ vector127:
   pushq $127
   jmp __alltraps
 
+.globl vector236
+vector236:
+  pushq $0
+  pushq $236
+  jmp __alltraps
+
     .section .note.GNU-stack,"",@progbits

@@ -21,6 +21,7 @@ V(96) V(97) V(98) V(99) V(100) V(101) V(102) V(103)
 V(104) V(105) V(106) V(107) V(108) V(109) V(110) V(111)
 V(112) V(113) V(114) V(115) V(116) V(117) V(118) V(119)
 V(120) V(121) V(122) V(123) V(124) V(125) V(126) V(127)
+void vector236();
 #undef V
 
 static uint64_t __vectors[IDT_ENTRIES] = {
@@ -41,6 +42,7 @@ static uint64_t __vectors[IDT_ENTRIES] = {
     V(104) V(105) V(106) V(107) V(108) V(109) V(110) V(111)
     V(112) V(113) V(114) V(115) V(116) V(117) V(118) V(119)
     V(120) V(121) V(122) V(123) V(124) V(125) V(126) V(127)
+    (uint64_t)vector236,
 #undef V
 };
 
@@ -81,6 +83,7 @@ void idt_install() {
   set_idt_gate(2, (uint64_t)vector2, 0x8E, 1);   // NMI → IST1
   set_idt_gate(8, (uint64_t)vector8, 0x8E, 2);   // Double Fault → IST2
   set_idt_gate(18, (uint64_t)vector18, 0x8E, 3);  // Machine Check → IST3
+  set_idt_gate(0xec, (uint64_t)vector236, 0x8E, 0);  // Reschedule IPI → RSP0 (no IST)
   set_idt();
 }
 

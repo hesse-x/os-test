@@ -453,7 +453,6 @@ struct dirent *readdir(DIR *dirp) {
         dir->buf_pos = 0;
         dir->buf_len = (size_t)n;
     }
-
     // Parse current dirent64 entry
     struct dirent64 *d64 = (struct dirent64 *)(dir->buf + dir->buf_pos);
     static struct dirent result;

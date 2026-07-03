@@ -55,7 +55,13 @@ static struct thread_entry thread_table[MAX_PROC];
 
 static volatile int __thread_table_lock = 0;
 static inline void __thread_table_lock_fn(void) {
-    while (!__atomic_test_and_set(&__thread_table_lock, __ATOMIC_ACQUIRE)) {
+    // __atomic_test_and_set 返回旧值：旧值!=0（已锁）返回 true 需重试，旧值==0（未锁）
+    // 返回 false 获得锁。故条件为 while(__atomic_test_and_set(...))。
+    // 之前误写成 while(!...) 导致逻辑反转：锁空闲时反而进循环自旋，锁被持有时反而
+    // 立即"获得"（与持有者并发进入临界区）。单线程下靠 sched_yield 后第二次重试
+    // 偶然退出而"能工作"；多线程竞争 stress 场景下表现为永久 sched_yield 不返回
+    // （bug.md Bug 2：test_futex_stress 第一个 pthread_create 卡在 thread_table_activate）。
+    while (__atomic_test_and_set(&__thread_table_lock, __ATOMIC_ACQUIRE)) {
         sched_yield();
     }
 }

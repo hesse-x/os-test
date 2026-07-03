@@ -16,7 +16,7 @@
 #include "xos/signal.h"
 
 // ===================== IRQ handler registry =====================
-#define MAX_IRQ_HANDLERS 128
+#define MAX_IRQ_HANDLERS 256
 static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS];
 
 // ===================== IRQ owner (user-space driver binding) =====================
@@ -362,6 +362,20 @@ void trap_dispatch(trapframe_t *tf) {
 }
 
 // ===================== Timer IRQ handler =====================
+// Reschedule IPI handler: set need_resched flag on current task and EOI.
+// 严格照 ipi.md 决策 #1（c1 模型）：handler 只设标志，不调 schedule()。
+// 抢占统一由返用户态出口 check_pending_signals 的 while(need_resched) schedule() 完成。
+//
+// bug.md Bug 2 死锁根因：此前此处对 tf->cs==0x2B 直接调 schedule()，会在 IPI 中断
+// 上下文里重入 schedule()。若 IPI 打断的恰是一次正在执行的 schedule()（已持有本核
+// scheduler_lock），handler 重入 schedule() 取同一把锁 → 自旋死锁。表现为 cpu0 timer
+// 持续涨（timer 中断不需 scheduler_lock）但 sched 计数永久停住、idle phase=4。
+static void reschedule_ipi_handler(trapframe_t *tf) {
+    (void)tf;
+    current_task->need_resched = 1;
+    lapic_eoi();
+}
+
 static void timer_handler(trapframe_t *tf) {
   tick++;
   lapic_eoi();
@@ -427,8 +441,28 @@ static void timer_handler(trapframe_t *tf) {
     if (signal_check_hook && current_task->proc) {
         signal_check_hook(current_task, tf);
     }
-    schedule();
+    current_task->need_resched = 1;  // 只设标志,出口由 check_pending_signals 统一调 schedule()
   }
+
+#ifndef NDEBUG
+  // Preempt-stall watchdog（仅 debug）：need_resched 被置位后若连续 N 个 timer tick 仍未被
+  // schedule() 消费（schedule 入口会清 need_resched），即抢占点被绕过——历史上 bug.md
+  // Bug 2 (ls 卡死) 即 check_pending_signals 的 reschedule 循环不可达所致。打一行告警直接
+  // 指向抢占路径，避免再误判到 work stealing / load balance。release 构建零开销。
+  {
+    int cpu = get_cpu_local()->cpu_id;
+    if (current_task && current_task->need_resched) {
+      if (++cpu_locals[cpu].preempt_stall_ticks >= 100) {  // ~1s 未兑现
+        printk(LOG_WARN, "PREEMPT-STALLED cpu%d pid%d need_resched 持续 %u tick 未兑现, "
+               "本核 run_queue ready=%d（抢占点被绕过？check check_pending_signals）\n",
+               cpu, current_task->pid, cpu_locals[cpu].preempt_stall_ticks,
+               cpu_locals[cpu].run_count);
+      }
+    } else {
+      cpu_locals[cpu].preempt_stall_ticks = 0;
+    }
+  }
+#endif
 }
 
 void isr_init() {
@@ -439,6 +473,7 @@ void isr_init() {
 
   // Register default handlers
   register_irq(LAPIC_TIMER_VECTOR, timer_handler);
+  register_irq(RESCHEDULE_VECTOR, reschedule_ipi_handler);
 
   // Re-initialize GDT with per-CPU setup (now running at virtual address)
   smp_init_cpu(0, 0, (int64_t)&stack_bottom + 8192);

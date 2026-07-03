@@ -51,6 +51,12 @@ typedef struct cpu_local_t {
     // #NM nesting guard: detects fxrstor/fxsave executed with CR0.TS=1
     // (would nest #NM and blow the kernel stack into #DF). See fpu_lazy_switch.
     int nm_nesting_depth;
+
+    // Preempt-stall watchdog（仅 debug）：统计本核 need_resched 被置位后连续未兑现的
+    // timer tick 数。schedule() 入口清 need_resched → 计数归零。超阈值即抢占点被绕过
+    // （如 check_pending_signals 的 reschedule 循环不可达），打一行告警直接锁死抢占路径，
+    // 避免再绕进 work stealing 之类误判。release 构建不读不写，零开销。
+    uint32_t preempt_stall_ticks;
 } cpu_local_t;
 
 extern cpu_local_t cpu_locals[MAX_CPUS];

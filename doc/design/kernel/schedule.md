@@ -232,6 +232,10 @@
 
 当前直接返回 TSC cycle，未转换为纳秒。
 
+## 调试
+
+调度器卡死/抢占类问题的诊断手法（单字符进度链定位 idle_entry 阶段、per-CPU timer/sched 计数区分"本核哑火 vs 全局停摆"、preempt-stall watchdog 把"need_resched 被绕过"变成自动告警、持锁遍历验证"在队列里"）见 `doc/design/debug.md`。已实装的 preempt-stall watchdog 在 `kernel/xcore/trap.c` timer_handler，`#ifndef NDEBUG` 门控。
+
 ## 待完成项
 
 | 项目 | 说明 | 优先级 |

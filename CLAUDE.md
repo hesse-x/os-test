@@ -191,6 +191,7 @@ kernel/
 | `driver_workflow.md` | 用户态驱动工作流 |
 | `user_driver.md` | 用户态驱动详细设计 |
 | `terminal.md` | Terminal/PTY/串口设计（内核 PTY + 内核串口 + 用户态 ldisc + Shell） |
+| `debug.md` | 内核调试方法论（诊断输出克制、单字符进度链、per-CPU 计数器、watchdog、持锁遍历、偏移量陷阱） |
 
 内核设计见 `doc/design/kernel/`：
 

@@ -695,6 +695,11 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
     child->wait_event = WAIT_NONE;
     child->tgid = child->pid;
     child->mm = child_mm;
+    // fs_base 继承：fork 子进程共享父地址空间(COW)，父 TCB 页映射仍在子空间内，
+    // 必须继承父 fs_base 才能访问 errno/TLS。遗漏则子进程 FS_BASE=0，首次读
+    // errno(mov %fs:0)即 #PF 被杀（如 execve 失败后 libc wrapper 写 errno）。
+    // sys_clone 的 CLONE_SETTLS 分支单独处理 TLS，此处 fork 路径恒继承父值。
+    child->fs_base = parent->fs_base;
     child->iopm = NULL; // fork does not inherit IOPM
     child->recv_head = 0; child->recv_tail = 0; child->recv_lock = SPINLOCK_INIT;
     child->req_caller_pid = -1; child->req_reply_buf = NULL;

@@ -82,6 +82,7 @@ typedef struct xtask_t {
     uint64_t user_stack_base;       // user vaddr of stack base (incl guard)
     size_t   user_stack_size;       // stack+guard total size
 
+    uint8_t need_resched;           // 1 = current task must yield, checked at sched exit
     // === pointer to BSD extension data (Xcore does not interpret contents) ===
     struct proc *proc;  // NULL = idle/task without POSIX semantics
 } xtask_t;

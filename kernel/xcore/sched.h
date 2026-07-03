@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "kernel/xcore/xtask.h"
+#include "arch/x64/apic.h"
 
 // Scheduler and process table (kernel/xcore/sched.c)
 
@@ -32,6 +33,17 @@ static inline void wake_from_wait(xtask_t *p) {
     int cpu = p->assigned_cpu;
     list_push_back(&cpu_locals[cpu].run_queue, &p->run_node);
     cpu_locals[cpu].run_count++;
+
+    // Reschedule IPI: set need_resched on target CPU's current task
+    // (target is BLOCKED, not running; curr is what's actually running on that CPU)
+    xtask_t *curr = cpu_locals[cpu]._cur_proc;
+    if (curr != p) {
+        curr->need_resched = 1;
+        int my_cpu = get_cpu_local()->cpu_id;
+        if (cpu != my_cpu) {
+            lapic_send_reschedule(cpu);
+        }
+    }
 }
 
 // wake_with_event: 持 target 的 scheduler_lock，仅当 target 处于 BLOCKED 且
