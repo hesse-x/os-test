@@ -17,7 +17,6 @@
 #include "kernel/bsd/types.h"
 #include "kernel/driver/ahci.h"
 #include "kernel/driver/blk_dev.h"
-#include "kernel/driver/display.h"
 #include "kernel/driver/serial.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/log.h"
@@ -35,13 +34,13 @@
 
 void vfs_init(void) {
   // inode_init, page_cache_init, devtmpfs_init are called in kernel_main before
-  // driver_init
-  display_dev_register();
+  // driver_init. drm_dev_register() is called from virtio_gpu_init (driver_init).
   serial_dev_register();
   pty_init();
 
-  /* Try FAT32 on each AHCI port (disk.img may be on a different port
-     than boot.img, just like ELF loading in kernel_main). */
+  /* Try FAT32 on each AHCI port. disk.img is a single disk now (two
+     partitions: ESP + root), so the root FAT32 is on port 0 — but we
+     keep the multi-port scan for robustness. */
   int try_ports[] = {0, 1, 2, 3, 4, 5};
   int rc = -1;
   for (int pi = 0; pi < 6; pi++) {
@@ -89,6 +88,17 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   struct inode *ip = fat32_open(path, flags, &errno_val);
   if (!ip) {
     return errno_val;
+  }
+
+  /* Reject write access to directories (POSIX EISDIR). This also guards
+   * against a directory inode leaking into a writable fd: previously a
+   * FAT32 empty file collided with a devtmpfs dir inode at ino=0 and
+   * open(...,O_WRONLY|O_CREAT) silently returned a dir fd, which later
+   * crashed sys_read/sys_write. Returning EISDIR turns that into a
+   * userspace error instead of a kernel page fault. */
+  if (ip->type == INODE_DIR && (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC))) {
+    inode_put(ip);
+    return (int64_t)-EISDIR;
   }
 
   /* 4. Allocate fd (under fd_lock) */

@@ -13,6 +13,7 @@
 #     /usr/lib/libc.a
 #     /lib/{libc.so,ld.so}
 #     /local/{hello,hello_dyn}.elf
+#     /test/drm_test.elf          ← 仅 test 构建拷入 /test/
 #     /README
 #
 # The kernel gets init.elf from boot_info to create the init process, no longer needs a raw LBA slot.
@@ -105,7 +106,8 @@ if [ "$TEST" = "1" ]; then
                signal.elf poll.elf pci.elf ioctl.elf dev_vfs.elf \
                test_fpu.elf test_sse_smoke.elf pthread.elf \
                ld_test_single.elf ld_test_chain.elf \
-               ld_test_diamond.elf ld_test_cycle.elf; do
+               ld_test_diamond.elf ld_test_cycle.elf \
+               drm_test.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
     done
 fi

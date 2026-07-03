@@ -594,8 +594,8 @@ __attribute__((no_sanitize("kernel-address"))) void ahci_init() {
   ahci_alloc_dma();
 
   // Scan PI bitmap: probe each port with DET==3 via IDENTIFY DEVICE
-  // Scan ALL ports — with boot.img on port 0 and disk.img on port 2 (ide.1
-  // master), active_port ends up as port 2 (disk.img) where the ELF files live.
+  // Scan ALL ports — disk.img is a single disk (two partitions: ESP +
+  // root FAT32) on port 0; keep the multi-port scan for robustness.
   uint8_t idbuf[512];
   int disk_count = 0;
   active_port = -1;

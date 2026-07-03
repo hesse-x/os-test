@@ -70,9 +70,9 @@ void test_fstat_dir(void) {
   }
 }
 
-/* 4. fstat on /dev/kms → S_ISCHR */
+/* 4. fstat on /dev/dri/card0 → S_ISCHR */
 void test_fstat_dev(void) {
-  int fd = open("/dev/kms", O_RDWR);
+  int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
     struct stat st;
     int r = fstat(fd, &st);
@@ -81,7 +81,7 @@ void test_fstat_dev(void) {
 
     close(fd);
   } else {
-    /* KMS may not be available in test env */
+    /* DRM may not be available in test env */
     TEST_ASSERT_TRUE(1);
   }
 }
@@ -152,9 +152,9 @@ void test_isatty_regular(void) {
   close(fd);
 }
 
-/* 10. isatty on /dev/kms → 0 (KMS doesn't support TCGETS) */
+/* 10. isatty on /dev/dri/card0 → 0 (DRM doesn't support TCGETS) */
 void test_isatty_dev_kms(void) {
-  int fd = open("/dev/kms", O_RDWR);
+  int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
     int r = isatty(fd);
     TEST_ASSERT_EQUAL_INT(0, r);
@@ -176,21 +176,6 @@ void test_stat_regular(void) {
   TEST_ASSERT_EQUAL_INT(0, r);
   TEST_ASSERT_TRUE(S_ISREG(st.st_mode));
   TEST_ASSERT_EQUAL_INT(9, (int)st.st_size);
-}
-
-/* ---- Phase 1: dev_ops ioctl callback (KMS) ---- */
-
-/* 12. ioctl on /dev/kms with KMS_IOCTL_FLIP → success (0) */
-void test_ioctl_kms_flip(void) {
-  int fd = open("/dev/kms", O_RDWR);
-  if (fd >= 0) {
-    long r = ioctl(fd, KMS_IOCTL_FLIP, 0);
-    /* FLIP without prior CREATE_BUF may return -ENOENT or 0 */
-    TEST_ASSERT_TRUE(r == 0 || r == -ENOENT || errno == ENOENT);
-    close(fd);
-  } else {
-    TEST_ASSERT_TRUE(1);
-  }
 }
 
 /* ---- Phase 2: FD_DEV unified + serial dev_ops ---- */
@@ -309,9 +294,9 @@ void test_lseek_dev_serial(void) {
   }
 }
 
-/* 24. lseek on /dev/kms → ESPIPE */
+/* 24. lseek on /dev/dri/card0 → ESPIPE */
 void test_lseek_dev_kms(void) {
-  int fd = open("/dev/kms", O_RDWR);
+  int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
     off_t r = lseek(fd, 0, SEEK_SET);
     TEST_ASSERT_TRUE(r < 0);
@@ -383,34 +368,6 @@ void test_ioc_macros(void) {
   TEST_ASSERT_EQUAL_INT(_IOC_READ | _IOC_WRITE, _IOC_DIR(cmd_iowr));
 }
 
-/* 29. KMS ioctl CREATE_BUF with struct arg (via sys_ioctl) */
-void test_ioctl_kms_create_buf_arg(void) {
-  int fd = open("/dev/kms", O_RDWR);
-  if (fd >= 0) {
-    /* Try CREATE_BUF with unified struct arg */
-    struct display_ioctl_create_buf_arg arg;
-    memset(&arg, 0, sizeof(arg));
-    arg.width = 800;
-    arg.height = 600;
-    arg.bpp = 32;
-
-    int r = ioctl(fd, KMS_IOCTL_CREATE_BUF, &arg);
-    /* May succeed (0) or fail (-EBUSY if already initialized, -EINVAL if bad
-     * params) */
-    if (r == 0) {
-      /* Verify output fields were filled */
-      TEST_ASSERT_TRUE(arg.pitch > 0);
-      TEST_ASSERT_TRUE(arg.size > 0);
-      TEST_ASSERT_TRUE(arg.rows > 0);
-      TEST_ASSERT_TRUE(arg.cols > 0);
-      TEST_ASSERT_EQUAL_INT(0, arg.result);
-    }
-    close(fd);
-  } else {
-    TEST_ASSERT_TRUE(1);
-  }
-}
-
 /* 30. ioctl on /dev/kbd (user-space driver) — IPC proxy path */
 void test_ioctl_kbd_bind(void) {
   int fd = open("/dev/kbd", O_RDWR);
@@ -465,7 +422,6 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_isatty_regular);
   RUN_TEST(test_isatty_dev_kms);
   RUN_TEST(test_stat_regular);
-  RUN_TEST(test_ioctl_kms_flip);
   RUN_TEST(test_open_dev_serial);
   RUN_TEST(test_isatty_dev_serial);
   RUN_TEST(test_ioctl_serial_tcgets);
@@ -480,7 +436,6 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_fstat_dev_fs);
   /* Phase 8 */
   RUN_TEST(test_ioc_macros);
-  RUN_TEST(test_ioctl_kms_create_buf_arg);
   RUN_TEST(test_ioctl_kbd_bind);
   RUN_TEST(test_ioctl_serial_ioc_cmd);
   return UNITY_END();

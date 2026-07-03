@@ -1123,7 +1123,13 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     goto out;
   }
 
-  // FD_PIPE
+  // FD_PIPE — explicit type dispatch so any unhandled fd type returns
+  // -EINVAL instead of falling through into the pipe path (which once
+  // dereferenced NULL f->pipe on a directory fd and page-faulted).
+  if (f->type != FD_PIPE) {
+    ret = -EINVAL;
+    goto out;
+  }
   if (!(f->flags & (O_WRONLY | O_RDWR))) {
     ret = -EINVAL;
     goto out;
@@ -1142,6 +1148,10 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   }
 
   struct pipe *p = f->pipe;
+  if (!p) {
+    ret = -EBADF;
+    goto out;
+  }
   size_t written = 0;
 
   while (written < len) {
@@ -1431,7 +1441,13 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     goto out;
   }
 
-  // FD_PIPE
+  // FD_PIPE — explicit type dispatch so any unhandled fd type returns
+  // -EINVAL instead of falling through into the pipe path (which once
+  // dereferenced NULL f->pipe on a directory fd and page-faulted).
+  if (f->type != FD_PIPE) {
+    ret = -EINVAL;
+    goto out;
+  }
   if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR)) {
     ret = -EINVAL;
     goto out;
@@ -1450,6 +1466,10 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   }
 
   struct pipe *p = f->pipe;
+  if (!p) {
+    ret = -EBADF;
+    goto out;
+  }
 
   while (p->head == p->tail) {
     if (refcount_read(&p->p_count) == 1) {
@@ -1709,34 +1729,32 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       goto out;
     }
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-    printk(LOG_DEBUG, "sys_ioctl: pid=%d fd=%d cmd=0x%x driver_pid=%d\n",
-           proc->pid, fd, cmd, ops->driver_pid);
     if (ops->driver_pid == 0) {
       if (!ops->ioctl) {
         ret = -(int64_t)ENOTTY;
         goto out;
       }
 
-      uint8_t kbuf[64];
+      /* 256B buffer accommodates DRM ioctl structs (max drm_mode_crtc=104B).
+         User-space driver path below still uses 56B req_data (unchanged). */
+      uint8_t kbuf[256];
       __memset(kbuf, 0, sizeof(kbuf));
 
-      if ((_IOC_DIR(cmd) & _IOC_WRITE) && (__force uint64_t)arg != 0) {
-        uint16_t arg_size = _IOC_SIZE(cmd);
-        if (arg_size > 48) {
+      uint16_t arg_size = _IOC_SIZE(cmd);
+      uint8_t dir = _IOC_DIR(cmd);
+      if ((__force uint64_t)arg != 0 && (dir & _IOC_WRITE) && arg_size > 0) {
+        if (arg_size > 240) {
           ret = -(int64_t)EINVAL;
           goto out;
         }
-        if (arg_size > 0)
-          copy_from_user(kbuf, arg, arg_size);
+        copy_from_user(kbuf, arg, arg_size);
       }
 
       long result = ops->ioctl(cmd, kbuf);
 
-      if ((_IOC_DIR(cmd) & _IOC_READ) && (__force uint64_t)arg != 0 &&
-          result >= 0) {
-        uint16_t arg_size = _IOC_SIZE(cmd);
-        if (arg_size > 0 && arg_size <= 48)
-          copy_to_user(arg, kbuf, arg_size);
+      if ((__force uint64_t)arg != 0 && (dir & _IOC_READ) && result >= 0 &&
+          arg_size > 0 && arg_size <= 240) {
+        copy_to_user(arg, kbuf, arg_size);
       }
 
       ret = (int64_t)result;

@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "common/ioctl.h"
+#include "xos/ioctl.h"
 
 /* ===== DRM ioctl base ===== */
 #define DRM_IOCTL_BASE 'd'
@@ -56,9 +56,11 @@ struct drm_set_client_cap {
 
 /* ===== auth / master ===== */
 #define DRM_IOCTL_GET_MAGIC        _DRM_IOR(0x02, struct drm_auth)
-#define DRM_IOCTL_AUTH_MAGIC       _DRM_IOW(0x03, struct drm_auth)
-#define DRM_IOCTL_SET_MASTER       _DRM_IO(0x04)
-#define DRM_IOCTL_DROP_MASTER      _DRM_IO(0x05)
+#define DRM_IOCTL_AUTH_MAGIC       _DRM_IOW(0x11, struct drm_auth)
+#define DRM_IOCTL_SET_MASTER       _DRM_IO(0x1e)
+#define DRM_IOCTL_DROP_MASTER      _DRM_IO(0x1f)
+
+#define DRM_IOCTL_GEM_CLOSE        _DRM_IOW(0x09, struct drm_gem_close)
 
 struct drm_auth {
     int magic;
@@ -297,6 +299,12 @@ struct drm_event_vblank {
 #define DRM_IOCTL_MODE_OBJ_SETPROPERTY  _DRM_IOW(0xBD, struct drm_mode_obj_set_property)
 #define DRM_IOCTL_PRIME_HANDLE_TO_FD  _DRM_IOWR(0x2D, struct drm_prime_handle)
 #define DRM_IOCTL_PRIME_FD_TO_HANDLE  _DRM_IOWR(0x2E, struct drm_prime_handle)
+
+/* ===== GEM ===== */
+struct drm_gem_close {
+    uint32_t handle;
+    uint32_t pad;
+};
 
 struct drm_mode_get_property { uint32_t dummy; };  /* stub layout */
 struct drm_mode_connector_set_property { uint32_t dummy; };

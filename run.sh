@@ -30,8 +30,7 @@ qemu-system-x86_64 \
     -device qemu-xhci,id=xhci \
     -device usb-kbd,bus=xhci.0 \
     -device usb-mouse,bus=xhci.0 \
-    -vga none -device bochs-display -m 512M -bios /usr/share/ovmf/OVMF.fd \
-    -device virtio-gpu-pci \
+    -vga none -device virtio-gpu-pci -m 512M -bios /usr/share/ovmf/OVMF.fd \
     -smp 2 \
     $SERIAL_OPTS \
     $@

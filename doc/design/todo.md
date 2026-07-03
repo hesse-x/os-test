@@ -25,6 +25,31 @@
 
 **不在验收范围内**：wl_pointer/鼠标、xdg-shell/window decoration、wl_output 详细模式通告、客户端库封装（验收只需要 test client）
 
+## virtio-gpu + DRM/KMS 迁移（阶段 1 完成）
+
+内核侧设计见 [kernel/drm.md](kernel/drm.md) + [kernel/virtio.md](kernel/virtio.md) + [kernel/virtio_gpu.md](kernel/virtio_gpu.md)。
+
+- [x] Phase 0: devtmpfs 子目录支持 + `common/drm.h`
+- [x] Phase 1: virtio-pci modern transport + split virtqueue
+- [x] Phase 2: virtio-gpu 命令层（CREATE_RESOURCE_2D / ATTACH_BACKING / TRANSFER_TO_HOST_2D / SET_SCANOUT / FLUSH）
+- [x] Phase 3: DRM/KMS ioctl + `drm_test`
+- [x] Phase 4: 删除 bochs-display + terminal 改造为 DRM backend + QEMU 配置 + 文档
+
+## 阶段 2 待办（mesa 接入）
+
+- [ ] GEM / PRIME fd 跨进程 buffer 共享
+- [ ] atomic commit（替代当前 SETCRTC + PAGE_FLIP 的非原子序列）
+- [ ] EDID 协商 + 多分辨率（当前硬编码 800×600@60）
+- [ ] libdrm 二进制接入（当前用户态直连 DRM ioctl，未走 libdrm）
+- [ ] `modetest`/`weston` 验证
+
+## 阶段 3 待办（Vulkan Wayland）
+
+- [ ] syncobj / explicit fence
+- [ ] atomic commit（完整）
+- [ ] Venus（Vulkan over virtio-gpu）
+- [ ] Wayland 合成器
+
 ## 中期目标 — Wayland 核心协议
 
 ### Phase 2: Wayland 用户态服务

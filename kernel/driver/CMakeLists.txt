@@ -4,6 +4,6 @@
 
 add_kernel_object(driver_obj
     SOURCES init.c registry.c
-            ahci.c xhci.c pci.c display.c serial.c blk_dev.c
+            ahci.c xhci.c pci.c serial.c blk_dev.c
             virtio_pci.c virtio_ring.c virtio_gpu.c
 )

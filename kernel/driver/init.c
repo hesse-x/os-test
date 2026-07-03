@@ -17,7 +17,6 @@
 extern dev_driver ahci_driver;
 extern dev_driver xhci_driver;
 extern dev_driver virtio_gpu_driver;
-extern dev_driver display_driver;
 extern dev_driver serial_driver;
 
 void driver_init(void) {
@@ -28,7 +27,6 @@ void driver_init(void) {
   driver_register(&ahci_driver);
   driver_register(&xhci_driver);
   driver_register(&virtio_gpu_driver);
-  driver_register(&display_driver);
   driver_register(&serial_driver);
 
   // PCI class/vendor auto-match: calls init() for matched drivers

@@ -92,9 +92,9 @@ void test_pci_scan_all(void) {
   TEST_ASSERT_TRUE(found_count >= 1);
 }
 
-/* 5. open /dev/kms returns valid fd */
+/* 5. open /dev/dri/card0 returns valid fd */
 void test_open_dev_kms(void) {
-  int fd = open("/dev/kms", O_RDWR);
+  int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
     close(fd);
   }
@@ -110,9 +110,9 @@ void test_open_dev_fs(void) {
   TEST_ASSERT_TRUE(1);
 }
 
-/* 7. fstat on /dev/kms → S_ISCHR */
+/* 7. fstat on /dev/dri/card0 → S_ISCHR */
 void test_fstat_dev_kms(void) {
-  int fd = open("/dev/kms", O_RDWR);
+  int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
     struct stat st;
     int r = fstat(fd, &st);
@@ -125,9 +125,9 @@ void test_fstat_dev_kms(void) {
   }
 }
 
-/* 8. isatty on /dev/kms → 0 (KMS doesn't support TCGETS) */
+/* 8. isatty on /dev/dri/card0 → 0 (KMS doesn't support TCGETS) */
 void test_isatty_dev_kms(void) {
-  int fd = open("/dev/kms", O_RDWR);
+  int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
     int r = isatty(fd);
     TEST_ASSERT_EQUAL_INT(0, r);

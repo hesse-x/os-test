@@ -428,15 +428,15 @@ int ioctl(int fd, uint32_t cmd, ...) {
     return (int)rc;
   }
 
-  // Properly encoded ioctls: use 64B stack buffer for kernel communication.
-  // For proxy path, kernel writes 56B reply into this buffer via sys_resp.
-  // This avoids the caller's original arg being smaller than 56B.
-  if (arg_size > 48) {
+  // Properly encoded ioctls: use 256B stack buffer for kernel communication.
+  // 256B accommodates DRM ioctl structs (max drm_mode_crtc=104B) and the
+  // 56B reply used by the user-space driver proxy path.
+  if (arg_size > 240) {
     errno = EINVAL;
     return -1;
   }
 
-  uint8_t buf[64];
+  uint8_t buf[256];
   __builtin_memset(buf, 0, sizeof(buf));
 
   // Copy-in: user arg → buf (only if direction includes WRITE)

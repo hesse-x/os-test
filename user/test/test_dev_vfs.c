@@ -26,24 +26,14 @@ void tearDown(void) {}
 
 /* ===== Phase 1: dev_ops → file_operations (callback dispatch) ===== */
 
-/* 1. KMS ioctl via callback: KMS_IOCTL_FLIP on uninit → -ENOENT or 0 */
-void test_dev_vfs_kms_ioctl_flip(void) {
-  int fd = open("/dev/kms", O_RDWR);
-  if (fd >= 0) {
-    long r = ioctl(fd, KMS_IOCTL_FLIP, 0);
-    TEST_ASSERT_TRUE(r == 0 || (r < 0 && (errno == ENOENT || errno == EINVAL)));
-    close(fd);
-  } else {
-    TEST_ASSERT_TRUE(1);
-  }
-}
+/* 1. (removed in Phase 4: KMS FLIP retired with bochs-display) */
 
-/* 2. KMS mmap via callback: mmap MAP_SHARED on /dev/kms */
+/* 2. DRM mmap via callback: mmap MAP_SHARED on /dev/dri/card0 */
 void test_dev_vfs_kms_mmap(void) {
-  int fd = open("/dev/kms", O_RDWR);
+  int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
-    /* Try mmap — without CREATE_BUF, the handler returns 0 (failure).
-     * With CREATE_BUF it would map the back buffer. Test both paths. */
+    /* Without CREATE_DUMB, the handler returns 0 (no matching buffer).
+     * With CREATE_DUMB it would map the dumb buffer. Test both paths. */
     void *p =
         mmap(NULL, 800 * 4 * 600, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (p && p != MAP_FAILED) {
@@ -51,7 +41,7 @@ void test_dev_vfs_kms_mmap(void) {
       ((volatile char *)p)[0] = 0x42;
       munmap(p, 800 * 4 * 600);
     }
-    /* Either NULL (no back buffer yet) or a valid mapping is acceptable */
+    /* Either NULL (no dumb buffer yet) or a valid mapping is acceptable */
     close(fd);
   }
   TEST_ASSERT_TRUE(1);
@@ -59,7 +49,7 @@ void test_dev_vfs_kms_mmap(void) {
 
 /* 3. KMS ioctl with unknown cmd → ENOTTY or EINVAL */
 void test_dev_vfs_kms_ioctl_unknown(void) {
-  int fd = open("/dev/kms", O_RDWR);
+  int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
     long r = ioctl(fd, 0xFFFF, 0);
     TEST_ASSERT_TRUE(r < 0);
@@ -188,9 +178,9 @@ void test_dev_vfs_serial_devtmpfs_path(void) {
   close(fd);
 }
 
-/* 12. open("/dev/kms") goes through devtmpfs */
+/* 12. open("/dev/dri/card0") goes through devtmpfs */
 void test_dev_vfs_kms_devtmpfs_path(void) {
-  int fd = open("/dev/kms", O_RDWR);
+  int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
     struct stat st;
     int r = fstat(fd, &st);
@@ -308,9 +298,9 @@ void test_dev_vfs_dev_create(void) {
 /* 23. devtmpfs_cleanup_pid: device nodes removed when driver exits (indirect)
  */
 void test_dev_vfs_cleanup(void) {
-  /* Indirect test: /dev/kms and /dev/serial are kernel devices
+  /* Indirect test: /dev/dri/card0 and /dev/serial are kernel devices
    * and should persist. Only user-space driver nodes get cleaned. */
-  int fd1 = open("/dev/kms", O_RDWR);
+  int fd1 = open("/dev/dri/card0", O_RDWR);
   int fd2 = open("/dev/serial", O_RDWR);
   /* At minimum serial should exist (kernel device) */
   TEST_ASSERT_TRUE(fd2 >= 0);
@@ -405,9 +395,9 @@ void test_dev_vfs_fcntl_setfl(void) {
   close(fd);
 }
 
-/* 29. mmap MAP_SHARED on /dev/kms → kernel auto resolves via dev_ops.mmap */
+/* 29. mmap MAP_SHARED on /dev/dri/card0 → kernel auto resolves via dev_ops.mmap */
 void test_dev_vfs_kms_mmap_shared(void) {
-  int fd = open("/dev/kms", O_RDWR);
+  int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
     /* Without CREATE_BUF, mmap returns NULL (no back buffer).
      * Test that the kernel path works without crashing. */
@@ -445,28 +435,7 @@ void test_dev_vfs_pipe_dev_coexist(void) {
 
 /* ===== Cross-phase integration ===== */
 
-/* 31. Full /dev/kms lifecycle: open → ioctl FLIP → fstat → close */
-void test_dev_vfs_kms_lifecycle(void) {
-  int fd = open("/dev/kms", O_RDWR);
-  if (fd >= 0) {
-    /* fstat */
-    struct stat st;
-    int r = fstat(fd, &st);
-    TEST_ASSERT_EQUAL_INT(0, r);
-    TEST_ASSERT_TRUE(S_ISCHR(st.st_mode));
-
-    /* ioctl */
-    long ir = ioctl(fd, KMS_IOCTL_FLIP, 0);
-    TEST_ASSERT_TRUE(ir == 0 || ir < 0);
-
-    /* isatty → 0 (KMS is not a tty) */
-    TEST_ASSERT_EQUAL_INT(0, isatty(fd));
-
-    close(fd);
-  } else {
-    TEST_ASSERT_TRUE(1);
-  }
-}
+/* 31. (removed in Phase 4: KMS FLIP retired with bochs-display) */
 
 /* 32. Full /dev/serial lifecycle: open → write → fstat → poll → close → reopen
  */
@@ -501,10 +470,10 @@ void test_dev_vfs_serial_lifecycle(void) {
   close(fd);
 }
 
-/* 33. /dev/serial and /dev/kms have distinct inodes */
+/* 33. /dev/serial and /dev/dri/card0 have distinct inodes */
 void test_dev_vfs_distinct_inodes(void) {
   int serial_fd = open("/dev/serial", O_RDWR);
-  int kms_fd = open("/dev/kms", O_RDWR);
+  int kms_fd = open("/dev/dri/card0", O_RDWR);
 
   if (serial_fd >= 0 && kms_fd >= 0) {
     struct stat st_serial, st_kms;
@@ -544,31 +513,7 @@ void test_dev_vfs_fstat_fs(void) {
 
 /* ===== Phase 8: ioctl IPC proxy ===== */
 
-/* 36. KMS ioctl via sys_ioctl with struct arg (copy_to_user path) */
-void test_dev_vfs_kms_ioctl_struct_arg(void) {
-  int fd = open("/dev/kms", O_RDWR);
-  if (fd >= 0) {
-    struct display_ioctl_create_buf_arg arg;
-    memset(&arg, 0, sizeof(arg));
-    arg.width = 800;
-    arg.height = 600;
-    arg.bpp = 32;
-
-    int r = ioctl(fd, KMS_IOCTL_CREATE_BUF, &arg);
-    if (r == 0) {
-      /* Kernel filled output fields via copy_to_user */
-      TEST_ASSERT_TRUE(arg.pitch == 800 * 4);
-      TEST_ASSERT_TRUE(arg.size == 800 * 4 * 600);
-      TEST_ASSERT_TRUE(arg.rows > 0);
-      TEST_ASSERT_TRUE(arg.cols > 0);
-      TEST_ASSERT_EQUAL_INT(0, arg.result);
-    }
-    /* If -EBUSY (already initialized by terminal), that's also valid */
-    close(fd);
-  } else {
-    TEST_ASSERT_TRUE(1);
-  }
-}
+/* 36. (removed in Phase 4: KMS CREATE_BUF retired with bochs-display) */
 
 /* 37. ioctl INPUT_BIND on /dev/kbd (IPC proxy path) */
 void test_dev_vfs_kbd_ioctl_proxy(void) {
@@ -591,17 +536,7 @@ void test_dev_vfs_kbd_ioctl_proxy(void) {
   }
 }
 
-/* 38. KMS FLIP via sys_ioctl (no arg) */
-void test_dev_vfs_kms_flip_ioctl(void) {
-  int fd = open("/dev/kms", O_RDWR);
-  if (fd >= 0) {
-    long r = ioctl(fd, KMS_IOCTL_FLIP, 0);
-    TEST_ASSERT_TRUE(r == 0 || (r < 0 && (errno == ENOENT || errno == EINVAL)));
-    close(fd);
-  } else {
-    TEST_ASSERT_TRUE(1);
-  }
-}
+/* 38. (removed in Phase 4: KMS FLIP retired with bochs-display) */
 
 int main(int argc, char **argv, char **envp) {
   (void)argc;
@@ -610,7 +545,6 @@ int main(int argc, char **argv, char **envp) {
   UNITY_BEGIN();
 
   /* Phase 1: dev_ops callback dispatch */
-  RUN_TEST(test_dev_vfs_kms_ioctl_flip);
   RUN_TEST(test_dev_vfs_kms_mmap);
   RUN_TEST(test_dev_vfs_kms_ioctl_unknown);
 
@@ -651,15 +585,12 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_dev_vfs_pipe_dev_coexist);
 
   /* Cross-phase integration */
-  RUN_TEST(test_dev_vfs_kms_lifecycle);
   RUN_TEST(test_dev_vfs_serial_lifecycle);
   RUN_TEST(test_dev_vfs_distinct_inodes);
   RUN_TEST(test_dev_vfs_fstat_fs);
 
   /* Phase 8: ioctl IPC proxy */
-  RUN_TEST(test_dev_vfs_kms_ioctl_struct_arg);
   RUN_TEST(test_dev_vfs_kbd_ioctl_proxy);
-  RUN_TEST(test_dev_vfs_kms_flip_ioctl);
 
   return UNITY_END();
 }
