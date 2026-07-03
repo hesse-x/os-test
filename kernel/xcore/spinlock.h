@@ -72,4 +72,18 @@ static inline void spin_unlock_irqrestore(spinlock_t *lk, uint64_t flags) __rele
     __asm__ volatile("pushq %0; popfq" : : "r"(flags));
 }
 
+static inline int spin_trylock(spinlock_t *lk) __acquires(lk) {
+    return __atomic_exchange_n(&lk->locked, 1, __ATOMIC_ACQUIRE) == 0;
+}
+
+// trylock 失败时必须 popfq 恢复原 IF 状态,避免 cli 状态泄漏
+static inline int spin_trylock_irqsave(spinlock_t *lk, uint64_t *flags) __acquires(lk) __must_check {
+    uint64_t f;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(f));
+    *flags = f;
+    if (spin_trylock(lk)) return 1;
+    __asm__ volatile("pushq %0; popfq" : : "r"(f));
+    return 0;
+}
+
 #endif // KERNEL_SPINLOCK_H

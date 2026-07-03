@@ -177,7 +177,10 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     uint64_t k_rsp = build_kstack_user_rsp(k_stack_top, lr.entry, user_sp);
 
     // 7. Fill PCB (still under tasks_lock)
+    // 顺序约束:assigned_cpu 必须先于 pid 赋值(wake 路径在锁前无锁读 assigned_cpu,
+    // 防 pid 生效后 assigned_cpu 仍是 -1 导致 cpu_locals[-1] 越界)
     int assigned_cpu = pick_cpu();
+    proc->assigned_cpu = assigned_cpu;
     proc->pid = alloc_idx;
     proc->state = READY;
     proc->k_rsp = k_rsp;
@@ -187,7 +190,6 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     proc->wait_event = WAIT_NONE;
     proc->tgid = proc->pid;
     proc->mm = mm;
-    proc->assigned_cpu = assigned_cpu;
     proc->iopm = NULL;
     proc->proc = NULL;  // created below
     proc->cpu_time_ns = 0;
@@ -224,11 +226,22 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     spin_unlock(&tasks_lock);
 
     // Enqueue to target CPU's run_queue under scheduler_lock
+    int cpu = proc->assigned_cpu;
     uint64_t rflags;
-    spin_lock_irqsave(&cpu_locals[assigned_cpu].scheduler_lock, &rflags);
-    list_push_back(&cpu_locals[assigned_cpu].run_queue, &proc->run_node);
-    cpu_locals[assigned_cpu].run_count++;
-    spin_unlock_irqrestore(&cpu_locals[assigned_cpu].scheduler_lock, rflags);
+    spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
+    // TOCTOU 重检:入队期间目标 CPU 已被塞满则重新选 CPU
+    if (__atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) > RECHECK_THRESHOLD) {
+        int new_cpu = pick_cpu();
+        if (new_cpu != cpu) {
+            spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
+            proc->assigned_cpu = new_cpu;   // 此时尚未入队,改字段安全
+            cpu = new_cpu;
+            spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
+        }
+    }
+    list_push_back(&cpu_locals[cpu].run_queue, &proc->run_node);
+    cpu_locals[cpu].run_count++;
+    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
 
     return proc;
 

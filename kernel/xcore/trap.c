@@ -377,9 +377,17 @@ static void timer_handler(trapframe_t *tf) {
   // This ensures QEMU retries NAK'ed interrupt transfers
   if (tick % 10 == 0 && timer_poll_hook) timer_poll_hook();
 
-  // Check timer queue for expired deadlines
+  // Check timer queue for expired deadlines.
+  // 两阶段:先在本地锁内把到期任务摘到临时链表(只动本 CPU 的 timer_queue + 任务字段),
+  // 再逐个用目标 CPU 的 scheduler_lock 投递到 run_queue。run_queue/run_count 必须
+  // 由所属 CPU 的 scheduler_lock 保护——若直接在持本 CPU 锁时跨 CPU 写 tcpu 的
+  // run_queue,会与目标 CPU 的 schedule() 并发写同一链表/计数器,导致节点丢失、
+  // run_count 漂移,最终 schedule() 的 ASSERT(cnt == run_count) 触发 panic。
   int cpu = get_cpu_local()->cpu_id;
   uint64_t now = sched_clock();
+  list_node_t wakeup_list;
+  list_init(&wakeup_list);
+
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
   list_node_t *head = &cpu_locals[cpu].timer_queue;
@@ -392,14 +400,27 @@ static void timer_handler(trapframe_t *tf) {
       p->wait_event = WAIT_NONE;
       p->wait_timed_out = 1;
       p->wait_deadline = 0;
-      list_push_back(&cpu_locals[cpu].run_queue, &p->run_node);
-      cpu_locals[cpu].run_count++;
+      list_push_back(&wakeup_list, &p->wait_node);
     } else {
       // Stale entry: process was woken but timer_queue_remove was skipped
       WARN_ON(1);
     }
   }
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+
+  // 跨 CPU 投递:每个任务按其 assigned_cpu 加锁后入队。本 CPU 锁已释放,
+  // 锁顺序固定为"单把目标 CPU 锁",无嵌套,无 AB-BA 风险。
+  while (!list_empty(&wakeup_list)) {
+    list_node_t *node = list_front(&wakeup_list);
+    list_remove(node);
+    xtask_t *p = LIST_ENTRY(node, xtask_t, wait_node);
+    int tcpu = p->assigned_cpu;
+    uint64_t tflags;
+    spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &tflags);
+    list_push_back(&cpu_locals[tcpu].run_queue, &p->run_node);
+    cpu_locals[tcpu].run_count++;
+    spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, tflags);
+  }
 
   if (tf->cs == 0x2B) {   // from user mode
     // Check pending signals before rescheduling

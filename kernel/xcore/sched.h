@@ -13,6 +13,7 @@ void schedule(void);
 void task_reap(xtask_t *proc);
 xtask_t *create_idle_process(int cpu_id);
 void idle_entry(void);
+void try_steal_task(void);
 void timer_queue_insert(int cpu, xtask_t *proc);
 void timer_queue_remove(xtask_t *proc);
 
@@ -66,7 +67,10 @@ void switch_to(xtask_t *prev, xtask_t *next);
 void process_entry(void);
 
 // Internal helpers
+#define AFFINITY_THRESHOLD 1   // 亲和性阈值:偏好 CPU 负载与最小值差距 <= 此值时选偏好 CPU
+#define RECHECK_THRESHOLD 2   // TOCTOU 重检阈值:队列已有 > 此值个等待任务时考虑换 CPU
 int pick_cpu(void);
+int pick_cpu_pref(int pref_cpu);
 uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip);
 // Variant allowing caller-supplied user rsp (e.g. for argc/argv/auxv stack layout)
 uint64_t build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip, uint64_t user_rsp);

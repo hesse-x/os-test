@@ -34,7 +34,7 @@ arch/x64/smp.h : cpu_local_t
 - lapic_base : uint64_t — LAPIC MMIO 基地址
 - kernel_stack : uint64_t — 本 CPU 内核栈顶
 - tss_rsp0 : uint64_t — 本 CPU TSS 的 RSP0（schedule() 更新，syscall 入口通过 %gs:32 读取）
-- run_count : int — 本 CPU 可运行进程数（pick_cpu() 负载均衡用，当前未实现）
+- run_count : int — 本 CPU run_queue 中 READY 任务数(**不含 RUNNING**,出队即 `--`);`pick_cpu()`/`pick_cpu_pref()` 选最小值负载均衡,`try_steal_task` 偷取时双向更新
 - active_slab[9] : Page* — per-CPU slab 活跃页指针
 
 BSP 和每个 AP 各分配一个 cpu_local_t，通过 wrmsr(MSR_GS_BASE) 设置 GS base 指向。中断入口 swapgs 获取内核 GS base。
@@ -123,6 +123,16 @@ arch/x64/smp.h : spinlock_t — volatile uint32_t locked，spin_lock 用 atomic_
 
 锁获取顺序声明：scheduler_lock → procs_lock → bfc_lock。违反此顺序可能导致死锁。详见 [kernel_lock.md](kernel_lock.md)。
 
+## Work Stealing(运行时负载均衡)
+
+实现:kernel/xcore/sched.c : try_steal_task(),在 idle_entry 循环内调用。
+
+- 本 CPU idle 时线性扫描所有非本 CPU 的 `run_count`,选最大值为 victim;`max_run <= 1` 放弃。
+- 用 `spin_trylock_irqsave` 抢 victim 的 scheduler_lock(机会主义,失败即放弃,绝不阻塞),持自己 CPU 的 scheduler_lock 防本 CPU 中断并发。
+- 偷 victim run_queue 尾部,更新 `t->assigned_cpu = my_cpu`,victim `run_count--` + thief `run_count++`。
+- 进临界区后重判 `list_empty`(外部快照可能过期)。
+- `assigned_cpu` 唯一迁移写入者;`task_reap` 不清 `assigned_cpu`(防越界竞态)。fork/clone/proc_create 中 `assigned_cpu` 先于 `pid` 赋值。
+
 ### 关键源码位置
 
 - AP trampoline：arch/x64/ap_trampoline.S
@@ -142,5 +152,3 @@ arch/x64/smp.h : spinlock_t — volatile uint32_t locked，spin_lock 用 atomic_
 | IPI（reschedule_ipi） | 当前 scheduler_lock 保证串行，跨 CPU 调度提示需 IPI 通知 idle CPU | 中 |
 | TLB shootdown | 当前 switch_to 重载 CR3 自动刷新 TLB，大规模 unmmap 需主动 shootdown | 中 |
 | IRQ affinity | I/O APIC 中断路由到特定 CPU，而非全部路由到 BSP | 低 |
-| Per-CPU 运行队列 + work stealing | 当前全局运行队列，改为 per-CPU 队列 + idle CPU steal | 低 |
-| run_count 负载均衡 | cpu_local_t.run_count 字段已预留，pick_cpu() 未实现 | 低 |

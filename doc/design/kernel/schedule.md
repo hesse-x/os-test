@@ -10,9 +10,9 @@
 | 2 | `schedule()` 语义 | 纯挑选+切换，**总是返回** | 对 idle：返回后 hlt；对抢占：返回后 iretq 回用户态。不含 hlt 循环 |
 | 3 | idle 入口 | `while(1) { schedule(); sti(); hlt; }` | hlt 期间中断允许，任何中断唤醒后重新 schedule |
 | 4 | BSP idle 进程重构 | 分配独立内核栈 + switch_frame，统一创建流程 | 所有 idle 进程结构一致，消除 `prev == nullptr` 特殊路径 |
-| 5 | `run_count` 语义 | 动态可运行计数（READY + RUNNING 之和） | 大量 BLOCKED 驱动/服务进程下，静态计数严重失真；scheduler_lock 下更新，跨 CPU 用 `__atomic_load_n` RELAXED |
-| 6 | `pick_cpu()` | 遍历 `cpu_locals[].run_count`，选最小值 | 简单有效，拆锁后可替换为更精细的策略 |
-| 7 | `assigned_cpu` | 静态绑定，不迁移 | work stealing 是后续优化 |
+| 5 | `run_count` 语义 | 本 CPU run_queue 中 READY 任务数,**不含 RUNNING**(出队即 `--`) | scheduler_lock 下更新,跨 CPU 用 `__atomic_load_n` RELAXED |
+| 6 | `pick_cpu()` / `pick_cpu_pref(pref)` | 遍历 `cpu_locals[].run_count` 选最小值;`pick_cpu_pref` 增加父进程亲和性倾向(差距 <= `AFFINITY_THRESHOLD` 时选偏好 CPU) | 含义是"队列最短的 CPU",**不反映 RUNNING 任务** |
+| 7 | `assigned_cpu` | 创建时初始化 + work stealing 迁移时更新(唯一写入者:`try_steal_task` 持双锁);fork/clone 中 `assigned_cpu` 先于 `pid` 赋值(顺序约束) | 防 pid 生效后 assigned_cpu 仍是 -1 导致 wake 路径越界 |
 | 8 | IRQ 路由 | 全部留在 BSP | AP 靠定时器轮询拾取 woken 进程；低延迟需 IPI |
 | 9 | timer_handler 抢占条件 | `tf->cs == 0x2B`（从用户态来则抢占） | 用户态中断时可安全调 schedule()；内核态中断（idle hlt）不调 schedule()，仅 EOI |
 | 10 | idle 不计入 `run_count` | idle 永远可运行但不计入 | idle 是"兜底"，不是负载；`pick_cpu()` 只看用户进程负载 |
@@ -141,7 +141,10 @@
 
 1. tick++，lapic_eoi()
 2. xHCI 轮询：每 10 tick 调 `xhci_poll()`
-3. 定时器队列到期处理（scheduler_lock 下）：遍历 `cpu_locals[cpu].timer_queue`，到期进程 state→READY，入 run_queue，run_count++
+3. 定时器队列到期处理（两阶段，避免跨 CPU 无锁写 run_queue）：
+   - **阶段一**：持**本 CPU** scheduler_lock，遍历 `cpu_locals[cpu].timer_queue`，到期进程 `state→READY`、清 `wait_deadline`，`list_remove` 出 timer_queue 后挂到本地临时链表 `wakeup_list`（只动本 CPU 的 timer_queue 与任务自身字段）。
+   - **阶段二**：释放本 CPU 锁，遍历 `wakeup_list`，对每个任务按其 `assigned_cpu` 加锁后 `list_push_back` 入该 CPU 的 run_queue 并 `run_count++`。
+   - **为何不能在持本 CPU 锁时直接跨 CPU 投递**：run_queue/run_count 必须由所属 CPU 的 scheduler_lock 保护；若持 A 锁写 B CPU 的 run_queue，会与 B 的 `schedule()` 并发写同一链表/计数器，导致节点丢失、`run_count` 漂移，最终 `schedule()` 的一致性 `ASSERT(cnt == run_count)` 触发 panic。
 4. 用户态抢占：`tf->cs == 0x2B` 时调 schedule()；内核态中断（idle hlt）不调
 
 ### check_pending_signals
@@ -159,27 +162,43 @@
 
 详见 doc/design/ipc.md 信号机制部分。
 
-### pick_cpu()
+### pick_cpu() / pick_cpu_pref()
 
-实现：kernel/proc.c : pick_cpu()
+实现：kernel/xcore/sched.c : pick_cpu() / pick_cpu_pref()
 
-遍历所有 CPU 的 `cpu_locals[i].run_count`（`__atomic_load_n` RELAXED），选最小值。
+- `pick_cpu()` 等价于 `pick_cpu_pref(-1)`,选 `run_count` 最小的 CPU。
+- `pick_cpu_pref(pref_cpu)` 在最小值基础上增加亲和性倾向:若偏好 CPU 的 `run_count` 与最小值差距 <= `AFFINITY_THRESHOLD`,则选偏好 CPU。`pref_cpu < 0` 表示无偏好。
+- 含义是"队列最短的 CPU",**不反映 RUNNING 任务**(出队即 `--`)。
+- 调用点:`process_create_elf` / `sys_fork` / `sys_clone`(CLONE_THREAD 亲和父 CPU)/ TOCTOU 重检。
 
 ### run_count 维护
 
-所有修改在 scheduler_lock 保护下，跨 CPU 操作用 `__atomic_load_n` RELAXED。idle 进程不计入。
+所有修改在 scheduler_lock 保护下,跨 CPU 操作用 `__atomic_load_n` RELAXED。idle 进程不计入。`run_count` = 本 CPU run_queue 中 READY 任务数,**不含 RUNNING**(出队即 `--`)。Debug 构建(`NDEBUG` 未定义)下,`schedule()` 在所有 run_queue/run_count 变更完成后断言 `cnt == run_count`,用于捕获跨 CPU 路径未持本 CPU 锁写本 CPU 队列的竞态。
 
 | 位置 | 操作 | 说明 |
 |------|------|------|
 | process_create / process_create_elf | run_count++ | 新进程 READY |
-| sys_waitpid BLOCKED | schedule() 中不重新入队 | RUNNING → BLOCKED，不出队不计数 |
-| sys_notify / sys_req / sys_resp 唤醒 | run_count++ | BLOCKED → READY |
-| IRQ owner 唤醒 | run_count++ | BLOCKED → READY |
-| timer_queue 到期 | run_count++ | BLOCKED → READY |
-| pipe wake | run_count++ | BLOCKED → READY |
-| schedule() prev 重新入队 | run_count++（入队） | READY 重新入队 |
-| schedule() next 出队 | run_count--（出队） | RUNNING 消费一个槽位 |
+| sys_waitpid BLOCKED | schedule() 中不重新入队 | RUNNING → BLOCKED,不出队不计数 |
+| sys_notify / sys_req / sys_resp 唤醒 | run_count++ | BLOCKED → READY,投递到 `assigned_cpu` 的队列 |
+| IRQ owner 唤醒 | run_count++ | BLOCKED → READY,投递到 `assigned_cpu` 的队列 |
+| timer_queue 到期 | run_count++ | BLOCKED → READY,两阶段投递:本 CPU 锁摘到临时链表,再按 `assigned_cpu` 加锁入队(详见 timer_handler 步骤 3) |
+| pipe wake | run_count++ | BLOCKED → READY,投递到 `assigned_cpu` 的队列 |
+| schedule() prev 重新入队 | run_count++(入队) | READY 重新入队 |
+| schedule() next 出队 | run_count--(出队) | RUNNING 消费一个槽位 |
 | 进程退出 | run_count-- | 移除一个可运行进程 |
+| try_steal_task | victim `run_count--` + thief `run_count++` | work stealing 迁移,持双 CPU scheduler_lock |
+
+### Work Stealing(运行时负载均衡)
+
+实现:kernel/xcore/sched.c : try_steal_task(),在 idle_entry 循环内调用。
+
+- **触发时机**:本 CPU idle_entry 即将 schedule() 前调用。idle 表示本 CPU 无可运行任务,尝试从繁忙 CPU 偷一个。
+- **victim 选择**:线性扫描所有非本 CPU 的 `run_count`,选最大值;`max_run <= 1` 时放弃(偷了对方就空了)。
+- **锁策略**:机会主义,用 `spin_trylock_irqsave` 抢目标 CPU 的 scheduler_lock,失败即放弃,绝不阻塞。持自己 CPU 的 scheduler_lock 防本 CPU 中断并发写 run_queue。
+- **偷取对象**:victim 的 run_queue 尾部(`head->prev`),循环双向链表不变式。偷到则更新 `t->assigned_cpu = my_cpu`。
+- **重检**:进临界区后重判 `list_empty`(外部 run_count 快照可能已过期)。
+- **`assigned_cpu` 写入者**:仅 `try_steal_task` 持双锁时迁移更新;创建时初始化 + TOCTOU 重检时改写(尚未入队,安全)。`task_reap` 不清 `assigned_cpu`(清成 -1 会引入越界竞态:wake 路径在锁前无锁读)。
+- **顺序约束**:fork/clone/proc_create 中 `assigned_cpu` 必须先于 `pid` 赋值,防 pid 生效后 assigned_cpu 仍是 -1 导致 `cpu_locals[-1]` 越界。
 
 ### 初始化序列
 
@@ -217,8 +236,7 @@
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| work stealing | assigned_cpu 静态绑定改为动态负载均衡，idle CPU 从繁忙 CPU steal 进程 | 中 |
-| IPI 唤醒 | IRQ 全留在 BSP，AP 靠定时器轮询拾取 woken 进程（~10ms 延迟）；低延迟需 IPI 通知目标 CPU | 中 |
-| 调度策略 | 当前 FIFO（run_queue 顺序），无优先级/时间片；需 O(1) 或 CFS 调度器 | 低 |
-| per-CPU run_count 优化 | pick_cpu() 遍历所有 CPU；大核数时可用 cache line 对齐 + NUMA 感知 | 低 |
-| sched_clock 精度 | 当前直接用 TSC cycle，未转换为纳秒；需校准 tsc_khz | 低 |
+| IPI 唤醒 | IRQ 全留在 BSP,AP 靠定时器轮询拾取 woken 进程(~10ms 延迟);低延迟需 IPI 通知目标 CPU | 中 |
+| 调度策略 | 当前 FIFO(run_queue 顺序),无优先级/时间片;需 O(1) 或 CFS 调度器 | 低 |
+| per-CPU run_count 优化 | pick_cpu() 遍历所有 CPU;大核数时可用 cache line 对齐 + NUMA 感知 | 低 |
+| sched_clock 精度 | 当前直接用 TSC cycle,未转换为纳秒;需校准 tsc_khz | 低 |

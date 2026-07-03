@@ -684,6 +684,9 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
     uint64_t k_rsp = build_kstack_from_tf(k_stack_top, parent_tf, 0);
 
     // 7. Fill child xtask_t
+    // 顺序约束:assigned_cpu 必须先于 pid 赋值(wake 路径在锁前无锁读 assigned_cpu,
+    // 防 pid 生效后 assigned_cpu 仍是 -1 导致越界);亲和父 CPU
+    child->assigned_cpu = pick_cpu_pref(parent->assigned_cpu);
     child->pid = alloc_idx;
     child->state = READY;
     child->k_rsp = k_rsp;
@@ -693,7 +696,6 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
     child->wait_event = WAIT_NONE;
     child->tgid = child->pid;
     child->mm = child_mm;
-    child->assigned_cpu = -1; // will be set below
     child->iopm = NULL; // fork does not inherit IOPM
     child->recv_head = 0; child->recv_tail = 0; child->recv_lock = SPINLOCK_INIT;
     child->req_caller_pid = -1; child->req_reply_buf = NULL;
@@ -721,21 +723,22 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
     child_bp->sid = parent->proc->sid; child_bp->pgid = parent->proc->pgid; child_bp->ctty = parent->proc->ctty;
     list_init(&child->run_node); list_init(&child->wait_node);
 
-    // Pick CPU for child
-    int best = 0;
-    int min_run = __atomic_load_n(&cpu_locals[0].run_count, __ATOMIC_RELAXED);
-    for (int i = 1; i < ncpu; i++) {
-        int r = __atomic_load_n(&cpu_locals[i].run_count, __ATOMIC_RELAXED);
-        if (r < min_run) { min_run = r; best = i; }
-    }
-    child->assigned_cpu = best;
-
     spin_unlock(&tasks_lock);
 
     // 8. Enqueue to scheduler
     int cpu = child->assigned_cpu;
     uint64_t rflags;
     spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
+    // TOCTOU 重检:入队期间目标 CPU 已被塞满则重新选 CPU
+    if (__atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) > RECHECK_THRESHOLD) {
+        int new_cpu = pick_cpu_pref(parent->assigned_cpu);
+        if (new_cpu != cpu) {
+            spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
+            child->assigned_cpu = new_cpu;   // 此时尚未入队,改字段安全
+            cpu = new_cpu;
+            spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
+        }
+    }
     list_push_back(&cpu_locals[cpu].run_queue, &child->run_node);
     cpu_locals[cpu].run_count++;
     spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
@@ -913,6 +916,10 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3,
     }
 
     // 10. 填充 child xtask_t
+    // 顺序约束:assigned_cpu 必须先于 pid 赋值;CLONE_THREAD 亲和父 CPU,否则无亲和性
+    child->assigned_cpu = (flags & CLONE_THREAD)
+                              ? pick_cpu_pref(parent->assigned_cpu)
+                              : pick_cpu();
     child->pid = alloc_idx;
     child->state = READY;
     child->k_rsp = k_rsp;
@@ -920,7 +927,6 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3,
     child->entry = parent->entry;
     child->wait_event = WAIT_NONE;
     child->mm = child_mm;
-    child->assigned_cpu = -1;
     child->iopm = NULL;
     child->recv_head = 0; child->recv_tail = 0; child->recv_lock = SPINLOCK_INIT;
     child->req_caller_pid = -1; child->req_reply_buf = NULL;
@@ -936,21 +942,24 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3,
         child_bp->ctty = parent->proc->ctty;
     }
 
-    // Pick CPU
-    int best = 0;
-    int min_run = __atomic_load_n(&cpu_locals[0].run_count, __ATOMIC_RELAXED);
-    for (int i = 1; i < ncpu; i++) {
-        int r = __atomic_load_n(&cpu_locals[i].run_count, __ATOMIC_RELAXED);
-        if (r < min_run) { min_run = r; best = i; }
-    }
-    child->assigned_cpu = best;
-
     spin_unlock(&tasks_lock);
 
     // 11. 入队调度
     int cpu = child->assigned_cpu;
     uint64_t rflags;
     spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
+    // TOCTOU 重检:入队期间目标 CPU 已被塞满则重新选 CPU
+    if (__atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) > RECHECK_THRESHOLD) {
+        int new_cpu = (flags & CLONE_THREAD)
+                          ? pick_cpu_pref(parent->assigned_cpu)
+                          : pick_cpu();
+        if (new_cpu != cpu) {
+            spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
+            child->assigned_cpu = new_cpu;   // 此时尚未入队,改字段安全
+            cpu = new_cpu;
+            spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
+        }
+    }
     list_push_back(&cpu_locals[cpu].run_queue, &child->run_node);
     cpu_locals[cpu].run_count++;
     spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);

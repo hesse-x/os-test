@@ -244,14 +244,18 @@ void idle_entry() {
         // Reap zombie processes (BSD hook for POSIX cleanup)
         if (reap_hook) reap_hook();
 
+        // Work stealing:本 CPU idle 时尝试从最繁忙 CPU 偷一个任务
+        try_steal_task();
+
         schedule();
         sti();
         __asm__ volatile("hlt");
     }
 }
 
-// Pick the CPU with the fewest runnable processes
-int pick_cpu(void) {
+// pick_cpu_pref:选最空 CPU,可选偏好 CPU(亲和性)
+// pref_cpu < 0 表示无偏好;否则偏好 CPU 负载与最小值差距 <= AFFINITY_THRESHOLD 时选偏好 CPU
+int pick_cpu_pref(int pref_cpu) {
     int best = 0;
     int min = __atomic_load_n(&cpu_locals[0].run_count, __ATOMIC_RELAXED);
     for (int i = 1; i < ncpu; i++) {
@@ -261,7 +265,60 @@ int pick_cpu(void) {
             best = i;
         }
     }
+    if (pref_cpu >= 0 && pref_cpu < ncpu) {
+        int pref_r = __atomic_load_n(&cpu_locals[pref_cpu].run_count, __ATOMIC_RELAXED);
+        if (pref_r - min <= AFFINITY_THRESHOLD) best = pref_cpu;
+    }
     return best;
+}
+
+// Pick the CPU with the fewest runnable processes
+int pick_cpu(void) {
+    return pick_cpu_pref(-1);
+}
+
+// try_steal_task:本 CPU idle 时从最繁忙 CPU 的 run_queue 尾部偷一个任务。
+// 偷取者持自己 CPU 的 scheduler_lock(防本 CPU 中断并发写 run_queue),用 trylock 抢目标
+// CPU 锁,失败即放弃(机会主义,绝不阻塞)。偷到则更新 assigned_cpu = my_cpu。
+void try_steal_task(void) {
+    int my_cpu = get_cpu_local()->cpu_id;
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
+
+    // 选 victim:线性扫描找 run_count 最大值
+    int best_v = -1;
+    int max_run = 0;
+    for (int v = 0; v < ncpu; v++) {
+        if (v == my_cpu) continue;
+        int r = __atomic_load_n(&cpu_locals[v].run_count, __ATOMIC_RELAXED);
+        if (r > max_run) { max_run = r; best_v = v; }
+    }
+    if (max_run <= 1) goto out;   // 无可偷(偷了对方就空了)
+
+    int v = best_v;
+    uint64_t vflags;
+    if (!spin_trylock_irqsave(&cpu_locals[v].scheduler_lock, &vflags)) goto out;
+
+    // 进临界区后重检:run_count 是外部快照,队列可能已空
+    if (list_empty(&cpu_locals[v].run_queue)) {
+        spin_unlock_irqrestore(&cpu_locals[v].scheduler_lock, vflags);
+        goto out;
+    }
+    ASSERT(cpu_locals[v].run_count > 0);
+
+    // 偷尾部:循环双向链表 head->prev 即尾(list_push_back 已依赖此不变式)
+    list_node_t *head = &cpu_locals[v].run_queue;
+    list_node_t *tail_node = head->prev;
+    xtask_t *t = LIST_ENTRY(tail_node, xtask_t, run_node);
+    list_remove(&t->run_node);
+    cpu_locals[v].run_count--;
+    t->assigned_cpu = my_cpu;
+    list_push_back(&cpu_locals[my_cpu].run_queue, &t->run_node);
+    cpu_locals[my_cpu].run_count++;
+
+    spin_unlock_irqrestore(&cpu_locals[v].scheduler_lock, vflags);
+out:
+    spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
 }
 
 // Update TSS IOPM for the current CPU to match the given process
@@ -330,6 +387,9 @@ void schedule() {
 
     // Check if run_queue has a runnable process
     if (list_empty(&cpu_locals[my_cpu].run_queue)) {
+#ifndef NDEBUG
+            ASSERT(cpu_locals[my_cpu].run_count == 0);
+#endif
         // If prev is BLOCKED, ZOMBIE, or REAPING, it cannot continue running —
         // switch to idle so the CPU halts until an IRQ wakes a process.
         if (prev != idle && (prev->state == BLOCKED || prev->state == ZOMBIE || prev->state == REAPING)) {
@@ -380,6 +440,18 @@ void schedule() {
     next->state = RUNNING;
     next->last_sched = sched_clock();
     cpu_locals[my_cpu].run_count--;
+#ifndef NDEBUG
+    // 一致性检查:所有 run_queue / run_count 变更完成后,队列长度必须等于 run_count。
+    // 若跨 CPU 路径未持本 CPU scheduler_lock 写本 CPU run_queue/run_count,
+    // 此处会捕获(此前 timer_handler 跨 CPU 投递即在此暴露)。
+    {
+        int cnt = 0;
+        list_node_t *__head = &cpu_locals[my_cpu].run_queue;
+        list_node_t *__n = __head->next;
+        while (__n != __head) { cnt++; __n = __n->next; }
+        ASSERT(cnt == cpu_locals[my_cpu].run_count);
+    }
+#endif
     current_task = next;
     per_cpu_tss[my_cpu].rsp0 = next->k_stack_top;
     get_cpu_local()->tss_rsp0 = next->k_stack_top;
@@ -515,6 +587,13 @@ void task_reap(xtask_t *proc) {
     //    reclaim_lazy_resources can free them when the slot is reused
     //    (SMP race: schedule() may still be referencing them — see top of function).
     spin_lock(&tasks_lock);
+
+    // 不变式断言:ZOMBIE 不应在任何 run_queue / timer_queue
+    // (state 断言保留顶部入口处一处,此处不重复——顶部 ASSERT 已覆盖调用者传错状态,
+    // 窗口内无路径会改写 ZOMBIE 状态,第 7 步再断言是冗余)
+    WARN_ON(!list_empty(&proc->run_node));
+    WARN_ON(!list_empty(&proc->wait_node));
+
     proc->pid = -1;
     proc->state = UNUSED;
     proc->k_rsp = 0;
@@ -524,14 +603,12 @@ void task_reap(xtask_t *proc) {
     proc->wait_event = WAIT_NONE;
     proc->tgid = -1;
     proc->mm = NULL;
-    proc->assigned_cpu = -1;
+    // 注意:不清 assigned_cpu —— 清成 -1 会引入越界竞态(wake 路径在锁前无锁读)
     proc->iopm = NULL;
     proc->wait_deadline = 0;
     proc->wait_timed_out = 0;
-    list_init(&proc->run_node);
-    // If wait_node is still linked in a list, list_init silently corrupts it
-    WARN_ON(proc->wait_node.prev != &proc->wait_node);
-    list_init(&proc->wait_node);
+    list_init(&proc->run_node);   // slot 复用清理,幂等
+    list_init(&proc->wait_node);  // 同上
     // recv queue
     proc->recv_head = 0;
     proc->recv_tail = 0;
