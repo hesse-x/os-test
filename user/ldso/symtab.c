@@ -17,12 +17,12 @@ static uint32_t gnu_hash(const char *s) {
     return h;
 }
 
-// GNU hash 查找：返回符号 st_value（相对基址），未找到返回 NULL
-// gnu_hash_table 指向 .gnu.hash 段起始（uint32_t* 视角）
-static void *gnu_hash_lookup(const char *name,
-                              Elf64_Sym *symtab,
-                              const char *strtab,
-                              uint32_t *gnu_hash_table) {
+// GNU hash 查找：返回 symtab 内的 Elf64_Sym *（含 st_value/st_size），
+// 未找到返回 NULL。caller 需自己加 link_map.base 得运行时绝对地址
+static Elf64_Sym *gnu_hash_lookup(const char *name,
+                                   Elf64_Sym *symtab,
+                                   const char *strtab,
+                                   uint32_t *gnu_hash_table) {
     if (!gnu_hash_table) return NULL;
 
     uint32_t nbuckets    = gnu_hash_table[0];
@@ -54,7 +54,7 @@ static void *gnu_hash_lookup(const char *name,
         if ((h | 1) == (chain_h | 1)) {  // 忽略最低位（结束标记）
             Elf64_Sym *sym = &symtab[symidx];
             if (strcmp(strtab + sym->st_name, name) == 0) {
-                return (void *)(uintptr_t)sym->st_value;  // 调用方加 base
+                return sym;
             }
         }
         symidx++;
@@ -67,9 +67,27 @@ static void *gnu_hash_lookup(const char *name,
 // 返回绝对地址（已加 base），未找到返回 NULL
 void *lookup_symbol_in_link_map(const char *name, struct link_map *lmap) {
     for (struct link_map *l = lmap; l; l = l->l_next) {
-        void *sym = gnu_hash_lookup(name, (Elf64_Sym *)l->symtab, l->strtab,
-                                    (uint32_t *)l->gnu_hash);
-        if (sym) return (char *)l->base + (uintptr_t)sym;
+        Elf64_Sym *sym = gnu_hash_lookup(name, (Elf64_Sym *)l->symtab, l->strtab,
+                                         (uint32_t *)l->gnu_hash);
+        if (sym) return (char *)l->base + (uintptr_t)sym->st_value;
+    }
+    return NULL;
+}
+
+// COPY 重定位用：查找符号定义方，返回定义方 Elf64_Sym *（含 st_value/st_size）
+// out_def_map 写入定义方 link_map，用于取 base；未找到返回 NULL
+// 仅用于主 ELF 的 R_X86_64_COPY：caller 从 lmap->l_next 起查（跳过主 ELF 自身，
+// 否则会查到主 ELF .bss 中待填充的同名符号，自引用 memcpy 无意义）
+__attribute__((visibility("hidden")))
+Elf64_Sym *lookup_symbol_def(const char *name, struct link_map *lmap,
+                             struct link_map **out_def_map) {
+    for (struct link_map *l = lmap; l; l = l->l_next) {
+        Elf64_Sym *sym = gnu_hash_lookup(name, (Elf64_Sym *)l->symtab, l->strtab,
+                                         (uint32_t *)l->gnu_hash);
+        if (sym) {
+            if (out_def_map) *out_def_map = l;
+            return sym;
+        }
     }
     return NULL;
 }

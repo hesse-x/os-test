@@ -242,10 +242,17 @@ endfunction()
 # ld.md §3.4.4 / plan_ld2b3 T5
 # crt0.o 链入首位（提供 _start），libc.so 通过 -L/-l 链接（记 DT_NEEDED）
 function(add_user_dyn_elf name)
-    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS" ${ARGN})
+    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
     set(COMPILE_CMD ${CMAKE_C_COMPILER})
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+
+    # Extra compile definitions (-D flags)
+    if(ARG_DEFS)
+        foreach(def ${ARG_DEFS})
+            list(APPEND COMPILE_FLAGS -D${def})
+        endforeach()
+    endif()
 
     set(OBJ_FILES "")
     set(idx 0)

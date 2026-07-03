@@ -2,8 +2,6 @@
 #include <errno.h>
 #include "common/syscall.h"
 
-int errno;
-
 pid_t getpid(void) {
     return (pid_t)sys_getpid();
 }

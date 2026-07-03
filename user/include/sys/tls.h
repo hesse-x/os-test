@@ -46,6 +46,7 @@ struct tcb {
     void *arg;
     void *tls_page;                      // for munmap on exit (NULL for main thread)
     size_t tls_total;                    // for munmap on exit
+    int errno_val;                       // per-thread errno（__errno_location 返回 & 此字段）
 };
 
 struct tcb *__pthread_current_tcb(void);

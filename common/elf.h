@@ -42,10 +42,11 @@ typedef struct Elf64_Phdr {
     uint64_t p_align;
 } Elf64_Phdr;
 
-// 重定位类型（x86-64 PIC 全集 9 种，plan_ld2b3 T20）
+// 重定位类型（x86-64 PIC 全集 + 主 ELF COPY，plan_ld2b3 T20 / 阶段 5 补丁）
 #define R_X86_64_64         1
 #define R_X86_64_PC32       2
 #define R_X86_64_PLT32      4
+#define R_X86_64_COPY       5    // 仅非 PIE 主 ELF 引用 libc.so 可写全局（errno/stdout 等）
 #define R_X86_64_GLOB_DAT   6
 #define R_X86_64_JUMP_SLOT  7
 #define R_X86_64_RELATIVE   8

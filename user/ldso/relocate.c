@@ -1,5 +1,5 @@
-// ld.so 重定位：9 种类型 + eager binding + hard-fail
-// ld.md §3.3.4, §3.3.6 / plan_ld2b3 T16
+// ld.so 重定位：10 种类型（9 PIC + COPY）+ eager binding + 诊断 hard-fail
+// ld.md §3.3.4, §3.3.6, §5.4 / plan_ld2b3 T16
 
 #include <stddef.h>
 #include <stdint.h>
@@ -13,6 +13,11 @@ __attribute__((visibility("hidden"))) void dl_put_hex(uint64_t val);
 
 // symtab.c
 __attribute__((visibility("hidden"))) void *lookup_symbol_in_link_map(const char *name, struct link_map *lmap);
+__attribute__((visibility("hidden"))) Elf64_Sym *lookup_symbol_def(const char *name, struct link_map *lmap,
+                                                                   struct link_map **out_def_map);
+
+// minilibc.c
+__attribute__((visibility("hidden"))) void *memcpy(void *dst, const void *src, unsigned long n);
 
 // 取符号名：symtab[sym_idx].st_name + strtab
 static const char *sym_name(struct link_map *l, uint32_t sym_idx) {
@@ -32,6 +37,20 @@ void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
     case R_X86_64_RELATIVE:
         *addr = (uintptr_t)base + addend;
         break;
+
+    case R_X86_64_COPY: {
+        // 仅非 PIE 主 ELF 引用 libc.so 可写全局（errno/stdout/stdin/stderr 等）
+        // 语义：从定义方（libc.so）拷贝 sym.st_size 字节到主 ELF .bss（r_offset 处）
+        // 主 ELF 持有独立副本，后续主 ELF 内引用解析到自身副本，与 libc.so 隔离
+        const char *name = sym_name(lmap, sym_idx);
+        // 从 lmap->l_next 起查（跳过主 ELF 自身，避免自引用 memcpy）
+        struct link_map *def_map = NULL;
+        Elf64_Sym *def_sym = lookup_symbol_def(name, lmap->l_next, &def_map);
+        if (!def_sym || !def_map) goto unresolved;
+        void *src = (char *)def_map->base + def_sym->st_value;
+        memcpy(addr, src, def_sym->st_size);
+        break;
+    }
 
     case R_X86_64_64: {
         const char *name = sym_name(lmap, sym_idx);
@@ -97,6 +116,23 @@ void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
     default:
         dl_puts("dl: FATAL: unknown reloc type ");
         dl_put_hex(type);
+        dl_puts(" @base ");
+        dl_put_hex((uint64_t)base);
+        dl_puts(" off ");
+        dl_put_hex(r->r_offset);
+        if (sym_idx) {
+            dl_puts(" sym '");
+            dl_puts(sym_name(lmap, sym_idx));
+            dl_puts("'");
+        }
+        // TLS 重定位类型（16-23, 35-36）：共享库内 __thread 变量触发
+        // ld.so 暂未实现 __tls_get_addr / TLS descriptor，需改用 TCB 字段
+        if (type >= 16 && type <= 23) {
+            dl_puts(" [TLS reloc: ld.so no __tls_get_addr; use TCB field, not __thread]");
+        } else if (type == 35 || type == 36) {
+            dl_puts(" [TLSDESC: ld.so no TLS descriptor; use TCB field, not __thread]");
+        }
+        dl_puts("\n");
         long ret;
         __asm__ volatile("syscall" : "=a"(ret) : "a"(SYS_EXIT), "D"(1) : "rcx", "r11");
         while (1) ;
@@ -104,8 +140,13 @@ void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
     return;
 
 unresolved:
-    dl_puts("dl: FATAL: unresolved symbol ");
+    dl_puts("dl: FATAL: unresolved symbol '");
     dl_puts(sym_name(lmap, sym_idx));
+    dl_puts("' @base ");
+    dl_put_hex((uint64_t)base);
+    dl_puts(" off ");
+    dl_put_hex(r->r_offset);
+    dl_puts("\n");
     long ret;
     __asm__ volatile("syscall" : "=a"(ret) : "a"(SYS_EXIT), "D"(1) : "rcx", "r11");
     while (1) ;
@@ -126,8 +167,11 @@ void eager_bind(struct link_map *l) {
         // 从前驱链表查（主 ELF 优先，再 libc.so，再 ld.so）
         void *sym = lookup_symbol_in_link_map(name, _dl_link_map);
         if (!sym) {
-            dl_puts("dl: FATAL: unresolved PLT symbol ");
+            dl_puts("dl: FATAL: unresolved PLT symbol '");
             dl_puts(name);
+            dl_puts("' @base ");
+            dl_put_hex((uint64_t)l->base);
+            dl_puts("\n");
             long ret;
             __asm__ volatile("syscall" : "=a"(ret) : "a"(SYS_EXIT), "D"(1) : "rcx", "r11");
             while (1) ;

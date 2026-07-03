@@ -28,7 +28,10 @@ struct kernel_mem_stats {
 #ifdef __cplusplus
 extern "C" {
 #endif
-extern int errno;  // defined in libc (user/lib/unistd.cc), declared in user/include/errno.h
+// errno 经 __errno_location() 返回 TLS 指针（user/include/errno.h 定义宏 errno）
+// syscall.h 被 libc 内部代码包含，此处声明 __errno_location 供 inline wrapper 写 errno
+int *__errno_location(void);
+#define errno (*__errno_location())
 #ifdef __cplusplus
 }
 #endif

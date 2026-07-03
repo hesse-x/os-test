@@ -40,7 +40,7 @@
 | TLS 布局 | variant II | ld.md #12 |
 | 重定位策略 | eager binding | ld.md #10 |
 | 符号查找 | DT_GNU_HASH only | 本方案补充 |
-| 重定位类型 | 标准 PIC 全集 9 种 | 本方案补充 |
+| 重定位类型 | 标准 PIC 全集 9 种 + 主 ELF COPY | 本方案补充 |
 | 验证阶段 | 插入阶段 2a bootstrap-only | 本方案补充 |
 | 工具链 | 自研 gcc + 自研 libc.so（不用宿主机 glibc） | ld.md #7 |
 
@@ -74,6 +74,10 @@
 | 重定位类型支持范围 | 本方案补充 | §3.3 |
 | 符号哈希表选型 | 本方案补充 | §3.3 |
 | 插入 bootstrap-only 验证 | 本方案补充 | §6.3 |
+| errno 经 `__errno_location` 返回 TCB 字段 | 阶段 5 补充 | §3.4.5 |
+| hard-fail 诊断打印类型+对象+符号 | 阶段 5 补充 | §3.3.4, §5.4 |
+| hello_dyn 覆盖 COPY 路径 | 阶段 5 补充 | §6.5 |
+| 阶段 5 改动态前先跑静态基线 | 阶段 5 补充 | §6.6 |
 
 ## 2 总体架构设计
 
@@ -749,9 +753,9 @@ static void *load_so(const char *path) {
 
 **注：** 不做页共享（每个 .so 整文件读进内存再拷贝），与主 ELF 现状一致（ld.md #4）。未来做文件映射 mmap 时切换为纯 ld.so 内部实现，不影响内核/ld.so 的 ABI。
 
-#### 3.3.4 重定位类型支持（标准 PIC 全集 9 种）
+#### 3.3.4 重定位类型支持（标准 PIC 全集 + 主 ELF COPY）
 
-`gcc -shared -fPIC` 在 x86-64 产出的 `.so` 包含的重定位类型：
+`.so` 内部重定位（`gcc -shared -fPIC` 产出）覆盖以下 9 种；主 ELF（非 PIE）额外产生 `R_X86_64_COPY`：
 
 | 类型 | 值 | 用途 | 处理方式 |
 |------|----|----|---------|
@@ -764,6 +768,7 @@ static void *load_so(const char *path) {
 | `R_X86_64_JUMP_SLOT` | 7 | PLT 跳转（S，eager） | `*addr = sym` |
 | `R_X86_64_32` | 10 | 绝对地址 32 位零扩展（S + A） | `*addr = (uint32_t)(sym + addend)` |
 | `R_X86_64_32S` | 11 | 绝对地址 32 位符号扩展（S + A） | `*addr = (int32_t)(sym + addend)` |
+| `R_X86_64_COPY` | 5 | 主 ELF 引用 libc.so 可写全局（errno/stdout 等） | `memcpy(addr, def_base+st_value, st_size)`，从 `l_next` 起查避免自引用 |
 
 **实现：**
 
@@ -781,6 +786,18 @@ static void apply_relocation(Elf64_Rela *r, void *base,
     case R_X86_64_RELATIVE:
         *addr = (uintptr_t)base + addend;
         break;
+
+    case R_X86_64_COPY: {
+        // 仅非 PIE 主 ELF 引用 libc.so 可写全局（errno/stdout/stdin/stderr 等）
+        // 从 l_next 起查避免自引用（主 ELF .bss 中待填充的同名符号）
+        const char *name = sym_name(lmap, sym_idx);
+        struct link_map *def_map = NULL;
+        Elf64_Sym *def_sym = lookup_symbol_def(name, lmap->l_next, &def_map);
+        if (!def_sym || !def_map) goto unresolved;
+        void *src = (char *)def_map->base + def_sym->st_value;
+        memcpy(addr, src, def_sym->st_size);
+        break;
+    }
 
     case R_X86_64_64: {
         void *sym = lookup_symbol(sym_idx, lmap);
@@ -837,24 +854,43 @@ static void apply_relocation(Elf64_Rela *r, void *base,
     }
 
     default:
+        // 诊断打印：类型 + 对象 base + r_offset + 符号名（若有）
+        // TLS 重定位类型（16-23, 35-36）特别提示：ld.so 未实现 __tls_get_addr /
+        // TLS descriptor，共享库内的 __thread 变量需改用 TCB 字段
         dl_puts("dl: FATAL: unknown reloc type ");
         dl_put_hex(type);
+        dl_puts(" @base ");
+        dl_put_hex((uint64_t)base);
+        dl_puts(" off ");
+        dl_put_hex(r->r_offset);
+        if (sym_idx) { dl_puts(" sym '"); dl_puts(sym_name(lmap, sym_idx)); dl_puts("'"); }
+        if (type >= 16 && type <= 23)
+            dl_puts(" [TLS reloc: use TCB field, not __thread]");
+        else if (type == 35 || type == 36)
+            dl_puts(" [TLSDESC: use TCB field, not __thread]");
+        dl_puts("\n");
         sys_exit(1);
     }
     return;
 
 unresolved:
-    dl_puts("dl: FATAL: unresolved symbol idx ");
-    dl_put_hex(sym_idx);
+    dl_puts("dl: FATAL: unresolved symbol '");
+    dl_puts(sym_name(lmap, sym_idx));
+    dl_puts("' @base ");
+    dl_put_hex((uint64_t)base);
+    dl_puts(" off ");
+    dl_put_hex(r->r_offset);
+    dl_puts("\n");
     sys_exit(1);
 }
 ```
 
 **关键策略：**
 
-- **未知类型 hard-fail**：直接报错 + `sys_exit(1)`，不静默跳过。掩盖真实链接错误比加载失败更难调。
-- **未解析符号加载时立即报错**：eager binding 的优势（ld.md #10）。
+- **未知类型 hard-fail**：直接报错 + `sys_exit(1)`，不静默跳过。掩盖真实链接错误比加载失败更难调。诊断必须打印**类型 + 对象 base + r_offset + 符号名**（对照 `dl: loaded libc.so @ 0x800000` 即知 base 归属），否则只看到 `unknown reloc type 5` 仍需手动 `readelf -r` 交叉对照。TLS 重定位类型（16-23, 35-36）额外提示「ld.so 未实现 `__tls_get_addr` / TLS descriptor，共享库内 `__thread` 变量改用 TCB 字段」——这是 `__thread` 在 `.so` 中触发 `R_X86_64_DTPMOD64` 等通用动态 TLS 重定位的常见陷阱。
+- **未解析符号加载时立即报错**：eager binding 的优势（ld.md #10）。诊断同样打印符号名 + 对象 base + r_offset。
 - `R_X86_64_PLT32` 等价 `R_X86_64_PC32`（gcc 在 x86-64 把 PLT 调用编译成 PC32 + PLT32 标记，链接器合并处理）。
+- **`R_X86_64_COPY` 仅主 ELF 出现**：`.so` 内部不产生 COPY（PIC 共享库不复制全局副本）。主 ELF（非 PIE）引用 libc.so 可写全局（`errno`/`stdout`/`stdin`/`stderr` 等）时，链接器在主 ELF `.bss` 分配空间并生成 COPY 重定位，ld.so 从 libc.so 拷贝 `st_size` 字节过去。**注意 errno 的特殊性**：见 §3.4.5。
 
 #### 3.3.5 符号查找（DT_GNU_HASH）
 
@@ -1229,6 +1265,36 @@ add_user_lib(c_so SHARED SOURCES ${LIBC_SOURCES} FLAGS "-fPIC -DDYNAMIC=1" OUTPU
 ```
 
 **与现有 `add_user_lib`/`add_user_elf` 关系：** 静态主 ELF 仍用 `add_user_elf`（现状不动）；libc.a 仍用 `add_user_lib`（现状不动）；libc.so 用 `add_user_lib` 加 `SHARED` 选项（§3.4.2）；动态主 ELF 用 `add_user_dyn_elf`；ld.so 用 `add_user_ldso`。
+
+#### 3.4.5 errno 经 `__errno_location` 返回 TCB 字段（动态链接必需）
+
+**背景：** 静态 libc 用 `extern int errno;` + `int errno;` 全局变量即可。但动态链接下，主 ELF 引用 `errno` 会生成 `R_X86_64_COPY` 重定位（§3.3.4），把 libc.so 的 errno 拷贝到主 ELF `.bss`。结果：libc.so 内部 syscall 失败写自己 `.bss` 的 errno（`common/syscall.h` 的 inline wrapper `errno = -(int)r`），主 ELF 读自己的 COPY 副本——**两份不同地址，主 ELF 永远读 0**。阶段 5 把测试改动态后，`test_pipe_nonblock_read` 等期望 `errno==EAGAIN` 却拿到 0。
+
+**方案：** 参考 glibc/musl，errno 改为经 `__errno_location()` 返回 per-thread 指针。但 `__thread` 在共享库会触发 `R_X86_64_DTPMOD64`(16) 等通用动态 TLS 重定位（ld.so 暂未实现 `__tls_get_addr`）。故 errno 不放 TLS 段，而是放进 **TCB**：
+
+```c
+// user/include/sys/tls.h: struct tcb 末尾加字段
+struct tcb { ...; int errno_val; };
+
+// user/lib/errno.cc
+int *__errno_location(void) {
+    return &__pthread_current_tcb()->errno_val;  // movq %fs:0 + 偏移
+}
+
+// user/include/errno.h
+int *__errno_location(void);
+#define errno (*__errno_location())  // errno = 5 → (*__errno_location()) = 5
+```
+
+**为什么 TCB 而非 `__thread`：**
+- TCB 在 FS_BASE，主 ELF 与 libc.so 都通过 `%fs:offset` 访问当前线程同一份 errno，写读一致
+- 不产生 TLS 重定位（无需 `__tls_get_addr`）
+- 顺带解决多线程 errno 隔离（每个线程 TCB 独立，符合 POSIX 语义）
+
+**约束：**
+- `errno` 是宏后，所有 `errno = X` / `errno == X` 都经 `__errno_location()` 间接，编译器自动展开
+- `__errno_location` 依赖 FS_BASE 已设（TCB 已分配）。启动顺序：`__libc_start_main` → TLS init（设 FS_BASE）→ `__libc_run_init_array` → `main`。`main` 之前 errno 不可用，但 `main` 之前也不该读 errno（没有失败的 syscall）
+- `common/syscall.h` 的 inline wrapper 也用 `errno` 宏，展开为 `(*__errno_location()) = xxx`，libc.so 内部 syscall 失败写 TCB 的 errno，主 ELF 读同一 TCB 字段
 
 ### 3.5 __libc_start_main 统一启动
 
@@ -1606,7 +1672,7 @@ __trapret:
 | `dl_put_hex(val)` | bootstrap+ | 局部数组转十六进制，可用 |
 | `__dls_init(sp, ld_base)` | post-bootstrap | 可用全局变量/GOT |
 | `load_so(path)` | post-bootstrap | 返回加载基址 |
-| `apply_relocation(r, base, lmap)` | post-bootstrap | 9 种类型 + hard-fail |
+| `apply_relocation(r, base, lmap)` | post-bootstrap | 10 种类型（9 PIC + COPY）+ 诊断 hard-fail |
 | `gnu_hash_lookup(name, symtab, strtab, hash)` | post-bootstrap | 返回符号地址 |
 | `eager_bind(lmap)` | post-bootstrap | 遍历 JUMP_SLOT |
 | `build_link_map(...)` | post-bootstrap | 填 _dl_link_map |
@@ -1692,8 +1758,8 @@ void __dls3(uintptr_t *sp) {
 
 ### 5.4 重定位失败处理
 
-- **未知重定位类型**：hard-fail，`dl_puts` 报错 + `sys_exit(1)`。不静默跳过（掩盖真实链接错误）。
-- **未解析符号**：加载时立即报错（eager binding 优势），`dl_puts` 打印符号名 + `sys_exit(1)`。
+- **未知重定位类型**：hard-fail，`dl_puts` 报错 + `sys_exit(1)`。不静默跳过（掩盖真实链接错误）。诊断必须打印**类型 + 对象 base + r_offset + 符号名**（对照 `dl: loaded libc.so @ 0x800000` 即知 base 归属），TLS 重定位类型（16-23, 35-36）额外提示改用 TCB 字段。
+- **未解析符号**：加载时立即报错（eager binding 优势），`dl_puts` 打印符号名 + 对象 base + r_offset + `sys_exit(1)`。
 - **GOT/PLT 越界写**：`r_offset` 校验在段范围内，越界报错。
 
 ### 5.5 调试可观测
@@ -1825,7 +1891,7 @@ Summary: PASS=18 FAIL=0 SKIP=0   ← 静态 hello + 17 测试全回归通过
    - `DT_NEEDED`：加载 libc.so（read + anon mmap + memcpy）
    - **重定位 libc.so**（其 `.rela.dyn`/`.rela.plt`）
    - **重定位主 ELF**（其 `.rela.dyn` 含 GOTPCREL/`.rela.plt` JUMP_SLOT 解析 libc.so 符号）
-   - eager 重定位（标准 PIC 全集 9 种，§3.3.4，GOTPCREL 正确两步处理）
+   - eager 重定位（标准 PIC 全集 9 种 + 主 ELF COPY，§3.3.4，GOTPCREL 正确两步处理）
    - 构造 link_map，存全局 `_dl_link_map`
    - 跳 AT_ENTRY（主 ELF `_start`，来自 crt0.o）
 
@@ -1856,8 +1922,11 @@ gcc -fno-pie -no-pie -Wl,--dynamic-linker,/lib/ld.so \
 **验证：**
 
 - `hello_dyn` 跑通，调用 `printf`（libc.so 符号）正确
+- `hello_dyn` 引用 `errno`，验证 errno 的 TCB 模式在动态链接下工作（`readelf -r` 显示 `__errno_location` 的 JUMP_SLOT，运行输出 `errno=0` 不崩）
 - 串口看到完整 ld.so 日志链
 - 静态 hello 仍正常
+
+**覆盖要求：** `hello_dyn` 必须引用 `errno`，验证 errno 的 TCB 模式（§3.4.5）在动态链接下写读一致。errno 改 TCB 后不再生成 `R_X86_64_COPY`（主 ELF 调 `__errno_location()` 函数而非引用变量），COPY 路径由 stdio 测试的 `stdout`/`stdin`/`stderr` 覆盖。若 errno 仍用全局变量模式，动态链接下会写读分离（bug.md BUG-LD-002），阶段 5 测试改动态后一次性暴露。
 
 ### 6.6 阶段 5：测试 ELF 全改动态，迁移其余用户程序
 
@@ -1865,9 +1934,10 @@ gcc -fno-pie -no-pie -Wl,--dynamic-linker,/lib/ld.so \
 
 **任务：**
 
-1. 测试 ELF 全改动态链接
-2. 验证全部测试通过
-3. 评估迁移其余用户程序（init/shell 暂留静态）
+1. **改动态前先跑静态基线**：记录静态下 `test_runner` 的 `PASS=N FAIL=0`（基线 = 18）。改动态后若 FAIL 数变化，diff 立刻定位是动态链接引入的回归，而非测试本身缺陷（阶段 5 实测教训：改动态后 7 个测试挂，需手动 `git stash` 回退才确认是动态引入）
+2. 测试 ELF 全改动态链接
+3. 验证全部测试通过（与静态基线 diff，PASS 数应一致）
+4. 评估迁移其余用户程序（init/shell 暂留静态）
 
 ### 6.7 依赖关系图
 

@@ -17,6 +17,7 @@ set(LIBC_SOURCES
     lib/start_main.cc
     lib/atexit.c
     lib/init_array.c
+    lib/errno.cc
     ${CMAKE_SOURCE_DIR}/common/kvformat.c
 )
 
@@ -47,7 +48,7 @@ target_include_directories(unity PRIVATE
 target_compile_definitions(unity PRIVATE UNITY_EXCLUDE_SETJMP_H)
 
 add_user_elf(hello  C SOURCES hello.c  LINK_LIBS c)
-add_user_elf(test_fpu C SOURCES test/test_fpu.c LINK_LIBS c)
+add_user_dyn_elf(test_fpu C SOURCES test/test_fpu.c LINK_LIBS c)
 
 # ld.so（阶段 2b+3：完整加载链路）
 add_user_ldso(ldso SOURCES
