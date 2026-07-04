@@ -395,7 +395,8 @@ void test_dev_vfs_fcntl_setfl(void) {
   close(fd);
 }
 
-/* 29. mmap MAP_SHARED on /dev/dri/card0 → kernel auto resolves via dev_ops.mmap */
+/* 29. mmap MAP_SHARED on /dev/dri/card0 → kernel auto resolves via dev_ops.mmap
+ */
 void test_dev_vfs_kms_mmap_shared(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {

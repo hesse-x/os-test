@@ -357,8 +357,9 @@ uint32_t fat32_bytes_per_cluster(void) { return bytes_per_cluster; }
  * disk. The root directory (dir_idx < 0) keeps ino = root_cluster.
  */
 static uint32_t fat32_make_ino(uint32_t dir_cluster, int dir_entry_idx) {
-    if (dir_entry_idx < 0) return root_cluster;
-    return dir_cluster * (bytes_per_cluster / 32) + (uint32_t)dir_entry_idx;
+  if (dir_entry_idx < 0)
+    return root_cluster;
+  return dir_cluster * (bytes_per_cluster / 32) + (uint32_t)dir_entry_idx;
 }
 
 /* ==================== Path resolution (synchronous) ==================== */
@@ -910,8 +911,8 @@ struct inode *fat32_open(const char *path, int flags, int *out_errno) {
    * empty files (start_cluster == 0) get a unique, stable inode. */
   int ino_type = is_dir ? INODE_DIR : INODE_REGULAR;
   uint32_t ino = fat32_make_ino(dir_cluster, dir_idx);
-  struct inode *ip = inode_get_or_create(ino, ino_type, file_size,
-                                         cluster, dir_cluster, dir_idx);
+  struct inode *ip = inode_get_or_create(ino, ino_type, file_size, cluster,
+                                         dir_cluster, dir_idx);
   return ip;
 }
 
@@ -1462,98 +1463,105 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
   char lfn_buf[256];
   __memset(lfn_buf, 0, sizeof(lfn_buf));
 
-    while (scan_cluster >= 2 && scan_cluster < 0x0FFFFFF8) {
-        uint8_t *cbuf = read_cluster_buf(scan_cluster);
-        if (!cbuf) return -EIO;
+  while (scan_cluster >= 2 && scan_cluster < 0x0FFFFFF8) {
+    uint8_t *cbuf = read_cluster_buf(scan_cluster);
+    if (!cbuf)
+      return -EIO;
 
-        int entries = bytes_per_cluster / 32;
-        for (int i = 0; i < entries; i++) {
-            struct fat_dir_entry *de = (struct fat_dir_entry *)(cbuf + i * 32);
-            if (de->name[0] == 0x00) {
-                /* End of directory */
-                kfree(cbuf);
-                *pos = (uint64_t)-1; /* signal EOF */
-                return (int)written;
-            }
-            if (de->name[0] == 0xE5) {
-                lfn_buf[0] = '\0';
-                continue;
-            }
-            if (de->attr == 0x0F) {
-                collect_lfn_entry(de, lfn_buf);
-                continue;
-            }
-
-            /* Skip entries we've already consumed (for resuming after pos) */
-            if (entry_idx < *pos) {
-                entry_idx++;
-                lfn_buf[0] = '\0';
-                continue;
-            }
-
-            /* Build name */
-            char name[256];
-            if (lfn_buf[0] != '\0') {
-                int j;
-                for (j = 0; lfn_buf[j] && j < 255; j++) name[j] = lfn_buf[j];
-                name[j] = '\0';
-            } else {
-                /* Convert 8.3 name */
-                int j = 0;
-                for (int k = 0; k < 8 && de->name[k] != ' '; k++) {
-                    char c = de->name[k];
-                    if (c >= 'A' && c <= 'Z') c += 32;
-                    name[j++] = c;
-                }
-                if (de->name[8] != ' ') {
-                    name[j++] = '.';
-                    for (int k = 8; k < 11 && de->name[k] != ' '; k++) {
-                        char c = de->name[k];
-                        if (c >= 'A' && c <= 'Z') c += 32;
-                        name[j++] = c;
-                    }
-                }
-                name[j] = '\0';
-            }
-            lfn_buf[0] = '\0';
-
-            /* Compute entry size: dirent64 header + name + null + padding to 8-byte align */
-            int name_len = 0;
-            while (name[name_len]) name_len++;
-            uint16_t reclen = (uint16_t)(sizeof(struct dirent64) + name_len + 1);
-            reclen = (reclen + 7) & ~7; /* 8-byte align */
-
-            /* If this entry doesn't fit, stop here */
-            if (written + reclen > len) {
-                kfree(cbuf);
-                *pos = entry_idx;
-                return (int)written;
-            }
-
-            /* Fill entry */
-            struct dirent64 *d = (struct dirent64 *)(out + written);
-            d->d_ino = fat32_make_ino(scan_cluster, i);
-            d->d_reclen = reclen;
-            d->d_type = (de->attr & 0x10) ? 4 : 8; /* DT_DIR=4, DT_REG=8 */
-            int j;
-            for (j = 0; j < name_len; j++) d->d_name[j] = name[j];
-            d->d_name[j] = '\0';
-
-            written += reclen;
-            entry_idx++;
-        }
-
+    int entries = bytes_per_cluster / 32;
+    for (int i = 0; i < entries; i++) {
+      struct fat_dir_entry *de = (struct fat_dir_entry *)(cbuf + i * 32);
+      if (de->name[0] == 0x00) {
+        /* End of directory */
         kfree(cbuf);
+        *pos = (uint64_t)-1; /* signal EOF */
+        return (int)written;
+      }
+      if (de->name[0] == 0xE5) {
+        lfn_buf[0] = '\0';
+        continue;
+      }
+      if (de->attr == 0x0F) {
+        collect_lfn_entry(de, lfn_buf);
+        continue;
+      }
 
-        /* Follow FAT chain */
-        uint32_t next = fat32_read_entry(scan_cluster);
-        if (next >= 0x0FFFFFF8) {
-            *pos = (uint64_t)-1; /* EOF */
-            return (int)written;
+      /* Skip entries we've already consumed (for resuming after pos) */
+      if (entry_idx < *pos) {
+        entry_idx++;
+        lfn_buf[0] = '\0';
+        continue;
+      }
+
+      /* Build name */
+      char name[256];
+      if (lfn_buf[0] != '\0') {
+        int j;
+        for (j = 0; lfn_buf[j] && j < 255; j++)
+          name[j] = lfn_buf[j];
+        name[j] = '\0';
+      } else {
+        /* Convert 8.3 name */
+        int j = 0;
+        for (int k = 0; k < 8 && de->name[k] != ' '; k++) {
+          char c = de->name[k];
+          if (c >= 'A' && c <= 'Z')
+            c += 32;
+          name[j++] = c;
         }
-        scan_cluster = next;
+        if (de->name[8] != ' ') {
+          name[j++] = '.';
+          for (int k = 8; k < 11 && de->name[k] != ' '; k++) {
+            char c = de->name[k];
+            if (c >= 'A' && c <= 'Z')
+              c += 32;
+            name[j++] = c;
+          }
+        }
+        name[j] = '\0';
+      }
+      lfn_buf[0] = '\0';
+
+      /* Compute entry size: dirent64 header + name + null + padding to 8-byte
+       * align */
+      int name_len = 0;
+      while (name[name_len])
+        name_len++;
+      uint16_t reclen = (uint16_t)(sizeof(struct dirent64) + name_len + 1);
+      reclen = (reclen + 7) & ~7; /* 8-byte align */
+
+      /* If this entry doesn't fit, stop here */
+      if (written + reclen > len) {
+        kfree(cbuf);
+        *pos = entry_idx;
+        return (int)written;
+      }
+
+      /* Fill entry */
+      struct dirent64 *d = (struct dirent64 *)(out + written);
+      d->d_ino = fat32_make_ino(scan_cluster, i);
+      d->d_reclen = reclen;
+      d->d_type = (de->attr & 0x10) ? 4 : 8; /* DT_DIR=4, DT_REG=8 */
+      int j;
+      for (j = 0; j < name_len; j++)
+        d->d_name[j] = name[j];
+      d->d_name[j] = '\0';
+
+      written += reclen;
+      entry_idx++;
     }
 
-    *pos = (uint64_t)-1;
-    return (int)written;
+    kfree(cbuf);
+
+    /* Follow FAT chain */
+    uint32_t next = fat32_read_entry(scan_cluster);
+    if (next >= 0x0FFFFFF8) {
+      *pos = (uint64_t)-1; /* EOF */
+      return (int)written;
+    }
+    scan_cluster = next;
+  }
+
+  *pos = (uint64_t)-1;
+  return (int)written;
 }

@@ -1,7 +1,14 @@
-#include "kernel/driver/virtio_ring.h"
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include <stddef.h>
+
 #include "arch/x64/paging.h"
 #include "arch/x64/utils.h"
-#include "kernel/xcore/log.h"
+#include "kernel/driver/virtio_ring.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/slab.h"
 

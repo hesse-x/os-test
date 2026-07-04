@@ -1,9 +1,13 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #ifndef KERNEL_DRIVER_VIRTIO_PCI_H
 #define KERNEL_DRIVER_VIRTIO_PCI_H
 
 #include "kernel/xcore/sparse.h"
-#include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 
 /* ===== virtio PCI vendor/device IDs ===== */
@@ -30,6 +34,8 @@
 
 /* ===== common config register layout (virtio 1.x spec) ===== */
 /* All fields are LE, accessed via MMIO */
+struct pci_device;
+
 struct virtio_pci_common_cfg {
   uint32_t device_feature_select; /* r/w: selects feature bits 0-31 */
   uint32_t device_feature;        /* r: read selected feature bits */

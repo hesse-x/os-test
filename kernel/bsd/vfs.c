@@ -34,7 +34,8 @@
 
 void vfs_init(void) {
   // inode_init, page_cache_init, devtmpfs_init are called in kernel_main before
-  // driver_init. drm_dev_register() is called from virtio_gpu_init (driver_init).
+  // driver_init. drm_dev_register() is called from virtio_gpu_init
+  // (driver_init).
   serial_dev_register();
   pty_init();
 
@@ -96,7 +97,8 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
    * open(...,O_WRONLY|O_CREAT) silently returned a dir fd, which later
    * crashed sys_read/sys_write. Returning EISDIR turns that into a
    * userspace error instead of a kernel page fault. */
-  if (ip->type == INODE_DIR && (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC))) {
+  if (ip->type == INODE_DIR &&
+      (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC))) {
     inode_put(ip);
     return (int64_t)-EISDIR;
   }

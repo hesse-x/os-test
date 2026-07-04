@@ -1,12 +1,20 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #ifndef KERNEL_DRIVER_VIRTIO_GPU_H
 #define KERNEL_DRIVER_VIRTIO_GPU_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "kernel/driver/virtio_pci.h"
 #include "kernel/driver/virtio_ring.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
-#include <stdbool.h>
-#include <stdint.h>
 
 /* ===== virtio-gpu PCI config (device-specific config space) ===== */
 struct virtio_gpu_config {

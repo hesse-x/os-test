@@ -1,8 +1,16 @@
-#include "kernel/driver/virtio_pci.h"
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include <stdbool.h>
+#include <stddef.h>
+
 #include "arch/x64/utils.h"
 #include "kernel/driver/pci.h"
+#include "kernel/driver/virtio_pci.h"
 #include "kernel/xcore/log.h"
-#include "kernel/xcore/trap.h"
 
 /* Read a virtio_pci_cap from PCI config space cap chain.
    Returns true if found, fills cap struct. */
