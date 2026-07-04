@@ -1,7 +1,7 @@
 #!/bin/bash
 # run.sh - QEMU 启动内核
-# disk.img 在 ICH9 port 0，boot.img 在 port 1
-# UEFI 从 port 1 的 FAT32 引导 BOOTX64.EFI → 加载 myos.elf
+# 单盘 disk.img (两分区: ESP + 根 FAT32), 接 q35 ICH9 SATA (IDE 兼容总线 ide.0)
+# UEFI 从 ESP 分区引导 BOOTX64.EFI → 加载 myos.elf + init.elf
 #
 # 串口输出默认写入 log.txt，可通过 -o <file> 指定；串口输入需通过 socat 连接:
 #   socat -,rawer UNIX-CONNECT:/tmp/qemu-serial.sock 2>&1 | tee -a <logfile>
@@ -25,10 +25,8 @@ SERIAL_OPTS="-chardev socket,id=s0,path=/tmp/qemu-serial.sock,server=on,wait=off
 
 qemu-system-x86_64 \
     -machine q35 \
-    -drive file=build/boot.img,format=raw,if=none,id=boot0 \
-    -device ide-hd,drive=boot0,bus=ide.0 \
     -drive file=build/disk.img,format=raw,if=none,id=disk0 \
-    -device ide-hd,drive=disk0,bus=ide.1 \
+    -device ide-hd,drive=disk0,bus=ide.0 \
     -device qemu-xhci,id=xhci \
     -device usb-kbd,bus=xhci.0 \
     -device usb-mouse,bus=xhci.0 \

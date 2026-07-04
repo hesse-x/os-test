@@ -18,6 +18,13 @@ typedef struct boot_info {
     uint64_t mmap_size;
     uint64_t mmap_desc_size;
     uint64_t mmap_desc_ver;
+
+    // init.elf loaded by stub into physical memory (initrd-style):
+    // kernel creates the init process directly from this buffer, avoiding
+    // any early disk I/O. The stub reads init.elf from the ESP alongside
+    // myos.elf.
+    uint64_t init_elf_addr;
+    uint64_t init_elf_size;
 } boot_info;
 
 #endif /* COMMON_BOOT_H */

@@ -566,35 +566,12 @@ void ahci_init() {
     }
   }
 
-  // If only 1 disk found, also check all PI ports by trying COMRESET + detect
-  if (disk_count <= 1) {
-    ahci_puts("ahci: fallback: COMRESET all PI ports\n");
-    for (int i = 0; i < 32; i++) {
-      if (!(pi & (1 << i))) continue;
-      if (i == active_port) continue;  // already scanned
-      uint32_t ssts = readl(port_reg(i, PxSSTS));
-      uint32_t det = ssts & 0xF;
-      printk(LOG_WARN, "ahci: re-scan port %d DET=%d", i, det);
-      if (det != 3) {
-        // Try COMRESET to force device detection
-        if (ahci_comreset_port(i) != 0) {
-          ahci_puts(" (no device after COMRESET)\n");
-          continue;
-        }
-      } else {
-        ahci_puts(" (already detected)\n");
-      }
-      port_init(i);
-      if (ahci_identify_device(i, idbuf) == 0) {
-        printk(LOG_INFO, "ahci: port %d: SATA disk (fallback)\n", i);
-        if (active_port < 0) active_port = i;
-        disk_count++;
-      } else {
-        printk(LOG_ERROR, "ahci: port %d: IDENTIFY failed\n", i);
-        port_stop(i);
-      }
-    }
-  }
+  // Startup disk is fixed: UEFI boots from the ESP on the single disk where
+  // BOOTX64.EFI/myos.elf/init.elf live, and the kernel mounts that disk's root
+  // FAT32 for init. The main scan above already found it (active_port). No
+  // fallback COMRESET scan — probing empty ports blocks ~1.25s each on COMRESET
+  // timeout. Runtime multi-disk support (additional /dev/sd* block devices) is
+  // a separate user-visible concern, not needed at early boot.
 
   printk(LOG_INFO, "ahci: disks=%d active=%d\n", disk_count, active_port);
 

@@ -49,31 +49,11 @@ cmake -DCMAKE_TOOLCHAIN_FILE=../build_script/cmake/toolchain-x86_64.cmake \
 make
 cd ..
 
-# 2. 生成 disk.img（裸 ELF + FAT32）
+# 2. 生成 disk.img（单盘两分区: ESP + 根 FAT32）
 TEST="${TEST:-0}"
 if echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
     TEST=1
 fi
 export TEST
 
-# 2a. 提前检查裸 ELF 大小不超出 slot 容量。
-# 裸 ELF 区 init.elf 在 LBA 101，slot = ELF_SLOT_SECTORS（与 kernel.c 对齐）。
-# 超出时 dd 会越界写入 FAT32 分区，导致 .data/.bss 被覆盖，init 早期 page fault
-#（典型症状：stdout 指针变 NULL/垃圾，fflush(stdout) 崩在 file_putc_internal）。
-BARE_ELF_SLOT_SECTORS=2048  # = kernel.c ELF_SLOT_SECTORS，1MB
-BARE_ELF_SLOT_BYTES=$((BARE_ELF_SLOT_SECTORS * 512))
-INIT_SIZE=$(stat -c%s "${BUILD_DIR:-build}/init.elf" 2>/dev/null || echo 0)
-if [ "$INIT_SIZE" -gt "$BARE_ELF_SLOT_BYTES" ]; then
-    echo "build.sh: init.elf size ${INIT_SIZE} bytes exceeds bare-ELF slot capacity ${BARE_ELF_SLOT_BYTES} bytes (${BARE_ELF_SLOT_SECTORS} sectors)"
-    echo "  init.elf is stored at LBA 101 in a raw ELF slot; FAT32 begins right after."
-    echo "  If init.elf grows past the slot, dd overwrites the FAT32 partition and"
-    echo "  clobbers init's .data — runtime symptoms look like a libc layout bug."
-    echo "  Fix: shrink init.elf, or raise ELF_SLOT_SECTORS in kernel.c and the slot"
-    echo "       size in build_script/mkdisk.sh (keep them in sync)."
-    exit 1
-fi
-
 ./build_script/mkdisk.sh
-
-# 3. 生成 boot.img（EFI 启动盘）
-./mkimg.sh

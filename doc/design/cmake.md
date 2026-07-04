@@ -11,18 +11,18 @@
 | 3 | 用户态寻址 | -fno-pie + -Ttext 0x400000 | 用户态用绝对地址，链接脚本指定入口 |
 | 4 | POSITION_INDEPENDENT_CODE | OFF（内核 OBJECT library） | 防止 add_library(OBJECT) 自动加 -fPIC，破坏 RIP-relative 寻址 |
 | 5 | objcopy | --remove-section .note.gnu.property | 移除 GNU property note，避免 ld 警告 |
-| 6 | 磁盘映像 | 脚本生成（mkdisk.sh + mkimg.sh） | mkdisk.sh 生成 disk.img（裸 ELF + FAT32），mkimg.sh 生成 boot.img（UEFI 启动） |
+| 6 | 磁盘映像 | 脚本生成（mkdisk.sh） | mkdisk.sh 生成单盘两分区 disk.img：ESP(FAT16) + 根(FAT32) |
 
 ### 构建入口
 
 ```bash
-./build.sh          # 编译内核 + EFI bootloader + 用户态 ELF + 生成 disk.img + boot.img
+./build.sh          # 编译内核 + EFI bootloader + 用户态 ELF + 生成 disk.img
 ./build.sh -d       # Debug 模式（-g -fno-omit-frame-pointer）
 ./build.sh --test   # 测试构建（Unity 测试 ELF + test_runner）
 ./build.sh --no-serial  # 禁用串口打印（NSERIAL 宏）
 ```
 
-build.sh 三步流程：CMake configure + make → mkdisk.sh → mkimg.sh
+build.sh 两步流程：CMake configure + make → mkdisk.sh
 
 ### 工具链
 
@@ -92,13 +92,12 @@ Terminal 和驱动不链接 libc，使用 syscall 原语。
 
 ### 磁盘映像生成
 
-mkdisk.sh 生成 build/disk.img（64MB）：
-- dd 写 ELF 到裸 LBA 区域（每槽 100 扇区）
-- sfdisk 创建 MBR 分区表（分区1: 裸 ELF 存储，分区2: FAT32）
-- mkfs.fat 格式化 FAT32 分区（4KB 簇）
+mkdisk.sh 生成单盘两分区 build/disk.img（192MB）：
+- sfdisk 创建 MBR 分区表（分区1: ESP type 0xEF FAT16 1MB 对齐，分区2: 根 type 0x0C FAT32）
+- mkfs.fat 格式化两个分区（ESP FAT16，根 FAT32 512B 簇）
 - mmd + mcopy 创建 FHS 目录结构并复制文件
-
-mkimg.sh 生成 build/boot.img（128MB FAT32），包含 \EFI\BOOT\BOOTX64.EFI + myos.elf。
+- ESP 放 \EFI\BOOT\BOOTX64.EFI + myos.elf + init.elf（stub 把 init.elf 读进内存传给内核，initrd-style）
+- 根分区放 /driver、/usr/bin、/usr/lib、/lib、/local 等用户态文件
 
 ### 添加新源文件
 
@@ -113,7 +112,7 @@ mkimg.sh 生成 build/boot.img（128MB FAT32），包含 \EFI\BOOT\BOOTX64.EFI +
 - 用户态规则：build_script/cmake/user_rules.cmake
 - 链接脚本：build_script/linker.ld
 - 链接辅助：build_script/cmake/do_link.cmake
-- 磁盘映像：build_script/mkdisk.sh / mkimg.sh
+- 磁盘映像：build_script/mkdisk.sh
 - 顶层构建：CMakeLists.txt / build.sh
 
 ## 待完成项

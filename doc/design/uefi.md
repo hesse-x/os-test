@@ -14,8 +14,8 @@
 | 6 | 代码分工 | stub 入口+调 EFI API→汇编，建页表→C，切 CR3+跳内核→汇编 | 汇编处理硬件状态切换，C 复用 paging.cc 逻辑 |
 | 7 | Framebuffer | stub 从 GOP 获取物理地址 | 内核在自己的页表中映射到 device_vma_base 区域 |
 | 8 | ACPI RSDP | stub 从 UEFI 配置表提取 | 内核未来加 ACPI 时直接读取 |
-| 9 | 介质构建 | FAT32 磁盘映像 | mkimg.sh 创建 FAT32 img，放置 BOOTX64.EFI + myos.elf |
-| 10 | QEMU 启动 | -bios OVMF.fd + 硬盘启动 | -drive file=build/boot.img,format=raw |
+| 9 | 介质构建 | 单盘两分区 disk.img | mkdisk.sh 生成 ESP(FAT16) + 根(FAT32)：ESP 放 BOOTX64.EFI + myos.elf + init.elf |
+| 10 | QEMU 启动 | -bios OVMF.fd + 硬盘启动 | -drive file=build/disk.img,format=raw |
 
 ### 启动流程
 
@@ -57,8 +57,7 @@ ExitBootServices 后 mmap 缓冲区数据仍然有效：
 - EFI 类型定义：common/efi.h
 - 页表构建（stub 侧）：boot/stub.c 中 C 函数
 - 内核入口：arch/x64/start.S : _start
-- 启动映像构建：mkimg.sh
-- 磁盘映像构建：build_script/mkdisk.sh
+- 磁盘映像构建（ESP + 根两分区）：build_script/mkdisk.sh
 
 ## 待完成项
 

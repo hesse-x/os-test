@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/types.h>
+#include <time.h>
 #include "common/signal.h"
 
 #ifdef __cplusplus
@@ -35,8 +36,14 @@ typedef int32_t pthread_key_t;
 #define PTHREAD_PROCESS_PRIVATE       0
 #define PTHREAD_PROCESS_SHARED        1
 
+// 守卫防止与系统 <bits/local_lim.h> 重定义：Unity 的 <limits.h> 在 test
+// 构建下会回退到系统头，链条拉入 local_lim.h 定义这些宏。
+#ifndef PTHREAD_KEYS_MAX
 #define PTHREAD_KEYS_MAX              128
+#endif
+#ifndef PTHREAD_DESTRUCTOR_ITERATIONS
 #define PTHREAD_DESTRUCTOR_ITERATIONS 4
+#endif
 
 #define PTHREAD_ONCE_INIT             0
 #define PTHREAD_BARRIER_SERIAL_THREAD -1

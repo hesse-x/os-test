@@ -1,5 +1,22 @@
 #!/bin/bash
-# mkdisk.sh — 创建 disk.img（MBR + 裸 ELF 存储 + FAT32 分区）
+# mkdisk.sh — 单盘两分区 disk.img 生成
+#
+# 布局:
+#   LBA 0:           MBR + 分区表
+#   分区1 (ESP):     FAT32, ~32MB — UEFI 引导文件
+#     /EFI/BOOT/BOOTX64.EFI
+#     /myos.elf
+#     /init.elf          ← stub 加载到内存传给内核 (initrd-style)
+#   分区2 (根):      FAT32, ~160MB — 根文件系统
+#     /driver/kbd.dev
+#     /usr/bin/{terminal,shell}
+#     /usr/lib/libc.a
+#     /lib/{libc.so,ld.so}
+#     /local/{hello,hello_dyn}.elf
+#     /README
+#
+# 内核从 boot_info 拿 init.elf 创建 init 进程, 不再需要裸 LBA slot。
+# FAT32 驱动自己解析 MBR 分区表找根分区起始 LBA (fat32_init)。
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -8,34 +25,57 @@ BUILD_DIR="${PROJECT_DIR}/build"
 TESTDATA_DIR="${PROJECT_DIR}/testdata"
 
 # 检查依赖文件
-if [ ! -f "${BUILD_DIR}/init.elf" ]; then
-    echo "mkdisk.sh: ${BUILD_DIR}/init.elf not found, run build.sh first"
-    exit 1
-fi
+for f in init.elf myos.elf BOOTX64.EFI kbd_driver.elf terminal.elf shell.elf \
+         libc.a libc.so hello.elf ldso.elf hello_dyn.elf; do
+    if [ ! -f "${BUILD_DIR}/${f}" ]; then
+        echo "mkdisk.sh: ${BUILD_DIR}/${f} not found, run build.sh first"
+        exit 1
+    fi
+done
 
-# 创建零填充映像 (64MB, 131072 扇区)
-# 注意: -F 32 -s 8 (4KB/簇) 在 64MB 下簇数不足 65525 下限，新版 mtools 拒绝操作。
-# 改用 -s 1 (512B/簇) 确保簇数达标。
-DISK_SECTORS=$((64 * 1024 * 1024 / 512))      # 131072
-PART2_SECTORS=$((DISK_SECTORS - 2149))          # FAT32 分区扇区数
+# 磁盘总大小: 192MB = 393216 扇区
+DISK_SECTORS=$((192 * 1024 * 1024 / 512))
+# 分区1 (ESP): 32MB = 65536 扇区, 从 LBA 2048 开始 (1MB 对齐)
+PART1_START=2048
+PART1_SECTORS=65536
+# 分区2 (根): 剩余空间
+PART2_START=$((PART1_START + PART1_SECTORS))
+PART2_SECTORS=$((DISK_SECTORS - PART2_START))
+
+# 创建零填充映像
 dd if=/dev/zero of="${BUILD_DIR}/disk.img" bs=512 count=${DISK_SECTORS} status=none
 
-# 写入 ELF 到裸 LBA 区域 (init: LBA 101, slot 2048 扇区 = 1MB)
-dd if="${BUILD_DIR}/init.elf"         of="${BUILD_DIR}/disk.img" bs=512 seek=101 conv=notrunc status=none
-
 # 创建 MBR 分区表
-# 分区1: LBA 1-2148 (裸 ELF: init at LBA 101, 1MB slot), 分区2: LBA 2149+ (FAT32)
+# 分区1: ESP, type 0xEF (EFI), 1MB 对齐 — OVMF 凭此类型识别 ESP
+# 分区2: 根, type 0x0C (W95 FAT32 LBA)
 sfdisk "${BUILD_DIR}/disk.img" <<EOF
 label: dos
 unit: sectors
 
-${BUILD_DIR}/disk.img1 : start=1, size=2148, type=da
-${BUILD_DIR}/disk.img2 : start=2149, size=${PART2_SECTORS}, type=0c
+${BUILD_DIR}/disk.img1 : start=${PART1_START}, size=${PART1_SECTORS}, type=ef
+${BUILD_DIR}/disk.img2 : start=${PART2_START}, size=${PART2_SECTORS}, type=0c
 EOF
 
-# 提取 FAT32 分区区域，格式化，写入文件，写回
-dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part2.img" bs=512 skip=2149 count=${PART2_SECTORS} status=none
+# ===================== 分区1: ESP =====================
+# 提取分区1 区域, 格式化, 写入引导文件, 写回
+dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part1.img" bs=512 skip=${PART1_START} count=${PART1_SECTORS} status=none
+# FAT16: 32MB ESP 用 FAT32 簇数不足 (mtools WARNING + OVMF 拒绝)。
+# UEFI 规范允许 FAT12/16/32, OVMF 对 FAT16 ESP 引导支持良好。
+mkfs.fat -F 16 -n ESP "${BUILD_DIR}/part1.img" >/dev/null
+
+mmd -i "${BUILD_DIR}/part1.img" ::EFI
+mmd -i "${BUILD_DIR}/part1.img" ::EFI/BOOT
+mcopy -i "${BUILD_DIR}/part1.img" "${BUILD_DIR}/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI
+mcopy -i "${BUILD_DIR}/part1.img" "${BUILD_DIR}/myos.elf"     ::myos.elf
+mcopy -i "${BUILD_DIR}/part1.img" "${BUILD_DIR}/init.elf"     ::init.elf
+
+dd if="${BUILD_DIR}/part1.img" of="${BUILD_DIR}/disk.img" bs=512 seek=${PART1_START} conv=notrunc status=none
+rm -f "${BUILD_DIR}/part1.img"
+
+# ===================== 分区2: 根文件系统 =====================
+dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part2.img" bs=512 skip=${PART2_START} count=${PART2_SECTORS} status=none
 mkfs.fat -F 32 -s 1 "${BUILD_DIR}/part2.img" >/dev/null
+# 注: -s 1 (512B/簇) 在 64MB 下簇数达标 (新版 mtools 要求 ≥65525 簇)。
 
 # 创建目录结构
 mmd -i "${BUILD_DIR}/part2.img" ::driver
@@ -68,7 +108,5 @@ fi
 mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/README" ::README
 
 # 写回 FAT32 分区
-dd if="${BUILD_DIR}/part2.img" of="${BUILD_DIR}/disk.img" bs=512 seek=2149 conv=notrunc status=none
-
-# 清理临时文件
+dd if="${BUILD_DIR}/part2.img" of="${BUILD_DIR}/disk.img" bs=512 seek=${PART2_START} conv=notrunc status=none
 rm -f "${BUILD_DIR}/part2.img"

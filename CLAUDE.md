@@ -25,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 构建与运行
 
 ```bash
-./build.sh          # 编译内核 + EFI bootloader + 用户态 ELF + disk.img + boot.img
+./build.sh          # 编译内核 + EFI bootloader + 用户态 ELF + disk.img（单盘两分区）
 ./build.sh -d       # Debug 模式（-g -fno-omit-frame-pointer，异常时栈回溯）
 ./build.sh --test   # 测试构建（Unity 测试 ELF + test_runner）
 ./build.sh --no-serial  # 禁用串口打印（NSERIAL 宏）
@@ -35,7 +35,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 构建体系为 CMake + 自定义链接脚本。详见 `doc/design/cmake.md`。
 
-**磁盘布局**：disk.img（64MB），LBA 0=MBR，LBA 101-2148=init.elf（1MB 裸 ELF slot），LBA 2149+=FAT32。详见 `doc/design/vfs.md`。
+**磁盘布局**：disk.img（192MB），单盘两分区：分区1=ESP(FAT16, LBA 2048 起, 32MB，放 BOOTX64.EFI/myos.elf/init.elf)，分区2=根(FAT32, LBA 67648 起)。stub 把 init.elf 读进内存传给内核（initrd-style），内核不再用裸 LBA slot。详见 `doc/design/vfs.md`。
 
 **重要：** `add_library(OBJECT)` 不能设置 `POSITION_INDEPENDENT_CODE ON`，否则加 `-fPIC` 破坏 RIP-relative 寻址。
 
@@ -60,9 +60,9 @@ build_script/
   cmake/kernel_rules.cmake   — add_kernel_object()
   cmake/user_rules.cmake     — add_user_lib() / add_user_elf()
   linker.ld            — 64位链接脚本
-  mkdisk.sh            — disk.img 打包（裸 ELF + FAT32）
+  mkdisk.sh            — disk.img 打包（单盘两分区: ESP FAT16 + 根 FAT32）
 CMakeLists.txt
-build.sh / mkimg.sh / run.sh
+build.sh / run.sh
 testdata/
 
 boot/

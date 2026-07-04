@@ -63,12 +63,67 @@ static EFI_STATUS load_elf(EFI_FILE_PROTOCOL *file, UINT64 *entry_addr) {
   return EFI_SUCCESS;
 }
 
+// ===================== 加载整个文件到内存 =====================
+// 读取 file 的全部内容到一段 AllocatePages 分配的物理内存。
+// 返回分配的物理地址（*out_phys）和字节数（*out_size）。
+// 失败返回 EFI 错误码；调用者负责在失败路径上释放已分配的页面。
+static EFI_STATUS load_file_to_mem(EFI_FILE_PROTOCOL *file,
+                                   EFI_PHYSICAL_ADDRESS *out_phys,
+                                   UINT64 *out_size) {
+  // 先取文件大小
+  EFI_STATUS st = uefi_call_wrapper(file->SetPosition, 2, file, 0xFFFFFFFFFFFFFFFFULL);
+  if (EFI_ERROR(st)) return st;
+  UINT64 file_size = 0;
+  st = uefi_call_wrapper(file->GetPosition, 2, file, &file_size);
+  if (EFI_ERROR(st)) return st;
+  // 回到文件头
+  st = uefi_call_wrapper(file->SetPosition, 2, file, 0);
+  if (EFI_ERROR(st)) return st;
+
+  // 分配页面对齐的物理内存（向上取整到 4KB 页）
+  // EfiLoaderData: 归 loader 拥有，ExitBootServices 后固件不回收，
+  // 内核页表映射后可直接访问（Linux initrd 同款做法）。
+  UINTN npages = (UINTN)((file_size + 4095) / 4096);
+  EFI_PHYSICAL_ADDRESS phys = 0;
+  st = uefi_call_wrapper(BS->AllocatePages, 4,
+      AllocateAnyPages, EfiLoaderData, npages, &phys);
+  if (EFI_ERROR(st)) {
+    Print(L"stub: AllocatePages failed (%r)\n", st);
+    return st;
+  }
+
+  // 一次性读完整个文件
+  UINTN want = (UINTN)file_size;
+  st = uefi_call_wrapper(file->Read, 3, file, &want, (void *)phys);
+  if (EFI_ERROR(st) || want != (UINTN)file_size) {
+    Print(L"stub: read file failed (st=%r want=%lx size=%lx)\n",
+          st, (UINT64)want, file_size);
+    uefi_call_wrapper(BS->FreePages, 2, phys, npages);
+    return EFI_DEVICE_ERROR;
+  }
+
+  *out_phys = phys;
+  *out_size = file_size;
+  return EFI_SUCCESS;
+}
+
 // ===================== 打开文件 =====================
-static EFI_STATUS open_file(EFI_SYSTEM_TABLE *SystemTable,
+// 从 BOOTX64.EFI 所在的卷（disk.img 的 ESP 分区）打开文件。
+// 用 LoadedImage 定位装载 BOOTX64.EFI 的设备 handle，保证拿到 ESP
+// 而非根分区或其他磁盘的 FAT32。
+static EFI_STATUS open_file(EFI_HANDLE ImageHandle,
                             EFI_FILE_PROTOCOL **file, CHAR16 *name) {
+  EFI_LOADED_IMAGE *li;
+  EFI_STATUS st = uefi_call_wrapper(BS->HandleProtocol, 3,
+      ImageHandle, &gEfiLoadedImageProtocolGuid, (void **)&li);
+  if (EFI_ERROR(st)) {
+    Print(L"stub: locate LoadedImage failed\n");
+    return st;
+  }
+
   EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
-  EFI_STATUS st = uefi_call_wrapper(SystemTable->BootServices->LocateProtocol, 3,
-      &gEfiSimpleFileSystemProtocolGuid, NULL, (void **)&fs);
+  st = uefi_call_wrapper(BS->HandleProtocol, 3,
+      li->DeviceHandle, &gEfiSimpleFileSystemProtocolGuid, (void **)&fs);
   if (EFI_ERROR(st)) {
     Print(L"stub: locate filesystem failed\n");
     return st;
@@ -155,7 +210,7 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   read_rsdp(SystemTable);
 
   EFI_FILE_PROTOCOL *kernel_file;
-  EFI_STATUS st = open_file(SystemTable, &kernel_file, L"myos.elf");
+  EFI_STATUS st = open_file(ImageHandle, &kernel_file, L"myos.elf");
   if (EFI_ERROR(st)) {
     Print(L"stub: cannot open myos.elf, halting\n");
     while (1) __asm__ volatile("hlt");
@@ -168,6 +223,27 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     while (1) __asm__ volatile("hlt");
   }
   Print(L"stub: ELF loaded, entry=0x%lx\n", entry_vaddr);
+
+  // Load init.elf into physical memory (initrd-style). The kernel creates
+  // the init process directly from this buffer, so no early disk I/O is
+  // needed. Placed on the ESP alongside myos.elf.
+  EFI_FILE_PROTOCOL *init_file;
+  st = open_file(ImageHandle, &init_file, L"init.elf");
+  if (EFI_ERROR(st)) {
+    Print(L"stub: cannot open init.elf, halting\n");
+    while (1) __asm__ volatile("hlt");
+  }
+  EFI_PHYSICAL_ADDRESS init_phys = 0;
+  UINT64 init_size = 0;
+  st = load_file_to_mem(init_file, &init_phys, &init_size);
+  if (EFI_ERROR(st)) {
+    Print(L"stub: load init.elf failed, halting\n");
+    while (1) __asm__ volatile("hlt");
+  }
+  bi.init_elf_addr = (uint64_t)init_phys;
+  bi.init_elf_size = init_size;
+  Print(L"stub: init.elf loaded, phys=0x%lx size=%lu\n",
+        (UINT64)init_phys, init_size);
 
   st = exit_bs(SystemTable, ImageHandle);
   if (EFI_ERROR(st)) {

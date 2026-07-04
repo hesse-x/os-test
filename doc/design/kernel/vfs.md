@@ -236,11 +236,11 @@ kernel/fat32.c/h — FAT32 实现；kernel/vfs.c/h — VFS 层；kernel/devtmpfs
 
 ### 磁盘布局
 
-disk.img (64MB, 131072 扇区)：LBA 0=MBR 分区表；MBR 分区1(type=0xDA) LBA 1-2148 裸 ELF 存储（init.elf 在 LBA 101，1MB slot）；MBR 分区2(type=0x0C) LBA 2149-131071 FAT32 文件系统。FAT32 使用 -s 1（512B/簇）。
+disk.img (192MB, 393216 扇区)：LBA 0=MBR 分区表；分区1(type=0xEF ESP, FAT16) LBA 2048-67583，放 \EFI\BOOT\BOOTX64.EFI + myos.elf + init.elf（stub 把 init.elf 读进内存传给内核，initrd-style）；分区2(type=0x0C 根, FAT32) LBA 67648-393215 文件系统，FAT32 使用 -s 1（512B/簇）。fat32_init 扫描 MBR 分区表找 type 0x0B/0x0C 的根分区起始 LBA。
 
 ### 启动流程
 
-UEFI → kernel_main → FAT32 初始化 → spawn init.elf → init spawn kbd/kms/terminal → shell
+UEFI → stub 读 ESP 加载 myos.elf + init.elf → kernel_main（从 boot_info 取 init.elf 建 init 进程）→ FAT32 初始化 → init spawn kbd/terminal → shell
 
 ---
 
