@@ -23,8 +23,7 @@ rm -f /tmp/qemu-serial.sock "$LOGFILE"
 
 SERIAL_OPTS="-chardev socket,id=s0,path=/tmp/qemu-serial.sock,server=on,wait=off,logfile=$LOGFILE -serial chardev:s0 -monitor stdio"
 
-# qemu-system-x86_64 \
-~/opensource/qemu/build/qemu-system-x86_64 \
+qemu-system-x86_64 \
     -machine q35 \
     -drive file=build/boot.img,format=raw,if=none,id=boot0 \
     -device ide-hd,drive=boot0,bus=ide.0 \
