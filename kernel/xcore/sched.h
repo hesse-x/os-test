@@ -3,11 +3,12 @@
 
 #include <stdint.h>
 #include "kernel/xcore/xtask.h"
+#include "kernel/xcore/mem/slab.h"  // kmem_cache_t（xtask_cache 声明所需）
 #include "arch/x64/apic.h"
 
 // Scheduler and process table (kernel/xcore/sched.c)
 
-xtask_t *xtask_alloc(void);
+xtask_t *xtask_alloc(pid_t *out_pid);
 void xtask_free(xtask_t *t);
 void proc_init(void);
 void schedule(void);
@@ -17,6 +18,11 @@ void idle_entry(void);
 void try_steal_task(void);
 void timer_queue_insert(int cpu, xtask_t *proc);
 void timer_queue_remove(xtask_t *proc);
+
+// xtask_t 专用 slab cache（kernel/xcore/sched.c 定义）。
+// 动态化后 xtask_t 由 kmem_cache_alloc 从此 cache 分配，slot 复用时 free 回此 cache。
+// proc_create.c / proc.c 的失败回滚路径需 kmem_cache_free(xtask_cache, ...) 回收对象。
+extern kmem_cache_t *xtask_cache;
 
 static inline void timer_queue_cancel(xtask_t *proc) {
     if (proc->wait_deadline != 0) {

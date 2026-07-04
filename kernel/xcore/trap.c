@@ -126,7 +126,7 @@ void trap_dispatch(trapframe_t *tf) {
     pid_t owner_pid = __atomic_load_n(&irq_owner[tf->trapno], __ATOMIC_ACQUIRE);
     // Direct index by PID — no scan needed
     if (owner_pid >= 0 && owner_pid < MAX_PROC) {
-      xtask_t *target = &tasks[owner_pid];
+      xtask_t *target = task_get(owner_pid);
 
       // Enqueue RECV_IRQ message to target's recv queue
       spin_lock(&target->recv_lock);

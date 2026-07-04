@@ -228,12 +228,12 @@ void pty_close_file(struct file *f) {
         if (pty->master_refs == 0) {
             if (pty->t_sid != 0) {
                 for (int p = 0; p < MAX_PROC; p++) {
-                    if (tasks[p].pid == p && tasks[p].proc && tasks[p].proc->pgid == pty->t_pgid
-                        && tasks[p].proc->sid == pty->t_sid) {
-                        __atomic_or_fetch(&tasks[p].proc->sig_pending, 1ULL << SIGHUP, __ATOMIC_RELEASE);
+                    if (tasks[p] && tasks[p]->pid == p && tasks[p]->proc && tasks[p]->proc->pgid == pty->t_pgid
+                        && tasks[p]->proc->sid == pty->t_sid) {
+                        __atomic_or_fetch(&tasks[p]->proc->sig_pending, 1ULL << SIGHUP, __ATOMIC_RELEASE);
                         // SIGHUP 需打断任意阻塞态（含 WAIT_FUTEX/WAIT_CHILD），
                         // 用 wake_process_any 而非窄语义 wake_process。
-                        if (tasks[p].state == BLOCKED) wake_process_any(&tasks[p]);
+                        if (tasks[p]->state == BLOCKED) wake_process_any(tasks[p]);
                     }
                 }
             }
@@ -442,16 +442,16 @@ void mm_release(mm_t *mm, pid_t owner_pid) {
 
         // Wake any processes waiting for REQ reply from this process
         for (int i = 0; i < MAX_PROC; i++) {
-            if (tasks[i].pid >= 0 &&
-                tasks[i].state == BLOCKED &&
-                tasks[i].wait_event == WAIT_REQ_REPLY &&
-                tasks[i].req_target_pid == owner_pid) {
-                int wcpu = tasks[i].assigned_cpu;
+            if (tasks[i] && tasks[i]->pid >= 0 &&
+                tasks[i]->state == BLOCKED &&
+                tasks[i]->wait_event == WAIT_REQ_REPLY &&
+                tasks[i]->req_target_pid == owner_pid) {
+                int wcpu = tasks[i]->assigned_cpu;
                 uint64_t wflags;
                 spin_lock_irqsave(&cpu_locals[wcpu].scheduler_lock, &wflags);
-                if (tasks[i].state == BLOCKED && tasks[i].wait_event == WAIT_REQ_REPLY) {
-                    tasks[i].req_result = ESRCH;
-                    wake_from_wait(&tasks[i]);
+                if (tasks[i]->state == BLOCKED && tasks[i]->wait_event == WAIT_REQ_REPLY) {
+                    tasks[i]->req_result = ESRCH;
+                    wake_from_wait(tasks[i]);
                 }
                 spin_unlock_irqrestore(&cpu_locals[wcpu].scheduler_lock, wflags);
             }
@@ -459,16 +459,16 @@ void mm_release(mm_t *mm, pid_t owner_pid) {
 
         // Wake any processes waiting for MSG reply from this process
         for (int i = 0; i < MAX_PROC; i++) {
-            if (tasks[i].pid >= 0 &&
-                tasks[i].state == BLOCKED &&
-                tasks[i].wait_event == WAIT_MSG_REPLY &&
-                tasks[i].msg_target_pid == owner_pid) {
-                int wcpu = tasks[i].assigned_cpu;
+            if (tasks[i] && tasks[i]->pid >= 0 &&
+                tasks[i]->state == BLOCKED &&
+                tasks[i]->wait_event == WAIT_MSG_REPLY &&
+                tasks[i]->msg_target_pid == owner_pid) {
+                int wcpu = tasks[i]->assigned_cpu;
                 uint64_t wflags;
                 spin_lock_irqsave(&cpu_locals[wcpu].scheduler_lock, &wflags);
-                if (tasks[i].state == BLOCKED && tasks[i].wait_event == WAIT_MSG_REPLY) {
-                    tasks[i].msg_result = -ESRCH;
-                    wake_from_wait(&tasks[i]);
+                if (tasks[i]->state == BLOCKED && tasks[i]->wait_event == WAIT_MSG_REPLY) {
+                    tasks[i]->msg_result = -ESRCH;
+                    wake_from_wait(tasks[i]);
                 }
                 spin_unlock_irqrestore(&cpu_locals[wcpu].scheduler_lock, wflags);
             }
@@ -623,11 +623,8 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3,
 
     // 1. Allocate new xtask_t slot
     spin_lock(&tasks_lock);
-    xtask_t *child = NULL;
     int alloc_idx = -1;
-    for (int i = 0; i < MAX_PROC; i++) {
-        if (tasks[i].pid < 0) { child = &tasks[i]; alloc_idx = i; break; }
-    }
+    xtask_t *child = xtask_alloc(&alloc_idx);
     if (!child) { spin_unlock(&tasks_lock); return (int64_t)-ENOMEM; }
 
     // 2. Allocate new mm_t
@@ -781,11 +778,8 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3,
 
     // 1. 分配 xtask slot
     spin_lock(&tasks_lock);
-    xtask_t *child = NULL;
     int alloc_idx = -1;
-    for (int i = 0; i < MAX_PROC; i++) {
-        if (tasks[i].pid < 0) { child = &tasks[i]; alloc_idx = i; break; }
-    }
+    xtask_t *child = xtask_alloc(&alloc_idx);
     if (!child) { spin_unlock(&tasks_lock); return (int64_t)-ENOMEM; }
 
     // 2. 分配内核栈

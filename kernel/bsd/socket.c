@@ -172,7 +172,7 @@ void unix_sock_free(struct unix_sock *sock) {
         struct unix_sock *next = bp->backlog_head;  // backlog_head is next in chain
         // Tell peer we're closing
         if (bp->peer >= 0) {
-            xtask_t *peer = &tasks[bp->peer];
+            xtask_t *peer = task_get(bp->peer);
             if (peer->pid == bp->peer) {
                 // Wake peer if waiting on this socket
                 sock_wake_reader(bp);
@@ -354,8 +354,8 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
             }
             // 3) Socket closed or peer zombie
             if (sock->state == UNIX_CLOSED ||
-                (sock->peer >= 0 && tasks[sock->peer].pid == sock->peer &&
-                 tasks[sock->peer].state == ZOMBIE)) {
+                (sock->peer >= 0 && task_get(sock->peer)->pid == sock->peer &&
+                 task_get(sock->peer)->state == ZOMBIE)) {
                 // Check if peer has closed
                 bool peer_closed = true;
                 if (sock->peer_sock) {
@@ -477,7 +477,7 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock,
                 // Step 1: RCU read — validate + file_get (atomic verify+hold, no TOCTOU)
                 struct file *src = NULL;
                 if (sender_pid >= 0 && sender_pid < MAX_PROC) {
-                    xtask_t *sender = &tasks[sender_pid];
+                    xtask_t *sender = task_get(sender_pid);
                     if (sender->pid == sender_pid && sender->mm && sender->proc->files && orig_fd >= 0 && orig_fd < MAX_FD) {
                         rcu_read_lock();
                         src = fd_lookup(sender->proc->files, orig_fd);
@@ -1391,7 +1391,7 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t 
                     // POLLHUP: peer gone (always reported regardless of events mask)
                     if (sock->state == UNIX_CLOSED ||
                         (sock->peer >= 0 && sock->peer < MAX_PROC &&
-                         tasks[sock->peer].pid != sock->peer)) {
+                         task_get(sock->peer)->pid != sock->peer)) {
                         kfds[i].revents |= POLLHUP;
                     }
 

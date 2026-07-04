@@ -33,13 +33,13 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
 
     // 1. Find free slot under tasks_lock
     spin_lock(&tasks_lock);
-    proc = xtask_alloc();
+    int alloc_idx = -1;
+    proc = xtask_alloc(&alloc_idx);
     if (!proc) {
         spin_unlock(&tasks_lock);
         printk(LOG_ERROR, "process_create_elf: no free slot\n");
         return NULL;
     }
-    int alloc_idx = (int)(proc - tasks);
 
     // 2. Allocate kernel stack (8KB = 2 pages)
     stack_pages = bfc_alloc_page(2);
@@ -262,7 +262,12 @@ fail_stack:
     if (proc->fpu_page) { bfc_free_page(proc->fpu_page, 1); proc->fpu_page = NULL; }
     // fall through to slot cleanup
 fail_slot:
-    // proc slot was never modified (pid still -1, state still UNUSED)
+    // 动态化：slot 由 xtask_alloc 从 xtask_cache 分配，失败须回收到 cache
+    // 防 leak。槽位从未发布（pid 仍 -1、未入任何队列），无 schedule() 引用，
+    // 此处直接 free 安全。注意 k_stack/fpu_page 已在 fail_stack 释放，
+    // 对象本身无 lazy 资源残留。
+    tasks[alloc_idx] = NULL;
+    kmem_cache_free(xtask_cache, proc);
     spin_unlock(&tasks_lock);
     return NULL;
 }

@@ -125,7 +125,7 @@ static uint64_t walk_user_pt(uint64_t cr3_phys, uint64_t vaddr) {
 __attribute__((no_sanitize("kernel-address")))
 static bool bounce_to_user_pages(pid_t pid, void *user_buf, uint32_t byte_len) {
     if (pid < 0 || pid >= MAX_PROC) return false;
-    xtask_t *proc = &tasks[pid];
+    xtask_t *proc = task_get(pid);
     if (proc->pid != pid || proc->state == ZOMBIE || proc->state == REAPING) return false;
 
     uint64_t cr3 = proc->cr3;  // physical address of PML4

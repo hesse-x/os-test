@@ -22,7 +22,7 @@
 
 ### PCB 结构
 
-进程控制块拆分为三层：`task_t`（调度 + IPC + 信号）、`mm_t`（地址空间 + fd）、`files_t`（fd 表，引用计数支持 fork 共享）。
+进程控制块拆分为三层：`task_t`（调度 + IPC + 信号）、`mm_t`（地址空间 + fd）、`files_t`（fd 表，引用计数支持 fork 共享）。xtask_t 由 `xtask_cache` 专用 slab cache 动态分配（`tasks[MAX_PROC]` 为指针数组，`pid == 数组下标`）。
 
 **task_t**（kernel/proc.h : task_t）
   pid : pid_t — 进程 ID
@@ -69,7 +69,7 @@
   fd_table[MAX_FD] : struct file — 固定 32 项数组（MAX_FD=32）
   ref_count : int — fork 共享引用计数
 
-最多 64 个进程（MAX_PROC=64）。
+最多 1024 个进程（MAX_PROC=1024，指针数组常驻 8KB）。`_Static_assert(MAX_PROC <= 4096)` 防盲目调大——需更大容量应走 pidhash 路线（见 proc list 动态化方案"不做的事"）。`task_get(pid)` helper 统一 pid→xtask_t* 访问：debug 下 ASSERT 不合格 panic，release 裸指针零开销。
 
 ### 内核栈布局
 

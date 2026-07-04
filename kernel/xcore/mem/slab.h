@@ -63,4 +63,17 @@ void kfree(const void *ptr) __attribute__((no_sanitize("kernel-address")));
 void *kcalloc(size_t n, size_t size) __must_check __attribute__((no_sanitize("kernel-address")));
 void *krealloc(void *ptr, size_t new_size) __must_check __attribute__((no_sanitize("kernel-address")));
 
+// ===================== 专用 slab cache API（Linux 风格精简版）=====================
+// 用于固定大小、长生命周期对象的专用 cache（如 xtask_t）。对象池复用，零内部碎片。
+// 精简版：仅 name + obj_size，不预留 ctor/align/flags（洁优先，未来需要再扩）。
+//
+// 与 kmalloc 的区别：kmalloc 走固定 size class（8..2048），对象大小对齐到 class；
+// kmem_cache_create 用精确 obj_size 初始化页内 freelist，对象更紧凑。
+kmem_cache_t *kmem_cache_create(const char *name, size_t obj_size)
+    __must_check __attribute__((no_sanitize("kernel-address")));
+void *kmem_cache_alloc(kmem_cache_t *cache)
+    __must_check __attribute__((no_sanitize("kernel-address")));
+void kmem_cache_free(kmem_cache_t *cache, void *obj)
+    __attribute__((no_sanitize("kernel-address")));
+
 #endif // KERNEL_MEM_SLAB_H

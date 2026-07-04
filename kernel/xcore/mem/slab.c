@@ -314,3 +314,110 @@ void *krealloc(void *ptr, size_t new_size) {
     kfree(ptr);
     return new_ptr;
 }
+
+// ===================== 专用 slab cache API =====================
+// 与 kmalloc 共用 slab_page_init / partial list / kfree 的 Page 描述符约定，
+// 区别：精确 obj_size（不向上对齐 size class），无 per-CPU active_slab（只走
+// partial list + 新页分配）。精简版：无 ctor/align/flags。
+//
+// obj_size 上限约束：必须 <= PAGE_SIZE/2 否则一页放不下 ≥2 对象（freelist 侵入式
+// 需要对象容纳 next 指针）。xtask_t ~2KB 满足。kmalloc 大对象走 BFC，专用 cache
+// 不应承接这种用法。
+
+// kmem_cache_create: 静态分配 cache 控制块（kmem_cache_t 本身用 kmalloc）。
+// 返回 NULL 表示 kmalloc 失败。cache 由调用者持有，无需 destroy（xtask_cache 全局常驻）。
+__attribute__((no_sanitize("kernel-address")))
+kmem_cache_t *kmem_cache_create(const char *name, size_t obj_size) {
+    (void)name;  // 调试用，暂不存储
+    if (obj_size == 0 || obj_size > PAGE_SIZE / 2) return NULL;
+    kmem_cache_t *cache = (kmem_cache_t *)kmalloc(sizeof(kmem_cache_t));
+    if (!cache) return NULL;
+    cache->obj_size = obj_size;
+    cache->redzone_size = 0;
+    cache->lock = SPINLOCK_INIT;
+    cache->partial = NULL;
+    return cache;
+}
+
+// kmem_cache_alloc: 从 cache 分配一个对象。持 cache->lock 全程。
+// 路径：partial list 有空位 → 复用；否则从 BFC 分配新页初始化。
+__attribute__((no_sanitize("kernel-address")))
+void *kmem_cache_alloc(kmem_cache_t *cache) {
+    uint64_t flags;
+    spin_lock_irqsave(&cache->lock, &flags);
+
+    // partial list 找有空闲对象的页
+    while (cache->partial) {
+        Page *page = cache->partial;
+        if (page->slab.freelist == NULL) {
+            // 页已满，移出 partial 跳过
+            partial_remove(cache, page);
+            continue;
+        }
+        partial_remove(cache, page);
+        void *obj = page->slab.freelist;
+        page->slab.freelist = *(void **)obj;
+        page->slab.inuse++;
+        spin_unlock_irqrestore(&cache->lock, flags);
+        kasan_slab_alloc(obj, cache->obj_size);
+        slab_poison_alloc(obj, cache->obj_size);
+        memstat_add(&kernel_mem_stats.slab_used_bytes, (int)cache->obj_size);
+        return obj;
+    }
+
+    // partial 空：分配新页
+    Page *new_page = bfc_alloc_page(1);
+    if (!new_page) {
+        spin_unlock_irqrestore(&cache->lock, flags);
+        printk(LOG_WARN, "kmem_cache_alloc(%zu) failed: no free pages\n", cache->obj_size);
+        return NULL;
+    }
+    slab_page_init(new_page, cache, -1);  // cpu_id=-1：专用 cache 无 per-CPU 归属
+
+    void *obj = new_page->slab.freelist;
+    new_page->slab.freelist = *(void **)obj;
+    new_page->slab.inuse++;
+    // 新页立即挂回 partial（仍有空闲对象），下次 alloc 可复用
+    partial_add(cache, new_page);
+
+    spin_unlock_irqrestore(&cache->lock, flags);
+    kasan_slab_alloc(obj, cache->obj_size);
+    slab_poison_alloc(obj, cache->obj_size);
+    memstat_add(&kernel_mem_stats.slab_used_bytes, (int)cache->obj_size);
+    return obj;
+}
+
+// kmem_cache_free: 释放对象回所属页的 freelist。通过物理地址反查 Page 描述符。
+// 与 kfree 的 slab 分支同款逻辑（侵入式链表 + inuse 递减 + 满→partial 转换）。
+__attribute__((no_sanitize("kernel-address")))
+void kmem_cache_free(kmem_cache_t *cache, void *obj) {
+    if (!obj) return;
+    memstat_inc(&kernel_mem_stats.kfree_calls);
+
+    uint64_t addr = (uint64_t)obj;
+    uint64_t phys = (__force uint64_t)PHY_ADDR(addr);
+    Page *page = &bfc_frames[PHY_TO_PAGE(phys)];
+
+    // 专用 cache 的对象页必为 PAGE_SLAB；非此状态说明 obj 不属于该 cache（double-free/野指针）
+    if (page->status != PAGE_SLAB) {
+        printk(LOG_ERROR, "kmem_cache_free: bad page status ptr=%p status=%d\n",
+               obj, page->status);
+        ASSERT(page->status == PAGE_SLAB);
+        return;
+    }
+
+    kasan_slab_free(obj, cache->obj_size);
+    slab_poison_free(obj, cache->obj_size);
+
+    uint64_t flags;
+    spin_lock_irqsave(&cache->lock, &flags);
+    *(void **)obj = page->slab.freelist;
+    page->slab.freelist = obj;
+    page->slab.inuse--;
+    memstat_sub(&kernel_mem_stats.slab_used_bytes, (int)cache->obj_size);
+    // 释放前页满（inuse==obj_count）则不在 partial，归零后挂回 partial
+    if (page->slab.inuse == page->slab.obj_count - 1) {
+        partial_add(cache, page);
+    }
+    spin_unlock_irqrestore(&cache->lock, flags);
+}

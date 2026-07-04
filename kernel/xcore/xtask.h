@@ -15,7 +15,7 @@ typedef enum wait_event_t { WAIT_NONE, WAIT_RECV, WAIT_REQ_REPLY, WAIT_CHILD, WA
 
 #define RECV_MSG_SIZE   64
 #define RECV_QUEUE_SIZE 16
-#define MAX_PROC 256
+#define MAX_PROC 1024
 
 struct proc;  // forward declaration — Xcore does not interpret contents
 
@@ -100,8 +100,32 @@ STATIC_ASSERT(offsetof(xtask_t, cr3) == 24, "xtask_t.cr3 offset must be 24");
 // without hardcoding the constant (struct layout may drift).
 extern const uint64_t xtask_fs_base_offset;
 
-extern xtask_t tasks[MAX_PROC];
+// ===================== Process table: 指针数组（动态化）=====================
+// tasks[i] 指向动态分配的 xtask_t（来自 xtask_cache 专用 slab），NULL = 空槽。
+// 保留 pid == 数组下标 语义（112+ 处 tasks[pid]->field 不破坏）。slot 复用：
+// REAPING 槽在 xtask_alloc 内 kmem_cache_free 后重新 alloc，NULL 槽直接 alloc。
+// pid 分配：递增 next_pid + 环形复用（避免 exit 后 pid 立即复用致 waitpid 陈旧）。
+extern xtask_t *tasks[MAX_PROC];
 extern spinlock_t tasks_lock;
+extern pid_t next_pid;
 extern pid_t init_pid;
+
+// task_get: pid → xtask_t* 的统一访问 helper。
+// debug：校验 pid 合法且槽非空（编码"无锁读语义"约束），不合格 panic 定位。
+// release：裸指针零开销（呼应 CLAUDE.md debug/release 双模式）。
+// 用法：原 tasks[pid].field → task_get(pid)->field；
+//       原 &tasks[pid]（赋值 xtask_t*）→ task_get(pid)；
+//       原 &tasks[pid].run_node（取字段地址）→ &task_get(pid)->run_node。
+static inline xtask_t *task_get(pid_t pid) {
+#ifndef NDEBUG
+    ASSERT(pid >= 0 && pid < MAX_PROC);
+    ASSERT(tasks[pid] != NULL);
+#endif
+    return tasks[pid];
+}
+
+// 防盲目调大 MAX_PROC：指针数组常驻 8KB（1024*8），超过 4096 会滑向"动态扩容"
+// 的 RCU 复杂度（见方案"不做的事"）。需要更大容量应走 pidhash 路线（路线 B）。
+_Static_assert(MAX_PROC <= 4096, "MAX_PROC too large — consider pidhash route");
 
 #endif // KERNEL_XCORE_XTASK_H

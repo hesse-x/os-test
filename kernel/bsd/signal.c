@@ -261,8 +261,8 @@ void deliver_signal_to(xtask_t *target, int sig) {
 int pgsignal(pid_t pgid, int sig) {
     int found = 0;
     for (int p = 0; p < MAX_PROC; p++) {
-        if (tasks[p].pid == p && tasks[p].proc && tasks[p].proc->pgid == pgid) {
-            deliver_signal_to(&tasks[p], sig);
+        if (tasks[p] && tasks[p]->pid == p && tasks[p]->proc && tasks[p]->proc->pgid == pgid) {
+            deliver_signal_to(tasks[p], sig);
             found++;
         }
     }
@@ -278,7 +278,7 @@ int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_t _
 
     if (pid > 0) {
         if (pid >= MAX_PROC) return (int64_t)-ESRCH;
-        xtask_t *leader = &tasks[pid];
+        xtask_t *leader = task_get(pid);
         if (leader->pid != pid || !leader->proc) return (int64_t)-ESRCH;
         // Deliver to process-level shared_pending
         spin_lock(&leader->proc->signal->sig_lock);
@@ -308,7 +308,7 @@ int64_t sys_tgkill(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_
     if (sig < 0 || sig >= NSIG) return (int64_t)-EINVAL;
     if (sig == 0) return 0;
     if (tid < 0 || tid >= MAX_PROC) return (int64_t)-ESRCH;
-    xtask_t *target = &tasks[tid];
+    xtask_t *target = task_get(tid);
     if (target->pid != tid || target->tgid != tgid || !target->proc) return (int64_t)-ESRCH;
     // 投递到线程级 sig_pending（atomic，无 sig_lock）
     __atomic_or_fetch(&target->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);

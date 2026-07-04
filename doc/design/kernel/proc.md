@@ -17,7 +17,7 @@
 
 ### 核心数据结构
 
-task_t（kernel/proc.h : task_t）— 调度实体，数组内嵌 `tasks[MAX_PROC]`
+task_t（kernel/proc.h : task_t）— 调度实体，动态分配自 `xtask_cache` 专用 slab cache（`tasks[MAX_PROC]` 为指针数组，`pid == 数组下标`）
   pid : pid_t — 进程 ID（数组下标）
   state : proc_state_t — UNUSED / READY / RUNNING / BLOCKED / ZOMBIE / REAPING
   k_rsp : uint64_t — 内核栈保存的 RSP（switch_to 用）
@@ -76,7 +76,7 @@ files_t（kernel/proc.h : files_t）— fd 表，独立引用计数
 
 #### sys_fork（kernel/proc.c : sys_fork）
 
-1. 分配新 task_t 槽位（tasks_lock 保护）
+1. 分配新 task_t 槽位（tasks_lock 保护）：`xtask_alloc(&child_pid)` 从 `next_pid` 起 ffz 扫描空槽（NULL 或 REAPING），返回新 xtask_t* 并写出 pid。消除旧 `proc - tasks` 指针算术 UB（静态数组时代遗留）
 2. 创建新 mm_t：分配新 PML4，copy_page_table COW 共享用户页表（父 RW PTE 改为只读+PTE_COW，子 PTE 同样只读+PTE_COW，物理页 p_refcount++），flush 父 TLB
 3. 深拷贝 files_t：逐 fd 复制 file_t，对应资源 ref_count++（pipe/shm/inode 等）
 4. 深拷贝 mmap_regions 链表
@@ -129,7 +129,10 @@ fork:
     mm_put(task->mm)
     释放 recv 队列 RECV_MSG 缓冲区
     清信号状态
-    清 PCB 槽位（pid=-1, state=UNUSED）
+    设 REAPING（动态化：不立即 kmem_cache_free xtask_t 对象，保留 pid=-1 / mm=NULL /
+    proc=NULL 等所有 reader 守卫语义，无锁读 112+ 处不需 refcount 仍安全；
+    xtask_alloc 复用该槽时 reclaim_lazy_resources 释放 k_stack/fpu_page 后
+    kmem_cache_free 旧对象再 alloc 新对象）
 ```
 
 ### 锁协议
@@ -175,5 +178,5 @@ fork:
 | 进程优先级 | 当前所有进程同等优先级，需 nice 值或实时优先级支持 | 低 |
 | 用户栈仅 4KB 无 guard page | 栈溢出触发 #PF 被 kill，应扩栈 + 加 guard page | 中 |
 | 内核栈仅 8KB | 深层调用路径偏紧，应扩栈或加溢出检测 | 中 |
-| pid 未校验上界 | procs[pid] 未检查 pid >= MAX_PROC，可越界访问 | 高 |
+| ~~pid 未校验上界~~ | ~~procs[pid] 未检查 pid >= MAX_PROC~~ | 已修复（动态化）：`task_get(pid)` 编码 `pid >= 0 && pid < MAX_PROC` 守卫到运行时（debug ASSERT / release 零开销），所有 `tasks[pid]` 访问点统一走该 helper。优先级由高→已闭环 |
 | cross-process files_t UAF | SCM_RIGHTS 跨进程读 fd_table 时，目标进程 exit + kfree(files_t) 导致 UAF。缓解：`files_put` 中 `synchronize_rcu()` 保证 grace period 后才 kfree | 低 |

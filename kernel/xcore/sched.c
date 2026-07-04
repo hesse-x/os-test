@@ -36,11 +36,13 @@ _Static_assert(offsetof(cpu_local_t, tss_rsp0) == 48,
 // user mode). Pinned by static_assert at the bottom of this file.
 const uint64_t xtask_fs_base_offset = offsetof(xtask_t, fs_base);
 
-xtask_t tasks[MAX_PROC];
+xtask_t *tasks[MAX_PROC];
 // current_task is per-CPU (in cpu_local_t), accessed via macro
 
 spinlock_t tasks_lock = SPINLOCK_INIT;
 pid_t init_pid = -1;
+pid_t next_pid = 0;                 // 递增分配 + 环形复用（MAX_PROC 回绕）
+kmem_cache_t *xtask_cache = NULL;   // xtask_t 专用 slab cache（动态化）
 
 // ===================== Process table =====================
 
@@ -70,61 +72,77 @@ static void reclaim_lazy_resources(xtask_t *t) {
     }
 }
 
-xtask_t *xtask_alloc(void) {
-    for (int i = 0; i < MAX_PROC; i++) {
-        if (tasks[i].pid < 0) {
-            xtask_t *t = &tasks[i];
-            reclaim_lazy_resources(t);
+// init_xtask_defaults: 新 xtask_t 对象的默认字段初始化（零 + 非零默认值 + 链表节点）。
+// 集中此处供 xtask_alloc 复用，替代旧 proc_init 的逐槽位初始化。
+// 注意：不设 k_stack_top/fpu_page——它们由调用者在分配栈/FPU 页后设置，
+// slot 复用路径已由 reclaim_lazy_resources 清零。
+static void init_xtask_defaults(xtask_t *t) {
+    __memset(t, 0, sizeof(*t));
+    t->pid = -1;
+    t->state = UNUSED;
+    t->tgid = -1;
+    t->assigned_cpu = -1;
+    t->recv_lock = SPINLOCK_INIT;
+    t->req_caller_pid = -1;
+    t->req_target_pid = -1;
+    t->msg_caller_pid = -1;
+    t->msg_target_pid = -1;
+    list_init(&t->run_node);
+    list_init(&t->wait_node);
+}
+
+// xtask_alloc: 从 next_pid 起扫描空槽，分配 xtask_t 并写入 tasks[i]。
+// 返回新 xtask_t*，*out_pid = 槽下标（即 pid）；无空槽返回 NULL。
+//
+// 槽复用语义（呼应方案决策 7 REAPING 延迟释放）：
+//   - tasks[i] == NULL          : 直接 kmem_cache_alloc 新对象
+//   - tasks[i]->state == REAPING: 先 reclaim_lazy_resources 释放延迟资源（k_stack/fpu_page），
+//                                 再 kmem_cache_free 旧对象，最后 alloc 新对象
+//   - 其它状态                   : 槽占用，跳过
+// 调用者须持 tasks_lock。
+xtask_t *xtask_alloc(pid_t *out_pid) {
+    if (!xtask_cache) return NULL;  // 未初始化（proc_init 前调用）
+
+    // 从 next_pid 起环形扫描（ffz 语义），找第一个可复用槽
+    for (int k = 0; k < MAX_PROC; k++) {
+        int i = (next_pid + k) % MAX_PROC;
+        xtask_t *old = tasks[i];
+        if (old == NULL) {
+            // 空槽：直接分配
+            xtask_t *t = (xtask_t *)kmem_cache_alloc(xtask_cache);
+            if (!t) return NULL;
+            init_xtask_defaults(t);
+            tasks[i] = t;
+            next_pid = (i + 1) % MAX_PROC;
+            if (out_pid) *out_pid = (pid_t)i;
             return t;
         }
+        if (old->state == REAPING) {
+            // REAPING 槽：释放延迟资源 → free 旧对象 → alloc 新对象
+            reclaim_lazy_resources(old);
+            kmem_cache_free(xtask_cache, old);
+            tasks[i] = NULL;
+            xtask_t *t = (xtask_t *)kmem_cache_alloc(xtask_cache);
+            if (!t) return NULL;
+            init_xtask_defaults(t);
+            tasks[i] = t;
+            next_pid = (i + 1) % MAX_PROC;
+            if (out_pid) *out_pid = (pid_t)i;
+            return t;
+        }
+        // 占用槽，继续扫描
     }
-    return NULL;
+    return NULL;  // 满了
 }
 
 void proc_init() {
+    // 动态化：创建 xtask_t 专用 slab cache，指针数组初始化为 NULL
+    xtask_cache = kmem_cache_create("xtask", sizeof(xtask_t));
+    if (!xtask_cache) {
+        panic("proc_init: kmem_cache_create(xtask) failed\n");
+    }
     for (int i = 0; i < MAX_PROC; i++) {
-        tasks[i].pid = -1;
-        tasks[i].state = UNUSED;
-        tasks[i].k_rsp = 0;
-        tasks[i].k_stack_top = 0;
-        tasks[i].cr3 = 0;
-        tasks[i].entry = 0;
-        tasks[i].wait_event = WAIT_NONE;
-        tasks[i].tgid = -1;
-        tasks[i].mm = NULL;
-        tasks[i].assigned_cpu = -1;
-        tasks[i].iopm = NULL;
-        tasks[i].proc = NULL;  // NULL = no POSIX semantics
-        tasks[i].wait_deadline = 0;
-        tasks[i].wait_timed_out = 0;
-        tasks[i].recv_intr = 0;
-        list_init(&tasks[i].run_node);
-        list_init(&tasks[i].wait_node);
-        // recv queue
-        tasks[i].recv_head = 0;
-        tasks[i].recv_tail = 0;
-        tasks[i].recv_lock = SPINLOCK_INIT;
-        // REQ state
-        tasks[i].req_caller_pid = -1;
-        tasks[i].req_reply_buf = NULL;
-        tasks[i].req_result = 0;
-        tasks[i].req_target_pid = -1;
-        // MSG state
-        tasks[i].msg_reply_buf = NULL;
-        tasks[i].msg_reply_len = 0;
-        tasks[i].msg_caller_pid = -1;
-        tasks[i].msg_result = 0;
-        tasks[i].msg_target_pid = -1;
-        tasks[i].cpu_time_ns = 0;
-        tasks[i].last_sched = 0;
-        tasks[i].exit_code = 0;
-        tasks[i].detached = 0;
-        tasks[i].tls_page = 0;
-        tasks[i].tls_total = 0;
-        tasks[i].user_stack_base = 0;
-        tasks[i].user_stack_size = 0;
-        tasks[i].need_resched = 0;
-        // POSIX fields (sig, sid, pgid, ctty, exit_code) are in proc (NULL = no POSIX semantics)
+        tasks[i] = NULL;
     }
     cpu_locals[0]._cur_proc = NULL;
     cpu_locals[0].run_count = 0;
@@ -194,10 +212,9 @@ static uint64_t build_idle_kstack(uint64_t k_stack_top) {
 // Create idle process for the specified CPU
 xtask_t *create_idle_process(int cpu_id) {
     spin_lock(&tasks_lock);
-    xtask_t *proc = xtask_alloc();
+    pid_t alloc_idx = -1;
+    xtask_t *proc = xtask_alloc(&alloc_idx);
     if (!proc) { spin_unlock(&tasks_lock); printk(LOG_ERROR, "create_idle_process: no free slot\n"); return NULL; }
-    int alloc_idx = proc->pid >= 0 ? proc->pid : -1;  // pid not yet set, derive index from pointer
-    alloc_idx = (int)(proc - tasks);
 
     // Allocate kernel stack (8KB = 2 pages)
     Page *stack_pages = bfc_alloc_page(2);
@@ -584,10 +601,13 @@ void task_reap(xtask_t *proc) {
     // 6. POSIX cleanup: close fds, signal_put, free proc
     if (proc_reap_hook) proc_reap_hook(proc);
 
-    // 7. Clear PCB slot — EXCEPT lazy-reclaim resources (k_stack_top, fpu_page),
-    //    which task_reap deliberately leaves set so xtask_alloc's
-    //    reclaim_lazy_resources can free them when the slot is reused
-    //    (SMP race: schedule() may still be referencing them — see top of function).
+    // 7. 置 REAPING 状态（动态化：不立即 kmem_cache_free xtask_t 对象）。
+    //    字段清理同旧设计（pid=-1 / mm=NULL / proc 由 hook 释放），保留所有
+    //    reader 守卫语义（tasks[i].pid>=0 / ==p / proc!=NULL 在 REAPING 槽上
+    //    均判否 → 跳过），无锁读 112+ 处不需 refcount 仍安全。
+    //    xtask_t 对象本身留到 xtask_alloc 复用该槽时 kmem_cache_free（REAPING 分支）。
+    //    lazy 资源（k_stack_top / fpu_page）刻意保留，由 xtask_alloc 的
+    //    reclaim_lazy_resources 释放（SMP race：schedule() 可能仍引用）。
     spin_lock(&tasks_lock);
 
     // 不变式断言:ZOMBIE 不应在任何 run_queue / timer_queue
@@ -597,7 +617,7 @@ void task_reap(xtask_t *proc) {
     WARN_ON(!list_empty(&proc->wait_node));
 
     proc->pid = -1;
-    proc->state = UNUSED;
+    proc->state = REAPING;  // 动态化：REAPING 而非 UNUSED，xtask_alloc 复用时 free 对象
     proc->k_rsp = 0;
     // proc->k_stack_top intentionally preserved (lazy reclaim)
     proc->cr3 = 0;

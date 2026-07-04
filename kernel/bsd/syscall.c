@@ -102,8 +102,8 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
     if (init_pid >= 0) {
         spin_lock(&tasks_lock);
         for (int i = 0; i < MAX_PROC; i++) {
-            if (tasks[i].pid >= 0 && tasks[i].mm && tasks[i].mm->parent_pid == proc->pid) {
-                tasks[i].mm->parent_pid = init_pid;
+            if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->mm && tasks[i]->mm->parent_pid == proc->pid) {
+                tasks[i]->mm->parent_pid = init_pid;
             }
         }
         spin_unlock(&tasks_lock);
@@ -143,8 +143,8 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
 
     // 7. 通知父进程（最后线程）— uses local ppid, not sig->parent_pid
     if (notify_parent) {
-        if (ppid >= 0 && ppid < MAX_PROC && tasks[ppid].pid == ppid) {
-            xtask_t *parent = &tasks[ppid];
+        if (ppid >= 0 && ppid < MAX_PROC && task_get(ppid)->pid == ppid) {
+            xtask_t *parent = task_get(ppid);
             __atomic_or_fetch(&parent->proc->sig_pending, 1ULL << SIGCHLD, __ATOMIC_RELEASE);
             int pcpu = parent->assigned_cpu;
             uint64_t pflags;
@@ -158,7 +158,8 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
 
     // 8. 唤醒等待本线程 REQ/MSG reply 的进程 — xtask_t fields only, no proc_t
     for (int i = 0; i < MAX_PROC; i++) {
-        xtask_t *waiter = &tasks[i];
+        if (!tasks[i]) continue;
+        xtask_t *waiter = task_get(i);
         if (waiter->pid >= 0 &&
             waiter->state == BLOCKED &&
             waiter->wait_event == WAIT_REQ_REPLY &&
@@ -203,16 +204,16 @@ int64_t sys_exit_group(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int6
 
     // 2. 遍历 tasks[]，唤醒同 tgid 且 != current 的 BLOCKED 线程
     for (int i = 0; i < MAX_PROC; i++) {
-        if (tasks[i].pid >= 0 && tasks[i].tgid == current->tgid && tasks[i].pid != current->pid) {
-            int tcpu = tasks[i].assigned_cpu;
+        if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->tgid == current->tgid && tasks[i]->pid != current->pid) {
+            int tcpu = tasks[i]->assigned_cpu;
             uint64_t tflags;
             spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &tflags);
-            if (tasks[i].state == BLOCKED) {
-                timer_queue_cancel(&tasks[i]);
-                tasks[i].state = READY;
-                tasks[i].wait_event = WAIT_NONE;
-                tasks[i].wait_timed_out = 0;
-                list_push_back(&cpu_locals[tcpu].run_queue, &tasks[i].run_node);
+            if (tasks[i]->state == BLOCKED) {
+                timer_queue_cancel(tasks[i]);
+                tasks[i]->state = READY;
+                tasks[i]->wait_event = WAIT_NONE;
+                tasks[i]->wait_timed_out = 0;
+                list_push_back(&cpu_locals[tcpu].run_queue, &tasks[i]->run_node);
                 cpu_locals[tcpu].run_count++;
             }
             spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, tflags);
@@ -234,10 +235,10 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
             xtask_t *zombie = NULL;
             bool has_children = false;
             for (int i = 0; i < MAX_PROC; i++) {
-                if (tasks[i].pid >= 0 && tasks[i].mm && tasks[i].mm->parent_pid == current_task->pid) {
+                if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->mm && tasks[i]->mm->parent_pid == current_task->pid) {
                     has_children = true;
-                    if (tasks[i].state == ZOMBIE) {
-                        zombie = &tasks[i];
+                    if (tasks[i]->state == ZOMBIE) {
+                        zombie = tasks[i];
                         break;
                     }
                 }
@@ -277,10 +278,10 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
             zombie = NULL;
             has_children = false;
             for (int i = 0; i < MAX_PROC; i++) {
-                if (tasks[i].pid >= 0 && tasks[i].mm && tasks[i].mm->parent_pid == current_task->pid) {
+                if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->mm && tasks[i]->mm->parent_pid == current_task->pid) {
                     has_children = true;
-                    if (tasks[i].state == ZOMBIE) {
-                        zombie = &tasks[i];
+                    if (tasks[i]->state == ZOMBIE) {
+                        zombie = tasks[i];
                         break;
                     }
                 }
@@ -315,7 +316,7 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
         return -EINVAL;
     }
 
-    xtask_t *child = &tasks[pid];
+    xtask_t *child = task_get(pid);
 
     spin_lock(&tasks_lock);
     if (child->pid != pid || !child->mm || child->mm->parent_pid != current_task->pid) {
@@ -1420,7 +1421,7 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3,
 
         if (target_pid < 0 || target_pid >= MAX_PROC)
             { ret = -(int64_t)ESRCH; goto out; }
-        xtask_t *target = &tasks[target_pid];
+        xtask_t *target = task_get(target_pid);
         if (target->pid != target_pid)
             { ret = -(int64_t)ESRCH; goto out; }
 
@@ -2037,27 +2038,27 @@ int64_t sys_setpgid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64_
     if (pid < 0 || pgid < 0) return (int64_t)-EINVAL;
     if (pid == 0) pid = current_task->pid;
     if (pgid == 0) pgid = pid;
-    if (pid >= MAX_PROC || tasks[pid].pid != pid) return (int64_t)-ESRCH;
+    if (pid >= MAX_PROC || task_get(pid)->pid != pid) return (int64_t)-ESRCH;
     if (pid != current_task->pid) {
-        if (tasks[pid].mm->parent_pid != current_task->pid) return (int64_t)-ESRCH;
-        if (tasks[pid].proc->sid != current_proc->sid) return (int64_t)-EPERM;
+        if (task_get(pid)->mm->parent_pid != current_task->pid) return (int64_t)-ESRCH;
+        if (task_get(pid)->proc->sid != current_proc->sid) return (int64_t)-EPERM;
     }
-    tasks[pid].proc->pgid = pgid;
+    task_get(pid)->proc->pgid = pgid;
     return 0;
 }
 
 int64_t sys_getpgid(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     pid_t pid = (pid_t)arg1;
     if (pid == 0) pid = current_task->pid;
-    if (pid < 0 || pid >= MAX_PROC || tasks[pid].pid != pid) return (int64_t)-ESRCH;
-    return (int64_t)tasks[pid].proc->pgid;
+    if (pid < 0 || pid >= MAX_PROC || task_get(pid)->pid != pid) return (int64_t)-ESRCH;
+    return (int64_t)task_get(pid)->proc->pgid;
 }
 
 int64_t sys_getsid(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
     pid_t pid = (pid_t)arg1;
     if (pid == 0) pid = current_task->pid;
-    if (pid < 0 || pid >= MAX_PROC || tasks[pid].pid != pid) return (int64_t)-ESRCH;
-    return (int64_t)tasks[pid].proc->sid;
+    if (pid < 0 || pid >= MAX_PROC || task_get(pid)->pid != pid) return (int64_t)-ESRCH;
+    return (int64_t)task_get(pid)->proc->sid;
 }
 
 // ===================== BSD syscall dispatch =====================

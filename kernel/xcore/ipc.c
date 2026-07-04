@@ -299,7 +299,7 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1, int64_t _
         rep_ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
         return (int64_t)-EFAULT;
 
-    xtask_t *target = &tasks[target_pid];
+    xtask_t *target = task_get(target_pid);
     if (target->pid != target_pid) return (int64_t)-ESRCH;
     WARN_ON(target->state == UNUSED);
 
@@ -375,7 +375,7 @@ int64_t sys_resp(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
     pid_t caller_pid = proc->req_caller_pid;
     if (caller_pid < 0 || caller_pid >= MAX_PROC) return (int64_t)-EINVAL;
 
-    xtask_t *caller = &tasks[caller_pid];
+    xtask_t *caller = task_get(caller_pid);
     if (caller->pid != caller_pid) return (int64_t)-ESRCH;
 
     size_t reply_len = caller->req_reply_len;
@@ -427,7 +427,7 @@ int64_t sys_irq_bind(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_
 // ===================== notify_and_wake =====================
 void notify_and_wake(pid_t target_pid, recv_msg_t *msg) {
     if (target_pid < 0 || target_pid >= MAX_PROC) return;
-    xtask_t *target = &tasks[target_pid];
+    xtask_t *target = task_get(target_pid);
     if (target->pid != target_pid) return;
 
     spin_lock(&target->recv_lock);
@@ -470,7 +470,7 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
 // 防止下次再加 wait_event 时重蹈 Bug 1 覆辙（memory: feedback_constraint_in_code）。
 void wake_process(pid_t pid) {
     if (pid < 0 || pid >= MAX_PROC) return;
-    xtask_t *target = &tasks[pid];
+    xtask_t *target = task_get(pid);
 
     int target_cpu = target->assigned_cpu;
     uint64_t flags;
@@ -490,7 +490,7 @@ int64_t sys_notify(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t 
     pid_t target_pid = (pid_t)arg1;
     if (target_pid < 0 || target_pid >= MAX_PROC) return (int64_t)-EINVAL;
 
-    xtask_t *target = &tasks[target_pid];
+    xtask_t *target = task_get(target_pid);
     if (target->pid != target_pid) return (int64_t)-ESRCH;
 
     spin_lock(&target->recv_lock);
@@ -527,7 +527,7 @@ int64_t sys_clock(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u
 // ===================== sys_msg_to (inner implementation) =====================
 int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
                            void *reply_buf, size_t reply_len) {
-    xtask_t *target = &tasks[target_pid];
+    xtask_t *target = task_get(target_pid);
     if (target->pid != target_pid) return (int64_t)-ESRCH;
 
     void *kbuf = kmalloc(msg_len);
@@ -631,7 +631,7 @@ int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2, int64
         return (int64_t)-EINVAL;
     }
 
-    xtask_t *caller = &tasks[caller_pid];
+    xtask_t *caller = task_get(caller_pid);
     if (caller->pid != caller_pid) return (int64_t)-ESRCH;
 
     void *kbuf = kmalloc(resp_len);

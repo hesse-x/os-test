@@ -17,7 +17,7 @@
 | 7 | TLS | 完整加载 ELF `.tdata`/`.tbss` 段 + TCB。**variant II 布局**（TCB 在 TLS 页高地址端，`FS_BASE = &TCB`，TLS 变量 `%fs:(-offset)` 访问，与 musl/glibc x86-64 一致）。`elf_loader` 加 PT_TLS 解析，`clone(CLONE_SETTLS)` 分配 TLS 页，`__trapret`/`syscall_fast_entry` 返回用户态前加载 fs_base（不动 `switch_to` 汇编）。主线程 TLS 由用户态 `_start` 调 `__libc_tls_init()` 初始化，通过 `linker.ld` 导出的 `__tls_template_*` 符号定位模板（无 auxv） |
 | 8 | FPU/SSE | eager FPU 上下文切换（创建时预分配 fpu_page + schedule 时 fxsave prev/fxrstor next）。`xcore_fpu_alloc` 在 `process_create_elf`/`sys_fork` 时调用 `bfc_alloc_page(1)` 并初始化为合法 fxsave 镜像（memset 0 + MXCSR=0x1F80）。`schedule()` 的 C helper `fpu_context_switch` 直接 fxsave prev + fxrstor next，不设 CR0.TS，用户态 SSE 零 trap。`#NM` handler `fpu_lazy_switch` 保留作兜底（TS 意外泄漏时 clts + fxrstor）。fork 时 child memcpy parent 当前 FPU 快照（POSIX 语义）。内核仍 `-mno-sse`，用户态移除 |
 | 9 | clone 签名 | `clone(flags, stack, parent_tid, child_tid, tls)`，与 Linux 一致 |
-| 10 | task 表大小 | 维持 `MAX_PROC=64`，`pid==数组下标`。`tgid` 字段已存在于 `xtask_t`，单线程时 `tgid==pid`，多线程时 `tgid=leader.pid`。动态扩容后续 |
+| 10 | task 表大小 | `MAX_PROC=1024`，`tasks[]` 为指针数组（`xtask_t*`，slot 动态分配自 `xtask_cache` 专用 slab cache），`pid==数组下标` 语义不变。`tgid` 字段已存在于 `xtask_t`，单线程时 `tgid==pid`，多线程时 `tgid=leader.pid`。`_Static_assert(MAX_PROC <= 4096)` 防盲目调大——需更大容量应走 pidhash 路线（见 proc list 动态化方案"不做的事"） |
 | 11 | fd_table 归属 | `files_t` 已从 `mm_t` 独立（master commit 9279262），`CLONE_FILES` 时 `files_t.f_count++`，与 `CLONE_VM` 解耦。第一版 `CLONE_FILES` 和 `CLONE_VM` 绑定一起用，但结构上不耦合 |
 | 12 | 信号与线程 | 两级 pending，贴 Linux：`proc_t.sig_pending`（per-task 私有，`tgkill`/`pthread_kill` 产生）+ `signal_struct.shared_pending`（进程级，`kill(pid,sig)` 产生）。`sigaction action[]` 挪到 `signal_struct`（线程组共享） |
 | 13 | execv 线程行为 | 设 `signal->group_exit` 标志，同组线程在 `check_pending_signals` 入口自行退出（Linux 方式） |
@@ -489,7 +489,7 @@ int get_futex_key(uint64_t uaddr, mm_t *mm, struct futex_key *key);
 2. bucket = &futex_table[futex_hash(key)]
 3. spin_lock(&bucket->lock)
 4. 遍历 bucket->waiters，找 futex_key 匹配的 waiter
-5. 收集到局部数组（最多 count 个，数组大小 MAX_PROC=64 指针）
+5. 收集到局部数组（最多 count 个，数组大小 MAX_PROC=1024 指针）
 6. spin_unlock(&bucket->lock)  ← 释放后再唤醒（零嵌套锁序）
 7. 遍历局部数组，对每个 waiter 调用 `wake_with_event(xtask, WAIT_FUTEX)`
    （收敛在 `kernel/xcore/sched.h` 的 inline：持 waiter 的 scheduler_lock，
@@ -724,7 +724,7 @@ int pick_signal(xtask_t *t) {
 int sys_kill(pid_t pid, int sig) {
     if (pid > 0) {
         if (pid >= MAX_PROC) return -ESRCH;
-        xtask_t *leader = &tasks[pid];
+        xtask_t *leader = task_get(pid);
         if (leader->pid != pid) return -ESRCH;
         // 投递到进程级 shared_pending
         spin_lock(&leader->proc->signal->sig_lock);
@@ -732,10 +732,10 @@ int sys_kill(pid_t pid, int sig) {
         spin_unlock(&leader->proc->signal->sig_lock);
         // 唤醒所有未阻塞该信号的线程（任意线程可消费）
         for (int i = 0; i < MAX_PROC; i++) {
-            if (tasks[i].pid >= 0 && tasks[i].tgid == pid
-                && !(tasks[i].proc->sig_blocked & (1UL << sig))
-                && tasks[i].state == BLOCKED) {
-                wake_process_any(&tasks[i]);  // signal 打断任意阻塞态（含 WAIT_FUTEX）
+            if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->tgid == pid
+                && !(tasks[i]->proc->sig_blocked & (1UL << sig))
+                && tasks[i]->state == BLOCKED) {
+                wake_process_any(tasks[i]);  // signal 打断任意阻塞态（含 WAIT_FUTEX）
             }
         }
         return 0;
@@ -752,7 +752,7 @@ int sys_kill(pid_t pid, int sig) {
 // 投递到指定 tid 的 per-task sig_pending
 int sys_tgkill(pid_t tgid, pid_t tid, int sig) {
     if (tid >= MAX_PROC) return -ESRCH;
-    xtask_t *target = &tasks[tid];
+    xtask_t *target = task_get(tid);
     if (target->pid != tid || target->tgid != tgid) return -ESRCH;
     // 投递到线程级 sig_pending（atomic，无 sig_lock）
     __atomic_or_fetch(&target->proc->sig_pending, 1UL << sig, __ATOMIC_RELEASE);
