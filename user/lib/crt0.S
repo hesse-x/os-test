@@ -26,3 +26,5 @@ _start:
     call __libc_start_main
 1:  hlt
     jmp 1b
+
+    .section .note.GNU-stack,"",@progbits

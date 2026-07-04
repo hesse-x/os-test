@@ -2,6 +2,7 @@
 #define _SYS_IOCTL_H
 
 #include <stdint.h>
+#include <sys/cdefs.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -9,7 +10,7 @@ extern "C" {
 
 typedef uint32_t ioctl_cmd_t;
 
-int ioctl(int fd, ioctl_cmd_t cmd, ...);
+LIBC_EXPORT int ioctl(int fd, ioctl_cmd_t cmd, ...);
 
 #include "xos/ioctl.h"
 

@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 /* ===================== sys_write based flush ===================== */
 
@@ -22,16 +23,19 @@ static int sys_read_fill(FILE *f, char *buf, int len) {
 }
 
 static FILE stdin_file = {
-    0, nullptr, 0, 0, _IONBF, _F_READ, nullptr, sys_read_fill
+    0, nullptr, 0, 0, _IONBF, _F_READ, nullptr, sys_read_fill,
+    0, -1, PTHREAD_MUTEX_INITIALIZER
 };
 
 static char stdout_buf[256];
 static FILE stdout_file = {
-    1, stdout_buf, sizeof(stdout_buf), 0, _IOLBF, _F_WRITE, sys_write_flush, nullptr
+    1, stdout_buf, sizeof(stdout_buf), 0, _IOLBF, _F_WRITE, sys_write_flush, nullptr,
+    0, -1, PTHREAD_MUTEX_INITIALIZER
 };
 
 static FILE stderr_file = {
-    2, nullptr, 0, 0, _IONBF, _F_WRITE, sys_write_flush, nullptr
+    2, nullptr, 0, 0, _IONBF, _F_WRITE, sys_write_flush, nullptr,
+    0, -1, PTHREAD_MUTEX_INITIALIZER
 };
 
 FILE *stdin  = &stdin_file;
@@ -84,10 +88,14 @@ int putchar(int c) {
     return c;
 }
 
+int putchar_unlocked(int c) { return putchar(c); }
+
 int fputc(int c, FILE *f) {
     file_putc_internal(f, (char)c);
     return c;
 }
+
+int fputc_unlocked(int c, FILE *f) { return fputc(c, f); }
 
 int fputs(const char *s, FILE *f) {
     while (*s) file_putc_internal(f, *s++);
@@ -113,6 +121,12 @@ int vfprintf(FILE *f, const char *fmt, va_list ap) {
     return kvformat(file_putc_wrapper, &w, fmt, ap);
 }
 
+int vprintf(const char *fmt, va_list ap) {
+    int n = vfprintf(stdout, fmt, ap);
+    fflush(stdout);
+    return n;
+}
+
 /* ===================== printf / fprintf ===================== */
 
 int printf(const char *fmt, ...) {
@@ -136,6 +150,11 @@ int fprintf(FILE *f, const char *fmt, ...) {
 /* ===================== Character input ===================== */
 
 int fgetc(FILE *f) {
+    if (f->ungot != -1) {
+        int c = f->ungot;
+        f->ungot = -1;
+        return c;
+    }
     char c;
     if (f->read_fn) {
         int n = f->read_fn(f, &c, 1);
@@ -148,8 +167,22 @@ int fgetc(FILE *f) {
     return (unsigned char)c;
 }
 
+int fgetc_unlocked(FILE *f) { return fgetc(f); }
+
 int getchar(void) {
     return fgetc(stdin);
+}
+
+int getchar_unlocked(void) {
+    return fgetc(stdin);
+}
+
+int ungetc(int c, FILE *f) {
+    if (c == EOF || !f) return EOF;
+    if (f->ungot != -1) return EOF;  /* 仅支持 1 字符 pushback */
+    f->ungot = (unsigned char)c;
+    f->flags &= ~_F_EOF;
+    return (unsigned char)c;
 }
 
 /* ===================== sprintf / snprintf ===================== */
@@ -284,6 +317,8 @@ FILE *fopen(const char *path, const char *mode) {
     f->write_fn = sys_write_flush;
     f->read_fn = sys_read_fill;
     f->offset = 0;
+    f->ungot = -1;
+    f->lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
 
     return f;
 }
@@ -356,4 +391,119 @@ long ftell(FILE *f) {
 
 void rewind(FILE *f) {
     if (f) fseek(f, 0, SEEK_SET);
+}
+
+/* ===================== fdopen / freopen / fileno ===================== */
+
+FILE *fdopen(int fd, const char *mode) {
+    if (fd < 0 || !mode) { errno = EINVAL; return NULL; }
+
+    int file_flags = 0;
+    if (mode[0] == 'r') {
+        file_flags = _F_READ;
+        if (mode[1] == '+') file_flags = _F_READ | _F_WRITE;
+    } else if (mode[0] == 'w') {
+        file_flags = _F_WRITE;
+        if (mode[1] == '+') file_flags = _F_READ | _F_WRITE;
+    } else if (mode[0] == 'a') {
+        file_flags = _F_WRITE;
+        if (mode[1] == '+') file_flags = _F_READ | _F_WRITE;
+    } else {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    FILE *f = (FILE *)malloc(sizeof(FILE));
+    if (!f) { errno = ENOMEM; return NULL; }
+    char *buf = (char *)malloc(BUFSIZ);
+    if (!buf) { free(f); errno = ENOMEM; return NULL; }
+
+    f->fd = fd;
+    f->buf = buf;
+    f->buf_size = BUFSIZ;
+    f->buf_pos = 0;
+    f->buf_mode = _IOFBF;
+    f->flags = file_flags;
+    f->write_fn = sys_write_flush;
+    f->read_fn = sys_read_fill;
+    f->offset = 0;
+    f->ungot = -1;
+    f->lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    return f;
+}
+
+FILE *freopen(const char *path, const char *mode, FILE *f) {
+    if (!f || !mode) { errno = EINVAL; return NULL; }
+    if (f->fd >= 0) {
+        fflush(f);
+        close(f->fd);
+    }
+    if (!path) { errno = EINVAL; return NULL; }
+    FILE *nf = fopen(path, mode);
+    if (!nf) return NULL;
+    /* 把新 fd 搬进旧 FILE，保持 FILE* 不变 */
+    f->fd = nf->fd;
+    f->flags = nf->flags;
+    f->offset = 0;
+    f->ungot = -1;
+    /* 释放 nf 的外壳（保留其 fd 已搬走） */
+    nf->fd = -1;
+    fclose(nf);
+    return f;
+}
+
+int fileno(FILE *f) {
+    if (!f) { errno = EINVAL; return -1; }
+    return f->fd;
+}
+
+/* ===================== feof / ferror / clearerr ===================== */
+
+int feof(FILE *f) { return f && (f->flags & _F_EOF) ? 1 : 0; }
+int ferror(FILE *f) { return f && (f->flags & _F_ERR) ? 1 : 0; }
+void clearerr(FILE *f) { if (f) f->flags &= ~(_F_EOF | _F_ERR); }
+
+/* ===================== setbuf / setvbuf ===================== */
+
+int setvbuf(FILE *f, char *buf, int mode, size_t size) {
+    if (!f) { errno = EINVAL; return -1; }
+    fflush(f);
+    /* 释放旧缓冲（仅 fopen 分配的，静态三流的不释放） */
+    if (f->buf && f != stdin && f != stdout && f != stderr) {
+        free(f->buf);
+        f->buf = nullptr;
+    }
+    f->buf_mode = mode;
+    if (mode == _IONBF) {
+        f->buf = nullptr;
+        f->buf_size = 0;
+    } else if (buf) {
+        f->buf = buf;
+        f->buf_size = (int)size;
+    } else {
+        f->buf = (char *)malloc(size ? size : BUFSIZ);
+        f->buf_size = f->buf ? (int)(size ? size : BUFSIZ) : 0;
+    }
+    f->buf_pos = 0;
+    return 0;
+}
+
+int setbuf(FILE *f, char *buf) {
+    return setvbuf(f, buf, buf ? _IOFBF : _IONBF, BUFSIZ);
+}
+
+/* ===================== flockfile / funlockfile / ftrylockfile ===================== */
+
+void flockfile(FILE *f)   { if (f) pthread_mutex_lock(&f->lock); }
+void funlockfile(FILE *f) { if (f) pthread_mutex_unlock(&f->lock); }
+int ftrylockfile(FILE *f) { return f ? pthread_mutex_trylock(&f->lock) : EINVAL; }
+
+/* ===================== fread_unlocked / fwrite_unlocked ===================== */
+
+size_t fread_unlocked(void *ptr, size_t size, size_t nmemb, FILE *f) {
+    return fread(ptr, size, nmemb, f);
+}
+
+size_t fwrite_unlocked(const void *ptr, size_t size, size_t nmemb, FILE *f) {
+    return fwrite(ptr, size, nmemb, f);
 }

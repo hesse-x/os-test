@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <sys/cdefs.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,7 +40,7 @@ extern struct link_map *_dl_link_map;
 
 // libc.so 用：遍历 _dl_link_map 合并 PT_TLS 填 tls_info
 struct tls_info;
-extern struct tls_info collect_tls_from_link_map(struct link_map *lmap);
+LIBC_EXPORT extern struct tls_info collect_tls_from_link_map(struct link_map *lmap);
 
 // ld.so 内部：从 PHDR 找 PT_TLS 填 link_map 的 tls_* 字段
 // hidden visibility：避免 ld.so 跨模块调用走 PLT（bootstrap 前 GOT 未填，

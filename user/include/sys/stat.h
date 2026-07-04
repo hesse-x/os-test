@@ -5,6 +5,7 @@
 #include <time.h>
 #include <stddef.h>
 #include "xos/stat.h"
+#include <sys/cdefs.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,9 +42,9 @@ _Static_assert(offsetof(struct stat, st_size) == offsetof(struct kstat, st_size)
  * and type tests (S_ISREG/S_ISDIR/S_ISCHR/S_ISBLK) come from xos/stat.h
  * (included above) — single source of truth shared with the kernel. */
 
-int stat(const char *path, struct stat *st);
-int fstat(int fd, struct stat *st);
-int mkdir(const char *path, mode_t mode);
+LIBC_EXPORT int stat(const char *path, struct stat *st);
+LIBC_EXPORT int fstat(int fd, struct stat *st);
+LIBC_EXPORT int mkdir(const char *path, mode_t mode);
 
 #ifdef __cplusplus
 }

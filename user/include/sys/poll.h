@@ -3,12 +3,13 @@
 
 #include <sys/types.h>
 #include "xos/socket.h"  // defines struct pollfd, POLLIN/OUT/ERR/HUP
+#include <sys/cdefs.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms);
+LIBC_EXPORT int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms);
 
 #ifdef __cplusplus
 }

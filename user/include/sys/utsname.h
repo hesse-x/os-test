@@ -3,6 +3,8 @@
 
 #define UTSNAME_LEN 65
 
+#include <sys/cdefs.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -15,7 +17,7 @@ struct utsname {
     char machine[UTSNAME_LEN];
 };
 
-int uname(struct utsname *buf);
+LIBC_EXPORT int uname(struct utsname *buf);
 
 #ifdef __cplusplus
 }

@@ -2,6 +2,7 @@
 #define _DIRENT_H
 
 #include <sys/types.h>
+#include <sys/cdefs.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,9 +20,9 @@ typedef struct {
     // Internal state managed by libc
 } DIR;
 
-DIR *opendir(const char *name);
-struct dirent *readdir(DIR *dirp);
-int closedir(DIR *dirp);
+LIBC_EXPORT DIR *opendir(const char *name);
+LIBC_EXPORT struct dirent *readdir(DIR *dirp);
+LIBC_EXPORT int closedir(DIR *dirp);
 
 #ifdef __cplusplus
 }

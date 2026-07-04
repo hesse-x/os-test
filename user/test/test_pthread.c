@@ -6,7 +6,9 @@
 #include <time.h>
 #include <errno.h>
 #include <sys/mman.h>
-#include <sched.h>
+// sched_yield() 已由 <unistd.h> 声明,无需 <sched.h>;且本 OS 无该头,
+// 尖括号会回退到宿主机 /usr/include/sched.h,拉入宿主机 struct timespec
+// 与我们的 xos/time.h 重定义冲突。
 
 void setUp(void) {}
 void tearDown(void) {}

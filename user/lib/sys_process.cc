@@ -1,6 +1,7 @@
 #include <sys/process.h>
 #include <errno.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include "syscall.h"
 
 pid_t fork(void) {
@@ -10,7 +11,8 @@ pid_t fork(void) {
 }
 
 int execve(const char *pathname, char *const argv[], char *const envp[]) {
-    return sys_execve(pathname, argv, envp);
+    /* envp 为 NULL 时默认传 environ（D9 模型，继承当前环境） */
+    return sys_execve(pathname, argv, envp ? envp : environ);
 }
 
 pid_t spawn(const char *path) {

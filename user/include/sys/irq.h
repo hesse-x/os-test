@@ -1,11 +1,13 @@
 #ifndef _SYS_IRQ_H
 #define _SYS_IRQ_H
 
+#include <sys/cdefs.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-int irq_bind(int irq);
+LIBC_EXPORT int irq_bind(int irq);
 
 #ifdef __cplusplus
 }

@@ -70,9 +70,24 @@ typedef struct file_t_io_resp {
 // never proc->proc or sig, which may be kfree'd by concurrent task_reap on
 // another CPU. do_exit does NOT do mm_put/files_put/signal_put — task_reap/
 // proc_reap owns all resource freeing (original design; 3b will revisit).
-int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
+// ===================== BSD syscall: exit =====================
+// Key safety: all proc_t/signal reads happen BEFORE setting ZOMBIE (stored in
+// locals). After ZOMBIE, do_exit only uses locals + xtask_t array fields —
+// never proc->proc or sig, which may be kfree'd by concurrent task_reap on
+// another CPU. do_exit does NOT do mm_put/files_put/signal_put — task_reap/
+// proc_reap owns all resource freeing (original design; 3b will revisit).
+//
+// D13：exit_code 按 Linux wait status 编码存储。本函数接收**已编码**的
+// exit_code（正常退出 = (code & 0xff) << 8；信号致死 = sig & 0x7f）。
+// sys_exit / do_exit_with_code 两条入口分别编码：
+//   - sys_exit(code)：用户态 exit/_exit 入口，编码 (code & 0xff) << 8。
+//   - do_exit_with_code(encoded)：信号致死等内部入口，直接传已编码值
+//     （signal.c 传 sig & 0x7f，避免 sys_exit 的 code<<8 把信号号错放进
+//     退出状态位）。父进程 waitpid 拿到的 status 可直接喂标准
+//     WIFEXITED/WEXITSTATUS 宏（user/include/sys/wait.h）。
+int64_t do_exit_with_code(int32_t encoded_exit_code) {
     xtask_t *proc = current_task;
-    int32_t exit_code = (int32_t)arg1;
+    int32_t exit_code = encoded_exit_code;
     proc->exit_code = exit_code;           // xtask_t (UAF-safe for waitpid)
     proc->proc->exit_code = exit_code;     // proc_t (legacy, waitpid 已改读 xtask_t)
     printk(LOG_INFO, "do_exit: pid=%d tid=%d exit_code=%d\n", proc->tgid, proc->pid, exit_code);
@@ -165,6 +180,13 @@ int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u
     //    proc_t lifetime (RCU or per-task reap lock).
     schedule();
     return 0;
+}
+
+// sys_exit：用户态 exit/_exit 系统调用入口。编码 (code & 0xff) << 8 后
+// 交给 do_exit_with_code。D13。
+int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4, int64_t _u5) {
+    int32_t encoded = ((int32_t)arg1 & 0xff) << 8;
+    return do_exit_with_code(encoded);
 }
 
 // ===================== BSD syscall: exit_group =====================

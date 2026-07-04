@@ -8,4 +8,9 @@ struct timespec {
     long   tv_nsec;
 };
 
+struct timeval {
+    time_t tv_sec;
+    long   tv_usec;
+};
+
 #endif /* COMMON_TIME_H */

@@ -146,6 +146,16 @@ int fcntl(int fd, int cmd, ...) {
         va_end(ap);
         int r = sys_fcntl(fd, cmd, arg);
         return r;
+    } else if (cmd == F_GETFD) {
+        /* 内核 sys_fcntl 暂不支持 F_GETFD/F_SETFD；本 OS 无 exec，FD_CLOEXEC
+         * 语义无意义，诚实降级：恒返回 0（无 cloexec）。见 todo.md。 */
+        return 0;
+    } else if (cmd == F_SETFD) {
+        va_list ap;
+        va_start(ap, cmd);
+        (void)va_arg(ap, int);
+        va_end(ap);
+        return 0;
     }
 
     errno = EINVAL;

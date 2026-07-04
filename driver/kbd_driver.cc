@@ -29,4 +29,5 @@ int main(int argc, char** argv, char** envp) {
     // Library opens /dev/usb_hid_kbd, mmaps HID SHM, registers /dev/kbd (no shm),
     // enters main loop. on_key_event called repeatedly to drain HID reports.
     input_driver_run(INPUT_DEV_KBD, "kbd", "/dev/usb_hid_kbd", on_key_event, kbd_hid_init);
+    return 0;
 }

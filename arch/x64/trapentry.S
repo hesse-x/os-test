@@ -249,3 +249,5 @@ reload_cs:
     lretq
 1:
     ret
+
+    .section .note.GNU-stack,"",@progbits

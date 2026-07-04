@@ -50,7 +50,9 @@ function(add_user_lib lib_name)
         endif()
         # FLAGS 可能是字符串（如 "-fno-pie -DDYNAMIC=0"），转 list
         separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
-        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${ARG_FLAGS_LIST})
+        # -fvisibility=hidden：默认 hidden，仅 LIBC_EXPORT 标记的声明导出（与 ld.so 一致）。
+        # .map + verify_libc_exports.sh 仍是最终闸门，拦截漏标/多标。
+        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fvisibility=hidden ${ARG_FLAGS_LIST})
 
         set(OBJ_FILES "")
         set(idx 0)
@@ -75,9 +77,11 @@ function(add_user_lib lib_name)
             COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
                     -Wl,--hash-style=gnu
                     -Wl,-soname,lib${ARG_OUTPUT_NAME}.so
+                    -Wl,--version-script,${CMAKE_SOURCE_DIR}/user/libc.map
                     -o ${SO_FILE} ${OBJ_FILES}
             COMMAND bash ${CMAKE_SOURCE_DIR}/build_script/cmake/verify_so_init_array.sh ${SO_FILE}
-            DEPENDS ${OBJ_FILES}
+            COMMAND bash ${CMAKE_SOURCE_DIR}/build_script/cmake/verify_libc_exports.sh ${SO_FILE} ${CMAKE_SOURCE_DIR}/user/libc.map
+            DEPENDS ${OBJ_FILES} ${CMAKE_SOURCE_DIR}/user/libc.map
             COMMENT "Linking ${lib_name}.so (libc.so)")
         add_custom_target(${lib_name} ALL DEPENDS ${SO_FILE})
     else()

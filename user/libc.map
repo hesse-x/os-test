@@ -1,0 +1,138 @@
+# libc.map — libc.so 导出符号版本脚本
+#
+# 规则：头文件即契约 + 跨 .so 引用。
+#   - global: user/include/** 下声明且 libc.so 实际定义的符号，全部导出
+#   - 必要的 __ 事实 ABI 符号（crt0/assert/errno 跨 .so 调用）显式列入
+#   - local: *; 兜底：所有未列入 global 的符号（内部实现、_Z mangled、
+#     __libc_run_*、__pthread_key_*、kvfmt_*、atexit_* 等）一律 hidden
+#
+# 单版本节点 LIBC_1.0；将来 Proton 二进制兼容需要符号版本时加 GLIBC_2.x 节点。
+
+LIBC_1.0 {
+global:
+    /* <stdio.h> */
+    fclose; feof; ferror; fflush; fgetc; fileno; fopen; fprintf; fputc;
+    fputs; fread; freopen; fseek; ftell; fwrite; getchar; perror; printf;
+    putchar; puts; rewind; snprintf; sprintf; vfprintf; vprintf; vsnprintf;
+    vsprintf; fdopen; clearerr; setbuf; setvbuf; ungetc; flockfile;
+    funlockfile; ftrylockfile; fgetc_unlocked; fputc_unlocked;
+    getchar_unlocked; putchar_unlocked; fread_unlocked; fwrite_unlocked;
+    stdin; stdout; stderr;
+
+    /* <stdlib.h> */
+    abs; atexit; atoi; atol; atoll; calloc; exit; free; labs; llabs;
+    malloc; qsort; bsearch; rand; rand_r; realloc; srand; strtol; strtoul;
+    strtoll; strtoull; strtod; atof; div; ldiv; lldiv; imaxabs; imaxdiv;
+    getenv; setenv; putenv; unsetenv; clearenv; environ;
+
+    /* <string.h> */
+    bzero; bcmp; bcopy; index; rindex; memcmp; memcpy; memmove; memset;
+    memchr; memmem; strcat; strchr; strcmp; strcpy; strcspn; strdup;
+    strerror; strerror_r; strlen; strncat; strncmp; strncpy; strndup;
+    strpbrk; strrchr; strspn; strstr; strtok; strtok_r;
+
+    /* <unistd.h> */
+    access; close; dup2; _exit; ftruncate; getcwd; getpid; gettid;
+    ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; read;
+    rmdir; sched_yield; sleep; ttyname; unlink; usleep; write;
+
+    /* <fcntl.h> */
+    fcntl; fd_file_size;
+
+    /* <ctype.h> */
+    isalnum; isalpha; isascii; isblank; iscntrl; isdigit; isgraph;
+    islower; isprint; ispunct; isspace; isupper; isxdigit; tolower;
+    toupper;
+
+    /* <time.h> */
+    clock; clock_gettime; ctime; ctime_r; asctime; asctime_r; difftime;
+    gettimeofday; gmtime; gmtime_r; localtime; localtime_r; mktime;
+    nanosleep; strftime; time; timespec_get; timespec_to_tm; timezone;
+    daylight; tzname; tzset;
+
+    /* <signal.h> */
+    kill; raise; sigaction; signal; sigreturn; sigprocmask; abort;
+
+    /* <termios.h> */
+    tcgetattr; tcsetattr;
+
+    /* <dirent.h> */
+    closedir; opendir; readdir;
+
+    /* <errno.h> */
+    __errno_location;
+
+    /* <assert.h> */
+    __assert_fail;
+
+    /* <setjmp.h> */
+    setjmp; longjmp; _setjmp; _longjmp;
+
+    /* <sched.h> */
+    sched_yield;
+
+    /* <pthread.h> */
+    pthread_attr_destroy; pthread_attr_getdetachstate;
+    pthread_attr_getguardsize; pthread_attr_getstack;
+    pthread_attr_getstacksize; pthread_attr_init;
+    pthread_attr_setdetachstate; pthread_attr_setguardsize;
+    pthread_attr_setstack; pthread_attr_setstacksize;
+    pthread_barrier_destroy; pthread_barrier_init; pthread_barrier_wait;
+    pthread_cancel; pthread_cleanup_pop; pthread_cleanup_push;
+    pthread_cond_broadcast; pthread_cond_destroy; pthread_cond_init;
+    pthread_cond_signal; pthread_cond_wait; pthread_create; pthread_detach;
+    pthread_equal; pthread_exit; pthread_getspecific; pthread_join;
+    pthread_key_create; pthread_kill;
+    pthread_mutexattr_destroy; pthread_mutexattr_gettype;
+    pthread_mutexattr_init; pthread_mutexattr_settype;
+    pthread_mutex_destroy; pthread_mutex_init; pthread_mutex_lock;
+    pthread_mutex_timedlock; pthread_mutex_trylock; pthread_mutex_unlock;
+    pthread_once; pthread_rwlock_destroy; pthread_rwlock_init;
+    pthread_rwlock_rdlock; pthread_rwlock_unlock; pthread_rwlock_wrlock;
+    pthread_self; pthread_setcancelstate; pthread_setcanceltype;
+    pthread_setname_np; pthread_setspecific; pthread_sigmask;
+    pthread_testcancel;
+
+    /* <sys/stat.h> */
+    fstat; mkdir; stat;
+
+    /* <sys/wait.h> */
+    waitpid;
+
+    /* <sys/mman.h> */
+    memfd_create; mmap; munmap;
+
+    /* <sys/ioctl.h> */
+    ioctl;
+
+    /* <sys/poll.h> */
+    poll;
+
+    /* <sys/utsname.h> */
+    uname;
+
+    /* <sys/tls.h> — 半公开内部入口（crt0/pthread 跨文件，已声明即契约） */
+    alloc_tls_block; __libc_tls_init_rest; __pthread_cancel_check;
+    __pthread_current_tcb; collect_tls_from_link_map;
+
+    /* <sys/process.h> */
+    execve; fork; getpgid; getsid; setpgid; setsid; spawn;
+
+    /* <sys/ipc.h> — 微内核 IPC 用户态入口 */
+    msg; msg_fd; msg_resp; notify; notify_fd; recv; req; resp;
+
+    /* <sys/irq.h> */
+    irq_bind;
+
+    /* <sys/pci.h> */
+    pci_dev_info;
+
+    /* <sys/device.h> */
+    device_register; device_register_shm;
+
+    /* 事实 ABI：crt0.S 跨 .so 调用 */
+    __libc_start_main;
+
+local:
+    *;
+};

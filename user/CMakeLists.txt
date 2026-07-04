@@ -17,7 +17,9 @@ set(LIBC_SOURCES
     lib/start_main.cc
     lib/atexit.c
     lib/init_array.c
+    lib/environ.c
     lib/errno.cc
+    lib/setjmp.S
     ${CMAKE_SOURCE_DIR}/common/kvformat.c
 )
 
@@ -45,7 +47,10 @@ target_include_directories(unity PRIVATE
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/third_party/Unity/src
 )
-target_compile_definitions(unity PRIVATE UNITY_EXCLUDE_SETJMP_H)
+# UNITY_EXCLUDE_SETJMP_H / UNITY_EXCLUDE_MATH_H：排除宿主机 <setjmp.h>/<math.h>。
+# freestanding + -nostdlib 下 <sys/cdefs.h> 不引入，宿主机 math.h 的
+# __BEGIN_DECLS 等宏未定义会解析失败；Unity 自带 UNITY_IS_NAN/IS_INF 兜底。
+target_compile_definitions(unity PRIVATE UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 
 add_user_elf(hello  C SOURCES hello.c  LINK_LIBS c)
 add_user_dyn_elf(test_fpu C SOURCES test/test_fpu.c LINK_LIBS c)

@@ -134,3 +134,5 @@ trampoline_64bit:
 
 .org 0x108
 ap_trampoline_end:
+
+    .section .note.GNU-stack,"",@progbits

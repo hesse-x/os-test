@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <sys/ioctl.h>
+#include <sys/cdefs.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -73,8 +74,8 @@ struct winsize {
 };
 
 // Functions
-int tcgetattr(int fd, struct termios *termios_p);
-int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
+LIBC_EXPORT int tcgetattr(int fd, struct termios *termios_p);
+LIBC_EXPORT int tcsetattr(int fd, int optional_actions, const struct termios *termios_p);
 
 #ifdef __cplusplus
 }

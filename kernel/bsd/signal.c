@@ -168,8 +168,10 @@ void check_pending_signals(trapframe_t *tf) {
         if (sig == SIGCANCEL) {
             uint64_t handler = proc->proc->cancel_handler;
             if (handler == 0) {
-                proc->proc->exit_code = -1;
-                sys_exit(-1, 0, 0, 0, 0, 0);
+                // 信号致死：exit_code 按 Linux wait status 编码 (sig & 0x7f)。
+                // 走 do_exit_with_code 而非 sys_exit，避免 sys_exit 的 (code<<8) 编码
+                // 把信号号错放进退出状态位。D13。
+                do_exit_with_code(sig & 0x7f);
                 return;
             }
             sigaction_t sa;

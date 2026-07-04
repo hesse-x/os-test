@@ -14,3 +14,5 @@ _start:
     # 若返回则挂掉
 1:  hlt
     jmp 1b
+
+    .section .note.GNU-stack,"",@progbits

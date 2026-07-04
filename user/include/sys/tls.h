@@ -2,6 +2,7 @@
 #define USER_SYS_TLS_H
 
 #include <stddef.h>
+#include <sys/cdefs.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,23 +50,23 @@ struct tcb {
     int errno_val;                       // per-thread errno（__errno_location 返回 & 此字段）
 };
 
-struct tcb *__pthread_current_tcb(void);
+LIBC_EXPORT struct tcb *__pthread_current_tcb(void);
 
 // Allocate TLS block + TCB for a thread (main or child).
 // Returns TCB pointer (= FS_BASE). tls_page_out/tls_total_out for later munmap.
 // Exported for pthread_create (pthread.cc) to call for child threads.
-struct tcb *alloc_tls_block(void **tls_page_out, size_t *tls_total_out);
+LIBC_EXPORT struct tcb *alloc_tls_block(void **tls_page_out, size_t *tls_total_out);
 
 // Called by __libc_tls_init (static path) and __libc_start_main (dynamic path)
 // after __g_tls_info is filled. Allocates main thread TCB + sets FS_BASE +
 // set_tid_address + registers cancel handler.
-void __libc_tls_init_rest(void);
+LIBC_EXPORT void __libc_tls_init_rest(void);
 
 // Cancel check handler — registered via sys_pthread_set_cancel_handler.
 // Called by kernel deliver_signal on SIGCANCEL. Reads TCB cancel_state:
 //   ENABLE  → exit (phase 2: sys_exit; phase 3: pthread_exit(PTHREAD_CANCELED))
 //   DISABLE → returns (sigreturn restores context)
-void __pthread_cancel_check(int sig);
+LIBC_EXPORT void __pthread_cancel_check(int sig);
 
 #ifdef __cplusplus
 }

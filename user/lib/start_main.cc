@@ -14,6 +14,7 @@ typedef void (*init_func_t)(void);
 extern "C" void __libc_run_init_array(init_func_t *start, init_func_t *end);
 extern "C" void __libc_run_fini_array(init_func_t *start, init_func_t *end);
 extern "C" void __libc_run_atexit(void);
+extern "C" void __libc_env_init(char **envp);  /* environ.c：拷贝栈 envp → environ */
 
 // 静态路径 TLS 初始化（tls.cc）：读链接器符号填 __g_tls_info + alloc TCB + FS_BASE + ...
 extern "C" void __libc_tls_init(void);
@@ -37,7 +38,8 @@ extern "C" void __libc_fini_array_trampoline(void) {
 // 参数：main, argc, argv, init_array 范围 [init_start, init_end),
 //       fini_array 范围 [fini_start, fini_end)
 // （原 SysV ABI 的 init/fini/rtld_fini/stack_end 不再使用，复用寄存器传范围）
-extern "C" int __libc_start_main(int (*main)(int, char**, char**),
+// 事实 ABI：crt0.S 跨 .so 调用，必须导出（-fvisibility=hidden 下显式 default）
+extern "C" LIBC_EXPORT int __libc_start_main(int (*main)(int, char**, char**),
                                   int argc, char **argv,
                                   init_func_t *init_start, init_func_t *init_end,
                                   init_func_t *fini_start, init_func_t *fini_end) {
@@ -62,6 +64,9 @@ extern "C" int __libc_start_main(int (*main)(int, char**, char**),
 
     // 4. 算 envp
     char **envp = argv + argc + 1;
+
+    // 4b. 初始化 environ（拷贝栈 envp 到 malloc 的 char** 数组）
+    __libc_env_init(envp);
 
     // 5. 跑 main
     int ret = main(argc, argv, envp);

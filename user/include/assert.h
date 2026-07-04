@@ -1,11 +1,13 @@
 #ifndef _ASSERT_H
 #define _ASSERT_H
 
+#include <sys/cdefs.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-void __assert_fail(const char *expr, const char *file, int line);
+LIBC_EXPORT void __assert_fail(const char *expr, const char *file, int line);
 
 #ifdef __cplusplus
 }

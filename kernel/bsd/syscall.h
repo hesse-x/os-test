@@ -21,6 +21,9 @@ int64_t sys_fcntl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 // process semantics
 int64_t sys_exit(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_exit_group(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+// do_exit_with_code：退出公共主体，接收**已编码**的 exit_code（D13）。
+// sys_exit（用户态 code<<8）与 signal.c 信号致死（sig & 0x7f）分别编码后调用。
+int64_t do_exit_with_code(int32_t encoded_exit_code);
 int64_t sys_waitpid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_fork(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_execve(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);

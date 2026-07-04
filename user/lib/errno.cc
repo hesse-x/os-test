@@ -12,6 +12,7 @@
 // R_X86_64_DTPMOD64 等通用动态 TLS 重定位，ld.so 暂未实现 __tls_get_addr）。
 
 #include "sys/tls.h"
+#include <errno.h>
 
 extern "C" {
 

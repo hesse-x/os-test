@@ -13,6 +13,12 @@
 
 #define F_GETFL     1
 #define F_SETFL     2
+#define F_GETFD     3
+#define F_SETFD     4
+
+/* 注意：POSIX 的 FD_CLOEXEC=1 不在此处定义。内核内部在 kernel/bsd/types.h
+ * 用 FD_CLOEXEC=0x8000 作为 fd flags 位（与 O_* 分离）。用户态 FD_CLOEXEC
+ * 定义在 user/include/fcntl.h（=1，POSIX 约定）。 */
 
 // Linux-compatible sealing constants (for memfd_create + fcntl)
 #define F_ADD_SEALS   1033

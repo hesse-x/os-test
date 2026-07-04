@@ -1,9 +1,20 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* 前向声明：本文件内函数互相调用（strdup 用 memcpy、strerror_r 用 strerror、
+ * bcopy 用 memmove、bcmp 用 memcmp），C++ 需先声明 */
+void *memcpy(void *dst, const void *src, size_t n);
+void *memmove(void *dst, const void *src, size_t n);
+int memcmp(const void *s1, const void *s2, size_t n);
+const char *strerror(int errnum);
+size_t strlen(const char *s);
 
 size_t strlen(const char *s) {
     size_t n = 0;
@@ -41,6 +52,13 @@ char *strcat(char *dst, const char *src) {
     return dst;
 }
 
+char *strncat(char *dst, const char *src, size_t n) {
+    char *d = dst + strlen(dst);
+    while (n && *src) { *d++ = *src++; n--; }
+    *d = '\0';
+    return dst;
+}
+
 char *strchr(const char *s, int c) {
     while (*s) {
         if (*s == (char)c) return (char *)s;
@@ -49,6 +67,116 @@ char *strchr(const char *s, int c) {
     if (c == '\0') return (char *)s;
     return nullptr;
 }
+
+char *strrchr(const char *s, int c) {
+    const char *last = nullptr;
+    for (;;) {
+        if (*s == (char)c) last = s;
+        if (!*s) break;
+        s++;
+    }
+    return (char *)last;
+}
+
+char *strpbrk(const char *s, const char *accept) {
+    while (*s) {
+        const char *a = accept;
+        while (*a) { if (*s == *a) return (char *)s; a++; }
+        s++;
+    }
+    return nullptr;
+}
+
+size_t strspn(const char *s, const char *accept) {
+    size_t n = 0;
+    while (*s) {
+        const char *a = accept;
+        int found = 0;
+        while (*a) { if (*s == *a) { found = 1; break; } a++; }
+        if (!found) break;
+        n++; s++;
+    }
+    return n;
+}
+
+size_t strcspn(const char *s, const char *reject) {
+    size_t n = 0;
+    while (*s) {
+        const char *r = reject;
+        int found = 0;
+        while (*r) { if (*s == *r) { found = 1; break; } r++; }
+        if (found) break;
+        n++; s++;
+    }
+    return n;
+}
+
+void *memchr(const void *s, int c, size_t n) {
+    const unsigned char *p = (const unsigned char *)s;
+    while (n--) {
+        if (*p == (unsigned char)c) return (void *)p;
+        p++;
+    }
+    return nullptr;
+}
+
+void *memmem(const void *haystack, size_t haystacklen,
+             const void *needle, size_t needlelen) {
+    if (needlelen == 0) return (void *)haystack;
+    if (haystacklen < needlelen) return nullptr;
+    const unsigned char *h = (const unsigned char *)haystack;
+    const unsigned char *n = (const unsigned char *)needle;
+    for (size_t i = 0; i <= haystacklen - needlelen; i++) {
+        size_t j = 0;
+        for (; j < needlelen; j++) if (h[i + j] != n[j]) break;
+        if (j == needlelen) return (void *)(h + i);
+    }
+    return nullptr;
+}
+
+char *strdup(const char *s) {
+    size_t n = strlen(s) + 1;
+    char *p = (char *)malloc(n);
+    if (!p) { errno = ENOMEM; return nullptr; }
+    return (char *)memcpy(p, s, n);
+}
+
+char *strndup(const char *s, size_t n) {
+    size_t len = 0;
+    while (len < n && s[len]) len++;
+    char *p = (char *)malloc(len + 1);
+    if (!p) { errno = ENOMEM; return nullptr; }
+    memcpy(p, s, len);
+    p[len] = '\0';
+    return p;
+}
+
+int strerror_r(int errnum, char *buf, size_t buflen) {
+    if (!buf || buflen == 0) return EINVAL;
+    const char *msg = strerror(errnum);
+    size_t len = 0;
+    while (msg[len]) len++;
+    if (len >= buflen) {
+        size_t copy = buflen - 1;
+        memcpy(buf, msg, copy);
+        buf[copy] = '\0';
+        return ERANGE;
+    }
+    memcpy(buf, msg, len + 1);
+    return 0;
+}
+
+/* BSD legacy aliases */
+void bcopy(const void *src, void *dst, size_t n) {
+    memmove(dst, src, n);
+}
+
+int bcmp(const void *s1, const void *s2, size_t n) {
+    return memcmp(s1, s2, n) != 0 ? 1 : 0;
+}
+
+char *index(const char *s, int c) { return strchr(s, c); }
+char *rindex(const char *s, int c) { return strrchr(s, c); }
 
 void *memcpy(void *dst, const void *src, size_t n) {
     char *d = (char *)dst;
