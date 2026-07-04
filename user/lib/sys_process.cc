@@ -1,7 +1,7 @@
 #include <sys/process.h>
 #include <errno.h>
 #include <unistd.h>
-#include "common/syscall.h"
+#include "syscall.h"
 
 pid_t fork(void) {
     int64_t r = sys_fork();

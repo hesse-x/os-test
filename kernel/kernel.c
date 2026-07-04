@@ -5,7 +5,7 @@
 #include <stdbool.h>
 
 #include "common/macro.h"
-#include "common/boot.h"
+#include "boot/boot.h"
 #include "kernel/kernel.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/log.h"

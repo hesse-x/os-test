@@ -7,7 +7,7 @@
 #include "kernel/xcore/list.h"
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/signal.h"
-#include "common/signal.h"
+#include "xos/signal.h"
 
 typedef struct proc {
     struct xtask_t *xtask;      // reverse reference to scheduling entity (1:1 binding)

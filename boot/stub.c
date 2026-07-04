@@ -4,7 +4,7 @@
 #include <efilib.h>
 #include <elf.h>
 #include <stdint.h>
-#include "common/boot.h"
+#include "boot/boot.h"
 
 // EFI 内存映射缓冲区
 #define MMAP_BUF_SIZE (4096 * 4)

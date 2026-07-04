@@ -7,9 +7,8 @@
 #include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <sys/mman.h>
-#include "common/syscall.h"
-#include "common/dev.h"
-#include "common/errno.h"
+#include "syscall.h"
+#include "xos/errno.h"
 #include "driver/display.h"
 #include "input.h"
 

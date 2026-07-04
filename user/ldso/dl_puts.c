@@ -1,6 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "common/syscall_nums.h"
+#include "xos/syscall_nums.h"
 
 // bootstrap 阶段可用：纯 syscall，不依赖 GOT/printf
 // fd=2 是 stderr，execve 后 fd 表保留 stdin/stdout/stderr

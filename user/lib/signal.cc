@@ -1,6 +1,6 @@
 #include <signal.h>
 #include <string.h>    // memset
-#include <sys.h>       // sys_kill, sys_sigaction, sys_sigreturn
+#include <syscall.h>   // sys_kill, sys_sigaction, sys_sigreturn
 #include <unistd.h>    // getpid
 
 int kill(int pid, int sig) {

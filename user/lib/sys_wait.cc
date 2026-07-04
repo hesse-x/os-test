@@ -1,6 +1,6 @@
 #include <sys/wait.h>
 #include <errno.h>
-#include "common/syscall.h"
+#include "syscall.h"
 
 pid_t waitpid(pid_t pid, int *status, int options) {
     (void)options;

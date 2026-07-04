@@ -9,10 +9,9 @@
 #include "kernel/xcore/spinlock.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
-#include "common/errno.h"
-#include "common/shm.h"
+#include "xos/errno.h"
+#include "xos/shm.h"
 #include "kernel/bsd/devtmpfs.h"
-#include "common/syscall.h"
 
 // ===================== xHCI register offsets =====================
 // Capability registers (from MMIO base)

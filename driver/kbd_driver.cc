@@ -3,9 +3,9 @@
 #include <stdint.h>
 #include <sys/mman.h>
 #include "input.h"
-#include "common/input.h"
-#include "common/shm.h"
-#include "common/syscall.h"
+#include "xos/input.h"
+#include "xos/shm.h"
+#include "syscall.h"
 #include "usb_hid.h"
 
 // on_key_event: each callback fills one event, returns 1=has event / 0=HID empty.

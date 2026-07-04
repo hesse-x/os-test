@@ -31,13 +31,13 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
-#include "common/errno.h"
-#include "common/syscall_nums.h"
-#include "common/syscall.h"
-#include "common/ioctl.h"
-#include "common/stat.h"
-#include "common/input.h"
-#include "common/shm.h"
+#include "xos/errno.h"
+#include "xos/syscall_nums.h"
+#include "xos/syscall.h"
+#include "xos/ioctl.h"
+#include "xos/stat.h"
+#include "xos/input.h"
+#include "xos/shm.h"
 
 // ===================== File protocol for FD_FILE <-> fs_driver IPC =====================
 #define FILE_CMD_READ      2

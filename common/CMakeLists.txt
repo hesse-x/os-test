@@ -1,2 +1,6 @@
-# common/ contains only ABI contract headers (syscall, shm, dev, errno, macro, elf)
-# No compilation targets — all headers are header-only
+# common/ contains non-UAPI shared implementation only:
+#   macro.h        — ALIGN_UP/ALIGN_DOWN generic macros (used by kernel + user malloc)
+#   kvformat.c/.h — shared printf formatting impl (compiled by both kernel and libc; NOT a UAPI contract)
+# UAPI contract headers (syscall, errno, stat, shm, ...) live in xos/ — see xos/CMakeLists.txt.
+# No compilation targets here — all headers are header-only (kvformat.c is compiled via add_*
+# rules in the kernel/user CMake trees that include it).

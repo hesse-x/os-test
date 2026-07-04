@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "usb_hid.h"
-#include "common/shm.h"
+#include "xos/shm.h"
 
 // Internal state
 static uint8_t last_report[8];

@@ -7,9 +7,9 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/rcu.h"
-#include "common/mman.h"
-#include "common/fcntl.h"
-#include "common/types.h"
+#include "xos/mman.h"
+#include "xos/fcntl.h"
+#include "xos/types.h"
 #include "kernel/xcore/xtask.h"       // pid_t, xtask_t
 #include "kernel/xcore/mm_types.h"    // mm_t, mmap_region_t, shm_t
 

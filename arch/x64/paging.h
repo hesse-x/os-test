@@ -6,7 +6,7 @@
 #include "kernel/xcore/sparse.h"
 #include "arch/x64/utils.h"
 #include "common/macro.h"
-#include "common/boot.h"
+#include "boot/boot.h"
 #include "arch/x64/memlayout.h"
 
 // ===================== Page table entry flags =====================

@@ -8,13 +8,13 @@
 #include "kernel/driver/blk_dev.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/page_cache.h"
-#include "common/stat.h"
-#include "common/dirent.h"
+#include "xos/stat.h"
+#include "xos/dirent.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/slab.h"
-#include "common/errno.h"
-#include "common/fcntl.h"
+#include "xos/errno.h"
+#include "xos/fcntl.h"
 #include "arch/x64/utils.h"
 #include <stddef.h>
 
@@ -1124,7 +1124,7 @@ int fat32_stat(const char *path, void *stat_buf) {
 }
 
 /* ==================== getdents: read directory entries into user buffer ==================== */
-/* Each entry: struct dirent64 — defined in common/dirent.h
+/* Each entry: struct dirent64 — defined in xos/dirent.h
  * pos tracks how many dir entries we've consumed so far.
  * Returns total bytes written, or negative errno. */
 

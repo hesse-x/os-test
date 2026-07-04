@@ -4,7 +4,7 @@
 #include <sys/types.h>
 #include <stdint.h>
 #include <sys/poll.h>
-#include "common/syscall.h"
+#include "syscall.h"
 
 #ifdef __cplusplus
 extern "C" {

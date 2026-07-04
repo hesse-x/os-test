@@ -5,9 +5,9 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "kernel/xcore/sparse.h"
-#include "common/ioctl.h"
-#include "common/font_metrics.h"
-#include "common/display.h"
+#include "xos/ioctl.h"
+#include "xos/font_metrics.h"
+#include "xos/display.h"
 
 #include "kernel/xcore/xtask.h"
 struct pci_device;

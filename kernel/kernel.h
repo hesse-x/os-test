@@ -2,7 +2,7 @@
 #define KERNEL_H
 #include <stddef.h>
 #include <stdint.h>
-#include "common/boot.h"
+#include "boot/boot.h"
 
 void kernel_main(boot_info *bi);
 void kernel_init_finish(void);

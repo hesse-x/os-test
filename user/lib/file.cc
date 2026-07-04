@@ -14,9 +14,8 @@
 #include <sys/ipc.h>
 #include <sys/device.h>
 #include <sys/poll.h>
-#include "common/syscall.h"
-#include "common/dev.h"
-#include "common/shm.h"
+#include "syscall.h"
+#include "xos/shm.h"
 
 // ===================== Working directory (per-process) =====================
 static char cwd_path[256] = "/";
@@ -392,7 +391,7 @@ int mkdir(const char *path, mode_t mode) {
 
 // ===================== opendir / readdir / closedir =====================
 #include <dirent.h>
-#include "common/dirent.h"
+#include "xos/dirent.h"
 
 #define GETDENTS_BUF_SIZE 4096
 

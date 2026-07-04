@@ -1,6 +1,6 @@
 #include <sys/ipc.h>
 #include <errno.h>
-#include "common/syscall.h"
+#include "syscall.h"
 
 int notify(pid_t pid) {
     return sys_notify(pid);

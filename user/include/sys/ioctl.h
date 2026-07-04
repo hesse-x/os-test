@@ -11,7 +11,7 @@ typedef uint32_t ioctl_cmd_t;
 
 int ioctl(int fd, ioctl_cmd_t cmd, ...);
 
-#include "common/ioctl.h"
+#include "xos/ioctl.h"
 
 #ifdef __cplusplus
 }

@@ -10,10 +10,10 @@
 #include <sys/mman.h>
 #include <pthread.h>
 #include "sys/tls.h"
-#include "common/syscall.h"
-#include "common/mman.h"
-#include "common/signal.h"
-#include "common/thread.h"
+#include "syscall.h"
+#include "xos/mman.h"
+#include "xos/signal.h"
+#include "xos/thread.h"
 
 #ifndef FUTEX_WAIT
 #define FUTEX_WAIT 0

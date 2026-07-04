@@ -7,9 +7,9 @@
 #include "kernel/bsd/proc.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/mem/kasan.h"
-#include "common/errno.h"
-#include "common/signal.h"
-#include "common/socket.h"
+#include "xos/errno.h"
+#include "xos/signal.h"
+#include "xos/socket.h"
 #include <stddef.h>
 
 // ===================== Default termios =====================

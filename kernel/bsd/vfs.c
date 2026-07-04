@@ -17,8 +17,8 @@
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/trap.h"
-#include "common/errno.h"
-#include "common/stat.h"
+#include "xos/errno.h"
+#include "xos/stat.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/smp.h"
 #include <stddef.h>

@@ -6,7 +6,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include "test_helpers.h"
-#include "common/syscall.h"
+#include "syscall.h"
 
 void setUp(void) {}
 void tearDown(void) {}

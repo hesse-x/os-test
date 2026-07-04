@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <sys/types.h>
 #include <time.h>
-#include "common/signal.h"
+#include "xos/signal.h"
 
 #ifdef __cplusplus
 extern "C" {

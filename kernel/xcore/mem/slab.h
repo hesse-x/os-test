@@ -7,15 +7,15 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/mem/alloc.h"
+#include "xos/syscall.h"  // struct kernel_mem_stats (shared kernel/user layout)
 
 #define KMALLOC_SHIFT_LOW   3    // 最小 class = 8B
 #define KMALLOC_SHIFT_HIGH  11   // 最大 class = 2048B
 
 // ===================== Kernel memory accounting =====================
-// struct kernel_mem_stats is defined in common/syscall.h (shared kernel/user layout).
-// Kernel code accesses atomic fields via cast: (atomic_t*)&field, since atomic_t = { int counter }
-// and layout is identical to plain int.
-struct kernel_mem_stats;
+// struct kernel_mem_stats comes from xos/syscall.h (shared kernel/user
+// layout). Kernel code accesses atomic fields via cast: (atomic_t*)&field,
+// since atomic_t = { int counter } and layout is identical to plain int.
 extern struct kernel_mem_stats kernel_mem_stats;
 
 // Helpers for atomic access to kernel_mem_stats int fields (cast int* → atomic_t*)

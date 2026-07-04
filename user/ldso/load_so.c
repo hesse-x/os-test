@@ -6,9 +6,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "elf.h"
-#include "common/syscall_nums.h"
-#include "common/mman.h"
-#include "common/fcntl.h"
+#include "xos/syscall_nums.h"
+#include "xos/mman.h"
+#include "xos/fcntl.h"
 #include "sys/link_map.h"
 
 // bootstrap 阶段辅助（hidden）

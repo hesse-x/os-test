@@ -10,8 +10,8 @@
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <sys/device.h>
-#include "common/syscall.h"
-#include "common/errno.h"
+#include "syscall.h"
+#include "xos/errno.h"
 #include "driver/display.h"
 #include "input.h"
 

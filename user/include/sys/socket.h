@@ -10,13 +10,13 @@
 extern "C" {
 #endif
 
-// ===================== Constants (from common/socket.h) =====================
-#include "common/socket.h"
+// ===================== Constants (from xos/socket.h) =====================
+#include "xos/socket.h"
 
 // ===================== Syscall wrappers =====================
 // These directly invoke the kernel syscalls via the inline assembly wrappers.
 
-#include "common/syscall.h"
+#include "syscall.h"
 
 static inline int socket(int domain, int type, int protocol) {
     int64_t ret = __syscall3(SYS_SOCKET, (int64_t)domain, (int64_t)type, (int64_t)protocol);

@@ -7,9 +7,9 @@
 #include <sys/mman.h>
 #include "sys/tls.h"
 #include "pthread.h"
-#include "common/syscall.h"
-#include "common/mman.h"
-#include "common/signal.h"
+#include "syscall.h"
+#include "xos/mman.h"
+#include "xos/signal.h"
 
 // 全局 TLS 模板信息单例（pthread_create 读取）
 extern "C" {

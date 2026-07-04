@@ -2,7 +2,7 @@
 #include <sys/shm.h>
 #include <errno.h>
 #include <unistd.h>
-#include "common/syscall.h"
+#include "syscall.h"
 
 // POSIX-like mmap: (addr, length, prot, flags, fd, offset)
 // For MAP_SHARED (SHM): fd is the SHM fd or FD_DEV fd

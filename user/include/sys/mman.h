@@ -4,7 +4,7 @@
 #include <sys/types.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "common/mman.h"
+#include "xos/mman.h"
 
 #ifdef __cplusplus
 extern "C" {

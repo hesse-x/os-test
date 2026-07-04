@@ -14,9 +14,9 @@
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/spinlock.h"
-#include "common/fcntl.h"
-#include "common/types.h"           // pid_t
-#include "common/signal.h"          // NSIG, sigset_t, sigaction, siginfo_t
+#include "xos/fcntl.h"
+#include "xos/types.h"           // pid_t
+#include "xos/signal.h"          // NSIG, sigset_t, sigaction, siginfo_t
 #include "kernel/xcore/xtask.h"     // xtask_t
 #include "kernel/xcore/mm_types.h"  // mm_t, mmap_region_t, shm_t
 

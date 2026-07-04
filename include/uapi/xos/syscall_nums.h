@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "common/ioctl.h"
+#include "xos/ioctl.h"
 
 // ===================== Syscall numbers (NR_SYSCALL=69, 0-68 continuous) =====================
 #define SYS_GETPID       0

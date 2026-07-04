@@ -9,10 +9,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include "driver/font.h"
-#include "common/dev.h"
-#include "common/display.h"
+#include "xos/display.h"
 
-// ===== ioctl commands from <sys/ioctl.h> (common/ioctl.h) =====
+// ===== ioctl commands from <sys/ioctl.h> (xos/ioctl.h) =====
 
 // ===== Client API (compositor side) =====
 

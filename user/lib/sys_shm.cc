@@ -1,7 +1,7 @@
 #include <sys/shm.h>
 #include <sys/mman.h>
 #include <errno.h>
-#include "common/syscall.h"
+#include "syscall.h"
 
 /* shm_create, shm_attach, shm_attach_kernel removed.
  * Use memfd_create + ftruncate + mmap:

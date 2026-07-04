@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "common/macro.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,7 +61,7 @@ typedef struct cmsghdr {
     // followed by unsigned char cmsg_data[];
 } cmsghdr_t;
 
-#define CMSG_ALIGN(len)     ALIGN_UP(len, sizeof(size_t))
+#define CMSG_ALIGN(len)     (((len) + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1))
 #define CMSG_DATA(cmsg)     ((void *)(((char *)(cmsg)) + sizeof(struct cmsghdr)))
 #define CMSG_NXTHDR(msg, cmsg)                                          \
     (((char *)(cmsg) + CMSG_ALIGN((cmsg)->cmsg_len) >=                  \

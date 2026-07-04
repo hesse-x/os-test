@@ -6,10 +6,9 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
-#include "common/dev.h"
-#include "common/errno.h"
+#include "xos/errno.h"
 
-#include "common/syscall.h"
+#include "syscall.h"
 
 /* AHCI: (class << 8) | subclass = 0x0106 */
 #define PCI_CLASS_STORAGE_AHCI 0x0106

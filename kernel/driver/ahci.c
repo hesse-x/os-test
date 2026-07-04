@@ -9,7 +9,7 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "kernel/xcore/acpi.h"
-#include "common/errno.h"
+#include "xos/errno.h"
 
 // ===================== AHCI register offsets (from ABAR) =====================
 // Global HBA registers

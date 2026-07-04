@@ -4,9 +4,9 @@
 #include <sys/types.h>
 #include <stdint.h>
 
-// struct pci_dev_info_bar and struct pci_dev_info are defined in common/syscall.h
-// (included transitively through the kernel interface)
-#include "common/syscall.h"
+// struct pci_dev_info_bar and struct pci_dev_info are defined in
+// xos/syscall_nums.h (pulled in transitively via user/include/syscall.h).
+#include "syscall.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -6,7 +6,7 @@
 #include "kernel/xcore/xtask.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/atomic.h"
-#include "common/socket.h"
+#include "xos/socket.h"
 
 // ===================== sk_buff (socket buffer) =====================
 // One per sendmsg call. Flexible array member for data.

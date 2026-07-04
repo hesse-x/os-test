@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "input.h"
-#include "common/input.h"
+#include "xos/input.h"
 
 // Poll ring: drain all pending events. Pure drain, no sleeping flag management.
 int input_client_poll(volatile void *shm, input_event_t *events, int max_events) {

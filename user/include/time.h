@@ -2,7 +2,7 @@
 #define _TIME_H
 
 #include <stddef.h>
-#include "common/time.h"
+#include "xos/time.h"
 
 typedef long clock_t;
 

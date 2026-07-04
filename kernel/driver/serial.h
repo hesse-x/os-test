@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include "kernel/xcore/spinlock.h"
 #include "arch/x64/trap.h"  // trapframe_t
-#include "common/types.h"   // pid_t
+#include "xos/types.h"   // pid_t
 
 // ===================== 16550 UART register offsets from COM1 base =====================
 #define COM1      0x3F8

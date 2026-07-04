@@ -6,6 +6,9 @@
 #define PAGE_SIZE    (1 << PAGE_SHIFT)   // 4096
 #define PAGE_SIZE_2M 0x200000
 
+// Higher-half kernel/user boundary: user space lives below this, kernel above.
+#define KERNEL_VMA_BOUNDARY 0xFFFFFFFF80000000ULL
+
 // ld.so 固定基址（栈顶 0x7FFFFFFFE000 下方，固定高位，无 ASLR）
 #define LD_SO_BASE   0x7FFFFF000000ULL
 

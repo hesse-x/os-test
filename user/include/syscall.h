@@ -1,40 +1,41 @@
-#ifndef COMMON_SYSCALL_H
-#define COMMON_SYSCALL_H
+#ifndef USER_SYSCALL_H
+#define USER_SYSCALL_H
 
-#include "common/syscall_nums.h"
-#include "common/errno.h"
-#include "common/mman.h"
-#include "common/signal.h"
-#include "arch/x64/utils.h"
+/*
+ * User-space semantic syscall wrappers (sys_getpid, sys_recv, ...).
+ *
+ * These issue the raw syscall via the __syscallN inline-assembly wrappers from
+ * xos/syscall_asm.h and translate the unified return convention
+ * (>=0 success, -errno failure) into the libc-style (-1 + errno) convention.
+ *
+ * This is the userspace counterpart to the kernel's UAPI headers; it is NOT a
+ * standard POSIX header (glibc has no <syscall.h> at this path) and is meant
+ * for libc internals and programs that issue syscalls directly.
+ */
 
-// ===================== Unified syscall return convention =====================
-//   Success: return >= 0 (value meaning depends on syscall)
-//   Failure: return -errno (negative value)
-// All __syscallN return int64_t from kernel; wrappers cast as needed.
-
-// ===================== Kernel memory stats (shared with user space) =====================
-struct kernel_mem_stats {
-    int total_pages;       // atomic_t: physical total pages
-    int used_pages;        // atomic_t: pages allocated
-    int slab_used_bytes;   // atomic_t: slab bytes in use
-    size_t slab_peak_bytes; // slab peak usage
-    int kmalloc_calls;     // atomic_t: kmalloc call count
-    int kfree_calls;       // atomic_t: kfree call count
-};
-
-// ===================== Semantic wrappers (user-space only) =====================
-#ifndef __KERNEL__
+#include <stdint.h>
+#include <stddef.h>
+#include "xos/syscall.h"        // struct kernel_mem_stats (UAPI, shared layout)
+#include "xos/syscall_nums.h"
+#include "xos/syscall_asm.h"
+#include "xos/errno.h"
+#include "xos/mman.h"
+#include "xos/signal.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
 // errno 经 __errno_location() 返回 TLS 指针（user/include/errno.h 定义宏 errno）
 // syscall.h 被 libc 内部代码包含，此处声明 __errno_location 供 inline wrapper 写 errno
 int *__errno_location(void);
 #define errno (*__errno_location())
+
 #ifdef __cplusplus
 }
 #endif
+
+// ===================== Semantic wrappers (user-space only) =====================
 
 // --- pid/yield (always succeed) ---
 static inline int64_t sys_getpid() {
@@ -429,6 +430,4 @@ static inline int sys_pthread_set_cancel_handler(uint64_t handler) {
     return (int)r;
 }
 
-#endif // __KERNEL__
-
-#endif // COMMON_SYSCALL_H
+#endif // USER_SYSCALL_H

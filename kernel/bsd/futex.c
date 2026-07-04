@@ -10,8 +10,8 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "arch/x64/smp.h"
-#include "common/errno.h"
-#include "common/time.h"
+#include "xos/errno.h"
+#include "xos/time.h"
 
 struct futex_bucket futex_table[FUTEX_HASH_SIZE];
 

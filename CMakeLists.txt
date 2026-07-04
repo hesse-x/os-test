@@ -28,6 +28,9 @@ endif()
 
 # Include project root for #include "arch/x64/..." etc.
 include_directories(${CMAKE_SOURCE_DIR})
+# UAPI contract headers live in include/uapi/xos/ but are included as
+# #include "xos/xxx.h" (matching the published /usr/include/xos/ form).
+include_directories(${CMAKE_SOURCE_DIR}/include/uapi)
 
 # 编译规则封装
 include(build_script/cmake/kernel_rules.cmake)

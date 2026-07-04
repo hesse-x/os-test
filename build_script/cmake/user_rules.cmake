@@ -50,7 +50,7 @@ function(add_user_lib lib_name)
         endif()
         # FLAGS 可能是字符串（如 "-fno-pie -DDYNAMIC=0"），转 list
         separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
-        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include ${ARG_FLAGS_LIST})
+        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${ARG_FLAGS_LIST})
 
         set(OBJ_FILES "")
         set(idx 0)
@@ -126,7 +126,7 @@ function(add_user_elf elf_name)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra compile definitions (-D flags)
     if(ARG_DEFS)
@@ -212,7 +212,7 @@ function(add_user_ldso name)
     set(COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin
                       -fPIC -fno-stack-protector -mno-red-zone
                       -fvisibility=hidden
-                      -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include)
+                      -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include)
     set(OBJ_FILES "")
     set(idx 0)
     foreach(src ${ARG_SOURCES})
@@ -245,7 +245,7 @@ function(add_user_dyn_elf name)
     cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
     set(COMPILE_CMD ${CMAKE_C_COMPILER})
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra compile definitions (-D flags)
     if(ARG_DEFS)

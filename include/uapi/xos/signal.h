@@ -128,7 +128,7 @@ struct rt_sigframe {
 // (read-only, executable, no NX)
 #define SIG_TRAMPOLINE_ADDR  0x50000000ULL
 
-// SYS_SIGRETURN syscall number (from common/syscall.h, but needed by trampoline)
+// SYS_SIGRETURN syscall number (from xos/syscall.h, but needed by trampoline)
 // The trampoline code is:  mov rax, SYS_SIGRETURN; syscall
 // SYS_SIGRETURN = 45
 

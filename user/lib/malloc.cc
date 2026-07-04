@@ -1,8 +1,8 @@
 #include "stdlib.h"
 #include "string.h"
-#include "common/syscall.h"
+#include "syscall.h"
 #include <sys/mman.h>
-#include "common/errno.h"
+#include "xos/errno.h"
 #include "common/macro.h"
 #include "arch/x64/memlayout.h"
 #include <unistd.h>

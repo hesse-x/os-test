@@ -1,6 +1,6 @@
 #include <unistd.h>
 #include <errno.h>
-#include "common/syscall.h"
+#include "syscall.h"
 
 pid_t getpid(void) {
     return (pid_t)sys_getpid();

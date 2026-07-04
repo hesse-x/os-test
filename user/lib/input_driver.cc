@@ -13,10 +13,10 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include "input.h"
-#include "common/input.h"
-#include "common/shm.h"
-#include "common/syscall.h"
-#include "common/errno.h"
+#include "xos/input.h"
+#include "xos/shm.h"
+#include "syscall.h"
+#include "xos/errno.h"
 
 #define MAX_CONSUMERS 8
 

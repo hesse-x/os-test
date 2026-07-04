@@ -1,6 +1,6 @@
 #include "stdio.h"
 #include "string.h"
-#include "common/syscall.h"
+#include "syscall.h"
 #include "common/kvformat.h"
 #include <errno.h>
 #include <fcntl.h>

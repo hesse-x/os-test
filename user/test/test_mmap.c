@@ -5,7 +5,7 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include "test_helpers.h"
-#include "common/syscall.h"
+#include "syscall.h"
 
 void setUp(void) {}
 void tearDown(void) {}

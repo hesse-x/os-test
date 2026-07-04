@@ -3,7 +3,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/poll.h>
-#include "common/socket.h"
+#include "xos/socket.h"
 
 void setUp(void) {}
 void tearDown(void) {}

@@ -1,5 +1,5 @@
 #include <time.h>
-#include <common/syscall.h>
+#include <syscall.h>
 
 extern "C" {
 

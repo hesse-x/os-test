@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "kernel/xcore/sparse.h"
+#include "xos/syscall_nums.h"  // recv_msg_t / pci_dev_info / SYS_* (UAPI)
 
 // ===================== I/O port helpers =====================
 static inline void outb(uint16_t port, uint8_t val) {
@@ -216,84 +217,10 @@ static inline uint64_t rdtsc64() {
 //   RAX = syscall number, RDI/RSI/RDX/R10/R8/R9 = args
 //   RAX = return value
 //   RCX = saved RIP, R11 = saved RFLAGS (clobbered by SYSCALL)
-// Semantic wrappers are in common/syscall.h
-static inline int64_t __syscall0(int64_t num) {
-  int64_t ret;
-  __asm__ volatile(
-      "syscall"
-      : "=a"(ret)
-      : "a"(num)
-      : "rcx", "r11", "memory");
-  return ret;
-}
+// The __syscallN inline-assembly wrappers live in xos/syscall_asm.h
+// (UAPI, self-contained); semantic wrappers are in user/include/syscall.h.
+#include "xos/syscall_asm.h"
 
-static inline int64_t __syscall1(int64_t num, int64_t arg1) {
-  int64_t ret;
-  __asm__ volatile(
-      "syscall"
-      : "=a"(ret)
-      : "a"(num), "D"(arg1)
-      : "rcx", "r11", "memory");
-  return ret;
-}
-
-static inline int64_t __syscall2(int64_t num, int64_t arg1, int64_t arg2) {
-  int64_t ret;
-  __asm__ volatile(
-      "syscall"
-      : "=a"(ret)
-      : "a"(num), "D"(arg1), "S"(arg2)
-      : "rcx", "r11", "memory");
-  return ret;
-}
-
-static inline int64_t __syscall3(int64_t num, int64_t arg1, int64_t arg2, int64_t arg3) {
-  int64_t ret;
-  __asm__ volatile(
-      "syscall"
-      : "=a"(ret)
-      : "a"(num), "D"(arg1), "S"(arg2), "d"(arg3)
-      : "rcx", "r11", "memory");
-  return ret;
-}
-
-static inline int64_t __syscall4(int64_t num, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4) {
-  int64_t ret;
-  register int64_t a4 __asm__("r10") = arg4;
-  __asm__ volatile(
-      "syscall"
-      : "=a"(ret)
-      : "a"(num), "D"(arg1), "S"(arg2), "d"(arg3), "r"(a4)
-      : "rcx", "r11", "memory");
-  return ret;
-}
-
-static inline int64_t __syscall5(int64_t num, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5) {
-  int64_t ret;
-  register int64_t a4 __asm__("r10") = arg4;
-  register int64_t a5 __asm__("r8") = arg5;
-  __asm__ volatile(
-      "syscall"
-      : "=a"(ret)
-      : "a"(num), "D"(arg1), "S"(arg2), "d"(arg3), "r"(a4), "r"(a5)
-      : "rcx", "r11", "memory");
-  return ret;
-}
-
-static inline int64_t __syscall6(int64_t num, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6) {
-  int64_t ret;
-  register int64_t a4 __asm__("r10") = arg4;
-  register int64_t a5 __asm__("r8") = arg5;
-  register int64_t a6 __asm__("r9") = arg6;
-  __asm__ volatile(
-      "syscall"
-      : "=a"(ret)
-      : "a"(num), "D"(arg1), "S"(arg2), "d"(arg3), "r"(a4), "r"(a5), "r"(a6)
-      : "rcx", "r11", "memory");
-  return ret;
-}
-
-#include "common/syscall.h"
-#include "common/shm.h"
+#include "xos/shm.h"
 
 #endif // ARCH_X64_UTILS_H

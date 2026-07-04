@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "common/macro.h"  // KERNEL_VMA_BOUNDARY
+#include "arch/x64/memlayout.h"  // KERNEL_VMA_BOUNDARY
 
 // Validate that a user-space buffer [buf, buf+len) does not cross into kernel space.
 // Returns true if valid, false if invalid (NULL, overflow, or >= KERNEL_VMA_BOUNDARY).

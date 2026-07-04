@@ -1,7 +1,7 @@
 #ifndef USER_SIGNAL_H
 #define USER_SIGNAL_H
 
-#include "common/signal.h"
+#include "xos/signal.h"
 
 #ifdef __cplusplus
 extern "C" {

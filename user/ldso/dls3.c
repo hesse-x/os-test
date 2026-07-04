@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "elf.h"
-#include "common/syscall_nums.h"
+#include "xos/syscall_nums.h"
 
 // 链接器提供的 .dynamic 起始符号
 // 用 asm 取 RIP-relative 地址，避免走 GOT（bootstrap 前 GOT 未填）

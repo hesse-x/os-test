@@ -1,7 +1,7 @@
 // kernel/xcore/init.c — Xcore initialization sequence
 // Extracted from kernel/kernel.c (phase 5 step 5.1)
 
-#include "common/boot.h"
+#include "boot/boot.h"
 #include "common/macro.h"
 #include "kernel/kernel.h"
 #include "kernel/xcore/xtask.h"

@@ -8,7 +8,7 @@
 #include "stdlib.h"
 #include "sys/tls.h"
 #include <unistd.h>
-#include "common/syscall.h"
+#include "syscall.h"
 
 typedef void (*init_func_t)(void);
 extern "C" void __libc_run_init_array(init_func_t *start, init_func_t *end);

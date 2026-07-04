@@ -10,7 +10,7 @@
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/spinlock.h"
-#include "common/errno.h"
+#include "xos/errno.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/bsd/pty.h"
 #include "arch/x64/utils.h"
