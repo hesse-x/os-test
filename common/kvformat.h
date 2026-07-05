@@ -21,8 +21,8 @@ extern "C" {
  * Calls putc(c, arg) for each output character.
  * Returns total character count.
  */
-int kvformat(void (*putc)(char c, void *arg), void *arg,
-             const char *fmt, va_list ap);
+int kvformat(void (*putc)(char c, void *arg), void *arg, const char *fmt,
+             va_list ap);
 
 #ifdef __cplusplus
 }

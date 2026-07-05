@@ -14,10 +14,22 @@ extern "C" {
 #define RAND_MAX 32767
 
 /* div / ldiv / lldiv 结果类型 */
-typedef struct { int quot; int rem; } div_t;
-typedef struct { long quot; long rem; } ldiv_t;
-typedef struct { long long quot; long long rem; } lldiv_t;
-typedef struct { intmax_t quot; intmax_t rem; } imaxdiv_t;
+typedef struct {
+  int quot;
+  int rem;
+} div_t;
+typedef struct {
+  long quot;
+  long rem;
+} ldiv_t;
+typedef struct {
+  long long quot;
+  long long rem;
+} lldiv_t;
+typedef struct {
+  intmax_t quot;
+  intmax_t rem;
+} imaxdiv_t;
 
 LIBC_EXPORT void *malloc(size_t size);
 LIBC_EXPORT void free(void *ptr);
@@ -50,9 +62,9 @@ LIBC_EXPORT int rand(void);
 LIBC_EXPORT int rand_r(unsigned *seedp);
 LIBC_EXPORT void srand(unsigned seed);
 LIBC_EXPORT void qsort(void *base, size_t nmemb, size_t size,
-           int (*cmp)(const void *, const void *));
-LIBC_EXPORT void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
-              int (*cmp)(const void *, const void *));
+                       int (*cmp)(const void *, const void *));
+LIBC_EXPORT void *bsearch(const void *key, const void *base, size_t nmemb,
+                          size_t size, int (*cmp)(const void *, const void *));
 
 /* 环境变量（environ.c） */
 LIBC_EXPORT extern char **environ;

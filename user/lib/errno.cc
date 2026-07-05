@@ -17,9 +17,9 @@
 extern "C" {
 
 int *__errno_location(void) {
-    // __pthread_current_tcb() 内部为 movq %fs:0, rax；返回 TCB 指针
-    struct tcb *tcb = __pthread_current_tcb();
-    return &tcb->errno_val;
+  // __pthread_current_tcb() 内部为 movq %fs:0, rax；返回 TCB 指针
+  struct tcb *tcb = __pthread_current_tcb();
+  return &tcb->errno_val;
 }
 
-}  // extern "C"
+} // extern "C"

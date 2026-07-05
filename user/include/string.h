@@ -21,7 +21,8 @@ LIBC_EXPORT char *strpbrk(const char *s, const char *accept);
 LIBC_EXPORT size_t strspn(const char *s, const char *accept);
 LIBC_EXPORT size_t strcspn(const char *s, const char *reject);
 LIBC_EXPORT void *memchr(const void *s, int c, size_t n);
-LIBC_EXPORT void *memmem(const void *haystack, size_t haystacklen, const void *needle, size_t needlelen);
+LIBC_EXPORT void *memmem(const void *haystack, size_t haystacklen,
+                         const void *needle, size_t needlelen);
 LIBC_EXPORT int memcmp(const void *s1, const void *s2, size_t n);
 LIBC_EXPORT char *strstr(const char *haystack, const char *needle);
 LIBC_EXPORT char *strtok(char *str, const char *delim);

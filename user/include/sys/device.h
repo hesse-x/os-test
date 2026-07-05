@@ -1,8 +1,8 @@
 #ifndef _SYS_DEVICE_H
 #define _SYS_DEVICE_H
 
-#include <sys/types.h>
 #include <sys/cdefs.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {

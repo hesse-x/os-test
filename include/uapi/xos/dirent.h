@@ -17,10 +17,10 @@
  *     dirent64 records via sys_getdents and copies d_name into a dirent.
  */
 struct dirent64 {
-    uint64_t d_ino;
-    uint16_t d_reclen;
-    uint8_t  d_type;
-    char     d_name[];
+  uint64_t d_ino;
+  uint16_t d_reclen;
+  uint8_t d_type;
+  char d_name[];
 };
 
 #endif

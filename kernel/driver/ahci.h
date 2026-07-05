@@ -1,13 +1,13 @@
 #ifndef KERNEL_AHCI_H
 #define KERNEL_AHCI_H
 
-#include <stdbool.h>
-#include <stdint.h>
-#include "kernel/xcore/spinlock.h"
 #include "arch/x64/trap.h"
 #include "kernel/driver/driver.h"
+#include "kernel/xcore/spinlock.h"
+#include <stdbool.h>
+#include <stdint.h>
 
-#define AHCI_MAX_SECTORS 128  // 64KB bounce buffer / 512 bytes per sector
+#define AHCI_MAX_SECTORS 128 // 64KB bounce buffer / 512 bytes per sector
 
 void ahci_init();
 int ahci_read_lba(uint32_t lba, uint32_t count, void *buf);

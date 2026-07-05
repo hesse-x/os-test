@@ -1,12 +1,12 @@
 #ifndef _STDIO_H
 #define _STDIO_H
 
-#include <stdarg.h>
-#include <stdint.h>
-#include <stddef.h>
-#include <sys/types.h>
 #include <pthread.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <sys/cdefs.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,31 +14,31 @@ extern "C" {
 
 /* FILE structure */
 typedef struct _FILE {
-    int fd;              /* file descriptor (0=stdin, 1=stdout, 2=stderr) */
-    char *buf;           /* I/O buffer */
-    int buf_size;        /* buffer capacity */
-    int buf_pos;         /* current write position in buffer */
-    int buf_mode;        /* _IONBF / _IOLBF / _IOFBF */
-    int flags;           /* _F_WRITE / _F_READ / _F_EOF / _F_ERR */
-    void (*write_fn)(struct _FILE *, const char *, int len); /* output function */
-    int (*read_fn)(struct _FILE *, char *, int len);        /* input function */
-    off_t offset;        /* current file offset (for fseek/ftell) */
-    int ungot;           /* ungetc pushback (-1 if none) */
-    pthread_mutex_t lock; /* per-FILE lock for flockfile/funlockfile */
+  int fd;       /* file descriptor (0=stdin, 1=stdout, 2=stderr) */
+  char *buf;    /* I/O buffer */
+  int buf_size; /* buffer capacity */
+  int buf_pos;  /* current write position in buffer */
+  int buf_mode; /* _IONBF / _IOLBF / _IOFBF */
+  int flags;    /* _F_WRITE / _F_READ / _F_EOF / _F_ERR */
+  void (*write_fn)(struct _FILE *, const char *, int len); /* output function */
+  int (*read_fn)(struct _FILE *, char *, int len);         /* input function */
+  off_t offset;         /* current file offset (for fseek/ftell) */
+  int ungot;            /* ungetc pushback (-1 if none) */
+  pthread_mutex_t lock; /* per-FILE lock for flockfile/funlockfile */
 } FILE;
 
 /* Constants */
-#define EOF        (-1)
-#define _IONBF     0   /* no buffering */
-#define _IOLBF     1   /* line buffering */
-#define _IOFBF     2   /* full buffering */
+#define EOF (-1)
+#define _IONBF 0 /* no buffering */
+#define _IOLBF 1 /* line buffering */
+#define _IOFBF 2 /* full buffering */
 
-#define _F_WRITE   1
-#define _F_READ    2
-#define _F_EOF     4
-#define _F_ERR     8
+#define _F_WRITE 1
+#define _F_READ 2
+#define _F_EOF 4
+#define _F_ERR 8
 
-#define BUFSIZ     4096
+#define BUFSIZ 4096
 
 #define SEEK_SET 0
 #define SEEK_CUR 1
@@ -87,8 +87,10 @@ LIBC_EXPORT int ferror(FILE *f);
 LIBC_EXPORT void clearerr(FILE *f);
 LIBC_EXPORT size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f);
 LIBC_EXPORT size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f);
-LIBC_EXPORT size_t fread_unlocked(void *ptr, size_t size, size_t nmemb, FILE *f);
-LIBC_EXPORT size_t fwrite_unlocked(const void *ptr, size_t size, size_t nmemb, FILE *f);
+LIBC_EXPORT size_t fread_unlocked(void *ptr, size_t size, size_t nmemb,
+                                  FILE *f);
+LIBC_EXPORT size_t fwrite_unlocked(const void *ptr, size_t size, size_t nmemb,
+                                   FILE *f);
 LIBC_EXPORT int fseek(FILE *f, long offset, int whence);
 LIBC_EXPORT long ftell(FILE *f);
 LIBC_EXPORT void rewind(FILE *f);

@@ -14,20 +14,20 @@ extern dev_driver_t display_driver;
 extern dev_driver_t serial_driver;
 
 void driver_init(void) {
-    pci_init();
-    printk(LOG_INFO, "driver_init: pci_init done\n");
+  pci_init();
+  printk(LOG_INFO, "driver_init: pci_init done\n");
 
-    // Register all built-in drivers
-    driver_register(&ahci_driver);
-    driver_register(&xhci_driver);
-    driver_register(&display_driver);
-    driver_register(&serial_driver);
+  // Register all built-in drivers
+  driver_register(&ahci_driver);
+  driver_register(&xhci_driver);
+  driver_register(&display_driver);
+  driver_register(&serial_driver);
 
-    // PCI class/vendor auto-match: calls init() for matched drivers
-    driver_pci_match();
+  // PCI class/vendor auto-match: calls init() for matched drivers
+  driver_pci_match();
 
-    // Register xHCI timer poll hook (called periodically from timer IRQ handler)
-    timer_poll_hook = xhci_poll;
+  // Register xHCI timer poll hook (called periodically from timer IRQ handler)
+  timer_poll_hook = xhci_poll;
 
-    printk(LOG_INFO, "driver_init: done\n");
+  printk(LOG_INFO, "driver_init: done\n");
 }

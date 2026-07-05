@@ -13,7 +13,7 @@ LIBC_EXPORT void __assert_fail(const char *expr, const char *file, int line);
 }
 #endif
 
-#define assert(expr) \
-    ((void)((expr) || (__assert_fail(#expr, __FILE__, __LINE__), 0)))
+#define assert(expr)                                                           \
+  ((void)((expr) || (__assert_fail(#expr, __FILE__, __LINE__), 0)))
 
 #endif /* _ASSERT_H */

@@ -28,13 +28,13 @@ if [ ! -f "$CC_JSON" ]; then
     exit 1
 fi
 
-if ! command -v iwyu_tool &> /dev/null; then
-    echo "Error: iwyu_tool is not installed (should ship with include-what-you-use)."
-    exit 1
-fi
+# if ! command -v iwyu_tool &> /dev/null; then
+#     echo "Error: iwyu_tool is not installed (should ship with include-what-you-use)."
+#     exit 1
+# fi
 
 # ===================== 提取分析文件列表 =====================
-# 从 compile_commands.json 取所有 .c/.cc，排除 third_party/。
+# 从 compile_commands.json 取所有 .c/.cc，排除 third_party/ 和 build/。
 # compile_commands 的 "file" 字段是绝对路径（本仓库如此）。
 SOURCES=$(python3 - <<'PYEOF'
 import json, os, sys
@@ -45,6 +45,10 @@ for e in data:
     f = e['file']
     af = f if os.path.isabs(f) else os.path.join(e['directory'], f)
     if 'third_party' in af.split(os.sep):
+        continue
+    if 'build' in af.split(os.sep):
+        continue
+    if 'build' in af.split(os.sep):
         continue
     if not (af.endswith('.c') or af.endswith('.cc')):
         continue

@@ -1,10 +1,10 @@
 #ifndef ARCH_X64_UTILS_H
 #define ARCH_X64_UTILS_H
 
+#include "kernel/xcore/sparse.h"
 #include <stddef.h>
 #include <stdint.h>
-#include "kernel/xcore/sparse.h"
-#include <xos/syscall_nums.h>  // recv_msg_t / pci_dev_info / SYS_* (UAPI)
+#include <xos/syscall_nums.h> // recv_msg_t / pci_dev_info / SYS_* (UAPI)
 
 // ===================== I/O port helpers =====================
 static inline void outb(uint16_t port, uint8_t val) {
@@ -51,8 +51,8 @@ static inline uint64_t rdmsr(uint32_t msr) {
 }
 
 // ===================== Memory helpers =====================
-__attribute__((no_sanitize("kernel-address")))
-static inline void *__memcpy(void *dst, const void *src, size_t n) {
+__attribute__((no_sanitize("kernel-address"))) static inline void *
+__memcpy(void *dst, const void *src, size_t n) {
   size_t nq = n >> 3;
   uint64_t *dq = (uint64_t *)dst;
   const uint64_t *sq = (const uint64_t *)src;
@@ -66,12 +66,14 @@ static inline void *__memcpy(void *dst, const void *src, size_t n) {
   return dst;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-static inline void *__memset(void *dst, int val, size_t n) {
+__attribute__((no_sanitize("kernel-address"))) static inline void *
+__memset(void *dst, int val, size_t n) {
   size_t nq = n >> 3;
   uint64_t *dq = (uint64_t *)dst;
   uint64_t v8 = (uint8_t)val;
-  v8 |= v8 << 8; v8 |= v8 << 16; v8 |= v8 << 32;
+  v8 |= v8 << 8;
+  v8 |= v8 << 16;
+  v8 |= v8 << 32;
   while (nq--)
     *dq++ = v8;
   unsigned char *db = (unsigned char *)dq;
@@ -81,15 +83,18 @@ static inline void *__memset(void *dst, int val, size_t n) {
   return dst;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-static inline void *__memmove(void *dst, const void *src, size_t n) {
+__attribute__((no_sanitize("kernel-address"))) static inline void *
+__memmove(void *dst, const void *src, size_t n) {
   char *d = (char *)dst;
   const char *s = (const char *)src;
   if (d < s) {
-    while (n--) *d++ = *s++;
+    while (n--)
+      *d++ = *s++;
   } else {
-    d += n; s += n;
-    while (n--) *--d = *--s;
+    d += n;
+    s += n;
+    while (n--)
+      *--d = *--s;
   }
   return dst;
 }
@@ -102,17 +107,11 @@ static inline void serial_early_out(char c) { outb(0x3F8, c); }
 #endif
 
 // ===================== Interrupt control =====================
-static inline void cli() {
-  __asm__ volatile("cli");
-}
+static inline void cli() { __asm__ volatile("cli"); }
 
-static inline void sti() {
-  __asm__ volatile("sti");
-}
+static inline void sti() { __asm__ volatile("sti"); }
 
-static inline void halt() {
-  __asm__ volatile("cli; hlt");
-}
+static inline void halt() { __asm__ volatile("cli; hlt"); }
 
 // ===================== Interrupt state save/restore =====================
 static inline uint64_t local_irq_save() {
@@ -122,41 +121,42 @@ static inline uint64_t local_irq_save() {
 }
 
 static inline void local_irq_restore(uint64_t flags) {
-  __asm__ volatile("pushq %0; popfq" :: "r"(flags));
+  __asm__ volatile("pushq %0; popfq" ::"r"(flags));
 }
 
-// ===================== RAII interrupt guard (C cleanup macro) =====================
+// ===================== RAII interrupt guard (C cleanup macro)
+// =====================
 static inline void irq_guard_cleanup(uint64_t *flags) {
   local_irq_restore(*flags);
 }
 
-#define DEFINE_IRQGUARD(name) \
+#define DEFINE_IRQGUARD(name)                                                  \
   uint64_t name __attribute__((cleanup(irq_guard_cleanup))) = local_irq_save()
 
 // ===================== MMIO helpers =====================
-__attribute__((no_sanitize("kernel-address")))
-static inline uint16_t mmio_read16(const volatile void __iomem *addr) {
+__attribute__((no_sanitize("kernel-address"))) static inline uint16_t
+mmio_read16(const volatile void __iomem *addr) {
   return *(volatile const uint16_t __force *)addr;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-static inline void mmio_write16(volatile void __iomem *addr, uint16_t val) {
+__attribute__((no_sanitize("kernel-address"))) static inline void
+mmio_write16(volatile void __iomem *addr, uint16_t val) {
   *(volatile uint16_t __force *)addr = val;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-static inline uint32_t readl(const void __iomem *addr) {
+__attribute__((no_sanitize("kernel-address"))) static inline uint32_t
+readl(const void __iomem *addr) {
   return *(volatile const uint32_t __force *)addr;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-static inline void writel(void __iomem *addr, uint32_t val) {
+__attribute__((no_sanitize("kernel-address"))) static inline void
+writel(void __iomem *addr, uint32_t val) {
   *(volatile uint32_t __force *)addr = val;
 }
 
 // ===================== System register helpers =====================
 static inline void load_cr3(uint64_t addr) {
-  __asm__ volatile("movq %0, %%cr3" :: "r"(addr) : "memory");
+  __asm__ volatile("movq %0, %%cr3" ::"r"(addr) : "memory");
 }
 
 static inline uint64_t read_cr4() {
@@ -172,7 +172,7 @@ static inline uint64_t read_cr0() {
 }
 
 static inline void write_cr4(uint64_t val) {
-  __asm__ volatile("movq %0, %%cr4" :: "r"(val) : "memory");
+  __asm__ volatile("movq %0, %%cr4" ::"r"(val) : "memory");
 }
 
 static inline void lgdt(const void *ptr) {
@@ -183,12 +183,10 @@ static inline void lidt(const void *ptr) {
   __asm__ volatile("lidt %0" : : "m"(*((const uint64_t *)ptr)));
 }
 
-static inline void ltr(uint16_t sel) {
-  __asm__ volatile("ltr %w0" :: "r"(sel));
-}
+static inline void ltr(uint16_t sel) { __asm__ volatile("ltr %w0" ::"r"(sel)); }
 
 static inline void invlpg(uint64_t vaddr) {
-  __asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+  __asm__ volatile("invlpg (%0)" ::"r"(vaddr) : "memory");
 }
 
 static inline uint64_t read_cr2() {

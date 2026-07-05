@@ -1,10 +1,10 @@
 #ifndef _UNISTD_H
 #define _UNISTD_H
 
-#include <sys/types.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/cdefs.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,7 +19,7 @@ extern "C" {
 #define W_OK 2
 #define X_OK 1
 
-#define STDIN_FILENO  0
+#define STDIN_FILENO 0
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
 

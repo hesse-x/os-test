@@ -4,13 +4,13 @@
 typedef long time_t;
 
 struct timespec {
-    time_t tv_sec;
-    long   tv_nsec;
+  time_t tv_sec;
+  long tv_nsec;
 };
 
 struct timeval {
-    time_t tv_sec;
-    long   tv_usec;
+  time_t tv_sec;
+  long tv_usec;
 };
 
 #endif /* COMMON_TIME_H */

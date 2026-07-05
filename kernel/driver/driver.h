@@ -1,18 +1,18 @@
 #ifndef KERNEL_DRIVER_DRIVER_H
 #define KERNEL_DRIVER_DRIVER_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
-struct dev_ops;  // defined in kernel/bsd/devtmpfs.h
+struct dev_ops; // defined in kernel/bsd/devtmpfs.h
 
 typedef struct dev_driver {
-    const char *name;
-    uint32_t pci_class;     // (class_subclass << 8) | prog_if, 0 = no PCI matching
-    uint32_t pci_vendor;    // 0 = match by class only
-    uint32_t pci_device;    // 0 = match by class only
-    void (*init)(void);
-    struct dev_ops *ops;
+  const char *name;
+  uint32_t pci_class;  // (class_subclass << 8) | prog_if, 0 = no PCI matching
+  uint32_t pci_vendor; // 0 = match by class only
+  uint32_t pci_device; // 0 = match by class only
+  void (*init)(void);
+  struct dev_ops *ops;
 } dev_driver_t;
 
 void driver_register(const dev_driver_t *drv);

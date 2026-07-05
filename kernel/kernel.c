@@ -1,25 +1,27 @@
 // 64位 higher-half内核，-mcmodel=kernel编译
-// kernel_main: 虚拟地址运行，xcore_init + driver_init + bsd_init + idle + 从 boot_info 加载 init
+// kernel_main: 虚拟地址运行，xcore_init + driver_init + bsd_init + idle + 从
+// boot_info 加载 init
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
-#include "common/macro.h"
-#include "boot/boot.h"
-#include "kernel/kernel.h"
-#include "kernel/xcore/mem/alloc.h"
-#include "kernel/xcore/log.h"
-#include "kernel/driver/serial.h"
-#include "kernel/xcore/trap.h"
-#include "kernel/xcore/sched.h"
-#include "kernel/bsd/proc.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
+#include "boot/boot.h"
+#include "common/macro.h"
+#include "kernel/bsd/proc.h"
+#include "kernel/driver/serial.h"
+#include "kernel/kernel.h"
+#include "kernel/xcore/log.h"
+#include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
+#include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
 
-// VFS data structure init (must run before driver_init so devtmpfs_create works)
+// VFS data structure init (must run before driver_init so devtmpfs_create
+// works)
 void inode_init(void);
 void page_cache_init(void);
 void devtmpfs_init(void);
@@ -57,7 +59,8 @@ void kernel_main(boot_info *bi) {
     // for its own computation; xmm0 is only touched by this snippet.
     __asm__ volatile("movsd %1, %%xmm0\n"
                      "movsd %%xmm0, %0\n"
-                     : "=m"(dst) : "m"(src));
+                     : "=m"(dst)
+                     : "m"(src));
 
     if (dst != 3.14) {
       /* Kernel printk does not support %f (built with -mno-sse); the
@@ -83,8 +86,8 @@ void kernel_main(boot_info *bi) {
   // later in vfs_init().
   bool init_loaded = false;
   if (bi->init_elf_addr != 0 && bi->init_elf_size != 0) {
-    const uint8_t *init_elf =
-        (__force const uint8_t *)phys_to_virt((__force phys_addr_t)bi->init_elf_addr);
+    const uint8_t *init_elf = (__force const uint8_t *)phys_to_virt(
+        (__force phys_addr_t)bi->init_elf_addr);
     printk(LOG_INFO, "kernel_main: loading init (phys=0x%lx size=%lu)...\n",
            bi->init_elf_addr, (unsigned long)bi->init_elf_size);
     xtask_t *init_proc = process_create_elf(init_elf, bi->init_elf_size);
@@ -99,7 +102,8 @@ void kernel_main(boot_info *bi) {
     printk(LOG_ERROR, "kernel_main: no init.elf in boot_info\n");
   }
 
-  if (!init_loaded) printk(LOG_ERROR, "kernel_main: init FAILED to load\n");
+  if (!init_loaded)
+    printk(LOG_ERROR, "kernel_main: init FAILED to load\n");
 
   printk(LOG_INFO, "kernel_main: all tasks loaded, entering idle\n");
 
@@ -114,16 +118,14 @@ void kernel_main(boot_info *bi) {
   sti();
 
   uint64_t idle_rsp = bsp_idle->k_rsp;
-  __asm__ volatile(
-      "movq %0, %%rsp\n"
-      "popq %%rbx\n"
-      "popq %%rbp\n"
-      "popq %%r12\n"
-      "popq %%r13\n"
-      "popq %%r14\n"
-      "popq %%r15\n"
-      "retq\n"
-      :: "r"(idle_rsp)
-      : "memory");
+  __asm__ volatile("movq %0, %%rsp\n"
+                   "popq %%rbx\n"
+                   "popq %%rbp\n"
+                   "popq %%r12\n"
+                   "popq %%r13\n"
+                   "popq %%r14\n"
+                   "popq %%r15\n"
+                   "retq\n" ::"r"(idle_rsp)
+                   : "memory");
   // never reaches here
 }

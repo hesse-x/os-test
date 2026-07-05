@@ -4,10 +4,10 @@
 #include <stdio.h>
 
 int main(void) {
-    volatile unsigned long sum = 0;
-    for (unsigned long i = 0; i < 100000000UL; i++) {
-        sum += i * 7 + (i & 0xFF);
-    }
-    printf("cpu_burn done: sum=%lu\n", sum);
-    return 0;
+  volatile unsigned long sum = 0;
+  for (unsigned long i = 0; i < 100000000UL; i++) {
+    sum += i * 7 + (i & 0xFF);
+  }
+  printf("cpu_burn done: sum=%lu\n", sum);
+  return 0;
 }

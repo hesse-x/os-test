@@ -1,8 +1,8 @@
 #ifndef _DIRENT_H
 #define _DIRENT_H
 
-#include <sys/types.h>
 #include <sys/cdefs.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -11,13 +11,13 @@ extern "C" {
 #define NAME_MAX 255
 
 struct dirent {
-    ino_t d_ino;
-    char  d_name[NAME_MAX + 1];
+  ino_t d_ino;
+  char d_name[NAME_MAX + 1];
 };
 
 typedef struct {
-    int dd_fd;
-    // Internal state managed by libc
+  int dd_fd;
+  // Internal state managed by libc
 } DIR;
 
 LIBC_EXPORT DIR *opendir(const char *name);

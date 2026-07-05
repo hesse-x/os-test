@@ -1,23 +1,24 @@
-#include <stdbool.h>
-#include <stddef.h>
 #include "kernel/xcore/acpi.h"
 #include "arch/x64/paging.h"
-#include "kernel/xcore/log.h"
-#include "common/macro.h"
 #include "boot/boot.h"
+#include "common/macro.h"
+#include "kernel/xcore/log.h"
+#include <stdbool.h>
+#include <stddef.h>
 
 acpi_madt_result_t g_madt = {0, 0, 0, 0, {0}, 0, {{0}}};
 acpi_mcfg_result_t g_mcfg = {0, 0, 0, 0};
 
 // Internal XSDT state for acpi_find_table
 static uint64_t xsdt_virt = 0;
-static uint8_t  xsdt_entry_size = 8;
+static uint8_t xsdt_entry_size = 8;
 static uint32_t xsdt_entry_count = 0;
 
 static bool acpi_checksum(const void *tbl, size_t len) {
   const uint8_t *p = (const uint8_t *)tbl;
   uint8_t sum = 0;
-  for (size_t i = 0; i < len; i++) sum += p[i];
+  for (size_t i = 0; i < len; i++)
+    sum += p[i];
   return sum == 0;
 }
 
@@ -25,9 +26,10 @@ static bool sig4_match(const uint8_t *a, const char *b) {
   return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3];
 }
 
-__attribute__((no_sanitize("kernel-address")))
-void *acpi_find_table(const char signature[4]) {
-  if (xsdt_virt == 0) return NULL;
+__attribute__((no_sanitize("kernel-address"))) void *
+acpi_find_table(const char signature[4]) {
+  if (xsdt_virt == 0)
+    return NULL;
 
   for (uint32_t i = 0; i < xsdt_entry_count; i++) {
     uint64_t addr;
@@ -53,11 +55,11 @@ static void parse_madt(const acpi_madt_t *madt) {
   while (offset < madt->header.length) {
     const acpi_madt_entry_t *e =
         (const acpi_madt_entry_t *)((const uint8_t *)madt + offset);
-    if (e->length == 0) break;
+    if (e->length == 0)
+      break;
 
     if (e->type == 0 && g_madt.ncpus < 4) {
-      const acpi_madt_lapic_entry_t *lapic =
-          (const acpi_madt_lapic_entry_t *)e;
+      const acpi_madt_lapic_entry_t *lapic = (const acpi_madt_lapic_entry_t *)e;
       if (lapic->flags & 1) {
         g_madt.apic_ids[g_madt.ncpus] = lapic->apic_id;
         g_madt.ncpus++;
@@ -68,9 +70,8 @@ static void parse_madt(const acpi_madt_t *madt) {
       g_madt.ioapic_base = ioapic->ioapic_address;
       g_madt.ioapic_gsi_base = ioapic->gsi_base;
     } else if (e->type == 2 && g_madt.num_iso < MAX_ISO_OVERRIDES) {
-      const acpi_madt_iso_entry_t *iso =
-          (const acpi_madt_iso_entry_t *)e;
-      if (iso->bus == 0) {  // only ISA overrides
+      const acpi_madt_iso_entry_t *iso = (const acpi_madt_iso_entry_t *)e;
+      if (iso->bus == 0) { // only ISA overrides
         acpi_iso_override_t *o = &g_madt.iso[g_madt.num_iso];
         o->irq = iso->irq;
         o->gsi = iso->gsi;
@@ -105,8 +106,8 @@ static void parse_mcfg(const acpi_mcfg_t *mcfg) {
   g_mcfg.end_bus = entry->end_bus;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-void acpi_init(uint64_t rsdp_phys) {
+__attribute__((no_sanitize("kernel-address"))) void
+acpi_init(uint64_t rsdp_phys) {
   printk(LOG_INFO, "acpi_init: rsdp_phys=0x%016lX\n", rsdp_phys);
 
   // 1. Map RSDP (ACPI tables in RAM, already mapped by extend_mapping)
@@ -142,22 +143,26 @@ void acpi_init(uint64_t rsdp_phys) {
   }
   xsdt_virt = sdt_phys + VMA_BASE;
   const acpi_sdt_header_t *sdt_hdr = (const acpi_sdt_header_t *)xsdt_virt;
-  xsdt_entry_count = (sdt_hdr->length - sizeof(acpi_sdt_header_t)) / xsdt_entry_size;
+  xsdt_entry_count =
+      (sdt_hdr->length - sizeof(acpi_sdt_header_t)) / xsdt_entry_size;
 
-  printk(LOG_INFO, "acpi: SDT at 0x%016lX entries=%u\n", sdt_phys, xsdt_entry_count);
+  printk(LOG_INFO, "acpi: SDT at 0x%016lX entries=%u\n", sdt_phys,
+         xsdt_entry_count);
 
   // 5. Parse MADT
   void *madt_ptr = acpi_find_table("APIC");
   if (madt_ptr) {
     parse_madt((const struct acpi_madt *)madt_ptr);
-    printk(LOG_INFO, "acpi: MADT lapic=0x%016lX ioapic=0x%016lX gsi_base=0x%08X ncpus=%u iso=%u\n",
-                   g_madt.lapic_base, g_madt.ioapic_base, g_madt.ioapic_gsi_base,
-                   g_madt.ncpus, g_madt.num_iso);
+    printk(LOG_INFO,
+           "acpi: MADT lapic=0x%016lX ioapic=0x%016lX gsi_base=0x%08X ncpus=%u "
+           "iso=%u\n",
+           g_madt.lapic_base, g_madt.ioapic_base, g_madt.ioapic_gsi_base,
+           g_madt.ncpus, g_madt.num_iso);
     for (uint32_t i = 0; i < g_madt.num_iso; i++) {
       printk(LOG_INFO, "  ISO: irq=%u gsi=%u low=%d level=%d\n",
-                     g_madt.iso[i].irq, g_madt.iso[i].gsi,
-                     g_madt.iso[i].active_low ? 1 : 0,
-                     g_madt.iso[i].level_triggered ? 1 : 0);
+             g_madt.iso[i].irq, g_madt.iso[i].gsi,
+             g_madt.iso[i].active_low ? 1 : 0,
+             g_madt.iso[i].level_triggered ? 1 : 0);
     }
   } else {
     printk(LOG_WARN, "acpi: MADT not found\n");
@@ -168,7 +173,7 @@ void acpi_init(uint64_t rsdp_phys) {
   if (mcfg_ptr) {
     parse_mcfg((const struct acpi_mcfg *)mcfg_ptr);
     printk(LOG_INFO, "acpi: MCFG ecam_base=0x%016lX bus=%u-%u\n",
-                   g_mcfg.ecam_base, g_mcfg.start_bus, g_mcfg.end_bus);
+           g_mcfg.ecam_base, g_mcfg.start_bus, g_mcfg.end_bus);
   } else {
     printk(LOG_WARN, "acpi: MCFG not found\n");
   }

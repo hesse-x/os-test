@@ -1,29 +1,29 @@
 #ifndef KERNEL_ACPI_H
 #define KERNEL_ACPI_H
 
-#include <stdint.h>
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 // ===================== ACPI table structures =====================
 
 typedef struct acpi_rsdp {
-  uint8_t  signature[8];   // "RSD PTR "
-  uint8_t  checksum;
-  uint8_t  oem_id[6];
-  uint8_t  revision;
+  uint8_t signature[8]; // "RSD PTR "
+  uint8_t checksum;
+  uint8_t oem_id[6];
+  uint8_t revision;
   uint32_t rsdt_address;
-  uint32_t length;         // revision >= 2
-  uint64_t xsdt_address;   // revision >= 2
+  uint32_t length;       // revision >= 2
+  uint64_t xsdt_address; // revision >= 2
 } __attribute__((packed)) acpi_rsdp_t;
 
 typedef struct acpi_sdt_header {
-  uint8_t  signature[4];
+  uint8_t signature[4];
   uint32_t length;
-  uint8_t  revision;
-  uint8_t  checksum;
-  uint8_t  oem_id[6];
-  uint8_t  oem_table_id[8];
+  uint8_t revision;
+  uint8_t checksum;
+  uint8_t oem_id[6];
+  uint8_t oem_table_id[8];
   uint32_t oem_revision;
   uint32_t creator_id;
   uint32_t creator_revision;
@@ -41,38 +41,39 @@ typedef struct acpi_madt_entry {
 } __attribute__((packed)) acpi_madt_entry_t;
 
 typedef struct acpi_madt_lapic_entry {
-  uint8_t  type;       // 0
-  uint8_t  length;
-  uint8_t  processor_id;
-  uint8_t  apic_id;
+  uint8_t type; // 0
+  uint8_t length;
+  uint8_t processor_id;
+  uint8_t apic_id;
   uint32_t flags;
 } __attribute__((packed)) acpi_madt_lapic_entry_t;
 
 typedef struct acpi_madt_ioapic_entry {
-  uint8_t  type;       // 1
-  uint8_t  length;
-  uint8_t  ioapic_id;
-  uint8_t  reserved;
+  uint8_t type; // 1
+  uint8_t length;
+  uint8_t ioapic_id;
+  uint8_t reserved;
   uint32_t ioapic_address;
   uint32_t gsi_base;
 } __attribute__((packed)) acpi_madt_ioapic_entry_t;
 
 // MADT Interrupt Source Override entry (type 2)
 typedef struct acpi_madt_iso_entry {
-  uint8_t  type;       // 2
-  uint8_t  length;     // 10
-  uint8_t  bus;        // 0 = ISA
-  uint8_t  irq;        // ISA IRQ number
-  uint32_t gsi;        // Global System Interrupt
-  uint16_t flags;      // bit 0: polarity (0=high, 1=low), bit 1: trigger (0=edge, 1=level)
+  uint8_t type;   // 2
+  uint8_t length; // 10
+  uint8_t bus;    // 0 = ISA
+  uint8_t irq;    // ISA IRQ number
+  uint32_t gsi;   // Global System Interrupt
+  uint16_t flags; // bit 0: polarity (0=high, 1=low), bit 1: trigger (0=edge,
+                  // 1=level)
 } __attribute__((packed)) acpi_madt_iso_entry_t;
 
 // Parsed ISO override record
 typedef struct acpi_iso_override {
-  uint8_t  irq;        // ISA IRQ
-  uint32_t gsi;        // mapped GSI
-  bool     active_low; // polarity
-  bool     level_triggered;
+  uint8_t irq;     // ISA IRQ
+  uint32_t gsi;    // mapped GSI
+  bool active_low; // polarity
+  bool level_triggered;
 } acpi_iso_override_t;
 
 #define MAX_ISO_OVERRIDES 16
@@ -80,15 +81,15 @@ typedef struct acpi_iso_override {
 // MCFG table (PCI Firmware Spec 3.0)
 typedef struct acpi_mcfg {
   acpi_sdt_header_t header;
-  uint64_t reserved;    // 8 bytes reserved
+  uint64_t reserved; // 8 bytes reserved
   // entries[] follow
 } __attribute__((packed)) acpi_mcfg_t;
 
 typedef struct acpi_mcfg_entry {
-  uint64_t base_address;   // ECAM base physical address
+  uint64_t base_address; // ECAM base physical address
   uint16_t pci_segment;
-  uint8_t  start_bus;
-  uint8_t  end_bus;
+  uint8_t start_bus;
+  uint8_t end_bus;
   uint32_t reserved2;
 } __attribute__((packed)) acpi_mcfg_entry_t;
 
@@ -109,8 +110,8 @@ typedef struct acpi_madt_result {
 typedef struct acpi_mcfg_result {
   uint64_t ecam_base;
   uint16_t segment;
-  uint8_t  start_bus;
-  uint8_t  end_bus;
+  uint8_t start_bus;
+  uint8_t end_bus;
 } acpi_mcfg_result_t;
 
 extern acpi_madt_result_t g_madt;

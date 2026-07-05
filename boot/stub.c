@@ -1,10 +1,10 @@
 // boot/stub.c - 独立 EFI bootloader
 // 从 FAT32 读取 myos.elf，加载到物理地址，设置 boot_info，跳转内核
+#include "boot/boot.h"
 #include <efi.h>
 #include <efilib.h>
-#include <xos/elf.h>
 #include <stdint.h>
-#include "boot/boot.h"
+#include <xos/elf.h>
 
 // EFI 内存映射缓冲区
 #define MMAP_BUF_SIZE (4096 * 4)
@@ -35,12 +35,15 @@ static EFI_STATUS load_elf(EFI_FILE_PROTOCOL *file, UINT64 *entry_addr) {
     Elf64_Phdr phdr;
     UINTN pos = ehdr.e_phoff + i * ehdr.e_phentsize;
     st = uefi_call_wrapper(file->SetPosition, 2, file, pos);
-    if (EFI_ERROR(st)) return st;
+    if (EFI_ERROR(st))
+      return st;
     size = sizeof(phdr);
     st = uefi_call_wrapper(file->Read, 3, file, &size, &phdr);
-    if (EFI_ERROR(st)) return st;
+    if (EFI_ERROR(st))
+      return st;
 
-    if (phdr.p_type != PT_LOAD) continue;
+    if (phdr.p_type != PT_LOAD)
+      continue;
 
     UINT64 load_addr = KERNEL_LOAD_ADDR + (phdr.p_vaddr - KERNEL_VMA_BASE);
     if (phdr.p_paddr != 0) {
@@ -48,13 +51,16 @@ static EFI_STATUS load_elf(EFI_FILE_PROTOCOL *file, UINT64 *entry_addr) {
     }
 
     st = uefi_call_wrapper(file->SetPosition, 2, file, phdr.p_offset);
-    if (EFI_ERROR(st)) return st;
+    if (EFI_ERROR(st))
+      return st;
     size = phdr.p_filesz;
     st = uefi_call_wrapper(file->Read, 3, file, &size, (void *)load_addr);
-    if (EFI_ERROR(st)) return st;
+    if (EFI_ERROR(st))
+      return st;
 
     if (phdr.p_memsz > phdr.p_filesz) {
-      SetMem((void *)(load_addr + phdr.p_filesz), phdr.p_memsz - phdr.p_filesz, 0);
+      SetMem((void *)(load_addr + phdr.p_filesz), phdr.p_memsz - phdr.p_filesz,
+             0);
     }
 
     Print(L"  seg %d: paddr=0x%lx size=0x%lx\n", i, load_addr, phdr.p_memsz);
@@ -71,22 +77,26 @@ static EFI_STATUS load_file_to_mem(EFI_FILE_PROTOCOL *file,
                                    EFI_PHYSICAL_ADDRESS *out_phys,
                                    UINT64 *out_size) {
   // 先取文件大小
-  EFI_STATUS st = uefi_call_wrapper(file->SetPosition, 2, file, 0xFFFFFFFFFFFFFFFFULL);
-  if (EFI_ERROR(st)) return st;
+  EFI_STATUS st =
+      uefi_call_wrapper(file->SetPosition, 2, file, 0xFFFFFFFFFFFFFFFFULL);
+  if (EFI_ERROR(st))
+    return st;
   UINT64 file_size = 0;
   st = uefi_call_wrapper(file->GetPosition, 2, file, &file_size);
-  if (EFI_ERROR(st)) return st;
+  if (EFI_ERROR(st))
+    return st;
   // 回到文件头
   st = uefi_call_wrapper(file->SetPosition, 2, file, 0);
-  if (EFI_ERROR(st)) return st;
+  if (EFI_ERROR(st))
+    return st;
 
   // 分配页面对齐的物理内存（向上取整到 4KB 页）
   // EfiLoaderData: 归 loader 拥有，ExitBootServices 后固件不回收，
   // 内核页表映射后可直接访问（Linux initrd 同款做法）。
   UINTN npages = (UINTN)((file_size + 4095) / 4096);
   EFI_PHYSICAL_ADDRESS phys = 0;
-  st = uefi_call_wrapper(BS->AllocatePages, 4,
-      AllocateAnyPages, EfiLoaderData, npages, &phys);
+  st = uefi_call_wrapper(BS->AllocatePages, 4, AllocateAnyPages, EfiLoaderData,
+                         npages, &phys);
   if (EFI_ERROR(st)) {
     Print(L"stub: AllocatePages failed (%r)\n", st);
     return st;
@@ -96,8 +106,8 @@ static EFI_STATUS load_file_to_mem(EFI_FILE_PROTOCOL *file,
   UINTN want = (UINTN)file_size;
   st = uefi_call_wrapper(file->Read, 3, file, &want, (void *)phys);
   if (EFI_ERROR(st) || want != (UINTN)file_size) {
-    Print(L"stub: read file failed (st=%r want=%lx size=%lx)\n",
-          st, (UINT64)want, file_size);
+    Print(L"stub: read file failed (st=%r want=%lx size=%lx)\n", st,
+          (UINT64)want, file_size);
     uefi_call_wrapper(BS->FreePages, 2, phys, npages);
     return EFI_DEVICE_ERROR;
   }
@@ -111,19 +121,19 @@ static EFI_STATUS load_file_to_mem(EFI_FILE_PROTOCOL *file,
 // 从 BOOTX64.EFI 所在的卷（disk.img 的 ESP 分区）打开文件。
 // 用 LoadedImage 定位装载 BOOTX64.EFI 的设备 handle，保证拿到 ESP
 // 而非根分区或其他磁盘的 FAT32。
-static EFI_STATUS open_file(EFI_HANDLE ImageHandle,
-                            EFI_FILE_PROTOCOL **file, CHAR16 *name) {
+static EFI_STATUS open_file(EFI_HANDLE ImageHandle, EFI_FILE_PROTOCOL **file,
+                            CHAR16 *name) {
   EFI_LOADED_IMAGE *li;
-  EFI_STATUS st = uefi_call_wrapper(BS->HandleProtocol, 3,
-      ImageHandle, &gEfiLoadedImageProtocolGuid, (void **)&li);
+  EFI_STATUS st = uefi_call_wrapper(BS->HandleProtocol, 3, ImageHandle,
+                                    &gEfiLoadedImageProtocolGuid, (void **)&li);
   if (EFI_ERROR(st)) {
     Print(L"stub: locate LoadedImage failed\n");
     return st;
   }
 
   EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
-  st = uefi_call_wrapper(BS->HandleProtocol, 3,
-      li->DeviceHandle, &gEfiSimpleFileSystemProtocolGuid, (void **)&fs);
+  st = uefi_call_wrapper(BS->HandleProtocol, 3, li->DeviceHandle,
+                         &gEfiSimpleFileSystemProtocolGuid, (void **)&fs);
   if (EFI_ERROR(st)) {
     Print(L"stub: locate filesystem failed\n");
     return st;
@@ -136,8 +146,8 @@ static EFI_STATUS open_file(EFI_HANDLE ImageHandle,
     return st;
   }
 
-  st = uefi_call_wrapper(root->Open, 5, root, file, name,
-                         EFI_FILE_MODE_READ, 0);
+  st =
+      uefi_call_wrapper(root->Open, 5, root, file, name, EFI_FILE_MODE_READ, 0);
   if (EFI_ERROR(st)) {
     Print(L"stub: open %s failed\n", name);
   }
@@ -152,7 +162,10 @@ static void read_rsdp(EFI_SYSTEM_TABLE *SystemTable) {
     UINT8 *b = (UINT8 *)&acpi_guid;
     int match = 1;
     for (int j = 0; j < 16; j++) {
-      if (a[j] != b[j]) { match = 0; break; }
+      if (a[j] != b[j]) {
+        match = 0;
+        break;
+      }
     }
     if (match) {
       bi.rsdp = (UINT64)SystemTable->ConfigurationTable[i].VendorTable;
@@ -167,8 +180,9 @@ EFI_STATUS exit_bs(EFI_SYSTEM_TABLE *SystemTable, EFI_HANDLE ImageHandle) {
   UINT32 desc_ver;
 
   mmap_size = sizeof(mmap_buf);
-  EFI_STATUS st = uefi_call_wrapper(SystemTable->BootServices->GetMemoryMap, 5,
-      &mmap_size, (void *)mmap_buf, &map_key, &desc_size, &desc_ver);
+  EFI_STATUS st =
+      uefi_call_wrapper(SystemTable->BootServices->GetMemoryMap, 5, &mmap_size,
+                        (void *)mmap_buf, &map_key, &desc_size, &desc_ver);
   if (EFI_ERROR(st)) {
     Print(L"stub: GetMemoryMap failed\n");
     return st;
@@ -193,7 +207,8 @@ __attribute__((noreturn)) static void jump_to_kernel(UINT64 entry_vaddr) {
   typedef void (*kernel_entry_t)(struct boot_info *);
   kernel_entry_t entry = (kernel_entry_t)entry_phys;
   entry(&bi);
-  while (1) __asm__ volatile("hlt");
+  while (1)
+    __asm__ volatile("hlt");
 }
 
 // ===================== efi_main =====================
@@ -213,14 +228,16 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   EFI_STATUS st = open_file(ImageHandle, &kernel_file, L"myos.elf");
   if (EFI_ERROR(st)) {
     Print(L"stub: cannot open myos.elf, halting\n");
-    while (1) __asm__ volatile("hlt");
+    while (1)
+      __asm__ volatile("hlt");
   }
 
   UINT64 entry_vaddr = 0;
   st = load_elf(kernel_file, &entry_vaddr);
   if (EFI_ERROR(st)) {
     Print(L"stub: load ELF failed, halting\n");
-    while (1) __asm__ volatile("hlt");
+    while (1)
+      __asm__ volatile("hlt");
   }
   Print(L"stub: ELF loaded, entry=0x%lx\n", entry_vaddr);
 
@@ -231,23 +248,26 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   st = open_file(ImageHandle, &init_file, L"init.elf");
   if (EFI_ERROR(st)) {
     Print(L"stub: cannot open init.elf, halting\n");
-    while (1) __asm__ volatile("hlt");
+    while (1)
+      __asm__ volatile("hlt");
   }
   EFI_PHYSICAL_ADDRESS init_phys = 0;
   UINT64 init_size = 0;
   st = load_file_to_mem(init_file, &init_phys, &init_size);
   if (EFI_ERROR(st)) {
     Print(L"stub: load init.elf failed, halting\n");
-    while (1) __asm__ volatile("hlt");
+    while (1)
+      __asm__ volatile("hlt");
   }
   bi.init_elf_addr = (uint64_t)init_phys;
   bi.init_elf_size = init_size;
-  Print(L"stub: init.elf loaded, phys=0x%lx size=%lu\n",
-        (UINT64)init_phys, init_size);
+  Print(L"stub: init.elf loaded, phys=0x%lx size=%lu\n", (UINT64)init_phys,
+        init_size);
 
   st = exit_bs(SystemTable, ImageHandle);
   if (EFI_ERROR(st)) {
-    while (1) __asm__ volatile("hlt");
+    while (1)
+      __asm__ volatile("hlt");
   }
 
   jump_to_kernel(entry_vaddr);

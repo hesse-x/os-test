@@ -15,14 +15,15 @@
 // live in user/include/syscall.h. Keeping these separate lets this header stay
 // self-contained (no dependency on kernel-internal arch/x64/utils.h).
 
-// ===================== Kernel memory stats (shared with user space) =====================
+// ===================== Kernel memory stats (shared with user space)
+// =====================
 struct kernel_mem_stats {
-    int total_pages;       // atomic_t: physical total pages
-    int used_pages;        // atomic_t: pages allocated
-    int slab_used_bytes;   // atomic_t: slab bytes in use
-    size_t slab_peak_bytes; // slab peak usage
-    int kmalloc_calls;     // atomic_t: kmalloc call count
-    int kfree_calls;       // atomic_t: kfree call count
+  int total_pages;        // atomic_t: physical total pages
+  int used_pages;         // atomic_t: pages allocated
+  int slab_used_bytes;    // atomic_t: slab bytes in use
+  size_t slab_peak_bytes; // slab peak usage
+  int kmalloc_calls;      // atomic_t: kmalloc call count
+  int kfree_calls;        // atomic_t: kfree call count
 };
 
 #endif // COMMON_SYSCALL_H

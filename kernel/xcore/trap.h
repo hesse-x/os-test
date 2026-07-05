@@ -3,12 +3,13 @@
 
 #include "arch/x64/trap.h"
 #include "kernel/xcore/xtask.h"
-#include <xos/syscall_nums.h>
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <xos/syscall_nums.h>
 
-// Hook registration points: BSD layer registers during init, Xcore calls at trap_dispatch end
+// Hook registration points: BSD layer registers during init, Xcore calls at
+// trap_dispatch end
 typedef void (*signal_check_fn)(xtask_t *t, trapframe_t *tf);
 extern signal_check_fn signal_check_hook;
 
@@ -68,7 +69,8 @@ int64_t sys_gettid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 // IRQ registration
 #define MAX_IRQ_HANDLERS 256
 typedef void (*irq_handler_t)(trapframe_t *);
-typedef int64_t (*syscall_fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+typedef int64_t (*syscall_fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t,
+                                int64_t);
 void register_irq(int vec, irq_handler_t fn);
 void unregister_irq(int vec);
 int irq_owner_check(int irq);

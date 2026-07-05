@@ -9,14 +9,16 @@ typedef void (*init_func_t)(void);
 
 // 跑 .init_array（C++ 全局构造器等）
 void __libc_run_init_array(init_func_t *start, init_func_t *end) {
-    for (init_func_t *f = start; f < end; f++) {
-        if (*f) (*f)();
-    }
+  for (init_func_t *f = start; f < end; f++) {
+    if (*f)
+      (*f)();
+  }
 }
 
 // 跑 .fini_array（exit 时逆序）
 void __libc_run_fini_array(init_func_t *start, init_func_t *end) {
-    for (init_func_t *f = end - 1; f >= start; f--) {
-        if (*f) (*f)();
-    }
+  for (init_func_t *f = end - 1; f >= start; f--) {
+    if (*f)
+      (*f)();
+  }
 }

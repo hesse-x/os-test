@@ -1,7 +1,7 @@
 #include "arch/x64/paging.h"
+#include "arch/x64/memlayout.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
-#include "arch/x64/memlayout.h"
 #include "common/macro.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
@@ -41,36 +41,36 @@ void reload_cs(void);
 // 临时 TSS，仅供物理地址阶段使用
 static tss_t boot_tss;
 
-const uint8_t stack_bottom[8192]
-    __attribute__((aligned(16))) = {0};
+const uint8_t stack_bottom[8192] __attribute__((aligned(16))) = {0};
 
 __attribute__((no_sanitize("kernel-address"))) void gdt_init() {
   // 物理地址阶段：使用静态 GDT（RIP-relative 自动给出物理地址）
   set_gdt_gate(0, 0, 0, 0, 0);
-  set_gdt_gate(1, 0, 0, 0x9A, 0x02);    // kernel code64 (L=1)
-  set_gdt_gate(2, 0, 0, 0x92, 0x00);    // kernel data
-  set_gdt_gate(3, 0, 0, 0xFA, 0x00);    // user code32 compat (DPL=3, STAR[63:48] base)
-  set_gdt_gate(4, 0, 0, 0xF2, 0x00);    // user data (DPL=3)
-  set_gdt_gate(5, 0, 0, 0xFA, 0x02);    // user code64 (DPL=3, L=1)
+  set_gdt_gate(1, 0, 0, 0x9A, 0x02); // kernel code64 (L=1)
+  set_gdt_gate(2, 0, 0, 0x92, 0x00); // kernel data
+  set_gdt_gate(3, 0, 0, 0xFA,
+               0x00); // user code32 compat (DPL=3, STAR[63:48] base)
+  set_gdt_gate(4, 0, 0, 0xF2, 0x00); // user data (DPL=3)
+  set_gdt_gate(5, 0, 0, 0xFA, 0x02); // user code64 (DPL=3, L=1)
   set_tss_gate(6, (uint64_t)&boot_tss, sizeof(tss_t) - 1);
 
   gdt_reg.base = (uint64_t)&gdt;
   gdt_reg.limit = sizeof(gdt) - 1;
   lgdt(&gdt_reg);
-  __asm__ volatile(
-      "movw $0x10, %%ax\n"
-      "movw %%ax, %%ds\n"
-      "movw %%ax, %%es\n"
-      "movw %%ax, %%fs\n"
-      "movw %%ax, %%gs\n"
-      "movw %%ax, %%ss\n" ::: "ax");
+  __asm__ volatile("movw $0x10, %%ax\n"
+                   "movw %%ax, %%ds\n"
+                   "movw %%ax, %%es\n"
+                   "movw %%ax, %%fs\n"
+                   "movw %%ax, %%gs\n"
+                   "movw %%ax, %%ss\n" ::
+                       : "ax");
   reload_cs();
 
   boot_tss.rsp0 = (uint64_t)&stack_bottom + 8192;
   boot_tss.iomap_base = 104;
   // Initialize IOPM to deny all ports
   for (int i = 0; i < IOPM_SIZE; i++)
-      boot_tss.iopm[i] = 0xFF;
+    boot_tss.iopm[i] = 0xFF;
   ltr(TSS_SEL);
 }
 
@@ -86,30 +86,35 @@ __attribute__((aligned(4096))) uint64_t page_dir[512];
 // 注意：此时 higher-half 不可访问，必须通过物理地址指针操作页表
 // CR3 加载后 identity map + higher-half 生效，才能访问 VMA
 // 返回: rax = &gdtr(栈/物理地址), rdx = &far_ptr(栈/物理地址)
-__attribute__((noinline, no_sanitize("kernel-address"))) void enable_paging(boot_info *bi_phys) {
+__attribute__((noinline, no_sanitize("kernel-address"))) void
+enable_paging(boot_info *bi_phys) {
   (void)bi_phys;
 
   // === 构建页表 (2MB huge pages) ===
   // 物理地址运行时 RIP-relative 直接给出物理地址
-  uint64_t *pml4_p   = pml4;
+  uint64_t *pml4_p = pml4;
   uint64_t *pdpt_i_p = pdpt_ident;
   uint64_t *pdpt_h_p = pdpt_hh;
-  uint64_t *pd_p     = page_dir;
+  uint64_t *pd_p = page_dir;
 
-  uint64_t pml4_phys   = (uint64_t)pml4_p;
+  uint64_t pml4_phys = (uint64_t)pml4_p;
   uint64_t pdpt_i_phys = (uint64_t)pdpt_i_p;
   uint64_t pdpt_h_phys = (uint64_t)pdpt_h_p;
-  uint64_t pd_phys     = (uint64_t)pd_p;
+  uint64_t pd_phys = (uint64_t)pd_p;
 
   // 清零（手动循环，不用 __builtin_memset）
-  for (int i = 0; i < 512; i++) pml4_p[i] = 0;
-  for (int i = 0; i < 512; i++) pdpt_i_p[i] = 0;
-  for (int i = 0; i < 512; i++) pdpt_h_p[i] = 0;
-  for (int i = 0; i < 512; i++) pd_p[i] = 0;
+  for (int i = 0; i < 512; i++)
+    pml4_p[i] = 0;
+  for (int i = 0; i < 512; i++)
+    pdpt_i_p[i] = 0;
+  for (int i = 0; i < 512; i++)
+    pdpt_h_p[i] = 0;
+  for (int i = 0; i < 512; i++)
+    pd_p[i] = 0;
 
-  pml4_p[0]     = pdpt_i_phys | PTE_PRESENT | PTE_RW;
-  pml4_p[511]   = pdpt_h_phys | PTE_PRESENT | PTE_RW;
-  pdpt_i_p[0]   = pd_phys | PTE_PRESENT | PTE_RW;
+  pml4_p[0] = pdpt_i_phys | PTE_PRESENT | PTE_RW;
+  pml4_p[511] = pdpt_h_phys | PTE_PRESENT | PTE_RW;
+  pdpt_i_p[0] = pd_phys | PTE_PRESENT | PTE_RW;
   pdpt_h_p[510] = pd_phys | PTE_PRESENT | PTE_RW;
 
   for (int i = 0; i < 512; i++) {
@@ -131,7 +136,8 @@ uintptr_t device_vma_base = 0;
 static uintptr_t bump_next_phys;
 static bool bump_disabled = false;
 
-__attribute__((no_sanitize("kernel-address"))) void bump_init_phys(uintptr_t start) {
+__attribute__((no_sanitize("kernel-address"))) void
+bump_init_phys(uintptr_t start) {
   bump_next_phys = ALIGN_UP(start, PAGE_SIZE);
 }
 
@@ -144,7 +150,9 @@ __attribute__((no_sanitize("kernel-address"))) void *bump_alloc(size_t size) {
   return (void *)(phys + VMA_BASE);
 }
 
-__attribute__((no_sanitize("kernel-address"))) void bump_disable() { bump_disabled = true; }
+__attribute__((no_sanitize("kernel-address"))) void bump_disable() {
+  bump_disabled = true;
+}
 
 // ===================== extend_mapping =====================
 // 扩展 higher-half 映射：为超出初始 1GB 的物理 RAM 分配 PDPT+PD
@@ -154,7 +162,8 @@ __attribute__((no_sanitize("kernel-address"))) void bump_disable() { bump_disabl
 //   所以 higher-half 从 PDPT_hh[510] 开始
 //   后续 1GB 块使用 PDPT_hh[511], PDPT_hh[512-overflow]...
 //   注意: PDPT_hh[511] 已被 PML4 自映射占用时需要换 PDPT
-__attribute__((no_sanitize("kernel-address"))) void extend_mapping(uint64_t max_phys_addr) {
+__attribute__((no_sanitize("kernel-address"))) void
+extend_mapping(uint64_t max_phys_addr) {
   // 计算需要多少个 1GB 块
   size_t max_1gb_block = (size_t)(max_phys_addr / 0x40000000);
 
@@ -175,7 +184,8 @@ __attribute__((no_sanitize("kernel-address"))) void extend_mapping(uint64_t max_
     // 填充 PD: 512个 2MB huge pages 映射物理 n*1GB 到 (n+1)*1GB
     uint64_t phys_base = (uint64_t)n * 0x40000000;
     for (int i = 0; i < 512; i++) {
-      pd[i] = (phys_base + (uint64_t)i * PAGE_SIZE_2M) | PTE_PRESENT | PTE_RW | PTE_PS;
+      pd[i] = (phys_base + (uint64_t)i * PAGE_SIZE_2M) | PTE_PRESENT | PTE_RW |
+              PTE_PS;
     }
 
     // identity map: PDPT_ident[n] = PD
@@ -190,7 +200,8 @@ __attribute__((no_sanitize("kernel-address"))) void extend_mapping(uint64_t max_
       if (!pdpt_extra) {
         // 分配扩展 PDPT 页
         pdpt_extra = (uint64_t *)bump_alloc(4096);
-        uintptr_t pdpt_phys = (__force uintptr_t)PHY_ADDR((uintptr_t)pdpt_extra);
+        uintptr_t pdpt_phys =
+            (__force uintptr_t)PHY_ADDR((uintptr_t)pdpt_extra);
         for (int i = 0; i < 512; i++)
           pdpt_extra[i] = 0;
         // PML4[510] 映射虚拟地址 0xFFFFFFFF00000000 起
@@ -202,14 +213,11 @@ __attribute__((no_sanitize("kernel-address"))) void extend_mapping(uint64_t max_
   }
 
   // 设备映射区
-  device_vma_base =
-      ALIGN_UP(VMA_BASE + (uintptr_t)max_phys_addr, 0x40000000);
+  device_vma_base = ALIGN_UP(VMA_BASE + (uintptr_t)max_phys_addr, 0x40000000);
 }
 
 // ===================== flush_tlb =====================
-void flush_tlb() {
-  load_cr3((__force uint64_t)PHY_ADDR((uintptr_t)pml4));
-}
+void flush_tlb() { load_cr3((__force uint64_t)PHY_ADDR((uintptr_t)pml4)); }
 
 // ===================== bump allocator query =====================
 __attribute__((no_sanitize("kernel-address"))) uintptr_t bump_end_phys() {
@@ -242,37 +250,39 @@ __attribute__((no_sanitize("kernel-address"))) void enable_sse() {
 }
 
 // ===================== per-CPU capability logging =====================
-// 打印 CR0/CR4/EFER 摘要 + 关键 bit 解读（TS/PE/MP/EM、OSFXSR/OSXMMEXCPT/NXDE、NXE/SCE）。
-// 在 BSP（isr_init）和 AP（cpu_bringup_common）的 bringup 末尾各调一次。
-// 出 "必备 bit 缺失" 类 bug 时（如本次 AP 缺 CR4.OSFXSR 导致 #UD），一眼可见。
+// 打印 CR0/CR4/EFER 摘要 + 关键 bit
+// 解读（TS/PE/MP/EM、OSFXSR/OSXMMEXCPT/NXDE、NXE/SCE）。 在 BSP（isr_init）和
+// AP（cpu_bringup_common）的 bringup 末尾各调一次。 出 "必备 bit 缺失" 类 bug
+// 时（如本次 AP 缺 CR4.OSFXSR 导致 #UD），一眼可见。
 void log_cpu_caps(const char *tag) {
-    uint64_t cr0 = read_cr0();
-    uint64_t cr4 = read_cr4();
-    uint64_t efer = rdmsr(MSR_EFER);
-    printk(LOG_INFO, "cpu[%s] caps: CR0=0x%016lX TS=%d PE=%d MP=%d EM=%d | "
-                     "CR4=0x%016lX OSFXSR=%d OSXMMEXCPT=%d NXDE=%d | "
-                     "EFER=0x%016lX NXE=%d SCE=%d LME=%d\n",
-           tag, cr0,
-           (int)((cr0 >> 3) & 1), (int)((cr0 >> 0) & 1),
-           (int)((cr0 >> 1) & 1), (int)((cr0 >> 2) & 1),
-           cr4,
-           (int)((cr4 >> 9) & 1), (int)((cr4 >> 10) & 1), (int)((cr4 >> 5) & 1),
-           efer,
-           (int)((efer >> 11) & 1), (int)((efer >> 0) & 1), (int)((efer >> 8) & 1));
+  uint64_t cr0 = read_cr0();
+  uint64_t cr4 = read_cr4();
+  uint64_t efer = rdmsr(MSR_EFER);
+  printk(LOG_INFO,
+         "cpu[%s] caps: CR0=0x%016lX TS=%d PE=%d MP=%d EM=%d | "
+         "CR4=0x%016lX OSFXSR=%d OSXMMEXCPT=%d NXDE=%d | "
+         "EFER=0x%016lX NXE=%d SCE=%d LME=%d\n",
+         tag, cr0, (int)((cr0 >> 3) & 1), (int)((cr0 >> 0) & 1),
+         (int)((cr0 >> 1) & 1), (int)((cr0 >> 2) & 1), cr4,
+         (int)((cr4 >> 9) & 1), (int)((cr4 >> 10) & 1), (int)((cr4 >> 5) & 1),
+         efer, (int)((efer >> 11) & 1), (int)((efer >> 0) & 1),
+         (int)((efer >> 8) & 1));
 }
 
 // ===================== PAT MSR programming =====================
 #define MSR_IA32_PAT 0x277
-#define PAT_MSR_LO   0x0001040600010406ULL
-#define PAT_MSR_HI   0x0001040600010406ULL
+#define PAT_MSR_LO 0x0001040600010406ULL
+#define PAT_MSR_HI 0x0001040600010406ULL
 
 void pat_init(void) {
-    // Check CPUID.01H:EDX[16] for PAT support
-    uint32_t eax, ebx, ecx, edx;
-    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
-    if (!(edx & (1 << 16))) {
-        // PAT not supported, skip programming
-        return;
-    }
-    wrmsr(MSR_IA32_PAT, (PAT_MSR_HI << 32) | PAT_MSR_LO);
+  // Check CPUID.01H:EDX[16] for PAT support
+  uint32_t eax, ebx, ecx, edx;
+  __asm__ volatile("cpuid"
+                   : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                   : "a"(1));
+  if (!(edx & (1 << 16))) {
+    // PAT not supported, skip programming
+    return;
+  }
+  wrmsr(MSR_IA32_PAT, (PAT_MSR_HI << 32) | PAT_MSR_LO);
 }

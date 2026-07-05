@@ -1,35 +1,35 @@
-#include <stdbool.h>
-#include <stddef.h>
 #include "kernel/driver/pci.h"
-#include "kernel/xcore/acpi.h"
+#include "arch/x64/apic.h"
 #include "arch/x64/paging.h"
+#include "arch/x64/utils.h"
+#include "common/macro.h"
+#include "kernel/xcore/acpi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
-#include "common/macro.h"
+#include "kernel/xcore/trap.h"
+#include <stdbool.h>
+#include <stddef.h>
 #include <xos/errno.h>
 #include <xos/syscall_nums.h>
-#include "arch/x64/apic.h"
-#include "arch/x64/utils.h"
-#include "kernel/xcore/trap.h"
 
 pci_device_t pci_devices[MAX_PCI_DEV];
 int pci_device_count = 0;
 
 void __iomem *ecam_vbase = NULL;
-uint8_t  ecam_start_bus = 0;
-uint8_t  ecam_end_bus = 0;
+uint8_t ecam_start_bus = 0;
+uint8_t ecam_end_bus = 0;
 
 // MSI-X vector allocation: simple counter starting at 64
 static int next_msix_vector = 64;
 
 // ===================== ECAM MMIO mapping =====================
 
-__attribute__((no_sanitize("kernel-address")))
-static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus) {
+__attribute__((no_sanitize("kernel-address"))) static void
+map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus) {
   uint64_t region_start = ecam_phys + (uint64_t)start_bus * 0x100000;
   uint64_t region_end = ecam_phys + ((uint64_t)end_bus + 1) * 0x100000;
-  region_start &= ~0x1FFFFFULL;   // 2MB align down
+  region_start &= ~0x1FFFFFULL;                           // 2MB align down
   region_end = (region_end + 0x1FFFFFULL) & ~0x1FFFFFULL; // 2MB align up
   size_t num_2mb = (region_end - region_start) / 0x200000;
 
@@ -52,19 +52,24 @@ static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus
     printk(LOG_ERROR, "pci: ECAM PD alloc failed\n");
     halt();
   }
-  uint64_t *pd = (__force uint64_t *)phys_to_virt((__force phys_addr_t)page_to_phys(pd_page));
-  for (int i = 0; i < 512; i++) pd[i] = 0;
+  uint64_t *pd = (__force uint64_t *)phys_to_virt(
+      (__force phys_addr_t)page_to_phys(pd_page));
+  for (int i = 0; i < 512; i++)
+    pd[i] = 0;
 
   // Fill PD with 2MB huge pages, UC for MMIO
   for (size_t n = 0; n < num_2mb; n++) {
-    pd[n] = (region_start + n * 0x200000) | PTE_PRESENT | PTE_RW | PTE_PS | PTE_UC;
+    pd[n] =
+        (region_start + n * 0x200000) | PTE_PRESENT | PTE_RW | PTE_PS | PTE_UC;
   }
 
-  pdpt_hh[pdpt_idx] = (__force uint64_t)page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
+  pdpt_hh[pdpt_idx] =
+      (__force uint64_t)page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
 
   // Compute ecam_vbase so ecam_vbase + bus<<20 + dev<<15 + func<<12 + offset
   // addresses the config register
-  uint64_t vma = (0xFFFFULL << 48) | (511ULL << 39) | ((uint64_t)pdpt_idx << 30);
+  uint64_t vma =
+      (0xFFFFULL << 48) | (511ULL << 39) | ((uint64_t)pdpt_idx << 30);
   ecam_vbase = (void __iomem __force *)(vma + (ecam_phys - region_start));
 
   device_vma_base = vma + num_2mb * 0x200000;
@@ -73,23 +78,24 @@ static void map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus
 
 // ===================== Config space access =====================
 
-__attribute__((no_sanitize("kernel-address")))
-uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset) {
-  volatile uint32_t __iomem *addr = (volatile uint32_t __iomem *)ecam_vbase
-                + (((uint64_t)bus << 20)
-                + ((uint64_t)dev << 15)
-                + ((uint64_t)func << 12)
-                + offset) / 4;
+__attribute__((no_sanitize("kernel-address"))) uint32_t
+pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset) {
+  volatile uint32_t __iomem *addr =
+      (volatile uint32_t __iomem *)ecam_vbase +
+      (((uint64_t)bus << 20) + ((uint64_t)dev << 15) + ((uint64_t)func << 12) +
+       offset) /
+          4;
   return *(volatile uint32_t __force *)addr;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-void pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset, uint32_t value) {
-  volatile uint32_t __iomem *addr = (volatile uint32_t __iomem *)ecam_vbase
-                + (((uint64_t)bus << 20)
-                + ((uint64_t)dev << 15)
-                + ((uint64_t)func << 12)
-                + offset) / 4;
+__attribute__((no_sanitize("kernel-address"))) void
+pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset,
+                 uint32_t value) {
+  volatile uint32_t __iomem *addr =
+      (volatile uint32_t __iomem *)ecam_vbase +
+      (((uint64_t)bus << 20) + ((uint64_t)dev << 15) + ((uint64_t)func << 12) +
+       offset) /
+          4;
   *(volatile uint32_t __force *)addr = value;
 }
 
@@ -109,7 +115,8 @@ static void pci_size_bar(pci_device_t *d, int bar_idx) {
 
   bool is_io = (orig & PCI_BAR_IO_SPACE);
 
-  // Write all 1s, read back mask (hardwired bits survive, decode bits read as 0)
+  // Write all 1s, read back mask (hardwired bits survive, decode bits read as
+  // 0)
   pci_write_config(bus, dev, func, offset, 0xFFFFFFFF);
   uint32_t mask = pci_read_config(bus, dev, func, offset);
 
@@ -154,13 +161,15 @@ static void pci_size_bar(pci_device_t *d, int bar_idx) {
 
 static void pci_scan_bus(uint8_t bus);
 
-__attribute__((no_sanitize("kernel-address")))
-static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
-  if (pci_device_count >= MAX_PCI_DEV) return;
+__attribute__((no_sanitize("kernel-address"))) static void
+pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
+  if (pci_device_count >= MAX_PCI_DEV)
+    return;
 
   uint32_t vd = pci_read_config(bus, dev, func, 0x00);
   uint16_t vendor = vd & 0xFFFF;
-  if (vendor == 0xFFFF) return;
+  if (vendor == 0xFFFF)
+    return;
 
   uint16_t device = (vd >> 16) & 0xFFFF;
   uint32_t rev_class = pci_read_config(bus, dev, func, 0x08);
@@ -204,7 +213,8 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
         d->msi_cap_offset = cap_ptr;
       }
       cap_ptr = next_ptr;
-      if (cap_ptr < 0x40) break; // invalid, stop
+      if (cap_ptr < 0x40)
+        break; // invalid, stop
     }
   }
 
@@ -212,7 +222,8 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   int max_bars = (d->header_type == PCI_HEADER_TYPE_BRIDGE) ? 2 : 6;
   for (int i = 0; i < max_bars; i++) {
     pci_size_bar(d, i);
-    if (d->bar[i].type == 2 && i < max_bars - 1) i++; // skip next (consumed by 64-bit)
+    if (d->bar[i].type == 2 && i < max_bars - 1)
+      i++; // skip next (consumed by 64-bit)
   }
 
   pci_device_count++;
@@ -227,11 +238,12 @@ static void pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   }
 }
 
-__attribute__((no_sanitize("kernel-address")))
-static void pci_scan_bus(uint8_t bus) {
+__attribute__((no_sanitize("kernel-address"))) static void
+pci_scan_bus(uint8_t bus) {
   for (int dev = 0; dev < PCI_MAX_DEV; dev++) {
     uint32_t vd = pci_read_config(bus, dev, 0, 0x00);
-    if ((vd & 0xFFFF) == 0xFFFF) continue;
+    if ((vd & 0xFFFF) == 0xFFFF)
+      continue;
 
     uint8_t header_type = (pci_read_config(bus, dev, 0, 0x0C) >> 16) & 0xFF;
 
@@ -248,12 +260,14 @@ static void pci_scan_bus(uint8_t bus) {
 
 // ===================== BAR MMIO mapping =====================
 
-__attribute__((no_sanitize("kernel-address")))
-static void pci_map_bar_mmio(pci_device_t *d, int wc_bar_idx) {
+__attribute__((no_sanitize("kernel-address"))) static void
+pci_map_bar_mmio(pci_device_t *d, int wc_bar_idx) {
   int max_bars = (d->header_type == PCI_HEADER_TYPE_BRIDGE) ? 2 : 6;
   for (int i = 0; i < max_bars; i++) {
-    if (d->bar[i].size == 0) continue;
-    if (d->bar[i].type == 1) continue; // I/O BAR, no mapping needed
+    if (d->bar[i].size == 0)
+      continue;
+    if (d->bar[i].type == 1)
+      continue; // I/O BAR, no mapping needed
 
     uint64_t phys = d->bar[i].phys;
     uint64_t size = d->bar[i].size;
@@ -261,7 +275,10 @@ static void pci_map_bar_mmio(pci_device_t *d, int wc_bar_idx) {
     // Find free PDPT_hh slot
     int pdpt_idx = -1;
     for (int j = 511; j >= 0; j--) {
-      if (pdpt_hh[j] == 0) { pdpt_idx = j; break; }
+      if (pdpt_hh[j] == 0) {
+        pdpt_idx = j;
+        break;
+      }
     }
     if (pdpt_idx < 0) {
       printk(LOG_ERROR, "pci: no free PDPT_hh slot for BAR\n");
@@ -274,19 +291,25 @@ static void pci_map_bar_mmio(pci_device_t *d, int wc_bar_idx) {
 
     // Allocate PD
     Page *pd_page = bfc_alloc_page(1);
-    if (!pd_page) continue;
-    uint64_t *pd = (__force uint64_t *)phys_to_virt((__force phys_addr_t)page_to_phys(pd_page));
-    for (int j = 0; j < 512; j++) pd[j] = 0;
+    if (!pd_page)
+      continue;
+    uint64_t *pd = (__force uint64_t *)phys_to_virt(
+        (__force phys_addr_t)page_to_phys(pd_page));
+    for (int j = 0; j < 512; j++)
+      pd[j] = 0;
 
     // Fill with 2MB huge pages: WC for specified BAR, UC for others
     uint64_t cache_flags = (i == wc_bar_idx) ? PTE_WC : PTE_UC;
     for (size_t n = 0; n < num_2mb; n++) {
-      pd[n] = (region_start + n * 0x200000) | PTE_PRESENT | PTE_RW | PTE_PS | cache_flags;
+      pd[n] = (region_start + n * 0x200000) | PTE_PRESENT | PTE_RW | PTE_PS |
+              cache_flags;
     }
 
-    pdpt_hh[pdpt_idx] = (__force uint64_t)page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
+    pdpt_hh[pdpt_idx] =
+        (__force uint64_t)page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
 
-    uint64_t vma = (0xFFFFULL << 48) | (511ULL << 39) | ((uint64_t)pdpt_idx << 30);
+    uint64_t vma =
+        (0xFFFFULL << 48) | (511ULL << 39) | ((uint64_t)pdpt_idx << 30);
     d->bar[i].vaddr = (void __iomem __force *)(vma + (phys - region_start));
     device_vma_base = vma + num_2mb * 0x200000;
     flush_tlb();
@@ -295,32 +318,34 @@ static void pci_map_bar_mmio(pci_device_t *d, int wc_bar_idx) {
 
 // ===================== Device enablement =====================
 
-__attribute__((no_sanitize("kernel-address")))
-int pci_enable_device(pci_device_t *d) {
-  if (d->enabled) return 0;
+__attribute__((no_sanitize("kernel-address"))) int
+pci_enable_device(pci_device_t *d) {
+  if (d->enabled)
+    return 0;
 
   // 1. Map MMIO BARs
-  pci_map_bar_mmio(d, -1);  // all BARs UC
+  pci_map_bar_mmio(d, -1); // all BARs UC
 
   // 2. Enable Bus Master + Memory Space
   uint32_t cmd = pci_read_config(d->bus, d->dev, d->func, 0x04);
-  cmd |= (1 << 1) | (1 << 2);  // Bus Master + Memory Space
+  cmd |= (1 << 1) | (1 << 2); // Bus Master + Memory Space
   pci_write_config(d->bus, d->dev, d->func, 0x04, cmd);
 
   d->enabled = true;
   return 0;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-int pci_enable_device_wc(pci_device_t *d, int wc_bar_idx) {
-  if (d->enabled) return 0;
+__attribute__((no_sanitize("kernel-address"))) int
+pci_enable_device_wc(pci_device_t *d, int wc_bar_idx) {
+  if (d->enabled)
+    return 0;
 
   // 1. Map MMIO BARs (specified BAR uses WC, others UC)
   pci_map_bar_mmio(d, wc_bar_idx);
 
   // 2. Enable Bus Master + Memory Space
   uint32_t cmd = pci_read_config(d->bus, d->dev, d->func, 0x04);
-  cmd |= (1 << 1) | (1 << 2);  // Bus Master + Memory Space
+  cmd |= (1 << 1) | (1 << 2); // Bus Master + Memory Space
   pci_write_config(d->bus, d->dev, d->func, 0x04, cmd);
 
   d->enabled = true;
@@ -329,8 +354,8 @@ int pci_enable_device_wc(pci_device_t *d, int wc_bar_idx) {
 
 // ===================== Device lookup =====================
 
-__attribute__((no_sanitize("kernel-address")))
-pci_device_t *pci_find_device(uint16_t class_code) {
+__attribute__((no_sanitize("kernel-address"))) pci_device_t *
+pci_find_device(uint16_t class_code) {
   for (int i = 0; i < pci_device_count; i++) {
     if (pci_devices[i].class_code == class_code)
       return &pci_devices[i];
@@ -338,10 +363,11 @@ pci_device_t *pci_find_device(uint16_t class_code) {
   return NULL;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-pci_device_t *pci_find_device_by_id(uint16_t vendor, uint16_t device) {
+__attribute__((no_sanitize("kernel-address"))) pci_device_t *
+pci_find_device_by_id(uint16_t vendor, uint16_t device) {
   for (int i = 0; i < pci_device_count; i++) {
-    if (pci_devices[i].vendor_id == vendor && pci_devices[i].device_id == device)
+    if (pci_devices[i].vendor_id == vendor &&
+        pci_devices[i].device_id == device)
       return &pci_devices[i];
   }
   return NULL;
@@ -349,7 +375,8 @@ pci_device_t *pci_find_device_by_id(uint16_t vendor, uint16_t device) {
 
 // ===================== Syscall: sys_pci_dev_info =====================
 
-int64_t sys_pci_dev_info(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t _u5, int64_t _u6) {
+int64_t sys_pci_dev_info(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                         int64_t _u5, int64_t _u6) {
   uint8_t bus = (uint8_t)arg1;
   uint8_t dev_num = (uint8_t)arg2;
   uint8_t func = (uint8_t)arg3;
@@ -370,7 +397,8 @@ int64_t sys_pci_dev_info(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       break;
     }
   }
-  if (!d) return (int64_t)-ENOENT;
+  if (!d)
+    return (int64_t)-ENOENT;
 
   struct pci_dev_info info = {0};
   info.vendor_id = d->vendor_id;
@@ -390,19 +418,22 @@ int64_t sys_pci_dev_info(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
 // ===================== MSI =====================
 
-__attribute__((no_sanitize("kernel-address")))
-int pci_enable_msi(pci_device_t *dev) {
-  if (dev->msi_cap_offset == 0) return -ENOSYS;
-  if (next_msix_vector > 95) return -ENOMEM;  // cap at vec 95 (priority class 5)
+__attribute__((no_sanitize("kernel-address"))) int
+pci_enable_msi(pci_device_t *dev) {
+  if (dev->msi_cap_offset == 0)
+    return -ENOSYS;
+  if (next_msix_vector > 95)
+    return -ENOMEM; // cap at vec 95 (priority class 5)
 
   // Read Message Control (upper 16 bits of DWORD at cap_offset)
-  uint32_t cap_dword = pci_read_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset);
+  uint32_t cap_dword =
+      pci_read_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset);
   uint16_t msg_ctrl = (cap_dword >> 16) & 0xFFFF;
-  bool is_64bit = (msg_ctrl & (1 << 7)) != 0;  // 64-bit Address Capable
+  bool is_64bit = (msg_ctrl & (1 << 7)) != 0; // 64-bit Address Capable
 
   // Allocate one vector
   int vector = next_msix_vector++;
-  dev->msix_vector_base = vector;  // reuse field for MSI vector base
+  dev->msix_vector_base = vector; // reuse field for MSI vector base
   dev->msix_num_vectors = 1;
 
   uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
@@ -415,18 +446,22 @@ int pci_enable_msi(pci_device_t *dev) {
     // Write Message Upper Address (DWORD at cap_offset + 8) = 0
     pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset + 8, 0);
     // Write Message Data (DWORD at cap_offset + 12)
-    pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset + 12, vector);
+    pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset + 12,
+                     vector);
   } else {
     // Write Message Data (DWORD at cap_offset + 8)
-    pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset + 8, vector);
+    pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset + 8,
+                     vector);
   }
 
   // Enable MSI: set Enable bit (bit 0 of 16-bit Message Control)
-  cap_dword = pci_read_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset);
+  cap_dword =
+      pci_read_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset);
   msg_ctrl = (cap_dword >> 16) & 0xFFFF;
-  msg_ctrl |= (1 << 0);  // MSI Enable
+  msg_ctrl |= (1 << 0); // MSI Enable
   cap_dword = (cap_dword & 0xFFFF) | ((uint32_t)msg_ctrl << 16);
-  pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset, cap_dword);
+  pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset,
+                   cap_dword);
 
   // Disable INTx: set bit 10 (Interrupt Disable) in Command register
   uint32_t cmd = pci_read_config(dev->bus, dev->dev, dev->func, 0x04);
@@ -438,17 +473,22 @@ int pci_enable_msi(pci_device_t *dev) {
 
 // ===================== MSI-X =====================
 
-__attribute__((no_sanitize("kernel-address")))
-int pci_enable_msix(pci_device_t *dev, int num_vectors) {
-  if (dev->msix_cap_offset == 0) return -ENOSYS;
-  if (num_vectors <= 0 || next_msix_vector + num_vectors > 96) return -ENOMEM;
+__attribute__((no_sanitize("kernel-address"))) int
+pci_enable_msix(pci_device_t *dev, int num_vectors) {
+  if (dev->msix_cap_offset == 0)
+    return -ENOSYS;
+  if (num_vectors <= 0 || next_msix_vector + num_vectors > 96)
+    return -ENOMEM;
 
-  // Read Message Control to get table size (bits 10:2 of 16-bit Message Control = N-1)
-  // Message Control is at cap_offset+2, upper 16 bits of DWORD at cap_offset
-  uint32_t cap_dword = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
+  // Read Message Control to get table size (bits 10:2 of 16-bit Message Control
+  // = N-1) Message Control is at cap_offset+2, upper 16 bits of DWORD at
+  // cap_offset
+  uint32_t cap_dword =
+      pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
   uint16_t msg_ctrl = (cap_dword >> 16) & 0xFFFF;
   int table_size = ((msg_ctrl >> 2) & 0x7FF) + 1;
-  if (num_vectors > table_size) num_vectors = table_size;
+  if (num_vectors > table_size)
+    num_vectors = table_size;
 
   // Allocate vectors
   int base = next_msix_vector;
@@ -459,83 +499,105 @@ int pci_enable_msix(pci_device_t *dev, int num_vectors) {
   // Get MSI-X Table address (BAR vaddr + offset)
   // BAR should already be mapped by pci_enable_device
   void __iomem *bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
-  if (!bar_vaddr) return -EFAULT;
+  if (!bar_vaddr)
+    return -EFAULT;
 
-  volatile uint32_t __iomem *table = (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr + dev->msix_table_offset);
+  volatile uint32_t __iomem *table =
+      (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr +
+                                    dev->msix_table_offset);
   uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
 
   // Write all Table Entries: masked, with vector numbers
   for (int i = 0; i < num_vectors; i++) {
     uint32_t vector = base + i;
-    *(volatile uint32_t __force *)&table[i * 4 + 0] = 0xFEE00000 | (bsp_apic_id << 12);  // Message Address low
-    *(volatile uint32_t __force *)&table[i * 4 + 1] = 0;                                    // Message Address high
-    *(volatile uint32_t __force *)&table[i * 4 + 2] = vector;                                // Message Data (vector, Fixed, Edge)
-    *(volatile uint32_t __force *)&table[i * 4 + 3] = 1;                                     // Vector Control: Mask bit = 1
+    *(volatile uint32_t __force *)&table[i * 4 + 0] =
+        0xFEE00000 | (bsp_apic_id << 12);                // Message Address low
+    *(volatile uint32_t __force *)&table[i * 4 + 1] = 0; // Message Address high
+    *(volatile uint32_t __force *)&table[i * 4 + 2] =
+        vector; // Message Data (vector, Fixed, Edge)
+    *(volatile uint32_t __force *)&table[i * 4 + 3] =
+        1; // Vector Control: Mask bit = 1
   }
 
   // Enable MSI-X: set Enable bit (bit 15 of 16-bit Message Control)
   // Also set Function Mask (bit 14) temporarily to prevent spurious interrupts
-  // ECAM requires DWORD-aligned access. Message Control is at cap_offset+2 (upper 16 bits of the DWORD at cap_offset)
-  cap_dword = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
+  // ECAM requires DWORD-aligned access. Message Control is at cap_offset+2
+  // (upper 16 bits of the DWORD at cap_offset)
+  cap_dword =
+      pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
   msg_ctrl = (cap_dword >> 16) & 0xFFFF;
-  msg_ctrl |= (1 << 15);  // MSI-X Enable (bit 15 of 16-bit Message Control)
-  msg_ctrl |= (1 << 14);  // Function Mask (bit 14 of 16-bit Message Control)
+  msg_ctrl |= (1 << 15); // MSI-X Enable (bit 15 of 16-bit Message Control)
+  msg_ctrl |= (1 << 14); // Function Mask (bit 14 of 16-bit Message Control)
   cap_dword = (cap_dword & 0xFFFF) | ((uint32_t)msg_ctrl << 16);
-  pci_write_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset, cap_dword);
+  pci_write_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset,
+                   cap_dword);
 
   // Disable INTx: set bit 10 (Interrupt Disable) in Command register
   uint32_t cmd = pci_read_config(dev->bus, dev->dev, dev->func, 0x04);
-  cmd |= (1 << 10);  // Interrupt Disable
+  cmd |= (1 << 10); // Interrupt Disable
   pci_write_config(dev->bus, dev->dev, dev->func, 0x04, cmd);
 
   // Clear Function Mask now that setup is done
-  cap_dword = pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
+  cap_dword =
+      pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
   msg_ctrl = (cap_dword >> 16) & 0xFFFF;
-  msg_ctrl &= ~(1 << 14);  // Clear Function Mask
+  msg_ctrl &= ~(1 << 14); // Clear Function Mask
   cap_dword = (cap_dword & 0xFFFF) | ((uint32_t)msg_ctrl << 16);
-  pci_write_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset, cap_dword);
+  pci_write_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset,
+                   cap_dword);
 
   return num_vectors;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-void pci_msix_mask_entry(pci_device_t *dev, int entry) {
-  if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors) return;
+__attribute__((no_sanitize("kernel-address"))) void
+pci_msix_mask_entry(pci_device_t *dev, int entry) {
+  if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors)
+    return;
   void __iomem *bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
-  volatile uint32_t __iomem *table = (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr + dev->msix_table_offset);
-  *(volatile uint32_t __force *)&table[entry * 4 + 3] |= 1;  // Set Mask bit
+  volatile uint32_t __iomem *table =
+      (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr +
+                                    dev->msix_table_offset);
+  *(volatile uint32_t __force *)&table[entry * 4 + 3] |= 1; // Set Mask bit
 }
 
-__attribute__((no_sanitize("kernel-address")))
-void pci_msix_unmask_entry(pci_device_t *dev, int entry) {
-  if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors) return;
+__attribute__((no_sanitize("kernel-address"))) void
+pci_msix_unmask_entry(pci_device_t *dev, int entry) {
+  if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors)
+    return;
   void __iomem *bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
-  volatile uint32_t __iomem *table = (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr + dev->msix_table_offset);
-  *(volatile uint32_t __force *)&table[entry * 4 + 3] &= ~1;  // Clear Mask bit
+  volatile uint32_t __iomem *table =
+      (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr +
+                                    dev->msix_table_offset);
+  *(volatile uint32_t __force *)&table[entry * 4 + 3] &= ~1; // Clear Mask bit
 }
 
-__attribute__((no_sanitize("kernel-address")))
-void __iomem *pci_msix_table_addr(pci_device_t *dev) {
-  if (dev->msix_cap_offset == 0) return NULL;
-  return (void __iomem *)((uint8_t __iomem *)dev->bar[dev->msix_table_bar].vaddr + dev->msix_table_offset);
+__attribute__((no_sanitize("kernel-address"))) void __iomem *
+pci_msix_table_addr(pci_device_t *dev) {
+  if (dev->msix_cap_offset == 0)
+    return NULL;
+  return (
+      void __iomem *)((uint8_t __iomem *)dev->bar[dev->msix_table_bar].vaddr +
+                      dev->msix_table_offset);
 }
 
-__attribute__((no_sanitize("kernel-address")))
-void __iomem *pci_msix_pba_addr(pci_device_t *dev) {
-  if (dev->msix_cap_offset == 0) return NULL;
-  return (void __iomem *)((uint8_t __iomem *)dev->bar[dev->msix_pba_bar].vaddr + dev->msix_pba_offset);
+__attribute__((no_sanitize("kernel-address"))) void __iomem *
+pci_msix_pba_addr(pci_device_t *dev) {
+  if (dev->msix_cap_offset == 0)
+    return NULL;
+  return (void __iomem *)((uint8_t __iomem *)dev->bar[dev->msix_pba_bar].vaddr +
+                          dev->msix_pba_offset);
 }
 
-__attribute__((no_sanitize("kernel-address")))
-int pci_msix_vector_base(pci_device_t *dev) {
+__attribute__((no_sanitize("kernel-address"))) int
+pci_msix_vector_base(pci_device_t *dev) {
   return dev->msix_vector_base;
 }
 
 // ===================== pci_init =====================
 
-__attribute__((no_sanitize("kernel-address")))
-void pci_init() {
-  if (g_mcfg.ecam_base == 0) return;
+__attribute__((no_sanitize("kernel-address"))) void pci_init() {
+  if (g_mcfg.ecam_base == 0)
+    return;
 
   ecam_start_bus = g_mcfg.start_bus;
   ecam_end_bus = g_mcfg.end_bus;

@@ -1,21 +1,21 @@
 #ifndef ARCH_X64_TRAP_H
 #define ARCH_X64_TRAP_H
 
-#include <stdint.h>
-#include <stddef.h>
 #include "arch/x64/utils.h"
+#include <stddef.h>
+#include <stdint.h>
 
 #define IDT_ENTRIES 256
 
 // ===================== IDT (16-byte gate for 64-bit) =====================
 typedef struct {
-  uint16_t offset_low;     // offset[15:0]
-  uint16_t sel;            // code segment selector
-  uint8_t  ist;            // IST offset (0 = don't use IST)
-  uint8_t  flags;          // 0x8E = interrupt gate, 0xEE = user interrupt
-  uint16_t offset_mid;     // offset[31:16]
-  uint32_t offset_high;    // offset[63:32]
-  uint32_t reserved;       // must be 0
+  uint16_t offset_low;  // offset[15:0]
+  uint16_t sel;         // code segment selector
+  uint8_t ist;          // IST offset (0 = don't use IST)
+  uint8_t flags;        // 0x8E = interrupt gate, 0xEE = user interrupt
+  uint16_t offset_mid;  // offset[31:16]
+  uint32_t offset_high; // offset[63:32]
+  uint32_t reserved;    // must be 0
 } __attribute__((packed)) idt_gate_t;
 
 typedef struct {

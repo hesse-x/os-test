@@ -11,8 +11,8 @@ typedef uint32_t mode_t;
 typedef uint32_t nlink_t;
 typedef uint32_t uid_t;
 typedef uint32_t gid_t;
-typedef int32_t  blksize_t;
-typedef int32_t  blkcnt_t;
+typedef int32_t blksize_t;
+typedef int32_t blkcnt_t;
 
 typedef unsigned long nfds_t;
 

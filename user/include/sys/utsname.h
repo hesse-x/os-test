@@ -10,11 +10,11 @@ extern "C" {
 #endif
 
 struct utsname {
-    char sysname[UTSNAME_LEN];
-    char nodename[UTSNAME_LEN];
-    char release[UTSNAME_LEN];
-    char version[UTSNAME_LEN];
-    char machine[UTSNAME_LEN];
+  char sysname[UTSNAME_LEN];
+  char nodename[UTSNAME_LEN];
+  char release[UTSNAME_LEN];
+  char version[UTSNAME_LEN];
+  char machine[UTSNAME_LEN];
 };
 
 LIBC_EXPORT int uname(struct utsname *buf);

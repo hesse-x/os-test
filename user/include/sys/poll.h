@@ -1,9 +1,9 @@
 #ifndef _SYS_POLL_H
 #define _SYS_POLL_H
 
-#include <sys/types.h>
-#include <xos/socket.h>  // defines struct pollfd, POLLIN/OUT/ERR/HUP
 #include <sys/cdefs.h>
+#include <sys/types.h>
+#include <xos/socket.h> // defines struct pollfd, POLLIN/OUT/ERR/HUP
 
 #ifdef __cplusplus
 extern "C" {

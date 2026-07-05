@@ -1,8 +1,8 @@
 #ifndef _ERRNO_H
 #define _ERRNO_H
 
-#include <xos/errno.h>
 #include <sys/cdefs.h>
+#include <xos/errno.h>
 
 #ifdef __cplusplus
 extern "C" {

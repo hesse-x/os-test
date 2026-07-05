@@ -1,8 +1,8 @@
 #include "kernel/xcore/mem/alloc.h"
-#include "arch/x64/paging.h"
-#include "kernel/efi.h"
 #include "arch/x64/memlayout.h"
+#include "arch/x64/paging.h"
 #include "common/macro.h"
+#include "kernel/efi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
@@ -20,9 +20,9 @@ void bfc_init(void) {
   // init_mem 中完成初始化
 }
 
-__attribute__((no_sanitize("kernel-address")))
-Page *bfc_alloc_page(size_t n) {
-  if (n == 0) return NULL;
+__attribute__((no_sanitize("kernel-address"))) Page *bfc_alloc_page(size_t n) {
+  if (n == 0)
+    return NULL;
 
   uint64_t flags;
   spin_lock_irqsave(&bfc_lock, &flags);
@@ -52,7 +52,9 @@ Page *bfc_alloc_page(size_t n) {
         }
         spin_unlock_irqrestore(&bfc_lock, flags);
         memstat_add(&kernel_mem_stats.used_pages, (int)n);
-        kasan_bfc_alloc((__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(cur)), n * PAGE_SIZE);
+        kasan_bfc_alloc((__force void *)phys_to_virt(
+                            (__force phys_addr_t)page_to_phys(cur)),
+                        n * PAGE_SIZE);
         return cur;
       } else {
         size_t remaining = cur->bfc.cont_page_num - n;
@@ -81,7 +83,9 @@ Page *bfc_alloc_page(size_t n) {
         cur->bfc.next = NULL;
         spin_unlock_irqrestore(&bfc_lock, flags);
         memstat_add(&kernel_mem_stats.used_pages, (int)n);
-        kasan_bfc_alloc((__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(cur)), n * PAGE_SIZE);
+        kasan_bfc_alloc((__force void *)phys_to_virt(
+                            (__force phys_addr_t)page_to_phys(cur)),
+                        n * PAGE_SIZE);
         return cur;
       }
     }
@@ -93,8 +97,8 @@ Page *bfc_alloc_page(size_t n) {
   return NULL;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-Page *bfc_free_page(Page *page, size_t n) {
+__attribute__((no_sanitize("kernel-address"))) Page *bfc_free_page(Page *page,
+                                                                   size_t n) {
   if (page == NULL || n == 0) {
     return NULL;
   }
@@ -160,9 +164,10 @@ Page *bfc_free_page(Page *page, size_t n) {
   return page;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-Page *bfc_alloc_page_low(size_t n) {
-  if (n == 0) return NULL;
+__attribute__((no_sanitize("kernel-address"))) Page *
+bfc_alloc_page_low(size_t n) {
+  if (n == 0)
+    return NULL;
 
   uint64_t flags;
   spin_lock_irqsave(&bfc_lock, &flags);
@@ -177,7 +182,8 @@ Page *bfc_alloc_page_low(size_t n) {
 
   while (cur != NULL) {
     uint64_t phys = (uint64_t)(cur - bfc_frames) * PAGE_SIZE;
-    if (cur->bfc.cont_page_num >= n && phys + (uint64_t)n * PAGE_SIZE <= 0x100000000ULL) {
+    if (cur->bfc.cont_page_num >= n &&
+        phys + (uint64_t)n * PAGE_SIZE <= 0x100000000ULL) {
       // Same split logic as alloc_page
       if (cur->bfc.cont_page_num == n) {
         if (prev == NULL) {
@@ -194,7 +200,9 @@ Page *bfc_alloc_page_low(size_t n) {
         }
         spin_unlock_irqrestore(&bfc_lock, flags);
         memstat_add(&kernel_mem_stats.used_pages, (int)n);
-        kasan_bfc_alloc((__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(cur)), n * PAGE_SIZE);
+        kasan_bfc_alloc((__force void *)phys_to_virt(
+                            (__force phys_addr_t)page_to_phys(cur)),
+                        n * PAGE_SIZE);
         return cur;
       } else {
         size_t remaining = cur->bfc.cont_page_num - n;
@@ -223,7 +231,9 @@ Page *bfc_alloc_page_low(size_t n) {
         cur->bfc.next = NULL;
         spin_unlock_irqrestore(&bfc_lock, flags);
         memstat_add(&kernel_mem_stats.used_pages, (int)n);
-        kasan_bfc_alloc((__force void *)phys_to_virt((__force phys_addr_t)page_to_phys(cur)), n * PAGE_SIZE);
+        kasan_bfc_alloc((__force void *)phys_to_virt(
+                            (__force phys_addr_t)page_to_phys(cur)),
+                        n * PAGE_SIZE);
         return cur;
       }
     }
@@ -235,8 +245,7 @@ Page *bfc_alloc_page_low(size_t n) {
   return NULL;
 }
 
-__attribute__((no_sanitize("kernel-address")))
-size_t bfc_free_page_nums(void) {
+__attribute__((no_sanitize("kernel-address"))) size_t bfc_free_page_nums(void) {
   uint64_t flags;
   spin_lock_irqsave(&bfc_lock, &flags);
   size_t total = 0;
@@ -259,10 +268,10 @@ static efi_memory_descriptor_t *get_efi_desc(boot_info *bi, size_t index) {
 }
 
 // ===================== init_mem =====================
-__attribute__((no_sanitize("kernel-address")))
-void init_mem(boot_info *bi) {
-  printk(LOG_INFO, "init_mem: mmap_addr=0x%016lX mmap_size=0x%016lX desc_size=0x%016lX\n",
-                 bi->mmap_addr, bi->mmap_size, bi->mmap_desc_size);
+__attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
+  printk(LOG_INFO,
+         "init_mem: mmap_addr=0x%016lX mmap_size=0x%016lX desc_size=0x%016lX\n",
+         bi->mmap_addr, bi->mmap_size, bi->mmap_desc_size);
 
   size_t desc_count = bi->mmap_size / bi->mmap_desc_size;
 
@@ -272,13 +281,15 @@ void init_mem(boot_info *bi) {
     efi_memory_descriptor_t *desc = get_efi_desc(bi, i);
     if (desc->type == EfiConventionalMemory) {
       uint64_t end = desc->physical_start + desc->number_of_pages * 4096;
-      if (end > max_phys_addr) max_phys_addr = end;
+      if (end > max_phys_addr)
+        max_phys_addr = end;
     }
   }
   total_page_frames = GET_PAGE_NUM(max_phys_addr);
 
   // 2. Bump 分配器初始化
-  uintptr_t kernel_end_phys = (__force uintptr_t)PHY_ADDR((uintptr_t)kernel_end);
+  uintptr_t kernel_end_phys =
+      (__force uintptr_t)PHY_ADDR((uintptr_t)kernel_end);
   bump_init_phys(kernel_end_phys);
 
   // 3. Bump 分配 frames 数组
@@ -366,33 +377,35 @@ void init_mem(boot_info *bi) {
 }
 
 // ===================== Address conversion =====================
-__attribute__((no_sanitize("kernel-address")))
-phys_addr_t page_to_phys(Page *p) {
-    return (__force phys_addr_t)((uint64_t)(p - bfc_frames) * PAGE_SIZE);
+__attribute__((no_sanitize("kernel-address"))) phys_addr_t
+page_to_phys(Page *p) {
+  return (__force phys_addr_t)((uint64_t)(p - bfc_frames) * PAGE_SIZE);
 }
 
-__attribute__((no_sanitize("kernel-address")))
-kern_vaddr_t phys_to_virt(phys_addr_t phys) {
-    return (__force kern_vaddr_t)((__force uint64_t)phys + VMA_BASE);
+__attribute__((no_sanitize("kernel-address"))) kern_vaddr_t
+phys_to_virt(phys_addr_t phys) {
+  return (__force kern_vaddr_t)((__force uint64_t)phys + VMA_BASE);
 }
 
 // ===================== Data-pointer wrappers =====================
 // bfc_alloc_page_data: allocate n pages and return the writable data-page
 // virtual address (instead of the Page metadata pointer). Use for callers
 // that immediately write to the page (fxsave area, kernel stack data, etc.).
-__attribute__((no_sanitize("kernel-address")))
-void *bfc_alloc_page_data(size_t n) {
-    Page *p = bfc_alloc_page(n);
-    if (!p) return NULL;
-    return (void *)(__force uintptr_t)phys_to_virt(page_to_phys(p));
+__attribute__((no_sanitize("kernel-address"))) void *
+bfc_alloc_page_data(size_t n) {
+  Page *p = bfc_alloc_page(n);
+  if (!p)
+    return NULL;
+  return (void *)(__force uintptr_t)phys_to_virt(page_to_phys(p));
 }
 
 // bfc_free_page_data: free pages given a data-page virtual address.
 // Inverse of bfc_alloc_page_data; recovers the Page* via phys conversion.
-__attribute__((no_sanitize("kernel-address")))
-void bfc_free_page_data(void *data, size_t n) {
-    if (!data) return;
-    uint64_t phys = (__force uint64_t)PHY_ADDR((uintptr_t)data);
-    Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
-    bfc_free_page(p, n);
+__attribute__((no_sanitize("kernel-address"))) void
+bfc_free_page_data(void *data, size_t n) {
+  if (!data)
+    return;
+  uint64_t phys = (__force uint64_t)PHY_ADDR((uintptr_t)data);
+  Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
+  bfc_free_page(p, n);
 }

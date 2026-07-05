@@ -2,10 +2,10 @@
 #define KERNEL_BSD_SYSCALL_H
 
 #include "arch/x64/trap.h"
-#include "kernel/xcore/xtask.h"
 #include "kernel/bsd/types.h"
-#include <stdint.h>
+#include "kernel/xcore/xtask.h"
 #include <stddef.h>
+#include <stdint.h>
 
 // Syscall dispatch entry
 int64_t syscall_dispatch(trapframe_t *tf);
@@ -44,7 +44,8 @@ int64_t sys_dma_alloc(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_dma_free(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_pci_dev_info(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_block_async(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-int64_t sys_install_fd_impl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_install_fd_impl(int64_t, int64_t, int64_t, int64_t, int64_t,
+                            int64_t);
 int64_t sys_debug_memstat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // signals

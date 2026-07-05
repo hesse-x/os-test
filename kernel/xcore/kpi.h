@@ -2,9 +2,9 @@
 #define KERNEL_XCORE_KPI_H
 
 #include "arch/x64/trap.h"
-#include "kernel/xcore/xtask.h"
-#include "kernel/xcore/sched.h"
 #include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/sched.h"
+#include "kernel/xcore/xtask.h"
 #include <stddef.h>
 
 // IRQ handler callback type
@@ -21,7 +21,7 @@ void mm_release(mm_t *mm, pid_t owner);
 void mm_release_pages(mm_t *mm);
 int copy_page_table(uint64_t *src, uint64_t *dst, mmap_region_t *regions);
 mmap_region_t *add_mmap_region(xtask_t *t, uint64_t vaddr, uint64_t size,
-                                uint64_t phys, struct shm *shm, uint32_t prot);
+                               uint64_t phys, struct shm *shm, uint32_t prot);
 
 // === IPC ===
 void notify_and_wake(pid_t target_pid, recv_msg_t *msg);
@@ -38,8 +38,10 @@ Page *bfc_alloc_page(size_t n);
 Page *bfc_free_page(Page *page, size_t n);
 phys_addr_t page_to_phys(Page *p);
 kern_vaddr_t phys_to_virt(phys_addr_t phys);
-bool map_user_page_direct(uint64_t *pml4, uint64_t vaddr, uint64_t phys, uint64_t flags);
-void unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end, int count);
+bool map_user_page_direct(uint64_t *pml4, uint64_t vaddr, uint64_t phys,
+                          uint64_t flags);
+void unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
+                      int count);
 int copy_from_user(void *dst, const void __user *src, size_t len);
 int copy_to_user(void __user *dst, const void *src, size_t len);
 

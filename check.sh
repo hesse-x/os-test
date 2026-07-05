@@ -7,7 +7,7 @@
 #   ./check.sh --filter iwyu            # 单项
 #
 # 合法检查项: sparse, iwyu, clang-format, clang-tidy
-#   后两项暂为占位（见 doc/design/format.md）。
+#   clang-tidy 暂为占位（见 doc/design/format.md）。
 #
 # 退出码: 全部通过 0；任一失败 1；参数错误 2。
 

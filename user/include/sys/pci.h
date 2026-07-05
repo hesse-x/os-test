@@ -1,8 +1,8 @@
 #ifndef _SYS_PCI_H
 #define _SYS_PCI_H
 
-#include <sys/types.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 // struct pci_dev_info_bar and struct pci_dev_info are defined in
 // xos/syscall_nums.h (pulled in transitively via user/include/syscall.h).
@@ -13,7 +13,8 @@
 extern "C" {
 #endif
 
-LIBC_EXPORT int pci_dev_info(uint8_t bus, uint8_t dev, uint8_t func, struct pci_dev_info *out);
+LIBC_EXPORT int pci_dev_info(uint8_t bus, uint8_t dev, uint8_t func,
+                             struct pci_dev_info *out);
 
 #ifdef __cplusplus
 }

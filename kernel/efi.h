@@ -9,9 +9,9 @@ typedef void *efi_handle_t;
 typedef uint64_t efi_uintn_t;
 
 // ===================== Status codes =====================
-#define EFI_SUCCESS             0
-#define EFI_BUFFER_TOO_SMALL    5
-#define EFI_NOT_FOUND           14
+#define EFI_SUCCESS 0
+#define EFI_BUFFER_TOO_SMALL 5
+#define EFI_NOT_FOUND 14
 
 // ===================== EFI GUID =====================
 typedef struct {
@@ -22,20 +22,20 @@ typedef struct {
 } efi_guid_t;
 
 // ===================== Memory type constants =====================
-#define EfiReservedMemoryType       0
-#define EfiLoaderCode               1
-#define EfiLoaderData               2
-#define EfiBootServicesCode         3
-#define EfiBootServicesData         4
-#define EfiRuntimeServicesCode      5
-#define EfiRuntimeServicesData      6
-#define EfiConventionalMemory       7
-#define EfiUnusableMemory           8
-#define EfiACPIReclaimMemory        9
-#define EfiACPIMemoryNVS            10
-#define EfiMemoryMappedIO           11
-#define EfiMemoryMappedIOPortSpace  12
-#define EfiPalCode                  13
+#define EfiReservedMemoryType 0
+#define EfiLoaderCode 1
+#define EfiLoaderData 2
+#define EfiBootServicesCode 3
+#define EfiBootServicesData 4
+#define EfiRuntimeServicesCode 5
+#define EfiRuntimeServicesData 6
+#define EfiConventionalMemory 7
+#define EfiUnusableMemory 8
+#define EfiACPIReclaimMemory 9
+#define EfiACPIMemoryNVS 10
+#define EfiMemoryMappedIO 11
+#define EfiMemoryMappedIOPortSpace 12
+#define EfiPalCode 13
 
 // ===================== Memory descriptor =====================
 typedef struct {
@@ -63,8 +63,8 @@ typedef struct {
 } efi_configuration_table_t;
 
 // ===================== GOP =====================
-#define EFI_PIXEL_FORMAT_RGB  0
-#define EFI_PIXEL_FORMAT_BGR  1
+#define EFI_PIXEL_FORMAT_RGB 0
+#define EFI_PIXEL_FORMAT_BGR 1
 
 typedef struct {
   uint32_t version;
@@ -120,7 +120,7 @@ typedef struct {
   efi_status_t (*allocate_pages)(int, int, efi_uintn_t, uint64_t *);
   efi_status_t (*free_pages)(uint64_t, efi_uintn_t);
   efi_status_t (*get_memory_map)(efi_uintn_t *, void *, uint64_t *,
-                                  efi_uintn_t *, uint32_t *);
+                                 efi_uintn_t *, uint32_t *);
   efi_status_t (*allocate_pool)(int, efi_uintn_t, void **);
   efi_status_t (*free_pool)(void *);
 
@@ -133,23 +133,23 @@ typedef struct {
   void *check_event;
 
   // Protocol Handler Services
-  efi_status_t (*install_protocol_interface)(efi_handle_t *, efi_guid_t *,
-                                              int, void *);
+  efi_status_t (*install_protocol_interface)(efi_handle_t *, efi_guid_t *, int,
+                                             void *);
   efi_status_t (*reinstall_protocol_interface)(efi_handle_t, efi_guid_t *,
-                                                void *, void *);
+                                               void *, void *);
   efi_status_t (*uninstall_protocol_interface)(efi_handle_t, efi_guid_t *,
-                                                void *);
+                                               void *);
   efi_status_t (*handle_protocol)(efi_handle_t, efi_guid_t *, void **);
   void *reserved;
   void *register_protocol_notify;
   efi_status_t (*locate_handle)(int, efi_guid_t *, void *, efi_uintn_t *,
-                                 efi_handle_t *);
+                                efi_handle_t *);
   efi_status_t (*locate_device_path)(efi_guid_t *, void **, efi_handle_t *);
   efi_status_t (*install_configuration_table)(efi_guid_t *, void *);
 
   // Image Services
-  efi_status_t (*load_image)(uint8_t, efi_handle_t, void *, void *,
-                              efi_uintn_t, efi_handle_t *);
+  efi_status_t (*load_image)(uint8_t, efi_handle_t, void *, void *, efi_uintn_t,
+                             efi_handle_t *);
   efi_status_t (*start_image)(efi_handle_t, efi_uintn_t *, uint16_t **);
   efi_status_t (*exit)(efi_handle_t, efi_status_t, efi_uintn_t, uint16_t *);
   efi_status_t (*unload_image)(efi_handle_t);
@@ -202,18 +202,27 @@ typedef struct {
 
 // ===================== GUIDs =====================
 // ACPI 2.0 RSDP
-#define EFI_ACPI20_TABLE_GUID          \
-  { 0x8868E871, 0xE4F1, 0x11D3,       \
-    { 0xBC, 0xB1, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81 } }
+#define EFI_ACPI20_TABLE_GUID                                                  \
+  {                                                                            \
+    0x8868E871, 0xE4F1, 0x11D3, {                                              \
+      0xBC, 0xB1, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81                           \
+    }                                                                          \
+  }
 
 // GOP
-#define EFI_GOP_GUID                   \
-  { 0x9042A9DE, 0x23DC, 0x4A38,       \
-    { 0x96, 0xFB, 0x7A, 0xDE, 0xEE, 0x44, 0xB9, 0x75 } }
+#define EFI_GOP_GUID                                                           \
+  {                                                                            \
+    0x9042A9DE, 0x23DC, 0x4A38, {                                              \
+      0x96, 0xFB, 0x7A, 0xDE, 0xEE, 0x44, 0xB9, 0x75                           \
+    }                                                                          \
+  }
 
 // Loaded Image Protocol
-#define EFI_LOADED_IMAGE_GUID          \
-  { 0x5B1B31A1, 0x9562, 0x11D2,       \
-    { 0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B } }
+#define EFI_LOADED_IMAGE_GUID                                                  \
+  {                                                                            \
+    0x5B1B31A1, 0x9562, 0x11D2, {                                              \
+      0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B                           \
+    }                                                                          \
+  }
 
 #endif // KERNEL_EFI_H
