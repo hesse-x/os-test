@@ -30,6 +30,10 @@ static struct test_entry tests[] = {
     {"sse_smoke", "/test/test_sse_smoke.elf"},
     {"pthread",  "/test/pthread.elf"},
     {"hello_dyn", "/local/hello_dyn.elf"},
+    {"ld_single",   "/test/ld_test_single.elf"},
+    {"ld_chain",    "/test/ld_test_chain.elf"},
+    {"ld_diamond",  "/test/ld_test_diamond.elf"},
+    {"ld_cycle",    "/test/ld_test_cycle.elf"},
 };
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))

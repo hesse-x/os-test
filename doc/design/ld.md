@@ -675,7 +675,10 @@ void __dls_init(uintptr_t *sp, uintptr_t ld_base) {
 
 // 加载 .so 到用户态内存
 // 返回加载基址（同时也是 PT_LOAD 最高 vaddr 的最低地址）
-static void *load_so(const char *path) {
+// out_dyn 回填 .dynamic 段地址（caller 用于建 link_map）
+// 注：实际签名 void *load_so(const char *path, Elf64_Dyn **out_dyn)，
+//     下面为示意（错误处理路径用 dl_puts + 内联 SYS_EXIT，非 sys_exit 函数）
+static void *load_so(const char *path, Elf64_Dyn **out_dyn) {
     int fd = sys_open(path, O_RDONLY, 0);
     if (fd < 0) {
         dl_puts("dl: FATAL: cannot open ");
@@ -775,6 +778,14 @@ static void *load_so(const char *path) {
 ```c
 // user/ldso/relocate.c
 
+// 符号查找从全局作用域头（_dl_link_map = 主 ELF）起遍历，与 eager_bind 一致。
+// 链表顺序 main → ld → libs：若从被重定位对象 lmap 起前向遍历，会漏掉排在它
+// 前面的 ld.so 符号（如 libc.so 引用的 _dl_link_map），故必须从 head 查。
+// （R_X86_64_COPY 仍特殊：从 lmap->l_next 起查，跳过主 ELF 自身 .bss 副本）
+static void *lookup_global(const char *name) {
+    return lookup_symbol_in_link_map(name, _dl_link_map);
+}
+
 static void apply_relocation(Elf64_Rela *r, void *base,
                              struct link_map *lmap) {
     uint32_t type = ELF64_R_TYPE(r->r_info);
@@ -800,7 +811,8 @@ static void apply_relocation(Elf64_Rela *r, void *base,
     }
 
     case R_X86_64_64: {
-        void *sym = lookup_symbol(sym_idx, lmap);
+        const char *name = sym_name(lmap, sym_idx);
+        void *sym = lookup_global(name);
         if (!sym) goto unresolved;
         *addr = (uintptr_t)sym + addend;
         break;
@@ -808,46 +820,50 @@ static void apply_relocation(Elf64_Rela *r, void *base,
 
     case R_X86_64_PC32:
     case R_X86_64_PLT32: {
-        void *sym = lookup_symbol(sym_idx, lmap);
+        const char *name = sym_name(lmap, sym_idx);
+        void *sym = lookup_global(name);
         if (!sym) goto unresolved;
         *(uint32_t *)addr = (uint32_t)((uintptr_t)sym + addend - (uintptr_t)addr);
         break;
     }
 
     case R_X86_64_GOTPCREL: {
-        // 正确语义（两步）：
-        // (1) 定位 GOT entry：r_offset 指向指令中的 4 字节 disp 字段，
-        //     GOT entry 地址由 .got 段布局决定（link_map 记录 .got 段位置，
-        //     entry 与 sym_idx 一一对应，由链接器分配）。
-        // (2) 填 GOT entry = sym（被间接访问的目标地址）。
-        // (3) 写 disp = GOT_entry_addr + addend - addr（PC-relative 指向 GOT entry）。
-        //     执行 mov foo@GOTPCREL(%rip), %rax 时：CPU 计算 rip+disp = GOT_entry_addr，
-        //     从 GOT entry 取出 sym 地址。
-        void *sym = lookup_symbol(sym_idx, lmap);
+        // plan_ld2b3 决策 6：两步但**不改指令 disp**
+        // 指令形式 mov foo@GOTPCREL(%rip), %reg
+        // disp 字段在指令末尾前 4 字节，r_offset 指向 disp 字段位置
+        // instr_end = r_offset + 4（即 disp 之后的地址 = 下条指令地址）
+        // got_entry = instr_end + disp（RIP-relative 计算）
+        // 填 *got_entry = sym，disp 不改（保持 RIP-relative 寻址正确）
+        const char *name = sym_name(lmap, sym_idx);
+        void *sym = lookup_global(name);
         if (!sym) goto unresolved;
-        uintptr_t got_entry = find_or_get_got_entry(lmap, sym_idx);  // lmap->got + offset
+        int32_t disp = *(int32_t *)addr;
+        uintptr_t instr_end = (uintptr_t)addr + 4;
+        uintptr_t got_entry = instr_end + disp;
         *(uintptr_t *)got_entry = (uintptr_t)sym;
-        *(uint32_t *)addr = (uint32_t)(got_entry + addend - (uintptr_t)addr);
         break;
     }
 
     case R_X86_64_GLOB_DAT:
     case R_X86_64_JUMP_SLOT: {
-        void *sym = lookup_symbol(sym_idx, lmap);
+        const char *name = sym_name(lmap, sym_idx);
+        void *sym = lookup_global(name);
         if (!sym) goto unresolved;
         *addr = (uintptr_t)sym;
         break;
     }
 
     case R_X86_64_32: {
-        void *sym = lookup_symbol(sym_idx, lmap);
+        const char *name = sym_name(lmap, sym_idx);
+        void *sym = lookup_global(name);
         if (!sym) goto unresolved;
         *(uint32_t *)addr = (uint32_t)((uintptr_t)sym + addend);
         break;
     }
 
     case R_X86_64_32S: {
-        void *sym = lookup_symbol(sym_idx, lmap);
+        const char *name = sym_name(lmap, sym_idx);
+        void *sym = lookup_global(name);
         if (!sym) goto unresolved;
         *(int32_t *)addr = (int32_t)((uintptr_t)sym + addend);
         break;
@@ -887,6 +903,7 @@ unresolved:
 
 **关键策略：**
 
+- **符号查找作用域 = 全局链表头 `_dl_link_map`**：所有非 COPY 重定位的符号解析（`lookup_global`）都从主 ELF 起遍历整条 `_dl_link_map`，与 `eager_bind` 一致。**不能**从被重定位对象 `lmap` 起前向遍历——多依赖链表顺序为 `main → ld → libs`（见 §8.2.2），ld.so 排在 libc.so 等 `.so` **之前**，从 libc.so 起前向遍历会漏掉 ld.so 的符号（如 libc.so 引用的 `_dl_link_map` GLOB_DAT），导致 `FATAL: unresolved symbol '_dl_link_map'`。从 head 查符合 ELF 全局作用域语义（主程序优先，可覆盖 libc 行为），也保证排在被重定位对象之前的对象（ld.so）能被解析到。`R_X86_64_COPY` 是唯一例外：从 `lmap->l_next` 起查以跳过主 ELF 自身 `.bss` 中的同名待填充副本（避免自引用 `memcpy`）。
 - **未知类型 hard-fail**：直接报错 + `sys_exit(1)`，不静默跳过。掩盖真实链接错误比加载失败更难调。诊断必须打印**类型 + 对象 base + r_offset + 符号名**（对照 `dl: loaded libc.so @ 0x800000` 即知 base 归属），否则只看到 `unknown reloc type 5` 仍需手动 `readelf -r` 交叉对照。TLS 重定位类型（16-23, 35-36）额外提示「ld.so 未实现 `__tls_get_addr` / TLS descriptor，共享库内 `__thread` 变量改用 TCB 字段」——这是 `__thread` 在 `.so` 中触发 `R_X86_64_DTPMOD64` 等通用动态 TLS 重定位的常见陷阱。
 - **未解析符号加载时立即报错**：eager binding 的优势（ld.md #10）。诊断同样打印符号名 + 对象 base + r_offset。
 - `R_X86_64_PLT32` 等价 `R_X86_64_PC32`（gcc 在 x86-64 把 PLT 调用编译成 PC32 + PLT32 标记，链接器合并处理）。
@@ -964,19 +981,22 @@ static uint32_t gnu_hash(const char *s) {
 **符号查找顺序（ld.md #10）：**
 
 ```
-主 ELF → libc.so（按 DT_NEEDED 出现顺序）
+主 ELF → ld.so → 各 .so（按 DT_NEEDED 递归加载顺序，依赖先于依赖者）
 先找到的赢，主 ELF 优先（用户可覆盖 libc 行为）
 ```
+
+链表顺序在 §8.2.2 装配后为 `main → ld → libs`（ld.so 节点静态、紧随主 ELF，各 `.so` 按递归加载顺序尾插）。符号查找统一从链表头 `_dl_link_map` 起 `l_next` 遍历（见 §3.3.4 `lookup_global` 与 `eager_bind`），首个命中即赢。
 
 ```c
 // user/ldso/symtab.c
 
-// 遍历 link_map 查找符号
-// lmap 链表顺序：主 ELF → libc.so → ...
+// 遍历 link_map 查找符号（从传入的起点 lmap 起 l_next 遍历）
+// 调用方传 _dl_link_map 即从主 ELF 起全局查找
 void *lookup_symbol_in_link_map(const char *name, struct link_map *lmap) {
     for (struct link_map *l = lmap; l; l = l->l_next) {
-        void *sym = gnu_hash_lookup(name, l->symtab, l->strtab, l->gnu_hash);
-        if (sym) return (char *)l->base + (uintptr_t)sym;
+        Elf64_Sym *sym = gnu_hash_lookup(name, (Elf64_Sym *)l->symtab,
+                                         l->strtab, (uint32_t *)l->gnu_hash);
+        if (sym) return (char *)l->base + (uintptr_t)sym->st_value;
     }
     return NULL;
 }
@@ -988,96 +1008,86 @@ void *lookup_symbol_in_link_map(const char *name, struct link_map *lmap) {
 // user/ldso/relocate.c
 
 // eager binding：遍历 .rela.plt，立即解析每个 JUMP_SLOT
-static void eager_bind(struct link_map *l) {
-    Elf64_Rela *plt_rela = l->rela_plt;
+// 符号从全局作用域头 _dl_link_map 起查（与 apply_relocation 的 lookup_global 一致）
+void eager_bind(struct link_map *l) {
+    Elf64_Rela *plt_rela = (Elf64_Rela *)l->rela_plt;
     size_t plt_sz = l->rela_plt_sz;
-    int count = 0;
+    if (!plt_rela || plt_sz == 0) return;
 
     for (size_t i = 0; i < plt_sz / sizeof(Elf64_Rela); i++) {
         Elf64_Rela *r = &plt_rela[i];
         if (ELF64_R_TYPE(r->r_info) != R_X86_64_JUMP_SLOT) continue;
 
         uint32_t sym_idx = ELF64_R_SYM(r->r_info);
-        const char *name = l->strtab + l->symtab[sym_idx].st_name;
-        void *sym = lookup_symbol_in_link_map(name, l->l_prev);  // 从前驱查
-        // 注：libc.so 的 JUMP_SLOT 解析需在主 ELF + libc.so 都加载后做
-        // 所以 eager binding 在所有 .so 加载完后统一做
+        const char *name = l->strtab + ((Elf64_Sym *)l->symtab)[sym_idx].st_name;
+        void *sym = lookup_symbol_in_link_map(name, _dl_link_map);  // 从 head 查
 
         if (!sym) {
-            dl_puts("dl: FATAL: unresolved symbol ");
+            dl_puts("dl: FATAL: unresolved PLT symbol '");
             dl_puts(name);
+            dl_puts("' @base ");
+            dl_put_hex((uint64_t)l->base);
             sys_exit(1);
         }
 
         uintptr_t *got_entry = (uintptr_t *)((char *)l->base + r->r_offset);
         *got_entry = (uintptr_t)sym;
-        count++;
     }
-
-    dl_puts("dl: relocated N symbols");  // N 替换为 count
 }
 ```
 
 **关键点：**
 
-- eager binding 顺序：所有 .so 加载完 → 统一 eager bind（保证符号查找能跨模块）
+- eager binding 顺序：各对象在自身 `relocate_object` 时先 `apply_relocation` 处理 `.rela.dyn`，再 `eager_bind` 处理 `.rela.plt`；对象按「依赖先于依赖者」顺序重定位（见 §8.2.2），故被依赖者的符号已就绪
 - 不设 `.got.plt` trampoline（省掉 `_dl_runtime_resolve` 汇编，ld.md #10）
 - 未解析符号加载时立即报错，调试更直接
 
 #### 3.3.7 link_map 构造 + _dl_link_map
 
 ```c
-// user/ldso/link_map.c
+// user/include/sys/link_map.h（与 user/ldso/link_map.c 同构，libc.so 侧也用）
 
 struct link_map {
-    uintptr_t base;            // 加载基址
-    Elf64_Dyn *dynamic;        // .dynamic 段地址
-    struct link_map *l_next;   // 链表
+    uintptr_t base;              // 加载基址
+    char soname[64];             // DT_NEEDED soname（如 "libc.so"）；主 ELF/ld.so 可为空
+    void *dynamic;               // .dynamic 段地址
+    struct link_map *l_next;     // 链表
     struct link_map *l_prev;
     // 符号查找辅助
-    Elf64_Sym *symtab;
+    void *symtab;
     const char *strtab;
-    uint32_t *gnu_hash;
-    Elf64_Rela *rela_dyn;
+    void *gnu_hash;
+    void *rela_dyn;
     size_t rela_dyn_sz;
-    Elf64_Rela *rela_plt;
+    void *rela_plt;
     size_t rela_plt_sz;
-    // .got 段位置（GOTPCREL 重定位用，§3.3.4）
-    void *got_addr;
-    size_t got_size;
     // PT_TLS（供 __libc_start_main 合并）
     void *tls_template;
     size_t tls_tdata_size;
     size_t tls_tbss_size;
     size_t tls_align;
 };
+// 注：GOTPCREL 不需要 got_addr/got_size 字段——
+// 实测语义见 §3.3.4：r_offset 指向指令内 disp 字段，从 disp 反算 GOT entry 地址。
 
-// 全局变量，__libc_start_main 读取
+// 全局变量，__libc_start_main 通过 extern 读取（ld.so 导出，visibility("default")，
+// ld.so 全局 -fvisibility=hidden，仅此符号导出）
 struct link_map *_dl_link_map = NULL;
 
-// 构造 link_map 链表
-void build_link_map(uintptr_t main_base, Elf64_Dyn *main_dyn,
-                    uintptr_t libc_base, Elf64_Dyn *libc_dyn) {
-    static struct link_map main_map, libc_map;  // 静态分配（ld.so 不用 malloc 太早）
+// ld.so 自身：保留单个静态节点（无外部依赖，避免一次 malloc；
+// 且 _dl_link_map 导出点不变）
+struct link_map g_ld_map_static;
 
-    fill_link_map(&main_map, main_base, main_dyn);  // 解析 .dynamic 填 symtab/strtab/gnu_hash/rela_dyn/rela_plt/got_addr/PT_TLS
-    fill_link_map(&libc_map, libc_base, libc_dyn);  // 同上
-
-    main_map.l_next = &libc_map;
-    libc_map.l_prev = &main_map;
-
-    _dl_link_map = &main_map;
-}
-
-// __libc_start_main 通过 extern 读取
-// extern struct link_map *_dl_link_map;  // 在 libc.so/libc.a 头文件
+// 解析 .dynamic 填 link_map 的符号查找 + TLS 字段（hidden：跨文件可见但不导出）
+void fill_link_map(struct link_map *l, uintptr_t base, Elf64_Dyn *dyn);
 ```
 
 **关键点：**
 
-- link_map 静态分配（ld.so 早期 malloc 可能未就绪）
+- 链表由 `__dls_init` 的加载循环动态构造（§8.2.2），**无 `build_link_map` 三参数函数**——二元模型时代写死的 `build_link_map(main, libc, ld)` 在多依赖通用化后废弃（见 §8.1 写死点 ③）
+- 主 ELF / 各 `.so` 节点在 bootstrap 后 `malloc` 分配（ld.so 自重定位已完成，`malloc` via `dl_sys_mmap` 可用）；ld.so 自身用静态节点 `g_ld_map_static`
 - `_dl_link_map` 是全局变量，ld.so 导出，`__libc_start_main` 通过 `extern` 读取
-- 链表顺序：主 ELF → libc.so（符号查找顺序匹配 ld.md #10）
+- 链表顺序：`main → ld → libs`（§8.2.2），符号查找从 head 起 `l_next` 遍历（§3.3.4/§3.3.5）
 
 #### 3.3.8 跳主 ELF entry
 
@@ -1201,29 +1211,32 @@ function(add_user_dyn_elf name)
         math(EXPR idx "${idx} + 1")
     endforeach()
 
-    # gcc driver 链接：crt0.o + 主 ELF obj + -lc（记 DT_NEEDED，不提取符号）
+    # gcc driver 链接：crt0.o + 主 ELF obj + 各 .so（全路径，记 DT_NEEDED，不提取符号）
     set(LD_ARGS ${CMAKE_BINARY_DIR}/crt0.o ${OBJ_FILES})
+    set(SO_DEPS "")
     if(ARG_LINK_LIBS)
-        foreach(lib ${ARG_LINK_LIBS})
-            list(APPEND LD_ARGS -L${CMAKE_BINARY_DIR} -l${lib})
+        foreach(lib ${ARG_LINK_LINK_LIBS})
+            # 动态 ELF 优先链 .so（全路径，避免 -lc 误选 libc.a）
+            set(so_path ${CMAKE_BINARY_DIR}/lib${lib}.so)
+            list(APPEND LD_ARGS ${so_path})
+            list(APPEND SO_DEPS ${so_path})
         endforeach()
     endif()
-    # 阶段 2a 实测：-nostdlib + 无动态依赖时 ld 丢弃 --dynamic-linker 指定的 .interp 段
-    # 生成空 stub 共享库 + --no-as-needed 强制动态链接，保留 PT_INTERP + PT_DYNAMIC
-    set(STUB_SO ${CMAKE_BINARY_DIR}/libdyn_stub.so)
-    add_custom_command(OUTPUT ${STUB_SO}
-        COMMAND gcc -shared -fPIC -nostdlib -o ${STUB_SO} -x c /dev/null
-        COMMENT "Generating dyn stub shared library")
+    # 注：每个 add_user_dyn_elf 调用至少 LINK_LIBS c（libc.so），该真实 DT_NEEDED
+    # 已足够让 ld 保留 PT_INTERP + PT_DYNAMIC，无需额外 stub 共享库（见下文「stub
+    # 共享库移除」说明）。
     add_custom_command(OUTPUT ${ELF_FILE}
         COMMAND gcc -fno-pie -no-pie
                 -Wl,--dynamic-linker,/lib/ld.so
                 -Wl,--hash-style=gnu
                 -Wl,--no-as-needed
+                -Wl,--allow-shlib-undefined
                 -nostdlib -nodefaultlibs
-                -o ${ELF_FILE} ${LD_ARGS} -L${CMAKE_BINARY_DIR} -ldyn_stub
-        DEPENDS ${OBJ_FILES} ${CMAKE_BINARY_DIR}/crt0.o ${ARG_LINK_LIBS} ${STUB_SO}
+                -o ${ELF_FILE} ${LD_ARGS}
+        DEPENDS ${OBJ_FILES} ${CMAKE_BINARY_DIR}/crt0.o ${SO_DEPS}
         COMMENT "Linking dynamic ${name}.elf")
     add_custom_target(${name}_dyn_elf ALL DEPENDS ${ELF_FILE})
+    add_dependencies(${name}_dyn_elf crt0_obj)
 endfunction()
 
 # add_user_ldso: ld.so 专用（-shared -fPIC，自带 minilibc，不链 libc.a）
@@ -1670,13 +1683,19 @@ __trapret:
 | `__dls3(sp)` | bootstrap | 纯算术，不用 GOT/全局指针/字符串字面量 |
 | `dl_puts(s)` | bootstrap+ | SYS_write 直写，可用 |
 | `dl_put_hex(val)` | bootstrap+ | 局部数组转十六进制，可用 |
-| `__dls_init(sp, ld_base)` | post-bootstrap | 可用全局变量/GOT |
-| `load_so(path)` | post-bootstrap | 返回加载基址 |
-| `apply_relocation(r, base, lmap)` | post-bootstrap | 10 种类型（9 PIC + COPY）+ 诊断 hard-fail |
-| `gnu_hash_lookup(name, symtab, strtab, hash)` | post-bootstrap | 返回符号地址 |
-| `eager_bind(lmap)` | post-bootstrap | 遍历 JUMP_SLOT |
-| `build_link_map(...)` | post-bootstrap | 填 _dl_link_map |
-| `lookup_symbol_in_link_map(name, lmap)` | post-bootstrap | 链表顺序查找 |
+| `__dls_init(sp, ld_base)` | post-bootstrap | 可用全局变量/GOT；递归加载主 ELF 全部 DT_NEEDED（§8.2.2） |
+| `load_so(path, &dyn)` | post-bootstrap | 返回加载基址，回填 .dynamic 地址 |
+| `load_one(soname)` | post-bootstrap | 路径搜索 `/lib/<soname>` → 回退 `/test/lib/<soname>`；建 link_map 节点不重定位 |
+| `load_recursive(soname, tail)` | post-bootstrap | 递归加载 soname 及其全部 NEEDED（BFS 去重），返回新链尾 |
+| `find_loaded`/`register_loaded` | post-bootstrap | `g_loaded[16]` 已加载库表（去重 + 闭环收敛） |
+| `apply_relocation(r, base, lmap)` | post-bootstrap | 10 种类型（9 PIC + COPY）+ 诊断 hard-fail；符号从 `_dl_link_map` head 查 |
+| `lookup_global(name)` | post-bootstrap | `apply_relocation` 用：从 `_dl_link_map` 起 `l_next` 全局查找 |
+| `gnu_hash_lookup(name, symtab, strtab, hash)` | post-bootstrap | 返回符号 Elf64_Sym *（caller 加 base） |
+| `lookup_symbol_in_link_map(name, lmap)` | post-bootstrap | 从 lmap 起 `l_next` 链表顺序查找，返回绝对地址 |
+| `eager_bind(lmap)` | post-bootstrap | 遍历 .rela.plt 的 JUMP_SLOT，符号从 `_dl_link_map` head 查 |
+| `relocate_object(lmap)` | post-bootstrap | apply_relocation 遍历 .rela.dyn + eager_bind |
+| `fill_link_map(l, base, dyn)` | post-bootstrap | 解析 .dynamic 填符号查找 + TLS 字段 |
+| `fill_tls_from_phdr(l, base, phdr, phent, phnum)` | post-bootstrap | 从 PHDR 找 PT_TLS 填 tls_* 字段 |
 
 ## 5 风险与稳定性方案
 
@@ -1852,7 +1871,7 @@ dl: jump to entry 0x401000
 2. **`dl_puts`/`dl_put_hex` 加 `visibility("hidden")`**：同上，避免 `__dls3` 调它们走 PLT。不能用 `static`（跨文件），`hidden` 是"文件内可见但不导出动态符号表"。
 3. **`dls3.c` 用 `asm("leaq _DYNAMIC(%rip)")` 取 `.dynamic` 地址**：C 代码 `extern Elf64_Dyn _DYNAMIC[]` + `(char *)_DYNAMIC` 在 `-fPIC` 下走 GOT（`mov .got(%rip), %rax`），bootstrap 前 GOT 未填读到 0。改 asm 直接 RIP-relative 取运行时地址。
 4. **`dl_puts.c`/`dls3.c` include `common/syscall_nums.h` 而非 `common/syscall.h`**：`syscall.h` 拉 `arch/x64/utils.h`（含内核态 cli/sti/cr3/load_cr3 等），ld.so 用户态不需要；只需 `SYS_WRITE`/`SYS_EXIT` 常量。
-5. **`add_user_dyn_elf` 加 stub 共享库**：`-nostdlib -nodefaultlibs` + 无动态依赖时，即使传 `-Wl,--dynamic-linker,/lib/ld.so`，ld 也丢弃 `.interp` 段（不生成 PT_INTERP）。生成空 `libdyn_stub.so` + `-Wl,--no-as-needed -ldyn_stub` 强制动态链接，保留 PT_INTERP + PT_DYNAMIC。
+5. **`add_user_dyn_elf` 不再需要 stub 共享库**（多依赖通用化后移除）：阶段 2a 时 `-nostdlib -nodefaultlibs` + 无动态依赖会让 ld 丢弃 `.interp` 段，故曾生成空 `libdyn_stub.so` + `-Wl,--no-as-needed -ldyn_stub` 强制动态链接保留 `PT_INTERP`。但审计全部 `add_user_dyn_elf` 调用均至少 `LINK_LIBS c`（libc.so），该**真实** `DT_NEEDED` 已足够强制动态可执行文件，stub 是冗余。多依赖通用化（§8）后 `__dls_init` 的 `load_recursive` 递归加载**所有** `DT_NEEDED`，stub 从不部署到磁盘 → 去开 `/lib/libdyn_stub.so` 失败 `FATAL`。故移除 stub 生成与 `-ldyn_stub`，每个动态 ELF 的 `DT_NEEDED` 只剩真实依赖。
 6. **内核 `elf_load_internal` 非页对齐段映射 bug 修复**（plan_ld1 遗留）：原 `page_off = (page_addr - base) - p_vaddr` 对 `p_vaddr` 非页对齐的段（如 ld.so 的 `.dynamic`/`.data` 段 `p_vaddr=0x3f20`）算出负值（uint64 下溢），导致 `copy_len=0`，段所在页映射为全 0，bootstrap 读 `.dynamic` 全 0 找不到 DT_RELA。改为按 `p_offset & ~0xFFF` 页对齐基准 + 整页拷贝（页内段前部分属于其他段或文件头，整页拷贝保留正确内容）。此修复属于 plan_ld1 内核 execve 范围，但阶段 2a 首次触发（静态 ELF 段都页对齐，未暴露）。
 
 **实测结果：**
@@ -2080,12 +2099,16 @@ gcc -fno-pie -no-pie \
 /lib/libc.so      ← libc.so（动态）
 /bin/hello        ← 静态 hello（现状）
 /bin/hello_dyn    ← 动态 hello
-/bin/test_*       ← 测试 ELF（阶段 5 改动态）
+/bin/test_*       ← 测试 ELF（动态，挂进 test_runner）
+/test/test_runner.elf  ← 测试调度器（动态）
+/test/ld_test_*.elf    ← ld.so 多依赖测试主 ELF（§8.3，4 个场景）
+/test/lib/liba.so      ← ld.so 测试 stub .so（load_one 回退 /test/lib/ 路径）
+/test/lib/libb.so      ← 同上
 /init             ← init（静态，现状）
 /bin/shell        ← shell（静态）
 ```
 
-**`libc.a` 不入镜像**：静态 ELF 已把 libc 代码链进自己，`libc.a` 仅构建时用。
+**`libc.a` 不入镜像**：静态 ELF 已把 libc 代码链进自己，`libc.a` 仅构建时用。stub `.so` 放 `/test/lib/` 而非 `/lib/`，与生产库分区——`load_one` 先试 `/lib/` 失败回退 `/test/lib/`（§8.2.2），避免测试 stub 污染生产库路径。
 
 ### 7.3 调试环境
 
@@ -2152,3 +2175,207 @@ dl: relocated 234 symbols
 dl: jump to entry 0x401000
 hello, world
 ```
+
+---
+
+## 8 多依赖通用化（N 库 + 递归加载）
+
+> **本节已落地**：ld.so 装配层从「主 ELF + libc.so」二元假设解放到「主 ELF + N 个 `DT_NEEDED` + 递归加载依赖的依赖」。第 1-7 章是二元模型时代的原始设计（hello_dyn 验收形态），其中 §3.3 的代码示例仍保留二元写法作为单依赖情形的可读参考；§3.3.4/§3.3.5/§3.3.6/§3.3.7 已回写多依赖实测语义（符号查找从 head、`eager_bind`、`link_map` 动态化等）。本节描述的装配逻辑是当前真实实现，触发场景是接入 `third_party/drm/`（libdrm.so），后续 Mesa/Wayland 等任意第三方 `.so` 直接复用。
+>
+> **不是重写 ld.so**：底层积木（`load_so.c` 的 `.so` 加载、`symtab.c` 的 GNU hash 符号查找、`relocate.c` 的重定位类型处理）已经通用，本节只改顶层的「装配逻辑」——三处写死的二元假设。
+
+### 8.1 现状诊断：源码 vs §3.3 原设计（重构前二元模型）
+
+> 本小节记录**多依赖重构前**的二元模型现状，作为重构动机的对照基线。重构后这三处写死均已通用化（见 §8.2），源码中不再存在。
+
+§3.3.2 的代码示例展示的是**原设计意图**——用 `needed[DT_NEEDED_MAX]` 数组收集主 ELF 全部 `DT_NEEDED`：
+
+```c
+const char *needed[DT_NEEDED_MAX] = {0};
+int needed_cnt = 0;
+for (Elf64_Dyn *d = main_dyn; d->d_tag != DT_NULL; d++) {
+    if (d->d_tag == DT_NEEDED) {
+        needed[needed_cnt++] = main_dynstr + d->d_un.d_val;
+    }
+}
+```
+
+但源码实现是简化版二元模型（`grep DT_NEEDED_MAX user/ldso/` 全空，该常量与数组**只在本文档，未进源码**）：
+
+| 写死点 | 重构前源码位置 | 二元假设 | 通用化目标（已落地） |
+|--------|----------|----------|------------|
+| ① 只读第一个 NEEDED | `dls_init.c` 命中即 `break` | 主 ELF 恰好 `NEEDED=libc.so` 一个 | 遍历主 ELF 全部 `DT_NEEDED`，`load_recursive` 递归加载 |
+| ② link_map 静态 3 节点 | `link_map.c` `static main_map/libc_map/ld_map` | 恰好主+libc+ld 三个 | 动态分配 N 节点（ld.so 保留单个全局节点 `g_ld_map_static`） |
+| ③ build_link_map 写死三参数 | `link_map.c` `build_link_map(main, libc, ld)` | 链表 `主→libc→ld` 写死 | 函数废弃，链表由 `__dls_init` 加载循环动态构造 |
+
+**符号查找本身已通用**——`symtab.c` `for (l = lmap; l; l = l->l_next)` 遍历任意长度链表查 GNU hash，不限定 3 节点；`relocate.c` 的 JUMP_SLOT/GLOB_DAT/COPY 处理也不限定库。所以通用化的全部工作量收敛在 ①②③ 的装配逻辑（实测改动含 head/tail 链表构造、重定位循环跳过 ld、符号查找改为从 head 全局查找三处配套修正，见 §8.3 踩坑记录）。
+
+### 8.2 设计：递归加载 + 动态 link_map
+
+#### 8.2.1 加载队列与去重
+
+`DT_NEEDED` 是闭包——主 ELF `NEEDED=libdrm.so`，libdrm.so 自身 `NEEDED=libc.so`，需递归加载到闭包不增长为止。加载顺序遵循「依赖先于依赖者」（libc.so 必须在 libdrm.so 之前完成重定位，否则 libdrm.so 的 JUMP_SLOT 解析时 libc 符号未就绪）。
+
+去重避免 libc.so 被主 ELF 和 libdrm.so 各加载一次（两份 libc.so 会导致全局符号二义 + TLS 模板重复初始化）。
+
+```c
+// user/ldso/dls_init.c
+
+// 已加载库表：soname → link_map 节点。去重 + 闭环检测。
+// bootstrap 后可用 malloc（ld.so 自重定位已完成），故用动态结构。
+struct loaded_lib {
+    char soname[64];          // DT_NEEDED 是 soname（如 "libc.so"）
+    struct link_map *map;     // 加载后建好的 link_map 节点
+};
+static struct loaded_lib g_loaded[16];   // 上限足够 OS 用，溢出报错
+static int g_loaded_cnt = 0;
+
+// soname → link_map，未加载返回 NULL
+static struct link_map *find_loaded(const char *soname);
+
+// 加载单个 .so（若已加载则去重返回），建 link_map 节点，但不重定位。
+// 返回新节点的 l_next 供链表拼接。
+static struct link_map *load_one(const char *soname);
+```
+
+#### 8.2.2 递归加载主流程
+
+```c
+void __dls_init(uintptr_t *sp, uintptr_t ld_base) {
+    // ... §3.3.2 取主 ELF phdr/entry/PT_DYNAMIC（不变）...
+    // ... 找 DT_STRTAB（不变）...
+
+    // 1. ld.so 自身节点：继续静态（bootstrap 已完成，但 ld.so 无外部依赖，
+    //    静态节点零成本，且 _dl_link_map 导出点不变）
+    struct link_map *ld_map = &g_ld_map_static;   // 保留单个静态节点
+    fill_link_map(ld_map, ld_base, _DYNAMIC);
+    ld_map->soname[0] = '\0';
+
+    // 2. 递归加载主 ELF 的全部 DT_NEEDED
+    //    主 ELF 非依赖者本身不进 loaded 表（它是入口，不是库），
+    //    但其 NEEDED 递归展开。链表按加载完成顺序构造，天然满足
+    //    「依赖先于依赖者」（BFS：先加载的库 l_next 靠后）。
+    //
+    //    链表最终形态：主 → ld → libc.so → libdrm.so → ...
+    //    （ld.so 紧随主 ELF；libc.so 在 libdrm.so 之前，因 libdrm.so NEEDED
+    //     libc.so，递归先加载 libc.so 再加载 libdrm.so）
+    //
+    //    !! head 固定为链首 ld_map，tail 随尾插前进 !!
+    //    load_recursive 返回【新尾】不是链首——若用 head = load_recursive(...)
+    //    收集返回值，循环结束后 head 指向最后一个库，main_map->l_next = head
+    //    会把 main 直接连到末库，ld_map 及中间库全部游离。故 head/tail 分离：
+    //    head 只用于最后 main_map 挂接，tail 承载尾插递进。
+    struct link_map *head = ld_map;
+    struct link_map *tail = ld_map;
+    for (Elf64_Dyn *d = main_dyn; d->d_tag != DT_NULL; d++) {
+        if (d->d_tag == DT_NEEDED) {
+            const char *soname = main_dynstr + d->d_un.d_val;
+            tail = load_recursive(soname, tail);   // 递归加载 + 链入新尾
+        }
+    }
+
+    // 3. 主 ELF 节点（非 PIE，base=0），链到链表头
+    struct link_map *main_map = malloc(sizeof(*main_map));
+    fill_link_map(main_map, 0, main_dyn);
+    main_map->soname[0] = '\0';
+    main_map->l_next = head;          // head = ld_map（链首）
+    main_map->l_prev = NULL;
+    if (head) head->l_prev = main_map;
+    _dl_link_map = main_map;
+
+    // 4. 填主 ELF 的 PT_TLS（不变）
+
+    // 5. 重定位：遍历整条链表（跳过 ld.so 自身和主 ELF）
+    //    ld.so 已在 bootstrap 自重定位；主 ELF 最后重定位（其 JUMP_SLOT 可能
+    //    依赖任意已加载库的符号）。其余对象按「依赖先于依赖者」顺序重定位。
+    //    链表顺序 main → ld → libs：ld 夹在中间，故用 `if (l == ld_map) continue`
+    //    显式跳过，而不是 `l != ld_map` 作循环终止条件（后者会在 ld 处停下、
+    //    漏掉 ld 之后的所有 .so）。
+    for (struct link_map *l = main_map->l_next; l; l = l->l_next) {
+        if (l == ld_map) continue;
+        dl_puts("dl: relocating ");
+        dl_puts(l->soname);
+        relocate_object(l);
+    }
+    dl_puts("dl: relocating main ELF");
+    relocate_object(main_map);
+
+    // 6. 跳主 ELF entry（不变）
+}
+
+// 递归加载 soname 及其全部 NEEDED（BFS），已加载则去重（兼闭环收敛）。
+// 链入链表尾部 tail，返回新尾。
+static struct link_map *load_recursive(const char *soname, struct link_map *tail) {
+    if (find_loaded(soname)) return tail;          // 去重（a↔b 互 NEEDED 时天然终止）
+    struct link_map *m = load_one(soname);          // load_so + 建 link_map（不重定位）
+    register_loaded(soname, m);
+    tail->l_next = m;  m->l_prev = tail;  tail = m;
+
+    // 递归：读 m 自身的 .dynamic，加载它的全部 DT_NEEDED
+    // dynstr 直接用 fill_link_map 已填好的 m->strtab（运行时绝对地址）
+    const char *dynstr = m->strtab;
+    for (Elf64_Dyn *d = (Elf64_Dyn *)m->dynamic; d->d_tag != DT_NULL; d++) {
+        if (d->d_tag == DT_NEEDED) {
+            const char *dep = dynstr + d->d_un.d_val;
+            tail = load_recursive(dep, tail);
+        }
+    }
+    return tail;
+}
+```
+
+**关键不变量：** 加载顺序 = 重定位顺序 = 链表 `l_next` 顺序 = 「依赖先于依赖者」。libc.so 因被 libdrm.so `NEEDED`，在 `load_recursive("libdrm.so")` 的递归调用中先加载入链表，故 `l_next` 遍历到 libc.so 早于 libdrm.so。libdrm.so 重定位时其 JUMP_SLOT（`open`/`ioctl` 等）从 `_dl_link_map` head 起查（§3.3.4 `lookup_global`），遍历到 libc.so 节点解析（`symtab.c` 已通用）。
+
+**`load_one` 路径搜索（实测落地，对齐 Linux `DT_RPATH` 思路）：** soname 是裸文件名（如 `"libc.so"`），`load_one` 先尝试 `/lib/<soname>`（生产库），用 `SYS_OPEN` 探测存在性（`load_so` open 失败会 `SYS_EXIT`，不能靠返回值区分）；`fd < 0` 则回退 `/test/lib/<soname>`（ld.so 多依赖测试 stub）。当前不解析 `DT_RPATH`/`DT_RUNPATH`（§8.4 已知边界），硬编码两个前缀已满足「生产库放 `/lib/`、测试 stub 放 `/test/lib/`」的全部需求。
+
+**闭环去重对齐 Linux/glibc：** `find_loaded` 命中即返回，天然终止递归，环静默打破不报错。ELF 规范未禁止 NEEDED 环（glibc 的 `libc.so↔libpthread.so` 即环），ld.so 用 loaded 表去重收敛。`ld_test_cycle` 场景（`a↔b` 互 NEEDED）验证此行为。
+
+#### 8.2.3 link_map 动态化
+
+`link_map.c` 的静态 3 节点改为：ld.so 自身保留 1 个全局节点（无外部依赖、零成本），其余节点（主 ELF + 各 `.so`）在 bootstrap 后 `malloc` 分配。`build_link_map` 三参数函数废弃，链表由加载循环动态构造（见 8.2.2）。
+
+```c
+// user/ldso/link_map.c
+
+// ld.so 自身：保留单个全局节点（非 static——dls_init.c 通过 extern 取地址链入）
+// bootstrap 已完成，ld.so 无 NEEDED，全局节点避免一次 malloc 且 _dl_link_map
+// 导出语义不变
+struct link_map g_ld_map_static;
+// user/include/sys/link_map.h 对应声明：
+//   __attribute__((visibility("hidden")))
+//   extern struct link_map g_ld_map_static;
+
+// main_map/libc_map 静态节点删除——改由 dls_init.c malloc 分配
+// build_link_map(main, libc, ld) 三参数函数废弃——链表由加载循环构造
+```
+
+#### 8.2.4 符号查找顺序（已通用，仅确认）
+
+`symtab.c` 的 `lookup_symbol_in_link_map` 是 `for (l = lmap; l; l = l->l_next)` 纯 `l_next` 遍历，对任意长度链表都成立。`apply_relocation` / `eager_bind` 统一从链表头 `_dl_link_map`（主 ELF）起遍历（§3.3.4 `lookup_global`），而非从被重定位对象 `lmap` 起——这是多依赖链表顺序 `main → ld → libs` 下的**必要**修正：ld.so 排在 libc.so 之前，从 libc.so 起前向遍历会漏掉 ld.so 符号（如 libc.so 引用的 `_dl_link_map` GLOB_DAT）。从 head 查既符合 ELF 全局作用域语义（主程序优先，可覆盖 libc 行为），也保证 ld.so 符号可被解析。`l_prev` 当前未被符号查找使用（COPY 重定位的 `lookup_symbol_def` 也是 `l_next` 向后查）。若将来出现主程序静态链 libc.a + 动态链 libdrm.so 的混合模型（libdrm.so 需回溯主程序解析 libc 符号），再考虑 `l_prev` 回溯，本节不预设。
+
+### 8.3 验证（实测落地）
+
+多依赖通用化完全脱钩 drm——§8 的本质是「ld.so 装配层通用化：N 库 + 递归加载」，drm 只是未来第一个消费者。验证用 stub `.so` 拓扑（`liba.so`/`libb.so`，导出 `lda_answer`/`ldb_chain`/`ldb_via_a`，内部调 libc `strcmp` 触发跨模块 JUMP_SLOT）+ 4 个动态主 ELF 全面覆盖装配层行为，挂进 `test_runner`。stub `.so` 打包 `/test/lib/`（`load_one` 回退路径），主 ELF 打包 `/test/`。
+
+| 场景 | 主 ELF NEEDED | 拓扑 | 期望 | 实测 |
+|------|--------------|------|------|------|
+| `ld_single` | libc.so | 单依赖回归 | 递归加载退化为 no-op | PASS（exit 0） |
+| `ld_chain` | libb.so, libc.so | 主→b→{a,libc} 线性链 | 加载顺序 libc 先于 libb；`ldb_chain()==42`、`ldb_via_a()==42` 跨模块解析 | PASS（exit 0） |
+| `ld_diamond` | liba.so, libc.so | 主→{a,libc}, a→libc 菱形 | libc.so 只加载 1 次（去重）；`lda_answer()==41` 解析到唯一 libc.so | PASS（exit 0） |
+| `ld_cycle` | liba.so, libc.so | a↔b 互 NEEDED 闭环 | 无 `dl: FATAL`；liba/libb 各加载 1 次（去重静默打破环）；`lda_answer()==41` | PASS（exit 0） |
+
+`./build.sh --test -d && ./run.sh` 跑 `test_runner` 全部 23 个 suite PASS（含上述 4 个 ld 场景 + `hello_dyn` 单依赖回归），`test_runner` 进程 `exit_code=0`，全日志无 `dl: FATAL`。串口加载日志示例（`ld_chain`）：`dl: loading /test/lib/libb.so` → 递归 `dl: loading /lib/libc.so` → `dl: loading /test/lib/liba.so` → `dl: relocating libb.so`/`liba.so`/`libc.so`/`main ELF` → `dl: jump to entry`，体现「依赖先于依赖者」。
+
+**实测踩坑（已修，回写源码 + 本文）：**
+
+1. **`libdyn_stub.so` 死链接暴露**：阶段 2a 为强制 `PT_INTERP` 引入的空 stub 共享库，给每个动态 ELF 记了 `DT_NEEDED libdyn_stub.so`，但 stub 从不部署到磁盘。旧 `dls_init` 只加载 libc.so、忽略其余 NEEDED，一直被掩盖；§8 的 `load_recursive` 递归加载**所有** NEEDED 后去开 `/lib/libdyn_stub.so` 失败 `FATAL`。审计全部 `add_user_dyn_elf` 调用均至少 `LINK_LIBS c`，libc.so 真实依赖已足够强制动态可执行文件，stub 冗余，移除（§3.4.4）。
+2. **链表 head/tail 混淆**：`head = load_recursive(soname, head)` 误用——`load_recursive` 返回新尾不是链首，循环后 head 指向末库，`main_map->l_next = head` 把 main 直接连末库、ld_map 及中间库游离。改 head 固定链首、tail 承载尾插递进（§8.2.2）。
+3. **重定位循环终止条件**：`for (l = main->l_next; l && l != ld_map; ...)` 假定 ld 在链尾，但新链表 `main → ld → libs` 中 ld 夹中间，循环在 ld 处停下、漏掉 ld 之后所有 .so。改遍历整条链 + `if (l == ld_map) continue` 显式跳过（§8.2.2）。
+4. **符号查找作用域**：`apply_relocation` 从被重定位对象 `lmap` 起前向查符号，新链表里 ld 在 libc.so 之前时会漏查 ld 符号 → libc.so 的 `_dl_link_map` GLOB_DAT `FATAL unresolved`。改从 `_dl_link_map` head 起全局查找（§3.3.4 `lookup_global`）。
+
+### 8.4 已知边界（本节不处理）
+
+- **`dlopen` 运行时加载**：本节只处理**加载期** `DT_NEEDED` 闭包，不涉及运行时 `dlopen`/`dlclose`。后者需要 refcount + 卸载 + 信号安全，是独立工作。OS 当前无 `dlopen` 消费者（Mesa/Wayland 仍走加载期依赖）。
+- **`DT_RPATH`/`DT_RUNPATH` 搜索路径**：当前 `load_one` 硬编码 `/lib/<soname>` → `/test/lib/<soname>` 两前缀探测（§8.2.2），不解析 `DT_RPATH`/`DT_RUNPATH`。已满足「生产库放 `/lib/`、测试 stub 放 `/test/lib/`」的全部需求，将来需要时再加路径搜索。
+- **全局符号作用域与符号插入**（`RTLD_GLOBAL`/interposition）：当前链表顺序「主→ld→依赖」+ 从 head 起 `l_next` 首个命中即赢，等价于主 ELF 优先（用户可覆盖 libc 行为）。Linux 的 `RTLD_LOCAL` 默认 + interposition 语义更复杂，OS 暂不需要。
+- **TLS 模板的递归处理**：`fill_tls_from_phdr` 当前只填主 ELF 的 `PT_TLS`（注释「libc.so/ld.so 通常无 TLS，留 0」）。多依赖后若某个 `.so`（如 pthread 库）有 `PT_TLS`，需递归累加 TLS 模板偏移。本节不处理，留待 pthread/TLS 独立工作（见 `thread.md`）。

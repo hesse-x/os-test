@@ -14,8 +14,13 @@ extern "C" {
 // ld.so 的 link_map.c 定义同一结构，两边必须一致
 // plan_ld2b3 T12 / ld.md §3.3.7
 
+struct Elf64_Dyn;  // 前向声明：ld.so 用 "elf.h"，libc.so 用 <xos/elf.h>，
+                   // 两份定义等价但符号风格不同（具名 struct vs 匿名 typedef），
+                   // 同时包含会冲突。fill_link_map 仅用指针，前向声明足够。
+
 struct link_map {
     uintptr_t base;              // 加载基址
+    char soname[64];           // DT_NEEDED soname（如 "libc.so"）；主 ELF/ld.so 可为空
     void *dynamic;               // .dynamic 段指针
     struct link_map *l_next;     // 链表下一项
     struct link_map *l_prev;     // 链表上一项
@@ -48,6 +53,14 @@ LIBC_EXPORT extern struct tls_info collect_tls_from_link_map(struct link_map *lm
 __attribute__((visibility("hidden")))
 void fill_tls_from_phdr(struct link_map *l, uintptr_t base, uintptr_t phdr,
                         size_t phent, size_t phnum);
+
+// ld.so 内部：解析 .dynamic 填 link_map 符号查找字段（dls_init.c 动态构造链表时调用）
+__attribute__((visibility("hidden")))
+void fill_link_map(struct link_map *l, uintptr_t base, Elf64_Dyn *dyn);
+
+// ld.so 自身静态节点（link_map.c 定义，dls_init.c 取地址链入链表尾）
+__attribute__((visibility("hidden")))
+extern struct link_map g_ld_map_static;
 
 #ifdef __cplusplus
 }

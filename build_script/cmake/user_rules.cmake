@@ -290,12 +290,6 @@ function(add_user_dyn_elf name)
             list(APPEND SO_DEPS ${so_path})
         endforeach()
     endif()
-    # 生成空 stub 共享库，强制 gcc 生成动态可执行文件（PT_INTERP + PT_DYNAMIC）
-    # 否则 -nostdlib + 无动态依赖时 ld 会丢弃 --dynamic-linker 指定的 .interp 段
-    set(STUB_SO ${CMAKE_BINARY_DIR}/libdyn_stub.so)
-    add_custom_command(OUTPUT ${STUB_SO}
-        COMMAND gcc -shared -fPIC -nostdlib -o ${STUB_SO} -x c /dev/null
-        COMMENT "Generating dyn stub shared library")
     add_custom_command(OUTPUT ${ELF_FILE}
         COMMAND gcc -fno-pie -no-pie
                 -Wl,--dynamic-linker,/lib/ld.so
@@ -303,8 +297,8 @@ function(add_user_dyn_elf name)
                 -Wl,--no-as-needed
                 -Wl,--allow-shlib-undefined
                 -nostdlib -nodefaultlibs
-                -o ${ELF_FILE} ${LD_ARGS} -L${CMAKE_BINARY_DIR} -ldyn_stub
-        DEPENDS ${OBJ_FILES} ${CMAKE_BINARY_DIR}/crt0.o ${SO_DEPS} ${STUB_SO}
+                -o ${ELF_FILE} ${LD_ARGS}
+        DEPENDS ${OBJ_FILES} ${CMAKE_BINARY_DIR}/crt0.o ${SO_DEPS}
         COMMENT "Linking dynamic ${name}.elf")
     add_custom_target(${name}_dyn_elf ALL DEPENDS ${ELF_FILE})
     add_dependencies(${name}_dyn_elf crt0_obj)

@@ -1,5 +1,5 @@
-// ld.so link_map 构造：3 个 map（主 ELF → libc.so → ld.so）
-// ld.md §3.3.7 / plan_ld2b3 T18
+// ld.so link_map 构造：ld.so 自身静态节点 + 动态分配的主 ELF/各 .so 节点
+// ld.md §3.3.7 / §8.2.3 / plan_ld2b3 T18
 
 #include <stddef.h>
 #include <stdint.h>
@@ -11,13 +11,12 @@
 __attribute__((visibility("default")))
 struct link_map *_dl_link_map = NULL;
 
-// 静态分配 3 个 link_map（ld.so 早期不用 malloc）
-static struct link_map main_map;
-static struct link_map libc_map;
-static struct link_map ld_map;
+// ld.so 自身：保留单个静态节点（无外部依赖，避免一次 malloc）
+struct link_map g_ld_map_static;
 
 // 解析 .dynamic 填 link_map 的符号查找 + TLS 字段
-static void fill_link_map(struct link_map *l, uintptr_t base, Elf64_Dyn *dyn) {
+__attribute__((visibility("hidden")))
+void fill_link_map(struct link_map *l, uintptr_t base, Elf64_Dyn *dyn) {
     l->base = base;
     l->dynamic = dyn;
 
@@ -91,21 +90,4 @@ void fill_tls_from_phdr(struct link_map *l, uintptr_t base, uintptr_t phdr,
         }
     }
 }
-// 构造 link_map 链表：主 ELF → libc.so → ld.so
-void build_link_map(uintptr_t main_base, Elf64_Dyn *main_dyn,
-                    uintptr_t libc_base, Elf64_Dyn *libc_dyn,
-                    uintptr_t ld_base, Elf64_Dyn *ld_dyn) {
-    fill_link_map(&main_map, main_base, main_dyn);
-    fill_link_map(&libc_map, libc_base, libc_dyn);
-    fill_link_map(&ld_map,   ld_base,   ld_dyn);
 
-    // 链表连接：main → libc → ld
-    main_map.l_prev = NULL;
-    main_map.l_next = &libc_map;
-    libc_map.l_prev = &main_map;
-    libc_map.l_next = &ld_map;
-    ld_map.l_prev = &libc_map;
-    ld_map.l_next = NULL;
-
-    _dl_link_map = &main_map;
-}

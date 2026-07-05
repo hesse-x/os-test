@@ -26,6 +26,14 @@ static const char *sym_name(struct link_map *l, uint32_t sym_idx) {
     return strtab + symtab[sym_idx].st_name;
 }
 
+// 符号查找从全局作用域头（_dl_link_map = 主 ELF）起遍历，与 eager_bind 一致。
+// 链表顺序 main → ld → libs：若从被重定位对象 lmap 起前向遍历，会漏掉排在它
+// 前面的 ld.so 符号（如 _dl_link_map），故必须从 head 查。
+// （R_X86_64_COPY 仍特殊：从 lmap->l_next 起查，跳过主 ELF 自身 .bss 副本）
+static void *lookup_global(const char *name) {
+    return lookup_symbol_in_link_map(name, _dl_link_map);
+}
+
 // 应用单条重定位
 void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
     uint32_t type = ELF64_R_TYPE(r->r_info);
@@ -54,7 +62,7 @@ void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
 
     case R_X86_64_64: {
         const char *name = sym_name(lmap, sym_idx);
-        void *sym = lookup_symbol_in_link_map(name, lmap);
+        void *sym = lookup_global(name);
         if (!sym) goto unresolved;
         *addr = (uintptr_t)sym + addend;
         break;
@@ -63,7 +71,7 @@ void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
     case R_X86_64_PC32:
     case R_X86_64_PLT32: {
         const char *name = sym_name(lmap, sym_idx);
-        void *sym = lookup_symbol_in_link_map(name, lmap);
+        void *sym = lookup_global(name);
         if (!sym) goto unresolved;
         *(uint32_t *)addr = (uint32_t)((uintptr_t)sym + addend - (uintptr_t)addr);
         break;
@@ -77,7 +85,7 @@ void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
         // got_entry = instr_end + disp（RIP-relative 计算）
         // 填 *got_entry = sym，disp 不改（保持 RIP-relative 寻址正确）
         const char *name = sym_name(lmap, sym_idx);
-        void *sym = lookup_symbol_in_link_map(name, lmap);
+        void *sym = lookup_global(name);
         if (!sym) goto unresolved;
         // 从指令读静态 disp（disp 字段紧跟 r_offset 位置，4 字节）
         int32_t disp = *(int32_t *)addr;
@@ -91,7 +99,7 @@ void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
     case R_X86_64_GLOB_DAT:
     case R_X86_64_JUMP_SLOT: {
         const char *name = sym_name(lmap, sym_idx);
-        void *sym = lookup_symbol_in_link_map(name, lmap);
+        void *sym = lookup_global(name);
         if (!sym) goto unresolved;
         *addr = (uintptr_t)sym;
         break;
@@ -99,7 +107,7 @@ void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
 
     case R_X86_64_32: {
         const char *name = sym_name(lmap, sym_idx);
-        void *sym = lookup_symbol_in_link_map(name, lmap);
+        void *sym = lookup_global(name);
         if (!sym) goto unresolved;
         *(uint32_t *)addr = (uint32_t)((uintptr_t)sym + addend);
         break;
@@ -107,7 +115,7 @@ void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
 
     case R_X86_64_32S: {
         const char *name = sym_name(lmap, sym_idx);
-        void *sym = lookup_symbol_in_link_map(name, lmap);
+        void *sym = lookup_global(name);
         if (!sym) goto unresolved;
         *(int32_t *)addr = (int32_t)((uintptr_t)sym + addend);
         break;

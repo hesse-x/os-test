@@ -91,15 +91,21 @@ mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.a"           ::usr/lib/libc
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello.elf"        ::local/hello.elf
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/ldso.elf"         ::lib/ld.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.so"          ::lib/libc.so
+# ld.so 多依赖测试 stub .so（plan_ld 阶段 D）：放 /test/lib/ 与生产 /lib/ 分区，
+# ld.so load_one() 先试 /lib/ 失败回退 /test/lib/（对齐 Linux DT_RPATH 思路）
+mmd -i "${BUILD_DIR}/part2.img" ::test ::test/lib
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/liba.so"          ::test/lib/liba.so
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libb.so"          ::test/lib/libb.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello_dyn.elf"    ::local/hello_dyn.elf
 
 # Copy test ELFs to /test/ directory (test build only)
 if [ "$TEST" = "1" ]; then
-    mmd -i "${BUILD_DIR}/part2.img" ::test
     for elf in test_runner.elf pipe.elf fcntl.elf string.elf malloc.elf \
                stdio.elf mmap.elf ipc.elf socket.elf process.elf \
                signal.elf poll.elf pci.elf ioctl.elf dev_vfs.elf \
-               test_fpu.elf test_sse_smoke.elf pthread.elf; do
+               test_fpu.elf test_sse_smoke.elf pthread.elf \
+               ld_test_single.elf ld_test_chain.elf \
+               ld_test_diamond.elf ld_test_cycle.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
     done
 fi

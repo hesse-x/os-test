@@ -84,3 +84,65 @@ if(TEST)
 else()
     add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c)
 endif()
+
+# ===== ld.so 多依赖单元测试（ld.md §8 / plan_ld 阶段 D）=====
+# 完全脱钩 drm：用 stub .so 拓扑 + 动态主 ELF 覆盖装配层（递归加载/去重/闭环）。
+# stub .so 不走 add_user_lib(SHARED)（该路径绑死 libc.map + libc 导出验证），
+# 这里用独立自定义命令，与 ld.so/libc.so 同模式（gcc -shared -fPIC -Wl,-soname）。
+#
+# 闭环场景需 a↔b 互 NEEDED（plan_ld D7）。互引用存在链接期 bootstrap 问题
+# （a 链 b 时 b 尚未建）。解法：
+#   1. libb.so.seed：空 .so（SONAME=libb.so，仅 NEEDED libc.so）作 bootstrap 种子
+#   2. liba.so：链接 ld_stub_a.c + 直接引用 libb.so.seed（--no-as-needed），
+#      记 NEEDED libb.so（取 seed 的 SONAME）+ libc.so。liba 不调任何 b 符号，
+#      无需符号解析，DT_NEEDED 纯记录。
+#   3. libb.so：链接 ld_stub_b.c + 直接引用 liba.so（--no-as-needed）+ libc.so。
+#      libb 调 lda_answer（来自 liba）—— --allow-shlib-undefined 容忍该未定义引用，
+#      记 NEEDED liba.so + libc.so。
+# 链式/菱形场景复用同一对 stub，去重保证正确性。
+
+# 1. libb.so.seed：bootstrap 种子（空 .so，SONAME=libb.so，仅 NEEDED libc.so）
+add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/libb.so.seed
+    COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
+            -Wl,--hash-style=gnu -Wl,-soname,libb.so
+            -o ${CMAKE_BINARY_DIR}/libb.so.seed -x c /dev/null
+            -L${CMAKE_BINARY_DIR} -Wl,--no-as-needed -lc
+    DEPENDS ${CMAKE_BINARY_DIR}/libc.so
+    COMMENT "Linking libb.so.seed (ld.so stub bootstrap)")
+# 2. liba.so：NEEDED libb.so（seed SONAME）+ libc.so
+add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/liba.so
+    COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
+            -Wl,--hash-style=gnu -Wl,-soname,liba.so
+            -Wl,--no-as-needed -Wl,--allow-shlib-undefined
+            -o ${CMAKE_BINARY_DIR}/liba.so ${CMAKE_SOURCE_DIR}/user/test/ld_stub_a.c
+            ${CMAKE_BINARY_DIR}/libb.so.seed
+            -L${CMAKE_BINARY_DIR} -Wl,--no-as-needed -lc
+    DEPENDS ${CMAKE_SOURCE_DIR}/user/test/ld_stub_a.c ${CMAKE_BINARY_DIR}/libb.so.seed ${CMAKE_BINARY_DIR}/libc.so
+    COMMENT "Linking liba.so (ld.so stub, NEEDED libb.so+libc.so)")
+add_custom_target(ld_stub_a_so ALL DEPENDS ${CMAKE_BINARY_DIR}/liba.so)
+add_dependencies(ld_stub_a_so c_so)
+# 3. libb.so：NEEDED liba.so + libc.so（lda_answer 引用由 --allow-shlib-undefined 容忍）
+add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/libb.so
+    COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
+            -Wl,--hash-style=gnu -Wl,-soname,libb.so
+            -Wl,--no-as-needed -Wl,--allow-shlib-undefined
+            -o ${CMAKE_BINARY_DIR}/libb.so ${CMAKE_SOURCE_DIR}/user/test/ld_stub_b.c
+            ${CMAKE_BINARY_DIR}/liba.so
+            -L${CMAKE_BINARY_DIR} -Wl,--no-as-needed -lc
+    DEPENDS ${CMAKE_SOURCE_DIR}/user/test/ld_stub_b.c ${CMAKE_BINARY_DIR}/liba.so ${CMAKE_BINARY_DIR}/libc.so
+    COMMENT "Linking libb.so (ld.so stub, NEEDED liba.so+libc.so)")
+add_custom_target(ld_stub_b_so ALL DEPENDS ${CMAKE_BINARY_DIR}/libb.so)
+add_dependencies(ld_stub_b_so ld_stub_a_so c_so)
+
+# 4 个动态主 ELF：每场景一个，挂进 test_runner.c 的 tests[] 表（D9）
+# 场景 1 单依赖回归
+add_user_dyn_elf(ld_test_single C SOURCES test/ld_test_single.c LINK_LIBS c)
+# 场景 2 线性链（主→b→{a,libc}）
+add_user_dyn_elf(ld_test_chain C SOURCES test/ld_test_chain.c LINK_LIBS b a c)
+add_dependencies(ld_test_chain_dyn_elf ld_stub_b_so ld_stub_a_so c_so)
+# 场景 3 菱形去重（主→{a,libc}, a→libc）
+add_user_dyn_elf(ld_test_diamond C SOURCES test/ld_test_diamond.c LINK_LIBS a c)
+add_dependencies(ld_test_diamond_dyn_elf ld_stub_a_so c_so)
+# 场景 4 闭环检测（a↔b 互 NEEDED）
+add_user_dyn_elf(ld_test_cycle C SOURCES test/ld_test_cycle.c LINK_LIBS a b c)
+add_dependencies(ld_test_cycle_dyn_elf ld_stub_a_so ld_stub_b_so c_so)

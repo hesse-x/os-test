@@ -58,7 +58,9 @@ static long dl_sys_close(int fd) {
 }
 
 // 6 参数 mmap：rdi=addr, rsi=len, rdx=prot, r10=flags, r8=fd, r9=offset
-static void *dl_sys_mmap(void *addr, size_t size, int prot, int flags, int fd, uint64_t offset) {
+// hidden 导出：minilibc.c 的 malloc 复用同一封装，避免重复内联汇编
+__attribute__((visibility("hidden")))
+void *dl_sys_mmap(void *addr, size_t size, int prot, int flags, int fd, uint64_t offset) {
     long ret;
     register int64_t r10 __asm__("r10") = (int64_t)flags;
     register int64_t r8 __asm__("r8") = (int64_t)fd;
