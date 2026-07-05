@@ -92,9 +92,9 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   }
 
   /* 4. Allocate fd (under fd_lock) */
-  xtask_t *proc = current_task;
-  files_t *files = proc->proc->files;
-  spinlock_t *fdlk = &files->fd_lock;
+  xtask *proc = current_task;
+  files *files = proc->proc->files;
+  spinlock *fdlk = &files->fd_lock;
   spin_lock(fdlk);
   int fd = alloc_fd(files, 3);
   if (fd < 0) {
@@ -230,12 +230,12 @@ int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 
   // Resolve shm_fd to struct shm* (if provided)
   if (shm_fd >= 0) {
-    xtask_t *proc = current_task;
+    xtask *proc = current_task;
     if (shm_fd >= MAX_FD) {
       kfree(kops);
       return (int64_t)-EBADF;
     }
-    spinlock_t *fdlk = &proc->proc->files->fd_lock;
+    spinlock *fdlk = &proc->proc->files->fd_lock;
     spin_lock(fdlk);
     struct file *sf = proc->proc->files->fd_table[shm_fd];
     if (!sf || sf->type != FD_SHM) {

@@ -44,7 +44,7 @@ typedef struct pci_bar {
   void __iomem
       *vaddr;   // kernel virtual address after mapping (NULL if not mapped)
   uint8_t type; // 0=MMIO32, 1=I/O, 2=MMIO64
-} pci_bar_t;
+} pci_bar;
 
 // ===================== PCI device =====================
 typedef struct pci_device {
@@ -67,10 +67,10 @@ typedef struct pci_device {
   int msix_num_vectors;       // Number of vectors allocated
   bool enabled;
   struct pci_bar bar[6];
-} pci_device_t;
+} pci_device;
 
 // ===================== PCI global state =====================
-extern pci_device_t pci_devices[MAX_PCI_DEV];
+extern pci_device pci_devices[MAX_PCI_DEV];
 extern int pci_device_count;
 
 extern void __iomem *ecam_vbase;
@@ -85,20 +85,20 @@ uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func,
 void pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset,
                       uint32_t value);
 
-pci_device_t *pci_find_device(uint16_t class_code);
-pci_device_t *pci_find_device_by_id(uint16_t vendor, uint16_t device);
+pci_device *pci_find_device(uint16_t class_code);
+pci_device *pci_find_device_by_id(uint16_t vendor, uint16_t device);
 
-int pci_enable_device(pci_device_t *dev);
-int pci_enable_device_wc(pci_device_t *dev, int wc_bar_idx);
-int pci_enable_msi(pci_device_t *dev);
+int pci_enable_device(pci_device *dev);
+int pci_enable_device_wc(pci_device *dev, int wc_bar_idx);
+int pci_enable_msi(pci_device *dev);
 
 // MSI-X API
-int pci_enable_msix(pci_device_t *dev, int num_vectors);
-void pci_msix_mask_entry(pci_device_t *dev, int entry);
-void pci_msix_unmask_entry(pci_device_t *dev, int entry);
-void __iomem *pci_msix_table_addr(pci_device_t *dev);
-void __iomem *pci_msix_pba_addr(pci_device_t *dev);
-int pci_msix_vector_base(pci_device_t *dev);
+int pci_enable_msix(pci_device *dev, int num_vectors);
+void pci_msix_mask_entry(pci_device *dev, int entry);
+void pci_msix_unmask_entry(pci_device *dev, int entry);
+void __iomem *pci_msix_table_addr(pci_device *dev);
+void __iomem *pci_msix_pba_addr(pci_device *dev);
+int pci_msix_vector_base(pci_device *dev);
 
 // sys_pci_dev_info syscall
 int64_t sys_pci_dev_info(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,

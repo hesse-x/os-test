@@ -69,7 +69,7 @@ timer_poll_fn timer_poll_hook = NULL;
 static uint64_t tick = 0;
 
 // #NM handler: Device Not Available — lazy FPU 上下文切换
-void fpu_lazy_switch(xtask_t *t) {
+void fpu_lazy_switch(xtask *t) {
   uint64_t cr0;
   __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
   if (!(cr0 & (1ULL << 3)))
@@ -78,7 +78,7 @@ void fpu_lazy_switch(xtask_t *t) {
   // 嵌套检测：正常 #NM 只触发一次，clts 后即返回。若 handler 内部又触发
   // #NM（典型原因：fxrstor/fxsave 在 TS=1 下执行），会嵌套并撑爆内核栈
   // 导致 #DF。立即 panic 给出明确提示，不让 #DF 毁掉现场。
-  cpu_local_t *cl = get_cpu_local();
+  cpu_local *cl = get_cpu_local();
   if (++cl->nm_nesting_depth > 1) {
     panic("#NM nested (depth=%d) — fxrstor/fxsave executed with CR0.TS=1? "
           "use kernel_fpu_save/restore helpers (they clts first)\n",
@@ -105,7 +105,7 @@ void fpu_lazy_switch(xtask_t *t) {
 
 // ===================== COW fault resolution =====================
 __attribute__((no_sanitize("kernel-address"))) static void
-resolve_cow_fault(xtask_t *task, uint64_t *pte, uint64_t fault_addr) {
+resolve_cow_fault(xtask *task, uint64_t *pte, uint64_t fault_addr) {
   uint64_t old_phys = *pte & PTE_PHYS_MASK;
   Page *old_page = &bfc_frames[PHY_TO_PAGE(old_phys)];
 
@@ -148,7 +148,7 @@ void trap_dispatch(trapframe_t *tf) {
     pid_t owner_pid = __atomic_load_n(&irq_owner[tf->trapno], __ATOMIC_ACQUIRE);
     // Direct index by PID — no scan needed
     if (owner_pid >= 0 && owner_pid < MAX_PROC) {
-      xtask_t *target = task_get(owner_pid);
+      xtask *target = task_get(owner_pid);
 
       // Enqueue RECV_IRQ message to target's recv queue
       spin_lock(&target->recv_lock);
@@ -451,14 +451,14 @@ static void timer_handler(trapframe_t *tf) {
   // schedule() 的 ASSERT(cnt == run_count) 触发 panic。
   int cpu = get_cpu_local()->cpu_id;
   uint64_t now = sched_clock();
-  list_node_t wakeup_list;
+  list_node wakeup_list;
   list_init(&wakeup_list);
 
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
-  list_node_t *head = &cpu_locals[cpu].timer_queue;
+  list_node *head = &cpu_locals[cpu].timer_queue;
   while (!list_empty(head)) {
-    xtask_t *p = LIST_ENTRY(list_front(head), xtask_t, wait_node);
+    xtask *p = LIST_ENTRY(list_front(head), xtask, wait_node);
     if (p->wait_deadline > now)
       break; // sorted, stop at first unexpired
     list_remove(&p->wait_node);
@@ -478,9 +478,9 @@ static void timer_handler(trapframe_t *tf) {
   // 跨 CPU 投递:每个任务按其 assigned_cpu 加锁后入队。本 CPU 锁已释放,
   // 锁顺序固定为"单把目标 CPU 锁",无嵌套,无 AB-BA 风险。
   while (!list_empty(&wakeup_list)) {
-    list_node_t *node = list_front(&wakeup_list);
+    list_node *node = list_front(&wakeup_list);
     list_remove(node);
-    xtask_t *p = LIST_ENTRY(node, xtask_t, wait_node);
+    xtask *p = LIST_ENTRY(node, xtask, wait_node);
     int tcpu = p->assigned_cpu;
     uint64_t tflags;
     spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &tflags);

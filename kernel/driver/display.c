@@ -41,7 +41,7 @@ static struct dev_ops kms_dev_ops = {
 __attribute__((no_sanitize("kernel-address"))) void display_init(void) {
   // 1. PCI discovery: find bochs-display by vendor/device ID
   // (class code is 0x0380 "Display/Other", not 0x0300 VGA)
-  pci_device_t *dev = pci_find_device_by_id(0x1234, 0x1111);
+  pci_device *dev = pci_find_device_by_id(0x1234, 0x1111);
   if (!dev) {
     printk(LOG_WARN, "display_init: no display device found\n");
     halt();
@@ -303,14 +303,14 @@ display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
 // Wrapper to adapt display_mmap_handler to dev_ops.mmap signature (uint64_t
 // size)
 
-uint64_t display_mmap_handler_ioctl(xtask_t *proc, uint64_t size) {
+uint64_t display_mmap_handler_ioctl(xtask *proc, uint64_t size) {
   return display_mmap_handler(proc, (size_t)size);
 }
 
 // ===================== display_mmap_handler =====================
 
 __attribute__((no_sanitize("kernel-address"))) uint64_t
-display_mmap_handler(xtask_t *proc, size_t size) {
+display_mmap_handler(xtask *proc, size_t size) {
   if (!g_display.initialized)
     return 0;
 
@@ -333,8 +333,8 @@ display_mmap_handler(xtask_t *proc, size_t size) {
     }
   }
 
-  // Create mmap_region_t for proc_reap cleanup
-  mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+  // Create mmap_region for proc_reap cleanup
+  mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
   if (!region) {
     for (size_t i = 0; i < npages; i++)
       unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE,
@@ -368,7 +368,7 @@ void display_dev_register(void) {
 // ===================== Driver registry =====================
 #include "kernel/driver/driver.h"
 
-dev_driver_t display_driver = {
+dev_driver display_driver = {
     .name = "display",
     .pci_class = 0, // Matched by vendor/device ID (bochs-display class=0x0380)
     .pci_vendor = 0x1234, // QEMU bochs-display

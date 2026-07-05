@@ -203,7 +203,7 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
        (__force uint64_t)data_buf + data_buf_len > 0xFFFFFFFF80000000ULL))
     return (int64_t)-EFAULT;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   int cpu = proc->assigned_cpu;
   while (1) {
     // Try to dequeue a message from recv queue
@@ -334,7 +334,7 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       rep_ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
     return (int64_t)-EFAULT;
 
-  xtask_t *target = task_get(target_pid);
+  xtask *target = task_get(target_pid);
   if (target->pid != target_pid)
     return (int64_t)-ESRCH;
   WARN_ON(target->state == UNUSED);
@@ -368,7 +368,7 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
   // Block caller on WAIT_REQ_REPLY
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   proc->state = BLOCKED;
   proc->wait_event = WAIT_REQ_REPLY;
   proc->wait_timed_out = 0;
@@ -411,12 +411,12 @@ int64_t sys_resp(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
       ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
     return (int64_t)-EFAULT;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   pid_t caller_pid = proc->req_caller_pid;
   if (caller_pid < 0 || caller_pid >= MAX_PROC)
     return (int64_t)-EINVAL;
 
-  xtask_t *caller = task_get(caller_pid);
+  xtask *caller = task_get(caller_pid);
   if (caller->pid != caller_pid)
     return (int64_t)-ESRCH;
 
@@ -475,7 +475,7 @@ int64_t sys_irq_bind(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 void notify_and_wake(pid_t target_pid, recv_msg_t *msg) {
   if (target_pid < 0 || target_pid >= MAX_PROC)
     return;
-  xtask_t *target = task_get(target_pid);
+  xtask *target = task_get(target_pid);
   if (target->pid != target_pid)
     return;
 
@@ -520,13 +520,13 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
 void wake_process(pid_t pid) {
   if (pid < 0 || pid >= MAX_PROC)
     return;
-  xtask_t *target = task_get(pid);
+  xtask *target = task_get(pid);
 
   int target_cpu = target->assigned_cpu;
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
   if (target->pid == pid && target->state == BLOCKED) {
-    wait_event_t ev = target->wait_event;
+    wait_event ev = target->wait_event;
     ASSERT(ev == WAIT_PIPE || ev == WAIT_POLL || ev == WAIT_RECV);
     if (ev == WAIT_RECV)
       target->recv_intr = 1;
@@ -542,7 +542,7 @@ int64_t sys_notify(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
   if (target_pid < 0 || target_pid >= MAX_PROC)
     return (int64_t)-EINVAL;
 
-  xtask_t *target = task_get(target_pid);
+  xtask *target = task_get(target_pid);
   if (target->pid != target_pid)
     return (int64_t)-ESRCH;
 
@@ -583,7 +583,7 @@ int64_t sys_clock(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
 // ===================== sys_msg_to (inner implementation) =====================
 int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
                    void *reply_buf, size_t reply_len) {
-  xtask_t *target = task_get(target_pid);
+  xtask *target = task_get(target_pid);
   if (target->pid != target_pid)
     return (int64_t)-ESRCH;
 
@@ -619,7 +619,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
   spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
   // Block caller on WAIT_MSG_REPLY
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   proc->state = BLOCKED;
   proc->wait_event = WAIT_MSG_REPLY;
   proc->wait_timed_out = 0;
@@ -690,13 +690,13 @@ int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
       ptr + resp_len > 0xFFFFFFFF80000000ULL)
     return (int64_t)-EFAULT;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   pid_t caller_pid = proc->msg_caller_pid;
   if (caller_pid < 0 || caller_pid >= MAX_PROC) {
     return (int64_t)-EINVAL;
   }
 
-  xtask_t *caller = task_get(caller_pid);
+  xtask *caller = task_get(caller_pid);
   if (caller->pid != caller_pid)
     return (int64_t)-ESRCH;
 
@@ -739,7 +739,7 @@ int64_t sys_ioperm(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   if (from + num > 65536)
     return (int64_t)-EINVAL;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   if (!proc->iopm) {
     uint8_t *iopm = (uint8_t *)kmalloc(IOPM_SIZE);

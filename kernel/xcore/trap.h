@@ -16,17 +16,17 @@
 
 // Hook registration points: BSD layer registers during init, Xcore calls at
 // trap_dispatch end
-typedef void (*signal_check_fn)(xtask_t *t, trapframe_t *tf);
+typedef void (*signal_check_fn)(xtask *t, trapframe_t *tf);
 extern signal_check_fn signal_check_hook;
 
-typedef int (*fault_handler_fn)(uint64_t vaddr, xtask_t *t);
+typedef int (*fault_handler_fn)(uint64_t vaddr, xtask *t);
 extern fault_handler_fn fault_handler;
 
 typedef void (*reap_fn)(void);
 extern reap_fn reap_hook;
 
 // Per-process cleanup (called from sched_task_reap)
-typedef void (*proc_reap_fn)(xtask_t *t);
+typedef void (*proc_reap_fn)(xtask *t);
 extern proc_reap_fn proc_reap_hook;
 
 // devtmpfs cleanup for a PID (called from sched_task_reap / mm_release)
@@ -38,11 +38,11 @@ typedef int64_t (*syscall_dispatch_fn)(trapframe_t *tf);
 extern syscall_dispatch_fn syscall_dispatch_hook;
 
 // Signal pending check (called from IPC to detect interruptible waits)
-typedef bool (*signal_pending_fn)(xtask_t *t);
+typedef bool (*signal_pending_fn)(xtask *t);
 extern signal_pending_fn signal_pending_hook;
 
 // Force signal delivery (called from trap exception handling)
-typedef void (*force_sig_fn)(xtask_t *t, int sig, int si_code, void *si_addr);
+typedef void (*force_sig_fn)(xtask *t, int sig, int si_code, void *si_addr);
 extern force_sig_fn force_sig_hook;
 
 // Driver timer poll hook (called periodically from timer IRQ handler)

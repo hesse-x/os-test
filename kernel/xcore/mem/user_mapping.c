@@ -211,7 +211,7 @@ unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
 // partially filled).
 __attribute__((no_sanitize("kernel-address"))) int
 copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
-                mmap_region_t *mmap_regions) {
+                mmap_region *mmap_regions) {
   for (int pml4_idx = 0; pml4_idx < 256; pml4_idx++) {
     if (!(src_pml4[pml4_idx] & PTE_PRESENT))
       continue;
@@ -293,9 +293,9 @@ copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
 
           // Check if this is an SHM/MAP_PHYSICAL page
           bool is_shared = false;
-          for (mmap_region_t *mr = mmap_regions; mr; mr = mr->next) {
+          for (mmap_region *mr = mmap_regions; mr; mr = mr->next) {
             if (mr->shm_obj != NULL) {
-              shm_t *s = mr->shm_obj;
+              shm *s = mr->shm_obj;
               if (s->page_list) {
                 for (int pi = 0; pi < s->num_pages; pi++) {
                   if (leaf_phys == s->page_list[pi]) {

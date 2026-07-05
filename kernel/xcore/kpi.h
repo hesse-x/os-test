@@ -17,16 +17,16 @@
 typedef void (*irq_handler_t)(trapframe_t *);
 
 // === scheduling ===
-void xtask_set_state(xtask_t *t, proc_state_t s);
-void xtask_wake_from_wait(xtask_t *t);
+void xtask_set_state(xtask *t, proc_state s);
+void xtask_wake_from_wait(xtask *t);
 
 // === address space ===
-mm_t *mm_create(void);
-void mm_put(mm_t *mm);
-void mm_release(mm_t *mm, pid_t owner);
-void mm_release_pages(mm_t *mm);
-int copy_page_table(uint64_t *src, uint64_t *dst, mmap_region_t *regions);
-mmap_region_t *add_mmap_region(xtask_t *t, uint64_t vaddr, uint64_t size,
+mm *mm_create(void);
+void mm_put(mm *mm);
+void mm_release(mm *mm, pid_t owner);
+void mm_release_pages(mm *mm);
+int copy_page_table(uint64_t *src, uint64_t *dst, mmap_region *regions);
+mmap_region *add_mmap_region(xtask *t, uint64_t vaddr, uint64_t size,
                                uint64_t phys, struct shm *shm, uint32_t prot);
 
 // === IPC ===

@@ -12,10 +12,10 @@
 #include <stdint.h>
 
 #define MAX_DRIVERS 16
-static dev_driver_t driver_table[MAX_DRIVERS];
+static dev_driver driver_table[MAX_DRIVERS];
 static int driver_count;
 
-void driver_register(const dev_driver_t *drv) {
+void driver_register(const dev_driver *drv) {
   if (driver_count >= MAX_DRIVERS) {
     printk(LOG_ERROR, "driver_register: table full, cannot register %s\n",
            drv->name);
@@ -27,13 +27,13 @@ void driver_register(const dev_driver_t *drv) {
 
 void driver_pci_match(void) {
   for (int i = 0; i < driver_count; i++) {
-    dev_driver_t *drv = &driver_table[i];
+    dev_driver *drv = &driver_table[i];
     if (drv->pci_class == 0 && drv->pci_vendor == 0)
       continue;
 
     // Match by vendor/device ID if specified
     if (drv->pci_vendor != 0 && drv->pci_device != 0) {
-      pci_device_t *dev = pci_find_device_by_id((uint16_t)drv->pci_vendor,
+      pci_device *dev = pci_find_device_by_id((uint16_t)drv->pci_vendor,
                                                 (uint16_t)drv->pci_device);
       if (dev) {
         printk(LOG_INFO,

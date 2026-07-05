@@ -18,7 +18,7 @@
 #include "kernel/xcore/xtask.h"
 #include <stddef.h>
 
-cpu_local_t cpu_locals[MAX_CPUS];
+cpu_local cpu_locals[MAX_CPUS];
 int ncpu = 1;
 gdt_entry_t per_cpu_gdt[MAX_CPUS][8];
 gdt_ptr_t per_cpu_gdtr[MAX_CPUS];
@@ -195,7 +195,7 @@ __attribute__((no_sanitize("kernel-address"))) void ap_entry_c(int cpu_id) {
   printk(LOG_INFO, "AP 0x%016X init finish\n", cpu_id);
 
   // Switch to idle process: set current_task, switch to idle kernel stack
-  xtask_t *idle = cpu_locals[cpu_id].idle_proc;
+  xtask *idle = cpu_locals[cpu_id].idle_proc;
   current_task = idle;
   idle->state = RUNNING;
   per_cpu_tss[cpu_id].rsp0 = idle->k_stack_top;

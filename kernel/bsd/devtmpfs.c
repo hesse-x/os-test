@@ -30,7 +30,7 @@ struct dev_entry {
 static struct dev_entry dev_entries[MAX_DEV_ENTRIES];
 static struct dev_entry *dev_list = NULL;
 static int dev_count = 0;
-static spinlock_t devtmpfs_lock = SPINLOCK_INIT;
+static spinlock devtmpfs_lock = SPINLOCK_INIT;
 
 static bool devtmpfs_initialized = false;
 
@@ -124,13 +124,13 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
   return 0;
 }
 
-uint64_t devtmpfs_open(xtask_t *proc, const char *name, int flags) {
+uint64_t devtmpfs_open(xtask *proc, const char *name, int flags) {
   struct inode *ip = devtmpfs_lookup(name);
   if (!ip)
     return (uint64_t)(-(uint64_t)ENOENT);
 
   /* Allocate fd (under fd_lock) */
-  spinlock_t *fdlk = &proc->proc->files->fd_lock;
+  spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
   int fd = alloc_fd(proc->proc->files, 3);
   if (fd < 0) {

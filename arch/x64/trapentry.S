@@ -57,7 +57,7 @@ __trapret:
 
     # Load current_task->fs_base into MSR_FS_BASE (TLS base for user mode).
     # cpu_local._cur_proc is at GS:16; xtask_fs_base_offset is a linker symbol
-    # holding offsetof(xtask_t, fs_base). wrmsr: ecx=MSR, edx=hi32, eax=lo32.
+    # holding offsetof(xtask, fs_base). wrmsr: ecx=MSR, edx=hi32, eax=lo32.
     movq %gs:16, %rax
     movq xtask_fs_base_offset(%rip), %rcx
     movq (%rax,%rcx), %rdx          # rdx = current_task->fs_base

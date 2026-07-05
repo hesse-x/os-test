@@ -46,7 +46,7 @@ const struct termios default_termios = {
 
 // ===================== Global PTY table =====================
 struct pty *pty_table[MAX_PTY];
-spinlock_t pty_alloc_lock = SPINLOCK_INIT;
+spinlock pty_alloc_lock = SPINLOCK_INIT;
 
 // Cached ptmx inode pointer for master/slave identification
 static struct inode *ptmx_inode;
@@ -83,7 +83,7 @@ int pty_ring_read(uint8_t *buf, uint32_t head, uint32_t *tail, uint8_t *data,
 }
 
 // ===================== Helpers =====================
-static int pty_eintr_check(xtask_t *proc) {
+static int pty_eintr_check(xtask *proc) {
   uint64_t pend = __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
   uint64_t deliv = pend & ~proc->proc->sig_blocked;
   deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
@@ -101,8 +101,8 @@ static int pty_ring_write1(uint8_t *buf, uint32_t *head, uint32_t tail,
 }
 
 // Check O_NONBLOCK for a PTY fd of given master/slave type in this proc
-static int pty_is_nonblock(xtask_t *proc, struct pty *pty, int is_master) {
-  files_t *files = proc->proc->files;
+static int pty_is_nonblock(xtask *proc, struct pty *pty, int is_master) {
+  files *files = proc->proc->files;
   rcu_read_lock();
   for (int i = 0; i < MAX_FD; i++) {
     struct file *f = fd_lookup(files, i);
@@ -190,7 +190,7 @@ void pty_free(struct pty *pty) {
 }
 
 // ===================== ptmx_open =====================
-int ptmx_open(xtask_t *proc, int fd) {
+int ptmx_open(xtask *proc, int fd) {
   int index;
   struct pty *pty = pty_alloc(&index);
   if (!pty)
@@ -247,7 +247,7 @@ int ptmx_open(xtask_t *proc, int fd) {
 }
 
 // ===================== pts_open =====================
-int pts_open(xtask_t *proc, int fd) {
+int pts_open(xtask *proc, int fd) {
   struct file *f = fd_lookup(proc->proc->files, fd);
   if (!f)
     return -EBADF;
@@ -283,7 +283,7 @@ int pts_open(xtask_t *proc, int fd) {
 }
 
 // ===================== pty_fd_is_master =====================
-int pty_fd_is_master(files_t *files, int fd) {
+int pty_fd_is_master(files *files, int fd) {
   rcu_read_lock();
   struct file *f = fd_lookup(files, fd);
   int result = 0;
@@ -299,7 +299,7 @@ int pty_is_master_inode(struct inode *inode) {
 }
 
 // ===================== pty_master_read =====================
-int64_t pty_master_read(struct pty *pty, xtask_t *proc, void *buf, size_t len) {
+int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
   while (pty_ring_avail(pty->s_to_m_head, pty->s_to_m_tail) == 0) {
     // EOF only after slave was opened and then closed.
     // If slave has never been opened, avoid false EOF that triggers
@@ -342,7 +342,7 @@ int64_t pty_master_read(struct pty *pty, xtask_t *proc, void *buf, size_t len) {
 }
 
 // ===================== pty_master_write =====================
-int64_t pty_master_write(struct pty *pty, xtask_t *proc, const void *buf,
+int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
                          size_t len) {
   // len==0: EOF signal (Ctrl-D empty linebuf → slave read returns 0)
   if (len == 0) {
@@ -388,7 +388,7 @@ int64_t pty_master_write(struct pty *pty, xtask_t *proc, const void *buf,
 }
 
 // ===================== pty_slave_read =====================
-int64_t pty_slave_read(struct pty *pty, xtask_t *proc, void *buf, size_t len) {
+int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
   if (pty->master_refs == 0)
     return -EPIPE;
 
@@ -424,7 +424,7 @@ int64_t pty_slave_read(struct pty *pty, xtask_t *proc, void *buf, size_t len) {
 
 // ===================== pty_slave_write (with OPOST+ONLCR)
 // =====================
-int64_t pty_slave_write(struct pty *pty, xtask_t *proc, const void *buf,
+int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
                         size_t len) {
   if (pty->master_refs == 0)
     return -EPIPE;

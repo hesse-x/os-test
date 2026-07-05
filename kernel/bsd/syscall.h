@@ -59,8 +59,8 @@ int64_t sys_kill(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_sigaction(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_sigreturn(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 void check_pending_signals(trapframe_t *tf);
-void force_sig(xtask_t *proc, int sig, int si_code, void *si_addr);
-void deliver_signal_to(xtask_t *target, int sig);
+void force_sig(xtask *proc, int sig, int si_code, void *si_addr);
+void deliver_signal_to(xtask *target, int sig);
 int pgsignal(pid_t pgid, int sig);
 
 // Session/pgid

@@ -65,13 +65,13 @@ long strncpy_from_user(char *dst, const char __user *src, long maxlen);
 
 // ===================== proc lifecycle =====================
 
-proc_t *proc_create(void) {
-  proc_t *bp = (proc_t *)kmalloc(sizeof(proc_t));
+proc *proc_create(void) {
+  proc *bp = (proc *)kmalloc(sizeof(proc));
   if (!bp)
     return NULL;
-  __memset(bp, 0, sizeof(proc_t));
+  __memset(bp, 0, sizeof(proc));
 
-  // Create files_t
+  // Create files
   bp->files = files_create();
   if (!bp->files) {
     kfree(bp);
@@ -96,7 +96,7 @@ proc_t *proc_create(void) {
   return bp;
 }
 
-void proc_free(proc_t *bp) {
+void proc_free(proc *bp) {
   if (!bp)
     return;
   if (bp->files)
@@ -108,12 +108,12 @@ void proc_free(proc_t *bp) {
 // proc_reap: POSIX cleanup part of sched_task_reap
 // Called directly from sched_task_reap() for synchronous per-process cleanup.
 // Owns all POSIX resource freeing: files_put (closes all fds), signal_put,
-// kfree(proc_t). do_exit does NOT put these — it only sets ZOMBIE and
-// notifies parent; sched_task_reap/proc_reap is the sole owner of proc_t lifetime.
-void proc_reap(xtask_t *proc) {
+// kfree(proc). do_exit does NOT put these — it only sets ZOMBIE and
+// notifies parent; sched_task_reap/proc_reap is the sole owner of proc lifetime.
+void proc_reap(xtask *proc) {
   if (!proc->proc)
     return;
-  proc_t *bp = proc->proc;
+  struct proc *bp = proc->proc;
 
   if (bp->files) {
     struct file *entries[MAX_FD];
@@ -146,13 +146,13 @@ void proc_reap_idle(void) {
   // in sched_task_reap, but provides defense-in-depth)
 }
 
-// ===================== files_t lifecycle =====================
+// ===================== files lifecycle =====================
 
-files_t *files_create(void) {
-  files_t *files = (files_t *)kmalloc(sizeof(files_t));
+files *files_create(void) {
+  struct files *files = (struct files *)kmalloc(sizeof(struct files));
   if (!files)
     return NULL;
-  __memset(files, 0, sizeof(files_t));
+  __memset(files, 0, sizeof(struct files));
   files->fd_lock = SPINLOCK_INIT;
   refcount_set(&files->f_count, 1);
   for (int j = 0; j < MAX_FD; j++) {
@@ -173,7 +173,7 @@ void file_put(struct file *f) {
   case FD_NONE:
     break;
   case FD_PIPE: {
-    pipe_t *p = f->pipe;
+    pipe *p = f->pipe;
     if (p) {
       wake_pipe_peers(p, f->flags);
       if (refcount_dec_and_test(&p->p_count)) {
@@ -227,7 +227,7 @@ void file_put(struct file *f) {
   kfree(f);
 }
 
-int alloc_fd(files_t *files, int min_fd) {
+int alloc_fd(files *files, int min_fd) {
   for (int i = min_fd; i < MAX_FD; i++) {
     if (fd_lookup(files, i) == NULL)
       return i;
@@ -317,7 +317,7 @@ void pty_close_file(struct file *f) {
   }
 }
 
-void files_put(files_t *files) {
+void files_put(files *files) {
   if (!files)
     return;
   if (refcount_dec_and_test(&files->f_count)) {
@@ -343,13 +343,13 @@ static void free_table_page(uint64_t phys) {
   bfc_free_page(p, 1);
 }
 
-// ===================== mm_t lifecycle =====================
+// ===================== mm lifecycle =====================
 
-mm_t *mm_create(void) {
-  mm_t *mm = (mm_t *)kmalloc(sizeof(mm_t));
+mm *mm_create(void) {
+  struct mm *mm = (struct mm *)kmalloc(sizeof(struct mm));
   if (!mm)
     return NULL;
-  __memset(mm, 0, sizeof(mm_t));
+  __memset(mm, 0, sizeof(struct mm));
 
   // Allocate PML4
   Page *pml4_page = bfc_alloc_page(1);
@@ -376,11 +376,11 @@ mm_t *mm_create(void) {
   mm->mmap_brk = 0x800000;
   mm->mmap_phys_brk = MAP_PHYSICAL_BASE;
 
-  // files_t is now created by proc_create(), not by mm_create()
+  // files is now created by proc_create(), not by mm_create()
   return mm;
 }
 
-void mm_release(mm_t *mm, pid_t owner_pid) {
+void mm_release(mm *mm, pid_t owner_pid) {
   if (!mm)
     return;
   uint64_t *pml4_virt =
@@ -425,9 +425,9 @@ void mm_release(mm_t *mm, pid_t owner_pid) {
             uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
             // Check mmap_regions: skip SHM fd mappings and MAP_PHYSICAL
             bool is_shared = false;
-            for (mmap_region_t *mr = mm->mmap_regions; mr; mr = mr->next) {
+            for (mmap_region *mr = mm->mmap_regions; mr; mr = mr->next) {
               if (mr->shm_obj != NULL) {
-                shm_t *s = mr->shm_obj;
+                shm *s = mr->shm_obj;
                 if (s->page_list) {
                   for (int pi = 0; pi < s->num_pages; pi++) {
                     if (leaf_phys == s->page_list[pi]) {
@@ -482,9 +482,9 @@ void mm_release(mm_t *mm, pid_t owner_pid) {
   free_table_page(mm->cr3);
 
   // 3. Free mmap region metadata + release SHM references
-  mmap_region_t *region = mm->mmap_regions;
+  mmap_region *region = mm->mmap_regions;
   while (region) {
-    mmap_region_t *next = region->next;
+    mmap_region *next = region->next;
     if (region->shm_obj) {
       shm_put(region->shm_obj);
     }
@@ -537,7 +537,7 @@ void mm_release(mm_t *mm, pid_t owner_pid) {
   kfree(mm);
 }
 
-void mm_put(mm_t *mm) {
+void mm_put(mm *mm) {
   if (!mm)
     return;
   if (refcount_dec_and_test(&mm->m_count)) {
@@ -545,7 +545,7 @@ void mm_put(mm_t *mm) {
   }
 }
 
-void mm_release_pages(mm_t *mm) {
+void mm_release_pages(mm *mm) {
   if (!mm)
     return;
   uint64_t *pml4_virt =
@@ -587,9 +587,9 @@ void mm_release_pages(mm_t *mm) {
           if (pte & PTE_PRESENT) {
             uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
             bool skip = false;
-            for (mmap_region_t *mr = mm->mmap_regions; mr; mr = mr->next) {
+            for (mmap_region *mr = mm->mmap_regions; mr; mr = mr->next) {
               if (mr->shm_obj) {
-                shm_t *s = mr->shm_obj;
+                shm *s = mr->shm_obj;
                 if (s->page_list) {
                   for (int pi = 0; pi < s->num_pages; pi++)
                     if (leaf_phys == s->page_list[pi]) {
@@ -669,7 +669,7 @@ uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe_t *parent_tf,
 // Deep-copy fd_table from parent_files to child_files.
 // Bumps ref counts for pipe, SHM, file, inode, socket, TTY.
 static void __attribute__((unused))
-copy_fd_table(files_t *parent_files, files_t *child_files) {
+copy_fd_table(files *parent_files, files *child_files) {
   for (int fd = 0; fd < MAX_FD; fd++) {
     struct file *f = parent_files->fd_table[fd];
     child_files->fd_table[fd] = f;
@@ -683,11 +683,11 @@ copy_fd_table(files_t *parent_files, files_t *child_files) {
 
 // Deep-copy mmap_regions linked list from parent to child.
 // SHM refs are bumped.
-__attribute__((unused)) static mmap_region_t *
-copy_mmap_regions(mmap_region_t *src) {
-  mmap_region_t *head = NULL, *tail = NULL;
-  for (mmap_region_t *mr = src; mr; mr = mr->next) {
-    mmap_region_t *new_mr = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+__attribute__((unused)) static mmap_region *
+copy_mmap_regions(mmap_region *src) {
+  mmap_region *head = NULL, *tail = NULL;
+  for (mmap_region *mr = src; mr; mr = mr->next) {
+    mmap_region *new_mr = (mmap_region *)kmalloc(sizeof(mmap_region));
     if (!new_mr)
       return head; // partial copy, caller handles
     *new_mr = *mr;
@@ -713,19 +713,19 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   (void)a4;
   (void)a5;
   (void)a6;
-  xtask_t *parent = current_task;
+  xtask *parent = current_task;
 
-  // 1. Allocate new xtask_t slot
+  // 1. Allocate new xtask slot
   spin_lock(&tasks_lock);
   int alloc_idx = -1;
-  xtask_t *child = xtask_alloc(&alloc_idx);
+  xtask *child = xtask_alloc(&alloc_idx);
   if (!child) {
     spin_unlock(&tasks_lock);
     return (int64_t)-ENOMEM;
   }
 
-  // 2. Allocate new mm_t
-  mm_t *child_mm = mm_create();
+  // 2. Allocate new mm
+  mm *child_mm = mm_create();
   if (!child_mm) {
     spin_unlock(&tasks_lock);
     return (int64_t)-ENOMEM;
@@ -748,7 +748,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   load_cr3(parent->mm->cr3);
 
   // 4. Create child proc + copy fd_table
-  proc_t *child_bp = proc_create();
+  proc *child_bp = proc_create();
   if (!child_bp) {
     mm_put(child_mm);
     spin_unlock(&tasks_lock);
@@ -800,7 +800,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   trapframe_t *parent_tf = get_cpu_local()->cur_tf;
   uint64_t k_rsp = build_kstack_from_tf(k_stack_top, parent_tf, 0);
 
-  // 7. Fill child xtask_t
+  // 7. Fill child xtask
   // 顺序约束:assigned_cpu 必须先于 pid 赋值(wake 路径在锁前无锁读 assigned_cpu,
   // 防 pid 生效后 assigned_cpu 仍是 -1 导致越界);亲和父 CPU
   child->assigned_cpu = sched_pick_cpu_pref(parent->assigned_cpu);
@@ -900,7 +900,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   uint64_t parent_tid = (uint64_t)arg3;
   uint64_t child_tid = (uint64_t)arg4;
   uint64_t tls = (uint64_t)arg5;
-  xtask_t *parent = current_task;
+  xtask *parent = current_task;
 
   // flag 组合约束校验
   if ((flags & CLONE_SIGHAND) && !(flags & CLONE_VM))
@@ -913,7 +913,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // 1. 分配 xtask slot
   spin_lock(&tasks_lock);
   int alloc_idx = -1;
-  xtask_t *child = xtask_alloc(&alloc_idx);
+  xtask *child = xtask_alloc(&alloc_idx);
   if (!child) {
     spin_unlock(&tasks_lock);
     return (int64_t)-ENOMEM;
@@ -944,8 +944,8 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   kernel_fpu_save(parent_fpu);
   __memcpy(child_fpu, parent_fpu, PAGE_SIZE);
 
-  // 3. mm_t
-  mm_t *child_mm;
+  // 3. mm
+  mm *child_mm;
   if (flags & CLONE_VM) {
     child_mm = parent->mm;
     refcount_inc(&child_mm->m_count);
@@ -980,8 +980,8 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     child->cr3 = child_mm->cr3;
   }
 
-  // 4. files_t
-  proc_t *child_bp = proc_create();
+  // 4. files
+  proc *child_bp = proc_create();
   if (!child_bp) {
     if (!(flags & CLONE_VM))
       mm_put(child_mm);
@@ -1035,7 +1035,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   uint64_t k_rsp = build_kstack_from_tf(k_stack_top, parent_tf, 0);
   parent_tf->rsp = saved_rsp;
 
-  // 8. fs_base + proc_t 线程级字段
+  // 8. fs_base + proc 线程级字段
   child->fs_base = (flags & CLONE_SETTLS) ? tls : parent->fs_base;
   if ((flags & CLONE_THREAD) && clone_info_ptr) {
     struct thread_clone_info ci;
@@ -1066,7 +1066,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     *((pid_t *)child_tid) = (pid_t)alloc_idx;
   }
 
-  // 10. 填充 child xtask_t
+  // 10. 填充 child xtask
   // 顺序约束:assigned_cpu 必须先于 pid 赋值;CLONE_THREAD 亲和父
   // CPU,否则无亲和性
   child->assigned_cpu =
@@ -1134,7 +1134,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   const char *pathname = (const char *)a1;
   char **argv_ptr = (char **)a2; // 用户态 argv[]
   char **envp_ptr = (char **)a3; // 用户态 envp[]
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   if (!proc->mm)
     return (int64_t)-EINVAL;
   printk(LOG_INFO, "execve: pid=%d path=%s\n", proc->pid, pathname);
@@ -1475,7 +1475,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   // === Point of no return: old address space will be replaced ===
 
   // 8. Close FD_CLOEXEC fds
-  spinlock_t *fdlk = &proc->proc->files->fd_lock;
+  spinlock *fdlk = &proc->proc->files->fd_lock;
   struct file *cloexec_entries[MAX_FD];
   int cloexec_count = 0;
   spin_lock(fdlk);
@@ -1510,9 +1510,9 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   ASSERT(tf->rsp % 16 == 0);
   tf->rax = 0;
 
-  // 9b. Update mm_t fields
+  // 9b. Update mm fields
   uint64_t old_cr3 = proc->mm->cr3;
-  mmap_region_t *old_regions = proc->mm->mmap_regions;
+  mmap_region *old_regions = proc->mm->mmap_regions;
   proc->mm->mmap_regions = NULL;
   proc->mm->cr3 = pml4_phys;
   proc->cr3 = pml4_phys; // cached
@@ -1521,9 +1521,9 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   proc->entry = lr.entry;
 
   // 9c. Create user stack mmap_region
-  mmap_region_t *stack_region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+  mmap_region *stack_region = (mmap_region *)kmalloc(sizeof(mmap_region));
   if (stack_region) {
-    __memset(stack_region, 0, sizeof(mmap_region_t));
+    __memset(stack_region, 0, sizeof(mmap_region));
     stack_region->vaddr = stack_base;
     stack_region->size = (uint64_t)user_stack_pages * PAGE_SIZE;
     stack_region->phys = 0; // not MAP_PHYSICAL — anonymous stack
@@ -1575,9 +1575,9 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
             if (pte & PTE_PRESENT) {
               uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
               bool skip = false;
-              for (mmap_region_t *mr = old_regions; mr; mr = mr->next) {
+              for (mmap_region *mr = old_regions; mr; mr = mr->next) {
                 if (mr->shm_obj) {
-                  shm_t *s = mr->shm_obj;
+                  shm *s = mr->shm_obj;
                   if (s->page_list) {
                     for (int pi = 0; pi < s->num_pages; pi++)
                       if (leaf_phys == s->page_list[pi]) {
@@ -1623,9 +1623,9 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
   // 11. Free old mmap_regions + release SHM references
   {
-    mmap_region_t *region = old_regions;
+    mmap_region *region = old_regions;
     while (region) {
-      mmap_region_t *next = region->next;
+      mmap_region *next = region->next;
       if (region->shm_obj)
         shm_put(region->shm_obj);
       kfree(region);
@@ -1641,12 +1641,12 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
 // ===================== mmap region allocation =====================
 
-mmap_region_t *add_mmap_region(xtask_t *proc, uint64_t vaddr, uint64_t size,
+mmap_region *add_mmap_region(xtask *proc, uint64_t vaddr, uint64_t size,
                                uint64_t phys, struct shm *shm_obj,
                                uint32_t prot) {
   if (!proc->mm)
     return NULL;
-  mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+  mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
   if (!region)
     return NULL;
   region->vaddr = vaddr;

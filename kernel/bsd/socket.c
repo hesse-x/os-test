@@ -32,7 +32,7 @@
 #include <xos/socket.h>
 
 // ===================== Global socket lock =====================
-spinlock_t socket_lock = SPINLOCK_INIT;
+spinlock socket_lock = SPINLOCK_INIT;
 
 // ===================== Bind name space =====================
 static struct unix_bind_entry *unix_bind_table[UNIX_HASH_SIZE];
@@ -200,7 +200,7 @@ void unix_sock_free(struct unix_sock *sock) {
     struct unix_sock *next = bp->backlog_head; // backlog_head is next in chain
     // Tell peer we're closing
     if (bp->peer >= 0) {
-      xtask_t *peer = task_get(bp->peer);
+      xtask *peer = task_get(bp->peer);
       if (peer->pid == bp->peer) {
         // Wake peer if waiting on this socket
         unix_sock_wake_reader(bp);
@@ -420,7 +420,7 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
 
       // Block reader
       sock->blocked_reader = current_task->pid;
-      xtask_t *proc = current_task;
+      xtask *proc = current_task;
       proc->state = BLOCKED;
       proc->wait_event = WAIT_POLL;
       proc->wait_deadline =
@@ -517,7 +517,7 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
     int num_fds_installed = 0;
     int installed_fds[SCM_MAX_FD];
     if (do_scm) {
-      xtask_t *proc = current_task;
+      xtask *proc = current_task;
       for (int i = 0; i < num_fds_to_install && num_fds_installed < SCM_MAX_FD;
            i++) {
         int orig_fd = orig_fds[i];
@@ -525,7 +525,7 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
         // TOCTOU)
         struct file *src = NULL;
         if (sender_pid >= 0 && sender_pid < MAX_PROC) {
-          xtask_t *sender = task_get(sender_pid);
+          xtask *sender = task_get(sender_pid);
           if (sender->pid == sender_pid && sender->mm && sender->proc->files &&
               orig_fd >= 0 && orig_fd < MAX_FD) {
             rcu_read_lock();
@@ -539,7 +539,7 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
           continue;
 
         // Step 2: receiver_fd_lock — find free slot + install pointer
-        spinlock_t *fdlk = &proc->proc->files->fd_lock;
+        spinlock *fdlk = &proc->proc->files->fd_lock;
         spin_lock(fdlk);
         int new_fd = alloc_fd(proc->proc->files, 0);
         if (new_fd < 0) {
@@ -660,11 +660,11 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   if (!sock)
     return (int64_t)-ENOMEM;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   sock->state = UNIX_FREE;
 
-  spinlock_t *fdlk = &proc->proc->files->fd_lock;
+  spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
 
   // Find free fd slot
@@ -704,7 +704,7 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       (const struct sockaddr_un __user *)arg2;
   socklen_t addrlen = (socklen_t)arg3;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   // Validate fd
   if (fd < 0 || fd >= MAX_FD)
@@ -791,7 +791,7 @@ int64_t sys_listen(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   int fd = (int)arg1;
   int backlog = (int)arg2;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
@@ -830,7 +830,7 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   struct sockaddr_un __user *addr = (struct sockaddr_un __user *)arg2;
   socklen_t __user *addrlen = (socklen_t __user *)arg3;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
@@ -929,7 +929,7 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 
     // Allocate new fd for this child socket (fd_lock only, no socket_lock
     // nesting)
-    spinlock_t *fdlk = &proc->proc->files->fd_lock;
+    spinlock *fdlk = &proc->proc->files->fd_lock;
     spin_lock(fdlk);
     int new_fd = alloc_fd(proc->proc->files, 3);
 
@@ -1021,7 +1021,7 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       (const struct sockaddr_un __user *)arg2;
   socklen_t addrlen = (socklen_t)arg3;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
@@ -1158,7 +1158,7 @@ int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       sv_ptr + 2 * sizeof(int) > 0xFFFFFFFF80000000ULL)
     return (int64_t)-EFAULT;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   struct unix_sock *a = unix_sock_alloc();
   struct unix_sock *b = unix_sock_alloc();
@@ -1177,7 +1177,7 @@ int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   b->peer = proc->pid;
   b->peer_sock = a;
 
-  spinlock_t *fdlk = &proc->proc->files->fd_lock;
+  spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
 
   int fd_a = alloc_fd(proc->proc->files, 3);
@@ -1245,7 +1245,7 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   const struct msghdr __user *msg = (const struct msghdr __user *)arg2;
   int flags = (int)arg3;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
@@ -1354,7 +1354,7 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   struct msghdr __user *msg = (struct msghdr __user *)arg2;
   int flags = (int)arg3;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
@@ -1452,7 +1452,7 @@ int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   int fd = (int)arg1;
   int how = (int)arg2;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
@@ -1530,7 +1530,7 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   nfds_t nfds = (nfds_t)arg2;
   int timeout_ms = (int)arg3;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   // Validate user pointer
   uint64_t fds_ptr = (int64_t)fds;

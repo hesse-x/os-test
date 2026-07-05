@@ -34,7 +34,7 @@ static uint32_t futex_hash(struct futex_key *key) {
   return (uint32_t)((h >> 3) & (FUTEX_HASH_SIZE - 1));
 }
 
-static void get_futex_key(uint64_t uaddr, mm_t *mm, struct futex_key *key) {
+static void get_futex_key(uint64_t uaddr, mm *mm, struct futex_key *key) {
   key->type = 0;
   key->cr3 = mm->cr3;
   key->page_off = uaddr >> 12; // PAGE_SHIFT=12
@@ -47,7 +47,7 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   uint64_t uaddr = (uint64_t)arg1;
   int op = (int)arg2;
   uint32_t val = (uint32_t)arg3;
-  xtask_t *cur = current_task;
+  xtask *cur = current_task;
 
   // 只支持 FUTEX_WAIT / FUTEX_WAKE
   int real_op = op & 0x7f;
@@ -62,7 +62,7 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 // 收集 waiter 后释放 bucket lock 再唤醒：wake_with_event 会取 target 的
 // scheduler_lock，持 bucket lock 唤醒会形成 bucket→scheduler 锁序嵌套。
 //
-// 注意：曾在栈上分配 xtask_t *to_wake[MAX_PROC]（8KB）收集 waiter，但
+// 注意：曾在栈上分配 xtask *to_wake[MAX_PROC]（8KB）收集 waiter，但
 // 内核栈仅 2 页（8KB），该数组直接占满整栈并向下溢出，踩坏栈下方相邻的
 // slab 对象（典型现象：sys_exit 的 clear_tid futex_wake 后 signal->parent_pid
 // 变成栈残留垃圾，do_exit 访问 parent->proc->sig_pending 触发 #PF）。
@@ -72,16 +72,16 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 #define FUTEX_WAKE_BATCH 32
     int total_woken = 0;
     while (total_woken < (int)val) {
-      xtask_t *to_wake[FUTEX_WAKE_BATCH];
+      xtask *to_wake[FUTEX_WAKE_BATCH];
       int nwake = 0;
       uint64_t bflags;
       spin_lock_irqsave(&bucket->lock, &bflags);
-      list_node_t *node = bucket->waiters.next;
+      list_node *node = bucket->waiters.next;
       int batch = (int)val - total_woken;
       if (batch > FUTEX_WAKE_BATCH)
         batch = FUTEX_WAKE_BATCH;
       while (node != &bucket->waiters && nwake < batch) {
-        proc_t *p = LIST_ENTRY(node, proc_t, futex_node);
+        proc *p = LIST_ENTRY(node, proc, futex_node);
         node = node->next;
         if (p->futex_uaddr == uaddr) {
           to_wake[nwake++] = p->xtask;

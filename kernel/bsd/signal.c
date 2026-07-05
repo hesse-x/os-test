@@ -64,7 +64,7 @@ void sig_init() {
 // ===================== Signal delivery =====================
 
 // Deliver a signal with a user-registered handler via sigframe on user stack.
-static void deliver_signal(xtask_t *proc, trapframe_t *tf, int sig,
+static void deliver_signal(xtask *proc, trapframe_t *tf, int sig,
                            sigaction_t *sa) {
   struct rt_sigframe frame;
   __memset(&frame, 0, sizeof(frame));
@@ -145,7 +145,7 @@ void check_pending_signals(trapframe_t *tf) {
   if (tf->cs != 0x2B)
     return;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   if (!proc || !proc->proc)
     return;
 
@@ -253,7 +253,7 @@ void check_pending_signals(trapframe_t *tf) {
 }
 
 // ===================== force_sig =====================
-void force_sig(xtask_t *proc, int sig, int si_code, void *si_addr) {
+void force_sig(xtask *proc, int sig, int si_code, void *si_addr) {
   __atomic_or_fetch(&proc->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
   __atomic_and_fetch(&proc->proc->sig_blocked, ~(1ULL << sig),
                      __ATOMIC_RELEASE);
@@ -271,7 +271,7 @@ void force_sig(xtask_t *proc, int sig, int si_code, void *si_addr) {
 
 // ===================== Signal delivery helpers =====================
 
-void deliver_signal_to(xtask_t *target, int sig) {
+void deliver_signal_to(xtask *target, int sig) {
   __atomic_or_fetch(&target->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
   // signal 应能打断任意阻塞态（含 WAIT_FUTEX，pthread_cancel 路径），
   // 用 wake_process_any 而非窄语义 wake_process（后者只处理 IPC 类等待）。
@@ -304,7 +304,7 @@ int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   if (pid > 0) {
     if (pid >= MAX_PROC)
       return (int64_t)-ESRCH;
-    xtask_t *leader = task_get(pid);
+    xtask *leader = task_get(pid);
     if (leader->pid != pid || !leader->proc)
       return (int64_t)-ESRCH;
     // Deliver to process-level shared_pending
@@ -342,7 +342,7 @@ int64_t sys_tgkill(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     return 0;
   if (tid < 0 || tid >= MAX_PROC)
     return (int64_t)-ESRCH;
-  xtask_t *target = task_get(tid);
+  xtask *target = task_get(tid);
   if (target->pid != tid || target->tgid != tgid || !target->proc)
     return (int64_t)-ESRCH;
   // 投递到线程级 sig_pending（atomic，无 sig_lock）
@@ -364,7 +364,7 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   int how = (int)arg1;
   const sigset_t *set = (const sigset_t *)arg2;
   sigset_t *oldset = (sigset_t *)arg3;
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   if (set == NULL && oldset == NULL)
     return 0;
@@ -476,7 +476,7 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   if (sig == SIGCANCEL)
     return (int64_t)-EINVAL;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   if (oldact) {
     uint64_t ptr = (__force uint64_t)oldact;
@@ -519,7 +519,7 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 // ===================== BSD syscall: sigreturn =====================
 int64_t sys_sigreturn(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
                       int64_t _u5, int64_t _u6) {
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   uint64_t tf_base = get_cpu_local()->tss_rsp0 - sizeof(trapframe_t);
   trapframe_t *tf = (trapframe_t *)tf_base;

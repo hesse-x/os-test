@@ -60,7 +60,7 @@
 static void __iomem *abar;
 static int active_port = -1;
 
-spinlock_t ahci_lock = SPINLOCK_INIT;
+spinlock ahci_lock = SPINLOCK_INIT;
 
 static Page *cmd_list_page;
 static Page *fis_recv_page;
@@ -147,7 +147,7 @@ __attribute__((no_sanitize("kernel-address"))) static bool
 bounce_to_user_pages(pid_t pid, void *user_buf, uint32_t byte_len) {
   if (pid < 0 || pid >= MAX_PROC)
     return false;
-  xtask_t *proc = task_get(pid);
+  xtask *proc = task_get(pid);
   if (proc->pid != pid || proc->state == ZOMBIE || proc->state == REAPING)
     return false;
 
@@ -563,7 +563,7 @@ int ahci_set_active_port(int port) {
 // ===================== ahci_init =====================
 __attribute__((no_sanitize("kernel-address"))) void ahci_init() {
   // Find AHCI controller (class 0x0106 = SATA/AHCI)
-  pci_device_t *dev = pci_find_device(PCI_CLASS_STORAGE_AHCI);
+  pci_device *dev = pci_find_device(PCI_CLASS_STORAGE_AHCI);
   if (!dev) {
     ahci_puts("ahci: no AHCI controller found\n");
     halt();
@@ -948,7 +948,7 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
 // ===================== Driver registry =====================
 #include "kernel/driver/driver.h"
 
-dev_driver_t ahci_driver = {
+dev_driver ahci_driver = {
     .name = "ahci",
     .pci_class = 0x010600, // SATA AHCI (class=0x01, subclass=0x06)
     .pci_vendor = 0,

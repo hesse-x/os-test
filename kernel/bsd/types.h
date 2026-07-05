@@ -10,10 +10,10 @@
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/mem/alloc.h"
-#include "kernel/xcore/mm_types.h" // mm_t, mmap_region_t, shm_t
+#include "kernel/xcore/mm_types.h" // mm, mmap_region, shm
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sparse.h"
-#include "kernel/xcore/xtask.h" // pid_t, xtask_t
+#include "kernel/xcore/xtask.h" // pid_t, xtask
 #include <stdint.h>
 #include <xos/fcntl.h>
 #include <xos/mman.h>
@@ -41,7 +41,7 @@ typedef struct pipe {
   pid_t read_pid;
   pid_t write_pid;
   refcount_t p_count;
-} pipe_t;
+} pipe;
 
 struct unix_sock;
 struct inode;
@@ -67,25 +67,25 @@ typedef struct file {
     struct unix_sock *sock;
     struct pty *pty;
   };
-} file_t;
+} file;
 
-typedef struct files_t {
-  spinlock_t fd_lock;
+typedef struct files {
+  spinlock fd_lock;
   struct file *fd_table[MAX_FD];
   refcount_t f_count;
-} files_t;
+} files;
 
-// mm_t, mmap_region_t, shm_t defined in kernel/xcore/mm_types.h
+// mm, mmap_region, shm defined in kernel/xcore/mm_types.h
 // shm_get/shm_put declared in kernel/xcore/trap.h
 // copy_page_table/add_mmap_region declared in kernel/xcore/kpi.h
 
-// ===================== files_t lifecycle =====================
-files_t *files_create(void);
-void files_put(files_t *files);
+// ===================== files lifecycle =====================
+files *files_create(void);
+void files_put(files *files);
 
 // ===================== unified fd lifecycle =====================
 void file_put(struct file *f);
-int alloc_fd(files_t *files, int min_fd);
+int alloc_fd(files *files, int min_fd);
 void pty_dup_file(struct file *f);
 void pty_close_file(struct file *f);
 
@@ -94,17 +94,17 @@ static inline void file_get(struct file *f) {
     refcount_inc(&f->f_count);
 }
 
-static inline void fd_install(files_t *files, int fd, struct file *f) {
+static inline void fd_install(files *files, int fd, struct file *f) {
   rcu_assign_pointer(files->fd_table[fd], f);
 }
 
-static inline struct file *fd_uninstall(files_t *files, int fd) {
+static inline struct file *fd_uninstall(files *files, int fd) {
   struct file *f = files->fd_table[fd];
   rcu_assign_pointer(files->fd_table[fd], NULL);
   return f;
 }
 
-static inline struct file *fd_lookup(files_t *files, int fd) {
+static inline struct file *fd_lookup(files *files, int fd) {
   return rcu_dereference(files->fd_table[fd]);
 }
 

@@ -40,15 +40,15 @@ static inline void memstat_set(int *field, int val) {
   atomic_set((atomic_t *)field, val);
 }
 
-typedef struct kmem_cache_t {
+typedef struct kmem_cache {
   size_t obj_size;     // 对象大小
   size_t redzone_size; // 红区大小（当前 = 0）
-  spinlock_t lock;     // per-cache 锁（保护 partial list）
+  spinlock lock;     // per-cache 锁（保护 partial list）
   Page *partial;       // 有空闲对象的 slab 链表
-} kmem_cache_t;
+} kmem_cache;
 
 // 全局 kmalloc cache 数组
-extern kmem_cache_t kmalloc_caches[NUM_KMALLOC_CLASSES];
+extern kmem_cache kmalloc_caches[NUM_KMALLOC_CLASSES];
 
 static inline int size_to_class(size_t size) {
   if (size <= 8)
@@ -81,16 +81,16 @@ void *krealloc(void *ptr, size_t new_size) __must_check
 
 // ===================== 专用 slab cache API（Linux
 // 风格精简版）===================== 用于固定大小、长生命周期对象的专用
-// cache（如 xtask_t）。对象池复用，零内部碎片。 精简版：仅 name +
+// cache（如 xtask）。对象池复用，零内部碎片。 精简版：仅 name +
 // obj_size，不预留 ctor/align/flags（洁优先，未来需要再扩）。
 //
 // 与 kmalloc 的区别：kmalloc 走固定 size class（8..2048），对象大小对齐到
 // class； kmem_cache_create 用精确 obj_size 初始化页内 freelist，对象更紧凑。
-kmem_cache_t *kmem_cache_create(const char *name, size_t obj_size) __must_check
+kmem_cache *kmem_cache_create(const char *name, size_t obj_size) __must_check
     __attribute__((no_sanitize("kernel-address")));
-void *kmem_cache_alloc(kmem_cache_t *cache) __must_check
+void *kmem_cache_alloc(kmem_cache *cache) __must_check
     __attribute__((no_sanitize("kernel-address")));
-void kmem_cache_free(kmem_cache_t *cache, void *obj)
+void kmem_cache_free(kmem_cache *cache, void *obj)
     __attribute__((no_sanitize("kernel-address")));
 
 #endif // KERNEL_MEM_SLAB_H

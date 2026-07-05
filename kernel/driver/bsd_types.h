@@ -16,18 +16,18 @@
 // its guard KERNEL_BSD_TYPES_H prevents duplicate definitions here.
 
 #include "kernel/xcore/atomic.h"
-#include "kernel/xcore/mm_types.h" // mm_t, mmap_region_t, shm_t
+#include "kernel/xcore/mm_types.h" // mm, mmap_region, shm
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
-#include "kernel/xcore/xtask.h" // xtask_t
+#include "kernel/xcore/xtask.h" // xtask
 #include <stddef.h>
 #include <stdint.h>
 #include <xos/fcntl.h>
 #include <xos/signal.h> // NSIG, sigset_t, sigaction, siginfo_t
 #include <xos/types.h>  // pid_t
 
-// ===================== file / files_t =====================
+// ===================== file / files =====================
 // Must match kernel/bsd/types.h exactly.
 
 #ifndef KERNEL_BSD_TYPES_H
@@ -69,13 +69,13 @@ typedef struct file {
     struct unix_sock *sock;
     struct pty *pty;
   };
-} file_t;
+} file;
 
-typedef struct files_t {
-  spinlock_t fd_lock;
+typedef struct files {
+  spinlock fd_lock;
   struct file *fd_table[MAX_FD];
   refcount_t f_count;
-} files_t;
+} files;
 
 #endif /* KERNEL_BSD_TYPES_H */
 
@@ -93,7 +93,7 @@ typedef struct files_t {
 struct signal_struct;
 
 typedef struct proc {
-  struct xtask_t *xtask;
+  struct xtask *xtask;
 
   int32_t exit_code;
   pid_t sid;
@@ -105,27 +105,27 @@ typedef struct proc {
   siginfo_t sig_force_info;
   struct signal_struct *signal;
 
-  struct files_t *files;
+  struct files *files;
 
   pid_t clear_tid_addr;
-  list_node_t futex_node;
+  list_node futex_node;
   uint64_t futex_uaddr;
 
   // === pthread cancel (Phase 4) ===
   uint64_t cancel_handler; // __pthread_cancel_check 函数地址，0 = 未注册
-} proc_t;
+} proc;
 
 // ABI drift guard: must match kernel/bsd/proc.h byte-for-byte.
-// If this assert fails, the driver-side proc_t copy has drifted from the
+// If this assert fails, the driver-side proc copy has drifted from the
 // canonical definition in kernel/bsd/proc.h — fix this struct to match.
 // The numbers are duplicated here on purpose: if either side changes without
 // the other, BOTH files fail to compile, which is impossible to miss.
 #define DRV_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
-DRV_STATIC_ASSERT(offsetof(proc_t, files) == 184,
-                  "driver proc_t.files offset drift");
-DRV_STATIC_ASSERT(offsetof(proc_t, signal) == 176,
-                  "driver proc_t.signal must be POINTER not inline");
-DRV_STATIC_ASSERT(sizeof(proc_t) == 232, "driver proc_t size drift");
+DRV_STATIC_ASSERT(offsetof(proc, files) == 184,
+                  "driver proc.files offset drift");
+DRV_STATIC_ASSERT(offsetof(proc, signal) == 176,
+                  "driver proc.signal must be POINTER not inline");
+DRV_STATIC_ASSERT(sizeof(proc) == 232, "driver proc size drift");
 #undef DRV_STATIC_ASSERT
 
 #endif /* KERNEL_BSD_PROC_H */
@@ -134,7 +134,7 @@ DRV_STATIC_ASSERT(sizeof(proc_t) == 232, "driver proc_t size drift");
 // Inline helper (same as kernel/bsd/types.h version).
 
 #ifndef KERNEL_BSD_TYPES_H
-static inline struct file *fd_lookup(files_t *files, int fd) {
+static inline struct file *fd_lookup(files *files, int fd) {
   return rcu_dereference(files->fd_table[fd]);
 }
 #endif

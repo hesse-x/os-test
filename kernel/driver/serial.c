@@ -23,14 +23,14 @@
 #include <xos/ioctl.h> // TCGETS
 
 // ===================== TX lock =====================
-spinlock_t serial_tx_lock = SPINLOCK_INIT;
+spinlock serial_tx_lock = SPINLOCK_INIT;
 
 // ===================== RX ring buffer =====================
 
 uint8_t serial_rx_buf[SERIAL_RX_BUF_SIZE];
 uint32_t serial_rx_head = 0; // ISR write position
 uint32_t serial_rx_tail = 0; // sys_read read position
-spinlock_t serial_rx_lock = SPINLOCK_INIT;
+spinlock serial_rx_lock = SPINLOCK_INIT;
 int32_t serial_read_waiter = -1;
 int serial_fd_count = 0;
 bool serial_irq_registered = false;
@@ -184,7 +184,7 @@ void serial_vprintf(const char *fmt, va_list ap) {
 // ===================== Serial dev_ops (VFS callback dispatch)
 // =====================
 
-static int serial_dev_open(xtask_t *proc, int fd) {
+static int serial_dev_open(xtask *proc, int fd) {
   // Mutual exclusion: cannot coexist with user-space irq_bind on vector 36
   // But if serial IRQ is already registered (by a previous open), it's fine —
   // just bump the fd count.
@@ -202,7 +202,7 @@ static int serial_dev_open(xtask_t *proc, int fd) {
   return 0;
 }
 
-static int serial_dev_close(xtask_t *proc, int fd) {
+static int serial_dev_close(xtask *proc, int fd) {
   serial_fd_count--;
   uint64_t rx_flags;
   spin_lock_irqsave(&serial_rx_lock, &rx_flags);
@@ -218,7 +218,7 @@ static int serial_dev_close(xtask_t *proc, int fd) {
   return 0;
 }
 
-static ssize_t serial_dev_read(xtask_t *proc, int fd, void *buf, size_t count) {
+static ssize_t serial_dev_read(xtask *proc, int fd, void *buf, size_t count) {
   if (!buf)
     return -EFAULT;
 
@@ -253,7 +253,7 @@ static ssize_t serial_dev_read(xtask_t *proc, int fd, void *buf, size_t count) {
   return (ssize_t)nread;
 }
 
-static ssize_t serial_dev_write(xtask_t *proc, int fd, const void *buf,
+static ssize_t serial_dev_write(xtask *proc, int fd, const void *buf,
                                 size_t count) {
   if (!buf)
     return -EFAULT;
@@ -269,7 +269,7 @@ static long serial_dev_ioctl(uint32_t cmd, void *arg) {
   return -ENOTTY;
 }
 
-static __poll_t serial_dev_poll(xtask_t *proc, int events) {
+static __poll_t serial_dev_poll(xtask *proc, int events) {
   __poll_t revents = 0;
   uint64_t rx_flags;
   spin_lock_irqsave(&serial_rx_lock, &rx_flags);
@@ -305,7 +305,7 @@ void serial_dev_register(void) {
 // ===================== Driver registry =====================
 #include "kernel/driver/driver.h"
 
-dev_driver_t serial_driver = {
+dev_driver serial_driver = {
     .name = "serial",
     .pci_class = 0, // No PCI device (ISA UART at 0x3F8)
     .pci_vendor = 0,

@@ -34,11 +34,11 @@ int blk_read_sector(uint32_t lba, void *buf) { return blk_read(lba, 1, buf); }
 #include "kernel/xcore/xtask.h"
 #include <xos/errno.h>
 
-static int blk_dev_open(xtask_t *proc, int fd) { return 0; }
+static int blk_dev_open(xtask *proc, int fd) { return 0; }
 
-static int blk_dev_close(xtask_t *proc, int fd) { return 0; }
+static int blk_dev_close(xtask *proc, int fd) { return 0; }
 
-static ssize_t blk_dev_read(xtask_t *proc, int fd, void *buf, size_t count) {
+static ssize_t blk_dev_read(xtask *proc, int fd, void *buf, size_t count) {
   struct file *f = fd_lookup(proc->proc->files, fd);
   if (WARN_ON_ONCE(!f))
     return -EBADF;
@@ -62,7 +62,7 @@ static ssize_t blk_dev_read(xtask_t *proc, int fd, void *buf, size_t count) {
   return (ssize_t)done;
 }
 
-static ssize_t blk_dev_write(xtask_t *proc, int fd, const void *buf,
+static ssize_t blk_dev_write(xtask *proc, int fd, const void *buf,
                              size_t count) {
   struct file *f = fd_lookup(proc->proc->files, fd);
   if (WARN_ON_ONCE(!f))

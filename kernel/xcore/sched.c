@@ -37,32 +37,32 @@
 
 // Validate assembly offset assumptions in trapentry.S (switch_to uses hardcoded
 // offsets)
-_Static_assert(offsetof(xtask_t, k_rsp) == 8,
+_Static_assert(offsetof(xtask, k_rsp) == 8,
                "switch_to asm: k_rsp offset mismatch");
-_Static_assert(offsetof(xtask_t, cr3) == 24,
+_Static_assert(offsetof(xtask, cr3) == 24,
                "switch_to asm: cr3 offset mismatch");
 _Static_assert(sizeof(trapframe_t) == 176,
                "trapframe size must be 176 (22 × uint64_t)");
 _Static_assert(
-    offsetof(cpu_local_t, tss_rsp0) == 48,
+    offsetof(cpu_local, tss_rsp0) == 48,
     "syscall_fast_entry asm: tss_rsp0 offset mismatch (expected 48)");
 
 // fs_base offset consumed by trapentry.S (wrmsr FS_BASE before returning to
 // user mode). Pinned by static_assert at the bottom of this file.
-const uint64_t xtask_fs_base_offset = offsetof(xtask_t, fs_base);
+const uint64_t xtask_fs_base_offset = offsetof(xtask, fs_base);
 
-xtask_t *tasks[MAX_PROC];
-// current_task is per-CPU (in cpu_local_t), accessed via macro
+xtask *tasks[MAX_PROC];
+// current_task is per-CPU (in cpu_local), accessed via macro
 
-spinlock_t tasks_lock = SPINLOCK_INIT;
+spinlock tasks_lock = SPINLOCK_INIT;
 pid_t init_pid = -1;
 pid_t next_pid = 0; // 递增分配 + 环形复用（MAX_PROC 回绕）
-kmem_cache_t *xtask_cache = NULL; // xtask_t 专用 slab cache（动态化）
+kmem_cache *xtask_cache = NULL; // xtask 专用 slab cache（动态化）
 
 // ===================== Process table =====================
 
 // Allocate a free slot from tasks[] under tasks_lock.
-// Returns pointer to the free xtask_t, or NULL if no free slot.
+// Returns pointer to the free xtask, or NULL if no free slot.
 // Caller must hold tasks_lock; on success the slot's pid is still -1
 // (caller sets it after allocating resources).
 //
@@ -75,7 +75,7 @@ kmem_cache_t *xtask_cache = NULL; // xtask_t 专用 slab cache（动态化）
 //   - fpu_page (1 page)  : fpu_context_switch 在 prev 分支 fxsave 该页
 // slot 复用意味着子进程早已切走，安全。新增同类资源（如扩展 FPU
 // 状态页）请加入此函数。
-static void reclaim_lazy_resources(xtask_t *t) {
+static void reclaim_lazy_resources(xtask *t) {
   if (t->k_stack_top != 0) {
     uint64_t k_stack_phys_base =
         (__force uint64_t)PHY_ADDR(t->k_stack_top - 2 * PAGE_SIZE);
@@ -89,11 +89,11 @@ static void reclaim_lazy_resources(xtask_t *t) {
   }
 }
 
-// init_xtask_defaults: 新 xtask_t 对象的默认字段初始化（零 + 非零默认值 +
+// init_xtask_defaults: 新 xtask 对象的默认字段初始化（零 + 非零默认值 +
 // 链表节点）。 集中此处供 xtask_alloc 复用，替代旧 sched_init 的逐槽位初始化。
 // 注意：不设 k_stack_top/fpu_page——它们由调用者在分配栈/FPU 页后设置，
 // slot 复用路径已由 reclaim_lazy_resources 清零。
-static void init_xtask_defaults(xtask_t *t) {
+static void init_xtask_defaults(xtask *t) {
   __memset(t, 0, sizeof(*t));
   t->pid = -1;
   t->state = UNUSED;
@@ -108,8 +108,8 @@ static void init_xtask_defaults(xtask_t *t) {
   list_init(&t->wait_node);
 }
 
-// xtask_alloc: 从 next_pid 起扫描空槽，分配 xtask_t 并写入 tasks[i]。
-// 返回新 xtask_t*，*out_pid = 槽下标（即 pid）；无空槽返回 NULL。
+// xtask_alloc: 从 next_pid 起扫描空槽，分配 xtask 并写入 tasks[i]。
+// 返回新 xtask*，*out_pid = 槽下标（即 pid）；无空槽返回 NULL。
 //
 // 槽复用语义（呼应方案决策 7 REAPING 延迟释放）：
 //   - tasks[i] == NULL          : 直接 kmem_cache_alloc 新对象
@@ -118,17 +118,17 @@ static void init_xtask_defaults(xtask_t *t) {
 //                                 再 kmem_cache_free 旧对象，最后 alloc 新对象
 //   - 其它状态                   : 槽占用，跳过
 // 调用者须持 tasks_lock。
-xtask_t *xtask_alloc(pid_t *out_pid) {
+xtask *xtask_alloc(pid_t *out_pid) {
   if (!xtask_cache)
     return NULL; // 未初始化（sched_init 前调用）
 
   // 从 next_pid 起环形扫描（ffz 语义），找第一个可复用槽
   for (int k = 0; k < MAX_PROC; k++) {
     int i = (next_pid + k) % MAX_PROC;
-    xtask_t *old = tasks[i];
+    xtask *old = tasks[i];
     if (old == NULL) {
       // 空槽：直接分配
-      xtask_t *t = (xtask_t *)kmem_cache_alloc(xtask_cache);
+      xtask *t = (xtask *)kmem_cache_alloc(xtask_cache);
       if (!t)
         return NULL;
       init_xtask_defaults(t);
@@ -143,7 +143,7 @@ xtask_t *xtask_alloc(pid_t *out_pid) {
       reclaim_lazy_resources(old);
       kmem_cache_free(xtask_cache, old);
       tasks[i] = NULL;
-      xtask_t *t = (xtask_t *)kmem_cache_alloc(xtask_cache);
+      xtask *t = (xtask *)kmem_cache_alloc(xtask_cache);
       if (!t)
         return NULL;
       init_xtask_defaults(t);
@@ -159,8 +159,8 @@ xtask_t *xtask_alloc(pid_t *out_pid) {
 }
 
 void sched_init() {
-  // 动态化：创建 xtask_t 专用 slab cache，指针数组初始化为 NULL
-  xtask_cache = kmem_cache_create("xtask", sizeof(xtask_t));
+  // 动态化：创建 xtask 专用 slab cache，指针数组初始化为 NULL
+  xtask_cache = kmem_cache_create("xtask", sizeof(xtask));
   if (!xtask_cache) {
     panic("sched_init: kmem_cache_create(xtask) failed\n");
   }
@@ -176,7 +176,7 @@ void sched_init() {
 }
 
 // switch_to restore frame: callee-saved registers + return address
-typedef struct switch_frame_t {
+typedef struct switch_frame {
   uint64_t rbx;
   uint64_t rbp;
   uint64_t r12;
@@ -184,9 +184,9 @@ typedef struct switch_frame_t {
   uint64_t r14;
   uint64_t r15;
   uint64_t ret_addr;
-} switch_frame_t;
+} switch_frame;
 
-_Static_assert(sizeof(switch_frame_t) == 56,
+_Static_assert(sizeof(switch_frame) == 56,
                "switch_frame size must be 56 (7 × uint64_t)");
 
 uint64_t sched_build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
@@ -210,15 +210,15 @@ uint64_t sched_build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
   tf.err_code = 0;
   tf.trapno = 0;
 
-  switch_frame_t sf = {0};
+  switch_frame sf = {0};
   sf.ret_addr = (uint64_t)process_entry;
 
   uint8_t *sp = (uint8_t *)k_stack_top;
   sp -= sizeof(trapframe_t);
   __memcpy(sp, &tf, sizeof(trapframe_t));
 
-  sp -= sizeof(switch_frame_t);
-  __memcpy(sp, &sf, sizeof(switch_frame_t));
+  sp -= sizeof(switch_frame);
+  __memcpy(sp, &sf, sizeof(switch_frame));
 
   return (uint64_t)sp;
 }
@@ -226,21 +226,21 @@ uint64_t sched_build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
 // Build idle kernel stack: only switch_frame (no trapframe), ret_addr =
 // sched_idle_entry
 static uint64_t build_idle_kstack(uint64_t k_stack_top) {
-  switch_frame_t sf = {0};
+  switch_frame sf = {0};
   sf.ret_addr = (uint64_t)sched_idle_entry;
 
   uint8_t *sp = (uint8_t *)k_stack_top;
-  sp -= sizeof(switch_frame_t);
-  __memcpy(sp, &sf, sizeof(switch_frame_t));
+  sp -= sizeof(switch_frame);
+  __memcpy(sp, &sf, sizeof(switch_frame));
 
   return (uint64_t)sp;
 }
 
 // Create idle process for the specified CPU
-xtask_t *sched_create_idle_process(int cpu_id) {
+xtask *sched_create_idle_process(int cpu_id) {
   spin_lock(&tasks_lock);
   pid_t alloc_idx = -1;
-  xtask_t *proc = xtask_alloc(&alloc_idx);
+  xtask *proc = xtask_alloc(&alloc_idx);
   if (!proc) {
     spin_unlock(&tasks_lock);
     printk(LOG_ERROR, "sched_create_idle_process: no free slot\n");
@@ -371,9 +371,9 @@ void sched_try_steal_task(void) {
   ASSERT(cpu_locals[v].run_count > 0);
 
   // 偷尾部:循环双向链表 head->prev 即尾(list_push_back 已依赖此不变式)
-  list_node_t *head = &cpu_locals[v].run_queue;
-  list_node_t *tail_node = head->prev;
-  xtask_t *t = LIST_ENTRY(tail_node, xtask_t, run_node);
+  list_node *head = &cpu_locals[v].run_queue;
+  list_node *tail_node = head->prev;
+  xtask *t = LIST_ENTRY(tail_node, xtask, run_node);
   list_remove(&t->run_node);
   cpu_locals[v].run_count--;
   t->assigned_cpu = my_cpu;
@@ -386,7 +386,7 @@ out:
 }
 
 // Update TSS IOPM for the current CPU to match the given process
-static void update_tss_iopm(xtask_t *proc) {
+static void update_tss_iopm(xtask *proc) {
   int cpu = get_cpu_local()->cpu_id;
   tss_t *tss = &per_cpu_tss[cpu];
   if (proc->iopm) {
@@ -407,7 +407,7 @@ static void update_tss_iopm(xtask_t *proc) {
 // sched_task_reap 立即释放，schedule() 此处会 UAF。ASSERT page->status == PAGE_USED
 // 可在 DEBUG 构建下立即捕获——bfc_free_page 释放后 status 变 PAGE_FREE，fxsave
 // 前暴露。
-void fpu_context_switch(xtask_t *prev, xtask_t *next) {
+void fpu_context_switch(xtask *prev, xtask *next) {
   if (prev && prev->fpu_page) {
     ASSERT(prev->fpu_page->status == PAGE_USED);
     void *fpu_data =
@@ -438,7 +438,7 @@ void fpu_context_switch(xtask_t *prev, xtask_t *next) {
 // #GP）。 memset 0 + 设 MXCSR=0x1F80（默认值：异常屏蔽位全
 // 1，舍入=nearest）等价于 fninit+ldmxcsr 后的 init state。 纯内存操作，无 SSE
 // 指令，不破坏调用者 xmm 寄存器。
-int xcore_fpu_alloc(xtask_t *t) {
+int xcore_fpu_alloc(xtask *t) {
   t->fpu_page = bfc_alloc_page(1);
   if (!t->fpu_page)
     return 0;
@@ -451,8 +451,8 @@ int xcore_fpu_alloc(xtask_t *t) {
 
 __attribute__((no_sanitize("kernel-address"))) void schedule() {
   int my_cpu = get_cpu_local()->cpu_id;
-  xtask_t *idle = get_cpu_local()->idle_proc;
-  xtask_t *prev = current_task;
+  xtask *idle = get_cpu_local()->idle_proc;
+  xtask *prev = current_task;
 
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
@@ -495,8 +495,8 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
   }
 
   // Dequeue next process from head (FIFO round-robin)
-  list_node_t *next_node = list_front(&cpu_locals[my_cpu].run_queue);
-  xtask_t *next = LIST_ENTRY(next_node, xtask_t, run_node);
+  list_node *next_node = list_front(&cpu_locals[my_cpu].run_queue);
+  xtask *next = LIST_ENTRY(next_node, xtask, run_node);
   list_remove(&next->run_node);
 
   // Account prev's CPU time before switching out
@@ -522,8 +522,8 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
   // run_queue/run_count, 此处会捕获(此前 timer_handler 跨 CPU 投递即在此暴露)。
   {
     int cnt = 0;
-    list_node_t *__head = &cpu_locals[my_cpu].run_queue;
-    list_node_t *__n = __head->next;
+    list_node *__head = &cpu_locals[my_cpu].run_queue;
+    list_node *__n = __head->next;
     while (__n != __head) {
       cnt++;
       __n = __n->next;
@@ -555,16 +555,16 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
 // ===================== Timer queue operations =====================
 // Must be called under scheduler_lock of the target CPU
 
-void sched_timer_queue_insert(int cpu, xtask_t *proc) {
+void sched_timer_queue_insert(int cpu, xtask *proc) {
   // Remove from any existing list first to prevent duplicate insertion.
   // Skip if wait_node is self-referencing (never inserted into a list).
   if (!list_empty(&proc->wait_node))
     list_remove(&proc->wait_node);
 
-  list_node_t *head = &cpu_locals[cpu].timer_queue;
-  list_node_t *node = head->next;
+  list_node *head = &cpu_locals[cpu].timer_queue;
+  list_node *node = head->next;
   while (node != head) {
-    xtask_t *p = LIST_ENTRY(node, xtask_t, wait_node);
+    xtask *p = LIST_ENTRY(node, xtask, wait_node);
     if (p->wait_deadline > proc->wait_deadline)
       break;
     node = node->next;
@@ -576,7 +576,7 @@ void sched_timer_queue_insert(int cpu, xtask_t *proc) {
   node->prev = &proc->wait_node;
 }
 
-void sched_timer_queue_remove(xtask_t *proc) { list_remove(&proc->wait_node); }
+void sched_timer_queue_remove(xtask *proc) { list_remove(&proc->wait_node); }
 
 // sched_task_reap: reclaim all resources of a process
 // Called by sys_exit (no-parent path) or sys_waitpid
@@ -590,12 +590,12 @@ void sched_timer_queue_remove(xtask_t *proc) { list_remove(&proc->wait_node); }
 //     - k_stack (2pg)  : switch_to 汇编在子进程栈上 ret
 //     - fpu_page (1pg) : fpu_context_switch 在 prev 分支 fxsave 该页
 //   由 BSD 层释放（proc_reap_hook）:
-//     - fds/signal/proc_t
+//     - fds/signal/proc
 //
 // 立即释放 lazy 类资源会与 schedule() 竞态 UAF（sched_task_reap 与 schedule()
 // 无共享锁）。 新增同类资源请归入对应类别，lazy 类资源统一在 xtask_alloc 的
 // reclaim_lazy_resources 释放。
-void sched_task_reap(xtask_t *proc) {
+void sched_task_reap(xtask *proc) {
   ASSERT(proc->state == ZOMBIE || proc->state == REAPING);
 
   // 1. Free IOPM bitmap (immediate)
@@ -639,7 +639,7 @@ void sched_task_reap(xtask_t *proc) {
   //    waiters
   if (proc->mm) {
     pid_t pid_for_cleanup = proc->pid;
-    mm_t *mm = proc->mm;
+    mm *mm = proc->mm;
     proc->mm = NULL;
     if (refcount_dec_and_test(&mm->m_count)) {
       mm_release(mm, pid_for_cleanup);
@@ -666,11 +666,11 @@ void sched_task_reap(xtask_t *proc) {
   if (proc_reap_hook)
     proc_reap_hook(proc);
 
-  // 7. 置 REAPING 状态（动态化：不立即 kmem_cache_free xtask_t 对象）。
+  // 7. 置 REAPING 状态（动态化：不立即 kmem_cache_free xtask 对象）。
   //    字段清理同旧设计（pid=-1 / mm=NULL / proc 由 hook 释放），保留所有
   //    reader 守卫语义（tasks[i].pid>=0 / ==p / proc!=NULL 在 REAPING 槽上
   //    均判否 → 跳过），无锁读 112+ 处不需 refcount 仍安全。
-  //    xtask_t 对象本身留到 xtask_alloc 复用该槽时 kmem_cache_free（REAPING
+  //    xtask 对象本身留到 xtask_alloc 复用该槽时 kmem_cache_free（REAPING
   //    分支）。 lazy 资源（k_stack_top / fpu_page）刻意保留，由 xtask_alloc 的
   //    reclaim_lazy_resources 释放（SMP race：schedule() 可能仍引用）。
   spin_lock(&tasks_lock);

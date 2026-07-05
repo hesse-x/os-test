@@ -18,8 +18,8 @@
 #define FUTEX_WAKE 1
 
 struct futex_bucket {
-  list_node_t waiters; // 等待线程链表（proc_t->futex_node 挂载）
-  spinlock_t lock;
+  list_node waiters; // 等待线程链表（proc->futex_node 挂载）
+  spinlock lock;
 };
 
 extern struct futex_bucket futex_table[FUTEX_HASH_SIZE];

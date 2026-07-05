@@ -30,7 +30,7 @@ bool ahci_is_busy();
 // Returns 0 on success, -errno if port has no device.
 int ahci_set_active_port(int port);
 
-extern spinlock_t ahci_lock;
+extern spinlock ahci_lock;
 
 struct dev_driver;
 extern struct dev_driver ahci_driver;

@@ -84,14 +84,14 @@ typedef struct file_t_io_resp {
 } file_t_io_resp;
 
 // ===================== BSD syscall: exit =====================
-// Key safety: all proc_t/signal reads happen BEFORE setting ZOMBIE (stored in
-// locals). After ZOMBIE, do_exit only uses locals + xtask_t array fields —
+// Key safety: all proc/signal reads happen BEFORE setting ZOMBIE (stored in
+// locals). After ZOMBIE, do_exit only uses locals + xtask array fields —
 // never proc->proc or sig, which may be kfree'd by concurrent sched_task_reap on
 // another CPU. do_exit does NOT do mm_put/files_put/signal_put — sched_task_reap/
 // proc_reap owns all resource freeing (original design; 3b will revisit).
 // ===================== BSD syscall: exit =====================
-// Key safety: all proc_t/signal reads happen BEFORE setting ZOMBIE (stored in
-// locals). After ZOMBIE, do_exit only uses locals + xtask_t array fields —
+// Key safety: all proc/signal reads happen BEFORE setting ZOMBIE (stored in
+// locals). After ZOMBIE, do_exit only uses locals + xtask array fields —
 // never proc->proc or sig, which may be kfree'd by concurrent sched_task_reap on
 // another CPU. do_exit does NOT do mm_put/files_put/signal_put — sched_task_reap/
 // proc_reap owns all resource freeing (original design; 3b will revisit).
@@ -105,10 +105,10 @@ typedef struct file_t_io_resp {
 //     退出状态位）。父进程 waitpid 拿到的 status 可直接喂标准
 //     WIFEXITED/WEXITSTATUS 宏（user/include/sys/wait.h）。
 int64_t do_exit_with_code(int32_t encoded_exit_code) {
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   int32_t exit_code = encoded_exit_code;
-  proc->exit_code = exit_code;       // xtask_t (UAF-safe for waitpid)
-  proc->proc->exit_code = exit_code; // proc_t (legacy, waitpid 已改读 xtask_t)
+  proc->exit_code = exit_code;       // xtask (UAF-safe for waitpid)
+  proc->proc->exit_code = exit_code; // proc (legacy, waitpid 已改读 xtask)
   printk(LOG_INFO, "do_exit: pid=%d tid=%d exit_code=%d\n", proc->tgid,
          proc->pid, exit_code);
 
@@ -131,7 +131,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   }
 
   // 4. clear_tid_addr: 写 0 + futex_wake（pthread_join 依赖此唤醒）
-  //    BEFORE ZOMBIE — proc_t is alive, no concurrent sched_task_reap possible.
+  //    BEFORE ZOMBIE — proc is alive, no concurrent sched_task_reap possible.
   if (proc->proc->clear_tid_addr) {
     // 不变量：clear 前 *clear_tid_addr 必须是本线程 tid（由 CLONE_CHILD_SETTID
     // 在子线程被调度前写入）。若为 0，说明父线程 clone 返回后还没来得及让
@@ -147,7 +147,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
               0);
   }
 
-  // 5. Thread-group bookkeeping BEFORE ZOMBIE (proc_t/signal alive).
+  // 5. Thread-group bookkeeping BEFORE ZOMBIE (proc/signal alive).
   //    Read signal fields into locals — after ZOMBIE we must not touch sig.
   struct signal_struct *sig = proc->proc->signal;
   pid_t ppid = sig->parent_pid;
@@ -155,7 +155,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   int notify_parent = atomic_dec_and_test(&sig->thread_count);
 
   // 6. 设 ZOMBIE
-  //    GATE: after this, sched_task_reap/proc_reap on another CPU may kfree proc_t
+  //    GATE: after this, sched_task_reap/proc_reap on another CPU may kfree proc
   //    and signal_put signal_struct. Do NOT dereference proc->proc or sig.
   int cpu = proc->assigned_cpu;
   uint64_t flags;
@@ -166,7 +166,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   // 7. 通知父进程（最后线程）— uses local ppid, not sig->parent_pid
   if (notify_parent) {
     if (ppid >= 0 && ppid < MAX_PROC && task_get(ppid)->pid == ppid) {
-      xtask_t *parent = task_get(ppid);
+      xtask *parent = task_get(ppid);
       __atomic_or_fetch(&parent->proc->sig_pending, 1ULL << SIGCHLD,
                         __ATOMIC_RELEASE);
       int pcpu = parent->assigned_cpu;
@@ -179,11 +179,11 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
     }
   }
 
-  // 8. 唤醒等待本线程 REQ/MSG reply 的进程 — xtask_t fields only, no proc_t
+  // 8. 唤醒等待本线程 REQ/MSG reply 的进程 — xtask fields only, no proc
   for (int i = 0; i < MAX_PROC; i++) {
     if (!tasks[i])
       continue;
-    xtask_t *waiter = task_get(i);
+    xtask *waiter = task_get(i);
     if (waiter->pid >= 0 && waiter->state == BLOCKED &&
         waiter->wait_event == WAIT_REQ_REPLY &&
         waiter->req_target_pid == proc->pid) {
@@ -201,7 +201,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   // 9. schedule() — never returns.
   //    do_exit does NOT do mm_put/files_put/signal_put — sched_task_reap/proc_reap
   //    owns all freeing. 3b will revisit do_exit ownership with proper
-  //    proc_t lifetime (RCU or per-task reap lock).
+  //    proc lifetime (RCU or per-task reap lock).
   schedule();
   return 0;
 }
@@ -217,7 +217,7 @@ int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 // ===================== BSD syscall: exit_group =====================
 int64_t sys_exit_group(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
                        int64_t _u4, int64_t _u5) {
-  xtask_t *current = current_task;
+  xtask *current = current_task;
   struct signal_struct *sig = current->proc->signal;
   int32_t status = (int32_t)arg1;
 
@@ -259,7 +259,7 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   if (pid == -1) {
     while (1) {
       spin_lock(&tasks_lock);
-      xtask_t *zombie = NULL;
+      xtask *zombie = NULL;
       bool has_children = false;
       for (int i = 0; i < MAX_PROC; i++) {
         if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->mm &&
@@ -347,7 +347,7 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
     return -EINVAL;
   }
 
-  xtask_t *child = task_get(pid);
+  xtask *child = task_get(pid);
 
   spin_lock(&tasks_lock);
   if (child->pid != pid || !child->mm ||
@@ -423,7 +423,7 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
     spin_unlock(&tasks_lock);
   }
 
-  // exit_code lives in xtask_t (static array) — safe to read without proc_t
+  // exit_code lives in xtask (static array) — safe to read without proc
   // ref.
   if (exit_code_ptr) {
     uint64_t ptr_val = (__force uint64_t)exit_code_ptr;
@@ -454,7 +454,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   if (size > 128 * 1024 * 1024)
     return -EINVAL;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   uint64_t mmap_flags;
   spin_lock_irqsave(&proc->mm->mmap_lock, &mmap_flags);
   printk(LOG_DEBUG, "sys_mmap: pid=%d size=%zu flags=%d fd=%d offset=%llu\n",
@@ -516,8 +516,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
             }
           }
 
-          mmap_region_t *region =
-              (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+          mmap_region *region =
+              (mmap_region *)kmalloc(sizeof(mmap_region));
           if (!region) {
             for (size_t i = 0; i < total_pages; i++)
               unmap_user_pages(pml4, vaddr + i * PAGE_SIZE,
@@ -584,7 +584,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       }
     }
 
-    mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+    mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
     if (!region) {
       for (size_t i = 0; i < total_pages; i++)
         unmap_user_pages(pml4, vaddr + i * PAGE_SIZE,
@@ -651,7 +651,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       }
     }
 
-    mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+    mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
     if (!region) {
       for (size_t i = 0; i < npages; i++)
         unmap_user_pages(pml4, vaddr + i * PAGE_SIZE,
@@ -722,7 +722,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     mapped++;
   }
 
-  mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+  mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
   if (!region) {
     for (size_t i = 0; i < npages; i++) {
       uint64_t va = vaddr + i * PAGE_SIZE;
@@ -756,14 +756,14 @@ int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   if (size == 0)
     return (int64_t)-EINVAL;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   uint64_t *pml4 =
       (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
-  mmap_region_t **pp = &proc->mm->mmap_regions;
+  mmap_region **pp = &proc->mm->mmap_regions;
   while (*pp) {
     if ((*pp)->vaddr == addr) {
-      mmap_region_t *region = *pp;
+      mmap_region *region = *pp;
       size = region->size;
 
       size_t npages = size / PAGE_SIZE;
@@ -813,9 +813,9 @@ int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
       ptr + 2 * sizeof(int) > 0xFFFFFFFF80000000ULL)
     return (int64_t)-EFAULT;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
-  spinlock_t *fdlk = &proc->proc->files->fd_lock;
+  spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
   int read_fd = alloc_fd(proc->proc->files, 3);
   int write_fd =
@@ -912,7 +912,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   rcu_read_lock();
   struct file *f = fd_lookup(proc->proc->files, fd);
   if (!f) {
@@ -1199,7 +1199,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   rcu_read_lock();
   struct file *f = fd_lookup(proc->proc->files, fd);
   if (!f) {
@@ -1498,7 +1498,7 @@ int64_t sys_close(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
 
-  spinlock_t *fdlk = &current_proc->files->fd_lock;
+  spinlock *fdlk = &current_proc->files->fd_lock;
   spin_lock(fdlk);
   struct file *f = fd_uninstall(current_proc->files, fd);
   spin_unlock(fdlk);
@@ -1521,9 +1521,9 @@ int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   if (old_fd == new_fd)
     return (int64_t)new_fd;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
-  spinlock_t *fdlk = &proc->proc->files->fd_lock;
+  spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
 
   struct file *old_f = fd_lookup(proc->proc->files, old_fd);
@@ -1557,7 +1557,7 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   rcu_read_lock();
   struct file *f = fd_lookup(proc->proc->files, fd);
@@ -1604,7 +1604,7 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     }
 
     if (new_seals & F_SEAL_WRITE) {
-      for (mmap_region_t *mr = proc->mm->mmap_regions; mr; mr = mr->next) {
+      for (mmap_region *mr = proc->mm->mmap_regions; mr; mr = mr->next) {
         if (mr->shm_obj == shm) {
           break;
         }
@@ -1644,7 +1644,7 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   uint32_t cmd = (uint32_t)arg2;
   void __user *arg = (void __user *__force)arg3;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)(-(int64_t)EBADF);
 
@@ -1745,7 +1745,7 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       ret = -(int64_t)ESRCH;
       goto out;
     }
-    xtask_t *target = task_get(target_pid);
+    xtask *target = task_get(target_pid);
     if (target->pid != target_pid) {
       ret = -(int64_t)ESRCH;
       goto out;
@@ -1850,7 +1850,7 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   int fd = (int)arg1;
   struct kstat __user *ust = (struct kstat __user * __force) arg2;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)(-(int64_t)EBADF);
 
@@ -1934,7 +1934,7 @@ out:
 int64_t sys_fdev_pid(int64_t arg1, int64_t _u2, int64_t _u3, int64_t _u4,
                      int64_t _u5, int64_t _u6) {
   int fd = (int)arg1;
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)(-(int64_t)EBADF);
 
@@ -1974,7 +1974,7 @@ int64_t sys_memfd_create(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   if (flags & ~(MFD_CLOEXEC | MFD_ALLOW_SEALING))
     return -EINVAL;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   struct shm *shm = (struct shm *)kmalloc(sizeof(struct shm));
   if (!shm)
@@ -2008,7 +2008,7 @@ int64_t sys_memfd_create(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
     shm->name[0] = '\0';
   }
 
-  spinlock_t *fdlk = &proc->proc->files->fd_lock;
+  spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
   int fd = alloc_fd(proc->proc->files, 2);
   if (fd < 0) {
@@ -2044,7 +2044,7 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   rcu_read_lock();
   struct file *f = fd_lookup(proc->proc->files, fd);
@@ -2216,9 +2216,9 @@ int64_t sys_install_fd_impl(int64_t arg1, int64_t arg2, int64_t arg3,
   if (flags & ~(O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK))
     return (int64_t)-EINVAL;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
-  spinlock_t *fdlk = &proc->proc->files->fd_lock;
+  spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
   int fd = alloc_fd(proc->proc->files, 3);
   if (fd < 0) {
@@ -2274,7 +2274,7 @@ int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     return (int64_t)-ENOMEM;
 
   uint64_t phys = (__force uint64_t)page_to_phys(pages);
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   uint64_t vaddr = proc->mm->mmap_brk;
   uint64_t vaddr_end = vaddr + size;
@@ -2296,7 +2296,7 @@ int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 
   proc->mm->mmap_brk = vaddr_end;
 
-  mmap_region_t *region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+  mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
   if (!region) {
     unmap_user_pages(
         (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3), vaddr,
@@ -2328,11 +2328,11 @@ int64_t sys_dma_free(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
   if (!vaddr)
     return (int64_t)-EINVAL;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
-  mmap_region_t **pp = &proc->mm->mmap_regions;
+  mmap_region **pp = &proc->mm->mmap_regions;
   while (*pp) {
-    mmap_region_t *r = *pp;
+    mmap_region *r = *pp;
     if (r->vaddr == vaddr) {
       size_t npages = r->size / PAGE_SIZE;
 
@@ -2363,7 +2363,7 @@ int64_t sys_lseek(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
 
-  xtask_t *proc = current_task;
+  xtask *proc = current_task;
 
   rcu_read_lock();
   struct file *f = fd_lookup(proc->proc->files, fd);

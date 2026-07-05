@@ -153,7 +153,7 @@ struct pty {
 
 // ===================== Global PTY table =====================
 extern struct pty *pty_table[MAX_PTY];
-extern spinlock_t pty_alloc_lock;
+extern spinlock pty_alloc_lock;
 
 // ===================== PTY functions =====================
 void pty_init(void);
@@ -169,17 +169,17 @@ int pty_ring_avail(uint32_t head, uint32_t tail);
 int pty_ring_space(uint32_t head, uint32_t tail);
 
 // /dev/ptmx open callback
-int ptmx_open(xtask_t *proc, int fd);
+int ptmx_open(xtask *proc, int fd);
 
 // /dev/ptsN slave open callback
-int pts_open(xtask_t *proc, int fd);
+int pts_open(xtask *proc, int fd);
 
 // PTY read/write
-int64_t pty_master_read(struct pty *pty, xtask_t *proc, void *buf, size_t len);
-int64_t pty_master_write(struct pty *pty, xtask_t *proc, const void *buf,
+int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len);
+int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
                          size_t len);
-int64_t pty_slave_read(struct pty *pty, xtask_t *proc, void *buf, size_t len);
-int64_t pty_slave_write(struct pty *pty, xtask_t *proc, const void *buf,
+int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len);
+int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
                         size_t len);
 
 // PTY ioctl
@@ -189,13 +189,13 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg);
 uint32_t pty_poll(struct pty *pty, int is_master, uint32_t events);
 
 // Determine if fd is master or slave side
-int pty_fd_is_master(files_t *files, int fd);
+int pty_fd_is_master(files *files, int fd);
 
 // Check if inode is the ptmx master inode (for pty_close_file/pty_dup_file)
 int pty_is_master_inode(struct inode *inode);
 
 // Wake blocked pipe peers based on fd direction flags
-static inline void wake_pipe_peers(pipe_t *p, int fd_flags) {
+static inline void wake_pipe_peers(pipe *p, int fd_flags) {
   if (fd_flags & (O_WRONLY | O_RDWR)) {
     if (p->read_pid >= 0)
       wake_process(p->read_pid);

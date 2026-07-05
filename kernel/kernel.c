@@ -77,7 +77,7 @@ void kernel_main(boot_info *bi) {
   }
 
   // Create BSP idle process
-  xtask_t *bsp_idle = sched_create_idle_process(0);
+  xtask *bsp_idle = sched_create_idle_process(0);
   if (!bsp_idle) {
     printk(LOG_ERROR, "kernel_main: create BSP idle failed\n");
     halt();
@@ -96,7 +96,7 @@ void kernel_main(boot_info *bi) {
         (__force phys_addr_t)bi->init_elf_addr);
     printk(LOG_INFO, "kernel_main: loading init (phys=0x%lx size=%lu)...\n",
            bi->init_elf_addr, (unsigned long)bi->init_elf_size);
-    xtask_t *init_proc = process_create_elf(init_elf, bi->init_elf_size);
+    xtask *init_proc = process_create_elf(init_elf, bi->init_elf_size);
     if (init_proc) {
       init_loaded = true;
       init_pid = init_proc->pid;

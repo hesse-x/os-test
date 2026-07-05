@@ -32,7 +32,7 @@ typedef struct shm {
   char name[32];
   uint64_t *page_list;
   int num_pages;
-} shm_t;
+} shm;
 
 // ===================== Memory mapping region =====================
 #define MAP_PHYSICAL_BASE 0x70000000
@@ -44,19 +44,19 @@ typedef struct mmap_region {
   struct shm *shm_obj;
   uint32_t prot;
   struct mmap_region *next;
-} mmap_region_t;
+} mmap_region;
 
 // ===================== Address space =====================
-typedef struct mm_t {
+typedef struct mm {
   uint64_t cr3;
   refcount_t m_count;
   uint64_t mmap_brk;
   uint64_t mmap_phys_brk;
   struct mmap_region *mmap_regions;
   pid_t parent_pid;
-  spinlock_t mmap_lock;
-} mm_t;
+  spinlock mmap_lock;
+} mm;
 
-void mm_release(mm_t *mm, pid_t owner_pid);
+void mm_release(mm *mm, pid_t owner_pid);
 
 #endif // KERNEL_XCORE_MM_TYPES_H

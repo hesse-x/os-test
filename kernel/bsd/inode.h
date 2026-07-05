@@ -25,7 +25,7 @@ struct inode {
   uint32_t mode;
   int nlink;
   refcount_t i_count;
-  spinlock_t i_lock;
+  spinlock i_lock;
   void *i_priv;    /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
   struct shm *shm; /* INODE_DEV -> shared memory (NULL = no SHM) */
 

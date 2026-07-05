@@ -19,7 +19,7 @@ size_t total_page_frames = 0;
 Page *bfc_frames = NULL;
 Page *bfc_free_list = NULL;
 
-spinlock_t bfc_lock = SPINLOCK_INIT;
+spinlock bfc_lock = SPINLOCK_INIT;
 
 // ===================== BFC allocator implementation =====================
 void bfc_init(void) {
@@ -349,7 +349,7 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
   Page **cur_page = &bfc_free_list;
   size_t cont_page_num = 0;
   for (size_t i = 0; i < total_page_frames; i++) {
-    page_status_t status = frames[i].status;
+    page_status status = frames[i].status;
     switch (state) {
     case 0: {
       if (status == PAGE_FREE) {

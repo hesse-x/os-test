@@ -26,7 +26,7 @@ typedef struct sk_buff {
   int num_fds;          // number of SCM_RIGHTS fds
   int fds[MAX_SCM_FDS]; // SCM_RIGHTS fd numbers (lazy install)
   uint8_t data[];       // flexible array member
-} sk_buff_t;
+} sk_buff;
 
 // allocate: skb = kmalloc(sizeof(sk_buff) + data_len)
 // free: kfree(skb)
@@ -39,7 +39,7 @@ typedef enum unix_sock_state {
   UNIX_LISTEN,
   UNIX_CONNECTED,
   UNIX_CLOSED,
-} unix_sock_state_t;
+} unix_sock_state;
 
 // ===================== unix_sock (per-socket kernel structure)
 // =====================
@@ -69,7 +69,7 @@ typedef struct unix_sock {
 
   // Bind path (empty = unbound/anonymous)
   char sun_path[108];
-} unix_sock_t;
+} unix_sock;
 
 // ===================== Bind name space =====================
 // Hash table: path -> unix_sock* (listener only, UNIX_LISTEN state)
@@ -80,11 +80,11 @@ typedef struct unix_bind_entry {
   struct unix_sock *sock;
   pid_t owner_pid;              // PID of the process that bound this socket
   struct unix_bind_entry *next; // chain for hash collisions
-} unix_bind_entry_t;
+} unix_bind_entry;
 
 // ===================== Global socket lock =====================
 // Lock order: tasks_lock -> socket_lock -> scheduler_lock
-extern spinlock_t socket_lock;
+extern spinlock socket_lock;
 
 // ===================== Socket operations (internal) =====================
 struct unix_sock *unix_sock_alloc(void);

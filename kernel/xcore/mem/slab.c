@@ -17,7 +17,7 @@
 #include <stdint.h>
 
 // 全局 kmalloc cache 数组
-kmem_cache_t kmalloc_caches[NUM_KMALLOC_CLASSES];
+kmem_cache kmalloc_caches[NUM_KMALLOC_CLASSES];
 
 // 全局内核内存统计
 struct kernel_mem_stats kernel_mem_stats;
@@ -28,7 +28,7 @@ static const size_t class_sizes[NUM_KMALLOC_CLASSES] = {
 
 // ===================== Slab 页初始化 =====================
 __attribute__((no_sanitize("kernel-address"))) static void
-slab_page_init(Page *page, kmem_cache_t *cache, int cpu_id) {
+slab_page_init(Page *page, kmem_cache *cache, int cpu_id) {
   page->status = PAGE_SLAB;
   page->slab.cache = cache;
   page->slab.inuse = 0;
@@ -50,7 +50,7 @@ slab_page_init(Page *page, kmem_cache_t *cache, int cpu_id) {
 
 // ===================== partial list 操作 =====================
 __attribute__((no_sanitize("kernel-address"))) static void
-partial_add(kmem_cache_t *cache, Page *page) {
+partial_add(kmem_cache *cache, Page *page) {
   page->slab.partial_next = cache->partial;
   page->slab.partial_prev = NULL;
   if (cache->partial) {
@@ -60,7 +60,7 @@ partial_add(kmem_cache_t *cache, Page *page) {
 }
 
 __attribute__((no_sanitize("kernel-address"))) static void
-partial_remove(kmem_cache_t *cache, Page *page) {
+partial_remove(kmem_cache *cache, Page *page) {
   if (page->slab.partial_prev) {
     page->slab.partial_prev->slab.partial_next = page->slab.partial_next;
   } else {
@@ -148,8 +148,8 @@ __attribute__((no_sanitize("kernel-address"))) void *kmalloc(size_t size) {
   }
 
   int c = size_to_class(size);
-  kmem_cache_t *cache = &kmalloc_caches[c];
-  cpu_local_t *cpu = get_cpu_local();
+  kmem_cache *cache = &kmalloc_caches[c];
+  cpu_local *cpu = get_cpu_local();
   Page *active = cpu->active_slab[c];
 
   // All paths hold lock (方案 A: remove fast path lock-free optimization)
@@ -267,7 +267,7 @@ __attribute__((no_sanitize("kernel-address"))) void kfree(const void *ptr) {
   kasan_slab_free(ptr, page->slab.cache->obj_size);
   slab_poison_free((void *)ptr, page->slab.cache->obj_size);
 
-  kmem_cache_t *cache = page->slab.cache;
+  kmem_cache *cache = page->slab.cache;
   int my_cpu = get_cpu_local()->cpu_id;
 
   if (page->slab.cpu_id == my_cpu) {
@@ -356,18 +356,18 @@ __attribute__((no_sanitize("kernel-address"))) void *krealloc(void *ptr,
 // partial list + 新页分配）。精简版：无 ctor/align/flags。
 //
 // obj_size 上限约束：必须 <= PAGE_SIZE/2 否则一页放不下 ≥2 对象（freelist
-// 侵入式 需要对象容纳 next 指针）。xtask_t ~2KB 满足。kmalloc 大对象走
+// 侵入式 需要对象容纳 next 指针）。xtask ~2KB 满足。kmalloc 大对象走
 // BFC，专用 cache 不应承接这种用法。
 
-// kmem_cache_create: 静态分配 cache 控制块（kmem_cache_t 本身用 kmalloc）。
+// kmem_cache_create: 静态分配 cache 控制块（kmem_cache 本身用 kmalloc）。
 // 返回 NULL 表示 kmalloc 失败。cache 由调用者持有，无需 destroy（xtask_cache
 // 全局常驻）。
-__attribute__((no_sanitize("kernel-address"))) kmem_cache_t *
+__attribute__((no_sanitize("kernel-address"))) kmem_cache *
 kmem_cache_create(const char *name, size_t obj_size) {
   (void)name; // 调试用，暂不存储
   if (obj_size == 0 || obj_size > PAGE_SIZE / 2)
     return NULL;
-  kmem_cache_t *cache = (kmem_cache_t *)kmalloc(sizeof(kmem_cache_t));
+  kmem_cache *cache = (kmem_cache *)kmalloc(sizeof(kmem_cache));
   if (!cache)
     return NULL;
   cache->obj_size = obj_size;
@@ -380,7 +380,7 @@ kmem_cache_create(const char *name, size_t obj_size) {
 // kmem_cache_alloc: 从 cache 分配一个对象。持 cache->lock 全程。
 // 路径：partial list 有空位 → 复用；否则从 BFC 分配新页初始化。
 __attribute__((no_sanitize("kernel-address"))) void *
-kmem_cache_alloc(kmem_cache_t *cache) {
+kmem_cache_alloc(kmem_cache *cache) {
   uint64_t flags;
   spin_lock_irqsave(&cache->lock, &flags);
 
@@ -429,7 +429,7 @@ kmem_cache_alloc(kmem_cache_t *cache) {
 // kmem_cache_free: 释放对象回所属页的 freelist。通过物理地址反查 Page 描述符。
 // 与 kfree 的 slab 分支同款逻辑（侵入式链表 + inuse 递减 + 满→partial 转换）。
 __attribute__((no_sanitize("kernel-address"))) void
-kmem_cache_free(kmem_cache_t *cache, void *obj) {
+kmem_cache_free(kmem_cache *cache, void *obj) {
   if (!obj)
     return;
   memstat_inc(&kernel_mem_stats.kfree_calls);

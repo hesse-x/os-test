@@ -19,9 +19,9 @@ typedef struct dev_driver {
   uint32_t pci_device; // 0 = match by class only
   void (*init)(void);
   struct dev_ops *ops;
-} dev_driver_t;
+} dev_driver;
 
-void driver_register(const dev_driver_t *drv);
+void driver_register(const dev_driver *drv);
 void driver_pci_match(void);
 void driver_init(void);
 

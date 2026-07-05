@@ -22,18 +22,18 @@ struct dev_ops {
   bool is_block;    // true = block device, false = char device
 
   // VFS callbacks (only called when driver_pid == 0)
-  int (*open)(xtask_t *proc, int fd);
-  int (*close)(xtask_t *proc, int fd);
+  int (*open)(xtask *proc, int fd);
+  int (*close)(xtask *proc, int fd);
   long (*ioctl)(uint32_t cmd, void *arg);
-  uint64_t (*mmap)(xtask_t *proc, uint64_t size);
-  ssize_t (*read)(xtask_t *proc, int fd, void *buf, size_t count);
-  ssize_t (*write)(xtask_t *proc, int fd, const void *buf, size_t count);
-  __poll_t (*poll)(xtask_t *proc, int events);
+  uint64_t (*mmap)(xtask *proc, uint64_t size);
+  ssize_t (*read)(xtask *proc, int fd, void *buf, size_t count);
+  ssize_t (*write)(xtask *proc, int fd, const void *buf, size_t count);
+  __poll_t (*poll)(xtask *proc, int events);
 };
 
 void devtmpfs_init(void);
 int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm);
-uint64_t devtmpfs_open(xtask_t *proc, const char *name, int flags);
+uint64_t devtmpfs_open(xtask *proc, const char *name, int flags);
 struct inode *devtmpfs_lookup(const char *name);
 void devtmpfs_cleanup_pid(pid_t pid);
 void devtmpfs_remove(const char *name);

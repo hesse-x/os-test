@@ -12,7 +12,7 @@
 #include <stddef.h>
 
 static struct inode *inode_hash_table[INODE_HASH_SIZE];
-static spinlock_t inode_hash_lock = SPINLOCK_INIT;
+static spinlock inode_hash_lock = SPINLOCK_INIT;
 static uint32_t next_dev_ino = 0x80000000;
 
 static unsigned inode_hash(uint32_t ino) { return ino & (INODE_HASH_SIZE - 1); }

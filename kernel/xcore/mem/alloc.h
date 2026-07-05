@@ -24,12 +24,12 @@ typedef enum {
   PAGE_USED,    // 已使用（如内核占用）
   PAGE_SLAB,    // slab 页
   PAGE_RESERVED // 保留（硬件/BIOS占用）
-} page_status_t;
+} page_status;
 
-struct kmem_cache_t;
+struct kmem_cache;
 
 typedef struct Page {
-  page_status_t status;
+  page_status status;
   refcount_t p_refcount; // physical page reference count (0=free, 1=exclusive,
                          // >1=shared)
   union {
@@ -40,7 +40,7 @@ typedef struct Page {
     } bfc;
 
     struct {
-      struct kmem_cache_t *cache; // 所属 cache
+      struct kmem_cache *cache; // 所属 cache
       void *freelist;             // 空闲对象链表头（侵入式）
       uint32_t inuse;             // 已分配对象数
       uint32_t obj_count;         // 页内总对象数
@@ -79,7 +79,7 @@ typedef struct boot_info boot_info;
 
 void init_mem(boot_info *bi) __attribute__((no_sanitize("kernel-address")));
 
-extern spinlock_t bfc_lock;
+extern spinlock bfc_lock;
 
 // ===================== Address conversion =====================
 phys_addr_t page_to_phys(Page *p)

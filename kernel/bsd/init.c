@@ -25,16 +25,16 @@
 #include <xos/signal.h>
 
 // Wrapper to adapt check_pending_signals(trapframe_t*) to
-// signal_check_fn(xtask_t*, trapframe_t*) check_pending_signals uses
-// current_task internally, so the xtask_t argument is redundant but required by
+// signal_check_fn(xtask*, trapframe_t*) check_pending_signals uses
+// current_task internally, so the xtask argument is redundant but required by
 // the hook signature for future extensibility.
-static void check_signals(xtask_t *task, trapframe_t *tf) {
+static void check_signals(xtask *task, trapframe_t *tf) {
   (void)task; // check_pending_signals reads current_task internally
   check_pending_signals(tf);
 }
 
 // Check if a signal is pending and deliverable for the given task
-static bool check_signal_pending(xtask_t *t) {
+static bool check_signal_pending(xtask *t) {
   if (!t->proc)
     return false;
   uint64_t pend = __atomic_load_n(&t->proc->sig_pending, __ATOMIC_ACQUIRE);

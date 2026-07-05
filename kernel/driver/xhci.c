@@ -148,7 +148,7 @@ static void __iomem *mmio_base;
 static void __iomem *op_base;
 static void __iomem *rt_base;
 static void __iomem *db_base;
-static pci_device_t *xhci_dev;
+static pci_device *xhci_dev;
 
 // DMA memory pages (base controller)
 static Page *dcbaa_page;
@@ -645,7 +645,7 @@ void xhci_init() {
 
 // ===================== USB HID keyboard enumeration =====================
 
-static int usb_hid_kbd_open(xtask_t *proc, int fd) {
+static int usb_hid_kbd_open(xtask *proc, int fd) {
   for (int i = 0; i < 8; i++)
     if (kbd_openers[i] == 0) {
       kbd_openers[i] = proc->pid;
@@ -654,7 +654,7 @@ static int usb_hid_kbd_open(xtask_t *proc, int fd) {
   return 0;
 }
 
-static int usb_hid_kbd_close(xtask_t *proc, int fd) {
+static int usb_hid_kbd_close(xtask *proc, int fd) {
   for (int i = 0; i < 8; i++)
     if (kbd_openers[i] == proc->pid) {
       kbd_openers[i] = 0;
@@ -1066,7 +1066,7 @@ static void xhci_init_keyboard() {
 // ===================== Driver registry =====================
 #include "kernel/driver/driver.h"
 
-dev_driver_t xhci_driver = {
+dev_driver xhci_driver = {
     .name = "xhci",
     .pci_class = 0x0C0330, // USB xHCI (class=0x0C, subclass=0x03, prog_if=0x30)
     .pci_vendor = 0,

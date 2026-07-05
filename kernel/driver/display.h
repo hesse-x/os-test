@@ -70,8 +70,8 @@ int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
 long display_ioctl(uint32_t cmd, void *arg);
 
 // mmap handler: returns mapped address, 0=failure
-uint64_t display_mmap_handler(xtask_t *proc, size_t size);
-uint64_t display_mmap_handler_ioctl(xtask_t *proc, uint64_t size);
+uint64_t display_mmap_handler(xtask *proc, size_t size);
+uint64_t display_mmap_handler_ioctl(xtask *proc, uint64_t size);
 
 // Device registration (called from vfs_init)
 void display_dev_register(void);

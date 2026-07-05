@@ -18,18 +18,18 @@
 typedef struct rcu_state {
   atomic_t global_gen; // global generation counter, writer increments
   atomic_t cpu_gen[RCU_MAX_CPUS]; // per-CPU observed generation
-  spinlock_t
+  spinlock
       writer_lock; // serialize writers (only one synchronize_rcu at a time)
-} rcu_state_t;
+} rcu_state;
 
-extern rcu_state_t rcu_state;
+extern rcu_state g_rcu_state;
 
 // ===================== Per-CPU RCU nesting =====================
-// rcu_local_t is defined in arch/x64/smp.h (embedded in cpu_local_t)
+// rcu_local is defined in arch/x64/smp.h (embedded in cpu_local)
 
 // Reader-side (nesting-safe, no flags parameter needed)
 static inline void rcu_read_lock(void) {
-  rcu_local_t *r = &get_cpu_local()->rcu;
+  rcu_local *r = &get_cpu_local()->rcu;
   ASSERT(r->nesting < 8); // catch runaway nesting (bug in unlock path)
   if (r->nesting++ == 0) {
     uint64_t flags;
@@ -39,12 +39,12 @@ static inline void rcu_read_lock(void) {
 }
 
 static inline void rcu_read_unlock(void) {
-  rcu_local_t *r = &get_cpu_local()->rcu;
+  rcu_local *r = &get_cpu_local()->rcu;
   ASSERT(r->nesting > 0);
   if (--r->nesting == 0) {
-    int gen = atomic_read(&rcu_state.global_gen);
+    int gen = atomic_read(&g_rcu_state.global_gen);
     int cpu = get_cpu_local()->cpu_id;
-    atomic_set(&rcu_state.cpu_gen[cpu], gen);
+    atomic_set(&g_rcu_state.cpu_gen[cpu], gen);
     __asm__ volatile("pushq %0; popfq" : : "r"(r->saved_if));
   }
 }
@@ -59,12 +59,12 @@ static inline void rcu_read_unlock(void) {
 // Caller context: IRQs disabled (e.g. timer IRQ).  No lock taken — only
 // an atomic store to this CPU's cpu_gen slot.
 static inline void rcu_quiescent(void) {
-  rcu_local_t *r = &get_cpu_local()->rcu;
+  rcu_local *r = &get_cpu_local()->rcu;
   if (r->nesting != 0)
     return;
-  int gen = atomic_read(&rcu_state.global_gen);
+  int gen = atomic_read(&g_rcu_state.global_gen);
   int cpu = get_cpu_local()->cpu_id;
-  atomic_set(&rcu_state.cpu_gen[cpu], gen);
+  atomic_set(&g_rcu_state.cpu_gen[cpu], gen);
 }
 
 // Writer-side

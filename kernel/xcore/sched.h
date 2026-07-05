@@ -10,38 +10,38 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "kernel/xcore/list.h"
-#include "kernel/xcore/mem/slab.h" // kmem_cache_t（xtask_cache 声明所需）
+#include "kernel/xcore/mem/slab.h" // kmem_cache（xtask_cache 声明所需）
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
 #include <stdint.h>
 
 // Scheduler and process table (kernel/xcore/sched.c)
 
-xtask_t *xtask_alloc(pid_t *out_pid);
-void xtask_free(xtask_t *t);
+xtask *xtask_alloc(pid_t *out_pid);
+void xtask_free(xtask *t);
 void sched_init(void);
 void schedule(void);
-void sched_task_reap(xtask_t *proc);
-xtask_t *sched_create_idle_process(int cpu_id);
+void sched_task_reap(xtask *proc);
+xtask *sched_create_idle_process(int cpu_id);
 void sched_idle_entry(void);
 void sched_try_steal_task(void);
-void sched_timer_queue_insert(int cpu, xtask_t *proc);
-void sched_timer_queue_remove(xtask_t *proc);
+void sched_timer_queue_insert(int cpu, xtask *proc);
+void sched_timer_queue_remove(xtask *proc);
 
-// xtask_t 专用 slab cache（kernel/xcore/sched.c 定义）。
-// 动态化后 xtask_t 由 kmem_cache_alloc 从此 cache 分配，slot 复用时 free 回此
+// xtask 专用 slab cache（kernel/xcore/sched.c 定义）。
+// 动态化后 xtask 由 kmem_cache_alloc 从此 cache 分配，slot 复用时 free 回此
 // cache。 proc_create.c / proc.c 的失败回滚路径需 kmem_cache_free(xtask_cache,
 // ...) 回收对象。
-extern kmem_cache_t *xtask_cache;
+extern kmem_cache *xtask_cache;
 
-static inline void sched_timer_queue_cancel(xtask_t *proc) {
+static inline void sched_timer_queue_cancel(xtask *proc) {
   if (proc->wait_deadline != 0) {
     sched_timer_queue_remove(proc);
     proc->wait_deadline = 0;
   }
 }
 
-static inline void wake_from_wait(xtask_t *p) {
+static inline void wake_from_wait(xtask *p) {
   sched_timer_queue_cancel(p);
   p->state = READY;
   p->wait_event = WAIT_NONE;
@@ -53,7 +53,7 @@ static inline void wake_from_wait(xtask_t *p) {
   // Reschedule IPI: set need_resched on target CPU's current task
   // (target is BLOCKED, not running; curr is what's actually running on that
   // CPU)
-  xtask_t *curr = cpu_locals[cpu]._cur_proc;
+  xtask *curr = cpu_locals[cpu]._cur_proc;
   if (curr != p) {
     curr->need_resched = 1;
     int my_cpu = get_cpu_local()->cpu_id;
@@ -68,8 +68,8 @@ static inline void wake_from_wait(xtask_t *p) {
 // 安全： target 已被其它路径唤醒或不在该类等待）。在 bucket lock / socket_lock
 // 外调用。 收敛 futex.c / ipc.c 的"持 scheduler_lock + check +
 // wake_from_wait"重复写法。
-static inline void wake_with_event(xtask_t *target,
-                                   wait_event_t expected_event) {
+static inline void wake_with_event(xtask *target,
+                                   wait_event expected_event) {
   int tcpu = target->assigned_cpu;
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &flags);
@@ -83,7 +83,7 @@ static inline void wake_with_event(xtask_t *target,
 // WAIT_FUTEX/WAIT_CHILD/WAIT_PIPE 等任意等待）。与 wake_process 的区别：
 // wake_process 窄语义只处理 IPC 类等待（PIPE/POLL/RECV），命中其它 event 即
 // ASSERT； wake_process_any 不区分 event，无条件唤醒 BLOCKED 状态的 target。
-static inline void wake_process_any(xtask_t *target) {
+static inline void wake_process_any(xtask *target) {
   int tcpu = target->assigned_cpu;
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &flags);
@@ -94,7 +94,7 @@ static inline void wake_process_any(xtask_t *target) {
 }
 
 // Assembly entry points
-void switch_to(xtask_t *prev, xtask_t *next);
+void switch_to(xtask *prev, xtask *next);
 void process_entry(void);
 
 // Internal helpers
@@ -127,11 +127,11 @@ static inline void kernel_fpu_restore(void *buf) {
                    : "memory");
 }
 
-void fpu_lazy_switch(xtask_t *t);
-void fpu_context_switch(xtask_t *prev, xtask_t *next);
+void fpu_lazy_switch(xtask *t);
+void fpu_context_switch(xtask *prev, xtask *next);
 
 // 分配 FPU 状态页并初始化为合法 fxsave 镜像（memset 0 + MXCSR=0x1F80）。
 // 返回 1 成功 / 0 失败（bfc_alloc_page 失败）。调用者负责失败回滚。
-int xcore_fpu_alloc(xtask_t *t);
+int xcore_fpu_alloc(xtask *t);
 
 #endif // KERNEL_XCORE_SCHED_H

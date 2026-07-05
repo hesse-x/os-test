@@ -17,7 +17,7 @@
 
 /* Hash table for page lookup: (inode, page_index) -> cache_page */
 static struct cache_page *page_cache_hash[1 << PAGE_CACHE_HASH_BITS];
-static spinlock_t page_cache_lock = SPINLOCK_INIT;
+static spinlock page_cache_lock = SPINLOCK_INIT;
 
 /* LRU list: head = most recent, tail = eviction candidate */
 static struct cache_page lru_head;

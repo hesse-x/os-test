@@ -14,10 +14,10 @@
 #include "kernel/xcore/trap.h"
 
 // Driver definitions (in respective .c files)
-extern dev_driver_t ahci_driver;
-extern dev_driver_t xhci_driver;
-extern dev_driver_t display_driver;
-extern dev_driver_t serial_driver;
+extern dev_driver ahci_driver;
+extern dev_driver xhci_driver;
+extern dev_driver display_driver;
+extern dev_driver serial_driver;
 
 void driver_init(void) {
   pci_init();

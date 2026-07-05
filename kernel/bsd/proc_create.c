@@ -36,10 +36,10 @@
 #include <xos/signal.h>
 
 // process_create_elf: create user process from ELF data
-xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
-  xtask_t *proc = NULL;
+xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
+  xtask *proc = NULL;
   Page *stack_pages = NULL;
-  mm_t *mm = NULL;
+  mm *mm = NULL;
   Page *user_stack_page = NULL;
   int user_stack_mapped = 0; // number of user stack pages successfully mapped
 
@@ -66,7 +66,7 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   if (!xcore_fpu_alloc(proc))
     goto fail_stack;
 
-  // 3. Create mm_t (allocates PML4 + files_t)
+  // 3. Create mm (allocates PML4 + files)
   mm = mm_create();
   if (!mm)
     goto fail_stack;
@@ -237,7 +237,7 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   list_init(&proc->wait_node);
 
   // Create proc for this user process
-  proc_t *bp = proc_create();
+  struct proc *bp = proc_create();
   if (!bp)
     goto fail_mm;
   proc->proc = bp;
@@ -248,9 +248,9 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   bp->signal->parent_pid = -1;
 
   // Create stack mmap_region
-  mmap_region_t *stack_region = (mmap_region_t *)kmalloc(sizeof(mmap_region_t));
+  mmap_region *stack_region = (mmap_region *)kmalloc(sizeof(mmap_region));
   if (stack_region) {
-    __memset(stack_region, 0, sizeof(mmap_region_t));
+    __memset(stack_region, 0, sizeof(mmap_region));
     stack_region->vaddr = stack_base;
     stack_region->size = (uint64_t)user_stack_pages * PAGE_SIZE;
     stack_region->phys = 0; // not MAP_PHYSICAL — anonymous stack
@@ -297,7 +297,7 @@ fail_user_stack:
   bfc_free_page(user_stack_page, user_stack_pages);
   // fall through to mm cleanup
 fail_mm:
-  mm_put(mm); // releases PML4 + page table pages + files_t
+  mm_put(mm); // releases PML4 + page table pages + files
               // fall through to stack cleanup
 fail_stack:
   bfc_free_page(stack_pages, 2);

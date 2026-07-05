@@ -40,7 +40,7 @@ static uint32_t next_free_hint = 2;
 
 /* Global FAT lock: protects FAT modifications (free cluster scan + FAT entry
  * writes). Lock order: i_lock -> fat_lock -> ahci_lock (via blk_write) */
-static spinlock_t fat_lock = SPINLOCK_INIT;
+static spinlock fat_lock = SPINLOCK_INIT;
 
 /* ==================== FAT sector cache (16 slots, LRU) ==================== */
 #define FAT_CACHE_PAGES 16
@@ -53,7 +53,7 @@ struct fat_cache_entry {
 static struct fat_cache_entry fat_cache[FAT_CACHE_PAGES];
 static uint32_t fat_cache_time = 0;
 static uint32_t fat_cache_age[FAT_CACHE_PAGES];
-static spinlock_t fat_cache_lock = SPINLOCK_INIT;
+static spinlock fat_cache_lock = SPINLOCK_INIT;
 
 static int fat_cache_lookup(uint32_t sector_lba) {
   spin_lock(&fat_cache_lock);

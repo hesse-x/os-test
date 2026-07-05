@@ -29,33 +29,33 @@
 #define EFER_SCE (1ULL << 0)
 #define EFER_NXE (1ULL << 11)
 
-struct xtask_t; // forward declaration (typedef xtask_t in kernel/xcore/xtask.h)
+struct xtask; // forward declaration (typedef xtask in kernel/xcore/xtask.h)
 
 // RCU per-CPU nesting state (defined in kernel/rcu.h)
 typedef struct rcu_local {
   int nesting;
   uint64_t saved_if;
-} rcu_local_t;
+} rcu_local;
 
-typedef struct cpu_local_t {
+typedef struct cpu_local {
   uint64_t saved_r10; // scratch slot: SYSCALL entry saves user R10 (arg4) here
   int cpu_id;
   uint32_t apic_id;
-  struct xtask_t *_cur_proc;
+  struct xtask *_cur_proc;
   trapframe_t *cur_tf; // current trapframe (set by syscall/irq entry)
   void __iomem *lapic_base;
   uint64_t kernel_stack;
   uint64_t tss_rsp0;
   int run_count; // number of runnable processes on this CPU (excludes idle)
-  struct xtask_t *idle_proc; // this CPU's idle process
-  spinlock_t scheduler_lock; // per-CPU scheduler lock
-  list_node_t run_queue;     // per-CPU ready queue (sentinel node)
-  list_node_t timer_queue;   // per-CPU timer queue (sorted by wait_deadline,
+  struct xtask *idle_proc; // this CPU's idle process
+  spinlock scheduler_lock; // per-CPU scheduler lock
+  list_node run_queue;     // per-CPU ready queue (sentinel node)
+  list_node timer_queue;   // per-CPU timer queue (sorted by wait_deadline,
                              // sentinel node)
   Page *active_slab[NUM_KMALLOC_CLASSES]; // per-CPU active slab per size class
 
   // RCU read-side nesting state
-  rcu_local_t rcu; // nesting count + saved IF
+  rcu_local rcu; // nesting count + saved IF
 
   // #NM nesting guard: detects fxrstor/fxsave executed with CR0.TS=1
   // (would nest #NM and blow the kernel stack into #DF). See fpu_lazy_switch.
@@ -67,23 +67,23 @@ typedef struct cpu_local_t {
   // 循环不可达），打一行告警直接锁死抢占路径， 避免再绕进 work stealing
   // 之类误判。release 构建不读不写，零开销。
   uint32_t preempt_stall_ticks;
-} cpu_local_t;
+} cpu_local;
 
-extern cpu_local_t cpu_locals[MAX_CPUS];
+extern cpu_local cpu_locals[MAX_CPUS];
 extern int ncpu;
 extern gdt_entry_t per_cpu_gdt[MAX_CPUS][8];
 extern gdt_ptr_t per_cpu_gdtr[MAX_CPUS];
 extern tss_t per_cpu_tss[MAX_CPUS];
 extern uint64_t per_cpu_ist_stack[MAX_CPUS][3]; // IST1=NMI, IST2=DF, IST3=MCE
 
-static inline void set_cpu_local(cpu_local_t *p) {
+static inline void set_cpu_local(cpu_local *p) {
   // Kernel GS base holds cpu_local pointer; swapgs will exchange it to GS_BASE
   // when entering kernel from user mode
   wrmsr(MSR_KERNEL_GS_BASE, (uint64_t)p);
 }
 
-static inline cpu_local_t *get_cpu_local() {
-  return (cpu_local_t *)rdmsr(MSR_GS_BASE);
+static inline cpu_local *get_cpu_local() {
+  return (cpu_local *)rdmsr(MSR_GS_BASE);
 }
 
 #define current_task (get_cpu_local()->_cur_proc)
