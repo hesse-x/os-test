@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // KASAN runtime — kernel-address sanitizer for x86-64
 // Shadow formula: shadow_addr = (addr >> 3) + KASAN_SHADOW_OFFSET
 // Shadow byte: 0x00 = fully accessible, 1-7 = partial, >= 0xF9 = error

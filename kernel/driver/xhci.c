@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "kernel/driver/xhci.h"
 #include "arch/x64/apic.h"
 #include "arch/x64/trap.h"

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "syscall.h"
 #include "xos/errno.h"
 #include <sys/device.h>

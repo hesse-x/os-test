@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #ifndef KERNEL_ACPI_H
 #define KERNEL_ACPI_H
 

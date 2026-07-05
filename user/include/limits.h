@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 //===-- Definition of macros from limits.h --------------------------------===//
 //
 // Copied from LLVM Project (libc/include/llvm-libc-macros/limits-macros.h)

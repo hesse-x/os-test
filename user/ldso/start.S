@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 # ld.so 汇编入口（避免任何 C 运行时依赖）
 # ld.md §3.2.3
 

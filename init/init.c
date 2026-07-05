@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // init process — PID 2 (VFS in-kernel)
 // Spawns kbd_driver, terminal, and optionally test_runner
 // Adopts orphan children and reaps them via waitpid(-1)

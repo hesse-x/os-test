@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 # start.S - 内核入口（仅 x64）
 # _start: 物理地址运行 → enable_paging → gdt_init → ljmp → _entry64 虚拟地址继续
 

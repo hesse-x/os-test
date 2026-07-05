@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #ifndef USER_SYS_LINK_MAP_H
 #define USER_SYS_LINK_MAP_H
 

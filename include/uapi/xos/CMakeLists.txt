@@ -1,3 +1,7 @@
+# Copyright (c) 2026 hesse
+#
+# SPDX-License-Identifier: MIT
+
 # include/uapi/xos/ — UAPI contract headers (kernel/userspace shared ABI).
 # This is the OS's equivalent of Linux's include/uapi/ — the publish source for
 # `make headers_install` (see install-headers.sh): this directory is copied verbatim

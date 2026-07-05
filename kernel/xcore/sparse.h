@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #ifndef KERNEL_SPARSE_H
 #define KERNEL_SPARSE_H
 

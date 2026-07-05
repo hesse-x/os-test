@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "xos/signal.h"
 #include <pthread.h> // pthread_sigmask
 #include <signal.h>

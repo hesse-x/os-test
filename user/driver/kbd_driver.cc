@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // Keyboard driver (user-space): evdev-style input protocol.
 // on_key_event reads HID reports via get_keycode() and fills input_event_t.
 #include "input.h"

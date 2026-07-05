@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include <assert.h>
 #include <stdio.h>
 #include <unistd.h>

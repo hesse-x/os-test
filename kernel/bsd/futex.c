@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // kernel/bsd/futex.c — Futex implementation (anon key: cr3 + page_off)
 // 阶段 3b→C5: FUTEX_WAIT / FUTEX_WAKE + timeout + EINTR + bucket lock irqsave
 

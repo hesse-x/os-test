@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // kernel/xcore/ipc.c — Xcore IPC syscalls and primitives
 // Extracted from kernel/trap.c (phase 3 step 3.1)
 

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "test_helpers.h"
 #include <errno.h>
 #include <fcntl.h>

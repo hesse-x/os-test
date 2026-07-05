@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "kernel/driver/display.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"

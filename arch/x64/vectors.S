@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 # vectors.S - ISR stubs for vector 0-127 (64-bit)
 # 64-bit: pushq $0 (dummy error) + pushq $vector_num, then jmp __alltraps
 # CPU-exception vectors that push error code (8,10-14,17) only push the vector num

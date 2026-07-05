@@ -1,3 +1,7 @@
+# Copyright (c) 2026 hesse
+#
+# SPDX-License-Identifier: MIT
+
 # common/ contains non-UAPI shared implementation only:
 #   macro.h        — ALIGN_UP/ALIGN_DOWN generic macros (used by kernel + user malloc)
 #   kvformat.c/.h — shared printf formatting impl (compiled by both kernel and libc; NOT a UAPI contract)

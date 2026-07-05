@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "kernel/bsd/elf_loader.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"

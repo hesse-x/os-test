@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // kernel/driver/registry.c — Driver registration and PCI auto-matching
 
 #include "kernel/driver/driver.h"

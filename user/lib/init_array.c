@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // .init_array / .fini_array 遍历
 // ld.md §3.5.2, §6.4 任务 4 / plan_ld2b3 T10
 //

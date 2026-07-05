@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 # ap_trampoline.S - AP 16-bit trampoline
 # Copied to physical address 0x8000 by BSP.
 # AP starts here in 16-bit real mode after SIPI.

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // kernel/driver/init.c — Driver initialization sequence
 // Extracted from kernel/kernel.c (phase 5 step 5.2)
 

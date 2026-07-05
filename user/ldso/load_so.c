@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // ld.so 加载 .so 到用户态内存（read + 匿名映射）
 // ld.md §3.3.3 / plan_ld2b3 T15
 //

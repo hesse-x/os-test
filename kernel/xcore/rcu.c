@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "kernel/xcore/rcu.h"
 #include "arch/x64/smp.h"   // ncpu, current_task
 #include "arch/x64/utils.h" // pause

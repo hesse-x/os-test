@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // ld.so 符号查找：GNU hash + 链表遍历
 // ld.md §3.3.5 / plan_ld2b3 T17
 

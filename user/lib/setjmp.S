@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 # setjmp.S — 纯汇编 setjmp/longjmp（D12）
 # plan_posix §5.7：保存 8 个 callee-saved 寄存器到 jmp_buf：
 #   rbx rbp r12 r13 r14 r15 rsp rip

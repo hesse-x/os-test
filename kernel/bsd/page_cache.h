@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #ifndef KERNEL_PAGE_CACHE_H
 #define KERNEL_PAGE_CACHE_H
 

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "kernel/bsd/page_cache.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/fat32.h"

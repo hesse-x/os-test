@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // kernel/xcore/sched.c — Scheduler and process table management
 // Extracted from kernel/proc.c (phase 4 step 4.1)
 

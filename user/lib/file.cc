@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // libc file I/O: all file operations go through syscalls directly.
 // Kernel handles FAT32, devtmpfs, pipes, sockets, etc.
 // No libc-side fd_table — kernel's proc->fd_table is the single source of

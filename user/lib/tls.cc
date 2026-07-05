@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // user/lib/tls.cc — TLS template snapshot + main thread TCB init + cancel
 // handler
 #include "sys/tls.h"

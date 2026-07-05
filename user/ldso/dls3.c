@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // ld.so bootstrap 入口
 // ld.md §3.2.3 / plan_ld2b3 T13
 

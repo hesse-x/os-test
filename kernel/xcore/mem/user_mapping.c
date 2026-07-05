@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // User-space page mapping functions
 // Used by proc.c (process creation) and trap.c (sys_mmap/sys_munmap/sys_spawn)
 

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "kernel/bsd/vfs.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"

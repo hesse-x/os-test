@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 /* kernel/fat32.c — In-kernel FAT32 filesystem (synchronous)
  * Ported from driver/fs_driver.cc, converting async state machines
  * to simple synchronous loops using blk_read/blk_write.

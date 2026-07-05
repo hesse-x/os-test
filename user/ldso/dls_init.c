@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // ld.so 主流程（post-bootstrap）
 // ld.md §3.3 / §8.2.2 递归加载多依赖 / plan_ld2b3 T14
 

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // kernel/bsd/signal.c — Signal delivery and session syscalls
 // Extracted from kernel/trap.c (phase 3 step 3.2)
 

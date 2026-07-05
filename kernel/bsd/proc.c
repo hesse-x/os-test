@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // kernel/bsd/proc.c — BSD process lifecycle: fd/mm/fork/execve
 // Extracted from kernel/proc.c (phase 4 step 4.2)
 

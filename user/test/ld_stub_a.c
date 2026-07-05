@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // ld.so 多依赖单元测试 stub：liba.so
 // 导出 lda_answer()，内部调 libc strcmp（触发 JUMP_SLOT 跨模块解析）
 #include <stddef.h>

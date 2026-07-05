@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "arch/x64/trap.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"

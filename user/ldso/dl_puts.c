@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include <stddef.h>
 #include <stdint.h>
 #include <xos/syscall_nums.h>

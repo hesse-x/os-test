@@ -1,3 +1,7 @@
+# Copyright (c) 2026 hesse
+#
+# SPDX-License-Identifier: MIT
+
 # boot/ - EFI bootloader stub (独立低地址 EFI 应用)
 
 # GNU-EFI 路径

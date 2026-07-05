@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // kernel/bsd/proc_create.c — Process creation entry point (process_create_elf)
 // BSD layer: creates user process from ELF data, bridging Xcore scheduler + BSD
 // proc + ELF loader

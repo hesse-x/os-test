@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #ifndef COMMON_DISPLAY_H
 #define COMMON_DISPLAY_H
 

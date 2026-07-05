@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include <ctype.h>
 
 int isdigit(int c) { return c >= '0' && c <= '9'; }

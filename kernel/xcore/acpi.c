@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "kernel/xcore/acpi.h"
 #include "arch/x64/paging.h"
 #include "boot/boot.h"

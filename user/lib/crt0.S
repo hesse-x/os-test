@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 # crt0.o — _start 入口（静态/动态主 ELF 共用）
 # ld.md §3.7.2 / plan_ld2b3 T4
 # _start 不在 libc.a/libc.so 中，独立产物，链入每个主 ELF

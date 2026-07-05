@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // USB HID Boot Protocol keyboard: get_keycode()
 // Reads HID reports from kernel USB HID SHM ring, compares with previous
 // report to detect key press/release events, maps HID keycodes to input_key.

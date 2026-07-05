@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // Terminal process: VT100 state machine + cell buffer + compositor.
 // Renders cells → pixels → back buffer (display SHM), KMS does flip.
 //

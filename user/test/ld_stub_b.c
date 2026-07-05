@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // ld.so 多依赖单元测试 stub：libb.so
 // 导出 ldb_chain()（线性链场景用）、ldb_via_a()（调 liba 符号，验证 b→a 解析）
 int lda_answer(void); // liba.so 符号（JUMP_SLOT）

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // user/lib/start_main.cc — __libc_start_main 统一启动（同源双产物）
 // ld.md §3.5.2 / plan_ld2b3 T11
 //

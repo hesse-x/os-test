@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #ifndef COMMON_KVFORMAT_H
 #define COMMON_KVFORMAT_H
 

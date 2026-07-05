@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // 64位 higher-half内核，-mcmodel=kernel编译
 // kernel_main: 虚拟地址运行，xcore_init + driver_init + bsd_init + idle + 从
 // boot_info 加载 init

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include <sys/shm.h>
 
 /* shm_create, shm_attach, shm_attach_kernel removed.

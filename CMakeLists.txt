@@ -1,3 +1,7 @@
+# Copyright (c) 2026 hesse
+#
+# SPDX-License-Identifier: MIT
+
 cmake_minimum_required(VERSION 3.10)
 
 if(CMAKE_TOOLCHAIN_FILE)

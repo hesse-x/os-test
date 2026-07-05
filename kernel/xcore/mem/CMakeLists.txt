@@ -1,3 +1,7 @@
+# Copyright (c) 2026 hesse
+#
+# SPDX-License-Identifier: MIT
+
 add_kernel_object(xcore_mem
     SOURCES alloc.c user_mapping.c slab.c copy_user.c
 )

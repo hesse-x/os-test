@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // libinput_client: consumer-side input SHM ring poll + basic ASCII mapping.
 #include "input.h"
 #include <stdint.h>

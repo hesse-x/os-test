@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // 场景 1：单依赖回归（NEEDED=libc.so）
 // 验证递归加载对单依赖退化为 no-op，不破坏 hello_dyn 现状
 #include <stdio.h>

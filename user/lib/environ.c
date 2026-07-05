@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 /* environ.c — 环境变量（D9 模型）
  *
  * environ 是 malloc 可增长的 char** 数组（NULL 终止）。__libc_start_main

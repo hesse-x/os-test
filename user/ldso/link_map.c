@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // ld.so link_map 构造：ld.so 自身静态节点 + 动态分配的主 ELF/各 .so 节点
 // ld.md §3.3.7 / §8.2.3 / plan_ld2b3 T18
 

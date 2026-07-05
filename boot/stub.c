@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // boot/stub.c - 独立 EFI bootloader
 // 从 FAT32 读取 myos.elf，加载到物理地址，设置 boot_info，跳转内核
 #include "boot/boot.h"

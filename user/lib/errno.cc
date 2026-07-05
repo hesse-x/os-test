@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // user/lib/errno.cc — per-thread errno via TCB
 //
 // errno 经 __errno_location() 返回 &TCB.errno_val（FS_BASE 指向 TCB），

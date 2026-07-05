@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "kernel/xcore/log.h"
 #include "arch/x64/smp.h" // cpu_locals, get_cpu_local, cur_tf
 #include "arch/x64/trap.h"

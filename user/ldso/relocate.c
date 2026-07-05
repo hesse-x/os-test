@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // ld.so 重定位：10 种类型（9 PIC + COPY）+ eager binding + 诊断 hard-fail
 // ld.md §3.3.4, §3.3.6, §5.4 / plan_ld2b3 T16
 

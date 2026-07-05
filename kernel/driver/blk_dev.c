@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "kernel/driver/blk_dev.h"
 #include "arch/x64/utils.h"
 #include "kernel/driver/ahci.h"

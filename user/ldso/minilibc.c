@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // ld.so 自带最小 libc（不链 libc.a）
 // ld.md §7.1 偏离：ld.so 不链 libc.a，自带最小 libc
 

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // kernel/bsd/init.c — BSD layer initialization and hook registration
 // Extracted from kernel/kernel.c (phase 5 step 5.3)
 

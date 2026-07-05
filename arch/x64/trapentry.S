@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 # trapentry.S - 64-bit common trap entry/exit, syscall, context switch
 # vectors.S sends all traps here.
 .text

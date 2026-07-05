@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // 场景 3：菱形去重（主→{a,libc}, a→libc）
 // 验证：libc.so 只加载一次（去重），lda_answer 调 strcmp 解析到唯一 libc.so
 int lda_answer(void);

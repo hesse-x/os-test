@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "stdlib.h"
 
 // atexit 实现：最多 32 个 handler 的静态数组（无 malloc 依赖）

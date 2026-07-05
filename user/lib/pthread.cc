@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // user/lib/pthread.cc — pthread library implementation (Phase 4)
 #include "sys/tls.h"
 #include "syscall.h"

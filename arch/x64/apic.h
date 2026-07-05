@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #ifndef ARCH_X64_APIC_H
 #define ARCH_X64_APIC_H
 

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // 场景 2：线性链（主→b→{a,libc}）
 // 验证：加载顺序 libc 先于 b；ldb_chain/ldb_via_a 解析正确
 int ldb_chain(void);

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #ifndef DRIVER_DISPLAY_H
 #define DRIVER_DISPLAY_H
 

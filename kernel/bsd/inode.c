@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/page_cache.h"
 #include "kernel/xcore/log.h"

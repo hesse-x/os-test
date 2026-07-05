@@ -1,3 +1,7 @@
+# Copyright (c) 2026 hesse
+#
+# SPDX-License-Identifier: MIT
+
 add_kernel_object(bsd_obj
     SOURCES init.c syscall.c proc.c proc_create.c signal.c
             vfs.c fat32.c inode.c page_cache.c devtmpfs.c

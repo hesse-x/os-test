@@ -1,3 +1,7 @@
+# Copyright (c) 2026 hesse
+#
+# SPDX-License-Identifier: MIT
+
 # user/ — 用户态 libc + 测试程序
 
 # libc 源文件列表（同源双产物：libc.a + libc.so）

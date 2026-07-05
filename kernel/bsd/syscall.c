@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // kernel/bsd/syscall.c — BSD syscall implementations
 // Extracted from kernel/trap.c (phase 3 step 3.3)
 

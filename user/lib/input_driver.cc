@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // libinput_driver: driver-side main loop + single SHM ring (bound to
 // /dev/<name> inode)
 // + unconditional notify to all bound consumers.

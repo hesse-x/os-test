@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // copy_from_user / copy_to_user / strncpy_from_user — out-of-line to prevent
 // the compiler from inlining __memcpy and mis-optimizing source writes via
 // strict-aliasing violations.

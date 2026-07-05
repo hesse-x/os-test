@@ -1,3 +1,7 @@
+# Copyright (c) 2026 hesse
+#
+# SPDX-License-Identifier: MIT
+
 # user/test/ — Unity-based test ELF targets
 
 # Test runner (no Unity needed)
