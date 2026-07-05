@@ -1,149 +1,97 @@
 #!/bin/bash
-# Sparse static analysis + sanitizer boot test for kernel code
-# Usage: ./check.sh
+# check.sh — 检查调度器
+#
+# 用法:
+#   ./check.sh                          # 跑全部四项（按序）
+#   ./check.sh --filter sparse,iwyu     # 只跑指定项，按给定顺序
+#   ./check.sh --filter iwyu            # 单项
+#
+# 合法检查项: sparse, iwyu, clang-format, clang-tidy
+#   后两项暂为占位（见 doc/design/format.md）。
+#
+# 退出码: 全部通过 0；任一失败 1；参数错误 2。
 
-SPARSE_COMPAT=""
-WARNFILE=/tmp/sparse-output.txt
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-cleanup() {
-    rm -f "$SPARSE_COMPAT" "$WARNFILE"
-    # Kill QEMU process group if still running
-    if [ -n "$QEMU_PGID" ]; then
-        kill -- -"$QEMU_PGID" 2>/dev/null || true
-        wait "$QEMU_PID" 2>/dev/null || true
-    fi
-}
-trap cleanup EXIT INT TERM
-
-# ===================== Step 1: Sparse check =====================
-
-# Check if sparse is available
-if ! command -v sparse &> /dev/null; then
-    echo "Error: sparse is not installed. Install with: sudo apt install sparse"
-    exit 1
-fi
-
-SPARSE_FLAGS=(
-    -std=gnu11
-    -m64
-    -D__KERNEL__
-    -D__CHECKER__
-    -D__ATOMIC_ACQUIRE=2
-    -D__ATOMIC_RELEASE=3
-    -D__ATOMIC_RELAXED=0
-    -D__ATOMIC_SEQ_CST=5
-    "-D__attribute__(x)="
-    -Waddress-space
-    -Wdecl
-    -Wdo-while
-    -Wtransparent-union
-    -Wreturn-void-ptr
-    -I.
+# 检查项 → 子脚本 映射
+declare -A CHECK_SCRIPT=(
+    [sparse]="build_script/sparse_check.sh"
+    [iwyu]="build_script/iwyu_check.sh"
+    [clang-format]="build_script/clang_format_check.sh"
+    [clang-tidy]="build_script/clang_tidy_check.sh"
 )
+ALL_CHECKS=(sparse iwyu clang-format clang-tidy)
 
-# Create a temporary sparse compat header for GCC builtins sparse doesn't understand
-SPARSE_COMPAT=$(mktemp /tmp/sparse-compat-XXXXXX.h)
-cat > "$SPARSE_COMPAT" << 'EOF'
-/* Sparse compatibility: stub out GCC builtins that sparse doesn't understand */
-/* Prevent GCC's stdarg.h from being included (sparse can't parse __builtin_va_*) */
-#ifndef _STDARG_H
-#define _STDARG_H
-typedef struct { char __dummy; } __gnuc_va_list;
-typedef __gnuc_va_list va_list;
-#define va_start(v, l) ((void)0)
-#define va_end(v) ((void)0)
-#define va_arg(v, t) ((t)0)
-#endif
-#define __atomic_exchange_n(p, val, ord) (*(p))
-#define __atomic_store_n(p, val, ord) (*(p) = (val))
-#define __atomic_load_n(p, ord) (*(p))
-#define __atomic_add_fetch(p, val, ord) (*(p) += (val))
-#define __atomic_sub_fetch(p, val, ord) (*(p) -= (val))
-#define __atomic_fetch_sub(p, val, ord) (*(p) -= (val))
-#define __atomic_or_fetch(p, val, ord) (*(p) |= (val))
-#define __atomic_and_fetch(p, val, ord) (*(p) &= (val))
-#define __sync_val_compare_and_swap(p, old, new) (*(p))
-#define __builtin_unreachable() ((void)0)
-EOF
-
-SPARSE_FLAGS+=(-include "$SPARSE_COMPAT")
-
-echo "Running sparse on kernel sources..."
-
-# Collect all kernel .c files (exclude user-space code)
-KERNEL_SOURCES=()
-for f in kernel/xcore/*.c arch/x64/*.c kernel/xcore/mem/*.c kernel/bsd/*.c kernel/driver/*.c; do
-    [ -f "$f" ] && KERNEL_SOURCES+=("$f")
+# ===================== 解析 --filter =====================
+FILTER=""
+FILTER_SET=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --filter)
+            FILTER="$2"
+            FILTER_SET=1
+            shift 2
+            ;;
+        --filter=*)
+            FILTER="${1#--filter=}"
+            FILTER_SET=1
+            shift
+            ;;
+        -h|--help)
+            sed -n '2,12p' "$0"
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1"
+            echo "Usage: $0 [--filter sparse,iwyu,...]"
+            exit 2
+            ;;
+    esac
 done
 
-if [ ${#KERNEL_SOURCES[@]} -eq 0 ]; then
-    echo "Error: No kernel source files found"
-    exit 1
+# 展开 filter 为有序列表；未传 --filter 则全跑
+if [ "$FILTER_SET" -eq 0 ]; then
+    CHECKS=("${ALL_CHECKS[@]}")
+else
+    if [ -z "$FILTER" ]; then
+        echo "Error: --filter value is empty. Valid: ${ALL_CHECKS[*]}"
+        exit 2
+    fi
+    CHECKS=()
+    IFS=',' read -ra _parts <<< "$FILTER"
+    for c in "${_parts[@]}"; do
+        if [ -z "$c" ]; then
+            echo "Error: empty check name in --filter '$FILTER'. Valid: ${ALL_CHECKS[*]}"
+            exit 2
+        fi
+        if [ -z "${CHECK_SCRIPT[$c]}" ]; then
+            echo "Error: unknown check '$c'. Valid: ${ALL_CHECKS[*]}"
+            exit 2
+        fi
+        CHECKS+=("$c")
+    done
 fi
 
-# Run sparse per-file to avoid __bitwise type state leakage across translation units
-> "$WARNFILE"
-for f in "${KERNEL_SOURCES[@]}"; do
-    sparse "${SPARSE_FLAGS[@]}" "$f" 2>&1 \
-        | grep -v "non-ANSI function declaration" \
-        | grep -v "^sparse: " \
-        >> "$WARNFILE" || true
-done
-
-# Clean up sparse compat header early (no longer needed)
-rm -f "$SPARSE_COMPAT"
-SPARSE_COMPAT=""
-
-if [ -s "$WARNFILE" ]; then
-    cat "$WARNFILE"
+# ===================== 顺序执行 =====================
+FAIL=0
+STEP=0
+for c in "${CHECKS[@]}"; do
+    STEP=$((STEP + 1))
     echo ""
-    echo "Sparse check failed with $(wc -l < "$WARNFILE") warning(s)."
+    echo "=== Step $STEP: $c ==="
+    bash "$SCRIPT_DIR/${CHECK_SCRIPT[$c]}"
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        FAIL=1
+        echo "Step $STEP ($c) FAILED (exit $rc)."
+    fi
+done
+
+# ===================== 汇总 =====================
+echo ""
+if [ "$FAIL" -ne 0 ]; then
+    echo "check.sh: FAILED (one or more checks did not pass)."
     exit 1
 fi
-echo "Sparse check passed."
-
-# ===================== Step 1.5: #include layer check =====================
-echo ""
-echo "=== Step 1.5: #include layer check ==="
-
-INCLUDE_FAIL=0
-
-# kernel/xcore/ must not include kernel/bsd/ or kernel/driver/ headers
-echo "Checking kernel/xcore/ #include violations..."
-if grep -rn '#include "kernel/bsd/' kernel/xcore/ 2>/dev/null; then
-    echo "FAIL: xcore includes bsd"
-    INCLUDE_FAIL=1
-fi
-if grep -rn '#include "kernel/driver/' kernel/xcore/ 2>/dev/null; then
-    echo "FAIL: xcore includes driver"
-    INCLUDE_FAIL=1
-fi
-
-# kernel/driver/ must not include kernel/bsd/ headers (devtmpfs excepted)
-echo "Checking kernel/driver/ #include violations..."
-if grep -rn '#include "kernel/bsd/' kernel/driver/ 2>/dev/null | grep -v devtmpfs; then
-    echo "FAIL: driver includes bsd (except devtmpfs)"
-    INCLUDE_FAIL=1
-fi
-
-# Verify kernel/xcore/mm_types.h does not pull in bsd/driver
-echo "Checking kernel/xcore/mm_types.h is self-contained..."
-if grep -q '#include "kernel/bsd/' kernel/xcore/mm_types.h 2>/dev/null; then
-    echo "FAIL: mm_types.h includes bsd"
-    INCLUDE_FAIL=1
-fi
-if grep -q '#include "kernel/driver/' kernel/xcore/mm_types.h 2>/dev/null; then
-    echo "FAIL: mm_types.h includes driver"
-    INCLUDE_FAIL=1
-fi
-
-if [ "$INCLUDE_FAIL" -ne 0 ]; then
-    echo "#include layer check failed."
-    exit 1
-fi
-echo "#include layer check passed."
-
-# ===================== Step 2: Sanitizer check (skipped) =====================
-echo ""
-echo "=== Step 2: Sanitizer build + boot test ==="
-echo "Skipped (not yet ready)."
+echo "check.sh: all selected checks passed."
+exit 0
