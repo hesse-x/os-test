@@ -136,22 +136,14 @@ kernel/
     blk_dev.c / blk_dev.h — 块设备抽象层（AHCI 同步封装+spinlock）
     user_check.h          — 用户态缓冲区/指针验证
 
-driver/
-  CMakeLists.txt
-  kbd_driver.cc       — 用户态键盘驱动（USB HID SHM）
-  display.h           — Display 协议（req CREATE_BUF/FLIP + client API）
-  font.h              — 8x16 字体
-  terminal.cc         — 用户态 Terminal（VT100 + Display client）
-
 init/
   init.c              — init 进程（fork+exec 驱动 + waitpid）
-
-shell/
-  shell.cc            — Shell（ls/cat/cd/pwd/touch/mkdir + 路径执行）
 
 user/
   CMakeLists.txt
   hello.c             — 最小用户程序
+  driver/             — 用户态驱动进程（kbd_driver.cc/display.h/font.h/terminal.cc）
+  shell/              — Shell 用户进程（shell.cc，ls/cat/cd/pwd/touch/mkdir + 路径执行）
   include/             — libc 头文件（stdio.h, stdlib.h, string.h, fcntl.h, time.h, unistd.h,
                          sys.h, sys/*.h, input.h, usb_hid.h, assert.h, ctype.h, dirent.h,
                          errno.h, signal.h, termios.h）

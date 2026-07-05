@@ -152,7 +152,7 @@ task_t 新增 sid/pgid/ctty 字段：fork 时拷贝，setsid 时重设。
 
 sys_kill 扩展：pid>0 发指定进程；pid==0 发同 pgid（pgsignal）；pid<-1 发 abs(pid) pgid；pid==-1 返回 -EPERM。
 
-### 用户态：Terminal 进程（driver/terminal.cc）
+### 用户态：Terminal 进程（user/driver/terminal.cc）
 
 Terminal 是 PTY master holder + VT100 渲染器 + ldisc 处理器。
 
@@ -183,7 +183,7 @@ ldisc 处理：
 
 VT100 状态机（vt100_feed）：NORMAL → ESC → CSI → 参数累积 → 派发指令。支持光标定位、清屏、清行、颜色设置、重置属性。
 
-### 用户态：Shell（shell/shell.cc）
+### 用户态：Shell（user/shell/shell.cc）
 
 Shell 启动后 setsid() + ioctl(0, TIOCSCTTY, 0)，成为 session leader 并设置控制终端。
 

@@ -50,7 +50,7 @@ Sleeping flag 协议和驱动工作流详见 [driver_workflow.md](driver_workflo
 
 ### 各驱动工作流摘要
 
-**kbd_driver**（driver/kbd_driver.cc）— RECV_NOTIFY 驱动（基于 input_driver_run 库）：
+**kbd_driver**（user/driver/kbd_driver.cc）— RECV_NOTIFY 驱动（基于 input_driver_run 库）：
 
 1. `input_driver_run(INPUT_DEV_KBD, "kbd", "/dev/usb_hid_kbd", on_key_event, kbd_hid_init)` 进入主循环，库负责：
    - `open("/dev/usb_hid_kbd")` + `mmap` → 映射内核 HID SHM → `kbd_hid_init` → `get_keycode_init()`
@@ -58,7 +58,7 @@ Sleeping flag 协议和驱动工作流详见 [driver_workflow.md](driver_workflo
 2. 主循环：`sys_recv` → EINTR（ISR wake）→ `on_key_event()` 循环填 input_event_t → `broadcast_event()` 写 input SHM ring + notify 所有 bound consumers
 3. RECV_REQ：处理 INPUT_BIND（注册 consumer pid 到 `consumers[]`）/ INPUT_UNBIND
 
-**terminal**（driver/terminal.cc）— pipe + SHM 驱动：
+**terminal**（user/driver/terminal.cc）— pipe + SHM 驱动：
 
 1. `display_client_init()` → `open("/dev/kms")` + `ioctl(KMS_IOCTL_CREATE_BUF)` + `mmap` back buffer
 2. `open("/dev/kbd")` → `ioctl(kbd_fd, INPUT_BIND, &arg)`（arg.shm_fd=-1，driver 注册 consumer pid）→ `mmap(MAP_SHARED, kbd_fd)` 从 inode->shm 映射 input SHM
@@ -72,7 +72,7 @@ Sleeping flag 协议和驱动工作流详见 [driver_workflow.md](driver_workflo
 3. 读 fs_req_shm → 执行文件操作 → 写 fs_resp_shm → 检查 client_sleeping → notify shell
 4. 与磁盘通信：写 disk_req_shm → notify → recv 等响应 → 读 disk_resp_shm
 
-**shell**（shell/shell.cc）— pipe + SHM 驱动：
+**shell**（user/shell/shell.cc）— pipe + SHM 驱动：
 
 1. SCM_RIGHTS 接收 FS SHM fd
 2. 键盘输入：`sys_read(0, ...)` 从 stdin pipe 读

@@ -17,6 +17,4 @@
 
 ## 待办
 
-- [ ] 将 `driver/` 移至 `user/driver/`，更新 CMakeLists.txt 及源码路径
-- [ ] 将 `shell/` 移至 `user/shell/`，更新 CMakeLists.txt 及源码路径
 - [ ] 更新 `format.sh` 按目录应用不同风格

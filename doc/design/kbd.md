@@ -177,7 +177,7 @@ kernel/driver/xhci.c : xhci_init_keyboard 完整流程：
 | user/lib/usb_kbd.cc | get_keycode / get_keycode_init（HID→key_event 转换） |
 | user/lib/input_driver.cc | input_driver_run + broadcast_event + consumer 注册（driver 侧通用库） |
 | user/lib/input_client.cc | input_client_poll + input_event_to_ascii（consumer 侧通用库） |
-| driver/kbd_driver.cc | 用户态键盘驱动（on_key_event + kbd_hid_init → input_driver_run） |
+| user/driver/kbd_driver.cc | 用户态键盘驱动（on_key_event + kbd_hid_init → input_driver_run） |
 
 ### 与其他模块的关系
 

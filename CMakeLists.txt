@@ -43,9 +43,7 @@ add_subdirectory(boot)
 add_subdirectory(arch/x64)
 add_subdirectory(kernel)
 
-# User-space (drivers, shell, libc, test programs)
-add_subdirectory(driver)
-add_subdirectory(shell)
+# User-space (libc, drivers, shell, test programs)
 add_subdirectory(user)
 add_subdirectory(init)
 

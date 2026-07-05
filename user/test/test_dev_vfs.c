@@ -12,7 +12,7 @@
 #include <sys/device.h>
 #include "syscall.h"
 #include "xos/errno.h"
-#include "driver/display.h"
+#include "user/driver/display.h"
 #include "input.h"
 
 void setUp(void) {}

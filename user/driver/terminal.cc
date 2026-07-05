@@ -26,7 +26,7 @@
 #include "common/macro.h"
 #include "input.h"
 #include "xos/input.h"
-#include "driver/display.h"
+#include "user/driver/display.h"
 
 static int master_fd = -1;
 static pid_t shell_pid = -1;

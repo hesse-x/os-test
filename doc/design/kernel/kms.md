@@ -129,7 +129,7 @@ init/init.c 只 spawn kbd_driver 和 terminal，不 spawn KMS 进程。`/dev/kms
 
 ### Terminal 集成
 
-driver/display.h 提供 client API：
+user/driver/display.h 提供 client API：
 
 - `display_client_init()` — `open("/dev/kms")` + `ioctl(fd, KMS_IOCTL_CREATE_BUF)` + `mmap(fd, size)`
 - `display_client_render_cell(row, col, ch, fg, bg)` — 像素渲染到 back buffer
@@ -153,8 +153,8 @@ arch/x64/utils.h 提供：
 | kernel/display.c + kernel/display.h | 内核 KMS 子系统（PCI 发现 + VBE modeset + back buffer 分配 + flip + mmap） |
 | common/display.h | ioctl 常量 + 结构体定义 |
 | common/ioctl.h | KMS_IOCTL_CREATE_BUF / KMS_IOCTL_FLIP 命令编码 |
-| driver/display.h | Client API（compositor 侧 inline 函数） |
-| driver/font.h | 8x16 字体表 |
+| user/driver/display.h | Client API（compositor 侧 inline 函数） |
+| user/driver/font.h | 8x16 字体表 |
 
 ### 与其他模块的关系
 
@@ -212,8 +212,8 @@ Partial flip 行分布：rows=4（10次），rows=1（5次），rows=3（2次）
 | common/ioctl.h | `KMS_IOCTL_FLIP` 从 `_IO('K',2)` 改为 `_IOWR('K',2,char[8])`，兼容 `_IOC_NR==2` |
 | kernel/display.h | `display_state` 新增 `fb_rows` 字段 |
 | kernel/display.c | FLIP 路径解析 flip_arg，有效 dirty 范围时行级 memcpy，无效时退化为全帧拷贝；legacy `DISPLAY_REQ_FLIP` 传入零初始化 flip_arg 保持向后兼容 |
-| driver/display.h | `display_client_flush(dirty_row_start, dirty_row_end)` 传入 dirty 范围 |
-| driver/terminal.cc | `flush_dirty_cells` 保存 dirty 范围传给 flush；初始化清屏传 `(0, display_rows)`；read buffer 从 256 扩至 4096 并每 4 行主动 flush |
+| user/driver/display.h | `display_client_flush(dirty_row_start, dirty_row_end)` 传入 dirty 范围 |
+| user/driver/terminal.cc | `flush_dirty_cells` 保存 dirty 范围传给 flush；初始化清屏传 `(0, display_rows)`；read buffer 从 256 扩至 4096 并每 4 行主动 flush |
 
 ---
 

@@ -68,7 +68,7 @@ cpu_local_t 新增字段：
 
 ### kbd_driver 工作流
 
-kbd_driver（driver/kbd_driver.cc）是 IOPL=0 的用户态驱动，基于 input_driver_run 库（user/lib/input_driver.cc），通过 RECV_NOTIFY 驱动（非轮询）：
+kbd_driver（user/driver/kbd_driver.cc）是 IOPL=0 的用户态驱动，基于 input_driver_run 库（user/lib/input_driver.cc），通过 RECV_NOTIFY 驱动（非轮询）：
 
 1. `input_driver_run(INPUT_DEV_KBD, "kbd", "/dev/usb_hid_kbd", on_key_event, kbd_hid_init)` — 库负责初始化 + 主循环
 2. 库初始化：`open("/dev/usb_hid_kbd")` + `mmap` → 映射内核 HID SHM → `kbd_hid_init` → `get_keycode_init()`

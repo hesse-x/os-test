@@ -73,3 +73,14 @@ add_user_ldso(ldso SOURCES
 add_user_dyn_elf(hello_dyn C SOURCES hello_dyn.c LINK_LIBS c)
 # 确保 libc.so 先于 hello_dyn 构建
 add_dependencies(hello_dyn_dyn_elf c_so)
+
+# driver/ — 用户态驱动进程（kbd_driver 跨目录引用 lib/ 下的 usb_kbd/input_driver）
+add_user_elf(kbd_driver   SOURCES driver/kbd_driver.cc lib/usb_kbd.cc lib/input_driver.cc   LINK_LIBS c)
+add_user_elf(terminal     SOURCES driver/terminal.cc     LINK_LIBS c)
+
+# shell/ — Shell 用户进程
+if(TEST)
+    add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c DEFS TEST)
+else()
+    add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c)
+endif()
