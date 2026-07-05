@@ -9,7 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include "user/driver/font.h"
-#include "xos/display.h"
+#include <xos/display.h>
 
 // ===== ioctl commands from <sys/ioctl.h> (xos/ioctl.h) =====
 

@@ -11,7 +11,7 @@
 #include <sys/shm.h>
 #include <sys/device.h>
 #include "syscall.h"
-#include "xos/errno.h"
+#include <xos/errno.h>
 #include "user/driver/display.h"
 #include "input.h"
 

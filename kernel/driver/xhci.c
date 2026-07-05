@@ -9,8 +9,8 @@
 #include "kernel/xcore/spinlock.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
-#include "xos/errno.h"
-#include "xos/shm.h"
+#include <xos/errno.h>
+#include <xos/shm.h>
 #include "kernel/bsd/devtmpfs.h"
 
 // ===================== xHCI register offsets =====================

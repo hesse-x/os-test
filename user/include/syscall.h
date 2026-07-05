@@ -15,12 +15,12 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "xos/syscall.h"        // struct kernel_mem_stats (UAPI, shared layout)
-#include "xos/syscall_nums.h"
-#include "xos/syscall_asm.h"
-#include "xos/errno.h"
-#include "xos/mman.h"
-#include "xos/signal.h"
+#include <xos/syscall.h>        // struct kernel_mem_stats (UAPI, shared layout)
+#include <xos/syscall_nums.h>
+#include <xos/syscall_asm.h>
+#include <xos/errno.h>
+#include <xos/mman.h>
+#include <xos/signal.h>
 
 #ifdef __cplusplus
 extern "C" {

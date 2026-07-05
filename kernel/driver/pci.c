@@ -6,7 +6,7 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "common/macro.h"
-#include "xos/errno.h"
+#include <xos/errno.h>
 #include "arch/x64/apic.h"
 #include "kernel/xcore/trap.h"
 

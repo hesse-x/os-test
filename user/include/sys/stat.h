@@ -4,7 +4,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <stddef.h>
-#include "xos/stat.h"
+#include <xos/stat.h>
 #include <sys/cdefs.h>
 
 #ifdef __cplusplus

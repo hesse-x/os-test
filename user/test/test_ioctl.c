@@ -8,7 +8,7 @@
 #include <sys/poll.h>
 #include <sys/mman.h>
 #include "syscall.h"
-#include "xos/errno.h"
+#include <xos/errno.h>
 #include "user/driver/display.h"
 #include "input.h"
 

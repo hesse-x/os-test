@@ -5,6 +5,17 @@
 
 // ELF64 fixed header
 #define EI_NIDENT 16
+
+// e_ident[] magic index/value (ELF ABI fixed)
+#define EI_MAG0 0
+#define EI_MAG1 1
+#define EI_MAG2 2
+#define EI_MAG3 3
+#define ELFMAG0 0x7f
+#define ELFMAG1 'E'
+#define ELFMAG2 'L'
+#define ELFMAG3 'F'
+
 #define PT_LOAD 1
 #define PT_DYNAMIC 2   // Dynamic linking information
 #define PT_INTERP 3    // Program interpreter path name

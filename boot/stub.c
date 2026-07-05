@@ -2,7 +2,7 @@
 // 从 FAT32 读取 myos.elf，加载到物理地址，设置 boot_info，跳转内核
 #include <efi.h>
 #include <efilib.h>
-#include <elf.h>
+#include <xos/elf.h>
 #include <stdint.h>
 #include "boot/boot.h"
 

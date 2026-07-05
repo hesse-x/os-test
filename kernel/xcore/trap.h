@@ -3,7 +3,7 @@
 
 #include "arch/x64/trap.h"
 #include "kernel/xcore/xtask.h"
-#include "xos/syscall_nums.h"
+#include <xos/syscall_nums.h>
 #include <stddef.h>
 
 // Hook registration points: BSD layer registers during init, Xcore calls at trap_dispatch end

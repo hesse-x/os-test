@@ -11,9 +11,9 @@
 #include <pthread.h>
 #include "sys/tls.h"
 #include "syscall.h"
-#include "xos/mman.h"
-#include "xos/signal.h"
-#include "xos/thread.h"
+#include <xos/mman.h>
+#include <xos/signal.h>
+#include <xos/thread.h>
 
 #ifndef FUTEX_WAIT
 #define FUTEX_WAIT 0

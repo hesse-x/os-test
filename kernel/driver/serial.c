@@ -7,11 +7,11 @@
 #include "kernel/xcore/trap.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
-#include "xos/errno.h"
-#include "xos/socket.h"  // POLLIN/POLLOUT
+#include <xos/errno.h>
+#include <xos/socket.h>  // POLLIN/POLLOUT
 #include "common/kvformat.h"
 
-#include "xos/ioctl.h"   // TCGETS
+#include <xos/ioctl.h>   // TCGETS
 
 // ===================== TX lock =====================
 spinlock_t serial_tx_lock = SPINLOCK_INIT;

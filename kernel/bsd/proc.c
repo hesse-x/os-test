@@ -33,12 +33,12 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/memlayout.h"
 #include "common/macro.h"
-#include "xos/errno.h"
-#include "xos/shm.h"
-#include "xos/fcntl.h"
-#include "xos/stat.h"
-#include "xos/signal.h"
-#include "xos/thread.h"
+#include <xos/errno.h>
+#include <xos/shm.h>
+#include <xos/fcntl.h>
+#include <xos/stat.h>
+#include <xos/signal.h>
+#include <xos/thread.h>
 
 // Minimal file_io_req for FD_FILE CLOSE notification (must match fs_driver struct layout)
 typedef struct file_io_close_req {

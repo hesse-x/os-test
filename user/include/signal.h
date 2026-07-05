@@ -1,7 +1,7 @@
 #ifndef USER_SIGNAL_H
 #define USER_SIGNAL_H
 
-#include "xos/signal.h"
+#include <xos/signal.h>
 #include <sys/cdefs.h>
 
 #ifdef __cplusplus

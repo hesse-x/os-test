@@ -27,7 +27,7 @@ int blk_read_sector(uint32_t lba, void *buf) {
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/xcore/xtask.h"
 #include "kernel/driver/bsd_types.h"
-#include "xos/errno.h"
+#include <xos/errno.h>
 
 static int blk_dev_open(xtask_t *proc, int fd) {
     return 0;

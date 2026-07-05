@@ -11,9 +11,9 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/apic.h"
-#include "xos/errno.h"
-#include "xos/syscall_nums.h"
-#include "xos/signal.h"
+#include <xos/errno.h>
+#include <xos/syscall_nums.h>
+#include <xos/signal.h>
 
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 256

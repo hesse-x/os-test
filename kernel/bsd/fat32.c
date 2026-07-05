@@ -8,13 +8,13 @@
 #include "kernel/driver/blk_dev.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/page_cache.h"
-#include "xos/stat.h"
-#include "xos/dirent.h"
+#include <xos/stat.h>
+#include <xos/dirent.h>
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/slab.h"
-#include "xos/errno.h"
-#include "xos/fcntl.h"
+#include <xos/errno.h>
+#include <xos/fcntl.h>
 #include "arch/x64/utils.h"
 #include <stddef.h>
 

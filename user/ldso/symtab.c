@@ -3,9 +3,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "elf.h"
-#include "xos/syscall_nums.h"
-#include "sys/link_map.h"
+#include <xos/elf.h>
+#include <xos/syscall_nums.h>
+#include <sys/link_map.h>
 
 // minilibc.c
 __attribute__((visibility("hidden"))) int strcmp(const char *a, const char *b);

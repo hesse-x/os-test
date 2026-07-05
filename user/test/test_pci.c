@@ -6,7 +6,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
-#include "xos/errno.h"
+#include <xos/errno.h>
 
 #include "syscall.h"
 

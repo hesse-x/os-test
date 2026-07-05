@@ -2,7 +2,7 @@
 #include "string.h"
 #include "syscall.h"
 #include <sys/mman.h>
-#include "xos/errno.h"
+#include <xos/errno.h>
 #include "common/macro.h"
 #include "arch/x64/memlayout.h"
 #include <unistd.h>

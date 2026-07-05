@@ -4,7 +4,7 @@
 #include <sys/types.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "xos/mman.h"
+#include <xos/mman.h>
 #include <sys/cdefs.h>
 
 #ifdef __cplusplus

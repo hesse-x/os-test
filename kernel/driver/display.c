@@ -8,8 +8,7 @@
 #include "kernel/xcore/mem/slab.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/utils.h"
-#include "xos/errno.h"
-#include <string.h>
+#include <xos/errno.h>
 #ifdef PERF
 #include "kernel/driver/serial.h"
 #include "arch/x64/apic.h"

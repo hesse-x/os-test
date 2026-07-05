@@ -20,9 +20,9 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/paging.h"
-#include "xos/signal.h"
-#include "xos/syscall_nums.h"
-#include "xos/errno.h"
+#include <xos/signal.h>
+#include <xos/syscall_nums.h>
+#include <xos/errno.h>
 
 // ===================== Signal trampoline =====================
 uint64_t sig_trampoline_phys = 0;

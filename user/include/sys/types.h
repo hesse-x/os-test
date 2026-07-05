@@ -2,7 +2,7 @@
 #define _SYS_TYPES_H
 
 #include <stdint.h>
-#include "xos/types.h"
+#include <xos/types.h>
 
 typedef int64_t off_t;
 typedef uint32_t dev_t;

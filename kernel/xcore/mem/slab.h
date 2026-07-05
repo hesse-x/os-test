@@ -7,7 +7,7 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/mem/alloc.h"
-#include "xos/syscall.h"  // struct kernel_mem_stats (shared kernel/user layout)
+#include <xos/syscall.h>  // struct kernel_mem_stats (shared kernel/user layout)
 
 #define KMALLOC_SHIFT_LOW   3    // 最小 class = 8B
 #define KMALLOC_SHIFT_HIGH  11   // 最大 class = 2048B

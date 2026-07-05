@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include "input.h"
-#include "xos/shm.h"  // usb_hid_slot, usb_hid_shm_header, HID constants
+#include <xos/shm.h>  // usb_hid_slot, usb_hid_shm_header, HID constants
 
 // Read keyboard events from USB HID SHM ring
 // Returns 0 if event produced, -1 if ring empty

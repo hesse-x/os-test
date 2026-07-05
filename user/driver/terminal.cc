@@ -25,7 +25,7 @@
 #include <sys/poll.h>
 #include "common/macro.h"
 #include "input.h"
-#include "xos/input.h"
+#include <xos/input.h>
 #include "user/driver/display.h"
 
 static int master_fd = -1;

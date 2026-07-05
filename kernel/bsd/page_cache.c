@@ -4,7 +4,7 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/slab.h"
-#include "xos/errno.h"
+#include <xos/errno.h>
 #include "arch/x64/utils.h"
 #include <stddef.h>
 

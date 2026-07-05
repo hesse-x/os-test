@@ -3,8 +3,8 @@
 #include <stdint.h>
 #include <sys/mman.h>
 #include "input.h"
-#include "xos/input.h"
-#include "xos/shm.h"
+#include <xos/input.h>
+#include <xos/shm.h>
 #include "syscall.h"
 #include "usb_hid.h"
 

@@ -21,9 +21,9 @@
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
 #include "common/macro.h"
-#include "xos/errno.h"
-#include "xos/shm.h"
-#include "xos/signal.h"
+#include <xos/errno.h>
+#include <xos/shm.h>
+#include <xos/signal.h>
 
 // Validate assembly offset assumptions in trapentry.S (switch_to uses hardcoded offsets)
 _Static_assert(offsetof(xtask_t, k_rsp) == 8,  "switch_to asm: k_rsp offset mismatch");

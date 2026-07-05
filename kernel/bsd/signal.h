@@ -2,7 +2,7 @@
 #define KERNEL_BSD_SIGNAL_H
 
 #include <stdint.h>
-#include "xos/signal.h"
+#include <xos/signal.h>
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/spinlock.h"
 

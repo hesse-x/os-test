@@ -9,7 +9,7 @@
    不 include <time.h>:测试构建(Unity <limits.h>)下尖括号会回退到宿主机
    /usr/include/time.h,其 struct timespec 定义与我们的 xos/time.h 重定义冲突。 */
 struct timespec;
-#include "xos/signal.h"
+#include <xos/signal.h>
 
 #ifdef __cplusplus
 extern "C" {

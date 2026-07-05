@@ -16,9 +16,9 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/paging.h"
 #include "kernel/xcore/acpi.h"
-#include "xos/syscall_nums.h"
-#include "xos/syscall.h"
-#include "xos/errno.h"
+#include <xos/syscall_nums.h>
+#include <xos/syscall.h>
+#include <xos/errno.h>
 
 // ===================== IRQ owner table (shared with trap.c) =====================
 extern pid_t irq_owner[MAX_IRQ_HANDLERS];

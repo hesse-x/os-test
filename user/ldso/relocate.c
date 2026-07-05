@@ -3,9 +3,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "elf.h"
-#include "xos/syscall_nums.h"
-#include "sys/link_map.h"
+#include <xos/elf.h>
+#include <xos/syscall_nums.h>
+#include <sys/link_map.h>
 
 // bootstrap 阶段辅助（hidden）
 __attribute__((visibility("hidden"))) void dl_puts(const char *s);

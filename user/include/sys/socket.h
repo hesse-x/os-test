@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 // ===================== Constants (from xos/socket.h) =====================
-#include "xos/socket.h"
+#include <xos/socket.h>
 
 // ===================== Syscall wrappers =====================
 // These directly invoke the kernel syscalls via the inline assembly wrappers.

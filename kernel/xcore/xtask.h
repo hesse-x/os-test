@@ -7,7 +7,7 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/smp.h"
-#include "xos/types.h"
+#include <xos/types.h>
 #include "kernel/xcore/atomic.h"
 
 typedef enum proc_state_t { UNUSED, READY, RUNNING, BLOCKED, ZOMBIE, REAPING } proc_state_t;

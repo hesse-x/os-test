@@ -8,7 +8,7 @@
 #ifndef SANITIZER
 
 #include <stddef.h>
-#include "xos/errno.h"
+#include <xos/errno.h>
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/mem/kasan.h"
 

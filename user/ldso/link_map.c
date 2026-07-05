@@ -3,8 +3,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "elf.h"
-#include "sys/link_map.h"
+#include <xos/elf.h>
+#include <sys/link_map.h>
 
 // 全局 link_map 链表头（libc.so 的 collect_tls_from_link_map 通过 extern 读取）
 // visibility("default")：ld.so 全局 -fvisibility=hidden，仅此符号需导出给 libc.so

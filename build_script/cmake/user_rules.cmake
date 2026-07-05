@@ -1,7 +1,11 @@
 # user_rules.cmake — add_user_lib() / add_user_elf() 封装用户态编译规则
 
 # 用户态公共编译 flags (CMake list, semicolon-separated)
-set(USER_COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -mno-red-zone)
+# -nostdinc + -isystem: 见 CMakeLists.txt 顶部说明。此处重复列出是因为
+# add_user_ldso / SHARED libc.so / crt0 等用裸 gcc 命令(非 CMake target),
+# 不继承全局 CMAKE_C_FLAGS，必须显式带上才能解析 <stdint.h> 等 freestanding 头。
+# 与全局 flags 重复对 CMake target 静态库无害（gcc 接受重复 -nostdinc/-isystem）。
+set(USER_COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -mno-red-zone -nostdinc -isystem ${GCC_FREESTANDING_INC})
 
 # 防御：用户态需要 SSE（double/printf/FPU 都依赖），任何 -mno-sse* 都是
 # 全局 CMAKE_C_FLAGS 泄漏的信号（典型来源：内核-only flag 误放全局）。
@@ -216,6 +220,7 @@ function(add_user_ldso name)
     set(COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin
                       -fPIC -fno-stack-protector -mno-red-zone
                       -fvisibility=hidden
+                      -nostdinc -isystem ${GCC_FREESTANDING_INC}
                       -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include)
     set(OBJ_FILES "")
     set(idx 0)

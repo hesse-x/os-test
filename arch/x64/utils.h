@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "kernel/xcore/sparse.h"
-#include "xos/syscall_nums.h"  // recv_msg_t / pci_dev_info / SYS_* (UAPI)
+#include <xos/syscall_nums.h>  // recv_msg_t / pci_dev_info / SYS_* (UAPI)
 
 // ===================== I/O port helpers =====================
 static inline void outb(uint16_t port, uint8_t val) {
@@ -219,8 +219,8 @@ static inline uint64_t rdtsc64() {
 //   RCX = saved RIP, R11 = saved RFLAGS (clobbered by SYSCALL)
 // The __syscallN inline-assembly wrappers live in xos/syscall_asm.h
 // (UAPI, self-contained); semantic wrappers are in user/include/syscall.h.
-#include "xos/syscall_asm.h"
+#include <xos/syscall_asm.h>
 
-#include "xos/shm.h"
+#include <xos/shm.h>
 
 #endif // ARCH_X64_UTILS_H

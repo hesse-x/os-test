@@ -1,7 +1,7 @@
 #ifndef _FCNTL_H
 #define _FCNTL_H
 
-#include "xos/fcntl.h"
+#include <xos/fcntl.h>
 #include <stdint.h>
 #include <sys/cdefs.h>
 

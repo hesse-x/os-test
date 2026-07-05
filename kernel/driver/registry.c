@@ -3,7 +3,6 @@
 #include "kernel/driver/driver.h"
 #include "kernel/driver/pci.h"
 #include "kernel/xcore/log.h"
-#include <string.h>
 
 #define MAX_DRIVERS 16
 static dev_driver_t driver_table[MAX_DRIVERS];

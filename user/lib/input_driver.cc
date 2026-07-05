@@ -5,7 +5,7 @@
 // device_register_shm. Consumers access via open("/dev/<name>") + mmap(MAP_SHARED, fd).
 // BIND request only registers the consumer pid for notify (no cross-process fd passing).
 #include <stdint.h>
-#include <cerrno>
+#include <errno.h>
 #include <sys/ipc.h>
 #include <sys/mman.h>
 #include <sys/device.h>
@@ -13,10 +13,10 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include "input.h"
-#include "xos/input.h"
-#include "xos/shm.h"
+#include <xos/input.h>
+#include <xos/shm.h>
 #include "syscall.h"
-#include "xos/errno.h"
+#include <xos/errno.h>
 
 #define MAX_CONSUMERS 8
 

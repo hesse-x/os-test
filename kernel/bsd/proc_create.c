@@ -19,8 +19,8 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/memlayout.h"
-#include "xos/signal.h"
-#include "xos/elf.h"
+#include <xos/signal.h>
+#include <xos/elf.h>
 #include "common/macro.h"
 
 // process_create_elf: create user process from ELF data

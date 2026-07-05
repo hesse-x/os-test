@@ -7,13 +7,29 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 project(myos C CXX ASM)
 
+# Export compile database for clang-tidy incremental naming checks (see doc/design/format.md)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Common C flags (kernel uses C with -fPIE; user-space uses C/C++ with -fno-pie)
 # Note: -mno-sse/-mno-sse2/-mno-mmx are kernel-only (applied via
 # kernel_rules.cmake). User-space needs SSE for double/float in printf
 # and general floating-point, so they must NOT be global.
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fPIE -mno-red-zone -std=gnu17")
+#
+# -nostdinc removes ALL default system header search paths (/usr/include
+# AND gcc's bundled freestanding dir). We re-add the freestanding headers
+# (std*.h: stdint.h, stddef.h, stdarg.h, ...) via -isystem so <stdint.h>
+# still resolves, while host glibc headers (/usr/include/stdio.h etc.)
+# stay out of the search path — the build is now truly host-independent.
+# -isystem (not -I) marks them as system headers so -Werror does not fire
+# on their internals. The freestanding dir is queried from gcc at configure
+# time (not hardcoded) so it survives gcc version changes.
+execute_process(
+    COMMAND gcc -print-file-name=include
+    OUTPUT_VARIABLE GCC_FREESTANDING_INC
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fPIE -mno-red-zone -std=gnu17 -nostdinc -isystem ${GCC_FREESTANDING_INC}")
 # C++ flags for user-space only (driver, shell, libc .cc files)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone -nostdinc -isystem ${GCC_FREESTANDING_INC}")
 
 # KASAN sanitizer flags (applied only to kernel OBJECT libraries via kernel_rules.cmake)
 if(SANITIZE)

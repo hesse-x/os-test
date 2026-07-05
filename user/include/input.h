@@ -66,8 +66,8 @@ enum input_key {
 #define ABS_Y        0x01
 #define ABS_PRESSURE 0x18
 
-#include "xos/ioctl.h"
-#include "xos/input.h"
+#include <xos/ioctl.h>
+#include <xos/input.h>
 
 // ===================== libinput_client public API =====================
 

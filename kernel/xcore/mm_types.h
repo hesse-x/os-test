@@ -8,8 +8,8 @@
 #include <stddef.h>
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/atomic.h"
-#include "xos/types.h"        // pid_t
-#include "xos/mman.h"         // PROT_*
+#include <xos/types.h>        // pid_t
+#include <xos/mman.h>         // PROT_*
 
 // ===================== SHM =====================
 #define SHM_SEALED  2

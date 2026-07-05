@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "xos/time.h"
+#include <xos/time.h>
 #include <sys/cdefs.h>
 
 typedef long clock_t;
