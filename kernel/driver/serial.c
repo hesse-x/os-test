@@ -187,7 +187,7 @@ static int serial_dev_open(xtask_t *proc, int fd) {
 
   serial_fd_count++;
   if (!serial_irq_registered) {
-    register_irq(36, serial_irq_handler);
+    irq_register(36, serial_irq_handler);
     uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
     ioapic_set_irq(4, 36, bsp_apic_id, false, false, false); // edge-triggered
     outb(COM1_IER, IER_RX_ENABLE);
@@ -206,7 +206,7 @@ static int serial_dev_close(xtask_t *proc, int fd) {
   if (serial_fd_count == 0) {
     outb(COM1_IER, 0x00);                         // Disable UART interrupts
     ioapic_set_irq(4, 36, 0, true, false, false); // Mask GSI 4 in I/O APIC
-    unregister_irq(36);
+    irq_unregister(36);
     serial_irq_registered = false;
   }
   return 0;

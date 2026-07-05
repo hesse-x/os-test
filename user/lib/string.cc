@@ -560,6 +560,34 @@ void bzero(void *s, size_t n) {
     *p++ = 0;
 }
 
+/* strcasecmp / strncasecmp — POSIX <strings.h> */
+static unsigned char _toupper(unsigned char c) {
+  if (c >= 'a' && c <= 'z')
+    return (unsigned char)(c - 'a' + 'A');
+  return c;
+}
+
+int strcasecmp(const char *s1, const char *s2) {
+  while (*s1 && _toupper((unsigned char)*s1) == _toupper((unsigned char)*s2)) {
+    s1++;
+    s2++;
+  }
+  return (int)_toupper((unsigned char)*s1) -
+         (int)_toupper((unsigned char)*s2);
+}
+
+int strncasecmp(const char *s1, const char *s2, size_t n) {
+  while (n && *s1 && _toupper((unsigned char)*s1) == _toupper((unsigned char)*s2)) {
+    s1++;
+    s2++;
+    n--;
+  }
+  if (!n)
+    return 0;
+  return (int)_toupper((unsigned char)*s1) -
+         (int)_toupper((unsigned char)*s2);
+}
+
 #ifdef __cplusplus
 }
 #endif

@@ -197,8 +197,8 @@ void unix_sock_free(struct unix_sock *sock) {
       xtask_t *peer = task_get(bp->peer);
       if (peer->pid == bp->peer) {
         // Wake peer if waiting on this socket
-        sock_wake_reader(bp);
-        sock_wake_writer(bp);
+        unix_sock_wake_reader(bp);
+        unix_sock_wake_writer(bp);
       }
     }
     // Free the child socket
@@ -231,13 +231,13 @@ void unix_sock_release(struct unix_sock *sock) {
 
 // ===================== Wake helpers =====================
 
-void sock_wake_reader(struct unix_sock *sock) {
+void unix_sock_wake_reader(struct unix_sock *sock) {
   if (sock->blocked_reader >= 0) {
     wake_process(sock->blocked_reader);
   }
 }
 
-void sock_wake_writer(struct unix_sock *sock) {
+void unix_sock_wake_writer(struct unix_sock *sock) {
   if (sock->blocked_writer >= 0) {
     wake_process(sock->blocked_writer);
   }
@@ -245,7 +245,7 @@ void sock_wake_writer(struct unix_sock *sock) {
 
 // ===================== Internal sendmsg/recvmsg =====================
 
-int64_t sock_sendmsg_internal(struct unix_sock *sock, const struct iovec *iov,
+int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
                               size_t iovlen, const void *control,
                               size_t controllen, int flags) {
   // Check shutdown_write on our socket
@@ -362,7 +362,7 @@ int64_t sock_sendmsg_internal(struct unix_sock *sock, const struct iovec *iov,
   return (int64_t)total;
 }
 
-int64_t sock_recvmsg_internal(struct unix_sock *sock, const struct iovec *iov,
+int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
                               size_t iovlen, void *control, size_t *controllen,
                               int flags) {
   bool nonblock = (flags & MSG_DONTWAIT) != 0;
@@ -423,7 +423,7 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock, const struct iovec *iov,
       int cpu = proc->assigned_cpu;
       uint64_t rflags;
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
-      timer_queue_insert(cpu, proc);
+      sched_timer_queue_insert(cpu, proc);
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
       schedule();
       // Timeout check
@@ -579,7 +579,7 @@ int64_t sock_recvmsg_internal(struct unix_sock *sock, const struct iovec *iov,
 
 // ===================== socket close / cleanup =====================
 
-void sock_close(struct unix_sock *sock) {
+void unix_sock_close(struct unix_sock *sock) {
   if (!sock)
     return;
 
@@ -638,10 +638,14 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   int type = (int)arg2;
   int protocol = (int)arg3;
 
+  // Strip socket type flags before checking base type
+  int sock_flags = type & ~(SOCK_CLOEXEC | SOCK_NONBLOCK);
+  int base_type = type & (SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET);
+
   // Only AF_UNIX SOCK_STREAM supported
   if (domain != AF_UNIX)
     return (int64_t)-EAFNOSUPPORT;
-  if (type != SOCK_STREAM)
+  if (base_type != SOCK_STREAM)
     return (int64_t)-EPROTONOSUPPORT;
   if (protocol != 0)
     return (int64_t)-EPROTONOSUPPORT;
@@ -675,6 +679,10 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   refcount_set(&f->f_count, 1);
   f->type = FD_SOCKET;
   f->flags = O_RDWR;
+  if (sock_flags & SOCK_NONBLOCK)
+    f->flags |= O_NONBLOCK;
+  if (sock_flags & SOCK_CLOEXEC)
+    f->flags |= FD_CLOEXEC;
   f->sock = sock;
   fd_install(proc->proc->files, fd, f);
 
@@ -874,7 +882,7 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       int cpu = proc->assigned_cpu;
       uint64_t rflags;
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
-      timer_queue_insert(cpu, proc);
+      sched_timer_queue_insert(cpu, proc);
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
       schedule();
       // Timeout check
@@ -1324,7 +1332,7 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     return (int64_t)-EBADF;
   }
 
-  int64_t ret = sock_sendmsg_internal(sock, kiov, kmsg.msg_iovlen, kcontrol,
+  int64_t ret = unix_sock_sendmsg(sock, kiov, kmsg.msg_iovlen, kcontrol,
                                       kcontrollen, flags);
 
   kfree(kiov);
@@ -1416,7 +1424,7 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     return (int64_t)-EBADF;
   }
 
-  int64_t ret = sock_recvmsg_internal(sock, kiov, kmsg.msg_iovlen, kcontrol,
+  int64_t ret = unix_sock_recvmsg(sock, kiov, kmsg.msg_iovlen, kcontrol,
                                       &kcontrollen, flags);
 
   // Update msg_controllen in user space
@@ -1679,7 +1687,7 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       uint64_t pflags;
       spin_lock_irqsave(&cpu_locals[proc->assigned_cpu].scheduler_lock,
                         &pflags);
-      timer_queue_insert(proc->assigned_cpu, proc);
+      sched_timer_queue_insert(proc->assigned_cpu, proc);
       spin_unlock_irqrestore(&cpu_locals[proc->assigned_cpu].scheduler_lock,
                              pflags);
     } else {
@@ -1714,19 +1722,19 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   }
 }
 
-// ===================== sock_write / sock_read (for sys_write/sys_read
+// ===================== unix_sock_write / unix_sock_read (for sys_write/sys_read
 // FD_SOCKET dispatch) =====================
 
-int64_t sock_write(struct unix_sock *sock, const void *buf, size_t len) {
+int64_t unix_sock_write(struct unix_sock *sock, const void *buf, size_t len) {
   struct iovec iov;
   iov.iov_base = (void *)buf;
   iov.iov_len = len;
-  return sock_sendmsg_internal(sock, &iov, 1, NULL, 0, 0);
+  return unix_sock_sendmsg(sock, &iov, 1, NULL, 0, 0);
 }
 
-int64_t sock_read(struct unix_sock *sock, void *buf, size_t len) {
+int64_t unix_sock_read(struct unix_sock *sock, void *buf, size_t len) {
   struct iovec iov;
   iov.iov_base = buf;
   iov.iov_len = len;
-  return sock_recvmsg_internal(sock, &iov, 1, NULL, NULL, 0);
+  return unix_sock_recvmsg(sock, &iov, 1, NULL, NULL, 0);
 }

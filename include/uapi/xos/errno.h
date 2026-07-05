@@ -36,13 +36,12 @@
 #define EDOM 32
 #define ERANGE 33
 #define ENOTEMPTY 34
-#define ELOOP 35
+#define EDEADLK 35
 #define ENODEV 36
 #define ENOTTY 37
 #define EINTR 38
 #define ENOEXEC 39
+#define ELOOP 40
 #define EWOULDBLOCK EAGAIN
-#define EDEADLK                                                                \
-  35 // PTHREAD_MUTEX_ERRORCHECK 用（与 ELOOP 共用值，ELOOP 当前无引用）
 
 #endif // COMMON_ERRNO_H

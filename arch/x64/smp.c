@@ -145,9 +145,9 @@ __attribute__((no_sanitize("kernel-address"))) void smp_apply_cpu(int cpu_id) {
 }
 
 // ===================== Shared per-CPU bringup =====================
-// BSP (isr_init) 和 AP (ap_entry_c) 共用的 per-CPU 初始化：
+// BSP (irq_init) 和 AP (ap_entry_c) 共用的 per-CPU 初始化：
 // GDT 应用 → 控制寄存器（NX/SSE）→ PAT → IDT → syscall MSRs → 能力日志。
-// smp_init_cpu 由调用方在 common 之前完成（BSP 在 isr_init，AP 由 smp_boot_aps
+// smp_init_cpu 由调用方在 common 之前完成（BSP 在 irq_init，AP 由 smp_boot_aps
 // 代调）。 apic_init 不在此处：BSP 做全局 APIC 初始化（IOAPIC/中断路由），AP 走
 // per-CPU LAPIC enable。
 void cpu_bringup_common(int cpu_id) {
@@ -195,7 +195,7 @@ __attribute__((no_sanitize("kernel-address"))) void ap_entry_c(int cpu_id) {
   per_cpu_tss[cpu_id].rsp0 = idle->k_stack_top;
   cpu_locals[cpu_id].tss_rsp0 = idle->k_stack_top;
 
-  // Switch to idle kernel stack and enter idle_entry (never returns)
+  // Switch to idle kernel stack and enter sched_idle_entry (never returns)
   uint64_t idle_rsp = idle->k_rsp;
   __asm__ volatile("movq %0, %%rsp\n"
                    "popq %%rbx\n"
@@ -290,7 +290,7 @@ __attribute__((no_sanitize("kernel-address"))) void smp_boot_aps() {
     smp_init_cpu(i, apic_id, k_stack_top);
 
     // Create idle process for this AP
-    create_idle_process(i);
+    sched_create_idle_process(i);
 
     // Fill trampoline data fields (BSP writes, AP reads in 16-bit mode)
     volatile uint64_t *t_pml4 =

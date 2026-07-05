@@ -559,6 +559,8 @@ struct dirent *readdir(DIR *dirp) {
   struct dirent64 *d64 = (struct dirent64 *)(dir->buf + dir->buf_pos);
   static struct dirent result;
   result.d_ino = (ino_t)d64->d_ino;
+  result.d_off = (off_t)dir->buf_pos;
+  result.d_reclen = d64->d_reclen;
   int j = 0;
   while (d64->d_name[j] && j < 255) {
     result.d_name[j] = d64->d_name[j];

@@ -101,7 +101,7 @@ static void fat_cache_invalidate_sector(uint32_t sector_lba) {
 /* ==================== FAT entry read/write ==================== */
 
 /* Read a FAT entry (synchronous, uses FAT cache) */
-static uint32_t fat_read_entry(uint32_t cluster) {
+static uint32_t fat32_read_entry(uint32_t cluster) {
   uint32_t fat_offset = cluster * 4;
   uint32_t fat_sector = fat_start_lba + (fat_offset / 512);
   uint32_t offset_in_sector = fat_offset % 512;
@@ -164,7 +164,7 @@ uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index) {
       WARN_ON(1);        // FAT chain loop detected
       return 0x0FFFFFF8; // treat as EOF to prevent infinite loop
     }
-    uint32_t next = fat_read_entry(c);
+    uint32_t next = fat32_read_entry(c);
     if (next >= 0x0FFFFFF8)
       return next;
     c = next;
@@ -215,7 +215,7 @@ static void fat32_free_chain(uint32_t start_cluster) {
       WARN_ON(1); // FAT chain loop detected
       break;
     }
-    uint32_t next = fat_read_entry(c);
+    uint32_t next = fat32_read_entry(c);
     fat32_write_fat_entry(c, 0);
     if (c < next_free_hint)
       next_free_hint = c;
@@ -457,7 +457,7 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
             }
           }
           kfree(buf2);
-          scan2 = fat_read_entry(scan2);
+          scan2 = fat32_read_entry(scan2);
         }
       dotdot_done:
         prev_dir_cluster = cluster;
@@ -548,7 +548,7 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
         break;
 
       /* Follow FAT chain */
-      uint32_t next = fat_read_entry(scan_cluster);
+      uint32_t next = fat32_read_entry(scan_cluster);
       if (next >= 0x0FFFFFF8)
         return -ENOENT;
       scan_cluster = next;
@@ -844,7 +844,7 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
         uint32_t tail = ip->start_cluster;
         int max_tail_walk = 1024;
         while (max_tail_walk-- > 0) {
-          uint32_t next = fat_read_entry(tail);
+          uint32_t next = fat32_read_entry(tail);
           if (next >= 0x0FFFFFF8)
             break;
           tail = next;
@@ -1186,7 +1186,7 @@ int fat32_rmdir(const char *path) {
       break;
     }
     kfree(dbuf);
-    uint32_t next = fat_read_entry(cc);
+    uint32_t next = fat32_read_entry(cc);
     if (next >= 0x0FFFFFF8)
       break;
     cc = next;
@@ -1363,7 +1363,7 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
     kfree(cbuf);
 
     /* Follow FAT chain */
-    uint32_t next = fat_read_entry(scan_cluster);
+    uint32_t next = fat32_read_entry(scan_cluster);
     if (next >= 0x0FFFFFF8) {
       *pos = (uint64_t)-1; /* EOF */
       return (int)written;

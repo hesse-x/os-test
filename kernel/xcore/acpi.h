@@ -123,7 +123,7 @@ extern acpi_mcfg_result_t g_mcfg;
 const acpi_iso_override_t *acpi_find_iso(uint8_t isa_irq);
 
 // Initialize ACPI: parse RSDP -> XSDT -> find MADT + MCFG
-// Must be called after init_mem, before isr_init
+// Must be called after init_mem, before irq_init
 void acpi_init(uint64_t rsdp_phys);
 
 // Find an ACPI table by 4-byte signature

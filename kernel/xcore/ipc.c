@@ -248,7 +248,7 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       proc->wait_deadline = sched_clock() + (int64_t)timeout_ms * 1000000ULL;
       uint64_t flags;
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
-      timer_queue_insert(cpu, proc);
+      sched_timer_queue_insert(cpu, proc);
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
     } else {
       proc->wait_deadline = 0;
@@ -375,7 +375,7 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   int cpu = proc->assigned_cpu;
   uint64_t flags2;
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
-  timer_queue_insert(cpu, proc);
+  sched_timer_queue_insert(cpu, proc);
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
 
   schedule();
@@ -626,7 +626,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
   int cpu = proc->assigned_cpu;
   uint64_t flags2;
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
-  timer_queue_insert(cpu, proc);
+  sched_timer_queue_insert(cpu, proc);
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
 
   schedule();

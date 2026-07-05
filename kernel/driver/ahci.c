@@ -654,7 +654,7 @@ __attribute__((no_sanitize("kernel-address"))) void ahci_init() {
     uint8_t ahci_gsi =
         (uint8_t)pci_read_config(dev->bus, dev->dev, dev->func, 0x3C) & 0xFF;
     uint8_t ahci_irq_vec = 32 + ahci_gsi;
-    register_irq(ahci_irq_vec, ahci_irq_handler);
+    irq_register(ahci_irq_vec, ahci_irq_handler);
 
     uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
     const acpi_iso_override_t *iso = acpi_find_iso(ahci_gsi);
@@ -666,7 +666,7 @@ __attribute__((no_sanitize("kernel-address"))) void ahci_init() {
            ahci_irq_vec);
   } else {
     uint8_t msi_vec = (uint8_t)dev->msix_vector_base;
-    register_irq(msi_vec, ahci_irq_handler);
+    irq_register(msi_vec, ahci_irq_handler);
 
     printk(LOG_INFO, "ahci: MSI enabled (vec=%d)\n", msi_vec);
   }

@@ -139,7 +139,7 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   cur->wait_timed_out = 0;
   if (has_timeout) {
     cur->wait_deadline = abstime_ns; // absolute abstime
-    timer_queue_insert(cpu, cur);
+    sched_timer_queue_insert(cpu, cur);
   }
   cur->wait_event = WAIT_FUTEX;
   cur->state = BLOCKED;

@@ -547,7 +547,7 @@ void xhci_init() {
   if (nvectors <= 0)
     return;
 
-  register_irq(xhci_dev->msix_vector_base, xhci_isr);
+  irq_register(xhci_dev->msix_vector_base, xhci_isr);
 
   // 7. Controller reset
   uint32_t usbsts = op_read(XHCI_USBSTS);

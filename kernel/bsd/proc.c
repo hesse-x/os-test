@@ -95,15 +95,15 @@ void proc_free(proc_t *bp) {
     return;
   if (bp->files)
     files_put(bp->files);
-  // xtask_free is handled by the caller (task_reap resets the xtask slot)
+  // xtask_free is handled by the caller (sched_task_reap resets the xtask slot)
   kfree(bp);
 }
 
-// proc_reap: POSIX cleanup part of task_reap
-// Called directly from task_reap() for synchronous per-process cleanup.
+// proc_reap: POSIX cleanup part of sched_task_reap
+// Called directly from sched_task_reap() for synchronous per-process cleanup.
 // Owns all POSIX resource freeing: files_put (closes all fds), signal_put,
 // kfree(proc_t). do_exit does NOT put these — it only sets ZOMBIE and
-// notifies parent; task_reap/proc_reap is the sole owner of proc_t lifetime.
+// notifies parent; sched_task_reap/proc_reap is the sole owner of proc_t lifetime.
 void proc_reap(xtask_t *proc) {
   if (!proc->proc)
     return;
@@ -133,11 +133,11 @@ void proc_reap(xtask_t *proc) {
 }
 
 // proc_reap_idle: scan for orphaned zombie processes
-// Called from idle_entry via reap_hook
+// Called from sched_idle_entry via reap_hook
 void proc_reap_idle(void) {
   // Safety net: scan for any ZOMBIE processes whose proc
   // wasn't freed (shouldn't happen with direct proc_reap
-  // in task_reap, but provides defense-in-depth)
+  // in sched_task_reap, but provides defense-in-depth)
 }
 
 // ===================== files_t lifecycle =====================
@@ -210,7 +210,7 @@ void file_put(struct file *f) {
     break;
   case FD_SOCKET:
     if (f->sock)
-      sock_close(f->sock);
+      unix_sock_close(f->sock);
     break;
   case FD_TTY:
     pty_close_file(f);
@@ -797,7 +797,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   // 7. Fill child xtask_t
   // 顺序约束:assigned_cpu 必须先于 pid 赋值(wake 路径在锁前无锁读 assigned_cpu,
   // 防 pid 生效后 assigned_cpu 仍是 -1 导致越界);亲和父 CPU
-  child->assigned_cpu = pick_cpu_pref(parent->assigned_cpu);
+  child->assigned_cpu = sched_pick_cpu_pref(parent->assigned_cpu);
   child->pid = alloc_idx;
   child->state = READY;
   child->k_rsp = k_rsp;
@@ -857,7 +857,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   // TOCTOU 重检:入队期间目标 CPU 已被塞满则重新选 CPU
   if (__atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) >
       RECHECK_THRESHOLD) {
-    int new_cpu = pick_cpu_pref(parent->assigned_cpu);
+    int new_cpu = sched_pick_cpu_pref(parent->assigned_cpu);
     if (new_cpu != cpu) {
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
       child->assigned_cpu = new_cpu; // 此时尚未入队,改字段安全
@@ -1064,7 +1064,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // 顺序约束:assigned_cpu 必须先于 pid 赋值;CLONE_THREAD 亲和父
   // CPU,否则无亲和性
   child->assigned_cpu =
-      (flags & CLONE_THREAD) ? pick_cpu_pref(parent->assigned_cpu) : pick_cpu();
+      (flags & CLONE_THREAD) ? sched_pick_cpu_pref(parent->assigned_cpu) : sched_pick_cpu();
   child->pid = alloc_idx;
   child->state = READY;
   child->k_rsp = k_rsp;
@@ -1102,8 +1102,8 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // TOCTOU 重检:入队期间目标 CPU 已被塞满则重新选 CPU
   if (__atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) >
       RECHECK_THRESHOLD) {
-    int new_cpu = (flags & CLONE_THREAD) ? pick_cpu_pref(parent->assigned_cpu)
-                                         : pick_cpu();
+    int new_cpu = (flags & CLONE_THREAD) ? sched_pick_cpu_pref(parent->assigned_cpu)
+                                         : sched_pick_cpu();
     if (new_cpu != cpu) {
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
       child->assigned_cpu = new_cpu; // 此时尚未入队,改字段安全
@@ -1500,7 +1500,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     tf->rip = lr.entry; // 主 ELF entry（静态路径）
     tf->rsp = user_sp;  // 指向 argc
   }
-  // 用户栈顶必须 16 字节对齐（见 build_kstack 同款 ASSERT）
+  // 用户栈顶必须 16 字节对齐（见 sched_build_kstack 同款 ASSERT）
   ASSERT(tf->rsp % 16 == 0);
   tf->rax = 0;
 

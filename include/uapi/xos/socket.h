@@ -8,6 +8,9 @@
 extern "C" {
 #endif
 
+// ===================== Address family type =====================
+typedef uint16_t sa_family_t;
+
 // ===================== Address family =====================
 #define AF_UNIX 1
 #define AF_LOCAL AF_UNIX
@@ -16,6 +19,10 @@ extern "C" {
 #define SOCK_STREAM 1
 #define SOCK_DGRAM 2
 #define SOCK_SEQPACKET 5
+
+// Socket type flags (ORed with type)
+#define SOCK_CLOEXEC  02000000  /* 0x80000 — set FD_CLOEXEC on new fd */
+#define SOCK_NONBLOCK 04000     /* 0x800  — set O_NONBLOCK on new fd */
 
 // ===================== Protocol =====================
 #define SOL_SOCKET 1
@@ -34,16 +41,16 @@ extern "C" {
 
 // ===================== sockaddr (generic) =====================
 typedef struct sockaddr {
-  uint16_t sa_family; // address family (AF_UNIX = 1)
-  char sa_data[14];   // address data
+  sa_family_t sa_family; // address family (AF_UNIX = 1)
+  char sa_data[14];      // address data
 } sockaddr_t;
 
 // ===================== sockaddr_un =====================
 #define UNIX_PATH_MAX 108
 
 typedef struct sockaddr_un {
-  uint16_t sun_family;          // AF_UNIX = 1
-  char sun_path[UNIX_PATH_MAX]; // path or abstract (\0 prefix)
+  sa_family_t sun_family;         // AF_UNIX = 1
+  char sun_path[UNIX_PATH_MAX];   // path or abstract (\0 prefix)
 } sockaddr_un_t;
 
 // ===================== iovec =====================

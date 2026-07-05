@@ -12,20 +12,23 @@ extern "C" {
 #endif
 
 /* Userspace struct stat — mirrors struct kstat from xos/stat.h.
- * Kept as a separate type so user code uses standard POSIX names. */
+ * Must match Linux x86-64 ABI exactly (144 bytes). */
 struct stat {
-  dev_t st_dev;
-  ino_t st_ino;
-  mode_t st_mode;
-  nlink_t st_nlink;
-  uid_t st_uid;
-  gid_t st_gid;
-  off_t st_size;
-  blksize_t st_blksize;
-  blkcnt_t st_blocks;
-  struct timespec st_atim;
-  struct timespec st_mtim;
-  struct timespec st_ctim;
+  dev_t st_dev;                     /* offset  0: uint64_t */
+  ino_t st_ino;                     /* offset  8: uint64_t */
+  nlink_t st_nlink;                 /* offset 16: uint64_t */
+  mode_t st_mode;                   /* offset 24: uint32_t */
+  uid_t st_uid;                     /* offset 28: uint32_t */
+  gid_t st_gid;                     /* offset 32: uint32_t */
+  int __pad0;                       /* offset 36: padding  */
+  dev_t st_rdev;                    /* offset 40: uint64_t */
+  off_t st_size;                    /* offset 48: int64_t  */
+  blksize_t st_blksize;             /* offset 56: int64_t  */
+  blkcnt_t st_blocks;               /* offset 64: int64_t  */
+  struct timespec st_atim;          /* offset 72: 16 bytes */
+  struct timespec st_mtim;          /* offset 88: 16 bytes */
+  struct timespec st_ctim;          /* offset 104: 16 bytes */
+  long __reserved[3];               /* offset 120: 24 bytes */
 };
 
 /* Compile-time assertion: struct stat and struct kstat must have identical
@@ -33,10 +36,14 @@ struct stat {
 #if defined(__cplusplus)
 static_assert(offsetof(struct stat, st_size) == offsetof(struct kstat, st_size),
               "struct stat and struct kstat st_size offset mismatch");
+static_assert(sizeof(struct stat) == sizeof(struct kstat),
+               "struct stat and struct kstat size mismatch");
 #else
 _Static_assert(offsetof(struct stat, st_size) ==
                    offsetof(struct kstat, st_size),
                "struct stat and struct kstat st_size offset mismatch");
+_Static_assert(sizeof(struct stat) == sizeof(struct kstat),
+               "struct stat and struct kstat size mismatch");
 #endif
 
 /* File type constants (S_IFMT..S_IFIFO), permission bits (S_ISUID..S_IXOTH),

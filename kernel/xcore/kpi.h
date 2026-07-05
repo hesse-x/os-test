@@ -46,8 +46,8 @@ int copy_from_user(void *dst, const void __user *src, size_t len);
 int copy_to_user(void __user *dst, const void *src, size_t len);
 
 // === interrupts ===
-void register_irq(int vec, irq_handler_t fn);
-void unregister_irq(int vec);
+void irq_register(int vec, irq_handler_t fn);
+void irq_unregister(int vec);
 int irq_owner_check(int irq);
 void irq_owner_cleanup(pid_t pid);
 

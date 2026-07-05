@@ -13,14 +13,14 @@
 
 xtask_t *xtask_alloc(pid_t *out_pid);
 void xtask_free(xtask_t *t);
-void proc_init(void);
+void sched_init(void);
 void schedule(void);
-void task_reap(xtask_t *proc);
-xtask_t *create_idle_process(int cpu_id);
-void idle_entry(void);
-void try_steal_task(void);
-void timer_queue_insert(int cpu, xtask_t *proc);
-void timer_queue_remove(xtask_t *proc);
+void sched_task_reap(xtask_t *proc);
+xtask_t *sched_create_idle_process(int cpu_id);
+void sched_idle_entry(void);
+void sched_try_steal_task(void);
+void sched_timer_queue_insert(int cpu, xtask_t *proc);
+void sched_timer_queue_remove(xtask_t *proc);
 
 // xtask_t 专用 slab cache（kernel/xcore/sched.c 定义）。
 // 动态化后 xtask_t 由 kmem_cache_alloc 从此 cache 分配，slot 复用时 free 回此
@@ -28,15 +28,15 @@ void timer_queue_remove(xtask_t *proc);
 // ...) 回收对象。
 extern kmem_cache_t *xtask_cache;
 
-static inline void timer_queue_cancel(xtask_t *proc) {
+static inline void sched_timer_queue_cancel(xtask_t *proc) {
   if (proc->wait_deadline != 0) {
-    timer_queue_remove(proc);
+    sched_timer_queue_remove(proc);
     proc->wait_deadline = 0;
   }
 }
 
 static inline void wake_from_wait(xtask_t *p) {
-  timer_queue_cancel(p);
+  sched_timer_queue_cancel(p);
   p->state = READY;
   p->wait_event = WAIT_NONE;
   p->wait_timed_out = 0;
@@ -96,12 +96,12 @@ void process_entry(void);
   1 // 亲和性阈值:偏好 CPU 负载与最小值差距 <= 此值时选偏好 CPU
 #define RECHECK_THRESHOLD                                                      \
   2 // TOCTOU 重检阈值:队列已有 > 此值个等待任务时考虑换 CPU
-int pick_cpu(void);
-int pick_cpu_pref(int pref_cpu);
-uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip);
+int sched_pick_cpu(void);
+int sched_pick_cpu_pref(int pref_cpu);
+uint64_t sched_build_kstack(uint64_t k_stack_top, uint64_t entry_rip);
 // Variant allowing caller-supplied user rsp (e.g. for argc/argv/auxv stack
 // layout)
-uint64_t build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
+uint64_t sched_build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
                                uint64_t user_rsp);
 
 // ===================== FPU state save/restore =====================

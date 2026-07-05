@@ -35,13 +35,13 @@ int irq_has_handler(int irq) {
   return irq_handlers[irq] != NULL;
 }
 
-void register_irq(int vec, irq_handler_t fn) {
+void irq_register(int vec, irq_handler_t fn) {
   if (vec >= 0 && vec < MAX_IRQ_HANDLERS) {
     irq_handlers[vec] = fn;
   }
 }
 
-void unregister_irq(int vec) {
+void irq_unregister(int vec) {
   if (vec >= 0 && vec < MAX_IRQ_HANDLERS) {
     irq_handlers[vec] = NULL;
   }
@@ -325,11 +325,17 @@ void trap_dispatch(trapframe_t *tf) {
     // User-mode: dump faulting instruction bytes so SSE/illegal-insn are
     // recognizable without offline objdump (e.g. f2 0f 10 = movsd).
     // User rip is mapped in the current CR3; safe to read from kernel.
+    // Guard against NULL rip (e.g. jump to address 0) — reading from
+    // address 0 in kernel context would cause a second page fault.
     {
       uint8_t *rip_ptr = (uint8_t *)tf->rip;
       printk(LOG_ERROR, "  user RIP bytes:");
-      for (int i = 0; i < 16; i++) {
-        printk(LOG_ERROR, " %02X", rip_ptr[i]);
+      if (rip_ptr) {
+        for (int i = 0; i < 16; i++) {
+          printk(LOG_ERROR, " %02X", rip_ptr[i]);
+        }
+      } else {
+        printk(LOG_ERROR, " (NULL)");
       }
       printk(LOG_ERROR, "\n");
     }
@@ -420,7 +426,7 @@ static void timer_handler(trapframe_t *tf) {
 
   // Advance this CPU's RCU grace-period counter.  Without this, a CPU that
   // stays runnable in user mode (e.g. terminal flushing PTY output) never
-  // enters idle_entry and thus never calls rcu_read_unlock(); synchronize_rcu
+  // enters sched_idle_entry and thus never calls rcu_read_unlock(); synchronize_rcu
   // would spin forever waiting on cpu_gen[cpu].  IRQ context (IF=0) is a
   // quiescent state as long as we're not inside a read-side CS.
   rcu_quiescent();
@@ -457,7 +463,7 @@ static void timer_handler(trapframe_t *tf) {
       p->wait_deadline = 0;
       list_push_back(&wakeup_list, &p->wait_node);
     } else {
-      // Stale entry: process was woken but timer_queue_remove was skipped
+      // Stale entry: process was woken but sched_timer_queue_remove was skipped
       WARN_ON(1);
     }
   }
@@ -511,15 +517,15 @@ static void timer_handler(trapframe_t *tf) {
 #endif
 }
 
-void isr_init() {
+void irq_init() {
   // Initialize IRQ owner table
   for (int i = 0; i < MAX_IRQ_HANDLERS; i++) {
     irq_owner[i] = -1;
   }
 
   // Register default handlers
-  register_irq(LAPIC_TIMER_VECTOR, timer_handler);
-  register_irq(RESCHEDULE_VECTOR, reschedule_ipi_handler);
+  irq_register(LAPIC_TIMER_VECTOR, timer_handler);
+  irq_register(RESCHEDULE_VECTOR, reschedule_ipi_handler);
 
   // Re-initialize GDT with per-CPU setup (now running at virtual address)
   smp_init_cpu(0, 0, (int64_t)&stack_bottom + 8192);
@@ -535,7 +541,7 @@ void isr_init() {
     for (volatile int i = 0; i < 100000; i++)
       ; // brief delay
     uint32_t ccr2 = lapic_read(LAPIC_TIMER_CCR);
-    printk(LOG_INFO, "isr_init: BSP timer CCR %u->%u LVT=0x%x (counting=%s)\n",
+    printk(LOG_INFO, "irq_init: BSP timer CCR %u->%u LVT=0x%x (counting=%s)\n",
            ccr1, ccr2, lapic_read(LAPIC_LVT_TIMER),
            ccr1 != ccr2 ? "yes" : "NO!");
   }

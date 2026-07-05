@@ -28,7 +28,7 @@ __attribute__((no_sanitize("kernel-address"))) void xcore_init(boot_info *bi) {
 
   init_mem(bi);
   acpi_init(bi->rsdp);
-  isr_init();
+  irq_init();
 
   // Disable bump allocator
   bump_disable();
@@ -36,10 +36,10 @@ __attribute__((no_sanitize("kernel-address"))) void xcore_init(boot_info *bi) {
   kasan_init();
   slab_init();
 
-  // rcu_init();  // RCU is initialized lazily in proc_init
+  // rcu_init();  // RCU is initialized lazily in sched_init
 
   sig_init();  // allocate signal trampoline page (shared across all processes)
-  proc_init(); // initialize process table + cpu_locals
+  sched_init(); // initialize process table + cpu_locals
 
   smp_boot_aps();
 

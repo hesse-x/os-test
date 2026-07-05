@@ -19,11 +19,11 @@ extern fault_handler_fn fault_handler;
 typedef void (*reap_fn)(void);
 extern reap_fn reap_hook;
 
-// Per-process cleanup (called from task_reap)
+// Per-process cleanup (called from sched_task_reap)
 typedef void (*proc_reap_fn)(xtask_t *t);
 extern proc_reap_fn proc_reap_hook;
 
-// devtmpfs cleanup for a PID (called from task_reap / mm_release)
+// devtmpfs cleanup for a PID (called from sched_task_reap / mm_release)
 typedef void (*devtmpfs_cleanup_fn)(pid_t pid);
 extern devtmpfs_cleanup_fn devtmpfs_cleanup_hook;
 
@@ -46,7 +46,7 @@ extern timer_poll_fn timer_poll_hook;
 // trap entry and syscall dispatch entry
 void trap_dispatch(trapframe_t *tf);
 void xcall_dispatch(trapframe_t *tf);
-void isr_init(void);
+void irq_init(void);
 void sig_init(void);
 
 // Xcore IPC syscall function declarations
@@ -71,8 +71,8 @@ int64_t sys_gettid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 typedef void (*irq_handler_t)(trapframe_t *);
 typedef int64_t (*syscall_fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t,
                                 int64_t);
-void register_irq(int vec, irq_handler_t fn);
-void unregister_irq(int vec);
+void irq_register(int vec, irq_handler_t fn);
+void irq_unregister(int vec);
 int irq_owner_check(int irq);
 void irq_owner_cleanup(pid_t pid);
 int irq_has_handler(int irq);

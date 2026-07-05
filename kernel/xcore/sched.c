@@ -60,10 +60,10 @@ kmem_cache_t *xtask_cache = NULL; // xtask_t 专用 slab cache（动态化）
 // Caller must hold tasks_lock; on success the slot's pid is still -1
 // (caller sets it after allocating resources).
 //
-// reclaim_lazy_resources: 释放 task_reap 延迟处理的资源。
+// reclaim_lazy_resources: 释放 sched_task_reap 延迟处理的资源。
 //
 // 延迟释放清单（SMP 竞态防护）——这些资源在 schedule() 的切换路径中被引用，
-// task_reap 与 schedule() 无共享锁，立即释放会 UAF。留到 slot
+// sched_task_reap 与 schedule() 无共享锁，立即释放会 UAF。留到 slot
 // 复用时此处统一释放：
 //   - k_stack (2 pages)  : switch_to 汇编在子进程栈上执行 ret
 //   - fpu_page (1 page)  : fpu_context_switch 在 prev 分支 fxsave 该页
@@ -84,7 +84,7 @@ static void reclaim_lazy_resources(xtask_t *t) {
 }
 
 // init_xtask_defaults: 新 xtask_t 对象的默认字段初始化（零 + 非零默认值 +
-// 链表节点）。 集中此处供 xtask_alloc 复用，替代旧 proc_init 的逐槽位初始化。
+// 链表节点）。 集中此处供 xtask_alloc 复用，替代旧 sched_init 的逐槽位初始化。
 // 注意：不设 k_stack_top/fpu_page——它们由调用者在分配栈/FPU 页后设置，
 // slot 复用路径已由 reclaim_lazy_resources 清零。
 static void init_xtask_defaults(xtask_t *t) {
@@ -114,7 +114,7 @@ static void init_xtask_defaults(xtask_t *t) {
 // 调用者须持 tasks_lock。
 xtask_t *xtask_alloc(pid_t *out_pid) {
   if (!xtask_cache)
-    return NULL; // 未初始化（proc_init 前调用）
+    return NULL; // 未初始化（sched_init 前调用）
 
   // 从 next_pid 起环形扫描（ffz 语义），找第一个可复用槽
   for (int k = 0; k < MAX_PROC; k++) {
@@ -152,11 +152,11 @@ xtask_t *xtask_alloc(pid_t *out_pid) {
   return NULL; // 满了
 }
 
-void proc_init() {
+void sched_init() {
   // 动态化：创建 xtask_t 专用 slab cache，指针数组初始化为 NULL
   xtask_cache = kmem_cache_create("xtask", sizeof(xtask_t));
   if (!xtask_cache) {
-    panic("proc_init: kmem_cache_create(xtask) failed\n");
+    panic("sched_init: kmem_cache_create(xtask) failed\n");
   }
   for (int i = 0; i < MAX_PROC; i++) {
     tasks[i] = NULL;
@@ -183,11 +183,11 @@ typedef struct switch_frame_t {
 _Static_assert(sizeof(switch_frame_t) == 56,
                "switch_frame size must be 56 (7 × uint64_t)");
 
-uint64_t build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
-  return build_kstack_user_rsp(k_stack_top, entry_rip, 0x00007FFFFFFFE000ULL);
+uint64_t sched_build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
+  return sched_build_kstack_user_rsp(k_stack_top, entry_rip, 0x00007FFFFFFFE000ULL);
 }
 
-uint64_t build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
+uint64_t sched_build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
                                uint64_t user_rsp) {
   trapframe_t tf = {0};
   tf.ss = 0x23; // USER_DS
@@ -218,10 +218,10 @@ uint64_t build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
 }
 
 // Build idle kernel stack: only switch_frame (no trapframe), ret_addr =
-// idle_entry
+// sched_idle_entry
 static uint64_t build_idle_kstack(uint64_t k_stack_top) {
   switch_frame_t sf = {0};
-  sf.ret_addr = (uint64_t)idle_entry;
+  sf.ret_addr = (uint64_t)sched_idle_entry;
 
   uint8_t *sp = (uint8_t *)k_stack_top;
   sp -= sizeof(switch_frame_t);
@@ -231,13 +231,13 @@ static uint64_t build_idle_kstack(uint64_t k_stack_top) {
 }
 
 // Create idle process for the specified CPU
-xtask_t *create_idle_process(int cpu_id) {
+xtask_t *sched_create_idle_process(int cpu_id) {
   spin_lock(&tasks_lock);
   pid_t alloc_idx = -1;
   xtask_t *proc = xtask_alloc(&alloc_idx);
   if (!proc) {
     spin_unlock(&tasks_lock);
-    printk(LOG_ERROR, "create_idle_process: no free slot\n");
+    printk(LOG_ERROR, "sched_create_idle_process: no free slot\n");
     return NULL;
   }
 
@@ -245,7 +245,7 @@ xtask_t *create_idle_process(int cpu_id) {
   Page *stack_pages = bfc_alloc_page(2);
   if (!stack_pages) {
     spin_unlock(&tasks_lock);
-    printk(LOG_ERROR, "create_idle_process: alloc stack failed\n");
+    printk(LOG_ERROR, "sched_create_idle_process: alloc stack failed\n");
     return NULL;
   }
   uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
@@ -263,7 +263,7 @@ xtask_t *create_idle_process(int cpu_id) {
   proc->k_stack_top = k_stack_top;
   proc->cr3 = (__force uint64_t)PHY_ADDR(
       (uintptr_t)pml4); // kernel PML4 physical address (cached)
-  proc->entry = (uint64_t)idle_entry;
+  proc->entry = (uint64_t)sched_idle_entry;
   proc->wait_event = WAIT_NONE;
   proc->tgid = proc->pid;
   proc->mm = NULL; // idle has no address space
@@ -282,7 +282,7 @@ xtask_t *create_idle_process(int cpu_id) {
   return proc;
 }
 
-__attribute__((no_sanitize("kernel-address"))) void idle_entry() {
+__attribute__((no_sanitize("kernel-address"))) void sched_idle_entry() {
   sti();
   while (1) {
     // Idle is a quiescent state — report RCU quiescence so
@@ -295,7 +295,7 @@ __attribute__((no_sanitize("kernel-address"))) void idle_entry() {
       reap_hook();
 
     // Work stealing:本 CPU idle 时尝试从最繁忙 CPU 偷一个任务
-    try_steal_task();
+    sched_try_steal_task();
 
     schedule();
     sti();
@@ -303,10 +303,10 @@ __attribute__((no_sanitize("kernel-address"))) void idle_entry() {
   }
 }
 
-// pick_cpu_pref:选最空 CPU,可选偏好 CPU(亲和性)
+// sched_pick_cpu_pref:选最空 CPU,可选偏好 CPU(亲和性)
 // pref_cpu < 0 表示无偏好;否则偏好 CPU 负载与最小值差距 <= AFFINITY_THRESHOLD
 // 时选偏好 CPU
-int pick_cpu_pref(int pref_cpu) {
+int sched_pick_cpu_pref(int pref_cpu) {
   int best = 0;
   int min = __atomic_load_n(&cpu_locals[0].run_count, __ATOMIC_RELAXED);
   for (int i = 1; i < ncpu; i++) {
@@ -326,13 +326,13 @@ int pick_cpu_pref(int pref_cpu) {
 }
 
 // Pick the CPU with the fewest runnable processes
-int pick_cpu(void) { return pick_cpu_pref(-1); }
+int sched_pick_cpu(void) { return sched_pick_cpu_pref(-1); }
 
-// try_steal_task:本 CPU idle 时从最繁忙 CPU 的 run_queue 尾部偷一个任务。
+// sched_try_steal_task:本 CPU idle 时从最繁忙 CPU 的 run_queue 尾部偷一个任务。
 // 偷取者持自己 CPU 的 scheduler_lock(防本 CPU 中断并发写 run_queue),用 trylock
 // 抢目标 CPU 锁,失败即放弃(机会主义,绝不阻塞)。偷到则更新 assigned_cpu =
 // my_cpu。
-void try_steal_task(void) {
+void sched_try_steal_task(void) {
   int my_cpu = get_cpu_local()->cpu_id;
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
@@ -397,8 +397,8 @@ static void update_tss_iopm(xtask_t *proc) {
 // FPU 状态。 不设 CR0.TS，用户态 SSE 指令直接执行不触发 #NM。idle 进程
 // fpu_page=NULL，自动跳过。
 //
-// UAF 防御：fpu_page 的释放是延迟的（见 task_reap 资源清单），但若有人错误地在
-// task_reap 立即释放，schedule() 此处会 UAF。ASSERT page->status == PAGE_USED
+// UAF 防御：fpu_page 的释放是延迟的（见 sched_task_reap 资源清单），但若有人错误地在
+// sched_task_reap 立即释放，schedule() 此处会 UAF。ASSERT page->status == PAGE_USED
 // 可在 DEBUG 构建下立即捕获——bfc_free_page 释放后 status 变 PAGE_FREE，fxsave
 // 前暴露。
 void fpu_context_switch(xtask_t *prev, xtask_t *next) {
@@ -549,7 +549,7 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
 // ===================== Timer queue operations =====================
 // Must be called under scheduler_lock of the target CPU
 
-void timer_queue_insert(int cpu, xtask_t *proc) {
+void sched_timer_queue_insert(int cpu, xtask_t *proc) {
   // Remove from any existing list first to prevent duplicate insertion.
   // Skip if wait_node is self-referencing (never inserted into a list).
   if (!list_empty(&proc->wait_node))
@@ -570,9 +570,9 @@ void timer_queue_insert(int cpu, xtask_t *proc) {
   node->prev = &proc->wait_node;
 }
 
-void timer_queue_remove(xtask_t *proc) { list_remove(&proc->wait_node); }
+void sched_timer_queue_remove(xtask_t *proc) { list_remove(&proc->wait_node); }
 
-// task_reap: reclaim all resources of a process
+// sched_task_reap: reclaim all resources of a process
 // Called by sys_exit (no-parent path) or sys_waitpid
 //
 // 资源释放清单（注意 SMP 竞态）：
@@ -586,10 +586,10 @@ void timer_queue_remove(xtask_t *proc) { list_remove(&proc->wait_node); }
 //   由 BSD 层释放（proc_reap_hook）:
 //     - fds/signal/proc_t
 //
-// 立即释放 lazy 类资源会与 schedule() 竞态 UAF（task_reap 与 schedule()
+// 立即释放 lazy 类资源会与 schedule() 竞态 UAF（sched_task_reap 与 schedule()
 // 无共享锁）。 新增同类资源请归入对应类别，lazy 类资源统一在 xtask_alloc 的
 // reclaim_lazy_resources 释放。
-void task_reap(xtask_t *proc) {
+void sched_task_reap(xtask_t *proc) {
   ASSERT(proc->state == ZOMBIE || proc->state == REAPING);
 
   // 1. Free IOPM bitmap (immediate)

@@ -251,7 +251,7 @@ __attribute__((no_sanitize("kernel-address"))) void enable_sse() {
 
 // ===================== per-CPU capability logging =====================
 // 打印 CR0/CR4/EFER 摘要 + 关键 bit
-// 解读（TS/PE/MP/EM、OSFXSR/OSXMMEXCPT/NXDE、NXE/SCE）。 在 BSP（isr_init）和
+// 解读（TS/PE/MP/EM、OSFXSR/OSXMMEXCPT/NXDE、NXE/SCE）。 在 BSP（irq_init）和
 // AP（cpu_bringup_common）的 bringup 末尾各调一次。 出 "必备 bit 缺失" 类 bug
 // 时（如本次 AP 缺 CR4.OSFXSR 导致 #UD），一眼可见。
 void log_cpu_caps(const char *tag) {

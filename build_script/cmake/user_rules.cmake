@@ -272,9 +272,15 @@ function(add_user_dyn_elf name)
             set(src_full ${CMAKE_CURRENT_SOURCE_DIR}/${src})
         endif()
         set(src_obj ${ELF_FILE}.${idx}.o)
+        if(ARG_C)
+            set(DEP_LANG "C")
+        else()
+            set(DEP_LANG "CXX")
+        endif()
         add_custom_command(OUTPUT ${src_obj}
             COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS} -c ${src_full} -o ${src_obj}
-            DEPENDS ${src_full})
+            DEPENDS ${src_full}
+            IMPLICIT_DEPENDS ${DEP_LANG} ${src_full})
         list(APPEND OBJ_FILES ${src_obj})
         math(EXPR idx "${idx} + 1")
     endforeach()

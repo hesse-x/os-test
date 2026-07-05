@@ -205,12 +205,12 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   kfree(argv_str_vaddrs);
 
   // 6. Build trapframe + switch_to frame on kernel stack
-  uint64_t k_rsp = build_kstack_user_rsp(k_stack_top, lr.entry, user_sp);
+  uint64_t k_rsp = sched_build_kstack_user_rsp(k_stack_top, lr.entry, user_sp);
 
   // 7. Fill PCB (still under tasks_lock)
   // 顺序约束:assigned_cpu 必须先于 pid 赋值(wake 路径在锁前无锁读 assigned_cpu,
   // 防 pid 生效后 assigned_cpu 仍是 -1 导致 cpu_locals[-1] 越界)
-  int assigned_cpu = pick_cpu();
+  int assigned_cpu = sched_pick_cpu();
   proc->assigned_cpu = assigned_cpu;
   proc->pid = alloc_idx;
   proc->state = READY;
@@ -266,7 +266,7 @@ xtask_t *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   // TOCTOU 重检:入队期间目标 CPU 已被塞满则重新选 CPU
   if (__atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) >
       RECHECK_THRESHOLD) {
-    int new_cpu = pick_cpu();
+    int new_cpu = sched_pick_cpu();
     if (new_cpu != cpu) {
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
       proc->assigned_cpu = new_cpu; // 此时尚未入队,改字段安全

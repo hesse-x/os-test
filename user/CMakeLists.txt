@@ -19,6 +19,7 @@ set(LIBC_SOURCES
     lib/init_array.c
     lib/environ.c
     lib/errno.cc
+    lib/select.c
     lib/setjmp.S
     ${CMAKE_SOURCE_DIR}/common/kvformat.c
 )

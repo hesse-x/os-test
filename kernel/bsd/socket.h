@@ -97,10 +97,10 @@ int unix_bind_register(const char *sun_path, struct unix_sock *sock,
                        pid_t owner_pid);
 void unix_bind_unregister(struct unix_sock *sock);
 
-int64_t sock_sendmsg_internal(struct unix_sock *sock, const struct iovec *iov,
+int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
                               size_t iovlen, const void *control,
                               size_t controllen, int flags);
-int64_t sock_recvmsg_internal(struct unix_sock *sock, const struct iovec *iov,
+int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
                               size_t iovlen, void *control, size_t *controllen,
                               int flags);
 
@@ -126,12 +126,12 @@ int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t,
 int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t,
                  int64_t);
 
-// Internal helpers for sock_write/sock_read
-int64_t sock_write(struct unix_sock *sock, const void *buf, size_t len);
-int64_t sock_read(struct unix_sock *sock, void *buf, size_t len);
-void sock_wake_reader(struct unix_sock *sock);
-void sock_wake_writer(struct unix_sock *sock);
-void sock_close(struct unix_sock *sock);
+// Internal helpers for unix_sock_write/unix_sock_read
+int64_t unix_sock_write(struct unix_sock *sock, const void *buf, size_t len);
+int64_t unix_sock_read(struct unix_sock *sock, void *buf, size_t len);
+void unix_sock_wake_reader(struct unix_sock *sock);
+void unix_sock_wake_writer(struct unix_sock *sock);
+void unix_sock_close(struct unix_sock *sock);
 
 // Forward declaration from trap.c
 void wake_process(pid_t pid);

@@ -46,7 +46,7 @@ static inline void rcu_read_unlock(void) {
 // Report a quiescent state from a CPU that is NOT in an RCU read-side
 // critical section.  Used by timer_handler to advance grace periods on
 // CPUs that stay runnable in user mode and would otherwise never pass
-// through idle_entry's rcu_read_unlock().  If the CPU is inside a
+// through sched_idle_entry's rcu_read_unlock().  If the CPU is inside a
 // read-side CS (nesting > 0), this is a no-op — the in-flight
 // rcu_read_unlock() will publish the quiescence when the CS ends.
 //

@@ -80,14 +80,14 @@ typedef struct file_t_io_resp {
 // ===================== BSD syscall: exit =====================
 // Key safety: all proc_t/signal reads happen BEFORE setting ZOMBIE (stored in
 // locals). After ZOMBIE, do_exit only uses locals + xtask_t array fields —
-// never proc->proc or sig, which may be kfree'd by concurrent task_reap on
-// another CPU. do_exit does NOT do mm_put/files_put/signal_put — task_reap/
+// never proc->proc or sig, which may be kfree'd by concurrent sched_task_reap on
+// another CPU. do_exit does NOT do mm_put/files_put/signal_put — sched_task_reap/
 // proc_reap owns all resource freeing (original design; 3b will revisit).
 // ===================== BSD syscall: exit =====================
 // Key safety: all proc_t/signal reads happen BEFORE setting ZOMBIE (stored in
 // locals). After ZOMBIE, do_exit only uses locals + xtask_t array fields —
-// never proc->proc or sig, which may be kfree'd by concurrent task_reap on
-// another CPU. do_exit does NOT do mm_put/files_put/signal_put — task_reap/
+// never proc->proc or sig, which may be kfree'd by concurrent sched_task_reap on
+// another CPU. do_exit does NOT do mm_put/files_put/signal_put — sched_task_reap/
 // proc_reap owns all resource freeing (original design; 3b will revisit).
 //
 // D13：exit_code 按 Linux wait status 编码存储。本函数接收**已编码**的
@@ -125,7 +125,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   }
 
   // 4. clear_tid_addr: 写 0 + futex_wake（pthread_join 依赖此唤醒）
-  //    BEFORE ZOMBIE — proc_t is alive, no concurrent task_reap possible.
+  //    BEFORE ZOMBIE — proc_t is alive, no concurrent sched_task_reap possible.
   if (proc->proc->clear_tid_addr) {
     // 不变量：clear 前 *clear_tid_addr 必须是本线程 tid（由 CLONE_CHILD_SETTID
     // 在子线程被调度前写入）。若为 0，说明父线程 clone 返回后还没来得及让
@@ -149,7 +149,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   int notify_parent = atomic_dec_and_test(&sig->thread_count);
 
   // 6. 设 ZOMBIE
-  //    GATE: after this, task_reap/proc_reap on another CPU may kfree proc_t
+  //    GATE: after this, sched_task_reap/proc_reap on another CPU may kfree proc_t
   //    and signal_put signal_struct. Do NOT dereference proc->proc or sig.
   int cpu = proc->assigned_cpu;
   uint64_t flags;
@@ -193,7 +193,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   }
 
   // 9. schedule() — never returns.
-  //    do_exit does NOT do mm_put/files_put/signal_put — task_reap/proc_reap
+  //    do_exit does NOT do mm_put/files_put/signal_put — sched_task_reap/proc_reap
   //    owns all freeing. 3b will revisit do_exit ownership with proper
   //    proc_t lifetime (RCU or per-task reap lock).
   schedule();
@@ -229,7 +229,7 @@ int64_t sys_exit_group(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
       uint64_t tflags;
       spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &tflags);
       if (tasks[i]->state == BLOCKED) {
-        timer_queue_cancel(tasks[i]);
+        sched_timer_queue_cancel(tasks[i]);
         tasks[i]->state = READY;
         tasks[i]->wait_event = WAIT_NONE;
         tasks[i]->wait_timed_out = 0;
@@ -288,7 +288,7 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
               (ptr_val + sizeof(int32_t) - 1) < 0xFFFFFFFF80000000ULL)
             *(__force int32_t *)exit_code_ptr = zombie->exit_code;
         }
-        task_reap(zombie);
+        sched_task_reap(zombie);
         return (int64_t)zpid;
       }
       spin_unlock(&tasks_lock);
@@ -429,7 +429,7 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
     }
     *(__force int32_t *)exit_code_ptr = child->exit_code;
   }
-  task_reap(child);
+  sched_task_reap(child);
   return (int64_t)pid;
 }
 
@@ -921,7 +921,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   // FD_REGULAR: kernel FAT32 via page cache
   if (f->type == FD_REGULAR) {
     if (!(f->flags & (O_WRONLY | O_RDWR))) {
-      ret = -EINVAL;
+      ret = -EBADF;
       goto out;
     }
     struct inode *ip = f->inode;
@@ -1039,7 +1039,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       ret = -EBADF;
       goto out;
     }
-    ret = sock_write(sock, (const void __force *)buf, len);
+    ret = unix_sock_write(sock, (const void __force *)buf, len);
     goto out;
   }
 
@@ -1140,7 +1140,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
         int cpu = proc->assigned_cpu;
         uint64_t flags;
         spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
-        timer_queue_insert(cpu, proc);
+        sched_timer_queue_insert(cpu, proc);
         spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
       }
       schedule();
@@ -1208,7 +1208,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   // FD_REGULAR: kernel FAT32 via page cache
   if (f->type == FD_REGULAR) {
     if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR)) {
-      ret = -EINVAL;
+      ret = -EBADF;
       goto out;
     }
     struct inode *ip = f->inode;
@@ -1340,7 +1340,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       ret = -EBADF;
       goto out;
     }
-    ret = sock_read(sock, (void __force *)buf, len);
+    ret = unix_sock_read(sock, (void __force *)buf, len);
     goto out;
   }
 
@@ -1442,7 +1442,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       int cpu = proc->assigned_cpu;
       uint64_t flags;
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
-      timer_queue_insert(cpu, proc);
+      sched_timer_queue_insert(cpu, proc);
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
     }
     schedule();
@@ -1782,7 +1782,7 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     int cpu = proc->assigned_cpu;
     uint64_t flags2;
     spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
-    timer_queue_insert(cpu, proc);
+    sched_timer_queue_insert(cpu, proc);
     spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
 
     file_put(f);

@@ -86,7 +86,7 @@ void smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack);
 void smp_apply_cpu(int cpu_id);
 
 // Shared per-CPU bringup (GDT apply, NX/SSE, PAT, IDT, syscall MSRs, caps log).
-// Called by isr_init (BSP, cpu_id=0) and ap_entry_c (APs) after smp_init_cpu.
+// Called by irq_init (BSP, cpu_id=0) and ap_entry_c (APs) after smp_init_cpu.
 // apic_init is NOT included: BSP does global APIC init, APs do per-CPU LAPIC
 // enable.
 void cpu_bringup_common(int cpu_id);

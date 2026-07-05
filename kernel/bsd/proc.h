@@ -66,7 +66,7 @@ proc_t *proc_create(void);  // calls xtask_alloc + kmalloc proc + bidirectional
                             // binding + files_create
 void proc_free(proc_t *bp); // files_put + xtask_free + kfree
 void proc_reap(xtask_t *proc); // POSIX cleanup: close fds, free proc (called
-                               // from task_reap)
+                               // from sched_task_reap)
 void proc_reap_idle(void);     // idle hook: scan for orphaned zombies
 
 // Process creation (kernel/bsd/proc_create.c)
