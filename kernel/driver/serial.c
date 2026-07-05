@@ -8,7 +8,7 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
-#include "common/kvformat.h"
+#include "utils/kvformat.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/driver/bsd_types.h"
 #include "kernel/xcore/log.h"

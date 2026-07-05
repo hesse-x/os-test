@@ -5,7 +5,7 @@
  */
 
 // Keyboard driver (user-space): evdev-style input protocol.
-// on_key_event reads HID reports via get_keycode() and fills input_event_t.
+// on_key_event reads HID reports via get_keycode() and fills input_event.
 #include "input.h"
 #include "syscall.h"
 #include "usb_hid.h"
@@ -17,7 +17,7 @@
 // on_key_event: each callback fills one event, returns 1=has event / 0=HID
 // empty. Library loops calling this and writes each event to all consumer rings
 // + notify.
-static int on_key_event(input_event_t *ev) {
+static int on_key_event(input_event *ev) {
   struct key_event ke;
   if (get_keycode(&ke) != 0)
     return 0; // HID ring empty

@@ -14,7 +14,7 @@
 #   user/include/sys/*.h → $DEST/sys/
 #
 # What is NOT published (deliberately):
-#   common/              — non-UAPI shared implementation:
+#   utils/             — non-UAPI shared implementation:
 #                            macro.h        (generic ALIGN_* macros, also used by kernel)
 #                            kvformat.*     (shared printf formatting impl, compiled into both)
 #   boot/boot.h          — EFI stub ↔ kernel internal contract (not a user ABI)

@@ -86,12 +86,12 @@ typedef struct xtask {
 
   // === threading support (appended at end, preserves existing offsets) ===
   uint64_t fs_base; // TLS base (FS_BASE MSR mirror), loaded by __trapret
-  Page *fpu_page; // fxsave area page (创建时预分配：xcore_fpu_alloc 在
-                  // process_create_elf/sys_fork 时调用 bfc_alloc_page(1))。
-                  // Stores Page* (NOT data pointer) — use
-                  // page_to_phys/phys_to_virt to obtain the fxsave area virtual
-                  // address. Type prevents feeding a Page* to fxsave/fxrstor by
-                  // accident. NULL = idle (无 FPU 状态)。
+  Page *fpu_page; // fxsave area page (pre-allocated at creation time:
+                  // xcore_fpu_alloc calls bfc_alloc_page(1) during
+                  // process_create_elf/sys_fork).  Stores Page* (NOT data
+                  // pointer) — use page_to_phys/phys_to_virt to obtain the
+                  // fxsave area virtual address. Type prevents feeding a Page*
+                  // to fxsave/fxrstor by accident. NULL = idle (no FPU state).
 
   // === exit code (valid when state == ZOMBIE) ===
   // Lives in xtask (static array, slot lifetime by tasks_lock) not proc
@@ -99,7 +99,7 @@ typedef struct xtask {
   int32_t exit_code;
 
   // === thread cleanup ownership (set by clone, read by sched_task_reap) ===
-  int detached;             // 1 = sched_task_reap owns tls/stack unmap
+  int detached;             // 1 = sched_task_reap owns TLS/stack unmap
   uint64_t tls_page;        // user vaddr of TLS+TCB page (0 if N/A)
   size_t tls_total;         // size of TLS+TCB mapping
   uint64_t user_stack_base; // user vaddr of stack base (incl guard)
@@ -124,23 +124,27 @@ STATIC_ASSERT(offsetof(xtask, cr3) == 24, "xtask.cr3 offset must be 24");
 // without hardcoding the constant (struct layout may drift).
 extern const uint64_t xtask_fs_base_offset;
 
-// ===================== Process table: 指针数组（动态化）=====================
-// tasks[i] 指向动态分配的 xtask（来自 xtask_cache 专用 slab），NULL = 空槽。
-// 保留 pid == 数组下标 语义（112+ 处 tasks[pid]->field 不破坏）。slot 复用：
-// REAPING 槽在 xtask_alloc 内 kmem_cache_free 后重新 alloc，NULL 槽直接 alloc。
-// pid 分配：递增 next_pid + 环形复用（避免 exit 后 pid 立即复用致 waitpid
-// 陈旧）。
+// ===================== Process table: pointer array (dynamic) =====================
+// tasks[i] points to dynamically allocated xtask (from xtask_cache slab),
+// NULL = empty slot.  Retains pid == array-index semantics (112+ instances
+// of tasks[pid]->field unchanged).  Slot reuse:
+//   REAPING slot: kmem_cache_free then re-alloc via xtask_alloc
+//   NULL slot: alloc directly
+// pid allocation: incrementing next_pid + circular reuse (avoids immediate
+// pid reuse after exit causing stale waitpid).
 extern xtask *tasks[MAX_PROC];
 extern spinlock tasks_lock;
 extern pid_t next_pid;
 extern pid_t init_pid;
 
-// task_get: pid → xtask* 的统一访问 helper。
-// debug：校验 pid 合法且槽非空（编码"无锁读语义"约束），不合格 panic 定位。
-// release：裸指针零开销（呼应 CLAUDE.md debug/release 双模式）。
-// 用法：原 tasks[pid].field → task_get(pid)->field；
-//       原 &tasks[pid]（赋值 xtask*）→ task_get(pid)；
-//       原 &tasks[pid].run_node（取字段地址）→ &task_get(pid)->run_node。
+// task_get: pid -> xtask* unified access helper.
+// debug: validates pid is valid and slot non-NULL (encodes lock-free-read
+// semantics constraint); panics with location on failure.
+// release: bare pointer, zero overhead (mirrors CLAUDE.md debug/release
+// dual mode).
+// Usage: tasks[pid].field -> task_get(pid)->field;
+//        &tasks[pid] (assign xtask*) -> task_get(pid);
+//        &tasks[pid].run_node (field addr) -> &task_get(pid)->run_node.
 static inline xtask *task_get(pid_t pid) {
 #ifndef NDEBUG
   ASSERT(pid >= 0 && pid < MAX_PROC);
@@ -149,8 +153,9 @@ static inline xtask *task_get(pid_t pid) {
   return tasks[pid];
 }
 
-// 防盲目调大 MAX_PROC：指针数组常驻 8KB（1024*8），超过 4096 会滑向"动态扩容"
-// 的 RCU 复杂度（见方案"不做的事"）。需要更大容量应走 pidhash 路线（路线 B）。
+// Prevent blindly increasing MAX_PROC: pointer array is 8KB (1024*8);
+// exceeding 4096 would require RCU-complex dynamic expansion (see "won't do").
+// Larger capacity should follow the pidhash route (route B).
 _Static_assert(MAX_PROC <= 4096, "MAX_PROC too large — consider pidhash route");
 
 #endif // KERNEL_XCORE_XTASK_H

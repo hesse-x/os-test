@@ -15,7 +15,7 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "kernel/bsd/elf_loader.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/signal.h"
@@ -111,9 +111,10 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     }
   }
 
-// === argc/argv/envp/auxv 栈构建（标准 SysV ABI） ===
-// 内核直接创建的 init 进程没有 execve 路径，注入 argv[0]="/init"。
-// 栈是连续物理内存，用户态地址 [stack_base, USER_STACK_TOP) 映射连续。
+// === argc/argv/envp/auxv stack construction (standard SysV ABI) ===
+// The init process created directly by the kernel has no execve path; inject
+// argv[0]="/init". The stack is contiguous physical memory; user-space
+// addresses [stack_base, USER_STACK_TOP) are contiguously mapped.
 #define ARG_MAX 128
   char(*argv_strings)[256] = (char(*)[256])kmalloc(sizeof(char[ARG_MAX][256]));
   uint64_t *argv_str_vaddrs = (uint64_t *)kmalloc(sizeof(uint64_t) * ARG_MAX);
@@ -132,7 +133,7 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   argv_strings[0][sizeof(init_path) - 1] = '\0';
   int envc = 0;
 
-// STACK_KV: sp_user 用户态地址 → 内核虚拟地址
+// STACK_KV: sp_user user-space address -> kernel virtual address
 #define STACK_KV(sp_user)                                                      \
   ((void *)((__force uint64_t)phys_to_virt((__force phys_addr_t)(              \
       user_stack_phys + (uint64_t)user_stack_pages * PAGE_SIZE -               \
@@ -140,7 +141,7 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
 
   uint64_t sp_user = USER_STACK_TOP;
 
-  // 1. AT_RANDOM 16 字节（填 0）
+  // 1. AT_RANDOM 16 bytes (zero-filled)
   sp_user -= 16;
   __memset(STACK_KV(sp_user), 0, 16);
   uint64_t at_random_vaddr = sp_user;
@@ -151,7 +152,7 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   __memcpy(STACK_KV(sp_user), init_path, execfn_len + 1);
   uint64_t at_execfn_vaddr = sp_user;
 
-  // 3. argv 字符串
+  // 3. argv strings
   for (int i = argc - 1; i >= 0; i--) {
     int len = 0;
     while (argv_strings[i][len])
@@ -161,11 +162,11 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     argv_str_vaddrs[i] = sp_user;
   }
 
-  // 4. 16 字节对齐
+  // 4. 16-byte alignment
   while ((sp_user % 16) != 0)
     sp_user--;
 
-  // 5. auxv（6 对 + AT_NULL）
+  // 5. auxv (6 pairs + AT_NULL)
   int auxc = 6;
   sp_user -= (auxc + 1) * 16;
   uint64_t *auxv = (uint64_t *)STACK_KV(sp_user);
@@ -187,12 +188,12 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   auxv[ai++] = AT_NULL;
   auxv[ai++] = 0;
 
-  // 6. envp 指针数组 + NULL
+  // 6. envp pointer array + NULL
   sp_user -= (envc + 1) * 8;
   uint64_t *envp_arr = (uint64_t *)STACK_KV(sp_user);
   envp_arr[envc] = 0;
 
-  // 7. argv 指针数组 + NULL
+  // 7. argv pointer array + NULL
   sp_user -= (argc + 1) * 8;
   uint64_t *argv_arr = (uint64_t *)STACK_KV(sp_user);
   argv_arr[argc] = 0;
@@ -214,8 +215,9 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   uint64_t k_rsp = sched_build_kstack_user_rsp(k_stack_top, lr.entry, user_sp);
 
   // 7. Fill PCB (still under tasks_lock)
-  // 顺序约束:assigned_cpu 必须先于 pid 赋值(wake 路径在锁前无锁读 assigned_cpu,
-  // 防 pid 生效后 assigned_cpu 仍是 -1 导致 cpu_locals[-1] 越界)
+  // Ordering constraint: assigned_cpu must be set before pid (the wake path
+  // reads assigned_cpu locklessly before taking the lock, prevent
+  // cpu_locals[-1] OOB if pid takes effect while assigned_cpu is still -1)
   int assigned_cpu = sched_pick_cpu();
   proc->assigned_cpu = assigned_cpu;
   proc->pid = alloc_idx;
@@ -269,13 +271,14 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   int cpu = proc->assigned_cpu;
   uint64_t rflags;
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
-  // TOCTOU 重检:入队期间目标 CPU 已被塞满则重新选 CPU
+  // TOCTOU recheck: if the target CPU has been filled past the threshold
+  // during enqueue, re-pick a CPU
   if (__atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) >
       RECHECK_THRESHOLD) {
     int new_cpu = sched_pick_cpu();
     if (new_cpu != cpu) {
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
-      proc->assigned_cpu = new_cpu; // 此时尚未入队,改字段安全
+      proc->assigned_cpu = new_cpu; // not yet enqueued, safe to mutate field
       cpu = new_cpu;
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
     }
@@ -308,10 +311,11 @@ fail_stack:
   }
   // fall through to slot cleanup
 fail_slot:
-  // 动态化：slot 由 xtask_alloc 从 xtask_cache 分配，失败须回收到 cache
-  // 防 leak。槽位从未发布（pid 仍 -1、未入任何队列），无 schedule() 引用，
-  // 此处直接 free 安全。注意 k_stack/fpu_page 已在 fail_stack 释放，
-  // 对象本身无 lazy 资源残留。
+  // Dynamic: the slot is allocated by xtask_alloc from xtask_cache; on
+  // failure it must be returned to the cache to prevent leaks. The slot was
+  // never published (pid still -1, not on any queue), no schedule() references
+  // it, so freeing here is safe. Note k_stack/fpu_page were already freed in
+  // fail_stack; the object itself has no lazy resource remnants.
   tasks[alloc_idx] = NULL;
   kmem_cache_free(xtask_cache, proc);
   spin_unlock(&tasks_lock);

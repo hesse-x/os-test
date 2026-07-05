@@ -16,12 +16,12 @@ extern "C" {
 
 #define SIG_ERR ((void (*)(int)) - 1)
 
-/* sigprocmask how 参数（与内核 SIG_BLOCK/UNBLOCK/SETMASK 一致） */
+/* sigprocmask how argument (matches kernel SIG_BLOCK/UNBLOCK/SETMASK) */
 #define SIG_BLOCK 0
 #define SIG_UNBLOCK 1
 #define SIG_SETMASK 2
 
-/* sigset_t 位运算（sigset_t = uint64_t，64 信号） */
+/* sigset_t bit operations (sigset_t = uint64_t, 64 signals) */
 #define sigemptyset(s) (*(s) = (sigset_t)0)
 #define sigfillset(s) (*(s) = (sigset_t) ~(uint64_t)0)
 #define sigaddset(s, n) (*(s) |= (sigset_t)1 << (n))

@@ -59,12 +59,12 @@ typedef struct Elf64_Phdr {
   uint64_t p_align;
 } Elf64_Phdr;
 
-// 重定位类型（x86-64 PIC 全集 + 主 ELF COPY，plan_ld2b3 T20 / 阶段 5 补丁）
+// Relocation types (x86-64 PIC full set + main ELF COPY, plan_ld2b3 T20 / phase 5 patch)
 #define R_X86_64_64 1
 #define R_X86_64_PC32 2
 #define R_X86_64_PLT32 4
 #define R_X86_64_COPY                                                          \
-  5 // 仅非 PIE 主 ELF 引用 libc.so 可写全局（errno/stdout 等）
+  5 // Only non-PIE main ELF references writable globals from libc.so (errno/stdout etc.)
 #define R_X86_64_GLOB_DAT 6
 #define R_X86_64_JUMP_SLOT 7
 #define R_X86_64_RELATIVE 8
@@ -72,7 +72,7 @@ typedef struct Elf64_Phdr {
 #define R_X86_64_32 10
 #define R_X86_64_32S 11
 
-// .dynamic 标签（plan_ld2b3 T20）
+// .dynamic tags (plan_ld2b3 T20)
 #define DT_NULL 0
 #define DT_NEEDED 1
 #define DT_STRTAB 5
@@ -83,11 +83,11 @@ typedef struct Elf64_Phdr {
 #define DT_PLTRELSZ 2
 #define DT_GNU_HASH 0x6ffffef5
 
-// ELF64 重定位宏
+// ELF64 relocation macros
 #define ELF64_R_TYPE(info) ((info) & 0xffffffff)
 #define ELF64_R_SYM(info) ((info) >> 32)
 
-// ELF 符号表项
+// ELF symbol table entry
 typedef struct {
   uint32_t st_name;
   uint8_t st_info;

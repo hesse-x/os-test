@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-LIBC_EXPORT int pci_dev_info(uint8_t bus, uint8_t dev, uint8_t func,
+LIBC_EXPORT int pci_dev_info_get(uint8_t bus, uint8_t dev, uint8_t func,
                              struct pci_dev_info *out);
 
 #ifdef __cplusplus

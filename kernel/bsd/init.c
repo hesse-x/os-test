@@ -47,7 +47,7 @@ void bsd_init(void) {
   vfs_init();
   printk(LOG_INFO, "bsd_init: vfs_init done\n");
 
-  // futex_table 初始化（64 bucket + lock）
+  // futex_table initialization (64 buckets + locks)
   for (int i = 0; i < FUTEX_HASH_SIZE; i++) {
     list_init(&futex_table[i].waiters);
     futex_table[i].lock = SPINLOCK_INIT;

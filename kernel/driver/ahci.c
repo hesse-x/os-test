@@ -397,7 +397,7 @@ static void ahci_irq_handler(trapframe_t *tf) {
   ahci_current_req->result = error ? EIO : 0;
 
   // Build RECV_NOTIFY completion message
-  recv_msg_t msg;
+  recv_msg msg;
   msg.type = RECV_NOTIFY;
   msg.src = 0; // kernel disk completion
   __memset(msg.data, 0, 56);
@@ -923,7 +923,7 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
       req->result = error ? EIO : 0;
 
       // Build notification message
-      recv_msg_t msg;
+      recv_msg msg;
       msg.type = RECV_NOTIFY;
       msg.src = 0;
       __memset(msg.data, 0, 56);

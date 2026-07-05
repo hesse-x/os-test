@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "common/kvformat.h"
+#include "utils/kvformat.h"
 #include <stdint.h>
 
 /* Helper: emit unsigned integer in given base */

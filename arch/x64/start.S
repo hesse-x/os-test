@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-# start.S - 内核入口（仅 x64）
-# _start: 物理地址运行 → enable_paging → gdt_init → ljmp → _entry64 虚拟地址继续
+# start.S - kernel entry point (x64 only)
+# _start: physical address execution -> enable_paging -> gdt_init ->
+#         ljmp -> _entry64 (virtual address continues)
 
 .section .text
 .code64
@@ -13,26 +14,27 @@
 .global _entry64
 .type _start, @function
 
-#define VMA_BASE 0xFFFFFFFF80000000  // mirrors boot/boot.h — keep in sync
+#define VMA_BASE 0xFFFFFFFF80000000  // mirrors boot/boot.h -- keep in sync
 
 _start:
-    # rdi = boot_info* (物理地址, 由 EFI stub 传递)
+    # rdi = boot_info* (physical address, passed by EFI stub)
 
-    # 设置物理地址栈
+    # Set up physical-address stack
     lea stack_bottom(%rip), %rax
     addq $8192, %rax
     movq %rax, %rsp
 
-    # r12 = boot_info* 物理地址，跨 ljmp 保留
+    # r12 = boot_info* physical address, preserved across ljmp
     movq %rdi, %r12
 
-    # 建页表 + 加载 CR3
+    # Build page tables + load CR3
     call enable_paging
 
-    # 配置 GDT + lgdt
+    # Configure GDT + lgdt
     call gdt_init
 
-    # 设段寄存器（GDT 已加载，当前仍在物理地址，identity map 可访问）
+    # Set segment registers (GDT loaded; still at physical addresses,
+    # identity map makes them accessible)
     movw $0x10, %ax
     movw %ax, %ds
     movw %ax, %es
@@ -40,27 +42,27 @@ _start:
     movw %ax, %gs
     movw %ax, %ss
 
-    # 计算 _entry64 的虚拟地址：物理地址 + VMA_BASE
+    # Compute _entry64 virtual address: physical address + VMA_BASE
     lea _entry64(%rip), %rax
     addq $VMA_BASE, %rax
 
-    # ljmp 到虚拟地址
+    # ljmp to virtual address
     pushq $0x08
     pushq %rax
     lretq
 
 .code64
 _entry64:
-    # --- 虚拟地址运行 ---
+    # --- Virtual address execution ---
 
-    # 切换到虚拟地址栈
+    # Switch to virtual-address stack
     lea stack_bottom(%rip), %rsp
     addq $8192, %rsp
 
-    # boot_info 物理地址 → 虚拟地址
+    # boot_info physical address -> virtual address
     addq $VMA_BASE, %r12
 
-    # 复制到 g_boot_info
+    # Copy to g_boot_info
     movq %r12, %rsi
     lea g_boot_info(%rip), %rdi
     movq $128, %rcx

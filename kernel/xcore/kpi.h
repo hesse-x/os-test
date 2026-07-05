@@ -14,7 +14,7 @@
 #include <stddef.h>
 
 // IRQ handler callback type
-typedef void (*irq_handler_t)(trapframe_t *);
+typedef void (*irq_handler_fn)(trapframe_t *);
 
 // === scheduling ===
 void xtask_set_state(xtask *t, proc_state s);
@@ -30,7 +30,7 @@ mmap_region *add_mmap_region(xtask *t, uint64_t vaddr, uint64_t size,
                                uint64_t phys, struct shm *shm, uint32_t prot);
 
 // === IPC ===
-void notify_and_wake(pid_t target_pid, recv_msg_t *msg);
+void notify_and_wake(pid_t target_pid, recv_msg *msg);
 void wake_process(pid_t pid);
 int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
                     void *resp, size_t resp_len);
@@ -52,7 +52,7 @@ int copy_from_user(void *dst, const void __user *src, size_t len);
 int copy_to_user(void __user *dst, const void *src, size_t len);
 
 // === interrupts ===
-void irq_register(int vec, irq_handler_t fn);
+void irq_register(int vec, irq_handler_fn fn);
 void irq_unregister(int vec);
 int irq_owner_check(int irq);
 void irq_owner_cleanup(pid_t pid);

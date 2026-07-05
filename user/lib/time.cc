@@ -12,7 +12,7 @@
 
 extern "C" {
 
-/* ===================== 基础：sys_gettime / sys_clock ===================== */
+/* ===================== Basics: sys_gettime / sys_clock ===================== */
 
 int timespec_get(struct timespec *ts, int base) {
   if (base != TIME_UTC)
@@ -53,36 +53,37 @@ time_t time(time_t *t) {
   return s;
 }
 
-/* ===================== 时区桩（D10：UTC-only） ===================== */
+/* ===================== Timezone stubs (D10: UTC-only) ===================== */
 
 long timezone = 0;
 int daylight = 0;
 char *tzname[2] = {(char *)"UTC", (char *)"UTC"};
 
-void tzset(void) { /* 无时区，空操作桩 */
+void tzset(void) { /* No timezone, no-op stub */
 }
 
-/* ===================== time_t → struct tm 日历换算（UTC）
+/* ===================== time_t → struct tm calendar conversion (UTC)
  * =====================
  *
- * 算法：从 1970-01-01 起的天数 + 当天秒数。用 400 年/100 年/4 年的闰年规则
- * 反推年月日。tm_wday/tm_yday 顺带算出。约 80 行，无外部依赖。
+ * Algorithm: days since 1970-01-01 + seconds within the day. Reverse the
+ * 400-year/100-year/4-year leap rules to derive year/month/day. tm_wday/tm_yday are
+ * computed along the way. About 80 lines, no external dependencies.
  */
 static void secs_to_tm(time_t t, struct tm *tm) {
-  /* 处理负时间（t < 0）：用长除法保证地板除正确 */
+  /* Handle negative times (t < 0): long division guarantees floor division */
   long long days = (long long)(t / 86400);
-  long long rem = (long long)t - days * 86400; /* 当天剩余秒 [0,86400) */
+  long long rem = (long long)t - days * 86400; /* remaining seconds of the day [0,86400) */
 
   tm->tm_sec = (int)(rem % 60);
   rem /= 60;
   tm->tm_min = (int)(rem % 60);
   tm->tm_hour = (int)(rem / 60);
 
-  /* 1970-01-01 是周四（wday=4） */
+  /* 1970-01-01 is a Thursday (wday=4) */
   long long wday = (days % 7 + 4 + 7) % 7;
   tm->tm_wday = (int)wday;
 
-  /* 把 days 折算到 1970 年起点的年/月/日 */
+  /* Fold days into year/month/day starting from 1970 */
   long long year = 1970;
   long long ydays;
   for (;;) {
@@ -104,8 +105,8 @@ static void secs_to_tm(time_t t, struct tm *tm) {
   tm->tm_year = (int)(year - 1900);
 
   static const int mdays[2][12] = {
-      {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}, /* 平年 */
-      {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}, /* 闰年 */
+      {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}, /* common year */
+      {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}, /* leap year */
   };
   int leap = ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)) ? 1 : 0;
   int mon = 0;
@@ -128,7 +129,7 @@ struct tm *gmtime(const time_t *t) {
   return gmtime_r(t, &buf);
 }
 
-/* D10：无时区，localtime = gmtime */
+/* D10: no timezone, localtime = gmtime */
 struct tm *localtime_r(const time_t *t, struct tm *result) {
   return gmtime_r(t, result);
 }
@@ -140,14 +141,16 @@ struct tm *timespec_to_tm(const struct timespec *ts, struct tm *result) {
   return result;
 }
 
-/* mktime：struct tm → time_t。
+/* mktime: struct tm → time_t.
  *
- * POSIX 语义：tm 字段允许越界（tm_mday=0 表示上月末尾，tm_mon=-1 表示
- * 上年 12 月等）。算法——把各字段折算成自 1970-01-01 00:00:00 UTC 起的
- * 总秒数：先算年到目标年的整年天数（含闰年），再累加月到目标月的天数，
- * 再加日/时/分/秒。最后用 secs_to_tm 回填标准化字段。
+ * POSIX semantics: tm fields may be out of range (tm_mday=0 means the last day of the
+ * previous month, tm_mon=-1 means December of the previous year, etc.). Algorithm —
+ * fold each field into total seconds since 1970-01-01 00:00:00 UTC: first sum whole-year
+ * days up to the target year (including leap years), then add days month by month to the
+ * target month, then add day/hour/minute/second. Finally use secs_to_tm to backfill the
+ * normalized fields.
  *
- * 注意 tm_year 是 year - 1900，tm_mon [0-11] 但允许越界。
+ * Note tm_year is year - 1900, tm_mon is [0-11] but may be out of range.
  */
 static int is_leap(long long y) {
   return ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) ? 1 : 0;
@@ -162,9 +165,9 @@ static int month_days(long long y, int m) {
 
 time_t mktime(struct tm *tm) {
   long long year = tm->tm_year + 1900LL;
-  long long mon = tm->tm_mon;  /* 允许越界 */
-  long long day = tm->tm_mday; /* 允许越界 */
-  /* 把越界月归一到 [0,11]，进位到 year */
+  long long mon = tm->tm_mon;  /* may be out of range */
+  long long day = tm->tm_mday; /* may be out of range */
+  /* Normalize out-of-range month into [0,11], carrying into year */
   if (mon < 0 || mon > 11) {
     long long adj = mon / 12;
     mon -= adj * 12;
@@ -176,7 +179,7 @@ time_t mktime(struct tm *tm) {
   }
   tm->tm_mon = (int)mon;
 
-  /* 从 1970 累加整年天数到 year */
+  /* Sum whole-year days from 1970 up to year */
   long long days = 0;
   long long y = 1970;
   if (year >= 1970) {
@@ -190,16 +193,16 @@ time_t mktime(struct tm *tm) {
       days -= is_leap(y) ? 366 : 365;
     }
   }
-  /* 累加月天数到 mon */
+  /* Sum month days up to mon */
   for (int m = 0; m < mon; m++)
     days += month_days(year, m);
-  /* 日（tm_mday 是 1-based；越界由后续 secs_to_tm 标准化） */
+  /* Day (tm_mday is 1-based; out-of-range values are normalized by secs_to_tm below) */
   days += day - 1;
 
   long long secs = days * 86400LL + (long long)tm->tm_hour * 3600LL +
                    (long long)tm->tm_min * 60LL + (long long)tm->tm_sec;
 
-  /* 回填标准化字段（wday/yday/mday/mon/year 全部重算） */
+  /* Backfill normalized fields (wday/yday/mday/mon/year all recomputed) */
   secs_to_tm((time_t)secs, tm);
   return (time_t)secs;
 }
@@ -208,9 +211,10 @@ double difftime(time_t a, time_t b) { return (double)a - (double)b; }
 
 /* ===================== strftime =====================
  *
- * 支持常见转换说明符：%Y %m %d %H %M %S %j %w %Z %z %A %B %p
- * %T(=HH:MM:SS) %F(=YYYY-MM-DD) %R(HH:MM) %D(MM/DD/YY) %s(epoch) %% 。
- * 复杂说明符（%c %x %X 本地化格式）按 ISO C 最小实现返回 "%c" 等占位。
+ * Supports common conversion specifiers: %Y %m %d %H %M %S %j %w %Z %z %A %B %p
+ * %T(=HH:MM:SS) %F(=YYYY-MM-DD) %R(HH:MM) %D(MM/DD/YY) %s(epoch) %%.
+ * Complex specifiers (%c %x %X localized formats) use the ISO C minimal implementation
+ * returning placeholders like "%c".
  */
 static int put_str(char **p, char *end, const char *s) {
   while (*s) {
@@ -358,7 +362,7 @@ char *asctime_r(const struct tm *tm, char *buf) {
                                 "Thu", "Fri", "Sat"};
   static const char *mon[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-  /* "Www Mmm dd hh:mm:ss yyyy\n"（26 字节含末尾 \n 和 NUL） */
+  /* "Www Mmm dd hh:mm:ss yyyy\n" (26 bytes including the trailing \n and NUL) */
   int h = tm->tm_hour, mi = tm->tm_min, s = tm->tm_sec;
   int d = tm->tm_mday, y = tm->tm_year + 1900;
   char tmp[26];
@@ -373,7 +377,7 @@ char *asctime_r(const struct tm *tm, char *buf) {
   tmp[n++] = mo[1];
   tmp[n++] = mo[2];
   tmp[n++] = ' ';
-  /* dd 用空格填充（asctime 语义：%e 风格） */
+  /* dd padded with a space (asctime semantics: %e style) */
   if (d < 10) {
     tmp[n++] = ' ';
     tmp[n++] = '0' + d;

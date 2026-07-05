@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-# trapentry.S - 64-bit common trap entry/exit, syscall, context switch
+# trapentry.S - 64-bit trap entry/exit, syscall entry, context switch
 # vectors.S sends all traps here.
 .text
 .code64
@@ -12,10 +12,10 @@
 # ===================== __alltraps / __trapret =====================
 .globl __alltraps
 __alltraps:
-    # CPU 已自动 push: SS, RSP, RFLAGS, CS, RIP, [error code]
-    # vector stub 已 push: trapno, [dummy error code if needed]
+    # CPU already pushed: SS, RSP, RFLAGS, CS, RIP, [error code]
+    # vector stub pushed: trapno, [dummy error code if needed]
 
-    # 保存所有通用寄存器
+    # Save all GP registers
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -32,7 +32,7 @@ __alltraps:
     pushq %r14
     pushq %r15
 
-    # 设置内核数据段
+    # Set kernel data segments
     movw $0x10, %ax
     movw %ax, %ds
     movw %ax, %es
@@ -43,15 +43,15 @@ __alltraps:
     swapgs
 1:
 
-    # 调用 trap_dispatch(rdi = &trapframe)
+    # Call trap_dispatch(rdi = &trapframe)
     movq %rsp, %rdi
     call trap_dispatch
 
-    # __trapret: 恢复
+    # __trapret: restore and return
 .globl __trapret
 __trapret:
-    # 检查 pending signals 后再返回用户态
-    # (此时 gs 仍指向 per-CPU 数据，swapgs 尚未执行)
+    # Check pending signals before returning to user mode
+    # (gs still points to per-CPU data; swapgs not yet executed)
     movq %rsp, %rdi
     call check_pending_signals
 
@@ -94,7 +94,7 @@ __trapret:
     popq %rbx
     popq %rax
 
-    # 跳过 trapno + err_code (各8字节)
+    # Skip trapno + err_code (8 bytes each)
     addq $16, %rsp
 
     iretq
@@ -245,7 +245,7 @@ switch_to:
 process_entry:
     jmp __trapret
 
-# reload_cs: 用 lretq 刷新 CS 到 0x08
+# reload_cs: use lretq to reload CS to 0x08
 .globl reload_cs
 reload_cs:
     subq $16, %rsp

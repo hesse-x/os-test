@@ -11,9 +11,11 @@
 #include <stdint.h>
 #include <sys/cdefs.h>
 #include <sys/types.h>
-/* struct timespec 仅在 pthread_mutex_timedlock 参数里作指针使用,前向声明即可。
-   不 include <time.h>:测试构建(Unity <limits.h>)下尖括号会回退到宿主机
-   /usr/include/time.h,其 struct timespec 定义与我们的 xos/time.h 重定义冲突。
+/* struct timespec is only used as a pointer in pthread_mutex_timedlock args,
+   a forward declaration suffices. Do not include <time.h>: in test builds
+   (Unity <limits.h>) angle brackets would fall back to the host's
+   /usr/include/time.h, whose struct timespec definition conflicts with our
+   xos/time.h (redefinition).
  */
 struct timespec;
 #include <xos/signal.h>
@@ -47,8 +49,9 @@ typedef int32_t pthread_key_t;
 #define PTHREAD_PROCESS_PRIVATE 0
 #define PTHREAD_PROCESS_SHARED 1
 
-// 守卫防止与系统 <bits/local_lim.h> 重定义：Unity 的 <limits.h> 在 test
-// 构建下会回退到系统头，链条拉入 local_lim.h 定义这些宏。
+// Guards against redefinition with system <bits/local_lim.h>: Unity's
+// <limits.h> in test builds falls back to the system header, which pulls in
+// local_lim.h defining these macros.
 #ifndef PTHREAD_KEYS_MAX
 #define PTHREAD_KEYS_MAX 128
 #endif

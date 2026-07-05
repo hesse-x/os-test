@@ -15,14 +15,15 @@
 #include <unistd.h>
 #include <xos/mman.h>
 
-// 全局 TLS 模板信息单例（pthread_create 读取）
+// Global TLS template info singleton (read by pthread_create)
 extern "C" {
-struct tls_info __g_tls_info = {0};
+struct tls_info g_tls_info = {0};
 }
 
-// 链接器符号（user_linker.ld 定义）
-// 链接脚本中 `__xxx = SIZEOF(...)` 的符号，其地址即值，故声明为 char[]，
-// 用 (size_t)__xxx 取地址作为数值，避免生成对该地址的内存读取。
+// Linker symbols (defined in user_linker.ld)
+// For symbols of the form `__xxx = SIZEOF(...)` in the linker script, their address is
+// the value, so they are declared as char[] and (size_t)__xxx takes the address as a
+// numerical value, avoiding generating a memory load at that address.
 extern "C" char __tls_template_start[];
 extern "C" char __tls_template_end[];
 extern "C" char __tdata_size[];
@@ -31,22 +32,23 @@ extern "C" char __tdata_align[];
 extern "C" char __tbss_align[];
 extern "C" char __tls_align[];
 
-// 读链接器符号填 __g_tls_info（进程级模板元数据）
-// 对应 ld.md §3.5.3 collect_tls_from_linker_symbols
-// 仅静态路径（-DDYNAMIC=0）编译；动态路径用 collect_tls_from_link_map
+// Read linker symbols to fill g_tls_info (process-level template metadata)
+// Corresponds to ld.md §3.5.3 collect_tls_from_linker_symbols
+// Only compiled for the static path (-DDYNAMIC=0); the dynamic path uses
+// collect_tls_from_link_map
 #if !DYNAMIC
 extern "C" void __libc_tls_init_first(void) {
-  __g_tls_info.tdata_template = (void *)__tls_template_start;
-  __g_tls_info.tdata_size = (size_t)__tdata_size;
-  __g_tls_info.tbss_size = (size_t)__tbss_size;
-  __g_tls_info.alignment = (size_t)__tls_align;
-  if (__g_tls_info.alignment < 8)
-    __g_tls_info.alignment = 8;
-  __g_tls_info.size = __g_tls_info.tdata_size + __g_tls_info.tbss_size;
-  // 按 alignment 对齐 tls_block
-  if (__g_tls_info.alignment > 0) {
-    __g_tls_info.size = (__g_tls_info.size + __g_tls_info.alignment - 1) &
-                        ~(__g_tls_info.alignment - 1);
+  g_tls_info.tdata_template = (void *)__tls_template_start;
+  g_tls_info.tdata_size = (size_t)__tdata_size;
+  g_tls_info.tbss_size = (size_t)__tbss_size;
+  g_tls_info.alignment = (size_t)__tls_align;
+  if (g_tls_info.alignment < 8)
+    g_tls_info.alignment = 8;
+  g_tls_info.size = g_tls_info.tdata_size + g_tls_info.tbss_size;
+  // Align tls_block to alignment
+  if (g_tls_info.alignment > 0) {
+    g_tls_info.size = (g_tls_info.size + g_tls_info.alignment - 1) &
+                        ~(g_tls_info.alignment - 1);
   }
 }
 #endif
@@ -56,9 +58,9 @@ extern "C" void __libc_tls_init_first(void) {
 // Exported (non-static) — pthread_create in pthread.cc calls this for child
 // threads.
 struct tcb *alloc_tls_block(void **tls_page_out, size_t *tls_total_out) {
-  size_t tdata_size = __g_tls_info.tdata_size;
-  size_t tbss_size = __g_tls_info.tbss_size;
-  size_t tls_align = __g_tls_info.alignment;
+  size_t tdata_size = g_tls_info.tdata_size;
+  size_t tbss_size = g_tls_info.tbss_size;
+  size_t tls_align = g_tls_info.alignment;
   if (tls_align < 8)
     tls_align = 8;
 
@@ -77,7 +79,7 @@ struct tcb *alloc_tls_block(void **tls_page_out, size_t *tls_total_out) {
   memset(tls_page, 0, total);
 
   if (tdata_size > 0) {
-    memcpy(tls_page, __g_tls_info.tdata_template, tdata_size);
+    memcpy(tls_page, g_tls_info.tdata_template, tdata_size);
   }
 
   struct tcb *tcb = (struct tcb *)((char *)tls_page + tls_block);
@@ -102,8 +104,8 @@ struct tcb *alloc_tls_block(void **tls_page_out, size_t *tls_total_out) {
 
 // Allocate main thread TCB + set FS_BASE + set_tid_address + register cancel
 // handler. Called by __libc_tls_init (static path, after __libc_tls_init_first
-// fills __g_tls_info) AND by __libc_start_main (dynamic path, after
-// collect_tls_from_link_map fills __g_tls_info). Does NOT touch __g_tls_info —
+// fills g_tls_info) AND by __libc_start_main (dynamic path, after
+// collect_tls_from_link_map fills g_tls_info). Does NOT touch g_tls_info —
 // caller is responsible for filling it first.
 extern "C" void __libc_tls_init_rest(void) {
   void *tls_page;
@@ -112,19 +114,20 @@ extern "C" void __libc_tls_init_rest(void) {
   if (!tcb)
     return;
   tcb->tid = (pid_t)sys_gettid();
-  tcb->tls_page = NULL; // 主线程：退出时不 munmap
+  tcb->tls_page = NULL; // Main thread: do not munmap on exit
   tcb->tls_total = 0;
 
   sys_arch_prctl(ARCH_SET_FS, (int64_t)tcb);
   sys_set_tid_address((uint64_t)&tcb->tid);
 
-  // 注册 cancel check handler（内核投递 SIGCANCEL 时调用）
+  // Register cancel check handler (invoked when the kernel delivers SIGCANCEL)
   sys_pthread_set_cancel_handler((uint64_t)__pthread_cancel_check);
 }
 
-// 主线程 TLS 初始化（静态路径入口）：填 __g_tls_info + alloc TCB + FS_BASE +
-// ... 动态路径不调此函数，直接调 __libc_tls_init_rest（__g_tls_info 由
-// collect_tls_from_link_map 填充，见 ld2b3 T11/T12）。
+// Main-thread TLS initialization (static-path entry): fill g_tls_info + alloc TCB +
+// FS_BASE + ... The dynamic path does not call this function; it calls
+// __libc_tls_init_rest directly (g_tls_info is filled by collect_tls_from_link_map,
+// see ld2b3 T11/T12).
 #if !DYNAMIC
 extern "C" void __libc_tls_init(void) {
   __libc_tls_init_first();
@@ -144,24 +147,24 @@ extern "C" void __pthread_cancel_check(int sig) {
   (void)sig;
   struct tcb *tcb = __pthread_current_tcb();
   if (tcb->cancel_state == PTHREAD_CANCEL_ENABLE) {
-    // Phase 3（第 3 步）改为 pthread_exit(PTHREAD_CANCELED)
-    // 此步 pthread_exit 尚未实现，先用 sys_exit
+    // Phase 3 (step 3) changed this to pthread_exit(PTHREAD_CANCELED)
+    // At that point pthread_exit was not yet implemented, so sys_exit was used first
     pthread_exit(PTHREAD_CANCELED);
   }
   // DISABLE: return to sigreturn trampoline, resume original context
 }
 
-// === 动态路径 TLS 收集（plan_ld2b3 T12 / ld.md §3.5.3） ===
+// === Dynamic-path TLS collection (plan_ld2b3 T12 / ld.md §3.5.3) ===
 #if DYNAMIC
 #include "sys/link_map.h"
 #include <stdlib.h>
 
-// 动态路径：遍历 _dl_link_map 合并 PT_TLS 填 tls_info
-// 链表顺序：主 ELF → libc.so → ld.so（ld.so 通常无 PT_TLS，跳过）
+// Dynamic path: walk _dl_link_map merging PT_TLS into tls_info
+// List order: main ELF → libc.so → ld.so (ld.so usually has no PT_TLS, skip it)
 extern "C" struct tls_info collect_tls_from_link_map(struct link_map *lmap) {
   struct tls_info ti = {0};
   size_t offset = 0;
-  // 第一遍：计算总 size、最大对齐
+  // First pass: compute total size and maximum alignment
   for (struct link_map *l = lmap; l; l = l->l_next) {
     if (l->tls_tdata_size + l->tls_tbss_size == 0)
       continue;
@@ -171,7 +174,7 @@ extern "C" struct tls_info collect_tls_from_link_map(struct link_map *lmap) {
               ~((size_t)l->tls_align - 1);
   }
   ti.size = offset;
-  // 第二遍：分配合并模板
+  // Second pass: allocate and assemble the merged template
   if (ti.size > 0) {
     ti.tdata_template = malloc(ti.size);
     size_t off = 0;

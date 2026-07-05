@@ -72,13 +72,13 @@ void synchronize_rcu(void); // wait for all CPUs to pass through a grace period
 void rcu_init(void);
 
 // RCU-protected pointer access
-#define rcu_dereference(p)                                                     \
+#define RCU_DEREFERENCE(p)                                                     \
   ({                                                                           \
     typeof(p) ___p = __atomic_load_n(&(p), __ATOMIC_CONSUME);                  \
     ___p;                                                                      \
   })
 
-#define rcu_assign_pointer(p, v)                                               \
+#define RCU_ASSIGN_POINTER(p, v)                                               \
   do {                                                                         \
     __atomic_store_n(&(p), (v), __ATOMIC_RELEASE);                             \
   } while (0)

@@ -17,7 +17,7 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
@@ -56,8 +56,8 @@ xtask *tasks[MAX_PROC];
 
 spinlock tasks_lock = SPINLOCK_INIT;
 pid_t init_pid = -1;
-pid_t next_pid = 0; // 递增分配 + 环形复用（MAX_PROC 回绕）
-kmem_cache *xtask_cache = NULL; // xtask 专用 slab cache（动态化）
+pid_t next_pid = 0; // incrementing + circular reuse (wraps at MAX_PROC)
+kmem_cache *xtask_cache = NULL; // xtask-dedicated slab cache (dynamic)
 
 // ===================== Process table =====================
 
@@ -66,15 +66,16 @@ kmem_cache *xtask_cache = NULL; // xtask 专用 slab cache（动态化）
 // Caller must hold tasks_lock; on success the slot's pid is still -1
 // (caller sets it after allocating resources).
 //
-// reclaim_lazy_resources: 释放 sched_task_reap 延迟处理的资源。
+// reclaim_lazy_resources: release resources deferred by sched_task_reap.
 //
-// 延迟释放清单（SMP 竞态防护）——这些资源在 schedule() 的切换路径中被引用，
-// sched_task_reap 与 schedule() 无共享锁，立即释放会 UAF。留到 slot
-// 复用时此处统一释放：
-//   - k_stack (2 pages)  : switch_to 汇编在子进程栈上执行 ret
-//   - fpu_page (1 page)  : fpu_context_switch 在 prev 分支 fxsave 该页
-// slot 复用意味着子进程早已切走，安全。新增同类资源（如扩展 FPU
-// 状态页）请加入此函数。
+// Deferred release list (SMP race protection) — these resources are still
+// referenced in schedule()'s switch path.  sched_task_reap and schedule()
+// share no lock; immediate free would cause UAF.  Instead, release them
+// here when the slot is reused:
+//   - k_stack (2 pages)  : switch_to asm executes ret on child's stack
+//   - fpu_page (1 page)  : fpu_context_switch fxsaves this page in prev branch
+// By slot reuse time the child has long been switched away — safe.
+// Add similar resources (e.g. extended FPU state pages) to this function.
 static void reclaim_lazy_resources(xtask *t) {
   if (t->k_stack_top != 0) {
     uint64_t k_stack_phys_base =
@@ -89,10 +90,12 @@ static void reclaim_lazy_resources(xtask *t) {
   }
 }
 
-// init_xtask_defaults: 新 xtask 对象的默认字段初始化（零 + 非零默认值 +
-// 链表节点）。 集中此处供 xtask_alloc 复用，替代旧 sched_init 的逐槽位初始化。
-// 注意：不设 k_stack_top/fpu_page——它们由调用者在分配栈/FPU 页后设置，
-// slot 复用路径已由 reclaim_lazy_resources 清零。
+// init_xtask_defaults: default field initialization for new xtask objects
+// (zero + non-zero defaults + list node init).  Centralized here for
+// xtask_alloc reuse, replacing the old per-slot init in sched_init.
+// Note: does NOT set k_stack_top/fpu_page — they are set by the caller
+// after allocating stack/FPU pages; slot reuse path clears them via
+// reclaim_lazy_resources.
 static void init_xtask_defaults(xtask *t) {
   __memset(t, 0, sizeof(*t));
   t->pid = -1;
@@ -108,26 +111,27 @@ static void init_xtask_defaults(xtask *t) {
   list_init(&t->wait_node);
 }
 
-// xtask_alloc: 从 next_pid 起扫描空槽，分配 xtask 并写入 tasks[i]。
-// 返回新 xtask*，*out_pid = 槽下标（即 pid）；无空槽返回 NULL。
+// xtask_alloc: scan from next_pid for an empty slot, allocate xtask,
+// and write it to tasks[i].  Returns new xtask*, *out_pid = slot index
+// (i.e. pid); returns NULL if no empty slot.
 //
-// 槽复用语义（呼应方案决策 7 REAPING 延迟释放）：
-//   - tasks[i] == NULL          : 直接 kmem_cache_alloc 新对象
-//   - tasks[i]->state == REAPING: 先 reclaim_lazy_resources
-//   释放延迟资源（k_stack/fpu_page），
-//                                 再 kmem_cache_free 旧对象，最后 alloc 新对象
-//   - 其它状态                   : 槽占用，跳过
-// 调用者须持 tasks_lock。
+// Slot reuse semantics (aligned with decision #7 REAPING deferred release):
+//   - tasks[i] == NULL          : kmem_cache_alloc new object directly
+//   - tasks[i]->state == REAPING: reclaim_lazy_resources first (free
+//                                  deferred k_stack/fpu_page), then
+//                                  kmem_cache_free old object, alloc new
+//   - other state               : slot occupied, skip
+// Caller must hold tasks_lock.
 xtask *xtask_alloc(pid_t *out_pid) {
   if (!xtask_cache)
-    return NULL; // 未初始化（sched_init 前调用）
+    return NULL; // not initialized (called before sched_init)
 
-  // 从 next_pid 起环形扫描（ffz 语义），找第一个可复用槽
+  // Circular scan from next_pid (ffz semantics), find first reusable slot
   for (int k = 0; k < MAX_PROC; k++) {
     int i = (next_pid + k) % MAX_PROC;
     xtask *old = tasks[i];
     if (old == NULL) {
-      // 空槽：直接分配
+      // Empty slot: allocate directly
       xtask *t = (xtask *)kmem_cache_alloc(xtask_cache);
       if (!t)
         return NULL;
@@ -139,7 +143,7 @@ xtask *xtask_alloc(pid_t *out_pid) {
       return t;
     }
     if (old->state == REAPING) {
-      // REAPING 槽：释放延迟资源 → free 旧对象 → alloc 新对象
+      // REAPING slot: reclaim deferred resources -> free old -> alloc new
       reclaim_lazy_resources(old);
       kmem_cache_free(xtask_cache, old);
       tasks[i] = NULL;
@@ -153,13 +157,13 @@ xtask *xtask_alloc(pid_t *out_pid) {
         *out_pid = (pid_t)i;
       return t;
     }
-    // 占用槽，继续扫描
+    // Slot occupied, continue scanning
   }
-  return NULL; // 满了
+  return NULL; // full
 }
 
 void sched_init() {
-  // 动态化：创建 xtask 专用 slab cache，指针数组初始化为 NULL
+  // Dynamic: create xtask-dedicated slab cache, init pointer array to NULL
   xtask_cache = kmem_cache_create("xtask", sizeof(xtask));
   if (!xtask_cache) {
     panic("sched_init: kmem_cache_create(xtask) failed\n");
@@ -200,9 +204,9 @@ uint64_t sched_build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
   if (user_rsp == 0)
     user_rsp = 0x00007FFFFFFFE000ULL;
   tf.rsp = user_rsp; // user stack pointer
-  // 用户栈顶必须 16 字节对齐：iret 进入 _start 时 rsp%16==0，
-  // _start 用 andq $-16 兜底后符合 ABI（call 后 rsp%16==8）。
-  // 若此处不对齐，用户态 movaps/movdqa 会 #GP。
+  // User stack top must be 16-byte aligned: iret enters _start with
+  // rsp%16==0, _start's andq $-16 then satisfies ABI (call leaves
+  // rsp%16==8).  Misalignment here causes user-space movaps/movdqa #GP.
   ASSERT(tf.rsp % 16 == 0);
   tf.rflags = 0x202; // IF=1, IOPL=0
   tf.cs = 0x2B;      // USER_CS
@@ -300,7 +304,7 @@ __attribute__((no_sanitize("kernel-address"))) void sched_idle_entry() {
     if (reap_hook)
       reap_hook();
 
-    // Work stealing:本 CPU idle 时尝试从最繁忙 CPU 偷一个任务
+    // Work stealing: when this CPU is idle, try to steal a task from the busiest CPU
     sched_try_steal_task();
 
     schedule();
@@ -309,9 +313,9 @@ __attribute__((no_sanitize("kernel-address"))) void sched_idle_entry() {
   }
 }
 
-// sched_pick_cpu_pref:选最空 CPU,可选偏好 CPU(亲和性)
-// pref_cpu < 0 表示无偏好;否则偏好 CPU 负载与最小值差距 <= AFFINITY_THRESHOLD
-// 时选偏好 CPU
+// sched_pick_cpu_pref: pick the least-loaded CPU, with optional preferred CPU
+// (affinity). pref_cpu < 0 means no preference; otherwise the preferred CPU is
+// chosen when its load is within AFFINITY_THRESHOLD of the minimum.
 int sched_pick_cpu_pref(int pref_cpu) {
   int best = 0;
   int min = __atomic_load_n(&cpu_locals[0].run_count, __ATOMIC_RELAXED);
@@ -334,16 +338,17 @@ int sched_pick_cpu_pref(int pref_cpu) {
 // Pick the CPU with the fewest runnable processes
 int sched_pick_cpu(void) { return sched_pick_cpu_pref(-1); }
 
-// sched_try_steal_task:本 CPU idle 时从最繁忙 CPU 的 run_queue 尾部偷一个任务。
-// 偷取者持自己 CPU 的 scheduler_lock(防本 CPU 中断并发写 run_queue),用 trylock
-// 抢目标 CPU 锁,失败即放弃(机会主义,绝不阻塞)。偷到则更新 assigned_cpu =
-// my_cpu。
+// sched_try_steal_task: when this CPU is idle, steal a task from the tail of
+// the busiest CPU's run_queue. The stealer holds its own CPU's scheduler_lock
+// (to prevent concurrent interrupt writes to its own run_queue) and trylocks
+// the target CPU's lock; on failure it gives up (opportunistic, never blocks).
+// On success, update assigned_cpu = my_cpu.
 void sched_try_steal_task(void) {
   int my_cpu = get_cpu_local()->cpu_id;
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
 
-  // 选 victim:线性扫描找 run_count 最大值
+  // Pick victim: linear scan for the maximum run_count
   int best_v = -1;
   int max_run = 0;
   for (int v = 0; v < ncpu; v++) {
@@ -356,21 +361,23 @@ void sched_try_steal_task(void) {
     }
   }
   if (max_run <= 1)
-    goto out; // 无可偷(偷了对方就空了)
+    goto out; // nothing to steal (stealing would empty the target)
 
   int v = best_v;
   uint64_t vflags;
   if (!spin_trylock_irqsave(&cpu_locals[v].scheduler_lock, &vflags))
     goto out;
 
-  // 进临界区后重检:run_count 是外部快照,队列可能已空
+  // Re-check after entering the critical section: run_count is an external
+  // snapshot, the queue may already be empty
   if (list_empty(&cpu_locals[v].run_queue)) {
     spin_unlock_irqrestore(&cpu_locals[v].scheduler_lock, vflags);
     goto out;
   }
   ASSERT(cpu_locals[v].run_count > 0);
 
-  // 偷尾部:循环双向链表 head->prev 即尾(list_push_back 已依赖此不变式)
+  // Steal the tail: for a circular doubly-linked list head->prev is the tail
+  // (list_push_back already relies on this invariant)
   list_node *head = &cpu_locals[v].run_queue;
   list_node *tail_node = head->prev;
   xtask *t = LIST_ENTRY(tail_node, xtask, run_node);
@@ -398,28 +405,32 @@ static void update_tss_iopm(xtask *proc) {
   }
 }
 
-// FPU 上下文切换 C helper（eager 模式，不修改 switch_to 汇编）
-// 在 switch_to(prev, next) 之前调用：fxsave prev 的 FPU 状态 + fxrstor next 的
-// FPU 状态。 不设 CR0.TS，用户态 SSE 指令直接执行不触发 #NM。idle 进程
-// fpu_page=NULL，自动跳过。
+// FPU context switch C helper (eager mode, does not modify switch_to asm)
+// Called before switch_to(prev, next): fxsave prev's FPU state + fxrstor
+// next's FPU state. Does not set CR0.TS, user-space SSE instructions execute
+// directly without triggering #NM. idle process has fpu_page=NULL, skipped
+// automatically.
 //
-// UAF 防御：fpu_page 的释放是延迟的（见 sched_task_reap 资源清单），但若有人错误地在
-// sched_task_reap 立即释放，schedule() 此处会 UAF。ASSERT page->status == PAGE_USED
-// 可在 DEBUG 构建下立即捕获——bfc_free_page 释放后 status 变 PAGE_FREE，fxsave
-// 前暴露。
+// UAF defense: fpu_page release is deferred (see sched_task_reap resource
+// list), but if someone incorrectly frees it immediately in sched_task_reap,
+// schedule() here would UAF. ASSERT page->status == PAGE_USED catches this
+// immediately in DEBUG builds — bfc_free_page sets status to PAGE_FREE after
+// freeing, exposing it before fxsave.
 void fpu_context_switch(xtask *prev, xtask *next) {
   if (prev && prev->fpu_page) {
     ASSERT(prev->fpu_page->status == PAGE_USED);
     void *fpu_data =
         (void *)(__force uintptr_t)phys_to_virt(page_to_phys(prev->fpu_page));
-    // 防御：fxsave 目标必须是 BFC 数据页虚拟地址，不能是 Page* 元数据指针
-    // （历史 bug：误把 bfc_alloc_page 返回的 Page* 直接当数据指针，fxsave 覆盖
-    //  Page 元数据，后续 kfree 检测 page->status 异常才暴露，定位困难）
+    // Defense: fxsave target must be a BFC data-page virtual address, not a
+    // Page* metadata pointer (historical bug: mistakenly treated the Page*
+    // returned by bfc_alloc_page as a data pointer, fxsave overwrote Page
+    // metadata, only exposed later when kfree detected page->status anomaly,
+    // hard to diagnose)
     uint64_t vma_start __attribute__((unused)) =
         (__force uint64_t)phys_to_virt(0);
     ASSERT((uint64_t)fpu_data >= vma_start &&
            (uint64_t)fpu_data < vma_start + total_page_frames * PAGE_SIZE);
-    kernel_fpu_save(fpu_data); // 内部先 clts 再 fxsave
+    kernel_fpu_save(fpu_data); // internally clts then fxsave
   }
   if (next && next->fpu_page) {
     ASSERT(next->fpu_page->status == PAGE_USED);
@@ -429,15 +440,16 @@ void fpu_context_switch(xtask *prev, xtask *next) {
         (__force uint64_t)phys_to_virt(0);
     ASSERT((uint64_t)fpu_data >= vma_start &&
            (uint64_t)fpu_data < vma_start + total_page_frames * PAGE_SIZE);
-    kernel_fpu_restore(fpu_data); // 内部先 clts 再 fxrstor
+    kernel_fpu_restore(fpu_data); // internally clts then fxrstor
   }
 }
 
-// 分配 FPU 状态页并初始化为合法 fxsave 镜像。
-// fxsave 512 字节布局中 MXCSR 位于 offset 24，必须为合法值（否则 fxrstor 触发
-// #GP）。 memset 0 + 设 MXCSR=0x1F80（默认值：异常屏蔽位全
-// 1，舍入=nearest）等价于 fninit+ldmxcsr 后的 init state。 纯内存操作，无 SSE
-// 指令，不破坏调用者 xmm 寄存器。
+// Allocate an FPU state page and initialize it as a valid fxsave image.
+// In the 512-byte fxsave layout MXCSR is at offset 24 and must be a valid
+// value (otherwise fxrstor triggers #GP). memset 0 + setting MXCSR=0x1F80
+// (default: all exception mask bits set, rounding=nearest) is equivalent to
+// the init state after fninit+ldmxcsr. Pure memory operations, no SSE
+// instructions, does not clobber caller's xmm registers.
 int xcore_fpu_alloc(xtask *t) {
   t->fpu_page = bfc_alloc_page(1);
   if (!t->fpu_page)
@@ -517,9 +529,11 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
   next->last_sched = sched_clock();
   cpu_locals[my_cpu].run_count--;
 #ifndef NDEBUG
-  // 一致性检查:所有 run_queue / run_count 变更完成后,队列长度必须等于
-  // run_count。 若跨 CPU 路径未持本 CPU scheduler_lock 写本 CPU
-  // run_queue/run_count, 此处会捕获(此前 timer_handler 跨 CPU 投递即在此暴露)。
+  // Consistency check: after all run_queue / run_count changes are done, the
+  // queue length must equal run_count. If a cross-CPU path writes to this
+  // CPU's run_queue/run_count without holding this CPU's scheduler_lock, this
+  // will catch it (previously timer_handler cross-CPU delivery was exposed
+  // here).
   {
     int cnt = 0;
     list_node *__head = &cpu_locals[my_cpu].run_queue;
@@ -581,20 +595,22 @@ void sched_timer_queue_remove(xtask *proc) { list_remove(&proc->wait_node); }
 // sched_task_reap: reclaim all resources of a process
 // Called by sys_exit (no-parent path) or sys_waitpid
 //
-// 资源释放清单（注意 SMP 竞态）：
-//   immediate（无 schedule() 路径引用）:
-//     - iopm           : 仅 update_tss_iopm 在 sched_lock 下读
-//     - mm (mm_put)    : refcount 管理，最后释放者负责
-//     - recv queue     : 仅本进程访问
-//   lazy（schedule() 切换路径仍引用，延迟到 xtask_alloc 复用 slot 时释放）:
-//     - k_stack (2pg)  : switch_to 汇编在子进程栈上 ret
-//     - fpu_page (1pg) : fpu_context_switch 在 prev 分支 fxsave 该页
-//   由 BSD 层释放（proc_reap_hook）:
+// Resource release list (note SMP races):
+//   immediate (no schedule() path references):
+//     - iopm           : only read under sched_lock by update_tss_iopm
+//     - mm (mm_put)    : refcount-managed, last releaser is responsible
+//     - recv queue     : only accessed by this process
+//   lazy (still referenced by schedule() switch path, deferred until slot
+//   reuse in xtask_alloc):
+//     - k_stack (2pg)  : switch_to asm executes ret on the child's stack
+//     - fpu_page (1pg) : fpu_context_switch fxsave on this page in prev branch
+//   released by BSD layer (proc_reap_hook):
 //     - fds/signal/proc
 //
-// 立即释放 lazy 类资源会与 schedule() 竞态 UAF（sched_task_reap 与 schedule()
-// 无共享锁）。 新增同类资源请归入对应类别，lazy 类资源统一在 xtask_alloc 的
-// reclaim_lazy_resources 释放。
+// Freeing lazy-class resources immediately would race with schedule() and
+// UAF (sched_task_reap and schedule() share no lock). Add similar resources
+// to the corresponding category; lazy-class resources are uniformly released
+// in xtask_alloc's reclaim_lazy_resources.
 void sched_task_reap(xtask *proc) {
   ASSERT(proc->state == ZOMBIE || proc->state == REAPING);
 
@@ -605,9 +621,11 @@ void sched_task_reap(xtask *proc) {
   }
 
   // 2b. Free FPU state page (lazy-allocated via bfc_alloc_page)
-  //     延迟到 xtask_alloc 复用 slot 时释放（与内核栈同理，见函数顶部清单）：
-  //     子进程在 schedule() 的 fpu_context_switch 中可能仍持有 fpu_page 引用，
-  //     此处立即释放会与 schedule() 竞态 UAF。slot 复用时子进程早已切走。
+  //     Deferred until slot reuse in xtask_alloc (same rationale as the kernel
+  //     stack, see the list at the top of this function): the child may still
+  //     hold an fpu_page reference in schedule()'s fpu_context_switch; freeing
+  //     it here would race with schedule() and UAF. By slot reuse time the
+  //     child has long been switched away.
   //     if (proc->fpu_page) {
   //     bfc_free_page(proc->fpu_page, 1);
   //     proc->fpu_page = NULL;
@@ -650,7 +668,7 @@ void sched_task_reap(xtask *proc) {
   spin_lock(&proc->recv_lock);
   uint32_t idx = proc->recv_tail;
   while (idx != proc->recv_head) {
-    recv_msg_t *m = (recv_msg_t *)proc->recv_buf[idx];
+    recv_msg *m = (recv_msg *)proc->recv_buf[idx];
     if (m->type == RECV_MSG && m->msg.kmaddr) {
       kfree(m->msg.kmaddr);
       m->msg.kmaddr = NULL;
@@ -666,24 +684,28 @@ void sched_task_reap(xtask *proc) {
   if (proc_reap_hook)
     proc_reap_hook(proc);
 
-  // 7. 置 REAPING 状态（动态化：不立即 kmem_cache_free xtask 对象）。
-  //    字段清理同旧设计（pid=-1 / mm=NULL / proc 由 hook 释放），保留所有
-  //    reader 守卫语义（tasks[i].pid>=0 / ==p / proc!=NULL 在 REAPING 槽上
-  //    均判否 → 跳过），无锁读 112+ 处不需 refcount 仍安全。
-  //    xtask 对象本身留到 xtask_alloc 复用该槽时 kmem_cache_free（REAPING
-  //    分支）。 lazy 资源（k_stack_top / fpu_page）刻意保留，由 xtask_alloc 的
-  //    reclaim_lazy_resources 释放（SMP race：schedule() 可能仍引用）。
+  // 7. Set REAPING state (dynamic: do not immediately kmem_cache_free the
+  //    xtask object). Field cleanup matches the old design (pid=-1 / mm=NULL
+  //    / proc freed by hook), preserving all reader guard semantics
+  //    (tasks[i].pid>=0 / ==p / proc!=NULL all evaluate false on REAPING slots
+  //    -> skip), the 112+ lockless reads remain safe without refcount.
+  //    The xtask object itself is left for xtask_alloc to kmem_cache_free when
+  //    reusing this slot (REAPING branch). Lazy resources (k_stack_top /
+  //    fpu_page) are intentionally preserved, released by xtask_alloc's
+  //    reclaim_lazy_resources (SMP race: schedule() may still reference them).
   spin_lock(&tasks_lock);
 
-  // 不变式断言:ZOMBIE 不应在任何 run_queue / timer_queue
-  // (state 断言保留顶部入口处一处,此处不重复——顶部 ASSERT 已覆盖调用者传错状态,
-  // 窗口内无路径会改写 ZOMBIE 状态,第 7 步再断言是冗余)
+  // Invariant assertion: ZOMBIE should not be on any run_queue / timer_queue
+  // (the state assertion is kept only at the top entry point, not duplicated
+  // here — the top ASSERT already covers callers passing the wrong state, and
+  // no path within this window overwrites the ZOMBIE state, so re-asserting
+  // in step 7 would be redundant)
   WARN_ON(!list_empty(&proc->run_node));
   WARN_ON(!list_empty(&proc->wait_node));
 
   proc->pid = -1;
   proc->state =
-      REAPING; // 动态化：REAPING 而非 UNUSED，xtask_alloc 复用时 free 对象
+      REAPING; // dynamic: REAPING instead of UNUSED, xtask_alloc frees the object on reuse
   proc->k_rsp = 0;
   // proc->k_stack_top intentionally preserved (lazy reclaim)
   proc->cr3 = 0;
@@ -691,12 +713,14 @@ void sched_task_reap(xtask *proc) {
   proc->wait_event = WAIT_NONE;
   proc->tgid = -1;
   proc->mm = NULL;
-  // 注意:不清 assigned_cpu —— 清成 -1 会引入越界竞态(wake 路径在锁前无锁读)
+  // Note: do not clear assigned_cpu — setting it to -1 would introduce an
+  // out-of-bounds race (the wake path reads it locklessly before acquiring
+  // the lock)
   proc->iopm = NULL;
   proc->wait_deadline = 0;
   proc->wait_timed_out = 0;
-  list_init(&proc->run_node);  // slot 复用清理,幂等
-  list_init(&proc->wait_node); // 同上
+  list_init(&proc->run_node);  // slot reuse cleanup, idempotent
+  list_init(&proc->wait_node); // same as above
   // recv queue
   proc->recv_head = 0;
   proc->recv_tail = 0;
@@ -722,6 +746,6 @@ void sched_task_reap(xtask *proc) {
   proc->user_stack_base = 0;
   proc->user_stack_size = 0;
   proc->need_resched = 0;
-  // proc->fpu_page intentionally preserved (lazy reclaim, 见函数顶部清单)
+  // proc->fpu_page intentionally preserved (lazy reclaim, see list at top of function)
   spin_unlock(&tasks_lock);
 }

@@ -10,7 +10,7 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "kernel/xcore/list.h"
-#include "kernel/xcore/mem/slab.h" // kmem_cache（xtask_cache 声明所需）
+#include "kernel/xcore/mem/slab.h" // kmem_cache (needed for xtask_cache declaration)
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
 #include <stdint.h>
@@ -28,10 +28,11 @@ void sched_try_steal_task(void);
 void sched_timer_queue_insert(int cpu, xtask *proc);
 void sched_timer_queue_remove(xtask *proc);
 
-// xtask 专用 slab cache（kernel/xcore/sched.c 定义）。
-// 动态化后 xtask 由 kmem_cache_alloc 从此 cache 分配，slot 复用时 free 回此
-// cache。 proc_create.c / proc.c 的失败回滚路径需 kmem_cache_free(xtask_cache,
-// ...) 回收对象。
+// xtask-dedicated slab cache (defined in kernel/xcore/sched.c).
+// After dynamic allocation, xtask is allocated via kmem_cache_alloc from this
+// cache; slot reuse frees back to this cache.  Failure rollback paths in
+// proc_create.c / proc.c must kmem_cache_free(xtask_cache, ...) to reclaim
+// the object.
 extern kmem_cache *xtask_cache;
 
 static inline void sched_timer_queue_cancel(xtask *proc) {
@@ -63,11 +64,11 @@ static inline void wake_from_wait(xtask *p) {
   }
 }
 
-// wake_with_event: 持 target 的 scheduler_lock，仅当 target 处于 BLOCKED 且
-// wait_event == expected_event 时唤醒。event 不匹配则 no-op（lost wake-up
-// 安全： target 已被其它路径唤醒或不在该类等待）。在 bucket lock / socket_lock
-// 外调用。 收敛 futex.c / ipc.c 的"持 scheduler_lock + check +
-// wake_from_wait"重复写法。
+// wake_with_event: hold target's scheduler_lock; only wake if target is BLOCKED
+// and wait_event == expected_event.  Mismatched event is no-op (lost wake-up
+// safe: target was already woken by another path or not waiting on this event).
+// Call outside bucket lock / socket_lock.  Consolidates repeated
+// "hold scheduler_lock + check + wake_from_wait" pattern from futex.c / ipc.c.
 static inline void wake_with_event(xtask *target,
                                    wait_event expected_event) {
   int tcpu = target->assigned_cpu;
@@ -79,10 +80,12 @@ static inline void wake_with_event(xtask *target,
   spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, flags);
 }
 
-// wake_process_any: 中断任意阻塞态（用于 signal 投递——signal 应能打断
-// WAIT_FUTEX/WAIT_CHILD/WAIT_PIPE 等任意等待）。与 wake_process 的区别：
-// wake_process 窄语义只处理 IPC 类等待（PIPE/POLL/RECV），命中其它 event 即
-// ASSERT； wake_process_any 不区分 event，无条件唤醒 BLOCKED 状态的 target。
+// wake_process_any: interrupt any blocking state (for signal delivery --
+// signals must be able to interrupt WAIT_FUTEX/WAIT_CHILD/WAIT_PIPE, etc.).
+// Difference from wake_process: wake_process has narrow semantics, only handles
+// IPC-class waits (PIPE/POLL/RECV), ASSERTs on other events;
+// wake_process_any does not distinguish event type, unconditionally wakes any
+// BLOCKED target.
 static inline void wake_process_any(xtask *target) {
   int tcpu = target->assigned_cpu;
   uint64_t flags;
@@ -99,9 +102,9 @@ void process_entry(void);
 
 // Internal helpers
 #define AFFINITY_THRESHOLD                                                     \
-  1 // 亲和性阈值:偏好 CPU 负载与最小值差距 <= 此值时选偏好 CPU
+  1 // affinity threshold: prefer preferred CPU when its load <= min + this
 #define RECHECK_THRESHOLD                                                      \
-  2 // TOCTOU 重检阈值:队列已有 > 此值个等待任务时考虑换 CPU
+  2 // TOCTOU recheck threshold: consider switching CPU when queue has > this many waiters
 int sched_pick_cpu(void);
 int sched_pick_cpu_pref(int pref_cpu);
 uint64_t sched_build_kstack(uint64_t k_stack_top, uint64_t entry_rip);
@@ -111,10 +114,11 @@ uint64_t sched_build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
                                uint64_t user_rsp);
 
 // ===================== FPU state save/restore =====================
-// fxsave/fxrstor 本身是 FPU 指令，在 CR0.TS=1 时会触发 #NM。eager 模式下 TS
-// 恒为 0， clts 是冗余的 no-op，但保留作防御（若 TS 被意外设置，fxsave/fxrstor
-// 会嵌套 #NM → #DF）。 这两个 helper 是唯一允许操作 FPU
-// 状态的入口，从结构上杜绝"忘记 clts"。
+// fxsave/fxrstor are FPU instructions; they trigger #NM when CR0.TS=1.
+// In eager mode TS is always 0, so clts is a redundant no-op, but retained
+// as defense (if TS is accidentally set, fxsave/fxrstor would nest #NM -> #DF).
+// These two helpers are the only entry points for FPU state manipulation,
+// structurally preventing "forgot clts".
 static inline void kernel_fpu_save(void *buf) {
   __asm__ volatile("clts\n\t"
                    "fxsave (%0)" ::"r"(buf)
@@ -130,8 +134,9 @@ static inline void kernel_fpu_restore(void *buf) {
 void fpu_lazy_switch(xtask *t);
 void fpu_context_switch(xtask *prev, xtask *next);
 
-// 分配 FPU 状态页并初始化为合法 fxsave 镜像（memset 0 + MXCSR=0x1F80）。
-// 返回 1 成功 / 0 失败（bfc_alloc_page 失败）。调用者负责失败回滚。
+// Allocate an FPU state page and initialize it as a valid fxsave image
+// (memset 0 + MXCSR=0x1F80).  Returns 1 on success / 0 on failure
+// (bfc_alloc_page failed).  Caller is responsible for failure rollback.
 int xcore_fpu_alloc(xtask *t);
 
 #endif // KERNEL_XCORE_SCHED_H

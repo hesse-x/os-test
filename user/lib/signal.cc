@@ -21,8 +21,8 @@ int sigaction(int sig, const struct sigaction *act, struct sigaction *oldact) {
 int sigreturn(void) { return sys_sigreturn(); }
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
-  /* D11：sigprocmask = pthread_sigmask（POSIX 进程级掩码 = 线程级掩码，
-   * 本 OS 单线程进程语义一致）。 */
+  /* D11: sigprocmask = pthread_sigmask (POSIX process-level mask = thread-level mask;
+   * in this OS single-threaded processes have equivalent semantics). */
   return pthread_sigmask(how, set, oldset);
 }
 
@@ -40,20 +40,20 @@ sighandler_t signal(int sig, sighandler_t handler) {
   return old.sa_handler;
 }
 
-/* abort（D13）：先 raise(SIGABRT)；若被忽略/捕获，重置 SIGABRT 为 SIG_DFL
- * 再 raise，确保进程终止。 */
+/* abort (D13): first raise(SIGABRT); if ignored/caught, reset SIGABRT to SIG_DFL
+ * and raise again to ensure the process terminates. */
 void abort(void) {
   sigset_t set;
   sigemptyset(&set);
   sigaddset(&set, SIGABRT);
   sigprocmask(SIG_UNBLOCK, &set, NULL);
   raise(SIGABRT);
-  /* 仍存活 → handler 拦截了 SIGABRT，重置默认动作再 raise */
+  /* Still alive → a handler intercepted SIGABRT; reset to default action and raise */
   struct sigaction dfl;
   memset(&dfl, 0, sizeof(dfl));
   dfl.sa_handler = SIG_DFL;
   sigaction(SIGABRT, &dfl, NULL);
   raise(SIGABRT);
-  /* 不应到达 */
+  /* Should not reach here */
   _exit(127);
 }

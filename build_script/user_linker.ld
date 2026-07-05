@@ -1,6 +1,6 @@
-/* 用户态 ELF 链接脚本（静态主 ELF）
- * 基址 0x400000，含 TLS 段符号 + .init_array/.fini_array
- * 阶段 0 只需 TLS 符号；.init_array/.fini_array 在阶段 2b+3 启用
+/* Userspace ELF linker script (static main ELF)
+ * Base 0x400000, includes TLS section symbols + .init_array/.fini_array
+ * Phase 0 only needs TLS symbols; .init_array/.fini_array are enabled in phase 2b+3
  */
 ENTRY(_start)
 
@@ -21,7 +21,7 @@ SECTIONS
         *(.got)
     }
 
-    /* TLS 初始化数据段 */
+    /* TLS initialization data section */
     .tdata : {
         __tls_template_start = .;
         *(.tdata .tdata.*)
@@ -32,7 +32,7 @@ SECTIONS
     __tdata_size = SIZEOF(.tdata);
     __tdata_align = ALIGNOF(.tdata);
 
-    /* TLS BSS 段（运行时清零） */
+    /* TLS BSS section (zeroed at runtime) */
     .tbss (NOLOAD) : {
         __tbss_start = .;
         *(.tbss .tbss.*)

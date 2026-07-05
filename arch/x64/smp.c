@@ -151,15 +151,16 @@ __attribute__((no_sanitize("kernel-address"))) void smp_apply_cpu(int cpu_id) {
 }
 
 // ===================== Shared per-CPU bringup =====================
-// BSP (irq_init) 和 AP (ap_entry_c) 共用的 per-CPU 初始化：
-// GDT 应用 → 控制寄存器（NX/SSE）→ PAT → IDT → syscall MSRs → 能力日志。
-// smp_init_cpu 由调用方在 common 之前完成（BSP 在 irq_init，AP 由 smp_boot_aps
-// 代调）。 apic_init 不在此处：BSP 做全局 APIC 初始化（IOAPIC/中断路由），AP 走
-// per-CPU LAPIC enable。
+// Per-CPU initialization shared by BSP (irq_init) and AP (ap_entry_c):
+// GDT apply -> control registers (NX/SSE) -> PAT -> IDT -> syscall MSRs
+// -> capability log.
+// smp_init_cpu is called by the caller before the common path (BSP in
+// irq_init, AP through smp_boot_aps).  apic_init is NOT here: BSP does
+// global APIC init (IOAPIC/interrupt routing), AP does per-CPU LAPIC enable.
 void cpu_bringup_common(int cpu_id) {
   smp_apply_cpu(cpu_id);
-  enable_nx(); // CR4.NXDE + EFER.NXE（AP 也显式开，消除 trampoline 隐式依赖）
-  pat_init();   // PAT MSR（顺带修 BSP 之前没调 pat_init 的遗漏）
+  enable_nx(); // CR4.NXDE + EFER.NXE (AP opens explicitly too, removing implicit trampoline dependency)
+  pat_init();   // PAT MSR (also fixes the BSP omission of pat_init before the fix)
   enable_sse(); // CR4.OSFXSR + CR4.OSXMMEXCPT
   idt_install();
   setup_syscall();

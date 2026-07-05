@@ -12,9 +12,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <unity.h>
-// sched_yield() 已由 <unistd.h> 声明,无需 <sched.h>;且本 OS 无该头,
-// 尖括号会回退到宿主机 /usr/include/sched.h,拉入宿主机 struct timespec
-// 与我们的 xos/time.h 重定义冲突。
+// sched_yield() is already declared by <unistd.h>; no <sched.h> needed.
+// This OS does not have that header, and angle brackets would fall back to the
+// host's /usr/include/sched.h, pulling in the host's struct timespec which
+// conflicts with our xos/time.h (redefinition).
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -71,10 +72,12 @@ void test_pthread_mutex(void) {
   pthread_mutex_destroy(&test_mutex);
 }
 
-// ---- mutex stress：多线程高竞争 + randomized delay，覆盖三态 mutex 边界 ----
-// bug.md Bug 5 的回归测试：手搓三态 mutex 在 contention 标记竞态下会遗留
-// state=2 永久自旋。这里用 8 线程 × 5000 次加解锁 + 随机 yield 制造时序，
-// 若 mutex slow path 回归会表现为 counter 不等于预期或卡死。
+// ---- mutex stress: high-contention multithreaded + randomized delay,
+// exercising three-state mutex boundaries ----
+// Regression test for bug.md Bug 5: a hand-rolled three-state mutex under a
+// contention-flag race could leave state=2 spinning forever. Here we use
+// 8 threads × 5000 lock/unlock iterations + random yield to generate timing;
+// a mutex slow-path regression shows up as a counter mismatch or a hang.
 #define STRESS_THREADS 8
 #define STRESS_ITERS 5000
 static pthread_mutex_t stress_mutex;
@@ -86,7 +89,8 @@ static void *thread_stress_fn(void *arg) {
     pthread_mutex_lock(&stress_mutex);
     stress_counter++;
     pthread_mutex_unlock(&stress_mutex);
-    // 伪随机 yield 制造时序抖动，让 fast/slow path 都被覆盖
+    // Pseudo-random yield to introduce timing jitter so both fast and slow
+    // paths get covered.
     seed = seed * 1103515245u + 12345u;
     if ((seed & 0x7) == 0)
       sched_yield();
@@ -235,7 +239,8 @@ void test_pthread_main_exit_safe(void) {
   TEST_ASSERT_EQUAL_INT(
       0, pthread_create(&t, NULL, thread_main_exit_child_fn, NULL));
   pthread_join(t, NULL);
-  // 不调用 pthread_exit，避免终结整个测试进程；NULL-entry 路径由其它用例覆盖。
+  // Do not call pthread_exit, to avoid terminating the whole test process;
+  // the NULL-entry path is covered by other test cases.
 }
 
 static void *thread_guard_overflow_fn(void *arg) {
@@ -243,7 +248,7 @@ static void *thread_guard_overflow_fn(void *arg) {
   void *g = mmap(NULL, 4096, 0, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
   if (g == MAP_FAILED)
     return NULL;
-  *(volatile char *)g = 1; // 应触发 #PF
+  *(volatile char *)g = 1; // should trigger #PF
   return NULL;
 }
 void test_pthread_guard_pf(void) {

@@ -1,14 +1,14 @@
 #!/bin/bash
-# run.sh - QEMU 启动内核
-# 单盘 disk.img (两分区: ESP + 根 FAT32), 接 q35 ICH9 SATA (IDE 兼容总线 ide.0)
-# UEFI 从 ESP 分区引导 BOOTX64.EFI → 加载 myos.elf + init.elf
+# run.sh - QEMU boots the kernel
+# Single-disk disk.img (two partitions: ESP + root FAT32), connected to q35 ICH9 SATA (IDE-compatible bus ide.0)
+# UEFI boots from the ESP partition BOOTX64.EFI → loads myos.elf + init.elf
 #
-# 串口输出默认写入 log.txt，可通过 -o <file> 指定；串口输入需通过 socat 连接:
+# Serial output is written to log.txt by default, can be specified via -o <file>; serial input requires socat connection:
 #   socat -,rawer UNIX-CONNECT:/tmp/qemu-serial.sock 2>&1 | tee -a <logfile>
-# monitor 在 stdio（可输入 QEMU monitor 命令）
+# monitor on stdio (can input QEMU monitor commands)
 #
-# -s: 启用 GDB 远程调试（默认关闭）
-# -o <file>: 串口输出写入指定文件（默认 log.txt）
+# -s: enable GDB remote debug (off by default)
+# -o <file>: serial output written to the specified file (default log.txt)
 
 LOGFILE=log.txt
 

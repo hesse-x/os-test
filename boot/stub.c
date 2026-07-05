@@ -4,22 +4,22 @@
  * SPDX-License-Identifier: MIT
  */
 
-// boot/stub.c - 独立 EFI bootloader
-// 从 FAT32 读取 myos.elf，加载到物理地址，设置 boot_info，跳转内核
+// boot/stub.c - standalone EFI bootloader
+// Read myos.elf from FAT32, load to physical address, set up boot_info, jump to kernel
 #include "boot/boot.h"
 #include <efi.h>
 #include <efilib.h>
 #include <stdint.h>
 #include <xos/elf.h>
 
-// EFI 内存映射缓冲区
+// EFI memory map buffer
 #define MMAP_BUF_SIZE (4096 * 4)
 static UINT8 mmap_buf[MMAP_BUF_SIZE] __attribute__((aligned(16)));
 
-// boot_info 实例
+// boot_info instance
 static struct boot_info bi;
 
-// ===================== ELF 加载 =====================
+// ===================== ELF loading =====================
 static EFI_STATUS load_elf(EFI_FILE_PROTOCOL *file, UINT64 *entry_addr) {
   Elf64_Ehdr ehdr;
   UINTN size = sizeof(ehdr);
@@ -75,14 +75,15 @@ static EFI_STATUS load_elf(EFI_FILE_PROTOCOL *file, UINT64 *entry_addr) {
   return EFI_SUCCESS;
 }
 
-// ===================== 加载整个文件到内存 =====================
-// 读取 file 的全部内容到一段 AllocatePages 分配的物理内存。
-// 返回分配的物理地址（*out_phys）和字节数（*out_size）。
-// 失败返回 EFI 错误码；调用者负责在失败路径上释放已分配的页面。
+// ===================== Load entire file into memory =====================
+// Read the entire contents of file into a physical memory region allocated via AllocatePages.
+// Returns the allocated physical address (*out_phys) and byte count (*out_size).
+// On failure returns an EFI error code; the caller is responsible for freeing
+// already-allocated pages on the failure path.
 static EFI_STATUS load_file_to_mem(EFI_FILE_PROTOCOL *file,
                                    EFI_PHYSICAL_ADDRESS *out_phys,
                                    UINT64 *out_size) {
-  // 先取文件大小
+  // First get the file size
   EFI_STATUS st =
       uefi_call_wrapper(file->SetPosition, 2, file, 0xFFFFFFFFFFFFFFFFULL);
   if (EFI_ERROR(st))
@@ -91,14 +92,14 @@ static EFI_STATUS load_file_to_mem(EFI_FILE_PROTOCOL *file,
   st = uefi_call_wrapper(file->GetPosition, 2, file, &file_size);
   if (EFI_ERROR(st))
     return st;
-  // 回到文件头
+  // Seek back to file head
   st = uefi_call_wrapper(file->SetPosition, 2, file, 0);
   if (EFI_ERROR(st))
     return st;
 
-  // 分配页面对齐的物理内存（向上取整到 4KB 页）
-  // EfiLoaderData: 归 loader 拥有，ExitBootServices 后固件不回收，
-  // 内核页表映射后可直接访问（Linux initrd 同款做法）。
+  // Allocate page-aligned physical memory (rounded up to 4KB pages)
+  // EfiLoaderData: owned by the loader, firmware does not reclaim after ExitBootServices,
+  // accessible directly after kernel page table mapping (same approach as Linux initrd).
   UINTN npages = (UINTN)((file_size + 4095) / 4096);
   EFI_PHYSICAL_ADDRESS phys = 0;
   st = uefi_call_wrapper(BS->AllocatePages, 4, AllocateAnyPages, EfiLoaderData,
@@ -108,7 +109,7 @@ static EFI_STATUS load_file_to_mem(EFI_FILE_PROTOCOL *file,
     return st;
   }
 
-  // 一次性读完整个文件
+  // Read the entire file at once
   UINTN want = (UINTN)file_size;
   st = uefi_call_wrapper(file->Read, 3, file, &want, (void *)phys);
   if (EFI_ERROR(st) || want != (UINTN)file_size) {
@@ -123,10 +124,10 @@ static EFI_STATUS load_file_to_mem(EFI_FILE_PROTOCOL *file,
   return EFI_SUCCESS;
 }
 
-// ===================== 打开文件 =====================
-// 从 BOOTX64.EFI 所在的卷（disk.img 的 ESP 分区）打开文件。
-// 用 LoadedImage 定位装载 BOOTX64.EFI 的设备 handle，保证拿到 ESP
-// 而非根分区或其他磁盘的 FAT32。
+// ===================== Open file =====================
+// Open the file from the volume where BOOTX64.EFI resides (the ESP partition of disk.img).
+// Use LoadedImage to locate the device handle that loaded BOOTX64.EFI, ensuring we get the ESP
+// rather than the root partition or another disk's FAT32.
 static EFI_STATUS open_file(EFI_HANDLE ImageHandle, EFI_FILE_PROTOCOL **file,
                             CHAR16 *name) {
   EFI_LOADED_IMAGE *li;
@@ -160,7 +161,7 @@ static EFI_STATUS open_file(EFI_HANDLE ImageHandle, EFI_FILE_PROTOCOL **file,
   return st;
 }
 
-// ===================== 获取 RSDP =====================
+// ===================== Get RSDP =====================
 static void read_rsdp(EFI_SYSTEM_TABLE *SystemTable) {
   for (UINTN i = 0; i < SystemTable->NumberOfTableEntries; i++) {
     EFI_GUID acpi_guid = ACPI_20_TABLE_GUID;
@@ -207,7 +208,7 @@ EFI_STATUS exit_bs(EFI_SYSTEM_TABLE *SystemTable, EFI_HANDLE ImageHandle) {
   return st;
 }
 
-// ===================== 跳转内核 =====================
+// ===================== Jump to kernel =====================
 __attribute__((noreturn)) static void jump_to_kernel(UINT64 entry_vaddr) {
   UINT64 entry_phys = entry_vaddr - VMA_BASE;
   typedef void (*kernel_entry_t)(struct boot_info *);

@@ -724,7 +724,7 @@ static void xhci_init_keyboard() {
       // Initialize HID SHM header in the new page (same as original init)
       void *new_virt = (__force void *)phys_to_virt(
           (__force phys_addr_t)hid_shm->page_list[0]);
-      usb_hid_shm_header_t *hdr = (usb_hid_shm_header_t *)new_virt;
+      usb_hid_shm_header *hdr = (usb_hid_shm_header *)new_virt;
       hdr->magic = USB_HID_SHM_MAGIC;
       hdr->version = USB_HID_SHM_VERSION;
       // Sub-ring descriptors (same offsets as original init)

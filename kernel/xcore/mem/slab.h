@@ -15,8 +15,8 @@
 #include <stdint.h>
 #include <xos/syscall.h> // struct kernel_mem_stats (shared kernel/user layout)
 
-#define KMALLOC_SHIFT_LOW 3   // 最小 class = 8B
-#define KMALLOC_SHIFT_HIGH 11 // 最大 class = 2048B
+#define KMALLOC_SHIFT_LOW 3   // minimum class = 8B
+#define KMALLOC_SHIFT_HIGH 11 // maximum class = 2048B
 
 // ===================== Kernel memory accounting =====================
 // struct kernel_mem_stats comes from xos/syscall.h (shared kernel/user
@@ -41,13 +41,13 @@ static inline void memstat_set(int *field, int val) {
 }
 
 typedef struct kmem_cache {
-  size_t obj_size;     // 对象大小
-  size_t redzone_size; // 红区大小（当前 = 0）
-  spinlock lock;     // per-cache 锁（保护 partial list）
-  Page *partial;       // 有空闲对象的 slab 链表
+  size_t obj_size;     // object size
+  size_t redzone_size; // redzone size (currently = 0)
+  spinlock lock;     // per-cache lock (protects partial list)
+  Page *partial;       // slab list with free objects
 } kmem_cache;
 
-// 全局 kmalloc cache 数组
+// Global kmalloc cache array
 extern kmem_cache kmalloc_caches[NUM_KMALLOC_CLASSES];
 
 static inline int size_to_class(size_t size) {
@@ -79,13 +79,15 @@ void *kcalloc(size_t n, size_t size) __must_check
 void *krealloc(void *ptr, size_t new_size) __must_check
     __attribute__((no_sanitize("kernel-address")));
 
-// ===================== 专用 slab cache API（Linux
-// 风格精简版）===================== 用于固定大小、长生命周期对象的专用
-// cache（如 xtask）。对象池复用，零内部碎片。 精简版：仅 name +
-// obj_size，不预留 ctor/align/flags（洁优先，未来需要再扩）。
+// ===================== Dedicated slab cache API (Linux-style
+// streamlined)===================== Dedicated cache for fixed-size,
+// long-lived objects (e.g. xtask). Object pool reuse, zero internal
+// fragmentation. Streamlined version: only name + obj_size, no
+// ctor/align/flags reserved (keep it simple, extend later if needed).
 //
-// 与 kmalloc 的区别：kmalloc 走固定 size class（8..2048），对象大小对齐到
-// class； kmem_cache_create 用精确 obj_size 初始化页内 freelist，对象更紧凑。
+// Difference from kmalloc: kmalloc uses fixed size classes (8..2048),
+// object size aligned to class; kmem_cache_create uses exact obj_size to
+// initialize in-page freelist, objects are more compact.
 kmem_cache *kmem_cache_create(const char *name, size_t obj_size) __must_check
     __attribute__((no_sanitize("kernel-address")));
 void *kmem_cache_alloc(kmem_cache *cache) __must_check

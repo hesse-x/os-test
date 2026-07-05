@@ -246,7 +246,7 @@ long display_ioctl(uint32_t cmd, void *arg) {
     uint64_t t1 = rdtsc64();
     uint64_t delta = t1 - t0;
     uint64_t us = delta / (tsc_per_ms / 1000);
-    serial_printf("flip: rows=%u/%u bytes=%u tsc=%lu us=%lu\n", copy_rows, rows,
+    SERIAL_PRINTF("flip: rows=%u/%u bytes=%u tsc=%lu us=%lu\n", copy_rows, rows,
                   copy_bytes, delta, us);
 #endif
     return 0;

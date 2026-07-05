@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-// ld.so 重定位：10 种类型（9 PIC + COPY）+ eager binding + 诊断 hard-fail
+// ld.so relocation: 10 types (9 PIC + COPY) + eager binding + diagnostic hard-fail
 // ld.md §3.3.4, §3.3.6, §5.4 / plan_ld2b3 T16
 
 #include <stddef.h>
@@ -13,7 +13,7 @@
 #include <xos/elf.h>
 #include <xos/syscall_nums.h>
 
-// bootstrap 阶段辅助（hidden）
+// bootstrap stage helpers (hidden)
 __attribute__((visibility("hidden"))) void dl_puts(const char *s);
 __attribute__((visibility("hidden"))) void dl_put_hex(uint64_t val);
 
@@ -28,22 +28,24 @@ lookup_symbol_def(const char *name, struct link_map *lmap,
 __attribute__((visibility("hidden"))) void *memcpy(void *dst, const void *src,
                                                    unsigned long n);
 
-// 取符号名：symtab[sym_idx].st_name + strtab
+// get symbol name: symtab[sym_idx].st_name + strtab
 static const char *sym_name(struct link_map *l, uint32_t sym_idx) {
   Elf64_Sym *symtab = (Elf64_Sym *)l->symtab;
   const char *strtab = l->strtab;
   return strtab + symtab[sym_idx].st_name;
 }
 
-// 符号查找从全局作用域头（_dl_link_map = 主 ELF）起遍历，与 eager_bind 一致。
-// 链表顺序 main → ld → libs：若从被重定位对象 lmap 起前向遍历，会漏掉排在它
-// 前面的 ld.so 符号（如 _dl_link_map），故必须从 head 查。
-// （R_X86_64_COPY 仍特殊：从 lmap->l_next 起查，跳过主 ELF 自身 .bss 副本）
+// symbol lookup walks from global scope head (_dl_link_map = main ELF), consistent with eager_bind.
+// list order main -> ld -> libs: if we walked forward starting from the relocated
+// object lmap, we would miss ld.so symbols ahead of it (e.g. _dl_link_map), so we
+// must look up from head.
+// (R_X86_64_COPY is still special: lookup starts from lmap->l_next, skipping the
+// main ELF's own .bss copy)
 static void *lookup_global(const char *name) {
   return lookup_symbol_in_link_map(name, _dl_link_map);
 }
 
-// 应用单条重定位
+// apply a single relocation
 void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
   uint32_t type = ELF64_R_TYPE(r->r_info);
   uint32_t sym_idx = ELF64_R_SYM(r->r_info);
@@ -56,12 +58,12 @@ void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
     break;
 
   case R_X86_64_COPY: {
-    // 仅非 PIE 主 ELF 引用 libc.so 可写全局（errno/stdout/stdin/stderr 等）
-    // 语义：从定义方（libc.so）拷贝 sym.st_size 字节到主 ELF .bss（r_offset
-    // 处） 主 ELF 持有独立副本，后续主 ELF 内引用解析到自身副本，与 libc.so
-    // 隔离
+    // only non-PIE main ELF references writable libc.so globals (errno/stdout/stdin/stderr etc.)
+    // semantics: copy sym.st_size bytes from the definer (libc.so) into the main ELF .bss (at r_offset)
+    // the main ELF holds an independent copy; subsequent references inside the main ELF resolve to
+    // its own copy, isolated from libc.so
     const char *name = sym_name(lmap, sym_idx);
-    // 从 lmap->l_next 起查（跳过主 ELF 自身，避免自引用 memcpy）
+    // look up starting from lmap->l_next (skip main ELF itself, avoid self-referential memcpy)
     struct link_map *def_map = NULL;
     Elf64_Sym *def_sym = lookup_symbol_def(name, lmap->l_next, &def_map);
     if (!def_sym || !def_map)
@@ -91,22 +93,22 @@ void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
   }
 
   case R_X86_64_GOTPCREL: {
-    // plan_ld2b3 决策 6：两步但**不改指令 disp**
-    // 指令形式 mov foo@GOTPCREL(%rip), %reg
-    // disp 字段在指令末尾前 4 字节，r_offset 指向 disp 字段位置
-    // instr_end = r_offset + 4（即 disp 之后的地址 = 下条指令地址）
-    // got_entry = instr_end + disp（RIP-relative 计算）
-    // 填 *got_entry = sym，disp 不改（保持 RIP-relative 寻址正确）
+    // plan_ld2b3 decision 6: two-step but **do not modify instruction disp**
+    // instruction form: mov foo@GOTPCREL(%rip), %reg
+    // the disp field is the 4 bytes before the instruction end; r_offset points to the disp field
+    // instr_end = r_offset + 4 (address after disp = next instruction address)
+    // got_entry = instr_end + disp (RIP-relative computation)
+    // fill *got_entry = sym, leave disp unchanged (keeps RIP-relative addressing correct)
     const char *name = sym_name(lmap, sym_idx);
     void *sym = lookup_global(name);
     if (!sym)
       goto unresolved;
-    // 从指令读静态 disp（disp 字段紧跟 r_offset 位置，4 字节）
+    // read static disp from instruction (disp field immediately follows r_offset position, 4 bytes)
     int32_t disp = *(int32_t *)addr;
     uintptr_t instr_end = (uintptr_t)addr + 4;
     uintptr_t got_entry = instr_end + disp;
     *(uintptr_t *)got_entry = (uintptr_t)sym;
-    // disp 不改
+    // disp unchanged
     break;
   }
 
@@ -150,8 +152,8 @@ void apply_relocation(Elf64_Rela *r, void *base, struct link_map *lmap) {
       dl_puts(sym_name(lmap, sym_idx));
       dl_puts("'");
     }
-    // TLS 重定位类型（16-23, 35-36）：共享库内 __thread 变量触发
-    // ld.so 暂未实现 __tls_get_addr / TLS descriptor，需改用 TCB 字段
+    // TLS relocation types (16-23, 35-36): triggered by __thread variables inside shared libs
+    // ld.so does not yet implement __tls_get_addr / TLS descriptor; must use TCB fields
     if (type >= 16 && type <= 23) {
       dl_puts(
           " [TLS reloc: ld.so no __tls_get_addr; use TCB field, not __thread]");
@@ -187,7 +189,7 @@ unresolved:
     ;
 }
 
-// eager binding：遍历 .rela.plt，立即解析每个 JUMP_SLOT
+// eager binding: walk .rela.plt, immediately resolve each JUMP_SLOT
 void eager_bind(struct link_map *l) {
   Elf64_Rela *plt_rela = (Elf64_Rela *)l->rela_plt;
   size_t plt_sz = l->rela_plt_sz;
@@ -201,7 +203,7 @@ void eager_bind(struct link_map *l) {
 
     uint32_t sym_idx = ELF64_R_SYM(r->r_info);
     const char *name = sym_name(l, sym_idx);
-    // 从前驱链表查（主 ELF 优先，再 libc.so，再 ld.so）
+    // look up from predecessor list (main ELF first, then libc.so, then ld.so)
     void *sym = lookup_symbol_in_link_map(name, _dl_link_map);
     if (!sym) {
       dl_puts("dl: FATAL: unresolved PLT symbol '");
@@ -223,5 +225,5 @@ void eager_bind(struct link_map *l) {
   }
 }
 
-// _dl_link_map 声明（link_map.c 定义）
+// _dl_link_map declaration (defined in link_map.c)
 extern struct link_map *_dl_link_map;

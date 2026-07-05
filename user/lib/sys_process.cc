@@ -21,7 +21,8 @@ pid_t fork(void) {
 }
 
 int execve(const char *pathname, char *const argv[], char *const envp[]) {
-  /* envp 为 NULL 时默认传 environ（D9 模型，继承当前环境） */
+  /* When envp is NULL, default to environ (D9 model, inheriting the current
+   * environment) */
   return sys_execve(pathname, argv, envp ? envp : environ);
 }
 

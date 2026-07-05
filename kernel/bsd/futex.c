@@ -5,7 +5,8 @@
  */
 
 // kernel/bsd/futex.c — Futex implementation (anon key: cr3 + page_off)
-// 阶段 3b→C5: FUTEX_WAIT / FUTEX_WAKE + timeout + EINTR + bucket lock irqsave
+// Phase 3b -> C5: FUTEX_WAIT / FUTEX_WAKE + timeout + EINTR + bucket lock
+// irqsave
 
 #include "kernel/bsd/futex.h"
 #include "arch/x64/smp.h"
@@ -49,7 +50,7 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   uint32_t val = (uint32_t)arg3;
   xtask *cur = current_task;
 
-  // 只支持 FUTEX_WAIT / FUTEX_WAKE
+  // Only FUTEX_WAIT / FUTEX_WAKE are supported
   int real_op = op & 0x7f;
   if (real_op != FUTEX_WAIT && real_op != FUTEX_WAKE)
     return (int64_t)-ENOSYS;
@@ -59,16 +60,21 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   struct futex_bucket *bucket = &futex_table[futex_hash(&key)];
 
   if (real_op == FUTEX_WAKE) {
-// 收集 waiter 后释放 bucket lock 再唤醒：wake_with_event 会取 target 的
-// scheduler_lock，持 bucket lock 唤醒会形成 bucket→scheduler 锁序嵌套。
+// Collect waiters then release the bucket lock before waking: wake_with_event
+// takes the target's scheduler_lock, so waking while holding the bucket lock
+// would form a bucket->scheduler lock-order nesting.
 //
-// 注意：曾在栈上分配 xtask *to_wake[MAX_PROC]（8KB）收集 waiter，但
-// 内核栈仅 2 页（8KB），该数组直接占满整栈并向下溢出，踩坏栈下方相邻的
-// slab 对象（典型现象：sys_exit 的 clear_tid futex_wake 后 signal->parent_pid
-// 变成栈残留垃圾，do_exit 访问 parent->proc->sig_pending 触发 #PF）。
-// 改为分批：每批用小固定数组收集 ≤32 个并唤醒，循环至 wake 满 val 个
-// 或 bucket 无更多匹配 waiter。futex wake 语义是"最多唤醒 val 个"，分批
-// 等价。val 来自用户态不可信，分批同时规避了大 val 的栈/堆开销。
+// Note: we previously allocated xtask *to_wake[MAX_PROC] (8KB) on the stack to
+// collect waiters, but the kernel stack is only 2 pages (8KB); that array
+// filled the whole stack and overflowed downward, corrupting the slab object
+// adjacent below the stack (typical symptom: after sys_exit's clear_tid
+// futex_wake, signal->parent_pid became stack-residual garbage, and do_exit's
+// access to parent->proc->sig_pending triggered #PF).
+// Switched to batching: each batch uses a small fixed array to collect <= 32
+// waiters and wakes them, looping until val waiters have been woken or the
+// bucket has no more matching waiters. futex wake semantics is "wake at most
+// val", so batching is equivalent. val comes from user space and is untrusted;
+// batching also avoids the stack/heap overhead of a large val.
 #define FUTEX_WAKE_BATCH 32
     int total_woken = 0;
     while (total_woken < (int)val) {
@@ -95,7 +101,7 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       }
       total_woken += nwake;
       if (nwake < batch)
-        break; // bucket 已无更多匹配 waiter
+        break; // bucket has no more matching waiters
     }
     printk(LOG_DEBUG, "futex WAKE: pid=%d uaddr=%p val=%d nwake=%d\n",
            (int)cur->pid, (void *)uaddr, (int)val, total_woken);
@@ -104,7 +110,7 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
 
   // FUTEX_WAIT
-  // 1. 持锁验值（防 lost wake-up）+ 入队
+  // 1. Verify the value under lock (prevent lost wake-up) + enqueue
   uint64_t bflags;
   spin_lock_irqsave(&bucket->lock, &bflags);
   uint32_t cur_val;
@@ -138,7 +144,7 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     has_timeout = 1;
   }
 
-  // 2. 设 BLOCKED（持 bucket lock 防 lost-wakeup 窗口）
+  // 2. Set BLOCKED (hold bucket lock to close the lost-wakeup window)
   int cpu = cur->assigned_cpu;
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
@@ -153,7 +159,7 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   spin_unlock_irqrestore(&bucket->lock, bflags);
   schedule();
 
-  // 3. 唤醒后清理 + 返回值判定
+  // 3. Post-wakeup cleanup + return value decision
   int64_t ret_val = 0;
   if (signal_pending_hook && signal_pending_hook(cur))
     ret_val = (int64_t)-EINTR;

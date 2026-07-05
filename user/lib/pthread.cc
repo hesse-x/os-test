@@ -60,27 +60,28 @@ struct thread_entry {
 };
 static struct thread_entry thread_table[MAX_PROC];
 
-static volatile int __thread_table_lock = 0;
-static inline void __thread_table_lock_fn(void) {
-  // __atomic_test_and_set 返回旧值：旧值!=0（已锁）返回 true
-  // 需重试，旧值==0（未锁） 返回 false 获得锁。故条件为
-  // while(__atomic_test_and_set(...))。 之前误写成 while(!...)
-  // 导致逻辑反转：锁空闲时反而进循环自旋，锁被持有时反而
-  // 立即"获得"（与持有者并发进入临界区）。单线程下靠 sched_yield 后第二次重试
-  // 偶然退出而"能工作"；多线程竞争 stress 场景下表现为永久 sched_yield 不返回
-  // （bug.md Bug 2：test_futex_stress 第一个 pthread_create 卡在
-  // thread_table_activate）。
-  while (__atomic_test_and_set(&__thread_table_lock, __ATOMIC_ACQUIRE)) {
+static volatile int thread_table_lock = 0;
+static inline void thread_table_lock_fn(void) {
+  // __atomic_test_and_set returns the old value: old!=0 (already locked) returns true
+  // and needs retry; old==0 (unlocked) returns false and acquires the lock. Hence the
+  // condition is while(__atomic_test_and_set(...)). Previously miswritten as while(!...),
+  // which inverted the logic: when the lock was free it span, and when held it
+  // immediately "acquired" (entering the critical section concurrently with the holder).
+  // Under single-threading it "worked" by accidentally exiting on the second retry after
+  // sched_yield; under multi-threaded stress it manifested as sched_yield never returning
+  // (bug.md Bug 2: test_futex_stress's first pthread_create stuck in
+  // thread_table_activate).
+  while (__atomic_test_and_set(&thread_table_lock, __ATOMIC_ACQUIRE)) {
     sched_yield();
   }
 }
-static inline void __thread_table_unlock_fn(void) {
-  __atomic_clear(&__thread_table_lock, __ATOMIC_RELEASE);
+static inline void thread_table_unlock_fn(void) {
+  __atomic_clear(&thread_table_lock, __ATOMIC_RELEASE);
 }
 
-// 认领一个空闲 slot，置 CLAIMED。持 __thread_table_lock 调用。
+// Claim a free slot and mark it CLAIMED. Called holding thread_table_lock.
 static struct thread_entry *thread_table_claim(struct tcb *tcb) {
-  __thread_table_lock_fn();
+  thread_table_lock_fn();
   for (int i = 0; i < MAX_PROC; i++) {
     if (thread_table[i].state == SLOT_FREE) {
       thread_table[i].state = SLOT_CLAIMED;
@@ -92,26 +93,26 @@ static struct thread_entry *thread_table_claim(struct tcb *tcb) {
       thread_table[i].stack_base = NULL;
       thread_table[i].stack_alloc_size = 0;
       tcb->entry = &thread_table[i];
-      __thread_table_unlock_fn();
+      thread_table_unlock_fn();
       return &thread_table[i];
     }
   }
-  __thread_table_unlock_fn();
+  thread_table_unlock_fn();
   return NULL;
 }
 
-// clone 后回填 tid 并置 LIVE。持 __thread_table_lock 调用。
+// Backfill tid after clone and mark LIVE. Called holding thread_table_lock.
 static void thread_table_activate(struct thread_entry *e, pid_t tid,
                                   volatile int32_t *clear_tid_addr) {
-  __thread_table_lock_fn();
+  thread_table_lock_fn();
   e->tid = tid;
   e->clear_tid_addr = clear_tid_addr;
   e->state = SLOT_LIVE;
-  __thread_table_unlock_fn();
+  thread_table_unlock_fn();
 }
 
 static struct thread_entry *thread_table_find(pid_t tid) {
-  // 无锁读：tid 在 LIVE 期间不变，调用方持引用
+  // Lock-free read: tid is stable during LIVE, caller holds a reference
   for (int i = 0; i < MAX_PROC; i++) {
     if (thread_table[i].state == SLOT_LIVE && thread_table[i].tid == tid)
       return &thread_table[i];
@@ -120,17 +121,17 @@ static struct thread_entry *thread_table_find(pid_t tid) {
 }
 
 // ===================== __libc_clone_thread (asm trampoline)
-// ===================== 不能用纯 C wrapper：clone child 从 syscall
-// 返回后仍在父栈帧里（rbp 指向父栈），
-// __syscall5 的 epilogue (leave; ret) 会把 rsp 切回父栈，导致 child
-// 在父栈上执行。
+// ===================== Cannot use a pure C wrapper: after the clone child returns
+// from the syscall it is still in the parent's stack frame (rbp points at the parent
+// stack), and __syscall5's epilogue (leave; ret) would switch rsp back to the parent
+// stack, causing the child to execute on the parent stack.
 //
-// 用内联汇编直接发 syscall，child 返回 0 后在汇编里：
-//   1. 重设 rsp 到 child_stack_top（与内核 trapframe 一致）
-//   2. 清 rbp（child 栈是空的，无栈帧）
-//   3. 从 TCB（%fs:0）读 start_routine / arg
-//   4. 调用 start_routine，再 pthread_exit
-// 父线程正常返回 rax（child tid 或负 errno）。
+// We issue the syscall directly via inline asm; after the child returns 0 the asm:
+//   1. Resets rsp to child_stack_top (matching the kernel trapframe)
+//   2. Clears rbp (child stack is empty, no frame)
+//   3. Reads start_routine / arg from the TCB (%fs:0)
+//   4. Calls start_routine, then pthread_exit
+// The parent thread returns normally in rax (child tid or negative errno).
 extern "C" int64_t __libc_clone_thread(uint64_t flags, uint64_t stack_top,
                                        uint64_t parent_tid, uint64_t child_tid,
                                        uint64_t tls, uint64_t clone_info) {
@@ -146,14 +147,14 @@ extern "C" int64_t __libc_clone_thread(uint64_t flags, uint64_t stack_top,
   __asm__ volatile(
       "syscall\n"
       "testq %%rax, %%rax\n"
-      "jnz 1f\n" // parent: rax != 0, 跳到 1:
+      "jnz 1f\n" // parent: rax != 0, jump to 1:
       // child: rax == 0
-      "movq %%rsi, %%rsp\n"        // rsp = stack_top（child 栈）
-      "xorq %%rbp, %%rbp\n"        // 清 rbp（无栈帧）
+      "movq %%rsi, %%rsp\n"        // rsp = stack_top (child stack)
+      "xorq %%rbp, %%rbp\n"        // clear rbp (no frame)
       "movq %%fs:0, %%rdi\n"       // rdi = tcb = %fs:0
       "movq 0x438(%%rdi), %%rax\n" // rax = tcb->start_routine
-      "movq 0x440(%%rdi), %%rdi\n" // rdi = tcb->arg（同时覆盖 tcb，作为
-                                   // start_routine 的第一参数）
+      "movq 0x440(%%rdi), %%rdi\n" // rdi = tcb->arg (also overwrites tcb, becoming
+                                   // the first argument to start_routine)
       "callq *%%rax\n"             // start_routine(arg)
       "movq %%rax, %%rdi\n"        // pthread_exit(retval)
       "callq pthread_exit\n"
@@ -264,12 +265,14 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
   }
 
   pid_t tid = (pid_t)r;
-  // new_tcb->tid 已由内核 CLONE_CHILD_SETTID 写入；此处不再覆盖，
-  // 否则子线程先退出写 0 后会被父线程覆盖成非 0，join 永远等不到 0。
-  // 不变量：clone 返回后 tid 只可能是 tid（内核写入值）或 0（子线程已退出
-  // 并经 clear_tid_addr 清 0）。若出现第三种值，说明有人多写了一次
-  // （bug.md Bug 2 根因之一）或 CLONE_CHILD_SETTID 写入了错误的值。
-  // 纯检查，不改语义。
+  // new_tcb->tid was written by the kernel via CLONE_CHILD_SETTID; do not overwrite it
+  // here, otherwise if the child exits first (writing 0) the parent could overwrite it
+  // with a non-zero value and join would never see 0.
+  // Invariant: after clone returns, tid can only be tid (the kernel-written value) or 0
+  // (child already exited and cleared via clear_tid_addr). A third value means someone
+  // wrote it an extra time (one of the root causes of bug.md Bug 2) or
+  // CLONE_CHILD_SETTID wrote the wrong value.
+  // Pure check, does not change semantics.
   pid_t observed = __atomic_load_n(&new_tcb->tid, __ATOMIC_ACQUIRE);
   assert(observed == tid || observed == 0);
   thread_table_activate(slot, tid, &new_tcb->tid);
@@ -316,12 +319,12 @@ void pthread_exit(void *retval) {
     // Must do BEFORE sys_exit — after that the kernel unmaps TLS/stack,
     // so tcb and clear_tid_addr become inaccessible (UAF/page fault).
     if (tcb->entry->detached) {
-      __thread_table_lock_fn();
+      thread_table_lock_fn();
       tcb->entry->state = SLOT_FREE;
       tcb->entry->tid = 0;
       tcb->entry->clear_tid_addr = NULL;
       tcb->entry->detached = 0;
-      __thread_table_unlock_fn();
+      thread_table_unlock_fn();
     }
   }
 
@@ -474,18 +477,18 @@ int pthread_mutex_lock(pthread_mutex_t *mutex) {
   while (!__atomic_compare_exchange_n(&mutex->state, &expected, 1, 0,
                                       __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
     if (expected == 1) {
-      // 尝试标记 contention：state 1→2。若返回 0 说明 holder 在此间隙 unlock
-      // 了（state 已被设为 0），此时不能 futex_wait（val=2≠0 必 EAGAIN 且无
-      // waker）， 也不能遗留 state=2（否则后续 CAS 永远失败 → 永久自旋）。还原
-      // state=0 后跳过 futex_wait 回 fast-path 重试（避免一次注定 EAGAIN 的
-      // syscall）。
+      // Try to mark contention: state 1→2. If it returns 0, the holder unlocked during
+      // this window (state was reset to 0); we cannot futex_wait (val=2≠0 would EAGAIN
+      // with no waker), nor leave state=2 (later CAS would fail forever → infinite
+      // spin). Restore state=0 and skip futex_wait to retry the fast-path (avoiding a
+      // syscall guaranteed to EAGAIN).
       uint32_t prev = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
       if (prev == 0) {
         __atomic_store_n(&mutex->state, 0, __ATOMIC_RELEASE);
         expected = 0;
         continue;
       } else if (prev != 1) {
-        // prev==2：他人已标记 contention，直接 wait
+        // prev==2: someone else already marked contention, just wait
       }
       sys_futex(&mutex->state, FUTEX_WAIT, 2, NULL, NULL, 0);
     }
@@ -550,13 +553,13 @@ int pthread_mutex_timedlock(pthread_mutex_t *mutex,
         expected = 0;
         continue;
       } else if (prev != 1) {
-        // prev==2: 他人已标记 contention
+        // prev==2: someone else already marked contention
       }
       int64_t r = sys_futex((uint32_t *)&mutex->state, FUTEX_WAIT, 2,
                             (const void *)abstime, NULL, 0);
       // sys_futex wrapper: negative kernel return → errno = -r, return -1
       if (r < 0 && errno == ETIMEDOUT) {
-        // 内核已自摘节点；用户态 CAS 2→0 + wake
+        // Kernel already removed the waiter; userspace CAS 2→0 + wake
         uint32_t exp = 2;
         if (__atomic_compare_exchange_n(&mutex->state, &exp, 0, 0,
                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
@@ -564,7 +567,7 @@ int pthread_mutex_timedlock(pthread_mutex_t *mutex,
         }
         return ETIMEDOUT;
       }
-      // r == 0 (wake) 或 r == -EINTR (signal): 重试，不返回 EINTR
+      // r == 0 (wake) or r == -EINTR (signal): retry, do not return EINTR
     }
     expected = 0;
   }

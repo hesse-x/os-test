@@ -149,7 +149,7 @@ void check_pending_signals(trapframe_t *tf) {
   if (!proc || !proc->proc)
     return;
 
-  // group_exit 检查（最高优先级）
+  // group_exit check (highest priority)
   if (proc->proc->signal->group_exit) {
     sys_exit_group(proc->proc->signal->group_exit_code, 0, 0, 0, 0, 0);
     return; // unreachable
@@ -179,19 +179,23 @@ void check_pending_signals(trapframe_t *tf) {
       spin_unlock(&proc->proc->signal->sig_lock);
     }
 
-    // bug.md Bug 2 (ls 卡死): 无信号也要返用户态,必须 break 落到循环后的
-    // 抢占点 while(need_resched) schedule()。原 `return` 使该点对所有"返用户态"
-    // 路径不可达 → need_resched 置了不兑现 → shell 永不被调度。
+    // bug.md Bug 2 (ls hang): even with no signal we must return to user
+    // mode, must break to fall through to the preemption point
+    // while(need_resched) schedule() after the loop. The original `return`
+    // made that point unreachable for all "return to user mode" paths ->
+    // need_resched set but never honored -> shell never scheduled.
     if (sig <= 0 || sig >= NSIG)
       break;
 
-    // SIGCANCEL: 不走 sigaction 表，内核直接投递到 cancel_handler
+    // SIGCANCEL: does not go through the sigaction table; the kernel delivers
+    // directly to cancel_handler
     if (sig == SIGCANCEL) {
       uint64_t handler = proc->proc->cancel_handler;
       if (handler == 0) {
-        // 信号致死：exit_code 按 Linux wait status 编码 (sig & 0x7f)。
-        // 走 do_exit_with_code 而非 sys_exit，避免 sys_exit 的 (code<<8) 编码
-        // 把信号号错放进退出状态位。D13。
+        // Death by signal: exit_code is encoded as a Linux wait status
+        // (sig & 0x7f). Go through do_exit_with_code rather than sys_exit
+        // to avoid sys_exit's (code<<8) encoding misplacing the signal
+        // number into the exit status bits. D13.
         do_exit_with_code(sig & 0x7f);
         return;
       }
@@ -201,7 +205,7 @@ void check_pending_signals(trapframe_t *tf) {
       sa.sa_mask = 0;
       sa.sa_flags = 0;
       deliver_signal(proc, tf, sig, &sa);
-      break; // 投递后返用户态跑 handler:落到抢占点
+      break; // after delivery, return to user mode to run handler: fall through to preemption point
     }
 
     sigaction_t *sa = &proc->proc->signal->action[sig];
@@ -240,7 +244,7 @@ void check_pending_signals(trapframe_t *tf) {
       continue;
     } else {
       deliver_signal(proc, tf, sig, sa);
-      break; // 投递后返用户态跑 handler:落到抢占点
+      break; // after delivery, return to user mode to run handler: fall through to preemption point
     }
   }
 
@@ -273,8 +277,10 @@ void force_sig(xtask *proc, int sig, int si_code, void *si_addr) {
 
 void deliver_signal_to(xtask *target, int sig) {
   __atomic_or_fetch(&target->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
-  // signal 应能打断任意阻塞态（含 WAIT_FUTEX，pthread_cancel 路径），
-  // 用 wake_process_any 而非窄语义 wake_process（后者只处理 IPC 类等待）。
+  // Signals must be able to interrupt any blocking state (including
+  // WAIT_FUTEX, the pthread_cancel path); use wake_process_any instead of
+  // the narrow-semantics wake_process (the latter only handles IPC-class
+  // waits).
   if (target->state == BLOCKED)
     wake_process_any(target);
 }
@@ -345,10 +351,10 @@ int64_t sys_tgkill(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   xtask *target = task_get(tid);
   if (target->pid != tid || target->tgid != tgid || !target->proc)
     return (int64_t)-ESRCH;
-  // 投递到线程级 sig_pending（atomic，无 sig_lock）
+  // Deliver to the thread-level sig_pending (atomic, no sig_lock)
   __atomic_or_fetch(&target->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
-  // tgkill 投递的 signal 应能打断任意阻塞态（含 WAIT_FUTEX，pthread_cancel
-  // 走此路径）。
+  // A signal delivered via tgkill must be able to interrupt any blocking
+  // state (including WAIT_FUTEX, pthread_cancel goes through this path).
   if (target->state == BLOCKED)
     wake_process_any(target);
   return 0;
@@ -397,7 +403,7 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     default:
       return (int64_t)-EINVAL;
     }
-    // SIGKILL/SIGSTOP 不可阻塞
+    // SIGKILL/SIGSTOP cannot be blocked
     proc->proc->sig_blocked &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
   }
 
@@ -420,7 +426,7 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 int64_t sys_set_tid_address(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
                             int64_t _u4, int64_t _u5) {
   current_task->proc->clear_tid_addr = (pid_t)arg1;
-  return (int64_t)current_task->pid; // 返回 tid
+  return (int64_t)current_task->pid; // returns tid
 }
 
 // ===================== BSD syscall: arch_prctl =====================

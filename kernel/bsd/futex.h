@@ -18,7 +18,7 @@
 #define FUTEX_WAKE 1
 
 struct futex_bucket {
-  list_node waiters; // 等待线程链表（proc->futex_node 挂载）
+  list_node waiters; // waiter thread list (linked via proc->futex_node)
   spinlock lock;
 };
 

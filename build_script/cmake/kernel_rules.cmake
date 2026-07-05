@@ -1,4 +1,4 @@
-# kernel_rules.cmake — add_kernel_object() 封装内核 OBJECT library 编译规则
+# kernel_rules.cmake — add_kernel_object() wraps kernel OBJECT library build rules
 
 function(add_kernel_object lib_name)
     cmake_parse_arguments(ARG "" "" "SOURCES;ASM_SOURCES" ${ARGN})

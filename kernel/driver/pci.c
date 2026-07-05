@@ -8,7 +8,7 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/utils.h"
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "kernel/xcore/acpi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"

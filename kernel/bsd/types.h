@@ -95,17 +95,17 @@ static inline void file_get(struct file *f) {
 }
 
 static inline void fd_install(files *files, int fd, struct file *f) {
-  rcu_assign_pointer(files->fd_table[fd], f);
+  RCU_ASSIGN_POINTER(files->fd_table[fd], f);
 }
 
 static inline struct file *fd_uninstall(files *files, int fd) {
   struct file *f = files->fd_table[fd];
-  rcu_assign_pointer(files->fd_table[fd], NULL);
+  RCU_ASSIGN_POINTER(files->fd_table[fd], NULL);
   return f;
 }
 
 static inline struct file *fd_lookup(files *files, int fd) {
-  return rcu_dereference(files->fd_table[fd]);
+  return RCU_DEREFERENCE(files->fd_table[fd]);
 }
 
 #endif // KERNEL_BSD_TYPES_H

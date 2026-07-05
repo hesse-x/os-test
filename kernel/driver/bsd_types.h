@@ -112,7 +112,7 @@ typedef struct proc {
   uint64_t futex_uaddr;
 
   // === pthread cancel (Phase 4) ===
-  uint64_t cancel_handler; // __pthread_cancel_check 函数地址，0 = 未注册
+  uint64_t cancel_handler; // __pthread_cancel_check function address, 0 = not registered
 } proc;
 
 // ABI drift guard: must match kernel/bsd/proc.h byte-for-byte.
@@ -135,7 +135,7 @@ DRV_STATIC_ASSERT(sizeof(proc) == 232, "driver proc size drift");
 
 #ifndef KERNEL_BSD_TYPES_H
 static inline struct file *fd_lookup(files *files, int fd) {
-  return rcu_dereference(files->fd_table[fd]);
+  return RCU_DEREFERENCE(files->fd_table[fd]);
 }
 #endif
 

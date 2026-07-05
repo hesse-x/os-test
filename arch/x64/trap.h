@@ -14,7 +14,7 @@
 #define IDT_ENTRIES 256
 
 // ===================== IDT (16-byte gate for 64-bit) =====================
-typedef struct {
+typedef struct idt_gate {
   uint16_t offset_low;  // offset[15:0]
   uint16_t sel;         // code segment selector
   uint8_t ist;          // IST offset (0 = don't use IST)
@@ -24,7 +24,7 @@ typedef struct {
   uint32_t reserved;    // must be 0
 } __attribute__((packed)) idt_gate_t;
 
-typedef struct {
+typedef struct idt_register {
   uint16_t limit;
   uint16_t base_low;
   uint32_t base_high;
@@ -33,14 +33,14 @@ typedef struct {
 } __attribute__((packed)) idt_register_t;
 
 // ===================== Trapframe (64-bit) =====================
-typedef struct {
-  // __alltraps 手动 push（从高地址到低地址）
+typedef struct trapframe {
+  // __alltraps pushed manually (high address to low)
   uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
   uint64_t rdi, rsi, rbp, rdx, rcx, rbx, rax;
   uint64_t trapno;
   uint64_t err_code;
 
-  // CPU 自动 push（iretq 自动 pop）
+  // CPU-pushed by interrupt (popped by iretq)
   uint64_t rip;
   uint64_t cs;
   uint64_t rflags;

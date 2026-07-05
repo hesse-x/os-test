@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-// ld.so 自带最小 libc（不链 libc.a）
-// ld.md §7.1 偏离：ld.so 不链 libc.a，自带最小 libc
+// ld.so's built-in minimal libc (does not link libc.a)
+// ld.md §7.1 deviation: ld.so does not link libc.a, brings its own minimal libc
 
 #include "xos/mman.h"
 #include <stddef.h>
@@ -41,14 +41,14 @@ unsigned long strlen(const char *s) {
   return n;
 }
 
-// load_so.c 导出（hidden），复用同一 mmap 封装，避免重复内联汇编
+// exported by load_so.c (hidden), reuse the same mmap wrapper, avoiding duplicate inline asm
 __attribute__((visibility("hidden"))) void *dl_sys_mmap(void *addr, size_t size,
                                                         int prot, int flags,
                                                         int fd,
                                                         uint64_t offset);
 
-// 简单 malloc：按 size 向上取整到 4KB 页，dl_sys_mmap 匿名映射；
-// 不 free（ld.so 加载期分配，无需回收）
+// simple malloc: round size up to 4KB pages, dl_sys_mmap anonymous mapping;
+// no free (ld.so allocations happen during load, no reclamation needed)
 void *malloc(unsigned long size) {
   unsigned long page = 4096;
   size = (size + page - 1) & ~(page - 1);

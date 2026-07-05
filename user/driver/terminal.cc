@@ -5,14 +5,14 @@
  */
 
 // Terminal process: VT100 state machine + cell buffer + compositor.
-// Renders cells → pixels → back buffer (display SHM), KMS does flip.
+// Renders cells -> pixels -> back buffer (display SHM), KMS does flip.
 //
 // fd 0 = stdout pipe read end (reads shell output, O_NONBLOCK)
 // fd 1 = stdin pipe write end  (sends keystrokes to shell)
 //
 // Links libc.a, uses main() entry point.
 
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "input.h"
 #include "user/driver/display.h"
 #include <fcntl.h>
@@ -471,7 +471,7 @@ int main(int argc, char **argv, char **envp) {
     struct termios t;
     ioctl(master_fd, TCGETS, &t);
     // input_event → ASCII → ldisc → master write
-    input_event_t evs[64];
+    input_event evs[64];
     int nev = input_client_poll(input_shm, evs, 64);
     for (int ei = 0; ei < nev; ei++) {
       uint8_t ascii_buf[4];
@@ -597,10 +597,11 @@ int main(int argc, char **argv, char **envp) {
 
     flush_dirty_cells();
 
-    // 用 poll 替代 recv 超时：阻塞等 master_fd 可读，10ms 超时回来检查键盘
-    // SHM。 键盘 SHM 无 notify 机制，只能轮询；10ms 超时平衡键盘延迟与 CPU
-    // 占用。 shell 写数据 → slave_write → wake_process(master_owner_pid)
-    // 立刻唤醒。
+    // Use poll instead of recv timeout: block waiting for master_fd to be
+    // readable, with a 10ms timeout to come back and check the keyboard SHM.
+    // The keyboard SHM has no notify mechanism, so we can only poll; the 10ms
+    // timeout balances keyboard latency against CPU usage. shell writes data
+    // -> slave_write -> wake_process(master_owner_pid) wakes immediately.
     struct pollfd pfd = {.fd = master_fd, .events = POLLIN, .revents = 0};
     poll(&pfd, 1, 10);
   }

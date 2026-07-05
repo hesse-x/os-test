@@ -7,7 +7,7 @@
 #ifndef ARCH_X64_MEMLAYOUT_H
 #define ARCH_X64_MEMLAYOUT_H
 
-// x86-64 内存布局常量（内核/用户态共享）
+// x86-64 memory layout constants (shared kernel/user-space)
 #define PAGE_SHIFT 12
 #define PAGE_SIZE (1 << PAGE_SHIFT) // 4096
 #define PAGE_SIZE_2M 0x200000
@@ -15,10 +15,10 @@
 // Higher-half kernel/user boundary: user space lives below this, kernel above.
 #define KERNEL_VMA_BOUNDARY 0xFFFFFFFF80000000ULL
 
-// ld.so 固定基址（栈顶 0x7FFFFFFFE000 下方，固定高位，无 ASLR）
+// ld.so fixed base (below stack top 0x7FFFFFFFE000, fixed high address, no ASLR)
 #define LD_SO_BASE 0x7FFFFF000000ULL
 
-// 用户栈顶（与 proc.c / sched.c 中硬编码值一致）
+// User stack top (consistent with hardcoded values in proc.c / sched.c)
 #define USER_STACK_TOP 0x00007FFFFFFFE000ULL
 
 #define PHY_TO_PAGE(addr) ((addr) >> PAGE_SHIFT)

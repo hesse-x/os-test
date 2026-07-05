@@ -125,7 +125,7 @@ global:
     irq_bind;
 
     /* <sys/pci.h> */
-    pci_dev_info;
+    pci_dev_info_get;
 
     /* <sys/device.h> */
     device_register; device_register_shm;

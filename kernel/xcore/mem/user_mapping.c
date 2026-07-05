@@ -9,7 +9,7 @@
 
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/mem/alloc.h"

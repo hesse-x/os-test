@@ -1,0 +1,71 @@
+# iwyu mapping file for this freestanding -nostdinc kernel + libc.
+#
+# The build uses -nostdinc and -isystem <gcc-freestanding-include>, so only
+# the freestanding C headers (<stdint.h>, <stddef.h>, <stdarg.h>, <stdbool.h>)
+# resolve. POSIX/glibc headers (<signal.h>, <sys/types.h>, <unistd.h>, ...)
+# do NOT exist in the search path for kernel TUs, and only exist for user-space
+# TUs as thin wrappers under user/include/ that pull in <xos/...>.
+#
+# iwyu's built-in glibc mappings (gcc.libc.imp etc.) attribute symbols like
+# sigset_t / pid_t / timespec to the glibc public headers, which then makes iwyu
+# tell every kernel file to "#include <signal.h>" / "#include <sys/types.h>" —
+# bogus advice that breaks the -nostdinc build. These mappings redirect those
+# glibc public headers to the project's <xos/...> UAPI headers (which resolve in
+# BOTH kernel and user-space TUs), so iwyu attributes symbols to where they are
+# actually defined.
+#
+# Format: { include: ["<glibc-public>", public, "<xos/...>", public ] }
+#   — "a public include of <glibc-public> is rewritten to a public include of
+#      <xos/...>". iwyu's include picker then stops suggesting <glibc-public>
+#      for the symbols it used to own, because they are now owned by <xos/...>.
+
+[
+  # ---- signal ----
+  { include: ["<signal.h>", public, "<xos/signal.h>", public ] },
+
+  # ---- POSIX sys/* types ----
+  # pid_t lives in <xos/types.h>. The other POSIX types (off_t, dev_t, ino_t,
+  # mode_t, uid_t, gid_t, ssize_t, ...) are defined only in user/include/sys/types.h
+  # (a user-space wrapper); kernel code does not use them. Point <sys/types.h>
+  # at <xos/types.h> so the kernel-resolvable symbol (pid_t) lands correctly.
+  { include: ["<sys/types.h>", public, "<xos/types.h>", public ] },
+
+  # ---- errno ----
+  { include: ["<errno.h>", public, "<xos/errno.h>", public ] },
+
+  # ---- time ----
+  # struct timespec / struct timeval / time_t are in <xos/time.h>.
+  # (clock_t, struct tm, CLOCK_* live only in the user/include/time.h wrapper
+  # and are not used by kernel code, so no kernel TU will be told to add them.)
+  { include: ["<time.h>", public, "<xos/time.h>", public ] },
+  { include: ["<sys/time.h>", public, "<xos/time.h>", public ] },
+
+  # ---- sockets / iovec ----
+  { include: ["<sys/socket.h>", public, "<xos/socket.h>", public ] },
+  { include: ["<sys/uio.h>", public, "<xos/socket.h>", public ] },
+
+  # ---- file control / open flags ----
+  { include: ["<fcntl.h>", public, "<xos/fcntl.h>", public ] },
+  { include: ["<sys/fcntl.h>", public, "<xos/fcntl.h>", public ] },
+
+  # ---- stat / mode bits ----
+  { include: ["<sys/stat.h>", public, "<xos/stat.h>", public ] },
+  { include: ["<stat.h>", public, "<xos/stat.h>", public ] },
+
+  # ---- mmap protection / map flags ----
+  { include: ["<sys/mman.h>", public, "<xos/mman.h>", public ] },
+  { include: ["<mman.h>", public, "<xos/mman.h>", public ] },
+
+  # ---- unistd: read/write/close/pipe/dup2/getpid/... ----
+  { include: ["<unistd.h>", public, "<xos/syscall.h>", public ] },
+
+  # ---- waitpid / W* macros ----
+  { include: ["<sys/wait.h>", public, "<xos/syscall.h>", public ] },
+
+  # ---- ELF types ----
+  { include: ["<elf.h>", public, "<xos/elf.h>", public ] },
+
+  # ---- dirent ----
+  { include: ["<dirent.h>", public, "<xos/dirent.h>", public ] },
+  { include: ["<sys/dirent.h>", public, "<xos/dirent.h>", public ] },
+]

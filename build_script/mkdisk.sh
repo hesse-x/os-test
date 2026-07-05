@@ -1,13 +1,13 @@
 #!/bin/bash
-# mkdisk.sh — 单盘两分区 disk.img 生成
+# mkdisk.sh — generate single-disk two-partition disk.img
 #
-# 布局:
-#   LBA 0:           MBR + 分区表
-#   分区1 (ESP):     FAT32, ~32MB — UEFI 引导文件
+# Layout:
+#   LBA 0:           MBR + partition table
+#   Partition 1 (ESP): FAT32, ~32MB — UEFI boot files
 #     /EFI/BOOT/BOOTX64.EFI
 #     /myos.elf
-#     /init.elf          ← stub 加载到内存传给内核 (initrd-style)
-#   分区2 (根):      FAT32, ~160MB — 根文件系统
+#     /init.elf          ← stub loads into memory and passes to kernel (initrd-style)
+#   Partition 2 (root):  FAT32, ~160MB — root file system
 #     /driver/kbd.dev
 #     /usr/bin/{terminal,shell}
 #     /usr/lib/libc.a
@@ -15,8 +15,8 @@
 #     /local/{hello,hello_dyn}.elf
 #     /README
 #
-# 内核从 boot_info 拿 init.elf 创建 init 进程, 不再需要裸 LBA slot。
-# FAT32 驱动自己解析 MBR 分区表找根分区起始 LBA (fat32_init)。
+# The kernel gets init.elf from boot_info to create the init process, no longer needs a raw LBA slot.
+# The FAT32 driver parses the MBR partition table itself to find the root partition start LBA (fat32_init).
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,7 +24,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${PROJECT_DIR}/build"
 TESTDATA_DIR="${PROJECT_DIR}/testdata"
 
-# 检查依赖文件
+# Check dependency files
 for f in init.elf myos.elf BOOTX64.EFI kbd_driver.elf terminal.elf shell.elf \
          libc.a libc.so hello.elf ldso.elf hello_dyn.elf; do
     if [ ! -f "${BUILD_DIR}/${f}" ]; then
@@ -33,21 +33,21 @@ for f in init.elf myos.elf BOOTX64.EFI kbd_driver.elf terminal.elf shell.elf \
     fi
 done
 
-# 磁盘总大小: 192MB = 393216 扇区
+# Total disk size: 192MB = 393216 sectors
 DISK_SECTORS=$((192 * 1024 * 1024 / 512))
-# 分区1 (ESP): 32MB = 65536 扇区, 从 LBA 2048 开始 (1MB 对齐)
+# Partition 1 (ESP): 32MB = 65536 sectors, starts at LBA 2048 (1MB alignment)
 PART1_START=2048
 PART1_SECTORS=65536
-# 分区2 (根): 剩余空间
+# Partition 2 (root): remaining space
 PART2_START=$((PART1_START + PART1_SECTORS))
 PART2_SECTORS=$((DISK_SECTORS - PART2_START))
 
-# 创建零填充映像
+# Create zero-filled image
 dd if=/dev/zero of="${BUILD_DIR}/disk.img" bs=512 count=${DISK_SECTORS} status=none
 
-# 创建 MBR 分区表
-# 分区1: ESP, type 0xEF (EFI), 1MB 对齐 — OVMF 凭此类型识别 ESP
-# 分区2: 根, type 0x0C (W95 FAT32 LBA)
+# Create MBR partition table
+# Partition 1: ESP, type 0xEF (EFI), 1MB aligned — OVMF recognizes ESP by this type
+# Partition 2: root, type 0x0C (W95 FAT32 LBA)
 sfdisk "${BUILD_DIR}/disk.img" <<EOF
 label: dos
 unit: sectors
@@ -56,11 +56,11 @@ ${BUILD_DIR}/disk.img1 : start=${PART1_START}, size=${PART1_SECTORS}, type=ef
 ${BUILD_DIR}/disk.img2 : start=${PART2_START}, size=${PART2_SECTORS}, type=0c
 EOF
 
-# ===================== 分区1: ESP =====================
-# 提取分区1 区域, 格式化, 写入引导文件, 写回
+# ===================== Partition 1: ESP =====================
+# Extract partition 1 region, format, write boot files, write back
 dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part1.img" bs=512 skip=${PART1_START} count=${PART1_SECTORS} status=none
-# FAT16: 32MB ESP 用 FAT32 簇数不足 (mtools WARNING + OVMF 拒绝)。
-# UEFI 规范允许 FAT12/16/32, OVMF 对 FAT16 ESP 引导支持良好。
+# FAT16: a 32MB ESP has too few FAT32 clusters (mtools WARNING + OVMF refuses).
+# UEFI spec allows FAT12/16/32; OVMF boots FAT16 ESP well.
 mkfs.fat -F 16 -n ESP "${BUILD_DIR}/part1.img" >/dev/null
 
 mmd -i "${BUILD_DIR}/part1.img" ::EFI
@@ -72,18 +72,18 @@ mcopy -i "${BUILD_DIR}/part1.img" "${BUILD_DIR}/init.elf"     ::init.elf
 dd if="${BUILD_DIR}/part1.img" of="${BUILD_DIR}/disk.img" bs=512 seek=${PART1_START} conv=notrunc status=none
 rm -f "${BUILD_DIR}/part1.img"
 
-# ===================== 分区2: 根文件系统 =====================
+# ===================== Partition 2: root file system =====================
 dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part2.img" bs=512 skip=${PART2_START} count=${PART2_SECTORS} status=none
 mkfs.fat -F 32 -s 1 "${BUILD_DIR}/part2.img" >/dev/null
-# 注: -s 1 (512B/簇) 在 64MB 下簇数达标 (新版 mtools 要求 ≥65525 簇)。
+# Note: -s 1 (512B/cluster) at 64MB yields enough clusters (newer mtools requires ≥65525 clusters).
 
-# 创建目录结构
+# Create directory structure
 mmd -i "${BUILD_DIR}/part2.img" ::driver
 mmd -i "${BUILD_DIR}/part2.img" ::usr ::usr/bin ::usr/lib
 mmd -i "${BUILD_DIR}/part2.img" ::local
 mmd -i "${BUILD_DIR}/part2.img" ::lib
 
-# 复制文件到目录结构
+# Copy files into directory structure
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/kbd_driver.elf"   ::driver/kbd.dev
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/terminal.elf"     ::usr/bin/terminal
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/shell.elf"        ::usr/bin/shell
@@ -91,8 +91,8 @@ mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.a"           ::usr/lib/libc
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello.elf"        ::local/hello.elf
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/ldso.elf"         ::lib/ld.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.so"          ::lib/libc.so
-# ld.so 多依赖测试 stub .so（plan_ld 阶段 D）：放 /test/lib/ 与生产 /lib/ 分区，
-# ld.so load_one() 先试 /lib/ 失败回退 /test/lib/（对齐 Linux DT_RPATH 思路）
+# ld.so multi-dependency test stub .so (plan_ld phase D): placed in /test/lib/ separate from production /lib/,
+# ld.so load_one() tries /lib/ first and falls back to /test/lib/ on failure (mirrors Linux DT_RPATH idea)
 mmd -i "${BUILD_DIR}/part2.img" ::test ::test/lib
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/liba.so"          ::test/lib/liba.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libb.so"          ::test/lib/libb.so
@@ -110,9 +110,9 @@ if [ "$TEST" = "1" ]; then
     done
 fi
 
-# 保留根目录 README
+# Preserve root directory README
 mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/README" ::README
 
-# 写回 FAT32 分区
+# Write back FAT32 partition
 dd if="${BUILD_DIR}/part2.img" of="${BUILD_DIR}/disk.img" bs=512 seek=${PART2_START} conv=notrunc status=none
 rm -f "${BUILD_DIR}/part2.img"

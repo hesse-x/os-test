@@ -4,15 +4,16 @@
  * SPDX-License-Identifier: MIT
  */
 
-// ld.so 多依赖单元测试 stub：liba.so
-// 导出 lda_answer()，内部调 libc strcmp（触发 JUMP_SLOT 跨模块解析）
+// ld.so multi-dependency unit-test stub: liba.so
+// Exports lda_answer(); internally calls libc strcmp (triggers a cross-module
+// JUMP_SLOT resolution)
 #include <stddef.h>
 
-int strcmp(const char *a, const char *b); // libc.so 符号
+int strcmp(const char *a, const char *b); // libc.so symbol
 
 int lda_answer(void) {
-  // 调 libc 符号，验证 JUMP_SLOT 解析到 libc.so
+  // Call a libc symbol to verify JUMP_SLOT resolves to libc.so
   if (strcmp("ld", "ld") != 0)
     return -1;
-  return 41; // 线性链场景主 ELF 期望 41
+  return 41; // linear-chain scenario: main ELF expects 41
 }

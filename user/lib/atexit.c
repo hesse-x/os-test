@@ -6,8 +6,8 @@
 
 #include "stdlib.h"
 
-// atexit 实现：最多 32 个 handler 的静态数组（无 malloc 依赖）
-// ld.md §6.4 任务 5 / plan_ld2b3 T8
+// atexit implementation: a static array of up to 32 handlers (no malloc dependency)
+// ld.md §6.4 task 5 / plan_ld2b3 T8
 
 #define ATEXIT_MAX 32
 
@@ -23,7 +23,7 @@ int atexit(void (*func)(void)) {
   return 0;
 }
 
-// __libc_run_atexit：exit 时逆序调用所有 atexit handler
+// __libc_run_atexit: on exit, call all atexit handlers in reverse order
 void __libc_run_atexit(void) {
   for (int i = atexit_count - 1; i >= 0; i--) {
     if (atexit_funcs[i])

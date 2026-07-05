@@ -1,8 +1,8 @@
 #!/bin/bash
-# build.sh - CMake 编译内核 + EFI bootloader + 用户态 ELF + 生成映像
+# build.sh - CMake builds kernel + EFI bootloader + userspace ELF + generates image
 set -e
 
-# 构建类型：默认 Release，-d 为 Debug（带 -g 调试信息）
+# Build type: default Release, -d for Debug (with -g debug info)
 BUILD_TYPE=Release
 CMAKE_EXTRA=""
 
@@ -40,7 +40,7 @@ if ! echo "$CMAKE_EXTRA" | grep -q "SANITIZE="; then
     CMAKE_EXTRA="$CMAKE_EXTRA -DSANITIZE=0"
 fi
 
-# 1. CMake 编译（内核 + 用户态）
+# 1. CMake build (kernel + userspace)
 mkdir -p build && cd build
 cmake -DCMAKE_TOOLCHAIN_FILE=../build_script/cmake/toolchain-x86_64.cmake \
       -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
@@ -49,7 +49,7 @@ cmake -DCMAKE_TOOLCHAIN_FILE=../build_script/cmake/toolchain-x86_64.cmake \
 make
 cd ..
 
-# 2. 生成 disk.img（单盘两分区: ESP + 根 FAT32）
+# 2. Generate disk.img (single disk, two partitions: ESP + root FAT32)
 TEST="${TEST:-0}"
 if echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
     TEST=1

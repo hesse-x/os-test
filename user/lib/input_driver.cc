@@ -49,14 +49,14 @@ static void consumer_remove_pid(pid_t pid) {
 }
 
 // Driver-side SHM ring (single, shared via inode).
-static volatile input_shm_header_t *g_ring_hdr;
-static volatile input_event_t *g_ring_slots;
+static volatile input_shm_header *g_ring_hdr;
+static volatile input_event *g_ring_slots;
 static uint32_t g_ring_cap;
 static uint32_t g_ring_off;
 
 // Write one event to the shared ring + unconditional notify to all consumers.
-static void broadcast_event(const input_event_t *ev) {
-  volatile input_shm_header_t *hdr = g_ring_hdr;
+static void broadcast_event(const input_event *ev) {
+  volatile input_shm_header *hdr = g_ring_hdr;
   if (!hdr)
     return;
 
@@ -66,9 +66,9 @@ static void broadcast_event(const input_event_t *ev) {
   if (next == tail)
     return; // ring full, drop
 
-  volatile input_event_t *slot =
-      (volatile input_event_t *)((volatile uint8_t *)hdr + g_ring_off +
-                                 head * sizeof(input_event_t));
+  volatile input_event *slot =
+      (volatile input_event *)((volatile uint8_t *)hdr + g_ring_off +
+                                 head * sizeof(input_event));
   slot->timestamp_ns = ev->timestamp_ns;
   slot->type = ev->type;
   slot->code = ev->code;
@@ -107,7 +107,7 @@ static void handle_req(struct recv_msg *msg) {
 
 void input_driver_run(uint32_t device_type, const char *dev_name,
                       const char *hid_dev_path,
-                      int (*on_event)(input_event_t *ev),
+                      int (*on_event)(input_event *ev),
                       void (*hid_init)(void *hid_shm)) {
   // 1. Open HID node + mmap kernel HID SHM (this triggers usb_hid_kbd_open
   // callback,
@@ -127,12 +127,12 @@ void input_driver_run(uint32_t device_type, const char *dev_name,
   // Zero-init + fill header
   for (int i = 0; i < 4096; i++)
     ((volatile uint8_t *)shm)[i] = 0;
-  volatile input_shm_header_t *hdr = (volatile input_shm_header_t *)shm;
+  volatile input_shm_header *hdr = (volatile input_shm_header *)shm;
   hdr->magic = INPUT_SHM_MAGIC;
   hdr->version = INPUT_SHM_VERSION;
   hdr->device_type = device_type;
-  hdr->event_size = sizeof(input_event_t);
-  hdr->ring_offset = sizeof(input_shm_header_t);
+  hdr->event_size = sizeof(input_event);
+  hdr->ring_offset = sizeof(input_shm_header);
   hdr->ring_capacity = INPUT_RING_CAPACITY_DEFAULT;
   hdr->head = 0;
   hdr->tail = 0;
@@ -141,7 +141,7 @@ void input_driver_run(uint32_t device_type, const char *dev_name,
   g_ring_off = hdr->ring_offset;
   g_ring_cap = hdr->ring_capacity;
   g_ring_slots =
-      (volatile input_event_t *)((volatile uint8_t *)hdr + g_ring_off);
+      (volatile input_event *)((volatile uint8_t *)hdr + g_ring_off);
 
   device_register_shm(dev_name, shm_fd);
 
@@ -155,7 +155,7 @@ void input_driver_run(uint32_t device_type, const char *dev_name,
       if (errno != EINTR)
         continue;
       // ISR woke us — drain HID reports
-      input_event_t ev;
+      input_event ev;
       while (on_event(&ev)) {
         broadcast_event(&ev);
       }

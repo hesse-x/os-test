@@ -199,8 +199,8 @@ unsigned long long strtoull(const char *s, char **endptr, int base) {
   return result;
 }
 
-/* strtod / atof — 无 libm 的有限精度十进制解析（处理常规
- * [-]ddd[.ddd][e[+-]dd]） */
+/* strtod / atof — finite-precision decimal parsing without libm (handles the
+ * common [-]ddd[.ddd][e[+-]dd] form) */
 double strtod(const char *s, char **endptr) {
   const char *p = s;
   double result = 0.0;
@@ -249,7 +249,7 @@ double strtod(const char *s, char **endptr) {
       p++;
     }
     if (exp_digits == 0) {
-      /* 无效指数，回退到 e 之前 */
+      /* Invalid exponent, roll back to before 'e' */
       p = e_start;
     } else {
       double mul = 1.0;

@@ -37,10 +37,12 @@ void synchronize_rcu(void) {
     while (atomic_read(&g_rcu_state.cpu_gen[i]) < new_gen - 1) {
       __asm__ volatile("pause");
       if (++spins > 100000000) {
-        // Stall watchdog：打印每个 CPU 的落后量 + 当前 task，定位"哪个
-        // CPU 没过 grace period + 它在跑什么"。比单行 WARN_ON 信息量大
-        // 一个数量级——原 Bug 6 靠人肉猜"哪个 CPU 卡了"，现在直接给出。
-        // 纯观测点，不改 RCU 语义（仍 continue waiting）。
+        // Stall watchdog: print each CPU's lag + current task to identify
+        // which CPU isn't passing through grace periods and what it's running.
+        // Provides an order of magnitude more information than a single-line
+        // WARN_ON -- original Bug 6 required guessing "which CPU is stuck",
+        // now it's given directly.  Observation point only, does not change
+        // RCU semantics (still continue waiting).
         printk(LOG_WARN, "RCU stall: global_gen=%d waiter_cpu=%d\n",
                new_gen - 1, i);
         for (int c = 0; c < ncpu; c++) {

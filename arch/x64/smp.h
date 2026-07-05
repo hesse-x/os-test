@@ -29,8 +29,6 @@
 #define EFER_SCE (1ULL << 0)
 #define EFER_NXE (1ULL << 11)
 
-struct xtask; // forward declaration (typedef xtask in kernel/xcore/xtask.h)
-
 // RCU per-CPU nesting state (defined in kernel/rcu.h)
 typedef struct rcu_local {
   int nesting;
@@ -61,11 +59,13 @@ typedef struct cpu_local {
   // (would nest #NM and blow the kernel stack into #DF). See fpu_lazy_switch.
   int nm_nesting_depth;
 
-  // Preempt-stall watchdog（仅 debug）：统计本核 need_resched
-  // 被置位后连续未兑现的 timer tick 数。schedule() 入口清 need_resched →
-  // 计数归零。超阈值即抢占点被绕过 （如 check_pending_signals 的 reschedule
-  // 循环不可达），打一行告警直接锁死抢占路径， 避免再绕进 work stealing
-  // 之类误判。release 构建不读不写，零开销。
+  // Preempt-stall watchdog (debug only): counts consecutive timer ticks
+  // where need_resched is set but never consumed.  schedule() clears
+  // need_resched on entry, resetting the counter.  If the counter exceeds
+  // the threshold, a preemption point was bypassed (e.g. an unreachable
+  // reschedule loop in check_pending_signals); we emit a warning and lock
+  // the preemption path to prevent work stealing from misdiagnosing.
+  // Release builds don't read or write this field — zero cost.
   uint32_t preempt_stall_ticks;
 } cpu_local;
 

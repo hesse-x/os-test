@@ -15,8 +15,9 @@
 extern "C" {
 #endif
 
-/* POSIX FD_CLOEXEC（用户态约定=1）。内核内部用 0x8000 位，互不干扰。
- * 本 OS 无 exec，F_SETFD/FD_CLOEXEC 仅占位，见 file.cc fcntl 降级处理。 */
+/* POSIX FD_CLOEXEC (userspace convention = 1). The kernel uses bit 0x8000
+ * internally; the two do not interfere. This OS has no exec, so
+ * F_SETFD/FD_CLOEXEC are placeholders (see file.cc fcntl downgrade). */
 #define FD_CLOEXEC 1
 
 LIBC_EXPORT int open(const char *path, int flags, ...);

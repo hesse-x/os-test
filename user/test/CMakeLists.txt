@@ -49,7 +49,8 @@ add_user_dyn_elf(dev_vfs C SOURCES test_dev_vfs.c ${CMAKE_SOURCE_DIR}/third_part
 # SSE path (CR4.OSFXSR + lazy FPU #NM handler). No Unity — simple printf+exit.
 add_user_dyn_elf(test_sse_smoke C SOURCES test_sse_smoke.c LINK_LIBS c)
 
-# CPU 密集型压测,用于 work stealing 均衡验证(手动启动多实例,非 test_runner 回归)
+# CPU-bound stress test for work-stealing balance verification (launched
+# manually as multiple instances; not a test_runner regression)
 add_user_dyn_elf(test_cpu_burn C SOURCES test_cpu_burn.c LINK_LIBS c)
 
 # Layer 13: pthread

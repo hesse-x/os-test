@@ -159,8 +159,9 @@ int fcntl(int fd, int cmd, ...) {
     int r = sys_fcntl(fd, cmd, arg);
     return r;
   } else if (cmd == F_GETFD) {
-    /* 内核 sys_fcntl 暂不支持 F_GETFD/F_SETFD；本 OS 无 exec，FD_CLOEXEC
-     * 语义无意义，诚实降级：恒返回 0（无 cloexec）。见 todo.md。 */
+    /* The kernel's sys_fcntl does not yet support F_GETFD/F_SETFD; this OS has no
+     * exec, so FD_CLOEXEC semantics are meaningless. Honest degradation: always
+     * return 0 (no cloexec). See todo.md. */
     return 0;
   } else if (cmd == F_SETFD) {
     va_list ap;

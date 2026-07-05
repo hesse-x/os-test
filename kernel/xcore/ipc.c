@@ -166,13 +166,13 @@ uint64_t shm_add_page(struct shm *shm) {
 // ===================== Xcore IPC syscall: getpid =====================
 int64_t sys_getpid(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
                    int64_t _u5, int64_t _u6) {
-  return (int64_t)current_task->tgid; // 返回 tgid（进程 ID）
+  return (int64_t)current_task->tgid; // return tgid (process ID)
 }
 
 // ===================== Xcore IPC syscall: gettid =====================
 int64_t sys_gettid(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
                    int64_t _u5, int64_t _u6) {
-  return (int64_t)current_task->pid; // 返回 tid（线程 ID）
+  return (int64_t)current_task->pid; // return tid (thread ID)
 }
 
 // ===================== Xcore IPC syscall: yield =====================
@@ -212,7 +212,7 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       // Message available: copy to user buffer
       copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
       // If this is an REQ request, record the caller PID for sys_resp
-      recv_msg_t *msg = (recv_msg_t *)proc->recv_buf[proc->recv_tail];
+      recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
       if (msg->type == RECV_REQ) {
         proc->req_caller_pid = (pid_t)msg->src;
       }
@@ -224,7 +224,7 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
         if (!data_buf || data_buf_len < len) {
           kfree(kmaddr);
-          recv_msg_t *umsg = (recv_msg_t __force *)buf;
+          recv_msg *umsg = (recv_msg __force *)buf;
           umsg->msg.kmaddr = NULL;
           umsg->msg.len = len;
           proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
@@ -235,7 +235,7 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
         copy_to_user(data_buf, kmaddr, len);
         kfree(kmaddr);
 
-        recv_msg_t *umsg = (recv_msg_t __force *)buf;
+        recv_msg *umsg = (recv_msg __force *)buf;
         umsg->msg.kmaddr = NULL;
         umsg->msg.len = len;
       }
@@ -278,7 +278,7 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       spin_lock(&proc->recv_lock);
       if (proc->recv_head != proc->recv_tail) {
         copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
-        recv_msg_t *msg = (recv_msg_t *)proc->recv_buf[proc->recv_tail];
+        recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
         if (msg->type == RECV_REQ) {
           proc->req_caller_pid = (pid_t)msg->src;
         }
@@ -289,7 +289,7 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
           if (!data_buf || data_buf_len < len) {
             kfree(kmaddr);
-            recv_msg_t *umsg = (recv_msg_t __force *)buf;
+            recv_msg *umsg = (recv_msg __force *)buf;
             umsg->msg.kmaddr = NULL;
             umsg->msg.len = len;
             proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
@@ -298,7 +298,7 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           }
           copy_to_user(data_buf, kmaddr, len);
           kfree(kmaddr);
-          recv_msg_t *umsg = (recv_msg_t __force *)buf;
+          recv_msg *umsg = (recv_msg __force *)buf;
           umsg->msg.kmaddr = NULL;
           umsg->msg.len = len;
         }
@@ -341,7 +341,7 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 
   // Build RECV_REQ message
   uint8_t msg[RECV_MSG_SIZE];
-  recv_msg_t *hdr = (recv_msg_t *)msg;
+  recv_msg *hdr = (recv_msg *)msg;
   hdr->type = RECV_REQ;
   hdr->src = (uint32_t)current_task->pid;
   copy_from_user(hdr->data, request, 56);
@@ -472,7 +472,7 @@ int64_t sys_irq_bind(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 }
 
 // ===================== notify_and_wake =====================
-void notify_and_wake(pid_t target_pid, recv_msg_t *msg) {
+void notify_and_wake(pid_t target_pid, recv_msg *msg) {
   if (target_pid < 0 || target_pid >= MAX_PROC)
     return;
   xtask *target = task_get(target_pid);
@@ -511,12 +511,13 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
 }
 
 // ===================== wake_process =====================
-// 窄语义：仅处理 IPC 类等待（WAIT_PIPE/WAIT_POLL/WAIT_RECV）。
-// 命中其它 event（如 WAIT_FUTEX/WAIT_CHILD/WAIT_REQ_REPLY/WAIT_MSG_REPLY）说明
-// 调用者语义错误——应改用 wake_with_event（精确 event 匹配）或 wake_process_any
-// （signal 路径，需打断任意阻塞态）。约束代码化：debug build 触发 ASSERT
-// panic， 防止下次再加 wait_event 时重蹈 Bug 1 覆辙（memory:
-// feedback_constraint_in_code）。
+// Narrow semantics: only handles IPC-class waits (WAIT_PIPE/WAIT_POLL/WAIT_RECV).
+// Hitting other events (WAIT_FUTEX/WAIT_CHILD/WAIT_REQ_REPLY/WAIT_MSG_REPLY)
+// indicates a caller semantic error -- use wake_with_event (precise event match)
+// or wake_process_any (signal path, must interrupt any blocking state).
+// Encode this constraint in code: debug build triggers ASSERT panic,
+// preventing future wait_event additions from repeating Bug 1 (memory:
+// feedback_constraint_in_code).
 void wake_process(pid_t pid) {
   if (pid < 0 || pid >= MAX_PROC)
     return;
@@ -552,7 +553,7 @@ int64_t sys_notify(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
     spin_unlock(&target->recv_lock);
     return (int64_t)-EBUSY;
   }
-  recv_msg_t *slot = (recv_msg_t *)target->recv_buf[target->recv_head];
+  recv_msg *slot = (recv_msg *)target->recv_buf[target->recv_head];
   slot->type = RECV_NOTIFY;
   slot->src = (uint32_t)current_task->pid;
   target->recv_head = next;
@@ -593,7 +594,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
   __memcpy(kbuf, msg_buf, msg_len);
 
   uint8_t msg[RECV_MSG_SIZE];
-  recv_msg_t *hdr = (recv_msg_t *)msg;
+  recv_msg *hdr = (recv_msg *)msg;
   hdr->type = RECV_MSG;
   hdr->src = (uint32_t)current_task->pid;
   hdr->msg.kmaddr = kbuf;

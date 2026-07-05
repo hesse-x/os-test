@@ -1,19 +1,19 @@
 #!/bin/bash
-# check.sh — 检查调度器
+# check.sh — check scheduler
 #
-# 用法:
-#   ./check.sh                          # 跑全部四项（按序）
-#   ./check.sh --filter sparse,iwyu     # 只跑指定项，按给定顺序
-#   ./check.sh --filter iwyu            # 单项
+# Usage:
+#   ./check.sh                          # run all four (in order)
+#   ./check.sh --filter sparse,iwyu     # run only specified items, in given order
+#   ./check.sh --filter iwyu            # single item
 #
-# 合法检查项: sparse, iwyu, clang-format, clang-tidy
-#   clang-tidy 暂为占位（见 doc/design/format.md）。
+# Valid check items: sparse, iwyu, clang-format, clang-tidy
+#   clang-tidy is a placeholder for now (see doc/design/format.md).
 #
-# 退出码: 全部通过 0；任一失败 1；参数错误 2。
+# Exit code: all pass 0; any failure 1; argument error 2.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-# 检查项 → 子脚本 映射
+# Check item → sub-script mapping
 declare -A CHECK_SCRIPT=(
     [sparse]="build_script/sparse_check.sh"
     [iwyu]="build_script/iwyu_check.sh"
@@ -22,7 +22,7 @@ declare -A CHECK_SCRIPT=(
 )
 ALL_CHECKS=(sparse iwyu clang-format clang-tidy)
 
-# ===================== 解析 --filter =====================
+# ===================== Parse --filter =====================
 FILTER=""
 FILTER_SET=0
 while [[ $# -gt 0 ]]; do
@@ -49,7 +49,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 展开 filter 为有序列表；未传 --filter 则全跑
+# Expand filter into an ordered list; if --filter not passed, run all
 if [ "$FILTER_SET" -eq 0 ]; then
     CHECKS=("${ALL_CHECKS[@]}")
 else
@@ -72,7 +72,7 @@ else
     done
 fi
 
-# ===================== 顺序执行 =====================
+# ===================== Sequential execution =====================
 FAIL=0
 STEP=0
 for c in "${CHECKS[@]}"; do
@@ -87,7 +87,7 @@ for c in "${CHECKS[@]}"; do
     fi
 done
 
-# ===================== 汇总 =====================
+# ===================== Summary =====================
 echo ""
 if [ "$FAIL" -ne 0 ]; then
     echo "check.sh: FAILED (one or more checks did not pass)."

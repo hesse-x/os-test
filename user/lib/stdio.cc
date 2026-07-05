@@ -5,7 +5,7 @@
  */
 
 #include "stdio.h"
-#include "common/kvformat.h"
+#include "utils/kvformat.h"
 #include "string.h"
 #include "syscall.h"
 #include "xos/errno.h"
@@ -208,7 +208,7 @@ int ungetc(int c, FILE *f) {
   if (c == EOF || !f)
     return EOF;
   if (f->ungot != -1)
-    return EOF; /* 仅支持 1 字符 pushback */
+    return EOF; /* only 1-character pushback is supported */
   f->ungot = (unsigned char)c;
   f->flags &= ~_F_EOF;
   return (unsigned char)c;
@@ -537,12 +537,12 @@ FILE *freopen(const char *path, const char *mode, FILE *f) {
   FILE *nf = fopen(path, mode);
   if (!nf)
     return NULL;
-  /* 把新 fd 搬进旧 FILE，保持 FILE* 不变 */
+  /* Move the new fd into the old FILE, keeping the FILE* unchanged */
   f->fd = nf->fd;
   f->flags = nf->flags;
   f->offset = 0;
   f->ungot = -1;
-  /* 释放 nf 的外壳（保留其 fd 已搬走） */
+  /* Free nf's shell (its fd has already been moved away) */
   nf->fd = -1;
   fclose(nf);
   return f;
@@ -573,7 +573,7 @@ int setvbuf(FILE *f, char *buf, int mode, size_t size) {
     return -1;
   }
   fflush(f);
-  /* 释放旧缓冲（仅 fopen 分配的，静态三流的不释放） */
+  /* Free the old buffer (only for buffers allocated by fopen; not the static streams) */
   if (f->buf && f != stdin && f != stdout && f != stderr) {
     free(f->buf);
     f->buf = nullptr;

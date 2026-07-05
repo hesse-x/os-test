@@ -2,16 +2,16 @@
 #
 # SPDX-License-Identifier: MIT
 
-# boot/ - EFI bootloader stub (独立低地址 EFI 应用)
+# boot/ - EFI bootloader stub (standalone low-address EFI application)
 
-# GNU-EFI 路径
+# GNU-EFI paths
 set(GNU_EFI_INCLUDE_DIR /usr/include/efi)
 set(GNU_EFI_ARCH_INCLUDE_DIR /usr/include/efi/x86_64)
 set(GNU_EFI_LIB_DIR /usr/lib)
 set(GNU_EFI_CRT /usr/lib/crt0-efi-x86_64.o)
 set(GNU_EFI_LINKER_SCRIPT /usr/lib/elf_x86_64_efi.lds)
 
-# 编译 stub.c 为目标文件
+# Compile stub.c into an object file
 add_library(boot_obj OBJECT stub.c)
 
 target_include_directories(boot_obj PRIVATE
@@ -37,7 +37,7 @@ set_target_properties(boot_obj PROPERTIES
     POSITION_INDEPENDENT_CODE OFF
 )
 
-# 链接 EFI 共享对象
+# Link EFI shared object
 set(BOOT_ELF_FILE ${CMAKE_CURRENT_BINARY_DIR}/boot.so)
 set(BOOT_BIN_FILE ${CMAKE_CURRENT_BINARY_DIR}/BOOTX64.EFI)
 
@@ -62,7 +62,7 @@ add_custom_command(
 add_custom_target(boot_elf ALL DEPENDS ${BOOT_ELF_FILE})
 add_dependencies(boot_elf boot_obj)
 
-# objcopy 转 PE/COFF EFI 应用（和 uefi 分支一致）
+# objcopy to PE/COFF EFI application (same as the uefi branch)
 add_custom_command(
     OUTPUT ${BOOT_BIN_FILE}
     COMMAND objcopy

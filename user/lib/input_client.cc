@@ -10,11 +10,11 @@
 #include <xos/input.h>
 
 // Poll ring: drain all pending events. Pure drain, no sleeping flag management.
-int input_client_poll(volatile void *shm, input_event_t *events,
+int input_client_poll(volatile void *shm, input_event *events,
                       int max_events) {
   if (!shm || !events || max_events <= 0)
     return 0;
-  volatile input_shm_header_t *hdr = (volatile input_shm_header_t *)shm;
+  volatile input_shm_header *hdr = (volatile input_shm_header *)shm;
   if (hdr->magic != INPUT_SHM_MAGIC)
     return 0;
 
@@ -23,13 +23,13 @@ int input_client_poll(volatile void *shm, input_event_t *events,
   uint32_t cap =
       hdr->ring_capacity ? hdr->ring_capacity : INPUT_RING_CAPACITY_DEFAULT;
   uint32_t off =
-      hdr->ring_offset ? hdr->ring_offset : sizeof(input_shm_header_t);
+      hdr->ring_offset ? hdr->ring_offset : sizeof(input_shm_header);
 
   int n = 0;
   while (head != tail && n < max_events) {
-    volatile input_event_t *slot =
-        (volatile input_event_t *)((volatile uint8_t *)shm + off +
-                                   tail * sizeof(input_event_t));
+    volatile input_event *slot =
+        (volatile input_event *)((volatile uint8_t *)shm + off +
+                                   tail * sizeof(input_event));
     events[n].timestamp_ns = slot->timestamp_ns;
     events[n].type = slot->type;
     events[n].code = slot->code;
@@ -42,7 +42,7 @@ int input_client_poll(volatile void *shm, input_event_t *events,
 }
 
 // Basic single-byte ASCII mapping (no shift/caps/Ctrl — caller handles those).
-int input_event_to_ascii(const input_event_t *ev, uint8_t *buf, int buf_len) {
+int input_event_to_ascii(const input_event *ev, uint8_t *buf, int buf_len) {
   if (!ev || !buf || buf_len <= 0)
     return 0;
   if (ev->type != EV_KEY || ev->value != 1)

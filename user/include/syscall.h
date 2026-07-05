@@ -32,9 +32,9 @@
 extern "C" {
 #endif
 
-// errno 经 __errno_location() 返回 TLS 指针（user/include/errno.h 定义宏
-// errno） syscall.h 被 libc 内部代码包含，此处声明 __errno_location 供 inline
-// wrapper 写 errno
+// errno is returned via __errno_location() as a TLS pointer (user/include/errno.h
+// defines the errno macro). syscall.h is included by libc internals; declare
+// __errno_location here so inline wrappers can write errno.
 int *__errno_location(void);
 #define errno (*__errno_location())
 

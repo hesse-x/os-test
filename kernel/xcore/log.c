@@ -25,18 +25,18 @@ void printk(int level, const char *fmt, ...) {
   if (level < log_level && level != LOG_PANIC)
     return;
 
-  serial_printf("[%s] ", level < 5 ? level_tags[level] : "???");
+  SERIAL_PRINTF("[%s] ", level < 5 ? level_tags[level] : "???");
 
   va_list ap;
   va_start(ap, fmt);
-  serial_vprintf(fmt, ap);
+  SERIAL_VPRINTF(fmt, ap);
   va_end(ap);
 }
 
 void panic(const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  serial_vprintf(fmt, ap);
+  SERIAL_VPRINTF(fmt, ap);
   va_end(ap);
 
   printk(LOG_PANIC, "--- PANIC ---");
@@ -44,10 +44,10 @@ void panic(const char *fmt, ...) {
   // Print current syscall name if in syscall context
   trapframe_t *tf = get_cpu_local()->cur_tf;
   if (tf) {
-    serial_printf("\nCPU %d  syscall=%s(%lu)\n", get_cpu_local()->cpu_id,
+    SERIAL_PRINTF("\nCPU %d  syscall=%s(%lu)\n", get_cpu_local()->cpu_id,
                   syscall_name(tf->rax), (unsigned long)tf->rax);
   } else {
-    serial_printf("\nCPU %d  (no trapframe)\n", get_cpu_local()->cpu_id);
+    SERIAL_PRINTF("\nCPU %d  (no trapframe)\n", get_cpu_local()->cpu_id);
   }
 
   dump_stack_trace();
@@ -58,14 +58,14 @@ void panic(const char *fmt, ...) {
 }
 
 void dump_stack_trace(void) {
-  serial_printf("BACKTRACE:\n");
+  SERIAL_PRINTF("BACKTRACE:\n");
   uint64_t *rbp;
   __asm__ volatile("movq %%rbp, %0" : "=r"(rbp));
   for (int depth = 0; depth < 16; depth++) {
     if (!rbp || (uint64_t)rbp < 0xFFFFFFFF80000000)
       break;
     uint64_t ret_addr = rbp[1];
-    serial_printf("    0x%016X\n", ret_addr);
+    SERIAL_PRINTF("    0x%016X\n", ret_addr);
     rbp = (uint64_t *)rbp[0];
     if (!rbp)
       break;

@@ -10,8 +10,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// clone arg6 传递的线程清理信息（user 填，kernel 读）
-// 不依赖 struct tcb 布局，保持 user/kernel 分层
+// Thread cleanup info passed via clone arg6 (filled by user, read by kernel)
+// Does not depend on struct tcb layout, keeps user/kernel layering
 struct thread_clone_info {
   int detached;             // 1 = detached thread
   uint64_t tls_page;        // user vaddr of TLS+TCB page (0 if N/A)

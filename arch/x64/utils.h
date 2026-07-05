@@ -10,7 +10,7 @@
 #include "kernel/xcore/sparse.h"
 #include <stddef.h>
 #include <stdint.h>
-#include <xos/syscall_nums.h> // recv_msg_t / pci_dev_info / SYS_* (UAPI)
+#include <xos/syscall_nums.h> // recv_msg / pci_dev_info / SYS_* (UAPI)
 
 // ===================== I/O port helpers =====================
 static inline void outb(uint16_t port, uint8_t val) {

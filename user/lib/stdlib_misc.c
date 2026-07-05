@@ -66,8 +66,8 @@ lldiv_t lldiv(long long numer, long long denom) {
   return r;
 }
 
-/* qsort — 真正的快速排序（median-of-three + 小数组插入排序）
- * 原 implementation 是纯插入排序，O(n²) 最坏。 */
+/* qsort — a real quicksort (median-of-three + insertion sort for small arrays).
+ * The original implementation was pure insertion sort, O(n²) worst case. */
 static void swap_bytes(char *a, char *b, size_t size) {
   while (size--) {
     char t = *a;
@@ -79,7 +79,7 @@ static void swap_bytes(char *a, char *b, size_t size) {
 static void qsort_range(char *arr, size_t lo, size_t hi, size_t size,
                         int (*cmp)(const void *, const void *)) {
   while (lo < hi) {
-    /* 小数组用插入排序，避免递归开销 */
+    /* Use insertion sort for small arrays to avoid recursion overhead */
     if (hi - lo < 8) {
       for (size_t i = lo + 1; i <= hi; i++) {
         size_t j = i;
@@ -90,7 +90,7 @@ static void qsort_range(char *arr, size_t lo, size_t hi, size_t size,
       }
       return;
     }
-    /* median-of-three 选 pivot，放到 hi */
+    /* median-of-three pivot selection, place pivot at hi */
     size_t mid = lo + (hi - lo) / 2;
     if (cmp(&arr[mid * size], &arr[hi * size]) > 0)
       swap_bytes(&arr[mid * size], &arr[hi * size], size);
@@ -107,7 +107,7 @@ static void qsort_range(char *arr, size_t lo, size_t hi, size_t size,
       }
     }
     swap_bytes(&arr[lo * size], &arr[i * size], size);
-    /* 尾递归消除：对较短的一侧递归，较长侧循环 */
+    /* Tail-call elimination: recurse on the shorter side, loop on the longer side */
     if (i - lo < hi - i) {
       qsort_range(arr, lo, i - 1, size, cmp);
       lo = i + 1;

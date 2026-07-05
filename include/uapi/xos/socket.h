@@ -49,7 +49,7 @@ typedef uint16_t sa_family_t;
 typedef struct sockaddr {
   sa_family_t sa_family; // address family (AF_UNIX = 1)
   char sa_data[14];      // address data
-} sockaddr_t;
+} sockaddr;
 
 // ===================== sockaddr_un =====================
 #define UNIX_PATH_MAX 108
@@ -57,13 +57,13 @@ typedef struct sockaddr {
 typedef struct sockaddr_un {
   sa_family_t sun_family;         // AF_UNIX = 1
   char sun_path[UNIX_PATH_MAX];   // path or abstract (\0 prefix)
-} sockaddr_un_t;
+} sockaddr_un;
 
 // ===================== iovec =====================
 typedef struct iovec {
   void *iov_base; // buffer address
   size_t iov_len; // buffer length
-} iovec_t;
+} iovec;
 
 // ===================== cmsghdr / CMSG macros =====================
 // Linux UAPI compatible layout (cmsg_len is socklen_t = uint32_t on x86-64)
@@ -72,7 +72,7 @@ typedef struct cmsghdr {
   int cmsg_level;    // originating protocol
   int cmsg_type;     // protocol-specific type
                      // followed by unsigned char cmsg_data[];
-} cmsghdr_t;
+} cmsghdr;
 
 #define CMSG_ALIGN(len) (((len) + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1))
 #define CMSG_DATA(cmsg) ((void *)(((char *)(cmsg)) + sizeof(struct cmsghdr)))
@@ -97,7 +97,7 @@ typedef struct msghdr {
   void *msg_control;     // ancillary data (SCM_RIGHTS)
   size_t msg_controllen; // ancillary data size
   int msg_flags;         // flags on received message
-} msghdr_t;
+} msghdr;
 
 // ===================== pollfd =====================
 typedef unsigned long nfds_t;
@@ -106,7 +106,7 @@ typedef struct pollfd {
   int fd;        // fd to poll
   short events;  // requested events
   short revents; // returned events
-} pollfd_t;
+} pollfd;
 
 // ===================== Flags for sendmsg/recvmsg =====================
 #define MSG_EOR 0x80      // end of record

@@ -1,9 +1,9 @@
 #!/bin/bash
 # sparse_check.sh — Sparse static analysis + #include layer check for kernel code
-# 独立可跑：./build_script/sparse_check.sh
-# 返回 0 = 通过，1 = 有 sparse/层级违规或环境缺失
+# Standalone runnable: ./build_script/sparse_check.sh
+# Returns 0 = passed, 1 = sparse/layer violations or missing environment
 #
-# 由 check.sh --filter sparse 调用。
+# Invoked by check.sh --filter sparse.
 
 # resolve repo root (this script lives in build_script/)
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -25,12 +25,12 @@ if ! command -v sparse &> /dev/null; then
     exit 1
 fi
 
-# Flags 对齐当前编译行为 (CMakeLists.txt 全局 C flags + include 路径):
-#   -std=gnu17, -I. + -Iinclude/uapi (xos/* UAPI 头)
-# 注：不加 -nostdinc -isystem <gcc freestanding inc>。gcc 编译用这对组合隔离
-# 宿主 glibc 头，但 sparse 对 -nostdinc + -isystem 的 #include_next 链支持不全，
-# 会导致 gcc 自带 stdint.h 自引用解析失败。sparse 用其默认 freestanding 头即可，
-# 仅需 -Iinclude/uapi 让 "xos/*.h" UAPI 头能解析（否则 "unable to open 'xos/...'"）。
+# Flags align with current compile behavior (CMakeLists.txt global C flags + include paths):
+#   -std=gnu17, -I. + -Iinclude/uapi (xos/* UAPI headers)
+# Note: do NOT add -nostdinc -isystem <gcc freestanding inc>. gcc compilation uses this pair to isolate
+# host glibc headers, but sparse has incomplete support for the -nostdinc + -isystem #include_next chain,
+# which causes gcc's bundled stdint.h to fail self-referential resolution. sparse can use its default freestanding headers,
+# only -Iinclude/uapi is needed so "xos/*.h" UAPI headers can resolve (otherwise "unable to open 'xos/...'").
 SPARSE_FLAGS=(
     -std=gnu17
     -m64

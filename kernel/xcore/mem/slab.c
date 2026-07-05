@@ -9,24 +9,24 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "xos/syscall.h"
 #include <stdint.h>
 
-// 全局 kmalloc cache 数组
+// Global kmalloc cache array
 kmem_cache kmalloc_caches[NUM_KMALLOC_CLASSES];
 
-// 全局内核内存统计
+// Global kernel memory statistics
 struct kernel_mem_stats kernel_mem_stats;
 
-// Size class 对应的对象大小
+// Object size for each size class
 static const size_t class_sizes[NUM_KMALLOC_CLASSES] = {
     8, 16, 32, 64, 128, 256, 512, 1024, 2048};
 
-// ===================== Slab 页初始化 =====================
+// ===================== Slab page initialization =====================
 __attribute__((no_sanitize("kernel-address"))) static void
 slab_page_init(Page *page, kmem_cache *cache, int cpu_id) {
   page->status = PAGE_SLAB;
@@ -38,7 +38,8 @@ slab_page_init(Page *page, kmem_cache *cache, int cpu_id) {
   page->slab.partial_next = NULL;
   page->slab.partial_prev = NULL;
 
-  // 侵入式空闲链表：每个空闲对象首 8 字节存 next
+  // Intrusive freelist: the first 8 bytes of each free object store the next
+  // pointer
   char *base =
       (__force char *)phys_to_virt((__force phys_addr_t)page_to_phys(page));
   for (uint32_t i = 0; i < page->slab.obj_count; i++) {
@@ -48,7 +49,7 @@ slab_page_init(Page *page, kmem_cache *cache, int cpu_id) {
   }
 }
 
-// ===================== partial list 操作 =====================
+// ===================== partial list operations =====================
 __attribute__((no_sanitize("kernel-address"))) static void
 partial_add(kmem_cache *cache, Page *page) {
   page->slab.partial_next = cache->partial;
@@ -128,7 +129,7 @@ __attribute__((no_sanitize("kernel-address"))) void *kmalloc(size_t size) {
 
   memstat_inc(&kernel_mem_stats.kmalloc_calls);
 
-  // 大分配：走 BFC
+  // Large allocation: go through BFC
   if (size > 2048) {
     size_t npages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     Page *page = bfc_alloc_page(npages);
@@ -152,11 +153,11 @@ __attribute__((no_sanitize("kernel-address"))) void *kmalloc(size_t size) {
   cpu_local *cpu = get_cpu_local();
   Page *active = cpu->active_slab[c];
 
-  // All paths hold lock (方案 A: remove fast path lock-free optimization)
+  // All paths hold lock (option A: remove fast path lock-free optimization)
   uint64_t flags;
   spin_lock_irqsave(&cache->lock, &flags);
 
-  // Check active slab (原 fast path，现持锁)
+  // Check active slab (former fast path, now lock-held)
   if (active && active->slab.freelist) {
     void *obj = active->slab.freelist;
     active->slab.freelist = *(void **)obj;
@@ -190,7 +191,7 @@ __attribute__((no_sanitize("kernel-address"))) void *kmalloc(size_t size) {
     return obj;
   }
 
-  // partial 也空：从 BFC 分配新页
+  // partial is also empty: allocate a new page from BFC
   Page *new_page = bfc_alloc_page(1);
   if (!new_page) {
     spin_unlock_irqrestore(&cache->lock, flags);
@@ -229,7 +230,7 @@ __attribute__((no_sanitize("kernel-address"))) void kfree(const void *ptr) {
   Page *page = &bfc_frames[PHY_TO_PAGE(phys)];
 
   if (page->status == PAGE_USED) {
-    // BFC 大分配释放
+    // BFC large allocation free
     kasan_bfc_free(ptr, page->bfc.cont_page_num * PAGE_SIZE);
     memstat_sub(&kernel_mem_stats.slab_used_bytes,
                 (int)(page->bfc.cont_page_num * PAGE_SIZE));
@@ -238,8 +239,9 @@ __attribute__((no_sanitize("kernel-address"))) void kfree(const void *ptr) {
   }
 
   if (page->status != PAGE_SLAB) {
-    // page->status 既不是 PAGE_USED 也不是 PAGE_SLAB,说明 Page 描述符已损坏。
-    // 不可恢复, DEBUG 直接 panic 定位, release 不做检查。
+    // page->status is neither PAGE_USED nor PAGE_SLAB, meaning the Page
+    // descriptor has been corrupted. Unrecoverable; DEBUG panics directly to
+    // locate, release builds do not check.
 #ifndef NDEBUG
     printk(LOG_ERROR,
            "kfree: bad page status ptr=%p phys=%lx page=%p status=%d "
@@ -271,7 +273,7 @@ __attribute__((no_sanitize("kernel-address"))) void kfree(const void *ptr) {
   int my_cpu = get_cpu_local()->cpu_id;
 
   if (page->slab.cpu_id == my_cpu) {
-    // 同 CPU: 全程持锁（方案 A: eliminate data race）
+    // Same CPU: hold the lock throughout (option A: eliminate data race)
     uint64_t flags;
     spin_lock_irqsave(&cache->lock, &flags);
     *(void **)ptr = page->slab.freelist;
@@ -284,7 +286,7 @@ __attribute__((no_sanitize("kernel-address"))) void kfree(const void *ptr) {
     }
     spin_unlock_irqrestore(&cache->lock, flags);
   } else {
-    // 跨 CPU 释放：持锁
+    // Cross-CPU free: hold the lock
     uint64_t flags;
     spin_lock_irqsave(&cache->lock, &flags);
     *(void **)ptr = page->slab.freelist;
@@ -324,7 +326,7 @@ __attribute__((no_sanitize("kernel-address"))) void *krealloc(void *ptr,
     return NULL;
   }
 
-  // 获取旧大小
+  // Get the old size
   uint64_t addr = (uint64_t)ptr;
   uint64_t phys = (__force uint64_t)PHY_ADDR(addr);
   Page *page = &bfc_frames[PHY_TO_PAGE(phys)];
@@ -350,21 +352,24 @@ __attribute__((no_sanitize("kernel-address"))) void *krealloc(void *ptr,
   return new_ptr;
 }
 
-// ===================== 专用 slab cache API =====================
-// 与 kmalloc 共用 slab_page_init / partial list / kfree 的 Page 描述符约定，
-// 区别：精确 obj_size（不向上对齐 size class），无 per-CPU active_slab（只走
-// partial list + 新页分配）。精简版：无 ctor/align/flags。
+// ===================== Dedicated slab cache API =====================
+// Shares slab_page_init / partial list / kfree Page descriptor conventions
+// with kmalloc. Differences: exact obj_size (not aligned up to a size class),
+// no per-CPU active_slab (only partial list + new page allocation). Streamlined
+// version: no ctor/align/flags.
 //
-// obj_size 上限约束：必须 <= PAGE_SIZE/2 否则一页放不下 ≥2 对象（freelist
-// 侵入式 需要对象容纳 next 指针）。xtask ~2KB 满足。kmalloc 大对象走
-// BFC，专用 cache 不应承接这种用法。
+// obj_size upper bound constraint: must be <= PAGE_SIZE/2, otherwise a page
+// cannot hold >= 2 objects (the intrusive freelist requires each object to
+// fit a next pointer). xtask ~2KB satisfies this. kmalloc large objects go
+// through BFC; dedicated caches should not handle such usage.
 
-// kmem_cache_create: 静态分配 cache 控制块（kmem_cache 本身用 kmalloc）。
-// 返回 NULL 表示 kmalloc 失败。cache 由调用者持有，无需 destroy（xtask_cache
-// 全局常驻）。
+// kmem_cache_create: statically allocate the cache control block (kmem_cache
+// itself is allocated via kmalloc). Returns NULL on kmalloc failure. The cache
+// is held by the caller; no destroy needed (xtask_cache is global and
+// persistent).
 __attribute__((no_sanitize("kernel-address"))) kmem_cache *
 kmem_cache_create(const char *name, size_t obj_size) {
-  (void)name; // 调试用，暂不存储
+  (void)name; // debug only, not stored for now
   if (obj_size == 0 || obj_size > PAGE_SIZE / 2)
     return NULL;
   kmem_cache *cache = (kmem_cache *)kmalloc(sizeof(kmem_cache));
@@ -377,18 +382,19 @@ kmem_cache_create(const char *name, size_t obj_size) {
   return cache;
 }
 
-// kmem_cache_alloc: 从 cache 分配一个对象。持 cache->lock 全程。
-// 路径：partial list 有空位 → 复用；否则从 BFC 分配新页初始化。
+// kmem_cache_alloc: allocate one object from the cache. Holds cache->lock
+// throughout. Path: partial list has a free slot -> reuse; otherwise allocate
+// a new page from BFC and initialize it.
 __attribute__((no_sanitize("kernel-address"))) void *
 kmem_cache_alloc(kmem_cache *cache) {
   uint64_t flags;
   spin_lock_irqsave(&cache->lock, &flags);
 
-  // partial list 找有空闲对象的页
+  // Find a page with free objects in the partial list
   while (cache->partial) {
     Page *page = cache->partial;
     if (page->slab.freelist == NULL) {
-      // 页已满，移出 partial 跳过
+      // Page is full, remove from partial and skip
       partial_remove(cache, page);
       continue;
     }
@@ -403,7 +409,7 @@ kmem_cache_alloc(kmem_cache *cache) {
     return obj;
   }
 
-  // partial 空：分配新页
+  // partial is empty: allocate a new page
   Page *new_page = bfc_alloc_page(1);
   if (!new_page) {
     spin_unlock_irqrestore(&cache->lock, flags);
@@ -411,12 +417,13 @@ kmem_cache_alloc(kmem_cache *cache) {
            cache->obj_size);
     return NULL;
   }
-  slab_page_init(new_page, cache, -1); // cpu_id=-1：专用 cache 无 per-CPU 归属
+  slab_page_init(new_page, cache, -1); // cpu_id=-1: dedicated cache has no per-CPU ownership
 
   void *obj = new_page->slab.freelist;
   new_page->slab.freelist = *(void **)obj;
   new_page->slab.inuse++;
-  // 新页立即挂回 partial（仍有空闲对象），下次 alloc 可复用
+  // Add the new page back to partial immediately (still has free objects),
+  // reuse on next alloc
   partial_add(cache, new_page);
 
   spin_unlock_irqrestore(&cache->lock, flags);
@@ -426,8 +433,9 @@ kmem_cache_alloc(kmem_cache *cache) {
   return obj;
 }
 
-// kmem_cache_free: 释放对象回所属页的 freelist。通过物理地址反查 Page 描述符。
-// 与 kfree 的 slab 分支同款逻辑（侵入式链表 + inuse 递减 + 满→partial 转换）。
+// kmem_cache_free: free an object back to its page's freelist. Reverse-lookups
+// the Page descriptor via the physical address. Same logic as the slab branch
+// of kfree (intrusive list + inuse decrement + full->partial transition).
 __attribute__((no_sanitize("kernel-address"))) void
 kmem_cache_free(kmem_cache *cache, void *obj) {
   if (!obj)
@@ -438,8 +446,8 @@ kmem_cache_free(kmem_cache *cache, void *obj) {
   uint64_t phys = (__force uint64_t)PHY_ADDR(addr);
   Page *page = &bfc_frames[PHY_TO_PAGE(phys)];
 
-  // 专用 cache 的对象页必为 PAGE_SLAB；非此状态说明 obj 不属于该
-  // cache（double-free/野指针）
+  // Object pages of a dedicated cache must be PAGE_SLAB; any other status
+  // means obj does not belong to this cache (double-free/wild pointer)
   if (page->status != PAGE_SLAB) {
     printk(LOG_ERROR, "kmem_cache_free: bad page status ptr=%p status=%d\n",
            obj, page->status);
@@ -456,7 +464,8 @@ kmem_cache_free(kmem_cache *cache, void *obj) {
   page->slab.freelist = obj;
   page->slab.inuse--;
   memstat_sub(&kernel_mem_stats.slab_used_bytes, (int)cache->obj_size);
-  // 释放前页满（inuse==obj_count）则不在 partial，归零后挂回 partial
+  // If the page was full before the free (inuse==obj_count) it is not on
+  // partial; add it back to partial after the count drops
   if (page->slab.inuse == page->slab.obj_count - 1) {
     partial_add(cache, page);
   }

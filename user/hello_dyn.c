@@ -23,10 +23,11 @@ int main(int argc, char **argv, char **envp) {
     nsec += 1000000000L;
   }
   printf(" [printf %ld.%09ld s]\n", sec, nsec);
-  // 引用 errno 验证 TCB 模式在动态链接下写读一致（ld.so §3.4.5）。
-  // errno 是宏 → __errno_location() 返回 &TCB.errno_val，主 ELF 与 libc.so
-  // 共享当前线程的同一份 errno。若 errno 仍是全局变量，动态链接下会写读分离
-  // （bug.md BUG-LD-002）。
+  // Reference errno to verify the TCB mode reads/writes consistently under
+  // dynamic linking (ld.so §3.4.5). errno is a macro -> __errno_location()
+  // returns &TCB.errno_val; the main ELF and libc.so share the same errno
+  // of the current thread. If errno were still a global variable, dynamic
+  // linking would split writes from reads (bug.md BUG-LD-002).
   printf("errno=%d\n", errno);
   return 0;
 }

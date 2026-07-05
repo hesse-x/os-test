@@ -7,7 +7,7 @@
 #include "kernel/bsd/elf_loader.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
@@ -111,34 +111,38 @@ static elf_load_result_t elf_load_internal(const uint8_t *data, uint64_t size,
     if (ph->p_memsz == 0)
       continue;
 
-    // 记录第一个 PT_LOAD 用于 AT_PHDR：p_vaddr + e_phoff - p_offset
-    // PHDR 表位于 ELF 文件 e_phoff 处，与首个 PT_LOAD 的文件偏移对齐
+    // Record the first PT_LOAD for AT_PHDR: p_vaddr + e_phoff - p_offset
+    // The PHDR table is at ELF file offset e_phoff, aligned with the first
+    // PT_LOAD's file offset
     if (!phdr_found) {
       result.phdr_vaddr = base + (ph->p_vaddr + ehdr->e_phoff - ph->p_offset);
       phdr_found = true;
     }
 
     // 3. Map pages covering this segment
-    // ELF 规范：p_vaddr & 0xFFF == p_offset & 0xFFF（段在页内对齐）
-    // 页 page_addr 对应文件偏移 file_off_at_page = p_offset 的页对齐部分 +
-    // 页内偏移 即 src = data + (p_offset & ~0xFFF) + (page_addr - first_page)
-    //     copy_len = 从该位置到 filesz 末尾（截断到 PAGE_SIZE）
-    // 页内段前部分（seg_page_off
-    // 之前）属于其他段或文件头，整页拷贝可保留正确内容
+    // ELF spec: p_vaddr & 0xFFF == p_offset & 0xFFF (segment is page-aligned
+    // within the page)
+    // Page page_addr corresponds to file offset file_off_at_page = page-aligned
+    // part of p_offset + intra-page offset, i.e.
+    //     src = data + (p_offset & ~0xFFF) + (page_addr - first_page)
+    //     copy_len = from that position to the end of filesz (truncated to
+    //     PAGE_SIZE)
+    // The part of the page before seg_page_off belongs to other segments or
+    // the file header; copying the whole page preserves the correct content
     uint64_t first_page = base + (ph->p_vaddr & ~0xFFFULL);
     uint64_t last_page = base + ((ph->p_vaddr + ph->p_memsz - 1) & ~0xFFFULL);
     uint64_t file_page_base =
-        ph->p_offset & ~0xFFFULL; // 段起始文件偏移的页对齐
+        ph->p_offset & ~0xFFFULL; // page-aligned start file offset of the segment
 
     for (uint64_t page_addr = first_page; page_addr <= last_page;
          page_addr += PAGE_SIZE) {
-      // 该页在文件中的起始偏移（相对 file_page_base）
+      // The page's starting offset in the file (relative to file_page_base)
       uint64_t page_file_off = (page_addr - first_page);
-      // 该页需要拷贝的文件范围：[file_page_base + page_file_off, p_offset +
-      // filesz)
+      // The file range to copy for this page: [file_page_base + page_file_off,
+      // p_offset + filesz)
       const uint8_t *src = NULL;
       uint64_t copy_len = 0;
-      uint64_t file_end = ph->p_offset + ph->p_filesz; // 段文件数据结束
+      uint64_t file_end = ph->p_offset + ph->p_filesz; // end of segment file data
       uint64_t page_file_start = file_page_base + page_file_off;
       if (page_file_start < file_end) {
         src = data + page_file_start;

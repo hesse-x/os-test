@@ -14,7 +14,7 @@
 # kernel-internal headers. This is what lets them be installed to /usr/include
 # and included by host-built user programs without the kernel source tree.
 #
-# Non-UAPI shared implementation (macro.h, kvformat.*) stays in common/ — those
+# Non-UAPI shared implementation (macro.h, kvformat.*) stays in utils/ — those
 # are NOT published to the sysroot.
 #
 # No compilation targets — all headers are header-only.

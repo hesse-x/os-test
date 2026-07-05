@@ -7,7 +7,7 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "kernel/efi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
@@ -23,7 +23,7 @@ spinlock bfc_lock = SPINLOCK_INIT;
 
 // ===================== BFC allocator implementation =====================
 void bfc_init(void) {
-  // init_mem 中完成初始化
+  // Initialization is done in init_mem
 }
 
 __attribute__((no_sanitize("kernel-address"))) Page *bfc_alloc_page(size_t n) {
@@ -112,8 +112,9 @@ __attribute__((no_sanitize("kernel-address"))) Page *bfc_free_page(Page *page,
   uint64_t flags;
   spin_lock_irqsave(&bfc_lock, &flags);
 
-  // 不可恢复: slab 页被当 BFC 大块释放,说明 page->status 已被破坏。
-  // DEBUG 直接 panic 定位根因, release 不做检查。
+  // Unrecoverable: a slab page being freed as a BFC large block indicates
+  // page->status has been corrupted. DEBUG panics directly to locate the root
+  // cause; release builds do not check.
   ASSERT(page->status != PAGE_SLAB);
 
   memstat_sub(&kernel_mem_stats.used_pages, (int)n);
@@ -267,7 +268,7 @@ __attribute__((no_sanitize("kernel-address"))) size_t bfc_free_page_nums(void) {
 }
 
 // ===================== EFI mmap iteration helpers =====================
-// EFI mmap 地址是物理地址，转虚拟: phys + VMA_BASE
+// EFI mmap addresses are physical; convert to virtual: phys + VMA_BASE
 static efi_memory_descriptor_t *get_efi_desc(boot_info *bi, size_t index) {
   uintptr_t mmap_virt = (uintptr_t)bi->mmap_addr + VMA_BASE;
   return (efi_memory_descriptor_t *)(mmap_virt + index * bi->mmap_desc_size);
@@ -281,7 +282,7 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
 
   size_t desc_count = bi->mmap_size / bi->mmap_desc_size;
 
-  // 1. 计算 AVAILABLE 内存最大物理地址 + 总页帧数
+  // 1. Compute the maximum physical address of AVAILABLE memory + total page frames
   uint64_t max_phys_addr = 0;
   for (size_t i = 0; i < desc_count; i++) {
     efi_memory_descriptor_t *desc = get_efi_desc(bi, i);
@@ -293,16 +294,16 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
   }
   total_page_frames = GET_PAGE_NUM(max_phys_addr);
 
-  // 2. Bump 分配器初始化
+  // 2. Bump allocator initialization
   uintptr_t kernel_end_phys =
       (__force uintptr_t)PHY_ADDR((uintptr_t)kernel_end);
   bump_init_phys(kernel_end_phys);
 
-  // 3. Bump 分配 frames 数组
+  // 3. Bump-allocate the frames array
   size_t frames_size = total_page_frames * sizeof(Page);
   Page *frames = (Page *)bump_alloc(frames_size);
 
-  // 4. 初始化 frames 为 RESERVED
+  // 4. Initialize frames as RESERVED
   for (size_t i = 0; i < total_page_frames; i++) {
     frames[i].status = PAGE_RESERVED;
     frames[i].bfc.cont_page_num = 1;
@@ -311,7 +312,7 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
     refcount_set(&frames[i].p_refcount, 0);
   }
 
-  // 5. 根据 EFI mmap 标记 FREE 页
+  // 5. Mark FREE pages according to the EFI mmap
   for (size_t i = 0; i < desc_count; i++) {
     efi_memory_descriptor_t *desc = get_efi_desc(bi, i);
     if (desc->type == EfiConventionalMemory) {
@@ -326,13 +327,13 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
     }
   }
 
-  // 6. 扩展 higher-half 映射 + 设备映射区
+  // 6. Extend the higher-half mapping + device mapping region
   extend_mapping(max_phys_addr);
 
-  // 7. 刷新 TLB
+  // 7. Flush TLB
   flush_tlb();
 
-  // 8. 标记内核 + bump 分配的页为 USED
+  // 8. Mark kernel + bump-allocated pages as USED
   uintptr_t used_start = bi->kernel_phys;
   uintptr_t used_end = bump_end_phys();
   size_t used_page_idx_start = PHY_TO_PAGE(used_start);
@@ -343,7 +344,7 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
     refcount_set(&frames[i].p_refcount, 1);
   }
 
-  // 9. 建立 free list
+  // 9. Build the free list
   int state = 0;
   Page *prev = NULL;
   Page **cur_page = &bfc_free_list;
@@ -378,7 +379,7 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
     (*cur_page)->bfc.cont_page_num = cont_page_num;
   }
 
-  // 10. 设置 bfc_frames
+  // 10. Set bfc_frames
   bfc_frames = frames;
 }
 

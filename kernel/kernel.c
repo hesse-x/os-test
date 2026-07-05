@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-// 64位 higher-half内核，-mcmodel=kernel编译
-// kernel_main: 虚拟地址运行，xcore_init + driver_init + bsd_init + idle + 从
-// boot_info 加载 init
+// 64-bit higher-half kernel, compiled with -mcmodel=kernel
+// kernel_main: runs in virtual address space,
+//   xcore_init + driver_init + bsd_init + idle + load init from boot_info
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -15,7 +15,7 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "boot/boot.h"
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/driver/serial.h"
 #include "kernel/kernel.h"
@@ -57,7 +57,7 @@ void kernel_main(boot_info *bi) {
   // execute without #UD. This is the exact failure mode seen when APs
   // missed enable_sse() — catching it here gives a clear kernel-side
   // panic instead of a mysterious user-mode #UD later.
-  // eager FPU: CR0.TS 恒为 0，无需 clts/恢复 TS。
+  // eager FPU: CR0.TS is always 0, no clts/restore TS needed.
   {
     double src = 3.14, dst = 0.0;
     // Note: no "xmm0" clobber — kernel is compiled with -mno-sse, so gcc

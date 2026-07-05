@@ -25,7 +25,7 @@ static int find_pci_device(uint16_t class_code, struct pci_dev_info *out) {
   for (int dev = 0; dev < 32; dev++) {
     for (int func = 0; func < 8; func++) {
       memset(out, 0, sizeof(*out));
-      if (pci_dev_info(0, dev, func, out) == 0 &&
+      if (pci_dev_info_get(0, dev, func, out) == 0 &&
           out->class_code == class_code) {
         return 0;
       }
@@ -49,11 +49,11 @@ void test_pci_dev_info_valid(void) {
   }
 }
 
-/* 2. pci_dev_info(255,0,0) returns -ENOENT */
+/* 2. pci_dev_info_get(255,0,0) returns -ENOENT */
 void test_pci_dev_info_invalid(void) {
   struct pci_dev_info info;
   memset(&info, 0, sizeof(info));
-  int r = pci_dev_info(255, 0, 0, &info);
+  int r = pci_dev_info_get(255, 0, 0, &info);
   TEST_ASSERT_TRUE(r < 0);
 }
 
@@ -83,7 +83,7 @@ void test_pci_scan_all(void) {
   for (int dev = 0; dev < 32; dev++) {
     for (int func = 0; func < 8; func++) {
       memset(&info, 0, sizeof(info));
-      if (pci_dev_info(0, dev, func, &info) == 0) {
+      if (pci_dev_info_get(0, dev, func, &info) == 0) {
         found_count++;
       }
     }

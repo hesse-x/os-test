@@ -8,14 +8,15 @@
 #include "arch/x64/memlayout.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include <stdbool.h>
 
-// ===================== GDT (物理地址阶段) =====================
-// start.S 调用 gdt_init() 时仍在物理地址运行，
-// 必须用物理地址的 GDT。smp_init_cpu 在虚拟地址阶段调用。
+// ===================== GDT (physical-address phase) =====================
+// start.S calls gdt_init() while still running at physical addresses,
+// so the GDT must be accessed via physical addresses.  smp_init_cpu is
+// called later in the virtual-address phase and uses a separate GDT.
 
 static gdt_entry_t gdt[8];
 static gdt_ptr_t gdt_reg;
@@ -44,13 +45,14 @@ static void set_tss_gate(int n, uint64_t base, uint32_t limit) {
 
 void reload_cs(void);
 
-// 临时 TSS，仅供物理地址阶段使用
+// Temporary TSS for the physical-address phase only
 static tss_t boot_tss;
 
 const uint8_t stack_bottom[8192] __attribute__((aligned(16))) = {0};
 
 __attribute__((no_sanitize("kernel-address"))) void gdt_init() {
-  // 物理地址阶段：使用静态 GDT（RIP-relative 自动给出物理地址）
+  // Physical-address phase: use a static GDT (RIP-relative addressing
+  // automatically produces physical addresses)
   set_gdt_gate(0, 0, 0, 0, 0);
   set_gdt_gate(1, 0, 0, 0x9A, 0x02); // kernel code64 (L=1)
   set_gdt_gate(2, 0, 0, 0x92, 0x00); // kernel data
@@ -80,24 +82,27 @@ __attribute__((no_sanitize("kernel-address"))) void gdt_init() {
   ltr(TSS_SEL);
 }
 
-// ===================== 页表 =====================
-// stub.S 在物理地址阶段设置这些页表，此处定义 BSS
+// ===================== Page tables =====================
+// Set up by stub.S in the physical-address phase; we define the BSS here.
 __attribute__((aligned(4096))) uint64_t pml4[512];
 __attribute__((aligned(4096))) uint64_t pdpt_ident[512];
 __attribute__((aligned(4096))) uint64_t pdpt_hh[512];
 __attribute__((aligned(4096))) uint64_t page_dir[512];
 
 // ===================== enable_paging =====================
-// 物理地址阶段，由 start.S _start 调用
-// 注意：此时 higher-half 不可访问，必须通过物理地址指针操作页表
-// CR3 加载后 identity map + higher-half 生效，才能访问 VMA
-// 返回: rax = &gdtr(栈/物理地址), rdx = &far_ptr(栈/物理地址)
+// Called from start.S _start in the physical-address phase.
+// Note: the higher-half is not yet accessible; page tables must be
+// manipulated through physical-address pointers.  Once CR3 is loaded,
+// both the identity map and the higher-half become active, making VMA
+// addresses accessible.
+// Returns: rax = &gdtr (on stack, physical addr), rdx = &far_ptr (stack, phys)
 __attribute__((noinline, no_sanitize("kernel-address"))) void
 enable_paging(boot_info *bi_phys) {
   (void)bi_phys;
 
-  // === 构建页表 (2MB huge pages) ===
-  // 物理地址运行时 RIP-relative 直接给出物理地址
+  // === Build page tables (2MB huge pages) ===
+  // During physical-address execution, RIP-relative addressing directly
+  // yields physical addresses.
   uint64_t *pml4_p = pml4;
   uint64_t *pdpt_i_p = pdpt_ident;
   uint64_t *pdpt_h_p = pdpt_hh;
@@ -108,7 +113,7 @@ enable_paging(boot_info *bi_phys) {
   uint64_t pdpt_h_phys = (uint64_t)pdpt_h_p;
   uint64_t pd_phys = (uint64_t)pd_p;
 
-  // 清零（手动循环，不用 __builtin_memset）
+  // Zero out page tables (manual loop, avoid __builtin_memset)
   for (int i = 0; i < 512; i++)
     pml4_p[i] = 0;
   for (int i = 0; i < 512; i++)
@@ -127,18 +132,18 @@ enable_paging(boot_info *bi_phys) {
     pd_p[i] = ((uint64_t)i << 21) | PTE_PRESENT | PTE_RW | PTE_PS;
   }
 
-  // 加载 CR3 — 此后 identity map + higher-half 均生效
+  // Load CR3 — both the identity map and the higher-half become active
   load_cr3(pml4_phys);
 
   // Program PAT MSR after paging is enabled
   pat_init();
 }
 
-// ===================== 全局变量定义 =====================
+// ===================== Global variable definitions =====================
 boot_info g_boot_info;
 uintptr_t device_vma_base = 0;
 
-// ===================== Bump 分配器 =====================
+// ===================== Bump allocator =====================
 static uintptr_t bump_next_phys;
 static bool bump_disabled = false;
 
@@ -161,33 +166,35 @@ __attribute__((no_sanitize("kernel-address"))) void bump_disable() {
 }
 
 // ===================== extend_mapping =====================
-// 扩展 higher-half 映射：为超出初始 1GB 的物理 RAM 分配 PDPT+PD
-// 0xFFFFFFFF80000000 的页表索引:
+// Extend the higher-half mapping: allocate PDPT+PD entries for physical
+// RAM beyond the initial 1 GB.
+// Page table index for 0xFFFFFFFF80000000:
 //   PML4 index = 511
 //   PDPT index = 510
-//   所以 higher-half 从 PDPT_hh[510] 开始
-//   后续 1GB 块使用 PDPT_hh[511], PDPT_hh[512-overflow]...
-//   注意: PDPT_hh[511] 已被 PML4 自映射占用时需要换 PDPT
+//   Thus the higher-half starts at PDPT_hh[510]
+//   Subsequent 1 GB blocks use PDPT_hh[511], PDPT_hh[512-overflow], ...
+//   Note: if PDPT_hh[511] is already occupied by PML4 self-map,
+//   a new PDPT page must be allocated.
 __attribute__((no_sanitize("kernel-address"))) void
 extend_mapping(uint64_t max_phys_addr) {
-  // 计算需要多少个 1GB 块
+  // Calculate how many 1 GB blocks are needed
   size_t max_1gb_block = (size_t)(max_phys_addr / 0x40000000);
 
-  // stub 已设置 PDPT_hh[510] → PD (第一个1GB)
-  // PDPT_hh[511] 将用于第二个1GB
-  // n >= 2 的 1GB 块需要新的 PDPT 页，链接到 PML4[510]
-  // 因为 PML4[511] + PDPT_hh 仅覆盖索引 510-511（2GB 虚拟地址空间）
+  // stub already set PDPT_hh[510] → PD (first 1 GB)
+  // PDPT_hh[511] covers the second 1 GB
+  // n >= 2 blocks require a fresh PDPT page linked to PML4[510]
+  // because PML4[511] + PDPT_hh only covers indices 510-511 (2 GB VA space)
 
-  // PML4[510] 对应虚拟地址 0xFFFFFFFF00000000 起
-  // 用于扩展 higher-half 映射（物理 2GB 以上）
+  // PML4[510] maps virtual addresses starting at 0xFFFFFFFF00000000
+  // Used to extend the higher-half mapping (physical memory above 2 GB)
   static uint64_t *pdpt_extra = NULL;
 
   for (size_t n = 1; n <= max_1gb_block; n++) {
-    // 分配 PD (4KB)
+    // Allocate PD (4 KB)
     uint64_t *pd = (uint64_t *)bump_alloc(4096);
     uintptr_t pd_phys = (__force uintptr_t)PHY_ADDR((uintptr_t)pd);
 
-    // 填充 PD: 512个 2MB huge pages 映射物理 n*1GB 到 (n+1)*1GB
+    // Fill PD: 512 x 2MB huge pages mapping physical n*1GB to (n+1)*1GB
     uint64_t phys_base = (uint64_t)n * 0x40000000;
     for (int i = 0; i < 512; i++) {
       pd[i] = (phys_base + (uint64_t)i * PAGE_SIZE_2M) | PTE_PRESENT | PTE_RW |
@@ -198,27 +205,27 @@ extend_mapping(uint64_t max_phys_addr) {
     pdpt_ident[n] = pd_phys | PTE_PRESENT | PTE_RW;
 
     // higher-half map:
-    //   n=1: PDPT_hh[511] (第二个1GB, 虚拟地址 0xFFFFFFFFC0000000)
-    //   n>=2: 分配额外 PDPT, 链接到 PML4[510]
+    //   n=1: PDPT_hh[511] (second 1 GB, virtual 0xFFFFFFFFC0000000)
+    //   n>=2: allocate extra PDPT, link to PML4[510]
     if (n == 1) {
       pdpt_hh[511] = pd_phys | PTE_PRESENT | PTE_RW;
     } else {
       if (!pdpt_extra) {
-        // 分配扩展 PDPT 页
+        // Allocate an extended PDPT page
         pdpt_extra = (uint64_t *)bump_alloc(4096);
         uintptr_t pdpt_phys =
             (__force uintptr_t)PHY_ADDR((uintptr_t)pdpt_extra);
         for (int i = 0; i < 512; i++)
           pdpt_extra[i] = 0;
-        // PML4[510] 映射虚拟地址 0xFFFFFFFF00000000 起
+        // PML4[510] maps starting at virtual address 0xFFFFFFFF00000000
         pml4[510] = pdpt_phys | PTE_PRESENT | PTE_RW;
       }
-      // PDPT 索引: 第 n 个 1GB 块(n>=2)映射到 pdpt_extra[n-2]
+      // PDPT index: the n-th 1 GB block (n>=2) maps to pdpt_extra[n-2]
       pdpt_extra[n - 2] = pd_phys | PTE_PRESENT | PTE_RW;
     }
   }
 
-  // 设备映射区
+  // Device mapping region
   device_vma_base = ALIGN_UP(VMA_BASE + (uintptr_t)max_phys_addr, 0x40000000);
 }
 
@@ -246,9 +253,10 @@ __attribute__((no_sanitize("kernel-address"))) void enable_nx() {
 
 // ===================== SSE/FPU enable =====================
 // Set CR4.OSFXSR (bit 9) + CR4.OSXMMEXCPT (bit 10).
-//   OSFXSR: fxsave/fxrstor 保存/恢复 SSE 寄存器；不设则用户态 SSE 指令触发 #UD
-//   OSXMMEXCPT: SSE #XM(向量 19)异常走标准 IDT 路径
-// 必须在每个 CPU（BSP + AP）启动时调用。
+//   OSFXSR: fxsave/fxrstor save/restore SSE regs; without this flag,
+//           user-mode SSE instructions trigger #UD.
+//   OSXMMEXCPT: SSE #XM (vector 19) exceptions use the standard IDT path.
+// Must be called on every CPU (BSP + AP) during bringup.
 __attribute__((no_sanitize("kernel-address"))) void enable_sse() {
   uint64_t cr4 = read_cr4();
   cr4 |= (1ULL << 9) | (1ULL << 10);
@@ -256,10 +264,11 @@ __attribute__((no_sanitize("kernel-address"))) void enable_sse() {
 }
 
 // ===================== per-CPU capability logging =====================
-// 打印 CR0/CR4/EFER 摘要 + 关键 bit
-// 解读（TS/PE/MP/EM、OSFXSR/OSXMMEXCPT/NXDE、NXE/SCE）。 在 BSP（irq_init）和
-// AP（cpu_bringup_common）的 bringup 末尾各调一次。 出 "必备 bit 缺失" 类 bug
-// 时（如本次 AP 缺 CR4.OSFXSR 导致 #UD），一眼可见。
+// Print CR0/CR4/EFER summaries with key bits decoded
+// (TS/PE/MP/EM, OSFXSR/OSXMMEXCPT/NXDE, NXE/SCE).
+// Called once at the end of BSP (irq_init) and AP (cpu_bringup_common)
+// bringup.  Makes "missing required bit" bugs (e.g. AP missing
+// CR4.OSFXSR causing #UD) immediately visible.
 void log_cpu_caps(const char *tag) {
   uint64_t cr0 = read_cr0();
   uint64_t cr4 = read_cr4();

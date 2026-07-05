@@ -1445,7 +1445,7 @@ struct tls_info {
 };
 
 // 全局单例，pthread_create 读取
-extern struct tls_info __g_tls_info;
+extern struct tls_info g_tls_info;
 ```
 
 #### 3.6.2 静态/动态填充路径
@@ -1455,14 +1455,14 @@ extern struct tls_info __g_tls_info;
   __libc_start_main (-DDYNAMIC=0)
     └─ collect_tls_from_linker_symbols()
          └─ 读 __tls_template_start/end 等链接器符号
-         └─ 单对象，直接填 __g_tls_info
+         └─ 单对象，直接填 g_tls_info
 
 动态程序：
   __libc_start_main (-DDYNAMIC=1)
     └─ collect_tls_from_link_map(_dl_link_map)
          └─ 遍历主 ELF + libc.so 的 PT_TLS
          └─ 合并 tdata 模板（按对齐拼接）+ 计算总 size/tbss
-         └─ 填 __g_tls_info（不保留 per-object 偏移）
+         └─ 填 g_tls_info（不保留 per-object 偏移）
 ```
 
 #### 3.6.3 pthread_create 消费接口
@@ -1470,10 +1470,10 @@ extern struct tls_info __g_tls_info;
 ```c
 // user/lib/pthread/pthread_create.cc
 
-// pthread_create 只读 __g_tls_info，不区分静态/动态
+// pthread_create 只读 g_tls_info，不区分静态/动态
 int pthread_create(pthread_t *tid, const pthread_attr_t *attr,
                    void *(*start)(void *), void *arg) {
-    struct tls_info *ti = &__g_tls_info;
+    struct tls_info *ti = &g_tls_info;
 
     // 1. 分配新线程 TLS 块 + TCB（variant II，与主线程一致）
     size_t block_sz = ALIGN_UP(ti->size, ti->alignment);
@@ -1497,7 +1497,7 @@ int pthread_create(pthread_t *tid, const pthread_attr_t *attr,
 }
 ```
 
-**稳定接口：** `pthread_create` 只读 `tls_info`，未来加 dlopen 只是 `__g_tls_info` 重算，pthread 不用改（ld.md #13）。
+**稳定接口：** `pthread_create` 只读 `tls_info`，未来加 dlopen 只是 `g_tls_info` 重算，pthread 不用改（ld.md #13）。
 
 ### 3.7 统一 _start
 

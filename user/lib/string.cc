@@ -15,8 +15,9 @@
 extern "C" {
 #endif
 
-/* 前向声明：本文件内函数互相调用（strdup 用 memcpy、strerror_r 用 strerror、
- * bcopy 用 memmove、bcmp 用 memcmp），C++ 需先声明 */
+/* Forward declarations: functions in this file call each other (strdup uses memcpy,
+ * strerror_r uses strerror, bcopy uses memmove, bcmp uses memcmp); C++ requires
+ * prior declarations */
 void *memcpy(void *dst, const void *src, size_t n);
 void *memmove(void *dst, const void *src, size_t n);
 int memcmp(const void *s1, const void *s2, size_t n);

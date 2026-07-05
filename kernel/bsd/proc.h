@@ -42,7 +42,7 @@ typedef struct proc {
       futex_uaddr; // user address being waited on (0 = not waiting on futex)
 
   // === pthread cancel (Phase 4) ===
-  uint64_t cancel_handler; // __pthread_cancel_check 函数地址，0 = 未注册
+  uint64_t cancel_handler; // __pthread_cancel_check function address, 0 = not registered
 } proc;
 
 // ABI drift guard: kernel/driver/bsd_types.h maintains a parallel proc for
@@ -82,7 +82,7 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);
 uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe_t *parent_tf,
                               uint64_t new_rax);
 
-// sys_clone (阶段 3b)
+// sys_clone (Phase 3b)
 int64_t sys_clone(int64_t flags, int64_t stack, int64_t parent_tid,
                   int64_t child_tid, int64_t tls, int64_t _u6);
 

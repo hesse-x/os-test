@@ -15,7 +15,7 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "boot/boot.h"
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/futex.h"
@@ -96,29 +96,33 @@ typedef struct file_t_io_resp {
 // another CPU. do_exit does NOT do mm_put/files_put/signal_put — sched_task_reap/
 // proc_reap owns all resource freeing (original design; 3b will revisit).
 //
-// D13：exit_code 按 Linux wait status 编码存储。本函数接收**已编码**的
-// exit_code（正常退出 = (code & 0xff) << 8；信号致死 = sig & 0x7f）。
-// sys_exit / do_exit_with_code 两条入口分别编码：
-//   - sys_exit(code)：用户态 exit/_exit 入口，编码 (code & 0xff) << 8。
-//   - do_exit_with_code(encoded)：信号致死等内部入口，直接传已编码值
-//     （signal.c 传 sig & 0x7f，避免 sys_exit 的 code<<8 把信号号错放进
-//     退出状态位）。父进程 waitpid 拿到的 status 可直接喂标准
-//     WIFEXITED/WEXITSTATUS 宏（user/include/sys/wait.h）。
+// D13: exit_code is stored encoded as a Linux wait status. This function
+// receives an **already-encoded** exit_code (normal exit = (code & 0xff) << 8;
+// death by signal = sig & 0x7f). The two entry points sys_exit and
+// do_exit_with_code encode separately:
+//   - sys_exit(code): user-space exit/_exit entry point, encodes
+//     (code & 0xff) << 8.
+//   - do_exit_with_code(encoded): internal entry point such as death by
+//     signal, passes the already-encoded value directly (signal.c passes
+//     sig & 0x7f to avoid sys_exit's code<<8 misplacing the signal number
+//     into the exit status bits). The status the parent gets from waitpid
+//     can be fed directly to the standard WIFEXITED/WEXITSTATUS macros
+//     (user/include/sys/wait.h).
 int64_t do_exit_with_code(int32_t encoded_exit_code) {
   xtask *proc = current_task;
   int32_t exit_code = encoded_exit_code;
   proc->exit_code = exit_code;       // xtask (UAF-safe for waitpid)
-  proc->proc->exit_code = exit_code; // proc (legacy, waitpid 已改读 xtask)
+  proc->proc->exit_code = exit_code; // proc (legacy, waitpid now reads xtask)
   printk(LOG_INFO, "do_exit: pid=%d tid=%d exit_code=%d\n", proc->tgid,
          proc->pid, exit_code);
 
-  // 2. CPU 时间记账
+  // 2. CPU time accounting
   if (proc->last_sched != 0) {
     proc->cpu_time_ns += sched_clock() - proc->last_sched;
     proc->last_sched = 0;
   }
 
-  // 3. 孤儿收养（用 mm->parent_pid，不用 signal->parent_pid）
+  // 3. Orphan adoption (use mm->parent_pid, not signal->parent_pid)
   if (init_pid >= 0) {
     spin_lock(&tasks_lock);
     for (int i = 0; i < MAX_PROC; i++) {
@@ -130,15 +134,18 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
     spin_unlock(&tasks_lock);
   }
 
-  // 4. clear_tid_addr: 写 0 + futex_wake（pthread_join 依赖此唤醒）
-  //    BEFORE ZOMBIE — proc is alive, no concurrent sched_task_reap possible.
+  // 4. clear_tid_addr: write 0 + futex_wake (pthread_join relies on this
+  //    wakeup) BEFORE ZOMBIE — proc is alive, no concurrent sched_task_reap
+  //    possible.
   if (proc->proc->clear_tid_addr) {
-    // 不变量：clear 前 *clear_tid_addr 必须是本线程 tid（由 CLONE_CHILD_SETTID
-    // 在子线程被调度前写入）。若为 0，说明父线程 clone 返回后还没来得及让
-    // 内核写 tid，子线程就退出了——这是 bug.md Bug 2 的时序竞态特征。
-    // 命中即 panic，避免 join 永远等不到 0 的静默死锁。纯检查，不改语义。
-    // __attribute__((unused))：release 构建 ASSERT 是 no-op，cur_tid_val
-    // 零引用； debug 构建下 ASSERT 消费它。
+    // Invariant: before clear, *clear_tid_addr must equal this thread's tid
+    // (written by CLONE_CHILD_SETTID before the child is scheduled). If it is
+    // 0, the parent thread had not yet let the kernel write tid after clone
+    // returned when the child exited — this is the timing-race signature of
+    // bug.md Bug 2. Panic on hit to avoid the silent deadlock where join
+    // never sees 0. Pure check, does not change semantics.
+    // __attribute__((unused)): in release builds ASSERT is a no-op and
+    // cur_tid_val is unused; in debug builds ASSERT consumes it.
     pid_t cur_tid_val __attribute__((unused)) =
         *((pid_t *)(uintptr_t)proc->proc->clear_tid_addr);
     ASSERT(cur_tid_val == proc->pid);
@@ -154,7 +161,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   atomic_dec(&sig->live_count);
   int notify_parent = atomic_dec_and_test(&sig->thread_count);
 
-  // 6. 设 ZOMBIE
+  // 6. Set ZOMBIE
   //    GATE: after this, sched_task_reap/proc_reap on another CPU may kfree proc
   //    and signal_put signal_struct. Do NOT dereference proc->proc or sig.
   int cpu = proc->assigned_cpu;
@@ -163,7 +170,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   proc->state = ZOMBIE;
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
 
-  // 7. 通知父进程（最后线程）— uses local ppid, not sig->parent_pid
+  // 7. Notify parent (last thread) — uses local ppid, not sig->parent_pid
   if (notify_parent) {
     if (ppid >= 0 && ppid < MAX_PROC && task_get(ppid)->pid == ppid) {
       xtask *parent = task_get(ppid);
@@ -179,7 +186,8 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
     }
   }
 
-  // 8. 唤醒等待本线程 REQ/MSG reply 的进程 — xtask fields only, no proc
+  // 8. Wake processes waiting on this thread's REQ/MSG reply — xtask fields
+  //     only, no proc
   for (int i = 0; i < MAX_PROC; i++) {
     if (!tasks[i])
       continue;
@@ -206,8 +214,8 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   return 0;
 }
 
-// sys_exit：用户态 exit/_exit 系统调用入口。编码 (code & 0xff) << 8 后
-// 交给 do_exit_with_code。D13。
+// sys_exit: user-space exit/_exit syscall entry point. Encodes
+// (code & 0xff) << 8 and passes it to do_exit_with_code. D13.
 int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
                  int64_t _u4, int64_t _u5) {
   int32_t encoded = ((int32_t)arg1 & 0xff) << 8;
@@ -221,13 +229,13 @@ int64_t sys_exit_group(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
   struct signal_struct *sig = current->proc->signal;
   int32_t status = (int32_t)arg1;
 
-  // 1. 设 group_exit 标志
+  // 1. Set group_exit flag
   spin_lock(&sig->sig_lock);
   sig->group_exit = 1;
   sig->group_exit_code = status;
   spin_unlock(&sig->sig_lock);
 
-  // 2. 遍历 tasks[]，唤醒同 tgid 且 != current 的 BLOCKED 线程
+  // 2. Scan tasks[], wake BLOCKED threads with the same tgid and != current
   for (int i = 0; i < MAX_PROC; i++) {
     if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->tgid == current->tgid &&
         tasks[i]->pid != current->pid) {
@@ -246,7 +254,7 @@ int64_t sys_exit_group(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
     }
   }
 
-  // 3. 当前线程退出
+  // 3. Current thread exits
   return sys_exit(status, 0, 0, 0, 0, 0);
 }
 
@@ -1752,7 +1760,7 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     }
 
     uint8_t msg[RECV_MSG_SIZE];
-    recv_msg_t *hdr = (recv_msg_t *)msg;
+    recv_msg *hdr = (recv_msg *)msg;
     hdr->type = RECV_REQ;
     hdr->src = (uint32_t)current_task->pid;
     __memcpy(hdr->data, req_data, 56);
@@ -2618,8 +2626,8 @@ int64_t syscall_dispatch(trapframe_t *tf) {
   case SYS_PTHREAD_SET_CANCEL_HANDLER:
     return sys_pthread_set_cancel_handler(tf->rdi, tf->rsi, tf->rdx, tf->r10,
                                           tf->r8, tf->r9);
-  // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) 在阶段 3b 实现，此阶段返回
-  // -ENOSYS
+  // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) implemented in phase 3b,
+  // this phase returns -ENOSYS
   default:
     printk(LOG_WARN, "syscall_dispatch: unknown syscall nr=%lu pid=%d\n",
            (unsigned long)nr, current_task->pid);

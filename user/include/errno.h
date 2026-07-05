@@ -14,11 +14,14 @@
 extern "C" {
 #endif
 
-// errno 通过 __errno_location() 返回 TLS 指针，每个线程独立。
-// 动态链接下避免主 ELF 与 libc.so 各持一份 errno 副本导致写读分离
-// （R_X86_64_COPY 把 libc.so 的 errno 拷贝到主 ELF .bss，libc.so 内部
-//  syscall 失败写自己 .bss 的 errno，主 ELF 读自己的 COPY 副本永远拿 0）。
-// TLS 模式：errno 在 TLS 模板里，主 ELF 和 libc.so 共享当前线程的同一份。
+// errno is returned via __errno_location() as a TLS pointer, per-thread.
+// Under dynamic linking this avoids the main ELF and libc.so each holding an
+// errno copy that diverge on write/read
+// (R_X86_64_COPY copies libc.so's errno into the main ELF .bss; libc.so
+//  internally writes its own .bss errno on syscall failure, while the main
+//  ELF reads its own COPY replica and always gets 0).
+// TLS mode: errno lives in the TLS template; the main ELF and libc.so share
+// the same instance of the current thread.
 LIBC_EXPORT int *__errno_location(void);
 #define errno (*__errno_location())
 

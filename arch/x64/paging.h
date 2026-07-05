@@ -7,10 +7,7 @@
 #ifndef ARCH_X64_PAGING_H
 #define ARCH_X64_PAGING_H
 
-#include "arch/x64/memlayout.h"
-#include "arch/x64/utils.h"
 #include "boot/boot.h"
-#include "common/macro.h"
 #include "kernel/xcore/sparse.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -40,8 +37,8 @@
 #define PHY_ADDR(addr) ((__force phys_addr_t)((uintptr_t)(addr)-VMA_BASE))
 
 // ===================== GDT =====================
-// 64位 GDT entry: 8字节
-typedef struct {
+// 64-bit GDT entry: 8 bytes
+typedef struct gdt_entry {
   uint16_t limit_low;
   uint16_t base_low;
   uint8_t base_middle;
@@ -50,15 +47,15 @@ typedef struct {
   uint8_t base_high;
 } __attribute__((packed)) gdt_entry_t;
 
-// 64位 GDT 指针: 10字节 (64-bit base)
-typedef struct {
+// 64-bit GDT pointer: 10 bytes (64-bit base)
+typedef struct gdt_ptr {
   uint16_t limit;
   uint64_t base;
 } __attribute__((packed)) gdt_ptr_t;
 
-// ===================== TSS (64-bit, 128字节 + 8KB IOPM) =====================
+// ===================== TSS (64-bit, 128 bytes + 8KB IOPM) =====================
 #define IOPM_SIZE 8192 // 8KB IOPM bitmap (65536 ports / 8 bits per byte)
-typedef struct {
+typedef struct tss {
   uint32_t reserved0;
   uint64_t rsp0;
   uint64_t rsp1;

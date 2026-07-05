@@ -20,10 +20,10 @@
 
 // ===================== Page frame descriptor =====================
 typedef enum {
-  PAGE_FREE,    // 空闲
-  PAGE_USED,    // 已使用（如内核占用）
-  PAGE_SLAB,    // slab 页
-  PAGE_RESERVED // 保留（硬件/BIOS占用）
+  PAGE_FREE,    // free
+  PAGE_USED,    // in use (e.g. kernel heap)
+  PAGE_SLAB,    // slab page
+  PAGE_RESERVED // reserved (hardware/BIOS)
 } page_status;
 
 struct kmem_cache;
@@ -34,18 +34,18 @@ typedef struct Page {
                          // >1=shared)
   union {
     struct {
-      size_t cont_page_num; // 连续页数（BFC 空闲/已分配大块）
-      struct Page *prev;    // BFC free list 双向链表
+      size_t cont_page_num; // contiguous page count (BFC free/allocated large block)
+      struct Page *prev;    // BFC free list (doubly-linked)
       struct Page *next;
     } bfc;
 
     struct {
-      struct kmem_cache *cache; // 所属 cache
-      void *freelist;             // 空闲对象链表头（侵入式）
-      uint32_t inuse;             // 已分配对象数
-      uint32_t obj_count;         // 页内总对象数
-      int8_t cpu_id;              // 正在使用此页的 CPU（-1 = 无）
-      struct Page *partial_next;  // partial list 链接
+      struct kmem_cache *cache; // owning cache
+      void *freelist;             // free object list head (intrusive)
+      uint32_t inuse;             // allocated object count
+      uint32_t obj_count;         // total objects in page
+      int8_t cpu_id;              // CPU currently using this page (-1 = none)
+      struct Page *partial_next;  // partial list link
       struct Page *partial_prev;
     } slab;
   };

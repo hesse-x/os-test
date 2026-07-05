@@ -1,22 +1,24 @@
-# user_rules.cmake — add_user_lib() / add_user_elf() 封装用户态编译规则
+# user_rules.cmake — add_user_lib() / add_user_elf() wrappers for userspace build rules
 
-# 用户态公共编译 flags (CMake list, semicolon-separated)
-# -nostdinc + -isystem: 见 CMakeLists.txt 顶部说明。此处重复列出是因为
-# add_user_ldso / SHARED libc.so / crt0 等用裸 gcc 命令(非 CMake target),
-# 不继承全局 CMAKE_C_FLAGS，必须显式带上才能解析 <stdint.h> 等 freestanding 头。
-# 与全局 flags 重复对 CMake target 静态库无害（gcc 接受重复 -nostdinc/-isystem）。
+# Userspace common compile flags (CMake list, semicolon-separated)
+# -nostdinc + -isystem: see top of CMakeLists.txt. Duplicated here because
+# add_user_ldso / SHARED libc.so / crt0 use bare gcc commands (not CMake targets),
+# they don't inherit global CMAKE_C_FLAGS, so they must carry these explicitly
+# to resolve freestanding headers like <stdint.h>.
+# Duplicating global flags is harmless for CMake target static libraries (gcc accepts duplicate -nostdinc/-isystem).
 set(USER_COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -mno-red-zone -nostdinc -isystem ${GCC_FREESTANDING_INC})
 
-# 防御：用户态需要 SSE（double/printf/FPU 都依赖），任何 -mno-sse* 都是
-# 全局 CMAKE_C_FLAGS 泄漏的信号（典型来源：内核-only flag 误放全局）。
-# 检查 target 的 COMPILE_OPTIONS + 继承的 CMAKE_C_FLAGS，命中即 FATAL_ERROR。
+# Defense: userspace requires SSE (double/printf/FPU all depend on it), any
+# -mno-sse* flag signals a leak from global CMAKE_C_FLAGS (typical source:
+# kernel-only flag mistakenly placed globally).
+# Check target's COMPILE_OPTIONS + inherited CMAKE_C_FLAGS, FATAL_ERROR on hit.
 function(user_assert_no_sse_disable target_name)
-    # 收集 target 自身 options
+    # Collect target's own options
     get_target_property(_opts ${target_name} COMPILE_OPTIONS)
-    # 合并全局 C flags（CMake 把 CMAKE_C_FLAGS 当作 directory property）
+    # Merge global C flags (CMake treats CMAKE_C_FLAGS as a directory property)
     get_directory_property(_global_cflags COMPILE_OPTIONS)
     set(_all_flags ${_opts} ${_global_cflags})
-    # CMAKE_C_FLAGS 是字符串，转成 list 用空格分
+    # CMAKE_C_FLAGS is a string, convert to list splitting on whitespace
     separate_arguments(_global_c_flags UNIX_COMMAND "${CMAKE_C_FLAGS}")
     set(_all_flags ${_all_flags} ${_global_c_flags})
     foreach(_f ${_all_flags})
@@ -31,11 +33,11 @@ function(user_assert_no_sse_disable target_name)
     endforeach()
 endfunction()
 
-# add_user_lib: 用户态库（libc.a 静态 / libc.so 共享）
-# 用法: add_user_lib(name [C] SOURCES ... [FLAGS ...] [SHARED] [OUTPUT_NAME ...])
-# C: 标记用 C 编译器（与 add_user_elf 一致）
-# SHARED: 生成 .so（gcc -shared -fPIC 自定义命令，plan_ld2b3 决策 1 回退方案）
-# 否则: add_library(STATIC)，保留 target 接口（unity 用 target_include_directories）
+# add_user_lib: userspace library (libc.a static / libc.so shared)
+# Usage: add_user_lib(name [C] SOURCES ... [FLAGS ...] [SHARED] [OUTPUT_NAME ...])
+# C: flag to use C compiler (consistent with add_user_elf)
+# SHARED: produce .so (gcc -shared -fPIC custom command, plan_ld2b3 decision 1 fallback)
+# Otherwise: add_library(STATIC), preserve target interface (unity uses target_include_directories)
 function(add_user_lib lib_name)
     set(option_args SHARED C)
     set(multi_args SOURCES FLAGS)
@@ -43,8 +45,8 @@ function(add_user_lib lib_name)
     cmake_parse_arguments(ARG "${option_args}" "${one_args}" "${multi_args}" ${ARGN})
 
     if(ARG_SHARED)
-        # 共享库 libc.so — add_library(SHARED) 在本 toolchain 不可用，用自定义命令
-        # plan_ld2b3 决策 1 回退方案（与 add_user_ldso 同模式）
+        # Shared library libc.so — add_library(SHARED) is unavailable in this toolchain, use custom command
+        # plan_ld2b3 decision 1 fallback (same pattern as add_user_ldso)
         if(ARG_C)
             set(COMPILE_CMD ${CMAKE_C_COMPILER})
             set(DEP_LANG "C")
@@ -52,10 +54,10 @@ function(add_user_lib lib_name)
             set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
             set(DEP_LANG "CXX")
         endif()
-        # FLAGS 可能是字符串（如 "-fno-pie -DDYNAMIC=0"），转 list
+        # FLAGS may be a string (e.g. "-fno-pie -DDYNAMIC=0"), convert to list
         separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
-        # -fvisibility=hidden：默认 hidden，仅 LIBC_EXPORT 标记的声明导出（与 ld.so 一致）。
-        # .map + verify_libc_exports.sh 仍是最终闸门，拦截漏标/多标。
+        # -fvisibility=hidden: default hidden, only LIBC_EXPORT-marked declarations are exported (consistent with ld.so).
+        # .map + verify_libc_exports.sh is the final gate, catching missed/extra markings.
         set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fvisibility=hidden ${ARG_FLAGS_LIST})
 
         set(OBJ_FILES "")
@@ -89,7 +91,7 @@ function(add_user_lib lib_name)
             COMMENT "Linking ${lib_name}.so (libc.so)")
         add_custom_target(${lib_name} ALL DEPENDS ${SO_FILE})
     else()
-        # 静态库 — add_library(STATIC)，保留 target 接口
+        # Static library — add_library(STATIC), preserve target interface
         add_library(${lib_name} STATIC ${ARG_SOURCES})
 
         target_include_directories(${lib_name} PRIVATE
@@ -112,7 +114,7 @@ function(add_user_lib lib_name)
     endif()
 endfunction()
 
-# crt0.o 构建（_start 入口，链入每个静态主 ELF）
+# Build crt0.o (_start entry, linked into every static main ELF)
 # plan_ld2b3 T5
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/crt0.o
     COMMAND gcc -ffreestanding -fno-pie -c ${CMAKE_SOURCE_DIR}/user/lib/crt0.S -o ${CMAKE_BINARY_DIR}/crt0.o
@@ -120,8 +122,8 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/crt0.o
     COMMENT "Compiling crt0.o")
 add_custom_target(crt0_obj ALL DEPENDS ${CMAKE_BINARY_DIR}/crt0.o)
 
-# add_user_elf: 用户态 ELF（compile → objcopy → ld）
-# 用法: add_user_elf(name [C] SOURCES source1 ... [LINK_LIBS lib1 ...] [DEFS def1 ...])
+# add_user_elf: userspace ELF (compile → objcopy → ld)
+# Usage: add_user_elf(name [C] SOURCES source1 ... [LINK_LIBS lib1 ...] [DEFS def1 ...])
 function(add_user_elf elf_name)
     cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS" ${ARGN})
 
@@ -185,7 +187,7 @@ function(add_user_elf elf_name)
         math(EXPR idx "${idx} + 1")
     endforeach()
 
-    # Step 2: ld — crt0.o 必须在链接输入首位（提供 _start）
+    # Step 2: ld — crt0.o must be first in link input (provides _start)
     set(LD_DEPS ${CMAKE_BINARY_DIR}/crt0.o ${OBJ_FILES})
     set(LD_ARGS ${CMAKE_BINARY_DIR}/crt0.o ${OBJ_FILES})
 
@@ -205,14 +207,14 @@ function(add_user_elf elf_name)
 
     add_custom_target(${elf_name}_elf ALL DEPENDS ${ELF_FILE})
 
-    # 依赖声明
+    # Dependency declarations
     add_dependencies(${elf_name}_elf crt0_obj)
     if(ARG_LINK_LIBS)
         add_dependencies(${elf_name}_elf ${ARG_LINK_LIBS})
     endif()
 endfunction()
 
-# add_user_ldso: ld.so 专用（-shared -fPIC，自带 minilibc，不链 libc.a）
+# add_user_ldso: ld.so specific (-shared -fPIC, with built-in minilibc, does not link libc.a)
 # ld.md §3.4.4
 function(add_user_ldso name)
     cmake_parse_arguments(ARG "" "" "SOURCES" ${ARGN})
@@ -247,9 +249,9 @@ function(add_user_ldso name)
     add_custom_target(${name}_elf ALL DEPENDS ${ELF_FILE})
 endfunction()
 
-# add_user_dyn_elf: 动态主 ELF，gcc driver 链接
+# add_user_dyn_elf: dynamic main ELF, linked by gcc driver
 # ld.md §3.4.4 / plan_ld2b3 T5
-# crt0.o 链入首位（提供 _start），libc.so 通过 -L/-l 链接（记 DT_NEEDED）
+# crt0.o linked first (provides _start), libc.so linked via -L/-l (records DT_NEEDED)
 function(add_user_dyn_elf name)
     cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
@@ -285,12 +287,12 @@ function(add_user_dyn_elf name)
         math(EXPR idx "${idx} + 1")
     endforeach()
 
-    # crt0.o 必须在链接输入首位（提供 _start）
+    # crt0.o must be first in link input (provides _start)
     set(LD_ARGS ${CMAKE_BINARY_DIR}/crt0.o ${OBJ_FILES})
     set(SO_DEPS "")
     if(ARG_LINK_LIBS)
         foreach(lib ${ARG_LINK_LIBS})
-            # 动态 ELF 优先链 .so（全路径，避免 -lc 误选 libc.a）
+            # Dynamic ELF prefers .so (full path, avoids -lc mistakenly selecting libc.a)
             set(so_path ${CMAKE_BINARY_DIR}/lib${lib}.so)
             list(APPEND LD_ARGS ${so_path})
             list(APPEND SO_DEPS ${so_path})

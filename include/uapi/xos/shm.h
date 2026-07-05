@@ -31,7 +31,7 @@ typedef struct fs_req_shm {
   uint32_t offset;     // for read
   uint32_t count;      // for read
   uint32_t lba;        // for raw_read
-} fs_req_shm_t;
+} fs_req_shm;
 
 // FS response shared page (fs_driver -> shell), 2 pages
 typedef struct fs_resp_shm {
@@ -40,7 +40,7 @@ typedef struct fs_resp_shm {
   uint32_t count;     // bytes read/returned
   uint32_t total;     // file size (open) or entry count (readdir)
   uint8_t data[8176]; // data area (2 pages - 16 bytes header)
-} fs_resp_shm_t;
+} fs_resp_shm;
 
 // Directory entry (readdir)
 typedef struct fs_dirent {
@@ -50,13 +50,13 @@ typedef struct fs_dirent {
   uint32_t time;  // modification time (FAT32 wrt_time)
   uint8_t attr;   // FAT attributes (dir/readonly etc)
                   // 3 bytes padding → sizeof = 272
-} fs_dirent_t;
+} fs_dirent;
 
 // FS REQ request (fits in recv_msg.data[56])
 typedef struct fs_req_request {
   uint32_t cmd; // FS_CMD_*
   uint8_t reserved[52];
-} fs_req_request_t;
+} fs_req_request;
 
 // FS REQ reply (fits in 64 bytes, same as RECV_MSG_SIZE)
 typedef struct fs_req_reply {
@@ -65,7 +65,7 @@ typedef struct fs_req_reply {
   uint32_t count;  // bytes read/returned
   uint32_t total;  // file size (open) or entry count (readdir)
   uint8_t reserved[48];
-} fs_req_reply_t;
+} fs_req_reply;
 
 // FS commands
 #define FS_CMD_READDIR 0
@@ -79,7 +79,7 @@ typedef struct fs_req_reply {
 // FS SHM header (no sleeping flags — sync is via REQ now)
 typedef struct fs_shm_header {
   uint8_t reserved[8];
-} fs_shm_header_t;
+} fs_shm_header;
 
 // ===================== USB HID shared memory =====================
 // 1 page (4KB) allocated by kernel xHCI init via shm_create_internal(1),
@@ -106,7 +106,7 @@ typedef struct usb_hid_slot {
   uint8_t type;    // HID_TYPE_KEYBOARD etc.
   uint8_t len;     // valid bytes in data[]
   uint8_t data[8]; // raw HID report (keyboard: 8B Boot Protocol)
-} usb_hid_slot_t;
+} usb_hid_slot;
 
 typedef struct usb_hid_shm_header {
   uint32_t magic;   // USB_HID_SHM_MAGIC
@@ -117,7 +117,7 @@ typedef struct usb_hid_shm_header {
     uint32_t capacity; // HID_SUBRING_CAPACITY
     uint32_t reserved;
   } rings[4]; // 4 sub-rings: kbd/mouse/gamepad/touchpad
-} usb_hid_shm_header_t;
+} usb_hid_shm_header;
 
 #ifdef __cplusplus
 }

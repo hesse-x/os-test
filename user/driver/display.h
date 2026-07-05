@@ -89,8 +89,9 @@ static inline void display_client_render_cell(uint32_t row, uint32_t col,
   uint32_t py = row * FONT_HEIGHT;
   const uint8_t *glyph = font8x16[ch - FONT_CHARS_START];
 
-  // cols × FONT_WIDTH = fb_width，px+c 不会越界，移除内层边界检查。
-  // 预计算每行的 fg/bg 指针，内层循环只剩位测试 + 条件写。
+  // cols × FONT_WIDTH = fb_width, so px+c never goes out of bounds; the inner
+  // bounds check is removed. Precompute the per-row fg/bg pointer so the inner
+  // loop only does a bit test + conditional write.
   for (int r = 0; r < FONT_HEIGHT; r++) {
     if (py + r >= display_fb_height)
       break;
@@ -118,8 +119,9 @@ static inline void display_client_scroll_up(uint32_t bg) {
   uint32_t fb_bytes = display_fb_height * display_pitch;
   uint32_t move_bytes = fb_bytes - line_bytes;
 
-  // uint64_t 搬运（8 字节步进），尾部按字节兜底。
-  // display_pitch (3200) 和 line_bytes (51200) 均为 8 的倍数，正常无尾部。
+  // Copy in uint64_t chunks (8-byte stride); fall back to byte copy for the
+  // tail. display_pitch (3200) and line_bytes (51200) are both multiples of 8,
+  // so there is normally no tail.
   uint64_t *dst64 = (uint64_t *)display_back_buffer;
   const uint64_t *src64 = (const uint64_t *)(display_back_buffer + line_bytes);
   uint32_t n64 = move_bytes / 8;

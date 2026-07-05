@@ -7,7 +7,7 @@
 #include "kernel/xcore/acpi.h"
 #include "arch/x64/paging.h"
 #include "boot/boot.h"
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "kernel/xcore/log.h"
 #include <stdbool.h>
 #include <stddef.h>

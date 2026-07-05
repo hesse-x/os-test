@@ -16,7 +16,7 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
-#include "common/macro.h"
+#include "utils/macro.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/elf_loader.h"
 #include "kernel/bsd/fat32.h"
@@ -261,8 +261,9 @@ void pty_close_file(struct file *f) {
               tasks[p]->proc->sid == pty->t_sid) {
             __atomic_or_fetch(&tasks[p]->proc->sig_pending, 1ULL << SIGHUP,
                               __ATOMIC_RELEASE);
-            // SIGHUP 需打断任意阻塞态（含 WAIT_FUTEX/WAIT_CHILD），
-            // 用 wake_process_any 而非窄语义 wake_process。
+            // SIGHUP must interrupt any blocking state (including
+            // WAIT_FUTEX/WAIT_CHILD); use wake_process_any instead of the
+            // narrow-semantics wake_process.
             if (tasks[p]->state == BLOCKED)
               wake_process_any(tasks[p]);
           }
@@ -337,8 +338,9 @@ void files_put(files *files) {
 // Free a page table page by physical address
 static void free_table_page(uint64_t phys) {
   Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
-  // 不可恢复: 页表页被当成 slab 页或已空闲页,说明 Page 描述符或页表已损坏。
-  // DEBUG 直接 panic 定位, release 不做检查。
+  // Unrecoverable: a page-table page being freed as a slab page or already
+  // free page means the Page descriptor or page table has been corrupted.
+  // DEBUG panics directly to locate; release builds do not check.
   ASSERT(p->status != PAGE_SLAB && p->status != PAGE_FREE);
   bfc_free_page(p, 1);
 }
@@ -458,8 +460,9 @@ void mm_release(mm *mm, pid_t owner_pid) {
             }
             if (!is_shared) {
               Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
-              // 不可恢复: 用户页表 leaf 指向了 slab 页,说明页表或 Page
-              // 描述符已损坏。 DEBUG 直接 panic 定位, release 不做检查。
+              // Unrecoverable: a user page-table leaf pointing to a slab page
+              // means the page table or Page descriptor has been corrupted.
+              // DEBUG panics directly to locate; release builds do not check.
               ASSERT(leaf_page->status != PAGE_SLAB);
               if (refcount_dec_and_test(&leaf_page->p_refcount)) {
                 bfc_free_page(leaf_page, 1);
@@ -777,8 +780,8 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
       (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) +
       2 * PAGE_SIZE;
 
-  // 6b. FPU 继承：child 预分配 fpu_page + 复制 parent 当前 FPU 快照（POSIX fork
-  // 语义）
+  // 6b. FPU inheritance: child pre-allocates fpu_page + copies parent's
+  // current FPU snapshot (POSIX fork semantics)
   if (!xcore_fpu_alloc(child)) {
     bfc_free_page(stack_pages, 2);
     proc_free(child_bp);
@@ -792,8 +795,8 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
       (void *)(__force uintptr_t)phys_to_virt(page_to_phys(parent->fpu_page));
   void *child_fpu =
       (void *)(__force uintptr_t)phys_to_virt(page_to_phys(child->fpu_page));
-  kernel_fpu_save(parent_fpu); // 存 parent 当前 live xmm（fxsave
-                               // 不改寄存器，parent 继续跑）
+  kernel_fpu_save(parent_fpu); // save parent's current live xmm (fxsave does
+                               // not modify registers, parent keeps running)
   __memcpy(child_fpu, parent_fpu, PAGE_SIZE);
 
   // 6. Build child kernel stack (reuse build_kstack_from_tf helper)
@@ -801,8 +804,9 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   uint64_t k_rsp = build_kstack_from_tf(k_stack_top, parent_tf, 0);
 
   // 7. Fill child xtask
-  // 顺序约束:assigned_cpu 必须先于 pid 赋值(wake 路径在锁前无锁读 assigned_cpu,
-  // 防 pid 生效后 assigned_cpu 仍是 -1 导致越界);亲和父 CPU
+  // Ordering constraint: assigned_cpu must be set before pid (the wake path
+  // reads assigned_cpu locklessly before taking the lock, prevent OOB if pid
+  // takes effect while assigned_cpu is still -1); affinity to parent CPU
   child->assigned_cpu = sched_pick_cpu_pref(parent->assigned_cpu);
   child->pid = alloc_idx;
   child->state = READY;
@@ -813,10 +817,13 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   child->wait_event = WAIT_NONE;
   child->tgid = child->pid;
   child->mm = child_mm;
-  // fs_base 继承：fork 子进程共享父地址空间(COW)，父 TCB 页映射仍在子空间内，
-  // 必须继承父 fs_base 才能访问 errno/TLS。遗漏则子进程 FS_BASE=0，首次读
-  // errno(mov %fs:0)即 #PF 被杀（如 execve 失败后 libc wrapper 写 errno）。
-  // sys_clone 的 CLONE_SETTLS 分支单独处理 TLS，此处 fork 路径恒继承父值。
+  // fs_base inheritance: fork child shares parent's address space (COW), and
+  // the parent TCB page mapping remains in the child's space, so the child
+  // must inherit parent's fs_base to access errno/TLS. Missing it leaves child
+  // FS_BASE=0, and the first errno read (mov %fs:0) triggers #PF and gets
+  // killed (e.g. libc wrapper writing errno after execve failure).
+  // sys_clone's CLONE_SETTLS branch handles TLS separately; the fork path here
+  // always inherits the parent's value.
   child->fs_base = parent->fs_base;
   child->iopm = NULL; // fork does not inherit IOPM
   child->recv_head = 0;
@@ -860,13 +867,14 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   int cpu = child->assigned_cpu;
   uint64_t rflags;
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
-  // TOCTOU 重检:入队期间目标 CPU 已被塞满则重新选 CPU
+  // TOCTOU recheck: if the target CPU has been filled past the threshold
+  // during enqueue, re-pick a CPU
   if (__atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) >
       RECHECK_THRESHOLD) {
     int new_cpu = sched_pick_cpu_pref(parent->assigned_cpu);
     if (new_cpu != cpu) {
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
-      child->assigned_cpu = new_cpu; // 此时尚未入队,改字段安全
+      child->assigned_cpu = new_cpu; // not yet enqueued, safe to mutate field
       cpu = new_cpu;
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
     }
@@ -882,7 +890,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
 // ===================== sys_clone =====================
 
-// clone flag definitions (与 Linux 一致)
+// clone flag definitions (matches Linux)
 #define CLONE_VM 0x00000100
 #define CLONE_FILES 0x00000400
 #define CLONE_SIGHAND 0x00000800
@@ -902,7 +910,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   uint64_t tls = (uint64_t)arg5;
   xtask *parent = current_task;
 
-  // flag 组合约束校验
+  // flag combination constraint validation
   if ((flags & CLONE_SIGHAND) && !(flags & CLONE_VM))
     return (int64_t)-EINVAL;
   if ((flags & CLONE_THREAD) && !(flags & CLONE_SIGHAND))
@@ -910,7 +918,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   if ((flags & CLONE_VM) && stack == 0)
     return (int64_t)-EINVAL;
 
-  // 1. 分配 xtask slot
+  // 1. Allocate an xtask slot
   spin_lock(&tasks_lock);
   int alloc_idx = -1;
   xtask *child = xtask_alloc(&alloc_idx);
@@ -919,7 +927,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     return (int64_t)-ENOMEM;
   }
 
-  // 2. 分配内核栈
+  // 2. Allocate kernel stack
   Page *stack_pages = bfc_alloc_page(2);
   if (!stack_pages) {
     spin_unlock(&tasks_lock);
@@ -930,7 +938,8 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) +
       2 * PAGE_SIZE;
 
-  // 2b. FPU 状态：子线程预分配 fpu_page + 复制父线程当前 FPU 快照
+  // 2b. FPU state: child thread pre-allocates fpu_page + copies parent
+  // thread's current FPU snapshot
   if (!xcore_fpu_alloc(child)) {
     bfc_free_page(stack_pages, 2);
     spin_unlock(&tasks_lock);
@@ -994,7 +1003,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   child->proc = child_bp;
   child_bp->xtask = child;
   if (flags & CLONE_FILES) {
-    files_put(child_bp->files); // 释放 proc_create 默认创建的
+    files_put(child_bp->files); // release the default one created by proc_create
     child_bp->files = parent->proc->files;
     refcount_inc(&child_bp->files->f_count);
   } else {
@@ -1003,7 +1012,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   // 5. signal_struct
   if (flags & CLONE_SIGHAND) {
-    signal_put(child_bp->signal); // 释放 proc_create 默认创建的
+    signal_put(child_bp->signal); // release the default one created by proc_create
     child_bp->signal = parent->proc->signal;
     refcount_inc(&child_bp->signal->sig_count);
   } else {
@@ -1017,7 +1026,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     atomic_set(&child_bp->signal->live_count, 1);
   }
 
-  // 6. tgid + 线程组计数
+  // 6. tgid + thread-group count
   if (flags & CLONE_THREAD) {
     child->tgid = parent->tgid;
     atomic_inc(&child_bp->signal->thread_count);
@@ -1029,13 +1038,13 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // 7. trapframe: rax=0, rsp=(CLONE_VM? stack : parent_tf->rsp)
   trapframe_t *parent_tf = get_cpu_local()->cur_tf;
   uint64_t new_rsp = (flags & CLONE_VM) ? stack : parent_tf->rsp;
-  // 临时改 parent_tf->rsp 以复用 build_kstack_from_tf
+  // Temporarily modify parent_tf->rsp to reuse build_kstack_from_tf
   uint64_t saved_rsp = parent_tf->rsp;
   parent_tf->rsp = new_rsp;
   uint64_t k_rsp = build_kstack_from_tf(k_stack_top, parent_tf, 0);
   parent_tf->rsp = saved_rsp;
 
-  // 8. fs_base + proc 线程级字段
+  // 8. fs_base + proc thread-level fields
   child->fs_base = (flags & CLONE_SETTLS) ? tls : parent->fs_base;
   if ((flags & CLONE_THREAD) && clone_info_ptr) {
     struct thread_clone_info ci;
@@ -1056,9 +1065,10 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       (flags & CLONE_CHILD_CLEARTID) ? (pid_t)child_tid : 0;
 
   // 9. CLONE_PARENT_SETTID / CLONE_CHILD_SETTID
-  //    CHILD_SETTID 必须在子线程被调度前写入，否则子线程退出时 clear_tid_addr
-  //    写 0 + futex_wake 会丢失（父线程 clone 返回后才写 tid，覆盖 0 → lost
-  //    wake-up）。
+  //    CHILD_SETTID must be written before the child thread is scheduled,
+  //    otherwise the child's clear_tid_addr write of 0 + futex_wake on exit
+  //    would be lost (the parent only writes tid after clone returns,
+  //    overwriting 0 -> lost wake-up).
   if (flags & CLONE_PARENT_SETTID) {
     *((pid_t *)parent_tid) = (pid_t)alloc_idx;
   }
@@ -1066,9 +1076,9 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     *((pid_t *)child_tid) = (pid_t)alloc_idx;
   }
 
-  // 10. 填充 child xtask
-  // 顺序约束:assigned_cpu 必须先于 pid 赋值;CLONE_THREAD 亲和父
-  // CPU,否则无亲和性
+  // 10. Fill child xtask
+  // Ordering constraint: assigned_cpu must be set before pid; CLONE_THREAD
+  // has affinity to the parent CPU, otherwise no affinity
   child->assigned_cpu =
       (flags & CLONE_THREAD) ? sched_pick_cpu_pref(parent->assigned_cpu) : sched_pick_cpu();
   child->pid = alloc_idx;
@@ -1092,7 +1102,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   list_init(&child->run_node);
   list_init(&child->wait_node);
 
-  // 非 CLONE_THREAD 时继承 session/job control
+  // Inherit session/job control when not CLONE_THREAD
   if (!(flags & CLONE_THREAD)) {
     child_bp->sid = parent->proc->sid;
     child_bp->pgid = parent->proc->pgid;
@@ -1101,18 +1111,19 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   spin_unlock(&tasks_lock);
 
-  // 11. 入队调度
+  // 11. Enqueue to scheduler
   int cpu = child->assigned_cpu;
   uint64_t rflags;
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
-  // TOCTOU 重检:入队期间目标 CPU 已被塞满则重新选 CPU
+  // TOCTOU recheck: if the target CPU has been filled past the threshold
+  // during enqueue, re-pick a CPU
   if (__atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) >
       RECHECK_THRESHOLD) {
     int new_cpu = (flags & CLONE_THREAD) ? sched_pick_cpu_pref(parent->assigned_cpu)
                                          : sched_pick_cpu();
     if (new_cpu != cpu) {
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
-      child->assigned_cpu = new_cpu; // 此时尚未入队,改字段安全
+      child->assigned_cpu = new_cpu; // not yet enqueued, safe to mutate field
       cpu = new_cpu;
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
     }
@@ -1132,8 +1143,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   (void)a5;
   (void)a6;
   const char *pathname = (const char *)a1;
-  char **argv_ptr = (char **)a2; // 用户态 argv[]
-  char **envp_ptr = (char **)a3; // 用户态 envp[]
+  char **argv_ptr = (char **)a2; // user-space argv[]
+  char **envp_ptr = (char **)a3; // user-space envp[]
   xtask *proc = current_task;
   if (!proc->mm)
     return (int64_t)-EINVAL;
@@ -1313,11 +1324,11 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                          PTE_PRESENT | PTE_USER);
   }
 
-// === argc/argv/envp/auxv 栈构建（标准 SysV ABI） ===
-// 栈是连续物理内存（user_stack_phys 起 user_stack_pages 页），用户态地址
-// [stack_base, USER_STACK_TOP] 映射连续。 注意：argv/envp
-// 字符串缓冲较大（ARG_MAX*256*2 ≈ 64KB），不能用内核栈（仅 8KB），改用
-// kmalloc。
+// === argc/argv/envp/auxv stack construction (standard SysV ABI) ===
+// The stack is contiguous physical memory (user_stack_phys, user_stack_pages
+// pages); user-space addresses [stack_base, USER_STACK_TOP] are contiguously
+// mapped. Note: the argv/envp string buffer is large (ARG_MAX*256*2 ~ 64KB),
+// cannot use the kernel stack (only 8KB), so kmalloc is used instead.
 #define ARG_MAX 128
   char(*argv_strings)[256] = (char(*)[256])kmalloc(sizeof(char[ARG_MAX][256]));
   char(*envp_strings)[256] = (char(*)[256])kmalloc(sizeof(char[ARG_MAX][256]));
@@ -1350,7 +1361,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
       argc++;
     }
   }
-  // 若 argv 为空，按 POSIX 约定注入 pathname 作为 argv[0]
+  // If argv is empty, inject pathname as argv[0] per POSIX convention
   if (argc == 0 && pathname) {
     int plen = 0;
     while (pathname[plen] && plen < 255) {
@@ -1376,7 +1387,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     }
   }
 
-// STACK_KV: sp_user 用户态地址 → 内核虚拟地址（支持跨页）
+// STACK_KV: sp_user user-space address -> kernel virtual address (supports
+// cross-page)
 #define STACK_KV(sp_user)                                                      \
   ((void *)((__force uint64_t)phys_to_virt((__force phys_addr_t)(              \
       user_stack_phys + (uint64_t)user_stack_pages * PAGE_SIZE -               \
@@ -1384,12 +1396,12 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
   uint64_t sp_user = USER_STACK_TOP;
 
-  // 1. AT_RANDOM 16 字节（先填全 0）
+  // 1. AT_RANDOM 16 bytes (first zero-fill)
   sp_user -= 16;
   __memset(STACK_KV(sp_user), 0, 16);
   uint64_t at_random_vaddr = sp_user;
 
-  // 2. AT_EXECFN：execve path 字符串副本
+  // 2. AT_EXECFN: execve path string copy
   int execfn_len = 0;
   while (pathname[execfn_len])
     execfn_len++;
@@ -1397,7 +1409,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   __memcpy(STACK_KV(sp_user), pathname, execfn_len + 1);
   uint64_t at_execfn_vaddr = sp_user;
 
-  // 3. envp 字符串（高地址→低地址）
+  // 3. envp strings (high address -> low address)
   for (int i = envc - 1; i >= 0; i--) {
     int len = 0;
     while (envp_strings[i][len])
@@ -1407,7 +1419,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     envp_str_vaddrs[i] = sp_user;
   }
 
-  // 4. argv 字符串
+  // 4. argv strings
   for (int i = argc - 1; i >= 0; i--) {
     int len = 0;
     while (argv_strings[i][len])
@@ -1417,11 +1429,11 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     argv_str_vaddrs[i] = sp_user;
   }
 
-  // 5. 16 字节对齐 sp_user
+  // 5. 16-byte align sp_user
   while ((sp_user % 16) != 0)
     sp_user--;
 
-  // 6. 写 auxv（8 对 + AT_NULL）
+  // 6. Write auxv (8 pairs + AT_NULL)
   int auxc = 8;
   sp_user -= (auxc + 1) * 16;
   uint64_t *auxv = (uint64_t *)STACK_KV(sp_user);
@@ -1445,14 +1457,14 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   auxv[ai++] = AT_NULL;
   auxv[ai++] = 0;
 
-  // 7. envp 指针数组 + NULL
+  // 7. envp pointer array + NULL
   sp_user -= (envc + 1) * 8;
   uint64_t *envp_arr = (uint64_t *)STACK_KV(sp_user);
   envp_arr[envc] = 0;
   for (int i = 0; i < envc; i++)
     envp_arr[i] = envp_str_vaddrs[i];
 
-  // 8. argv 指针数组 + NULL
+  // 8. argv pointer array + NULL
   sp_user -= (argc + 1) * 8;
   uint64_t *argv_arr = (uint64_t *)STACK_KV(sp_user);
   argv_arr[argc] = 0;
@@ -1499,14 +1511,14 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   trapframe_t *tf = get_cpu_local()->cur_tf;
   if (is_dynamic) {
     tf->rip = ld_lr.entry; // ld.so entry
-    tf->rsp = user_sp;     // 指向 argc
+    tf->rsp = user_sp;     // points to argc
     printk(LOG_INFO, "exec: ld.so @ 0x%lx, entry 0x%lx, main @ 0x%lx\n",
            ld_lr.load_base, ld_lr.entry, lr.entry);
   } else {
-    tf->rip = lr.entry; // 主 ELF entry（静态路径）
-    tf->rsp = user_sp;  // 指向 argc
+    tf->rip = lr.entry; // main ELF entry (static path)
+    tf->rsp = user_sp;  // points to argc
   }
-  // 用户栈顶必须 16 字节对齐（见 sched_build_kstack 同款 ASSERT）
+  // User stack top must be 16-byte aligned (see same ASSERT in sched_build_kstack)
   ASSERT(tf->rsp % 16 == 0);
   tf->rax = 0;
 

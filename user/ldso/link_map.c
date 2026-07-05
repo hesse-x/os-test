@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-// ld.so link_map 构造：ld.so 自身静态节点 + 动态分配的主 ELF/各 .so 节点
+// ld.so link_map construction: ld.so's own static node + dynamically allocated
+// nodes for main ELF / each .so
 // ld.md §3.3.7 / §8.2.3 / plan_ld2b3 T18
 
 #include <stddef.h>
@@ -12,21 +13,21 @@
 #include <sys/link_map.h>
 #include <xos/elf.h>
 
-// 全局 link_map 链表头（libc.so 的 collect_tls_from_link_map 通过 extern 读取）
-// visibility("default")：ld.so 全局 -fvisibility=hidden，仅此符号需导出给
-// libc.so
+// global link_map list head (libc.so reads it via extern in collect_tls_from_link_map)
+// visibility("default"): ld.so is globally -fvisibility=hidden, only this symbol
+// needs to be exported to libc.so
 __attribute__((visibility("default"))) struct link_map *_dl_link_map = NULL;
 
-// ld.so 自身：保留单个静态节点（无外部依赖，避免一次 malloc）
+// ld.so itself: keep a single static node (no external dependencies, avoids one malloc)
 struct link_map g_ld_map_static;
 
-// 解析 .dynamic 填 link_map 的符号查找 + TLS 字段
+// parse .dynamic to fill link_map's symbol lookup + TLS fields
 __attribute__((visibility("hidden"))) void
 fill_link_map(struct link_map *l, uintptr_t base, Elf64_Dyn *dyn) {
   l->base = base;
   l->dynamic = dyn;
 
-  // 默认清零
+  // default zeroing
   l->symtab = NULL;
   l->strtab = NULL;
   l->gnu_hash = NULL;
@@ -42,10 +43,10 @@ fill_link_map(struct link_map *l, uintptr_t base, Elf64_Dyn *dyn) {
   if (!dyn)
     return;
 
-  // 第一遍：找 DT_STRTAB/DT_SYMTAB/DT_GNU_HASH（地址需加 base，.so 是 PIC）
-  // 注：主 ELF 非 PIE，d_ptr 已是绝对地址；libc.so/ld.so 是 PIC，d_ptr 是相对
-  // vaddr 需加 base 简化：对所有对象都尝试 base + d_ptr（主 ELF base=0
-  // 退化为绝对地址）
+  // first pass: find DT_STRTAB/DT_SYMTAB/DT_GNU_HASH (addresses need base added; .so is PIC)
+  // note: main ELF is non-PIE, d_ptr is already an absolute address; libc.so/ld.so is PIC,
+  // d_ptr is a relative vaddr needing base
+  // simplification: try base + d_ptr for all objects (main ELF base=0 degrades to absolute address)
   for (Elf64_Dyn *d = dyn; d->d_tag != DT_NULL; d++) {
     switch (d->d_tag) {
     case DT_STRTAB:
@@ -60,10 +61,11 @@ fill_link_map(struct link_map *l, uintptr_t base, Elf64_Dyn *dyn) {
     }
   }
 
-  // 第二遍：找 DT_RELA/DT_RELASZ/DT_JMPREL/DT_PLTRELSZ + PT_TLS
-  // PT_TLS 信息不通过 .dynamic 传递，需遍历 PHDR — 但 ld.so 此时已无主 ELF PHDR
-  // 简化：TLS 信息由 fill 时单独遍历 PHDR 填充（caller 传 phdr）
-  // 这里只填 .dynamic 能提供的字段
+  // second pass: find DT_RELA/DT_RELASZ/DT_JMPREL/DT_PLTRELSZ + PT_TLS
+  // PT_TLS info is not delivered via .dynamic; needs PHDR walk - but ld.so no longer has
+  // the main ELF PHDR at this point
+  // simplification: TLS info is filled by a separate PHDR walk at fill time (caller passes phdr)
+  // here we only fill fields that .dynamic can provide
   for (Elf64_Dyn *d = dyn; d->d_tag != DT_NULL; d++) {
     switch (d->d_tag) {
     case DT_RELA:
@@ -82,8 +84,8 @@ fill_link_map(struct link_map *l, uintptr_t base, Elf64_Dyn *dyn) {
   }
 }
 
-// 从 PHDR 找 PT_TLS，填 link_map 的 tls_* 字段
-// base 是加载基址（PIC .so 加偏移；主 ELF base=0）
+// find PT_TLS from PHDR, fill link_map's tls_* fields
+// base is the load base (PIC .so adds offset; main ELF base=0)
 __attribute__((visibility("hidden"))) void
 fill_tls_from_phdr(struct link_map *l, uintptr_t base, uintptr_t phdr,
                    size_t phent, size_t phnum) {

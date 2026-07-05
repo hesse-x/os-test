@@ -158,10 +158,8 @@ user/
 third_party/
   Unity/               — Unity v2.6.1 测试框架（git submodule）
 
-common/
-  boot.h, macro.h, errno.h, syscall.h, syscall_nums.h, shm.h, dev.h, socket.h,
-  elf.h, dirent.h, stat.h, ioctl.h, input.h, font_metrics.h, display.h,
-  fcntl.h, mman.h, signal.h, types.h, kvformat.c, kvformat.h
+utils/
+  macro.h, kvformat.c, kvformat.h, CMakeLists.txt
 
 kernel/
   efi.h               — EFI 类型定义

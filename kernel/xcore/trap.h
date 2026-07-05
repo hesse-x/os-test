@@ -74,10 +74,10 @@ int64_t sys_gettid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // IRQ registration
 #define MAX_IRQ_HANDLERS 256
-typedef void (*irq_handler_t)(trapframe_t *);
-typedef int64_t (*syscall_fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t,
+typedef void (*irq_handler_fn)(trapframe_t *);
+typedef int64_t (*syscall_fn)(int64_t, int64_t, int64_t, int64_t, int64_t,
                                 int64_t);
-void irq_register(int vec, irq_handler_t fn);
+void irq_register(int vec, irq_handler_fn fn);
 void irq_unregister(int vec);
 int irq_owner_check(int irq);
 void irq_owner_cleanup(pid_t pid);
@@ -85,7 +85,7 @@ int irq_has_handler(int irq);
 extern pid_t irq_owner[MAX_IRQ_HANDLERS];
 
 // IPC primitives (exported by Xcore layer)
-void notify_and_wake(pid_t target_pid, recv_msg_t *msg);
+void notify_and_wake(pid_t target_pid, recv_msg *msg);
 void wake_process(pid_t pid);
 int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
                     void *resp, size_t resp_len);

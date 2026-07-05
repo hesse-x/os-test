@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: MIT
  */
 
-// user/lib/start_main.cc — __libc_start_main 统一启动（同源双产物）
+// user/lib/start_main.cc — __libc_start_main unified startup (single source, dual products)
 // ld.md §3.5.2 / plan_ld2b3 T11
 //
-// libc.a 编译 -DDYNAMIC=0（静态路径调 __libc_tls_init）
-// libc.so 编译 -DDYNAMIC=1（动态路径调 collect_tls_from_link_map +
-// __libc_tls_init_rest）
+// libc.a is compiled with -DDYNAMIC=0 (static path calls __libc_tls_init)
+// libc.so is compiled with -DDYNAMIC=1 (dynamic path calls collect_tls_from_link_map +
+// __libc_tls_init_rest)
 
 #include "stdio.h"
 #include "stdlib.h"
@@ -22,67 +22,69 @@ extern "C" void __libc_run_init_array(init_func_t *start, init_func_t *end);
 extern "C" void __libc_run_fini_array(init_func_t *start, init_func_t *end);
 extern "C" void __libc_run_atexit(void);
 extern "C" void
-__libc_env_init(char **envp); /* environ.c：拷贝栈 envp → environ */
+__libc_env_init(char **envp); /* environ.c: copy stack envp → environ */
 
-// 静态路径 TLS 初始化（tls.cc）：读链接器符号填 __g_tls_info + alloc TCB +
-// FS_BASE + ...
+// Static-path TLS initialization (tls.cc): read linker symbols to fill g_tls_info +
+// alloc TCB + FS_BASE + ...
 extern "C" void __libc_tls_init(void);
 extern "C" void __libc_tls_init_rest(
     void); // alloc TCB + FS_BASE + set_tid_address + cancel handler
-extern "C" struct tls_info __g_tls_info;
+extern "C" struct tls_info g_tls_info;
 
-// 动态路径：ld.so 导出的 link_map 链表
+// Dynamic path: link_map list exported by ld.so
 #if DYNAMIC
 #include "sys/link_map.h"
 extern "C" struct tls_info collect_tls_from_link_map(struct link_map *lmap);
 #endif
 
-// atexit 回调无参数，用静态变量记录 fini 范围
+// atexit callbacks take no arguments; use static variables to record the fini range
 static init_func_t *g_fini_start;
 static init_func_t *g_fini_end;
 extern "C" void __libc_fini_array_trampoline(void) {
   __libc_run_fini_array(g_fini_start, g_fini_end);
 }
 
-// 统一启动函数，同源双产物
-// 参数：main, argc, argv, init_array 范围 [init_start, init_end),
-//       fini_array 范围 [fini_start, fini_end)
-// （原 SysV ABI 的 init/fini/rtld_fini/stack_end 不再使用，复用寄存器传范围）
-// 事实 ABI：crt0.S 跨 .so 调用，必须导出（-fvisibility=hidden 下显式 default）
+// Unified startup function, single source dual products
+// Parameters: main, argc, argv, init_array range [init_start, init_end),
+//             fini_array range [fini_start, fini_end)
+// (The original SysV ABI's init/fini/rtld_fini/stack_end are no longer used; the
+// registers are repurposed to pass the ranges)
+// De facto ABI: crt0.S calls across .so boundaries, so it must be exported
+// (explicitly default under -fvisibility=hidden)
 extern "C" LIBC_EXPORT int
 __libc_start_main(int (*main)(int, char **, char **), int argc, char **argv,
                   init_func_t *init_start, init_func_t *init_end,
                   init_func_t *fini_start, init_func_t *fini_end) {
-  // 1. TLS 模板发现 + 主线程 TCB 分配（静态/动态分流）
+  // 1. TLS template discovery + main-thread TCB allocation (static/dynamic split)
 #if DYNAMIC
-  // 动态：遍历 _dl_link_map 合并 PT_TLS 填 __g_tls_info，再 alloc TCB
-  __g_tls_info = collect_tls_from_link_map(_dl_link_map);
+  // Dynamic: walk _dl_link_map merging PT_TLS into g_tls_info, then alloc TCB
+  g_tls_info = collect_tls_from_link_map(_dl_link_map);
   __libc_tls_init_rest();
 #else
-  // 静态：__libc_tls_init 全包（first 填 __g_tls_info + rest alloc TCB + ...）
+  // Static: __libc_tls_init does it all (first fills g_tls_info + rest allocs TCB + ...)
   __libc_tls_init();
 #endif
 
-  // 2. 跑 .init_array
+  // 2. Run .init_array
   __libc_run_init_array(init_start, init_end);
 
-  // 3. 注册 .fini_array 到 atexit
+  // 3. Register .fini_array with atexit
   g_fini_start = fini_start;
   g_fini_end = fini_end;
   atexit(__libc_fini_array_trampoline);
-  // rtld_fini（ld.so 的 fini）本方案 ld.so 不注册，传 NULL
+  // rtld_fini (ld.so's fini): in this design ld.so does not register it, pass NULL
 
-  // 4. 算 envp
+  // 4. Compute envp
   char **envp = argv + argc + 1;
 
-  // 4b. 初始化 environ（拷贝栈 envp 到 malloc 的 char** 数组）
+  // 4b. Initialize environ (copy stack envp into a malloc'd char** array)
   __libc_env_init(envp);
 
-  // 5. 跑 main
+  // 5. Run main
   int ret = main(argc, argv, envp);
 
-  // 6. exit → 跑 atexit handlers（含 .fini_array）→
-  // sys_exit_group（杀全部线程）
+  // 6. exit → run atexit handlers (including .fini_array) →
+  // sys_exit_group (kill all threads)
   fflush(stdout);
   __libc_run_atexit();
   sys_exit_group(ret);

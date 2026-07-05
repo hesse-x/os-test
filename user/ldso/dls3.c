@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-// ld.so bootstrap 入口
+// ld.so bootstrap entry
 // ld.md §3.2.3 / plan_ld2b3 T13
 
 #include <stddef.h>
@@ -12,41 +12,43 @@
 #include <xos/elf.h>
 #include <xos/syscall_nums.h>
 
-// 链接器提供的 .dynamic 起始符号
-// 用 asm 取 RIP-relative 地址，避免走 GOT（bootstrap 前 GOT 未填）
+// linker-provided .dynamic start symbol
+// use asm to get RIP-relative address, avoiding GOT (GOT not filled before bootstrap)
 extern Elf64_Dyn _DYNAMIC[];
-// bootstrap 阶段辅助函数声明（hidden：跨文件可见但不走 PLT，bootstrap 前 GOT
-// 未填）
+// bootstrap stage helper declarations (hidden: visible across files but not via PLT, GOT
+// not filled before bootstrap)
 __attribute__((visibility("hidden"))) void dl_puts(const char *s);
 __attribute__((visibility("hidden"))) void dl_put_hex(uint64_t val);
 
-// post-bootstrap 主流程（dls_init.c）
+// post-bootstrap main flow (dls_init.c)
 __attribute__((visibility("hidden"))) void __dls_init(uintptr_t *sp,
                                                       uintptr_t ld_base);
 
-// 取 _DYNAMIC 运行时地址（RIP-relative，不依赖 GOT）
+// get runtime address of _DYNAMIC (RIP-relative, does not depend on GOT)
 static Elf64_Dyn *get_dynamic(void) {
   Elf64_Dyn *p;
   __asm__("leaq _DYNAMIC(%%rip), %0" : "=r"(p));
   return p;
 }
 
-// 全局指针（触发 R_X86_64_RELATIVE 重定位，验证自重定位后指向 ld_base +
-// offset） 不被使用，仅用于让 .rela.dyn 非空，使 bootstrap 路径实际执行重定位
+// global pointer (triggers R_X86_64_RELATIVE relocation, verifies that after
+// self-relocation it points to ld_base + offset)
+// not used, only exists to make .rela.dyn non-empty so the bootstrap path
+// actually performs relocation
 static void *self_ptr = (void *)dl_puts;
 
-// 从 auxv 取指定类型值
+// get value of given type from auxv
 static uintptr_t find_auxv(uintptr_t *sp, uint64_t type) {
-  // sp 指向 argc
+  // sp points to argc
   int argc = (int)sp[0];
   uintptr_t *argv = sp + 1;
-  uintptr_t *envp = argv + argc + 1; // 跳过 argv + NULL
-  // 遍历 envp 找 NULL
+  uintptr_t *envp = argv + argc + 1; // skip argv + NULL
+  // walk envp to find NULL
   uintptr_t *p = envp;
   while (*p)
     p++;
-  p++; // 跳过 envp 的 NULL 终止符
-  // p 现在指向 auxv
+  p++; // skip envp's NULL terminator
+  // p now points to auxv
   while (*p != AT_NULL) {
     if (p[0] == type)
       return p[1];
@@ -55,16 +57,16 @@ static uintptr_t find_auxv(uintptr_t *sp, uint64_t type) {
   return 0;
 }
 
-// bootstrap 入口
+// bootstrap entry
 void __dls3(uintptr_t *sp) {
-  // 1. 从 auxv 取 AT_BASE（自己的基址）
+  // 1. get AT_BASE from auxv (own base address)
   uintptr_t ld_base = find_auxv(sp, AT_BASE);
 
-  // 2. 定位 .dynamic（RIP-relative 直接取运行时地址，不走 GOT）
+  // 2. locate .dynamic (RIP-relative directly gets runtime address, no GOT)
   Elf64_Dyn *dyn = get_dynamic();
 
-  // 3. 先遍历 .dynamic raw 找 DT_RELA/DT_RELASZ/DT_SYMTAB
-  //    d_ptr 是 link-time 相对 vaddr，用时 + ld_base
+  // 3. first walk .dynamic raw to find DT_RELA/DT_RELASZ/DT_SYMTAB
+  //    d_ptr is link-time relative vaddr, add ld_base when used
   Elf64_Rela *rela = NULL;
   size_t rela_sz = 0;
   Elf64_Sym *symtab = NULL;
@@ -82,12 +84,14 @@ void __dls3(uintptr_t *sp) {
     }
   }
 
-  // 4. 遍历 .rela.dyn 应用 R_X86_64_RELATIVE 与 R_X86_64_GLOB_DAT
+  // 4. walk .rela.dyn applying R_X86_64_RELATIVE and R_X86_64_GLOB_DAT
   //    RELATIVE:   *addr = ld_base + addend
   //    GLOB_DAT:   *addr = ld_base + symtab[sym].st_value + addend
-  //    （ld.so 自身定义的符号，st_value 是 link-time vaddr，加 base
-  //    得运行时地址） bootstrap 前 GOT 未填，必须在此处理 GLOB_DAT，否则
-  //    build_link_map 读 _dl_link_map 的 GOT entry 得 0，解引用即 #PF
+  //    (symbols defined in ld.so itself; st_value is link-time vaddr, add base
+  //    to get runtime address)
+  //    GOT not filled before bootstrap; GLOB_DAT must be handled here, otherwise
+  //    build_link_map reads the GOT entry of _dl_link_map as 0 and dereferences
+  //    it -> #PF
   if (rela && rela_sz) {
     for (size_t i = 0; i < rela_sz / sizeof(Elf64_Rela); i++) {
       Elf64_Rela *r = &rela[i];
@@ -101,10 +105,11 @@ void __dls3(uintptr_t *sp) {
           *addr = ld_base + symtab[sym_idx].st_value + r->r_addend;
         }
       } else {
-        // 未处理类型打 WARN：bootstrap 只做 RELATIVE/GLOB_DAT，
-        // 其他类型（如 JUMP_SLOT/PC32）意味着 ld.so 内部有跨模块调用，
-        // bootstrap 前 GOT 未填会崩溃。正常情况下 ld.so 全局
-        // -fvisibility=hidden 后 .rela.dyn 只剩 RELATIVE/GLOB_DAT
+        // WARN on unhandled types: bootstrap only does RELATIVE/GLOB_DAT,
+        // other types (e.g. JUMP_SLOT/PC32) mean ld.so has intra-module calls,
+        // and the unfilled GOT before bootstrap would crash. Normally ld.so is
+        // built with global -fvisibility=hidden so .rela.dyn only contains
+        // RELATIVE/GLOB_DAT
         dl_puts("dl: WARN: skip reloc type ");
         dl_put_hex(type);
         dl_puts(" at offset ");
@@ -114,12 +119,12 @@ void __dls3(uintptr_t *sp) {
     }
   }
 
-  // 5. 自重定位完成
+  // 5. self-relocation done
   dl_puts("dl: self-relocate done");
 
-  // 6. 进入 post-bootstrap 主流程（可用全局变量/GOT）
+  // 6. enter post-bootstrap main flow (global variables/GOT now usable)
   __dls_init(sp, ld_base);
-  // __dls_init 不返回（跳主 ELF entry）
+  // __dls_init does not return (jumps to main ELF entry)
   while (1)
     ;
 }

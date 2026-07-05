@@ -28,7 +28,7 @@
 
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 256
-static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS];
+static irq_handler_fn irq_handlers[MAX_IRQ_HANDLERS];
 
 // ===================== IRQ owner (user-space driver binding)
 // =====================
@@ -41,7 +41,7 @@ int irq_has_handler(int irq) {
   return irq_handlers[irq] != NULL;
 }
 
-void irq_register(int vec, irq_handler_t fn) {
+void irq_register(int vec, irq_handler_fn fn) {
   if (vec >= 0 && vec < MAX_IRQ_HANDLERS) {
     irq_handlers[vec] = fn;
   }
@@ -68,16 +68,18 @@ timer_poll_fn timer_poll_hook = NULL;
 // ===================== Trap dispatch =====================
 static uint64_t tick = 0;
 
-// #NM handler: Device Not Available — lazy FPU 上下文切换
+// #NM handler: Device Not Available -- lazy FPU context switch
 void fpu_lazy_switch(xtask *t) {
   uint64_t cr0;
   __asm__ volatile("movq %%cr0, %0" : "=r"(cr0));
   if (!(cr0 & (1ULL << 3)))
-    return; // TS 已清，无需处理
+    return; // TS already clear, nothing to handle
 
-  // 嵌套检测：正常 #NM 只触发一次，clts 后即返回。若 handler 内部又触发
-  // #NM（典型原因：fxrstor/fxsave 在 TS=1 下执行），会嵌套并撑爆内核栈
-  // 导致 #DF。立即 panic 给出明确提示，不让 #DF 毁掉现场。
+  // Nesting detection: normal #NM fires once, clts returns immediately.
+  // If the handler triggers another #NM (typical cause: fxrstor/fxsave
+  // executed with TS=1), it would nest and blow the kernel stack, causing
+  // #DF.  Panic immediately with a clear message, don't let #DF destroy
+  // the scene.
   cpu_local *cl = get_cpu_local();
   if (++cl->nm_nesting_depth > 1) {
     panic("#NM nested (depth=%d) — fxrstor/fxsave executed with CR0.TS=1? "
@@ -89,15 +91,15 @@ void fpu_lazy_switch(xtask *t) {
     ASSERT(t->fpu_page->status == PAGE_USED);
     void *fpu_data =
         (void *)(__force uintptr_t)phys_to_virt(page_to_phys(t->fpu_page));
-    // 防御：fxrstor 源必须是 BFC 数据页虚拟地址（见 fpu_context_switch 同款
-    // ASSERT）
+    // Defense: fxrstor source must be a BFC data page virtual address
+    // (see same ASSERT in fpu_context_switch)
     uint64_t vma_start __attribute__((unused)) =
         (__force uint64_t)phys_to_virt(0);
     ASSERT((uint64_t)fpu_data >= vma_start &&
            (uint64_t)fpu_data < vma_start + total_page_frames * PAGE_SIZE);
-    kernel_fpu_restore(fpu_data); // 内部先 clts 再 fxrstor
+    kernel_fpu_restore(fpu_data); // internally clts then fxrstor
   } else {
-    // fpu_page == NULL：线程还没用过 FPU，只需清 TS
+    // fpu_page == NULL: thread never used FPU, just clear TS
     __asm__ volatile("clts");
   }
   cl->nm_nesting_depth = 0;
@@ -154,7 +156,7 @@ void trap_dispatch(trapframe_t *tf) {
       spin_lock(&target->recv_lock);
       uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
       if (next != target->recv_tail) { // drop if full
-        recv_msg_t *slot = (recv_msg_t *)target->recv_buf[target->recv_head];
+        recv_msg *slot = (recv_msg *)target->recv_buf[target->recv_head];
         slot->type = RECV_IRQ;
         slot->src = tf->trapno;
         target->recv_head = next;
@@ -228,11 +230,11 @@ void trap_dispatch(trapframe_t *tf) {
     uint64_t cr2;
     __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
     printk(LOG_ERROR, "PAGE FAULT: fault addr=0x%016lX", cr2);
-    // err code 含义解码：加速定位 NX/写保护/缺页类问题
-    // bit0: 0=not present(缺页) 1=protection(权限违例)
+    // err code decoding: speed up NX/write-protect/page-not-present diagnosis
+    // bit0: 0=not present 1=protection violation
     // bit1: 0=read 1=write
     // bit2: 0=kernel 1=user
-    // bit4: 0=data access 1=instruction fetch(NX 典型)
+    // bit4: 0=data access 1=instruction fetch (typical NX)
     {
       const char *acc =
           (tf->err_code & 0x10) ? "instruction fetch" : "data access";
@@ -411,15 +413,16 @@ void trap_dispatch(trapframe_t *tf) {
 
 // ===================== Timer IRQ handler =====================
 // Reschedule IPI handler: set need_resched flag on current task and EOI.
-// 严格照 ipi.md 决策 #1（c1 模型）：handler 只设标志，不调 schedule()。
-// 抢占统一由返用户态出口 check_pending_signals 的 while(need_resched)
-// schedule() 完成。
+// Per ipi.md decision #1 (c1 model): handler only sets flag, does NOT call
+// schedule().  Preemption is uniformly handled by check_pending_signals at
+// the return-to-user exit, which loops on need_resched -> schedule().
 //
-// bug.md Bug 2 死锁根因：此前此处对 tf->cs==0x2B 直接调 schedule()，会在 IPI
-// 中断 上下文里重入 schedule()。若 IPI 打断的恰是一次正在执行的
-// schedule()（已持有本核 scheduler_lock），handler 重入 schedule() 取同一把锁 →
-// 自旋死锁。表现为 cpu0 timer 持续涨（timer 中断不需 scheduler_lock）但 sched
-// 计数永久停住、idle phase=4。
+// bug.md Bug 2 root cause: previously this handler called schedule() directly
+// when tf->cs==0x2B, which could re-enter schedule() inside IPI context.
+// If the IPI interrupted an in-progress schedule() (already holding this core's
+// scheduler_lock), the handler would re-enter schedule() on the same lock ->
+// spin deadlock.  Symptoms: cpu0 timer keeps rising (timer IRQ doesn't need
+// scheduler_lock) but sched count freezes, idle phase=4.
 static void reschedule_ipi_handler(trapframe_t *tf) {
   (void)tf;
   current_task->need_resched = 1;
@@ -443,12 +446,14 @@ static void timer_handler(trapframe_t *tf) {
     timer_poll_hook();
 
   // Check timer queue for expired deadlines.
-  // 两阶段:先在本地锁内把到期任务摘到临时链表(只动本 CPU 的 timer_queue +
-  // 任务字段), 再逐个用目标 CPU 的 scheduler_lock 投递到
-  // run_queue。run_queue/run_count 必须 由所属 CPU 的 scheduler_lock
-  // 保护——若直接在持本 CPU 锁时跨 CPU 写 tcpu 的 run_queue,会与目标 CPU 的
-  // schedule() 并发写同一链表/计数器,导致节点丢失、 run_count 漂移,最终
-  // schedule() 的 ASSERT(cnt == run_count) 触发 panic。
+  // Two-phase approach: first, under local lock, detach expired tasks into
+  // a temp list (touches only this CPU's timer_queue + task fields).  Then
+  // deliver each to its target CPU's run_queue under that CPU's scheduler_lock.
+  // run_queue/run_count must be protected by the owning CPU's scheduler_lock
+  // — writing tcpu's run_queue cross-CPU while holding the local lock would
+  // race with tcpu's schedule() on the same linked list/counter, causing
+  // node loss, run_count drift, and eventually schedule()'s
+  // ASSERT(cnt == run_count) panic.
   int cpu = get_cpu_local()->cpu_id;
   uint64_t now = sched_clock();
   list_node wakeup_list;
@@ -475,8 +480,9 @@ static void timer_handler(trapframe_t *tf) {
   }
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
 
-  // 跨 CPU 投递:每个任务按其 assigned_cpu 加锁后入队。本 CPU 锁已释放,
-  // 锁顺序固定为"单把目标 CPU 锁",无嵌套,无 AB-BA 风险。
+  // Cross-CPU delivery: each task is queued under its assigned_cpu's lock.
+  // Local CPU lock is already released.  Lock order is fixed as "single
+  // target CPU lock", no nesting, no AB-BA risk.
   while (!list_empty(&wakeup_list)) {
     list_node *node = list_front(&wakeup_list);
     list_remove(node);
@@ -495,24 +501,25 @@ static void timer_handler(trapframe_t *tf) {
       signal_check_hook(current_task, tf);
     }
     current_task->need_resched =
-        1; // 只设标志,出口由 check_pending_signals 统一调 schedule()
+        1; // set flag only, check_pending_signals calls schedule() at exit
   }
 
 #ifndef NDEBUG
-  // Preempt-stall watchdog（仅 debug）：need_resched 被置位后若连续 N 个 timer
-  // tick 仍未被 schedule() 消费（schedule 入口会清
-  // need_resched），即抢占点被绕过——历史上 bug.md Bug 2 (ls 卡死) 即
-  // check_pending_signals 的 reschedule 循环不可达所致。打一行告警直接
-  // 指向抢占路径，避免再误判到 work stealing / load balance。release
-  // 构建零开销。
+  // Preempt-stall watchdog (debug only): if need_resched is set but N
+  // consecutive timer ticks pass without schedule() consuming it (schedule
+  // clears need_resched on entry), a preemption point was bypassed.
+  // Historically bug.md Bug 2 (ls hang) was caused by an unreachable
+  // reschedule loop in check_pending_signals.  Print a warning pointing
+  // at the preemption path to avoid misdiagnosing as work stealing /
+  // load balance.  Zero cost in release builds.
   {
     int cpu = get_cpu_local()->cpu_id;
     if (current_task && current_task->need_resched) {
-      if (++cpu_locals[cpu].preempt_stall_ticks >= 100) { // ~1s 未兑现
+      if (++cpu_locals[cpu].preempt_stall_ticks >= 100) { // ~1s unconsumed
         printk(LOG_WARN,
-               "PREEMPT-STALLED cpu%d pid%d need_resched 持续 %u tick 未兑现, "
-               "本核 run_queue ready=%d（抢占点被绕过？check "
-               "check_pending_signals）\n",
+               "PREEMPT-STALLED cpu%d pid%d need_resched unconsumed for %u ticks, "
+               "this CPU run_queue ready=%d (preemption point bypassed? check "
+               "check_pending_signals)\n",
                cpu, current_task->pid, cpu_locals[cpu].preempt_stall_ticks,
                cpu_locals[cpu].run_count);
       }
@@ -558,7 +565,7 @@ void irq_init() {
 // All other syscalls are delegated to syscall_dispatch.
 #define NR_XCORE_SYSCALL (SYS_GETTID + 1)
 
-static syscall_fn_t xcore_syscall_table[NR_XCORE_SYSCALL] = {
+static syscall_fn xcore_syscall_table[NR_XCORE_SYSCALL] = {
     [SYS_GETPID] = sys_getpid,     [SYS_YIELD] = sys_yield,
     [SYS_RECV] = sys_recv,         [SYS_REQ] = sys_req,
     [SYS_RESP] = sys_resp,         [SYS_IRQ_BIND] = sys_irq_bind,

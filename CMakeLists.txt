@@ -40,7 +40,7 @@ if(SANITIZE)
   set(KASAN_CFLAGS "-fsanitize=kernel-address" "-DKASAN_SHADOW_OFFSET=0xDFFFFC0000000000ULL" "-DSANITIZER=1")
 endif()
 
-# Debug 模式：加调试信息 + 保留帧指针（栈回溯需要）+ 放行所有日志级别
+# Debug mode: add debug info + preserve frame pointer (needed for stack backtrace) + allow all log levels
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG")
@@ -52,11 +52,11 @@ include_directories(${CMAKE_SOURCE_DIR})
 # #include "xos/xxx.h" (matching the published /usr/include/xos/ form).
 include_directories(${CMAKE_SOURCE_DIR}/include/uapi)
 
-# 编译规则封装
+# Build rule wrappers
 include(build_script/cmake/kernel_rules.cmake)
 include(build_script/cmake/user_rules.cmake)
 
-# Boot loader (独立 EFI 应用，用 GNU-EFI 编译)
+# Boot loader (standalone EFI application, compiled with GNU-EFI)
 add_subdirectory(boot)
 
 # Kernel (higher-half ELF)
@@ -72,7 +72,7 @@ if(TEST)
     add_subdirectory(user/test)
 endif()
 
-# 链接内核 ELF
+# Link kernel ELF
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/build_script/linker.ld)
 set(BIN_FILE ${CMAKE_BINARY_DIR}/myos.elf)
 set(LINK_SCRIPT ${CMAKE_SOURCE_DIR}/build_script/cmake/do_link.cmake)
@@ -89,7 +89,7 @@ add_custom_target(link ALL
 
 add_dependencies(link arch_x64 xcore_mem xcore_obj bsd_obj driver_obj kernel_obj)
 
-# 将 EFI bootloader 复制到 build/ 根目录
+# Copy EFI bootloader to build/ root directory
 add_custom_target(copy_boot ALL
     COMMAND ${CMAKE_COMMAND} -E copy
         ${CMAKE_CURRENT_BINARY_DIR}/boot/BOOTX64.EFI

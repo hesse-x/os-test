@@ -76,7 +76,7 @@
 #define SYS_GETPGID 58
 #define SYS_GETSID 59
 
-// ===================== Thread syscalls (阶段 3a/3b) =====================
+// ===================== Thread syscalls (phase 3a/3b) =====================
 #define SYS_CLONE 60
 #define SYS_FUTEX 61
 #define SYS_ARCH_PRCTL 62
@@ -104,14 +104,14 @@ typedef struct recv_msg {
       size_t len;     // data length
     } msg;
   };
-} recv_msg_t;
+} recv_msg;
 
 // ===================== PCI device info =====================
 typedef struct pci_dev_info_bar {
   uint64_t phys;
   uint64_t size;
   uint8_t type; // 0=MMIO32, 1=IO, 2=MMIO64
-} pci_dev_info_bar_t;
+} pci_dev_info_bar;
 
 typedef struct pci_dev_info {
   uint16_t vendor_id;
@@ -119,7 +119,7 @@ typedef struct pci_dev_info {
   uint16_t class_code;
   uint8_t num_bars;
   struct pci_dev_info_bar bars[6];
-} pci_dev_info_t;
+} pci_dev_info;
 
 // ===================== Block I/O constants =====================
 #define BLOCK_DIR_READ 0

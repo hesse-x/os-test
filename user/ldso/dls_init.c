@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-// ld.so 主流程（post-bootstrap）
-// ld.md §3.3 / §8.2.2 递归加载多依赖 / plan_ld2b3 T14
+// ld.so main flow (post-bootstrap)
+// ld.md §3.3 / §8.2.2 recursive loading of multiple dependencies / plan_ld2b3 T14
 
 #include <stddef.h>
 #include <stdint.h>
@@ -14,11 +14,11 @@
 #include <xos/fcntl.h>
 #include <xos/syscall_nums.h>
 
-// bootstrap 阶段辅助（hidden：跨文件可见但不走 PLT）
+// bootstrap stage helpers (hidden: visible across files but not via PLT)
 __attribute__((visibility("hidden"))) void dl_puts(const char *s);
 __attribute__((visibility("hidden"))) void dl_put_hex(uint64_t val);
 
-// 外部函数声明（load_so.c / relocate.c / symtab.c / link_map.c）
+// external function declarations (load_so.c / relocate.c / symtab.c / link_map.c)
 __attribute__((visibility("hidden"))) void *load_so(const char *path,
                                                     Elf64_Dyn **out_dyn);
 __attribute__((visibility("hidden"))) void
@@ -31,10 +31,10 @@ __attribute__((visibility("hidden"))) void eager_bind(struct link_map *l);
 __attribute__((visibility("hidden"))) void *malloc(unsigned long size);
 __attribute__((visibility("hidden"))) int strcmp(const char *a, const char *b);
 
-// 全局 link_map 链表（link_map.c 定义）
+// global link_map list (defined in link_map.c)
 extern struct link_map *_dl_link_map;
 
-// 链接器提供的 .dynamic 起始符号（ld.so 自身）
+// linker-provided .dynamic start symbol (ld.so itself)
 extern Elf64_Dyn _DYNAMIC[];
 
 static uintptr_t find_auxv_val(uintptr_t *sp, uint64_t type) {
@@ -53,7 +53,7 @@ static uintptr_t find_auxv_val(uintptr_t *sp, uint64_t type) {
   return 0;
 }
 
-// 重定位单个对象：遍历 .rela.dyn 应用所有重定位 + eager bind .rela.plt
+// relocate a single object: walk .rela.dyn applying all relocations + eager bind .rela.plt
 static void relocate_object(struct link_map *l) {
   Elf64_Rela *rela = (Elf64_Rela *)l->rela_dyn;
   size_t rela_sz = l->rela_dyn_sz;
@@ -65,8 +65,8 @@ static void relocate_object(struct link_map *l) {
   eager_bind(l);
 }
 
-// ===== §8.2.1 加载队列与去重 =====
-// 已加载库表：soname → link_map 节点（去重 + 闭环检测）
+// ===== §8.2.1 load queue and dedup =====
+// loaded library table: soname -> link_map node (dedup + cycle detection)
 struct loaded_lib {
   char soname[64];
   struct link_map *map;
@@ -74,7 +74,7 @@ struct loaded_lib {
 static struct loaded_lib g_loaded[16];
 static int g_loaded_cnt = 0;
 
-// soname → link_map，未加载返回 NULL
+// soname -> link_map, returns NULL if not loaded
 static struct link_map *find_loaded(const char *soname) {
   for (int i = 0; i < g_loaded_cnt; i++) {
     if (strcmp(g_loaded[i].soname, soname) == 0)
@@ -83,7 +83,7 @@ static struct link_map *find_loaded(const char *soname) {
   return NULL;
 }
 
-// 登记已加载库
+// register loaded library
 static void register_loaded(const char *soname, struct link_map *m) {
   if (g_loaded_cnt >= 16) {
     dl_puts("dl: FATAL: too many loaded libs");
@@ -95,7 +95,7 @@ static void register_loaded(const char *soname, struct link_map *m) {
     while (1)
       ;
   }
-  // 拷贝 soname（截断到 63 字节）
+  // copy soname (truncate to 63 bytes)
   int i = 0;
   while (soname[i] && i < 63) {
     g_loaded[g_loaded_cnt].soname[i] = soname[i];
@@ -106,12 +106,12 @@ static void register_loaded(const char *soname, struct link_map *m) {
   g_loaded_cnt++;
 }
 
-// 加载单个 .so（不去重），建 link_map 节点但不重定位
+// load a single .so (no dedup), build link_map node but do not relocate
 static struct link_map *load_one(const char *soname) {
-  // 路径搜索：先 /lib/<soname>（生产库），失败回退 /test/lib/<soname>
-  // （ld.so 测试 stub）。对齐 Linux DT_RPATH 思路；当前不解析
-  // DT_RPATH/DT_RUNPATH （ld.md §8.4 已知边界），硬编码前缀已满足所有库放 /lib/
-  // 或 /test/lib/。
+  // path search: try /lib/<soname> first (production libs), fall back to /test/lib/<soname>
+  // (ld.so test stub). Aligns with Linux DT_RPATH idea; currently does not parse
+  // DT_RPATH/DT_RUNPATH (ld.md §8.4 known boundary), hardcoded prefixes suffice since all
+  // libs live in /lib/ or /test/lib/.
   static char lib_path[256];
   const char *prefix = "/lib/";
   char *dp = lib_path;
@@ -122,7 +122,7 @@ static struct link_map *load_one(const char *soname) {
     *dp++ = *np++;
   *dp = '\0';
 
-  // 探测 /lib/<soname> 是否存在（load_so open 失败会 SYS_EXIT，不能靠返回值）
+  // probe whether /lib/<soname> exists (load_so open failure triggers SYS_EXIT, cannot rely on return value)
   long fd;
   __asm__ volatile("syscall"
                    : "=a"(fd)
@@ -130,7 +130,7 @@ static struct link_map *load_one(const char *soname) {
                      "S"((int64_t)O_RDONLY)
                    : "rcx", "r11");
   if (fd < 0) {
-    // 回退 /test/lib/<soname>
+    // fall back to /test/lib/<soname>
     const char *tp = "/test/lib/";
     dp = lib_path;
     while (*tp)
@@ -158,7 +158,7 @@ static struct link_map *load_one(const char *soname) {
 
   struct link_map *m = (struct link_map *)malloc(sizeof(*m));
   fill_link_map(m, (uintptr_t)base, dyn);
-  // 填 soname
+  // fill soname
   int i = 0;
   while (soname[i] && i < 63) {
     m->soname[i] = soname[i];
@@ -170,20 +170,20 @@ static struct link_map *load_one(const char *soname) {
   return m;
 }
 
-// 递归加载 soname 及其全部 NEEDED（BFS），已加载则去重
-// 链入链表尾部 tail，返回新尾
+// recursively load soname and all its NEEDED (BFS), dedup if already loaded
+// append to tail of list, return new tail
 static struct link_map *load_recursive(const char *soname,
                                        struct link_map *tail) {
   if (find_loaded(soname))
-    return tail; // 去重（兼闭环收敛）
+    return tail; // dedup (also closes cycles)
   struct link_map *m = load_one(soname);
   register_loaded(soname, m);
   tail->l_next = m;
   m->l_prev = tail;
   tail = m;
 
-  // 递归：读 m 自身的 .dynamic，加载它的全部 DT_NEEDED
-  // dynstr 直接用 fill_link_map 已填好的 m->strtab（运行时绝对地址）
+  // recurse: read m's own .dynamic, load all its DT_NEEDED
+  // dynstr uses m->strtab filled by fill_link_map (runtime absolute address)
   const char *dynstr = m->strtab;
   for (Elf64_Dyn *d = (Elf64_Dyn *)m->dynamic; d->d_tag != DT_NULL; d++) {
     if (d->d_tag == DT_NEEDED) {
@@ -195,13 +195,13 @@ static struct link_map *load_recursive(const char *soname,
 }
 
 void __dls_init(uintptr_t *sp, uintptr_t ld_base) {
-  // 1. 从 auxv 取主 ELF 信息
+  // 1. get main ELF info from auxv
   uintptr_t phdr = find_auxv_val(sp, AT_PHDR);
   size_t phent = find_auxv_val(sp, AT_PHENT);
   size_t phnum = find_auxv_val(sp, AT_PHNUM);
   uintptr_t entry = find_auxv_val(sp, AT_ENTRY);
 
-  // 2. 遍历 PHDR 找 PT_DYNAMIC
+  // 2. walk PHDR to find PT_DYNAMIC
   Elf64_Dyn *main_dyn = NULL;
   for (size_t i = 0; i < phnum; i++) {
     Elf64_Phdr *p = (Elf64_Phdr *)(phdr + i * phent);
@@ -221,7 +221,7 @@ void __dls_init(uintptr_t *sp, uintptr_t ld_base) {
       ;
   }
 
-  // 3. 找 DT_STRTAB
+  // 3. find DT_STRTAB
   const char *main_dynstr = NULL;
   for (Elf64_Dyn *d = main_dyn; d->d_tag != DT_NULL; d++) {
     if (d->d_tag == DT_STRTAB) {
@@ -230,14 +230,16 @@ void __dls_init(uintptr_t *sp, uintptr_t ld_base) {
     }
   }
 
-  // 4. ld.so 自身节点：静态（无外部依赖，零成本）
+  // 4. ld.so's own node: static (no external dependencies, zero cost)
   struct link_map *ld_map = &g_ld_map_static;
   fill_link_map(ld_map, ld_base, _DYNAMIC);
   ld_map->soname[0] = '\0';
 
-  // 5. 递归加载主 ELF 的全部 DT_NEEDED（BFS，去重）
-  //    链表按加载完成顺序尾插，天然满足「依赖先于依赖者」
-  //    head 固定为链首（ld_map），tail 随尾插前进；load_recursive 返回新尾
+  // 5. recursively load all DT_NEEDED of the main ELF (BFS, dedup)
+  //    list is appended at tail in load-completion order, naturally satisfying
+  //    "dependencies before dependents"
+  //    head is fixed as list head (ld_map), tail advances with each append;
+  //    load_recursive returns the new tail
   struct link_map *head = ld_map;
   struct link_map *tail = ld_map;
   for (Elf64_Dyn *d = main_dyn; d->d_tag != DT_NULL; d++) {
@@ -247,7 +249,7 @@ void __dls_init(uintptr_t *sp, uintptr_t ld_base) {
     }
   }
 
-  // 6. 主 ELF 节点（非 PIE，base=0），链到链表头
+  // 6. main ELF node (non-PIE, base=0), link as list head
   struct link_map *main_map = (struct link_map *)malloc(sizeof(*main_map));
   fill_link_map(main_map, 0, main_dyn);
   main_map->soname[0] = '\0';
@@ -257,12 +259,13 @@ void __dls_init(uintptr_t *sp, uintptr_t ld_base) {
     head->l_prev = main_map;
   _dl_link_map = main_map;
 
-  // 7. 填主 ELF 的 PT_TLS 信息（libc.so/ld.so 通常无 TLS，留 0）
+  // 7. fill main ELF's PT_TLS info (libc.so/ld.so usually have no TLS, leave 0)
   fill_tls_from_phdr(main_map, 0, phdr, phent, phnum);
 
-  // 8. 重定位：按「依赖先于依赖者」顺序遍历链表（跳过 ld.so 自身和主 ELF）
-  //    ld.so 已在 bootstrap 自重定位；主 ELF 最后重定位
-  //    链表顺序 main → ld → libs...：ld 夹在中间，需显式跳过 ld_map
+  // 8. relocation: walk the list in "dependencies before dependents" order
+  //    (skip ld.so itself and the main ELF)
+  //    ld.so self-relocated during bootstrap; main ELF relocated last
+  //    list order main -> ld -> libs...: ld is in the middle, must explicitly skip ld_map
   for (struct link_map *l = main_map->l_next; l; l = l->l_next) {
     if (l == ld_map)
       continue;
@@ -274,7 +277,7 @@ void __dls_init(uintptr_t *sp, uintptr_t ld_base) {
   relocate_object(main_map);
   dl_puts("dl: main ELF relocated");
 
-  // 9. 跳主 ELF entry
+  // 9. jump to main ELF entry
   dl_puts("dl: jump to entry");
   dl_put_hex(entry);
 

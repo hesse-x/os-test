@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-// user/test/test_cpu_burn.c — CPU 密集型测试,用于 work stealing 均衡验证。
-// 纯计算循环,无 syscalls,触发多核负载。
+// user/test/test_cpu_burn.c — CPU-bound test for work-stealing balance
+// verification. Pure compute loop, no syscalls, triggers multi-core load.
 
 #include <stdio.h>
 

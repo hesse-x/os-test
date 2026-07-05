@@ -19,7 +19,7 @@ extern "C" {
 #define EXIT_FAILURE 1
 #define RAND_MAX 32767
 
-/* div / ldiv / lldiv 结果类型 */
+/* div / ldiv / lldiv result types */
 typedef struct {
   int quot;
   int rem;
@@ -72,7 +72,7 @@ LIBC_EXPORT void qsort(void *base, size_t nmemb, size_t size,
 LIBC_EXPORT void *bsearch(const void *key, const void *base, size_t nmemb,
                           size_t size, int (*cmp)(const void *, const void *));
 
-/* 环境变量（environ.c） */
+/* Environment variables (environ.c) */
 LIBC_EXPORT extern char **environ;
 LIBC_EXPORT char *getenv(const char *name);
 LIBC_EXPORT int setenv(const char *name, const char *value, int overwrite);
