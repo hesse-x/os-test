@@ -1,8 +1,12 @@
+#include <stdbool.h>
+#include <stdint.h>
 #include "kernel/driver/xhci.h"
 #include "kernel/driver/pci.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
+#include "arch/x64/trap.h"
 #include "kernel/xcore/xtask.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/mem/slab.h"

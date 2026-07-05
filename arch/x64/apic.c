@@ -4,6 +4,7 @@
 #include "arch/x64/smp.h"
 #include "kernel/xcore/acpi.h"
 #include "kernel/xcore/log.h"
+#include <stddef.h>
 
 void __iomem *lapic_vaddr = NULL;
 void __iomem *ioapic_vaddr = NULL;

@@ -2,10 +2,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
-#include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <stdio.h>
+#include <signal.h>  // IWYU pragma: keep  // sigset_t/SIG_BLOCK etc. used in cancel mask; provided transitively by xos/signal.h but IWYU maps to hosted <signal.h>
 #include <assert.h>
 #include <sys/mman.h>
 #include <pthread.h>
@@ -14,6 +13,8 @@
 #include <xos/mman.h>
 #include <xos/signal.h>
 #include <xos/thread.h>
+#include "xos/errno.h"
+#include "xos/syscall_nums.h"
 
 #ifndef FUTEX_WAIT
 #define FUTEX_WAIT 0

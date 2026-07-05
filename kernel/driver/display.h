@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "kernel/xcore/sparse.h"
+#include "kernel/driver/driver.h"
 #include <xos/ioctl.h>
 #include <xos/font_metrics.h>
 #include <xos/display.h>

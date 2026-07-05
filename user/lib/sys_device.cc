@@ -1,7 +1,6 @@
 #include <sys/device.h>
-#include <errno.h>
-#include <string.h>
 #include "syscall.h"
+#include "xos/errno.h"
 
 int device_register(const char *name) {
     return device_register_shm(name, -1);

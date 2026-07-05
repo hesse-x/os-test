@@ -8,6 +8,7 @@
 #include "kernel/xcore/spinlock.h"
 
 #include "kernel/xcore/atomic.h"
+#include "boot/boot.h"
 
 #define NUM_KMALLOC_CLASSES 9
 

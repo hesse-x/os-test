@@ -3,8 +3,12 @@
 #include "kernel/xcore/mem/kasan.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
+#include "arch/x64/memlayout.h"
+#include "arch/x64/utils.h"
 #include "kernel/xcore/log.h"
 #include "common/macro.h"
+#include "xos/syscall.h"
+#include <stdint.h>
 
 // 全局 kmalloc cache 数组
 kmem_cache_t kmalloc_caches[NUM_KMALLOC_CLASSES];

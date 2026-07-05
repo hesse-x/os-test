@@ -1,6 +1,7 @@
 #include <sys/ipc.h>
-#include <errno.h>
+#include <stdint.h>
 #include "syscall.h"
+#include <sys/types.h>
 
 int notify(pid_t pid) {
     return sys_notify(pid);

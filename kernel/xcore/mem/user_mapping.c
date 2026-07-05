@@ -3,8 +3,10 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include "kernel/xcore/mem/alloc.h"
 #include "arch/x64/paging.h"
+#include "arch/x64/memlayout.h"
 #include "common/macro.h"
 #include <xos/errno.h>
 #include <xos/shm.h>
@@ -12,6 +14,7 @@
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/atomic.h"
+#include "kernel/xcore/sparse.h"
 #include "kernel/xcore/kpi.h"
 
 // Lookup the leaf PTE for a given virtual address in a page table hierarchy.

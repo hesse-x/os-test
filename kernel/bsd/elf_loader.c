@@ -3,10 +3,13 @@
 #include "kernel/xcore/xtask.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/log.h"
+#include "kernel/xcore/sparse.h"
 #include "arch/x64/paging.h"
+#include "arch/x64/memlayout.h"
 #include "common/macro.h"
 #include <stddef.h>
 #include <stdbool.h>
+#include <xos/elf.h>
 
 // page_to_phys, phys_to_virt — defined in kernel/mem/alloc.c
 // ensure_pd, ensure_pt_in_pd, map_user_page_direct — defined in kernel/mem/user_mapping.c

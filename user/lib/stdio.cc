@@ -3,10 +3,13 @@
 #include "syscall.h"
 #include "common/kvformat.h"
 #include <errno.h>
-#include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <stddef.h>
+#include <stdint.h>
+#include "xos/errno.h"
+#include "xos/fcntl.h"
 
 /* ===================== sys_write based flush ===================== */
 

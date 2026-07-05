@@ -4,18 +4,21 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <termios.h>
-#include <errno.h>
-#include <string.h>
-#include <stdlib.h>
+#include <stdlib.h>  // IWYU pragma: keep  // malloc/calloc/free in getdir/dup
 #include <sys/types.h>
 #include <sys/ipc.h>
-#include <sys/device.h>
 #include <sys/poll.h>
 #include "syscall.h"
-#include <xos/shm.h>
+#include "xos/errno.h"
+#include "xos/fcntl.h"
+#include "xos/ioctl.h"
+#include "xos/socket.h"
+#include "xos/syscall_asm.h"
+#include "xos/syscall_nums.h"
 
 // ===================== Working directory (per-process) =====================
 static char cwd_path[256] = "/";

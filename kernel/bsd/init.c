@@ -9,9 +9,14 @@
 #include "kernel/kernel.h"
 #include "kernel/xcore/xtask.h"
 #include "kernel/xcore/trap.h"
+#include "kernel/xcore/list.h"
 #include "kernel/bsd/vfs.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/spinlock.h"
+#include "arch/x64/trap.h"
+#include <stdbool.h>
+#include <stdint.h>
+#include <xos/signal.h>
 
 // Wrapper to adapt check_pending_signals(trapframe_t*) to signal_check_fn(xtask_t*, trapframe_t*)
 // check_pending_signals uses current_task internally, so the xtask_t argument is redundant but

@@ -7,6 +7,7 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/mem/slab.h"
+#include "kernel/xcore/atomic.h"
 #include <xos/errno.h>
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"

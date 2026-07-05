@@ -27,6 +27,9 @@
 #include "kernel/driver/display.h"
 #include "kernel/bsd/socket.h"
 #include "kernel/user_check.h"
+#include "kernel/xcore/atomic.h"
+#include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/sparse.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
@@ -39,6 +42,8 @@
 #include <xos/stat.h>
 #include <xos/signal.h>
 #include <xos/thread.h>
+#include <xos/elf.h>
+#include <xos/mman.h>
 
 // Minimal file_io_req for FD_FILE CLOSE notification (must match fs_driver struct layout)
 typedef struct file_io_close_req {

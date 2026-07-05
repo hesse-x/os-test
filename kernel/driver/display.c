@@ -7,8 +7,12 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/slab.h"
 #include "arch/x64/paging.h"
+#include "arch/x64/memlayout.h"
 #include "arch/x64/utils.h"
 #include <xos/errno.h>
+#include <xos/display.h>
+#include <xos/font_metrics.h>
+#include <xos/ioctl.h>
 #ifdef PERF
 #include "kernel/driver/serial.h"
 #include "arch/x64/apic.h"

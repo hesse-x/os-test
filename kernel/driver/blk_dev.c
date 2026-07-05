@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include "kernel/driver/blk_dev.h"
 #include "kernel/driver/ahci.h"
 #include "kernel/xcore/log.h"

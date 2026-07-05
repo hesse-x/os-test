@@ -12,6 +12,7 @@
 #include <string.h>
 #include <errno.h>
 #include <pthread.h>
+#include "xos/errno.h"
 
 char **environ = NULL;
 

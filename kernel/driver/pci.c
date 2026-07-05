@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <stddef.h>
 #include "kernel/driver/pci.h"
 #include "kernel/xcore/acpi.h"
 #include "arch/x64/paging.h"
@@ -7,7 +8,9 @@
 #include "kernel/xcore/mem/kasan.h"
 #include "common/macro.h"
 #include <xos/errno.h>
+#include <xos/syscall_nums.h>
 #include "arch/x64/apic.h"
+#include "arch/x64/utils.h"
 #include "kernel/xcore/trap.h"
 
 pci_device_t pci_devices[MAX_PCI_DEV];

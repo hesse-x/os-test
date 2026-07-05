@@ -1,5 +1,6 @@
 // kernel/driver/registry.c — Driver registration and PCI auto-matching
 
+#include <stdint.h>
 #include "kernel/driver/driver.h"
 #include "kernel/driver/pci.h"
 #include "kernel/xcore/log.h"

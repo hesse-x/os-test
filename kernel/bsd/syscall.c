@@ -13,6 +13,10 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/rcu.h"
+#include "kernel/xcore/atomic.h"
+#include "kernel/xcore/list.h"
+#include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/sparse.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/user_check.h"
@@ -31,6 +35,11 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
+#include "arch/x64/memlayout.h"
+#include "boot/boot.h"
+#include "common/macro.h"
+#include <stdbool.h>
+#include <stddef.h>
 #include <xos/errno.h>
 #include <xos/syscall_nums.h>
 #include <xos/syscall.h>
@@ -38,6 +47,9 @@
 #include <xos/stat.h>
 #include <xos/input.h>
 #include <xos/shm.h>
+#include <xos/fcntl.h>
+#include <xos/mman.h>
+#include <xos/signal.h>
 
 // ===================== File protocol for FD_FILE <-> fs_driver IPC =====================
 #define FILE_CMD_READ      2

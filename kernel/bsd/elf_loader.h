@@ -2,6 +2,7 @@
 #define KERNEL_ELF_LOADER_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <xos/elf.h>
 
 typedef struct elf_load_result {

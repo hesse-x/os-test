@@ -16,6 +16,7 @@
 #include "kernel/xcore/rcu.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
+#include "arch/x64/utils.h"
 
 __attribute__((no_sanitize("kernel-address")))
 void xcore_init(boot_info *bi) {

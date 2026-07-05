@@ -7,7 +7,7 @@
 #include "stdio.h"
 #include "stdlib.h"
 #include "sys/tls.h"
-#include <unistd.h>
+#include "sys/cdefs.h"
 #include "syscall.h"
 
 typedef void (*init_func_t)(void);

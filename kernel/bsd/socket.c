@@ -7,15 +7,23 @@
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/bsd/inode.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/log.h"
+#include "kernel/xcore/sparse.h"
+#include "kernel/xcore/xtask.h"
 #include <xos/errno.h>
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/bsd/pty.h"
 #include "arch/x64/utils.h"
+#include "arch/x64/smp.h"
 #include "arch/x64/apic.h"
 #include "kernel/xcore/rcu.h"
+#include <xos/fcntl.h>
+#include <xos/signal.h>
+#include <xos/socket.h>
 
 // ===================== Global socket lock =====================
 spinlock_t socket_lock = SPINLOCK_INIT;

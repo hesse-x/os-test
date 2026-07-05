@@ -5,11 +5,15 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/xtask.h"
 #include "kernel/xcore/trap.h"
+#include "kernel/xcore/sparse.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
+#include "arch/x64/paging.h"
+#include "arch/x64/trap.h"
 #include "kernel/xcore/acpi.h"
 #include <xos/errno.h>
+#include <xos/syscall_nums.h>
 
 // ===================== AHCI register offsets (from ABAR) =====================
 // Global HBA registers

@@ -1,16 +1,21 @@
 #include "kernel/bsd/pty.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/slab.h"
+#include "kernel/xcore/rcu.h"
+#include "kernel/xcore/sparse.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/mem/kasan.h"
+#include "arch/x64/smp.h"
+#include "arch/x64/utils.h"
 #include <xos/errno.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 // ===================== Default termios =====================
 const struct termios default_termios = {

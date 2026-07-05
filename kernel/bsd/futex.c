@@ -9,6 +9,8 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
+#include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/sparse.h"
 #include "arch/x64/smp.h"
 #include <xos/errno.h>
 #include <xos/time.h>

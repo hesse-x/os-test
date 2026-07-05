@@ -5,6 +5,9 @@
 #include "kernel/xcore/xtask.h"
 #include "kernel/xcore/mem/slab.h"  // kmem_cache_t（xtask_cache 声明所需）
 #include "arch/x64/apic.h"
+#include "arch/x64/smp.h"
+#include "kernel/xcore/list.h"
+#include "kernel/xcore/spinlock.h"
 
 // Scheduler and process table (kernel/xcore/sched.c)
 

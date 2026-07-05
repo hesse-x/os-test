@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "kernel/xcore/spinlock.h"
 #include "arch/x64/trap.h"
+#include "kernel/driver/driver.h"
 
 #define AHCI_MAX_SECTORS 128  // 64KB bounce buffer / 512 bytes per sector
 

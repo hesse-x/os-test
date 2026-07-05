@@ -4,6 +4,7 @@
 #include "arch/x64/trap.h"
 #include "kernel/xcore/xtask.h"
 #include "kernel/bsd/types.h"
+#include <stdint.h>
 #include <stddef.h>
 
 // Syscall dispatch entry

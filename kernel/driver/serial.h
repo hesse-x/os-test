@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include "kernel/xcore/spinlock.h"
+#include "kernel/driver/driver.h"
 #include "arch/x64/trap.h"  // trapframe_t
 #include <xos/types.h>   // pid_t
 

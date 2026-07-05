@@ -11,6 +11,11 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/apic.h"
+#include "arch/x64/memlayout.h"
+#include "kernel/xcore/atomic.h"
+#include "kernel/xcore/list.h"
+#include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/sparse.h"
 #include <xos/errno.h>
 #include <xos/syscall_nums.h>
 #include <xos/signal.h>

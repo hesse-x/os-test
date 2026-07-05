@@ -5,6 +5,8 @@
 #include "kernel/xcore/xtask.h"
 #include <xos/syscall_nums.h>
 #include <stddef.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 // Hook registration points: BSD layer registers during init, Xcore calls at trap_dispatch end
 typedef void (*signal_check_fn)(xtask_t *t, trapframe_t *tf);

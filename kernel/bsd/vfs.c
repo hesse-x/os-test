@@ -12,6 +12,8 @@
 #include "kernel/bsd/proc.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/log.h"
+#include "kernel/xcore/atomic.h"
+#include "kernel/xcore/spinlock.h"
 #include "kernel/driver/serial.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/mem/kasan.h"
@@ -19,9 +21,11 @@
 #include "kernel/xcore/trap.h"
 #include <xos/errno.h>
 #include <xos/stat.h>
+#include <xos/fcntl.h>
 #include "arch/x64/utils.h"
 #include "arch/x64/smp.h"
 #include <stddef.h>
+#include <stdbool.h>
 
 void vfs_init(void) {
     // inode_init, page_cache_init, devtmpfs_init are called in kernel_main before driver_init

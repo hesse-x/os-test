@@ -15,10 +15,15 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/apic.h"
 #include "arch/x64/paging.h"
+#include "arch/x64/memlayout.h"
 #include "kernel/xcore/acpi.h"
+#include "kernel/xcore/atomic.h"
+#include "kernel/xcore/sparse.h"
 #include <xos/syscall_nums.h>
 #include <xos/syscall.h>
 #include <xos/errno.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 // ===================== IRQ owner table (shared with trap.c) =====================
 extern pid_t irq_owner[MAX_IRQ_HANDLERS];

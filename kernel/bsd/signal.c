@@ -14,12 +14,14 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/sparse.h"
 #include "kernel/user_check.h"
 #include "kernel/xcore/spinlock.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/paging.h"
+#include <stddef.h>
 #include <xos/signal.h>
 #include <xos/syscall_nums.h>
 #include <xos/errno.h>

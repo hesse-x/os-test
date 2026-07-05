@@ -4,6 +4,7 @@
 #include <syscall.h>   // sys_kill, sys_sigaction, sys_sigreturn
 #include <unistd.h>    // getpid
 #include <pthread.h>   // pthread_sigmask
+#include "xos/signal.h"
 
 int kill(int pid, int sig) {
     return sys_kill((int)pid, sig);

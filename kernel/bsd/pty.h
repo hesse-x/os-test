@@ -7,6 +7,7 @@
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/xcore/trap.h"  // wake_process
+#include <xos/fcntl.h>
 
 // ===================== PTY buffer size =====================
 #define PTY_BUF_SIZE 4096

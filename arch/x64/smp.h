@@ -4,9 +4,11 @@
 #include <stdint.h>
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
+#include "arch/x64/utils.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/sparse.h"
 
 #define MAX_CPUS 4
 #define MSR_GS_BASE 0xC0000101

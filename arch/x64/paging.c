@@ -1,6 +1,10 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
+#include "arch/x64/memlayout.h"
+#include "common/macro.h"
+#include "kernel/xcore/log.h"
+#include "kernel/xcore/mem/alloc.h"
 #include <stdbool.h>
 
 // ===================== GDT (物理地址阶段) =====================

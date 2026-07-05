@@ -11,6 +11,7 @@
 #include <xos/errno.h>
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/mem/kasan.h"
+#include "arch/x64/utils.h"
 
 __attribute__((no_sanitize("kernel-address")))
 size_t copy_from_user(void *dst, const void __user *src, size_t size) {

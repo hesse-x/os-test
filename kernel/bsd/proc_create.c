@@ -8,8 +8,12 @@
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/sched.h"
+#include "kernel/xcore/list.h"
+#include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/sparse.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/types.h"
+#include "kernel/bsd/signal.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/mem/alloc.h"
@@ -21,6 +25,7 @@
 #include "arch/x64/memlayout.h"
 #include <xos/signal.h>
 #include <xos/elf.h>
+#include <xos/mman.h>
 #include "common/macro.h"
 
 // process_create_elf: create user process from ELF data

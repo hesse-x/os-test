@@ -20,10 +20,14 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
+#include "arch/x64/memlayout.h"
 #include "common/macro.h"
+#include "kernel/xcore/atomic.h"
+#include "kernel/xcore/sparse.h"
 #include <xos/errno.h>
 #include <xos/shm.h>
 #include <xos/signal.h>
+#include <xos/syscall_nums.h>
 
 // Validate assembly offset assumptions in trapentry.S (switch_to uses hardcoded offsets)
 _Static_assert(offsetof(xtask_t, k_rsp) == 8,  "switch_to asm: k_rsp offset mismatch");

@@ -1,7 +1,8 @@
 #include <time.h>
 #include <string.h>
-#include <stdlib.h>
+#include <stdint.h>
 #include <syscall.h>
+#include <stddef.h>
 
 extern "C" {
 

@@ -1,8 +1,10 @@
 #include <stdbool.h>
+#include <stddef.h>
 #include "kernel/xcore/acpi.h"
 #include "arch/x64/paging.h"
 #include "kernel/xcore/log.h"
 #include "common/macro.h"
+#include "boot/boot.h"
 
 acpi_madt_result_t g_madt = {0, 0, 0, 0, {0}, 0, {{0}}};
 acpi_mcfg_result_t g_mcfg = {0, 0, 0, 0};

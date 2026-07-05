@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/log.h"
 #include "arch/x64/smp.h"     // MAX_CPUS, get_cpu_local
 
 #define RCU_MAX_CPUS MAX_CPUS

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/atomic.h"
+#include "kernel/xcore/sparse.h"
 
 struct shm;  /* forward declaration */
 

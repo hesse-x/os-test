@@ -1,6 +1,5 @@
 // libinput_client: consumer-side input SHM ring poll + basic ASCII mapping.
 #include <stdint.h>
-#include <string.h>
 #include "input.h"
 #include <xos/input.h>
 

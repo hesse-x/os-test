@@ -3,11 +3,14 @@
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/xcore/xtask.h"
 #include "kernel/xcore/sched.h"
+#include "kernel/xcore/sparse.h"
 #include "kernel/driver/bsd_types.h"
 #include "kernel/xcore/trap.h"
+#include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "arch/x64/apic.h"
 #include <xos/errno.h>
+#include <xos/fcntl.h>
 #include <xos/socket.h>  // POLLIN/POLLOUT
 #include "common/kvformat.h"
 

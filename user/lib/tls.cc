@@ -1,15 +1,12 @@
 // user/lib/tls.cc — TLS template snapshot + main thread TCB init + cancel handler
 #include <stdint.h>
-#include <stddef.h>
 #include <string.h>
-#include <stdlib.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include "sys/tls.h"
 #include "pthread.h"
 #include "syscall.h"
 #include <xos/mman.h>
-#include <xos/signal.h>
 
 // 全局 TLS 模板信息单例（pthread_create 读取）
 extern "C" {
@@ -141,6 +138,7 @@ extern "C" void __pthread_cancel_check(int sig) {
 
 // === 动态路径 TLS 收集（plan_ld2b3 T12 / ld.md §3.5.3） ===
 #if DYNAMIC
+#include <stdlib.h>
 #include "sys/link_map.h"
 
 // 动态路径：遍历 _dl_link_map 合并 PT_TLS 填 tls_info

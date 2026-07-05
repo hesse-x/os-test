@@ -15,6 +15,9 @@
 #include "kernel/bsd/proc.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
+#include "arch/x64/utils.h"
+#include "kernel/xcore/sparse.h"
+#include "kernel/xcore/xtask.h"
 
 // VFS data structure init (must run before driver_init so devtmpfs_create works)
 void inode_init(void);

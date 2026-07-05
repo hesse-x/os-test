@@ -3,7 +3,9 @@
 #include "kernel/xcore/trap.h"       // syscall_name()
 #include "arch/x64/utils.h"    // halt()
 #include "arch/x64/smp.h"      // cpu_locals, get_cpu_local, cur_tf
+#include "arch/x64/trap.h"
 #include <stdint.h>
+#include <stdarg.h>
 
 #ifdef LOG_LEVEL_DEBUG
 int log_level = LOG_DEBUG;

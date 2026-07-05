@@ -1,6 +1,7 @@
 #include "kernel/bsd/page_cache.h"
 #include "kernel/driver/blk_dev.h"
 #include "kernel/bsd/fat32.h"
+#include "kernel/bsd/inode.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/slab.h"
