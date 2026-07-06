@@ -22,14 +22,6 @@ typedef struct idt_gate {
   uint32_t reserved;    // must be 0
 } __attribute__((packed)) idt_gate;
 
-typedef struct idt_register {
-  uint16_t limit;
-  uint16_t base_low;
-  uint32_t base_high;
-  uint32_t base_upper;
-  uint32_t reserved;
-} __attribute__((packed)) idt_register;
-
 // ===================== Trapframe (64-bit) =====================
 typedef struct trapframe {
   // __alltraps pushed manually (high address to low)

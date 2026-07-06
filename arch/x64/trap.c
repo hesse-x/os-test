@@ -163,7 +163,6 @@ static uint64_t __vectors[IDT_ENTRIES] = {
 
 // ===================== IDT =====================
 static idt_gate idt[IDT_ENTRIES];
-static idt_register idt_reg;
 
 void set_idt_gate(int n, uint64_t handler, uint8_t flags, uint8_t ist) {
   idt[n].offset_low = L16(handler);
@@ -177,15 +176,12 @@ void set_idt_gate(int n, uint64_t handler, uint8_t flags, uint8_t ist) {
 
 void set_idt() {
   uint64_t base = (uint64_t)&idt;
-  idt_reg.limit = IDT_ENTRIES * sizeof(idt_gate) - 1;
-  idt_reg.base_low = L16(base);
-  idt_reg.base_high = (uint32_t)(base >> 16); // bits 31:16
   // For lidt in 64-bit mode, we use inline asm with the full 10-byte descriptor
   struct {
     uint16_t limit;
     uint64_t base;
   } __attribute__((packed)) idtr;
-  idtr.limit = idt_reg.limit;
+  idtr.limit = IDT_ENTRIES * sizeof(idt_gate) - 1;
   idtr.base = base;
   lidt(&idtr);
 }

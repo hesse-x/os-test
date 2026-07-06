@@ -156,9 +156,6 @@ __attribute__((no_sanitize("kernel-address"))) void display_init(void) {
 }
 
 // ===================== display_ioctl =====================
-// Converts (cmd, arg) ioctl pattern to display_req_handler logic.
-// Phase 1: called by sys_dev_req via ops->ioctl, arg points to kernel stack
-// buffer.
 
 long display_ioctl(uint32_t cmd, void *arg) {
   bool is_create =
@@ -250,50 +247,6 @@ long display_ioctl(uint32_t cmd, void *arg) {
                   copy_bytes, delta, us);
 #endif
     return 0;
-  }
-
-  return -EINVAL;
-}
-
-__attribute__((no_sanitize("kernel-address"))) int
-display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
-                    void *resp_data, uint32_t resp_len) {
-  if (req_type == DISPLAY_REQ_CREATE_BUF) {
-    if (req_len < sizeof(struct display_create_buf_req) ||
-        resp_len < sizeof(struct display_create_buf_resp))
-      return -EINVAL;
-
-    // Construct unified ioctl arg from legacy req, call display_ioctl
-    struct display_ioctl_create_buf_arg arg = {0};
-    struct display_create_buf_req *req =
-        (struct display_create_buf_req *)req_data;
-    arg.width = req->width;
-    arg.height = req->height;
-    arg.bpp = req->bpp;
-
-    long rc = display_ioctl(KMS_IOCTL_CREATE_BUF, &arg);
-    if (rc < 0)
-      return rc;
-
-    // Copy result from unified arg to legacy resp
-    struct display_create_buf_resp *resp =
-        (struct display_create_buf_resp *)resp_data;
-    resp->pitch = arg.pitch;
-    resp->size = arg.size;
-    resp->rows = arg.rows;
-    resp->cols = arg.cols;
-    resp->result = arg.result;
-    return 0;
-
-  } else if (req_type == DISPLAY_REQ_FLIP) {
-    if (resp_len < sizeof(struct display_flip_resp))
-      return -EINVAL;
-
-    struct display_ioctl_flip_arg flip_arg = {0};
-    long rc = display_ioctl(KMS_IOCTL_FLIP, &flip_arg);
-    struct display_flip_resp *resp = (struct display_flip_resp *)resp_data;
-    resp->result = (rc < 0) ? rc : 0;
-    return rc;
   }
 
   return -EINVAL;

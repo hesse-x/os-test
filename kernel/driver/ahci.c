@@ -850,8 +850,6 @@ int ahci_write_lba(uint32_t lba, uint32_t count, const void *buf) {
 
 // ===================== Async block I/O interface =====================
 
-bool ahci_is_busy() { return ahci_current_req != NULL; }
-
 // Submit async block request. Returns cookie (>0) on success, -errno on error.
 // Completion delivered via RECV_NOTIFY to caller.
 int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {

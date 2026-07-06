@@ -50,7 +50,6 @@ static void consumer_remove_pid(pid_t pid) {
 
 // Driver-side SHM ring (single, shared via inode).
 static volatile input_shm_header *g_ring_hdr;
-static volatile input_event *g_ring_slots;
 static uint32_t g_ring_cap;
 static uint32_t g_ring_off;
 
@@ -140,7 +139,6 @@ void input_driver_run(uint32_t device_type, const char *dev_name,
   g_ring_hdr = hdr;
   g_ring_off = hdr->ring_offset;
   g_ring_cap = hdr->ring_capacity;
-  g_ring_slots = (volatile input_event *)((volatile uint8_t *)hdr + g_ring_off);
 
   device_register_shm(dev_name, shm_fd);
 

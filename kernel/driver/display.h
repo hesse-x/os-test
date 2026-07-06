@@ -58,10 +58,6 @@ extern struct display_state g_display;
 // PCI discovery + VBE modeset + BAR mapping (no boot_info dependency)
 void display_init(void);
 
-// Request handler (legacy, called by sys_dev_req fallback)
-int display_req_handler(uint32_t req_type, void *req_data, uint32_t req_len,
-                        void *resp_data, uint32_t resp_len);
-
 // ioctl handler (new, called via dev_ops callback)
 long display_ioctl(uint32_t cmd, void *arg);
 
