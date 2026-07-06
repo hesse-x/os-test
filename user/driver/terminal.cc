@@ -467,7 +467,6 @@ int main(int argc, char **argv, char **envp) {
   int linebuf_len = 0;
 
   while (1) {
-    int did_work = 0;
     struct termios t;
     ioctl(master_fd, TCGETS, &t);
     // input_event → ASCII → ldisc → master write
@@ -489,12 +488,10 @@ int main(int argc, char **argv, char **envp) {
 
       if ((t.c_lflag & ISIG) && ch == (char)t.c_cc[VINTR]) {
         kill(-fg_pgid, SIGINT);
-        did_work = 1;
         continue;
       }
       if ((t.c_lflag & ISIG) && ch == (char)t.c_cc[VSUSP]) {
         kill(-fg_pgid, SIGTSTP);
-        did_work = 1;
         continue;
       }
 
@@ -505,17 +502,14 @@ int main(int argc, char **argv, char **envp) {
           vt100_feed('\r');
           vt100_feed('\n');
           linebuf_len = 0;
-          did_work = 1;
           continue;
         }
         if (ch == (char)t.c_cc[VEOF]) {
           if (linebuf_len > 0) {
             write(master_fd, linebuf, linebuf_len);
             linebuf_len = 0;
-            did_work = 1;
           } else {
             write(master_fd, "", 0); // eof_pending → slave EOF
-            did_work = 1;
           }
           continue;
         }
@@ -525,7 +519,6 @@ int main(int argc, char **argv, char **envp) {
             vt100_feed('\b');
             vt100_feed(' ');
             vt100_feed('\b');
-            did_work = 1;
           }
           continue;
         }
@@ -533,14 +526,12 @@ int main(int argc, char **argv, char **envp) {
           linebuf_len = 0;
           vt100_feed('\r');
           vt100_feed('\n');
-          did_work = 1;
           continue;
         }
         if (linebuf_len < (int)sizeof(linebuf) - 2) {
           linebuf[linebuf_len++] = ch;
           if (t.c_lflag & ECHO)
             vt100_feed(ch);
-          did_work = 1;
         }
         continue;
       }
@@ -549,7 +540,6 @@ int main(int argc, char **argv, char **envp) {
       write(master_fd, &ch, 1);
       if (t.c_lflag & ECHO)
         vt100_feed(ch);
-      did_work = 1;
     }
 
     // Shell output ← master read → VT100 + serial echo
@@ -563,7 +553,6 @@ int main(int argc, char **argv, char **envp) {
         if (dirty_row_end - dirty_row_start >= 4)
           flush_dirty_cells();
       }
-      did_work = 1;
     } else if (n == 0) {
       // Shell exited → re-fork
       printf("terminal: shell exited (n=0), re-forking\n");
@@ -592,7 +581,6 @@ int main(int argc, char **argv, char **envp) {
         _exit(127);
       }
       linebuf_len = 0;
-      did_work = 1;
     }
 
     flush_dirty_cells();

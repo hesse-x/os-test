@@ -24,6 +24,7 @@ global:
     malloc; qsort; bsearch; rand; rand_r; realloc; srand; strtol; strtoul;
     strtoll; strtoull; strtod; atof; div; ldiv; lldiv; imaxabs; imaxdiv;
     getenv; setenv; putenv; unsetenv; clearenv; environ;
+    mkstemp; mktemp; realpath;
 
     /* <string.h> */
     bzero; bcmp; bcopy; index; rindex; memcmp; memcpy; memmove; memset;
@@ -35,6 +36,9 @@ global:
     access; close; dup2; _exit; ftruncate; getcwd; getpid; gettid;
     ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; read;
     rmdir; sched_yield; sleep; ttyname; unlink; usleep; write;
+    getuid; geteuid; getgid; getegid; getppid; getpgrp; umask;
+    gethostname; sethostname; alarm; pause;
+    truncate; fsync; sync;
 
     /* <fcntl.h> */
     fcntl; fd_file_size;
@@ -116,7 +120,7 @@ global:
     __pthread_current_tcb; collect_tls_from_link_map;
 
     /* <sys/process.h> */
-    execve; fork; getpgid; getsid; setpgid; setsid; spawn;
+    execve; fork; getpgid; getsid; setpgid; setsid; spawn; setuid; setgid;
 
     /* <sys/ipc.h> — 微内核 IPC 用户态入口 */
     msg; msg_fd; msg_resp; notify; notify_fd; recv; req; resp;

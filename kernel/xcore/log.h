@@ -7,8 +7,6 @@
 #ifndef KERNEL_LOG_H
 #define KERNEL_LOG_H
 
-#include <stdarg.h>
-
 // Log levels
 #define LOG_DEBUG 0 // dev debug (default off)
 #define LOG_INFO 1  // normal flow key points

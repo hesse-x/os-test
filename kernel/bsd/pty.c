@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <xos/errno.h>
+#include <xos/fcntl.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
 

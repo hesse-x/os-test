@@ -12,7 +12,6 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
-#include "kernel/xcore/trap.h"
 #include "utils/macro.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -556,17 +555,6 @@ pci_enable_msix(pci_device *dev, int num_vectors) {
 }
 
 __attribute__((no_sanitize("kernel-address"))) void
-pci_msix_mask_entry(pci_device *dev, int entry) {
-  if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors)
-    return;
-  void __iomem *bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
-  volatile uint32_t __iomem *table =
-      (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr +
-                                    dev->msix_table_offset);
-  *(volatile uint32_t __force *)&table[entry * 4 + 3] |= 1; // Set Mask bit
-}
-
-__attribute__((no_sanitize("kernel-address"))) void
 pci_msix_unmask_entry(pci_device *dev, int entry) {
   if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors)
     return;
@@ -575,28 +563,6 @@ pci_msix_unmask_entry(pci_device *dev, int entry) {
       (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr +
                                     dev->msix_table_offset);
   *(volatile uint32_t __force *)&table[entry * 4 + 3] &= ~1; // Clear Mask bit
-}
-
-__attribute__((no_sanitize("kernel-address"))) void __iomem *
-pci_msix_table_addr(pci_device *dev) {
-  if (dev->msix_cap_offset == 0)
-    return NULL;
-  return (
-      void __iomem *)((uint8_t __iomem *)dev->bar[dev->msix_table_bar].vaddr +
-                      dev->msix_table_offset);
-}
-
-__attribute__((no_sanitize("kernel-address"))) void __iomem *
-pci_msix_pba_addr(pci_device *dev) {
-  if (dev->msix_cap_offset == 0)
-    return NULL;
-  return (void __iomem *)((uint8_t __iomem *)dev->bar[dev->msix_pba_bar].vaddr +
-                          dev->msix_pba_offset);
-}
-
-__attribute__((no_sanitize("kernel-address"))) int
-pci_msix_vector_base(pci_device *dev) {
-  return dev->msix_vector_base;
 }
 
 // ===================== pci_init =====================

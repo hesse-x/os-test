@@ -7,7 +7,6 @@
 #ifndef KERNEL_SERIAL_H
 #define KERNEL_SERIAL_H
 
-#include "arch/x64/trap.h" // trapframe
 #include "kernel/driver/driver.h"
 #include "kernel/xcore/spinlock.h"
 #include <stdarg.h>
@@ -48,13 +47,6 @@ extern pid_t serial_read_waiter;
 extern int serial_fd_count;
 extern bool serial_irq_registered;
 
-#ifdef NSERIAL
-
-#define SERIAL_PRINTF(...) ((void)0)
-#define SERIAL_VPRINTF(fmt, ap) ((void)0)
-
-#else
-
 void serial_printf(const char *fmt, ...);
 void serial_vprintf(const char *fmt, va_list ap);
 
@@ -64,9 +56,6 @@ void serial_vprintf(const char *fmt, va_list ap);
 // Register serial device in devtmpfs (called by vfs_init)
 void serial_dev_register(void);
 
-struct dev_driver;
 extern struct dev_driver serial_driver;
-
-#endif
 
 #endif /* KERNEL_SERIAL_H */

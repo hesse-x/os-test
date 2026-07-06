@@ -15,7 +15,7 @@
 | 7 | 定时器 | PIT 校准 LAPIC Timer，校准后弃用 PIT | PIT 校准经典做法，~20 行代码 |
 | 8 | 锁策略 | 细粒度锁（scheduler_lock + procs_lock 等） | 已从 BKL 演进到细粒度锁 |
 | 9 | swapgs | 中断/异常：检查 trapframe.cs 判断来源；syscall：无条件 swapgs | SYSCALL 只从 ring 3 来，无条件 swapgs 安全 |
-| 10 | IPI/TLB shootdown | 第一阶段不需要 | scheduler_lock 保护串行，switch_to 重载 CR3 自动刷新 TLB |
+| 10 | reschedule IPI | 已实现（c1 模型）；TLB shootdown 仍待办 | scheduler_lock 保护串行调度；reschedule IPI 跨核唤醒通知目标 CPU；TLB 仍靠 switch_to 重载 CR3 自动刷新 |
 | 11 | ACPI/MADT 解析 | 在 EFI stub 中解析，结果通过 boot_info 传内核 | stub 在 UEFI 环境中解析方便 |
 | 12 | boot_info SMP 扩展 | ncpus, apic_ids[4], lapic_base, ioapic_base | MAX_CPUS=4 |
 | 13 | IST 数量 | 3 个（IST1=NMI #2, IST2=Double Fault #8, IST3=MCE #18） | 仅对最关键异常提供独立栈 |
@@ -123,6 +123,25 @@ arch/x64/smp.h : spinlock_t — volatile uint32_t locked，spin_lock 用 atomic_
 
 锁获取顺序声明：scheduler_lock → procs_lock → bfc_lock。违反此顺序可能导致死锁。详见 [kernel_lock.md](kernel_lock.md)。
 
+### reschedule IPI
+
+跨核唤醒后及时调度，延迟从 ~10ms（等下次 LAPIC timer tick）降到微秒级。采用 c1 模型：IPI/timer 只设 per-thread `xtask_t.need_resched` 标志，不调 `schedule()`；抢占统一在返用户态出口做（`check_pending_signals` 的 `while (need_resched) schedule()` 循环，见 [schedule.md](schedule.md)）。
+
+| 要点 | 说明 |
+|------|------|
+| 向量号 | `RESCHEDULE_VECTOR = 0xec`（236），跟 Linux `RESCHEDULE_VECTOR` 一致；为将来 TLB shootdown（0xed）、`CALL_FUNCTION_VECTOR`（0xfc）等预留高向量 IPI 区 |
+| 入口 | 复用 `__alltraps`，新增 `vector236` stub（`arch/x64/vectors.S`）；handler 走 `irq_handlers[]` 注册表 |
+| IST 栈 | 不用，走 RSP0（handler 只设标志不切栈） |
+| 注册表容量 | `MAX_IRQ_HANDLERS` 从 128 扩到 256（0xec 超出旧范围会落到 CPU exception 路径 panic） |
+| IDT 安装 | `set_idt_gate(0xec, vector236, 0x8E, /*ist=*/0)`；`idt_install` BSP/AP 共享，AP 自动受益 |
+| 发送 | `lapic_send_reschedule(target_cpu)`：读目标 CPU 的 `apic_id`，自旋等 ICR delivery idle，写 ICR_HIGH + ICR_LOW（Fixed delivery，physical destination） |
+| 触发封装 | IPI 逻辑塞进 `wake_from_wait` 内部（持目标 CPU scheduler_lock 闭包内）：设**目标 CPU 的 current** `curr->need_resched = 1`，跨 CPU 才发 IPI。target 是 BLOCKED 不可能在跑，故必设 curr 而非 target |
+| 本 CPU 短路 | `target_cpu == my_cpu` 时只设标志不发 IPI |
+| 清标志 | `schedule()` 入口 `spin_lock_irqsave` 后第一行 `prev->need_resched = 0`，单点清理 |
+| idle 边界 | IPI 打到 idle 时 handler 设 `idle->need_resched = 1`，idle 不走 `__trapret` 出口，靠 `idle_entry` 循环下一轮 `schedule()` 自然消费（入口清标志） |
+
+关键源码：`arch/x64/apic.c : lapic_send_reschedule`、`kernel/xcore/trap.c : reschedule_ipi_handler`、`kernel/xcore/sched.h : wake_from_wait`。
+
 ## Work Stealing(运行时负载均衡)
 
 实现:kernel/xcore/sched.c : try_steal_task(),在 idle_entry 循环内调用。
@@ -149,6 +168,5 @@ arch/x64/smp.h : spinlock_t — volatile uint32_t locked，spin_lock 用 atomic_
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| IPI（reschedule_ipi） | 当前 scheduler_lock 保证串行，跨 CPU 调度提示需 IPI 通知 idle CPU | 中 |
 | TLB shootdown | 当前 switch_to 重载 CR3 自动刷新 TLB，大规模 unmmap 需主动 shootdown | 中 |
 | IRQ affinity | I/O APIC 中断路由到特定 CPU，而非全部路由到 BSP | 低 |

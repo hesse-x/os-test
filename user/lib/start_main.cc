@@ -18,9 +18,9 @@
 #include <sys/tls.h>
 #include <syscall.h>
 
-typedef void (*init_func_t)(void);
-extern "C" void __libc_run_init_array(init_func_t *start, init_func_t *end);
-extern "C" void __libc_run_fini_array(init_func_t *start, init_func_t *end);
+typedef void (*init_func_fn)(void);
+extern "C" void __libc_run_init_array(init_func_fn *start, init_func_fn *end);
+extern "C" void __libc_run_fini_array(init_func_fn *start, init_func_fn *end);
 extern "C" void __libc_run_atexit(void);
 extern "C" void
 __libc_env_init(char **envp); /* environ.c: copy stack envp → environ */
@@ -40,8 +40,8 @@ extern "C" struct tls_info collect_tls_from_link_map(struct link_map *lmap);
 
 // atexit callbacks take no arguments; use static variables to record the fini
 // range
-static init_func_t *g_fini_start;
-static init_func_t *g_fini_end;
+static init_func_fn *g_fini_start;
+static init_func_fn *g_fini_end;
 extern "C" void __libc_fini_array_trampoline(void) {
   __libc_run_fini_array(g_fini_start, g_fini_end);
 }
@@ -55,8 +55,8 @@ extern "C" void __libc_fini_array_trampoline(void) {
 // -fvisibility=hidden)
 extern "C" LIBC_EXPORT int
 __libc_start_main(int (*main)(int, char **, char **), int argc, char **argv,
-                  init_func_t *init_start, init_func_t *init_end,
-                  init_func_t *fini_start, init_func_t *fini_end) {
+                  init_func_fn *init_start, init_func_fn *init_end,
+                  init_func_fn *fini_start, init_func_fn *fini_end) {
   // 1. TLS template discovery + main-thread TCB allocation (static/dynamic
   // split)
 #if DYNAMIC

@@ -82,6 +82,11 @@ LIBC_EXPORT int clearenv(void);
 
 int system(const char *command);
 
+/* Temp file + path canonicalization (group 3) */
+LIBC_EXPORT int mkstemp(char *tmpl);
+LIBC_EXPORT char *mktemp(char *tmpl);
+LIBC_EXPORT char *realpath(const char *path, char *resolved);
+
 #ifdef __cplusplus
 }
 #endif

@@ -28,7 +28,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./build.sh          # 编译内核 + EFI bootloader + 用户态 ELF + disk.img（单盘两分区）
 ./build.sh -d       # Debug 模式（-g -fno-omit-frame-pointer，异常时栈回溯）
 ./build.sh --test   # 测试构建（Unity 测试 ELF + test_runner）
-./build.sh --no-serial  # 禁用串口打印（NSERIAL 宏）
 ./run.sh            # QEMU 启动（串口输出→log.txt，串口输入需 socat 连接）
 ./run.sh -s         # QEMU + GDB 远程调试服务器
 ```
@@ -131,7 +130,7 @@ kernel/
     ahci.c / ahci.h      — AHCI DMA 驱动
     xhci.c / xhci.h      — xHCI USB 主控驱动
     display.c / display.h — KMS 内核态 display（bochs-display, req flip）
-    serial.c / serial.h   — COM1 串口（NSERIAL 门控）
+    serial.c / serial.h   — COM1 串口
     pci.c / pci.h         — PCI/PCIe ECAM 枚举与 BAR 分配
     blk_dev.c / blk_dev.h — 块设备抽象层（AHCI 同步封装+spinlock）
     user_check.h          — 用户态缓冲区/指针验证

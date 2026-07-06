@@ -8,19 +8,14 @@
 // Extracted from kernel/trap.c (phase 3 step 3.2)
 
 #include "kernel/bsd/signal.h"
-#include "arch/x64/paging.h"
+#include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/syscall.h"
-#include "kernel/bsd/types.h"
-#include "kernel/user_check.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/log.h"
-#include "kernel/xcore/mem/alloc.h"
-#include "kernel/xcore/mem/slab.h"
-#include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
@@ -336,6 +331,57 @@ int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   } else {
     return (int64_t)pgsignal(-pid, sig);
   }
+}
+
+// ===================== BSD syscall: alarm =====================
+// Set a real-time alarm (in seconds). Returns the number of seconds remaining
+// of any previously set alarm, or 0 if none. seconds==0 cancels a pending
+// alarm.
+int64_t sys_alarm(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t) {
+  unsigned seconds = (unsigned)arg1;
+  uint64_t now = sched_clock();
+  uint64_t old_remaining = 0;
+  if (current_xtask->alarm_deadline != 0) {
+    uint64_t rem = current_xtask->alarm_deadline > now
+                       ? current_xtask->alarm_deadline - now
+                       : 0;
+    old_remaining = rem / 1000000000ULL;
+  }
+  if (seconds == 0) {
+    current_xtask->alarm_deadline = 0;
+  } else {
+    current_xtask->alarm_deadline = now + (uint64_t)seconds * 1000000000ULL;
+  }
+  return (int64_t)old_remaining;
+}
+
+// ===================== BSD syscall: pause =====================
+// Suspend the caller until a signal is delivered. Always returns -EINTR when
+// resumed (or immediately if a signal is already pending).
+int64_t sys_pause(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+  // If a signal is already pending, do not block.
+  if (current_proc->sig_pending != 0 ||
+      current_proc->signal->shared_pending != 0)
+    return (int64_t)-EINTR;
+
+  int cpu = get_cpu_local()->cpu_id;
+  uint64_t flags;
+  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+  current_task->wait_event = WAIT_PAUSE;
+  // If an alarm is armed, let the timer queue wake us when it fires — the
+  // timer_handler delivers SIGALRM on WAIT_PAUSE expiry. Otherwise wait
+  // indefinitely for any signal (deliver_signal_to / wake_process_any).
+  if (current_xtask->alarm_deadline != 0) {
+    current_task->wait_deadline = current_xtask->alarm_deadline;
+    sched_timer_queue_insert(cpu, current_task);
+  }
+  current_task->state = BLOCKED;
+  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+
+  schedule();
+
+  // Woken by a signal (or alarm expiry, which itself forces SIGALRM).
+  return (int64_t)-EINTR;
 }
 
 // ===================== BSD syscall: tgkill =====================

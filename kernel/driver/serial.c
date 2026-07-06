@@ -4,23 +4,25 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "kernel/driver/serial.h"
+#include <stddef.h>
+
 #include "arch/x64/apic.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/driver/bsd_types.h"
+#include "kernel/driver/serial.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
 #include "utils/kvformat.h"
+
 #include <xos/errno.h>
 #include <xos/fcntl.h>
+#include <xos/ioctl.h>  // TCGETS
 #include <xos/socket.h> // POLLIN/POLLOUT
-
-#include <xos/ioctl.h> // TCGETS
 
 // ===================== TX lock =====================
 spinlock serial_tx_lock = SPINLOCK_INIT;
@@ -45,8 +47,6 @@ void serial_init(void) {
   outb(COM1_MCR, 0x03); // DTR + RTS
                         // IER RX enable deferred to first serial open
 }
-
-#ifndef NSERIAL
 
 static void serial_putc_raw(char c) {
   while (!(inb(COM1_LSR) & LSR_THRE))
@@ -269,8 +269,8 @@ static long serial_dev_ioctl(uint32_t cmd, void *arg) {
   return -ENOTTY;
 }
 
-static __poll_t serial_dev_poll(xtask *proc, int events) {
-  __poll_t revents = 0;
+static __poll serial_dev_poll(xtask *proc, int events) {
+  __poll revents = 0;
   uint64_t rx_flags;
   spin_lock_irqsave(&serial_rx_lock, &rx_flags);
   if (serial_rx_head != serial_rx_tail) {
@@ -313,5 +313,3 @@ dev_driver serial_driver = {
     .init = NULL, // serial_init() called early from xcore_init
     .ops = &serial_ops,
 };
-
-#endif

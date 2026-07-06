@@ -7,13 +7,14 @@
 #ifndef KERNEL_DEVTMPFS_H
 #define KERNEL_DEVTMPFS_H
 
-#include "kernel/bsd/inode.h"
 #include "kernel/xcore/xtask.h" // pid_t
 #include <stdbool.h>
 #include <stdint.h>
 
+struct shm;
+
 typedef int64_t ssize_t;
-typedef uint32_t __poll_t;
+typedef uint32_t __poll;
 
 struct dev_ops {
   pid_t driver_pid; // 0 = kernel device, >0 = user-space driver
@@ -26,7 +27,7 @@ struct dev_ops {
   uint64_t (*mmap)(xtask *proc, uint64_t size);
   ssize_t (*read)(xtask *proc, int fd, void *buf, size_t count);
   ssize_t (*write)(xtask *proc, int fd, const void *buf, size_t count);
-  __poll_t (*poll)(xtask *proc, int events);
+  __poll (*poll)(xtask *proc, int events);
 };
 
 void devtmpfs_init(void);

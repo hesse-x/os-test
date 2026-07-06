@@ -69,10 +69,15 @@ echo "Running iwyu on $N_SOURCES source file(s) (excluding third_party/, skippin
 # iwyu_tool reads each file's full flags from compile_commands, no need to pass -nostdinc/-mno-sse etc. manually.
 # --no_comments: drops "// for xxx" comments, cleaner output, easier to parse.
 # --max_line_length=200: prevents long lines from being mistakenly folded by iwyu, which would affect parsing.
+# --mapping_file: redirect iwyu's built-in glibc symbol attribution (sigset_t-><signal.h>,
+#   pid_t-><sys/types.h>, struct timespec-><time.h>, ...) to the project's <xos/...> UAPI
+#   headers. Without this, iwyu tells every -nostdinc kernel TU to add <signal.h>/<sys/types.h>
+#   — bogus advice that breaks the build. See build_script/iwyu.imp.
 IWYU_OUT=$(mktemp /tmp/iwyu-out.XXXXXX)
 trap 'rm -f "$IWYU_OUT"' EXIT INT TERM
 
 iwyu_tool -p build -j "$(nproc)" $SOURCES -- -Xiwyu --no_comments -Xiwyu --max_line_length=200 \
+    -Xiwyu --mapping_file="$SCRIPT_DIR/iwyu.imp" \
     > "$IWYU_OUT" 2>&1
 
 # ===================== Parse violations =====================
@@ -84,6 +89,51 @@ import re, sys
 path = sys.argv[1]
 lines = open(path).read().splitlines()
 violations = {}  # file -> {'add':[...], 'remove':[...]}
+
+# ---- Spurious-add filter ----------------------------------------------
+# iwyu ships a built-in glibc symbol→header attribution table (gcc.libc.imp).
+# On this -nostdinc + self-built-libc tree it emits "should add <H>" for glibc
+# public headers that DO NOT EXIST in the TU's include search path — pure noise:
+# the symbol is already provided by the project's own headers (<xos/...> or the
+# user/include/ POSIX wrappers), and following the advice would be a hard
+# compile error. We drop those add-lines. Resolvable suggestions (including
+# pedantic-but-valid ones like "+ <sys/types.h>" on user TUs, where the wrapper
+# exists on disk) are kept — only unresolvable adds are filtered.
+#
+# Verified unresolvable per TU category (see probe in the .imp investigation):
+#   kernel TU (-I src -I include/uapi, NO user/include): every non-<xos>
+#     POSIX/glibc public header — <unistd.h>, <sys/types.h>, <sys/time.h>,
+#     <inttypes.h>, <sys/socket.h>, <sys/stat.h>, <sys/mman.h>, ...
+#   user TU   (adds -I user/include): <sys/time.h>, <inttypes.h> (no wrapper).
+FREE_STANDING = {'stdint.h', 'stddef.h', 'stdarg.h', 'stdbool.h'}
+
+def is_kernel_tu(filepath):
+    # Match the split used to build the source list: kernel/arch/boot/utils.
+    seg = filepath
+    for prefix in ('/kernel/', '/arch/', '/boot/', '/utils/'):
+        if prefix in seg:
+            return True
+    return False
+
+def unresolvable_add(line, filepath):
+    # Only filter '#include <...>' (angle-bracket public) adds, not "..." or fwd-decls.
+    m = re.match(r'\s*#include\s+<([^>]+)>\s*$', line)
+    if not m:
+        return False
+    inc = m.group(1)
+    # freestanding C headers resolve everywhere; never filter them.
+    if inc in FREE_STANDING:
+        return False
+    # <xos/...> resolves everywhere (include/uapi is on both paths).
+    if inc.startswith('xos/'):
+        return False
+    if is_kernel_tu(filepath):
+        # kernel TUs see only freestanding + <xos/...>: any other angle-bracket
+        # public header is an unresolvable glibc-builtin suggestion.
+        return True
+    # user TUs also have user/include (the POSIX wrappers). Unresolvable there:
+    # headers with no wrapper on disk. Verified set: <sys/time.h>, <inttypes.h>.
+    return inc in ('sys/time.h', 'inttypes.h')
 
 i, n = 0, len(lines)
 while i < n:
@@ -99,9 +149,18 @@ while i < n:
             content.append(lines[i])
             i += 1
         if content:
-            violations.setdefault(file, {'add': [], 'remove': []})[kind] = content
+            entry = violations.setdefault(file, {'add': [], 'remove': []})
+            if kind == 'add':
+                for line in content:
+                    if not unresolvable_add(line, file):
+                        entry['add'].append(line)
+            else:
+                entry['remove'] = content
     else:
         i += 1
+
+# Drop files that ended up with no surviving violations (all adds filtered).
+violations = {f: v for f, v in violations.items() if v['add'] or v['remove']}
 
 if not violations:
     print("iwyu check passed.")

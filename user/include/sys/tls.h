@@ -46,7 +46,7 @@ struct tcb {
   int cancel_state;            // PTHREAD_CANCEL_ENABLE/DISABLE
   int cancel_type;             // PTHREAD_CANCEL_DEFERRED/ASYNCHRONOUS
   void *tsd[PTHREAD_KEYS_MAX]; // TSD values (pthread_key)
-  __pthread_cleanup_handler_t *cleanup_head;
+  pthread_cleanup_handler *cleanup_head;
   int detached;
   struct thread_entry *entry; // back-pointer to slot (NULL for main thread)
   // === child thread start info (set by pthread_create, read by

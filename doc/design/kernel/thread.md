@@ -12,12 +12,12 @@
 | 2 | 结构体分层 | 保持 master 现有 `xtask_t`(Xcore,调度) + `proc_t`(BSD,POSIX) 分层。新增 `signal_struct`(线程组共享,ref counted)。`mm_t`/`files_t` 已独立 ref counted，直接复用 |
 | 3 | 创建接口 | `clone()` 系统调用，贴 Linux。`fork = clone(0,...)` 语义等价，但 `sys_fork` 保留独立实现（COW 路径稳定，见 `proc.md`）。`sys_fork` 必须同步适配 `signal_struct`（P1 强制项） |
 | 4 | 共享体引用计数 | 4 个共享体独立 ref count：`mm_t.m_count`（CLONE_VM）、`files_t.f_count`（CLONE_FILES）、`signal_struct.sig_count`（CLONE_SIGHAND）、`tgid`（CLONE_THREAD）。各自归零独立释放 |
-| 5 | 退出语义 | 贴 Linux `do_exit`：所有线程 `do_exit` 做 `clear_tid` + `futex_wake`（唤醒 joiner）。`signal_struct.thread_count` atomic dec 判最后线程，最后线程通知父进程。`exit_group` 设 `group_exit` 标志，同组线程在 `check_pending_signals` 入口自行退出。**`do_exit` 不做 `mm_put`/`files_put`/`signal_put`**——SMP 下设 ZOMBIE 后 `schedule()`，父进程在另一 CPU 上 `waitpid`→`task_reap` 可能并发 `kfree(proc_t)`，若 `do_exit` 也 put 资源会与 `task_reap` 形成并发 UAF。所有资源释放集中到 `task_reap`/`proc_reap` 单一 owner。`exit_code` 移到 `xtask_t`（静态数组，slot 生命周期由 `tasks_lock` 保），`waitpid` 从 `xtask->exit_code` 读，不依赖 `proc_t` |
+| 5 | 退出语义 | 贴 Linux `do_exit`：所有线程 `do_exit` 做 `clear_tid` + `futex_wake`（唤醒 joiner）。`signal_struct.thread_count` atomic dec 判最后线程，最后线程通知父进程。`exit_group` 设 `group_exit` 标志，同组线程在 `check_pending_signals` 入口自行退出。**`do_exit` 不做 `mm_put`/`files_put`/`signal_put`**——SMP 下设 ZOMBIE 后 `schedule()`，父进程在另一 CPU 上 `waitpid`→`task_reap` 可能并发 `kfree(proc_t)`，若 `do_exit` 也 put 资源会与 `task_reap` 形成并发 UAF。所有资源释放集中到 `task_reap`/`proc_reap` 单一 owner。`exit_code` 移到 `xtask_t`（动态分配自 `xtask_cache`，slot 生命周期由 `tasks_lock` 保），`waitpid` 从 `xtask->exit_code` 读，不依赖 `proc_t` |
 | 6 | fork + execve | 与线程解耦。`sys_fork` 保留 master 现有 COW 路径（见 `proc.md`），`sys_clone` 的 fork 分支（flags=0）复用 `copy_page_table`/`copy_fd_table`/`copy_mmap_regions`/`build_kstack_from_tf` 辅助函数（从 `sys_fork` 抽出为独立函数）但入口独立。两路径并存，helper 共享，入口编排不同 |
 | 7 | TLS | 完整加载 ELF `.tdata`/`.tbss` 段 + TCB。**variant II 布局**（TCB 在 TLS 页高地址端，`FS_BASE = &TCB`，TLS 变量 `%fs:(-offset)` 访问，与 musl/glibc x86-64 一致）。`elf_loader` 加 PT_TLS 解析，`clone(CLONE_SETTLS)` 分配 TLS 页，`__trapret`/`syscall_fast_entry` 返回用户态前加载 fs_base（不动 `switch_to` 汇编）。主线程 TLS 由用户态 `_start` 调 `__libc_tls_init()` 初始化，通过 `linker.ld` 导出的 `__tls_template_*` 符号定位模板（无 auxv） |
 | 8 | FPU/SSE | eager FPU 上下文切换（创建时预分配 fpu_page + schedule 时 fxsave prev/fxrstor next）。`xcore_fpu_alloc` 在 `process_create_elf`/`sys_fork` 时调用 `bfc_alloc_page(1)` 并初始化为合法 fxsave 镜像（memset 0 + MXCSR=0x1F80）。`schedule()` 的 C helper `fpu_context_switch` 直接 fxsave prev + fxrstor next，不设 CR0.TS，用户态 SSE 零 trap。`#NM` handler `fpu_lazy_switch` 保留作兜底（TS 意外泄漏时 clts + fxrstor）。fork 时 child memcpy parent 当前 FPU 快照（POSIX 语义）。内核仍 `-mno-sse`，用户态移除 |
 | 9 | clone 签名 | `clone(flags, stack, parent_tid, child_tid, tls)`，与 Linux 一致 |
-| 10 | task 表大小 | `MAX_PROC=1024`，`tasks[]` 为指针数组（`xtask_t*`，slot 动态分配自 `xtask_cache` 专用 slab cache），`pid==数组下标` 语义不变。`tgid` 字段已存在于 `xtask_t`，单线程时 `tgid==pid`，多线程时 `tgid=leader.pid`。`_Static_assert(MAX_PROC <= 4096)` 防盲目调大——需更大容量应走 pidhash 路线（见 proc list 动态化方案"不做的事"） |
+| 10 | task 表大小 | `MAX_PROC=1024`，`tasks[]` 为指针数组（`xtask_t*`，slot 动态分配自 `xtask_cache` 专用 slab cache），`pid==数组下标` 语义不变。`tgid` 字段已存在于 `xtask_t`，单线程时 `tgid==pid`，多线程时 `tgid=leader.pid`。`_Static_assert(MAX_PROC <= 4096)` 防盲目调大——需更大容量应走 pidhash 路线（见 [proc.md](proc.md) task 表设计） |
 | 11 | fd_table 归属 | `files_t` 已从 `mm_t` 独立（master commit 9279262），`CLONE_FILES` 时 `files_t.f_count++`，与 `CLONE_VM` 解耦。第一版 `CLONE_FILES` 和 `CLONE_VM` 绑定一起用，但结构上不耦合 |
 | 12 | 信号与线程 | 两级 pending，贴 Linux：`proc_t.sig_pending`（per-task 私有，`tgkill`/`pthread_kill` 产生）+ `signal_struct.shared_pending`（进程级，`kill(pid,sig)` 产生）。`sigaction action[]` 挪到 `signal_struct`（线程组共享） |
 | 13 | execv 线程行为 | 设 `signal->group_exit` 标志，同组线程在 `check_pending_signals` 入口自行退出（Linux 方式） |
@@ -50,7 +50,7 @@ typedef struct xtask_t {
     // === 新增：线程支持 ===
     uint64_t fs_base;           // TLS 基址（FS_BASE MSR 镜像），__trapret 加载
     Page    *fpu_page;          // fxsave 区页（创建时预分配：xcore_fpu_alloc 在 process_create_elf/sys_fork 调用 bfc_alloc_page(1)）。存 Page* 而非数据指针，类型层面防误用；使用时 phys_to_virt(page_to_phys(fpu_page)) 取数据页虚拟地址喂 fxsave/fxrstor。NULL = idle（无 FPU 状态）
-    int32_t  exit_code;         // 退出码（state==ZOMBIE 时有效）。放 xtask_t（静态数组，slot 生命周期由 tasks_lock 保）而非 proc_t（kmalloc'd），waitpid 可在 proc_t 被 task_reap 释放后安全读
+    int32_t  exit_code;         // 退出码（state==ZOMBIE 时有效）。放 xtask_t（动态分配自 xtask_cache，slot 生命周期由 tasks_lock 保）而非 proc_t（kmalloc'd），waitpid 可在 proc_t 被 task_reap 释放后安全读
 } xtask_t;
 ```
 
@@ -58,7 +58,7 @@ typedef struct xtask_t {
 约束是依赖方向单向：某个字段进了 xcore，外部（BSD 层）就通过 xcore 的接口访问它，xcore 不反过来为访问这些字段解引用 `proc_t`。
 - `fs_base`：`__trapret`/`syscall_fast_entry` 汇编要 `wrmsr(MSR_FS_BASE, current_task->fs_base)`。放 `proc_t` 多一次解引用（`current_task->proc->fs_base`），且 `proc` 可能为 NULL（idle）要判空——汇编里判空很丑。放 `xtask_t` 汇编直接 `movq offset(%rax), %rdx`，xcore 不回解引用 `proc_t`，依赖干净。
 - `fpu_page`：`fpu_context_switch` 在 `schedule()`（Xcore 层）直接拿 `current_task`。eager FPU 的核心是"创建时预分配 + 切换时直接 fxsave/fxrstor"，这条路径不碰 BSD 语义，纯调度器职责。放 `xtask_t` 不需要 `trap_dispatch` 解引用 `proc_t`。
-- `exit_code`：SMP 下 `do_exit` 设 ZOMBIE 后 `schedule()`，父进程在另一 CPU 上 `waitpid`→`task_reap` 可能并发 `kfree(proc_t)`。`exit_code` 放 `proc_t` 的话，`waitpid` 读时 `proc_t` 可能已被释放。放 `xtask_t`（静态数组，slot 生命周期由 `tasks_lock` 保），`waitpid` 从 `xtask->exit_code` 读，不依赖可能被 reap 的 `proc_t`。`proc_t.exit_code` 仍保留为 legacy dead write（3b 移除）。
+- `exit_code`：SMP 下 `do_exit` 设 ZOMBIE 后 `schedule()`，父进程在另一 CPU 上 `waitpid`→`task_reap` 可能并发 `kfree(proc_t)`。`exit_code` 放 `proc_t` 的话，`waitpid` 读时 `proc_t` 可能已被释放。放 `xtask_t`（动态分配自 `xtask_cache`，slot 生命周期由 `tasks_lock` 保），`waitpid` 从 `xtask->exit_code` 读，不依赖可能被 reap 的 `proc_t`。`proc_t.exit_code` 仍保留为 legacy dead write（3b 移除）。
 
 POSIX 纯线程语义（`tgid` 线程组、`sig_pending`、`clear_tid_addr`、`futex_node`）仍优先 `proc_t`，因为这些不会被 xcore 快路径直接碰。
 
@@ -274,7 +274,7 @@ do_exit(exit_code):  // 所有线程都走这个
 
 **关键设计点**：
 - `clear_tid` 在 `do_exit` 第4步做（**不是** `task_reap`），立刻 `futex_wake` 唤醒 joiner。如果延迟到 `task_reap`，`task_reap` 又延迟到父进程 `waitpid` 之后——joiner 会永远阻塞。detached 线程的 `clear_tid_addr` 通常为 `&tcb->tid`，第4步照样执行（futex_wake 无 joiner 等待，no-op）。
-- **`mm_put`/`files_put`/`signal_put` 不在 `do_exit` 做，由 `task_reap`/`proc_reap` 独占释放**。SMP 下 `do_exit` 设 ZOMBIE 后 `schedule()`，父进程在另一 CPU 上 `waitpid`→`task_reap` 可能并发 `kfree(proc_t)`；若 `do_exit` 自己也 put 这些资源，就和 `task_reap` 形成并发 UAF。把所有资源释放集中到 `task_reap`/`proc_reap` 单一 owner，避免竞态。`exit_code` 因此移到 `xtask_t`（静态数组，slot 生命周期由 `tasks_lock` 保），`waitpid` 从 `xtask->exit_code` 读，不依赖可能被 reap 的 `proc_t`。
+- **`mm_put`/`files_put`/`signal_put` 不在 `do_exit` 做，由 `task_reap`/`proc_reap` 独占释放**。SMP 下 `do_exit` 设 ZOMBIE 后 `schedule()`，父进程在另一 CPU 上 `waitpid`→`task_reap` 可能并发 `kfree(proc_t)`；若 `do_exit` 自己也 put 这些资源，就和 `task_reap` 形成并发 UAF。把所有资源释放集中到 `task_reap`/`proc_reap` 单一 owner，避免竞态。`exit_code` 因此移到 `xtask_t`（动态分配自 `xtask_cache`，slot 生命周期由 `tasks_lock` 保），`waitpid` 从 `xtask->exit_code` 读，不依赖可能被 reap 的 `proc_t`。
 - "最后一个线程"用 `signal->thread_count` 判（atomic_dec_and_test），不是 `mm` refcount 也不是 `signal->sig_count`。理由：refcount 是"共享体引用计数"，thread_count 是"线程组存活线程数"，两者语义不同——CLONE_VM 时 mm ref++（不一定是新线程），CLONE_SIGHAND 时 sig_count++（也不一定是新线程），只有 CLONE_THREAD 时 thread_count++。
 - **ZOMBIE gate 模式**：ZOMBIE 前把 `sig`/`ppid` 读到局部变量，ZOMBIE 后只用局部变量 + `xtask_t` 数组字段，不解引用 `proc->proc` 或 `sig`。这是 SMP 并发 reap 的安全保证。
 - **detached 自回收 UAF 安全**：`exit_group` 遍历同组只读 `xtask_t.tgid`（不读 `proc`），自回收 `kfree(proc)` 后 `exit_group` 不会 UAF。leader 且 `thread_count>0` 的 detached 情况不存在（主线程 `pthread_exit` = `exit_group`）。

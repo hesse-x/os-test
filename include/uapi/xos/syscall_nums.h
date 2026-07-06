@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <xos/ioctl.h>
 
-// ===================== Syscall numbers (NR_SYSCALL=69, 0-68 continuous)
+// ===================== Syscall numbers (NR_SYSCALL=85, 0-84 continuous)
 // =====================
 #define SYS_GETPID 0
 #define SYS_YIELD 1
@@ -86,6 +86,27 @@
 #define SYS_GETTID 66
 #define SYS_SIGPROCMASK 67
 #define SYS_PTHREAD_SET_CANCEL_HANDLER 68
+
+// ===================== POSIX identity & signals (group 1-2)
+// =====================
+#define SYS_GETUID 69
+#define SYS_GETEUID 70
+#define SYS_GETGID 71
+#define SYS_GETEGID 72
+#define SYS_SETUID 73
+#define SYS_SETGID 74
+#define SYS_GETPPID 75
+#define SYS_GETPGRP 76
+#define SYS_UMASK 77
+#define SYS_GETHOSTNAME 78
+#define SYS_SETHOSTNAME 79
+#define SYS_ALARM 80
+#define SYS_PAUSE 81
+
+// ===================== POSIX fs (group 3) =====================
+#define SYS_TRUNCATE 82
+#define SYS_FSYNC 83
+#define SYS_SYNC 84
 
 // ===================== recv_msg (shared between kernel and user)
 // =====================

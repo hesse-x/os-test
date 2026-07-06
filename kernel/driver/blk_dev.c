@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "kernel/driver/blk_dev.h"
-#include "arch/x64/utils.h"
+#include <stdbool.h>
+
 #include "kernel/driver/ahci.h"
+#include "kernel/driver/blk_dev.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/spinlock.h"
-#include <stdbool.h>
 
 int blk_read(uint32_t lba, uint32_t count, void *buf) {
   uint64_t flags;

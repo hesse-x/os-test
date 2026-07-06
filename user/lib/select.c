@@ -5,11 +5,13 @@
  */
 
 #include <errno.h>
-#include <stddef.h>
+
 #include <sys/poll.h>
 #include <sys/select.h>
-#include <time.h>
+#include <xos/errno.h>
+#include <xos/socket.h>
 
+struct timeval;
 /* select(nfds, readfds, writefds, exceptfds, timeout)
  *
  * Implemented on top of poll(2).  Converts fd_set bitmaps to/from

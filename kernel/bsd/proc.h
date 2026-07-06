@@ -44,6 +44,19 @@ typedef struct proc {
   // === pthread cancel (Phase 4) ===
   uint64_t cancel_handler; // __pthread_cancel_check function address, 0 = not
                            // registered
+
+  // === POSIX identity & permissions (group 1-2) ===
+  // FAT32 has no on-disk permission bits, so uid/gid/mode live only in the
+  // in-memory inode cache. These fields gate the getters/setters and umask.
+  // uint32_t (not uid_t/gid_t/mode_t) keeps kernel/driver/bsd_types.h's
+  // byte-identical mirror free of user-side sys/types.h includes.
+  // (alarm_deadline lives in xtask — the Xcore timer handler needs to read it
+  // without crossing into the BSD layer.)
+  uint32_t uid;   // real UID (default 0)
+  uint32_t euid;  // effective UID (default 0)
+  uint32_t gid;   // real GID (default 0)
+  uint32_t egid;  // effective GID (default 0)
+  uint32_t umask; // file creation mask (default 0022)
 } proc;
 
 // ABI drift guard: kernel/driver/bsd_types.h maintains a parallel proc for
@@ -62,7 +75,7 @@ STATIC_ASSERT(
     offsetof(proc, signal) == 176,
     "proc.signal must be a POINTER to a separately-allocated signal_struct, "
     "not an inline struct — inlining shifts the offset of files");
-STATIC_ASSERT(sizeof(proc) == 232,
+STATIC_ASSERT(sizeof(proc) == 256,
               "proc size changed — update kernel/driver/bsd_types.h to match");
 #undef STATIC_ASSERT
 

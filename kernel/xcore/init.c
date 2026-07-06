@@ -17,12 +17,9 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
-#include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/serial_hook.h"
 #include "kernel/xcore/trap.h"
-#include "kernel/xcore/xtask.h"
-#include "utils/macro.h"
 
 __attribute__((no_sanitize("kernel-address"))) void xcore_init(boot_info *bi) {
   serial_init();

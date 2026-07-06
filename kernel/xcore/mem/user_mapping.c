@@ -7,6 +7,10 @@
 // User-space page mapping functions
 // Used by proc.c (process creation) and trap.c (sys_mmap/sys_munmap/sys_spawn)
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
 #include "kernel/xcore/atomic.h"
@@ -15,13 +19,9 @@
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
-#include "kernel/xcore/xtask.h"
 #include "utils/macro.h"
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+
 #include <xos/errno.h>
-#include <xos/shm.h>
 
 // Lookup the leaf PTE for a given virtual address in a page table hierarchy.
 // cr3_phys is the physical address of the PML4 (as stored in mm->cr3 or CR3).

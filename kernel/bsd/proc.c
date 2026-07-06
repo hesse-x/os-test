@@ -28,6 +28,7 @@
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/vfs.h"
 #include "kernel/driver/display.h"
+#include "kernel/kernel.h"
 #include "kernel/user_check.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/kpi.h"
@@ -93,6 +94,15 @@ proc *proc_create(void) {
   bp->clear_tid_addr = 0;
   bp->sig_pending = 0;
   bp->sig_blocked = 0;
+
+  // POSIX identity defaults: single-user system (uid/gid=0). umask follows the
+  // conventional 0022 default. (alarm_deadline lives in xtask, zeroed by
+  // xtask_alloc.)
+  bp->uid = 0;
+  bp->euid = 0;
+  bp->gid = 0;
+  bp->egid = 0;
+  bp->umask = 0022;
   return bp;
 }
 
@@ -859,6 +869,13 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   child_bp->sid = parent->proc->sid;
   child_bp->pgid = parent->proc->pgid;
   child_bp->ctty = parent->proc->ctty;
+  // Inherit POSIX identity & permissions. alarm_deadline is NOT inherited —
+  // a fresh child has no pending alarm (POSIX: fork resets it).
+  child_bp->uid = parent->proc->uid;
+  child_bp->euid = parent->proc->euid;
+  child_bp->gid = parent->proc->gid;
+  child_bp->egid = parent->proc->egid;
+  child_bp->umask = parent->proc->umask;
   list_init(&child->run_node);
   list_init(&child->wait_node);
 
@@ -1111,6 +1128,13 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     child_bp->sid = parent->proc->sid;
     child_bp->pgid = parent->proc->pgid;
     child_bp->ctty = parent->proc->ctty;
+    // Inherit POSIX identity & permissions. alarm_deadline is NOT inherited
+    // (a fresh child has no pending alarm).
+    child_bp->uid = parent->proc->uid;
+    child_bp->euid = parent->proc->euid;
+    child_bp->gid = parent->proc->gid;
+    child_bp->egid = parent->proc->egid;
+    child_bp->umask = parent->proc->umask;
   }
 
   spin_unlock(&tasks_lock);
@@ -1675,4 +1699,96 @@ mmap_region *add_mmap_region(xtask *proc, uint64_t vaddr, uint64_t size,
   region->next = proc->mm->mmap_regions;
   proc->mm->mmap_regions = region;
   return region;
+}
+
+// ===================== POSIX identity & permissions (group 1)
+// ===================== Single-user system: uid/gid default to 0. setuid/setgid
+// are relaxed (no setuid-bit privilege rules yet) — they just set
+// real+effective, matching the "root can become anyone" model. umask gates
+// file-creation mode (applied in fat32_open via the inode cache mode).
+
+int64_t sys_getuid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+  return (int64_t)current_proc->uid;
+}
+
+int64_t sys_geteuid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+  return (int64_t)current_proc->euid;
+}
+
+int64_t sys_getgid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+  return (int64_t)current_proc->gid;
+}
+
+int64_t sys_getegid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+  return (int64_t)current_proc->egid;
+}
+
+int64_t sys_setuid(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t) {
+  uint32_t uid = (uint32_t)arg1;
+  // Relaxed: a single-user root system has no setuid-bit privilege ladder.
+  // euid=uid lets root drop/raise identity freely.
+  current_proc->uid = uid;
+  current_proc->euid = uid;
+  return 0;
+}
+
+int64_t sys_setgid(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t) {
+  uint32_t gid = (uint32_t)arg1;
+  current_proc->gid = gid;
+  current_proc->egid = gid;
+  return 0;
+}
+
+int64_t sys_getppid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+  pid_t ppid = current_proc->signal->parent_pid;
+  // init (and orphans adopted by init) reports itself/1 as parent.
+  if (ppid <= 0)
+    ppid = current_task->pid;
+  return (int64_t)ppid;
+}
+
+int64_t sys_getpgrp(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+  return (int64_t)current_proc->pgid;
+}
+
+int64_t sys_umask(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t) {
+  uint32_t old = current_proc->umask;
+  current_proc->umask = (uint32_t)arg1 & 0777;
+  return (int64_t)old;
+}
+
+// gethostname(buf, len) — copy out the kernel hostname string.
+int64_t sys_gethostname(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t,
+                        int64_t) {
+  char __user *ubuf = (char __user *__force)arg1;
+  size_t len = (size_t)arg2;
+  if (!ubuf || len == 0)
+    return (int64_t)-EFAULT;
+  char kbuf[HOSTNAME_MAX];
+  size_t n = hostname_get(kbuf, sizeof(kbuf));
+  if (n >= len)
+    return (int64_t)-EINVAL;           // buffer too small (would not fit NUL)
+  if (copy_to_user(ubuf, kbuf, n + 1)) // include terminator
+    return (int64_t)-EFAULT;
+  return 0;
+}
+
+// sethostname(name, len) — replace the kernel hostname.
+int64_t sys_sethostname(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t,
+                        int64_t) {
+  const char __user *uname = (const char __user *__force)arg1;
+  size_t len = (size_t)arg2;
+  if (!uname)
+    return (int64_t)-EFAULT;
+  if (len == 0 || len >= HOSTNAME_MAX)
+    return (int64_t)-EINVAL;
+  char kbuf[HOSTNAME_MAX];
+  if (copy_from_user(kbuf, uname, len))
+    return (int64_t)-EFAULT;
+  // Reject embedded NUL so the hostname stays a clean C string.
+  for (size_t i = 0; i < len; i++)
+    if (kbuf[i] == '\0')
+      return (int64_t)-EINVAL;
+  hostname_set(kbuf, len);
+  return 0;
 }

@@ -622,6 +622,122 @@ static int fat32_truncate(uint32_t cluster, uint32_t dir_cluster, int dir_idx) {
   return fat32_update_dir_entry(dir_cluster, dir_idx, 0, 0);
 }
 
+/* ==================== ftruncate to an arbitrary length ====================
+ */
+/* Grow or shrink an existing regular file to exactly len bytes. New bytes
+ * (when growing) read back as zero. Updates the inode size + on-disk dir entry
+ * and invalidates the page cache so subsequent reads see the new length.
+ * Caller holds ip->i_lock. */
+int fat32_ftruncate(struct inode *ip, uint64_t len) {
+  if (ip->type != INODE_REGULAR)
+    return -EINVAL;
+
+  uint32_t bpc = fat32_bytes_per_cluster();
+  if (bpc == 0)
+    return -EIO;
+
+  /* No work if size already matches. */
+  if (ip->size == len)
+    return 0;
+
+  if (len == 0) {
+    /* Shrink-to-zero reuses the simple path. */
+    int rc = fat32_truncate(ip->start_cluster, ip->dir_start_cluster,
+                            ip->dir_entry_index);
+    if (rc)
+      return rc;
+    ip->start_cluster = 0;
+    ip->size = 0;
+    page_cache_invalidate_inode(ip);
+    return 0;
+  }
+
+  uint32_t keep_clusters = (uint32_t)((len + bpc - 1) / bpc);
+
+  if (len < ip->size) {
+    /* Shrink: free every cluster past the keep boundary. */
+    spin_lock(&fat_lock);
+    if (ip->start_cluster == 0) {
+      spin_unlock(&fat_lock);
+      return -EIO;
+    }
+    /* Walk to the last cluster we keep (index keep_clusters-1). */
+    uint32_t c = ip->start_cluster;
+    uint32_t prev = 0;
+    for (uint32_t i = 0; i < keep_clusters; i++) {
+      if (c < 2 || c >= 0x0FFFFFF8) {
+        /* Chain shorter than keep_clusters — nothing to free. */
+        c = 0;
+        break;
+      }
+      prev = c;
+      c = fat32_read_entry(c);
+    }
+    if (prev != 0 && c >= 2 && c < 0x0FFFFFF8) {
+      /* Terminate the kept chain and free the rest. */
+      fat32_write_fat_entry(prev, 0x0FFFFFFF);
+      fat32_free_chain(c);
+    }
+    spin_unlock(&fat_lock);
+  } else {
+    /* Grow: allocate clusters until the chain holds keep_clusters. */
+    spin_lock(&fat_lock);
+    if (ip->start_cluster == 0) {
+      uint32_t first = fat32_allocate_cluster();
+      if (first == 0) {
+        spin_unlock(&fat_lock);
+        return -ENOSPC;
+      }
+      ip->start_cluster = first;
+      /* Zero the new cluster on disk. */
+      uint8_t z[4096];
+      __memset(z, 0, bpc);
+      uint32_t lba = data_start_lba + (first - 2) * sectors_per_cluster;
+      blk_write(lba, sectors_per_cluster, z);
+      keep_clusters -= 1;
+    }
+    /* Find current tail. */
+    uint32_t tail = ip->start_cluster;
+    uint32_t have = 1;
+    int guard = 1024;
+    while (guard-- > 0) {
+      uint32_t next = fat32_read_entry(tail);
+      if (next >= 0x0FFFFFF8)
+        break;
+      tail = next;
+      have++;
+    }
+    /* Append (keep_clusters - have) new zeroed clusters. */
+    while (have < keep_clusters) {
+      uint32_t nc = fat32_allocate_cluster();
+      if (nc == 0) {
+        spin_unlock(&fat_lock);
+        /* Partial grow: update size to what we have so far. */
+        ip->size = len;
+        fat32_update_dir_entry(ip->dir_start_cluster, ip->dir_entry_index,
+                               ip->start_cluster, (uint32_t)ip->size);
+        return -ENOSPC;
+      }
+      uint8_t z[4096];
+      __memset(z, 0, bpc);
+      uint32_t lba = data_start_lba + (nc - 2) * sectors_per_cluster;
+      blk_write(lba, sectors_per_cluster, z);
+      fat32_link_cluster(tail, nc);
+      tail = nc;
+      have++;
+    }
+    spin_unlock(&fat_lock);
+  }
+
+  ip->size = len;
+  if (ip->dir_start_cluster >= 2) {
+    fat32_update_dir_entry(ip->dir_start_cluster, ip->dir_entry_index,
+                           ip->start_cluster, (uint32_t)ip->size);
+  }
+  page_cache_invalidate_inode(ip);
+  return 0;
+}
+
 /* ==================== FAT32 init ==================== */
 
 int fat32_init(void) {
@@ -721,6 +837,11 @@ struct inode *fat32_open(const char *path, int flags, int *out_errno) {
 
   int rc =
       fat32_resolve_path(path, &cluster, &dir_cluster, &dir_idx, &file_size, 0);
+  /* O_EXCL: with O_CREAT, the file must NOT already exist. */
+  if (rc == 0 && (flags & O_CREAT) && (flags & O_EXCL)) {
+    *out_errno = -EEXIST;
+    return NULL;
+  }
   /* O_CREAT: create file if not found */
   if (rc != 0 && (flags & O_CREAT)) {
     spin_lock(&fat_lock);
@@ -923,31 +1044,74 @@ static int fat32_create_file(const char *path) {
   if (leaf_len == 0)
     return -ENOENT;
 
-  /* Find a free directory entry slot in parent */
-  uint8_t *dir_buf = read_cluster_buf(dummy_cluster);
-  if (!dir_buf)
-    return -EIO;
-
+  /* Find a free directory entry slot in parent, walking the whole directory
+   * chain. A directory may span multiple clusters; the previous implementation
+   * only inspected the first cluster and gave up with ENOSPC once it filled,
+   * which made file creation fail after ~16 entries on a 512B/cluster volume.
+   */
   int entries = bytes_per_cluster / 32;
+  uint32_t target_cluster = dummy_cluster; /* cluster holding the free slot */
   int free_idx = -1;
   int was_end_of_dir = 0;
-  for (int i = 0; i < entries; i++) {
-    struct fat_dir_entry *de = (struct fat_dir_entry *)(dir_buf + i * 32);
-    if (de->name[0] == 0x00) {
-      free_idx = i;
-      was_end_of_dir = 1;
+  uint32_t tail_cluster = dummy_cluster; /* last cluster of the dir chain */
+  uint32_t cur = dummy_cluster;
+  while (cur >= 2 && cur < 0x0FFFFFF8) {
+    tail_cluster = cur;
+    uint8_t *dir_buf = read_cluster_buf(cur);
+    if (!dir_buf)
+      return -EIO;
+    for (int i = 0; i < entries; i++) {
+      struct fat_dir_entry *de = (struct fat_dir_entry *)(dir_buf + i * 32);
+      if (de->name[0] == 0x00) {
+        /* End-of-directory: this slot (and the rest of the chain) is free. */
+        free_idx = i;
+        was_end_of_dir = 1;
+        break;
+      }
+      if (de->name[0] == 0xE5) {
+        free_idx = i;
+        break;
+      }
+    }
+    kfree(dir_buf);
+    if (free_idx >= 0) {
+      target_cluster = cur;
       break;
     }
-    if (de->name[0] == 0xE5) {
-      free_idx = i;
-      break;
-    }
+    cur = fat32_read_entry(cur);
   }
 
+  /* No free slot anywhere in the chain: extend the directory by one cluster. */
   if (free_idx < 0) {
-    kfree(dir_buf);
-    return -ENOSPC; /* TODO: extend directory chain */
+    uint32_t new_cluster = fat32_allocate_cluster();
+    if (new_cluster == 0)
+      return -ENOSPC;
+    /* Link the new cluster as the new tail of the directory chain. */
+    if (fat32_link_cluster(tail_cluster, new_cluster) != 0) {
+      fat32_write_fat_entry(new_cluster, 0);
+      return -EIO;
+    }
+    /* Zero-fill the new cluster so its first entry is the end-of-dir marker. */
+    uint8_t *zbuf = (uint8_t *)kmalloc(bytes_per_cluster);
+    if (!zbuf) {
+      fat32_write_fat_entry(new_cluster, 0);
+      fat32_write_fat_entry(tail_cluster, 0x0FFFFFFF);
+      return -ENOMEM;
+    }
+    __memset(zbuf, 0, bytes_per_cluster);
+    uint32_t lba = data_start_lba + (new_cluster - 2) * sectors_per_cluster;
+    int wrc = blk_write(lba, sectors_per_cluster, zbuf);
+    kfree(zbuf);
+    if (wrc != 0)
+      return -EIO;
+    target_cluster = new_cluster;
+    free_idx = 0;
+    was_end_of_dir = 1; /* the freshly zeroed cluster ends the directory */
   }
+
+  uint8_t *dir_buf = read_cluster_buf(target_cluster);
+  if (!dir_buf)
+    return -EIO;
 
   /* Create the directory entry */
   struct fat_dir_entry new_entry;
@@ -968,7 +1132,7 @@ static int fat32_create_file(const char *path) {
 
   /* Write back the affected sector(s) */
   int sector_idx = (free_idx * 32) / 512;
-  int wrc = write_cluster_sector(dummy_cluster, sector_idx,
+  int wrc = write_cluster_sector(target_cluster, sector_idx,
                                  dir_buf + sector_idx * 512);
   if (wrc != 0) {
     kfree(dir_buf);
@@ -978,7 +1142,7 @@ static int fat32_create_file(const char *path) {
   if (was_end_of_dir && free_idx + 1 < entries) {
     int next_sector = ((free_idx + 1) * 32) / 512;
     if (next_sector != sector_idx) {
-      wrc = write_cluster_sector(dummy_cluster, next_sector,
+      wrc = write_cluster_sector(target_cluster, next_sector,
                                  dir_buf + next_sector * 512);
       if (wrc != 0) {
         kfree(dir_buf);

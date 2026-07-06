@@ -9,7 +9,6 @@
 
 #include "kernel/xcore/sparse.h"
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 
 // ===================== PCI constants =====================
@@ -94,11 +93,7 @@ int pci_enable_msi(pci_device *dev);
 
 // MSI-X API
 int pci_enable_msix(pci_device *dev, int num_vectors);
-void pci_msix_mask_entry(pci_device *dev, int entry);
 void pci_msix_unmask_entry(pci_device *dev, int entry);
-void __iomem *pci_msix_table_addr(pci_device *dev);
-void __iomem *pci_msix_pba_addr(pci_device *dev);
-int pci_msix_vector_base(pci_device *dev);
 
 // sys_pci_dev_info syscall
 int64_t sys_pci_dev_info(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,

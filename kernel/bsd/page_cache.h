@@ -7,10 +7,11 @@
 #ifndef KERNEL_PAGE_CACHE_H
 #define KERNEL_PAGE_CACHE_H
 
-#include "kernel/bsd/inode.h"
 #include "kernel/xcore/atomic.h"
 #include <stdbool.h>
 #include <stdint.h>
+
+struct inode;
 
 struct cache_page {
   struct inode *inode;
@@ -34,5 +35,7 @@ void page_cache_mark_dirty(struct cache_page *cp);
 int page_cache_writeback(struct cache_page *cp);
 void page_cache_invalidate_inode(struct inode *ip);
 void page_cache_release(struct cache_page *cp);
+void page_cache_flush_all(void); // sync(): write back all dirty pages
+void page_cache_flush_inode(struct inode *ip); // fsync(fd): one inode
 
 #endif

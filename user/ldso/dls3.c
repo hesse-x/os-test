@@ -36,7 +36,7 @@ static Elf64_Dyn *get_dynamic(void) {
 // self-relocation it points to ld_base + offset)
 // not used, only exists to make .rela.dyn non-empty so the bootstrap path
 // actually performs relocation
-static void *self_ptr = (void *)dl_puts;
+static void *self_ptr __attribute__((used)) = (void *)dl_puts;
 
 // get value of given type from auxv
 static uintptr_t find_auxv(uintptr_t *sp, uint64_t type) {

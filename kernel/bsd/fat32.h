@@ -41,6 +41,7 @@ struct inode *fat32_open(const char *path, int flags, int *out_errno);
 int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count);
 int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
                 size_t count);
+int fat32_ftruncate(struct inode *ip, uint64_t len);
 int fat32_mkdir(const char *path);
 int fat32_unlink(const char *path);
 int fat32_rmdir(const char *path);

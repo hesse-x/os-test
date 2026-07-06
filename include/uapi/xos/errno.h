@@ -48,6 +48,7 @@
 #define EINTR 38
 #define ENOEXEC 39
 #define ELOOP 40
+#define ENAMETOOLONG 41
 #define EWOULDBLOCK EAGAIN
 
 #endif // COMMON_ERRNO_H

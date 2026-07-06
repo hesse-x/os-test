@@ -26,8 +26,6 @@ typedef enum {
   PAGE_RESERVED // reserved (hardware/BIOS)
 } page_status;
 
-struct kmem_cache;
-
 struct page {
   page_status status;
   refcount_t p_refcount; // physical page reference count (0=free, 1=exclusive,

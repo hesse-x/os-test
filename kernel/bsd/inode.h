@@ -12,8 +12,6 @@
 #include "kernel/xcore/spinlock.h"
 #include <stdint.h>
 
-struct shm; /* forward declaration */
-
 #define INODE_REGULAR 1
 #define INODE_DIR 2
 #define INODE_DEV 3

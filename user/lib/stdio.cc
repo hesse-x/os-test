@@ -4,16 +4,15 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
-#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syscall.h>
 #include <unistd.h>
+
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 
@@ -223,11 +222,11 @@ typedef struct {
   size_t capacity;
   size_t pos;
   int flags; // bit 0: use_capacity
-} string_buf_t;
+} string_buf;
 
 static void string_write_fn(FILE *f, const char *data, int len) {
-  (void)f; // f is the FILE* passed from vfprintf
-  string_buf_t *sb = (string_buf_t *)f->buf; // hijack buf pointer
+  (void)f;                               // f is the FILE* passed from vfprintf
+  string_buf *sb = (string_buf *)f->buf; // hijack buf pointer
   for (int i = 0; i < len; i++) {
     if (sb->flags & 1) {
       if (sb->pos >= sb->capacity)
@@ -239,7 +238,7 @@ static void string_write_fn(FILE *f, const char *data, int len) {
 
 static int vsnprintf_impl(char *buf, size_t n, const char *fmt, va_list ap,
                           int use_capacity) {
-  string_buf_t sb;
+  string_buf sb;
   sb.buf = buf;
   sb.capacity = n;
   sb.pos = 0;
@@ -248,7 +247,7 @@ static int vsnprintf_impl(char *buf, size_t n, const char *fmt, va_list ap,
   // Create a temporary FILE that writes to the string buffer
   FILE str_f;
   str_f.fd = -1;
-  str_f.buf = (char *)&sb; // store string_buf_t pointer in buf
+  str_f.buf = (char *)&sb; // store string_buf pointer in buf
   str_f.buf_size = 0;
   str_f.buf_pos = 0;
   str_f.buf_mode = _IONBF;

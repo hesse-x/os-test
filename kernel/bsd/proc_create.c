@@ -18,11 +18,9 @@
 #include "kernel/bsd/elf_loader.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/signal.h"
-#include "kernel/bsd/types.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
-#include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/sched.h"
@@ -30,7 +28,6 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
-#include "utils/macro.h"
 #include <xos/elf.h>
 #include <xos/mman.h>
 #include <xos/signal.h>

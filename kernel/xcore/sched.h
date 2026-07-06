@@ -107,7 +107,6 @@ void process_entry(void);
     // many waiters
 int sched_pick_cpu(void);
 int sched_pick_cpu_pref(int pref_cpu);
-uint64_t sched_build_kstack(uint64_t k_stack_top, uint64_t entry_rip);
 // Variant allowing caller-supplied user rsp (e.g. for argc/argv/auxv stack
 // layout)
 uint64_t sched_build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,

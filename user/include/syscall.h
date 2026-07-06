@@ -596,4 +596,95 @@ static inline int sys_pthread_set_cancel_handler(uint64_t handler) {
   return (int)r;
 }
 
+// --- POSIX identity & permissions (group 1) ---
+// Identity getters never fail; return the raw value.
+static inline int64_t sys_getuid(void) { return __syscall0(SYS_GETUID); }
+static inline int64_t sys_geteuid(void) { return __syscall0(SYS_GETEUID); }
+static inline int64_t sys_getgid(void) { return __syscall0(SYS_GETGID); }
+static inline int64_t sys_getegid(void) { return __syscall0(SYS_GETEGID); }
+static inline int64_t sys_getppid(void) { return __syscall0(SYS_GETPPID); }
+static inline int64_t sys_getpgrp(void) { return __syscall0(SYS_GETPGRP); }
+// umask returns the previous mask (always succeeds).
+static inline int64_t sys_umask(int mode) {
+  return __syscall1(SYS_UMASK, (int64_t)mode);
+}
+
+static inline int sys_setuid(uint32_t uid) {
+  int64_t r = __syscall1(SYS_SETUID, (int64_t)uid);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_setgid(uint32_t gid) {
+  int64_t r = __syscall1(SYS_SETGID, (int64_t)gid);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_gethostname(char *buf, size_t len) {
+  int64_t r =
+      __syscall2(SYS_GETHOSTNAME, (int64_t)(uintptr_t)buf, (int64_t)len);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_sethostname(const char *name, size_t len) {
+  int64_t r =
+      __syscall2(SYS_SETHOSTNAME, (int64_t)(uintptr_t)name, (int64_t)len);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+// --- alarm / pause (group 2) ---
+// alarm returns the seconds remaining on the previous alarm (0 if none).
+static inline int64_t sys_alarm(unsigned seconds) {
+  return __syscall1(SYS_ALARM, (int64_t)seconds);
+}
+
+// pause returns -1 with EINTR when interrupted by a signal.
+static inline int sys_pause(void) {
+  int64_t r = __syscall0(SYS_PAUSE);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+// --- truncate / fsync / sync (group 3) ---
+static inline int sys_truncate(const char *path, int64_t len) {
+  int64_t r = __syscall2(SYS_TRUNCATE, (int64_t)(uintptr_t)path, len);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_fsync(int fd) {
+  int64_t r = __syscall1(SYS_FSYNC, (int64_t)fd);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_sync(void) {
+  __syscall0(SYS_SYNC);
+  return 0;
+}
+
 #endif // USER_SYSCALL_H

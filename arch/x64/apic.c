@@ -31,12 +31,6 @@ uint64_t sched_clock() {
   return sec * 1000000000ULL + rem * 1000000000ULL / tsc_freq;
 }
 
-// ===================== PIC disable =====================
-void pic_disable() {
-  outb(0x21, 0xFF);
-  outb(0xA1, 0xFF);
-}
-
 // ===================== I/O APIC =====================
 void ioapic_set_irq(uint32_t gsi, uint8_t vector, uint32_t apic_id, bool masked,
                     bool level_triggered, bool active_low) {

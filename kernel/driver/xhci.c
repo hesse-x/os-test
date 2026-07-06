@@ -12,15 +12,12 @@
 #include "kernel/driver/pci.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
-#include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/sparse.h"
-#include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
 #include <stdbool.h>
 #include <stdint.h>
-#include <xos/errno.h>
 #include <xos/shm.h>
 
 // ===================== xHCI register offsets =====================

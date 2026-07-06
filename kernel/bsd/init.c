@@ -12,7 +12,6 @@
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/syscall.h"
-#include "kernel/bsd/types.h"
 #include "kernel/bsd/vfs.h"
 #include "kernel/kernel.h"
 #include "kernel/xcore/list.h"

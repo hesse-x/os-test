@@ -413,9 +413,10 @@ void trap_dispatch(trapframe *tf) {
 
 // ===================== Timer IRQ handler =====================
 // Reschedule IPI handler: set need_resched flag on current task and EOI.
-// Per ipi.md decision #1 (c1 model): handler only sets flag, does NOT call
-// schedule().  Preemption is uniformly handled by check_pending_signals at
-// the return-to-user exit, which loops on need_resched -> schedule().
+// Per the reschedule IPI design (doc/design/kernel/schedule.md, c1 model):
+// handler only sets flag, does NOT call schedule().  Preemption is uniformly
+// handled by check_pending_signals at the return-to-user exit, which loops on
+// need_resched -> schedule().
 //
 // bug.md Bug 2 root cause: previously this handler called schedule() directly
 // when tf->cs==0x2B, which could re-enter schedule() inside IPI context.
@@ -472,6 +473,15 @@ static void timer_handler(trapframe *tf) {
       p->wait_event = WAIT_NONE;
       p->wait_timed_out = 1;
       p->wait_deadline = 0;
+      // pause() armed with an alarm: the timeout IS the alarm firing.
+      // Force SIGALRM so the signal path (default-terminate or handler) runs
+      // when the task resumes; the pending bit is set before run_queue push so
+      // check_pending_signals sees it on resume.
+      if (p->alarm_deadline != 0) {
+        p->alarm_deadline = 0;
+        if (force_sig_hook)
+          force_sig_hook(p, SIGALRM, SI_KERNEL, NULL);
+      }
       list_push_back(&wakeup_list, &p->wait_node);
     } else {
       // Stale entry: process was woken but sched_timer_queue_remove was skipped
@@ -493,6 +503,17 @@ static void timer_handler(trapframe *tf) {
     list_push_back(&cpu_locals[tcpu].run_queue, &p->run_node);
     cpu_locals[tcpu].run_count++;
     spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, tflags);
+  }
+
+  // Running-task alarm: a process that armed an alarm and kept running (or is
+  // blocked on something other than pause) is never in the timer_queue for its
+  // alarm. Check the current task's alarm deadline each tick and force SIGALRM
+  // when it fires; the user-mode signal check below then delivers it.
+  if (current_task && current_task->alarm_deadline != 0 &&
+      current_task->alarm_deadline <= now) {
+    current_task->alarm_deadline = 0;
+    if (force_sig_hook)
+      force_sig_hook(current_task, SIGALRM, SI_KERNEL, NULL);
   }
 
   if (tf->cs == 0x2B) { // from user mode

@@ -8,16 +8,15 @@
 #define KERNEL_SOCKET_H
 
 #include "kernel/xcore/atomic.h"
-#include "kernel/xcore/list.h"
 #include "kernel/xcore/spinlock.h"
-#include "kernel/xcore/xtask.h"
 #include <stdint.h>
-#include <xos/socket.h>
 
 // ===================== sk_buff (socket buffer) =====================
 // One per sendmsg call. Flexible array member for data.
 #define MAX_SOCKET_DATA 65536 // 64KB soft limit (same as sys_msg)
 #define MAX_SCM_FDS 8         // max fd count per SCM_RIGHTS
+
+struct iovec;
 
 typedef struct sk_buff {
   struct sk_buff *next; // linked list next
@@ -89,7 +88,6 @@ extern spinlock socket_lock;
 // ===================== Socket operations (internal) =====================
 struct unix_sock *unix_sock_alloc(void);
 void unix_sock_free(struct unix_sock *sock);
-void unix_sock_acquire(struct unix_sock *sock);
 void unix_sock_release(struct unix_sock *sock);
 
 struct sk_buff *skb_alloc(uint32_t data_len);

@@ -7,12 +7,9 @@
 #include "kernel/bsd/elf_loader.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
-#include "kernel/bsd/types.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/sparse.h"
-#include "kernel/xcore/xtask.h"
-#include "utils/macro.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <xos/elf.h>

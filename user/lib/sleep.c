@@ -4,11 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <errno.h>
-#include <sys/ipc.h>
 #include <time.h>
 #include <unistd.h>
 
+#include <sys/ipc.h>
+#include <xos/errno.h>
+#include <xos/syscall_nums.h>
+
+struct timespec;
 unsigned int sleep(unsigned seconds) {
   // Use sys_recv with timeout in milliseconds
   struct recv_msg msg;

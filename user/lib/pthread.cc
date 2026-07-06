@@ -158,8 +158,8 @@ extern "C" int64_t __libc_clone_thread(uint64_t flags, uint64_t stack_top,
       "movq 0x440(%%rdi), %%rdi\n" // rdi = tcb->arg (also overwrites tcb,
                                    // becoming the first argument to
                                    // start_routine)
-      "callq *%%rax\n"      // start_routine(arg)
-      "movq %%rax, %%rdi\n" // pthread_exit(retval)
+      "callq *%%rax\n"             // start_routine(arg)
+      "movq %%rax, %%rdi\n"        // pthread_exit(retval)
       "callq pthread_exit\n"
       "1:\n"
       : "=a"(r)
@@ -311,7 +311,7 @@ void pthread_exit(void *retval) {
   }
   // Run cleanup handlers (reverse order)
   while (tcb->cleanup_head) {
-    __pthread_cleanup_handler_t *h = tcb->cleanup_head;
+    pthread_cleanup_handler *h = tcb->cleanup_head;
     tcb->cleanup_head = h->prev;
     h->routine(h->arg);
     free(h);
@@ -469,11 +469,12 @@ int pthread_mutex_destroy(pthread_mutex_t *mutex) {
 
 int pthread_mutex_lock(pthread_mutex_t *mutex) {
   pid_t tid = (pid_t)sys_gettid();
-  if (mutex->type == PTHREAD_MUTEX_RECURSIVE && mutex->owner == tid) {
+  if (mutex->type == PTHREAD_MUTEX_RECURSIVE && mutex->owner == (uint32_t)tid) {
     mutex->count++;
     return 0;
   }
-  if (mutex->type == PTHREAD_MUTEX_ERRORCHECK && mutex->owner == tid) {
+  if (mutex->type == PTHREAD_MUTEX_ERRORCHECK &&
+      mutex->owner == (uint32_t)tid) {
     return EDEADLK;
   }
   uint32_t expected = 0;
@@ -505,7 +506,7 @@ int pthread_mutex_lock(pthread_mutex_t *mutex) {
 
 int pthread_mutex_trylock(pthread_mutex_t *mutex) {
   pid_t tid = (pid_t)sys_gettid();
-  if (mutex->type == PTHREAD_MUTEX_RECURSIVE && mutex->owner == tid) {
+  if (mutex->type == PTHREAD_MUTEX_RECURSIVE && mutex->owner == (uint32_t)tid) {
     mutex->count++;
     return 0;
   }
@@ -521,12 +522,12 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex) {
 
 int pthread_mutex_unlock(pthread_mutex_t *mutex) {
   pid_t tid = (pid_t)sys_gettid();
-  if (mutex->type == PTHREAD_MUTEX_RECURSIVE && mutex->owner == tid &&
+  if (mutex->type == PTHREAD_MUTEX_RECURSIVE && mutex->owner == (uint32_t)tid &&
       mutex->count > 1) {
     mutex->count--;
     return 0;
   }
-  if (mutex->owner != tid)
+  if (mutex->owner != (uint32_t)tid)
     return EPERM;
   mutex->owner = 0;
   mutex->count = 0;
@@ -540,11 +541,12 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex) {
 int pthread_mutex_timedlock(pthread_mutex_t *mutex,
                             const struct timespec *abstime) {
   pid_t tid = (pid_t)sys_gettid();
-  if (mutex->type == PTHREAD_MUTEX_RECURSIVE && mutex->owner == tid) {
+  if (mutex->type == PTHREAD_MUTEX_RECURSIVE && mutex->owner == (uint32_t)tid) {
     mutex->count++;
     return 0;
   }
-  if (mutex->type == PTHREAD_MUTEX_ERRORCHECK && mutex->owner == tid) {
+  if (mutex->type == PTHREAD_MUTEX_ERRORCHECK &&
+      mutex->owner == (uint32_t)tid) {
     return EDEADLK;
   }
   uint32_t expected = 0;
@@ -795,8 +797,8 @@ void pthread_testcancel(void) {
 // ===================== Cleanup =====================
 void pthread_cleanup_push(void (*routine)(void *), void *arg) {
   struct tcb *tcb = __pthread_current_tcb();
-  __pthread_cleanup_handler_t *h = (__pthread_cleanup_handler_t *)malloc(
-      sizeof(__pthread_cleanup_handler_t));
+  pthread_cleanup_handler *h =
+      (pthread_cleanup_handler *)malloc(sizeof(pthread_cleanup_handler));
   if (!h)
     return;
   h->routine = routine;
@@ -807,7 +809,7 @@ void pthread_cleanup_push(void (*routine)(void *), void *arg) {
 
 void pthread_cleanup_pop(int execute) {
   struct tcb *tcb = __pthread_current_tcb();
-  __pthread_cleanup_handler_t *h = tcb->cleanup_head;
+  pthread_cleanup_handler *h = tcb->cleanup_head;
   if (!h)
     return;
   tcb->cleanup_head = h->prev;

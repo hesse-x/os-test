@@ -23,6 +23,8 @@ LIBC_EXPORT pid_t setsid(void);
 LIBC_EXPORT int setpgid(pid_t pid, pid_t pgid);
 LIBC_EXPORT pid_t getpgid(pid_t pid);
 LIBC_EXPORT pid_t getsid(pid_t pid);
+LIBC_EXPORT int setuid(uid_t uid);
+LIBC_EXPORT int setgid(gid_t gid);
 
 #ifdef __cplusplus
 }

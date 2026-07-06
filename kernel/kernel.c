@@ -14,23 +14,52 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
-#include "boot/boot.h"
 #include "kernel/bsd/proc.h"
-#include "kernel/driver/serial.h"
 #include "kernel/kernel.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
-#include "kernel/xcore/trap.h"
+#include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
-#include "utils/macro.h"
 
 // VFS data structure init (must run before driver_init so devtmpfs_create
 // works)
 void inode_init(void);
 void page_cache_init(void);
 void devtmpfs_init(void);
+
+// POSIX hostname (group 1). Default "myos"; guarded against concurrent
+// sethostname/gethostname. Plain NUL-terminated C string, len < HOSTNAME_MAX.
+char hostname[HOSTNAME_MAX] = "myos";
+static spinlock hostname_lock = SPINLOCK_INIT;
+
+void hostname_set(const char *name, size_t len) {
+  if (len >= HOSTNAME_MAX)
+    len = HOSTNAME_MAX - 1;
+  uint64_t flags;
+  spin_lock_irqsave(&hostname_lock, &flags);
+  __memcpy(hostname, name, len);
+  hostname[len] = '\0';
+  spin_unlock_irqrestore(&hostname_lock, flags);
+}
+
+// Copy out the current hostname (NUL-terminated) into dst; return the length
+// not counting the terminator. dst is a kernel buffer (callers do the
+// copy_to_user themselves so this stays lock-clean of user faults).
+size_t hostname_get(char *dst, size_t maxlen) {
+  uint64_t flags;
+  spin_lock_irqsave(&hostname_lock, &flags);
+  size_t n = 0;
+  while (n < maxlen && hostname[n] != '\0') {
+    dst[n] = hostname[n];
+    n++;
+  }
+  if (n < maxlen)
+    dst[n] = '\0';
+  spin_unlock_irqrestore(&hostname_lock, flags);
+  return n;
+}
 
 // phys_to_virt is available after xcore_init() builds the higher-half
 // direct map covering all physical RAM. The stub places init.elf into

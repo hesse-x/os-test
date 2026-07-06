@@ -7,8 +7,6 @@
 #ifndef ARCH_X64_TRAP_H
 #define ARCH_X64_TRAP_H
 
-#include "arch/x64/utils.h"
-#include <stddef.h>
 #include <stdint.h>
 
 #define IDT_ENTRIES 256

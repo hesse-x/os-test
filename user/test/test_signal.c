@@ -181,6 +181,37 @@ void test_sigterm_child(void) {
   /* Child terminated by signal */
 }
 
+/* 12. alarm() return value: first call returns 0, second returns remaining */
+void test_alarm_return(void) {
+  TEST_ASSERT_EQUAL_INT(0, alarm(5));
+  /* Re-arming returns the seconds remaining of the previous alarm (~5). */
+  unsigned rem = alarm(3);
+  TEST_ASSERT_TRUE(rem == 4 || rem == 5); // allow for a tick of slack
+  /* Cancel and return remaining (~3). */
+  rem = alarm(0);
+  TEST_ASSERT_TRUE(rem == 2 || rem == 3);
+}
+
+/* 13. alarm + pause: SIGALRM wakes pause and runs the handler */
+static volatile int alrm_caught = 0;
+static void alrm_handler(int sig) { alrm_caught = sig; }
+
+void test_alarm_pause(void) {
+  alrm_caught = 0;
+  struct sigaction act;
+  memset(&act, 0, sizeof(act));
+  act.sa_handler = alrm_handler;
+  sigaction(SIGALRM, &act, NULL);
+
+  alarm(1); // 1 second
+  pause();  // blocks until SIGALRM
+  TEST_ASSERT_EQUAL_INT(SIGALRM, alrm_caught);
+
+  /* Restore default */
+  act.sa_handler = SIG_DFL;
+  sigaction(SIGALRM, &act, NULL);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -197,5 +228,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_sigreturn_restore);
   RUN_TEST(test_sigignore);
   RUN_TEST(test_sigterm_child);
+  RUN_TEST(test_alarm_return);
+  RUN_TEST(test_alarm_pause);
   return UNITY_END();
 }

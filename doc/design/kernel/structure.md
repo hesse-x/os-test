@@ -70,7 +70,7 @@ kernel/xcore/
   list.h               — 内嵌双向链表
   spinlock.h           — spinlock_t
   sparse.h             — Sparse 注解（__user, __iomem, phys_addr_t, kern_vaddr_t）
-  serial_hook.h        — 串口 hook（NSERIAL 门控）
+  serial_hook.h        — 串口 hook（Xcore 层声明）
   mm_types.h           — mm_t, mmap_region_t, shm_t 类型定义
   mem/
     alloc.c / alloc.h  — Bump/BFC 分配器
@@ -288,7 +288,7 @@ kernel/driver/
   ahci.c / ahci.h      — AHCI DMA 驱动
   xhci.c / xhci.h      — xHCI USB 主控驱动
   display.c / display.h — KMS 内核态 display（bochs-display, req flip）
-  serial.c / serial.h   — COM1 串口（NSERIAL 门控）
+  serial.c / serial.h   — COM1 串口
   pci.c / pci.h         — PCI/PCIe ECAM 枚举与 BAR 分配
   blk_dev.c / blk_dev.h — 块设备抽象层（AHCI 同步封装+spinlock）
   bsd_types.h           — BSD 层类型前向声明（driver 需要）

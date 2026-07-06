@@ -5,7 +5,6 @@
  */
 
 #include "utils/kvformat.h"
-#include <stdint.h>
 
 /* Helper: emit unsigned integer in given base */
 static int kvfmt_uint(void (*putc)(char c, void *arg), void *arg,
@@ -101,6 +100,7 @@ static int kvfmt_int(void (*putc)(char c, void *arg), void *arg, long val,
  * The %f branch in kvformat() is likewise excluded under __KERNEL__.
  */
 #ifndef __KERNEL__
+#include <stdint.h>
 static int kvfmt_emit_str(void (*putc)(char c, void *arg), void *arg,
                           const char *s) {
   int n = 0;
@@ -274,9 +274,19 @@ int kvformat(void (*putc)(char c, void *arg), void *arg, const char *fmt,
 
     /* --- flags --- */
     int left_align = 0;
-    if (*fmt == '-') {
-      left_align = 1;
-      fmt++;
+    int alt = 0;
+    for (;;) {
+      if (*fmt == '-') {
+        left_align = 1;
+        fmt++;
+        continue;
+      }
+      if (*fmt == '#') {
+        alt = 1;
+        fmt++;
+        continue;
+      }
+      break;
     }
 
     /* --- width and pad character --- */
@@ -387,6 +397,17 @@ int kvformat(void (*putc)(char c, void *arg), void *arg, const char *fmt,
         val = va_arg(ap, unsigned long);
       else
         val = (unsigned long)va_arg(ap, unsigned int);
+      /* '#' flag: ensure the output begins with '0' (glibc raises precision
+       * so the first digit is 0; for non-zero values this means a leading 0).
+       */
+      if (alt && val != 0) {
+        putc('0', arg);
+        count++;
+        if (width > 1)
+          width--;
+        else
+          width = 0;
+      }
       count += kvfmt_uint(putc, arg, val, 8, 0, width, pad, left_align);
       break;
     }
@@ -401,6 +422,17 @@ int kvformat(void (*putc)(char c, void *arg), void *arg, const char *fmt,
         val = va_arg(ap, unsigned long);
       else
         val = (unsigned long)va_arg(ap, unsigned int);
+      /* '#' flag: prefix "0x"/"0X" for non-zero values (glibc: %#x of 0 is
+       * "0"). */
+      if (alt && val != 0) {
+        putc('0', arg);
+        putc(upper ? 'X' : 'x', arg);
+        count += 2;
+        if (width > 2)
+          width -= 2;
+        else
+          width = 0;
+      }
       count += kvfmt_uint(putc, arg, val, 16, upper, width, pad, left_align);
       break;
     }

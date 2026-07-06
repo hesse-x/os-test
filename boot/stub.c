@@ -7,8 +7,19 @@
 // boot/stub.c - standalone EFI bootloader
 // Read myos.elf from FAT32, load to physical address, set up boot_info, jump to
 // kernel
+//
+// gnu-efi provides <efi.h> as an aggregate header that pulls in its sub-headers
+// (efibind/efidef/eficompiler/efiapi/efierr/efiprot/...). We include it as a
+// whole and do not split it. The no_include pragmas below stop iwyu from
+// suggesting the individual sub-headers; this is the "external aggregate
+// header, do not decompose" rule from doc/design/code_standard.md.
+// IWYU pragma: no_include "efiapi.h"
+// IWYU pragma: no_include "efibind.h"
+// IWYU pragma: no_include "efidef.h"
+// IWYU pragma: no_include "efierr.h"
+// IWYU pragma: no_include "efiprot.h"
 #include "boot/boot.h"
-#include <efi.h>
+#include <efi.h> // IWYU pragma: keep  // gnu-efi aggregate header; used as a whole, not split.
 #include <efilib.h>
 #include <stdint.h>
 #include <xos/elf.h>
@@ -214,8 +225,8 @@ EFI_STATUS exit_bs(EFI_SYSTEM_TABLE *SystemTable, EFI_HANDLE ImageHandle) {
 // ===================== Jump to kernel =====================
 __attribute__((noreturn)) static void jump_to_kernel(UINT64 entry_vaddr) {
   UINT64 entry_phys = entry_vaddr - VMA_BASE;
-  typedef void (*kernel_entry_t)(struct boot_info *);
-  kernel_entry_t entry = (kernel_entry_t)entry_phys;
+  typedef void (*kernel_entry_fn)(struct boot_info *);
+  kernel_entry_fn entry = (kernel_entry_fn)entry_phys;
   entry(&bi);
   while (1)
     __asm__ volatile("hlt");

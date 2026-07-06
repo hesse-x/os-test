@@ -5,8 +5,7 @@
  */
 
 #include "kernel/xcore/rcu.h"
-#include "arch/x64/smp.h"   // ncpu, current_task
-#include "arch/x64/utils.h" // pause
+#include "arch/x64/smp.h" // ncpu, current_task
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/xtask.h"
 

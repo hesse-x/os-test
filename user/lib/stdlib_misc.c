@@ -4,11 +4,16 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <stddef.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+
+#include <sys/stat.h>
+#include <xos/errno.h>
+#include <xos/fcntl.h>
 
 void exit(int status) {
   fflush(stdout);
@@ -141,4 +146,158 @@ void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
       lo = mid + 1;
   }
   return NULL;
+}
+
+/* ==================== mkstemp / mktemp (group 3) ====================
+ * Replace the trailing X's in template with random letters, then open with
+ * O_CREAT|O_EXCL|O_RDWR so a pre-existing name yields EEXIST and we retry.
+ * Relies on the O_EXCL semantics added to fat32_open. */
+static int fill_xxx(char *tmpl, int xstart, int xlen) {
+  /* Seed from getpid + a monotonic counter so concurrent/sequential calls in
+   * one process produce distinct names without requiring srand(). */
+  static unsigned counter = 0;
+  unsigned seed = (unsigned)getpid() * 2654435761u + (counter++ * 2246822519u);
+  const char *set = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
+                    "456789";
+  for (int i = 0; i < xlen; i++) {
+    seed = seed * 1103515245u + 12345u;
+    tmpl[xstart + i] = set[(seed / 65536) % 62];
+  }
+  return 0;
+}
+
+/* Find the run of trailing X's in template (POSIX requires >=6). Returns the
+ * start index and length via out params, or -1 if none. */
+static int find_xrun(char *tmpl, int *start, int *len) {
+  int slen = (int)strlen(tmpl);
+  int i = slen;
+  while (i > 0 && tmpl[i - 1] == 'X')
+    i--;
+  if (i == slen)
+    return -1;
+  *start = i;
+  *len = slen - i;
+  return 0;
+}
+
+int mkstemp(char *tmpl) {
+  int start, len;
+  if (find_xrun(tmpl, &start, &len) < 0 || len < 6) {
+    errno = EINVAL;
+    return -1;
+  }
+  /* Try up to 2^len distinct names (capped). */
+  for (int attempt = 0; attempt < 256; attempt++) {
+    fill_xxx(tmpl, start, len);
+    int fd = open(tmpl, O_CREAT | O_EXCL | O_RDWR, 0600);
+    if (fd >= 0)
+      return fd;
+    if (errno != EEXIST)
+      return -1;
+  }
+  errno = EEXIST;
+  return -1;
+}
+
+/* mktemp: fill the template with a unique name that does not exist, without
+ * opening it. Returns template on success, "" on failure. Inherently racy
+ * (POSIX warns so); acceptable for this libc. */
+char *mktemp(char *tmpl) {
+  int start, len;
+  if (find_xrun(tmpl, &start, &len) < 0 || len < 6) {
+    tmpl[0] = '\0';
+    return tmpl;
+  }
+  for (int attempt = 0; attempt < 256; attempt++) {
+    fill_xxx(tmpl, start, len);
+    struct stat st;
+    if (stat(tmpl, &st) < 0) {
+      if (errno == ENOENT)
+        return tmpl; /* name is free */
+      tmpl[0] = '\0';
+      return tmpl;
+    }
+  }
+  tmpl[0] = '\0';
+  return tmpl;
+}
+
+/* ==================== realpath (group 3) ====================
+ * No symlinks exist in this FS yet, so realpath reduces to: make the path
+ * absolute (relative → getcwd join) then collapse . / .. / redundant slashes.
+ * Returns resolved (or buf if non-NULL) on success, NULL on failure. */
+char *realpath(const char *path, char *resolved) {
+  if (!path || !path[0]) {
+    errno = EINVAL;
+    return NULL;
+  }
+  static char buf_storage[4096];
+  char *buf = resolved ? resolved : buf_storage;
+
+  char abs[4096];
+  if (path[0] == '/') {
+    strncpy(abs, path, sizeof(abs) - 1);
+    abs[sizeof(abs) - 1] = '\0';
+  } else {
+    if (!getcwd(abs, sizeof(abs))) {
+      errno = ENAMETOOLONG;
+      return NULL;
+    }
+    size_t cl = strlen(abs);
+    if (cl + 1 + strlen(path) + 1 > sizeof(abs)) {
+      errno = ENAMETOOLONG;
+      return NULL;
+    }
+    abs[cl++] = '/';
+    strcpy(abs + cl, path);
+  }
+
+  /* Canonicalize: split on '/', drop empty + ".", apply "..". */
+  char *out = buf;
+  size_t outcap = 4096;
+  /* Stack of component start offsets within buf. */
+  int starts[256];
+  int depth = 0;
+  size_t o = 0;
+  const char *p = abs;
+  while (*p) {
+    while (*p == '/')
+      p++;
+    if (!*p)
+      break;
+    const char *seg = p;
+    while (*p && *p != '/')
+      p++;
+    size_t seglen = (size_t)(p - seg);
+    if (seglen == 1 && seg[0] == '.')
+      continue;
+    if (seglen == 2 && seg[0] == '.' && seg[1] == '.') {
+      if (depth > 0) {
+        depth--;
+        /* Pop the previous component: starts[depth] points just past its
+         * leading '/', so rewind one further to drop that '/' too. This
+         * prevents the next component from producing a doubled "//". */
+        o = (size_t)starts[depth] - 1;
+      }
+      continue;
+    }
+    if (o + 1 >= outcap) {
+      errno = ENAMETOOLONG;
+      return NULL;
+    }
+    buf[o++] = '/';
+    starts[depth++] = (int)o;
+    if (o + seglen >= outcap) {
+      errno = ENAMETOOLONG;
+      return NULL;
+    }
+    memcpy(buf + o, seg, seglen);
+    o += seglen;
+  }
+  if (o == 0) {
+    buf[o++] = '/';
+  }
+  buf[o] = '\0';
+  (void)out;
+  return buf;
 }

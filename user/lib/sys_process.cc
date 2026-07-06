@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <sys/process.h>
 #include <syscall.h>
 #include <unistd.h>
+
+#include <sys/process.h>
 
 pid_t fork(void) {
   int64_t r = sys_fork();
@@ -60,3 +60,7 @@ pid_t getsid(pid_t pid) {
     return -1;
   return (pid_t)r;
 }
+
+int setuid(uid_t uid) { return sys_setuid((uint32_t)uid); }
+
+int setgid(gid_t gid) { return sys_setgid((uint32_t)gid); }

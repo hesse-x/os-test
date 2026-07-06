@@ -12,6 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <unity.h>
+#include <xos/errno.h>
 // sched_yield() is already declared by <unistd.h>; no <sched.h> needed.
 // This OS does not have that header, and angle brackets would fall back to the
 // host's /usr/include/sched.h, pulling in the host's struct timespec which
@@ -262,7 +263,12 @@ static void *thread_detached_fn(void *arg) {
   volatile char buf[1024];
   for (int i = 0; i < 1024; i++)
     buf[i] = (char)i;
-  return NULL;
+  /* Read back so the writes are not "set but not used"; this also
+   * guarantees the thread touches its full stack page. */
+  volatile char sum = 0;
+  for (int i = 0; i < 1024; i++)
+    sum += buf[i];
+  return (void *)(long)sum;
 }
 void test_pthread_detached_leak(void) {
   pthread_attr_t attr;

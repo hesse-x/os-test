@@ -26,10 +26,7 @@
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/vfs.h"
 #include "kernel/driver/ahci.h"
-#include "kernel/driver/blk_dev.h"
-#include "kernel/driver/display.h"
 #include "kernel/driver/pci.h"
-#include "kernel/user_check.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/list.h"
@@ -48,10 +45,8 @@
 #include <stddef.h>
 #include <xos/errno.h>
 #include <xos/fcntl.h>
-#include <xos/input.h>
 #include <xos/ioctl.h>
 #include <xos/mman.h>
-#include <xos/shm.h>
 #include <xos/signal.h>
 #include <xos/stat.h>
 #include <xos/syscall.h>
@@ -1904,6 +1899,8 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
     ks.st_ino = ip->ino;
     ks.st_size = ip->size;
     ks.st_mode = S_IFREG | 0644;
+    ks.st_uid = current_proc->uid;
+    ks.st_gid = current_proc->gid;
     ks.st_blocks = (ip->size + 511) / 512;
     break;
   }
@@ -2073,7 +2070,26 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 
   rcu_read_lock();
   struct file *f = fd_lookup(proc->proc->files, fd);
-  if (!f || f->type != FD_SHM) {
+  if (!f) {
+    rcu_read_unlock();
+    return (int64_t)-EBADF;
+  }
+
+  /* Regular files: grow/shrink the FAT32 cluster chain. */
+  if (f->type == FD_REGULAR) {
+    struct inode *ip = f->inode;
+    rcu_read_unlock();
+    if (!ip)
+      return (int64_t)-EBADF;
+    if (size < 0)
+      return (int64_t)-EINVAL;
+    spin_lock(&ip->i_lock);
+    int rc = fat32_ftruncate(ip, (uint64_t)size);
+    spin_unlock(&ip->i_lock);
+    return (int64_t)rc;
+  }
+
+  if (f->type != FD_SHM) {
     rcu_read_unlock();
     return (int64_t)-EINVAL;
   }
@@ -2643,6 +2659,41 @@ int64_t syscall_dispatch(trapframe *tf) {
   case SYS_PTHREAD_SET_CANCEL_HANDLER:
     return sys_pthread_set_cancel_handler(tf->rdi, tf->rsi, tf->rdx, tf->r10,
                                           tf->r8, tf->r9);
+  // POSIX identity & permissions (group 1)
+  case SYS_GETUID:
+    return sys_getuid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETEUID:
+    return sys_geteuid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETGID:
+    return sys_getgid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETEGID:
+    return sys_getegid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SETUID:
+    return sys_setuid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SETGID:
+    return sys_setgid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETPPID:
+    return sys_getppid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETPGRP:
+    return sys_getpgrp(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_UMASK:
+    return sys_umask(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETHOSTNAME:
+    return sys_gethostname(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SETHOSTNAME:
+    return sys_sethostname(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // alarm / pause (group 2)
+  case SYS_ALARM:
+    return sys_alarm(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_PAUSE:
+    return sys_pause(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // truncate / fsync / sync (group 3)
+  case SYS_TRUNCATE:
+    return sys_truncate(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_FSYNC:
+    return sys_fsync(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SYNC:
+    return sys_sync(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) implemented in phase 3b,
   // this phase returns -ENOSYS
   default:

@@ -6,11 +6,14 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <sys/stat.h>
 #include <unistd.h>
 #include <unity.h>
+
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <xos/errno.h>
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -206,6 +209,109 @@ void test_isatty_pipe(void) {
   close(fd[1]);
 }
 
+/* 12. ftruncate shrinks a file */
+void test_ftruncate_shrink(void) {
+  int fd = open("/local/ftrunc.txt", O_WRONLY | O_CREAT | O_TRUNC);
+  TEST_ASSERT_TRUE(fd >= 0);
+  write(fd, "0123456789ABCDE", 15);
+  TEST_ASSERT_EQUAL_INT(0, ftruncate(fd, 5));
+  struct stat st;
+  TEST_ASSERT_EQUAL_INT(0, fstat(fd, &st));
+  TEST_ASSERT_EQUAL_INT(5, (int)st.st_size);
+  close(fd);
+
+  fd = open("/local/ftrunc.txt", O_RDONLY);
+  char buf[16] = {0};
+  TEST_ASSERT_EQUAL_INT(5, (int)read(fd, buf, 16));
+  TEST_ASSERT_EQUAL_STRING("01234", buf);
+  close(fd);
+}
+
+/* 13. ftruncate grows a file; new bytes read back as zero */
+void test_ftruncate_grow(void) {
+  int fd = open("/local/ftrunc_g.txt", O_WRONLY | O_CREAT | O_TRUNC);
+  TEST_ASSERT_TRUE(fd >= 0);
+  write(fd, "AB", 2);
+  TEST_ASSERT_EQUAL_INT(0, ftruncate(fd, 10));
+  close(fd);
+
+  fd = open("/local/ftrunc_g.txt", O_RDONLY);
+  char buf[11] = {0};
+  TEST_ASSERT_EQUAL_INT(10, (int)read(fd, buf, 11));
+  TEST_ASSERT_EQUAL_INT('A', buf[0]);
+  TEST_ASSERT_EQUAL_INT('B', buf[1]);
+  for (int i = 2; i < 10; i++)
+    TEST_ASSERT_EQUAL_INT(0, buf[i]);
+  close(fd);
+}
+
+/* 14. truncate(path) by path */
+void test_truncate_path(void) {
+  int fd = open("/local/trunc.txt", O_WRONLY | O_CREAT | O_TRUNC);
+  write(fd, "hello world", 11);
+  close(fd);
+  TEST_ASSERT_EQUAL_INT(0, truncate("/local/trunc.txt", 5));
+  struct stat st;
+  TEST_ASSERT_EQUAL_INT(0, stat("/local/trunc.txt", &st));
+  TEST_ASSERT_EQUAL_INT(5, (int)st.st_size);
+}
+
+/* 15. fsync on a regular file returns 0 */
+void test_fsync_regular(void) {
+  int fd = open("/local/fsync.txt", O_WRONLY | O_CREAT);
+  TEST_ASSERT_TRUE(fd >= 0);
+  write(fd, "data", 4);
+  TEST_ASSERT_EQUAL_INT(0, fsync(fd));
+  close(fd);
+  /* sync() takes no args; just exercise it. */
+  sync();
+}
+
+/* 16. O_CREAT|O_EXCL fails on existing file */
+void test_open_excl(void) {
+  int fd = open("/local/excl.txt", O_CREAT | O_WRONLY, 0644);
+  TEST_ASSERT_TRUE(fd >= 0);
+  close(fd);
+  errno = 0;
+  int r = open("/local/excl.txt", O_CREAT | O_EXCL | O_WRONLY, 0644);
+  TEST_ASSERT_EQUAL_INT(-1, r);
+  TEST_ASSERT_EQUAL_INT(EEXIST, errno);
+}
+
+/* 17. mkstemp returns a unique, writable fd */
+void test_mkstemp(void) {
+  char tmpl[] = "/local/mkst_XXXXXX";
+  int fd = mkstemp(tmpl);
+  TEST_ASSERT_TRUE(fd >= 0);
+  /* the X's must be replaced */
+  TEST_ASSERT_FALSE(strstr(tmpl, "XXXXXX") != NULL);
+  write(fd, "tmp", 3);
+  lseek(fd, 0, SEEK_SET);
+  char buf[4] = {0};
+  read(fd, buf, 3);
+  TEST_ASSERT_EQUAL_STRING("tmp", buf);
+  close(fd);
+
+  /* a second call must yield a distinct name */
+  char tmpl2[] = "/local/mkst_XXXXXX";
+  int fd2 = mkstemp(tmpl2);
+  TEST_ASSERT_TRUE(fd2 >= 0);
+  TEST_ASSERT_FALSE(strcmp(tmpl, tmpl2) == 0);
+  close(fd2);
+}
+
+/* 18. realpath collapses . and .. */
+void test_realpath(void) {
+  char *r = realpath("/local/a/../b/./c", NULL);
+  TEST_ASSERT_NOT_NULL(r);
+  TEST_ASSERT_EQUAL_STRING("/local/b/c", r);
+
+  char buf[256];
+  char *r2 = realpath("/local/x/y", buf);
+  TEST_ASSERT_EQUAL_PTR(buf, r2);
+  TEST_ASSERT_EQUAL_STRING("/local/x/y", r2);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -222,5 +328,12 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_write_read_lseek);
   RUN_TEST(test_fstat_regular);
   RUN_TEST(test_isatty_pipe);
+  RUN_TEST(test_ftruncate_shrink);
+  RUN_TEST(test_ftruncate_grow);
+  RUN_TEST(test_truncate_path);
+  RUN_TEST(test_fsync_regular);
+  RUN_TEST(test_open_excl);
+  RUN_TEST(test_mkstemp);
+  RUN_TEST(test_realpath);
   return UNITY_END();
 }

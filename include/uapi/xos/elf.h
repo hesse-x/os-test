@@ -105,11 +105,6 @@ typedef struct {
   int64_t r_addend;
 } Elf64_Rela;
 
-typedef union {
-  uint64_t d_val;
-  uint64_t d_ptr;
-} Elf64_Dyn_v;
-
 typedef struct {
   int64_t d_tag;
   union {

@@ -124,3 +124,32 @@ CheckOptions:
 git diff --name-only --diff-filter=d origin/master...HEAD -- '*.c' '*.h' \
   | run-clang-tidy -p build/compile_commands.json
 ```
+
+## include 检查(include-what-you-use)
+
+由 `build_script/iwyu_check.sh` 执行(`check.sh --filter iwyu` 调用),全仓 `.c/.cc` 覆盖,排除 `third_party/`、跳过 `.S`。映射文件 `build_script/iwyu.imp`,工具内置 glibc 归属表与本项目 `-nostdinc + 自造 libc` 架构的冲突由脚本解析层处理。
+
+### 判定标准(机器可判,无需肉眼)
+
+iwyu 的每条 `should add` 建议按以下规则二分,不靠人工权衡:
+
+- **不可解析 = 噪音,自动滤掉**:iwyu 建议 `+ #include <H>`,但 `<H>` 在该 TU 搜索路径下编译器解析不到。这类建议源自 iwyu 内置 glibc 符号归属表(把 `struct timeval`→`<sys/time.h>`、`pid_t`→`<sys/types.h>` 等),在本项目里那些 glibc 公开头多数不存在。`iwyu_check.sh` 的解析层按 TU 类别滤除:
+  - 内核 TU(搜索路径仅 freestanding 四件套 + `<xos/*>`):任何非 freestanding、非 `<xos/*>` 的尖括号公开头都判不可解析,滤除。
+  - 用户态 TU(额外有 `user/include/`):仅 `<sys/time.h>`、`<inttypes.h>` 等无 wrapper 的头判不可解析,滤除;`<sys/types.h>`、`<unistd.h>` 等 wrapper 存在的头**不滤**(见下)。
+- **可解析 = 真建议,照报**:iwyu 建议 `+ #include <H>` 且 `<H>` 可解析。这是真实建议,处理方式二选一,都是机械动作:
+  1. **照做**:加上该 include(如 `sys_wait.cc` 用 `pid_t`,加 `#include <sys/types.h>`)。
+  2. **豁免**:现状合理但不想改,在该 include 行加 `// IWYU pragma: keep`(见下「豁免」)。
+
+`should remove`(删未用 include)一律照报,不滤——但注意 iwyu 偶有「因建议了 bogus 头而误判某 include 没用」的连锁误删(如建议 bogus `<sys/time.h>` 后误判 `<time.h>` 无用)。这类 `-` 行若涉及 `struct timeval` 等仍在用的符号,判为 bogus 连锁孤儿,手动忽略。
+
+### 豁免规则(`// IWYU pragma: keep` / `no_include`)
+
+以下两类 iwyu 建议虽「合法」但违背项目设计,**明确豁免**,不算肉眼妥协:
+
+- **外部聚合头不拆**:来自 host 的聚合头(`<efi.h>`、`<efilib.h>` 等 gnu-efi 头;`<stdint.h>` 等 freestanding 头)设计上只引一个、内部拉齐子头。iwyu 会要求拆成子头(如 `stub.c` 拆出 `efiapi.h/efibind.h/...`)——**不拆**。处理:聚合头行加 `// IWYU pragma: keep`;若 iwyu 仍建议子头,在文件头加 `// IWYU pragma: no_include "子头.h"` 显式拒绝(见 `boot/stub.c` 范例)。
+- **传递包含够用**:某符号已通过现有 include 传递获得,iwyu 仍要求显式引规范头。若项目接受传递包含,在被传递的 include 行加 `// IWYU pragma: keep` 说明依赖关系。
+
+### 映射文件 `iwyu.imp` 的边界
+
+`iwyu.imp` 用 header→header 改写映射(如 `["<signal.h>" → "<xos/signal.h>"]`),**仅对「iwyu 想改写已 include 的头」生效**;对「iwyu 新增建议某头」(本项目主要冲突点)基本无效——后者由 `iwyu_check.sh` 解析层的「不可解析即滤」规则兜底,不靠映射。映射只在「外部库头被误归到 glibc 公开头、需改写到项目头」时少量有用,新增需实测验证是否生效,勿盲目堆砌。
+

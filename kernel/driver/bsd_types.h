@@ -114,6 +114,14 @@ typedef struct proc {
   // === pthread cancel (Phase 4) ===
   uint64_t cancel_handler; // __pthread_cancel_check function address, 0 = not
                            // registered
+
+  // === POSIX identity & permissions (group 1-2) — mirror kernel/bsd/proc.h
+  // ===
+  uint32_t uid;
+  uint32_t euid;
+  uint32_t gid;
+  uint32_t egid;
+  uint32_t umask;
 } proc;
 
 // ABI drift guard: must match kernel/bsd/proc.h byte-for-byte.
@@ -126,7 +134,7 @@ DRV_STATIC_ASSERT(offsetof(proc, files) == 184,
                   "driver proc.files offset drift");
 DRV_STATIC_ASSERT(offsetof(proc, signal) == 176,
                   "driver proc.signal must be POINTER not inline");
-DRV_STATIC_ASSERT(sizeof(proc) == 232, "driver proc size drift");
+DRV_STATIC_ASSERT(sizeof(proc) == 256, "driver proc size drift");
 #undef DRV_STATIC_ASSERT
 
 #endif /* KERNEL_BSD_PROC_H */

@@ -4,12 +4,15 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "arch/x64/memlayout.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syscall.h>
 #include <unistd.h>
+
+#include "arch/x64/memlayout.h"
+
+#include <xos/mman.h>
 
 // ===================== Size class definitions =====================
 #define NUM_KMALLOC_CLASSES 9

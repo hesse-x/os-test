@@ -1,18 +1,16 @@
 #!/bin/bash
 # clang_format_check.sh — clang-format format check (+ optional auto-fix)
-# Standalone runnable: ./build_script/clang_format_check.sh [--fix]
-# Returns 0 = check passed (all files conform); 1 = check failed (violations
-# remain, or the environment is missing). The return value always reflects the
-# check result; --fix only applies repairs after a failed check, it does not
-# change the exit status.
+# Standalone runnable: ./build_script/clang_format_check.sh
+# Returns 0 = all files conform (no violations found); 1 = violations detected
+# and auto-fixed (files have been modified in-place — git add/commit to apply).
 #
 # Coverage: all .c/.cc/.h/.hpp in the repo, excluding third_party/ and build/.
 # Format standard: repo-root .clang-format (BasedOnStyle: LLVM).
 #
 # Behavior:
-#   default  — check only (clang-format --dry-run --Werror). No file is modified.
-#   --fix    — check first; if the check fails, run clang-format -i to auto-fix,
-#              then show the changes via git diff. Two clang-format passes total.
+#   default — clang-format --dry-run --Werror to detect violations;
+#             if any, auto-fix with clang-format -i.
+#             Two clang-format passes total when violations exist.
 #
 # Invoked by check.sh --filter clang-format.
 # Design in doc/design/code_standard.md.
@@ -20,16 +18,6 @@
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 cd "$ROOT_DIR"
-
-# ===================== Parse arguments =====================
-
-FIX=0
-for arg in "$@"; do
-    case "$arg" in
-        --fix) FIX=1 ;;
-        *) echo "Usage: $0 [--fix]"; exit 1 ;;
-    esac
-done
 
 # ===================== Environment check =====================
 
@@ -71,17 +59,12 @@ fi
 echo "clang-format check FAILED. Violations:"
 echo "$VIOLATIONS"
 
-# ===================== Optional auto-fix (pass 2: in-place) =====================
+# ===================== Auto-fix (pass 2: in-place) =====================
 
-if [ "$FIX" -eq 1 ]; then
-    echo ""
-    echo "Applying clang-format -i to fix violations..."
-    echo "$SOURCES" | xargs clang-format -i
-    echo ""
-    echo "Fixed changes (git diff):"
-    git diff
-    echo ""
-    echo "Review and git add/commit."
-fi
+echo ""
+echo "Applying clang-format -i to fix violations..."
+echo "$SOURCES" | xargs clang-format -i
+echo ""
+echo "Done. git add/commit if satisfied."
 
 exit 1

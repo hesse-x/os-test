@@ -7,11 +7,10 @@
 #ifndef KERNEL_BSD_SYSCALL_H
 #define KERNEL_BSD_SYSCALL_H
 
-#include "arch/x64/trap.h"
-#include "kernel/bsd/types.h"
-#include "kernel/xcore/xtask.h"
-#include <stddef.h>
 #include <stdint.h>
+
+#include "arch/x64/trap.h"
+#include "kernel/xcore/xtask.h"
 
 // Syscall dispatch entry
 int64_t syscall_dispatch(trapframe *tf);
@@ -69,6 +68,28 @@ int64_t sys_setsid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_setpgid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_getpgid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_getsid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
+// POSIX identity & permissions (group 1)
+int64_t sys_getuid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_geteuid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_getgid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_getegid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_setuid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_setgid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_getppid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_getpgrp(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_umask(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_gethostname(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_sethostname(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
+// alarm / pause (group 2)
+int64_t sys_alarm(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_pause(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
+// truncate / fsync / sync (group 3)
+int64_t sys_truncate(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_fsync(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_sync(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // Socket (declared in socket.h, not repeated here)
 

@@ -14,9 +14,9 @@
 extern "C" {
 #endif
 
-typedef uint32_t ioctl_cmd_t;
+typedef uint32_t ioctl_cmd;
 
-LIBC_EXPORT int ioctl(int fd, ioctl_cmd_t cmd, ...);
+LIBC_EXPORT int ioctl(int fd, ioctl_cmd cmd, ...);
 
 #include <xos/ioctl.h>
 

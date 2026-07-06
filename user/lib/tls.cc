@@ -17,7 +17,7 @@
 
 // Global TLS template info singleton (read by pthread_create)
 extern "C" {
-struct tls_info g_tls_info = {0};
+struct tls_info g_tls_info = {};
 }
 
 // Linker symbols (defined in user_linker.ld)
@@ -164,7 +164,7 @@ extern "C" void __pthread_cancel_check(int sig) {
 // Dynamic path: walk _dl_link_map merging PT_TLS into tls_info
 // List order: main ELF → libc.so → ld.so (ld.so usually has no PT_TLS, skip it)
 extern "C" struct tls_info collect_tls_from_link_map(struct link_map *lmap) {
-  struct tls_info ti = {0};
+  struct tls_info ti = {};
   size_t offset = 0;
   // First pass: compute total size and maximum alignment
   for (struct link_map *l = lmap; l; l = l->l_next) {

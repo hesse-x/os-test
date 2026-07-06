@@ -117,7 +117,7 @@ dup2：对应 refs++（master_refs 或 slave_refs）
 
 #### TX 路径
 
-serial_putc（arch/x64/utils.h 门控 NSERIAL）：spin_lock_irqsave(serial_tx_lock) → LSR 等待 THR 空 → outb(COM1, c) → unlock。内核 debug 输出直接调用 serial_printf→serial_puts→serial_putc，不经过 fd。
+serial_putc（spin_lock_irqsave(serial_tx_lock) → LSR 等待 THR 空 → outb(COM1, c) → unlock）。内核 debug 输出直接调用 serial_printf→serial_puts→serial_putc，不经过 fd。
 
 #### RX 路径
 

@@ -13,7 +13,6 @@
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/spinlock.h"
 #include <stddef.h>
-#include <xos/errno.h>
 
 /* Hash table for page lookup: (inode, page_index) -> cache_page */
 static struct cache_page *page_cache_hash[1 << PAGE_CACHE_HASH_BITS];
@@ -334,4 +333,54 @@ void page_cache_invalidate_inode(struct inode *ip) {
     }
   }
   spin_unlock(&page_cache_lock);
+}
+
+/* Collect dirty pages (optionally restricted to one inode) into out[], pinning
+ * each so it can't be evicted before writeback. Returns the count collected,
+ * capped at max. Caller must page_cache_release() each collected page. */
+static int collect_dirty(struct inode *only_ip, struct cache_page **out,
+                         int max) {
+  int n = 0;
+  spin_lock(&page_cache_lock);
+  for (int i = 0; i < (1 << PAGE_CACHE_HASH_BITS) && n < max; i++) {
+    for (struct cache_page *cp = page_cache_hash[i]; cp && n < max;
+         cp = cp->hash_next) {
+      if (cp->dirty && cp->data && cp->inode &&
+          (!only_ip || cp->inode == only_ip)) {
+        atomic_inc(&cp->pin_count);
+        out[n++] = cp;
+      }
+    }
+  }
+  spin_unlock(&page_cache_lock);
+  return n;
+}
+
+/* Write back every dirty page in the cache (sync()). Walks all 64 hash buckets
+ * — there is no global dirty list yet (vfs.md todo). */
+void page_cache_flush_all(void) {
+  for (;;) {
+    struct cache_page *buf[64];
+    int n = collect_dirty(NULL, buf, 64);
+    if (n == 0)
+      break;
+    for (int i = 0; i < n; i++) {
+      page_cache_writeback(buf[i]);
+      page_cache_release(buf[i]);
+    }
+  }
+}
+
+/* Write back only the dirty pages of one inode (fsync(fd)). */
+void page_cache_flush_inode(struct inode *ip) {
+  for (;;) {
+    struct cache_page *buf[64];
+    int n = collect_dirty(ip, buf, 64);
+    if (n == 0)
+      break;
+    for (int i = 0; i < n; i++) {
+      page_cache_writeback(buf[i]);
+      page_cache_release(buf[i]);
+    }
+  }
 }

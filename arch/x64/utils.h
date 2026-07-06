@@ -23,26 +23,6 @@ static inline uint8_t inb(uint16_t port) {
   return ret;
 }
 
-static inline uint16_t inw(uint16_t port) {
-  uint16_t ret;
-  __asm__ volatile("inw %1, %0" : "=a"(ret) : "Nd"(port));
-  return ret;
-}
-
-static inline void outw(uint16_t port, uint16_t val) {
-  __asm__ volatile("outw %0, %1" : : "a"(val), "Nd"(port));
-}
-
-static inline uint32_t inl(uint16_t port) {
-  uint32_t ret;
-  __asm__ volatile("inl %1, %0" : "=a"(ret) : "Nd"(port));
-  return ret;
-}
-
-static inline void outl(uint16_t port, uint32_t val) {
-  __asm__ volatile("outl %0, %1" : : "a"(val), "Nd"(port));
-}
-
 // ===================== MSR helpers =====================
 static inline void wrmsr(uint32_t msr, uint64_t val) {
   uint32_t lo = val & 0xFFFFFFFF;
@@ -105,39 +85,12 @@ __memmove(void *dst, const void *src, size_t n) {
   return dst;
 }
 
-// ===================== Early serial output =====================
-#ifdef NSERIAL
-static inline void serial_early_out(char c) { (void)c; }
-#else
-static inline void serial_early_out(char c) { outb(0x3F8, c); }
-#endif
-
 // ===================== Interrupt control =====================
 static inline void cli() { __asm__ volatile("cli"); }
 
 static inline void sti() { __asm__ volatile("sti"); }
 
 static inline void halt() { __asm__ volatile("cli; hlt"); }
-
-// ===================== Interrupt state save/restore =====================
-static inline uint64_t local_irq_save() {
-  uint64_t flags;
-  __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags));
-  return flags;
-}
-
-static inline void local_irq_restore(uint64_t flags) {
-  __asm__ volatile("pushq %0; popfq" ::"r"(flags));
-}
-
-// ===================== RAII interrupt guard (C cleanup macro)
-// =====================
-static inline void irq_guard_cleanup(uint64_t *flags) {
-  local_irq_restore(*flags);
-}
-
-#define DEFINE_IRQGUARD(name)                                                  \
-  uint64_t name __attribute__((cleanup(irq_guard_cleanup))) = local_irq_save()
 
 // ===================== MMIO helpers =====================
 __attribute__((no_sanitize("kernel-address"))) static inline uint16_t

@@ -13,8 +13,8 @@
 | 5 | `run_count` 语义 | 本 CPU run_queue 中 READY 任务数,**不含 RUNNING**(出队即 `--`) | scheduler_lock 下更新,跨 CPU 用 `__atomic_load_n` RELAXED |
 | 6 | `pick_cpu()` / `pick_cpu_pref(pref)` | 遍历 `cpu_locals[].run_count` 选最小值;`pick_cpu_pref` 增加父进程亲和性倾向(差距 <= `AFFINITY_THRESHOLD` 时选偏好 CPU) | 含义是"队列最短的 CPU",**不反映 RUNNING 任务** |
 | 7 | `assigned_cpu` | 创建时初始化 + work stealing 迁移时更新(唯一写入者:`try_steal_task` 持双锁);fork/clone 中 `assigned_cpu` 先于 `pid` 赋值(顺序约束) | 防 pid 生效后 assigned_cpu 仍是 -1 导致 wake 路径越界 |
-| 8 | IRQ 路由 | 全部留在 BSP | AP 靠定时器轮询拾取 woken 进程；低延迟需 IPI |
-| 9 | timer_handler 抢占条件 | `tf->cs == 0x2B`（从用户态来则抢占） | 用户态中断时可安全调 schedule()；内核态中断（idle hlt）不调 schedule()，仅 EOI |
+| 8 | IRQ 路由 | 全部留在 BSP | 外部硬件中断路由到 BSP；跨核唤醒靠 reschedule IPI（见下）通知目标 CPU |
+| 9 | timer_handler 抢占条件 | `tf->cs == 0x2B`（从用户态来）只设 `current_task->need_resched = 1`，不调 schedule() | 统一抢占路径，timer/IPI 都"设标志 + 出口调"；`schedule()` 永远在进程内核栈被调，不在 irq 栈。内核态中断（idle hlt）不设标志，仅 EOI |
 | 10 | idle 不计入 `run_count` | idle 永远可运行但不计入 | idle 是"兜底"，不是负载；`pick_cpu()` 只看用户进程负载 |
 | 11 | `process_entry` | `jmp __trapret` | 无需额外操作 |
 | 12 | AP idle 栈 | 创建独立内核栈，ap_entry_c 末尾切换到 idle 栈后进入 idle_entry | smp_boot_aps 分配的临时栈仅用于 AP 初始化 |
@@ -69,7 +69,7 @@
   fd_table[MAX_FD] : struct file — 固定 32 项数组（MAX_FD=32）
   ref_count : int — fork 共享引用计数
 
-最多 1024 个进程（MAX_PROC=1024，指针数组常驻 8KB）。`_Static_assert(MAX_PROC <= 4096)` 防盲目调大——需更大容量应走 pidhash 路线（见 proc list 动态化方案"不做的事"）。`task_get(pid)` helper 统一 pid→xtask_t* 访问：debug 下 ASSERT 不合格 panic，release 裸指针零开销。
+最多 1024 个进程（MAX_PROC=1024，指针数组常驻 8KB）。`_Static_assert(MAX_PROC <= 4096)` 防盲目调大——需更大容量应走 pidhash 路线。`task_get(pid)` helper 统一 pid→xtask_t* 访问：debug 下 ASSERT 不合格 panic，release 裸指针零开销。
 
 ### 内核栈布局
 
@@ -145,7 +145,40 @@
    - **阶段一**：持**本 CPU** scheduler_lock，遍历 `cpu_locals[cpu].timer_queue`，到期进程 `state→READY`、清 `wait_deadline`，`list_remove` 出 timer_queue 后挂到本地临时链表 `wakeup_list`（只动本 CPU 的 timer_queue 与任务自身字段）。
    - **阶段二**：释放本 CPU 锁，遍历 `wakeup_list`，对每个任务按其 `assigned_cpu` 加锁后 `list_push_back` 入该 CPU 的 run_queue 并 `run_count++`。
    - **为何不能在持本 CPU 锁时直接跨 CPU 投递**：run_queue/run_count 必须由所属 CPU 的 scheduler_lock 保护；若持 A 锁写 B CPU 的 run_queue，会与 B 的 `schedule()` 并发写同一链表/计数器，导致节点丢失、`run_count` 漂移，最终 `schedule()` 的一致性 `ASSERT(cnt == run_count)` 触发 panic。
-4. 用户态抢占：`tf->cs == 0x2B` 时调 schedule()；内核态中断（idle hlt）不调
+4. 用户态抢占：`tf->cs == 0x2B` 时只设 `current_task->need_resched = 1`，不调 schedule()；内核态中断（idle hlt）不设标志，仅 EOI。抢占统一在返用户态出口（`check_pending_signals` 的 `while (need_resched) schedule()` 循环）完成。Debug 构建附带 preempt-stall watchdog：连续 ~100 个 timer tick `need_resched` 未被消费则告警（指向抢占点被绕过），见 [debug.md](../debug.md)。
+
+### reschedule IPI
+
+跨核唤醒后及时调度，延迟从 ~10ms（等下次 LAPIC timer tick）降到微秒级。模型为 c1：IPI/timer 只设 per-thread `xtask_t.need_resched` 标志，不调 `schedule()`；抢占统一在返用户态出口做。
+
+```
+唤醒路径（持目标 CPU scheduler_lock）
+  ├─ wake_from_wait(target)         // state→READY, 入队, run_count++
+  └─ 设 curr->need_resched = 1      // curr = 目标 CPU 的 current（target 是 BLOCKED 不可能在跑）
+      └─ if (target_cpu != my_cpu) lapic_send_reschedule(target_cpu)
+
+IPI handler / timer handler
+  └─ current->need_resched = 1 + EOI
+
+返用户态出口（__trapret / syscall_fast_entry）
+  └─ check_pending_signals(tf)      // 现有信号检查
+  └─ while (current->need_resched) schedule()  // 入口清 need_resched = 0
+```
+
+| 要点 | 说明 |
+|------|------|
+| 标志位 | per-thread `xtask_t.need_resched`，照 Linux `TIF_NEED_RESCHED` |
+| 设标志的目标 | 永远设在**目标 CPU 的 current** 上（curr），不设在 target 上；target 的紧迫性由入队 run_queue + run_count++ 自然表达 |
+| 触发封装 | IPI 逻辑塞进 `wake_from_wait` 内部，所有唤醒路径（`wake_process`/`sys_notify`/`sys_msg_to`/`sys_req`/`sys_resp`/pipe/socket）自动获益 |
+| 本 CPU 短路 | `target_cpu == my_cpu` 时只设标志不发 IPI（自 IPI 浪费） |
+| 清标志 | `schedule()` 入口 `spin_lock_irqsave` 后第一行 `prev->need_resched = 0`，单点清理，零漏清 |
+| 向量号 | 0xec（236），跟 Linux `RESCHEDULE_VECTOR` 一致；为将来 TLB shootdown（0xed）等预留高向量 IPI 区 |
+| 入口 | 复用 `__alltraps`，handler 走 `irq_handlers[]` 注册表；新增 `vector236` stub |
+| IST 栈 | 不用，走 RSP0（handler 只设标志不切栈） |
+| 注册表容量 | `MAX_IRQ_HANDLERS` 从 128 扩到 256（否则 0xec 落到 CPU exception 路径 panic） |
+| 信号 vs resched 顺序 | 先检查信号后循环 resched（信号可能让进程退出，退出就不需 resched） |
+
+实现：`arch/x64/apic.c : lapic_send_reschedule`（ICR Fixed IPI）、`kernel/xcore/trap.c : reschedule_ipi_handler`、`kernel/xcore/sched.h : wake_from_wait`。详见 [smp.md](smp.md) IPI 部分。
 
 ### check_pending_signals
 
@@ -159,6 +192,7 @@
 2. 计算 `deliverable = pending & ~blocked`，为空则 return
 3. 取最低位信号 `sig = __builtin_ctzll(deliverable)`，清除 pending 位
 4. SIG_IGN → continue；SIG_DFL → 默认动作；有 handler → `deliver_signal(proc, tf, sig, sa)` 后 return（一次只投递一个）
+5. 信号循环结束后：`while (current_task->need_resched) schedule()` —— 先检查信号后循环 resched，保证 iretq/sysretq 前 current 一定不需再抢。`schedule()` 入口清 `need_resched`，切回来后继续循环判定直到清零
 
 详见 doc/design/ipc.md 信号机制部分。
 
@@ -240,7 +274,7 @@
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| IPI 唤醒 | IRQ 全留在 BSP,AP 靠定时器轮询拾取 woken 进程(~10ms 延迟);低延迟需 IPI 通知目标 CPU | 中 |
 | 调度策略 | 当前 FIFO(run_queue 顺序),无优先级/时间片;需 O(1) 或 CFS 调度器 | 低 |
 | per-CPU run_count 优化 | pick_cpu() 遍历所有 CPU;大核数时可用 cache line 对齐 + NUMA 感知 | 低 |
 | sched_clock 精度 | 当前直接用 TSC cycle,未转换为纳秒;需校准 tsc_khz | 低 |
+| 内核态抢占 | 当前 c1 模型只覆盖"返用户态出口";c2（preempt_count + 内核态抢占点）可覆盖 syscall 主体计算中那段时间（微秒级），但需改造所有 spinlock 操作 + 协调 RCU 临界区 | 低 |

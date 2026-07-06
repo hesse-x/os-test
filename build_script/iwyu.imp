@@ -2,7 +2,7 @@
 #
 # The build uses -nostdinc and -isystem <gcc-freestanding-include>, so only
 # the freestanding C headers (<stdint.h>, <stddef.h>, <stdarg.h>, <stdbool.h>)
-# resolve. POSIX/glibc headers (<signal.h>, <sys/types.h>, <unistd.h>, ...)
+# resolve. POSIX/glibc headers (<signal.h>, <sys/types.h>, <sys/time.h>, ...)
 # do NOT exist in the search path for kernel TUs, and only exist for user-space
 # TUs as thin wrappers under user/include/ that pull in <xos/...>.
 #
@@ -14,6 +14,28 @@
 # BOTH kernel and user-space TUs), so iwyu attributes symbols to where they are
 # actually defined.
 #
+# Mechanism (verified): a mapping rewrites a *suggested* include. When iwyu's
+# glibc DB wants to suggest "<sys/time.h>" for struct timeval, the mapping turns
+# that suggestion into "<xos/time.h>" — which is on disk, so the TU is reported
+# correct instead of being told to add a header it can't resolve. The mapping is
+# harmless on user-space TUs: when the user/include wrapper already provides the
+# symbol, iwyu reports correct regardless, and symbol-ownership rewrite does not
+# strip a header the TU already includes.
+#
+# A mapping is only useful where the RHS <xos/...> header actually defines the
+# symbols the LHS glibc header owns. Entries are NOT added for headers whose
+# owned symbols are libc *function declarations* with no <xos/...> home:
+#   - <unistd.h> (read/write/close/...): declared in user/include/unistd.h only;
+#     <xos/syscall.h> carries no function decls. Kernel TUs never call the libc
+#     read()/write(), so iwyu never suggests <unistd.h> there — no mapping needed.
+#   - <sys/wait.h> (waitpid/W*): same — only in user/include/sys/wait.h.
+#   - <dirent.h> (struct dirent): user/include/dirent.h's struct dirent is
+#     deliberately a different type from <xos/dirent.h>'s struct dirent64 (see
+#     the comment in include/uapi/xos/dirent.h); conflating them via a mapping
+#     would mis-attribute. struct dirent64 is a project-internal type iwyu has no
+#     builtin attribution for, so nothing needs redirecting.
+# Loaded by build_script/iwyu_check.sh via -Xiwyu --mapping_file.
+#
 # Format: { include: ["<glibc-public>", public, "<xos/...>", public ] }
 #   — "a public include of <glibc-public> is rewritten to a public include of
 #      <xos/...>". iwyu's include picker then stops suggesting <glibc-public>
@@ -24,10 +46,13 @@
   { include: ["<signal.h>", public, "<xos/signal.h>", public ] },
 
   # ---- POSIX sys/* types ----
-  # pid_t lives in <xos/types.h>. The other POSIX types (off_t, dev_t, ino_t,
-  # mode_t, uid_t, gid_t, ssize_t, ...) are defined only in user/include/sys/types.h
-  # (a user-space wrapper); kernel code does not use them. Point <sys/types.h>
-  # at <xos/types.h> so the kernel-resolvable symbol (pid_t) lands correctly.
+  # pid_t lives in <xos/types.h>; the other POSIX types (off_t, dev_t, ino_t,
+  # mode_t, uid_t, gid_t, ssize_t, ...) live only in user/include/sys/types.h.
+  # Pointing <sys/types.h> at <xos/types.h> is what makes iwyu stop telling
+  # kernel TUs to add the unresolvable <sys/types.h> for pid_t. It is safe for
+  # user-space TUs too: the user/include/sys/types.h wrapper is on disk and
+  # provides ssize_t/off_t/etc., so iwyu reports correct there regardless — the
+  # mapping only rewrites the *suggestion*, it does not strip an included header.
   { include: ["<sys/types.h>", public, "<xos/types.h>", public ] },
 
   # ---- errno ----
@@ -56,16 +81,6 @@
   { include: ["<sys/mman.h>", public, "<xos/mman.h>", public ] },
   { include: ["<mman.h>", public, "<xos/mman.h>", public ] },
 
-  # ---- unistd: read/write/close/pipe/dup2/getpid/... ----
-  { include: ["<unistd.h>", public, "<xos/syscall.h>", public ] },
-
-  # ---- waitpid / W* macros ----
-  { include: ["<sys/wait.h>", public, "<xos/syscall.h>", public ] },
-
   # ---- ELF types ----
   { include: ["<elf.h>", public, "<xos/elf.h>", public ] },
-
-  # ---- dirent ----
-  { include: ["<dirent.h>", public, "<xos/dirent.h>", public ] },
-  { include: ["<sys/dirent.h>", public, "<xos/dirent.h>", public ] },
 ]

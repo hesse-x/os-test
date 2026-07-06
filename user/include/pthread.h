@@ -133,11 +133,11 @@ typedef struct {
 #define PTHREAD_STACK_DEFAULT (64 * 1024)
 
 // ===================== Cleanup handler =====================
-typedef struct __pthread_cleanup_handler {
+typedef struct pthread_cleanup_handler {
   void (*routine)(void *);
   void *arg;
-  struct __pthread_cleanup_handler *prev;
-} __pthread_cleanup_handler_t;
+  struct pthread_cleanup_handler *prev;
+} pthread_cleanup_handler;
 
 // ===================== Function declarations =====================
 LIBC_EXPORT int pthread_create(pthread_t *thread, const pthread_attr_t *attr,

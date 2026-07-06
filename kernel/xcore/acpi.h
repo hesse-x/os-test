@@ -8,7 +8,6 @@
 #define KERNEL_ACPI_H
 
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 
 // ===================== ACPI table structures =====================

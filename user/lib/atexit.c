@@ -11,9 +11,9 @@
 
 #define ATEXIT_MAX 32
 
-typedef void (*atexit_func_t)(void);
+typedef void (*atexit_func_fn)(void);
 
-static atexit_func_t atexit_funcs[ATEXIT_MAX];
+static atexit_func_fn atexit_funcs[ATEXIT_MAX];
 static int atexit_count = 0;
 
 int atexit(void (*func)(void)) {

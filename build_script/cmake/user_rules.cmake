@@ -1,12 +1,16 @@
 # user_rules.cmake — add_user_lib() / add_user_elf() wrappers for userspace build rules
 
 # Userspace common compile flags (CMake list, semicolon-separated)
-# -nostdinc + -isystem: see top of CMakeLists.txt. Duplicated here because
-# add_user_ldso / SHARED libc.so / crt0 use bare gcc commands (not CMake targets),
-# they don't inherit global CMAKE_C_FLAGS, so they must carry these explicitly
-# to resolve freestanding headers like <stdint.h>.
-# Duplicating global flags is harmless for CMake target static libraries (gcc accepts duplicate -nostdinc/-isystem).
-set(USER_COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -mno-red-zone -nostdinc -isystem ${GCC_FREESTANDING_INC})
+# Bare-gcc custom commands (add_user_elf / add_user_ldso / SHARED libc.so /
+# crt0) do NOT inherit global CMAKE_C_FLAGS, so they must carry these flags
+# explicitly to resolve freestanding headers like <stdint.h> and to get the
+# warning gate. They reference the shared FREESTANDING_FLAGS / WARN_FLAGS
+# variables defined in CMakeLists.txt — the single source of truth — so a flag
+# change there propagates here without manual mirroring. ( gcc accepts
+# duplicate -nostdinc/-isystem, so this is also harmless for the CMake-target
+# static-library path in add_user_lib, which gets the same flags via
+# target_compile_options below. )
+set(USER_COMPILE_FLAGS -m64 ${WARN_FLAGS} ${FREESTANDING_FLAGS} -fno-pie)
 
 # Build-type flags for the bare-gcc commands below (add_user_elf / add_user_ldso /
 # SHARED libc.so / add_user_dyn_elf). CMake targets (kernel OBJECT libs, static
@@ -236,11 +240,9 @@ endfunction()
 function(add_user_ldso name)
     cmake_parse_arguments(ARG "" "" "SOURCES" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
-    set(COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin
-                      -fPIC -fno-stack-protector -mno-red-zone
-                      -fvisibility=hidden
+    set(COMPILE_FLAGS -m64 ${WARN_FLAGS} ${FREESTANDING_FLAGS}
+                      -fPIC -fvisibility=hidden
                       ${USER_BUILD_FLAGS}
-                      -nostdinc -isystem ${GCC_FREESTANDING_INC}
                       -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include)
     set(OBJ_FILES "")
     set(idx 0)

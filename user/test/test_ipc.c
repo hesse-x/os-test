@@ -74,8 +74,6 @@ void test_req_resp(void) {
   /* Request ourselves — this requires the process to handle recv
    * and send resp, which is complex in single-process. Mark as
    * basic API availability test. */
-  char req_data[56] = {0};
-  char resp_data[56] = {0};
   /* Cannot do full req/resp with self in single process */
   /* Test that the API exists and compiles */
   TEST_ASSERT_TRUE(1);

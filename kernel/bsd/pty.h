@@ -15,6 +15,8 @@
 #include <stdint.h>
 #include <xos/fcntl.h>
 
+struct inode;
+
 // ===================== PTY buffer size =====================
 #define PTY_BUF_SIZE 4096
 

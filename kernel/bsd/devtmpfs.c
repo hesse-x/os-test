@@ -5,7 +5,6 @@
  */
 
 #include "kernel/bsd/devtmpfs.h"
-#include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/proc.h"
@@ -18,6 +17,8 @@
 #include "kernel/xcore/xtask.h"
 #include <stddef.h>
 #include <xos/errno.h>
+
+struct shm;
 
 #define MAX_DEV_ENTRIES 32
 

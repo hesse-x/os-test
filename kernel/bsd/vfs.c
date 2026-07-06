@@ -25,7 +25,6 @@
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
-#include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -148,6 +147,62 @@ int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
     return rc;
   if (copy_to_user(stat_buf, kstat_buf, sizeof(struct kstat)))
     return (int64_t)-EFAULT;
+  return 0;
+}
+
+/* sys_truncate(path, len) — SYS_TRUNCATE (group 3)
+ * Resolve the path to an inode and grow/shrink the file to len bytes. */
+int64_t sys_truncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
+                     int64_t _u3, int64_t _u4) {
+  const char __user *upath = (const char __user *__force)arg1;
+  int64_t len = arg2;
+  if (!upath)
+    return (int64_t)-EFAULT;
+  if (len < 0)
+    return (int64_t)-EINVAL;
+  char path[256];
+  if (strncpy_from_user(path, upath, 256) < 0)
+    return (int64_t)-EFAULT;
+
+  int err = 0;
+  struct inode *ip = fat32_open(path, 0, &err);
+  if (!ip)
+    return (int64_t)(-err);
+  spin_lock(&ip->i_lock);
+  int rc = fat32_ftruncate(ip, (uint64_t)len);
+  spin_unlock(&ip->i_lock);
+  inode_put(ip);
+  return (int64_t)rc;
+}
+
+/* sys_fsync(fd) — SYS_FSYNC (group 3): write back dirty pages of one inode. */
+int64_t sys_fsync(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
+                  int64_t _u4, int64_t _u5) {
+  int fd = (int)arg1;
+  xtask *proc = current_task;
+  if (fd < 0 || fd >= MAX_FD)
+    return (int64_t)-EBADF;
+
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f || (f->type != FD_REGULAR && f->type != FD_DIR)) {
+    rcu_read_unlock();
+    return (int64_t)-EINVAL;
+  }
+  struct inode *ip = f->inode;
+  rcu_read_unlock();
+  if (!ip)
+    return (int64_t)-EBADF;
+
+  page_cache_flush_inode(ip);
+  /* FAT32 has no separate metadata journal; the dir entry is updated
+   * synchronously on each size/metadata change, so nothing more to flush. */
+  return 0;
+}
+
+/* sys_sync() — SYS_SYNC (group 3): write back all dirty pages. */
+int64_t sys_sync(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+  page_cache_flush_all();
   return 0;
 }
 

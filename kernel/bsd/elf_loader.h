@@ -9,7 +9,6 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <xos/elf.h>
 
 typedef struct elf_load_result {
   uint64_t entry;

@@ -24,7 +24,6 @@
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
-#include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
 #include <xos/errno.h>
 #include <xos/fcntl.h>
@@ -219,11 +218,6 @@ void unix_sock_free(struct unix_sock *sock) {
     bp = next;
   }
   kfree(sock);
-}
-
-void unix_sock_acquire(struct unix_sock *sock) {
-  if (sock)
-    refcount_inc(&sock->u_count);
 }
 
 void unix_sock_release(struct unix_sock *sock) {
@@ -1635,7 +1629,7 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
         struct pty *pty = f->pty;
         if (pty) {
           int is_master = pty_fd_is_master(proc->proc->files, i);
-          __poll_t revents = pty_poll(pty, is_master, kfds[i].events);
+          __poll revents = pty_poll(pty, is_master, kfds[i].events);
           kfds[i].revents |= revents;
         }
       } else if (f->type == FD_DEV) {
@@ -1644,7 +1638,7 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
         if (ip && ip->i_priv) {
           struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
           if (ops->driver_pid == 0 && ops->poll) {
-            __poll_t revents = ops->poll(current_task, kfds[i].events);
+            __poll revents = ops->poll(current_task, kfds[i].events);
             kfds[i].revents |= revents;
           }
         }

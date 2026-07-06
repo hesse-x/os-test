@@ -7,7 +7,6 @@
 // kernel/xcore/sched.c — Scheduler and process table management
 // Extracted from kernel/proc.c (phase 4 step 4.1)
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -20,7 +19,6 @@
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
-#include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/rcu.h"
@@ -29,10 +27,7 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
-#include "utils/macro.h"
-#include <xos/errno.h>
-#include <xos/shm.h>
-#include <xos/signal.h>
+
 #include <xos/syscall_nums.h>
 
 // Validate assembly offset assumptions in trapentry.S (switch_to uses hardcoded
@@ -192,11 +187,6 @@ typedef struct switch_frame {
 
 _Static_assert(sizeof(switch_frame) == 56,
                "switch_frame size must be 56 (7 × uint64_t)");
-
-uint64_t sched_build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
-  return sched_build_kstack_user_rsp(k_stack_top, entry_rip,
-                                     0x00007FFFFFFFE000ULL);
-}
 
 uint64_t sched_build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
                                      uint64_t user_rsp) {

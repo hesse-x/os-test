@@ -10,13 +10,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <termios.h>
+#include <unistd.h>
+
 #include <sys/ioctl.h>
 #include <sys/process.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <termios.h>
-#include <unistd.h>
+#include <xos/errno.h>
 
 // Current working directory
 static char cwd[256] = "/";
@@ -63,15 +65,6 @@ static int readline(char *buf, int len) {
 
 // ===================== Helpers =====================
 
-static uint32_t parse_u32(const char *s) {
-  uint32_t v = 0;
-  while (*s >= '0' && *s <= '9') {
-    v = v * 10 + (*s - '0');
-    s++;
-  }
-  return v;
-}
-
 static void build_abs_path(const char *rel, char *abs) {
   int i;
   if (rel[0] == '/') {
@@ -87,59 +80,6 @@ static void build_abs_path(const char *rel, char *abs) {
       abs[i] = rel[j];
     abs[i] = '\0';
   }
-}
-
-// ===================== Date/time formatting =====================
-
-static const char *month_names[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-
-// Format FAT32 date+time as "Mon DD HH:MM"
-static void format_datetime(uint32_t date, uint32_t time, char *out,
-                            int out_len) {
-  int month = (date >> 5) & 0x0F;
-  int day = date & 0x1F;
-  int hour = (time >> 11) & 0x1F;
-  int min = (time >> 5) & 0x3F;
-
-  if (month < 1 || month > 12)
-    month = 1;
-
-  const char *mon = month_names[month - 1];
-  int pos = 0;
-  for (int i = 0; mon[i] && pos < out_len - 1; i++)
-    out[pos++] = mon[i];
-  if (pos < out_len - 1)
-    out[pos++] = ' ';
-  if (day < 10 && pos < out_len - 1)
-    out[pos++] = ' ';
-  if (day >= 10 && pos < out_len - 2) {
-    out[pos++] = '0' + (day / 10);
-    out[pos++] = '0' + (day % 10);
-  } else if (pos < out_len - 1) {
-    out[pos++] = '0' + day;
-  }
-  if (pos < out_len - 1)
-    out[pos++] = ' ';
-  if (hour < 10 && pos < out_len - 1)
-    out[pos++] = '0';
-  if (hour >= 10 && pos < out_len - 2) {
-    out[pos++] = '0' + (hour / 10);
-    out[pos++] = '0' + (hour % 10);
-  } else if (pos < out_len - 1) {
-    out[pos++] = '0' + hour;
-  }
-  if (pos < out_len - 1)
-    out[pos++] = ':';
-  if (min < 10 && pos < out_len - 1)
-    out[pos++] = '0';
-  if (min >= 10 && pos < out_len - 2) {
-    out[pos++] = '0' + (min / 10);
-    out[pos++] = '0' + (min % 10);
-  } else if (pos < out_len - 1) {
-    out[pos++] = '0' + min;
-  }
-  out[pos] = '\0';
 }
 
 // ===================== Command handlers =====================
@@ -354,11 +294,11 @@ static void exec_path(const char *rel_path) {
 
 // ===================== Command parsing =====================
 
-typedef void (*cmd_func)(const char *args);
+typedef void (*cmd_fn)(const char *args);
 
 struct cmd_entry {
   const char *name;
-  cmd_func handler;
+  cmd_fn handler;
   int min_args;
 };
 

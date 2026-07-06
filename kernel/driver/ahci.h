@@ -7,7 +7,6 @@
 #ifndef KERNEL_AHCI_H
 #define KERNEL_AHCI_H
 
-#include "arch/x64/trap.h"
 #include "kernel/driver/driver.h"
 #include "kernel/xcore/spinlock.h"
 #include <stdbool.h>
@@ -32,7 +31,6 @@ int ahci_set_active_port(int port);
 
 extern spinlock ahci_lock;
 
-struct dev_driver;
 extern struct dev_driver ahci_driver;
 
 #endif // KERNEL_AHCI_H

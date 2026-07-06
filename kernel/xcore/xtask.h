@@ -32,7 +32,8 @@ typedef enum wait_event {
   WAIT_PIPE,
   WAIT_MSG_REPLY,
   WAIT_POLL,
-  WAIT_FUTEX
+  WAIT_FUTEX,
+  WAIT_PAUSE // pause(): block until any signal; may carry an alarm deadline
 } wait_event;
 
 #define RECV_MSG_SIZE 64
@@ -54,11 +55,13 @@ typedef struct xtask {
   int assigned_cpu;      // which CPU this process runs on
   uint8_t *iopm;         // IOPM bitmap (NULL = deny all), 8KB if allocated
 
-  list_node run_node;     // per-CPU run_queue
-  list_node wait_node;    // per-CPU timer_queue
-  uint64_t wait_deadline; // sched_clock() nanosecond deadline
-  uint8_t wait_timed_out; // 1 = timer expired wakeup, 0 = notify wakeup
-  uint8_t recv_intr;      // set by wake_process when WAIT_RECV
+  list_node run_node;      // per-CPU run_queue
+  list_node wait_node;     // per-CPU timer_queue
+  uint64_t wait_deadline;  // sched_clock() nanosecond deadline
+  uint64_t alarm_deadline; // 0 = no alarm; else sched_clock() ns absolute
+                           // (POSIX alarm(); checked by timer_handler)
+  uint8_t wait_timed_out;  // 1 = timer expired wakeup, 0 = notify wakeup
+  uint8_t recv_intr;       // set by wake_process when WAIT_RECV
 
   // === unified recv queue ===
   uint8_t recv_buf[RECV_QUEUE_SIZE][RECV_MSG_SIZE];

@@ -19,7 +19,6 @@
 ./build.sh          # 编译内核 + EFI bootloader + 用户态 ELF + 生成 disk.img
 ./build.sh -d       # Debug 模式（-g -fno-omit-frame-pointer）
 ./build.sh --test   # 测试构建（Unity 测试 ELF + test_runner）
-./build.sh --no-serial  # 禁用串口打印（NSERIAL 宏）
 ```
 
 build.sh 两步流程：CMake configure + make → mkdisk.sh

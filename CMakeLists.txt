@@ -31,9 +31,36 @@ execute_process(
     COMMAND gcc -print-file-name=include
     OUTPUT_VARIABLE GCC_FREESTANDING_INC
     OUTPUT_STRIP_TRAILING_WHITESPACE)
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fPIE -mno-red-zone -std=gnu17 -nostdinc -isystem ${GCC_FREESTANDING_INC}")
-# C++ flags for user-space only (driver, shell, libc .cc files)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone -nostdinc -isystem ${GCC_FREESTANDING_INC}")
+
+# ---- Shared compile-flag variables (single source of truth) ----
+# These are target-agnostic groupings referenced by both the global
+# CMAKE_<LANG>_FLAGS (inherited by CMake targets) AND the bare-gcc custom
+# commands in user_rules.cmake (which do NOT inherit CMake variables, so they
+# must reference these explicitly to stay in sync). Edit a flag here once and
+# every build path — kernel OBJECT libs, libc.a, user ELF, ld.so — picks it up.
+#
+# FREESTANDING_FLAGS: freestanding runtime basics shared by all code paths.
+# WARN_FLAGS: warning gate. Applied to kernel, libc.a, user ELF, and ld.so
+# alike so unused/dead code is caught everywhere, not just where CMake targets
+# happen to inherit CMAKE_C_FLAGS.
+#
+# Defined as CMake LISTS (the natural form for target_compile_options and the
+# bare-gcc COMMAND lists in user_rules.cmake). When splicing into the
+# CMAKE_<LANG>_FLAGS *string* below, string(JOIN) flattens the list with single
+# spaces — without it the list's semicolons would leak into the string and
+# break the compiler invocation.
+set(FREESTANDING_FLAGS -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -mno-red-zone -nostdinc -isystem ${GCC_FREESTANDING_INC})
+set(WARN_FLAGS -Wall -Wextra -Werror)
+
+# Flatten the lists into space-separated strings for CMAKE_<LANG>_FLAGS.
+string(JOIN " " _FREESTANDING_STR ${FREESTANDING_FLAGS})
+string(JOIN " " _WARN_STR ${WARN_FLAGS})
+
+# Kernel + libc.a (CMake targets inherit CMAKE_C_FLAGS automatically).
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${_WARN_STR} ${_FREESTANDING_STR} -fPIE -std=gnu17")
+# C++ flags for user-space only (driver, shell, libc .cc files). -Wall -Wextra
+# are language-appropriate; -Werror is inherited via WARN_FLAGS.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${_WARN_STR} ${_FREESTANDING_STR} -fno-pie")
 
 # KASAN sanitizer flags (applied only to kernel OBJECT libraries via kernel_rules.cmake)
 if(SANITIZE)

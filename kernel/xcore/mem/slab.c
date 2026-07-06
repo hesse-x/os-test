@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "kernel/xcore/mem/slab.h"
+#include <stdint.h>
+
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
@@ -12,8 +13,8 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
-#include "utils/macro.h"
-#include <stdint.h>
+#include "kernel/xcore/mem/slab.h"
+
 #include <xos/syscall.h>
 
 // Global kmalloc cache array

@@ -12,12 +12,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <xos/display.h>
-#include <xos/font_metrics.h>
-#include <xos/ioctl.h>
 
 #include "kernel/xcore/xtask.h"
-struct pci_device;
 
 // VBE DISPI MMIO register indices (bochs-display BAR0)
 #define VBE_DISPI_INDEX_ID 0x00
@@ -76,7 +72,6 @@ uint64_t display_mmap_handler_ioctl(xtask *proc, uint64_t size);
 // Device registration (called from vfs_init)
 void display_dev_register(void);
 
-struct dev_driver;
 extern struct dev_driver display_driver;
 
 #endif

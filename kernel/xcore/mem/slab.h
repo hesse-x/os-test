@@ -12,7 +12,6 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include <stddef.h>
-#include <stdint.h>
 #include <xos/syscall.h> // struct kernel_mem_stats (shared kernel/user layout)
 
 #define KMALLOC_SHIFT_LOW 3   // minimum class = 8B

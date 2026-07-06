@@ -53,6 +53,22 @@ LIBC_EXPORT int isatty(int fd);
 LIBC_EXPORT char *ttyname(int fd);
 LIBC_EXPORT int mkdir(const char *path, mode_t mode);
 
+// POSIX identity & permissions (group 1)
+LIBC_EXPORT uid_t getuid(void);
+LIBC_EXPORT uid_t geteuid(void);
+LIBC_EXPORT gid_t getgid(void);
+LIBC_EXPORT gid_t getegid(void);
+LIBC_EXPORT pid_t getppid(void);
+LIBC_EXPORT pid_t getpgrp(void);
+LIBC_EXPORT mode_t umask(mode_t mask);
+LIBC_EXPORT int gethostname(char *name, size_t len);
+LIBC_EXPORT int sethostname(const char *name, size_t len);
+LIBC_EXPORT unsigned int alarm(unsigned int seconds);
+LIBC_EXPORT int pause(void);
+LIBC_EXPORT int truncate(const char *path, off_t length);
+LIBC_EXPORT int fsync(int fd);
+LIBC_EXPORT void sync(void);
+
 #ifdef __cplusplus
 }
 #endif
