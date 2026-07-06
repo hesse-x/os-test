@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "stdio.h"
+#include <stdio.h>
 #include "utils/kvformat.h"
-#include "string.h"
-#include "syscall.h"
-#include "xos/errno.h"
-#include "xos/fcntl.h"
+#include <string.h>
+#include <syscall.h>
+#include <xos/errno.h>
+#include <xos/fcntl.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stddef.h>

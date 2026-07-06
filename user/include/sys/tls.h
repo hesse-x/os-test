@@ -34,7 +34,7 @@ extern struct tls_info g_tls_info;
 // Initialization function (static path: read linker symbols to fill g_tls_info)
 void __libc_tls_init(void);
 
-#include "pthread.h"
+#include <pthread.h>
 
 // TCB structure — placed at FS_BASE, %fs:0 returns &TCB.self
 // variant II layout: [tls_block (.tdata+.tbss)] [TCB]

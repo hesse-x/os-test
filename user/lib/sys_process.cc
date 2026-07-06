@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "syscall.h"
+#include <syscall.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>

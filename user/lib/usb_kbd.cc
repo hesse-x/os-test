@@ -7,7 +7,7 @@
 // USB HID Boot Protocol keyboard: get_keycode()
 // Reads HID reports from kernel USB HID SHM ring, compares with previous
 // report to detect key press/release events, maps HID keycodes to input_key.
-#include "usb_hid.h"
+#include "user/include/usb_hid.h"
 #include <stdint.h>
 #include <string.h>
 #include <xos/shm.h>

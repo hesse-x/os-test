@@ -13,7 +13,7 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
-#include "xos/syscall.h"
+#include <xos/syscall.h>
 #include <stdint.h>
 
 // Global kmalloc cache array

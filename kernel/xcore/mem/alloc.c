@@ -12,7 +12,7 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
-#include "xos/syscall.h"
+#include <xos/syscall.h>
 
 // ===================== Global variable definitions =====================
 size_t total_page_frames = 0;

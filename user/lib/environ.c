@@ -14,7 +14,7 @@
  * putenv: places the passed-in char* into the array without copying (glibc semantics).
  * execve callers pass environ by default (see sys_process.cc).
  */
-#include "xos/errno.h"
+#include <xos/errno.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "xos/errno.h"
+#include <xos/errno.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>

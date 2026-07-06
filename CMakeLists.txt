@@ -11,7 +11,7 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 project(myos C CXX ASM)
 
-# Export compile database for clang-tidy incremental naming checks (see doc/design/format.md)
+# Export compile database for clang-tidy incremental naming checks (see doc/design/code_standard.md)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Common C flags (kernel uses C with -fPIE; user-space uses C/C++ with -fno-pie)

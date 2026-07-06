@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "syscall.h"
-#include "xos/mman.h"
+#include <syscall.h>
+#include <xos/mman.h>
 #include <stdint.h>
 #include <sys/mman.h>
 

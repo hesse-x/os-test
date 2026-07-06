@@ -8,13 +8,13 @@
 // Kernel handles FAT32, devtmpfs, pipes, sockets, etc.
 // No libc-side fd_table — kernel's proc->fd_table is the single source of
 // truth.
-#include "syscall.h"
-#include "xos/errno.h"
-#include "xos/fcntl.h"
-#include "xos/ioctl.h"
-#include "xos/socket.h"
-#include "xos/syscall_asm.h"
-#include "xos/syscall_nums.h"
+#include <syscall.h>
+#include <xos/errno.h>
+#include <xos/fcntl.h>
+#include <xos/ioctl.h>
+#include <xos/socket.h>
+#include <xos/syscall_asm.h>
+#include <xos/syscall_nums.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdint.h>

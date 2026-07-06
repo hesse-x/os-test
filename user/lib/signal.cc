@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "xos/signal.h"
+#include <xos/signal.h>
 #include <pthread.h> // pthread_sigmask
 #include <signal.h>
 #include <stdlib.h>  // abort (declared in stdlib.h)

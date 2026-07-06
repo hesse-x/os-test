@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "test_helpers.h"
+#include "user/test/test_helpers.h"
 #include <signal.h>
 #include <string.h>
 #include <sys/mman.h>

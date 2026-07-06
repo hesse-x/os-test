@@ -7,7 +7,7 @@
 #   ./check.sh --filter iwyu            # single item
 #
 # Valid check items: sparse, iwyu, clang-format, clang-tidy
-#   clang-tidy is a placeholder for now (see doc/design/format.md).
+#   clang-tidy is a placeholder for now (see doc/design/code_standard.md).
 #
 # Exit code: all pass 0; any failure 1; argument error 2.
 

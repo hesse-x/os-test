@@ -5,9 +5,9 @@
  */
 
 #include "arch/x64/memlayout.h"
-#include "stdlib.h"
-#include "string.h"
-#include "syscall.h"
+#include <stdlib.h>
+#include <string.h>
+#include <syscall.h>
 #include <stdint.h>
 #include <unistd.h>
 

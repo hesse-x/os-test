@@ -14,7 +14,7 @@
 #include <unity.h>
 #include <xos/errno.h>
 
-#include "syscall.h"
+#include <syscall.h>
 
 /* AHCI: (class << 8) | subclass = 0x0106 */
 #define PCI_CLASS_STORAGE_AHCI 0x0106

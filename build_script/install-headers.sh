@@ -3,10 +3,10 @@
 #
 # Source form == publish form (zero rewrite): the repo's headers already carry the
 # include paths the published sysroot must satisfy, e.g. user/include/time.h does
-#   #include "xos/time.h"
+#   #include <xos/time.h>
 # and this script copies include/uapi/xos/ verbatim to $DEST/xos/, so that path
 # resolves in the sysroot exactly as it does in the source tree (where -Iinclude/uapi
-# maps "xos/..." to include/uapi/xos/...). No sed, no path munging.
+# maps <xos/...> to include/uapi/xos/...). No sed, no path munging.
 #
 # What gets published:
 #   include/uapi/xos/*.h → $DEST/xos/          (UAPI contract headers — shared kernel/user ABI)
@@ -31,7 +31,7 @@
 #     "No such file" lines, proving the published tree is self-contained.
 set -euo pipefail
 
-SRC="$(cd "$(dirname "$0")" && pwd)"
+SRC="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${1:-$SRC/build/sysroot/usr/include}"
 
 echo "Installing UAPI headers → $DEST"

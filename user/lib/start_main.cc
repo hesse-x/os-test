@@ -11,11 +11,11 @@
 // libc.so is compiled with -DDYNAMIC=1 (dynamic path calls collect_tls_from_link_map +
 // __libc_tls_init_rest)
 
-#include "stdio.h"
-#include "stdlib.h"
-#include "sys/cdefs.h"
-#include "sys/tls.h"
-#include "syscall.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/cdefs.h>
+#include <sys/tls.h>
+#include <syscall.h>
 
 typedef void (*init_func_t)(void);
 extern "C" void __libc_run_init_array(init_func_t *start, init_func_t *end);
@@ -33,7 +33,7 @@ extern "C" struct tls_info g_tls_info;
 
 // Dynamic path: link_map list exported by ld.so
 #if DYNAMIC
-#include "sys/link_map.h"
+#include <sys/link_map.h>
 extern "C" struct tls_info collect_tls_from_link_map(struct link_map *lmap);
 #endif
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "syscall.h"
+#include <syscall.h>
 #include <unistd.h>
 
 pid_t getpid(void) { return (pid_t)sys_getpid(); }

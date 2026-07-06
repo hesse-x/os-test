@@ -1,4 +1,4 @@
-# 代码格式化方案
+# 代码规范
 
 ## 总则
 
@@ -12,10 +12,23 @@
 
 **全部遵循 Linux 命名标准**,不分 C/C++:
 
+> **上位原则:已有惯例命名不受项目编程规范约束。** 凡命名受外部权威规范 / 惯例约束的符号——POSIX 接口(`open`/`fork`/`O_RDONLY`/`pid_t`/`ssize_t`)、C/glibc 标准库符号(`memcpy`/`printf`/`FILE`/`NULL`)、硬件 spec 寄存器 / 字段符号(AHCI `PxCLB`/`PxIS`、PCI/XHCI 配置空间偏移等)、网络协议字段名(ether header `ether_type`、IP header `ihl`/`ttl` 等)——**保留其规范原命名**,不改成项目 snake_case / SCREAMING。字面与规范 / spec / 协议对照有真实价值(读者拿规范对照代码时符号能一一对上),区别于作者自造的命名偏好(后者无外部约束,必须服从项目规范)。具体例外的判定标准与已知清单见下各条。
+
 - 函数 / 变量 / 类型(struct/union/enum):`snake_case`(如 `sys_open`、`nr_threads`、`task_struct`)
 - 宏 / 常量:`SCREAMING_SNAKE_CASE`(如 `PAGE_SIZE`、`GFP_KERNEL`)
+
+  **例外:硬件 spec 照搬符号保留原大小写**(与 POSIX 接口 `open`/`O_RDONLY` 同理——受外部权威规范约束,字面对应有真实价值,非作者自造命名偏好):
+
+  - **AHCI 端口寄存器偏移宏 — `kernel/driver/ahci.c` 的 `Px*` 族**(`PxCLB`/`PxIS`/`PxCMD`/`PxTFD`/`PxSIG`/`PxSSTS`/`PxSCTL`/`PxSERR`/`PxSACT`/`PxCI`/...)。`Px` = "Port x"(AHCI spec 1.3 里端口寄存器一章的符号前缀),后半段是字段助记符(`CLB` = Command List Base、`IS` = Interrupt Status、`CMD` = Command and Status)。照搬 spec 原大小写,让驱动代码和 AHCI spec 章节符号字面对应——读者拿 spec 对照寄存器偏移时,`PxCLB 0x00`/`PxIS 0x10` 直接对得上。这些宏只在 `ahci.c` 内部用(传给 MMIO 读写),不跨文件、不对外、无 ABI,改名无收益反失 spec 可对照性。
 - 函数指针 typedef:`*_fn` 后缀(如 `irq_handler_fn`、`syscall_fn`、`signal_check_fn`),不用 `_t`
 - 非 POSIX 的内核/UAPI 类型**不带 `_t`**(Linux 风格,如 `recv_msg`、`input_event`、`pci_dev_info`、`sockaddr`、`iovec`);POSIX 定义的标准类型(`pid_t`/`ssize_t`/`mode_t`/`sigset_t`/`siginfo_t`/`sa_family_t`/`nfds_t`/`socklen_t`/`sigaction_t`/`tcflag_t`/`cc_t`/`uid_t`/`gid_t`/`dev_t`/`ino_t`/`off_t`/`time_t` 等)按 POSIX 保留 `_t`
+
+  **例外:两类带技术动因的 `_t` 保留**(与 Linux 上游一致,非历史包袱):
+
+  - **访问器封装型 — `atomic_t` / `refcount_t`**:`_t` 是「此类型不可直接当 int 用」的语义信号——外部强制走 `atomic_read()`/`atomic_set()`/`refcount_inc()` 等访问器,不直接取 `v->counter` 字段。去 `_t` 不影响功能,但丢失这层「封装意图」标记。与 Linux `include/linux/types.h` 一致。
+  - **sparse `__bitwise` 强类型型 — `phys_addr_t` / `kern_vaddr_t`**:typedef 上带 sparse `__bitwise` 注解,sparse 在编译期报错物理地址 / 虚拟地址混用(把 `phys_addr_t` 当 `kern_vaddr_t` 传给期望虚拟地址的函数会报 warning)。`_t` 与 `__bitwise` 配套(注解在 typedef 上,去 `_t` 不影响 sparse 功能,但与上游 Linux 命名脱钩)。定义在 `kernel/xcore/sparse.h`。
+
+  判定「该去 `_t` 还是保留」的标准:**有无技术动因**。「无技术动因」清单(纯内部、无 ABI、无访问器封装、无 sparse 强类型——如 `gdt_*_t`/`trapframe_t`/`acpi_*_t`/`efi_*_t`/`elf_load_result_t`/`xhci_intr_t`/`trb_t`/`local_switch_frame_t`)全改;上述两类有现实动因,保留。
 
 > 用户态 C++ 代码(`user/driver/`、`user/shell/`、`user/lib/*.cc`)同样用 Linux snake_case,**不**采用 LLVM CamelCase——统一一套命名,降低内核↔用户态边界的心智负担。POSIX/UAPI 公开符号在 C++ 文件中亦保持原名。
 
@@ -41,7 +54,26 @@
 - **项目内部头用 `" "`,写完整路径**:相对仓库根的路径(如 `"kernel/xcore/mem/alloc.h"`),与 `-I ${CMAKE_SOURCE_DIR}` 配合。不依赖相邻目录的相对路径,移动文件时不易失联。
 - **不混用**:内部头不得用 `< >`,C 标准/系统头不得用 `" "`。
 
-> 历史的「按物理目录决定尖括号/双引号」已过时,以本节 CMake 配置为准。
+### `include/uapi/xos/` 不是「对外公开 API」
+
+UAPI 这个名字容易误读。`include/uapi/xos/` 的真实角色是**内核↔用户态共享的内部 ABI**——被 `kernel/` 和 `user/` **两侧**同时引用(如 `struct kernel_mem_stats` 内核填、用户态读;`SYS_*` 号用户态发、内核 dispatch 表查)。它的「公开」是相对于「内核内部头」(只内核可见)而言:用户态也能 include,不依赖内核内部机制。
+
+**真正「对外」的边界是 `user/include/`**:那里装的是 `stdio.h`/`string.h`/`fcntl.h` 等 POSIX 名公开头,面向用户程序直接 `#include <stdio.h>`。`include/uapi/xos/` 用 `xos/` 自造前缀,不是给用户程序直接引的,是给内核和 libc 内部共享 ABI 用的。`build_script/install-headers.sh` 把这两棵树都发布到 sysroot(`xos/` → `$DEST/xos/`、`user/include/` → `$DEST/`),用户程序只感知 `user/include/` 那一层。
+
+### UAPI 头只装数据布局/常量,绝不装 C 函数原型
+
+这是 Linux UAPI 铁律,也是 `install-headers.sh` 的 zero-rewrite 设计能成立的前提。UAPI 头装的是跨边界共享的 ABI 契约:struct/enum/typedef/`#define` 常量/`static inline` 函数定义(定义在头里、无外部链接)。**不装 `extern` 函数原型声明**——函数签名是实现细节,会随版本变;数据布局是 ABI 契约,跨版本稳定。
+
+违反这条的典型是混合头:既装共享数据,又装 C 函数原型。例如 `user/include/input.h` 曾把 `enum input_key`/`struct key_event`(共享 ABI)和 `input_client_poll`/`input_driver_run`(libc 函数原型 `extern`)混在一个文件里。修法是按内容拆:UAPI 数据 → `include/uapi/xos/input_key.h`(`<xos/input_key.h>`),函数原型 → 内部头 `"user/include/input_lib.h"`。
+
+### `install-headers.sh` 的 zero-rewrite 依赖源码写法符合 sysroot 布局
+
+`build_script/install-headers.sh` 把头文件 verbatim 拷贝到 sysroot(`include/uapi/xos/` → `$DEST/xos/`、`user/include/` → `$DEST/`、`user/include/sys/` → `$DEST/sys/`),**不重写任何 include 路径**。这能成立,是因为源码里的写法在 sysroot 布局下也能解析:
+
+- `<xos/foo.h>` 尖括号:源码里 `-I include/uapi` 解析到 `include/uapi/xos/foo.h`;sysroot 里 `-I $DEST` 解析到 `$DEST/xos/foo.h`。两边都是「`-I <根>` + `xos/` 子目录」的同构布局,尖括号在两边都对。
+- 若用引号 `"xos/foo.h"`:源码里靠 `-I` 也能解析,但语义错(公开头该尖括号),且引号会先查源文件所在目录,同名歧义时易误解析。
+
+所以「公开头一律尖括号 + 逻辑前缀」不只是风格偏好,是 sysroot 发布机制能 zero-rewrite 成立的硬约束。脚本自带的 closure check(对每个 published header 预处理探针)是这条约束的回归守卫——源码若混入引号公开头或 UAPI 函数原型,该 check 会 FAIL。
 
 ## 目录划分
 
@@ -58,7 +90,7 @@
 ### 前提
 
 - CMake 导出编译数据库:`set(CMAKE_EXPORT_COMPILE_COMMANDS ON)`(根 CMakeLists.txt),产出 `build/compile_commands.json`。
-- 安装 clang-tidy(本机当前未装;工具链为 gcc,clang-tidy 仅做语义解析不链接,需实测 `-ffreestanding -nostdlib -fPIE -mno-red-zone -std=gnu17` 及自定义 `-I` 的误报率)。
+- 安装 clang-tidy(工具链为 gcc,clang-tidy 仅做语义解析不链接,需实测 `-ffreestanding -nostdlib -fPIE -mno-red-zone -std=gnu17` 及自定义 `-I` 的误报率)。
 
 ### 策略
 
@@ -92,7 +124,3 @@ CheckOptions:
 git diff --name-only --diff-filter=d origin/master...HEAD -- '*.c' '*.h' \
   | run-clang-tidy -p build/compile_commands.json
 ```
-
-## 待办
-
-无（目录重组 `driver/`→`user/driver/`、`shell/`→`user/shell/` 已完成；全目录统一 LLVM 风格，无需按目录分发的 `format.sh`）。

@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "syscall.h"
-#include "test_helpers.h"
+#include <syscall.h>
+#include "user/test/test_helpers.h"
 #include <fcntl.h>
 #include <string.h>
 #include <sys/mman.h>

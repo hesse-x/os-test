@@ -6,9 +6,9 @@
 
 // user/lib/tls.cc — TLS template snapshot + main thread TCB init + cancel
 // handler
-#include "sys/tls.h"
-#include "pthread.h"
-#include "syscall.h"
+#include <sys/tls.h>
+#include <pthread.h>
+#include <syscall.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -156,7 +156,7 @@ extern "C" void __pthread_cancel_check(int sig) {
 
 // === Dynamic-path TLS collection (plan_ld2b3 T12 / ld.md §3.5.3) ===
 #if DYNAMIC
-#include "sys/link_map.h"
+#include <sys/link_map.h>
 #include <stdlib.h>
 
 // Dynamic path: walk _dl_link_map merging PT_TLS into tls_info

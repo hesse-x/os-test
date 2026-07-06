@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "input.h"
-#include "syscall.h"
+#include <xos/input.h>
+#include <xos/ioctl.h>
+#include <syscall.h>
 #include "user/driver/display.h"
 #include <errno.h>
 #include <fcntl.h>

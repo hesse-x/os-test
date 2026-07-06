@@ -9,7 +9,7 @@
 # Added start_main.cc (__libc_start_main, T11), atexit.c (T8), init_array.c (T10)
 set(LIBC_SOURCES
     lib/stdio.cc lib/string.cc lib/malloc.cc
-    lib/unistd.cc lib/sys_wait.cc lib/sys_mman.cc lib/sys_shm.cc
+    lib/unistd.cc lib/sys_wait.cc lib/sys_mman.cc
     lib/sys_irq.cc lib/sys_device.cc lib/sys_ipc.cc
     lib/sys_process.cc lib/time.cc lib/file.cc
     lib/ctype.c lib/strtol.c lib/stdlib_misc.c lib/uname.c

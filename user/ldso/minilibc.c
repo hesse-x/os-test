@@ -7,7 +7,7 @@
 // ld.so's built-in minimal libc (does not link libc.a)
 // ld.md §7.1 deviation: ld.so does not link libc.a, brings its own minimal libc
 
-#include "xos/mman.h"
+#include <xos/mman.h>
 #include <stddef.h>
 #include <stdint.h>
 

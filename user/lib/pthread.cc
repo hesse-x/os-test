@@ -5,10 +5,10 @@
  */
 
 // user/lib/pthread.cc — pthread library implementation (Phase 4)
-#include "sys/tls.h"
-#include "syscall.h"
-#include "xos/errno.h"
-#include "xos/syscall_nums.h"
+#include <sys/tls.h>
+#include <syscall.h>
+#include <xos/errno.h>
+#include <xos/syscall_nums.h>
 #include <assert.h>
 #include <pthread.h>
 #include <signal.h> // IWYU pragma: keep  // sigset_t/SIG_BLOCK etc. used in cancel mask; provided transitively by xos/signal.h but IWYU maps to hosted <signal.h>

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "test_helpers.h"
+#include "user/test/test_helpers.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>

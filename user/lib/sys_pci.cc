@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "syscall.h"
+#include <syscall.h>
 #include <stdint.h>
 #include <sys/pci.h>
 

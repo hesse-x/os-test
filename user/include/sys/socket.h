@@ -22,7 +22,7 @@ extern "C" {
 // ===================== Syscall wrappers =====================
 // These directly invoke the kernel syscalls via the inline assembly wrappers.
 
-#include "syscall.h"
+#include <syscall.h>
 
 static inline int socket(int domain, int type, int protocol) {
   int64_t ret =

@@ -13,7 +13,7 @@
 // Links libc.a, uses main() entry point.
 
 #include "utils/macro.h"
-#include "input.h"
+#include "user/include/input_lib.h"
 #include "user/driver/display.h"
 #include <fcntl.h>
 #include <signal.h>

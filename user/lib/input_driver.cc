@@ -12,8 +12,8 @@
 // via device_register_shm. Consumers access via open("/dev/<name>") +
 // mmap(MAP_SHARED, fd). BIND request only registers the consumer pid for notify
 // (no cross-process fd passing).
-#include "input.h"
-#include "syscall.h"
+#include <xos/input_key.h>
+#include <syscall.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>

@@ -19,7 +19,7 @@
 // needed (avoids generating general dynamic TLS relocations such as
 // R_X86_64_DTPMOD64; ld.so does not yet implement __tls_get_addr).
 
-#include "sys/tls.h"
+#include <sys/tls.h>
 #include <errno.h>
 
 extern "C" {
