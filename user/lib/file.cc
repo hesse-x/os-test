@@ -169,6 +169,12 @@ int fcntl(int fd, int cmd, ...) {
     (void)va_arg(ap, int);
     va_end(ap);
     return 0;
+  } else if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
+    va_list ap;
+    va_start(ap, cmd);
+    int min_fd = va_arg(ap, int);
+    va_end(ap);
+    return sys_fcntl(fd, cmd, min_fd);
   }
 
   errno = EINVAL;

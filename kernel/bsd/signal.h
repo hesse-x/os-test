@@ -44,5 +44,7 @@ int64_t sys_arch_prctl(int64_t code, int64_t addr, int64_t, int64_t, int64_t,
                        int64_t);
 int64_t sys_pthread_set_cancel_handler(int64_t handler, int64_t, int64_t,
                                        int64_t, int64_t, int64_t);
+int64_t sys_sigpending(int64_t set, int64_t, int64_t, int64_t, int64_t,
+                       int64_t);
 
 #endif // KERNEL_BSD_SIGNAL_H

@@ -212,6 +212,54 @@ void test_alarm_pause(void) {
   sigaction(SIGALRM, &act, NULL);
 }
 
+/* 14. sigpending reports a blocked signal that has been raised but not
+ * delivered. Block SIGUSR1, raise it (it stays pending because blocked), then
+ * sigpending must report the SIGUSR1 bit. */
+void test_sigpending_blocked(void) {
+  /* Ensure SIGUSR1 starts unblocked and not pending */
+  sigset_t mask;
+  sigemptyset(&mask);
+  sigprocmask(SIG_SETMASK, &mask, NULL);
+
+  sigaddset(&mask, SIGUSR1);
+  TEST_ASSERT_EQUAL_INT(0, sigprocmask(SIG_BLOCK, &mask, NULL));
+
+  /* SIG_IGN would drop the signal before it pends; use default/handler so it
+   * stays pending. SIG_DFL for SIGUSR1 terminates the process, so install a
+   * no-op handler. */
+  struct sigaction act;
+  memset(&act, 0, sizeof(act));
+  act.sa_handler = sigusr1_handler; // reuse the no-op handler from test 9
+  sigaction(SIGUSR1, &act, NULL);
+
+  /* Raise while blocked: signal lands in pending, handler not run. */
+  TEST_ASSERT_EQUAL_INT(0, raise(SIGUSR1));
+
+  sigset_t pend;
+  sigemptyset(&pend);
+  TEST_ASSERT_EQUAL_INT(0, sigpending(&pend));
+  TEST_ASSERT_TRUE(sigismember(&pend, SIGUSR1));
+
+  /* Unblock to let it fire and clear, then restore defaults. */
+  sigprocmask(SIG_UNBLOCK, &mask, NULL);
+  act.sa_handler = SIG_DFL;
+  sigaction(SIGUSR1, &act, NULL);
+}
+
+/* 15. sigpending with no pending signal returns an empty set */
+void test_sigpending_empty(void) {
+  sigset_t mask, pend;
+  sigemptyset(&mask);
+  /* Clear any pending by unblocking (a blocked SIGUSR1 may linger from prior
+   * tests) */
+  sigaddset(&mask, SIGUSR1);
+  sigprocmask(SIG_UNBLOCK, &mask, NULL);
+
+  sigemptyset(&pend);
+  TEST_ASSERT_EQUAL_INT(0, sigpending(&pend));
+  TEST_ASSERT_TRUE(!sigismember(&pend, SIGUSR1));
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -230,5 +278,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_sigterm_child);
   RUN_TEST(test_alarm_return);
   RUN_TEST(test_alarm_pause);
+  RUN_TEST(test_sigpending_blocked);
+  RUN_TEST(test_sigpending_empty);
   return UNITY_END();
 }

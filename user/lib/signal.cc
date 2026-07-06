@@ -26,6 +26,11 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
   return pthread_sigmask(how, set, oldset);
 }
 
+int sigpending(sigset_t *set) {
+  /* POSIX: return the set of pending signals, including those blocked. */
+  return sys_sigpending(set);
+}
+
 int raise(int sig) { return kill(getpid(), sig); }
 
 sighandler_t signal(int sig, sighandler_t handler) {

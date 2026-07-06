@@ -1648,6 +1648,29 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     ret = (int64_t)shm->seals;
     goto out;
   }
+  case F_DUPFD:
+  case F_DUPFD_CLOEXEC: {
+    int min_fd = (int)arg3;
+    if (min_fd < 0 || min_fd >= MAX_FD) {
+      ret = -EINVAL;
+      goto out;
+    }
+    spinlock *fdlk = &proc->proc->files->fd_lock;
+    spin_lock(fdlk);
+    int new_fd = alloc_fd(proc->proc->files, min_fd);
+    if (new_fd < 0) {
+      spin_unlock(fdlk);
+      ret = -EMFILE;
+      goto out;
+    }
+    fd_install(proc->proc->files, new_fd, f);
+    file_get(f);
+    if (cmd == F_DUPFD_CLOEXEC)
+      f->flags |= FD_CLOEXEC;
+    spin_unlock(fdlk);
+    ret = (int64_t)new_fd;
+    goto out;
+  }
   default:
     ret = -EINVAL;
     goto out;
@@ -2694,6 +2717,9 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_fsync(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SYNC:
     return sys_sync(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // POSIX signal (group 4)
+  case SYS_SIGPENDING:
+    return sys_sigpending(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) implemented in phase 3b,
   // this phase returns -ENOSYS
   default:

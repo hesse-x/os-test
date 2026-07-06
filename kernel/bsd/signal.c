@@ -616,6 +616,42 @@ int64_t sys_sigreturn(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
   return 0;
 }
 
+// ===================== BSD syscall: sigpending =====================
+// Return the set of pending signals (per-task + thread-group shared), WITHOUT
+// filtering by sig_blocked — POSIX sigpending reports all pending signals,
+// including those blocked. Distinct from check_pending_signals which filters.
+int64_t sys_sigpending(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
+                       int64_t _u4, int64_t _u5) {
+  (void)_u1;
+  (void)_u2;
+  (void)_u3;
+  (void)_u4;
+  (void)_u5;
+  sigset_t __user *set = (sigset_t __user *)arg1;
+  if (!set)
+    return (int64_t)-EFAULT;
+
+  uint64_t ptr = (uint64_t)set;
+  if (ptr >= 0xFFFFFFFF80000000ULL ||
+      ptr + sizeof(sigset_t) > 0xFFFFFFFF80000000ULL)
+    return (int64_t)-EFAULT;
+
+  xtask *proc = current_task;
+  uint64_t pending =
+      __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
+  spin_lock(&proc->proc->signal->sig_lock);
+  pending |= proc->proc->signal->shared_pending;
+  spin_unlock(&proc->proc->signal->sig_lock);
+
+  sigset_t out = (sigset_t)pending;
+  uint64_t saved_cr3;
+  __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+  __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)proc->cr3) : "memory");
+  copy_to_user(set, &out, sizeof(sigset_t));
+  __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+  return 0;
+}
+
 // ===================== signal_struct lifecycle =====================
 struct signal_struct *signal_create(void) {
   struct signal_struct *sig =

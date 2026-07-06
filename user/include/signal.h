@@ -34,6 +34,7 @@ LIBC_EXPORT int sigaction(int sig, const struct sigaction *act,
                           struct sigaction *oldact);
 LIBC_EXPORT int sigreturn(void);
 LIBC_EXPORT int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+LIBC_EXPORT int sigpending(sigset_t *set);
 LIBC_EXPORT int raise(int sig);
 typedef void (*sighandler_t)(int);
 LIBC_EXPORT sighandler_t signal(int sig, sighandler_t handler);

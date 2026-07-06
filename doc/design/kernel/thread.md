@@ -804,6 +804,18 @@ recv_lock           — recv 队列
 
 `spinlock.h` 的 debug 模式加 `ASSERT(!holding_any_other_lock())` 检查——每个 `spin_lock` 调用前断言当前 CPU 没持有其他 spinlock。这样零嵌套约束变成运行时校验，违反会立刻 panic。master 的 `spinlock.h` 已有 debug 基础设施（commit 2739c91），扩展它加这个断言。
 
+### POSIX 信号扩展待完成项
+
+当前实现：`sigaction` + `sigprocmask` + `kill` + `sigpending`（+ `raise`/`signal`/`abort` 封装）。以下需新增内核机制，非"极小改动"，按依赖顺序：
+
+| 项目 | 机制 | 说明 |
+|------|------|------|
+| `sigsuspend` | 新 syscall + "原子换掩码并阻塞到信号"的等待点 | 避免 `sigprocmask`+`pause` 的竞态窗口（换掩码与阻塞之间信号到达会丢失）。是 `sigwait` 家族的基础 |
+| `sigwait`/`sigwaitinfo`/`sigtimedwait` | 复用 sigsuspend 等待点 + "消费但不投递 handler"分支 + siginfo 返回 | 从 pending 集合取走一个信号但不调 handler，返回 siginfo；`sigtimedwait` 加超时 |
+| `sigaltstack` | `proc_t` 加 `sigaltstack`/`on_alt_stack` 字段 + `SA_ONSTACK` 投递路径 + `sigreturn` 清栈标志 | 触发 `sizeof(proc_t)==232` ABI guard + `bsd_types.h` driver 副本同步。建议最后做 |
+
+> errno 全表对齐 Linux（策略 B，重排所有 errno 编号 + 全量审计内核 `return -E…`）单独立项，见 [posix.md](posix.md) errno 约定章节。
+
 ## syscall 新增
 
 | 编号 | syscall | 签名 | 归属层 | 说明 |
@@ -816,6 +828,7 @@ recv_lock           — recv 队列
 | 65 | sys_set_tid_address | `set_tid_address(tidptr)` | BSD | 设置 `proc_t->clear_tid_addr` |
 | 66 | sys_gettid | `gettid()` | BSD | 返回线程 ID（tid），区别于 getpid 返回 tgid |
 | 67 | sys_sigprocmask | `sigprocmask(how, set, oldset)` | BSD | 信号屏蔽字操作（how=SIG_BLOCK/UNBLOCK/SETMASK），同时服务 `pthread_sigmask`/`sigprocmask`/`bsd_sigprocmask` |
+| 85 | sys_sigpending | `sigpending(set)` | BSD | 返回未决信号集（per-task `sig_pending` ∪ `shared_pending`，**不滤 `sig_blocked`**——POSIX sigpending 报告所有 pending 含被 block 的）。CR3 切换 `copy_to_user`，复用 `sigprocmask` 的 `0xFFFFFFFF80000000` 用户指针校验模式 |
 
 NR_SYSCALL: 60 → 68。`xcore_syscall_table` 不动（0-19），新 syscall 全在 BSD 的 `syscall_dispatch`。
 

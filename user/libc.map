@@ -55,7 +55,7 @@ global:
     daylight; tzname; tzset;
 
     /* <signal.h> */
-    kill; raise; sigaction; signal; sigreturn; sigprocmask; abort;
+    kill; raise; sigaction; signal; sigreturn; sigprocmask; sigpending; abort;
 
     /* <termios.h> */
     tcgetattr; tcsetattr;

@@ -22,6 +22,8 @@
 #define F_SETFL 2
 #define F_GETFD 3
 #define F_SETFD 4
+#define F_DUPFD 5
+#define F_DUPFD_CLOEXEC 6
 
 /* Note: POSIX FD_CLOEXEC=1 is not defined here. The kernel internally uses
  * FD_CLOEXEC=0x8000 in kernel/bsd/types.h as the fd flags bit (separate from

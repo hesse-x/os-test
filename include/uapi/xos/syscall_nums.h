@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <xos/ioctl.h>
 
-// ===================== Syscall numbers (NR_SYSCALL=85, 0-84 continuous)
+// ===================== Syscall numbers (NR_SYSCALL=86, 0-85 continuous)
 // =====================
 #define SYS_GETPID 0
 #define SYS_YIELD 1
@@ -107,6 +107,9 @@
 #define SYS_TRUNCATE 82
 #define SYS_FSYNC 83
 #define SYS_SYNC 84
+
+// ===================== POSIX signal (group 4) =====================
+#define SYS_SIGPENDING 85
 
 // ===================== recv_msg (shared between kernel and user)
 // =====================

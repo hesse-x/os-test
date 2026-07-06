@@ -49,6 +49,29 @@
 #define ENOEXEC 39
 #define ELOOP 40
 #define ENAMETOOLONG 41
+
+/* POSIX errno values that do not collide with existing assignments use the
+ * Linux numbers for cross-ecology familiarity. Two Linux values collide with
+ * existing slots (EACCES=13 vs EMFILE=13; ENFILE=23 vs ECONNREFUSED=23), so
+ * they are pushed to free high numbers (100/101). See doc/design/kernel/
+ * posix.md "errno 约定". A full Linux-aligned renumber is a separate item. */
+#define ENOMSG 42
+#define EIDRM 43
+#define ENOLCK 46
+#define EBADE 52
+#define ENOSTR 60
+#define ENODATA 61
+#define ETIME 62
+#define ENOSR 63
+#define ENOLINK 67
+#define EPROTO 71
+#define EMULTIHOP 72
+#define EBADMSG 74
+#define EOVERFLOW 75
+#define EOPNOTSUPP 95
+#define EACCES 100
+#define ENFILE 101
+
 #define EWOULDBLOCK EAGAIN
 
 #endif // COMMON_ERRNO_H

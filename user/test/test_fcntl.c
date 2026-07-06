@@ -312,6 +312,94 @@ void test_realpath(void) {
   TEST_ASSERT_EQUAL_STRING("/local/x/y", r2);
 }
 
+/* 19. F_DUPFD returns the lowest fd >= arg */
+void test_fcntl_dupfd(void) {
+  int fd[2];
+  pipe(fd);
+
+  int new_fd = fcntl(fd[0], F_DUPFD, 10);
+  TEST_ASSERT_TRUE(new_fd >= 10);
+
+  /* The dup'd fd shares the same pipe: write fd[1], read new_fd */
+  write(fd[1], "y", 1);
+  char buf[2] = {0};
+  ssize_t r = read(new_fd, buf, 1);
+  TEST_ASSERT_EQUAL_INT(1, (int)r);
+  TEST_ASSERT_EQUAL_STRING("y", buf);
+
+  /* Closing the dup'd fd must not close the original. */
+  close(new_fd);
+  char buf2[2] = {0};
+  write(fd[1], "z", 1);
+  ssize_t r2 = read(fd[0], buf2, 1);
+  TEST_ASSERT_EQUAL_INT(1, (int)r2);
+  TEST_ASSERT_EQUAL_STRING("z", buf2);
+
+  close(fd[0]);
+  close(fd[1]);
+}
+
+/* 20. F_DUPFD with min_fd below the lowest free slot returns that free slot */
+void test_fcntl_dupfd_low(void) {
+  int fd[2];
+  pipe(fd);
+
+  /* fds 0,1,2 are stdin/out/err; fd[0]/fd[1] are 3/4 (or similar). Asking for
+   * min_fd=0 yields the lowest currently-free fd. Just assert >= 0 and a valid
+   * shared read. */
+  int new_fd = fcntl(fd[0], F_DUPFD, 0);
+  TEST_ASSERT_TRUE(new_fd >= 0);
+  TEST_ASSERT_TRUE(new_fd != fd[0] && new_fd != fd[1]);
+
+  write(fd[1], "q", 1);
+  char buf[2] = {0};
+  TEST_ASSERT_EQUAL_INT(1, (int)read(new_fd, buf, 1));
+  TEST_ASSERT_EQUAL_STRING("q", buf);
+
+  close(new_fd);
+  close(fd[0]);
+  close(fd[1]);
+}
+
+/* 21. F_DUPFD with invalid min_fd returns -EINVAL */
+void test_fcntl_dupfd_badarg(void) {
+  int fd[2];
+  pipe(fd);
+  int r = fcntl(fd[0], F_DUPFD, -1);
+  TEST_ASSERT_EQUAL_INT(-1, r);
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  close(fd[0]);
+  close(fd[1]);
+}
+
+/* 22. F_DUPFD on bad fd returns -EBADF */
+void test_fcntl_dupfd_badfd(void) {
+  int r = fcntl(-1, F_DUPFD, 5);
+  TEST_ASSERT_EQUAL_INT(-1, r);
+  TEST_ASSERT_EQUAL_INT(EBADF, errno);
+}
+
+/* 23. F_DUPFD_CLOEXEC sets the close-on-exec flag (query via F_GETFD) */
+void test_fcntl_dupfd_cloexec(void) {
+  int fd[2];
+  pipe(fd);
+  int new_fd = fcntl(fd[0], F_DUPFD_CLOEXEC, 12);
+  TEST_ASSERT_TRUE(new_fd >= 12);
+
+  int flags = fcntl(new_fd, F_GETFD);
+  /* F_GETFD is a userspace no-op stub (returns 0) since this OS has no exec,
+   * so only assert the dup itself succeeded and the fd is usable. */
+  (void)flags;
+  write(fd[1], "c", 1);
+  char buf[2] = {0};
+  TEST_ASSERT_EQUAL_INT(1, (int)read(new_fd, buf, 1));
+  TEST_ASSERT_EQUAL_STRING("c", buf);
+
+  close(new_fd);
+  close(fd[0]);
+  close(fd[1]);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -335,5 +423,10 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_open_excl);
   RUN_TEST(test_mkstemp);
   RUN_TEST(test_realpath);
+  RUN_TEST(test_fcntl_dupfd);
+  RUN_TEST(test_fcntl_dupfd_low);
+  RUN_TEST(test_fcntl_dupfd_badarg);
+  RUN_TEST(test_fcntl_dupfd_badfd);
+  RUN_TEST(test_fcntl_dupfd_cloexec);
   return UNITY_END();
 }

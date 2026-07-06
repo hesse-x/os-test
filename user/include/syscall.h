@@ -687,4 +687,16 @@ static inline int sys_sync(void) {
   return 0;
 }
 
+// --- POSIX signal (group 4) ---
+// sigpending: read the set of pending signals (per-task + shared, including
+// blocked) into *set. Returns 0 on success, -1/errno on failure.
+static inline int sys_sigpending(sigset_t *set) {
+  int64_t r = __syscall1(SYS_SIGPENDING, (int64_t)(uintptr_t)set);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
 #endif // USER_SYSCALL_H

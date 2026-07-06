@@ -4,7 +4,7 @@
 
 ### Syscall 编号表
 
-NR_SYSCALL=63（编号 0-62，slot 8 为 NULL/已删除 sys_spawn）。
+NR_SYSCALL=86（编号 0-85，slot 8 为 NULL/已删除 sys_spawn）。
 
 | 编号 | 名称 | 实现位置 | 说明 |
 |------|------|---------|------|
@@ -71,6 +71,7 @@ NR_SYSCALL=63（编号 0-62，slot 8 为 NULL/已删除 sys_spawn）。
 | 60 | SYS_SETPGID | trap.c | |
 | 61 | SYS_GETPGID | trap.c | |
 | 62 | SYS_GETSID | trap.c | |
+| 85 | SYS_SIGPENDING | signal.c | 返回未决信号集（含被 block） |
 
 ### libc 已实现 POSIX 函数
 
@@ -84,7 +85,7 @@ NR_SYSCALL=63（编号 0-62，slot 8 为 NULL/已删除 sys_spawn）。
 | 字符类 | isdigit, isalpha, isalnum, isprint, isspace, ispunct, islower, isupper, tolower, toupper | ctype.h | — (纯用户态) |
 | 数值 | atoi, atol, strtol, strtoul, abs, labs, rand, srand, qsort | stdlib.h | rand 种子用 SYS_GETTIME |
 | 时间 | timespec_get, clock, sleep, usleep | time.h, unistd.h | SYS_GETTIME/CLOCK/RECV(timeout) |
-| 信号 | kill, sigaction, sigprocmask, raise, signal | signal.h | SYS_KILL/SIGACTION/SIGRETURN |
+| 信号 | kill, sigaction, sigprocmask, sigpending, raise, signal | signal.h | SYS_KILL/SIGACTION/SIGRETURN/SIGPENDING |
 | TTY | isatty, tcgetattr, tcsetattr, ttyname, ioctl | termios.h, sys/ioctl.h | SYS_IOCTL |
 | 文件系统 | stat, fstat, mkdir, unlink, rmdir, opendir, readdir, closedir, getcwd, access | sys/stat.h, dirent.h, unistd.h | SYS_STAT/FSTAT/MKDIR/UNLINK/RMDIR/GETDENTS |
 | 进程信息 | uname | sys/utsname.h | SYS_DEBUG_PRINT (内核填充) |
@@ -111,6 +112,8 @@ libc.a 为 CMake target `c`，用户 ELF 通过 `LINK_LIBS c` 链接。编译加
 
 syscall 返回负 errno（-ENOMEM 等），POSIX 函数约定返回 -1 并设置 errno。封装层统一模式：`r = sys_xxx(args); if (r < 0) { errno = -r; return -1; } return r;`
 
+**errno 编号偏离 Linux（待全表对齐）**：现有编号与 Linux 不一致（如 `EINTR=38`，Linux=4）。`include/uapi/xos/errno.h` 已补全常用常量，采用**局部补值**策略：未占用号位直接用 Linux 值（`ENOMSG=42`…`EOPNOTSUPP=95`）；两个与现有占用冲突的 Linux 号位推到空闲高位——`EACCES=100`（Linux=13，被 `EMFILE=13` 占用）、`ENFILE=101`（Linux=23，被 `ECONNREFUSED=23` 占用）。交叉编译程序 `#include <errno.h>` 后硬编码值会错，但本 OS 用户程序用自己的 libc 头，影响有限。errno 全表对齐 Linux（策略 B，重排所有编号 + 全量审计内核 `return -E…`）单独立项。
+
 ### 与其他模块的关系
 
 - IPC：recv/req/msg 等详见 [ipc.md](ipc.md)
@@ -126,7 +129,7 @@ syscall 返回负 errno（-ENOMEM 等），POSIX 函数约定返回 -1 并设置
 | FILE 行缓冲/全缓冲 | isatty 检测终端时切换行缓冲，当前终端 fd 行缓冲已实现，非终端需全缓冲验证 | 中 |
 | execve argv/envp | 当前 argv=NULL, envp=NULL，需支持参数和环境变量传入新程序 | 高 |
 | envp 环境变量 | getenv/setenv/clearenv，全局 environ 数组 | 中 |
-| POSIX signal 扩展 | sigpending/sigsuspend/sigaltstack，当前只实现 sigaction+sigprocmask+kill | 中 |
+| POSIX signal 扩展 | sigsuspend/sigwait/sigaltstack，当前实现 sigaction+sigprocmask+kill+sigpending。机制与依赖顺序见 [thread.md](kernel/thread.md) POSIX 信号扩展待完成项 | 中 |
 | perror errno 映射 | 当前 perror 只输出字符串，需 errno→字符串完整映射 | 低 |
 | strftime | 时间格式化，需时区支持（当前无时区概念） | 低 |
 | opendir/readdir 内核化 | 当前 opendir 通过 sys_open + sys_getdents 实现，readdir 需 dirent 结构转换 | 低 |
