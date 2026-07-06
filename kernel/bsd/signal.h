@@ -21,7 +21,7 @@ struct signal_struct {
                          // on do_exit)
   atomic_t live_count;   // threads still alive (not ZOMBIE), for waitpid
                          // thread-group check
-  spinlock sig_lock;   // protects shared_pending
+  spinlock sig_lock;     // protects shared_pending
   uint64_t shared_pending;  // process-level pending (kill/pgsignal)
   sigaction_t action[NSIG]; // handler table (shared across thread group)
   uint8_t group_exit;       // exit_group flag

@@ -252,8 +252,8 @@ void unix_sock_wake_writer(struct unix_sock *sock) {
 // ===================== Internal sendmsg/recvmsg =====================
 
 int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
-                              size_t iovlen, const void *control,
-                              size_t controllen, int flags) {
+                          size_t iovlen, const void *control, size_t controllen,
+                          int flags) {
   // Check shutdown_write on our socket
   if (sock->shutdown_write)
     return -EPIPE;
@@ -369,8 +369,8 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
 }
 
 int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
-                              size_t iovlen, void *control, size_t *controllen,
-                              int flags) {
+                          size_t iovlen, void *control, size_t *controllen,
+                          int flags) {
   bool nonblock = (flags & MSG_DONTWAIT) != 0;
 
   while (1) {
@@ -1339,7 +1339,7 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   }
 
   int64_t ret = unix_sock_sendmsg(sock, kiov, kmsg.msg_iovlen, kcontrol,
-                                      kcontrollen, flags);
+                                  kcontrollen, flags);
 
   kfree(kiov);
   if (kcontrol)
@@ -1431,7 +1431,7 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   }
 
   int64_t ret = unix_sock_recvmsg(sock, kiov, kmsg.msg_iovlen, kcontrol,
-                                      &kcontrollen, flags);
+                                  &kcontrollen, flags);
 
   // Update msg_controllen in user space
   if (ret >= 0) {
@@ -1728,8 +1728,8 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   }
 }
 
-// ===================== unix_sock_write / unix_sock_read (for sys_write/sys_read
-// FD_SOCKET dispatch) =====================
+// ===================== unix_sock_write / unix_sock_read (for
+// sys_write/sys_read FD_SOCKET dispatch) =====================
 
 int64_t unix_sock_write(struct unix_sock *sock, const void *buf, size_t len) {
   struct iovec iov;

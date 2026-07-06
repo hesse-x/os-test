@@ -23,8 +23,9 @@
 #define F_SETFD 4
 
 /* Note: POSIX FD_CLOEXEC=1 is not defined here. The kernel internally uses
- * FD_CLOEXEC=0x8000 in kernel/bsd/types.h as the fd flags bit (separate from O_*).
- * The userspace FD_CLOEXEC is defined in user/include/fcntl.h (=1, POSIX convention). */
+ * FD_CLOEXEC=0x8000 in kernel/bsd/types.h as the fd flags bit (separate from
+ * O_*). The userspace FD_CLOEXEC is defined in user/include/fcntl.h (=1, POSIX
+ * convention). */
 
 // Linux-compatible sealing constants (for memfd_create + fcntl)
 #define F_ADD_SEALS 1033

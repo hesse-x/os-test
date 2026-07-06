@@ -47,9 +47,9 @@ struct kstat {
   uint32_t st_gid;
   uint32_t __pad0;
   uint64_t st_rdev;
-  int64_t  st_size;
-  int64_t  st_blksize;
-  int64_t  st_blocks;
+  int64_t st_size;
+  int64_t st_blksize;
+  int64_t st_blocks;
   struct kstat_timespec st_atim;
   struct kstat_timespec st_mtim;
   struct kstat_timespec st_ctim;

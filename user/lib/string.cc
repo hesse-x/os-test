@@ -4,20 +4,19 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <xos/errno.h>
 #include <errno.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <xos/errno.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Forward declarations: functions in this file call each other (strdup uses memcpy,
- * strerror_r uses strerror, bcopy uses memmove, bcmp uses memcmp); C++ requires
- * prior declarations */
+/* Forward declarations: functions in this file call each other (strdup uses
+ * memcpy, strerror_r uses strerror, bcopy uses memmove, bcmp uses memcmp); C++
+ * requires prior declarations */
 void *memcpy(void *dst, const void *src, size_t n);
 void *memmove(void *dst, const void *src, size_t n);
 int memcmp(const void *s1, const void *s2, size_t n);
@@ -579,20 +578,19 @@ int strcasecmp(const char *s1, const char *s2) {
     s1++;
     s2++;
   }
-  return (int)_toupper((unsigned char)*s1) -
-         (int)_toupper((unsigned char)*s2);
+  return (int)_toupper((unsigned char)*s1) - (int)_toupper((unsigned char)*s2);
 }
 
 int strncasecmp(const char *s1, const char *s2, size_t n) {
-  while (n && *s1 && _toupper((unsigned char)*s1) == _toupper((unsigned char)*s2)) {
+  while (n && *s1 &&
+         _toupper((unsigned char)*s1) == _toupper((unsigned char)*s2)) {
     s1++;
     s2++;
     n--;
   }
   if (!n)
     return 0;
-  return (int)_toupper((unsigned char)*s1) -
-         (int)_toupper((unsigned char)*s2);
+  return (int)_toupper((unsigned char)*s1) - (int)_toupper((unsigned char)*s2);
 }
 
 #ifdef __cplusplus

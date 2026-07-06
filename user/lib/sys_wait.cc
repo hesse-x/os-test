@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <syscall.h>
 #include <stdint.h>
 #include <sys/wait.h>
+#include <syscall.h>
 
 pid_t waitpid(pid_t pid, int *status, int options) {
   int64_t r = sys_waitpid(pid, status, options);

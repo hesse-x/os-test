@@ -24,8 +24,9 @@ static uint32_t gnu_hash(const char *s) {
   return h;
 }
 
-// GNU hash lookup: returns the Elf64_Sym * in symtab (including st_value/st_size),
-// or NULL if not found. caller must add link_map.base to get the runtime absolute address
+// GNU hash lookup: returns the Elf64_Sym * in symtab (including
+// st_value/st_size), or NULL if not found. caller must add link_map.base to get
+// the runtime absolute address
 static Elf64_Sym *gnu_hash_lookup(const char *name, Elf64_Sym *symtab,
                                   const char *strtab,
                                   uint32_t *gnu_hash_table) {
@@ -84,11 +85,12 @@ void *lookup_symbol_in_link_map(const char *name, struct link_map *lmap) {
   return NULL;
 }
 
-// for COPY relocation: find symbol definer, returns definer's Elf64_Sym * (including st_value/st_size)
-// out_def_map receives the definer's link_map, used to get base; returns NULL if not found
-// only used for main ELF's R_X86_64_COPY: caller looks up starting from lmap->l_next (skip main ELF itself,
-// otherwise the same-named symbol pending fill in main ELF .bss would be found, making
-// self-referential memcpy meaningless)
+// for COPY relocation: find symbol definer, returns definer's Elf64_Sym *
+// (including st_value/st_size) out_def_map receives the definer's link_map,
+// used to get base; returns NULL if not found only used for main ELF's
+// R_X86_64_COPY: caller looks up starting from lmap->l_next (skip main ELF
+// itself, otherwise the same-named symbol pending fill in main ELF .bss would
+// be found, making self-referential memcpy meaningless)
 __attribute__((visibility("hidden"))) Elf64_Sym *
 lookup_symbol_def(const char *name, struct link_map *lmap,
                   struct link_map **out_def_map) {

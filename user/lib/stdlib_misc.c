@@ -107,7 +107,8 @@ static void qsort_range(char *arr, size_t lo, size_t hi, size_t size,
       }
     }
     swap_bytes(&arr[lo * size], &arr[i * size], size);
-    /* Tail-call elimination: recurse on the shorter side, loop on the longer side */
+    /* Tail-call elimination: recurse on the shorter side, loop on the longer
+     * side */
     if (i - lo < hi - i) {
       qsort_range(arr, lo, i - 1, size, cmp);
       lo = i + 1;

@@ -125,8 +125,8 @@ typedef struct {
   // Memory Services
   efi_status (*allocate_pages)(int, int, efi_uintn, uint64_t *);
   efi_status (*free_pages)(uint64_t, efi_uintn);
-  efi_status (*get_memory_map)(efi_uintn *, void *, uint64_t *,
-                                 efi_uintn *, uint32_t *);
+  efi_status (*get_memory_map)(efi_uintn *, void *, uint64_t *, efi_uintn *,
+                               uint32_t *);
   efi_status (*allocate_pool)(int, efi_uintn, void **);
   efi_status (*free_pool)(void *);
 
@@ -140,22 +140,21 @@ typedef struct {
 
   // Protocol Handler Services
   efi_status (*install_protocol_interface)(efi_handle *, efi_guid *, int,
+                                           void *);
+  efi_status (*reinstall_protocol_interface)(efi_handle, efi_guid *, void *,
                                              void *);
-  efi_status (*reinstall_protocol_interface)(efi_handle, efi_guid *,
-                                               void *, void *);
-  efi_status (*uninstall_protocol_interface)(efi_handle, efi_guid *,
-                                               void *);
+  efi_status (*uninstall_protocol_interface)(efi_handle, efi_guid *, void *);
   efi_status (*handle_protocol)(efi_handle, efi_guid *, void **);
   void *reserved;
   void *register_protocol_notify;
   efi_status (*locate_handle)(int, efi_guid *, void *, efi_uintn *,
-                                efi_handle *);
+                              efi_handle *);
   efi_status (*locate_device_path)(efi_guid *, void **, efi_handle *);
   efi_status (*install_configuration_table)(efi_guid *, void *);
 
   // Image Services
   efi_status (*load_image)(uint8_t, efi_handle, void *, void *, efi_uintn,
-                             efi_handle *);
+                           efi_handle *);
   efi_status (*start_image)(efi_handle, efi_uintn *, uint16_t **);
   efi_status (*exit)(efi_handle, efi_status, efi_uintn, uint16_t *);
   efi_status (*unload_image)(efi_handle);

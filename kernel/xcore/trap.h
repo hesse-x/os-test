@@ -76,7 +76,7 @@ int64_t sys_gettid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 #define MAX_IRQ_HANDLERS 256
 typedef void (*irq_handler_fn)(trapframe *);
 typedef int64_t (*syscall_fn)(int64_t, int64_t, int64_t, int64_t, int64_t,
-                                int64_t);
+                              int64_t);
 void irq_register(int vec, irq_handler_fn fn);
 void irq_unregister(int vec);
 int irq_owner_check(int irq);

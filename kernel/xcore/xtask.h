@@ -42,20 +42,20 @@ typedef enum wait_event {
 struct proc; // forward declaration — Xcore does not interpret contents
 
 typedef struct xtask {
-  pid_t pid;               // offset 0
+  pid_t pid;             // offset 0
   proc_state state;      // offset 4
-  uint64_t k_rsp;          // offset 8 (switch_to: movq %rsp, 8(%rdi))
-  uint64_t k_stack_top;    // offset 16
-  uint64_t cr3;            // offset 24 (switch_to: movq 24(%rsi), %rax)
-  uint64_t entry;          // user entry RIP
+  uint64_t k_rsp;        // offset 8 (switch_to: movq %rsp, 8(%rdi))
+  uint64_t k_stack_top;  // offset 16
+  uint64_t cr3;          // offset 24 (switch_to: movq 24(%rsi), %rax)
+  uint64_t entry;        // user entry RIP
   wait_event wait_event; // block reason
-  pid_t tgid;              // thread group ID
+  pid_t tgid;            // thread group ID
   struct mm *mm;         // address space pointer (NULL for idle)
-  int assigned_cpu;        // which CPU this process runs on
-  uint8_t *iopm;           // IOPM bitmap (NULL = deny all), 8KB if allocated
+  int assigned_cpu;      // which CPU this process runs on
+  uint8_t *iopm;         // IOPM bitmap (NULL = deny all), 8KB if allocated
 
-  list_node run_node;   // per-CPU run_queue
-  list_node wait_node;  // per-CPU timer_queue
+  list_node run_node;     // per-CPU run_queue
+  list_node wait_node;    // per-CPU timer_queue
   uint64_t wait_deadline; // sched_clock() nanosecond deadline
   uint8_t wait_timed_out; // 1 = timer expired wakeup, 0 = notify wakeup
   uint8_t recv_intr;      // set by wake_process when WAIT_RECV
@@ -85,13 +85,14 @@ typedef struct xtask {
   uint64_t last_sched;
 
   // === threading support (appended at end, preserves existing offsets) ===
-  uint64_t fs_base; // TLS base (FS_BASE MSR mirror), loaded by __trapret
+  uint64_t fs_base;      // TLS base (FS_BASE MSR mirror), loaded by __trapret
   struct page *fpu_page; // fxsave area page (pre-allocated at creation time:
-                  // xcore_fpu_alloc calls bfc_alloc_page(1) during
-                  // process_create_elf/sys_fork).  Stores struct page * (NOT data
-                  // pointer) — use page_to_phys/phys_to_virt to obtain the
-                  // fxsave area virtual address. Type prevents feeding a struct page *
-                  // to fxsave/fxrstor by accident. NULL = idle (no FPU state).
+                         // xcore_fpu_alloc calls bfc_alloc_page(1) during
+                         // process_create_elf/sys_fork).  Stores struct page *
+                         // (NOT data pointer) — use page_to_phys/phys_to_virt
+                         // to obtain the fxsave area virtual address. Type
+                         // prevents feeding a struct page * to fxsave/fxrstor
+                         // by accident. NULL = idle (no FPU state).
 
   // === exit code (valid when state == ZOMBIE) ===
   // Lives in xtask (static array, slot lifetime by tasks_lock) not proc
@@ -124,10 +125,10 @@ STATIC_ASSERT(offsetof(xtask, cr3) == 24, "xtask.cr3 offset must be 24");
 // without hardcoding the constant (struct layout may drift).
 extern const uint64_t xtask_fs_base_offset;
 
-// ===================== Process table: pointer array (dynamic) =====================
-// tasks[i] points to dynamically allocated xtask (from xtask_cache slab),
-// NULL = empty slot.  Retains pid == array-index semantics (112+ instances
-// of tasks[pid]->field unchanged).  Slot reuse:
+// ===================== Process table: pointer array (dynamic)
+// ===================== tasks[i] points to dynamically allocated xtask (from
+// xtask_cache slab), NULL = empty slot.  Retains pid == array-index semantics
+// (112+ instances of tasks[pid]->field unchanged).  Slot reuse:
 //   REAPING slot: kmem_cache_free then re-alloc via xtask_alloc
 //   NULL slot: alloc directly
 // pid allocation: incrementing next_pid + circular reuse (avoids immediate

@@ -8,9 +8,9 @@
 #include "arch/x64/memlayout.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
-#include "utils/macro.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
+#include "utils/macro.h"
 #include <stdbool.h>
 
 // ===================== GDT (physical-address phase) =====================

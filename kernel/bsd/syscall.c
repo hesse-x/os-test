@@ -15,7 +15,6 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "boot/boot.h"
-#include "utils/macro.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/futex.h"
@@ -44,6 +43,7 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
+#include "utils/macro.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <xos/errno.h>
@@ -86,15 +86,17 @@ typedef struct file_t_io_resp {
 // ===================== BSD syscall: exit =====================
 // Key safety: all proc/signal reads happen BEFORE setting ZOMBIE (stored in
 // locals). After ZOMBIE, do_exit only uses locals + xtask array fields —
-// never proc->proc or sig, which may be kfree'd by concurrent sched_task_reap on
-// another CPU. do_exit does NOT do mm_put/files_put/signal_put — sched_task_reap/
-// proc_reap owns all resource freeing (original design; 3b will revisit).
+// never proc->proc or sig, which may be kfree'd by concurrent sched_task_reap
+// on another CPU. do_exit does NOT do mm_put/files_put/signal_put —
+// sched_task_reap/ proc_reap owns all resource freeing (original design; 3b
+// will revisit).
 // ===================== BSD syscall: exit =====================
 // Key safety: all proc/signal reads happen BEFORE setting ZOMBIE (stored in
 // locals). After ZOMBIE, do_exit only uses locals + xtask array fields —
-// never proc->proc or sig, which may be kfree'd by concurrent sched_task_reap on
-// another CPU. do_exit does NOT do mm_put/files_put/signal_put — sched_task_reap/
-// proc_reap owns all resource freeing (original design; 3b will revisit).
+// never proc->proc or sig, which may be kfree'd by concurrent sched_task_reap
+// on another CPU. do_exit does NOT do mm_put/files_put/signal_put —
+// sched_task_reap/ proc_reap owns all resource freeing (original design; 3b
+// will revisit).
 //
 // D13: exit_code is stored encoded as a Linux wait status. This function
 // receives an **already-encoded** exit_code (normal exit = (code & 0xff) << 8;
@@ -162,8 +164,8 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   int notify_parent = atomic_dec_and_test(&sig->thread_count);
 
   // 6. Set ZOMBIE
-  //    GATE: after this, sched_task_reap/proc_reap on another CPU may kfree proc
-  //    and signal_put signal_struct. Do NOT dereference proc->proc or sig.
+  //    GATE: after this, sched_task_reap/proc_reap on another CPU may kfree
+  //    proc and signal_put signal_struct. Do NOT dereference proc->proc or sig.
   int cpu = proc->assigned_cpu;
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
@@ -207,9 +209,9 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   }
 
   // 9. schedule() — never returns.
-  //    do_exit does NOT do mm_put/files_put/signal_put — sched_task_reap/proc_reap
-  //    owns all freeing. 3b will revisit do_exit ownership with proper
-  //    proc lifetime (RCU or per-task reap lock).
+  //    do_exit does NOT do mm_put/files_put/signal_put —
+  //    sched_task_reap/proc_reap owns all freeing. 3b will revisit do_exit
+  //    ownership with proper proc lifetime (RCU or per-task reap lock).
   schedule();
   return 0;
 }
@@ -260,7 +262,8 @@ int64_t sys_exit_group(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 
 // ===================== BSD syscall: waitpid =====================
 // Mirror of user/include/sys/wait.h options. Only WNOHANG is honored today;
-// WUNTRACED/WCONTINUED require stopped-state reporting (see doc/design/todo.md).
+// WUNTRACED/WCONTINUED require stopped-state reporting (see
+// doc/design/todo.md).
 #define WNOHANG 1
 #define WUNTRACED 2
 #define WCONTINUED 4
@@ -539,8 +542,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
             }
           }
 
-          mmap_region *region =
-              (mmap_region *)kmalloc(sizeof(mmap_region));
+          mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
           if (!region) {
             for (size_t i = 0; i < total_pages; i++)
               unmap_user_pages(pml4, vaddr + i * PAGE_SIZE,

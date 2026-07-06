@@ -34,7 +34,7 @@ void driver_pci_match(void) {
     // Match by vendor/device ID if specified
     if (drv->pci_vendor != 0 && drv->pci_device != 0) {
       pci_device *dev = pci_find_device_by_id((uint16_t)drv->pci_vendor,
-                                                (uint16_t)drv->pci_device);
+                                              (uint16_t)drv->pci_device);
       if (dev) {
         printk(LOG_INFO,
                "driver_pci_match: %s -> PCI %02x:%02x.%02x (vendor/device)\n",

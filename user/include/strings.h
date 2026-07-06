@@ -7,8 +7,8 @@
 #ifndef _STRINGS_H
 #define _STRINGS_H
 
-#include <sys/cdefs.h>
 #include <stddef.h>
+#include <sys/cdefs.h>
 
 #ifdef __cplusplus
 extern "C" {

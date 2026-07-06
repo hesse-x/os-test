@@ -42,6 +42,6 @@ static inline bool list_empty(list_node *head) { return head->next == head; }
 static inline list_node *list_front(list_node *head) { return head->next; }
 
 #define LIST_ENTRY(node, type, member)                                         \
-  ((type *)((char *)(node)-offsetof(type, member)))
+  ((type *)((char *)(node) - offsetof(type, member)))
 
 #endif // KERNEL_LIST_H

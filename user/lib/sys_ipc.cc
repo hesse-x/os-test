@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <syscall.h>
 #include <stdint.h>
 #include <sys/ipc.h>
 #include <sys/types.h>
+#include <syscall.h>
 
 int notify(pid_t pid) { return sys_notify(pid); }
 

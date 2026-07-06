@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <sys/device.h>
 #include <syscall.h>
 #include <xos/errno.h>
-#include <sys/device.h>
 
 int device_register(const char *name) { return device_register_shm(name, -1); }
 

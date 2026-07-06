@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <syscall.h>
-#include <xos/mman.h>
 #include <stdint.h>
 #include <sys/mman.h>
+#include <syscall.h>
+#include <xos/mman.h>
 
 // POSIX-like mmap: (addr, length, prot, flags, fd, offset)
 // For MAP_SHARED (SHM): fd is the SHM fd or FD_DEV fd

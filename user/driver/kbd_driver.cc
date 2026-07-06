@@ -6,13 +6,13 @@
 
 // Keyboard driver (user-space): evdev-style input protocol.
 // on_key_event reads HID reports via get_keycode() and fills input_event.
-#include <xos/input_key.h>
 #include "user/include/input_lib.h"
-#include <syscall.h>
 #include "user/include/usb_hid.h"
 #include <stdint.h>
 #include <sys/mman.h>
+#include <syscall.h>
 #include <xos/input.h>
+#include <xos/input_key.h>
 #include <xos/shm.h>
 
 // on_key_event: each callback fills one event, returns 1=has event / 0=HID

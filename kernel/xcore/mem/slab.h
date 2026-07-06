@@ -41,10 +41,10 @@ static inline void memstat_set(int *field, int val) {
 }
 
 typedef struct kmem_cache {
-  size_t obj_size;     // object size
-  size_t redzone_size; // redzone size (currently = 0)
-  spinlock lock;     // per-cache lock (protects partial list)
-  struct page *partial;       // slab list with free objects
+  size_t obj_size;      // object size
+  size_t redzone_size;  // redzone size (currently = 0)
+  spinlock lock;        // per-cache lock (protects partial list)
+  struct page *partial; // slab list with free objects
 } kmem_cache;
 
 // Global kmalloc cache array

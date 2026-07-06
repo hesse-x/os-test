@@ -12,9 +12,9 @@
 //
 // Links libc.a, uses main() entry point.
 
-#include "utils/macro.h"
-#include "user/include/input_lib.h"
 #include "user/driver/display.h"
+#include "user/include/input_lib.h"
+#include "utils/macro.h"
 #include <fcntl.h>
 #include <signal.h>
 #include <stddef.h>

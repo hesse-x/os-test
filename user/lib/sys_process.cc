@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <syscall.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <sys/process.h>
+#include <syscall.h>
 #include <unistd.h>
 
 pid_t fork(void) {

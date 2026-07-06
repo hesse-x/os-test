@@ -34,18 +34,19 @@ struct page {
                          // >1=shared)
   union {
     struct {
-      size_t cont_page_num; // contiguous page count (BFC free/allocated large block)
+      size_t cont_page_num; // contiguous page count (BFC free/allocated large
+                            // block)
       struct page *prev;    // BFC free list (doubly-linked)
       struct page *next;
     } bfc;
 
     struct {
-      struct kmem_cache *cache; // owning cache
-      void *freelist;             // free object list head (intrusive)
-      uint32_t inuse;             // allocated object count
-      uint32_t obj_count;         // total objects in page
-      int8_t cpu_id;              // CPU currently using this page (-1 = none)
-      struct page *partial_next;  // partial list link
+      struct kmem_cache *cache;  // owning cache
+      void *freelist;            // free object list head (intrusive)
+      uint32_t inuse;            // allocated object count
+      uint32_t obj_count;        // total objects in page
+      int8_t cpu_id;             // CPU currently using this page (-1 = none)
+      struct page *partial_next; // partial list link
       struct page *partial_prev;
     } slab;
   };
@@ -56,7 +57,8 @@ extern struct page *bfc_frames;
 extern struct page *bfc_free_list;
 
 void bfc_init(void) __attribute__((no_sanitize("kernel-address")));
-struct page *bfc_alloc_page(size_t n) __attribute__((no_sanitize("kernel-address")));
+struct page *bfc_alloc_page(size_t n)
+    __attribute__((no_sanitize("kernel-address")));
 struct page *bfc_alloc_page_low(size_t n)
     __attribute__((no_sanitize("kernel-address")));
 struct page *bfc_free_page(struct page *page, size_t n)

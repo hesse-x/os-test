@@ -5,10 +5,6 @@
  */
 
 // user/lib/pthread.cc — pthread library implementation (Phase 4)
-#include <sys/tls.h>
-#include <syscall.h>
-#include <xos/errno.h>
-#include <xos/syscall_nums.h>
 #include <assert.h>
 #include <pthread.h>
 #include <signal.h> // IWYU pragma: keep  // sigset_t/SIG_BLOCK etc. used in cancel mask; provided transitively by xos/signal.h but IWYU maps to hosted <signal.h>
@@ -17,9 +13,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/tls.h>
+#include <syscall.h>
 #include <unistd.h>
+#include <xos/errno.h>
 #include <xos/mman.h>
 #include <xos/signal.h>
+#include <xos/syscall_nums.h>
 #include <xos/thread.h>
 
 #ifndef FUTEX_WAIT
@@ -62,13 +62,14 @@ static struct thread_entry thread_table[MAX_PROC];
 
 static volatile int thread_table_lock = 0;
 static inline void thread_table_lock_fn(void) {
-  // __atomic_test_and_set returns the old value: old!=0 (already locked) returns true
-  // and needs retry; old==0 (unlocked) returns false and acquires the lock. Hence the
-  // condition is while(__atomic_test_and_set(...)). Previously miswritten as while(!...),
-  // which inverted the logic: when the lock was free it span, and when held it
-  // immediately "acquired" (entering the critical section concurrently with the holder).
-  // Under single-threading it "worked" by accidentally exiting on the second retry after
-  // sched_yield; under multi-threaded stress it manifested as sched_yield never returning
+  // __atomic_test_and_set returns the old value: old!=0 (already locked)
+  // returns true and needs retry; old==0 (unlocked) returns false and acquires
+  // the lock. Hence the condition is while(__atomic_test_and_set(...)).
+  // Previously miswritten as while(!...), which inverted the logic: when the
+  // lock was free it span, and when held it immediately "acquired" (entering
+  // the critical section concurrently with the holder). Under single-threading
+  // it "worked" by accidentally exiting on the second retry after sched_yield;
+  // under multi-threaded stress it manifested as sched_yield never returning
   // (bug.md Bug 2: test_futex_stress's first pthread_create stuck in
   // thread_table_activate).
   while (__atomic_test_and_set(&thread_table_lock, __ATOMIC_ACQUIRE)) {
@@ -121,12 +122,13 @@ static struct thread_entry *thread_table_find(pid_t tid) {
 }
 
 // ===================== __libc_clone_thread (asm trampoline)
-// ===================== Cannot use a pure C wrapper: after the clone child returns
-// from the syscall it is still in the parent's stack frame (rbp points at the parent
-// stack), and __syscall5's epilogue (leave; ret) would switch rsp back to the parent
-// stack, causing the child to execute on the parent stack.
+// ===================== Cannot use a pure C wrapper: after the clone child
+// returns from the syscall it is still in the parent's stack frame (rbp points
+// at the parent stack), and __syscall5's epilogue (leave; ret) would switch rsp
+// back to the parent stack, causing the child to execute on the parent stack.
 //
-// We issue the syscall directly via inline asm; after the child returns 0 the asm:
+// We issue the syscall directly via inline asm; after the child returns 0 the
+// asm:
 //   1. Resets rsp to child_stack_top (matching the kernel trapframe)
 //   2. Clears rbp (child stack is empty, no frame)
 //   3. Reads start_routine / arg from the TCB (%fs:0)
@@ -153,10 +155,11 @@ extern "C" int64_t __libc_clone_thread(uint64_t flags, uint64_t stack_top,
       "xorq %%rbp, %%rbp\n"        // clear rbp (no frame)
       "movq %%fs:0, %%rdi\n"       // rdi = tcb = %fs:0
       "movq 0x438(%%rdi), %%rax\n" // rax = tcb->start_routine
-      "movq 0x440(%%rdi), %%rdi\n" // rdi = tcb->arg (also overwrites tcb, becoming
-                                   // the first argument to start_routine)
-      "callq *%%rax\n"             // start_routine(arg)
-      "movq %%rax, %%rdi\n"        // pthread_exit(retval)
+      "movq 0x440(%%rdi), %%rdi\n" // rdi = tcb->arg (also overwrites tcb,
+                                   // becoming the first argument to
+                                   // start_routine)
+      "callq *%%rax\n"      // start_routine(arg)
+      "movq %%rax, %%rdi\n" // pthread_exit(retval)
       "callq pthread_exit\n"
       "1:\n"
       : "=a"(r)
@@ -265,14 +268,14 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
   }
 
   pid_t tid = (pid_t)r;
-  // new_tcb->tid was written by the kernel via CLONE_CHILD_SETTID; do not overwrite it
-  // here, otherwise if the child exits first (writing 0) the parent could overwrite it
-  // with a non-zero value and join would never see 0.
-  // Invariant: after clone returns, tid can only be tid (the kernel-written value) or 0
-  // (child already exited and cleared via clear_tid_addr). A third value means someone
-  // wrote it an extra time (one of the root causes of bug.md Bug 2) or
-  // CLONE_CHILD_SETTID wrote the wrong value.
-  // Pure check, does not change semantics.
+  // new_tcb->tid was written by the kernel via CLONE_CHILD_SETTID; do not
+  // overwrite it here, otherwise if the child exits first (writing 0) the
+  // parent could overwrite it with a non-zero value and join would never see 0.
+  // Invariant: after clone returns, tid can only be tid (the kernel-written
+  // value) or 0 (child already exited and cleared via clear_tid_addr). A third
+  // value means someone wrote it an extra time (one of the root causes of
+  // bug.md Bug 2) or CLONE_CHILD_SETTID wrote the wrong value. Pure check, does
+  // not change semantics.
   pid_t observed = __atomic_load_n(&new_tcb->tid, __ATOMIC_ACQUIRE);
   assert(observed == tid || observed == 0);
   thread_table_activate(slot, tid, &new_tcb->tid);
@@ -477,11 +480,12 @@ int pthread_mutex_lock(pthread_mutex_t *mutex) {
   while (!__atomic_compare_exchange_n(&mutex->state, &expected, 1, 0,
                                       __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
     if (expected == 1) {
-      // Try to mark contention: state 1→2. If it returns 0, the holder unlocked during
-      // this window (state was reset to 0); we cannot futex_wait (val=2≠0 would EAGAIN
-      // with no waker), nor leave state=2 (later CAS would fail forever → infinite
-      // spin). Restore state=0 and skip futex_wait to retry the fast-path (avoiding a
-      // syscall guaranteed to EAGAIN).
+      // Try to mark contention: state 1→2. If it returns 0, the holder unlocked
+      // during this window (state was reset to 0); we cannot futex_wait
+      // (val=2≠0 would EAGAIN with no waker), nor leave state=2 (later CAS
+      // would fail forever → infinite spin). Restore state=0 and skip
+      // futex_wait to retry the fast-path (avoiding a syscall guaranteed to
+      // EAGAIN).
       uint32_t prev = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
       if (prev == 0) {
         __atomic_store_n(&mutex->state, 0, __ATOMIC_RELEASE);

@@ -15,7 +15,6 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
-#include "utils/macro.h"
 #include "kernel/bsd/elf_loader.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/signal.h"
@@ -31,6 +30,7 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
+#include "utils/macro.h"
 #include <xos/elf.h>
 #include <xos/mman.h>
 #include <xos/signal.h>

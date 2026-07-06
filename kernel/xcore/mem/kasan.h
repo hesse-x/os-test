@@ -28,7 +28,7 @@
 #define KASAN_MEM_TO_SHADOW(addr)                                              \
   ((uint8_t *)(((uint64_t)(addr) >> KASAN_SHADOW_SCALE) + KASAN_SHADOW_OFFSET))
 #define KASAN_SHADOW_TO_MEM(shadow)                                            \
-  ((void *)(((uint64_t)(shadow)-KASAN_SHADOW_OFFSET) << KASAN_SHADOW_SCALE))
+  ((void *)(((uint64_t)(shadow) - KASAN_SHADOW_OFFSET) << KASAN_SHADOW_SCALE))
 
 // Shadow memory range: covers 0xFFFFFFFF80000000 ~ 0xFFFFFFFFFFFFFFFF
 // = 2GB virtual, 256MB shadow

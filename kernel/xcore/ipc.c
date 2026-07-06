@@ -511,12 +511,13 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
 }
 
 // ===================== wake_process =====================
-// Narrow semantics: only handles IPC-class waits (WAIT_PIPE/WAIT_POLL/WAIT_RECV).
-// Hitting other events (WAIT_FUTEX/WAIT_CHILD/WAIT_REQ_REPLY/WAIT_MSG_REPLY)
-// indicates a caller semantic error -- use wake_with_event (precise event match)
-// or wake_process_any (signal path, must interrupt any blocking state).
-// Encode this constraint in code: debug build triggers ASSERT panic,
-// preventing future wait_event additions from repeating Bug 1 (memory:
+// Narrow semantics: only handles IPC-class waits
+// (WAIT_PIPE/WAIT_POLL/WAIT_RECV). Hitting other events
+// (WAIT_FUTEX/WAIT_CHILD/WAIT_REQ_REPLY/WAIT_MSG_REPLY) indicates a caller
+// semantic error -- use wake_with_event (precise event match) or
+// wake_process_any (signal path, must interrupt any blocking state). Encode
+// this constraint in code: debug build triggers ASSERT panic, preventing future
+// wait_event additions from repeating Bug 1 (memory:
 // feedback_constraint_in_code).
 void wake_process(pid_t pid) {
   if (pid < 0 || pid >= MAX_PROC)

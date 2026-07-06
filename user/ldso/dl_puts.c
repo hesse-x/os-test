@@ -11,8 +11,8 @@
 // usable at bootstrap stage: pure syscall, does not depend on GOT/printf
 // fd=2 is stderr; fd table retains stdin/stdout/stderr after execve
 // ld.md §3.2.4
-// hidden: visible across files but not exported to dynamic symbol table, to avoid
-// going through PLT (GOT not filled before bootstrap)
+// hidden: visible across files but not exported to dynamic symbol table, to
+// avoid going through PLT (GOT not filled before bootstrap)
 
 __attribute__((visibility("hidden"))) void dl_puts(const char *s) {
   size_t len = 0;
@@ -27,7 +27,8 @@ __attribute__((visibility("hidden"))) void dl_puts(const char *s) {
 }
 
 // dl_put_hex: prints register values/addresses, usable early in bootstrap
-// hexdigits uses a local array (on stack), does not depend on .rodata relocation
+// hexdigits uses a local array (on stack), does not depend on .rodata
+// relocation
 __attribute__((visibility("hidden"))) void dl_put_hex(uint64_t val) {
   char buf[17];
   const char hexdigits[] = "0123456789abcdef"; // local array, on stack

@@ -86,7 +86,8 @@ static inline int spin_trylock(spinlock *lk) __acquires(lk) {
   return __atomic_exchange_n(&lk->locked, 1, __ATOMIC_ACQUIRE) == 0;
 }
 
-// trylock failure must popfq to restore original IF state, avoiding CLI state leak
+// trylock failure must popfq to restore original IF state, avoiding CLI state
+// leak
 static inline int spin_trylock_irqsave(spinlock *lk, uint64_t *flags)
     __acquires(lk) __must_check {
   uint64_t f;

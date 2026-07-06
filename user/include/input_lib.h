@@ -15,8 +15,7 @@
 
 // Poll ring: drain all pending events into caller buffer (pure drain, no
 // sleeping flag). Returns number of events read (0 if ring empty).
-int input_client_poll(volatile void *shm, input_event *events,
-                      int max_events);
+int input_client_poll(volatile void *shm, input_event *events, int max_events);
 
 // Helper: input_event → basic single-byte ASCII (lowercase letters, digits,
 // symbols without shift, space/enter/bs/tab/esc). shift/caps/ESC-seq/Ctrl

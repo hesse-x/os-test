@@ -34,7 +34,7 @@
 // PAT index 0 = WB (no PCD, no PWT) — default, no flag needed
 
 // ===================== Constants =====================
-#define PHY_ADDR(addr) ((__force phys_addr_t)((uintptr_t)(addr)-VMA_BASE))
+#define PHY_ADDR(addr) ((__force phys_addr_t)((uintptr_t)(addr) - VMA_BASE))
 
 // ===================== GDT =====================
 // 64-bit GDT entry: 8 bytes
@@ -53,7 +53,8 @@ typedef struct gdt_ptr {
   uint64_t base;
 } __attribute__((packed)) gdt_ptr;
 
-// ===================== TSS (64-bit, 128 bytes + 8KB IOPM) =====================
+// ===================== TSS (64-bit, 128 bytes + 8KB IOPM)
+// =====================
 #define IOPM_SIZE 8192 // 8KB IOPM bitmap (65536 ports / 8 bits per byte)
 struct tss_struct {
   uint32_t reserved0;

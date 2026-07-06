@@ -7,8 +7,8 @@
 #ifndef USER_USB_HID_H
 #define USER_USB_HID_H
 
-#include <xos/input_key.h>
 #include <stdint.h>
+#include <xos/input_key.h>
 #include <xos/shm.h> // usb_hid_slot, usb_hid_shm_header, HID constants
 
 // Read keyboard events from USB HID SHM ring

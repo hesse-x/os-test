@@ -435,9 +435,9 @@ static void timer_handler(trapframe *tf) {
 
   // Advance this CPU's RCU grace-period counter.  Without this, a CPU that
   // stays runnable in user mode (e.g. terminal flushing PTY output) never
-  // enters sched_idle_entry and thus never calls rcu_read_unlock(); synchronize_rcu
-  // would spin forever waiting on cpu_gen[cpu].  IRQ context (IF=0) is a
-  // quiescent state as long as we're not inside a read-side CS.
+  // enters sched_idle_entry and thus never calls rcu_read_unlock();
+  // synchronize_rcu would spin forever waiting on cpu_gen[cpu].  IRQ context
+  // (IF=0) is a quiescent state as long as we're not inside a read-side CS.
   rcu_quiescent();
 
   // Poll xHCI doorbell every ~10ms (every 10th tick at ~100Hz)
@@ -516,12 +516,13 @@ static void timer_handler(trapframe *tf) {
     int cpu = get_cpu_local()->cpu_id;
     if (current_task && current_task->need_resched) {
       if (++cpu_locals[cpu].preempt_stall_ticks >= 100) { // ~1s unconsumed
-        printk(LOG_WARN,
-               "PREEMPT-STALLED cpu%d pid%d need_resched unconsumed for %u ticks, "
-               "this CPU run_queue ready=%d (preemption point bypassed? check "
-               "check_pending_signals)\n",
-               cpu, current_task->pid, cpu_locals[cpu].preempt_stall_ticks,
-               cpu_locals[cpu].run_count);
+        printk(
+            LOG_WARN,
+            "PREEMPT-STALLED cpu%d pid%d need_resched unconsumed for %u ticks, "
+            "this CPU run_queue ready=%d (preemption point bypassed? check "
+            "check_pending_signals)\n",
+            cpu, current_task->pid, cpu_locals[cpu].preempt_stall_ticks,
+            cpu_locals[cpu].run_count);
       }
     } else {
       cpu_locals[cpu].preempt_stall_ticks = 0;

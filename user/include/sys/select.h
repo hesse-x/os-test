@@ -29,22 +29,19 @@ typedef struct {
   do {                                                                         \
     size_t __i;                                                                \
     for (__i = 0; __i < sizeof(fd_set) / sizeof(long); __i++)                  \
-      ((fd_set *)(set))->fds_bits[__i] = 0;                                   \
+      ((fd_set *)(set))->fds_bits[__i] = 0;                                    \
   } while (0)
 
 #define FD_CLR(fd, set)                                                        \
-  (((fd_set *)(set))                                                           \
-       ->fds_bits[(fd) / (8 * sizeof(unsigned long))] &=                       \
-       ~(1UL << ((fd) % (8 * sizeof(unsigned long)))))
+  (((fd_set *)(set))->fds_bits[(fd) / (8 * sizeof(unsigned long))] &=          \
+   ~(1UL << ((fd) % (8 * sizeof(unsigned long)))))
 
 #define FD_SET(fd, set)                                                        \
-  (((fd_set *)(set))                                                           \
-       ->fds_bits[(fd) / (8 * sizeof(unsigned long))] |=                       \
-       1UL << ((fd) % (8 * sizeof(unsigned long))))
+  (((fd_set *)(set))->fds_bits[(fd) / (8 * sizeof(unsigned long))] |=          \
+   1UL << ((fd) % (8 * sizeof(unsigned long))))
 
 #define FD_ISSET(fd, set)                                                      \
-  ((((const fd_set *)(set))                                                    \
-        ->fds_bits[(fd) / (8 * sizeof(unsigned long))] &                       \
+  ((((const fd_set *)(set))->fds_bits[(fd) / (8 * sizeof(unsigned long))] &    \
     (1UL << ((fd) % (8 * sizeof(unsigned long))))) != 0)
 
 /* select/pselect wrappers (stub — poll-based fallback) */

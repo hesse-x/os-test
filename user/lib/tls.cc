@@ -6,12 +6,12 @@
 
 // user/lib/tls.cc — TLS template snapshot + main thread TCB init + cancel
 // handler
-#include <sys/tls.h>
 #include <pthread.h>
-#include <syscall.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/tls.h>
+#include <syscall.h>
 #include <unistd.h>
 #include <xos/mman.h>
 
@@ -21,9 +21,10 @@ struct tls_info g_tls_info = {0};
 }
 
 // Linker symbols (defined in user_linker.ld)
-// For symbols of the form `__xxx = SIZEOF(...)` in the linker script, their address is
-// the value, so they are declared as char[] and (size_t)__xxx takes the address as a
-// numerical value, avoiding generating a memory load at that address.
+// For symbols of the form `__xxx = SIZEOF(...)` in the linker script, their
+// address is the value, so they are declared as char[] and (size_t)__xxx takes
+// the address as a numerical value, avoiding generating a memory load at that
+// address.
 extern "C" char __tls_template_start[];
 extern "C" char __tls_template_end[];
 extern "C" char __tdata_size[];
@@ -48,7 +49,7 @@ extern "C" void __libc_tls_init_first(void) {
   // Align tls_block to alignment
   if (g_tls_info.alignment > 0) {
     g_tls_info.size = (g_tls_info.size + g_tls_info.alignment - 1) &
-                        ~(g_tls_info.alignment - 1);
+                      ~(g_tls_info.alignment - 1);
   }
 }
 #endif
@@ -124,10 +125,10 @@ extern "C" void __libc_tls_init_rest(void) {
   sys_pthread_set_cancel_handler((uint64_t)__pthread_cancel_check);
 }
 
-// Main-thread TLS initialization (static-path entry): fill g_tls_info + alloc TCB +
-// FS_BASE + ... The dynamic path does not call this function; it calls
-// __libc_tls_init_rest directly (g_tls_info is filled by collect_tls_from_link_map,
-// see ld2b3 T11/T12).
+// Main-thread TLS initialization (static-path entry): fill g_tls_info + alloc
+// TCB + FS_BASE + ... The dynamic path does not call this function; it calls
+// __libc_tls_init_rest directly (g_tls_info is filled by
+// collect_tls_from_link_map, see ld2b3 T11/T12).
 #if !DYNAMIC
 extern "C" void __libc_tls_init(void) {
   __libc_tls_init_first();
@@ -148,7 +149,8 @@ extern "C" void __pthread_cancel_check(int sig) {
   struct tcb *tcb = __pthread_current_tcb();
   if (tcb->cancel_state == PTHREAD_CANCEL_ENABLE) {
     // Phase 3 (step 3) changed this to pthread_exit(PTHREAD_CANCELED)
-    // At that point pthread_exit was not yet implemented, so sys_exit was used first
+    // At that point pthread_exit was not yet implemented, so sys_exit was used
+    // first
     pthread_exit(PTHREAD_CANCELED);
   }
   // DISABLE: return to sigreturn trampoline, resume original context
@@ -156,8 +158,8 @@ extern "C" void __pthread_cancel_check(int sig) {
 
 // === Dynamic-path TLS collection (plan_ld2b3 T12 / ld.md §3.5.3) ===
 #if DYNAMIC
-#include <sys/link_map.h>
 #include <stdlib.h>
+#include <sys/link_map.h>
 
 // Dynamic path: walk _dl_link_map merging PT_TLS into tls_info
 // List order: main ELF → libc.so → ld.so (ld.so usually has no PT_TLS, skip it)

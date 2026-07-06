@@ -5,10 +5,10 @@
  */
 
 #include "arch/x64/memlayout.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syscall.h>
-#include <stdint.h>
 #include <unistd.h>
 
 // ===================== Size class definitions =====================
@@ -58,7 +58,8 @@ struct big_alloc_header {
 // ===================== Global state =====================
 static void *class_freelist[NUM_KMALLOC_CLASSES];
 static user_slab_header *class_partial[NUM_KMALLOC_CLASSES];
-// Phase 4: global lock protecting the single-threaded slab allocator (thread-safe)
+// Phase 4: global lock protecting the single-threaded slab allocator
+// (thread-safe)
 static volatile int malloc_spinlock = 0;
 static inline void malloc_lock(void) {
   while (!__atomic_test_and_set(&malloc_spinlock, __ATOMIC_ACQUIRE)) {

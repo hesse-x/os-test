@@ -69,7 +69,8 @@ static long dl_sys_close(int fd) {
 }
 
 // 6-arg mmap: rdi=addr, rsi=len, rdx=prot, r10=flags, r8=fd, r9=offset
-// hidden export: malloc in minilibc.c reuses the same wrapper, avoiding duplicate inline asm
+// hidden export: malloc in minilibc.c reuses the same wrapper, avoiding
+// duplicate inline asm
 __attribute__((visibility("hidden"))) void *dl_sys_mmap(void *addr, size_t size,
                                                         int prot, int flags,
                                                         int fd,
@@ -87,8 +88,8 @@ __attribute__((visibility("hidden"))) void *dl_sys_mmap(void *addr, size_t size,
   return (void *)(uintptr_t)ret;
 }
 
-// this OS has no mprotect syscall yet; anonymous RW mapping is implicitly executable,
-// segment permissions not enforced for now
+// this OS has no mprotect syscall yet; anonymous RW mapping is implicitly
+// executable, segment permissions not enforced for now
 static long dl_sys_mprotect(void *addr, size_t len, int prot) {
   (void)addr;
   (void)len;
@@ -101,7 +102,8 @@ static long dl_sys_mprotect(void *addr, size_t len, int prot) {
 #define PAGE_ALIGN(x) (((x) + PAGE_SIZE - 1) & ~((size_t)(PAGE_SIZE - 1)))
 #define PAGE_DOWN(x) ((x) & ~((size_t)(PAGE_SIZE - 1)))
 
-// static PHDR buffer (ld.so does not use malloc; PHDR usually < 4KB, 64 entries suffice)
+// static PHDR buffer (ld.so does not use malloc; PHDR usually < 4KB, 64 entries
+// suffice)
 static Elf64_Phdr dl_phdrs[64];
 
 // load .so into userspace memory
@@ -197,9 +199,10 @@ void *load_so(const char *path, Elf64_Dyn **out_dyn) {
 
   // 4. anonymous mapping (MAP_PRIVATE | MAP_ANONYMOUS)
   //    this OS has no mprotect syscall yet, cannot split segment permissions by
-  //    PT_LOAD p_flags; use uniform RWX (kernel sys_mmap sets NX bit on mappings
-  //    without PROT_EXEC, which would cause an instruction-fetch #PF on the .text
-  //    segment. The load_so comment that once said "RW implicitly executable" was wrong)
+  //    PT_LOAD p_flags; use uniform RWX (kernel sys_mmap sets NX bit on
+  //    mappings without PROT_EXEC, which would cause an instruction-fetch #PF
+  //    on the .text segment. The load_so comment that once said "RW implicitly
+  //    executable" was wrong)
   void *base = dl_sys_mmap(NULL, load_sz, PROT_READ | PROT_WRITE | PROT_EXEC,
                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (base == MAP_FAILED) {
@@ -222,16 +225,17 @@ void *load_so(const char *path, Elf64_Dyn **out_dyn) {
     if (dl_phdrs[i].p_filesz > 0) {
       dl_sys_read((int)fd, seg_dst, dl_phdrs[i].p_filesz);
     }
-    // BSS zeroing (memsz > filesz portion) - mmap already returns zero pages, no need to zero again
-    // but if filesz end and memsz end cross a page boundary, mmap already zeroed;
-    // also zero within the same page
+    // BSS zeroing (memsz > filesz portion) - mmap already returns zero pages,
+    // no need to zero again but if filesz end and memsz end cross a page
+    // boundary, mmap already zeroed; also zero within the same page
     if (dl_phdrs[i].p_memsz > dl_phdrs[i].p_filesz) {
       memset((char *)seg_dst + dl_phdrs[i].p_filesz, 0,
              dl_phdrs[i].p_memsz - dl_phdrs[i].p_filesz);
     }
   }
 
-  // 6. set segment permissions (this OS has no mprotect yet; anonymous RW+X mapping is implicitly executable)
+  // 6. set segment permissions (this OS has no mprotect yet; anonymous RW+X
+  // mapping is implicitly executable)
   //    will enable once mprotect syscall is added
   (void)dl_sys_mprotect;
 

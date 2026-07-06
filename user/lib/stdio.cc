@@ -4,18 +4,20 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <stdio.h>
-#include "utils/kvformat.h"
-#include <string.h>
-#include <syscall.h>
-#include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <syscall.h>
 #include <unistd.h>
+#include <xos/errno.h>
+#include <xos/fcntl.h>
+
+#include "utils/kvformat.h"
 
 /* ===================== sys_write based flush ===================== */
 
@@ -573,7 +575,8 @@ int setvbuf(FILE *f, char *buf, int mode, size_t size) {
     return -1;
   }
   fflush(f);
-  /* Free the old buffer (only for buffers allocated by fopen; not the static streams) */
+  /* Free the old buffer (only for buffers allocated by fopen; not the static
+   * streams) */
   if (f->buf && f != stdin && f != stdout && f != stderr) {
     free(f->buf);
     f->buf = nullptr;

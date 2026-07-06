@@ -13,12 +13,13 @@
 #include <sys/link_map.h>
 #include <xos/elf.h>
 
-// global link_map list head (libc.so reads it via extern in collect_tls_from_link_map)
-// visibility("default"): ld.so is globally -fvisibility=hidden, only this symbol
-// needs to be exported to libc.so
+// global link_map list head (libc.so reads it via extern in
+// collect_tls_from_link_map) visibility("default"): ld.so is globally
+// -fvisibility=hidden, only this symbol needs to be exported to libc.so
 __attribute__((visibility("default"))) struct link_map *_dl_link_map = NULL;
 
-// ld.so itself: keep a single static node (no external dependencies, avoids one malloc)
+// ld.so itself: keep a single static node (no external dependencies, avoids one
+// malloc)
 struct link_map g_ld_map_static;
 
 // parse .dynamic to fill link_map's symbol lookup + TLS fields
@@ -43,10 +44,11 @@ fill_link_map(struct link_map *l, uintptr_t base, Elf64_Dyn *dyn) {
   if (!dyn)
     return;
 
-  // first pass: find DT_STRTAB/DT_SYMTAB/DT_GNU_HASH (addresses need base added; .so is PIC)
-  // note: main ELF is non-PIE, d_ptr is already an absolute address; libc.so/ld.so is PIC,
-  // d_ptr is a relative vaddr needing base
-  // simplification: try base + d_ptr for all objects (main ELF base=0 degrades to absolute address)
+  // first pass: find DT_STRTAB/DT_SYMTAB/DT_GNU_HASH (addresses need base
+  // added; .so is PIC) note: main ELF is non-PIE, d_ptr is already an absolute
+  // address; libc.so/ld.so is PIC, d_ptr is a relative vaddr needing base
+  // simplification: try base + d_ptr for all objects (main ELF base=0 degrades
+  // to absolute address)
   for (Elf64_Dyn *d = dyn; d->d_tag != DT_NULL; d++) {
     switch (d->d_tag) {
     case DT_STRTAB:
@@ -62,10 +64,10 @@ fill_link_map(struct link_map *l, uintptr_t base, Elf64_Dyn *dyn) {
   }
 
   // second pass: find DT_RELA/DT_RELASZ/DT_JMPREL/DT_PLTRELSZ + PT_TLS
-  // PT_TLS info is not delivered via .dynamic; needs PHDR walk - but ld.so no longer has
-  // the main ELF PHDR at this point
-  // simplification: TLS info is filled by a separate PHDR walk at fill time (caller passes phdr)
-  // here we only fill fields that .dynamic can provide
+  // PT_TLS info is not delivered via .dynamic; needs PHDR walk - but ld.so no
+  // longer has the main ELF PHDR at this point simplification: TLS info is
+  // filled by a separate PHDR walk at fill time (caller passes phdr) here we
+  // only fill fields that .dynamic can provide
   for (Elf64_Dyn *d = dyn; d->d_tag != DT_NULL; d++) {
     switch (d->d_tag) {
     case DT_RELA:

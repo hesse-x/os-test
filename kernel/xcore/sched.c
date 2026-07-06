@@ -17,7 +17,6 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
-#include "utils/macro.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
@@ -30,6 +29,7 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
+#include "utils/macro.h"
 #include <xos/errno.h>
 #include <xos/shm.h>
 #include <xos/signal.h>
@@ -194,11 +194,12 @@ _Static_assert(sizeof(switch_frame) == 56,
                "switch_frame size must be 56 (7 × uint64_t)");
 
 uint64_t sched_build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
-  return sched_build_kstack_user_rsp(k_stack_top, entry_rip, 0x00007FFFFFFFE000ULL);
+  return sched_build_kstack_user_rsp(k_stack_top, entry_rip,
+                                     0x00007FFFFFFFE000ULL);
 }
 
 uint64_t sched_build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
-                               uint64_t user_rsp) {
+                                     uint64_t user_rsp) {
   trapframe tf = {0};
   tf.ss = 0x23; // USER_DS
   if (user_rsp == 0)
@@ -304,7 +305,8 @@ __attribute__((no_sanitize("kernel-address"))) void sched_idle_entry() {
     if (reap_hook)
       reap_hook();
 
-    // Work stealing: when this CPU is idle, try to steal a task from the busiest CPU
+    // Work stealing: when this CPU is idle, try to steal a task from the
+    // busiest CPU
     sched_try_steal_task();
 
     schedule();
@@ -422,10 +424,10 @@ void fpu_context_switch(xtask *prev, xtask *next) {
     void *fpu_data =
         (void *)(__force uintptr_t)phys_to_virt(page_to_phys(prev->fpu_page));
     // Defense: fxsave target must be a BFC data-page virtual address, not a
-    // struct page * metadata pointer (historical bug: mistakenly treated the struct page *
-    // returned by bfc_alloc_page as a data pointer, fxsave overwrote Page
-    // metadata, only exposed later when kfree detected page->status anomaly,
-    // hard to diagnose)
+    // struct page * metadata pointer (historical bug: mistakenly treated the
+    // struct page * returned by bfc_alloc_page as a data pointer, fxsave
+    // overwrote Page metadata, only exposed later when kfree detected
+    // page->status anomaly, hard to diagnose)
     uint64_t vma_start __attribute__((unused)) =
         (__force uint64_t)phys_to_virt(0);
     ASSERT((uint64_t)fpu_data >= vma_start &&
@@ -704,8 +706,8 @@ void sched_task_reap(xtask *proc) {
   WARN_ON(!list_empty(&proc->wait_node));
 
   proc->pid = -1;
-  proc->state =
-      REAPING; // dynamic: REAPING instead of UNUSED, xtask_alloc frees the object on reuse
+  proc->state = REAPING; // dynamic: REAPING instead of UNUSED, xtask_alloc
+                         // frees the object on reuse
   proc->k_rsp = 0;
   // proc->k_stack_top intentionally preserved (lazy reclaim)
   proc->cr3 = 0;
@@ -746,6 +748,7 @@ void sched_task_reap(xtask *proc) {
   proc->user_stack_base = 0;
   proc->user_stack_size = 0;
   proc->need_resched = 0;
-  // proc->fpu_page intentionally preserved (lazy reclaim, see list at top of function)
+  // proc->fpu_page intentionally preserved (lazy reclaim, see list at top of
+  // function)
   spin_unlock(&tasks_lock);
 }

@@ -9,7 +9,6 @@
 
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
-#include "utils/macro.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/mem/alloc.h"
@@ -17,6 +16,7 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
+#include "utils/macro.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

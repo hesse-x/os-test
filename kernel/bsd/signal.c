@@ -205,7 +205,8 @@ void check_pending_signals(trapframe *tf) {
       sa.sa_mask = 0;
       sa.sa_flags = 0;
       deliver_signal(proc, tf, sig, &sa);
-      break; // after delivery, return to user mode to run handler: fall through to preemption point
+      break; // after delivery, return to user mode to run handler: fall through
+             // to preemption point
     }
 
     sigaction_t *sa = &proc->proc->signal->action[sig];
@@ -244,7 +245,8 @@ void check_pending_signals(trapframe *tf) {
       continue;
     } else {
       deliver_signal(proc, tf, sig, sa);
-      break; // after delivery, return to user mode to run handler: fall through to preemption point
+      break; // after delivery, return to user mode to run handler: fall through
+             // to preemption point
     }
   }
 

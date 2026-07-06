@@ -50,8 +50,7 @@ static void set_gdt_gate(gdt_entry *gdt, int n, uint32_t base, uint32_t limit,
   gdt[n].base_high = (base >> 24) & 0xFF;
 }
 
-static void set_tss_gate(gdt_entry *gdt, int n, uint64_t base,
-                         uint32_t limit) {
+static void set_tss_gate(gdt_entry *gdt, int n, uint64_t base, uint32_t limit) {
   gdt[n].limit_low = L16(limit);
   gdt[n].base_low = L16(base);
   gdt[n].base_middle = (base >> 16) & 0xFF;
@@ -159,8 +158,10 @@ __attribute__((no_sanitize("kernel-address"))) void smp_apply_cpu(int cpu_id) {
 // global APIC init (IOAPIC/interrupt routing), AP does per-CPU LAPIC enable.
 void cpu_bringup_common(int cpu_id) {
   smp_apply_cpu(cpu_id);
-  enable_nx(); // CR4.NXDE + EFER.NXE (AP opens explicitly too, removing implicit trampoline dependency)
-  pat_init();   // PAT MSR (also fixes the BSP omission of pat_init before the fix)
+  enable_nx();  // CR4.NXDE + EFER.NXE (AP opens explicitly too, removing
+                // implicit trampoline dependency)
+  pat_init();   // PAT MSR (also fixes the BSP omission of pat_init before the
+                // fix)
   enable_sse(); // CR4.OSFXSR + CR4.OSXMMEXCPT
   idt_install();
   setup_syscall();

@@ -32,8 +32,9 @@
 extern "C" {
 #endif
 
-// errno is returned via __errno_location() as a TLS pointer (user/include/errno.h
-// defines the errno macro). syscall.h is included by libc internals; declare
+// errno is returned via __errno_location() as a TLS pointer
+// (user/include/errno.h defines the errno macro). syscall.h is included by libc
+// internals; declare
 // __errno_location here so inline wrappers can write errno.
 int *__errno_location(void);
 #define errno (*__errno_location())
@@ -131,9 +132,10 @@ static inline void sys_exit(int32_t exit_code) {
 }
 
 // --- fork/waitpid/execve ---
-static inline int64_t sys_waitpid(int32_t pid, int32_t *exit_code, int options) {
-  int64_t r = __syscall3(SYS_WAITPID, (int64_t)pid, (int64_t)(uintptr_t)exit_code,
-                         (int64_t)options);
+static inline int64_t sys_waitpid(int32_t pid, int32_t *exit_code,
+                                  int options) {
+  int64_t r = __syscall3(SYS_WAITPID, (int64_t)pid,
+                         (int64_t)(uintptr_t)exit_code, (int64_t)options);
   if (r < 0) {
     errno = -(int)r;
     return -1;

@@ -15,7 +15,8 @@
 // Higher-half kernel/user boundary: user space lives below this, kernel above.
 #define KERNEL_VMA_BOUNDARY 0xFFFFFFFF80000000ULL
 
-// ld.so fixed base (below stack top 0x7FFFFFFFE000, fixed high address, no ASLR)
+// ld.so fixed base (below stack top 0x7FFFFFFFE000, fixed high address, no
+// ASLR)
 #define LD_SO_BASE 0x7FFFFF000000ULL
 
 // User stack top (consistent with hardcoded values in proc.c / sched.c)

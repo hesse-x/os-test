@@ -5,13 +5,12 @@
  */
 
 // libinput_client: consumer-side input SHM ring poll + basic ASCII mapping.
-#include <xos/input_key.h>
 #include <stdint.h>
 #include <xos/input.h>
+#include <xos/input_key.h>
 
 // Poll ring: drain all pending events. Pure drain, no sleeping flag management.
-int input_client_poll(volatile void *shm, input_event *events,
-                      int max_events) {
+int input_client_poll(volatile void *shm, input_event *events, int max_events) {
   if (!shm || !events || max_events <= 0)
     return 0;
   volatile input_shm_header *hdr = (volatile input_shm_header *)shm;
@@ -22,14 +21,13 @@ int input_client_poll(volatile void *shm, input_event *events,
   uint32_t tail = __atomic_load_n(&hdr->tail, __ATOMIC_ACQUIRE);
   uint32_t cap =
       hdr->ring_capacity ? hdr->ring_capacity : INPUT_RING_CAPACITY_DEFAULT;
-  uint32_t off =
-      hdr->ring_offset ? hdr->ring_offset : sizeof(input_shm_header);
+  uint32_t off = hdr->ring_offset ? hdr->ring_offset : sizeof(input_shm_header);
 
   int n = 0;
   while (head != tail && n < max_events) {
     volatile input_event *slot =
         (volatile input_event *)((volatile uint8_t *)shm + off +
-                                   tail * sizeof(input_event));
+                                 tail * sizeof(input_event));
     events[n].timestamp_ns = slot->timestamp_ns;
     events[n].type = slot->type;
     events[n].code = slot->code;

@@ -5,7 +5,8 @@
  */
 
 // ld.so main flow (post-bootstrap)
-// ld.md §3.3 / §8.2.2 recursive loading of multiple dependencies / plan_ld2b3 T14
+// ld.md §3.3 / §8.2.2 recursive loading of multiple dependencies / plan_ld2b3
+// T14
 
 #include <stddef.h>
 #include <stdint.h>
@@ -18,7 +19,8 @@
 __attribute__((visibility("hidden"))) void dl_puts(const char *s);
 __attribute__((visibility("hidden"))) void dl_put_hex(uint64_t val);
 
-// external function declarations (load_so.c / relocate.c / symtab.c / link_map.c)
+// external function declarations (load_so.c / relocate.c / symtab.c /
+// link_map.c)
 __attribute__((visibility("hidden"))) void *load_so(const char *path,
                                                     Elf64_Dyn **out_dyn);
 __attribute__((visibility("hidden"))) void
@@ -53,7 +55,8 @@ static uintptr_t find_auxv_val(uintptr_t *sp, uint64_t type) {
   return 0;
 }
 
-// relocate a single object: walk .rela.dyn applying all relocations + eager bind .rela.plt
+// relocate a single object: walk .rela.dyn applying all relocations + eager
+// bind .rela.plt
 static void relocate_object(struct link_map *l) {
   Elf64_Rela *rela = (Elf64_Rela *)l->rela_dyn;
   size_t rela_sz = l->rela_dyn_sz;
@@ -108,10 +111,10 @@ static void register_loaded(const char *soname, struct link_map *m) {
 
 // load a single .so (no dedup), build link_map node but do not relocate
 static struct link_map *load_one(const char *soname) {
-  // path search: try /lib/<soname> first (production libs), fall back to /test/lib/<soname>
-  // (ld.so test stub). Aligns with Linux DT_RPATH idea; currently does not parse
-  // DT_RPATH/DT_RUNPATH (ld.md §8.4 known boundary), hardcoded prefixes suffice since all
-  // libs live in /lib/ or /test/lib/.
+  // path search: try /lib/<soname> first (production libs), fall back to
+  // /test/lib/<soname> (ld.so test stub). Aligns with Linux DT_RPATH idea;
+  // currently does not parse DT_RPATH/DT_RUNPATH (ld.md §8.4 known boundary),
+  // hardcoded prefixes suffice since all libs live in /lib/ or /test/lib/.
   static char lib_path[256];
   const char *prefix = "/lib/";
   char *dp = lib_path;
@@ -122,7 +125,8 @@ static struct link_map *load_one(const char *soname) {
     *dp++ = *np++;
   *dp = '\0';
 
-  // probe whether /lib/<soname> exists (load_so open failure triggers SYS_EXIT, cannot rely on return value)
+  // probe whether /lib/<soname> exists (load_so open failure triggers SYS_EXIT,
+  // cannot rely on return value)
   long fd;
   __asm__ volatile("syscall"
                    : "=a"(fd)
@@ -265,7 +269,8 @@ void __dls_init(uintptr_t *sp, uintptr_t ld_base) {
   // 8. relocation: walk the list in "dependencies before dependents" order
   //    (skip ld.so itself and the main ELF)
   //    ld.so self-relocated during bootstrap; main ELF relocated last
-  //    list order main -> ld -> libs...: ld is in the middle, must explicitly skip ld_map
+  //    list order main -> ld -> libs...: ld is in the middle, must explicitly
+  //    skip ld_map
   for (struct link_map *l = main_map->l_next; l; l = l->l_next) {
     if (l == ld_map)
       continue;

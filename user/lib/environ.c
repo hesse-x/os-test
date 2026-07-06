@@ -6,24 +6,26 @@
 
 /* environ.c — Environment variables (D9 model)
  *
- * environ is a malloc-growable char** array (NULL-terminated). __libc_start_main
- * copies the on-stack envp into this array. getenv/setenv/putenv/unsetenv/clearenv
- * use an internal pthread_mutex to protect all mutating operations.
+ * environ is a malloc-growable char** array (NULL-terminated).
+ * __libc_start_main copies the on-stack envp into this array.
+ * getenv/setenv/putenv/unsetenv/clearenv use an internal pthread_mutex to
+ * protect all mutating operations.
  *
  * setenv: strdup("name=val") into the array, realloc to grow.
- * putenv: places the passed-in char* into the array without copying (glibc semantics).
- * execve callers pass environ by default (see sys_process.cc).
+ * putenv: places the passed-in char* into the array without copying (glibc
+ * semantics). execve callers pass environ by default (see sys_process.cc).
  */
-#include <xos/errno.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <xos/errno.h>
 
 char **environ = NULL;
 
 static pthread_mutex_t env_lock = PTHREAD_MUTEX_INITIALIZER;
-static size_t env_capacity = 0; /* number of array slots (including NULL terminator) */
+static size_t env_capacity =
+    0; /* number of array slots (including NULL terminator) */
 
 /* Ensure the array can hold at least count env strings + 1 NULL terminator */
 static int env_reserve(size_t count) {
@@ -41,7 +43,8 @@ static int env_reserve(size_t count) {
   return 0;
 }
 
-/* Count the current number of entries in environ (excluding the NULL terminator) */
+/* Count the current number of entries in environ (excluding the NULL
+ * terminator) */
 static size_t env_count(void) {
   size_t n = 0;
   if (environ)
@@ -180,12 +183,13 @@ int clearenv(void) {
   return 0;
 }
 
-/* Called by __libc_start_main: copy the on-stack envp into a malloc'd char** array.
- * envp is a NULL-terminated array of strings. */
+/* Called by __libc_start_main: copy the on-stack envp into a malloc'd char**
+ * array. envp is a NULL-terminated array of strings. */
 void __libc_env_init(char **envp) {
   pthread_mutex_lock(&env_lock);
   if (!envp) {
-    /* No environment: allocate an empty array containing only the NULL terminator */
+    /* No environment: allocate an empty array containing only the NULL
+     * terminator */
     environ = (char **)malloc(sizeof(char *));
     if (environ) {
       environ[0] = NULL;

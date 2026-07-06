@@ -13,10 +13,11 @@
 #include <xos/syscall_nums.h>
 
 // linker-provided .dynamic start symbol
-// use asm to get RIP-relative address, avoiding GOT (GOT not filled before bootstrap)
+// use asm to get RIP-relative address, avoiding GOT (GOT not filled before
+// bootstrap)
 extern Elf64_Dyn _DYNAMIC[];
-// bootstrap stage helper declarations (hidden: visible across files but not via PLT, GOT
-// not filled before bootstrap)
+// bootstrap stage helper declarations (hidden: visible across files but not via
+// PLT, GOT not filled before bootstrap)
 __attribute__((visibility("hidden"))) void dl_puts(const char *s);
 __attribute__((visibility("hidden"))) void dl_put_hex(uint64_t val);
 
@@ -89,9 +90,9 @@ void __dls3(uintptr_t *sp) {
   //    GLOB_DAT:   *addr = ld_base + symtab[sym].st_value + addend
   //    (symbols defined in ld.so itself; st_value is link-time vaddr, add base
   //    to get runtime address)
-  //    GOT not filled before bootstrap; GLOB_DAT must be handled here, otherwise
-  //    build_link_map reads the GOT entry of _dl_link_map as 0 and dereferences
-  //    it -> #PF
+  //    GOT not filled before bootstrap; GLOB_DAT must be handled here,
+  //    otherwise build_link_map reads the GOT entry of _dl_link_map as 0 and
+  //    dereferences it -> #PF
   if (rela && rela_sz) {
     for (size_t i = 0; i < rela_sz / sizeof(Elf64_Rela); i++) {
       Elf64_Rela *r = &rela[i];

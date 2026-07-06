@@ -31,11 +31,11 @@ typedef struct elf_load_result {
 // new_pml4: caller-allocated PML4 (kernel entries already copied)
 // Returns entry point and success status
 elf_load_result elf_load(const uint8_t *data, uint64_t size,
-                           uint64_t *new_pml4);
+                         uint64_t *new_pml4);
 
 // Base-offset load (for -shared -fPIC images such as ld.so)
 // PT_LOAD segments are mapped to base + p_vaddr
 elf_load_result elf_load_at(const uint8_t *data, uint64_t size,
-                              uint64_t *new_pml4, uint64_t base);
+                            uint64_t *new_pml4, uint64_t base);
 
 #endif // KERNEL_ELF_LOADER_H

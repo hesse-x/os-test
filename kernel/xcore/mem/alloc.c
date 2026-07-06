@@ -7,11 +7,11 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
-#include "utils/macro.h"
 #include "kernel/efi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
+#include "utils/macro.h"
 #include <xos/syscall.h>
 
 // ===================== Global variable definitions =====================
@@ -26,7 +26,8 @@ void bfc_init(void) {
   // Initialization is done in init_mem
 }
 
-__attribute__((no_sanitize("kernel-address"))) struct page *bfc_alloc_page(size_t n) {
+__attribute__((no_sanitize("kernel-address"))) struct page *
+bfc_alloc_page(size_t n) {
   if (n == 0)
     return NULL;
 
@@ -103,8 +104,8 @@ __attribute__((no_sanitize("kernel-address"))) struct page *bfc_alloc_page(size_
   return NULL;
 }
 
-__attribute__((no_sanitize("kernel-address"))) struct page *bfc_free_page(struct page *page,
-                                                                   size_t n) {
+__attribute__((no_sanitize("kernel-address"))) struct page *
+bfc_free_page(struct page *page, size_t n) {
   if (page == NULL || n == 0) {
     return NULL;
   }
@@ -282,7 +283,8 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
 
   size_t desc_count = bi->mmap_size / bi->mmap_desc_size;
 
-  // 1. Compute the maximum physical address of AVAILABLE memory + total page frames
+  // 1. Compute the maximum physical address of AVAILABLE memory + total page
+  // frames
   uint64_t max_phys_addr = 0;
   for (size_t i = 0; i < desc_count; i++) {
     efi_memory_descriptor *desc = get_efi_desc(bi, i);
@@ -407,7 +409,8 @@ bfc_alloc_page_data(size_t n) {
 }
 
 // bfc_free_page_data: free pages given a data-page virtual address.
-// Inverse of bfc_alloc_page_data; recovers the struct page * via phys conversion.
+// Inverse of bfc_alloc_page_data; recovers the struct page * via phys
+// conversion.
 __attribute__((no_sanitize("kernel-address"))) void
 bfc_free_page_data(void *data, size_t n) {
   if (!data)

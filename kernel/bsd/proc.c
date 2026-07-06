@@ -16,7 +16,6 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
-#include "utils/macro.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/elf_loader.h"
 #include "kernel/bsd/fat32.h"
@@ -42,6 +41,7 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
+#include "utils/macro.h"
 #include <xos/elf.h>
 #include <xos/errno.h>
 #include <xos/fcntl.h>
@@ -109,7 +109,8 @@ void proc_free(proc *bp) {
 // Called directly from sched_task_reap() for synchronous per-process cleanup.
 // Owns all POSIX resource freeing: files_put (closes all fds), signal_put,
 // kfree(proc). do_exit does NOT put these — it only sets ZOMBIE and
-// notifies parent; sched_task_reap/proc_reap is the sole owner of proc lifetime.
+// notifies parent; sched_task_reap/proc_reap is the sole owner of proc
+// lifetime.
 void proc_reap(xtask *proc) {
   if (!proc->proc)
     return;
@@ -671,8 +672,8 @@ uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
 
 // Deep-copy fd_table from parent_files to child_files.
 // Bumps ref counts for pipe, SHM, file, inode, socket, TTY.
-static void __attribute__((unused))
-copy_fd_table(files *parent_files, files *child_files) {
+static void __attribute__((unused)) copy_fd_table(files *parent_files,
+                                                  files *child_files) {
   for (int fd = 0; fd < MAX_FD; fd++) {
     struct file *f = parent_files->fd_table[fd];
     child_files->fd_table[fd] = f;
@@ -1003,7 +1004,8 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   child->proc = child_bp;
   child_bp->xtask = child;
   if (flags & CLONE_FILES) {
-    files_put(child_bp->files); // release the default one created by proc_create
+    files_put(
+        child_bp->files); // release the default one created by proc_create
     child_bp->files = parent->proc->files;
     refcount_inc(&child_bp->files->f_count);
   } else {
@@ -1012,7 +1014,8 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   // 5. signal_struct
   if (flags & CLONE_SIGHAND) {
-    signal_put(child_bp->signal); // release the default one created by proc_create
+    signal_put(
+        child_bp->signal); // release the default one created by proc_create
     child_bp->signal = parent->proc->signal;
     refcount_inc(&child_bp->signal->sig_count);
   } else {
@@ -1079,8 +1082,9 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // 10. Fill child xtask
   // Ordering constraint: assigned_cpu must be set before pid; CLONE_THREAD
   // has affinity to the parent CPU, otherwise no affinity
-  child->assigned_cpu =
-      (flags & CLONE_THREAD) ? sched_pick_cpu_pref(parent->assigned_cpu) : sched_pick_cpu();
+  child->assigned_cpu = (flags & CLONE_THREAD)
+                            ? sched_pick_cpu_pref(parent->assigned_cpu)
+                            : sched_pick_cpu();
   child->pid = alloc_idx;
   child->state = READY;
   child->k_rsp = k_rsp;
@@ -1119,8 +1123,9 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // during enqueue, re-pick a CPU
   if (__atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) >
       RECHECK_THRESHOLD) {
-    int new_cpu = (flags & CLONE_THREAD) ? sched_pick_cpu_pref(parent->assigned_cpu)
-                                         : sched_pick_cpu();
+    int new_cpu = (flags & CLONE_THREAD)
+                      ? sched_pick_cpu_pref(parent->assigned_cpu)
+                      : sched_pick_cpu();
     if (new_cpu != cpu) {
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
       child->assigned_cpu = new_cpu; // not yet enqueued, safe to mutate field
@@ -1518,7 +1523,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     tf->rip = lr.entry; // main ELF entry (static path)
     tf->rsp = user_sp;  // points to argc
   }
-  // User stack top must be 16-byte aligned (see same ASSERT in sched_build_kstack)
+  // User stack top must be 16-byte aligned (see same ASSERT in
+  // sched_build_kstack)
   ASSERT(tf->rsp % 16 == 0);
   tf->rax = 0;
 
@@ -1654,8 +1660,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 // ===================== mmap region allocation =====================
 
 mmap_region *add_mmap_region(xtask *proc, uint64_t vaddr, uint64_t size,
-                               uint64_t phys, struct shm *shm_obj,
-                               uint32_t prot) {
+                             uint64_t phys, struct shm *shm_obj,
+                             uint32_t prot) {
   if (!proc->mm)
     return NULL;
   mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));

@@ -46,7 +46,7 @@ typedef struct input_event {
   uint16_t type;         // EV_KEY / EV_REL / EV_ABS / EV_SYN
   uint16_t code;         // KEY_A / BTN_LEFT / REL_X / ABS_X ...
   int32_t value;         // key: 1=press 0=release; rel: delta; abs: coordinate
-} input_event;         // 16 bytes
+} input_event;           // 16 bytes
 
 // Bind ioctl arg (consumer → driver)
 // Direction A: driver owns SHM (bound to /dev/<name> inode). Consumer just

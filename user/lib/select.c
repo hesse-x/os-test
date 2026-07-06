@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <sys/select.h>
-#include <sys/poll.h>
-#include <time.h>
 #include <errno.h>
 #include <stddef.h>
+#include <sys/poll.h>
+#include <sys/select.h>
+#include <time.h>
 
 /* select(nfds, readfds, writefds, exceptfds, timeout)
  *
@@ -58,9 +58,12 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
     return -1; /* errno already set by poll */
 
   /* Clear all fd_set and re-set based on poll results */
-  if (readfds)   FD_ZERO(readfds);
-  if (writefds)  FD_ZERO(writefds);
-  if (exceptfds) FD_ZERO(exceptfds);
+  if (readfds)
+    FD_ZERO(readfds);
+  if (writefds)
+    FD_ZERO(writefds);
+  if (exceptfds)
+    FD_ZERO(exceptfds);
 
   int result = 0;
   for (nfds_t i = 0; i < count; i++) {

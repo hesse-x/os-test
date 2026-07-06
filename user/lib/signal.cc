@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <xos/signal.h>
 #include <pthread.h> // pthread_sigmask
 #include <signal.h>
 #include <stdlib.h>  // abort (declared in stdlib.h)
 #include <string.h>  // memset
 #include <syscall.h> // sys_kill, sys_sigaction, sys_sigreturn
 #include <unistd.h>  // getpid
+#include <xos/signal.h>
 
 int kill(int pid, int sig) { return sys_kill((int)pid, sig); }
 
@@ -21,8 +21,8 @@ int sigaction(int sig, const struct sigaction *act, struct sigaction *oldact) {
 int sigreturn(void) { return sys_sigreturn(); }
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
-  /* D11: sigprocmask = pthread_sigmask (POSIX process-level mask = thread-level mask;
-   * in this OS single-threaded processes have equivalent semantics). */
+  /* D11: sigprocmask = pthread_sigmask (POSIX process-level mask = thread-level
+   * mask; in this OS single-threaded processes have equivalent semantics). */
   return pthread_sigmask(how, set, oldset);
 }
 
@@ -40,15 +40,16 @@ sighandler_t signal(int sig, sighandler_t handler) {
   return old.sa_handler;
 }
 
-/* abort (D13): first raise(SIGABRT); if ignored/caught, reset SIGABRT to SIG_DFL
- * and raise again to ensure the process terminates. */
+/* abort (D13): first raise(SIGABRT); if ignored/caught, reset SIGABRT to
+ * SIG_DFL and raise again to ensure the process terminates. */
 void abort(void) {
   sigset_t set;
   sigemptyset(&set);
   sigaddset(&set, SIGABRT);
   sigprocmask(SIG_UNBLOCK, &set, NULL);
   raise(SIGABRT);
-  /* Still alive → a handler intercepted SIGABRT; reset to default action and raise */
+  /* Still alive → a handler intercepted SIGABRT; reset to default action and
+   * raise */
   struct sigaction dfl;
   memset(&dfl, 0, sizeof(dfl));
   dfl.sa_handler = SIG_DFL;

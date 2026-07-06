@@ -11,7 +11,6 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "boot/boot.h"
-#include "utils/macro.h"
 #include "kernel/kernel.h"
 #include "kernel/xcore/acpi.h"
 #include "kernel/xcore/log.h"
@@ -23,6 +22,7 @@
 #include "kernel/xcore/serial_hook.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
+#include "utils/macro.h"
 
 __attribute__((no_sanitize("kernel-address"))) void xcore_init(boot_info *bi) {
   serial_init();
@@ -44,7 +44,7 @@ __attribute__((no_sanitize("kernel-address"))) void xcore_init(boot_info *bi) {
 
   // rcu_init();  // RCU is initialized lazily in sched_init
 
-  sig_init();  // allocate signal trampoline page (shared across all processes)
+  sig_init();   // allocate signal trampoline page (shared across all processes)
   sched_init(); // initialize process table + cpu_locals
 
   smp_boot_aps();

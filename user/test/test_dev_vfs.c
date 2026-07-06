@@ -4,9 +4,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <xos/input.h>
-#include <xos/ioctl.h>
-#include <syscall.h>
 #include "user/driver/display.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -17,9 +14,12 @@
 #include <sys/mman.h>
 #include <sys/poll.h>
 #include <sys/stat.h>
+#include <syscall.h>
 #include <unistd.h>
 #include <unity.h>
 #include <xos/errno.h>
+#include <xos/input.h>
+#include <xos/ioctl.h>
 
 void setUp(void) {}
 void tearDown(void) {}

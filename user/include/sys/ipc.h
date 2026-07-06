@@ -7,11 +7,11 @@
 #ifndef _SYS_IPC_H
 #define _SYS_IPC_H
 
-#include <syscall.h>
 #include <stdint.h>
 #include <sys/cdefs.h>
 #include <sys/poll.h>
 #include <sys/types.h>
+#include <syscall.h>
 
 #ifdef __cplusplus
 extern "C" {

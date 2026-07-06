@@ -7,9 +7,9 @@
 // ld.so's built-in minimal libc (does not link libc.a)
 // ld.md §7.1 deviation: ld.so does not link libc.a, brings its own minimal libc
 
-#include <xos/mman.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <xos/mman.h>
 
 void *memcpy(void *dst, const void *src, unsigned long n) {
   char *d = (char *)dst;
@@ -41,7 +41,8 @@ unsigned long strlen(const char *s) {
   return n;
 }
 
-// exported by load_so.c (hidden), reuse the same mmap wrapper, avoiding duplicate inline asm
+// exported by load_so.c (hidden), reuse the same mmap wrapper, avoiding
+// duplicate inline asm
 __attribute__((visibility("hidden"))) void *dl_sys_mmap(void *addr, size_t size,
                                                         int prot, int flags,
                                                         int fd,

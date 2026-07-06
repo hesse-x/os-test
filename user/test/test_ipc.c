@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <syscall.h>
 #include "user/test/test_helpers.h"
 #include <string.h>
 #include <sys/ipc.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <syscall.h>
 #include <unistd.h>
 #include <unity.h>
 

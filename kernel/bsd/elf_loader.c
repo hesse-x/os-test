@@ -7,12 +7,12 @@
 #include "kernel/bsd/elf_loader.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
-#include "utils/macro.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/xtask.h"
+#include "utils/macro.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <xos/elf.h>
@@ -69,7 +69,7 @@ static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
 }
 
 static elf_load_result elf_load_internal(const uint8_t *data, uint64_t size,
-                                           uint64_t *new_pml4, uint64_t base) {
+                                         uint64_t *new_pml4, uint64_t base) {
   elf_load_result result = {0};
   result.load_base = base;
 
@@ -132,7 +132,8 @@ static elf_load_result elf_load_internal(const uint8_t *data, uint64_t size,
     uint64_t first_page = base + (ph->p_vaddr & ~0xFFFULL);
     uint64_t last_page = base + ((ph->p_vaddr + ph->p_memsz - 1) & ~0xFFFULL);
     uint64_t file_page_base =
-        ph->p_offset & ~0xFFFULL; // page-aligned start file offset of the segment
+        ph->p_offset &
+        ~0xFFFULL; // page-aligned start file offset of the segment
 
     for (uint64_t page_addr = first_page; page_addr <= last_page;
          page_addr += PAGE_SIZE) {
@@ -142,7 +143,8 @@ static elf_load_result elf_load_internal(const uint8_t *data, uint64_t size,
       // p_offset + filesz)
       const uint8_t *src = NULL;
       uint64_t copy_len = 0;
-      uint64_t file_end = ph->p_offset + ph->p_filesz; // end of segment file data
+      uint64_t file_end =
+          ph->p_offset + ph->p_filesz; // end of segment file data
       uint64_t page_file_start = file_page_base + page_file_off;
       if (page_file_start < file_end) {
         src = data + page_file_start;
@@ -166,11 +168,11 @@ static elf_load_result elf_load_internal(const uint8_t *data, uint64_t size,
 }
 
 elf_load_result elf_load(const uint8_t *data, uint64_t size,
-                           uint64_t *new_pml4) {
+                         uint64_t *new_pml4) {
   return elf_load_internal(data, size, new_pml4, 0);
 }
 
 elf_load_result elf_load_at(const uint8_t *data, uint64_t size,
-                              uint64_t *new_pml4, uint64_t base) {
+                            uint64_t *new_pml4, uint64_t base) {
   return elf_load_internal(data, size, new_pml4, base);
 }

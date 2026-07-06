@@ -7,7 +7,6 @@
 // init process — PID 2 (VFS in-kernel)
 // Spawns kbd_driver, terminal, and optionally test_runner
 // Adopts orphan children and reaps them via waitpid(-1)
-#include <syscall.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +16,7 @@
 #include <sys/process.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <syscall.h>
 #include <unistd.h>
 
 static int spawn_service(const char *path) {

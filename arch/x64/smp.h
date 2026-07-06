@@ -49,8 +49,9 @@ typedef struct cpu_local {
   spinlock scheduler_lock; // per-CPU scheduler lock
   list_node run_queue;     // per-CPU ready queue (sentinel node)
   list_node timer_queue;   // per-CPU timer queue (sorted by wait_deadline,
-                             // sentinel node)
-  struct page *active_slab[NUM_KMALLOC_CLASSES]; // per-CPU active slab per size class
+                           // sentinel node)
+  struct page
+      *active_slab[NUM_KMALLOC_CLASSES]; // per-CPU active slab per size class
 
   // RCU read-side nesting state
   rcu_local rcu; // nesting count + saved IF

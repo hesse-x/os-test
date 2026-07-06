@@ -12,8 +12,6 @@
 // via device_register_shm. Consumers access via open("/dev/<name>") +
 // mmap(MAP_SHARED, fd). BIND request only registers the consumer pid for notify
 // (no cross-process fd passing).
-#include <xos/input_key.h>
-#include <syscall.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -21,9 +19,11 @@
 #include <sys/ioctl.h>
 #include <sys/ipc.h>
 #include <sys/mman.h>
+#include <syscall.h>
 #include <unistd.h>
 #include <xos/errno.h>
 #include <xos/input.h>
+#include <xos/input_key.h>
 #include <xos/shm.h>
 
 #define MAX_CONSUMERS 8
@@ -68,7 +68,7 @@ static void broadcast_event(const input_event *ev) {
 
   volatile input_event *slot =
       (volatile input_event *)((volatile uint8_t *)hdr + g_ring_off +
-                                 head * sizeof(input_event));
+                               head * sizeof(input_event));
   slot->timestamp_ns = ev->timestamp_ns;
   slot->type = ev->type;
   slot->code = ev->code;
@@ -140,8 +140,7 @@ void input_driver_run(uint32_t device_type, const char *dev_name,
   g_ring_hdr = hdr;
   g_ring_off = hdr->ring_offset;
   g_ring_cap = hdr->ring_capacity;
-  g_ring_slots =
-      (volatile input_event *)((volatile uint8_t *)hdr + g_ring_off);
+  g_ring_slots = (volatile input_event *)((volatile uint8_t *)hdr + g_ring_off);
 
   device_register_shm(dev_name, shm_fd);
 

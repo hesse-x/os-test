@@ -36,13 +36,14 @@ typedef struct proc {
   struct files *files; // fork: deep copy; clone(CLONE_FILES): ref++
 
   // === threading support ===
-  pid_t clear_tid_addr;   // CLONE_CHILD_CLEARTID user address (0 = none)
+  pid_t clear_tid_addr; // CLONE_CHILD_CLEARTID user address (0 = none)
   list_node futex_node; // futex bucket list node
   uint64_t
       futex_uaddr; // user address being waited on (0 = not waiting on futex)
 
   // === pthread cancel (Phase 4) ===
-  uint64_t cancel_handler; // __pthread_cancel_check function address, 0 = not registered
+  uint64_t cancel_handler; // __pthread_cancel_check function address, 0 = not
+                           // registered
 } proc;
 
 // ABI drift guard: kernel/driver/bsd_types.h maintains a parallel proc for
@@ -61,19 +62,18 @@ STATIC_ASSERT(
     offsetof(proc, signal) == 176,
     "proc.signal must be a POINTER to a separately-allocated signal_struct, "
     "not an inline struct — inlining shifts the offset of files");
-STATIC_ASSERT(
-    sizeof(proc) == 232,
-    "proc size changed — update kernel/driver/bsd_types.h to match");
+STATIC_ASSERT(sizeof(proc) == 232,
+              "proc size changed — update kernel/driver/bsd_types.h to match");
 #undef STATIC_ASSERT
 
 // Process lifecycle (BSD layer is the sole entry for process creation,
 // calls Xcore KPI xtask_alloc then wraps with POSIX data)
-proc *proc_create(void);  // calls xtask_alloc + kmalloc proc + bidirectional
-                            // binding + files_create
-void proc_free(proc *bp); // files_put + xtask_free + kfree
+proc *proc_create(void);     // calls xtask_alloc + kmalloc proc + bidirectional
+                             // binding + files_create
+void proc_free(proc *bp);    // files_put + xtask_free + kfree
 void proc_reap(xtask *proc); // POSIX cleanup: close fds, free proc (called
-                               // from sched_task_reap)
-void proc_reap_idle(void);     // idle hook: scan for orphaned zombies
+                             // from sched_task_reap)
+void proc_reap_idle(void);   // idle hook: scan for orphaned zombies
 
 // Process creation (kernel/bsd/proc_create.c)
 xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);

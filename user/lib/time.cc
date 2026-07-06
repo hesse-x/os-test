@@ -12,7 +12,8 @@
 
 extern "C" {
 
-/* ===================== Basics: sys_gettime / sys_clock ===================== */
+/* ===================== Basics: sys_gettime / sys_clock =====================
+ */
 
 int timespec_get(struct timespec *ts, int base) {
   if (base != TIME_UTC)
@@ -59,20 +60,20 @@ long timezone = 0;
 int daylight = 0;
 char *tzname[2] = {(char *)"UTC", (char *)"UTC"};
 
-void tzset(void) { /* No timezone, no-op stub */
-}
+void tzset(void) { /* No timezone, no-op stub */ }
 
 /* ===================== time_t → struct tm calendar conversion (UTC)
  * =====================
  *
  * Algorithm: days since 1970-01-01 + seconds within the day. Reverse the
- * 400-year/100-year/4-year leap rules to derive year/month/day. tm_wday/tm_yday are
- * computed along the way. About 80 lines, no external dependencies.
+ * 400-year/100-year/4-year leap rules to derive year/month/day. tm_wday/tm_yday
+ * are computed along the way. About 80 lines, no external dependencies.
  */
 static void secs_to_tm(time_t t, struct tm *tm) {
   /* Handle negative times (t < 0): long division guarantees floor division */
   long long days = (long long)(t / 86400);
-  long long rem = (long long)t - days * 86400; /* remaining seconds of the day [0,86400) */
+  long long rem =
+      (long long)t - days * 86400; /* remaining seconds of the day [0,86400) */
 
   tm->tm_sec = (int)(rem % 60);
   rem /= 60;
@@ -143,12 +144,12 @@ struct tm *timespec_to_tm(const struct timespec *ts, struct tm *result) {
 
 /* mktime: struct tm → time_t.
  *
- * POSIX semantics: tm fields may be out of range (tm_mday=0 means the last day of the
- * previous month, tm_mon=-1 means December of the previous year, etc.). Algorithm —
- * fold each field into total seconds since 1970-01-01 00:00:00 UTC: first sum whole-year
- * days up to the target year (including leap years), then add days month by month to the
- * target month, then add day/hour/minute/second. Finally use secs_to_tm to backfill the
- * normalized fields.
+ * POSIX semantics: tm fields may be out of range (tm_mday=0 means the last day
+ * of the previous month, tm_mon=-1 means December of the previous year, etc.).
+ * Algorithm — fold each field into total seconds since 1970-01-01 00:00:00 UTC:
+ * first sum whole-year days up to the target year (including leap years), then
+ * add days month by month to the target month, then add day/hour/minute/second.
+ * Finally use secs_to_tm to backfill the normalized fields.
  *
  * Note tm_year is year - 1900, tm_mon is [0-11] but may be out of range.
  */
@@ -196,7 +197,8 @@ time_t mktime(struct tm *tm) {
   /* Sum month days up to mon */
   for (int m = 0; m < mon; m++)
     days += month_days(year, m);
-  /* Day (tm_mday is 1-based; out-of-range values are normalized by secs_to_tm below) */
+  /* Day (tm_mday is 1-based; out-of-range values are normalized by secs_to_tm
+   * below) */
   days += day - 1;
 
   long long secs = days * 86400LL + (long long)tm->tm_hour * 3600LL +
@@ -213,8 +215,8 @@ double difftime(time_t a, time_t b) { return (double)a - (double)b; }
  *
  * Supports common conversion specifiers: %Y %m %d %H %M %S %j %w %Z %z %A %B %p
  * %T(=HH:MM:SS) %F(=YYYY-MM-DD) %R(HH:MM) %D(MM/DD/YY) %s(epoch) %%.
- * Complex specifiers (%c %x %X localized formats) use the ISO C minimal implementation
- * returning placeholders like "%c".
+ * Complex specifiers (%c %x %X localized formats) use the ISO C minimal
+ * implementation returning placeholders like "%c".
  */
 static int put_str(char **p, char *end, const char *s) {
   while (*s) {
@@ -362,7 +364,8 @@ char *asctime_r(const struct tm *tm, char *buf) {
                                 "Thu", "Fri", "Sat"};
   static const char *mon[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-  /* "Www Mmm dd hh:mm:ss yyyy\n" (26 bytes including the trailing \n and NUL) */
+  /* "Www Mmm dd hh:mm:ss yyyy\n" (26 bytes including the trailing \n and NUL)
+   */
   int h = tm->tm_hour, mi = tm->tm_min, s = tm->tm_sec;
   int d = tm->tm_mday, y = tm->tm_year + 1900;
   char tmp[26];

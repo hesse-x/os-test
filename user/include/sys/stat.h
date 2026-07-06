@@ -20,21 +20,21 @@ extern "C" {
 /* Userspace struct stat — mirrors struct kstat from xos/stat.h.
  * Must match Linux x86-64 ABI exactly (144 bytes). */
 struct stat {
-  dev_t st_dev;                     /* offset  0: uint64_t */
-  ino_t st_ino;                     /* offset  8: uint64_t */
-  nlink_t st_nlink;                 /* offset 16: uint64_t */
-  mode_t st_mode;                   /* offset 24: uint32_t */
-  uid_t st_uid;                     /* offset 28: uint32_t */
-  gid_t st_gid;                     /* offset 32: uint32_t */
-  int __pad0;                       /* offset 36: padding  */
-  dev_t st_rdev;                    /* offset 40: uint64_t */
-  off_t st_size;                    /* offset 48: int64_t  */
-  blksize_t st_blksize;             /* offset 56: int64_t  */
-  blkcnt_t st_blocks;               /* offset 64: int64_t  */
-  struct timespec st_atim;          /* offset 72: 16 bytes */
-  struct timespec st_mtim;          /* offset 88: 16 bytes */
-  struct timespec st_ctim;          /* offset 104: 16 bytes */
-  long __reserved[3];               /* offset 120: 24 bytes */
+  dev_t st_dev;            /* offset  0: uint64_t */
+  ino_t st_ino;            /* offset  8: uint64_t */
+  nlink_t st_nlink;        /* offset 16: uint64_t */
+  mode_t st_mode;          /* offset 24: uint32_t */
+  uid_t st_uid;            /* offset 28: uint32_t */
+  gid_t st_gid;            /* offset 32: uint32_t */
+  int __pad0;              /* offset 36: padding  */
+  dev_t st_rdev;           /* offset 40: uint64_t */
+  off_t st_size;           /* offset 48: int64_t  */
+  blksize_t st_blksize;    /* offset 56: int64_t  */
+  blkcnt_t st_blocks;      /* offset 64: int64_t  */
+  struct timespec st_atim; /* offset 72: 16 bytes */
+  struct timespec st_mtim; /* offset 88: 16 bytes */
+  struct timespec st_ctim; /* offset 104: 16 bytes */
+  long __reserved[3];      /* offset 120: 24 bytes */
 };
 
 /* Compile-time assertion: struct stat and struct kstat must have identical
@@ -43,7 +43,7 @@ struct stat {
 static_assert(offsetof(struct stat, st_size) == offsetof(struct kstat, st_size),
               "struct stat and struct kstat st_size offset mismatch");
 static_assert(sizeof(struct stat) == sizeof(struct kstat),
-               "struct stat and struct kstat size mismatch");
+              "struct stat and struct kstat size mismatch");
 #else
 _Static_assert(offsetof(struct stat, st_size) ==
                    offsetof(struct kstat, st_size),

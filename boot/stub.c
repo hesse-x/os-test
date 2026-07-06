@@ -5,7 +5,8 @@
  */
 
 // boot/stub.c - standalone EFI bootloader
-// Read myos.elf from FAT32, load to physical address, set up boot_info, jump to kernel
+// Read myos.elf from FAT32, load to physical address, set up boot_info, jump to
+// kernel
 #include "boot/boot.h"
 #include <efi.h>
 #include <efilib.h>
@@ -76,10 +77,10 @@ static EFI_STATUS load_elf(EFI_FILE_PROTOCOL *file, UINT64 *entry_addr) {
 }
 
 // ===================== Load entire file into memory =====================
-// Read the entire contents of file into a physical memory region allocated via AllocatePages.
-// Returns the allocated physical address (*out_phys) and byte count (*out_size).
-// On failure returns an EFI error code; the caller is responsible for freeing
-// already-allocated pages on the failure path.
+// Read the entire contents of file into a physical memory region allocated via
+// AllocatePages. Returns the allocated physical address (*out_phys) and byte
+// count (*out_size). On failure returns an EFI error code; the caller is
+// responsible for freeing already-allocated pages on the failure path.
 static EFI_STATUS load_file_to_mem(EFI_FILE_PROTOCOL *file,
                                    EFI_PHYSICAL_ADDRESS *out_phys,
                                    UINT64 *out_size) {
@@ -98,8 +99,9 @@ static EFI_STATUS load_file_to_mem(EFI_FILE_PROTOCOL *file,
     return st;
 
   // Allocate page-aligned physical memory (rounded up to 4KB pages)
-  // EfiLoaderData: owned by the loader, firmware does not reclaim after ExitBootServices,
-  // accessible directly after kernel page table mapping (same approach as Linux initrd).
+  // EfiLoaderData: owned by the loader, firmware does not reclaim after
+  // ExitBootServices, accessible directly after kernel page table mapping (same
+  // approach as Linux initrd).
   UINTN npages = (UINTN)((file_size + 4095) / 4096);
   EFI_PHYSICAL_ADDRESS phys = 0;
   st = uefi_call_wrapper(BS->AllocatePages, 4, AllocateAnyPages, EfiLoaderData,
@@ -125,9 +127,10 @@ static EFI_STATUS load_file_to_mem(EFI_FILE_PROTOCOL *file,
 }
 
 // ===================== Open file =====================
-// Open the file from the volume where BOOTX64.EFI resides (the ESP partition of disk.img).
-// Use LoadedImage to locate the device handle that loaded BOOTX64.EFI, ensuring we get the ESP
-// rather than the root partition or another disk's FAT32.
+// Open the file from the volume where BOOTX64.EFI resides (the ESP partition of
+// disk.img). Use LoadedImage to locate the device handle that loaded
+// BOOTX64.EFI, ensuring we get the ESP rather than the root partition or
+// another disk's FAT32.
 static EFI_STATUS open_file(EFI_HANDLE ImageHandle, EFI_FILE_PROTOCOL **file,
                             CHAR16 *name) {
   EFI_LOADED_IMAGE *li;

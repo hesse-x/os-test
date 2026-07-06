@@ -6,8 +6,8 @@
 
 #include <stdlib.h>
 
-// atexit implementation: a static array of up to 32 handlers (no malloc dependency)
-// ld.md §6.4 task 5 / plan_ld2b3 T8
+// atexit implementation: a static array of up to 32 handlers (no malloc
+// dependency) ld.md §6.4 task 5 / plan_ld2b3 T8
 
 #define ATEXIT_MAX 32
 

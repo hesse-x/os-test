@@ -9,12 +9,12 @@
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
-#include "utils/macro.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
-#include <xos/syscall.h>
+#include "utils/macro.h"
 #include <stdint.h>
+#include <xos/syscall.h>
 
 // Global kmalloc cache array
 kmem_cache kmalloc_caches[NUM_KMALLOC_CLASSES];
@@ -417,7 +417,8 @@ kmem_cache_alloc(kmem_cache *cache) {
            cache->obj_size);
     return NULL;
   }
-  slab_page_init(new_page, cache, -1); // cpu_id=-1: dedicated cache has no per-CPU ownership
+  slab_page_init(new_page, cache,
+                 -1); // cpu_id=-1: dedicated cache has no per-CPU ownership
 
   void *obj = new_page->slab.freelist;
   new_page->slab.freelist = *(void **)obj;

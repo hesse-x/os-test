@@ -8,7 +8,6 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
-#include "utils/kvformat.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/driver/bsd_types.h"
 #include "kernel/xcore/log.h"
@@ -16,6 +15,7 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
+#include "utils/kvformat.h"
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/socket.h> // POLLIN/POLLOUT

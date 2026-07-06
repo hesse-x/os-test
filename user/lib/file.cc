@@ -8,13 +8,6 @@
 // Kernel handles FAT32, devtmpfs, pipes, sockets, etc.
 // No libc-side fd_table — kernel's proc->fd_table is the single source of
 // truth.
-#include <syscall.h>
-#include <xos/errno.h>
-#include <xos/fcntl.h>
-#include <xos/ioctl.h>
-#include <xos/socket.h>
-#include <xos/syscall_asm.h>
-#include <xos/syscall_nums.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -24,8 +17,15 @@
 #include <sys/poll.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <syscall.h>
 #include <termios.h>
 #include <unistd.h>
+#include <xos/errno.h>
+#include <xos/fcntl.h>
+#include <xos/ioctl.h>
+#include <xos/socket.h>
+#include <xos/syscall_asm.h>
+#include <xos/syscall_nums.h>
 
 // ===================== Working directory (per-process) =====================
 static char cwd_path[256] = "/";
@@ -159,9 +159,9 @@ int fcntl(int fd, int cmd, ...) {
     int r = sys_fcntl(fd, cmd, arg);
     return r;
   } else if (cmd == F_GETFD) {
-    /* The kernel's sys_fcntl does not yet support F_GETFD/F_SETFD; this OS has no
-     * exec, so FD_CLOEXEC semantics are meaningless. Honest degradation: always
-     * return 0 (no cloexec). See todo.md. */
+    /* The kernel's sys_fcntl does not yet support F_GETFD/F_SETFD; this OS has
+     * no exec, so FD_CLOEXEC semantics are meaningless. Honest degradation:
+     * always return 0 (no cloexec). See todo.md. */
     return 0;
   } else if (cmd == F_SETFD) {
     va_list ap;

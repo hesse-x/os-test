@@ -69,8 +69,7 @@ static inline void wake_from_wait(xtask *p) {
 // safe: target was already woken by another path or not waiting on this event).
 // Call outside bucket lock / socket_lock.  Consolidates repeated
 // "hold scheduler_lock + check + wake_from_wait" pattern from futex.c / ipc.c.
-static inline void wake_with_event(xtask *target,
-                                   wait_event expected_event) {
+static inline void wake_with_event(xtask *target, wait_event expected_event) {
   int tcpu = target->assigned_cpu;
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &flags);
@@ -104,14 +103,15 @@ void process_entry(void);
 #define AFFINITY_THRESHOLD                                                     \
   1 // affinity threshold: prefer preferred CPU when its load <= min + this
 #define RECHECK_THRESHOLD                                                      \
-  2 // TOCTOU recheck threshold: consider switching CPU when queue has > this many waiters
+  2 // TOCTOU recheck threshold: consider switching CPU when queue has > this
+    // many waiters
 int sched_pick_cpu(void);
 int sched_pick_cpu_pref(int pref_cpu);
 uint64_t sched_build_kstack(uint64_t k_stack_top, uint64_t entry_rip);
 // Variant allowing caller-supplied user rsp (e.g. for argc/argv/auxv stack
 // layout)
 uint64_t sched_build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
-                               uint64_t user_rsp);
+                                     uint64_t user_rsp);
 
 // ===================== FPU state save/restore =====================
 // fxsave/fxrstor are FPU instructions; they trigger #NM when CR0.TS=1.

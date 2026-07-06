@@ -59,12 +59,14 @@ typedef struct Elf64_Phdr {
   uint64_t p_align;
 } Elf64_Phdr;
 
-// Relocation types (x86-64 PIC full set + main ELF COPY, plan_ld2b3 T20 / phase 5 patch)
+// Relocation types (x86-64 PIC full set + main ELF COPY, plan_ld2b3 T20 / phase
+// 5 patch)
 #define R_X86_64_64 1
 #define R_X86_64_PC32 2
 #define R_X86_64_PLT32 4
 #define R_X86_64_COPY                                                          \
-  5 // Only non-PIE main ELF references writable globals from libc.so (errno/stdout etc.)
+  5 // Only non-PIE main ELF references writable globals from libc.so
+    // (errno/stdout etc.)
 #define R_X86_64_GLOB_DAT 6
 #define R_X86_64_JUMP_SLOT 7
 #define R_X86_64_RELATIVE 8

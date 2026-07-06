@@ -17,14 +17,15 @@ extern "C" {
 #endif
 
 // link_map: loaded object descriptor built by ld.so
-// libc.so reads this struct via _dl_link_map (used by collect_tls_from_link_map)
-// ld.so's link_map.c defines the same struct; both sides must match
-// plan_ld2b3 T12 / ld.md §3.3.7
+// libc.so reads this struct via _dl_link_map (used by
+// collect_tls_from_link_map) ld.so's link_map.c defines the same struct; both
+// sides must match plan_ld2b3 T12 / ld.md §3.3.7
 
 struct link_map {
-  uintptr_t base; // load base address
-  char soname[64]; // DT_NEEDED soname (e.g. "libc.so"); may be empty for main ELF/ld.so
-  void *dynamic;           // .dynamic segment pointer
+  uintptr_t base;  // load base address
+  char soname[64]; // DT_NEEDED soname (e.g. "libc.so"); may be empty for main
+                   // ELF/ld.so
+  void *dynamic;   // .dynamic segment pointer
   struct link_map *l_next; // next list entry
   struct link_map *l_prev; // previous list entry
   void *symtab;            // .symtab

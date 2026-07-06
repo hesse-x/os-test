@@ -7,8 +7,8 @@
 #include "kernel/xcore/acpi.h"
 #include "arch/x64/paging.h"
 #include "boot/boot.h"
-#include "utils/macro.h"
 #include "kernel/xcore/log.h"
+#include "utils/macro.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -71,8 +71,7 @@ static void parse_madt(const acpi_madt *madt) {
         g_madt.ncpus++;
       }
     } else if (e->type == 1 && g_madt.ioapic_base == 0) {
-      const acpi_madt_ioapic_entry *ioapic =
-          (const acpi_madt_ioapic_entry *)e;
+      const acpi_madt_ioapic_entry *ioapic = (const acpi_madt_ioapic_entry *)e;
       g_madt.ioapic_base = ioapic->ioapic_address;
       g_madt.ioapic_gsi_base = ioapic->gsi_base;
     } else if (e->type == 2 && g_madt.num_iso < MAX_ISO_OVERRIDES) {

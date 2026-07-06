@@ -15,7 +15,6 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "boot/boot.h"
-#include "utils/macro.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/driver/serial.h"
 #include "kernel/kernel.h"
@@ -25,6 +24,7 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
+#include "utils/macro.h"
 
 // VFS data structure init (must run before driver_init so devtmpfs_create
 // works)
@@ -115,7 +115,8 @@ void kernel_main(boot_info *bi) {
 
   sti();
 
-  // Set current_task to BSP idle, switch to idle kernel stack, enter sched_idle_entry
+  // Set current_task to BSP idle, switch to idle kernel stack, enter
+  // sched_idle_entry
   current_task = bsp_idle;
   bsp_idle->state = RUNNING;
   per_cpu_tss[0].rsp0 = bsp_idle->k_stack_top;

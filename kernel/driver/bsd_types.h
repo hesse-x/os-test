@@ -112,7 +112,8 @@ typedef struct proc {
   uint64_t futex_uaddr;
 
   // === pthread cancel (Phase 4) ===
-  uint64_t cancel_handler; // __pthread_cancel_check function address, 0 = not registered
+  uint64_t cancel_handler; // __pthread_cancel_check function address, 0 = not
+                           // registered
 } proc;
 
 // ABI drift guard: must match kernel/bsd/proc.h byte-for-byte.
