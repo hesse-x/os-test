@@ -131,9 +131,9 @@ static inline void sys_exit(int32_t exit_code) {
 }
 
 // --- fork/waitpid/execve ---
-static inline int64_t sys_waitpid(int32_t pid, int32_t *exit_code) {
-  int64_t r =
-      __syscall2(SYS_WAITPID, (int64_t)pid, (int64_t)(uintptr_t)exit_code);
+static inline int64_t sys_waitpid(int32_t pid, int32_t *exit_code, int options) {
+  int64_t r = __syscall3(SYS_WAITPID, (int64_t)pid, (int64_t)(uintptr_t)exit_code,
+                         (int64_t)options);
   if (r < 0) {
     errno = -(int)r;
     return -1;

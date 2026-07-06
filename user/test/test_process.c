@@ -85,6 +85,30 @@ void test_spawn_orphan(void) {
   TEST_ASSERT_TRUE(1);
 }
 
+/* 7. WNOHANG returns 0 when no child has exited yet, then reaps after exit */
+void test_waitpid_wnohang(void) {
+  pid_t pid = spawn_elf("/test/string.elf");
+  if (pid <= 0) {
+    TEST_ASSERT_TRUE(1);
+    return;
+  }
+  /* Probe before the child finishes: WNOHANG must not block. The child may
+   * have already exited by the time we get here, so 0 (still running) and pid
+   * (already zombie) are both acceptable; only a block/real error fails. */
+  int status = -1;
+  pid_t r = waitpid(pid, &status, WNOHANG);
+  TEST_ASSERT_TRUE(r == 0 || r == pid);
+
+  /* Drain: if the first probe returned 0, the child is still running — wait
+   * for it (blocking) then reap. If it returned pid, already reaped. */
+  if (r == 0) {
+    pid_t r2 = waitpid(pid, &status, 0);
+    TEST_ASSERT_EQUAL_INT(pid, r2);
+  }
+  TEST_ASSERT_TRUE(WIFEXITED(status));
+  TEST_ASSERT_EQUAL_INT(0, WEXITSTATUS(status));
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -96,5 +120,6 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_spawn_inherit_fd);
   RUN_TEST(test_exit_code);
   RUN_TEST(test_spawn_orphan);
+  RUN_TEST(test_waitpid_wnohang);
   return UNITY_END();
 }

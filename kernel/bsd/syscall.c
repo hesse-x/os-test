@@ -259,10 +259,17 @@ int64_t sys_exit_group(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 }
 
 // ===================== BSD syscall: waitpid =====================
-int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
+// Mirror of user/include/sys/wait.h options. Only WNOHANG is honored today;
+// WUNTRACED/WCONTINUED require stopped-state reporting (see doc/design/todo.md).
+#define WNOHANG 1
+#define WUNTRACED 2
+#define WCONTINUED 4
+
+int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options, int64_t _u2,
                     int64_t _u3, int64_t _u4) {
   pid_t pid = (pid_t)arg1;
   int32_t __user *exit_code_ptr = (int32_t __user * __force) arg2;
+  int nohang = (int)options & WNOHANG;
 
   if (pid == -1) {
     while (1) {
@@ -306,6 +313,10 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
         return (int64_t)zpid;
       }
       spin_unlock(&tasks_lock);
+
+      // WNOHANG: no zombie ready, don't block — return 0 immediately.
+      if (nohang)
+        return 0;
 
       int pcpu = current_task->assigned_cpu;
       uint64_t pflags;
@@ -380,6 +391,10 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
       break;
     }
     spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+
+    // WNOHANG: child not a zombie yet, don't block — return 0.
+    if (nohang)
+      return 0;
 
     int pcpu = current_task->assigned_cpu;
     if (pcpu == cpu) {

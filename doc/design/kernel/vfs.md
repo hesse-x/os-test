@@ -298,3 +298,4 @@ UEFI → stub 读 ESP 加载 myos.elf + init.elf → kernel_main（从 boot_info
 | 通用块设备层 | AHCI 直接调用 → 通用 blk_dev 接口（支持 NVMe 等） | 低 |
 | page cache + mmap 共享 | sys_mmap(FD_REGULAR) 映射 page cache 物理页到用户地址空间，同一文件 read + mmap 共享数据 | 中 |
 | dev_ops->close 签名妥协 | `file_put` FD_DEV 路径传 `current_task` + `fd=-1` 给 `ops->close`；当前 blk_dev_close 不使用参数，安全。未来新设备驱动 close handler 如需 file 信息，改签名为 `int (*close)(struct file *f)` | 低 |
+| chmod/fchmod/umask mode 落盘策略 | FAT32 目录项只有 8-bit attr（只读/隐藏/系统/卷标/子目录/存档），无 Unix rwx 权限位。需定策略：① 仅内存——mode 存 inode cache，stat 返回内存值，重启丢失（推荐短期，零磁盘改动）；② 部分落盘——只读位映射 attr 的 READ_ONLY，其余 rwx 位内存化；③ 扩展目录项——Windows 式隐藏元数据扇区存 Unix mode（违背 FAT 规范，不推荐）。`umask` 接入 open 创建路径（mode & ~umask）。注意 kstat 已含 st_uid/st_gid/st_mode 但 sys_fstat 当前硬编码 uid=gid=0，需改为读 inode 内存值 | 中 |

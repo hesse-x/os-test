@@ -66,13 +66,70 @@ files_t（kernel/proc.h : files_t）— fd 表，独立引用计数
 6. 唤醒等待本进程 REQ reply 的进程（req_result = ESRCH）
 7. schedule()，永不返回
 
-#### sys_waitpid（kernel/trap.c : sys_waitpid）
+#### sys_waitpid（kernel/bsd/syscall.c : sys_waitpid）
 
-支持 pid > 0（指定子进程）和 pid == -1（任意子进程）：
+签名 `sys_waitpid(pid_t pid, int32_t *exit_code, int options)`。支持 pid > 0（指定子进程）和 pid == -1（任意子进程）：
 - pid == -1：遍历 tasks[] 找 ZOMBIE 子进程，无则 BLOCKED on WAIT_CHILD
 - pid > 0：验证 mm->parent_pid == current->pid，不是则 -ECHILD
 - 找到 ZOMBIE：设 REAPING，拷贝退出码到用户指针，task_reap 回收
 - 无 ZOMBIE：BLOCKED on WAIT_CHILD，等待 sys_exit 唤醒
+
+`options` 三层已打通：libc inline `__syscall3` 把 options 放进 `rdx`（`user/include/syscall.h`），wrapper 转发（`user/lib/sys_wait.cc`），内核第 3 参读 `options`。当前只兑现 `WNOHANG`：
+
+- **`WNOHANG`**：两条等待路径（pid==-1 / pid>=0）在「无 ZOMBIE、有 children」原本要 `schedule()` 阻塞处，按 `nohang = options & WNOHANG` 短路返回 0。无需新唤醒机制——复用现有 `schedule()`/`wake_process_any`。EINTR 语义不变（WNOHANG 不阻塞故无 EINTR；阻塞路径仍按 `deliv` 检查返回 `-EINTR`）。
+
+退出码编码已就绪（`do_exit`：正常退出 `(code & 0xff) << 8`，信号致死 `sig & 0x7f`），`user/include/sys/wait.h` 据此提供 `WIFEXITED/WEXITSTATUS/WIFSIGNALED/WTERMSIG` 宏。`WUNTRACED/WCONTINUED` 及 `WIFSTOPPED/WSTOPSIG/WIFCONTINUED` 宏已定义但内核未兑现停止态上报，运行时不会触发真值（见下「停止态上报」）。
+
+##### 停止态上报（待实现：WUNTRACED / WCONTINUED + WIFSTOPPED）
+
+job control 基础，当前 Wayland 验收路径不依赖，待真实需求（Ninja 并行构建等）触发再做。
+
+**数据结构**：`xtask_t` 状态枚举加 `STOPPED`（当前 `enum proc_state { RUNNABLE, BLOCKED, ZOMBIE, REAPING }` 无停止态），加字段记录停止信号与防重复上报：
+
+```c
+typedef enum proc_state { RUNNABLE, BLOCKED, ZOMBIE, REAPING, STOPPED } proc_state;
+int32_t stop_sig;        // state==STOPPED 时有效
+uint8_t stop_reported;   // 防止 waitpid 重复上报同一停止事件
+```
+
+**SIGSTOP/SIGTSTP/SIGCONT 默认动作**（`signal.c` check_pending_signals 的 SIG_DFL 分支，当前 `case SIGSTOP/SIGTSTP/SIGCONT: break;` 即忽略）：
+
+```c
+case SIGSTOP:
+case SIGTSTP:
+  proc->stop_sig = sig;
+  proc->state = STOPPED;
+  wake_parent_on_child_event(proc);   // 投 SIGCHLD + 唤醒 WAIT_CHILD
+  schedule();                          // 让出 CPU，不返回用户态
+  break;
+case SIGCONT:
+  if (proc->state == STOPPED) {
+    proc->state = RUNNABLE;
+    proc->stop_sig = 0;
+    enqueue_runqueue(proc);
+    wake_parent_on_child_event(proc);  // WIFCONTINUED 上报
+  }
+  break;
+```
+
+关键时序：SIGSTOP 在 `check_pending_signals`（运行中进程的内核态返回点）处理，此时持有 trapframe，置 STOPPED 后 `schedule()` 切走，SIGCONT 唤醒后从原 trapframe 返回用户态——**不需保存/恢复额外用户上下文**，trapframe 已是完整用户态快照。
+
+**waitpid 停止上报**（`sys_waitpid` 扫描除 ZOMBIE 外识别 STOPPED）：
+
+```c
+if (child->state == STOPPED && !child->stop_reported &&
+    (options & WUNTRACED)) {
+  *exit_code_ptr = (child->stop_sig << 8) | 0x7f;  // WIFSTOPPED 编码
+  child->stop_reported = 1;
+  return child->pid;          // 不 reap，子进程仍存活
+}
+```
+
+**WCONTINUED**：SIGCONT 处理时给父进程投 SIGCHLD，`sys_waitpid` 用单独的 `continued_reported` 标志 + `status == 0xffff` 编码上报一次。
+
+**竞态与锁**：STOPPED 是稳定态（非终态），`sys_waitpid` 读 `child->state == STOPPED` 时**不设 REAPING、不 reap**，子进程仍可被 SIGCONT 唤醒。STOPPED↔RUNNABLE 与 waitpid 读 state 的竞态用 `scheduler_lock[child->cpu]` 保护（与现有 ZOMBIE 路径同锁）。唤醒父进程用 `wake_process_any`（已有），父进程在 WAIT_CHILD 上醒来重新扫描。
+
+**SIGCHLD**：当前 SIG_DFL 是 `break`（忽略）。job control 需在子进程停止/继续/退出时给父进程 `sig_pending |= (1<<SIGCHLD)`，`deliver_signal_to(parent, SIGCHLD)` 即可，已有机制。完整 job control 还涉及 setpgid/tcgetpgrp 等进程组语义，超出本项范围。
 
 #### sys_fork（kernel/proc.c : sys_fork）
 
@@ -162,7 +219,7 @@ fork:
 | 编号 | syscall | 签名 | 行为 |
 |------|---------|------|------|
 | 6 | sys_exit | `sys_exit(int32_t exit_code)` | 进程退出，无父进程直接回收，有父进程 ZOMBIE 等待回收 |
-| 7 | sys_waitpid | `sys_waitpid(pid_t pid, int32_t *exit_code)` | 等待子进程退出并回收；pid==-1 等任意子进程 |
+| 7 | sys_waitpid | `sys_waitpid(pid_t pid, int32_t *exit_code, int options)` | 等待子进程退出并回收；pid==-1 等任意子进程；`options` 支持 `WNOHANG`（无就绪子立即返回 0）。停止态上报（`WUNTRACED`/`WCONTINUED`）见待完成项 |
 | 57 | sys_fork | `sys_fork()` | 创建子进程（深拷贝地址空间+fd表） |
 | 58 | sys_execve | `sys_execve(const char *pathname)` | 替换进程映像（内核打开 ELF → 释放旧空间 → 加载新 ELF） |
 
@@ -172,7 +229,8 @@ fork:
 |------|------|--------|
 | COW fault handler | #PF 需识别 PTE_COW 并 resolve（分配新页/恢复 RW），当前写共享页仍 SIGSEGV | 高 |
 | CLONE_VM / 线程 | task_t/mm_t/files_t 拆分已预留，需实现 pthread 级别的线程创建（共享地址空间） | 中 |
-| WNOHANG 非阻塞 waitpid | 当前 waitpid 只有阻塞模式，添加 WNOHANG 选项避免 shell 等子进程时卡死 | 高 |
+| ~~WNOHANG 非阻塞 waitpid~~ | ~~当前 waitpid 只有阻塞模式~~ | 已实现：`options` 三层打通（libc inline `__syscall3` + wrapper 转发 + 内核 `sys_waitpid` 读 `options`），两条等待路径（pid==-1 / pid>=0）在无 ZOMBIE 时按 `WNOHANG` 短路返回 0。`wait.h` 补齐 `WIFEXITED/WEXITSTATUS/WIFSIGNALED/WTERMSIG` 宏（内核 wait status 编码已就绪） |
+| 停止态上报（`WUNTRACED`/`WCONTINUED`） | `xtask_t` 加 `STOPPED` 状态 + `stop_sig`/`stop_reported` 字段；SIGSTOP/SIGTSTP/SIGCONT 默认动作（当前 `signal.c` SIG_DFL 分支为 `break`=忽略）改为置 STOPPED + `schedule()` / SIGCONT 唤醒回 RUNNABLE；`sys_waitpid` 扫描识别 STOPPED 并按 `(stop_sig<<8)|0x7f` 编码上报（不 reap，子进程仍存活）。涉及 SMP 锁顺序（state 读写走 `scheduler_lock[child->cpu]`）。设计详见 `extend_wait.md` P2/P3。job control 基础，待真实需求触发 | 中 |
 | execve argv/envp 传递 | 当前 argv=NULL, envp=NULL，需支持命令行参数和环境变量传入新进程 | 高 |
 | ELF 数据内核复制 | execve 当前直接用用户态指针（同步调用安全），防御性编程应先 kfree 到内核再加载 | 低 |
 | 进程优先级 | 当前所有进程同等优先级，需 nice 值或实时优先级支持 | 低 |
