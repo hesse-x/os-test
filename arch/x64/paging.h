@@ -45,17 +45,17 @@ typedef struct gdt_entry {
   uint8_t access;
   uint8_t granularity;
   uint8_t base_high;
-} __attribute__((packed)) gdt_entry_t;
+} __attribute__((packed)) gdt_entry;
 
 // 64-bit GDT pointer: 10 bytes (64-bit base)
 typedef struct gdt_ptr {
   uint16_t limit;
   uint64_t base;
-} __attribute__((packed)) gdt_ptr_t;
+} __attribute__((packed)) gdt_ptr;
 
 // ===================== TSS (64-bit, 128 bytes + 8KB IOPM) =====================
 #define IOPM_SIZE 8192 // 8KB IOPM bitmap (65536 ports / 8 bits per byte)
-typedef struct tss {
+struct tss_struct {
   uint32_t reserved0;
   uint64_t rsp0;
   uint64_t rsp1;
@@ -66,7 +66,7 @@ typedef struct tss {
   uint16_t reserved3;
   uint16_t iomap_base;
   uint8_t iopm[IOPM_SIZE]; // I/O permission bitmap
-} __attribute__((packed)) tss_t;
+} __attribute__((packed));
 
 #define USER_CS 0x2B // index 5, RPL=3 (SYSRET64 CS = STAR[63:48]+16 | 3)
 #define USER_DS 0x23 // index 4, RPL=3 (SYSRET SS = STAR[63:48]+8 | 3)

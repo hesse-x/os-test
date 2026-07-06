@@ -41,7 +41,7 @@ _Static_assert(offsetof(xtask, k_rsp) == 8,
                "switch_to asm: k_rsp offset mismatch");
 _Static_assert(offsetof(xtask, cr3) == 24,
                "switch_to asm: cr3 offset mismatch");
-_Static_assert(sizeof(trapframe_t) == 176,
+_Static_assert(sizeof(trapframe) == 176,
                "trapframe size must be 176 (22 × uint64_t)");
 _Static_assert(
     offsetof(cpu_local, tss_rsp0) == 48,
@@ -80,7 +80,7 @@ static void reclaim_lazy_resources(xtask *t) {
   if (t->k_stack_top != 0) {
     uint64_t k_stack_phys_base =
         (__force uint64_t)PHY_ADDR(t->k_stack_top - 2 * PAGE_SIZE);
-    Page *stack_page = &bfc_frames[PHY_TO_PAGE(k_stack_phys_base)];
+    struct page *stack_page = &bfc_frames[PHY_TO_PAGE(k_stack_phys_base)];
     bfc_free_page(stack_page, 2);
     t->k_stack_top = 0;
   }
@@ -199,7 +199,7 @@ uint64_t sched_build_kstack(uint64_t k_stack_top, uint64_t entry_rip) {
 
 uint64_t sched_build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
                                uint64_t user_rsp) {
-  trapframe_t tf = {0};
+  trapframe tf = {0};
   tf.ss = 0x23; // USER_DS
   if (user_rsp == 0)
     user_rsp = 0x00007FFFFFFFE000ULL;
@@ -218,8 +218,8 @@ uint64_t sched_build_kstack_user_rsp(uint64_t k_stack_top, uint64_t entry_rip,
   sf.ret_addr = (uint64_t)process_entry;
 
   uint8_t *sp = (uint8_t *)k_stack_top;
-  sp -= sizeof(trapframe_t);
-  __memcpy(sp, &tf, sizeof(trapframe_t));
+  sp -= sizeof(trapframe);
+  __memcpy(sp, &tf, sizeof(trapframe));
 
   sp -= sizeof(switch_frame);
   __memcpy(sp, &sf, sizeof(switch_frame));
@@ -252,7 +252,7 @@ xtask *sched_create_idle_process(int cpu_id) {
   }
 
   // Allocate kernel stack (8KB = 2 pages)
-  Page *stack_pages = bfc_alloc_page(2);
+  struct page *stack_pages = bfc_alloc_page(2);
   if (!stack_pages) {
     spin_unlock(&tasks_lock);
     printk(LOG_ERROR, "sched_create_idle_process: alloc stack failed\n");
@@ -395,7 +395,7 @@ out:
 // Update TSS IOPM for the current CPU to match the given process
 static void update_tss_iopm(xtask *proc) {
   int cpu = get_cpu_local()->cpu_id;
-  tss_t *tss = &per_cpu_tss[cpu];
+  struct tss_struct *tss = &per_cpu_tss[cpu];
   if (proc->iopm) {
     __memcpy(tss->iopm, proc->iopm, IOPM_SIZE);
   } else {
@@ -422,7 +422,7 @@ void fpu_context_switch(xtask *prev, xtask *next) {
     void *fpu_data =
         (void *)(__force uintptr_t)phys_to_virt(page_to_phys(prev->fpu_page));
     // Defense: fxsave target must be a BFC data-page virtual address, not a
-    // Page* metadata pointer (historical bug: mistakenly treated the Page*
+    // struct page * metadata pointer (historical bug: mistakenly treated the struct page *
     // returned by bfc_alloc_page as a data pointer, fxsave overwrote Page
     // metadata, only exposed later when kfree detected page->status anomaly,
     // hard to diagnose)

@@ -24,11 +24,11 @@
 #include <stdint.h>
 #include <xos/signal.h>
 
-// Wrapper to adapt check_pending_signals(trapframe_t*) to
-// signal_check_fn(xtask*, trapframe_t*) check_pending_signals uses
+// Wrapper to adapt check_pending_signals(trapframe*) to
+// signal_check_fn(xtask*, trapframe*) check_pending_signals uses
 // current_task internally, so the xtask argument is redundant but required by
 // the hook signature for future extensibility.
-static void check_signals(xtask *task, trapframe_t *tf) {
+static void check_signals(xtask *task, trapframe *tf) {
   (void)task; // check_pending_signals reads current_task internally
   check_pending_signals(tf);
 }

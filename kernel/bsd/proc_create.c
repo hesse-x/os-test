@@ -38,9 +38,9 @@
 // process_create_elf: create user process from ELF data
 xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   xtask *proc = NULL;
-  Page *stack_pages = NULL;
+  struct page *stack_pages = NULL;
   mm *mm = NULL;
-  Page *user_stack_page = NULL;
+  struct page *user_stack_page = NULL;
   int user_stack_mapped = 0; // number of user stack pages successfully mapped
 
   // 1. Find free slot under tasks_lock
@@ -76,7 +76,7 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   uint64_t *new_pml4 = (uint64_t *)pml4_virt;
 
   // 4. Load ELF segments into user address space
-  elf_load_result_t lr = elf_load(elf_data, elf_size, new_pml4);
+  elf_load_result lr = elf_load(elf_data, elf_size, new_pml4);
   if (!lr.success) {
     printk(LOG_ERROR, "process_create_elf: elf_load failed\n");
     goto fail_mm;

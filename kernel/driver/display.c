@@ -186,7 +186,7 @@ long display_ioctl(uint32_t cmd, void *arg) {
     uint32_t size = pitch * height;
     size_t npages = (size + 4095) / 4096;
 
-    Page *pages = bfc_alloc_page(npages);
+    struct page *pages = bfc_alloc_page(npages);
     if (!pages)
       return -ENOMEM;
 

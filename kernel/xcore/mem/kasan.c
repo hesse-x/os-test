@@ -48,7 +48,7 @@ static uint64_t *kasan_ensure_pdpt(uint64_t vaddr) {
     return (__force uint64_t *)phys_to_virt(
         (__force phys_addr_t)(pml4[pml4_idx] & 0x000FFFFFFFFFF000ULL));
   }
-  Page *pg = bfc_alloc_page(1);
+  struct page *pg = bfc_alloc_page(1);
   if (!pg)
     return NULL;
   uint64_t phys = (__force uint64_t)page_to_phys(pg);
@@ -65,7 +65,7 @@ static uint64_t *kasan_ensure_pd(uint64_t *pdpt, uint64_t vaddr) {
     return (__force uint64_t *)phys_to_virt(
         (__force phys_addr_t)(pdpt[idx] & 0x000FFFFFFFFFF000ULL));
   }
-  Page *pg = bfc_alloc_page(1);
+  struct page *pg = bfc_alloc_page(1);
   if (!pg)
     return NULL;
   uint64_t phys = (__force uint64_t)page_to_phys(pg);
@@ -82,7 +82,7 @@ static uint64_t *kasan_ensure_pt(uint64_t *pd, uint64_t vaddr) {
     return (__force uint64_t *)phys_to_virt(
         (__force phys_addr_t)(pd[idx] & 0x000FFFFFFFFFF000ULL));
   }
-  Page *pg = bfc_alloc_page(1);
+  struct page *pg = bfc_alloc_page(1);
   if (!pg)
     return NULL;
   uint64_t phys = (__force uint64_t)page_to_phys(pg);
@@ -123,7 +123,7 @@ __attribute__((no_sanitize("kernel-address"))) void kasan_init(void) {
          shadow_size / (1024 * 1024), num_pages);
 
   for (size_t i = 0; i < num_pages; i++) {
-    Page *pg = bfc_alloc_page(1);
+    struct page *pg = bfc_alloc_page(1);
     if (!pg) {
       printk(LOG_ERROR, "kasan_init: OOM at shadow page %lu\n", i);
       halt();

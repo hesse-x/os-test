@@ -54,13 +54,13 @@ void shm_put(struct shm *shm) {
     // Last reference released — free all pages and struct
     if (shm->page_list) {
       for (int i = 0; i < shm->num_pages; i++) {
-        Page *p = &bfc_frames[PHY_TO_PAGE(shm->page_list[i])];
+        struct page *p = &bfc_frames[PHY_TO_PAGE(shm->page_list[i])];
         bfc_free_page(p, 1);
       }
       kfree(shm->page_list);
     } else if (shm->phys != 0 && shm->npages > 0) {
       // Contiguous pages (legacy)
-      Page *page = &bfc_frames[PHY_TO_PAGE(shm->phys)];
+      struct page *page = &bfc_frames[PHY_TO_PAGE(shm->phys)];
       bfc_free_page(page, shm->npages);
     }
     kfree(shm);
@@ -73,7 +73,7 @@ void shm_put(struct shm *shm) {
 uint64_t shm_alloc_pages(uint64_t npages) {
   if (npages == 0)
     return 0;
-  Page *pages = bfc_alloc_page(npages);
+  struct page *pages = bfc_alloc_page(npages);
   if (!pages)
     return 0;
   uint64_t phys = (__force uint64_t)page_to_phys(pages);
@@ -94,7 +94,7 @@ struct shm *shm_create_internal(uint64_t npages) {
   // Allocate page_list pointing to each contiguous page
   uint64_t *page_list = (uint64_t *)kmalloc((size_t)npages * sizeof(uint64_t));
   if (!page_list) {
-    Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
+    struct page *p = &bfc_frames[PHY_TO_PAGE(phys)];
     bfc_free_page(p, npages);
     return NULL;
   }
@@ -103,7 +103,7 @@ struct shm *shm_create_internal(uint64_t npages) {
 
   struct shm *shm = (struct shm *)kmalloc(sizeof(struct shm));
   if (!shm) {
-    Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
+    struct page *p = &bfc_frames[PHY_TO_PAGE(phys)];
     bfc_free_page(p, npages);
     kfree(page_list);
     return NULL;
@@ -124,7 +124,7 @@ struct shm *shm_create_internal(uint64_t npages) {
 // Helper: allocate one page and add to shm's page_list
 // Returns physical address on success, 0 on failure
 uint64_t shm_add_page(struct shm *shm) {
-  Page *page = bfc_alloc_page(1);
+  struct page *page = bfc_alloc_page(1);
   if (!page)
     return 0;
   uint64_t phys = (__force uint64_t)page_to_phys(page);
@@ -462,7 +462,7 @@ int64_t sys_irq_bind(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
   int gsi = irq - 32;
   if (gsi >= 0 && gsi < 24) {
     uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
-    const acpi_iso_override_t *iso = acpi_find_iso((uint8_t)gsi);
+    const acpi_iso_override *iso = acpi_find_iso((uint8_t)gsi);
     bool level = iso ? iso->level_triggered : false;
     bool low = iso ? iso->active_low : false;
     ioapic_set_irq(gsi, irq, bsp_apic_id, false, level, low);

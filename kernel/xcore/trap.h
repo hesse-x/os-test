@@ -16,7 +16,7 @@
 
 // Hook registration points: BSD layer registers during init, Xcore calls at
 // trap_dispatch end
-typedef void (*signal_check_fn)(xtask *t, trapframe_t *tf);
+typedef void (*signal_check_fn)(xtask *t, trapframe *tf);
 extern signal_check_fn signal_check_hook;
 
 typedef int (*fault_handler_fn)(uint64_t vaddr, xtask *t);
@@ -34,7 +34,7 @@ typedef void (*devtmpfs_cleanup_fn)(pid_t pid);
 extern devtmpfs_cleanup_fn devtmpfs_cleanup_hook;
 
 // BSD syscall dispatch (called from xcall_dispatch for non-Xcore syscalls)
-typedef int64_t (*syscall_dispatch_fn)(trapframe_t *tf);
+typedef int64_t (*syscall_dispatch_fn)(trapframe *tf);
 extern syscall_dispatch_fn syscall_dispatch_hook;
 
 // Signal pending check (called from IPC to detect interruptible waits)
@@ -50,8 +50,8 @@ typedef void (*timer_poll_fn)(void);
 extern timer_poll_fn timer_poll_hook;
 
 // trap entry and syscall dispatch entry
-void trap_dispatch(trapframe_t *tf);
-void xcall_dispatch(trapframe_t *tf);
+void trap_dispatch(trapframe *tf);
+void xcall_dispatch(trapframe *tf);
 void irq_init(void);
 void sig_init(void);
 
@@ -74,7 +74,7 @@ int64_t sys_gettid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // IRQ registration
 #define MAX_IRQ_HANDLERS 256
-typedef void (*irq_handler_fn)(trapframe_t *);
+typedef void (*irq_handler_fn)(trapframe *);
 typedef int64_t (*syscall_fn)(int64_t, int64_t, int64_t, int64_t, int64_t,
                                 int64_t);
 void irq_register(int vec, irq_handler_fn fn);

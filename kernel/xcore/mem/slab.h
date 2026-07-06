@@ -44,7 +44,7 @@ typedef struct kmem_cache {
   size_t obj_size;     // object size
   size_t redzone_size; // redzone size (currently = 0)
   spinlock lock;     // per-cache lock (protects partial list)
-  Page *partial;       // slab list with free objects
+  struct page *partial;       // slab list with free objects
 } kmem_cache;
 
 // Global kmalloc cache array

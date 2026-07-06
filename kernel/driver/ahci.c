@@ -62,10 +62,10 @@ static int active_port = -1;
 
 spinlock ahci_lock = SPINLOCK_INIT;
 
-static Page *cmd_list_page;
-static Page *fis_recv_page;
-static Page *cmd_table_page;
-static Page *bounce_page;
+static struct page *cmd_list_page;
+static struct page *fis_recv_page;
+static struct page *cmd_table_page;
+static struct page *bounce_page;
 
 static uint64_t cmd_list_phys;
 static void *cmd_list_virt;
@@ -341,7 +341,7 @@ done:
 
 void ahci_issue_cmd(block_req *req); // forward declaration
 
-static void ahci_irq_handler(trapframe_t *tf) {
+static void ahci_irq_handler(trapframe *tf) {
   // Check if our port generated the interrupt
   uint32_t pxis = readl(port_reg(active_port, PxIS));
   if (pxis == 0) {
@@ -663,7 +663,7 @@ __attribute__((no_sanitize("kernel-address"))) void ahci_init() {
     irq_register(ahci_irq_vec, ahci_irq_handler);
 
     uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
-    const acpi_iso_override_t *iso = acpi_find_iso(ahci_gsi);
+    const acpi_iso_override *iso = acpi_find_iso(ahci_gsi);
     bool level = iso ? iso->level_triggered : false;
     bool low = iso ? iso->active_low : false;
     ioapic_set_irq(ahci_gsi, ahci_irq_vec, bsp_apic_id, false, level, low);

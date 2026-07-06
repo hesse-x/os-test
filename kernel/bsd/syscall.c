@@ -720,7 +720,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   size_t mapped = 0;
   for (size_t i = 0; i < npages; i++) {
-    Page *page = bfc_alloc_page(1);
+    struct page *page = bfc_alloc_page(1);
     if (!page) {
       for (size_t j = 0; j < mapped; j++) {
         uint64_t va = vaddr + j * PAGE_SIZE;
@@ -2096,7 +2096,7 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
     size_t extra = new_npages - old_total;
 
     if (!shm->page_list && shm->npages == 0) {
-      Page *pages = bfc_alloc_page(new_npages);
+      struct page *pages = bfc_alloc_page(new_npages);
       if (pages) {
         uint64_t phys = (__force uint64_t)page_to_phys(pages);
         __memset((__force void *)phys_to_virt((__force phys_addr_t)phys), 0,
@@ -2128,7 +2128,7 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
         uint64_t pphys = shm_add_page(shm);
         if (!pphys) {
           for (size_t j = 0; j < i; j++) {
-            Page *p = &bfc_frames[PHY_TO_PAGE(
+            struct page *p = &bfc_frames[PHY_TO_PAGE(
                 shm->page_list[shm->num_pages - 1 - j])];
             bfc_free_page(p, 1);
           }
@@ -2145,7 +2145,7 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
         uint64_t pphys = shm_add_page(shm);
         if (!pphys) {
           for (size_t j = 0; j < i; j++) {
-            Page *p =
+            struct page *p =
                 &bfc_frames[PHY_TO_PAGE(shm->page_list[--shm->num_pages])];
             bfc_free_page(p, 1);
           }
@@ -2165,7 +2165,7 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
     if (shm->page_list) {
       int free_start = (int)new_npages;
       for (int i = free_start; i < shm->num_pages; i++) {
-        Page *p = &bfc_frames[PHY_TO_PAGE(shm->page_list[i])];
+        struct page *p = &bfc_frames[PHY_TO_PAGE(shm->page_list[i])];
         bfc_free_page(p, 1);
       }
       shm->num_pages = (int)new_npages;
@@ -2176,7 +2176,7 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
     } else {
       uint64_t free_phys = shm->phys + new_npages * PAGE_SIZE;
       size_t free_npages = shm->npages - new_npages;
-      Page *page = &bfc_frames[PHY_TO_PAGE(free_phys)];
+      struct page *page = &bfc_frames[PHY_TO_PAGE(free_phys)];
       bfc_free_page(page, free_npages);
       shm->npages = new_npages;
     }
@@ -2292,7 +2292,7 @@ int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   size = ALIGN_UP(size, PAGE_SIZE);
   size_t npages = size / PAGE_SIZE;
 
-  Page *pages = bfc_alloc_page_low(npages);
+  struct page *pages = bfc_alloc_page_low(npages);
   if (!pages)
     return (int64_t)-ENOMEM;
 
@@ -2363,7 +2363,7 @@ int64_t sys_dma_free(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
           (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3),
           r->vaddr, r->vaddr + r->size, npages);
 
-      Page *page = bfc_frames + (r->phys / PAGE_SIZE);
+      struct page *page = bfc_frames + (r->phys / PAGE_SIZE);
       bfc_free_page(page, npages);
 
       *pp = r->next;
@@ -2519,7 +2519,7 @@ int64_t sys_getsid(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 }
 
 // ===================== BSD syscall dispatch =====================
-int64_t syscall_dispatch(trapframe_t *tf) {
+int64_t syscall_dispatch(trapframe *tf) {
   int64_t nr = tf->rax;
   switch (nr) {
   case SYS_EXIT:

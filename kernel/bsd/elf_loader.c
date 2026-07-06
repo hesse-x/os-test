@@ -24,7 +24,7 @@
 // Map a single 4KB page at vaddr into new_pml4, copying data from src.
 static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
                      uint64_t copy_len, uint64_t elf_flags) {
-  Page *page = bfc_alloc_page(1);
+  struct page *page = bfc_alloc_page(1);
   if (!page)
     return false;
   uint64_t page_phys = (__force uint64_t)page_to_phys(page);
@@ -68,9 +68,9 @@ static bool map_page(uint64_t *new_pml4, uint64_t vaddr, const uint8_t *src,
   return true;
 }
 
-static elf_load_result_t elf_load_internal(const uint8_t *data, uint64_t size,
+static elf_load_result elf_load_internal(const uint8_t *data, uint64_t size,
                                            uint64_t *new_pml4, uint64_t base) {
-  elf_load_result_t result = {0};
+  elf_load_result result = {0};
   result.load_base = base;
 
   // 1. Validate ELF magic
@@ -165,12 +165,12 @@ static elf_load_result_t elf_load_internal(const uint8_t *data, uint64_t size,
   return result;
 }
 
-elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
+elf_load_result elf_load(const uint8_t *data, uint64_t size,
                            uint64_t *new_pml4) {
   return elf_load_internal(data, size, new_pml4, 0);
 }
 
-elf_load_result_t elf_load_at(const uint8_t *data, uint64_t size,
+elf_load_result elf_load_at(const uint8_t *data, uint64_t size,
                               uint64_t *new_pml4, uint64_t base) {
   return elf_load_internal(data, size, new_pml4, base);
 }

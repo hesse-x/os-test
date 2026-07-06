@@ -8,6 +8,23 @@
 # Duplicating global flags is harmless for CMake target static libraries (gcc accepts duplicate -nostdinc/-isystem).
 set(USER_COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin -fno-pie -fno-stack-protector -mno-red-zone -nostdinc -isystem ${GCC_FREESTANDING_INC})
 
+# Build-type flags for the bare-gcc commands below (add_user_elf / add_user_ldso /
+# SHARED libc.so / add_user_dyn_elf). CMake targets (kernel OBJECT libs, static
+# libc.a) inherit CMAKE_<LANG>_FLAGS_<CONFIG> automatically; these custom-command
+# gcc invocations do NOT, so they would otherwise compile at -O0 even in Release
+# and miss -g in Debug. Keep this in sync with CMake's defaults for each config.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(USER_BUILD_FLAGS -g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG)
+elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(USER_BUILD_FLAGS -O3 -DNDEBUG)
+elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    set(USER_BUILD_FLAGS -O2 -g -DNDEBUG)
+elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
+    set(USER_BUILD_FLAGS -Os -DNDEBUG)
+else()
+    set(USER_BUILD_FLAGS "")
+endif()
+
 # Defense: userspace requires SSE (double/printf/FPU all depend on it), any
 # -mno-sse* flag signals a leak from global CMAKE_C_FLAGS (typical source:
 # kernel-only flag mistakenly placed globally).
@@ -58,7 +75,7 @@ function(add_user_lib lib_name)
         separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
         # -fvisibility=hidden: default hidden, only LIBC_EXPORT-marked declarations are exported (consistent with ld.so).
         # .map + verify_libc_exports.sh is the final gate, catching missed/extra markings.
-        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fvisibility=hidden ${ARG_FLAGS_LIST})
+        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fvisibility=hidden ${ARG_FLAGS_LIST})
 
         set(OBJ_FILES "")
         set(idx 0)
@@ -136,7 +153,7 @@ function(add_user_elf elf_name)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra compile definitions (-D flags)
     if(ARG_DEFS)
@@ -222,6 +239,7 @@ function(add_user_ldso name)
     set(COMPILE_FLAGS -m64 -ffreestanding -nostdlib -fno-builtin
                       -fPIC -fno-stack-protector -mno-red-zone
                       -fvisibility=hidden
+                      ${USER_BUILD_FLAGS}
                       -nostdinc -isystem ${GCC_FREESTANDING_INC}
                       -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include)
     set(OBJ_FILES "")
@@ -256,7 +274,7 @@ function(add_user_dyn_elf name)
     cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
     set(COMPILE_CMD ${CMAKE_C_COMPILER})
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra compile definitions (-D flags)
     if(ARG_DEFS)

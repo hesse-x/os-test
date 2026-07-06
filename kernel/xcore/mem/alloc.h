@@ -28,15 +28,15 @@ typedef enum {
 
 struct kmem_cache;
 
-typedef struct Page {
+struct page {
   page_status status;
   refcount_t p_refcount; // physical page reference count (0=free, 1=exclusive,
                          // >1=shared)
   union {
     struct {
       size_t cont_page_num; // contiguous page count (BFC free/allocated large block)
-      struct Page *prev;    // BFC free list (doubly-linked)
-      struct Page *next;
+      struct page *prev;    // BFC free list (doubly-linked)
+      struct page *next;
     } bfc;
 
     struct {
@@ -45,28 +45,28 @@ typedef struct Page {
       uint32_t inuse;             // allocated object count
       uint32_t obj_count;         // total objects in page
       int8_t cpu_id;              // CPU currently using this page (-1 = none)
-      struct Page *partial_next;  // partial list link
-      struct Page *partial_prev;
+      struct page *partial_next;  // partial list link
+      struct page *partial_prev;
     } slab;
   };
-} Page;
+};
 
 // BFC allocator (prefix functions + global variables)
-extern Page *bfc_frames;
-extern Page *bfc_free_list;
+extern struct page *bfc_frames;
+extern struct page *bfc_free_list;
 
 void bfc_init(void) __attribute__((no_sanitize("kernel-address")));
-Page *bfc_alloc_page(size_t n) __attribute__((no_sanitize("kernel-address")));
-Page *bfc_alloc_page_low(size_t n)
+struct page *bfc_alloc_page(size_t n) __attribute__((no_sanitize("kernel-address")));
+struct page *bfc_alloc_page_low(size_t n)
     __attribute__((no_sanitize("kernel-address")));
-Page *bfc_free_page(Page *page, size_t n)
+struct page *bfc_free_page(struct page *page, size_t n)
     __attribute__((no_sanitize("kernel-address")));
 size_t bfc_free_page_nums(void) __attribute__((no_sanitize("kernel-address")));
 
 // Convenience wrappers: return/accept data-page virtual address directly.
-// Use these when the caller wants the writable page data, not the Page
-// metadata. Avoids the common bug of feeding a Page* to code that expects a
-// data pointer (e.g. fxsave, memset on a kernel stack buffer).
+// Use these when the caller wants the writable page data, not the page
+// metadata. Avoids the common bug of feeding a struct page * to code that
+// expects a data pointer (e.g. fxsave, memset on a kernel stack buffer).
 void *bfc_alloc_page_data(size_t n)
     __attribute__((no_sanitize("kernel-address")));
 void bfc_free_page_data(void *data, size_t n)
@@ -82,7 +82,7 @@ void init_mem(boot_info *bi) __attribute__((no_sanitize("kernel-address")));
 extern spinlock bfc_lock;
 
 // ===================== Address conversion =====================
-phys_addr_t page_to_phys(Page *p)
+phys_addr_t page_to_phys(struct page *p)
     __attribute__((no_sanitize("kernel-address")));
 kern_vaddr_t phys_to_virt(phys_addr_t phys)
     __attribute__((no_sanitize("kernel-address")));

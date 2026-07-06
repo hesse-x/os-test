@@ -65,7 +65,7 @@ ensure_pd(uint64_t *new_pml4, uint64_t vaddr) {
         (__force phys_addr_t)(new_pml4[pml4_idx] & 0x000FFFFFFFFFF000ULL));
   }
   // Allocate new PDPT
-  Page *pdpt_page = bfc_alloc_page(1);
+  struct page *pdpt_page = bfc_alloc_page(1);
   if (!pdpt_page)
     return NULL;
   uint64_t pdpt_phys = (__force uint64_t)page_to_phys(pdpt_page);
@@ -96,7 +96,7 @@ ensure_pt_in_pd(uint64_t *pd_or_pdpt, uint64_t vaddr, int level) {
         (__force phys_addr_t)(pd_or_pdpt[idx] & 0x000FFFFFFFFFF000ULL));
   }
   // Allocate next-level table
-  Page *table_page = bfc_alloc_page(1);
+  struct page *table_page = bfc_alloc_page(1);
   if (!table_page)
     return NULL;
   uint64_t table_phys = (__force uint64_t)page_to_phys(table_page);
@@ -155,7 +155,7 @@ map_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
       continue;
     }
 
-    Page *page = bfc_alloc_page(1);
+    struct page *page = bfc_alloc_page(1);
     if (!page)
       return false;
     uint64_t phys = (__force uint64_t)page_to_phys(page);
@@ -191,7 +191,7 @@ unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
     uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
     if (pt[pt_idx] & PTE_PRESENT) {
       uint64_t phys = pt[pt_idx] & PTE_PHYS_MASK;
-      Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
+      struct page *p = &bfc_frames[PHY_TO_PAGE(phys)];
       if (refcount_dec_and_test(&p->p_refcount)) {
         bfc_free_page(p, 1);
       }
@@ -221,7 +221,7 @@ copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
         (uint64_t *)phys_to_virt((__force phys_addr_t)pdpt_phys);
 
     // Allocate new PDPT
-    Page *new_pdpt_page = bfc_alloc_page(1);
+    struct page *new_pdpt_page = bfc_alloc_page(1);
     if (!new_pdpt_page)
       return -ENOMEM;
     uint64_t new_pdpt_phys = (__force uint64_t)page_to_phys(new_pdpt_page);
@@ -243,7 +243,7 @@ copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
       uint64_t pd_phys = src_pdpt[pdpt_idx] & 0x000FFFFFFFFFF000ULL;
       uint64_t *src_pd = (uint64_t *)phys_to_virt((__force phys_addr_t)pd_phys);
 
-      Page *new_pd_page = bfc_alloc_page(1);
+      struct page *new_pd_page = bfc_alloc_page(1);
       if (!new_pd_page)
         return -ENOMEM;
       uint64_t new_pd_phys = (__force uint64_t)page_to_phys(new_pd_page);
@@ -266,7 +266,7 @@ copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
         uint64_t *src_pt =
             (uint64_t *)phys_to_virt((__force phys_addr_t)pt_phys);
 
-        Page *new_pt_page = bfc_alloc_page(1);
+        struct page *new_pt_page = bfc_alloc_page(1);
         if (!new_pt_page)
           return -ENOMEM;
         uint64_t new_pt_phys = (__force uint64_t)page_to_phys(new_pt_page);
@@ -324,7 +324,7 @@ copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
           }
 
           // COW: mark writable pages as read-only with COW flag
-          Page *phys_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
+          struct page *phys_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
           refcount_inc(&phys_page->p_refcount);
 
           if (pte & PTE_RW) {

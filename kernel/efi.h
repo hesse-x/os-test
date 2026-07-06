@@ -10,9 +10,9 @@
 #include <stdint.h>
 
 // ===================== Basic types =====================
-typedef uint64_t efi_status_t;
-typedef void *efi_handle_t;
-typedef uint64_t efi_uintn_t;
+typedef uint64_t efi_status;
+typedef void *efi_handle;
+typedef uint64_t efi_uintn;
 
 // ===================== Status codes =====================
 #define EFI_SUCCESS 0
@@ -25,7 +25,7 @@ typedef struct {
   uint16_t data2;
   uint16_t data3;
   uint8_t data4[8];
-} efi_guid_t;
+} efi_guid;
 
 // ===================== Memory type constants =====================
 #define EfiReservedMemoryType 0
@@ -51,7 +51,7 @@ typedef struct {
   uint64_t virtual_start;
   uint64_t number_of_pages;
   uint64_t attribute;
-} efi_memory_descriptor_t;
+} efi_memory_descriptor;
 
 // ===================== Table header =====================
 typedef struct {
@@ -60,13 +60,13 @@ typedef struct {
   uint32_t header_size;
   uint32_t crc32;
   uint32_t reserved;
-} efi_table_header_t;
+} efi_table_header;
 
 // ===================== Configuration table =====================
 typedef struct {
-  efi_guid_t vendor_guid;
+  efi_guid vendor_guid;
   void *vendor_table;
-} efi_configuration_table_t;
+} efi_configuration_table;
 
 // ===================== GOP =====================
 #define EFI_PIXEL_FORMAT_RGB 0
@@ -78,57 +78,57 @@ typedef struct {
   uint32_t vertical_resolution;
   uint32_t pixel_format;
   uint32_t pixels_per_scan_line;
-} efi_gop_mode_info_t;
+} efi_gop_mode_info;
 
 typedef struct {
   uint32_t max_mode;
   uint32_t mode;
-  efi_gop_mode_info_t *info;
+  efi_gop_mode_info *info;
   uint64_t size_of_info;
   uint64_t frame_buffer_base;
   uint64_t frame_buffer_size;
-} efi_gop_mode_t;
+} efi_gop_mode;
 
-typedef struct efi_gop efi_gop_t;
+typedef struct efi_gop efi_gop;
 struct efi_gop {
   uint64_t query_mode;
   uint64_t set_mode;
   uint64_t blt;
-  efi_gop_mode_t *mode;
+  efi_gop_mode *mode;
 };
 
 // ===================== Loaded Image Protocol =====================
 typedef struct {
   uint32_t revision;
-  efi_handle_t parent_handle;
-  efi_table_header_t *system_table;
-  efi_handle_t device_handle;
+  efi_handle parent_handle;
+  efi_table_header *system_table;
+  efi_handle device_handle;
   void *file_path;
   void *reserved;
   uint32_t load_options_size;
   void *load_options;
   void *image_base;
   uint64_t image_size;
-  efi_status_t image_code_type;
-  efi_status_t image_data_type;
+  efi_status image_code_type;
+  efi_status image_data_type;
   uint64_t unload;
-} efi_loaded_image_t;
+} efi_loaded_image;
 
 // ===================== Boot Services =====================
 typedef struct {
-  efi_table_header_t hdr;
+  efi_table_header hdr;
 
   // Task Priority Services
   void *raise_tpl;
   void *restore_tpl;
 
   // Memory Services
-  efi_status_t (*allocate_pages)(int, int, efi_uintn_t, uint64_t *);
-  efi_status_t (*free_pages)(uint64_t, efi_uintn_t);
-  efi_status_t (*get_memory_map)(efi_uintn_t *, void *, uint64_t *,
-                                 efi_uintn_t *, uint32_t *);
-  efi_status_t (*allocate_pool)(int, efi_uintn_t, void **);
-  efi_status_t (*free_pool)(void *);
+  efi_status (*allocate_pages)(int, int, efi_uintn, uint64_t *);
+  efi_status (*free_pages)(uint64_t, efi_uintn);
+  efi_status (*get_memory_map)(efi_uintn *, void *, uint64_t *,
+                                 efi_uintn *, uint32_t *);
+  efi_status (*allocate_pool)(int, efi_uintn, void **);
+  efi_status (*free_pool)(void *);
 
   // Event & Timer Services
   void *create_event;
@@ -139,27 +139,27 @@ typedef struct {
   void *check_event;
 
   // Protocol Handler Services
-  efi_status_t (*install_protocol_interface)(efi_handle_t *, efi_guid_t *, int,
+  efi_status (*install_protocol_interface)(efi_handle *, efi_guid *, int,
                                              void *);
-  efi_status_t (*reinstall_protocol_interface)(efi_handle_t, efi_guid_t *,
+  efi_status (*reinstall_protocol_interface)(efi_handle, efi_guid *,
                                                void *, void *);
-  efi_status_t (*uninstall_protocol_interface)(efi_handle_t, efi_guid_t *,
+  efi_status (*uninstall_protocol_interface)(efi_handle, efi_guid *,
                                                void *);
-  efi_status_t (*handle_protocol)(efi_handle_t, efi_guid_t *, void **);
+  efi_status (*handle_protocol)(efi_handle, efi_guid *, void **);
   void *reserved;
   void *register_protocol_notify;
-  efi_status_t (*locate_handle)(int, efi_guid_t *, void *, efi_uintn_t *,
-                                efi_handle_t *);
-  efi_status_t (*locate_device_path)(efi_guid_t *, void **, efi_handle_t *);
-  efi_status_t (*install_configuration_table)(efi_guid_t *, void *);
+  efi_status (*locate_handle)(int, efi_guid *, void *, efi_uintn *,
+                                efi_handle *);
+  efi_status (*locate_device_path)(efi_guid *, void **, efi_handle *);
+  efi_status (*install_configuration_table)(efi_guid *, void *);
 
   // Image Services
-  efi_status_t (*load_image)(uint8_t, efi_handle_t, void *, void *, efi_uintn_t,
-                             efi_handle_t *);
-  efi_status_t (*start_image)(efi_handle_t, efi_uintn_t *, uint16_t **);
-  efi_status_t (*exit)(efi_handle_t, efi_status_t, efi_uintn_t, uint16_t *);
-  efi_status_t (*unload_image)(efi_handle_t);
-  efi_status_t (*exit_boot_services)(efi_handle_t, efi_uintn_t);
+  efi_status (*load_image)(uint8_t, efi_handle, void *, void *, efi_uintn,
+                             efi_handle *);
+  efi_status (*start_image)(efi_handle, efi_uintn *, uint16_t **);
+  efi_status (*exit)(efi_handle, efi_status, efi_uintn, uint16_t *);
+  efi_status (*unload_image)(efi_handle);
+  efi_status (*exit_boot_services)(efi_handle, efi_uintn);
 
   // Misc Services
   void *get_next_monotonic_count;
@@ -176,7 +176,7 @@ typedef struct {
   void *open_protocol_information;
   void *protocols_per_handle;
   void *locate_handle_buffer;
-  efi_status_t (*locate_protocol)(efi_guid_t *, void *, void **);
+  efi_status (*locate_protocol)(efi_guid *, void *, void **);
   void *install_multiple_protocol_interfaces;
   void *uninstall_multiple_protocol_interfaces;
 
@@ -187,24 +187,24 @@ typedef struct {
   void *copy_mem;
   void *set_mem;
   void *create_event_ex;
-} efi_boot_services_t;
+} efi_boot_services;
 
 // ===================== System Table =====================
 typedef struct {
-  efi_table_header_t hdr;
+  efi_table_header hdr;
   uint16_t *firmware_vendor;
   uint32_t firmware_revision;
-  efi_handle_t console_in_handle;
+  efi_handle console_in_handle;
   void *con_in;
-  efi_handle_t console_out_handle;
+  efi_handle console_out_handle;
   void *con_out;
-  efi_handle_t standard_error_handle;
+  efi_handle standard_error_handle;
   void *std_err;
-  efi_boot_services_t *boot_services;
+  efi_boot_services *boot_services;
   void *runtime_services;
-  efi_uintn_t number_of_table_entries;
-  efi_configuration_table_t *configuration_table;
-} efi_system_table_t;
+  efi_uintn number_of_table_entries;
+  efi_configuration_table *configuration_table;
+} efi_system_table;
 
 // ===================== GUIDs =====================
 // ACPI 2.0 RSDP

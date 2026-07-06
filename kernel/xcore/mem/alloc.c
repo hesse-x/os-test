@@ -16,8 +16,8 @@
 
 // ===================== Global variable definitions =====================
 size_t total_page_frames = 0;
-Page *bfc_frames = NULL;
-Page *bfc_free_list = NULL;
+struct page *bfc_frames = NULL;
+struct page *bfc_free_list = NULL;
 
 spinlock bfc_lock = SPINLOCK_INIT;
 
@@ -26,7 +26,7 @@ void bfc_init(void) {
   // Initialization is done in init_mem
 }
 
-__attribute__((no_sanitize("kernel-address"))) Page *bfc_alloc_page(size_t n) {
+__attribute__((no_sanitize("kernel-address"))) struct page *bfc_alloc_page(size_t n) {
   if (n == 0)
     return NULL;
 
@@ -38,8 +38,8 @@ __attribute__((no_sanitize("kernel-address"))) Page *bfc_alloc_page(size_t n) {
     return NULL;
   }
 
-  Page *cur = bfc_free_list;
-  Page *prev = NULL;
+  struct page *cur = bfc_free_list;
+  struct page *prev = NULL;
 
   while (cur != NULL) {
     if (cur->bfc.cont_page_num >= n) {
@@ -70,7 +70,7 @@ __attribute__((no_sanitize("kernel-address"))) Page *bfc_alloc_page(size_t n) {
           refcount_set(&cur[i].p_refcount, 1);
         }
 
-        Page *new_block = cur + n;
+        struct page *new_block = cur + n;
         new_block->status = PAGE_FREE;
         new_block->bfc.cont_page_num = remaining;
         new_block->bfc.prev = prev;
@@ -103,7 +103,7 @@ __attribute__((no_sanitize("kernel-address"))) Page *bfc_alloc_page(size_t n) {
   return NULL;
 }
 
-__attribute__((no_sanitize("kernel-address"))) Page *bfc_free_page(Page *page,
+__attribute__((no_sanitize("kernel-address"))) struct page *bfc_free_page(struct page *page,
                                                                    size_t n) {
   if (page == NULL || n == 0) {
     return NULL;
@@ -129,8 +129,8 @@ __attribute__((no_sanitize("kernel-address"))) Page *bfc_free_page(Page *page,
     return page;
   }
 
-  Page *cur = bfc_free_list;
-  Page *prev = NULL;
+  struct page *cur = bfc_free_list;
+  struct page *prev = NULL;
 
   while (cur != NULL && cur < page) {
     prev = cur;
@@ -171,7 +171,7 @@ __attribute__((no_sanitize("kernel-address"))) Page *bfc_free_page(Page *page,
   return page;
 }
 
-__attribute__((no_sanitize("kernel-address"))) Page *
+__attribute__((no_sanitize("kernel-address"))) struct page *
 bfc_alloc_page_low(size_t n) {
   if (n == 0)
     return NULL;
@@ -184,8 +184,8 @@ bfc_alloc_page_low(size_t n) {
     return NULL;
   }
 
-  Page *cur = bfc_free_list;
-  Page *prev = NULL;
+  struct page *cur = bfc_free_list;
+  struct page *prev = NULL;
 
   while (cur != NULL) {
     uint64_t phys = (uint64_t)(cur - bfc_frames) * PAGE_SIZE;
@@ -219,7 +219,7 @@ bfc_alloc_page_low(size_t n) {
           refcount_set(&cur[i].p_refcount, 1);
         }
 
-        Page *new_block = cur + n;
+        struct page *new_block = cur + n;
         new_block->status = PAGE_FREE;
         new_block->bfc.cont_page_num = remaining;
         new_block->bfc.prev = prev;
@@ -256,7 +256,7 @@ __attribute__((no_sanitize("kernel-address"))) size_t bfc_free_page_nums(void) {
   uint64_t flags;
   spin_lock_irqsave(&bfc_lock, &flags);
   size_t total = 0;
-  Page *cur = bfc_free_list;
+  struct page *cur = bfc_free_list;
 
   while (cur != NULL) {
     total += cur->bfc.cont_page_num;
@@ -269,9 +269,9 @@ __attribute__((no_sanitize("kernel-address"))) size_t bfc_free_page_nums(void) {
 
 // ===================== EFI mmap iteration helpers =====================
 // EFI mmap addresses are physical; convert to virtual: phys + VMA_BASE
-static efi_memory_descriptor_t *get_efi_desc(boot_info *bi, size_t index) {
+static efi_memory_descriptor *get_efi_desc(boot_info *bi, size_t index) {
   uintptr_t mmap_virt = (uintptr_t)bi->mmap_addr + VMA_BASE;
-  return (efi_memory_descriptor_t *)(mmap_virt + index * bi->mmap_desc_size);
+  return (efi_memory_descriptor *)(mmap_virt + index * bi->mmap_desc_size);
 }
 
 // ===================== init_mem =====================
@@ -285,7 +285,7 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
   // 1. Compute the maximum physical address of AVAILABLE memory + total page frames
   uint64_t max_phys_addr = 0;
   for (size_t i = 0; i < desc_count; i++) {
-    efi_memory_descriptor_t *desc = get_efi_desc(bi, i);
+    efi_memory_descriptor *desc = get_efi_desc(bi, i);
     if (desc->type == EfiConventionalMemory) {
       uint64_t end = desc->physical_start + desc->number_of_pages * 4096;
       if (end > max_phys_addr)
@@ -300,8 +300,8 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
   bump_init_phys(kernel_end_phys);
 
   // 3. Bump-allocate the frames array
-  size_t frames_size = total_page_frames * sizeof(Page);
-  Page *frames = (Page *)bump_alloc(frames_size);
+  size_t frames_size = total_page_frames * sizeof(struct page);
+  struct page *frames = (struct page *)bump_alloc(frames_size);
 
   // 4. Initialize frames as RESERVED
   for (size_t i = 0; i < total_page_frames; i++) {
@@ -314,7 +314,7 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
 
   // 5. Mark FREE pages according to the EFI mmap
   for (size_t i = 0; i < desc_count; i++) {
-    efi_memory_descriptor_t *desc = get_efi_desc(bi, i);
+    efi_memory_descriptor *desc = get_efi_desc(bi, i);
     if (desc->type == EfiConventionalMemory) {
       uint64_t addr = desc->physical_start;
       uint64_t len = desc->number_of_pages * 4096;
@@ -346,8 +346,8 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
 
   // 9. Build the free list
   int state = 0;
-  Page *prev = NULL;
-  Page **cur_page = &bfc_free_list;
+  struct page *prev = NULL;
+  struct page **cur_page = &bfc_free_list;
   size_t cont_page_num = 0;
   for (size_t i = 0; i < total_page_frames; i++) {
     page_status status = frames[i].status;
@@ -385,7 +385,7 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
 
 // ===================== Address conversion =====================
 __attribute__((no_sanitize("kernel-address"))) phys_addr_t
-page_to_phys(Page *p) {
+page_to_phys(struct page *p) {
   return (__force phys_addr_t)((uint64_t)(p - bfc_frames) * PAGE_SIZE);
 }
 
@@ -400,19 +400,19 @@ phys_to_virt(phys_addr_t phys) {
 // that immediately write to the page (fxsave area, kernel stack data, etc.).
 __attribute__((no_sanitize("kernel-address"))) void *
 bfc_alloc_page_data(size_t n) {
-  Page *p = bfc_alloc_page(n);
+  struct page *p = bfc_alloc_page(n);
   if (!p)
     return NULL;
   return (void *)(__force uintptr_t)phys_to_virt(page_to_phys(p));
 }
 
 // bfc_free_page_data: free pages given a data-page virtual address.
-// Inverse of bfc_alloc_page_data; recovers the Page* via phys conversion.
+// Inverse of bfc_alloc_page_data; recovers the struct page * via phys conversion.
 __attribute__((no_sanitize("kernel-address"))) void
 bfc_free_page_data(void *data, size_t n) {
   if (!data)
     return;
   uint64_t phys = (__force uint64_t)PHY_ADDR((uintptr_t)data);
-  Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
+  struct page *p = &bfc_frames[PHY_TO_PAGE(phys)];
   bfc_free_page(p, n);
 }

@@ -102,9 +102,9 @@ __trapret:
 # ===================== syscall fast entry/exit (SYSCALL/SYSRET) =====================
 # SYSCALL instruction: RCX = return RIP, R11 = RFLAGS, CS/SS loaded from STAR.
 # No stack switch, no swapgs — we must do it manually.
-# We build the same trapframe_t as int 0x80 so xcall_dispatch can be shared.
+# We build the same trapframe as int 0x80 so xcall_dispatch can be shared.
 #
-# trapframe_t layout (C struct, offsets from base):
+# trapframe layout (C struct, offsets from base):
 #   0:   r15, r14, r13, r12, r11, r10, r9, r8
 #   64:  rdi, rsi, rbp, rdx, rcx, rbx, rax
 #   120: trapno, err_code

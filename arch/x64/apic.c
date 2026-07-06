@@ -217,7 +217,7 @@ void apic_init() {
   // for scheduling so the PIT I/O APIC interrupt is unneeded. Mask GSI 2
   // to prevent spurious vec 34 interrupts.
   {
-    const acpi_iso_override_t *iso = acpi_find_iso(0);
+    const acpi_iso_override *iso = acpi_find_iso(0);
     uint32_t gsi = iso ? iso->gsi : 0;
     bool level = iso ? iso->level_triggered : false;
     bool low = iso ? iso->active_low : false;
@@ -226,7 +226,7 @@ void apic_init() {
   }
   // Unmask keyboard (ISA IRQ 1 → GSI per ISO)
   {
-    const acpi_iso_override_t *iso = acpi_find_iso(1);
+    const acpi_iso_override *iso = acpi_find_iso(1);
     uint32_t gsi = iso ? iso->gsi : 1;
     bool level = iso ? iso->level_triggered : false;
     bool low = iso ? iso->active_low : false;

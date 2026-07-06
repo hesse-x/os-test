@@ -10,11 +10,9 @@
 #include "arch/x64/trap.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/sched.h"
+#include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
 #include <stddef.h>
-
-// IRQ handler callback type
-typedef void (*irq_handler_fn)(trapframe_t *);
 
 // === scheduling ===
 void xtask_set_state(xtask *t, proc_state s);
@@ -40,9 +38,9 @@ void *kmalloc(size_t size);
 void kfree(const void *ptr);
 void *kcalloc(size_t n, size_t size);
 void *krealloc(void *ptr, size_t size);
-Page *bfc_alloc_page(size_t n);
-Page *bfc_free_page(Page *page, size_t n);
-phys_addr_t page_to_phys(Page *p);
+struct page *bfc_alloc_page(size_t n);
+struct page *bfc_free_page(struct page *page, size_t n);
+phys_addr_t page_to_phys(struct page *p);
 kern_vaddr_t phys_to_virt(phys_addr_t phys);
 bool map_user_page_direct(uint64_t *pml4, uint64_t vaddr, uint64_t phys,
                           uint64_t flags);

@@ -42,7 +42,7 @@ void panic(const char *fmt, ...) {
   printk(LOG_PANIC, "--- PANIC ---");
 
   // Print current syscall name if in syscall context
-  trapframe_t *tf = get_cpu_local()->cur_tf;
+  trapframe *tf = get_cpu_local()->cur_tf;
   if (tf) {
     SERIAL_PRINTF("\nCPU %d  syscall=%s(%lu)\n", get_cpu_local()->cpu_id,
                   syscall_name(tf->rax), (unsigned long)tf->rax);

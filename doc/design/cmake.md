@@ -70,6 +70,13 @@ build_script/cmake/user_rules.cmake — add_user_lib() 和 add_user_elf()
 
 与内核区别：-fno-pie（用户态绝对地址）而非 -fPIE。
 
+构建类型 flags：CMake 目标（内核 OBJECT lib、static libc.a）自动继承
+`CMAKE_<LANG>_FLAGS_<CONFIG>`；但 add_user_elf / add_user_ldso / SHARED libc.so /
+add_user_dyn_elf 用 `add_custom_command` 裸调 gcc，不继承这些 flags。user_rules.cmake
+据此定义 `USER_BUILD_FLAGS` 按 CMAKE_BUILD_TYPE 显式补齐（Release=-O3 -DNDEBUG，
+Debug=-g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG，RelWithDebInfo/MinSizeRel 同 CMake
+默认），并注入每个裸 gcc 命令。crt0.S 是纯汇编，不参与。
+
 add_user_lib(lib_name SOURCES ...) — 创建 STATIC library（如 libc.a，target 名 c → libc.a）。
 
 add_user_elf(name [C] SOURCES ... [LINK_LIBS ...]) — 三步管线：compile → objcopy → ld

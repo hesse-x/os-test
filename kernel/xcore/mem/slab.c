@@ -28,7 +28,7 @@ static const size_t class_sizes[NUM_KMALLOC_CLASSES] = {
 
 // ===================== Slab page initialization =====================
 __attribute__((no_sanitize("kernel-address"))) static void
-slab_page_init(Page *page, kmem_cache *cache, int cpu_id) {
+slab_page_init(struct page *page, kmem_cache *cache, int cpu_id) {
   page->status = PAGE_SLAB;
   page->slab.cache = cache;
   page->slab.inuse = 0;
@@ -51,7 +51,7 @@ slab_page_init(Page *page, kmem_cache *cache, int cpu_id) {
 
 // ===================== partial list operations =====================
 __attribute__((no_sanitize("kernel-address"))) static void
-partial_add(kmem_cache *cache, Page *page) {
+partial_add(kmem_cache *cache, struct page *page) {
   page->slab.partial_next = cache->partial;
   page->slab.partial_prev = NULL;
   if (cache->partial) {
@@ -61,7 +61,7 @@ partial_add(kmem_cache *cache, Page *page) {
 }
 
 __attribute__((no_sanitize("kernel-address"))) static void
-partial_remove(kmem_cache *cache, Page *page) {
+partial_remove(kmem_cache *cache, struct page *page) {
   if (page->slab.partial_prev) {
     page->slab.partial_prev->slab.partial_next = page->slab.partial_next;
   } else {
@@ -132,7 +132,7 @@ __attribute__((no_sanitize("kernel-address"))) void *kmalloc(size_t size) {
   // Large allocation: go through BFC
   if (size > 2048) {
     size_t npages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    Page *page = bfc_alloc_page(npages);
+    struct page *page = bfc_alloc_page(npages);
     if (!page) {
       printk(LOG_WARN,
              "kmalloc(%zu) failed, slab_used=%d, free_pages=%d, caller=%p\n",
@@ -151,7 +151,7 @@ __attribute__((no_sanitize("kernel-address"))) void *kmalloc(size_t size) {
   int c = size_to_class(size);
   kmem_cache *cache = &kmalloc_caches[c];
   cpu_local *cpu = get_cpu_local();
-  Page *active = cpu->active_slab[c];
+  struct page *active = cpu->active_slab[c];
 
   // All paths hold lock (option A: remove fast path lock-free optimization)
   uint64_t flags;
@@ -171,7 +171,7 @@ __attribute__((no_sanitize("kernel-address"))) void *kmalloc(size_t size) {
 
   // Slow path: check partial list (already under lock, no extra locking needed)
   while (cache->partial) {
-    Page *page = cache->partial;
+    struct page *page = cache->partial;
     if (page->slab.freelist == NULL) {
       // Page is actually full — remove from partial and skip
       partial_remove(cache, page);
@@ -192,7 +192,7 @@ __attribute__((no_sanitize("kernel-address"))) void *kmalloc(size_t size) {
   }
 
   // partial is also empty: allocate a new page from BFC
-  Page *new_page = bfc_alloc_page(1);
+  struct page *new_page = bfc_alloc_page(1);
   if (!new_page) {
     spin_unlock_irqrestore(&cache->lock, flags);
     printk(LOG_WARN,
@@ -227,7 +227,7 @@ __attribute__((no_sanitize("kernel-address"))) void kfree(const void *ptr) {
 
   uint64_t addr = (uint64_t)ptr;
   uint64_t phys = (__force uint64_t)PHY_ADDR(addr);
-  Page *page = &bfc_frames[PHY_TO_PAGE(phys)];
+  struct page *page = &bfc_frames[PHY_TO_PAGE(phys)];
 
   if (page->status == PAGE_USED) {
     // BFC large allocation free
@@ -245,8 +245,8 @@ __attribute__((no_sanitize("kernel-address"))) void kfree(const void *ptr) {
 #ifndef NDEBUG
     printk(LOG_ERROR,
            "kfree: bad page status ptr=%p phys=%lx page=%p status=%d "
-           "sizeof(Page)=%zu bfc_frames=%p\n",
-           ptr, phys, page, page->status, sizeof(Page), bfc_frames);
+           "sizeof(struct page)=%zu bfc_frames=%p\n",
+           ptr, phys, page, page->status, sizeof(struct page), bfc_frames);
     printk(
         LOG_ERROR,
         "  page desc: refcount=%d cache=%p freelist=%p inuse=%u obj_count=%u\n",
@@ -329,7 +329,7 @@ __attribute__((no_sanitize("kernel-address"))) void *krealloc(void *ptr,
   // Get the old size
   uint64_t addr = (uint64_t)ptr;
   uint64_t phys = (__force uint64_t)PHY_ADDR(addr);
-  Page *page = &bfc_frames[PHY_TO_PAGE(phys)];
+  struct page *page = &bfc_frames[PHY_TO_PAGE(phys)];
 
   size_t old_size;
   if (page->status == PAGE_SLAB) {
@@ -392,7 +392,7 @@ kmem_cache_alloc(kmem_cache *cache) {
 
   // Find a page with free objects in the partial list
   while (cache->partial) {
-    Page *page = cache->partial;
+    struct page *page = cache->partial;
     if (page->slab.freelist == NULL) {
       // Page is full, remove from partial and skip
       partial_remove(cache, page);
@@ -410,7 +410,7 @@ kmem_cache_alloc(kmem_cache *cache) {
   }
 
   // partial is empty: allocate a new page
-  Page *new_page = bfc_alloc_page(1);
+  struct page *new_page = bfc_alloc_page(1);
   if (!new_page) {
     spin_unlock_irqrestore(&cache->lock, flags);
     printk(LOG_WARN, "kmem_cache_alloc(%zu) failed: no free pages\n",
@@ -444,7 +444,7 @@ kmem_cache_free(kmem_cache *cache, void *obj) {
 
   uint64_t addr = (uint64_t)obj;
   uint64_t phys = (__force uint64_t)PHY_ADDR(addr);
-  Page *page = &bfc_frames[PHY_TO_PAGE(phys)];
+  struct page *page = &bfc_frames[PHY_TO_PAGE(phys)];
 
   // Object pages of a dedicated cache must be PAGE_SLAB; any other status
   // means obj does not belong to this cache (double-free/wild pointer)

@@ -53,7 +53,7 @@ map_ecam_mmio(uint64_t ecam_phys, uint8_t start_bus, uint8_t end_bus) {
   }
 
   // Allocate PD using bfc_alloc (bump is disabled at pci_init time)
-  Page *pd_page = bfc_alloc_page(1);
+  struct page *pd_page = bfc_alloc_page(1);
   if (!pd_page) {
     printk(LOG_ERROR, "pci: ECAM PD alloc failed\n");
     halt();
@@ -296,7 +296,7 @@ pci_map_bar_mmio(pci_device *d, int wc_bar_idx) {
     size_t num_2mb = (region_end - region_start) / 0x200000;
 
     // Allocate PD
-    Page *pd_page = bfc_alloc_page(1);
+    struct page *pd_page = bfc_alloc_page(1);
     if (!pd_page)
       continue;
     uint64_t *pd = (__force uint64_t *)phys_to_virt(

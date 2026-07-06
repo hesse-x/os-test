@@ -36,7 +36,7 @@ uint64_t sig_trampoline_phys = 0;
 
 void sig_init() {
   // Allocate one shared physical page for the signal trampoline.
-  Page *page = bfc_alloc_page(1);
+  struct page *page = bfc_alloc_page(1);
   if (!page) {
     printk(LOG_ERROR, "sig_init: failed to allocate trampoline page\n");
     return;
@@ -64,7 +64,7 @@ void sig_init() {
 // ===================== Signal delivery =====================
 
 // Deliver a signal with a user-registered handler via sigframe on user stack.
-static void deliver_signal(xtask *proc, trapframe_t *tf, int sig,
+static void deliver_signal(xtask *proc, trapframe *tf, int sig,
                            sigaction_t *sa) {
   struct rt_sigframe frame;
   __memset(&frame, 0, sizeof(frame));
@@ -141,7 +141,7 @@ static void deliver_signal(xtask *proc, trapframe_t *tf, int sig,
 }
 
 // ===================== check_pending_signals =====================
-void check_pending_signals(trapframe_t *tf) {
+void check_pending_signals(trapframe *tf) {
   if (tf->cs != 0x2B)
     return;
 
@@ -527,8 +527,8 @@ int64_t sys_sigreturn(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
                       int64_t _u5, int64_t _u6) {
   xtask *proc = current_task;
 
-  uint64_t tf_base = get_cpu_local()->tss_rsp0 - sizeof(trapframe_t);
-  trapframe_t *tf = (trapframe_t *)tf_base;
+  uint64_t tf_base = get_cpu_local()->tss_rsp0 - sizeof(trapframe);
+  trapframe *tf = (trapframe *)tf_base;
 
   struct rt_sigframe frame;
   uint64_t user_rsp = tf->rsp - 8;

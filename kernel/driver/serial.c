@@ -121,7 +121,7 @@ static void serial_putc(char c) {
 }
 
 // ISR: drain all available bytes from UART FIFO into kernel ring buffer
-static void serial_irq_handler(trapframe_t *tf) {
+static void serial_irq_handler(trapframe *tf) {
   uint64_t flags;
   spin_lock_irqsave(&serial_rx_lock, &flags);
   // Drain all available bytes from FIFO (Linux: read LSR in loop)

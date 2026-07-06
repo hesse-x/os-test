@@ -337,7 +337,7 @@ void files_put(files *files) {
 
 // Free a page table page by physical address
 static void free_table_page(uint64_t phys) {
-  Page *p = &bfc_frames[PHY_TO_PAGE(phys)];
+  struct page *p = &bfc_frames[PHY_TO_PAGE(phys)];
   // Unrecoverable: a page-table page being freed as a slab page or already
   // free page means the Page descriptor or page table has been corrupted.
   // DEBUG panics directly to locate; release builds do not check.
@@ -354,7 +354,7 @@ mm *mm_create(void) {
   __memset(mm, 0, sizeof(struct mm));
 
   // Allocate PML4
-  Page *pml4_page = bfc_alloc_page(1);
+  struct page *pml4_page = bfc_alloc_page(1);
   if (!pml4_page) {
     kfree(mm);
     return NULL;
@@ -459,7 +459,7 @@ void mm_release(mm *mm, pid_t owner_pid) {
               continue;
             }
             if (!is_shared) {
-              Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
+              struct page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
               // Unrecoverable: a user page-table leaf pointing to a slab page
               // means the page table or Page descriptor has been corrupted.
               // DEBUG panics directly to locate; release builds do not check.
@@ -616,7 +616,7 @@ void mm_release_pages(mm *mm) {
             if (sig_trampoline_phys && leaf_phys == sig_trampoline_phys)
               skip = true;
             if (!skip) {
-              Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
+              struct page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
               if (refcount_dec_and_test(&leaf_page->p_refcount)) {
                 bfc_free_page(leaf_page, 1);
               }
@@ -642,10 +642,10 @@ void mm_release_pages(mm *mm) {
 
 // Build child kernel stack from parent trapframe: trapframe (rax=new_rax) +
 // switch_frame. Returns k_rsp. Used by sys_fork and sys_clone.
-uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe_t *parent_tf,
+uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
                               uint64_t new_rax) {
-  trapframe_t tf;
-  __memcpy(&tf, parent_tf, sizeof(trapframe_t));
+  trapframe tf;
+  __memcpy(&tf, parent_tf, sizeof(trapframe));
   tf.rax = new_rax;
 
   typedef struct {
@@ -656,16 +656,16 @@ uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe_t *parent_tf,
     uint64_t r14;
     uint64_t r15;
     uint64_t ret_addr;
-  } local_switch_frame_t;
+  } local_switch_frame;
 
-  local_switch_frame_t sf = {0};
+  local_switch_frame sf = {0};
   sf.ret_addr = (uint64_t)process_entry;
 
   uint8_t *sp = (uint8_t *)k_stack_top;
-  sp -= sizeof(trapframe_t);
-  __memcpy(sp, &tf, sizeof(trapframe_t));
-  sp -= sizeof(local_switch_frame_t);
-  __memcpy(sp, &sf, sizeof(local_switch_frame_t));
+  sp -= sizeof(trapframe);
+  __memcpy(sp, &tf, sizeof(trapframe));
+  sp -= sizeof(local_switch_frame);
+  __memcpy(sp, &sf, sizeof(local_switch_frame));
   return (uint64_t)sp;
 }
 
@@ -769,7 +769,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
   // 6. Allocate new kernel stack, copy parent trapframe (rax=0 for child
   // return)
-  Page *stack_pages = bfc_alloc_page(2);
+  struct page *stack_pages = bfc_alloc_page(2);
   if (!stack_pages) {
     mm_put(child_mm);
     spin_unlock(&tasks_lock);
@@ -800,7 +800,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   __memcpy(child_fpu, parent_fpu, PAGE_SIZE);
 
   // 6. Build child kernel stack (reuse build_kstack_from_tf helper)
-  trapframe_t *parent_tf = get_cpu_local()->cur_tf;
+  trapframe *parent_tf = get_cpu_local()->cur_tf;
   uint64_t k_rsp = build_kstack_from_tf(k_stack_top, parent_tf, 0);
 
   // 7. Fill child xtask
@@ -928,7 +928,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
 
   // 2. Allocate kernel stack
-  Page *stack_pages = bfc_alloc_page(2);
+  struct page *stack_pages = bfc_alloc_page(2);
   if (!stack_pages) {
     spin_unlock(&tasks_lock);
     return (int64_t)-ENOMEM;
@@ -1036,7 +1036,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
 
   // 7. trapframe: rax=0, rsp=(CLONE_VM? stack : parent_tf->rsp)
-  trapframe_t *parent_tf = get_cpu_local()->cur_tf;
+  trapframe *parent_tf = get_cpu_local()->cur_tf;
   uint64_t new_rsp = (flags & CLONE_VM) ? stack : parent_tf->rsp;
   // Temporarily modify parent_tf->rsp to reuse build_kstack_from_tf
   uint64_t saved_rsp = parent_tf->rsp;
@@ -1207,7 +1207,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
          pathname, (unsigned long)file_size);
 
   // 5. Allocate new PML4, copy kernel entries (before releasing old space)
-  Page *pml4_page = bfc_alloc_page(1);
+  struct page *pml4_page = bfc_alloc_page(1);
   if (!pml4_page) {
     kfree(elf_buf);
     return (int64_t)-ENOMEM;
@@ -1221,7 +1221,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   new_pml4[511] = pml4[511];
 
   // 6. elf_load into new PML4
-  elf_load_result_t lr = elf_load(elf_buf, file_size, new_pml4);
+  elf_load_result lr = elf_load(elf_buf, file_size, new_pml4);
   if (!lr.success) {
     kfree(elf_buf);
     free_table_page(pml4_phys);
@@ -1252,7 +1252,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   }
 
   // 6c. Dynamic path: load ld.so at LD_SO_BASE
-  elf_load_result_t ld_lr = {0};
+  elf_load_result ld_lr = {0};
   if (is_dynamic) {
     int64_t ld_open_res =
         sys_open((int64_t)(uintptr_t)interp_path, O_RDONLY, 0, 0, 0, 0);
@@ -1300,7 +1300,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
   // 7. Allocate new user stack
   int user_stack_pages = 2048;
-  Page *user_stack_page = bfc_alloc_page(user_stack_pages);
+  struct page *user_stack_page = bfc_alloc_page(user_stack_pages);
   if (!user_stack_page) {
     kfree(elf_buf);
     sys_exit((int64_t)-ENOMEM, 0, 0, 0, 0, 0);
@@ -1508,7 +1508,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   // 9. Switch to new address space
 
   // 9a. Modify current trapframe: rip=entry, rsp=user_sp
-  trapframe_t *tf = get_cpu_local()->cur_tf;
+  trapframe *tf = get_cpu_local()->cur_tf;
   if (is_dynamic) {
     tf->rip = ld_lr.entry; // ld.so entry
     tf->rsp = user_sp;     // points to argc
@@ -1613,7 +1613,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
               if (sig_trampoline_phys && leaf_phys == sig_trampoline_phys)
                 skip = true;
               if (!skip) {
-                Page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
+                struct page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
                 if (refcount_dec_and_test(&leaf_page->p_refcount)) {
                   bfc_free_page(leaf_page, 1);
                 }

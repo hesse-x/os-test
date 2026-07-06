@@ -86,11 +86,11 @@ typedef struct xtask {
 
   // === threading support (appended at end, preserves existing offsets) ===
   uint64_t fs_base; // TLS base (FS_BASE MSR mirror), loaded by __trapret
-  Page *fpu_page; // fxsave area page (pre-allocated at creation time:
+  struct page *fpu_page; // fxsave area page (pre-allocated at creation time:
                   // xcore_fpu_alloc calls bfc_alloc_page(1) during
-                  // process_create_elf/sys_fork).  Stores Page* (NOT data
+                  // process_create_elf/sys_fork).  Stores struct page * (NOT data
                   // pointer) — use page_to_phys/phys_to_virt to obtain the
-                  // fxsave area virtual address. Type prevents feeding a Page*
+                  // fxsave area virtual address. Type prevents feeding a struct page *
                   // to fxsave/fxrstor by accident. NULL = idle (no FPU state).
 
   // === exit code (valid when state == ZOMBIE) ===

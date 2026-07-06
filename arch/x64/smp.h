@@ -40,7 +40,7 @@ typedef struct cpu_local {
   int cpu_id;
   uint32_t apic_id;
   struct xtask *_cur_proc;
-  trapframe_t *cur_tf; // current trapframe (set by syscall/irq entry)
+  trapframe *cur_tf; // current trapframe (set by syscall/irq entry)
   void __iomem *lapic_base;
   uint64_t kernel_stack;
   uint64_t tss_rsp0;
@@ -50,7 +50,7 @@ typedef struct cpu_local {
   list_node run_queue;     // per-CPU ready queue (sentinel node)
   list_node timer_queue;   // per-CPU timer queue (sorted by wait_deadline,
                              // sentinel node)
-  Page *active_slab[NUM_KMALLOC_CLASSES]; // per-CPU active slab per size class
+  struct page *active_slab[NUM_KMALLOC_CLASSES]; // per-CPU active slab per size class
 
   // RCU read-side nesting state
   rcu_local rcu; // nesting count + saved IF
@@ -71,9 +71,9 @@ typedef struct cpu_local {
 
 extern cpu_local cpu_locals[MAX_CPUS];
 extern int ncpu;
-extern gdt_entry_t per_cpu_gdt[MAX_CPUS][8];
-extern gdt_ptr_t per_cpu_gdtr[MAX_CPUS];
-extern tss_t per_cpu_tss[MAX_CPUS];
+extern gdt_entry per_cpu_gdt[MAX_CPUS][8];
+extern gdt_ptr per_cpu_gdtr[MAX_CPUS];
+extern struct tss_struct per_cpu_tss[MAX_CPUS];
 extern uint64_t per_cpu_ist_stack[MAX_CPUS][3]; // IST1=NMI, IST2=DF, IST3=MCE
 
 static inline void set_cpu_local(cpu_local *p) {

@@ -14,7 +14,7 @@
 #include <stdint.h>
 
 // Syscall dispatch entry
-int64_t syscall_dispatch(trapframe_t *tf);
+int64_t syscall_dispatch(trapframe *tf);
 
 // BSD layer syscall function declarations (grouped by subsystem)
 // fd operations
@@ -59,7 +59,7 @@ int64_t sys_debug_memstat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_kill(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_sigaction(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_sigreturn(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-void check_pending_signals(trapframe_t *tf);
+void check_pending_signals(trapframe *tf);
 void force_sig(xtask *proc, int sig, int si_code, void *si_addr);
 void deliver_signal_to(xtask *target, int sig);
 int pgsignal(pid_t pgid, int sig);

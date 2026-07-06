@@ -22,7 +22,7 @@ typedef struct idt_gate {
   uint16_t offset_mid;  // offset[31:16]
   uint32_t offset_high; // offset[63:32]
   uint32_t reserved;    // must be 0
-} __attribute__((packed)) idt_gate_t;
+} __attribute__((packed)) idt_gate;
 
 typedef struct idt_register {
   uint16_t limit;
@@ -30,7 +30,7 @@ typedef struct idt_register {
   uint32_t base_high;
   uint32_t base_upper;
   uint32_t reserved;
-} __attribute__((packed)) idt_register_t;
+} __attribute__((packed)) idt_register;
 
 // ===================== Trapframe (64-bit) =====================
 typedef struct trapframe {
@@ -46,7 +46,7 @@ typedef struct trapframe {
   uint64_t rflags;
   uint64_t rsp;
   uint64_t ss;
-} trapframe_t;
+} trapframe;
 
 // ===================== Export interface =====================
 void set_idt_gate(int n, uint64_t handler, uint8_t flags, uint8_t ist);

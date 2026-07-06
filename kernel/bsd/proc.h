@@ -79,7 +79,7 @@ void proc_reap_idle(void);     // idle hook: scan for orphaned zombies
 xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);
 
 // Build child kernel stack from parent trapframe (used by sys_fork/sys_clone)
-uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe_t *parent_tf,
+uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
                               uint64_t new_rax);
 
 // sys_clone (Phase 3b)

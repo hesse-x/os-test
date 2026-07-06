@@ -151,12 +151,12 @@ static void __iomem *db_base;
 static pci_device *xhci_dev;
 
 // DMA memory pages (base controller)
-static Page *dcbaa_page;
-static Page *input_ctx_page;
-static Page *cmd_ring_page;
-static Page *erst_page;
-static Page *event_ring_page;
-static Page *scratchpad_page;
+static struct page *dcbaa_page;
+static struct page *input_ctx_page;
+static struct page *cmd_ring_page;
+static struct page *erst_page;
+static struct page *event_ring_page;
+static struct page *scratchpad_page;
 
 static uint64_t dcbaa_phys;
 static uint64_t input_ctx_phys;
@@ -183,7 +183,7 @@ static int max_ports;
 
 // ===================== USB HID / keyboard state =====================
 typedef struct xhci_intr {
-  Page *ring_page;
+  struct page *ring_page;
   uint64_t ring_phys;
   void *ring_virt;
   int enqueue;
@@ -191,12 +191,12 @@ typedef struct xhci_intr {
   int slot_id;
   int ep_dci; // Doorbell target (DCI): EP1-IN = 3
   int ep_num; // Endpoint number for event matching: EP1-IN = 1
-} xhci_intr_t;
+} xhci_intr;
 
-static xhci_intr_t xhci_intrs[2]; // intr 0=keyboard, 1=spare
+static xhci_intr xhci_intrs[2]; // intr 0=keyboard, 1=spare
 
 // USB HID SHM page (kernel-allocated, shared with kbd_driver)
-static Page *usb_hid_shm_page;
+static struct page *usb_hid_shm_page;
 static uint64_t usb_hid_shm_phys;
 static void *usb_hid_shm_virt;
 
@@ -205,23 +205,23 @@ static void *usb_hid_shm_virt;
 static pid_t kbd_openers[8];
 
 // HID DMA buffer (xHCI writes HID report here, <4GB)
-static Page *hid_dma_page;
+static struct page *hid_dma_page;
 static uint64_t hid_dma_phys;
 static void *hid_dma_virt;
 
 // EP0 Transfer Ring (for control transfers: Get Descriptor, Set Protocol)
-static Page *ep0_ring_page;
+static struct page *ep0_ring_page;
 static uint64_t ep0_ring_phys;
 static void *ep0_ring_virt;
 static int ep0_ring_enqueue = 0;
 static int ep0_ring_ccs = 1;
 
 // Output Device Context (xHCI writes device state here)
-static Page *dev_ctx_page;
+static struct page *dev_ctx_page;
 static uint64_t dev_ctx_phys;
 
 // Control transfer DMA buffer (for Get Descriptor data stage)
-static Page *ctrl_dma_page;
+static struct page *ctrl_dma_page;
 static uint64_t ctrl_dma_phys;
 static void *ctrl_dma_virt;
 
@@ -283,9 +283,9 @@ typedef struct trb {
   uint32_t dword1;
   uint32_t dword2;
   uint32_t dword3;
-} trb_t;
+} trb;
 
-static void cmd_ring_push(trb_t *t) {
+static void cmd_ring_push(trb *t) {
   volatile uint32_t *ring = (volatile uint32_t *)cmd_ring_virt;
   int idx = cmd_ring_enqueue * 4;
   t->dword3 &= ~1;
@@ -305,7 +305,7 @@ static void cmd_ring_push(trb_t *t) {
 
 // Enqueue a TRB on a transfer ring (EP0 or EP1-IN)
 static void xfer_ring_enqueue(volatile uint32_t *ring_virt, int *enqueue,
-                              int *ccs, trb_t *t) {
+                              int *ccs, trb *t) {
   int idx = (*enqueue) * 4;
   t->dword3 &= ~1;
   t->dword3 |= (*ccs & 1);
@@ -360,7 +360,7 @@ static int poll_event(uint32_t *completion_code, uint32_t *slot_id,
 
 // ===================== ISR =====================
 
-static void xhci_isr(trapframe_t *tf) {
+static void xhci_isr(trapframe *tf) {
   // Read IMAN to confirm IP
   uint32_t iman = intr_read(0, XHCI_IMAN);
   if (iman & IMAN_IP) {
@@ -389,7 +389,7 @@ static void xhci_isr(trapframe_t *tf) {
         // Replenish TRB regardless of completion code to keep ring alive
         volatile uint32_t *xfer_ring =
             (volatile uint32_t *)xhci_intrs[0].ring_virt;
-        trb_t norm;
+        trb norm;
         norm.dword0 = (uint32_t)hid_dma_phys;
         norm.dword1 = (uint32_t)(hid_dma_phys >> 32);
         norm.dword2 = 8;
@@ -806,7 +806,7 @@ static void xhci_init_keyboard() {
   int port_speed = (portsc & PORTSC_SPEED_MASK) >> 10;
 
   // ---- Step C: Enable Slot ----
-  trb_t es_trb;
+  trb es_trb;
   es_trb.dword0 = 0;
   es_trb.dword1 = 0;
   es_trb.dword2 = 0;
@@ -845,7 +845,7 @@ static void xhci_init_keyboard() {
   ictx[19] = (uint32_t)(ep0_ring_phys >> 32);
   ictx[22] = 8;
 
-  trb_t addr_trb;
+  trb addr_trb;
   addr_trb.dword0 = (uint32_t)input_ctx_phys;
   addr_trb.dword1 = (uint32_t)(input_ctx_phys >> 32);
   addr_trb.dword2 = 0;
@@ -868,21 +868,21 @@ static void xhci_init_keyboard() {
   // ---- Step E: Get Descriptor (Device Descriptor) ----
   volatile uint32_t *ep0 = (volatile uint32_t *)ep0_ring_virt;
 
-  trb_t setup_trb;
+  trb setup_trb;
   setup_trb.dword0 = 0x01000680;
   setup_trb.dword1 = 0x00120000;
   setup_trb.dword2 = 8;
   setup_trb.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &setup_trb);
 
-  trb_t data_trb;
+  trb data_trb;
   data_trb.dword0 = (uint32_t)ctrl_dma_phys;
   data_trb.dword1 = (uint32_t)(ctrl_dma_phys >> 32);
   data_trb.dword2 = 18;
   data_trb.dword3 = (TRB_DATA_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &data_trb);
 
-  trb_t status_trb;
+  trb status_trb;
   status_trb.dword0 = 0;
   status_trb.dword1 = 0;
   status_trb.dword2 = 0;
@@ -904,21 +904,21 @@ static void xhci_init_keyboard() {
 
   // ---- Step E2: Get Descriptor (Configuration Descriptor) ----
   ep0 = (volatile uint32_t *)ep0_ring_virt;
-  trb_t cfg_setup;
+  trb cfg_setup;
   cfg_setup.dword0 = 0x02000680;
   cfg_setup.dword1 = 0x00400000;
   cfg_setup.dword2 = 8;
   cfg_setup.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &cfg_setup);
 
-  trb_t cfg_data;
+  trb cfg_data;
   cfg_data.dword0 = (uint32_t)ctrl_dma_phys;
   cfg_data.dword1 = (uint32_t)(ctrl_dma_phys >> 32);
   cfg_data.dword2 = 64;
   cfg_data.dword3 = (TRB_DATA_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &cfg_data);
 
-  trb_t cfg_status;
+  trb cfg_status;
   cfg_status.dword0 = 0;
   cfg_status.dword1 = 0;
   cfg_status.dword2 = 0;
@@ -956,14 +956,14 @@ static void xhci_init_keyboard() {
   }
 
   // ---- Step F: Set Protocol (Boot Protocol) ----
-  trb_t sp_setup;
+  trb sp_setup;
   sp_setup.dword0 = 0x00000B21;
   sp_setup.dword1 = 0x00000000;
   sp_setup.dword2 = 8;
   sp_setup.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sp_setup);
 
-  trb_t sp_status;
+  trb sp_status;
   sp_status.dword0 = 0;
   sp_status.dword1 = 0;
   sp_status.dword2 = 0;
@@ -985,14 +985,14 @@ static void xhci_init_keyboard() {
     return;
 
   // ---- Step F2: Set Configuration ----
-  trb_t sc_setup;
+  trb sc_setup;
   sc_setup.dword0 = 0x00010900;
   sc_setup.dword1 = 0x00000000;
   sc_setup.dword2 = 8;
   sc_setup.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
   xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sc_setup);
 
-  trb_t sc_status;
+  trb sc_status;
   sc_status.dword0 = 0;
   sc_status.dword1 = 0;
   sc_status.dword2 = 0;
@@ -1027,7 +1027,7 @@ static void xhci_init_keyboard() {
   ictx[35] = (uint32_t)(xhci_intrs[0].ring_phys >> 32);
   ictx[39] = ep_interval;
 
-  trb_t cfg_trb;
+  trb cfg_trb;
   cfg_trb.dword0 = (uint32_t)input_ctx_phys;
   cfg_trb.dword1 = (uint32_t)(input_ctx_phys >> 32);
   cfg_trb.dword2 = 0;
@@ -1046,7 +1046,7 @@ static void xhci_init_keyboard() {
     return;
 
   // ---- Step H: Start keyboard data transfer ----
-  trb_t norm_trb;
+  trb norm_trb;
   norm_trb.dword0 = (uint32_t)hid_dma_phys;
   norm_trb.dword1 = (uint32_t)(hid_dma_phys >> 32);
   norm_trb.dword2 = 8;

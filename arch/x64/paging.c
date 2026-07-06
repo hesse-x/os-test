@@ -18,8 +18,8 @@
 // so the GDT must be accessed via physical addresses.  smp_init_cpu is
 // called later in the virtual-address phase and uses a separate GDT.
 
-static gdt_entry_t gdt[8];
-static gdt_ptr_t gdt_reg;
+static gdt_entry gdt[8];
+static gdt_ptr gdt_reg;
 
 static void set_gdt_gate(int n, uint32_t base, uint32_t limit, uint8_t access,
                          uint8_t gran) {
@@ -46,7 +46,7 @@ static void set_tss_gate(int n, uint64_t base, uint32_t limit) {
 void reload_cs(void);
 
 // Temporary TSS for the physical-address phase only
-static tss_t boot_tss;
+static struct tss_struct boot_tss;
 
 const uint8_t stack_bottom[8192] __attribute__((aligned(16))) = {0};
 
@@ -60,7 +60,7 @@ __attribute__((no_sanitize("kernel-address"))) void gdt_init() {
                0x00); // user code32 compat (DPL=3, STAR[63:48] base)
   set_gdt_gate(4, 0, 0, 0xF2, 0x00); // user data (DPL=3)
   set_gdt_gate(5, 0, 0, 0xFA, 0x02); // user code64 (DPL=3, L=1)
-  set_tss_gate(6, (uint64_t)&boot_tss, sizeof(tss_t) - 1);
+  set_tss_gate(6, (uint64_t)&boot_tss, sizeof(struct tss_struct) - 1);
 
   gdt_reg.base = (uint64_t)&gdt;
   gdt_reg.limit = sizeof(gdt) - 1;

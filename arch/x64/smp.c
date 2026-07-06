@@ -20,9 +20,9 @@
 
 cpu_local cpu_locals[MAX_CPUS];
 int ncpu = 1;
-gdt_entry_t per_cpu_gdt[MAX_CPUS][8];
-gdt_ptr_t per_cpu_gdtr[MAX_CPUS];
-tss_t per_cpu_tss[MAX_CPUS];
+gdt_entry per_cpu_gdt[MAX_CPUS][8];
+gdt_ptr per_cpu_gdtr[MAX_CPUS];
+struct tss_struct per_cpu_tss[MAX_CPUS];
 uint64_t per_cpu_ist_stack[MAX_CPUS][3]; // IST1=NMI, IST2=DF, IST3=MCE
 
 // Trampoline page at physical 0x8000, mapped via identity map
@@ -40,7 +40,7 @@ uint64_t per_cpu_ist_stack[MAX_CPUS][3]; // IST1=NMI, IST2=DF, IST3=MCE
 extern uint8_t ap_trampoline_start[];
 extern uint8_t ap_trampoline_end[];
 
-static void set_gdt_gate(gdt_entry_t *gdt, int n, uint32_t base, uint32_t limit,
+static void set_gdt_gate(gdt_entry *gdt, int n, uint32_t base, uint32_t limit,
                          uint8_t access, uint8_t gran) {
   gdt[n].limit_low = L16(limit);
   gdt[n].base_low = L16(base);
@@ -50,7 +50,7 @@ static void set_gdt_gate(gdt_entry_t *gdt, int n, uint32_t base, uint32_t limit,
   gdt[n].base_high = (base >> 24) & 0xFF;
 }
 
-static void set_tss_gate(gdt_entry_t *gdt, int n, uint64_t base,
+static void set_tss_gate(gdt_entry *gdt, int n, uint64_t base,
                          uint32_t limit) {
   gdt[n].limit_low = L16(limit);
   gdt[n].base_low = L16(base);
@@ -84,7 +84,7 @@ smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
   }
 
   // Set up per-CPU GDT (8 entries)
-  gdt_entry_t *gdt = per_cpu_gdt[cpu_id];
+  gdt_entry *gdt = per_cpu_gdt[cpu_id];
   set_gdt_gate(gdt, 0, 0, 0, 0, 0);       // null
   set_gdt_gate(gdt, 1, 0, 0, 0x9A, 0x02); // kernel code64 (L=1)
   set_gdt_gate(gdt, 2, 0, 0, 0x92, 0x00); // kernel data
@@ -94,8 +94,8 @@ smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
   set_gdt_gate(gdt, 5, 0, 0, 0xFA, 0x02); // user code64 (DPL=3, L=1)
 
   // Set up per-CPU TSS
-  tss_t *tss = &per_cpu_tss[cpu_id];
-  for (size_t i = 0; i < sizeof(tss_t); i++)
+  struct tss_struct *tss = &per_cpu_tss[cpu_id];
+  for (size_t i = 0; i < sizeof(struct tss_struct); i++)
     ((uint8_t *)tss)[i] = 0;
   tss->rsp0 = kernel_stack;
   tss->iomap_base = 104; // offset of IOPM within TSS (after reserved3)
@@ -105,7 +105,7 @@ smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
 
   // Allocate per-CPU IST stacks (1 page each: NMI, Double Fault, Machine Check)
   for (int i = 0; i < 3; i++) {
-    Page *ist_page = bfc_alloc_page(1);
+    struct page *ist_page = bfc_alloc_page(1);
     if (!ist_page) {
       printk(LOG_ERROR, "smp_init_cpu: IST alloc failed\n");
       halt();
@@ -119,7 +119,7 @@ smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
   tss->ist[1] = per_cpu_ist_stack[cpu_id][1]; // IST2 = Double Fault (#8)
   tss->ist[2] = per_cpu_ist_stack[cpu_id][2]; // IST3 = Machine Check (#18)
 
-  set_tss_gate(gdt, 6, (uint64_t)tss, sizeof(tss_t) - 1);
+  set_tss_gate(gdt, 6, (uint64_t)tss, sizeof(struct tss_struct) - 1);
 
   // Fill GDTR (but don't load it yet)
   per_cpu_gdtr[cpu_id].limit = sizeof(per_cpu_gdt[0]) - 1;
@@ -283,7 +283,7 @@ __attribute__((no_sanitize("kernel-address"))) void smp_boot_aps() {
     uint32_t apic_id = g_madt.apic_ids[i];
 
     // Allocate kernel stack (8KB)
-    Page *stack_pages = bfc_alloc_page(2);
+    struct page *stack_pages = bfc_alloc_page(2);
     if (!stack_pages) {
       ncpu = i;
       break;

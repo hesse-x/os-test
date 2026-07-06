@@ -109,7 +109,7 @@ void fpu_lazy_switch(xtask *t) {
 __attribute__((no_sanitize("kernel-address"))) static void
 resolve_cow_fault(xtask *task, uint64_t *pte, uint64_t fault_addr) {
   uint64_t old_phys = *pte & PTE_PHYS_MASK;
-  Page *old_page = &bfc_frames[PHY_TO_PAGE(old_phys)];
+  struct page *old_page = &bfc_frames[PHY_TO_PAGE(old_phys)];
 
   if (refcount_read(&old_page->p_refcount) == 1) {
     // Only owner: restore write permission without copy
@@ -120,7 +120,7 @@ resolve_cow_fault(xtask *task, uint64_t *pte, uint64_t fault_addr) {
   }
 
   // Shared page: allocate new page and copy content
-  Page *new_page = bfc_alloc_page(1);
+  struct page *new_page = bfc_alloc_page(1);
   if (!new_page) {
     if (force_sig_hook)
       force_sig_hook(task, SIGSEGV, SEGV_MAPERR, (void *)fault_addr);
@@ -142,7 +142,7 @@ resolve_cow_fault(xtask *task, uint64_t *pte, uint64_t fault_addr) {
   invlpg(fault_addr);
 }
 
-void trap_dispatch(trapframe_t *tf) {
+void trap_dispatch(trapframe *tf) {
   get_cpu_local()->cur_tf = tf;
   // Hardware IRQ: check user-space driver binding first
   if (tf->trapno >= 32 && tf->trapno < MAX_IRQ_HANDLERS &&
@@ -423,13 +423,13 @@ void trap_dispatch(trapframe_t *tf) {
 // scheduler_lock), the handler would re-enter schedule() on the same lock ->
 // spin deadlock.  Symptoms: cpu0 timer keeps rising (timer IRQ doesn't need
 // scheduler_lock) but sched count freezes, idle phase=4.
-static void reschedule_ipi_handler(trapframe_t *tf) {
+static void reschedule_ipi_handler(trapframe *tf) {
   (void)tf;
   current_task->need_resched = 1;
   lapic_eoi();
 }
 
-static void timer_handler(trapframe_t *tf) {
+static void timer_handler(trapframe *tf) {
   tick++;
   lapic_eoi();
 
@@ -592,7 +592,7 @@ const char *syscall_name(uint64_t nr) {
   return "bsd_syscall";
 }
 
-void xcall_dispatch(trapframe_t *tf) {
+void xcall_dispatch(trapframe *tf) {
   get_cpu_local()->cur_tf = tf;
   int64_t nr = tf->rax;
 

@@ -25,17 +25,17 @@ typedef struct elf_load_result {
   uint64_t phent;      // PHDR entry size (AT_PHENT)
   // Load base address (used by elf_load_at; 0 for elf_load)
   uint64_t load_base; // actual load base address
-} elf_load_result_t;
+} elf_load_result;
 
 // Load ELF64 static binary into user address space
 // new_pml4: caller-allocated PML4 (kernel entries already copied)
 // Returns entry point and success status
-elf_load_result_t elf_load(const uint8_t *data, uint64_t size,
+elf_load_result elf_load(const uint8_t *data, uint64_t size,
                            uint64_t *new_pml4);
 
 // Base-offset load (for -shared -fPIC images such as ld.so)
 // PT_LOAD segments are mapped to base + p_vaddr
-elf_load_result_t elf_load_at(const uint8_t *data, uint64_t size,
+elf_load_result elf_load_at(const uint8_t *data, uint64_t size,
                               uint64_t *new_pml4, uint64_t base);
 
 #endif // KERNEL_ELF_LOADER_H

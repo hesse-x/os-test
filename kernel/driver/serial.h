@@ -7,7 +7,7 @@
 #ifndef KERNEL_SERIAL_H
 #define KERNEL_SERIAL_H
 
-#include "arch/x64/trap.h" // trapframe_t
+#include "arch/x64/trap.h" // trapframe
 #include "kernel/driver/driver.h"
 #include "kernel/xcore/spinlock.h"
 #include <stdarg.h>
