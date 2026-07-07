@@ -1,3 +1,9 @@
 [submodule "third_party/Unity"]
 	path = third_party/Unity
 	url = https://github.com/ThrowTheSwitch/Unity.git
+[submodule "third_party/drm"]
+	path = third_party/drm
+	url = https://gitlab.com/freedesktop-sdk/mirrors/freedesktop/mesa/drm.git
+[submodule "third_party/libinput"]
+	path = third_party/libinput
+	url = https://gitlab.com/freedesktop-sdk/mirrors/freedesktop/libinput/libinput.git
