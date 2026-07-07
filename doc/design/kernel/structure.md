@@ -34,7 +34,8 @@
 │ BFC/Slab/页表/KASAN  │ fork/execve/waitpid/exit          │
 │ IDT/IRQ/APIC         │ Pipe + dup2/fcntl                 │
 │ spinlock/atomic/rcu  │ setsid/setpgid/getpgid            │
-│ list/printk/panic    │ memfd_create/ftruncate            │
+│ list/printk/panic    │ uid/gid/umask/hostname            │
+│                      │ memfd_create/ftruncate            │
 │──────────────────────│──────────────────────────────────│
 │                 驱动框架层                                │
 │──────────────────────────────────────────────────────────│
@@ -223,11 +224,12 @@ kernel/bsd/
 - sid : pid_t — session ID
 - pgid : pid_t — process group ID
 - ctty : pty* — 控制终端
-- sig.pending : uint64_t — 待处理信号位图
-- sig.blocked : sigset_t — 阻塞信号集
-- sig.action[] : sigaction[NSIG] — 信号处理动作
+- sig_pending : uint64_t — per-task 私有 pending（tgkill/pthread_kill）
+- sig_blocked : sigset_t — per-task 阻塞信号集
 - sig_force_info : siginfo_t — force_sig 临时 siginfo
+- signal : signal_struct* — 线程组共享（shared_pending + action[] + group_exit）
 - files : files_t* — fd 表（引用计数，CLONE_FILES 可共享）
+- uid/euid/gid/egid/umask — POSIX 身份与权限（uint32_t，默认 0/0/0/0/0022，fork 继承）
 
 **file_t**（kernel/bsd/types.h : file_t）
 - f_count : refcount_t — 引用计数
@@ -265,9 +267,10 @@ BSD 层处理的 syscall（通过 bsd_syscall_dispatch_hook 分发）：
 | VFS | open, stat, mkdir, unlink, rmdir, dev_create, getdents, ioctl, fstat |
 | Socket | socket, bind, listen, accept, connect, socketpair, sendmsg, recvmsg, shutdown, poll |
 | 进程 | fork, execve, exit, waitpid, setsid, setpgid, getpgid, getsid |
-| 信号 | kill, sigaction, sigreturn |
+| 进程身份 | getuid, geteuid, getgid, getegid, setuid, setgid, getppid, getpgrp, umask, gethostname, sethostname |
+| 信号 | kill, sigaction, sigreturn, tgkill, sigprocmask, sigpending, alarm, pause |
 | 内存 | mmap, munmap（BSD 入口，调用 Xcore KPI） |
-| 其他 | dma_alloc/free, pci_dev_info, block_async, install_fd, lseek, memfd_create, ftruncate, debug_memstat, fdev_pid |
+| 其他 | dma_alloc/free, pci_dev_info, block_async, install_fd, lseek, memfd_create, ftruncate, truncate, fsync, sync, debug_memstat, fdev_pid |
 
 #### 与其他模块的关系
 

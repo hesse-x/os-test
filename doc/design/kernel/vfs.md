@@ -225,7 +225,7 @@ kernel/fat32.c/h — FAT32 实现；kernel/vfs.c/h — VFS 层；kernel/devtmpfs
 
 | 操作 | 说明 |
 |------|------|
-| fat32_open(path, flags) | 路径解析 → 创建 inode → 安装 fd。O_CREAT/O_TRUNC 在内处理 |
+| fat32_open(path, flags) | 路径解析 → 创建 inode → 安装 fd。O_CREAT/O_TRUNC/O_EXCL 在内处理（O_EXCL：O_CREAT 分支文件已存在时返回 EEXIST） |
 | fat32_read(inode, offset, buf, count) | page cache 查找/填充 → 拷贝到用户 buf |
 | fat32_write(inode, offset, buf, count) | page cache 查找/填充 → 拷贝到 page → mark dirty → 即时写回 |
 | fat32_stat(path) | 路径解析 → 返回 inode 信息 |
@@ -248,16 +248,19 @@ UEFI → stub 读 ESP 加载 myos.elf + init.elf → kernel_main（从 boot_info
 
 | # | 名称 | 说明 |
 |---|------|------|
-| 47 | sys_open | open(path, flags, mode) |
-| 48 | sys_stat | stat(path, &buf) |
-| 49 | sys_mkdir | mkdir(path, mode) |
-| 50 | sys_unlink | unlink(path) |
-| 51 | sys_rmdir | rmdir(path) |
-| 52 | sys_dev_create | dev_create(name, dev_type) — 内核自动填 driver_pid |
-| 53 | sys_getdents | getdents(fd, buf, count) |
-| 54 | sys_ioctl | ioctl(fd, cmd, arg) |
-| 55 | sys_fstat | fstat(fd, &buf) |
-| 56 | sys_fdev_pid | 查询 fd 对应的驱动 PID |
+| 44 | sys_open | open(path, flags, mode) — O_CREAT/O_TRUNC/O_EXCL 在内处理 |
+| 45 | sys_stat | stat(path, &buf) |
+| 46 | sys_mkdir | mkdir(path, mode) |
+| 47 | sys_unlink | unlink(path) |
+| 48 | sys_rmdir | rmdir(path) |
+| 49 | sys_dev_create | dev_create(name, dev_type) — 内核自动填 driver_pid |
+| 50 | sys_getdents | getdents(fd, buf, count) |
+| 51 | sys_ioctl | ioctl(fd, cmd, arg) |
+| 52 | sys_fstat | fstat(fd, &buf) |
+| 53 | sys_fdev_pid | 查询 fd 对应的驱动 PID |
+| 82 | sys_truncate | truncate(path, length) — resolve_path → fat32_ftruncate → inode_put |
+| 83 | sys_fsync | fsync(fd) — 遍历 inode page_cache 脏页写回 + FAT 目录项元数据 |
+| 84 | sys_sync | sync() — page_cache_flush_all 全表 dirty 写回 + 所有 inode 元数据 |
 
 ---
 
@@ -298,4 +301,4 @@ UEFI → stub 读 ESP 加载 myos.elf + init.elf → kernel_main（从 boot_info
 | 通用块设备层 | AHCI 直接调用 → 通用 blk_dev 接口（支持 NVMe 等） | 低 |
 | page cache + mmap 共享 | sys_mmap(FD_REGULAR) 映射 page cache 物理页到用户地址空间，同一文件 read + mmap 共享数据 | 中 |
 | dev_ops->close 签名妥协 | `file_put` FD_DEV 路径传 `current_task` + `fd=-1` 给 `ops->close`；当前 blk_dev_close 不使用参数，安全。未来新设备驱动 close handler 如需 file 信息，改签名为 `int (*close)(struct file *f)` | 低 |
-| chmod/fchmod/umask mode 落盘策略 | FAT32 目录项只有 8-bit attr（只读/隐藏/系统/卷标/子目录/存档），无 Unix rwx 权限位。需定策略：① 仅内存——mode 存 inode cache，stat 返回内存值，重启丢失（推荐短期，零磁盘改动）；② 部分落盘——只读位映射 attr 的 READ_ONLY，其余 rwx 位内存化；③ 扩展目录项——Windows 式隐藏元数据扇区存 Unix mode（违背 FAT 规范，不推荐）。`umask` 接入 open 创建路径（mode & ~umask）。注意 kstat 已含 st_uid/st_gid/st_mode 但 sys_fstat 当前硬编码 uid=gid=0，需改为读 inode 内存值 | 中 |
+| chmod/fchmod/mode 落盘策略 | FAT32 目录项只有 8-bit attr（只读/隐藏/系统/卷标/子目录/存档），无 Unix rwx 权限位。uid/gid/mode 仅存内存 inode cache（sys_fstat 读 inode 内存值，不再硬编码 uid=gid=0）。umask getter/setter 已实现，fat32_open 创建文件时未读取 umask（见待完成项 umask 接入）。落盘策略选项：① 仅内存（当前，零磁盘改动）；② 部分落盘——只读位映射 attr READ_ONLY；③ 扩展目录项（不推荐） | 中 |

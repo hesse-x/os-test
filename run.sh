@@ -10,7 +10,6 @@
 # -s: enable GDB remote debug (off by default)
 # -o <file>: serial output written to the specified file (default log.txt)
 
-LOGFILE=log.txt
 
 while getopts "o:" opt; do
     case $opt in
@@ -19,6 +18,7 @@ while getopts "o:" opt; do
 done
 shift $((OPTIND - 1))
 
+LOGFILE=log.txt
 rm -f /tmp/qemu-serial.sock "$LOGFILE"
 
 SERIAL_OPTS="-chardev socket,id=s0,path=/tmp/qemu-serial.sock,server=on,wait=off,logfile=$LOGFILE -serial chardev:s0 -monitor stdio"
@@ -33,4 +33,4 @@ qemu-system-x86_64 \
     -vga none -device bochs-display -m 512M -bios /usr/share/ovmf/OVMF.fd \
     -smp 2 \
     $SERIAL_OPTS \
-    "$@"
+    $@

@@ -6,7 +6,7 @@
 
 | # | 决策 | 选择 | 理由 |
 |---|------|------|------|
-| 1 | 输出机制 | FILE 缓冲 + write_fn 抽象 | 将来加 sys_write 改 flush 函数即可，printf 不动 |
+| 1 | 输出机制 | FILE 缓冲 + write_fn 抽象 | 改 flush 函数即可适配新输出路径，printf 不动 |
 | 2 | printf 格式 | 实用集（无 %f） | %s/%d/%u/%c/%x/%X/%p/%ld/%lu/%lX/%% + 宽度前缀（%02x），覆盖 OS 调试场景 |
 | 3 | FILE 结构 | fd/buffer/mode/flags/write_fn | 为 read/write 预留，加 sys_read/sys_write 后 FILE 可直接使用 |
 | 4 | libc _start | 提供 | 用户程序写 main() 即可 |
@@ -37,7 +37,7 @@ user/lib/stdio.cc 内部：
 - stdout：fd=1，line-buffered（_IOLBF），静态 buf[1024]，write_fn=sys_putc_flush
 - stderr：fd=2，unbuffered（_IONBF），write_fn=sys_putc_flush
 
-sys_putc_flush：逐字节 sys_putc 输出。将来加 sys_write 后改为 sys_write_flush（一次 syscall 输出整段）。
+sys_putc_flush：逐字节 sys_putc 输出。sys_write_flush（一次 syscall 输出整段）为待完成项。
 
 ### printf / vfprintf
 
@@ -96,12 +96,12 @@ include 路径：-I. -Iuser/include → 自定义头文件优先。宿主机 fre
 | sys_mman | user/lib/sys_mman.cc | mmap/munmap 封装 |
 | sys_irq | user/lib/sys_irq.cc | IRQ 封装 |
 | sys_device | user/lib/sys_device.cc | 设备接口封装 |
-| sys_process | user/lib/sys_process.cc | fork/execve/waitpid 封装 |
+| sys_process | user/lib/sys_process.cc | fork/execve/waitpid/setsid/setpgid/getpgid/getsid/getuid/geteuid/getgid/getegid/setuid/setgid/getppid/getpgrp/umask/gethostname/sethostname |
 | sys_pci | user/lib/sys_pci.cc | PCI 封装 |
-| signal | user/lib/signal.cc | 信号封装 |
+| signal | user/lib/signal.cc | 信号封装（kill/sigaction/sigprocmask/sigpending/raise/signal/alarm/pause） |
 | ctype | user/lib/ctype.c | isdigit/isalpha 等 |
 | strtol | user/lib/strtol.c | strtol/atoi |
-| stdlib_misc | user/lib/stdlib_misc.c | exit/abort 等 |
+| stdlib_misc | user/lib/stdlib_misc.c | exit/abort/mkstemp/mktemp/realpath/qsort/rand/srand 等 |
 | uname | user/lib/uname.c | uname |
 | sleep | user/lib/sleep.c | sleep/usleep |
 | assert | user/lib/assert.c | assert |

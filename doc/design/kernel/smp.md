@@ -30,7 +30,7 @@ arch/x64/smp.h : cpu_local_t
 字段：
 - cpu_id : int — 本 CPU 编号（0 = BSP）
 - apic_id : uint32_t — LAPIC ID
-- _cur_proc : proc_t* — 替代全局 current_proc（宏 current_proc 访问此字段）
+- _cur_proc : xtask* — 替代全局 current_proc（宏 current_xtask 访问此字段，current_proc 通过 current_xtask->proc 获取 BSD 层 proc*）
 - lapic_base : uint64_t — LAPIC MMIO 基地址
 - kernel_stack : uint64_t — 本 CPU 内核栈顶
 - tss_rsp0 : uint64_t — 本 CPU TSS 的 RSP0（schedule() 更新，syscall 入口通过 %gs:32 读取）
@@ -116,12 +116,12 @@ arch/x64/smp.h : spinlock_t — volatile uint32_t locked，spin_lock 用 atomic_
 | 锁名称 | 类型 | 保护范围 | 获取顺序 |
 |---------|------|---------|---------|
 | scheduler_lock | per-CPU spinlock | schedule() 和运行队列（irqsave） | 1 |
-| procs_lock | 全局 spinlock | procs[] 进程表 | 2 |
+| tasks_lock | 全局 spinlock | tasks[] 进程表 | 2 |
 | bfc_lock | 全局 spinlock | BFC 分配器 free_list | 3 |
 | fb_lock | 全局 spinlock | framebuffer cursor + 缓冲区 | — |
 | slab per-cache lock | per-cache spinlock | slab partial list | — |
 
-锁获取顺序声明：scheduler_lock → procs_lock → bfc_lock。违反此顺序可能导致死锁。详见 [kernel_lock.md](kernel_lock.md)。
+锁获取顺序声明：scheduler_lock → tasks_lock → bfc_lock。违反此顺序可能导致死锁。详见 [kernel_lock.md](kernel_lock.md)。
 
 ### reschedule IPI
 
@@ -158,11 +158,11 @@ arch/x64/smp.h : spinlock_t — volatile uint32_t locked，spin_lock 用 atomic_
 - SMP 初始化：arch/x64/smp.cc : smp_boot_aps / smp_init_cpu / ap_entry_c / smp_apply_cpu
 - APIC：arch/x64/apic.cc : LAPIC/I/O APIC 配置 + Timer 校准
 - Per-CPU 数据：arch/x64/smp.h : cpu_local_t
-- IDT 加载：kernel/trap.cc : idt_install
-- idle 进程创建：kernel/proc.cc : init_ap_idle
+- IDT 加载：kernel/xcore/trap.c : idt_install
+- idle 进程创建：kernel/xcore/sched.c : init_ap_idle
 - IST 栈分配：arch/x64/smp.cc : smp_init_cpu() IST 部分
 - IST 全局数据：arch/x64/smp.h : per_cpu_ist_stack
-- IDT IST 配置：kernel/trap.cc : idt_install() IST 参数
+- IDT IST 配置：kernel/xcore/trap.c : idt_install() IST 参数
 
 ## 待完成项
 

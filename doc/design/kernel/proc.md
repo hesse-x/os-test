@@ -36,10 +36,16 @@ task_t（kernel/proc.h : task_t）— 调度实体，动态分配自 `xtask_cach
   recv_lock : spinlock_t — recv 队列保护
   req_caller_pid / msg_caller_pid : pid_t — REQ/MSG 状态
   cpu_time_ns / last_sched : uint64_t — CPU 时间记账
-  sig : signal_state — 信号子系统（pending/blocked/action[]）
+  sig_pending : uint64_t — per-task 私有 pending（tgkill/pthread_kill 目标）
+  sig_blocked : sigset_t — per-task 阻塞掩码
   sig_force_info : siginfo_t — force_sig 临时数据
+  signal : signal_struct* — 线程组共享（shared_pending/action[]/group_exit；fork 独立拷贝，CLONE_SIGHAND ref++）
+  alarm_deadline : uint64_t — alarm 超时（0=无，else sched_clock() ns 绝对值，放 xtask 供 timer handler 直接访问）
   sid / pgid : pid_t — session / process group（job control 预留）
   ctty : pty* — 控制终端（NULL = none）
+  uid/euid/gid/egid/umask — POSIX 身份与权限（uint32_t，默认 0/0/0/0/0022，fork 继承）
+
+sizeof(proc)=256（STATIC_ASSERT 验证，kernel/driver/bsd_types.h 需 byte-identical 镜像；files 偏移锁定 offsetof=184）
 
 mm_t（kernel/proc.h : mm_t）— 地址空间，kmalloc 分配，独立引用计数
   cr3 : uint64_t — 权威 PML4 物理地址
@@ -140,7 +146,7 @@ if (child->state == STOPPED && !child->stop_reported &&
 5. 分配新内核栈，拷贝父进程 trapframe（rax=0 表示子进程返回值）
 6. 设置 mm->parent_pid = current->pid，child->tgid = child->pid
 7. 拷贝信号状态（blocked/action），清空 pending
-8. 拷贝 sid/pgid/ctty
+8. 拷贝 sid/pgid/ctty/uid/euid/gid/egid/umask
 9. 入队调度（scheduler_lock 保护）
 10. 父进程返回子 PID，子进程返回 0
 
@@ -211,7 +217,7 @@ fork:
 - 调度器：task_t.run_node 嵌入 per-CPU run_queue，详见 [schedule.md](schedule.md)
 - IPC：recv 队列 / REQ / MSG 状态在 task_t 中，详见 [ipc.md](ipc.md)
 - PTY：task_t.sid/pgid/ctty 用于 session/job control，详见 [terminal.md](terminal.md)
-- 信号：task_t.sig 嵌入 signal_state，详见 ipc.md 信号章节
+- 信号：proc 的 sig_pending/sig_blocked/signal 详见 ipc.md 信号章节
 - VFS：files_t.fd_table 通过 fd 管理文件/pipe/socket/tty，详见 [vfs.md](vfs.md)
 
 ### 系统调用

@@ -53,9 +53,11 @@
   req_target_pid : pid_t — 崩溃清理用
   msg_reply_buf : void* / msg_reply_len : size_t
   msg_caller_pid : pid_t（-1 = 无） / msg_result : int32_t / msg_target_pid : pid_t
-  sig : signal_state — 信号子系统（pending/blocked/action[]）
+  sig_pending : uint64_t / sig_blocked : sigset_t — per-task 信号（私有 pending + 阻塞掩码）
   sig_force_info : siginfo_t — force_sig 同步信号信息
+  alarm_deadline : uint64_t — alarm 超时（0=无，else sched_clock() ns 绝对值，timer_handler 每 tick 内联扫描）
   sid : pid_t / pgid : pid_t / ctty : pty* — 会话/进程组/控制终端
+  uid/euid/gid/egid/umask — POSIX 身份与权限（uint32_t，默认 0/0/0/0/0022，fork 继承；在 bsd_proc_t 中，Xcore 不解读）
 
 **mm_t**（kernel/proc.h : mm_t）
   cr3 : uint64_t — PML4 物理地址
@@ -268,7 +270,7 @@ IPI handler / timer handler
 
 ## 调试
 
-调度器卡死/抢占类问题的诊断手法（单字符进度链定位 idle_entry 阶段、per-CPU timer/sched 计数区分"本核哑火 vs 全局停摆"、preempt-stall watchdog 把"need_resched 被绕过"变成自动告警、持锁遍历验证"在队列里"）见 `doc/design/debug.md`。已实装的 preempt-stall watchdog 在 `kernel/xcore/trap.c` timer_handler，`#ifndef NDEBUG` 门控。
+调度器卡死/抢占类问题的诊断手法详见 [debug.md](../debug.md)。已实装的 preempt-stall watchdog 在 `kernel/xcore/trap.c` timer_handler，`#ifndef NDEBUG` 门控。
 
 ## 待完成项
 

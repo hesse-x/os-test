@@ -103,15 +103,13 @@ fork 修改父进程 RW PTE 为只读+COW 后，必须刷新 TLB（当前用 `lo
 
 **COW Page Fault Handler**：
 
-trap_dispatch #PF 判断逻辑：
+trap_dispatch #PF 判断逻辑（实现：kernel/xcore/trap.c : trap_dispatch）：
 
-```
-is_user && is_present && is_write && PTE_COW → resolve_cow_fault
-is_user && is_present && is_write && !PTE_COW → SIGSEGV SEGV_ACCERR
-is_user && !is_present → SIGSEGV SEGV_MAPERR
-!is_user && is_present && is_write && PTE_COW → resolve_cow_fault (内核态 COW)
-!is_user && other → panic
-```
+- is_user && is_present && is_write && PTE_COW → resolve_cow_fault
+- is_user && is_present && is_write && !PTE_COW → SIGSEGV SEGV_ACCERR
+- is_user && !is_present → SIGSEGV SEGV_MAPERR
+- !is_user && is_present && is_write && PTE_COW → resolve_cow_fault (内核态 COW)
+- !is_user && other → panic
 
 resolve_cow_fault 逻辑：
 
@@ -147,15 +145,15 @@ resolve_cow_fault 逻辑：
 
 ### 关键源码位置
 
-- 页表构建：arch/x64/paging.cc : enable_paging / extend_mapping / gdt_init
+- 页表构建：arch/x64/paging.c : enable_paging / extend_mapping / gdt_init
 - 内核入口：arch/x64/start.S : _start / _entry64
-- 用户页映射：kernel/mem/user_mapping.cc : ensure_pd / ensure_pt / map_user_page_direct / map_user_pages / unmap_user_pages
+- 用户页映射：kernel/xcore/mem/user_mapping.c : ensure_pd / ensure_pt / map_user_page_direct / map_user_pages / unmap_user_pages
 - 常量定义：arch/x64/memlayout.h
-- NX 启用：arch/x64/paging.cc : enable_nx
+- NX 启用：arch/x64/paging.c : enable_nx
 - AP trampoline NXE：arch/x64/ap_trampoline.S
-- COW 页拷贝：kernel/mem/user_mapping.c : copy_page_table（COW 共享 + 父 PTE 修改）
-- COW fault handler：kernel/trap.c : trap_dispatch #PF + resolve_cow_fault
-- 物理页 refcount：kernel/atomic.h : refcount_t / kernel/mem/alloc.h : Page.p_refcount
+- COW 页拷贝：kernel/xcore/mem/user_mapping.c : copy_page_table（COW 共享 + 父 PTE 修改）
+- COW fault handler：kernel/xcore/trap.c : trap_dispatch #PF + resolve_cow_fault
+- 物理页 refcount：kernel/xcore/atomic.h : refcount_t / kernel/xcore/mem/alloc.h : Page.p_refcount
 - PTE 标志：arch/x64/paging.h : PTE_PRESENT / PTE_RW / PTE_USER / PTE_PS / PTE_COW / PTE_NX
 
 ## 待完成项

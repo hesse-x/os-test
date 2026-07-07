@@ -1020,9 +1020,12 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
   child->proc = child_bp;
   child_bp->xtask = child;
+  struct files *deferred_files = NULL; // CLONE_FILES: defer files_put outside
+                                       // tasks_lock (files_put→synchronize_rcu
+                                       // under tasks_lock deadlocks with
+                                       // do_exit spinning on tasks_lock)
   if (flags & CLONE_FILES) {
-    files_put(
-        child_bp->files); // release the default one created by proc_create
+    deferred_files = child_bp->files;
     child_bp->files = parent->proc->files;
     refcount_inc(&child_bp->files->f_count);
   } else {
@@ -1138,6 +1141,14 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
 
   spin_unlock(&tasks_lock);
+
+  // Deferred CLONE_FILES cleanup: release the default files created by
+  // proc_create. Must be outside tasks_lock because files_put calls
+  // synchronize_rcu, which waits for all CPUs to reach quiescence. Under
+  // tasks_lock, a thread on another CPU spinning on tasks_lock (e.g. do_exit)
+  // cannot reach quiescence → RCU stall deadlock.
+  if (deferred_files)
+    files_put(deferred_files);
 
   // 11. Enqueue to scheduler
   int cpu = child->assigned_cpu;

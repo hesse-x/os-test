@@ -464,20 +464,7 @@ fd_table 中 FD_SHM(=6) 类型指向 struct shm。
 
 ### shm_put 统一释放
 
-删除 `SHM_KERNEL` 标志后，统一用 page_list 释放路径：
-
-```c
-void shm_put(struct shm *shm) {
-    if (refcount_dec_and_test(&shm->s_count)) {
-        if (shm->page_list) {
-            for (int i = 0; i < shm->num_pages; i++)
-                bfc_free_page(shm->page_list[i]);
-            kfree(shm->page_list);
-        }
-        kfree(shm);
-    }
-}
-```
+删除 `SHM_KERNEL` 标志后，统一用 page_list 释放路径：refcount_dec_and_test 归零时逐页 bfc_free_page(page_list[i]) → kfree(page_list) → kfree(shm)。实现：kernel/bsd/types.h : shm_put
 
 ### 内核 SHM（USB HID）注册方式
 
@@ -543,7 +530,9 @@ seal 一经设置不可撤销。
 | force_sig | ✅ | 同步信号绕过 SIG_IGN（避免故障指令无限重入） |
 | SIGCHLD | ✅ | 替代 sys_exit 中 RECV_NOTIFY 子进程退出通知 |
 | sys_kill pgid | ✅ | pid>0 单进程，pid==0 同 pgid，pid<-1 进程组 -pid |
-| sys_sigprocmask | ❌ 不做 | blocked 初始为 0，仅内核在信号投递/sigreturn 时修改 |
+| sys_sigprocmask | ✅ | syscall #67，用户显式控制信号阻塞掩码（SIG_BLOCK/SIG_UNBLOCK/SIG_SETMASK） |
+| sys_sigpending | ✅ | syscall #85，返回未决信号集（per-task ∪ shared，不滤 blocked） |
+| sys_alarm/sys_pause | ✅ | syscall #80/#81，定时 SIGALRM + 可中断睡眠，详见 [posix.md](posix.md) alarm/pause 章节 |
 | SA_RESTART | ❌ 不做 | EINTR 后由用户态 libc 或应用决定是否重启 |
 | sigaltstack | ❌ 不做 | handler 在用户栈上执行 |
 | SIGPIPE | ❌ 不做 | 保持现有 -EPIPE 返回值 |
@@ -580,10 +569,11 @@ ucontext_t — uc_flags + uc_link(NULL) + uc_sigmask + uc_mcontext(sigcontext)
 siginfo_t — si_signo + si_errno(清零) + si_code(SI_USER/SI_KERNEL/SI_QUEUE) + union(_kill: si_pid/si_uid, si_addr: SIGSEGV 崩溃地址)
 rt_sigframe — pretcode(SIG_TRAMPOLINE_ADDR) + info + uc
 
-**signal_state**（task_t 内嵌）
-  pending : uint64_t — bitmask
-  blocked : sigset_t — 当前阻塞信号集
-  action[NSIG] : sigaction — per-signal handler 注册
+**信号字段**（proc 内嵌，不是独立 signal_state struct）：
+  sig_pending : uint64_t — per-task 私有 pending（tgkill/pthread_kill）
+  sig_blocked : sigset_t — per-task 阻塞掩码
+  sig_force_info : siginfo_t — force_sig 临时数据
+  signal : signal_struct* — 线程组共享（shared_pending + action[] + group_exit + parent_pid，见 signal.h）
 
 **vdso sigreturn trampoline**：固定映射到 SIG_TRAMPOLINE_ADDR=0x50000000，内容为 `mov rax, SYS_SIGRETURN; syscall`。每个进程创建时映射同一物理页。
 
@@ -672,70 +662,15 @@ trap_dispatch 中 `tf->cs == USER_CS` 时调 force_sig，不杀进程，由 chec
 
 # syscall 编号总表
 
-| # | 名称 | 说明 |
-|---|------|------|
-| 0 | sys_getpid | 返回当前 PID |
-| 1 | sys_yield | 让出 CPU |
-| 2 | sys_recv | 统一事件接收 |
-| 3 | sys_req | 同步内联请求（≤56B） |
-| 4 | sys_resp | 回复当前 req 调用者 |
-| 5 | sys_irq_bind | 绑定 IRQ |
-| 6 | sys_exit | 退出进程 |
-| 7 | sys_waitpid | 等待子进程 |
-| 8 | sys_mmap | 内存映射（匿名/SHM/设备/物理） |
-| 9 | sys_munmap | 解除映射 |
-| 10 | sys_pipe | 创建管道 |
-| 11 | sys_write | 写 fd |
-| 12 | sys_read | 读 fd |
-| 13 | sys_close | 关闭 fd |
-| 14 | sys_notify | 异步通知 |
-| 15 | sys_gettime | 全局单调时钟 |
-| 16 | sys_clock | per-process CPU 时间 |
-| 17 | sys_msg | 同步变长消息（≤64KB） |
-| 18 | sys_msg_resp | 回复当前 msg 调用者 |
-| 19 | sys_ioperm | I/O 端口权限 |
-| 20 | sys_dup2 | 复制 fd |
-| 21 | sys_fcntl | 文件控制 |
-| 22 | sys_dma_alloc | DMA 分配 |
-| 23 | sys_dma_free | 释放 DMA |
-| 24 | sys_pci_dev_info | PCI 设备信息 |
-| 25 | sys_block_async | 异步块 I/O |
-| 26 | sys_install_fd | 注册 FD_FILE fd |
-| 27 | sys_socket | socket |
-| 28 | sys_bind | bind |
-| 29 | sys_listen | listen |
-| 30 | sys_accept | accept |
-| 31 | sys_connect | connect |
-| 32 | sys_socketpair | socketpair |
-| 33 | sys_sendmsg | sendmsg |
-| 34 | sys_recvmsg | recvmsg |
-| 35 | sys_shutdown | shutdown |
-| 36 | sys_poll | poll |
-| 37 | sys_lseek | 文件偏移设置 |
-| 38 | sys_memfd_create | 创建 memfd |
-| 39 | sys_ftruncate | 截断文件 |
-| 40 | sys_kill | 发送信号 |
-| 41 | sys_sigaction | 注册信号 handler |
-| 42 | sys_sigreturn | 信号返回 |
-| 43 | sys_debug_print | 内核调试打印 |
-| 44 | sys_open | 打开文件 |
-| 45 | sys_stat | 获取文件状态 |
-| 46 | sys_mkdir | 创建目录 |
-| 47 | sys_unlink | 删除文件 |
-| 48 | sys_rmdir | 删除目录 |
-| 49 | sys_dev_create | 创建设备节点（含 shm_fd） |
-| 50 | sys_getdents | 读取目录项 |
-| 51 | sys_ioctl | 设备控制 |
-| 52 | sys_fstat | 基于 fd 获取文件状态 |
-| 53 | sys_fdev_pid | 获取设备驱动 PID |
-| 54 | sys_fork | fork |
-| 55 | sys_execve | execve |
-| 56 | sys_setsid | 创建新会话 |
-| 57 | sys_setpgid | 设置进程组 |
-| 58 | sys_getpgid | 获取进程组 |
-| 59 | sys_getsid | 获取会话 ID |
+NR_SYSCALL=86（编号 0-85 连续）。完整编号表见 [syscall.md](syscall.md) 当前架构设计的 syscall_dispatch 表和 [posix.md](posix.md) Syscall 编号表。IPC 相关 syscall 分布：
 
-NR_SYSCALL = 60。
+| 区间 | 类别 |
+|------|------|
+| 0-19 | Xcore 层（调度/IPC/内存/设备） |
+| 20-26 | fd 操作 + DMA + PCI |
+| 27-36 | AF_UNIX socket 系列 |
+| 40-42, 67, 85 | 信号（kill/sigaction/sigreturn/sigprocmask/sigpending） |
+| 80-81 | alarm/pause（信号驱动定时/可中断睡眠） |
 
 ## 待完成项
 
@@ -746,7 +681,6 @@ NR_SYSCALL = 60。
 | sys_msg/sys_msg_resp 废弃 | FD_FILE 消除后，sys_msg 仅剩用户消失，届时可删除 | 低 |
 | MSG_CTRUNC 标志 | recvmsg 在 controllen 不够时应设 msg_flags |= MSG_CTRUNC，当前仅设 *controllen = 0 | 低 |
 | ftruncate + mmap 可见性 | 已 mmap 的 SHM 区域在 ftruncate 扩大后，新页对已映射地址空间不可见（需刷新页表） | 中 |
-| sys_sigprocmask | 用户显式控制信号阻塞掩码 | 低 |
 | SA_RESTART | libc 自动重启被中断 syscall | 低 |
 | SIGPIPE | 写已关闭 socket 时发送 SIGPIPE | 低 |
 | 作业控制 | SIGTSTP/Ctrl+Z, fg/bg（需 session + PTY） | 低 |

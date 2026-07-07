@@ -18,7 +18,7 @@
 - arch/x64/utils.h : `rdtsc64()` — TSC 读取内联函数
 - arch/x64/apic.c : `tsc_freq` / `tsc_per_ms` — TSC 校准值（PIT 10ms 窗口校准）
 - arch/x64/apic.c : `sched_clock()` — 返回自启动以来的纳秒数
-- kernel/proc.c : `timer_queue_insert` / `timer_queue_remove` — 按 wait_deadline 升序排列的定时等待队列（per-CPU）
+- kernel/xcore/sched.c : `timer_queue_insert` / `timer_queue_remove` — 按 wait_deadline 升序排列的定时等待队列（per-CPU）
 
 ### sys_recv(timeout_ms)
 
@@ -27,7 +27,7 @@
 - timeout_ms>0：设 `wait_deadline = sched_clock() + timeout_ms * 1000000`，插入定时队列
 - 返回：0=成功收到消息，超时返回空消息（recv_head == recv_tail）
 
-task_t 新增字段（kernel/proc.h : task_t）：
+xtask_t 新增字段（kernel/xcore/xtask.h : xtask_t）：
   wait_deadline : uint64_t — sched_clock() 纳秒截止时间，0=无限等待
   wait_timed_out : uint8_t — 1=超时唤醒，0=notify 唤醒
 
