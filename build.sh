@@ -2,6 +2,9 @@
 # build.sh - CMake builds kernel + EFI bootloader + userspace ELF + generates image
 set -e
 
+# Configure git hooks path so pre-push check works out of the box
+git config core.hooksPath build_script/githooks
+
 # Build type: default Release, -d for Debug (with -g debug info)
 BUILD_TYPE=Release
 CMAKE_EXTRA=""

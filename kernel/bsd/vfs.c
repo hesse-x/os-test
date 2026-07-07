@@ -13,6 +13,7 @@
 #include "kernel/bsd/page_cache.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/pty.h"
+#include "kernel/bsd/syscall.h"
 #include "kernel/bsd/types.h"
 #include "kernel/driver/ahci.h"
 #include "kernel/driver/blk_dev.h"
@@ -201,7 +202,14 @@ int64_t sys_fsync(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 }
 
 /* sys_sync() — SYS_SYNC (group 3): write back all dirty pages. */
-int64_t sys_sync(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+int64_t sys_sync(int64_t unused1, int64_t unused2, int64_t unused3,
+                 int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   page_cache_flush_all();
   return 0;
 }

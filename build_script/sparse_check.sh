@@ -118,6 +118,8 @@ if [ "$CHECK_MODE" = "incremental" ]; then
     if [ ${#KERNEL_SOURCES[@]} -eq 0 ]; then
         echo "No changed kernel .c files vs $BASE — sparse step skipped."
         SPARSE_SKIPPED=1
+    else
+        SPARSE_SKIPPED=0
     fi
 else
     KERNEL_SOURCES=("${ALL_KERNEL_SOURCES[@]}")

@@ -90,15 +90,16 @@ void test_dev_vfs_serial_write(void) {
   }
 }
 
-/* 6. Serial read via dev_ops.read callback (non-blocking, empty → EAGAIN) */
+/* 6. Serial read is unsupported (serial input removed) → -1/ENOSYS */
 void test_dev_vfs_serial_read_nonblock(void) {
   int fd = open("/dev/serial", O_RDWR | O_NONBLOCK);
   if (fd >= 0) {
     char buf[1];
     ssize_t r = read(fd, buf, 1);
-    /* No data available → EAGAIN (ring buffer empty) */
-    TEST_ASSERT_TRUE(r < 0);
-    TEST_ASSERT_EQUAL_INT(EAGAIN, errno);
+    /* Serial input was removed (RX ring/ISR/read deleted), so dev_ops.read
+     * is NULL and sys_read returns -ENOSYS. */
+    TEST_ASSERT_EQUAL_INT(-1, (int)r);
+    TEST_ASSERT_EQUAL_INT(ENOSYS, errno);
     close(fd);
   } else {
     TEST_ASSERT_TRUE(1);
@@ -395,11 +396,11 @@ void test_dev_vfs_fcntl_setfl(void) {
   int flags = fcntl(fd, F_GETFL);
   TEST_ASSERT_TRUE(flags & O_NONBLOCK);
 
-  /* Non-blocking read on empty buffer → EAGAIN */
+  /* Serial input was removed (dev_ops.read is NULL) → read returns ENOSYS */
   char buf[1];
   ssize_t rr = read(fd, buf, 1);
-  TEST_ASSERT_TRUE(rr < 0);
-  TEST_ASSERT_EQUAL_INT(EAGAIN, errno);
+  TEST_ASSERT_EQUAL_INT(-1, (int)rr);
+  TEST_ASSERT_EQUAL_INT(ENOSYS, errno);
 
   close(fd);
 }

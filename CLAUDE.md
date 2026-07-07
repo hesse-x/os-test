@@ -25,30 +25,60 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 构建与运行
 
 ```bash
-./build.sh          # 编译内核 + EFI bootloader + 用户态 ELF + disk.img（单盘两分区）
-./build.sh -d       # Debug 模式（-g -fno-omit-frame-pointer，异常时栈回溯）
-./build.sh --test   # 测试构建（Unity 测试 ELF + test_runner）
-./run.sh            # QEMU 启动（串口输出→log.txt，串口输入需 socat 连接）
-./run.sh -s         # QEMU + GDB 远程调试服务器
+./build.sh                  # 编译内核 + EFI bootloader + 用户态 ELF + disk.img（Release）
+./build.sh -d               # Debug 模式（-g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG）
+./build.sh --test           # 测试构建（Unity 测试 ELF → disk.img 含 /test/ 目录）
+./build.sh --sanitizer      # KASAN sanitizer 构建（-DSANITIZE=1，内核内存错误检测）
+./build.sh --perf           # 性能计数构建（-DPERF=1）
+./run.sh                     # QEMU 启动（串口→log.txt, -monitor:stdio 可 sendkey 注入键盘）
+./run.sh -s                  # QEMU + GDB 远程调试服务器（端口 1234, gdb → target remote :1234）
+./check.sh                   # 检查脚本（incremental vs origin/master: sparse + iwyu + clang-format + clang-tidy）
+./check.sh --all             # 全量检查（所有源文件，非增量）
+./check.sh --filter iwyu     # 只跑 iwyu 检查
+./check.sh --filter sparse,clang-format   # 只跑 sparse + clang-format
 ```
 
-构建体系为 CMake + 自定义链接脚本。详见 `doc/design/cmake.md`。
+- `./check.sh` 无 `--filter` 会尝试跑 clang-tidy（该脚本不存在），需用 `./check.sh --filter sparse,iwyu,clang-format` 只跑已实现的检查
+
+**测试运行**：测试是动态 ELF（`add_user_dyn_elf`），由 `test_runner.elf`（用户态进程）逐个 `spawn` + `waitpid`。`--test` 构建后 `test_runner.elf` 写入 disk.img `/test/` 目录；在 OS 上执行 `/test/test_runner.elf` 即可运行全部 22 项测试。单测可单独 `spawn`，如 `spawn("/test/pipe.elf")`。`--test` 构建时 `#define TEST` 传递到 shell（`user/shell/shell.cc`），shell 启动前先 fork+execve `/test/test_runner.elf` 运行全部测试。
+
+**GDB 调试**：`./run.sh -s` 启动 QEMU + GDB server；宿主机 `gdb build/myos.elf` → `target remote :1234` 连接。断点、单步、栈回溯均可。详见 `doc/design/debug.md`。
 
 **磁盘布局**：disk.img（192MB），单盘两分区：分区1=ESP(FAT16, LBA 2048 起, 32MB，放 BOOTX64.EFI/myos.elf/init.elf)，分区2=根(FAT32, LBA 67648 起)。stub 把 init.elf 读进内存传给内核（initrd-style），内核不再用裸 LBA slot。详见 `doc/design/vfs.md`。
 
+**libc 双产物**：libc.a（静态）与 libc.so（动态）同源构建，`#if DYNAMIC` 编译期分流。libc.so 使用 `libc.map` 版本脚本控制导出符号（`LIBC_EXPORT` 标注 + `verify_libc_exports.sh` 校验）。动态 ELF 通过 ld.so 加载 libc.so（`PT_INTERP` → `/lib/ld.so`）。详见 `doc/design/ld.md`。
+
 **重要：** `add_library(OBJECT)` 不能设置 `POSITION_INDEPENDENT_CODE ON`，否则加 `-fPIC` 破坏 RIP-relative 寻址。
 
-**添加新内核源文件：** `add_kernel_object(lib_name SOURCES ... ASM_SOURCES ...)`
+**添加新内核源文件：** `add_kernel_object(lib_name SOURCES ... ASM_SOURCES ...)`，自动加 `-mno-sse -mno-sse2 -mno-mmx`、`__KERNEL__` 定义、`POSITION_INDEPENDENT_CODE OFF`
 
-**添加新用户态 ELF：** `add_user_elf(name [C] SOURCES ... [LINK_LIBS ...])`，`C` 标记表示用 C 编译器，`LINK_LIBS` 声明依赖库（如 `c` 即 libc.a）。
+**添加新静态用户态 ELF：** `add_user_elf(name [C] SOURCES ... [LINK_LIBS ...] [DEFS ...])`，`C` 标记表示用 C 编译器，`LINK_LIBS` 声明依赖库（如 `c` 即 libc.a），`DEFS` 添加编译定义
+
+**添加新动态用户态 ELF：** `add_user_dyn_elf(name [C] SOURCES ... [LINK_LIBS ...] [DEFS ...])`，链接 libc.so + crt0.o，产物为动态 ELF（DT_NEEDED libc.so）
+
+**添加 ld.so 组件：** `add_user_ldso(name SOURCES ...)`，`-fPIC -fvisibility=hidden -shared`，自带 minilibc 不链接 libc.a
+
+**添加用户态库：** `add_user_lib(name [C] [SHARED] SOURCES ... [FLAGS ...] [OUTPUT_NAME ...])`，无 `SHARED` → `add_library(STATIC)`（libc.a）；有 `SHARED` → gcc -shared -fPIC 自定义命令（libc.so + libc.map 版本脚本）
 
 ## 启动流程
 
 ```
-UEFI → BOOTX64.EFI → 加载 myos.elf → ExitBootServices → _start(物理地址) → enable_paging → kernel_main（VFS/FAT32初始化）→ 用户进程
+UEFI → BOOTX64.EFI → 加载 myos.elf + init.elf 到内存 → ExitBootServices → _start(物理地址) → enable_paging → kernel_main → init 进程（从内存加载 init.elf）
 ```
 
 详见 `doc/design/boot.md`。
+
+## 内核初始化顺序
+
+`kernel_main` 按以下顺序初始化（不可乱序）：
+
+1. **Xcore** (`xcore_init`)：serial_init（跨层例外，driver 层函数在 xcore 阶段调用以使 printk 可用）→ boot_info → bump/BFC/slab 分配器 → ACPI → IDT/IRQ → KASAN → sched (含 lazy RCU) → SMP (AP 启动)
+2. **VFS 数据结构**：`inode_init()` → `page_cache_init()` → `devtmpfs_init()` — 直接在 `kernel_main` 中调用（不在 `bsd_init` 中），因为 driver_init 需要 `devtmpfs_create()` 注册设备
+3. **Driver** (`driver_init`)：PCI ECAM → 注册四个内置驱动（ahci/xhci/display/serial）→ PCI auto-match → 设 `timer_poll_hook = xhci_poll`
+4. **BSD** (`bsd_init`)：`vfs_init`（FAT32 mount）→ futex 表 → 注册七个 BSD hook（`signal_check_hook`/`reap_hook`/`proc_reap_hook`/`devtmpfs_cleanup_hook`/`syscall_dispatch_hook`/`signal_pending_hook`/`force_sig_hook`）
+5. **init 进程**：从 `bi->init_elf_addr` 内存加载（EFI stub 预加载，非磁盘/AHCI 读取），因为此时才刚 mount FAT32
+
+Xcore→BSD 通过 hook 函数指针通信（BSD 注册，Xcore 调用，NULL 默认值保证 boot 早期安全）。调用方向：BSD→Xcore 单向（via `kpi.h`），Driver→Xcore+BSD 单向，Xcore 不回调上层。Xcore 唯一跨层例外是 `serial_init()`（通过 `kernel/xcore/serial_hook.h` 声明桥接）。
 
 ## 目录结构
 
@@ -91,6 +121,7 @@ kernel/
     xtask.h              — xtask_t 定义（PCB）、bsd_proc 前向声明
     proc.c               — create_process (ELF 加载+调度入队)
     trap.c / trap.h      — trap_dispatch + syscall_dispatch + IRQ注册表 + BSD hook 调用点
+    serial_hook.h         — serial_init 声明（xcore 跨层调用 driver 函数的唯一例外）
     ipc.c                — IPC 原语实现（sys_recv/req/resp/msg/msg_to）
     kpi.h                — Xcore KPI 导出声明
     log.c / log.h        — printk/panic/dump_stack_trace/BUG_ON/WARN_ON/ASSERT
@@ -111,7 +142,7 @@ kernel/
     CMakeLists.txt
     init.c               — bsd_init（vfs_init, hook 注册）
     proc.c / proc.h      — bsd_proc_t, files_t, sys_fork, sys_execve, bsd_proc_reap
-    syscall.c / syscall.h — BSD syscall 分发（60个 syscall）
+    syscall.c / syscall.h — BSD syscall 分发（86个 syscall，slot 20-85）
     types.h              — fd/pipe/shm/mm/file/files_t 类型定义
     signal.c             — 信号处理（force_sig, check_pending_signals）
     vfs.c / vfs.h        — VFS 层（sys_open/sys_stat/sys_mkdir/sys_unlink/sys_rmdir/sys_dev_create）
@@ -146,13 +177,20 @@ user/
   include/             — libc 头文件（stdio.h, stdlib.h, string.h, fcntl.h, time.h, unistd.h,
                          sys.h, sys/*.h, input.h, usb_hid.h, assert.h, ctype.h, dirent.h,
                          errno.h, signal.h, termios.h）
+  ldso/               — 动态链接器 ld.so（dls_init.c, load_so.c, relocate.c, symtab.c,
+                         link_map.c, minilibc.c, start.S — 自举重定位+加载 libc.so+跳 main）
   lib/
     stdio.cc, string.cc, start.cc, malloc.cc, file.cc, sys_ipc.cc, sys_shm.cc,
     usb_kbd.cc, time.cc, unistd.cc, sys_wait.cc, sys_mman.cc, sys_irq.cc,
     sys_device.cc, sys_process.cc, sys_pci.cc, signal.cc, ctype.c, strtol.c,
-    stdlib_misc.c, uname.c, sleep.c, assert.c
-  test/                — 15个测试 ELF（test_runner + 14子系统测试）
+    stdlib_misc.c, uname.c, sleep.c, assert.c, crt0.S
+    libc.map           — libc.so 导出符号版本脚本
+  test/                — 22个测试 ELF（test_runner + 21子系统测试，全部为动态 ELF）
   lib/unity/           — Unity wrapper（源码在 third_party/Unity 子模块）
+
+include/uapi/xos/     — 内核→用户态 ABI 头文件（syscall.h, syscall_nums.h, syscall_asm.h,
+                         types.h, mman.h, shm.h, fcntl.h, stat.h, signal.h, socket.h,
+                         thread.h, time.h, errno.h, ioctl.h, input.h, display.h, elf.h 等）
 
 third_party/
   Unity/               — Unity v2.6.1 测试框架（git submodule）
@@ -180,7 +218,9 @@ kernel/
 | `driver_workflow.md` | 用户态驱动工作流 |
 | `user_driver.md` | 用户态驱动详细设计 |
 | `terminal.md` | Terminal/PTY/串口设计（内核 PTY + 内核串口 + 用户态 ldisc + Shell） |
-| `debug.md` | 内核调试方法论（诊断输出克制、单字符进度链、per-CPU 计数器、watchdog、持锁遍历、偏移量陷阱） |
+| `debug.md` | 内核调试方法论与操作（诊断原则、sendkey、串口日志、GDB、tmux、栈回溯、watchdog） |
+| `ld.md` | 动态链接方案（ld.so 自举+重定位+libc.so 加载，libc.a/libc.so 双产物，crt0 统一入口） |
+| `code_standard.md` | 代码规范（LLVM 格式、Linux 命名、头文件引用规则、POSIX 接口命名例外） |
 
 内核设计见 `doc/design/kernel/`：
 
@@ -210,14 +250,18 @@ kernel/
 - PTE 物理地址提取必须用 `pte & 0x000FFFFFFFFFF000`（清除 bit 63 NX 位），`& ~0xFFF` 会导致越界
 - `sys_notify` 入队 RECV_NOTIFY + 唤醒 WAIT_RECV；`wake_process` 只改状态不入队消息（pipe I/O 用）
 - `add_library(OBJECT)` 不能设 `POSITION_INDEPENDENT_CODE ON`
+- 内核编译加 `-mno-sse -mno-sse2 -mno-mmx`（内核不碰 XMM），用户态必须保留 SSE（printf/double 依赖）；若用户态出现 `-mno-sse` 说明内核 flag 泄漏到全局 `CMAKE_C_FLAGS`
 - 用户程序编译加 `-I. -Iuser/include` 让自定义头文件优先
-- libc.a 为 CMake target `c`，用户 ELF 通过 `LINK_LIBS c` 链接
+- libc.a 为 CMake target `c`，用户 ELF 通过 `LINK_LIBS c` 链接；动态 ELF 通过 `LINK_LIBS c` 链接 libc.so
 - FAT32 锁获取顺序：`i_lock → fat_lock → ahci_lock`（固定，防死锁）
 - inode 号 (ino) = FAT32 start_cluster（自然唯一），设备 inode 自动递增分配
+- syscall 编号分两段：Xcore slot 0-19（ipc/sched/mem），BSD slot 20-85（vfs/proc/signal/socket），总 NR_SYSCALL=86
+- 动态 ELF `crt0.o` 提供 `_start`（crt0.S），链接时必须第一个输入；静态/动态共用同一 crt0
 
 ## 开发备注
 
-- 串口始终走 Unix socket，输出自动写入 `log.txt`（无需手动 tee）；串口输入仅在 socat 连接 `/tmp/qemu-serial.sock` 时启用。monitor 在 stdio
+- **串口输出**：始终走 `-serial file:log.txt`，输出自动写入 `log.txt`。**串口输入已移除**（RX ring/ISR/read 全删）
+- **QEMU monitor**：`-monitor stdio`，用 `sendkey` 注入键盘输入（替代串口输入，详见 `doc/design/debug.md`）
 - `.clang-format` = LLVM 风格
 - `outb/inb/wrmsr/rdmsr/IrqGuard` 统一在 `arch/x64/utils.h`
 - 驱动自注册：`dev_create("/dev/xxx", DEV_XXX, &ops)` → devtmpfs inode
@@ -248,63 +292,7 @@ kernel/
 
 ## 5. debug
 
-### 串口打印
-
-优先考虑串口打印定位，QEMU 初始化约 5s + 引导时间，建议等待 10s 以上。
-
-串口输出自动写入 `log.txt`（QEMU chardev socket logfile），串口输入需通过 socat 连接 Unix socket 才可用：
-
-```bash
-# 查看日志
-tail -f log.txt
-# 交互式连接（同时可输入）
-socat -,rawer UNIX-CONNECT:/tmp/qemu-serial.sock
-```
-
-常见错误信号：
-- **Page Fault (#PF)**：检查地址映射和空指针
-- **General Protection (#GP)**：检查段选择子、IOPL、MSR 访问
-- **Triple Fault (#DF)** → QEMU 重启：通常是 TSS IST 栈或 IDT 未正确设置
-
-### Debug 模式（栈回溯）
-
-`./build.sh -d` 启用 `-g -fno-omit-frame-pointer`，异常时打印完整寄存器 + RBP 链栈回溯（最多 16 帧）。
-
-```bash
-./build.sh -d
-./run.sh            # 串口输出自动写 log.txt
-cat log.txt            # 找 BACKTRACE 段
-addr2line -e build/myos.elf -f -C 0xFFFFFFFF8010XXXX
-```
-
-### GDB 远程调试
-
-```bash
-./run.sh -s            # 启用 GDB 服务器
-gdb -ex "target remote localhost:1234" build/myos.elf
-```
-
-### tmux + QEMU + GDB 自动化调试
-
-```bash
-rm -f log.txt
-tmux new-session -d -s qemu './run.sh -s 2>&1'
-tmux new-session -d -s serial 'socat -,rawer UNIX-CONNECT:/tmp/qemu-serial.sock'
-tmux new-session -d -s gdb 'gdb -ex "target remote localhost:1234" build/myos.elf'
-tmux send-keys -t gdb 'continue' Enter
-sleep 20
-tmux send-keys -t gdb '' C-c          # Ctrl-C 中断
-tmux send-keys -t gdb 'bt' Enter
-tmux capture-pane -t gdb -p
-addr2line -e build/init.elf -f -C 0x400245  # 用户态地址解析
-# 向串口发送输入（需 serial session）
-tmux send-keys -t serial 'ls' Enter
-# 查看串口日志
-cat log.txt
-tmux kill-session -t gdb; tmux kill-session -t serial; tmux kill-session -t qemu
-```
-
-注：tmux send-keys 只能发按键到对应 session 的 stdio。QEMU monitor 在 qemu session 的 stdio，串口输入需通过 serial session 的 socat 连接发送。
+串口输出写入 `log.txt`，**串口输入已移除**。键盘输入通过 QEMU monitor `sendkey` 命令注入（`-monitor stdio` 在 QEMU shell 直接输入）。Debug 模式、GDB、tmux 自动化、sendkey 键名映射、常见错误信号等操作详见 `doc/design/debug.md`。
 
 ## 6. 技术债务
 
@@ -313,3 +301,7 @@ tmux kill-session -t gdb; tmux kill-session -t serial; tmux kill-session -t qemu
 ## 7. 文档原则
 
 过时内容直接删除仅保留最新状态，历史信息由 git log 记录。文档内容在自己模块文档中最详细，其它引用处只保留必要信息 + 链接。
+
+## 8. 代码风格
+
+全部遵循 Linux 命名标准（`snake_case` 函数/变量/类型，`SCREAMING_SNAKE_CASE` 宏/常量），`.clang-format` = LLVM 风格。**关键例外**：POSIX 接口（`open`/`O_RDONLY`/`pid_t`）和硬件 spec 符号（AHCI `PxCLB`/`PxIS`）保留原命名不改。详细命名规则、头文件引用分类、POSIX/Linux 命名例外清单见 `doc/design/code_standard.md`。

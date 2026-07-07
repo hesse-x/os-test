@@ -10,8 +10,7 @@
 #   ./check.sh --all                    # full scan (all sources)
 #   ./check.sh --filter iwyu origin/perf  # filter + base
 #
-# Valid check items: sparse, iwyu, clang-format, clang-tidy
-#   clang-tidy is a placeholder for now (see doc/design/code_standard.md).
+# Valid check items: sparse, iwyu, clang-format
 #
 # Base argument (optional, positional): forwarded to each sub-script.
 #   (none)         sub-scripts default to incremental vs origin/master
@@ -20,6 +19,7 @@
 #
 # Exit code: all pass 0; any failure 1; argument error 2.
 
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # Check item → sub-script mapping
@@ -27,9 +27,8 @@ declare -A CHECK_SCRIPT=(
     [sparse]="build_script/sparse_check.sh"
     [iwyu]="build_script/iwyu_check.sh"
     [clang-format]="build_script/clang_format_check.sh"
-    [clang-tidy]="build_script/clang_tidy_check.sh"
 )
-ALL_CHECKS=(sparse iwyu clang-format clang-tidy)
+ALL_CHECKS=(sparse iwyu clang-format)
 
 # ===================== Parse --filter and base arg =====================
 FILTER=""

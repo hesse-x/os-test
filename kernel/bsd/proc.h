@@ -7,13 +7,14 @@
 #ifndef KERNEL_BSD_PROC_H
 #define KERNEL_BSD_PROC_H
 
-#include "arch/x64/trap.h"
-#include "kernel/bsd/signal.h"
-#include "kernel/bsd/types.h"
-#include "kernel/xcore/list.h"
-#include "kernel/xcore/xtask.h"
 #include <stddef.h>
 #include <stdint.h>
+
+#include "arch/x64/smp.h"
+#include "arch/x64/trap.h"
+#include "kernel/xcore/list.h"
+#include "kernel/xcore/xtask.h"
+
 #include <xos/signal.h>
 
 typedef struct proc {

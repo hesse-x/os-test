@@ -4,48 +4,41 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "arch/x64/apic.h"
-#include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
-#include "kernel/driver/bsd_types.h"
 #include "kernel/driver/serial.h"
 #include "kernel/xcore/log.h"
-#include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
-#include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
 #include "utils/kvformat.h"
 
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/ioctl.h>  // TCGETS
 #include <xos/socket.h> // POLLIN/POLLOUT
 
 // ===================== TX lock =====================
 spinlock serial_tx_lock = SPINLOCK_INIT;
 
-// ===================== RX ring buffer =====================
-
-uint8_t serial_rx_buf[SERIAL_RX_BUF_SIZE];
-uint32_t serial_rx_head = 0; // ISR write position
-uint32_t serial_rx_tail = 0; // sys_read read position
-spinlock serial_rx_lock = SPINLOCK_INIT;
-int32_t serial_read_waiter = -1;
-int serial_fd_count = 0;
-bool serial_irq_registered = false;
+// ===================== RX =====================
+// Serial input has been removed entirely (see remove_serial_input.md):
+// the OS has no poll wakeup path for device fds, and serial input was
+// debug-only, off the Wayland/ELF/gcc acceptance axes. TX stays polled —
+// serial_init() keeps IER disabled, so no RX ISR, ring buffer, or read
+// path exists. /dev/serial remains open/write/poll-POLLOUT/ioctl only.
 
 void serial_init(void) {
-  outb(COM1_IER, 0x00); // Disable all interrupts
+  outb(COM1_IER, 0x00); // Disable all interrupts (TX is polled, no RX)
   outb(COM1_LCR, 0x80); // Enable DLAB
   outb(COM1, 0x01);     // Divisor low byte: 115200 baud
   outb(COM1_IER, 0x00); // Divisor high byte
   outb(COM1_LCR, 0x03); // 8N1, disable DLAB
   outb(COM1_FCR, 0xC7); // Enable FIFO, clear, 14-byte threshold
   outb(COM1_MCR, 0x03); // DTR + RTS
-                        // IER RX enable deferred to first serial open
 }
 
 static void serial_putc_raw(char c) {
@@ -120,30 +113,6 @@ static void serial_putc(char c) {
   spin_unlock_irqrestore(&serial_tx_lock, flags);
 }
 
-// ISR: drain all available bytes from UART FIFO into kernel ring buffer
-static void serial_irq_handler(trapframe *tf) {
-  uint64_t flags;
-  spin_lock_irqsave(&serial_rx_lock, &flags);
-  // Drain all available bytes from FIFO (Linux: read LSR in loop)
-  while (inb(COM1_LSR) & LSR_DR) {
-    uint8_t c = inb(COM1);
-    uint32_t next = (serial_rx_head + 1) % SERIAL_RX_BUF_SIZE;
-    if (next != serial_rx_tail) { // drop if full
-      serial_rx_buf[serial_rx_head] = c;
-      serial_rx_head = next;
-    }
-  }
-  // Wake blocked reader (like Linux tty_flip_buffer_push → wait queue wake)
-  if (serial_read_waiter >= 0) {
-    int32_t waiter = serial_read_waiter;
-    serial_read_waiter = -1;
-    spin_unlock_irqrestore(&serial_rx_lock, flags);
-    wake_process(waiter);
-    return;
-  }
-  spin_unlock_irqrestore(&serial_rx_lock, flags);
-}
-
 static void serial_puts(const char *s) {
   while (*s) {
     serial_putc(*s++);
@@ -185,72 +154,14 @@ void serial_vprintf(const char *fmt, va_list ap) {
 // =====================
 
 static int serial_dev_open(xtask *proc, int fd) {
-  // Mutual exclusion: cannot coexist with user-space irq_bind on vector 36
-  // But if serial IRQ is already registered (by a previous open), it's fine —
-  // just bump the fd count.
-  if (!serial_irq_registered && irq_owner_check(36) >= 0)
-    return -EBUSY;
-
-  serial_fd_count++;
-  if (!serial_irq_registered) {
-    irq_register(36, serial_irq_handler);
-    uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
-    ioapic_set_irq(4, 36, bsp_apic_id, false, false, false); // edge-triggered
-    outb(COM1_IER, IER_RX_ENABLE);
-    serial_irq_registered = true;
-  }
+  // Serial input is removed; open is a no-op (VFS still requires the callback).
+  // IER stays disabled — TX is polled, no RX ISR to register.
   return 0;
 }
 
 static int serial_dev_close(xtask *proc, int fd) {
-  serial_fd_count--;
-  uint64_t rx_flags;
-  spin_lock_irqsave(&serial_rx_lock, &rx_flags);
-  if (serial_read_waiter == proc->pid)
-    serial_read_waiter = -1;
-  spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
-  if (serial_fd_count == 0) {
-    outb(COM1_IER, 0x00);                         // Disable UART interrupts
-    ioapic_set_irq(4, 36, 0, true, false, false); // Mask GSI 4 in I/O APIC
-    irq_unregister(36);
-    serial_irq_registered = false;
-  }
+  // No per-fd state to clean up (no IRQ registration, no reference count).
   return 0;
-}
-
-static ssize_t serial_dev_read(xtask *proc, int fd, void *buf, size_t count) {
-  if (!buf)
-    return -EFAULT;
-
-  uint64_t rx_flags;
-  spin_lock_irqsave(&serial_rx_lock, &rx_flags);
-  while (serial_rx_head == serial_rx_tail) {
-    struct file *f = fd_lookup(proc->proc->files, fd);
-    if (WARN_ON_ONCE(!f)) {
-      spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
-      return -EBADF;
-    }
-    if (f && (f->flags & O_NONBLOCK)) {
-      spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
-      return -EAGAIN;
-    }
-    serial_read_waiter = proc->pid;
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_PIPE; // reuse WAIT_PIPE, same semantics
-    spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
-    schedule();
-    spin_lock_irqsave(&serial_rx_lock, &rx_flags);
-  }
-
-  size_t nread = 0;
-  char *dst = (char __force *)buf;
-  while (nread < count && serial_rx_head != serial_rx_tail) {
-    dst[nread] = serial_rx_buf[serial_rx_tail];
-    serial_rx_tail = (serial_rx_tail + 1) % SERIAL_RX_BUF_SIZE;
-    nread++;
-  }
-  spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
-  return (ssize_t)nread;
 }
 
 static ssize_t serial_dev_write(xtask *proc, int fd, const void *buf,
@@ -270,15 +181,8 @@ static long serial_dev_ioctl(uint32_t cmd, void *arg) {
 }
 
 static __poll serial_dev_poll(xtask *proc, int events) {
+  // Serial is output-only: POLLOUT is always ready, POLLIN never reported.
   __poll revents = 0;
-  uint64_t rx_flags;
-  spin_lock_irqsave(&serial_rx_lock, &rx_flags);
-  if (serial_rx_head != serial_rx_tail) {
-    if (events & POLLIN)
-      revents |= POLLIN;
-  }
-  spin_unlock_irqrestore(&serial_rx_lock, rx_flags);
-  // POLLOUT: always ready
   if (events & POLLOUT)
     revents |= POLLOUT;
   return revents;
@@ -289,7 +193,7 @@ static struct dev_ops serial_ops = {
     .is_block = false,
     .open = serial_dev_open,
     .close = serial_dev_close,
-    .read = serial_dev_read,
+    .read = NULL, // serial input removed — sys_read returns -ENOSYS
     .write = serial_dev_write,
     .ioctl = serial_dev_ioctl,
     .poll = serial_dev_poll,

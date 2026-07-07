@@ -1,0 +1,45 @@
+#!/bin/bash
+# pre-push hook — run check.sh (incremental) before allowing push
+#
+# For each remote ref being pushed, runs check.sh with the remote's
+# current HEAD as the incremental base, so only the diff that is about
+# to be pushed gets checked.
+#
+# Bypass: git push --no-verify
+
+REMOTE="$1"
+URL="$2"
+
+# read each (local_ref local_sha remote_ref remote_sha) line
+while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+    # Skip delete pushes (local_sha is all zeros)
+    if [ "$LOCAL_SHA" = "0000000000000000000000000000000000000000" ]; then
+        continue
+    fi
+
+    # Determine incremental base: the remote's current commit for this ref.
+    # If remote_sha is all zeros (new branch), fall back to origin/master.
+    if [ "$REMOTE_SHA" = "0000000000000000000000000000000000000000" ]; then
+        BASE="origin/master"
+    else
+        BASE="$REMOTE_SHA"
+    fi
+
+    # Validate the base ref resolves
+    if ! git rev-parse --verify --quiet "$BASE^{commit}" >/dev/null 2>&1; then
+        echo "pre-push: cannot resolve base '$BASE' — falling back to --all"
+        BASE="--all"
+    fi
+
+    echo "pre-push: running check.sh (incremental vs $BASE)"
+    bash "$(git rev-parse --show-toplevel)/check.sh" "$BASE"
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        echo "pre-push: check.sh FAILED (exit $rc). Push aborted."
+        echo "          Use git push --no-verify to bypass."
+        exit 1
+    fi
+    echo "pre-push: check.sh passed."
+done
+
+exit 0

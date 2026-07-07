@@ -1,6 +1,6 @@
-# 内核调试方法论
+# 内核调试
 
-记录调试本 OS 卡死/调度类问题时验证有效的诊断手法。这些手法是**方法论**而非具体 bug 修复——具体 bug 见 `bug.md`，本文只留可复用的套路。
+记录本 OS 调试相关的**方法论**和**操作手册**。方法论是可复用的诊断套路；操作手册是具体工具的使用方式。
 
 ## 1. 第一原则：诊断输出必须极度克制
 
@@ -103,4 +103,99 @@ if (current_task && current_task->need_resched) {
 - 调度器具体结构与卡点阶段定义见 `doc/design/kernel/schedule.md`（idle_entry / schedule / try_steal_task）。
 - 锁竞争诊断见 `doc/design/kernel/kernel_lock.md`。
 - 已定位并修复的 bug（含各诊断手法的实战出处）见 `bug.md`。
-- 串口连接 / GDB / tmux 自动化等通用 debug 操作见 `CLAUDE.md` §5 debug。
+
+---
+
+# 操作手册
+
+## 9. 串口输出与日志
+
+串口输出通过 QEMU `-serial file:log.txt` 写入 `log.txt`。**串口输入已移除**（RX ring/ISR/read 全删），键盘输入通过 `sendkey` 注入（见 §10）。
+
+```bash
+# 查看日志
+tail -f log.txt
+```
+
+优先考虑串口打印定位，QEMU 初始化约 5s + 引导时间，建议等待 10s 以上。
+
+## 10. sendkey 键盘注入（替代串口输入）
+
+串口输入已移除。所有键盘交互通过 QEMU monitor 的 `sendkey` 命令完成。`run.sh` 使用 `-monitor stdio`，在 QEMU 所在的 shell/stdio 直接输入 `sendkey` 命令即可。
+
+**键名映射**（常用键，完整列表见 QEMU 文档）：
+
+| 键 | sendkey 名称 | 说明 |
+|----|--------------|------|
+| a-z | `a`-`z` | 字母键 |
+| 0-9 | `0`-`9` | 数字键 |
+| Enter | `ret` | 回车 |
+| Backspace | `backspace` | 退格 |
+| Tab | `tab` | 制表 |
+| Escape | `esc` | 退出 |
+| 方向键 | `up`/`down`/`left`/`right` | 方向 |
+| Ctrl 组合 | `ctrl-c`/`ctrl-z`/`ctrl-d` | Ctrl+字母 |
+| Shift 组合 | `shift-a`/`l-shift`/`r-shift` | Shift+键 |
+| Alt 组合 | `alt-a`/`l-alt`/`r-alt` | Alt+键 |
+| F1-F12 | `f1`-`f12` | 功能键 |
+| Space | `spc` | 空格 |
+
+**使用技巧**：
+- `sendkey` 每次只发一个键事件（按下+释放），多字符输入需逐个 `sendkey`
+- tmux 场景：`tmux send-keys -t qemu 'sendkey l' Enter`
+- 脚本化批量输入：`for k in l s ret; do tmux send-keys -t qemu "sendkey $k" Enter; sleep 0.1; done`
+- GDB 中断（Ctrl-C）仍通过 tmux `C-c` 发给 gdb session，不要用 `sendkey ctrl-c`
+
+## 11. 常见错误信号
+
+- **Page Fault (#PF)**：检查地址映射和空指针
+- **General Protection (#GP)**：检查段选择子、IOPL、MSR 访问
+- **Triple Fault (#DF)** → QEMU 重启：通常是 TSS IST 栈或 IDT 未正确设置
+
+## 12. Debug 模式（栈回溯）
+
+`./build.sh -d` 启用 `-g -fno-omit-frame-pointer`，异常时打印完整寄存器 + RBP 链栈回溯（最多 16 帧）。
+
+```bash
+./build.sh -d
+./run.sh            # 串口输出自动写 log.txt
+cat log.txt            # 找 BACKTRACE 段
+addr2line -e build/myos.elf -f -C 0xFFFFFFFF8010XXXX
+```
+
+## 13. GDB 远程调试
+
+```bash
+./run.sh -s            # 启用 GDB 服务器
+gdb -ex "target remote localhost:1234" build/myos.elf
+```
+
+用户态地址解析：
+```bash
+addr2line -e build/init.elf -f -C 0x400245
+```
+
+## 14. tmux + QEMU + GDB 自动化调试
+
+```bash
+rm -f log.txt
+tmux new-session -d -s qemu './run.sh -s 2>&1'
+tmux new-session -d -s gdb 'gdb -ex "target remote localhost:1234" build/myos.elf'
+tmux send-keys -t gdb 'continue' Enter
+sleep 20
+tmux send-keys -t gdb '' C-c          # Ctrl-C 中断
+tmux send-keys -t gdb 'bt' Enter
+tmux capture-pane -t gdb -p
+addr2line -e build/init.elf -f -C 0x400245  # 用户态地址解析
+# 注入键盘输入（通过 QEMU monitor）
+tmux send-keys -t qemu 'sendkey l' Enter    # 单个字母
+tmux send-keys -t qemu 'sendkey ret' Enter  # Enter 回车
+tmux send-keys -t qemu 'sendkey s' Enter && tmux send-keys -t qemu 'sendkey h' Enter && tmux send-keys -t qemu 'sendkey l' Enter && tmux send-keys -t qemu 'sendkey ret' Enter  # "shl" + Enter
+# 脚本化批量输入
+for k in l s ret; do tmux send-keys -t qemu "sendkey $k" Enter; sleep 0.1; done
+# 查看串口日志
+cat log.txt
+tmux kill-session -t gdb; tmux kill-session -t qemu
+```
+
+注：tmux send-keys 只能发按键到对应 session 的 stdio。QEMU monitor 在 qemu session 的 stdio，键盘输入通过 `sendkey` monitor 命令注入到 qemu session。串口输入已移除，不再需要 socat serial session。

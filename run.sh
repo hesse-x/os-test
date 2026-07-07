@@ -3,9 +3,9 @@
 # Single-disk disk.img (two partitions: ESP + root FAT32), connected to q35 ICH9 SATA (IDE-compatible bus ide.0)
 # UEFI boots from the ESP partition BOOTX64.EFI → loads myos.elf + init.elf
 #
-# Serial output is written to log.txt by default, can be specified via -o <file>; serial input requires socat connection:
-#   socat -,rawer UNIX-CONNECT:/tmp/qemu-serial.sock 2>&1 | tee -a <logfile>
-# monitor on stdio (can input QEMU monitor commands)
+# Serial output is written directly to LOGFILE (default log.txt); serial input
+# is not supported (RX path removed — see remove_serial_input.md). Keyboard input
+# is injected via the QEMU monitor's `sendkey` command (monitor on stdio).
 #
 # -s: enable GDB remote debug (off by default)
 # -o <file>: serial output written to the specified file (default log.txt)
@@ -18,10 +18,10 @@ while getopts "o:" opt; do
 done
 shift $((OPTIND - 1))
 
-LOGFILE=log.txt
-rm -f /tmp/qemu-serial.sock "$LOGFILE"
+LOGFILE="${LOGFILE:-log.txt}"
+rm -f "$LOGFILE"
 
-SERIAL_OPTS="-chardev socket,id=s0,path=/tmp/qemu-serial.sock,server=on,wait=off,logfile=$LOGFILE -serial chardev:s0 -monitor stdio"
+SERIAL_OPTS="-serial file:$LOGFILE -monitor stdio"
 
 qemu-system-x86_64 \
     -machine q35 \

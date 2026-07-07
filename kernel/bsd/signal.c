@@ -337,7 +337,13 @@ int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 // Set a real-time alarm (in seconds). Returns the number of seconds remaining
 // of any previously set alarm, or 0 if none. seconds==0 cancels a pending
 // alarm.
-int64_t sys_alarm(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t) {
+int64_t sys_alarm(int64_t arg1, int64_t unused2, int64_t unused3,
+                  int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   unsigned seconds = (unsigned)arg1;
   uint64_t now = sched_clock();
   uint64_t old_remaining = 0;
@@ -358,7 +364,14 @@ int64_t sys_alarm(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t) {
 // ===================== BSD syscall: pause =====================
 // Suspend the caller until a signal is delivered. Always returns -EINTR when
 // resumed (or immediately if a signal is already pending).
-int64_t sys_pause(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+int64_t sys_pause(int64_t unused1, int64_t unused2, int64_t unused3,
+                  int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   // If a signal is already pending, do not block.
   if (current_proc->sig_pending != 0 ||
       current_proc->signal->shared_pending != 0)

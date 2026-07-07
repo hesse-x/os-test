@@ -27,14 +27,11 @@
 #include "kernel/bsd/syscall.h"
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/vfs.h"
-#include "kernel/driver/display.h"
 #include "kernel/kernel.h"
-#include "kernel/user_check.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
-#include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
@@ -42,14 +39,12 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
-#include "utils/macro.h"
+
 #include <xos/elf.h>
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/mman.h>
-#include <xos/shm.h>
 #include <xos/signal.h>
-#include <xos/stat.h>
 #include <xos/thread.h>
 
 // Minimal file_io_req for FD_FILE CLOSE notification (must match fs_driver
@@ -1718,23 +1713,57 @@ mmap_region *add_mmap_region(xtask *proc, uint64_t vaddr, uint64_t size,
 // real+effective, matching the "root can become anyone" model. umask gates
 // file-creation mode (applied in fat32_open via the inode cache mode).
 
-int64_t sys_getuid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+int64_t sys_getuid(int64_t unused1, int64_t unused2, int64_t unused3,
+                   int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   return (int64_t)current_proc->uid;
 }
 
-int64_t sys_geteuid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+int64_t sys_geteuid(int64_t unused1, int64_t unused2, int64_t unused3,
+                    int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   return (int64_t)current_proc->euid;
 }
 
-int64_t sys_getgid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+int64_t sys_getgid(int64_t unused1, int64_t unused2, int64_t unused3,
+                   int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   return (int64_t)current_proc->gid;
 }
 
-int64_t sys_getegid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+int64_t sys_getegid(int64_t unused1, int64_t unused2, int64_t unused3,
+                    int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   return (int64_t)current_proc->egid;
 }
 
-int64_t sys_setuid(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t) {
+int64_t sys_setuid(int64_t arg1, int64_t unused2, int64_t unused3,
+                   int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   uint32_t uid = (uint32_t)arg1;
   // Relaxed: a single-user root system has no setuid-bit privilege ladder.
   // euid=uid lets root drop/raise identity freely.
@@ -1743,14 +1772,27 @@ int64_t sys_setuid(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t) {
   return 0;
 }
 
-int64_t sys_setgid(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t) {
+int64_t sys_setgid(int64_t arg1, int64_t unused2, int64_t unused3,
+                   int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   uint32_t gid = (uint32_t)arg1;
   current_proc->gid = gid;
   current_proc->egid = gid;
   return 0;
 }
 
-int64_t sys_getppid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+int64_t sys_getppid(int64_t unused1, int64_t unused2, int64_t unused3,
+                    int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   pid_t ppid = current_proc->signal->parent_pid;
   // init (and orphans adopted by init) reports itself/1 as parent.
   if (ppid <= 0)
@@ -1758,19 +1800,36 @@ int64_t sys_getppid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
   return (int64_t)ppid;
 }
 
-int64_t sys_getpgrp(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {
+int64_t sys_getpgrp(int64_t unused1, int64_t unused2, int64_t unused3,
+                    int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   return (int64_t)current_proc->pgid;
 }
 
-int64_t sys_umask(int64_t arg1, int64_t, int64_t, int64_t, int64_t, int64_t) {
+int64_t sys_umask(int64_t arg1, int64_t unused2, int64_t unused3,
+                  int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   uint32_t old = current_proc->umask;
   current_proc->umask = (uint32_t)arg1 & 0777;
   return (int64_t)old;
 }
 
 // gethostname(buf, len) — copy out the kernel hostname string.
-int64_t sys_gethostname(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t,
-                        int64_t) {
+int64_t sys_gethostname(int64_t arg1, int64_t arg2, int64_t unused3,
+                        int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   char __user *ubuf = (char __user *__force)arg1;
   size_t len = (size_t)arg2;
   if (!ubuf || len == 0)
@@ -1785,8 +1844,12 @@ int64_t sys_gethostname(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t,
 }
 
 // sethostname(name, len) — replace the kernel hostname.
-int64_t sys_sethostname(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t,
-                        int64_t) {
+int64_t sys_sethostname(int64_t arg1, int64_t arg2, int64_t unused3,
+                        int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
   const char __user *uname = (const char __user *__force)arg1;
   size_t len = (size_t)arg2;
   if (!uname)
