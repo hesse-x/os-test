@@ -138,9 +138,9 @@ check.sh 中 sparse flags：
 
 ## check.sh 设计
 
-- **默认行为**：全量检查所有内核 `.c` 文件
+- **默认行为**：增量检查 —— 只跑 `origin/master...HEAD` 改动触及的内核 `.c`（基准可由参数切换：`origin/<branch>` / 本地 `<branch>` / `--all` 全量；解析见 `doc/design/code_standard.md`「增量运行」）。`#include` 层级检查是目录级不变量，**始终全量**。
 - **不检查**：用户态代码（libc、shell、drivers 等）
-- **退出码**：任何 sparse 输出 → 返回非零
+- **退出码**：任何 sparse 输出 → 返回非零；基准无法解析 → 2；增量无改动 → 跳过该步并 exit 0。
 - **集成方式**：先尝试 `cgcc`（sparse 的编译器包装器）配合 CMake，不行换直接调 `sparse`
 
 ### 直接调 sparse 方案（备选）

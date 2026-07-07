@@ -117,7 +117,26 @@ CheckOptions:
 > **常量**:不设 `ConstantCase`——枚举常量、宏走 `UPPER_CASE`,其余常量(`const` 变量)随 `VariableCase`(`lower_case`)。
 > **类型后缀**:不强制 `_t`——Linux 内核风格 struct/union/enum 本身用 `snake_case`,typedef 名随类型走 `lower_case`;POSIX 定义的 `pid_t`/`ssize_t`/`mode_t` 等由 POSIX 接口约束保留 `_t`,不在此规则覆盖。函数指针 typedef 统一 `*_fn`(见上文命名约定),不走 `_t`。Linux 当下仍保留 `_t` 的少量内核类型(`atomic_t`/`refcount_t` 走访问器封装、`phys_addr_t`/`kern_vaddr_t` 走 sparse `__bitwise` 强类型)有其现实动因,是否保留由具体评估决定,不归 clang-tidy 管。
 
-### 增量运行
+### 增量运行(四个检查项的统一默认)
+
+`check.sh` 及其四个子脚本(`sparse`/`iwyu`/`clang-format`/`clang-tidy`)默认做**增量**检查:只看本次改动触及的文件,历史代码不背锅,也避免全仓 iwyu/sparse 的等待。基准由第一个位置参数选择,统一由 `build_script/_diff_files.sh` 解析:
+
+| 调用 | 基准 |
+|------|------|
+| `(无参)` | `origin/master...HEAD` |
+| `origin/<branch>` | `origin/<branch>...HEAD` |
+| `<branch>`(本地) | `<branch>...HEAD` |
+| `--all` | 全量(改造前行为) |
+
+三点 diff(`...HEAD`)取 merge-base,只看本分支相对基准新增/修改的文件,`--diff-filter=d` 去掉已删除文件。基准无法解析(stderr 提示可用分支)则退出 2;增量结果为空则「无改动,跳过」并 exit 0,不算失败。例:
+
+```bash
+./check.sh                          # 全部四项,增量 vs origin/master
+./check.sh --filter iwyu origin/perf
+./build_script/iwyu_check.sh --all  # 单脚本全量
+```
+
+各检查项的增量语义:clang-format/sparse 按文件 diff 缩范围;iwyu 取 diff 文件 ∩ `compile_commands.json` 的 `.c/.cc`(头文件改动 iwyu 无法直接分析,提示但不跑);sparse 的 `#include` 层级检查是目录级不变量 grep,**始终全量**(极快、非文件 diff 形态)。clang-tidy 增量示例:
 
 ```bash
 # 只检查本次改动触及的文件(需先 cmake 生成 compile_commands.json)
@@ -127,7 +146,7 @@ git diff --name-only --diff-filter=d origin/master...HEAD -- '*.c' '*.h' \
 
 ## include 检查(include-what-you-use)
 
-由 `build_script/iwyu_check.sh` 执行(`check.sh --filter iwyu` 调用),全仓 `.c/.cc` 覆盖,排除 `third_party/`、跳过 `.S`。映射文件 `build_script/iwyu.imp`,工具内置 glibc 归属表与本项目 `-nostdinc + 自造 libc` 架构的冲突由脚本解析层处理。
+由 `build_script/iwyu_check.sh` 执行(`check.sh --filter iwyu` 调用),`.c/.cc` 覆盖(增量模式下取 diff ∩ `compile_commands`),排除 `third_party/`、跳过 `.S`。映射文件 `build_script/iwyu.imp`,工具内置 glibc 归属表与本项目 `-nostdinc + 自造 libc` 架构的冲突由脚本解析层处理。
 
 ### 判定标准(机器可判,无需肉眼)
 

@@ -2,12 +2,21 @@
 # check.sh — check scheduler
 #
 # Usage:
-#   ./check.sh                          # run all four (in order)
+#   ./check.sh                          # run all four (in order), incremental vs origin/master
 #   ./check.sh --filter sparse,iwyu     # run only specified items, in given order
 #   ./check.sh --filter iwyu            # single item
+#   ./check.sh origin/perf              # incremental vs origin/perf
+#   ./check.sh plan                     # incremental vs local branch plan
+#   ./check.sh --all                    # full scan (all sources)
+#   ./check.sh --filter iwyu origin/perf  # filter + base
 #
 # Valid check items: sparse, iwyu, clang-format, clang-tidy
 #   clang-tidy is a placeholder for now (see doc/design/code_standard.md).
+#
+# Base argument (optional, positional): forwarded to each sub-script.
+#   (none)         sub-scripts default to incremental vs origin/master
+#   --all          full scan
+#   <ref>          incremental vs <ref> (origin/<branch> or local <branch>)
 #
 # Exit code: all pass 0; any failure 1; argument error 2.
 
@@ -22,9 +31,11 @@ declare -A CHECK_SCRIPT=(
 )
 ALL_CHECKS=(sparse iwyu clang-format clang-tidy)
 
-# ===================== Parse --filter =====================
+# ===================== Parse --filter and base arg =====================
 FILTER=""
 FILTER_SET=0
+BASE_ARG=""
+BASE_SET=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --filter)
@@ -38,13 +49,29 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,12p' "$0"
+            sed -n '2,18p' "$0"
             exit 0
             ;;
-        *)
-            echo "Unknown argument: $1"
-            echo "Usage: $0 [--filter sparse,iwyu,...]"
+        --all)
+            BASE_ARG="--all"
+            BASE_SET=1
+            shift
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--filter sparse,iwyu,...] [--all | <ref>]"
             exit 2
+            ;;
+        *)
+            # A base/ref argument. Only one is allowed.
+            if [ "$BASE_SET" -eq 1 ]; then
+                echo "Error: multiple base arguments ('$BASE_ARG' and '$1')."
+                echo "Usage: $0 [--filter sparse,iwyu,...] [--all | <ref>]"
+                exit 2
+            fi
+            BASE_ARG="$1"
+            BASE_SET=1
+            shift
             ;;
     esac
 done
@@ -79,7 +106,7 @@ for c in "${CHECKS[@]}"; do
     STEP=$((STEP + 1))
     echo ""
     echo "=== Step $STEP: $c ==="
-    bash "$SCRIPT_DIR/${CHECK_SCRIPT[$c]}"
+    bash "$SCRIPT_DIR/${CHECK_SCRIPT[$c]}" $BASE_ARG
     rc=$?
     if [ $rc -ne 0 ]; then
         FAIL=1

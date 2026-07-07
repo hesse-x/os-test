@@ -1,18 +1,27 @@
 #!/bin/bash
 # iwyu_check.sh — strict include-what-you-use gate
-# Standalone runnable: ./build_script/iwyu_check.sh
+# Standalone runnable: ./build_script/iwyu_check.sh [base|--all]
 # Returns 0 = no violations, 1 = add/remove violations or missing environment
 #
 # Coverage: all .c/.cc in the repo's compile_commands.json,
 #           excluding third_party/, skipping .S (iwyu can't analyze assembly).
 # Strictness: strict — any should add / should remove is a violation.
 #
+# Scope (incremental by default):
+#   (no arg)         only compile-db .c/.cc changed vs origin/master
+#   origin/<branch>  only those changed vs origin/<branch>
+#   <branch>         only those changed vs local <branch>
+#   --all            all compile-db .c/.cc (pre-change behavior)
+# Header-only changes (.h) can't be analyzed by iwyu (it works on TUs); the diff
+# is intersected with the compile-db .c/.cc set, and any .h in the diff is noted
+# but not analyzed. Empty incremental result → "nothing changed, skipped", exit 0.
+#
 # Invoked by check.sh --filter iwyu.
 
 # resolve repo root (this script lives in build_script/)
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
-cd "$ROOT_DIR"
+# shellcheck source=_diff_files.sh
+source "$SCRIPT_DIR/_diff_files.sh" "${1:-}"
 
 # ===================== Environment check =====================
 
@@ -36,8 +45,22 @@ fi
 # ===================== Extract file list for analysis =====================
 # Take all .c/.cc from compile_commands.json, excluding third_party/ and build/.
 # The "file" field in compile_commands is an absolute path (in this repo).
-SOURCES=$(python3 - <<'PYEOF'
+# In incremental mode, intersect with the git-diff file set (rel-to-root paths).
+DIFF_RELS=""
+if [ "$CHECK_MODE" = "incremental" ]; then
+    DIFF_RELS=$(filter_changed "*.c" "*.cc")
+    # Note any header changes iwyu can't analyze on its own.
+    DIFF_HEADERS=$(filter_changed "*.h" "*.hpp")
+    if [ -n "$DIFF_HEADERS" ]; then
+        echo "Note: iwyu analyzes TUs only; header changes in this diff are not checked separately:"
+        echo "$DIFF_HEADERS" | sed 's/^/    /'
+    fi
+fi
+
+SOURCES=$(CHECK_MODE="$CHECK_MODE" DIFF_RELS="$DIFF_RELS" python3 - <<'PYEOF'
 import json, os, sys
+mode = os.environ.get('CHECK_MODE', 'full')
+diff_rels = set(filter(None, os.environ.get('DIFF_RELS', '').splitlines()))
 with open('build/compile_commands.json') as f:
     data = json.load(f)
 out = []
@@ -48,22 +71,33 @@ for e in data:
         continue
     if 'build' in af.split(os.sep):
         continue
-    if 'build' in af.split(os.sep):
-        continue
     if not (af.endswith('.c') or af.endswith('.cc')):
         continue
+    if mode == 'incremental':
+        rel = os.path.relpath(af)
+        if rel not in diff_rels:
+            continue
     out.append(af)
 print('\n'.join(out))
 PYEOF
 )
 
 if [ -z "$SOURCES" ]; then
-    echo "Error: no .c/.cc sources found in compile_commands.json (after excluding third_party/)."
-    exit 1
+    if [ "$CHECK_MODE" = "incremental" ]; then
+        echo "No changed .c/.cc in compile_commands.json vs $BASE — nothing to check, skipped."
+    else
+        echo "Error: no .c/.cc sources found in compile_commands.json (after excluding third_party/)."
+        exit 1
+    fi
+    exit 0
 fi
 
 N_SOURCES=$(echo "$SOURCES" | wc -l)
-echo "Running iwyu on $N_SOURCES source file(s) (excluding third_party/, skipping .S)..."
+if [ "$CHECK_MODE" = "incremental" ]; then
+    echo "Running iwyu on $N_SOURCES changed source file(s) vs $BASE (excluding third_party/, skipping .S)..."
+else
+    echo "Running iwyu on $N_SOURCES source file(s) (excluding third_party/, skipping .S)..."
+fi
 
 # ===================== Run iwyu =====================
 # iwyu_tool reads each file's full flags from compile_commands, no need to pass -nostdinc/-mno-sse etc. manually.

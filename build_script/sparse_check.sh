@@ -1,14 +1,23 @@
 #!/bin/bash
 # sparse_check.sh — Sparse static analysis + #include layer check for kernel code
-# Standalone runnable: ./build_script/sparse_check.sh
+# Standalone runnable: ./build_script/sparse_check.sh [base|--all]
 # Returns 0 = passed, 1 = sparse/layer violations or missing environment
+#
+# Scope (incremental by default, sparse static-analysis part only):
+#   (no arg)         only kernel .c changed vs origin/master
+#   origin/<branch>  only those changed vs origin/<branch>
+#   <branch>         only those changed vs local <branch>
+#   --all            all kernel .c (pre-change behavior)
+# Empty incremental result → sparse step "nothing changed, skipped" (exit 0 for
+# that step). The #include layer check below is a directory-level invariant grep
+# and stays FULL in every mode (it's cheap and not file-diff-shaped).
 #
 # Invoked by check.sh --filter sparse.
 
 # resolve repo root (this script lives in build_script/)
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
-cd "$ROOT_DIR"
+# shellcheck source=_diff_files.sh
+source "$SCRIPT_DIR/_diff_files.sh" "${1:-}"
 
 SPARSE_COMPAT=""
 WARNFILE=$(mktemp /tmp/sparse-output.XXXXXX)
@@ -79,28 +88,55 @@ SPARSE_FLAGS+=(-include "$SPARSE_COMPAT")
 
 echo "Running sparse on kernel sources..."
 
-# Collect all kernel .c files (exclude user-space code)
-KERNEL_SOURCES=()
+if [ "$CHECK_MODE" = "incremental" ]; then
+    echo "Incremental sparse: base = $BASE (layer check below stays full)"
+fi
+
+# Collect all kernel .c files (exclude user-space code), then narrow to the diff
+# set in incremental mode.
+ALL_KERNEL_SOURCES=()
 for f in kernel/xcore/*.c arch/x64/*.c kernel/xcore/mem/*.c kernel/bsd/*.c kernel/driver/*.c; do
-    [ -f "$f" ] && KERNEL_SOURCES+=("$f")
+    [ -f "$f" ] && ALL_KERNEL_SOURCES+=("$f")
 done
 
-if [ ${#KERNEL_SOURCES[@]} -eq 0 ]; then
+if [ ${#ALL_KERNEL_SOURCES[@]} -eq 0 ]; then
     echo "Error: No kernel source files found"
     exit 1
 fi
 
+if [ "$CHECK_MODE" = "incremental" ]; then
+    # diff paths are repo-root-relative; ALL_KERNEL_SOURCES entries already are
+    # (cd to ROOT_DIR happened in _diff_files.sh).
+    declare -A DIFF_SET
+    while IFS= read -r df; do
+        [ -n "$df" ] && DIFF_SET["$df"]=1
+    done <<< "$(filter_changed '*.c')"
+    KERNEL_SOURCES=()
+    for f in "${ALL_KERNEL_SOURCES[@]}"; do
+        [ -n "${DIFF_SET[$f]}" ] && KERNEL_SOURCES+=("$f")
+    done
+    if [ ${#KERNEL_SOURCES[@]} -eq 0 ]; then
+        echo "No changed kernel .c files vs $BASE — sparse step skipped."
+        SPARSE_SKIPPED=1
+    fi
+else
+    KERNEL_SOURCES=("${ALL_KERNEL_SOURCES[@]}")
+    SPARSE_SKIPPED=0
+fi
+
 # Run sparse per-file to avoid __bitwise type state leakage across translation units
-> "$WARNFILE"
-for f in "${KERNEL_SOURCES[@]}"; do
-    sparse "${SPARSE_FLAGS[@]}" "$f" 2>&1 \
-        | grep -v "non-ANSI function declaration" \
-        | grep -v "^sparse: " \
-        | grep -v "warning: preprocessor token __.* redefined" \
-        | grep -v "this was the original definition" \
-        | grep -v "note: in included file" \
-        >> "$WARNFILE" || true
-done
+if [ "$SPARSE_SKIPPED" -ne 1 ]; then
+    > "$WARNFILE"
+    for f in "${KERNEL_SOURCES[@]}"; do
+        sparse "${SPARSE_FLAGS[@]}" "$f" 2>&1 \
+            | grep -v "non-ANSI function declaration" \
+            | grep -v "^sparse: " \
+            | grep -v "warning: preprocessor token __.* redefined" \
+            | grep -v "this was the original definition" \
+            | grep -v "note: in included file" \
+            >> "$WARNFILE" || true
+    done
+fi
 
 # Clean up sparse compat header early (no longer needed)
 rm -f "$SPARSE_COMPAT"
@@ -112,11 +148,14 @@ if [ -s "$WARNFILE" ]; then
     echo "Sparse check failed with $(wc -l < "$WARNFILE") warning(s)."
     exit 1
 fi
-echo "Sparse check passed."
+if [ "$SPARSE_SKIPPED" -ne 1 ]; then
+    echo "Sparse check passed."
+fi
 
 # ===================== Step 1.5: #include layer check =====================
+# Always full (every mode): a directory-level invariant grep, not file-shaped.
 echo ""
-echo "=== #include layer check ==="
+echo "=== #include layer check (full) ==="
 
 INCLUDE_FAIL=0
 
