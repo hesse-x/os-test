@@ -35,6 +35,8 @@ struct drm_device g_drm;
 static void virtio_gpu_isr(trapframe *tf);
 static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
                                size_t cmd_len, void *resp_buf, size_t resp_len);
+extern void drm_dev_register(void);
+extern dev_driver virtio_gpu_driver;
 
 /* ===== 2.B: ctrlq initialization ===== */
 

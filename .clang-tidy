@@ -1,0 +1,75 @@
+# .clang-tidy — naming-form check (whole repo, single root rule set)
+#
+# Per doc/design/code_standard.md: clang-tidy readability-identifier-naming only
+# validates the pure case form (lower_case / UPPER_CASE) of identifiers; it
+# cannot decide POSIX-vs-Linux naming attribution, nor the _t-suffix
+# POSIX/Linux conflict. Those are handled by the closed allowlist (per-category
+# IgnoredRegexp below, grown from real violations) — everything outside the
+# allowlist is a real naming defect.
+#
+# Note: clang-tidy 18+ does NOT support a global IgnoredRegexp key; each
+# identifier category (Function, MacroDefinition, Variable, etc.) has its own
+# IgnoredRegexp. The regex patterns are repeated per-category where the same
+# exception class applies to multiple categories (e.g. Linux kernel __ prefix
+# convention applies to functions, variables, and macros).
+#
+# Not wired into build.sh (identifier-naming needs semantic analysis, ~100x
+# slower than clang-format) — invoked only via build_script/clang_tidy_check.sh
+# (pre-commit / CI), incremental by default.
+
+Checks: 'readability-identifier-naming'
+HeaderFilterRegex: '.*'
+CheckOptions:
+  # ---- Base case rules (code_standard.md § 命名约定) ----
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.ParameterCase
+    value: lower_case
+  - key: readability-identifier-naming.StructCase
+    value: lower_case
+  - key: readability-identifier-naming.UnionCase
+    value: lower_case
+  - key: readability-identifier-naming.EnumCase
+    value: lower_case
+  - key: readability-identifier-naming.EnumConstantCase
+    value: UPPER_CASE
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE
+
+  # ---- Per-category IgnoredRegexp: closed exception set ----
+  # Everything outside these sets is a real naming defect. Grown from full-repo
+  # clang-tidy scan — all violations in the current codebase are legitimate
+  # exceptions, none are defects. Categories of exceptions:
+  #   POSIX/C standard — errno, _exit, sa_handler, sigaddset, etc.
+  #   Linux _/__ prefix — __memcpy, __syscall*, _IOC*, etc.
+  #   Include guards — _STDIO_H, _COMMON_DIRENT_H, etc.
+  #   glibc/crt internals — __libc_start_main, __assert_fail, etc.
+  #   UEFI spec — EfiBootServicesCode, ImageHandle, etc.
+  #   Hardware spec — AHCI Px*, DRM/KMS, ELF Elf64_*
+  #   Sparse annotations — __user, __iomem, __bitwise, etc.
+  #   TLS runtime — __tls_template_start, __tbss_size, etc.
+  #   Kernel per-cpu — current_task, __vectors, etc.
+  #   Unity framework — setUp, tearDown (for completeness).
+  #   libc internals — __dir, _FILE, __pthread_*, etc.
+
+  # Function exceptions: glibc/crt, Linux kernel __ prefix, POSIX, libc
+  - key: readability-identifier-naming.FunctionIgnoredRegexp
+    value: '^(__libc_[a-z_]+|__assert_fail|__errno_location|__pthread_[a-z_]+|__syscall[0-6]|__memcpy|__memset|__memmove|__get_cwd|_exit|_toupper)$'
+
+  # Macro exceptions: Linux _/__ prefix, POSIX, include guards, spec, sparse, per-cpu, DRM
+  - key: readability-identifier-naming.MacroDefinitionIgnoredRegexp
+    value: '^(_IOC_[A-Z]+|_IO$|_IOR$|_IOW$|_IOWR$|_IO[A-Z]+|_F_[A-Z]+|errno|sa_handler|sa_sigaction|sigaddset|sigdelset|sigemptyset|sigfillset|sigismember|current_task|current_proc|current_xtask|Px[A-Z][a-zA-Z]*|Efi[A-Z][a-zA-Z]*|DRM_MODE_SUBCONNECTOR_Automatic|__[a-z_]+|assert|_.*_H)$'
+
+  # Variable exceptions: TLS runtime, kernel internal, libc internals
+  - key: readability-identifier-naming.VariableIgnoredRegexp
+    value: '^(__tls_[a-z_]+|__tdata_[a-z_]+|__tbss_[a-z_]+|__pthread_[a-z_]+|__head|__n|__vectors)$'
+
+  # Parameter exceptions: UEFI spec, libc union accessors
+  - key: readability-identifier-naming.ParameterIgnoredRegexp
+    value: '^(ImageHandle|SystemTable|_u[1-6])$'
+
+  # Struct exceptions: ELF spec, libc internals
+  - key: readability-identifier-naming.StructIgnoredRegexp
+    value: '^(Elf64_[A-Za-z]+|__dir|_FILE)$'

@@ -10,7 +10,7 @@
 #   ./check.sh --all                    # full scan (all sources)
 #   ./check.sh --filter iwyu origin/perf  # filter + base
 #
-# Valid check items: sparse, iwyu, clang-format
+# Valid check items: sparse, iwyu, clang-format, clang-tidy, copyright
 #
 # Base argument (optional, positional): forwarded to each sub-script.
 #   (none)         sub-scripts default to incremental vs origin/master
@@ -27,8 +27,10 @@ declare -A CHECK_SCRIPT=(
     [sparse]="build_script/sparse_check.sh"
     [iwyu]="build_script/iwyu_check.sh"
     [clang-format]="build_script/clang_format_check.sh"
+    [clang-tidy]="build_script/clang_tidy_check.sh"
+    [copyright]="build_script/copyright_check.sh"
 )
-ALL_CHECKS=(sparse iwyu clang-format)
+ALL_CHECKS=(sparse iwyu clang-format clang-tidy copyright)
 
 # ===================== Parse --filter and base arg =====================
 FILTER=""
