@@ -656,12 +656,12 @@ void sched_task_reap(xtask *proc) {
     }
   }
 
-  // 4. Free any RECV_MSG entries in recv queue (kfree their kmaddr)
+  // 4. Free any RECV_MSG / RECV_IOCTL entries in recv queue (kfree kmaddr)
   spin_lock(&proc->recv_lock);
   uint32_t idx = proc->recv_tail;
   while (idx != proc->recv_head) {
     recv_msg *m = (recv_msg *)proc->recv_buf[idx];
-    if (m->type == RECV_MSG && m->msg.kmaddr) {
+    if ((m->type == RECV_MSG || m->type == RECV_IOCTL) && m->msg.kmaddr) {
       kfree(m->msg.kmaddr);
       m->msg.kmaddr = NULL;
     }

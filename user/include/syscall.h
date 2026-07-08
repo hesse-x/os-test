@@ -85,8 +85,9 @@ static inline int sys_req(int32_t pid, void *request, void *reply) {
   return 0;
 }
 
-static inline int sys_resp(void *reply) {
-  int64_t r = __syscall1(SYS_RESP, (int64_t)(uintptr_t)reply);
+static inline int sys_resp(void *reply, size_t reply_len, int32_t result) {
+  int64_t r = __syscall3(SYS_RESP, (int64_t)(uintptr_t)reply, (int64_t)reply_len,
+                         (int64_t)result);
   if (r < 0) {
     errno = -(int)r;
     return -1;

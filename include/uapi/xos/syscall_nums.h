@@ -117,9 +117,10 @@
 #define RECV_REQ 1
 #define RECV_NOTIFY 2
 #define RECV_MSG 3
+#define RECV_IOCTL 4 // ioctl variable-length request (arg > 48B path)
 
 typedef struct recv_msg {
-  uint32_t type; // RECV_IRQ / RECV_REQ / RECV_NOTIFY / RECV_MSG
+  uint32_t type; // RECV_IRQ / RECV_REQ / RECV_NOTIFY / RECV_MSG / RECV_IOCTL
   uint32_t src;  // IRQ number or sender PID
   union {
     uint8_t data[56]; // RECV_IRQ / RECV_REQ / RECV_NOTIFY
@@ -127,6 +128,12 @@ typedef struct recv_msg {
       void *kmaddr;   // kernel kmalloc buffer (opaque to user)
       size_t len;     // data length
     } msg;
+    struct {          // RECV_IOCTL only (24B, 8-byte aligned within 56B union)
+      uint32_t cmd;      // ioctl command number
+      uint32_t arg_size; // arg data length
+      void *kmaddr;      // kernel kmalloc buffer (arg data copy)
+      size_t len;        // = arg_size (convenience for driver)
+    } ioctl;
   };
 } recv_msg;
 

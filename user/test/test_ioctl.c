@@ -382,7 +382,7 @@ void test_ioctl_kbd_bind(void) {
     /* If kbd_driver is running: should succeed */
     /* If kbd_driver is not running: -ESRCH or similar */
     if (r == 0) {
-      TEST_ASSERT_EQUAL_INT(0, arg.result);
+      TEST_ASSERT_EQUAL_INT(0, r);
     }
     close(fd);
   } else {

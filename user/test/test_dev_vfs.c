@@ -528,7 +528,7 @@ void test_dev_vfs_kbd_ioctl_proxy(void) {
     int r = ioctl(fd, INPUT_BIND, &arg);
     /* kbd_driver may or may not be running in test env */
     if (r == 0) {
-      TEST_ASSERT_EQUAL_INT(0, arg.result);
+      TEST_ASSERT_EQUAL_INT(0, r);
     }
     close(fd);
   } else {

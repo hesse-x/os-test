@@ -86,22 +86,21 @@ static void handle_req(struct recv_msg *msg) {
   if (msg->type != RECV_REQ)
     return;
   uint32_t opcode = *(uint32_t *)msg->data;
-  int32_t reply[16];
-  for (int i = 0; i < 16; i++)
-    reply[i] = 0;
 
+  int32_t result = 0;
   if (opcode == (uint32_t)INPUT_BIND) {
     // Direction A: consumer just registers itself. SHM is accessed via
     // open("/dev/<name>") + mmap(MAP_SHARED, fd) — no fd passing.
     consumer_add((pid_t)msg->src);
-    reply[0] = 0;
+    result = 0;
   } else if (opcode == (uint32_t)INPUT_UNBIND) {
     consumer_remove_pid((pid_t)msg->src);
-    reply[0] = 0;
+    result = 0;
   } else {
-    reply[0] = -EINVAL;
+    result = -EINVAL;
   }
-  resp(reply);
+  // INPUT_BIND/UNBIND carry no _IOC_READ data; pass NULL/0 and result only
+  sys_resp(NULL, 0, result);
 }
 
 void input_driver_run(uint32_t device_type, const char *dev_name,

@@ -236,6 +236,30 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
         umsg->msg.kmaddr = NULL;
         umsg->msg.len = len;
       }
+      // If this is RECV_IOCTL, copy arg data to user data_buf and free kernel
+      // buffer (same pattern as RECV_MSG; record caller PID for sys_resp)
+      if (msg->type == RECV_IOCTL) {
+        void *kmaddr = msg->ioctl.kmaddr;
+        size_t len = msg->ioctl.len;
+        proc->req_caller_pid = (pid_t)msg->src;
+
+        if (!data_buf || data_buf_len < len) {
+          kfree(kmaddr);
+          recv_msg *umsg = (recv_msg __force *)buf;
+          umsg->ioctl.kmaddr = NULL;
+          umsg->ioctl.len = len;
+          proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+          spin_unlock(&proc->recv_lock);
+          return (int64_t)-EINVAL;
+        }
+
+        copy_to_user(data_buf, kmaddr, len);
+        kfree(kmaddr);
+
+        recv_msg *umsg = (recv_msg __force *)buf;
+        umsg->ioctl.kmaddr = NULL;
+        umsg->ioctl.len = len;
+      }
       proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
       spin_unlock(&proc->recv_lock);
       return 0;
@@ -298,6 +322,26 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           recv_msg *umsg = (recv_msg __force *)buf;
           umsg->msg.kmaddr = NULL;
           umsg->msg.len = len;
+        }
+        if (msg->type == RECV_IOCTL) {
+          void *kmaddr = msg->ioctl.kmaddr;
+          size_t len = msg->ioctl.len;
+          proc->req_caller_pid = (pid_t)msg->src;
+
+          if (!data_buf || data_buf_len < len) {
+            kfree(kmaddr);
+            recv_msg *umsg = (recv_msg __force *)buf;
+            umsg->ioctl.kmaddr = NULL;
+            umsg->ioctl.len = len;
+            proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+            spin_unlock(&proc->recv_lock);
+            return (int64_t)-EINVAL;
+          }
+          copy_to_user(data_buf, kmaddr, len);
+          kfree(kmaddr);
+          recv_msg *umsg = (recv_msg __force *)buf;
+          umsg->ioctl.kmaddr = NULL;
+          umsg->ioctl.len = len;
         }
         proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
         spin_unlock(&proc->recv_lock);
@@ -399,14 +443,18 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 }
 
 // ===================== Xcore IPC syscall: resp =====================
-int64_t sys_resp(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
+int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u3,
                  int64_t _u4, int64_t _u5) {
   void __user *reply = (void __user *__force)arg1;
+  size_t reply_len = (size_t)arg2;
+  int32_t result = (int32_t)arg3;
 
   uint64_t ptr = (__force uint64_t)reply;
-  if (!ptr || ptr >= 0xFFFFFFFF80000000ULL ||
-      ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
-    return (int64_t)-EFAULT;
+  if (reply_len > 0) {
+    if (!ptr || ptr >= 0xFFFFFFFF80000000ULL ||
+        ptr + reply_len > 0xFFFFFFFF80000000ULL)
+      return (int64_t)-EFAULT;
+  }
 
   xtask *proc = current_task;
   pid_t caller_pid = proc->req_caller_pid;
@@ -417,28 +465,49 @@ int64_t sys_resp(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
   if (caller->pid != caller_pid)
     return (int64_t)-ESRCH;
 
-  size_t reply_len = caller->req_reply_len;
-  if (reply_len == 0)
-    reply_len = RECV_MSG_SIZE;
-  if (reply_len > RECV_MSG_SIZE)
-    reply_len = RECV_MSG_SIZE;
-  uint8_t kbuf[RECV_MSG_SIZE];
-  copy_from_user(kbuf, reply, RECV_MSG_SIZE);
+  caller->req_result = result;
 
-  uint64_t saved_cr3;
-  __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
-  __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)caller->cr3) : "memory");
-  copy_to_user(caller->req_reply_buf, kbuf, reply_len);
-  __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+  if (reply_len == 0) {
+    int caller_cpu = caller->assigned_cpu;
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[caller_cpu].scheduler_lock, &flags);
+    if (caller->state == BLOCKED && caller->wait_event == WAIT_REQ_REPLY)
+      wake_from_wait(caller);
+    spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
+    proc->req_caller_pid = -1;
+    return 0;
+  }
 
-  // Wake caller
+  size_t copy_len = reply_len;
+  if (caller->req_reply_len > 0 && copy_len > caller->req_reply_len)
+    copy_len = caller->req_reply_len;
+
+  if (copy_len <= RECV_MSG_SIZE) {
+    uint8_t kbuf[RECV_MSG_SIZE];
+    copy_from_user(kbuf, reply, copy_len);
+    uint64_t saved_cr3;
+    __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+    __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)caller->cr3) : "memory");
+    copy_to_user(caller->req_reply_buf, kbuf, copy_len);
+    __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+  } else {
+    void *kbuf = kmalloc(copy_len);
+    if (!kbuf)
+      return (int64_t)-ENOMEM;
+    copy_from_user(kbuf, reply, copy_len);
+    uint64_t saved_cr3;
+    __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+    __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)caller->cr3) : "memory");
+    copy_to_user(caller->req_reply_buf, kbuf, copy_len);
+    __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+    kfree(kbuf);
+  }
+
   int caller_cpu = caller->assigned_cpu;
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[caller_cpu].scheduler_lock, &flags);
-  if (caller->state == BLOCKED && caller->wait_event == WAIT_REQ_REPLY) {
-    caller->req_result = 0;
+  if (caller->state == BLOCKED && caller->wait_event == WAIT_REQ_REPLY)
     wake_from_wait(caller);
-  }
   spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
 
   proc->req_caller_pid = -1;

@@ -20,7 +20,9 @@ int req(pid_t pid, void *req_ptr, void *resp) {
   return sys_req(pid, req_ptr, resp);
 }
 
-int resp(void *resp) { return sys_resp(resp); }
+int resp(void *resp, size_t len, int32_t result) {
+  return sys_resp(resp, len, result);
+}
 
 int msg(int32_t pid, void *req_buf, size_t req_len, void *resp_buf,
         size_t resp_len) {

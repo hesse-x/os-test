@@ -72,38 +72,36 @@ static void handle_req(struct recv_msg *msg) {
   uint32_t minor = *(uint32_t *)(msg->data + 52);
   pid_t src = (pid_t)msg->src;
 
-  uint8_t reply[REPLY_BUF_SIZE];
-  memset(reply, 0, REPLY_BUF_SIZE);
+  uint8_t nr = _IOC_NR(cmd);
+  uint16_t size = _IOC_SIZE(cmd);
+  // Reply data buffer (pure data — result is passed separately to resp()).
+  uint8_t data[REPLY_BUF_SIZE];
+  memset(data, 0, REPLY_BUF_SIZE);
+  int32_t result = 0;
+  uint16_t data_len = 0;
 
   struct evdev_device *dev = find_device(minor);
   if (!dev) {
-    *(int32_t *)reply = -ENODEV;
-    resp(reply);
+    resp(NULL, 0, -ENODEV);
     return;
   }
 
   // EVIOCGRAB itself bypasses grab check (holder must be able to release)
   if (cmd != (uint32_t)EVIOCGRAB) {
     if (dev->grabbed && dev->grab_client != src) {
-      *(int32_t *)reply = -EBUSY;
-      resp(reply);
+      resp(NULL, 0, -EBUSY);
       return;
     }
   }
 
-  uint8_t nr = _IOC_NR(cmd);
-  uint16_t size = _IOC_SIZE(cmd);
-  int32_t *result = (int32_t *)reply;
-  uint8_t *data = reply + 4;
-
   switch (nr) {
   case 0x01: // EVIOCGVERSION
     *(int32_t *)data = EV_VERSION;
-    *result = 0;
+    data_len = size;
     break;
   case 0x02: // EVIOCGID
     memcpy(data, &dev->id, sizeof(struct input_id));
-    *result = 0;
+    data_len = size;
     break;
   case 0x06: // EVIOCGNAME(len)
   {
@@ -111,7 +109,7 @@ static void handle_req(struct recv_msg *msg) {
     if (copy_len > size)
       copy_len = size;
     memcpy(data, dev->name, copy_len);
-    *result = 0;
+    data_len = size;
     break;
   }
   case 0x09: // EVIOCGPROP(len)
@@ -120,7 +118,7 @@ static void handle_req(struct recv_msg *msg) {
     if (copy_len > size)
       copy_len = size;
     memcpy(data, &dev->prop_bitmap, copy_len);
-    *result = 0;
+    data_len = size;
     break;
   }
   default:
@@ -133,9 +131,9 @@ static void handle_req(struct recv_msg *msg) {
           copy_len = size;
         memcpy(data, &dev->caps_bitmap[ev], copy_len);
       }
-      *result = 0;
+      data_len = size;
     } else if (nr >= 0x40 && nr < 0x80) { // EVIOCGABS(abs)
-      *result = -ENOSYS;
+      result = -ENOSYS;
     } else if (nr == 0x90) { // EVIOCGRAB
       int32_t grab_val = 0;
       if (_IOC_DIR(cmd) & _IOC_WRITE) {
@@ -148,14 +146,14 @@ static void handle_req(struct recv_msg *msg) {
         dev->grabbed = false;
         dev->grab_client = 0;
       }
-      *result = 0;
+      // EVIOCGRAB is write-only: no data returned.
     } else {
-      *result = -ENOSYS;
+      result = -ENOSYS;
     }
     break;
   }
 
-  resp(reply);
+  resp(data, data_len, result);
 }
 
 int main(int argc, char **argv, char **envp) {

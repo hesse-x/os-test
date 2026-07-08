@@ -1735,27 +1735,33 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
         goto out;
       }
 
-      /* 256B buffer accommodates DRM ioctl structs (max drm_mode_crtc=104B).
-         User-space driver path below still uses 56B req_data (unchanged). */
-      uint8_t kbuf[256];
-      __memset(kbuf, 0, sizeof(kbuf));
-
       uint16_t arg_size = _IOC_SIZE(cmd);
       uint8_t dir = _IOC_DIR(cmd);
-      if ((__force uint64_t)arg != 0 && (dir & _IOC_WRITE) && arg_size > 0) {
-        if (arg_size > 240) {
-          ret = -(int64_t)EINVAL;
+
+      uint8_t kbuf_stack[256];
+      uint8_t *kbuf = kbuf_stack;
+      bool kbuf_dyn = false;
+      if (arg_size > 240) {
+        kbuf = kmalloc(arg_size);
+        if (!kbuf) {
+          ret = -(int64_t)ENOMEM;
           goto out;
         }
-        copy_from_user(kbuf, arg, arg_size);
+        kbuf_dyn = true;
       }
+      __memset(kbuf, 0, arg_size);
+
+      if ((__force uint64_t)arg != 0 && (dir & _IOC_WRITE) && arg_size > 0)
+        copy_from_user(kbuf, arg, arg_size);
 
       long result = ops->ioctl(cmd, kbuf);
 
       if ((__force uint64_t)arg != 0 && (dir & _IOC_READ) && result >= 0 &&
-          arg_size > 0 && arg_size <= 240) {
+          arg_size > 0)
         copy_to_user(arg, kbuf, arg_size);
-      }
+
+      if (kbuf_dyn)
+        kfree(kbuf);
 
       ret = (int64_t)result;
       goto out;
@@ -1769,36 +1775,13 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     printk(LOG_DEBUG, "sys_ioctl: fd=%d cmd=0x%x driver_pid=%d (req path)\n",
            fd, cmd, target_pid);
 
-    if ((_IOC_DIR(cmd) & _IOC_WRITE) && (__force uint64_t)arg != 0) {
-      uint16_t arg_size = _IOC_SIZE(cmd);
-      if (arg_size > 48) {
+    uint16_t arg_size = _IOC_SIZE(cmd);
+    uint8_t dir = _IOC_DIR(cmd);
+
+    if (arg_size > 48) {
+      if ((__force uint64_t)arg == 0) {
         ret = -(int64_t)EINVAL;
         goto out;
-      }
-    }
-    uint8_t req_data[56];
-    __memset(req_data, 0, 56);
-    *(uint32_t *)req_data = cmd;
-    if ((_IOC_DIR(cmd) & _IOC_WRITE) && (__force uint64_t)arg != 0) {
-      uint16_t arg_size = _IOC_SIZE(cmd);
-      if (arg_size > 0)
-        copy_from_user(req_data + 4, arg, arg_size);
-    }
-
-    // Defensive: warn if ioctl REQ arg carries a cross-process fd that won't
-    // translate. Direction A keeps SHM on the inode (no fd passing), so this
-    // is purely diagnostic — surfaces misconfigured protocols early instead
-    // of silently failing in the driver's mmap(EBADF).
-    if (cmd == INPUT_BIND && (_IOC_DIR(cmd) & _IOC_WRITE)) {
-      int passed_fd =
-          *(int *)(req_data + 4); // input_bind_arg.shm_fd at offset 0
-      if (passed_fd >= 0) {
-        if (passed_fd >= MAX_FD || !fd_lookup(proc->proc->files, passed_fd)) {
-          printk(LOG_WARN,
-                 "ioctl REQ: INPUT_BIND fd=%d not valid in caller pid=%d "
-                 "(cross-proc fd passing unsupported; use inode-bound SHM)\n",
-                 passed_fd, proc->pid);
-        }
       }
     }
 
@@ -1812,17 +1795,118 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       goto out;
     }
 
+    // === Branch point: arg_size <= 48 inline, > 48 variable-length ===
+    if (arg_size <= 48) {
+      // ===== inline path (RECV_REQ + req_data[56] = cmd + arg) =====
+      uint8_t req_data[56];
+      __memset(req_data, 0, 56);
+      *(uint32_t *)req_data = cmd;
+      if ((dir & _IOC_WRITE) && (__force uint64_t)arg != 0) {
+        if (arg_size > 0)
+          copy_from_user(req_data + 4, arg, arg_size);
+      }
+
+      // Defensive: warn if ioctl REQ arg carries a cross-process fd that won't
+      // translate. Direction A keeps SHM on the inode (no fd passing), so this
+      // is purely diagnostic — surfaces misconfigured protocols early instead
+      // of silently failing in the driver's mmap(EBADF).
+      if (cmd == INPUT_BIND && (dir & _IOC_WRITE)) {
+        int passed_fd =
+            *(int *)(req_data + 4); // input_bind_arg.shm_fd at offset 0
+        if (passed_fd >= 0) {
+          if (passed_fd >= MAX_FD || !fd_lookup(proc->proc->files, passed_fd)) {
+            printk(LOG_WARN,
+                   "ioctl REQ: INPUT_BIND fd=%d not valid in caller pid=%d "
+                   "(cross-proc fd passing unsupported; use inode-bound SHM)\n",
+                   passed_fd, proc->pid);
+          }
+        }
+      }
+
+      uint8_t msg[RECV_MSG_SIZE];
+      recv_msg *hdr = (recv_msg *)msg;
+      hdr->type = RECV_REQ;
+      hdr->src = (uint32_t)current_task->pid;
+      // Device minor at data[52..55] (after cmd at [0..3] and arg data at
+      // [4..4+arg_size); arg_size<=48 so no overlap). evdev reads it from
+      // msg->data+52 to route the ioctl to the right device.
+      *(uint32_t *)(req_data + 52) = ops->minor;
+      __memcpy(hdr->data, req_data, 56);
+
+      spin_lock(&target->recv_lock);
+      uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
+      if (next == target->recv_tail) {
+        spin_unlock(&target->recv_lock);
+        ret = -(int64_t)EBUSY;
+        goto out;
+      }
+      __memcpy(target->recv_buf[target->recv_head], msg, RECV_MSG_SIZE);
+      target->recv_head = next;
+      spin_unlock(&target->recv_lock);
+
+      int target_cpu = target->assigned_cpu;
+      uint64_t flags;
+      spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
+      if (target->state == BLOCKED && target->wait_event == WAIT_RECV) {
+        wake_from_wait(target);
+      }
+      spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
+
+      proc->state = BLOCKED;
+      proc->wait_event = WAIT_REQ_REPLY;
+      proc->wait_timed_out = 0;
+      proc->wait_deadline = sched_clock() + 3000000000ULL;
+      proc->req_target_pid = target_pid;
+      proc->req_reply_buf = arg;
+      proc->req_reply_len = arg_size;
+      proc->req_result = 0;
+
+      int cpu = proc->assigned_cpu;
+      uint64_t flags2;
+      spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
+      sched_timer_queue_insert(cpu, proc);
+      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
+
+      file_put(f);
+      f = NULL;
+      schedule();
+
+      if (proc->wait_timed_out)
+        return (int64_t)-ETIMEDOUT;
+      if (proc->req_result != 0)
+        return (int64_t)proc->req_result;
+      return 0;
+    }
+
+    // ===== variable-length path (RECV_IOCTL + kmalloc'd buffer) =====
+    if ((__force uint64_t)arg == 0) {
+      ret = -(int64_t)EINVAL;
+      goto out;
+    }
+
+    void *kbuf = kmalloc(arg_size);
+    if (!kbuf) {
+      ret = -(int64_t)ENOMEM;
+      goto out;
+    }
+    if ((dir & _IOC_WRITE) && (__force uint64_t)arg != 0)
+      copy_from_user(kbuf, arg, arg_size);
+
     uint8_t msg[RECV_MSG_SIZE];
     recv_msg *hdr = (recv_msg *)msg;
-    hdr->type = RECV_REQ;
+    __memset(msg, 0, RECV_MSG_SIZE);
+    hdr->type = RECV_IOCTL;
     hdr->src = (uint32_t)current_task->pid;
-    *(uint32_t *)(req_data + 52) = ops->minor;
-    __memcpy(hdr->data, req_data, 56);
+    hdr->ioctl.cmd = cmd;
+    hdr->ioctl.arg_size = arg_size;
+    hdr->ioctl.kmaddr = kbuf;
+    hdr->ioctl.len = arg_size;
 
     spin_lock(&target->recv_lock);
     uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
     if (next == target->recv_tail) {
       spin_unlock(&target->recv_lock);
+      kfree(kbuf);
       ret = -(int64_t)EBUSY;
       goto out;
     }
@@ -1830,13 +1914,15 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     target->recv_head = next;
     spin_unlock(&target->recv_lock);
 
-    int target_cpu = target->assigned_cpu;
-    uint64_t flags;
-    spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
-    if (target->state == BLOCKED && target->wait_event == WAIT_RECV) {
-      wake_from_wait(target);
+    {
+      int target_cpu = target->assigned_cpu;
+      uint64_t flags;
+      spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
+      if (target->state == BLOCKED && target->wait_event == WAIT_RECV) {
+        wake_from_wait(target);
+      }
+      spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
     }
-    spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
     proc->state = BLOCKED;
     proc->wait_event = WAIT_REQ_REPLY;
@@ -1844,40 +1930,26 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     proc->wait_deadline = sched_clock() + 3000000000ULL;
     proc->req_target_pid = target_pid;
     proc->req_reply_buf = arg;
-    proc->req_reply_len = 56;
+    proc->req_reply_len = arg_size;
     proc->req_result = 0;
 
-    int cpu = proc->assigned_cpu;
-    uint64_t flags2;
-    spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
-    sched_timer_queue_insert(cpu, proc);
-    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
+    {
+      int cpu = proc->assigned_cpu;
+      uint64_t flags2;
+      spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
+      sched_timer_queue_insert(cpu, proc);
+      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
+    }
 
     file_put(f);
     f = NULL;
     schedule();
 
-    if (proc->wait_timed_out) {
+    if (proc->wait_timed_out)
       return (int64_t)-ETIMEDOUT;
-    }
-
     if (proc->req_result != 0)
       return (int64_t)proc->req_result;
-
-    int32_t ioctl_result = 0;
-    if ((__force uint64_t)arg != 0) {
-      copy_from_user(&ioctl_result, arg, 4);
-
-      if ((_IOC_DIR(cmd) & _IOC_READ) && _IOC_SIZE(cmd) > 0 &&
-          _IOC_SIZE(cmd) <= 48) {
-        uint16_t arg_size = _IOC_SIZE(cmd);
-        uint8_t tmp[48];
-        copy_from_user(tmp, (void __user *__force)((__force uint64_t)arg + 4),
-                       arg_size);
-        copy_to_user((void __user *__force)arg, tmp, arg_size);
-      }
-    }
-    return (int64_t)(long)ioctl_result;
+    return 0;
   }
   case FD_TTY: {
     struct pty *pty = f->pty;

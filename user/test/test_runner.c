@@ -44,6 +44,7 @@ static struct test_entry tests[] = {
 #ifdef TEST
     {"evdev", "/test/test_evdev.elf"},
 #endif
+    {"ioctl_varlen", "/test/ioctl_varlen.elf"},
 };
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))
