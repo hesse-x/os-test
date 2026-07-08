@@ -5,7 +5,7 @@
  */
 
 // init process — PID 2 (VFS in-kernel)
-// Spawns kbd_driver, terminal, and optionally test_runner
+// Spawns kbd_driver, evdev, terminal, and optionally test_runner
 // Adopts orphan children and reaps them via waitpid(-1)
 #include "syscall.h"
 #include <fcntl.h>
@@ -23,23 +23,6 @@ static int spawn_service(const char *path) {
   printf("spawn: %s\n", path);
   pid_t pid = spawn(path);
   return (pid > 0) ? (int)pid : -1;
-}
-
-static void wait_dev_ready(const char *dev_path) {
-  int fd;
-  for (int tries = 0;; tries++) {
-    printf("wait_dev_ready: calling open %s try=%d\n", dev_path, tries);
-    fd = open(dev_path, O_RDWR);
-    printf("wait_dev_ready: open %s try=%d ret=%d\n", dev_path, tries, fd);
-    if (fd >= 0)
-      break;
-    printf("wait_dev_ready: calling recv try=%d\n", tries);
-    struct recv_msg m;
-    recv(&m, NULL, 0, 10);
-    printf("wait_dev_ready: recv returned try=%d\n", tries);
-  }
-  printf("wait_dev_ready: %s opened fd=%d\n", dev_path, fd);
-  close(fd);
 }
 
 int main(int argc, char **argv, char **envp) {
@@ -69,9 +52,11 @@ int main(int argc, char **argv, char **envp) {
   wait_dev_ready("/dev/kbd");
   printf("init: kbd_driver ready\n");
 
-  // 3. Spawn terminal (which spawns shell internally)
-  // /dev/dri/card0 is registered by the kernel (virtio-gpu DRM) — no need
-  // to spawn a separate display driver.
+  // 3. Spawn evdev (unconditional — long-lived infrastructure)
+  printf("init: spawning evdev\n");
+  spawn_service("/driver/evdev.dev");
+
+  // 4. Spawn terminal (which spawns shell internally)
   printf("init: spawning terminal\n");
   spawn_service("/usr/bin/terminal");
   printf("init: terminal spawned\n");

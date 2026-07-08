@@ -5,6 +5,7 @@
  */
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <xos/errno.h>
@@ -256,13 +257,28 @@ void *memmove(void *dst, const void *src, size_t n) {
   char *d = (char *)dst;
   const char *s = (const char *)src;
   if (d < s) {
+    size_t nq = n >> 3;
+    uint64_t *dq = (uint64_t *)d;
+    const uint64_t *sq = (const uint64_t *)s;
+    while (nq--)
+      *dq++ = *sq++;
+    d = (char *)dq;
+    s = (const char *)sq;
+    n &= 7;
     while (n--)
       *d++ = *s++;
   } else {
     d += n;
     s += n;
-    while (n--)
+    size_t tail = n & 7;
+    while (tail--)
       *--d = *--s;
+    size_t nq = n >> 3;
+    while (nq--) {
+      d -= 8;
+      s -= 8;
+      *(uint64_t *)d = *(const uint64_t *)s;
+    }
   }
   return dst;
 }

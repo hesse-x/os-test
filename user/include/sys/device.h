@@ -15,7 +15,8 @@ extern "C" {
 #endif
 
 LIBC_EXPORT int device_register(const char *name);
-LIBC_EXPORT int device_register_shm(const char *name, int shm_fd);
+LIBC_EXPORT int device_register_shm(const char *name, int shm_fd,
+                                    uint32_t minor);
 
 #ifdef __cplusplus
 }

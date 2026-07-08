@@ -183,7 +183,7 @@ static inline void display_client_scroll_up(uint32_t bg) {
   uint32_t fb_bytes = display_fb_height * display_pitch;
   uint32_t move_bytes = fb_bytes - line_bytes;
 
-  /* uint64_t 搬运（8 字节步进），尾部按字节兜底 */
+  /* uint64_t bulk move (8-byte stride), byte-wise tail for remainder */
   uint64_t *dst64 = (uint64_t *)display_back_buffer;
   const uint64_t *src64 = (const uint64_t *)(display_back_buffer + line_bytes);
   uint32_t n64 = move_bytes / 8;

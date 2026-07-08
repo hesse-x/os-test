@@ -54,7 +54,8 @@
  * Linux numbers for cross-ecology familiarity. Two Linux values collide with
  * existing slots (EACCES=13 vs EMFILE=13; ENFILE=23 vs ECONNREFUSED=23), so
  * they are pushed to free high numbers (100/101). See doc/design/kernel/
- * posix.md "errno 约定". A full Linux-aligned renumber is a separate item. */
+ * posix.md "errno conventions". A full Linux-aligned renumber is a separate
+ * item. */
 #define ENOMSG 42
 #define EIDRM 43
 #define ENOLCK 46

@@ -13,7 +13,7 @@
 #     /usr/lib/libc.a
 #     /lib/{libc.so,ld.so}
 #     /local/{hello,hello_dyn}.elf
-#     /test/drm_test.elf          ← 仅 test 构建拷入 /test/
+#     /test/drm_test.elf          ← only copied in test builds
 #     /README
 #
 # The kernel gets init.elf from boot_info to create the init process, no longer needs a raw LBA slot.
@@ -26,7 +26,7 @@ BUILD_DIR="${PROJECT_DIR}/build"
 TESTDATA_DIR="${PROJECT_DIR}/testdata"
 
 # Check dependency files
-for f in init.elf myos.elf BOOTX64.EFI kbd_driver.elf terminal.elf shell.elf \
+for f in init.elf myos.elf BOOTX64.EFI kbd_driver.elf evdev.elf terminal.elf shell.elf \
          libc.a libc.so hello.elf ldso.elf hello_dyn.elf; do
     if [ ! -f "${BUILD_DIR}/${f}" ]; then
         echo "mkdisk.sh: ${BUILD_DIR}/${f} not found, run build.sh first"
@@ -86,6 +86,7 @@ mmd -i "${BUILD_DIR}/part2.img" ::lib
 
 # Copy files into directory structure
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/kbd_driver.elf"   ::driver/kbd.dev
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/evdev.elf"        ::driver/evdev.dev
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/terminal.elf"     ::usr/bin/terminal
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/shell.elf"        ::usr/bin/shell
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.a"           ::usr/lib/libc.a
@@ -107,7 +108,7 @@ if [ "$TEST" = "1" ]; then
                test_fpu.elf test_sse_smoke.elf pthread.elf \
                ld_test_single.elf ld_test_chain.elf \
                ld_test_diamond.elf ld_test_cycle.elf \
-               drm_test.elf drm_ioctl.elf; do
+               drm_test.elf drm_ioctl.elf test_evdev.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
     done
 fi

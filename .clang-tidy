@@ -56,7 +56,7 @@ CheckOptions:
 
   # Function exceptions: glibc/crt, Linux kernel __ prefix, POSIX, libc
   - key: readability-identifier-naming.FunctionIgnoredRegexp
-    value: '^(__libc_[a-z_]+|__assert_fail|__errno_location|__pthread_[a-z_]+|__syscall[0-6]|__memcpy|__memset|__memmove|__get_cwd|_exit|_toupper)$'
+    value: '^(__libc_[a-z_]+|__assert_fail|__errno_location|__pthread_[a-z_]+|__syscall[0-6]|__memcpy|__memset|__memmove|__memcmp|__strcmp|__get_cwd|_exit|_toupper)$'
 
   # Macro exceptions: Linux _/__ prefix, POSIX, include guards, spec, sparse, per-cpu, DRM
   - key: readability-identifier-naming.MacroDefinitionIgnoredRegexp

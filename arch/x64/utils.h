@@ -74,15 +74,64 @@ __memmove(void *dst, const void *src, size_t n) {
   char *d = (char *)dst;
   const char *s = (const char *)src;
   if (d < s) {
+    size_t nq = n >> 3;
+    uint64_t *dq = (uint64_t *)d;
+    const uint64_t *sq = (const uint64_t *)s;
+    while (nq--)
+      *dq++ = *sq++;
+    d = (char *)dq;
+    s = (const char *)sq;
+    n &= 7;
     while (n--)
       *d++ = *s++;
   } else {
     d += n;
     s += n;
-    while (n--)
+    size_t tail = n & 7;
+    while (tail--)
       *--d = *--s;
+    size_t nq = n >> 3;
+    while (nq--) {
+      d -= 8;
+      s -= 8;
+      *(uint64_t *)d = *(const uint64_t *)s;
+    }
   }
   return dst;
+}
+
+__attribute__((no_sanitize("kernel-address"))) static inline int
+__memcmp(const void *s1, const void *s2, size_t n) {
+  const unsigned char *a = (const unsigned char *)s1;
+  const unsigned char *b = (const unsigned char *)s2;
+  size_t i = 0;
+  // 8-byte batch compare; on mismatch, backtrack byte-by-byte to find first
+  // difference
+  for (; i + 8 <= n; i += 8) {
+    uint64_t va = *(const uint64_t *)(a + i);
+    uint64_t vb = *(const uint64_t *)(b + i);
+    if (va != vb) {
+      for (size_t j = 0; j < 8; j++) {
+        if (a[i + j] != b[i + j])
+          return (int)a[i + j] - (int)b[i + j];
+      }
+    }
+  }
+  // Remaining bytes (< 8)
+  for (; i < n; i++) {
+    if (a[i] != b[i])
+      return (int)a[i] - (int)b[i];
+  }
+  return 0;
+}
+
+__attribute__((no_sanitize("kernel-address"))) static inline int
+__strcmp(const char *s1, const char *s2) {
+  while (*s1 && *s1 == *s2) {
+    s1++;
+    s2++;
+  }
+  return *(const unsigned char *)s1 - *(const unsigned char *)s2;
 }
 
 // ===================== Interrupt control =====================

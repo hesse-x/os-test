@@ -630,9 +630,10 @@ size_t fwrite_unlocked(const void *ptr, size_t size, size_t nmemb, FILE *f) {
 }
 
 /* ===================== open_memstream =====================
- * Dynamic memory stream: write_fn 回调直接管理动态缓冲,
- * 走 _IONBF 直写路径，状态存 user_data (W1 方案)。
- * fclose 释放 FILE 和 user_data 结构，但保留 *bufptr 缓冲 (所有权转用户)。
+ * Dynamic memory stream: write_fn callback manages the dynamic buffer directly,
+ * uses the _IONBF direct-write path; state stored in user_data (W1 scheme).
+ * fclose frees FILE and user_data struct, but preserves *bufptr buffer
+ * (ownership transfers to caller).
  */
 struct memstream_ctx {
   char **bufptr;

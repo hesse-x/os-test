@@ -1816,6 +1816,7 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     recv_msg *hdr = (recv_msg *)msg;
     hdr->type = RECV_REQ;
     hdr->src = (uint32_t)current_task->pid;
+    *(uint32_t *)(req_data + 52) = ops->minor;
     __memcpy(hdr->data, req_data, 56);
 
     spin_lock(&target->recv_lock);

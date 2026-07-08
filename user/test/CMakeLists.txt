@@ -5,7 +5,11 @@
 # user/test/ — Unity-based test ELF targets
 
 # Test runner (no Unity needed)
-add_user_dyn_elf(test_runner C SOURCES test_runner.c LINK_LIBS c)
+if(TEST)
+    add_user_dyn_elf(test_runner C SOURCES test_runner.c LINK_LIBS c DEFS TEST)
+else()
+    add_user_dyn_elf(test_runner C SOURCES test_runner.c LINK_LIBS c)
+endif()
 
 # Layer 1: unistd (pipe/read/write/close)
 add_user_dyn_elf(pipe C SOURCES test_pipe.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
@@ -61,3 +65,12 @@ add_user_dyn_elf(drm_test C SOURCES drm_test.c LINK_LIBS c)
 
 # Layer 14: DRM ioctl (GET_MAGIC, AUTH_MAGIC, ADDFB2, GEM_CLOSE, GETFB, caps)
 add_user_dyn_elf(drm_ioctl C SOURCES test_drm_ioctl.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+
+# evdev EVIOCG* ioctl test (only in TEST builds)
+# Target named test_evdev (not evdev): user/CMakeLists.txt already defines the
+# evdev driver target -> build/evdev.elf (/driver/evdev.dev). Same target name
+# would collide on the output file build/evdev.elf and the test ELF would
+# overwrite the driver, so init would spawn the test instead of the driver.
+if(TEST)
+    add_user_dyn_elf(test_evdev C SOURCES test_evdev.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libinput/include/linux)
+endif()

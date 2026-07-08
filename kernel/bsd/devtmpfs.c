@@ -74,12 +74,7 @@ void devtmpfs_init(void) {
 /* Find or create a subdirectory dev_dir entry by name (no slash in name) */
 static struct dev_dir *devtmpfs_find_dir(const char *name) {
   for (struct dev_dir *d = dir_list; d; d = d->next) {
-    int i;
-    for (i = 0; name[i] && d->name[i]; i++) {
-      if (name[i] != d->name[i])
-        break;
-    }
-    if (name[i] == '\0' && d->name[i] == '\0')
+    if (__strcmp(name, d->name) == 0)
       return d;
   }
   return NULL;
@@ -117,6 +112,9 @@ static struct dev_dir *devtmpfs_get_or_create_dir(const char *name, int len) {
 }
 
 struct inode *devtmpfs_lookup(const char *name) {
+  /* Strip "/dev/" prefix — stored entries use paths without this prefix */
+  if (__memcmp(name, "/dev/", 5) == 0)
+    name += 5;
   /* If path contains '/', split into dir + leaf */
   const char *slash = name;
   while (*slash && *slash != '/')
@@ -134,19 +132,12 @@ struct inode *devtmpfs_lookup(const char *name) {
     spin_unlock(&devtmpfs_lock);
     if (!d)
       return NULL;
-    /* lookup leaf inside dir's dev entries: leaf is flat name, scan dev_list
-       but only those whose name matches leaf AND whose parent dir is d.
-       For simplicity in first version: store full path "dir/leaf" in
-       dev_entry.name and match by full path here. */
+    /* lookup leaf inside dir: match by full path (stored entry.name includes
+     * dir/ prefix) */
     spin_lock(&devtmpfs_lock);
     struct dev_entry *e = dev_list;
     while (e) {
-      int i;
-      for (i = 0; name[i] && e->name[i]; i++) {
-        if (name[i] != e->name[i])
-          break;
-      }
-      if (name[i] == '\0' && e->name[i] == '\0') {
+      if (__strcmp(name, e->name) == 0) {
         spin_unlock(&devtmpfs_lock);
         return e->ip;
       }
@@ -155,16 +146,11 @@ struct inode *devtmpfs_lookup(const char *name) {
     spin_unlock(&devtmpfs_lock);
     return NULL;
   }
-  /* No slash: flat lookup (original behavior) */
+  /* No slash: flat lookup */
   spin_lock(&devtmpfs_lock);
   struct dev_entry *e = dev_list;
   while (e) {
-    int i;
-    for (i = 0; name[i] && e->name[i]; i++) {
-      if (name[i] != e->name[i])
-        break;
-    }
-    if (name[i] == '\0' && e->name[i] == '\0') {
+    if (__strcmp(name, e->name) == 0) {
       spin_unlock(&devtmpfs_lock);
       return e->ip;
     }
@@ -322,12 +308,7 @@ void devtmpfs_remove(const char *name) {
   struct dev_entry **pp = &dev_list;
   while (*pp) {
     struct dev_entry *e = *pp;
-    int i;
-    for (i = 0; name[i] && e->name[i]; i++) {
-      if (name[i] != e->name[i])
-        break;
-    }
-    if (name[i] == '\0' && e->name[i] == '\0') {
+    if (__strcmp(name, e->name) == 0) {
       *pp = e->next;
       if (e->ip)
         inode_put(e->ip);

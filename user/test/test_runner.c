@@ -41,6 +41,9 @@ static struct test_entry tests[] = {
     {"ld_diamond", "/test/ld_test_diamond.elf"},
     {"ld_cycle", "/test/ld_test_cycle.elf"},
     {"drm_ioctl", "/test/drm_ioctl.elf"},
+#ifdef TEST
+    {"evdev", "/test/test_evdev.elf"},
+#endif
 };
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))

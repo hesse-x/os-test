@@ -140,7 +140,7 @@ void input_driver_run(uint32_t device_type, const char *dev_name,
   g_ring_off = hdr->ring_offset;
   g_ring_cap = hdr->ring_capacity;
 
-  device_register_shm(dev_name, shm_fd);
+  device_register_shm(dev_name, shm_fd, 0);
 
   // 3. Main loop: recv() → EINTR: drain HID via on_event, write ring + notify;
   //    REQ: handle bind/unbind.

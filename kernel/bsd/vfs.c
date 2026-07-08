@@ -277,13 +277,14 @@ int64_t sys_rmdir(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
   return 0;
 }
 
-/* sys_dev_create(name, shm_fd) — SYS_DEV_CREATE
+/* sys_dev_create(name, shm_fd, minor) — SYS_DEV_CREATE
  * Kernel auto-fills driver_pid=current_task->pid, is_block=false, callbacks
- * NULL (user-space driver) */
+ * NULL (user-space driver). minor stored in dev_ops for ioctl req routing. */
 int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
                        int64_t _u2, int64_t _u3) {
   const char __user *uname = (const char __user *__force)arg1;
   int shm_fd = (int)arg2;
+  uint32_t minor = (uint32_t)arg3;
   struct shm *dev_shm = NULL;
 
   if (!uname)
@@ -300,6 +301,7 @@ int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   // Force driver_pid to current process — user-space can't set this
   kops->driver_pid = current_task->pid;
   kops->is_block = false;
+  kops->minor = minor;
   // All callbacks remain NULL for user-space drivers (IPC proxy handles
   // requests)
 

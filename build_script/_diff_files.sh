@@ -57,7 +57,7 @@ _diff_files_parse() {
     fi
 
     # Three-dot diff against the merge-base: only files this branch added/modified
-    # relative to BASE. Same convention as doc/design/code_standard.md "增量运行".
+    # relative to BASE. Same convention as doc/design/code_standard.md "incremental runs".
     # --diff-filter=d drops deleted files (can't lint a file that no longer exists).
     CHANGED_FILES=$(git diff --name-only --diff-filter=d "$BASE"...HEAD)
 }

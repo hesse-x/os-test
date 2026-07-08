@@ -445,9 +445,9 @@ static inline int sys_rmdir(const char *path) {
   return 0;
 }
 
-static inline int sys_dev_create(const char *name, int shm_fd) {
-  int64_t r =
-      __syscall3(SYS_DEV_CREATE, (int64_t)(uintptr_t)name, (int64_t)shm_fd, 0);
+static inline int sys_dev_create(const char *name, int shm_fd, uint32_t minor) {
+  int64_t r = __syscall3(SYS_DEV_CREATE, (int64_t)(uintptr_t)name,
+                         (int64_t)shm_fd, (int64_t)minor);
   if (r < 0) {
     errno = -(int)r;
     return -1;

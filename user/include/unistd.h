@@ -69,6 +69,7 @@ LIBC_EXPORT int truncate(const char *path, off_t length);
 LIBC_EXPORT int fsync(int fd);
 LIBC_EXPORT void sync(void);
 LIBC_EXPORT int getpagesize(void);
+LIBC_EXPORT void wait_dev_ready(const char *dev_path);
 
 #ifdef __cplusplus
 }

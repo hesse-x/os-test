@@ -19,6 +19,7 @@ typedef uint32_t __poll;
 struct dev_ops {
   pid_t driver_pid; // 0 = kernel device, >0 = user-space driver
   bool is_block;    // true = block device, false = char device
+  uint32_t minor;   // device minor number (ioctl req routing)
 
   // VFS callbacks (only called when driver_pid == 0)
   int (*open)(xtask *proc, int fd);

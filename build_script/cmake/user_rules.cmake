@@ -146,7 +146,7 @@ add_custom_target(crt0_obj ALL DEPENDS ${CMAKE_BINARY_DIR}/crt0.o)
 # add_user_elf: userspace ELF (compile → objcopy → ld)
 # Usage: add_user_elf(name [C] SOURCES source1 ... [LINK_LIBS lib1 ...] [DEFS def1 ...])
 function(add_user_elf elf_name)
-    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS" ${ARGN})
+    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS;INCLUDE_DIRS" ${ARGN})
 
     set(ELF_DIR ${CMAKE_BINARY_DIR})
     set(ELF_FILE ${ELF_DIR}/${elf_name}.elf)
@@ -158,6 +158,13 @@ function(add_user_elf elf_name)
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
     set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+
+    # Extra include directories
+    if(ARG_INCLUDE_DIRS)
+        foreach(inc ${ARG_INCLUDE_DIRS})
+            list(APPEND COMPILE_FLAGS -I${inc})
+        endforeach()
+    endif()
 
     # Extra compile definitions (-D flags)
     if(ARG_DEFS)
@@ -273,10 +280,17 @@ endfunction()
 # ld.md §3.4.4 / plan_ld2b3 T5
 # crt0.o linked first (provides _start), libc.so linked via -L/-l (records DT_NEEDED)
 function(add_user_dyn_elf name)
-    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS" ${ARGN})
+    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS;INCLUDE_DIRS" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
     set(COMPILE_CMD ${CMAKE_C_COMPILER})
     set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+
+    # Extra include directories
+    if(ARG_INCLUDE_DIRS)
+        foreach(inc ${ARG_INCLUDE_DIRS})
+            list(APPEND COMPILE_FLAGS -I${inc})
+        endforeach()
+    endif()
 
     # Extra compile definitions (-D flags)
     if(ARG_DEFS)

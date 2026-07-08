@@ -137,6 +137,9 @@ global:
     /* <sys/device.h> */
     device_register; device_register_shm;
 
+    /* <unistd.h> */
+    wait_dev_ready;
+
     /* 事实 ABI：crt0.S 跨 .so 调用 */
     __libc_start_main;
 
