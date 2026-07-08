@@ -6,6 +6,7 @@
 
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <unity.h>
@@ -318,6 +319,80 @@ void test_f_neg_zero_fill(void) {
   TEST_ASSERT_EQUAL_STRING("-0003.14", b);
 }
 
+/* ========== open_memstream tests ========== */
+
+/* open_memstream: basic write, content + size + NUL terminator */
+void test_open_memstream_basic(void) {
+  char *buf = NULL;
+  size_t sz = 0;
+  FILE *f = open_memstream(&buf, &sz);
+  TEST_ASSERT_NOT_NULL(f);
+  fputs("hello", f);
+  fflush(f);
+  TEST_ASSERT_EQUAL_INT(5, (int)sz);
+  TEST_ASSERT_EQUAL_STRING("hello", buf);
+  fclose(f);
+  free(buf);
+}
+
+/* open_memstream: multiple appends accumulate */
+void test_open_memstream_append(void) {
+  char *buf = NULL;
+  size_t sz = 0;
+  FILE *f = open_memstream(&buf, &sz);
+  fputs("foo", f);
+  fputs("bar", f);
+  fflush(f);
+  TEST_ASSERT_EQUAL_INT(6, (int)sz);
+  TEST_ASSERT_EQUAL_STRING("foobar", buf);
+  fclose(f);
+  free(buf);
+}
+
+/* open_memstream: printf formatting into stream */
+void test_open_memstream_printf(void) {
+  char *buf = NULL;
+  size_t sz = 0;
+  FILE *f = open_memstream(&buf, &sz);
+  fprintf(f, "%d+%d=%d", 2, 3, 5);
+  fflush(f);
+  TEST_ASSERT_EQUAL_INT(5, (int)sz);
+  TEST_ASSERT_EQUAL_STRING("2+3=5", buf);
+  fclose(f);
+  free(buf);
+}
+
+/* open_memstream: grow beyond initial 64-byte capacity */
+void test_open_memstream_grow(void) {
+  char *buf = NULL;
+  size_t sz = 0;
+  FILE *f = open_memstream(&buf, &sz);
+  for (int i = 0; i < 20; i++)
+    fprintf(f, "row%02d\n", i);
+  fflush(f);
+  /* each "rowNN\n" = 6 bytes × 20 = 120 bytes */
+  TEST_ASSERT_EQUAL_INT(120, (int)sz);
+  TEST_ASSERT_EQUAL_INT('\n', buf[5]);
+  TEST_ASSERT_EQUAL_INT('r', buf[6]);
+  fclose(f);
+  free(buf);
+}
+
+/* open_memstream: empty stream → size 0, buffer non-NULL after flush */
+void test_open_memstream_empty(void) {
+  char *buf = NULL;
+  size_t sz = 99; /* poison */
+  FILE *f = open_memstream(&buf, &sz);
+  fflush(f);
+  TEST_ASSERT_EQUAL_INT(0, (int)sz);
+  fclose(f);
+}
+
+/* open_memstream: NULL args → NULL return */
+void test_open_memstream_null_args(void) {
+  TEST_ASSERT_NULL(open_memstream(NULL, NULL));
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -365,5 +440,11 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_f_zero_fill);
   RUN_TEST(test_f_left_align);
   RUN_TEST(test_f_neg_zero_fill);
+  RUN_TEST(test_open_memstream_basic);
+  RUN_TEST(test_open_memstream_append);
+  RUN_TEST(test_open_memstream_printf);
+  RUN_TEST(test_open_memstream_grow);
+  RUN_TEST(test_open_memstream_empty);
+  RUN_TEST(test_open_memstream_null_args);
   return UNITY_END();
 }

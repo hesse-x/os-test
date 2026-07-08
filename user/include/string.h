@@ -35,6 +35,7 @@ LIBC_EXPORT char *strtok(char *str, const char *delim);
 LIBC_EXPORT char *strtok_r(char *str, const char *delim, char **saveptr);
 LIBC_EXPORT char *strdup(const char *s);
 LIBC_EXPORT char *strndup(const char *s, size_t n);
+LIBC_EXPORT char *basename(char *path);
 LIBC_EXPORT const char *strerror(int errnum);
 LIBC_EXPORT int strerror_r(int errnum, char *buf, size_t buflen);
 LIBC_EXPORT void bzero(void *s, size_t n);

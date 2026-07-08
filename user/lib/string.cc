@@ -592,6 +592,11 @@ int strncasecmp(const char *s1, const char *s2, size_t n) {
   return (int)_toupper((unsigned char)*s1) - (int)_toupper((unsigned char)*s2);
 }
 
+char *basename(char *path) {
+  char *p = strrchr(path, '/');
+  return p ? p + 1 : path;
+}
+
 #ifdef __cplusplus
 }
 #endif

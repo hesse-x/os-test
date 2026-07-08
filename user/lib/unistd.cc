@@ -59,3 +59,5 @@ int truncate(const char *path, off_t length) {
 int fsync(int fd) { return sys_fsync(fd); }
 
 void sync(void) { sys_sync(); }
+
+int getpagesize(void) { return 4096; }

@@ -43,13 +43,14 @@ static FILE stdin_file = {0,
                           sys_read_fill,
                           0,
                           -1,
-                          PTHREAD_MUTEX_INITIALIZER};
+                          PTHREAD_MUTEX_INITIALIZER,
+                          nullptr};
 
 static char stdout_buf[256];
 static FILE stdout_file = {
-    1,      stdout_buf, sizeof(stdout_buf),       0,
-    _IOLBF, _F_WRITE,   sys_write_flush,          nullptr,
-    0,      -1,         PTHREAD_MUTEX_INITIALIZER};
+    1,      stdout_buf, sizeof(stdout_buf),        0,
+    _IOLBF, _F_WRITE,   sys_write_flush,           nullptr,
+    0,      -1,         PTHREAD_MUTEX_INITIALIZER, nullptr};
 
 static FILE stderr_file = {2,
                            nullptr,
@@ -61,7 +62,8 @@ static FILE stderr_file = {2,
                            nullptr,
                            0,
                            -1,
-                           PTHREAD_MUTEX_INITIALIZER};
+                           PTHREAD_MUTEX_INITIALIZER,
+                           nullptr};
 
 FILE *stdin = &stdin_file;
 FILE *stdout = &stdout_file;
@@ -388,6 +390,8 @@ int fclose(FILE *f) {
     close(f->fd);
   if (f->buf)
     free(f->buf);
+  if (f->user_data)
+    free(f->user_data);
   free(f);
   return 0;
 }
@@ -623,4 +627,70 @@ size_t fread_unlocked(void *ptr, size_t size, size_t nmemb, FILE *f) {
 
 size_t fwrite_unlocked(const void *ptr, size_t size, size_t nmemb, FILE *f) {
   return fwrite(ptr, size, nmemb, f);
+}
+
+/* ===================== open_memstream =====================
+ * Dynamic memory stream: write_fn 回调直接管理动态缓冲,
+ * 走 _IONBF 直写路径，状态存 user_data (W1 方案)。
+ * fclose 释放 FILE 和 user_data 结构，但保留 *bufptr 缓冲 (所有权转用户)。
+ */
+struct memstream_ctx {
+  char **bufptr;
+  size_t *sizeptr;
+};
+
+static void memstream_write_fn(FILE *f, const char *data, int len) {
+  struct memstream_ctx *ctx = (struct memstream_ctx *)f->user_data;
+  char **bufptr = ctx->bufptr;
+  size_t *sizeptr = ctx->sizeptr;
+  char *buf = *bufptr;
+  size_t cur = *sizeptr;
+  size_t need = cur + (size_t)len;
+  if (need + 1 > (size_t)f->buf_size) {
+    size_t newcap = (size_t)f->buf_size;
+    if (newcap == 0)
+      newcap = 64;
+    while (newcap < need + 1)
+      newcap *= 2;
+    char *nb = (char *)realloc(buf, newcap);
+    if (!nb) {
+      f->flags |= _F_ERR;
+      return;
+    }
+    buf = nb;
+    *bufptr = buf;
+    f->buf_size = (int)newcap;
+  }
+  memcpy(buf + cur, data, (size_t)len);
+  *sizeptr = need;
+  buf[need] = '\0';
+}
+
+FILE *open_memstream(char **bufptr, size_t *sizeptr) {
+  if (!bufptr || !sizeptr)
+    return NULL;
+  *bufptr = NULL;
+  *sizeptr = 0;
+  FILE *f = (FILE *)calloc(1, sizeof(FILE));
+  if (!f)
+    return NULL;
+  struct memstream_ctx *ctx =
+      (struct memstream_ctx *)calloc(1, sizeof(struct memstream_ctx));
+  if (!ctx) {
+    free(f);
+    return NULL;
+  }
+  ctx->bufptr = bufptr;
+  ctx->sizeptr = sizeptr;
+  f->fd = -1;
+  f->buf = NULL;
+  f->buf_size = 0;
+  f->buf_pos = 0;
+  f->buf_mode = _IONBF;
+  f->flags = _F_WRITE;
+  f->ungot = -1;
+  f->write_fn = memstream_write_fn;
+  f->read_fn = NULL;
+  f->user_data = ctx;
+  return f;
 }

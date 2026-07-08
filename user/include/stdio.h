@@ -31,6 +31,7 @@ typedef struct _FILE {
   off_t offset;         /* current file offset (for fseek/ftell) */
   int ungot;            /* ungetc pushback (-1 if none) */
   pthread_mutex_t lock; /* per-FILE lock for flockfile/funlockfile */
+  void *user_data; /* user pointer for custom streams (e.g. open_memstream) */
 } FILE;
 
 /* Constants */
@@ -102,6 +103,9 @@ LIBC_EXPORT long ftell(FILE *f);
 LIBC_EXPORT void rewind(FILE *f);
 LIBC_EXPORT int setbuf(FILE *f, char *buf);
 LIBC_EXPORT int setvbuf(FILE *f, char *buf, int mode, size_t size);
+
+/* Dynamic memory stream (POSIX.1-2008) */
+LIBC_EXPORT FILE *open_memstream(char **bufptr, size_t *sizeptr);
 
 /* File locking (pthread mutex per FILE) */
 LIBC_EXPORT void flockfile(FILE *f);

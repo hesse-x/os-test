@@ -8,8 +8,11 @@
 #include <fcntl.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/param.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <syscall.h>
+#include <time.h>
 #include <unistd.h>
 #include <unity.h>
 
@@ -185,6 +188,36 @@ void test_mmap_memfd_verify(void) {
   close(fd);
 }
 
+/* 14. getpagesize returns the page size (4096 on x86-64) */
+void test_getpagesize(void) {
+  int ps = getpagesize();
+  TEST_ASSERT_TRUE(ps > 0);
+  TEST_ASSERT_EQUAL_INT(4096, ps);
+}
+
+/* 15. getpagesize matches sys/param.h PAGESIZE macro */
+void test_getpagesize_matches_param(void) {
+  TEST_ASSERT_EQUAL_INT(PAGESIZE, getpagesize());
+}
+
+/* 16. getpagesize: mmap one page and index last byte */
+void test_getpagesize_mmap_boundary(void) {
+  int ps = getpagesize();
+  char *p = (char *)mmap(NULL, ps, PROT_READ | PROT_WRITE, 0, -1, 0);
+  TEST_ASSERT_NOT_NULL(p);
+  p[ps - 1] = 'X';
+  TEST_ASSERT_EQUAL_INT('X', p[ps - 1]);
+  munmap(p, ps);
+}
+
+/* 17. sys/time.h: gettimeofday fills struct timeval (header integration) */
+void test_sys_time_gettimeofday(void) {
+  struct timeval tv;
+  int r = gettimeofday(&tv, NULL);
+  TEST_ASSERT_EQUAL_INT(0, r);
+  TEST_ASSERT_TRUE(tv.tv_sec > 0);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -203,5 +236,9 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_mmap_memfd_shared_cross);
   RUN_TEST(test_mmap_bad_fd);
   RUN_TEST(test_mmap_memfd_verify);
+  RUN_TEST(test_getpagesize);
+  RUN_TEST(test_getpagesize_matches_param);
+  RUN_TEST(test_getpagesize_mmap_boundary);
+  RUN_TEST(test_sys_time_gettimeofday);
   return UNITY_END();
 }

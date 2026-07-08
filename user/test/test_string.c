@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <alloca.h>
 #include <string.h>
 #include <unity.h>
 
@@ -96,6 +97,47 @@ void test_memmove_overlap(void) {
   TEST_ASSERT_EQUAL_INT('e', buf[6]);
 }
 
+/* 15. basename: no slash → whole string */
+void test_basename_no_slash(void) {
+  char buf[] = "hello.txt";
+  TEST_ASSERT_EQUAL_STRING("hello.txt", basename(buf));
+}
+
+/* 16. basename: trailing path component */
+void test_basename_with_slash(void) {
+  char buf[] = "/usr/lib/libfoo.so";
+  TEST_ASSERT_EQUAL_STRING("libfoo.so", basename(buf));
+}
+
+/* 17. basename: root path → empty string */
+void test_basename_root(void) {
+  char buf[] = "/";
+  TEST_ASSERT_EQUAL_STRING("", basename(buf));
+}
+
+/* 18. basename: trailing slash stripped by strrchr semantics */
+void test_basename_trailing_slash(void) {
+  char buf[] = "/usr/bin/";
+  /* strrchr finds last '/', returns pointer to it; +1 → empty string */
+  TEST_ASSERT_EQUAL_STRING("", basename(buf));
+}
+
+/* 19. alloca: stack allocation, usable like malloc */
+void test_alloca_basic(void) {
+  char *p = (char *)alloca(32);
+  strcpy(p, "stack_alloc");
+  TEST_ASSERT_EQUAL_STRING("stack_alloc", p);
+}
+
+/* 20. alloca: large enough to span multiple words */
+void test_alloca_large(void) {
+  size_t n = 1024;
+  char *p = (char *)alloca(n);
+  memset(p, 'A', n);
+  TEST_ASSERT_EQUAL_INT('A', p[0]);
+  TEST_ASSERT_EQUAL_INT('A', p[n - 1]);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -115,5 +157,11 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_memcpy_basic);
   RUN_TEST(test_memset_basic);
   RUN_TEST(test_memmove_overlap);
+  RUN_TEST(test_basename_no_slash);
+  RUN_TEST(test_basename_with_slash);
+  RUN_TEST(test_basename_root);
+  RUN_TEST(test_basename_trailing_slash);
+  RUN_TEST(test_alloca_basic);
+  RUN_TEST(test_alloca_large);
   return UNITY_END();
 }

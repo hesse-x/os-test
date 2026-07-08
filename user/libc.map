@@ -17,6 +17,7 @@ global:
     vsprintf; fdopen; clearerr; setbuf; setvbuf; ungetc; flockfile;
     funlockfile; ftrylockfile; fgetc_unlocked; fputc_unlocked;
     getchar_unlocked; putchar_unlocked; fread_unlocked; fwrite_unlocked;
+    open_memstream;
     stdin; stdout; stderr;
 
     /* <stdlib.h> */
@@ -31,6 +32,7 @@ global:
     memchr; memmem; strcat; strchr; strcmp; strcpy; strcspn; strdup;
     strerror; strerror_r; strlen; strncat; strncmp; strncpy; strndup;
     strpbrk; strrchr; strspn; strstr; strtok; strtok_r;
+    basename;
 
     /* <unistd.h> */
     access; close; dup2; _exit; ftruncate; getcwd; getpid; gettid;
@@ -39,6 +41,7 @@ global:
     getuid; geteuid; getgid; getegid; getppid; getpgrp; umask;
     gethostname; sethostname; alarm; pause;
     truncate; fsync; sync;
+    getpagesize;
 
     /* <fcntl.h> */
     fcntl; fd_file_size;
