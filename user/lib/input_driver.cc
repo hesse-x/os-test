@@ -99,8 +99,16 @@ static void handle_req(struct recv_msg *msg) {
   } else {
     result = -EINVAL;
   }
-  // INPUT_BIND/UNBIND carry no _IOC_READ data; pass NULL/0 and result only
-  sys_resp(NULL, 0, result);
+  // INPUT_BIND/UNBIND are _IOWR('I', ...): the kernel copies the 8-byte arg
+  // (struct input_bind_arg { int shm_fd; int result; }) back to the caller on
+  // reply. The caller (terminal/test) judges success by bind_arg.result, so we
+  // must write result into offset 4 and return it as a full 8-byte reply — not
+  // just pass result as status with reply_len=0 (that leaves bind_arg.result at
+  // its caller-initialized -1 and the caller loops forever).
+  struct input_bind_arg reply;
+  reply.shm_fd = -1;
+  reply.result = result;
+  sys_resp(&reply, sizeof(reply), result);
 }
 
 void input_driver_run(uint32_t device_type, const char *dev_name,

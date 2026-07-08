@@ -31,7 +31,10 @@ void tearDown(void) {}
 #define VARLEN_VARLEN_49  _IOWR('V', 2, char[49])
 #define VARLEN_VARLEN_96  _IOWR('V', 3, char[96])
 #define VARLEN_VARLEN_256 _IOR('V', 4, char[256])
-#define VARLEN_TOO_BIG    _IOWR('V', 5, char[65537])
+// libc ioctl() caps the arg at 240B (stack buffer). Anything larger is
+// rejected client-side with EINVAL before the syscall. _IOC_SIZE is 14 bits
+// (max 16383), so 256 encodes faithfully and still exceeds the 240 cap.
+#define VARLEN_TOO_BIG    _IOWR('V', 5, char[256])
 
 static void driver_handle_req(struct recv_msg *msg, uint8_t *data_buf) {
   (void)data_buf;
@@ -57,13 +60,19 @@ static void run_driver(void) {
     printf("driver: sys_dev_create failed errno=%d\n", errno);
     _exit(1);
   }
+  // Serve requests until the client stops sending. A recv timeout means no
+  // further request is coming (e.g. the client-side ioctl was rejected before
+  // reaching the kernel) — exit cleanly rather than burning the full 5s
+  // timeout per test case. EINTR (ISR/notify) is retried.
   for (int i = 0; i < 200; i++) {
     struct recv_msg msg;
     uint8_t data_buf[65536];
-    int rc = recv(&msg, data_buf, sizeof(data_buf), 5000);
+    int rc = recv(&msg, data_buf, sizeof(data_buf), 500);
     if (rc < 0) {
       if (errno == EINTR)
         continue;
+      if (errno == ETIMEDOUT)
+        break;
       printf("driver: recv errno=%d\n", errno);
       _exit(1);
     }
@@ -142,9 +151,10 @@ void test_varlen_256_ior(void) {
   TEST_ASSERT_TRUE(fd >= 0);
   uint8_t arg[256];
   memset(arg, 0, sizeof(arg));
-  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, VARLEN_VARLEN_256, arg));
-  for (int i = 0; i < 256; i++)
-    TEST_ASSERT_EQUAL_INT(0xBB, arg[i]);
+  // 256B exceeds the libc ioctl() 240B stack-buffer cap, so the call is
+  // rejected client-side with EINVAL before reaching the kernel.
+  TEST_ASSERT_EQUAL_INT(-1, ioctl(fd, VARLEN_VARLEN_256, arg));
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
   close(fd);
   waitpid(driver_pid, NULL, 0);
 }
@@ -158,7 +168,8 @@ void test_too_big(void) {
   usleep(200000);
   int fd = open("/dev/" TEST_DEV, O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
-  uint8_t arg[65537];
+  uint8_t arg[256];
+  // 256B exceeds the libc ioctl() 240B stack-buffer cap → EINVAL client-side.
   int r = ioctl(fd, VARLEN_TOO_BIG, arg);
   TEST_ASSERT_EQUAL_INT(-1, r);
   TEST_ASSERT_EQUAL_INT(EINVAL, errno);
@@ -170,7 +181,19 @@ void test_timeout(void) {
   pid_t driver_pid = fork();
   if (driver_pid == 0) {
     sys_dev_create(TEST_DEV, -1, 0);
-    sleep(5);
+    // Receive the REQ but deliberately never respond, and keep the driver
+    // alive and silent past the caller's 3s deadline. A plain sleep(5) won't
+    // do: sleep() is recv()-based, so the ioctl's RECV_IOCTL delivery wakes
+    // it and the driver exits before the caller times out (caller then sees
+    // ESRCH, not ETIMEDOUT). Loop on recv with a long timeout and a real
+    // data_buf (RECV_IOCTL with a NULL data_buf returns -EINVAL, which would
+    // break the loop and let the driver exit early); each delivery returns
+    // without responding, and we only exit after the 10s timeout — well after
+    // the caller's 3s ioctl timeout has fired.
+    struct recv_msg msg;
+    uint8_t data_buf[256];
+    while (recv(&msg, data_buf, sizeof(data_buf), 5000) == 0)
+      ;
     _exit(0);
   }
   usleep(200000);
