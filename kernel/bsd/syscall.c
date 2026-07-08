@@ -1901,6 +1901,7 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     hdr->ioctl.arg_size = arg_size;
     hdr->ioctl.kmaddr = kbuf;
     hdr->ioctl.len = arg_size;
+    hdr->ioctl.minor = ops->minor;
 
     spin_lock(&target->recv_lock);
     uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;

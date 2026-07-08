@@ -78,6 +78,23 @@ static void test_evdev_caps_abs(void) {
   close(fd);
 }
 
+// Drives the variable-length RECV_IOCTL path: 96B > 48B, so the kernel proxy
+// takes the kmalloc'd-buffer branch (sys_ioctl varlen). Before B3 this request
+// was silently dropped (evdev only handled RECV_REQ). KEY_A=30 sits in byte 3
+// bit 6 of the KEY bitmap, same position as the 48B case — verifies the varlen
+// path returns identical data and the call no longer fails/strands.
+static void test_evdev_caps_key_varlen(void) {
+  int fd = open("/dev/input/event0", O_RDWR);
+  TEST_ASSERT_GREATER_OR_EQUAL(0, fd);
+  uint8_t buf[96];
+  memset(buf, 0xEE, sizeof(buf));
+  int rc = ioctl(fd, EVIOCGBIT(EV_KEY, 96), buf);
+  TEST_ASSERT_EQUAL(0, rc);
+  // KEY_A=30 → byte 3, bit 6.
+  TEST_ASSERT_BIT_HIGH(6, buf[3]);
+  close(fd);
+}
+
 static void test_evdev_prop(void) {
   int fd = open("/dev/input/event0", O_RDWR);
   TEST_ASSERT_GREATER_OR_EQUAL(0, fd);
@@ -166,6 +183,7 @@ int main(int argc, char **argv) {
   RUN_TEST(test_evdev_id);
   RUN_TEST(test_evdev_name);
   RUN_TEST(test_evdev_caps_key);
+  RUN_TEST(test_evdev_caps_key_varlen);
   RUN_TEST(test_evdev_caps_abs);
   RUN_TEST(test_evdev_prop);
   RUN_TEST(test_evdev_abs_info);

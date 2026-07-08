@@ -128,14 +128,28 @@ typedef struct recv_msg {
       void *kmaddr;   // kernel kmalloc buffer (opaque to user)
       size_t len;     // data length
     } msg;
-    struct {          // RECV_IOCTL only (24B, 8-byte aligned within 56B union)
+    struct {             // RECV_IOCTL only (variable-length ioctl proxy path)
       uint32_t cmd;      // ioctl command number
       uint32_t arg_size; // arg data length
       void *kmaddr;      // kernel kmalloc buffer (arg data copy)
       size_t len;        // = arg_size (convenience for driver)
+      uint32_t minor; // device minor for routing (evdev reads msg->ioctl.minor)
     } ioctl;
   };
 } recv_msg;
+
+// Guard the recv_msg ABI: it must serialize into RECV_MSG_SIZE (64) bytes.
+// The ioctl/msg union members must not grow past the 56-byte data[] member,
+// or the fixed-size RECV_MSG_SIZE copies in sys_ioctl/sys_recv would truncate
+// the trailing fields. Any struct growth that trips this assert must either
+// shrink elsewhere or raise RECV_MSG_SIZE deliberately.
+#ifdef __cplusplus
+static_assert(sizeof(recv_msg) == 64,
+              "recv_msg must stay 64 bytes (RECV_MSG_SIZE)");
+#else
+_Static_assert(sizeof(recv_msg) == 64,
+               "recv_msg must stay 64 bytes (RECV_MSG_SIZE)");
+#endif
 
 // ===================== PCI device info =====================
 typedef struct pci_dev_info_bar {

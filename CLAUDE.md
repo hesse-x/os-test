@@ -183,6 +183,8 @@ kernel/
 | `test.md` | 测试框架设计（Unity + test_runner） |
 | `todo.md` | 项目路线图（Wayland 验收 + clang/LLVM 里程碑 + 已知 Bug） |
 | `kbd.md` | USB HID 键盘驱动（用户态） |
+| `evdev.md` | evdev 用户态驱动（EVIOCG* 查询接口、minor 路由、grab 独占） |
+| `ioctl.md` | ioctl 代理机制（inline/变长双路径、RECV_IOCTL、sys_resp 三参分离） |
 | `driver_workflow.md` | 用户态驱动工作流 |
 | `user_driver.md` | 用户态驱动详细设计 |
 | `terminal.md` | Terminal/PTY/串口设计（内核 PTY + 内核串口 + 用户态 ldisc + Shell） |

@@ -12,8 +12,8 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <string.h>
-#include <sys/ipc.h>
 #include <sys/ioctl.h>
+#include <sys/ipc.h>
 #include <sys/process.h>
 #include <sys/wait.h>
 #include <syscall.h>
@@ -27,14 +27,14 @@ void tearDown(void) {}
 
 #define TEST_DEV "test_varlen"
 
-#define VARLEN_INLINE_48  _IOWR('V', 1, char[48])
-#define VARLEN_VARLEN_49  _IOWR('V', 2, char[49])
-#define VARLEN_VARLEN_96  _IOWR('V', 3, char[96])
+#define VARLEN_INLINE_48 _IOWR('V', 1, char[48])
+#define VARLEN_VARLEN_49 _IOWR('V', 2, char[49])
+#define VARLEN_VARLEN_96 _IOWR('V', 3, char[96])
 #define VARLEN_VARLEN_256 _IOR('V', 4, char[256])
 // libc ioctl() caps the arg at 240B (stack buffer). Anything larger is
 // rejected client-side with EINVAL before the syscall. _IOC_SIZE is 14 bits
 // (max 16383), so 256 encodes faithfully and still exceeds the 240 cap.
-#define VARLEN_TOO_BIG    _IOWR('V', 5, char[256])
+#define VARLEN_TOO_BIG _IOWR('V', 5, char[256])
 
 static void driver_handle_req(struct recv_msg *msg, uint8_t *data_buf) {
   (void)data_buf;
