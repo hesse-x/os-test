@@ -19,6 +19,7 @@ typedef uint16_t sa_family_t;
 
 // ===================== Address family =====================
 #define AF_UNIX 1
+#define AF_NETLINK 2
 #define AF_LOCAL AF_UNIX
 
 // ===================== Socket types =====================

@@ -10,6 +10,7 @@
 #include "arch/x64/trap.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/futex.h"
+#include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/syscall.h"
 #include "kernel/bsd/timerfd.h"
@@ -46,6 +47,8 @@ static bool check_signal_pending(xtask *t) {
 void bsd_init(void) {
   vfs_init();
   printk(LOG_INFO, "bsd_init: vfs_init done\n");
+  nl_init();
+  printk(LOG_INFO, "bsd_init: nl_init done\n");
 
   // futex_table initialization (64 buckets + locks)
   for (int i = 0; i < FUTEX_HASH_SIZE; i++) {

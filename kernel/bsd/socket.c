@@ -12,6 +12,7 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/file_poll.h"
+#include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/socket.h"
 #include "kernel/bsd/types.h"
@@ -26,6 +27,7 @@
 #include "kernel/xcore/xtask.h"
 #include <xos/errno.h>
 #include <xos/fcntl.h>
+#include <xos/netlink.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
 
@@ -665,6 +667,45 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   int base_type = type & (SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET);
 
   // Only AF_UNIX SOCK_STREAM supported
+  if (domain == AF_NETLINK) {
+    if (base_type != SOCK_DGRAM)
+      return (int64_t)-ESOCKTNOSUPPORT;
+    struct netlink_sock *nl = netlink_sock_alloc(protocol);
+    if (!nl)
+      return (int64_t)-ENOMEM;
+
+    xtask *proc = current_task;
+    spinlock *fdlk = &proc->proc->files->fd_lock;
+    spin_lock(fdlk);
+
+    int fd = alloc_fd(proc->proc->files, 3);
+    if (fd < 0) {
+      spin_unlock(fdlk);
+      netlink_sock_release(nl);
+      return (int64_t)-EMFILE;
+    }
+
+    struct file *f = (struct file *)kmalloc(sizeof(struct file));
+    if (!f) {
+      spin_unlock(fdlk);
+      netlink_sock_release(nl);
+      return (int64_t)-ENOMEM;
+    }
+    __memset(f, 0, sizeof(*f));
+    refcount_set(&f->f_count, 1);
+    f->type = FD_NETLINK;
+    f->flags = O_RDWR;
+    if (sock_flags & SOCK_NONBLOCK)
+      f->flags |= O_NONBLOCK;
+    if (sock_flags & SOCK_CLOEXEC)
+      f->flags |= FD_CLOEXEC;
+    f->nlsock = nl;
+    fd_install(proc->proc->files, fd, f);
+
+    spin_unlock(fdlk);
+    return (int64_t)fd;
+  }
+
   if (domain != AF_UNIX)
     return (int64_t)-EAFNOSUPPORT;
   if (base_type != SOCK_STREAM)
@@ -727,7 +768,7 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     return (int64_t)-EBADF;
   rcu_read_lock();
   struct file *bf = fd_lookup(proc->proc->files, fd);
-  if (!bf || bf->type != FD_SOCKET) {
+  if (!bf || (bf->type != FD_SOCKET && bf->type != FD_NETLINK)) {
     rcu_read_unlock();
     return (int64_t)-ENOTSOCK;
   }
@@ -745,9 +786,37 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   // Read sun_family
   uint16_t sun_family;
   copy_from_user(&sun_family, addr, sizeof(sun_family));
+  if (sun_family == AF_NETLINK) {
+    // Validate addr pointer for sockaddr_nl
+    if (addrlen < sizeof(sockaddr_nl)) {
+      file_put(bf);
+      return (int64_t)-EINVAL;
+    }
+    if (bf->type != FD_NETLINK) {
+      file_put(bf);
+      return (int64_t)-ENOTSOCK;
+    }
+    struct netlink_sock *nlsock = bf->nlsock;
+    if (!nlsock) {
+      file_put(bf);
+      return (int64_t)-EBADF;
+    }
+    sockaddr_nl nl_addr;
+    copy_from_user(&nl_addr, addr, sizeof(sockaddr_nl));
+    int64_t ret = netlink_sock_bind(nlsock, &nl_addr);
+    file_put(bf);
+    return ret;
+  }
+
   if (sun_family != AF_UNIX) {
     file_put(bf);
     return (int64_t)-EAFNOSUPPORT;
+  }
+
+  // AF_UNIX bind must use FD_SOCKET
+  if (bf->type != FD_SOCKET) {
+    file_put(bf);
+    return (int64_t)-ENOTSOCK;
   }
 
   // Read sun_path (max 108 bytes)
@@ -1269,7 +1338,7 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     return (int64_t)-EBADF;
   rcu_read_lock();
   struct file *sf = fd_lookup(proc->proc->files, fd);
-  if (!sf || sf->type != FD_SOCKET) {
+  if (!sf || (sf->type != FD_SOCKET && sf->type != FD_NETLINK)) {
     rcu_read_unlock();
     return (int64_t)-ENOTSOCK;
   }
@@ -1347,17 +1416,30 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     kcontrollen = kmsg.msg_controllen;
   }
 
-  struct unix_sock *sock = sf->sock;
-  if (!sock) {
-    kfree(kiov);
-    if (kcontrol)
-      kfree(kcontrol);
-    file_put(sf);
-    return (int64_t)-EBADF;
+  int64_t ret;
+  if (sf->type == FD_NETLINK) {
+    struct netlink_sock *nlsock = sf->nlsock;
+    if (!nlsock) {
+      kfree(kiov);
+      if (kcontrol)
+        kfree(kcontrol);
+      file_put(sf);
+      return (int64_t)-EBADF;
+    }
+    // Netlink: ignore control data (SCM_RIGHTS not supported on netlink)
+    ret = netlink_sock_sendmsg(nlsock, kiov, kmsg.msg_iovlen, flags);
+  } else {
+    struct unix_sock *sock = sf->sock;
+    if (!sock) {
+      kfree(kiov);
+      if (kcontrol)
+        kfree(kcontrol);
+      file_put(sf);
+      return (int64_t)-EBADF;
+    }
+    ret = unix_sock_sendmsg(sock, kiov, kmsg.msg_iovlen, kcontrol, kcontrollen,
+                            flags);
   }
-
-  int64_t ret = unix_sock_sendmsg(sock, kiov, kmsg.msg_iovlen, kcontrol,
-                                  kcontrollen, flags);
 
   kfree(kiov);
   if (kcontrol)
@@ -1378,7 +1460,7 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     return (int64_t)-EBADF;
   rcu_read_lock();
   struct file *rf = fd_lookup(proc->proc->files, fd);
-  if (!rf || rf->type != FD_SOCKET) {
+  if (!rf || (rf->type != FD_SOCKET && rf->type != FD_NETLINK)) {
     rcu_read_unlock();
     return (int64_t)-ENOTSOCK;
   }
@@ -1441,22 +1523,42 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     kcontrollen = kmsg.msg_controllen;
   }
 
-  struct unix_sock *sock = rf->sock;
-  if (!sock) {
-    kfree(kiov);
-    file_put(rf);
-    return (int64_t)-EBADF;
-  }
-
-  int64_t ret = unix_sock_recvmsg(sock, kiov, kmsg.msg_iovlen, kcontrol,
-                                  &kcontrollen, flags);
-
-  // Update msg_controllen in user space
-  if (ret >= 0) {
-    if (kmsg.msg_control && kmsg.msg_controllen > 0) {
-      // struct msghdr: offset 40 = msg_controllen (size_t)
-      copy_to_user((void __user *)((char __user *)msg + 40), &kcontrollen,
-                   sizeof(size_t));
+  int64_t ret;
+  if (rf->type == FD_NETLINK) {
+    struct netlink_sock *nlsock = rf->nlsock;
+    if (!nlsock) {
+      kfree(kiov);
+      file_put(rf);
+      return (int64_t)-EBADF;
+    }
+    sockaddr_nl src_addr;
+    size_t src_len = sizeof(sockaddr_nl);
+    __memset(&src_addr, 0, sizeof(src_addr));
+    ret = netlink_sock_recvmsg(nlsock, kiov, kmsg.msg_iovlen, &src_addr,
+                               &src_len, flags);
+    // Write src_addr to msg_name if requested
+    if (ret >= 0 && kmsg.msg_name && kmsg.msg_namelen >= sizeof(sockaddr_nl)) {
+      copy_to_user((void __user *)kmsg.msg_name, &src_addr,
+                   sizeof(sockaddr_nl));
+      socklen_t out_len = sizeof(sockaddr_nl);
+      copy_to_user((void __user *)((char __user *)msg + 4), &out_len,
+                   sizeof(socklen_t));
+    }
+  } else {
+    struct unix_sock *sock = rf->sock;
+    if (!sock) {
+      kfree(kiov);
+      file_put(rf);
+      return (int64_t)-EBADF;
+    }
+    ret = unix_sock_recvmsg(sock, kiov, kmsg.msg_iovlen, kcontrol, &kcontrollen,
+                            flags);
+    // Update msg_controllen in user space (existing code)
+    if (ret >= 0) {
+      if (kmsg.msg_control && kmsg.msg_controllen > 0) {
+        copy_to_user((void __user *)((char __user *)msg + 40), &kcontrollen,
+                     sizeof(size_t));
+      }
     }
   }
 

@@ -11,6 +11,7 @@
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/file_poll.h"
+#include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/pty.h"
 #include "kernel/bsd/socket.h"
@@ -103,6 +104,11 @@ static wait_queue_head *ep_target_wq(struct file *f) {
     if (f->pty->wq)
       return f->pty->wq;
     return ep_wq_alloc(&f->pty->wq);
+  }
+  if (f->type == FD_NETLINK && f->nlsock) {
+    if (f->nlsock->wq)
+      return f->nlsock->wq;
+    return ep_wq_alloc(&f->nlsock->wq);
   }
   return file_wq_get(f); // generic file wq (eventfd/timerfd/signalfd/other)
 }

@@ -56,6 +56,10 @@ int main(int argc, char **argv, char **envp) {
   printf("init: spawning evdev\n");
   spawn_service("/driver/evdev.dev");
 
+  // 3.5 Spawn udevd (device event daemon, subscribes to netlink uevent group)
+  printf("init: spawning udevd\n");
+  spawn_service("/usr/bin/udevd");
+
   // 4. Spawn terminal (which spawns shell internally)
   printf("init: spawning terminal\n");
   spawn_service("/usr/bin/terminal");

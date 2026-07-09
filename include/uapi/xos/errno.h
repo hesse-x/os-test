@@ -49,6 +49,7 @@
 #define ENOEXEC 39
 #define ELOOP 40
 #define ENAMETOOLONG 41
+#define ESOCKTNOSUPPORT 44
 
 /* POSIX errno values that do not collide with existing assignments use the
  * Linux numbers for cross-ecology familiarity. Two Linux values collide with

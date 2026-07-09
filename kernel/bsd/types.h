@@ -38,6 +38,7 @@
 #define FD_EVENTFD 10
 #define FD_TIMERFD 11
 #define FD_SIGNALFD 12
+#define FD_NETLINK 13
 
 typedef struct pipe {
   uint8_t *buf;
@@ -56,6 +57,7 @@ struct eventpoll;
 struct eventfd_ctx;
 struct timerfd_ctx;
 struct signalfd_ctx;
+struct netlink_sock;
 
 typedef struct file {
   refcount_t f_count;
@@ -81,6 +83,7 @@ typedef struct file {
     struct eventfd_ctx *eventfd;
     struct timerfd_ctx *timerfd;
     struct signalfd_ctx *signalfd;
+    struct netlink_sock *nlsock;
   };
 } file;
 

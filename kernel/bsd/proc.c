@@ -21,6 +21,7 @@
 #include "kernel/bsd/eventpoll.h"
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/pty.h"
 #include "kernel/bsd/signal.h"
@@ -256,6 +257,10 @@ void file_put(struct file *f) {
       kfree(f->signalfd);
       f->signalfd = NULL;
     }
+    break;
+  case FD_NETLINK:
+    if (f->nlsock)
+      netlink_sock_close(f->nlsock);
     break;
   case FD_TTY:
     pty_close_file(f);

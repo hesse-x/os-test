@@ -103,6 +103,9 @@ else()
     add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c)
 endif()
 
+# udev/ — device event daemon (subscribes to netlink uevent group)
+add_user_elf(udevd C SOURCES udev/udevd.c LINK_LIBS c)
+
 # ===== ld.so multi-dependency unit tests (ld.md §8 / plan_ld phase D) =====
 # Fully decoupled from drm: use stub .so topologies + a dynamic main ELF to
 # cover the loading layer (recursive load / dedup / cycle detection).

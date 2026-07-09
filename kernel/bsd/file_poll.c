@@ -12,6 +12,7 @@
 #include "kernel/bsd/eventpoll.h"
 #include "kernel/bsd/file_poll.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/pty.h"
 #include "kernel/bsd/signal.h"
@@ -140,6 +141,19 @@ __poll file_poll(struct file *f, __poll events) {
         if (pend & ~bp->sig_blocked)
           revents |= (events & POLLIN);
       }
+    }
+  } else if (f->type == FD_NETLINK) {
+    struct netlink_sock *nlsock = f->nlsock;
+    if (nlsock) {
+      spin_lock(&nl_group_lock);
+      if (nlsock->recv_queue_head) {
+        if (events & POLLIN)
+          revents |= POLLIN;
+      }
+      spin_unlock(&nl_group_lock);
+      // Netlink is always writable (broadcast does not block)
+      if (events & POLLOUT)
+        revents |= POLLOUT;
     }
   } else {
     // FD_SHM etc: always ready

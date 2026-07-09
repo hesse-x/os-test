@@ -7,6 +7,7 @@
 #include "kernel/bsd/devtmpfs.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/atomic.h"
@@ -221,6 +222,12 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
 
   spin_unlock(&devtmpfs_lock);
   printk(LOG_INFO, "devtmpfs: created /dev/%s\n", name);
+
+  // Broadcast uevent if netlink initialized
+  if (devtmpfs_initialized && nl_is_initialized()) {
+    const char *subsys = (ops && ops->is_block) ? "block" : "input";
+    nl_uevent_broadcast("add", name, subsys);
+  }
   return 0;
 }
 
@@ -304,6 +311,7 @@ void devtmpfs_cleanup_pid(pid_t pid) {
 }
 
 void devtmpfs_remove(const char *name) {
+  bool removed = false;
   spin_lock(&devtmpfs_lock);
   struct dev_entry **pp = &dev_list;
   while (*pp) {
@@ -315,10 +323,13 @@ void devtmpfs_remove(const char *name) {
       e->ip = NULL;
       e->name[0] = '\0';
       dev_count--;
-      spin_unlock(&devtmpfs_lock);
-      return;
+      removed = true;
+      break;
     }
     pp = &e->next;
   }
   spin_unlock(&devtmpfs_lock);
+
+  if (removed && devtmpfs_initialized && nl_is_initialized())
+    nl_uevent_broadcast("remove", name, "misc");
 }

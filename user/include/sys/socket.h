@@ -17,6 +17,7 @@ extern "C" {
 #endif
 
 // ===================== Constants (from xos/socket.h) =====================
+#include <xos/netlink.h>
 #include <xos/socket.h>
 
 // ===================== Syscall wrappers =====================

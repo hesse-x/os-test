@@ -21,6 +21,7 @@
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/pty.h"
 #include "kernel/bsd/signal.h"
@@ -1081,6 +1082,36 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     goto out;
   }
 
+  // FD_NETLINK: write → netlink broadcast
+  if (f->type == FD_NETLINK) {
+    if (!(f->flags & (O_WRONLY | O_RDWR))) {
+      ret = -EINVAL;
+      goto out;
+    }
+    if (!buf) {
+      ret = -EFAULT;
+      goto out;
+    }
+    uint64_t ptr_start = (__force uint64_t)buf;
+    uint64_t ptr_end = ptr_start + len;
+    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
+        ptr_end > 0xFFFFFFFF80000000ULL) {
+      ret = -EFAULT;
+      goto out;
+    }
+    struct netlink_sock *nlsock = f->nlsock;
+    if (!nlsock) {
+      ret = -EBADF;
+      goto out;
+    }
+    struct iovec iov;
+    iov.iov_base = (void *)(__force uint64_t)buf;
+    iov.iov_len = len;
+    ret = netlink_sock_sendmsg(nlsock, &iov, 1,
+                               (f->flags & O_NONBLOCK) ? MSG_DONTWAIT : 0);
+    goto out;
+  }
+
   // FD_DEV: write via dev_ops callback
   if (f->type == FD_DEV) {
     if (!(f->flags & (O_WRONLY | O_RDWR))) {
@@ -1401,6 +1432,32 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       goto out;
     }
     ret = unix_sock_read(sock, (void __force *)buf, len);
+    goto out;
+  }
+
+  // FD_NETLINK: read → netlink recv
+  if (f->type == FD_NETLINK) {
+    if (!buf) {
+      ret = -EFAULT;
+      goto out;
+    }
+    uint64_t ptr_start = (__force uint64_t)buf;
+    uint64_t ptr_end = ptr_start + len;
+    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
+        ptr_end > 0xFFFFFFFF80000000ULL) {
+      ret = -EFAULT;
+      goto out;
+    }
+    struct netlink_sock *nlsock = f->nlsock;
+    if (!nlsock) {
+      ret = -EBADF;
+      goto out;
+    }
+    struct iovec iov;
+    iov.iov_base = buf;
+    iov.iov_len = len;
+    ret = netlink_sock_recvmsg(nlsock, &iov, 1, NULL, NULL,
+                               (f->flags & O_NONBLOCK) ? MSG_DONTWAIT : 0);
     goto out;
   }
 
@@ -2046,6 +2103,7 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     goto out;
   }
   case FD_SOCKET:
+  case FD_NETLINK:
   case FD_PIPE:
   case FD_REGULAR:
   case FD_DIR:
@@ -2615,7 +2673,8 @@ int64_t sys_lseek(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 
   int64_t ret;
 
-  if (f->type == FD_PIPE || f->type == FD_SOCKET || f->type == FD_DEV) {
+  if (f->type == FD_PIPE || f->type == FD_SOCKET || f->type == FD_NETLINK ||
+      f->type == FD_DEV) {
     ret = -ESPIPE;
     goto out;
   }
