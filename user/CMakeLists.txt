@@ -24,6 +24,10 @@ set(LIBC_SOURCES
     lib/environ.c
     lib/errno.cc
     lib/select.c
+    lib/epoll.cc
+    lib/eventfd.cc
+    lib/timerfd.cc
+    lib/signalfd.cc
     lib/setjmp.S
     lib/dev_ready.c
     ${CMAKE_SOURCE_DIR}/utils/kvformat.c

@@ -159,16 +159,13 @@ int fcntl(int fd, int cmd, ...) {
     int r = sys_fcntl(fd, cmd, arg);
     return r;
   } else if (cmd == F_GETFD) {
-    /* The kernel's sys_fcntl does not yet support F_GETFD/F_SETFD; this OS has
-     * no exec, so FD_CLOEXEC semantics are meaningless. Honest degradation:
-     * always return 0 (no cloexec). See todo.md. */
-    return 0;
+    return sys_fcntl(fd, F_GETFD, 0);
   } else if (cmd == F_SETFD) {
     va_list ap;
     va_start(ap, cmd);
-    (void)va_arg(ap, int);
+    int arg = va_arg(ap, int);
     va_end(ap);
-    return 0;
+    return sys_fcntl(fd, cmd, arg);
   } else if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
     va_list ap;
     va_start(ap, cmd);

@@ -18,6 +18,7 @@
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/elf_loader.h"
+#include "kernel/bsd/eventpoll.h"
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/proc.h"
@@ -25,6 +26,7 @@
 #include "kernel/bsd/signal.h"
 #include "kernel/bsd/socket.h"
 #include "kernel/bsd/syscall.h"
+#include "kernel/bsd/timerfd.h"
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/vfs.h"
 #include "kernel/kernel.h"
@@ -184,6 +186,8 @@ void file_put(struct file *f) {
       wake_pipe_peers(p, f->flags);
       if (refcount_dec_and_test(&p->p_count)) {
         kfree(p->buf);
+        if (p->close_wq)
+          kfree(p->close_wq);
         kfree(p);
       }
     }
@@ -224,11 +228,44 @@ void file_put(struct file *f) {
     if (f->sock)
       unix_sock_close(f->sock);
     break;
+  case FD_EPOLL:
+    if (f->epoll) {
+      eventpoll_release(f->epoll);
+      f->epoll = NULL;
+    }
+    break;
+  case FD_EVENTFD:
+    if (f->eventfd) {
+      kfree(f->eventfd);
+      f->eventfd = NULL;
+    }
+    break;
+  case FD_TIMERFD: {
+    timerfd_ctx *tfd = f->timerfd;
+    if (tfd) {
+      spin_lock(&timerfd_list_lock);
+      list_remove(&tfd->node);
+      spin_unlock(&timerfd_list_lock);
+      kfree(tfd);
+      f->timerfd = NULL;
+    }
+    break;
+  }
+  case FD_SIGNALFD:
+    if (f->signalfd) {
+      kfree(f->signalfd);
+      f->signalfd = NULL;
+    }
+    break;
   case FD_TTY:
     pty_close_file(f);
     if (f->inode)
       inode_put(f->inode);
     break;
+  }
+  if (f->wq) {
+    kfree(f->wq);
+    f->wq = NULL;
   }
   kfree(f);
 }

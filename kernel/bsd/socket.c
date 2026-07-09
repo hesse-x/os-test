@@ -11,12 +11,11 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
-#include "kernel/bsd/devtmpfs.h"
-#include "kernel/bsd/inode.h"
+#include "kernel/bsd/file_poll.h"
 #include "kernel/bsd/proc.h"
-#include "kernel/bsd/pty.h"
 #include "kernel/bsd/socket.h"
 #include "kernel/bsd/types.h"
+#include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
@@ -182,6 +181,7 @@ struct unix_sock *unix_sock_alloc(void) {
   sock->shutdown_read = 0;
   sock->shutdown_write = 0;
   sock->sun_path[0] = '\0';
+  sock->wq = NULL;
   return sock;
 }
 
@@ -206,6 +206,12 @@ void unix_sock_free(struct unix_sock *sock) {
         unix_sock_wake_writer(bp);
       }
     }
+    // Detach peer's back-reference so it cannot dereference us after free.
+    if (bp->peer_sock) {
+      spin_lock(&socket_lock);
+      bp->peer_sock->peer_sock = NULL;
+      spin_unlock(&socket_lock);
+    }
     // Free the child socket
     bp->peer = -1;
     bp->state = UNIX_CLOSED;
@@ -214,9 +220,13 @@ void unix_sock_free(struct unix_sock *sock) {
       struct sk_buff *skb2 = skb_dequeue(bp);
       skb_free(skb2);
     }
+    if (bp->wq)
+      kfree(bp->wq);
     kfree(bp);
     bp = next;
   }
+  if (sock->wq)
+    kfree(sock->wq);
   kfree(sock);
 }
 
@@ -235,12 +245,16 @@ void unix_sock_wake_reader(struct unix_sock *sock) {
   if (sock->blocked_reader >= 0) {
     wake_process(sock->blocked_reader);
   }
+  if (sock->wq)
+    __wake_up(sock->wq, POLLIN);
 }
 
 void unix_sock_wake_writer(struct unix_sock *sock) {
   if (sock->blocked_writer >= 0) {
     wake_process(sock->blocked_writer);
   }
+  if (sock->wq)
+    __wake_up(sock->wq, POLLOUT);
 }
 
 // ===================== Internal sendmsg/recvmsg =====================
@@ -358,6 +372,8 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
   if (blocked_reader >= 0) {
     wake_process(blocked_reader);
   }
+  if (peer_sock->wq)
+    __wake_up(peer_sock->wq, POLLIN);
 
   return (int64_t)total;
 }
@@ -389,17 +405,11 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
       if (sock->state == UNIX_CLOSED ||
           (sock->peer >= 0 && task_get(sock->peer)->pid == sock->peer &&
            task_get(sock->peer)->state == ZOMBIE)) {
-        // Check if peer has closed
+        // Check if peer has closed. peer_sock is NULL after peer close
+        // detached the back-reference (see unix_sock_close).
         bool peer_closed = true;
         if (sock->peer_sock) {
           peer_closed = (sock->peer_sock->state != UNIX_CONNECTED);
-        } else {
-          spin_unlock(&socket_lock);
-          // peer_sock is always set during connect/socketpair; this should not
-          // be reached
-          WARN_ON(!sock->peer_sock);
-          // without peer_sock, assume peer closed
-          return 0; // EOF
         }
         if (peer_closed) {
           spin_unlock(&socket_lock);
@@ -598,13 +608,18 @@ void unix_sock_close(struct unix_sock *sock) {
   pid_t reader = sock->blocked_reader;
   pid_t writer = sock->blocked_writer;
   struct unix_sock *peer_s = sock->peer_sock;
-  pid_t peer_pid = sock->peer;
   pid_t peer_reader = -1, peer_writer = -1;
   if (peer_s) {
     peer_reader = peer_s->blocked_reader;
     peer_writer = peer_s->blocked_writer;
     peer_s->blocked_reader = -1;
     peer_s->blocked_writer = -1;
+    // Mark the peer's read side as shutdown so subsequent recv/poll on the
+    // peer sees EOF (POLLIN with read returning 0), matching Linux semantics
+    // for close() of the remote end.
+    peer_s->shutdown_read = 1;
+    // Detach back-reference so the peer never dereferences us after free.
+    peer_s->peer_sock = NULL;
   }
   sock->blocked_reader = -1;
   sock->blocked_writer = -1;
@@ -622,9 +637,16 @@ void unix_sock_close(struct unix_sock *sock) {
     wake_process(peer_reader);
   if (peer_writer >= 0)
     wake_process(peer_writer);
-  // Also wake peer process itself (PID-based fallback for cross-process)
-  if (!peer_s && peer_pid >= 0)
-    wake_process(peer_pid);
+  // Note: no PID-based fallback wake. When peer_s is NULL the peer socket was
+  // already closed; its process may be in any wait state (e.g. WAIT_CHILD)
+  // and wake_process() ASSERTs on non-IPC events. Socket-level wakeups are
+  // already covered by peer_reader/peer_writer and the __wake_up() calls below.
+
+  // Notify epoll-style waiters of close-driven readiness (POLLHUP).
+  if (sock->wq)
+    __wake_up(sock->wq, POLLHUP | POLLIN | POLLOUT);
+  if (peer_s && peer_s->wq)
+    __wake_up(peer_s->wq, POLLHUP | POLLIN | POLLOUT);
 
   // Release reference (actual free when ref_count hits 0)
   unix_sock_release(sock);
@@ -1127,6 +1149,8 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   if (blocked_reader >= 0) {
     wake_process(blocked_reader);
   }
+  if (listener->wq)
+    __wake_up(listener->wq, POLLIN);
 
   file_put(cf);
   return 0;
@@ -1518,6 +1542,15 @@ int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   return 0;
 }
 
+// Per-fd wait callback for sys_poll: registered on each polled fd's wq so a
+// fd becoming ready (e.g. timerfd expiry) wakes the blocked poll promptly
+// instead of waiting out the full deadline. Mirrors eventfd/timerfd wake cbs.
+static void poll_wait_cb(wait_queue_t *wq, unsigned long flags) {
+  xtask *proc = (xtask *)wq->data;
+  (void)flags;
+  wake_with_event(proc, WAIT_POLL);
+}
+
 int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
                  int64_t _u2, int64_t _u3) {
   struct pollfd __user *fds = (struct pollfd __user *)arg1;
@@ -1538,15 +1571,24 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     return (int64_t)-ENOMEM;
   copy_from_user(kfds, fds, nfds * sizeof(struct pollfd));
 
+  // Per-fd wait registrations. While blocked, each polled fd holds a reference
+  // and a wait_queue_t on f->wq so the fd's __wake_up (e.g. timerfd expiry)
+  // wakes us instead of waiting out the full deadline.
+  struct file *polled[MAX_FD];
+  wait_queue_t pwq[MAX_FD];
+  for (nfds_t i = 0; i < nfds; i++)
+    polled[i] = NULL;
+
   uint64_t deadline = 0;
   if (timeout_ms > 0) {
     deadline = sched_clock() + (int64_t)timeout_ms * 1000000ULL;
   }
 
+  int64_t ret = 0;
   while (1) {
     int ready = 0;
 
-    // Check each fd
+    // Check each fd and register a wait entry on its wq.
     for (nfds_t i = 0; i < nfds; i++) {
       kfds[i].revents = 0;
       int pfd = kfds[i].fd;
@@ -1569,109 +1611,34 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
         continue;
       }
 
-      if (f->type == FD_PIPE) {
-        struct pipe *p = f->pipe;
-        if (p) {
-          // POLLIN: data available or EOF (no writers)
-          if (p->head != p->tail || refcount_read(&p->p_count) <= 1) {
-            if (kfds[i].events & POLLIN)
-              kfds[i].revents |= POLLIN;
-          }
-          // POLLOUT: space available or peer closed
-          if ((p->head + 1) % PIPE_BUF_SIZE != p->tail ||
-              refcount_read(&p->p_count) <= 1) {
-            if (kfds[i].events & POLLOUT)
-              kfds[i].revents |= POLLOUT;
-          }
-        }
-      } else if (f->type == FD_SOCKET) {
-        struct unix_sock *sock = f->sock;
-        if (sock) {
-          spin_lock(&socket_lock);
-
-          // POLLIN: data available or shutdown_read
-          if (sock->recv_queue_head || sock->shutdown_read) {
-            if (kfds[i].events & POLLIN)
-              kfds[i].revents |= POLLIN;
-          }
-
-          // POLLOUT: not shutdown_write
-          if (!sock->shutdown_write && sock->state == UNIX_CONNECTED) {
-            if (kfds[i].events & POLLOUT)
-              kfds[i].revents |= POLLOUT;
-          }
-
-          // POLLHUP: peer gone (always reported regardless of events mask)
-          if (sock->state == UNIX_CLOSED ||
-              (sock->peer >= 0 && sock->peer < MAX_PROC &&
-               task_get(sock->peer)->pid != sock->peer)) {
-            kfds[i].revents |= POLLHUP;
-          }
-
-          // For LISTEN socket: POLLIN = has pending connections
-          if (sock->state == UNIX_LISTEN && sock->backlog_len > 0) {
-            if (kfds[i].events & POLLIN)
-              kfds[i].revents |= POLLIN;
-          }
-
-          spin_unlock(&socket_lock);
-        }
-      } else if (f->type == FD_FILE) {
-        // FD_FILE: always writable (buffered), POLLIN if not at EOF
-        if (kfds[i].events & POLLOUT)
-          kfds[i].revents |= POLLOUT;
-        // For POLLIN: check if offset < file_size
-        if ((kfds[i].events & POLLIN) &&
-            f->file_data._offset < f->file_data.file_size) {
-          kfds[i].revents |= POLLIN;
-        }
-      } else if (f->type == FD_TTY) {
-        struct pty *pty = f->pty;
-        if (pty) {
-          int is_master = pty_fd_is_master(proc->proc->files, i);
-          __poll revents = pty_poll(pty, is_master, kfds[i].events);
-          kfds[i].revents |= revents;
-        }
-      } else if (f->type == FD_DEV) {
-        // FD_DEV: call dev_ops.poll callback for kernel devices
-        struct inode *ip = f->inode;
-        if (ip && ip->i_priv) {
-          struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-          if (ops->driver_pid == 0 && ops->poll) {
-            __poll revents = ops->poll(current_task, kfds[i].events);
-            kfds[i].revents |= revents;
-          }
-        }
-        // User-space driver: always ready (IPC handles events)
-        if (f->target_pid > 0) {
-          if (kfds[i].events & POLLIN)
-            kfds[i].revents |= POLLIN;
-          if (kfds[i].events & POLLOUT)
-            kfds[i].revents |= POLLOUT;
-        }
-      } else {
-        // FD_SHM etc: always ready
-        if (kfds[i].events & POLLIN)
-          kfds[i].revents |= POLLIN;
-        if (kfds[i].events & POLLOUT)
-          kfds[i].revents |= POLLOUT;
-      }
+      kfds[i].revents |= file_poll(f, kfds[i].events);
       if (kfds[i].revents)
         ready++;
+
+      // Register a wait entry so a later __wake_up on this fd (after this
+      // loop's file_put) can wake our BLOCKED poll.
+      wait_queue_head *wq = file_wq_get(f);
+      if (wq) {
+        pwq[i].func = poll_wait_cb;
+        pwq[i].data = proc;
+        list_init(&pwq[i].node);
+        add_wait_queue(wq, &pwq[i]);
+        polled[i] = f; // retain reference until after schedule()
+        continue;
+      }
       file_put(f);
     }
 
     if (ready > 0) {
-      // Copy results back to user
       copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
-      kfree(kfds);
-      return (int64_t)ready;
+      ret = (int64_t)ready;
+      break;
     }
 
     if (timeout_ms == 0) {
       copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
-      kfree(kfds);
-      return 0;
+      ret = 0;
+      break;
     }
 
     // Block on WAIT_POLL
@@ -1680,8 +1647,8 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       if (now >= deadline) {
         __memset(kfds, 0, nfds * sizeof(struct pollfd));
         copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
-        kfree(kfds);
-        return 0; // timeout
+        ret = 0;
+        break;
       }
       proc->wait_deadline = deadline;
       uint64_t pflags;
@@ -1706,20 +1673,35 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       uint64_t deliv = pend & ~proc->proc->sig_blocked;
       deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
       if (deliv) {
-        kfree(kfds);
-        return (int64_t)-EINTR;
+        ret = (int64_t)-EINTR;
+        break;
       }
     }
 
     if (proc->wait_timed_out && timeout_ms > 0) {
       __memset(kfds, 0, nfds * sizeof(struct pollfd));
       copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
-      kfree(kfds);
-      return 0; // timeout
+      ret = 0;
+      break;
     }
 
     // Woken up — re-check all fds
   }
+
+  // Tear down any wait registrations still held from the last loop iteration.
+  for (nfds_t i = 0; i < nfds; i++) {
+    if (!polled[i])
+      continue;
+    struct file *f = polled[i];
+    wait_queue_head *wq = f->wq;
+    if (wq)
+      remove_wait_queue(wq, &pwq[i]);
+    file_put(f);
+    polled[i] = NULL;
+  }
+
+  kfree(kfds);
+  return ret;
 }
 
 // ===================== unix_sock_write / unix_sock_read (for

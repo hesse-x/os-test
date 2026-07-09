@@ -55,12 +55,18 @@ CheckOptions:
   #   libc internals — __dir, _FILE, __pthread_*, etc.
 
   # Function exceptions: glibc/crt, Linux kernel __ prefix, POSIX, libc
+  # The __[a-z_]+ alternative covers the Linux kernel __-prefix convention
+  # (e.g. __wake_up, __memcpy) — same exception class already used for macros
+  # and variables below.
   - key: readability-identifier-naming.FunctionIgnoredRegexp
-    value: '^(__libc_[a-z_]+|__assert_fail|__errno_location|__pthread_[a-z_]+|__syscall[0-6]|__memcpy|__memset|__memmove|__memcmp|__strcmp|__get_cwd|_exit|_toupper)$'
+    value: '^(__libc_[a-z_]+|__assert_fail|__errno_location|__pthread_[a-z_]+|__syscall[0-6]|__memcpy|__memset|__memmove|__memcmp|__strcmp|__get_cwd|_exit|_toupper|__[a-z_]+)$'
 
   # Macro exceptions: Linux _/__ prefix, POSIX, include guards, spec, sparse, per-cpu, DRM
+  # The rb_* alternative covers the Linux kernel rbtree function-like macros
+  # (rb_entry/rb_is_red/rb_parent/rb_set_*, copied verbatim from lib/rbtree.c),
+  # which Linux keeps lower_case by convention.
   - key: readability-identifier-naming.MacroDefinitionIgnoredRegexp
-    value: '^(_IOC_[A-Z]+|_IO$|_IOR$|_IOW$|_IOWR$|_IO[A-Z]+|_F_[A-Z]+|errno|sa_handler|sa_sigaction|sigaddset|sigdelset|sigemptyset|sigfillset|sigismember|current_task|current_proc|current_xtask|Px[A-Z][a-zA-Z]*|Efi[A-Z][a-zA-Z]*|DRM_MODE_SUBCONNECTOR_Automatic|__[a-z_]+|assert|_.*_H)$'
+    value: '^(_IOC_[A-Z]+|_IO$|_IOR$|_IOW$|_IOWR$|_IO[A-Z]+|_F_[A-Z]+|errno|sa_handler|sa_sigaction|sigaddset|sigdelset|sigemptyset|sigfillset|sigismember|current_task|current_proc|current_xtask|Px[A-Z][a-zA-Z]*|Efi[A-Z][a-zA-Z]*|DRM_MODE_SUBCONNECTOR_Automatic|__[a-z_]+|assert|rb_[a-z_]+|_.*_H)$'
 
   # Variable exceptions: TLS runtime, kernel internal, libc internals
   - key: readability-identifier-naming.VariableIgnoredRegexp

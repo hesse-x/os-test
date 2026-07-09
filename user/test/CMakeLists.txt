@@ -77,3 +77,15 @@ endif()
 
 # Layer 15: ioctl variable-length (user-space driver proxy, RECV_IOCTL path)
 add_user_dyn_elf(ioctl_varlen C SOURCES test_ioctl_varlen.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+
+# Layer 16: epoll
+add_user_dyn_elf(epoll C SOURCES test_epoll.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+
+# Layer 17: eventfd
+add_user_dyn_elf(eventfd C SOURCES test_eventfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+
+# Layer 18: timerfd
+add_user_dyn_elf(timerfd C SOURCES test_timerfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+
+# Layer 19: signalfd
+add_user_dyn_elf(signalfd C SOURCES test_signalfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)

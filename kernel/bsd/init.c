@@ -12,6 +12,7 @@
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/syscall.h"
+#include "kernel/bsd/timerfd.h"
 #include "kernel/bsd/vfs.h"
 #include "kernel/kernel.h"
 #include "kernel/xcore/list.h"
@@ -61,6 +62,9 @@ void bsd_init(void) {
   syscall_dispatch_hook = syscall_dispatch;
   signal_pending_hook = check_signal_pending;
   force_sig_hook = force_sig;
+  // timerfd: initialize global list + lock, register tick sweep hook
+  timerfd_init();
+  timerfd_tick_hook = timerfd_tick_all;
   // fault_handler = NULL;  // future: file-backed mmap page-in
 
   printk(LOG_INFO, "bsd_init: done\n");

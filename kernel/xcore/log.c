@@ -65,7 +65,7 @@ void dump_stack_trace(void) {
     if (!rbp || (uint64_t)rbp < 0xFFFFFFFF80000000)
       break;
     uint64_t ret_addr = rbp[1];
-    SERIAL_PRINTF("    0x%016X\n", ret_addr);
+    SERIAL_PRINTF("    0x%016lX\n", ret_addr);
     rbp = (uint64_t *)rbp[0];
     if (!rbp)
       break;

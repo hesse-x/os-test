@@ -64,6 +64,7 @@ syscall_dispatch_fn syscall_dispatch_hook = NULL;
 signal_pending_fn signal_pending_hook = NULL;
 force_sig_fn force_sig_hook = NULL;
 timer_poll_fn timer_poll_hook = NULL;
+timerfd_tick_fn timerfd_tick_hook = NULL;
 
 // ===================== Trap dispatch =====================
 static uint64_t tick = 0;
@@ -505,6 +506,12 @@ static void timer_handler(trapframe *tf) {
     spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, tflags);
   }
 
+  // timerfd expiry sweep: fire any armed timerfd whose deadline has passed.
+  // Runs every tick (IRQ context, IF=0). Wakes blocked timerfd readers via
+  // their file wait_queue. Registered by the BSD layer at init.
+  if (timerfd_tick_hook)
+    timerfd_tick_hook();
+
   // Running-task alarm: a process that armed an alarm and kept running (or is
   // blocked on something other than pause) is never in the timer_queue for its
   // alarm. Check the current task's alarm deadline each tick and force SIGALRM
@@ -624,8 +631,14 @@ void xcall_dispatch(trapframe *tf) {
                                       tf->r8, tf->r9);
   } else if (nr >= 0) {
     // All other syscalls → BSD layer
-    tf->rax =
+    int64_t ret =
         syscall_dispatch_hook ? syscall_dispatch_hook(tf) : (int64_t)-ENOSYS;
+    // sys_sigreturn restores the full trapframe (including rax) from the
+    // signal frame; its own return value must NOT overwrite tf->rax, or
+    // the syscall return value saved at signal delivery (-EINTR etc.) is
+    // clobbered back to 0.
+    if (nr != SYS_SIGRETURN)
+      tf->rax = ret;
   } else {
     printk(LOG_WARN, "xcall_dispatch: unknown syscall nr=%lu pid=%d\n",
            (unsigned long)tf->rax, current_task->pid);

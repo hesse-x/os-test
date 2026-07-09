@@ -13,6 +13,7 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/proc.h"
+#include "kernel/bsd/signalfd.h"
 #include "kernel/bsd/syscall.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/log.h"
@@ -20,10 +21,12 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
+#include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 #include <stddef.h>
 #include <xos/errno.h>
 #include <xos/signal.h>
+#include <xos/socket.h>
 #include <xos/syscall_nums.h>
 
 // ===================== Signal trampoline =====================
@@ -157,6 +160,7 @@ void check_pending_signals(trapframe *tf) {
     uint64_t deliverable = pending & ~proc->proc->sig_blocked;
     deliverable |= (pending & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
     int sig = 0;
+    int sig_shared = 0; // 0 = private sig_pending, 1 = shared_pending
     if (deliverable) {
       sig = __builtin_ctzll(deliverable);
       __atomic_and_fetch(&proc->proc->sig_pending, ~(1ULL << sig),
@@ -169,6 +173,7 @@ void check_pending_signals(trapframe *tf) {
                   ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
       if (pending) {
         sig = __builtin_ctzll(pending);
+        sig_shared = 1;
         proc->proc->signal->shared_pending &= ~(1ULL << sig);
       }
       spin_unlock(&proc->proc->signal->sig_lock);
@@ -181,6 +186,26 @@ void check_pending_signals(trapframe *tf) {
     // need_resched set but never honored -> shell never scheduled.
     if (sig <= 0 || sig >= NSIG)
       break;
+
+    // signalfd: if an open signalfd accepts this signal (and it is not
+    // blocked), defer handler delivery — leave the bit pending so the
+    // signalfd reader can consume it. Wake any blocked signalfd waiter.
+    // The bit was already cleared above; re-set it so signalfd_do_read sees
+    // it, then break out (signal stays pending until the signalfd read).
+    if (signalfd_consumes(proc->proc, sig)) {
+      if (sig_shared) {
+        spin_lock(&proc->proc->signal->sig_lock);
+        proc->proc->signal->shared_pending |= 1ULL << sig;
+        spin_unlock(&proc->proc->signal->sig_lock);
+      } else {
+        __atomic_or_fetch(&proc->proc->sig_pending, 1ULL << sig,
+                          __ATOMIC_RELEASE);
+      }
+      wait_queue_head *wq = signalfd_wq(proc->proc, sig);
+      if (wq)
+        __wake_up(wq, POLLIN);
+      break;
+    }
 
     // SIGCANCEL: does not go through the sigaction table; the kernel delivers
     // directly to cancel_handler

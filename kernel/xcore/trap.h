@@ -49,6 +49,10 @@ extern force_sig_fn force_sig_hook;
 typedef void (*timer_poll_fn)(void);
 extern timer_poll_fn timer_poll_hook;
 
+// timerfd expiry sweep (called every timer tick from the timer IRQ handler)
+typedef void (*timerfd_tick_fn)(void);
+extern timerfd_tick_fn timerfd_tick_hook;
+
 // trap entry and syscall dispatch entry
 void trap_dispatch(trapframe *tf);
 void xcall_dispatch(trapframe *tf);

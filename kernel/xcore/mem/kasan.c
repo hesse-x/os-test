@@ -255,8 +255,8 @@ kasan_report(const void *addr, size_t size, bool is_write) {
   else if (sv == KASAN_SHADOW_REDZONE)
     printk(LOG_ERROR, " (global-redzone)");
 
-  printk(LOG_ERROR, "\n  addr=0x%016X size=%lu shadow=0x%02X\n", (uint64_t)addr,
-         (unsigned long)size, sv);
+  printk(LOG_ERROR, "\n  addr=0x%016lX size=%lu shadow=0x%02X\n",
+         (uint64_t)addr, (unsigned long)size, sv);
 
   // Stack trace via RBP chain
   printk(LOG_ERROR, "  backtrace:\n");
@@ -265,7 +265,7 @@ kasan_report(const void *addr, size_t size, bool is_write) {
   for (int depth = 0; depth < 16 && (uint64_t)rbp > 0xFFFFFFFF80000000ULL;
        depth++) {
     uint64_t ret_addr = rbp[1];
-    printk(LOG_ERROR, "    0x%016X\n", ret_addr);
+    printk(LOG_ERROR, "    0x%016lX\n", ret_addr);
     rbp = (uint64_t *)rbp[0];
     if (!rbp)
       break;

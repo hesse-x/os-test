@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <xos/ioctl.h>
 
-// ===================== Syscall numbers (NR_SYSCALL=86, 0-85 continuous)
+// ===================== Syscall numbers (NR_SYSCALL=95, 0-94 continuous)
 // =====================
 #define SYS_GETPID 0
 #define SYS_YIELD 1
@@ -110,6 +110,17 @@
 
 // ===================== POSIX signal (group 4) =====================
 #define SYS_SIGPENDING 85
+
+// ===================== epoll & event fd =====================
+#define SYS_EPOLL_CREATE 86
+#define SYS_EPOLL_CREATE1 87
+#define SYS_EPOLL_CTL 88
+#define SYS_EPOLL_WAIT 89
+#define SYS_EPOLL_PWAIT 90
+#define SYS_EVENTFD2 91
+#define SYS_TIMERFD_CREATE 92
+#define SYS_TIMERFD_SETTIME 93
+#define SYS_SIGNALFD4 94
 
 // ===================== recv_msg (shared between kernel and user)
 // =====================

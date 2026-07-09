@@ -9,6 +9,7 @@
 
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/wait_queue.h"
 #include <stdint.h>
 
 // ===================== sk_buff (socket buffer) =====================
@@ -68,6 +69,8 @@ typedef struct unix_sock {
 
   // Bind path (empty = unbound/anonymous)
   char sun_path[108];
+
+  wait_queue_head *wq; // 惰性分配，epoll 等待者挂此
 } unix_sock;
 
 // ===================== Bind name space =====================

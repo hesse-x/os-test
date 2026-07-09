@@ -187,6 +187,8 @@ void pty_free(struct pty *pty) {
   spin_lock(&pty_alloc_lock);
   pty_table[pty->index] = NULL;
   spin_unlock(&pty_alloc_lock);
+  if (pty->wq)
+    kfree(pty->wq);
   kfree(pty);
 }
 
@@ -279,6 +281,8 @@ int pts_open(xtask *proc, int fd) {
   // so it re-checks slave_refs and proceeds to block for data.
   if (pty->m_read_pid >= 0)
     wake_process(pty->m_read_pid);
+  if (pty->wq)
+    __wake_up(pty->wq, POLLIN);
 
   return 0;
 }
@@ -339,6 +343,8 @@ int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
                             &pty->s_to_m_tail, (uint8_t *)buf, (int)len);
   if (pty->s_write_pid >= 0)
     wake_process(pty->s_write_pid);
+  if (pty->wq)
+    __wake_up(pty->wq, POLLOUT);
   return (int64_t)nread;
 }
 
@@ -350,6 +356,8 @@ int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
     pty->eof_pending = 1;
     if (pty->s_read_pid >= 0)
       wake_process(pty->s_read_pid);
+    if (pty->wq)
+      __wake_up(pty->wq, POLLIN);
     return 0;
   }
 
@@ -363,6 +371,8 @@ int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
       written += n;
       if (pty->s_read_pid >= 0)
         wake_process(pty->s_read_pid);
+      if (pty->wq)
+        __wake_up(pty->wq, POLLIN);
       continue;
     }
 
@@ -420,6 +430,8 @@ int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
                             &pty->m_to_s_tail, (uint8_t *)buf, (int)len);
   if (pty->m_write_pid >= 0)
     wake_process(pty->m_write_pid);
+  if (pty->wq)
+    __wake_up(pty->wq, POLLOUT);
   return (int64_t)nread;
 }
 
@@ -458,6 +470,8 @@ int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
         wake_process(pty->m_read_pid);
       if (pty->master_owner_pid >= 0)
         wake_process(pty->master_owner_pid);
+      if (pty->wq)
+        __wake_up(pty->wq, POLLIN);
       continue;
     }
 

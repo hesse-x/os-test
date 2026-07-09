@@ -16,13 +16,17 @@
 #include "arch/x64/utils.h"
 #include "boot/boot.h"
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/bsd/eventfd.h"
+#include "kernel/bsd/eventpoll.h"
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/pty.h"
 #include "kernel/bsd/signal.h"
+#include "kernel/bsd/signalfd.h"
 #include "kernel/bsd/socket.h"
+#include "kernel/bsd/timerfd.h"
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/vfs.h"
 #include "kernel/driver/ahci.h"
@@ -39,6 +43,7 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
+#include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 #include "utils/macro.h"
 #include <stdbool.h>
@@ -48,6 +53,7 @@
 #include <xos/ioctl.h>
 #include <xos/mman.h>
 #include <xos/signal.h>
+#include <xos/socket.h>
 #include <xos/stat.h>
 #include <xos/syscall.h>
 #include <xos/syscall_nums.h>
@@ -870,6 +876,7 @@ int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
   p->tail = 0;
   p->read_pid = -1;
   p->write_pid = -1;
+  p->close_wq = NULL;
   refcount_set(&p->p_count, 2);
 
   struct file *fr = (struct file *)kmalloc(sizeof(struct file));
@@ -1123,6 +1130,12 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     goto out;
   }
 
+  // FD_EVENTFD: 8-byte counter write
+  if (f->type == FD_EVENTFD) {
+    ret = eventfd_do_write(f, buf, len);
+    goto out;
+  }
+
   // FD_PIPE — explicit type dispatch so any unhandled fd type returns
   // -EINVAL instead of falling through into the pipe path (which once
   // dereferenced NULL f->pipe on a directory fd and page-faulted).
@@ -1209,6 +1222,8 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 
   if (p->read_pid >= 0)
     wake_process(p->read_pid);
+  if (p->close_wq)
+    __wake_up(p->close_wq, POLLIN);
 
   ret = (int64_t)written;
 
@@ -1441,6 +1456,24 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     goto out;
   }
 
+  // FD_EVENTFD: 8-byte counter read
+  if (f->type == FD_EVENTFD) {
+    ret = eventfd_do_read(f, buf);
+    goto out;
+  }
+
+  // FD_TIMERFD: 8-byte tick count read
+  if (f->type == FD_TIMERFD) {
+    ret = timerfd_do_read(f, buf);
+    goto out;
+  }
+
+  // FD_SIGNALFD: one signalfd_siginfo (128 bytes) read
+  if (f->type == FD_SIGNALFD) {
+    ret = signalfd_do_read(f, buf);
+    goto out;
+  }
+
   // FD_PIPE — explicit type dispatch so any unhandled fd type returns
   // -EINVAL instead of falling through into the pipe path (which once
   // dereferenced NULL f->pipe on a directory fd and page-faulted).
@@ -1520,6 +1553,8 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 
     if (p->write_pid >= 0)
       wake_process(p->write_pid);
+    if (p->close_wq)
+      __wake_up(p->close_wq, POLLOUT);
 
     ret = (int64_t)nread;
     goto out;
@@ -1668,6 +1703,18 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     ret = (int64_t)shm->seals;
     goto out;
   }
+  case F_GETFD:
+    // Map kernel FD_CLOEXEC bit (0x8000) to POSIX userspace bit (1).
+    ret = (f->flags & FD_CLOEXEC) ? 1 : 0;
+    goto out;
+  case F_SETFD:
+    // POSIX userspace FD_CLOEXEC == 1; any other bits are ignored.
+    if (arg & 1)
+      f->flags |= FD_CLOEXEC;
+    else
+      f->flags &= ~FD_CLOEXEC;
+    ret = 0;
+    goto out;
   case F_DUPFD:
   case F_DUPFD_CLOEXEC: {
     int min_fd = (int)arg3;
@@ -2812,6 +2859,25 @@ int64_t syscall_dispatch(trapframe *tf) {
   // POSIX signal (group 4)
   case SYS_SIGPENDING:
     return sys_sigpending(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // epoll
+  case SYS_EPOLL_CREATE:
+    return sys_epoll_create(tf->rdi);
+  case SYS_EPOLL_CREATE1:
+    return sys_epoll_create1(tf->rdi);
+  case SYS_EPOLL_CTL:
+    return sys_epoll_ctl(tf->rdi, tf->rsi, tf->rdx, tf->r10);
+  case SYS_EPOLL_WAIT:
+    return sys_epoll_wait(tf->rdi, tf->rsi, tf->rdx, tf->r10);
+  case SYS_EPOLL_PWAIT:
+    return sys_epoll_pwait(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_EVENTFD2:
+    return sys_eventfd2(tf->rdi, tf->rsi);
+  case SYS_TIMERFD_CREATE:
+    return sys_timerfd_create(tf->rdi, tf->rsi);
+  case SYS_TIMERFD_SETTIME:
+    return sys_timerfd_settime(tf->rdi, tf->rsi, tf->rdx, tf->r10);
+  case SYS_SIGNALFD4:
+    return sys_signalfd4(tf->rdi, tf->rsi, tf->rdx, tf->r10);
   // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) implemented in phase 3b,
   // this phase returns -ENOSYS
   default:

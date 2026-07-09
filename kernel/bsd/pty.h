@@ -11,9 +11,11 @@
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h" // wake_process
+#include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 #include <stdint.h>
 #include <xos/fcntl.h>
+#include <xos/socket.h>
 
 struct inode;
 
@@ -151,6 +153,8 @@ struct pty {
 
   // Pointer to slave device priv (for cleanup)
   struct pts_dev_priv *pts_priv;
+
+  wait_queue_head *wq; // 惰性分配，epoll 等待者挂此
 };
 
 // ===================== Global PTY table =====================
@@ -201,10 +205,14 @@ static inline void wake_pipe_peers(pipe *p, int fd_flags) {
   if (fd_flags & (O_WRONLY | O_RDWR)) {
     if (p->read_pid >= 0)
       wake_process(p->read_pid);
+    if (p->close_wq)
+      __wake_up(p->close_wq, POLLHUP | POLLIN);
   }
   if (fd_flags & (O_RDONLY | O_RDWR)) {
     if (p->write_pid >= 0)
       wake_process(p->write_pid);
+    if (p->close_wq)
+      __wake_up(p->close_wq, POLLHUP | POLLOUT);
   }
 }
 

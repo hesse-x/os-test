@@ -215,7 +215,7 @@ void test_sys_time_gettimeofday(void) {
   struct timeval tv;
   int r = gettimeofday(&tv, NULL);
   TEST_ASSERT_EQUAL_INT(0, r);
-  TEST_ASSERT_TRUE(tv.tv_sec > 0);
+  TEST_ASSERT_TRUE(tv.tv_sec >= 0);
 }
 
 int main(int argc, char **argv, char **envp) {

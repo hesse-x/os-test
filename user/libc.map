@@ -115,6 +115,18 @@ global:
     /* <sys/poll.h> */
     poll;
 
+    /* <sys/epoll.h> */
+    epoll_create; epoll_create1; epoll_ctl; epoll_wait; epoll_pwait;
+
+    /* <sys/eventfd.h> */
+    eventfd;
+
+    /* <sys/timerfd.h> */
+    timerfd_create; timerfd_settime;
+
+    /* <sys/signalfd.h> */
+    signalfd;
+
     /* <sys/utsname.h> */
     uname;
 

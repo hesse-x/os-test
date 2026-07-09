@@ -13,6 +13,7 @@
 #include "kernel/xcore/mm_types.h" // mm, mmap_region, shm
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sparse.h"
+#include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h" // pid_t, xtask
 #include <stdint.h>
 #include <xos/fcntl.h>
@@ -20,7 +21,7 @@
 #include <xos/types.h>
 
 // ===================== fd / pipe =====================
-#define MAX_FD 32
+#define MAX_FD 128
 #define PIPE_BUF_SIZE 4096
 #define FD_CLOEXEC 0x8000
 
@@ -33,6 +34,10 @@
 #define FD_SHM 6
 #define FD_FILE 7
 #define FD_TTY 8
+#define FD_EPOLL 9
+#define FD_EVENTFD 10
+#define FD_TIMERFD 11
+#define FD_SIGNALFD 12
 
 typedef struct pipe {
   uint8_t *buf;
@@ -41,11 +46,16 @@ typedef struct pipe {
   pid_t read_pid;
   pid_t write_pid;
   refcount_t p_count;
+  wait_queue_head *close_wq; // 惰性分配，epoll 等待者挂此
 } pipe;
 
 struct unix_sock;
 struct inode;
 struct pty;
+struct eventpoll;
+struct eventfd_ctx;
+struct timerfd_ctx;
+struct signalfd_ctx;
 
 typedef struct file {
   refcount_t f_count;
@@ -53,6 +63,7 @@ typedef struct file {
   int flags;
   struct inode *inode;
   uint64_t offset;
+  wait_queue_head *wq; // 惰性分配：NULL 表示无等待者
   union {
     struct pipe *pipe;
     struct shm *shm;
@@ -66,6 +77,10 @@ typedef struct file {
     } file_data;
     struct unix_sock *sock;
     struct pty *pty;
+    struct eventpoll *epoll;
+    struct eventfd_ctx *eventfd;
+    struct timerfd_ctx *timerfd;
+    struct signalfd_ctx *signalfd;
   };
 } file;
 
