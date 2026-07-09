@@ -6,6 +6,8 @@
 
 /* Minimal DRM test: open /dev/dri/card0, create dumb, map, draw pattern, addfb,
  * setcrtc, page flip */
+#include "drm/drm.h"
+#include "drm/drm_fourcc.h"
 #include "syscall.h"
 #include <fcntl.h>
 #include <stdint.h>
@@ -15,7 +17,6 @@
 #include <sys/mman.h>
 #include <sys/poll.h>
 #include <unistd.h>
-#include <xos/drm.h>
 #include <xos/ioctl.h>
 
 #define DRM_FB_WIDTH 800
@@ -130,8 +131,8 @@ int main(void) {
   if (prc > 0 && (pfd.revents & POLLIN)) {
     struct drm_event_vblank ev;
     int rrc = read(fd, &ev, sizeof(ev));
-    printf("drm_test: read event rc=%d type=%u user_data=%llu\n", rrc, ev.type,
-           (unsigned long long)ev.user_data);
+    printf("drm_test: read event rc=%d type=%u user_data=%llu\n", rrc,
+           ev.base.type, (unsigned long long)ev.user_data);
   }
 
   printf("drm_test: done — check screen for test pattern\n");

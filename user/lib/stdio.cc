@@ -297,6 +297,29 @@ int snprintf(char *buf, size_t n, const char *fmt, ...) {
   return n2;
 }
 
+int vasprintf(char **strp, const char *fmt, va_list ap) {
+  va_list ap2;
+  va_copy(ap2, ap);
+  int len = vsnprintf(NULL, 0, fmt, ap2);
+  va_end(ap2);
+  if (len < 0)
+    return -1;
+  char *buf = (char *)malloc((size_t)len + 1);
+  if (!buf)
+    return -1;
+  vsnprintf(buf, (size_t)len + 1, fmt, ap);
+  *strp = buf;
+  return len;
+}
+
+int asprintf(char **strp, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vasprintf(strp, fmt, ap);
+  va_end(ap);
+  return n;
+}
+
 /* ===================== perror ===================== */
 
 void perror(const char *s) {
@@ -750,31 +773,6 @@ int sscanf(const char *buf, const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   int n = vsscanf(buf, fmt, ap);
-  va_end(ap);
-  return n;
-}
-
-/* ===================== vasprintf / asprintf ===================== */
-int vasprintf(char **strp, const char *fmt, va_list ap) {
-  va_list ap2;
-  va_copy(ap2, ap);
-  int n = vsnprintf(NULL, 0, fmt, ap);
-  if (n < 0) {
-    *strp = NULL;
-    return -1;
-  }
-  *strp = (char *)malloc((size_t)(n + 1));
-  if (!*strp)
-    return -1;
-  vsnprintf(*strp, (size_t)(n + 1), fmt, ap2);
-  va_end(ap2);
-  return n;
-}
-
-int asprintf(char **strp, const char *fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-  int n = vasprintf(strp, fmt, ap);
   va_end(ap);
   return n;
 }

@@ -259,3 +259,57 @@ add_dependencies(ld_test_diamond_dyn_elf ld_stub_a_so c_so)
 # Scenario 4 cycle detection (a<->b mutual NEEDED)
 add_user_dyn_elf(ld_test_cycle C SOURCES test/ld_test_cycle.c LINK_LIBS a b c)
 add_dependencies(ld_test_cycle_dyn_elf ld_stub_a_so ld_stub_b_so c_so)
+
+# ===== libdrm (third_party/drm, core only) — plan_drm2 =====
+# libdrm 公共编译参数 (libdrm.md §3.3)
+#
+# config.h / libdrm.map live in the MAIN repo (build_script/libdrm/), not in
+# the third_party/drm submodule — we must not pollute the upstream submodule
+# working tree. CMake copies them into the build tree (configure_file) so the
+# -include path resolves to build/libdrm_config.h and the (phase-4) version
+# script to build/libdrm.map. generated_static_table_fourcc.h is produced by
+# upstream's gen_table_fourcc.py (add_custom_command) so the build is fully
+# reproducible with no manual one-shot steps.
+configure_file(${CMAKE_SOURCE_DIR}/build_script/libdrm/config.h
+               ${CMAKE_BINARY_DIR}/libdrm_config.h COPYONLY)
+configure_file(${CMAKE_SOURCE_DIR}/build_script/libdrm/libdrm.map
+               ${CMAKE_BINARY_DIR}/libdrm.map COPYONLY)
+add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/generated_static_table_fourcc.h
+    COMMAND python3
+            ${CMAKE_SOURCE_DIR}/third_party/drm/gen_table_fourcc.py
+            ${CMAKE_SOURCE_DIR}/third_party/drm/include/drm/drm_fourcc.h
+            ${CMAKE_BINARY_DIR}/generated_static_table_fourcc.h
+    DEPENDS ${CMAKE_SOURCE_DIR}/third_party/drm/include/drm/drm_fourcc.h
+            ${CMAKE_SOURCE_DIR}/third_party/drm/gen_table_fourcc.py
+    COMMENT "Generating libdrm static fourcc table")
+add_custom_target(libdrm_fourcc_table
+    DEPENDS ${CMAKE_BINARY_DIR}/generated_static_table_fourcc.h)
+
+set(LIBDRM_SOURCES
+    ${CMAKE_SOURCE_DIR}/third_party/drm/xf86drm.c
+    ${CMAKE_SOURCE_DIR}/third_party/drm/xf86drmMode.c
+    ${CMAKE_SOURCE_DIR}/third_party/drm/xf86drmHash.c
+    ${CMAKE_SOURCE_DIR}/third_party/drm/xf86drmRandom.c
+    ${CMAKE_SOURCE_DIR}/third_party/drm/xf86drmSL.c)
+
+# libdrm.a (static, -fno-pie, relaxed warnings — upstream submodule code)
+# INCLUDE_DIRS: private paths for compiling libdrm sources (upstream <drm.h>,
+# xf86drm internal headers, build dir for config.h/fourcc table).
+# INTERFACE_INCLUDE_DIRS: propagated to any target that links drm — provides
+# xf86drm.h / xf86drmMode.h location + upstream <drm.h> resolution path,
+# so consumers don't need explicit INCLUDE_DIRS.
+add_drm_lib(drm C SOURCES ${LIBDRM_SOURCES}
+            INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/drm/include/drm
+                         ${CMAKE_SOURCE_DIR}/third_party/drm
+                         ${CMAKE_BINARY_DIR}
+            INTERFACE_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/drm/include/drm
+                                   ${CMAKE_SOURCE_DIR}/third_party/drm
+            FLAGS "-Wno-unused-parameter -D__linux__ -include ${CMAKE_BINARY_DIR}/libdrm_config.h")
+# ensure generated_static_table_fourcc.h exists before libdrm sources compile
+add_dependencies(drm libdrm_fourcc_table)
+
+# libdrm.a 验证小程序 (libdrm.md §3.4: drmOpen + drmModeGetResources)
+# xf86drm.h / xf86drmMode.h and upstream <drm.h> resolution paths
+# propagate automatically from the drm target's INTERFACE_INCLUDE_DIRS.
+add_user_elf(drm_test_link C SOURCES test/drm_test_link.c LINK_LIBS drm c)

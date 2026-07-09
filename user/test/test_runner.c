@@ -41,6 +41,7 @@ static struct test_entry tests[] = {
     {"ld_diamond", "/test/ld_test_diamond.elf"},
     {"ld_cycle", "/test/ld_test_cycle.elf"},
     {"drm_ioctl", "/test/drm_ioctl.elf"},
+    {"drm_test_link", "/test/drm_test_link.elf"},
 #ifdef TEST
     {"test_sysfs", "/test/test_sysfs.elf"},
 #endif

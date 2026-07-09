@@ -81,8 +81,20 @@ LIBC_EXPORT int vsprintf(char *buf, const char *fmt, va_list ap);
 LIBC_EXPORT int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 
 /* scanf family */
+LIBC_EXPORT int fscanf(FILE *f, const char *fmt, ...);
+LIBC_EXPORT int scanf(const char *fmt, ...);
 LIBC_EXPORT int sscanf(const char *buf, const char *fmt, ...);
 LIBC_EXPORT int vsscanf(const char *buf, const char *fmt, va_list ap);
+
+/* asprintf family: allocate a buffer large enough via malloc */
+LIBC_EXPORT int vasprintf(char **strp, const char *fmt, va_list ap);
+LIBC_EXPORT int asprintf(char **strp, const char *fmt, ...);
+
+/* POSIX getline -- reads a complete line into a malloc'd buffer */
+LIBC_EXPORT ssize_t getline(char **lineptr, size_t *n, FILE *stream);
+
+/* C99 remove -- remove a file (POSIX alias of unlink) */
+LIBC_EXPORT int remove(const char *path);
 
 /* perror */
 LIBC_EXPORT void perror(const char *s);
@@ -107,10 +119,6 @@ LIBC_EXPORT long ftell(FILE *f);
 LIBC_EXPORT void rewind(FILE *f);
 LIBC_EXPORT int setbuf(FILE *f, char *buf);
 LIBC_EXPORT int setvbuf(FILE *f, char *buf, int mode, size_t size);
-
-/* printf allocation (GNU extensions) */
-LIBC_EXPORT int asprintf(char **strp, const char *fmt, ...);
-LIBC_EXPORT int vasprintf(char **strp, const char *fmt, va_list ap);
 
 /* Dynamic memory stream (POSIX.1-2008) */
 LIBC_EXPORT FILE *open_memstream(char **bufptr, size_t *sizeptr);

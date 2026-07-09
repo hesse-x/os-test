@@ -113,7 +113,7 @@ if [ "$TEST" = "1" ]; then
                ld_test_diamond.elf ld_test_cycle.elf \
                drm_test.elf drm_ioctl.elf ioctl_varlen.elf \
                epoll.elf eventfd.elf timerfd.elf signalfd.elf mount.elf \
-               test_sysfs.elf; do
+               test_sysfs.elf drm_test_link.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
     done
 fi

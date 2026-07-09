@@ -25,9 +25,12 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
 
-#include <xos/drm.h>
+#include "drm/drm.h"
+#include "drm/drm_fourcc.h"
 #include <xos/errno.h>
 #include <xos/socket.h>
+
+#include "drm/drm_mode.h"
 
 struct virtio_gpu_device g_virtio_gpu;
 struct drm_device g_drm;
@@ -390,7 +393,7 @@ static long drm_ioctl_get_cap(void *arg) {
   case DRM_CAP_DUMB_PREFER_SHADOW:
     c->value = 0;
     return 0;
-  case DRM_CAP_VBLANK_HIGH_CRTC_TIME:
+  case DRM_CAP_VBLANK_HIGH_CRTC:
     c->value = 0;
     return 0;
   case DRM_CAP_PRIME:
@@ -562,7 +565,7 @@ static long drm_ioctl_getconnector(void *arg) {
     return -EINVAL;
   c->connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
   c->connector_type_id = 1;
-  c->connection = DRM_MODE_CONNECTED;
+  c->connection = 1; /* drm_connector_status_connected */
   c->mm_width = 0;
   c->mm_height = 0;
   c->subpixel = 0;
@@ -585,7 +588,7 @@ static long drm_ioctl_getencoder(void *arg) {
   return 0;
 }
 
-/* DRM_IOCTL_MODE_GETPLANERES */
+/* DRM_IOCTL_MODE_GETPLANERESOURCES */
 static long drm_ioctl_getplaneres(void *arg) {
   struct drm_mode_get_plane_res *p = (struct drm_mode_get_plane_res *)arg;
   p->count_planes = 1;
@@ -601,7 +604,7 @@ static long drm_ioctl_getplane(void *arg) {
   p->fb_id = g_drm.current_fb_id;
   p->possible_crtcs = 1;
   p->gamma_size = 0;
-  p->count_format_type = 1;
+  p->count_format_types = 1;
   return 0;
 }
 
@@ -917,7 +920,7 @@ long drm_ioctl(uint32_t cmd, void *arg) {
     return drm_ioctl_getconnector(arg);
   case DRM_IOCTL_MODE_GETENCODER:
     return drm_ioctl_getencoder(arg);
-  case DRM_IOCTL_MODE_GETPLANERES:
+  case DRM_IOCTL_MODE_GETPLANERESOURCES:
     return drm_ioctl_getplaneres(arg);
   case DRM_IOCTL_MODE_GETPLANE:
     return drm_ioctl_getplane(arg);
@@ -945,9 +948,9 @@ long drm_ioctl(uint32_t cmd, void *arg) {
     return drm_ioctl_auth_magic(arg);
   case DRM_IOCTL_GEM_CLOSE:
     return drm_ioctl_gem_close(arg);
-  case DRM_IOCTL_GETPROPERTY:
-  case DRM_IOCTL_SETPROPERTY:
-  case DRM_IOCTL_MODE_GETPROPROB:
+  case DRM_IOCTL_MODE_GETPROPERTY:
+  case DRM_IOCTL_MODE_SETPROPERTY:
+  case DRM_IOCTL_MODE_GETPROPBLOB:
   case DRM_IOCTL_MODE_OBJ_GETPROPERTIES:
   case DRM_IOCTL_MODE_OBJ_SETPROPERTY:
   case DRM_IOCTL_PRIME_HANDLE_TO_FD:
@@ -1158,8 +1161,8 @@ static ssize_t drm_read(xtask *proc, int fd, void *buf, size_t count) {
   }
   struct drm_event_vblank ev;
   __memset(&ev, 0, sizeof(ev));
-  ev.type = DRM_EVENT_VBLANK;
-  ev.length = sizeof(ev);
+  ev.base.type = DRM_EVENT_VBLANK;
+  ev.base.length = sizeof(ev);
   ev.user_data = g_drm.event_user_data;
   ev.sequence = g_drm.event_sequence;
   g_drm.event_pending = false;

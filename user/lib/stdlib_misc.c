@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 
@@ -300,4 +301,63 @@ char *realpath(const char *path, char *resolved) {
   buf[o] = '\0';
   (void)out;
   return buf;
+}
+
+int mknod(const char *path, mode_t mode, dev_t dev) {
+  (void)path;
+  (void)mode;
+  (void)dev;
+  errno = ENOSYS;
+  return -1;
+}
+
+/* POSIX functions referenced by upstream libdrm's device-enumeration and
+ * node-creation paths (chown/chmod/remove/readlink/getline/sscanf/fscanf).
+ * None lie on the drmOpen/drmModeGetResources path verified in plan_drm2
+ * step 10; stubs keep the libdrm compile/link unit whole and return failure
+ * (errno=ENOSYS) if reached, matching the mknod stub above. */
+int chown(const char *path, uid_t owner, gid_t group) {
+  (void)path;
+  (void)owner;
+  (void)group;
+  errno = ENOSYS;
+  return -1;
+}
+
+int chmod(const char *path, mode_t mode) {
+  (void)path;
+  (void)mode;
+  errno = ENOSYS;
+  return -1;
+}
+
+int remove(const char *path) { return unlink(path); }
+
+ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
+  (void)path;
+  (void)buf;
+  (void)bufsiz;
+  errno = ENOSYS;
+  return -1;
+}
+
+ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
+  (void)lineptr;
+  (void)n;
+  (void)stream;
+  errno = ENOSYS;
+  return -1;
+}
+
+int fscanf(FILE *f, const char *fmt, ...) {
+  (void)f;
+  (void)fmt;
+  errno = ENOSYS;
+  return 0;
+}
+
+int scanf(const char *fmt, ...) {
+  (void)fmt;
+  errno = ENOSYS;
+  return 0;
 }

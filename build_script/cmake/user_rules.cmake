@@ -12,6 +12,14 @@
 # target_compile_options below. )
 set(USER_COMPILE_FLAGS -m64 ${WARN_FLAGS} ${FREESTANDING_FLAGS} -fno-pie)
 
+# DRM UAPI headers are infrastructure (display.h → "drm/drm.h"), so
+# -I.../include is in base compile flags for project-wide "drm/drm.h"
+# resolution. The upstream <drm.h> path (-I.../include/drm) and the
+# xf86drm.h/xf86drmMode.h path (-I.../drm) are NOT global — they
+# propagate via INTERFACE_INCLUDE_DIRECTORIES on the drm CMake target,
+# so only targets that link libdrm.a (LINK_LIBS drm) inherit them.
+set(DRM_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/drm/include)
+
 # Build-type flags for the bare-gcc commands below (add_user_elf / add_user_ldso /
 # SHARED libc.so / add_user_dyn_elf). CMake targets (kernel OBJECT libs, static
 # libc.a) inherit CMAKE_<LANG>_FLAGS_<CONFIG> automatically; these custom-command
@@ -88,7 +96,7 @@ function(add_user_lib lib_name)
         # When VERSION_MAP is set, .map + verify_libc_exports.sh gates the exports.
         # Libraries like libinput use LIBINPUT_EXPORT (__attribute__((visibility("default")))) markings.
         # -fPIC: required for all .so objects (position-independent code).
-        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fPIC -fvisibility=hidden ${ARG_FLAGS_LIST})
+        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fPIC -I${DRM_INCLUDE_DIR} -fvisibility=hidden ${ARG_FLAGS_LIST})
         if(ARG_INCLUDE_DIRS)
             foreach(_dir ${ARG_INCLUDE_DIRS})
                 list(APPEND COMPILE_FLAGS_BASE -I${_dir})
@@ -191,6 +199,55 @@ function(add_user_lib lib_name)
     endif()
 endfunction()
 
+# add_drm_lib: third_party upstream library (static, relaxed warnings)
+# Unlike add_user_lib which enforces WARN_FLAGS (-Werror etc), third_party
+# submodule code should not carry our strict warning gate. This function
+# shares only the essential compile infrastructure (architecture, freestanding,
+# fno-pie) and common include paths; each library supplies its own -I list
+# and extra -D/-include flags via INCLUDE_DIRS / FLAGS.
+#
+# INTERFACE_INCLUDE_DIRS are propagated to any target that links this library
+# (add_user_elf/add_user_dyn_elf read INTERFACE_INCLUDE_DIRECTORIES from
+# LINK_LIBS targets). This avoids polluting the global base compile flags with
+# paths only needed by libdrm consumers.
+# Usage: add_drm_lib(name [C] SOURCES ... [INCLUDE_DIRS dir1 ...] [FLAGS "..."]
+#                       INTERFACE_INCLUDE_DIRS dir1 ...)
+function(add_drm_lib lib_name)
+    set(option_args C)
+    set(multi_args SOURCES INCLUDE_DIRS FLAGS INTERFACE_INCLUDE_DIRS)
+    cmake_parse_arguments(ARG "${option_args}" "" "${multi_args}" ${ARGN})
+
+    add_library(${lib_name} STATIC ${ARG_SOURCES})
+
+    # Common include paths every third_party lib needs (freestanding headers,
+    # project-wide uapi, user/include). Library-specific headers go via
+    # INCLUDE_DIRS so the lib controls its own resolution order.
+    target_include_directories(${lib_name} PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/include/uapi
+        ${CMAKE_SOURCE_DIR}/user/include
+        ${ARG_INCLUDE_DIRS}
+    )
+
+    # INTERFACE include dirs: propagated to consumers that link this library.
+    # E.g. libdrm exposes xf86drm.h location + upstream <drm.h> resolution path.
+    if(ARG_INTERFACE_INCLUDE_DIRS)
+        target_include_directories(${lib_name} INTERFACE ${ARG_INTERFACE_INCLUDE_DIRS})
+    endif()
+
+    # Relaxed compile flags: -m64 + freestanding + -fno-pie, NO WARN_FLAGS.
+    # Third-party upstream code is not subject to our -Werror gate; any
+    # warning suppression must be passed explicitly via FLAGS.
+    separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
+    target_compile_options(${lib_name} PRIVATE -m64 ${FREESTANDING_FLAGS} -fno-pie ${ARG_FLAGS_LIST})
+
+    set_target_properties(${lib_name} PROPERTIES
+        ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+
+    user_assert_no_sse_disable(${lib_name})
+endfunction()
+
 # Build crt0.o (_start entry, linked into every static main ELF)
 # plan_ld2b3 T5
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/crt0.o
@@ -213,12 +270,30 @@ function(add_user_elf elf_name)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${DRM_INCLUDE_DIR} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra include directories
     if(ARG_INCLUDE_DIRS)
         foreach(inc ${ARG_INCLUDE_DIRS})
             list(APPEND COMPILE_FLAGS -I${inc})
+        endforeach()
+    endif()
+
+    # Propagate INTERFACE_INCLUDE_DIRECTORIES from linked library targets.
+    # Bare-gcc custom commands don't inherit CMake target properties, so we
+    # must read them manually. This mirrors target_link_libraries propagation
+    # for static libs built with add_drm_lib (or any add_library that sets
+    # INTERFACE include dirs).
+    if(ARG_LINK_LIBS)
+        foreach(lib ${ARG_LINK_LIBS})
+            if(TARGET ${lib})
+                get_target_property(_iface_includes ${lib} INTERFACE_INCLUDE_DIRECTORIES)
+                if(_iface_includes)
+                    foreach(inc ${_iface_includes})
+                        list(APPEND COMPILE_FLAGS -I${inc})
+                    endforeach()
+                endif()
+            endif()
         endforeach()
     endif()
 
@@ -310,7 +385,7 @@ function(add_user_ldso name)
     set(COMPILE_FLAGS -m64 ${WARN_FLAGS} ${FREESTANDING_FLAGS}
                       -fPIC -fvisibility=hidden
                       ${USER_BUILD_FLAGS}
-                      -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include)
+                      -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${DRM_INCLUDE_DIR})
     set(OBJ_FILES "")
     set(idx 0)
     foreach(src ${ARG_SOURCES})
@@ -348,12 +423,27 @@ function(add_user_dyn_elf name)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${DRM_INCLUDE_DIR} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra include directories
     if(ARG_INCLUDE_DIRS)
         foreach(inc ${ARG_INCLUDE_DIRS})
             list(APPEND COMPILE_FLAGS -I${inc})
+        endforeach()
+    endif()
+
+    # Propagate INTERFACE_INCLUDE_DIRECTORIES from linked library targets
+    # (same logic as add_user_elf — see comment there).
+    if(ARG_LINK_LIBS)
+        foreach(lib ${ARG_LINK_LIBS})
+            if(TARGET ${lib})
+                get_target_property(_iface_includes ${lib} INTERFACE_INCLUDE_DIRECTORIES)
+                if(_iface_includes)
+                    foreach(inc ${_iface_includes})
+                        list(APPEND COMPILE_FLAGS -I${inc})
+                    endforeach()
+                endif()
+            endif()
         endforeach()
     endif()
 

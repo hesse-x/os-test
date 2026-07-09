@@ -59,6 +59,8 @@ _Static_assert(sizeof(struct stat) == sizeof(struct kstat),
 LIBC_EXPORT int stat(const char *path, struct stat *st);
 LIBC_EXPORT int fstat(int fd, struct stat *st);
 LIBC_EXPORT int mkdir(const char *path, mode_t mode);
+LIBC_EXPORT int mknod(const char *path, mode_t mode, dev_t dev);
+LIBC_EXPORT int chmod(const char *path, mode_t mode);
 
 #ifdef __cplusplus
 }

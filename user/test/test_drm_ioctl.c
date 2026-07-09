@@ -6,6 +6,8 @@
 
 /* DRM ioctl regression test: verify new ioctls (GET_MAGIC, AUTH_MAGIC, ADDFB2,
  * GEM_CLOSE, GETFB, DRM_CAP_ADDFB2_MODIFIERS) work correctly. */
+#include "drm/drm.h"
+#include "drm/drm_fourcc.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -13,7 +15,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <unity.h>
-#include <xos/drm.h>
 #include <xos/ioctl.h>
 
 void setUp(void) {}
