@@ -1,0 +1,6 @@
+LIBDRM_1.0 {
+    global:
+        drm*;
+    local:
+        *;
+};

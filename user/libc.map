@@ -17,7 +17,8 @@ global:
     vsprintf; fdopen; clearerr; setbuf; setvbuf; ungetc; flockfile;
     funlockfile; ftrylockfile; fgetc_unlocked; fputc_unlocked;
     getchar_unlocked; putchar_unlocked; fread_unlocked; fwrite_unlocked;
-    open_memstream;
+    open_memstream; vasprintf; asprintf;
+    fscanf; scanf; sscanf; getline; remove;
     stdin; stdout; stderr;
 
     /* <stdlib.h> */
@@ -42,6 +43,7 @@ global:
     gethostname; sethostname; alarm; pause;
     truncate; fsync; sync;
     getpagesize;
+    chown; readlink;
 
     /* <fcntl.h> */
     fcntl; fd_file_size;
@@ -101,7 +103,8 @@ global:
     pthread_testcancel;
 
     /* <sys/stat.h> */
-    fstat; mkdir; stat;
+    fstat; mkdir; mknod; stat;
+    chmod;
 
     /* <sys/wait.h> */
     waitpid;

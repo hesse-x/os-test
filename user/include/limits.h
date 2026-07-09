@@ -271,4 +271,12 @@
 #endif
 #endif
 
+/* POSIX path-length constants. glibc provides these via <limits.h> (through
+ * <bits/local_lim.h>); our LLVM-libc-derived copy only has the C23 macro set,
+ * so add the POSIX minimums here. Third-party code (e.g. upstream libdrm) uses
+ * PATH_MAX to size sysfs/uevent path buffers. Linux x86-64 uses 4096. */
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
 #endif // _LIMITS_H

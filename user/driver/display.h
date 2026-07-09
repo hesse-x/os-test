@@ -14,16 +14,18 @@
    on /dev/dri/card0 (CREATE_DUMB / MAP_DUMB / mmap / ADDFB /
    SETCRTC / PAGE_FLIP). */
 
-#include "user/driver/font.h"
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <unistd.h>
+
+#include "user/driver/font.h"
 #include <sys/ioctl.h>
 #include <sys/ipc.h>
 #include <sys/mman.h>
-#include <unistd.h>
-#include <xos/drm.h>
+
+#include "drm/drm.h"
 
 /* Local metadata (filled by display_client_init) */
 static uint32_t display_pitch;

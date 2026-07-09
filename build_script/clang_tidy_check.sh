@@ -17,8 +17,11 @@
 # Empty incremental result → "nothing changed, skipped", exit 0.
 #
 # Exclusions:
-#   third_party/ — upstream Unity/gnu-efi, stripped from compile_commands.json
-#                   before running. clang-tidy never analyzes their TUs.
+#   third_party/ — upstream Unity/gnu-efi/drm, stripped from compile_commands.json
+#                   before running AND filtered from findings: first-party TUs
+#                   still #include third_party headers (e.g. drm/drm.h), and
+#                   HeaderFilterRegex '.*' makes clang-tidy analyze those headers
+#                   too, so third_party/ paths are dropped from the final result.
 #   .S files     — not in compile DB, clang-tidy cannot parse assembly.
 #   Non-naming   — clang-analyzer / other checks may leak in; only
 #                   readability-identifier-naming findings are reported.
@@ -124,7 +127,13 @@ echo "$TU_LIST" | run-clang-tidy \
 # also includes a check-list diagnostic line that merely says
 # "readability-identifier-naming" without a warning/error prefix — that is NOT
 # a violation, just a "these checks are active" banner.
-NAMING=$(grep -E 'warning:|error:' "$WARNFILE" | grep '\[readability-identifier-naming\]' || true)
+# Drop findings in third_party/ headers: first-party TUs include upstream
+# headers (drm/drm.h, etc.) and HeaderFilterRegex '.*' surfaces their naming,
+# which is upstream style we don't own — the per-category IgnoredRegexp in
+# .clang-tidy only exempts specific symbols, not whole upstream trees.
+NAMING=$(grep -E 'warning:|error:' "$WARNFILE" \
+    | grep '\[readability-identifier-naming\]' \
+    | grep -v 'third_party/' || true)
 
 if [ -n "$NAMING" ]; then
     N_VIOLATIONS=$(echo "$NAMING" | wc -l)

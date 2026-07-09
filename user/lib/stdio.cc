@@ -297,6 +297,29 @@ int snprintf(char *buf, size_t n, const char *fmt, ...) {
   return n2;
 }
 
+int vasprintf(char **strp, const char *fmt, va_list ap) {
+  va_list ap2;
+  va_copy(ap2, ap);
+  int len = vsnprintf(NULL, 0, fmt, ap2);
+  va_end(ap2);
+  if (len < 0)
+    return -1;
+  char *buf = (char *)malloc((size_t)len + 1);
+  if (!buf)
+    return -1;
+  vsnprintf(buf, (size_t)len + 1, fmt, ap);
+  *strp = buf;
+  return len;
+}
+
+int asprintf(char **strp, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vasprintf(strp, fmt, ap);
+  va_end(ap);
+  return n;
+}
+
 /* ===================== perror ===================== */
 
 void perror(const char *s) {

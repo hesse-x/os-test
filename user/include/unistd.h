@@ -71,6 +71,10 @@ LIBC_EXPORT void sync(void);
 LIBC_EXPORT int getpagesize(void);
 LIBC_EXPORT void wait_dev_ready(const char *dev_path);
 
+/* file ownership / symlink — used by libdrm device-node & sysfs paths */
+LIBC_EXPORT int chown(const char *path, uid_t owner, gid_t group);
+LIBC_EXPORT ssize_t readlink(const char *path, char *buf, size_t bufsiz);
+
 #ifdef __cplusplus
 }
 #endif

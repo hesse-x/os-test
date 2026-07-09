@@ -7,3 +7,7 @@ add_kernel_object(driver_obj
             ahci.c xhci.c pci.c serial.c blk_dev.c
             virtio_pci.c virtio_ring.c virtio_gpu.c
 )
+# DRM UAPI headers — upstream headers in third_party/drm/include/drm/ are
+# included as "drm/drm.h" by virtio_gpu.c (and drm_internal.h).
+target_include_directories(driver_obj PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/drm/include)
