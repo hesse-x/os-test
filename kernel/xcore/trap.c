@@ -16,6 +16,7 @@
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/mem/extable.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
@@ -143,6 +144,22 @@ resolve_cow_fault(xtask *task, uint64_t *pte, uint64_t fault_addr) {
   invlpg(fault_addr);
 }
 
+// External symbols bracketing the __ex_table section (defined in linker.ld).
+extern const struct exception_table_entry __start___ex_table[];
+extern const struct exception_table_entry __stop___ex_table[];
+
+// Linear scan of the exception table for an entry whose .insn == tf->rip.
+// Returns the .fixup RIP on match, or 0 on miss.
+uint64_t fixup_exception(trapframe *tf) {
+  const struct exception_table_entry *e = __start___ex_table;
+  const struct exception_table_entry *end = __stop___ex_table;
+  for (; e < end; e++) {
+    if (e->insn == (uint64_t)tf->rip)
+      return e->fixup;
+  }
+  return 0;
+}
+
 void trap_dispatch(trapframe *tf) {
   get_cpu_local()->cur_tf = tf;
   // Hardware IRQ: check user-space driver binding first
@@ -261,6 +278,7 @@ void trap_dispatch(trapframe *tf) {
            "  hint: check segment selectors / IOPL / non-canonical MSR or RIP, "
            "and RPL/TI bits of any segment load\n");
 #ifdef SANITIZER
+#include "kernel/xcore/mem/kasan.h" // kasan_shadow_exists (SANITIZER #PF diagnostics)
     if (kasan_shadow_exists()) {
       uint64_t fault_addr;
       __asm__ volatile("movq %%cr2, %0" : "=r"(fault_addr));
@@ -406,6 +424,22 @@ void trap_dispatch(trapframe *tf) {
     }
     return; // Don't kill process; check_pending_signals already handled it
   }
+  // Kernel-mode exception: attempt exception-table fixup before panicking.
+  // Only the user-copy instructions in copy_user.c are annotated; a fault on
+  // any other kernel instruction is genuinely unrecoverable. vec 13 (#GP, e.g.
+  // non-canonical address) and vec 14 (#PF) both use fixup semantics: #GP does
+  // not report CR2 but the fixup (jump + -EFAULT) is identical. tf->cs==0x08
+  // is the kernel-mode selector and gates this whole fallthrough (user-mode
+  // tf->cs==0x2B is handled by the signal-translation branch above).
+  if (tf->trapno == 13 || tf->trapno == 14) {
+    uint64_t fixup = fixup_exception(tf);
+    if (fixup) {
+      tf->rip =
+          fixup; // CPU resumes at the fixup label -> sets %rax=-EFAULT -> ret
+      return;
+    }
+  }
+
   // Kernel-mode exception: unrecoverable, panic
   // (COW faults were already resolved above; genuine kernel #PF falls through.)
   panic("kernel-mode exception: vector=%lu rip=0x%lx cr3=0x%lx", tf->trapno,

@@ -36,6 +36,7 @@
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/mem/kasan.h" // copy_*/strncpy_from_user declarations
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/rcu.h"
@@ -1025,7 +1026,11 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     req->fs_fd = f->file_data.fs_fd;
     req->offset = f->file_data._offset;
     req->count = (uint32_t)len;
-    copy_from_user(msg_buf + sizeof(file_t_io_req), buf, len);
+    if (copy_from_user(msg_buf + sizeof(file_t_io_req), buf, len)) {
+      kfree(msg_buf);
+      ret = (int64_t)-EFAULT;
+      goto out;
+    }
 
     file_t_io_resp resp;
     int64_t msg_ret =
@@ -1365,7 +1370,11 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     size_t nread = resp->count;
     if (nread > len)
       nread = len;
-    copy_to_user(buf, resp_buf + sizeof(file_t_io_resp), nread);
+    if (copy_to_user(buf, resp_buf + sizeof(file_t_io_resp), nread)) {
+      kfree(resp_buf);
+      ret = (int64_t)-EFAULT;
+      goto out;
+    }
 
     f->file_data._offset += nread;
     kfree(resp_buf);
@@ -1784,6 +1793,8 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 
       uint16_t arg_size = _IOC_SIZE(cmd);
       uint8_t dir = _IOC_DIR(cmd);
+      printk(LOG_DEBUG, "sys_ioctl(direct): pid=%d cmd=0x%x dir=%u size=%u\n",
+             current_task->pid, cmd, dir, arg_size);
 
       uint8_t kbuf_stack[256];
       uint8_t *kbuf = kbuf_stack;
@@ -1798,14 +1809,31 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       }
       __memset(kbuf, 0, arg_size);
 
-      if ((__force uint64_t)arg != 0 && (dir & _IOC_WRITE) && arg_size > 0)
-        copy_from_user(kbuf, arg, arg_size);
+      if ((__force uint64_t)arg != 0 && (dir & _IOC_WRITE) && arg_size > 0) {
+        size_t cfu = copy_from_user(kbuf, arg, arg_size);
+        if (cfu) {
+          printk(LOG_DEBUG, "sys_ioctl: copy_from_user EFAULT cfu=%zu\n", cfu);
+          if (kbuf_dyn)
+            kfree(kbuf);
+          ret = (int64_t)-EFAULT;
+          goto out;
+        }
+      }
 
       long result = ops->ioctl(cmd, kbuf);
+      printk(LOG_DEBUG, "sys_ioctl: ops->ioctl result=%ld\n", result);
 
       if ((__force uint64_t)arg != 0 && (dir & _IOC_READ) && result >= 0 &&
-          arg_size > 0)
-        copy_to_user(arg, kbuf, arg_size);
+          arg_size > 0) {
+        size_t ctu = copy_to_user(arg, kbuf, arg_size);
+        if (ctu) {
+          printk(LOG_DEBUG, "sys_ioctl: copy_to_user EFAULT ctu=%zu\n", ctu);
+          if (kbuf_dyn)
+            kfree(kbuf);
+          ret = (int64_t)-EFAULT;
+          goto out;
+        }
+      }
 
       if (kbuf_dyn)
         kfree(kbuf);
@@ -1849,8 +1877,12 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       __memset(req_data, 0, 56);
       *(uint32_t *)req_data = cmd;
       if ((dir & _IOC_WRITE) && (__force uint64_t)arg != 0) {
-        if (arg_size > 0)
-          copy_from_user(req_data + 4, arg, arg_size);
+        if (arg_size > 0) {
+          if (copy_from_user(req_data + 4, arg, arg_size)) {
+            ret = (int64_t)-EFAULT;
+            goto out;
+          }
+        }
       }
 
       // Defensive: warn if ioctl REQ arg carries a cross-process fd that won't
@@ -1936,8 +1968,13 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       ret = -(int64_t)ENOMEM;
       goto out;
     }
-    if ((dir & _IOC_WRITE) && (__force uint64_t)arg != 0)
-      copy_from_user(kbuf, arg, arg_size);
+    if ((dir & _IOC_WRITE) && (__force uint64_t)arg != 0) {
+      if (copy_from_user(kbuf, arg, arg_size)) {
+        kfree(kbuf);
+        ret = (int64_t)-EFAULT;
+        goto out;
+      }
+    }
 
     uint8_t msg[RECV_MSG_SIZE];
     recv_msg *hdr = (recv_msg *)msg;
@@ -2179,15 +2216,14 @@ int64_t sys_memfd_create(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
       kfree(shm);
       return -EFAULT;
     }
-    int i;
-    for (i = 0; i < 31; i++) {
-      char c;
-      copy_from_user(&c, (const char __user *)(uptr + i), 1);
-      if (c == '\0')
-        break;
-      shm->name[i] = c;
+    long nlen = strncpy_from_user(shm->name, user_name, 31);
+    if (nlen < 0) {
+      kfree(shm);
+      return -EFAULT;
     }
-    shm->name[i] = '\0';
+    if (nlen > 31)
+      nlen = 31;
+    shm->name[nlen] = '\0';
   } else {
     shm->name[0] = '\0';
   }

@@ -1291,6 +1291,9 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   for (int i = 0; i < 512; i++)
     new_pml4[i] = 0;
   new_pml4[511] = pml4[511];
+#ifdef SANITIZER
+  new_pml4[503] = pml4[503]; // KASAN shadow
+#endif
 
   // 6. elf_load into new PML4
   elf_load_result lr = elf_load(elf_buf, file_size, new_pml4);
@@ -1324,36 +1327,29 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   }
 
   // 6c. Dynamic path: load ld.so at LD_SO_BASE
+  // Bypass sys_open (which validates path as user-space pointer) — interp_path
+  // is a kernel stack variable, so use fat32_open directly instead.
   elf_load_result ld_lr = {0};
   if (is_dynamic) {
-    int64_t ld_open_res =
-        sys_open((int64_t)(uintptr_t)interp_path, O_RDONLY, 0, 0, 0, 0);
-    int32_t ld_fd = (int32_t)(ld_open_res & 0xFFFFFFFFULL);
-    if (ld_fd < 0) {
+    int ld_errno = 0;
+    struct inode *ld_ip = fat32_open(interp_path, O_RDONLY, &ld_errno);
+    if (!ld_ip) {
       kfree(elf_buf);
       free_table_page(pml4_phys);
       printk(LOG_ERROR, "execve: ld.so open failed pid=%d path=%s err=%d\n",
-             proc->pid, interp_path, ld_fd);
-      return (int64_t)ld_open_res;
+             proc->pid, interp_path, ld_errno);
+      return (int64_t)ld_errno;
     }
-    struct file *ld_file = fd_lookup(proc->proc->files, ld_fd);
-    if (!ld_file || ld_file->type != FD_REGULAR || !ld_file->inode) {
-      sys_close((int64_t)ld_fd, 0, 0, 0, 0, 0);
-      kfree(elf_buf);
-      free_table_page(pml4_phys);
-      return (int64_t)-EIO;
-    }
-    struct inode *ld_ip = ld_file->inode;
     uint64_t ld_size = ld_ip->size;
     uint8_t *ld_buf = (uint8_t *)kmalloc(ld_size);
     if (!ld_buf) {
-      sys_close((int64_t)ld_fd, 0, 0, 0, 0, 0);
+      inode_put(ld_ip);
       kfree(elf_buf);
       free_table_page(pml4_phys);
       return (int64_t)-ENOMEM;
     }
     int ld_nread = fat32_read(ld_ip, 0, (void *)ld_buf, ld_size);
-    sys_close((int64_t)ld_fd, 0, 0, 0, 0, 0);
+    inode_put(ld_ip);
     if (ld_nread < 0 || (uint64_t)ld_nread < ld_size) {
       kfree(ld_buf);
       kfree(elf_buf);

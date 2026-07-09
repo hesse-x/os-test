@@ -942,10 +942,6 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_epoll_closed_fd_auto);
   RUN_TEST(test_epoll_maxitems);
   RUN_TEST(test_epoll_maxevents_limit);
-  // TODO(extable): 故障注入用例，传 (void*)0xdead 测 epoll_ctl 返回 -1/EFAULT。
-  // extable 未落地前会触发 copy_from_user 解引用 0xdead → 内核 panic，阻塞
-  // 整个 test_runner，故临时注释。extable（见 mem_check_design.md 顶部 TODO）
-  // 实现完成后必须恢复此行，否则 EFAULT 容错路径无回归保护。
-  // RUN_TEST(test_epoll_user_ptr_fault);
+  RUN_TEST(test_epoll_user_ptr_fault);
   return UNITY_END();
 }

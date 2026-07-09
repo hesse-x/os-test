@@ -473,7 +473,10 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)proc->cr3) : "memory");
-    copy_from_user(&newset, set, sizeof(sigset_t));
+    if (copy_from_user(&newset, set, sizeof(sigset_t))) {
+      __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+      return (int64_t)-EFAULT;
+    }
     __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
 
     switch (how) {
@@ -502,7 +505,10 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)proc->cr3) : "memory");
-    copy_to_user(oldset, &old, sizeof(sigset_t));
+    if (copy_to_user(oldset, &old, sizeof(sigset_t))) {
+      __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+      return (int64_t)-EFAULT;
+    }
     __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
   }
   return 0;
@@ -579,8 +585,11 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)proc->cr3) : "memory");
-    copy_to_user(oldact, &proc->proc->signal->action[sig],
-                 sizeof(struct sigaction));
+    if (copy_to_user(oldact, &proc->proc->signal->action[sig],
+                     sizeof(struct sigaction))) {
+      __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+      return (int64_t)-EFAULT;
+    }
     __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
   }
 
@@ -594,7 +603,10 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)proc->cr3) : "memory");
-    copy_from_user(&new_act, act, sizeof(struct sigaction));
+    if (copy_from_user(&new_act, act, sizeof(struct sigaction))) {
+      __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+      return (int64_t)-EFAULT;
+    }
     __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
 
     if (new_act.sa_mask & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)))
@@ -685,7 +697,10 @@ int64_t sys_sigpending(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
   uint64_t saved_cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
   __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)proc->cr3) : "memory");
-  copy_to_user(set, &out, sizeof(sigset_t));
+  if (copy_to_user(set, &out, sizeof(sigset_t))) {
+    __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+    return (int64_t)-EFAULT;
+  }
   __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
   return 0;
 }

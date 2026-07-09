@@ -207,7 +207,10 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     spin_lock(&proc->recv_lock);
     if (proc->recv_head != proc->recv_tail) {
       // Message available: copy to user buffer
-      copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
+      if (copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE)) {
+        spin_unlock(&proc->recv_lock);
+        return (int64_t)-EFAULT;
+      }
       // If this is an REQ request, record the caller PID for sys_resp
       recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
       if (msg->type == RECV_REQ) {
@@ -229,7 +232,15 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           return (int64_t)-EINVAL;
         }
 
-        copy_to_user(data_buf, kmaddr, len);
+        if (copy_to_user(data_buf, kmaddr, len)) {
+          kfree(kmaddr);
+          recv_msg *umsg = (recv_msg __force *)buf;
+          umsg->msg.kmaddr = NULL;
+          umsg->msg.len = len;
+          proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+          spin_unlock(&proc->recv_lock);
+          return (int64_t)-EFAULT;
+        }
         kfree(kmaddr);
 
         recv_msg *umsg = (recv_msg __force *)buf;
@@ -253,7 +264,15 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           return (int64_t)-EINVAL;
         }
 
-        copy_to_user(data_buf, kmaddr, len);
+        if (copy_to_user(data_buf, kmaddr, len)) {
+          kfree(kmaddr);
+          recv_msg *umsg = (recv_msg __force *)buf;
+          umsg->ioctl.kmaddr = NULL;
+          umsg->ioctl.len = len;
+          proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+          spin_unlock(&proc->recv_lock);
+          return (int64_t)-EFAULT;
+        }
         kfree(kmaddr);
 
         recv_msg *umsg = (recv_msg __force *)buf;
@@ -298,7 +317,10 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       // Re-check queue before returning timeout
       spin_lock(&proc->recv_lock);
       if (proc->recv_head != proc->recv_tail) {
-        copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE);
+        if (copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE)) {
+          spin_unlock(&proc->recv_lock);
+          return (int64_t)-EFAULT;
+        }
         recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
         if (msg->type == RECV_REQ) {
           proc->req_caller_pid = (pid_t)msg->src;
@@ -317,7 +339,15 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
             spin_unlock(&proc->recv_lock);
             return (int64_t)-EINVAL;
           }
-          copy_to_user(data_buf, kmaddr, len);
+          if (copy_to_user(data_buf, kmaddr, len)) {
+            kfree(kmaddr);
+            recv_msg *umsg = (recv_msg __force *)buf;
+            umsg->msg.kmaddr = NULL;
+            umsg->msg.len = len;
+            proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+            spin_unlock(&proc->recv_lock);
+            return (int64_t)-EFAULT;
+          }
           kfree(kmaddr);
           recv_msg *umsg = (recv_msg __force *)buf;
           umsg->msg.kmaddr = NULL;
@@ -337,7 +367,15 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
             spin_unlock(&proc->recv_lock);
             return (int64_t)-EINVAL;
           }
-          copy_to_user(data_buf, kmaddr, len);
+          if (copy_to_user(data_buf, kmaddr, len)) {
+            kfree(kmaddr);
+            recv_msg *umsg = (recv_msg __force *)buf;
+            umsg->ioctl.kmaddr = NULL;
+            umsg->ioctl.len = len;
+            proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+            spin_unlock(&proc->recv_lock);
+            return (int64_t)-EFAULT;
+          }
           kfree(kmaddr);
           recv_msg *umsg = (recv_msg __force *)buf;
           umsg->ioctl.kmaddr = NULL;
@@ -385,7 +423,8 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   recv_msg *hdr = (recv_msg *)msg;
   hdr->type = RECV_REQ;
   hdr->src = (uint32_t)current_task->pid;
-  copy_from_user(hdr->data, request, 56);
+  if (copy_from_user(hdr->data, request, 56))
+    return (int64_t)-EFAULT;
 
   // Enqueue to target's recv queue
   spin_lock(&target->recv_lock);
@@ -484,21 +523,32 @@ int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u3,
 
   if (copy_len <= RECV_MSG_SIZE) {
     uint8_t kbuf[RECV_MSG_SIZE];
-    copy_from_user(kbuf, reply, copy_len);
+    if (copy_from_user(kbuf, reply, copy_len))
+      return (int64_t)-EFAULT;
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)caller->cr3) : "memory");
-    copy_to_user(caller->req_reply_buf, kbuf, copy_len);
+    if (copy_to_user(caller->req_reply_buf, kbuf, copy_len)) {
+      __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+      return (int64_t)-EFAULT;
+    }
     __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
   } else {
     void *kbuf = kmalloc(copy_len);
     if (!kbuf)
       return (int64_t)-ENOMEM;
-    copy_from_user(kbuf, reply, copy_len);
+    if (copy_from_user(kbuf, reply, copy_len)) {
+      kfree(kbuf);
+      return (int64_t)-EFAULT;
+    }
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
     __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)caller->cr3) : "memory");
-    copy_to_user(caller->req_reply_buf, kbuf, copy_len);
+    if (copy_to_user(caller->req_reply_buf, kbuf, copy_len)) {
+      __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+      kfree(kbuf);
+      return (int64_t)-EFAULT;
+    }
     __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
     kfree(kbuf);
   }
@@ -771,7 +821,10 @@ int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   void *kbuf = kmalloc(resp_len);
   if (!kbuf)
     return (int64_t)-ENOMEM;
-  copy_from_user(kbuf, resp_buf, resp_len);
+  if (copy_from_user(kbuf, resp_buf, resp_len)) {
+    kfree(kbuf);
+    return (int64_t)-EFAULT;
+  }
 
   size_t copy_len =
       resp_len < caller->msg_reply_len ? resp_len : caller->msg_reply_len;
@@ -779,7 +832,11 @@ int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   uint64_t saved_cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
   __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)caller->cr3) : "memory");
-  copy_to_user(caller->msg_reply_buf, kbuf, copy_len);
+  if (copy_to_user(caller->msg_reply_buf, kbuf, copy_len)) {
+    __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+    kfree(kbuf);
+    return (int64_t)-EFAULT;
+  }
   __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
 
   kfree(kbuf);

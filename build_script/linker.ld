@@ -17,7 +17,16 @@ SECTIONS {
         *(.rodata.*)
     } :rodata
 
-    /* Initialized data section */
+    /* Exception fixup table — (fault_rip, fixup_rip) pairs emitted by
+       _ASM_EXTABLE in copy_user.c. Searched by fixup_exception() on
+       kernel-mode #PF/#GP to rewind a user-copy and return -EFAULT. */
+    __start___ex_table = .;
+    __ex_table : AT(ADDR(__ex_table) - 0xFFFFFFFF80000000) {
+        KEEP(*(__ex_table))
+    } :rodata
+    __stop___ex_table = .;
+
+    /*Initialized data section*/
     .data : AT(ADDR(.data) - 0xFFFFFFFF80000000) {
         *(.data)
         *(.data.*)

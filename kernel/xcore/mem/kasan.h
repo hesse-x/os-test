@@ -7,7 +7,6 @@
 #ifndef KERNEL_MEM_KASAN_H
 #define KERNEL_MEM_KASAN_H
 
-#include "arch/x64/utils.h" // __memcpy (static inline, must be visible for copy_from_user/copy_to_user)
 #include "kernel/xcore/sparse.h" // __user, __force
 #include <stdbool.h>
 #include <stddef.h>

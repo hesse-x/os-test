@@ -46,8 +46,8 @@ bool map_user_page_direct(uint64_t *pml4, uint64_t vaddr, uint64_t phys,
                           uint64_t flags);
 void unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
                       int count);
-int copy_from_user(void *dst, const void __user *src, size_t len);
-int copy_to_user(void __user *dst, const void *src, size_t len);
+size_t copy_from_user(void *dst, const void __user *src, size_t len);
+size_t copy_to_user(void __user *dst, const void *src, size_t len);
 
 // === interrupts ===
 void irq_register(int vec, irq_handler_fn fn);

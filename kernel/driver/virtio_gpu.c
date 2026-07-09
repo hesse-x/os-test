@@ -491,6 +491,8 @@ static void drm_mode_fill_name(struct drm_mode_modeinfo *m) {
 /* DRM_IOCTL_MODE_GETRESOURCES */
 static long drm_ioctl_getresources(void *arg) {
   struct drm_mode_card_res *r = (struct drm_mode_card_res *)arg;
+  printk(LOG_DEBUG, "drm_getresources: fb_w=%u fb_h=%u\n", g_drm.fb_width,
+         g_drm.fb_height);
   r->count_crtcs = 1;
   r->count_connectors = 1;
   r->count_encoders = 1;
@@ -889,6 +891,8 @@ static long drm_ioctl_dirtyfb(void *arg) {
 
 /* Main DRM ioctl dispatcher */
 long drm_ioctl(uint32_t cmd, void *arg) {
+  printk(LOG_DEBUG, "drm_ioctl: cmd=0x%x initialized=%d\n", cmd,
+         g_drm.initialized);
   if (!g_drm.initialized)
     return -ENODEV;
   switch (cmd) {

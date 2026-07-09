@@ -1569,7 +1569,10 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   struct pollfd *kfds = (struct pollfd *)kmalloc(nfds * sizeof(struct pollfd));
   if (!kfds)
     return (int64_t)-ENOMEM;
-  copy_from_user(kfds, fds, nfds * sizeof(struct pollfd));
+  if (copy_from_user(kfds, fds, nfds * sizeof(struct pollfd))) {
+    kfree(kfds);
+    return (int64_t)-EFAULT;
+  }
 
   // Per-fd wait registrations. While blocked, each polled fd holds a reference
   // and a wait_queue_t on f->wq so the fd's __wake_up (e.g. timerfd expiry)
@@ -1630,15 +1633,22 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     }
 
     if (ready > 0) {
-      copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
-      ret = (int64_t)ready;
-      break;
+      // Copy results back to user
+      if (copy_to_user(fds, kfds, nfds * sizeof(struct pollfd))) {
+        kfree(kfds);
+        return (int64_t)-EFAULT;
+      }
+      kfree(kfds);
+      return (int64_t)ready;
     }
 
     if (timeout_ms == 0) {
-      copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
-      ret = 0;
-      break;
+      if (copy_to_user(fds, kfds, nfds * sizeof(struct pollfd))) {
+        kfree(kfds);
+        return (int64_t)-EFAULT;
+      }
+      kfree(kfds);
+      return 0;
     }
 
     // Block on WAIT_POLL
@@ -1646,9 +1656,12 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
       uint64_t now = sched_clock();
       if (now >= deadline) {
         __memset(kfds, 0, nfds * sizeof(struct pollfd));
-        copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
-        ret = 0;
-        break;
+        if (copy_to_user(fds, kfds, nfds * sizeof(struct pollfd))) {
+          kfree(kfds);
+          return (int64_t)-EFAULT;
+        }
+        kfree(kfds);
+        return 0; // timeout
       }
       proc->wait_deadline = deadline;
       uint64_t pflags;
@@ -1680,9 +1693,12 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 
     if (proc->wait_timed_out && timeout_ms > 0) {
       __memset(kfds, 0, nfds * sizeof(struct pollfd));
-      copy_to_user(fds, kfds, nfds * sizeof(struct pollfd));
-      ret = 0;
-      break;
+      if (copy_to_user(fds, kfds, nfds * sizeof(struct pollfd))) {
+        kfree(kfds);
+        return (int64_t)-EFAULT;
+      }
+      kfree(kfds);
+      return 0; // timeout
     }
 
     // Woken up — re-check all fds

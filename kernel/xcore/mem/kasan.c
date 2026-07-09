@@ -14,9 +14,9 @@
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/utils.h"
+#include "boot/boot.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
-#include "kernel/xcore/mem/slab.h"
 
 // ===================== State =====================
 static bool kasan_ready = false;
@@ -147,7 +147,25 @@ __attribute__((no_sanitize("kernel-address"))) void kasan_init(void) {
       (const void *)0xFFFFFFFF80100000ULL,
       (size_t)((uintptr_t)kernel_end - 0xFFFFFFFF80100000ULL));
 
-  // 4. Poison global variable redzones
+  // 4. Unpoison bump-allocated region: [kernel_end, bump_end)
+  //    BFC frames array, page tables, and other kernel data were allocated
+  //    by the bump allocator before KASAN was initialized. Their shadow
+  //    bytes must be cleared so that subsequent accesses (even from
+  //    non-no_sanitize functions like out-of-line atomic_set) are valid.
+  uintptr_t bump_virt_end = bump_end_phys() + VMA_BASE;
+  if (bump_virt_end > (uintptr_t)kernel_end) {
+    kasan_unpoison_shadow((const void *)kernel_end,
+                          (size_t)(bump_virt_end - (uintptr_t)kernel_end));
+  }
+
+  // 5. Unpoison init.elf buffer loaded by boot stub into physical memory.
+  //    The kernel reads the ELF binary via higher-half mapping during
+  //    process_create_elf.
+  uintptr_t init_virt = g_boot_info.init_elf_addr + VMA_BASE;
+  kasan_unpoison_shadow((const void *)init_virt,
+                        (size_t)g_boot_info.init_elf_size);
+
+  // 6. Poison global variable redzones
   kasan_poison_globals();
 
   kasan_ready = true;
@@ -278,40 +296,6 @@ kasan_report(const void *addr, size_t size, bool is_write) {
 // ===================== kasan_shadow_exists =====================
 __attribute__((no_sanitize("kernel-address"))) bool kasan_shadow_exists(void) {
   return kasan_ready;
-}
-
-// ===================== copy_from_user / copy_to_user =====================
-// User addresses are not in the shadow range; we bypass KASAN entirely.
-__attribute__((no_sanitize("kernel-address"))) size_t
-copy_from_user(void *dst, const void __user *src, size_t size) {
-  __memcpy(dst, (const void __force *)src, size);
-  return 0;
-}
-
-__attribute__((no_sanitize("kernel-address"))) size_t
-copy_to_user(void __user *dst, const void *src, size_t size) {
-  __memcpy((void __force *)dst, src, size);
-  return 0;
-}
-
-// strncpy_from_user — copy a string from user space byte-by-byte.
-// Stops at '\0' or maxlen, never crosses page boundaries for short strings
-// near page edges (unlike copy_from_user which reads a fixed block).
-// Returns: length of string (excluding '\0'), or -EFAULT if src is NULL.
-__attribute__((no_sanitize("kernel-address"))) long
-strncpy_from_user(char *dst, const char __user *src, long maxlen) {
-  if (!src || maxlen <= 0)
-    return -EFAULT;
-  long len = 0;
-  while (len < maxlen) {
-    char c = *(volatile const char __force *)(src + len);
-    dst[len] = c;
-    if (c == '\0')
-      return len;
-    len++;
-  }
-  dst[maxlen - 1] = '\0';
-  return len;
 }
 
 // ===================== Global variable poisoning =====================
