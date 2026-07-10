@@ -171,11 +171,6 @@ user/
 third_party/
   Unity/               — Unity v2.6.1 测试框架（git submodule）
 
-common/
-  boot.h, macro.h, errno.h, syscall.h, syscall_nums.h, shm.h, dev.h, socket.h,
-  elf.h, dirent.h, stat.h, ioctl.h, input.h, font_metrics.h, display.h, drm.h,
-  fcntl.h, mman.h, signal.h, types.h, kvformat.c, kvformat.h
-
 kernel/
   efi.h               — EFI 类型定义
 ```
@@ -219,6 +214,7 @@ kernel/
 | `netlink.md` | Netlink 多播事件通知（AF_NETLINK + group 注册表 + uevent 广播） | BSD |
 | `syscall.md` | 系统调用（SYSCALL/SYSRET、syscall 编号表、Xcore/BSD 分发） | BSD |
 | `vfs.md` | VFS + 文件系统设计（FAT32 + inode + page cache + devtmpfs） | BSD |
+| `mount.md` | Mount 框架（mount_table + 最长前缀匹配 + fstype 注册 + dir_context） | BSD |
 | `posix.md` | POSIX 接口覆盖现状 | BSD |
 | `thread.md` | 多线程设计（xtask_t + proc_t + signal_struct + clone + pthread，含 TLS/FPU lazy switch/futex/两级信号） | BSD/Xcore |
 | `pcie.md` | PCIe ECAM 枚举与 BAR 分配 | Driver |

@@ -12,6 +12,7 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/bsd/sysfs.h"
 #include "kernel/driver/driver.h"
 #include "kernel/driver/drm_internal.h"
 #include "kernel/driver/pci.h"
@@ -985,11 +986,92 @@ static struct dev_ops drm_dev_ops = {
     .poll = drm_poll,
 };
 
+/* DRM PCI 设备访问 (设计 C1) */
+static struct pci_device *drm_pci_dev(void) { return g_virtio_gpu.vpci.pdev; }
+
+/* sysfs show 回调 (priv=NULL, 读内核全局) */
+static ssize_t drm_show_vendor(char *buf, size_t len, void *priv) {
+  (void)priv;
+  struct pci_device *pdev = drm_pci_dev();
+  if (!pdev)
+    return snprintf(buf, len, "0x0000\n");
+  return snprintf(buf, len, "0x%04X\n", pdev->vendor_id);
+}
+static ssize_t drm_show_device(char *buf, size_t len, void *priv) {
+  (void)priv;
+  struct pci_device *pdev = drm_pci_dev();
+  if (!pdev)
+    return snprintf(buf, len, "0x0000\n");
+  return snprintf(buf, len, "0x%04X\n", pdev->device_id);
+}
+static ssize_t drm_show_class(char *buf, size_t len, void *priv) {
+  (void)priv;
+  struct pci_device *pdev = drm_pci_dev();
+  if (!pdev)
+    return snprintf(buf, len, "0x000000\n");
+  return snprintf(buf, len, "0x%06X\n", pdev->class_code);
+}
+static ssize_t drm_show_driver(char *buf, size_t len, void *priv) {
+  (void)priv;
+  return snprintf(buf, len, "virtio_gpu\n");
+}
+static ssize_t drm_show_enabled(char *buf, size_t len, void *priv) {
+  (void)priv;
+  return snprintf(buf, len, "%d\n", g_drm.initialized ? 1 : 0);
+}
+static ssize_t drm_show_mode(char *buf, size_t len, void *priv) {
+  (void)priv;
+  return snprintf(buf, len, "%ux%u\n", g_drm.fb_width, g_drm.fb_height);
+}
+static ssize_t drm_show_connector_status(char *buf, size_t len, void *priv) {
+  (void)priv;
+  return snprintf(buf, len, "connected\n");
+}
+static ssize_t drm_show_num_scanouts(char *buf, size_t len, void *priv) {
+  (void)priv;
+  return snprintf(buf, len, "%u\n", g_virtio_gpu.config.num_scanouts);
+}
+
+static const struct sysfs_attr drm_attr_vendor = {
+    .name = "vendor", .show = drm_show_vendor, .priv = NULL};
+static const struct sysfs_attr drm_attr_device = {
+    .name = "device", .show = drm_show_device, .priv = NULL};
+static const struct sysfs_attr drm_attr_class = {
+    .name = "class", .show = drm_show_class, .priv = NULL};
+static const struct sysfs_attr drm_attr_driver = {
+    .name = "driver", .show = drm_show_driver, .priv = NULL};
+static const struct sysfs_attr drm_attr_enabled = {
+    .name = "enabled", .show = drm_show_enabled, .priv = NULL};
+static const struct sysfs_attr drm_attr_mode = {
+    .name = "mode", .show = drm_show_mode, .priv = NULL};
+static const struct sysfs_attr drm_attr_connector_status = {
+    .name = "connector_status",
+    .show = drm_show_connector_status,
+    .priv = NULL};
+static const struct sysfs_attr drm_attr_num_scanouts = {
+    .name = "num_scanouts", .show = drm_show_num_scanouts, .priv = NULL};
+
 void drm_dev_register(void) {
   int rc = devtmpfs_create("dri/card0", &drm_dev_ops, NULL);
   if (rc < 0) {
     printk(LOG_ERROR, "drm: failed to create /dev/dri/card0: %d\n", rc);
     return;
+  }
+  __strncpy(drm_dev_ops.subsystem, "drm", 7);
+  __strncpy(drm_dev_ops.devtype, "card", 7);
+
+  struct sysfs_node *cls = sysfs_class_dir("drm");
+  struct sysfs_node *card0 = sysfs_create_dir(cls, "card0");
+  if (card0) {
+    sysfs_create_file(card0, "vendor", &drm_attr_vendor);
+    sysfs_create_file(card0, "device", &drm_attr_device);
+    sysfs_create_file(card0, "class", &drm_attr_class);
+    sysfs_create_file(card0, "driver", &drm_attr_driver);
+    sysfs_create_file(card0, "enabled", &drm_attr_enabled);
+    sysfs_create_file(card0, "mode", &drm_attr_mode);
+    sysfs_create_file(card0, "connector_status", &drm_attr_connector_status);
+    sysfs_create_file(card0, "num_scanouts", &drm_attr_num_scanouts);
+    drm_dev_ops.sysfs_dir = card0;
   }
   printk(LOG_INFO, "drm: registered /dev/dri/card0\n");
 }

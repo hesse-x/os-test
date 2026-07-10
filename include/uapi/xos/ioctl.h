@@ -8,6 +8,7 @@
 #define COMMON_IOCTL_H
 
 #include <stdint.h>
+#include <xos/input.h> // struct input_id / struct input_absinfo (EVIOCGID/ABS)
 
 // ioctl command encoding (Linux-compatible)
 // Shared between kernel and user space.
@@ -43,5 +44,14 @@
 // Input (generic, evdev-style)
 #define INPUT_BIND _IOWR('I', 0x01, char[8]) // input_bind_arg = 8B
 #define INPUT_UNBIND _IO('I', 0x02)
+
+// evdev query ioctls (type='E', aligned with linux/input.h)
+#define EVIOCGVERSION _IOR('E', 0x01, int)
+#define EVIOCGID _IOR('E', 0x02, struct input_id)
+#define EVIOCGNAME(len) _IOC(_IOC_READ, 'E', 0x06, len)
+#define EVIOCGPROP(len) _IOC(_IOC_READ, 'E', 0x09, len)
+#define EVIOCGBIT(ev, len) _IOC(_IOC_READ, 'E', 0x20 + (ev), len)
+#define EVIOCGABS(abs) _IOR('E', 0x40 + (abs), struct input_absinfo)
+#define EVIOCGRAB _IOW('E', 0x90, int)
 
 #endif

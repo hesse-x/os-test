@@ -125,13 +125,153 @@ __memcmp(const void *s1, const void *s2, size_t n) {
   return 0;
 }
 
+// ===================== SWAR helpers =====================
+// SIMD Within A Register: detect NUL bytes or specific byte values in 64-bit
+// words. Used by __strcmp/__strncmp/__strlen/__strchr for 8× throughput over
+// byte-by-byte scanning.
+
+// Detect if any byte in v is zero. Returns a bitmask where bit 7 of each
+// byte-position is set if that byte was zero.
+static inline uint64_t __swar_has_zero(uint64_t v) {
+  return (v - 0x0101010101010101ULL) & ~v & 0x8080808080808080ULL;
+}
+
+// Detect if any byte in v equals c.
+static inline uint64_t __swar_has_byte(uint64_t v, uint8_t c) {
+  return __swar_has_zero(v ^ ((uint64_t)c * 0x0101010101010101ULL));
+}
+
+// Given a SWAR bitmask, return the byte index (0–7) of the first flagged byte.
+static inline unsigned __swar_first_idx(uint64_t mask) {
+  return (unsigned)__builtin_ctzll(mask) >> 3;
+}
+
+// ===================== String helpers =====================
 __attribute__((no_sanitize("kernel-address"))) static inline int
 __strcmp(const char *s1, const char *s2) {
-  while (*s1 && *s1 == *s2) {
-    s1++;
-    s2++;
+  const unsigned char *a = (const unsigned char *)s1;
+  const unsigned char *b = (const unsigned char *)s2;
+  for (;;) {
+    uint64_t wa = *(const uint64_t *)a;
+    uint64_t wb = *(const uint64_t *)b;
+    uint64_t nz = __swar_has_zero(wa) | __swar_has_zero(wb);
+    if (nz) {
+      // NUL in this chunk — resolve byte-by-byte
+      for (unsigned j = 0; j < 8; j++) {
+        if (a[j] != b[j] || a[j] == 0)
+          return (int)a[j] - (int)b[j];
+      }
+      return 0;
+    }
+    if (wa != wb) {
+      for (unsigned j = 0; j < 8; j++) {
+        if (a[j] != b[j])
+          return (int)a[j] - (int)b[j];
+      }
+    }
+    a += 8;
+    b += 8;
   }
-  return *(const unsigned char *)s1 - *(const unsigned char *)s2;
+}
+
+__attribute__((no_sanitize("kernel-address"))) static inline int
+__strncmp(const char *s1, const char *s2, size_t n) {
+  if (!n)
+    return 0;
+  const unsigned char *a = (const unsigned char *)s1;
+  const unsigned char *b = (const unsigned char *)s2;
+  size_t i = 0;
+  // 8-byte batch; stop early if either word contains NUL
+  for (; i + 8 <= n; i += 8) {
+    uint64_t wa = *(const uint64_t *)(a + i);
+    uint64_t wb = *(const uint64_t *)(b + i);
+    uint64_t nz = __swar_has_zero(wa) | __swar_has_zero(wb);
+    if (nz) {
+      for (unsigned j = 0; j < 8 && i + j < n; j++) {
+        if (a[i + j] != b[i + j] || a[i + j] == 0)
+          return (int)a[i + j] - (int)b[i + j];
+      }
+      return 0;
+    }
+    if (wa != wb) {
+      for (unsigned j = 0; j < 8 && i + j < n; j++) {
+        if (a[i + j] != b[i + j])
+          return (int)a[i + j] - (int)b[i + j];
+      }
+    }
+  }
+  // Remaining bytes (< 8)
+  for (; i < n; i++) {
+    if (a[i] != b[i] || a[i] == 0)
+      return (int)a[i] - (int)b[i];
+  }
+  return 0;
+}
+
+__attribute__((no_sanitize("kernel-address"))) static inline size_t
+__strlen(const char *s) {
+  const char *p = s;
+  for (;;) {
+    uint64_t w = *(const uint64_t *)p;
+    uint64_t z = __swar_has_zero(w);
+    if (z)
+      return (size_t)(p - s) + __swar_first_idx(z);
+    p += 8;
+  }
+}
+
+__attribute__((no_sanitize("kernel-address"))) static inline size_t
+__strnlen(const char *s, size_t maxlen) {
+  const char *p = s;
+  size_t rem = maxlen;
+  while (rem >= 8) {
+    uint64_t w = *(const uint64_t *)p;
+    uint64_t z = __swar_has_zero(w);
+    if (z) {
+      size_t pos = (size_t)(p - s) + __swar_first_idx(z);
+      return pos < maxlen ? pos : maxlen;
+    }
+    p += 8;
+    rem -= 8;
+  }
+  for (size_t i = 0; i < rem; i++) {
+    if (p[i] == '\0')
+      return (size_t)(p - s) + i;
+  }
+  return maxlen;
+}
+
+__attribute__((no_sanitize("kernel-address"))) static inline void
+__strncpy(char *dst, const char *src, size_t n) {
+  size_t slen = __strnlen(src, n);
+  __memcpy(dst, src, slen);
+  __memset(dst + slen, 0, n - slen);
+}
+
+__attribute__((no_sanitize("kernel-address"))) static inline char *
+__strchr(const char *s, int c) {
+  if (c == 0)
+    return (char *)(s + __strlen(s));
+  const char *p = s;
+  for (;;) {
+    uint64_t w = *(const uint64_t *)p;
+    uint64_t z = __swar_has_zero(w);
+    if (z) {
+      // String ends in this word — check for target byte before NUL
+      unsigned zi = __swar_first_idx(z);
+      uint64_t m = __swar_has_byte(w, (uint8_t)c);
+      if (m) {
+        unsigned mi = __swar_first_idx(m);
+        if (mi < zi)
+          return (char *)(p + mi);
+      }
+      return NULL;
+    }
+    uint64_t m = __swar_has_byte(w, (uint8_t)c);
+    if (m)
+      return (char *)(p + __swar_first_idx(m));
+    p += 8;
+  }
 }
 
 // ===================== Interrupt control =====================

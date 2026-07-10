@@ -20,6 +20,8 @@
 #include <xos/mman.h>
 #include <xos/types.h>
 
+#include "kernel/bsd/fops.h"
+
 // ===================== fd / pipe =====================
 #define MAX_FD 128
 #define PIPE_BUF_SIZE 4096
@@ -65,7 +67,8 @@ typedef struct file {
   int flags;
   struct inode *inode;
   uint64_t offset;
-  wait_queue_head *wq; // 惰性分配：NULL 表示无等待者
+  wait_queue_head *wq;                // 惰性分配：NULL 表示无等待者
+  const struct file_operations *f_op; // fd-I/O 分发（NULL=走 type 分发）
   union {
     struct pipe *pipe;
     struct shm *shm;

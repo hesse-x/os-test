@@ -150,7 +150,7 @@ global:
     pci_dev_info_get;
 
     /* <sys/device.h> */
-    device_register; device_register_shm;
+    device_register; device_register_shm; device_set_meta;
 
     /* <unistd.h> */
     wait_dev_ready;

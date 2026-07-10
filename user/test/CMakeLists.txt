@@ -66,15 +66,6 @@ add_user_dyn_elf(drm_test C SOURCES drm_test.c LINK_LIBS c)
 # Layer 14: DRM ioctl (GET_MAGIC, AUTH_MAGIC, ADDFB2, GEM_CLOSE, GETFB, caps)
 add_user_dyn_elf(drm_ioctl C SOURCES test_drm_ioctl.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 
-# evdev EVIOCG* ioctl test (only in TEST builds)
-# Target named test_evdev (not evdev): user/CMakeLists.txt already defines the
-# evdev driver target -> build/evdev.elf (/driver/evdev.dev). Same target name
-# would collide on the output file build/evdev.elf and the test ELF would
-# overwrite the driver, so init would spawn the test instead of the driver.
-if(TEST)
-    add_user_dyn_elf(test_evdev C SOURCES test_evdev.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libinput/include/linux)
-endif()
-
 # Layer 15: ioctl variable-length (user-space driver proxy, RECV_IOCTL path)
 add_user_dyn_elf(ioctl_varlen C SOURCES test_ioctl_varlen.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 
@@ -92,3 +83,8 @@ add_user_dyn_elf(signalfd C SOURCES test_signalfd.c ${CMAKE_SOURCE_DIR}/third_pa
 
 # mount framework test
 add_user_dyn_elf(mount C SOURCES test_mount.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+
+# sysfs + file_operations + ringbuf (TEST build only — evdev sysfs needs stubs)
+if(TEST)
+    add_user_dyn_elf(test_sysfs C SOURCES test_sysfs.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libinput/include/linux)
+endif()

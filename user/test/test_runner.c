@@ -42,7 +42,7 @@ static struct test_entry tests[] = {
     {"ld_cycle", "/test/ld_test_cycle.elf"},
     {"drm_ioctl", "/test/drm_ioctl.elf"},
 #ifdef TEST
-    {"evdev", "/test/test_evdev.elf"},
+    {"test_sysfs", "/test/test_sysfs.elf"},
 #endif
     {"ioctl_varlen", "/test/ioctl_varlen.elf"},
     {"epoll", "/test/epoll.elf"},
@@ -93,4 +93,5 @@ int main(int argc, char **argv, char **envp) {
          skip_count);
 
   _exit(fail_count > 0 ? 1 : 0);
+  return 0;
 }

@@ -178,6 +178,9 @@ void file_put(struct file *f) {
   if (!refcount_dec_and_test(&f->f_count))
     return;
 
+  if (f->f_op && f->f_op->close)
+    f->f_op->close(current_task, f);
+
   switch (f->type) {
   case FD_NONE:
     break;
@@ -719,8 +722,8 @@ uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
 
 // Deep-copy fd_table from parent_files to child_files.
 // Bumps ref counts for pipe, SHM, file, inode, socket, TTY.
-static void __attribute__((unused)) copy_fd_table(files *parent_files,
-                                                  files *child_files) {
+static void __attribute__((unused))
+copy_fd_table(files *parent_files, files *child_files) {
   for (int fd = 0; fd < MAX_FD; fd++) {
     struct file *f = parent_files->fd_table[fd];
     child_files->fd_table[fd] = f;

@@ -346,12 +346,12 @@ int main(int argc, char **argv, char **envp) {
     }
   }
 
-  // 2. Open /dev/kbd, bind (register pid for notify), mmap driver's SHM via
-  // inode.
-  //    Direction A: driver owns SHM and bound it to /dev/kbd inode via
-  //    device_register_shm. Consumer accesses via open + mmap(MAP_SHARED, fd).
+  // 2. Open /dev/input/event0, bind (register pid for notify), mmap driver's
+  // SHM via inode.
+  //    Direction A: driver owns SHM and bound it to /dev/input/event0 inode via
+  // device_register_shm. Consumer accesses via open + mmap(MAP_SHARED, fd).
   int kbd_fd;
-  while ((kbd_fd = open("/dev/kbd", O_RDWR)) < 0) {
+  while ((kbd_fd = open("/dev/input/event0", O_RDWR)) < 0) {
     struct recv_msg m;
     recv(&m, NULL, 0, 1);
   }

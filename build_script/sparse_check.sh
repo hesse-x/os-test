@@ -174,8 +174,8 @@ fi
 
 # kernel/driver/ must not include kernel/bsd/ headers (devtmpfs excepted)
 echo "Checking kernel/driver/ #include violations..."
-if grep -rn '#include "kernel/bsd/' kernel/driver/ 2>/dev/null | grep -v devtmpfs; then
-    echo "FAIL: driver includes bsd (except devtmpfs)"
+if grep -rn '#include "kernel/bsd/' kernel/driver/ 2>/dev/null | grep -v devtmpfs | grep -v sysfs; then
+    echo "FAIL: driver includes bsd (except devtmpfs/sysfs)"
     INCLUDE_FAIL=1
 fi
 

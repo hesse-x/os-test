@@ -713,4 +713,11 @@ static inline int sys_mount(const char *source, const char *target,
   return 0;
 }
 
+static inline int64_t sys_dev_set_meta(const char *name, const char *subsys,
+                                       const char *devtype, const void *props) {
+  return __syscall4(SYS_DEV_SET_META, (int64_t)(uintptr_t)name,
+                    (int64_t)(uintptr_t)subsys, (int64_t)(uintptr_t)devtype,
+                    (int64_t)(uintptr_t)props);
+}
+
 #endif // USER_SYSCALL_H

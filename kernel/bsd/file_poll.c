@@ -34,6 +34,12 @@ __poll file_poll(struct file *f, __poll events) {
   if (!f)
     return 0;
 
+  if (f->f_op) {
+    if (f->f_op->poll)
+      return f->f_op->poll(current_task, f, events);
+    return events & (POLLIN | POLLOUT);
+  }
+
   if (f->type == FD_PIPE) {
     struct pipe *p = f->pipe;
     if (p) {

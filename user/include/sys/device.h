@@ -18,6 +18,18 @@ LIBC_EXPORT int device_register(const char *name);
 LIBC_EXPORT int device_register_shm(const char *name, int shm_fd,
                                     uint32_t minor);
 
+struct dev_props {
+  uint16_t bustype;
+  uint16_t vendor;
+  uint16_t product;
+  uint16_t version;
+  char name[64];
+};
+
+LIBC_EXPORT int device_set_meta(const char *name, const char *subsystem,
+                                const char *devtype,
+                                const struct dev_props *props);
+
 #ifdef __cplusplus
 }
 #endif

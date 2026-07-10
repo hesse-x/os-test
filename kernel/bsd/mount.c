@@ -41,7 +41,7 @@ struct fstype *find_fstype_by_name(const char *name) {
   return NULL;
 }
 
-int mount_internal(struct fstype *fs, const char *target) {
+int mount_internal(struct fstype *fs, const char *target, void *fs_data) {
   if (target[0] != '/')
     return -EINVAL;
   spin_lock(&mount_lock);
@@ -68,7 +68,7 @@ int mount_internal(struct fstype *fs, const char *target) {
     mount_table[slot].mntpoint[j] = target[j];
   mount_table[slot].mntpoint[j] = '\0';
   mount_table[slot].fs = fs;
-  mount_table[slot].fs_data = NULL;
+  mount_table[slot].fs_data = fs_data;
   mount_table[slot].in_use = true;
   spin_unlock(&mount_lock);
   return 0;
@@ -254,5 +254,5 @@ int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   if (!fs)
     return -ENODEV;
 
-  return mount_internal(fs, target);
+  return mount_internal(fs, target, NULL);
 }

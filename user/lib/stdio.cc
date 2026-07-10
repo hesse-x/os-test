@@ -376,6 +376,7 @@ FILE *fopen(const char *path, const char *mode) {
   f->offset = 0;
   f->ungot = -1;
   f->lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+  f->user_data = NULL;
 
   return f;
 }
@@ -523,6 +524,7 @@ FILE *fdopen(int fd, const char *mode) {
   f->offset = 0;
   f->ungot = -1;
   f->lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+  f->user_data = NULL;
   return f;
 }
 

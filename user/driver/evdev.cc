@@ -4,17 +4,29 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <freebsd/input.h>
+// evdev user-space driver: real keyboard event source (xHCI HID → SHM ring →
+// terminal consumer) + EVIOCG* ioctl query handler. Replaces the old kbd
+// driver; terminal now opens /dev/input/event0.
+#include "user/include/input_lib.h"
+#include "user/include/usb_hid.h"
+#include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/device.h>
 #include <sys/ipc.h>
+#include <sys/mman.h>
 #include <syscall.h>
 #include <unistd.h>
 #include <xos/errno.h>
+#include <xos/input.h>
+#include <xos/input_key.h>
+#include <xos/ioctl.h>
+#include <xos/shm.h>
 
 #define MAX_EVDEV_DEVICES 8
+#define MAX_CONSUMERS 8
 // Reply buffer for inline RECV_REQ path and the data evdev hands to sys_resp.
 // Must hold the largest getter we serve: EVIOCGBIT(EV_KEY, KEY_CNT) = 96B, plus
 // headroom for future EVIOCGABS (struct input_absinfo across ABS_CNT axes) etc.
@@ -45,34 +57,100 @@ static struct evdev_device *find_device(uint32_t minor) {
   return NULL;
 }
 
-#ifdef TEST
-static void init_stub(struct evdev_device *dev, uint16_t minor,
-                      const char *name, struct input_id id, uint32_t prop) {
-  dev->minor = minor;
-  strncpy(dev->name, name, sizeof(dev->name) - 1);
-  dev->id = id;
-  memset(dev->caps_bitmap, 0, sizeof(dev->caps_bitmap));
-  dev->prop_bitmap = prop;
-  dev->grabbed = false;
-  dev->grab_client = 0;
+// Bound consumer pids (for notify). SHM is single shared ring on /dev/<name>
+// inode.
+static pid_t consumers[MAX_CONSUMERS];
+
+static void consumer_add(pid_t pid) {
+  for (int i = 0; i < MAX_CONSUMERS; i++) {
+    if (consumers[i] == 0) {
+      consumers[i] = pid;
+      return;
+    }
+  }
 }
 
-static void register_stubs(void) {
-  struct input_id kbd_id = {BUS_USB, 0x0001, 0x0001, 0x0001};
-  init_stub(&devices[0], 0, "evdev keyboard", kbd_id, 0);
-  // Advertise EV_KEY support: set bit EV_KEY in the EV_SYN-type bitmap (ev=0).
-  devices[0].caps_bitmap[EV_SYN][EV_KEY / 8] |= (1u << (EV_KEY % 8));
-  // Advertise KEY_A: set bit KEY_A (=30) in the EV_KEY-type bitmap (ev=1).
-  // KEY_A=30 → byte 3, bit 6.
-  devices[0].caps_bitmap[EV_KEY][KEY_A / 8] |= (1u << (KEY_A % 8));
-
-  struct input_id probe_id = {0, 0, 0, 0};
-  init_stub(&devices[1], 1, "evdev test dev", probe_id, 0);
-  num_devices = 2;
-  device_register_shm("input/event0", -1, 0);
-  device_register_shm("input/event1", -1, 1);
+static void consumer_remove_pid(pid_t pid) {
+  for (int i = 0; i < MAX_CONSUMERS; i++) {
+    if (consumers[i] == pid)
+      consumers[i] = 0;
+  }
 }
-#endif
+
+// Driver-side SHM ring (single, shared via inode).
+static volatile input_shm_header *g_ring_hdr;
+static uint32_t g_ring_cap;
+static uint32_t g_ring_off;
+
+// Write one event to the shared ring + unconditional notify to all consumers.
+static void broadcast_event(const input_event *ev) {
+  volatile input_shm_header *hdr = g_ring_hdr;
+  if (!hdr)
+    return;
+
+  uint32_t head = __atomic_load_n(&hdr->head, __ATOMIC_ACQUIRE);
+  uint32_t tail = __atomic_load_n(&hdr->tail, __ATOMIC_ACQUIRE);
+  uint32_t next = (head + 1) % g_ring_cap;
+  if (next == tail)
+    return; // ring full, drop
+
+  volatile input_event *slot =
+      (volatile input_event *)((volatile uint8_t *)hdr + g_ring_off +
+                               head * sizeof(input_event));
+  slot->timestamp_ns = ev->timestamp_ns;
+  slot->type = ev->type;
+  slot->code = ev->code;
+  slot->value = ev->value;
+  __atomic_store_n(&hdr->head, next, __ATOMIC_RELEASE);
+
+  // Unconditional notify. If pid gone/exited, notify is no-op.
+  for (int i = 0; i < MAX_CONSUMERS; i++) {
+    pid_t p = consumers[i];
+    if (p > 0)
+      notify(p);
+  }
+}
+
+static void handle_req(struct recv_msg *msg) {
+  if (msg->type != RECV_REQ)
+    return;
+  uint32_t opcode = *(uint32_t *)msg->data;
+
+  int32_t result = 0;
+  if (opcode == (uint32_t)INPUT_BIND) {
+    // Direction A: consumer just registers itself. SHM is accessed via
+    // open("/dev/input/event0") + mmap(MAP_SHARED, fd) — no fd passing.
+    consumer_add((pid_t)msg->src);
+    result = 0;
+  } else if (opcode == (uint32_t)INPUT_UNBIND) {
+    consumer_remove_pid((pid_t)msg->src);
+    result = 0;
+  } else {
+    result = -EINVAL;
+  }
+  // INPUT_BIND/UNBIND are _IOWR('I', ...): the kernel copies the 8-byte arg
+  // (struct input_bind_arg { int shm_fd; int result; }) back to the caller on
+  // reply. The caller (terminal/test) judges success by bind_arg.result, so we
+  // must write result into offset 4 and return it as a full 8-byte reply — not
+  // just pass result as status with reply_len=0 (that leaves bind_arg.result at
+  // its caller-initialized -1 and the caller loops forever).
+  struct input_bind_arg reply;
+  reply.shm_fd = -1;
+  reply.result = result;
+  sys_resp(&reply, sizeof(reply), result);
+}
+
+// on_key_event: each call fills one event, returns 1=has event / 0=HID empty.
+static int on_key_event(input_event *ev) {
+  struct key_event ke;
+  if (get_keycode(&ke) != 0)
+    return 0; // HID ring empty
+  ev->timestamp_ns = sys_gettime();
+  ev->type = EV_KEY;
+  ev->code = ke.key;      // KEY_A, KEY_B, ... (evdev-aligned in input_key.h)
+  ev->value = ke.pressed; // 1=press, 0=release
+  return 1;
+}
 
 // Core ioctl handler shared by the inline (RECV_REQ, arg<=48B) and variable-
 // length (RECV_IOCTL, arg>48B) proxy paths. The caller extracts cmd/minor/src
@@ -163,46 +241,135 @@ static void handle_ioctl(uint32_t cmd, uint32_t minor, pid_t src,
   resp(data, data_len, result);
 }
 
+// Advertise EV_KEY support + the set of keys input_event_to_ascii can map.
+static void init_caps(struct evdev_device *dev) {
+  memset(dev->caps_bitmap, 0, sizeof(dev->caps_bitmap));
+  // ev=0 (EV_SYN-type) bitmap advertises supported event types: set EV_KEY.
+  dev->caps_bitmap[EV_SYN][EV_KEY / 8] |= (1u << (EV_KEY % 8));
+  // ev=1 (EV_KEY-type) bitmap advertises supported key codes.
+  static const uint16_t keys[] = {
+      KEY_ESC,      KEY_1,          KEY_2,          KEY_3,
+      KEY_4,        KEY_5,          KEY_6,          KEY_7,
+      KEY_8,        KEY_9,          KEY_0,          KEY_MINUS,
+      KEY_EQUAL,    KEY_BACKSPACE,  KEY_TAB,        KEY_Q,
+      KEY_W,        KEY_E,          KEY_R,          KEY_T,
+      KEY_Y,        KEY_U,          KEY_I,          KEY_O,
+      KEY_P,        KEY_LEFTBRACE,  KEY_RIGHTBRACE, KEY_ENTER,
+      KEY_LEFTCTRL, KEY_A,          KEY_S,          KEY_D,
+      KEY_F,        KEY_G,          KEY_H,          KEY_J,
+      KEY_K,        KEY_L,          KEY_SEMICOLON,  KEY_APOSTROPHE,
+      KEY_GRAVE,    KEY_LEFTSHIFT,  KEY_BACKSLASH,  KEY_Z,
+      KEY_X,        KEY_C,          KEY_V,          KEY_B,
+      KEY_N,        KEY_M,          KEY_COMMA,      KEY_DOT,
+      KEY_SLASH,    KEY_RIGHTSHIFT, KEY_LEFTALT,    KEY_SPACE,
+      KEY_CAPSLOCK,
+  };
+  for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+    uint16_t k = keys[i];
+    dev->caps_bitmap[EV_KEY][k / 8] |= (1u << (k % 8));
+  }
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
   (void)envp;
 
-#ifdef TEST
-  register_stubs();
-#endif
+  // 1. Open HID node + mmap kernel HID SHM (triggers usb_hid_kbd_open,
+  // adding our pid into xhci kbd_openers[]).
+  int hid_fd = open("/dev/usb_hid_kbd", O_RDWR);
+  void *hid_shm =
+      mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, hid_fd, 0);
+  get_keycode_init(hid_shm);
 
+  // 2. Build event0 device record (minor=0): real keyboard identity + caps.
+  struct evdev_device *dev = &devices[0];
+  dev->minor = 0;
+  strncpy(dev->name, "evdev keyboard", sizeof(dev->name) - 1);
+  dev->id.bustype = BUS_USB;
+  dev->id.vendor = 0x0001;
+  dev->id.product = 0x0001;
+  dev->id.version = 0x0001;
+  dev->prop_bitmap = 0;
+  dev->grabbed = false;
+  dev->grab_client = 0;
+  init_caps(dev);
+  num_devices = 1;
+
+  // 3. Create output SHM ring (driver-owned) + bind to /dev/input/event0 inode.
+  //    Consumers access via open("/dev/input/event0") + mmap(MAP_SHARED, fd).
+  int shm_fd = memfd_create("input_ring", 0);
+  ftruncate(shm_fd, 4096);
+  void *shm = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+
+  for (int i = 0; i < 4096; i++)
+    ((volatile uint8_t *)shm)[i] = 0;
+  volatile input_shm_header *hdr = (volatile input_shm_header *)shm;
+  hdr->magic = INPUT_SHM_MAGIC;
+  hdr->version = INPUT_SHM_VERSION;
+  hdr->device_type = INPUT_DEV_KBD;
+  hdr->event_size = sizeof(input_event);
+  hdr->ring_offset = sizeof(input_shm_header);
+  hdr->ring_capacity = INPUT_RING_CAPACITY_DEFAULT;
+  hdr->head = 0;
+  hdr->tail = 0;
+
+  g_ring_hdr = hdr;
+  g_ring_off = hdr->ring_offset;
+  g_ring_cap = hdr->ring_capacity;
+
+  device_register_shm("input/event0", shm_fd, 0);
+
+  {
+    struct dev_props props;
+    memset(&props, 0, sizeof(props));
+    props.bustype = BUS_USB;
+    props.vendor = 0x0001;
+    props.product = 0x0001;
+    props.version = 0x0001;
+    strncpy(props.name, "evdev keyboard", 63);
+    props.name[63] = '\0';
+    device_set_meta("input/event0", "input", "evdev", &props);
+  }
+
+  // 4. Main loop: recv() → EINTR: drain HID reports → ring + notify;
+  //    RECV_REQ: INPUT_BIND/UNBIND (type='I') or inline EVIOCG* (type='E');
+  //    RECV_IOCTL: variable-length EVIOCG* (arg>48B).
   while (1) {
     struct recv_msg msg;
     // Variable-length RECV_IOCTL requests carry their arg data here: the kernel
     // copies the kmalloc'd arg into data_buf and frees the kernel buffer before
-    // returning (see kernel/xcore/ipc.c sys_recv). NULL would make the kernel
-    // reject those with EINVAL and drop the request. 256B covers any arg we
-    // serve (read getters only; size is _IOC_SIZE(cmd), capped by libc ioctl).
+    // returning. NULL would make the kernel reject those with EINVAL. 256B
+    // covers any arg we serve (read getters only; size = _IOC_SIZE(cmd)).
     uint8_t data_buf[256];
     int rc = recv(&msg, data_buf, sizeof(data_buf), 0);
-    if (rc < 0)
-      continue;
 
-    uint32_t cmd;
-    uint32_t minor;
-    pid_t src = (pid_t)msg.src;
-    int32_t grab_val = 0;
-    if (msg.type == RECV_REQ) {
-      // inline path: req_data = [cmd][arg<=48B][minor@52]
-      cmd = *(uint32_t *)msg.data;
-      minor = *(uint32_t *)(msg.data + 52);
-      if (_IOC_DIR(cmd) & _IOC_WRITE)
-        grab_val = *(int32_t *)(msg.data + 4);
-    } else if (msg.type == RECV_IOCTL) {
-      // variable-length path: arg data already delivered via data_buf above;
-      // pure-read getters (the only ones that exceed 48B) don't read it back.
-      cmd = msg.ioctl.cmd;
-      minor = msg.ioctl.minor;
-    } else {
+    if (rc < 0) {
+      if (errno == EINTR) {
+        // ISR woke us — drain HID reports
+        input_event ev;
+        while (on_key_event(&ev))
+          broadcast_event(&ev);
+      }
       continue;
     }
-    handle_ioctl(cmd, minor, src, grab_val);
+
+    if (msg.type == RECV_REQ) {
+      uint32_t opcode = *(uint32_t *)msg.data;
+      // type=='I' → INPUT_BIND/UNBIND; type=='E' → inline EVIOCG* ioctl.
+      if (_IOC_TYPE(opcode) == 'I') {
+        handle_req(&msg);
+      } else {
+        // inline path: req_data = [cmd][arg<=48B][minor@52]
+        uint32_t cmd = opcode;
+        uint32_t minor = *(uint32_t *)(msg.data + 52);
+        int32_t grab_val =
+            (_IOC_DIR(cmd) & _IOC_WRITE) ? *(int32_t *)(msg.data + 4) : 0;
+        handle_ioctl(cmd, minor, (pid_t)msg.src, grab_val);
+      }
+    } else if (msg.type == RECV_IOCTL) {
+      handle_ioctl(msg.ioctl.cmd, msg.ioctl.minor, (pid_t)msg.src, 0);
+    }
   }
 
   return 0;

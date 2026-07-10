@@ -504,6 +504,17 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     if (f)
       file_get(f);
     rcu_read_unlock();
+    if (f && f->f_op && f->f_op->mmap) {
+      uint64_t ret = f->f_op->mmap(proc, f, size);
+      // f_op->mmap may reject consumers (e.g. ringbuf_fops only allows the
+      // driver owner). Fall through to the FD_DEV SHM path so consumers can
+      // still mmap the inode-bound SHM.
+      if (ret != (uint64_t)-EPERM && ret != (uint64_t)-ENOSYS) {
+        file_put(f);
+        spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+        return ret;
+      }
+    }
     if (f && f->type == FD_DEV) {
       struct inode *ip = f->inode;
       if (ip && ip->i_priv) {
@@ -737,6 +748,10 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       return -ENOMEM;
     }
     phys_pages[i] = (__force uint64_t)page_to_phys(page);
+    // Zero the page before mapping to userspace (page may contain stale data
+    // from previous user)
+    __memset((__force void *)phys_to_virt((__force phys_addr_t)phys_pages[i]),
+             0, PAGE_SIZE);
     if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, phys_pages[i],
                               pte_flags)) {
       bfc_free_page(&bfc_frames[PHY_TO_PAGE(phys_pages[i])], 1);
@@ -953,6 +968,13 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   rcu_read_unlock();
 
   int64_t ret;
+
+  if (f->f_op) {
+    if (f->f_op->write)
+      return f->f_op->write(proc, f, buf, len);
+    ret = -EINVAL;
+    goto out;
+  }
 
   // FD_REGULAR: kernel FAT32 via page cache
   if (f->type == FD_REGULAR) {
@@ -1292,6 +1314,14 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   rcu_read_unlock();
 
   int64_t ret;
+
+  // file_operations 分发: f_op 非 NULL 时优先走 f_op
+  if (f->f_op) {
+    if (f->f_op->read)
+      return f->f_op->read(proc, f, buf, len);
+    ret = -EINVAL;
+    goto out;
+  }
 
   // FD_REGULAR: kernel FAT32 via page cache
   if (f->type == FD_REGULAR) {
@@ -1835,6 +1865,13 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   rcu_read_unlock();
 
   int64_t ret;
+  // f_op with an ioctl callback handles the command entirely in-kernel
+  // (e.g. pts/ptmx tty ioctl). f_op without ioctl (e.g. ringbuf_fops on
+  // SHM-backed user drivers) must fall through to the FD_DEV driver_pid
+  // proxy path below so INPUT_BIND/EVIOCG* reach the user-space driver.
+  if (f->f_op && f->f_op->ioctl)
+    return f->f_op->ioctl(proc, f, cmd, arg);
+
   switch (f->type) {
   case FD_DEV: {
     struct inode *ip = f->inode;
@@ -2976,6 +3013,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_signalfd4(tf->rdi, tf->rsi, tf->rdx, tf->r10);
   case SYS_MOUNT:
     return sys_mount(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_DEV_SET_META:
+    return sys_dev_set_meta(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) implemented in phase 3b,
   // this phase returns -ENOSYS
   default:

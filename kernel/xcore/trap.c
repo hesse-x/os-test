@@ -261,6 +261,86 @@ void trap_dispatch(trapframe *tf) {
     uint64_t cr2;
     __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
     printk(LOG_ERROR, "PAGE FAULT: fault addr=0x%016lX", cr2);
+    // DIAG: detect cross-process physical-page overlap. The faulting rip's
+    // page (libc.so .text) was overwritten at runtime; suspect a physical
+    // page mapped into two address spaces. Walk all tasks, look up the PTE
+    // for the faulting rip's page, record which pids map the SAME physical
+    // page. If >1 pid maps it → double allocation in bfc_alloc_page.
+    {
+      uint64_t rip_page = tf->rip & ~0xFFF;
+      uint64_t my_phys = 0;
+      if (current_task) {
+        uint64_t *pte = lookup_pte(current_task->cr3, rip_page);
+        if (pte)
+          my_phys = *pte & 0x000FFFFFFFFFF000ULL;
+      }
+      printk(LOG_ERROR, "\n  OVERLAP-DIAG: rip_page=0x%lX phys=0x%lX", rip_page,
+             my_phys);
+      if (my_phys) {
+        int hits = 0;
+        for (int i = 0; i < MAX_PROC; i++) {
+          xtask *t = tasks[i];
+          if (!t || !t->cr3)
+            continue;
+          // skip kernel/idle
+          if (t->pid == 0)
+            continue;
+          uint64_t *pte = lookup_pte(t->cr3, rip_page);
+          if (pte && (*pte & 0x000FFFFFFFFFF000ULL) == my_phys) {
+            printk(LOG_ERROR, " pid%d@cr3=0x%lX", t->pid, t->cr3);
+            hits++;
+          }
+        }
+        printk(LOG_ERROR, " (total %d mapping this phys page)\n", hits);
+      } else {
+        printk(LOG_ERROR, " (rip_page not mapped in current task)\n");
+      }
+      // DIAG2: full walk of CURRENT task's page table, find ALL virtual
+      // addresses mapping to my_phys (same-process alias). If the .text phys
+      // page is also mapped at a .data vaddr, a write to .data corrupts .text.
+      if (my_phys && current_task) {
+        uint64_t *pml4 =
+            (uint64_t *)phys_to_virt((__force phys_addr_t)current_task->cr3);
+        int aliases = 0;
+        for (int i4 = 0; i4 < 512; i4++) {
+          if (!(pml4[i4] & 1))
+            continue;
+          uint64_t *pdpt = (uint64_t *)phys_to_virt(
+              (__force phys_addr_t)(pml4[i4] & 0x000FFFFFFFFFF000ULL));
+          for (int i3 = 0; i3 < 512; i3++) {
+            if (!(pdpt[i3] & 1))
+              continue;
+            if (pdpt[i3] & 0x80) // 1GB huge page
+              continue;
+            uint64_t *pd = (uint64_t *)phys_to_virt(
+                (__force phys_addr_t)(pdpt[i3] & 0x000FFFFFFFFFF000ULL));
+            for (int i2 = 0; i2 < 512; i2++) {
+              if (!(pd[i2] & 1))
+                continue;
+              if (pd[i2] & 0x80) // 2MB huge page
+                continue;
+              uint64_t *pt = (uint64_t *)phys_to_virt(
+                  (__force phys_addr_t)(pd[i2] & 0x000FFFFFFFFFF000ULL));
+              for (int i1 = 0; i1 < 512; i1++) {
+                if (!(pt[i1] & 1))
+                  continue;
+                if ((pt[i1] & 0x000FFFFFFFFFF000ULL) == my_phys) {
+                  uint64_t va = ((uint64_t)i4 << 39) | ((uint64_t)i3 << 30) |
+                                ((uint64_t)i2 << 21) | ((uint64_t)i1 << 12);
+                  if (i4 >= 256)
+                    va |= 0xFFFF000000000000ULL;
+                  printk(LOG_ERROR, "\n    ALIAS va=0x%lX pte=0x%lX", va,
+                         pt[i1]);
+                  aliases++;
+                }
+              }
+            }
+          }
+        }
+        printk(LOG_ERROR, "\n    ALIAS total=%d vaddr(s) map phys 0x%lX\n",
+               aliases, my_phys);
+      }
+    }
     // err code decoding: speed up NX/write-protect/page-not-present diagnosis
     // bit0: 0=not present 1=protection violation
     // bit1: 0=read 1=write
@@ -575,8 +655,14 @@ static void timer_handler(trapframe *tf) {
     if (signal_check_hook && current_task->proc) {
       signal_check_hook(current_task, tf);
     }
+    // EXPERIMENT (NO_PREEMPT): skip setting need_resched so user-mode tasks
+    // are never preempted mid-execution. If the libc.so .text corruption
+    // disappears, the write happens during a context switch; if it remains,
+    // pid=6 corrupts its own .text. Remove after the experiment.
+#ifndef NO_PREEMPT
     current_task->need_resched =
         1; // set flag only, check_pending_signals calls schedule() at exit
+#endif
   }
 
 #ifndef NDEBUG

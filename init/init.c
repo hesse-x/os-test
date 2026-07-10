@@ -43,20 +43,14 @@ int main(int argc, char **argv, char **envp) {
 
   printf("init: started\n");
 
-  // 2. Spawn kbd_driver, wait for /dev/kbd
-  printf("init: spawning kbd_driver\n");
-  {
-    pid_t p = spawn("/driver/kbd.dev");
-    printf("init: spawn kbd returned pid=%d\n", (int)p);
-  }
-  wait_dev_ready("/dev/kbd");
-  printf("init: kbd_driver ready\n");
-
-  // 3. Spawn evdev (unconditional — long-lived infrastructure)
+  // 2. Spawn evdev (keyboard event source + EVIOCG* ioctl query), wait for
+  //    /dev/input/event0. Replaces the old kbd driver.
   printf("init: spawning evdev\n");
   spawn_service("/driver/evdev.dev");
+  wait_dev_ready("/dev/input/event0");
+  printf("init: evdev ready\n");
 
-  // 3.5 Spawn udevd (device event daemon, subscribes to netlink uevent group)
+  // 3. Spawn udevd (device event daemon, subscribes to netlink uevent group)
   printf("init: spawning udevd\n");
   spawn_service("/usr/bin/udevd");
 

@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/device.h>
 #include <sys/ioctl.h>
 #include <sys/ipc.h>
@@ -143,11 +144,34 @@ void input_driver_run(uint32_t device_type, const char *dev_name,
   hdr->head = 0;
   hdr->tail = 0;
 
+  /* 同时初始化 ringbuf_header 字段 (design 3.5, 兼容过渡) */
+  volatile ringbuf_header *rhdr = (volatile ringbuf_header *)shm;
+  rhdr->magic = RINGBUF_MAGIC;
+  rhdr->version = 1;
+  rhdr->capacity = INPUT_RING_CAPACITY_DEFAULT;
+  rhdr->head = 0;
+  rhdr->data_offset = sizeof(ringbuf_header);
+  rhdr->elem_size = sizeof(input_event);
+
   g_ring_hdr = hdr;
   g_ring_off = hdr->ring_offset;
   g_ring_cap = hdr->ring_capacity;
 
   device_register_shm(dev_name, shm_fd, 0);
+
+  // Step 2: set metadata (design 3.3.2). Properties are stub values
+  // for now — real HID descriptor parsing is a future task (design 3.3.3).
+  {
+    struct dev_props props;
+    memset(&props, 0, sizeof(props));
+    props.bustype = 0x03 /* BUS_USB */;
+    props.vendor = 0x0001;
+    props.product = 0x0001;
+    props.version = 0x0001;
+    strncpy(props.name, dev_name, 63);
+    props.name[63] = '\0';
+    device_set_meta(dev_name, "input", "evdev", &props);
+  }
 
   // 3. Main loop: recv() → EINTR: drain HID via on_event, write ring + notify;
   //    REQ: handle bind/unbind.

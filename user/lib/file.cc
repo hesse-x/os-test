@@ -414,7 +414,6 @@ int ioctl(int fd, uint32_t cmd, ...) {
   va_end(ap);
 
   uint16_t arg_size = _IOC_SIZE(cmd);
-
   // Legacy ioctl commands (TCGETS, TCSETS, TIOCGPGRP, etc.) don't encode
   // direction/size in the _IOC format — _IOC_SIZE=0, _IOC_DIR=_IOC_NONE.
   // The buf intermediary relies on these fields to copy data, so it silently

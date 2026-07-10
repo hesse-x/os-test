@@ -18,10 +18,17 @@ struct shm;
 typedef int64_t ssize_t;
 typedef uint32_t __poll;
 
+struct sysfs_node;
+
 struct dev_ops {
   pid_t driver_pid; // 0 = kernel device, >0 = user-space driver
   bool is_block;    // true = block device, false = char device
   uint32_t minor;   // device minor number (ioctl req routing)
+
+  char subsystem[8];            // "input" / "drm" / "block" / "tty"
+  char devtype[8];              // "evdev" / "card" / "disk" / "ptmx"
+  void *subsys_priv;            // -> input_dev_props* / NULL
+  struct sysfs_node *sysfs_dir; // sysfs 子树根 (移除时用)
 
   // VFS callbacks (only called when driver_pid == 0)
   int (*open)(xtask *proc, int fd);

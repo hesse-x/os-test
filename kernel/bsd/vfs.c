@@ -15,6 +15,7 @@
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/pty.h"
 #include "kernel/bsd/syscall.h"
+#include "kernel/bsd/sysfs.h"
 #include "kernel/bsd/types.h"
 #include "kernel/driver/ahci.h"
 #include "kernel/driver/blk_dev.h"
@@ -54,7 +55,9 @@ void vfs_init(void) {
       printk(LOG_INFO, "vfs_init: FAT32 inited on port %d\n", try_ports[pi]);
       register_fstype(&fat32_fstype);
       register_fstype(&devtmpfs_fstype);
-      mount_internal(&fat32_fstype, "/");
+      register_fstype(&sysfs_fstype);
+      sysfs_init();
+      mount_internal(&fat32_fstype, "/", NULL);
       /* Create /dev directory entry on FAT32 root so getdents("/") sees it.
        * fat32_mkdir is not idempotent (it allocates a cluster unconditionally),
        * so only create when the entry is missing. */
@@ -63,7 +66,14 @@ void vfs_init(void) {
         if (fat32_stat("/dev", ksb) != 0)
           fat32_mkdir("/dev");
       }
-      mount_internal(&devtmpfs_fstype, "/dev");
+      mount_internal(&devtmpfs_fstype, "/dev", NULL);
+      /* Create /sys directory on FAT32 root for getdents("/") visibility */
+      {
+        uint8_t ksb[256];
+        if (fat32_stat("/sys", ksb) != 0)
+          fat32_mkdir("/sys");
+      }
+      mount_internal(&sysfs_fstype, "/sys", sysfs_root_node());
       devtmpfs_create("sda", &blk_dev_ops, NULL);
       break;
     }
@@ -187,6 +197,11 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   refcount_set(&f->f_count, 1);
 
   /* 6. Set up fd entry */
+  /* sysfs 属性文件: 设 f_op = sysfs_fops */
+  if (ip->type == INODE_REGULAR && ip->mount &&
+      __strcmp(ip->mount->fs->name, "sysfs") == 0)
+    f->f_op = &sysfs_fops;
+
   if (ip->type == INODE_DIR) {
     f->type = FD_DIR;
     f->flags = O_RDONLY;

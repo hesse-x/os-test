@@ -91,13 +91,10 @@ add_dependencies(hello_dyn_dyn_elf c_so)
 add_user_elf(kbd_driver   SOURCES driver/kbd_driver.cc lib/usb_kbd.cc lib/input_driver.cc   LINK_LIBS c)
 add_user_elf(terminal     SOURCES driver/terminal.cc     LINK_LIBS c)
 
-if(TEST)
-    add_user_elf(evdev  SOURCES driver/evdev.cc  LINK_LIBS c  DEFS TEST  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libinput/include/linux)
-else()
-    add_user_elf(evdev  SOURCES driver/evdev.cc  LINK_LIBS c  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libinput/include/linux)
-endif()
+# evdev: real keyboard event source (xHCI HID → SHM ring → terminal) +
+# EVIOCG* ioctl query. Replaces the kbd driver for terminal input.
+add_user_elf(evdev  SOURCES driver/evdev.cc lib/usb_kbd.cc  LINK_LIBS c)
 
-# shell/ — Shell user process
 if(TEST)
     add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c DEFS TEST)
 else()

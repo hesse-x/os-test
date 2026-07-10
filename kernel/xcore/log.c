@@ -10,7 +10,9 @@
 #include "arch/x64/utils.h" // halt()
 #include "kernel/xcore/serial_hook.h"
 #include "kernel/xcore/trap.h" // syscall_name()
+#include "utils/kvformat.h"
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef LOG_LEVEL_DEBUG
@@ -70,4 +72,37 @@ void dump_stack_trace(void) {
     if (!rbp)
       break;
   }
+}
+
+// ===================== snprintf (backed by kvformat) =====================
+struct snprintf_arg {
+  char *buf;
+  size_t pos;
+  size_t cap;
+};
+
+static void snprintf_putc(char c, void *arg) {
+  struct snprintf_arg *a = (struct snprintf_arg *)arg;
+  if (a->pos + 1 < a->cap)
+    a->buf[a->pos++] = c;
+}
+
+int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
+  struct snprintf_arg a = {buf, 0, size};
+  int n = kvformat(snprintf_putc, &a, fmt, ap);
+  if (size > 0) {
+    if (a.pos < size)
+      buf[a.pos] = '\0';
+    else
+      buf[size - 1] = '\0';
+  }
+  return n;
+}
+
+int snprintf(char *buf, size_t size, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, size, fmt, ap);
+  va_end(ap);
+  return n;
 }

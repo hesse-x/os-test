@@ -13,6 +13,7 @@
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/log.h"
+#include "kernel/xcore/mem/kasan.h" // copy_from_user/strncpy_from_user/__user
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
@@ -20,6 +21,9 @@
 #include <stddef.h>
 #include <xos/errno.h>
 #include <xos/stat.h>
+
+#include "kernel/bsd/syscall.h"
+#include "kernel/bsd/sysfs.h"
 
 struct shm;
 
@@ -239,9 +243,12 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
   spin_unlock(&devtmpfs_lock);
   printk(LOG_INFO, "devtmpfs: created /dev/%s\n", name);
 
-  // Broadcast uevent if netlink initialized
-  if (devtmpfs_initialized && nl_is_initialized()) {
-    const char *subsys = (ops && ops->is_block) ? "block" : "input";
+  // Broadcast uevent only for kernel devices (user-space drivers push via
+  // SYS_DEV_SET_META after metadata is set — design 3.3.2 step 2)
+  if (devtmpfs_initialized && nl_is_initialized() && ops &&
+      ops->driver_pid == 0) {
+    const char *subsys =
+        ops->subsystem[0] ? ops->subsystem : (ops->is_block ? "block" : "misc");
     nl_uevent_broadcast("add", name, subsys);
   }
   return 0;
@@ -280,6 +287,9 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags) {
   if (ip->i_priv) {
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
     f->target_pid = ops->driver_pid;
+    /* SHM-backed 用户态驱动 = ringbuf (design 2.5) */
+    if (ops->driver_pid > 0 && ip->shm)
+      f->f_op = &ringbuf_fops;
     // Kernel device: call open callback. Callbacks mutate the FD_DEV file
     // in place (do not replace the pointer), so fd_table[fd] stays valid.
     if (ops->driver_pid == 0 && ops->open) {
@@ -310,6 +320,15 @@ void devtmpfs_cleanup_pid(pid_t pid) {
       if (ops->driver_pid == pid) {
         /* Remove from list */
         *pp = e->next;
+        /* Clean up sysfs subtree + subsys_priv */
+        if (ops->sysfs_dir) {
+          sysfs_remove_dir(ops->sysfs_dir);
+          ops->sysfs_dir = NULL;
+        }
+        if (ops->subsys_priv) {
+          kfree(ops->subsys_priv);
+          ops->subsys_priv = NULL;
+        }
         /* Free kmalloc'd dev_ops (user-space driver) */
         if (ops->driver_pid > 0)
           kfree(ops);
@@ -463,3 +482,101 @@ struct fstype devtmpfs_fstype = {
     .rmdir = devtmpfs_fs_nosys,
     .stat = devtmpfs_stat,
 };
+
+/* sys_dev_set_meta(name, subsystem, devtype, props) — SYS_DEV_SET_META
+ * Sets device metadata + builds sysfs subtree + pushes uevent.
+ * Step 2 of two-step registration (design 3.3.2). */
+int64_t sys_dev_set_meta(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                         int64_t unused1, int64_t unused2) {
+  (void)unused1;
+  (void)unused2;
+  const char __user *uname = (const char __user *__force)arg1;
+  const char __user *usubsys = (const char __user *__force)arg2;
+  const char __user *udevtype = (const char __user *__force)arg3;
+  const char __user *uprops = (const char __user *__force)arg4;
+
+  if (!uname || !usubsys || !udevtype)
+    return (int64_t)-EFAULT;
+
+  char name[32], subsystem[8], devtype[8];
+  if (strncpy_from_user(name, uname, 32) < 0)
+    return (int64_t)-EFAULT;
+  if (strncpy_from_user(subsystem, usubsys, 8) < 0)
+    return (int64_t)-EFAULT;
+  if (strncpy_from_user(devtype, udevtype, 8) < 0)
+    return (int64_t)-EFAULT;
+
+  /* Find dev_ops by name. devtmpfs_lookup returns a borrowed reference
+   * (no refcount increment) for non-root entries, so do NOT inode_put. */
+  struct inode *ip = devtmpfs_lookup(name);
+  if (!ip)
+    return (int64_t)-ENOENT;
+  struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+  if (!ops) {
+    return (int64_t)-ENOENT;
+  }
+
+  /* Fill subsystem/devtype */
+  __strncpy(ops->subsystem, subsystem, 7);
+  ops->subsystem[7] = '\0';
+  __strncpy(ops->devtype, devtype, 7);
+  ops->devtype[7] = '\0';
+
+  /* Copy props if provided */
+  struct input_dev_props *iprops = NULL;
+  if (uprops) {
+    iprops = kmalloc(sizeof(struct input_dev_props));
+    if (!iprops) {
+      return (int64_t)-ENOMEM;
+    }
+    if (copy_from_user(iprops, uprops, sizeof(struct input_dev_props))) {
+      kfree(iprops);
+      return (int64_t)-EFAULT;
+    }
+    ops->subsys_priv = iprops;
+  }
+
+  /* Build sysfs subtree for input devices with props */
+  if (__strcmp(ops->subsystem, "input") == 0 && iprops) {
+    const char *slash = name;
+    while (*slash && *slash != '/')
+      slash++;
+    const char *basename = (*slash == '/') ? slash + 1 : name;
+
+    struct sysfs_node *cls = sysfs_class_dir("input");
+    struct sysfs_node *devdir = sysfs_create_dir(cls, basename);
+    if (devdir) {
+      /* Per-device attr copies: const templates have no priv; we need
+       * priv = iprops so show callbacks read this device's properties.
+       * (Shared mutable attrs would corrupt across multiple devices.) */
+      const struct sysfs_attr *tmpl[5] = {
+          &evdev_attr_name, &evdev_attr_bustype, &evdev_attr_vendor,
+          &evdev_attr_product, &evdev_attr_version};
+      const char *fnames[5] = {"name", "bustype", "vendor", "product",
+                               "version"};
+      struct sysfs_node *iddir = sysfs_create_dir(devdir, "id");
+      for (int i = 0; i < 5; i++) {
+        struct sysfs_attr *a = kmalloc(sizeof(*a));
+        if (!a)
+          break;
+        a->name = tmpl[i]->name;
+        a->priv = iprops;
+        a->show = tmpl[i]->show;
+        a->store = tmpl[i]->store;
+        struct sysfs_node *target = (i == 0) ? devdir : iddir;
+        struct sysfs_node *fn = sysfs_create_file(target, fnames[i], a);
+        if (fn)
+          fn->attr_owned = true;
+        else
+          kfree(a);
+      }
+      ops->sysfs_dir = devdir;
+    }
+  }
+
+  /* Push uevent (step 2: device ready) */
+  if (nl_is_initialized())
+    nl_uevent_broadcast("add", name, ops->subsystem);
+
+  return 0;
+}
