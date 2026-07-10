@@ -381,7 +381,7 @@ pci_find_device_by_id(uint16_t vendor, uint16_t device) {
 // ===================== Syscall: sys_pci_dev_info =====================
 
 int64_t sys_pci_dev_info(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
-                         int64_t _u5, int64_t _u6) {
+                         int64_t unused5, int64_t unused6) {
   uint8_t bus = (uint8_t)arg1;
   uint8_t dev_num = (uint8_t)arg2;
   uint8_t func = (uint8_t)arg3;

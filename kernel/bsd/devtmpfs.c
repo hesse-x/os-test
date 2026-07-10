@@ -7,6 +7,7 @@
 #include "kernel/bsd/devtmpfs.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/mount.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/types.h"
@@ -18,7 +19,6 @@
 #include "kernel/xcore/xtask.h"
 #include <stddef.h>
 #include <xos/errno.h>
-#include "kernel/bsd/mount.h"
 #include <xos/stat.h>
 
 struct shm;
@@ -387,8 +387,7 @@ static ssize_t devtmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
       nl++;
     }
     if (!has_slash) {
-      if (!dir_emit(ctx, e->name, (int)nl, ctx->written, e->ip->ino,
-                    DT_CHR))
+      if (!dir_emit(ctx, e->name, (int)nl, ctx->written, e->ip->ino, DT_CHR))
         break;
     }
     e = e->next;

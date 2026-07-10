@@ -28,6 +28,14 @@ void synchronize_rcu(void) {
   // would never see its own cpu_gen advance (it never passes through
   // rcu_read_unlock while spinning).
   atomic_set(&g_rcu_state.cpu_gen[my_cpu], new_gen - 1);
+  // Release writer_lock before busy-wait.  The lock only serializes
+  // the global_gen increment; holding it across the wait serializes
+  // all callers and, on SMP with IF=0, creates deadlock (a CPU
+  // spinning on writer_lock can never reach a quiescent state to
+  // advance cpu_gen).  Releasing early allows concurrent callers to
+  // wait for different generation thresholds — all satisfied by the
+  // same rcu_quiescent() calls from timer IRQs.
+  spin_unlock(&g_rcu_state.writer_lock);
   // Wait for all OTHER online CPUs to observe at least new_gen - 1
   for (int i = 0; i < ncpu; i++) {
     if (i == my_cpu)
@@ -64,5 +72,4 @@ void synchronize_rcu(void) {
       }
     }
   }
-  spin_unlock(&g_rcu_state.writer_lock);
 }

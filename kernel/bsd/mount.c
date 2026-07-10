@@ -7,7 +7,6 @@
 #include "kernel/bsd/mount.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/inode.h"
-#include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/spinlock.h"
 #include <xos/errno.h>
@@ -124,8 +123,8 @@ struct mount_entry *vfs_resolve(const char *path, char *relpath,
   return best;
 }
 
-struct mount_entry *vfs_resolve_user(const char __user *upath,
-                                     char *relpath, size_t relcap) {
+struct mount_entry *vfs_resolve_user(const char __user *upath, char *relpath,
+                                     size_t relcap) {
   char kpath[256];
   char norm[256];
   if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
@@ -143,8 +142,7 @@ struct mount_entry *mount_of_inode(struct inode *ip) {
   /* Fallback: find root mount "/" */
   spin_lock(&mount_lock);
   for (int i = 0; i < MAX_MOUNTS; i++) {
-    if (mount_table[i].in_use &&
-        mount_table[i].mntpoint[0] == '/' &&
+    if (mount_table[i].in_use && mount_table[i].mntpoint[0] == '/' &&
         mount_table[i].mntpoint[1] == '\0') {
       spin_unlock(&mount_lock);
       return &mount_table[i];
@@ -230,10 +228,10 @@ int normalize_path(const char *in, char *out, size_t outcap) {
  * source/flags/data currently reserved (passed 0/NULL). No permission
  * check: this OS has no user/capability model. */
 int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
-                  int64_t arg5, int64_t _u) {
+                  int64_t arg5, int64_t unused) {
   (void)arg4;
   (void)arg5;
-  (void)_u;
+  (void)unused;
   const char __user *utarget = (const char __user *__force)arg2;
   const char __user *utype = (const char __user *__force)arg3;
 

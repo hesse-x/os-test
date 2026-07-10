@@ -78,9 +78,9 @@ CheckOptions:
   - key: readability-identifier-naming.VariableIgnoredRegexp
     value: '^(__tls_[a-z_]+|__tdata_[a-z_]+|__tbss_[a-z_]+|__pthread_[a-z_]+|__head|__n|__vectors|__start_[a-zA-Z_]+|__stop_[a-zA-Z_]+)$'
 
-  # Parameter exceptions: UEFI spec, libc union accessors
+  # Parameter exceptions: UEFI spec
   - key: readability-identifier-naming.ParameterIgnoredRegexp
-    value: '^(ImageHandle|SystemTable|_u[1-6])$'
+    value: '^(ImageHandle|SystemTable)$'
 
   # Struct exceptions: ELF spec, libc internals
   - key: readability-identifier-naming.StructIgnoredRegexp

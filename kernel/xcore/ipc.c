@@ -161,27 +161,27 @@ uint64_t shm_add_page(struct shm *shm) {
 }
 
 // ===================== Xcore IPC syscall: getpid =====================
-int64_t sys_getpid(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
-                   int64_t _u5, int64_t _u6) {
+int64_t sys_getpid(int64_t unused1, int64_t unused2, int64_t unused3,
+                   int64_t unused4, int64_t unused5, int64_t unused6) {
   return (int64_t)current_task->tgid; // return tgid (process ID)
 }
 
 // ===================== Xcore IPC syscall: gettid =====================
-int64_t sys_gettid(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
-                   int64_t _u5, int64_t _u6) {
+int64_t sys_gettid(int64_t unused1, int64_t unused2, int64_t unused3,
+                   int64_t unused4, int64_t unused5, int64_t unused6) {
   return (int64_t)current_task->pid; // return tid (thread ID)
 }
 
 // ===================== Xcore IPC syscall: yield =====================
-int64_t sys_yield(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
-                  int64_t _u5, int64_t _u6) {
+int64_t sys_yield(int64_t unused1, int64_t unused2, int64_t unused3,
+                  int64_t unused4, int64_t unused5, int64_t unused6) {
   schedule();
   return 0;
 }
 
 // ===================== Xcore IPC syscall: recv =====================
 int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
-                 int64_t _u1, int64_t _u2) {
+                 int64_t unused1, int64_t unused2) {
   void __user *buf = (void __user *__force)arg1;
   void __user *data_buf = (void __user *__force)arg2;
   size_t data_buf_len = (size_t)arg3;
@@ -393,8 +393,8 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 }
 
 // ===================== Xcore IPC syscall: req =====================
-int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                int64_t _u2, int64_t _u3) {
+int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                int64_t unused2, int64_t unused3) {
   pid_t target_pid = (pid_t)arg1;
   void __user *request = (void __user *__force)arg2;
   void __user *reply = (void __user *__force)arg3;
@@ -482,8 +482,8 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 }
 
 // ===================== Xcore IPC syscall: resp =====================
-int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u3,
-                 int64_t _u4, int64_t _u5) {
+int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused3,
+                 int64_t unused4, int64_t unused5) {
   void __user *reply = (void __user *__force)arg1;
   size_t reply_len = (size_t)arg2;
   int32_t result = (int32_t)arg3;
@@ -565,8 +565,8 @@ int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u3,
 }
 
 // ===================== Xcore IPC syscall: irq_bind =====================
-int64_t sys_irq_bind(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                     int64_t _u4, int64_t _u5) {
+int64_t sys_irq_bind(int64_t arg1, int64_t unused1, int64_t unused2,
+                     int64_t unused3, int64_t unused4, int64_t unused5) {
   int irq = (int)arg1;
   if (irq < 0 || irq >= MAX_IRQ_HANDLERS)
     return (int64_t)-EINVAL;
@@ -654,8 +654,8 @@ void wake_process(pid_t pid) {
 }
 
 // ===================== Xcore IPC syscall: notify =====================
-int64_t sys_notify(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                   int64_t _u4, int64_t _u5) {
+int64_t sys_notify(int64_t arg1, int64_t unused1, int64_t unused2,
+                   int64_t unused3, int64_t unused4, int64_t unused5) {
   pid_t target_pid = (pid_t)arg1;
   if (target_pid < 0 || target_pid >= MAX_PROC)
     return (int64_t)-EINVAL;
@@ -688,13 +688,13 @@ int64_t sys_notify(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 
 // ===================== Xcore IPC syscall: gettime / clock
 // =====================
-int64_t sys_gettime(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
-                    int64_t _u5, int64_t _u6) {
+int64_t sys_gettime(int64_t unused1, int64_t unused2, int64_t unused3,
+                    int64_t unused4, int64_t unused5, int64_t unused6) {
   return sched_clock();
 }
 
-int64_t sys_clock(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
-                  int64_t _u5, int64_t _u6) {
+int64_t sys_clock(int64_t unused1, int64_t unused2, int64_t unused3,
+                  int64_t unused4, int64_t unused5, int64_t unused6) {
   return current_task->cpu_time_ns;
 }
 
@@ -770,7 +770,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
 
 // ===================== Xcore IPC syscall: msg =====================
 int64_t sys_msg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
-                int64_t arg5, int64_t _u1) {
+                int64_t arg5, int64_t unused1) {
   pid_t target_pid = (pid_t)arg1;
   void __user *msg_buf = (void __user *__force)arg2;
   size_t msg_len = (size_t)arg3;
@@ -798,8 +798,8 @@ int64_t sys_msg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 }
 
 // ===================== Xcore IPC syscall: msg_resp =====================
-int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                     int64_t _u3, int64_t _u4) {
+int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t unused1,
+                     int64_t unused2, int64_t unused3, int64_t unused4) {
   void __user *resp_buf = (void __user *__force)arg1;
   size_t resp_len = (size_t)arg2;
 
@@ -855,8 +855,8 @@ int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 }
 
 // ===================== Xcore IPC syscall: ioperm =====================
-int64_t sys_ioperm(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                   int64_t _u2, int64_t _u3) {
+int64_t sys_ioperm(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                   int64_t unused2, int64_t unused3) {
   unsigned long from = (unsigned long)arg1;
   unsigned long num = (unsigned long)arg2;
   int turn_on = (int)arg3;

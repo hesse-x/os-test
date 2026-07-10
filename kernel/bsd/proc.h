@@ -98,7 +98,7 @@ uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
 
 // sys_clone (Phase 3b)
 int64_t sys_clone(int64_t flags, int64_t stack, int64_t parent_tid,
-                  int64_t child_tid, int64_t tls, int64_t _u6);
+                  int64_t child_tid, int64_t tls, int64_t arg6);
 
 // Convenience macros (gradually replace current_task, eventually delete
 // current_task alias)

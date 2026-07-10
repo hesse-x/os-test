@@ -59,13 +59,17 @@ echo "clang-tidy version: $(clang-tidy --version | grep -m1 version)"
 
 # ===================== Filtered compile database =====================
 # Strip third_party/ entries so clang-tidy never touches upstream TUs.
+# Also strip .S entries: clang-tidy parses assembly as pseudo-C and flags
+# comment words (e.g. "SMP") as identifier-naming violations. Assembly has
+# no C identifiers to check, so excluding .S matches the script's design
+# (".S files — not in compile DB, clang-tidy cannot parse assembly").
 CLEAN_DB_DIR="$ROOT_DIR/build/clang-tidy-check"
 mkdir -p "$CLEAN_DB_DIR"
 
-jq '[.[] | select(.file | test("third_party/") | not)]' "$COMPILE_DB" \
+jq '[.[] | select(.file | test("third_party/|\\.S$") | not)]' "$COMPILE_DB" \
     > "$CLEAN_DB_DIR/compile_commands.json"
 N_TU=$(jq 'length' "$CLEAN_DB_DIR/compile_commands.json")
-echo "Filtered compile DB: $N_TU TU(s) (third_party/ excluded)"
+echo "Filtered compile DB: $N_TU TU(s) (third_party/ and .S excluded)"
 
 # ===================== Collect TU list =====================
 # TU paths from the compile DB (repo-root-relative for matching with diff output).

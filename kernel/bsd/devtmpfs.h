@@ -7,9 +7,11 @@
 #ifndef KERNEL_DEVTMPFS_H
 #define KERNEL_DEVTMPFS_H
 
-#include "kernel/xcore/xtask.h" // pid_t
 #include <stdbool.h>
 #include <stdint.h>
+
+#include "kernel/bsd/mount.h"
+#include "kernel/xcore/xtask.h" // pid_t
 
 struct shm;
 
@@ -38,7 +40,6 @@ struct inode *devtmpfs_lookup(const char *name);
 void devtmpfs_cleanup_pid(pid_t pid);
 void devtmpfs_remove(const char *name);
 
-struct fstype;
 extern struct fstype devtmpfs_fstype;
 
 #endif

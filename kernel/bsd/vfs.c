@@ -8,9 +8,9 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
-#include "kernel/bsd/mount.h"
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/mount.h"
 #include "kernel/bsd/page_cache.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/pty.h"
@@ -75,8 +75,8 @@ void vfs_init(void) {
 }
 
 /* sys_open(path, flags, mode) — SYS_OPEN */
-int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                 int64_t _u2, int64_t _u3) {
+int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                 int64_t unused2, int64_t unused3) {
   const char __user *upath = (const char __user *__force)arg1;
   int flags = (int)arg2;
   /* mode (arg3) ignored for FAT32 */
@@ -204,8 +204,8 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 }
 
 /* sys_stat(path, stat_buf) — SYS_STAT */
-int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                 int64_t _u3, int64_t _u4) {
+int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                 int64_t unused3, int64_t unused4) {
   const char __user *upath = (const char __user *__force)arg1;
   void __user *stat_buf = (void __user *__force)arg2;
 
@@ -234,8 +234,8 @@ int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 
 /* sys_truncate(path, len) — SYS_TRUNCATE (group 3)
  * Resolve the path to an inode and grow/shrink the file to len bytes. */
-int64_t sys_truncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                     int64_t _u3, int64_t _u4) {
+int64_t sys_truncate(int64_t arg1, int64_t arg2, int64_t unused1,
+                     int64_t unused2, int64_t unused3, int64_t unused4) {
   const char __user *upath = (const char __user *__force)arg1;
   int64_t len = arg2;
   if (!upath)
@@ -258,8 +258,8 @@ int64_t sys_truncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 }
 
 /* sys_fsync(fd) — SYS_FSYNC (group 3): write back dirty pages of one inode. */
-int64_t sys_fsync(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                  int64_t _u4, int64_t _u5) {
+int64_t sys_fsync(int64_t arg1, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4, int64_t unused5) {
   int fd = (int)arg1;
   xtask *proc = current_task;
   if (fd < 0 || fd >= MAX_FD)
@@ -296,8 +296,8 @@ int64_t sys_sync(int64_t unused1, int64_t unused2, int64_t unused3,
 }
 
 /* sys_mkdir(path, mode) — SYS_MKDIR */
-int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                  int64_t _u3, int64_t _u4) {
+int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4) {
   const char __user *upath = (const char __user *__force)arg1;
 
   if (!upath)
@@ -316,8 +316,8 @@ int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 }
 
 /* sys_unlink(path) — SYS_UNLINK */
-int64_t sys_unlink(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                   int64_t _u4, int64_t _u5) {
+int64_t sys_unlink(int64_t arg1, int64_t unused1, int64_t unused2,
+                   int64_t unused3, int64_t unused4, int64_t unused5) {
   const char __user *upath = (const char __user *__force)arg1;
 
   if (!upath)
@@ -336,8 +336,8 @@ int64_t sys_unlink(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 }
 
 /* sys_rmdir(path) — SYS_RMDIR */
-int64_t sys_rmdir(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                  int64_t _u4, int64_t _u5) {
+int64_t sys_rmdir(int64_t arg1, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4, int64_t unused5) {
   const char __user *upath = (const char __user *__force)arg1;
 
   if (!upath)
@@ -358,8 +358,8 @@ int64_t sys_rmdir(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 /* sys_dev_create(name, shm_fd, minor) — SYS_DEV_CREATE
  * Kernel auto-fills driver_pid=current_task->pid, is_block=false, callbacks
  * NULL (user-space driver). minor stored in dev_ops for ioctl req routing. */
-int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                       int64_t _u2, int64_t _u3) {
+int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3,
+                       int64_t unused1, int64_t unused2, int64_t unused3) {
   const char __user *uname = (const char __user *__force)arg1;
   int shm_fd = (int)arg2;
   uint32_t minor = (uint32_t)arg3;
@@ -414,8 +414,8 @@ int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 /* sys_getdents(fd, buf, len) — SYS_GETDENTS
  * Read directory entries into user buffer.
  * fd must be FD_DIR. Returns bytes written, 0 on EOF, or negative errno. */
-int64_t sys_getdents(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                     int64_t _u2, int64_t _u3) {
+int64_t sys_getdents(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                     int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
   void __user *buf = (void __user *__force)arg2;
   size_t len = (size_t)arg3;

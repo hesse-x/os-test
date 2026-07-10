@@ -656,8 +656,8 @@ void unix_sock_close(struct unix_sock *sock) {
 
 // ===================== Syscall implementations =====================
 
-int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                   int64_t _u2, int64_t _u3) {
+int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                   int64_t unused2, int64_t unused3) {
   int domain = (int)arg1;
   int type = (int)arg2;
   int protocol = (int)arg3;
@@ -754,8 +754,8 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   return (int64_t)fd;
 }
 
-int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                 int64_t _u2, int64_t _u3) {
+int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                 int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
   const struct sockaddr_un __user *addr =
       (const struct sockaddr_un __user *)arg2;
@@ -871,8 +871,8 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   return 0;
 }
 
-int64_t sys_listen(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                   int64_t _u3, int64_t _u4) {
+int64_t sys_listen(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                   int64_t unused3, int64_t unused4) {
   int fd = (int)arg1;
   int backlog = (int)arg2;
 
@@ -909,8 +909,8 @@ int64_t sys_listen(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   return 0;
 }
 
-int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                   int64_t _u2, int64_t _u3) {
+int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                   int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
   struct sockaddr_un __user *addr = (struct sockaddr_un __user *)arg2;
   socklen_t __user *addrlen = (socklen_t __user *)arg3;
@@ -1099,8 +1099,8 @@ out:
   return ret;
 }
 
-int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                    int64_t _u2, int64_t _u3) {
+int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                    int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
   const struct sockaddr_un __user *addr =
       (const struct sockaddr_un __user *)arg2;
@@ -1226,7 +1226,7 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 }
 
 int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
-                       int64_t _u1, int64_t _u2) {
+                       int64_t unused1, int64_t unused2) {
   int domain = (int)arg1;
   int type = (int)arg2;
   int protocol = (int)arg3;
@@ -1326,8 +1326,8 @@ int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   return 0;
 }
 
-int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                    int64_t _u2, int64_t _u3) {
+int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                    int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
   const struct msghdr __user *msg = (const struct msghdr __user *)arg2;
   int flags = (int)arg3;
@@ -1448,8 +1448,8 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   return (int64_t)ret;
 }
 
-int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                    int64_t _u2, int64_t _u3) {
+int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                    int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
   struct msghdr __user *msg = (struct msghdr __user *)arg2;
   int flags = (int)arg3;
@@ -1567,8 +1567,8 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   return (int64_t)ret;
 }
 
-int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                     int64_t _u3, int64_t _u4) {
+int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t unused1,
+                     int64_t unused2, int64_t unused3, int64_t unused4) {
   int fd = (int)arg1;
   int how = (int)arg2;
 
@@ -1653,8 +1653,8 @@ static void poll_wait_cb(wait_queue_t *wq, unsigned long flags) {
   wake_with_event(proc, WAIT_POLL);
 }
 
-int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                 int64_t _u2, int64_t _u3) {
+int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                 int64_t unused2, int64_t unused3) {
   struct pollfd __user *fds = (struct pollfd __user *)arg1;
   nfds_t nfds = (nfds_t)arg2;
   int timeout_ms = (int)arg3;

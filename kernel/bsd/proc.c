@@ -956,8 +956,8 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 #define CLONE_SETTLS 0x00080000
 
 int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
-                  int64_t arg5, int64_t _u6) {
-  uint64_t clone_info_ptr = (uint64_t)_u6;
+                  int64_t arg5, int64_t arg6) {
+  uint64_t clone_info_ptr = (uint64_t)arg6;
   uint64_t flags = (uint64_t)arg1;
   uint64_t stack = (uint64_t)arg2;
   uint64_t parent_tid = (uint64_t)arg3;

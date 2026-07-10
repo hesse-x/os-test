@@ -21,6 +21,7 @@
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/mount.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/pty.h"
@@ -30,7 +31,6 @@
 #include "kernel/bsd/timerfd.h"
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/vfs.h"
-#include "kernel/bsd/mount.h"
 #include "kernel/driver/ahci.h"
 #include "kernel/driver/pci.h"
 #include "kernel/xcore/atomic.h"
@@ -222,15 +222,15 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
 
 // sys_exit: user-space exit/_exit syscall entry point. Encodes
 // (code & 0xff) << 8 and passes it to do_exit_with_code. D13.
-int64_t sys_exit(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                 int64_t _u4, int64_t _u5) {
+int64_t sys_exit(int64_t arg1, int64_t unused1, int64_t unused2,
+                 int64_t unused3, int64_t unused4, int64_t unused5) {
   int32_t encoded = ((int32_t)arg1 & 0xff) << 8;
   return do_exit_with_code(encoded);
 }
 
 // ===================== BSD syscall: exit_group =====================
-int64_t sys_exit_group(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                       int64_t _u4, int64_t _u5) {
+int64_t sys_exit_group(int64_t arg1, int64_t unused1, int64_t unused2,
+                       int64_t unused3, int64_t unused4, int64_t unused5) {
   xtask *current = current_task;
   struct signal_struct *sig = current->proc->signal;
   int32_t status = (int32_t)arg1;
@@ -272,8 +272,8 @@ int64_t sys_exit_group(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 #define WUNTRACED 2
 #define WCONTINUED 4
 
-int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options, int64_t _u2,
-                    int64_t _u3, int64_t _u4) {
+int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
+                    int64_t unused2, int64_t unused3, int64_t unused4) {
   pid_t pid = (pid_t)arg1;
   int32_t __user *exit_code_ptr = (int32_t __user * __force) arg2;
   int nohang = (int)options & WNOHANG;
@@ -777,8 +777,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 }
 
 // ===================== BSD syscall: munmap =====================
-int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                   int64_t _u3, int64_t _u4) {
+int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                   int64_t unused3, int64_t unused4) {
   uint64_t addr = arg1;
   size_t size = (size_t)arg2;
 
@@ -833,8 +833,8 @@ int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 }
 
 // ===================== BSD syscall: pipe =====================
-int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                 int64_t _u4, int64_t _u5) {
+int64_t sys_pipe(int64_t arg1, int64_t unused1, int64_t unused2,
+                 int64_t unused3, int64_t unused4, int64_t unused5) {
   int __user *fd_ptr = (int __user *__force)arg1;
 
   uint64_t ptr = (__force uint64_t)fd_ptr;
@@ -931,8 +931,8 @@ int64_t sys_pipe(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 }
 
 // ===================== BSD syscall: write =====================
-int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                  int64_t _u2, int64_t _u3) {
+int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                  int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
   const char __user *buf = (const char __user *__force)arg2;
   size_t len = (size_t)arg3;
@@ -1270,8 +1270,8 @@ out:
 }
 
 // ===================== BSD syscall: read =====================
-int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                 int64_t _u2, int64_t _u3) {
+int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                 int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
   char __user *buf = (char __user *__force)arg2;
   size_t len = (size_t)arg3;
@@ -1633,8 +1633,8 @@ out:
 }
 
 // ===================== BSD syscall: close =====================
-int64_t sys_close(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                  int64_t _u4, int64_t _u5) {
+int64_t sys_close(int64_t arg1, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4, int64_t unused5) {
   int fd = (int)arg1;
 
   if (fd < 0 || fd >= MAX_FD)
@@ -1652,8 +1652,8 @@ int64_t sys_close(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 }
 
 // ===================== BSD syscall: dup2 =====================
-int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                 int64_t _u3, int64_t _u4) {
+int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                 int64_t unused3, int64_t unused4) {
   int old_fd = (int)arg1;
   int new_fd = (int)arg2;
 
@@ -1690,8 +1690,8 @@ int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 }
 
 // ===================== BSD syscall: fcntl =====================
-int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                  int64_t _u2, int64_t _u3) {
+int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                  int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
   int cmd = (int)arg2;
   int arg = (int)arg3;
@@ -1815,8 +1815,8 @@ out:
 }
 
 // ===================== BSD syscall: ioctl =====================
-int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                  int64_t _u2, int64_t _u3) {
+int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                  int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
   uint32_t cmd = (uint32_t)arg2;
   void __user *arg = (void __user *__force)arg3;
@@ -2123,8 +2123,8 @@ out:
 }
 
 // ===================== BSD syscall: fstat =====================
-int64_t sys_fstat(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                  int64_t _u3, int64_t _u4) {
+int64_t sys_fstat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4) {
   int fd = (int)arg1;
   struct kstat __user *ust = (struct kstat __user * __force) arg2;
 
@@ -2211,8 +2211,8 @@ out:
 }
 
 // ===================== BSD syscall: fdev_pid =====================
-int64_t sys_fdev_pid(int64_t arg1, int64_t _u2, int64_t _u3, int64_t _u4,
-                     int64_t _u5, int64_t _u6) {
+int64_t sys_fdev_pid(int64_t arg1, int64_t unused2, int64_t unused3,
+                     int64_t unused4, int64_t unused5, int64_t unused6) {
   int fd = (int)arg1;
   xtask *proc = current_task;
   if (fd < 0 || fd >= MAX_FD)
@@ -2246,8 +2246,8 @@ out:
 }
 
 // ===================== BSD syscall: memfd_create =====================
-int64_t sys_memfd_create(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                         int64_t _u3, int64_t _u4) {
+int64_t sys_memfd_create(int64_t arg1, int64_t arg2, int64_t unused1,
+                         int64_t unused2, int64_t unused3, int64_t unused4) {
   const char __user *user_name = (const char __user *__force)arg1;
   unsigned int flags = (unsigned int)arg2;
 
@@ -2315,8 +2315,8 @@ int64_t sys_memfd_create(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 }
 
 // ===================== BSD syscall: ftruncate =====================
-int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                      int64_t _u3, int64_t _u4) {
+int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t unused1,
+                      int64_t unused2, int64_t unused3, int64_t unused4) {
   int fd = (int)arg1;
   int64_t size = (int64_t)arg2;
 
@@ -2466,7 +2466,7 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 
 // ===================== BSD syscall: block_async =====================
 int64_t sys_block_async(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
-                        int64_t _u1, int64_t _u2) {
+                        int64_t unused1, int64_t unused2) {
   uint32_t lba = (uint32_t)arg1;
   void __user *buf = (void __user *__force)arg2;
   uint32_t count = (uint32_t)arg3;
@@ -2477,8 +2477,8 @@ int64_t sys_block_async(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 }
 
 // ===================== BSD syscall: debug_memstat =====================
-int64_t sys_debug_memstat(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                          int64_t _u3, int64_t _u4) {
+int64_t sys_debug_memstat(int64_t arg1, int64_t arg2, int64_t unused1,
+                          int64_t unused2, int64_t unused3, int64_t unused4) {
   void __user *buf = (void __user *__force)(uintptr_t)arg1;
   size_t len = (size_t)arg2;
   if (!buf || len < sizeof(struct kernel_mem_stats))
@@ -2500,7 +2500,7 @@ int64_t sys_debug_memstat(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 
 // ===================== BSD syscall: install_fd =====================
 int64_t sys_install_fd_impl(int64_t arg1, int64_t arg2, int64_t arg3,
-                            int64_t arg4, int64_t arg5, int64_t _u1) {
+                            int64_t arg4, int64_t arg5, int64_t unused1) {
   pid_t fs_pid = (pid_t)arg1;
   int32_t fs_fd = (int32_t)arg2;
   uint64_t offset = arg3;
@@ -2546,8 +2546,8 @@ int64_t sys_install_fd_impl(int64_t arg1, int64_t arg2, int64_t arg3,
 }
 
 // ===================== BSD syscall: dma_alloc =====================
-int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                      int64_t _u2, int64_t _u3) {
+int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                      int64_t unused2, int64_t unused3) {
   size_t size = (size_t)arg1;
   void __user *__user *vaddr_ptr = (void __user *__user *__force)arg2;
   uint64_t __user *paddr_ptr = (uint64_t __user * __force) arg3;
@@ -2620,8 +2620,8 @@ int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 }
 
 // ===================== BSD syscall: dma_free =====================
-int64_t sys_dma_free(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                     int64_t _u4, int64_t _u5) {
+int64_t sys_dma_free(int64_t arg1, int64_t unused1, int64_t unused2,
+                     int64_t unused3, int64_t unused4, int64_t unused5) {
   uint64_t vaddr = (int64_t)arg1;
   if (!vaddr)
     return (int64_t)-EINVAL;
@@ -2652,8 +2652,8 @@ int64_t sys_dma_free(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 }
 
 // ===================== BSD syscall: lseek =====================
-int64_t sys_lseek(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                  int64_t _u2, int64_t _u3) {
+int64_t sys_lseek(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                  int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
   int64_t offset = (int64_t)arg2;
   int whence = (int)arg3;
@@ -2743,8 +2743,8 @@ out:
 }
 
 // ===================== Session/pgid syscalls =====================
-int64_t sys_setsid(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
-                   int64_t _u5, int64_t _u6) {
+int64_t sys_setsid(int64_t unused1, int64_t unused2, int64_t unused3,
+                   int64_t unused4, int64_t unused5, int64_t unused6) {
   if (current_proc->sid == current_task->pid)
     return (int64_t)-EPERM;
   current_proc->sid = current_task->pid;
@@ -2752,8 +2752,8 @@ int64_t sys_setsid(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
   return (int64_t)current_proc->sid;
 }
 
-int64_t sys_setpgid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                    int64_t _u3, int64_t _u4) {
+int64_t sys_setpgid(int64_t arg1, int64_t arg2, int64_t unused1,
+                    int64_t unused2, int64_t unused3, int64_t unused4) {
   pid_t pid = (pid_t)arg1;
   pid_t pgid = (pid_t)arg2;
   if (pid < 0 || pgid < 0)
@@ -2774,8 +2774,8 @@ int64_t sys_setpgid(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
   return 0;
 }
 
-int64_t sys_getpgid(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                    int64_t _u4, int64_t _u5) {
+int64_t sys_getpgid(int64_t arg1, int64_t unused1, int64_t unused2,
+                    int64_t unused3, int64_t unused4, int64_t unused5) {
   pid_t pid = (pid_t)arg1;
   if (pid == 0)
     pid = current_task->pid;
@@ -2784,8 +2784,8 @@ int64_t sys_getpgid(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
   return (int64_t)task_get(pid)->proc->pgid;
 }
 
-int64_t sys_getsid(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                   int64_t _u4, int64_t _u5) {
+int64_t sys_getsid(int64_t arg1, int64_t unused1, int64_t unused2,
+                   int64_t unused3, int64_t unused4, int64_t unused5) {
   pid_t pid = (pid_t)arg1;
   if (pid == 0)
     pid = current_task->pid;

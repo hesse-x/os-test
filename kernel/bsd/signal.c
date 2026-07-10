@@ -320,8 +320,8 @@ int pgsignal(pid_t pgid, int sig) {
 }
 
 // ===================== BSD syscall: kill =====================
-int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                 int64_t _u3, int64_t _u4) {
+int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                 int64_t unused3, int64_t unused4) {
   pid_t pid = (pid_t)arg1;
   int sig = (int)arg2;
   if (sig < 0 || sig >= NSIG)
@@ -423,8 +423,8 @@ int64_t sys_pause(int64_t unused1, int64_t unused2, int64_t unused3,
 }
 
 // ===================== BSD syscall: tgkill =====================
-int64_t sys_tgkill(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                   int64_t _u2, int64_t _u3) {
+int64_t sys_tgkill(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                   int64_t unused2, int64_t unused3) {
   pid_t tgid = (pid_t)arg1;
   pid_t tid = (pid_t)arg2;
   int sig = (int)arg3;
@@ -451,8 +451,8 @@ int64_t sys_tgkill(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 #define SIG_UNBLOCK 1
 #define SIG_SETMASK 2
 
-int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                        int64_t _u2, int64_t _u3) {
+int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3,
+                        int64_t unused1, int64_t unused2, int64_t unused3) {
   int how = (int)arg1;
   const sigset_t *set = (const sigset_t *)arg2;
   sigset_t *oldset = (sigset_t *)arg3;
@@ -515,8 +515,8 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 }
 
 // ===================== BSD syscall: set_tid_address =====================
-int64_t sys_set_tid_address(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                            int64_t _u4, int64_t _u5) {
+int64_t sys_set_tid_address(int64_t arg1, int64_t unused1, int64_t unused2,
+                            int64_t unused3, int64_t unused4, int64_t unused5) {
   current_task->proc->clear_tid_addr = (pid_t)arg1;
   return (int64_t)current_task->pid; // returns tid
 }
@@ -525,12 +525,12 @@ int64_t sys_set_tid_address(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 #define ARCH_SET_FS 0x1002
 #define ARCH_GET_FS 0x1003
 
-int64_t sys_arch_prctl(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
-                       int64_t _u3, int64_t _u4) {
-  (void)_u1;
-  (void)_u2;
-  (void)_u3;
-  (void)_u4;
+int64_t sys_arch_prctl(int64_t arg1, int64_t arg2, int64_t unused1,
+                       int64_t unused2, int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
   int code = (int)arg1;
   uint64_t addr = (uint64_t)arg2;
   switch (code) {
@@ -547,21 +547,22 @@ int64_t sys_arch_prctl(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 
 // ===================== BSD syscall: pthread_set_cancel_handler
 // =====================
-int64_t sys_pthread_set_cancel_handler(int64_t arg1, int64_t _u1, int64_t _u2,
-                                       int64_t _u3, int64_t _u4, int64_t _u5) {
-  (void)_u1;
-  (void)_u2;
-  (void)_u3;
-  (void)_u4;
-  (void)_u5;
+int64_t sys_pthread_set_cancel_handler(int64_t arg1, int64_t unused1,
+                                       int64_t unused2, int64_t unused3,
+                                       int64_t unused4, int64_t unused5) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
   uint64_t handler = (uint64_t)arg1;
   current_task->proc->cancel_handler = handler;
   return 0;
 }
 
 // ===================== BSD syscall: sigaction =====================
-int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
-                      int64_t _u2, int64_t _u3) {
+int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                      int64_t unused2, int64_t unused3) {
   int sig = (int)arg1;
   const struct sigaction __user *act =
       (const struct sigaction __user *__force)arg2;
@@ -621,8 +622,8 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
 }
 
 // ===================== BSD syscall: sigreturn =====================
-int64_t sys_sigreturn(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
-                      int64_t _u5, int64_t _u6) {
+int64_t sys_sigreturn(int64_t unused1, int64_t unused2, int64_t unused3,
+                      int64_t unused4, int64_t unused5, int64_t unused6) {
   xtask *proc = current_task;
 
   uint64_t tf_base = get_cpu_local()->tss_rsp0 - sizeof(trapframe);
@@ -670,13 +671,13 @@ int64_t sys_sigreturn(int64_t _u1, int64_t _u2, int64_t _u3, int64_t _u4,
 // Return the set of pending signals (per-task + thread-group shared), WITHOUT
 // filtering by sig_blocked — POSIX sigpending reports all pending signals,
 // including those blocked. Distinct from check_pending_signals which filters.
-int64_t sys_sigpending(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
-                       int64_t _u4, int64_t _u5) {
-  (void)_u1;
-  (void)_u2;
-  (void)_u3;
-  (void)_u4;
-  (void)_u5;
+int64_t sys_sigpending(int64_t arg1, int64_t unused1, int64_t unused2,
+                       int64_t unused3, int64_t unused4, int64_t unused5) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
   sigset_t __user *set = (sigset_t __user *)arg1;
   if (!set)
     return (int64_t)-EFAULT;

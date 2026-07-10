@@ -160,7 +160,20 @@ uint64_t fixup_exception(trapframe *tf) {
   return 0;
 }
 
+// Auto-restore cur_tf on any return from trap_dispatch.  Without this, a
+// timer IRQ that fires during syscall execution (sti) overwrites cur_tf
+// with the IRQ's trapframe address.  After IRETQ pops the IRQ trapframe,
+// cur_tf still points to the now-invalid IRQ stack slot.  cleanup attribute
+// ensures cur_tf is restored on every return path, even early returns from
+// COW/exception handlers.
+static void restore_cur_tf(void *arg) {
+  trapframe **saved = (trapframe **)arg;
+  get_cpu_local()->cur_tf = *saved;
+}
+
 void trap_dispatch(trapframe *tf) {
+  trapframe *saved_cur_tf __attribute__((cleanup(restore_cur_tf))) =
+      get_cpu_local()->cur_tf;
   get_cpu_local()->cur_tf = tf;
   // Hardware IRQ: check user-space driver binding first
   if (tf->trapno >= 32 && tf->trapno < MAX_IRQ_HANDLERS &&

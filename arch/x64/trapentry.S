@@ -160,6 +160,16 @@ syscall_fast_entry:
     movw %ax, %ds
     movw %ax, %es
 
+    # Enable interrupts — timer IRQs must fire during syscall execution to
+    # advance RCU grace periods (rcu_quiescent).  Without this, IF=0 prevents
+    # timer IRQs from firing; on SMP, synchronize_rcu() busy-waits forever
+    # because the other CPU never reaches a quiescent state.
+    # __alltraps is swapgs-safe: it checks CS on the stack and skips swapgs
+    # when the interrupted context is kernel mode (CS=0x08), so interrupts
+    # firing between this sti and the cli in the SYSRET return path do not
+    # corrupt GS_BASE.
+    sti
+
     # Call xcall_dispatch(rdi = &trapframe)
     movq %rsp, %rdi
     call xcall_dispatch

@@ -11,14 +11,7 @@
 # -o <file>: serial output written to the specified file (default log.txt)
 
 
-while getopts "o:" opt; do
-    case $opt in
-        o) LOGFILE="$OPTARG" ;;
-    esac
-done
-shift $((OPTIND - 1))
-
-LOGFILE="${LOGFILE:-log.txt}"
+LOGFILE="log.txt"
 rm -f "$LOGFILE"
 
 SERIAL_OPTS="-serial file:$LOGFILE -monitor stdio"

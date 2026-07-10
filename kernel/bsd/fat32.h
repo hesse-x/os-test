@@ -10,6 +10,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "kernel/bsd/mount.h"
+
 /* FAT32 directory entry (32 bytes) */
 struct fat_dir_entry {
   uint8_t name[11];
@@ -48,7 +50,6 @@ int fat32_rmdir(const char *path);
 int fat32_stat(const char *path, void *stat_buf);
 int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len);
 
-struct fstype;
 extern struct fstype fat32_fstype;
 
 #endif
