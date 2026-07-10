@@ -38,6 +38,7 @@ API：
 | i_lock（per-inode） | per-inode | inode 引用计数 + page cache 状态 | 否 |
 | page_cache_lock | 全局 | page cache LRU 操作 | 否 |
 | socket_lock | 全局 | AF_UNIX socket 状态 + 连接队列 | 否 |
+| nl_group_lock | 全局 | netlink group 注册表 + 各 netlink_sock recv_queue/blocked_reader/wq | 否 |
 | pty_alloc_lock | 全局 | pty_table 分配/释放 + next_pty_index | 否 |
 | devtmpfs_lock | 全局 | /dev/ 设备节点注册/查找 | 否 |
 | serial_tx_lock / serial_rx_lock | 全局 | 串口发送/接收缓冲区 | 否 |
@@ -53,6 +54,7 @@ API：
   2. scheduler_lock[cpu]    — per-CPU 调度器
   3. fd_lock                — per-process fd 表
   4. socket_lock            — AF_UNIX socket 状态 + 连接队列
+     nl_group_lock           — netlink group 注册表 + recv_queue（与 socket_lock 平级，无嵌套）
   5. inode_hash_lock        — inode hash 表
   6. i_lock                 — per-inode
   7. fat_lock               — FAT 表操作

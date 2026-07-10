@@ -9,6 +9,7 @@
 | sys_req / sys_resp | ≤56B | 内联，零分配 | 控制信令（bind/unbind）、ioctl IPC proxy |
 | sys_msg / sys_msg_resp | 变长（≤64KB） | 内核 kmalloc 中转拷贝 | FD_FILE 代理文件 I/O（过渡保留） |
 | AF_UNIX SOCK_STREAM socket | 双向字节流 + SCM_RIGHTS | skb 链表 | Wayland、通用 IPC |
+| AF_NETLINK socket | datagram 多播事件 | skb 链表 + group 注册表 | uevent 广播（udev），详见 [netlink.md](netlink.md) |
 | pipe | 匿名单向 | ring buffer（4KB） | terminal ↔ shell |
 | SHM | 共享内存页 | fd + mmap | 批量数据零拷贝（键盘、display buffer） |
 | signal | 异步通知 | sigframe 栈帧投递 | Ctrl+C、异常翻译、SIGCHLD |
@@ -297,14 +298,14 @@ consumed 字段用于 SOCK_STREAM 部分读：skb 留在队列中直到 consumed
 
 ### poll
 
-实现：kernel/socket.c : sys_poll
+实现：kernel/bsd/socket.c : sys_poll（就绪判断委托 file_poll）
 
-1. 遍历 pollfd 数组：pipe→POLLIN/POLLOUT；socket→recv_queue+shutdown 状态判断；FD_TTY→pty 事件；FD_DEV→dev_ops->poll
+1. 遍历 pollfd 数组，对每个 fd 调 `file_poll(f, events)`（kernel/bsd/file_poll.c）得到 revents——per-type 就绪逻辑统一在 file_poll，sys_poll/epoll_ctl/epoll_wait 共用
 2. 有就绪 fd → 立即返回；全部未就绪且 timeout=0 → 返回 0
-3. 全部未就绪且 timeout>0 → 设 WAIT_POLL + wait_deadline → schedule
-4. 被唤醒后重新遍历 pollfd → 更新 revents → 返回
+3. 全部未就绪且 timeout>0 → 对每个 fd 在其 `file_wq_get(f)` 上注册 wait_queue_t（poll_wait_cb→wake_with_event(proc, WAIT_POLL)），设 WAIT_POLL + wait_deadline → schedule
+4. 被唤醒后移除 wait 注册、重新遍历 pollfd 调 file_poll → 更新 revents → 返回
 
-阻塞模型：WAIT_POLL 状态，任何 fd 事件调 wake_process(pid)，复用 wait_deadline 超时。
+阻塞模型：WAIT_POLL 状态。数据到达点调 `__wake_up(&f->wq, POLLIN)` 触发 wait_queue 回调唤醒阻塞的 poll 进程。file_poll 与 wait_queue 机制详见 [epoll.md](epoll.md)。
 
 ### shutdown
 
@@ -662,7 +663,7 @@ trap_dispatch 中 `tf->cs == USER_CS` 时调 force_sig，不杀进程，由 chec
 
 # syscall 编号总表
 
-NR_SYSCALL=86（编号 0-85 连续）。完整编号表见 [syscall.md](syscall.md) 当前架构设计的 syscall_dispatch 表和 [posix.md](posix.md) Syscall 编号表。IPC 相关 syscall 分布：
+NR_SYSCALL=95（编号 0-94 连续）。完整编号表见 [syscall.md](syscall.md) 当前架构设计的 syscall_dispatch 表和 [posix.md](posix.md) Syscall 编号表。IPC 相关 syscall 分布：
 
 | 区间 | 类别 |
 |------|------|
@@ -671,6 +672,7 @@ NR_SYSCALL=86（编号 0-85 连续）。完整编号表见 [syscall.md](syscall.
 | 27-36 | AF_UNIX socket 系列 |
 | 40-42, 67, 85 | 信号（kill/sigaction/sigreturn/sigprocmask/sigpending） |
 | 80-81 | alarm/pause（信号驱动定时/可中断睡眠） |
+| 86-94 | epoll + eventfd/timerfd/signalfd（详见 [epoll.md](epoll.md)） |
 
 ## 待完成项
 
@@ -689,7 +691,6 @@ NR_SYSCALL=86（编号 0-85 连续）。完整编号表见 [syscall.md](syscall.
 | real-time signal | 32-64 号信号排队不丢 | 低 |
 | recv/resp 降级为 driver-only | recv/resp/req/msg/msg_resp 从公共 libc 头移到 driver/ipc.h，公共 libc 只导出 POSIX 标准接口 | 低 |
 | futex 跨进程同步原语 | SHM 场景必需，当前靠轮询标志位易死锁；无 PTHREAD_PROCESS_SHARED mutex/cond/POSIX 信号量 | 高 |
-| eventfd | 轻量事件通知，替代 signal 唤醒 SHM 读写方；当前用 poll + pipe 模拟 | 中 |
 | AF_UNIX SOCK_DGRAM/SEQPACKET | sys_socket 对非 SOCK_STREAM 返回 EPROTONOSUPPORT | 低 |
 | SCM_RIGHTS cross-process files_t UAF | 接收方读 sender fd_table 时，sender exit + kfree(files_t) 可导致 UAF。缓解：`files_put` 中 `synchronize_rcu()` 保证 grace period 后才 kfree；当前 `file_get` 在 RCU 内原子性验证+持引用，sender close 不会立即 free | 低 |
 | 消息优先级/优先级继承 | recv 队列为 FIFO，实时场景可能优先级反转 | 低 |

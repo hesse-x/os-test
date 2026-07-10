@@ -30,7 +30,7 @@ MSR 设置：kernel/trap.cc : setup_syscall() — STAR/LSTAR/CSTAR/SFMASK/EFER.S
 
 ### syscall_dispatch 与系统调用表
 
-NR_SYSCALL=86，syscall_table[] 定义在 kernel/xcore/trap.c（Xcore 层，slot 0-19）+ kernel/bsd/syscall.c（BSD 层，slot 20-85）。
+NR_SYSCALL=95，syscall_table[] 定义在 kernel/xcore/trap.c（Xcore 层，slot 0-19）+ kernel/bsd/syscall.c（BSD 层，slot 20-94）。
 
 参数从 trapframe 提取：RDI/RSI/RDX/R10/R8/R9（6 参），返回值写回 tf->rax。超出范围返回 ENOSYS。
 
@@ -63,7 +63,7 @@ NR_SYSCALL=86，syscall_table[] 定义在 kernel/xcore/trap.c（Xcore 层，slot
 | 24 | sys_pci_dev_info | PCI 设备查询 |
 | 25 | sys_block_async | 异步块 I/O |
 | 26 | sys_install_fd | 注册 FD_FILE fd |
-| 27-36 | socket 系列 | socket/bind/listen/accept/connect/socketpair/sendmsg/recvmsg/shutdown/poll（AF_UNIX） |
+| 27-36 | socket 系列 | socket/bind/listen/accept/connect/socketpair/sendmsg/recvmsg/shutdown/poll（AF_UNIX + AF_NETLINK，netlink 详见 [netlink.md](netlink.md)） |
 | 37 | sys_lseek | 文件偏移设置 |
 | 38 | sys_memfd_create | 创建 memfd |
 | 39 | sys_ftruncate | 截断文件（按 fd） |
@@ -76,6 +76,7 @@ NR_SYSCALL=86，syscall_table[] 定义在 kernel/xcore/trap.c（Xcore 层，slot
 | 80-81 | alarm/pause | sys_alarm（定时 SIGALRM）/sys_pause（可中断睡眠） |
 | 82-84 | 文件系统扩展 | sys_truncate（路径截断）/sys_fsync（单 inode 脏页写回）/sys_sync（全局脏页写回） |
 | 85 | sys_sigpending | 返回未决信号集（per-task ∪ shared，不滤 blocked） |
+| 86-94 | epoll + 事件 fd | epoll_create/create1/ctl/wait/pwait + eventfd2 + timerfd_create/settime + signalfd4（详见 [epoll.md](epoll.md)） |
 
 ### recv_msg 类型
 

@@ -29,8 +29,9 @@
 │ mm_t（地址空间）      │ files_t / file_t / fd管理         │
 │ schedule/switch_to   │ VFS + FAT32 + inode + page_cache  │
 │ IPC: recv/req/resp   │ AF_UNIX Socket + SCM_RIGHTS       │
-│   msg/msg_resp       │ PTY/TTY + termios                 │
-│ notify_and_wake      │ 信号: sigaction/force_sig/sigreturn│
+│   msg/msg_resp       │ AF_NETLINK uevent 多播            │
+│ notify_and_wake      │ PTY/TTY + termios                 │
+│                      │ 信号: sigaction/force_sig/sigreturn│
 │ BFC/Slab/页表/KASAN  │ fork/execve/waitpid/exit          │
 │ IDT/IRQ/APIC         │ Pipe + dup2/fcntl                 │
 │ spinlock/atomic/rcu  │ setsid/setpgid/getpgid            │
@@ -70,6 +71,8 @@ kernel/xcore/
   atomic.h             — 原子操作
   list.h               — 内嵌双向链表
   spinlock.h           — spinlock_t
+  wait_queue.c / wait_queue.h — 回调式等待队列原语（多等待者唤醒）
+  rbtree.c / rbtree.h  — 红黑树（eventpoll interest list 用）
   sparse.h             — Sparse 注解（__user, __iomem, phys_addr_t, kern_vaddr_t）
   serial_hook.h        — 串口 hook（Xcore 层声明）
   mm_types.h           — mm_t, mmap_region_t, shm_t 类型定义
@@ -213,7 +216,14 @@ kernel/bsd/
   devtmpfs.c / devtmpfs.h — /dev/ 内存伪文件系统（设备节点注册+open）
   elf_loader.c / elf_loader.h — ELF 加载器
   socket.c / socket.h  — AF_UNIX SOCK_STREAM + SCM_RIGHTS
+  netlink.c / netlink.h — AF_NETLINK 多播事件通知（uevent 广播 + group 注册表）
   pty.c / pty.h        — PTY/TTY 子系统
+  eventpoll.c / eventpoll.h — epoll 核心（eventpoll/epitem/ctl/wait）
+  eventfd.c / eventfd.h — eventfd 信号计数器 fd
+  timerfd.c / timerfd.h — timerfd 定时器 fd
+  signalfd.c / signalfd.h — signalfd 信号 fd
+  file_poll.c / file_poll.h — per-type 就绪检测 helper（file_poll）
+  file_wq.c            — file->wq 惰性分配（file_wq_get）
 ```
 
 #### 核心数据结构
@@ -233,11 +243,12 @@ kernel/bsd/
 
 **file_t**（kernel/bsd/types.h : file_t）
 - f_count : refcount_t — 引用计数
-- type : int — FD_NONE/PIPE/REGULAR/DEV/DIR/SOCKET/SHM/FILE/TTY
+- type : int — FD_NONE/PIPE/REGULAR/DEV/DIR/SOCKET/NETLINK/SHM/FILE/TTY/EPOLL/EVENTFD/TIMERFD/SIGNALFD
 - flags : int — FD_CLOEXEC 等
 - inode : inode* — 关联 inode
 - offset : uint64_t — 文件偏移
-- union：pipe* / shm* / target_pid / file_data{fs_pid,fs_fd,offset,file_size} / unix_sock* / pty*
+- wq : wait_queue_head* — 惰性分配等待队列（epoll/poll 等待者挂此，NULL=无）
+- union：pipe* / shm* / target_pid / file_data{...} / unix_sock* / netlink_sock* / pty* / epoll* / eventfd* / timerfd* / signalfd*
 
 **files_t**（kernel/bsd/types.h : files_t）
 - fd_lock : spinlock_t — fd 表锁

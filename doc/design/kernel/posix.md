@@ -4,7 +4,7 @@
 
 ### Syscall 编号表
 
-NR_SYSCALL=86（编号 0-85 连续，无空槽）。
+NR_SYSCALL=95（编号 0-94 连续，无空槽）。
 
 | 编号 | 名称 | 实现位置 | 说明 |
 |------|------|---------|------|
@@ -35,7 +35,7 @@ NR_SYSCALL=86（编号 0-85 连续，无空槽）。
 | 24 | SYS_PCI_DEV_INFO | trap.c | |
 | 25 | SYS_BLOCK_ASYNC | trap.c | |
 | 26 | SYS_INSTALL_FD | trap.c | |
-| 27 | SYS_SOCKET | socket.c | AF_UNIX only |
+| 27 | SYS_SOCKET | socket.c | AF_UNIX + AF_NETLINK |
 | 28 | SYS_BIND | socket.c | |
 | 29 | SYS_LISTEN | socket.c | |
 | 30 | SYS_ACCEPT | socket.c | |
@@ -94,6 +94,10 @@ NR_SYSCALL=86（编号 0-85 连续，无空槽）。
 | 83 | SYS_FSYNC | vfs.c | 写回单个 inode 脏页 |
 | 84 | SYS_SYNC | vfs.c | 写回全部脏页 |
 | 85 | SYS_SIGPENDING | signal.c | 返回未决信号集（per-task ∪ shared，不滤 blocked） |
+| 86-90 | SYS_EPOLL_CREATE/CREATE1/CTL/WAIT/PWAIT | eventpoll.c | epoll I/O 多路复用（LT+ET），详见 [epoll.md](epoll.md) |
+| 91 | SYS_EVENTFD2 | eventfd.c | eventfd 信号计数器 fd |
+| 92-93 | SYS_TIMERFD_CREATE/SETTIME | timerfd.c | timerfd 定时器 fd（单次/周期） |
+| 94 | SYS_SIGNALFD4 | signalfd.c | signalfd 信号 fd（消费信号替代 handler） |
 
 ### libc 已实现 POSIX 函数
 
@@ -101,6 +105,7 @@ NR_SYSCALL=86（编号 0-85 连续，无空槽）。
 |------|------|--------|-------------|
 | 进程 | getpid, fork, execve, spawn, _exit, exit, waitpid, setsid, setpgid, getpgid, getsid, getuid, geteuid, getgid, getegid, setuid, setgid, getppid, getpgrp, umask, gethostname, sethostname | unistd.h, sys/wait.h, sys/process.h, stdlib.h | SYS_GETPID/FORK/EXECVE/EXIT/WAITPID/SETSID/SETPGID/GETUID/GETEUID/GETGID/GETEGID/SETUID/SETGID/GETPPID/GETPGRP/UMASK/GETHOSTNAME/SETHOSTNAME |
 | I/O | read, write, close, pipe, dup2, fcntl(F_DUPFD/F_DUPFD_CLOEXEC), open, lseek, ioctl, poll, truncate, fsync, sync | unistd.h, fcntl.h, sys/poll.h, sys/ioctl.h | SYS_READ/WRITE/CLOSE/PIPE/DUP2/FCNTL/OPEN/LSEEK/IOCTL/POLL/TRUNCATE/FSYNC/SYNC |
+| epoll + 事件 fd | epoll_create, epoll_create1, epoll_ctl, epoll_wait, epoll_pwait, eventfd, timerfd_create, timerfd_settime, signalfd | sys/epoll.h, sys/eventfd.h, sys/timerfd.h, sys/signalfd.h | SYS_EPOLL_CREATE/CREATE1/CTL/WAIT/PWAIT/EVENTFD2/TIMERFD_CREATE/SETTIME/SIGNALFD4 |
 | FILE | printf, fprintf, vfprintf, fflush, putchar, fputc, fputs, puts, fgetc, getchar, fopen, fclose, fread, fwrite, fseek, ftell, rewind, sprintf, snprintf, perror | stdio.h | SYS_WRITE/READ |
 | 内存 | malloc, free, calloc, realloc, mmap, munmap | stdlib.h, sys/mman.h | SYS_MMAP/MUNMAP |
 | 字符串 | strlen, strcmp, strncmp, strcpy, strncpy, strcat, strchr, memcpy, memset, memmove, memcmp, strstr, strtok, strtok_r, strerror, bzero | string.h | — (纯用户态) |
