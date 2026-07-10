@@ -28,6 +28,7 @@ set(LIBC_SOURCES
     lib/eventfd.cc
     lib/timerfd.cc
     lib/signalfd.cc
+    lib/sys_mount.cc
     lib/setjmp.S
     lib/dev_ready.c
     ${CMAKE_SOURCE_DIR}/utils/kvformat.c

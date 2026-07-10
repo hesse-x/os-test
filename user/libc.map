@@ -127,6 +127,9 @@ global:
     /* <sys/signalfd.h> */
     signalfd;
 
+    /* <sys/mount.h> */
+    mount;
+
     /* <sys/utsname.h> */
     uname;
 

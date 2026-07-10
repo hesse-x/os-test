@@ -91,6 +91,9 @@ int64_t sys_truncate(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_fsync(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_sync(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
+int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                  int64_t arg5, int64_t _u);
+
 // Socket (declared in socket.h, not repeated here)
 
 #endif // KERNEL_BSD_SYSCALL_H

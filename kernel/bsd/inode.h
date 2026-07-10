@@ -12,6 +12,8 @@
 #include "kernel/xcore/spinlock.h"
 #include <stdint.h>
 
+struct mount_entry; /* forward declaration — defined in mount.h */
+
 #define INODE_REGULAR 1
 #define INODE_DIR 2
 #define INODE_DEV 3
@@ -26,6 +28,7 @@ struct inode {
   spinlock i_lock;
   void *i_priv;    /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
   struct shm *shm; /* INODE_DEV -> shared memory (NULL = no SHM) */
+  struct mount_entry *mount; /* owning mount (set by sys_open lookup) */
 
   /* FAT32 metadata (REGULAR/DIR only) */
   uint32_t start_cluster;

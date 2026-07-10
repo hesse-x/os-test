@@ -48,4 +48,7 @@ int fat32_rmdir(const char *path);
 int fat32_stat(const char *path, void *stat_buf);
 int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len);
 
+struct fstype;
+extern struct fstype fat32_fstype;
+
 #endif

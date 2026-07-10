@@ -8,6 +8,7 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/bsd/mount.h"
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/page_cache.h"
@@ -36,6 +37,7 @@ void vfs_init(void) {
   // inode_init, page_cache_init, devtmpfs_init are called in kernel_main before
   // driver_init. drm_dev_register() is called from virtio_gpu_init
   // (driver_init).
+  mount_init();
   serial_dev_register();
   pty_init();
 
@@ -49,7 +51,19 @@ void vfs_init(void) {
       continue;
     rc = fat32_init();
     if (rc == 0) {
-      printk(LOG_INFO, "vfs_init: FAT32 mounted on port %d\n", try_ports[pi]);
+      printk(LOG_INFO, "vfs_init: FAT32 inited on port %d\n", try_ports[pi]);
+      register_fstype(&fat32_fstype);
+      register_fstype(&devtmpfs_fstype);
+      mount_internal(&fat32_fstype, "/");
+      /* Create /dev directory entry on FAT32 root so getdents("/") sees it.
+       * fat32_mkdir is not idempotent (it allocates a cluster unconditionally),
+       * so only create when the entry is missing. */
+      {
+        uint8_t ksb[256];
+        if (fat32_stat("/dev", ksb) != 0)
+          fat32_mkdir("/dev");
+      }
+      mount_internal(&devtmpfs_fstype, "/dev");
       devtmpfs_create("sda", &blk_dev_ops, NULL);
       break;
     }
@@ -67,29 +81,76 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   int flags = (int)arg2;
   /* mode (arg3) ignored for FAT32 */
 
-  /* 1. Copy user path */
-  if (!upath)
-    return (int64_t)-EFAULT;
-  char path[256];
-  if (strncpy_from_user(path, upath, 256) < 0)
-    return (int64_t)-EFAULT;
+  /* 1. Resolve via mount table (longest-prefix match) */
+  char relpath[256];
+  struct mount_entry *m = vfs_resolve_user(upath, relpath, sizeof(relpath));
+  if (IS_ERR(m))
+    return PTR_ERR(m);
+  if (!m)
+    return (int64_t)-ENOENT;
 
-  /* 2. /dev/ prefix — delegate to devtmpfs */
-  if (path[0] == '/' && path[1] == 'd' && path[2] == 'e' && path[3] == 'v' &&
-      path[4] == '/') {
-    printk(LOG_DEBUG, "sys_open: pid=%d path=%s\n", current_task->pid, path);
-    int64_t dev_ret = devtmpfs_open(current_task, path + 5, flags);
-    printk(LOG_DEBUG, "sys_open: devtmpfs_open returned %lld\n",
-           (long long)dev_ret);
+  /* 2. devtmpfs device files: delegate to devtmpfs_open so the fd is
+   * created as FD_DEV and ops->open (ptmx/pts, serial, etc.) runs.
+   * The bare "/dev" directory (relpath empty) falls through to the
+   * generic directory path below. */
+  if (m->fs == &devtmpfs_fstype && relpath[0] != '\0') {
+    int64_t dev_ret = devtmpfs_open(current_task, relpath, flags);
     return dev_ret;
   }
 
-  /* 3. FAT32 path resolution */
+  /* 3. fstype lookup */
   int errno_val = 0;
-  struct inode *ip = fat32_open(path, flags, &errno_val);
-  if (!ip) {
-    return errno_val;
+  struct inode *ip;
+  if (m->fs->lookup) {
+    ip = m->fs->lookup(relpath);
+    if (ip) {
+      /* O_EXCL: file must not already exist. The lookup-based path
+       * bypasses fat32_open's flag handling, so check here. */
+      if ((flags & O_CREAT) && (flags & O_EXCL)) {
+        inode_put(ip);
+        return (int64_t)-EEXIST;
+      }
+      /* O_TRUNC: truncate existing regular file to 0. fat32_open did
+       * this internally; the lookup path bypasses it. */
+      if ((flags & O_TRUNC) && ip->type == INODE_REGULAR && ip->size > 0) {
+        spin_lock(&ip->i_lock);
+        fat32_ftruncate(ip, 0);
+        spin_unlock(&ip->i_lock);
+      }
+    }
+    if (!ip) {
+      /* O_CREAT: fall back to fat32_open (creates the file) */
+      if (flags & O_CREAT) {
+        char full[258];
+        full[0] = '/';
+        size_t i = 0;
+        while (relpath[i] && i < 256) {
+          full[i + 1] = relpath[i];
+          i++;
+        }
+        full[i + 1] = '\0';
+        ip = fat32_open(full, flags, &errno_val);
+        if (!ip)
+          return errno_val;
+      } else {
+        return (int64_t)-ENOENT;
+      }
+    }
+  } else {
+    /* fallback: fat32_open with O_CREAT semantics */
+    char full[258];
+    full[0] = '/';
+    size_t i = 0;
+    while (relpath[i] && i < 256) {
+      full[i + 1] = relpath[i];
+      i++;
+    }
+    full[i + 1] = '\0';
+    ip = fat32_open(full, flags, &errno_val);
+    if (!ip)
+      return errno_val;
   }
+  ip->mount = m;
 
   /* Reject write access to directories (POSIX EISDIR). This also guards
    * against a directory inode leaking into a writable fd: previously a
@@ -150,12 +211,20 @@ int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 
   if (!upath)
     return (int64_t)-EFAULT;
-  char path[256];
-  if (strncpy_from_user(path, upath, 256) < 0)
-    return (int64_t)-EFAULT;
+
+  char relpath[256];
+  struct mount_entry *m = vfs_resolve_user(upath, relpath, sizeof(relpath));
+  if (IS_ERR(m))
+    return PTR_ERR(m);
+  if (!m)
+    return (int64_t)-ENOENT;
 
   uint8_t kstat_buf[256];
-  int rc = fat32_stat(path, kstat_buf);
+  int rc;
+  if (m->fs->stat)
+    rc = m->fs->stat(relpath, (struct kstat *)kstat_buf);
+  else
+    return (int64_t)-ENOSYS;
   if (rc != 0)
     return rc;
   if (copy_to_user(stat_buf, kstat_buf, sizeof(struct kstat)))
@@ -233,11 +302,14 @@ int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t _u1, int64_t _u2,
 
   if (!upath)
     return (int64_t)-EFAULT;
-  char path[256];
-  if (strncpy_from_user(path, upath, 256) < 0)
-    return (int64_t)-EFAULT;
+  char relpath[256];
+  struct mount_entry *m = vfs_resolve_user(upath, relpath, sizeof(relpath));
+  if (IS_ERR(m))
+    return PTR_ERR(m);
+  if (!m || !m->fs->mkdir)
+    return (int64_t)-ENOSYS;
 
-  int rc = fat32_mkdir(path);
+  int rc = m->fs->mkdir(relpath);
   if (rc != 0)
     return rc;
   return 0;
@@ -250,11 +322,14 @@ int64_t sys_unlink(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 
   if (!upath)
     return (int64_t)-EFAULT;
-  char path[256];
-  if (strncpy_from_user(path, upath, 256) < 0)
-    return (int64_t)-EFAULT;
+  char relpath[256];
+  struct mount_entry *m = vfs_resolve_user(upath, relpath, sizeof(relpath));
+  if (IS_ERR(m))
+    return PTR_ERR(m);
+  if (!m || !m->fs->unlink)
+    return (int64_t)-ENOSYS;
 
-  int rc = fat32_unlink(path);
+  int rc = m->fs->unlink(relpath);
   if (rc != 0)
     return rc;
   return 0;
@@ -267,11 +342,14 @@ int64_t sys_rmdir(int64_t arg1, int64_t _u1, int64_t _u2, int64_t _u3,
 
   if (!upath)
     return (int64_t)-EFAULT;
-  char path[256];
-  if (strncpy_from_user(path, upath, 256) < 0)
-    return (int64_t)-EFAULT;
+  char relpath[256];
+  struct mount_entry *m = vfs_resolve_user(upath, relpath, sizeof(relpath));
+  if (IS_ERR(m))
+    return PTR_ERR(m);
+  if (!m || !m->fs->rmdir)
+    return (int64_t)-ENOSYS;
 
-  int rc = fat32_rmdir(path);
+  int rc = m->fs->rmdir(relpath);
   if (rc != 0)
     return rc;
   return 0;
@@ -367,18 +445,31 @@ int64_t sys_getdents(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     file_put(f);
     return (int64_t)-ENOMEM;
   }
-  int ret = fat32_getdents(ip->start_cluster, &f->offset, kbuf, len);
+  struct mount_entry *m = mount_of_inode(ip);
+  if (!m || !m->fs->getdents) {
+    kfree(kbuf);
+    file_put(f);
+    return (int64_t)-ENOTDIR;
+  }
+  struct dir_context ctx = {
+      .pos = f->offset,
+      .buf = kbuf,
+      .len = len,
+      .written = 0,
+  };
+  ssize_t ret = m->fs->getdents(ip, &ctx);
   if (ret < 0) {
     kfree(kbuf);
     file_put(f);
-    return ret;
+    return (int64_t)ret;
   }
-  if (copy_to_user(buf, kbuf, ret)) {
+  f->offset = ctx.pos;
+  if (copy_to_user(buf, kbuf, ctx.written)) {
     kfree(kbuf);
     file_put(f);
     return (int64_t)-EFAULT;
   }
   kfree(kbuf);
   file_put(f);
-  return (int64_t)ret;
+  return (int64_t)ctx.written;
 }

@@ -700,4 +700,17 @@ static inline int sys_sigpending(sigset_t *set) {
   return 0;
 }
 
+static inline int sys_mount(const char *source, const char *target,
+                            const char *fstype, unsigned long flags,
+                            const void *data) {
+  int64_t r = __syscall5(SYS_MOUNT, (int64_t)(uintptr_t)source,
+                         (int64_t)(uintptr_t)target, (int64_t)(uintptr_t)fstype,
+                         (int64_t)flags, (int64_t)(uintptr_t)data);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
 #endif // USER_SYSCALL_H

@@ -1565,3 +1565,69 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
   *pos = (uint64_t)-1;
   return (int)written;
 }
+
+/* ==================== FAT32 fstype shims ==================== */
+/* fat32_resolve_path requires path[0]=='/', so relpath callbacks prepend '/'.
+ * fat32_getdents takes (dir_cluster, &pos, buf, len); shim extracts
+ * dir->start_cluster and passes &ctx->pos. */
+
+#include "kernel/bsd/mount.h"
+
+static void fat32_prepend_slash(const char *relpath, char *buf, size_t bufsz) {
+  buf[0] = '/';
+  size_t i = 0;
+  while (relpath[i] && i < bufsz - 2) {
+    buf[i + 1] = relpath[i];
+    i++;
+  }
+  buf[i + 1] = '\0';
+}
+
+static struct inode *fat32_fs_lookup(const char *relpath) {
+  char full[258];
+  fat32_prepend_slash(relpath, full, sizeof(full));
+  int errno_val = 0;
+  return fat32_open(full, 0, &errno_val);
+}
+
+static int fat32_fs_stat(const char *relpath, struct kstat *ks) {
+  char full[258];
+  fat32_prepend_slash(relpath, full, sizeof(full));
+  return fat32_stat(full, ks);
+}
+
+static int fat32_fs_mkdir(const char *relpath) {
+  char full[258];
+  fat32_prepend_slash(relpath, full, sizeof(full));
+  return fat32_mkdir(full);
+}
+
+static int fat32_fs_unlink(const char *relpath) {
+  char full[258];
+  fat32_prepend_slash(relpath, full, sizeof(full));
+  return fat32_unlink(full);
+}
+
+static int fat32_fs_rmdir(const char *relpath) {
+  char full[258];
+  fat32_prepend_slash(relpath, full, sizeof(full));
+  return fat32_rmdir(full);
+}
+
+static ssize_t fat32_fs_getdents(struct inode *dir, struct dir_context *ctx) {
+  int ret = fat32_getdents(dir->start_cluster, &ctx->pos, ctx->buf, ctx->len);
+  if (ret < 0)
+    return (ssize_t)ret;
+  ctx->written = (size_t)ret;
+  return (ssize_t)ret;
+}
+
+struct fstype fat32_fstype = {
+    .name = "fat32",
+    .lookup = fat32_fs_lookup,
+    .getdents = fat32_fs_getdents,
+    .mkdir = fat32_fs_mkdir,
+    .unlink = fat32_fs_unlink,
+    .rmdir = fat32_fs_rmdir,
+    .stat = fat32_fs_stat,
+};

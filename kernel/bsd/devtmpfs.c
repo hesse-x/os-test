@@ -18,6 +18,8 @@
 #include "kernel/xcore/xtask.h"
 #include <stddef.h>
 #include <xos/errno.h>
+#include "kernel/bsd/mount.h"
+#include <xos/stat.h>
 
 struct shm;
 
@@ -113,9 +115,23 @@ static struct dev_dir *devtmpfs_get_or_create_dir(const char *name, int len) {
 }
 
 struct inode *devtmpfs_lookup(const char *name) {
-  /* Strip "/dev/" prefix — stored entries use paths without this prefix */
-  if (__memcmp(name, "/dev/", 5) == 0)
-    name += 5;
+  /* relpath from vfs_resolve has no /dev/ prefix; entries store paths
+   * relative to /dev (e.g. "serial", "dri/card0"). */
+  /* Empty string = root /dev directory — return a synthetic dir inode.
+   * We reuse the first registered directory's inode if available, else
+   * return NULL (no devices registered yet). */
+  if (name[0] == '\0') {
+    spin_lock(&devtmpfs_lock);
+    if (dir_list) {
+      struct inode *root_ip = dir_list->ip;
+      inode_get(root_ip);
+      spin_unlock(&devtmpfs_lock);
+      return root_ip;
+    }
+    spin_unlock(&devtmpfs_lock);
+    return NULL;
+  }
+
   /* If path contains '/', split into dir + leaf */
   const char *slash = name;
   while (*slash && *slash != '/')
@@ -333,3 +349,118 @@ void devtmpfs_remove(const char *name) {
   if (removed && devtmpfs_initialized && nl_is_initialized())
     nl_uevent_broadcast("remove", name, "misc");
 }
+
+/* ==================== devtmpfs fstype callbacks ==================== */
+
+/* getdents: enumerate direct children of a devtmpfs directory.
+ * relpath "" or NULL = root /dev; "dri" = /dev/dri subdir.
+ * Scans dev_list + dir_list, matching entries whose name starts with
+ * dir + "/" and have no further "/" (direct children only). */
+static ssize_t devtmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
+  (void)dir;
+  spin_lock(&devtmpfs_lock);
+
+  if (ctx->pos != 0) {
+    spin_unlock(&devtmpfs_lock);
+    return 0;
+  }
+
+  /* Emit directories */
+  struct dev_dir *d = dir_list;
+  while (d) {
+    size_t nl = 0;
+    while (d->name[nl])
+      nl++;
+    if (!dir_emit(ctx, d->name, (int)nl, ctx->written, d->ip->ino, DT_DIR))
+      break;
+    d = d->next;
+  }
+
+  /* Emit top-level devices (no '/' in name) */
+  struct dev_entry *e = dev_list;
+  while (e) {
+    int has_slash = 0;
+    size_t nl = 0;
+    while (e->name[nl]) {
+      if (e->name[nl] == '/')
+        has_slash = 1;
+      nl++;
+    }
+    if (!has_slash) {
+      if (!dir_emit(ctx, e->name, (int)nl, ctx->written, e->ip->ino,
+                    DT_CHR))
+        break;
+    }
+    e = e->next;
+  }
+
+  ctx->pos = (uint64_t)-1; /* EOF */
+  spin_unlock(&devtmpfs_lock);
+  return (ssize_t)ctx->written;
+}
+
+static int devtmpfs_stat(const char *relpath, struct kstat *ks) {
+  spin_lock(&devtmpfs_lock);
+
+  /* Root /dev directory */
+  if (relpath[0] == '\0') {
+    __memset(ks, 0, sizeof(*ks));
+    ks->st_mode = 0040755;
+    ks->st_ino = 0;
+    ks->st_nlink = 1;
+    ks->st_size = 0;
+    ks->st_blksize = 512;
+    spin_unlock(&devtmpfs_lock);
+    return 0;
+  }
+
+  /* Check directories */
+  struct dev_dir *d = dir_list;
+  while (d) {
+    if (__strcmp(relpath, d->name) == 0) {
+      __memset(ks, 0, sizeof(*ks));
+      ks->st_mode = 0040755;
+      ks->st_ino = d->ip->ino;
+      ks->st_nlink = 1;
+      ks->st_size = 0;
+      ks->st_blksize = 512;
+      spin_unlock(&devtmpfs_lock);
+      return 0;
+    }
+    d = d->next;
+  }
+
+  /* Check devices (full path match, including '/') */
+  struct dev_entry *e = dev_list;
+  while (e) {
+    if (__strcmp(relpath, e->name) == 0) {
+      __memset(ks, 0, sizeof(*ks));
+      ks->st_mode = 0020000 | 0600; /* S_IFCHR | 0600 */
+      ks->st_ino = e->ip->ino;
+      ks->st_nlink = 1;
+      ks->st_size = 0;
+      ks->st_blksize = 512;
+      spin_unlock(&devtmpfs_lock);
+      return 0;
+    }
+    e = e->next;
+  }
+
+  spin_unlock(&devtmpfs_lock);
+  return -ENOENT;
+}
+
+static int devtmpfs_fs_nosys(const char *relpath) {
+  (void)relpath;
+  return -ENOSYS;
+}
+
+struct fstype devtmpfs_fstype = {
+    .name = "devtmpfs",
+    .lookup = devtmpfs_lookup,
+    .getdents = devtmpfs_getdents,
+    .mkdir = devtmpfs_fs_nosys,
+    .unlink = devtmpfs_fs_nosys,
+    .rmdir = devtmpfs_fs_nosys,
+    .stat = devtmpfs_stat,
+};

@@ -38,4 +38,7 @@ struct inode *devtmpfs_lookup(const char *name);
 void devtmpfs_cleanup_pid(pid_t pid);
 void devtmpfs_remove(const char *name);
 
+struct fstype;
+extern struct fstype devtmpfs_fstype;
+
 #endif

@@ -30,6 +30,7 @@
 #include "kernel/bsd/timerfd.h"
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/vfs.h"
+#include "kernel/bsd/mount.h"
 #include "kernel/driver/ahci.h"
 #include "kernel/driver/pci.h"
 #include "kernel/xcore/atomic.h"
@@ -1257,7 +1258,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
   }
 
   if (p->read_pid >= 0)
-    wake_process(p->read_pid);
+    wake_with_event(task_get(p->read_pid), WAIT_PIPE);
   if (p->close_wq)
     __wake_up(p->close_wq, POLLIN);
 
@@ -1618,7 +1619,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t _u1,
     }
 
     if (p->write_pid >= 0)
-      wake_process(p->write_pid);
+      wake_with_event(task_get(p->write_pid), WAIT_PIPE);
     if (p->close_wq)
       __wake_up(p->close_wq, POLLOUT);
 
@@ -2973,6 +2974,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_timerfd_settime(tf->rdi, tf->rsi, tf->rdx, tf->r10);
   case SYS_SIGNALFD4:
     return sys_signalfd4(tf->rdi, tf->rsi, tf->rdx, tf->r10);
+  case SYS_MOUNT:
+    return sys_mount(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) implemented in phase 3b,
   // this phase returns -ENOSYS
   default:

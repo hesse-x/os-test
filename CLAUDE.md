@@ -100,6 +100,8 @@ kernel/
     atomic.h             — 原子操作
     list.h               — 内嵌双向链表
     spinlock.h           — spinlock_t
+    wait_queue.c / wait_queue.h — 回调式等待队列原语（多等待者唤醒）
+    rbtree.c / rbtree.h  — 红黑树（eventpoll interest list 用）
     sparse.h             — Sparse 注解（__user, __iomem, phys_addr_t, kern_vaddr_t）
     mem/
       alloc.c / alloc.h — Bump/BFC 分配器
@@ -122,7 +124,14 @@ kernel/
     devtmpfs.c / devtmpfs.h — /dev/ 内存伪文件系统（设备节点注册+open）
     elf_loader.c / elf_loader.h — ELF 加载器
     socket.c / socket.h  — AF_UNIX SOCK_STREAM + SCM_RIGHTS
+    netlink.c / netlink.h — AF_NETLINK 多播事件通知（uevent 广播 + group 注册表）
     pty.c / pty.h        — PTY/TTY 子系统
+    eventpoll.c / eventpoll.h — epoll 核心（eventpoll/epitem/ctl/wait）
+    eventfd.c / eventfd.h — eventfd 信号计数器 fd
+    timerfd.c / timerfd.h — timerfd 定时器 fd
+    signalfd.c / signalfd.h — signalfd 信号 fd
+    file_poll.c / file_poll.h — per-type 就绪检测 helper（file_poll）
+    file_wq.c            — file->wq 惰性分配（file_wq_get）
 
   driver/                 — 驱动层：PCI 设备驱动、块设备抽象
     CMakeLists.txt
@@ -154,8 +163,9 @@ user/
     stdio.cc, string.cc, start.cc, malloc.cc, file.cc, sys_ipc.cc, sys_shm.cc,
     usb_kbd.cc, time.cc, unistd.cc, sys_wait.cc, sys_mman.cc, sys_irq.cc,
     sys_device.cc, sys_process.cc, sys_pci.cc, signal.cc, ctype.c, strtol.c,
-    stdlib_misc.c, uname.c, sleep.c, assert.c
-  test/                — 15个测试 ELF（test_runner + 14子系统测试）
+    stdlib_misc.c, uname.c, sleep.c, assert.c, epoll.cc, eventfd.cc, timerfd.cc,
+    signalfd.cc
+  test/                — 29个测试 ELF（test_runner + 28子系统测试）
   lib/unity/           — Unity wrapper（源码在 third_party/Unity 子模块）
 
 third_party/
@@ -205,6 +215,8 @@ kernel/
 | `sanitize.md` | KASAN sanitizer 设计 | Xcore |
 | `kernel_exception.md` | 内核异常处理基础设施 | Xcore |
 | `proc.md` | 进程管理（xtask_t/bsd_proc_t/files_t、fork/execve/exit/waitpid） | BSD |
+| `epoll.md` | epoll + eventfd/timerfd/signalfd + wait_queue + file_poll | BSD/Xcore |
+| `netlink.md` | Netlink 多播事件通知（AF_NETLINK + group 注册表 + uevent 广播） | BSD |
 | `syscall.md` | 系统调用（SYSCALL/SYSRET、syscall 编号表、Xcore/BSD 分发） | BSD |
 | `vfs.md` | VFS + 文件系统设计（FAT32 + inode + page cache + devtmpfs） | BSD |
 | `posix.md` | POSIX 接口覆盖现状 | BSD |
