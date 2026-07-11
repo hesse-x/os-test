@@ -217,17 +217,24 @@ void *load_so(const char *path, Elf64_Dyn **out_dyn) {
   }
 
   // 5. for each PT_LOAD segment: lseek + read into mapped region
+  //    Handle short reads (sys_read caps at 65536 bytes per call)
   for (size_t i = 0; i < phnum; i++) {
     if (dl_phdrs[i].p_type != PT_LOAD)
       continue;
     void *seg_dst = (char *)base + (dl_phdrs[i].p_vaddr - min_vaddr);
     dl_sys_lseek((int)fd, (int64_t)dl_phdrs[i].p_offset, SEEK_SET);
-    if (dl_phdrs[i].p_filesz > 0) {
-      dl_sys_read((int)fd, seg_dst, dl_phdrs[i].p_filesz);
+    size_t remaining = dl_phdrs[i].p_filesz;
+    unsigned char *rdst = (unsigned char *)seg_dst;
+    while (remaining > 0) {
+      size_t chunk = remaining > 65536 ? 65536 : remaining;
+      long n = dl_sys_read((int)fd, rdst, chunk);
+      if (n <= 0)
+        break;
+      rdst += n;
+      remaining -= (size_t)n;
     }
     // BSS zeroing (memsz > filesz portion) - mmap already returns zero pages,
-    // no need to zero again but if filesz end and memsz end cross a page
-    // boundary, mmap already zeroed; also zero within the same page
+    // no need to zero again but ensure last page is clean
     if (dl_phdrs[i].p_memsz > dl_phdrs[i].p_filesz) {
       memset((char *)seg_dst + dl_phdrs[i].p_filesz, 0,
              dl_phdrs[i].p_memsz - dl_phdrs[i].p_filesz);
@@ -239,7 +246,7 @@ void *load_so(const char *path, Elf64_Dyn **out_dyn) {
   //    will enable once mprotect syscall is added
   (void)dl_sys_mprotect;
 
-  // 7. find PT_DYNAMIC and output .dynamic pointer
+  // 6. find PT_DYNAMIC and output .dynamic pointer
   if (out_dyn) {
     *out_dyn = NULL;
     for (size_t i = 0; i < phnum; i++) {
