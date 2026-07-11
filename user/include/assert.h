@@ -22,4 +22,10 @@ LIBC_EXPORT void __assert_fail(const char *expr, const char *file, int line);
 #define assert(expr)                                                           \
   ((void)((expr) || (__assert_fail(#expr, __FILE__, __LINE__), 0)))
 
+#ifndef __cplusplus
+#ifndef static_assert
+#define static_assert _Static_assert
+#endif
+#endif
+
 #endif /* _ASSERT_H */

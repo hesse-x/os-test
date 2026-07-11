@@ -94,9 +94,10 @@ int64_t sys_timerfd_create(int64_t clockid, int64_t flags) {
   fd_install(proc->proc->files, fd, f);
   spin_unlock(&proc->proc->files->fd_lock);
 
-  spin_lock(&timerfd_list_lock);
+  uint64_t tfd_flags;
+  spin_lock_irqsave(&timerfd_list_lock, &tfd_flags);
   list_push_back(&timerfd_list, &tfd->node);
-  spin_unlock(&timerfd_list_lock);
+  spin_unlock_irqrestore(&timerfd_list_lock, tfd_flags);
   return fd;
 }
 
@@ -114,7 +115,8 @@ int64_t sys_timerfd_settime(int64_t fd, int64_t flags, int64_t new_ptr,
   if (copy_from_user(&neu, (void *)new_ptr, sizeof(neu)))
     return -EFAULT;
 
-  spin_lock(&tfd->lock);
+  uint64_t tfd_settime_flags;
+  spin_lock_irqsave(&tfd->lock, &tfd_settime_flags);
   if (old_ptr) {
     struct itimerspec old;
     old.it_interval.tv_sec = (time_t)(tfd->interval / 1000000000ULL);
@@ -135,7 +137,7 @@ int64_t sys_timerfd_settime(int64_t fd, int64_t flags, int64_t new_ptr,
   }
   tfd->interval = (uint64_t)neu.it_interval.tv_sec * 1000000000ULL +
                   (uint64_t)neu.it_interval.tv_nsec;
-  spin_unlock(&tfd->lock);
+  spin_unlock_irqrestore(&tfd->lock, tfd_settime_flags);
   return 0;
 }
 
@@ -179,18 +181,19 @@ int64_t timerfd_do_read(struct file *f, void *buf) {
 
   int64_t ret;
   for (;;) {
-    spin_lock(&tfd->lock);
+    uint64_t flags;
+    spin_lock_irqsave(&tfd->lock, &flags);
     if (tfd->ticks > 0) {
       uint64_t val = tfd->ticks;
       tfd->ticks = 0;
-      spin_unlock(&tfd->lock);
+      spin_unlock_irqrestore(&tfd->lock, flags);
       if (copy_to_user(buf, &val, 8))
         ret = -EFAULT;
       else
         ret = 8;
       goto out;
     }
-    spin_unlock(&tfd->lock);
+    spin_unlock_irqrestore(&tfd->lock, flags);
     if (f->flags & O_NONBLOCK) {
       ret = -EAGAIN;
       goto out;

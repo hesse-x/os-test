@@ -1880,6 +1880,17 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       goto out;
     }
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+
+    /* RINGBUF_WAKE: kernel-internal, wake ringbuf poll/epoll consumers */
+    if (cmd == RINGBUF_WAKE) {
+      printk(LOG_INFO, "RINGBUF_WAKE: ino=%u wq=%p\n", (unsigned)ip->ino,
+             (void *)ip->wq);
+      if (ip->wq)
+        __wake_up(ip->wq, POLLIN);
+      ret = 0;
+      goto out;
+    }
+
     if (ops->driver_pid == 0) {
       if (!ops->ioctl) {
         ret = -(int64_t)ENOTTY;
@@ -2217,6 +2228,7 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
       goto out;
     }
     ks.st_ino = ip->ino;
+    ks.st_rdev = ip->ino;
     if (ip->i_priv && ((struct dev_ops *)ip->i_priv)->is_block)
       ks.st_mode = S_IFBLK | 0666;
     else

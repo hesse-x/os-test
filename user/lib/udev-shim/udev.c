@@ -1,0 +1,447 @@
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include "libudev.h"
+
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <xos/input.h>
+#include <xos/ioctl.h>
+
+#define EVDEV_BITS_PER_LONG (sizeof(long) * 8)
+#define NBITS(x) ((((x)-1) / EVDEV_BITS_PER_LONG) + 1)
+#define LONG(x) ((x) / EVDEV_BITS_PER_LONG)
+#define OFF(x) ((x) % EVDEV_BITS_PER_LONG)
+
+// Path-seat mode backend: minimal udev shim that only supports the calls
+// libinput's path-seat mode uses.
+
+static int scan_devices(void);
+static int device_is_keyboard(const char *devnode);
+static struct udev_device *find_device_by_devnum(dev_t devnum);
+
+// Simple device table
+#define MAX_UDEV_DEVICES 16
+static struct udev_device *udev_device_table[MAX_UDEV_DEVICES];
+static int udev_device_count;
+static int udev_table_scanned;
+
+// ======================== udev ========================
+
+struct udev *udev_new(void) {
+  struct udev *u = calloc(1, sizeof(struct udev));
+  if (u)
+    u->refcount = 1;
+  return u;
+}
+
+struct udev *udev_ref(struct udev *udev) {
+  if (udev)
+    udev->refcount++;
+  return udev;
+}
+
+void udev_unref(struct udev *udev) {
+  if (udev && --udev->refcount == 0)
+    free(udev);
+}
+
+// ======================== internal helpers ========================
+
+static void scan_devices_if_needed(void) {
+  if (udev_table_scanned)
+    return;
+  udev_table_scanned = 1;
+  udev_device_count = 0;
+  memset(udev_device_table, 0, sizeof(udev_device_table));
+  scan_devices();
+}
+
+static int device_is_keyboard(const char *devnode) {
+  // Attempt to detect keyboard via EVIOCGBIT
+  int fd = open(devnode, O_RDONLY);
+  if (fd < 0)
+    return 0;
+  unsigned long bits[NBITS(EV_MAX + 1)];
+  memset(bits, 0, sizeof(bits));
+  int rc = ioctl(fd, EVIOCGBIT(0, sizeof(bits)), bits);
+  close(fd);
+  if (rc < 0)
+    return 0;
+  return !!(bits[LONG(EV_KEY)] & (1UL << OFF(EV_KEY)));
+}
+
+static struct udev_device *find_device_by_devnum(dev_t devnum) {
+  scan_devices_if_needed();
+  for (int i = 0; i < udev_device_count; i++) {
+    if (udev_device_table[i] && udev_device_table[i]->devnum == devnum)
+      return udev_device_table[i];
+  }
+  return NULL;
+}
+
+static struct udev_device *create_udev_device(struct udev *udev,
+                                              const char *devnode) {
+  (void)udev;
+  struct stat st;
+  if (stat(devnode, &st) < 0)
+    return NULL;
+
+  struct udev_device *d = calloc(1, sizeof(struct udev_device));
+  if (!d)
+    return NULL;
+  d->refcount = 1;
+  d->initialized = 1;
+  d->devnum = st.st_rdev;
+
+  strncpy(d->devnode, devnode, sizeof(d->devnode) - 1);
+  d->devnode[sizeof(d->devnode) - 1] = '\0';
+
+  // Build syspath: /sys/devices/virtual/input/eventN
+  const char *basename = strrchr(devnode, '/');
+  if (!basename)
+    basename = devnode;
+  else
+    basename++;
+  snprintf(d->syspath, sizeof(d->syspath), "/sys/devices/virtual/input/%s",
+           basename);
+  strncpy(d->sysname, basename, sizeof(d->sysname) - 1);
+  d->sysname[sizeof(d->sysname) - 1] = '\0';
+
+  strncpy(d->subsystem, "input", sizeof(d->subsystem) - 1);
+  d->subsystem[sizeof(d->subsystem) - 1] = '\0';
+
+  // Detect if input or evdev type
+  const char *s = strrchr(devnode, '/');
+  if (s && strstr(s, "event") != NULL) {
+    strncpy(d->devtype, "evdev", sizeof(d->devtype) - 1);
+    d->devtype[sizeof(d->devtype) - 1] = '\0';
+  }
+
+  return d;
+}
+
+static int scan_devices(void) {
+  DIR *dir = opendir("/dev/input");
+  if (!dir)
+    return 0;
+
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL &&
+         udev_device_count < MAX_UDEV_DEVICES) {
+    if (strncmp(entry->d_name, "event", 5) != 0)
+      continue;
+    char devnode[64];
+    snprintf(devnode, sizeof(devnode), "/dev/input/%s", entry->d_name);
+    struct stat st;
+    if (stat(devnode, &st) < 0)
+      continue;
+    // Check if keyboard
+    if (!device_is_keyboard(devnode))
+      continue;
+    struct udev_device *d = create_udev_device(NULL, devnode);
+    if (d)
+      udev_device_table[udev_device_count++] = d;
+  }
+  closedir(dir);
+  return udev_device_count;
+}
+
+// ======================== udev_device ========================
+
+struct udev_device *udev_device_new_from_syspath(struct udev *udev,
+                                                 const char *syspath) {
+  (void)udev;
+  scan_devices_if_needed();
+  for (int i = 0; i < udev_device_count; i++) {
+    if (udev_device_table[i] &&
+        strcmp(udev_device_table[i]->syspath, syspath) == 0)
+      return udev_device_ref(udev_device_table[i]);
+  }
+  return NULL;
+}
+
+struct udev_device *udev_device_new_from_devnum(struct udev *udev, char type,
+                                                dev_t devnum) {
+  (void)udev;
+  (void)type;
+  // Shortcut: try to stat /dev/input/event* to find the device
+  struct udev_device *d = find_device_by_devnum(devnum);
+  if (d) {
+    return udev_device_ref(d);
+  }
+
+  // Fallback: scan /dev/input/ for matching devnum
+  DIR *dir = opendir("/dev/input");
+  if (!dir)
+    return NULL;
+
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strncmp(entry->d_name, "event", 5) != 0)
+      continue;
+    char devnode[64];
+    snprintf(devnode, sizeof(devnode), "/dev/input/%s", entry->d_name);
+    struct stat st;
+    if (stat(devnode, &st) < 0)
+      continue;
+    if (st.st_rdev != devnum)
+      continue;
+    closedir(dir);
+    d = create_udev_device(udev, devnode);
+    if (d && udev_device_count < MAX_UDEV_DEVICES)
+      udev_device_table[udev_device_count++] = udev_device_ref(d);
+    return d;
+  }
+  closedir(dir);
+  return NULL;
+}
+
+struct udev_device *
+udev_device_new_from_subsystem_sysname(struct udev *udev, const char *subsystem,
+                                       const char *sysname) {
+  (void)udev;
+  scan_devices_if_needed();
+  for (int i = 0; i < udev_device_count; i++) {
+    if (udev_device_table[i] &&
+        strcmp(udev_device_table[i]->subsystem, subsystem) == 0 &&
+        strcmp(udev_device_table[i]->sysname, sysname) == 0)
+      return udev_device_ref(udev_device_table[i]);
+  }
+  return NULL;
+}
+
+struct udev_device *udev_device_ref(struct udev_device *udev_device) {
+  if (udev_device)
+    udev_device->refcount++;
+  return udev_device;
+}
+
+void udev_device_unref(struct udev_device *udev_device) {
+  if (!udev_device)
+    return;
+  if (--udev_device->refcount == 0) {
+    // If this is in the static table, leave it there (don't free)
+    // Only free if not in the table
+    int in_table = 0;
+    for (int i = 0; i < udev_device_count; i++) {
+      if (udev_device_table[i] == udev_device) {
+        in_table = 1;
+        break;
+      }
+    }
+    if (!in_table)
+      free(udev_device);
+  }
+}
+
+const char *udev_device_get_property_value(struct udev_device *udev_device,
+                                           const char *key) {
+  if (!udev_device)
+    return NULL;
+
+  // For evdev keyboard devices, return appropriate ID_INPUT properties
+  // Check if device is a keyboard using EVIOCGBIT
+  int fd = open(udev_device->devnode, O_RDONLY);
+  if (fd < 0)
+    return NULL;
+  unsigned long evbits[NBITS(EV_MAX + 1)];
+  memset(evbits, 0, sizeof(evbits));
+  ioctl(fd, EVIOCGBIT(0, sizeof(evbits)), evbits);
+  close(fd);
+
+  int has_key = !!(evbits[LONG(EV_KEY)] & (1UL << OFF(EV_KEY)));
+
+  if (strcmp(key, "ID_INPUT") == 0)
+    return has_key ? "1" : NULL;
+  if (strcmp(key, "ID_INPUT_KEYBOARD") == 0)
+    return has_key ? "1" : NULL;
+  if (strcmp(key, "ID_INPUT_KEY") == 0)
+    return has_key ? "1" : NULL;
+  if (strcmp(key, "ID_SEAT") == 0)
+    return NULL; // default seat
+
+  return NULL;
+}
+
+const char *udev_device_get_devnode(struct udev_device *udev_device) {
+  return udev_device ? udev_device->devnode : NULL;
+}
+
+const char *udev_device_get_syspath(struct udev_device *udev_device) {
+  return udev_device ? udev_device->syspath : NULL;
+}
+
+const char *udev_device_get_sysname(struct udev_device *udev_device) {
+  return udev_device ? udev_device->sysname : NULL;
+}
+
+int udev_device_get_is_initialized(struct udev_device *udev_device) {
+  return udev_device ? udev_device->initialized : 0;
+}
+
+dev_t udev_device_get_devnum(struct udev_device *udev_device) {
+  return udev_device ? udev_device->devnum : 0;
+}
+
+const char *udev_device_get_action(struct udev_device *udev_device) {
+  (void)udev_device;
+  return NULL;
+}
+
+const char *udev_device_get_subsystem(struct udev_device *udev_device) {
+  return udev_device ? udev_device->subsystem : NULL;
+}
+
+const char *udev_device_get_devtype(struct udev_device *udev_device) {
+  return udev_device ? udev_device->devtype : NULL;
+}
+
+const char *udev_device_get_sysattr_value(struct udev_device *udev_device,
+                                          const char *sysattr) {
+  (void)udev_device;
+  (void)sysattr;
+  return NULL;
+}
+
+struct udev_list_entry *
+udev_device_get_properties_list_entry(struct udev_device *udev_device) {
+  (void)udev_device;
+  return NULL;
+}
+
+struct udev_list_entry *
+udev_device_get_sysattr_list_entry(struct udev_device *udev_device) {
+  (void)udev_device;
+  return NULL;
+}
+
+const char *udev_device_get_driver(struct udev_device *udev_device) {
+  (void)udev_device;
+  return NULL;
+}
+
+struct udev_device *udev_device_get_parent(struct udev_device *udev_device) {
+  (void)udev_device;
+  return NULL;
+}
+
+struct udev *udev_device_get_udev(struct udev_device *udev_device) {
+  (void)udev_device;
+  return NULL;
+}
+
+// ======================== list_entry ========================
+
+struct udev_list_entry *
+udev_list_entry_get_next(struct udev_list_entry *list_entry) {
+  return list_entry ? list_entry->next : NULL;
+}
+
+const char *udev_list_entry_get_name(struct udev_list_entry *list_entry) {
+  return list_entry ? list_entry->name : NULL;
+}
+
+const char *udev_list_entry_get_value(struct udev_list_entry *list_entry) {
+  return list_entry ? list_entry->value : NULL;
+}
+
+// ======================== monitor (no-op stubs) ========================
+
+struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev,
+                                                   const char *name) {
+  (void)udev;
+  (void)name;
+  struct udev_monitor *m = calloc(1, sizeof(struct udev_monitor));
+  if (m)
+    m->fd = -1;
+  return m;
+}
+
+int udev_monitor_filter_add_match_subsystem_devtype(
+    struct udev_monitor *udev_monitor, const char *subsystem,
+    const char *devtype) {
+  (void)udev_monitor;
+  (void)subsystem;
+  (void)devtype;
+  return 0;
+}
+
+int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
+  (void)udev_monitor;
+  return 0;
+}
+
+int udev_monitor_get_fd(struct udev_monitor *udev_monitor) {
+  return udev_monitor ? udev_monitor->fd : -1;
+}
+
+struct udev_device *
+udev_monitor_receive_device(struct udev_monitor *udev_monitor) {
+  (void)udev_monitor;
+  return NULL;
+}
+
+void udev_monitor_unref(struct udev_monitor *udev_monitor) {
+  free(udev_monitor);
+}
+
+// ======================== enumerate (no-op stubs) ========================
+
+struct udev_enumerate *udev_enumerate_new(struct udev *udev) {
+  (void)udev;
+  struct udev_enumerate *e = calloc(1, sizeof(struct udev_enumerate));
+  return e;
+}
+
+void udev_enumerate_unref(struct udev_enumerate *udev_enumerate) {
+  free(udev_enumerate);
+}
+
+int udev_enumerate_add_match_subsystem(struct udev_enumerate *udev_enumerate,
+                                       const char *subsystem) {
+  (void)udev_enumerate;
+  (void)subsystem;
+  return 0;
+}
+
+int udev_enumerate_add_match_sysname(struct udev_enumerate *udev_enumerate,
+                                     const char *sysname) {
+  (void)udev_enumerate;
+  (void)sysname;
+  return 0;
+}
+
+int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
+  (void)udev_enumerate;
+  return 0;
+}
+
+struct udev_list_entry *
+udev_enumerate_get_list_entry(struct udev_enumerate *udev_enumerate) {
+  (void)udev_enumerate;
+  return NULL;
+}
+
+char *udev_device_get_property_value_w(char *property, size_t property_size,
+                                       struct udev_device *udev_device,
+                                       const char *key) {
+  const char *val = udev_device_get_property_value(udev_device, key);
+  if (!val)
+    return NULL;
+  size_t len = strlen(val) + 1;
+  if (len > property_size)
+    return NULL;
+  memcpy(property, val, len);
+  return property;
+}

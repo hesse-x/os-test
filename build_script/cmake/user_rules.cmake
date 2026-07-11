@@ -54,15 +54,22 @@ function(user_assert_no_sse_disable target_name)
     endforeach()
 endfunction()
 
-# add_user_lib: userspace library (libc.a static / libc.so shared)
-# Usage: add_user_lib(name [C] SOURCES ... [FLAGS ...] [SHARED] [OUTPUT_NAME ...])
+# add_user_lib: userspace library (libc.a static / libc.so shared / generic .so)
+# Usage: add_user_lib(name [C] SOURCES ... [FLAGS ...] [SHARED] [OUTPUT_NAME ...]
+#                     [VERSION_MAP ...] [SO_LINK_LIBS ...] [INCLUDE_DIRS ...])
 # C: flag to use C compiler (consistent with add_user_elf)
 # SHARED: produce .so (gcc -shared -fPIC custom command, plan_ld2b3 decision 1 fallback)
+# OUTPUT_NAME: custom base output name (without lib prefix); default = lib_name
+# VERSION_MAP: path to version script (relative to CMAKE_SOURCE_DIR, e.g. user/libc.map)
+#              Triggers --version-script + post-link export verification.
+# SO_LINK_LIBS: additional .so dependencies for SHARED libs (e.g. "c" for libc.so)
+#              Links -L${CMAKE_BINARY_DIR} -l<lib>.
+# INCLUDE_DIRS: extra include directories (SHARED path only; static uses target_include_directories)
 # Otherwise: add_library(STATIC), preserve target interface (unity uses target_include_directories)
 function(add_user_lib lib_name)
     set(option_args SHARED C)
-    set(multi_args SOURCES FLAGS)
-    set(one_args OUTPUT_NAME)
+    set(multi_args SOURCES FLAGS SO_LINK_LIBS INCLUDE_DIRS)
+    set(one_args OUTPUT_NAME VERSION_MAP)
     cmake_parse_arguments(ARG "${option_args}" "${one_args}" "${multi_args}" ${ARGN})
 
     if(ARG_SHARED)
@@ -77,9 +84,16 @@ function(add_user_lib lib_name)
         endif()
         # FLAGS may be a string (e.g. "-fno-pie -DDYNAMIC=0"), convert to list
         separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
-        # -fvisibility=hidden: default hidden, only LIBC_EXPORT-marked declarations are exported (consistent with ld.so).
-        # .map + verify_libc_exports.sh is the final gate, catching missed/extra markings.
-        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fvisibility=hidden ${ARG_FLAGS_LIST})
+        # -fvisibility=hidden: default hidden, only export-marked declarations are exported (consistent with ld.so).
+        # When VERSION_MAP is set, .map + verify_libc_exports.sh gates the exports.
+        # Libraries like libinput use LIBINPUT_EXPORT (__attribute__((visibility("default")))) markings.
+        # -fPIC: required for all .so objects (position-independent code).
+        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fPIC -fvisibility=hidden ${ARG_FLAGS_LIST})
+        if(ARG_INCLUDE_DIRS)
+            foreach(_dir ${ARG_INCLUDE_DIRS})
+                list(APPEND COMPILE_FLAGS_BASE -I${_dir})
+            endforeach()
+        endif()
 
         set(OBJ_FILES "")
         set(idx 0)
@@ -100,16 +114,51 @@ function(add_user_lib lib_name)
         endforeach()
 
         set(SO_FILE ${CMAKE_BINARY_DIR}/lib${ARG_OUTPUT_NAME}.so)
+
+        # --- Link dependencies (object files + version map if any) ---
+        set(SO_LINK_DEPS ${OBJ_FILES})
+        if(ARG_VERSION_MAP)
+            list(APPEND SO_LINK_DEPS ${CMAKE_SOURCE_DIR}/${ARG_VERSION_MAP})
+        endif()
+        if(ARG_SO_LINK_LIBS)
+            foreach(_so_lib ${ARG_SO_LINK_LIBS})
+                list(APPEND SO_LINK_DEPS ${CMAKE_BINARY_DIR}/lib${_so_lib}.so)
+            endforeach()
+        endif()
+
+        # --- Extra link flags (version script + libc.so dependency) ---
+        set(SO_EXTRA_LDFLAGS "")
+        if(ARG_VERSION_MAP)
+            list(APPEND SO_EXTRA_LDFLAGS
+                 "-Wl,--version-script,${CMAKE_SOURCE_DIR}/${ARG_VERSION_MAP}")
+        endif()
+        if(ARG_SO_LINK_LIBS)
+            list(APPEND SO_EXTRA_LDFLAGS "-L${CMAKE_BINARY_DIR}")
+            foreach(_so_lib ${ARG_SO_LINK_LIBS})
+                list(APPEND SO_EXTRA_LDFLAGS "-l${_so_lib}")
+            endforeach()
+        endif()
+
         add_custom_command(OUTPUT ${SO_FILE}
             COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
                     -Wl,--hash-style=gnu
                     -Wl,-soname,lib${ARG_OUTPUT_NAME}.so
-                    -Wl,--version-script,${CMAKE_SOURCE_DIR}/user/libc.map
+                    ${SO_EXTRA_LDFLAGS}
                     -o ${SO_FILE} ${OBJ_FILES}
-            COMMAND bash ${CMAKE_SOURCE_DIR}/build_script/cmake/verify_so_init_array.sh ${SO_FILE}
-            COMMAND bash ${CMAKE_SOURCE_DIR}/build_script/cmake/verify_libc_exports.sh ${SO_FILE} ${CMAKE_SOURCE_DIR}/user/libc.map
-            DEPENDS ${OBJ_FILES} ${CMAKE_SOURCE_DIR}/user/libc.map
-            COMMENT "Linking ${lib_name}.so (libc.so)")
+            DEPENDS ${SO_LINK_DEPS}
+            COMMENT "Linking ${lib_name}.so")
+
+        # Post-link verification (libc-specific, only when VERSION_MAP is provided)
+        # NOTE: APPEND COMMAND cannot specify DEPENDS — that would create a
+        # self-referencing rule (OUTPUT depends on OUTPUT). The dependency on
+        # SO_FILE is already implicit from the OUTPUT-matching APPEND mechanism.
+        if(ARG_VERSION_MAP)
+            add_custom_command(OUTPUT ${SO_FILE}
+                COMMAND bash ${CMAKE_SOURCE_DIR}/build_script/cmake/verify_so_init_array.sh ${SO_FILE}
+                COMMAND bash ${CMAKE_SOURCE_DIR}/build_script/cmake/verify_libc_exports.sh ${SO_FILE} ${CMAKE_SOURCE_DIR}/${ARG_VERSION_MAP}
+                APPEND COMMAND)
+        endif()
+
         add_custom_target(${lib_name} ALL DEPENDS ${SO_FILE})
     else()
         # Static library — add_library(STATIC), preserve target interface
@@ -127,9 +176,16 @@ function(add_user_lib lib_name)
             target_compile_options(${lib_name} PRIVATE ${USER_COMPILE_FLAGS})
         endif()
 
-        set_target_properties(${lib_name} PROPERTIES
-            ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-        )
+        if(ARG_OUTPUT_NAME)
+            set_target_properties(${lib_name} PROPERTIES
+                ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+                OUTPUT_NAME "${ARG_OUTPUT_NAME}"
+            )
+        else()
+            set_target_properties(${lib_name} PROPERTIES
+                ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+            )
+        endif()
 
         user_assert_no_sse_disable(${lib_name})
     endif()
@@ -220,10 +276,14 @@ function(add_user_elf elf_name)
     set(LD_ARGS ${CMAKE_BINARY_DIR}/crt0.o ${OBJ_FILES})
 
     if(ARG_LINK_LIBS)
+        # Use --start-group/--end-group to handle circular dependencies within
+        # and between static libraries (e.g. libinput internal .o -> .o refs).
+        list(APPEND LD_ARGS "--start-group")
         foreach(lib ${ARG_LINK_LIBS})
             list(APPEND LD_DEPS ${CMAKE_BINARY_DIR}/lib${lib}.a)
             list(APPEND LD_ARGS ${CMAKE_BINARY_DIR}/lib${lib}.a)
         endforeach()
+        list(APPEND LD_ARGS "--end-group")
     endif()
 
     add_custom_command(
@@ -279,10 +339,15 @@ endfunction()
 # add_user_dyn_elf: dynamic main ELF, linked by gcc driver
 # ld.md §3.4.4 / plan_ld2b3 T5
 # crt0.o linked first (provides _start), libc.so linked via -L/-l (records DT_NEEDED)
+# Supports both C and C++ sources: pass C flag for C, omit for C++ (like add_user_elf)
 function(add_user_dyn_elf name)
     cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS;INCLUDE_DIRS" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
-    set(COMPILE_CMD ${CMAKE_C_COMPILER})
+    if(ARG_C)
+        set(COMPILE_CMD ${CMAKE_C_COMPILER})
+    else()
+        set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
+    endif()
     set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra include directories

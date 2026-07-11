@@ -42,7 +42,8 @@ struct dev_ops {
 
 void devtmpfs_init(void);
 int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm);
-uint64_t devtmpfs_open(xtask *proc, const char *name, int flags);
+uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
+                       struct mount_entry *m);
 struct inode *devtmpfs_lookup(const char *name);
 void devtmpfs_cleanup_pid(pid_t pid);
 void devtmpfs_remove(const char *name);

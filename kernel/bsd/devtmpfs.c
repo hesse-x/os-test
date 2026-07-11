@@ -52,6 +52,9 @@ static int dev_count = 0;
 static spinlock devtmpfs_lock = SPINLOCK_INIT;
 
 static bool devtmpfs_initialized = false;
+/* Dedicated root /dev inode — allows getdents to distinguish root from
+ * subdirectory */
+static struct inode *devtmpfs_root_ip = NULL;
 
 void devtmpfs_init(void) {
   if (devtmpfs_initialized) {
@@ -74,6 +77,10 @@ void devtmpfs_init(void) {
     dev_dirs[i].next = NULL;
   }
   spin_unlock(&devtmpfs_lock);
+
+  /* Create dedicated root inode for /dev (distinguished from subdirectories).
+   * Must be outside the lock because inode_create may allocate. */
+  devtmpfs_root_ip = inode_create(0, INODE_DIR, 0, 0, 0, 0);
   devtmpfs_initialized = true;
   printk(LOG_INFO, "devtmpfs_init: done\n");
 }
@@ -121,18 +128,12 @@ static struct dev_dir *devtmpfs_get_or_create_dir(const char *name, int len) {
 struct inode *devtmpfs_lookup(const char *name) {
   /* relpath from vfs_resolve has no /dev/ prefix; entries store paths
    * relative to /dev (e.g. "serial", "dri/card0"). */
-  /* Empty string = root /dev directory — return a synthetic dir inode.
-   * We reuse the first registered directory's inode if available, else
-   * return NULL (no devices registered yet). */
+  /* Empty string = root /dev directory — return the dedicated root inode. */
   if (name[0] == '\0') {
-    spin_lock(&devtmpfs_lock);
-    if (dir_list) {
-      struct inode *root_ip = dir_list->ip;
-      inode_get(root_ip);
-      spin_unlock(&devtmpfs_lock);
-      return root_ip;
+    if (devtmpfs_root_ip) {
+      inode_get(devtmpfs_root_ip);
+      return devtmpfs_root_ip;
     }
-    spin_unlock(&devtmpfs_lock);
     return NULL;
   }
 
@@ -167,7 +168,7 @@ struct inode *devtmpfs_lookup(const char *name) {
     spin_unlock(&devtmpfs_lock);
     return NULL;
   }
-  /* No slash: flat lookup */
+  /* No slash: flat lookup — search devices first, then directories */
   spin_lock(&devtmpfs_lock);
   struct dev_entry *e = dev_list;
   while (e) {
@@ -176,6 +177,15 @@ struct inode *devtmpfs_lookup(const char *name) {
       return e->ip;
     }
     e = e->next;
+  }
+  /* Check directories */
+  struct dev_dir *d = dir_list;
+  while (d) {
+    if (__strcmp(name, d->name) == 0) {
+      spin_unlock(&devtmpfs_lock);
+      return d->ip;
+    }
+    d = d->next;
   }
   spin_unlock(&devtmpfs_lock);
   return NULL;
@@ -254,12 +264,42 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
   return 0;
 }
 
-uint64_t devtmpfs_open(xtask *proc, const char *name, int flags) {
+uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
+                       struct mount_entry *m) {
   struct inode *ip = devtmpfs_lookup(name);
   if (!ip)
     return (uint64_t)(-(uint64_t)ENOENT);
 
-  /* Allocate fd (under fd_lock) */
+  /* Handle directories: create FD_DIR (not FD_DEV) so getdents works.
+   * Also set ip->mount so mount_of_inode() finds the devtmpfs fstype. */
+  if (ip->type == INODE_DIR) {
+    ip->mount = m;
+    files *fs = proc->proc->files;
+    spinlock *fdlk = &fs->fd_lock;
+    spin_lock(fdlk);
+    int fd = alloc_fd(fs, 3);
+    if (fd < 0) {
+      spin_unlock(fdlk);
+      return (uint64_t)(-(uint64_t)EMFILE);
+    }
+    struct file *f = kmalloc(sizeof(struct file));
+    if (!f) {
+      spin_unlock(fdlk);
+      return (uint64_t)(-(uint64_t)ENOMEM);
+    }
+    __memset(f, 0, sizeof(*f));
+    refcount_set(&f->f_count, 1);
+    f->type = FD_DIR;
+    f->flags = O_RDONLY;
+    f->inode = ip;
+    inode_get(ip);
+    f->offset = 0;
+    fd_install(fs, fd, f);
+    spin_unlock(fdlk);
+    return (uint64_t)fd;
+  }
+
+  /* Device open path (existing) */
   spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
   int fd = alloc_fd(proc->proc->files, 3);
@@ -376,7 +416,6 @@ void devtmpfs_remove(const char *name) {
  * Scans dev_list + dir_list, matching entries whose name starts with
  * dir + "/" and have no further "/" (direct children only). */
 static ssize_t devtmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
-  (void)dir;
   spin_lock(&devtmpfs_lock);
 
   if (ctx->pos != 0) {
@@ -384,32 +423,82 @@ static ssize_t devtmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
     return 0;
   }
 
-  /* Emit directories */
-  struct dev_dir *d = dir_list;
-  while (d) {
-    size_t nl = 0;
-    while (d->name[nl])
-      nl++;
-    if (!dir_emit(ctx, d->name, (int)nl, ctx->written, d->ip->ino, DT_DIR))
-      break;
-    d = d->next;
+  /* Determine if this is the root /dev directory or a subdirectory.
+   * Root has a dedicated inode (devtmpfs_root_ip). */
+  bool is_root = (devtmpfs_root_ip && dir->ino == devtmpfs_root_ip->ino);
+  const char *prefix = NULL;
+  int prefix_len = 0;
+
+  if (!is_root) {
+    /* Find which subdirectory this inode belongs to */
+    struct dev_dir *dd = dir_list;
+    while (dd) {
+      if (dd->ip && dd->ip->ino == dir->ino) {
+        prefix = dd->name;
+        for (prefix_len = 0; prefix[prefix_len]; prefix_len++)
+          ;
+        break;
+      }
+      dd = dd->next;
+    }
+    /* If no matching dev_dir found, treat as root */
+    is_root = (prefix == NULL);
   }
 
-  /* Emit top-level devices (no '/' in name) */
-  struct dev_entry *e = dev_list;
-  while (e) {
-    int has_slash = 0;
-    size_t nl = 0;
-    while (e->name[nl]) {
-      if (e->name[nl] == '/')
-        has_slash = 1;
-      nl++;
-    }
-    if (!has_slash) {
-      if (!dir_emit(ctx, e->name, (int)nl, ctx->written, e->ip->ino, DT_CHR))
+  if (is_root) {
+    /* Root /dev: emit all directories and top-level devices (no '/' in name) */
+    struct dev_dir *d = dir_list;
+    while (d) {
+      size_t nl = 0;
+      while (d->name[nl])
+        nl++;
+      if (!dir_emit(ctx, d->name, (int)nl, ctx->written, d->ip->ino, DT_DIR))
         break;
+      d = d->next;
     }
-    e = e->next;
+
+    struct dev_entry *e = dev_list;
+    while (e) {
+      int has_slash = 0;
+      size_t nl = 0;
+      while (e->name[nl]) {
+        if (e->name[nl] == '/')
+          has_slash = 1;
+        nl++;
+      }
+      if (!has_slash) {
+        if (!dir_emit(ctx, e->name, (int)nl, ctx->written, e->ip->ino, DT_CHR))
+          break;
+      }
+      e = e->next;
+    }
+  } else {
+    /* Subdirectory listing: emit only device entries whose name starts with
+     * "prefix/" and has no further "/" after the prefix. */
+    struct dev_entry *e = dev_list;
+    while (e) {
+      size_t nl = 0;
+      while (e->name[nl])
+        nl++;
+      /* Check if name starts with "prefix/" */
+      if ((int)nl > prefix_len + 1 && e->name[prefix_len] == '/' &&
+          __strncmp(e->name, prefix, (size_t)prefix_len) == 0) {
+        const char *leaf = e->name + prefix_len + 1;
+        int has_inner_slash = 0;
+        for (const char *p = leaf; *p; p++) {
+          if (*p == '/') {
+            has_inner_slash = 1;
+            break;
+          }
+        }
+        if (!has_inner_slash) {
+          if (!dir_emit(ctx, leaf, (int)(nl - prefix_len - 1), ctx->written,
+                        e->ip->ino, DT_CHR))
+            break;
+        }
+      }
+      e = e->next;
+    }
   }
 
   ctx->pos = (uint64_t)-1; /* EOF */
@@ -419,8 +508,6 @@ static ssize_t devtmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
 
 static int devtmpfs_stat(const char *relpath, struct kstat *ks) {
   spin_lock(&devtmpfs_lock);
-
-  /* Root /dev directory */
   if (relpath[0] == '\0') {
     __memset(ks, 0, sizeof(*ks));
     ks->st_mode = 0040755;
@@ -449,19 +536,20 @@ static int devtmpfs_stat(const char *relpath, struct kstat *ks) {
   }
 
   /* Check devices (full path match, including '/') */
-  struct dev_entry *e = dev_list;
-  while (e) {
-    if (__strcmp(relpath, e->name) == 0) {
+  struct dev_entry *e2 = dev_list;
+  while (e2) {
+    if (__strcmp(relpath, e2->name) == 0) {
       __memset(ks, 0, sizeof(*ks));
       ks->st_mode = 0020000 | 0600; /* S_IFCHR | 0600 */
-      ks->st_ino = e->ip->ino;
+      ks->st_ino = e2->ip->ino;
       ks->st_nlink = 1;
       ks->st_size = 0;
       ks->st_blksize = 512;
+      ks->st_rdev = (uint64_t)e2->ip->ino; /* device number = inode */
       spin_unlock(&devtmpfs_lock);
       return 0;
     }
-    e = e->next;
+    e2 = e2->next;
   }
 
   spin_unlock(&devtmpfs_lock);

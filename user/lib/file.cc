@@ -407,6 +407,15 @@ char *ttyname(int fd) {
 }
 
 // ===================== ioctl =====================
+//
+// Buffer strategy — hybrid stack/heap:
+//   ≤64B  → stack (zero alloc overhead)
+//   >64B  → heap via static reusable buffer (realloc grows-on-demand)
+//   >4KB  → rejected (kernel-side limit safety)
+//
+// The reusable heap buffer lives until process exit, avoiding repeated
+// malloc/free churn for large ioctls (EVIOCGNAME(256), DRM structs, etc.).
+// Not thread-safe (same convention as strtok/ttyname in this libc).
 int ioctl(int fd, uint32_t cmd, ...) {
   va_list ap;
   va_start(ap, cmd);
@@ -424,16 +433,38 @@ int ioctl(int fd, uint32_t cmd, ...) {
     return (int)rc;
   }
 
-  // Properly encoded ioctls: use 256B stack buffer for kernel communication.
-  // 256B accommodates DRM ioctl structs (max drm_mode_crtc=104B) and the
-  // 56B reply used by the user-space driver proxy path.
-  if (arg_size > 240) {
+  // Cap at a reasonable max — no individual ioctl struct should need more
+  if (arg_size > 4096) {
     errno = EINVAL;
     return -1;
   }
 
-  uint8_t buf[256];
-  __builtin_memset(buf, 0, sizeof(buf));
+  // Choose buffer: stack for small, heap (reusable) for large
+  uint8_t stack_buf[64];
+  void *buf;
+
+  if (arg_size <= sizeof(stack_buf)) {
+    buf = stack_buf;
+    __builtin_memset(buf, 0, arg_size);
+  } else {
+    // Reusable heap buffer — allocate once, grow on demand, never freed
+    // (process teardown reclaims it).
+    static void *heap_buf = NULL;
+    static size_t heap_cap = 0;
+
+    if (heap_cap < arg_size) {
+      void *nb = realloc(heap_buf, arg_size);
+      if (!nb) {
+        errno = ENOMEM;
+        return -1;
+      }
+      heap_buf = nb;
+      heap_cap = arg_size;
+    }
+    buf = heap_buf;
+    // Only zero the portion we'll use (reused buffer may have stale data).
+    __builtin_memset(buf, 0, arg_size);
+  }
 
   // Copy-in: user arg → buf (only if direction includes WRITE)
   if ((_IOC_DIR(cmd) & _IOC_WRITE) && arg != 0 && arg_size > 0)

@@ -63,6 +63,7 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
   ip->i_priv = NULL;
   ip->shm = NULL;
   ip->mount = NULL;
+  ip->wq = NULL;
   ip->start_cluster = start_cluster;
   ip->dir_start_cluster = dir_cluster;
   ip->dir_entry_index = dir_entry_idx;
@@ -124,6 +125,7 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
   ip->i_priv = NULL;
   ip->shm = NULL;
   ip->mount = NULL;
+  ip->wq = NULL;
   ip->start_cluster = start_cluster;
   ip->dir_start_cluster = dir_cluster;
   ip->dir_entry_index = dir_entry_idx;

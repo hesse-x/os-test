@@ -10,6 +10,7 @@
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/wait_queue.h"
 #include <stdint.h>
 
 #define INODE_REGULAR 1
@@ -27,6 +28,7 @@ struct inode {
   void *i_priv;              /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
   struct shm *shm;           /* INODE_DEV -> shared memory (NULL = no SHM) */
   struct mount_entry *mount; /* owning mount (set by sys_open lookup) */
+  wait_queue_head *wq; /* ringbuf-backed: shared wq for epoll/poll waiters */
 
   /* FAT32 metadata (REGULAR/DIR only) */
   uint32_t start_cluster;

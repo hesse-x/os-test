@@ -15,6 +15,7 @@
 #define O_CREAT 16
 #define O_TRUNC 32
 #define O_EXCL 128 // with O_CREAT: fail if file exists (EEXIST)
+#define O_CLOEXEC 02000000
 
 #define O_SETFL_MASK (O_NONBLOCK | O_APPEND)
 

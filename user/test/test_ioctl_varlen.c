@@ -31,9 +31,9 @@ void tearDown(void) {}
 #define VARLEN_VARLEN_49 _IOWR('V', 2, char[49])
 #define VARLEN_VARLEN_96 _IOWR('V', 3, char[96])
 #define VARLEN_VARLEN_256 _IOR('V', 4, char[256])
-// libc ioctl() caps the arg at 240B (stack buffer). Anything larger is
-// rejected client-side with EINVAL before the syscall. _IOC_SIZE is 14 bits
-// (max 16383), so 256 encodes faithfully and still exceeds the 240 cap.
+// 256B exceeds the inline 64B stack-buffer, so the libc ioctl uses the
+// heap fallback (realloc) — not an error; the call reaches the kernel
+// as RECV_IOCTL. _IOC_SIZE is 14 bits (max 16383), so 256 encodes correctly.
 #define VARLEN_TOO_BIG _IOWR('V', 5, char[256])
 
 static void driver_handle_req(struct recv_msg *msg, uint8_t *data_buf) {
@@ -151,10 +151,11 @@ void test_varlen_256_ior(void) {
   TEST_ASSERT_TRUE(fd >= 0);
   uint8_t arg[256];
   memset(arg, 0, sizeof(arg));
-  // 256B exceeds the libc ioctl() 240B stack-buffer cap, so the call is
-  // rejected client-side with EINVAL before reaching the kernel.
-  TEST_ASSERT_EQUAL_INT(-1, ioctl(fd, VARLEN_VARLEN_256, arg));
-  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  // 256B exceeds the 64B inline buffer but uses the heap fallback;
+  // the call reaches the kernel and should succeed.
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, VARLEN_VARLEN_256, arg));
+  for (int i = 0; i < 256; i++)
+    TEST_ASSERT_EQUAL_INT(0xBB, arg[i]);
   close(fd);
   waitpid(driver_pid, NULL, 0);
 }
@@ -169,10 +170,12 @@ void test_too_big(void) {
   int fd = open("/dev/" TEST_DEV, O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
   uint8_t arg[256];
-  // 256B exceeds the libc ioctl() 240B stack-buffer cap → EINVAL client-side.
+  // 256B exceeds the 64B inline buffer but uses the heap fallback;
+  // the call reaches the kernel and should succeed.
   int r = ioctl(fd, VARLEN_TOO_BIG, arg);
-  TEST_ASSERT_EQUAL_INT(-1, r);
-  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  TEST_ASSERT_EQUAL_INT(0, r);
+  for (int i = 0; i < 256; i++)
+    TEST_ASSERT_EQUAL_INT(0xBB, arg[i]);
   close(fd);
   waitpid(driver_pid, NULL, 0);
 }

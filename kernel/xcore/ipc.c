@@ -207,12 +207,12 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     spin_lock(&proc->recv_lock);
     if (proc->recv_head != proc->recv_tail) {
       // Message available: copy to user buffer
+      recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
       if (copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE)) {
         spin_unlock(&proc->recv_lock);
         return (int64_t)-EFAULT;
       }
       // If this is an REQ request, record the caller PID for sys_resp
-      recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
       if (msg->type == RECV_REQ) {
         proc->req_caller_pid = (pid_t)msg->src;
       }

@@ -69,7 +69,8 @@ static void broadcast_event(const input_event *ev) {
   volatile input_event *slot =
       (volatile input_event *)((volatile uint8_t *)hdr + g_ring_off +
                                head * sizeof(input_event));
-  slot->timestamp_ns = ev->timestamp_ns;
+  slot->tv_sec = ev->tv_sec;
+  slot->tv_usec = ev->tv_usec;
   slot->type = ev->type;
   slot->code = ev->code;
   slot->value = ev->value;

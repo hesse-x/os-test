@@ -7,6 +7,10 @@
 #ifndef COMMON_INPUT_H
 #define COMMON_INPUT_H
 
+// If our libinput compat linux/input.h has already been included, skip
+// struct input_event/input_id/input_absinfo redefinition.
+#if !defined(COMPAT_LINUX_INPUT_H)
+
 #include <stdint.h>
 #include <xos/types.h> // pid_t
 
@@ -73,12 +77,18 @@ struct ringbuf_lifecycle_msg {
   char name[32];   /* 设备名 */
 };
 
+/* Standard Linux struct input_event (24 bytes).
+ * Layout must match linux/input.h: struct timeval time + __u16 type + __u16
+ * code + __s32 value. On x86_64, struct timeval is {__s64 tv_sec; __s64
+ * tv_usec} = 16 bytes.
+ */
 typedef struct input_event {
-  uint64_t timestamp_ns; // monotonic timestamp
-  uint16_t type;         // EV_KEY / EV_REL / EV_ABS / EV_SYN
-  uint16_t code;         // KEY_A / BTN_LEFT / REL_X / ABS_X ...
-  int32_t value;         // key: 1=press 0=release; rel: delta; abs: coordinate
-} input_event;           // 16 bytes
+  int64_t tv_sec;
+  int64_t tv_usec;
+  uint16_t type; // EV_KEY / EV_REL / EV_ABS / EV_SYN
+  uint16_t code; // KEY_A / BTN_LEFT / REL_X / ABS_X ...
+  int32_t value; // key: 1=press 0=release; rel: delta; abs: coordinate
+} input_event;   // 24 bytes
 
 // Device identity (EVIOCGID)
 struct input_id {
@@ -97,6 +107,8 @@ struct input_absinfo {
   int32_t flat;
   int32_t resolution;
 };
+
+#endif // !COMPAT_LINUX_INPUT_H
 
 // Bind ioctl arg (consumer → driver)
 // Direction A: driver owns SHM (bound to /dev/<name> inode). Consumer just

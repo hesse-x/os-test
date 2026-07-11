@@ -12,6 +12,8 @@
 
 // ioctl command encoding (Linux-compatible)
 // Shared between kernel and user space.
+#ifndef _IOC_MACROS
+#define _IOC_MACROS
 #define _IOC(dir, type, nr, size)                                              \
   ((uint32_t)(((dir) << 30) | ((type) << 8) | ((nr) << 0) | ((size) << 16)))
 #define _IO(type, nr) _IOC(0, type, nr, 0)
@@ -25,6 +27,7 @@
 #define _IOC_NONE 0
 #define _IOC_WRITE 1
 #define _IOC_READ 2
+#endif /* _IOC_MACROS */
 
 // ===== ioctl command definitions (_IOC-encoded) =====
 
@@ -53,5 +56,8 @@
 #define EVIOCGBIT(ev, len) _IOC(_IOC_READ, 'E', 0x20 + (ev), len)
 #define EVIOCGABS(abs) _IOR('E', 0x40 + (abs), struct input_absinfo)
 #define EVIOCGRAB _IOW('E', 0x90, int)
+
+// ringbuf ioctls (type='R')
+#define RINGBUF_WAKE _IO('R', 0x01) // wake ringbuf poll/epoll waiters
 
 #endif

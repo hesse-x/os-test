@@ -80,6 +80,10 @@ LIBC_EXPORT int snprintf(char *buf, size_t n, const char *fmt, ...);
 LIBC_EXPORT int vsprintf(char *buf, const char *fmt, va_list ap);
 LIBC_EXPORT int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 
+/* scanf family */
+LIBC_EXPORT int sscanf(const char *buf, const char *fmt, ...);
+LIBC_EXPORT int vsscanf(const char *buf, const char *fmt, va_list ap);
+
 /* perror */
 LIBC_EXPORT void perror(const char *s);
 
@@ -104,8 +108,14 @@ LIBC_EXPORT void rewind(FILE *f);
 LIBC_EXPORT int setbuf(FILE *f, char *buf);
 LIBC_EXPORT int setvbuf(FILE *f, char *buf, int mode, size_t size);
 
+/* printf allocation (GNU extensions) */
+LIBC_EXPORT int asprintf(char **strp, const char *fmt, ...);
+LIBC_EXPORT int vasprintf(char **strp, const char *fmt, va_list ap);
+
 /* Dynamic memory stream (POSIX.1-2008) */
 LIBC_EXPORT FILE *open_memstream(char **bufptr, size_t *sizeptr);
+
+LIBC_EXPORT char *fgets(char *s, int size, FILE *stream);
 
 /* File locking (pthread mutex per FILE) */
 LIBC_EXPORT void flockfile(FILE *f);

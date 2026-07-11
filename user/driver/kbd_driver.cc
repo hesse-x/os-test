@@ -22,7 +22,9 @@ static int on_key_event(input_event *ev) {
   struct key_event ke;
   if (get_keycode(&ke) != 0)
     return 0; // HID ring empty
-  ev->timestamp_ns = sys_gettime();
+  uint64_t ns = sys_gettime();
+  ev->tv_sec = ns / 1000000000ULL;
+  ev->tv_usec = (ns % 1000000000ULL) / 1000;
   ev->type = EV_KEY;
   ev->code = ke.key; // KEY_A, KEY_B, ... (already evdev-aligned in input.h)
   ev->value = ke.pressed; // 1=press, 0=release

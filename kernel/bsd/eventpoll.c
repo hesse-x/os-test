@@ -174,8 +174,12 @@ int ep_insert(eventpoll *ep, struct file *f, struct epoll_event *ev) {
   epi->wait.data = epi;
   list_init(&epi->rdllist_node);
   wait_queue_head *wq = ep_target_wq(f);
-  if (wq)
+  if (wq) {
     add_wait_queue(wq, &epi->wait);
+  } else {
+    printk(LOG_WARN, "ep_insert: NO wq for fd_type=%d file=%p\n", f->type,
+           (void *)f);
+  }
   spin_lock(&ep->lock);
   rb_insert(&ep->rbt, &epi->rb_node, ep_cmp);
   ep->nitems++;

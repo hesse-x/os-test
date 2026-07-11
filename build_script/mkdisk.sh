@@ -11,7 +11,7 @@
 #     /driver/kbd.dev
 #     /usr/bin/{terminal,shell}
 #     /usr/lib/libc.a
-#     /lib/{libc.so,ld.so}
+#     /lib/{libc.so,libinput.so,ld.so}
 #     /local/{hello,hello_dyn}.elf
 #     /test/drm_test.elf          ← only copied in test builds
 #     /README
@@ -27,7 +27,7 @@ TESTDATA_DIR="${PROJECT_DIR}/testdata"
 
 # Check dependency files
 for f in init.elf myos.elf BOOTX64.EFI kbd_driver.elf evdev.elf terminal.elf shell.elf \
-         libc.a libc.so hello.elf ldso.elf hello_dyn.elf udevd.elf; do
+         libc.a libc.so libinput.so hello.elf ldso.elf hello_dyn.elf udevd.elf; do
     if [ ! -f "${BUILD_DIR}/${f}" ]; then
         echo "mkdisk.sh: ${BUILD_DIR}/${f} not found, run build.sh first"
         exit 1
@@ -83,6 +83,7 @@ mmd -i "${BUILD_DIR}/part2.img" ::driver
 mmd -i "${BUILD_DIR}/part2.img" ::usr ::usr/bin ::usr/lib
 mmd -i "${BUILD_DIR}/part2.img" ::local
 mmd -i "${BUILD_DIR}/part2.img" ::lib
+mmd -i "${BUILD_DIR}/part2.img" ::usr/share ::usr/share/libinput
 
 # Copy files into directory structure
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/kbd_driver.elf"   ::driver/kbd.dev
@@ -94,6 +95,7 @@ mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.a"           ::usr/lib/libc
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello.elf"        ::local/hello.elf
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/ldso.elf"         ::lib/ld.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.so"          ::lib/libc.so
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libinput.so"     ::lib/libinput.so
 # ld.so multi-dependency test stub .so (plan_ld phase D): placed in /test/lib/ separate from production /lib/,
 # ld.so load_one() tries /lib/ first and falls back to /test/lib/ on failure (mirrors Linux DT_RPATH idea)
 mmd -i "${BUILD_DIR}/part2.img" ::test ::test/lib
@@ -115,6 +117,10 @@ if [ "$TEST" = "1" ]; then
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
     done
 fi
+
+# Copy libinput quirks
+mcopy -i "${BUILD_DIR}/part2.img" "${PROJECT_DIR}/third_party/libinput/quirks/10-generic-keyboard.quirks"  ::usr/share/libinput/
+mcopy -i "${BUILD_DIR}/part2.img" "${PROJECT_DIR}/third_party/libinput/quirks/10-generic-mouse.quirks"     ::usr/share/libinput/
 
 # Preserve root directory README
 mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/README" ::README

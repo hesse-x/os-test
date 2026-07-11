@@ -49,6 +49,8 @@ add_user_lib(c_so
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED
     OUTPUT_NAME c
+    VERSION_MAP user/libc.map
+    # NOTE: no SO_LINK_LIBS — libc.so is the base library, does not record DT_NEEDED on itself
 )
 
 # Unity test framework (static library)
@@ -89,11 +91,89 @@ add_dependencies(hello_dyn_dyn_elf c_so)
 # driver/ — userspace driver processes (kbd_driver references lib/usb_kbd and
 # lib/input_driver across directories)
 add_user_elf(kbd_driver   SOURCES driver/kbd_driver.cc lib/usb_kbd.cc lib/input_driver.cc   LINK_LIBS c)
-add_user_elf(terminal     SOURCES driver/terminal.cc     LINK_LIBS c)
+
+# terminal — dynamic ELF (libc.so + libinput.so), PT_INTERP → ld.so
+add_user_dyn_elf(terminal
+    SOURCES driver/terminal_libinput.cc
+    LINK_LIBS input c
+    INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/third_party/libinput/src;${CMAKE_SOURCE_DIR}/third_party/libinput/include;${CMAKE_SOURCE_DIR}/user/lib/udev-shim;${CMAKE_SOURCE_DIR}/user/lib/evdev-shim"
+)
+add_dependencies(terminal_dyn_elf libinput_so)
 
 # evdev: real keyboard event source (xHCI HID → SHM ring → terminal) +
 # EVIOCG* ioctl query. Replaces the kbd driver for terminal input.
 add_user_elf(evdev  SOURCES driver/evdev.cc lib/usb_kbd.cc  LINK_LIBS c)
+
+# ===== libinput (static library, keyboard subset) =====
+# Provides libinput event processing pipeline. Wraps libevdev/udev shims.
+set(LIBINPUT_SOURCES
+    # libinput core (keyboard-only subset)
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/libinput.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/evdev.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/evdev-fallback.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/evdev-middle-button.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/evdev-plugin.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/libinput-plugin.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/libinput-plugin-button-debounce.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/libinput-plugin-mouse-wheel.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/path-seat.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/timer.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/util-libinput.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/quirks.c
+    # filters
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/filter.c
+    # utilities
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/util-files.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/util-list.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/util-ratelimit.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/util-strings.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/util-prop-parsers.c
+    # os-test compat layer (scandir etc.)
+    lib/libinput-compat/compat.c
+    lib/libinput-compat/stubs.c
+    lib/fnmatch.c
+    # evdev/udev shims (needed by libinput internal)
+    lib/evdev-shim/evdev.c
+    lib/udev-shim/udev.c
+)
+
+add_user_lib(input
+    SOURCES ${LIBINPUT_SOURCES}
+    C
+    FLAGS "-O2 -DLIBINPUT_QUIRKS_DIR=\\\"/usr/share/libinput\\\" -DHAVE_QUIRKS -Wno-unused-parameter -Wno-duplicate-decl-specifier -Wno-implicit-function-declaration -Wno-return-type -Wno-int-conversion -Wno-format -Wno-implicit-fallthrough -Wno-sign-compare -Wno-error=cpp -Wno-maybe-uninitialized"
+    OUTPUT_NAME input
+)
+
+set(LIBINPUT_INCLUDE_DIRS
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/include/uapi
+    ${CMAKE_SOURCE_DIR}/user/include
+    ${CMAKE_SOURCE_DIR}/include/uapi/compat
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/include
+    ${CMAKE_SOURCE_DIR}/third_party/libinput
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src
+    ${CMAKE_SOURCE_DIR}/user/lib/libinput-config
+    ${CMAKE_SOURCE_DIR}/user/lib/evdev-shim
+    ${CMAKE_SOURCE_DIR}/user/lib/udev-shim
+    ${CMAKE_SOURCE_DIR}/user/lib/libinput-compat
+)
+
+target_include_directories(input PRIVATE ${LIBINPUT_INCLUDE_DIRS})
+
+# libinput.so (shared library, dynamically linked into terminal.elf)
+# Uses -fvisibility=hidden — libinput's public API is marked with LIBINPUT_EXPORT
+# (__attribute__((visibility("default")))) so only public symbols are exported.
+# Links libc.so via SO_LINK_LIBS c to record DT_NEEDED libc.so.
+add_user_lib(libinput_so
+    SOURCES ${LIBINPUT_SOURCES}
+    C
+    FLAGS "-O2 -DHAVE_QUIRKS -Wno-unused-parameter -Wno-duplicate-decl-specifier -Wno-implicit-function-declaration -Wno-return-type -Wno-int-conversion -Wno-format -Wno-implicit-fallthrough -Wno-sign-compare -Wno-error=cpp -Wno-maybe-uninitialized -Wno-macro-redefined"
+    SHARED
+    OUTPUT_NAME input
+    SO_LINK_LIBS c
+    INCLUDE_DIRS ${LIBINPUT_INCLUDE_DIRS}
+)
+add_dependencies(libinput_so c_so)
 
 if(TEST)
     add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c DEFS TEST)

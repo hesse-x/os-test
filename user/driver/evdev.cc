@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/device.h>
+#include <sys/ioctl.h>
 #include <sys/ipc.h>
 #include <sys/mman.h>
 #include <syscall.h>
@@ -81,6 +82,10 @@ static void consumer_remove_pid(pid_t pid) {
 static volatile input_shm_header *g_ring_hdr;
 static uint32_t g_ring_cap;
 static uint32_t g_ring_off;
+static volatile void *shm_base;
+
+/* 唤醒 fd: /dev/input/event0 的 ringbuf fd, 用于 ioctl RINGBUF_WAKE */
+static int wake_fd = -1;
 
 // Write one event to the shared ring + unconditional notify to all consumers.
 static void broadcast_event(const input_event *ev) {
@@ -97,17 +102,29 @@ static void broadcast_event(const input_event *ev) {
   volatile input_event *slot =
       (volatile input_event *)((volatile uint8_t *)hdr + g_ring_off +
                                head * sizeof(input_event));
-  slot->timestamp_ns = ev->timestamp_ns;
+  slot->tv_sec = ev->tv_sec;
+  slot->tv_usec = ev->tv_usec;
   slot->type = ev->type;
   slot->code = ev->code;
   slot->value = ev->value;
   __atomic_store_n(&hdr->head, next, __ATOMIC_RELEASE);
+
+  // Update ringbuf_header head for kernel ringbuf_fops.read
+  volatile ringbuf_header *rb = (volatile ringbuf_header *)shm_base;
+  rb->head = next;
 
   // Unconditional notify. If pid gone/exited, notify is no-op.
   for (int i = 0; i < MAX_CONSUMERS; i++) {
     pid_t p = consumers[i];
     if (p > 0)
       notify(p);
+  }
+
+  /* 唤醒 ringbuf poll/epoll 等待者 (terminal/libinput) */
+  if (wake_fd >= 0) {
+    int r = ioctl(wake_fd, RINGBUF_WAKE, 0);
+    if (r < 0)
+      fprintf(stderr, "evdev: RINGBUF_WAKE failed errno=%d\n", errno);
   }
 }
 
@@ -145,7 +162,9 @@ static int on_key_event(input_event *ev) {
   struct key_event ke;
   if (get_keycode(&ke) != 0)
     return 0; // HID ring empty
-  ev->timestamp_ns = sys_gettime();
+  uint64_t ns = sys_gettime();
+  ev->tv_sec = ns / 1000000000ULL;
+  ev->tv_usec = (ns % 1000000000ULL) / 1000;
   ev->type = EV_KEY;
   ev->code = ke.key;      // KEY_A, KEY_B, ... (evdev-aligned in input_key.h)
   ev->value = ke.pressed; // 1=press, 0=release
@@ -298,27 +317,52 @@ int main(int argc, char **argv, char **envp) {
 
   // 3. Create output SHM ring (driver-owned) + bind to /dev/input/event0 inode.
   //    Consumers access via open("/dev/input/event0") + mmap(MAP_SHARED, fd).
+  //    Layout: ringbuf_header at offset 0 (kernel ringbuf_fops.read path),
+  //            input_shm_header at offset 64 (backward compat for test
+  //            programs).
+  //    The ring data area starts at offset 128 (after both headers);
+  //    ringbuf_header.data_offset and input_shm_header.ring_offset both
+  //    describe this same location from their respective bases.
   int shm_fd = memfd_create("input_ring", 0);
   ftruncate(shm_fd, 4096);
   void *shm = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
 
   for (int i = 0; i < 4096; i++)
     ((volatile uint8_t *)shm)[i] = 0;
-  volatile input_shm_header *hdr = (volatile input_shm_header *)shm;
+
+  // ringbuf_header for kernel ringbuf_fops.read
+  volatile ringbuf_header *rb = (volatile ringbuf_header *)shm;
+  rb->magic = RINGBUF_MAGIC;
+  rb->version = 1;
+  rb->capacity = INPUT_RING_CAPACITY_DEFAULT;
+  rb->head = 0;
+  rb->data_offset = 128;
+  rb->elem_size = sizeof(input_event);
+
+  // input_shm_header for backward compat (input_client_poll)
+  volatile input_shm_header *hdr =
+      (volatile input_shm_header *)((volatile uint8_t *)shm + 64);
   hdr->magic = INPUT_SHM_MAGIC;
   hdr->version = INPUT_SHM_VERSION;
   hdr->device_type = INPUT_DEV_KBD;
   hdr->event_size = sizeof(input_event);
-  hdr->ring_offset = sizeof(input_shm_header);
+  hdr->ring_offset = 64;
   hdr->ring_capacity = INPUT_RING_CAPACITY_DEFAULT;
   hdr->head = 0;
   hdr->tail = 0;
 
   g_ring_hdr = hdr;
-  g_ring_off = hdr->ring_offset;
-  g_ring_cap = hdr->ring_capacity;
+  g_ring_off = 64;
+  g_ring_cap = INPUT_RING_CAPACITY_DEFAULT;
+  shm_base = shm;
 
   device_register_shm("input/event0", shm_fd, 0);
+
+  /* Open /dev/input/event0 for RINGBUF_WAKE ioctl (wake ringbuf
+   * poll/epoll consumers like terminal/libinput). */
+  wake_fd = open("/dev/input/event0", O_RDWR);
+  if (wake_fd < 0)
+    fprintf(stderr, "evdev: wake open failed errno=%d\n", errno);
 
   {
     struct dev_props props;
@@ -348,8 +392,24 @@ int main(int argc, char **argv, char **envp) {
       if (errno == EINTR) {
         // ISR woke us — drain HID reports
         input_event ev;
-        while (on_key_event(&ev))
+        int nevents = 0;
+        while (on_key_event(&ev)) {
           broadcast_event(&ev);
+          nevents++;
+        }
+        // Send EV_SYN/SYN_REPORT after batch — libinput/evdev requires it
+        // to commit the event sequence.
+        if (nevents > 0) {
+          input_event syn_ev;
+          memset(&syn_ev, 0, sizeof(syn_ev));
+          uint64_t syn_ns = sys_gettime();
+          syn_ev.tv_sec = syn_ns / 1000000000ULL;
+          syn_ev.tv_usec = (syn_ns % 1000000000ULL) / 1000;
+          syn_ev.type = EV_SYN;
+          syn_ev.code = 0; // SYN_REPORT
+          syn_ev.value = 0;
+          broadcast_event(&syn_ev);
+        }
       }
       continue;
     }

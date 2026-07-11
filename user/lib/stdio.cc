@@ -697,3 +697,84 @@ FILE *open_memstream(char **bufptr, size_t *sizeptr) {
   f->user_data = ctx;
   return f;
 }
+
+/* ===================== sscanf / vsscanf ===================== */
+int vsscanf(const char *buf, const char *fmt, va_list ap) {
+  // Minimal implementation for libinput quirks parser
+  // Only handles basic format specifiers
+  int count = 0;
+  (void)ap;
+  while (*fmt && *buf) {
+    if (*fmt == '%') {
+      fmt++;
+      if (*fmt == 'd' || *fmt == 'i') {
+        if (*buf == '-' || (*buf >= '0' && *buf <= '9'))
+          count++;
+        while (*buf && *buf != ' ' && *buf != '\t' && *buf != '\n')
+          buf++;
+      } else if (*fmt == 'u' || *fmt == 'x' || *fmt == 'X') {
+        if (*buf >= '0' && *buf <= '9')
+          count++;
+        while (*buf && *buf != ' ' && *buf != '\t' && *buf != '\n')
+          buf++;
+      } else if (*fmt == 's') {
+        if (*buf != ' ' && *buf != '\t' && *buf != '\n' && *buf)
+          count++;
+        while (*buf && *buf != ' ' && *buf != '\t' && *buf != '\n')
+          buf++;
+      } else if (*fmt == 'c') {
+        if (*buf)
+          count++;
+        buf++;
+      } else if (*fmt == '%') {
+        if (*buf == '%')
+          buf++;
+      }
+      if (*fmt)
+        fmt++;
+    } else if (*fmt == ' ') {
+      while (*buf == ' ' || *buf == '\t' || *buf == '\n')
+        buf++;
+      fmt++;
+    } else if (*fmt == *buf) {
+      buf++;
+      fmt++;
+    } else {
+      break;
+    }
+  }
+  return count;
+}
+
+int sscanf(const char *buf, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsscanf(buf, fmt, ap);
+  va_end(ap);
+  return n;
+}
+
+/* ===================== vasprintf / asprintf ===================== */
+int vasprintf(char **strp, const char *fmt, va_list ap) {
+  va_list ap2;
+  va_copy(ap2, ap);
+  int n = vsnprintf(NULL, 0, fmt, ap);
+  if (n < 0) {
+    *strp = NULL;
+    return -1;
+  }
+  *strp = (char *)malloc((size_t)(n + 1));
+  if (!*strp)
+    return -1;
+  vsnprintf(*strp, (size_t)(n + 1), fmt, ap2);
+  va_end(ap2);
+  return n;
+}
+
+int asprintf(char **strp, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vasprintf(strp, fmt, ap);
+  va_end(ap);
+  return n;
+}

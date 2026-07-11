@@ -74,6 +74,7 @@
 #define EACCES 100
 #define ENFILE 101
 
+#define ECONNRESET 104
 #define EWOULDBLOCK EAGAIN
 
 #endif // COMMON_ERRNO_H

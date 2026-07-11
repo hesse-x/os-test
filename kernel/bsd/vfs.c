@@ -104,7 +104,7 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
    * The bare "/dev" directory (relpath empty) falls through to the
    * generic directory path below. */
   if (m->fs == &devtmpfs_fstype && relpath[0] != '\0') {
-    int64_t dev_ret = devtmpfs_open(current_task, relpath, flags);
+    int64_t dev_ret = devtmpfs_open(current_task, relpath, flags, m);
     return dev_ret;
   }
 

@@ -96,12 +96,10 @@ __poll file_poll(struct file *f, __poll events) {
       revents |= POLLIN;
     }
   } else if (f->type == FD_TTY) {
-    // pty_poll 需要 is_master，由调用方上下文；file_poll 仅收 file*，
-    // 无 fd 上下文。此处默认 slave 侧（is_master=0）。见 [Items To
-    // Confirm] #3。test_poll 不覆盖 TTY，故不影响回归。
     struct pty *pty = f->pty;
     if (pty) {
-      revents |= pty_poll(pty, 0, events);
+      int is_master = pty_is_master_inode(f->inode);
+      revents |= pty_poll(pty, is_master, events);
     }
   } else if (f->type == FD_DEV) {
     // FD_DEV: call dev_ops.poll callback for kernel devices

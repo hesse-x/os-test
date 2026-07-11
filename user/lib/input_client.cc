@@ -28,7 +28,8 @@ int input_client_poll(volatile void *shm, input_event *events, int max_events) {
     volatile input_event *slot =
         (volatile input_event *)((volatile uint8_t *)shm + off +
                                  tail * sizeof(input_event));
-    events[n].timestamp_ns = slot->timestamp_ns;
+    events[n].tv_sec = slot->tv_sec;
+    events[n].tv_usec = slot->tv_usec;
     events[n].type = slot->type;
     events[n].code = slot->code;
     events[n].value = slot->value;
