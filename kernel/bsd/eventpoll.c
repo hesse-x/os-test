@@ -127,27 +127,38 @@ eventpoll *eventpoll_create(void) {
 }
 
 void eventpoll_release(eventpoll *ep) {
+  epitem *epi_array[EP_MAX_ITEMS];
+  int count = 0;
+
+  // Phase 1: under ep->lock, remove all epitems from their target wait
+  // queues, ready_list, and rbt.  Collect into epi_array for later cleanup.
   spin_lock(&ep->lock);
-  // Detach all epitems
   rb_node *n = rb_first(&ep->rbt);
-  while (n) {
+  while (n && count < EP_MAX_ITEMS) {
     epitem *epi = rb_entry(n, epitem, rb_node);
-    rb_node *next = rb_first(&ep->rbt); // re-fetch leftmost after erase
-    if (next == n)
-      next = NULL; // tree became empty
     wait_queue_head *wq = ep_target_wq(epi->file);
     if (wq)
       remove_wait_queue(wq, &epi->wait);
     if (epi->is_ready)
       list_remove(&epi->rdllist_node);
     rb_erase(&ep->rbt, n);
-    file_put(epi->file);
-    kfree(epi);
+    epi_array[count++] = epi;
     n = rb_first(&ep->rbt);
-    (void)next;
   }
   ep->nitems = 0;
   spin_unlock(&ep->lock);
+
+  // Phase 2: wait for any in-flight ep_poll_callback (collected before our
+  // remove_wait_queue) to finish.  __wake_up wraps the callback in
+  // rcu_read_lock, so synchronize_rcu ensures no callback is still using
+  // these epitems.
+  synchronize_rcu();
+
+  // Phase 3: free all epitems.  No callback is in-flight at this point.
+  for (int i = 0; i < count; i++) {
+    file_put(epi_array[i]->file);
+    kfree(epi_array[i]);
+  }
   kfree(ep);
 }
 
@@ -205,6 +216,10 @@ int ep_remove(eventpoll *ep, struct file *f) {
   wait_queue_head *wq = ep_target_wq(f);
   if (wq)
     remove_wait_queue(wq, &epi->wait);
+  // Wait for any in-flight ep_poll_callback (collected by __wake_up before our
+  // remove_wait_queue) to finish.  __wake_up wraps the callback call in
+  // rcu_read_lock, so synchronize_rcu() ensures the callback has completed.
+  synchronize_rcu();
   spin_lock(&ep->lock);
   if (epi->is_ready)
     list_remove(&epi->rdllist_node);

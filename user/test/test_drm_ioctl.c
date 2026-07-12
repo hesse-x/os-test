@@ -45,12 +45,18 @@ void test_drm_auth_magic(void) {
     return;
   }
 
-  /* Need to be master first */
-  ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
+  /* Need to be master first — skip if display holds master */
+  int rc = ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
+  if (rc < 0 && errno == EBUSY) {
+    close(fd);
+    TEST_IGNORE_MESSAGE("master held by display");
+    return;
+  }
+  TEST_ASSERT_EQUAL_INT(0, rc);
 
   struct drm_auth auth;
   memset(&auth, 0, sizeof(auth));
-  int rc = ioctl(fd, DRM_IOCTL_GET_MAGIC, &auth);
+  rc = ioctl(fd, DRM_IOCTL_GET_MAGIC, &auth);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
   /* Auth with the same magic */

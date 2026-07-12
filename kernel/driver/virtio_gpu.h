@@ -78,6 +78,13 @@ struct virtio_gpu_resource_create_2d {
   uint32_t height;
 };
 
+/* RESOURCE_UNREF command */
+struct virtio_gpu_resource_unref {
+  struct virtio_gpu_ctrl_hdr hdr;
+  uint32_t resource_id;
+  uint32_t padding;
+};
+
 /* ATTACH_BACKING command */
 struct virtio_gpu_mem_entry {
   uint64_t addr;   /* guest physical address */
@@ -168,6 +175,7 @@ int virtio_gpu_transfer_2d(uint32_t resource_id, uint32_t x, uint32_t y,
                            uint32_t w, uint32_t h, uint64_t offset);
 int virtio_gpu_flush(uint32_t resource_id, uint32_t x, uint32_t y, uint32_t w,
                      uint32_t h);
+int virtio_gpu_resource_unref(uint32_t resource_id);
 
 extern struct virtio_gpu_device g_virtio_gpu;
 

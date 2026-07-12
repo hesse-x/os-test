@@ -112,7 +112,7 @@ if [ "$TEST" = "1" ]; then
                test_fpu.elf test_sse_smoke.elf pthread.elf \
                ld_test_single.elf ld_test_chain.elf \
                ld_test_diamond.elf ld_test_cycle.elf \
-               drm_test.elf drm_ioctl.elf ioctl_varlen.elf \
+               drm_test.elf drm_ioctl.elf drm_phase_c.elf ioctl_varlen.elf \
                epoll.elf eventfd.elf timerfd.elf signalfd.elf mount.elf \
                test_sysfs.elf drm_test_link.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/

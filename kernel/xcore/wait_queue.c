@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 
+#include "kernel/xcore/rcu.h"
 #include "kernel/xcore/wait_queue.h"
 
 void init_wait_queue_head(wait_queue_head *wq) {
@@ -42,8 +43,10 @@ void __wake_up(wait_queue_head *wq, unsigned long flags) {
     it = it->next;
   }
   spin_unlock_irqrestore(&wq->lock, irqflags);
+  rcu_read_lock();
   for (int i = 0; i < n; i++) {
     if (targets[i]->func)
       targets[i]->func(targets[i], flags);
   }
+  rcu_read_unlock();
 }

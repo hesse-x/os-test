@@ -34,6 +34,13 @@
 
 struct virtio_gpu_device g_virtio_gpu;
 struct drm_device g_drm;
+struct drm_property g_drm_properties[DRM_MAX_PROPERTIES];
+int g_drm_next_prop_id = 1;
+struct drm_blob g_drm_blobs[DRM_MAX_BLOBS];
+int g_drm_next_blob_id = 1;
+spinlock g_drm_files_lock = SPINLOCK_INIT;
+struct drm_file g_drm_files[MAX_DRM_FDS];
+struct drm_cursor g_drm_cursor;
 
 /* Forward declarations */
 static void virtio_gpu_isr(trapframe *tf);
@@ -328,6 +335,27 @@ int virtio_gpu_flush(uint32_t resource_id, uint32_t x, uint32_t y, uint32_t w,
   return 0;
 }
 
+int virtio_gpu_resource_unref(uint32_t resource_id) {
+  struct virtio_gpu_resource_unref cmd;
+  __memset(&cmd, 0, sizeof(cmd));
+  cmd.hdr.type = VIRTIO_GPU_CMD_RESOURCE_UNREF;
+  cmd.resource_id = resource_id;
+
+  struct virtio_gpu_ctrl_hdr_response resp;
+  __memset(&resp, 0, sizeof(resp));
+
+  int rc = virtio_gpu_send_cmd(&g_virtio_gpu, &cmd, sizeof(cmd), &resp,
+                               sizeof(resp));
+  if (rc < 0)
+    return rc;
+  if (resp.hdr.type != VIRTIO_GPU_RESP_OK_NODATA) {
+    printk(LOG_ERROR, "virtio_gpu: RESOURCE_UNREF failed, resp type=0x%x\n",
+           resp.hdr.type);
+    return -1;
+  }
+  return 0;
+}
+
 /* ===== 2.E: real init + driver definition ===== */
 
 /* ===== DRM ioctl implementation ===== */
@@ -355,6 +383,228 @@ static int drm_alloc_dumb_handle(void) {
     }
   }
   return -1;
+}
+
+/* ===== Property infrastructure helpers (Phase C) ===== */
+/* File-level obj_props_tbl — shared between add_to_object and get,
+   avoiding the bug of duplicate per-function static arrays. */
+static struct drm_object_props obj_props_tbl[8];
+static bool obj_props_inited = false;
+
+static struct drm_property *drm_find_property(uint32_t prop_id) {
+  if (prop_id == 0 || prop_id > DRM_MAX_PROPERTIES)
+    return NULL;
+  struct drm_property *p = &g_drm_properties[prop_id - 1];
+  if (!p->allocated)
+    return NULL;
+  return p;
+}
+
+static struct drm_blob *drm_find_blob(uint32_t blob_id) {
+  if (blob_id == 0 || blob_id > DRM_MAX_BLOBS)
+    return NULL;
+  struct drm_blob *b = &g_drm_blobs[blob_id - 1];
+  if (!b->allocated)
+    return NULL;
+  return b;
+}
+
+static uint32_t drm_property_create_range(const char *name, uint32_t min,
+                                          uint32_t max, bool is_immutable) {
+  int id = g_drm_next_prop_id++;
+  if (id > DRM_MAX_PROPERTIES) {
+    g_drm_next_prop_id = DRM_MAX_PROPERTIES + 1;
+    return 0;
+  }
+  struct drm_property *p = &g_drm_properties[id - 1];
+  p->prop_id = (uint32_t)id;
+  p->allocated = true;
+  __memset(p->name, 0, sizeof(p->name));
+  size_t nlen = 0;
+  while (name[nlen] && nlen < DRM_PROP_NAME_LEN - 1) {
+    p->name[nlen] = name[nlen];
+    nlen++;
+  }
+  p->name[nlen] = '\0';
+  p->type = DRM_PROP_RANGE;
+  p->range_min = min;
+  p->range_max = max;
+  p->is_immutable = is_immutable;
+  p->enum_count = 0;
+  return (uint32_t)id;
+}
+
+static uint32_t drm_property_create_enum(const char *name,
+                                         const uint64_t *enum_values,
+                                         const char *const *enum_names,
+                                         int count, bool is_immutable) {
+  int id = g_drm_next_prop_id++;
+  if (id > DRM_MAX_PROPERTIES) {
+    g_drm_next_prop_id = DRM_MAX_PROPERTIES + 1;
+    return 0;
+  }
+  struct drm_property *p = &g_drm_properties[id - 1];
+  p->prop_id = (uint32_t)id;
+  p->allocated = true;
+  __memset(p->name, 0, sizeof(p->name));
+  size_t nlen = 0;
+  while (name[nlen] && nlen < DRM_PROP_NAME_LEN - 1) {
+    p->name[nlen] = name[nlen];
+    nlen++;
+  }
+  p->name[nlen] = '\0';
+  p->type = DRM_PROP_ENUM;
+  p->is_immutable = is_immutable;
+  int copy_count = count < 16 ? count : 16;
+  p->enum_count = copy_count;
+  for (int i = 0; i < copy_count; i++) {
+    p->enums[i].value = enum_values[i];
+    __memset(p->enums[i].name, 0, sizeof(p->enums[i].name));
+    const char *s = enum_names[i];
+    size_t slen = 0;
+    while (s[slen] && slen < DRM_PROP_NAME_LEN - 1) {
+      p->enums[i].name[slen] = s[slen];
+      slen++;
+    }
+    p->enums[i].name[slen] = '\0';
+  }
+  return (uint32_t)id;
+}
+
+static uint32_t drm_property_create_blob(const char *name, bool is_immutable) {
+  int id = g_drm_next_prop_id++;
+  if (id > DRM_MAX_PROPERTIES) {
+    g_drm_next_prop_id = DRM_MAX_PROPERTIES + 1;
+    return 0;
+  }
+  struct drm_property *p = &g_drm_properties[id - 1];
+  p->prop_id = (uint32_t)id;
+  p->allocated = true;
+  __memset(p->name, 0, sizeof(p->name));
+  size_t nlen = 0;
+  while (name[nlen] && nlen < DRM_PROP_NAME_LEN - 1) {
+    p->name[nlen] = name[nlen];
+    nlen++;
+  }
+  p->name[nlen] = '\0';
+  p->type = DRM_PROP_BLOB;
+  p->is_immutable = is_immutable;
+  return (uint32_t)id;
+}
+
+static uint32_t drm_property_create_object(const char *name, uint32_t type,
+                                           bool is_immutable) {
+  int id = g_drm_next_prop_id++;
+  if (id > DRM_MAX_PROPERTIES) {
+    g_drm_next_prop_id = DRM_MAX_PROPERTIES + 1;
+    return 0;
+  }
+  struct drm_property *p = &g_drm_properties[id - 1];
+  p->prop_id = (uint32_t)id;
+  p->allocated = true;
+  __memset(p->name, 0, sizeof(p->name));
+  size_t nlen = 0;
+  while (name[nlen] && nlen < DRM_PROP_NAME_LEN - 1) {
+    p->name[nlen] = name[nlen];
+    nlen++;
+  }
+  p->name[nlen] = '\0';
+  p->type = DRM_PROP_OBJECT;
+  p->is_immutable = is_immutable;
+  (void)type;
+  return (uint32_t)id;
+}
+
+static int drm_property_add_to_object(uint32_t obj_type, uint32_t obj_id,
+                                      uint32_t prop_id,
+                                      uint64_t initial_value) {
+  (void)obj_type;
+  /* For now, single object per type: map by obj_id directly.
+   * Connector=2, Plane=4, CRTC=1 */
+  if (!obj_props_inited) {
+    for (int i = 0; i < 8; i++)
+      obj_props_tbl[i].lock = SPINLOCK_INIT;
+    obj_props_inited = true;
+  }
+  int idx = (int)obj_id;
+  if (idx < 0 || idx >= 8)
+    return -EINVAL;
+  struct drm_object_props *props = &obj_props_tbl[idx];
+  spin_lock(&props->lock);
+  if (props->count >= DRM_MAX_PROPS_PER_OBJECT) {
+    spin_unlock(&props->lock);
+    return -ENOSPC;
+  }
+  props->prop_ids[props->count] = prop_id;
+  props->prop_values[props->count] = initial_value;
+  props->count++;
+  spin_unlock(&props->lock);
+  return 0;
+}
+
+static struct drm_object_props *obj_props_get(uint32_t obj_id,
+                                              uint32_t obj_type) {
+  (void)obj_type;
+  if (!obj_props_inited) {
+    for (int i = 0; i < 8; i++)
+      obj_props_tbl[i].lock = SPINLOCK_INIT;
+    obj_props_inited = true;
+  }
+  int idx = (int)obj_id;
+  if (idx < 0 || idx >= 8)
+    return NULL;
+  return &obj_props_tbl[idx];
+}
+
+static uint32_t drm_blob_create(const void *data, size_t length) {
+  int id = g_drm_next_blob_id++;
+  if (id > DRM_MAX_BLOBS) {
+    g_drm_next_blob_id = DRM_MAX_BLOBS + 1;
+    return 0;
+  }
+  struct drm_blob *b = &g_drm_blobs[id - 1];
+  b->blob_id = (uint32_t)id;
+  b->allocated = true;
+  b->refcount = 1;
+  b->length = length;
+  b->data = kmalloc(length);
+  if (!b->data) {
+    b->allocated = false;
+    return 0;
+  }
+  __memcpy(b->data, data, length);
+  return (uint32_t)id;
+}
+
+static __attribute__((unused)) void drm_blob_release(uint32_t blob_id) {
+  struct drm_blob *b = drm_find_blob(blob_id);
+  if (!b)
+    return;
+  b->refcount--;
+  if (b->refcount <= 0) {
+    if (b->data)
+      kfree(b->data);
+    __memset(b, 0, sizeof(*b));
+  }
+}
+
+static __attribute__((unused)) int
+drm_object_prop_set(uint32_t obj_id, const char *name, uint64_t value) {
+  struct drm_object_props *props = obj_props_get(obj_id, 0);
+  if (!props)
+    return -EINVAL;
+  spin_lock(&props->lock);
+  for (int i = 0; i < props->count; i++) {
+    uint32_t pid = props->prop_ids[i];
+    struct drm_property *p = drm_find_property(pid);
+    if (p && __strncmp(p->name, name, DRM_PROP_NAME_LEN) == 0) {
+      props->prop_values[i] = value;
+      spin_unlock(&props->lock);
+      return 0;
+    }
+  }
+  spin_unlock(&props->lock);
+  return -ENOENT;
 }
 
 static int drm_alloc_fb_id(void) {
@@ -416,6 +666,9 @@ static long drm_ioctl_get_cap(void *arg) {
   case DRM_CAP_PRIME:
     c->value = 0;
     return 0;
+  case 0x0D:      /* DRM_CAP_ATOMIC */
+    c->value = 0; /* force legacy path */
+    return 0;
   case DRM_CAP_TIMESTAMP_MONOTONIC:
     c->value = 0;
     return 0;
@@ -444,35 +697,358 @@ static long drm_ioctl_set_client_cap(void *arg) {
   }
 }
 
-/* DRM_IOCTL_SET_MASTER / DROP_MASTER */
-static long drm_ioctl_set_master(void) {
-  g_drm.is_master = true;
-  return 0;
+/* DROP_MASTER 清理 — 重置 master 相关状态 */
+static void drm_master_cleanup(void) {
+  /* 1. Clear current FB (unbind CRTC scanout) */
+  if (g_drm.current_fb_id != 0) {
+    g_drm.current_fb_id = 0;
+  }
+
+  /* 2. Clear pending page flip event */
+  spin_lock(&g_drm.event_lock);
+  g_drm.event_pending = false;
+  g_drm.event_sequence = 0;
+  g_drm.event_user_data = 0;
+  spin_unlock(&g_drm.event_lock);
+
+  /* 3. Disable cursor */
+  extern struct drm_cursor g_drm_cursor;
+  g_drm_cursor.enabled = false;
+  g_drm_cursor.dirty = false;
 }
-static long drm_ioctl_drop_master(void) {
-  g_drm.is_master = false;
+
+/* Forward declaration (defined later in per-fd section) */
+static struct drm_file *drm_file_current(void);
+
+/* DRM_IOCTL_SET_MASTER — per-fd 互斥 */
+static long drm_ioctl_set_master(void) {
+  struct drm_file *f = drm_file_current();
+  if (!f)
+    return -EBADF;
+
+  spin_lock(&g_drm_files_lock);
+  if (f->is_master) {
+    /* Already master: idempotent */
+    spin_unlock(&g_drm_files_lock);
+    return 0;
+  }
+
+  /* Check if any other fd holds master */
+  for (int i = 0; i < MAX_DRM_FDS; i++) {
+    if (g_drm_files[i].used && g_drm_files[i].is_master) {
+      spin_unlock(&g_drm_files_lock);
+      return -EBUSY;
+    }
+  }
+
+  f->is_master = true;
+  g_drm.is_master = true;
+  spin_unlock(&g_drm_files_lock);
   return 0;
 }
 
-/* DRM_IOCTL_GET_MAGIC */
+static long drm_ioctl_drop_master(void) {
+  struct drm_file *f = drm_file_current();
+  if (!f)
+    return -EBADF;
+
+  spin_lock(&g_drm_files_lock);
+  if (!f->is_master) {
+    spin_unlock(&g_drm_files_lock);
+    return -EPERM;
+  }
+  f->is_master = false;
+  g_drm.is_master = false;
+  spin_unlock(&g_drm_files_lock);
+
+  drm_master_cleanup();
+  return 0;
+}
+
+/* DRM_IOCTL_GET_MAGIC — 记录到 per-fd */
 static long drm_ioctl_get_magic(void *arg) {
   struct drm_auth *a = (struct drm_auth *)arg;
   if (!a)
     return -EFAULT;
+  struct drm_file *f = drm_file_current();
+  if (!f)
+    return -EBADF;
+
   a->magic = ++g_drm.magic_counter;
+  f->authenticated_magic = a->magic;
+  f->auth_valid = false; /* not yet authenticated */
   return 0;
 }
 
-/* DRM_IOCTL_AUTH_MAGIC */
+/* DRM_IOCTL_AUTH_MAGIC — 严格校验：仅 master fd 可认证，且 magic 必须是已签发的
+ */
 static long drm_ioctl_auth_magic(void *arg) {
   struct drm_auth *a = (struct drm_auth *)arg;
   if (!a)
     return -EFAULT;
-  /* Simplified: any caller with DRM master can auth any magic.
-     In single-process scenario, this is always the calling fd itself. */
-  if (!g_drm.is_master)
+  struct drm_file *current = drm_file_current();
+  if (!current)
+    return -EBADF;
+
+  spin_lock(&g_drm_files_lock);
+  /* Only the master fd can authenticate magics */
+  if (!current->is_master) {
+    spin_unlock(&g_drm_files_lock);
     return -EPERM;
+  }
+
+  /* Search all open fds for matching magic */
+  for (int i = 0; i < MAX_DRM_FDS; i++) {
+    if (g_drm_files[i].used && g_drm_files[i].authenticated_magic == a->magic) {
+      g_drm_files[i].auth_valid = true;
+      spin_unlock(&g_drm_files_lock);
+      return 0;
+    }
+  }
+  spin_unlock(&g_drm_files_lock);
+  return -EPERM;
+}
+
+/* DRM_IOCTL_MODE_GETPROPERTY */
+static long drm_ioctl_getproperty(void *arg) {
+  struct drm_mode_get_property *p = (struct drm_mode_get_property *)arg;
+  if (!p)
+    return -EFAULT;
+  struct drm_property *prop = drm_find_property(p->prop_id);
+  if (!prop)
+    return -ENOENT;
+
+  __memset(p->name, 0, sizeof(p->name));
+  __memcpy(p->name, prop->name, DRM_PROP_NAME_LEN);
+  p->flags = prop->is_immutable ? DRM_MODE_PROP_IMMUTABLE : 0;
+
+  switch (prop->type) {
+  case DRM_PROP_RANGE:
+    p->flags |= DRM_MODE_PROP_RANGE;
+    if (p->values_ptr) {
+      uint64_t vals[2] = {prop->range_min, prop->range_max};
+      copy_to_user((void *)(uintptr_t)p->values_ptr, vals, sizeof(vals));
+      p->count_values = 2;
+    }
+    break;
+  case DRM_PROP_ENUM:
+    p->flags |= DRM_MODE_PROP_ENUM;
+    p->count_values = 0;
+    if (p->enum_blob_ptr) {
+      for (int i = 0; i < prop->enum_count; i++) {
+        struct drm_mode_property_enum e;
+        e.value = prop->enums[i].value;
+        __memset(e.name, 0, sizeof(e.name));
+        __memcpy(e.name, prop->enums[i].name, DRM_PROP_NAME_LEN);
+        copy_to_user((void *)(uintptr_t)(p->enum_blob_ptr + i * sizeof(e)), &e,
+                     sizeof(e));
+      }
+    }
+    p->count_enum_blobs = prop->enum_count;
+    break;
+  case DRM_PROP_BLOB:
+    p->flags |= DRM_MODE_PROP_BLOB;
+    break;
+  case DRM_PROP_OBJECT:
+    p->flags |= DRM_MODE_PROP_OBJECT;
+    p->count_values = 0;
+    break;
+  }
   return 0;
+}
+
+/* DRM_IOCTL_MODE_GETPROPBLOB */
+static long drm_ioctl_getpropblob(void *arg) {
+  struct drm_mode_get_blob *b = (struct drm_mode_get_blob *)arg;
+  if (!b)
+    return -EFAULT;
+  struct drm_blob *blob = drm_find_blob(b->blob_id);
+  if (!blob)
+    return -ENOENT;
+
+  b->length = (uint32_t)blob->length;
+  if (b->data && b->length > 0) {
+    if (copy_to_user((void *)(uintptr_t)b->data, blob->data, b->length))
+      return -EFAULT;
+  }
+  return 0;
+}
+
+/* DRM_IOCTL_MODE_OBJ_GETPROPERTIES */
+static long drm_ioctl_obj_getproperties(void *arg) {
+  struct drm_mode_obj_get_properties *o =
+      (struct drm_mode_obj_get_properties *)arg;
+  if (!o)
+    return -EFAULT;
+  struct drm_object_props *props = obj_props_get(o->obj_id, o->obj_type);
+  if (!props)
+    return -EINVAL;
+
+  spin_lock(&props->lock);
+  o->count_props = props->count;
+
+  if (o->props_ptr && o->prop_values_ptr) {
+    if (copy_to_user((void *)(uintptr_t)o->props_ptr, props->prop_ids,
+                     props->count * sizeof(uint32_t))) {
+      spin_unlock(&props->lock);
+      return -EFAULT;
+    }
+    if (copy_to_user((void *)(uintptr_t)o->prop_values_ptr, props->prop_values,
+                     props->count * sizeof(uint64_t))) {
+      spin_unlock(&props->lock);
+      return -EFAULT;
+    }
+  }
+  spin_unlock(&props->lock);
+  return 0;
+}
+
+/* ===== EDID generation (Phase C) ===== */
+
+struct edid_block {
+  uint8_t header[8];
+  uint16_t id_manufacturer;
+  uint16_t id_product_code;
+  uint32_t id_serial;
+  uint8_t week_of_manufacture;
+  uint8_t year_of_manufacture;
+  uint8_t edid_version;
+  uint8_t edid_revision;
+
+  uint8_t video_input_def;
+  uint8_t max_horizontal_cm;
+  uint8_t max_vertical_cm;
+  uint8_t gamma;
+  uint8_t features;
+
+  uint8_t chroma[10];
+  uint8_t established[3];
+  uint8_t standard_timings[16];
+
+  struct {
+    uint16_t pixel_clock;
+    uint8_t h_active_lo;
+    uint8_t h_blank_lo;
+    uint8_t h_active_hi_blank_hi;
+    uint8_t v_active_lo;
+    uint8_t v_blank_lo;
+    uint8_t v_active_hi_blank_hi;
+    uint8_t h_sync_offset_lo;
+    uint8_t h_sync_pulse_lo;
+    uint8_t vsync_offset_lo_pulse_lo;
+    uint8_t hvsync_hi;
+    uint8_t h_image_size_lo;
+    uint8_t v_image_size_lo;
+    uint8_t image_size_hi;
+    uint8_t h_border;
+    uint8_t v_border;
+    uint8_t flags;
+  } __attribute__((packed)) detailed_timings[4];
+
+  uint8_t extension_flag;
+  uint8_t checksum;
+} __attribute__((packed));
+
+static void drm_generate_edid(uint8_t *buf, size_t bufsz, uint32_t width,
+                              uint32_t height) {
+  if (bufsz < 128)
+    return;
+
+  struct edid_block *e = (struct edid_block *)buf;
+  __memset(e, 0, 128);
+
+  /* 1. Header */
+  e->header[0] = 0x00;
+  e->header[1] = 0xFF;
+  e->header[2] = 0xFF;
+  e->header[3] = 0xFF;
+  e->header[4] = 0xFF;
+  e->header[5] = 0xFF;
+  e->header[6] = 0xFF;
+  e->header[7] = 0x00;
+
+  /* 2. Manufacturer: "VBO" (close enough to VirtualBox PNP) */
+  e->id_manufacturer = 0x0914;
+  e->id_product_code = 0x0001;
+  e->edid_version = 1;
+  e->edid_revision = 3;
+  e->video_input_def = 0x80; /* digital */
+  e->features = 0x06;        /* RGB, preferred timing mode */
+
+  /* 3. Detailed Timing Descriptor (Descriptor #1) */
+  uint32_t total_h = width + 160;
+  uint32_t total_v = height + 50;
+  uint32_t clock_khz = total_h * total_v * 60 / 1000;
+  uint32_t pixel_clock_10khz = (clock_khz + 5000) / 10000;
+  if (pixel_clock_10khz > 65535)
+    pixel_clock_10khz = 65535;
+
+  e->detailed_timings[0].pixel_clock = (uint16_t)pixel_clock_10khz;
+
+  e->detailed_timings[0].h_active_lo = width & 0xFF;
+  e->detailed_timings[0].h_blank_lo = 160 & 0xFF;
+  e->detailed_timings[0].h_active_hi_blank_hi =
+      ((width >> 8) & 0xF) | (((160 >> 8) & 0xF) << 4);
+
+  e->detailed_timings[0].v_active_lo = height & 0xFF;
+  e->detailed_timings[0].v_blank_lo = 50 & 0xFF;
+  e->detailed_timings[0].v_active_hi_blank_hi =
+      ((height >> 8) & 0xF) | (((50 >> 8) & 0xF) << 4);
+
+  uint16_t h_front_porch = 16;
+  uint16_t h_sync_width = 32;
+  e->detailed_timings[0].h_sync_offset_lo = h_front_porch & 0xFF;
+  e->detailed_timings[0].h_sync_pulse_lo = h_sync_width & 0xFF;
+
+  uint8_t v_front_porch = 1;
+  uint8_t v_sync_width = 3;
+  e->detailed_timings[0].vsync_offset_lo_pulse_lo =
+      (v_front_porch & 0xF) | ((v_sync_width & 0xF) << 4);
+
+  e->detailed_timings[0].hvsync_hi =
+      ((h_front_porch >> 4) & 0x3) | (((h_sync_width >> 4) & 0x3) << 2) |
+      (((v_front_porch >> 4) & 0x3) << 4) | (((v_sync_width >> 4) & 0x3) << 6);
+
+  uint32_t h_mm = width * 254 / 960;
+  uint32_t v_mm = height * 254 / 960;
+  e->detailed_timings[0].h_image_size_lo = h_mm & 0xFF;
+  e->detailed_timings[0].v_image_size_lo = v_mm & 0xFF;
+  e->detailed_timings[0].image_size_hi =
+      ((h_mm >> 8) & 0xF) | ((v_mm >> 8) & 0xF << 4);
+
+  e->detailed_timings[0].flags = 0x00;
+
+  /* 4. Descriptor #2: Monitor name ("Virtual OS") */
+  uint8_t *desc2 = (uint8_t *)&e->detailed_timings[1];
+  desc2[0] = desc2[1] = desc2[2] = 0x00;
+  desc2[3] = 0xFC;
+  const char vname[] = "Virtual OS";
+  for (int i = 0; i < 13; i++)
+    desc2[4 + i] = (i < (int)sizeof(vname) - 1) ? vname[i] : ' ';
+
+  /* 5. Descriptor #3: Monitor range limits */
+  uint8_t *desc3 = (uint8_t *)&e->detailed_timings[2];
+  desc3[0] = desc3[1] = desc3[2] = 0x00;
+  desc3[3] = 0xFD;
+  desc3[4] = 56;
+  desc3[5] = 61;
+  desc3[6] = 30;
+  desc3[7] = 80;
+  desc3[8] = 100;
+
+  /* 6. Descriptor #4: Serial number placeholder */
+  uint8_t *desc4 = (uint8_t *)&e->detailed_timings[3];
+  desc4[0] = desc4[1] = desc4[2] = 0x00;
+  desc4[3] = 0xFF;
+  const char serial[] = "00000001";
+  for (int i = 0; i < 13; i++)
+    desc4[4 + i] = (i < (int)sizeof(serial) - 1) ? serial[i] : ' ';
+
+  /* 7. Checksum */
+  uint8_t sum = 0;
+  for (int i = 0; i < 127; i++)
+    sum += buf[i];
+  buf[127] = (uint8_t)(256 - sum);
 }
 
 /* Fill m->name with "<w>x<h>" (no refresh suffix; buffer is
@@ -639,7 +1215,46 @@ static long drm_ioctl_getconnector(void *arg) {
   c->encoder_id = DRM_ENCODER_ID;
   c->count_encoders = 1;
   c->count_modes = 1;
-  c->count_props = 0;
+  c->count_props = 2;
+  if (c->props_ptr && c->prop_values_ptr) {
+    /* Find DPMS and EDID prop_ids dynamically */
+    uint32_t props[2];
+    uint64_t values[2];
+    int found = 0;
+    for (int i = 0; i < DRM_MAX_PROPERTIES; i++) {
+      if (!g_drm_properties[i].allocated)
+        continue;
+      if (__strncmp(g_drm_properties[i].name, "DPMS", 5) == 0) {
+        props[found] = g_drm_properties[i].prop_id;
+        values[found] = DRM_MODE_DPMS_ON;
+        found++;
+      } else if (__strncmp(g_drm_properties[i].name, "EDID", 5) == 0) {
+        props[found] = g_drm_properties[i].prop_id;
+        /* Find the EDID blob value from obj_props */
+        struct drm_object_props *op =
+            obj_props_get(DRM_CONNECTOR_ID, DRM_MODE_OBJECT_CONNECTOR);
+        if (op) {
+          spin_lock(&op->lock);
+          for (int j = 0; j < op->count; j++) {
+            struct drm_property *pp = drm_find_property(op->prop_ids[j]);
+            if (pp && __strncmp(pp->name, "EDID", 5) == 0) {
+              values[found] = op->prop_values[j];
+              break;
+            }
+          }
+          spin_unlock(&op->lock);
+        }
+        found++;
+      }
+      if (found >= 2)
+        break;
+    }
+    if (found == 2) {
+      copy_to_user((void *)(uintptr_t)c->props_ptr, props, sizeof(props));
+      copy_to_user((void *)(uintptr_t)c->prop_values_ptr, values,
+                   sizeof(values));
+    }
+  }
 
   /* Fill mode data buffer (second ioctl call).
      Always report the default/configured mode as the connector's native
@@ -700,8 +1315,18 @@ static long drm_ioctl_getplane(void *arg) {
   p->crtc_id = DRM_CRTC_ID;
   p->fb_id = g_drm.current_fb_id;
   p->possible_crtcs = 1;
+  p->count_format_types = 4;
+  if (p->format_type_ptr) {
+    uint32_t fmts[4] = {
+        DRM_FORMAT_XRGB8888,
+        DRM_FORMAT_ARGB8888,
+        DRM_FORMAT_XBGR8888,
+        DRM_FORMAT_ABGR8888,
+    };
+    if (copy_to_user((void *)(uintptr_t)p->format_type_ptr, fmts, sizeof(fmts)))
+      return -EFAULT;
+  }
   p->gamma_size = 0;
-  p->count_format_types = 1;
   return 0;
 }
 
@@ -746,6 +1371,13 @@ static long drm_ioctl_create_dumb(void *arg) {
   }
 
   d->handle = (uint32_t)handle;
+
+  /* Track in per-fd list (Phase C) */
+  struct drm_file *cf = drm_file_current();
+  if (cf && cf->created_dumb_count < MAX_DUMB_BUFFERS) {
+    cf->created_dumb_handles[cf->created_dumb_count++] = (int)d->handle;
+  }
+
   return 0;
 }
 
@@ -774,7 +1406,11 @@ static long drm_ioctl_destroy_dumb(void *arg) {
   }
   buf->refcount--;
   if (buf->refcount <= 0) {
+    uint32_t rid = buf->virtio_res_id;
     __memset(buf, 0, sizeof(*buf));
+    spin_unlock(&g_drm.dumb_lock);
+    virtio_gpu_resource_unref(rid);
+    return 0;
   }
   spin_unlock(&g_drm.dumb_lock);
   return 0;
@@ -799,7 +1435,11 @@ static long drm_ioctl_gem_close(void *arg) {
   }
   buf->refcount--;
   if (buf->refcount <= 0) {
+    uint32_t rid = buf->virtio_res_id;
     __memset(buf, 0, sizeof(*buf));
+    spin_unlock(&g_drm.dumb_lock);
+    virtio_gpu_resource_unref(rid);
+    return 0;
   }
   spin_unlock(&g_drm.dumb_lock);
   return 0;
@@ -837,6 +1477,13 @@ static long drm_ioctl_addfb(void *arg) {
   spin_unlock(&g_drm.dumb_lock);
 
   f->fb_id = (uint32_t)fb_id;
+
+  /* Track in per-fd list (Phase C) */
+  struct drm_file *cf = drm_file_current();
+  if (cf && cf->created_fb_count < MAX_FRAMEBUFFERS) {
+    cf->created_fb_ids[cf->created_fb_count++] = (int)fb_id;
+  }
+
   return 0;
 }
 
@@ -903,6 +1550,15 @@ static long drm_ioctl_addfb2(void *arg) {
   spin_unlock(&g_drm.dumb_lock);
 
   c->fb_id = (uint32_t)fb_id;
+
+  /* Track in per-fd list (Phase C) */
+  {
+    struct drm_file *cf = drm_file_current();
+    if (cf && cf->created_fb_count < MAX_FRAMEBUFFERS) {
+      cf->created_fb_ids[cf->created_fb_count++] = (int)fb_id;
+    }
+  }
+
   return 0;
 }
 
@@ -949,6 +1605,81 @@ static long drm_ioctl_rmfb(void *arg) {
   return 0;
 }
 
+/* ===== Cursor overlay (Phase C) ===== */
+static void drm_cursor_overlay(struct drm_dumb_buffer *target) {
+  if (!g_drm_cursor.dirty || !g_drm_cursor.enabled)
+    return;
+
+  uint32_t *fb = (uint32_t *)target->kernel_vaddr;
+  int fb_w = (int)target->width;
+  int fb_h = (int)target->height;
+
+  int sx = (g_drm_cursor.x - g_drm_cursor.hotspot_x);
+  int sy = (g_drm_cursor.y - g_drm_cursor.hotspot_y);
+
+  for (int cy = 0; cy < CURSOR_HEIGHT; cy++) {
+    for (int cx = 0; cx < CURSOR_WIDTH; cx++) {
+      int fx = sx + cx, fy = sy + cy;
+      if (fx < 0 || fx >= fb_w || fy < 0 || fy >= fb_h)
+        continue;
+
+      uint32_t cpixel = g_drm_cursor.buffer[cy * CURSOR_WIDTH + cx];
+      uint8_t a = (cpixel >> 24) & 0xFF;
+      if (a == 0)
+        continue; /* fully transparent */
+      if (a == 255) {
+        fb[fy * fb_w + fx] = cpixel; /* opaque: replace */
+      } else {
+        /* alpha blend */
+        uint32_t *dst = &fb[fy * fb_w + fx];
+        uint32_t bg = *dst;
+        uint8_t r = ((cpixel >> 16) & 0xFF) * a / 255 +
+                    ((bg >> 16) & 0xFF) * (255 - a) / 255;
+        uint8_t g = ((cpixel >> 8) & 0xFF) * a / 255 +
+                    ((bg >> 8) & 0xFF) * (255 - a) / 255;
+        uint8_t b = (cpixel & 0xFF) * a / 255 + (bg & 0xFF) * (255 - a) / 255;
+        *dst = (0xFF << 24) | (r << 16) | (g << 8) | b;
+      }
+    }
+  }
+
+  g_drm_cursor.dirty = false;
+}
+
+/* DRM_IOCTL_MODE_CURSOR2 */
+static long drm_ioctl_cursor2(void *arg) {
+  struct drm_mode_cursor2 *c = (struct drm_mode_cursor2 *)arg;
+  if (!c)
+    return -EFAULT;
+
+  switch (c->flags & DRM_MODE_CURSOR_FLAGS) {
+  case DRM_MODE_CURSOR_BO: {
+    /* Set cursor bitmap: c->handle is a dumb buffer handle containing cursor
+     * image data */
+    spin_lock(&g_drm.dumb_lock);
+    struct drm_dumb_buffer *d = drm_find_dumb((int)c->handle);
+    if (!d || d->size < CURSOR_SIZE) {
+      spin_unlock(&g_drm.dumb_lock);
+      return -EINVAL;
+    }
+    __memcpy(g_drm_cursor.buffer, d->kernel_vaddr, CURSOR_SIZE);
+    spin_unlock(&g_drm.dumb_lock);
+    g_drm_cursor.hotspot_x = (int16_t)c->hot_x;
+    g_drm_cursor.hotspot_y = (int16_t)c->hot_y;
+    g_drm_cursor.enabled = true;
+    g_drm_cursor.dirty = true;
+    return 0;
+  }
+  case DRM_MODE_CURSOR_MOVE:
+    g_drm_cursor.x = (int16_t)c->x;
+    g_drm_cursor.y = (int16_t)c->y;
+    g_drm_cursor.dirty = true;
+    return 0;
+  default:
+    return -EINVAL;
+  }
+}
+
 /* DRM_IOCTL_MODE_PAGE_FLIP */
 static long drm_ioctl_page_flip(void *arg) {
   struct drm_mode_crtc_page_flip *p = (struct drm_mode_crtc_page_flip *)arg;
@@ -960,6 +1691,8 @@ static long drm_ioctl_page_flip(void *arg) {
   struct drm_dumb_buffer *d = drm_find_dumb(fb->dumb_handle);
   if (!d)
     return -EINVAL;
+
+  drm_cursor_overlay(d); /* Phase C: overlay cursor before transfer */
 
   virtio_gpu_transfer_2d(d->virtio_res_id, 0, 0, d->width, d->height, 0);
   virtio_gpu_flush(d->virtio_res_id, 0, 0, d->width, d->height);
@@ -985,6 +1718,8 @@ static long drm_ioctl_dirtyfb(void *arg) {
   struct drm_dumb_buffer *d = drm_find_dumb(fb->dumb_handle);
   if (!d)
     return -EINVAL;
+  drm_cursor_overlay(d); /* Phase C: overlay cursor before transfer */
+
   virtio_gpu_transfer_2d(d->virtio_res_id, 0, 0, d->width, d->height, 0);
   virtio_gpu_flush(d->virtio_res_id, 0, 0, d->width, d->height);
   return 0;
@@ -1037,6 +1772,8 @@ long drm_ioctl(uint32_t cmd, void *arg) {
     return drm_ioctl_page_flip(arg);
   case DRM_IOCTL_MODE_DIRTYFB:
     return drm_ioctl_dirtyfb(arg);
+  case DRM_IOCTL_MODE_CURSOR2:
+    return drm_ioctl_cursor2(arg);
   case DRM_IOCTL_MODE_GETFB:
     return drm_ioctl_getfb(arg);
   case DRM_IOCTL_GET_MAGIC:
@@ -1046,10 +1783,14 @@ long drm_ioctl(uint32_t cmd, void *arg) {
   case DRM_IOCTL_GEM_CLOSE:
     return drm_ioctl_gem_close(arg);
   case DRM_IOCTL_MODE_GETPROPERTY:
+    return drm_ioctl_getproperty(arg);
   case DRM_IOCTL_MODE_SETPROPERTY:
-  case DRM_IOCTL_MODE_GETPROPBLOB:
-  case DRM_IOCTL_MODE_OBJ_GETPROPERTIES:
   case DRM_IOCTL_MODE_OBJ_SETPROPERTY:
+    return -ENOSYS;
+  case DRM_IOCTL_MODE_GETPROPBLOB:
+    return drm_ioctl_getpropblob(arg);
+  case DRM_IOCTL_MODE_OBJ_GETPROPERTIES:
+    return drm_ioctl_obj_getproperties(arg);
   case DRM_IOCTL_PRIME_HANDLE_TO_FD:
   case DRM_IOCTL_PRIME_FD_TO_HANDLE:
     return -ENOSYS;
@@ -1059,17 +1800,126 @@ long drm_ioctl(uint32_t cmd, void *arg) {
   }
 }
 
+/* ===== per-fd lookup (Phase C) ===== */
+static struct drm_file *drm_file_current(void) {
+  /* Find the drm_file slot for the current task.
+   * Called from ioctl handlers; the current task is what's running.
+   * Iterate g_drm_files[] matching ->proc == current xtask. */
+  xtask *cur = current_task;
+  spin_lock(&g_drm_files_lock);
+  for (int i = 0; i < MAX_DRM_FDS; i++) {
+    if (g_drm_files[i].used && g_drm_files[i].proc == cur) {
+      spin_unlock(&g_drm_files_lock);
+      return &g_drm_files[i];
+    }
+  }
+  spin_unlock(&g_drm_files_lock);
+  return NULL;
+}
+
 /* ===== DRM device ops ===== */
 int drm_open(xtask *proc, int fd) {
-  (void)proc;
-  (void)fd;
-  return 0;
+  spin_lock(&g_drm_files_lock);
+  for (int i = 0; i < MAX_DRM_FDS; i++) {
+    if (!g_drm_files[i].used) {
+      g_drm_files[i].used = true;
+      g_drm_files[i].fd = fd;
+      g_drm_files[i].proc = proc;
+      g_drm_files[i].is_master = false;
+      g_drm_files[i].authenticated_magic = 0;
+      g_drm_files[i].auth_valid = false;
+      spin_unlock(&g_drm_files_lock);
+      return 0;
+    }
+  }
+  spin_unlock(&g_drm_files_lock);
+  return -ENFILE;
+}
+
+/* Helper: release a framebuffer (refcount decrement + cleanup) */
+static void drm_release_fb(int fb_id) {
+  spin_lock(&g_drm.fb_lock);
+  struct drm_framebuffer *fb = drm_find_fb(fb_id);
+  if (!fb) {
+    spin_unlock(&g_drm.fb_lock);
+    return;
+  }
+  int dumb_handle = fb->dumb_handle;
+  fb->refcount--;
+  if (fb->refcount <= 0) {
+    __memset(fb, 0, sizeof(*fb));
+  }
+  spin_unlock(&g_drm.fb_lock);
+
+  /* Release dumb buffer reference */
+  if (dumb_handle > 0) {
+    spin_lock(&g_drm.dumb_lock);
+    struct drm_dumb_buffer *d = drm_find_dumb(dumb_handle);
+    if (d) {
+      d->refcount--;
+      if (d->refcount <= 0) {
+        uint32_t rid = d->virtio_res_id;
+        __memset(d, 0, sizeof(*d));
+        spin_unlock(&g_drm.dumb_lock);
+        virtio_gpu_resource_unref(rid);
+      } else {
+        spin_unlock(&g_drm.dumb_lock);
+      }
+    } else {
+      spin_unlock(&g_drm.dumb_lock);
+    }
+  }
+}
+
+/* Helper: release a dumb buffer (force release) */
+static void drm_release_dumb(int handle) {
+  spin_lock(&g_drm.dumb_lock);
+  struct drm_dumb_buffer *d = drm_find_dumb(handle);
+  if (d) {
+    uint32_t rid = d->virtio_res_id;
+    __memset(d, 0, sizeof(*d));
+    spin_unlock(&g_drm.dumb_lock);
+    virtio_gpu_resource_unref(rid);
+  } else {
+    spin_unlock(&g_drm.dumb_lock);
+  }
 }
 
 int drm_close(xtask *proc, int fd) {
-  (void)proc;
-  (void)fd;
-  return 0;
+  spin_lock(&g_drm_files_lock);
+  for (int i = 0; i < MAX_DRM_FDS; i++) {
+    struct drm_file *f = &g_drm_files[i];
+    if (!f->used)
+      continue;
+    if (fd >= 0) {
+      /* Normal close via sys_close: match specific fd + proc. */
+      if (f->fd != fd || f->proc != proc)
+        continue;
+    } else {
+      /* Process-exit cleanup (file_put → ops->close(proc, -1)):
+       * no fd number available, match by proc only.  Each FD_DEV fd
+       * gets its own file_put call, so one iteration per entry. */
+      if (f->proc != proc)
+        continue;
+    }
+    /* Release per-fd resources (Phase C) */
+    for (int j = 0; j < f->created_fb_count; j++) {
+      drm_release_fb(f->created_fb_ids[j]);
+    }
+    for (int j = 0; j < f->created_dumb_count; j++) {
+      drm_release_dumb(f->created_dumb_handles[j]);
+    }
+
+    if (f->is_master) {
+      g_drm.is_master = false;
+      drm_master_cleanup();
+    }
+    __memset(f, 0, sizeof(*f));
+    spin_unlock(&g_drm_files_lock);
+    return 0;
+  }
+  spin_unlock(&g_drm_files_lock);
+  return 0; /* ignore close on unknown fd */
 }
 
 /* forward declarations for ops callbacks defined further below */
@@ -1353,6 +2203,108 @@ void virtio_gpu_init(void) {
   g_drm.fb_height = DRM_FB_HEIGHT;
   g_drm.fb_bpp = DRM_FB_BPP;
   g_drm.fb_pitch = g_drm.fb_width * (g_drm.fb_bpp / 8);
+
+  /* ===== Property infrastructure initialization (Phase C) ===== */
+  /* Create properties */
+  uint32_t p_src_x = drm_property_create_range("SRC_X", 0, 0xFFFFFFFF, true);
+  uint32_t p_src_y = drm_property_create_range("SRC_Y", 0, 0xFFFFFFFF, true);
+  uint32_t p_src_w = drm_property_create_range("SRC_W", 0, 0xFFFFFFFF, true);
+  uint32_t p_src_h = drm_property_create_range("SRC_H", 0, 0xFFFFFFFF, true);
+  uint32_t p_active = drm_property_create_range("ACTIVE", 0, 1, false);
+
+  const uint64_t dpms_vals[4] = {0, 1, 2, 3};
+  const char *dpms_names[4] = {"On", "Standby", "Suspend", "Off"};
+  uint32_t p_dpms =
+      drm_property_create_enum("DPMS", dpms_vals, dpms_names, 4, false);
+
+  uint32_t p_edid = drm_property_create_blob("EDID", true);
+  uint32_t p_in_formats = drm_property_create_blob("IN_FORMATS", true);
+  uint32_t p_crtc_id =
+      drm_property_create_object("CRTC_ID", DRM_MODE_OBJECT_CRTC, false);
+  uint32_t p_fb_id =
+      drm_property_create_object("FB_ID", DRM_MODE_OBJECT_FB, false);
+  uint32_t p_mode_id = drm_property_create_blob("MODE_ID", false);
+
+  /* Generate IN_FORMATS blob */
+  struct drm_format_modifier_blob {
+    uint32_t version;
+    uint32_t count_formats;
+    uint32_t formats_offset;
+    uint32_t count_modifiers;
+    uint32_t modifiers_offset;
+  } __attribute__((packed));
+
+  uint32_t in_fmts[4] = {
+      DRM_FORMAT_XRGB8888,
+      DRM_FORMAT_ARGB8888,
+      DRM_FORMAT_XBGR8888,
+      DRM_FORMAT_ABGR8888,
+  };
+
+  struct drm_format_modifier {
+    uint64_t offset;
+    uint64_t width;
+    uint64_t modifier;
+  };
+
+  struct drm_format_modifier in_mods[1];
+  in_mods[0].offset = 0;
+  in_mods[0].width = 4;
+  in_mods[0].modifier = DRM_FORMAT_MOD_LINEAR;
+
+  uint32_t in_fmts_blob_size =
+      (uint32_t)(sizeof(struct drm_format_modifier_blob) +
+                 4 * sizeof(uint32_t) + 1 * sizeof(struct drm_format_modifier));
+  uint8_t *in_fmts_blob_data = (uint8_t *)kmalloc(in_fmts_blob_size);
+  if (in_fmts_blob_data) {
+    struct drm_format_modifier_blob *hdr =
+        (struct drm_format_modifier_blob *)in_fmts_blob_data;
+    __memset(hdr, 0, sizeof(*hdr));
+    hdr->version = 1;
+    hdr->count_formats = 4;
+    hdr->formats_offset = sizeof(struct drm_format_modifier_blob);
+    hdr->count_modifiers = 1;
+    hdr->modifiers_offset = (uint32_t)(sizeof(struct drm_format_modifier_blob) +
+                                       4 * sizeof(uint32_t));
+    __memcpy(in_fmts_blob_data + sizeof(struct drm_format_modifier_blob),
+             in_fmts, 4 * sizeof(uint32_t));
+    __memcpy(in_fmts_blob_data + hdr->modifiers_offset, in_mods,
+             sizeof(struct drm_format_modifier));
+  }
+  uint32_t in_fmts_blob_id =
+      in_fmts_blob_data ? drm_blob_create(in_fmts_blob_data, in_fmts_blob_size)
+                        : 0;
+  if (in_fmts_blob_data)
+    kfree(in_fmts_blob_data);
+
+  /* Generate EDID blob */
+  uint8_t edid_data[128];
+  extern void drm_generate_edid(uint8_t * buf, size_t bufsz, uint32_t width,
+                                uint32_t height);
+  drm_generate_edid(edid_data, sizeof(edid_data), g_drm.fb_width,
+                    g_drm.fb_height);
+  uint32_t edid_blob_id = drm_blob_create(edid_data, 128);
+
+  /* Bind properties to objects */
+  /* Connector(2): DPMS + EDID */
+  drm_property_add_to_object(DRM_MODE_OBJECT_CONNECTOR, DRM_CONNECTOR_ID,
+                             p_dpms, DRM_MODE_DPMS_ON);
+  drm_property_add_to_object(DRM_MODE_OBJECT_CONNECTOR, DRM_CONNECTOR_ID,
+                             p_edid, edid_blob_id);
+
+  /* Plane(4): IN_FORMATS + CRTC_ID + FB_ID + SRC_X/Y/W/H */
+  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_in_formats,
+                             in_fmts_blob_id);
+  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_crtc_id, 0);
+  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_fb_id, 0);
+  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_src_x, 0);
+  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_src_y, 0);
+  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_src_w, 0);
+  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_src_h, 0);
+
+  /* CRTC(1): ACTIVE + MODE_ID */
+  drm_property_add_to_object(DRM_MODE_OBJECT_CRTC, DRM_CRTC_ID, p_active, 0);
+  drm_property_add_to_object(DRM_MODE_OBJECT_CRTC, DRM_CRTC_ID, p_mode_id, 0);
 
   /* Register /dev/dri/card0 */
   drm_dev_register();
