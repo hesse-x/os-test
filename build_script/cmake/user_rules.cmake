@@ -15,10 +15,20 @@ set(USER_COMPILE_FLAGS -m64 ${WARN_FLAGS} ${FREESTANDING_FLAGS} -fno-pie)
 # DRM UAPI headers are infrastructure (display.h → "drm/drm.h"), so
 # -I.../include is in base compile flags for project-wide "drm/drm.h"
 # resolution. The upstream <drm.h> path (-I.../include/drm) and the
-# xf86drm.h/xf86drmMode.h path (-I.../drm) are NOT global — they
-# propagate via INTERFACE_INCLUDE_DIRECTORIES on the drm CMake target,
-# so only targets that link libdrm.a (LINK_LIBS drm) inherit them.
+# xf86drm.h/xf86drmMode.h path (-I.../drm) used to propagate via
+# INTERFACE_INCLUDE_DIRECTORIES on the drm CMake target. Now that
+# display.h directly includes xf86drm.h, -I.../drm is also global.
 set(DRM_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/drm/include)
+# Additional DRM include paths: (1) <drm.h> resolution via include/drm,
+# (2) xf86drm.h/xf86drmMode.h resolution via third_party/drm root.
+# Used as separate -I flags via DRM_INCLUDE_FLAGS below.
+set(DRM_XF86_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/drm/include/drm)
+set(DRM_XF86_INCLUDE_DIR2 ${CMAKE_SOURCE_DIR}/third_party/drm)
+# Combined -I flags (used in compile flag construction below)
+set(DRM_INCLUDE_FLAGS
+    -I${DRM_INCLUDE_DIR}
+    -I${DRM_XF86_INCLUDE_DIR}
+    -I${DRM_XF86_INCLUDE_DIR2})
 
 # Build-type flags for the bare-gcc commands below (add_user_elf / add_user_ldso /
 # SHARED libc.so / add_user_dyn_elf). CMake targets (kernel OBJECT libs, static
@@ -96,7 +106,7 @@ function(add_user_lib lib_name)
         # When VERSION_MAP is set, .map + verify_libc_exports.sh gates the exports.
         # Libraries like libinput use LIBINPUT_EXPORT (__attribute__((visibility("default")))) markings.
         # -fPIC: required for all .so objects (position-independent code).
-        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fPIC -I${DRM_INCLUDE_DIR} -fvisibility=hidden ${ARG_FLAGS_LIST})
+        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fPIC ${DRM_INCLUDE_FLAGS} -fvisibility=hidden ${ARG_FLAGS_LIST})
         if(ARG_INCLUDE_DIRS)
             foreach(_dir ${ARG_INCLUDE_DIRS})
                 list(APPEND COMPILE_FLAGS_BASE -I${_dir})
@@ -270,7 +280,7 @@ function(add_user_elf elf_name)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${DRM_INCLUDE_DIR} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra include directories
     if(ARG_INCLUDE_DIRS)
@@ -385,7 +395,7 @@ function(add_user_ldso name)
     set(COMPILE_FLAGS -m64 ${WARN_FLAGS} ${FREESTANDING_FLAGS}
                       -fPIC -fvisibility=hidden
                       ${USER_BUILD_FLAGS}
-                      -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${DRM_INCLUDE_DIR})
+                      -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${DRM_INCLUDE_FLAGS})
     set(OBJ_FILES "")
     set(idx 0)
     foreach(src ${ARG_SOURCES})
@@ -423,7 +433,7 @@ function(add_user_dyn_elf name)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${DRM_INCLUDE_DIR} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra include directories
     if(ARG_INCLUDE_DIRS)

@@ -104,10 +104,10 @@ add_dependencies(hello_dyn_dyn_elf c_so)
 # terminal — dynamic ELF (libc.so + libinput.so), PT_INTERP → ld.so
 add_user_dyn_elf(terminal
     SOURCES driver/terminal_libinput.cc
-    LINK_LIBS input m c
-    INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/third_party/libinput/src;${CMAKE_SOURCE_DIR}/third_party/libinput/include;${CMAKE_SOURCE_DIR}/user/lib/udev-shim;${CMAKE_SOURCE_DIR}/user/lib/evdev-shim"
+    LINK_LIBS input drm m c
+    INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/third_party/libinput/src;${CMAKE_SOURCE_DIR}/third_party/libinput/include;${CMAKE_SOURCE_DIR}/user/lib/udev-shim;${CMAKE_SOURCE_DIR}/user/lib/evdev-shim;${CMAKE_SOURCE_DIR}/third_party/drm;${CMAKE_SOURCE_DIR}/third_party/drm/include/drm"
 )
-add_dependencies(terminal_dyn_elf libinput_so m_so)
+add_dependencies(terminal_dyn_elf libinput_so drm_so m_so)
 
 # evdev: real keyboard event source (xHCI HID → SHM ring → terminal) +
 # EVIOCG* ioctl query. Replaces the kbd driver for terminal input.
@@ -313,3 +313,20 @@ add_dependencies(drm libdrm_fourcc_table)
 # xf86drm.h / xf86drmMode.h and upstream <drm.h> resolution paths
 # propagate automatically from the drm target's INTERFACE_INCLUDE_DIRS.
 add_user_elf(drm_test_link C SOURCES test/drm_test_link.c LINK_LIBS drm c)
+
+# ===== libdrm.so (shared library) — Phase A =====
+add_user_lib(drm_so
+    SOURCES ${LIBDRM_SOURCES}
+    C
+    SHARED
+    OUTPUT_NAME drm
+    SO_LINK_LIBS c
+    # NOTE: no VERSION_MAP — verify_libc_exports.sh doesn't handle glob
+    # patterns (drm*) in .map. -fvisibility=hidden + drm_public (via
+    # HAVE_VISIBILITY) already gate exports correctly.
+    FLAGS "-Wno-unused-parameter -D__linux__ -include ${CMAKE_BINARY_DIR}/libdrm_config.h"
+    INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/drm/include/drm
+                 ${CMAKE_SOURCE_DIR}/third_party/drm
+                 ${CMAKE_BINARY_DIR}
+)
+add_dependencies(drm_so c_so libdrm_fourcc_table)

@@ -150,6 +150,11 @@ void serial_vprintf(const char *fmt, va_list ap) {
   serial_puts(buf);
 }
 
+void serial_write(const char *buf, size_t len) {
+  for (size_t i = 0; i < len; i++)
+    serial_putc(buf[i]);
+}
+
 // ===================== Serial dev_ops (VFS callback dispatch)
 // =====================
 

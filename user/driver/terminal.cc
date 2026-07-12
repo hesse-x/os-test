@@ -542,11 +542,10 @@ int main(int argc, char **argv, char **envp) {
         vt100_feed(ch);
     }
 
-    // Shell output ← master read → VT100 + serial echo
+    // Shell output ← master read → VT100
     char buf[4096];
     int64_t n = read(master_fd, buf, sizeof(buf));
     if (n > 0) {
-      write(2, buf, (size_t)n);
       for (int64_t i = 0; i < n; i++) {
         vt100_feed(buf[i]);
         // Flush every few dirty rows to keep display responsive

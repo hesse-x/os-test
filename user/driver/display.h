@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "user/driver/font.h"
@@ -25,7 +26,8 @@
 #include <sys/ipc.h>
 #include <sys/mman.h>
 
-#include "drm/drm.h"
+#include "xf86drm.h"
+#include "xf86drmMode.h"
 
 /* Local metadata (filled by display_client_init) */
 static uint32_t display_pitch;
@@ -51,99 +53,99 @@ static inline int display_client_init(void) {
     struct recv_msg m;
     recv(&m, NULL, 0, 1);
   }
-  printf("display_client_init: /dev/dri/card0 opened fd=%d\n", fd);
   display_dev_fd = fd;
 
-  /* SET_MASTER (best-effort; kernel allows it) */
-  ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
+  /* SET_MASTER */
+  drmSetMaster(fd);
 
-  /* Query the supported mode from the kernel (single fixed mode), so the
-     client follows the kernel's runtime default rather than hardcoding. */
-  struct drm_mode_card_res res;
-  for (int i = 0; i < (int)sizeof(res); i++)
-    ((uint8_t *)&res)[i] = 0;
-  if (ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0 || !res.max_width ||
-      !res.max_height) {
-    printf("display_client_init: GETRESOURCES failed\n");
+  /* Query resources via libdrm */
+  drmModeRes *res = drmModeGetResources(fd);
+  if (!res) {
+    printf("display_client_init: drmModeGetResources failed\n");
     return -1;
   }
 
-  /* CREATE_DUMB: use the kernel's current mode (res.max_width/height). */
-  struct drm_mode_create_dumb dumb;
-  for (int i = 0; i < (int)sizeof(dumb); i++)
-    ((uint8_t *)&dumb)[i] = 0;
-  dumb.width = res.max_width;
-  dumb.height = res.max_height;
-  dumb.bpp = 32;
-
-  printf("display_client_init: calling ioctl CREATE_DUMB\n");
-  int rc = ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb);
-  printf(
-      "display_client_init: CREATE_DUMB rc=%d handle=%u pitch=%u size=%llu\n",
-      rc, dumb.handle, dumb.pitch, (unsigned long long)dumb.size);
-  if (rc < 0)
+  /* Get the first connector to grab mode info */
+  drmModeConnector *conn = NULL;
+  for (int i = 0; i < res->count_connectors; i++) {
+    conn = drmModeGetConnector(fd, res->connectors[i]);
+    if (conn && conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0)
+      break;
+    drmModeFreeConnector(conn);
+    conn = NULL;
+  }
+  if (!conn) {
+    printf("display_client_init: no connected connector\n");
+    drmModeFreeResources(res);
     return -1;
+  }
 
+  /* Use the preferred mode (first in list) */
+  drmModeModeInfo *mode = &conn->modes[0];
+  display_fb_width = mode->hdisplay;
+  display_fb_height = mode->vdisplay;
+
+  /* CREATE_DUMB via drmIoctl */
+  struct drm_mode_create_dumb dumb;
+  memset(&dumb, 0, sizeof(dumb));
+  dumb.width = display_fb_width;
+  dumb.height = display_fb_height;
+  dumb.bpp = 32;
+  if (drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) < 0) {
+    printf("display_client_init: CREATE_DUMB failed\n");
+    drmModeFreeConnector(conn);
+    drmModeFreeResources(res);
+    return -1;
+  }
   drm_dumb_handle = dumb.handle;
   display_pitch = dumb.pitch;
-  display_fb_width = dumb.width;
-  display_fb_height = dumb.height;
+
   display_rows = display_fb_height / FONT_HEIGHT;
   display_cols = display_fb_width / FONT_WIDTH;
 
-  /* MAP_DUMB: get an offset to pass to mmap */
+  /* MAP_DUMB via drmIoctl */
   struct drm_mode_map_dumb map;
-  for (int i = 0; i < (int)sizeof(map); i++)
-    ((uint8_t *)&map)[i] = 0;
+  memset(&map, 0, sizeof(map));
   map.handle = drm_dumb_handle;
-  rc = ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map);
-  printf("display_client_init: MAP_DUMB rc=%d offset=%llu\n", rc,
-         (unsigned long long)map.offset);
-  if (rc < 0)
+  if (drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
+    printf("display_client_init: MAP_DUMB failed\n");
+    drmModeFreeConnector(conn);
+    drmModeFreeResources(res);
     return -1;
+  }
 
-  /* mmap back buffer. Kernel drm_mmap_handler matches by size, so the
-     length must equal dumb.size. */
-  printf("display_client_init: calling mmap size=%llu\n",
-         (unsigned long long)dumb.size);
+  /* mmap back buffer */
   void *buf =
       mmap(NULL, dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, map.offset);
-  printf("display_client_init: mmap returned buf=%p\n", buf);
-  if (buf == MAP_FAILED)
+  if (buf == MAP_FAILED) {
+    printf("display_client_init: mmap failed\n");
+    drmModeFreeConnector(conn);
+    drmModeFreeResources(res);
     return -1;
+  }
   display_back_buffer = (uint8_t *)buf;
 
-  /* ADDFB: wrap the dumb buffer in a framebuffer */
-  struct drm_mode_fb_cmd fb;
-  for (int i = 0; i < (int)sizeof(fb); i++)
-    ((uint8_t *)&fb)[i] = 0;
-  fb.width = display_fb_width;
-  fb.height = display_fb_height;
-  fb.pitch = display_pitch;
-  fb.bpp = 32;
-  fb.depth = 24;
-  fb.handle = drm_dumb_handle;
-  rc = ioctl(fd, DRM_IOCTL_MODE_ADDFB, &fb);
-  printf("display_client_init: ADDFB rc=%d fb_id=%u\n", rc, fb.fb_id);
-  if (rc < 0)
+  /* ADDFB via drmModeAddFB */
+  uint32_t fb_id;
+  if (drmModeAddFB(fd, display_fb_width, display_fb_height, 24, 32,
+                   display_pitch, drm_dumb_handle, &fb_id) < 0) {
+    printf("display_client_init: ADDFB failed\n");
+    munmap(buf, dumb.size);
+    drmModeFreeConnector(conn);
+    drmModeFreeResources(res);
     return -1;
-  drm_fb_id = fb.fb_id;
+  }
+  drm_fb_id = fb_id;
 
-  /* SETCRTC: bind framebuffer to CRTC 1 with the fixed 800x600 mode */
-  struct drm_mode_crtc crtc;
-  for (int i = 0; i < (int)sizeof(crtc); i++)
-    ((uint8_t *)&crtc)[i] = 0;
-  crtc.crtc_id = 1; /* DRM_CRTC_ID */
-  crtc.fb_id = drm_fb_id;
-  crtc.mode_valid = 1;
-  crtc.mode.hdisplay = display_fb_width;
-  crtc.mode.vdisplay = display_fb_height;
-  crtc.mode.vrefresh = 60;
-  rc = ioctl(fd, DRM_IOCTL_MODE_SETCRTC, &crtc);
-  printf("display_client_init: SETCRTC rc=%d\n", rc);
-  if (rc < 0)
-    return -1;
+  /* SETCRTC via drmModeSetCrtc */
+  if (drmModeSetCrtc(fd, 1 /* crtc_id */, fb_id, 0, 0, &conn->connector_id, 1,
+                     mode) < 0) {
+    printf("display_client_init: SETCRTC failed\n");
+    /* partial cleanup — continue, terminal may still start */
+  }
 
+  drmModeFreeConnector(conn);
+  drmModeFreeResources(res);
   return 0;
 }
 
@@ -221,13 +223,8 @@ static inline void display_client_flush(uint32_t dirty_row_start,
                                         uint32_t dirty_row_end) {
   (void)dirty_row_start;
   (void)dirty_row_end;
-  struct drm_mode_crtc_page_flip flip;
-  for (int i = 0; i < (int)sizeof(flip); i++)
-    ((uint8_t *)&flip)[i] = 0;
-  flip.crtc_id = 1; /* DRM_CRTC_ID */
-  flip.fb_id = drm_fb_id;
-  flip.flags = 0; /* fire-and-forget, mirrors old synchronous KMS_FLIP */
-  ioctl(display_dev_fd, DRM_IOCTL_MODE_PAGE_FLIP, &flip);
+  drmModePageFlip(display_dev_fd, 1 /* crtc_id */, drm_fb_id,
+                  0 /* flags — fire-and-forget */, NULL /* user_data */);
 }
 
 #endif

@@ -35,7 +35,7 @@ global:
     basename;
 
     /* <strings.h> */
-    ffs;
+    ffs; strcasecmp; strncasecmp;
 
     /* <unistd.h> */
     access; close; dup2; _exit; ftruncate; getcwd; getpid; gettid;

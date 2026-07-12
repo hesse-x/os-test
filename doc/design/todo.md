@@ -41,7 +41,7 @@
 - [ ] atomic commit（替代当前 SETCRTC + PAGE_FLIP 的非原子序列）
 - [ ] EDID 协商 + 多分辨率（当前硬编码 800×600@60）
 - [ ] libdrm 二进制接入（当前用户态直连 DRM ioctl，未走 libdrm）
-- [ ] `modetest`/`weston` 验证
+- [ ] `modetest`/`tinywl`（wlroots example compositor）验证
 
 ## 阶段 3 待办（Vulkan Wayland）
 

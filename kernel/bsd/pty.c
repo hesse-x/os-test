@@ -10,6 +10,7 @@
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/types.h"
+#include "kernel/driver/serial.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
@@ -494,6 +495,7 @@ int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
     }
   }
 
+  serial_write((const char *)buf, written);
   return (int64_t)written;
 }
 

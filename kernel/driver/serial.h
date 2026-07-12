@@ -33,6 +33,7 @@ extern spinlock serial_tx_lock;
 
 void serial_printf(const char *fmt, ...);
 void serial_vprintf(const char *fmt, va_list ap);
+void serial_write(const char *buf, size_t len);
 
 #define SERIAL_PRINTF(...) serial_printf(__VA_ARGS__)
 #define SERIAL_VPRINTF(fmt, ap) serial_vprintf(fmt, ap)

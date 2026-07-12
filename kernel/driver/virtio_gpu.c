@@ -371,10 +371,27 @@ static int drm_alloc_fb_id(void) {
 /* DRM_IOCTL_VERSION */
 static long drm_ioctl_version(void *arg) {
   struct drm_version *v = (struct drm_version *)arg;
+  static const char driver_name[] = "virtio_gpu";
+  size_t name_len = sizeof(driver_name) - 1;
+
   v->version_major = 0;
   v->version_minor = 1;
   v->version_patchlevel = 0;
-  v->name_len = 0;
+
+  /* Second pass: copy driver name to user buffer.
+   * v->name is a user-space pointer (copied verbatim by sys_ioctl's
+   * copy_from_user). v->name_len is the buffer size libdrm allocated. */
+  if (v->name != NULL && v->name_len > 0) {
+    size_t copy_len = (name_len < v->name_len - 1) ? name_len : v->name_len - 1;
+    if (copy_to_user((void *)(uintptr_t)v->name, driver_name, copy_len))
+      return -EFAULT;
+    if (copy_len == v->name_len - 1) {
+      char nul = '\0';
+      copy_to_user((void *)(uintptr_t)(v->name + copy_len), &nul, 1);
+    }
+  }
+
+  v->name_len = name_len;
   v->date_len = 0;
   v->desc_len = 0;
   return 0;
@@ -505,6 +522,23 @@ static long drm_ioctl_getresources(void *arg) {
   r->max_width = g_drm.fb_width;
   r->min_height = g_drm.fb_height;
   r->max_height = g_drm.fb_height;
+
+  /* Fill ID buffers (second ioctl call, after libdrm allocates buffers) */
+  if (r->crtc_id_ptr) {
+    uint32_t id = DRM_CRTC_ID;
+    if (copy_to_user((void *)(uintptr_t)r->crtc_id_ptr, &id, sizeof(id)))
+      return -EFAULT;
+  }
+  if (r->connector_id_ptr) {
+    uint32_t id = DRM_CONNECTOR_ID;
+    if (copy_to_user((void *)(uintptr_t)r->connector_id_ptr, &id, sizeof(id)))
+      return -EFAULT;
+  }
+  if (r->encoder_id_ptr) {
+    uint32_t id = DRM_ENCODER_ID;
+    if (copy_to_user((void *)(uintptr_t)r->encoder_id_ptr, &id, sizeof(id)))
+      return -EFAULT;
+  }
   return 0;
 }
 
@@ -573,6 +607,36 @@ static long drm_ioctl_getconnector(void *arg) {
   c->count_encoders = 1;
   c->count_modes = 1;
   c->count_props = 0;
+
+  /* Fill mode data buffer (second ioctl call).
+     Always report the default/configured mode as the connector's native
+     capability, regardless of whether the CRTC has been set via SETCRTC
+     yet. */
+  if (c->modes_ptr) {
+    struct drm_mode_modeinfo km;
+    __memset(&km, 0, sizeof(km));
+    km.clock = 40000;
+    km.hdisplay = g_drm.fb_width;
+    km.hsync_start = g_drm.fb_width + 16;
+    km.hsync_end = g_drm.fb_width + 32;
+    km.htotal = g_drm.fb_width + 48;
+    km.vdisplay = g_drm.fb_height;
+    km.vsync_start = g_drm.fb_height + 1;
+    km.vsync_end = g_drm.fb_height + 4;
+    km.vtotal = g_drm.fb_height + 10;
+    km.vrefresh = 60;
+    km.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
+    drm_mode_fill_name(&km);
+    if (copy_to_user((void *)(uintptr_t)c->modes_ptr, &km, sizeof(km)))
+      return -EFAULT;
+  }
+
+  /* Fill encoder ID buffer (second ioctl call) */
+  if (c->encoders_ptr) {
+    uint32_t eid = DRM_ENCODER_ID;
+    if (copy_to_user((void *)(uintptr_t)c->encoders_ptr, &eid, sizeof(eid)))
+      return -EFAULT;
+  }
   return 0;
 }
 
