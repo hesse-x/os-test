@@ -31,6 +31,10 @@ typedef struct {
 LIBC_EXPORT DIR *opendir(const char *name);
 LIBC_EXPORT struct dirent *readdir(DIR *dirp);
 LIBC_EXPORT int closedir(DIR *dirp);
+LIBC_EXPORT int scandir(const char *dirp, struct dirent ***namelist,
+                        int (*filter)(const struct dirent *),
+                        int (*compar)(const struct dirent **,
+                                      const struct dirent **));
 
 #ifdef __cplusplus
 }

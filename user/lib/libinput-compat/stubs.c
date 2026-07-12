@@ -1,11 +1,15 @@
 /*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * Comprehensive stubs for libinput/linker dependencies not available in our
  * minimal libc or evdev shim.  libinput's keyboard-subset pulls in pointer-
  * acceleration filter code and tablet/touchpad dispatch paths even for
  * keyboard-only devices; these stubs provide the missing symbols so the link
  * succeeds.  They are never called at runtime for keyboard operation.
- *
- * SPDX-License-Identifier: MIT
  *
  * NOTE: do NOT #include <math.h> — our math.h defines static inline wrappers
  * that conflict with the real function definitions needed here.  The math
@@ -15,41 +19,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-/* ===================== math stubs ===================== */
-
-double sin(double x) {
-  (void)x;
-  return 0.0;
-}
-double cos(double x) {
-  (void)x;
-  return 1.0;
-}
-double atan2(double y, double x) {
-  (void)y;
-  (void)x;
-  return 0.0;
-}
-double fmod(double x, double y) {
-  (void)x;
-  (void)y;
-  return 0.0;
-}
-double hypot(double x, double y) {
-  (void)x;
-  (void)y;
-  return 0.0;
-}
-double sqrt(double x) {
-  (void)x;
-  return 0.0;
-}
-void sincos(double x, double *s, double *c) {
-  (void)x;
-  *s = 0.0;
-  *c = 1.0;
-}
 
 /* ===================== filter stubs ===================== */
 /*

@@ -15,6 +15,8 @@
 | 7 | 用户态 malloc | size-class slab + sys_mmap | 替代旧 sbrk + 显式空闲链表。详见 [mem.md](mem.md) |
 | 8 | 时间接口 | timespec_get(TIME_UTC) + clock() | 内核 sys_gettime/sys_clock 封装，C11/C99 标准接口 |
 | 9 | 时间语义 | 单调时间（非 wall time） | 内核无 RTC，timespec_get 返回系统启动后单调时间；clock 返回进程 CPU 时间 |
+| 10 | 数学库（libm） | 独立 `libm.a`/`libm.so`，`__builtin_*` 包装器 | GCC x86-64 builtin 直接编译为 `fsin`/`fcos`/`sqrtsd` 等指令，无需手写数值算法。`math.h` 的 `static inline` 在 `-O0` 和 `hypot` 等场景仍需外部符号 |
+| 11 | libm 构建 | `add_user_lib(m ...)` + `add_user_lib(m_so ...)`，独立 `libm.map` 版本脚本 | libm 是独立标准库，不与 libc 合并维护。`LIBM_1.0` 版本节点导出全部 math.h 符号 + sincos 等 GNU 扩展 |
 
 ### FILE 结构体
 
@@ -118,18 +120,19 @@ include 路径：-I. -Iuser/include → 自定义头文件优先。宿主机 fre
 
 | 模块 | 源文件 | 内容 |
 |------|--------|------|
-| _start | user/lib/start.cc | 入口点 |
-| stdio | user/lib/stdio.cc | FILE, printf/vfprintf, fputc/fputs/puts/fflush |
-| string | user/lib/string.cc | strlen/strcmp/strcpy/strcat/strchr, memcpy/memset/memmove |
+| _start | user/lib/start_main.cc | `__libc_start_main` 入口点（crt0.o 提供 `_start`） |
+| stdio | user/lib/stdio.cc | FILE, printf/vfprintf, fputc/fputs/puts/fflush, **fgets** |
+| string | user/lib/string.cc | strlen/strcmp/strcpy/strcat/strchr, memcpy/memset/memmove, **ffs** |
 | malloc | user/lib/malloc.cc | size-class slab + sys_mmap |
 | time | user/lib/time.cc | timespec_get, clock |
 | unistd | user/lib/unistd.cc | POSIX syscall 封装 |
+| file | user/lib/file.cc | fopen/fclose/fread/fwrite/fseek/rewind/feof/ferror/freopen/ftell/fdopen/flockfile/funlockfile, **scandir** |
 | sys_ipc | user/lib/sys_ipc.cc | IPC 封装 |
 | sys_shm | user/lib/sys_shm.cc | SHM 封装 |
 | sys_wait | user/lib/sys_wait.cc | waitpid 封装 |
 | sys_mman | user/lib/sys_mman.cc | mmap/munmap 封装 |
 | sys_irq | user/lib/sys_irq.cc | IRQ 封装 |
-| sys_device | user/lib/sys_device.cc | 设备接口封装 |
+| sys_device | user/lib/sys_device.cc | 设备接口封装（device_register_shm, dev_wait_ready） |
 | sys_process | user/lib/sys_process.cc | fork/execve/waitpid/setsid/setpgid/getpgid/getsid/getuid/geteuid/getgid/getegid/setuid/setgid/getppid/getpgrp/umask/gethostname/sethostname |
 | sys_pci | user/lib/sys_pci.cc | PCI 封装 |
 | signal | user/lib/signal.cc | 信号封装（kill/sigaction/sigprocmask/sigpending/raise/signal/alarm/pause） |
@@ -139,7 +142,29 @@ include 路径：-I. -Iuser/include → 自定义头文件优先。宿主机 fre
 | uname | user/lib/uname.c | uname |
 | sleep | user/lib/sleep.c | sleep/usleep |
 | assert | user/lib/assert.c | assert |
-| usb_kbd | user/lib/usb_kbd.cc | USB HID 键盘 |
+| errno | user/lib/errno.cc | errno TLS + strerror |
+| input_client | user/lib/input_client.cc | input SHM ring 客户端（input_client_poll） |
+| tls | user/lib/tls.cc | TLS（errno, pthread 所需） |
+| pthread | user/lib/pthread.cc | pthread_mutex_t / pthread_cond_t |
+| setjmp | user/lib/setjmp.S | setjmp/longjmp（x86-64 寄存器保存） |
+| io_multiplex | user/lib/io_multiplex.cc | ppoll/pselect6 封装 |
+| fnmatch | user/lib/fnmatch.c | POSIX fnmatch（libinput 依赖） |
+
+### libm 模块
+
+`libm.a`（静态）+ `libm.so`（动态）是两个独立的 CMake target（`m` 和 `m_so`），编译同组源文件。
+
+| 源文件 | 内容 |
+|--------|------|
+| `lib/math/math_basic.c` | double 精度函数，全部 `__builtin_*` 包装（sin/cos/tan/sqrt/hypot/fmod/pow/exp/log/log2/floor/ceil/round/fabs/atan2 等 44 个函数） |
+| `lib/math/math_float.c` | float 精度函数，同上模式（sinf/cosf/sqrtf/hypotf/fmodf/powf/expf/logf/floorf/ceilf/roundf/fabsf/atan2f 等 32 个函数） |
+| `lib/math/sincos.c` | `sincos`/`sincosf`（GNU 扩展，GCC builtin 分别调 sin+cos） |
+
+编译标志 `-D__LIBM_BUILD__` 防止 `math.h` 的 `static inline` 内联函数与 out-of-line 定义冲突。`libm.so` 使用 `-fvisibility=default`（区别于 libinput.so 的 hidden）确保所有 math.h 函数对外可见。
+
+符号版本脚本 `user/libm.map` 定义 `LIBM_1.0` 版本节点，导出全部 `math.h` 函数 + `sincos`/`sincosf`，内部符号 `local: *;`。
+
+libm 编译不依赖 libc（freestanding，`-nostdlib`），但运行时 libm.so 的 `DT_NEEDED` 依赖 libc.so（链接时通过 `SO_LINK_LIBS c` 记录）。
 
 ### 与其他模块的关系
 
@@ -163,8 +188,6 @@ include 路径：-I. -Iuser/include → 自定义头文件优先。宿主机 fre
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
 | sys_write 输出优化 | 当前 stdout 逐字节 sys_putc，改为 sys_write 一次 syscall 输出整段 | 高 |
-| sys_read + stdin | stdin FILE 实例 + fgetc/fgets/fread，sys_read 填充 FILE buffer | 高 |
-| fopen/fclose | 分配 FILE + sys_open 获取 fd | 中 |
 | %f 浮点格式化 | 依赖用户态 SSE/FPU 上下文保存 + 浮点格式化算法 | 低 |
 | time() / gettimeofday() | wall time 接口，需 RTC 硬件支撑 | 低 |
 | strftime | 时间格式化，依赖 time() | 低 |

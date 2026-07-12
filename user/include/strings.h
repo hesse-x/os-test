@@ -27,6 +27,7 @@ LIBC_EXPORT char *index(const char *s, int c);
 LIBC_EXPORT char *rindex(const char *s, int c);
 LIBC_EXPORT int strcasecmp(const char *s1, const char *s2);
 LIBC_EXPORT int strncasecmp(const char *s1, const char *s2, size_t n);
+LIBC_EXPORT int ffs(int i);
 
 #ifdef __cplusplus
 }

@@ -778,3 +778,23 @@ int asprintf(char **strp, const char *fmt, ...) {
   va_end(ap);
   return n;
 }
+
+// ===================== fgets =====================
+char *fgets(char *s, int size, FILE *stream) {
+  if (size <= 0 || !s || !stream)
+    return NULL;
+  int i = 0;
+  while (i < size - 1) {
+    int c = fgetc(stream);
+    if (c == EOF) {
+      if (i == 0)
+        return NULL;
+      break;
+    }
+    s[i++] = (char)c;
+    if (c == '\n')
+      break;
+  }
+  s[i] = '\0';
+  return s;
+}

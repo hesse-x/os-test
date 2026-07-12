@@ -42,6 +42,10 @@
 #define HUGE_VAL __builtin_huge_val()
 #define HUGE_VALL __builtin_huge_vall()
 
+/* Out-of-line definitions in libm use __LIBM_BUILD__ to suppress
+ * these static inline wrappers and provide real function symbols. */
+#ifndef __LIBM_BUILD__
+
 static inline double acos(double x) { return __builtin_acos(x); }
 static inline double acosh(double x) { return __builtin_acosh(x); }
 static inline double asin(double x) { return __builtin_asin(x); }
@@ -148,5 +152,7 @@ static inline float sqrtf(float x) { return __builtin_sqrtf(x); }
 static inline float tanf(float x) { return __builtin_tanf(x); }
 static inline float tanhf(float x) { return __builtin_tanhf(x); }
 static inline float truncf(float x) { return __builtin_truncf(x); }
+
+#endif /* __LIBM_BUILD__ */
 
 #endif

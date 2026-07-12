@@ -6,8 +6,12 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <sys/ipc.h>
 #include <syscall.h>
 #include <time.h>
+#include <unistd.h>
+#include <xos/errno.h>
+#include <xos/syscall_nums.h>
 
 extern "C" {
 
@@ -59,7 +63,8 @@ long timezone = 0;
 int daylight = 0;
 char *tzname[2] = {(char *)"UTC", (char *)"UTC"};
 
-void tzset(void) { /* No timezone, no-op stub */ }
+void tzset(void) { /* No timezone, no-op stub */
+}
 
 /* ===================== time_t → struct tm calendar conversion (UTC)
  * =====================
@@ -420,6 +425,40 @@ char *ctime_r(const time_t *t, char *buf) {
 char *ctime(const time_t *t) {
   static char buf[26];
   return ctime_r(t, buf);
+}
+
+/* ===================== sleep / usleep / nanosleep ===================== */
+
+unsigned int sleep(unsigned seconds) {
+  struct recv_msg msg;
+  int r = recv(&msg, NULL, 0, seconds * 1000);
+  if (r == -ETIMEDOUT)
+    return 0;
+  return 0;
+}
+
+int usleep(unsigned usec) {
+  unsigned ms = usec / 1000;
+  if (ms == 0)
+    ms = 1;
+  struct recv_msg msg;
+  recv(&msg, NULL, 0, ms);
+  return 0;
+}
+
+int nanosleep(const struct timespec *req, struct timespec *rem) {
+  if (!req)
+    return -1;
+  unsigned ms = (unsigned)(req->tv_sec * 1000 + req->tv_nsec / 1000000);
+  if (ms == 0 && req->tv_nsec > 0)
+    ms = 1;
+  struct recv_msg msg;
+  recv(&msg, NULL, 0, ms);
+  if (rem) {
+    rem->tv_sec = 0;
+    rem->tv_nsec = 0;
+  }
+  return 0;
 }
 
 } /* extern "C" */

@@ -11,7 +11,7 @@
 LIBC_1.0 {
 global:
     /* <stdio.h> */
-    fclose; feof; ferror; fflush; fgetc; fileno; fopen; fprintf; fputc;
+    fclose; feof; ferror; fflush; fgetc; fgets; fileno; fopen; fprintf; fputc;
     fputs; fread; freopen; fseek; ftell; fwrite; getchar; perror; printf;
     putchar; puts; rewind; snprintf; sprintf; vfprintf; vprintf; vsnprintf;
     vsprintf; fdopen; clearerr; setbuf; setvbuf; ungetc; flockfile;
@@ -33,6 +33,9 @@ global:
     strerror; strerror_r; strlen; strncat; strncmp; strncpy; strndup;
     strpbrk; strrchr; strspn; strstr; strtok; strtok_r;
     basename;
+
+    /* <strings.h> */
+    ffs;
 
     /* <unistd.h> */
     access; close; dup2; _exit; ftruncate; getcwd; getpid; gettid;
@@ -64,7 +67,7 @@ global:
     tcgetattr; tcsetattr;
 
     /* <dirent.h> */
-    closedir; opendir; readdir;
+    closedir; opendir; readdir; scandir;
 
     /* <errno.h> */
     __errno_location;

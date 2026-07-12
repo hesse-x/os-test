@@ -9,28 +9,16 @@
 # Added start_main.cc (__libc_start_main, T11), atexit.c (T8), init_array.c (T10)
 set(LIBC_SOURCES
     lib/stdio.cc lib/string.cc lib/malloc.cc
-    lib/unistd.cc lib/sys_wait.cc lib/sys_mman.cc
-    lib/sys_irq.cc lib/sys_device.cc lib/sys_ipc.cc
-    lib/sys_process.cc lib/time.cc lib/file.cc
+    lib/unistd.cc lib/time.cc lib/file.cc
     lib/ctype.c lib/strtol.c lib/stdlib_misc.c lib/uname.c
-    lib/sleep.c lib/assert.c lib/sys_pci.cc
-    lib/signal.cc
-    lib/input_client.cc
-    lib/tls.cc
-    lib/pthread.cc
-    lib/start_main.cc
-    lib/atexit.c
-    lib/init_array.c
-    lib/environ.c
-    lib/errno.cc
-    lib/select.c
-    lib/epoll.cc
-    lib/eventfd.cc
-    lib/timerfd.cc
-    lib/signalfd.cc
-    lib/sys_mount.cc
+    lib/assert.c lib/errno.cc lib/signal.cc
+    lib/input_client.cc lib/tls.cc lib/pthread.cc
     lib/setjmp.S
-    lib/dev_ready.c
+    lib/start_main.cc
+    lib/io_multiplex.cc
+    lib/sys_process.cc
+    lib/sys_device.cc
+    lib/sys_ipc.cc
     ${CMAKE_SOURCE_DIR}/utils/kvformat.c
 )
 
@@ -52,6 +40,31 @@ add_user_lib(c_so
     VERSION_MAP user/libc.map
     # NOTE: no SO_LINK_LIBS — libc.so is the base library, does not record DT_NEEDED on itself
 )
+
+# libm source list
+set(LIBM_SOURCES
+    lib/math/math_basic.c
+    lib/math/math_float.c
+    lib/math/sincos.c
+)
+
+# libm.a (static)
+add_user_lib(m
+    SOURCES ${LIBM_SOURCES}
+    C
+    FLAGS "-fno-pie -D__LIBM_BUILD__"
+)
+
+# libm.so (dynamic)
+add_user_lib(m_so
+    SOURCES ${LIBM_SOURCES}
+    C
+    FLAGS "-fPIC -DDYNAMIC=1 -D__LIBM_BUILD__ -fvisibility=default"
+    SHARED
+    OUTPUT_NAME m
+    VERSION_MAP user/libm.map
+)
+
 
 # Unity test framework (static library)
 add_user_lib(unity SOURCES ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c)
@@ -88,17 +101,13 @@ add_user_dyn_elf(hello_dyn C SOURCES hello_dyn.c LINK_LIBS c)
 # Ensure libc.so is built before hello_dyn
 add_dependencies(hello_dyn_dyn_elf c_so)
 
-# driver/ — userspace driver processes (kbd_driver references lib/usb_kbd and
-# lib/input_driver across directories)
-add_user_elf(kbd_driver   SOURCES driver/kbd_driver.cc lib/usb_kbd.cc lib/input_driver.cc   LINK_LIBS c)
-
 # terminal — dynamic ELF (libc.so + libinput.so), PT_INTERP → ld.so
 add_user_dyn_elf(terminal
     SOURCES driver/terminal_libinput.cc
-    LINK_LIBS input c
+    LINK_LIBS input m c
     INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/third_party/libinput/src;${CMAKE_SOURCE_DIR}/third_party/libinput/include;${CMAKE_SOURCE_DIR}/user/lib/udev-shim;${CMAKE_SOURCE_DIR}/user/lib/evdev-shim"
 )
-add_dependencies(terminal_dyn_elf libinput_so)
+add_dependencies(terminal_dyn_elf libinput_so m_so)
 
 # evdev: real keyboard event source (xHCI HID → SHM ring → terminal) +
 # EVIOCG* ioctl query. Replaces the kbd driver for terminal input.

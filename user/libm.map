@@ -1,0 +1,43 @@
+# libm.map — libm.so 导出符号版本脚本
+#
+# 规则：math.h 中声明的所有函数 + sincos（GNU 扩展）
+#   - global: math.h 公开接口的全部 out-of-line 定义
+#   - local: *; 所有内部符号 hidden
+#
+# 单版本节点 LIBM_1.0
+
+LIBM_1.0 {
+global:
+    /* <math.h> double functions */
+    acos; acosh; asin; asinh; atan; atanh; atan2;
+    cbrt; ceil; copysign; cos; cosh;
+    erf; erfc; exp; exp2; expm1;
+    fabs; fdim; floor; fma; fmax; fmin; fmod; frexp;
+    hypot;
+    ldexp; lgamma; llrint; llround; log; log10; log1p; log2; logb;
+    lrint; lround;
+    modf;
+    nan; nearbyint;
+    pow;
+    remainder; remquo; rint; round;
+    scalbln; scalbn; sin; sinh; sqrt;
+    tan; tanh; tgamma; trunc;
+
+    /* <math.h> float functions */
+    acosf; acoshf; asinf; asinhf; atanf; atanhf; atan2f;
+    cbrtf; ceilf; cosf; coshf;
+    erff; erfcf; expf; exp2f; expm1f;
+    fabsf; floorf; fmodf; hypotf;
+    logf; log10f; log2f;
+    modff;
+    powf;
+    roundf;
+    sinf; sinhf; sqrtf;
+    tanf; tanhf; truncf;
+
+    /* GNU extensions */
+    sincos; sincosf;
+
+local:
+    *;
+};

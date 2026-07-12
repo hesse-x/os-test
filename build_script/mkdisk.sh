@@ -26,8 +26,8 @@ BUILD_DIR="${PROJECT_DIR}/build"
 TESTDATA_DIR="${PROJECT_DIR}/testdata"
 
 # Check dependency files
-for f in init.elf myos.elf BOOTX64.EFI kbd_driver.elf evdev.elf terminal.elf shell.elf \
-         libc.a libc.so libinput.so hello.elf ldso.elf hello_dyn.elf udevd.elf; do
+for f in init.elf myos.elf BOOTX64.EFI evdev.elf terminal.elf shell.elf \
+         libc.a libc.so libinput.so libm.so hello.elf ldso.elf hello_dyn.elf udevd.elf; do
     if [ ! -f "${BUILD_DIR}/${f}" ]; then
         echo "mkdisk.sh: ${BUILD_DIR}/${f} not found, run build.sh first"
         exit 1
@@ -86,7 +86,6 @@ mmd -i "${BUILD_DIR}/part2.img" ::lib
 mmd -i "${BUILD_DIR}/part2.img" ::usr/share ::usr/share/libinput
 
 # Copy files into directory structure
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/kbd_driver.elf"   ::driver/kbd.dev
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/evdev.elf"        ::driver/evdev.dev
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/terminal.elf"     ::usr/bin/terminal
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/shell.elf"        ::usr/bin/shell
@@ -96,6 +95,7 @@ mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello.elf"        ::local/hello.
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/ldso.elf"         ::lib/ld.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.so"          ::lib/libc.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libinput.so"     ::lib/libinput.so
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libm.so"        ::lib/libm.so
 # ld.so multi-dependency test stub .so (plan_ld phase D): placed in /test/lib/ separate from production /lib/,
 # ld.so load_one() tries /lib/ first and falls back to /test/lib/ on failure (mirrors Linux DT_RPATH idea)
 mmd -i "${BUILD_DIR}/part2.img" ::test ::test/lib

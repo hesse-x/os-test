@@ -624,3 +624,64 @@ int closedir(DIR *dirp) {
   free(dir);
   return 0;
 }
+
+// ===================== scandir =====================
+int scandir(const char *dirp, struct dirent ***namelist,
+            int (*filter)(const struct dirent *),
+            int (*compar)(const struct dirent **, const struct dirent **)) {
+  DIR *dir = opendir(dirp);
+  if (!dir)
+    return -1;
+
+  size_t capacity = 32;
+  size_t count = 0;
+  struct dirent **list =
+      (struct dirent **)malloc(capacity * sizeof(struct dirent *));
+  if (!list) {
+    closedir(dir);
+    errno = ENOMEM;
+    return -1;
+  }
+
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    if (filter && !filter(entry))
+      continue;
+
+    struct dirent *copy = (struct dirent *)malloc(sizeof(struct dirent));
+    if (!copy) {
+      for (size_t i = 0; i < count; i++)
+        free(list[i]);
+      free(list);
+      closedir(dir);
+      errno = ENOMEM;
+      return -1;
+    }
+    *copy = *entry;
+
+    if (count >= capacity) {
+      capacity *= 2;
+      struct dirent **newlist =
+          (struct dirent **)realloc(list, capacity * sizeof(struct dirent *));
+      if (!newlist) {
+        free(copy);
+        for (size_t i = 0; i < count; i++)
+          free(list[i]);
+        free(list);
+        closedir(dir);
+        errno = ENOMEM;
+        return -1;
+      }
+      list = newlist;
+    }
+    list[count++] = copy;
+  }
+  closedir(dir);
+
+  if (compar)
+    qsort(list, count, sizeof(struct dirent *),
+          (int (*)(const void *, const void *))compar);
+
+  *namelist = list;
+  return (int)count;
+}

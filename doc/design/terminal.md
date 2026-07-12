@@ -21,10 +21,10 @@
 ### 数据流
 
 ```
-VGA 路径：
-键盘 → kbd_driver input SHM ring → Terminal 用户态 line discipline 处理：
-  · input_client_poll(input_shm, evs, 64) drain input_event_t ring
-  · input_event_to_ascii → 单字节 ASCII
+VGA 路径（libinput 变体）：
+键盘 → xHCI → HID SHM → evdev SHM ring → ringbuf_fops read() → libevdev 垫片
+  → libinput (libinput_dispatch + libinput_get_event)
+  → key_to_ascii raw key → terminal 用户态 line discipline 处理：
   · ISIG 开: Ctrl-C → sys_kill(-pgid, SIGINT)，不写入 master
   · ISIG 开: Ctrl-Z → sys_kill(-pgid, SIGTSTP)，不写入 master
   · ICANON 开: 积累字符直到 Enter → write(master, line)
@@ -158,9 +158,9 @@ Terminal 是 PTY master holder + VT100 渲染器 + ldisc 处理器。
 
 初始化流程：
 1. `display_client_init()` — attach KMS 显示 SHM（`open("/dev/kms")` + `ioctl(KMS_IOCTL_CREATE_BUF)` + `mmap` back buffer）
-2. `open("/dev/kbd")` → kbd_fd（轮询重试直到 kbd_driver 注册 /dev/kbd）
-3. `ioctl(kbd_fd, INPUT_BIND, &arg)` — arg.shm_fd=-1，kbd_driver 注册 consumer pid 用于 notify
-4. `mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_SHARED, kbd_fd, 0)` — 从 /dev/kbd inode->shm 映射 kbd_driver 的 input SHM ring
+2. `libinput_path_create_context(&interface, NULL)` — 创建 libinput path-seat 上下文
+3. `libinput_path_add_device(li, "/dev/input/event0")` — 添加键盘设备（libinput 内部通过 open_restricted 回调打开）
+4. `li_fd = libinput_get_fd(li)` — 获取 libinput fd 用于 poll
 5. `open("/dev/ptmx")` → 创建 PTY 对，获取 master_fd
 6. TIOCGPTN 获取 pty_idx，构造 pts_path "/dev/ptsN"
 7. fork → 子进程 open slave + dup2 0/1/2 + execve("/usr/bin/shell")
@@ -169,9 +169,10 @@ Terminal 是 PTY master holder + VT100 渲染器 + ldisc 处理器。
 
 主循环：
 1. TCGETS 检查 termios 变化
-2. `input_client_poll(input_shm, evs, 64)` drain input_event_t ring → `input_event_to_ascii` → ldisc 处理 → master write / sys_kill(-pgid, SIGINT)
+2. `libinput_dispatch(li)` → `libinput_get_event(li)` 循环取键盘事件 → `key_to_ascii` → ldisc 处理 → master write / sys_kill(-pgid, SIGINT)
 3. master read → VT100 解析 → cell buffer → KMS 渲染 → serial echo
-4. Shell 退出（master read 返回 0）→ close master → 重新 open ptmx → fork shell
+4. `poll([li_fd, master_fd], 2, -1)` 阻塞等待下一轮输入
+5. Shell 退出（master read 返回 0）→ close master → 重新 open ptmx → fork shell
 
 ldisc 处理：
 - ISIG 开 + Ctrl-C → sys_kill(-pgid, SIGINT)

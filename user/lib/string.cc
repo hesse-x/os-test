@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <xos/errno.h>
 
 #ifdef __cplusplus
@@ -234,6 +235,8 @@ void bcopy(const void *src, void *dst, size_t n) { memmove(dst, src, n); }
 int bcmp(const void *s1, const void *s2, size_t n) {
   return memcmp(s1, s2, n) != 0 ? 1 : 0;
 }
+
+int ffs(int i) { return __builtin_ffs(i); }
 
 char *index(const char *s, int c) { return strchr(s, c); }
 char *rindex(const char *s, int c) { return strrchr(s, c); }

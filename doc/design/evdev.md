@@ -4,7 +4,7 @@
 
 evdev 进程在用户态实现 evdev 子系统的查询接口，让 `EVIOCG*` 系列 ioctl 对齐 Linux/FreeBSD `input.h` 标准。客户端 `ioctl(fd, EVIOCG*)` → 内核按 `_IOC_SIZE(cmd)` 分流：`≤48B` 走 inline `RECV_REQ`（`req_data[56]` = cmd + arg + minor），`>48B` 走变长 `RECV_IOCTL`（kmalloc buffer + `recv_msg.ioctl.minor`）→ evdev 进程主循环按 `msg.type` 分流、统一调 `handle_ioctl(cmd, minor, src, grab_val)` 按 minor 路由、按 cmd 处理 → `sys_resp` 回传。
 
-当前为纯 ioctl 设备（无 SHM、无 read、无事件流），evdev 进程内置静态桩设备供测试验证 `EVIOCG*` 查询管道与多设备路由。真实底层驱动接入、事件读取是后续工作。
+事件读取通过内核 `ringbuf_fops.read`（kernel/bsd/sysfs.c : ringbuf_read）从 SHM ring 读取 `struct input_event`（24B），consumer 通过 `read(/dev/input/event0)` 拉取。详见 [libinput.md](libinput.md)。
 
 ### 设计决策
 
@@ -162,9 +162,5 @@ test_evdev（user/test/test_evdev.c，仅 `if(TEST)` 构建）11 个用例：
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
 | grab 僵尸锁 | `file_put` 对 user-driver 不调 close，客户端崩溃/关 fd 后 grab_client 残留 → eventN 永久 EBUSY。需 close 通知驱动清除 grab 状态 | 中 |
-| 事件读取 read() 路径 | SHM ring + notify + block；打通后验 24B 事件流。当前纯 ioctl 设备无 read | 中 |
 | 真实底层驱动 → evdev 事件桥接 | kbd_driver 现走 → /dev/kbd → terminal 链；evdev 接入需决定两套 driver 并存还是合并。届时 evdev.cc 同时用 16B xos input_event 与 24B linux struct input_event，需 rename/隔离 | 中 |
 | stat().st_rdev + lookup_devt | libinput path-seat 的 udev devnum 反查前置；当前按路径 open 不触发。届时再建 makedev/i_rdev | 低 |
-| libevdev vendoring | libinput 编译的 required 依赖，桩会让设备分类全错 | 低 |
-| libudev shim / kkenv 桩 | 接口对齐 libudev，后端用 devtmpfs（不引入 devd） | 低 |
-| epoll / timerfd syscall | libinput 主循环所需，需真内核实现非 shim | 低 |
