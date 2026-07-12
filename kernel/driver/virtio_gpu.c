@@ -371,7 +371,7 @@ static int drm_alloc_fb_id(void) {
 /* DRM_IOCTL_VERSION */
 static long drm_ioctl_version(void *arg) {
   struct drm_version *v = (struct drm_version *)arg;
-  static const char driver_name[] = "virtio_gpu";
+  static const char driver_name[] = "drm";
   size_t name_len = sizeof(driver_name) - 1;
 
   v->version_major = 0;
@@ -517,7 +517,6 @@ static long drm_ioctl_getresources(void *arg) {
   r->count_crtcs = 1;
   r->count_connectors = 1;
   r->count_encoders = 1;
-  r->count_fbs = 0; /* dynamic */
   r->min_width = g_drm.fb_width;
   r->max_width = g_drm.fb_width;
   r->min_height = g_drm.fb_height;
@@ -538,6 +537,40 @@ static long drm_ioctl_getresources(void *arg) {
     uint32_t id = DRM_ENCODER_ID;
     if (copy_to_user((void *)(uintptr_t)r->encoder_id_ptr, &id, sizeof(id)))
       return -EFAULT;
+  }
+
+  /* count_fbs + fb_id_ptr fill — B-1 fix */
+  spin_lock(&g_drm.fb_lock);
+
+  int count = 0;
+  for (int i = 0; i < MAX_FRAMEBUFFERS; i++) {
+    if (g_drm.fbs[i].fb_id != 0)
+      count++;
+  }
+  r->count_fbs = count;
+
+  /* Fill fb ID buffer (second ioctl call) */
+  if (count > 0 && r->fb_id_ptr) {
+    uint32_t *fb_buf = (uint32_t *)kmalloc(count * sizeof(uint32_t));
+    if (!fb_buf) {
+      spin_unlock(&g_drm.fb_lock);
+      return -ENOMEM;
+    }
+    int idx = 0;
+    for (int i = 0; i < MAX_FRAMEBUFFERS; i++) {
+      if (g_drm.fbs[i].fb_id != 0)
+        fb_buf[idx++] = g_drm.fbs[i].fb_id;
+    }
+    spin_unlock(&g_drm.fb_lock);
+
+    if (copy_to_user((void *)(uintptr_t)r->fb_id_ptr, fb_buf,
+                     count * sizeof(uint32_t))) {
+      kfree(fb_buf);
+      return -EFAULT;
+    }
+    kfree(fb_buf);
+  } else {
+    spin_unlock(&g_drm.fb_lock);
   }
   return 0;
 }
@@ -1099,6 +1132,15 @@ static ssize_t drm_show_num_scanouts(char *buf, size_t len, void *priv) {
   return snprintf(buf, len, "%u\n", g_virtio_gpu.config.num_scanouts);
 }
 
+static ssize_t drm_attr_dev_show(char *buf, size_t len, void *priv) {
+  (void)priv;
+  /* DRM_MAJOR=226, minor=0 */
+  return snprintf(buf, len, "226:0\n");
+}
+
+static const struct sysfs_attr drm_attr_dev = {
+    .name = "dev", .show = drm_attr_dev_show, .priv = NULL};
+
 static const struct sysfs_attr drm_attr_vendor = {
     .name = "vendor", .show = drm_show_vendor, .priv = NULL};
 static const struct sysfs_attr drm_attr_device = {
@@ -1138,6 +1180,7 @@ void drm_dev_register(void) {
     sysfs_create_file(card0, "mode", &drm_attr_mode);
     sysfs_create_file(card0, "connector_status", &drm_attr_connector_status);
     sysfs_create_file(card0, "num_scanouts", &drm_attr_num_scanouts);
+    sysfs_create_file(card0, "dev", &drm_attr_dev);
     drm_dev_ops.sysfs_dir = card0;
   }
   printk(LOG_INFO, "drm: registered /dev/dri/card0\n");

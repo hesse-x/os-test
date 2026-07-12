@@ -28,6 +28,7 @@
 void inode_init(void);
 void page_cache_init(void);
 void devtmpfs_init(void);
+void sysfs_init(void);
 
 // POSIX hostname (group 1). Default "myos"; guarded against concurrent
 // sethostname/gethostname. Plain NUL-terminated C string, len < HOSTNAME_MAX.
@@ -72,10 +73,13 @@ void kernel_main(boot_info *bi) {
   xcore_init(bi);
 
   // VFS data structures must be initialized before driver_init
-  // so that devtmpfs_create() calls during driver_init survive
+  // so that devtmpfs_create() calls during driver_init survive.
+  // sysfs_init must also run before driver_init so that
+  // drm_dev_register can create /sys/class/drm/card0/* attributes.
   inode_init();
   page_cache_init();
   devtmpfs_init();
+  sysfs_init();
 
   driver_init();
   bsd_init();

@@ -175,7 +175,11 @@ void test_sysfs_drm_card0_getdents(void) {
   closedir(d);
   TEST_ASSERT_TRUE(found_vendor);
   TEST_ASSERT_TRUE(found_mode);
-  TEST_ASSERT_TRUE(count >= 8); /* 8 个属性文件 */
+  TEST_ASSERT_TRUE(
+      count >=
+      9); /* 9 个属性文件
+             (vendor/device/class/driver/enabled/mode/connector_status/num_scanouts/dev)
+           */
 }
 
 /* 通用 sysfs 属性读取 helper */
@@ -294,6 +298,22 @@ void test_sysfs_read_dir(void) {
   close(fd);
 }
 
+/* Phase B: /sys/class/drm/card0/dev 属性存在且格式正确 */
+void test_sysfs_drm_dev_attr(void) {
+  const char *path = "/sys/class/drm/card0/dev";
+  int fd = open(path, O_RDONLY);
+  TEST_ASSERT_TRUE(fd >= 0);
+
+  char buf[32];
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  TEST_ASSERT_TRUE(n > 0);
+  buf[n] = '\0';
+
+  /* Expect format "226:0\n" (MAJOR:MINOR) */
+  TEST_ASSERT_EQUAL_STRING("226:0\n", buf);
+}
+
 /* ===== R: 回归 ===== */
 
 void test_sysfs_drm_ioctl_regression(void) {
@@ -358,6 +378,8 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_sysfs_drm_enabled);
   RUN_TEST(test_sysfs_drm_stat_attr);
   RUN_TEST(test_sysfs_drm_stat_dir);
+  /* Phase B: sysfs dev attr */
+  RUN_TEST(test_sysfs_drm_dev_attr);
 
   /* S4 边界：sysfs 边界条件 */
 #ifdef TEST

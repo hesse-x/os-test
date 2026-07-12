@@ -88,3 +88,14 @@ add_user_dyn_elf(mount C SOURCES test_mount.c ${CMAKE_SOURCE_DIR}/third_party/Un
 if(TEST)
     add_user_dyn_elf(test_sysfs C SOURCES test_sysfs.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libinput/include/linux)
 endif()
+
+# Phase B: libdrm.so composite loading test (plan_drm2)
+add_user_dyn_elf(hello_drm_dyn C SOURCES hello_drm_dyn.c LINK_LIBS drm c)
+add_dependencies(hello_drm_dyn_dyn_elf drm_so)
+
+# Phase B: modetest — drmOpen + GETRESOURCES + CONNECTOR + DUMB + ADDFB + SETCRTC + PAGE_FLIP
+add_user_elf(modetest C SOURCES modetest.c LINK_LIBS drm c)
+add_dependencies(modetest_elf libdrm_fourcc_table)
+
+add_user_dyn_elf(modetest_dyn C SOURCES modetest_dyn.c LINK_LIBS drm c)
+add_dependencies(modetest_dyn_dyn_elf drm_so)
