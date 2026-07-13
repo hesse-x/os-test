@@ -7,3 +7,7 @@
 [submodule "third_party/libinput"]
 	path = third_party/libinput
 	url = https://gitlab.com/freedesktop-sdk/mirrors/freedesktop/libinput/libinput.git
+[submodule "third_party/mesa"]
+	path = third_party/mesa
+	url = https://gitlab.com/freedesktop-sdk/mirrors/freedesktop/mesa/mesa.git
+	branch = 26.1
