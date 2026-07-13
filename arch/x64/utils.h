@@ -37,8 +37,14 @@ static inline uint64_t rdmsr(uint32_t msr) {
 }
 
 // ===================== Memory helpers =====================
+// The 8-byte qword loop casts an arbitrary pointer to uint64_t*, which is
+// strict-aliasing UB. Under -O2 the compiler may reorder/eliminate stores
+// across the cast (observed: EDID header bytes lost after copy). The compiler
+// barrier below forces all prior stores to land and forbids reordering across
+// the copy, so the qword loads see up-to-date memory.
 __attribute__((no_sanitize("kernel-address"))) static inline void *
 __memcpy(void *dst, const void *src, size_t n) {
+  __asm__ volatile("" ::: "memory");
   size_t nq = n >> 3;
   uint64_t *dq = (uint64_t *)dst;
   const uint64_t *sq = (const uint64_t *)src;
@@ -71,6 +77,7 @@ __memset(void *dst, int val, size_t n) {
 
 __attribute__((no_sanitize("kernel-address"))) static inline void *
 __memmove(void *dst, const void *src, size_t n) {
+  __asm__ volatile("" ::: "memory");
   char *d = (char *)dst;
   const char *s = (const char *)src;
   if (d < s) {
@@ -102,6 +109,7 @@ __memmove(void *dst, const void *src, size_t n) {
 
 __attribute__((no_sanitize("kernel-address"))) static inline int
 __memcmp(const void *s1, const void *s2, size_t n) {
+  __asm__ volatile("" ::: "memory");
   const unsigned char *a = (const unsigned char *)s1;
   const unsigned char *b = (const unsigned char *)s2;
   size_t i = 0;

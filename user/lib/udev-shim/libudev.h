@@ -41,7 +41,11 @@ struct udev_monitor {
 };
 
 struct udev_enumerate {
-  int dummy;
+  int refcount;
+  struct udev *udev;
+  char subsystem_filter[32];       // "input" 等，空串表示不过滤
+  char sysname_filter[64];         // "event*" 等，空串表示不过滤
+  struct udev_list_entry *devices; // scan 结果链表头
 };
 
 // Forward declarations needed by cleanup functions

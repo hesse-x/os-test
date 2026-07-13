@@ -13,7 +13,6 @@
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/mount.h"
 
-typedef int64_t ssize_t;
 struct file;
 struct inode;
 struct kstat;

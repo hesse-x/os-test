@@ -7,19 +7,22 @@
 #include "libudev.h"
 
 #include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#include "xos/errno.h"
+#include "xos/fcntl.h"
+
 #include <sys/ioctl.h>
 #include <sys/stat.h>
-#include <unistd.h>
+#include <sys/types.h>
 #include <xos/input.h>
 #include <xos/ioctl.h>
 
 #define EVDEV_BITS_PER_LONG (sizeof(long) * 8)
-#define NBITS(x) ((((x)-1) / EVDEV_BITS_PER_LONG) + 1)
+#define NBITS(x) ((((x) - 1) / EVDEV_BITS_PER_LONG) + 1)
 #define LONG(x) ((x) / EVDEV_BITS_PER_LONG)
 #define OFF(x) ((x) % EVDEV_BITS_PER_LONG)
 
@@ -67,6 +70,20 @@ static void scan_devices_if_needed(void) {
   scan_devices();
 }
 
+// 尾部 '*' 通配符匹配（libinput 常用
+// udev_enumerate_add_match_sysname("event*")）。 仅支持形如 "event*"
+// 的尾部通配；无 '*' 时退化为精确 strcmp。 返回 1 匹配 / 0 不匹配（user 态无
+// stdbool.h，用 int）。
+static int match_pattern(const char *pattern, const char *name) {
+  if (!pattern || !name)
+    return 0;
+  const char *star = strchr(pattern, '*');
+  if (!star)
+    return strcmp(pattern, name) == 0;
+  size_t prefix_len = star - pattern;
+  return strncmp(name, pattern, prefix_len) == 0;
+}
+
 static int device_is_keyboard(const char *devnode) {
   // Attempt to detect keyboard via EVIOCGBIT
   int fd = open(devnode, O_RDONLY);
@@ -107,19 +124,29 @@ static struct udev_device *create_udev_device(struct udev *udev,
   strncpy(d->devnode, devnode, sizeof(d->devnode) - 1);
   d->devnode[sizeof(d->devnode) - 1] = '\0';
 
-  // Build syspath: /sys/devices/virtual/input/eventN
+  // subsystem 固定 "input"（scan_devices 仅扫描 /dev/input），先填以便 syspath
+  // 构造引用。
+  strncpy(d->subsystem, "input", sizeof(d->subsystem) - 1);
+  d->subsystem[sizeof(d->subsystem) - 1] = '\0';
+
+  // Build syspath: /sys/class/<subsystem>/<sysname>（与内核 sysfs
+  // 实际挂载路径一致）
   const char *basename = strrchr(devnode, '/');
   if (!basename)
     basename = devnode;
   else
     basename++;
-  snprintf(d->syspath, sizeof(d->syspath), "/sys/devices/virtual/input/%s",
-           basename);
+
+  // subsystem 此时已固定为 "input"；保留分支结构以便后续
+  // 扩展到 drm 等其它子系统。
+  if (strcmp(d->subsystem, "drm") == 0)
+    snprintf(d->syspath, sizeof(d->syspath), "/sys/class/drm/%s", basename);
+  else
+    snprintf(d->syspath, sizeof(d->syspath), "/sys/class/%s/%s", d->subsystem,
+             basename);
+
   strncpy(d->sysname, basename, sizeof(d->sysname) - 1);
   d->sysname[sizeof(d->sysname) - 1] = '\0';
-
-  strncpy(d->subsystem, "input", sizeof(d->subsystem) - 1);
-  d->subsystem[sizeof(d->subsystem) - 1] = '\0';
 
   // Detect if input or evdev type
   const char *s = strrchr(devnode, '/');
@@ -309,9 +336,39 @@ const char *udev_device_get_devtype(struct udev_device *udev_device) {
 
 const char *udev_device_get_sysattr_value(struct udev_device *udev_device,
                                           const char *sysattr) {
-  (void)udev_device;
-  (void)sysattr;
-  return NULL;
+  if (!udev_device || !sysattr)
+    return NULL;
+
+  // syspath 已为 "/sys/class/input/event0"（P1 修复后）。
+  // evdev 布局：name 在设备目录根，bustype/vendor/product/version 在 id/ 子目录
+  // （见 devtmpfs.c:661 target = (i==0) ? devdir : iddir）。
+  // drm 等其它子系统属性在类目录根。
+  char path[128];
+  if (strcmp(udev_device->subsystem, "input") == 0) {
+    if (strcmp(sysattr, "name") == 0)
+      snprintf(path, sizeof(path), "%s/%s", udev_device->syspath, sysattr);
+    else
+      snprintf(path, sizeof(path), "%s/id/%s", udev_device->syspath, sysattr);
+  } else {
+    snprintf(path, sizeof(path), "%s/%s", udev_device->syspath, sysattr);
+  }
+
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+    return NULL;
+
+  // 单次调用有效的静态缓冲区，下次调用覆盖（与 Linux libudev 行为一致，
+  // 调用者需立即拷贝）。
+  static char attr_buf[256];
+  ssize_t n = read(fd, attr_buf, sizeof(attr_buf) - 1);
+  close(fd);
+  if (n <= 0)
+    return NULL;
+
+  attr_buf[n] = '\0';
+  if (n > 0 && attr_buf[n - 1] == '\n')
+    attr_buf[n - 1] = '\0';
+  return attr_buf;
 }
 
 struct udev_list_entry *
@@ -405,32 +462,97 @@ struct udev_enumerate *udev_enumerate_new(struct udev *udev) {
 }
 
 void udev_enumerate_unref(struct udev_enumerate *udev_enumerate) {
+  if (!udev_enumerate)
+    return;
+  struct udev_list_entry *cur = udev_enumerate->devices;
+  while (cur) {
+    struct udev_list_entry *next = cur->next;
+    free(cur);
+    cur = next;
+  }
   free(udev_enumerate);
 }
 
 int udev_enumerate_add_match_subsystem(struct udev_enumerate *udev_enumerate,
                                        const char *subsystem) {
-  (void)udev_enumerate;
-  (void)subsystem;
+  if (!udev_enumerate || !subsystem)
+    return -EINVAL;
+  strncpy(udev_enumerate->subsystem_filter, subsystem,
+          sizeof(udev_enumerate->subsystem_filter) - 1);
+  udev_enumerate
+      ->subsystem_filter[sizeof(udev_enumerate->subsystem_filter) - 1] = '\0';
   return 0;
 }
 
 int udev_enumerate_add_match_sysname(struct udev_enumerate *udev_enumerate,
                                      const char *sysname) {
-  (void)udev_enumerate;
-  (void)sysname;
+  if (!udev_enumerate || !sysname)
+    return -EINVAL;
+  strncpy(udev_enumerate->sysname_filter, sysname,
+          sizeof(udev_enumerate->sysname_filter) - 1);
+  udev_enumerate->sysname_filter[sizeof(udev_enumerate->sysname_filter) - 1] =
+      '\0';
   return 0;
 }
 
 int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
-  (void)udev_enumerate;
+  if (!udev_enumerate)
+    return -EINVAL;
+
+  // 已知子系统白名单。无 subsystem_filter 时扫描全部。
+  const char *subsystems[] = {"input", "drm", NULL};
+  const char *only_subsys = udev_enumerate->subsystem_filter[0]
+                                ? udev_enumerate->subsystem_filter
+                                : NULL;
+
+  // 清除旧结果（支持重复 scan）。
+  struct udev_list_entry *cur = udev_enumerate->devices;
+  while (cur) {
+    struct udev_list_entry *next = cur->next;
+    free(cur);
+    cur = next;
+  }
+  udev_enumerate->devices = NULL;
+
+  for (int si = 0; subsystems[si]; si++) {
+    if (only_subsys && strcmp(subsystems[si], only_subsys) != 0)
+      continue;
+
+    char class_path[64];
+    snprintf(class_path, sizeof(class_path), "/sys/class/%s", subsystems[si]);
+    DIR *dir = opendir(class_path);
+    if (!dir)
+      continue;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+      if (entry->d_name[0] == '.')
+        continue;
+      if (udev_enumerate->sysname_filter[0] &&
+          !match_pattern(udev_enumerate->sysname_filter, entry->d_name))
+        continue;
+
+      char syspath[128];
+      snprintf(syspath, sizeof(syspath), "/sys/class/%s/%s", subsystems[si],
+               entry->d_name);
+
+      struct udev_list_entry *le = calloc(1, sizeof(struct udev_list_entry));
+      if (!le)
+        continue;
+      strncpy(le->name, syspath, sizeof(le->name) - 1);
+      le->name[sizeof(le->name) - 1] = '\0';
+      le->next = udev_enumerate->devices;
+      udev_enumerate->devices = le;
+    }
+    closedir(dir);
+  }
+
   return 0;
 }
 
 struct udev_list_entry *
 udev_enumerate_get_list_entry(struct udev_enumerate *udev_enumerate) {
-  (void)udev_enumerate;
-  return NULL;
+  return udev_enumerate ? udev_enumerate->devices : NULL;
 }
 
 char *udev_device_get_property_value_w(char *property, size_t property_size,

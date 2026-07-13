@@ -285,20 +285,43 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     }
     spin_unlock(&proc->recv_lock);
 
-    // Queue empty: block on WAIT_RECV
+    // Queue empty: block on WAIT_RECV.
+    //
+    // Arm the wait under scheduler_lock, then re-check the queue under the same
+    // lock. This closes the lost-wake-up window: a sender (sys_req / sys_msg_to
+    // / sys_notify / sys_ioctl proxy) enqueues under recv_lock, then wakes us
+    // under scheduler_lock only if we are already BLOCKED+WAIT_RECV. Without
+    // re-checking under scheduler_lock, the ordering
+    //   recv: see-empty -> unlock recv_lock
+    //   sender: enqueue (recv_lock) -> wake-check sees NOT-BLOCKED -> no wake
+    //   recv: set BLOCKED -> schedule()  (sleeps with a pending message!)
+    // leaves the request stranded until an unrelated wake (e.g. xHCI ISR) —
+    // exactly the sporadic 3s ETIMEDOUT seen on EVIOCGVERSION.
+    //
+    // The re-check reads recv_head/recv_tail without recv_lock. This is safe:
+    // every sender takes recv_lock *then* scheduler_lock, so under scheduler_lock
+    // any enqueue that started is fully visible and any not-yet-started enqueue
+    // can't have changed the pointers. recv_lock ranks below scheduler_lock, so
+    // it cannot be nested here.
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+    if (proc->recv_head != proc->recv_tail) {
+      // A message arrived between the lockless check and arming. A sender may
+      // have skipped the wake (we weren't BLOCKED yet) — don't sleep; loop back
+      // and dequeue. No state to undo: we never set BLOCKED this round.
+      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+      continue;
+    }
     proc->state = BLOCKED;
     proc->wait_event = WAIT_RECV;
     proc->wait_timed_out = 0;
-
     if (timeout_ms > 0) {
       proc->wait_deadline = sched_clock() + (int64_t)timeout_ms * 1000000ULL;
-      uint64_t flags;
-      spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
       sched_timer_queue_insert(cpu, proc);
-      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
     } else {
       proc->wait_deadline = 0;
     }
+    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
 
     schedule();
 

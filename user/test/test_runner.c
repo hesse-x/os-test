@@ -45,6 +45,7 @@ static struct test_entry tests[] = {
     {"drm_test_link", "/test/drm_test_link.elf"},
 #ifdef TEST
     {"test_sysfs", "/test/test_sysfs.elf"},
+    {"test_libudev", "/test/test_libudev.elf"},
 #endif
     {"ioctl_varlen", "/test/ioctl_varlen.elf"},
     {"epoll", "/test/epoll.elf"},

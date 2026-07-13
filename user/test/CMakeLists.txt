@@ -102,3 +102,12 @@ add_dependencies(modetest_elf libdrm_fourcc_table)
 
 add_user_dyn_elf(modetest_dyn C SOURCES modetest_dyn.c LINK_LIBS drm c)
 add_dependencies(modetest_dyn_dyn_elf drm_so)
+
+# libudev shim 阶段 A 回归测试（TEST 构建——依赖 evdev 真实注册态）。
+# 仿 test_sysfs：TEST 门控 + udev-shim 头文件 include 路径。
+# SOURCES 直接编入 udev.c：udev_* 符号实现于此文件，单独编译即可，无需
+# 链接整个 input 静态库（避免拖入 libinput 全套依赖）。默认 -Iinclude/uapi
+# 已覆盖 udev.c 的 <xos/input.h>/<xos/ioctl.h>。
+if(TEST)
+    add_user_dyn_elf(test_libudev C SOURCES test_libudev.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
+endif()

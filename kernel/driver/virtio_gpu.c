@@ -183,7 +183,6 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
       vring_poll_used(&vgpu->ctrlq);
       vgpu->response_ready = true;
       spin_unlock(&vgpu->cmd_lock);
-      printk(LOG_INFO, "virtio_gpu_send_cmd: completed via busy poll\n");
       return 0;
     }
   }
@@ -191,8 +190,6 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
   current_task->wait_event = WAIT_RECV;
   spin_unlock(&vgpu->cmd_lock);
   schedule();
-  printk(LOG_INFO, "virtio_gpu_send_cmd: woken, response_ready=%d\n",
-         vgpu->response_ready);
 
   /* Woken up: response is in resp_buf */
   return vgpu->response_ready ? 0 : -1;
@@ -567,7 +564,11 @@ static uint32_t drm_blob_create(const void *data, size_t length) {
   b->allocated = true;
   b->refcount = 1;
   b->length = length;
-  b->data = kmalloc(length);
+  /* Allocate blob data on a dedicated page (kmalloc may place it in a slab
+   * page shared with other objects; a neighbour's overwrite can corrupt
+   * the blob's content). Page-level allocation isolates the blob data. */
+  size_t alloc_size = (length <= PAGE_SIZE) ? PAGE_SIZE : length;
+  b->data = kmalloc(alloc_size);
   if (!b->data) {
     b->allocated = false;
     return 0;
