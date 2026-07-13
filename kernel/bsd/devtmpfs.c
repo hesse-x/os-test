@@ -15,9 +15,11 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h" // copy_from_user/strncpy_from_user/__user
 #include "kernel/xcore/mem/slab.h"
+#include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
+#include "xos/fcntl.h"
 #include <stddef.h>
 #include <xos/errno.h>
 #include <xos/stat.h>
@@ -328,8 +330,13 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
     f->target_pid = ops->driver_pid;
     /* SHM-backed 用户态驱动 = ringbuf (design 2.5) */
-    if (ops->driver_pid > 0 && ip->shm)
+    if (ops->driver_pid > 0 && ip->shm) {
       f->f_op = &ringbuf_fops;
+      ringbuf_init_cursor(ip, f);
+    }
+    /* ringbuf lifecycle: send RINGBUF_OPEN to driver (design 3.6) */
+    if (ops->driver_pid > 0 && ip->shm)
+      ringbuf_notify_open(ip, proc->pid);
     // Kernel device: call open callback. Callbacks mutate the FD_DEV file
     // in place (do not replace the pointer), so fd_table[fd] stays valid.
     if (ops->driver_pid == 0 && ops->open) {

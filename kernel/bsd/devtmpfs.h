@@ -18,8 +18,6 @@ struct shm;
 typedef int64_t ssize_t;
 typedef uint32_t __poll;
 
-struct sysfs_node;
-
 struct dev_ops {
   pid_t driver_pid; // 0 = kernel device, >0 = user-space driver
   bool is_block;    // true = block device, false = char device

@@ -183,6 +183,11 @@ sprint 10+: 交叉编译 clang for Xos → 在 Xos 上测试 cc1 → 自举
   - 废弃虚拟 syspath 内存库
   - 回改 udev_design.md 1.3/3.2.2/3.3.1 章节
 
+## 键盘 repeat 机制
+
+- [ ] evdev 层实现键盘 repeat：记录最后按下键 + 时间戳，用软定时器（timerfd 或 sys_gettime 轮询）在按住超过延迟后周期性重发 KEY_DOWN
+- [ ] 验证: 长按一个键持续输出字符（对齐 Linux EV_REP 行为）
+
 ## 已知 Bug 与技术债务
 
 | # | 问题 | 位置 | 说明 | 归属文档 |

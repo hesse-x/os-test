@@ -19,6 +19,7 @@
 #include "kernel/bsd/eventfd.h"
 #include "kernel/bsd/eventpoll.h"
 #include "kernel/bsd/fat32.h"
+#include "kernel/bsd/fops.h"
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/mount.h"
@@ -53,6 +54,7 @@
 #include <stddef.h>
 #include <xos/errno.h>
 #include <xos/fcntl.h>
+#include <xos/input.h>
 #include <xos/ioctl.h>
 #include <xos/mman.h>
 #include <xos/signal.h>
@@ -506,10 +508,10 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     rcu_read_unlock();
     if (f && f->f_op && f->f_op->mmap) {
       uint64_t ret = f->f_op->mmap(proc, f, size);
-      // f_op->mmap may reject consumers (e.g. ringbuf_fops only allows the
-      // driver owner). Fall through to the FD_DEV SHM path so consumers can
-      // still mmap the inode-bound SHM.
-      if (ret != (uint64_t)-EPERM && ret != (uint64_t)-ENOSYS) {
+      // -ENOSYS: f_op doesn't handle mmap → fall through to FD_DEV SHM path.
+      // -EPERM: hard rejection (e.g. ringbuf_fops blocks non-driver consumers).
+      // Other negatives: hard error.
+      if (ret != (uint64_t)-ENOSYS) {
         file_put(f);
         spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
         return ret;
@@ -1885,6 +1887,35 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     if (cmd == RINGBUF_WAKE) {
       printk(LOG_INFO, "RINGBUF_WAKE: ino=%u wq=%p\n", (unsigned)ip->ino,
              (void *)ip->wq);
+      if (ip->wq)
+        __wake_up(ip->wq, POLLIN);
+      ret = 0;
+      goto out;
+    }
+    /* RINGBUF_INJECT: kernel-mediated event injection into ringbuf SHM.
+     * Any process can inject — the kernel controls the write (no mmap bypass).
+     */
+    if (cmd == RINGBUF_INJECT) {
+      if (!ip->shm) {
+        ret = -(int64_t)ENODEV;
+        goto out;
+      }
+      struct ringbuf_header *hdr = (struct ringbuf_header *)phys_to_virt(
+          (__force phys_addr_t)ip->shm->phys);
+      if (!hdr || hdr->magic != RINGBUF_MAGIC) {
+        ret = -(int64_t)ENODEV;
+        goto out;
+      }
+      struct input_event ev;
+      if (copy_from_user(&ev, arg, sizeof(ev))) {
+        ret = -(int64_t)EFAULT;
+        goto out;
+      }
+      uint32_t slot = hdr->head % hdr->capacity;
+      uint8_t *base = (uint8_t *)hdr;
+      void *slot_addr = base + hdr->data_offset + slot * hdr->elem_size;
+      __memcpy(slot_addr, &ev, hdr->elem_size);
+      hdr->head = (hdr->head + 1) % hdr->capacity;
       if (ip->wq)
         __wake_up(ip->wq, POLLIN);
       ret = 0;

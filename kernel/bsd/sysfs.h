@@ -14,6 +14,9 @@
 #include "kernel/bsd/mount.h"
 
 typedef int64_t ssize_t;
+struct file;
+struct inode;
+struct kstat;
 
 /* sysfs 属性回调 (对齐 Linux kobject_attribute) */
 struct sysfs_attr {
@@ -68,9 +71,14 @@ struct inode *sysfs_lookup(const char *relpath);
 ssize_t sysfs_getdents(struct inode *dir, struct dir_context *ctx);
 int sysfs_stat(const char *relpath, struct kstat *ks);
 
-struct fstype;
 extern struct fstype sysfs_fstype;
 extern const struct file_operations sysfs_fops;
 extern const struct file_operations ringbuf_fops;
+
+/* ringbuf lifecycle notification: send RINGBUF_OPEN to driver_pid */
+void ringbuf_notify_open(struct inode *ip, int32_t opener_pid);
+
+/* ringbuf cursor: initialize consumer offset to current head on open */
+void ringbuf_init_cursor(struct inode *ip, struct file *f);
 
 #endif

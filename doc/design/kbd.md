@@ -38,7 +38,7 @@ USB 键盘 → xHCI Transfer Ring → xHCI ISR (内核)
 kbd_driver (用户态, IOPL=0):
   open("/dev/usb_hid_kbd") + mmap → get_keycode_init()
   input_driver_run 主循环 sys_recv → EINTR（ISR wake）
-  → get_keycode() 读 HID SHM ring + 对比 last_report + HID keycode→input_key → key_event
+  → get_keycode() 读 HID SHM slot → 完整 diff(modifier 8bit + 普通键 6位)入 pending 队列 → 逐个弹出 key_event
   → on_key_event() 填 input_event_t → broadcast_event 写 input SHM ring + notify 所有 consumers
 
 terminal: open("/dev/kbd") + INPUT_BIND + mmap(MAP_SHARED, kbd_fd)
@@ -87,10 +87,10 @@ terminal: open("/dev/kbd") + INPUT_BIND + mmap(MAP_SHARED, kbd_fd)
 **3 层函数**：
 
 1. **获取层**（内核侧）：xHCI ISR 读 HID DMA buffer → 写 USB HID SHM sub-ring → wake kbd_driver（kbd_openers[] 中所有 pid）
-2. **翻译层**（用户态）：user/lib/usb_kbd.cc : `get_keycode()` — 读 SHM slot + 对比 last_report[8] 检测 press/release + HID keycode→input_key 映射（`hid_to_input_key[256]` 查找表） + modifier bitmap→MOD_* flags
+2. **翻译层**（用户态）：user/lib/usb_kbd.cc : `get_keycode()` — 读 SHM slot + 完整 diff（modifier 全 8 bit + 普通键全 6 位）所有变化入 pending 队列 + 逐个弹出返回 + HID keycode→input_key 映射（`hid_to_input_key[256]` 查找表） + modifier bitmap→MOD_* flags
 3. **推送层**（用户态库）：user/lib/input_driver.cc : `broadcast_event()` — on_key_event 填 input_event_t → 写 input SHM ring（head/tail 原子操作）+ 无条件 notify 所有 bound consumer pid
 
-初始化：user/lib/usb_kbd.cc : `get_keycode_init(shm_addr)` 设置 SHM 地址和 last_report 状态
+初始化：user/lib/usb_kbd.cc : `get_keycode_init(shm_addr)` 设置 SHM 地址、清 last_report 和 pending 队列、丢弃 HID ring 积压（`tail=head`）
 
 ### 输出 SHM 协议（evdev-style，1 页 4KB）
 
@@ -191,5 +191,6 @@ kernel/driver/xhci.c : xhci_init_keyboard 完整流程：
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
 | 热插拔 | Port Status Change 事件处理 + 内核工作队列；当前枚举在 xhci_init 一步完成 | 中 |
+| 键盘 repeat | evdev 层记录最后按下键 + 时间戳，用软定时器（timerfd 或 sys_gettime 轮询）在按住超过延迟后周期性重发 KEY_DOWN；不在 HID diff 层做（report 不含 repeat 信息） | 中 |
 | USB mouse | 第二设备 slot / 第二 endpoint / mouse sub-ring + EV_REL 事件 | 低 |
 | 驱动崩溃自动重连 | 终端检测 POLLERR → close(fd) → 循环 open 重连；需 Wayland compositor 架构 | 低 |

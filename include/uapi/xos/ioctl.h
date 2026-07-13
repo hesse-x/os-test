@@ -59,5 +59,7 @@
 
 // ringbuf ioctls (type='R')
 #define RINGBUF_WAKE _IO('R', 0x01) // wake ringbuf poll/epoll waiters
+#define RINGBUF_INJECT                                                         \
+  _IOW('R', 0x02, input_event) // inject one event via kernel
 
 #endif

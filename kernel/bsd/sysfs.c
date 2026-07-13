@@ -5,16 +5,21 @@
  */
 #include "kernel/bsd/sysfs.h"
 
+#include "arch/x64/smp.h"
+#include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/kpi.h"
+#include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
-#include "kernel/xcore/mem/slab.h"
+#include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
+#include "xos/syscall_nums.h"
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/socket.h>
@@ -311,7 +316,9 @@ const struct sysfs_attr evdev_attr_version = {.name = "version",
                                               .show = evdev_show_version};
 
 /* ===== ringbuf_fops: SHM ring buffer 事件流 (design 3.5) ===== */
+#include "kernel/bsd/file_poll.h"
 #include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/sched.h"
 #include <xos/input.h>
 
 static struct ringbuf_header *phys_to_ringbuf_hdr(struct shm *shm) {
@@ -326,9 +333,17 @@ static void *phys_to_ringbuf_slot(struct shm *shm, struct ringbuf_header *hdr,
   return base + hdr->data_offset + slot * hdr->elem_size;
 }
 
+static void ringbuf_wake_cb(wait_queue_t *wq, unsigned long flags) {
+  xtask *target = (xtask *)wq->data;
+  (void)flags;
+  wake_with_event(target, WAIT_POLL);
+}
+
 static ssize_t ringbuf_read(struct xtask *proc, struct file *f, void *buf,
                             size_t count) {
   (void)proc;
+  if (count == 0)
+    return 0;
   struct inode *ip = f->inode;
   if (!ip || !ip->shm)
     return -ENODEV;
@@ -349,9 +364,34 @@ static ssize_t ringbuf_read(struct xtask *proc, struct file *f, void *buf,
   if (cursor == head) {
     if (f->flags & O_NONBLOCK)
       return -EAGAIN;
-    /* 阻塞等待: 加入 wq, schedule, 被 wake_process 唤醒后重试 */
-    /* TODO: 完整阻塞等待实现(依赖 wait_queue + evdev notify) */
-    return -EAGAIN;
+    /* 阻塞等待: 加入 per-inode wq, schedule, 被 RINGBUF_WAKE 唤醒后重试 */
+    wait_queue_head *wq = file_wq_get(f);
+    if (!wq)
+      return -EAGAIN;
+    wait_queue_t wait;
+    wait.func = ringbuf_wake_cb;
+    wait.data = current_task;
+    list_init(&wait.node);
+    add_wait_queue(wq, &wait);
+
+    while (cursor == head) {
+      current_task->state = BLOCKED;
+      current_task->wait_event = WAIT_POLL;
+      schedule();
+      /* 重新检查 */
+      hdr = phys_to_ringbuf_hdr(ip->shm);
+      if (!hdr || hdr->magic != RINGBUF_MAGIC) {
+        remove_wait_queue(wq, &wait);
+        return -ENODEV;
+      }
+      head = hdr->head;
+      cursor = (uint32_t)f->offset;
+      if (f->flags & O_NONBLOCK) {
+        remove_wait_queue(wq, &wait);
+        return -EAGAIN;
+      }
+    }
+    remove_wait_queue(wq, &wait);
   }
 
   uint32_t avail = (head > cursor) ? (head - cursor) : (cap - cursor + head);
@@ -386,20 +426,47 @@ static __poll ringbuf_poll(struct xtask *proc, struct file *f, int events) {
 }
 
 static int ringbuf_close(struct xtask *proc, struct file *f) {
-  (void)proc;
   struct inode *ip = f->inode;
   if (!ip || !ip->i_priv)
     return 0;
   struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
   if (ops->driver_pid > 0) {
-    /* 发 RINGBUF_CLOSE 通知给 evdev (design 3.6) */
-    struct ringbuf_lifecycle_msg msg = {.opcode = RINGBUF_CLOSE,
-                                        .pid = proc->pid};
-    __strncpy(msg.name, "", 31);
-    /* TODO: 通过 RECV_REQ 机制发送 — 当前简化为 no-op */
-    (void)msg;
+    /* 发 RINGBUF_CLOSE 通知给 driver (design 3.6) */
+    recv_msg msg;
+    __memset(&msg, 0, sizeof(msg));
+    msg.type = RECV_NOTIFY;
+    msg.src = (uint32_t)proc->pid;
+    struct ringbuf_lifecycle_msg lm = {.opcode = RINGBUF_CLOSE,
+                                       .pid = proc->pid};
+    __strncpy(lm.name, "", 31);
+    __memcpy(msg.data, &lm, sizeof(lm));
+    notify_and_wake(ops->driver_pid, &msg);
   }
   return 0;
+}
+
+void ringbuf_init_cursor(struct inode *ip, struct file *f) {
+  if (!ip || !ip->shm)
+    return;
+  struct ringbuf_header *hdr = phys_to_ringbuf_hdr(ip->shm);
+  if (hdr && hdr->magic == RINGBUF_MAGIC)
+    f->offset = hdr->head;
+}
+
+void ringbuf_notify_open(struct inode *ip, int32_t opener_pid) {
+  if (!ip || !ip->i_priv)
+    return;
+  struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+  if (ops->driver_pid <= 0)
+    return;
+  recv_msg msg;
+  __memset(&msg, 0, sizeof(msg));
+  msg.type = RECV_NOTIFY;
+  msg.src = (uint32_t)opener_pid;
+  struct ringbuf_lifecycle_msg lm = {.opcode = RINGBUF_OPEN, .pid = opener_pid};
+  __strncpy(lm.name, "", 31);
+  __memcpy(msg.data, &lm, sizeof(lm));
+  notify_and_wake(ops->driver_pid, &msg);
 }
 
 static uint64_t ringbuf_mmap(struct xtask *proc, struct file *f,
@@ -414,8 +481,9 @@ static uint64_t ringbuf_mmap(struct xtask *proc, struct file *f,
     return -EPERM;
   if (!ip->shm)
     return -ENODEV;
-  /* 映射 SHM 物理页到调用者地址空间 */
-  /* TODO: 复用现有 FD_DEV mmap SHM 路径 */
+  /* Driver owner: return -ENOSYS so sys_mmap falls through to the FD_DEV
+   * SHM page-mapping path. Consumers are rejected by -EPERM above
+   * (sys_mmap does not fall through on EPERM). */
   return -ENOSYS;
 }
 

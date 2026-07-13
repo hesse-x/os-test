@@ -17,6 +17,14 @@ static uint8_t last_report[8];
 static volatile struct usb_hid_shm_header *hid_hdr;
 static volatile uint8_t *hid_shm_base;
 
+// Pending event queue: buffers all events from one HID frame so that
+// get_keycode returns one event per call while diff processes all changes
+// without loss. Single-threaded (evdev consumer), no concurrency issues.
+#define KBD_PENDING_MAX 16
+static key_event pending[KBD_PENDING_MAX];
+static int pending_head;
+static int pending_tail;
+
 // HID keycode → input_key mapping (core keys per HID Usage Table)
 // HID Usage 0x04-0x1D: Keyboard A-Z (alphabetical order!)
 // HID Usage 0x1E-0x26: Keyboard 1-0 (row, 1=0x1E, 2=0x1F, ... 0=0x27)
@@ -86,29 +94,49 @@ void get_keycode_init(void *shm_addr) {
   hid_shm_base = (volatile uint8_t *)shm_addr;
   hid_hdr = (volatile struct usb_hid_shm_header *)shm_addr;
   memset(last_report, 0, 8);
+  // Clear pending queue
+  pending_head = 0;
+  pending_tail = 0;
+  // Discard stale HID slots accumulated before evdev started
+  __atomic_store_n(&hid_hdr->rings[0].tail,
+                   __atomic_load_n(&hid_hdr->rings[0].head, __ATOMIC_ACQUIRE),
+                   __ATOMIC_RELEASE);
 }
 
 int get_keycode(key_event *ev) {
   if (!hid_hdr)
     return -1;
 
-  uint32_t head = __atomic_load_n(&hid_hdr->rings[0].head, __ATOMIC_ACQUIRE);
-  uint32_t tail = __atomic_load_n(&hid_hdr->rings[0].tail, __ATOMIC_ACQUIRE);
+  // 1. Pop from pending queue (events from previously processed slot)
+  if (pending_head != pending_tail) {
+    *ev = pending[pending_tail];
+    pending_tail = (pending_tail + 1) % KBD_PENDING_MAX;
+    return 0;
+  }
 
-  if (head == tail)
-    return -1; // ring empty
+  // 2. Find next keyboard slot in ring, skipping non-keyboard slots.
+  //    Only one keyboard slot per call — queue empties → return -1,
+  //    evdev sends EV_SYN, next ISR wake processes next slot.
+  //    This aligns with Linux: one HID report → one event batch → one EV_SYN.
+  volatile struct usb_hid_slot *slot = NULL;
+  for (;;) {
+    uint32_t head = __atomic_load_n(&hid_hdr->rings[0].head, __ATOMIC_ACQUIRE);
+    uint32_t tail = __atomic_load_n(&hid_hdr->rings[0].tail, __ATOMIC_ACQUIRE);
 
-  // Read slot at tail position
-  volatile struct usb_hid_slot *slot =
-      (volatile struct usb_hid_slot *)(hid_shm_base + HID_SUBRING_KBD_OFFSET +
-                                       tail * HID_SLOT_SIZE);
+    if (head == tail)
+      return -1; // ring empty
 
-  // Only process keyboard type
-  if (slot->type != HID_TYPE_KEYBOARD) {
-    // Skip non-keyboard slot
+    slot =
+        (volatile struct usb_hid_slot *)(hid_shm_base + HID_SUBRING_KBD_OFFSET +
+                                         tail * HID_SLOT_SIZE);
+
+    // Advance tail regardless of slot type
     __atomic_store_n(&hid_hdr->rings[0].tail, (tail + 1) % HID_SUBRING_CAPACITY,
                      __ATOMIC_RELEASE);
-    return -1; // let caller loop to try next slot
+
+    if (slot->type == HID_TYPE_KEYBOARD)
+      break; // found keyboard slot, process it below
+    // skip non-keyboard slot, continue to next
   }
 
   // Parse 8-byte HID Boot Protocol report
@@ -118,60 +146,56 @@ int get_keycode(key_event *ev) {
   for (int i = 0; i < 6; i++)
     current_keys[i] = slot->data[2 + i];
 
+  // Save old report values before updating
   uint8_t last_mods = last_report[0];
   uint8_t last_keys[6];
   for (int i = 0; i < 6; i++)
     last_keys[i] = last_report[2 + i];
 
-  // Advance tail
-  __atomic_store_n(&hid_hdr->rings[0].tail, (tail + 1) % HID_SUBRING_CAPACITY,
-                   __ATOMIC_RELEASE);
-
-  // Update last_report
+  // Update last_report (correct baseline for next frame)
   for (int i = 0; i < 8; i++)
     last_report[i] = slot->data[i];
 
-  // Detect events:
-  // 1. Modifier changes — if modifier bitmap changed, report modifier
-  // press/release
+  // 3. Complete diff: enqueue all events from this slot
+  // Modifier changes: all 8 bits, each changed bit generates one event
   uint8_t mod_diff = current_mods ^ last_mods;
-  if (mod_diff) {
-    // Find which modifier bit changed (only first one for simplicity)
-    // Check for new modifier pressed
-    for (int bit = 0; bit < 8; bit++) {
-      if ((mod_diff >> bit) & 1) {
-        uint8_t pressed = (current_mods >> bit) & 1;
-        // Map modifier bit to a key via HID Usage 0xE0+bit
-        ev->key = hid_to_input_key[0xE0 + bit];
-        // Override with specific modifier key constants
-        switch (bit) {
-        case 0:
-          ev->key = KEY_LEFTCTRL;
-          break;
-        case 1:
-          ev->key = KEY_LEFTSHIFT;
-          break;
-        case 2:
-          ev->key = KEY_LEFTALT;
-          break;
-        case 5:
-          ev->key = KEY_RIGHTSHIFT;
-          break;
-        case 6:
-          ev->key = KEY_RIGHTALT;
-          break;
-        case 4:
-          ev->key = KEY_RIGHTCTRL;
-          break;
-        }
-        ev->pressed = pressed;
-        ev->modifiers = hid_modifier_to_mods(current_mods);
-        return 0;
+  for (int bit = 0; bit < 8; bit++) {
+    if ((mod_diff >> bit) & 1) {
+      key_event ke;
+      ke.key = hid_to_input_key[0xE0 + bit];
+      // Override with specific modifier key constants
+      switch (bit) {
+      case 0:
+        ke.key = KEY_LEFTCTRL;
+        break;
+      case 1:
+        ke.key = KEY_LEFTSHIFT;
+        break;
+      case 2:
+        ke.key = KEY_LEFTALT;
+        break;
+      case 5:
+        ke.key = KEY_RIGHTSHIFT;
+        break;
+      case 6:
+        ke.key = KEY_RIGHTALT;
+        break;
+      case 4:
+        ke.key = KEY_RIGHTCTRL;
+        break;
+      }
+      ke.pressed = (current_mods >> bit) & 1;
+      ke.modifiers = hid_modifier_to_mods(current_mods);
+      // Enqueue if space available
+      int next_head = (pending_head + 1) % KBD_PENDING_MAX;
+      if (next_head != pending_tail) {
+        pending[pending_head] = ke;
+        pending_head = next_head;
       }
     }
   }
 
-  // 2. Find newly pressed keycodes (in current but not in last)
+  // Newly pressed keycodes (in current but not in last)
   for (int i = 0; i < 6; i++) {
     if (current_keys[i] == 0)
       continue;
@@ -183,16 +207,22 @@ int get_keycode(key_event *ev) {
       }
     }
     if (!found_in_last) {
-      ev->key = hid_to_input_key[current_keys[i]];
-      ev->pressed = 1;
-      ev->modifiers = hid_modifier_to_mods(current_mods);
-      if (ev->key == 0)
-        continue; // unmapped key, try next
-      return 0;
+      uint16_t mapped = hid_to_input_key[current_keys[i]];
+      if (mapped == 0)
+        continue; // unmapped key
+      key_event ke;
+      ke.key = mapped;
+      ke.pressed = 1;
+      ke.modifiers = hid_modifier_to_mods(current_mods);
+      int next_head = (pending_head + 1) % KBD_PENDING_MAX;
+      if (next_head != pending_tail) {
+        pending[pending_head] = ke;
+        pending_head = next_head;
+      }
     }
   }
 
-  // 3. Find released keycodes (in last but not in current)
+  // Released keycodes (in last but not in current)
   for (int i = 0; i < 6; i++) {
     if (last_keys[i] == 0)
       continue;
@@ -204,15 +234,28 @@ int get_keycode(key_event *ev) {
       }
     }
     if (!found_in_current) {
-      ev->key = hid_to_input_key[last_keys[i]];
-      ev->pressed = 0;
-      ev->modifiers = hid_modifier_to_mods(current_mods);
-      if (ev->key == 0)
+      uint16_t mapped = hid_to_input_key[last_keys[i]];
+      if (mapped == 0)
         continue;
-      return 0;
+      key_event ke;
+      ke.key = mapped;
+      ke.pressed = 0;
+      ke.modifiers = hid_modifier_to_mods(current_mods);
+      int next_head = (pending_head + 1) % KBD_PENDING_MAX;
+      if (next_head != pending_tail) {
+        pending[pending_head] = ke;
+        pending_head = next_head;
+      }
     }
   }
 
-  // No event found in this report — try consuming next slot
+  // Pop first event from queue if any
+  if (pending_head != pending_tail) {
+    *ev = pending[pending_tail];
+    pending_tail = (pending_tail + 1) % KBD_PENDING_MAX;
+    return 0;
+  }
+
+  // No changes in this slot (same keys held, no modifier change)
   return -1;
 }
