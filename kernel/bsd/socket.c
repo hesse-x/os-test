@@ -1726,20 +1726,41 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   }
 
   // Per-fd wait registrations. While blocked, each polled fd holds a reference
-  // and a wait_queue_t on f->wq so the fd's __wake_up (e.g. timerfd expiry)
+  // and a wait_queue_t on its wq so the fd's __wake_up (e.g. timerfd expiry)
   // wakes us instead of waiting out the full deadline.
-  struct file *polled[MAX_FD];
-  wait_queue_t pwq[MAX_FD];
-  for (nfds_t i = 0; i < nfds; i++)
+  //
+  // Heap-allocate polled[]/pwq[]: at nfds up to MAX_FD(128) this is ~5KB
+  // (128*8 + 128*32). On an 8KB kernel stack that leaves under 1.5KB for the
+  // schedule()/switch_to call chain and overruns into pwq, corrupting
+  // node->prev to garbage and #PF-ing in list_remove during poll_out teardown.
+  // Linux kmallocs its poll_list for the same reason.
+  struct file **polled = (struct file **)kmalloc(nfds * sizeof(struct file *));
+  wait_queue_t *pwq = (wait_queue_t *)kmalloc(nfds * sizeof(wait_queue_t));
+  if (!polled || !pwq) {
+    kfree(kfds);
+    kfree(polled);
+    kfree(pwq);
+    return (int64_t)-ENOMEM;
+  }
+  for (nfds_t i = 0; i < nfds; i++) {
     polled[i] = NULL;
+    list_init(&pwq[i].node); // self-ref = "not on any wq"; makes the
+                             // on-wq guards below reliable on heap memory
+                             // (kmalloc returns poison, not zeroed).
+  }
 
+  // polled[i] != NULL marks "we retained a file ref for fd i and its pwq[i] is
+  // registered on that fd's wq". poll_out walks it to remove each waiter and
+  // drop the ref. Removal must resolve the wq via file_wq_get(f) — the same wq
+  // used at add_wait_queue time — not f->wq: for ringbuf-backed FD_DEV the wq
+  // is per-inode (f->inode->wq) while f->wq is NULL.
   uint64_t deadline = 0;
   if (timeout_ms > 0) {
     deadline = sched_clock() + (int64_t)timeout_ms * 1000000ULL;
   }
 
   int64_t ret = 0;
-  while (1) {
+  for (;;) {
     int ready = 0;
 
     // Check each fd and register a wait entry on its wq.
@@ -1773,10 +1794,28 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       // loop's file_put) can wake our BLOCKED poll.
       wait_queue_head *wq = file_wq_get(f);
       if (wq) {
-        pwq[i].func = poll_wait_cb;
-        pwq[i].data = proc;
-        list_init(&pwq[i].node);
-        add_wait_queue(wq, &pwq[i]);
+        // A node is "on a wq" iff not self-referential (list_init/list_remove
+        // both leave node.{prev,next} == &node). On the first iteration pwq[i]
+        // is freshly list_init'd below; on later iterations it may still be
+        // registered from the previous pass (we leave waiters in place across
+        // the blocked schedule() so wakeups during the wait reach us).
+        // Re-adding an already-linked node would corrupt the wq list
+        // (list_push_back on a linked node leaves dangling prev->next pointers,
+        // which then manifests as self-ref nodes wedged onto the wq and trip
+        // remove_wait_queue's WARN + __wake_up's WARN_ON_ONCE). So add at most
+        // once per call.
+        if (pwq[i].node.next == &pwq[i].node) {
+          pwq[i].func = poll_wait_cb;
+          pwq[i].data = proc;
+          list_init(&pwq[i].node);
+          add_wait_queue(wq, &pwq[i]);
+        }
+        // Drop a ref retained by a previous iteration's fd_lookup for this pfd
+        // before overwriting it, so only the latest lookup's ref survives to
+        // poll_out's file_put. (Each pass re-looks-up the fd; without this the
+        // earlier ref leaks.)
+        if (polled[i])
+          file_put(polled[i]);
         polled[i] = f; // retain reference until after schedule()
         continue;
       }
@@ -1786,20 +1825,20 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     if (ready > 0) {
       // Copy results back to user
       if (copy_to_user(fds, kfds, nfds * sizeof(struct pollfd))) {
-        kfree(kfds);
-        return (int64_t)-EFAULT;
+        ret = (int64_t)-EFAULT;
+        goto poll_out;
       }
-      kfree(kfds);
-      return (int64_t)ready;
+      ret = (int64_t)ready;
+      goto poll_out;
     }
 
     if (timeout_ms == 0) {
       if (copy_to_user(fds, kfds, nfds * sizeof(struct pollfd))) {
-        kfree(kfds);
-        return (int64_t)-EFAULT;
+        ret = (int64_t)-EFAULT;
+        goto poll_out;
       }
-      kfree(kfds);
-      return 0;
+      ret = 0;
+      goto poll_out;
     }
 
     // Block on WAIT_POLL
@@ -1808,11 +1847,11 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       if (now >= deadline) {
         __memset(kfds, 0, nfds * sizeof(struct pollfd));
         if (copy_to_user(fds, kfds, nfds * sizeof(struct pollfd))) {
-          kfree(kfds);
-          return (int64_t)-EFAULT;
+          ret = (int64_t)-EFAULT;
+          goto poll_out;
         }
-        kfree(kfds);
-        return 0; // timeout
+        ret = 0; // timeout
+        goto poll_out;
       }
       proc->wait_deadline = deadline;
       uint64_t pflags;
@@ -1838,36 +1877,47 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
       if (deliv) {
         ret = (int64_t)-EINTR;
-        break;
+        goto poll_out;
       }
     }
 
     if (proc->wait_timed_out && timeout_ms > 0) {
       __memset(kfds, 0, nfds * sizeof(struct pollfd));
       if (copy_to_user(fds, kfds, nfds * sizeof(struct pollfd))) {
-        kfree(kfds);
-        return (int64_t)-EFAULT;
+        ret = (int64_t)-EFAULT;
+        goto poll_out;
       }
-      kfree(kfds);
-      return 0; // timeout
+      ret = 0; // timeout
+      goto poll_out;
     }
 
     // Woken up — re-check all fds
   }
 
-  // Tear down any wait registrations still held from the last loop iteration.
+poll_out:
+  // Tear down every wait registration still held. Single cleanup point so no
+  // return path can leave a pwq[i] on a wq (leaked heap node + dangling wq
+  // links that wedge a later __wake_up traversal).
   for (nfds_t i = 0; i < nfds; i++) {
     if (!polled[i])
       continue;
     struct file *f = polled[i];
-    wait_queue_head *wq = f->wq;
-    if (wq)
-      remove_wait_queue(wq, &pwq[i]);
+    // Only remove a node that is actually on a wq (not self-referential). A
+    // node we registered is linked here; guarding avoids remove_wait_queue's
+    // self-ref WARN if a future path skips the add, and avoids a needless
+    // file_wq_get that would lazily allocate a wq just to remove from it.
+    if (pwq[i].node.next != &pwq[i].node) {
+      wait_queue_head *wq = file_wq_get(f);
+      if (wq)
+        remove_wait_queue(wq, &pwq[i]);
+    }
     file_put(f);
     polled[i] = NULL;
   }
 
   kfree(kfds);
+  kfree(polled);
+  kfree(pwq);
   return ret;
 }
 

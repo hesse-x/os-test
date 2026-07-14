@@ -11,13 +11,11 @@
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/file_poll.h"
-#include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
-#include "kernel/bsd/pty.h"
-#include "kernel/bsd/socket.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
+#include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
@@ -75,43 +73,12 @@ static void ep_poll_callback(wait_queue_t *wq, unsigned long flags) {
   spin_unlock(&ep->lock);
 }
 
-// Lazily allocate a wait_queue_head and store it into out_wq.
-// Returns the allocated wq, or NULL on OOM.
-static wait_queue_head *ep_wq_alloc(wait_queue_head **out_wq) {
-  wait_queue_head *wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
-  if (!wq)
-    return NULL;
-  init_wait_queue_head(wq);
-  *out_wq = wq;
-  return wq;
-}
-
 // Resolve which wait_queue_head a monitored file exposes for epoll waiters.
 // Lazily allocates the per-type wq on first epoll registration so that
-// data-ready wakeups can reach ep_poll_callback.
-static wait_queue_head *ep_target_wq(struct file *f) {
-  if (f->type == FD_PIPE && f->pipe) {
-    if (f->pipe->close_wq)
-      return f->pipe->close_wq;
-    return ep_wq_alloc(&f->pipe->close_wq);
-  }
-  if (f->type == FD_SOCKET && f->sock) {
-    if (f->sock->wq)
-      return f->sock->wq;
-    return ep_wq_alloc(&f->sock->wq);
-  }
-  if (f->type == FD_TTY && f->pty) {
-    if (f->pty->wq)
-      return f->pty->wq;
-    return ep_wq_alloc(&f->pty->wq);
-  }
-  if (f->type == FD_NETLINK && f->nlsock) {
-    if (f->nlsock->wq)
-      return f->nlsock->wq;
-    return ep_wq_alloc(&f->nlsock->wq);
-  }
-  return file_wq_get(f); // generic file wq (eventfd/timerfd/signalfd/other)
-}
+// data-ready wakeups can reach ep_poll_callback. Delegates to file_wq_get so
+// sys_poll and sys_epoll_wait register waiters on the same per-type wq (and
+// can't diverge — a divergence left sys_poll waiters on an unwoken wq).
+static wait_queue_head *ep_target_wq(struct file *f) { return file_wq_get(f); }
 
 // ===================== eventpoll lifecycle =====================
 eventpoll *eventpoll_create(void) {
