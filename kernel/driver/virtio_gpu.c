@@ -5,6 +5,10 @@
  */
 
 #include "kernel/driver/virtio_gpu.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+
 #include "arch/x64/apic.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
@@ -15,6 +19,7 @@
 #include "kernel/driver/driver.h"
 #include "kernel/driver/drm_internal.h"
 #include "kernel/driver/pci.h"
+#include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
@@ -23,6 +28,8 @@
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
+#include "kernel/xcore/wait_queue.h"
+#include "kernel/xcore/xtask.h"
 
 #include <xos/errno.h>
 #include <xos/page.h>
@@ -41,6 +48,34 @@ int g_drm_next_blob_id = 1;
 spinlock g_drm_files_lock = SPINLOCK_INIT;
 struct drm_file g_drm_files[MAX_DRM_FDS];
 struct drm_cursor g_drm_cursor;
+
+/* Per-command completion context: stack-allocated in virtio_gpu_send_cmd.
+   The vring callback sets completed=true when the device processes this
+   command's descriptor, allowing each caller to independently detect its
+   own completion without a shared global flag. */
+struct virtio_gpu_cmd_ctx {
+  volatile bool completed; /* set by virtio_gpu_cmd_callback from ISR */
+};
+
+static void virtio_gpu_cmd_callback(void *ctx, uint32_t len) {
+  /* Defensive: ctx must never be NULL in normal operation (it is the
+     per-cmd context set in vring_add_buf).  A NULL here means the used
+     ring was drained against a descriptor whose ctx had already been
+     cleared/reused by a concurrent drain — historically the direct cause
+     of the NULL-write #PF.  Harmless-ize it rather than crashing. */
+  if (!ctx)
+    return;
+  struct virtio_gpu_cmd_ctx *cmd_ctx = (struct virtio_gpu_cmd_ctx *)ctx;
+  cmd_ctx->completed = true;
+}
+
+/* Wake callback for wait_queue: bridges __wake_up → wake_with_event.
+   Lock order: cmd_wq.lock (held by __wake_up) → scheduler_lock (taken by
+   wake_with_event) — matches existing A-class pattern (wq→sched). */
+static void virtio_gpu_wake_cb(wait_queue_t *wq, unsigned long flags) {
+  xtask *target = (xtask *)wq->data;
+  wake_with_event(target, WAIT_VGPU_CMD);
+}
 
 /* Forward declarations */
 static void virtio_gpu_isr(trapframe *tf);
@@ -82,8 +117,17 @@ static int virtio_gpu_init_ctrlq(struct virtio_gpu_device *vgpu) {
   common->queue_used_lo = (uint32_t)(vgpu->ctrlq.used_phys & 0xFFFFFFFF);
   common->queue_used_hi = (uint32_t)(vgpu->ctrlq.used_phys >> 32);
 
-  /* Assign MSI-X vector to this queue (set before enable) */
-  common->queue_msix_vector = (uint16_t)vgpu->vpci.msix_vector;
+  /* Assign MSI-X vector to this queue (set before enable).
+     Per virtio spec 1.1 §4.1.4.3, queue_msix_vector is the MSI-X **table entry
+     index** (0-based), NOT the LAPIC vector number.  The device maps entry
+     index → LAPIC vector via its internal MSI-X table.  Writing the LAPIC
+     vector (69) causes the device to reject it (0xFFFF) since only entries 0..1
+     exist. */
+  common->queue_msix_vector = 0; /* MSI-X table entry 0 (queue interrupt) */
+  uint16_t accepted_vec = common->queue_msix_vector;
+  printk(LOG_INFO,
+         "virtio_gpu: queue_msix_vector entry=%u readback=%u (lapic_vec=%u)\n",
+         0, accepted_vec, vgpu->vpci.msix_vector);
 
   /* Enable queue */
   common->queue_enable = 1;
@@ -99,22 +143,24 @@ static int virtio_gpu_init_ctrlq(struct virtio_gpu_device *vgpu) {
 static void virtio_gpu_isr(trapframe *tf) {
   struct virtio_gpu_device *vgpu = &g_virtio_gpu;
   uint8_t isr_status = virtio_pci_read_isr(&vgpu->vpci);
-  printk(LOG_INFO, "virtio_gpu_isr: isr_status=0x%x\n", isr_status);
 
   if (isr_status & VIRTIO_ISR_QUEUE_INTR) {
-    /* Drain used ring: process completed commands */
-    int n = vring_poll_used(&vgpu->ctrlq);
-    printk(LOG_INFO, "virtio_gpu_isr: poll_used n=%d waiter=%p\n", n,
-           vgpu->waiter);
-    if (n > 0 && vgpu->waiter) {
-      /* Wake the task waiting for response */
-      xtask *w = vgpu->waiter;
-      vgpu->waiter = NULL;
-      vgpu->response_ready = true;
-      wake_with_event(w, WAIT_RECV);
-    }
+    /* Drain the used ring under cmd_lock so vring_poll_used (frees descs,
+       clears ctx[], advances used_idx) is mutually exclusive with the
+       process side's vring_add_buf (allocates descs, sets ctx[], publishes
+       avail).  This is the single place the used ring is drained now.
+       irqsave is symmetric with send_cmd's process-side acquisition: while
+       cmd_lock is held here, the originating CPU cannot re-enter this ISR.
+       __wake_up is performed after releasing cmd_lock to keep the lock
+       order one-directional (cmd_wq.lock → scheduler_lock inside
+       wake_with_event) and to minimize time spent in interrupt context. */
+    uint64_t flags;
+    spin_lock_irqsave(&vgpu->cmd_lock, &flags);
+    vring_poll_used(&vgpu->ctrlq);
+    spin_unlock_irqrestore(&vgpu->cmd_lock, flags);
+    __wake_up(&vgpu->cmd_wq, 0);
   }
-  /* config change: not handled in Phase 2 (no EDID) */
+  /* config change: not handled (no EDID) */
 
   lapic_eoi();
 }
@@ -128,7 +174,11 @@ static void virtio_gpu_isr(trapframe *tf) {
 static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
                                size_t cmd_len, void *resp_buf,
                                size_t resp_len) {
-  spin_lock(&vgpu->cmd_lock);
+  /* Per-command completion context: vring callback sets completed=true
+     when the device processes this descriptor.  Each caller has its own
+     ctx on the stack, so concurrent send_cmd invocations don't clobber
+     each other's state. */
+  struct virtio_gpu_cmd_ctx cmd_ctx = {.completed = false};
 
   /* Physical addresses for descriptors (must be guest-physical) */
   uint64_t cmd_phys = (uint64_t)PHY_ADDR((uintptr_t)cmd_buf);
@@ -139,60 +189,89 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
   uint32_t lens[2] = {(uint32_t)cmd_len, (uint32_t)resp_len};
   uint16_t flags[2] = {0, VRING_DESC_F_WRITE}; /* cmd: read-only; resp: write */
 
-  vgpu->response_buf = resp_buf;
-  vgpu->response_len = resp_len;
-  vgpu->response_ready = false;
-  vgpu->waiter = current_task; /* NULL during early boot (driver_init) */
-
-  int head = vring_add_buf(&vgpu->ctrlq, addrs, lens, flags, 2, NULL);
-  if (head < 0) {
+  /* During early boot (driver_init, before idle process exists) there is no
+     process context to sleep in: current_task is NULL and schedule() cannot
+     block. Poll the used ring synchronously instead. */
+  if (current_task == NULL) {
+    spin_lock(&vgpu->cmd_lock);
+    int head = vring_add_buf(&vgpu->ctrlq, addrs, lens, flags, 2, &cmd_ctx);
+    if (head < 0) {
+      spin_unlock(&vgpu->cmd_lock);
+      printk(LOG_ERROR, "virtio_gpu: vring_add_buf failed\n");
+      return -1;
+    }
+    vring_kick(&vgpu->ctrlq);
+    virtio_pci_notify(&vgpu->vpci, vgpu->ctrlq.notify_off);
+    while (!vring_has_used(&vgpu->ctrlq)) {
+      __asm__ volatile("pause" ::: "memory");
+    }
+    vring_poll_used(&vgpu->ctrlq); /* callback sets cmd_ctx.completed */
     spin_unlock(&vgpu->cmd_lock);
+    return cmd_ctx.completed ? 0 : -1;
+  }
+
+  /* Process context: register on wait queue, submit, and sleep in a loop.
+     The loop handles spurious wakes (__wake_up wakes all waiters; those
+     whose command hasn't completed yet re-sleep).  The "set BLOCKED →
+     re-check → schedule" pattern prevents lost wakeup: if the ISR fires
+     between setting BLOCKED and calling schedule(), wake_with_event sets
+     state to READY, and schedule() returns immediately. */
+  wait_queue_t wait;
+  wait.func = virtio_gpu_wake_cb;
+  wait.data = current_task;
+  list_init(&wait.node);
+  add_wait_queue(&vgpu->cmd_wq, &wait);
+
+  /* Hold cmd_lock with interrupts disabled: the virtio-gpu ISR also takes
+     cmd_lock to drain the used ring, so acquiring it irqsave on the
+     process side prevents a same-CPU ISR re-entry from deadlocking, and
+     makes the alloc/publish side of vring_add_buf mutually exclusive with
+     the ISR's drain side.  Use irq_flags to avoid clashing with the
+     descriptor flags[] array below. */
+  uint64_t irq_flags;
+  spin_lock_irqsave(&vgpu->cmd_lock, &irq_flags);
+  int head = vring_add_buf(&vgpu->ctrlq, addrs, lens, flags, 2, &cmd_ctx);
+  if (head < 0) {
+    spin_unlock_irqrestore(&vgpu->cmd_lock, irq_flags);
+    remove_wait_queue(&vgpu->cmd_wq, &wait);
     printk(LOG_ERROR, "virtio_gpu: vring_add_buf failed\n");
     return -1;
   }
 
-  /* Make command visible + kick */
+  /* Arm BLOCKED state before kick — lost-wakeup-safe: after we release
+     cmd_lock (re-enabling interrupts) the ISR may fire immediately, see
+     BLOCKED+WAIT_VGPU_CMD, and wake us.  WAIT_VGPU_CMD is a dedicated event:
+     IPC/pty wake_process(pid) matches only WAIT_RECV, so it cannot spuriously
+     wake us (which previously caused cross-source wakes and run_node
+     re-enqueue races under a shared WAIT_RECV). */
+  current_task->state = BLOCKED;
+  current_task->wait_event = WAIT_VGPU_CMD;
+
   vring_kick(&vgpu->ctrlq);
   virtio_pci_notify(&vgpu->vpci, vgpu->ctrlq.notify_off);
 
-  /* During early boot (driver_init, before idle process exists) there is no
-     process context to sleep in: current_task is NULL and schedule() cannot
-     block. Poll the used ring synchronously instead. Once a process context
-     is available, sleep/wake via the ISR as originally intended. */
-  if (current_task == NULL) {
-    while (!vring_has_used(&vgpu->ctrlq)) {
-      __asm__ volatile("pause" ::: "memory");
-    }
-    vring_poll_used(&vgpu->ctrlq);
-    vgpu->response_ready = true;
-    spin_unlock(&vgpu->cmd_lock);
-    return 0;
-  }
+  /* Release lock before sleeping — the ISR drains the used ring under
+     cmd_lock.  If the ISR already completed our command it set
+     cmd_ctx.completed=true and (via __wake_up) enqueued our run_node;
+     schedule() below dequeues it and runs us. */
+  spin_unlock_irqrestore(&vgpu->cmd_lock, irq_flags);
 
-  /* Sleep until ISR wakes us.
-     Fallback: MSI-X delivery for virtio-gpu in this environment is unreliable,
-     so busy-wait with a bounded timeout before falling through to schedule().
-   */
-  {
-    uint64_t spins = 0;
-    while (!vring_has_used(&vgpu->ctrlq) && spins < 100000000ULL) {
-      __asm__ volatile("pause" ::: "memory");
-      spins++;
-    }
-    if (vring_has_used(&vgpu->ctrlq)) {
-      vring_poll_used(&vgpu->ctrlq);
-      vgpu->response_ready = true;
-      spin_unlock(&vgpu->cmd_lock);
-      return 0;
-    }
-  }
-  current_task->state = BLOCKED;
-  current_task->wait_event = WAIT_RECV;
-  spin_unlock(&vgpu->cmd_lock);
-  schedule();
+  /* Wait loop.  We go through schedule() on EVERY iteration (do/while, not a
+     pre-test that early-exits): schedule() is the only place our run_node is
+     dequeued from the run_queue.  If the ISR already enqueued run_node (fast
+     completion), schedule() dequeues it and re-runs us; if not, we block
+     until the ISR wakes us with WAIT_VGPU_CMD.  Spurious wakes from other
+     sources are excluded by the dedicated event, so the loop only exits on
+     real completion.  The used ring is drained ONLY by the ISR; we never
+     poll it here. */
+  do {
+    current_task->state = BLOCKED;
+    current_task->wait_event = WAIT_VGPU_CMD;
+    schedule();
+  } while (!cmd_ctx.completed);
 
-  /* Woken up: response is in resp_buf */
-  return vgpu->response_ready ? 0 : -1;
+  remove_wait_queue(&vgpu->cmd_wq, &wait);
+  return cmd_ctx.completed ? 0 : -1;
 }
 
 /* ===== 2.D: high-level command wrappers ===== */
@@ -2140,6 +2219,7 @@ void virtio_gpu_init(void) {
   struct virtio_gpu_device *vgpu = &g_virtio_gpu;
   __memset(vgpu, 0, sizeof(*vgpu));
   vgpu->cmd_lock = SPINLOCK_INIT;
+  init_wait_queue_head(&vgpu->cmd_wq);
 
   /* Find PCI device */
   pci_device *pdev =
@@ -2178,6 +2258,11 @@ void virtio_gpu_init(void) {
     printk(LOG_ERROR, "virtio_gpu: ctrlq init failed\n");
     return;
   }
+
+  /* Wire up vring completion callback: vring_poll_used calls this for each
+     completed descriptor, setting the per-command completed flag so each
+     sleeping caller can independently detect its own response. */
+  vgpu->ctrlq.callback = virtio_gpu_cmd_callback;
 
   /* Register ISR */
   irq_register(vgpu->vpci.msix_vector, virtio_gpu_isr);

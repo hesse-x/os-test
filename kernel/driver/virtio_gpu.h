@@ -7,14 +7,12 @@
 #ifndef KERNEL_DRIVER_VIRTIO_GPU_H
 #define KERNEL_DRIVER_VIRTIO_GPU_H
 
-#include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 
 #include "kernel/driver/virtio_pci.h"
 #include "kernel/driver/virtio_ring.h"
 #include "kernel/xcore/spinlock.h"
-#include "kernel/xcore/xtask.h"
+#include "kernel/xcore/wait_queue.h"
 
 /* ===== virtio-gpu PCI config (device-specific config space) ===== */
 struct virtio_gpu_config {
@@ -152,12 +150,10 @@ struct virtio_gpu_device {
   struct virtqueue ctrlq;
   struct virtio_gpu_config config;
 
-  /* command synchronization: one in-flight command at a time */
+  /* command synchronization: cmd_lock serializes vring submission;
+     cmd_wq + per-command ctx track completion for multiple waiters */
   spinlock cmd_lock;
-  volatile bool response_ready;
-  void *response_buf;
-  size_t response_len;
-  xtask *waiter; /* current task waiting for response, or NULL */
+  wait_queue_head cmd_wq; /* wait queue for processes sleeping in send_cmd */
 };
 
 /* ===== API ===== */

@@ -894,49 +894,9 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
   if (!ahci_current_req) {
     ahci_current_req = req;
     ahci_issue_cmd(req);
-
-    // Short polling fallback: spin briefly to check if command completes
-    // without an IRQ. This handles emulators/configs where the port
-    // interrupt doesn't fire reliably (e.g., after PxIE toggle).
-    bool completed = false;
-    for (int i = 0; i < 500000; i++) {
-      if (!(readl(port_reg(active_port, PxCI)) & 1)) {
-        completed = true;
-        break;
-      }
-      __asm__ volatile("pause");
-    }
-
-    if (completed) {
-      // Command completed via polling — process completion directly
-      uint32_t pxis = readl(port_reg(active_port, PxIS));
-      writel(port_reg(active_port, PxIS), 0xFFFFFFFF); // acknowledge
-      bool error = (pxis & (1U << 30));
-
-      // For reads: copy bounce buffer to user buffer
-      if (dir == 0 && !error) {
-        __memcpy(buf, (const void *)bounce_virt, (size_t)count * 512);
-      }
-
-      req->result = error ? EIO : 0;
-
-      // Build notification message
-      recv_msg msg;
-      msg.type = RECV_NOTIFY;
-      msg.src = 0;
-      __memset(msg.data, 0, 56);
-      __memcpy(msg.data, &req->cookie, 4);
-      __memcpy(msg.data + 4, &req->result, 4);
-      __memcpy(msg.data + 8, &req->lba, 4);
-      __memcpy(msg.data + 12, &req->count, 4);
-
-      ahci_current_req = NULL;
-      bq_count--;
-      bq_head = (bq_head + 1) % BLOCK_QUEUE_SIZE;
-
-      // Notify caller (safe while holding ahci_lock)
-      notify_and_wake(req->caller_pid, &msg);
-    }
+    // Command completion is handled by ahci_irq_handler (MSI ISR).
+    // ISR reads PxIS, copies data, builds notification, and calls
+    // notify_and_wake to unblock the caller.
   }
 
   spin_unlock_irqrestore(&ahci_lock, flags);

@@ -33,7 +33,10 @@ typedef enum wait_event {
   WAIT_MSG_REPLY,
   WAIT_POLL,
   WAIT_FUTEX,
-  WAIT_PAUSE // pause(): block until any signal; may carry an alarm deadline
+  WAIT_PAUSE,   // pause(): block until any signal; may carry an alarm deadline
+  WAIT_VGPU_CMD // virtio-gpu send_cmd: awaiting per-cmd completion. Dedicated
+                // event so IPC/pty wake_process(pid) (which matches only
+                // WAIT_RECV) cannot spuriously wake a virtio waiter.
 } wait_event;
 
 #define RECV_MSG_SIZE 64

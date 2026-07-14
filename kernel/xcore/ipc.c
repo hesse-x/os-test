@@ -675,14 +675,15 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
 }
 
 // ===================== wake_process =====================
-// Narrow semantics: only handles IPC-class waits
-// (WAIT_PIPE/WAIT_POLL/WAIT_RECV). Hitting other events
-// (WAIT_FUTEX/WAIT_CHILD/WAIT_REQ_REPLY/WAIT_MSG_REPLY) indicates a caller
-// semantic error -- use wake_with_event (precise event match) or
-// wake_process_any (signal path, must interrupt any blocking state). Encode
-// this constraint in code: debug build triggers ASSERT panic, preventing future
-// wait_event additions from repeating Bug 1 (memory:
-// feedback_constraint_in_code).
+// Narrow semantics: only wakes IPC-class waits (WAIT_PIPE/WAIT_POLL/WAIT_RECV).
+// If the target is BLOCKED on a *different* event (e.g. a pty master reader
+// that is currently busy in virtio-gpu via WAIT_VGPU_CMD, or a futex/child
+// wait), this is a no-op: the target isn't waiting on an IPC-readable
+// resource right now, and the consumer re-checks its condition (ring buffer /
+// recv queue) on its own next read, so skipping the wake cannot lose data.
+// (Previously this case hit an ASSERT panic; that was too strict for callers
+// like pty_slave_write that wake a reader pid unconditionally without
+// knowing what it is currently blocked on.)
 void wake_process(pid_t pid) {
   if (pid < 0 || pid >= MAX_PROC)
     return;
@@ -693,10 +694,12 @@ void wake_process(pid_t pid) {
   spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
   if (target->pid == pid && target->state == BLOCKED) {
     wait_event ev = target->wait_event;
-    ASSERT(ev == WAIT_PIPE || ev == WAIT_POLL || ev == WAIT_RECV);
-    if (ev == WAIT_RECV)
-      target->recv_intr = 1;
-    wake_from_wait(target);
+    if (ev == WAIT_PIPE || ev == WAIT_POLL || ev == WAIT_RECV) {
+      if (ev == WAIT_RECV)
+        target->recv_intr = 1;
+      wake_from_wait(target);
+    }
+    // else: target blocked on an unrelated event — no-op (see comment above).
   }
   spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 }

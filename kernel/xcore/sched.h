@@ -48,8 +48,16 @@ static inline void wake_from_wait(xtask *p) {
   p->wait_event = WAIT_NONE;
   p->wait_timed_out = 0;
   int cpu = p->assigned_cpu;
-  list_push_back(&cpu_locals[cpu].run_queue, &p->run_node);
-  cpu_locals[cpu].run_count++;
+  /* Idempotent enqueue: if run_node is already on a run_queue (a prior wake
+     already enqueued p but schedule() hasn't dequeued it yet — possible when
+     multiple wake sources race), do NOT push again.  A second list_push_back
+     on a linked node rewires its prev/next and corrupts the run_queue ring.
+     Just ensure state=READY and leave run_count untouched: p is already
+     runnable and will be dequeued by the next schedule() on `cpu`. */
+  if (list_empty(&p->run_node)) {
+    list_push_back(&cpu_locals[cpu].run_queue, &p->run_node);
+    cpu_locals[cpu].run_count++;
+  }
 
   // Reschedule IPI: set need_resched on target CPU's current task
   // (target is BLOCKED, not running; curr is what's actually running on that
@@ -82,7 +90,7 @@ static inline void wake_with_event(xtask *target, wait_event expected_event) {
 // wake_process_any: interrupt any blocking state (for signal delivery --
 // signals must be able to interrupt WAIT_FUTEX/WAIT_CHILD/WAIT_PIPE, etc.).
 // Difference from wake_process: wake_process has narrow semantics, only handles
-// IPC-class waits (PIPE/POLL/RECV), ASSERTs on other events;
+// IPC-class waits (PIPE/POLL/RECV) and is a no-op on other events;
 // wake_process_any does not distinguish event type, unconditionally wakes any
 // BLOCKED target.
 static inline void wake_process_any(xtask *target) {

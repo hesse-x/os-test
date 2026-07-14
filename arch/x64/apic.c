@@ -179,6 +179,14 @@ void apic_init() {
   // 3. Software-enable LAPIC via Spurious Interrupt Vector Register
   lapic_write(LAPIC_SVR, LAPIC_SVR_ENABLE | 0xFF);
 
+  // 3b. Clear Task Priority Register — TPR determines the minimum priority
+  // class (vector >> 4) the LAPIC will deliver. If left at a non-zero value
+  // (e.g. set by UEFI firmware during boot services), all MSI/MSI-X vectors
+  // in the 64–95 range (priority classes 4–5) would be silently dropped,
+  // while the LAPIC timer at vector 120 (class 7) would still fire — exactly
+  // the symptom observed before this fix.
+  lapic_write(LAPIC_TPR, 0);
+
   // 4. Remap PIC (don't fully disable yet — keyboard may still route through
   // PIC)
   outb(0x20, 0x11);
