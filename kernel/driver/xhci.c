@@ -172,6 +172,27 @@ static int cmd_ring_enqueue = 0;
 static int cmd_ring_ccs = 1;
 static int event_ring_dequeue = 0;
 static int event_ring_ccs = 1;
+// Total software CCS flips (each = one full lap consumed). Compared against the
+// HC's actual lap count (inferred at dump time from the cycle-bit pattern over
+// the whole ring) to detect a software/HC cycle desync: if they differ, the
+// consumer flipped CCS at the wrong point.
+static int event_ring_ccs_flips = 0;
+
+// Last-ISR snapshot: captured at the end of every xhci_isr invocation so the
+// hang dump can show what the most recent successful ISR saw (CCS flip state,
+// dequeue pointer, how many events it consumed, the IMAN it cleared). This is
+// the key to telling whether the ISR mis-handled the event ring cycle flip
+// right before the hang.
+static struct {
+  int count;         // total ISR invocations
+  int dequeue;       // event_ring_dequeue at ISR exit
+  int ccs;           // event_ring_ccs at ISR exit
+  int consumed;      // events drained this invocation
+  uint32_t iman_in;  // IMAN value read at ISR entry (before clearing IP)
+  uint32_t usbsts;   // USBSTS at ISR entry
+  uint32_t last_cc;  // completion code of the last EP1-IN transfer event
+  uint32_t last_len; // transfer length of the last EP1-IN transfer event
+} last_isr;
 
 // HC parameters
 static int max_slots;
@@ -295,6 +316,12 @@ static void cmd_ring_push(trb *t) {
   cmd_ring_enqueue++;
 
   if (cmd_ring_enqueue == 255) {
+    // Refresh the Link TRB cycle bit with this lap's ccs (pre-toggle) so the HC
+    // follows the link on every lap. See xfer_ring_enqueue for the full
+    // rationale.
+    uint32_t link_d3 = ring[255 * 4 + 3];
+    link_d3 = (link_d3 & ~1u) | (cmd_ring_ccs & 1);
+    ring[255 * 4 + 3] = link_d3;
     cmd_ring_enqueue = 0;
     cmd_ring_ccs ^= 1;
   }
@@ -314,6 +341,18 @@ static void xfer_ring_enqueue(volatile uint32_t *ring_virt, int *enqueue,
   (*enqueue)++;
 
   if (*enqueue == 255) {
+    // The Link TRB at slot 255 must carry the cycle bit the HC expects when it
+    // reaches this slot, i.e. THIS lap's ccs (before the toggle): the HC's
+    // cycle state still equals the current lap's ccs at slot 255, and it only
+    // follows the link when the Link TRB's cycle bit matches. TC=1 then makes
+    // the HC toggle its own cycle state for the next lap. So we refresh the
+    // Link TRB's cycle bit with the pre-toggle ccs on every wrap. A static Link
+    // TRB cycle bit stalls the HC at slot 255 after the first lap whose ccs
+    // differs from the Link TRB's — observed as the keyboard freezing after
+    // exactly 255*N hid reports.
+    uint32_t link_d3 = ring_virt[255 * 4 + 3];
+    link_d3 = (link_d3 & ~1u) | (*ccs & 1);
+    ring_virt[255 * 4 + 3] = link_d3;
     *enqueue = 0;
     *ccs ^= 1;
   }
@@ -340,13 +379,20 @@ static int poll_event(uint32_t *completion_code, uint32_t *slot_id,
     *slot_id = (d3 >> 24) & 0xFF;
 
     event_ring_dequeue++;
-    if (event_ring_dequeue >= 255) {
+    // ERST size is 256: flip CCS on wrap to 256 (after consuming idx 255), not
+    // 255. Wrapping at 255 skips TRB 255 and drifts the consumer one slot per
+    // lap, so the HC sees the ring as full (EHB stays set) and the ISR
+    // deadlocks consuming nothing.
+    if (event_ring_dequeue >= 256) {
       event_ring_dequeue = 0;
       event_ring_ccs ^= 1;
+      event_ring_ccs_flips++;
     }
 
-    uint64_t erdp = event_ring_phys + event_ring_dequeue * 16;
-    erdp |= ERDP_EHB;
+    // Advance HC dequeue pointer; preserve read-back EHB, never set it.
+    uint32_t erdp_lo = intr_read(0, XHCI_ERDP_LO);
+    uint64_t erdp = event_ring_phys + (uint64_t)event_ring_dequeue * 16;
+    erdp |= (uint64_t)(erdp_lo & ERDP_EHB);
     intr_write(0, XHCI_ERDP_LO, (uint32_t)erdp);
     intr_write(0, XHCI_ERDP_HI, (uint32_t)(erdp >> 32));
     return 0;
@@ -357,15 +403,27 @@ static int poll_event(uint32_t *completion_code, uint32_t *slot_id,
 
 // ===================== ISR =====================
 
+// Poll counter for the IP-stuck detector's rate-limiting in xhci_poll.
+static int xhci_poll_count = 0;
+
 static void xhci_isr(trapframe *tf) {
-  // Read IMAN to confirm IP
+  static int isr_count = 0;
+  isr_count++;
+  // Acknowledge the interrupt first (write-1-to-clear IP, keep IE). This is
+  // safe because we drain the event ring below before returning; any event
+  // that lands during/after this write sets IP again and re-triggers us.
   uint32_t iman = intr_read(0, XHCI_IMAN);
+  uint32_t sts_in = op_read(XHCI_USBSTS);
+  last_isr.iman_in = iman;
+  last_isr.usbsts = sts_in;
+  last_isr.count = isr_count;
   if (iman & IMAN_IP) {
     intr_write(0, XHCI_IMAN, iman | IMAN_IP | IMAN_IE);
   }
 
-  // Walk event ring
+  // Walk event ring, draining every valid TRB the HC has produced.
   volatile uint32_t *ring = (volatile uint32_t *)event_ring_virt;
+  int consumed = 0;
   while (1) {
     int idx = event_ring_dequeue * 4;
     uint32_t d3 = ring[idx + 3];
@@ -383,6 +441,11 @@ static void xhci_isr(trapframe *tf) {
 
       if (sid == (uint32_t)xhci_intrs[0].slot_id &&
           epid == (uint32_t)xhci_intrs[0].ep_num) {
+        // Record the completion code + transfer length of this EP1-IN transfer
+        // event so the hang dump can show what the HC last reported (e.g. a
+        // NAK/short/error completion that the ISR mis-handles).
+        last_isr.last_cc = cc;
+        last_isr.last_len = d2 & 0xFFFFFF;
         // Replenish TRB regardless of completion code to keep ring alive
         volatile uint32_t *xfer_ring =
             (volatile uint32_t *)xhci_intrs[0].ring_virt;
@@ -435,17 +498,42 @@ static void xhci_isr(trapframe *tf) {
     }
 
     event_ring_dequeue++;
-    if (event_ring_dequeue >= 255) {
+    // ERST size is 256: flip CCS on wrap to 256 (after consuming idx 255), not
+    // 255. Wrapping at 255 skips TRB 255 and drifts the consumer one slot per
+    // lap, so the HC sees the ring as full (EHB stays set) and the ISR
+    // deadlocks consuming nothing.
+    if (event_ring_dequeue >= 256) {
       event_ring_dequeue = 0;
       event_ring_ccs ^= 1;
+      event_ring_ccs_flips++;
     }
+    consumed++;
   }
 
-  // Update ERDP
-  uint64_t erdp = event_ring_phys + event_ring_dequeue * 16;
-  erdp |= ERDP_EHB;
-  intr_write(0, XHCI_ERDP_LO, (uint32_t)erdp);
-  intr_write(0, XHCI_ERDP_HI, (uint32_t)(erdp >> 32));
+  // Only touch ERDP if we advanced the dequeue pointer. Writing ERDP with an
+  // unchanged pointer (and especially setting EHB) when nothing was consumed
+  // never clears the HC's pending state and re-triggers the ISR indefinitely
+  // (interrupt storm). Preserve the read-back EHB; software must never set it
+  // (it is HC-set/SW-clear via the dequeue-pointer write).
+  if (consumed) {
+    uint32_t erdp_lo = intr_read(0, XHCI_ERDP_LO);
+    uint64_t erdp = event_ring_phys + (uint64_t)event_ring_dequeue * 16;
+    erdp |= (uint64_t)(erdp_lo & ERDP_EHB);
+    intr_write(0, XHCI_ERDP_LO, (uint32_t)erdp);
+    intr_write(0, XHCI_ERDP_HI, (uint32_t)(erdp >> 32));
+  }
+
+  // Snapshot exit state so the hang dump can inspect the last successful ISR.
+  last_isr.dequeue = event_ring_dequeue;
+  last_isr.ccs = event_ring_ccs;
+  last_isr.consumed = consumed;
+
+  // Clear the latched event-interrupt status (USBSTS.EINT, write-1-to-clear).
+  // EINT latches "an event interrupt occurred" and stays set until software
+  // clears it; leaving it set can keep the HC's interrupt-raise logic in a
+  // permanently-satisfied state so it stops re-asserting IMAN.IP for new
+  // events.
+  op_write(XHCI_USBSTS, USBSTS_EINT);
 
   lapic_eoi();
 }
@@ -455,9 +543,239 @@ static void xhci_isr(trapframe *tf) {
 // (QEMU only retries on doorbell write, not on timer expiry after NAK).
 static int xhci_poll_initialized = 0;
 
+// Track consecutive polls with IP stuck. The boot-time spurious IP clears
+// quickly once the first real interrupt fires, so we only dump after IP stays
+// asserted for many polls (real hang). Re-arm after a dump so we can re-capture
+// the state again if it recurs / changes.
+static int xhci_ip_stuck_ticks = 0;
+static int xhci_ip_last_dump_tick = 0;
+#define XHCI_IP_STUCK_DUMP_THRESHOLD 20 // ~2s of stuck polls (poll runs ~10Hz)
+
+// xhci_poll_count is defined above xhci_isr (used here for dump rate-limiting).
+
+static void xhci_dump_int_state(uint32_t iman);
+
+// Dump the complete interrupt-delivery chain for the xHCI MSI-X vector, to
+// localize where a pending interrupt gets lost between the HC and the CPU.
+// Prints: IMAN, MSI-X entry0 (mask + message addr/data), LAPIC TMR/IRR/ISR
+// bit for the vector (edge/level + pending-in-lapic + in-service), IDT gate
+// 64, and CPU RFLAGS.IF. Called once when IP is first observed stuck.
+static void xhci_dump_int_state(uint32_t iman) {
+  int vec = xhci_dev->msix_vector_base;
+  printk(LOG_WARN, "=== xHCI INT DUMP (vec=%d) ===\n", vec);
+  printk(LOG_WARN, "IMAN=0x%x (IE=%d IP=%d)\n", iman, (iman >> 1) & 1,
+         iman & 1);
+
+  // MSI-X capability global state: Message Control bits.
+  //   bit 15 = MSI-X Enable, bit 14 = Function Mask (globally masks all vectors
+  //   when set). If Function Mask is set or MSI-X Enable is clear, no MSI-X
+  //   interrupt can be delivered regardless of per-entry state.
+  uint32_t cap_dword = pci_read_config(
+      xhci_dev->bus, xhci_dev->dev, xhci_dev->func, xhci_dev->msix_cap_offset);
+  uint16_t msg_ctrl = (cap_dword >> 16) & 0xFFFF;
+  printk(LOG_WARN, "MSI-X cap: Enable=%d FunctionMask=%d (msg_ctrl=0x%x)\n",
+         (msg_ctrl >> 15) & 1, (msg_ctrl >> 14) & 1, msg_ctrl);
+
+  // xHCI HC global state. USBSTS tells us whether the HC is halted (HCH), has a
+  // host-system error (HSE), an event interrupt pending (EINT), or is still
+  // controller-not-ready (CNR). USBCMD confirms interrupts are enabled (INTE)
+  // and the HC is running (RS). EINT=1 with IP=1 but no LAPIC delivery means
+  // the HC asserted its interrupt but the MSI never reached the LAPIC.
+  uint32_t usbsts = op_read(XHCI_USBSTS);
+  uint32_t usbcmd = op_read(XHCI_USBCMD);
+  printk(LOG_WARN,
+         "USBSTS=0x%x (HCH=%d HSE=%d EINT=%d PCD=%d CNR=%d) USBCMD=0x%x (RS=%d "
+         "INTE=%d)\n",
+         usbsts, usbsts & USBSTS_HCH ? 1 : 0, usbsts & USBSTS_HSE ? 1 : 0,
+         usbsts & USBSTS_EINT ? 1 : 0, usbsts & USBSTS_PCD ? 1 : 0,
+         usbsts & USBSTS_CNR ? 1 : 0, usbcmd, usbcmd & USBCMD_RS ? 1 : 0,
+         usbcmd & USBCMD_INTE ? 1 : 0);
+
+  // Event ring state. event_ring_dequeue is the software consume pointer;
+  // ERDP.EHB (bit 3) is set by the HC when it has produced events the software
+  // hasn't yet acknowledged (via the ERDP write). If EHB=1 with IP=1, the HC
+  // has undelivered/unacked events AND an unacked interrupt — and our ISR never
+  // ran to drain them. Peek the TRB at the dequeue slot to see if a fresh event
+  // is waiting (cycle bit matches CCS).
+  uint32_t erdp_lo = intr_read(0, XHCI_ERDP_LO);
+  uint32_t erdp_hi = intr_read(0, XHCI_ERDP_HI);
+  uint64_t erdp_val = ((uint64_t)erdp_hi << 32) | erdp_lo;
+  uint64_t erdp_idx_phys = erdp_val & ~0xFu; // low 4 bits are flags (EHB etc.)
+  int hc_dequeue =
+      (erdp_idx_phys == 0) ? -1 : (int)((erdp_idx_phys - event_ring_phys) / 16);
+  volatile uint32_t *ering = (volatile uint32_t *)event_ring_virt;
+  int eidx = event_ring_dequeue * 4;
+  uint32_t trb_d3 = ering[eidx + 3];
+  int trb_cycle = trb_d3 & 1;
+  printk(LOG_WARN,
+         "event_ring: dequeue=%d hc_dequeue=%d ERDP_EHB=%d peek TRB cycle=%d "
+         "(CCS=%d) match=%d\n",
+         event_ring_dequeue, hc_dequeue, (erdp_lo & ERDP_EHB) ? 1 : 0,
+         trb_cycle, event_ring_ccs & 1, trb_cycle == (event_ring_ccs & 1));
+
+  // Software CCS flip count vs HC lap count. The HC flips its cycle bit each
+  // time it wraps the ring; software should flip CCS exactly the same number of
+  // times. To infer the HC's lap count, scan all 256 event TRBs and count how
+  // many carry the *current* CCS cycle vs the opposite: a freshly-written lap
+  // has cycle==CCS, the stale previous lap has cycle!=CCS. With a single
+  // segment the HC writes strictly in order, so the boundary between
+  // "opposite-cycle" (old) and "same-cycle" (new) slots marks where the HC's
+  // producer currently is. ccs_flips should equal the HC lap count; a mismatch
+  // is direct proof the consumer flipped CCS at the wrong point.
+  {
+    int same = 0, opp = 0;
+    for (int i = 0; i < 256; i++) {
+      uint32_t c = ering[i * 4 + 3] & 1;
+      if (c == (event_ring_ccs & 1))
+        same++;
+      else
+        opp++;
+    }
+    printk(LOG_WARN, "ccs_flips(sw)=%d  ring cycle: same-as-CCS=%d opp=%d\n",
+           event_ring_ccs_flips, same, opp);
+  }
+
+  // EP1-IN transfer ring state: the producer ring the HC drains to fetch IN
+  // transfers. enqueue/ccs are the software producer pointers; the slot at
+  // `enqueue` is the next TRB the HC has not yet consumed. If enqueue is near
+  // 254/255 the ring has nearly lapped and the Link TRB at slot 255 (whose
+  // cycle bit is set once at init and never updated) may be mis-gating the HC.
+  // Also dump the Link TRB itself and the TRB the HC is currently sitting on.
+  volatile uint32_t *xr = (volatile uint32_t *)xhci_intrs[0].ring_virt;
+  {
+    int enq = xhci_intrs[0].enqueue;
+    int xccs = xhci_intrs[0].ccs & 1;
+    uint32_t link_d3 = xr[255 * 4 + 3];
+    uint32_t enq_d3 = xr[enq * 4 + 3];
+    printk(LOG_WARN,
+           "ep1_ring: enqueue=%d ccs=%d  link255[type=%d TC=%d cycle=%d]  "
+           "slot%d[cycle=%d]\n",
+           enq, xccs, (link_d3 >> TRB_TYPE_SHIFT) & TRB_TYPE_MASK,
+           (link_d3 >> 1) & 1, link_d3 & 1, enq, enq_d3 & 1);
+  }
+
+  // HC's EP1-IN TR dequeue pointer, read from the Output Device Context the HC
+  // maintains. Output ctx = Slot(dword0-7) + EP contexts (8 dwords each, DCI n
+  // at dword 8+(n-1)*8). EP1-IN is DCI 3 → dword 24; its TR Dequeue Pointer is
+  // dword 26/27 (lo/hi), low bit = DCS (Dequeue Cycle State). Comparing the HC
+  // dequeue slot against the software enqueue tells us whether the HC stalled
+  // with pending TRBs (enqueue != hc_deq) or simply has nothing to consume
+  // (enqueue == hc_deq, ring empty).
+  if (xhci_intrs[0].slot_id != 0 && dev_ctx_phys != 0) {
+    volatile uint32_t *octx =
+        (volatile uint32_t *)phys_to_virt((__force phys_addr_t)dev_ctx_phys);
+    uint32_t tr_lo = octx[26];
+    uint32_t tr_hi = octx[27];
+    uint64_t tr = ((uint64_t)tr_hi << 32) | (tr_lo & ~0xFu);
+    int hc_deq = (tr == 0) ? -1 : (int)((tr - xhci_intrs[0].ring_phys) / 16);
+    int hc_dcs = tr_lo & 1;
+    int sw_enq = xhci_intrs[0].enqueue;
+    // Peek the cycle bits around the HC dequeue pointer: the slot the HC is
+    // about to consume must carry cycle==DCS, else the HC stalls. Dump the
+    // AT-dequeue slot and one ahead so we can see exactly where the mismatch
+    // is.
+    int d0 = (hc_deq >= 0 && hc_deq < 256) ? (int)(xr[hc_deq * 4 + 3] & 1) : -1;
+    int d1 = (hc_deq >= 0 && hc_deq + 1 < 256)
+                 ? (int)(xr[(hc_deq + 1) * 4 + 3] & 1)
+                 : -1;
+    // EP1-IN endpoint state from Output Context dword 24 bits[0:2]:
+    // 0=disabled, 1=running, 2=halted (set by HC on transfer error), 3=stopped.
+    // If the EP is halted, the HC won't consume TRBs until software resets it
+    // (Stop Endpoint + Reset Endpoint + Restart). This is the likely reason a
+    // pending TRB with a matching cycle bit still isn't consumed.
+    uint32_t ep_dw0 = octx[24];
+    int ep_state = ep_dw0 & 0x7;
+    printk(LOG_WARN,
+           "hc_ep1: dequeue_slot=%d DCS=%d  sw_enqueue=%d  pending=%d  "
+           "slot%d[cyc=%d] slot%d[cyc=%d]  EPstate=%d\n",
+           hc_deq, hc_dcs, sw_enq,
+           (hc_deq >= 0) ? ((sw_enq - hc_deq + 256) % 256) : -1, hc_deq, d0,
+           hc_deq + 1, d1, ep_state);
+  }
+
+  // LAPIC TMR/IRR/ISR for the vector: 256-bit bitmasks, 32 per 32-bit reg.
+  // Reg base: ISR 0x100, TMR 0x180, IRR 0x200; vector V -> reg (V/32)*0x10,
+  // bit (V%32). A set IRR bit = pending in LAPIC but not yet delivered; a set
+  // ISR bit = currently in-service (CPU is inside the ISR).
+  uint32_t tmr = lapic_read(0x180 + (vec / 32) * 0x10);
+  uint32_t irr = lapic_read(0x200 + (vec / 32) * 0x10);
+  uint32_t isr = lapic_read(0x100 + (vec / 32) * 0x10);
+  uint32_t vbit = 1u << (vec % 32);
+  printk(LOG_WARN,
+         "LAPIC vec%d: TMR bit=%d (0=edge 1=level) IRR bit=%d (pending in "
+         "LAPIC) ISR bit=%d (in-service)\n",
+         vec, (tmr & vbit) != 0, (irr & vbit) != 0, (isr & vbit) != 0);
+
+  // LAPIC Error Status Register: a non-zero ESR means the LAPIC rejected an
+  // incoming interrupt (illegal vector, receive/redirect errors). If the HC is
+  // firing MSIs at a bogus address/vector, ESR may record it. Write 0 first to
+  // clear, then read back (ESR is read-after-clear).
+  lapic_write(0x280, 0); // clear ESR
+  uint32_t esr = lapic_read(0x280);
+  printk(LOG_WARN, "LAPIC ESR=0x%x (illegal-vec/redirect errors, if any)\n",
+         esr);
+
+  // Last successful ISR snapshot: shows what the most recent xhci_isr saw at
+  // entry and left behind at exit. If ccs/dequeue look wrong here, the ISR
+  // mis-handled the event ring cycle flip on its last run, leaving the HC with
+  // an event it can never get the software to consume.
+  printk(LOG_WARN,
+         "last_isr: count=%d iman_in=0x%x usbsts_in=0x%x consumed=%d "
+         "exit_dequeue=%d exit_ccs=%d\n",
+         last_isr.count, last_isr.iman_in, last_isr.usbsts, last_isr.consumed,
+         last_isr.dequeue, last_isr.ccs);
+  printk(LOG_WARN, "last_ep1_xfer: cc=%d len=%d (CC_SUCCESS=1)\n",
+         last_isr.last_cc, last_isr.last_len);
+
+  // Active probe: manually clear IMAN.IP now. If the next poll sees IP set
+  // again, the HC is still asserting (real pending event the ISR never drained)
+  // — the interrupt delivery is stuck at the HC. If IP stays clear, the HC had
+  // a one-shot pending that we just cleared, and the real problem is the MSI
+  // never reached the LAPIC in the first place (delivery path).
+  intr_write(0, XHCI_IMAN, iman | IMAN_IP | IMAN_IE);
+  uint32_t iman_after = intr_read(0, XHCI_IMAN);
+  printk(LOG_WARN,
+         "manual IP clear: iman before=0x%x after=0x%x (IP still set=%d)\n",
+         iman, iman_after, (iman_after & IMAN_IP) ? 1 : 0);
+
+  // IDT gate / handler registration for the vector. irq_handlers[] is static in
+  // trap.c; use the public irq_has_handler() predicate (keys the stub
+  // dispatch). irq_owner < 0 = not bound to a user-space driver (which would
+  // reroute the IRQ to a RECV_IRQ path and bypass the kernel handler).
+  printk(LOG_WARN, "irq_has_handler(%d)=%d irq_owner[%d]=%d\n", vec,
+         irq_has_handler(vec), vec,
+         (int)__atomic_load_n(&irq_owner[vec], __ATOMIC_ACQUIRE));
+
+  uint64_t flags;
+  __asm__ volatile("pushfq; popq %0" : "=r"(flags));
+  printk(LOG_WARN, "RFLAGS.IF=%d (CPU interrupt enable)\n",
+         (int)((flags >> 9) & 1));
+  printk(LOG_WARN, "=== end dump ===\n");
+}
+
 void xhci_poll() {
   if (!xhci_poll_initialized)
     return;
+  xhci_poll_count++;
+  uint32_t iman = intr_read(0, XHCI_IMAN);
+  if (iman & IMAN_IP) {
+    xhci_ip_stuck_ticks++;
+    // Dump only after sustained IP-stuck (skip boot spurious), and rate-limit
+    // repeats so we can re-capture if the state later changes.
+    if (xhci_ip_stuck_ticks >= XHCI_IP_STUCK_DUMP_THRESHOLD &&
+        xhci_poll_count - xhci_ip_last_dump_tick >=
+            XHCI_IP_STUCK_DUMP_THRESHOLD) {
+      xhci_ip_last_dump_tick = xhci_poll_count;
+      xhci_dump_int_state(iman);
+    }
+  } else {
+    xhci_ip_stuck_ticks = 0;
+  }
+
+  // Ring the EP1-IN doorbell every poll. QEMU's xHCI only retries a NAK'ed
+  // interrupt-IN transfer on a doorbell write (not on timer expiry), so without
+  // this a key press that arrives while the previous transfer is NAK'ing would
+  // never be delivered.
   db_write(xhci_intrs[0].slot_id, xhci_intrs[0].ep_dci);
 }
 
@@ -586,7 +904,10 @@ void xhci_init() {
   cmd_ring[255 * 4 + 0] = (uint32_t)cmd_ring_phys;
   cmd_ring[255 * 4 + 1] = (uint32_t)(cmd_ring_phys >> 32);
   cmd_ring[255 * 4 + 2] = 0;
-  cmd_ring[255 * 4 + 3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC;
+  // Link TRB cycle bit = initial producer cycle state (cmd_ring_ccs=1). The HC
+  // only follows the link when this bit matches its cycle state; TC=1 toggles
+  // the HC's state for the next lap. cmd_ring_push refreshes this bit on wrap.
+  cmd_ring[255 * 4 + 3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC | 1;
 
   uint64_t crcr = cmd_ring_phys | CRCR_RCS;
   op_write(XHCI_CRCR_LO, (uint32_t)crcr);
@@ -604,18 +925,21 @@ void xhci_init() {
   erst[0].addr_hi = (uint32_t)(event_ring_phys >> 32);
   erst[0].size = 256;
 
-  volatile uint32_t *evt_ring = (volatile uint32_t *)event_ring_virt;
-  evt_ring[255 * 4 + 0] = (uint32_t)event_ring_phys;
-  evt_ring[255 * 4 + 1] = (uint32_t)(event_ring_phys >> 32);
-  evt_ring[255 * 4 + 2] = 0;
-  evt_ring[255 * 4 + 3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC | 1;
+  // Event ring has NO Link TRB. Unlike command/transfer rings (which wrap via a
+  // Link TRB at the last slot), the event ring wraps purely by ERST.size — the
+  // HC manages the cycle-bit flip itself when it wraps past the last entry. All
+  // 256 slots (0..255) are real event TRBs. Putting a Link TRB here (as this
+  // code previously did, with cycle=1) corrupts the cycle tracking: the first
+  // 255 events consume slots 0..254, then the HC/software wrap points diverge
+  // by one slot and the CCS drifts, deadlocking the ISR (consumed=0 forever).
 
   intr_write(0, XHCI_ERSTSZ, 1);
   intr_write(0, XHCI_ERSTBA_LO, (uint32_t)erst_phys);
   intr_write(0, XHCI_ERSTBA_HI, (uint32_t)(erst_phys >> 32));
-  uint64_t erdp = event_ring_phys | ERDP_EHB;
-  intr_write(0, XHCI_ERDP_LO, (uint32_t)erdp);
-  intr_write(0, XHCI_ERDP_HI, (uint32_t)(erdp >> 32));
+  // Initial dequeue pointer at ring start; do NOT set EHB — it is HC-set only
+  // and there are no pending events before the controller starts running.
+  intr_write(0, XHCI_ERDP_LO, (uint32_t)event_ring_phys);
+  intr_write(0, XHCI_ERDP_HI, (uint32_t)(event_ring_phys >> 32));
 
   // 12. CONFIG = MaxSlots
   op_write(XHCI_CONFIG, max_slots);
@@ -756,13 +1080,19 @@ static void xhci_init_keyboard() {
   ep0_ring[255 * 4 + 0] = (uint32_t)ep0_ring_phys;
   ep0_ring[255 * 4 + 1] = (uint32_t)(ep0_ring_phys >> 32);
   ep0_ring[255 * 4 + 2] = 0;
-  ep0_ring[255 * 4 + 3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC;
+  ep0_ring[255 * 4 + 3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC | 1;
 
   volatile uint32_t *ep1_ring = (volatile uint32_t *)xhci_intrs[0].ring_virt;
   ep1_ring[255 * 4 + 0] = (uint32_t)xhci_intrs[0].ring_phys;
   ep1_ring[255 * 4 + 1] = (uint32_t)(xhci_intrs[0].ring_phys >> 32);
   ep1_ring[255 * 4 + 2] = 0;
-  ep1_ring[255 * 4 + 3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC;
+  // Link TRB cycle bit must equal the producer's current cycle state (ccs=1 at
+  // init) so the HC, when it reaches this slot at the end of a lap, sees a
+  // cycle bit matching its own cycle state and follows the link. With TC=1 the
+  // HC then toggles its cycle state for the next lap. A Link TRB whose cycle
+  // bit never matches causes the HC to stall at slot 255 after one full lap
+  // (exactly 255 NORMAL TRBs), reproducing the keyboard freeze.
+  ep1_ring[255 * 4 + 3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC | 1;
 
   xhci_intrs[0].enqueue = 0;
   xhci_intrs[0].ccs = 1;

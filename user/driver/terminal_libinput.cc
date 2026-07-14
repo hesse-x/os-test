@@ -701,7 +701,10 @@ int main(int argc, char **argv, char **envp) {
     pfds[1].fd = master_fd;
     pfds[1].events = POLLIN;
     pfds[1].revents = 0;
-    poll(pfds, 2, -1);
+    int pr = poll(pfds, 2, -1);
+    fprintf(stderr,
+            "terminal poll: pr=%d li_revents=0x%x master_revents=0x%x\n", pr,
+            pfds[0].revents, pfds[1].revents);
   }
   return 0;
 }

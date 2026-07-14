@@ -10,7 +10,7 @@
 #include <syscall.h>
 #include <unistd.h>
 
-#include "arch/x64/memlayout.h"
+#include <xos/page.h> /* PAGE_SIZE (UAPI) */
 
 #include <xos/mman.h>
 

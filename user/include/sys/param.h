@@ -7,7 +7,7 @@
 #ifndef _SYS_PARAM_H
 #define _SYS_PARAM_H
 
-#include <arch/x64/memlayout.h> /* IWYU pragma: keep */
+#include <xos/page.h> /* IWYU pragma: keep — PAGE_SIZE (UAPI, sysroot-published) */
 
 #define PAGESIZE PAGE_SIZE
 

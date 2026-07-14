@@ -12,7 +12,7 @@ set(LIBC_SOURCES
     lib/unistd.cc lib/time.cc lib/file.cc
     lib/ctype.c lib/strtol.c lib/stdlib_misc.c lib/uname.c
     lib/assert.c lib/errno.cc lib/signal.cc
-    lib/input_client.cc lib/tls.cc lib/pthread.cc
+    lib/tls.cc lib/pthread.cc
     lib/setjmp.S
     lib/start_main.cc
     lib/io_multiplex.cc

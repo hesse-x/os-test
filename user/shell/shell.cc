@@ -274,7 +274,7 @@ static void cmd_mkdir(const char *rel_path) {
 }
 
 // Execute a file: spawn(path), wait
-static void exec_path(const char *rel_path) {
+__attribute__((used)) static void exec_path(const char *rel_path) {
   char abs_path[256];
   build_abs_path(rel_path, abs_path);
 
@@ -418,7 +418,30 @@ int main(int argc, char **argv, char **envp) {
     if (found_builtin)
       continue;
 
-    // Not a built-in command — treat as file path to execute
+    // Not a built-in command — try to execute as ELF file
+    char abs_path[256];
+    build_abs_path(cmd_name, abs_path);
+
+    struct stat st;
+    if (stat(abs_path, &st) != 0) {
+      printf("%s: not found\n", cmd_name);
+      continue;
+    }
+
+    int fd = open(abs_path, O_RDONLY);
+    if (fd < 0) {
+      printf("%s: cannot open\n", cmd_name);
+      continue;
+    }
+    char magic[4];
+    if (read(fd, magic, 4) != 4 || magic[0] != 0x7f || magic[1] != 'E' ||
+        magic[2] != 'L' || magic[3] != 'F') {
+      close(fd);
+      printf("%s: not an executable\n", cmd_name);
+      continue;
+    }
+    close(fd);
+
     exec_path(cmd_name);
   }
 }

@@ -8,4 +8,5 @@ add_kernel_object(bsd_obj
             socket.c pty.c elf_loader.c futex.c
             file_wq.c file_poll.c eventpoll.c eventfd.c timerfd.c signalfd.c
             netlink.c fops.c
+            ring.c
 )

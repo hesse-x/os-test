@@ -7,10 +7,7 @@
 #ifndef ARCH_X64_MEMLAYOUT_H
 #define ARCH_X64_MEMLAYOUT_H
 
-// x86-64 memory layout constants (shared kernel/user-space)
-#define PAGE_SHIFT 12
-#define PAGE_SIZE (1 << PAGE_SHIFT) // 4096
-#define PAGE_SIZE_2M 0x200000
+#include <xos/page.h> /* PAGE_SHIFT / PAGE_SIZE / PAGE_SIZE_2M (UAPI, shared kernel/user) */
 
 // Higher-half kernel/user boundary: user space lives below this, kernel above.
 #define KERNEL_VMA_BOUNDARY 0xFFFFFFFF80000000ULL

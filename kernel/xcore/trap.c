@@ -5,6 +5,9 @@
  */
 
 #include "kernel/xcore/trap.h"
+
+#include <stddef.h>
+
 #include "arch/x64/apic.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
@@ -22,8 +25,8 @@
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
-#include <stddef.h>
 #include <xos/errno.h>
+#include <xos/page.h>
 #include <xos/signal.h>
 #include <xos/syscall_nums.h>
 
@@ -561,6 +564,9 @@ static void reschedule_ipi_handler(trapframe *tf) {
 static void timer_handler(trapframe *tf) {
   tick++;
   lapic_eoi();
+
+  if (tick % 100 == 0)
+    printk(LOG_INFO, "timer alive: tick=%lu\n", tick);
 
   // Advance this CPU's RCU grace-period counter.  Without this, a CPU that
   // stays runnable in user mode (e.g. terminal flushing PTY output) never

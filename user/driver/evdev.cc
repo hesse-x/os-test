@@ -7,7 +7,6 @@
 // evdev user-space driver: real keyboard event source (xHCI HID → SHM ring →
 // terminal consumer) + EVIOCG* ioctl query handler. Replaces the old kbd
 // driver; terminal now opens /dev/input/event0.
-#include "user/include/input_lib.h"
 #include "user/include/usb_hid.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -24,6 +23,7 @@
 #include <xos/input.h>
 #include <xos/input_key.h>
 #include <xos/ioctl.h>
+#include <xos/ringbuf.h>
 #include <xos/shm.h>
 
 #define MAX_EVDEV_DEVICES 8
@@ -78,40 +78,22 @@ static void consumer_remove_pid(pid_t pid) {
   }
 }
 
-// Driver-side SHM ring (single, shared via inode).
-static volatile input_shm_header *g_ring_hdr;
-static uint32_t g_ring_cap;
-static uint32_t g_ring_off;
-static volatile void *shm_base;
+// Driver-side SHM ring (single, shared via inode). The producer writes through
+// this header; consumers read via the kernel ring_t path (per-fd f->offset).
+static volatile ringbuf_header *g_ring;
 
 /* 唤醒 fd: /dev/input/event0 的 ringbuf fd, 用于 ioctl RINGBUF_WAKE */
 static int wake_fd = -1;
 
 // Write one event to the shared ring + unconditional notify to all consumers.
+// Overwrite-oldest policy: push never fails (no "full" check), and the wake
+// below always runs — a dropped wake is what stalled the terminal.
 static void broadcast_event(const input_event *ev) {
-  volatile input_shm_header *hdr = g_ring_hdr;
-  if (!hdr)
+  if (!g_ring)
     return;
-
-  uint32_t head = __atomic_load_n(&hdr->head, __ATOMIC_ACQUIRE);
-  uint32_t tail = __atomic_load_n(&hdr->tail, __ATOMIC_ACQUIRE);
-  uint32_t next = (head + 1) % g_ring_cap;
-  if (next == tail)
-    return; // ring full, drop
-
-  volatile input_event *slot =
-      (volatile input_event *)((volatile uint8_t *)hdr + g_ring_off +
-                               head * sizeof(input_event));
-  slot->tv_sec = ev->tv_sec;
-  slot->tv_usec = ev->tv_usec;
-  slot->type = ev->type;
-  slot->code = ev->code;
-  slot->value = ev->value;
-  __atomic_store_n(&hdr->head, next, __ATOMIC_RELEASE);
-
-  // Update ringbuf_header head for kernel ringbuf_fops.read
-  volatile ringbuf_header *rb = (volatile ringbuf_header *)shm_base;
-  rb->head = next;
+  fprintf(stderr, "evdev broadcast: type=%u code=%u value=%d\n",
+          (unsigned)ev->type, (unsigned)ev->code, (int)ev->value);
+  ringbuf_push(g_ring, ev);
 
   // Unconditional notify. If pid gone/exited, notify is no-op.
   for (int i = 0; i < MAX_CONSUMERS; i++) {
@@ -260,7 +242,7 @@ static void handle_ioctl(uint32_t cmd, uint32_t minor, pid_t src,
   resp(data, data_len, result);
 }
 
-// Advertise EV_KEY support + the set of keys input_event_to_ascii can map.
+// Advertise EV_KEY support + the set of keys the terminal can map to ASCII.
 static void init_caps(struct evdev_device *dev) {
   memset(dev->caps_bitmap, 0, sizeof(dev->caps_bitmap));
   // ev=0 (EV_SYN-type) bitmap advertises supported event types: set EV_KEY.
@@ -316,13 +298,10 @@ int main(int argc, char **argv, char **envp) {
   num_devices = 1;
 
   // 3. Create output SHM ring (driver-owned) + bind to /dev/input/event0 inode.
-  //    Consumers access via open("/dev/input/event0") + mmap(MAP_SHARED, fd).
-  //    Layout: ringbuf_header at offset 0 (kernel ringbuf_fops.read path),
-  //            input_shm_header at offset 64 (backward compat for test
-  //            programs).
-  //    The ring data area starts at offset 128 (after both headers);
-  //    ringbuf_header.data_offset and input_shm_header.ring_offset both
-  //    describe this same location from their respective bases.
+  // 3. Create output SHM ring (driver-owned) + bind to /dev/input/event0 inode.
+  //    Layout: ringbuf_header at offset 0, ring data area at offset 128.
+  //    Consumers read via the kernel ring_t path (open + read/poll); the
+  //    producer pushes with ringbuf_push() (overwrite-oldest, never fails).
   int shm_fd = memfd_create("input_ring", 0);
   ftruncate(shm_fd, 4096);
   void *shm = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
@@ -330,7 +309,7 @@ int main(int argc, char **argv, char **envp) {
   for (int i = 0; i < 4096; i++)
     ((volatile uint8_t *)shm)[i] = 0;
 
-  // ringbuf_header for kernel ringbuf_fops.read
+  // ringbuf_header for kernel ring_t (read/poll) + user-space ringbuf_push.
   volatile ringbuf_header *rb = (volatile ringbuf_header *)shm;
   rb->magic = RINGBUF_MAGIC;
   rb->version = 1;
@@ -339,22 +318,7 @@ int main(int argc, char **argv, char **envp) {
   rb->data_offset = 128;
   rb->elem_size = sizeof(input_event);
 
-  // input_shm_header for backward compat (input_client_poll)
-  volatile input_shm_header *hdr =
-      (volatile input_shm_header *)((volatile uint8_t *)shm + 64);
-  hdr->magic = INPUT_SHM_MAGIC;
-  hdr->version = INPUT_SHM_VERSION;
-  hdr->device_type = INPUT_DEV_KBD;
-  hdr->event_size = sizeof(input_event);
-  hdr->ring_offset = 64;
-  hdr->ring_capacity = INPUT_RING_CAPACITY_DEFAULT;
-  hdr->head = 0;
-  hdr->tail = 0;
-
-  g_ring_hdr = hdr;
-  g_ring_off = 64;
-  g_ring_cap = INPUT_RING_CAPACITY_DEFAULT;
-  shm_base = shm;
+  g_ring = rb;
 
   device_register_shm("input/event0", shm_fd, 0);
 
@@ -387,6 +351,7 @@ int main(int argc, char **argv, char **envp) {
     // covers any arg we serve (read getters only; size = _IOC_SIZE(cmd)).
     uint8_t data_buf[256];
     int rc = recv(&msg, data_buf, sizeof(data_buf), 0);
+    fprintf(stderr, "evdev recv: rc=%d errno=%d\n", rc, errno);
 
     if (rc < 0) {
       if (errno == EINTR) {
@@ -397,6 +362,7 @@ int main(int argc, char **argv, char **envp) {
           broadcast_event(&ev);
           nevents++;
         }
+        fprintf(stderr, "evdev EINTR drain: nevents=%d\n", nevents);
         // Send EV_SYN/SYN_REPORT after batch — libinput/evdev requires it
         // to commit the event sequence.
         if (nevents > 0) {

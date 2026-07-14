@@ -522,6 +522,16 @@ pci_enable_msix(pci_device *dev, int num_vectors) {
         vector; // Message Data (vector, Fixed, Edge)
     *(volatile uint32_t __force *)&table[i * 4 + 3] =
         1; // Vector Control: Mask bit = 1
+    // Immediate readback at the same vaddr just written, to confirm the write
+    // landed in device MMIO (not dropped to a stale/CoW mapping). If this
+    // reads back 0, our BAR vaddr does NOT point at the real MSI-X table and
+    // every later table read is meaningless.
+    if (i == 0)
+      printk(LOG_INFO,
+             "MSI-X entry0 write-then-read: addrlo=0x%x data=0x%x ctrl=0x%x\n",
+             *(volatile uint32_t __force *)&table[i * 4 + 0],
+             *(volatile uint32_t __force *)&table[i * 4 + 2],
+             *(volatile uint32_t __force *)&table[i * 4 + 3]);
   }
 
   // Enable MSI-X: set Enable bit (bit 15 of 16-bit Message Control)
