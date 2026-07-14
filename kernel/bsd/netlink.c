@@ -190,8 +190,11 @@ int64_t netlink_sock_sendmsg(netlink_sock *sock, const struct iovec *iov,
   uint32_t offset = 0;
   for (size_t i = 0; i < iovlen; i++) {
     if (iov[i].iov_base && iov[i].iov_len > 0) {
-      copy_from_user(buf + offset, (const void __user *)iov[i].iov_base,
-                     iov[i].iov_len);
+      if (copy_from_user(buf + offset, (const void __user *)iov[i].iov_base,
+                         iov[i].iov_len)) {
+        kfree(buf);
+        return -EFAULT;
+      }
       offset += iov[i].iov_len;
     }
   }
@@ -286,8 +289,11 @@ int64_t netlink_sock_recvmsg(netlink_sock *sock, const struct iovec *iov,
         uint32_t copy = (uint32_t)iov[i].iov_len;
         if (copy > remaining)
           copy = remaining;
-        copy_to_user((void __user *)iov[i].iov_base, skb->data + data_offset,
-                     copy);
+        if (copy_to_user((void __user *)iov[i].iov_base,
+                         skb->data + data_offset, copy)) {
+          spin_unlock(&nl_group_lock);
+          return -EFAULT;
+        }
         data_offset += copy;
         remaining -= copy;
       }

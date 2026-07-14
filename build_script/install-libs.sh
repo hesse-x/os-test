@@ -9,6 +9,7 @@
 #   build/libc.a      → $DEST/libc.a      (libc static)
 #   build/libc.so     → $DEST/libc.so     (libc shared)
 #   build/libm.a      → $DEST/libm.a      (libm static, if present)
+#   build/libm.so     → $DEST/libm.so     (libm shared, if present)
 #   build/libdrm.a    → $DEST/libdrm.a    (libdrm static)
 #   build/libdrm.so   → $DEST/libdrm.so   (libdrm shared, if present)
 #   build/ldso.elf    → $DEST/ld.so       (dynamic linker; PT_INTERP = /lib/ld.so)
@@ -22,7 +23,7 @@
 #   ./install-libs.sh /path/to/sysroot/usr/lib
 #
 # Verification:
-#   ls $DEST → libc.a, libc.so, libdrm.a, ld.so (+ libdrm.so, libm.a if built)
+#   ls $DEST → libc.a, libc.so, libdrm.a, ld.so (+ libdrm.so, libm.a, libm.so if built)
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
@@ -44,6 +45,7 @@ mandatory=(
 # Files that are optional (built by later phases; absent is fine, not a failure).
 optional=(
   "libm.a:libm.a"
+  "libm.so:libm.so"
   "libdrm.so:libdrm.so"
 )
 

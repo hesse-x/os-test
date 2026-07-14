@@ -123,7 +123,10 @@ int64_t sys_timerfd_settime(int64_t fd, int64_t flags, int64_t new_ptr,
     old.it_interval.tv_nsec = (long)(tfd->interval % 1000000000ULL);
     old.it_value.tv_sec = (time_t)(tfd->expiry / 1000000000ULL);
     old.it_value.tv_nsec = (long)(tfd->expiry % 1000000000ULL);
-    copy_to_user((void *)old_ptr, &old, sizeof(old));
+    if (copy_to_user((void *)old_ptr, &old, sizeof(old))) {
+      spin_unlock_irqrestore(&tfd->lock, tfd_settime_flags);
+      return -EFAULT;
+    }
   }
   uint64_t now = sched_clock();
   if (neu.it_value.tv_sec == 0 && neu.it_value.tv_nsec == 0) {

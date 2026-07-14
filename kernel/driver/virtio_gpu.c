@@ -638,7 +638,8 @@ static long drm_ioctl_version(void *arg) {
       return -EFAULT;
     if (copy_len == v->name_len - 1) {
       char nul = '\0';
-      copy_to_user((void *)(uintptr_t)(v->name + copy_len), &nul, 1);
+      if (copy_to_user((void *)(uintptr_t)(v->name + copy_len), &nul, 1))
+        return -EFAULT;
     }
   }
 
@@ -828,7 +829,8 @@ static long drm_ioctl_getproperty(void *arg) {
     p->flags |= DRM_MODE_PROP_RANGE;
     if (p->values_ptr) {
       uint64_t vals[2] = {prop->range_min, prop->range_max};
-      copy_to_user((void *)(uintptr_t)p->values_ptr, vals, sizeof(vals));
+      if (copy_to_user((void *)(uintptr_t)p->values_ptr, vals, sizeof(vals)))
+        return -EFAULT;
       p->count_values = 2;
     }
     break;
@@ -841,8 +843,9 @@ static long drm_ioctl_getproperty(void *arg) {
         e.value = prop->enums[i].value;
         __memset(e.name, 0, sizeof(e.name));
         __memcpy(e.name, prop->enums[i].name, DRM_PROP_NAME_LEN);
-        copy_to_user((void *)(uintptr_t)(p->enum_blob_ptr + i * sizeof(e)), &e,
-                     sizeof(e));
+        if (copy_to_user((void *)(uintptr_t)(p->enum_blob_ptr + i * sizeof(e)),
+                         &e, sizeof(e)))
+          return -EFAULT;
       }
     }
     p->count_enum_blobs = prop->enum_count;
@@ -1251,9 +1254,10 @@ static long drm_ioctl_getconnector(void *arg) {
         break;
     }
     if (found == 2) {
-      copy_to_user((void *)(uintptr_t)c->props_ptr, props, sizeof(props));
-      copy_to_user((void *)(uintptr_t)c->prop_values_ptr, values,
-                   sizeof(values));
+      if (copy_to_user((void *)(uintptr_t)c->props_ptr, props, sizeof(props)) ||
+          copy_to_user((void *)(uintptr_t)c->prop_values_ptr, values,
+                       sizeof(values)))
+        return -EFAULT;
     }
   }
 

@@ -289,8 +289,12 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
   uint32_t offset = 0;
   for (size_t i = 0; i < iovlen; i++) {
     if (iov[i].iov_base && iov[i].iov_len > 0) {
-      copy_from_user(skb->data + offset, (const void __user *)iov[i].iov_base,
-                     iov[i].iov_len);
+      if (copy_from_user(skb->data + offset,
+                         (const void __user *)iov[i].iov_base,
+                         iov[i].iov_len)) {
+        skb_free(skb);
+        return -EFAULT;
+      }
       offset += iov[i].iov_len;
     }
   }
@@ -483,8 +487,11 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
         uint32_t copy = (uint32_t)iov[i].iov_len;
         if (copy > remaining)
           copy = remaining;
-        copy_to_user((void __user *)iov[i].iov_base, skb->data + data_offset,
-                     copy);
+        if (copy_to_user((void __user *)iov[i].iov_base,
+                         skb->data + data_offset, copy)) {
+          spin_unlock(&socket_lock);
+          return -EFAULT;
+        }
         data_offset += copy;
         remaining -= copy;
       }
@@ -785,7 +792,10 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   // Read sun_family
   uint16_t sun_family;
-  copy_from_user(&sun_family, addr, sizeof(sun_family));
+  if (copy_from_user(&sun_family, addr, sizeof(sun_family))) {
+    file_put(bf);
+    return (int64_t)-EFAULT;
+  }
   if (sun_family == AF_NETLINK) {
     // Validate addr pointer for sockaddr_nl
     if (addrlen < sizeof(sockaddr_nl)) {
@@ -802,7 +812,10 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       return (int64_t)-EBADF;
     }
     sockaddr_nl nl_addr;
-    copy_from_user(&nl_addr, addr, sizeof(sockaddr_nl));
+    if (copy_from_user(&nl_addr, addr, sizeof(sockaddr_nl))) {
+      file_put(bf);
+      return (int64_t)-EFAULT;
+    }
     int64_t ret = netlink_sock_bind(nlsock, &nl_addr);
     file_put(bf);
     return ret;
@@ -825,9 +838,13 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   size_t path_len = addrlen - sizeof(sun_family);
   if (path_len > 107)
     path_len = 107;
-  if (path_len > 0)
-    copy_from_user(sun_path, (const char __user *)addr + sizeof(sun_family),
-                   path_len);
+  if (path_len > 0) {
+    if (copy_from_user(sun_path, (const char __user *)addr + sizeof(sun_family),
+                       path_len)) {
+      file_put(bf);
+      return (int64_t)-EFAULT;
+    }
+  }
   sun_path[107] = '\0';
 
   if (sun_path[0] == '\0') {
@@ -1082,10 +1099,11 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         }
         sa.sun_path[pi] = '\0';
       }
-      // Copy to user
-      socklen_t user_alen;
-      copy_from_user(&user_alen, addrlen, sizeof(socklen_t));
-      if (user_alen > alen)
+      // Copy to user. The accepted fd is already installed; on copy failure we
+      // skip the address backfill rather than tear down a live connection.
+      socklen_t user_alen = alen;
+      if (!copy_from_user(&user_alen, addrlen, sizeof(socklen_t)) &&
+          user_alen > alen)
         user_alen = alen;
       copy_to_user(addr, &sa, user_alen);
       copy_to_user(addrlen, &alen, sizeof(socklen_t));
@@ -1128,7 +1146,10 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   }
 
   uint16_t sun_family;
-  copy_from_user(&sun_family, addr, sizeof(sun_family));
+  if (copy_from_user(&sun_family, addr, sizeof(sun_family))) {
+    file_put(cf);
+    return (int64_t)-EFAULT;
+  }
   if (sun_family != AF_UNIX) {
     file_put(cf);
     return (int64_t)-EAFNOSUPPORT;
@@ -1139,9 +1160,13 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   size_t path_len = addrlen - sizeof(sun_family);
   if (path_len > 107)
     path_len = 107;
-  if (path_len > 0)
-    copy_from_user(sun_path, (const char __user *)addr + sizeof(sun_family),
-                   path_len);
+  if (path_len > 0) {
+    if (copy_from_user(sun_path, (const char __user *)addr + sizeof(sun_family),
+                       path_len)) {
+      file_put(cf);
+      return (int64_t)-EFAULT;
+    }
+  }
   sun_path[107] = '\0';
 
   if (sun_path[0] == '\0') {
@@ -1354,7 +1379,10 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   }
 
   struct msghdr kmsg;
-  copy_from_user(&kmsg, msg, sizeof(struct msghdr));
+  if (copy_from_user(&kmsg, msg, sizeof(struct msghdr))) {
+    file_put(sf);
+    return (int64_t)-EFAULT;
+  }
 
   // Validate iov
   uint64_t iov_ptr = (int64_t)kmsg.msg_iov;
@@ -1373,8 +1401,12 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     file_put(sf);
     return (int64_t)-ENOMEM;
   }
-  copy_from_user(kiov, (const void __user *)kmsg.msg_iov,
-                 kmsg.msg_iovlen * sizeof(struct iovec));
+  if (copy_from_user(kiov, (const void __user *)kmsg.msg_iov,
+                     kmsg.msg_iovlen * sizeof(struct iovec))) {
+    kfree(kiov);
+    file_put(sf);
+    return (int64_t)-EFAULT;
+  }
 
   // Validate each iov base pointer
   for (size_t i = 0; i < kmsg.msg_iovlen; i++) {
@@ -1411,8 +1443,13 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       file_put(sf);
       return (int64_t)-ENOMEM;
     }
-    copy_from_user(kcontrol, (const void __user *)kmsg.msg_control,
-                   kmsg.msg_controllen);
+    if (copy_from_user(kcontrol, (const void __user *)kmsg.msg_control,
+                       kmsg.msg_controllen)) {
+      kfree(kcontrol);
+      kfree(kiov);
+      file_put(sf);
+      return (int64_t)-EFAULT;
+    }
     kcontrollen = kmsg.msg_controllen;
   }
 
@@ -1475,7 +1512,10 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   }
 
   struct msghdr kmsg;
-  copy_from_user(&kmsg, msg, sizeof(struct msghdr));
+  if (copy_from_user(&kmsg, msg, sizeof(struct msghdr))) {
+    file_put(rf);
+    return (int64_t)-EFAULT;
+  }
 
   // Validate iov
   uint64_t iov_ptr = (int64_t)kmsg.msg_iov;
@@ -1493,8 +1533,12 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     file_put(rf);
     return (int64_t)-ENOMEM;
   }
-  copy_from_user(kiov, (const void __user *)kmsg.msg_iov,
-                 kmsg.msg_iovlen * sizeof(struct iovec));
+  if (copy_from_user(kiov, (const void __user *)kmsg.msg_iov,
+                     kmsg.msg_iovlen * sizeof(struct iovec))) {
+    kfree(kiov);
+    file_put(rf);
+    return (int64_t)-EFAULT;
+  }
 
   for (size_t i = 0; i < kmsg.msg_iovlen; i++) {
     if (kiov[i].iov_base) {
@@ -1538,11 +1582,15 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                                &src_len, flags);
     // Write src_addr to msg_name if requested
     if (ret >= 0 && kmsg.msg_name && kmsg.msg_namelen >= sizeof(sockaddr_nl)) {
-      copy_to_user((void __user *)kmsg.msg_name, &src_addr,
-                   sizeof(sockaddr_nl));
-      socklen_t out_len = sizeof(sockaddr_nl);
-      copy_to_user((void __user *)((char __user *)msg + 4), &out_len,
-                   sizeof(socklen_t));
+      if (copy_to_user((void __user *)kmsg.msg_name, &src_addr,
+                       sizeof(sockaddr_nl)))
+        ret = (int64_t)-EFAULT;
+      else {
+        socklen_t out_len = sizeof(sockaddr_nl);
+        if (copy_to_user((void __user *)((char __user *)msg + 4), &out_len,
+                         sizeof(socklen_t)))
+          ret = (int64_t)-EFAULT;
+      }
     }
   } else {
     struct unix_sock *sock = rf->sock;
@@ -1556,8 +1604,9 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     // Update msg_controllen in user space (existing code)
     if (ret >= 0) {
       if (kmsg.msg_control && kmsg.msg_controllen > 0) {
-        copy_to_user((void __user *)((char __user *)msg + 40), &kcontrollen,
-                     sizeof(size_t));
+        if (copy_to_user((void __user *)((char __user *)msg + 40), &kcontrollen,
+                         sizeof(size_t)))
+          ret = (int64_t)-EFAULT;
       }
     }
   }

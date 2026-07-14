@@ -48,7 +48,11 @@ cmake -DCMAKE_TOOLCHAIN_FILE=../build_script/cmake/toolchain-x86_64.cmake \
 make
 cd ..
 
-# 2. Generate disk.img (single disk, two partitions: ESP + root FAT32)
+# 2. Publish sysroot artifacts (UAPI headers + libs → self-contained cross-target)
+bash build_script/install-headers.sh
+bash build_script/install-libs.sh
+
+# 3. Generate disk.img (single disk, two partitions: ESP + root FAT32)
 TEST="${TEST:-0}"
 if echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
     TEST=1
