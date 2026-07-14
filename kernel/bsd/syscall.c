@@ -8,6 +8,10 @@
 // Extracted from kernel/trap.c (phase 3 step 3.3)
 
 #include "kernel/bsd/syscall.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+
 #include "arch/x64/apic.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
@@ -50,13 +54,13 @@
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 #include "utils/macro.h"
-#include <stdbool.h>
-#include <stddef.h>
+
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/input.h>
 #include <xos/ioctl.h>
 #include <xos/mman.h>
+#include <xos/page.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
 #include <xos/stat.h>
@@ -2068,24 +2072,42 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       }
       spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
-      proc->state = BLOCKED;
-      proc->wait_event = WAIT_REQ_REPLY;
-      proc->wait_timed_out = 0;
-      proc->wait_deadline = sched_clock() + 3000000000ULL;
+      // Block caller on WAIT_REQ_REPLY. Arm the wait (set BLOCKED + deadline +
+      // insert timer) under our own scheduler_lock, in the same critical
+      // section. Without this, the target (evdev on another CPU) can receive
+      // the REQ, run sys_resp() and try to wake us between the wake above and
+      // setting BLOCKED below — sys_resp's wake-check then sees us
+      // not-yet-BLOCKED and drops the wake, stranding us until the 3s timeout.
+      // Now that sys_recv's lost-wake is fixed, evdev replies fast, so this
+      // caller-side window is the more likely failure; close it the same way.
+      //
+      // req_replied is set by sys_resp under this lock before its wake-check;
+      // we clear it before arming and re-check it under the lock. If the reply
+      // already landed, stay RUNNING and return without sleeping (lost-wake
+      // guard). See sys_req for the full rationale.
       proc->req_target_pid = target_pid;
       proc->req_reply_buf = arg;
       proc->req_reply_len = arg_size;
       proc->req_result = 0;
+      proc->req_replied = 0;
+      proc->wait_timed_out = 0;
+      proc->wait_deadline = sched_clock() + 3000000000ULL;
 
       int cpu = proc->assigned_cpu;
       uint64_t flags2;
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
-      sched_timer_queue_insert(cpu, proc);
+      bool need_sleep = !proc->req_replied;
+      if (need_sleep) {
+        proc->state = BLOCKED;
+        proc->wait_event = WAIT_REQ_REPLY;
+        sched_timer_queue_insert(cpu, proc);
+      }
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
 
       file_put(f);
       f = NULL;
-      schedule();
+      if (need_sleep)
+        schedule();
 
       if (proc->wait_timed_out)
         return (int64_t)-ETIMEDOUT;
@@ -2146,26 +2168,35 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
     }
 
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_REQ_REPLY;
-    proc->wait_timed_out = 0;
-    proc->wait_deadline = sched_clock() + 3000000000ULL;
+    // Block caller on WAIT_REQ_REPLY. Arm the wait under our own scheduler_lock
+    // — same caller-side lost-wake fix + req_replied guard as the inline path
+    // above (see comment there).
     proc->req_target_pid = target_pid;
     proc->req_reply_buf = arg;
     proc->req_reply_len = arg_size;
     proc->req_result = 0;
+    proc->req_replied = 0;
+    proc->wait_timed_out = 0;
+    proc->wait_deadline = sched_clock() + 3000000000ULL;
 
+    bool need_sleep;
     {
       int cpu = proc->assigned_cpu;
       uint64_t flags2;
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
-      sched_timer_queue_insert(cpu, proc);
+      need_sleep = !proc->req_replied;
+      if (need_sleep) {
+        proc->state = BLOCKED;
+        proc->wait_event = WAIT_REQ_REPLY;
+        sched_timer_queue_insert(cpu, proc);
+      }
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
     }
 
     file_put(f);
     f = NULL;
-    schedule();
+    if (need_sleep)
+      schedule();
 
     if (proc->wait_timed_out)
       return (int64_t)-ETIMEDOUT;

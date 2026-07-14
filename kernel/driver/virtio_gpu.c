@@ -6,7 +6,6 @@
 
 #include "kernel/driver/virtio_gpu.h"
 #include "arch/x64/apic.h"
-#include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
@@ -25,11 +24,12 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
 
-#include "drm/drm.h"
-#include "drm/drm_fourcc.h"
 #include <xos/errno.h>
+#include <xos/page.h>
 #include <xos/socket.h>
 
+#include "drm/drm.h"
+#include "drm/drm_fourcc.h"
 #include "drm/drm_mode.h"
 
 struct virtio_gpu_device g_virtio_gpu;

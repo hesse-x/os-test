@@ -28,6 +28,7 @@
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
 
+#include <xos/page.h>
 #include <xos/syscall_nums.h>
 
 // Validate assembly offset assumptions in trapentry.S (switch_to uses hardcoded
@@ -100,8 +101,10 @@ static void init_xtask_defaults(xtask *t) {
   t->recv_lock = SPINLOCK_INIT;
   t->req_caller_pid = -1;
   t->req_target_pid = -1;
+  t->req_replied = 0;
   t->msg_caller_pid = -1;
   t->msg_target_pid = -1;
+  t->msg_replied = 0;
   list_init(&t->run_node);
   list_init(&t->wait_node);
 }
@@ -722,12 +725,14 @@ void sched_task_reap(xtask *proc) {
   proc->req_reply_buf = NULL;
   proc->req_result = 0;
   proc->req_target_pid = -1;
+  proc->req_replied = 0;
   // MSG state
   proc->msg_reply_buf = NULL;
   proc->msg_reply_len = 0;
   proc->msg_caller_pid = -1;
   proc->msg_result = 0;
   proc->msg_target_pid = -1;
+  proc->msg_replied = 0;
   proc->cpu_time_ns = 0;
   proc->last_sched = 0;
   // Clear threading fields

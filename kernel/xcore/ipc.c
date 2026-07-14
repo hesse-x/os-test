@@ -7,6 +7,9 @@
 // kernel/xcore/ipc.c — Xcore IPC syscalls and primitives
 // Extracted from kernel/trap.c (phase 3 step 3.1)
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "arch/x64/apic.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
@@ -23,9 +26,9 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
-#include <stdbool.h>
-#include <stdint.h>
+
 #include <xos/errno.h>
+#include <xos/page.h>
 #include <xos/syscall_nums.h>
 
 // ===================== IRQ owner table (shared with trap.c)
@@ -299,10 +302,10 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     // exactly the sporadic 3s ETIMEDOUT seen on EVIOCGVERSION.
     //
     // The re-check reads recv_head/recv_tail without recv_lock. This is safe:
-    // every sender takes recv_lock *then* scheduler_lock, so under scheduler_lock
-    // any enqueue that started is fully visible and any not-yet-started enqueue
-    // can't have changed the pointers. recv_lock ranks below scheduler_lock, so
-    // it cannot be nested here.
+    // every sender takes recv_lock *then* scheduler_lock, so under
+    // scheduler_lock any enqueue that started is fully visible and any
+    // not-yet-started enqueue can't have changed the pointers. recv_lock ranks
+    // below scheduler_lock, so it cannot be nested here.
     uint64_t flags;
     spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
     if (proc->recv_head != proc->recv_tail) {
@@ -470,24 +473,39 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   }
   spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
-  // Block caller on WAIT_REQ_REPLY
+  // Block caller on WAIT_REQ_REPLY. Arm the wait (set BLOCKED + deadline +
+  // insert timer) under our own scheduler_lock so the target's sys_resp() can't
+  // race between our wake above and setting BLOCKED — same lost-wake fix as
+  // sys_recv / sys_ioctl proxy paths.
   xtask *proc = current_task;
-  proc->state = BLOCKED;
-  proc->wait_event = WAIT_REQ_REPLY;
-  proc->wait_timed_out = 0;
-  proc->wait_deadline = sched_clock() + 5000000000ULL; // 5 second timeout
   proc->req_target_pid = target_pid;
   proc->req_reply_buf = reply;
   proc->req_reply_len = RECV_MSG_SIZE;
   proc->req_result = 0;
+  proc->req_replied = 0; // cleared before arming so the post-arm check detects
+                         // only a reply to THIS request
+  proc->wait_timed_out = 0;
+  proc->wait_deadline = sched_clock() + 5000000000ULL; // 5 second timeout
 
   int cpu = proc->assigned_cpu;
   uint64_t flags2;
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
-  sched_timer_queue_insert(cpu, proc);
+  // Lost-wake guard: if sys_resp already delivered the reply between our wake
+  // of the target and acquiring this lock (it sets req_replied under this
+  // lock), don't arm a wait at all — we're still RUNNING, so just leave state
+  // alone and fall through to return the result. sys_resp only wakes us if we
+  // were already BLOCKED, so when it raced ahead it touched neither state nor
+  // the timer.
+  bool need_sleep = !proc->req_replied;
+  if (need_sleep) {
+    proc->state = BLOCKED;
+    proc->wait_event = WAIT_REQ_REPLY;
+    sched_timer_queue_insert(cpu, proc);
+  }
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
 
-  schedule();
+  if (need_sleep)
+    schedule();
 
   // Timeout check
   if (proc->wait_timed_out) {
@@ -527,12 +545,15 @@ int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused3,
   if (caller->pid != caller_pid)
     return (int64_t)-ESRCH;
 
-  caller->req_result = result;
-
   if (reply_len == 0) {
     int caller_cpu = caller->assigned_cpu;
     uint64_t flags;
     spin_lock_irqsave(&cpu_locals[caller_cpu].scheduler_lock, &flags);
+    // Record result + "replied" under the caller's scheduler_lock so the
+    // caller's post-arm re-check (sys_req / sys_ioctl proxy) sees a coherent
+    // pair and can't sleep past an already-delivered reply (lost-wake guard).
+    caller->req_result = result;
+    caller->req_replied = 1;
     if (caller->state == BLOCKED && caller->wait_event == WAIT_REQ_REPLY)
       wake_from_wait(caller);
     spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
@@ -579,6 +600,10 @@ int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused3,
   int caller_cpu = caller->assigned_cpu;
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[caller_cpu].scheduler_lock, &flags);
+  // See reply_len==0 branch: publish result + req_replied under the caller's
+  // scheduler_lock before the wake-check, closing the caller-side lost-wake.
+  caller->req_result = result;
+  caller->req_replied = 1;
   if (caller->state == BLOCKED && caller->wait_event == WAIT_REQ_REPLY)
     wake_from_wait(caller);
   spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
@@ -759,24 +784,34 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
   }
   spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
-  // Block caller on WAIT_MSG_REPLY
+  // Block caller on WAIT_MSG_REPLY. Arm the wait under our own scheduler_lock
+  // — same caller-side lost-wake fix as sys_req / sys_recv / sys_ioctl proxy.
   xtask *proc = current_task;
-  proc->state = BLOCKED;
-  proc->wait_event = WAIT_MSG_REPLY;
-  proc->wait_timed_out = 0;
-  proc->wait_deadline = sched_clock() + 5000000000ULL;
   proc->msg_target_pid = target_pid;
   proc->msg_reply_buf = (void __user *__force)reply_buf;
   proc->msg_reply_len = reply_len;
   proc->msg_result = 0;
+  proc->msg_replied = 0; // cleared before arming so the post-arm check detects
+                         // only a reply to THIS message
+  proc->wait_timed_out = 0;
+  proc->wait_deadline = sched_clock() + 5000000000ULL;
 
   int cpu = proc->assigned_cpu;
   uint64_t flags2;
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
-  sched_timer_queue_insert(cpu, proc);
+  // Lost-wake guard: if sys_msg_resp already replied between our wake of the
+  // target and acquiring this lock (it sets msg_replied under this lock), stay
+  // RUNNING and return the result without sleeping. See sys_req for full note.
+  bool need_sleep = !proc->msg_replied;
+  if (need_sleep) {
+    proc->state = BLOCKED;
+    proc->wait_event = WAIT_MSG_REPLY;
+    sched_timer_queue_insert(cpu, proc);
+  }
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
 
-  schedule();
+  if (need_sleep)
+    schedule();
 
   if (proc->wait_timed_out) {
     return (int64_t)-ETIMEDOUT;
@@ -867,10 +902,13 @@ int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t unused1,
   int caller_cpu = caller->assigned_cpu;
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[caller_cpu].scheduler_lock, &flags);
-  if (caller->state == BLOCKED && caller->wait_event == WAIT_MSG_REPLY) {
-    caller->msg_result = 0;
+  // Publish msg_replied under the caller's scheduler_lock before the wake-check
+  // so the caller's post-arm re-check (sys_msg_to) can't sleep past a reply
+  // already delivered here (lost-wake guard, mirroring sys_resp/req_replied).
+  caller->msg_result = 0;
+  caller->msg_replied = 1;
+  if (caller->state == BLOCKED && caller->wait_event == WAIT_MSG_REPLY)
     wake_from_wait(caller);
-  }
   spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
 
   proc->msg_caller_pid = -1;

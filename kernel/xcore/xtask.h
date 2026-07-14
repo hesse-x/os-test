@@ -75,6 +75,11 @@ typedef struct xtask {
   size_t req_reply_len;
   int32_t req_result;
   pid_t req_target_pid;
+  uint8_t
+      req_replied; // set under caller's scheduler_lock by sys_resp before the
+                   // wake-check; caller re-checks it under the same lock after
+                   // arming WAIT_REQ_REPLY to close the lost-wake window
+                   // (result==0 on success is ambiguous as a "replied" signal)
 
   // === MSG state ===
   void __user *msg_reply_buf;
@@ -82,6 +87,8 @@ typedef struct xtask {
   pid_t msg_caller_pid;
   int32_t msg_result;
   pid_t msg_target_pid;
+  uint8_t msg_replied; // set under caller's scheduler_lock by sys_msg_resp;
+                       // same lost-wake guard as req_replied for WAIT_MSG_REPLY
 
   // === CPU time accounting ===
   uint64_t cpu_time_ns;

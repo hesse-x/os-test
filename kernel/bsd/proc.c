@@ -20,6 +20,7 @@
 #include "kernel/bsd/elf_loader.h"
 #include "kernel/bsd/eventpoll.h"
 #include "kernel/bsd/fat32.h"
+#include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
@@ -47,6 +48,7 @@
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/mman.h>
+#include <xos/page.h>
 #include <xos/signal.h>
 #include <xos/thread.h>
 
@@ -722,8 +724,8 @@ uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
 
 // Deep-copy fd_table from parent_files to child_files.
 // Bumps ref counts for pipe, SHM, file, inode, socket, TTY.
-static void __attribute__((unused))
-copy_fd_table(files *parent_files, files *child_files) {
+static void __attribute__((unused)) copy_fd_table(files *parent_files,
+                                                  files *child_files) {
   for (int fd = 0; fd < MAX_FD; fd++) {
     struct file *f = parent_files->fd_table[fd];
     child_files->fd_table[fd] = f;
@@ -882,8 +884,10 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   child->recv_lock = SPINLOCK_INIT;
   child->req_caller_pid = -1;
   child->req_reply_buf = NULL;
+  child->req_replied = 0;
   child->msg_caller_pid = -1;
   child->msg_reply_buf = NULL;
+  child->msg_replied = 0;
   child->cpu_time_ns = 0;
   child->last_sched = 0;
   child->exit_code = 0;
@@ -1158,8 +1162,10 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   child->recv_lock = SPINLOCK_INIT;
   child->req_caller_pid = -1;
   child->req_reply_buf = NULL;
+  child->req_replied = 0;
   child->msg_caller_pid = -1;
   child->msg_reply_buf = NULL;
+  child->msg_replied = 0;
   child->cpu_time_ns = 0;
   child->last_sched = 0;
   child->exit_code = 0;
