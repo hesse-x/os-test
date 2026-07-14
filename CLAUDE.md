@@ -192,6 +192,8 @@ kernel/
 | `ioctl.md` | ioctl 代理机制（inline/变长双路径、RECV_IOCTL、sys_resp 三参分离） |
 | `driver_workflow.md` | 用户态驱动工作流 |
 | `user_driver.md` | 用户态驱动详细设计 |
+| `sysfs.md` | sysfs 伪文件系统（`/sys` 属性树 + file_operations fd-I/O 分发 + ringbuf 事件流） |
+| `udev.md` | libudev 兼容层（netlink uevent + shim 直读 sysfs path-seat） |
 | `terminal.md` | Terminal/PTY/串口设计（内核 PTY + 内核串口 + 用户态 ldisc + Shell） |
 | `debug.md` | 内核调试方法论（诊断输出克制、单字符进度链、per-CPU 计数器、watchdog、持锁遍历、偏移量陷阱） |
 

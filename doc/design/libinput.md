@@ -43,14 +43,20 @@ terminal 为动态 ELF（PT_INTERP → ld.so），运行时加载 `libc.so` + `l
 
 #### libudev 垫片（user/lib/udev-shim/）
 
-libinput path-seat 模式只用到 `udev_new` + `udev_unref`（后两者在 path-seat 路径实际不走，但 libinput 初始化流程引用了 `udev_new` 符号）。垫片空实现返回 NULL，path-seat 不依赖它们。
+libinput path-seat 模式只用到 `udev_new` + `udev_unref`（后两者在 path-seat 路径实际不走，但 libinput 初始化流程引用了 `udev_new` 符号）。
 
 接口声明在 `user/lib/udev-shim/libudev.h`，实现在 `user/lib/udev-shim/udev.c`。
 
-当前实现：
-- `udev_new()` — 返回 NULL（path-seat 不依赖）
+当前实现（commit 66f5cc0 起补全）：
+- `udev_new()` — 返回非空上下文（path-seat 不依赖其内容，但需非 NULL）
 - `udev_unref()` — no-op
-- 其它 libudev 函数（`udev_device_*`, `udev_enumerate_*`, `udev_monitor_*`） — 均返回 0/NULL
+- `udev_device_new_from_syspath` / `udev_device_new_from_devnum` / `udev_device_new_from_subsystem_sysname` — 按 syspath/devnum/subsystem+sysname 构造设备对象
+- `udev_device_get_sysattr_value` — 真读 sysfs：`open("<syspath>/id/<attr>")` + `read()`（input 子系统用）
+- `udev_device_get_syspath` / `get_sysname` / `get_devnode` / `get_subsystem` — 路径/名称访问器
+- `udev_enumerate_new` / `add_match_subsystem` / `add_match_sysname` / `scan_devices` / `get_list_entry` — `scan_devices` 扫描 `/dev/input` 设备（opendir + stat + 键盘判别）
+- `udev_monitor_new_from_netlink` — 占位（接收 fd 由 netlink uevent 通道驱动，详见 [kernel/netlink.md](kernel/netlink.md)）
+
+回归测试：`user/test/test_libudev.c`（TEST-gated ELF）。
 
 #### libevdev 垫片（user/lib/evdev-shim/）
 
@@ -177,7 +183,7 @@ HID 驱动 → evdev SHM ring (struct input_event[256], 24B per event)
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
 | ringbuf_read 阻塞等待 | 当前 cursor==head 返回 -EAGAIN，terminal poll 轮询。需通过 evdev notify + wait_queue 实现真正的阻塞读，消除 poll 忙等 | 中 |
-| libudev 垫片完善 / udev-seat | path-seat 之外添加 `libinput_udev_create_context` 支持需 udev enumerate + netlink monitor。当前垫片全部空实现 | 低 |
+| udev-seat 模式 | path-seat 之外添加 `libinput_udev_create_context` 支持：需 udev enumerate（已实现 `scan_devices`）+ netlink monitor（`udev_monitor_new_from_netlink` 占位）。当前 path-seat 已覆盖 terminal 键盘场景 | 低 |
 | evdev multi-device | 多输入设备（event0..eventN）场景下 libinput 多 device 共存和路由 | 低 |
 | tablet / touchpad dispatch stubs | stubs.c 中空桩的滤波器（9 个）和 dispatch（tablet/touchpad/totem 共 10 个）在接入非键盘设备时需真实实现 | 低 |
 | ringbuf_close 通知 evdev | `ringbuf_close` 中 RINGBUF_CLOSE 消息发送当前为 no-op，consumer 崩溃后 evdev 无法感知 | 低 |

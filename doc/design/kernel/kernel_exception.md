@@ -88,11 +88,24 @@ Debug 构建（NDEBUG 未定义）`spinlock_t` 含 `cpu_id` 字段：`spin_lock`
 - `panic()`：打印原因 + 寄存器 + dump_stack_trace + halt。实现：`kernel/xcore/log.c:22-36`
 - `dump_stack_trace()`：独立 RBP 链回溯函数。实现：`kernel/xcore/log.c:38-51`
 
-当前状态：内核约 142 处仍用 `serial_printf`（无分级）；`trap_dispatch` 内核态异常仍调 `halt()` 而非 `panic()`；BUG_ON/WARN_ON/ASSERT 零调用点；`dump_stack_trace` 被 `panic()` 调用但 `trap_dispatch` 仍有独立内联回溯代码未复用。
+当前状态：内核约 142 处仍用 `serial_printf`（无分级）；`trap_dispatch` 内核态异常已接入 `panic()`（`log.c`）且在 panic 前先尝试异常表 fixup（见「用户态指针保护」）；BUG_ON/WARN_ON/ASSERT 零调用点；`dump_stack_trace` 已被 `panic()` 调用。
 
 ### 用户态指针保护
 
-`copy_from_user/copy_to_user` 已广泛使用（`kernel/xcore/mem/copy_user.c`）。`validate_user_buf/validate_user_ptr` 存在（`kernel/driver/user_check.h`）。残余直接访问：`sys_pipe` 直接写用户指针；`sys_getdents` 无 len 上限。
+`copy_from_user`/`copy_to_user`/`strncpy_from_user`（`kernel/xcore/mem/copy_user.c`）是用户态指针访问的唯一规范实现，正常构建与 KASAN（SANITIZE=1）构建共用同一份代码。三函数均内置 `access_ok()` 前置检查（拒绝内核空间指针 + 溢出地址），拷贝体用 `rep movsb`（copy_*）/逐字节循环（strncpy）单条可标注指令实现，并用 `_ASM_EXTABLE` 标注故障指令。
+
+**异常表 fixup 机制**（commit b75f246）：
+
+- 链接脚本 `build_script/linker.ld` 定义 `__ex_table` 段，`__start___ex_table`/`__stop___ex_table` 符号界之，`KEEP(*(__ex_table))` 入 rodata PHDR
+- `kernel/xcore/mem/extable.h`：`struct exception_table_entry { uint64_t insn; uint64_t fixup; }` + `_ASM_EXTABLE(insn, fixup)` 宏（`.pushsection __ex_table` 写一条「故障 RIP → fixup 标签」记录）
+- `kernel/xcore/trap.c : fixup_exception(tf)`：线性扫描异常表，RIP 命中则返回 fixup 地址
+- 内核态异常路径（`trap.c`，vec 13 #GP / vec 14 #PF，`tf->cs==0x08` 内核态）：**先尝试 `fixup_exception`**，命中则 `tf->rip = fixup` 返回（CPU 跳到 fixup 标签 → `%rax=-EFAULT` → ret），未命中才 `panic()`
+
+**返回值契约**：成功返回 0（strncpy 返回未拷贝字节数），故障返回 `-EFAULT`。用户指针非法时不再 panic，而是回传 -EFAULT 给 syscall。
+
+`validate_user_buf/validate_user_ptr`（`kernel/driver/user_check.h`）为驱动层手动校验辅助，与 `access_ok` 互补。
+
+**call-site 加固**（Stage F，部分完成）：所有 `copy_*` 调用点须检查返回值，失败走 `if (copy_...) { cleanup; return -EFAULT; }`。已完成：`signal.c`（5 处）、`syscall.c`（全处）、`ipc.c`（14 处，跨进程路径正确先恢复 CR3 再返回 -EFAULT）。未完成：`socket.c` 仍有约 19 处裸调用忽略返回值（详见待完成项）。
 
 ### 与其他模块的关系
 
@@ -112,11 +125,9 @@ Debug 构建（NDEBUG 未定义）`spinlock_t` 含 `cpu_id` 字段：`spin_lock`
 | syscall 返回值语义统一 | `trap.h` 签名仍为 `uint64_t`，需改为 `int64_t`；sys_mmap 等 0=失败需改为 -errno | 高 |
 | 内核函数 `__must_check` | `inode_create` 等不可忽略返回值的函数未标注 | 低 |
 | 分配失败回滚 | `process_create_elf` 错误路径泄漏栈页（5 处），需 goto cleanup 集中回滚 | 高 |
-| 用户态指针加固 | `sys_pipe` 直接写用户指针；`sys_getdents` 无 len 上限；`sys_mmap MAP_PHYSICAL` 未验证 offset 范围 | 高 |
+| 用户态指针 call-site 加固（socket.c） | `kernel/bsd/socket.c` 仍有约 19 处裸 `copy_from_user`/`copy_to_user` 忽略返回值（iovec 循环、bind/accept/connect/sendmsg/recvmsg 各路径）。extable 已保证不再 panic，但静默拷垃圾。需补 `if (copy_...) { cleanup; return -EFAULT; }`。同样模式散见 `netlink.c`/`timerfd.c`/`virtio_gpu.c` | 高 |
 | printk 调用迁移 | 142 处 `serial_printf` 需逐步迁移为 `printk(LOG_XX, ...)` | 中 |
-| panic() 接入异常处理 | `trap_dispatch` 内核态异常仍调 `halt()`，需改为 `panic()` | 中 |
 | 断言插入 | BUG_ON/WARN_ON/ASSERT 零调用点，需插入首批高价值位置（spin_lock 递归、kmalloc 返回值、inode_get/put ref_count） | 中 |
-| 栈回溯复用 | `trap_dispatch` 仍有独立内联回溯代码，需复用 `dump_stack_trace()` | 低 |
 | IPC 阻塞超时 | sys_req/sys_msg_to/sys_ioctl 均设 `wait_deadline=0`（永久等待），需加默认超时 | 中 |
 | socket 阻塞超时 | accept/recvmsg 阻塞无 `wait_deadline` | 中 |
 | FAT chain 循环检测 | walk_chain/free_chain/write tail loop 均无循环计数器，磁盘损坏时内核无限循环 | 中 |

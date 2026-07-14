@@ -170,8 +170,7 @@ terminal 动态 ELF 最终 `DT_NEEDED` 链：`libdrm.so` + `libinput.so` + `libm
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| modetest 构建目标 | `user/test/modetest.c` 已有源码但未接入 CMake 构建，需新增 `add_user_elf(modetest)` 和 `add_user_dyn_elf(modetest_dyn)` 目标 | 低 |
-| hello_drm_dyn 构建目标 | `user/test/hello_drm_dyn.c` 已有源码但未接入 CMake 构建，需新增 `add_user_dyn_elf(hello_drm_dyn)` 目标 | 低 |
+| sysroot lib/ 接入构建 | `build_script/install-libs.sh` 已存在并提交，但未被 `build.sh` 调用，`build/sysroot/usr/lib/` 不存在。需在构建产出库后调用该脚本，形成自包含 sysroot（头+库），供 Mesa/第三方库 `-isysroot` 编链 | 中 |
 | SETPROPERTY / OBJ_SETPROPERTY | 当前返回 `-ENOSYS`，wlroots 调用 `drmModeObjectSetProperty` 设置 DPMS 或 IN_FORMATS 时会失败。需实现属性设置路径（DPMS 可接受 no-op，IN_FORMATS 拒绝不支持的 format） | 中 |
 | GEM_FLINK / GEM_OPEN | Mesa kms_swrast 可能调用 `drmModeGetFB` 后走 flink 路径获取全局 handle，当前返回 `-ENOSYS` | 低 |
 | PRIME / SYNCOBJ / ATOMIC / LEASE | 阶段 3 高级特性，当前返回 `-ENOSYS`，非 wlroots legacy 路径所必须 | 低 |

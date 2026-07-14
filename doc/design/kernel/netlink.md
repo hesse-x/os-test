@@ -140,7 +140,7 @@ nlmsghdr.nlmsg_type 取 NLMSG_UEVENT_ADD(1) / NLMSG_UEVENT_REMOVE(2) / NLMSG_UEV
 
 ### 与其他模块的关系
 
-- **devtmpfs**：dev_create / dev_remove 调用 nl_uevent_broadcast 触发 uevent
+- **devtmpfs**：三类事件触发 uevent 广播——`dev_create`（内核驱动设备创建）、`dev_remove`（设备删除）、`sys_dev_set_meta`（用户态驱动推送设备元数据，design §3.3.2 step 2）。三者均经 `nl_is_initialized()` 门控
 - **socket 层**：sys_socket/bind/sendmsg/recvmsg 按 domain/fd 类型分流到 netlink 路径，与 AF_UNIX 共享 sk_buff 基础设施
 - **epoll**：netlink fd 通过 file_poll + wait_queue 集成，与 AF_UNIX socket/pipe/eventfd 共用同一机制，详见 [epoll.md](epoll.md)
 - **IPC**：Netlink 与 MSG 服务不同通信模式（多播事件 vs 1:1 RPC），底层共享 sk_buff/wake_from_wait 基础设施，详见 [ipc.md](ipc.md)
@@ -151,6 +151,7 @@ nlmsghdr.nlmsg_type 取 NLMSG_UEVENT_ADD(1) / NLMSG_UEVENT_REMOVE(2) / NLMSG_UEV
 - include/uapi/xos/netlink.h — nlmsghdr / sockaddr_nl / 常量 / 宏
 - user/include/linux/netlink.h — Linux 兼容头文件（重定向到 xos/netlink.h + 补充 NETLINK_ROUTE 等协议常量），供移植的 Linux 程序使用
 - user/udev/udevd.c — 最小 udevd 用户态进程（socket + bind + epoll + recvmsg 事件循环，打印 uevent）
+- user/lib/udev-shim/ — libudev 兼容垫片（`udev_new`、`udev_device_new_from_syspath/devnum/subsystem_sysname`、`udev_device_get_sysattr_value` 真读 sysfs、`udev_enumerate_scan_devices` 扫 /dev/input、`udev_monitor_new_from_netlink` 等），消费 netlink uevent 通道。已接入回归测试 `user/test/test_libudev.c`。详见 [libinput.md](../libinput.md)
 
 ## 待完成项
 

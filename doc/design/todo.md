@@ -176,13 +176,6 @@ sprint 10+: 交叉编译 clang for Xos → 在 Xos 上测试 cc1 → 自举
 
 详细设计见 [kernel/mount.md](kernel/mount.md)。待完成项（sysfs 占位、ino 唯一化、子目录 getdents、path_walk 重写等）见该文档末尾。
 
-## udevd 改读 sysfs 真文件
-
-- [ ] udevd 改读 /sys/class/... 真文件 (sysfs_design.md 3.8)
-  - udev_device_get_sysattr_value 改为 open("/sys/class/<subsys>/<dev>/<attr>") + read()
-  - 废弃虚拟 syspath 内存库
-  - 回改 udev_design.md 1.3/3.2.2/3.3.1 章节
-
 ## 键盘 repeat 机制
 
 - [ ] evdev 层实现键盘 repeat：记录最后按下键 + 时间戳，用软定时器（timerfd 或 sys_gettime 轮询）在按住超过延迟后周期性重发 KEY_DOWN
