@@ -447,6 +447,16 @@ static inline int sys_unlink(const char *path) {
   return 0;
 }
 
+static inline int sys_rename(const char *oldpath, const char *newpath) {
+  int64_t r = __syscall2(SYS_RENAME, (int64_t)(uintptr_t)oldpath,
+                         (int64_t)(uintptr_t)newpath);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
 static inline int sys_rmdir(const char *path) {
   int64_t r = __syscall1(SYS_RMDIR, (int64_t)(uintptr_t)path);
   if (r < 0) {

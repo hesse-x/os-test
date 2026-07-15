@@ -56,6 +56,7 @@ VFS 多态载体是 per-inode 的 `i_op`（`kernel/bsd/inode.h: struct inode_ope
 | sys_mkdir | `parent->i_op->mkdir` | EPERM（`vfs_mkdir`） |
 | sys_unlink | `parent->i_op->unlink` | EPERM（`vfs_unlink`） |
 | sys_rmdir | `parent->i_op->rmdir` | EPERM（`vfs_rmdir`） |
+| sys_rename | `old_parent->i_op->rename` | EPERM（`vfs_rename`） |
 | sys_getdents | `fstype->getdents(ip, ctx)` | — |
 
 路径解析由 `path_walk` / `path_walk_parent` 逐段解析（`kernel/bsd/vfs.c`），每段 lookup 返回的中间 inode 经 `inode_put` 配对释放，不泄漏。`vfs_open_kern` 为内核态入口（供 `sys_execve` 等使用）。
@@ -67,7 +68,7 @@ VFS 多态载体是 per-inode 的 `i_op`（`kernel/bsd/inode.h: struct inode_ope
 | fat32 | `fat32_dir_iop`（lookup/create/mkdir/unlink/rmdir/setattr/getattr） | `fat32_file_iop`（setattr/getattr） |
 | devtmpfs | `devtmpfs_dir_iop`（lookup/create） | `devtmpfs_dev_iop`（getattr） |
 | sysfs | `sysfs_dir_iop`（lookup/getattr） | `sysfs_file_iop`（getattr） |
-| tmpfs | `tmpfs_dir_iop`（lookup/create/mkdir/unlink/rmdir/getattr/setattr） | `tmpfs_file_iop`（getattr/setattr） |
+| tmpfs | `tmpfs_dir_iop`（lookup/create/mkdir/unlink/rmdir/rename/getattr/setattr） | `tmpfs_file_iop`（getattr/setattr） |
 
 ---
 
@@ -292,6 +293,7 @@ UEFI → stub 读 ESP 加载 myos.elf + init.elf → kernel_main（从 boot_info
 | 82 | sys_truncate | truncate(path, length) — path_walk → i_op->setattr(ip, len) |
 | 83 | sys_fsync | fsync(fd) — 遍历 inode page_cache 脏页写回 + FAT 目录项元数据 |
 | 84 | sys_sync | sync() — page_cache_flush_all 全表 dirty 写回 + 所有 inode 元数据 |
+| 98 | sys_rename | rename(old, new) — 双 path_walk_parent → old_parent->i_op->rename（tmpfs 原子覆盖，udevd db 原子写基座） |
 
 ---
 
@@ -302,7 +304,7 @@ UEFI → stub 读 ESP 加载 myos.elf + init.elf → kernel_main（从 boot_info
 | fd_table | files_struct + 动态 fdtable | files_t + 固定 32 项数组 + ref_count 共享 |
 | 文件系统 | ext4/btrfs | FAT32 |
 | inode | struct inode + hash cache | struct inode + hash cache |
-| inode_operations | per-inode i_op（lookup/create/link/unlink/mkdir/rmdir/setattr/getattr…） | per-inode i_op（lookup/create/unlink/mkdir/rmdir/setattr/getattr）✅ |
+| inode_operations | per-inode i_op（lookup/create/link/unlink/mkdir/rmdir/rename/setattr/getattr…） | per-inode i_op（lookup/create/unlink/mkdir/rmdir/rename/setattr/getattr）✅ |
 | file_operations | per-inode f_op（read/write/poll/…） | dev_ops 回调（内核设备）+ IPC 代理（用户态驱动） |
 | page cache | 4KB page, (mapping, index) | 4KB page, (inode, page_index) |
 | 设备发现 | devtmpfs + major:minor | devtmpfs + inode + dev_ops 回调 |
@@ -338,10 +340,27 @@ UEFI → stub 读 ESP 加载 myos.elf + init.elf → kernel_main（从 boot_info
 
 ### i_op / fops
 
-- `tmpfs_dir_iop`：lookup/create/mkdir/unlink/rmdir/getattr/setattr 全套（可写 fs 的本质）。`tmpfs_create` 按 `mode & S_IFMT` 区分——`S_IFSOCK` 建 `INODE_SOCKET`，其余建 `INODE_REGULAR`（一个 create 回调承载普通文件 + socket 文件，对齐 Linux `i_op->create` 按 mode 建不同类型）。
+- `tmpfs_dir_iop`：lookup/create/mkdir/unlink/rmdir/rename/getattr/setattr 全套（可写 fs 的本质）。`tmpfs_create` 按 `mode & S_IFMT` 区分——`S_IFSOCK` 建 `INODE_SOCKET`，其余建 `INODE_REGULAR`（一个 create 回调承载普通文件 + socket 文件，对齐 Linux `i_op->create` 按 mode 建不同类型）。
 - `tmpfs_file_iop`：getattr/setattr。
 - `tmpfs_file_fops`：read/write（单段 data buffer，write 超容量 `krealloc`，不做分页/不进 page cache——tmpfs 自管页）。
 - getdents 走 `fstype->getdents`（`sys_getdents` 经 `m->fs->getdents`），遍历 children 链表 `dir_emit`，d_type 用 `DT_DIR`/`DT_REG`/`DT_SOCK`。
+
+### tmpfs rename（`SYS_RENAME`，db 原子写基座）
+
+`tmpfs_rename`（tmpfs.c : tmpfs_rename）实现完整 `rename(2)` 语义，支撑 udevd db 原子写（tmp+rename，见 [udev.md](../udev.md)）：
+
+- 同目录 + 跨目录都支持且原子；跨 mount `sys_rename` 返 `-EXDEV`（`vfs_resolve` 按最长前缀剥离）。
+- old 不存在 → `-ENOENT`；new 存在 → 原子替换；`old == new` → no-op 返 0。
+- 目录边界：old 是目录、new 非空 → `-ENOTEMPTY`；old 是目录、new 非目录 → `-EISDIR`；old 非目录、new 是目录 → `-ENOTDIR`；old 是 new 祖先 → `-EINVAL`（循环）。
+- 已打开 fd 不受影响（inode 引用计数，对齐 Linux）。
+
+**原子性靠 spinlock 互斥：**
+- 同目录 rename：old/new 同一 `ti`（parent 目录的 `tmpfs_inode_info`）→ 持 `ti->lock` 单段临界区完成「摘旧 new（若存在）→ 改名 → 插入」。并发 `tmpfs_lookup` 拿同一把 `ti->lock` 阻塞，释放锁时新节点已就位——lookup 看不到中间态（Linux `rename(2)` 原子性契约）。
+- 跨目录 rename：old_dir/new_dir 两把 `ti->lock`。全局序列化锁 `tmpfs_rename_lock`（`spinlock_t` + irqsave，等价 Linux `s_vfs_rename_mutex` 轻量版——本 OS 无 semaphore/mutex）序列化所有 tmpfs rename；全局锁内按 **inode 地址排序** 获取 old_dir/new_dir 的 `ti->lock`（防 `a→b` 与 `b→a` 锁序相反死锁）。
+
+**回收纪律（对齐 `tmpfs_unlink`）：** `inode_put`/`kfree` **不在 `ti->lock` 临界区内执行**——`inode_put` 取 `inode_hash_lock` + `page_cache_invalidate` + `kfree`（slab lock），嵌套 `ti->lock` 违反既有回收规范且可能死锁。rename 在临界区内只做目录项链表变更 + 记录被覆盖 inode 的待回收信息；出全部锁后 `inode_put` + `kfree`（已 open fd 靠 `i_count>1` 保 inode 不被 kfree）。
+
+`sys_rename(oldpath, newpath)`（vfs.c : sys_rename）照 `sys_unlink` 模板：双 `vfs_resolve_user` + `path_walk_parent` 取两 parent + lastname，同 mount 检查（否则 `-EXDEV`），调 `old_parent->i_op->rename`，无 rename op → `-EPERM`。
 
 ### 容量上限
 

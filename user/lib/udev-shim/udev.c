@@ -272,32 +272,45 @@ void udev_device_unref(struct udev_device *udev_device) {
   }
 }
 
+/* udev.c — udev_device_get_property_value 乙落地(user 态 C,int 代 bool) */
 const char *udev_device_get_property_value(struct udev_device *udev_device,
                                            const char *key) {
-  if (!udev_device)
+  if (!udev_device || !key)
     return NULL;
 
-  // For evdev keyboard devices, return appropriate ID_INPUT properties
-  // Check if device is a keyboard using EVIOCGBIT
-  int fd = open(udev_device->devnode, O_RDONLY);
+  /* 直读 db 文件(对齐 Linux libudev 直读 /run/udev/data/<key>) */
+  char key_str[32], path[80];
+  snprintf(key_str, sizeof(key_str), "%u", (unsigned)udev_device->devnum);
+  snprintf(path, sizeof(path), "/run/udev/data/%s", key_str);
+
+  int fd = open(path, O_RDONLY);
   if (fd < 0)
-    return NULL;
-  unsigned long evbits[NBITS(EV_MAX + 1)];
-  memset(evbits, 0, sizeof(evbits));
-  ioctl(fd, EVIOCGBIT(0, sizeof(evbits)), evbits);
+    return NULL; /* db 文件不存在(udevd 未起/未写过)→ 返 NULL(降级,§5.2) */
+
+  static char
+      db_buf[2048]; /* 单次调用有效,调用者需立即拷贝(对齐 Linux libudev) */
+  ssize_t n = read(fd, db_buf, sizeof(db_buf) - 1);
   close(fd);
+  if (n <= 0)
+    return NULL;
+  db_buf[n] = '\0';
 
-  int has_key = !!(evbits[LONG(EV_KEY)] & (1UL << OFF(EV_KEY)));
-
-  if (strcmp(key, "ID_INPUT") == 0)
-    return has_key ? "1" : NULL;
-  if (strcmp(key, "ID_INPUT_KEYBOARD") == 0)
-    return has_key ? "1" : NULL;
-  if (strcmp(key, "ID_INPUT_KEY") == 0)
-    return has_key ? "1" : NULL;
-  if (strcmp(key, "ID_SEAT") == 0)
-    return NULL; // default seat
-
+  /* 解析 KEY=VALUE\n 找指定 key */
+  char *line = db_buf;
+  while (line && *line) {
+    char *eol = strchr(line, '\n');
+    if (eol)
+      *eol = '\0';
+    char *eq = strchr(line, '=');
+    if (eq) {
+      *eq = '\0';
+      if (strcmp(line, key) == 0) {
+        return eq + 1; /* 返指向 db_buf 内的指针,调用者需立即拷贝 */
+      }
+      *eq = '=';
+    }
+    line = eol ? eol + 1 : NULL;
+  }
   return NULL;
 }
 

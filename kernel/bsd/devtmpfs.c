@@ -491,7 +491,14 @@ void devtmpfs_cleanup_pid(pid_t pid) {
       if (ops->driver_pid == pid) {
         /* Remove from list */
         *pp = e->next;
-        /* Clean up sysfs subtree + subsys_priv */
+        /* Clean up sysfs subtree + uevent_priv + subsys_priv。
+         * 顺序:kfree uevent_priv → sysfs_remove_dir(释放 attr 结构体,不释放其
+         * priv)→ kfree subsys_priv → kfree ops(对齐 sys_dev_set_meta 幂等
+         * guard)。 */
+        if (ops->uevent_priv) {
+          kfree(ops->uevent_priv);
+          ops->uevent_priv = NULL;
+        }
         if (ops->sysfs_dir) {
           sysfs_remove_dir(ops->sysfs_dir);
           ops->sysfs_dir = NULL;
@@ -677,6 +684,27 @@ int64_t sys_dev_set_meta(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     return (int64_t)-ENOENT;
   }
 
+  /* ↓↓↓ 本方案新增:幂等 guard,防重复调用泄漏 ↓↓↓ */
+  /* sysfs_dir 已存在(重复调用):先 kfree uevent_priv 再 sysfs_remove_dir 释放
+   * 旧子树(对齐 devtmpfs_cleanup_pid:495-498 的释放逻辑),防重复建 sysfs 文件。
+   * sysfs_dir 内 uevent attr 的 priv 指向 uevent_priv,sysfs_remove_dir 只 kfree
+   * attr 结构体不释放其 priv,故须先 kfree uevent_priv(subsys_priv 见下,因其
+   * show 回调被 remove 遍历无关——remove 不调 show,但保守在 remove 后释放)。 */
+  if (ops->uevent_priv) {
+    kfree(ops->uevent_priv);
+    ops->uevent_priv = NULL;
+  }
+  if (ops->sysfs_dir) {
+    sysfs_remove_dir(ops->sysfs_dir); /* 复用现有 sysfs 子树释放 */
+    ops->sysfs_dir = NULL;
+  }
+  /* subsys_priv 已存在(重复调用):先 kfree 释放旧 props(对齐
+   * devtmpfs_cleanup_pid:499-501 的释放逻辑) */
+  if (ops->subsys_priv) {
+    kfree(ops->subsys_priv);
+    ops->subsys_priv = NULL;
+  }
+
   /* Fill subsystem/devtype */
   __strncpy(ops->subsystem, subsystem, 7);
   ops->subsystem[7] = '\0';
@@ -730,6 +758,32 @@ int64_t sys_dev_set_meta(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           fn->attr_owned = true;
         else
           kfree(a);
+      }
+      /* 可写 uevent 属性(coldplug 用):写 "add" → uevent_store →
+       * nl_uevent_broadcast 重广播。devpath=name(DEVPATH 值,如 "input/event0"),
+       * subsystem=ops->subsystem。priv 由 dev_ops.uevent_priv 持,在两处 cleanup
+       * 的 sysfs_remove_dir 前 kfree(防 UAF)。本轮只写不读(show=NULL),Linux
+       * uevent 可读记 todo。拷贝 uevent_attr 模板填 priv(对齐上面 id/ attr 拷贝
+       * 模式,uevent_store 保持 static 无需导出符号)。 */
+      struct uevent_attr_priv *upriv = kmalloc(sizeof(*upriv));
+      if (upriv) {
+        __memset(upriv, 0, sizeof(*upriv));
+        __strncpy(upriv->devpath, name, sizeof(upriv->devpath) - 1);
+        __strncpy(upriv->subsystem, ops->subsystem,
+                  sizeof(upriv->subsystem) - 1);
+        ops->uevent_priv = upriv;
+        struct sysfs_attr *ua = kmalloc(sizeof(*ua));
+        if (ua) {
+          ua->name = uevent_attr.name;
+          ua->priv = upriv;
+          ua->show = uevent_attr.show;
+          ua->store = uevent_attr.store;
+          struct sysfs_node *ufn = sysfs_create_file(devdir, "uevent", ua);
+          if (ufn)
+            ufn->attr_owned = true;
+          else
+            kfree(ua);
+        }
       }
       ops->sysfs_dir = devdir;
     }

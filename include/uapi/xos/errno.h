@@ -76,5 +76,8 @@
 
 #define ECONNRESET 104
 #define EWOULDBLOCK EAGAIN
+#define EXDEV                                                                  \
+  102 /* Cross-device link (Linux EXDEV=18, collides with EAGAIN;              \
+       * pushed to free high slot per errno conventions). */
 
 #endif // COMMON_ERRNO_H

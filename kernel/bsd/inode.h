@@ -31,6 +31,12 @@ struct inode_operations {
   int (*mkdir)(struct inode *dir, const char *name, int mode);
   int (*unlink)(struct inode *dir, const char *name);
   int (*rmdir)(struct inode *dir, const char *name);
+  /* rename:将 old_dir 下 old_name 节点移到 new_dir 下 new_name。
+   * 完整 rename(2) 语义(对齐 Linux):同/跨目录均支持且原子;new 存在
+   * 原子替换;目录边界(ENOTEMPTY/EISDIR/ENOTDIR/EINVAL 循环);old==new
+   * no-op;已 open fd 不受影响(inode 引用计数)。NULL → -EPERM。 */
+  int (*rename)(struct inode *old_dir, const char *old_name,
+                struct inode *new_dir, const char *new_name);
   int (*getattr)(struct inode *ip, struct kstat *ks);
   int (*setattr)(struct inode *ip, uint64_t size);
 };

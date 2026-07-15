@@ -22,7 +22,17 @@ struct sysfs_attr {
   const char *name;
   void *priv;                                         /* 设备上下文 */
   ssize_t (*show)(char *buf, size_t len, void *priv); /* 读 */
-  ssize_t (*store)(const char *buf, size_t len);      /* 写(本轮 NULL) */
+  ssize_t (*store)(const char *buf, size_t len, void *priv); /* 写(默认 NULL) */
+};
+
+/* uevent 属性的 priv:重广播所需的 devpath + subsystem。
+ * sysfs 节点 basename 去掉了子系统前缀(sysfs.c basename 解析),
+ * 且文件节点 inode->i_priv 只存 attr 不存 sysfs_node,store 回调
+ * 无法从节点位置反推完整 devpath,故单独存。生命周期由 dev_ops.uevent_priv
+ * 管理(在 sysfs_remove_dir 前 kfree)。 */
+struct uevent_attr_priv {
+  char devpath[32];  /* 如 "input/event0"(= devtmpfs name,DEVPATH 值) */
+  char subsystem[8]; /* 如 "input" */
 };
 
 /* evdev 设备属性 (内核侧) */
@@ -53,6 +63,8 @@ extern const struct sysfs_attr evdev_attr_bustype;
 extern const struct sysfs_attr evdev_attr_vendor;
 extern const struct sysfs_attr evdev_attr_product;
 extern const struct sysfs_attr evdev_attr_version;
+/* 可写 uevent 属性模板(coldplug 写 "add" 重广播);devtmpfs 逐设备拷贝填 priv */
+extern const struct sysfs_attr uevent_attr;
 
 /* API */
 struct sysfs_node *sysfs_create_dir(struct sysfs_node *parent,

@@ -18,6 +18,7 @@ global:
     funlockfile; ftrylockfile; fgetc_unlocked; fputc_unlocked;
     getchar_unlocked; putchar_unlocked; fread_unlocked; fwrite_unlocked;
     open_memstream; vasprintf; asprintf; fscanf; scanf; sscanf; vsscanf; getline; remove;
+    rename;
     stdin; stdout; stderr;
 
     /* <stdlib.h> */

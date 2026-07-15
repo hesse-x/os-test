@@ -98,7 +98,7 @@ Netlink 多播事件通知机制，提供内核→用户态 + 用户态→用户
 
 实现：kernel/bsd/init.c → kernel/bsd/netlink.c : nl_init
 
-bsd_init → vfs_init → devtmpfs_init → `nl_init()`（置 nl_initialized=true）。此后 dev_create 的 nl_uevent_broadcast 才会真正广播；启动期间 udevd 未启动时 broadcast 遍历空链表安全跳过（消息 drop，udevd 启动后可主动扫描 /dev 补偿）。
+bsd_init → vfs_init → devtmpfs_init → `nl_init()`（置 nl_initialized=true）。此后 dev_create 的 nl_uevent_broadcast 才会真正广播；启动期间 udevd 未启动时 broadcast 遍历空链表安全跳过（消息 drop，udevd 启动后经 coldplug 重广播补偿，见 [udev.md](../udev.md)）。
 
 ### 锁模型
 
@@ -141,6 +141,7 @@ nlmsghdr.nlmsg_type 取 NLMSG_UEVENT_ADD(1) / NLMSG_UEVENT_REMOVE(2) / NLMSG_UEV
 ### 与其他模块的关系
 
 - **devtmpfs**：三类事件触发 uevent 广播——`dev_create`（内核驱动设备创建）、`dev_remove`（设备删除）、`sys_dev_set_meta`（用户态驱动推送设备元数据，design §3.3.2 step 2）。三者均经 `nl_is_initialized()` 门控
+- **sysfs 可写 uevent（coldplug 重广播）**：sysfs `uevent` 属性可写（见 [sysfs.md](../sysfs.md)），`uevent_store` 写 `"add"` → `nl_uevent_broadcast("add", devpath, subsystem)` 重广播，走与热插拔完全相同的 netlink 路径。udevd 启动时 `coldplug_trigger` 扫 `/sys/class/input` 对每个设备写 `add` 重放，补偿订阅前的丢失事件（详见 [udev.md](../udev.md)）
 - **socket 层**：sys_socket/bind/sendmsg/recvmsg 按 domain/fd 类型分流到 netlink 路径，与 AF_UNIX 共享 sk_buff 基础设施
 - **epoll**：netlink fd 通过 file_poll + wait_queue 集成，与 AF_UNIX socket/pipe/eventfd 共用同一机制，详见 [epoll.md](epoll.md)
 - **IPC**：Netlink 与 MSG 服务不同通信模式（多播事件 vs 1:1 RPC），底层共享 sk_buff/wake_from_wait 基础设施，详见 [ipc.md](ipc.md)

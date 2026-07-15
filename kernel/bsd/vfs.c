@@ -551,6 +551,67 @@ int64_t sys_unlink(int64_t arg1, int64_t unused1, int64_t unused2,
   return (int64_t)rc;
 }
 
+/* sys_rename(oldpath, newpath) — SYS_RENAME
+ * 照 sys_unlink 模板:双 path_walk_parent 取两个 parent + lastname,
+ * 调 old_parent->i_op->rename。跨 mount 不支持(vfs_resolve 已剥离挂载点
+ * 前缀,relpath 限单 mount 内),db 场景全在 /run/udev/data/ 单 tmpfs mount。 */
+int64_t sys_rename(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                   int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  const char __user *uold = (const char __user *__force)arg1;
+  const char __user *unew = (const char __user *__force)arg2;
+  if (!uold || !unew)
+    return (int64_t)-EFAULT;
+
+  char old_rel[256], old_name[256];
+  char new_rel[256], new_name[256];
+
+  struct mount_entry *old_m = vfs_resolve_user(uold, old_rel, sizeof(old_rel));
+  if (IS_ERR(old_m))
+    return (int64_t)PTR_ERR(old_m);
+  if (!old_m)
+    return (int64_t)-ENOENT;
+  struct mount_entry *new_m = vfs_resolve_user(unew, new_rel, sizeof(new_rel));
+  if (IS_ERR(new_m))
+    return (int64_t)PTR_ERR(new_m);
+  if (!new_m)
+    return (int64_t)-ENOENT;
+
+  /* db 场景 old/new 同 mount;跨 mount 返 -EXDEV(对齐 Linux rename(2)) */
+  if (old_m != new_m)
+    return (int64_t)-EXDEV;
+
+  struct inode *old_parent = NULL, *new_parent = NULL;
+  int rc =
+      path_walk_parent(old_m, old_rel, &old_parent, old_name, sizeof(old_name));
+  if (rc) {
+    if (old_parent)
+      inode_put(old_parent);
+    return (int64_t)rc;
+  }
+  rc =
+      path_walk_parent(new_m, new_rel, &new_parent, new_name, sizeof(new_name));
+  if (rc) {
+    if (new_parent)
+      inode_put(new_parent);
+    inode_put(old_parent);
+    return (int64_t)rc;
+  }
+
+  if (!old_parent->i_op || !old_parent->i_op->rename) {
+    inode_put(old_parent);
+    inode_put(new_parent);
+    return (int64_t)-EPERM; /* 对齐 Linux vfs_rename:无 rename → EPERM */
+  }
+  rc = old_parent->i_op->rename(old_parent, old_name, new_parent, new_name);
+  inode_put(old_parent);
+  inode_put(new_parent);
+  return (int64_t)rc;
+}
+
 /* sys_rmdir(path) — SYS_RMDIR */
 int64_t sys_rmdir(int64_t arg1, int64_t unused1, int64_t unused2,
                   int64_t unused3, int64_t unused4, int64_t unused5) {

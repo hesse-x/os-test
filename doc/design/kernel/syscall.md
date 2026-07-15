@@ -30,7 +30,7 @@ MSR 设置：kernel/trap.cc : setup_syscall() — STAR/LSTAR/CSTAR/SFMASK/EFER.S
 
 ### syscall_dispatch 与系统调用表
 
-NR_SYSCALL=95，syscall_table[] 定义在 kernel/xcore/trap.c（Xcore 层，slot 0-19）+ kernel/bsd/syscall.c（BSD 层，slot 20-94）。
+NR_SYSCALL=95，syscall_table[] 定义在 kernel/xcore/trap.c（Xcore 层，slot 0-19）+ kernel/bsd/syscall.c（BSD 层，slot 20-98）。
 
 参数从 trapframe 提取：RDI/RSI/RDX/R10/R8/R9（6 参），返回值写回 tf->rax。超出范围返回 ENOSYS。
 
@@ -77,6 +77,10 @@ NR_SYSCALL=95，syscall_table[] 定义在 kernel/xcore/trap.c（Xcore 层，slot
 | 82-84 | 文件系统扩展 | sys_truncate（路径截断）/sys_fsync（单 inode 脏页写回）/sys_sync（全局脏页写回） |
 | 85 | sys_sigpending | 返回未决信号集（per-task ∪ shared，不滤 blocked） |
 | 86-94 | epoll + 事件 fd | epoll_create/create1/ctl/wait/pwait + eventfd2 + timerfd_create/settime + signalfd4（详见 [epoll.md](epoll.md)） |
+| 95 | sys_mount | 挂载文件系统（mount_table + 最长前缀匹配，见 [mount.md](mount.md)） |
+| 96 | sys_dev_set_meta | evdev 两步注册第二步：填 dev_ops subsystem/devtype + 建 sysfs 子树（含可写 uevent）+ 推 uevent（见 [sysfs.md](sysfs.md)） |
+| 97 | sys_mknod | mknod(path, mode, dev) — 仅 S_IFSOCK，path_walk_parent → i_op->create 建 socket inode（见 [vfs.md](vfs.md) AF_UNIX 节） |
+| 98 | sys_rename | rename(old, new) — 双 path_walk_parent → old_parent->i_op->rename；tmpfs tmp+rename 原子覆盖，udevd db 原子写基座（见 [vfs.md](vfs.md) tmpfs rename 节 / [udev.md](../udev.md)） |
 
 ### recv_msg 类型
 

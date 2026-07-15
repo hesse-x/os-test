@@ -56,6 +56,11 @@ static spinlock tmpfs_ino_lock = SPINLOCK_INIT;
 static size_t tmpfs_total_used = 0;
 static spinlock tmpfs_total_lock = SPINLOCK_INIT;
 
+/* tmpfs 全局序列化锁(等价 Linux s_vfs_rename_mutex,序列化所有 tmpfs rename
+ * 防跨目录死锁)。本 OS 无 semaphore/mutex,用 spinlock_t + irqsave。db 场景只
+ * 同目录,但接口对齐 Linux 须支持跨目录。 */
+static spinlock tmpfs_rename_lock = SPINLOCK_INIT;
+
 static uint32_t tmpfs_alloc_ino(void) {
   spin_lock(&tmpfs_ino_lock);
   uint32_t ino = next_tmpfs_ino++;
@@ -89,6 +94,8 @@ static struct inode *tmpfs_create(struct inode *dir, const char *name,
 static int tmpfs_mkdir(struct inode *dir, const char *name, int mode);
 static int tmpfs_unlink(struct inode *dir, const char *name);
 static int tmpfs_rmdir(struct inode *dir, const char *name);
+static int tmpfs_rename(struct inode *old_dir, const char *old_name,
+                        struct inode *new_dir, const char *new_name);
 static int tmpfs_getattr(struct inode *ip, struct kstat *ks);
 static int tmpfs_setattr(struct inode *ip, uint64_t size);
 
@@ -98,6 +105,7 @@ static const struct inode_operations tmpfs_dir_iop = {
     .mkdir = tmpfs_mkdir,
     .unlink = tmpfs_unlink,
     .rmdir = tmpfs_rmdir,
+    .rename = tmpfs_rename, /* 本方案新增 */
     .getattr = tmpfs_getattr,
     .setattr = tmpfs_setattr,
 };
@@ -307,6 +315,159 @@ static int tmpfs_unlink(struct inode *dir, const char *name) {
   }
   spin_unlock(&parent_ti->lock);
   return -ENOENT;
+}
+
+/* tmpfs_rename:完整 rename(2) 语义(对齐 Linux)。db 原子写基座(§3.1)。
+ * 原子性靠 spinlock 互斥(不需要 dentry cache):同目录持 ti->lock 单段临界区;
+ * 跨目录全局 tmpfs_rename_lock 序列化 + 按 inode 地址排序获取两把 ti->lock。
+ * 回收纪律对齐 tmpfs_unlink:295-310:inode_put/kfree 出 ti->lock 临界区外执行。
+ */
+static int tmpfs_rename(struct inode *old_dir, const char *old_name,
+                        struct inode *new_dir, const char *new_name) {
+  if (!old_dir || !old_name || !new_dir || !new_name)
+    return -EFAULT;
+
+  /* old == new:no-op 对齐 Linux。显式处理避免"摘旧 new(=old 自己)→
+   * 改名"逻辑误删自身。 */
+  if (old_dir == new_dir && __strcmp(old_name, new_name) == 0)
+    return 0;
+
+  struct tmpfs_inode_info *old_ti = (struct tmpfs_inode_info *)old_dir->i_priv;
+  struct tmpfs_inode_info *new_ti = (struct tmpfs_inode_info *)new_dir->i_priv;
+  if (!old_ti || !new_ti)
+    return -EFAULT;
+
+  /* 全局序列化锁(跨目录死锁规避 + 原子性)。db 场景同目录单锁即可,但
+   * 接口对齐 Linux rename(2) 须支持跨目录原子。irqsave 防 slab 分配的中断
+   * 与本锁嵌套。 */
+  uint64_t rflags;
+  spin_lock_irqsave(&tmpfs_rename_lock, &rflags);
+
+  /* 按 inode 地址排序获取 old_dir/new_dir 两把 ti->lock(防 a→b 与
+   * b→a 锁序相反死锁;对齐 Linux vfs_rename 锁序协议)。 */
+  struct tmpfs_inode_info *first_ti = (old_ti < new_ti) ? old_ti : new_ti;
+  struct tmpfs_inode_info *second_ti = (old_ti < new_ti) ? new_ti : old_ti;
+  spin_lock(&first_ti->lock);
+  if (first_ti != second_ti)
+    spin_lock(&second_ti->lock);
+
+  /* 待回收信息(出锁后处理,对齐 tmpfs_unlink 回收纪律) */
+  struct inode *reclaim_ip = NULL;
+  struct tmpfs_inode_info *reclaim_node = NULL;
+  int reclaim_last = 0, reclaim_is_dir = 0;
+
+  /* 1. 从 old_dir 摘 old_name 节点 */
+  struct tmpfs_inode_info *prev = NULL, *node = NULL;
+  for (node = old_ti->children; node; prev = node, node = node->sibling) {
+    if (__strcmp(node->name, old_name) == 0)
+      break;
+  }
+  if (!node) {
+    spin_unlock(&second_ti->lock);
+    if (first_ti != second_ti)
+      spin_unlock(&first_ti->lock);
+    spin_unlock_irqrestore(&tmpfs_rename_lock, rflags);
+    return -ENOENT;
+  }
+  if (prev)
+    prev->sibling = node->sibling;
+  else
+    old_ti->children = node->sibling;
+
+  /* 目录边界检查(对齐 Linux rename(2)):
+   * - old 是目录、new 存在且非空 → -ENOTEMPTY
+   * - old 是目录、new 存在且非目录 → -EISDIR
+   * - old 非目录、new 存在且是目录 → -ENOTDIR
+   * - old 是 new 祖先/new 是 old 祖先(循环) → -EINVAL
+   * db 场景 old/new 均普通文件,不触发这些分支。 */
+  int is_dir = (node->inode->type == INODE_DIR);
+  struct tmpfs_inode_info *exist = NULL;
+  for (exist = new_ti->children; exist; exist = exist->sibling) {
+    if (__strcmp(exist->name, new_name) == 0)
+      break;
+  }
+  if (exist) {
+    int exist_is_dir = (exist->inode->type == INODE_DIR);
+    int rc = 0;
+    if (is_dir) {
+      if (!exist_is_dir)
+        rc = -EISDIR;
+      else if (exist->children)
+        rc = -ENOTEMPTY; /* new 目录非空 */
+      /* 循环检测:沿 new 的 parent 链确认 old 不在其中(tmpfs_inode_info
+       * .parent 回指,O(深度))。db 场景不触发。 */
+      for (struct tmpfs_inode_info *a = new_ti; a; a = a->parent) {
+        if (a == node) {
+          rc = -EINVAL;
+          break;
+        }
+      }
+    } else {
+      if (exist_is_dir)
+        rc = -ENOTDIR;
+    }
+    if (rc) {
+      /* 回滚:重新插回 old_dir */
+      node->sibling = old_ti->children;
+      old_ti->children = node;
+      spin_unlock(&second_ti->lock);
+      if (first_ti != second_ti)
+        spin_unlock(&first_ti->lock);
+      spin_unlock_irqrestore(&tmpfs_rename_lock, rflags);
+      return rc;
+    }
+    /* 覆盖语义:从 new_ti 摘 exist 节点,目录项提交;inode/data 延后出锁回收
+     * (对齐 tmpfs_unlink:287-302;已 open fd 靠 i_count>1 保 inode 不回收)。 */
+    reclaim_ip = exist->inode;
+    reclaim_node = exist;
+    reclaim_last = (refcount_read(&reclaim_ip->i_count) == 1);
+    reclaim_is_dir = exist_is_dir;
+    struct tmpfs_inode_info *eprev = NULL, *e = new_ti->children;
+    while (e) {
+      if (e == exist) {
+        if (eprev)
+          eprev->sibling = e->sibling;
+        else
+          new_ti->children = e->sibling;
+        break;
+      }
+      eprev = e;
+      e = e->sibling;
+    }
+  }
+
+  /* 2. 改名 + 头插 new_dir children 链 */
+  int i = 0;
+  while (new_name[i] && i < 255) {
+    node->name[i] = new_name[i];
+    i++;
+  }
+  node->name[i] = '\0';
+  node->parent = new_ti;
+  node->sibling = new_ti->children;
+  new_ti->children = node;
+
+  /* 3. 释放所有锁——目录项已提交,被覆盖 inode 不再经任何目录可达 */
+  spin_unlock(&second_ti->lock);
+  if (first_ti != second_ti)
+    spin_unlock(&first_ti->lock);
+  spin_unlock_irqrestore(&tmpfs_rename_lock, rflags);
+
+  /* 4. 出锁后回收被覆盖节点(对齐 tmpfs_unlink:295-310 回收纪律;inode_put 取
+   * inode_hash_lock + page_cache_invalidate + kfree,不能在 ti->lock 下)。 */
+  if (reclaim_ip) {
+    inode_put(reclaim_ip);
+    if (reclaim_last && !reclaim_is_dir) {
+      if (reclaim_node->data) {
+        spin_lock(&tmpfs_total_lock);
+        tmpfs_total_used -= reclaim_node->cap;
+        spin_unlock(&tmpfs_total_lock);
+        kfree(reclaim_node->data);
+      }
+      kfree(reclaim_node);
+    }
+  }
+  return 0;
 }
 
 static int tmpfs_rmdir(struct inode *dir, const char *name) {

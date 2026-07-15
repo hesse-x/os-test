@@ -49,6 +49,8 @@ static struct test_entry tests[] = {
     {"test_vfs_dispatch", "/test/test_vfs_dispatch.elf"},
     {"test_inode_refcount", "/test/test_inode_refcount.elf"},
     {"test_tmpfs_socket", "/test/test_tmpfs_socket.elf"},
+    {"test_rename", "/test/test_rename.elf"},
+    {"test_udevd_db", "/test/test_udevd_db.elf"},
 #endif
     {"ioctl_varlen", "/test/ioctl_varlen.elf"},
     {"epoll", "/test/epoll.elf"},

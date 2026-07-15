@@ -80,6 +80,9 @@ LIBC_EXPORT int snprintf(char *buf, size_t n, const char *fmt, ...);
 LIBC_EXPORT int vsprintf(char *buf, const char *fmt, va_list ap);
 LIBC_EXPORT int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 
+/* file rename (POSIX rename(3), via sys_rename) */
+LIBC_EXPORT int rename(const char *oldpath, const char *newpath);
+
 /* scanf family */
 LIBC_EXPORT int fscanf(FILE *f, const char *fmt, ...);
 LIBC_EXPORT int scanf(const char *fmt, ...);

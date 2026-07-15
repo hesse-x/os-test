@@ -23,9 +23,10 @@ struct dev_ops {
   bool is_block;    // true = block device, false = char device
   uint32_t minor;   // device minor number (ioctl req routing)
 
-  char subsystem[8];            // "input" / "drm" / "block" / "tty"
-  char devtype[8];              // "evdev" / "card" / "disk" / "ptmx"
-  void *subsys_priv;            // -> input_dev_props* / NULL
+  char subsystem[8]; // "input" / "drm" / "block" / "tty"
+  char devtype[8];   // "evdev" / "card" / "disk" / "ptmx"
+  void *subsys_priv; // -> input_dev_props* / NULL
+  void *uevent_priv; // -> uevent_attr_priv* (sysfs uevent attr 的 priv) / NULL
   struct sysfs_node *sysfs_dir; // sysfs 子树根 (移除时用)
 
   // VFS callbacks (only called when driver_pid == 0)

@@ -37,13 +37,14 @@ init/init.c : main()，链接 libc.a。
 
 1. `open("/dev/serial")` + dup2 到 stdio（fd 0/1/2），使 printf 工作
 2. spawn evdev 驱动 → `wait_dev_ready("/dev/input/event0")`（轮询）
-3. **socket activation 拉 udevd**：`create_udev_socket()` 建 AF_UNIX listen socket 绑 `/run/udev/socket`（期望落 fd 3，被占则 `dup2` 归位）→ `spawn_with_fd("/usr/bin/udevd", listen_fd)`（fork + 子进程 `dup2(fd,3)` + close(4..31) + execve，listen fd 经继承传 udevd）；listen_fd < 0 则降级 `spawn_service`（udevd 自 bind）
-4. spawn terminal
-5. 收尸循环 `waitpid(-1, &status, 0)`：比对 `udevd_pid`，udevd 信号退出 / 非零退出码 → `sleep(1)` 退避 respawn（`StartLimitBurst=5` 上限，超限放弃告警，收尸循环继续不退）；正常退出清零 crash_count；其它子进程正常收尸不 respawn
+3. **socket activation 拉 udevd**：`create_udev_socket()`（先 `mkdir("/run/udev")`）建 AF_UNIX listen socket 绑 `/run/udev/socket`（期望落 fd 3，被占则 `dup2` 归位）→ `spawn_with_fd("/usr/bin/udevd", listen_fd)`（fork + 子进程 `dup2(fd,3)` + close(4..31) + execve，listen fd 经继承传 udevd）；listen_fd < 0 则降级 `spawn_service`（udevd 自 bind）
+4. **settled gate**：spawn terminal 前轮询 `access("/run/udev/settled", F_OK)`（最多 ~2s，200×10ms；超时仍 spawn 退化为原行为），保证 udevd coldplug 跑完 db 就绪再起 terminal（对齐 systemd udev settle；偏离：文件标志 + init 轮询非命令通道）
+5. spawn terminal
+6. 收尸循环 `waitpid(-1, &status, 0)`：比对 `udevd_pid`，udevd 信号退出 / 非零退出码 → `sleep(1)` 退避 respawn（`StartLimitBurst=5` 上限，超限放弃告警，收尸循环继续不退）；正常退出清零 crash_count；其它子进程正常收尸不 respawn
 
 spawn 辅助函数：`spawn_service(path)` = `spawn(path)`（fork+exec）；`spawn_with_fd(path, fd)` 手写 fork+dup2+close+execve 确保listen fd 继承到 udevd fd 3。失败时串口打印错误。
 
-udevd 角色（user/udev/udevd.c）：启动探测 fd 3 是否已 listen 的 AF_UNIX socket（try-accept），是 → accept 循环；否 → 回退自 bind+listen 降级。详见 [udev.md](udev.md)。
+udevd 角色（user/udev/udevd.c）：启动探测 fd 3 是否已 listen 的 AF_UNIX socket（try-accept），是 → accept 循环；否 → 回退自 bind+listen 降级。起 netlink 订阅 uevent + `mkdir("/run/udev/data")`（db 落点）+ `coldplug_trigger` 写 `/sys/class/input/*/uevent` 重广播 + `coldplug_drain_settle` 排干建 `/run/udev/settled` 标志。详见 [udev.md](udev.md)。
 
 ### terminal 拉起 shell
 

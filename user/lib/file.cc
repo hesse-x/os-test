@@ -11,7 +11,9 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>  // snprintf (rename cwd 相对化)
 #include <stdlib.h> // IWYU pragma: keep  // malloc/calloc/free in getdir/dup
+#include <string.h> // strlen (rename cwd 相对化)
 #include <sys/ioctl.h>
 #include <sys/ipc.h>
 #include <sys/poll.h>
@@ -315,7 +317,40 @@ int unlink(const char *path) {
   return r;
 }
 
-// ===================== rmdir (via sys_rmdir syscall) =====================
+// ===================== rename (via sys_rename syscall) =====================
+int rename(const char *oldpath, const char *newpath) {
+  if (!oldpath || !newpath) {
+    errno = EFAULT;
+    return -1;
+  }
+  const char *old_abs = oldpath;
+  const char *new_abs = newpath;
+  char old_abs_path[256], new_abs_path[256];
+  if (oldpath[0] != '/') {
+    /* cwd 相对化(照 file.cc 既有 unlink/mkdir wrapper 惯例) */
+    getcwd(old_abs_path, sizeof(old_abs_path));
+    size_t cl = strlen(old_abs_path);
+    if (cl + 1 + strlen(oldpath) + 1 > sizeof(old_abs_path)) {
+      errno = ENAMETOOLONG;
+      return -1;
+    }
+    snprintf(old_abs_path + cl, sizeof(old_abs_path) - cl, "/%s", oldpath);
+    old_abs = old_abs_path;
+  }
+  if (newpath[0] != '/') {
+    getcwd(new_abs_path, sizeof(new_abs_path));
+    size_t cl = strlen(new_abs_path);
+    if (cl + 1 + strlen(newpath) + 1 > sizeof(new_abs_path)) {
+      errno = ENAMETOOLONG;
+      return -1;
+    }
+    snprintf(new_abs_path + cl, sizeof(new_abs_path) - cl, "/%s", newpath);
+    new_abs = new_abs_path;
+  }
+  if (sys_rename(old_abs, new_abs) < 0)
+    return -1;
+  return 0;
+}
 int rmdir(const char *path) {
   if (!path) {
     errno = EFAULT;

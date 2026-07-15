@@ -2983,6 +2983,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_mkdir(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_UNLINK:
     return sys_unlink(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_RENAME:
+    return sys_rename(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_RMDIR:
     return sys_rmdir(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_DEV_CREATE:

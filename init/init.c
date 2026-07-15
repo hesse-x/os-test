@@ -53,6 +53,11 @@ static int spawn_with_fd(const char *path, int listen_fd) {
  * getsockname 在本 OS 不存在，靠 socket() 返回最小空闲 fd 约定
  * （stdio 占 0/1/2 → fd 3）；若被占则 dup2 强制归位 fd 3。 */
 static int create_udev_socket(void) {
+  /* ↓↓↓ 本方案新增:先建 /run/udev 目录 ↓↓↓
+   * 现状无 mkdir,vfs_mknod_socket path_walk_parent 失败 → bind 降级 hash 表。
+   * mkdir 幂等(EEXIST 忽略)。 */
+  mkdir("/run/udev", 0755); /* /run 已是 tmpfs mount,可 mkdir */
+
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0)
     return -1;
@@ -116,6 +121,16 @@ int main(int argc, char **argv, char **envp) {
   }
 
   // 4. Spawn terminal (which spawns shell internally)
+  /* settled gate:轮询 /run/udev/settled(udevd coldplug drain 后建),保证 db
+   * 就绪再 spawn terminal,否则 libinput 读 ID_INPUT_* 为空判 unsupported →
+   * terminal block 黑屏(根因见 fix.md)。最多等 ~2s,超时仍 spawn(退化为原
+   * 行为,不阻塞启动;对齐 systemd udev settle,偏离:文件标志 + init 轮询,
+   * 无 IPC 命令通道)。 */
+  for (int i = 0; i < 200; i++) {
+    if (access("/run/udev/settled", F_OK) == 0)
+      break;
+    usleep(10 * 1000);
+  }
   printf("init: spawning terminal\n");
   spawn_service("/usr/bin/terminal");
   printf("init: terminal spawned\n");

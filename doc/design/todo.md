@@ -221,6 +221,16 @@ ENOSYS 表示"syscall 内核层不存在"，EPERM 表示"syscall 存在但此 fs
 
 各 Bug 详细说明见归属文档的待完成项。已修复的 Bug（#30 socket 锁粒度）不再列出。
 
+## udev / udevd 进度
+
+udevd 设备数据库 + 规则引擎 + coldplug **已落地**（对齐 Linux `input_id` builtin + `udevadm trigger`）：udevd 维护 `/run/udev/data/<key>` db（tmp+rename 原子写，依赖 `SYS_RENAME`(98) + tmpfs rename），规则引擎 `input_id_compute` 开 /dev 跑 `EVIOCGBIT` 合成键盘类 `ID_INPUT_*`；sysfs `uevent` 属性可写，coldplug 写 `add` 重广播走 netlink；init settled gate 保证 db 就绪再起 terminal。详见 [udev.md](udev.md)。
+
+延后项（均记 [udev.md](udev.md) 待完成项）：
+- monitor 管道（shim `udev_monitor_*` 仍 no-op stub）——AF_UNIX accept + pipe + SCM_RIGHTS 转发 uevent，完整设计见根目录 `udev_design.md`
+- dev_entries 动态化（B5，`dev_entries[32]` + `dev_dirs[16]` 静态数组 → kmalloc 链表）
+- B6 ID_INPUT_MOUSE/TOUCHPAD/SEAT 全类——依赖 evdev 真实多设备 caps，做合成器（Wayland）时连同真实多输入设备一起做
+- shim 枚举路径对齐 db（`device_is_keyboard` 改走 db 查 property）、uevent 可读 + 接受 remove/change、coldplug 扫 /sys/devices 全树
+
 ## Sprint 1-2: POSIX 扩展波
 
 详细计划见 [posix.md](posix.md)。

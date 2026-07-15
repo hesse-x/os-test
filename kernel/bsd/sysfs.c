@@ -10,6 +10,7 @@
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/mount.h"
+#include "kernel/bsd/netlink.h"
 #include "kernel/bsd/ring.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/kpi.h"
@@ -18,6 +19,7 @@
 #include "kernel/xcore/xtask.h"
 #include "xos/syscall_nums.h"
 #include <xos/errno.h>
+#include <xos/fcntl.h>
 #include <xos/stat.h>
 
 /* ===== sysfs 节点树 ===== */
@@ -267,6 +269,48 @@ int sysfs_stat(const char *relpath, struct kstat *ks) {
   return 0;
 }
 
+/* ===== uevent store 回调(对齐 Linux kobject uevent 属性写) ===== */
+/* uevent_store:写 "add" 到 /sys/.../uevent → 重广播 uevent。
+ * 走与原始广播(devtmpfs.c device_create/device_set_meta)完全相同的 netlink
+ * 路径(nl_uevent_broadcast),使 coldplug 与热插拔同路。本轮只接受 "add"
+ * action(Linux 接受 add/remove/change,记 todo)。 */
+static ssize_t uevent_store(const char *buf, size_t len, void *priv) {
+  struct uevent_attr_priv *p = (struct uevent_attr_priv *)priv;
+  if (!p)
+    return -EIO;
+  /* 解析 action:到首个 '\n'/'\0' 止 */
+  size_t alen = 0;
+  while (alen < len && buf[alen] != '\n' && buf[alen] != '\0')
+    alen++;
+  if (alen == 3 && __memcmp(buf, "add", 3) == 0) {
+    nl_uevent_broadcast("add", p->devpath, p->subsystem);
+    return (ssize_t)len;
+  }
+  /* 本轮只 input coldplug 用 add;remove/change 记 todo */
+  return -EINVAL;
+}
+
+/* ===== sysfs_fops.write ===== */
+static ssize_t sysfs_file_write(struct xtask *proc, struct file *f,
+                                const void *buf, size_t count) {
+  (void)proc;
+  struct inode *ip = f->inode;
+  if (!ip || !ip->i_priv)
+    return -ENODEV;
+  /* sysfs_fops 同时服务 read/write:防 O_RDONLY 写 */
+  if (!(f->flags & (O_WRONLY | O_RDWR)))
+    return -EBADF;
+  struct sysfs_attr *attr = (struct sysfs_attr *)ip->i_priv;
+  if (!attr->store)
+    return -EIO;
+  if (count > 4096)
+    count = 4096;
+  char kbuf[4096];
+  if (copy_from_user(kbuf, buf, count))
+    return -EFAULT;
+  return attr->store(kbuf, count, attr->priv);
+}
+
 /* ===== sysfs_fops.read ===== */
 static ssize_t sysfs_file_read(struct xtask *proc, struct file *f, void *buf,
                                size_t count) {
@@ -292,6 +336,7 @@ static ssize_t sysfs_file_read(struct xtask *proc, struct file *f, void *buf,
 
 const struct file_operations sysfs_fops = {
     .read = sysfs_file_read,
+    .write = sysfs_file_write,
 };
 
 /* ===== fstype ===== */
@@ -358,6 +403,12 @@ const struct sysfs_attr evdev_attr_product = {.name = "product",
                                               .show = evdev_show_product};
 const struct sysfs_attr evdev_attr_version = {.name = "version",
                                               .show = evdev_show_version};
+
+/* 可写 uevent 属性模板(coldplug 用):priv = uevent_attr_priv*。devtmpfs 逐设备
+ * 拷贝此模板并填 priv(对齐 evdev id/ attr 拷贝模式),使 uevent_store 保持
+ * static(无需导出符号)。show=NULL(本轮只写不读,Linux uevent 可读记 todo)。 */
+const struct sysfs_attr uevent_attr = {
+    .name = "uevent", .show = NULL, .store = uevent_store};
 
 /* ===== ringbuf_fops: SHM ring buffer 事件流 (design 3.5) ===== */
 #include <xos/input.h>
