@@ -148,16 +148,71 @@ static struct sysfs_node *sysfs_walk(const char *relpath) {
   return cur;
 }
 
+static const struct inode_operations sysfs_dir_iop;
+static const struct inode_operations sysfs_file_iop;
+
 static struct inode *sysfs_node_to_inode(struct sysfs_node *n) {
-  if (n->ip)
+  if (n->ip) {
+    n->ip->i_op = n->is_dir ? &sysfs_dir_iop : &sysfs_file_iop;
     return inode_get(n->ip);
+  }
   int type = n->is_dir ? INODE_DIR : INODE_REGULAR;
   struct inode *ip = inode_create(n->ino, type, 0, 0, 0, 0);
   if (!ip)
     return NULL;
   ip->i_priv = n->is_dir ? (void *)n : (void *)n->attr;
+  ip->i_op = n->is_dir ? &sysfs_dir_iop : &sysfs_file_iop;
   n->ip = inode_get(ip);
   return ip;
+}
+
+/* sysfs_dir_lookup:在目录 inode dir 内查名为 name 的子项,返 +1 inode 或 NULL。 */
+static struct inode *sysfs_dir_lookup(struct inode *dir, const char *name) {
+  struct sysfs_node *parent = (struct sysfs_node *)dir->i_priv;
+  if (!parent || !parent->is_dir)
+    return NULL;
+  int namelen = 0;
+  while (name[namelen])
+    namelen++;
+  spin_lock(&sysfs_lock);
+  struct sysfs_node *found = NULL;
+  for (struct sysfs_node *c = parent->children; c; c = c->sibling) {
+    if (__strlen(c->name) == (size_t)namelen &&
+        __memcmp(c->name, name, namelen) == 0) {
+      found = c;
+      break;
+    }
+  }
+  spin_unlock(&sysfs_lock);
+  if (!found)
+    return NULL;
+  return sysfs_node_to_inode(found);
+}
+
+/* sysfs_getattr:从 ip 字段填(不 deref i_priv,避免 dir/node 与 file/attr 脆弱判别)。 */
+static int sysfs_getattr(struct inode *ip, struct kstat *ks) {
+  __memset(ks, 0, sizeof(*ks));
+  ks->st_ino = ip->ino;
+  ks->st_mode = (ip->type == INODE_DIR) ? 0040755 : 0100644;
+  ks->st_nlink = 1;
+  ks->st_size = 0;
+  ks->st_blksize = 512;
+  return 0;
+}
+
+static const struct inode_operations sysfs_dir_iop = {
+    .lookup = sysfs_dir_lookup,
+    .getattr = sysfs_getattr,
+};
+
+static const struct inode_operations sysfs_file_iop = {
+    .getattr = sysfs_getattr,
+};
+
+/* sysfs_mount_root:返回 /sys 根 inode(已 inode_get)。 */
+static struct inode *sysfs_mount_root(struct mount_entry *m) {
+  (void)m;
+  return sysfs_node_to_inode(sysfs_root);
 }
 
 struct inode *sysfs_lookup(const char *relpath) {
@@ -238,19 +293,11 @@ const struct file_operations sysfs_fops = {
 };
 
 /* ===== fstype ===== */
-static int sysfs_nosys(const char *p) {
-  (void)p;
-  return -ENOSYS;
-}
-
+/* R1 stub:返 NULL。R3(plan_vfs1.md)以 sysfs_mount_root 取代。 */
 struct fstype sysfs_fstype = {
     .name = "sysfs",
-    .lookup = sysfs_lookup,
+    .mount_root = sysfs_mount_root,
     .getdents = sysfs_getdents,
-    .mkdir = sysfs_nosys,
-    .unlink = sysfs_nosys,
-    .rmdir = sysfs_nosys,
-    .stat = sysfs_stat,
 };
 
 /* ===== 初始化 ===== */

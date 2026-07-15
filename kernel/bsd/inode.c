@@ -61,6 +61,7 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
   refcount_set(&ip->i_count, 1);
   ip->i_lock = SPINLOCK_INIT;
   ip->i_priv = NULL;
+  ip->i_op = NULL; /* 未挂的 inode dispatch 安全返 -ENOSYS/-EACCES */
   ip->shm = NULL;
   ip->mount = NULL;
   ip->wq = NULL;
@@ -123,6 +124,7 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
   refcount_set(&ip->i_count, 1);
   ip->i_lock = SPINLOCK_INIT;
   ip->i_priv = NULL;
+  ip->i_op = NULL; /* cache miss 新建;命中分支复用旧 inode,iget 出口幂等补挂 */
   ip->shm = NULL;
   ip->mount = NULL;
   ip->wq = NULL;

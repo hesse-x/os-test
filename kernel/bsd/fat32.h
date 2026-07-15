@@ -39,7 +39,6 @@ uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index);
 
 /* File operations */
 struct inode;
-struct inode *fat32_open(const char *path, int flags, int *out_errno);
 int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count);
 int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
                 size_t count);

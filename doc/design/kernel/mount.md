@@ -16,7 +16,7 @@ VFS 路径分发通过 `mount_table` + 最长前缀匹配实现。`/`（FAT32）
 | 4 | 目录枚举模型 | `dir_context` + `dir_emit`（对齐 Linux） | fstype 回调只 emit `(name, ino, d_type)`，不碰 `dirent64` 布局；`sys_getdents` 负责 buffer 管理和 offset 写回 |
 | 5 | fd-I/O 不改 | 仍走 `switch(f->type)` 分发 | fd 打开后 I/O 与路径无关，mount 框架只负责路径解析到 inode，不引入 `file_operations` 分发 |
 | 6 | devtmpfs 设备 fd 创建 | `sys_open` 命中 `/dev` 且 relpath 非空时直调 `devtmpfs_open`（不走 `fs->lookup`） | 设备 fd 需为 FD_DEV 并执行 `ops->open`（ptmx/serial 等），通用 lookup 路径无法满足 |
-| 7 | devtmpfs ino | `inode_create(0, ...)`，ino=0 | devtmpfs inode 不参与 FAT32 cluster 编号空间；`stat` 返回的 `st_ino` 当前为 0（待唯一化） |
+| 7 | devtmpfs ino | `inode_create(next_dev_ino++, ...)`，递增分配（已修复：见 VFS 重构 §3.5） | devtmpfs inode 不参与 FAT32 cluster 编号空间；`st_ino` 递增唯一 |
 | 8 | mount_lock 作用域 | 查询侧拷指针后即放锁，回调在锁外执行 | 避免"持锁遍历 + 回调内再取锁"死锁 |
 | 9 | SYS_MOUNT 权限 | 不检查 | 当前 OS 无用户/capability 模型，所有进程等权；`flags`/`data` 预留 |
 | 10 | FAT32 单实例限制 | 卷几何用文件级 static 全局 | 只挂一个根 FAT32 场景足够；多实例需移到 per-mount `fat32_sb` |
@@ -25,10 +25,8 @@ VFS 路径分发通过 `mount_table` + 最长前缀匹配实现。`/`（FAT32）
 
 **struct fstype**（kernel/bsd/mount.h : fstype）
   name : const char* — "fat32" / "devtmpfs" / "sysfs"
-  lookup : inode* (*)(const char *relpath) — 解析挂载内相对路径，返回 inode（已 inode_get）或 NULL
+  mount_root : inode* (*)(void) — 返回挂载根 inode（已 iget + i_op 挂载），VFS 挂载时调用
   getdents : ssize_t (*)(inode *dir, dir_context *ctx) — 目录枚举，逐条 dir_emit
-  mkdir / unlink / rmdir : int (*)(const char *relpath) — 目录创建/删除，伪 fs 返回 -ENOSYS
-  stat : int (*)(const char *relpath, kstat *ks) — 填充 kstat
 
 **struct mount_entry**（kernel/bsd/mount.h : mount_entry）
   mntpoint : char[64] — 挂载点绝对路径（"/" / "/dev" / "/sys"）
@@ -87,14 +85,20 @@ VFS 路径分发通过 `mount_table` + 最长前缀匹配实现。`/`（FAT32）
 ### fstype 实现
 
 **fat32_fstype**（kernel/bsd/fat32.c : fat32_fstype）：
-- 6 个回调（lookup/stat/mkdir/unlink/rmdir/getdents）均经 `fat32_prepend_slash` 给 relpath 补前导 `/`，适配 `fat32_resolve_path` 要求 `path[0]=='/'`
-- `getdents` 取 `dir->start_cluster` 传给 `fat32_getdents`
+- `mount_root`：iget 根 inode + 挂 `fat32_dir_iop`，返回根 inode
+- `getdents`：取 `dir->start_cluster` 传给 `fat32_getdents`
+- 路径类操作（lookup/create/mkdir/unlink/rmdir/setattr/getattr）由 per-inode `fat32_dir_iop`/`fat32_file_iop` 分发，不再走 fstype 全局回调
 
 **devtmpfs_fstype**（kernel/bsd/devtmpfs.c : devtmpfs_fstype）：
-- `lookup`：relpath 空串返回根目录 dir inode；含 `/` 则 split 为 dir + leaf 匹配；无 `/` 平铺扫描
+- `mount_root`：iget 根 dir inode + 挂 `devtmpfs_dir_iop`，返回根 inode
 - `getdents`：emit 顶级目录（`dir_list`）+ 顶级设备（`dev_list` 中 name 无 `/` 者）；`ctx->pos != 0` 返回 EOF
-- `stat`：空串合成 `/dev` 目录元数据；匹配 `dir_list`/`dev_list` 合成（目录 S_IFDIR|0755，设备 S_IFCHR|0600）
-- `mkdir`/`unlink`/`rmdir` 返回 -ENOSYS（devtmpfs 目录由 `devtmpfs_create` 内部建）
+- 设备查找/创建由 per-inode `devtmpfs_dir_iop->lookup`/`devtmpfs_dir_iop->create` 分发
+- 设备 getattr 由 per-inode `devtmpfs_dev_iop->getattr` 分发
+
+**sysfs_fstype**（kernel/bsd/sysfs.c : sysfs_fstype）：
+- `mount_root`：iget 根 dir inode + 挂 `sysfs_dir_iop`，返回根 inode
+- `getdents`：emit sysfs 顶级 class 子目录
+- 属性查找/getattr 由 per-inode `sysfs_dir_iop->lookup`/`sysfs_file_iop->getattr` 分发
 
 ### 系统调用
 
@@ -106,15 +110,16 @@ VFS 路径分发通过 `mount_table` + 最长前缀匹配实现。`/`（FAT32）
 
 ### 路径 syscall 改造点
 
-所有路径 syscall 经 `vfs_resolve_user` → 调 fstype 回调：
+所有路径 syscall 经 `vfs_resolve_user` → mount 框架 → `path_walk`/`path_walk_parent` 解析到 inode → 由 per-inode `i_op` 分发：
 
-| syscall | 位置 | 回调 |
+| syscall | 位置 | 分发目标 |
 |---|---|---|
-| sys_open | kernel/bsd/vfs.c : sys_open | `fs->lookup`（devtmpfs 设备 fd 例外，直调 `devtmpfs_open`） |
-| sys_stat | kernel/bsd/vfs.c : sys_stat | `fs->stat` |
-| sys_mkdir | kernel/bsd/vfs.c : sys_mkdir | `fs->mkdir` |
-| sys_unlink | kernel/bsd/vfs.c : sys_unlink | `fs->unlink` |
-| sys_rmdir | kernel/bsd/vfs.c : sys_rmdir | `fs->rmdir` |
+| sys_open | kernel/bsd/vfs.c : sys_open | `path_walk` → `parent->i_op->create`(O_CREAT) / `ip->i_op->setattr`(O_TRUNC) |
+| sys_stat | kernel/bsd/vfs.c : sys_stat | `path_walk` → `ip->i_op->getattr` |
+| sys_mkdir | kernel/bsd/vfs.c : sys_mkdir | `path_walk_parent` → `parent->i_op->mkdir` |
+| sys_unlink | kernel/bsd/vfs.c : sys_unlink | `path_walk_parent` → `parent->i_op->unlink` |
+| sys_rmdir | kernel/bsd/vfs.c : sys_rmdir | `path_walk_parent` → `parent->i_op->rmdir` |
+| sys_truncate | kernel/bsd/vfs.c : sys_truncate | `path_walk` → `ip->i_op->setattr` |
 | sys_getdents | kernel/bsd/vfs.c : sys_getdents | `mount_of_inode` → `fs->getdents(ip, ctx)` |
 
 `sys_dev_create` 不经路径解析，直接调 `devtmpfs_create`，不走 mount 框架。
@@ -123,7 +128,7 @@ VFS 路径分发通过 `mount_table` + 最长前缀匹配实现。`/`（FAT32）
 
 - **VFS**：mount 框架是 VFS 路径分发的统一入口，替代旧的 `/dev/` 前缀字节比较。详见 [vfs.md](vfs.md)
 - **devtmpfs**：从"前缀 hack"迁为挂载到 `/dev` 的 fstype。`devtmpfs_create` 调用点（virtio_gpu、xhci 等）不变，只改访问入口
-- **FAT32**：注册为根 fstype，6 个函数加 `fat32_prepend_slash` shim 适配 relpath 语义
+- **FAT32**：注册为根 fstype，`mount_root` iget 根 inode + 挂 `fat32_dir_iop`。路径类操作由 i_op 分发，不再走 fstype 全局回调
 - **fd-I/O（syscall.c）**：mount 框架不涉及，fd 打开后仍走 `switch(f->type)` 分发
 
 ## 待完成项
@@ -132,9 +137,9 @@ VFS 路径分发通过 `mount_table` + 最长前缀匹配实现。`/`（FAT32）
 |------|------|--------|
 | sysfs 挂载占位 | `mount(NULL, "/sys", "sysfs", 0, NULL)` 可成功，内容见 sysfs 方案 | 中 |
 | SYS_UMOUNT | `mount_table` 结构已预留 remove 路径，后续可加 umount2 syscall | 低 |
-| devtmpfs ino 唯一化 | 当前所有 devtmpfs inode 用 `inode_create(0, ...)`，ino 全为 0，导致 `inode_lookup` hash 冲突且 `st_ino=0`（测试断言 `st_ino > 0` 失败）。需递增分配器（如 `0x80000000` 起，避开 FAT32 cluster 范围） | 高 |
+| devtmpfs ino 唯一化 ✅ | 已修复：`inode_create(next_dev_ino++, ...)`（VFS 重构 §3.5），`st_ino > 0` | — |
 | devtmpfs getdents 子目录枚举 | 当前 `devtmpfs_getdents` 只 emit 顶级目录和顶级设备，`opendir("/dev/dri")` 无法枚举 `card0`。需按 `dir + "/"` 前缀过滤直接子条目 | 中 |
-| VFS 逐组件 path_walk | 当前 `normalize_path` 字符串级处理 `.`/`..`，无 symlink 场景下与 Linux 逐组件 `..` 穿越结果等价。引入 symlink 后需重写为 inode 级逐组件遍历 + `follow_dotdot` 穿越挂载边界，同时可引入 dentry cache | 低 |
+| VFS 逐组件 path_walk ✅（基础） | 已实现 `path_walk`/`path_walk_parent` 逐组件 lookup（VFS 重构 R2）。无 symlink 场景下与 Linux 等价。引入 symlink 后需加 `follow_symlink` + `follow_dotdot` 穿越挂载边界 | 低 |
 | dentry cache | 每次 open 读磁盘解析路径，添加 `(path, inode)` hash + LRU 缓存 | 中 |
 | mount 权限检查 | 当前无用户/capability 模型，`sys_mount` 不检查权限。引入权限体系时在入口加门控，ABI 不变 | 低 |
 | FAT32 多实例 | 卷几何用文件级 static 全局，只能挂一个 FAT32 实例。多实例需移到 per-mount `struct fat32_sb` | 低 |

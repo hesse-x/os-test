@@ -1341,18 +1341,17 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   }
 
   // 6c. Dynamic path: load ld.so at LD_SO_BASE
-  // Bypass sys_open (which validates path as user-space pointer) — interp_path
-  // is a kernel stack variable, so use fat32_open directly instead.
+  // interp_path is a kernel stack variable, so use vfs_open_kern (kernel-path
+  // open) instead of sys_open (which validates the path as a user pointer).
   elf_load_result ld_lr = {0};
   if (is_dynamic) {
-    int ld_errno = 0;
-    struct inode *ld_ip = fat32_open(interp_path, O_RDONLY, &ld_errno);
+    struct inode *ld_ip = vfs_open_kern(interp_path);
     if (!ld_ip) {
       kfree(elf_buf);
       free_table_page(pml4_phys);
       printk(LOG_ERROR, "execve: ld.so open failed pid=%d path=%s err=%d\n",
-             proc->pid, interp_path, ld_errno);
-      return (int64_t)ld_errno;
+             proc->pid, interp_path, ENOENT);
+      return (int64_t)-ENOENT;
     }
     uint64_t ld_size = ld_ip->size;
     uint8_t *ld_buf = (uint8_t *)kmalloc(ld_size);
@@ -1758,7 +1757,7 @@ mmap_region *add_mmap_region(xtask *proc, uint64_t vaddr, uint64_t size,
 // ===================== Single-user system: uid/gid default to 0. setuid/setgid
 // are relaxed (no setuid-bit privilege rules yet) — they just set
 // real+effective, matching the "root can become anyone" model. umask gates
-// file-creation mode (applied in fat32_open via the inode cache mode).
+// file-creation mode (applied via i_op->create + the inode cache mode).
 
 int64_t sys_getuid(int64_t unused1, int64_t unused2, int64_t unused3,
                    int64_t unused4, int64_t unused5, int64_t unused6) {

@@ -58,6 +58,10 @@ static bool devtmpfs_initialized = false;
  * subdirectory */
 static struct inode *devtmpfs_root_ip = NULL;
 
+/* Forward: devtmpfs_iget defined later (after devtmpfs_get_or_create_dir),
+ * but devtmpfs_init / devtmpfs_get_or_create_dir call it. */
+static struct inode *devtmpfs_iget(int type);
+
 void devtmpfs_init(void) {
   if (devtmpfs_initialized) {
     printk(LOG_INFO, "devtmpfs_init: already initialized, skip\n");
@@ -82,7 +86,7 @@ void devtmpfs_init(void) {
 
   /* Create dedicated root inode for /dev (distinguished from subdirectories).
    * Must be outside the lock because inode_create may allocate. */
-  devtmpfs_root_ip = inode_create(0, INODE_DIR, 0, 0, 0, 0);
+  devtmpfs_root_ip = devtmpfs_iget(INODE_DIR);
   devtmpfs_initialized = true;
   printk(LOG_INFO, "devtmpfs_init: done\n");
 }
@@ -111,13 +115,14 @@ static struct dev_dir *devtmpfs_get_or_create_dir(const char *name, int len) {
   /* find free slot */
   for (int i = 0; i < 16; i++) {
     if (dev_dirs[i].ip == NULL) {
-      struct inode *ip = inode_create(0, INODE_DIR, 0, 0, 0, 0);
+      struct inode *ip = devtmpfs_iget(INODE_DIR);
       if (!ip)
         return NULL;
       for (int j = 0; j < len; j++)
         dev_dirs[i].name[j] = tmp[j];
       dev_dirs[i].name[len] = '\0';
       dev_dirs[i].ip = ip;
+      dev_dirs[i].ip->i_priv = &dev_dirs[i]; /* I5:子目录 inode 回指 dev_dir,供 lookup 取 prefix */
       dev_dirs[i].next = dir_list;
       dir_list = &dev_dirs[i];
       dir_count++;
@@ -125,6 +130,121 @@ static struct dev_dir *devtmpfs_get_or_create_dir(const char *name, int len) {
     }
   }
   return NULL;
+}
+
+/* devtmpfs_iget:封装 inode_create + 挂 i_op。devtmpfs inode 由
+ *  dev_entries[].ip/dev_dirs[].ip 持基准 ref 常驻。 */
+static const struct inode_operations devtmpfs_dir_iop;
+static const struct inode_operations devtmpfs_dev_iop;
+
+static struct inode *devtmpfs_iget(int type) {
+  struct inode *ip = inode_create(0, type, 0, 0, 0, 0);
+  if (!ip)
+    return NULL;
+  ip->i_op = (type == INODE_DIR) ? &devtmpfs_dir_iop : &devtmpfs_dev_iop;
+  return ip;
+}
+
+/* devtmpfs_dir_lookup:在目录 inode dir 内查名为 name 的直接子项,返 +1 inode 或 NULL。
+ *  I4(a) 决议:dev_list 存全名(如 "dri/card0"),path_walk 逐段收单名,故按 dir 身份取
+ *  prefix 拼全名比较。根(dir->i_priv==NULL)扁平匹配 top-level;子目录(i_priv==dev_dir*)
+ *  拼 "prefix/name" 匹配。守 +1 inode_get 契约(修复旧 devtmpfs_lookup 借用无 get,UAF)。 */
+static struct inode *devtmpfs_dir_lookup(struct inode *dir, const char *name) {
+  if (name[0] == '\0') {
+    if (devtmpfs_root_ip) {
+      inode_get(devtmpfs_root_ip);
+      return devtmpfs_root_ip;
+    }
+    return NULL;
+  }
+  int namelen = 0;
+  while (name[namelen])
+    namelen++;
+  struct dev_dir *dd = (struct dev_dir *)dir->i_priv;
+  const char *prefix = dd ? dd->name : NULL;
+  int prefix_len = 0;
+  if (prefix) {
+    while (prefix[prefix_len])
+      prefix_len++;
+  }
+  spin_lock(&devtmpfs_lock);
+  struct dev_entry *e = dev_list;
+  while (e) {
+    int elen = 0;
+    while (e->name[elen])
+      elen++;
+    if (!prefix) {
+      /* 根:仅匹配 top-level(无 '/' 的全名) */
+      int has_slash = 0;
+      for (int i = 0; i < elen; i++)
+        if (e->name[i] == '/') { has_slash = 1; break; }
+      if (!has_slash && elen == namelen &&
+          __memcmp(e->name, name, namelen) == 0) {
+        inode_get(e->ip);
+        spin_unlock(&devtmpfs_lock);
+        return e->ip;
+      }
+    } else {
+      /* 子目录:匹配 "prefix/name" */
+      if (elen == prefix_len + 1 + namelen &&
+          e->name[prefix_len] == '/' &&
+          __memcmp(e->name, prefix, prefix_len) == 0 &&
+          __memcmp(e->name + prefix_len + 1, name, namelen) == 0) {
+        inode_get(e->ip);
+        spin_unlock(&devtmpfs_lock);
+        return e->ip;
+      }
+    }
+    e = e->next;
+  }
+  /* 子目录内不再嵌套 dev_dir(现状只支持一级),不查 dir_list */
+  if (!prefix) {
+    struct dev_dir *d = dir_list;
+    while (d) {
+      if (__strcmp(name, d->name) == 0) {
+        inode_get(d->ip);
+        spin_unlock(&devtmpfs_lock);
+        return d->ip;
+      }
+      d = d->next;
+    }
+  }
+  spin_unlock(&devtmpfs_lock);
+  return NULL;
+}
+
+/* devtmpfs_getattr:从 ip 字段填。根 st_ino=ip->ino(修正旧硬编码 0)。
+ *  st_rdev=ip->ino 是设备号架构 gap,记 todo 不动(§3.5)。 */
+static int devtmpfs_getattr(struct inode *ip, struct kstat *ks) {
+  __memset(ks, 0, sizeof(*ks));
+  if (ip->type == INODE_DIR) {
+    ks->st_mode = 0040755;
+  } else {
+    ks->st_mode = 0020000 | 0600; /* S_IFCHR | 0600 */
+    ks->st_rdev = (uint64_t)ip->ino; /* 设备号=inode(现状) */
+  }
+  ks->st_ino = ip->ino;
+  ks->st_nlink = 1;
+  ks->st_size = 0;
+  ks->st_blksize = 512;
+  return 0;
+}
+
+static const struct inode_operations devtmpfs_dir_iop = {
+    .lookup = devtmpfs_dir_lookup,
+    .getattr = devtmpfs_getattr,
+};
+
+static const struct inode_operations devtmpfs_dev_iop = {
+    .getattr = devtmpfs_getattr,
+};
+
+/* devtmpfs_mount_root:返回 /dev 根 inode(已 inode_get)。 */
+static struct inode *devtmpfs_mount_root(struct mount_entry *m) {
+  (void)m;
+  if (!devtmpfs_root_ip)
+    return NULL;
+  return inode_get(devtmpfs_root_ip);
 }
 
 struct inode *devtmpfs_lookup(const char *name) {
@@ -229,7 +349,7 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
   }
 
   /* Create inode */
-  struct inode *ip = inode_create(0, INODE_DEV, 0, 0, 0, 0);
+  struct inode *ip = devtmpfs_iget(INODE_DEV);
   if (!ip) {
     spin_unlock(&devtmpfs_lock);
     return -ENOMEM;
@@ -513,69 +633,11 @@ static ssize_t devtmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
   return (ssize_t)ctx->written;
 }
 
-static int devtmpfs_stat(const char *relpath, struct kstat *ks) {
-  spin_lock(&devtmpfs_lock);
-  if (relpath[0] == '\0') {
-    __memset(ks, 0, sizeof(*ks));
-    ks->st_mode = 0040755;
-    ks->st_ino = 0;
-    ks->st_nlink = 1;
-    ks->st_size = 0;
-    ks->st_blksize = 512;
-    spin_unlock(&devtmpfs_lock);
-    return 0;
-  }
-
-  /* Check directories */
-  struct dev_dir *d = dir_list;
-  while (d) {
-    if (__strcmp(relpath, d->name) == 0) {
-      __memset(ks, 0, sizeof(*ks));
-      ks->st_mode = 0040755;
-      ks->st_ino = d->ip->ino;
-      ks->st_nlink = 1;
-      ks->st_size = 0;
-      ks->st_blksize = 512;
-      spin_unlock(&devtmpfs_lock);
-      return 0;
-    }
-    d = d->next;
-  }
-
-  /* Check devices (full path match, including '/') */
-  struct dev_entry *e2 = dev_list;
-  while (e2) {
-    if (__strcmp(relpath, e2->name) == 0) {
-      __memset(ks, 0, sizeof(*ks));
-      ks->st_mode = 0020000 | 0600; /* S_IFCHR | 0600 */
-      ks->st_ino = e2->ip->ino;
-      ks->st_nlink = 1;
-      ks->st_size = 0;
-      ks->st_blksize = 512;
-      ks->st_rdev = (uint64_t)e2->ip->ino; /* device number = inode */
-      spin_unlock(&devtmpfs_lock);
-      return 0;
-    }
-    e2 = e2->next;
-  }
-
-  spin_unlock(&devtmpfs_lock);
-  return -ENOENT;
-}
-
-static int devtmpfs_fs_nosys(const char *relpath) {
-  (void)relpath;
-  return -ENOSYS;
-}
-
+/* R1 stub:返 NULL。R3(plan_vfs1.md)以 devtmpfs_mount_root 取代。 */
 struct fstype devtmpfs_fstype = {
     .name = "devtmpfs",
-    .lookup = devtmpfs_lookup,
+    .mount_root = devtmpfs_mount_root,
     .getdents = devtmpfs_getdents,
-    .mkdir = devtmpfs_fs_nosys,
-    .unlink = devtmpfs_fs_nosys,
-    .rmdir = devtmpfs_fs_nosys,
-    .stat = devtmpfs_stat,
 };
 
 /* sys_dev_set_meta(name, subsystem, devtype, props) — SYS_DEV_SET_META

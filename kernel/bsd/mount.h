@@ -51,15 +51,14 @@ struct dir_context {
 };
 
 struct kstat;
+struct mount_entry; /* forward: struct fstype.mount_root takes mount_entry*,
+                      * defined below struct fstype */
 
 struct fstype {
   const char *name; /* "fat32" / "devtmpfs" / "sysfs" */
-  struct inode *(*lookup)(const char *relpath);
-  ssize_t (*getdents)(struct inode *dir, struct dir_context *ctx);
-  int (*mkdir)(const char *relpath);
-  int (*unlink)(const char *relpath);
-  int (*rmdir)(const char *relpath);
-  int (*stat)(const char *relpath, struct kstat *ks);
+  struct inode *(*mount_root)(struct mount_entry *m); /* 返回挂载点根 inode(已 inode_get) */
+  ssize_t (*getdents)(struct inode *dir, struct dir_context *ctx); /* fops 层 per-inode,不进 i_op */
+  /* 重构后 lookup/mkdir/unlink/rmdir/stat 全局回调删除,改走 i_op。 */
 };
 
 #define MAX_MOUNTS 8

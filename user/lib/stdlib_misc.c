@@ -152,7 +152,7 @@ void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
 /* ==================== mkstemp / mktemp (group 3) ====================
  * Replace the trailing X's in template with random letters, then open with
  * O_CREAT|O_EXCL|O_RDWR so a pre-existing name yields EEXIST and we retry.
- * Relies on the O_EXCL semantics added to fat32_open. */
+ * Relies on the O_EXCL semantics enforced by sys_open (via i_op->create). */
 static int fill_xxx(char *tmpl, int xstart, int xlen) {
   /* Seed from getpid + a monotonic counter so concurrent/sequential calls in
    * one process produce distinct names without requiring srand(). */

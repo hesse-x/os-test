@@ -17,6 +17,24 @@
 #define INODE_DIR 2
 #define INODE_DEV 3
 
+struct inode;
+struct file;
+struct kstat;
+
+/* per-inode 行为表(对齐 Linux struct inode_operations,裁剪子集)。
+ * lookup/create/mkdir/unlink/rmdir 由父目录 inode 的 i_op 分发;
+ * getattr/setattr 由目标 inode 的 i_op 分发。
+ * read/write/getdents 属 f_op/数据层,不在本表(§6.1)。 */
+struct inode_operations {
+  struct inode *(*lookup)(struct inode *dir, const char *name);
+  struct inode *(*create)(struct inode *dir, const char *name, int mode);
+  int (*mkdir)(struct inode *dir, const char *name, int mode);
+  int (*unlink)(struct inode *dir, const char *name);
+  int (*rmdir)(struct inode *dir, const char *name);
+  int (*getattr)(struct inode *ip, struct kstat *ks);
+  int (*setattr)(struct inode *ip, uint64_t size);
+};
+
 struct inode {
   int type;
   uint32_t ino;
@@ -26,6 +44,7 @@ struct inode {
   refcount_t i_count;
   spinlock i_lock;
   void *i_priv;              /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
+  const struct inode_operations *i_op; /* 行为表(iget 出口挂);未挂则 dispatch 返 -ENOSYS/-EACCES */
   struct shm *shm;           /* INODE_DEV -> shared memory (NULL = no SHM) */
   struct mount_entry *mount; /* owning mount (set by sys_open lookup) */
   wait_queue_head *wq; /* ringbuf-backed: shared wq for epoll/poll waiters */

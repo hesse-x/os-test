@@ -2,7 +2,12 @@
 
 ## 当前架构设计
 
-用户进程通过统一 syscall 入口（sys_open/sys_read/sys_write/sys_close/sys_dup2/sys_lseek/sys_ioctl/sys_fstat）访问所有 fd 类型，内核按 fd type 分发：
+VFS 有两套独立分发机制：
+
+1. **路径/VFS 层分发**：`sys_open`/`sys_stat`/`sys_truncate`/`sys_mkdir` 等路径类 syscall 经 `vfs_resolve_user` → `path_walk` 逐组件解析到目标 inode → 由 **per-inode `i_op`** 分发到具体 fs 实现（见下方 i_op 层）。Mount 框架负责路径前缀匹配到 `(mount_entry, relpath)`（见 [mount.md](mount.md)）。
+2. **fd I/O 层分发**：fd 打开后的 read/write/ioctl/close/lseek/fstat 按 `f->type` 分发：
+
+用户进程通过统一 syscall 入口访问所有 fd 类型，内核按 fd type 分发：
 
 | fd 类型 | 分发目标 | IPC |
 |---------|---------|-----|
@@ -38,6 +43,32 @@
 
 files_t 包含 fd_table[MAX_FD=32] 固定数组和 ref_count（fork 共享引用计数）。FD 分配：线性扫描 fd_table[3..31] 找 type==FD_NONE 空槽。files_t 独立引用计数，fork 时共享（ref_count++），写时按需复制。
 
+### i_op 层（per-inode `inode_operations`）
+
+VFS 多态载体是 per-inode 的 `i_op`（`kernel/bsd/inode.h: struct inode_operations`），非 fstype 全局回调。创建/查找/删除由**所在目录 inode** 的 `i_op->...` 分发：
+
+| syscall | 分发目标 | NULL 回调 errno（对齐 Linux） |
+|---------|---------|-------------------------------|
+| sys_open O_CREAT | `parent->i_op->create` | EACCES（`vfs_create`） |
+| sys_open O_TRUNC | `ip->i_op->setattr` | EPERM（`notify_change`） |
+| sys_stat | `ip->i_op->getattr` | — |
+| sys_truncate / sys_ftruncate | `ip->i_op->setattr` | EPERM（`notify_change`） |
+| sys_mkdir | `parent->i_op->mkdir` | EPERM（`vfs_mkdir`） |
+| sys_unlink | `parent->i_op->unlink` | EPERM（`vfs_unlink`） |
+| sys_rmdir | `parent->i_op->rmdir` | EPERM（`vfs_rmdir`） |
+| sys_getdents | `fstype->getdents(ip, ctx)` | — |
+
+路径解析由 `path_walk` / `path_walk_parent` 逐段解析（`kernel/bsd/vfs.c`），每段 lookup 返回的中间 inode 经 `inode_put` 配对释放，不泄漏。`vfs_open_kern` 为内核态入口（供 `sys_execve` 等使用）。
+
+四 fs 经各自的 iget 出口挂 i_op：
+
+| fs | dir i_op | file/dev i_op |
+|----|----------|---------------|
+| fat32 | `fat32_dir_iop`（lookup/create/mkdir/unlink/rmdir/setattr/getattr） | `fat32_file_iop`（setattr/getattr） |
+| devtmpfs | `devtmpfs_dir_iop`（lookup/create） | `devtmpfs_dev_iop`（getattr） |
+| sysfs | `sysfs_dir_iop`（lookup/getattr） | `sysfs_file_iop`（getattr） |
+| tmpfs | `tmpfs_dir_iop`/`tmpfs_file_iop`（契约声明，实现归 work1 §3.1） |
+
 ---
 
 # 一、inode 抽象
@@ -56,8 +87,10 @@ files_t 包含 fd_table[MAX_FD=32] 固定数组和 ref_count（fork 共享引用
   nlink : int — 硬链接数（FAT32 无硬链接，始终 1）
   ref_count : int — 打开 fd 数 + dentry 引用
   i_lock : spinlock_t — per-inode spinlock
-  i_priv : void* — INODE_DEV: 指向 dev_ops*; INODE_REGULAR/DIR: NULL
+  i_op : inode_operations* — per-inode 多态分发（VFS 层核心，见 i_op 层节）
+  i_priv : void* — fs 专属私有数据：INODE_DEV → dev_ops*；sysfs → sysfs_attr*；tmpfs → tmpfs_node*；FAT32 NULL
   shm : shm* — INODE_DEV 关联的 SHM（dev_create 时设置），mmap 从此取物理页
+  mount : mount_entry* — 挂载条目（sys_open lookup 命中后填入）
   start_cluster / dir_start_cluster : uint32_t — FAT32 专属
   dir_entry_index : int — 在目录中的短名 entry index
   hash_next / hash_prev : inode* — hash chain
@@ -144,13 +177,11 @@ NULL 回调 = 默认行为（ops->read==NULL → sys_read 返回 -EINVAL）。
 - devtmpfs_open(name, flags) — 分配 FD_DEV fd，内核设备调 ops->open()
 - devtmpfs_cleanup_pid(pid) — 删除 driver_pid 匹配的所有 inode，清零 isr_driver_pid[]
 
-### VFS 路径拦截
+### VFS 路径分发
 
-sys_open 中：path 以 /dev/ 开头 → devtmpfs_open(path+5, flags)；否则 → fat32_open(path, flags)。
+`sys_open` 经 `vfs_resolve_user` → mount 框架最长前缀匹配 → `path_walk` 逐组件解析到 inode → 由 `i_op` 分发。`/dev` 挂载点命中 devtmpfs fstype 后，`path_walk` 调 `devtmpfs_dir_iop->lookup` 解析设备名；设备 fd 创建仍走 `devtmpfs_open`（需分配 FD_DEV + 执行 `ops->open`）。详见 [mount.md](mount.md)。
 
-实现：kernel/vfs.c : sys_open
-
-预留 mount 接口：已实现，见 [mount.md](mount.md)。
+实现：kernel/bsd/vfs.c : sys_open + kernel/bsd/devtmpfs.c
 
 ### ISR 唤醒机制
 
@@ -258,7 +289,7 @@ UEFI → stub 读 ESP 加载 myos.elf + init.elf → kernel_main（从 boot_info
 | 51 | sys_ioctl | ioctl(fd, cmd, arg) |
 | 52 | sys_fstat | fstat(fd, &buf) |
 | 53 | sys_fdev_pid | 查询 fd 对应的驱动 PID |
-| 82 | sys_truncate | truncate(path, length) — resolve_path → fat32_ftruncate → inode_put |
+| 82 | sys_truncate | truncate(path, length) — path_walk → i_op->setattr(ip, len) |
 | 83 | sys_fsync | fsync(fd) — 遍历 inode page_cache 脏页写回 + FAT 目录项元数据 |
 | 84 | sys_sync | sync() — page_cache_flush_all 全表 dirty 写回 + 所有 inode 元数据 |
 
@@ -271,13 +302,15 @@ UEFI → stub 读 ESP 加载 myos.elf + init.elf → kernel_main（从 boot_info
 | fd_table | files_struct + 动态 fdtable | files_t + 固定 32 项数组 + ref_count 共享 |
 | 文件系统 | ext4/btrfs | FAT32 |
 | inode | struct inode + hash cache | struct inode + hash cache |
+| inode_operations | per-inode i_op（lookup/create/link/unlink/mkdir/rmdir/setattr/getattr…） | per-inode i_op（lookup/create/unlink/mkdir/rmdir/setattr/getattr）✅ |
+| file_operations | per-inode f_op（read/write/poll/…） | dev_ops 回调（内核设备）+ IPC 代理（用户态驱动） |
 | page cache | 4KB page, (mapping, index) | 4KB page, (inode, page_index) |
 | 设备发现 | devtmpfs + major:minor | devtmpfs + inode + dev_ops 回调 |
-| file_operations | 函数指针表 | dev_ops 回调（内核）+ IPC 代理（用户态驱动） |
 | pipe | pipe_read/write | ring buffer (4KB) |
 | socket lock | per-socket lock | 全局 socket_lock |
 | SCM_RIGHTS | unix_inflight ref bump | skb fds[] + lazy 安装 |
 | mount | mount_table + 挂载点穿越 | mount_table + 最长前缀匹配（见 [mount.md](mount.md)） |
+| path_walk | 逐组件遍历 + follow_dotdot | 逐组件遍历（`path_walk`）✅ |
 | ioctl | _IOC 编码 + file_operations | _IOC 编码 + dev_ops / IPC 代理 |
 | dentry cache | 路径缓存 | 无（每次 open 读磁盘解析路径） |
 
@@ -287,6 +320,7 @@ UEFI → stub 读 ESP 加载 myos.elf + init.elf → kernel_main（从 boot_info
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
+| ~~i_op NULL errno 修正~~ | ~~setattr=NULL 返 EINVAL（应为 EPERM），mkdir/unlink/rmdir=NULL 返 ENOSYS（应为 EPERM）~~ | 已修复（R5-前置）：setattr/mkdir/unlink/rmdir NULL 均返 EPERM，对齐 Linux `notify_change`/`vfs_mkdir`/`vfs_unlink`/`vfs_rmdir`；`test_vfs_dispatch` 断言精确 errno |
 | FD_FILE 消除 | FD_FILE(=7) 是 fs_driver IPC 代理遗留类型，消除后 sys_msg/sys_msg_resp 也可废弃 | 高 |
 | sys_install_fd 消除 | syscall #29 仅 FD_FILE 使用，FD_FILE 消除后删除 | 高 |
 | fd_table 动态扩展 | 固定 32 项 → bitmap + 动态扩展（初始 32，超限 kmalloc），构建 gcc 可能需要 256+ | 中 |

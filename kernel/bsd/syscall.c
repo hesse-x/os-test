@@ -2443,7 +2443,8 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t unused1,
     return (int64_t)-EBADF;
   }
 
-  /* Regular files: grow/shrink the FAT32 cluster chain. */
+  /* Regular files: dispatch size change to i_op->setattr (锁由 setattr
+   * 内部持,对齐 §6.6;消除硬编码 fat32_ftruncate)。 */
   if (f->type == FD_REGULAR) {
     struct inode *ip = f->inode;
     rcu_read_unlock();
@@ -2451,9 +2452,9 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t unused1,
       return (int64_t)-EBADF;
     if (size < 0)
       return (int64_t)-EINVAL;
-    spin_lock(&ip->i_lock);
-    int rc = fat32_ftruncate(ip, (uint64_t)size);
-    spin_unlock(&ip->i_lock);
+    if (!ip->i_op || !ip->i_op->setattr)
+      return (int64_t)-EINVAL;
+    int rc = ip->i_op->setattr(ip, (uint64_t)size);
     return (int64_t)rc;
   }
 

@@ -172,9 +172,44 @@ sprint 10+: 交叉编译 clang for Xos → 在 Xos 上测试 cc1 → 自举
 
 这约等于 sprint 3-5 即可完成，跳过了 sprint 7-9。
 
-## VFS mount 框架 ✅
+## VFS i_op 重构 ✅（R1–R5）
 
-详细设计见 [kernel/mount.md](kernel/mount.md)。待完成项（sysfs 占位、ino 唯一化、子目录 getdents、path_walk 重写等）见该文档末尾。
+详细设计见 `vfs_refact.md`。四 fs i_op 就绪、path_walk 逐组件遍历、硬编码消除、fstype 仅保留 mount_root/getdents。
+
+- [x] R1: `struct inode_operations` 定义 + 四 fs i_op 表 + mount_root iget 出口
+- [x] R2: fat32 回归 + sys_open/sys_stat/sys_truncate 等 i_op 分发
+- [x] R3: sysfs/devtmpfs 回归 + devtmpfs ino 唯一化（next_dev_ino++）
+- [ ] R4: `test_vfs_dispatch` + `test_inode_refcount` 测试 ELF
+- [ ] R5-前置: i_op NULL errno 修正（EINVAL→EPERM, ENOSYS→EPERM，对齐 Linux）
+- [ ] R5: tmpfs i_op 契约声明（实现归 work1 §3.1）
+
+### tmpfs i_op 接口契约（本 VFS 重构 R5 交付，实现归 work1 §3.1）
+
+work1 实现 tmpfs 时，`tmpfs_dir_iop`/`tmpfs_file_iop` 须满足 `kernel/bsd/inode.h` 的 `struct inode_operations`：
+- `tmpfs_dir_lookup(dir, name)`:从 tmpfs_node children 找 name,返 +1 inode。
+- `tmpfs_dir_create(dir, name, mode)`:建 tmpfs 普通文件 inode(+1)。
+- `tmpfs_dir_mkdir(dir, name, mode)`:建 tmpfs 目录 inode(+1)。
+- `tmpfs_dir_unlink(dir, name)`:删 tmpfs 文件。
+- `tmpfs_dir_rmdir(dir, name)`:删 tmpfs 目录(验空)。
+- `tmpfs_getattr(ip, ks)`:从 tmpfs_node 填(ip->i_priv 为 tmpfs_node*,非 NULL 前置)。
+- `tmpfs_setattr(ip, size)`:size 缩→释放多余页;扩→补零页(对齐 fat32_setattr 语义)。
+- `tmpfs_create_inode(node)` 为 iget 出口:`inode_create` + 挂 i_op + `tmpfs_node->ip` 单例常驻(同 sysfs)。
+- `mount_root` 返 fs_data->root。
+- AF_UNIX bind 落 VFS(work1 §3.2)用 `tmpfs_dir_create` 建 socket inode,无需 sys_mknod。
+
+### i_op NULL errno 修正（R5 前置，对齐 Linux）
+
+当前 `kernel/bsd/vfs.c` 中 i_op NULL 回调返回的 errno 与 Linux 不一致：
+
+| 回调 | 当前 errno | Linux errno | Linux 源码 | 位置 |
+|------|-----------|-------------|-----------|------|
+| setattr NULL | EINVAL | **EPERM** | `notify_change()` | vfs.c:238,376 |
+| mkdir NULL | ENOSYS | **EPERM** | `vfs_mkdir()` | vfs.c:443 |
+| unlink NULL | ENOSYS | **EPERM** | `vfs_unlink()` | vfs.c:472 |
+| rmdir NULL | ENOSYS | **EPERM** | `vfs_rmdir()` | vfs.c:501 |
+| create NULL | EACCES | EACCES | `vfs_create()` | vfs.c:254 ✓ |
+
+ENOSYS 表示"syscall 内核层不存在"，EPERM 表示"syscall 存在但此 fs 不支持该操作"。用户态程序（如 glibc）会据此做完全不同的回退策略。修正为 EPERM 对齐 Linux 语义。
 
 ## 键盘 repeat 机制
 
@@ -195,7 +230,7 @@ sprint 10+: 交叉编译 clang for Xos → 在 Xos 上测试 cc1 → 自举
 | 28 | boot_info 复制硬编码 128B | arch/x64/start.S | 结构体扩展会截断 | [uefi.md](uefi.md) |
 | 29 | evdev ioctl 大 getter 数据截断(B3) | kernel/bsd/syscall.c FD_DEV req 段 | 客户端回填守卫硬限 `_IOC_SIZE<=48`、`req_reply_len=56`,完整 KEY 位图 96B 等 >48B 查询会静默截断。本轮 B1(test 传 ≤48B buf)够桩用,**接 libinput 前必须做 B3**:ioctl 段按 `_IOC_SIZE>48` 分流到 `sys_msg_to`/`sys_msg_resp` 变长通道,复用已有 MSG 机制 | [../../evdev_design.md](../../evdev_design.md) |
 | 31 | evdev grab 僵尸锁 | kernel/bsd/proc.c `file_put` FD_DEV 段 | `file_put` 对 user-driver(`driver_pid>0`)不调 close,客户端崩溃/关 fd 后 `grab_client` 残留 → eventN 永久 EBUSY。FD_FILE 已有 `kernel_msg_send` close 通知范式(proc.c:220)可复用:给 user-driver close 时 `kernel_msg_send(driver, &close_req, ...)` → evdev 收 RECV_MSG 释放 grab。但改全局 close 语义(所有 user-driver 的 close 阻塞等驱动)作用域溢出 evdev 查询接口本轮,留接真实多客户端前 | [../../evdev_design.md](../../evdev_design.md) |
-| 32 | VFS 路径解析为字符串前缀匹配,非逐组件遍历 | kernel/bsd/vfs.c | mount 框架用 `normalize_path`(字符串级 `.`/`..` 处理)+ `vfs_resolve`(最长前缀匹配)替代 Linux 的 `path_walk`(inode 级逐组件遍历 + `follow_dotdot` 穿越挂载边界)。无 symlink 场景下结果等价。引入 symlink 后需重写为逐组件遍历,同时可引入 dentry cache。见 [mount.md](kernel/mount.md) | [mount.md](kernel/mount.md) |
+| ~~32~~ | ~~VFS 路径解析为字符串前缀匹配,非逐组件遍历~~ | ~~kernel/bsd/vfs.c~~ | 已修复：VFS 重构 R2 实现 `path_walk`/`path_walk_parent` 逐组件遍历（`inode->i_op->lookup`），无 symlink 场景与 Linux 等价。引入 symlink 后需加 `follow_symlink` + `follow_dotdot` 穿越挂载边界。见 [mount.md](kernel/mount.md) | [mount.md](kernel/mount.md) |
 | 33 | pipe read_pid/write_pid 滞后引用致 wake_process ASSERT panic | kernel/bsd/syscall.c `pipe_write`/`pipe_read` | 读/写端 `schedule()` 返回后才清 `read_pid`/`write_pid = -1`,目标线程可能已切换到 `WAIT_FUTEX` 等非 PIPE 等待状态;另一核 `pipe_write`/`pipe_read` 仍看到旧 pid,调 `wake_process` 触发 `ev==WAIT_PIPE` ASSERT( ipc.c:648)。多核偶发。**修复**:`wake_process(p->read_pid)` → `wake_with_event(task_get(p->read_pid), WAIT_PIPE)`,内部持 `scheduler_lock` 校验 `wait_event==expected`,不匹配 no-op。write 端同理。 | [ipc.md](ipc.md) |
 
 各 Bug 详细说明见归属文档的待完成项。已修复的 Bug（#30 socket 锁粒度）不再列出。
