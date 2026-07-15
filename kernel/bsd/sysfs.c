@@ -166,7 +166,8 @@ static struct inode *sysfs_node_to_inode(struct sysfs_node *n) {
   return ip;
 }
 
-/* sysfs_dir_lookup:在目录 inode dir 内查名为 name 的子项,返 +1 inode 或 NULL。 */
+/* sysfs_dir_lookup:在目录 inode dir 内查名为 name 的子项,返 +1 inode 或 NULL。
+ */
 static struct inode *sysfs_dir_lookup(struct inode *dir, const char *name) {
   struct sysfs_node *parent = (struct sysfs_node *)dir->i_priv;
   if (!parent || !parent->is_dir)
@@ -189,7 +190,8 @@ static struct inode *sysfs_dir_lookup(struct inode *dir, const char *name) {
   return sysfs_node_to_inode(found);
 }
 
-/* sysfs_getattr:从 ip 字段填(不 deref i_priv,避免 dir/node 与 file/attr 脆弱判别)。 */
+/* sysfs_getattr:从 ip 字段填(不 deref i_priv,避免 dir/node 与 file/attr
+ * 脆弱判别)。 */
 static int sysfs_getattr(struct inode *ip, struct kstat *ks) {
   __memset(ks, 0, sizeof(*ks));
   ks->st_ino = ip->ino;

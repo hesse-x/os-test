@@ -122,7 +122,8 @@ static struct dev_dir *devtmpfs_get_or_create_dir(const char *name, int len) {
         dev_dirs[i].name[j] = tmp[j];
       dev_dirs[i].name[len] = '\0';
       dev_dirs[i].ip = ip;
-      dev_dirs[i].ip->i_priv = &dev_dirs[i]; /* I5:子目录 inode 回指 dev_dir,供 lookup 取 prefix */
+      dev_dirs[i].ip->i_priv =
+          &dev_dirs[i]; /* I5:子目录 inode 回指 dev_dir,供 lookup 取 prefix */
       dev_dirs[i].next = dir_list;
       dir_list = &dev_dirs[i];
       dir_count++;
@@ -145,10 +146,11 @@ static struct inode *devtmpfs_iget(int type) {
   return ip;
 }
 
-/* devtmpfs_dir_lookup:在目录 inode dir 内查名为 name 的直接子项,返 +1 inode 或 NULL。
- *  I4(a) 决议:dev_list 存全名(如 "dri/card0"),path_walk 逐段收单名,故按 dir 身份取
- *  prefix 拼全名比较。根(dir->i_priv==NULL)扁平匹配 top-level;子目录(i_priv==dev_dir*)
- *  拼 "prefix/name" 匹配。守 +1 inode_get 契约(修复旧 devtmpfs_lookup 借用无 get,UAF)。 */
+/* devtmpfs_dir_lookup:在目录 inode dir 内查名为 name 的直接子项,返 +1 inode 或
+ * NULL。 I4(a) 决议:dev_list 存全名(如 "dri/card0"),path_walk 逐段收单名,故按
+ * dir 身份取 prefix 拼全名比较。根(dir->i_priv==NULL)扁平匹配
+ * top-level;子目录(i_priv==dev_dir*) 拼 "prefix/name" 匹配。守 +1 inode_get
+ * 契约(修复旧 devtmpfs_lookup 借用无 get,UAF)。 */
 static struct inode *devtmpfs_dir_lookup(struct inode *dir, const char *name) {
   if (name[0] == '\0') {
     if (devtmpfs_root_ip) {
@@ -177,7 +179,10 @@ static struct inode *devtmpfs_dir_lookup(struct inode *dir, const char *name) {
       /* 根:仅匹配 top-level(无 '/' 的全名) */
       int has_slash = 0;
       for (int i = 0; i < elen; i++)
-        if (e->name[i] == '/') { has_slash = 1; break; }
+        if (e->name[i] == '/') {
+          has_slash = 1;
+          break;
+        }
       if (!has_slash && elen == namelen &&
           __memcmp(e->name, name, namelen) == 0) {
         inode_get(e->ip);
@@ -186,8 +191,7 @@ static struct inode *devtmpfs_dir_lookup(struct inode *dir, const char *name) {
       }
     } else {
       /* 子目录:匹配 "prefix/name" */
-      if (elen == prefix_len + 1 + namelen &&
-          e->name[prefix_len] == '/' &&
+      if (elen == prefix_len + 1 + namelen && e->name[prefix_len] == '/' &&
           __memcmp(e->name, prefix, prefix_len) == 0 &&
           __memcmp(e->name + prefix_len + 1, name, namelen) == 0) {
         inode_get(e->ip);
@@ -220,7 +224,7 @@ static int devtmpfs_getattr(struct inode *ip, struct kstat *ks) {
   if (ip->type == INODE_DIR) {
     ks->st_mode = 0040755;
   } else {
-    ks->st_mode = 0020000 | 0600; /* S_IFCHR | 0600 */
+    ks->st_mode = 0020000 | 0600;    /* S_IFCHR | 0600 */
     ks->st_rdev = (uint64_t)ip->ino; /* 设备号=inode(现状) */
   }
   ks->st_ino = ip->ino;

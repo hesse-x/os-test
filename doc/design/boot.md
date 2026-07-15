@@ -7,7 +7,7 @@
 | # | 决策 | 选择 | 理由 |
 |---|------|------|------|
 | 1 | 启动方式 | UEFI → EFI stub → 内核 | 详见 [uefi.md](uefi.md) |
-| 2 | init 启动顺序 | 硬编码串行：kbd → kms → terminal | 驱动间有依赖，硬编码简单可靠 |
+| 2 | init 启动顺序 | 硬编码串行：evdev → udevd(socket activation) → terminal | 驱动间有依赖，硬编码简单可靠 |
 | 3 | kernel_main 行为 | 加载 init 后直接进 idle，不创建 pipe/不等驱动就绪 | 最小内核原则，用户态服务自管理 |
 | 4 | 进程加载 | init 从 FAT32 spawn 服务进程 | FAT32 已可用，后续服务不需裸 LBA |
 | 5 | 失败处理 | 任何步骤失败直接停住，不降级运行 | 早期系统，降级增加复杂性且难以调试 |
@@ -18,9 +18,13 @@
 
 ```
 UEFI → BOOTX64.EFI → myos.elf → kernel_main
-  kernel 从裸 LBA 加载 init (PID 3)
+  kernel 从裸 LBA 加载 init (PID 2)
+  bsd_init / vfs_init：
+    mount fat32("/") + devtmpfs("/dev") + sysfs("/sys") + tmpfs("/run")   ← /run tmpfs 供 udevd db/socket
   init 从 FAT32 spawn:
-    kbd_driver → kms_driver → terminal
+    evdev → wait_dev_ready("/dev/input/event0")
+    udevd（socket activation：init 建 /run/udev/socket listen fd 传 udevd）
+    terminal
   terminal 从 FAT32 spawn:
     shell（通过 pipe 通信）
 ```
@@ -31,13 +35,15 @@ UEFI → BOOTX64.EFI → myos.elf → kernel_main
 
 init/init.c : main()，链接 libc.a。
 
-1. 等 DEV_FS 就绪（`device_lookup` 轮询）
-2. spawn kbd_driver → 等 DEV_KBD 就绪（轮询 + 计数超时 10000 次 yield）
-3. spawn kms_driver → 等 DEV_KMS 就绪
+1. `open("/dev/serial")` + dup2 到 stdio（fd 0/1/2），使 printf 工作
+2. spawn evdev 驱动 → `wait_dev_ready("/dev/input/event0")`（轮询）
+3. **socket activation 拉 udevd**：`create_udev_socket()` 建 AF_UNIX listen socket 绑 `/run/udev/socket`（期望落 fd 3，被占则 `dup2` 归位）→ `spawn_with_fd("/usr/bin/udevd", listen_fd)`（fork + 子进程 `dup2(fd,3)` + close(4..31) + execve，listen fd 经继承传 udevd）；listen_fd < 0 则降级 `spawn_service`（udevd 自 bind）
 4. spawn terminal
-5. `waitpid(-1)` 循环回收子进程
+5. 收尸循环 `waitpid(-1, &status, 0)`：比对 `udevd_pid`，udevd 信号退出 / 非零退出码 → `sleep(1)` 退避 respawn（`StartLimitBurst=5` 上限，超限放弃告警，收尸循环继续不退）；正常退出清零 crash_count；其它子进程正常收尸不 respawn
 
-spawn 辅助函数：`stat(path)` → `malloc + open + read` → `sys_spawn(buf, size)` → `free(buf)`。失败时串口打印错误并停住。
+spawn 辅助函数：`spawn_service(path)` = `spawn(path)`（fork+exec）；`spawn_with_fd(path, fd)` 手写 fork+dup2+close+execve 确保listen fd 继承到 udevd fd 3。失败时串口打印错误。
+
+udevd 角色（user/udev/udevd.c）：启动探测 fd 3 是否已 listen 的 AF_UNIX socket（try-accept），是 → accept 循环；否 → 回退自 bind+listen 降级。详见 [udev.md](udev.md)。
 
 ### terminal 拉起 shell
 

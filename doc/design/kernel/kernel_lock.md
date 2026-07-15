@@ -70,6 +70,15 @@ API：
 不存在需要同时持 fat_lock + scheduler_lock、ahci_lock + scheduler_lock 等路径。
 FAT32 内部顺序固定：i_lock → fat_lock → ahci_lock。
 新增约束：scheduler_lock → fd_lock（proc_reap 先 scheduler_lock 再 fd_lock）。
+
+tmpfs（/run）锁序：`socket_lock → mount_lock → inode_hash_lock → tmpfs_i_lock`
+（bind→VFS 新嵌套，独立于 `i_lock → fat_lock → ahci_lock`，tmpfs 无块设备依赖）。
+- `tmpfs_i_lock` = `struct tmpfs_inode_info.lock`（per-tmpfs-inode），保护 data/size/children。
+- 调用链：sys_bind/connect 持 socket_lock → `vfs_mknod_socket`/`vfs_lookup_socket`
+  → vfs_resolve（取 mount_lock）→ path_walk/path_walk_parent → i_op->create/lookup
+  → inode_get/inode_put（取 inode_hash_lock）→ tmpfs_create/tmpfs_lookup（取 tmpfs_i_lock）。
+- 单向无反向获取路径：mount_lock 仅 mount.c 用，inode_hash_lock 仅 inode.c 用，
+  tmpfs_i_lock 仅 tmpfs.c 用，无任一在持锁后回取 socket_lock。
 **已完成**：sun_path hash（connect 通过 hash 直接获取 listener PID，消灭全进程 fd_table 扫描）+ RCU（fd_table 读走 rcu_read_lock + file_get/file_put 指针引用，消除所有 peer_fd_lock 读路径），socket_lock → fd_lock 嵌套彻底消除。详见下方 §RCU 设计 和 §sun_path hash 设计。
 任何违反此顺序的代码路径必须标注原因和替代方案。
 

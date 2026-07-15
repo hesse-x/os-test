@@ -78,8 +78,8 @@
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
 | monitor 实现 | shim `udev_monitor_*` 当前 no-op stubs（`get_fd` 返回 -1、`receive_device` 返回 NULL）。推荐 M1 netlink 直读：shim `socket(AF_NETLINK)` + bind(group=1) + recvmsg 解析 uevent；阶段 B 后期可切 udevd pipe SCM_RIGHTS | 高 |
-| udevd 完整 daemon | 121 行骨架仅订阅 netlink 打印。缺：设备属性数据库、AF_UNIX `/run/udev/socket` 服务端、ENUMERATE/MONITOR/QUERY 协议、pipe monitor + SCM_RIGHTS、PCI 扫描补属性。属阶段 B，非 path-seat 阻塞项 | 中 |
-| udevd crash 恢复 | init 仅 `waitpid(-1)` 收尸循环，无 udevd 监控 + 重启逻辑 | 中 |
+| udevd 完整 daemon | 121 行骨架仅订阅 netlink 打印。缺：设备属性数据库、ENUMERATE/MONITOR/QUERY 协议、pipe monitor + SCM_RIGHTS、PCI 扫描补属性。属阶段 B，非 path-seat 阻塞项。**前置已完成（dep0）**：AF_UNIX `/run/udev/socket` 服务端入口已落地——/run tmpfs + mknod(S_IFSOCK) + bind→VFS socket inode + init socket activation 传 fd 3 + udevd fd 探测降级 | 中 |
+| udevd crash 恢复 | **已完成（dep0）**：init 收尸循环改比对 udevd_pid + 信号/非零退出判定 + 1s respawn + StartLimitBurst=5 上限；socket activation 下 respawn 复用同一 listen_fd | 中 |
 | udevd 集成测试 | 缺 `test_udevd.c`（AF_UNIX 连接、enumerate、monitor 热插拔、crash 恢复） | 中 |
 | 内核通知 syscall 测试 | 缺 `test_dev_notify.c` | 中 |
 | dev_entries 动态链表 | `dev_entries[MAX_DEV_ENTRIES=32]` 仍为静态数组，`next` 在数组槽位上串链表，未走 kmalloc；上限提升到 128。当前 32 足够覆盖 ~8 设备 | 低 |

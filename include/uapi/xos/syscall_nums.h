@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <xos/ioctl.h>
 
-// ===================== Syscall numbers (NR_SYSCALL=97, 0-96 continuous)
+// ===================== Syscall numbers (NR_SYSCALL=98, 0-97 continuous)
 // =====================
 #define SYS_GETPID 0
 #define SYS_YIELD 1
@@ -123,6 +123,7 @@
 #define SYS_SIGNALFD4 94
 #define SYS_MOUNT 95
 #define SYS_DEV_SET_META 96
+#define SYS_MKNOD 97
 
 // ===================== recv_msg (shared between kernel and user)
 // =====================

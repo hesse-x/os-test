@@ -428,6 +428,16 @@ static inline int sys_mkdir(const char *path, uint32_t mode) {
   return 0;
 }
 
+static inline int sys_mknod(const char *path, uint32_t mode, uint64_t dev) {
+  int64_t r = __syscall3(SYS_MKNOD, (int64_t)(uintptr_t)path, (int64_t)mode,
+                         (int64_t)dev);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
 static inline int sys_unlink(const char *path) {
   int64_t r = __syscall1(SYS_UNLINK, (int64_t)(uintptr_t)path);
   if (r < 0) {

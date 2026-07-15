@@ -67,7 +67,7 @@ VFS 多态载体是 per-inode 的 `i_op`（`kernel/bsd/inode.h: struct inode_ope
 | fat32 | `fat32_dir_iop`（lookup/create/mkdir/unlink/rmdir/setattr/getattr） | `fat32_file_iop`（setattr/getattr） |
 | devtmpfs | `devtmpfs_dir_iop`（lookup/create） | `devtmpfs_dev_iop`（getattr） |
 | sysfs | `sysfs_dir_iop`（lookup/getattr） | `sysfs_file_iop`（getattr） |
-| tmpfs | `tmpfs_dir_iop`/`tmpfs_file_iop`（契约声明，实现归 work1 §3.1） |
+| tmpfs | `tmpfs_dir_iop`（lookup/create/mkdir/unlink/rmdir/getattr/setattr） | `tmpfs_file_iop`（getattr/setattr） |
 
 ---
 
@@ -77,10 +77,10 @@ VFS 多态载体是 per-inode 的 `i_op`（`kernel/bsd/inode.h: struct inode_ope
 
 定义：kernel/inode.h : inode
 
-类型常量：INODE_REGULAR=1, INODE_DIR=2, INODE_DEV=3
+类型常量：INODE_REGULAR=1, INODE_DIR=2, INODE_DEV=3, INODE_SOCKET=4
 
 字段：
-  type : int — INODE_REGULAR / INODE_DIR / INODE_DEV
+  type : int — INODE_REGULAR / INODE_DIR / INODE_DEV / INODE_SOCKET
   ino : uint32_t — inode 号（FAT32 start_cluster，设备自动递增）
   size : uint64_t
   mode : uint32_t — 权限位 (S_IFREG | 0644 等)
@@ -88,7 +88,7 @@ VFS 多态载体是 per-inode 的 `i_op`（`kernel/bsd/inode.h: struct inode_ope
   ref_count : int — 打开 fd 数 + dentry 引用
   i_lock : spinlock_t — per-inode spinlock
   i_op : inode_operations* — per-inode 多态分发（VFS 层核心，见 i_op 层节）
-  i_priv : void* — fs 专属私有数据：INODE_DEV → dev_ops*；sysfs → sysfs_attr*；tmpfs → tmpfs_node*；FAT32 NULL
+  i_priv : void* — fs 专属私有数据：INODE_DEV → dev_ops*；INODE_SOCKET → unix_sock*；sysfs → sysfs_attr*；tmpfs → tmpfs_inode_info*；FAT32 NULL
   shm : shm* — INODE_DEV 关联的 SHM（dev_create 时设置），mmap 从此取物理页
   mount : mount_entry* — 挂载条目（sys_open lookup 命中后填入）
   start_cluster / dir_start_cluster : uint32_t — FAT32 专属
@@ -313,6 +313,69 @@ UEFI → stub 读 ESP 加载 myos.elf + init.elf → kernel_main（从 boot_info
 | path_walk | 逐组件遍历 + follow_dotdot | 逐组件遍历（`path_walk`）✅ |
 | ioctl | _IOC 编码 + file_operations | _IOC 编码 + dev_ops / IPC 代理 |
 | dentry cache | 路径缓存 | 无（每次 open 读磁盘解析路径） |
+
+---
+
+# 九、tmpfs
+
+`/run` 是内核态内存文件系统（kernel/bsd/tmpfs.c），承载 udevd db（`/run/udev/data/`）与 AF_UNIX socket 文件等启动期临时文件。重启清空，进程 crash 不影响（数据在内核内存非进程内存）。
+
+### 数据结构
+
+`struct tmpfs_inode_info`（挂 inode->i_priv）：children 链表（目录用，头插）+ sibling + parent 回指 + name[256] + data buffer（普通文件内容）+ size/cap + per-node `spinlock lock`（保护 data/size/children）。socket inode 的 i_priv 由 socket 层 bind 时改挂 `unix_sock*`（见 socket.c）。
+
+### inode 号段分区
+
+全局 inode hash 按 ino 唯一索引，各 fs ino 段永不重叠（kernel/bsd/inode.c 顶部注释固化契约）：
+
+| fs | ino 来源 | 段 |
+|----|---------|----|
+| FAT32 | cluster 派生 | < 0x80000000 |
+| devtmpfs | `next_dev_ino++`（自动分配分支） | 0x80000000+ |
+| tmpfs | `next_tmpfs_ino++`（tmpfs.c 自维护） | 0xC0000000+ |
+
+注：`INODE_DIR` 经 `inode_create` 强制走 `next_dev_ino`（dev 段），仅文件/socket 落 tmpfs 段；各段由全局 hash 去重，无需段间协调。
+
+### i_op / fops
+
+- `tmpfs_dir_iop`：lookup/create/mkdir/unlink/rmdir/getattr/setattr 全套（可写 fs 的本质）。`tmpfs_create` 按 `mode & S_IFMT` 区分——`S_IFSOCK` 建 `INODE_SOCKET`，其余建 `INODE_REGULAR`（一个 create 回调承载普通文件 + socket 文件，对齐 Linux `i_op->create` 按 mode 建不同类型）。
+- `tmpfs_file_iop`：getattr/setattr。
+- `tmpfs_file_fops`：read/write（单段 data buffer，write 超容量 `krealloc`，不做分页/不进 page cache——tmpfs 自管页）。
+- getdents 走 `fstype->getdents`（`sys_getdents` 经 `m->fs->getdents`），遍历 children 链表 `dir_emit`，d_type 用 `DT_DIR`/`DT_REG`/`DT_SOCK`。
+
+### 容量上限
+
+单文件 `TMPFS_FILE_CAP=64KB` + 总量 `TMPFS_TOTAL_CAP=1MB`（tmpfs_total_used 记账，`tmpfs_total_lock` 保护），超限 write/setattr 返 `-ENOSPC`。
+
+### 挂载
+
+`vfs_init` 早期挂载（kernel/bsd/vfs.c）：先在 FAT32 根 `fat32_mkdir("/run")` 建宿主目录（仅 `getdents("/")` 可见性，对齐 `/dev`/`/sys` 范式），再 `mount_internal(&tmpfs_fstype, "/run", NULL)`。`tmpfs_mount_root` iget 根 inode + 挂 `tmpfs_dir_iop`，返回根 inode（已 inode_get）。详见 [mount.md](mount.md)。
+
+---
+
+# 十、AF_UNIX socket inode + sys_mknod
+
+AF_UNIX bind 在 `/run` tmpfs 上建真实 socket inode（对齐 Linux `vfs_mknod(SOCKFS)`），client connect 走 VFS path 解析取 socket inode（替换纯哈希匹配）。详细 IPC 语义见 [ipc.md](ipc.md)。
+
+### INODE_SOCKET + sys_mknod
+
+- `INODE_SOCKET=4`（kernel/bsd/inode.h），`inode_create` mode 分支按 type 设 `S_IFSOCK`。i_priv 指向 `unix_sock*`（类比 `INODE_DEV` 指向 `dev_ops*`）。
+- `sys_mknod(path, mode, dev)`（`SYS_MKNOD`=97，kernel/bsd/vfs.c）：仅支持 `S_IFSOCK`（`mode & S_IFMT != S_IFSOCK` 返 `-ENOSYS`），`path_walk_parent` 到父目录 → `parent->i_op->create(parent, lastname, S_IFSOCK|0777)` 建 socket inode。其余类型文件创建复用 `sys_open(O_CREAT)`/`sys_mkdir`，不需通用 mknod。
+
+### bind / connect 走 VFS（socket.c）
+
+- `unix_bind_register`：`vfs_mknod_socket(sun_path)`（`path_walk_parent` + `i_op->create(S_IFSOCK)`）建 socket inode → `ip->i_priv = sock` 挂 sock + 记 `sock->bind_inode`（bind 期间持有 inode 引用，不 put）。create 返 `-EEXIST`（路径已存在）→ 对齐 Linux 返 `-EADDRINUSE`；其余 VFS 失败（`/run` 未挂载 / path 解析失败）→ 降级 `unix_bind_register_hash` 哈希表占名。
+- `unix_bind_lookup`：`vfs_lookup_socket(sun_path)`（`path_walk` 取 socket inode）→ 从 `i_priv` 取 sock；`UNIX_LISTEN` 返 listener，否则 `-ECONNREFUSED`（对齐 Linux：路径存在但未 listen）。VFS 失败降级 `unix_bind_lookup_hash`。
+- `unix_bind_unregister`：清 `bind_inode->i_priv = NULL` + `inode_put(bind_inode)` 平衡 bind 时的 get；哈希表路径同步摘除。
+- 哈希表 `unix_bind_table`（`unix_bind_register_hash`/`unix_bind_lookup_hash`）保留作 `/run` 未挂载时的降级路径，保证 udevd 永远能起。
+
+### socket inode 生命周期 + unlink-while-open
+
+bind 时 sock 挂 i_priv 并 `inode_get` 持引用（i_count+1）→ socket inode 在 bind 期间不被释放，天然对齐 Linux unlink-while-open：`tmpfs_unlink` 只摘目录项（从父 children 链表移除）不释放 inode（仍有 bind 持有的 i_count）；判据是 `i_count`（非文件类型）——普通文件且无打开 fd（i_count==1）立即回收 data，socket inode 的 i_priv 归 socket 层 unregister 负责。直到 `unix_bind_unregister` 清 i_priv + inode_put，i_count 归 0 才 kfree。
+
+### 跨 fs 边界
+
+socket 文件只能落在支持 socket inode 的 fs（当前仅 tmpfs）；落在 fat32/devtmpfs/sysfs 上，其 `i_op->create` 不建 INODE_SOCKET → `vfs_mknod_socket` 返 `-EOPNOTSUPP`。锁序 `socket_lock→mount_lock→inode_hash_lock→tmpfs_i_lock`（单向无反向，见 [kernel_lock.md](kernel_lock.md)）。
 
 ---
 

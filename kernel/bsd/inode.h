@@ -16,9 +16,9 @@
 #define INODE_REGULAR 1
 #define INODE_DIR 2
 #define INODE_DEV 3
+#define INODE_SOCKET 4
 
 struct inode;
-struct file;
 struct kstat;
 
 /* per-inode 行为表(对齐 Linux struct inode_operations,裁剪子集)。
@@ -43,8 +43,9 @@ struct inode {
   int nlink;
   refcount_t i_count;
   spinlock i_lock;
-  void *i_priv;              /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
-  const struct inode_operations *i_op; /* 行为表(iget 出口挂);未挂则 dispatch 返 -ENOSYS/-EACCES */
+  void *i_priv; /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
+  const struct inode_operations
+      *i_op; /* 行为表(iget 出口挂);未挂则 dispatch 返 -ENOSYS/-EACCES */
   struct shm *shm;           /* INODE_DEV -> shared memory (NULL = no SHM) */
   struct mount_entry *mount; /* owning mount (set by sys_open lookup) */
   wait_queue_head *wq; /* ringbuf-backed: shared wq for epoll/poll waiters */

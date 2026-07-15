@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syscall.h>
 #include <unistd.h>
 
 #include <sys/stat.h>
@@ -304,11 +304,11 @@ char *realpath(const char *path, char *resolved) {
 }
 
 int mknod(const char *path, mode_t mode, dev_t dev) {
-  (void)path;
-  (void)mode;
-  (void)dev;
-  errno = ENOSYS;
-  return -1;
+  if (!path) {
+    errno = EFAULT;
+    return -1;
+  }
+  return sys_mknod(path, (uint32_t)mode, (uint64_t)dev);
 }
 
 /* POSIX functions referenced by upstream libdrm's device-enumeration and

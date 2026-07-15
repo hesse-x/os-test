@@ -52,12 +52,15 @@ struct dir_context {
 
 struct kstat;
 struct mount_entry; /* forward: struct fstype.mount_root takes mount_entry*,
-                      * defined below struct fstype */
+                     * defined below struct fstype */
 
 struct fstype {
   const char *name; /* "fat32" / "devtmpfs" / "sysfs" */
-  struct inode *(*mount_root)(struct mount_entry *m); /* 返回挂载点根 inode(已 inode_get) */
-  ssize_t (*getdents)(struct inode *dir, struct dir_context *ctx); /* fops 层 per-inode,不进 i_op */
+  struct inode *(*mount_root)(
+      struct mount_entry *m); /* 返回挂载点根 inode(已 inode_get) */
+  ssize_t (*getdents)(
+      struct inode *dir,
+      struct dir_context *ctx); /* fops 层 per-inode,不进 i_op */
   /* 重构后 lookup/mkdir/unlink/rmdir/stat 全局回调删除,改走 i_op。 */
 };
 

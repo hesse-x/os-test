@@ -183,7 +183,7 @@ Xcore 层直接处理的 syscall：
 **启动初始化**：
 1. xcore_init(boot_info) — serial → mem → ACPI → ISR → KASAN/slab → RCU → sig → proc → SMP
 2. driver_init() — PCI 枚举 → driver_pci_match → 各驱动 init → serial_device_init
-3. bsd_init() — VFS/FAT32/inode/page_cache/devtmpfs → bsd_proc 初始化
+3. bsd_init() — VFS/FAT32/inode/page_cache/devtmpfs/sysfs/tmpfs → bsd_proc 初始化
 4. create_idle_process(BSP) → 从 AHCI 加载 init.elf → 切入用户态
 
 **syscall 路径**：
@@ -214,6 +214,8 @@ kernel/bsd/
   inode.c / inode.h    — inode cache（hash 表+引用计数+inode_put）
   page_cache.c / page_cache.h — 4KB page cache（LRU淘汰+写回）
   devtmpfs.c / devtmpfs.h — /dev/ 内存伪文件系统（设备节点注册+open）
+  tmpfs.c / tmpfs.h     — /run tmpfs 内存文件系统（目录树+文件内容+i_op/fops，承载 udevd db/socket）
+  sysfs.c / sysfs.h     — /sys 伪文件系统（属性树+ringbuf 事件流）
   elf_loader.c / elf_loader.h — ELF 加载器
   socket.c / socket.h  — AF_UNIX SOCK_STREAM + SCM_RIGHTS
   netlink.c / netlink.h — AF_NETLINK 多播事件通知（uevent 广播 + group 注册表）
@@ -359,7 +361,7 @@ kernel/driver/
 | Target | 源文件 | 依赖 |
 |--------|--------|------|
 | xcore_obj | xcore init/sched/trap/ipc/log/rcu/acpi + mem/ | arch_x64, kernel_mem |
-| bsd_obj | bsd init/syscall/proc/signal/vfs/fat32/inode/page_cache/devtmpfs/socket/pty/elf_loader | xcore_obj |
+| bsd_obj | bsd init/syscall/proc/signal/vfs/fat32/inode/page_cache/devtmpfs/sysfs/tmpfs/socket/pty/elf_loader | xcore_obj |
 | driver_obj | driver init/registry/ahci/xhci/pci/display/serial/blk_dev | xcore_obj, bsd_obj (devtmpfs) |
 
 链接顺序：arch_x64 → kernel_mem → xcore_obj → bsd_obj → driver_obj

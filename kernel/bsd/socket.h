@@ -70,6 +70,10 @@ typedef struct unix_sock {
   // Bind path (empty = unbound/anonymous)
   char sun_path[108];
 
+  struct inode
+      *bind_inode; /* VFS bind 路径：socket inode 引用（NULL=哈希表占名） */
+  pid_t owner_pid; /* bind 进程 pid（VFS 路径用，对齐 bind_entry.owner_pid） */
+
   wait_queue_head *wq; // 惰性分配，epoll 等待者挂此
 } unix_sock;
 

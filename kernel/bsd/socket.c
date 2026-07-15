@@ -12,10 +12,13 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/file_poll.h"
+#include "kernel/bsd/inode.h"
+#include "kernel/bsd/mount.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/socket.h"
 #include "kernel/bsd/types.h"
+#include "kernel/bsd/vfs.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
@@ -30,6 +33,7 @@
 #include <xos/netlink.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
+#include <xos/stat.h>
 
 // ===================== Global socket lock =====================
 spinlock socket_lock = SPINLOCK_INIT;
@@ -45,8 +49,8 @@ static uint32_t unix_hash(const char *path) {
   return h % UNIX_HASH_SIZE;
 }
 
-int unix_bind_lookup(const char *sun_path, struct unix_sock **out,
-                     pid_t *owner_pid) {
+static int unix_bind_lookup_hash(const char *sun_path, struct unix_sock **out,
+                                 pid_t *owner_pid) {
   uint32_t h = unix_hash(sun_path);
   for (struct unix_bind_entry *e = unix_bind_table[h]; e; e = e->next) {
     int i = 0;
@@ -67,8 +71,8 @@ int unix_bind_lookup(const char *sun_path, struct unix_sock **out,
   return -ENOENT;
 }
 
-int unix_bind_register(const char *sun_path, struct unix_sock *sock,
-                       pid_t owner_pid) {
+static int unix_bind_register_hash(const char *sun_path, struct unix_sock *sock,
+                                   pid_t owner_pid) {
   // Check for duplicate (already bound to some socket — not necessarily LISTEN)
   uint32_t h = unix_hash(sun_path);
   for (struct unix_bind_entry *e = unix_bind_table[h]; e; e = e->next) {
@@ -101,9 +105,103 @@ int unix_bind_register(const char *sun_path, struct unix_sock *sock,
   return 0;
 }
 
+/* ===== VFS socket inode helpers（/run tmpfs 上 mknod socket）=====
+ * 调用者持 socket_lock；本层取 mount_lock(vfs_resolve) + inode_hash_lock +
+ * tmpfs_i_lock，锁序单向 socket_lock→mount_lock→inode_hash_lock→tmpfs_i_lock，
+ * 无反向获取路径（inode_hash_lock 仅 inode.c 用，mount_lock 仅 mount.c 用）。
+ */
+
+/* VFS 路径：path_walk 父目录 + i_op->create(S_IFSOCK) 建 socket inode。
+ * 返 ERR_PTR(-errno) 失败；成功返 +1 引用 inode（i_priv 初始 NULL，待挂
+ * sock）。 */
+static struct inode *vfs_mknod_socket(const char *sun_path) {
+  char relpath[256], lastname[256];
+  struct mount_entry *m = vfs_resolve(sun_path, relpath, sizeof(relpath));
+  if (!m)
+    return ERR_PTR(-ENOENT);
+  struct inode *parent = NULL;
+  int rc = path_walk_parent(m, relpath, &parent, lastname, sizeof(lastname));
+  if (rc) {
+    if (parent)
+      inode_put(parent);
+    return ERR_PTR((long)rc);
+  }
+  if (!parent->i_op || !parent->i_op->create) {
+    inode_put(parent);
+    return ERR_PTR(-EOPNOTSUPP);
+  }
+  struct inode *ip =
+      parent->i_op->create(parent, lastname, (int)(S_IFSOCK | 0777));
+  inode_put(parent);
+  if (IS_ERR(ip))
+    return ip;
+  return ip; /* +1 引用，挂 sock 用 */
+}
+
+/* VFS 路径：path_walk 取 socket inode（+1 引用）。 */
+static struct inode *vfs_lookup_socket(const char *sun_path) {
+  char relpath[256];
+  struct mount_entry *m = vfs_resolve(sun_path, relpath, sizeof(relpath));
+  if (!m)
+    return ERR_PTR(-ENOENT);
+  struct inode *ip = path_walk(m, relpath); /* +1 */
+  if (!ip)
+    return ERR_PTR(-ENOENT);
+  return ip;
+}
+
+/* 新 register：先走 VFS（建 socket inode + 挂 sock），失败降级哈希表占名。
+ * 对齐 Linux bind 语义：路径已存在（无论是否已 bind）→ EADDRINUSE。 */
+int unix_bind_register(const char *sun_path, struct unix_sock *sock,
+                       pid_t owner_pid) {
+  struct inode *ip = vfs_mknod_socket(sun_path);
+  if (!IS_ERR(ip) && ip) {
+    /* create 成功（文件此前不存在）→ 挂 sock */
+    ip->i_priv = sock;     /* sock 挂 inode->i_priv */
+    sock->bind_inode = ip; /* 记录，unregister 时清 i_priv + inode_put */
+    sock->owner_pid = owner_pid;
+    /* 不 inode_put：bind 期间持有 inode 引用 */
+    return 0;
+  }
+  /* create 返 EEXIST：路径已存在 → 对齐 Linux 返 EADDRINUSE（非 EEXIST） */
+  if (IS_ERR(ip) && PTR_ERR(ip) == -EEXIST) {
+    return -EADDRINUSE;
+  }
+  /* 其余 VFS 失败（/run 未挂载 / path 解析失败）→ 降级哈希表占名 */
+  return unix_bind_register_hash(sun_path, sock, owner_pid);
+}
+
+/* 新 lookup：先走 VFS，失败降级哈希表。
+ * 对齐 Linux connect 语义：路径存在但未 LISTEN → -ECONNREFUSED（非 -ENOENT）。
+ */
+int unix_bind_lookup(const char *sun_path, struct unix_sock **out,
+                     pid_t *owner_pid) {
+  struct inode *ip = vfs_lookup_socket(sun_path);
+  if (!IS_ERR(ip) && ip) {
+    struct unix_sock *s = (struct unix_sock *)ip->i_priv;
+    if (s && s->state == UNIX_LISTEN) {
+      *out = s;
+      *owner_pid = s->owner_pid;
+      inode_put(ip);
+      return 0;
+    }
+    inode_put(ip);
+    /* socket 文件存在但未 LISTEN（或 i_priv 空）→ ECONNREFUSED */
+    return -ECONNREFUSED;
+  }
+  return unix_bind_lookup_hash(sun_path, out, owner_pid);
+}
+
 void unix_bind_unregister(struct unix_sock *sock) {
+  /* VFS 路径清理：清 inode->i_priv + 释放 bind 期间持有的 inode 引用。
+   * bind_inode 为 NULL 时 no-op（哈希表路径）。 */
+  if (sock->bind_inode) {
+    sock->bind_inode->i_priv = NULL;
+    inode_put(sock->bind_inode);
+    sock->bind_inode = NULL;
+  }
   if (!sock->sun_path[0])
-    return; // not bound
+    return; // not bound (哈希表路径未建 inode)
   uint32_t h = unix_hash(sock->sun_path);
   struct unix_bind_entry **pp = &unix_bind_table[h];
   while (*pp) {
@@ -183,6 +281,8 @@ struct unix_sock *unix_sock_alloc(void) {
   sock->shutdown_read = 0;
   sock->shutdown_write = 0;
   sock->sun_path[0] = '\0';
+  sock->bind_inode = NULL;
+  sock->owner_pid = -1;
   sock->wq = NULL;
   return sock;
 }
@@ -871,7 +971,7 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   if (ret != 0) {
     spin_unlock(&socket_lock);
     file_put(bf);
-    return (int64_t)(-ret);
+    return (int64_t)ret;
   }
 
   // Save sun_path in sock
@@ -981,7 +1081,13 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     struct unix_sock *child = listen_sock->backlog_head;
 
     if (!child) {
-      // No pending connections: block
+      // No pending connections: non-blocking fd → EAGAIN immediately
+      if (af->flags & O_NONBLOCK) {
+        spin_unlock(&socket_lock);
+        ret = -EAGAIN;
+        goto out;
+      }
+      // Blocking: wait with 30s timeout
       listen_sock->blocked_reader = proc->pid;
       proc->state = BLOCKED;
       proc->wait_event = WAIT_POLL;
@@ -1183,7 +1289,7 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   if (ret != 0) {
     spin_unlock(&socket_lock);
     file_put(cf);
-    return (int64_t)(-ret);
+    return (int64_t)ret;
   }
 
   if (listener->state != UNIX_LISTEN) {

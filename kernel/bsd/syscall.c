@@ -3090,6 +3090,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_mount(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_DEV_SET_META:
     return sys_dev_set_meta(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_MKNOD:
+    return sys_mknod(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) implemented in phase 3b,
   // this phase returns -ENOSYS
   default:

@@ -16,7 +16,7 @@ VFS 路径分发通过 `mount_table` + 最长前缀匹配实现。`/`（FAT32）
 | 4 | 目录枚举模型 | `dir_context` + `dir_emit`（对齐 Linux） | fstype 回调只 emit `(name, ino, d_type)`，不碰 `dirent64` 布局；`sys_getdents` 负责 buffer 管理和 offset 写回 |
 | 5 | fd-I/O 不改 | 仍走 `switch(f->type)` 分发 | fd 打开后 I/O 与路径无关，mount 框架只负责路径解析到 inode，不引入 `file_operations` 分发 |
 | 6 | devtmpfs 设备 fd 创建 | `sys_open` 命中 `/dev` 且 relpath 非空时直调 `devtmpfs_open`（不走 `fs->lookup`） | 设备 fd 需为 FD_DEV 并执行 `ops->open`（ptmx/serial 等），通用 lookup 路径无法满足 |
-| 7 | devtmpfs ino | `inode_create(next_dev_ino++, ...)`，递增分配（已修复：见 VFS 重构 §3.5） | devtmpfs inode 不参与 FAT32 cluster 编号空间；`st_ino` 递增唯一 |
+| 7 | devtmpfs ino | `inode_create(next_dev_ino++, ...)`，递增分配（已修复：见 [vfs.md](vfs.md) i_op 层节） | devtmpfs inode 不参与 FAT32 cluster 编号空间；`st_ino` 递增唯一 |
 | 8 | mount_lock 作用域 | 查询侧拷指针后即放锁，回调在锁外执行 | 避免"持锁遍历 + 回调内再取锁"死锁 |
 | 9 | SYS_MOUNT 权限 | 不检查 | 当前 OS 无用户/capability 模型，所有进程等权；`flags`/`data` 预留 |
 | 10 | FAT32 单实例限制 | 卷几何用文件级 static 全局 | 只挂一个根 FAT32 场景足够；多实例需移到 per-mount `fat32_sb` |
@@ -24,14 +24,14 @@ VFS 路径分发通过 `mount_table` + 最长前缀匹配实现。`/`（FAT32）
 ### 核心数据结构
 
 **struct fstype**（kernel/bsd/mount.h : fstype）
-  name : const char* — "fat32" / "devtmpfs" / "sysfs"
+  name : const char* — "fat32" / "devtmpfs" / "sysfs" / "tmpfs"
   mount_root : inode* (*)(void) — 返回挂载根 inode（已 iget + i_op 挂载），VFS 挂载时调用
   getdents : ssize_t (*)(inode *dir, dir_context *ctx) — 目录枚举，逐条 dir_emit
 
 **struct mount_entry**（kernel/bsd/mount.h : mount_entry）
   mntpoint : char[64] — 挂载点绝对路径（"/" / "/dev" / "/sys"）
   fs : fstype* — 所属文件系统类型
-  fs_data : void* — 挂载私有数据（fat32/devtmpfs 为 NULL）
+  fs_data : void* — 挂载私有数据（fat32/devtmpfs/tmpfs 为 NULL；sysfs 为 sysfs 根节点）
   in_use : bool
 
 **struct dir_context**（kernel/bsd/mount.h : dir_context）
@@ -60,10 +60,13 @@ VFS 路径分发通过 `mount_table` + 最长前缀匹配实现。`/`（FAT32）
 
 **挂载初始化** `vfs_init()`（kernel/bsd/vfs.c : vfs_init）：
 1. `mount_init()` 清空 `mount_table`
-2. 扫描 AHCI 端口，`fat32_init()` 成功后 `register_fstype(&fat32_fstype)` + `register_fstype(&devtmpfs_fstype)`
+2. 扫描 AHCI 端口，`fat32_init()` 成功后 `register_fstype` 注册 fat32 / devtmpfs / sysfs / tmpfs 四个 fstype，`sysfs_init()`
 3. `mount_internal(&fat32_fstype, "/")` — 内核内部挂载 FAT32 到根
-4. `fat32_stat("/dev")` 不存在则 `fat32_mkdir("/dev")` — 在 FAT32 根建真实目录项，使 `getdents("/")` 可见 `dev`
-5. `mount_internal(&devtmpfs_fstype, "/dev")` — 内核内部挂载 devtmpfs
+4. `fat32_stat("/dev")` 不存在则 `fat32_mkdir("/dev")`（FAT32 非幂等，先 stat 防重复建簇）→ `mount_internal(&devtmpfs_fstype, "/dev")`
+5. `fat32_stat("/sys")` 不存在则 `fat32_mkdir("/sys")` → `mount_internal(&sysfs_fstype, "/sys", sysfs_root_node())`
+6. `fat32_stat("/run")` 不存在则 `fat32_mkdir("/run")` → `mount_internal(&tmpfs_fstype, "/run")`
+
+FAT32 根的 `/dev`/`/sys`/`/run` 宿主目录仅为 `getdents("/")` 可见性，实际内容由挂载的 fs 提供（挂载点穿越，`vfs_resolve` 最长前缀匹配）。
 
 **sys_getdents**（kernel/bsd/vfs.c : sys_getdents）：
 1. 校验 fd 为 FD_DIR，取 `ip = f->inode`
@@ -99,6 +102,11 @@ VFS 路径分发通过 `mount_table` + 最长前缀匹配实现。`/`（FAT32）
 - `mount_root`：iget 根 dir inode + 挂 `sysfs_dir_iop`，返回根 inode
 - `getdents`：emit sysfs 顶级 class 子目录
 - 属性查找/getattr 由 per-inode `sysfs_dir_iop->lookup`/`sysfs_file_iop->getattr` 分发
+
+**tmpfs_fstype**（kernel/bsd/tmpfs.c : tmpfs_fstype）：
+- `mount_root`：iget 根 dir inode + 挂 `tmpfs_dir_iop`，返回根 inode（首次建 `tmpfs_root_inode`，后续 inode_get 复用）
+- `getdents`：遍历根/目录 inode 的 children 链表 `dir_emit`（DT_DIR/DT_REG/DT_SOCK）
+- create/mkdir/unlink/rmdir/lookup/getattr/setattr 由 per-inode `tmpfs_dir_iop`/`tmpfs_file_iop` 分发；详见 [vfs.md](vfs.md) tmpfs 节
 
 ### 系统调用
 
@@ -137,9 +145,9 @@ VFS 路径分发通过 `mount_table` + 最长前缀匹配实现。`/`（FAT32）
 |------|------|--------|
 | sysfs 挂载占位 | `mount(NULL, "/sys", "sysfs", 0, NULL)` 可成功，内容见 sysfs 方案 | 中 |
 | SYS_UMOUNT | `mount_table` 结构已预留 remove 路径，后续可加 umount2 syscall | 低 |
-| devtmpfs ino 唯一化 ✅ | 已修复：`inode_create(next_dev_ino++, ...)`（VFS 重构 §3.5），`st_ino > 0` | — |
+| devtmpfs ino 唯一化 ✅ | 已修复：`inode_create(next_dev_ino++, ...)`（见 [vfs.md](vfs.md) i_op 层节），`st_ino > 0` | — |
 | devtmpfs getdents 子目录枚举 | 当前 `devtmpfs_getdents` 只 emit 顶级目录和顶级设备，`opendir("/dev/dri")` 无法枚举 `card0`。需按 `dir + "/"` 前缀过滤直接子条目 | 中 |
-| VFS 逐组件 path_walk ✅（基础） | 已实现 `path_walk`/`path_walk_parent` 逐组件 lookup（VFS 重构 R2）。无 symlink 场景下与 Linux 等价。引入 symlink 后需加 `follow_symlink` + `follow_dotdot` 穿越挂载边界 | 低 |
+| VFS 逐组件 path_walk ✅（基础） | 已实现 `path_walk`/`path_walk_parent` 逐组件 lookup（见 [vfs.md](vfs.md) i_op 层节）。无 symlink 场景下与 Linux 等价。引入 symlink 后需加 `follow_symlink` + `follow_dotdot` 穿越挂载边界 | 低 |
 | dentry cache | 每次 open 读磁盘解析路径，添加 `(path, inode)` hash + LRU 缓存 | 中 |
 | mount 权限检查 | 当前无用户/capability 模型，`sys_mount` 不检查权限。引入权限体系时在入口加门控，ABI 不变 | 低 |
 | FAT32 多实例 | 卷几何用文件级 static 全局，只能挂一个 FAT32 实例。多实例需移到 per-mount `struct fat32_sb` | 低 |

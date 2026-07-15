@@ -14,6 +14,13 @@
 static struct inode *inode_hash_table[INODE_HASH_SIZE];
 static spinlock inode_hash_lock = SPINLOCK_INIT;
 static uint32_t next_dev_ino = 0x80000000;
+/* ino 段分区（全局 hash 唯一）：
+ *   FAT32     cluster 派生      (< 0x80000000)
+ *   devtmpfs  next_dev_ino      (0x80000000+, 设备/目录)
+ *   tmpfs     next_tmpfs_ino    (0xC0000000+, 内存 fs 文件/socket)
+ * 注意：inode_create 对 INODE_DIR 强制走 next_dev_ino 自增（忽略调用者 ino），
+ * 故 tmpfs 目录 inode 落在 dev 段；tmpfs 文件/socket inode 用调用者传入的
+ * 0xC0000000+ ino（走 else 分支保留）。各 fs 自维护计数器，全局 hash 去重。 */
 
 static unsigned inode_hash(uint32_t ino) { return ino & (INODE_HASH_SIZE - 1); }
 
@@ -54,9 +61,10 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
    * collided here); the final hashed ino must never be 0. */
   ASSERT(ip->ino != 0);
   ip->size = size;
-  ip->mode = (type == INODE_DIR)   ? 0040755
-             : (type == INODE_DEV) ? 0020000
-                                   : 0100644;
+  ip->mode = (type == INODE_DIR)      ? 0040755
+             : (type == INODE_DEV)    ? 0020000
+             : (type == INODE_SOCKET) ? 0140000
+                                      : 0100644;
   ip->nlink = 1;
   refcount_set(&ip->i_count, 1);
   ip->i_lock = SPINLOCK_INIT;
@@ -117,9 +125,10 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
   ip->type = type;
   ip->ino = (type == INODE_DEV) ? next_dev_ino++ : ino;
   ip->size = size;
-  ip->mode = (type == INODE_DIR)   ? 0040755
-             : (type == INODE_DEV) ? 0020000
-                                   : 0100644;
+  ip->mode = (type == INODE_DIR)      ? 0040755
+             : (type == INODE_DEV)    ? 0020000
+             : (type == INODE_SOCKET) ? 0140000
+                                      : 0100644;
   ip->nlink = 1;
   refcount_set(&ip->i_count, 1);
   ip->i_lock = SPINLOCK_INIT;

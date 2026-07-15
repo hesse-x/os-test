@@ -228,7 +228,7 @@ fd-based 变体：notify_fd(fd) — 从 fd_table 查 target_pid 后调 sys_notif
 | 9 | SCM_RIGHTS 安装时机 | Lazy（recvmsg 时安装 fd） | 与 Linux 对齐。skb 持有 fd 资源引用 |
 | 10 | skb 大小 | 动态 kmalloc，软上限 64KB | 防恶意 OOM |
 | 11 | 锁 | 全局 socket_lock（spinlock_t，no irqsave） | 锁顺序：procs_lock → socket_lock → scheduler_lock |
-| 12 | Socket 命名 | 内核名字空间表（hash map: path → unix_sock*） | 不依赖文件系统（FAT32 无 socket inode） |
+| 12 | Socket 命名 | bind 在 `/run` tmpfs 上 mknod 建 INODE_SOCKET inode（对齐 Linux `vfs_mknod(SOCKFS)`），sock 挂 inode->i_priv；`/run` 未挂载时降级哈希表占名 | VFS socket 文件 stat/ls 可见，connect 走 path 解析；哈希表保留作降级 |
 
 ### 数据结构
 
@@ -268,10 +268,10 @@ consumed 字段用于 SOCK_STREAM 部分读：skb 留在队列中直到 consumed
 
 ### 连接建立流程
 
-- socket()：分配 unix_sock（state=UNIX_FREE, ref_count=1, peer=-1），返回 FD_SOCKET fd
-- bind()：拷贝 sun_path，注册到内核名字空间表
+- socket()：分配 unix_sock（state=UNIXFREE, ref_count=1, peer=-1），返回 FD_SOCKET fd
+- bind()：拷贝 sun_path → `vfs_mknod_socket`（`path_walk_parent` + `i_op->create(S_IFSOCK)`）在 `/run` tmpfs 建 INODE_SOCKET inode → `ip->i_priv = sock` 挂 sock + 记 `sock->bind_inode`（bind 期间持有 inode 引用）；路径已存在返 -EADDRINUSE；`/run` 未挂载 / path 解析失败降级 `unix_bind_register_hash` 哈希表占名
 - listen()：state → UNIX_LISTEN
-- connect()：查 listener（UNIX_LISTEN），未找到→-ENOENT，backlog 满→-ECONNREFUSED；创建 child（UNIX_CONNECTED），双向设 peer/peer_sock，挂到 listener backlog，唤醒 blocked_reader
+- connect()：`vfs_lookup_socket`（path_walk 取 socket inode）→ 从 i_priv 取 listener；UNIX_LISTEN 命中建立连接，未 LISTEN 返 -ECONNREFUSED，未找到返 -ENOENT；backlog 满 -ECONNREFUSED；VFS 失败降级哈希查找。创建 child（UNIX_CONNECTED），双向设 peer/peer_sock，挂到 listener backlog，唤醒 blocked_reader
 - accept()：从 backlog 取 child，分配 fd，ref_count++，返回新 fd
 
 ### socketpair
@@ -322,6 +322,12 @@ SHUT_RDWR：两者都做
 
 **资源保活**：skb 入队到 recvmsg 期间，发送方 close 或 exit 不释放 skb 引用到的资源（引用计数保证）。proc_reap 清理时遍历未消费 skb 释放引用。
 
+### socket inode 生命周期 + unlink-while-open
+
+bind 走 VFS 建 INODE_SOCKET inode（见上方 bind 流程），sock 挂 `inode->i_priv` 并 `inode_get` 持引用（i_count+1）→ socket inode 在 bind 期间不被释放。`unix_bind_unregister`（sock close）清 `bind_inode->i_priv = NULL` + `inode_put(bind_inode)` 平衡 bind 时的 get。
+
+这天然对齐 Linux **unlink-while-open** 语义：`tmpfs_unlink` 只摘目录项（从父 children 链表移除）不释放 socket inode（仍有 bind 持有的 i_count 引用）；client connect 此时若已 path_walk 拿到 inode（短暂 inode_get），仍能从 i_priv 取到 sock；直到 unregister 清 i_priv + inode_put，i_count 归 0 才 kfree。socket inode 落点与 mknod 细节见 [vfs.md](vfs.md) AF_UNIX socket inode 节。
+
 ### EOF / EPIPE 行为
 
 | 场景 | 行为 |
@@ -368,6 +374,8 @@ SHUT_RDWR：两者都做
 锁顺序：procs_lock → socket_lock → scheduler_lock
 
 wake_process 在 socket_lock 外调用：sendmsg/recvmsg 操作完 skb 队列后，先释放 socket_lock，再调 wake_process。避免 socket_lock → scheduler_lock 逆序。
+
+**bind→VFS 锁嵌套**：bind/connect 走 VFS 建/查 socket inode 时，`unix_bind_register`/`unix_bind_lookup` 在持 `socket_lock` 下调 `vfs_mknod_socket`/`vfs_lookup_socket`，内部取 `mount_lock`（vfs_resolve）→ `inode_hash_lock`（inode_create/get）→ `tmpfs_i_lock`（tmpfs children 链表），锁序单向 `socket_lock → mount_lock → inode_hash_lock → tmpfs_i_lock`，无反向获取路径。详见 [kernel_lock.md](kernel_lock.md)。
 
 ### libc 封装
 
