@@ -29,8 +29,6 @@
 
 struct shm;
 
-#define MAX_DEV_ENTRIES 32
-
 struct dev_entry {
   char name[32];
   struct inode *ip;
@@ -44,13 +42,9 @@ struct dev_dir {
   struct dev_dir *next;
 };
 
-static struct dev_dir dev_dirs[16]; /* max 16 subdirectories */
 static struct dev_dir *dir_list = NULL;
-static int dir_count = 0;
 
-static struct dev_entry dev_entries[MAX_DEV_ENTRIES];
 static struct dev_entry *dev_list = NULL;
-static int dev_count = 0;
 static spinlock devtmpfs_lock = SPINLOCK_INIT;
 
 static bool devtmpfs_initialized = false;
@@ -69,19 +63,7 @@ void devtmpfs_init(void) {
   }
   spin_lock(&devtmpfs_lock);
   dev_list = NULL;
-  dev_count = 0;
   dir_list = NULL;
-  dir_count = 0;
-  for (int i = 0; i < MAX_DEV_ENTRIES; i++) {
-    dev_entries[i].name[0] = '\0';
-    dev_entries[i].ip = NULL;
-    dev_entries[i].next = NULL;
-  }
-  for (int i = 0; i < 16; i++) {
-    dev_dirs[i].name[0] = '\0';
-    dev_dirs[i].ip = NULL;
-    dev_dirs[i].next = NULL;
-  }
   spin_unlock(&devtmpfs_lock);
 
   /* Create dedicated root inode for /dev (distinguished from subdirectories).
@@ -110,31 +92,26 @@ static struct dev_dir *devtmpfs_get_or_create_dir(const char *name, int len) {
   struct dev_dir *d = devtmpfs_find_dir(tmp);
   if (d)
     return d;
-  if (dir_count >= 16)
+  struct inode *ip = devtmpfs_iget(INODE_DIR);
+  if (!ip)
     return NULL;
-  /* find free slot */
-  for (int i = 0; i < 16; i++) {
-    if (dev_dirs[i].ip == NULL) {
-      struct inode *ip = devtmpfs_iget(INODE_DIR);
-      if (!ip)
-        return NULL;
-      for (int j = 0; j < len; j++)
-        dev_dirs[i].name[j] = tmp[j];
-      dev_dirs[i].name[len] = '\0';
-      dev_dirs[i].ip = ip;
-      dev_dirs[i].ip->i_priv =
-          &dev_dirs[i]; /* I5:子目录 inode 回指 dev_dir,供 lookup 取 prefix */
-      dev_dirs[i].next = dir_list;
-      dir_list = &dev_dirs[i];
-      dir_count++;
-      return &dev_dirs[i];
-    }
+  struct dev_dir *nd = kmalloc(sizeof(struct dev_dir));
+  if (!nd) {
+    inode_put(ip);
+    return NULL;
   }
-  return NULL;
+  for (int j = 0; j < len; j++)
+    nd->name[j] = tmp[j];
+  nd->name[len] = '\0';
+  nd->ip = ip;
+  nd->ip->i_priv = nd; /* I5:子目录 inode 回指 dev_dir,供 lookup 取 prefix */
+  nd->next = dir_list;
+  dir_list = nd;
+  return nd;
 }
 
 /* devtmpfs_iget:封装 inode_create + 挂 i_op。devtmpfs inode 由
- *  dev_entries[].ip/dev_dirs[].ip 持基准 ref 常驻。 */
+ *  dev_list/dev_dir 链表节点(kmalloc 动态分配)的 ip 持基准 ref 常驻。 */
 static const struct inode_operations devtmpfs_dir_iop;
 static const struct inode_operations devtmpfs_dev_iop;
 
@@ -319,8 +296,6 @@ struct inode *devtmpfs_lookup(const char *name) {
 
 int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
   WARN_ON(!devtmpfs_initialized); // catch order bugs: create before init
-  if (dev_count >= MAX_DEV_ENTRIES)
-    return -ENOMEM;
 
   /* Check if already exists (full path) */
   if (devtmpfs_lookup(name))
@@ -339,19 +314,6 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
 
   spin_lock(&devtmpfs_lock);
 
-  /* Find free slot */
-  int slot = -1;
-  for (int i = 0; i < MAX_DEV_ENTRIES; i++) {
-    if (dev_entries[i].ip == NULL) {
-      slot = i;
-      break;
-    }
-  }
-  if (slot < 0) {
-    spin_unlock(&devtmpfs_lock);
-    return -ENOMEM;
-  }
-
   /* Create inode */
   struct inode *ip = devtmpfs_iget(INODE_DEV);
   if (!ip) {
@@ -367,14 +329,19 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
   }
 
   /* Fill entry — store full path including any '/' */
+  struct dev_entry *ne = kmalloc(sizeof(struct dev_entry));
+  if (!ne) {
+    inode_put(ip);
+    spin_unlock(&devtmpfs_lock);
+    return -ENOMEM;
+  }
   int i;
   for (i = 0; name[i] && i < 31; i++)
-    dev_entries[slot].name[i] = name[i];
-  dev_entries[slot].name[i] = '\0';
-  dev_entries[slot].ip = ip;
-  dev_entries[slot].next = dev_list;
-  dev_list = &dev_entries[slot];
-  dev_count++;
+    ne->name[i] = name[i];
+  ne->name[i] = '\0';
+  ne->ip = ip;
+  ne->next = dev_list;
+  dev_list = ne;
 
   spin_unlock(&devtmpfs_lock);
   printk(LOG_INFO, "devtmpfs: created /dev/%s\n", name);
@@ -482,6 +449,7 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
 }
 
 void devtmpfs_cleanup_pid(pid_t pid) {
+  struct dev_entry *to_free = NULL; /* pending free 链(复用 e->next 串联) */
   spin_lock(&devtmpfs_lock);
   struct dev_entry **pp = &dev_list;
   while (*pp) {
@@ -513,18 +481,25 @@ void devtmpfs_cleanup_pid(pid_t pid) {
         /* Free inode */
         inode_put(e->ip);
         e->ip = NULL;
-        e->name[0] = '\0';
-        dev_count--;
+        e->next = to_free; /* 串入 pending(复用 next,节点已脱离 dev_list) */
+        to_free = e;
         continue;
       }
     }
     pp = &e->next;
   }
   spin_unlock(&devtmpfs_lock);
+
+  /* 锁外批量 kfree 节点(对齐 tmpfs_unlink 回收纪律) */
+  while (to_free) {
+    struct dev_entry *n = to_free->next;
+    kfree(to_free);
+    to_free = n;
+  }
 }
 
 void devtmpfs_remove(const char *name) {
-  bool removed = false;
+  struct dev_entry *victim = NULL;
   spin_lock(&devtmpfs_lock);
   struct dev_entry **pp = &dev_list;
   while (*pp) {
@@ -534,16 +509,16 @@ void devtmpfs_remove(const char *name) {
       if (e->ip)
         inode_put(e->ip);
       e->ip = NULL;
-      e->name[0] = '\0';
-      dev_count--;
-      removed = true;
+      victim = e;
       break;
     }
     pp = &e->next;
   }
   spin_unlock(&devtmpfs_lock);
 
-  if (removed && devtmpfs_initialized && nl_is_initialized())
+  kfree(victim); /* 锁外回收(对齐 tmpfs_unlink 回收纪律) */
+
+  if (victim && devtmpfs_initialized && nl_is_initialized())
     nl_uevent_broadcast("remove", name, "misc");
 }
 

@@ -120,6 +120,12 @@ if(TEST)
     add_user_dyn_elf(test_udevd_db C SOURCES test_udevd_db.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
 endif()
 
+# devtmpfs 设备表动态化回归(work2_design §5.5.1)— TEST 门控,不调 udev_*,
+# 只调 sys_dev_create/open/opendir(走 libc + syscall),无需编入 udev.c。
+if(TEST)
+    add_user_dyn_elf(test_dev_vfs_dynamic C SOURCES test_dev_vfs_dynamic.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+endif()
+
 # VFS i_op dispatch + inode refcount tests (TEST build only)
 if(TEST)
     add_user_dyn_elf(test_vfs_dispatch C SOURCES test_vfs_dispatch.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)

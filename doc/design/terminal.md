@@ -67,7 +67,7 @@ winsize 与 Linux ABI 对齐：ws_row/ws_col/ws_xpixel/ws_ypixel。
 
 #### PTY 全局表
 
-`pty_table[MAX_PTY=16]` + `pty_alloc_lock` — 最多 16 个 PTY 对。devtmpfs MAX_DEV_ENTRIES=32 预留一半给其他设备。
+`pty_table[MAX_PTY=16]` + `pty_alloc_lock` — 最多 16 个 PTY 对。devtmpfs 设备表已 kmalloc 动态化(无静态上限),PTY 数仅受 MAX_PTY 约束。
 
 #### /dev/ptmx 创建流程
 

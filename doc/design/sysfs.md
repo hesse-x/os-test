@@ -85,7 +85,7 @@
 
 | 锁 | 类型 | 保护范围 |
 |----|------|----------|
-| devtmpfs_lock | spinlock | dev_entries + sysfs 节点树增删 |
+| devtmpfs_lock | spinlock | dev_list/dir_list 链表(kmalloc 动态节点) + sysfs 节点树增删 |
 | fat_lock | — | sysfs 与 FAT32 无交集，不涉及 fat 锁 |
 
 sysfs 节点树在 `devtmpfs_lock` 下增删；show 回调读初始化后不变的只读字段，无额外锁。

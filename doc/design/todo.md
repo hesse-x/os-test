@@ -227,9 +227,16 @@ udevd 设备数据库 + 规则引擎 + coldplug **已落地**（对齐 Linux `in
 
 延后项（均记 [udev.md](udev.md) 待完成项）：
 - monitor 管道（shim `udev_monitor_*` 仍 no-op stub）——AF_UNIX accept + pipe + SCM_RIGHTS 转发 uevent，完整设计见根目录 `udev_design.md`
-- dev_entries 动态化（B5，`dev_entries[32]` + `dev_dirs[16]` 静态数组 → kmalloc 链表）
 - B6 ID_INPUT_MOUSE/TOUCHPAD/SEAT 全类——依赖 evdev 真实多设备 caps，做合成器（Wayland）时连同真实多输入设备一起做
 - shim 枚举路径对齐 db（`device_is_keyboard` 改走 db 查 property）、uevent 可读 + 接受 remove/change、coldplug 扫 /sys/devices 全树
+
+## 内核限制与已知缺陷（静默截断 / 固定上限类）
+
+均为既有现状，非任一在制方案引入，但会阻塞大缓冲/大设备场景。按修复成本排序：
+
+- `devtmpfs_getdents` 不支持分批续传（`kernel/bsd/devtmpfs.c:556`）：`ctx->pos != 0` 即返 0（`:559`），且末尾无条件 `ctx->pos = (uint64_t)-1` 标 EOF（`:642`）。`dir_emit` buffer 满 break 时直落 EOF 覆盖，故"装得下则一次返回全部、装不下则静默丢失剩余条目"。libc `readdir` 用 4096 buffer 分批拉（`user/lib/file.cc:626`），`/dev` 条目总 reclen 超 4096 即漏设备。**根因**：pos 当 EOF 标记而非"上次发到第几个节点"的游标。**修复**：pos 改节点序号游标，emit 成功 pos++、buffer 满则 break 存回 pos、下次从 pos 续传。**障碍**：root `/dev` 是两段遍历（先 `dir_list` 发子目录 `:588`、再 `dev_list` 发顶层设备 `:598`），跨段续传需统一编号（dir 段 [0,dir_count) + dev 段 [dir_count,...)），但 dev_count/dir_count 已随 devtmpfs 动态化删除——改用节点指针当 pos 或独立段计数。work2_design §3.6 明令 getdents 零改动，此为独立改进。发现于 devtmpfs 动态化 `test_dev_vfs_dynamic`（90 条 ≈ 3600 字节逼近 4096 边界）。
+- `sys_read`/`sys_write` 单次上限 65536（`kernel/bsd/syscall.c:1306` read / `:960` write）：`if (len > 65536) len = 65536;` 静默截断，用户态不检查返回值会以为读/写全。阻塞大 uevent、大 props、大文件单次 I/O 场景。**修复**：移除截断改为循环 I/O 或按调用方需求放宽（对齐 Linux 无单次上限）。注意 socket/msg 已有同源 64KB 限制（`kernel/bsd/socket.h:17 MAX_SOCKET_DATA`、`kernel/xcore/ipc.c:844/:928`），属 IPC 层独立约束，不与此处 read/write 同步改。
+- fd 表固定上限 `MAX_FD`（`kernel/bsd/types.h:26` `#define MAX_FD 128`，进程 `files->fd_table[MAX_FD]` 固定数组 `:95`）：fd 数超 128 即 `EMFILE`，无法运行时扩张。对齐 Linux 动态 fd 表（`files_struct` + `fdtable` 可扩容 `krealloc`）。**修复**：fd_table 改 `krealloc` 动态数组 + 容量翻倍（tmpfs `ti->data`/`ti->cap` 模式可参考，`kernel/bsd/tmpfs.c:161`）。与 devtmpfs 动态化同类（静态数组→动态），但属进程 fd 子系统独立改进。
 
 ## Sprint 1-2: POSIX 扩展波
 
