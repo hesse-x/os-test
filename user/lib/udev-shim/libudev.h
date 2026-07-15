@@ -19,6 +19,10 @@ struct udev {
   int refcount;
 };
 
+#define UDEV_DEV_PROPS_MAX 32
+#define UDEV_PROP_KEYLEN 32
+#define UDEV_PROP_VALLEN 64
+
 struct udev_device {
   int refcount;
   char devnode[256];
@@ -26,8 +30,21 @@ struct udev_device {
   char sysname[64];
   char subsystem[32];
   char devtype[32];
+  char
+      action[16]; /* monitor device 的 ACTION(add/remove/change);直读设备为空 */
   dev_t devnum;
   int initialized;
+  /* property 表(monitor device 从 pipe KV 收到的 ID_INPUT_*、ID_SEAT 等)。
+   * 对齐 Linux libudev 的 properties hashmap——monitor 路径 property 随 uevent
+   * KV 到达 client,存 device 内存,get_property_value 查此表(不查 db)。
+   * 数组代替 hashmap:freestanding user 态无现成 hashmap。32 槽覆盖
+   * ID_INPUT*(12) + ID_SEAT + 少数 WL_*、MOUSE_DPI 等。nprops=0 表示无 property
+   * (直读 device,走 db fallback)。 */
+  struct {
+    char key[UDEV_PROP_KEYLEN];
+    char value[UDEV_PROP_VALLEN];
+  } props[UDEV_DEV_PROPS_MAX];
+  int nprops;
 };
 
 struct udev_list_entry {
@@ -37,7 +54,10 @@ struct udev_list_entry {
 };
 
 struct udev_monitor {
-  int fd;
+  struct udev *udev; /* udev_ref 持有,unref 时释放 */
+  int sock_fd; /* AF_UNIX conn fd(connect 后短暂持有,拿 pipe fd 后关) */
+  int pipe_fd; /* SCM_RIGHTS 收到的 pipe rd fd(get_fd 返此,可 epoll) */
+  int subscribed; /* enable_receiving 后置 1(幂等) */
 };
 
 struct udev_enumerate {

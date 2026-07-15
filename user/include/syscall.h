@@ -19,6 +19,7 @@
  * for libc internals and programs that issue syscalls directly.
  */
 
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <xos/errno.h>
@@ -32,12 +33,10 @@
 extern "C" {
 #endif
 
-// errno is returned via __errno_location() as a TLS pointer
-// (user/include/errno.h defines the errno macro). syscall.h is included by libc
-// internals; declare
-// __errno_location here so inline wrappers can write errno.
-int *__errno_location(void);
-#define errno (*__errno_location())
+// errno (the macro + __errno_location decl) is provided by <errno.h>, included
+// above — libc internals get it from there rather than redefining it.
+// Redefining errno here made iwyu oscillate ("add syscall.h / remove errno.h" ↔
+// reverse) because errno then had two canonical providers.
 
 #ifdef __cplusplus
 }

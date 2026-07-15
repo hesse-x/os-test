@@ -31,6 +31,21 @@
 
 #define UDEV_LISTEN_FD 3
 
+/* udevd monitor client 表(单线程,无锁)。每个 client = accept 出的 conn +
+ * udevd 为其建的 pipe(rd 给 client / wr udevd 持)。conn fd 拿到 pipe rd fd
+ * 后即关闭(§4.4 step 8),仅 pipe wr 端进 epoll(可写时排空)。 */
+#define UDEV_MAX_CLIENTS 8
+
+struct udev_client {
+  int pipe_wr; /* udevd 持有的写端(收 SCM_RIGHTS 给 client 的 rd)。<0=空闲槽 */
+  char wbuf[4096]; /* 待写 pipe 缓冲(pipe 满则丢,Q2) */
+  int wlen;        /* wbuf 已用字节 */
+};
+
+static struct udev_client udev_clients[UDEV_MAX_CLIENTS];
+
+/* 单字符进度链(§8.6 调试纪律):u=uevent a=accept c=coldplug r=remove w=write */
+
 #define EVDEV_BITS_PER_LONG (sizeof(long) * 8)
 #define NBITS(x) ((((x) - 1) / EVDEV_BITS_PER_LONG) + 1)
 #define LONG(x) ((x) / EVDEV_BITS_PER_LONG)
@@ -55,6 +70,34 @@ static int probe_listen_fd(int fd) {
   if (saved == EAGAIN)
     return fd; /* 无排队，socket activation 成立 */
   /* ENOTSOCK / EINVAL 等 → 非 listen socket */
+  return -1;
+}
+
+/* client 表初始化(全部空闲)。 */
+static void clients_init(void) {
+  for (int i = 0; i < UDEV_MAX_CLIENTS; i++)
+    udev_clients[i].pipe_wr = -1;
+}
+
+/* 分配一个空闲 client 槽,返回下标;<0 表满。 */
+static int client_alloc(void) {
+  for (int i = 0; i < UDEV_MAX_CLIENTS; i++) {
+    if (udev_clients[i].pipe_wr < 0) {
+      udev_clients[i].pipe_wr = -2; /* 占位防重入,稍后填真 fd */
+      udev_clients[i].wlen = 0;
+      return i;
+    }
+  }
+  return -1;
+}
+
+/* 通过 pipe_wr fd 反查 client 槽下标;<0 表未找到。
+ * M1+M2 暂未接入(按 index 管理即可);shim monitor 客户端(第二步)经 fd
+ * 反查时启用。标 __attribute__((unused)) 过 -Werror=unused-function。 */
+static __attribute__((unused)) int client_find_by_wr(int pipe_wr) {
+  for (int i = 0; i < UDEV_MAX_CLIENTS; i++)
+    if (udev_clients[i].pipe_wr == pipe_wr)
+      return i;
   return -1;
 }
 
@@ -151,6 +194,171 @@ int db_remove(uint32_t devnum) {
   return 0;
 }
 
+/* device 补全:收 uevent(含 name=DEVPATH)→ 构造完整 KV 写入 out(buf)。
+ * 标识 KV 由 name+subsystem 构造;property(ID_INPUT_*)查 db 取值追加(乙)。
+ * out_nul 为 out 容量。返回写入字节数(含末尾 \0 分隔),<0 跳过。
+ * KV 格式(对齐 §4.3, \0 分隔):
+ *   "<action>@<name>\0ACTION=<action>\0DEVNAME=/dev/<name>\0
+ *    DEVPATH=/sys/class/<subsys>/<name>\0SUBSYSTEM=<subsys>\0
+ *    DEVTYPE=<devtype>\0DEVNUM=<n>\0ID_INPUT=1\0...\0"
+ * db 文件格式为 KEY=VALUE\n(见 input_id_compute 写入);本函数读 db 把每行转成
+ * \0 分隔 KV 追加。 */
+static int device_complete_kv(const char *action, const char *name,
+                              const char *subsystem, const char *devtype,
+                              char *out, size_t out_nul) {
+  /* 取 devnum(三边一致 = ino)作 db key + DEVNUM 字段 */
+  char devnode[64];
+  snprintf(devnode, sizeof(devnode), "/dev/%s", name);
+  struct stat st;
+  if (stat(devnode, &st) < 0)
+    return -1;
+  uint32_t devnum = (uint32_t)st.st_rdev;
+  if (devnum == 0)
+    return -1;
+
+  int len = 0;
+#define APPEND_KV0(fmt, ...)                                                   \
+  do {                                                                         \
+    int n = snprintf(out + len, out_nul - (size_t)len, fmt, ##__VA_ARGS__);    \
+    if (n < 0 || (size_t)n >= out_nul - (size_t)len)                           \
+      return -1;                                                               \
+    len += n;                                                                  \
+  } while (0)
+
+  APPEND_KV0("%s@%s", action, name);
+  APPEND_KV0("ACTION=%s", action);
+  APPEND_KV0("DEVNAME=/dev/%s", name);
+  APPEND_KV0("DEVPATH=/sys/class/%s/%s", subsystem, name);
+  APPEND_KV0("SUBSYSTEM=%s", subsystem);
+  if (devtype && devtype[0])
+    APPEND_KV0("DEVTYPE=%s", devtype);
+  APPEND_KV0("DEVNUM=%u", devnum);
+#undef APPEND_KV0
+
+  /* 查 db 拿 property(乙)。db 文件 KEY=VALUE\n,转成 \0 分隔 KV 追加。 */
+  char dbbuf[1024];
+  ssize_t dn = db_read_all(devnum, dbbuf, sizeof(dbbuf));
+  if (dn > 0) {
+    char *line = dbbuf;
+    char *end = dbbuf + dn;
+    while (line < end) {
+      char *eol = line;
+      while (eol < end && *eol != '\n')
+        eol++;
+      int llen = (int)(eol - line);
+      if (llen > 0 && line[0] != '\0') {
+        if ((size_t)len + (size_t)llen + 1 > out_nul)
+          return -1;
+        memcpy(out + len, line, (size_t)llen);
+        len += llen;
+        out[len++] = '\0';
+      }
+      line = (eol < end) ? eol + 1 : end;
+    }
+  }
+  return len;
+}
+
+/* 把 KV(olen 字节,\0 分隔)写进每个活跃 client 的 wbuf,并尽量排空到 pipe。
+ * pipe 满则丢该 client 此事件(Q2 非阻塞)。单线程,遍历期间不改表结构。 */
+static void clients_broadcast(const char *kv, int olen) {
+  if (olen <= 0)
+    return;
+  for (int i = 0; i < UDEV_MAX_CLIENTS; i++) {
+    if (udev_clients[i].pipe_wr < 0)
+      continue;
+    struct udev_client *c = &udev_clients[i];
+    int space = (int)sizeof(c->wbuf) - c->wlen;
+    if (olen > space) {
+      /* 缓冲满:先尝试排空,再决定丢/留 */
+      int w = write(c->pipe_wr, c->wbuf, (size_t)c->wlen);
+      if (w > 0) {
+        memmove(c->wbuf, c->wbuf + w, (size_t)(c->wlen - w));
+        c->wlen -= w;
+        space = (int)sizeof(c->wbuf) - c->wlen;
+      }
+    }
+    if (olen <= space) {
+      memcpy(c->wbuf + c->wlen, kv, (size_t)olen);
+      c->wlen += olen;
+    }
+    /* 排空(非阻塞):EAGAIN 时留 wbuf 等下次 EPOLLOUT/下次广播 */
+    if (c->wlen > 0) {
+      int w = write(c->pipe_wr, c->wbuf, (size_t)c->wlen);
+      if (w > 0) {
+        memmove(c->wbuf, c->wbuf + w, (size_t)(c->wlen - w));
+        c->wlen -= w;
+      }
+    }
+  }
+}
+
+/* 前置声明:accept_client 在 coldplug_trigger 定义之前调用它(冷启动补发)。 */
+static void coldplug_trigger(void);
+
+/* accept 新 client:建单向 pipe(rd 给 client, wr udevd 持),经 conn fd 用
+ * SCM_RIGHTS 回传 pipe rd fd(§4.4)。回传后关 conn fd(connect 即订阅,Q5)。
+ * accept/pipe/sendmsg 任一失败 → 关 fd 跳过该 client。 */
+static void accept_client(int listen_fd) {
+  int cfd = accept(listen_fd, NULL, NULL);
+  if (cfd < 0)
+    return;
+
+  int pfd[2];
+  if (pipe(pfd) < 0) {
+    close(cfd);
+    return;
+  }
+  int pipe_rd = pfd[0]; /* 给 client */
+  int pipe_wr = pfd[1]; /* udevd 持 */
+
+  /* SCM_RIGHTS 回传 pipe_rd。带 1 字节 dummy data(iov 必须非空)。 */
+  char dummy = 'u';
+  struct iovec iov;
+  iov.iov_base = &dummy;
+  iov.iov_len = 1;
+  char cmsgbuf[CMSG_SPACE(sizeof(int))];
+  struct msghdr msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = cmsgbuf;
+  msg.msg_controllen = sizeof(cmsgbuf);
+  struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+  cmsg->cmsg_level = SOL_SOCKET;
+  cmsg->cmsg_type = SCM_RIGHTS;
+  cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+  memcpy(CMSG_DATA(cmsg), &pipe_rd, sizeof(int));
+
+  if (sendmsg(cfd, &msg, 0) < 0) {
+    /* 回传失败:关 pipe rd(避免泄漏),留 wr 待清理 */
+    close(pipe_rd);
+    close(pipe_wr);
+    close(cfd);
+    return;
+  }
+
+  /* 登记到 client 表 */
+  int slot = client_alloc();
+  if (slot < 0) {
+    /* 表满:关 pipe + conn,client 连接断(§8.3 accept backlog 不会满,极少) */
+    close(pipe_wr);
+    close(pipe_rd);
+    close(cfd);
+    return;
+  }
+  udev_clients[slot].pipe_wr = pipe_wr;
+
+  close(cfd); /* connect 即订阅,关 conn(§4.4 step 8) */
+  putchar('a');
+
+  /* 首个 client 补 coldplug(§4.5):为现有设备合成 add 转发给该 client。
+   * 复用 coldplug_trigger 内核重广播路径——重广播的 uevent 回到 udevd 自身
+   * netlink fd,经 handle_uevent 写各 client(含新 client),无需此处单独转发。
+   * 故此处仅再触发一次 coldplug_trigger(若设备仍在)。 */
+  coldplug_trigger();
+}
+
 /* udevd input_id builtin(user 态 C,int 代 bool)
  * 开 /dev/input/eventX 探 caps,合成键盘类 ID_INPUT_* 写 db。
  * 对齐 Linux src/udev/udev-builtin-input_id.c(键盘路径子集)。 */
@@ -235,8 +443,11 @@ static void handle_uevent_add(const char *devname /* DEVPATH=<name> */,
 }
 
 /* process_one_uevent:解析 \0 分隔 uevent payload 取 ACTION/DEVPATH/SUBSYSTEM,
- * add 则 handle_uevent_add。drain 与主循环共用,避免重复解析逻辑。返回是否
- * 为 add 事件(主循环用于单字符进度)。 */
+ * 构造完整 KV(device 补全:标识 KV + 查 db property)广播给所有 client。
+ * add → handle_uevent_add 写 db 后再补全转发;remove → 两阶段(§4.6,直接用
+ * db 快照补全转发,不在此删 db——remove 时 db 可能已被设备清理路径删,
+ * 现状无 remove 设备来源,本路径仅占位)。drain 与主循环共用。
+ * 返回是否处理了事件(主循环用于单字符进度)。 */
 static int process_one_uevent(const char *payload, int payload_len) {
   char action[16] = {0}, devname[64] = {0}, subsys[16] = {0};
   const char *pp = payload;
@@ -252,10 +463,25 @@ static int process_one_uevent(const char *payload, int payload_len) {
     pp += seg_len;
     rem -= seg_len;
   }
-  int is_add = (strcmp(action, "add") == 0 && devname[0] && subsys[0]);
-  if (is_add)
-    handle_uevent_add(devname, subsys);
-  return is_add;
+  if (!action[0] || !devname[0] || !subsys[0])
+    return 0;
+
+  /* add:先写 db(规则引擎),再补全转发。input_id 仅 input 子系统。 */
+  if (strcmp(action, "add") == 0) {
+    if (strcmp(subsys, "input") == 0)
+      handle_uevent_add(devname, subsys);
+  }
+
+  /* device 补全(标识 KV + 查 db property)→ 广播给所有 client。
+   * devtype 现状 uevent payload 不含(§3.1 仅 3 键),传 NULL → KV 不带 DEVTYPE。
+   * monitor client 据此构造 udev_device。 */
+  char kv[1024];
+  int klen = device_complete_kv(action, devname, subsys, NULL, kv, sizeof(kv));
+  if (klen > 0) {
+    clients_broadcast(kv, klen);
+    putchar(strcmp(action, "remove") == 0 ? 'r' : 'u');
+  }
+  return 1;
 }
 
 /* coldplug_trigger:对齐 Linux udevadm trigger——扫 /sys/class/input,对每个
@@ -367,6 +593,12 @@ int main(void) {
    * drain 同步处理完写 db,然后建 /run/udev/settled。须在 nl_fd 入 epoll 之后
    * (trigger 产的 uevent 入 recv_queue 不丢)且 listen_fd 注册之前(先 settle
    * 再服务)。 */
+  /* 先初始化 monitor client 表(全部空闲 pipe_wr=-1):coldplug drain 会经
+   * process_one_uevent → clients_broadcast,若表未初始化(BSS pipe_wr==0)会被
+   * <0 guard 误判为活跃槽向 fd 0(stdin)写垃圾。coldplug 启动广播本就无 client
+   * 接收(真实 coldplug 转发在 accept_client 首连时重触发),故先 init 再
+   * coldplug。 */
+  clients_init();
   coldplug_trigger();
   coldplug_drain_settle(nl_fd);
   printf("udevd: coldplug trigger done\n");
@@ -444,11 +676,22 @@ int main(void) {
         /* 解析 KV + add 处理(drain 与主循环共用 process_one_uevent) */
         process_one_uevent(payload, payload_len);
       } else if (events[i].data.fd == listen_fd) {
-        /* socket activation accept：udevd 主体方案接管 udev 协议处理；
-         * 本轮保活——accept 出连接并立即关闭占位（真实处理见 udevd 主体）。 */
-        int cfd = accept(listen_fd, NULL, NULL);
-        if (cfd >= 0)
-          close(cfd);
+        /* 新 client 连接:accept → 建 pipe → SCM_RIGHTS 回传 pipe rd fd
+         * → 首个 client 补 coldplug(§4.4/§4.5)。 */
+        accept_client(listen_fd);
+      }
+    }
+
+    /* 兜底排空:本轮可能写满 wbuf(pipe EAGAIN),尝试再排一次。
+     * 现状 pipe wr 未入 epoll EPOLLOUT,靠每次广播自排空;满则丢(Q2)。 */
+    for (int i = 0; i < UDEV_MAX_CLIENTS; i++) {
+      if (udev_clients[i].pipe_wr >= 0 && udev_clients[i].wlen > 0) {
+        struct udev_client *c = &udev_clients[i];
+        int w = write(c->pipe_wr, c->wbuf, (size_t)c->wlen);
+        if (w > 0) {
+          memmove(c->wbuf, c->wbuf + w, (size_t)(c->wlen - w));
+          c->wlen -= w;
+        }
       }
     }
   }

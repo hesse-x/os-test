@@ -112,6 +112,13 @@ if(TEST)
     add_user_dyn_elf(test_libudev C SOURCES test_libudev.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
 endif()
 
+# udevd daemon 通道端到端测试(TEST 构建——依赖 udevd 真实运行态 + evdev 注册态)。
+# 仿 test_libudev:TEST 门控 + udev-shim 头文件 include 路径。
+# test_udevd 直接调 udev_* 符号 → SOURCES 编入 udev.c(避免拖整个 input 静态库)。
+if(TEST)
+    add_user_dyn_elf(test_udevd C SOURCES test_udevd.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
+endif()
+
 # udevd db + 规则引擎端到端测试(TEST 构建——依赖 udevd 真实运行态 + evdev 注册态)。
 # 仿 test_libudev:TEST 门控 + udev-shim 头文件 include 路径。
 # test_udevd_db 直接调 udev_* 符号 → SOURCES 编入 udev.c。

@@ -93,6 +93,8 @@ typedef struct cmsghdr {
   ((msg)->msg_control && (msg)->msg_controllen >= sizeof(struct cmsghdr)       \
        ? (struct cmsghdr *)(msg)->msg_control                                  \
        : (struct cmsghdr *)NULL)
+#define CMSG_LEN(len) (CMSG_ALIGN(sizeof(struct cmsghdr)) + (len))
+#define CMSG_SPACE(len) (CMSG_ALIGN(sizeof(struct cmsghdr)) + CMSG_ALIGN(len))
 
 // ===================== msghdr =====================
 // Linux UAPI x86-64 exact layout
