@@ -23,6 +23,13 @@ struct virtio_gpu_config {
 };
 
 /* ===== virtio-gpu command types (ctrlq) ===== */
+#define VIRTIO_GPU_F_VIRGL 0
+#define VIRTIO_GPU_F_EDID 1
+#define VIRTIO_GPU_F_RESOURCE_UUID 2
+#define VIRTIO_GPU_F_RESOURCE_BLOB 3
+#define VIRTIO_GPU_F_CONTEXT_INIT 4
+#define VIRTIO_GPU_F_BLOB_ALIGNMENT 5
+
 #define VIRTIO_GPU_CMD_GET_DISPLAY_INFO 0x0100
 #define VIRTIO_GPU_CMD_RESOURCE_CREATE_2D 0x0101
 #define VIRTIO_GPU_CMD_RESOURCE_UNREF 0x0102
@@ -33,6 +40,18 @@ struct virtio_gpu_config {
 #define VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING 0x0107
 #define VIRTIO_GPU_CMD_GET_CAPSET_INFO 0x0108
 #define VIRTIO_GPU_CMD_GET_CAPSET 0x0109
+#define VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB 0x010C
+#define VIRTIO_GPU_CMD_SET_SCANOUT_BLOB 0x010D
+#define VIRTIO_GPU_CMD_CTX_CREATE 0x0200
+#define VIRTIO_GPU_CMD_CTX_DESTROY 0x0201
+#define VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE 0x0202
+#define VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE 0x0203
+#define VIRTIO_GPU_CMD_RESOURCE_CREATE_3D 0x0204
+#define VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D 0x0205
+#define VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D 0x0206
+#define VIRTIO_GPU_CMD_SUBMIT_3D 0x0207
+#define VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB 0x0208
+#define VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB 0x0209
 #define VIRTIO_GPU_CMD_UPDATE_CURSOR 0x0300
 #define VIRTIO_GPU_CMD_MOVE_CURSOR 0x0301
 
@@ -47,6 +66,7 @@ struct virtio_gpu_config {
 #define VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID 0x1203
 #define VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID 0x1204
 #define VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER 0x1205
+#define VIRTIO_GPU_RESP_OK_MAP_INFO 0x1104
 
 /* ===== virtio-gpu formats ===== */
 #define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM 1
@@ -64,7 +84,20 @@ struct virtio_gpu_ctrl_hdr {
   uint32_t flags;
   uint64_t fence_id;
   uint32_t ctx_id;
-  uint32_t padding;
+  uint8_t ring_idx; /* per-ring fence (VIRTIO_GPU_FLAG_INFO_RING_IDX) */
+  uint8_t padding[3];
+};
+
+#define VIRTIO_GPU_FLAG_FENCE (1 << 0)
+#define VIRTIO_GPU_FLAG_INFO_RING_IDX (1 << 1)
+
+#define VIRTIO_GPU_CONTEXT_INIT_CAPSET_ID_MASK 0x000000ff
+
+struct virtio_gpu_ctx_create {
+  struct virtio_gpu_ctrl_hdr hdr;
+  uint32_t nlen;
+  uint32_t context_init; /* capset_id in low byte */
+  char debug_name[64];
 };
 
 /* RESOURCE_CREATE_2D command */

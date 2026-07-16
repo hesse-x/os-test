@@ -33,7 +33,7 @@ struct dev_ops {
   int (*open)(xtask *proc, int fd);
   int (*close)(xtask *proc, int fd);
   long (*ioctl)(uint32_t cmd, void *arg);
-  uint64_t (*mmap)(xtask *proc, uint64_t size);
+  uint64_t (*mmap)(xtask *proc, uint64_t size, uint64_t offset);
   ssize_t (*read)(xtask *proc, int fd, void *buf, size_t count);
   ssize_t (*write)(xtask *proc, int fd, const void *buf, size_t count);
   __poll (*poll)(xtask *proc, int events);

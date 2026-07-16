@@ -38,6 +38,7 @@
 #include "drm/drm.h"
 #include "drm/drm_fourcc.h"
 #include "drm/drm_mode.h"
+#include "drm/virtgpu_drm.h"
 
 struct virtio_gpu_device g_virtio_gpu;
 struct drm_device g_drm;
@@ -699,7 +700,7 @@ static int drm_alloc_fb_id(void) {
 /* DRM_IOCTL_VERSION */
 static long drm_ioctl_version(void *arg) {
   struct drm_version *v = (struct drm_version *)arg;
-  static const char driver_name[] = "drm";
+  static const char driver_name[] = "virtio_gpu";
   size_t name_len = sizeof(driver_name) - 1;
 
   v->version_major = 0;
@@ -723,6 +724,53 @@ static long drm_ioctl_version(void *arg) {
   v->name_len = name_len;
   v->date_len = 0;
   v->desc_len = 0;
+  return 0;
+}
+
+/* DRM_IOCTL_VIRTGPU_GETPARAM — return Venus runtime params.
+ * drm_virtgpu_getparam.value is a user-space __u64 pointer; the kernel
+ * writes the low 32 bits of the value and zeros the high 32 bits. */
+static long drm_ioctl_virtgpu_getparam(void *arg) {
+  struct drm_virtgpu_getparam *p = (struct drm_virtgpu_getparam *)arg;
+  uint32_t val = 0;
+
+  switch (p->param) {
+  case VIRTGPU_PARAM_3D_FEATURES:
+    val = 1;
+    break;
+  case VIRTGPU_PARAM_CAPSET_QUERY_FIX:
+    val = 1;
+    break;
+  case VIRTGPU_PARAM_RESOURCE_BLOB:
+    val = 1;
+    break;
+  case VIRTGPU_PARAM_HOST_VISIBLE:
+    val = 1; /* HOST3D blob */
+    break;
+  case VIRTGPU_PARAM_CONTEXT_INIT:
+    val = 1;
+    break;
+  case VIRTGPU_PARAM_CROSS_DEVICE:
+    val = 0; /* not supported */
+    break;
+  case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs:
+    val = (1 << 4); /* bit4 = Venus (capset id 4) */
+    break;
+  default:
+    printk(LOG_WARN, "drm: unknown virtgpu param %llu\n",
+           (unsigned long long)p->param);
+    val = 0;
+    break;
+  }
+
+  /* value is a user-space uint64_t pointer; write low 32 bits + zero high 32.
+   */
+  uint32_t zero_hi = 0;
+  if (copy_to_user((void *)(uintptr_t)p->value, &val, sizeof(val)))
+    return -EFAULT;
+  if (copy_to_user((void *)(uintptr_t)(p->value + sizeof(val)), &zero_hi,
+                   sizeof(zero_hi)))
+    return -EFAULT;
   return 0;
 }
 
@@ -804,6 +852,8 @@ static long drm_ioctl_set_master(void) {
   struct drm_file *f = drm_file_current();
   if (!f)
     return -EBADF;
+  if (f->is_render)
+    return -EACCES;
 
   spin_lock(&g_drm_files_lock);
   if (f->is_master) {
@@ -830,6 +880,8 @@ static long drm_ioctl_drop_master(void) {
   struct drm_file *f = drm_file_current();
   if (!f)
     return -EBADF;
+  if (f->is_render)
+    return -EACCES;
 
   spin_lock(&g_drm_files_lock);
   if (!f->is_master) {
@@ -852,6 +904,8 @@ static long drm_ioctl_get_magic(void *arg) {
   struct drm_file *f = drm_file_current();
   if (!f)
     return -EBADF;
+  if (f->is_render)
+    return -EACCES;
 
   a->magic = ++g_drm.magic_counter;
   f->authenticated_magic = a->magic;
@@ -868,6 +922,8 @@ static long drm_ioctl_auth_magic(void *arg) {
   struct drm_file *current = drm_file_current();
   if (!current)
     return -EBADF;
+  if (current->is_render)
+    return -EACCES;
 
   spin_lock(&g_drm_files_lock);
   /* Only the master fd can authenticate magics */
@@ -1816,6 +1872,8 @@ long drm_ioctl(uint32_t cmd, void *arg) {
   switch (cmd) {
   case DRM_IOCTL_VERSION:
     return drm_ioctl_version(arg);
+  case DRM_IOCTL_VIRTGPU_GETPARAM:
+    return drm_ioctl_virtgpu_getparam(arg);
   case DRM_IOCTL_GET_CAP:
     return drm_ioctl_get_cap(arg);
   case DRM_IOCTL_SET_CLIENT_CAP:
@@ -1908,6 +1966,27 @@ int drm_open(xtask *proc, int fd) {
       g_drm_files[i].fd = fd;
       g_drm_files[i].proc = proc;
       g_drm_files[i].is_master = false;
+      g_drm_files[i].authenticated_magic = 0;
+      g_drm_files[i].auth_valid = false;
+      spin_unlock(&g_drm_files_lock);
+      return 0;
+    }
+  }
+  spin_unlock(&g_drm_files_lock);
+  return -ENFILE;
+}
+
+/* Render node open: shares g_drm_files[] with card0 but marks is_render.
+ * Render fds reject SET_MASTER/GET_MAGIC/AUTH_MAGIC. */
+static int drm_render_open(xtask *proc, int fd) {
+  spin_lock(&g_drm_files_lock);
+  for (int i = 0; i < MAX_DRM_FDS; i++) {
+    if (!g_drm_files[i].used) {
+      g_drm_files[i].used = true;
+      g_drm_files[i].fd = fd;
+      g_drm_files[i].proc = proc;
+      g_drm_files[i].is_master = false;
+      g_drm_files[i].is_render = true;
       g_drm_files[i].authenticated_magic = 0;
       g_drm_files[i].auth_valid = false;
       spin_unlock(&g_drm_files_lock);
@@ -2018,6 +2097,19 @@ static struct dev_ops drm_dev_ops = {
     .poll = drm_poll,
 };
 
+/* Render node ops: kernel device, shares ioctl/mmap/close with card0,
+ * rejects read/poll (no vblank events on render nodes). */
+static struct dev_ops drm_render_ops = {
+    .driver_pid = 0,
+    .is_block = false,
+    .open = drm_render_open,
+    .close = drm_close,
+    .ioctl = drm_ioctl,
+    .mmap = drm_mmap_handler,
+    .read = NULL,
+    .poll = NULL,
+};
+
 /* DRM PCI 设备访问 (设计 C1) */
 static struct pci_device *drm_pci_dev(void) { return g_virtio_gpu.vpci.pdev; }
 
@@ -2101,6 +2193,14 @@ void drm_dev_register(void) {
   __strncpy(drm_dev_ops.subsystem, "drm", 7);
   __strncpy(drm_dev_ops.devtype, "card", 7);
 
+  int rc2 = devtmpfs_create("dri/renderD128", &drm_render_ops, NULL);
+  if (rc2 < 0) {
+    printk(LOG_ERROR, "drm: failed to create /dev/dri/renderD128: %d\n", rc2);
+  } else {
+    __strncpy(drm_render_ops.subsystem, "drm", 7);
+    __strncpy(drm_render_ops.devtype, "renderD128", 7);
+  }
+
   struct sysfs_node *cls = sysfs_class_dir("drm");
   struct sysfs_node *card0 = sysfs_create_dir(cls, "card0");
   if (card0) {
@@ -2115,6 +2215,16 @@ void drm_dev_register(void) {
     sysfs_create_file(card0, "dev", &drm_attr_dev);
     drm_dev_ops.sysfs_dir = card0;
   }
+
+  struct sysfs_node *rnode = sysfs_create_dir(cls, "renderD128");
+  if (rnode) {
+    sysfs_create_file(rnode, "vendor", &drm_attr_vendor);
+    sysfs_create_file(rnode, "device", &drm_attr_device);
+    sysfs_create_file(rnode, "class", &drm_attr_class);
+    sysfs_create_file(rnode, "driver", &drm_attr_driver);
+    sysfs_create_file(rnode, "dev", &drm_attr_dev);
+    drm_render_ops.sysfs_dir = rnode;
+  }
   printk(LOG_INFO, "drm: registered /dev/dri/card0\n");
 }
 
@@ -2123,19 +2233,19 @@ void drm_dev_register(void) {
    For Phase 3 (single active dumb buffer at a time) we locate the buffer
    by matching size. Map its physical pages into user space. */
 __attribute__((no_sanitize("kernel-address"))) uint64_t
-drm_mmap_handler(xtask *proc, uint64_t size) {
+drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
+  /* offset = handle << PAGE_SHIFT (from MODE_MAP_DUMB or VIRTGPU_MAP). */
+  uint32_t handle = (uint32_t)(offset >> PAGE_SHIFT);
+
   spin_lock(&g_drm.dumb_lock);
   struct drm_dumb_buffer *target = NULL;
-  for (int i = 0; i < MAX_DUMB_BUFFERS; i++) {
-    if (g_drm.dumbs[i].handle != 0 && g_drm.dumbs[i].size == size) {
-      target = &g_drm.dumbs[i];
-      break;
-    }
-  }
+  if (handle > 0 && handle <= MAX_DUMB_BUFFERS &&
+      (uint32_t)g_drm.dumbs[handle - 1].handle == handle)
+    target = &g_drm.dumbs[handle - 1];
   spin_unlock(&g_drm.dumb_lock);
   if (!target) {
-    printk(LOG_ERROR, "drm_mmap: no dumb buffer of size %llu\n",
-           (unsigned long long)size);
+    printk(LOG_ERROR, "drm_mmap: no buffer for handle %u (offset=0x%llx)\n",
+           handle, (unsigned long long)offset);
     return 0;
   }
 
@@ -2235,9 +2345,13 @@ void virtio_gpu_init(void) {
     return;
   }
 
-  /* Negotiate features: only VIRTIO_F_VERSION_1 */
-  if (virtio_pci_negotiate_features(&vgpu->vpci, 1ULL << VIRTIO_F_VERSION_1) <
-      0) {
+  /* Negotiate features: VERSION_1 + VIRGL(3D/context) + RESOURCE_BLOB +
+   * CONTEXT_INIT(multi-ring). HOST_VISIBLE is a HOST3D blob property, not a
+   * feature bit, so it is not negotiated here. */
+  uint64_t want = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_GPU_F_VIRGL) |
+                  (1ULL << VIRTIO_GPU_F_RESOURCE_BLOB) |
+                  (1ULL << VIRTIO_GPU_F_CONTEXT_INIT);
+  if (virtio_pci_negotiate_features(&vgpu->vpci, want) < 0) {
     printk(LOG_ERROR, "virtio_gpu: feature negotiation failed\n");
     return;
   }

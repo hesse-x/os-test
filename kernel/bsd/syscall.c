@@ -526,7 +526,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       if (ip && ip->i_priv) {
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
         if (ops->driver_pid == 0 && ops->mmap) {
-          uint64_t ret = ops->mmap(proc, size);
+          uint64_t ret = ops->mmap(proc, size, offset);
           file_put(f);
           spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
           return ret;

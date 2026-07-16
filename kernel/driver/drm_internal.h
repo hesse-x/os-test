@@ -101,6 +101,7 @@ struct drm_file {
   uint32_t authenticated_magic; /* the magic this fd got via GET_MAGIC */
   bool auth_valid;              /* magic has been authenticated */
   bool used;                    /* slot in use */
+  bool is_render;               /* render node (renderD128): no master/auth */
 
   /* Tracking of resources owned by this fd */
   int created_fb_ids[MAX_FRAMEBUFFERS];
@@ -189,7 +190,7 @@ extern int g_drm_next_blob_id;
 long drm_ioctl(uint32_t cmd, void *arg);
 
 /* ===== DRM mmap handler (called from dev_ops.mmap) ===== */
-uint64_t drm_mmap_handler(xtask *proc, uint64_t size);
+uint64_t drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset);
 
 /* ===== DRM poll handler ===== */
 __poll drm_poll(xtask *proc, int events);
