@@ -6,12 +6,14 @@
 
 #include "kernel/bsd/devtmpfs.h"
 #include "arch/x64/utils.h"
+#include "kernel/bsd/evdev_broker.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/atomic.h"
+#include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h" // copy_from_user/strncpy_from_user/__user
 #include "kernel/xcore/mem/slab.h"
@@ -433,14 +435,6 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
   if (ip->i_priv) {
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
     f->target_pid = ops->driver_pid;
-    /* SHM-backed 用户态驱动 = ringbuf (design 2.5) */
-    if (ops->driver_pid > 0 && ip->shm) {
-      f->f_op = &ringbuf_fops;
-      ringbuf_init_cursor(ip, f);
-    }
-    /* ringbuf lifecycle: send RINGBUF_OPEN to driver (design 3.6) */
-    if (ops->driver_pid > 0 && ip->shm)
-      ringbuf_notify_open(ip, proc->pid);
     // Kernel device: call open callback. Callbacks mutate the FD_DEV file
     // in place (do not replace the pointer), so fd_table[fd] stays valid.
     if (ops->driver_pid == 0 && ops->open) {
@@ -455,6 +449,25 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
         spin_unlock(fdlk);
         return (uint64_t)(-(uint64_t)(-rc));
       }
+    }
+    /* evdev 控制节点：ops->ioctl == evdev_control_ioctl 标识。open 后分配
+     * input_control_fd 挂入 f->private_data，装 evdev_control_fops（crash
+     * 清理由 evdev_control_close 触发）。控制节点无
+     * ops->open，故上面分支跳过。*/
+    if (ops->driver_pid == 0 && ops->ioctl == evdev_control_ioctl) {
+      struct input_control_fd *ctrl =
+          (struct input_control_fd *)kmalloc(sizeof(struct input_control_fd));
+      if (!ctrl) {
+        fd_uninstall(proc->proc->files, fd);
+        inode_put(ip);
+        kfree(f);
+        spin_unlock(fdlk);
+        return (uint64_t)(-(uint64_t)ENOMEM);
+      }
+      ctrl->manager_pid = proc->pid;
+      list_init(&ctrl->instances);
+      f->private_data = ctrl;
+      f->f_op = &evdev_control_fops;
     }
   }
   spin_unlock(fdlk);

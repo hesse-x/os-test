@@ -6,9 +6,14 @@
 #ifndef KERNEL_BSD_FOPS_H
 #define KERNEL_BSD_FOPS_H
 
-#include "kernel/bsd/devtmpfs.h" /* __poll, ssize_t */
+#include <stddef.h>
+#include <stdint.h>
+
+typedef int64_t ssize_t;
+typedef uint32_t __poll;
 
 struct file;
+struct xtask;
 
 struct file_operations {
   ssize_t (*read)(struct xtask *proc, struct file *f, void *buf, size_t count);

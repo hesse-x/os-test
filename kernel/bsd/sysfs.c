@@ -6,18 +6,15 @@
 #include "kernel/bsd/sysfs.h"
 
 #include "arch/x64/utils.h"
-#include "kernel/bsd/devtmpfs.h"
+struct xtask;
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/netlink.h"
-#include "kernel/bsd/ring.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/spinlock.h"
-#include "kernel/xcore/xtask.h"
-#include "xos/syscall_nums.h"
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/stat.h>
@@ -410,95 +407,6 @@ const struct sysfs_attr evdev_attr_version = {.name = "version",
 const struct sysfs_attr uevent_attr = {
     .name = "uevent", .show = NULL, .store = uevent_store};
 
-/* ===== ringbuf_fops: SHM ring buffer 事件流 (design 3.5) ===== */
-#include <xos/input.h>
-
-static ssize_t ringbuf_read(struct xtask *proc, struct file *f, void *buf,
-                            size_t count) {
-  (void)proc;
-  if (count == 0)
-    return 0;
-  struct inode *ip = f->inode;
-  if (!ip || !ip->shm)
-    return -ENODEV;
-  ring_t r = ring_from_shm(ip->shm);
-  return ring_read(&r, f, buf, count);
-}
-
-static __poll ringbuf_poll(struct xtask *proc, struct file *f, int events) {
-  (void)proc;
-  struct inode *ip = f->inode;
-  if (!ip || !ip->shm)
-    return 0;
-  ring_t r = ring_from_shm(ip->shm);
-  return ring_poll(&r, f, events);
-}
-
-static int ringbuf_close(struct xtask *proc, struct file *f) {
-  struct inode *ip = f->inode;
-  if (!ip || !ip->i_priv)
-    return 0;
-  struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-  if (ops->driver_pid > 0) {
-    /* 发 RINGBUF_CLOSE 通知给 driver (design 3.6) */
-    recv_msg msg;
-    __memset(&msg, 0, sizeof(msg));
-    msg.type = RECV_NOTIFY;
-    msg.src = (uint32_t)proc->pid;
-    struct ringbuf_lifecycle_msg lm = {.opcode = RINGBUF_CLOSE,
-                                       .pid = proc->pid};
-    __strncpy(lm.name, "", 31);
-    __memcpy(msg.data, &lm, sizeof(lm));
-    notify_and_wake(ops->driver_pid, &msg);
-  }
-  return 0;
-}
-
-void ringbuf_init_cursor(struct inode *ip, struct file *f) {
-  if (!ip || !ip->shm)
-    return;
-  ring_t r = ring_from_shm(ip->shm);
-  if (r.hdr)
-    f->offset = r.hdr->head;
-}
-
-void ringbuf_notify_open(struct inode *ip, int32_t opener_pid) {
-  if (!ip || !ip->i_priv)
-    return;
-  struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-  if (ops->driver_pid <= 0)
-    return;
-  recv_msg msg;
-  __memset(&msg, 0, sizeof(msg));
-  msg.type = RECV_NOTIFY;
-  msg.src = (uint32_t)opener_pid;
-  struct ringbuf_lifecycle_msg lm = {.opcode = RINGBUF_OPEN, .pid = opener_pid};
-  __strncpy(lm.name, "", 31);
-  __memcpy(msg.data, &lm, sizeof(lm));
-  notify_and_wake(ops->driver_pid, &msg);
-}
-
-static uint64_t ringbuf_mmap(struct xtask *proc, struct file *f,
-                             uint64_t size) {
-  (void)size;
-  struct inode *ip = f->inode;
-  if (!ip || !ip->i_priv)
-    return -EPERM;
-  struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-  /* 仅 driver_pid 允许 mmap (防止消费者绕过内核直接 mmap) */
-  if (ops->driver_pid != proc->pid)
-    return -EPERM;
-  if (!ip->shm)
-    return -ENODEV;
-  /* Driver owner: return -ENOSYS so sys_mmap falls through to the FD_DEV
-   * SHM page-mapping path. Consumers are rejected by -EPERM above
-   * (sys_mmap does not fall through on EPERM). */
-  return -ENOSYS;
-}
-
-const struct file_operations ringbuf_fops = {
-    .read = ringbuf_read,
-    .poll = ringbuf_poll,
-    .close = ringbuf_close,
-    .mmap = ringbuf_mmap,
-};
+/* ringbuf_fops (SHM ring consumer read/poll/mmap) removed — the evdev broker
+ * (kernel/bsd/evdev_broker.c) now owns per-fd kfifo consumer state directly,
+ * replacing the SHM output ring. See refact_evdev.md §5. */

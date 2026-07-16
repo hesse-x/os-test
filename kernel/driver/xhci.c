@@ -5,27 +5,36 @@
  */
 
 #include "kernel/driver/xhci.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/driver/bsd_types.h" // struct file, file_get/file_put, fd_lookup, FD_EVENTFD
 #include "kernel/driver/pci.h"
+#include "kernel/xcore/kpi.h"
+#include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/sched.h" // schedule, wake_with_event
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/wait_queue.h" // wait_queue_head, __wake_up, add/remove
 #include "kernel/xcore/xtask.h"
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <xos/shm.h>
 
-#include "kernel/driver/bsd_types.h" // struct file, file_get/file_put, fd_lookup, FD_EVENTFD
-#include "kernel/xcore/kpi.h" // eventfd_signal_isr (ISR-safe)
-#include <xos/errno.h>        // ENOTTY/EINVAL/EBUSY (hid_ops_ioctl)
-#include <xos/ioctl.h>        // HID_BIND_IRQFD / HID_UNBIND_IRQFD
+#include <xos/errno.h>
+#include <xos/fcntl.h>
+#include <xos/hidraw.h>
+#include <xos/input.h>
+#include <xos/ioctl.h> // HID_BIND_IRQFD / HID_UNBIND_IRQFD
+#include <xos/shm.h>
+#include <xos/signal.h> // SIGKILL/SIGSTOP
+#include <xos/socket.h> // POLLIN
 
 // ===================== xHCI register offsets =====================
 // Capability registers (from MMIO base)
@@ -220,7 +229,7 @@ typedef struct xhci_intr {
 
 static xhci_intr xhci_intrs[2]; // intr 0=keyboard, 1=spare
 
-// USB HID SHM page (kernel-allocated, shared with kbd_driver)
+// USB HID SHM page (kernel-allocated, shared with the evdev process via mmap)
 static struct page *usb_hid_shm_page;
 static uint64_t usb_hid_shm_phys;
 static void *usb_hid_shm_virt;
@@ -234,6 +243,10 @@ static void *usb_hid_shm_virt;
 #define HID_IRQFD_MAX 8
 static struct file *hid_irqfds[HID_IRQFD_MAX];
 static spinlock hid_irqfd_lock = SPINLOCK_INIT;
+
+// hidraw read() wait queue: blocking /dev/hidraw0 readers sleep here, woken by
+// the xHCI ISR after it enqueues a new HID report into the SHM sub-ring.
+static wait_queue_head *hidraw_wq;
 
 // HID DMA buffer (xHCI writes HID report here, <4GB)
 static struct page *hid_dma_page;
@@ -501,6 +514,10 @@ static void xhci_isr(trapframe *tf) {
             if (hid_irqfds[i])
               eventfd_signal_isr(hid_irqfds[i]);
           spin_unlock_irqrestore(&hid_irqfd_lock, irqflags);
+          // Wake any blocking /dev/hidraw0 read() waiters (report now
+          // enqueued in SHM sub-ring).
+          if (hidraw_wq)
+            __wake_up(hidraw_wq, POLLIN);
         }
       }
     } else if (type == TRB_CMD_COMPLETE) {
@@ -786,15 +803,102 @@ static int usb_hid_kbd_close(xtask *proc, int fd) {
   return 0;
 }
 
-// hid_ops_ioctl: register/unregister an eventfd as the HID interrupt-delivery
-// fd.  HID_BIND_IRQFD: arg = &irqfd_fd (int); resolve the caller's irqfd
-// file via current_task->files + fd_lookup, verify it is an eventfd, take a
-// reference, and store it in hid_irqfds[].  HID_UNBIND_IRQFD: clear the slot
-// and drop the reference.  (evdev_refact.md §4.2)
-static long hid_ops_ioctl(uint32_t cmd, void *arg) {
-  if (cmd != HID_BIND_IRQFD && cmd != HID_UNBIND_IRQFD)
-    return -ENOTTY;
+// hidraw read(): dequeue one 8B raw HID Boot report from the keyboard sub-ring
+// and copy_to_user. Shares the same SHM sub-ring as the evdev-mmap path:
+// whoever reads first advances tail. Empty -> block on hidraw_wq (woken by
+// ISR), or -EAGAIN if O_NONBLOCK. refact_evdev.md §14.2.
+static void hidraw_wake_cb(wait_queue_t *wq, unsigned long flags) {
+  xtask *target = (xtask *)wq->data;
+  (void)flags;
+  wake_with_event(target, WAIT_POLL);
+}
 
+static ssize_t usb_hidraw_read(xtask *proc, int fd, void *buf, size_t count) {
+  if (count < 8)
+    return -EINVAL;
+  if (!usb_hid_shm_virt)
+    return -ENODEV;
+
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  bool nonblock = f && (f->flags & O_NONBLOCK);
+
+  volatile struct usb_hid_shm_header *hdr =
+      (volatile struct usb_hid_shm_header *)usb_hid_shm_virt;
+
+  wait_queue_t wait;
+  bool queued = false;
+  if (!nonblock && hidraw_wq) {
+    wait.func = hidraw_wake_cb;
+    wait.data = current_task;
+    list_init(&wait.node);
+    add_wait_queue(hidraw_wq, &wait);
+    queued = true;
+  }
+
+  ssize_t ret;
+  for (;;) {
+    uint32_t head = __atomic_load_n(&hdr->rings[0].head, __ATOMIC_ACQUIRE);
+    uint32_t tail = __atomic_load_n(&hdr->rings[0].tail, __ATOMIC_ACQUIRE);
+    if (head != tail) {
+      volatile struct usb_hid_slot *slot =
+          (volatile struct usb_hid_slot *)((uint8_t *)usb_hid_shm_virt +
+                                           HID_SUBRING_KBD_OFFSET +
+                                           tail * HID_SLOT_SIZE);
+      if (copy_to_user(buf, (void *)slot->data, 8)) {
+        ret = -EFAULT;
+        goto out;
+      }
+      __atomic_store_n(&hdr->rings[0].tail, (tail + 1) % HID_SUBRING_CAPACITY,
+                       __ATOMIC_RELEASE);
+      ret = 8;
+      goto out;
+    }
+    // Empty.
+    if (nonblock) {
+      ret = -EAGAIN;
+      goto out;
+    }
+    // No wait queue (init kmalloc failed): cant block safely, fall back.
+    if (!hidraw_wq) {
+      ret = -EAGAIN;
+      goto out;
+    }
+    // EINTR on pending signal (mirror eventfd read).
+    {
+      xtask *p = current_task;
+      uint64_t pend = __atomic_load_n(&p->proc->sig_pending, __ATOMIC_ACQUIRE);
+      uint64_t deliv = pend & ~p->proc->sig_blocked;
+      deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+      if (deliv) {
+        ret = -EINTR;
+        goto out;
+      }
+    }
+    current_task->state = BLOCKED;
+    current_task->wait_event = WAIT_POLL;
+    schedule();
+  }
+
+out:
+  if (queued)
+    remove_wait_queue(hidraw_wq, &wait);
+  return ret;
+}
+
+// hidraw + irqfd combined ioctl handler.
+// HIDIOCGRAWINFO: return raw device info (§14.3).
+// HID_BIND_IRQFD / HID_UNBIND_IRQFD: register/unregister an eventfd as the HID
+// interrupt-delivery fd (evdev_refact.md §4.2).
+static long usb_hid_ioctl(uint32_t cmd, void *arg) {
+  // hidraw HIDIOCGRAWINFO
+  if (cmd == HIDIOCGRAWINFO) {
+    struct hidraw_devinfo info = {
+        .bustype = BUS_USB, .vendor = 1, .product = 1};
+    __memcpy(arg, &info, sizeof(info));
+    return 0;
+  }
+
+  // HID irqfd bind/unbind
   if (cmd == HID_BIND_IRQFD) {
     int irqfd_fd = *(int *)arg;
     xtask *proc = current_task;
@@ -804,7 +908,6 @@ static long hid_ops_ioctl(uint32_t cmd, void *arg) {
 
     uint64_t flags;
     spin_lock_irqsave(&hid_irqfd_lock, &flags);
-    // Find a free slot (single consumer; first-fit is fine).
     int slot = -1;
     for (int i = 0; i < HID_IRQFD_MAX; i++) {
       if (!hid_irqfds[i]) {
@@ -822,16 +925,13 @@ static long hid_ops_ioctl(uint32_t cmd, void *arg) {
     return 0;
   }
 
-  // HID_UNBIND_IRQFD: clear the first slot matching the caller's irqfd.
-  // (arg is unused for _IO; we match by file identity.)
+  // HID_UNBIND_IRQFD: clear the first slot matching the callers irqfd.
   {
     uint64_t flags;
     spin_lock_irqsave(&hid_irqfd_lock, &flags);
     struct file *dropped = NULL;
     for (int i = 0; i < HID_IRQFD_MAX; i++) {
       if (hid_irqfds[i]) {
-        // Drop any bound irqfd (single consumer evdev); the unbind is
-        // unambiguous because evdev holds exactly one irqfd at a time.
         dropped = hid_irqfds[i];
         hid_irqfds[i] = NULL;
         break;
@@ -898,7 +998,8 @@ static void xhci_init_keyboard() {
     hid_hdr->rings[i].reserved = 0;
   }
 
-  // Register /dev/usb_hid device with SHM — kbd_driver opens it via open + mmap
+  // Register /dev/hidraw0 device with SHM — evdev opens it via open + mmap
+  // (and third-party hidraw tools via read()/HIDIOCG*); refact_evdev.md §14.
   {
     struct shm *hid_shm = shm_create_internal(1);
     if (hid_shm) {
@@ -930,8 +1031,16 @@ static void xhci_init_keyboard() {
       usb_hid_ops.is_block = false;
       usb_hid_ops.open = usb_hid_kbd_open;
       usb_hid_ops.close = usb_hid_kbd_close;
-      usb_hid_ops.ioctl = hid_ops_ioctl; // HID_BIND_IRQFD / HID_UNBIND_IRQFD
-      devtmpfs_create("usb_hid_kbd", &usb_hid_ops, hid_shm);
+      usb_hid_ops.read = usb_hidraw_read;
+      usb_hid_ops.ioctl = usb_hid_ioctl;
+      // hidraw_wq: lazily allocate the blocking-read wait queue now that the
+      // device exists; the ISR __wake_ups it after enqueuing a HID report.
+      if (!hidraw_wq) {
+        hidraw_wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
+        if (hidraw_wq)
+          init_wait_queue_head(hidraw_wq);
+      }
+      devtmpfs_create("hidraw0", &usb_hid_ops, hid_shm);
       shm_put(hid_shm); // devtmpfs_create took a reference via shm_get
     }
   }

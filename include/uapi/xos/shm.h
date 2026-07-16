@@ -83,8 +83,9 @@ typedef struct fs_shm_header {
 
 // ===================== USB HID shared memory =====================
 // 1 page (4KB) allocated by kernel xHCI init via shm_create_internal(1),
-// registered as /dev/usb_hid via devtmpfs_create. kbd_driver opens it
-// via open("/dev/usb_hid") + mmap(MAP_SHARED).
+// registered as /dev/hidraw0 via devtmpfs_create. evdev opens it via
+// open("/dev/hidraw0") + mmap(MAP_SHARED) (Ring #1, refact_evdev.md §14);
+// third-party hidraw tools use read() + HIDIOCG* on the same node.
 //
 // Layout: 32B header + 4 sub-rings (keyboard/mouse/gamepad/touchpad)
 // Each sub-ring: 100 slots × 10 bytes = 1000 bytes

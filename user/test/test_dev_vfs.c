@@ -515,26 +515,9 @@ void test_dev_vfs_fstat_fs(void) {
 
 /* 36. (removed in Phase 4: KMS CREATE_BUF retired with bochs-display) */
 
-/* 37. ioctl INPUT_BIND on /dev/kbd (IPC proxy path) */
-void test_dev_vfs_kbd_ioctl_proxy(void) {
-  int fd = open("/dev/kbd", O_RDWR);
-  if (fd >= 0) {
-    /* Direction A: driver owns SHM, consumer just registers pid for notify.
-     * No memfd_create / shm_fd passing. */
-    struct input_bind_arg arg;
-    arg.shm_fd = -1;
-    arg.result = -1;
-
-    int r = ioctl(fd, INPUT_BIND, &arg);
-    /* kbd_driver may or may not be running in test env */
-    if (r == 0) {
-      TEST_ASSERT_EQUAL_INT(0, r);
-    }
-    close(fd);
-  } else {
-    TEST_ASSERT_TRUE(1);
-  }
-}
+/* 37. (removed: input bind ioctl retired with the SHM-ring evdev path; the
+ *      broker replaces bind/notify with INPUT_REGISTER on /dev/input/control)
+ */
 
 /* 38. (removed in Phase 4: KMS FLIP retired with bochs-display) */
 
@@ -589,8 +572,8 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_dev_vfs_distinct_inodes);
   RUN_TEST(test_dev_vfs_fstat_fs);
 
-  /* Phase 8: ioctl IPC proxy */
-  RUN_TEST(test_dev_vfs_kbd_ioctl_proxy);
+  /* Phase 8: (removed: input bind ioctl retired with the SHM-ring evdev path)
+   */
 
   return UNITY_END();
 }

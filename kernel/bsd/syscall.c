@@ -20,6 +20,7 @@
 #include "arch/x64/utils.h"
 #include "boot/boot.h"
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/bsd/evdev_broker.h"
 #include "kernel/bsd/eventfd.h"
 #include "kernel/bsd/eventpoll.h"
 #include "kernel/bsd/fat32.h"
@@ -58,7 +59,6 @@
 
 #include <xos/errno.h>
 #include <xos/fcntl.h>
-#include <xos/input.h>
 #include <xos/ioctl.h>
 #include <xos/mman.h>
 #include <xos/page.h>
@@ -517,7 +517,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     if (f && f->f_op && f->f_op->mmap) {
       uint64_t ret = f->f_op->mmap(proc, f, size);
       // -ENOSYS: f_op doesn't handle mmap → fall through to FD_DEV SHM path.
-      // -EPERM: hard rejection (e.g. ringbuf_fops blocks non-driver consumers).
+      // -EPERM: hard rejection (e.g. a char f_op blocks mmap for non-driver
+      //         consumers).
       // Other negatives: hard error.
       if (ret != (uint64_t)-ENOSYS) {
         file_put(f);
@@ -1939,9 +1940,10 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   int64_t ret;
   // f_op with an ioctl callback handles the command entirely in-kernel
-  // (e.g. pts/ptmx tty ioctl). f_op without ioctl (e.g. ringbuf_fops on
-  // SHM-backed user drivers) must fall through to the FD_DEV driver_pid
-  // proxy path below so INPUT_BIND/EVIOCG* reach the user-space driver.
+  // (e.g. pts/ptmx tty ioctl, evdev broker consumer EVIOCG*/GRAB). f_op without
+  // ioctl must fall through to the FD_DEV driver_pid proxy path below so that
+  // EVIOCG* reach the user-space driver (or INPUT_REGISTER hits the control
+  // node).
   if (f->f_op && f->f_op->ioctl)
     return f->f_op->ioctl(proc, f, cmd, arg);
 
@@ -1954,46 +1956,18 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
 
-    /* RINGBUF_WAKE: kernel-internal, wake ringbuf poll/epoll consumers */
-    if (cmd == RINGBUF_WAKE) {
-      printk(LOG_INFO, "RINGBUF_WAKE: ino=%u wq=%p\n", (unsigned)ip->ino,
-             (void *)ip->wq);
-      if (ip->wq)
-        __wake_up(ip->wq, POLLIN);
-      ret = 0;
-      goto out;
-    }
-    /* RINGBUF_INJECT: kernel-mediated event injection into ringbuf SHM.
-     * Any process can inject — the kernel controls the write (no mmap bypass).
-     */
-    if (cmd == RINGBUF_INJECT) {
-      if (!ip->shm) {
-        ret = -(int64_t)ENODEV;
-        goto out;
-      }
-      struct ringbuf_header *hdr = (struct ringbuf_header *)phys_to_virt(
-          (__force phys_addr_t)ip->shm->phys);
-      if (!hdr || hdr->magic != RINGBUF_MAGIC) {
-        ret = -(int64_t)ENODEV;
-        goto out;
-      }
-      struct input_event ev;
-      if (copy_from_user(&ev, arg, sizeof(ev))) {
-        ret = -(int64_t)EFAULT;
-        goto out;
-      }
-      uint32_t slot = hdr->head % hdr->capacity;
-      uint8_t *base = (uint8_t *)hdr;
-      void *slot_addr = base + hdr->data_offset + slot * hdr->elem_size;
-      __memcpy(slot_addr, &ev, hdr->elem_size);
-      hdr->head = (hdr->head + 1) % hdr->capacity;
-      if (ip->wq)
-        __wake_up(ip->wq, POLLIN);
-      ret = 0;
-      goto out;
-    }
+    /* RINGBUF_WAKE / RINGBUF_INJECT handlers removed (evdev broker replaces the
+     * SHM ring; see kernel/bsd/evdev_broker.c). */
 
     if (ops->driver_pid == 0) {
+      /* 控制节点 /dev/input/control 的 INPUT_REGISTER：走内核 direct path
+       * 返回 owner write-fd（能 alloc_fd/fd_install，转发路径不能装 fd）。
+       * arg 为用户指针，evdev_control_ioctl 内部 copy_from_user。 */
+      if (cmd == INPUT_REGISTER) {
+        long r = evdev_control_ioctl(cmd, arg);
+        ret = (int64_t)r;
+        goto out;
+      }
       if (!ops->ioctl) {
         ret = -(int64_t)ENOTTY;
         goto out;
@@ -2089,23 +2063,6 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
           if (copy_from_user(req_data + 4, arg, arg_size)) {
             ret = (int64_t)-EFAULT;
             goto out;
-          }
-        }
-      }
-
-      // Defensive: warn if ioctl REQ arg carries a cross-process fd that won't
-      // translate. Direction A keeps SHM on the inode (no fd passing), so this
-      // is purely diagnostic — surfaces misconfigured protocols early instead
-      // of silently failing in the driver's mmap(EBADF).
-      if (cmd == INPUT_BIND && (dir & _IOC_WRITE)) {
-        int passed_fd =
-            *(int *)(req_data + 4); // input_bind_arg.shm_fd at offset 0
-        if (passed_fd >= 0) {
-          if (passed_fd >= MAX_FD || !fd_lookup(proc->proc->files, passed_fd)) {
-            printk(LOG_WARN,
-                   "ioctl REQ: INPUT_BIND fd=%d not valid in caller pid=%d "
-                   "(cross-proc fd passing unsupported; use inode-bound SHM)\n",
-                   passed_fd, proc->pid);
           }
         }
       }

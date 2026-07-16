@@ -106,7 +106,7 @@ int main(int argc, char **argv, char **envp) {
   // 2. Spawn evdev (keyboard event source + EVIOCG* ioctl query), wait for
   //    /dev/input/event0. Replaces the old kbd driver.
   printf("init: spawning evdev\n");
-  spawn_service("/driver/evdev.dev");
+  int evdev_pid = spawn_service("/driver/evdev.dev");
   wait_dev_ready("/dev/input/event0");
   printf("init: evdev ready\n");
 
@@ -135,33 +135,58 @@ int main(int argc, char **argv, char **envp) {
   spawn_service("/usr/bin/terminal");
   printf("init: terminal spawned\n");
 
-// 5. Adopt orphans + reap children + udevd crash monitoring
+// 5. Adopt orphans + reap children + udevd/evdev crash monitoring (R1)
 #define RESTART_SEC 1
 #define START_LIMIT_BURST 5
-  int crash_count = 0;
+  int udevd_crashes = 0;
+  int evdev_crashes = 0;
   while (1) {
     int status;
     pid_t ret = waitpid(-1, &status, 0);
     if (ret < 0)
       continue;
-    if (ret != udevd_pid)
-      continue; /* 其它子进程收尸，忽略 */
     int crashed =
         WIFSIGNALED(status) || (WIFEXITED(status) && WEXITSTATUS(status) != 0);
-    if (!crashed) {
-      crash_count = 0;
+
+    if (ret == udevd_pid) {
+      if (!crashed) {
+        udevd_crashes = 0;
+        continue;
+      }
+      udevd_crashes++;
+      if (udevd_crashes > START_LIMIT_BURST) {
+        printf("init: udevd crashed %d times, giving up respawn\n",
+               udevd_crashes);
+        continue;
+      }
+      printf("init: udevd crashed (count %d), respawn in %ds\n", udevd_crashes,
+             RESTART_SEC);
+      sleep(RESTART_SEC);
+      udevd_pid = (listen_fd >= 0) ? spawn_with_fd("/usr/bin/udevd", listen_fd)
+                                   : spawn_service("/usr/bin/udevd");
       continue;
     }
-    crash_count++;
-    if (crash_count > START_LIMIT_BURST) {
-      printf("init: udevd crashed %d times, giving up respawn\n", crash_count);
+
+    if (ret == evdev_pid) {
+      if (!crashed) {
+        evdev_crashes = 0;
+        continue;
+      }
+      evdev_crashes++;
+      if (evdev_crashes > START_LIMIT_BURST) {
+        printf("init: evdev crashed %d times, giving up respawn\n",
+               evdev_crashes);
+        continue;
+      }
+      printf("init: evdev crashed (count %d), respawn in %ds\n", evdev_crashes,
+             RESTART_SEC);
+      sleep(RESTART_SEC);
+      evdev_pid = spawn_service("/driver/evdev.dev");
+      if (evdev_pid > 0)
+        wait_dev_ready("/dev/input/event0");
       continue;
     }
-    printf("init: udevd crashed (count %d), respawn in %ds\n", crash_count,
-           RESTART_SEC);
-    sleep(RESTART_SEC);
-    udevd_pid = (listen_fd >= 0) ? spawn_with_fd("/usr/bin/udevd", listen_fd)
-                                 : spawn_service("/usr/bin/udevd");
+    /* 其它子进程收尸，忽略 */
   }
 
   return 0;

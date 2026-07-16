@@ -8,11 +8,9 @@
 
 #include "kernel/bsd/eventpoll.h" // struct eventpoll (ep->wq)
 #include "kernel/bsd/file_poll.h"
-#include "kernel/bsd/inode.h"   // struct inode (wq field)
 #include "kernel/bsd/netlink.h" // struct netlink_sock (wq field)
 #include "kernel/bsd/pty.h"     // struct pty (wq field)
 #include "kernel/bsd/socket.h"  // struct unix_sock (wq field)
-#include "kernel/bsd/sysfs.h"   // ringbuf_fops
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/wait_queue.h"
@@ -30,20 +28,14 @@ static wait_queue_head *wq_alloc(wait_queue_head **out_wq) {
 
 // Resolve which wait_queue_head a file exposes for poll/epoll waiters, lazily
 // allocating the per-type wq on first use. This MUST return the same wq the
-// fd's data-ready path __wake_ups (pty->wq, sock->wq, pipe->wq,
-// nlsock->wq, ringbuf inode->wq, ep->wq), otherwise a waiter registered here is
+// fd's data-ready path __wake_ups (pty->wq, sock->wq, pipe->close_wq,
+// nlsock->wq, ep->wq, or the generic per-file f->wq used by eventfd/timerfd/
+// signalfd/evdev broker consumers), otherwise a waiter registered here is
 // never woken and (on return) the cleanup remove_wait_queue targets a wq that
 // nobody else touches — leaking the stack wait node and corrupting that wq's
 // list after stack reuse. sys_poll and sys_epoll_wait both resolve through
 // here (ep_target_wq delegates to file_wq_get) so the two paths can't diverge.
 wait_queue_head *file_wq_get(struct file *f) {
-  /* ringbuf-backed device: per-inode wq (shared across fd instances), woken by
-   * RINGBUF_WAKE / RINGBUF_INJECT ioctls. */
-  if (f->type == FD_DEV && f->f_op == &ringbuf_fops && f->inode) {
-    if (f->inode->wq)
-      return f->inode->wq;
-    return wq_alloc(&f->inode->wq);
-  }
   /* epoll fd: ep->wq, woken by ep_poll_callback's __wake_up(&ep->wq). */
   if (f->type == FD_EPOLL && f->epoll) {
     return &f->epoll->wq;

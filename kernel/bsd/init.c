@@ -9,6 +9,7 @@
 
 #include "arch/x64/trap.h"
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/bsd/evdev_broker.h"
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
@@ -68,6 +69,8 @@ void bsd_init(void) {
   // timerfd: initialize global list + lock, register tick sweep hook
   timerfd_init();
   timerfd_tick_hook = timerfd_tick_all;
+  // evdev broker: create /dev/input/control control node
+  evdev_broker_init();
   // fault_handler = NULL;  // future: file-backed mmap page-in
 
   printk(LOG_INFO, "bsd_init: done\n");

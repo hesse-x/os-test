@@ -13,7 +13,6 @@
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/mount.h"
 
-struct file;
 struct inode;
 struct kstat;
 
@@ -84,12 +83,5 @@ int sysfs_stat(const char *relpath, struct kstat *ks);
 
 extern struct fstype sysfs_fstype;
 extern const struct file_operations sysfs_fops;
-extern const struct file_operations ringbuf_fops;
-
-/* ringbuf lifecycle notification: send RINGBUF_OPEN to driver_pid */
-void ringbuf_notify_open(struct inode *ip, int32_t opener_pid);
-
-/* ringbuf cursor: initialize consumer offset to current head on open */
-void ringbuf_init_cursor(struct inode *ip, struct file *f);
 
 #endif

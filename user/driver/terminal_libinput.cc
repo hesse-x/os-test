@@ -8,7 +8,8 @@
 // compositor. Uses libinput for keyboard event processing via
 // libinput_udev_create_context() + libinput_udev_assign_seat() — 设备增删由
 // udev 后端 monitor 自动管理,终端经 udevd 管道收热插拔 uevent。
-// The kernel ringbuf_fops provides the read() backend from evdev's SHM ring.
+// Keyboard events reach libinput via the evdev broker: /dev/input/eventN
+// consumer fds (in-kernel read/poll, per-client kfifo).
 //
 // fd 0 = stdout pipe read end (reads shell output, O_NONBLOCK)
 // fd 1 = stdin pipe write end  (sends keystrokes to shell)

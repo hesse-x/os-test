@@ -368,29 +368,6 @@ void test_ioc_macros(void) {
   TEST_ASSERT_EQUAL_INT(_IOC_READ | _IOC_WRITE, _IOC_DIR(cmd_iowr));
 }
 
-/* 30. ioctl on /dev/kbd (user-space driver) — IPC proxy path */
-void test_ioctl_kbd_bind(void) {
-  int fd = open("/dev/kbd", O_RDWR);
-  if (fd >= 0) {
-    /* Direction A: driver owns SHM, consumer just registers pid for notify.
-     * No memfd_create / shm_fd passing. */
-    struct input_bind_arg arg;
-    arg.shm_fd = -1;
-    arg.result = -1;
-
-    int r = ioctl(fd, INPUT_BIND, &arg);
-    /* If kbd_driver is running: should succeed */
-    /* If kbd_driver is not running: -ESRCH or similar */
-    if (r == 0) {
-      TEST_ASSERT_EQUAL_INT(0, r);
-    }
-    close(fd);
-  } else {
-    /* /dev/kbd may not exist in test env */
-    TEST_ASSERT_TRUE(1);
-  }
-}
-
 /* 31. _IO-based cmd on /dev/serial → ENOTTY (serial only supports TCGETS) */
 void test_ioctl_serial_ioc_cmd(void) {
   int fd = open("/dev/serial", O_RDWR);
@@ -436,7 +413,6 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_fstat_dev_fs);
   /* Phase 8 */
   RUN_TEST(test_ioc_macros);
-  RUN_TEST(test_ioctl_kbd_bind);
   RUN_TEST(test_ioctl_serial_ioc_cmd);
   return UNITY_END();
 }

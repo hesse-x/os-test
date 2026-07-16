@@ -25,15 +25,16 @@
 #include <xos/input.h>
 #include <xos/input_key.h>
 #include <xos/ioctl.h>
-#include <xos/ringbuf.h>
 #include <xos/shm.h>
 
 #define MAX_EVDEV_DEVICES 8
-#define MAX_CONSUMERS 8
 // Reply buffer for inline RECV_REQ path and the data evdev hands to sys_resp.
 // Must hold the largest getter we serve: EVIOCGBIT(EV_KEY, KEY_CNT) = 96B, plus
 // headroom for future EVIOCGABS (struct input_absinfo across ABS_CNT axes) etc.
 #define REPLY_BUF_SIZE 256
+
+/* minor → owner write-fd (broker broadcast fd, returned by INPUT_REGISTER). */
+static int device_table[MAX_EVDEV_DEVICES];
 
 struct evdev_device {
   uint16_t minor;
@@ -60,85 +61,17 @@ static struct evdev_device *find_device(uint32_t minor) {
   return NULL;
 }
 
-// Bound consumer pids (for notify). SHM is single shared ring on /dev/<name>
-// inode.
-static pid_t consumers[MAX_CONSUMERS];
-
-static void consumer_add(pid_t pid) {
-  for (int i = 0; i < MAX_CONSUMERS; i++) {
-    if (consumers[i] == 0) {
-      consumers[i] = pid;
-      return;
-    }
-  }
-}
-
-static void consumer_remove_pid(pid_t pid) {
-  for (int i = 0; i < MAX_CONSUMERS; i++) {
-    if (consumers[i] == pid)
-      consumers[i] = 0;
-  }
-}
-
-// Driver-side SHM ring (single, shared via inode). The producer writes through
-// this header; consumers read via the kernel ring_t path (per-fd f->offset).
-static volatile ringbuf_header *g_ring;
-
-/* 唤醒 fd: /dev/input/event0 的 ringbuf fd, 用于 ioctl RINGBUF_WAKE */
-static int wake_fd = -1;
-
-// Write one event to the shared ring + unconditional notify to all consumers.
-// Overwrite-oldest policy: push never fails (no "full" check), and the wake
-// below always runs — a dropped wake is what stalled the terminal.
-static void broadcast_event(const input_event *ev) {
-  if (!g_ring)
+// Broadcast a batch of events to all clients via the broker owner write-fd.
+// The kernel broker fans out to per-client kfifo and wakes blocked readers.
+static void broadcast_events(const input_event *evs, int n) {
+  if (n <= 0)
     return;
-  fprintf(stderr, "evdev broadcast: type=%u code=%u value=%d\n",
-          (unsigned)ev->type, (unsigned)ev->code, (int)ev->value);
-  ringbuf_push(g_ring, ev);
-
-  // Unconditional notify. If pid gone/exited, notify is no-op.
-  for (int i = 0; i < MAX_CONSUMERS; i++) {
-    pid_t p = consumers[i];
-    if (p > 0)
-      notify(p);
-  }
-
-  /* 唤醒 ringbuf poll/epoll 等待者 (terminal/libinput) */
-  if (wake_fd >= 0) {
-    int r = ioctl(wake_fd, RINGBUF_WAKE, 0);
-    if (r < 0)
-      fprintf(stderr, "evdev: RINGBUF_WAKE failed errno=%d\n", errno);
-  }
-}
-
-static void handle_req(struct recv_msg *msg) {
-  if (msg->type != RECV_REQ)
+  int fd = device_table[0];
+  if (fd < 0)
     return;
-  uint32_t opcode = *(uint32_t *)msg->data;
-
-  int32_t result = 0;
-  if (opcode == (uint32_t)INPUT_BIND) {
-    // Direction A: consumer just registers itself. SHM is accessed via
-    // open("/dev/input/event0") + mmap(MAP_SHARED, fd) — no fd passing.
-    consumer_add((pid_t)msg->src);
-    result = 0;
-  } else if (opcode == (uint32_t)INPUT_UNBIND) {
-    consumer_remove_pid((pid_t)msg->src);
-    result = 0;
-  } else {
-    result = -EINVAL;
-  }
-  // INPUT_BIND/UNBIND are _IOWR('I', ...): the kernel copies the 8-byte arg
-  // (struct input_bind_arg { int shm_fd; int result; }) back to the caller on
-  // reply. The caller (terminal/test) judges success by bind_arg.result, so we
-  // must write result into offset 4 and return it as a full 8-byte reply — not
-  // just pass result as status with reply_len=0 (that leaves bind_arg.result at
-  // its caller-initialized -1 and the caller loops forever).
-  struct input_bind_arg reply;
-  reply.shm_fd = -1;
-  reply.result = result;
-  sys_resp(&reply, sizeof(reply), result);
+  ssize_t r = write(fd, evs, (size_t)n * sizeof(input_event));
+  if (r < 0)
+    fprintf(stderr, "evdev: broadcast write failed errno=%d\n", errno);
 }
 
 // on_key_event: each call fills one event, returns 1=has event / 0=HID empty.
@@ -279,8 +212,11 @@ int main(int argc, char **argv, char **envp) {
   (void)envp;
 
   // 1. Open HID node + mmap kernel HID SHM (triggers usb_hid_kbd_open,
-  // adding our pid into xhci kbd_openers[]).
-  int hid_fd = open("/dev/usb_hid_kbd", O_RDWR);
+  // adding our pid into xhci kbd_openers[]). /dev/hidraw0 is the xHCI HID
+  // node (Ring #1, refact_evdev.md §14); third-party hidraw tools read() it.
+  for (int i = 0; i < MAX_EVDEV_DEVICES; i++)
+    device_table[i] = -1;
+  int hid_fd = open("/dev/hidraw0", O_RDWR);
   void *hid_shm =
       mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, hid_fd, 0);
   get_keycode_init(hid_shm);
@@ -299,36 +235,26 @@ int main(int argc, char **argv, char **envp) {
   init_caps(dev);
   num_devices = 1;
 
-  // 3. Create output SHM ring (driver-owned) + bind to /dev/input/event0 inode.
-  // 3. Create output SHM ring (driver-owned) + bind to /dev/input/event0 inode.
-  //    Layout: ringbuf_header at offset 0, ring data area at offset 128.
-  //    Consumers read via the kernel ring_t path (open + read/poll); the
-  //    producer pushes with ringbuf_push() (overwrite-oldest, never fails).
-  int shm_fd = memfd_create("input_ring", 0);
-  ftruncate(shm_fd, 4096);
-  void *shm = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-
-  for (int i = 0; i < 4096; i++)
-    ((volatile uint8_t *)shm)[i] = 0;
-
-  // ringbuf_header for kernel ring_t (read/poll) + user-space ringbuf_push.
-  volatile ringbuf_header *rb = (volatile ringbuf_header *)shm;
-  rb->magic = RINGBUF_MAGIC;
-  rb->version = 1;
-  rb->capacity = INPUT_RING_CAPACITY_DEFAULT;
-  rb->head = 0;
-  rb->data_offset = 128;
-  rb->elem_size = sizeof(input_event);
-
-  g_ring = rb;
-
-  device_register_shm("input/event0", shm_fd, 0);
-
-  /* Open /dev/input/event0 for RINGBUF_WAKE ioctl (wake ringbuf
-   * poll/epoll consumers like terminal/libinput). */
-  wake_fd = open("/dev/input/event0", O_RDWR);
-  if (wake_fd < 0)
-    fprintf(stderr, "evdev: wake open failed errno=%d\n", errno);
+  // 3. Open control node + register event0 via INPUT_REGISTER ioctl.
+  //    Broker returns an owner write-fd; write() broadcasts to all clients.
+  int control_fd = open("/dev/input/control", O_RDWR);
+  if (control_fd < 0) {
+    fprintf(stderr, "evdev: control open failed errno=%d\n", errno);
+    return 1;
+  }
+  struct {
+    char name[64];
+    uint32_t minor;
+  } reg;
+  __builtin_memset(&reg, 0, sizeof(reg));
+  strncpy(reg.name, "input/event0", sizeof(reg.name) - 1);
+  reg.minor = 0;
+  int owner_fd = ioctl(control_fd, INPUT_REGISTER, &reg);
+  if (owner_fd < 0) {
+    fprintf(stderr, "evdev: INPUT_REGISTER failed errno=%d\n", errno);
+    return 1;
+  }
+  device_table[0] = owner_fd; /* minor 0 → owner write-fd */
 
   {
     struct dev_props props;
@@ -353,7 +279,7 @@ int main(int argc, char **argv, char **envp) {
   if (ipcfd < 0)
     fprintf(stderr, "evdev: ipcfd create failed errno=%d\n", errno);
   // Bind irqfd into the xHCI HID interrupt registry (§4.2).  hid_fd is the
-  // /dev/usb_hid_kbd fd opened at the top of main.
+  // /dev/hidraw0 fd opened at the top of main.
   int brc = ioctl(hid_fd, HID_BIND_IRQFD, &irqfd);
   if (brc < 0)
     fprintf(stderr, "evdev: HID_BIND_IRQFD failed errno=%d\n", errno);
@@ -361,13 +287,13 @@ int main(int argc, char **argv, char **envp) {
   int epfd = epoll_create1(0);
   if (epfd < 0)
     fprintf(stderr, "evdev: epoll_create1 failed errno=%d\n", errno);
-  struct epoll_event ev;
-  ev.events = EPOLLIN; // level-triggered (default, no EPOLLET) — §3.2/§5.4
-  ev.data.fd = irqfd;
-  epoll_ctl(epfd, EPOLL_CTL_ADD, irqfd, &ev);
-  ev.events = EPOLLIN;
-  ev.data.fd = ipcfd;
-  epoll_ctl(epfd, EPOLL_CTL_ADD, ipcfd, &ev);
+  struct epoll_event epev;
+  epev.events = EPOLLIN; // level-triggered (default, no EPOLLET) — §3.2/§5.4
+  epev.data.fd = irqfd;
+  epoll_ctl(epfd, EPOLL_CTL_ADD, irqfd, &epev);
+  epev.events = EPOLLIN;
+  epev.data.fd = ipcfd;
+  epoll_ctl(epfd, EPOLL_CTL_ADD, ipcfd, &epev);
 
   // 4. Main loop: epoll_wait(irqfd | ipcfd).  HID hardware interrupts land on
   //    irqfd (read clears the count, then drain the HID SHM sub-ring to empty);
@@ -385,11 +311,12 @@ int main(int argc, char **argv, char **envp) {
         // HID SHM sub-ring to empty (LT + drain-to-empty = no loss, §3.2/§5.4).
         uint64_t c;
         read(irqfd, &c, 8);
-        input_event ev;
+        input_event batch[16];
         int nevents = 0;
-        while (on_key_event(&ev)) {
-          broadcast_event(&ev);
-          nevents++;
+        input_event ev;
+        while (nevents < (int)(sizeof(batch) / sizeof(batch[0])) &&
+               on_key_event(&ev)) {
+          batch[nevents++] = ev;
         }
         // Send EV_SYN/SYN_REPORT after each batch — libinput/evdev requires it
         // to commit the event sequence.
@@ -402,7 +329,8 @@ int main(int argc, char **argv, char **envp) {
           syn_ev.type = EV_SYN;
           syn_ev.code = 0; // SYN_REPORT
           syn_ev.value = 0;
-          broadcast_event(&syn_ev);
+          broadcast_events(batch, nevents);
+          broadcast_events(&syn_ev, 1);
         }
       } else if (evs[i].data.fd == ipcfd) {
         // Downstream IPC request: non-blocking dequeue (ipcfd_read =
@@ -415,17 +343,12 @@ int main(int argc, char **argv, char **envp) {
           if (rc < 0)
             break; // -EAGAIN: queue empty (errno set by ipcfd_do_read)
           if (msg.type == RECV_REQ) {
-            uint32_t opcode = *(uint32_t *)msg.data;
-            if (_IOC_TYPE(opcode) == 'I') {
-              handle_req(&msg);
-            } else {
-              // inline path: req_data = [cmd][arg<=48B][minor@52]
-              uint32_t cmd = opcode;
-              uint32_t minor = *(uint32_t *)(msg.data + 52);
-              int32_t grab_val =
-                  (_IOC_DIR(cmd) & _IOC_WRITE) ? *(int32_t *)(msg.data + 4) : 0;
-              handle_ioctl(cmd, minor, (pid_t)msg.src, grab_val);
-            }
+            // inline path: req_data = [cmd][arg<=48B][minor@52]
+            uint32_t cmd = *(uint32_t *)msg.data;
+            uint32_t minor = *(uint32_t *)(msg.data + 52);
+            int32_t grab_val =
+                (_IOC_DIR(cmd) & _IOC_WRITE) ? *(int32_t *)(msg.data + 4) : 0;
+            handle_ioctl(cmd, minor, (pid_t)msg.src, grab_val);
           } else if (msg.type == RECV_IOCTL) {
             handle_ioctl(msg.ioctl.cmd, msg.ioctl.minor, (pid_t)msg.src, 0);
           }

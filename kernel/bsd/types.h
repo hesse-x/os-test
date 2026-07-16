@@ -69,6 +69,7 @@ typedef struct file {
   uint64_t offset;
   wait_queue_head *wq;                // 惰性分配：NULL 表示无等待者
   const struct file_operations *f_op; // fd-I/O 分发（NULL=走 type 分发）
+  void *private_data; // 类 Linux：broker/eventfd 等用；f_op->close 负责回收
   union {
     struct pipe *pipe;
     struct shm *shm;

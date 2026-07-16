@@ -44,9 +44,10 @@
 #define TIOCGWINSZ 0x5413
 #define TIOCSWINSZ 0x5414
 
-// Input (generic, evdev-style)
-#define INPUT_BIND _IOWR('I', 0x01, char[8]) // input_bind_arg = 8B
-#define INPUT_UNBIND _IO('I', 0x02)
+// Input control (generic, evdev-style)
+// INPUT_BIND / INPUT_UNBIND removed (evdev broker replaces the SHM-ring
+// consumer-registration protocol). INPUT_REGISTER (control node) below.
+#define INPUT_REGISTER _IOW('I', 0x10, char[68])
 
 // evdev query ioctls (type='E', aligned with linux/input.h)
 #define EVIOCGVERSION _IOR('E', 0x01, int)
@@ -62,10 +63,5 @@
 // caller's irqfd fd number (int).
 #define HID_BIND_IRQFD _IOW('H', 0x01, int)
 #define HID_UNBIND_IRQFD _IO('H', 0x02)
-
-// ringbuf ioctls (type='R')
-#define RINGBUF_WAKE _IO('R', 0x01) // wake ringbuf poll/epoll waiters
-#define RINGBUF_INJECT                                                         \
-  _IOW('R', 0x02, input_event) // inject one event via kernel
 
 #endif

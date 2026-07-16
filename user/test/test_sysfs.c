@@ -464,7 +464,7 @@ void test_sysfs_dev_set_meta_success(void) {
 
 #endif /* TEST */
 
-/* ===== S4: ringbuf_fops 测试 ===== */
+/* ===== S4: evdev broker consumer fd 测试 ===== */
 #ifdef TEST
 
 void test_ringbuf_open_evdev(void) {
@@ -501,33 +501,10 @@ void test_ringbuf_write_einval(void) {
   close(fd);
 }
 
-void test_ringbuf_mmap_eperm(void) {
-  /* ringbuf_mmap only allows the driver owner (ops->driver_pid).
-   * test_sysfs is the driver_pid, so we need a child process (different pid)
-   * to trigger EPERM. */
-  pid_t child = fork();
-  if (child == 0) {
-    int fd = open("/dev/input/event0", O_RDWR | O_NONBLOCK);
-    if (fd < 0) {
-      _exit(1);
-    }
-    void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (p == MAP_FAILED && errno == EPERM) {
-      close(fd);
-      _exit(0); /* success */
-    }
-    close(fd);
-    _exit(2); /* wrong errno or mmap succeeded */
-  }
-  int status;
-  waitpid(child, &status, 0);
-  TEST_ASSERT_EQUAL_INT(0, status);
-}
-
 void test_ringbuf_close_no_crash(void) {
   int fd = open("/dev/input/event0", O_RDWR | O_NONBLOCK);
   TEST_ASSERT_TRUE(fd >= 0);
-  /* close sends RINGBUF_CLOSE notification — should not crash */
+  /* close releases the broker consumer client — should not crash */
   int r = close(fd);
   TEST_ASSERT_EQUAL_INT(0, r);
 }
@@ -541,74 +518,13 @@ void test_ringbuf_read_zero_count(void) {
   close(fd);
 }
 
-void test_ringbuf_read_blocking(void) {
-  /* Use RINGBUF_INJECT ioctl to inject one event via kernel (no mmap needed).
-   * The ioctl writes to SHM + advances head + wakes consumers. */
-  int fd = open("/dev/input/event0", O_RDWR);
-  TEST_ASSERT_TRUE(fd >= 0);
-
-  /* Open a second fd (blocking, no O_NONBLOCK) as the consumer reader */
-  int cons_fd = open("/dev/input/event0", O_RDWR);
-  TEST_ASSERT_TRUE(cons_fd >= 0);
-
-  /* Inject one event via RINGBUF_INJECT */
-  struct input_event ev = {
-      .tv_sec = 1, .tv_usec = 0, .type = EV_KEY, .code = 1, .value = 1};
-  int rc = ioctl(fd, RINGBUF_INJECT, &ev);
-  TEST_ASSERT_EQUAL_INT(0, rc);
-
-  /* blocking read should now return the event */
-  struct input_event out;
-  ssize_t r = read(cons_fd, &out, sizeof(out));
-  TEST_ASSERT_EQUAL_INT((int)sizeof(out), (int)r);
-  TEST_ASSERT_EQUAL_INT(EV_KEY, out.type);
-  TEST_ASSERT_EQUAL_INT(1, out.code);
-
-  close(cons_fd);
-  close(fd);
-}
-
-void test_ringbuf_poll_has_data(void) {
-  int fd = open("/dev/input/event0", O_RDWR);
-  TEST_ASSERT_TRUE(fd >= 0);
-
-  /* poll fd — ring empty initially */
-  int cons_fd = open("/dev/input/event0", O_RDWR | O_NONBLOCK);
-  TEST_ASSERT_TRUE(cons_fd >= 0);
-  struct pollfd pfd = {.fd = cons_fd, .events = POLLIN, .revents = 0};
-  int r = poll(&pfd, 1, 0);
-  TEST_ASSERT_EQUAL_INT(0, r);
-
-  /* Inject event via RINGBUF_INJECT (kernel writes to SHM + advances head +
-   * wakes) */
-  struct input_event ev = {
-      .tv_sec = 0, .tv_usec = 0, .type = EV_KEY, .code = 2, .value = 0};
-  int rc = ioctl(fd, RINGBUF_INJECT, &ev);
-  TEST_ASSERT_EQUAL_INT(0, rc);
-
-  /* Now poll should see POLLIN */
-  pfd.revents = 0;
-  r = poll(&pfd, 1, 0);
-  TEST_ASSERT_EQUAL_INT(1, r);
-  TEST_ASSERT_TRUE(pfd.revents & POLLIN);
-
-  /* Drain the event so subsequent tests don't see stale data */
-  char buf[256];
-  read(cons_fd, buf, sizeof(buf));
-
-  close(cons_fd);
-  close(fd);
-}
-
 void test_ringbuf_ioctl_proxy(void) {
-  /* ringbuf_fops has no ioctl callback (f->f_op->ioctl == NULL), so sys_ioctl
-   * must fall through to the FD_DEV IPC-proxy path that forwards EVIOCG* to
-   * the user-space evdev driver. The plan's original "ioctl_enotty → ENOTTY"
-   * premise is wrong: EVIOCGVERSION is served by evdev and returns EV_VERSION.
+  /* /dev/input/eventN is a broker consumer fd; EVIOCG* is forwarded in-kernel
+   * to the evdev manager pid (broker ioctl path), so a served EVIOCGVERSION
+   * returns EV_VERSION. This verifies the consumer ioctl path reaches the
+   * driver intact (no crash, no spurious ENOTTY).
    *
-   * Case A: a served EVIOCG* returns 0 with the expected payload — proves the
-   *         NULL-f_op fall-through reaches the driver intact (no crash, no
-   *         spurious ENOTTY).
+   * Case A: a served EVIOCG* returns 0 with the expected payload.
    * Case B: an unknown ioctl the driver cannot serve returns -1 with errno
    *         set (evdev's default branch yields -ENOSYS). */
   int fd = open("/dev/input/event0", O_RDWR | O_NONBLOCK);
@@ -641,7 +557,7 @@ void test_sysfs_drm_ioctl_regression(void) {
     return;
   }
   /* DRM ioctl 全链路不应被 sysfs f_op 影响 */
-  /* /dev/dri/card0 没有 f_op (不是 ringbuf)，走原有 FD_DEV path */
+  /* /dev/dri/card0 没有 f_op，走原有 FD_DEV path */
   close(fd);
   TEST_ASSERT_TRUE(1);
 }
@@ -724,16 +640,13 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_sysfs_input_event1_name);
   RUN_TEST(test_sysfs_dev_set_meta_success);
 
-  /* S4: ringbuf_fops */
+  /* S4: evdev broker consumer fd (read/poll/ioctl via /dev/input/eventN) */
   RUN_TEST(test_ringbuf_open_evdev);
   RUN_TEST(test_ringbuf_read_empty_nonblock);
   RUN_TEST(test_ringbuf_poll_empty);
   RUN_TEST(test_ringbuf_write_einval);
-  RUN_TEST(test_ringbuf_mmap_eperm);
   RUN_TEST(test_ringbuf_close_no_crash);
   RUN_TEST(test_ringbuf_read_zero_count);
-  RUN_TEST(test_ringbuf_read_blocking);
-  RUN_TEST(test_ringbuf_poll_has_data);
   RUN_TEST(test_ringbuf_ioctl_proxy);
 #endif
 
