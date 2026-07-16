@@ -234,7 +234,7 @@ kernel/
 - libc.a 为 CMake target `c`，用户 ELF 通过 `LINK_LIBS c` 链接
 - FAT32 锁获取顺序：`i_lock → fat_lock → ahci_lock`（固定，防死锁）
 - inode 号 (ino) = FAT32 start_cluster（自然唯一），设备 inode 自动递增分配
-- 调度锁序（design1）：`wq->lock → scheduler_lock`（资源唤醒通用，单向）；`socket_lock → wq->lock → scheduler_lock`（socket 阻塞 IO）；evdev HID 中断投递例外：ISR 内 `wake_process` 直取 `scheduler_lock`、不经 `wq->lock`，待路径 3（todo #34）落地后撤销
+- 调度锁序（design1）：`wq->lock → scheduler_lock`（资源唤醒通用，单向）；`socket_lock → wq->lock → scheduler_lock`（socket 阻塞 IO）；evdev HID 中断经 irqfd 正规投递，唤醒全走 wq，无例外
 
 ## 开发备注
 

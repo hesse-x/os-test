@@ -2164,26 +2164,14 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       proc->req_result = 0;
       proc->req_replied = 0;
       proc->wait_timed_out = 0;
-      proc->wait_deadline = sched_clock() + 3000000000ULL;
 
-      int cpu = proc->assigned_cpu;
-      uint64_t flags2;
-      spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
-      bool need_sleep = !proc->req_replied;
-      if (need_sleep) {
-        proc->state = BLOCKED;
-        proc->wait_event = WAIT_REQ_REPLY;
-        sched_timer_queue_insert(cpu, proc);
-      } else {
-        sched_timer_queue_disarm(
-            proc); // aborted arm: clear stale wait_deadline (syscall.c:2094)
-      }
-      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
+      if (sched_arm_timed_wait(proc, WAIT_REQ_REPLY,
+                               sched_clock() + 3000000000ULL,
+                               &proc->req_replied))
+        schedule();
 
       file_put(f);
       f = NULL;
-      if (need_sleep)
-        schedule();
 
       if (proc->wait_timed_out)
         return (int64_t)-ETIMEDOUT;
@@ -2261,29 +2249,13 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     proc->req_result = 0;
     proc->req_replied = 0;
     proc->wait_timed_out = 0;
-    proc->wait_deadline = sched_clock() + 3000000000ULL;
 
-    bool need_sleep;
-    {
-      int cpu = proc->assigned_cpu;
-      uint64_t flags2;
-      spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
-      need_sleep = !proc->req_replied;
-      if (need_sleep) {
-        proc->state = BLOCKED;
-        proc->wait_event = WAIT_REQ_REPLY;
-        sched_timer_queue_insert(cpu, proc);
-      } else {
-        sched_timer_queue_disarm(
-            proc); // aborted arm: clear stale wait_deadline (syscall.c:2180)
-      }
-      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
-    }
+    if (sched_arm_timed_wait(proc, WAIT_REQ_REPLY,
+                             sched_clock() + 3000000000ULL, &proc->req_replied))
+      schedule();
 
     file_put(f);
     f = NULL;
-    if (need_sleep)
-      schedule();
 
     if (proc->wait_timed_out)
       return (int64_t)-ETIMEDOUT;

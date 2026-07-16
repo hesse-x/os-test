@@ -43,20 +43,6 @@ static inline void sched_timer_queue_cancel(xtask *proc) {
   }
 }
 
-// sched_timer_queue_disarm: clear a wait_deadline that was set but whose timer
-// was never inserted (lost-wake guard aborted the arm).  Complementary to
-// sched_timer_queue_cancel: cancel removes an *already-queued* timer node;
-// disarm clears a deadline for a timer that was *never queued*.  Without this,
-// a stale wait_deadline!=0 left by an aborted arm would later make
-// wake_from_wait's cancel take the asserting sched_timer_queue_remove path on a
-// wait_node that is NOT on any timer_queue -> ASSERT(!list_empty) panic.
-// Caller sets/clears wait_deadline; no lock strictly required to clear a field
-// the caller owns, but all current call sites invoke it under scheduler_lock
-// (the same lock held across the aborted arm).
-static inline void sched_timer_queue_disarm(xtask *proc) {
-  proc->wait_deadline = 0;
-}
-
 // run_queue_push: the ONLY entry point to enqueue a task's run_node onto a
 // CPU's run_queue.  Asserts single-tenancy (run_node must not already be on
 // any run_queue).  Caller MUST hold cpu_locals[cpu].scheduler_lock.
@@ -104,6 +90,46 @@ static inline void timer_queue_wait_pop(xtask *t) {
   ASSERT(!list_empty(&t->wait_node)); // must be on a timer_queue before pop
   list_remove(&t->wait_node);
   list_init(&t->wait_node); // reset to "not on any timer_queue"
+}
+
+// sched_arm_timed_wait: arm a timed blocking wait on behalf of an IPC caller.
+// Owns the entire arm critical section: take proc->assigned_cpu's
+// scheduler_lock -> re-check *replied_flag (lost-wake guard) -> either set
+// wait_deadline + BLOCKED + event + timer_queue_wait_push, or clear
+// wait_deadline (abort, never armed).  Returns true iff the caller went
+// BLOCKED and must call schedule().
+//
+// The caller NEVER touches wait_deadline directly — deadline_ns is computed
+// out of lock (sched_clock() + timeout) and applied under the lock only when
+// we actually arm.  This structurally eliminates the "set deadline out of
+// lock, forget to clear on aborted arm" class (design1 Q3 form-②).
+//
+// Pre-conditions: caller has reset the per-request fields
+// (req_replied/msg_replied = 0, wait_timed_out = 0, reply buf/len, result)
+// BEFORE calling; *replied_flag is published under this same scheduler_lock by
+// the responder (sys_resp / sys_msg_resp), so the in-lock re-check is
+// race-correct. Depends on design1 B1/B2: wait_node single-tenancy
+// (timer_queue_wait_push asserts list_empty; prior wake/timeout re-inits
+// wait_node).
+static inline bool sched_arm_timed_wait(xtask *proc, wait_event event,
+                                        uint64_t deadline_ns,
+                                        uint8_t *replied_flag) {
+  int cpu = proc->assigned_cpu;
+  uint64_t flags;
+  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+  bool need_sleep = !(*replied_flag);
+  if (need_sleep) {
+    proc->wait_deadline = deadline_ns; // set BEFORE sorted insert
+    proc->state = BLOCKED;
+    proc->wait_event = event;
+    timer_queue_wait_push(cpu, proc); // design1 B1 asserting variant
+  } else {
+    proc->wait_deadline = 0; // abort: absorb disarm semantics —
+  } // clear a deadline whose timer was
+    // never armed (form-①), not just a
+    // defensive wipe of a stale value.
+  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+  return need_sleep;
 }
 
 static inline void wake_from_wait(xtask *p) {

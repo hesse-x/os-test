@@ -87,11 +87,10 @@ pty 无锁 (SPSC ring，design0 模式 1，不走资源锁→wq->lock)
 wq->lock → scheduler_lock              (资源唤醒通用，design1 定稿)
 cmd_wq.lock → scheduler_lock           (virtio-gpu)
 recv_lock  与 scheduler_lock 互不嵌套   (各自独立)
-ISR wake_process 直取 scheduler_lock    (evdev HID 中断投递，design0 保留；不经 wq->lock；路径3落地后撤销)
 ```
 - socket 模式 2：读路径持 socket_lock 查条件 + 持锁 add_wait_queue（取 wq->lock）+ 标 BLOCKED → unlock(socket_lock) → schedule()（取 scheduler_lock，此时 socket_lock 已释放，二者不共持）。不变式：持 wq->lock 时绝不取 socket_lock（__wake_up 回调只取 scheduler_lock，无反向边）。
 - pty 模式 1：SPSC ring 条件无锁可读，挂 wq 不持资源锁，故无「资源锁 → wq->lock」一层。
-- evdev：ISR 上下文 wake_process 用 spin_lock_irqsave(&scheduler_lock) 直取，不经任何 wq->lock；sys_notify 不能在 ISR 调，故此例外保留至路径 3（todo #34）。
+- evdev：HID 中断经 irqfd（`hid_irqfds[]` + `eventfd_signal_isr`，`xhci.c`）正规投递，唤醒全走 wq，无 ISR 直取 scheduler_lock 的例外。
 
 **已完成**：sun_path hash（connect 通过 hash 直接获取 listener PID，消灭全进程 fd_table 扫描）+ RCU（fd_table 读走 rcu_read_lock + file_get/file_put 指针引用，消除所有 peer_fd_lock 读路径），socket_lock → fd_lock 嵌套彻底消除。详见下方 §RCU 设计 和 §sun_path hash 设计。
 任何违反此顺序的代码路径必须标注原因和替代方案。

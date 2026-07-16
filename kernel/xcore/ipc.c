@@ -441,31 +441,10 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   proc->req_replied = 0; // cleared before arming so the post-arm check detects
                          // only a reply to THIS request
   proc->wait_timed_out = 0;
-  proc->wait_deadline = sched_clock() + 5000000000ULL; // 5 second timeout
 
-  int cpu = proc->assigned_cpu;
-  uint64_t flags2;
-  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
-  // Lost-wake guard: if sys_resp already delivered the reply between our wake
-  // of the target and acquiring this lock (it sets req_replied under this
-  // lock), don't arm a wait at all — we're still RUNNING, so just leave state
-  // alone and fall through to return the result. sys_resp only wakes us if we
-  // were already BLOCKED, so when it raced ahead it touched neither state nor
-  // the timer.
-  bool need_sleep = !proc->req_replied;
-  if (need_sleep) {
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_REQ_REPLY;
-    sched_timer_queue_insert(cpu, proc);
-  } else {
-    // Lost-wake guard aborted the arm: wait_deadline was set (ipc.c:488) but
-    // the timer was never inserted.  Clear it so a later wake_from_wait's
-    // cancel does not take the asserting remove path on an unlinked wait_node.
-    sched_timer_queue_disarm(proc);
-  }
-  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
-
-  if (need_sleep)
+  if (sched_arm_timed_wait(proc, WAIT_REQ_REPLY,
+                           sched_clock() + 5000000000ULL, // 5 second timeout
+                           &proc->req_replied))
     schedule();
 
   // Timeout check
@@ -763,26 +742,9 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
   proc->msg_replied = 0; // cleared before arming so the post-arm check detects
                          // only a reply to THIS message
   proc->wait_timed_out = 0;
-  proc->wait_deadline = sched_clock() + 5000000000ULL;
 
-  int cpu = proc->assigned_cpu;
-  uint64_t flags2;
-  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags2);
-  // Lost-wake guard: if sys_msg_resp already replied between our wake of the
-  // target and acquiring this lock (it sets msg_replied under this lock), stay
-  // RUNNING and return the result without sleeping. See sys_req for full note.
-  bool need_sleep = !proc->msg_replied;
-  if (need_sleep) {
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_MSG_REPLY;
-    sched_timer_queue_insert(cpu, proc);
-  } else {
-    sched_timer_queue_disarm(
-        proc); // aborted arm: clear stale wait_deadline (ipc.c:797)
-  }
-  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
-
-  if (need_sleep)
+  if (sched_arm_timed_wait(proc, WAIT_MSG_REPLY, sched_clock() + 5000000000ULL,
+                           &proc->msg_replied))
     schedule();
 
   if (proc->wait_timed_out) {
