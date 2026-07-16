@@ -104,7 +104,7 @@ add_dependencies(hello_dyn_dyn_elf c_so)
 # terminal — dynamic ELF (libc.so + libinput.so), PT_INTERP → ld.so
 add_user_dyn_elf(terminal
     SOURCES driver/terminal_libinput.cc
-    LINK_LIBS input drm m c
+    LINK_LIBS input drm m c udev
     INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/third_party/libinput/src;${CMAKE_SOURCE_DIR}/third_party/libinput/include;${CMAKE_SOURCE_DIR}/user/lib/udev-shim;${CMAKE_SOURCE_DIR}/user/lib/evdev-shim;${CMAKE_SOURCE_DIR}/third_party/drm;${CMAKE_SOURCE_DIR}/third_party/drm/include/drm"
 )
 add_dependencies(terminal_dyn_elf libinput_so drm_so m_so)
@@ -126,6 +126,7 @@ set(LIBINPUT_SOURCES
     ${CMAKE_SOURCE_DIR}/third_party/libinput/src/libinput-plugin-button-debounce.c
     ${CMAKE_SOURCE_DIR}/third_party/libinput/src/libinput-plugin-mouse-wheel.c
     ${CMAKE_SOURCE_DIR}/third_party/libinput/src/path-seat.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/udev-seat.c
     ${CMAKE_SOURCE_DIR}/third_party/libinput/src/timer.c
     ${CMAKE_SOURCE_DIR}/third_party/libinput/src/util-libinput.c
     ${CMAKE_SOURCE_DIR}/third_party/libinput/src/quirks.c
@@ -143,7 +144,8 @@ set(LIBINPUT_SOURCES
     lib/fnmatch.c
     # evdev/udev shims (needed by libinput internal)
     lib/evdev-shim/evdev.c
-    lib/udev-shim/udev.c
+    # udev.c 不在此:libinput.so 经 SO_LINK_LIBS udev 链 libudev.so 取 udev_*
+    # (完整 Linux 模式:libudev 独立 .so,见下方 libudev_so)。
 )
 
 add_user_lib(input
@@ -179,10 +181,27 @@ add_user_lib(libinput_so
     FLAGS "-O2 -DHAVE_QUIRKS -Wno-unused-parameter -Wno-duplicate-decl-specifier -Wno-implicit-function-declaration -Wno-return-type -Wno-int-conversion -Wno-format -Wno-implicit-fallthrough -Wno-sign-compare -Wno-error=cpp -Wno-maybe-uninitialized -Wno-macro-redefined"
     SHARED
     OUTPUT_NAME input
-    SO_LINK_LIBS c
+    SO_LINK_LIBS c udev
     INCLUDE_DIRS ${LIBINPUT_INCLUDE_DIRS}
 )
-add_dependencies(libinput_so c_so)
+add_dependencies(libinput_so c_so libudev_so)
+
+# libudev.so (独立共享库,完整 Linux 模式):udev-shim 的 udev_* API 导出供
+# 终端 main(libinput_udev_create_context 前的 udev_new())与 libinput.so 内部
+# (udev-seat.c 调 udev_*)共享。add_user_lib SHARED 默认 -fvisibility=hidden,
+# 此处 FLAGS 追加 -fvisibility=default 覆盖——udev.c 内非 static 函数全为公共
+# udev_* API(无内部泄漏),故默认可见即全导出,无需逐个 UDEV_EXPORT 标记。
+# 对齐 Linux:libudev 与 libinput 分离;静态消费者(test_udevd/test_libudev/
+# test_udevd_db 各自 SOURCES 编 udev.c)不受影响。
+add_user_lib(libudev_so
+    SOURCES lib/udev-shim/udev.c
+    C
+    FLAGS "-O2 -fvisibility=default"
+    SHARED
+    OUTPUT_NAME udev
+    SO_LINK_LIBS c
+)
+add_dependencies(libudev_so c_so)
 
 if(TEST)
     add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c DEFS TEST)

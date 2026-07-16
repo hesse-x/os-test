@@ -226,6 +226,7 @@ struct sk_buff *skb_alloc(uint32_t data_len) {
   skb->len = data_len;
   skb->consumed = 0;
   skb->num_fds = 0;
+  skb->sender_pid = -1; /* set by sendmsg; -1 = no SCM_RIGHTS sender */
   return skb;
 }
 
@@ -384,6 +385,13 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
   struct sk_buff *skb = skb_alloc(total);
   if (!skb)
     return -ENOMEM;
+
+  // Capture sender PID at sendmsg time for SCM_RIGHTS lazy install on the
+  // receiver (socket.c recvmsg). Must not derive from sock->peer at recv: under
+  // socket activation the binder (init, sock->peer) ≠ the actual sender
+  // (udevd), so fd_lookup would hit the wrong fd table. See sk_buff.sender_pid
+  // comment.
+  skb->sender_pid = current_task->pid;
 
   // Copy data from iovecs
   uint32_t offset = 0;
@@ -603,7 +611,8 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
     // Extract SCM_RIGHTS data from skb before releasing socket_lock
     int num_fds_to_install = 0;
     int orig_fds[SCM_MAX_FD];
-    pid_t sender_pid = sock->peer;
+    pid_t sender_pid =
+        skb->sender_pid; /* actual sendmsg caller, not bind owner */
     if (skb->num_fds > 0 && skb_consumed) {
       for (int i = 0; i < skb->num_fds && num_fds_to_install < SCM_MAX_FD;
            i++) {

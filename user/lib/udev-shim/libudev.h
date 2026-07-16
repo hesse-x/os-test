@@ -74,27 +74,6 @@ void udev_device_unref(struct udev_device *udev_device);
 void udev_monitor_unref(struct udev_monitor *udev_monitor);
 void udev_enumerate_unref(struct udev_enumerate *udev_enumerate);
 
-// Cleanup helpers for _unref_/_cleanup_ macros from libinput's util-mem.h
-static inline void udev_unrefp(struct udev **p) {
-  if (p && *p)
-    udev_unref(*p);
-}
-
-static inline void udev_device_unrefp(struct udev_device **p) {
-  if (p && *p)
-    udev_device_unref(*p);
-}
-
-static inline void udev_enumerate_unrefp(struct udev_enumerate **p) {
-  if (p && *p)
-    udev_enumerate_unref(*p);
-}
-
-static inline void udev_monitor_unrefp(struct udev_monitor **p) {
-  if (p && *p)
-    udev_monitor_unref(*p);
-}
-
 struct udev *udev_new(void);
 struct udev *udev_ref(struct udev *udev);
 void udev_unref(struct udev *udev);
@@ -130,6 +109,13 @@ struct udev_list_entry *
 udev_list_entry_get_next(struct udev_list_entry *list_entry);
 const char *udev_list_entry_get_name(struct udev_list_entry *list_entry);
 const char *udev_list_entry_get_value(struct udev_list_entry *list_entry);
+
+/* 对齐 Linux libudev：udev-seat.c:172 用此宏遍历 enumerate 结果。
+ * get_next 已由 shim 提供（声明见上 / 实现见 udev.c:437），此处仅补 foreach
+ * 宏。 */
+#define udev_list_entry_foreach(list_entry, first_entry)                       \
+  for (list_entry = (first_entry); list_entry != NULL;                         \
+       list_entry = udev_list_entry_get_next(list_entry))
 
 struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev,
                                                    const char *name);

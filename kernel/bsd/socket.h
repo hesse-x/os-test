@@ -25,7 +25,11 @@ typedef struct sk_buff {
   uint32_t consumed;    // bytes already read (SOCK_STREAM partial read)
   int num_fds;          // number of SCM_RIGHTS fds
   int fds[MAX_SCM_FDS]; // SCM_RIGHTS fd numbers (lazy install)
-  uint8_t data[];       // flexible array member
+  pid_t sender_pid;     // PID of sender at sendmsg time (SCM_RIGHTS fd-table
+                    // owner). 捕获于发送瞬间而非 recvmsg 推导 sock->peer:
+                    // socket activation 下 binder(init) ≠ sender(udevd),
+                    // sock->peer=binder_pid 会查错 fd 表(见 socket.c recvmsg)。
+  uint8_t data[]; // flexible array member
 } sk_buff;
 
 // allocate: skb = kmalloc(sizeof(sk_buff) + data_len)

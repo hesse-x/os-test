@@ -226,9 +226,17 @@ ENOSYS 表示"syscall 内核层不存在"，EPERM 表示"syscall 存在但此 fs
 udevd 设备数据库 + 规则引擎 + coldplug **已落地**（对齐 Linux `input_id` builtin + `udevadm trigger`）：udevd 维护 `/run/udev/data/<key>` db（tmp+rename 原子写，依赖 `SYS_RENAME`(98) + tmpfs rename），规则引擎 `input_id_compute` 开 /dev 跑 `EVIOCGBIT` 合成键盘类 `ID_INPUT_*`；sysfs `uevent` 属性可写，coldplug 写 `add` 重广播走 netlink；init settled gate 保证 db 就绪再起 terminal。详见 [udev.md](udev.md)。
 
 延后项（均记 [udev.md](udev.md) 待完成项）：
-- monitor 管道（shim `udev_monitor_*` 仍 no-op stub）——AF_UNIX accept + pipe + SCM_RIGHTS 转发 uevent，完整设计见根目录 `udev_design.md`
 - B6 ID_INPUT_MOUSE/TOUCHPAD/SEAT 全类——依赖 evdev 真实多设备 caps，做合成器（Wayland）时连同真实多输入设备一起做
 - shim 枚举路径对齐 db（`device_is_keyboard` 改走 db 查 property）、uevent 可读 + 接受 remove/change、coldplug 扫 /sys/devices 全树
+
+> monitor 管道**已落地**（commit `221c373`）：shim `udev_monitor_*` 全真实（`enable_receiving` AF_UNIX connect+SCM_RIGHTS 收 pipe rd fd / `get_fd` / `receive_device` 解析 KV），唯一 stub=`filter_add_match_subsystem_devtype`。udevd 完整 daemon（accept→pipe→SCM_RIGHTS 握手 + device 补全 + 广播 + coldplug + settled 门）。终端消费 monitor + crash 重连见根目录 `use_udev_design.md`。
+
+延后项（终端 crash 自愈增强）：
+- terminal respawn 门控（use_udev_design.md §3.4 路径C 备选）：当前 init 收尸循环只 respawn udevd，**不 respawn terminal**（`init.c:138-165` 只比对 `udevd_pid`）。故 U3 终端 monitor 重连耗尽后取 degraded hold（保 pty/shell 活、输入断、5s 低频探活自愈）而非 exit→respawn。若将来要"自愈到全新可用终端"，扩 init 给 terminal 加与 udevd 同款 `crash_count` respawn + burst 上限 + **仅当 udevd 存活时才 respawn terminal** 的门控（避免 udevd 过 `START_LIMIT_BURST=5` 后 terminal respawn 风暴）。非 use_udev 本轮范围。
+
+延后项（use_udev U4 测试收尾，**极低优先级，非验收必需**——基建已全落地，terminal 切 udev 后端 + monitor 重连已可手动验收，下列仅为测试补全，都差不多了不如顺手做完）：
+- test_udevd 热插拔 add 测点（`plan_use_udev.md` U4-T2）：桩设备走两步注册（`device_register_shm`+`device_set_meta` 触发 `nl_uevent_broadcast("add")`，`devtmpfs.c:776`，对齐 `test_sysfs.c:register_event1()`）→ udevd → client pipe，验证 monitor 端到端（非 coldplug 快照路径）。落地即 +1 测点（5→6）。
+- test_udevd crash respawn 重连测点（`plan_use_udev.md` U4 推迟项）：**前置基建缺失**——当前 OS 无 pid 发现机制（无 `/proc`、udevd 不写 pid 文件、`udevd_pid` 仅存 `init.c:116` 栈变量、netlink 广播 `nlmsg_pid=0`，`test_udevd` 是 udevd 兄弟进程无法发现其 pid → `kill_udevd` 不可行）。需先扩 `init.c` spawn udevd 后写 `/run/udev/udevd.pid`（respawn 时刷新），测点读此文件 kill。crash 重连本身已由 U3 终端 spin→`suspend`/`resume` 人工驱动验收（use_udev_design.md §4.2 层2）。
 
 ## 内核限制与已知缺陷（静默截断 / 固定上限类）
 

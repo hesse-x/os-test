@@ -20,6 +20,8 @@
 #include <unity.h>
 
 #include "libudev.h"
+#include <sys/device.h>
+#include <xos/input.h> /* BUS_USB(dev_props.bustype) */
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -114,6 +116,65 @@ void test_monitor_filter_noop(void) {
   udev_unref(u);
 }
 
+/* 两步注册桩(对齐 test_sysfs.c:register_event1 同源理念):device_register_shm
+ * 建 devtmpfs 节点 → device_set_meta 建 sysfs 子树 + nl_uevent_broadcast("add")
+ * (devtmpfs.c:776-777) → udevd 收 uevent → 补全 → 广播进 client pipe。
+ * 桩作 #ifdef TEST 额外测试节点门控,不和真实设备来源耦合
+ * ([[evdev-real-device-source-untouched-this-round]])。
+ * 注:无设备移除 API + uevent_store 只接受 "add"(sysfs.c:316 拒 remove),
+ * 故不清理测试设备(同 test_udevd_db.c/test_sysfs.c 既有做法,TEST 镜像留痕)。 */
+static void trigger_test_device(const char *name, uint32_t minor) {
+  TEST_ASSERT_EQUAL_INT(0, device_register_shm(name, -1, minor));
+  struct dev_props props = {.bustype = BUS_USB,
+                            .vendor = 0x0002,
+                            .product = 0x0002,
+                            .version = 0x0001};
+  strncpy(props.name, "evdev test dev", sizeof(props.name) - 1);
+  props.name[sizeof(props.name) - 1] = '\0';
+  TEST_ASSERT_EQUAL_INT(0, device_set_meta(name, "input", "evdev", &props));
+}
+
+/* 热插拔 add(§4.1):桩设备走两步注册触发真实 add uevent → udevd 收 → 补全
+ * → 广播进 pipe。验证 monitor 端到端(非 coldplug 快照路径)。
+ * 注:enable_receiving 时 udevd accept_client 会重触发 coldplug,先排空 event0
+ * 的 coldplug add,再触发 event9,在有限轮内读到 sysname==event9 即通过
+ * (避免误收 coldplug 的 event0)。 */
+void test_monitor_hotplug_add(void) {
+  struct udev *u = udev_new();
+  TEST_ASSERT_NOT_NULL(u);
+  struct udev_monitor *m = udev_monitor_new_from_netlink(u, "udev");
+  TEST_ASSERT_NOT_NULL(m);
+  TEST_ASSERT_EQUAL_INT(0, udev_monitor_enable_receiving(m));
+  /* 排空 enable_receiving 触发的 coldplug add(event0 等),poll
+   * 短超时:无数据即排空。 */
+  for (int i = 0; i < 8; i++) {
+    struct udev_device *stale = recv_with_timeout(m, 200);
+    if (!stale)
+      break;
+    udev_device_unref(stale);
+  }
+  trigger_test_device("input/event9", 9);
+  /* 在有限轮内读 add 事件直到 event9 到达(coldplug 残余与 event9 竞态兜底)。 */
+  struct udev_device *d = NULL;
+  for (int i = 0; i < 8 && !d; i++) {
+    struct udev_device *e = recv_with_timeout(m, 5000);
+    if (!e)
+      break;
+    if (strcmp(udev_device_get_action(e), "add") == 0 &&
+        strcmp(udev_device_get_sysname(e), "event9") == 0) {
+      d = e;
+    } else {
+      udev_device_unref(e);
+    }
+  }
+  TEST_ASSERT_NOT_NULL(d);
+  TEST_ASSERT_EQUAL_STRING("add", udev_device_get_action(d));
+  TEST_ASSERT_EQUAL_STRING("event9", udev_device_get_sysname(d));
+  udev_device_unref(d);
+  udev_monitor_unref(m);
+  udev_unref(u);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_monitor_enable_receiving);
@@ -121,5 +182,6 @@ int main(void) {
   RUN_TEST(test_monitor_receive_coldplug_add);
   RUN_TEST(test_monitor_device_property_id_input);
   RUN_TEST(test_monitor_filter_noop);
+  RUN_TEST(test_monitor_hotplug_add);
   return UNITY_END();
 }

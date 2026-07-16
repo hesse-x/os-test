@@ -27,7 +27,7 @@ TESTDATA_DIR="${PROJECT_DIR}/testdata"
 
 # Check dependency files
 for f in init.elf myos.elf BOOTX64.EFI evdev.elf terminal.elf shell.elf \
-         libc.a libc.so libinput.so libm.so libdrm.so hello.elf ldso.elf hello_dyn.elf udevd.elf; do
+         libc.a libc.so libinput.so libudev.so libm.so libdrm.so hello.elf ldso.elf hello_dyn.elf udevd.elf; do
     if [ ! -f "${BUILD_DIR}/${f}" ]; then
         echo "mkdisk.sh: ${BUILD_DIR}/${f} not found, run build.sh first"
         exit 1
@@ -95,6 +95,7 @@ mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello.elf"        ::local/hello.
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/ldso.elf"         ::lib/ld.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.so"          ::lib/libc.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libinput.so"     ::lib/libinput.so
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libudev.so"      ::lib/libudev.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libm.so"        ::lib/libm.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libdrm.so"     ::lib/libdrm.so
 # ld.so multi-dependency test stub .so (plan_ld phase D): placed in /test/lib/ separate from production /lib/,

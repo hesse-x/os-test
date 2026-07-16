@@ -254,7 +254,7 @@ UEFI → BOOTX64.EFI → myos.elf → kernel_main
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| monitor 实现 | shim `udev_monitor_*` 仍 no-op stub（`get_fd` 返 -1、`receive_device` 返 NULL）。设计走 udevd AF_UNIX accept + pipe + SCM_RIGHTS 转发 uevent，详见根目录 `udev_design.md`（monitor 管道完整设计）。path-seat 不依赖 monitor | 中 |
+| monitor 实现 | shim `udev_monitor_*` 已全真实实现（commit `221c373`，详见根目录 `udev_design.md`）：`enable_receiving` AF_UNIX connect `/run/udev/socket` + `recvmsg` SCM_RIGHTS 收 pipe rd fd；`get_fd` 返 pipe rd fd（可 epoll）；`receive_device` read pipe + 解析 `\0` 分隔 KV + 建 `udev_device`。**唯一 stub = `filter_add_match_subsystem_devtype`**（返 0，no-op，本轮不实现）。path-seat 不依赖 monitor | ✅ 已落地 |
 | dev_entries 动态化（B5） | `dev_entries[MAX_DEV_ENTRIES=32]` 仍为静态数组；改 kmalloc 动态节点 + 链表（含 `dev_dirs[16]`），删静态上限。DRI/input/serial/pty 并发易撑满 | 低 |
 | B6 ID_INPUT_MOUSE/TOUCHPAD/SEAT 全类 | 依赖 evdev 真实多设备 caps + 每设备独立 caps（evdev 驱动长期基础设施）。做合成器（Wayland）时连同真实多输入设备一起做 | 低 |
 | shim 枚举路径对齐 db | `device_is_keyboard` 改走 db 查 property（对齐 Linux），删 EVIOCGBIT 现算 | 低 |
