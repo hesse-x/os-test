@@ -300,9 +300,8 @@ void force_sig(xtask *proc, int sig, int si_code, void *si_addr) {
 void deliver_signal_to(xtask *target, int sig) {
   __atomic_or_fetch(&target->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
   // Signals must be able to interrupt any blocking state (including
-  // WAIT_FUTEX, the pthread_cancel path); use wake_process_any instead of
-  // the narrow-semantics wake_process (the latter only handles IPC-class
-  // waits).
+  // WAIT_FUTEX, the pthread_cancel path); wake_process_any unconditionally
+  // wakes any BLOCKED target regardless of event type.
   if (target->state == BLOCKED)
     wake_process_any(target);
 }

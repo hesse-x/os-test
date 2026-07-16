@@ -30,7 +30,7 @@ static wait_queue_head *wq_alloc(wait_queue_head **out_wq) {
 
 // Resolve which wait_queue_head a file exposes for poll/epoll waiters, lazily
 // allocating the per-type wq on first use. This MUST return the same wq the
-// fd's data-ready path __wake_ups (pty->wq, sock->wq, pipe->close_wq,
+// fd's data-ready path __wake_ups (pty->wq, sock->wq, pipe->wq,
 // nlsock->wq, ringbuf inode->wq, ep->wq), otherwise a waiter registered here is
 // never woken and (on return) the cleanup remove_wait_queue targets a wq that
 // nobody else touches — leaking the stack wait node and corrupting that wq's
@@ -48,11 +48,9 @@ wait_queue_head *file_wq_get(struct file *f) {
   if (f->type == FD_EPOLL && f->epoll) {
     return &f->epoll->wq;
   }
-  /* pipe: close_wq, woken by pipe close/read/write paths. */
+  /* pipe: p->wq (eager-allocated), woken by pipe close/read/write paths. */
   if (f->type == FD_PIPE && f->pipe) {
-    if (f->pipe->close_wq)
-      return f->pipe->close_wq;
-    return wq_alloc(&f->pipe->close_wq);
+    return f->pipe->wq;
   }
   /* AF_UNIX socket: sock->wq, woken by sendmsg/recvmsg/shutdown. */
   if (f->type == FD_SOCKET && f->sock) {
@@ -71,6 +69,13 @@ wait_queue_head *file_wq_get(struct file *f) {
     if (f->nlsock->wq)
       return f->nlsock->wq;
     return wq_alloc(&f->nlsock->wq);
+  }
+  /* FD_IPC: per-file f->wq, woken by sys_req/notify/resp/msg_to/msg_resp
+   * enqueue paths (evdev_refact.md §5.6). */
+  if (f->type == FD_IPC) {
+    if (f->wq)
+      return f->wq;
+    return wq_alloc(&f->wq);
   }
   /* Generic per-file wq (eventfd/timerfd/signalfd/other). */
   if (f->wq)

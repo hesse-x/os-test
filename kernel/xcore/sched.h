@@ -10,6 +10,7 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "kernel/xcore/list.h"
+#include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/slab.h" // kmem_cache (needed for xtask_cache declaration)
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
@@ -42,6 +43,69 @@ static inline void sched_timer_queue_cancel(xtask *proc) {
   }
 }
 
+// sched_timer_queue_disarm: clear a wait_deadline that was set but whose timer
+// was never inserted (lost-wake guard aborted the arm).  Complementary to
+// sched_timer_queue_cancel: cancel removes an *already-queued* timer node;
+// disarm clears a deadline for a timer that was *never queued*.  Without this,
+// a stale wait_deadline!=0 left by an aborted arm would later make
+// wake_from_wait's cancel take the asserting sched_timer_queue_remove path on a
+// wait_node that is NOT on any timer_queue -> ASSERT(!list_empty) panic.
+// Caller sets/clears wait_deadline; no lock strictly required to clear a field
+// the caller owns, but all current call sites invoke it under scheduler_lock
+// (the same lock held across the aborted arm).
+static inline void sched_timer_queue_disarm(xtask *proc) {
+  proc->wait_deadline = 0;
+}
+
+// run_queue_push: the ONLY entry point to enqueue a task's run_node onto a
+// CPU's run_queue.  Asserts single-tenancy (run_node must not already be on
+// any run_queue).  Caller MUST hold cpu_locals[cpu].scheduler_lock.
+// Idempotent-wake caveat (design1 §4.3): this assert catches class-A residual
+// cross-source mis-wake AND dev-time pairing bugs, NOT the legal class-B wake
+// race where a second wake lands before schedule() dequeues the node — that
+// case must NOT route through the asserting path (see wake_from_wait below,
+// which keeps the silent no-op for list_empty==false).
+static inline void run_queue_push(int cpu, xtask *t) {
+  ASSERT(
+      list_empty(&t->run_node)); // single-tenancy: not on any queue before push
+  list_push_back(&cpu_locals[cpu].run_queue, &t->run_node);
+  cpu_locals[cpu].run_count++;
+}
+
+// run_queue_pop: the ONLY entry point to dequeue a task's run_node from its
+// run_queue.  Asserts the node is currently linked, removes it, decrements the
+// owning CPU's run_count, then re-inits to "not on any queue".  The owning CPU
+// is t->assigned_cpu at call time — callers MUST NOT mutate assigned_cpu before
+// the pop (sched_try_steal_task pops under v's lock while assigned_cpu==v, then
+// reassigns).  Caller MUST hold the scheduler_lock of the CPU that owns the
+// run_queue the node is on.
+static inline void run_queue_pop(xtask *t) {
+  ASSERT(!list_empty(&t->run_node)); // must be on a queue before pop
+  list_remove(&t->run_node);
+  list_init(&t->run_node); // reset to "not on any queue"
+  cpu_locals[t->assigned_cpu].run_count--;
+}
+
+// timer_queue_wait_push: the ONLY entry point to insert a task's wait_node
+// into a CPU's timer_queue.  Asserts single-tenancy (wait_node not already on
+// a timer_queue).  Caller MUST hold cpu_locals[cpu].scheduler_lock.
+// NOTE: differs from run_queue_push — sched_timer_queue_insert does sorted
+// insertion by wait_deadline, so this wrapper delegates to the sorted insert
+// after asserting the precondition.
+static inline void timer_queue_wait_push(int cpu, xtask *t) {
+  ASSERT(list_empty(&t->wait_node)); // single-tenancy: not on any timer_queue
+  sched_timer_queue_insert(cpu, t);
+}
+
+// timer_queue_wait_pop: the ONLY entry point to remove a task's wait_node
+// from its timer_queue.  Asserts linked, removes, re-inits to "not queued".
+// Caller MUST hold the scheduler_lock of the CPU owning the timer_queue.
+static inline void timer_queue_wait_pop(xtask *t) {
+  ASSERT(!list_empty(&t->wait_node)); // must be on a timer_queue before pop
+  list_remove(&t->wait_node);
+  list_init(&t->wait_node); // reset to "not on any timer_queue"
+}
+
 static inline void wake_from_wait(xtask *p) {
   sched_timer_queue_cancel(p);
   p->state = READY;
@@ -55,9 +119,19 @@ static inline void wake_from_wait(xtask *p) {
      Just ensure state=READY and leave run_count untouched: p is already
      runnable and will be dequeued by the next schedule() on `cpu`. */
   if (list_empty(&p->run_node)) {
-    list_push_back(&cpu_locals[cpu].run_queue, &p->run_node);
-    cpu_locals[cpu].run_count++;
+    run_queue_push(cpu, p);
   }
+#ifndef NDEBUG
+  else {
+    // Class-B legal wake race (design1 §4.3/§7.3): a prior wake already
+    // enqueued p but schedule() hasn't dequeued it yet.  This is expected;
+    // the idempotent guard silently absorbs it.  Observe frequency only,
+    // NEVER panic (a real second-push would be a class-A bug, but class-B
+    // races are the common cause of list_empty==false here).
+    printk(LOG_WARN, "wake_from_wait: idempotent no-op pid=%d (class-B race)\n",
+           p->pid);
+  }
+#endif
 
   // Reschedule IPI: set need_resched on target CPU's current task
   // (target is BLOCKED, not running; curr is what's actually running on that
@@ -70,6 +144,32 @@ static inline void wake_from_wait(xtask *p) {
       lapic_send_reschedule(cpu);
     }
   }
+}
+
+// sched_cancel_spurious_wake: cancel a spurious wakeup that enqueued proc's
+// run_node without a matching schedule() dequeue. Used by prepare_to_wait loops
+// (ep_poll / sys_poll) on their early-return / break paths that do NOT go
+// through schedule(): the loop marked state=BLOCKED at the top, a concurrent
+// wake_wq_target may have hit that BLOCKED and pushed run_node into the
+// run_queue (state=READY). If the re-check then finds the condition ready and
+// breaks without calling schedule(), run_node would stay linked — a dangling
+// node that trips run_queue_push's single-tenancy ASSERT on the next
+// block+wake, and trips sched_try_steal_task's ASSERT(state==READY) (state was
+// reset to RUNNING but the node remains). This cancels that: under proc's
+// scheduler_lock, if run_node is still linked, pop it and force state=RUNNING.
+// Idempotent: a no-op if no wake reached us (run_node empty) or if schedule()
+// already dequeued it.
+static inline void sched_cancel_spurious_wake(xtask *proc) {
+  int cpu = proc->assigned_cpu;
+  uint64_t flags;
+  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+  if (!list_empty(&proc->run_node)) {
+    run_queue_pop(proc); // removes from cpu's run_queue, list_init, run_count--
+  }
+  proc->state = RUNNING;
+  proc->wait_event = WAIT_NONE;
+  proc->wait_timed_out = 0;
+  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
 }
 
 // wake_with_event: hold target's scheduler_lock; only wake if target is BLOCKED
@@ -87,12 +187,23 @@ static inline void wake_with_event(xtask *target, wait_event expected_event) {
   spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, flags);
 }
 
+// wake_wq_target: hold target's scheduler_lock; wake if target is BLOCKED.
+// 队列身份制下的资源就绪唤醒：不查 wait_event（task 在我 wq 上即唤醒）。
+// wake_from_wait 内部已设 wait_event=WAIT_NONE，故无需额外设。
+// 用于 wq 回调（如 virtio_gpu_wake_cb）：语义即"task 在我 wq 上就唤醒"，
+// 是去 guard 的 wake_with_event。锁序同 wake_with_event：scheduler_lock 单锁。
+static inline void wake_wq_target(xtask *target) {
+  int tcpu = target->assigned_cpu;
+  uint64_t flags;
+  spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &flags);
+  if (target->state == BLOCKED)
+    wake_from_wait(target);
+  spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, flags);
+}
+
 // wake_process_any: interrupt any blocking state (for signal delivery --
-// signals must be able to interrupt WAIT_FUTEX/WAIT_CHILD/WAIT_PIPE, etc.).
-// Difference from wake_process: wake_process has narrow semantics, only handles
-// IPC-class waits (PIPE/POLL/RECV) and is a no-op on other events;
-// wake_process_any does not distinguish event type, unconditionally wakes any
-// BLOCKED target.
+// signals must be able to interrupt WAIT_FUTEX/WAIT_CHILD/WAIT_RECV, etc.).
+// Does not distinguish event type, unconditionally wakes any BLOCKED target.
 static inline void wake_process_any(xtask *target) {
   int tcpu = target->assigned_cpu;
   uint64_t flags;

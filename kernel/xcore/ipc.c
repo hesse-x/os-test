@@ -25,10 +25,12 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
+#include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 
 #include <xos/errno.h>
 #include <xos/page.h>
+#include <xos/socket.h> // POLLIN
 #include <xos/syscall_nums.h>
 
 // ===================== IRQ owner table (shared with trap.c)
@@ -182,6 +184,98 @@ int64_t sys_yield(int64_t unused1, int64_t unused2, int64_t unused3,
   return 0;
 }
 
+// ipc_dequeue: dequeue one message from proc's recv queue under recv_lock.
+// Single source of truth for the dequeue side effects (back-link fields +
+// per-type copyout + kfree + tail advance) shared by sys_recv (blocking)
+// and ipcfd read (non-blocking).  Returns:
+//   0       — a message was dequeued and copied to buf[/data_buf];
+//   -EAGAIN — queue empty (caller decides blocking vs -EAGAIN);
+//   -EINVAL — RECV_MSG/RECV_IOCTL but data_buf too small (msg still consumed);
+//   -EFAULT — copy_to_user failed (msg still consumed, kmaddr freed).
+// buf/data_buf/data_buf_len are user pointers (validated by callers).
+// Same per-type handling as the original sys_recv dequeue block.
+// Non-static: shared with kernel/bsd/ipcfd.c (ipcfd_do_read).
+int64_t ipc_dequeue(xtask *proc, void __user *buf, void __user *data_buf,
+                    size_t data_buf_len) {
+  spin_lock(&proc->recv_lock);
+  if (proc->recv_head == proc->recv_tail) {
+    spin_unlock(&proc->recv_lock);
+    return -EAGAIN;
+  }
+  if (copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE)) {
+    proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+    spin_unlock(&proc->recv_lock);
+    return -EFAULT;
+  }
+  recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
+  if (msg->type == RECV_REQ) {
+    proc->req_caller_pid = (pid_t)msg->src;
+  }
+  if (msg->type == RECV_MSG) {
+    void *kmaddr = msg->msg.kmaddr;
+    size_t len = msg->msg.len;
+    proc->msg_caller_pid = (pid_t)msg->src;
+
+    if (!data_buf || data_buf_len < len) {
+      kfree(kmaddr);
+      recv_msg *umsg = (recv_msg __force *)buf;
+      umsg->msg.kmaddr = NULL;
+      umsg->msg.len = len;
+      proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+      spin_unlock(&proc->recv_lock);
+      return -EINVAL;
+    }
+
+    if (copy_to_user(data_buf, kmaddr, len)) {
+      kfree(kmaddr);
+      recv_msg *umsg = (recv_msg __force *)buf;
+      umsg->msg.kmaddr = NULL;
+      umsg->msg.len = len;
+      proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+      spin_unlock(&proc->recv_lock);
+      return -EFAULT;
+    }
+    kfree(kmaddr);
+
+    recv_msg *umsg = (recv_msg __force *)buf;
+    umsg->msg.kmaddr = NULL;
+    umsg->msg.len = len;
+  }
+  if (msg->type == RECV_IOCTL) {
+    void *kmaddr = msg->ioctl.kmaddr;
+    size_t len = msg->ioctl.len;
+    proc->req_caller_pid = (pid_t)msg->src;
+
+    if (!data_buf || data_buf_len < len) {
+      kfree(kmaddr);
+      recv_msg *umsg = (recv_msg __force *)buf;
+      umsg->ioctl.kmaddr = NULL;
+      umsg->ioctl.len = len;
+      proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+      spin_unlock(&proc->recv_lock);
+      return -EINVAL;
+    }
+
+    if (copy_to_user(data_buf, kmaddr, len)) {
+      kfree(kmaddr);
+      recv_msg *umsg = (recv_msg __force *)buf;
+      umsg->ioctl.kmaddr = NULL;
+      umsg->ioctl.len = len;
+      proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+      spin_unlock(&proc->recv_lock);
+      return -EFAULT;
+    }
+    kfree(kmaddr);
+
+    recv_msg *umsg = (recv_msg __force *)buf;
+    umsg->ioctl.kmaddr = NULL;
+    umsg->ioctl.len = len;
+  }
+  proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
+  spin_unlock(&proc->recv_lock);
+  return 0;
+}
+
 // ===================== Xcore IPC syscall: recv =====================
 int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                  int64_t unused1, int64_t unused2) {
@@ -206,87 +300,12 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   xtask *proc = current_task;
   int cpu = proc->assigned_cpu;
   while (1) {
-    // Try to dequeue a message from recv queue
-    spin_lock(&proc->recv_lock);
-    if (proc->recv_head != proc->recv_tail) {
-      // Message available: copy to user buffer
-      recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
-      if (copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE)) {
-        spin_unlock(&proc->recv_lock);
-        return (int64_t)-EFAULT;
-      }
-      // If this is an REQ request, record the caller PID for sys_resp
-      if (msg->type == RECV_REQ) {
-        proc->req_caller_pid = (pid_t)msg->src;
-      }
-      // If this is RECV_MSG, copy data to user data_buf and free kernel buffer
-      if (msg->type == RECV_MSG) {
-        void *kmaddr = msg->msg.kmaddr;
-        size_t len = msg->msg.len;
-        proc->msg_caller_pid = (pid_t)msg->src;
-
-        if (!data_buf || data_buf_len < len) {
-          kfree(kmaddr);
-          recv_msg *umsg = (recv_msg __force *)buf;
-          umsg->msg.kmaddr = NULL;
-          umsg->msg.len = len;
-          proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
-          spin_unlock(&proc->recv_lock);
-          return (int64_t)-EINVAL;
-        }
-
-        if (copy_to_user(data_buf, kmaddr, len)) {
-          kfree(kmaddr);
-          recv_msg *umsg = (recv_msg __force *)buf;
-          umsg->msg.kmaddr = NULL;
-          umsg->msg.len = len;
-          proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
-          spin_unlock(&proc->recv_lock);
-          return (int64_t)-EFAULT;
-        }
-        kfree(kmaddr);
-
-        recv_msg *umsg = (recv_msg __force *)buf;
-        umsg->msg.kmaddr = NULL;
-        umsg->msg.len = len;
-      }
-      // If this is RECV_IOCTL, copy arg data to user data_buf and free kernel
-      // buffer (same pattern as RECV_MSG; record caller PID for sys_resp)
-      if (msg->type == RECV_IOCTL) {
-        void *kmaddr = msg->ioctl.kmaddr;
-        size_t len = msg->ioctl.len;
-        proc->req_caller_pid = (pid_t)msg->src;
-
-        if (!data_buf || data_buf_len < len) {
-          kfree(kmaddr);
-          recv_msg *umsg = (recv_msg __force *)buf;
-          umsg->ioctl.kmaddr = NULL;
-          umsg->ioctl.len = len;
-          proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
-          spin_unlock(&proc->recv_lock);
-          return (int64_t)-EINVAL;
-        }
-
-        if (copy_to_user(data_buf, kmaddr, len)) {
-          kfree(kmaddr);
-          recv_msg *umsg = (recv_msg __force *)buf;
-          umsg->ioctl.kmaddr = NULL;
-          umsg->ioctl.len = len;
-          proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
-          spin_unlock(&proc->recv_lock);
-          return (int64_t)-EFAULT;
-        }
-        kfree(kmaddr);
-
-        recv_msg *umsg = (recv_msg __force *)buf;
-        umsg->ioctl.kmaddr = NULL;
-        umsg->ioctl.len = len;
-      }
-      proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
-      spin_unlock(&proc->recv_lock);
+    // Try to dequeue a message from recv queue (shared with ipcfd read).
+    int64_t dr = ipc_dequeue(proc, buf, data_buf, data_buf_len);
+    if (dr == 0)
       return 0;
-    }
-    spin_unlock(&proc->recv_lock);
+    if (dr != -EAGAIN)
+      return dr; // -EINVAL / -EFAULT: message already consumed
 
     // Queue empty: block on WAIT_RECV.
     //
@@ -328,12 +347,6 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
     schedule();
 
-    // EINTR check: ISR notification (recv_intr set by wake_process)
-    if (proc->recv_intr) {
-      proc->recv_intr = 0;
-      return (int64_t)-EINTR;
-    }
-
     // EINTR check: signal pending and deliverable
     if (signal_pending_hook && signal_pending_hook(proc))
       return (int64_t)-EINTR;
@@ -341,77 +354,11 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     // Woken up: check if timed out
     if (proc->wait_timed_out) {
       // Re-check queue before returning timeout
-      spin_lock(&proc->recv_lock);
-      if (proc->recv_head != proc->recv_tail) {
-        if (copy_to_user(buf, proc->recv_buf[proc->recv_tail], RECV_MSG_SIZE)) {
-          spin_unlock(&proc->recv_lock);
-          return (int64_t)-EFAULT;
-        }
-        recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
-        if (msg->type == RECV_REQ) {
-          proc->req_caller_pid = (pid_t)msg->src;
-        }
-        if (msg->type == RECV_MSG) {
-          void *kmaddr = msg->msg.kmaddr;
-          size_t len = msg->msg.len;
-          proc->msg_caller_pid = (pid_t)msg->src;
-
-          if (!data_buf || data_buf_len < len) {
-            kfree(kmaddr);
-            recv_msg *umsg = (recv_msg __force *)buf;
-            umsg->msg.kmaddr = NULL;
-            umsg->msg.len = len;
-            proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
-            spin_unlock(&proc->recv_lock);
-            return (int64_t)-EINVAL;
-          }
-          if (copy_to_user(data_buf, kmaddr, len)) {
-            kfree(kmaddr);
-            recv_msg *umsg = (recv_msg __force *)buf;
-            umsg->msg.kmaddr = NULL;
-            umsg->msg.len = len;
-            proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
-            spin_unlock(&proc->recv_lock);
-            return (int64_t)-EFAULT;
-          }
-          kfree(kmaddr);
-          recv_msg *umsg = (recv_msg __force *)buf;
-          umsg->msg.kmaddr = NULL;
-          umsg->msg.len = len;
-        }
-        if (msg->type == RECV_IOCTL) {
-          void *kmaddr = msg->ioctl.kmaddr;
-          size_t len = msg->ioctl.len;
-          proc->req_caller_pid = (pid_t)msg->src;
-
-          if (!data_buf || data_buf_len < len) {
-            kfree(kmaddr);
-            recv_msg *umsg = (recv_msg __force *)buf;
-            umsg->ioctl.kmaddr = NULL;
-            umsg->ioctl.len = len;
-            proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
-            spin_unlock(&proc->recv_lock);
-            return (int64_t)-EINVAL;
-          }
-          if (copy_to_user(data_buf, kmaddr, len)) {
-            kfree(kmaddr);
-            recv_msg *umsg = (recv_msg __force *)buf;
-            umsg->ioctl.kmaddr = NULL;
-            umsg->ioctl.len = len;
-            proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
-            spin_unlock(&proc->recv_lock);
-            return (int64_t)-EFAULT;
-          }
-          kfree(kmaddr);
-          recv_msg *umsg = (recv_msg __force *)buf;
-          umsg->ioctl.kmaddr = NULL;
-          umsg->ioctl.len = len;
-        }
-        proc->recv_tail = (proc->recv_tail + 1) % RECV_QUEUE_SIZE;
-        spin_unlock(&proc->recv_lock);
+      int64_t dr = ipc_dequeue(proc, buf, data_buf, data_buf_len);
+      if (dr == 0)
         return 0;
-      }
-      spin_unlock(&proc->recv_lock);
+      if (dr != -EAGAIN)
+        return dr; // -EINVAL / -EFAULT: message already consumed
       return (int64_t)-ETIMEDOUT;
     }
     // Non-timeout wakeup: a message was enqueued, loop back to dequeue it
@@ -473,6 +420,15 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   }
   spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
+  // Wake target's ipcfd wq (evdev downstream-IPC fd), if any.  Coexists with
+  // WAIT_RECV above: non-evdev targets have ipcfd_file==NULL → skipped.
+  // (evdev_refact.md §5.6)
+  if (target->ipcfd_file) {
+    wait_queue_head *iwq = file_wq_get(target->ipcfd_file);
+    if (iwq)
+      __wake_up(iwq, POLLIN);
+  }
+
   // Block caller on WAIT_REQ_REPLY. Arm the wait (set BLOCKED + deadline +
   // insert timer) under our own scheduler_lock so the target's sys_resp() can't
   // race between our wake above and setting BLOCKED — same lost-wake fix as
@@ -501,6 +457,11 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     proc->state = BLOCKED;
     proc->wait_event = WAIT_REQ_REPLY;
     sched_timer_queue_insert(cpu, proc);
+  } else {
+    // Lost-wake guard aborted the arm: wait_deadline was set (ipc.c:488) but
+    // the timer was never inserted.  Clear it so a later wake_from_wait's
+    // cancel does not take the asserting remove path on an unlinked wait_node.
+    sched_timer_queue_disarm(proc);
   }
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
 
@@ -557,6 +518,13 @@ int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused3,
     if (caller->state == BLOCKED && caller->wait_event == WAIT_REQ_REPLY)
       wake_from_wait(caller);
     spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
+
+    // Wake caller's ipcfd wq, if any (evdev_refact.md §5.6).
+    if (caller->ipcfd_file) {
+      wait_queue_head *iwq = file_wq_get(caller->ipcfd_file);
+      if (iwq)
+        __wake_up(iwq, POLLIN);
+    }
     proc->req_caller_pid = -1;
     return 0;
   }
@@ -607,6 +575,13 @@ int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused3,
   if (caller->state == BLOCKED && caller->wait_event == WAIT_REQ_REPLY)
     wake_from_wait(caller);
   spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
+
+  // Wake caller's ipcfd wq, if any (evdev_refact.md §5.6).
+  if (caller->ipcfd_file) {
+    wait_queue_head *iwq = file_wq_get(caller->ipcfd_file);
+    if (iwq)
+      __wake_up(iwq, POLLIN);
+  }
 
   proc->req_caller_pid = -1;
   return 0;
@@ -661,6 +636,13 @@ void notify_and_wake(pid_t target_pid, recv_msg *msg) {
     wake_from_wait(target);
   }
   spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
+
+  // Wake target's ipcfd wq, if any (evdev_refact.md §5.6).
+  if (target->ipcfd_file) {
+    wait_queue_head *iwq = file_wq_get(target->ipcfd_file);
+    if (iwq)
+      __wake_up(iwq, POLLIN);
+  }
 }
 
 // ===================== kernel_msg_send =====================
@@ -672,36 +654,6 @@ int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
     resp_len = sizeof(dummy);
   }
   return (int)sys_msg_to(target_pid, (void *)req, req_len, resp, resp_len);
-}
-
-// ===================== wake_process =====================
-// Narrow semantics: only wakes IPC-class waits (WAIT_PIPE/WAIT_POLL/WAIT_RECV).
-// If the target is BLOCKED on a *different* event (e.g. a pty master reader
-// that is currently busy in virtio-gpu via WAIT_VGPU_CMD, or a futex/child
-// wait), this is a no-op: the target isn't waiting on an IPC-readable
-// resource right now, and the consumer re-checks its condition (ring buffer /
-// recv queue) on its own next read, so skipping the wake cannot lose data.
-// (Previously this case hit an ASSERT panic; that was too strict for callers
-// like pty_slave_write that wake a reader pid unconditionally without
-// knowing what it is currently blocked on.)
-void wake_process(pid_t pid) {
-  if (pid < 0 || pid >= MAX_PROC)
-    return;
-  xtask *target = task_get(pid);
-
-  int target_cpu = target->assigned_cpu;
-  uint64_t flags;
-  spin_lock_irqsave(&cpu_locals[target_cpu].scheduler_lock, &flags);
-  if (target->pid == pid && target->state == BLOCKED) {
-    wait_event ev = target->wait_event;
-    if (ev == WAIT_PIPE || ev == WAIT_POLL || ev == WAIT_RECV) {
-      if (ev == WAIT_RECV)
-        target->recv_intr = 1;
-      wake_from_wait(target);
-    }
-    // else: target blocked on an unrelated event — no-op (see comment above).
-  }
-  spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 }
 
 // ===================== Xcore IPC syscall: notify =====================
@@ -734,6 +686,13 @@ int64_t sys_notify(int64_t arg1, int64_t unused1, int64_t unused2,
     wake_from_wait(target);
   }
   spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
+
+  // Wake target's ipcfd wq, if any (evdev_refact.md §5.6).
+  if (target->ipcfd_file) {
+    wait_queue_head *iwq = file_wq_get(target->ipcfd_file);
+    if (iwq)
+      __wake_up(iwq, POLLIN);
+  }
   return 0;
 }
 
@@ -787,6 +746,13 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
   }
   spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
+  // Wake target's ipcfd wq, if any (evdev_refact.md §5.6).
+  if (target->ipcfd_file) {
+    wait_queue_head *iwq = file_wq_get(target->ipcfd_file);
+    if (iwq)
+      __wake_up(iwq, POLLIN);
+  }
+
   // Block caller on WAIT_MSG_REPLY. Arm the wait under our own scheduler_lock
   // — same caller-side lost-wake fix as sys_req / sys_recv / sys_ioctl proxy.
   xtask *proc = current_task;
@@ -810,6 +776,9 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
     proc->state = BLOCKED;
     proc->wait_event = WAIT_MSG_REPLY;
     sched_timer_queue_insert(cpu, proc);
+  } else {
+    sched_timer_queue_disarm(
+        proc); // aborted arm: clear stale wait_deadline (ipc.c:797)
   }
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
 
@@ -913,6 +882,13 @@ int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t unused1,
   if (caller->state == BLOCKED && caller->wait_event == WAIT_MSG_REPLY)
     wake_from_wait(caller);
   spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
+
+  // Wake caller's ipcfd wq, if any (evdev_refact.md §5.6).
+  if (caller->ipcfd_file) {
+    wait_queue_head *iwq = file_wq_get(caller->ipcfd_file);
+    if (iwq)
+      __wake_up(iwq, POLLIN);
+  }
 
   proc->msg_caller_pid = -1;
   return 0;

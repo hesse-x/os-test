@@ -44,6 +44,8 @@
 #define FD_SHM 6
 #define FD_FILE 7
 #define FD_TTY 8
+#define FD_IPC 9
+#define FD_EVENTFD 10
 
 struct inode;
 struct unix_sock;
@@ -138,6 +140,14 @@ DRV_STATIC_ASSERT(sizeof(proc) == 256, "driver proc size drift");
 #undef DRV_STATIC_ASSERT
 
 #endif /* KERNEL_BSD_PROC_H */
+
+// ===================== file refcount =====================
+// Must match kernel/bsd/types.h.
+
+#ifndef KERNEL_BSD_TYPES_H
+void file_put(struct file *f);
+static inline void file_get(struct file *f) { refcount_inc(&f->f_count); }
+#endif
 
 // ===================== fd lookup =====================
 // Inline helper (same as kernel/bsd/types.h version).

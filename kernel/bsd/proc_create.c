@@ -30,6 +30,7 @@
 #include "kernel/xcore/xtask.h"
 #include <xos/elf.h>
 #include <xos/mman.h>
+#include <xos/page.h>
 #include <xos/signal.h>
 
 // process_create_elf: create user process from ELF data
@@ -280,8 +281,7 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
     }
   }
-  list_push_back(&cpu_locals[cpu].run_queue, &proc->run_node);
-  cpu_locals[cpu].run_count++;
+  run_queue_push(cpu, proc);
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
 
   return proc;

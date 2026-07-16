@@ -29,9 +29,10 @@ mmap_region *add_mmap_region(xtask *t, uint64_t vaddr, uint64_t size,
 
 // === IPC ===
 void notify_and_wake(pid_t target_pid, recv_msg *msg);
-void wake_process(pid_t pid);
 int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
                     void *resp, size_t resp_len);
+int64_t ipc_dequeue(xtask *proc, void __user *buf, void __user *data_buf,
+                    size_t data_buf_len);
 
 // === memory ===
 void *kmalloc(size_t size);
@@ -54,6 +55,14 @@ void irq_register(int vec, irq_handler_fn fn);
 void irq_unregister(int vec);
 int irq_owner_check(int irq);
 void irq_owner_cleanup(pid_t pid);
+
+// === ISR-safe eventfd signal (for driver hard-IRQ context) ===
+struct file;
+void eventfd_signal_isr(struct file *f);
+
+// === file wait-queue (lazy wq for ipcfd/poll wake) ===
+struct wait_queue_head;
+struct wait_queue_head *file_wq_get(struct file *f);
 
 // === SHM (kernel internal) ===
 uint64_t shm_alloc_pages(uint64_t npages);

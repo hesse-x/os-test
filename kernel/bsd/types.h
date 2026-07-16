@@ -41,15 +41,15 @@
 #define FD_TIMERFD 11
 #define FD_SIGNALFD 12
 #define FD_NETLINK 13
+#define FD_IPC 14
 
 typedef struct pipe {
   uint8_t *buf;
   uint32_t head;
   uint32_t tail;
-  pid_t read_pid;
-  pid_t write_pid;
   refcount_t p_count;
-  wait_queue_head *close_wq; // 惰性分配，epoll 等待者挂此
+  wait_queue_head
+      *wq; // eager 分配：数据就绪(POLLIN/POLLOUT) + close(POLLHUP) 共用
 } pipe;
 
 struct unix_sock;
@@ -87,6 +87,8 @@ typedef struct file {
     struct timerfd_ctx *timerfd;
     struct signalfd_ctx *signalfd;
     struct netlink_sock *nlsock;
+    pid_t ipcfd_owner_pid; // FD_IPC: owner task pid whose recv queue this fd
+                           // drains
   };
 } file;
 

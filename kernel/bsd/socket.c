@@ -38,6 +38,10 @@
 // ===================== Global socket lock =====================
 spinlock socket_lock = SPINLOCK_INIT;
 
+// Forward declaration: poll_wait_cb is defined later (per-fd poll callback)
+// but used by unix_sock_recvmsg/sys_accept before its definition.
+static void poll_wait_cb(wait_queue_t *wq, unsigned long flags);
+
 // ===================== Bind name space =====================
 static struct unix_bind_entry *unix_bind_table[UNIX_HASH_SIZE];
 
@@ -226,13 +230,20 @@ struct sk_buff *skb_alloc(uint32_t data_len) {
   skb->len = data_len;
   skb->consumed = 0;
   skb->num_fds = 0;
-  skb->sender_pid = -1; /* set by sendmsg; -1 = no SCM_RIGHTS sender */
   return skb;
 }
 
 void skb_free(struct sk_buff *skb) {
-  if (skb)
-    kfree(skb);
+  if (!skb)
+    return;
+  // Release any SCM_RIGHTS file refs the skb still owns. The recv path
+  // transfers ownership (clears num_fds) when it installs the files; this
+  // covers dropped/flushed skbs (e.g. socket close with unconsumed data).
+  for (int i = 0; i < skb->num_fds; i++) {
+    if (skb->files[i])
+      file_put(skb->files[i]);
+  }
+  kfree(skb);
 }
 
 void skb_enqueue(struct unix_sock *sock, struct sk_buff *skb) {
@@ -273,8 +284,6 @@ struct unix_sock *unix_sock_alloc(void) {
   sock->recv_queue_head = NULL;
   sock->recv_queue_tail = NULL;
   sock->recv_queue_len = 0;
-  sock->blocked_reader = -1;
-  sock->blocked_writer = -1;
   sock->backlog_head = NULL;
   sock->backlog_tail = NULL;
   sock->backlog_len = 0;
@@ -284,7 +293,14 @@ struct unix_sock *unix_sock_alloc(void) {
   sock->sun_path[0] = '\0';
   sock->bind_inode = NULL;
   sock->owner_pid = -1;
-  sock->wq = NULL;
+  /* eager 分配 wq：阻塞 reader 改 add_wait_queue 后 wq 必须在创建时非
+   * NULL（§7.1）。 */
+  sock->wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
+  if (!sock->wq) {
+    kfree(sock);
+    return NULL;
+  }
+  init_wait_queue_head(sock->wq);
   return sock;
 }
 
@@ -345,19 +361,11 @@ void unix_sock_release(struct unix_sock *sock) {
 // ===================== Wake helpers =====================
 
 void unix_sock_wake_reader(struct unix_sock *sock) {
-  if (sock->blocked_reader >= 0) {
-    wake_process(sock->blocked_reader);
-  }
-  if (sock->wq)
-    __wake_up(sock->wq, POLLIN);
+  __wake_up(sock->wq, POLLIN);
 }
 
 void unix_sock_wake_writer(struct unix_sock *sock) {
-  if (sock->blocked_writer >= 0) {
-    wake_process(sock->blocked_writer);
-  }
-  if (sock->wq)
-    __wake_up(sock->wq, POLLOUT);
+  __wake_up(sock->wq, POLLOUT);
 }
 
 // ===================== Internal sendmsg/recvmsg =====================
@@ -385,13 +393,6 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
   struct sk_buff *skb = skb_alloc(total);
   if (!skb)
     return -ENOMEM;
-
-  // Capture sender PID at sendmsg time for SCM_RIGHTS lazy install on the
-  // receiver (socket.c recvmsg). Must not derive from sock->peer at recv: under
-  // socket activation the binder (init, sock->peer) ≠ the actual sender
-  // (udevd), so fd_lookup would hit the wrong fd table. See sk_buff.sender_pid
-  // comment.
-  skb->sender_pid = current_task->pid;
 
   // Copy data from iovecs
   uint32_t offset = 0;
@@ -425,6 +426,10 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
         }
         if (num_fds > 0) {
           int *fds = (int *)CMSG_DATA(cmsg);
+          // Resolve sender fds to struct file* here, while the sender's fd
+          // table is authoritative (Linux semantics). file_get() holds a ref
+          // so a later sender close() can't free the object before the
+          // receiver installs it. skb_free() drops any uninstalled refs.
           rcu_read_lock();
           for (int i = 0; i < num_fds; i++) {
             if (fds[i] < 0 || fds[i] >= MAX_FD) {
@@ -438,7 +443,8 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
               skb_free(skb);
               return -EBADF;
             }
-            skb->fds[skb->num_fds++] = fds[i];
+            file_get(tf);
+            skb->files[skb->num_fds++] = tf;
           }
           rcu_read_unlock();
         }
@@ -479,15 +485,10 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
 
   // Enqueue
   skb_enqueue(peer_sock, skb);
-  pid_t blocked_reader = peer_sock->blocked_reader;
   spin_unlock(&socket_lock);
 
-  // Wake reader outside socket_lock
-  if (blocked_reader >= 0) {
-    wake_process(blocked_reader);
-  }
-  if (peer_sock->wq)
-    __wake_up(peer_sock->wq, POLLIN);
+  // Wake reader (挂 peer_sock->wq) outside socket_lock
+  __wake_up(peer_sock->wq, POLLIN);
 
   return (int64_t)total;
 }
@@ -536,9 +537,14 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
         return -EAGAIN;
       }
 
-      // Block reader
-      sock->blocked_reader = current_task->pid;
+      // Block reader: 持 socket_lock 挂 wq（模式2，条件检查与挂 wq
+      // 同一临界区防丢唤醒）。
       xtask *proc = current_task;
+      wait_queue_t wait;
+      wait.func = poll_wait_cb;
+      wait.data = proc;
+      list_init(&wait.node);
+      add_wait_queue(sock->wq, &wait);
       proc->state = BLOCKED;
       proc->wait_event = WAIT_POLL;
       proc->wait_deadline =
@@ -552,9 +558,8 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
       schedule();
       // Timeout check
       if (proc->wait_timed_out) {
-        spin_lock(&socket_lock);
-        sock->blocked_reader = -1;
-        spin_unlock(&socket_lock);
+        proc->state = RUNNING;
+        remove_wait_queue(sock->wq, &wait);
         return -ETIMEDOUT;
       }
       // EINTR check
@@ -564,17 +569,14 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
         uint64_t deliv = pend & ~proc->proc->sig_blocked;
         deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
         if (deliv) {
-          spin_lock(&socket_lock);
-          sock->blocked_reader = -1;
-          spin_unlock(&socket_lock);
+          proc->state = RUNNING;
+          remove_wait_queue(sock->wq, &wait);
           return (int64_t)-EINTR;
         }
       }
-      spin_lock(&socket_lock);
-      sock->blocked_reader = -1;
-      // Re-try after wake
-      spin_unlock(&socket_lock);
-      continue;
+      proc->state = RUNNING;
+      remove_wait_queue(sock->wq, &wait);
+      continue; // 醒后回顶重新 lock → 重查 recv_queue
     }
 
     ; // We have data. Calculate how much to read.
@@ -608,16 +610,17 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
     skb->consumed += to_read;
     bool skb_consumed = (skb->consumed >= skb->len);
 
-    // Extract SCM_RIGHTS data from skb before releasing socket_lock
+    // Extract SCM_RIGHTS file refs from skb before releasing socket_lock.
+    // Ownership transfers to scm_files[] (we clear skb->num_fds so skb_free
+    // won't drop the refs); the install loop below owns them thereafter.
     int num_fds_to_install = 0;
-    int orig_fds[SCM_MAX_FD];
-    pid_t sender_pid =
-        skb->sender_pid; /* actual sendmsg caller, not bind owner */
+    struct file *scm_files[SCM_MAX_FD];
     if (skb->num_fds > 0 && skb_consumed) {
       for (int i = 0; i < skb->num_fds && num_fds_to_install < SCM_MAX_FD;
            i++) {
-        orig_fds[num_fds_to_install++] = skb->fds[i];
+        scm_files[num_fds_to_install++] = skb->files[i];
       }
+      skb->num_fds = 0; // transferred ownership
     }
 
     // Remove consumed skb and release socket_lock
@@ -627,47 +630,28 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
       skb_free(skb);
     }
 
-    pid_t blocked_writer = sock->blocked_writer;
     spin_unlock(&socket_lock);
 
-    // Wake writer outside lock
-    if (blocked_writer >= 0) {
-      wake_process(blocked_writer);
-    }
-
-    // Process SCM_RIGHTS — sequential locks, no nesting
-    int num_fds_installed = 0;
+    // Install SCM_RIGHTS files into the receiver's fd table — sequential
+    // locks, no nesting. Files were ref-resolved at sendmsg time, so no
+    // sender pid/fd re-lookup (which previously broke socket-activation: the
+    // listening fd is bound by init but accept/sendmsg run in udevd).
     int installed_fds[SCM_MAX_FD];
+    int num_fds_installed = 0;
     if (do_scm) {
       xtask *proc = current_task;
       for (int i = 0; i < num_fds_to_install && num_fds_installed < SCM_MAX_FD;
            i++) {
-        int orig_fd = orig_fds[i];
-        // Step 1: RCU read — validate + file_get (atomic verify+hold, no
-        // TOCTOU)
-        struct file *src = NULL;
-        if (sender_pid >= 0 && sender_pid < MAX_PROC) {
-          xtask *sender = task_get(sender_pid);
-          if (sender->pid == sender_pid && sender->mm && sender->proc->files &&
-              orig_fd >= 0 && orig_fd < MAX_FD) {
-            rcu_read_lock();
-            src = fd_lookup(sender->proc->files, orig_fd);
-            if (src)
-              file_get(src); // hold ref, sender close won't free
-            rcu_read_unlock();
-          }
-        }
-        if (!src)
-          continue;
+        struct file *src = scm_files[i];
 
-        // Step 2: receiver_fd_lock — find free slot + install pointer
+        // receiver_fd_lock — find free slot + install pointer
         spinlock *fdlk = &proc->proc->files->fd_lock;
         spin_lock(fdlk);
         int new_fd = alloc_fd(proc->proc->files, 0);
         if (new_fd < 0) {
           spin_unlock(fdlk);
-          file_put(src);
-          break; // no free fd slots
+          file_put(src); // drop this file's ref
+          break;         // no free fd slots
         }
         fd_install(proc->proc->files, new_fd,
                    src); // install pointer directly, no extra bump needed
@@ -677,6 +661,10 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
 
         installed_fds[num_fds_installed++] = new_fd;
       }
+      // Drop refs for any files we didn't install (e.g. broke out early on
+      // EMFILE). Installed files are now owned by the receiver's fd table.
+      for (int i = num_fds_installed; i < num_fds_to_install; i++)
+        file_put(scm_files[i]);
     }
 
     // Write SCM_RIGHTS to control buffer
@@ -722,16 +710,9 @@ void unix_sock_close(struct unix_sock *sock) {
     skb_free(skb);
   }
 
-  // Wake blocked reader/writer and notify peer
-  pid_t reader = sock->blocked_reader;
-  pid_t writer = sock->blocked_writer;
+  // Notify peer: mark its read side shutdown + detach back-reference
   struct unix_sock *peer_s = sock->peer_sock;
-  pid_t peer_reader = -1, peer_writer = -1;
   if (peer_s) {
-    peer_reader = peer_s->blocked_reader;
-    peer_writer = peer_s->blocked_writer;
-    peer_s->blocked_reader = -1;
-    peer_s->blocked_writer = -1;
     // Mark the peer's read side as shutdown so subsequent recv/poll on the
     // peer sees EOF (POLLIN with read returning 0), matching Linux semantics
     // for close() of the remote end.
@@ -739,31 +720,12 @@ void unix_sock_close(struct unix_sock *sock) {
     // Detach back-reference so the peer never dereferences us after free.
     peer_s->peer_sock = NULL;
   }
-  sock->blocked_reader = -1;
-  sock->blocked_writer = -1;
 
   spin_unlock(&socket_lock);
 
-  // Wake our blocked reader/writer outside lock
-  if (reader >= 0)
-    wake_process(reader);
-  if (writer >= 0)
-    wake_process(writer);
-
-  // Wake peer's blocked reader/writer so it can detect EOF/EPIPE
-  if (peer_reader >= 0)
-    wake_process(peer_reader);
-  if (peer_writer >= 0)
-    wake_process(peer_writer);
-  // Note: no PID-based fallback wake. When peer_s is NULL the peer socket was
-  // already closed; its process may be in any wait state (e.g. WAIT_CHILD)
-  // and wake_process() ASSERTs on non-IPC events. Socket-level wakeups are
-  // already covered by peer_reader/peer_writer and the __wake_up() calls below.
-
-  // Notify epoll-style waiters of close-driven readiness (POLLHUP).
-  if (sock->wq)
-    __wake_up(sock->wq, POLLHUP | POLLIN | POLLOUT);
-  if (peer_s && peer_s->wq)
+  // 唤醒本端与对端阻塞 reader/writer（各自挂自己 wq）+ epoll 等待者（POLLHUP）
+  __wake_up(sock->wq, POLLHUP | POLLIN | POLLOUT);
+  if (peer_s)
     __wake_up(peer_s->wq, POLLHUP | POLLIN | POLLOUT);
 
   // Release reference (actual free when ref_count hits 0)
@@ -1096,8 +1058,12 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         ret = -EAGAIN;
         goto out;
       }
-      // Blocking: wait with 30s timeout
-      listen_sock->blocked_reader = proc->pid;
+      // Blocking: block — 持 socket_lock 挂 wq（模式2）
+      wait_queue_t wait;
+      wait.func = poll_wait_cb;
+      wait.data = proc;
+      list_init(&wait.node);
+      add_wait_queue(listen_sock->wq, &wait);
       proc->state = BLOCKED;
       proc->wait_event = WAIT_POLL;
       proc->wait_deadline = sched_clock() + 30000000000ULL; // 30 second timeout
@@ -1110,9 +1076,8 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       schedule();
       // Timeout check
       if (proc->wait_timed_out) {
-        spin_lock(&socket_lock);
-        listen_sock->blocked_reader = -1;
-        spin_unlock(&socket_lock);
+        proc->state = RUNNING;
+        remove_wait_queue(listen_sock->wq, &wait);
         ret = -ETIMEDOUT;
         goto out;
       }
@@ -1123,16 +1088,14 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         uint64_t deliv = pend & ~proc->proc->sig_blocked;
         deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
         if (deliv) {
-          spin_lock(&socket_lock);
-          listen_sock->blocked_reader = -1;
-          spin_unlock(&socket_lock);
+          proc->state = RUNNING;
+          remove_wait_queue(listen_sock->wq, &wait);
           ret = -EINTR;
           goto out;
         }
       }
-      spin_lock(&socket_lock);
-      listen_sock->blocked_reader = -1;
-      spin_unlock(&socket_lock);
+      proc->state = RUNNING;
+      remove_wait_queue(listen_sock->wq, &wait);
       continue; // re-check backlog after wake
     }
 
@@ -1351,15 +1314,10 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   }
   listener->backlog_len++;
 
-  // Wake listener's blocked_reader (accept)
-  pid_t blocked_reader = listener->blocked_reader;
+  // Wake listener's blocked accept (挂 listener->wq)
   spin_unlock(&socket_lock);
 
-  if (blocked_reader >= 0) {
-    wake_process(blocked_reader);
-  }
-  if (listener->wq)
-    __wake_up(listener->wq, POLLIN);
+  __wake_up(listener->wq, POLLIN);
 
   file_put(cf);
   return 0;
@@ -1774,35 +1732,14 @@ int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t unused1,
     sock->shutdown_write = 1;
   }
 
-  pid_t reader = sock->blocked_reader;
-  pid_t writer = sock->blocked_writer;
-  // If we shut down write, peer's recvmsg should return EOF — wake peer's
-  // blocked reader If we shut down read, peer's sendmsg should return EPIPE —
-  // wake peer's blocked writer
-  pid_t peer_reader = -1, peer_writer = -1;
-  if (sock->peer_sock) {
-    if (how == SHUT_WR || how == SHUT_RDWR) {
-      peer_reader = sock->peer_sock->blocked_reader;
-      sock->peer_sock->blocked_reader = -1;
-    }
-    if (how == SHUT_RD || how == SHUT_RDWR) {
-      peer_writer = sock->peer_sock->blocked_writer;
-      sock->peer_sock->blocked_writer = -1;
-    }
-  }
-  sock->blocked_reader = -1;
-  sock->blocked_writer = -1;
+  struct unix_sock *peer_s = sock->peer_sock;
 
   spin_unlock(&socket_lock);
 
-  if (reader >= 0)
-    wake_process(reader);
-  if (writer >= 0)
-    wake_process(writer);
-  if (peer_reader >= 0)
-    wake_process(peer_reader);
-  if (peer_writer >= 0)
-    wake_process(peer_writer);
+  // 唤醒本端与对端阻塞 reader/writer（各自挂自己 wq）
+  __wake_up(sock->wq, POLLHUP | POLLIN | POLLOUT);
+  if (peer_s)
+    __wake_up(peer_s->wq, POLLHUP | POLLIN | POLLOUT);
 
   file_put(shf);
   return 0;
@@ -1814,7 +1751,7 @@ int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t unused1,
 static void poll_wait_cb(wait_queue_t *wq, unsigned long flags) {
   xtask *proc = (xtask *)wq->data;
   (void)flags;
-  wake_with_event(proc, WAIT_POLL);
+  wake_wq_target(proc);
 }
 
 int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
@@ -1876,6 +1813,12 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   int64_t ret = 0;
   for (;;) {
+    // prepare_to_wait: 先标 BLOCKED 再 re-poll，使 fd 的 __wake_up
+    // 若在重查后到达 命中已 BLOCKED 的 task（poll 是多 wq，pwq[]
+    // 注册结构保留，只动 state 位置）。
+    proc->state = BLOCKED;
+    proc->wait_event = WAIT_POLL;
+    proc->wait_timed_out = 0;
     int ready = 0;
 
     // Check each fd and register a wait entry on its wq.
@@ -1979,9 +1922,6 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       proc->wait_deadline = 0;
     }
 
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_POLL;
-    proc->wait_timed_out = 0;
     schedule();
 
     // EINTR check (before timeout check: signal priority over timeout)
@@ -2010,6 +1950,13 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   }
 
 poll_out:
+  // prepare_to_wait: 循环顶部标过 BLOCKED，若 re-poll 期间某 fd 的 poll_wait_cb
+  // 命中 wake_wq_target 把 run_node push 进了 run_queue（state=READY），goto
+  // poll_out 不走 schedule() 会留下悬空 run_node（下次 block+wake 撞
+  // run_queue_push 单租户 ASSERT， 或被 steal 偷到 state≠READY 撞
+  // sched.c:382）。cancel 掉虚假唤醒：摘 run_node + state=RUNNING。所有 goto
+  // poll_out 路径统一在此处理。
+  sched_cancel_spurious_wake(proc);
   // Tear down every wait registration still held. Single cleanup point so no
   // return path can leave a pwq[i] on a wq (leaked heap node + dangling wq
   // links that wedge a later __wake_up traversal).

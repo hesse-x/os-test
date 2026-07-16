@@ -11,6 +11,7 @@
 #include "kernel/bsd/eventfd.h"
 #include "kernel/bsd/eventpoll.h"
 #include "kernel/bsd/file_poll.h"
+#include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
@@ -145,6 +146,17 @@ __poll file_poll(struct file *f, __poll events) {
         if (pend & ~bp->sig_blocked)
           revents |= (events & POLLIN);
       }
+    }
+  } else if (f->type == FD_IPC) {
+    // FD_IPC: POLLIN iff owner's recv queue is non-empty.  Non-owner
+    // (cross-process hand-off) reports 0 — never ready, harmless to a
+    // foreign epoll (evdev_refact.md §4.3 越权防御).
+    pid_t owner_pid = f->ipcfd_owner_pid;
+    if (owner_pid >= 0 && owner_pid < MAX_PROC) {
+      xtask *o = task_get(owner_pid);
+      if (o->pid == owner_pid && o == current_task &&
+          o->recv_head != o->recv_tail)
+        revents |= (events & POLLIN);
     }
   } else if (f->type == FD_NETLINK) {
     struct netlink_sock *nlsock = f->nlsock;

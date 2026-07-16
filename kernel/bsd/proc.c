@@ -22,6 +22,7 @@
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/ipcfd.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/pty.h"
@@ -42,6 +43,7 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
+#include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 
 #include <xos/elf.h>
@@ -50,6 +52,7 @@
 #include <xos/mman.h>
 #include <xos/page.h>
 #include <xos/signal.h>
+#include <xos/socket.h>
 #include <xos/thread.h>
 
 // Minimal file_io_req for FD_FILE CLOSE notification (must match fs_driver
@@ -192,8 +195,7 @@ void file_put(struct file *f) {
       wake_pipe_peers(p, f->flags);
       if (refcount_dec_and_test(&p->p_count)) {
         kfree(p->buf);
-        if (p->close_wq)
-          kfree(p->close_wq);
+        kfree(p->wq);
         kfree(p);
       }
     }
@@ -263,6 +265,11 @@ void file_put(struct file *f) {
       f->signalfd = NULL;
     }
     break;
+  case FD_IPC:
+    // Clear the owner task's ipcfd_file back-link and drop the create-time
+    // reference (evdev_refact.md §4.3 生命周期 / §5.6).
+    ipcfd_close(f);
+    break;
   case FD_NETLINK:
     if (f->nlsock)
       netlink_sock_close(f->nlsock);
@@ -315,17 +322,14 @@ void pty_close_file(struct file *f) {
             __atomic_or_fetch(&tasks[p]->proc->sig_pending, 1ULL << SIGHUP,
                               __ATOMIC_RELEASE);
             // SIGHUP must interrupt any blocking state (including
-            // WAIT_FUTEX/WAIT_CHILD); use wake_process_any instead of the
-            // narrow-semantics wake_process.
+            // WAIT_FUTEX/WAIT_CHILD); wake_process_any unconditionally wakes
+            // any BLOCKED target regardless of event type.
             if (tasks[p]->state == BLOCKED)
               wake_process_any(tasks[p]);
           }
         }
       }
-      if (pty->s_read_pid >= 0)
-        wake_process(pty->s_read_pid);
-      if (pty->s_write_pid >= 0)
-        wake_process(pty->s_write_pid);
+      __wake_up(pty->wq, POLLHUP | POLLIN | POLLOUT);
     }
   } else {
     pty->slave_refs--;
@@ -334,8 +338,7 @@ void pty_close_file(struct file *f) {
       pty->m_to_s_head = 0;
       pty->m_to_s_tail = 0;
       // Wake master read — it gets EOF
-      if (pty->m_read_pid >= 0)
-        wake_process(pty->m_read_pid);
+      __wake_up(pty->wq, POLLHUP | POLLIN);
       pty->slave_opened = 0;
 
       // Remove /dev/ptsN from devtmpfs
@@ -941,8 +944,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
     }
   }
-  list_push_back(&cpu_locals[cpu].run_queue, &child->run_node);
-  cpu_locals[cpu].run_count++;
+  run_queue_push(cpu, child);
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
 
   // 9. Parent returns child PID
@@ -1214,8 +1216,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
     }
   }
-  list_push_back(&cpu_locals[cpu].run_queue, &child->run_node);
-  cpu_locals[cpu].run_count++;
+  run_queue_push(cpu, child);
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
 
   return (int64_t)child->pid;

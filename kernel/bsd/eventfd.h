@@ -29,4 +29,10 @@ struct file;
 int64_t eventfd_do_read(struct file *f, void *buf);
 int64_t eventfd_do_write(struct file *f, const void *buf, size_t len);
 
+// ISR-safe signal: increment ctx->count under irqsave and wake pollers.
+// Callable from hard-IRQ context (xHCI ISR).  No copy_from_user, no
+// current_task, no schedule().  ctx->lock MUST be taken irqsave here and
+// everywhere else ctx->lock is taken (see evdev_refact.md §5.2).
+void eventfd_signal_isr(struct file *f);
+
 #endif // KERNEL_BSD_EVENTFD_H

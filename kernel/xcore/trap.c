@@ -601,7 +601,7 @@ static void timer_handler(trapframe *tf) {
     xtask *p = LIST_ENTRY(list_front(head), xtask, wait_node);
     if (p->wait_deadline > now)
       break; // sorted, stop at first unexpired
-    list_remove(&p->wait_node);
+    timer_queue_wait_pop(p);
     if (p->state == BLOCKED) {
       p->state = READY;
       p->wait_event = WAIT_NONE;
@@ -634,8 +634,17 @@ static void timer_handler(trapframe *tf) {
     int tcpu = p->assigned_cpu;
     uint64_t tflags;
     spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &tflags);
-    list_push_back(&cpu_locals[tcpu].run_queue, &p->run_node);
-    cpu_locals[tcpu].run_count++;
+    // design1 §4.5: timer delivery routes through run_queue_push so the
+    // list_empty check unifies with wake_from_wait.  This is safe because
+    // the state==BLOCKED gate (trap.c:605) + wait_node single-tenancy already
+    // prevent a timer from seeing the same task twice; if a resource wake
+    // already pushed run_node (wake_from_wait canceled the timer entry first),
+    // list_empty is false and run_queue_push's ASSERT would trip — BUT that
+    // cannot happen here because wake_from_wait's cancel removed this task's
+    // wait_node from timer_queue, so timer_handler never reaches this task.
+    // The mutual exclusion with wake_from_wait (same assigned_cpu lock) is
+    // preserved: do NOT change the lock or drop it.
+    run_queue_push(tcpu, p);
     spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, tflags);
   }
 

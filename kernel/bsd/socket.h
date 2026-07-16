@@ -23,17 +23,13 @@ typedef struct sk_buff {
   struct sk_buff *next; // linked list next
   uint32_t len;         // data length
   uint32_t consumed;    // bytes already read (SOCK_STREAM partial read)
-  int num_fds;          // number of SCM_RIGHTS fds
-  int fds[MAX_SCM_FDS]; // SCM_RIGHTS fd numbers (lazy install)
-  pid_t sender_pid;     // PID of sender at sendmsg time (SCM_RIGHTS fd-table
-                    // owner). 捕获于发送瞬间而非 recvmsg 推导 sock->peer:
-                    // socket activation 下 binder(init) ≠ sender(udevd),
-                    // sock->peer=binder_pid 会查错 fd 表(见 socket.c recvmsg)。
-  uint8_t data[]; // flexible array member
+  int num_fds;          // number of SCM_RIGHTS files carried
+  struct file *files[MAX_SCM_FDS]; // SCM_RIGHTS files (ref-held at sendmsg)
+  uint8_t data[];                  // flexible array member
 } sk_buff;
 
 // allocate: skb = kmalloc(sizeof(sk_buff) + data_len)
-// free: kfree(skb)
+// free: kfree(skb) — skb_free() releases any ref-held files first.
 
 // ===================== unix_sock state =====================
 #define UNIX_MAX_BACKLOG 8
@@ -58,8 +54,7 @@ typedef struct unix_sock {
   struct sk_buff *recv_queue_head;
   struct sk_buff *recv_queue_tail;
   int recv_queue_len;
-  pid_t blocked_reader; // PID blocked in recvmsg/read (-1 = none)
-  pid_t blocked_writer; // PID blocked in sendmsg/write (-1 = none)
+  // 阻塞等待者改挂 sock->wq，不再记录 pid（队列身份制，§5.1）
 
   // Listen backlog (un-accepted connections)
   struct unix_sock *backlog_head;
@@ -78,7 +73,8 @@ typedef struct unix_sock {
       *bind_inode; /* VFS bind 路径：socket inode 引用（NULL=哈希表占名） */
   pid_t owner_pid; /* bind 进程 pid（VFS 路径用，对齐 bind_entry.owner_pid） */
 
-  wait_queue_head *wq; // 惰性分配，epoll 等待者挂此
+  wait_queue_head *wq; // eager 分配（unix_sock_create 即 kmalloc），阻塞
+                       // reader/epoll 等待者挂此
 } unix_sock;
 
 // ===================== Bind name space =====================
@@ -147,8 +143,5 @@ int64_t unix_sock_read(struct unix_sock *sock, void *buf, size_t len);
 void unix_sock_wake_reader(struct unix_sock *sock);
 void unix_sock_wake_writer(struct unix_sock *sock);
 void unix_sock_close(struct unix_sock *sock);
-
-// Forward declaration from trap.c
-void wake_process(pid_t pid);
 
 #endif // KERNEL_SOCKET_H

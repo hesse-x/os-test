@@ -11,13 +11,13 @@
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/types.h"
 #include "kernel/driver/serial.h"
+#include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
-#include "kernel/xcore/trap.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <xos/errno.h>
@@ -92,6 +92,14 @@ static int pty_eintr_check(xtask *proc) {
   return deliv ? 1 : 0;
 }
 
+// pty wq 回调：__wake_up → 唤醒挂在 pty->wq 的阻塞 reader/writer。
+// 不查 wait_event（队列身份制：在 pty->wq 上即唤醒）。
+static void pty_wake_cb(wait_queue_t *wq, unsigned long flags) {
+  xtask *target = (xtask *)wq->data;
+  (void)flags;
+  wake_wq_target(target);
+}
+
 // Write a single byte to ring, return 1 on success, 0 if no space
 static int pty_ring_write1(uint8_t *buf, uint32_t *head, uint32_t tail,
                            uint8_t byte) {
@@ -164,11 +172,6 @@ struct pty *pty_alloc(int *out_index) {
   pty->t_winsize.ws_col = 0;
   pty->t_winsize.ws_xpixel = 0;
   pty->t_winsize.ws_ypixel = 0;
-  pty->m_read_pid = -1;
-  pty->m_write_pid = -1;
-  pty->s_read_pid = -1;
-  pty->s_write_pid = -1;
-  pty->master_owner_pid = -1;
   pty->index = index;
   pty->master_refs = 0;
   pty->slave_refs = 0;
@@ -177,6 +180,16 @@ struct pty *pty_alloc(int *out_index) {
   pty->t_sid = 0;
   pty->t_pgid = 0;
   pty->pts_priv = NULL;
+
+  /* eager 分配 wq：pty close 路径（proc.c pty_close_file）需对 pty->wq 调
+   * __wake_up 唤醒对端（§5.2）。OOM 回退：释放 pty 后返回 NULL。 */
+  pty->wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
+  if (!pty->wq) {
+    spin_unlock(&pty_alloc_lock);
+    kfree(pty);
+    return NULL;
+  }
+  init_wait_queue_head(pty->wq);
 
   pty_table[index] = pty;
   *out_index = index;
@@ -210,7 +223,6 @@ int ptmx_open(xtask *proc, int fd) {
 
   // All allocations succeeded — commit state
   pty->master_refs = 1;
-  pty->master_owner_pid = proc->pid;
 
   __memset(priv, 0, sizeof(struct pts_dev_priv));
   priv->ops.driver_pid = 0;
@@ -280,10 +292,7 @@ int pts_open(xtask *proc, int fd) {
 
   // Wake a master blocked in pty_master_read waiting for slave to open,
   // so it re-checks slave_refs and proceeds to block for data.
-  if (pty->m_read_pid >= 0)
-    wake_process(pty->m_read_pid);
-  if (pty->wq)
-    __wake_up(pty->wq, POLLIN);
+  __wake_up(pty->wq, POLLIN);
 
   return 0;
 }
@@ -306,6 +315,11 @@ int pty_is_master_inode(struct inode *inode) {
 
 // ===================== pty_master_read =====================
 int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
+  wait_queue_t wait;
+  wait.func = pty_wake_cb;
+  wait.data = proc;
+  list_init(&wait.node);
+  add_wait_queue(pty->wq, &wait);
   while (pty_ring_avail(pty->s_to_m_head, pty->s_to_m_tail) == 0) {
     // EOF only after slave was opened and then closed.
     // If slave has never been opened, avoid false EOF that triggers
@@ -314,38 +328,57 @@ int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
       if (pty->slave_opened) {
         printk(LOG_INFO, "pty_master_read: EOF pty=%d (slave closed)\n",
                pty->index);
+        proc->state = RUNNING;
+        remove_wait_queue(pty->wq, &wait);
         return 0; // real EOF
       }
       // Slave not yet opened: block or EAGAIN
-      if (pty_is_nonblock(proc, pty, 1))
+      if (pty_is_nonblock(proc, pty, 1)) {
+        proc->state = RUNNING;
+        remove_wait_queue(pty->wq, &wait);
         return -EAGAIN;
-      pty->m_read_pid = proc->pid;
+      }
       proc->state = BLOCKED;
-      proc->wait_event = WAIT_PIPE;
-      schedule();
-      pty->m_read_pid = -1;
-      if (pty_eintr_check(proc))
+      proc->wait_event = WAIT_NONE;
+      if (pty_eintr_check(proc)) {
+        proc->state = RUNNING;
+        remove_wait_queue(pty->wq, &wait);
         return -EINTR;
+      }
+      schedule();
+      if (pty_eintr_check(proc)) {
+        proc->state = RUNNING;
+        remove_wait_queue(pty->wq, &wait);
+        return -EINTR;
+      }
       continue; // re-check conditions after wake
     }
-    if (pty_is_nonblock(proc, pty, 1))
+    if (pty_is_nonblock(proc, pty, 1)) {
+      proc->state = RUNNING;
+      remove_wait_queue(pty->wq, &wait);
       return -EAGAIN;
+    }
 
-    pty->m_read_pid = proc->pid;
     proc->state = BLOCKED;
-    proc->wait_event = WAIT_PIPE;
-    schedule();
-    pty->m_read_pid = -1;
-    if (pty_eintr_check(proc))
+    proc->wait_event = WAIT_NONE;
+    if (pty_eintr_check(proc)) {
+      proc->state = RUNNING;
+      remove_wait_queue(pty->wq, &wait);
       return -EINTR;
+    }
+    schedule();
+    if (pty_eintr_check(proc)) {
+      proc->state = RUNNING;
+      remove_wait_queue(pty->wq, &wait);
+      return -EINTR;
+    }
   }
+  proc->state = RUNNING;
+  remove_wait_queue(pty->wq, &wait);
 
   int nread = pty_ring_read(pty->s_to_m_buf, pty->s_to_m_head,
                             &pty->s_to_m_tail, (uint8_t *)buf, (int)len);
-  if (pty->s_write_pid >= 0)
-    wake_process(pty->s_write_pid);
-  if (pty->wq)
-    __wake_up(pty->wq, POLLOUT);
+  __wake_up(pty->wq, POLLOUT);
   return (int64_t)nread;
 }
 
@@ -355,10 +388,7 @@ int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
   // len==0: EOF signal (Ctrl-D empty linebuf → slave read returns 0)
   if (len == 0) {
     pty->eof_pending = 1;
-    if (pty->s_read_pid >= 0)
-      wake_process(pty->s_read_pid);
-    if (pty->wq)
-      __wake_up(pty->wq, POLLIN);
+    __wake_up(pty->wq, POLLIN);
     return 0;
   }
 
@@ -370,10 +400,7 @@ int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
                        (const uint8_t *)buf + written, (int)(len - written));
     if (n > 0) {
       written += n;
-      if (pty->s_read_pid >= 0)
-        wake_process(pty->s_read_pid);
-      if (pty->wq)
-        __wake_up(pty->wq, POLLIN);
+      __wake_up(pty->wq, POLLIN);
       continue;
     }
 
@@ -384,11 +411,23 @@ int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
       return -EAGAIN;
     }
 
-    pty->m_write_pid = proc->pid;
+    wait_queue_t wait;
+    wait.func = pty_wake_cb;
+    wait.data = proc;
+    list_init(&wait.node);
+    add_wait_queue(pty->wq, &wait);
     proc->state = BLOCKED;
-    proc->wait_event = WAIT_PIPE;
+    proc->wait_event = WAIT_NONE;
+    if (pty_eintr_check(proc)) {
+      proc->state = RUNNING;
+      remove_wait_queue(pty->wq, &wait);
+      if (written > 0)
+        break;
+      return -EINTR;
+    }
     schedule();
-    pty->m_write_pid = -1;
+    proc->state = RUNNING;
+    remove_wait_queue(pty->wq, &wait);
     if (pty_eintr_check(proc)) {
       if (written > 0)
         break;
@@ -410,29 +449,48 @@ int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
     return 0; // EOF — returns 0 once then clears flag
   }
 
+  wait_queue_t wait;
+  wait.func = pty_wake_cb;
+  wait.data = proc;
+  list_init(&wait.node);
+  add_wait_queue(pty->wq, &wait);
   while (pty_ring_avail(pty->m_to_s_head, pty->m_to_s_tail) == 0) {
-    if (pty->master_refs == 0)
+    if (pty->master_refs == 0) {
+      proc->state = RUNNING;
+      remove_wait_queue(pty->wq, &wait);
       return 0; // EOF
-    if (pty_is_nonblock(proc, pty, 0))
+    }
+    if (pty_is_nonblock(proc, pty, 0)) {
+      proc->state = RUNNING;
+      remove_wait_queue(pty->wq, &wait);
       return -EAGAIN;
+    }
 
-    pty->s_read_pid = proc->pid;
     proc->state = BLOCKED;
-    proc->wait_event = WAIT_PIPE;
-    schedule();
-    pty->s_read_pid = -1;
-    if (pty_eintr_check(proc))
+    proc->wait_event = WAIT_NONE;
+    if (pty_eintr_check(proc)) {
+      proc->state = RUNNING;
+      remove_wait_queue(pty->wq, &wait);
       return -EINTR;
-    if (pty->master_refs == 0)
+    }
+    schedule();
+    if (pty_eintr_check(proc)) {
+      proc->state = RUNNING;
+      remove_wait_queue(pty->wq, &wait);
+      return -EINTR;
+    }
+    if (pty->master_refs == 0) {
+      proc->state = RUNNING;
+      remove_wait_queue(pty->wq, &wait);
       return 0;
+    }
   }
+  proc->state = RUNNING;
+  remove_wait_queue(pty->wq, &wait);
 
   int nread = pty_ring_read(pty->m_to_s_buf, pty->m_to_s_head,
                             &pty->m_to_s_tail, (uint8_t *)buf, (int)len);
-  if (pty->m_write_pid >= 0)
-    wake_process(pty->m_write_pid);
-  if (pty->wq)
-    __wake_up(pty->wq, POLLOUT);
+  __wake_up(pty->wq, POLLOUT);
   return (int64_t)nread;
 }
 
@@ -467,12 +525,7 @@ int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
 
     if (wrote) {
       written++;
-      if (pty->m_read_pid >= 0)
-        wake_process(pty->m_read_pid);
-      if (pty->master_owner_pid >= 0)
-        wake_process(pty->master_owner_pid);
-      if (pty->wq)
-        __wake_up(pty->wq, POLLIN);
+      __wake_up(pty->wq, POLLIN);
       continue;
     }
 
@@ -483,11 +536,23 @@ int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
       return -EAGAIN;
     }
 
-    pty->s_write_pid = proc->pid;
+    wait_queue_t wait;
+    wait.func = pty_wake_cb;
+    wait.data = proc;
+    list_init(&wait.node);
+    add_wait_queue(pty->wq, &wait);
     proc->state = BLOCKED;
-    proc->wait_event = WAIT_PIPE;
+    proc->wait_event = WAIT_NONE;
+    if (pty_eintr_check(proc)) {
+      proc->state = RUNNING;
+      remove_wait_queue(pty->wq, &wait);
+      if (written > 0)
+        break;
+      return -EINTR;
+    }
     schedule();
-    pty->s_write_pid = -1;
+    proc->state = RUNNING;
+    remove_wait_queue(pty->wq, &wait);
     if (pty_eintr_check(proc)) {
       if (written > 0)
         break;
@@ -570,8 +635,8 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
           __atomic_or_fetch(&tasks[p]->proc->sig_pending, 1ULL << SIGWINCH,
                             __ATOMIC_RELEASE);
           // SIGWINCH must interrupt any blocking state (including
-          // WAIT_FUTEX/WAIT_CHILD); use wake_process_any instead of the
-          // narrow-semantics wake_process.
+          // WAIT_FUTEX/WAIT_CHILD); wake_process_any unconditionally wakes
+          // any BLOCKED target regardless of event type.
           if (tasks[p]->state == BLOCKED)
             wake_process_any(tasks[p]);
         }

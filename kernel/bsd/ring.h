@@ -21,7 +21,7 @@
 
 #include <stdint.h>
 
-#include "kernel/bsd/fops.h" /* __poll, struct file */
+#include "kernel/bsd/devtmpfs.h" /* __poll, struct file */
 
 struct shm;
 struct file;

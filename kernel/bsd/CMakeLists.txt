@@ -7,6 +7,6 @@ add_kernel_object(bsd_obj
             vfs.c fat32.c inode.c page_cache.c devtmpfs.c mount.c sysfs.c tmpfs.c
             socket.c pty.c elf_loader.c futex.c
             file_wq.c file_poll.c eventpoll.c eventfd.c timerfd.c signalfd.c
-            netlink.c fops.c
+            netlink.c fops.c ipcfd.c
             ring.c
 )

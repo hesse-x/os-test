@@ -26,6 +26,7 @@
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/ipcfd.h"
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
@@ -259,8 +260,7 @@ int64_t sys_exit_group(int64_t arg1, int64_t unused1, int64_t unused2,
         tasks[i]->state = READY;
         tasks[i]->wait_event = WAIT_NONE;
         tasks[i]->wait_timed_out = 0;
-        list_push_back(&cpu_locals[tcpu].run_queue, &tasks[i]->run_node);
-        cpu_locals[tcpu].run_count++;
+        run_queue_push(tcpu, tasks[i]);
       }
       spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, tflags);
     }
@@ -853,6 +853,14 @@ int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   return (int64_t)-EINVAL;
 }
 
+// pipe wq 回调：__wake_up(p->wq) → 唤醒挂在 p->wq 的阻塞 reader/writer。
+// 不查 wait_event（队列身份制：在 p->wq 上即唤醒）。类比 ring.c ring_wake_cb。
+static void pipe_wake_cb(wait_queue_t *wq, unsigned long flags) {
+  xtask *target = (xtask *)wq->data;
+  (void)flags;
+  wake_wq_target(target);
+}
+
 // ===================== BSD syscall: pipe =====================
 int64_t sys_pipe(int64_t arg1, int64_t unused1, int64_t unused2,
                  int64_t unused3, int64_t unused4, int64_t unused5) {
@@ -898,15 +906,23 @@ int64_t sys_pipe(int64_t arg1, int64_t unused1, int64_t unused2,
   p->buf = buf;
   p->head = 0;
   p->tail = 0;
-  p->read_pid = -1;
-  p->write_pid = -1;
-  p->close_wq = NULL;
+  p->wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
+  if (!p->wq) {
+    fd_uninstall(proc->proc->files, read_fd);
+    fd_uninstall(proc->proc->files, write_fd);
+    kfree(p);
+    kfree(buf);
+    spin_unlock(fdlk);
+    return (int64_t)-ENOMEM;
+  }
+  init_wait_queue_head(p->wq);
   refcount_set(&p->p_count, 2);
 
   struct file *fr = (struct file *)kmalloc(sizeof(struct file));
   if (!fr) {
     fd_uninstall(proc->proc->files, read_fd);
     fd_uninstall(proc->proc->files, write_fd);
+    kfree(p->wq);
     kfree(p);
     kfree(buf);
     spin_unlock(fdlk);
@@ -924,6 +940,7 @@ int64_t sys_pipe(int64_t arg1, int64_t unused1, int64_t unused2,
     fd_uninstall(proc->proc->files, write_fd);
     file_put(fr);
     fd_uninstall(proc->proc->files, read_fd);
+    kfree(p->wq);
     kfree(p);
     kfree(buf);
     spin_unlock(fdlk);
@@ -1246,49 +1263,70 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         ret = -EAGAIN;
         goto out;
       }
-      p->write_pid = proc->pid;
-      proc->state = BLOCKED;
-      proc->wait_event = WAIT_PIPE;
-      proc->wait_deadline = sched_clock() + 5000000000ULL;
-      {
-        int cpu = proc->assigned_cpu;
-        uint64_t flags;
-        spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
-        sched_timer_queue_insert(cpu, proc);
-        spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
-      }
-      schedule();
-      p->write_pid = -1;
-      if (proc->wait_timed_out) {
-        p->write_pid = -1;
-        if (written > 0)
-          break;
-        ret = -ETIMEDOUT;
-        goto out;
-      }
-      {
-        uint64_t pend =
-            __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-        uint64_t deliv = pend & ~proc->proc->sig_blocked;
-        deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
-        if (deliv) {
+      /* 阻塞写：挂 p->wq + prepare_to_wait 顺序（先挂 wq 标 BLOCKED → 重查空间
+       * → signal_pending → schedule）。SPSC 无锁 ring，模式1，不引入 pipe 锁。
+       */
+      wait_queue_head *wq = p->wq;
+      wait_queue_t wait;
+      wait.func = pipe_wake_cb;
+      wait.data = proc;
+      list_init(&wait.node);
+      add_wait_queue(wq, &wait);
+      for (;;) {
+        proc->state = BLOCKED;
+        proc->wait_event = WAIT_NONE;
+        if ((p->head + 1) % PIPE_BUF_SIZE != p->tail)
+          break; /* 有空间 */
+        if (f->flags & O_NONBLOCK) {
+          sched_cancel_spurious_wake(proc);
+          remove_wait_queue(wq, &wait);
           if (written > 0)
             break;
-          ret = -EINTR;
+          ret = -EAGAIN;
           goto out;
         }
+        proc->wait_deadline = sched_clock() + 5000000000ULL;
+        {
+          int cpu = proc->assigned_cpu;
+          uint64_t flags;
+          spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+          sched_timer_queue_insert(cpu, proc);
+          spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+        }
+        schedule();
+        if (proc->wait_timed_out) {
+          sched_cancel_spurious_wake(proc);
+          remove_wait_queue(wq, &wait);
+          if (written > 0)
+            break;
+          ret = -ETIMEDOUT;
+          goto out;
+        }
+        {
+          uint64_t pend =
+              __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
+          uint64_t deliv = pend & ~proc->proc->sig_blocked;
+          deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+          if (deliv) {
+            sched_cancel_spurious_wake(proc);
+            remove_wait_queue(wq, &wait);
+            if (written > 0)
+              break;
+            ret = -EINTR;
+            goto out;
+          }
+        }
       }
-      continue;
+      sched_cancel_spurious_wake(proc);
+      remove_wait_queue(wq, &wait);
+      continue; // 回外层 while 重查（含 p_count<=1 的 EPIPE）
     }
     p->buf[p->head] = ((const char __force *)buf)[written];
     p->head = (p->head + 1) % PIPE_BUF_SIZE;
     written++;
   }
 
-  if (p->read_pid >= 0)
-    wake_with_event(task_get(p->read_pid), WAIT_PIPE);
-  if (p->close_wq)
-    __wake_up(p->close_wq, POLLIN);
+  __wake_up(p->wq, POLLIN);
 
   ret = (int64_t)written;
 
@@ -1616,34 +1654,62 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       ret = -EAGAIN;
       goto out;
     }
-    p->read_pid = proc->pid;
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_PIPE;
-    proc->wait_deadline = sched_clock() + 5000000000ULL;
-    {
-      int cpu = proc->assigned_cpu;
-      uint64_t flags;
-      spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
-      sched_timer_queue_insert(cpu, proc);
-      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
-    }
-    schedule();
-    p->read_pid = -1;
-    if (proc->wait_timed_out) {
-      p->read_pid = -1;
-      ret = -ETIMEDOUT;
-      goto out;
-    }
-    {
-      uint64_t pend =
-          __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-      uint64_t deliv = pend & ~proc->proc->sig_blocked;
-      deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
-      if (deliv) {
-        ret = -EINTR;
+    /* 阻塞读：挂 p->wq + prepare_to_wait 顺序（先挂 wq 标 BLOCKED → 重查
+     * head!=tail → signal_pending → schedule）。SPSC 无锁 ring，模式1，不引入
+     * pipe 锁。 */
+    wait_queue_head *wq = p->wq;
+    wait_queue_t wait;
+    wait.func = pipe_wake_cb;
+    wait.data = proc;
+    list_init(&wait.node);
+    add_wait_queue(wq, &wait);
+    for (;;) {
+      proc->state = BLOCKED;
+      proc->wait_event = WAIT_NONE;
+      if (refcount_read(&p->p_count) == 1) {
+        sched_cancel_spurious_wake(proc);
+        remove_wait_queue(wq, &wait);
+        ret = 0;
         goto out;
       }
+      if (p->head != p->tail)
+        break; /* 有数据 */
+      if (f->flags & O_NONBLOCK) {
+        sched_cancel_spurious_wake(proc);
+        remove_wait_queue(wq, &wait);
+        ret = -EAGAIN;
+        goto out;
+      }
+      proc->wait_deadline = sched_clock() + 5000000000ULL;
+      {
+        int cpu = proc->assigned_cpu;
+        uint64_t flags;
+        spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+        sched_timer_queue_insert(cpu, proc);
+        spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+      }
+      schedule();
+      if (proc->wait_timed_out) {
+        sched_cancel_spurious_wake(proc);
+        remove_wait_queue(wq, &wait);
+        ret = -ETIMEDOUT;
+        goto out;
+      }
+      {
+        uint64_t pend =
+            __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
+        uint64_t deliv = pend & ~proc->proc->sig_blocked;
+        deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+        if (deliv) {
+          sched_cancel_spurious_wake(proc);
+          remove_wait_queue(wq, &wait);
+          ret = -EINTR;
+          goto out;
+        }
+      }
     }
+    sched_cancel_spurious_wake(proc);
+    remove_wait_queue(wq, &wait);
   }
 
   {
@@ -1654,10 +1720,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       nread++;
     }
 
-    if (p->write_pid >= 0)
-      wake_with_event(task_get(p->write_pid), WAIT_PIPE);
-    if (p->close_wq)
-      __wake_up(p->close_wq, POLLOUT);
+    __wake_up(p->wq, POLLOUT);
 
     ret = (int64_t)nread;
     goto out;
@@ -2072,6 +2135,16 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       }
       spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
 
+      // Wake target's ipcfd wq, if any (evdev_refact.md §5.6).  evdev blocks in
+      // epoll_wait (WAIT_POLL) on its ipcfd, not WAIT_RECV, so without this the
+      // REQ strands on its recv queue until the 3s caller timeout — black
+      // screen on EVIOCGBIT.  Same wake as sys_req/sys_notify.
+      if (target->ipcfd_file) {
+        wait_queue_head *iwq = file_wq_get(target->ipcfd_file);
+        if (iwq)
+          __wake_up(iwq, POLLIN);
+      }
+
       // Block caller on WAIT_REQ_REPLY. Arm the wait (set BLOCKED + deadline +
       // insert timer) under our own scheduler_lock, in the same critical
       // section. Without this, the target (evdev on another CPU) can receive
@@ -2101,6 +2174,9 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         proc->state = BLOCKED;
         proc->wait_event = WAIT_REQ_REPLY;
         sched_timer_queue_insert(cpu, proc);
+      } else {
+        sched_timer_queue_disarm(
+            proc); // aborted arm: clear stale wait_deadline (syscall.c:2094)
       }
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
 
@@ -2166,6 +2242,14 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         wake_from_wait(target);
       }
       spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
+
+      // Wake target's ipcfd wq, if any — same evdev WAIT_POLL fix as the inline
+      // path above (evdev drains RECV_IOCTL from its epoll ipcfd branch).
+      if (target->ipcfd_file) {
+        wait_queue_head *iwq = file_wq_get(target->ipcfd_file);
+        if (iwq)
+          __wake_up(iwq, POLLIN);
+      }
     }
 
     // Block caller on WAIT_REQ_REPLY. Arm the wait under our own scheduler_lock
@@ -2189,6 +2273,9 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         proc->state = BLOCKED;
         proc->wait_event = WAIT_REQ_REPLY;
         sched_timer_queue_insert(cpu, proc);
+      } else {
+        sched_timer_queue_disarm(
+            proc); // aborted arm: clear stale wait_deadline (syscall.c:2180)
       }
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags2);
     }
@@ -3094,6 +3181,10 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_dev_set_meta(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MKNOD:
     return sys_mknod(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_IPCFD_CREATE:
+    return sys_ipcfd_create();
+  case SYS_IPCFD_READ:
+    return sys_ipcfd_read(tf->rdi, tf->rsi, tf->rdx, tf->r10);
   // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) implemented in phase 3b,
   // this phase returns -ENOSYS
   default:

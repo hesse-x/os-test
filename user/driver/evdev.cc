@@ -14,6 +14,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/device.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/ipc.h>
 #include <sys/mman.h>
@@ -340,30 +342,56 @@ int main(int argc, char **argv, char **envp) {
     device_set_meta("input/event0", "input", "evdev", &props);
   }
 
-  // 4. Main loop: recv() → EINTR: drain HID reports → ring + notify;
-  //    RECV_REQ: INPUT_BIND/UNBIND (type='I') or inline EVIOCG* (type='E');
-  //    RECV_IOCTL: variable-length EVIOCG* (arg>48B).
-  while (1) {
-    struct recv_msg msg;
-    // Variable-length RECV_IOCTL requests carry their arg data here: the kernel
-    // copies the kmalloc'd arg into data_buf and frees the kernel buffer before
-    // returning. NULL would make the kernel reject those with EINVAL. 256B
-    // covers any arg we serve (read getters only; size = _IOC_SIZE(cmd)).
-    uint8_t data_buf[256];
-    int rc = recv(&msg, data_buf, sizeof(data_buf), 0);
-    fprintf(stderr, "evdev recv: rc=%d errno=%d\n", rc, errno);
+  // 5. Split the two event sources onto separate pollable fds (evdev_refact.md
+  //    §3.1/§4.4): HID hardware interrupts arrive on irqfd (an eventfd the
+  //    xHCI ISR signals via eventfd_signal_isr), downstream IPC requests
+  //    arrive on ipcfd (bound to our own recv queue).  epoll_wait joins them.
+  int irqfd = eventfd(0, EFD_NONBLOCK); // HID interrupt fd (LT, default)
+  if (irqfd < 0)
+    fprintf(stderr, "evdev: irqfd create failed errno=%d\n", errno);
+  int ipcfd = ipcfd_create(); // downstream-IPC fd (read = dequeue, §4.3)
+  if (ipcfd < 0)
+    fprintf(stderr, "evdev: ipcfd create failed errno=%d\n", errno);
+  // Bind irqfd into the xHCI HID interrupt registry (§4.2).  hid_fd is the
+  // /dev/usb_hid_kbd fd opened at the top of main.
+  int brc = ioctl(hid_fd, HID_BIND_IRQFD, &irqfd);
+  if (brc < 0)
+    fprintf(stderr, "evdev: HID_BIND_IRQFD failed errno=%d\n", errno);
 
-    if (rc < 0) {
-      if (errno == EINTR) {
-        // ISR woke us — drain HID reports
+  int epfd = epoll_create1(0);
+  if (epfd < 0)
+    fprintf(stderr, "evdev: epoll_create1 failed errno=%d\n", errno);
+  struct epoll_event ev;
+  ev.events = EPOLLIN; // level-triggered (default, no EPOLLET) — §3.2/§5.4
+  ev.data.fd = irqfd;
+  epoll_ctl(epfd, EPOLL_CTL_ADD, irqfd, &ev);
+  ev.events = EPOLLIN;
+  ev.data.fd = ipcfd;
+  epoll_ctl(epfd, EPOLL_CTL_ADD, ipcfd, &ev);
+
+  // 4. Main loop: epoll_wait(irqfd | ipcfd).  HID hardware interrupts land on
+  //    irqfd (read clears the count, then drain the HID SHM sub-ring to empty);
+  //    downstream IPC requests land on ipcfd (read = non-blocking dequeue,
+  //    -EAGAIN when empty).  The two sources are physically separated — they
+  //    share no wait queue (evdev_refact.md §3.1/§4.4).  HID drain, broadcast,
+  //    EV_SYN, handle_req/handle_ioctl internals are unchanged from the old
+  //    recv loop; only the outer block/dispatch structure is replaced.
+  struct epoll_event evs[2];
+  while (1) {
+    int n = epoll_wait(epfd, evs, 2, -1);
+    for (int i = 0; i < n; i++) {
+      if (evs[i].data.fd == irqfd) {
+        // HID interrupt arrived: clear the notification count, then drain the
+        // HID SHM sub-ring to empty (LT + drain-to-empty = no loss, §3.2/§5.4).
+        uint64_t c;
+        read(irqfd, &c, 8);
         input_event ev;
         int nevents = 0;
         while (on_key_event(&ev)) {
           broadcast_event(&ev);
           nevents++;
         }
-        fprintf(stderr, "evdev EINTR drain: nevents=%d\n", nevents);
-        // Send EV_SYN/SYN_REPORT after batch — libinput/evdev requires it
+        // Send EV_SYN/SYN_REPORT after each batch — libinput/evdev requires it
         // to commit the event sequence.
         if (nevents > 0) {
           input_event syn_ev;
@@ -376,25 +404,33 @@ int main(int argc, char **argv, char **envp) {
           syn_ev.value = 0;
           broadcast_event(&syn_ev);
         }
+      } else if (evs[i].data.fd == ipcfd) {
+        // Downstream IPC request: non-blocking dequeue (ipcfd_read =
+        // ipc_dequeue, §4.3).  Drain until -EAGAIN so a batch of requests is
+        // fully served.  data_buf holds RECV_IOCTL variable-length arg data.
+        struct recv_msg msg;
+        uint8_t data_buf[256];
+        while (1) {
+          int rc = ipcfd_read(ipcfd, &msg, data_buf, sizeof(data_buf));
+          if (rc < 0)
+            break; // -EAGAIN: queue empty (errno set by ipcfd_do_read)
+          if (msg.type == RECV_REQ) {
+            uint32_t opcode = *(uint32_t *)msg.data;
+            if (_IOC_TYPE(opcode) == 'I') {
+              handle_req(&msg);
+            } else {
+              // inline path: req_data = [cmd][arg<=48B][minor@52]
+              uint32_t cmd = opcode;
+              uint32_t minor = *(uint32_t *)(msg.data + 52);
+              int32_t grab_val =
+                  (_IOC_DIR(cmd) & _IOC_WRITE) ? *(int32_t *)(msg.data + 4) : 0;
+              handle_ioctl(cmd, minor, (pid_t)msg.src, grab_val);
+            }
+          } else if (msg.type == RECV_IOCTL) {
+            handle_ioctl(msg.ioctl.cmd, msg.ioctl.minor, (pid_t)msg.src, 0);
+          }
+        }
       }
-      continue;
-    }
-
-    if (msg.type == RECV_REQ) {
-      uint32_t opcode = *(uint32_t *)msg.data;
-      // type=='I' → INPUT_BIND/UNBIND; type=='E' → inline EVIOCG* ioctl.
-      if (_IOC_TYPE(opcode) == 'I') {
-        handle_req(&msg);
-      } else {
-        // inline path: req_data = [cmd][arg<=48B][minor@52]
-        uint32_t cmd = opcode;
-        uint32_t minor = *(uint32_t *)(msg.data + 52);
-        int32_t grab_val =
-            (_IOC_DIR(cmd) & _IOC_WRITE) ? *(int32_t *)(msg.data + 4) : 0;
-        handle_ioctl(cmd, minor, (pid_t)msg.src, grab_val);
-      }
-    } else if (msg.type == RECV_IOCTL) {
-      handle_ioctl(msg.ioctl.cmd, msg.ioctl.minor, (pid_t)msg.src, 0);
     }
   }
 

@@ -32,7 +32,7 @@ size_t copy_to_user(void *dst, const void *src, size_t size);
 static void eventfd_wake_cb(wait_queue_t *wq, unsigned long flags) {
   xtask *proc = (xtask *)wq->data;
   (void)flags;
-  wake_with_event(proc, WAIT_POLL);
+  wake_wq_target(proc);
 }
 
 int64_t sys_eventfd2(int64_t initval, int64_t flags) {
@@ -81,6 +81,7 @@ int64_t eventfd_do_read(struct file *f, void *buf) {
   if (!ctx)
     return -EBADF;
 
+  uint64_t flags;
   wait_queue_head *wq = file_wq_get(f);
   wait_queue_t wait;
   if (wq) {
@@ -92,7 +93,10 @@ int64_t eventfd_do_read(struct file *f, void *buf) {
 
   int64_t ret;
   for (;;) {
-    spin_lock(&ctx->lock);
+    current_task->state = BLOCKED;
+    current_task->wait_event = WAIT_POLL;
+    current_task->wait_timed_out = 0;
+    spin_lock_irqsave(&ctx->lock, &flags);
     if (ctx->count > 0) {
       uint64_t val;
       if (ctx->flags & EFD_SEMAPHORE) {
@@ -102,17 +106,19 @@ int64_t eventfd_do_read(struct file *f, void *buf) {
         val = ctx->count;
         ctx->count = 0;
       }
-      spin_unlock(&ctx->lock);
+      spin_unlock_irqrestore(&ctx->lock, flags);
       if (copy_to_user(buf, &val, 8))
         ret = -EFAULT;
       else
         ret = 8;
       if (wq)
         __wake_up(wq, POLLOUT);
+      current_task->state = RUNNING;
       goto out;
     }
-    spin_unlock(&ctx->lock);
+    spin_unlock_irqrestore(&ctx->lock, flags);
     if (f->flags & O_NONBLOCK) {
+      current_task->state = RUNNING;
       ret = -EAGAIN;
       goto out;
     }
@@ -123,17 +129,19 @@ int64_t eventfd_do_read(struct file *f, void *buf) {
       uint64_t deliv = pend & ~p->proc->sig_blocked;
       deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
       if (deliv) {
+        current_task->state = RUNNING;
         ret = -EINTR;
         goto out;
       }
     }
-    current_task->state = BLOCKED;
-    current_task->wait_event = WAIT_POLL;
-    current_task->wait_timed_out = 0;
     schedule();
   }
 
 out:
+  // prepare_to_wait: 循环顶部标过 BLOCKED，若 break 前被 wake 命中把 run_node
+  // push 进 了 run_queue（state=READY），goto out 不走 schedule() 会留下悬空
+  // run_node。cancel 掉。
+  sched_cancel_spurious_wake(current_task);
   if (wq)
     remove_wait_queue(wq, &wait);
   return ret;
@@ -153,6 +161,7 @@ int64_t eventfd_do_write(struct file *f, const void *buf, size_t len) {
   if (val > EVENTFD_MAX)
     return -EINVAL;
 
+  uint64_t flags;
   wait_queue_head *wq = file_wq_get(f);
   wait_queue_t wait;
   if (wq) {
@@ -164,17 +173,22 @@ int64_t eventfd_do_write(struct file *f, const void *buf, size_t len) {
 
   int64_t ret;
   for (;;) {
-    spin_lock(&ctx->lock);
+    current_task->state = BLOCKED;
+    current_task->wait_event = WAIT_POLL;
+    current_task->wait_timed_out = 0;
+    spin_lock_irqsave(&ctx->lock, &flags);
     if (ctx->count <= EVENTFD_MAX - val) {
       ctx->count += val;
-      spin_unlock(&ctx->lock);
+      spin_unlock_irqrestore(&ctx->lock, flags);
       if (wq)
         __wake_up(wq, POLLIN);
+      current_task->state = RUNNING;
       ret = 8;
       goto out;
     }
-    spin_unlock(&ctx->lock);
+    spin_unlock_irqrestore(&ctx->lock, flags);
     if (f->flags & O_NONBLOCK) {
+      current_task->state = RUNNING;
       ret = -EAGAIN;
       goto out;
     }
@@ -184,18 +198,38 @@ int64_t eventfd_do_write(struct file *f, const void *buf, size_t len) {
       uint64_t deliv = pend & ~p->proc->sig_blocked;
       deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
       if (deliv) {
+        current_task->state = RUNNING;
         ret = -EINTR;
         goto out;
       }
     }
-    current_task->state = BLOCKED;
-    current_task->wait_event = WAIT_POLL;
-    current_task->wait_timed_out = 0;
     schedule();
   }
 
 out:
+  // prepare_to_wait: 循环顶部标过 BLOCKED，若 break 前被 wake 命中把 run_node
+  // push 进 了 run_queue（state=READY），goto out 不走 schedule() 会留下悬空
+  // run_node。cancel 掉。
+  sched_cancel_spurious_wake(current_task);
   if (wq)
     remove_wait_queue(wq, &wait);
   return ret;
+}
+
+// ISR-safe signal: increment ctx->count under irqsave and wake pollers.
+// Callable from hard-IRQ context (xHCI ISR).  No copy_from_user, no
+// current_task, no schedule().  ctx->lock MUST be taken irqsave here and
+// everywhere else ctx->lock is taken (see evdev_refact.md §5.2).
+void eventfd_signal_isr(struct file *f) {
+  eventfd_ctx *ctx = f->eventfd;
+  if (!ctx)
+    return;
+  uint64_t flags;
+  spin_lock_irqsave(&ctx->lock, &flags);
+  if (ctx->count < EVENTFD_MAX) // saturate, never overflow
+    ctx->count++;
+  spin_unlock_irqrestore(&ctx->lock, flags);
+  wait_queue_head *wq = file_wq_get(f);
+  if (wq)
+    __wake_up(wq, POLLIN); // __wake_up is ISR-safe (wait_queue.c)
 }

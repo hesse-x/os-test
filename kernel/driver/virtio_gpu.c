@@ -69,12 +69,13 @@ static void virtio_gpu_cmd_callback(void *ctx, uint32_t len) {
   cmd_ctx->completed = true;
 }
 
-/* Wake callback for wait_queue: bridges __wake_up → wake_with_event.
-   Lock order: cmd_wq.lock (held by __wake_up) → scheduler_lock (taken by
-   wake_with_event) — matches existing A-class pattern (wq→sched). */
+/* Wake callback for wait_queue: bridges __wake_up → wake_wq_target.
+   队列身份制：cmd_wq 与资源 wq 物理隔离，跨源不可达；task 在 cmd_wq 上即唤醒，
+   不查 wait_event。锁序：cmd_wq.lock → scheduler_lock（A-class wq→sched）。 */
 static void virtio_gpu_wake_cb(wait_queue_t *wq, unsigned long flags) {
   xtask *target = (xtask *)wq->data;
-  wake_with_event(target, WAIT_VGPU_CMD);
+  (void)flags;
+  wake_wq_target(target);
 }
 
 /* Forward declarations */
@@ -240,12 +241,11 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
 
   /* Arm BLOCKED state before kick — lost-wakeup-safe: after we release
      cmd_lock (re-enabling interrupts) the ISR may fire immediately, see
-     BLOCKED+WAIT_VGPU_CMD, and wake us.  WAIT_VGPU_CMD is a dedicated event:
-     IPC/pty wake_process(pid) matches only WAIT_RECV, so it cannot spuriously
-     wake us (which previously caused cross-source wakes and run_node
-     re-enqueue races under a shared WAIT_RECV). */
+     BLOCKED, and wake us via __wake_up(&cmd_wq). 队列身份制：cmd_wq 与资源 wq
+     物理隔离，能唤醒 GPU 等待者的只有 ISR 对 cmd_wq 的 __wake_up，跨源不可达；
+     此处 arm 防 unlock(cmd_lock) → schedule() 之间 ISR 在首轮 schedule 前
+     fire。 */
   current_task->state = BLOCKED;
-  current_task->wait_event = WAIT_VGPU_CMD;
 
   vring_kick(&vgpu->ctrlq);
   virtio_pci_notify(&vgpu->vpci, vgpu->ctrlq.notify_off);
@@ -260,13 +260,11 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
      pre-test that early-exits): schedule() is the only place our run_node is
      dequeued from the run_queue.  If the ISR already enqueued run_node (fast
      completion), schedule() dequeues it and re-runs us; if not, we block
-     until the ISR wakes us with WAIT_VGPU_CMD.  Spurious wakes from other
-     sources are excluded by the dedicated event, so the loop only exits on
-     real completion.  The used ring is drained ONLY by the ISR; we never
-     poll it here. */
+     until the ISR wakes us via __wake_up(&cmd_wq). 队列身份制：被唤醒 ⇔ cmd_wq
+     wake ⇔ ISR 完成 ⇔ cmd_ctx.completed，循环只在真完成时退出；cmd_wq 与资源 wq
+     物理隔离，跨源不可达。used ring 仅由 ISR drain，此处不轮询。 */
   do {
     current_task->state = BLOCKED;
-    current_task->wait_event = WAIT_VGPU_CMD;
     schedule();
   } while (!cmd_ctx.completed);
 

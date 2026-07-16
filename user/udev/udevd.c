@@ -217,16 +217,16 @@ static int device_complete_kv(const char *action, const char *name,
     return -1;
 
   int len = 0;
-  /* 每段 KV 以 \0 分隔(对齐 netlink uevent payload 格式 + shim
-   * udev_monitor_receive_device 的 \0 分隔解析器)。snprintf 末尾的 \0
-   * 会被下一段 首字节覆盖,故显式追加 \0 作段分隔符。 */
+  /* 每条 KV 以 \0 结尾(Linux netlink uevent 同款),客户端 receive_device
+   * 按 \0 分隔 parse。snprintf 自带终止符但不计入返回值,故每条后手动补 \0
+   * 并计入 len——否则各 entry 黏成一坨,客户端 strchr('=') 跨多条取错 key。 */
 #define APPEND_KV0(fmt, ...)                                                   \
   do {                                                                         \
     int n = snprintf(out + len, out_nul - (size_t)len, fmt, ##__VA_ARGS__);    \
     if (n < 0 || (size_t)n >= out_nul - (size_t)len)                           \
       return -1;                                                               \
     len += n;                                                                  \
-    if ((size_t)len + 1 >= out_nul)                                            \
+    if ((size_t)len >= out_nul)                                                \
       return -1;                                                               \
     out[len++] = '\0';                                                         \
   } while (0)

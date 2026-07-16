@@ -376,11 +376,16 @@ void sched_try_steal_task(void) {
   list_node *head = &cpu_locals[v].run_queue;
   list_node *tail_node = head->prev;
   xtask *t = LIST_ENTRY(tail_node, xtask, run_node);
-  list_remove(&t->run_node);
-  cpu_locals[v].run_count--;
-  t->assigned_cpu = my_cpu;
-  list_push_back(&cpu_locals[my_cpu].run_queue, &t->run_node);
-  cpu_locals[my_cpu].run_count++;
+  // design1 §4.4: steal integrity asserts — the stolen task must be READY and
+  // its run_node on the victim's run_queue (we hold v's scheduler_lock, so the
+  // push side, which needs t->assigned_cpu's lock, cannot concurrently push).
+  ASSERT(t->state == READY);
+  ASSERT(t->assigned_cpu == v);
+  run_queue_pop(t);         // removes from v's run_queue + list_init
+  t->assigned_cpu = my_cpu; // mutate under v's lock (still held); push below
+                            // uses my_cpu which we also hold — read/modify of
+                            // assigned_cpu stays under a single lock window.
+  run_queue_push(my_cpu, t);
 
   spin_unlock_irqrestore(&cpu_locals[v].scheduler_lock, vflags);
 out:
@@ -504,7 +509,7 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
   // Dequeue next process from head (FIFO round-robin)
   list_node *next_node = list_front(&cpu_locals[my_cpu].run_queue);
   xtask *next = LIST_ENTRY(next_node, xtask, run_node);
-  list_remove(&next->run_node);
+  run_queue_pop(next);
 
   // Account prev's CPU time before switching out
   if (prev != idle && prev->last_sched != 0) {
@@ -514,15 +519,15 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
   // State transition for prev
   if (prev != idle && prev->state == RUNNING) {
     prev->state = READY;
-    list_push_back(&cpu_locals[my_cpu].run_queue, &prev->run_node);
-    cpu_locals[my_cpu].run_count++;
+    run_queue_push(my_cpu, prev);
   }
   // if prev->state == BLOCKED, ZOMBIE, or REAPING: don't enqueue, run_count
   // unchanged
 
   next->state = RUNNING;
   next->last_sched = sched_clock();
-  cpu_locals[my_cpu].run_count--;
+  // run_queue_pop(next) above already decremented run_count[my_cpu] (pop is
+  // the sole dequeue entry and now owns the counter); do NOT double-decrement.
 #ifndef NDEBUG
   // Consistency check: after all run_queue / run_count changes are done, the
   // queue length must equal run_count. If a cross-CPU path writes to this
@@ -564,12 +569,13 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
 // ===================== Timer queue operations =====================
 // Must be called under scheduler_lock of the target CPU
 
+// design1 §6.2: sched_timer_queue_insert is now the sorted-insert body only;
+// single-tenancy assertion lives in the timer_queue_wait_push wrapper.  The
+// former "remove from any existing list first" defensive hop is REMOVED —
+// push 入口已断言 list_empty(&wait_node), 重复插入由断言抓（类 A 残余/开发期
+// bug）， 不再静默吸收（与 §4.3 run_node 幂等保留不同：wait_node 无类 B
+// 合法竞态， 单一归属由 insert/remove 严格配对保证）。
 void sched_timer_queue_insert(int cpu, xtask *proc) {
-  // Remove from any existing list first to prevent duplicate insertion.
-  // Skip if wait_node is self-referencing (never inserted into a list).
-  if (!list_empty(&proc->wait_node))
-    list_remove(&proc->wait_node);
-
   list_node *head = &cpu_locals[cpu].timer_queue;
   list_node *node = head->next;
   while (node != head) {
@@ -585,7 +591,10 @@ void sched_timer_queue_insert(int cpu, xtask *proc) {
   node->prev = &proc->wait_node;
 }
 
-void sched_timer_queue_remove(xtask *proc) { list_remove(&proc->wait_node); }
+// design1 §6.2: remove routes through timer_queue_wait_pop for the
+// post-remove list_init (single-tenancy reset).  Kept as the canonical
+// remove entry for callers that hold the lock and know the node is linked.
+void sched_timer_queue_remove(xtask *proc) { timer_queue_wait_pop(proc); }
 
 // sched_task_reap: reclaim all resources of a process
 // Called by sys_exit (no-parent path) or sys_waitpid
@@ -695,8 +704,19 @@ void sched_task_reap(xtask *proc) {
   // here — the top ASSERT already covers callers passing the wrong state, and
   // no path within this window overwrites the ZOMBIE state, so re-asserting
   // in step 7 would be redundant)
+  // design1 §4.2: single-tenancy assert at destroy.  Debug build upgrades the
+  // existing WARN to ASSERT (catches class-A residual + pairing bugs); release
+  // build keeps WARN_ON as the prior safety net.
+#ifndef NDEBUG
+  ASSERT(list_empty(&proc->run_node));
+#else
   WARN_ON(!list_empty(&proc->run_node));
+#endif
+#ifndef NDEBUG
+  ASSERT(list_empty(&proc->wait_node));
+#else
   WARN_ON(!list_empty(&proc->wait_node));
+#endif
 
   proc->pid = -1;
   proc->state = REAPING; // dynamic: REAPING instead of UNUSED, xtask_alloc

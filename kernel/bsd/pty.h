@@ -10,7 +10,6 @@
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/spinlock.h"
-#include "kernel/xcore/trap.h" // wake_process
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 #include <stdint.h>
@@ -127,12 +126,7 @@ struct pty {
   uint8_t s_to_m_buf[PTY_BUF_SIZE]; // slave->master (shell output)
   uint32_t s_to_m_head, s_to_m_tail;
 
-  // Blocking wait PIDs (-1 = no waiter)
-  pid_t m_read_pid;       // master read blocked
-  pid_t m_write_pid;      // master write blocked
-  pid_t s_read_pid;       // slave read blocked
-  pid_t s_write_pid;      // slave write blocked
-  pid_t master_owner_pid; // process holding master fd (for wakeup)
+  // 阻塞等待者改挂 pty->wq，不再记录 pid（队列身份制，§5.2）
 
   // termios (kernel stored, user reads via TCGETS)
   struct termios t_termios;
@@ -203,16 +197,10 @@ int pty_is_master_inode(struct inode *inode);
 // Wake blocked pipe peers based on fd direction flags
 static inline void wake_pipe_peers(pipe *p, int fd_flags) {
   if (fd_flags & (O_WRONLY | O_RDWR)) {
-    if (p->read_pid >= 0)
-      wake_process(p->read_pid);
-    if (p->close_wq)
-      __wake_up(p->close_wq, POLLHUP | POLLIN);
+    __wake_up(p->wq, POLLHUP | POLLIN);
   }
   if (fd_flags & (O_RDONLY | O_RDWR)) {
-    if (p->write_pid >= 0)
-      wake_process(p->write_pid);
-    if (p->close_wq)
-      __wake_up(p->close_wq, POLLHUP | POLLOUT);
+    __wake_up(p->wq, POLLHUP | POLLOUT);
   }
 }
 

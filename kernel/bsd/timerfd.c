@@ -49,7 +49,7 @@ void timerfd_init(void) {
 static void timerfd_wake_cb(wait_queue_t *wq, unsigned long flags) {
   xtask *proc = (xtask *)wq->data;
   (void)flags;
-  wake_with_event(proc, WAIT_POLL);
+  wake_wq_target(proc);
 }
 
 int64_t sys_timerfd_create(int64_t clockid, int64_t flags) {
@@ -185,6 +185,9 @@ int64_t timerfd_do_read(struct file *f, void *buf) {
   int64_t ret;
   for (;;) {
     uint64_t flags;
+    current_task->state = BLOCKED;
+    current_task->wait_event = WAIT_POLL;
+    current_task->wait_timed_out = 0;
     spin_lock_irqsave(&tfd->lock, &flags);
     if (tfd->ticks > 0) {
       uint64_t val = tfd->ticks;
@@ -194,10 +197,12 @@ int64_t timerfd_do_read(struct file *f, void *buf) {
         ret = -EFAULT;
       else
         ret = 8;
+      current_task->state = RUNNING;
       goto out;
     }
     spin_unlock_irqrestore(&tfd->lock, flags);
     if (f->flags & O_NONBLOCK) {
+      current_task->state = RUNNING;
       ret = -EAGAIN;
       goto out;
     }
@@ -207,17 +212,19 @@ int64_t timerfd_do_read(struct file *f, void *buf) {
       uint64_t deliv = pend & ~p->proc->sig_blocked;
       deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
       if (deliv) {
+        current_task->state = RUNNING;
         ret = -EINTR;
         goto out;
       }
     }
-    current_task->state = BLOCKED;
-    current_task->wait_event = WAIT_POLL;
-    current_task->wait_timed_out = 0;
     schedule();
   }
 
 out:
+  // prepare_to_wait: 循环顶部标过 BLOCKED，若 break 前被 wake 命中把 run_node
+  // push 进 了 run_queue（state=READY），goto out 不走 schedule() 会留下悬空
+  // run_node。cancel 掉。
+  sched_cancel_spurious_wake(current_task);
   if (wq)
     remove_wait_queue(wq, &wait);
   return ret;

@@ -31,7 +31,6 @@ typedef struct netlink_sock {
   struct sk_buff *recv_queue_head;
   struct sk_buff *recv_queue_tail;
   int recv_queue_len;
-  pid_t blocked_reader; // recvmsg 阻塞的 PID（-1 = none）
 
   // Wait queue（epoll 集成）
   wait_queue_head *wq; // 惰性分配，epoll 等待者挂此

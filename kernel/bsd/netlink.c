@@ -31,6 +31,14 @@
 size_t copy_from_user(void *dst, const void *src, size_t size);
 size_t copy_to_user(void *dst, const void *src, size_t size);
 
+// netlink recv 阻塞点的 wq 回调：__wake_up → 唤醒挂在 sock->wq 的 reader。
+// 不查 wait_event（队列身份制：在 wq 上即唤醒），与 socket/pty 一致。
+static void nl_recv_wake_cb(wait_queue_t *wq, unsigned long flags) {
+  xtask *target = (xtask *)wq->data;
+  (void)flags;
+  wake_wq_target(target);
+}
+
 // ===================== Global group lock =====================
 spinlock nl_group_lock = SPINLOCK_INIT;
 
@@ -78,8 +86,14 @@ netlink_sock *netlink_sock_alloc(int protocol) {
   sock->recv_queue_head = NULL;
   sock->recv_queue_tail = NULL;
   sock->recv_queue_len = 0;
-  sock->blocked_reader = -1;
-  sock->wq = NULL;
+  /* eager 分配 wq：netlink recv 阻塞点转 add_wait_queue 后 wq 必须非
+   * NULL（§5.3）。 */
+  sock->wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
+  if (!sock->wq) {
+    kfree(sock);
+    return NULL;
+  }
+  init_wait_queue_head(sock->wq);
   refcount_set(&sock->n_count, 1);
   sock->owner_pid = current_task->pid;
   return sock;
@@ -120,17 +134,10 @@ void netlink_sock_close(netlink_sock *sock) {
   }
 
   // Wake blocked reader
-  pid_t reader = sock->blocked_reader;
-  sock->blocked_reader = -1;
-
   spin_unlock(&nl_group_lock);
 
-  if (reader >= 0)
-    wake_process(reader);
-
-  // Notify epoll waiters of close
-  if (sock->wq)
-    __wake_up(sock->wq, POLLHUP | POLLIN);
+  // 唤醒阻塞 reader（挂 sock->wq）与 epoll 等待者
+  __wake_up(sock->wq, POLLHUP | POLLIN);
 
   netlink_sock_release(sock);
 }
@@ -229,9 +236,14 @@ int64_t netlink_sock_recvmsg(netlink_sock *sock, const struct iovec *iov,
         return -EAGAIN;
       }
 
-      // Block reader
-      sock->blocked_reader = current_task->pid;
+      // Block reader: 持 nl_group_lock 挂 wq（模式2，条件检查与挂 wq
+      // 同一临界区防丢唤醒）。
       xtask *proc = current_task;
+      wait_queue_t wait;
+      wait.func = nl_recv_wake_cb;
+      wait.data = proc;
+      list_init(&wait.node);
+      add_wait_queue(sock->wq, &wait);
       proc->state = BLOCKED;
       proc->wait_event = WAIT_POLL;
       proc->wait_deadline = sched_clock() + 30000000000ULL; // 30s timeout
@@ -246,9 +258,8 @@ int64_t netlink_sock_recvmsg(netlink_sock *sock, const struct iovec *iov,
 
       // Timeout check
       if (proc->wait_timed_out) {
-        spin_lock(&nl_group_lock);
-        sock->blocked_reader = -1;
-        spin_unlock(&nl_group_lock);
+        proc->state = RUNNING;
+        remove_wait_queue(sock->wq, &wait);
         return -ETIMEDOUT;
       }
 
@@ -259,17 +270,15 @@ int64_t netlink_sock_recvmsg(netlink_sock *sock, const struct iovec *iov,
         uint64_t deliv = pend & ~proc->proc->sig_blocked;
         deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
         if (deliv) {
-          spin_lock(&nl_group_lock);
-          sock->blocked_reader = -1;
-          spin_unlock(&nl_group_lock);
+          proc->state = RUNNING;
+          remove_wait_queue(sock->wq, &wait);
           return (int64_t)-EINTR;
         }
       }
 
-      spin_lock(&nl_group_lock);
-      sock->blocked_reader = -1;
-      spin_unlock(&nl_group_lock);
-      continue;
+      proc->state = RUNNING;
+      remove_wait_queue(sock->wq, &wait);
+      continue; // 醒后回顶重新 lock → 重查 recv_queue
     }
 
     // We have data. Copy to user iov.
@@ -407,29 +416,8 @@ void nl_group_broadcast(uint32_t group_bit, const void *data, size_t len,
     __memcpy(skb->data, data, len);
     nl_skb_enqueue(sock, skb);
 
-    // Wake blocked reader inside lock (same pattern as design §8.4)
-    if (sock->blocked_reader >= 0) {
-      xtask *reader_task = task_get(sock->blocked_reader);
-      if (reader_task->pid == sock->blocked_reader) {
-        int rcpu = reader_task->assigned_cpu;
-        uint64_t rflags;
-        spin_lock_irqsave(&cpu_locals[rcpu].scheduler_lock, &rflags);
-        if (reader_task->state == BLOCKED &&
-            reader_task->wait_event == WAIT_POLL) {
-          sched_timer_queue_cancel(reader_task);
-          reader_task->state = READY;
-          reader_task->wait_event = WAIT_NONE;
-          reader_task->wait_timed_out = 0;
-          list_push_back(&cpu_locals[rcpu].run_queue, &reader_task->run_node);
-          cpu_locals[rcpu].run_count++;
-        }
-        spin_unlock_irqrestore(&cpu_locals[rcpu].scheduler_lock, rflags);
-      }
-    }
-
-    // Wake epoll waiters inside lock
-    if (sock->wq)
-      __wake_up(sock->wq, POLLIN);
+    // 唤醒阻塞 reader（挂 sock->wq）与 epoll 等待者，统一走 __wake_up
+    __wake_up(sock->wq, POLLIN);
   }
 
   spin_unlock(&nl_group_lock);

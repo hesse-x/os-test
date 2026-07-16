@@ -57,6 +57,12 @@
 #define EVIOCGABS(abs) _IOR('E', 0x40 + (abs), struct input_absinfo)
 #define EVIOCGRAB _IOW('E', 0x90, int)
 
+// HID irqfd bind ioctls (type='H') — bind/unbind an eventfd as the xHCI HID
+// interrupt-delivery fd (evdev_refact.md §4.2).  HID_BIND_IRQFD's arg is the
+// caller's irqfd fd number (int).
+#define HID_BIND_IRQFD _IOW('H', 0x01, int)
+#define HID_UNBIND_IRQFD _IO('H', 0x02)
+
 // ringbuf ioctls (type='R')
 #define RINGBUF_WAKE _IO('R', 0x01) // wake ringbuf poll/epoll waiters
 #define RINGBUF_INJECT                                                         \

@@ -7,7 +7,7 @@
 
 #include "arch/x64/smp.h"
 #include "kernel/bsd/devtmpfs.h"
-#include "kernel/bsd/file_poll.h"    /* file_wq_get, wait_queue_head */
+#include "kernel/bsd/proc.h"         /* struct proc: sig_pending/sig_blocked */
 #include "kernel/bsd/types.h"        /* struct file */
 #include "kernel/xcore/kpi.h"        /* copy_to_user */
 #include "kernel/xcore/list.h"       /* list_init */
@@ -20,6 +20,7 @@
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/input.h>
+#include <xos/signal.h>
 #include <xos/socket.h> /* POLLIN */
 
 ring_t ring_from_shm(struct shm *shm) {
@@ -38,7 +39,7 @@ ring_t ring_from_shm(struct shm *shm) {
 static void ring_wake_cb(wait_queue_t *wq, unsigned long flags) {
   xtask *target = (xtask *)wq->data;
   (void)flags;
-  wake_with_event(target, WAIT_POLL);
+  wake_wq_target(target);
 }
 
 ssize_t ring_read(ring_t *r, struct file *f, void *buf, size_t count) {
@@ -61,7 +62,8 @@ ssize_t ring_read(ring_t *r, struct file *f, void *buf, size_t count) {
   if (cursor == head) {
     if (f->flags & O_NONBLOCK)
       return -EAGAIN;
-    /* 阻塞等待: 加入 per-file wq, schedule, 被 RINGBUF_WAKE 唤醒后重试 */
+    /* 阻塞等待: 加入 per-file wq, prepare_to_wait 顺序（先挂 wq + 标 BLOCKED，
+     * 再重查条件，最后 schedule）防丢唤醒。被 RINGBUF_WAKE 唤醒后重试。 */
     wait_queue_head *wq = file_wq_get(f);
     if (!wq)
       return -EAGAIN;
@@ -71,22 +73,44 @@ ssize_t ring_read(ring_t *r, struct file *f, void *buf, size_t count) {
     list_init(&wait.node);
     add_wait_queue(wq, &wait);
 
-    while (cursor == head) {
+    while (1) {
+      /* 先标 BLOCKED，再重查：写侧 __wake_up 若在重查后到达，task 已在 wq 且
+       * BLOCKED，回调命中唤醒；若在重查前到达，重查发现就绪直接 break 不睡。 */
       current_task->state = BLOCKED;
       current_task->wait_event = WAIT_POLL;
-      schedule();
-      /* 重新检查 */
+      /* 重新检查条件 */
       if (!r->hdr || r->hdr->magic != RINGBUF_MAGIC) {
+        sched_cancel_spurious_wake(current_task);
         remove_wait_queue(wq, &wait);
         return -ENODEV;
       }
       head = r->hdr->head;
       cursor = (uint32_t)f->offset;
+      uint32_t dist2 =
+          (head >= cursor) ? (head - cursor) : (cap - cursor + head);
+      if (dist2 >= cap)
+        cursor = head;
+      if (cursor != head)
+        break; /* 有数据 */
       if (f->flags & O_NONBLOCK) {
+        sched_cancel_spurious_wake(current_task);
         remove_wait_queue(wq, &wait);
         return -EAGAIN;
       }
+      /* signal_pending: 醒来须检查信号，否则吞 SIGKILL（与
+       * socket.c:453/pty.c:88 同形态） */
+      uint64_t pend =
+          __atomic_load_n(&current_task->proc->sig_pending, __ATOMIC_ACQUIRE);
+      uint64_t deliv = pend & ~current_task->proc->sig_blocked;
+      deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+      if (deliv) {
+        sched_cancel_spurious_wake(current_task);
+        remove_wait_queue(wq, &wait);
+        return -EINTR;
+      }
+      schedule();
     }
+    sched_cancel_spurious_wake(current_task);
     remove_wait_queue(wq, &wait);
   }
 

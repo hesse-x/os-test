@@ -6,6 +6,7 @@
 
 #include "kernel/driver/xhci.h"
 #include "arch/x64/apic.h"
+#include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
@@ -14,11 +15,17 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/sparse.h"
-#include "kernel/xcore/trap.h"
+#include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <xos/shm.h>
+
+#include "kernel/driver/bsd_types.h" // struct file, file_get/file_put, fd_lookup, FD_EVENTFD
+#include "kernel/xcore/kpi.h" // eventfd_signal_isr (ISR-safe)
+#include <xos/errno.h>        // ENOTTY/EINVAL/EBUSY (hid_ops_ioctl)
+#include <xos/ioctl.h>        // HID_BIND_IRQFD / HID_UNBIND_IRQFD
 
 // ===================== xHCI register offsets =====================
 // Capability registers (from MMIO base)
@@ -218,9 +225,15 @@ static struct page *usb_hid_shm_page;
 static uint64_t usb_hid_shm_phys;
 static void *usb_hid_shm_virt;
 
-// kbd opener tracking: xhci module self-managed, replaces the old
-// global type-keyed driver lookup used by the ISR to wake the kbd driver
-static pid_t kbd_openers[8];
+// HID irqfd registry: the xHCI ISR signals these eventfd files (instead of
+// the old pid-array kbd_openers[] + wake_process) when a HID report lands.
+// Single consumer (evdev) binds one irqfd; capacity 8 is harmless headroom.
+// Protected by hid_irqfd_lock (taken irqsave in the ISR).  Each entry holds a
+// file reference (file_get on bind, file_put on unbind/close) so the ISR never
+// touches a freed file.  (evdev_refact.md §4.2)
+#define HID_IRQFD_MAX 8
+static struct file *hid_irqfds[HID_IRQFD_MAX];
+static spinlock hid_irqfd_lock = SPINLOCK_INIT;
 
 // HID DMA buffer (xHCI writes HID report here, <4GB)
 static struct page *hid_dma_page;
@@ -480,12 +493,14 @@ static void xhci_isr(trapframe *tf) {
             __atomic_store_n(&hdr->rings[0].head, next, __ATOMIC_RELEASE);
           }
 
-          // Notify kbd openers: wake so sys_recv returns -EINTR
-          for (int i = 0; i < 8; i++) {
-            pid_t p = kbd_openers[i];
-            if (p > 0)
-              wake_process(p);
-          }
+          // Notify registered irqfds: signal each bound eventfd so evdev's
+          // epoll_wait wakes on the irqfd (evdev_refact.md §4.2/§3.2).
+          uint64_t irqflags;
+          spin_lock_irqsave(&hid_irqfd_lock, &irqflags);
+          for (int i = 0; i < HID_IRQFD_MAX; i++)
+            if (hid_irqfds[i])
+              eventfd_signal_isr(hid_irqfds[i]);
+          spin_unlock_irqrestore(&hid_irqfd_lock, irqflags);
         }
       }
     } else if (type == TRB_CMD_COMPLETE) {
@@ -738,22 +753,95 @@ void xhci_init() {
 
 // ===================== USB HID keyboard enumeration =====================
 
+// usb_hid_kbd_open: no-op now.  HID interrupt delivery is registered
+// explicitly via the HID_BIND_IRQFD ioctl (hid_ops_ioctl below); the old
+// pid-array kbd_openers[] registration is gone.  (evdev_refact.md §4.2)
 static int usb_hid_kbd_open(xtask *proc, int fd) {
-  for (int i = 0; i < 8; i++)
-    if (kbd_openers[i] == 0) {
-      kbd_openers[i] = proc->pid;
-      break;
-    }
+  (void)proc;
+  (void)fd;
   return 0;
 }
 
+// usb_hid_kbd_close: drop any irqfd slots still bound by this process
+// (e.g. evdev exited without HID_UNBIND_IRQFD).  The normal path is
+// HID_UNBIND_IRQFD (hid_ops_ioctl); this is the safety net for fd-table
+// teardown.  (evdev_refact.md §4.2 生命周期)
 static int usb_hid_kbd_close(xtask *proc, int fd) {
-  for (int i = 0; i < 8; i++)
-    if (kbd_openers[i] == proc->pid) {
-      kbd_openers[i] = 0;
-      break;
+  (void)fd;
+  (void)proc;
+  uint64_t flags;
+  spin_lock_irqsave(&hid_irqfd_lock, &flags);
+  for (int i = 0; i < HID_IRQFD_MAX; i++) {
+    struct file *irqfd = hid_irqfds[i];
+    if (irqfd) {
+      // Drop the slot regardless of who bound it (single-consumer evdev);
+      // unbind the file and release our registry reference.
+      hid_irqfds[i] = NULL;
+      spin_unlock_irqrestore(&hid_irqfd_lock, flags);
+      file_put(irqfd);
+      spin_lock_irqsave(&hid_irqfd_lock, &flags);
     }
+  }
+  spin_unlock_irqrestore(&hid_irqfd_lock, flags);
   return 0;
+}
+
+// hid_ops_ioctl: register/unregister an eventfd as the HID interrupt-delivery
+// fd.  HID_BIND_IRQFD: arg = &irqfd_fd (int); resolve the caller's irqfd
+// file via current_task->files + fd_lookup, verify it is an eventfd, take a
+// reference, and store it in hid_irqfds[].  HID_UNBIND_IRQFD: clear the slot
+// and drop the reference.  (evdev_refact.md §4.2)
+static long hid_ops_ioctl(uint32_t cmd, void *arg) {
+  if (cmd != HID_BIND_IRQFD && cmd != HID_UNBIND_IRQFD)
+    return -ENOTTY;
+
+  if (cmd == HID_BIND_IRQFD) {
+    int irqfd_fd = *(int *)arg;
+    xtask *proc = current_task;
+    struct file *irqfd = fd_lookup(proc->proc->files, irqfd_fd);
+    if (!irqfd || irqfd->type != FD_EVENTFD)
+      return -EINVAL;
+
+    uint64_t flags;
+    spin_lock_irqsave(&hid_irqfd_lock, &flags);
+    // Find a free slot (single consumer; first-fit is fine).
+    int slot = -1;
+    for (int i = 0; i < HID_IRQFD_MAX; i++) {
+      if (!hid_irqfds[i]) {
+        slot = i;
+        break;
+      }
+    }
+    if (slot < 0) {
+      spin_unlock_irqrestore(&hid_irqfd_lock, flags);
+      return -EBUSY;
+    }
+    file_get(irqfd); // registry holds a reference until unbind/close
+    hid_irqfds[slot] = irqfd;
+    spin_unlock_irqrestore(&hid_irqfd_lock, flags);
+    return 0;
+  }
+
+  // HID_UNBIND_IRQFD: clear the first slot matching the caller's irqfd.
+  // (arg is unused for _IO; we match by file identity.)
+  {
+    uint64_t flags;
+    spin_lock_irqsave(&hid_irqfd_lock, &flags);
+    struct file *dropped = NULL;
+    for (int i = 0; i < HID_IRQFD_MAX; i++) {
+      if (hid_irqfds[i]) {
+        // Drop any bound irqfd (single consumer evdev); the unbind is
+        // unambiguous because evdev holds exactly one irqfd at a time.
+        dropped = hid_irqfds[i];
+        hid_irqfds[i] = NULL;
+        break;
+      }
+    }
+    spin_unlock_irqrestore(&hid_irqfd_lock, flags);
+    if (dropped)
+      file_put(dropped);
+    return 0;
+  }
 }
 
 static void xhci_init_keyboard() {
@@ -842,6 +930,7 @@ static void xhci_init_keyboard() {
       usb_hid_ops.is_block = false;
       usb_hid_ops.open = usb_hid_kbd_open;
       usb_hid_ops.close = usb_hid_kbd_close;
+      usb_hid_ops.ioctl = hid_ops_ioctl; // HID_BIND_IRQFD / HID_UNBIND_IRQFD
       devtmpfs_create("usb_hid_kbd", &usb_hid_ops, hid_shm);
       shm_put(hid_shm); // devtmpfs_create took a reference via shm_get
     }

@@ -29,14 +29,10 @@ typedef enum wait_event {
   WAIT_RECV,
   WAIT_REQ_REPLY,
   WAIT_CHILD,
-  WAIT_PIPE,
   WAIT_MSG_REPLY,
   WAIT_POLL,
   WAIT_FUTEX,
-  WAIT_PAUSE,   // pause(): block until any signal; may carry an alarm deadline
-  WAIT_VGPU_CMD // virtio-gpu send_cmd: awaiting per-cmd completion. Dedicated
-                // event so IPC/pty wake_process(pid) (which matches only
-                // WAIT_RECV) cannot spuriously wake a virtio waiter.
+  WAIT_PAUSE, // pause(): block until any signal; may carry an alarm deadline
 } wait_event;
 
 #define RECV_MSG_SIZE 64
@@ -44,6 +40,8 @@ typedef enum wait_event {
 #define MAX_PROC 1024
 
 struct proc; // forward declaration — Xcore does not interpret contents
+struct file; // forward declaration — ipcfd_file pointer (defined in
+             // kernel/bsd/types.h)
 
 typedef struct xtask {
   pid_t pid;             // offset 0
@@ -64,7 +62,6 @@ typedef struct xtask {
   uint64_t alarm_deadline; // 0 = no alarm; else sched_clock() ns absolute
                            // (POSIX alarm(); checked by timer_handler)
   uint8_t wait_timed_out;  // 1 = timer expired wakeup, 0 = notify wakeup
-  uint8_t recv_intr;       // set by wake_process when WAIT_RECV
 
   // === unified recv queue ===
   uint8_t recv_buf[RECV_QUEUE_SIZE][RECV_MSG_SIZE];
@@ -92,6 +89,16 @@ typedef struct xtask {
   pid_t msg_target_pid;
   uint8_t msg_replied; // set under caller's scheduler_lock by sys_msg_resp;
                        // same lost-wake guard as req_replied for WAIT_MSG_REPLY
+
+  // === ipcfd (evdev downstream-IPC fd) ===
+  // Points at the FD_IPC file bound to this task's recv queue (NULL if none).
+  // Set by sys_ipcfd_create (holds a file reference); cleared by the fd's
+  // close/file_put path.  Enqueue paths (sys_req/notify/resp/msg_to/msg_resp)
+  // check this to wake the ipcfd wq alongside WAIT_RECV (evdev_refact.md
+  // §5.6).  Stored as struct file* with a refcount, NOT a task pid — the wq
+  // lives in the file, and the reference keeps the file alive while a
+  // pending enqueue might wake it.
+  struct file *ipcfd_file;
 
   // === CPU time accounting ===
   uint64_t cpu_time_ns;

@@ -90,7 +90,6 @@ extern pid_t irq_owner[MAX_IRQ_HANDLERS];
 
 // IPC primitives (exported by Xcore layer)
 void notify_and_wake(pid_t target_pid, recv_msg *msg);
-void wake_process(pid_t pid);
 int kernel_msg_send(pid_t target_pid, const void *req, size_t req_len,
                     void *resp, size_t resp_len);
 

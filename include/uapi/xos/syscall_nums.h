@@ -128,6 +128,11 @@
 // ===================== udev db atomic write =====================
 #define SYS_RENAME 98
 
+// ===================== ipcfd (evdev 路径3 IPC 定制 socket fd)
+// =====================
+#define SYS_IPCFD_CREATE 99
+#define SYS_IPCFD_READ 100
+
 // ===================== recv_msg (shared between kernel and user)
 // =====================
 #define RECV_IRQ 0

@@ -17,7 +17,6 @@
 #include <sys/select.h>
 #include <sys/signalfd.h>
 #include <sys/timerfd.h>
-#include <syscall.h>
 #include <xos/errno.h>
 #include <xos/socket.h>
 #include <xos/syscall_asm.h>
@@ -153,6 +152,31 @@ extern "C" int epoll_pwait(int epfd, struct epoll_event *events, int maxevents,
 
 extern "C" int eventfd(unsigned int initval, int flags) {
   int64_t ret = __syscall2(SYS_EVENTFD2, (int64_t)initval, (int64_t)flags);
+  if (ret < 0) {
+    errno = (int)(-ret);
+    return -1;
+  }
+  return (int)ret;
+}
+
+// ===================== ipcfd (evdev downstream-IPC fd) =====================
+
+extern "C" int ipcfd_create(void) {
+  int64_t ret = __syscall0(SYS_IPCFD_CREATE);
+  if (ret < 0) {
+    errno = (int)(-ret);
+    return -1;
+  }
+  return (int)ret;
+}
+
+// Dedicated 4-arg read for an FD_IPC fd: read() is only 3-arg (fd, buf,
+// count), but ipcfd needs the recv_msg target + variable-length payload
+// (data_buf + len).  Dequeues non-blockingly; -EAGAIN (queue empty) → -1.
+extern "C" int ipcfd_read(int fd, struct recv_msg *msg, void *data_buf,
+                          size_t data_buf_len) {
+  int64_t ret = __syscall4(SYS_IPCFD_READ, (int64_t)fd, (int64_t)(uintptr_t)msg,
+                           (int64_t)(uintptr_t)data_buf, (int64_t)data_buf_len);
   if (ret < 0) {
     errno = (int)(-ret);
     return -1;

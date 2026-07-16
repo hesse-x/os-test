@@ -228,7 +228,7 @@ int ep_modify(eventpoll *ep, struct file *f, struct epoll_event *ev) {
 static void ep_wait_callback(wait_queue_t *wq, unsigned long flags) {
   xtask *proc = (xtask *)wq->data;
   (void)flags;
-  wake_with_event(proc, WAIT_POLL);
+  wake_wq_target(proc);
 }
 
 // ===================== syscalls =====================
@@ -343,6 +343,11 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
 
   int n = 0;
   while (1) {
+    // prepare_to_wait: 先标 BLOCKED 再持 ep->lock 查 ready_list，使
+    // ep_poll_callback 的 __wake_up 若在重查后到达命中已 BLOCKED 的 task。
+    proc->state = BLOCKED;
+    proc->wait_event = WAIT_POLL;
+    proc->wait_timed_out = 0;
     spin_lock(&ep->lock);
     if (!list_empty(&ep->ready_list)) {
       // Process only the items present at the start of this pass. LT items
@@ -374,6 +379,7 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
                                  .data = {.u64 = epi->user_data}};
         if (copy_to_user(&((struct epoll_event *)ev_ptr)[n], &ev, sizeof(ev))) {
           spin_unlock(&ep->lock);
+          sched_cancel_spurious_wake(proc);
           remove_wait_queue(&ep->wq, &wait);
           file_put(ef);
           return -EFAULT;
@@ -384,6 +390,11 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
         it = next;
       }
       spin_unlock(&ep->lock);
+      // prepare_to_wait: 循环顶部标过 BLOCKED，若 re-check 期间
+      // ep_wait_callback 的 wake_wq_target 命中把 run_node push 进了
+      // run_queue（state=READY），此 break 不 走 schedule() 会留下悬空
+      // run_node。cancel 掉虚假唤醒：摘 run_node + state=RUNNING。
+      sched_cancel_spurious_wake(proc);
       remove_wait_queue(&ep->wq, &wait);
       file_put(ef);
       return n;
@@ -391,6 +402,7 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
     spin_unlock(&ep->lock);
 
     if (timeout_ms == 0) {
+      sched_cancel_spurious_wake(proc);
       remove_wait_queue(&ep->wq, &wait);
       file_put(ef);
       return 0;
@@ -407,6 +419,7 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
     if (effective_deadline > 0) {
       uint64_t now = sched_clock();
       if (now >= effective_deadline) {
+        sched_cancel_spurious_wake(proc);
         remove_wait_queue(&ep->wq, &wait);
         file_put(ef);
         return 0; // timeout
@@ -422,9 +435,6 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
       proc->wait_deadline = 0;
     }
 
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_POLL;
-    proc->wait_timed_out = 0;
     schedule();
 
     // EINTR check (signal priority over timeout), mirrors sys_poll
@@ -434,6 +444,7 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
       uint64_t deliv = pend & ~proc->proc->sig_blocked;
       deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
       if (deliv) {
+        sched_cancel_spurious_wake(proc);
         remove_wait_queue(&ep->wq, &wait);
         file_put(ef);
         return -EINTR;
@@ -441,6 +452,7 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
     }
 
     if (proc->wait_timed_out && timeout_ms > 0) {
+      sched_cancel_spurious_wake(proc);
       remove_wait_queue(&ep->wq, &wait);
       file_put(ef);
       return 0; // timeout
