@@ -68,6 +68,10 @@
 #include <xos/syscall.h>
 #include <xos/syscall_nums.h>
 
+/* DRM 主号（仅 stat 设备号用，与 virtio_gpu.c DRM_MAJOR 同值；226 是 DRM 语义、
+ * 不属于 devtmpfs 通用层，故各 .c 顶部各自定义而非放公共头）。 */
+#define DRM_MAJOR_FOR_STAT 226
+
 // ===================== File protocol for FD_FILE <-> fs_driver IPC
 // =====================
 #define FILE_CMD_READ 2
@@ -2349,8 +2353,14 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
       goto out;
     }
     ks.st_ino = ip->ino;
-    ks.st_rdev = ip->ino;
-    if (ip->i_priv && ((struct dev_ops *)ip->i_priv)->is_block)
+    /* DRM 设备号同 devtmpfs_getattr（0.5-3）：libdrm fstat 判 render/primary。
+     */
+    struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+    if (ops && __strcmp(ops->subsystem, "drm") == 0)
+      ks.st_rdev = k_makedev(DRM_MAJOR_FOR_STAT, ops->minor);
+    else
+      ks.st_rdev = ip->ino;
+    if (ops && ops->is_block)
       ks.st_mode = S_IFBLK | 0666;
     else
       ks.st_mode = S_IFCHR | 0666;

@@ -13,6 +13,8 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 #include <unity.h>
 #include <xos/ioctl.h>
@@ -176,6 +178,25 @@ void test_drm_gem_close(void) {
   close(fd);
 }
 
+/* 6. renderD128 的 fstat.st_rdev 必须是 makedev(226,128)，否则 libdrm 判不出
+ * render */
+void test_drm_render_rdev(void) {
+  int fd = open("/dev/dri/renderD128", O_RDWR);
+  if (fd < 0) {
+    TEST_IGNORE_MESSAGE("/dev/dri/renderD128 not available");
+    return;
+  }
+
+  struct stat st;
+  memset(&st, 0, sizeof(st));
+  int rc = fstat(fd, &st);
+  TEST_ASSERT_EQUAL_INT(0, rc);
+  TEST_ASSERT_EQUAL_INT(226, major(st.st_rdev));
+  TEST_ASSERT_EQUAL_INT(128, minor(st.st_rdev));
+
+  close(fd);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -186,5 +207,6 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_drm_cap_addfb2_modifiers);
   RUN_TEST(test_drm_addfb2_getfb);
   RUN_TEST(test_drm_gem_close);
+  RUN_TEST(test_drm_render_rdev);
   return UNITY_END();
 }

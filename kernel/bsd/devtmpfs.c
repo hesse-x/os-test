@@ -27,6 +27,10 @@
 #include "kernel/bsd/syscall.h"
 #include "kernel/bsd/sysfs.h"
 
+/* DRM 主号（仅 stat 设备号用，与 virtio_gpu.c DRM_MAJOR 同值；devtmpfs 不
+ * 反向 include 驱动头）。 */
+#define DRM_MAJOR_FOR_STAT 226
+
 struct shm;
 
 struct dev_entry {
@@ -201,8 +205,17 @@ static int devtmpfs_getattr(struct inode *ip, struct kstat *ks) {
   if (ip->type == INODE_DIR) {
     ks->st_mode = 0040755;
   } else {
-    ks->st_mode = 0020000 | 0600;    /* S_IFCHR | 0600 */
-    ks->st_rdev = (uint64_t)ip->ino; /* 设备号=inode(现状) */
+    ks->st_mode = 0020000 | 0600; /* S_IFCHR | 0600 */
+    /* 设备号：DRM 设备返回真实 makedev(226, minor)（libdrm 靠 fstat.st_rdev
+     * 判 render/primary，见 drmGetNodeTypeFromFd）；其余设备维持 =ino 现状
+     *（架构 gap 记 todo §3.5，无消费者依赖）。子目录 inode 的 i_priv 是
+     * dev_dir*，但本 else 分支只对字符设备 inode 进入，i_priv 必为 dev_ops*。
+     */
+    struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+    if (ops && __strcmp(ops->subsystem, "drm") == 0)
+      ks->st_rdev = k_makedev(DRM_MAJOR_FOR_STAT, ops->minor);
+    else
+      ks->st_rdev = (uint64_t)ip->ino;
   }
   ks->st_ino = ip->ino;
   ks->st_nlink = 1;

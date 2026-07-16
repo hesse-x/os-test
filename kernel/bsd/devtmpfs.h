@@ -13,6 +13,13 @@
 #include "kernel/bsd/mount.h"
 #include "kernel/xcore/xtask.h" // pid_t
 
+/* Linux 64-bit dev_t 编码（搬自 user/include/sys/sysmacros.h，内核侧共用）。
+ * 内核不依赖用户态 sysmacros.h，故在此独立定义；纯算术无外部依赖。 */
+static inline uint64_t k_makedev(uint32_t major, uint32_t minor) {
+  return ((uint64_t)(major & 0xfff) << 8) | ((uint64_t)(major & ~0xfff) << 32) |
+         ((uint64_t)(minor & 0xff)) | ((uint64_t)(minor & ~0xff) << 12);
+}
+
 struct shm;
 
 typedef int64_t ssize_t;

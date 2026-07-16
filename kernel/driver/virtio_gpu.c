@@ -40,6 +40,8 @@
 #include "drm/drm_mode.h"
 #include "drm/virtgpu_drm.h"
 
+#define DRM_MAJOR 226
+
 struct virtio_gpu_device g_virtio_gpu;
 struct drm_device g_drm;
 struct drm_property g_drm_properties[DRM_MAX_PROPERTIES];
@@ -2192,6 +2194,16 @@ void drm_dev_register(void) {
   }
   __strncpy(drm_dev_ops.subsystem, "drm", 7);
   __strncpy(drm_dev_ops.devtype, "card", 7);
+  drm_dev_ops.minor = 0;
+
+  int rc2 = devtmpfs_create("dri/renderD128", &drm_render_ops, NULL);
+  if (rc2 < 0) {
+    printk(LOG_ERROR, "drm: failed to create /dev/dri/renderD128: %d\n", rc2);
+  } else {
+    __strncpy(drm_render_ops.subsystem, "drm", 7);
+    __strncpy(drm_render_ops.devtype, "renderD128", 7);
+    drm_render_ops.minor = 128;
+  }
 
   int rc2 = devtmpfs_create("dri/renderD128", &drm_render_ops, NULL);
   if (rc2 < 0) {
