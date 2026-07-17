@@ -57,6 +57,11 @@ SPARSE_FLAGS=(
     -Wreturn-void-ptr
     -I.
     -Iinclude/uapi
+    # Mirror kernel/driver/CMakeLists.txt target_include_directories(driver_obj
+    # PRIVATE third_party/drm/include): kernel driver sources include upstream
+    # DRM UAPI headers as "drm/virtgpu_drm.h". Without this -I, sparse cannot
+    # resolve that include and macros like VIRTGPU_DRM_CAPSET_VENUS are undefined.
+    -Ithird_party/drm/include
 )
 
 # Create a temporary sparse compat header for GCC builtins sparse doesn't understand
@@ -172,10 +177,11 @@ if grep -rn '#include "kernel/driver/' kernel/xcore/ 2>/dev/null; then
     INCLUDE_FAIL=1
 fi
 
-# kernel/driver/ must not include kernel/bsd/ headers (devtmpfs excepted)
+# kernel/driver/ must not include kernel/bsd/ headers
+# (devtmpfs/sysfs for VFS plumbing; poll_types for the __poll typedef only)
 echo "Checking kernel/driver/ #include violations..."
-if grep -rn '#include "kernel/bsd/' kernel/driver/ 2>/dev/null | grep -v devtmpfs | grep -v sysfs; then
-    echo "FAIL: driver includes bsd (except devtmpfs/sysfs)"
+if grep -rn '#include "kernel/bsd/' kernel/driver/ 2>/dev/null | grep -v devtmpfs | grep -v sysfs | grep -v poll_types; then
+    echo "FAIL: driver includes bsd (except devtmpfs/sysfs/poll_types)"
     INCLUDE_FAIL=1
 fi
 

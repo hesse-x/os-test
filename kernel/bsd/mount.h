@@ -7,17 +7,13 @@
 #ifndef KERNEL_MOUNT_H
 #define KERNEL_MOUNT_H
 
+#include "kernel/xcore/posix_types.h" // ssize_t
 #include "kernel/xcore/sparse.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 struct inode;
-
-/* ssize_t is not in the freestanding kernel; define locally (matches the
- * int64_t typedef in devtmpfs.h). Redefinition with the same type is allowed.
- */
-typedef int64_t ssize_t;
 
 /* d_type constants (Linux DT_* values) — used by dir_emit and fstype
  * getdents callbacks. No named constants existed before; fat32.c used

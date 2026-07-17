@@ -15,7 +15,7 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
-#include "kernel/bsd/fops.h"
+#include "kernel/bsd/poll_types.h"
 #include "kernel/bsd/sysfs.h"
 #include "kernel/driver/driver.h"
 #include "kernel/driver/drm_internal.h"

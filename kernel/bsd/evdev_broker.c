@@ -25,6 +25,7 @@
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h" // struct inode (i_priv)
+#include "kernel/bsd/poll_types.h"
 #include "kernel/bsd/proc.h"  // alloc_fd, fd_install, fd_lookup
 #include "kernel/bsd/types.h" // struct file
 #include "kernel/xcore/atomic.h"
@@ -366,7 +367,7 @@ int evdev_consumer_open_cb(xtask *proc, int fd) {
   }
   client->inst = inst;
   client->owner_pid = proc->pid;
-  client->wq = NULL; /* 惰性：首次阻塞 read 时 file_wq_get 后赋值 */
+  client->wq = NULL; /* set below via file_wq_get before returning */
   client->dropped = 0;
   client->in_frame = false;
   list_init(&client->node);
@@ -377,6 +378,15 @@ int evdev_consumer_open_cb(xtask *proc, int fd) {
 
   f->private_data = client;
   f->f_op = &evdev_consumer_fops;
+  /* Eagerly resolve the per-fd wq so owner write's __wake_up(client->wq)
+   * reaches epoll/poll waiters — not just blocking read. Without this,
+   * client->wq stays NULL until a blocking read (which never happens when
+   * libinput monitors the fd via epoll), so posted events pile up in the
+   * kfifo with no wakeup: input appears dead (bug.md). file_wq_get lazily
+   * allocates f->wq here, and every later file_wq_get(consumer_fd) — by
+   * sys_poll's add_wait_queue or epoll's ep_target_wq — returns the same
+   * f->wq, so the wakeup target and the waiter's wq are one object. */
+  client->wq = file_wq_get(f);
   return 0;
 }
 
@@ -404,7 +414,8 @@ static ssize_t evdev_consumer_read(struct xtask *proc, struct file *f,
     wait.data = current_task;
     list_init(&wait.node);
     add_wait_queue(wq, &wait);
-    client->wq = wq; /* 供 owner write / control_close 唤醒 */
+    /* client->wq was resolved at open (evdev_consumer_open_cb) to this same
+     * f->wq, so owner write already wakes us — nothing to assign here. */
 
     while (kfifo_len(&client->buffer) == 0) {
       if (client->inst->dead) {

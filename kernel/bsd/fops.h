@@ -7,10 +7,9 @@
 #define KERNEL_BSD_FOPS_H
 
 #include <stddef.h>
-#include <stdint.h>
 
-typedef int64_t ssize_t;
-typedef uint32_t __poll;
+#include "kernel/bsd/poll_types.h"    // __poll
+#include "kernel/xcore/posix_types.h" // ssize_t
 
 struct file;
 struct xtask;
