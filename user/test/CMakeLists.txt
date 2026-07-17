@@ -142,3 +142,30 @@ if(TEST)
     add_user_dyn_elf(test_inode_refcount C SOURCES test_inode_refcount.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
     add_user_dyn_elf(test_tmpfs_socket C SOURCES test_tmpfs_socket.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
 endif()
+
+# libffi dynamic test (ffi_worklist §4.C): ffi_call int/double + ffi_closure
+# callback (FFI_MMAP_EXEC_WRIT double-map closure path) + mprotect independent
+# case.
+# LINK_LIBS ffi → -lffi resolves to libffi.so (dynamic link, DT_NEEDED).
+# add_dependencies on target ffi_so ensures build ordering; INCLUDE_DIRS
+# ${CMAKE_BINARY_DIR} alone covers all three public headers — ffi.h and
+# fficonfig.h (generated) plus ffitarget.h (COPYONLY'd into build/ alongside
+# them, matching upstream nodist_include_HEADERS). No reach into src/x86.
+# DEFS adds UNITY_INCLUDE_DOUBLE (on top of the shared UNITY_EXCLUDE_*): case 2
+# asserts via TEST_ASSERT_EQUAL_DOUBLE, which unity_internals.h:286 gates off
+# unless UNITY_INCLUDE_DOUBLE is defined at the test's compile time (Unity is
+# compiled inline as unity.c, not linked as a library, so the define must ride
+# the test ELF's DEFS, not target_compile_definitions). Unity's double compare
+# (unity.c:898) is pure arithmetic, no math.h, so it coexists with EXCLUDE_MATH.
+# GEN_HEADERS lists the generated libffi public headers (configure_file outputs
+# in build/) that test_ffi.c #includes via <ffi.h>; bare-gcc custom commands
+# don't auto-track these, so editing the template wouldn't re-compile the test.
+add_user_dyn_elf(test_ffi C SOURCES test_ffi.c
+    ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c
+    LINK_LIBS ffi c
+    DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H UNITY_INCLUDE_DOUBLE
+    INCLUDE_DIRS ${CMAKE_BINARY_DIR}
+    GEN_HEADERS ${CMAKE_BINARY_DIR}/ffi.h
+                ${CMAKE_BINARY_DIR}/fficonfig.h
+                ${CMAKE_BINARY_DIR}/ffitarget.h)
+add_dependencies(test_ffi_dyn_elf ffi_so)

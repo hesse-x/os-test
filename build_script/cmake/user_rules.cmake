@@ -74,7 +74,8 @@ endfunction()
 
 # add_user_lib: userspace library (libc.a static / libc.so shared / generic .so)
 # Usage: add_user_lib(name [C] SOURCES ... [FLAGS ...] [SHARED] [OUTPUT_NAME ...]
-#                     [VERSION_MAP ...] [SO_LINK_LIBS ...] [INCLUDE_DIRS ...])
+#                     [VERSION_MAP ...] [SO_LINK_LIBS ...] [INCLUDE_DIRS ...]
+#                     [GEN_HEADERS hdr1 ...])
 # C: flag to use C compiler (consistent with add_user_elf)
 # SHARED: produce .so (gcc -shared -fPIC custom command, plan_ld2b3 decision 1 fallback)
 # OUTPUT_NAME: custom base output name (without lib prefix); default = lib_name
@@ -83,10 +84,19 @@ endfunction()
 # SO_LINK_LIBS: additional .so dependencies for SHARED libs (e.g. "c" for libc.so)
 #              Links -L${CMAKE_BINARY_DIR} -l<lib>.
 # INCLUDE_DIRS: extra include directories (SHARED path only; static uses target_include_directories)
+# GEN_HEADERS: generated headers (configure_file outputs in ${CMAKE_BINARY_DIR}, e.g.
+#              fficonfig.h/ffi.h/ffitarget.h) that the library's sources #include. The
+#              SHARED path compiles via bare-gcc add_custom_command, which is outside
+#              CMake's target dependency graph and so does NOT auto-track configure_file
+#              outputs — IMPLICIT_DEPENDS only scans source-local #include at configure
+#              time and cannot see headers generated later. Listing them here adds them
+#              to each object's DEPENDS so editing the template re-compiles the library.
+#              (The STATIC path uses add_library, which tracks configure_file outputs
+#              automatically, so GEN_HEADERS is unused there.)
 # Otherwise: add_library(STATIC), preserve target interface (unity uses target_include_directories)
 function(add_user_lib lib_name)
     set(option_args SHARED C)
-    set(multi_args SOURCES FLAGS SO_LINK_LIBS INCLUDE_DIRS)
+    set(multi_args SOURCES FLAGS SO_LINK_LIBS INCLUDE_DIRS GEN_HEADERS)
     set(one_args OUTPUT_NAME VERSION_MAP)
     cmake_parse_arguments(ARG "${option_args}" "${one_args}" "${multi_args}" ${ARGN})
 
@@ -124,7 +134,7 @@ function(add_user_lib lib_name)
             set(src_obj ${CMAKE_BINARY_DIR}/${lib_name}_${idx}.o)
             add_custom_command(OUTPUT ${src_obj}
                 COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS_BASE} -c ${src_full} -o ${src_obj}
-                DEPENDS ${src_full}
+                DEPENDS ${src_full} ${ARG_GEN_HEADERS}
                 IMPLICIT_DEPENDS ${DEP_LANG} ${src_full}
                 COMMENT "Compiling ${lib_name}_${idx}.o (SHARED)")
             list(APPEND OBJ_FILES ${src_obj})
@@ -425,8 +435,12 @@ endfunction()
 # ld.md §3.4.4 / plan_ld2b3 T5
 # crt0.o linked first (provides _start), libc.so linked via -L/-l (records DT_NEEDED)
 # Supports both C and C++ sources: pass C flag for C, omit for C++ (like add_user_elf)
+# GEN_HEADERS: generated headers (configure_file outputs in ${CMAKE_BINARY_DIR}) that
+#              the ELF's sources #include. Same rationale as add_user_lib's GEN_HEADERS:
+#              bare-gcc add_custom_command doesn't auto-track configure_file outputs, so
+#              listing them forces a re-compile when the template changes.
 function(add_user_dyn_elf name)
-    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS;INCLUDE_DIRS" ${ARGN})
+    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS;INCLUDE_DIRS;GEN_HEADERS" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
     if(ARG_C)
         set(COMPILE_CMD ${CMAKE_C_COMPILER})
@@ -480,7 +494,7 @@ function(add_user_dyn_elf name)
         endif()
         add_custom_command(OUTPUT ${src_obj}
             COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS} -c ${src_full} -o ${src_obj}
-            DEPENDS ${src_full}
+            DEPENDS ${src_full} ${ARG_GEN_HEADERS}
             IMPLICIT_DEPENDS ${DEP_LANG} ${src_full})
         list(APPEND OBJ_FILES ${src_obj})
         math(EXPR idx "${idx} + 1")

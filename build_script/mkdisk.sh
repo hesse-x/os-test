@@ -27,7 +27,7 @@ TESTDATA_DIR="${PROJECT_DIR}/testdata"
 
 # Check dependency files
 for f in init.elf myos.elf BOOTX64.EFI evdev.elf terminal.elf shell.elf \
-         libc.a libc.so libinput.so libudev.so libm.so libdrm.so hello.elf ldso.elf hello_dyn.elf udevd.elf; do
+         libc.a libc.so libinput.so libudev.so libm.so libdrm.so libffi.so hello.elf ldso.elf hello_dyn.elf udevd.elf; do
     if [ ! -f "${BUILD_DIR}/${f}" ]; then
         echo "mkdisk.sh: ${BUILD_DIR}/${f} not found, run build.sh first"
         exit 1
@@ -98,6 +98,7 @@ mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libinput.so"     ::lib/libinput.
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libudev.so"      ::lib/libudev.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libm.so"        ::lib/libm.so
 mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libdrm.so"     ::lib/libdrm.so
+mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libffi.so"     ::lib/libffi.so
 # ld.so multi-dependency test stub .so (plan_ld phase D): placed in /test/lib/ separate from production /lib/,
 # ld.so load_one() tries /lib/ first and falls back to /test/lib/ on failure (mirrors Linux DT_RPATH idea)
 mmd -i "${BUILD_DIR}/part2.img" ::test ::test/lib
@@ -118,7 +119,7 @@ if [ "$TEST" = "1" ]; then
                test_sysfs.elf test_libudev.elf drm_test_link.elf \
                test_vfs_dispatch.elf test_inode_refcount.elf test_tmpfs_socket.elf \
                test_rename.elf test_udevd_db.elf test_udevd.elf test_dev_vfs_dynamic.elf \
-               test_mprotect.elf; do
+               test_mprotect.elf test_ffi.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
     done
 fi
