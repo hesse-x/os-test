@@ -133,6 +133,13 @@
 #define SYS_IPCFD_CREATE 99
 #define SYS_IPCFD_READ 100
 
+// ===================== mprotect =====================
+#define SYS_MPROTECT 101
+
+// ===================== sysconf (dynamic values from kernel)
+// =====================
+#define SYS_SYSCONF 102
+
 // ===================== recv_msg (shared between kernel and user)
 // =====================
 #define RECV_IRQ 0

@@ -57,6 +57,7 @@
 #include "kernel/xcore/xtask.h"
 #include "utils/macro.h"
 
+#include <xos/confname.h> // _SC_* (shared with user-side sysconf)
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/ioctl.h>
@@ -730,7 +731,10 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // Access triggers #PF (desired for stack-overflow detection).
   uint64_t pte_flags = PTE_USER;
   if (prot == 0) {
-    pte_flags |= PTE_NX;
+    // PROT_NONE: keep physical page allocated but present=0 + PTE_PROTNONE.
+    // pte_present() still recognizes it (reclaim/fork/mprotect), but hardware
+    // treats it as not-present → access triggers #PF → SEGV_ACCERR (Linux).
+    pte_flags |= PTE_PROTNONE | PTE_NX;
   } else {
     pte_flags |= PTE_PRESENT;
     if (prot & PROT_WRITE)
@@ -856,6 +860,111 @@ int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   }
 
   return (int64_t)-EINVAL;
+}
+
+// ===================== BSD syscall: mprotect =====================
+// Change protection of existing user mappings page-by-page. Aligns with Linux:
+// PROT_NONE clears PTE_PRESENT and sets PTE_PROTNONE (hardware not-present, but
+// pte_present() recognizes it). partial-unmapped → -ENOMEM, already-changed
+// pages kept (Linux semantics). Does not split huge pages (→ -EINVAL).
+int64_t sys_mprotect(int64_t arg1, int64_t arg2, int64_t prot_arg,
+                     int64_t unused1, int64_t unused2, int64_t unused3) {
+  uint64_t addr = arg1;
+  size_t size = (size_t)arg2;
+  int prot = (int)prot_arg;
+
+  if (size == 0)
+    return 0; // Linux: no-op
+  if (addr & (PAGE_SIZE - 1))
+    return (int64_t)-EINVAL;
+  if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
+    return (int64_t)-EINVAL;
+  if (addr >= 0x800000000000ULL)
+    return (int64_t)-EINVAL;
+
+  size = ALIGN_UP(size, PAGE_SIZE);
+
+  xtask *proc = current_task;
+  spinlock *lk = &proc->mm->mmap_lock;
+  uint64_t flags;
+  spin_lock_irqsave(lk, &flags);
+
+  // New leaf flags (PTE_USER always; physical address preserved per-page).
+  uint64_t base = PTE_USER;
+  if (prot == 0) {
+    // PROT_NONE: present=0 + PROTNONE + NX
+    base |= PTE_PROTNONE | PTE_NX;
+  } else {
+    base |= PTE_PRESENT;
+    if (prot & PROT_WRITE)
+      base |= PTE_RW;
+    if (!(prot & PROT_EXEC))
+      base |= PTE_NX;
+  }
+
+  size_t npages = size / PAGE_SIZE;
+  for (size_t i = 0; i < npages; i++) {
+    uint64_t va = addr + i * PAGE_SIZE;
+    uint64_t *pte = lookup_pte(proc->mm->cr3, va);
+    if (!pte) {
+      // Page genuinely unmapped → -ENOMEM, already-changed pages kept (Linux).
+      spin_unlock_irqrestore(lk, flags);
+      return (int64_t)-ENOMEM;
+    }
+    if (*pte & PTE_PS) {
+      // Refuse to split huge pages (no anonymous huge-page mprotect users).
+      spin_unlock_irqrestore(lk, flags);
+      return (int64_t)-EINVAL;
+    }
+    uint64_t phys = *pte & PTE_PHYS_MASK;
+    // Preserve USER + physical address; clear COW/PROTNONE/old RW/NX, reapply.
+    *pte = phys | base;
+    invlpg(va); // stale TLB would defeat RW→RX / R→PROTNONE transitions
+  }
+
+  // Sync mmap_region->prot so fork COW honors the new protection.
+  for (mmap_region *mr = proc->mm->mmap_regions; mr; mr = mr->next) {
+    if (mr->vaddr == addr) {
+      mr->prot = (uint32_t)prot;
+      break;
+    }
+  }
+
+  spin_unlock_irqrestore(lk, flags);
+  return 0;
+}
+
+// ===================== BSD syscall: sysconf =====================
+// Backs the libc sysconf() for values that are genuinely runtime-variable.
+// Static/architecture-fixed values (PAGESIZE, CLK_TCK, OPEN_MAX, …) stay in
+// the user-side switch; this syscall only carries the dynamic ones so they
+// track real boot state rather than hardcoded guesses.
+//   _SC_NPROCESSORS_ONLN/CONF → ncpu (set by smp_boot_aps to g_madt.ncpus)
+//   _SC_PHYS_PAGES            → total_page_frames (E820 max phys, init_mem)
+//   _SC_AVPHYS_PAGES          → free pages in bfc_free_list (cont_page_num sum)
+int64_t sys_sysconf(int64_t name, int64_t unused1, int64_t unused2,
+                    int64_t unused3, int64_t unused4, int64_t unused5) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+
+  switch ((int)name) {
+  case _SC_NPROCESSORS_CONF:
+  case _SC_NPROCESSORS_ONLN:
+    return (int64_t)ncpu;
+  case _SC_PHYS_PAGES:
+    return (int64_t)total_page_frames;
+  case _SC_AVPHYS_PAGES: {
+    size_t free_pages = 0;
+    for (struct page *p = bfc_free_list; p; p = p->bfc.next)
+      free_pages += p->bfc.cont_page_num;
+    return (int64_t)free_pages;
+  }
+  default:
+    return -1; // POSIX: unsupported → -1, errno unchanged
+  }
 }
 
 // pipe wq 回调：__wake_up(p->wq) → 唤醒挂在 p->wq 的阻塞 reader/writer。
@@ -2944,6 +3053,10 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_mmap(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MUNMAP:
     return sys_munmap(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_MPROTECT:
+    return sys_mprotect(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SYSCONF:
+    return sys_sysconf(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_PIPE:
     return sys_pipe(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_WRITE:

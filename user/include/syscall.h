@@ -178,6 +178,26 @@ static inline int sys_munmap(void *addr, size_t size) {
   return 0;
 }
 
+static inline int sys_mprotect(void *addr, size_t size, int prot) {
+  int64_t r = __syscall3(SYS_MPROTECT, (int64_t)(uintptr_t)addr, (int64_t)size,
+                         (int64_t)prot);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline long sys_sysconf(int name) {
+  int64_t r = __syscall1(SYS_SYSCONF, (int64_t)name);
+  // sysconf is special: it does NOT set errno on unsupported names (POSIX),
+  // and kernel sys_sysconf returns -1 directly (not a negative errno) for
+  // unknown names. Treat any negative return as "unsupported → -1".
+  if (r < 0)
+    return -1;
+  return (long)r;
+}
+
 // --- memfd_create/ftruncate ---
 static inline int sys_pipe(int *fd_ptr) {
   int64_t r = __syscall1(SYS_PIPE, (int64_t)(uintptr_t)fd_ptr);

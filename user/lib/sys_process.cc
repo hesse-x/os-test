@@ -8,15 +8,14 @@
  * Merged from sys_process.cc + sys_wait.cc + sys_mman.cc
  */
 
-#include <stddef.h>
+#include <errno.h>
 #include <stdint.h>
-#include <stdlib.h>
-#include <sys/mman.h>
-#include <sys/process.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 #include <syscall.h>
 #include <unistd.h>
+
+#include <sys/mman.h>
+#include <sys/process.h>
+#include <sys/wait.h>
 #include <xos/mman.h>
 
 extern "C" char **environ;
@@ -101,6 +100,10 @@ extern "C" void *mmap(void *addr, size_t length, int prot, int flags, int fd,
 
 extern "C" int munmap(void *addr, size_t length) {
   return sys_munmap(addr, length);
+}
+
+extern "C" int mprotect(void *addr, size_t length, int prot) {
+  return sys_mprotect(addr, length, prot);
 }
 
 extern "C" int memfd_create(const char *name, unsigned int flags) {

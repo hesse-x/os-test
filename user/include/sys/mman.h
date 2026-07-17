@@ -20,6 +20,7 @@ extern "C" {
 LIBC_EXPORT void *mmap(void *addr, size_t length, int prot, int flags, int fd,
                        uint64_t offset);
 LIBC_EXPORT int munmap(void *addr, size_t length);
+LIBC_EXPORT int mprotect(void *addr, size_t length, int prot);
 LIBC_EXPORT int memfd_create(const char *name, unsigned int flags);
 
 #ifdef __cplusplus

@@ -116,18 +116,29 @@ static void deliver_signal(xtask *proc, trapframe *tf, int sig,
     proc->proc->sig_force_info.si_signo = 0;
 
   // Push sigframe to user stack (CR3 switch)
+  // SysV AMD64 ABI requires rsp at a function's entry to be 8 mod 16 (the
+  // state after a `call` pushed the 8-byte return address). The handler is
+  // entered via iretq with [rsp]=pretcode as the return address, so we must
+  // place that return address at rsp-8 below the 16-aligned frame — making the
+  // handler's entry rsp exactly 8 mod 16. Otherwise a handler prologue using
+  // aligned SSE (movaps) faults with #GP, which re-delivers SIGSEGV into the
+  // same handler, recursing until rsp walks off the mapped stack and the
+  // kernel's sigframe memcpy page-faults -> panic.
   uint64_t user_rsp = tf->rsp - sizeof(struct rt_sigframe);
-  user_rsp &= ~0xFULL; // 16-byte aligned
+  user_rsp &= ~0xFULL; // 16-byte aligned base for the frame
 
   uint64_t saved_cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
   __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)proc->cr3) : "memory");
   __memcpy((void *)user_rsp, &frame, sizeof(struct rt_sigframe));
+  // Return address sits 8 bytes below the frame; handler entry rsp is now
+  // 8 mod 16 (matches a real `call`).
+  *(uint64_t *)(user_rsp - 8) = SIG_TRAMPOLINE_ADDR;
   __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
 
   // Modify trapframe → jump to handler
   tf->rip = (int64_t)sa->__sigaction_handler._sa_handler;
-  tf->rsp = user_rsp;
+  tf->rsp = user_rsp - 8;
 
   if (sa->sa_flags & SA_SIGINFO) {
     tf->rdi = (int64_t)sig;
@@ -629,7 +640,10 @@ int64_t sys_sigreturn(int64_t unused1, int64_t unused2, int64_t unused3,
   trapframe *tf = (trapframe *)tf_base;
 
   struct rt_sigframe frame;
-  uint64_t user_rsp = tf->rsp - 8;
+  // Delivery places the frame at a 16-aligned base with the return address in
+  // the 8 bytes below it; after the handler's `ret` consumes that address,
+  // rsp lands exactly on the frame base. So the frame is at tf->rsp directly.
+  uint64_t user_rsp = tf->rsp;
 
   uint64_t saved_cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));

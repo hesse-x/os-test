@@ -479,7 +479,7 @@ void mm_release(mm *mm, pid_t owner_pid) {
 
         for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
           uint64_t pte = pt_virt[pt_idx];
-          if (pte & PTE_PRESENT) {
+          if (pte_present(pte)) {
             uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
             // Check mmap_regions: skip SHM fd mappings and MAP_PHYSICAL
             bool is_shared = false;
@@ -643,7 +643,7 @@ void mm_release_pages(mm *mm) {
 
         for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
           uint64_t pte = pt_virt[pt_idx];
-          if (pte & PTE_PRESENT) {
+          if (pte_present(pte)) {
             uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
             bool skip = false;
             for (mmap_region *mr = mm->mmap_regions; mr; mr = mr->next) {
@@ -1667,7 +1667,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
           for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
             uint64_t pte = pt_virt[pt_idx];
-            if (pte & PTE_PRESENT) {
+            if (pte_present(pte)) {
               uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
               bool skip = false;
               for (mmap_region *mr = old_regions; mr; mr = mr->next) {

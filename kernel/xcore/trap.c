@@ -493,9 +493,16 @@ void trap_dispatch(trapframe *tf) {
       si_addr = (void *)fault_addr;
 
       if (!is_present) {
-        // Not-present: genuine mapping error
+        // Not-present per hardware. A PROT_NONE page is present=0 but carries
+        // PTE_PROTNONE: it is a valid (mprotect'd) mapping with no access, so
+        // a fault on it is a protection violation (SEGV_ACCERR), not a missing
+        // mapping (SEGV_MAPERR). Mirrors Linux's pte Protnone handling.
         sig = SIGSEGV;
-        si_code = SEGV_MAPERR;
+        uint64_t *pte = lookup_pte(current_task->mm->cr3, fault_addr);
+        if (pte && (*pte & PTE_PROTNONE))
+          si_code = SEGV_ACCERR;
+        else
+          si_code = SEGV_MAPERR;
       } else {
         // Present but insufficient privilege: genuine protection violation
         sig = SIGSEGV;

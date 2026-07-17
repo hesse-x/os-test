@@ -45,7 +45,7 @@ global:
     getuid; geteuid; getgid; getegid; getppid; getpgrp; umask;
     gethostname; sethostname; alarm; pause;
     truncate; fsync; sync;
-    getpagesize;
+    getpagesize; sysconf;
     chown; readlink;
 
     /* <fcntl.h> */
@@ -113,7 +113,7 @@ global:
     waitpid;
 
     /* <sys/mman.h> */
-    memfd_create; mmap; munmap;
+    memfd_create; mmap; munmap; mprotect;
 
     /* <sys/ioctl.h> */
     ioctl;

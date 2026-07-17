@@ -22,6 +22,7 @@
 #include "utils/macro.h"
 
 #include <xos/errno.h>
+#include <xos/page.h>
 
 // Lookup the leaf PTE for a given virtual address in a page table hierarchy.
 // cr3_phys is the physical address of the PML4 (as stored in mm->cr3 or CR3).
@@ -49,7 +50,7 @@ lookup_pte(uint64_t cr3_phys, uint64_t vaddr) {
   uint64_t *pt = (uint64_t *)phys_to_virt(
       (__force phys_addr_t)(pd[pd_idx] & PTE_PHYS_MASK));
   uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
-  if (!(pt[pt_idx] & PTE_PRESENT))
+  if (!pte_present(pt[pt_idx]))
     return NULL;
 
   return &pt[pt_idx];
@@ -126,8 +127,8 @@ map_user_page_direct(uint64_t *new_pml4, uint64_t vaddr, uint64_t phys,
 
   uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
   // Refuse to overwrite an existing mapping (prevents silent SHM/mmap
-  // corruption)
-  if (pt[pt_idx] & PTE_PRESENT)
+  // corruption); PROT_NONE pages count as occupied too.
+  if (pte_present(pt[pt_idx]))
     return false;
   pt[pt_idx] = phys | flags;
   return true;
@@ -150,7 +151,7 @@ map_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
     if (!pt)
       return false;
     uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
-    if (pt[pt_idx] & PTE_PRESENT) {
+    if (pte_present(pt[pt_idx])) {
       vaddr += PAGE_SIZE;
       continue;
     }
@@ -189,7 +190,7 @@ unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
       return;
 
     uint64_t pt_idx = (vaddr >> 12) & 0x1FF;
-    if (pt[pt_idx] & PTE_PRESENT) {
+    if (pte_present(pt[pt_idx])) {
       uint64_t phys = pt[pt_idx] & PTE_PHYS_MASK;
       struct page *p = &bfc_frames[PHY_TO_PAGE(phys)];
       if (refcount_dec_and_test(&p->p_refcount)) {
@@ -279,7 +280,7 @@ copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
 
         for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
           uint64_t pte = src_pt[pt_idx];
-          if (!(pte & PTE_PRESENT))
+          if (!pte_present(pte))
             continue;
 
           uint64_t leaf_phys = pte & PTE_PHYS_MASK;

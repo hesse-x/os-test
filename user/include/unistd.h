@@ -75,6 +75,14 @@ LIBC_EXPORT void wait_dev_ready(const char *dev_path);
 LIBC_EXPORT int chown(const char *path, uid_t owner, gid_t group);
 LIBC_EXPORT ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 
+/* sysconf() — POSIX runtime configuration query. _SC_* constants live in the
+ * shared uapi header <xos/confname.h> so the kernel-side sys_sysconf and the
+ * user-side sysconf compile against identical literals. Unknown names return
+ * -1 without setting errno (POSIX). */
+#include <xos/confname.h>
+
+LIBC_EXPORT long sysconf(int name);
+
 #ifdef __cplusplus
 }
 #endif

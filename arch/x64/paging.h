@@ -23,9 +23,19 @@
 #define PTE_PS (1ULL << 7)       // Page size (2MB huge page at PD level)
 #define PTE_GLOBAL (1ULL << 8)   // Global page (not flushed on CR3 reload)
 #define PTE_COW (1ULL << 9)      // SW: Copy-on-Write marker
-#define PTE_NX (1ULL << 63)      // No-execute
+#define PTE_PROTNONE                                                           \
+  (1ULL << 10) // SW: PROT_NONE marker (present=0, pte_present()=true)
+#define PTE_NX (1ULL << 63) // No-execute
 
 #define PTE_PHYS_MASK 0x000FFFFFFFFFF000ULL // Extract physical address from PTE
+
+// pte_present(): true for any valid leaf mapping, including PROT_NONE pages.
+// PROT_NONE clears PTE_PRESENT and sets PTE_PROTNONE (aligns with Linux
+// pte_present() which honors _PAGE_PROTNONE). Intermediate page-table levels
+// keep using PTE_PRESENT directly — PROTNONE only appears on leaf PTEs.
+static inline int pte_present(uint64_t pte) {
+  return !!(pte & (PTE_PRESENT | PTE_PROTNONE));
+}
 
 // PAT index selection via PCD+PWT (for 2MB huge pages at PD level)
 #define PTE_UC (PTE_PCD | PTE_PWT) // PAT index 3 = UC

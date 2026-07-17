@@ -69,8 +69,10 @@ CheckOptions:
   # which Linux keeps lower_case by convention.
   # The _ASM_[A-Z]+ alternative covers Linux kernel assembly macro convention
   # (e.g. _ASM_EXTABLE for exception table entries).
+  # The _SC_[A-Z_]+ alternative covers POSIX sysconf() constants
+  # (e.g. _SC_ARG_MAX, _SC_PAGESIZE, _SC_NPROCESSORS_ONLN).
   - key: readability-identifier-naming.MacroDefinitionIgnoredRegexp
-    value: '^(fpclassify|isfinite|isnormal|isnan|isinf|signbit|_IOC_[A-Z]+|_IO$|_IOR$|_IOW$|_IOWR$|_IO[A-Z]+|_F_[A-Z]+|static_assert|input_event_(sec|usec)|errno|sa_handler|sa_sigaction|sigaddset|sigdelset|sigemptyset|sigfillset|sigismember|current_task|current_proc|current_xtask|Px[A-Z][a-zA-Z]*|Efi[A-Z][a-zA-Z]*|DRM_MODE_SUBCONNECTOR_Automatic|__[a-z_]+|assert|rb_[a-z_]+|_ASM_[A-Z]+|_.*_H)$'
+    value: '^(fpclassify|isfinite|isnormal|isnan|isinf|signbit|_IOC_[A-Z]+|_SC_[A-Z_]+|_IO$|_IOR$|_IOW$|_IOWR$|_IO[A-Z]+|_F_[A-Z]+|static_assert|input_event_(sec|usec)|errno|sa_handler|sa_sigaction|sigaddset|sigdelset|sigemptyset|sigfillset|sigismember|current_task|current_proc|current_xtask|Px[A-Z][a-zA-Z]*|Efi[A-Z][a-zA-Z]*|DRM_MODE_SUBCONNECTOR_Automatic|__[a-z_]+|assert|rb_[a-z_]+|_ASM_[A-Z]+|_.*_H)$'
 
   # Variable exceptions: TLS runtime, kernel internal, libc internals, linker section boundaries
   # The __start_/__stop_ alternatives cover linker-generated section boundary symbols

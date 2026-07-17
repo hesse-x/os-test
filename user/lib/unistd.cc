@@ -5,9 +5,11 @@
  */
 
 #include <stdint.h>
-#include <sys/types.h>
 #include <syscall.h>
 #include <unistd.h>
+
+#include <sys/types.h>
+#include <xos/confname.h>
 
 pid_t getpid(void) { return (pid_t)sys_getpid(); }
 
@@ -61,3 +63,24 @@ int fsync(int fd) { return sys_fsync(fd); }
 void sync(void) { sys_sync(); }
 
 int getpagesize(void) { return 4096; }
+
+long sysconf(int name) {
+  // Dynamic values are backed by sys_sysconf (ncpu, total/free phys pages).
+  // Static/architecture-fixed values (PAGESIZE, CLK_TCK, OPEN_MAX, …) stay
+  // here — glibc hardcodes them too. Unknown → -1, errno unchanged (POSIX).
+  switch (name) {
+  case _SC_NPROCESSORS_CONF:
+  case _SC_NPROCESSORS_ONLN:
+  case _SC_PHYS_PAGES:
+  case _SC_AVPHYS_PAGES:
+    return sys_sysconf(name);
+  case _SC_PAGESIZE: // _SC_PAGE_SIZE is the same value (30)
+    return 4096;
+  case _SC_CLK_TCK:
+    return 100;
+  case _SC_OPEN_MAX:
+    return 128; // MAX_FD (kernel/bsd/types.h)
+  default:
+    return -1;
+  }
+}
