@@ -7,6 +7,7 @@
 #ifndef KERNEL_DRIVER_VIRTIO_GPU_H
 #define KERNEL_DRIVER_VIRTIO_GPU_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -117,6 +118,13 @@ struct virtio_gpu_resource_map_blob {
   uint32_t padding;
 };
 
+/* SUBMIT_3D: header carries fence_id/ring_idx/ctx_id; followed by inline cmd
+ * stream. */
+struct virtio_gpu_cmd_submit {
+  struct virtio_gpu_ctrl_hdr hdr;
+  uint32_t size; /* size of following command stream in bytes */
+};
+
 /* MAP_BLOB response: map_info + host-visible offset. */
 struct virtio_gpu_resp_map_info {
   struct virtio_gpu_ctrl_hdr hdr;
@@ -224,6 +232,31 @@ struct virtio_gpu_resp_capset {
 /* ===== virtio-gpu device state ===== */
 #define VIRTIO_GPU_CTRLQ_INDEX 0
 
+/* ctx tag shared by both completion contexts so the single vring callback can
+ * distinguish a stack cmd_ctx (sync path) from a heap pending (async path). */
+enum virtgpu_cmd_ctx_tag { VIRTGPU_CTX_SYNC = 0, VIRTGPU_CTX_ASYNC = 1 };
+
+/* Sync-path per-cmd context (mirrors the existing virtio_gpu_cmd_ctx but with
+ * a tag header). Replaces virtio_gpu_cmd_ctx — see 2B-2. */
+struct virtgpu_sync_ctx {
+  enum virtgpu_cmd_ctx_tag tag; /* VIRTGPU_CTX_SYNC */
+  volatile bool completed;
+};
+
+/* Async-path pending node: owns heap cmd/resp, lives until ISR completes it. */
+struct virtgpu_cmd_pending {
+  enum virtgpu_cmd_ctx_tag tag; /* VIRTGPU_CTX_ASYNC */
+  volatile bool response_ready;
+  struct virtio_gpu_ctrl_hdr
+      hdr;       /* copy of submitted header (fence_id/ring/ctx) */
+  void *cmd_buf; /* heap, owned by node */
+  uint32_t cmd_len;
+  void *resp_buf; /* heap, owned by node */
+  uint32_t resp_len;
+  struct xtask *waiter; /* NULL: fire-and-forget (EXECBUFFER does not block) */
+  struct virtgpu_cmd_pending *next;
+};
+
 struct virtio_gpu_device {
   struct virtio_pci_dev vpci;
   struct virtqueue ctrlq;
@@ -233,6 +266,12 @@ struct virtio_gpu_device {
      cmd_wq + per-command ctx track completion for multiple waiters */
   spinlock cmd_lock;
   wait_queue_head cmd_wq; /* wait queue for processes sleeping in send_cmd */
+
+  /* per-command async completion (plan2). pending_list holds in-flight
+   * EXECBUFFER submissions whose cmd/resp buffers are heap-allocated and
+   * owned by the node. */
+  struct virtgpu_cmd_pending *pending_list;
+  spinlock pending_lock;
 };
 
 /* ===== API ===== */

@@ -42,6 +42,7 @@
 #define FD_SIGNALFD 12
 #define FD_NETLINK 13
 #define FD_IPC 14
+#define FD_SYNC_FILE 15
 
 typedef struct pipe {
   uint8_t *buf;
@@ -60,6 +61,7 @@ struct eventfd_ctx;
 struct timerfd_ctx;
 struct signalfd_ctx;
 struct netlink_sock;
+struct drm_fence;
 
 typedef struct file {
   refcount_t f_count;
@@ -90,6 +92,8 @@ typedef struct file {
     struct netlink_sock *nlsock;
     pid_t ipcfd_owner_pid; // FD_IPC: owner task pid whose recv queue this fd
                            // drains
+    struct drm_fence
+        *sync_file_fence; // FD_SYNC_FILE: bound fence (holds a ref)
   };
 } file;
 

@@ -7,7 +7,7 @@
 #ifndef KERNEL_FILE_POLL_H
 #define KERNEL_FILE_POLL_H
 
-#include "kernel/bsd/devtmpfs.h" // __poll
+#include "kernel/bsd/poll_types.h"
 #include "kernel/xcore/wait_queue.h"
 
 struct file;

@@ -20,6 +20,7 @@
 #include "kernel/driver/driver.h"
 #include "kernel/driver/drm_internal.h"
 #include "kernel/driver/pci.h"
+#include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
@@ -53,14 +54,11 @@ spinlock g_drm_files_lock = SPINLOCK_INIT;
 struct drm_file g_drm_files[MAX_DRM_FDS];
 struct drm_cursor g_drm_cursor;
 
-/* Per-command completion context: stack-allocated in virtio_gpu_send_cmd.
-   The vring callback sets completed=true when the device processes this
-   command's descriptor, allowing each caller to independently detect its
-   own completion without a shared global flag. */
-struct virtio_gpu_cmd_ctx {
-  volatile bool completed; /* set by virtio_gpu_cmd_callback from ISR */
-};
-
+/* Single vring completion callback shared by sync and async paths. The ctx is
+ * either a struct virtgpu_sync_ctx (sync send_cmd path) or a
+ * struct virtgpu_cmd_pending (async EXECBUFFER path); the tag discriminates.
+ * Runs in ISR (under cmd_lock via vring_poll_used). Both ctx structs are
+ * defined in virtio_gpu.h. */
 static void virtio_gpu_cmd_callback(void *ctx, uint32_t len) {
   /* Defensive: ctx must never be NULL in normal operation (it is the
      per-cmd context set in vring_add_buf).  A NULL here means the used
@@ -69,8 +67,15 @@ static void virtio_gpu_cmd_callback(void *ctx, uint32_t len) {
      of the NULL-write #PF.  Harmless-ize it rather than crashing. */
   if (!ctx)
     return;
-  struct virtio_gpu_cmd_ctx *cmd_ctx = (struct virtio_gpu_cmd_ctx *)ctx;
-  cmd_ctx->completed = true;
+  enum virtgpu_cmd_ctx_tag tag = *(enum virtgpu_cmd_ctx_tag *)ctx;
+  if (tag == VIRTGPU_CTX_ASYNC) {
+    struct virtgpu_cmd_pending *pn = (struct virtgpu_cmd_pending *)ctx;
+    pn->response_ready = true;
+  } else {
+    struct virtgpu_sync_ctx *sc = (struct virtgpu_sync_ctx *)ctx;
+    sc->completed = true;
+  }
+  (void)len;
 }
 
 /* Wake callback for wait_queue: bridges __wake_up → wake_wq_target.
@@ -88,6 +93,21 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
                                size_t cmd_len, void *resp_buf, size_t resp_len);
 extern void drm_dev_register(void);
 extern dev_driver virtio_gpu_driver;
+
+/* BSD-layer KPI for sync_file fd install/lookup (plan2). Declared here as
+ * extern — not via kernel/bsd/proc.h — so the driver stays off the bsd include
+ * boundary (only devtmpfs/sysfs/poll_types are allowed). drm_fence is opaque to
+ * the BSD layer; the pointer is just handed across. */
+int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence);
+struct drm_fence *bsd_sync_file_fd_fence(xtask *proc, int fd);
+
+/* plan2 forward declarations: these are defined later in the file but used by
+ * the ISR (drm_fence_find/signal) and the syncobj/EXECBUFFER ioctls
+ * (drm_file_current) which precede their definitions. */
+static struct drm_fence *drm_fence_find(uint32_t ctx_id, uint8_t ring_idx,
+                                        uint64_t fence_id);
+static void drm_fence_signal(struct drm_fence *fence);
+static struct drm_file *drm_file_current(void);
 
 /* ===== 2.B: ctrlq initialization ===== */
 
@@ -156,14 +176,47 @@ static void virtio_gpu_isr(trapframe *tf) {
        avail).  This is the single place the used ring is drained now.
        irqsave is symmetric with send_cmd's process-side acquisition: while
        cmd_lock is held here, the originating CPU cannot re-enter this ISR.
-       __wake_up is performed after releasing cmd_lock to keep the lock
-       order one-directional (cmd_wq.lock → scheduler_lock inside
-       wake_with_event) and to minimize time spent in interrupt context. */
+       vring_poll_used invokes virtio_gpu_cmd_callback for each used desc,
+       which sets cmd_ctx.completed (sync path) or pending->response_ready
+       (async path). */
     uint64_t flags;
     spin_lock_irqsave(&vgpu->cmd_lock, &flags);
     vring_poll_used(&vgpu->ctrlq);
     spin_unlock_irqrestore(&vgpu->cmd_lock, flags);
-    __wake_up(&vgpu->cmd_wq, 0);
+
+    /* Walk pending_list: for each completed async cmd, signal its fence, wake
+     * any waiter, unlink and free (cmd_buf/resp_buf owned by the node). Lock
+     * order is non-nested with cmd_lock above (both fully released between),
+     * matching the async submit path. */
+    spin_lock_irqsave(&vgpu->pending_lock, &flags);
+    struct virtgpu_cmd_pending *p = vgpu->pending_list;
+    struct virtgpu_cmd_pending *prev = NULL;
+    while (p) {
+      if (p->response_ready) {
+        if (p->hdr.flags & VIRTIO_GPU_FLAG_FENCE) {
+          struct drm_fence *f =
+              drm_fence_find(p->hdr.ctx_id, p->hdr.ring_idx, p->hdr.fence_id);
+          drm_fence_signal(f);
+        }
+        if (p->waiter)
+          wake_wq_target(p->waiter);
+        struct virtgpu_cmd_pending *done = p;
+        p = p->next;
+        if (prev)
+          prev->next = p;
+        else
+          vgpu->pending_list = p;
+        kfree(done->cmd_buf);
+        kfree(done->resp_buf);
+        kfree(done);
+      } else {
+        prev = p;
+        p = p->next;
+      }
+    }
+    spin_unlock_irqrestore(&vgpu->pending_lock, flags);
+
+    __wake_up(&vgpu->cmd_wq, 0); /* sync-path sleepers */
   }
   /* config change: not handled (no EDID) */
 
@@ -183,7 +236,8 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
      when the device processes this descriptor.  Each caller has its own
      ctx on the stack, so concurrent send_cmd invocations don't clobber
      each other's state. */
-  struct virtio_gpu_cmd_ctx cmd_ctx = {.completed = false};
+  struct virtgpu_sync_ctx cmd_ctx = {.tag = VIRTGPU_CTX_SYNC,
+                                     .completed = false};
 
   /* Physical addresses for descriptors (must be guest-physical) */
   uint64_t cmd_phys = (uint64_t)PHY_ADDR((uintptr_t)cmd_buf);
@@ -282,6 +336,84 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
 int virtio_gpu_send_cmd_3d(struct virtio_gpu_device *vgpu, void *cmd_buf,
                            size_t cmd_len, void *resp_buf, size_t resp_len) {
   return virtio_gpu_send_cmd(vgpu, cmd_buf, cmd_len, resp_buf, resp_len);
+}
+
+/* Async 3D submit: kmalloc private cmd+resp copies owned by a pending node,
+ * enqueue on pending_list, add_buf+kick under cmd_lock (NOT held across any
+ * sleep), return immediately. ISR completes via pending_list walk and frees
+ * the node + buffers. Multiple commands may be in-flight concurrently
+ * (bounded by vring desc count). Returns 0 on submitted, negative on error.
+ *
+ * caller_cmd/caller_resp are only used as copy sources; their lifetime after
+ * return is irrelevant. fence_id/ring_idx/ctx_id are recorded into the node's
+ * hdr copy so the ISR can find the matching fence. */
+static int virtio_gpu_send_cmd_3d_async(struct virtio_gpu_device *vgpu,
+                                        const void *caller_cmd, size_t cmd_len,
+                                        const void *caller_resp,
+                                        size_t resp_len, uint64_t fence_id,
+                                        uint8_t ring_idx, uint32_t ctx_id) {
+  struct virtgpu_cmd_pending *pn = kmalloc(sizeof(*pn));
+  if (!pn)
+    return -ENOMEM;
+  pn->tag = VIRTGPU_CTX_ASYNC;
+  pn->response_ready = false;
+  pn->waiter = NULL;
+  pn->next = NULL;
+  pn->cmd_len = (uint32_t)cmd_len;
+  pn->resp_len = (uint32_t)resp_len;
+  pn->cmd_buf = kmalloc(cmd_len);
+  pn->resp_buf = kmalloc(resp_len);
+  if (!pn->cmd_buf || !pn->resp_buf) {
+    kfree(pn->cmd_buf);
+    kfree(pn->resp_buf);
+    kfree(pn);
+    return -ENOMEM;
+  }
+  __memcpy(pn->cmd_buf, caller_cmd, cmd_len);
+  __memset(pn->resp_buf, 0, resp_len);
+  /* Copy the ctrl_hdr (first sizeof(ctrl_hdr) bytes of cmd) for ISR fence
+   * lookup. */
+  __memcpy(&pn->hdr, pn->cmd_buf, sizeof(struct virtio_gpu_ctrl_hdr));
+  /* Ensure the fence fields in the node hdr match what we tell the host. */
+  pn->hdr.fence_id = fence_id;
+  pn->hdr.ring_idx = ring_idx;
+  pn->hdr.ctx_id = ctx_id;
+
+  /* Link onto pending_list (under pending_lock) before submit so the ISR can
+   * always find the node. */
+  uint64_t pflags;
+  spin_lock_irqsave(&vgpu->pending_lock, &pflags);
+  pn->next = vgpu->pending_list;
+  vgpu->pending_list = pn;
+  spin_unlock_irqrestore(&vgpu->pending_lock, pflags);
+
+  /* Submit: cmd_lock ONLY covers add_buf+kick (free-list serialization), NOT
+   * any sleep. This is what lets the next EXECBUFFER submit while this one is
+   * still on the host. */
+  uint64_t cmd_phys = (uint64_t)PHY_ADDR((uintptr_t)pn->cmd_buf);
+  uint64_t resp_phys = (uint64_t)PHY_ADDR((uintptr_t)pn->resp_buf);
+  uint64_t addrs[2] = {cmd_phys, resp_phys};
+  uint32_t lens[2] = {(uint32_t)cmd_len, (uint32_t)resp_len};
+  uint16_t dflags[2] = {0, VRING_DESC_F_WRITE};
+
+  uint64_t cflags;
+  spin_lock_irqsave(&vgpu->cmd_lock, &cflags);
+  int head = vring_add_buf(&vgpu->ctrlq, addrs, lens, dflags, 2, pn);
+  if (head < 0) {
+    spin_unlock_irqrestore(&vgpu->cmd_lock, cflags);
+    /* unlink pending node and free */
+    spin_lock_irqsave(&vgpu->pending_lock, &pflags);
+    vgpu->pending_list = pn->next;
+    spin_unlock_irqrestore(&vgpu->pending_lock, pflags);
+    kfree(pn->cmd_buf);
+    kfree(pn->resp_buf);
+    kfree(pn);
+    return -ENOMEM;
+  }
+  vring_kick(&vgpu->ctrlq);
+  virtio_pci_notify(&vgpu->vpci, vgpu->ctrlq.notify_off);
+  spin_unlock_irqrestore(&vgpu->cmd_lock, cflags);
+  return 0;
 }
 
 /* ===== 2.D: high-level command wrappers ===== */
@@ -493,6 +625,474 @@ static struct drm_blob *drm_find_blob(uint32_t blob_id) {
   if (!b->allocated)
     return NULL;
   return b;
+}
+
+/* ===== Fence (plan2) ===== */
+
+/* Find or allocate a fence slot. Returns fence with refcount=1, or NULL if
+ * table full. Caller (process context) owns the initial ref. */
+static struct drm_fence *drm_fence_create(uint32_t ctx_id, uint8_t ring_idx,
+                                          uint64_t fence_id) {
+  spin_lock(&g_drm.fence_lock);
+  for (int i = 0; i < MAX_FENCES; i++) {
+    if (!g_drm.fences[i].ctx_id) {
+      struct drm_fence *f = &g_drm.fences[i];
+      f->ctx_id = ctx_id;
+      f->ring_idx = ring_idx;
+      f->fence_id = fence_id;
+      f->signaled = false;
+      f->syncobj_signals = NULL;
+      f->num_syncobj_signals = 0;
+      refcount_set(&f->refcount, 1);
+      f->lock = SPINLOCK_INIT;
+      init_wait_queue_head(&f->wq);
+      spin_unlock(&g_drm.fence_lock);
+      return f;
+    }
+  }
+  spin_unlock(&g_drm.fence_lock);
+  return NULL;
+}
+
+static struct drm_fence *drm_fence_find(uint32_t ctx_id, uint8_t ring_idx,
+                                        uint64_t fence_id) {
+  spin_lock(&g_drm.fence_lock);
+  for (int i = 0; i < MAX_FENCES; i++) {
+    if (g_drm.fences[i].ctx_id == ctx_id &&
+        g_drm.fences[i].ring_idx == ring_idx &&
+        g_drm.fences[i].fence_id == fence_id) {
+      spin_unlock(&g_drm.fence_lock);
+      return &g_drm.fences[i];
+    }
+  }
+  spin_unlock(&g_drm.fence_lock);
+  return NULL;
+}
+
+/* Drop a ref; when refcount hits 0, reclaim the slot (ctx_id=0, free signals
+ * array). Safe to call from process context (sync_file close, EXECBUFFER error
+ * path). Never call from ISR. Non-static: proc.c file_put calls it on
+ * FD_SYNC_FILE close. */
+void drm_fence_put(struct drm_fence *fence) {
+  if (!fence)
+    return;
+  /* Reclaim under fence_lock so the table-scanned free check is atomic. */
+  spin_lock(&g_drm.fence_lock);
+  if (!refcount_dec_and_test(&fence->refcount)) {
+    spin_unlock(&g_drm.fence_lock);
+    return;
+  }
+  if (fence->syncobj_signals)
+    kfree(fence->syncobj_signals);
+  fence->syncobj_signals = NULL;
+  fence->num_syncobj_signals = 0;
+  fence->ctx_id = 0; /* mark slot free */
+  spin_unlock(&g_drm.fence_lock);
+}
+
+/* Read-only signaled probe for sync_file poll (BSD file_poll.c). */
+bool drm_fence_is_signaled(struct drm_fence *fence) {
+  if (!fence)
+    return false;
+  uint64_t flags;
+  spin_lock_irqsave(&fence->lock, &flags);
+  bool s = fence->signaled;
+  spin_unlock_irqrestore(&fence->lock, flags);
+  return s;
+}
+
+/* ISR: mark fence signaled, advance attached syncobjs (by pointer), wake
+ * waiters. Runs in interrupt context — MUST use irqsave. Does NOT free the
+ * fence (refcount may be held by a sync_file fd); only marks signaled. */
+static void drm_fence_signal(struct drm_fence *fence) {
+  if (!fence)
+    return;
+  uint64_t flags;
+  spin_lock_irqsave(&fence->lock, &flags);
+  if (fence->signaled) {
+    spin_unlock_irqrestore(&fence->lock, flags);
+    return;
+  }
+  fence->signaled = true;
+  for (uint32_t i = 0; i < fence->num_syncobj_signals; i++) {
+    struct drm_syncobj *so = fence->syncobj_signals[i].syncobj;
+    if (!so)
+      continue;
+    /* so->lock is also taken from process context (timeline_signal/wait/reset/
+     * query). This runs in GPU ISR → must be irqsave to avoid same-CPU
+     * reentrant deadlock (spinlock.h:58 BUG_ON would panic in debug builds). */
+    uint64_t soflags;
+    spin_lock_irqsave(&so->lock, &soflags);
+    if (fence->syncobj_signals[i].point > so->timeline_point)
+      so->timeline_point = fence->syncobj_signals[i].point;
+    spin_unlock_irqrestore(&so->lock, soflags);
+    __wake_up(&so->wq, 0);
+  }
+  spin_unlock_irqrestore(&fence->lock, flags);
+  __wake_up(&fence->wq, 0);
+}
+
+/* Block on fence->wq until signaled or timeout_ns elapses. timeout_ns==0 →
+ * wait forever. Returns 0 on signal, -ETIME on timeout. Currently unused by
+ * the EXECBUFFER path (which polls the sync_file fd); retained as the fence
+ * wait primitive for future in-kernel waits (plan2 2A-3 / acceptance #7). */
+static __attribute__((unused)) int drm_fence_wait(struct drm_fence *fence,
+                                                  uint64_t timeout_ns) {
+  if (!fence)
+    return -EINVAL;
+  wait_queue_t wait;
+  wait.func = virtio_gpu_wake_cb; /* reuse: data=current_task, wake_wq_target */
+  wait.data = current_task;
+  list_init(&wait.node);
+  add_wait_queue(&fence->wq, &wait);
+
+  uint64_t deadline = (timeout_ns != 0) ? sched_clock() + timeout_ns : 0;
+  int ret = 0;
+  for (;;) {
+    current_task->state = BLOCKED;
+    if (fence->signaled)
+      break;
+    if (timeout_ns != 0 && sched_clock() >= deadline) {
+      ret = -ETIME;
+      break;
+    }
+    schedule();
+  }
+  current_task->state = READY;
+  remove_wait_queue(&fence->wq, &wait);
+  return ret;
+}
+
+/* Attach (syncobj, point) to fence so drm_fence_signal advances it. Process
+ * context — must be called BEFORE submit (see 2C-2 ordering). Uses
+ * spin_lock_irqsave to serialize with ISR's drm_fence_signal. Stores the
+ * syncobj pointer directly (not the handle). */
+static int drm_fence_add_syncobj_signal(struct drm_fence *fence,
+                                        struct drm_syncobj *so,
+                                        uint64_t point) {
+  uint64_t flags;
+  spin_lock_irqsave(&fence->lock, &flags);
+  void *arr = kmalloc((fence->num_syncobj_signals + 1) *
+                      sizeof(struct drm_fence_syncobj_signal));
+  if (!arr) {
+    spin_unlock_irqrestore(&fence->lock, flags);
+    return -ENOMEM;
+  }
+  if (fence->num_syncobj_signals && fence->syncobj_signals)
+    __memcpy(arr, fence->syncobj_signals,
+             fence->num_syncobj_signals *
+                 sizeof(struct drm_fence_syncobj_signal));
+  ((struct drm_fence_syncobj_signal *)arr)[fence->num_syncobj_signals].syncobj =
+      so;
+  ((struct drm_fence_syncobj_signal *)arr)[fence->num_syncobj_signals].point =
+      point;
+  if (fence->syncobj_signals)
+    kfree(fence->syncobj_signals);
+  fence->syncobj_signals = arr;
+  fence->num_syncobj_signals++;
+  spin_unlock_irqrestore(&fence->lock, flags);
+  return 0;
+}
+
+/* ===== Syncobj (plan2) ===== */
+
+static struct drm_syncobj *syncobj_lookup(struct drm_file *df,
+                                          uint32_t handle) {
+  if (!df || handle == 0 || handle >= MAX_SYNCOBJS_PER_FD)
+    return NULL;
+  return df->syncobjs[handle];
+}
+
+/* Install a sync_file fd bound to a fence. Takes a ref on the fence (released
+ * when the fd is closed via file_put's switch case for FD_SYNC_FILE). poll(fd)
+ * returns POLLIN once fence->signaled. Modeled on eventfd/timerfd fd install.
+ *
+ * fd-table install is delegated to the BSD KPI bsd_sync_file_fd_install so the
+ * driver never touches struct file / fd table layout directly (driver↔bsd
+ * include boundary). We still own the fence refcount: take a ref here, hand it
+ * to the fd, drop it back if install fails. */
+static int drm_fence_install_sync_file(struct drm_fence *fence, xtask *proc) {
+  if (!fence)
+    return -EINVAL;
+  /* Take a ref for the fd. fence_lock is process-context only (create/find/put
+   * never run in ISR), so plain spin_lock suffices here. */
+  spin_lock(&g_drm.fence_lock);
+  refcount_inc(&fence->refcount);
+  spin_unlock(&g_drm.fence_lock);
+
+  int fd = bsd_sync_file_fd_install(proc, fence);
+  if (fd < 0)
+    drm_fence_put(fence); /* reclaim the ref the fd won't be holding */
+  return fd;
+}
+
+/* ===== Syncobj ioctls (plan2) ===== */
+
+static long drm_ioctl_syncobj_create(void *arg) {
+  struct drm_syncobj_create *c = (struct drm_syncobj_create *)arg;
+  struct drm_file *df = drm_file_current();
+  if (!df)
+    return -EBADF;
+
+  uint32_t handle =
+      ++df->next_syncobj_handle; /* first handle = 1; 0 reserved */
+  if (handle >= MAX_SYNCOBJS_PER_FD)
+    return -ENOMEM;
+
+  struct drm_syncobj *so = kmalloc(sizeof(*so));
+  if (!so)
+    return -ENOMEM;
+  __memset(so, 0, sizeof(*so));
+  so->handle = handle;
+  so->lock = SPINLOCK_INIT;
+  init_wait_queue_head(&so->wq);
+  if (c->flags & DRM_SYNCOBJ_CREATE_SIGNALED)
+    so->timeline_point = 1;
+
+  df->syncobjs[handle] = so;
+  c->handle = handle;
+  return 0;
+}
+
+static long drm_ioctl_syncobj_destroy(void *arg) {
+  struct drm_syncobj_destroy *d = (struct drm_syncobj_destroy *)arg;
+  struct drm_file *df = drm_file_current();
+  if (!df)
+    return -EBADF;
+  struct drm_syncobj *so = syncobj_lookup(df, d->handle);
+  if (!so)
+    return -ENOENT;
+  df->syncobjs[d->handle] = NULL;
+  kfree(so);
+  return 0;
+}
+
+static long drm_ioctl_syncobj_reset(void *arg) {
+  struct drm_syncobj_array *a = (struct drm_syncobj_array *)arg;
+  struct drm_file *df = drm_file_current();
+  if (!df)
+    return -EBADF;
+  uint32_t *handles = kmalloc(a->count_handles * sizeof(uint32_t));
+  if (!handles)
+    return -ENOMEM;
+  if (copy_from_user(handles, (void *)(uintptr_t)a->handles,
+                     a->count_handles * sizeof(uint32_t))) {
+    kfree(handles);
+    return -EFAULT;
+  }
+  for (uint32_t i = 0; i < a->count_handles; i++) {
+    struct drm_syncobj *so = syncobj_lookup(df, handles[i]);
+    if (so) {
+      uint64_t soflags;
+      spin_lock_irqsave(&so->lock, &soflags);
+      so->timeline_point = 0;
+      spin_unlock_irqrestore(&so->lock, soflags);
+    }
+  }
+  kfree(handles);
+  return 0;
+}
+
+static long drm_ioctl_syncobj_query(void *arg) {
+  struct drm_syncobj_timeline_array *q =
+      (struct drm_syncobj_timeline_array *)arg;
+  struct drm_file *df = drm_file_current();
+  if (!df)
+    return -EBADF;
+  uint32_t *handles = kmalloc(q->count_handles * sizeof(uint32_t));
+  uint64_t *points = kmalloc(q->count_handles * sizeof(uint64_t));
+  if (!handles || !points) {
+    kfree(handles);
+    kfree(points);
+    return -ENOMEM;
+  }
+  if (copy_from_user(handles, (void *)(uintptr_t)q->handles,
+                     q->count_handles * sizeof(uint32_t))) {
+    kfree(handles);
+    kfree(points);
+    return -EFAULT;
+  }
+  for (uint32_t i = 0; i < q->count_handles; i++) {
+    struct drm_syncobj *so = syncobj_lookup(df, handles[i]);
+    if (so) {
+      uint64_t soflags;
+      spin_lock_irqsave(&so->lock, &soflags);
+      points[i] = so->timeline_point;
+      spin_unlock_irqrestore(&so->lock, soflags);
+    } else {
+      points[i] = 0; /* bad handle reports 0 */
+    }
+  }
+  if (copy_to_user((void *)(uintptr_t)q->points, points,
+                   q->count_handles * sizeof(uint64_t))) {
+    kfree(handles);
+    kfree(points);
+    return -EFAULT;
+  }
+  kfree(handles);
+  kfree(points);
+  return 0;
+}
+
+/* Block on so->wq until timeline_point >= point, or timeout_ns elapses.
+ * timeout_ns==0 → wait forever. Returns 0 on reached, -ETIME on timeout. */
+static int drm_syncobj_wait_one(struct drm_syncobj *so, uint64_t point,
+                                uint64_t timeout_ns) {
+  wait_queue_t wait;
+  wait.func = virtio_gpu_wake_cb;
+  wait.data = current_task;
+  list_init(&wait.node);
+  add_wait_queue(&so->wq, &wait);
+  uint64_t deadline = (timeout_ns != 0) ? sched_clock() + timeout_ns : 0;
+  int ret = 0;
+  for (;;) {
+    current_task->state = BLOCKED;
+    uint64_t soflags;
+    spin_lock_irqsave(&so->lock, &soflags);
+    bool reached = so->timeline_point >= point;
+    spin_unlock_irqrestore(&so->lock, soflags);
+    if (reached)
+      break;
+    if (timeout_ns != 0 && sched_clock() >= deadline) {
+      ret = -ETIME;
+      break;
+    }
+    schedule();
+  }
+  current_task->state = READY;
+  remove_wait_queue(&so->wq, &wait);
+  return ret;
+}
+
+static long drm_ioctl_syncobj_timeline_signal(void *arg) {
+  struct drm_syncobj_timeline_array *s =
+      (struct drm_syncobj_timeline_array *)arg;
+  struct drm_file *df = drm_file_current();
+  if (!df)
+    return -EBADF;
+  uint32_t *handles = kmalloc(s->count_handles * sizeof(uint32_t));
+  uint64_t *points = kmalloc(s->count_handles * sizeof(uint64_t));
+  if (!handles || !points) {
+    kfree(handles);
+    kfree(points);
+    return -ENOMEM;
+  }
+  if (copy_from_user(handles, (void *)(uintptr_t)s->handles,
+                     s->count_handles * sizeof(uint32_t)) ||
+      copy_from_user(points, (void *)(uintptr_t)s->points,
+                     s->count_handles * sizeof(uint64_t))) {
+    kfree(handles);
+    kfree(points);
+    return -EFAULT;
+  }
+  for (uint32_t i = 0; i < s->count_handles; i++) {
+    struct drm_syncobj *so = syncobj_lookup(df, handles[i]);
+    if (so) {
+      uint64_t soflags;
+      spin_lock_irqsave(&so->lock, &soflags);
+      if (points[i] > so->timeline_point)
+        so->timeline_point = points[i];
+      spin_unlock_irqrestore(&so->lock, soflags);
+      __wake_up(&so->wq, 0);
+    }
+  }
+  kfree(handles);
+  kfree(points);
+  return 0;
+}
+
+static long drm_ioctl_syncobj_timeline_wait(void *arg) {
+  struct drm_syncobj_timeline_wait *w = (struct drm_syncobj_timeline_wait *)arg;
+  struct drm_file *df = drm_file_current();
+  if (!df)
+    return -EBADF;
+  uint32_t *handles = kmalloc(w->count_handles * sizeof(uint32_t));
+  uint64_t *points = kmalloc(w->count_handles * sizeof(uint64_t));
+  if (!handles || !points) {
+    kfree(handles);
+    kfree(points);
+    return -ENOMEM;
+  }
+  if (copy_from_user(handles, (void *)(uintptr_t)w->handles,
+                     w->count_handles * sizeof(uint32_t)) ||
+      copy_from_user(points, (void *)(uintptr_t)w->points,
+                     w->count_handles * sizeof(uint64_t))) {
+    kfree(handles);
+    kfree(points);
+    return -EFAULT;
+  }
+  /* WAIT_ALL (default): wait every handle; WAIT_ANY would return first. */
+  for (uint32_t i = 0; i < w->count_handles; i++) {
+    struct drm_syncobj *so = syncobj_lookup(df, handles[i]);
+    if (!so)
+      continue;
+    int wrc = drm_syncobj_wait_one(so, points[i], (uint64_t)w->timeout_nsec);
+    if (wrc) {
+      kfree(handles);
+      kfree(points);
+      return wrc;
+    }
+  }
+  kfree(handles);
+  kfree(points);
+  return 0;
+}
+
+static long drm_ioctl_syncobj_handle_to_fd(void *arg) {
+  struct drm_syncobj_handle *h = (struct drm_syncobj_handle *)arg;
+  struct drm_file *df = drm_file_current();
+  if (!df)
+    return -EBADF;
+  struct drm_syncobj *so = syncobj_lookup(df, h->handle);
+  if (!so)
+    return -ENOENT;
+  /* Synthesize a fence already signaled at the syncobj's current point.
+   * (Simplified: a real impl would bind to the syncobj's backing fence.) */
+  struct drm_fence *f = drm_fence_create(df->ctx_id, 0, 0);
+  if (!f)
+    return -ENOMEM;
+  uint64_t fflags;
+  spin_lock_irqsave(&f->lock, &fflags);
+  f->signaled = true;
+  spin_unlock_irqrestore(&f->lock, fflags);
+  int fd = drm_fence_install_sync_file(f, current_task);
+  drm_fence_put(f); /* fd holds a ref */
+  if (fd < 0)
+    return fd;
+  h->fd = fd;
+  return 0;
+}
+
+static long drm_ioctl_syncobj_fd_to_handle(void *arg) {
+  struct drm_syncobj_handle *h = (struct drm_syncobj_handle *)arg;
+  struct drm_file *df = drm_file_current();
+  if (!df)
+    return -EBADF;
+  /* Import: look up the sync_file fd, create a syncobj signaled at its fence
+   * state. Fence lookup goes through the BSD KPI so the driver doesn't read
+   * struct file / the fd table directly. */
+  struct drm_fence *fence = bsd_sync_file_fd_fence(current_task, h->fd);
+  if (!fence)
+    return -ENOENT;
+  uint32_t handle = ++df->next_syncobj_handle;
+  if (handle >= MAX_SYNCOBJS_PER_FD)
+    return -ENOMEM;
+  struct drm_syncobj *so = kmalloc(sizeof(*so));
+  if (!so)
+    return -ENOMEM;
+  __memset(so, 0, sizeof(*so));
+  so->handle = handle;
+  so->lock = SPINLOCK_INIT;
+  init_wait_queue_head(&so->wq);
+  if (fence) {
+    uint64_t fflags;
+    spin_lock_irqsave(&fence->lock, &fflags);
+    so->timeline_point = fence->signaled ? 1 : 0;
+    spin_unlock_irqrestore(&fence->lock, fflags);
+  }
+  df->syncobjs[handle] = so;
+  h->handle = handle;
+  return 0;
 }
 
 static uint32_t drm_property_create_range(const char *name, uint32_t min,
@@ -782,6 +1382,8 @@ static long drm_ioctl_virtgpu_getparam(void *arg) {
   if (copy_to_user((void *)(uintptr_t)(p->value + sizeof(val)), &zero_hi,
                    sizeof(zero_hi)))
     return -EFAULT;
+  printk(LOG_DEBUG, "drm: GETPARAM param=%llu val=%u\n",
+         (unsigned long long)p->param, val);
   return 0;
 }
 
@@ -1014,6 +1616,177 @@ static long drm_ioctl_virtgpu_resource_info(void *arg) {
   ri->res_handle = blob->res_handle;
   ri->size = (uint32_t)blob->size;
   ri->blob_mem = blob->blob_mem;
+  return 0;
+}
+
+/* Forward declarations for plan2 helpers defined further below (2D-1, 2D-5):
+ * sync_file fd install and timeline wait are used by EXECBUFFER but defined
+ * later in the file. */
+static int drm_fence_install_sync_file(struct drm_fence *fence, xtask *proc);
+static int drm_syncobj_wait_one(struct drm_syncobj *so, uint64_t point,
+                                uint64_t timeout_ns);
+
+/* Copy + validate out_syncobjs and attach each (syncobj ptr, point) to the
+ * fence. Process context, before submit. */
+static int drm_execbuf_attach_out_syncobjs(struct drm_file *df,
+                                           struct drm_virtgpu_execbuffer *eb,
+                                           struct drm_fence *fence) {
+  struct drm_virtgpu_execbuffer_syncobj *sos =
+      kmalloc(eb->num_out_syncobjs * eb->syncobj_stride);
+  if (!sos)
+    return -ENOMEM;
+  if (copy_from_user(sos, (void *)(uintptr_t)eb->out_syncobjs,
+                     eb->num_out_syncobjs * eb->syncobj_stride)) {
+    kfree(sos);
+    return -EFAULT;
+  }
+  for (uint32_t i = 0; i < eb->num_out_syncobjs; i++) {
+    struct drm_syncobj *so = syncobj_lookup(df, sos[i].handle);
+    if (!so) {
+      kfree(sos);
+      return -ENOENT;
+    }
+    int arc = drm_fence_add_syncobj_signal(fence, so, sos[i].point);
+    if (arc) {
+      kfree(sos);
+      return arc;
+    }
+  }
+  kfree(sos);
+  return 0;
+}
+
+/* Block on each in_syncobj's wq until timeline_point >= point. Uses the shared
+ * timeline_wait helper (2D-5). */
+static int drm_execbuf_wait_in_syncobjs(struct drm_file *df,
+                                        struct drm_virtgpu_execbuffer *eb) {
+  struct drm_virtgpu_execbuffer_syncobj *sos =
+      kmalloc(eb->num_in_syncobjs * eb->syncobj_stride);
+  if (!sos)
+    return -ENOMEM;
+  if (copy_from_user(sos, (void *)(uintptr_t)eb->in_syncobjs,
+                     eb->num_in_syncobjs * eb->syncobj_stride)) {
+    kfree(sos);
+    return -EFAULT;
+  }
+  for (uint32_t i = 0; i < eb->num_in_syncobjs; i++) {
+    struct drm_syncobj *so = syncobj_lookup(df, sos[i].handle);
+    if (!so) {
+      kfree(sos);
+      return -ENOENT;
+    }
+    int wrc = drm_syncobj_wait_one(so, sos[i].point, 0 /* forever */);
+    if (wrc) {
+      kfree(sos);
+      return wrc;
+    }
+  }
+  kfree(sos);
+  return 0;
+}
+
+/* DRM_IOCTL_VIRTGPU_EXECBUFFER — submit Venus command stream on a ring.
+ * Out-fence: optional sync_file fd (FENCE_FD_OUT) + optional out_syncobjs
+ * advanced when the host completes this submission. */
+static long drm_ioctl_virtgpu_execbuffer(void *arg) {
+  struct drm_virtgpu_execbuffer *eb = (struct drm_virtgpu_execbuffer *)arg;
+  struct drm_file *df = drm_file_current();
+  if (!df || df->ctx_id == 0)
+    return -EINVAL;
+  if (eb->size == 0 || eb->command == 0)
+    return -EINVAL;
+  if (eb->ring_idx >= df->num_rings)
+    return -EINVAL;
+  if (eb->flags & VIRTGPU_EXECBUF_FENCE_FD_IN)
+    return -EINVAL; /* Venus does not use in-fence fd */
+
+  /* in_syncobjs: block (wq + timeout) until each timeline point is reached
+   * BEFORE submitting. (2D-5 timeline_wait helper.) */
+  if (eb->num_in_syncobjs > 0 && eb->in_syncobjs) {
+    int wrc = drm_execbuf_wait_in_syncobjs(df, eb);
+    if (wrc)
+      return wrc;
+  }
+
+  uint64_t fence_id = ++df->ring_fence_counters[eb->ring_idx];
+
+  /* Copy user command stream into the SUBMIT_3D buffer. */
+  void *cmd_data = kmalloc(eb->size);
+  if (!cmd_data)
+    return -ENOMEM;
+  if (copy_from_user(cmd_data, (void *)(uintptr_t)eb->command, eb->size)) {
+    kfree(cmd_data);
+    return -EFAULT;
+  }
+
+  size_t total_cmd_size = sizeof(struct virtio_gpu_cmd_submit) + eb->size;
+  void *submit_buf = kmalloc(total_cmd_size);
+  if (!submit_buf) {
+    kfree(cmd_data);
+    return -ENOMEM;
+  }
+  struct virtio_gpu_cmd_submit *sh = (struct virtio_gpu_cmd_submit *)submit_buf;
+  __memset(sh, 0, sizeof(*sh));
+  sh->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+  sh->hdr.flags = VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX;
+  sh->hdr.fence_id = fence_id;
+  sh->hdr.ctx_id = df->ctx_id;
+  sh->hdr.ring_idx = eb->ring_idx;
+  sh->size = eb->size;
+  __memcpy((char *)submit_buf + sizeof(*sh), cmd_data, eb->size);
+  kfree(cmd_data);
+
+  /* Create fence BEFORE submit so the ISR can find it on completion. */
+  struct drm_fence *fence =
+      drm_fence_create(df->ctx_id, eb->ring_idx, fence_id);
+  if (!fence) {
+    kfree(submit_buf);
+    return -ENOMEM;
+  }
+
+  /* Attach out_syncobjs BEFORE submit: if the host completes between kick and
+   * this attach, drm_fence_signal would run with an empty signal list and the
+   * syncobj would never advance. (修订点 3) */
+  if (eb->num_out_syncobjs > 0 && eb->out_syncobjs) {
+    int orc = drm_execbuf_attach_out_syncobjs(df, eb, fence);
+    if (orc) {
+      drm_fence_put(fence);
+      kfree(submit_buf);
+      return orc;
+    }
+  }
+
+  /* Submit async: send_cmd_3d_async copies submit_buf/resp into heap nodes
+   * it owns, so freeing submit_buf here is safe. */
+  struct virtio_gpu_ctrl_hdr_response resp_template;
+  __memset(&resp_template, 0, sizeof(resp_template));
+  int rc = virtio_gpu_send_cmd_3d_async(
+      &g_virtio_gpu, submit_buf, total_cmd_size, &resp_template,
+      sizeof(resp_template), fence_id, eb->ring_idx, df->ctx_id);
+  kfree(submit_buf);
+  if (rc) {
+    drm_fence_put(fence);
+    return rc;
+  }
+
+  /* Out-fence sync_file fd: install a fd bound to this fence (takes a ref). */
+  if (eb->flags & VIRTGPU_EXECBUF_FENCE_FD_OUT) {
+    int fd = drm_fence_install_sync_file(fence, current_task);
+    if (fd < 0) {
+      /* fence still valid and will signal; just no fd. Report error. */
+      drm_fence_put(fence);
+      return fd;
+    }
+    eb->fence_fd = fd;
+  }
+
+  /* Drop EXECBUFFER's own ref on the fence. sync_file fd (if installed) and
+   * the in-flight ISR callback hold their own refs; the fence lives until all
+   * are released. */
+  drm_fence_put(fence);
+
+  printk(LOG_DEBUG, "drm: EXECBUFFER ring=%u fence_id=%llu size=%u -> fd=%d\n",
+         eb->ring_idx, (unsigned long long)fence_id, eb->size, eb->fence_fd);
   return 0;
 }
 
@@ -2134,6 +2907,24 @@ long drm_ioctl(uint32_t cmd, void *arg) {
     return drm_ioctl_virtgpu_map(arg);
   case DRM_IOCTL_VIRTGPU_RESOURCE_INFO:
     return drm_ioctl_virtgpu_resource_info(arg);
+  case DRM_IOCTL_VIRTGPU_EXECBUFFER:
+    return drm_ioctl_virtgpu_execbuffer(arg);
+  case DRM_IOCTL_SYNCOBJ_CREATE:
+    return drm_ioctl_syncobj_create(arg);
+  case DRM_IOCTL_SYNCOBJ_DESTROY:
+    return drm_ioctl_syncobj_destroy(arg);
+  case DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD:
+    return drm_ioctl_syncobj_handle_to_fd(arg);
+  case DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE:
+    return drm_ioctl_syncobj_fd_to_handle(arg);
+  case DRM_IOCTL_SYNCOBJ_RESET:
+    return drm_ioctl_syncobj_reset(arg);
+  case DRM_IOCTL_SYNCOBJ_QUERY:
+    return drm_ioctl_syncobj_query(arg);
+  case DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL:
+    return drm_ioctl_syncobj_timeline_signal(arg);
+  case DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT:
+    return drm_ioctl_syncobj_timeline_wait(arg);
   case DRM_IOCTL_GET_CAP:
     return drm_ioctl_get_cap(arg);
   case DRM_IOCTL_SET_CLIENT_CAP:
@@ -2430,6 +3221,15 @@ int drm_close(xtask *proc, int fd) {
           free_blob_handle(blob->bo_handle);
       }
     }
+
+    /* Release syncobjs (plan2) */
+    for (uint32_t i = 0; i < MAX_SYNCOBJS_PER_FD; i++) {
+      if (f->syncobjs[i]) {
+        kfree(f->syncobjs[i]);
+        f->syncobjs[i] = NULL;
+      }
+    }
+    f->next_syncobj_handle = 0;
 
     if (f->is_master) {
       g_drm.is_master = false;
@@ -2789,6 +3589,8 @@ void virtio_gpu_init(void) {
   __memset(vgpu, 0, sizeof(*vgpu));
   vgpu->cmd_lock = SPINLOCK_INIT;
   init_wait_queue_head(&vgpu->cmd_wq);
+  vgpu->pending_lock = SPINLOCK_INIT;
+  vgpu->pending_list = NULL;
 
   /* Find PCI device */
   pci_device *pdev =
@@ -2860,6 +3662,7 @@ void virtio_gpu_init(void) {
   init_wait_queue_head(&g_drm.event_wq);
   g_drm.ctx_id_lock = SPINLOCK_INIT;
   g_drm.blob_lock = SPINLOCK_INIT;
+  g_drm.fence_lock = SPINLOCK_INIT;
   g_drm.next_blob_handle = 1;
   g_drm.next_dumb_handle = 1;
   g_drm.next_fb_id = 1;

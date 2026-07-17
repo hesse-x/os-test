@@ -99,6 +99,36 @@ extern struct drm_cursor g_drm_cursor;
 #define MAX_CTX_IDS 256
 #define MAX_BLOB_RESOURCES 64
 
+#define MAX_SYNCOBJS_PER_FD 256
+#define MAX_FENCES 256
+
+/* Fence: one per submitted EXECBUFFER with FENCE_FD_OUT or out_syncobj. */
+struct drm_fence_syncobj_signal {
+  struct drm_syncobj *syncobj; /* direct pointer (not handle): per-fd handle
+                                * is ambiguous across drm_files */
+  uint64_t point;
+};
+
+struct drm_fence {
+  uint32_t ctx_id; /* 0 = free slot */
+  uint8_t ring_idx;
+  uint64_t fence_id;
+  bool signaled;
+  refcount_t refcount; /* see 2A-3 / 2D-1: sync_file fd holds a ref */
+  spinlock lock;       /* irqsave: signal runs in ISR, add runs in process */
+  wait_queue_head wq;  /* tasks waiting for signal */
+  struct drm_fence_syncobj_signal *syncobj_signals;
+  uint32_t num_syncobj_signals;
+};
+
+/* Timeline syncobj: Vulkan timeline semaphore backing. */
+struct drm_syncobj {
+  uint32_t handle;         /* 1-based, 0 reserved (sentinel) */
+  uint64_t timeline_point; /* highest signaled point */
+  spinlock lock;
+  wait_queue_head wq; /* tasks waiting for timeline_point to advance */
+};
+
 struct drm_blob_resource {
   uint32_t bo_handle;  /* GEM handle (1-based) */
   uint32_t res_handle; /* virtio-gpu resource id (host) */
@@ -149,6 +179,11 @@ struct drm_file {
 
   int created_blob_handles[MAX_BLOB_RESOURCES];
   int created_blob_count;
+
+  /* syncobj table (plan2). syncobjs[0] is a sentinel (never used). */
+  struct drm_syncobj *syncobjs[MAX_SYNCOBJS_PER_FD];
+  uint32_t
+      next_syncobj_handle; /* 0 init; create uses ++next (first handle=1) */
 
   /* Tracking of resources owned by this fd */
   int created_fb_ids[MAX_FRAMEBUFFERS];
@@ -225,6 +260,10 @@ struct drm_device {
   uint32_t next_blob_handle; /* 1-based, monotonic */
   spinlock blob_lock;
 
+  /* fence table (plan2). slot free iff ctx_id==0. */
+  struct drm_fence fences[MAX_FENCES];
+  spinlock fence_lock; /* protects slot alloc/find across the table */
+
   /* dumb buffer table */
   struct drm_dumb_buffer dumbs[MAX_DUMB_BUFFERS];
   int next_dumb_handle;
@@ -270,5 +309,14 @@ __poll drm_poll(xtask *proc, int events);
 /* ===== DRM open/close ===== */
 int drm_open(xtask *proc, int fd);
 int drm_close(xtask *proc, int fd);
+
+/* ===== Fence lifecycle (plan2). drm_fence_put reclaims the slot when the
+ * last ref drops; called from sync_file fd close (proc.c file_put) and
+ * EXECBUFFER error paths, so non-static. ===== */
+void drm_fence_put(struct drm_fence *fence);
+
+/* Read-only signaled probe for sync_file poll (file_poll.c calls this to avoid
+ * pulling the driver-layer drm_internal.h into the BSD layer). */
+bool drm_fence_is_signaled(struct drm_fence *fence);
 
 #endif /* KERNEL_DRIVER_DRM_INTERNAL_H */

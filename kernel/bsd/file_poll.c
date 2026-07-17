@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "arch/x64/smp.h"
@@ -28,6 +29,7 @@
 
 #include <xos/socket.h>
 
+struct drm_fence;
 // 从 sys_poll 抽取的 per-type 就绪判断。纯查询，不阻塞、不加长锁。
 // 语义与 socket.c sys_poll 的 if-else 链完全一致（无语义改变）。
 __poll file_poll(struct file *f, __poll events) {
@@ -147,6 +149,14 @@ __poll file_poll(struct file *f, __poll events) {
           revents |= (events & POLLIN);
       }
     }
+  } else if (f->type == FD_SYNC_FILE) {
+    /* FD_SYNC_FILE (plan2): POLLIN once the bound fence is signaled. The
+     * probe is a driver-layer accessor (drm_fence_is_signaled) so this BSD
+     * file does not include the driver-layer drm_internal.h. */
+    extern bool drm_fence_is_signaled(struct drm_fence * fence);
+    struct drm_fence *fence = f->sync_file_fence;
+    if (fence && drm_fence_is_signaled(fence))
+      revents |= (events & POLLIN);
   } else if (f->type == FD_IPC) {
     // FD_IPC: POLLIN iff owner's recv queue is non-empty.  Non-owner
     // (cross-process hand-off) reports 0 — never ready, harmless to a

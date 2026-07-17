@@ -55,6 +55,7 @@
 #include <xos/socket.h>
 #include <xos/thread.h>
 
+struct drm_fence;
 // Minimal file_io_req for FD_FILE CLOSE notification (must match fs_driver
 // struct layout)
 typedef struct file_io_close_req {
@@ -265,6 +266,16 @@ void file_put(struct file *f) {
       f->signalfd = NULL;
     }
     break;
+  case FD_SYNC_FILE:
+    /* FD_SYNC_FILE (plan2): drop the fence ref the fd holds. Defined in the
+     * driver layer; declared here locally to avoid pulling drm_internal.h
+     * into the BSD layer. */
+    if (f->sync_file_fence) {
+      extern void drm_fence_put(struct drm_fence * fence);
+      drm_fence_put(f->sync_file_fence);
+      f->sync_file_fence = NULL;
+    }
+    break;
   case FD_IPC:
     // Clear the owner task's ipcfd_file back-link and drop the create-time
     // reference (evdev_refact.md §4.3 生命周期 / §5.6).
@@ -293,6 +304,48 @@ int alloc_fd(files *files, int min_fd) {
       return i;
   }
   return -EMFILE;
+}
+
+/* FD_SYNC_FILE (plan2): install a sync_file fd bound to `fence`. The caller
+ * (driver EXECBUFFER out-fence path) takes a fence ref before calling; this fd
+ * holds that ref, released on close by the FD_SYNC_FILE case in file_put.
+ *
+ * Lives in the BSD layer so the driver never touches struct file layout / fd
+ * table internals directly (the driver↔bsd include boundary). drm_fence is an
+ * opaque type to the BSD layer — declared forward in kernel/bsd/types.h. */
+int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence) {
+  if (!fence)
+    return -EINVAL;
+
+  spin_lock(&proc->proc->files->fd_lock);
+  int fd = alloc_fd(proc->proc->files, 3);
+  if (fd < 0) {
+    spin_unlock(&proc->proc->files->fd_lock);
+    return -EMFILE;
+  }
+  struct file *f = (struct file *)kmalloc(sizeof(struct file));
+  if (!f) {
+    spin_unlock(&proc->proc->files->fd_lock);
+    return -ENOMEM;
+  }
+  __memset(f, 0, sizeof(*f));
+  refcount_set(&f->f_count, 1);
+  f->type = FD_SYNC_FILE;
+  f->sync_file_fence = fence;
+  fd_install(proc->proc->files, fd, f);
+  spin_unlock(&proc->proc->files->fd_lock);
+  return fd;
+}
+
+/* FD_SYNC_FILE (plan2) lookup: return the fence bound to a sync_file fd, or
+ * NULL if the fd is not a sync_file. Driver syncobj-import path uses this
+ * instead of dereferencing struct file / fd table directly. The fence ref is
+ * not borrowed here — the fd still owns it for its lifetime. */
+struct drm_fence *bsd_sync_file_fd_fence(xtask *proc, int fd) {
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f || f->type != FD_SYNC_FILE)
+    return NULL;
+  return f->sync_file_fence;
 }
 
 void pty_dup_file(struct file *f) {
