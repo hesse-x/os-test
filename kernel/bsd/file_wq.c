@@ -8,10 +8,12 @@
 
 #include "kernel/bsd/eventpoll.h" // struct eventpoll (ep->wq)
 #include "kernel/bsd/file_poll.h"
+#include "kernel/bsd/inode.h"   // struct inode (i_priv for FD_DEV wq routing)
 #include "kernel/bsd/netlink.h" // struct netlink_sock (wq field)
 #include "kernel/bsd/pty.h"     // struct pty (wq field)
 #include "kernel/bsd/socket.h"  // struct unix_sock (wq field)
 #include "kernel/bsd/types.h"
+#include "kernel/driver/drm_internal.h" // g_drm.event_wq + drm_dev_ops (card0 wq routing)
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/wait_queue.h"
 
@@ -36,6 +38,14 @@ static wait_queue_head *wq_alloc(wait_queue_head **out_wq) {
 // list after stack reuse. sys_poll and sys_epoll_wait both resolve through
 // here (ep_target_wq delegates to file_wq_get) so the two paths can't diverge.
 wait_queue_head *file_wq_get(struct file *f) {
+  /* DRM card0: unified event_wq, woken by drm_ioctl_page_flip after setting
+   * event_pending. Render nodes (drm_render_ops, poll=NULL) fall through to
+   * the generic per-file wq — they never poll, so never wait. Routing card0
+   * here (not per-file f->wq) is what lets page_flip's single __wake_up reach
+   * every poll waiter; without it pollers deadlocked (bug.md). */
+  if (f->type == FD_DEV && f->inode && f->inode->i_priv == &drm_dev_ops) {
+    return &g_drm.event_wq;
+  }
   /* epoll fd: ep->wq, woken by ep_poll_callback's __wake_up(&ep->wq). */
   if (f->type == FD_EPOLL && f->epoll) {
     return &f->epoll->wq;

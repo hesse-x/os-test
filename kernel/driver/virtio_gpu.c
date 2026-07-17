@@ -15,6 +15,7 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/bsd/fops.h"
 #include "kernel/bsd/sysfs.h"
 #include "kernel/driver/driver.h"
 #include "kernel/driver/drm_internal.h"
@@ -273,6 +274,14 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
 
   remove_wait_queue(&vgpu->cmd_wq, &wait);
   return cmd_ctx.completed ? 0 : -1;
+}
+
+/* 3D/context/blob commands: identical to send_cmd (2-descriptor cmd+resp,
+ * synchronous). Kept as a separate entry point so plan2 can swap in an async
+ * variant without touching the 2D path. */
+int virtio_gpu_send_cmd_3d(struct virtio_gpu_device *vgpu, void *cmd_buf,
+                           size_t cmd_len, void *resp_buf, size_t resp_len) {
+  return virtio_gpu_send_cmd(vgpu, cmd_buf, cmd_len, resp_buf, resp_len);
 }
 
 /* ===== 2.D: high-level command wrappers ===== */
@@ -773,6 +782,238 @@ static long drm_ioctl_virtgpu_getparam(void *arg) {
   if (copy_to_user((void *)(uintptr_t)(p->value + sizeof(val)), &zero_hi,
                    sizeof(zero_hi)))
     return -EFAULT;
+  return 0;
+}
+
+/* Forward declarations (plan1: ctx_id pool + blob helpers, defined later). */
+static struct drm_file *drm_file_current(void);
+static uint32_t alloc_ctx_id(void);
+static void free_ctx_id(uint32_t id);
+static uint32_t alloc_blob_handle(void);
+static void free_blob_handle(uint32_t handle);
+static struct drm_blob_resource *drm_find_blob_resource(uint32_t handle);
+static int drm_blob_map_to_host(struct drm_blob_resource *blob);
+
+/* DRM_IOCTL_VIRTGPU_GET_CAPS — return cached capset payload. addr is a
+ * user-space pointer; copy up to c->size bytes. Currently only Venus (id=4). */
+static long drm_ioctl_virtgpu_get_caps(void *arg) {
+  struct drm_virtgpu_get_caps *c = (struct drm_virtgpu_get_caps *)arg;
+
+  if (c->cap_set_id != VIRTGPU_DRM_CAPSET_VENUS)
+    return -EINVAL;
+
+  const void *data = NULL;
+  uint32_t data_size = 0;
+  spin_lock(&g_drm.capset_lock);
+  for (uint32_t i = 0; i < g_drm.num_capsets; i++) {
+    if (g_drm.capsets[i].id == c->cap_set_id) {
+      data = g_drm.capsets[i].data;
+      data_size = g_drm.capsets[i].size;
+      break;
+    }
+  }
+  spin_unlock(&g_drm.capset_lock);
+  if (!data)
+    return -ENOENT;
+
+  uint32_t copy_size = (c->size < data_size) ? c->size : data_size;
+  if (copy_to_user((void *)(uintptr_t)c->addr, data, copy_size))
+    return -EFAULT;
+  return 0;
+}
+
+/* DRM_IOCTL_VIRTGPU_CONTEXT_INIT — translate drm_virtgpu_context_set_param[]
+ * into VIRTIO_GPU_CMD_CTX_CREATE. ctx_set_params is a user-space pointer. */
+static long drm_ioctl_virtgpu_context_init(void *arg) {
+  struct drm_virtgpu_context_init *ci = (struct drm_virtgpu_context_init *)arg;
+
+  if (ci->num_params == 0)
+    return -EINVAL;
+
+  struct drm_virtgpu_context_set_param *params =
+      kmalloc(ci->num_params * sizeof(*params));
+  if (!params)
+    return -ENOMEM;
+  if (copy_from_user(params, (void *)(uintptr_t)ci->ctx_set_params,
+                     ci->num_params * sizeof(*params))) {
+    kfree(params);
+    return -EFAULT;
+  }
+
+  uint32_t capset_id = 0, num_rings = 0, poll_rings_mask = 0;
+  for (uint32_t i = 0; i < ci->num_params; i++) {
+    switch (params[i].param) {
+    case VIRTGPU_CONTEXT_PARAM_CAPSET_ID:
+      capset_id = (uint32_t)params[i].value;
+      break;
+    case VIRTGPU_CONTEXT_PARAM_NUM_RINGS:
+      num_rings = (uint32_t)params[i].value;
+      break;
+    case VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK:
+      poll_rings_mask = (uint32_t)params[i].value;
+      break;
+    case VIRTGPU_CONTEXT_PARAM_DEBUG_NAME:
+      break; /* ignored */
+    }
+  }
+  kfree(params);
+
+  if (capset_id != VIRTGPU_DRM_CAPSET_VENUS)
+    return -EINVAL;
+  if (num_rings == 0 || num_rings > 64)
+    return -EINVAL;
+
+  uint32_t ctx_id = alloc_ctx_id();
+  if (ctx_id == 0)
+    return -ENOMEM;
+
+  struct virtio_gpu_ctx_create cmd;
+  __memset(&cmd, 0, sizeof(cmd));
+  cmd.hdr.type = VIRTIO_GPU_CMD_CTX_CREATE;
+  cmd.hdr.ctx_id = ctx_id;
+  cmd.nlen = 0;
+  cmd.context_init = capset_id & VIRTIO_GPU_CONTEXT_INIT_CAPSET_ID_MASK;
+
+  struct virtio_gpu_ctrl_hdr_response resp;
+  __memset(&resp, 0, sizeof(resp));
+  int rc = virtio_gpu_send_cmd_3d(&g_virtio_gpu, &cmd, sizeof(cmd), &resp,
+                                  sizeof(resp));
+  if (rc || resp.hdr.type != VIRTIO_GPU_RESP_OK_NODATA) {
+    free_ctx_id(ctx_id);
+    return rc ? rc : -EIO;
+  }
+
+  struct drm_file *df = drm_file_current();
+  if (!df) {
+    free_ctx_id(ctx_id);
+    return -EBADF;
+  }
+  df->ctx_id = ctx_id;
+  df->num_rings = num_rings;
+  df->poll_rings_mask = poll_rings_mask;
+
+  df->ring_fence_counters = kmalloc(num_rings * sizeof(uint64_t));
+  if (!df->ring_fence_counters) {
+    /* rollback: destroy ctx on host + free id */
+    struct virtio_gpu_ctx_create destroy;
+    __memset(&destroy, 0, sizeof(destroy));
+    destroy.hdr.type = VIRTIO_GPU_CMD_CTX_DESTROY;
+    destroy.hdr.ctx_id = ctx_id;
+    virtio_gpu_send_cmd_3d(&g_virtio_gpu, &destroy, sizeof(destroy), &resp,
+                           sizeof(resp));
+    free_ctx_id(ctx_id);
+    df->ctx_id = 0;
+    return -ENOMEM;
+  }
+  __memset(df->ring_fence_counters, 0, num_rings * sizeof(uint64_t));
+
+  printk(LOG_DEBUG, "drm: CONTEXT_INIT ctx_id=%u rings=%u\n", ctx_id,
+         num_rings);
+  return 0;
+}
+
+/* DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB — HOST3D host-visible blob only. */
+static long drm_ioctl_virtgpu_resource_create_blob(void *arg) {
+  struct drm_virtgpu_resource_create_blob *b =
+      (struct drm_virtgpu_resource_create_blob *)arg;
+
+  if (b->blob_mem != VIRTGPU_BLOB_MEM_HOST3D)
+    return -EINVAL;
+  if (b->size == 0)
+    return -EINVAL;
+  if (b->cmd_size != 0) /* Venus does not use inline cmd */
+    return -EINVAL;
+
+  uint32_t handle = alloc_blob_handle();
+  if (handle == 0)
+    return -ENOMEM;
+  uint32_t res_id = handle; /* reuse GEM handle as virtio resource id */
+
+  struct virtio_gpu_resource_create_blob cmd;
+  __memset(&cmd, 0, sizeof(cmd));
+  cmd.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB;
+  cmd.hdr.ctx_id = 0; /* HOST3D blob: no ctx required */
+  cmd.resource_id = res_id;
+  cmd.blob_mem = b->blob_mem;
+  cmd.blob_flags = b->blob_flags;
+  cmd.nr_entries = 0;
+  cmd.blob_id = b->blob_id;
+  cmd.size = b->size;
+
+  struct virtio_gpu_ctrl_hdr_response resp;
+  __memset(&resp, 0, sizeof(resp));
+  int rc = virtio_gpu_send_cmd_3d(&g_virtio_gpu, &cmd, sizeof(cmd), &resp,
+                                  sizeof(resp));
+  if (rc || resp.hdr.type != VIRTIO_GPU_RESP_OK_NODATA) {
+    free_blob_handle(handle);
+    return rc ? rc : -EIO;
+  }
+
+  struct drm_blob_resource *blob = &g_drm.blobs[handle - 1];
+  blob->bo_handle = handle;
+  blob->res_handle = res_id;
+  blob->blob_mem = b->blob_mem;
+  blob->blob_flags = b->blob_flags;
+  blob->size = b->size;
+  blob->blob_id = b->blob_id;
+  blob->mmap_offset = (uint64_t)handle << PAGE_SHIFT;
+  blob->refcount = 1;
+  blob->mapped = false;
+
+  b->bo_handle = handle;
+  b->res_handle = res_id;
+
+  /* If MAPPABLE, eagerly MAP_BLOB to get host-visible phys. */
+  if (b->blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE) {
+    if (drm_blob_map_to_host(blob) < 0) {
+      /* blob created but not mapped; mmap will lazy-MAP via ioctl VIRTGPU_MAP
+       */
+      blob->mapped = false;
+    }
+  }
+
+  /* Track per-fd for cleanup */
+  struct drm_file *df = drm_file_current();
+  if (df && df->created_blob_count < MAX_BLOB_RESOURCES)
+    df->created_blob_handles[df->created_blob_count++] = (int)handle;
+
+  printk(LOG_DEBUG,
+         "drm: CREATE_BLOB mem=%u size=%llu blob_id=%llu -> h=%u res=%u\n",
+         b->blob_mem, (unsigned long long)b->size,
+         (unsigned long long)b->blob_id, handle, res_id);
+  return 0;
+}
+
+/* DRM_IOCTL_VIRTGPU_MAP — return mmap offset (handle << PAGE_SHIFT).
+ * Lazy-MAP_BLOB if not already mapped. */
+static long drm_ioctl_virtgpu_map(void *arg) {
+  struct drm_virtgpu_map *m = (struct drm_virtgpu_map *)arg;
+
+  struct drm_blob_resource *blob = drm_find_blob_resource(m->handle);
+  if (!blob)
+    return -EINVAL;
+
+  if (!blob->mapped) {
+    if (drm_blob_map_to_host(blob) < 0)
+      return -EAGAIN; /* host not host-visible yet */
+  }
+
+  m->offset = blob->mmap_offset;
+  return 0;
+}
+
+/* DRM_IOCTL_VIRTGPU_RESOURCE_INFO — return res_handle/size/blob_mem. */
+static long drm_ioctl_virtgpu_resource_info(void *arg) {
+  struct drm_virtgpu_resource_info *ri =
+      (struct drm_virtgpu_resource_info *)arg;
+
+  struct drm_blob_resource *blob = drm_find_blob_resource(ri->bo_handle);
+  if (!blob)
+    return -EINVAL;
+
+  ri->res_handle = blob->res_handle;
+  ri->size = (uint32_t)blob->size;
+  ri->blob_mem = blob->blob_mem;
   return 0;
 }
 
@@ -1839,13 +2080,20 @@ static long drm_ioctl_page_flip(void *arg) {
 
   g_drm.current_fb_id = p->fb_id;
 
+  bool signal_event = false;
   if (p->flags & DRM_MODE_PAGE_FLIP_EVENT) {
     spin_lock(&g_drm.event_lock);
     g_drm.event_pending = true;
     g_drm.event_sequence++;
     g_drm.event_user_data = p->user_data;
     spin_unlock(&g_drm.event_lock);
+    signal_event = true;
   }
+  /* Wake poll waiters outside event_lock: __wake_up takes event_wq->lock,
+   * and keeping the order (event_lock → wq->lock) one-directional avoids
+   * any cross with drm_poll's event_lock-only read. */
+  if (signal_event)
+    __wake_up(&g_drm.event_wq, POLLIN);
   return 0;
 }
 
@@ -1876,6 +2124,16 @@ long drm_ioctl(uint32_t cmd, void *arg) {
     return drm_ioctl_version(arg);
   case DRM_IOCTL_VIRTGPU_GETPARAM:
     return drm_ioctl_virtgpu_getparam(arg);
+  case DRM_IOCTL_VIRTGPU_GET_CAPS:
+    return drm_ioctl_virtgpu_get_caps(arg);
+  case DRM_IOCTL_VIRTGPU_CONTEXT_INIT:
+    return drm_ioctl_virtgpu_context_init(arg);
+  case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB:
+    return drm_ioctl_virtgpu_resource_create_blob(arg);
+  case DRM_IOCTL_VIRTGPU_MAP:
+    return drm_ioctl_virtgpu_map(arg);
+  case DRM_IOCTL_VIRTGPU_RESOURCE_INFO:
+    return drm_ioctl_virtgpu_resource_info(arg);
   case DRM_IOCTL_GET_CAP:
     return drm_ioctl_get_cap(arg);
   case DRM_IOCTL_SET_CLIENT_CAP:
@@ -1957,6 +2215,78 @@ static struct drm_file *drm_file_current(void) {
   }
   spin_unlock(&g_drm_files_lock);
   return NULL;
+}
+
+/* ctx_id pool: ctx_id 0 is reserved ("no context"), ids 1..MAX_CTX_IDS. */
+static uint32_t alloc_ctx_id(void) {
+  spin_lock(&g_drm.ctx_id_lock);
+  for (uint32_t i = 0; i < MAX_CTX_IDS; i++) {
+    if (!(g_drm.ctx_id_bitmap[i / 32] & (1u << (i % 32)))) {
+      g_drm.ctx_id_bitmap[i / 32] |= (1u << (i % 32));
+      spin_unlock(&g_drm.ctx_id_lock);
+      return i + 1;
+    }
+  }
+  spin_unlock(&g_drm.ctx_id_lock);
+  return 0;
+}
+
+static void free_ctx_id(uint32_t id) {
+  if (id == 0 || id > MAX_CTX_IDS)
+    return;
+  spin_lock(&g_drm.ctx_id_lock);
+  g_drm.ctx_id_bitmap[(id - 1) / 32] &= ~(1u << ((id - 1) % 32));
+  spin_unlock(&g_drm.ctx_id_lock);
+}
+
+/* blob handle: monotonic 1-based; slot reuse keyed by bo_handle. */
+static uint32_t alloc_blob_handle(void) {
+  spin_lock(&g_drm.blob_lock);
+  uint32_t h = g_drm.next_blob_handle++;
+  spin_unlock(&g_drm.blob_lock);
+  if (h == 0 || h > MAX_BLOB_RESOURCES)
+    return 0;
+  return h;
+}
+
+static struct drm_blob_resource *drm_find_blob_resource(uint32_t handle) {
+  if (handle == 0 || handle > MAX_BLOB_RESOURCES)
+    return NULL;
+  struct drm_blob_resource *b = &g_drm.blobs[handle - 1];
+  return (b->bo_handle == handle) ? b : NULL;
+}
+
+static void free_blob_handle(uint32_t handle) {
+  if (handle == 0 || handle > MAX_BLOB_RESOURCES)
+    return;
+  struct drm_blob_resource *b = &g_drm.blobs[handle - 1];
+  if (b->bo_handle != handle)
+    return;
+  __memset(b, 0, sizeof(*b));
+}
+
+/* Send RESOURCE_MAP_BLOB and store host-visible phys into the blob slot.
+ * Returns 0 on success (blob->mapped=true), negative on host error. */
+static int drm_blob_map_to_host(struct drm_blob_resource *blob) {
+  struct virtio_gpu_resource_map_blob map_cmd;
+  __memset(&map_cmd, 0, sizeof(map_cmd));
+  map_cmd.hdr.type = VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB;
+  map_cmd.hdr.ctx_id = 0; /* HOST3D blob: no ctx required */
+  map_cmd.resource_id = blob->res_handle;
+
+  struct virtio_gpu_resp_map_info map_resp;
+  __memset(&map_resp, 0, sizeof(map_resp));
+  int rc = virtio_gpu_send_cmd_3d(&g_virtio_gpu, &map_cmd, sizeof(map_cmd),
+                                  &map_resp, sizeof(map_resp));
+  if (rc || map_resp.hdr.type != VIRTIO_GPU_RESP_OK_MAP_INFO) {
+    printk(LOG_WARN, "drm: MAP_BLOB failed for res %u (rc=%d type=0x%x)\n",
+           blob->res_handle, rc, map_resp.hdr.type);
+    return rc ? rc : -EIO;
+  }
+  blob->guest_phys = map_resp.offset;
+  blob->kernel_vaddr = (uint64_t)phys_to_virt((phys_addr_t)blob->guest_phys);
+  blob->mapped = true;
+  return 0;
 }
 
 /* ===== DRM device ops ===== */
@@ -2073,6 +2403,34 @@ int drm_close(xtask *proc, int fd) {
       drm_release_dumb(f->created_dumb_handles[j]);
     }
 
+    /* Release Venus context (plan1) */
+    if (f->ctx_id != 0) {
+      struct virtio_gpu_ctx_create destroy;
+      struct virtio_gpu_ctrl_hdr_response resp;
+      __memset(&destroy, 0, sizeof(destroy));
+      __memset(&resp, 0, sizeof(resp));
+      destroy.hdr.type = VIRTIO_GPU_CMD_CTX_DESTROY;
+      destroy.hdr.ctx_id = f->ctx_id;
+      virtio_gpu_send_cmd_3d(&g_virtio_gpu, &destroy, sizeof(destroy), &resp,
+                             sizeof(resp));
+      free_ctx_id(f->ctx_id);
+      f->ctx_id = 0;
+    }
+    if (f->ring_fence_counters) {
+      kfree(f->ring_fence_counters);
+      f->ring_fence_counters = NULL;
+    }
+
+    /* Release blob resources (plan1) */
+    for (int j = 0; j < f->created_blob_count; j++) {
+      struct drm_blob_resource *blob =
+          drm_find_blob_resource((uint32_t)f->created_blob_handles[j]);
+      if (blob) {
+        if (--blob->refcount <= 0)
+          free_blob_handle(blob->bo_handle);
+      }
+    }
+
     if (f->is_master) {
       g_drm.is_master = false;
       drm_master_cleanup();
@@ -2088,7 +2446,7 @@ int drm_close(xtask *proc, int fd) {
 /* forward declarations for ops callbacks defined further below */
 static ssize_t drm_read(xtask *proc, int fd, void *buf, size_t count);
 
-static struct dev_ops drm_dev_ops = {
+struct dev_ops drm_dev_ops = {
     .driver_pid = 0,
     .is_block = false,
     .open = drm_open,
@@ -2205,14 +2563,6 @@ void drm_dev_register(void) {
     drm_render_ops.minor = 128;
   }
 
-  int rc2 = devtmpfs_create("dri/renderD128", &drm_render_ops, NULL);
-  if (rc2 < 0) {
-    printk(LOG_ERROR, "drm: failed to create /dev/dri/renderD128: %d\n", rc2);
-  } else {
-    __strncpy(drm_render_ops.subsystem, "drm", 7);
-    __strncpy(drm_render_ops.devtype, "renderD128", 7);
-  }
-
   struct sysfs_node *cls = sysfs_class_dir("drm");
   struct sysfs_node *card0 = sysfs_create_dir(cls, "card0");
   if (card0) {
@@ -2255,20 +2605,36 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
       (uint32_t)g_drm.dumbs[handle - 1].handle == handle)
     target = &g_drm.dumbs[handle - 1];
   spin_unlock(&g_drm.dumb_lock);
-  if (!target) {
+
+  /* blob resource path (plan1) */
+  struct drm_blob_resource *blob = drm_find_blob_resource(handle);
+
+  if (!target && !blob) {
     printk(LOG_ERROR, "drm_mmap: no buffer for handle %u (offset=0x%llx)\n",
            handle, (unsigned long long)offset);
     return 0;
   }
 
-  size_t npages = (target->size + PAGE_SIZE - 1) / PAGE_SIZE;
+  uint64_t map_phys;
+  uint64_t map_size;
+  if (blob) {
+    if (!blob->mapped)
+      return -EAGAIN; /* caller must VIRTGPU_MAP first */
+    map_phys = blob->guest_phys;
+    map_size = blob->size;
+  } else {
+    map_phys = target->guest_phys;
+    map_size = target->size;
+  }
+
+  size_t npages = (map_size + PAGE_SIZE - 1) / PAGE_SIZE;
   uint64_t *pml4 =
       (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->mm->cr3);
   uint64_t vaddr = proc->mm->mmap_brk;
   uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
 
   for (size_t i = 0; i < npages; i++) {
-    uint64_t page_phys = target->guest_phys + i * PAGE_SIZE;
+    uint64_t page_phys = map_phys + i * PAGE_SIZE;
     if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, page_phys,
                               pte_flags)) {
       for (size_t j = 0; j < i; j++)
@@ -2287,7 +2653,7 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
   }
   region->vaddr = vaddr;
   region->size = npages * PAGE_SIZE;
-  region->phys = target->guest_phys;
+  region->phys = map_phys;
   region->shm_obj = NULL;
   region->next = proc->mm->mmap_regions;
   proc->mm->mmap_regions = region;
@@ -2333,6 +2699,89 @@ static ssize_t drm_read(xtask *proc, int fd, void *buf, size_t count) {
   if (cr != 0)
     return -EFAULT;
   return (ssize_t)sizeof(ev);
+}
+
+/* Pre-query all capsets via GET_CAPSET_INFO + GET_CAPSET and cache them in
+ * g_drm.capsets[]. Venus (id=4) is synthesized locally if the host does not
+ * report it, so GET_CAPS always succeeds for the Venus capset. */
+static void drm_query_capsets(struct virtio_gpu_device *vgpu) {
+  g_drm.capset_lock = SPINLOCK_INIT;
+  uint32_t n = vgpu->config.num_capsets;
+  if (n > MAX_CAPSETS)
+    n = MAX_CAPSETS;
+  g_drm.num_capsets = 0;
+
+  for (uint32_t i = 0; i < n; i++) {
+    struct virtio_gpu_get_capset_info {
+      struct virtio_gpu_ctrl_hdr hdr;
+      uint32_t capset_index;
+      uint32_t padding;
+    } info_cmd;
+    __memset(&info_cmd, 0, sizeof(info_cmd));
+    info_cmd.hdr.type = VIRTIO_GPU_CMD_GET_CAPSET_INFO;
+    info_cmd.capset_index = i;
+
+    struct virtio_gpu_resp_capset_info info_resp;
+    __memset(&info_resp, 0, sizeof(info_resp));
+    if (virtio_gpu_send_cmd_3d(vgpu, &info_cmd, sizeof(info_cmd), &info_resp,
+                               sizeof(info_resp)) < 0)
+      continue;
+    if (info_resp.hdr.type != VIRTIO_GPU_RESP_OK_CAPSET_INFO)
+      continue;
+
+    uint32_t csz = info_resp.capset_max_size;
+    void *cdata = kmalloc(csz);
+    if (!cdata)
+      continue;
+    __memset(cdata, 0, csz);
+
+    struct virtio_gpu_get_capset get_cmd;
+    __memset(&get_cmd, 0, sizeof(get_cmd));
+    get_cmd.hdr.type = VIRTIO_GPU_CMD_GET_CAPSET;
+    get_cmd.capset_id = info_resp.capset_id;
+    get_cmd.capset_version = info_resp.capset_max_version;
+
+    if (virtio_gpu_send_cmd_3d(vgpu, &get_cmd, sizeof(get_cmd), cdata, csz) <
+        0) {
+      kfree(cdata);
+      continue;
+    }
+
+    uint32_t slot = g_drm.num_capsets;
+    g_drm.capsets[slot].id = info_resp.capset_id;
+    g_drm.capsets[slot].ver = info_resp.capset_max_version;
+    g_drm.capsets[slot].size = csz;
+    g_drm.capsets[slot].data = cdata;
+    g_drm.num_capsets++;
+  }
+
+  /* Ensure Venus (id=4) exists; synthesize if host omitted it. */
+  bool have_venus = false;
+  for (uint32_t i = 0; i < g_drm.num_capsets; i++)
+    if (g_drm.capsets[i].id == VIRTGPU_DRM_CAPSET_VENUS)
+      have_venus = true;
+  if (!have_venus && g_drm.num_capsets < MAX_CAPSETS) {
+    struct virgl_renderer_capset_venus v = {
+        .wire_format_version = 1,
+        .vk_xml_version =
+            (1u << 22) | (3u << 12) | 0u, /* VK_MAKE_VERSION(1,3,0) */
+        .vk_ext_command_serialization = 1,
+        .vk_mesa_venus_protocol = 1,
+        .supports_blob_id_0 = 1,
+        .supports_multiple_timelines = 1,
+        .allow_vk_wait_syncs = 1,
+    };
+    void *cdata = kmalloc(sizeof(v));
+    if (cdata) {
+      __memcpy(cdata, &v, sizeof(v));
+      g_drm.capsets[g_drm.num_capsets].id = VIRTGPU_DRM_CAPSET_VENUS;
+      g_drm.capsets[g_drm.num_capsets].ver = 1;
+      g_drm.capsets[g_drm.num_capsets].size = sizeof(v);
+      g_drm.capsets[g_drm.num_capsets].data = cdata;
+      g_drm.num_capsets++;
+    }
+  }
+  printk(LOG_INFO, "drm: cached %u capsets\n", g_drm.num_capsets);
 }
 
 void virtio_gpu_init(void) {
@@ -2408,8 +2857,14 @@ void virtio_gpu_init(void) {
   g_drm.dumb_lock = SPINLOCK_INIT;
   g_drm.fb_lock = SPINLOCK_INIT;
   g_drm.event_lock = SPINLOCK_INIT;
+  init_wait_queue_head(&g_drm.event_wq);
+  g_drm.ctx_id_lock = SPINLOCK_INIT;
+  g_drm.blob_lock = SPINLOCK_INIT;
+  g_drm.next_blob_handle = 1;
   g_drm.next_dumb_handle = 1;
   g_drm.next_fb_id = 1;
+  /* Query capsets after g_drm is zeroed/initialized. */
+  drm_query_capsets(vgpu);
 
   /* Default display mode (runtime-overridable; see g_drm.fb_*).
      Change DRM_FB_WIDTH/HEIGHT to alter the default. */

@@ -9,6 +9,7 @@
 
 #include "kernel/bsd/devtmpfs.h" /* __poll, xtask via inode.h chain */
 #include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/wait_queue.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -94,6 +95,43 @@ extern struct drm_cursor g_drm_cursor;
 /* ===== per-fd tracking (Phase C) ===== */
 #define MAX_DRM_FDS 8
 
+#define MAX_CAPSETS 8
+#define MAX_CTX_IDS 256
+#define MAX_BLOB_RESOURCES 64
+
+struct drm_blob_resource {
+  uint32_t bo_handle;  /* GEM handle (1-based) */
+  uint32_t res_handle; /* virtio-gpu resource id (host) */
+  uint32_t blob_mem;   /* VIRTGPU_BLOB_MEM_HOST3D (0x2) */
+  uint32_t blob_flags; /* MAPPABLE | SHAREABLE */
+  uint64_t size;
+  uint64_t blob_id;      /* 0 for shmem, or Venus mem_id */
+  uint64_t mmap_offset;  /* handle << PAGE_SHIFT */
+  uint64_t guest_phys;   /* host-visible phys from MAP_BLOB resp */
+  uint64_t kernel_vaddr; /* phys_to_virt(guest_phys) */
+  int refcount;
+  bool mapped; /* MAP_BLOB executed */
+};
+
+/* Cached capset info fetched at init via GET_CAPSET_INFO/GET_CAPSET. */
+struct drm_capset {
+  uint32_t id;
+  uint32_t ver;
+  uint32_t size;
+  void *data; /* kmalloc'd capset payload */
+};
+
+/* Venus capset (capset id 4) synthetic payload (from Mesa venus_hw.h). */
+struct virgl_renderer_capset_venus {
+  uint32_t wire_format_version;
+  uint32_t vk_xml_version;
+  uint32_t vk_ext_command_serialization;
+  uint32_t vk_mesa_venus_protocol;
+  uint32_t supports_blob_id_0;
+  uint32_t supports_multiple_timelines;
+  uint32_t allow_vk_wait_syncs;
+};
+
 struct drm_file {
   int fd;                       /* system fd number, 0 = free slot */
   xtask *proc;                  /* owning process */
@@ -102,6 +140,15 @@ struct drm_file {
   bool auth_valid;              /* magic has been authenticated */
   bool used;                    /* slot in use */
   bool is_render;               /* render node (renderD128): no master/auth */
+
+  /* Venus 3D context (plan1 CONTEXT_INIT) */
+  uint32_t ctx_id;    /* 0 = no context */
+  uint32_t num_rings; /* rings allocated by CONTEXT_INIT */
+  uint32_t poll_rings_mask;
+  uint64_t *ring_fence_counters; /* per-ring fence counter (plan2 uses) */
+
+  int created_blob_handles[MAX_BLOB_RESOURCES];
+  int created_blob_count;
 
   /* Tracking of resources owned by this fd */
   int created_fb_ids[MAX_FRAMEBUFFERS];
@@ -163,6 +210,21 @@ struct drm_device {
   uint32_t fb_bpp;
   uint32_t fb_pitch;
 
+  /* capset cache (plan1 GET_CAPS) */
+  struct drm_capset capsets[MAX_CAPSETS];
+  uint32_t num_capsets;
+  spinlock capset_lock;
+
+  /* ctx_id allocation pool (plan1 CONTEXT_INIT) */
+  uint32_t ctx_id_bitmap[(MAX_CTX_IDS + 31) /
+                         32]; /* bit i set = ctx_id i+1 in use */
+  spinlock ctx_id_lock;
+
+  /* blob resource table (plan1 CREATE_BLOB) */
+  struct drm_blob_resource blobs[MAX_BLOB_RESOURCES];
+  uint32_t next_blob_handle; /* 1-based, monotonic */
+  spinlock blob_lock;
+
   /* dumb buffer table */
   struct drm_dumb_buffer dumbs[MAX_DUMB_BUFFERS];
   int next_dumb_handle;
@@ -178,9 +240,19 @@ struct drm_device {
   bool event_pending;
   uint32_t event_sequence;
   uint64_t event_user_data;
+
+  /* Unified vblank/event wait queue: drm_poll waiters register here via
+   * file_wq_get, and drm_ioctl_page_flip wakes it after setting event_pending.
+   * Without this, waiters sat on a per-file f->wq that page_flip never woke
+   * (poll(deadline=0) + no EVENT flag = permanent deadlock). See bug.md. */
+  wait_queue_head event_wq;
 };
 
 extern struct drm_device g_drm;
+extern struct dev_ops
+    drm_dev_ops; /* card0 ops — file_wq_get identifies DRM
+                  * card0 fds (inode->i_priv == &drm_dev_ops)
+                  * to route poll waiters to g_drm.event_wq. */
 extern struct drm_property g_drm_properties[DRM_MAX_PROPERTIES];
 extern int g_drm_next_prop_id;
 extern struct drm_blob g_drm_blobs[DRM_MAX_BLOBS];

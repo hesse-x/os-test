@@ -7,6 +7,7 @@
 #ifndef KERNEL_DRIVER_VIRTIO_GPU_H
 #define KERNEL_DRIVER_VIRTIO_GPU_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "kernel/driver/virtio_pci.h"
@@ -100,6 +101,30 @@ struct virtio_gpu_ctx_create {
   char debug_name[64];
 };
 
+struct virtio_gpu_resource_create_blob {
+  struct virtio_gpu_ctrl_hdr hdr;
+  uint32_t resource_id;
+  uint32_t blob_mem;
+  uint32_t blob_flags;
+  uint32_t nr_entries; /* 0 for HOST3D (no guest backing) */
+  uint64_t blob_id;
+  uint64_t size;
+};
+
+struct virtio_gpu_resource_map_blob {
+  struct virtio_gpu_ctrl_hdr hdr;
+  uint32_t resource_id;
+  uint32_t padding;
+};
+
+/* MAP_BLOB response: map_info + host-visible offset. */
+struct virtio_gpu_resp_map_info {
+  struct virtio_gpu_ctrl_hdr hdr;
+  uint32_t map_info; /* VIRTIO_GPU_MAP_INFO_* */
+  uint32_t padding;
+  uint64_t offset; /* host-visible offset */
+};
+
 /* RESOURCE_CREATE_2D command */
 struct virtio_gpu_resource_create_2d {
   struct virtio_gpu_ctrl_hdr hdr;
@@ -175,6 +200,27 @@ struct virtio_gpu_ctrl_hdr_response {
   struct virtio_gpu_ctrl_hdr hdr;
 };
 
+/* GET_CAPSET_INFO / GET_CAPSET responses */
+struct virtio_gpu_resp_capset_info {
+  struct virtio_gpu_ctrl_hdr hdr;
+  uint32_t capset_id;
+  uint32_t capset_max_version;
+  uint32_t capset_max_size;
+  uint32_t padding;
+};
+
+struct virtio_gpu_get_capset {
+  struct virtio_gpu_ctrl_hdr hdr;
+  uint32_t capset_id;
+  uint32_t capset_version;
+  uint32_t padding;
+};
+
+struct virtio_gpu_resp_capset {
+  struct virtio_gpu_ctrl_hdr hdr;
+  uint8_t capset_data[];
+};
+
 /* ===== virtio-gpu device state ===== */
 #define VIRTIO_GPU_CTRLQ_INDEX 0
 
@@ -205,6 +251,11 @@ int virtio_gpu_transfer_2d(uint32_t resource_id, uint32_t x, uint32_t y,
 int virtio_gpu_flush(uint32_t resource_id, uint32_t x, uint32_t y, uint32_t w,
                      uint32_t h);
 int virtio_gpu_resource_unref(uint32_t resource_id);
+
+/* 3D command senders (plan1/plan2). send_cmd_3d wraps send_cmd with a
+ * ctrl_hdr-bearing command + generic hdr response. */
+int virtio_gpu_send_cmd_3d(struct virtio_gpu_device *vgpu, void *cmd_buf,
+                           size_t cmd_len, void *resp_buf, size_t resp_len);
 
 extern struct virtio_gpu_device g_virtio_gpu;
 
