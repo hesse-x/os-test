@@ -27,6 +27,7 @@ global:
     strtoll; strtoull; strtod; atof; div; ldiv; lldiv; imaxabs; imaxdiv;
     getenv; setenv; putenv; unsetenv; clearenv; environ;
     mkstemp; mktemp; realpath;
+    arc4random_buf; arc4random_uniform;
 
     /* <string.h> */
     bzero; bcmp; bcopy; index; rindex; memcmp; memcpy; memmove; memset;
@@ -138,6 +139,9 @@ global:
 
     /* <sys/utsname.h> */
     uname;
+
+    /* <sys/random.h> */
+    getrandom; getentropy;
 
     /* <sys/tls.h> — 半公开内部入口（crt0/pthread 跨文件，已声明即契约） */
     alloc_tls_block; __libc_tls_init_rest; __pthread_cancel_check;

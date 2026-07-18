@@ -13,6 +13,7 @@
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
+#include "kernel/bsd/random.h"
 #include "kernel/bsd/syscall.h"
 #include "kernel/bsd/timerfd.h"
 #include "kernel/bsd/vfs.h"
@@ -71,6 +72,8 @@ void bsd_init(void) {
   timerfd_tick_hook = timerfd_tick_all;
   // evdev broker: create /dev/input/control control node
   evdev_broker_init();
+  // random: register /dev/random + /dev/urandom
+  random_dev_init();
   // fault_handler = NULL;  // future: file-backed mmap page-in
 
   printk(LOG_INFO, "bsd_init: done\n");

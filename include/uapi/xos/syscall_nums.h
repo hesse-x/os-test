@@ -140,6 +140,9 @@
 // =====================
 #define SYS_SYSCONF 102
 
+// ===================== getrandom =====================
+#define SYS_GETRANDOM 103
+
 // ===================== recv_msg (shared between kernel and user)
 // =====================
 #define RECV_IRQ 0

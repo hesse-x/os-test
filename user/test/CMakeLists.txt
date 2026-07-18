@@ -88,6 +88,9 @@ add_user_dyn_elf(timerfd C SOURCES test_timerfd.c ${CMAKE_SOURCE_DIR}/third_part
 # Layer 19: signalfd
 add_user_dyn_elf(signalfd C SOURCES test_signalfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 
+# Layer 20: getrandom (/dev/(u)random + libc 封装)
+add_user_dyn_elf(getrandom C SOURCES test_getrandom.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+
 # mprotect + PROT_NONE round-trip + sysconf (plan1.md §1.5 缺口1 hard acceptance)
 add_user_dyn_elf(test_mprotect C SOURCES test_mprotect.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 

@@ -17,6 +17,7 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
+#include "kernel/xcore/random.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/serial_hook.h"
 #include "kernel/xcore/trap.h"
@@ -43,6 +44,8 @@ __attribute__((no_sanitize("kernel-address"))) void xcore_init(boot_info *bi) {
 
   sig_init();   // allocate signal trampoline page (shared across all processes)
   sched_init(); // initialize process table + cpu_locals
+
+  xcore_random_init(); // RDRAND 探测 + ChaCha20 自检 + CPU0 播种
 
   smp_boot_aps();
 

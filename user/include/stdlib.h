@@ -67,6 +67,8 @@ LIBC_EXPORT lldiv_t lldiv(long long numer, long long denom);
 LIBC_EXPORT int rand(void);
 LIBC_EXPORT int rand_r(unsigned *seedp);
 LIBC_EXPORT void srand(unsigned seed);
+LIBC_EXPORT void arc4random_buf(void *buf, size_t n);
+LIBC_EXPORT uint32_t arc4random_uniform(uint32_t upper_bound);
 LIBC_EXPORT void qsort(void *base, size_t nmemb, size_t size,
                        int (*cmp)(const void *, const void *));
 LIBC_EXPORT void *bsearch(const void *key, const void *base, size_t nmemb,

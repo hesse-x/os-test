@@ -38,6 +38,7 @@ int64_t sys_mmap(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_munmap(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_mprotect(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_sysconf(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_getrandom(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // VFS
 int64_t sys_ioctl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
