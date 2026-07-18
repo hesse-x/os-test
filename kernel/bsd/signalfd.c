@@ -16,6 +16,7 @@
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/mem/slab.h"
+#include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
@@ -48,28 +49,42 @@ uint64_t proc_signalfd_pending(signalfd_ctx *sfd) {
 // Scan the process fd table for a signalfd that accepts `signo` and whose
 // signal is not blocked. Returns 1 if such a fd exists (the signal should be
 // left pending for the signalfd reader instead of delivered to a handler).
+//
+// The fd_table can be mutated concurrently by sibling threads sharing this
+// files_struct (close/dup2 on another CPU: fd_uninstall + synchronize_rcu +
+// file_put frees the file). Hold an RCU read-side critical section across
+// the scan so a file can't be freed while we dereference it — same protocol
+// as every other fd_table reader (fd_lookup / RCU_DEREFERENCE).
 int signalfd_consumes(proc *bp, int signo) {
   if (!bp || !bp->files)
     return 0;
   uint64_t bit = 1ULL << signo;
+  int consumes = 0;
+  rcu_read_lock();
   for (int fd = 0; fd < MAX_FD; fd++) {
-    struct file *f = bp->files->fd_table[fd];
+    struct file *f = fd_lookup(bp->files, fd);
     if (f && f->type == FD_SIGNALFD && f->signalfd) {
       signalfd_ctx *ctx = f->signalfd;
-      if ((ctx->sigmask & bit) && !(bp->sig_blocked & bit))
-        return 1;
+      if ((ctx->sigmask & bit) && !(bp->sig_blocked & bit)) {
+        consumes = 1;
+        break;
+      }
     }
   }
-  return 0;
+  rcu_read_unlock();
+  return consumes;
 }
 
 // Return the wait_queue_head of the first signalfd accepting `signo`.
+// Caller MUST hold rcu_read_lock across this call and the use of the
+// returned wq — otherwise the file (and its wq) can be closed/freed
+// concurrently by a sibling thread sharing files.
 wait_queue_head *signalfd_wq(proc *bp, int signo) {
   if (!bp || !bp->files)
     return NULL;
   uint64_t bit = 1ULL << signo;
   for (int fd = 0; fd < MAX_FD; fd++) {
-    struct file *f = bp->files->fd_table[fd];
+    struct file *f = fd_lookup(bp->files, fd);
     if (f && f->type == FD_SIGNALFD && f->signalfd) {
       signalfd_ctx *ctx = f->signalfd;
       if (ctx->sigmask & bit)

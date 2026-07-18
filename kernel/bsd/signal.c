@@ -17,6 +17,7 @@
 #include "kernel/bsd/syscall.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/log.h"
+#include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
@@ -212,9 +213,14 @@ void check_pending_signals(trapframe *tf) {
         __atomic_or_fetch(&proc->proc->sig_pending, 1ULL << sig,
                           __ATOMIC_RELEASE);
       }
+      // The wq belongs to the signalfd file; keep the RCU read-side
+      // critical section held across the __wake_up so a sibling thread
+      // can't close + free the file (and its wq) in between.
+      rcu_read_lock();
       wait_queue_head *wq = signalfd_wq(proc->proc, sig);
       if (wq)
         __wake_up(wq, POLLIN);
+      rcu_read_unlock();
       break;
     }
 

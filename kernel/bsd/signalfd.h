@@ -44,6 +44,9 @@ uint64_t proc_signalfd_pending(signalfd_ctx *sfd);
 int signalfd_consumes(struct proc *bp, int signo);
 
 // Return the wait_queue_head of the first signalfd accepting `signo`, or NULL.
+// Caller must hold rcu_read_lock across the call and the use of the
+// returned wq (the file can otherwise be closed/freed concurrently by a
+// sibling thread sharing files).
 struct wait_queue_head *signalfd_wq(struct proc *bp, int signo);
 
 int64_t sys_signalfd4(int64_t fd, int64_t sigmask_ptr, int64_t sizemask,
