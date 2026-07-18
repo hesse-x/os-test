@@ -23,55 +23,71 @@ int log_level = LOG_INFO;
 
 static const char *level_tags[] = {"DEBUG", "INFO", "WARN", "ERROR", "PANIC"};
 
+static void dump_stack_trace_locked(void);
+
 void printk(int level, const char *fmt, ...) {
   if (level < log_level && level != LOG_PANIC)
     return;
 
-  SERIAL_PRINTF("[%s] ", level < 5 ? level_tags[level] : "???");
-
+  // Hold the TX lock across tag+body so one printk line is never split by
+  // output from another CPU.
+  uint64_t flags = serial_tx_acquire();
+  serial_printf_locked("[%s] ", level < 5 ? level_tags[level] : "???");
   va_list ap;
   va_start(ap, fmt);
-  SERIAL_VPRINTF(fmt, ap);
+  serial_vprintf_locked(fmt, ap);
   va_end(ap);
+  serial_tx_release(flags);
 }
 
 void panic(const char *fmt, ...) {
+  // Hold the TX lock across the whole dump so it stays contiguous.
+  uint64_t flags = serial_tx_acquire();
+
   va_list ap;
   va_start(ap, fmt);
-  SERIAL_VPRINTF(fmt, ap);
+  serial_vprintf_locked(fmt, ap);
   va_end(ap);
 
-  printk(LOG_PANIC, "--- PANIC ---");
+  serial_printf_locked("[PANIC] --- PANIC ---");
 
   // Print current syscall name if in syscall context
   trapframe *tf = get_cpu_local()->cur_tf;
   if (tf) {
-    SERIAL_PRINTF("\nCPU %d  syscall=%s(%lu)\n", get_cpu_local()->cpu_id,
-                  syscall_name(tf->rax), (unsigned long)tf->rax);
+    serial_printf_locked("\nCPU %d  syscall=%s(%lu)\n", get_cpu_local()->cpu_id,
+                         syscall_name(tf->rax), (unsigned long)tf->rax);
   } else {
-    SERIAL_PRINTF("\nCPU %d  (no trapframe)\n", get_cpu_local()->cpu_id);
+    serial_printf_locked("\nCPU %d  (no trapframe)\n", get_cpu_local()->cpu_id);
   }
 
-  dump_stack_trace();
+  dump_stack_trace_locked();
+
+  serial_tx_release(flags);
 
   for (;;) {
     halt();
   }
 }
 
-void dump_stack_trace(void) {
-  SERIAL_PRINTF("BACKTRACE:\n");
+static void dump_stack_trace_locked(void) {
+  serial_printf_locked("BACKTRACE:\n");
   uint64_t *rbp;
   __asm__ volatile("movq %%rbp, %0" : "=r"(rbp));
   for (int depth = 0; depth < 16; depth++) {
     if (!rbp || (uint64_t)rbp < 0xFFFFFFFF80000000)
       break;
     uint64_t ret_addr = rbp[1];
-    SERIAL_PRINTF("    0x%016lX\n", ret_addr);
+    serial_printf_locked("    0x%016lX\n", ret_addr);
     rbp = (uint64_t *)rbp[0];
     if (!rbp)
       break;
   }
+}
+
+void dump_stack_trace(void) {
+  uint64_t flags = serial_tx_acquire();
+  dump_stack_trace_locked();
+  serial_tx_release(flags);
 }
 
 // ===================== snprintf (backed by kvformat) =====================

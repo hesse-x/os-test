@@ -56,6 +56,11 @@ typedef struct cpu_local {
   // RCU read-side nesting state
   rcu_local rcu; // nesting count + saved IF
 
+  // This CPU's rdtsc offset relative to the BSP timebase (bsp_tsc - ap_tsc),
+  // measured by the bringup rendezvous (tsc_sync_ap/tsc_sync_bsp in smp.c).
+  // sched_clock() adds it to rdtsc so all CPUs share one clock. 0 for BSP.
+  int64_t tsc_offset;
+
   // #NM nesting guard: detects fxrstor/fxsave executed with CR0.TS=1
   // (would nest #NM and blow the kernel stack into #DF). See fpu_lazy_switch.
   int nm_nesting_depth;

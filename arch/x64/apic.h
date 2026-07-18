@@ -117,7 +117,7 @@ void ioapic_set_irq(uint32_t gsi, uint8_t vector, uint32_t apic_id, bool masked,
 // BSP-calibrated LAPIC timer ticks (set by apic_init, used by AP init)
 extern uint32_t lapic_timer_ticks_calibrated;
 
-// TSC frequency (set by apic_init during PIT-based calibration)
+// TSC frequency (set by apic_init: CPUID.0x15 or PIT mode-0 calibration)
 extern uint64_t tsc_freq;   // TSC ticks per second
 extern uint64_t tsc_per_ms; // TSC ticks per millisecond
 

@@ -18,6 +18,7 @@ SERIAL_OPTS="-serial file:$LOGFILE -monitor stdio"
 
 qemu-system-x86_64 \
     -machine q35 \
+    --enable-kvm -cpu host \
     -drive file=build/disk.img,format=raw,if=none,id=disk0 \
     -device ide-hd,drive=disk0,bus=ide.0 \
     -device qemu-xhci,id=xhci \

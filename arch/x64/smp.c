@@ -168,6 +168,60 @@ void cpu_bringup_common(int cpu_id) {
   log_cpu_caps(cpu_id == 0 ? "BSP" : "AP");
 }
 
+// ===================== TSC sync (BSP <-> AP rendezvous) =====================
+// Under KVM the INIT IPI at AP bringup resets the AP's TSC (TCG doesn't), so
+// per-CPU rdtsc values differ by an arbitrary offset and sched_clock() — which
+// subtracts a BSP-recorded baseline — disagrees across CPUs.  Measure the
+// offset with a ping-pong rendezvous: BSP publishes its TSC, AP brackets the
+// read with its own TSC; the estimate is bsp_tsc - midpoint(ap_t0, ap_t1).
+// Keep the round with the smallest bracket (t1-t0): scheduling/VM-exit noise
+// only widens the bracket, it never shrinks it below the true latency.
+#define TSC_SYNC_ROUNDS 16
+static volatile uint64_t tsc_sync_bsp_tsc;
+static volatile int tsc_sync_seq; // BSP -> AP: announced round (1..ROUNDS)
+static volatile int tsc_sync_ack; // AP -> BSP: completed round
+
+static void tsc_sync_bsp(void) {
+  for (int r = 1; r <= TSC_SYNC_ROUNDS; r++) {
+    __atomic_store_n(&tsc_sync_bsp_tsc, rdtsc64(), __ATOMIC_RELAXED);
+    __atomic_store_n(&tsc_sync_seq, r, __ATOMIC_RELEASE);
+    // Bounded wait: if the AP never shows up (boot failed), give up and
+    // leave its offset 0 rather than hanging BSP boot.
+    uint64_t deadline = rdtsc64() + tsc_freq; // 1s
+    while (__atomic_load_n(&tsc_sync_ack, __ATOMIC_ACQUIRE) != r) {
+      if (rdtsc64() > deadline) {
+        __atomic_store_n(&tsc_sync_seq, -1, __ATOMIC_RELEASE); // unblock AP
+        return;
+      }
+      __asm__ volatile("pause");
+    }
+  }
+}
+
+static void tsc_sync_ap(int cpu_id) {
+  int64_t best_delta = 0;
+  uint64_t best_rtt = ~0ULL;
+  for (int r = 1; r <= TSC_SYNC_ROUNDS; r++) {
+    int seq;
+    while ((seq = __atomic_load_n(&tsc_sync_seq, __ATOMIC_ACQUIRE)) != r) {
+      if (seq < 0)
+        return; // BSP gave up on us
+      __asm__ volatile("pause");
+    }
+    uint64_t t0 = rdtsc64();
+    uint64_t b = __atomic_load_n(&tsc_sync_bsp_tsc, __ATOMIC_RELAXED);
+    uint64_t t1 = rdtsc64();
+    if (t1 - t0 < best_rtt) {
+      best_rtt = t1 - t0;
+      best_delta = (int64_t)(b - ((t0 + t1) >> 1));
+    }
+    __atomic_store_n(&tsc_sync_ack, r, __ATOMIC_RELEASE);
+  }
+  cpu_locals[cpu_id].tsc_offset = best_delta;
+  printk(LOG_INFO, "smp: cpu%d TSC offset=%lld rtt=%lu\n", cpu_id,
+         (long long)best_delta, best_rtt);
+}
+
 // ===================== AP entry (called from trampoline code)
 // =====================
 __attribute__((no_sanitize("kernel-address"))) void ap_entry_c(int cpu_id) {
@@ -193,6 +247,9 @@ __attribute__((no_sanitize("kernel-address"))) void ap_entry_c(int cpu_id) {
 
   // Set this AP's lapic_base in cpu_local
   cpu_locals[cpu_id].lapic_base = lapic_vaddr;
+
+  // Rendezvous with BSP to measure this AP's TSC offset (KVM INIT resets it)
+  tsc_sync_ap(cpu_id);
 
   printk(LOG_INFO, "AP 0x%016X init finish\n", cpu_id);
 
@@ -326,6 +383,10 @@ __attribute__((no_sanitize("kernel-address"))) void smp_boot_aps() {
     // Send second SIPI (per Intel manual recommendation)
     lapic_send_sipi(apic_id, 0x08);
     udelay(200);
+
+    // Sync this AP's TSC onto the BSP timebase (runs concurrently with
+    // ap_entry_c on the AP; bounded wait, no-op if the AP never shows up)
+    tsc_sync_bsp();
   }
 
   // Restore BSP LAPIC timer (udelay clobbers it to masked one-shot)

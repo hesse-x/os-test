@@ -21,9 +21,12 @@ uint64_t tsc_freq = 0;        // TSC ticks per second
 uint64_t tsc_per_ms = 0;      // TSC ticks per millisecond
 static uint64_t tsc_base = 0; // TSC value at boot baseline
 
-// Monotonic nanosecond clock since boot (TSC-based)
+// Monotonic nanosecond clock since boot (TSC-based).
+// tsc_offset corrects this CPU's rdtsc onto the BSP timebase: under KVM the
+// INIT IPI at AP bringup resets the AP's TSC (TCG doesn't), so per-CPU rdtsc
+// values differ by an arbitrary offset (see tsc_sync_ap in smp.c).
 uint64_t sched_clock() {
-  uint64_t now = rdtsc64();
+  uint64_t now = rdtsc64() + (uint64_t)get_cpu_local()->tsc_offset;
   uint64_t delta = now - tsc_base;
   // Split to avoid overflow: delta * 1e9 overflows uint64_t after ~7s at 2.5GHz
   uint64_t sec = delta / tsc_freq;
@@ -48,45 +51,75 @@ void ioapic_set_irq(uint32_t gsi, uint8_t vector, uint32_t apic_id, bool masked,
   ioapic_write(reg + 1, (uint32_t)(entry >> 32));
 }
 
-// ===================== PIT calibration =====================
-// Use PIT to calibrate the LAPIC timer bus frequency.
-// Strategy: set LAPIC timer to count down from max in one-shot mode,
-// set PIT channel 0 to one-shot mode with a known period (~10ms),
-// wait for PIT to expire, then read how many LAPIC ticks elapsed.
-static uint32_t calibrate_lapic_timer() {
-  // 10ms PIT period (divisor = 11932 for 100Hz = 10ms)
-  uint16_t divisor = 11932;
+// ===================== Calibration =====================
+// TSC frequency via CPUID leaf 0x15 (exact under KVM -cpu host).
+// Returns 0 when unavailable (TCG qemu64 has no leaf 0x15).
+static uint64_t calibrate_tsc_cpuid(void) {
+  uint32_t eax, ebx, ecx, edx;
+  __asm__ volatile("cpuid"
+                   : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                   : "a"(0));
+  if (eax < 0x15)
+    return 0;
+  __asm__ volatile("cpuid"
+                   : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                   : "a"(0x15));
+  uint32_t denom = eax, numer = ebx, crystal = ecx;
+  printk(LOG_INFO, "calib: CPUID.0x15 denom=%u numer=%u crystal=%u Hz\n", denom,
+         numer, crystal);
+  if (!denom || !numer || !crystal)
+    return 0;
+  return (uint64_t)crystal * numer / denom;
+}
 
-  // Set LAPIC timer: one-shot, divide by 1, masked (no interrupt)
-  lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
-  lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_MASKED);
-
-  // Set PIT channel 0 to mode 4 (software strobe): write divisor starts
-  // countdown, counter stops at 0 (does not wrap/reload).
-  outb(0x43, 0x38); // channel 0, lobyte/hibyte, mode 4, binary
+// TSC frequency via PIT. Mode 0 counts down from the divisor; at terminal
+// count the counter wraps to 0xFFFF and keeps decrementing — the wrapped
+// range persists for ~55ms, so the poll cannot miss it even when every port
+// access is a KVM VM exit (the old mode-4 poll for cur==0 missed the
+// momentary zero and exited at a later wrap crossing, inflating tsc_freq
+// ~13x under KVM). Elapsed PIT counts are recovered exactly from the wrapped
+// value, so the measured window is precise regardless of poll latency.
+static uint64_t calibrate_tsc_pit(void) {
+  const uint16_t divisor = 11932; // 10.000ms at 1.193182MHz
+  outb(0x43, 0x30);               // channel 0, lobyte/hibyte, mode 0
   outb(0x40, divisor & 0xFF);
   outb(0x40, (divisor >> 8) & 0xFF);
-
-  // Start LAPIC timer from max count (same time as PIT starts)
-  lapic_write(LAPIC_TIMER_ICR, 0xFFFFFFFF);
-
-  // Poll until PIT counter reaches 0.
-  // In mode 4 the counter stops at 0, so we just wait for cur == 0.
-  // Latch before each read to get a consistent 16-bit snapshot.
+  uint64_t t0 = rdtsc64();
   for (;;) {
-    outb(0x43, 0x00); // latch PIT count
+    outb(0x43, 0x00); // latch — freezes the count at this instant
+    uint64_t t1 = rdtsc64();
     uint8_t lo = inb(0x40);
     uint8_t hi = inb(0x40);
     uint16_t cur = (uint16_t)((hi << 8) | lo);
-    if (cur == 0)
-      break;
+    if (cur > divisor) { // wrapped past terminal count
+      uint32_t pit_counts = (uint32_t)divisor + (0xFFFF - cur) + 1;
+      return (t1 - t0) * 1193182ULL / pit_counts;
+    }
   }
+}
 
-  // Read LAPIC current count
-  uint32_t elapsed = 0xFFFFFFFF - lapic_read(LAPIC_TIMER_CCR);
+static uint64_t calibrate_tsc(void) {
+  uint64_t freq = calibrate_tsc_cpuid();
+  if (freq == 0) {
+    freq = calibrate_tsc_pit();
+    printk(LOG_INFO, "calib: TSC %lu Hz (PIT)\n", freq);
+  } else {
+    printk(LOG_INFO, "calib: TSC %lu Hz (CPUID.0x15)\n", freq);
+  }
+  return freq;
+}
 
-  // elapsed = LAPIC ticks per 10ms. For 100Hz timer, use this directly.
-  return elapsed;
+// LAPIC timer ticks per 10ms, measured against a TSC busy-wait window.
+// No port I/O, so KVM VM-exit latency can't distort the window; sharing the
+// TSC timebase with sched_clock keeps the timer and the clock consistent.
+static uint32_t calibrate_lapic_timer() {
+  lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
+  lapic_write(LAPIC_LVT_TIMER, LAPIC_LVT_MASKED);
+  lapic_write(LAPIC_TIMER_ICR, 0xFFFFFFFF);
+  uint64_t start = rdtsc64();
+  while (rdtsc64() - start < tsc_freq / 100) // 10ms
+    __asm__ volatile("pause");
+  return 0xFFFFFFFF - lapic_read(LAPIC_TIMER_CCR);
 }
 
 // ===================== APIC MMIO mapping =====================
@@ -237,37 +270,11 @@ void apic_init() {
            low);
   }
 
-  // 7. Calibrate and start LAPIC timer
-  uint32_t ticks = calibrate_lapic_timer();
-  lapic_timer_ticks_calibrated = ticks;
-
-  // 8. Calibrate TSC using the same PIT 10ms window
-  // Re-run the LAPIC calibration to measure TSC ticks per 10ms
-  {
-    uint16_t divisor = 11932;
-    uint64_t tsc_start = rdtsc64();
-
-    // PIT mode 4: counter stops at 0
-    outb(0x43, 0x38); // channel 0, lobyte/hibyte, mode 4, binary
-    outb(0x40, divisor & 0xFF);
-    outb(0x40, (divisor >> 8) & 0xFF);
-    lapic_write(LAPIC_TIMER_ICR, 0xFFFFFFFF);
-
-    for (;;) {
-      outb(0x43, 0x00);
-      uint8_t lo = inb(0x40);
-      uint8_t hi = inb(0x40);
-      uint16_t cur = (uint16_t)((hi << 8) | lo);
-      if (cur == 0)
-        break;
-    }
-
-    uint64_t tsc_end = rdtsc64();
-    uint64_t tsc_delta = tsc_end - tsc_start;
-    // tsc_delta = TSC ticks per 10ms, multiply by 100 for Hz
-    tsc_freq = tsc_delta * 100;
-    tsc_per_ms = tsc_freq / 1000;
-  }
+  // 7. Calibrate TSC (CPUID.0x15 when available, else PIT), then calibrate
+  // the LAPIC timer against a TSC-measured window.
+  tsc_freq = calibrate_tsc();
+  tsc_per_ms = tsc_freq / 1000;
+  lapic_timer_ticks_calibrated = calibrate_lapic_timer();
 
   // Record TSC baseline for sched_clock()
   tsc_base = rdtsc64();
@@ -275,7 +282,7 @@ void apic_init() {
   // Start LAPIC periodic timer
   lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1
   lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_VECTOR | LAPIC_LVT_TIMER_PERIODIC);
-  lapic_write(LAPIC_TIMER_ICR, ticks);
+  lapic_write(LAPIC_TIMER_ICR, lapic_timer_ticks_calibrated);
   printk(LOG_INFO, "apic: BSP timer started vec=0x%x ticks=%u\n",
-         LAPIC_TIMER_VECTOR, ticks);
+         LAPIC_TIMER_VECTOR, lapic_timer_ticks_calibrated);
 }

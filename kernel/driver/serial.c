@@ -51,6 +51,22 @@ static void serial_putc_raw(char c) {
 // Protected by serial_tx_lock; \n sets it true, \r is transparent.
 static bool serial_line_start = true;
 
+// ===================== Locking =====================
+// The TX lock is held across an entire printf/write call (not per char) so
+// output from different CPUs never interleaves mid-line. Callers that need a
+// multi-call atomic section (printk tag+body, panic dump) bracket it with
+// serial_tx_acquire()/serial_tx_release() and use the *_locked variants.
+
+uint64_t serial_tx_acquire(void) {
+  uint64_t flags;
+  spin_lock_irqsave(&serial_tx_lock, &flags);
+  return flags;
+}
+
+void serial_tx_release(uint64_t flags) {
+  spin_unlock_irqrestore(&serial_tx_lock, flags);
+}
+
 // Emit boot-time prefix [  sec.mmm] at line starts.
 // No-op until TSC is calibrated (early boot output skips the prefix).
 static void emit_timestamp_locked(void) {
@@ -100,9 +116,8 @@ static void emit_timestamp_locked(void) {
     serial_putc_raw(buf[i]);
 }
 
-static void serial_putc(char c) {
-  uint64_t flags;
-  spin_lock_irqsave(&serial_tx_lock, &flags);
+// Caller must hold serial_tx_lock (via serial_tx_acquire or a public wrapper).
+static void serial_putc_locked(char c) {
   if (serial_line_start && c != '\n' && c != '\r') {
     emit_timestamp_locked();
     serial_line_start = false;
@@ -110,12 +125,11 @@ static void serial_putc(char c) {
   serial_putc_raw(c);
   if (c == '\n')
     serial_line_start = true;
-  spin_unlock_irqrestore(&serial_tx_lock, flags);
 }
 
-static void serial_puts(const char *s) {
+static void serial_puts_locked(const char *s) {
   while (*s) {
-    serial_putc(*s++);
+    serial_putc_locked(*s++);
   }
 }
 
@@ -131,28 +145,41 @@ static void serial_buf_putc(char c, void *arg) {
     a->buf[a->pos++] = c;
 }
 
-void serial_printf(const char *fmt, ...) {
+void serial_vprintf_locked(const char *fmt, va_list ap) {
   char buf[256];
   struct serial_buf_arg a = {buf, 0, 255};
+  kvformat(serial_buf_putc, &a, fmt, ap);
+  buf[a.pos] = '\0';
+  serial_puts_locked(buf);
+}
+
+void serial_printf_locked(const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  kvformat(serial_buf_putc, &a, fmt, ap);
+  serial_vprintf_locked(fmt, ap);
   va_end(ap);
-  buf[a.pos] = '\0';
-  serial_puts(buf);
+}
+
+void serial_printf(const char *fmt, ...) {
+  uint64_t flags = serial_tx_acquire();
+  va_list ap;
+  va_start(ap, fmt);
+  serial_vprintf_locked(fmt, ap);
+  va_end(ap);
+  serial_tx_release(flags);
 }
 
 void serial_vprintf(const char *fmt, va_list ap) {
-  char buf[256];
-  struct serial_buf_arg a = {buf, 0, 255};
-  kvformat(serial_buf_putc, &a, fmt, ap);
-  buf[a.pos] = '\0';
-  serial_puts(buf);
+  uint64_t flags = serial_tx_acquire();
+  serial_vprintf_locked(fmt, ap);
+  serial_tx_release(flags);
 }
 
 void serial_write(const char *buf, size_t len) {
+  uint64_t flags = serial_tx_acquire();
   for (size_t i = 0; i < len; i++)
-    serial_putc(buf[i]);
+    serial_putc_locked(buf[i]);
+  serial_tx_release(flags);
 }
 
 // ===================== Serial dev_ops (VFS callback dispatch)
@@ -174,8 +201,10 @@ static ssize_t serial_dev_write(xtask *proc, int fd, const void *buf,
   if (!buf)
     return -EFAULT;
   const char *src = (const char __force *)buf;
+  uint64_t flags = serial_tx_acquire();
   for (size_t i = 0; i < count; i++)
-    serial_putc(src[i]);
+    serial_putc_locked(src[i]);
+  serial_tx_release(flags);
   return (ssize_t)count;
 }
 
