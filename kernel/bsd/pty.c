@@ -141,6 +141,12 @@ void pty_init(void) {
   devtmpfs_create("ptmx", &ptmx_ops, NULL);
 
   ptmx_inode = devtmpfs_lookup("ptmx");
+  /* ptmx_inode is kept only for pointer-identity comparisons
+   * (pty_fd_is_master / pty_is_master_inode). devtmpfs_lookup now returns a
+   * +1 reference; we don't need to own one — the dev_list entry keeps the
+   * inode alive for the system's lifetime (ptmx is a kernel device, never
+   * removed). Drop the lookup ref so we don't leak it. */
+  inode_put(ptmx_inode);
 
   printk(LOG_INFO, "pty_init: /dev/ptmx registered\n");
 }
@@ -629,7 +635,7 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
          old_ws.ws_col != pty->t_winsize.ws_col) &&
         pty->t_sid != 0) {
       for (int p = 0; p < MAX_PROC; p++) {
-        if (tasks[p] && tasks[p]->pid == p &&
+        if (tasks[p] && tasks[p]->pid == p && tasks[p]->proc &&
             tasks[p]->proc->pgid == pty->t_pgid &&
             tasks[p]->proc->sid == pty->t_sid) {
           __atomic_or_fetch(&tasks[p]->proc->sig_pending, 1ULL << SIGWINCH,

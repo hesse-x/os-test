@@ -29,6 +29,10 @@ struct dev_ops {
   bool is_block;    // true = block device, false = char device
   uint32_t minor;   // device minor number (ioctl req routing)
 
+  uint32_t magic;   /* DEV_OPS_MAGIC = 0xDEADBEE5; lets §3-DIAG tell a live
+                     * dev_ops (e.g. static broker_ops[slot]) from a freed/
+                     * slab-reused inode whose i_priv now points at garbage.
+                     * Set in devtmpfs_create; never cleared elsewhere. */
   char subsystem[8]; // "input" / "drm" / "block" / "tty"
   char devtype[8];   // "evdev" / "card" / "disk" / "ptmx"
   void *subsys_priv; // -> input_dev_props* / NULL
@@ -52,6 +56,8 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
 struct inode *devtmpfs_lookup(const char *name);
 void devtmpfs_cleanup_pid(pid_t pid);
 void devtmpfs_remove(const char *name);
+
+#define DEV_OPS_MAGIC 0xDEADBEE5u
 
 extern struct fstype devtmpfs_fstype;
 

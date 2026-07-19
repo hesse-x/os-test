@@ -55,6 +55,13 @@ struct input_producer {
 };
 
 static struct evdev_instance *g_instances[EVDEV_MAX_INSTANCES];
+
+/* §3-DIAG-locator: the event0 inode pointer, set at INPUT_REGISTER(minor=0)
+ * time. inode_put watches this to catch a premature free (i_count→0 while the
+ * dev_list entry still holds the base ref + pid 5's consumer fd holds an open
+ * ref). */
+volatile void *g_diag_event0_inode;
+
 static spinlock g_inst_lock = SPINLOCK_INIT;
 
 static struct evdev_instance *find_instance_by_name(const char *name) {
@@ -208,6 +215,22 @@ long evdev_control_ioctl(uint32_t cmd, void *arg) {
   __strncpy(ops->devtype, "evdev", sizeof(ops->devtype) - 1);
   ops->open = evdev_consumer_open_cb;
   devtmpfs_create(inst->name, ops, NULL);
+
+  /* §3-DIAG-locator: capture the event0 inode pointer so inode_put can detect
+   * a premature free (i_count→0 while the dev_list entry still holds the base
+   * ref + pid 5's consumer fd holds an open ref). Set only for minor==0. */
+  if (inst->minor == 0) {
+    extern volatile void *g_diag_event0_inode;
+    struct inode *ev_ip = devtmpfs_lookup(inst->name);
+    if (ev_ip) {
+      g_diag_event0_inode = ev_ip;
+      ev_ip->_canary_pre = 0xDEADBEEFCAFEULL;
+      ev_ip->_canary_post = 0xDEADBEEFCAFEULL;
+      printk(LOG_ERROR, "§3-DIAG: ARMED event0 inode=%p i_count=%d\n", ev_ip,
+             refcount_read(&ev_ip->i_count));
+      inode_put(ev_ip); /* drop the lookup +1 */
+    }
+  }
 
   /* 把新实例链入当前控制 fd 的 ctrl->instances（crash 清理用）。 */
   {

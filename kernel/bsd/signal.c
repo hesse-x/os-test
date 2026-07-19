@@ -159,6 +159,24 @@ void check_pending_signals(trapframe *tf) {
   if (!proc || !proc->proc)
     return;
 
+  // §4-DIAG: signal_struct should never be NULL on a live, running task —
+  // proc_create() sets bp->signal before the task is ever enqueued, and only
+  // proc_reap() (on a ZOMBIE task, from the parent's waitpid) clears it.
+  // Hitting NULL here means the running task's proc/signal was freed
+  // concurrently (SMP race) — print the full task state to locate the
+  // premature free, then bail out defensively instead of #PF'ing.
+  // Observation only for now; the root-cause fix follows once the freeing
+  // path is identified. See bug.md §4.
+  if (!proc->proc->signal) {
+    printk(LOG_ERROR,
+           "§4-DIAG: pid=%d state=%d tgid=%d proc=%p bp=%p signal=NULL "
+           "assigned_cpu=%d cs=0x%lx\n",
+           proc->pid, proc->state, proc->tgid, proc, proc->proc,
+           proc->assigned_cpu, (unsigned long)tf->cs);
+    dump_stack_trace();
+    return;
+  }
+
   // group_exit check (highest priority)
   if (proc->proc->signal->group_exit) {
     sys_exit_group(proc->proc->signal->group_exit_code, 0, 0, 0, 0, 0);

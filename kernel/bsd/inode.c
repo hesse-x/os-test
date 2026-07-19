@@ -151,6 +151,23 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
 }
 
 struct inode *inode_get(struct inode *ip) {
+  extern volatile void *g_diag_event0_inode;
+  if (g_diag_event0_inode && ip == (struct inode *)g_diag_event0_inode) {
+    uint64_t pre = ip->_canary_pre, post = ip->_canary_post;
+    int ic = refcount_read(&ip->i_count);
+    printk(LOG_ERROR,
+           "§3-DIAG: inode_get event0 %p i_count=%d canary pre=%#lx post=%#lx "
+           "i_priv=%p caller pid=%d\n",
+           ip, ic, (unsigned long)pre, (unsigned long)post, ip->i_priv,
+           current_task->pid);
+    if (ic <= 0 || pre != 0xDEADBEEFCAFEULL || post != 0xDEADBEEFCAFEULL) {
+      printk(LOG_ERROR,
+             "§3-DIAG: event0 inode %p CORRUPT at inode_get i_count=%d "
+             "canary pre=%#lx post=%#lx i_priv=%p\n",
+             ip, ic, (unsigned long)pre, (unsigned long)post, ip->i_priv);
+      dump_stack_trace();
+    }
+  }
   ASSERT(refcount_read(&ip->i_count) > 0);
   refcount_inc(&ip->i_count);
   return ip;
@@ -159,6 +176,43 @@ struct inode *inode_get(struct inode *ip) {
 void inode_put(struct inode *ip) {
   if (!ip)
     return;
+  /* §3-DIAG: catch a premature inode_put on /dev/input/event0 — the dev_list
+   * entry holds a permanent base ref and pid 5's consumer fd holds another, so
+   * i_count should be ≥2 while the fd is open. If a put drives it toward 0,
+   * dump the caller backtrace to locate the extra put. */
+  extern volatile void *g_diag_event0_inode;
+  if (g_diag_event0_inode && ip == (struct inode *)g_diag_event0_inode) {
+    int before = refcount_read(&ip->i_count);
+    printk(LOG_ERROR,
+           "§3-DIAG: inode_put event0 %p i_count %d→%d caller pid=%d tgid=%d\n",
+           ip, before, before - 1, current_task->pid, current_task->tgid);
+    if (before <= 1)
+      dump_stack_trace();
+  }
+  /* Heap-corruption check: if the canaries around i_count are stale, the
+   * refcount field was overwritten by an out-of-bounds write on an adjacent
+   * allocation (not a legit inode_put, which is instrumented above). Dump the
+   * neighbors to locate the overflowing object. */
+  if (g_diag_event0_inode && ip == (struct inode *)g_diag_event0_inode) {
+    uint64_t pre = ip->_canary_pre, post = ip->_canary_post;
+    if (pre != 0xDEADBEEFCAFEULL || post != 0xDEADBEEFCAFEULL) {
+      printk(LOG_ERROR,
+             "§3-DIAG: event0 inode %p CANARY CORRUPT pre=%#lx post=%#lx "
+             "i_count=%d i_priv=%p\n",
+             ip, (unsigned long)pre, (unsigned long)post,
+             refcount_read(&ip->i_count), ip->i_priv);
+      /* Dump the raw inode memory + preceding 64B (likely the overflowing
+       * object) as 8-byte words to identify what now occupies the slot. */
+      uint64_t *base = (uint64_t *)((char *)ip - 64);
+      for (size_t i = 0; i < 16 + sizeof(struct inode) / 8; i++) {
+        uint64_t v = base[i];
+        uintptr_t a = (uintptr_t)&base[i];
+        printk(LOG_ERROR, "  [%#lx]=%#016lx", (unsigned long)a,
+               (unsigned long)v);
+      }
+      dump_stack_trace();
+    }
+  }
   spin_lock(&inode_hash_lock);
   if (refcount_dec_and_test(&ip->i_count)) {
     unsigned idx = inode_hash(ip->ino);

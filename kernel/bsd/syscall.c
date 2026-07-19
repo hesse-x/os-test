@@ -192,15 +192,24 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   if (notify_parent) {
     if (ppid >= 0 && ppid < MAX_PROC && task_get(ppid)->pid == ppid) {
       xtask *parent = task_get(ppid);
-      __atomic_or_fetch(&parent->proc->sig_pending, 1ULL << SIGCHLD,
-                        __ATOMIC_RELEASE);
-      int pcpu = parent->assigned_cpu;
-      uint64_t pflags;
-      spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
-      if (parent->state == BLOCKED && parent->wait_event == WAIT_CHILD) {
-        wake_from_wait(parent);
+      // parent->proc is NULL for non-POSIX tasks (idle processes, see
+      // xtask.h "NULL = idle/task without POSIX semantics"). A child whose
+      // sig->parent_pid resolves to such a slot (orphan whose parent died and
+      // whose pid slot was reused, or a reparented task whose parent_pid
+      // never got rewritten — only mm->parent_pid is reparented in step 3)
+      // must not dereference it. Guard matches the pty SIGHUP path
+      // (proc.c pty_close_file).
+      if (parent->proc) {
+        __atomic_or_fetch(&parent->proc->sig_pending, 1ULL << SIGCHLD,
+                          __ATOMIC_RELEASE);
+        int pcpu = parent->assigned_cpu;
+        uint64_t pflags;
+        spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
+        if (parent->state == BLOCKED && parent->wait_event == WAIT_CHILD) {
+          wake_from_wait(parent);
+        }
+        spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
       }
-      spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
     }
   }
 

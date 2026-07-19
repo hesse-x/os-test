@@ -47,7 +47,9 @@ struct inode {
   uint64_t size;
   uint32_t mode;
   int nlink;
+  uint64_t _canary_pre; /* heap-corruption guard before i_count */
   refcount_t i_count;
+  uint64_t _canary_post; /* heap-corruption guard after i_count */
   spinlock i_lock;
   void *i_priv; /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
   const struct inode_operations
