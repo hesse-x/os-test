@@ -129,6 +129,21 @@ typedef struct xtask {
   uint8_t need_resched; // 1 = current task must yield, checked at sched exit
   // === pointer to BSD extension data (Xcore does not interpret contents) ===
   struct proc *proc; // NULL = idle/task without POSIX semantics
+
+  // === exit handshake (SMP) ===
+  // 0 → the dying CPU may STILL be executing this task's do_exit tail
+  //     (parent notify / waiter wake) and its final schedule()/switch_to on
+  //     this task's kernel stack, and may still write xtask fields (k_rsp
+  //     store in switch_to, cpu-time accounting).  do_exit wakes the parent
+  //     BEFORE the final switch, so a concurrent waitpid can reach REAPING
+  //     while the dying CPU is still active — slot reuse at that point frees
+  //     the kernel stack under a running CPU and lets its late writes land in
+  //     the reused xtask object (bug.md §4 heap corruption).
+  // 1 → the final context switch away from this task has completed (set by
+  //     the abandoning CPU at its next schedule() entry, via
+  //     cpu_local.pending_dead).  xtask_alloc must not reuse a REAPING slot
+  //     until exit_done == 1.
+  volatile uint32_t exit_done;
 } xtask;
 
 // STATIC_ASSERT: verify first 8 fields offset match old task_t exactly

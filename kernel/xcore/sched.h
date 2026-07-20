@@ -7,6 +7,9 @@
 #ifndef KERNEL_XCORE_SCHED_H
 #define KERNEL_XCORE_SCHED_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "kernel/xcore/list.h"
@@ -14,7 +17,6 @@
 #include "kernel/xcore/mem/slab.h" // kmem_cache (needed for xtask_cache declaration)
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
-#include <stdint.h>
 
 // Scheduler and process table (kernel/xcore/sched.c)
 

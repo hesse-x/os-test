@@ -73,6 +73,12 @@ typedef struct cpu_local {
   // the preemption path to prevent work stealing from misdiagnosing.
   // Release builds don't read or write this field — zero cost.
   uint32_t preempt_stall_ticks;
+
+  // Last task this CPU switched away from in ZOMBIE/REAPING state.  Finalized
+  // (exit_done = 1) at the next schedule() entry on this CPU — the point where
+  // this CPU is guaranteed to have left the dead task's kernel stack and to
+  // have completed all writes to its xtask.  See xtask.exit_done (bug.md §4).
+  struct xtask *pending_dead;
 } cpu_local;
 
 extern cpu_local cpu_locals[MAX_CPUS];

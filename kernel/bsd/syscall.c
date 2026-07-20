@@ -140,13 +140,21 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
     proc->last_sched = 0;
   }
 
-  // 3. Orphan adoption (use mm->parent_pid, not signal->parent_pid)
+  // 3. Orphan adoption: reparent all children whose mm->parent_pid matches
+  //    the dying process.  Update BOTH mm->parent_pid (used by waitpid/child
+  //    scan) AND signal->parent_pid (used by do_exit's SIGCHLD notification and
+  //    sys_getppid).  The old code only updated mm->parent_pid, leaving
+  //    signal->parent_pid pointing at a dead/reused PID, causing SIGCHLD to hit
+  //    the wrong task (guarded but lost) and getppid to return garbage for
+  //    orphans.
   if (init_pid >= 0) {
     spin_lock(&tasks_lock);
     for (int i = 0; i < MAX_PROC; i++) {
       if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->mm &&
           tasks[i]->mm->parent_pid == proc->pid) {
         tasks[i]->mm->parent_pid = init_pid;
+        if (tasks[i]->proc && tasks[i]->proc->signal)
+          tasks[i]->proc->signal->parent_pid = init_pid;
       }
     }
     spin_unlock(&tasks_lock);
@@ -192,15 +200,24 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   if (notify_parent) {
     if (ppid >= 0 && ppid < MAX_PROC && task_get(ppid)->pid == ppid) {
       xtask *parent = task_get(ppid);
-      __atomic_or_fetch(&parent->proc->sig_pending, 1ULL << SIGCHLD,
-                        __ATOMIC_RELEASE);
-      int pcpu = parent->assigned_cpu;
-      uint64_t pflags;
-      spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
-      if (parent->state == BLOCKED && parent->wait_event == WAIT_CHILD) {
-        wake_from_wait(parent);
+      // parent->proc is NULL for non-POSIX tasks (idle processes, see
+      // xtask.h "NULL = idle/task without POSIX semantics"). A child whose
+      // sig->parent_pid resolves to such a slot (orphan whose parent died and
+      // whose pid slot was reused, or a reparented task whose parent_pid
+      // never got rewritten — only mm->parent_pid is reparented in step 3)
+      // must not dereference it. Guard matches the pty SIGHUP path
+      // (proc.c pty_close_file).
+      if (parent->proc) {
+        __atomic_or_fetch(&parent->proc->sig_pending, 1ULL << SIGCHLD,
+                          __ATOMIC_RELEASE);
+        int pcpu = parent->assigned_cpu;
+        uint64_t pflags;
+        spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
+        if (parent->state == BLOCKED && parent->wait_event == WAIT_CHILD) {
+          wake_from_wait(parent);
+        }
+        spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
       }
-      spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
     }
   }
 

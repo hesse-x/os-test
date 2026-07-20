@@ -51,14 +51,14 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     return NULL;
   }
 
-  // 2. Allocate kernel stack (8KB = 2 pages)
-  stack_pages = bfc_alloc_page(2);
+  // 2. Allocate kernel stack (KERNEL_STACK_SIZE)
+  stack_pages = bfc_alloc_page(KERNEL_STACK_PAGES);
   if (!stack_pages)
     goto fail_slot;
   uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
   uint64_t k_stack_top =
       (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) +
-      2 * PAGE_SIZE;
+      KERNEL_STACK_SIZE;
 
   // 2b. Pre-allocate FPU state page (eager FPU: every user task gets one)
   if (!xcore_fpu_alloc(proc))
@@ -300,7 +300,7 @@ fail_mm:
   mm_put(mm); // releases PML4 + page table pages + files
               // fall through to stack cleanup
 fail_stack:
-  bfc_free_page(stack_pages, 2);
+  bfc_free_page(stack_pages, KERNEL_STACK_PAGES);
   // Free FPU state page if allocated (eager FPU pre-allocation)
   if (proc->fpu_page) {
     bfc_free_page(proc->fpu_page, 1);

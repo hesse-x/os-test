@@ -68,16 +68,17 @@ kmem_cache *xtask_cache = NULL; // xtask-dedicated slab cache (dynamic)
 // referenced in schedule()'s switch path.  sched_task_reap and schedule()
 // share no lock; immediate free would cause UAF.  Instead, release them
 // here when the slot is reused:
-//   - k_stack (2 pages)  : switch_to asm executes ret on child's stack
+//   - k_stack (KERNEL_STACK_PAGES pages): switch_to asm executes ret on child's
+//   stack
 //   - fpu_page (1 page)  : fpu_context_switch fxsaves this page in prev branch
 // By slot reuse time the child has long been switched away — safe.
 // Add similar resources (e.g. extended FPU state pages) to this function.
 static void reclaim_lazy_resources(xtask *t) {
   if (t->k_stack_top != 0) {
     uint64_t k_stack_phys_base =
-        (__force uint64_t)PHY_ADDR(t->k_stack_top - 2 * PAGE_SIZE);
+        (__force uint64_t)PHY_ADDR(t->k_stack_top - KERNEL_STACK_SIZE);
     struct page *stack_page = &bfc_frames[PHY_TO_PAGE(k_stack_phys_base)];
-    bfc_free_page(stack_page, 2);
+    bfc_free_page(stack_page, KERNEL_STACK_PAGES);
     t->k_stack_top = 0;
   }
   if (t->fpu_page) {
@@ -141,6 +142,19 @@ xtask *xtask_alloc(pid_t *out_pid) {
       return t;
     }
     if (old->state == REAPING) {
+      // Exit handshake: do not reuse the slot until the dying CPU has
+      // completed its final context switch off this task's kernel stack.
+      // Before exit_done, the dying CPU may still be executing its do_exit
+      // tail (parent notify / waiter-wake loop) and schedule()/switch_to on
+      // this stack, and may still write this xtask object (switch_to's k_rsp
+      // store, cpu-time accounting).  Reclaiming now would free the stack
+      // under a running CPU and recycle the xtask object (same slab address)
+      // under its late writes — bug.md §4 heap corruption.  Skip and let the
+      // scan find another slot; the abandoning CPU sets exit_done at its
+      // next schedule() entry (cpu_local.pending_dead finalize).
+      if (!__atomic_load_n(&old->exit_done, __ATOMIC_ACQUIRE)) {
+        continue;
+      }
       // REAPING slot: reclaim deferred resources -> free old -> alloc new
       reclaim_lazy_resources(old);
       kmem_cache_free(xtask_cache, old);
@@ -245,8 +259,8 @@ xtask *sched_create_idle_process(int cpu_id) {
     return NULL;
   }
 
-  // Allocate kernel stack (8KB = 2 pages)
-  struct page *stack_pages = bfc_alloc_page(2);
+  // Allocate kernel stack (KERNEL_STACK_SIZE)
+  struct page *stack_pages = bfc_alloc_page(KERNEL_STACK_PAGES);
   if (!stack_pages) {
     spin_unlock(&tasks_lock);
     printk(LOG_ERROR, "sched_create_idle_process: alloc stack failed\n");
@@ -255,7 +269,7 @@ xtask *sched_create_idle_process(int cpu_id) {
   uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
   uint64_t k_stack_top =
       (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) +
-      2 * PAGE_SIZE;
+      KERNEL_STACK_SIZE;
 
   // Build idle switch_frame on kernel stack (no trapframe, no user mode)
   uint64_t k_rsp = build_idle_kstack(k_stack_top);
@@ -468,6 +482,19 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
 
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);
+
+  // Exit handshake finalize: if this CPU previously switched away from a
+  // dying task (recorded as pending_dead at the switch-out below), that
+  // switch has long completed — we are running here on a different stack.
+  // Publish exit_done so xtask_alloc may reuse the REAPING slot (free the
+  // dead kernel stack / recycle the xtask object).  Monotonic store; runs
+  // under scheduler_lock with IRQs off, so no nested-schedule() race.
+  xtask *pending_dead = get_cpu_local()->pending_dead;
+  if (pending_dead) {
+    get_cpu_local()->pending_dead = NULL;
+    __atomic_store_n(&pending_dead->exit_done, 1, __ATOMIC_RELEASE);
+  }
+
   prev->need_resched = 0; // consume flag: schedule() called = flag cleared
 
   // Check if run_queue has a runnable process
@@ -496,6 +523,13 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
       spin_unlock(&cpu_locals[my_cpu].scheduler_lock);
       ASSERT(get_cpu_local()->rcu.nesting ==
              0); // must not schedule inside RCU read-side CS
+      // prev dies here: record so the next schedule() entry on this CPU can
+      // publish exit_done (see xtask.exit_done).  The entry finalize above
+      // guarantees pending_dead is NULL at this point.
+      if (prev->state == ZOMBIE || prev->state == REAPING) {
+        ASSERT(get_cpu_local()->pending_dead == NULL);
+        get_cpu_local()->pending_dead = prev;
+      }
       fpu_context_switch(prev, idle);
       switch_to(prev, idle);
       spin_lock(&cpu_locals[my_cpu].scheduler_lock);
@@ -560,6 +594,13 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
   spin_unlock(&cpu_locals[my_cpu].scheduler_lock);
   ASSERT(get_cpu_local()->rcu.nesting ==
          0); // must not schedule inside RCU read-side CS
+  // prev dies here: record so the next schedule() entry on this CPU can
+  // publish exit_done (see xtask.exit_done).  The entry finalize above
+  // guarantees pending_dead is NULL at this point.
+  if (prev != idle && (prev->state == ZOMBIE || prev->state == REAPING)) {
+    ASSERT(get_cpu_local()->pending_dead == NULL);
+    get_cpu_local()->pending_dead = prev;
+  }
   fpu_context_switch(prev, next);
   switch_to(prev, next);
   spin_lock(&cpu_locals[my_cpu].scheduler_lock);

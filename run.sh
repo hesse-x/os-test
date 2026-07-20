@@ -26,7 +26,7 @@ qemu-system-x86_64 \
     -device usb-mouse,bus=xhci.0 \
     -vga none \
     -device virtio-gpu-pci \
-    -m 512M -bios /usr/share/ovmf/OVMF.fd \
+    -m 2G -bios /usr/share/ovmf/OVMF.fd \
     -smp 2 \
     $SERIAL_OPTS \
     $@

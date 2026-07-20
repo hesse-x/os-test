@@ -24,7 +24,7 @@
 #include "arch/x64/utils.h" // __memcpy/__memset/__strncpy/__strcmp
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/fops.h"
-#include "kernel/bsd/inode.h" // struct inode (i_priv)
+#include "kernel/bsd/inode.h"
 #include "kernel/bsd/poll_types.h"
 #include "kernel/bsd/proc.h"  // alloc_fd, fd_install, fd_lookup
 #include "kernel/bsd/types.h" // struct file

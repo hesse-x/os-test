@@ -273,11 +273,16 @@ struct inode *devtmpfs_lookup(const char *name) {
     if (!d)
       return NULL;
     /* lookup leaf inside dir: match by full path (stored entry.name includes
-     * dir/ prefix) */
+     * dir/ prefix). Return a +1 reference taken under the lock so the inode
+     * cannot be freed (by a concurrent devtmpfs_remove / cleanup_pid) between
+     * the unlock here and the caller's first dereference of ip->i_priv — that
+     * borrow window was bug.md §3 (UAF → ip->i_priv=0x10 → #PF). Matches the
+     * devtmpfs_dir_lookup +1 contract; callers inode_put when done. */
     spin_lock(&devtmpfs_lock);
     struct dev_entry *e = dev_list;
     while (e) {
       if (__strcmp(name, e->name) == 0) {
+        inode_get(e->ip);
         spin_unlock(&devtmpfs_lock);
         return e->ip;
       }
@@ -286,11 +291,13 @@ struct inode *devtmpfs_lookup(const char *name) {
     spin_unlock(&devtmpfs_lock);
     return NULL;
   }
-  /* No slash: flat lookup — search devices first, then directories */
+  /* No slash: flat lookup — search devices first, then directories.
+   * Same +1 contract as the slash path (see comment above). */
   spin_lock(&devtmpfs_lock);
   struct dev_entry *e = dev_list;
   while (e) {
     if (__strcmp(name, e->name) == 0) {
+      inode_get(e->ip);
       spin_unlock(&devtmpfs_lock);
       return e->ip;
     }
@@ -300,6 +307,7 @@ struct inode *devtmpfs_lookup(const char *name) {
   struct dev_dir *d = dir_list;
   while (d) {
     if (__strcmp(name, d->name) == 0) {
+      inode_get(d->ip);
       spin_unlock(&devtmpfs_lock);
       return d->ip;
     }
@@ -312,9 +320,13 @@ struct inode *devtmpfs_lookup(const char *name) {
 int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
   WARN_ON(!devtmpfs_initialized); // catch order bugs: create before init
 
-  /* Check if already exists (full path) */
-  if (devtmpfs_lookup(name))
+  /* Check if already exists (full path). devtmpfs_lookup now returns a +1
+   * reference, so drop it before deciding. */
+  struct inode *existing = devtmpfs_lookup(name);
+  if (existing) {
+    inode_put(existing);
     return -EEXIST;
+  }
 
   /* If path contains '/', create the subdirectory first */
   const char *slash = name;
@@ -388,19 +400,20 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
     int fd = alloc_fd(fs, 3);
     if (fd < 0) {
       spin_unlock(fdlk);
+      inode_put(ip); /* drop the lookup reference on failure */
       return (uint64_t)(-(uint64_t)EMFILE);
     }
     struct file *f = kmalloc(sizeof(struct file));
     if (!f) {
       spin_unlock(fdlk);
+      inode_put(ip); /* drop the lookup reference on failure */
       return (uint64_t)(-(uint64_t)ENOMEM);
     }
     __memset(f, 0, sizeof(*f));
     refcount_set(&f->f_count, 1);
     f->type = FD_DIR;
     f->flags = O_RDONLY;
-    f->inode = ip;
-    inode_get(ip);
+    f->inode = ip; /* file takes ownership of the lookup +1 reference */
     f->offset = 0;
     fd_install(fs, fd, f);
     spin_unlock(fdlk);
@@ -413,20 +426,21 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
   int fd = alloc_fd(proc->proc->files, 3);
   if (fd < 0) {
     spin_unlock(fdlk);
+    inode_put(ip); /* drop the lookup reference on failure */
     return (uint64_t)(-(uint64_t)EMFILE);
   }
 
   struct file *f = kmalloc(sizeof(struct file));
   if (!f) {
     spin_unlock(fdlk);
+    inode_put(ip); /* drop the lookup reference on failure */
     return (uint64_t)(-(uint64_t)ENOMEM);
   }
   __memset(f, 0, sizeof(*f));
   refcount_set(&f->f_count, 1);
   f->type = FD_DEV;
   f->flags = flags;
-  f->inode = ip;
-  inode_get(ip);
+  f->inode = ip; /* file takes ownership of the lookup +1 reference */
 
   // Install FD_DEV BEFORE ops->open so callbacks (e.g. pts_open/ptmx_open)
   // can access it via fd_table[fd] and mutate it into FD_TTY in place.
@@ -442,7 +456,8 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
       if (rc < 0) {
         // Open failed: undo fd installation.
         // Manual cleanup (not file_put) to avoid calling ops->close
-        // when ops->open itself failed.
+        // when ops->open itself failed. Drop the lookup +1 that the file
+        // would otherwise have owned.
         fd_uninstall(proc->proc->files, fd);
         inode_put(ip);
         kfree(f);
@@ -675,12 +690,17 @@ int64_t sys_dev_set_meta(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   if (strncpy_from_user(devtype, udevtype, 8) < 0)
     return (int64_t)-EFAULT;
 
-  /* Find dev_ops by name. devtmpfs_lookup returns a borrowed reference
-   * (no refcount increment) for non-root entries, so do NOT inode_put. */
+  /* Find dev_ops by name. devtmpfs_lookup now returns a +1 reference (so the
+   * inode cannot be freed by a concurrent remove/cleanup_pid while we read
+   * i_priv). We only need the dev_ops pointer; drop the inode reference once
+   * ops is extracted. ops itself stays alive for this driver process's
+   * lifetime (freed only by devtmpfs_cleanup_pid on the owning driver's
+   * exit, which is this process — it can't be reaping itself here). */
   struct inode *ip = devtmpfs_lookup(name);
   if (!ip)
     return (int64_t)-ENOENT;
   struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+  inode_put(ip);
   if (!ops) {
     return (int64_t)-ENOENT;
   }

@@ -421,13 +421,13 @@ void trap_dispatch(trapframe *tf) {
 
     // Dump current_task kernel stack top area (trapframe + switch_frame)
     if (current_task && current_task->k_stack_top) {
-      uint64_t stack_base = current_task->k_stack_top - 2 * PAGE_SIZE;
+      uint64_t stack_base = current_task->k_stack_top - KERNEL_STACK_SIZE;
       uint64_t *sp = (uint64_t *)stack_base;
       printk(LOG_DEBUG, "  Kernel stack dump (bottom→top):\n");
       // Only dump the top 24 words (176 bytes trapframe + 56 bytes
       // switch_frame)
-      int start = (2 * PAGE_SIZE / 8) - 24;
-      for (int i = start; i < 2 * PAGE_SIZE / 8; i++) {
+      int start = (KERNEL_STACK_SIZE / 8) - 24;
+      for (int i = start; i < KERNEL_STACK_SIZE / 8; i++) {
         printk(LOG_DEBUG, "    [0x%016lX] 0x%016lX\n", stack_base + i * 8,
                sp[i]);
       }

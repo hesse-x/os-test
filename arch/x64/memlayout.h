@@ -22,6 +22,19 @@
 #define PHY_TO_PAGE(addr) ((addr) >> PAGE_SHIFT)
 #define GET_PAGE_NUM(len) (((len) + PAGE_SIZE - 1) / PAGE_SIZE)
 
+// Kernel stack size. Each task gets KERNEL_STACK_PAGES * PAGE_SIZE of kernel
+// stack. The previous 8KB (2 pages) overflowed under SMP IRQ nesting: a syscall
+// enables interrupts (sti in syscall_fast_entry), so the LAPIC timer and AHCI
+// completion IRQs (which itself re-sti) can nest multiple 176-byte trapframes
+// plus deep C call chains (trap_dispatch -> sys_ioctl -> drm_ioctl ->
+// virtgpu execbuf -> ...) on the same 8KB stack, walking past the bottom into
+// neighboring heap objects (confirmed via a bottom-of-stack canary:
+// bug4-STACK-OVF). Linux's x86_64 THREAD_SIZE is 16KB; match it. 16KB resolved
+// the §4 crash: under KVM (true parallel SMP) all 17 test suites pass.
+// (See bug.md §4, bug4-stack-overflow-root-cause.)
+#define KERNEL_STACK_PAGES 4
+#define KERNEL_STACK_SIZE (KERNEL_STACK_PAGES * PAGE_SIZE)
+
 // Linker symbol: end of kernel image (used by allocators)
 #include <stdint.h>
 extern uint8_t kernel_end[];

@@ -878,7 +878,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
   // 6. Allocate new kernel stack, copy parent trapframe (rax=0 for child
   // return)
-  struct page *stack_pages = bfc_alloc_page(2);
+  struct page *stack_pages = bfc_alloc_page(KERNEL_STACK_PAGES);
   if (!stack_pages) {
     mm_put(child_mm);
     spin_unlock(&tasks_lock);
@@ -887,12 +887,12 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
   uint64_t k_stack_top =
       (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) +
-      2 * PAGE_SIZE;
+      KERNEL_STACK_SIZE;
 
   // 6b. FPU inheritance: child pre-allocates fpu_page + copies parent's
   // current FPU snapshot (POSIX fork semantics)
   if (!xcore_fpu_alloc(child)) {
-    bfc_free_page(stack_pages, 2);
+    bfc_free_page(stack_pages, KERNEL_STACK_PAGES);
     proc_free(child_bp);
     child->proc = NULL;
     mm_put(child_mm);
@@ -1045,7 +1045,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
 
   // 2. Allocate kernel stack
-  struct page *stack_pages = bfc_alloc_page(2);
+  struct page *stack_pages = bfc_alloc_page(KERNEL_STACK_PAGES);
   if (!stack_pages) {
     spin_unlock(&tasks_lock);
     return (int64_t)-ENOMEM;
@@ -1053,12 +1053,12 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
   uint64_t k_stack_top =
       (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) +
-      2 * PAGE_SIZE;
+      KERNEL_STACK_SIZE;
 
   // 2b. FPU state: child thread pre-allocates fpu_page + copies parent
   // thread's current FPU snapshot
   if (!xcore_fpu_alloc(child)) {
-    bfc_free_page(stack_pages, 2);
+    bfc_free_page(stack_pages, KERNEL_STACK_PAGES);
     spin_unlock(&tasks_lock);
     return (int64_t)-ENOMEM;
   }
@@ -1081,7 +1081,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     if (!child_mm) {
       bfc_free_page(child->fpu_page, 1);
       child->fpu_page = NULL;
-      bfc_free_page(stack_pages, 2);
+      bfc_free_page(stack_pages, KERNEL_STACK_PAGES);
       spin_unlock(&tasks_lock);
       return (int64_t)-ENOMEM;
     }
@@ -1094,7 +1094,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       mm_put(child_mm);
       bfc_free_page(child->fpu_page, 1);
       child->fpu_page = NULL;
-      bfc_free_page(stack_pages, 2);
+      bfc_free_page(stack_pages, KERNEL_STACK_PAGES);
       spin_unlock(&tasks_lock);
       return (int64_t)ret;
     }
@@ -1113,7 +1113,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       mm_put(child_mm);
     bfc_free_page(child->fpu_page, 1);
     child->fpu_page = NULL;
-    bfc_free_page(stack_pages, 2);
+    bfc_free_page(stack_pages, KERNEL_STACK_PAGES);
     spin_unlock(&tasks_lock);
     return (int64_t)-ENOMEM;
   }

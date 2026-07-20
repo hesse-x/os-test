@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "arch/x64/smp.h"
+#include <stddef.h>
+
 #include "arch/x64/apic.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
+#include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "boot/boot.h"
@@ -16,7 +18,8 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/xtask.h"
-#include <stddef.h>
+
+#include <xos/page.h>
 
 cpu_local cpu_locals[MAX_CPUS];
 int ncpu = 1;
@@ -340,8 +343,8 @@ __attribute__((no_sanitize("kernel-address"))) void smp_boot_aps() {
   for (int i = 1; i < ncpu; i++) {
     uint32_t apic_id = g_madt.apic_ids[i];
 
-    // Allocate kernel stack (8KB)
-    struct page *stack_pages = bfc_alloc_page(2);
+    // Allocate kernel stack (KERNEL_STACK_SIZE)
+    struct page *stack_pages = bfc_alloc_page(KERNEL_STACK_PAGES);
     if (!stack_pages) {
       ncpu = i;
       break;
@@ -349,7 +352,7 @@ __attribute__((no_sanitize("kernel-address"))) void smp_boot_aps() {
     uint64_t k_stack_phys = (uint64_t)(stack_pages - bfc_frames) * PAGE_SIZE;
     uint64_t k_stack_top =
         (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) +
-        2 * PAGE_SIZE;
+        KERNEL_STACK_SIZE;
 
     // Initialize per-CPU data structures (fills cpu_locals, GDT, TSS)
     smp_init_cpu(i, apic_id, k_stack_top);

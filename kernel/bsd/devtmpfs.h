@@ -11,9 +11,8 @@
 #include <stdint.h>
 
 #include "kernel/bsd/mount.h"
-#include "kernel/bsd/poll_types.h"    // __poll
-#include "kernel/xcore/posix_types.h" // ssize_t
-#include "kernel/xcore/xtask.h"       // pid_t
+#include "kernel/bsd/poll_types.h" // __poll
+#include "kernel/xcore/xtask.h"    // pid_t
 
 /* Linux 64-bit dev_t 编码（搬自 user/include/sys/sysmacros.h，内核侧共用）。
  * 内核不依赖用户态 sysmacros.h，故在此独立定义；纯算术无外部依赖。 */
