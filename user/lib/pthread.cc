@@ -6,16 +6,18 @@
 
 // user/lib/pthread.cc — pthread library implementation (Phase 4)
 #include <assert.h>
+#include <errno.h>
 #include <pthread.h>
 #include <signal.h> // IWYU pragma: keep  // sigset_t/SIG_BLOCK etc. used in cancel mask; provided transitively by xos/signal.h but IWYU maps to hosted <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/tls.h>
 #include <syscall.h>
 #include <unistd.h>
+
+#include <sys/mman.h>
+#include <sys/tls.h>
 #include <xos/errno.h>
 #include <xos/mman.h>
 #include <xos/signal.h>
@@ -136,11 +138,10 @@ static struct thread_entry *thread_table_find(pid_t tid) {
 // The parent thread returns normally in rax (child tid or negative errno).
 extern "C" int64_t __libc_clone_thread(uint64_t flags, uint64_t stack_top,
                                        uint64_t parent_tid, uint64_t child_tid,
-                                       uint64_t tls, uint64_t clone_info) {
+                                       uint64_t tls) {
   int64_t r;
   register uint64_t r10 __asm__("r10") = child_tid;
   register uint64_t r8 __asm__("r8") = tls;
-  register uint64_t r9 __asm__("r9") = clone_info;
   // Lock TCB field offsets used by the asm trampoline below.
   static_assert(offsetof(struct tcb, start_routine) == 0x438,
                 "tcb.start_routine offset changed — update asm offsets");
@@ -164,7 +165,7 @@ extern "C" int64_t __libc_clone_thread(uint64_t flags, uint64_t stack_top,
       "1:\n"
       : "=a"(r)
       : "a"((int64_t)SYS_CLONE), "D"((int64_t)flags), "S"((int64_t)stack_top),
-        "d"((int64_t)parent_tid), "r"(r10), "r"(r8), "r"(r9)
+        "d"((int64_t)parent_tid), "r"(r10), "r"(r8)
       : "rcx", "r11", "memory");
   return r;
 }
@@ -255,9 +256,19 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
       0x00200000 /*CLONE_CHILD_CLEARTID*/ | 0x00100000 /*CLONE_PARENT_SETTID*/ |
       0x01000000 /*CLONE_CHILD_SETTID*/;
   pid_t parent_tid_buf = 0;
-  int64_t r = __libc_clone_thread(
-      flags, (uint64_t)stack_top, (uint64_t)&parent_tid_buf,
-      (uint64_t)&new_tcb->tid, (uint64_t)new_tcb, (uint64_t)&clone_info);
+  // §4.5:先预置 thread_clone_info 到内核 current_task,再走 5 参 Linux ABI clone
+  int64_t r = sys_pthread_setup(&clone_info);
+  if (r < 0) {
+    // 与下方 clone 失败路径同形:清理已分配资源,返回正 errno
+    munmap(tls_page, tls_total);
+    if (stack_allocated) {
+      void *unmap_base = guard_base ? guard_base : stack_base;
+      munmap(unmap_base, stack_alloc_size);
+    }
+    return (int)-r;
+  }
+  r = __libc_clone_thread(flags, (uint64_t)stack_top, (uint64_t)&parent_tid_buf,
+                          (uint64_t)&new_tcb->tid, (uint64_t)new_tcb);
   if (r < 0) {
     munmap(tls_page, tls_total);
     if (stack_allocated) {

@@ -28,6 +28,8 @@
 #include <xos/syscall.h> // struct kernel_mem_stats (UAPI, shared layout)
 #include <xos/syscall_asm.h>
 #include <xos/syscall_nums.h>
+#include <xos/thread.h> // struct thread_clone_info (sys_pthread_setup)
+#include <xos/time.h>   // struct timespec (sys_clock_gettime)
 
 #ifdef __cplusplus
 extern "C" {
@@ -59,7 +61,7 @@ static inline int64_t sys_arch_prctl(int64_t code, int64_t addr) {
   return __syscall2(SYS_ARCH_PRCTL, code, addr);
 }
 
-static inline void sys_yield() { __syscall0(SYS_YIELD); }
+static inline void sys_yield() { __syscall0(SYS_SCHED_YIELD); }
 
 // --- IPC status-only: recv/req/resp/msg/msg_resp/irq_bind ---
 static inline int sys_recv(void *buf, void *data_buf, size_t data_buf_len,
@@ -132,10 +134,11 @@ static inline void sys_exit(int32_t exit_code) {
 }
 
 // --- fork/waitpid/execve ---
+// 统一走 wait4(§4.3):wait4(pid,wstatus,options,NULL) ≡ waitpid
 static inline int64_t sys_waitpid(int32_t pid, int32_t *exit_code,
                                   int options) {
-  int64_t r = __syscall3(SYS_WAITPID, (int64_t)pid,
-                         (int64_t)(uintptr_t)exit_code, (int64_t)options);
+  int64_t r = __syscall4(SYS_WAIT4, (int64_t)pid, (int64_t)(uintptr_t)exit_code,
+                         (int64_t)options, 0);
   if (r < 0) {
     errno = -(int)r;
     return -1;
@@ -247,13 +250,6 @@ static inline int sys_notify(int32_t pid) {
   }
   return 0;
 }
-
-// --- gettime/clock (always succeed, return uint64_t time value) ---
-static inline uint64_t sys_gettime() {
-  return (uint64_t)__syscall0(SYS_GETTIME);
-}
-
-static inline uint64_t sys_clock() { return (uint64_t)__syscall0(SYS_CLOCK); }
 
 // --- ioperm/dup2/fcntl ---
 static inline int sys_ioperm(unsigned long from, unsigned long num,
@@ -390,8 +386,8 @@ static inline int sys_kill(int32_t pid, int sig) {
 
 static inline int sys_sigaction(int sig, const struct sigaction *act,
                                 struct sigaction *oldact) {
-  int64_t r = __syscall3(SYS_SIGACTION, (int64_t)sig, (int64_t)(uintptr_t)act,
-                         (int64_t)(uintptr_t)oldact);
+  int64_t r = __syscall3(SYS_RT_SIGACTION, (int64_t)sig,
+                         (int64_t)(uintptr_t)act, (int64_t)(uintptr_t)oldact);
   if (r < 0) {
     errno = -(int)r;
     return -1;
@@ -400,7 +396,7 @@ static inline int sys_sigaction(int sig, const struct sigaction *act,
 }
 
 static inline int sys_sigreturn(void) {
-  int64_t r = __syscall0(SYS_SIGRETURN);
+  int64_t r = __syscall0(SYS_RT_SIGRETURN);
   if (r < 0) {
     errno = -(int)r;
     return -1;
@@ -431,6 +427,51 @@ static inline int sys_open(const char *path, int flags, ...) {
 static inline int sys_stat(const char *path, void *stat_buf) {
   int64_t r = __syscall2(SYS_STAT, (int64_t)(uintptr_t)path,
                          (int64_t)(uintptr_t)stat_buf);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+// --- Linux 薄封装(§4.1/§4.2):at 变体,仅支持 AT_FDCWD ---
+// 固定 4 参(非变参):grep openat user/ 为空,当前无调用方,避免 va_arg 陷阱
+static inline int sys_openat(int dirfd, const char *path, int flags, int mode) {
+  int64_t r = __syscall4(SYS_OPENAT, (int64_t)dirfd, (int64_t)(uintptr_t)path,
+                         (int64_t)flags, (int64_t)mode);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return (int)r;
+}
+
+static inline int sys_newfstatat(int dirfd, const char *path, void *buf,
+                                 int flags) {
+  int64_t r =
+      __syscall4(SYS_NEWFSTATAT, (int64_t)dirfd, (int64_t)(uintptr_t)path,
+                 (int64_t)(uintptr_t)buf, (int64_t)flags);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+// --- Linux 薄封装(§4.4):clock_gettime(clk,&ts) ---
+static inline int sys_clock_gettime(int clk, struct timespec *ts) {
+  int64_t r =
+      __syscall2(SYS_CLOCK_GETTIME, (int64_t)clk, (int64_t)(uintptr_t)ts);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+// --- OS 独有(§4.5):pthread 创建线程前预置 thread_clone_info ---
+static inline int sys_pthread_setup(struct thread_clone_info *ci) {
+  int64_t r = __syscall1(SYS_PTHREAD_SETUP, (int64_t)(uintptr_t)ci);
   if (r < 0) {
     errno = -(int)r;
     return -1;
@@ -496,7 +537,7 @@ static inline int sys_dev_create(const char *name, int shm_fd, uint32_t minor) {
 }
 
 static inline int sys_getdents(int fd, void *buf, size_t len) {
-  int64_t r = __syscall3(SYS_GETDENTS, (int64_t)fd, (int64_t)(uintptr_t)buf,
+  int64_t r = __syscall3(SYS_GETDENTS64, (int64_t)fd, (int64_t)(uintptr_t)buf,
                          (int64_t)len);
   if (r < 0) {
     errno = -(int)r;
@@ -618,8 +659,8 @@ static inline int64_t sys_gettid(void) { return __syscall0(SYS_GETTID); }
 
 static inline int sys_sigprocmask(int how, const sigset_t *set,
                                   sigset_t *oldset) {
-  int64_t r = __syscall3(SYS_SIGPROCMASK, (int64_t)how, (int64_t)(uintptr_t)set,
-                         (int64_t)(uintptr_t)oldset);
+  int64_t r = __syscall3(SYS_RT_SIGPROCMASK, (int64_t)how,
+                         (int64_t)(uintptr_t)set, (int64_t)(uintptr_t)oldset);
   if (r < 0) {
     errno = -(int)r;
     return -1;
@@ -731,7 +772,7 @@ static inline int sys_sync(void) {
 // sigpending: read the set of pending signals (per-task + shared, including
 // blocked) into *set. Returns 0 on success, -1/errno on failure.
 static inline int sys_sigpending(sigset_t *set) {
-  int64_t r = __syscall1(SYS_SIGPENDING, (int64_t)(uintptr_t)set);
+  int64_t r = __syscall1(SYS_RT_SIGPENDING, (int64_t)(uintptr_t)set);
   if (r < 0) {
     errno = -(int)r;
     return -1;

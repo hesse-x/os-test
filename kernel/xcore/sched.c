@@ -442,16 +442,18 @@ void fpu_context_switch(xtask *prev, xtask *next) {
     // VA-boundary check could pass a wild pointer). Pure physical comparison
     // holds for any RAM size. (Historically this also caught the bug where the
     // struct page * from bfc_alloc_page was mistaken for a data pointer.)
-    phys_addr_t pphys = (__force phys_addr_t)page_to_phys(prev->fpu_page);
-    ASSERT(pphys < (phys_addr_t)total_page_frames * PAGE_SIZE);
+    // pphys is computed inline inside ASSERT so that release builds (NDEBUG →
+    // ASSERT is a no-op) don't declare an unused variable.
+    ASSERT((__force phys_addr_t)page_to_phys(prev->fpu_page) <
+           (phys_addr_t)total_page_frames * PAGE_SIZE);
     kernel_fpu_save(fpu_data); // internally clts then fxsave
   }
   if (next && next->fpu_page) {
     ASSERT(next->fpu_page->status == PAGE_USED);
     void *fpu_data =
         (void *)(__force uintptr_t)phys_to_virt(page_to_phys(next->fpu_page));
-    phys_addr_t pphys = (__force phys_addr_t)page_to_phys(next->fpu_page);
-    ASSERT(pphys < (phys_addr_t)total_page_frames * PAGE_SIZE);
+    ASSERT((__force phys_addr_t)page_to_phys(next->fpu_page) <
+           (phys_addr_t)total_page_frames * PAGE_SIZE);
     kernel_fpu_restore(fpu_data); // internally clts then fxrstor
   }
 }

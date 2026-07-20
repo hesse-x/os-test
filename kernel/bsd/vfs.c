@@ -373,6 +373,28 @@ int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   return 0;
 }
 
+// 薄封装 §4.1:openat(AT_FDCWD,...) ≡ open;仅支持 AT_FDCWD(本 OS 无 fd-relative
+// open)。
+int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
+                   int64_t unused1, int64_t unused2) {
+  if ((int)dirfd != AT_FDCWD)
+    return -ENOSYS;
+  // 复用 sys_open(path, flags, mode);现有 sys_open 忽略用户态 mode,行为不变。
+  return sys_open(path, flags, mode, 0, 0, 0);
+}
+
+// 薄封装 §4.2:newfstatat(AT_FDCWD,...) ≡ stat;仅支持 AT_FDCWD,忽略
+// AT_SYMLINK_NOFOLLOW。
+int64_t sys_newfstatat(int64_t dirfd, int64_t path, int64_t buf, int64_t flags,
+                       int64_t unused1, int64_t unused2) {
+  if ((int)dirfd != AT_FDCWD)
+    return -ENOSYS;
+  if ((int)flags &
+      ~AT_SYMLINK_NOFOLLOW) // 本 OS 无 symlink,该 flag 忽略;其余拒绝
+    return -EINVAL;
+  return sys_stat(path, buf, 0, 0, 0, 0);
+}
+
 /* sys_truncate(path, len) — SYS_TRUNCATE (group 3)
  * Resolve the path to an inode via mount framework + path_walk, then
  * dispatch size change to i_op->setattr (eliminates raw fat32_open). */
@@ -697,7 +719,7 @@ int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3,
   return 0;
 }
 
-/* sys_getdents(fd, buf, len) — SYS_GETDENTS
+/* sys_getdents(fd, buf, len) — SYS_GETDENTS64
  * Read directory entries into user buffer.
  * fd must be FD_DIR. Returns bytes written, 0 on EOF, or negative errno. */
 int64_t sys_getdents(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,

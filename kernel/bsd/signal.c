@@ -45,11 +45,11 @@ void sig_init() {
   uint8_t *vaddr =
       (__force uint8_t *)phys_to_virt((__force phys_addr_t)sig_trampoline_phys);
 
-  // mov rax, SYS_SIGRETURN
+  // mov rax, SYS_RT_SIGRETURN
   vaddr[0] = 0x48; // REX.W prefix
   vaddr[1] = 0xC7; // MOV r64, imm32
   vaddr[2] = 0xC0; // ModRM: rax
-  vaddr[3] = SYS_SIGRETURN;
+  vaddr[3] = SYS_RT_SIGRETURN;
   vaddr[4] = 0x00;
   vaddr[5] = 0x00;
   vaddr[6] = 0x00;

@@ -79,9 +79,11 @@ static int on_key_event(input_event *ev) {
   struct key_event ke;
   if (get_keycode(&ke) != 0)
     return 0; // HID ring empty
-  uint64_t ns = sys_gettime();
-  ev->tv_sec = ns / 1000000000ULL;
-  ev->tv_usec = (ns % 1000000000ULL) / 1000;
+  struct timespec ts;
+  if (sys_clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    return 0;
+  ev->tv_sec = ts.tv_sec;
+  ev->tv_usec = ts.tv_nsec / 1000;
   ev->type = EV_KEY;
   ev->code = ke.key;      // KEY_A, KEY_B, ... (evdev-aligned in input_key.h)
   ev->value = ke.pressed; // 1=press, 0=release
@@ -323,9 +325,11 @@ int main(int argc, char **argv, char **envp) {
         if (nevents > 0) {
           input_event syn_ev;
           memset(&syn_ev, 0, sizeof(syn_ev));
-          uint64_t syn_ns = sys_gettime();
-          syn_ev.tv_sec = syn_ns / 1000000000ULL;
-          syn_ev.tv_usec = (syn_ns % 1000000000ULL) / 1000;
+          struct timespec ts;
+          if (sys_clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+            return 1;
+          syn_ev.tv_sec = ts.tv_sec;
+          syn_ev.tv_usec = ts.tv_nsec / 1000;
           syn_ev.type = EV_SYN;
           syn_ev.code = 0; // SYN_REPORT
           syn_ev.value = 0;

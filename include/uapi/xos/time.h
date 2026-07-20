@@ -19,4 +19,10 @@ struct timeval {
   long tv_usec;
 };
 
+// ===================== clock_gettime clock IDs (对齐 Linux)
+// =====================
+#define CLOCK_REALTIME 0
+#define CLOCK_MONOTONIC 1
+#define CLOCK_PROCESS_CPUTIME_ID 2
+
 #endif /* COMMON_TIME_H */

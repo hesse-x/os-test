@@ -11,137 +11,122 @@
 #include <stdint.h>
 #include <xos/ioctl.h>
 
-// ===================== Syscall numbers (NR_SYSCALL=99, 0-98 continuous)
-// =====================
-#define SYS_GETPID 0
-#define SYS_YIELD 1
-#define SYS_RECV 2
-#define SYS_REQ 3
-#define SYS_RESP 4
-#define SYS_IRQ_BIND 5
-#define SYS_EXIT 6
-#define SYS_WAITPID 7
-#define SYS_MMAP 8
-#define SYS_MUNMAP 9
-#define SYS_PIPE 10
-#define SYS_WRITE 11
-#define SYS_READ 12
-#define SYS_CLOSE 13
-#define SYS_NOTIFY 14
-#define SYS_GETTIME 15
-#define SYS_CLOCK 16
-#define SYS_MSG 17
-#define SYS_MSG_RESP 18
-#define SYS_IOPERM 19
-#define SYS_DUP2 20
-#define SYS_FCNTL 21
-#define SYS_DMA_ALLOC 22
-#define SYS_DMA_FREE 23
-#define SYS_PCI_DEV_INFO 24
-#define SYS_BLOCK_ASYNC 25
-#define SYS_INSTALL_FD 26
-#define SYS_SOCKET 27
-#define SYS_BIND 28
-#define SYS_LISTEN 29
-#define SYS_ACCEPT 30
-#define SYS_CONNECT 31
-#define SYS_SOCKETPAIR 32
-#define SYS_SENDMSG 33
-#define SYS_RECVMSG 34
-#define SYS_SHUTDOWN 35
-#define SYS_POLL 36
-#define SYS_LSEEK 37
-#define SYS_MEMFD_CREATE 38
-#define SYS_FTRUNCATE 39
-#define SYS_KILL 40
-#define SYS_SIGACTION 41
-#define SYS_SIGRETURN 42
-#define SYS_DEBUG_MEMSTAT 43
+// ===================== Linux x86-64 syscall numbers =====================
+// 对齐 /usr/include/x86_64-linux-gnu/asm/unistd_64.h。
+// 内核分发表与用户态共用本宏;llvm-libc 经宿主 <sys/syscall.h> 取 __NR_* 直达,
+// 内核收到的号即 Linux 号。仅定义本 OS 已实现的 syscall;未实现的 Linux 号
+// 留空(dispatch default 返 -ENOSYS)。
+#define SYS_READ 0
+#define SYS_WRITE 1
+#define SYS_OPEN 2
+#define SYS_CLOSE 3
+#define SYS_STAT 4
+#define SYS_FSTAT 5
+#define SYS_POLL 7
+#define SYS_LSEEK 8
+#define SYS_MMAP 9
+#define SYS_MPROTECT 10
+#define SYS_MUNMAP 11
+#define SYS_RT_SIGACTION 13
+#define SYS_RT_SIGPROCMASK 14
+#define SYS_RT_SIGRETURN 15
+#define SYS_IOCTL 16
+#define SYS_PIPE 22
+#define SYS_SCHED_YIELD 24
+#define SYS_PAUSE 34
+#define SYS_DUP2 33
+#define SYS_ALARM 37
+#define SYS_GETPID 39
+#define SYS_SOCKET 41
+#define SYS_CONNECT 42
+#define SYS_ACCEPT 43
+#define SYS_SENDMSG 46
+#define SYS_RECVMSG 47
+#define SYS_SHUTDOWN 48
+#define SYS_BIND 49
+#define SYS_LISTEN 50
+#define SYS_SOCKETPAIR 53
+#define SYS_CLONE 56
+#define SYS_FORK 57
+#define SYS_EXECVE 59
+#define SYS_EXIT 60
+#define SYS_WAIT4 61
+#define SYS_KILL 62
+#define SYS_FCNTL 72
+#define SYS_FSYNC 74
+#define SYS_TRUNCATE 76
+#define SYS_FTRUNCATE 77
+#define SYS_RENAME 82
+#define SYS_MKDIR 83
+#define SYS_RMDIR 84
+#define SYS_UNLINK 87
+#define SYS_MKNOD 133
+#define SYS_UMASK 95
+#define SYS_SETHOSTNAME 170
+#define SYS_IOPERM 173
+#define SYS_ARCH_PRCTL 158
+#define SYS_GETTID 186
+#define SYS_SET_TID_ADDRESS 218
+#define SYS_GETDENTS64 217
+#define SYS_FUTEX 202
+#define SYS_EXIT_GROUP 231
+#define SYS_EPOLL_WAIT 232
+#define SYS_EPOLL_CTL 233
+#define SYS_TGKILL 234
+#define SYS_CLOCK_GETTIME 228
+#define SYS_EPOLL_PWAIT 281
+#define SYS_TIMERFD_CREATE 283
+#define SYS_TIMERFD_SETTIME 286
+#define SYS_SIGNALFD4 289
+#define SYS_EVENTFD2 290
+#define SYS_EPOLL_CREATE1 291
+#define SYS_OPENAT 257
+#define SYS_NEWFSTATAT 262
+#define SYS_EPOLL_CREATE 213
+#define SYS_GETRANDOM 318
+#define SYS_MEMFD_CREATE 319
+#define SYS_SETSID 112
+#define SYS_GETSID 124
+#define SYS_SETPGID 109
+#define SYS_GETPGID 121
+#define SYS_GETPPID 110
+#define SYS_GETPGRP 111
+#define SYS_GETUID 102
+#define SYS_GETEUID 107
+#define SYS_GETGID 104
+#define SYS_GETEGID 108
+#define SYS_SETUID 105
+#define SYS_SETGID 106
+#define SYS_RT_SIGPENDING 127
+#define SYS_SYNC 162
+#define SYS_MOUNT 165
 
-// ===================== VFS syscall numbers =====================
-#define SYS_OPEN 44
-#define SYS_STAT 45
-#define SYS_MKDIR 46
-#define SYS_UNLINK 47
-#define SYS_RMDIR 48
-#define SYS_DEV_CREATE 49
-#define SYS_GETDENTS 50
-#define SYS_IOCTL 51
-#define SYS_FSTAT 52
-#define SYS_FDEV_PID 53
-#define SYS_FORK 54
-#define SYS_EXECVE 55
-#define SYS_SETSID 56
-#define SYS_SETPGID 57
-#define SYS_GETPGID 58
-#define SYS_GETSID 59
-
-// ===================== Thread syscalls (phase 3a/3b) =====================
-#define SYS_CLONE 60
-#define SYS_FUTEX 61
-#define SYS_ARCH_PRCTL 62
-#define SYS_TGKILL 63
-#define SYS_EXIT_GROUP 64
-#define SYS_SET_TID_ADDRESS 65
-#define SYS_GETTID 66
-#define SYS_SIGPROCMASK 67
-#define SYS_PTHREAD_SET_CANCEL_HANDLER 68
-
-// ===================== POSIX identity & signals (group 1-2)
-// =====================
-#define SYS_GETUID 69
-#define SYS_GETEUID 70
-#define SYS_GETGID 71
-#define SYS_GETEGID 72
-#define SYS_SETUID 73
-#define SYS_SETGID 74
-#define SYS_GETPPID 75
-#define SYS_GETPGRP 76
-#define SYS_UMASK 77
-#define SYS_GETHOSTNAME 78
-#define SYS_SETHOSTNAME 79
-#define SYS_ALARM 80
-#define SYS_PAUSE 81
-
-// ===================== POSIX fs (group 3) =====================
-#define SYS_TRUNCATE 82
-#define SYS_FSYNC 83
-#define SYS_SYNC 84
-
-// ===================== POSIX signal (group 4) =====================
-#define SYS_SIGPENDING 85
-
-// ===================== epoll & event fd =====================
-#define SYS_EPOLL_CREATE 86
-#define SYS_EPOLL_CREATE1 87
-#define SYS_EPOLL_CTL 88
-#define SYS_EPOLL_WAIT 89
-#define SYS_EPOLL_PWAIT 90
-#define SYS_EVENTFD2 91
-#define SYS_TIMERFD_CREATE 92
-#define SYS_TIMERFD_SETTIME 93
-#define SYS_SIGNALFD4 94
-#define SYS_MOUNT 95
-#define SYS_DEV_SET_META 96
-#define SYS_MKNOD 97
-
-// ===================== udev db atomic write =====================
-#define SYS_RENAME 98
-
-// ===================== ipcfd (evdev 路径3 IPC 定制 socket fd)
-// =====================
-#define SYS_IPCFD_CREATE 99
-#define SYS_IPCFD_READ 100
-
-// ===================== mprotect =====================
-#define SYS_MPROTECT 101
-
-// ===================== sysconf (dynamic values from kernel)
-// =====================
-#define SYS_SYSCONF 102
-
-// ===================== getrandom =====================
-#define SYS_GETRANDOM 103
+// ===================== OS-specific syscalls (1024+) =====================
+// 给 Linux 预留空间:1024 之前不占任何 OS 独有号;新增独有号往后追加。
+#define SYS_OS_BASE 1024
+#define SYS_REQ (SYS_OS_BASE + 0)
+#define SYS_RESP (SYS_OS_BASE + 1)
+#define SYS_RECV (SYS_OS_BASE + 2)
+#define SYS_MSG (SYS_OS_BASE + 3)
+#define SYS_MSG_RESP (SYS_OS_BASE + 4)
+#define SYS_NOTIFY (SYS_OS_BASE + 5)
+#define SYS_IRQ_BIND (SYS_OS_BASE + 6)
+#define SYS_DMA_ALLOC (SYS_OS_BASE + 7)
+#define SYS_DMA_FREE (SYS_OS_BASE + 8)
+#define SYS_PCI_DEV_INFO (SYS_OS_BASE + 9)
+#define SYS_BLOCK_ASYNC (SYS_OS_BASE + 10)
+#define SYS_INSTALL_FD (SYS_OS_BASE + 11)
+#define SYS_DEV_CREATE (SYS_OS_BASE + 12)
+#define SYS_DEV_SET_META (SYS_OS_BASE + 13)
+#define SYS_IPCFD_CREATE (SYS_OS_BASE + 14)
+#define SYS_IPCFD_READ (SYS_OS_BASE + 15)
+#define SYS_SYSCONF (SYS_OS_BASE + 16)
+#define SYS_DEBUG_MEMSTAT (SYS_OS_BASE + 17)
+#define SYS_PTHREAD_SET_CANCEL_HANDLER (SYS_OS_BASE + 18)
+#define SYS_GETHOSTNAME (SYS_OS_BASE + 19)
+#define SYS_PTHREAD_SETUP (SYS_OS_BASE + 20)
+#define SYS_FDEV_PID (SYS_OS_BASE + 21)
+#define SYS_OS_MAX SYS_FDEV_PID
 
 // ===================== recv_msg (shared between kernel and user)
 // =====================
@@ -171,10 +156,6 @@ typedef struct recv_msg {
 } recv_msg;
 
 // Guard the recv_msg ABI: it must serialize into RECV_MSG_SIZE (64) bytes.
-// The ioctl/msg union members must not grow past the 56-byte data[] member,
-// or the fixed-size RECV_MSG_SIZE copies in sys_ioctl/sys_recv would truncate
-// the trailing fields. Any struct growth that trips this assert must either
-// shrink elsewhere or raise RECV_MSG_SIZE deliberately.
 #ifdef __cplusplus
 static_assert(sizeof(recv_msg) == 64,
               "recv_msg must stay 64 bytes (RECV_MSG_SIZE)");

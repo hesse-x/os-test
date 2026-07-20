@@ -497,6 +497,14 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
   return (int64_t)pid;
 }
 
+// 薄封装 §4.3:wait4(pid,wstatus,options,NULL) ≡ waitpid;不实现 rusage。
+int64_t sys_wait4(int64_t pid, int64_t wstatus, int64_t options, int64_t rusage,
+                  int64_t unused1, int64_t unused2) {
+  if (rusage != 0)
+    return -ENOSYS; // 不实现 rusage(Linux 允许 NULL)
+  return sys_waitpid(pid, wstatus, options, 0, 0, 0);
+}
+
 // ===================== BSD syscall: mmap =====================
 int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                  int64_t arg5, int64_t arg6) {
@@ -3064,8 +3072,8 @@ int64_t syscall_dispatch(trapframe *tf) {
   switch (nr) {
   case SYS_EXIT:
     return sys_exit(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
-  case SYS_WAITPID:
-    return sys_waitpid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_WAIT4:
+    return sys_wait4(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MMAP:
     return sys_mmap(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MUNMAP:
@@ -3116,9 +3124,9 @@ int64_t syscall_dispatch(trapframe *tf) {
                              tf->r9);
   case SYS_KILL:
     return sys_kill(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
-  case SYS_SIGACTION:
+  case SYS_RT_SIGACTION:
     return sys_sigaction(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
-  case SYS_SIGRETURN:
+  case SYS_RT_SIGRETURN:
     return sys_sigreturn(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SETSID:
     return sys_setsid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
@@ -3137,6 +3145,10 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_open(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_STAT:
     return sys_stat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_OPENAT:
+    return sys_openat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_NEWFSTATAT:
+    return sys_newfstatat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MKDIR:
     return sys_mkdir(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_UNLINK:
@@ -3147,7 +3159,7 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_rmdir(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_DEV_CREATE:
     return sys_dev_create(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
-  case SYS_GETDENTS:
+  case SYS_GETDENTS64:
     return sys_getdents(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // Socket syscalls (implemented in kernel/socket.c)
   case SYS_SOCKET:
@@ -3175,13 +3187,13 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_exit_group(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_TGKILL:
     return sys_tgkill(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
-  case SYS_SIGPROCMASK:
+  case SYS_RT_SIGPROCMASK:
     return sys_sigprocmask(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SET_TID_ADDRESS:
     return sys_set_tid_address(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
                                tf->r9);
   case SYS_CLONE:
-    return sys_clone(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+    return sys_clone(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8);
   case SYS_FUTEX:
     return sys_futex(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_ARCH_PRCTL:
@@ -3225,7 +3237,7 @@ int64_t syscall_dispatch(trapframe *tf) {
   case SYS_SYNC:
     return sys_sync(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // POSIX signal (group 4)
-  case SYS_SIGPENDING:
+  case SYS_RT_SIGPENDING:
     return sys_sigpending(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // epoll
   case SYS_EPOLL_CREATE:
@@ -3256,7 +3268,7 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_ipcfd_create();
   case SYS_IPCFD_READ:
     return sys_ipcfd_read(tf->rdi, tf->rsi, tf->rdx, tf->r10);
-  // SYS_CLONE(60)/SYS_FUTEX(61)/SYS_ARCH_PRCTL(62) implemented in phase 3b,
+  // SYS_CLONE(56)/SYS_FUTEX(202)/SYS_ARCH_PRCTL(158) implemented in phase 3b,
   // this phase returns -ENOSYS
   default:
     printk(LOG_WARN, "syscall_dispatch: unknown syscall nr=%lu pid=%d\n",

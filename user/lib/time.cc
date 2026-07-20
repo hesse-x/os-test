@@ -6,55 +6,63 @@
 
 #include <stdint.h>
 #include <string.h>
-#include <sys/ipc.h>
 #include <syscall.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <sys/ipc.h>
 #include <xos/errno.h>
 #include <xos/syscall_nums.h>
+#include <xos/time.h>
 
 extern "C" {
 
-/* ===================== Basics: sys_gettime / sys_clock =====================
+/* ===================== Basics: clock_gettime-backed time getters
+ * =====================
  */
 
 int timespec_get(struct timespec *ts, int base) {
   if (base != TIME_UTC)
     return 0;
 
-  uint64_t ns = sys_gettime();
-  ts->tv_sec = (time_t)(ns / 1000000000ULL);
-  ts->tv_nsec = (long)(ns % 1000000000ULL);
+  if (sys_clock_gettime(CLOCK_REALTIME, ts) != 0)
+    return 0;
   return base;
 }
 
 clock_t clock(void) {
-  uint64_t cpu_time_ns = sys_clock();
+  struct timespec ts;
+  if (sys_clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0)
+    return (clock_t)-1;
+  uint64_t cpu_time_ns =
+      (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
   return (clock_t)(cpu_time_ns / 1000);
 }
 
 int clock_gettime(int clk, struct timespec *ts) {
-  (void)clk;
-  uint64_t ns = sys_gettime();
-  ts->tv_sec = (time_t)(ns / 1000000000ULL);
-  ts->tv_nsec = (long)(ns % 1000000000ULL);
+  if (sys_clock_gettime(clk, ts) != 0)
+    return -1;
   return 0;
 }
 
 int gettimeofday(struct timeval *tv, void *tz) {
   (void)tz;
-  uint64_t ns = sys_gettime();
-  tv->tv_sec = (time_t)(ns / 1000000000ULL);
-  tv->tv_usec = (long)((ns / 1000ULL) % 1000000ULL);
+  struct timespec ts;
+  if (sys_clock_gettime(CLOCK_REALTIME, &ts) != 0)
+    return -1;
+  tv->tv_sec = ts.tv_sec;
+  tv->tv_usec = ts.tv_nsec / 1000;
   return 0;
 }
 
 time_t time(time_t *t) {
-  uint64_t ns = sys_gettime();
-  time_t s = (time_t)(ns / 1000000000ULL);
+  struct timespec ts;
+  if (sys_clock_gettime(CLOCK_REALTIME, &ts) != 0)
+    return (time_t)-1;
+  time_t sec = ts.tv_sec;
   if (t)
-    *t = s;
-  return s;
+    *t = sec;
+  return sec;
 }
 
 /* ===================== Timezone stubs (D10: UTC-only) ===================== */
@@ -63,8 +71,7 @@ long timezone = 0;
 int daylight = 0;
 char *tzname[2] = {(char *)"UTC", (char *)"UTC"};
 
-void tzset(void) { /* No timezone, no-op stub */
-}
+void tzset(void) { /* No timezone, no-op stub */ }
 
 /* ===================== time_t → struct tm calendar conversion (UTC)
  * =====================

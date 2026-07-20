@@ -40,4 +40,10 @@
 #define F_SEAL_GROW 0x0004   // ftruncate grow fails
 #define F_SEAL_WRITE 0x0008  // mmap(PROT_WRITE) fails
 
+// ===================== *at() syscall constants (薄封装 §4.1/§4.2)
+// =====================
+#define AT_FDCWD -100 // dirfd 占位:相对当前工作目录(本 OS 仅支持 AT_FDCWD)
+#define AT_SYMLINK_NOFOLLOW                                                    \
+  0x100 // newfstatat:不跟随符号链接(本 OS 无 symlink,忽略)
+
 #endif /* _COMMON_FCNTL_H */

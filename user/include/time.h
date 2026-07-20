@@ -17,8 +17,6 @@ typedef long time_t;
 
 #define CLOCKS_PER_SEC 1000000
 
-#define CLOCK_MONOTONIC 1
-#define CLOCK_REALTIME 0
 #define TIME_UTC 1
 
 /* Calendar time (UTC-only, D10: system has no timezone, localtime = gmtime) */
@@ -47,7 +45,7 @@ LIBC_EXPORT int timespec_get(struct timespec *ts, int base);
 LIBC_EXPORT clock_t clock(void);
 LIBC_EXPORT int nanosleep(const struct timespec *req, struct timespec *rem);
 
-/* clock_gettime / gettimeofday (wraps sys_gettime) */
+/* clock_gettime / gettimeofday (wraps sys_clock_gettime) */
 LIBC_EXPORT int clock_gettime(int clk, struct timespec *ts);
 LIBC_EXPORT int gettimeofday(struct timeval *tv, void *tz);
 

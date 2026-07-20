@@ -14,6 +14,7 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/sparse.h"
 #include <stdint.h>
+#include <xos/thread.h>
 #include <xos/types.h>
 
 typedef enum proc_state {
@@ -120,11 +121,14 @@ typedef struct xtask {
   int32_t exit_code;
 
   // === thread cleanup ownership (set by clone, read by sched_task_reap) ===
-  int detached;             // 1 = sched_task_reap owns TLS/stack unmap
-  uint64_t tls_page;        // user vaddr of TLS+TCB page (0 if N/A)
-  size_t tls_total;         // size of TLS+TCB mapping
-  uint64_t user_stack_base; // user vaddr of stack base (incl guard)
-  size_t user_stack_size;   // stack+guard total size
+  struct thread_clone_info
+      pending_pthread_setup; // §4.5:由 sys_pthread_setup
+                             // 预置,sys_clone(CLONE_THREAD) 消费即清
+  int detached;              // 1 = sched_task_reap owns TLS/stack unmap
+  uint64_t tls_page;         // user vaddr of TLS+TCB page (0 if N/A)
+  size_t tls_total;          // size of TLS+TCB mapping
+  uint64_t user_stack_base;  // user vaddr of stack base (incl guard)
+  size_t user_stack_size;    // stack+guard total size
 
   uint8_t need_resched; // 1 = current task must yield, checked at sched exit
   // === pointer to BSD extension data (Xcore does not interpret contents) ===

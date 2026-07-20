@@ -745,54 +745,96 @@ void irq_init() {
 }
 
 // ===================== Syscall dispatch =====================
-// Xcore IPC syscalls are dispatched directly via syscall_table.
-// All other syscalls are delegated to syscall_dispatch.
-#define NR_XCORE_SYSCALL (SYS_GETTID + 1)
+// Xcore 认领的 syscall(通用/时钟 Linux 号 + IPC/pthread OS 独有 1024+)在此
+// switch 分发;default 返回 XCALL_NOT_OWNED 哨兵,主入口据此 fallthrough 到 BSD
+// 层。 单一真相源:归属在 switch 里,不维护两张号→层归属表。
+#define XCALL_NOT_OWNED ((int64_t)0x8000000000000001LL)
 
-static syscall_fn xcore_syscall_table[NR_XCORE_SYSCALL] = {
-    [SYS_GETPID] = sys_getpid,     [SYS_YIELD] = sys_yield,
-    [SYS_RECV] = sys_recv,         [SYS_REQ] = sys_req,
-    [SYS_RESP] = sys_resp,         [SYS_IRQ_BIND] = sys_irq_bind,
-    [SYS_NOTIFY] = sys_notify,     [SYS_GETTIME] = sys_gettime,
-    [SYS_CLOCK] = sys_clock,       [SYS_MSG] = sys_msg,
-    [SYS_MSG_RESP] = sys_msg_resp, [SYS_IOPERM] = sys_ioperm,
-    [SYS_GETTID] = sys_gettid,
-};
-
-static const char *xcore_syscall_names[NR_XCORE_SYSCALL] = {
-    [SYS_GETPID] = "getpid",     [SYS_YIELD] = "yield",
-    [SYS_RECV] = "recv",         [SYS_REQ] = "req",
-    [SYS_RESP] = "resp",         [SYS_IRQ_BIND] = "irq_bind",
-    [SYS_NOTIFY] = "notify",     [SYS_GETTIME] = "gettime",
-    [SYS_CLOCK] = "clock",       [SYS_MSG] = "msg",
-    [SYS_MSG_RESP] = "msg_resp", [SYS_IOPERM] = "ioperm",
-    [SYS_GETTID] = "gettid",
-};
+static int64_t xcore_dispatch(trapframe *tf) {
+  int64_t nr = tf->rax;
+  switch (nr) {
+  // ---- Linux 号:通用/时钟(Xcore 机制层) ----
+  case SYS_SCHED_YIELD:
+    return sys_yield(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_CLOCK_GETTIME:
+    return sys_clock_gettime(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                             tf->r9);
+  case SYS_GETTID:
+    return sys_gettid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_IOPERM:
+    return sys_ioperm(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETPID:
+    return sys_getpid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // ---- OS 独有 1024+(IPC 原语 + pthread_setup) ----
+  case SYS_REQ:
+    return sys_req(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_RESP:
+    return sys_resp(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_RECV:
+    return sys_recv(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_MSG:
+    return sys_msg(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_MSG_RESP:
+    return sys_msg_resp(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_NOTIFY:
+    return sys_notify(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_IRQ_BIND:
+    return sys_irq_bind(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_PTHREAD_SETUP:
+    return sys_pthread_setup(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                             tf->r9);
+  default:
+    return XCALL_NOT_OWNED;
+  }
+}
 
 const char *syscall_name(uint64_t nr) {
-  if (nr < NR_XCORE_SYSCALL && xcore_syscall_names[nr])
-    return xcore_syscall_names[nr];
-  // BSD syscalls have names in syscall_dispatch debug output
-  return "bsd_syscall";
+  switch (nr) {
+  case SYS_SCHED_YIELD:
+    return "sched_yield";
+  case SYS_CLOCK_GETTIME:
+    return "clock_gettime";
+  case SYS_GETTID:
+    return "gettid";
+  case SYS_IOPERM:
+    return "ioperm";
+  case SYS_GETPID:
+    return "getpid";
+  case SYS_REQ:
+    return "req";
+  case SYS_RESP:
+    return "resp";
+  case SYS_RECV:
+    return "recv";
+  case SYS_MSG:
+    return "msg";
+  case SYS_MSG_RESP:
+    return "msg_resp";
+  case SYS_NOTIFY:
+    return "notify";
+  case SYS_IRQ_BIND:
+    return "irq_bind";
+  case SYS_PTHREAD_SETUP:
+    return "pthread_setup";
+  default:
+    return "bsd_syscall";
+  }
 }
 
 void xcall_dispatch(trapframe *tf) {
   get_cpu_local()->cur_tf = tf;
   int64_t nr = tf->rax;
 
-  // Xcore IPC syscalls: dispatch directly
-  if (nr >= 0 && nr < NR_XCORE_SYSCALL && xcore_syscall_table[nr]) {
-    tf->rax = xcore_syscall_table[nr](tf->rdi, tf->rsi, tf->rdx, tf->r10,
-                                      tf->r8, tf->r9);
+  int64_t r = xcore_dispatch(tf);
+  if (r != XCALL_NOT_OWNED) {
+    tf->rax = r;
   } else if (nr >= 0) {
-    // All other syscalls → BSD layer
+    // Xcore 未认领 → BSD 层
     int64_t ret =
         syscall_dispatch_hook ? syscall_dispatch_hook(tf) : (int64_t)-ENOSYS;
-    // sys_sigreturn restores the full trapframe (including rax) from the
-    // signal frame; its own return value must NOT overwrite tf->rax, or
-    // the syscall return value saved at signal delivery (-EINTR etc.) is
-    // clobbered back to 0.
-    if (nr != SYS_SIGRETURN)
+    // sys_sigreturn 从信号帧恢复完整 trapframe(含 rax),其自身返回值不得
+    // 覆盖 tf->rax,否则信号投递时保存的返回值(-EINTR 等)被改回 0。
+    if (nr != SYS_RT_SIGRETURN)
       tf->rax = ret;
   } else {
     printk(LOG_WARN, "xcall_dispatch: unknown syscall nr=%lu pid=%d\n",

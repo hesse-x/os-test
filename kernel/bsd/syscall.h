@@ -32,6 +32,7 @@ int64_t sys_exit_group(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 // (sig & 0x7f) encode separately before calling it.
 int64_t do_exit_with_code(int32_t encoded_exit_code);
 int64_t sys_waitpid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_wait4(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_fork(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_execve(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_mmap(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
@@ -45,6 +46,8 @@ int64_t sys_ioctl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_fstat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_fdev_pid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_lseek(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_openat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_newfstatat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_memfd_create(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_ftruncate(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 

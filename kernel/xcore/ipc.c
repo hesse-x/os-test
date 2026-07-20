@@ -32,6 +32,8 @@
 #include <xos/page.h>
 #include <xos/socket.h> // POLLIN
 #include <xos/syscall_nums.h>
+#include <xos/thread.h>
+#include <xos/time.h>
 
 // ===================== IRQ owner table (shared with trap.c)
 // =====================
@@ -674,16 +676,46 @@ int64_t sys_notify(int64_t arg1, int64_t unused1, int64_t unused2,
   return 0;
 }
 
-// ===================== Xcore IPC syscall: gettime / clock
+// ===================== Xcore syscall: clock_gettime / pthread_setup
 // =====================
-int64_t sys_gettime(int64_t unused1, int64_t unused2, int64_t unused3,
-                    int64_t unused4, int64_t unused5, int64_t unused6) {
-  return sched_clock();
+static inline void ns_to_timespec(uint64_t ns, struct timespec *ts) {
+  ts->tv_sec = ns / 1000000000ULL;
+  ts->tv_nsec = ns % 1000000000ULL;
 }
 
-int64_t sys_clock(int64_t unused1, int64_t unused2, int64_t unused3,
-                  int64_t unused4, int64_t unused5, int64_t unused6) {
-  return current_task->cpu_time_ns;
+int64_t sys_clock_gettime(int64_t clk, int64_t ts_arg, int64_t unused3,
+                          int64_t unused4, int64_t unused5, int64_t unused6) {
+  struct timespec __user *ts = (struct timespec __user *)(uintptr_t)ts_arg;
+  uint64_t ns;
+  switch ((int)clk) {
+  case CLOCK_MONOTONIC:
+    ns = sched_clock();
+    break;
+  case CLOCK_PROCESS_CPUTIME_ID:
+    ns = current_task->cpu_time_ns;
+    break;
+  case CLOCK_REALTIME:
+    ns = sched_clock(); // TODO: 真实时钟;暂复用单调时钟
+    break;
+  default:
+    return -EINVAL;
+  }
+  struct timespec kts;
+  ns_to_timespec(ns, &kts);
+  if (copy_to_user(ts, &kts, sizeof(kts)))
+    return -EFAULT;
+  return 0;
+}
+
+int64_t sys_pthread_setup(int64_t arg1, int64_t unused2, int64_t unused3,
+                          int64_t unused4, int64_t unused5, int64_t unused6) {
+  uint64_t info_ptr = (uint64_t)arg1;
+  if (!info_ptr)
+    return -EINVAL;
+  if (copy_from_user(&current_task->pending_pthread_setup,
+                     (void __user *)info_ptr, sizeof(struct thread_clone_info)))
+    return -EFAULT;
+  return 0;
 }
 
 // ===================== sys_msg_to (inner implementation) =====================

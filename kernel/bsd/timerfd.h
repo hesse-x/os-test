@@ -8,6 +8,7 @@
 #define KERNEL_BSD_TIMERFD_H
 
 #include <stdint.h>
+#include <xos/time.h>
 
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/spinlock.h"
@@ -15,7 +16,6 @@
 #define TFD_CLOEXEC 0x8000
 #define TFD_NONBLOCK 0x800
 #define TFD_TIMER_ABSTIME 0x01
-#define CLOCK_MONOTONIC 1
 
 typedef struct timerfd_ctx {
   uint64_t expiry;   // sched_clock() ns, 0 = disarmed

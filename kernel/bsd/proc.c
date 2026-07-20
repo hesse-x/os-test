@@ -1031,8 +1031,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 #define CLONE_SETTLS 0x00080000
 
 int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
-                  int64_t arg5, int64_t arg6) {
-  uint64_t clone_info_ptr = (uint64_t)arg6;
+                  int64_t arg5) {
   uint64_t flags = (uint64_t)arg1;
   uint64_t stack = (uint64_t)arg2;
   uint64_t parent_tid = (uint64_t)arg3;
@@ -1181,15 +1180,17 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   // 8. fs_base + proc thread-level fields
   child->fs_base = (flags & CLONE_SETTLS) ? tls : parent->fs_base;
-  if ((flags & CLONE_THREAD) && clone_info_ptr) {
-    struct thread_clone_info ci;
-    if (copy_from_user(&ci, (void __user *)clone_info_ptr, sizeof(ci)) == 0) {
-      child->detached = ci.detached;
-      child->tls_page = ci.tls_page;
-      child->tls_total = ci.tls_total;
-      child->user_stack_base = ci.user_stack_base;
-      child->user_stack_size = ci.user_stack_size;
-    }
+  if (flags & CLONE_THREAD) {
+    // §4.5:TLS/栈信息由 sys_pthread_setup 预置到 current_task,此处消费即清;
+    // 未预置则为零值(非 pthread 的 CLONE_THREAD 不存在)。
+    struct thread_clone_info ci = current_task->pending_pthread_setup;
+    __memset(&current_task->pending_pthread_setup, 0,
+             sizeof(struct thread_clone_info));
+    child->detached = ci.detached;
+    child->tls_page = ci.tls_page;
+    child->tls_total = ci.tls_total;
+    child->user_stack_base = ci.user_stack_base;
+    child->user_stack_size = ci.user_stack_size;
   }
   child_bp->sig_pending = 0;
   child_bp->sig_blocked = parent->proc->sig_blocked;
