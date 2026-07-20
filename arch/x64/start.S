@@ -16,6 +16,14 @@
 
 #define VMA_BASE 0xFFFFFFFF80000000  // mirrors boot/boot.h -- keep in sync
 
+# Byte count copied from the UEFI boot_info buffer into g_boot_info below.
+# Must equal BOOT_INFO_SIZE (and thus sizeof(boot_info)) in boot/boot.h,
+# which a _Static_assert there pins to the real struct size. Copying more
+# than sizeof(boot_info) overruns g_boot_info in BSS and clobbers the
+# adjacent globals (device_vma_base / early_bump_end / gdt) with stale
+# bytes from the source buffer — keep these in sync when boot_info grows.
+.set BOOT_INFO_SIZE, 72
+
 _start:
     # rdi = boot_info* (physical address, passed by EFI stub)
 
@@ -62,10 +70,17 @@ _entry64:
     # boot_info physical address -> virtual address
     addq $VMA_BASE, %r12
 
-    # Copy to g_boot_info
+    # Copy to g_boot_info. Copy EXACTLY sizeof(boot_info) bytes, not a
+    # rounded-up 128: g_boot_info sits in BSS immediately followed by
+    # device_vma_base / early_bump_end / gdt, and enable_paging already wrote
+    # early_bump_end during the physical phase. A 128-byte rep movsb overruns
+    # boot_info and clobbers those neighbours with stale bytes from the UEFI
+    # source buffer, zeroing early_bump_end and corrupting device_vma_base/gdt.
+    # BOOT_INFO_SIZE is .set above to mirror boot/boot.h's #define of the same
+    # name, which a _Static_assert there pins to sizeof(boot_info).
     movq %r12, %rsi
     lea g_boot_info(%rip), %rdi
-    movq $128, %rcx
+    movq $BOOT_INFO_SIZE, %rcx
     rep movsb
 
     # rdi = &g_boot_info

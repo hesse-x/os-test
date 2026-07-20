@@ -4,14 +4,18 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "arch/x64/paging.h"
+#include <stdbool.h>
+
 #include "arch/x64/memlayout.h"
+#include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
+#include "kernel/efi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "utils/macro.h"
-#include <stdbool.h>
+
+#include <xos/page.h>
 
 // ===================== GDT (physical-address phase) =====================
 // start.S calls gdt_init() while still running at physical addresses,
@@ -91,48 +95,145 @@ __attribute__((aligned(4096))) uint64_t page_dir[512];
 
 // ===================== enable_paging =====================
 // Called from start.S _start in the physical-address phase.
-// Note: the higher-half is not yet accessible; page tables must be
-// manipulated through physical-address pointers.  Once CR3 is loaded,
-// both the identity map and the higher-half become active, making VMA
-// addresses accessible.
-// Returns: rax = &gdtr (on stack, physical addr), rdx = &far_ptr (stack, phys)
+//
+// At entry CR3 still holds the UEFI firmware page table, which identity-maps
+// ALL physical RAM. We exploit that to read boot_info (and the EFI memory map
+// it points at) BEFORE installing our own page table: every physical address is
+// directly readable/writable as an identity virtual address.
+//
+// We compute the highest physical address that must remain reachable after we
+// switch CR3 (every EFI memory descriptor, regardless of type — covers RAM,
+// ACPI tables, loader data holding boot_info/mmap/init.elf), then build a
+// single direct map covering [0, max_map_addr) with 2MB huge pages, in both
+// identity and higher-half form. Only after that do we load_cr3, so the
+// higher-half boot_info copy in _entry64 (which may live at ~2GB on large-RAM
+// machines) and the mmap walk in init_mem never hit an unmapped page.
+//
+// Page-table pages come from a tiny early bump allocator carved out of physical
+// RAM starting at the kernel image end. Its final offset is published via
+// early_bump_end so init_mem's bump allocator can resume past it without
+// colliding with the page tables we allocate here.
 __attribute__((noinline, no_sanitize("kernel-address"))) void
 enable_paging(boot_info *bi_phys) {
-  (void)bi_phys;
+  // === Early bump allocator (physical-address phase) ===
+  // We execute at physical addresses before load_cr3, so RIP-relative
+  // addressing of a kernel-image symbol yields its PHYSICAL address directly —
+  // (uintptr_t)kernel_end is already physical, NOT the higher-half VMA, so we
+  // must NOT subtract VMA_BASE here. Page-align and grow upward.
+  //
+  // NOTE: no nested functions / trampolines here — they need a writable+-
+  // executable trampoline on the stack and a static-chain calling convention,
+  // neither valid in this bare physical phase. Inline the PT-page allocation.
+  uintptr_t early_bump = ALIGN_UP((uintptr_t)kernel_end, PAGE_SIZE);
 
-  // === Build page tables (2MB huge pages) ===
-  // During physical-address execution, RIP-relative addressing directly
-  // yields physical addresses.
+  // === Read the EFI memory map (still under UEFI's identity map) ===
+  // bi_phys is an identity virtual address == its physical address.
+  // Only count real RAM descriptors: OVMF/q35 also report large
+  // EfiReservedMemoryType and EfiMemoryMappedIO ranges far above physical
+  // RAM (observed: a reserved desc ending at 1 TB), which would otherwise
+  // balloon max_map_addr, make n_1gb exceed the identity PDPT (512) and the
+  // higher-half span (2 GB), and cause out-of-bounds pdpt_ident[]/
+  // pdpt_extra[] writes that corrupt the page tables and triple-fault on
+  // load_cr3. MMIO and reserved ranges are never part of the direct map.
+  boot_info *bi = bi_phys;
+  size_t desc_count = bi->mmap_size / bi->mmap_desc_size;
+  uint64_t max_map_addr = 0;
+  for (size_t i = 0; i < desc_count; i++) {
+    efi_memory_descriptor *desc =
+        (efi_memory_descriptor *)(bi->mmap_addr + i * bi->mmap_desc_size);
+    switch (desc->type) {
+    case EfiLoaderCode:
+    case EfiLoaderData:
+    case EfiBootServicesCode:
+    case EfiBootServicesData:
+    case EfiRuntimeServicesCode:
+    case EfiRuntimeServicesData:
+    case EfiConventionalMemory:
+    case EfiACPIReclaimMemory:
+    case EfiACPIMemoryNVS:
+    case EfiPalCode: {
+      uint64_t end = desc->physical_start + desc->number_of_pages * 4096;
+      if (end > max_map_addr)
+        max_map_addr = end;
+      break;
+    }
+    default:
+      break; // EfiReserved / EfiUnusable / EfiMemoryMappedIO / IO port space
+    }
+  }
+  if (max_map_addr == 0)
+    max_map_addr = 0x40000000; // fallback: 1 GB
+
+  // Number of 1 GB blocks to map (rounded up).
+  size_t n_1gb = (size_t)((max_map_addr + 0x40000000 - 1) / 0x40000000);
+
+  // === Allocate page-table pages from the early bump ===
+  // Reuse the statically reserved top-level pages; allocate one PD per 1 GB
+  // block plus, for the higher-half, one extra PDPT once we exceed 2 GB.
   uint64_t *pml4_p = pml4;
   uint64_t *pdpt_i_p = pdpt_ident;
   uint64_t *pdpt_h_p = pdpt_hh;
-  uint64_t *pd_p = page_dir;
+  uint64_t *pdpt_extra = NULL;
+
+  for (int i = 0; i < 512; i++) {
+    pml4_p[i] = 0;
+    pdpt_i_p[i] = 0;
+    pdpt_h_p[i] = 0;
+  }
 
   uint64_t pml4_phys = (uint64_t)pml4_p;
   uint64_t pdpt_i_phys = (uint64_t)pdpt_i_p;
   uint64_t pdpt_h_phys = (uint64_t)pdpt_h_p;
-  uint64_t pd_phys = (uint64_t)pd_p;
 
-  // Zero out page tables (manual loop, avoid __builtin_memset)
-  for (int i = 0; i < 512; i++)
-    pml4_p[i] = 0;
-  for (int i = 0; i < 512; i++)
-    pdpt_i_p[i] = 0;
-  for (int i = 0; i < 512; i++)
-    pdpt_h_p[i] = 0;
-  for (int i = 0; i < 512; i++)
-    pd_p[i] = 0;
+  pml4_p[0] = pdpt_i_phys | PTE_PRESENT | PTE_RW;   // identity at VA 0
+  pml4_p[511] = pdpt_h_phys | PTE_PRESENT | PTE_RW; // higher-half at VMA_BASE
 
-  pml4_p[0] = pdpt_i_phys | PTE_PRESENT | PTE_RW;
-  pml4_p[511] = pdpt_h_phys | PTE_PRESENT | PTE_RW;
-  pdpt_i_p[0] = pd_phys | PTE_PRESENT | PTE_RW;
-  pdpt_h_p[510] = pd_phys | PTE_PRESENT | PTE_RW;
+  // Fill PD for the n-th 1 GB block (n = 0..n_1gb-1): 512 x 2MB huge pages.
+  // pd_points: one PD page per block, identity-mapped so writable right now.
+  for (size_t n = 0; n < n_1gb; n++) {
+    // Carve one 4 KB PD page from the early bump. The pointer is an identity
+    // virtual address (== physical address) under UEFI's still-active map.
+    uint64_t *pd = (uint64_t *)early_bump;
+    early_bump += 4096;
+    uint64_t pd_phys = (uint64_t)pd;
+    uint64_t phys_base = (uint64_t)n * 0x40000000;
+    for (int i = 0; i < 512; i++) {
+      pd[i] = (phys_base + (uint64_t)i * PAGE_SIZE_2M) | PTE_PRESENT | PTE_RW |
+              PTE_PS;
+    }
 
-  for (int i = 0; i < 512; i++) {
-    pd_p[i] = ((uint64_t)i << 21) | PTE_PRESENT | PTE_RW | PTE_PS;
+    // identity: PDPT_ident[n] -> PD
+    pdpt_i_p[n] = pd_phys | PTE_PRESENT | PTE_RW;
+
+    // higher-half: block 0 -> PDPT_hh[510], block 1 -> PDPT_hh[511],
+    // block 2+ -> PML4[510] -> pdpt_extra[n-2] (PML4[511]'s PDPT only has
+    // slots 510/511 free, i.e. 2 GB of higher-half VA).
+    if (n == 0) {
+      pdpt_h_p[510] = pd_phys | PTE_PRESENT | PTE_RW;
+    } else if (n == 1) {
+      pdpt_h_p[511] = pd_phys | PTE_PRESENT | PTE_RW;
+    } else {
+      if (!pdpt_extra) {
+        pdpt_extra = (uint64_t *)early_bump;
+        early_bump += 4096;
+        uint64_t pdpt_extra_phys = (uint64_t)pdpt_extra;
+        for (int i = 0; i < 512; i++)
+          pdpt_extra[i] = 0;
+        pml4_p[510] = pdpt_extra_phys | PTE_PRESENT | PTE_RW;
+      }
+      pdpt_extra[n - 2] = pd_phys | PTE_PRESENT | PTE_RW;
+    }
   }
 
-  // Load CR3 — both the identity map and the higher-half become active
+  // The statically reserved page_dir[] is no longer used for the initial 1 GB
+  // (it is superseded by the dynamically allocated PD for block 0). Leave it
+  // zeroed; it is harmless BSS.
+
+  // Publish the early bump frontier for init_mem to resume from.
+  early_bump_end = early_bump;
+
+  // Load CR3 — UEFI's identity map is replaced by our direct map, which
+  // covers all RAM up to max_map_addr in both identity and higher-half form.
   load_cr3(pml4_phys);
 
   // Program PAT MSR after paging is enabled
@@ -142,6 +243,10 @@ enable_paging(boot_info *bi_phys) {
 // ===================== Global variable definitions =====================
 boot_info g_boot_info;
 uintptr_t device_vma_base = 0;
+// Frontier of the early bump allocator used inside enable_paging (physical
+// address). init_mem resumes its own bump allocator here so frames[] and
+// friends never overlap the page-table pages allocated during early paging.
+uintptr_t early_bump_end = 0;
 
 // ===================== Bump allocator =====================
 static uintptr_t bump_next_phys;
@@ -163,70 +268,6 @@ __attribute__((no_sanitize("kernel-address"))) void *bump_alloc(size_t size) {
 
 __attribute__((no_sanitize("kernel-address"))) void bump_disable() {
   bump_disabled = true;
-}
-
-// ===================== extend_mapping =====================
-// Extend the higher-half mapping: allocate PDPT+PD entries for physical
-// RAM beyond the initial 1 GB.
-// Page table index for 0xFFFFFFFF80000000:
-//   PML4 index = 511
-//   PDPT index = 510
-//   Thus the higher-half starts at PDPT_hh[510]
-//   Subsequent 1 GB blocks use PDPT_hh[511], PDPT_hh[512-overflow], ...
-//   Note: if PDPT_hh[511] is already occupied by PML4 self-map,
-//   a new PDPT page must be allocated.
-__attribute__((no_sanitize("kernel-address"))) void
-extend_mapping(uint64_t max_phys_addr) {
-  // Calculate how many 1 GB blocks are needed
-  size_t max_1gb_block = (size_t)(max_phys_addr / 0x40000000);
-
-  // stub already set PDPT_hh[510] → PD (first 1 GB)
-  // PDPT_hh[511] covers the second 1 GB
-  // n >= 2 blocks require a fresh PDPT page linked to PML4[510]
-  // because PML4[511] + PDPT_hh only covers indices 510-511 (2 GB VA space)
-
-  // PML4[510] maps virtual addresses starting at 0xFFFFFFFF00000000
-  // Used to extend the higher-half mapping (physical memory above 2 GB)
-  static uint64_t *pdpt_extra = NULL;
-
-  for (size_t n = 1; n <= max_1gb_block; n++) {
-    // Allocate PD (4 KB)
-    uint64_t *pd = (uint64_t *)bump_alloc(4096);
-    uintptr_t pd_phys = (__force uintptr_t)PHY_ADDR((uintptr_t)pd);
-
-    // Fill PD: 512 x 2MB huge pages mapping physical n*1GB to (n+1)*1GB
-    uint64_t phys_base = (uint64_t)n * 0x40000000;
-    for (int i = 0; i < 512; i++) {
-      pd[i] = (phys_base + (uint64_t)i * PAGE_SIZE_2M) | PTE_PRESENT | PTE_RW |
-              PTE_PS;
-    }
-
-    // identity map: PDPT_ident[n] = PD
-    pdpt_ident[n] = pd_phys | PTE_PRESENT | PTE_RW;
-
-    // higher-half map:
-    //   n=1: PDPT_hh[511] (second 1 GB, virtual 0xFFFFFFFFC0000000)
-    //   n>=2: allocate extra PDPT, link to PML4[510]
-    if (n == 1) {
-      pdpt_hh[511] = pd_phys | PTE_PRESENT | PTE_RW;
-    } else {
-      if (!pdpt_extra) {
-        // Allocate an extended PDPT page
-        pdpt_extra = (uint64_t *)bump_alloc(4096);
-        uintptr_t pdpt_phys =
-            (__force uintptr_t)PHY_ADDR((uintptr_t)pdpt_extra);
-        for (int i = 0; i < 512; i++)
-          pdpt_extra[i] = 0;
-        // PML4[510] maps starting at virtual address 0xFFFFFFFF00000000
-        pml4[510] = pdpt_phys | PTE_PRESENT | PTE_RW;
-      }
-      // PDPT index: the n-th 1 GB block (n>=2) maps to pdpt_extra[n-2]
-      pdpt_extra[n - 2] = pd_phys | PTE_PRESENT | PTE_RW;
-    }
-  }
-
-  // Device mapping region
-  device_vma_base = ALIGN_UP(VMA_BASE + (uintptr_t)max_phys_addr, 0x40000000);
 }
 
 // ===================== flush_tlb =====================

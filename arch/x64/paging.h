@@ -89,13 +89,13 @@ extern uint64_t pdpt_ident[512];
 extern uint64_t pdpt_hh[512];
 extern uint64_t page_dir[512];
 extern uintptr_t device_vma_base;
+extern uintptr_t early_bump_end;
 extern boot_info g_boot_info;
 extern const uint8_t stack_bottom[8192];
 
 // ===================== Functions =====================
 void enable_paging(boot_info *bi_phys);
 void gdt_init();
-void extend_mapping(uint64_t max_phys_addr);
 void flush_tlb();
 void *bump_alloc(size_t size);
 void bump_init_phys(uintptr_t start);
