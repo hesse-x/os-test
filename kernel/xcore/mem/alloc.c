@@ -297,9 +297,10 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
   total_page_frames = GET_PAGE_NUM(max_phys_addr);
 
   // 2. Bump allocator initialization
-  uintptr_t kernel_end_phys =
-      (__force uintptr_t)PHY_ADDR((uintptr_t)kernel_end);
-  bump_init_phys(kernel_end_phys);
+  // Resume past the page-table pages that enable_paging carved out of physical
+  // RAM while building the full direct map (it publishes the frontier via
+  // early_bump_end). Starting at kernel_end_phys would overlap those PT pages.
+  bump_init_phys(early_bump_end);
 
   // 3. Bump-allocate the frames array
   size_t frames_size = total_page_frames * sizeof(struct page);
@@ -329,8 +330,9 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
     }
   }
 
-  // 6. Extend the higher-half mapping + device mapping region
-  extend_mapping(max_phys_addr);
+  // 6. The full direct map (identity + higher-half) was already built by
+  // enable_paging before load_cr3, covering all physical RAM up to the highest
+  // EFI descriptor. Nothing to extend here.
 
   // 7. Flush TLB
   flush_tlb();

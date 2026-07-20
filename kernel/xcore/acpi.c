@@ -113,7 +113,8 @@ __attribute__((no_sanitize("kernel-address"))) void
 acpi_init(uint64_t rsdp_phys) {
   printk(LOG_INFO, "acpi_init: rsdp_phys=0x%016lX\n", rsdp_phys);
 
-  // 1. Map RSDP (ACPI tables in RAM, already mapped by extend_mapping)
+  // 1. Map RSDP (ACPI tables in RAM, already mapped by enable_paging's full
+  //    direct map covering all EFI memory descriptors)
   uint64_t rsdp_virt = rsdp_phys + VMA_BASE;
   const acpi_rsdp *rsdp = (const acpi_rsdp *)rsdp_virt;
 

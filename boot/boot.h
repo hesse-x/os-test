@@ -35,4 +35,17 @@ typedef struct boot_info {
   uint64_t init_elf_size;
 } boot_info;
 
+// Byte length of boot_info, as consumed by the hand-written rep movsb in
+// arch/x64/start.S (_entry64 copies exactly this many bytes from the UEFI
+// boot_info buffer into g_boot_info). Kept as a literal macro so the
+// assembler can use the matching `.set BOOT_INFO_SIZE` in start.S; the
+// _Static_assert below pins it to the real struct size so any field
+// addition that forgets to bump it (or the .set mirror) is a build break
+// instead of a silent BSS overrun that clobbers the globals sitting right
+// after g_boot_info (device_vma_base / early_bump_end / gdt).
+#define BOOT_INFO_SIZE 72
+_Static_assert(BOOT_INFO_SIZE == sizeof(boot_info),
+               "BOOT_INFO_SIZE out of sync with sizeof(boot_info) — update "
+               "arch/x64/start.S `BOOT_INFO_SIZE` .set to match");
+
 #endif /* COMMON_BOOT_H */
