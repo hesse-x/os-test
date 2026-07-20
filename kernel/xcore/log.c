@@ -5,7 +5,8 @@
  */
 
 #include "kernel/xcore/log.h"
-#include "arch/x64/smp.h" // cpu_locals, get_cpu_local, cur_tf
+#include "arch/x64/memlayout.h" // KERNEL_VMA_BOUNDARY
+#include "arch/x64/smp.h"       // cpu_locals, get_cpu_local, cur_tf
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h" // halt()
 #include "kernel/xcore/serial_hook.h"
@@ -74,7 +75,7 @@ static void dump_stack_trace_locked(void) {
   uint64_t *rbp;
   __asm__ volatile("movq %%rbp, %0" : "=r"(rbp));
   for (int depth = 0; depth < 16; depth++) {
-    if (!rbp || (uint64_t)rbp < 0xFFFFFFFF80000000)
+    if (!rbp || (uint64_t)rbp < KERNEL_VMA_BOUNDARY)
       break;
     uint64_t ret_addr = rbp[1];
     serial_printf_locked("    0x%016lX\n", ret_addr);

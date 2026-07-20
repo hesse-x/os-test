@@ -4,15 +4,15 @@ OUTPUT_ARCH(i386:x86-64)
 
 ENTRY(_start)
 
-. = 0xFFFFFFFF80100000;
+. = 0xFFFFFF8000100000;
 SECTIONS {
     /* Code section */
-    .text : AT(ADDR(.text) - 0xFFFFFFFF80000000) {
+    .text : AT(ADDR(.text) - 0xFFFFFF8000000000) {
         *(.text)
         *(.text.*)
     } :text
 
-    .rodata : AT(ADDR(.rodata) - 0xFFFFFFFF80000000) {
+    .rodata : AT(ADDR(.rodata) - 0xFFFFFF8000000000) {
         *(.rodata)
         *(.rodata.*)
     } :rodata
@@ -21,13 +21,13 @@ SECTIONS {
        _ASM_EXTABLE in copy_user.c. Searched by fixup_exception() on
        kernel-mode #PF/#GP to rewind a user-copy and return -EFAULT. */
     __start___ex_table = .;
-    __ex_table : AT(ADDR(__ex_table) - 0xFFFFFFFF80000000) {
+    __ex_table : AT(ADDR(__ex_table) - 0xFFFFFF8000000000) {
         KEEP(*(__ex_table))
     } :rodata
     __stop___ex_table = .;
 
     /*Initialized data section*/
-    .data : AT(ADDR(.data) - 0xFFFFFFFF80000000) {
+    .data : AT(ADDR(.data) - 0xFFFFFF8000000000) {
         *(.data)
         *(.data.*)
         *(.data.rel.ro.local)
@@ -36,21 +36,21 @@ SECTIONS {
     } :data
 
     /* GOT section */
-    .got : AT(ADDR(.got) - 0xFFFFFFFF80000000) {
+    .got : AT(ADDR(.got) - 0xFFFFFF8000000000) {
         *(.got)
         *(.got.plt)
     } :data
 
     /* KASAN global variable redzone metadata */
     __start_kasan_globals = .;
-    .kasan_globals : AT(ADDR(.kasan_globals) - 0xFFFFFFFF80000000) {
+    .kasan_globals : AT(ADDR(.kasan_globals) - 0xFFFFFF8000000000) {
         KEEP(*(__kasan_globals))
     } :data
     __stop_kasan_globals = .;
 
     . = ALIGN(4096);
     /* Uninitialized data section (BSS) - 4KB aligned for page table use */
-    .bss (NOLOAD) : AT(ADDR(.bss) - 0xFFFFFFFF80000000) {
+    .bss (NOLOAD) : AT(ADDR(.bss) - 0xFFFFFF8000000000) {
         *(.bss)
         *(COMMON)
     } :data

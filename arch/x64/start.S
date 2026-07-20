@@ -14,7 +14,7 @@
 .global _entry64
 .type _start, @function
 
-#define VMA_BASE 0xFFFFFFFF80000000  // mirrors boot/boot.h -- keep in sync
+#define VMA_BASE 0xFFFFFF8000000000  // mirrors boot/boot.h -- keep in sync
 
 # Byte count copied from the UEFI boot_info buffer into g_boot_info below.
 # Must equal BOOT_INFO_SIZE (and thus sizeof(boot_info)) in boot/boot.h,
@@ -50,9 +50,13 @@ _start:
     movw %ax, %gs
     movw %ax, %ss
 
-    # Compute _entry64 virtual address: physical address + VMA_BASE
+    # Compute _entry64 virtual address: physical address + VMA_BASE.
+    # VMA_BASE is a full 64-bit non-sign-extendable immediate (canonical
+    # high-half, not representable as a sign-extended 32-bit addq operand), so
+    # load it with movabsq into %rcx then add.
     lea _entry64(%rip), %rax
-    addq $VMA_BASE, %rax
+    movabsq $VMA_BASE, %rcx
+    addq %rcx, %rax
 
     # ljmp to virtual address
     pushq $0x08
@@ -67,8 +71,10 @@ _entry64:
     lea stack_bottom(%rip), %rsp
     addq $8192, %rsp
 
-    # boot_info physical address -> virtual address
-    addq $VMA_BASE, %r12
+    # boot_info physical address -> virtual address (VMA_BASE is a 64-bit
+    # non-sign-extend immediate; use movabsq, see the entry-jump note above).
+    movabsq $VMA_BASE, %rcx
+    addq %rcx, %r12
 
     # Copy to g_boot_info. Copy EXACTLY sizeof(boot_info) bytes, not a
     # rounded-up 128: g_boot_info sits in BSS immediately followed by

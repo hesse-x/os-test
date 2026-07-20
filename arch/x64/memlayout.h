@@ -10,7 +10,9 @@
 #include <xos/page.h> /* PAGE_SHIFT / PAGE_SIZE / PAGE_SIZE_2M (UAPI, shared kernel/user) */
 
 // Higher-half kernel/user boundary: user space lives below this, kernel above.
-#define KERNEL_VMA_BOUNDARY 0xFFFFFFFF80000000ULL
+// Equals VMA_BASE (boot/boot.h): the direct-map window starts here, so every
+// address >= this is kernel space. User pointers are validated against this.
+#define KERNEL_VMA_BOUNDARY 0xFFFFFF8000000000ULL
 
 // ld.so fixed base (below stack top 0x7FFFFFFFE000, fixed high address, no
 // ASLR)

@@ -18,14 +18,14 @@
 
 公式：`shadow_addr = (addr >> 3) + KASAN_SHADOW_OFFSET`
 
-KASAN_SHADOW_OFFSET：`0xDFFFFC0000000000`（推导：shadow(VMA_BASE) = PML4[503] = `0xFFFFFBFFF0000000`）
+KASAN_SHADOW_OFFSET：`0xDFFFFB9000000000`（推导：shadow(VMA_BASE) = PML4[503] = `0xFFFFFB8000000000`）
 
 | 真实地址范围 | Shadow 地址范围 | 大小 |
 |------------|---------------|------|
-| `0xFFFFFFFF80000000` (VMA_BASE) | `0xFFFFFBFFF0000000` | - |
-| `0xFFFFFFFFFFFFFFFF` | `0xFFFFFBFFFFFFFFFF` | 256MB |
+| `0xFFFFFF8000000000` (VMA_BASE) | `0xFFFFFB8000000000` | - |
+| `0xFFFFFFFFFFFFFFFF` | `0xFFFFFB8FFFFFFFFF` | 见下 |
 
-Shadow PML4 索引：503。Identity map 和用户态地址的 shadow 均落在非 canonical 区域（4-level paging 128TB 固有限制），内核访问这些区域必须走 `no_sanitize` 或 `copy_from_user/copy_to_user`。
+Shadow PML4 索引：503（与 direct map 所在 PML4[511] 不同 slot，不重叠）。shadow 覆盖范围在 `kasan_init` 中按 `total_page_frames` 动态计算（只 shadow 实际物理 RAM，而非整个 64GB direct-map 窗口），shadow 大小 = total_page_frames*PAGE_SIZE/8（如 4GB RAM → 512MB shadow）。Identity map 和用户态地址的 shadow 均落在非 canonical 区域（4-level paging 128TB 固有限制），内核访问这些区域必须走 `no_sanitize` 或 `copy_from_user/copy_to_user`。
 
 ### Shadow 值语义
 

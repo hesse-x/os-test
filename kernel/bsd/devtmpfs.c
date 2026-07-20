@@ -58,6 +58,41 @@ static bool devtmpfs_initialized = false;
  * subdirectory */
 static struct inode *devtmpfs_root_ip = NULL;
 
+/* §5: dev_ops 引用计数封装(FUSE fuse_conn 式)。
+ *   get: 取引用(open 路径持 fd 引用);refcount_inc 内部 BUG_ON from-0 = UAF。
+ *   put: 放引用(file_put 放 fd 引用、cleanup_pid 放注册引用);归 0 才 kfree。
+ * 仅 user-space driver(driver_pid>0,kmalloc ops)会归 0;kernel device ops
+ * 为 static,注册引用永在,refcount 永不归 0,put 不触发 kfree。fd 持引用
+ * 覆盖 read/write/ioctl/poll 裸读 i_priv 的生命周期,故那些路径不必 get/put。*/
+void dev_ops_get(struct dev_ops *ops) {
+  ASSERT(ops);
+  refcount_inc(&ops->refcount);
+}
+
+void dev_ops_put(struct dev_ops *ops) {
+  if (!ops)
+    return;
+  if (refcount_dec_and_test(&ops->refcount)) {
+    /* 仅 user-space driver 的 kmalloc ops 到此;kernel device ops 为 static
+     * 永不归 0。subsys_priv/uevent_priv/sysfs_dir 已由 cleanup_pid 先行清理。*/
+    kfree(ops);
+  }
+}
+
+/* §5: 在 devtmpfs_lock 下读 inode->i_priv 返回 ops 指针(不加引用)。
+ * 供 file_put(FD_DEV/FD_TTY) 等路径用:裸读 i_priv 与 cleanup_pid 的 put 之间
+ * 存在 §3 同类 borrow-window(ops 在读后被 kfree),需在锁下读。调用方持有 fd
+ * 引用(open 时 dev_ops_get 取),ops 在本 fd close 前不会归 0,故读出后无需再
+ * get 即可安全用;close 回调 + 放 fd 引用(dev_ops_put)均在锁外完成。*/
+struct dev_ops *dev_ops_peek_by_inode(struct inode *ip) {
+  if (!ip)
+    return NULL;
+  spin_lock(&devtmpfs_lock);
+  struct dev_ops *ops = ip->i_priv ? (struct dev_ops *)ip->i_priv : NULL;
+  spin_unlock(&devtmpfs_lock);
+  return ops;
+}
+
 /* Forward: devtmpfs_iget defined later (after devtmpfs_get_or_create_dir),
  * but devtmpfs_init / devtmpfs_get_or_create_dir call it. */
 static struct inode *devtmpfs_iget(int type);
@@ -370,6 +405,18 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
   ne->next = dev_list;
   dev_list = ne;
 
+  /* §5: 注册引用(dev_list entry 持有)。ops 进来时 refcount 已为 0(static/嵌入式
+   * 由零初始化保证,kmalloc 由 __memset(0) 保证);此处建立首个引用代表"已注册"。
+   * 不能用 dev_ops_get():refcount_inc 把 0→1 视作 UAF 并 BUG_ON;那是为"获取
+   * 额外引用"路径(open/peek)设的 UAF 防护,不适用于此处 from-0 的
+   * bootstrapping。 同一 ops 多次 create(如 random/urandom 共用 random_ops)→
+   * 第二次起 refcount 已 ≥1,走 dev_ops_get 正常 +1;首次(==0)用 refcount_set
+   * 建立。cleanup_pid 放 此引用,归 0(且无 fd 持引用)才 kfree。*/
+  if (refcount_read(&ops->refcount) == 0)
+    refcount_set(&ops->refcount, 1);
+  else
+    dev_ops_get(ops);
+
   spin_unlock(&devtmpfs_lock);
   printk(LOG_INFO, "devtmpfs: created /dev/%s\n", name);
 
@@ -421,19 +468,34 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
   }
 
   /* Device open path (existing) */
+  /* §5: 在 fdlk 之前、独立 devtmpfs_lock 临界区取 ops 引用(fd 引用)。
+   * fdlk 不防 devtmpfs_cleanup_pid(后者持 devtmpfs_lock),若在 fdlk 内裸读
+   * i_priv 会与 cleanup_pid 的 put 形成 §3 同类 borrow-window(ops 在取引用前
+   * 被 kfree)。先持 fd 引用,则本 fd 整个生命周期 ops 必活,read/write/ioctl/
+   * poll 裸读 i_priv 安全。fd 引用在 file_put(FD_DEV) 放。*/
+  spin_lock(&devtmpfs_lock);
+  struct dev_ops *ops = ip->i_priv ? (struct dev_ops *)ip->i_priv : NULL;
+  if (ops)
+    dev_ops_get(ops);
+  spin_unlock(&devtmpfs_lock);
+
   spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
   int fd = alloc_fd(proc->proc->files, 3);
   if (fd < 0) {
     spin_unlock(fdlk);
-    inode_put(ip); /* drop the lookup reference on failure */
+    if (ops)
+      dev_ops_put(ops); /* §5: 放刚取的 fd 引用 */
+    inode_put(ip);      /* drop the lookup reference on failure */
     return (uint64_t)(-(uint64_t)EMFILE);
   }
 
   struct file *f = kmalloc(sizeof(struct file));
   if (!f) {
     spin_unlock(fdlk);
-    inode_put(ip); /* drop the lookup reference on failure */
+    if (ops)
+      dev_ops_put(ops); /* §5: 放刚取的 fd 引用 */
+    inode_put(ip);      /* drop the lookup reference on failure */
     return (uint64_t)(-(uint64_t)ENOMEM);
   }
   __memset(f, 0, sizeof(*f));
@@ -446,8 +508,7 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
   // can access it via fd_table[fd] and mutate it into FD_TTY in place.
   fd_install(proc->proc->files, fd, f);
 
-  if (ip->i_priv) {
-    struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+  if (ops) {
     f->target_pid = ops->driver_pid;
     // Kernel device: call open callback. Callbacks mutate the FD_DEV file
     // in place (do not replace the pointer), so fd_table[fd] stays valid.
@@ -457,9 +518,10 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
         // Open failed: undo fd installation.
         // Manual cleanup (not file_put) to avoid calling ops->close
         // when ops->open itself failed. Drop the lookup +1 that the file
-        // would otherwise have owned.
+        // would otherwise have owned, and the §5 fd 引用.
         fd_uninstall(proc->proc->files, fd);
         inode_put(ip);
+        dev_ops_put(ops); /* §5: 放 fd 引用(open 未成功,引用不归 fd 持有) */
         kfree(f);
         spin_unlock(fdlk);
         return (uint64_t)(-(uint64_t)(-rc));
@@ -475,6 +537,7 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
       if (!ctrl) {
         fd_uninstall(proc->proc->files, fd);
         inode_put(ip);
+        dev_ops_put(ops); /* §5: 放 fd 引用 */
         kfree(f);
         spin_unlock(fdlk);
         return (uint64_t)(-(uint64_t)ENOMEM);
@@ -502,7 +565,7 @@ void devtmpfs_cleanup_pid(pid_t pid) {
         *pp = e->next;
         /* Clean up sysfs subtree + uevent_priv + subsys_priv。
          * 顺序:kfree uevent_priv → sysfs_remove_dir(释放 attr 结构体,不释放其
-         * priv)→ kfree subsys_priv → kfree ops(对齐 sys_dev_set_meta 幂等
+         * priv)→ kfree subsys_priv → put ops(对齐 sys_dev_set_meta 幂等
          * guard)。 */
         if (ops->uevent_priv) {
           kfree(ops->uevent_priv);
@@ -516,9 +579,13 @@ void devtmpfs_cleanup_pid(pid_t pid) {
           kfree(ops->subsys_priv);
           ops->subsys_priv = NULL;
         }
-        /* Free kmalloc'd dev_ops (user-space driver) */
+        /* §5: 放注册引用(devtmpfs_create 入口 dev_ops_get 取)。不直接 kfree:
+         * 此刻可能有别的进程的 fd 持 ops 引用(跨进程持有设备 fd 场景),kfree
+         * 会使 ip->i_priv 悬垂,后续 file_put 裸读 i_priv UAF。改 put,归 0
+         * (无任何 fd 持引用)才 kfree。user-space driver(driver_pid>0)的
+         * kmalloc ops 会归 0;kernel device 的 static ops 永不归 0。*/
         if (ops->driver_pid > 0)
-          kfree(ops);
+          dev_ops_put(ops);
         /* Free inode */
         inode_put(e->ip);
         e->ip = NULL;

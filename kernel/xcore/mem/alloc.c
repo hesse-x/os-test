@@ -296,6 +296,17 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
         max_phys_addr = end;
     }
   }
+  // Cap at the direct-map window: enable_paging only maps the first
+  // DIRECT_MAP_MAX_GB of physical RAM (pdpt_hh[0..DIRECT_MAP_MAX_GB-1]), and
+  // KASAN shadows exactly the direct map. On some QEMU/firmware combos the EFI
+  // map reports EfiConventionalMemory descriptors far above real RAM (or with
+  // a high MMIO gap), which would otherwise balloon total_page_frames, the
+  // frames[] array, and the KASAN shadow (observed 768MB shadow on a 4GB
+  // machine) — wasting RAM and inflating the shadow PT footprint. Anything
+  // above the direct map is unreachable anyway, so counting it is pure waste.
+  if (max_phys_addr > (uint64_t)DIRECT_MAP_MAX_GB * 0x40000000ULL) {
+    max_phys_addr = (uint64_t)DIRECT_MAP_MAX_GB * 0x40000000ULL;
+  }
   total_page_frames = GET_PAGE_NUM(max_phys_addr);
 
   // 2. Bump allocator initialization
@@ -349,6 +360,10 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
     frames[i].status = PAGE_USED;
     refcount_set(&frames[i].p_refcount, 1);
   }
+  // Record this accounted frontier so bump_disable() can mark any later
+  // bump allocations (e.g. apic_init's MMIO PD) as USED too — otherwise
+  // bfc_alloc_page would re-hand them out and overwrite them.
+  bump_set_accounted(used_end);
 
   // 9. Build the free list
   int state = 0;

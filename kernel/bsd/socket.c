@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include "arch/x64/apic.h"
+#include "arch/x64/memlayout.h" // KERNEL_VMA_BOUNDARY
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/file_poll.h"
@@ -855,8 +856,8 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   // Validate addr
   uint64_t addr_ptr = (int64_t)addr;
-  if (!addr_ptr || addr_ptr >= 0xFFFFFFFF80000000ULL ||
-      addr_ptr + addrlen > 0xFFFFFFFF80000000ULL || addrlen <= 0) {
+  if (!addr_ptr || addr_ptr >= KERNEL_VMA_BOUNDARY ||
+      addr_ptr + addrlen > KERNEL_VMA_BOUNDARY || addrlen <= 0) {
     file_put(bf);
     return (int64_t)-EFAULT;
   }
@@ -1025,15 +1026,15 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   // Validate addr pointers if non-null
   if (addr) {
     uint64_t aptr = (int64_t)addr;
-    if (aptr >= 0xFFFFFFFF80000000ULL) {
+    if (aptr >= KERNEL_VMA_BOUNDARY) {
       file_put(af);
       return (int64_t)-EFAULT;
     }
   }
   if (addrlen) {
     uint64_t alptr = (int64_t)addrlen;
-    if (alptr >= 0xFFFFFFFF80000000ULL ||
-        alptr + sizeof(socklen_t) > 0xFFFFFFFF80000000ULL) {
+    if (alptr >= KERNEL_VMA_BOUNDARY ||
+        alptr + sizeof(socklen_t) > KERNEL_VMA_BOUNDARY) {
       file_put(af);
       return (int64_t)-EFAULT;
     }
@@ -1217,8 +1218,8 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   // Validate addr
   uint64_t addr_ptr = (int64_t)addr;
-  if (!addr_ptr || addr_ptr >= 0xFFFFFFFF80000000ULL ||
-      addr_ptr + addrlen > 0xFFFFFFFF80000000ULL || addrlen <= 0) {
+  if (!addr_ptr || addr_ptr >= KERNEL_VMA_BOUNDARY ||
+      addr_ptr + addrlen > KERNEL_VMA_BOUNDARY || addrlen <= 0) {
     file_put(cf);
     return (int64_t)-EFAULT;
   }
@@ -1339,8 +1340,8 @@ int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   // Validate user pointer
   uint64_t sv_ptr = (int64_t)sv;
-  if (!sv_ptr || sv_ptr >= 0xFFFFFFFF80000000ULL ||
-      sv_ptr + 2 * sizeof(int) > 0xFFFFFFFF80000000ULL)
+  if (!sv_ptr || sv_ptr >= KERNEL_VMA_BOUNDARY ||
+      sv_ptr + 2 * sizeof(int) > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
 
   xtask *proc = current_task;
@@ -1445,8 +1446,8 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   // Validate msghdr pointer
   uint64_t msg_ptr = (int64_t)msg;
-  if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
-      msg_ptr + sizeof(struct msghdr) > 0xFFFFFFFF80000000ULL) {
+  if (!msg_ptr || msg_ptr >= KERNEL_VMA_BOUNDARY ||
+      msg_ptr + sizeof(struct msghdr) > KERNEL_VMA_BOUNDARY) {
     file_put(sf);
     return (int64_t)-EFAULT;
   }
@@ -1459,9 +1460,8 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   // Validate iov
   uint64_t iov_ptr = (int64_t)kmsg.msg_iov;
-  if (!iov_ptr || iov_ptr >= 0xFFFFFFFF80000000ULL ||
-      iov_ptr + kmsg.msg_iovlen * sizeof(struct iovec) >
-          0xFFFFFFFF80000000ULL ||
+  if (!iov_ptr || iov_ptr >= KERNEL_VMA_BOUNDARY ||
+      iov_ptr + kmsg.msg_iovlen * sizeof(struct iovec) > KERNEL_VMA_BOUNDARY ||
       kmsg.msg_iovlen == 0 || kmsg.msg_iovlen > 1024) {
     file_put(sf);
     return (int64_t)-EINVAL;
@@ -1485,8 +1485,8 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   for (size_t i = 0; i < kmsg.msg_iovlen; i++) {
     if (kiov[i].iov_base) {
       uint64_t base = (int64_t)kiov[i].iov_base;
-      if (base >= 0xFFFFFFFF80000000ULL ||
-          base + kiov[i].iov_len > 0xFFFFFFFF80000000ULL) {
+      if (base >= KERNEL_VMA_BOUNDARY ||
+          base + kiov[i].iov_len > KERNEL_VMA_BOUNDARY) {
         kfree(kiov);
         file_put(sf);
         return (int64_t)-EFAULT;
@@ -1499,8 +1499,8 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   size_t kcontrollen = 0;
   if (kmsg.msg_control && kmsg.msg_controllen > 0) {
     uint64_t ctrl_ptr = (int64_t)kmsg.msg_control;
-    if (ctrl_ptr >= 0xFFFFFFFF80000000ULL ||
-        ctrl_ptr + kmsg.msg_controllen > 0xFFFFFFFF80000000ULL) {
+    if (ctrl_ptr >= KERNEL_VMA_BOUNDARY ||
+        ctrl_ptr + kmsg.msg_controllen > KERNEL_VMA_BOUNDARY) {
       kfree(kiov);
       file_put(sf);
       return (int64_t)-EFAULT;
@@ -1578,8 +1578,8 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   rcu_read_unlock();
 
   uint64_t msg_ptr = (int64_t)msg;
-  if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
-      msg_ptr + sizeof(struct msghdr) > 0xFFFFFFFF80000000ULL) {
+  if (!msg_ptr || msg_ptr >= KERNEL_VMA_BOUNDARY ||
+      msg_ptr + sizeof(struct msghdr) > KERNEL_VMA_BOUNDARY) {
     file_put(rf);
     return (int64_t)-EFAULT;
   }
@@ -1592,9 +1592,8 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   // Validate iov
   uint64_t iov_ptr = (int64_t)kmsg.msg_iov;
-  if (!iov_ptr || iov_ptr >= 0xFFFFFFFF80000000ULL ||
-      iov_ptr + kmsg.msg_iovlen * sizeof(struct iovec) >
-          0xFFFFFFFF80000000ULL ||
+  if (!iov_ptr || iov_ptr >= KERNEL_VMA_BOUNDARY ||
+      iov_ptr + kmsg.msg_iovlen * sizeof(struct iovec) > KERNEL_VMA_BOUNDARY ||
       kmsg.msg_iovlen == 0 || kmsg.msg_iovlen > 1024) {
     file_put(rf);
     return (int64_t)-EINVAL;
@@ -1616,8 +1615,8 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   for (size_t i = 0; i < kmsg.msg_iovlen; i++) {
     if (kiov[i].iov_base) {
       uint64_t base = (int64_t)kiov[i].iov_base;
-      if (base >= 0xFFFFFFFF80000000ULL ||
-          base + kiov[i].iov_len > 0xFFFFFFFF80000000ULL) {
+      if (base >= KERNEL_VMA_BOUNDARY ||
+          base + kiov[i].iov_len > KERNEL_VMA_BOUNDARY) {
         kfree(kiov);
         file_put(rf);
         return (int64_t)-EFAULT;
@@ -1630,8 +1629,8 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   size_t kcontrollen = 0;
   if (kmsg.msg_control && kmsg.msg_controllen > 0) {
     uint64_t ctrl_ptr = (int64_t)kmsg.msg_control;
-    if (ctrl_ptr >= 0xFFFFFFFF80000000ULL ||
-        ctrl_ptr + kmsg.msg_controllen > 0xFFFFFFFF80000000ULL) {
+    if (ctrl_ptr >= KERNEL_VMA_BOUNDARY ||
+        ctrl_ptr + kmsg.msg_controllen > KERNEL_VMA_BOUNDARY) {
       kfree(kiov);
       file_put(rf);
       return (int64_t)-EFAULT;
@@ -1764,8 +1763,8 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   // Validate user pointer
   uint64_t fds_ptr = (int64_t)fds;
-  if (!fds_ptr || fds_ptr >= 0xFFFFFFFF80000000ULL ||
-      fds_ptr + nfds * sizeof(struct pollfd) > 0xFFFFFFFF80000000ULL)
+  if (!fds_ptr || fds_ptr >= KERNEL_VMA_BOUNDARY ||
+      fds_ptr + nfds * sizeof(struct pollfd) > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
 
   // Copy pollfd array to kernel

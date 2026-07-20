@@ -11,6 +11,7 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/efi.h"
+#include "kernel/xcore/atomic.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "utils/macro.h"
@@ -109,10 +110,25 @@ __attribute__((aligned(4096))) uint64_t page_dir[512];
 // higher-half boot_info copy in _entry64 (which may live at ~2GB on large-RAM
 // machines) and the mmap walk in init_mem never hit an unmapped page.
 //
+// VA layout (all inside PML4[511] -> pdpt_hh, the canonical 512GB high-half
+// window starting at VMA_BASE):
+//   pdpt_hh[0..n_1gb-1]  direct map: phys n*1GB -> VMA_BASE + n*1GB
+//                         (kernel image at pdpt_hh[0] head: phys 0x100000 ->
+//                         VMA_BASE+0x100000 = KERNEL_VMA_BASE, no separate
+//                         mapping needed)
+//   pdpt_hh[n_1gb..511]  free; device MMIO (APIC/PCI BAR) claims top-down
+//                         slots via map_apic_mmio() / device MMIO allocator
+// phys_to_virt(phys) = phys + VMA_BASE holds for all [0, max_map_addr), a
+// single continuous span with no 64-bit wraparound (VMA_BASE is the canonical
+// high-half start, leaving the full 512GB window before any wrap). Capped at
+// DIRECT_MAP_MAX_GB so the direct map can never grow past pdpt_hh[63] and
+// collide with device MMIO; raise DIRECT_MAP_MAX_GB to extend.
+//
 // Page-table pages come from a tiny early bump allocator carved out of physical
 // RAM starting at the kernel image end. Its final offset is published via
 // early_bump_end so init_mem's bump allocator can resume past it without
 // colliding with the page tables we allocate here.
+
 __attribute__((noinline, no_sanitize("kernel-address"))) void
 enable_paging(boot_info *bi_phys) {
   // === Early bump allocator (physical-address phase) ===
@@ -131,10 +147,8 @@ enable_paging(boot_info *bi_phys) {
   // Only count real RAM descriptors: OVMF/q35 also report large
   // EfiReservedMemoryType and EfiMemoryMappedIO ranges far above physical
   // RAM (observed: a reserved desc ending at 1 TB), which would otherwise
-  // balloon max_map_addr, make n_1gb exceed the identity PDPT (512) and the
-  // higher-half span (2 GB), and cause out-of-bounds pdpt_ident[]/
-  // pdpt_extra[] writes that corrupt the page tables and triple-fault on
-  // load_cr3. MMIO and reserved ranges are never part of the direct map.
+  // balloon max_map_addr and make the direct map span absurdly. MMIO and
+  // reserved ranges are never part of the direct map.
   boot_info *bi = bi_phys;
   size_t desc_count = bi->mmap_size / bi->mmap_desc_size;
   uint64_t max_map_addr = 0;
@@ -167,13 +181,18 @@ enable_paging(boot_info *bi_phys) {
   // Number of 1 GB blocks to map (rounded up).
   size_t n_1gb = (size_t)((max_map_addr + 0x40000000 - 1) / 0x40000000);
 
+  // Cap the direct map so it never grows past pdpt_hh[DIRECT_MAP_MAX_GB-1] and
+  // collides with device MMIO (which claims top-down slots). The current
+  // physical-memory targets are far below this; raise DIRECT_MAP_MAX_GB to
+  // support more.
+  ASSERT(n_1gb <= DIRECT_MAP_MAX_GB);
+
   // === Allocate page-table pages from the early bump ===
   // Reuse the statically reserved top-level pages; allocate one PD per 1 GB
-  // block plus, for the higher-half, one extra PDPT once we exceed 2 GB.
+  // block. The direct map is a single continuous span in pdpt_hh[0..n_1gb-1].
   uint64_t *pml4_p = pml4;
   uint64_t *pdpt_i_p = pdpt_ident;
   uint64_t *pdpt_h_p = pdpt_hh;
-  uint64_t *pdpt_extra = NULL;
 
   for (int i = 0; i < 512; i++) {
     pml4_p[i] = 0;
@@ -190,6 +209,10 @@ enable_paging(boot_info *bi_phys) {
 
   // Fill PD for the n-th 1 GB block (n = 0..n_1gb-1): 512 x 2MB huge pages.
   // pd_points: one PD page per block, identity-mapped so writable right now.
+  // Both identity (pdpt_ident[n]) and higher-half (pdpt_hh[n]) point at the
+  // same PD, so phys n*1GB is reachable both as VA n*1GB and VMA_BASE+n*1GB.
+  // Block 0's PD also covers the kernel image at phys 0x100000, so the image
+  // is reachable at KERNEL_VMA_BASE with no separate mapping.
   for (size_t n = 0; n < n_1gb; n++) {
     // Carve one 4 KB PD page from the early bump. The pointer is an identity
     // virtual address (== physical address) under UEFI's still-active map.
@@ -205,24 +228,8 @@ enable_paging(boot_info *bi_phys) {
     // identity: PDPT_ident[n] -> PD
     pdpt_i_p[n] = pd_phys | PTE_PRESENT | PTE_RW;
 
-    // higher-half: block 0 -> PDPT_hh[510], block 1 -> PDPT_hh[511],
-    // block 2+ -> PML4[510] -> pdpt_extra[n-2] (PML4[511]'s PDPT only has
-    // slots 510/511 free, i.e. 2 GB of higher-half VA).
-    if (n == 0) {
-      pdpt_h_p[510] = pd_phys | PTE_PRESENT | PTE_RW;
-    } else if (n == 1) {
-      pdpt_h_p[511] = pd_phys | PTE_PRESENT | PTE_RW;
-    } else {
-      if (!pdpt_extra) {
-        pdpt_extra = (uint64_t *)early_bump;
-        early_bump += 4096;
-        uint64_t pdpt_extra_phys = (uint64_t)pdpt_extra;
-        for (int i = 0; i < 512; i++)
-          pdpt_extra[i] = 0;
-        pml4_p[510] = pdpt_extra_phys | PTE_PRESENT | PTE_RW;
-      }
-      pdpt_extra[n - 2] = pd_phys | PTE_PRESENT | PTE_RW;
-    }
+    // higher-half: PDPT_hh[n] -> PD (single continuous span, no splicing)
+    pdpt_h_p[n] = pd_phys | PTE_PRESENT | PTE_RW;
   }
 
   // The statically reserved page_dir[] is no longer used for the initial 1 GB
@@ -251,6 +258,13 @@ uintptr_t early_bump_end = 0;
 // ===================== Bump allocator =====================
 static uintptr_t bump_next_phys;
 static bool bump_disabled = false;
+// Highest bump frontier that init_mem already marked PAGE_USED in frames[]
+// (its step 8). post-init_mem bump_alloc consumers (historically apic_init's
+// MMIO PD page) advance bump_next_phys past this point, leaving those pages
+// PAGE_FREE so bfc_alloc_page can re-hand them out. bump_disable() re-marks
+// [init_accounted_end, bump_end_phys()) as USED so the tracked allocator never
+// reuses a page still owned by the bump region.
+static uintptr_t init_accounted_end = 0;
 
 __attribute__((no_sanitize("kernel-address"))) void
 bump_init_phys(uintptr_t start) {
@@ -267,6 +281,20 @@ __attribute__((no_sanitize("kernel-address"))) void *bump_alloc(size_t size) {
 }
 
 __attribute__((no_sanitize("kernel-address"))) void bump_disable() {
+  // Account for any bump pages allocated after init_mem built the free list.
+  // Without this, those pages stay PAGE_FREE and bfc_alloc_page can hand them
+  // out again, then zero them — silently destroying whatever they backed (the
+  // APIC MMIO PD page, which caused a #PF in smp_boot_aps once kasan_init
+  // allocated shadow PTs over it). Forward-declared externs from alloc.c.
+  uintptr_t end = bump_end_phys();
+  if (bfc_frames && end > init_accounted_end) {
+    size_t idx_start = PHY_TO_PAGE(ALIGN_UP(init_accounted_end, PAGE_SIZE));
+    size_t idx_end = PHY_TO_PAGE(ALIGN_UP(end, PAGE_SIZE));
+    for (size_t i = idx_start; i < idx_end && i < total_page_frames; i++) {
+      bfc_frames[i].status = PAGE_USED;
+      refcount_set(&bfc_frames[i].p_refcount, 1);
+    }
+  }
   bump_disabled = true;
 }
 
@@ -276,6 +304,11 @@ void flush_tlb() { load_cr3((__force uint64_t)PHY_ADDR((uintptr_t)pml4)); }
 // ===================== bump allocator query =====================
 __attribute__((no_sanitize("kernel-address"))) uintptr_t bump_end_phys() {
   return bump_next_phys;
+}
+
+__attribute__((no_sanitize("kernel-address"))) void
+bump_set_accounted(uintptr_t end) {
+  init_accounted_end = end;
 }
 
 // ===================== NX bit enable =====================

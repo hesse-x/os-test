@@ -340,8 +340,8 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
         pid_t zpid = zombie->pid;
         if (exit_code_ptr) {
           uint64_t ptr_val = (__force uint64_t)exit_code_ptr;
-          if (ptr_val < 0xFFFFFFFF80000000ULL && ptr_val &&
-              (ptr_val + sizeof(int32_t) - 1) < 0xFFFFFFFF80000000ULL)
+          if (ptr_val < KERNEL_VMA_BOUNDARY && ptr_val &&
+              (ptr_val + sizeof(int32_t) - 1) < KERNEL_VMA_BOUNDARY)
             *(__force int32_t *)exit_code_ptr = zombie->exit_code;
         }
         sched_task_reap(zombie);
@@ -485,8 +485,8 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
   // ref.
   if (exit_code_ptr) {
     uint64_t ptr_val = (__force uint64_t)exit_code_ptr;
-    if (ptr_val >= 0xFFFFFFFF80000000ULL || !ptr_val ||
-        (ptr_val + sizeof(int32_t) - 1) >= 0xFFFFFFFF80000000ULL) {
+    if (ptr_val >= KERNEL_VMA_BOUNDARY || !ptr_val ||
+        (ptr_val + sizeof(int32_t) - 1) >= KERNEL_VMA_BOUNDARY) {
       printk(LOG_WARN, "waitpid: pid=%d bad exit_code_ptr=0x%lx\n", pid,
              ptr_val);
       return -EFAULT;
@@ -998,8 +998,8 @@ int64_t sys_pipe(int64_t arg1, int64_t unused1, int64_t unused2,
   int __user *fd_ptr = (int __user *__force)arg1;
 
   uint64_t ptr = (__force uint64_t)fd_ptr;
-  if (!ptr || ptr >= 0xFFFFFFFF80000000ULL ||
-      ptr + 2 * sizeof(int) > 0xFFFFFFFF80000000ULL)
+  if (!ptr || ptr >= KERNEL_VMA_BOUNDARY ||
+      ptr + 2 * sizeof(int) > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
 
   xtask *proc = current_task;
@@ -1148,8 +1148,8 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-        ptr_end > 0xFFFFFFFF80000000ULL) {
+    if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+        ptr_end > KERNEL_VMA_BOUNDARY) {
       ret = -EFAULT;
       goto out;
     }
@@ -1178,8 +1178,8 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-        ptr_end > 0xFFFFFFFF80000000ULL) {
+    if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+        ptr_end > KERNEL_VMA_BOUNDARY) {
       ret = -EFAULT;
       goto out;
     }
@@ -1245,8 +1245,8 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-        ptr_end > 0xFFFFFFFF80000000ULL) {
+    if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+        ptr_end > KERNEL_VMA_BOUNDARY) {
       ret = -EFAULT;
       goto out;
     }
@@ -1271,8 +1271,8 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-        ptr_end > 0xFFFFFFFF80000000ULL) {
+    if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+        ptr_end > KERNEL_VMA_BOUNDARY) {
       ret = -EFAULT;
       goto out;
     }
@@ -1325,8 +1325,8 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-        ptr_end > 0xFFFFFFFF80000000ULL) {
+    if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+        ptr_end > KERNEL_VMA_BOUNDARY) {
       ret = -EFAULT;
       goto out;
     }
@@ -1367,8 +1367,8 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   }
   uint64_t ptr_start = (__force uint64_t)buf;
   uint64_t ptr_end = ptr_start + len;
-  if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-      ptr_end > 0xFFFFFFFF80000000ULL) {
+  if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+      ptr_end > KERNEL_VMA_BOUNDARY) {
     ret = -EFAULT;
     goto out;
   }
@@ -1521,8 +1521,8 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-        ptr_end > 0xFFFFFFFF80000000ULL) {
+    if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+        ptr_end > KERNEL_VMA_BOUNDARY) {
       ret = -EFAULT;
       goto out;
     }
@@ -1570,8 +1570,8 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-        ptr_end > 0xFFFFFFFF80000000ULL) {
+    if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+        ptr_end > KERNEL_VMA_BOUNDARY) {
       ret = -EFAULT;
       goto out;
     }
@@ -1627,8 +1627,8 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-        ptr_end > 0xFFFFFFFF80000000ULL) {
+    if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+        ptr_end > KERNEL_VMA_BOUNDARY) {
       ret = -EFAULT;
       goto out;
     }
@@ -1649,8 +1649,8 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-        ptr_end > 0xFFFFFFFF80000000ULL) {
+    if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+        ptr_end > KERNEL_VMA_BOUNDARY) {
       ret = -EFAULT;
       goto out;
     }
@@ -1679,8 +1679,8 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-        ptr_end > 0xFFFFFFFF80000000ULL) {
+    if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+        ptr_end > KERNEL_VMA_BOUNDARY) {
       ret = -EFAULT;
       goto out;
     }
@@ -1710,8 +1710,8 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     uint64_t ptr_start = (__force uint64_t)buf;
     uint64_t ptr_end = ptr_start + len;
-    if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-        ptr_end > 0xFFFFFFFF80000000ULL) {
+    if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+        ptr_end > KERNEL_VMA_BOUNDARY) {
       ret = -EFAULT;
       goto out;
     }
@@ -1764,8 +1764,8 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   }
   uint64_t ptr_start = (__force uint64_t)buf;
   uint64_t ptr_end = ptr_start + len;
-  if (ptr_end < ptr_start || ptr_start >= 0xFFFFFFFF80000000ULL ||
-      ptr_end > 0xFFFFFFFF80000000ULL) {
+  if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+      ptr_end > KERNEL_VMA_BOUNDARY) {
     ret = -EFAULT;
     goto out;
   }
@@ -2534,7 +2534,7 @@ int64_t sys_memfd_create(int64_t arg1, int64_t arg2, int64_t unused1,
 
   if (user_name) {
     uint64_t uptr = (__force uint64_t)user_name;
-    if (uptr >= 0xFFFFFFFF80000000ULL) {
+    if (uptr >= KERNEL_VMA_BOUNDARY) {
       kfree(shm);
       return -EFAULT;
     }
@@ -2821,11 +2821,11 @@ int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   uint64_t vp = (__force uint64_t)vaddr_ptr;
   uint64_t pp = (__force uint64_t)paddr_ptr;
-  if (!vp || vp >= 0xFFFFFFFF80000000ULL ||
-      vp + sizeof(void *) > 0xFFFFFFFF80000000ULL)
+  if (!vp || vp >= KERNEL_VMA_BOUNDARY ||
+      vp + sizeof(void *) > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
-  if (!pp || pp >= 0xFFFFFFFF80000000ULL ||
-      pp + sizeof(int64_t) > 0xFFFFFFFF80000000ULL)
+  if (!pp || pp >= KERNEL_VMA_BOUNDARY ||
+      pp + sizeof(int64_t) > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
 
   size = ALIGN_UP(size, PAGE_SIZE);

@@ -43,6 +43,12 @@ static inline int pte_present(uint64_t pte) {
 #define PTE_WT (PTE_PWT)           // PAT index 1 = WT
 // PAT index 0 = WB (no PCD, no PWT) — default, no flag needed
 
+// Direct-map ceiling: the direct map occupies pdpt_hh[0..DIRECT_MAP_MAX_GB-1]
+// (1GB each), and device MMIO claims top-down slots above it. init_mem caps
+// total_page_frames at this so the frames[] array and KASAN shadow only cover
+// directly-mappable RAM. Raise to extend the direct map.
+#define DIRECT_MAP_MAX_GB 64
+
 // ===================== Constants =====================
 #define PHY_ADDR(addr) ((__force phys_addr_t)((uintptr_t)(addr) - VMA_BASE))
 
@@ -101,6 +107,10 @@ void *bump_alloc(size_t size);
 void bump_init_phys(uintptr_t start);
 void bump_disable();
 uintptr_t bump_end_phys();
+// Publish the bump frontier that init_mem has already accounted for as
+// PAGE_USED in frames[]; bump_disable() marks any pages above this as USED so
+// post-init_mem bump allocations are never re-handed out by bfc_alloc_page.
+void bump_set_accounted(uintptr_t end);
 void enable_nx();
 void enable_sse();
 void pat_init();

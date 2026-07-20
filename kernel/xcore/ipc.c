@@ -286,15 +286,14 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   // Validate user pointer
   uint64_t ptr = (__force uint64_t)buf;
-  if (!ptr || ptr >= 0xFFFFFFFF80000000ULL ||
-      ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
+  if (!ptr || ptr >= KERNEL_VMA_BOUNDARY ||
+      ptr + RECV_MSG_SIZE > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
 
   // Validate data_buf if provided
   if (data_buf &&
-      (data_buf_len == 0 ||
-       (__force uint64_t)data_buf >= 0xFFFFFFFF80000000ULL ||
-       (__force uint64_t)data_buf + data_buf_len > 0xFFFFFFFF80000000ULL))
+      (data_buf_len == 0 || (__force uint64_t)data_buf >= KERNEL_VMA_BOUNDARY ||
+       (__force uint64_t)data_buf + data_buf_len > KERNEL_VMA_BOUNDARY))
     return (int64_t)-EFAULT;
 
   xtask *proc = current_task;
@@ -379,11 +378,11 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   uint64_t req_ptr = (__force uint64_t)request;
   uint64_t rep_ptr = (__force uint64_t)reply;
-  if (!req_ptr || req_ptr >= 0xFFFFFFFF80000000ULL ||
-      req_ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
+  if (!req_ptr || req_ptr >= KERNEL_VMA_BOUNDARY ||
+      req_ptr + RECV_MSG_SIZE > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
-  if (!rep_ptr || rep_ptr >= 0xFFFFFFFF80000000ULL ||
-      rep_ptr + RECV_MSG_SIZE > 0xFFFFFFFF80000000ULL)
+  if (!rep_ptr || rep_ptr >= KERNEL_VMA_BOUNDARY ||
+      rep_ptr + RECV_MSG_SIZE > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
 
   xtask *target = task_get(target_pid);
@@ -471,8 +470,8 @@ int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused3,
 
   uint64_t ptr = (__force uint64_t)reply;
   if (reply_len > 0) {
-    if (!ptr || ptr >= 0xFFFFFFFF80000000ULL ||
-        ptr + reply_len > 0xFFFFFFFF80000000ULL)
+    if (!ptr || ptr >= KERNEL_VMA_BOUNDARY ||
+        ptr + reply_len > KERNEL_VMA_BOUNDARY)
       return (int64_t)-EFAULT;
   }
 
@@ -776,13 +775,13 @@ int64_t sys_msg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     return (int64_t)-EINVAL;
 
   uint64_t msg_ptr = (__force uint64_t)msg_buf;
-  if (!msg_ptr || msg_ptr >= 0xFFFFFFFF80000000ULL ||
-      msg_ptr + msg_len > 0xFFFFFFFF80000000ULL)
+  if (!msg_ptr || msg_ptr >= KERNEL_VMA_BOUNDARY ||
+      msg_ptr + msg_len > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
 
   uint64_t rep_ptr = (__force uint64_t)reply_buf;
-  if (!rep_ptr || rep_ptr >= 0xFFFFFFFF80000000ULL ||
-      rep_ptr + reply_len > 0xFFFFFFFF80000000ULL)
+  if (!rep_ptr || rep_ptr >= KERNEL_VMA_BOUNDARY ||
+      rep_ptr + reply_len > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
 
   return sys_msg_to(target_pid, (void __force *)msg_buf, msg_len,
@@ -796,8 +795,8 @@ int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t unused1,
   size_t resp_len = (size_t)arg2;
 
   uint64_t ptr = (__force uint64_t)resp_buf;
-  if (!ptr || ptr >= 0xFFFFFFFF80000000ULL || resp_len == 0 ||
-      ptr + resp_len > 0xFFFFFFFF80000000ULL)
+  if (!ptr || ptr >= KERNEL_VMA_BOUNDARY || resp_len == 0 ||
+      ptr + resp_len > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
 
   xtask *proc = current_task;

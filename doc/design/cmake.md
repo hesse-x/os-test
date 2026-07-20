@@ -59,7 +59,7 @@ ld -m elf_x86_64 -T build_script/linker.ld <obj_files> -o build/myos.elf
 
 do_link.cmake 处理 $<TARGET_OBJECTS> 的分号/空格混合分隔，统一为 CMake list 后传 ld。
 
-链接脚本 build_script/linker.ld：VMA=0xFFFFFFFF80100000，LMA 用 AT(ADDR(.section) - VMA_BASE) 指定。段顺序 .text → .rodata → .data → .got → .bss。导出 kernel_end。
+链接脚本 build_script/linker.ld：VMA=0xFFFFFF8000100000（KERNEL_VMA_BASE = VMA_BASE + 0x100000），LMA 用 AT(ADDR(.section) - VMA_BASE) 指定。段顺序 .text → .rodata → .data → .got → .bss。导出 kernel_end。
 
 ### 用户态编译规则
 

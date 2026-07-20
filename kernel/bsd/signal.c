@@ -9,6 +9,7 @@
 
 #include "kernel/bsd/signal.h"
 #include "arch/x64/apic.h"
+#include "arch/x64/memlayout.h" // KERNEL_VMA_BOUNDARY
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
@@ -481,8 +482,8 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3,
 
   if (set) {
     uint64_t ptr = (uint64_t)set;
-    if (ptr >= 0xFFFFFFFF80000000ULL ||
-        ptr + sizeof(sigset_t) > 0xFFFFFFFF80000000ULL)
+    if (ptr >= KERNEL_VMA_BOUNDARY ||
+        ptr + sizeof(sigset_t) > KERNEL_VMA_BOUNDARY)
       return (int64_t)-EFAULT;
 
     sigset_t newset;
@@ -514,8 +515,8 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3,
 
   if (oldset) {
     uint64_t ptr = (uint64_t)oldset;
-    if (ptr >= 0xFFFFFFFF80000000ULL ||
-        ptr + sizeof(sigset_t) > 0xFFFFFFFF80000000ULL)
+    if (ptr >= KERNEL_VMA_BOUNDARY ||
+        ptr + sizeof(sigset_t) > KERNEL_VMA_BOUNDARY)
       return (int64_t)-EFAULT;
 
     uint64_t saved_cr3;
@@ -595,8 +596,8 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   if (oldact) {
     uint64_t ptr = (__force uint64_t)oldact;
-    if (ptr >= 0xFFFFFFFF80000000ULL ||
-        ptr + sizeof(struct sigaction) > 0xFFFFFFFF80000000ULL)
+    if (ptr >= KERNEL_VMA_BOUNDARY ||
+        ptr + sizeof(struct sigaction) > KERNEL_VMA_BOUNDARY)
       return (int64_t)-EFAULT;
 
     uint64_t saved_cr3;
@@ -612,8 +613,8 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   if (act) {
     uint64_t ptr = (__force uint64_t)act;
-    if (ptr >= 0xFFFFFFFF80000000ULL ||
-        ptr + sizeof(struct sigaction) > 0xFFFFFFFF80000000ULL)
+    if (ptr >= KERNEL_VMA_BOUNDARY ||
+        ptr + sizeof(struct sigaction) > KERNEL_VMA_BOUNDARY)
       return (int64_t)-EFAULT;
 
     struct sigaction new_act;
@@ -702,8 +703,8 @@ int64_t sys_sigpending(int64_t arg1, int64_t unused1, int64_t unused2,
     return (int64_t)-EFAULT;
 
   uint64_t ptr = (uint64_t)set;
-  if (ptr >= 0xFFFFFFFF80000000ULL ||
-      ptr + sizeof(sigset_t) > 0xFFFFFFFF80000000ULL)
+  if (ptr >= KERNEL_VMA_BOUNDARY ||
+      ptr + sizeof(sigset_t) > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
 
   xtask *proc = current_task;

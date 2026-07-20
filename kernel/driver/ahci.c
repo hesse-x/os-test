@@ -6,6 +6,7 @@
 
 #include "kernel/driver/ahci.h"
 #include "arch/x64/apic.h"
+#include "arch/x64/memlayout.h" // KERNEL_VMA_BOUNDARY
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
@@ -855,10 +856,10 @@ int ahci_write_lba(uint32_t lba, uint32_t count, const void *buf) {
 int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
   // Validate user buffer
   uint64_t ptr = (uint64_t)buf;
-  if (!ptr || ptr >= 0xFFFFFFFF80000000ULL)
+  if (!ptr || ptr >= KERNEL_VMA_BOUNDARY)
     return EFAULT;
   uint64_t end = ptr + (uint64_t)count * 512;
-  if (end < ptr || end > 0xFFFFFFFF80000000ULL)
+  if (end < ptr || end > KERNEL_VMA_BOUNDARY)
     return EFAULT;
   if (count == 0 || count > AHCI_MAX_SECTORS)
     return EINVAL;

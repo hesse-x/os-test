@@ -7,11 +7,11 @@
 | # | 决策 | 选择 | 理由 |
 |---|------|------|------|
 | 1 | 页大小 | 4KB + 2MB huge pages | 内核映射用 2MB huge pages 减少 PT 层级，用户页映射用 4KB |
-| 2 | 地址模型 | higher-half（VMA_BASE = 0xFFFFFFFF80000000） | 内核与用户地址空间分离，内核在所有进程 PML4 中共享映射 |
+| 2 | 地址模型 | higher-half（VMA_BASE = 0xFFFFFF8000000000） | 内核与用户地址空间分离，内核在所有进程 PML4 中共享映射 |
 | 3 | 内核寻址 | -fPIE + RIP-relative | 物理地址和虚拟地址阶段 RIP-relative 自动给出正确地址，不需要 GOT fixup |
 | 4 | 内核 huge page NX | 不标 NX 位 | 初始映射使用代码数据混合的 huge page，不细分 NX |
 | 5 | 用户页 NX | 按需设置 PTE_NX | 栈页、SHM 页加 NX，代码页不加 |
-| 6 | 设备映射区 | device_vma_base = ALIGN_UP(VMA_BASE + max_phys_addr, 1GB) | framebuffer 等映射到此区域 |
+| 6 | 设备映射区 | device MMIO 在 pdpt_hh 内自顶向下扫空闲 PDPT slot 分配 | APIC/PCI BAR 等映射到 direct map（pdpt_hh[0..63]）之上的空闲 slot |
 | 7 | NX 启用方式 | CR4.NXDE(bit 5) + EFER.NXE(bit 11) | x86-64 标准 W^X 保护，两步启用缺一无效 |
 | 8 | NX 启用时机 | isr_init() 中 idt_install 之前 | 页表映射建立后启用，确保后续 PTE_NX 生效 |
 | 9 | AP 启动 NX | AP trampoline EFER 写入增加 NXE | AP 需自行启用 NX，否则 AP 上 PTE_NX 位无效 |
@@ -20,18 +20,21 @@
 
 ### 地址映射
 
+全部在 PML4[511] → pdpt_hh（canonical 高半区，512GB 窗口，基址 = VMA_BASE）：
+
 - 物理 0-1GB → 虚拟 0-1GB（identity map，PML4[0] → PDPT_ident）
-- 物理 0-1GB → 虚拟 0xFFFFFFFF80000000-0xFFFFFFFFC0000000（higher-half，PML4[511] → PDPT_hh[510]）
-- 2MB huge pages（PD 级别 PS=1），初始映射覆盖 1GB
-- extend_mapping 动态扩展：每 1GB 物理块对应 PDPT_hh[510+n]
-- 设备映射区：device_vma_base 起，framebuffer 等映射到此区域
+- 物理 [0, max_map_addr) → 虚拟 [VMA_BASE, VMA_BASE + max_map_addr)（higher-half direct map，单段连续，pdpt_hh[0..n_1gb-1]，2MB huge pages，PS=1）
+- 内核镜像在 direct map 头部：phys 0x100000 → VMA_BASE+0x100000 = KERNEL_VMA_BASE，无需单独映射
+- direct map 上限 DIRECT_MAP_MAX_GB=64（pdpt_hh[0..63]），超限 ASSERT halt
+- 设备映射区：APIC/PCI BAR 等在 pdpt_hh 内自顶向下扫空闲 PDPT slot 分配（落在 pdpt_hh[64+]，不与 direct map 冲突）
 
 ### 地址常量
 
 | 常量 | 值 | 说明 |
 |------|-----|------|
-| VMA_BASE | 0xFFFFFFFF80000000 | higher-half 基址 |
-| KERNEL_VMA_BASE | 0xFFFFFFFF80100000 | 内核 VMA |
+| VMA_BASE | 0xFFFFFF8000000000 | higher-half direct map 基址，phys_to_virt(phys)=phys+VMA_BASE |
+| KERNEL_VMA_BASE | 0xFFFFFF8000100000 | 内核 VMA（= VMA_BASE + 0x100000，direct map 头部）|
+| KERNEL_VMA_BOUNDARY | 0xFFFFFF8000000000 | 用户/内核 VA 分界（= VMA_BASE），用户指针校验 |
 | PAGE_SIZE / PAGE_SIZE_2M | 4096 / 0x200000 | 页大小常量 |
 
 地址转换：vaddr = paddr + VMA_BASE，PHY_ADDR(vaddr) = vaddr - VMA_BASE
@@ -145,7 +148,7 @@ resolve_cow_fault 逻辑：
 
 ### 关键源码位置
 
-- 页表构建：arch/x64/paging.c : enable_paging / extend_mapping / gdt_init
+- 页表构建：arch/x64/paging.c : enable_paging / gdt_init
 - 内核入口：arch/x64/start.S : _start / _entry64
 - 用户页映射：kernel/xcore/mem/user_mapping.c : ensure_pd / ensure_pt / map_user_page_direct / map_user_pages / unmap_user_pages
 - 常量定义：arch/x64/memlayout.h

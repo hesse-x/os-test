@@ -22,8 +22,8 @@
 0x500000 - 0x509FFF      共享页（信号 trampoline + vdso）
 0x800000 - ?             mmap 区域（匿名私有映射 / SHM 映射）
 0x7FFFFFFFD000           用户栈
-0xFFFFFFFF80000000       higher-half 内核映射基址（VMA_BASE）
-0xFFFFFFFF80100000       内核入口（KERNEL_VMA_BASE）
+0xFFFFFF8000000000       higher-half direct map 基址（VMA_BASE），phys_to_virt(phys)=phys+VMA_BASE
+0xFFFFFF8000100000       内核入口（KERNEL_VMA_BASE = VMA_BASE + 0x100000，direct map 头部）
 ```
 
 地址映射和分页设计详见 [page.md](page.md)。

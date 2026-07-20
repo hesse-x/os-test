@@ -6,6 +6,7 @@
 
 #include "kernel/driver/pci.h"
 #include "arch/x64/apic.h"
+#include "arch/x64/memlayout.h" // KERNEL_VMA_BOUNDARY
 #include "arch/x64/paging.h"
 #include "arch/x64/utils.h"
 #include "kernel/xcore/acpi.h"
@@ -389,8 +390,8 @@ int64_t sys_pci_dev_info(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   // Validate user pointer
   uint64_t ptr = (uint64_t)out_ptr;
-  if (!ptr || ptr >= 0xFFFFFFFF80000000ULL ||
-      ptr + sizeof(struct pci_dev_info) > 0xFFFFFFFF80000000ULL)
+  if (!ptr || ptr >= KERNEL_VMA_BOUNDARY ||
+      ptr + sizeof(struct pci_dev_info) > KERNEL_VMA_BOUNDARY)
     return (int64_t)-EFAULT;
 
   // Find the device

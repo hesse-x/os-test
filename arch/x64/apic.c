@@ -10,6 +10,7 @@
 #include "arch/x64/utils.h"
 #include "kernel/xcore/acpi.h"
 #include "kernel/xcore/log.h"
+#include "kernel/xcore/mem/alloc.h"
 #include <stddef.h>
 
 void __iomem *lapic_vaddr = NULL;
@@ -148,8 +149,18 @@ static void map_apic_mmio(uint64_t lapic_phys, uint64_t ioapic_phys) {
     halt();
   }
 
-  // Allocate and fill a PD for the APIC MMIO region
-  uint64_t *pd = (uint64_t *)bump_alloc(4096);
+  // Allocate and fill a PD for the APIC MMIO region.
+  // Use bfc_alloc_page_data (the tracked page allocator), NOT bump_alloc:
+  // init_mem already built bfc_free_list before apic_init() runs, so a
+  // bump_alloc'd PD page would stay PAGE_FREE in frames[] and could be
+  // re-handed out by bfc_alloc_page later (e.g. kasan_init allocates shadow
+  // PT pages) — that page then gets zeroed, silently deleting the APIC MMIO
+  // PTEs and causing a #PF on the next lapic_read (seen in smp_boot_aps).
+  uint64_t *pd = (uint64_t *)bfc_alloc_page_data(1);
+  if (!pd) {
+    printk(LOG_ERROR, "apic: failed to allocate MMIO PD page\n");
+    halt();
+  }
   uintptr_t pd_phys = (__force uintptr_t)PHY_ADDR((uintptr_t)pd);
   for (int i = 0; i < 512; i++)
     pd[i] = 0;
@@ -162,8 +173,11 @@ static void map_apic_mmio(uint64_t lapic_phys, uint64_t ioapic_phys) {
 
   pdpt_hh[pdpt_idx] = pd_phys | PTE_PRESENT | PTE_RW;
 
-  // Compute virtual address for this PDPT slot
-  // pdpt_hh[i] maps virtual: VMA_BASE + (i - 510) * 0x40000000
+  // Compute virtual address for this PDPT slot.
+  // pdpt_hh is the higher-half PDPT under PML4[511] (base = VMA_BASE), so
+  // pdpt_hh[i] maps virtual VMA_BASE + i * 1GB (single continuous span; the
+  // direct map occupies pdpt_hh[0..63], device MMIO claims top-down slots
+  // like this one). The formula below is PML4[511] base | (i << 30).
   uint64_t vma =
       (0xFFFFULL << 48) | (511ULL << 39) | ((uint64_t)pdpt_idx << 30);
   // Account for device_vma_base tracking (must be within this PDPT slot's

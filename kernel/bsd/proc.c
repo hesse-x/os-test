@@ -214,10 +214,15 @@ void file_put(struct file *f) {
   case FD_DEV: {
     struct inode *ip = f->inode;
     if (ip) {
-      if (ip->i_priv) {
-        struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+      /* §5: 锁下读 i_priv(防 borrow-window UAF)。fd 引用由 open 时
+       * dev_ops_get 取,ops 在本 fd close 前不归 0,故读出后可安全用。
+       * close 回调 + 放 fd 引用(dev_ops_put)在锁外完成;put 可能触发
+       * kfree(仅 user-space driver 且本 fd 是最后持有者时)。*/
+      struct dev_ops *ops = dev_ops_peek_by_inode(ip);
+      if (ops) {
         if (ops->driver_pid == 0 && ops->close)
           ops->close(current_task, -1);
+        dev_ops_put(ops); /* 放 fd 引用 */
       }
       inode_put(ip);
     }
@@ -287,8 +292,15 @@ void file_put(struct file *f) {
     break;
   case FD_TTY:
     pty_close_file(f);
-    if (f->inode)
+    if (f->inode) {
+      /* §5: ptmx_open/pts_open 把 FD_DEV mutate 成 FD_TTY,fd 引用随之转交,
+       * close 时在此放(对齐 FD_DEV 分支)。ops 为 static(ptmx_ops)/嵌入式
+       * (pts priv->ops),driver_pid==0,put 永不归 0,仅还回 open 取的计数。*/
+      struct dev_ops *ops = dev_ops_peek_by_inode(f->inode);
+      if (ops)
+        dev_ops_put(ops);
       inode_put(f->inode);
+    }
     break;
   }
   if (f->wq) {
@@ -477,7 +489,8 @@ mm *mm_create(void) {
     new_pml4[i] = 0;
   new_pml4[511] = pml4[511]; // kernel mapping
 #ifdef SANITIZER
-  new_pml4[503] = pml4[503]; // KASAN shadow
+  new_pml4[503] =
+      pml4[503]; // KASAN shadow (PML4[503], disjoint from direct map PML4[511])
 #endif
 
   mm->cr3 = pml4_phys;
@@ -1360,7 +1373,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     new_pml4[i] = 0;
   new_pml4[511] = pml4[511];
 #ifdef SANITIZER
-  new_pml4[503] = pml4[503]; // KASAN shadow
+  new_pml4[503] =
+      pml4[503]; // KASAN shadow (PML4[503], disjoint from direct map PML4[511])
 #endif
 
   // 6. elf_load into new PML4

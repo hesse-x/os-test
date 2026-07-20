@@ -63,8 +63,12 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${_WARN_STR} ${_FREESTANDING_STR} -fPIE -std
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${_WARN_STR} ${_FREESTANDING_STR} -fno-pie")
 
 # KASAN sanitizer flags (applied only to kernel OBJECT libraries via kernel_rules.cmake)
+# KASAN_SHADOW_OFFSET must match kasan.h's #define: gcc's -fsanitize=kernel-address
+# uses this command-line macro to generate shadow-address arithmetic that the
+# runtime (kasan.c) must agree with. Recomputed for VMA_BASE=0xFFFFFF8000000000
+# so shadow(VMA_BASE) lands at PML4[503] base 0xFFFFFB8000000000.
 if(SANITIZE)
-  set(KASAN_CFLAGS "-fsanitize=kernel-address" "-DKASAN_SHADOW_OFFSET=0xDFFFFC0000000000ULL" "-DSANITIZER=1")
+  set(KASAN_CFLAGS "-fsanitize=kernel-address" "-DKASAN_SHADOW_OFFSET=0xDFFFFB9000000000ULL" "-DSANITIZER=1")
 endif()
 
 # Debug mode: add debug info + preserve frame pointer (needed for stack backtrace) + allow all log levels

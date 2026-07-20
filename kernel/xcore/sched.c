@@ -435,25 +435,23 @@ void fpu_context_switch(xtask *prev, xtask *next) {
     ASSERT(prev->fpu_page->status == PAGE_USED);
     void *fpu_data =
         (void *)(__force uintptr_t)phys_to_virt(page_to_phys(prev->fpu_page));
-    // Defense: fxsave target must be a BFC data-page virtual address, not a
-    // struct page * metadata pointer (historical bug: mistakenly treated the
-    // struct page * returned by bfc_alloc_page as a data pointer, fxsave
-    // overwrote Page metadata, only exposed later when kfree detected
-    // page->status anomaly, hard to diagnose)
-    uint64_t vma_start __attribute__((unused)) =
-        (__force uint64_t)phys_to_virt(0);
-    ASSERT((uint64_t)fpu_data >= vma_start &&
-           (uint64_t)fpu_data < vma_start + total_page_frames * PAGE_SIZE);
+    // Defense: fxsave target must be a BFC data page whose physical address
+    // lies within managed RAM. Compare by physical page number, NOT by VA
+    // upper bound: phys_to_virt(0) + total_page_frames*PAGE_SIZE wraps in
+    // 64-bit on large RAM and would falsely fire (or, worse, a stale
+    // VA-boundary check could pass a wild pointer). Pure physical comparison
+    // holds for any RAM size. (Historically this also caught the bug where the
+    // struct page * from bfc_alloc_page was mistaken for a data pointer.)
+    phys_addr_t pphys = (__force phys_addr_t)page_to_phys(prev->fpu_page);
+    ASSERT(pphys < (phys_addr_t)total_page_frames * PAGE_SIZE);
     kernel_fpu_save(fpu_data); // internally clts then fxsave
   }
   if (next && next->fpu_page) {
     ASSERT(next->fpu_page->status == PAGE_USED);
     void *fpu_data =
         (void *)(__force uintptr_t)phys_to_virt(page_to_phys(next->fpu_page));
-    uint64_t vma_start __attribute__((unused)) =
-        (__force uint64_t)phys_to_virt(0);
-    ASSERT((uint64_t)fpu_data >= vma_start &&
-           (uint64_t)fpu_data < vma_start + total_page_frames * PAGE_SIZE);
+    phys_addr_t pphys = (__force phys_addr_t)page_to_phys(next->fpu_page);
+    ASSERT(pphys < (phys_addr_t)total_page_frames * PAGE_SIZE);
     kernel_fpu_restore(fpu_data); // internally clts then fxrstor
   }
 }

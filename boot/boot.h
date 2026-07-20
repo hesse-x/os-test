@@ -10,8 +10,16 @@
 #include <stdint.h>
 
 // VMA constants (shared between boot stub, kernel paging, and assembly)
-#define VMA_BASE 0xFFFFFFFF80000000ULL
-#define KERNEL_VMA_BASE 0xFFFFFFFF80100000ULL
+//
+// VMA_BASE is the canonical high-half start (PML4[511], 512GB window) chosen
+// so the direct map phys_to_virt(phys) = phys + VMA_BASE holds for the full
+// physical memory without 64-bit wraparound: 0xFFFFFF8000000000 leaves ~64GB
+// of upward window (and far more canonical space) before any wrap, whereas the
+// old 0xFFFFFFFF80000000 wrapped past 2GB. The kernel image links at
+// KERNEL_VMA_BASE = VMA_BASE + 0x100000, i.e. the head of the direct map
+// (phys 0x100000 -> KERNEL_VMA_BASE), so it needs no separate mapping.
+#define VMA_BASE 0xFFFFFF8000000000ULL
+#define KERNEL_VMA_BASE 0xFFFFFF8000100000ULL
 #define KERNEL_LOAD_ADDR                                                       \
   0x100000ULL // unified name (was KERNEL_LMA_BASE in paging.h, KERNEL_LOAD_ADDR
               // in stub.c)

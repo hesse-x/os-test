@@ -12,6 +12,19 @@
 # target_compile_options below. )
 set(USER_COMPILE_FLAGS -m64 ${WARN_FLAGS} ${FREESTANDING_FLAGS} -fno-pie)
 
+# When the kernel is built with KASAN (-DSANITIZE=1), propagate the SANITIZER
+# macro to userspace too — WITHOUT -fsanitize=kernel-address (that is
+# kernel-only; userspace has no shadow and the compiler's ASAN instrumentation
+# would not link). The macro lets tests condition out cases whose kernel-side
+# diagnostics trip KASAN under sanitizer builds (e.g. test_pthread_guard_pf:
+# its intentional PROT_NONE #PF runs trap_dispatch's page-table-walk DIAG,
+# which phys_to_virt's user-chosen physical addresses into the poisoned low
+# shadow and halts the kernel on a KASAN false-positive). Userspace code
+# otherwise behaves identically with or without this macro.
+if(SANITIZE)
+    list(APPEND USER_COMPILE_FLAGS -DSANITIZER=1)
+endif()
+
 # DRM UAPI headers are infrastructure (display.h → "drm/drm.h"), so
 # -I.../include is in base compile flags for project-wide "drm/drm.h"
 # resolution. The upstream <drm.h> path (-I.../include/drm) and the

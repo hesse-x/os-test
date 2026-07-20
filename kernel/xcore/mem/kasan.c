@@ -18,8 +18,17 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 
+#include <xos/page.h>
+
 // ===================== State =====================
 static bool kasan_ready = false;
+// Highest virtual address for which shadow is actually mapped. Shadow covers
+// only the direct-mapped RAM window [KERNEL_VMA_BOUNDARY, KERNEL_VMA_BOUNDARY +
+// total_page_frames*PAGE_SIZE); device MMIO (__iomem: APIC, PCI BARs, virtio
+// caps at 0xFFFFFFFE...) lives above this and has NO shadow. kasan_check_*
+// must skip such addresses — dereferencing their (unmapped) shadow byte would
+// itself #PF. Set in kasan_init after the shadow size is known.
+static uint64_t kasan_shadow_covered_end = 0;
 
 // ===================== kasan_global — GCC-generated metadata
 // =====================
@@ -113,11 +122,24 @@ static bool kasan_map_page(uint64_t vaddr, uint64_t phys, uint64_t flags) {
 __attribute__((no_sanitize("kernel-address"))) void kasan_init(void) {
   printk(LOG_INFO, "kasan_init: mapping shadow memory...\n");
 
-  // 1. Allocate physical pages and map them to the shadow range
+  // 1. Allocate physical pages and map them to the shadow range.
+  // Shadow covers exactly the direct-mapped physical RAM
+  // [VMA_BASE, VMA_BASE + total_page_frames*PAGE_SIZE): 1 shadow byte per 8
+  // memory bytes, so shadow_size = total_page_frames*PAGE_SIZE/8. Mapping the
+  // whole 64GB direct-map window instead would need up to 8GB of shadow on a
+  // 4GB machine and OOM here; sizing to real RAM keeps it proportional (e.g.
+  // 4GB RAM -> 512MB shadow, matching the old layout's 256MB on 2GB).
   uint64_t shadow_start = (uint64_t)KASAN_SHADOW_START;
-  uint64_t shadow_size = (uint64_t)KASAN_SHADOW_SIZE;
+  uint64_t shadow_size =
+      (uint64_t)total_page_frames * PAGE_SIZE >> KASAN_SHADOW_SCALE;
   // Round up to page granularity
   size_t num_pages = (shadow_size + PAGE_SIZE - 1) / PAGE_SIZE;
+
+  // Virtual end of the direct-mapped RAM window — the upper bound of addresses
+  // whose shadow is mapped. Used by kasan_check_* to skip __iomem/device MMIO
+  // pointers (which sit above this and have no shadow).
+  kasan_shadow_covered_end =
+      (uint64_t)KERNEL_VMA_BOUNDARY + (uint64_t)total_page_frames * PAGE_SIZE;
 
   printk(LOG_INFO, "  shadow_start=0x%lx size=%luMB pages=%lu\n", shadow_start,
          shadow_size / (1024 * 1024), num_pages);
@@ -142,10 +164,10 @@ __attribute__((no_sanitize("kernel-address"))) void kasan_init(void) {
   // 2. Poison all shadow as inaccessible (0xFF)
   __memset((void *)shadow_start, 0xFF, num_pages * PAGE_SIZE);
 
-  // 3. Unpoison kernel image: [0xFFFFFFFF80100000, kernel_end)
+  // 3. Unpoison kernel image: [KERNEL_VMA_BASE, kernel_end)
   kasan_unpoison_shadow(
-      (const void *)0xFFFFFFFF80100000ULL,
-      (size_t)((uintptr_t)kernel_end - 0xFFFFFFFF80100000ULL));
+      (const void *)KERNEL_VMA_BASE,
+      (size_t)((uintptr_t)kernel_end - (uintptr_t)KERNEL_VMA_BASE));
 
   // 4. Unpoison bump-allocated region: [kernel_end, bump_end)
   //    BFC frames array, page tables, and other kernel data were allocated
@@ -207,9 +229,14 @@ __attribute__((no_sanitize("kernel-address"))) void
 kasan_check_read(const void *addr, size_t size) {
   if (!kasan_ready)
     return;
-  // Only check kernel higher-half addresses (shadow is mapped for these)
+  // Only check kernel higher-half addresses whose shadow is actually mapped:
+  // the direct-mapped RAM window [KERNEL_VMA_BOUNDARY, covered_end). Device
+  // MMIO/__iomem pointers (APIC, PCI BARs, virtio caps) sit above covered_end
+  // and have no shadow; checking them would dereference an unmapped shadow
+  // byte and #PF (seen in virtio_pci_write_status). User addresses (< boundary)
+  // are handled by copy_from/to_user, never by these checks.
   uint64_t a = (uint64_t)addr;
-  if (a < 0xFFFFFFFF80000000ULL)
+  if (a < KERNEL_VMA_BOUNDARY || a >= kasan_shadow_covered_end)
     return;
   uint8_t *shadow = KASAN_MEM_TO_SHADOW(addr);
   size_t i;
@@ -235,8 +262,10 @@ __attribute__((no_sanitize("kernel-address"))) void
 kasan_check_write(const void *addr, size_t size) {
   if (!kasan_ready)
     return;
+  // See kasan_check_read: skip user addresses and __iomem/device MMIO above
+  // the shadow-covered direct-map window.
   uint64_t a = (uint64_t)addr;
-  if (a < 0xFFFFFFFF80000000ULL)
+  if (a < KERNEL_VMA_BOUNDARY || a >= kasan_shadow_covered_end)
     return;
   uint8_t *shadow = KASAN_MEM_TO_SHADOW(addr);
   size_t i;
@@ -280,7 +309,7 @@ kasan_report(const void *addr, size_t size, bool is_write) {
   printk(LOG_ERROR, "  backtrace:\n");
   uint64_t *rbp;
   __asm__ volatile("movq %%rbp, %0" : "=r"(rbp));
-  for (int depth = 0; depth < 16 && (uint64_t)rbp > 0xFFFFFFFF80000000ULL;
+  for (int depth = 0; depth < 16 && (uint64_t)rbp > KERNEL_VMA_BOUNDARY;
        depth++) {
     uint64_t ret_addr = rbp[1];
     printk(LOG_ERROR, "    0x%016lX\n", ret_addr);

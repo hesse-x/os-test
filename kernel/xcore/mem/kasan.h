@@ -7,6 +7,7 @@
 #ifndef KERNEL_MEM_KASAN_H
 #define KERNEL_MEM_KASAN_H
 
+#include "arch/x64/memlayout.h"  // KERNEL_VMA_BOUNDARY (= VMA_BASE)
 #include "kernel/xcore/sparse.h" // __user, __force
 #include <stdbool.h>
 #include <stddef.h>
@@ -14,8 +15,14 @@
 
 #ifdef SANITIZER
 
-// Shadow offset: addr >> 3 + offset = shadow address
-#define KASAN_SHADOW_OFFSET 0xDFFFFC0000000000ULL
+// Shadow offset: addr >> 3 + offset = shadow address.
+// Picked so shadow(VMA_BASE) lands at the base of PML4[503]
+// (0xFFFFFB8000000000), a 512GB canonical high-half window disjoint from the
+// direct map, which lives in PML4[511] (base 0xFFFFFF8000000000 = VMA_BASE).
+// VMA_BASE moving from 0xFFFFFFFF80000000 to 0xFFFFFF8000000000 keeps it in
+// PML4[511], so the direct-map/shadow slot split is unchanged; only the offset
+// is recomputed for the new VMA_BASE.
+#define KASAN_SHADOW_OFFSET 0xDFFFFB9000000000ULL
 #define KASAN_SHADOW_SCALE 3 // 1 shadow byte = 8 memory bytes
 
 // Shadow byte values
@@ -29,12 +36,10 @@
 #define KASAN_SHADOW_TO_MEM(shadow)                                            \
   ((void *)(((uint64_t)(shadow) - KASAN_SHADOW_OFFSET) << KASAN_SHADOW_SCALE))
 
-// Shadow memory range: covers 0xFFFFFFFF80000000 ~ 0xFFFFFFFFFFFFFFFF
-// = 2GB virtual, 256MB shadow
-#define KASAN_SHADOW_START KASAN_MEM_TO_SHADOW(0xFFFFFFFF80000000ULL)
-#define KASAN_SHADOW_END KASAN_MEM_TO_SHADOW(0xFFFFFFFFFFFFFFFFULL)
-#define KASAN_SHADOW_SIZE                                                      \
-  ((uint64_t)KASAN_SHADOW_END - (uint64_t)KASAN_SHADOW_START)
+// Shadow memory starts at shadow(VMA_BASE). The covered span is computed at
+// runtime in kasan_init from total_page_frames (only actual RAM is shadowed,
+// not the whole 64GB direct-map window), so there is no compile-time END/SIZE.
+#define KASAN_SHADOW_START KASAN_MEM_TO_SHADOW(KERNEL_VMA_BOUNDARY)
 
 // Initialization (called between kernel_init_finish and slab_init)
 void kasan_init(void);
