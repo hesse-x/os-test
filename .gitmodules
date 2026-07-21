@@ -20,3 +20,6 @@
 [submodule "third_party/libexpat"]
 	path = third_party/libexpat
 	url = https://github.com/libexpat/libexpat.git
+[submodule "third_party/llvm-project"]
+	path = third_party/llvm-project
+	url = https://gitee.com/artorias123/llvm-projec-shallow.git

@@ -68,10 +68,16 @@
 #include <xos/stat.h>
 #include <xos/syscall.h>
 #include <xos/syscall_nums.h>
+#include <xos/time.h>
+#include <xos/utsname.h>
 
 /* DRM 主号（仅 stat 设备号用，与 virtio_gpu.c DRM_MAJOR 同值；226 是 DRM 语义、
  * 不属于 devtmpfs 通用层，故各 .c 顶部各自定义而非放公共头）。 */
 #define DRM_MAJOR_FOR_STAT 226
+
+// OS-unique mmap flags (not in uapi mman.h, collision-free in 1024+ namespace)
+#define MAP_PHYSICAL 0x80000000
+#define MAP_UC 0x08 /* Map as uncacheable (device MMIO) */
 
 // ===================== File protocol for FD_FILE <-> fs_driver IPC
 // =====================
@@ -515,7 +521,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   int fd = (int)arg5;
   uint64_t offset = arg6;
 
-  if (size == 0 && ((flags & 0x01) == 0 || fd < 0))
+  if (size == 0 && ((flags & MAP_SHARED) == 0 || fd < 0))
     return -EINVAL;
   if (size > 128 * 1024 * 1024)
     return -EINVAL;
@@ -529,7 +535,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
   // MAP_SHARED + fd >= 0: SHM or DEV fd mapping
-  if ((flags & 0x01) && fd >= 0) {
+  if ((flags & MAP_SHARED) && fd >= 0) {
     if (fd >= MAX_FD) {
       spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
       return -EBADF;
@@ -1113,8 +1119,6 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   int fd = (int)arg1;
   const char __user *buf = (const char __user *__force)arg2;
   size_t len = (size_t)arg3;
-  if (len > 65536)
-    len = 65536;
 
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
@@ -1480,8 +1484,6 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   int fd = (int)arg1;
   char __user *buf = (char __user *__force)arg2;
   size_t len = (size_t)arg3;
-  if (len > 65536)
-    len = 65536;
 
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
@@ -2050,6 +2052,464 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 out:
   file_put(f);
   return ret;
+}
+
+// ===================== ENOSYS stubs (C group) =====================
+int64_t sys_sendfile(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+                     int64_t a6) {
+  return -ENOSYS;
+}
+int64_t sys_link(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+                 int64_t a6) {
+  return -ENOSYS;
+}
+int64_t sys_symlink(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+                    int64_t a6) {
+  return -ENOSYS;
+}
+int64_t sys_readlink(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+                     int64_t a6) {
+  return -ENOSYS;
+}
+int64_t sys_chmod(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+                  int64_t a6) {
+  (void)a1;
+  return 0;
+}
+int64_t sys_fchmod(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+                   int64_t a6) {
+  (void)a1;
+  return 0;
+}
+int64_t sys_chown(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+                  int64_t a6) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  return 0;
+}
+int64_t sys_fchown(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+                   int64_t a6) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  return 0;
+}
+int64_t sys_linkat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+                   int64_t a6) {
+  return -ENOSYS;
+}
+int64_t sys_symlinkat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
+                      int64_t a5, int64_t a6) {
+  return -ENOSYS;
+}
+int64_t sys_readlinkat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
+                       int64_t a5, int64_t a6) {
+  return -ENOSYS;
+}
+int64_t sys_fchmodat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+                     int64_t a6) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  return 0;
+}
+int64_t sys_fchownat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+                     int64_t a6) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  return 0;
+}
+int64_t sys_utimensat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
+                      int64_t a5, int64_t a6) {
+  return -ENOSYS;
+}
+int64_t sys_clock_settime(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
+                          int64_t a5, int64_t a6) {
+  return -ENOSYS;
+}
+int64_t sys_getitimer(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
+                      int64_t a5, int64_t a6) {
+  return -ENOSYS;
+}
+int64_t sys_setitimer(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
+                      int64_t a5, int64_t a6) {
+  return -ENOSYS;
+}
+
+// ===================== trivial-return stubs (C2 group) =====================
+int64_t sys_access(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
+                   int64_t a6) {
+  (void)a1;
+  (void)a2;
+  return 0;
+}
+int64_t sys_faccessat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
+                      int64_t a5, int64_t a6) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  return 0;
+}
+
+// ===================== Thin wrappers (A group) =====================
+
+// A1: mkdirat(dirfd, path, mode) — AT_FDCWD-only thin wrapper over sys_mkdir
+int64_t sys_mkdirat(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                    int64_t unused2, int64_t unused3) {
+  int dirfd = (int)arg1;
+  if (dirfd != AT_FDCWD)
+    return -ENOSYS;
+  return sys_mkdir(arg2, arg3, 0, 0, 0, 0);
+}
+
+// A2: unlinkat(dirfd, path, flags) — AT_FDCWD-only; AT_REMOVEDIR → rmdir, else
+// → unlink
+int64_t sys_unlinkat(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                     int64_t unused2, int64_t unused3) {
+  int dirfd = (int)arg1;
+  int flags = (int)arg3;
+  if (dirfd != AT_FDCWD)
+    return -ENOSYS;
+  if (flags & AT_REMOVEDIR)
+    return sys_rmdir(arg2, 0, 0, 0, 0, 0);
+  return sys_unlink(arg2, 0, 0, 0, 0, 0);
+}
+
+// A3: renameat(olddirfd, oldpath, newdirfd, newpath) — AT_FDCWD-only
+int64_t sys_renameat(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                     int64_t unused1, int64_t unused2) {
+  int olddirfd = (int)arg1;
+  int newdirfd = (int)arg3;
+  if (olddirfd != AT_FDCWD || newdirfd != AT_FDCWD)
+    return -ENOSYS;
+  return sys_rename(arg2, arg4, 0, 0, 0, 0);
+}
+
+// A4: dup(oldfd) — find lowest available fd ≥ 0, install same file
+int64_t sys_dup(int64_t arg1, int64_t unused1, int64_t unused2, int64_t unused3,
+                int64_t unused4, int64_t unused5) {
+  int old_fd = (int)arg1;
+  if (old_fd < 0 || old_fd >= MAX_FD)
+    return (int64_t)-EBADF;
+
+  xtask *proc = current_task;
+  spinlock *fdlk = &proc->proc->files->fd_lock;
+  spin_lock(fdlk);
+  struct file *old_f = fd_lookup(proc->proc->files, old_fd);
+  if (!old_f) {
+    spin_unlock(fdlk);
+    return (int64_t)-EBADF;
+  }
+  int new_fd = alloc_fd(proc->proc->files, 0);
+  if (new_fd < 0) {
+    spin_unlock(fdlk);
+    return (int64_t)-EMFILE;
+  }
+  fd_install(proc->proc->files, new_fd, old_f);
+  file_get(old_f);
+  spin_unlock(fdlk);
+  return (int64_t)new_fd;
+}
+
+// A5: dup3(oldfd, newfd, flags) — like dup2 but with O_CLOEXEC support
+// Temporary: sets FD_CLOEXEC on shared file struct (same bug as
+// F_DUPFD_CLOEXEC, complete fix deferred to per-fd-flags infrastructure, see
+// E3).
+int64_t sys_dup3(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                 int64_t unused2, int64_t unused3) {
+  int old_fd = (int)arg1;
+  int new_fd = (int)arg2;
+  int flags = (int)arg3;
+
+  if (old_fd < 0 || old_fd >= MAX_FD || new_fd < 0 || new_fd >= MAX_FD)
+    return (int64_t)-EBADF;
+  if (old_fd == new_fd)
+    return (int64_t)-EINVAL;
+
+  xtask *proc = current_task;
+  spinlock *fdlk = &proc->proc->files->fd_lock;
+  spin_lock(fdlk);
+
+  struct file *old_f = fd_lookup(proc->proc->files, old_fd);
+  if (!old_f) {
+    spin_unlock(fdlk);
+    return (int64_t)-EBADF;
+  }
+
+  struct file *victim = fd_uninstall(proc->proc->files, new_fd);
+  fd_install(proc->proc->files, new_fd, old_f);
+  file_get(old_f);
+
+  if (flags & O_CLOEXEC)
+    old_f->flags |= FD_CLOEXEC; // known bug: sets on shared file (E3 deferred)
+
+  spin_unlock(fdlk);
+  if (victim) {
+    synchronize_rcu();
+    file_put(victim);
+  }
+  return (int64_t)new_fd;
+}
+
+// A8: gettimeofday(tv, tz) — thin wrapper over clock_gettime(CLOCK_REALTIME)
+// tz is always ignored (Linux returns 0 for tz, most callers pass NULL).
+// NOTE: CLOCK_REALTIME currently uses sched_clock() (monotonic, same as
+// CLOCK_MONOTONIC) — no wall-clock source yet. See E7 (deferred).
+int64_t sys_gettimeofday(int64_t arg1, int64_t arg2, int64_t unused1,
+                         int64_t unused2, int64_t unused3, int64_t unused4) {
+  struct timeval __user *tv = (struct timeval __user *)(uintptr_t)arg1;
+  (void)arg2; // timezone always ignored
+
+  if (!tv)
+    return 0; // Linux: tv=NULL is valid (just don't fill it)
+
+  uint64_t ns =
+      sched_clock(); // CLOCK_REALTIME = sched_clock() for now (E7 TODO)
+  struct timeval ktv;
+  ktv.tv_sec = (time_t)(ns / 1000000000ULL);
+  ktv.tv_usec = (long)(ns % 1000000000ULL) / 1000;
+
+  if (copy_to_user(tv, &ktv, sizeof(ktv)))
+    return -EFAULT;
+  return 0;
+}
+
+// ===================== Simple kernel implementations (B group)
+// =====================
+
+// B1: pread64(fd, buf, count, offset) — read at specified offset without
+// changing file offset
+int64_t sys_pread64(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                    int64_t unused1, int64_t unused2) {
+  int fd = (int)arg1;
+  void __user *buf = (void __user *__force)arg2;
+  size_t count = (size_t)arg3;
+  uint64_t offset = (uint64_t)arg4;
+
+  if (fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+
+  xtask *proc = current_task;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    return -EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+
+  int64_t ret;
+  if (f->type != FD_REGULAR) {
+    ret = -ESPIPE;
+    goto out;
+  }
+  if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR)) {
+    ret = -EBADF;
+    goto out;
+  }
+  struct inode *ip = f->inode;
+  if (!ip) {
+    ret = -EBADF;
+    goto out;
+  }
+  if (!buf) {
+    ret = -EFAULT;
+    goto out;
+  }
+  uint64_t ptr_start = (__force uint64_t)buf;
+  uint64_t ptr_end = ptr_start + count;
+  if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+      ptr_end > KERNEL_VMA_BOUNDARY) {
+    ret = -EFAULT;
+    goto out;
+  }
+
+  if (offset >= ip->size) {
+    ret = 0;
+    goto out;
+  }
+  size_t avail = ip->size - (size_t)offset;
+  if (count > avail)
+    count = avail;
+  int nread = fat32_read(ip, offset, (void __force *)buf, count);
+  if (nread < 0) {
+    ret = -(int64_t)nread;
+    goto out;
+  }
+  ret = (int64_t)nread;
+
+out:
+  file_put(f);
+  return ret;
+}
+
+// B2: pwrite64(fd, buf, count, offset) — write at specified offset without
+// changing file offset
+int64_t sys_pwrite64(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                     int64_t unused1, int64_t unused2) {
+  int fd = (int)arg1;
+  const void __user *buf = (const void __user *__force)arg2;
+  size_t count = (size_t)arg3;
+  uint64_t offset = (uint64_t)arg4;
+
+  if (fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+
+  xtask *proc = current_task;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    return -EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+
+  int64_t ret;
+  if (f->type != FD_REGULAR) {
+    ret = -ESPIPE;
+    goto out;
+  }
+  if (!(f->flags & (O_WRONLY | O_RDWR))) {
+    ret = -EBADF;
+    goto out;
+  }
+  struct inode *ip = f->inode;
+  if (!ip) {
+    ret = -EBADF;
+    goto out;
+  }
+  if (!buf) {
+    ret = -EFAULT;
+    goto out;
+  }
+  uint64_t ptr_start = (__force uint64_t)buf;
+  uint64_t ptr_end = ptr_start + count;
+  if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+      ptr_end > KERNEL_VMA_BOUNDARY) {
+    ret = -EFAULT;
+    goto out;
+  }
+
+  int written = fat32_write(ip, offset, (const void __force *)buf, count);
+  if (written < 0) {
+    ret = (int64_t)written;
+    goto out;
+  }
+  ret = (int64_t)written;
+
+out:
+  file_put(f);
+  return ret;
+}
+
+// B3: readv(fd, iov, iovcnt) — scatter read over iovec array
+int64_t sys_readv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                  int64_t unused2, int64_t unused3) {
+  int fd = (int)arg1;
+  const struct iovec __user *uiov = (const struct iovec __user *__force)arg2;
+  int iovcnt = (int)arg3;
+
+  if (fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+  if (!uiov || iovcnt < 0 || iovcnt > 1024)
+    return -EINVAL;
+
+  struct iovec *kiov =
+      (struct iovec *)kmalloc(sizeof(struct iovec) * (size_t)iovcnt);
+  if (!kiov)
+    return -ENOMEM;
+  if (copy_from_user(kiov, uiov, sizeof(struct iovec) * (size_t)iovcnt)) {
+    kfree(kiov);
+    return -EFAULT;
+  }
+
+  int64_t total = 0;
+  for (int i = 0; i < iovcnt; i++) {
+    if (!kiov[i].iov_base || kiov[i].iov_len == 0)
+      continue;
+    int64_t r = sys_read(fd, (int64_t)(__force uintptr_t)kiov[i].iov_base,
+                         (int64_t)kiov[i].iov_len, 0, 0, 0);
+    if (r < 0) {
+      if (total > 0)
+        break;
+      kfree(kiov);
+      return r;
+    }
+    total += r;
+    if ((size_t)r < kiov[i].iov_len)
+      break;
+  }
+  kfree(kiov);
+  return total;
+}
+
+// B4: writev(fd, iov, iovcnt) — scatter write over iovec array
+int64_t sys_writev(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                   int64_t unused2, int64_t unused3) {
+  int fd = (int)arg1;
+  const struct iovec __user *uiov = (const struct iovec __user *__force)arg2;
+  int iovcnt = (int)arg3;
+
+  if (fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+  if (!uiov || iovcnt < 0 || iovcnt > 1024)
+    return -EINVAL;
+
+  struct iovec *kiov =
+      (struct iovec *)kmalloc(sizeof(struct iovec) * (size_t)iovcnt);
+  if (!kiov)
+    return -ENOMEM;
+  if (copy_from_user(kiov, uiov, sizeof(struct iovec) * (size_t)iovcnt)) {
+    kfree(kiov);
+    return -EFAULT;
+  }
+
+  int64_t total = 0;
+  for (int i = 0; i < iovcnt; i++) {
+    if (!kiov[i].iov_base || kiov[i].iov_len == 0)
+      continue;
+    int64_t r = sys_write(fd, (int64_t)(__force uintptr_t)kiov[i].iov_base,
+                          (int64_t)kiov[i].iov_len, 0, 0, 0);
+    if (r < 0) {
+      if (total > 0)
+        break;
+      kfree(kiov);
+      return r;
+    }
+    total += r;
+    if ((size_t)r < kiov[i].iov_len)
+      break;
+  }
+  kfree(kiov);
+  return total;
+}
+
+// B5: uname(buf) — fill new_utsname struct
+int64_t sys_uname(int64_t arg1, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4, int64_t unused5) {
+  struct new_utsname __user *ubuf =
+      (struct new_utsname __user *)(uintptr_t)arg1;
+
+  if (!ubuf)
+    return -EFAULT;
+
+  struct new_utsname kbuf;
+  __memset(&kbuf, 0, sizeof(kbuf));
+  __strncpy(kbuf.sysname, "Xos", __NEW_UTS_LEN);
+  __strncpy(kbuf.nodename, "(hostname)", __NEW_UTS_LEN);
+  __strncpy(kbuf.release, "0.1", __NEW_UTS_LEN);
+  __strncpy(kbuf.version, "#1 SMP", __NEW_UTS_LEN);
+  __strncpy(kbuf.machine, "x86_64", __NEW_UTS_LEN);
+  __strncpy(kbuf.domainname, "", __NEW_UTS_LEN);
+
+  if (copy_to_user(ubuf, &kbuf, sizeof(kbuf)))
+    return -EFAULT;
+  return 0;
 }
 
 // ===================== BSD syscall: ioctl =====================
@@ -3180,6 +3640,14 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_recvmsg(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SHUTDOWN:
     return sys_shutdown(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETSOCKNAME:
+    return sys_getsockname(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETPEERNAME:
+    return sys_getpeername(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SETSOCKOPT:
+    return sys_setsockopt(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETSOCKOPT:
+    return sys_getsockopt(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_POLL:
     return sys_poll(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // Thread syscalls
@@ -3260,6 +3728,75 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_signalfd4(tf->rdi, tf->rsi, tf->rdx, tf->r10);
   case SYS_MOUNT:
     return sys_mount(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // ENOSYS stubs (C group)
+  case SYS_SENDFILE:
+    return sys_sendfile(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_LINK:
+    return sys_link(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SYMLINK:
+    return sys_symlink(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_READLINK:
+    return sys_readlink(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_UTIMENSAT:
+    return sys_utimensat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_CLOCK_SETTIME:
+    return sys_clock_settime(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                             tf->r9);
+  case SYS_GETITIMER:
+    return sys_getitimer(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SETITIMER:
+    return sys_setitimer(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_LINKAT:
+    return sys_linkat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SYMLINKAT:
+    return sys_symlinkat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_READLINKAT:
+    return sys_readlinkat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // trivial-return stubs (C2 group)
+  case SYS_ACCESS:
+    return sys_access(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_FACCESSAT:
+    return sys_faccessat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_CHMOD:
+    return sys_chmod(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_FCHMOD:
+    return sys_fchmod(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_FCHMODAT:
+    return sys_fchmodat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_CHOWN:
+    return sys_chown(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_FCHOWN:
+    return sys_fchown(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_FCHOWNAT:
+    return sys_fchownat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // Thin wrappers (A group)
+  case SYS_DUP:
+    return sys_dup(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_DUP3:
+    return sys_dup3(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_MKDIRAT:
+    return sys_mkdirat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_UNLINKAT:
+    return sys_unlinkat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_RENAMEAT:
+    return sys_renameat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_RECVFROM:
+    return sys_recvfrom(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SENDTO:
+    return sys_sendto(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETTIMEOFDAY:
+    return sys_gettimeofday(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // Simple kernel implementations (B group)
+  case SYS_PREAD64:
+    return sys_pread64(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_PWRITE64:
+    return sys_pwrite64(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_READV:
+    return sys_readv(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_WRITEV:
+    return sys_writev(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_UNAME:
+    return sys_uname(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_DEV_SET_META:
     return sys_dev_set_meta(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MKNOD:

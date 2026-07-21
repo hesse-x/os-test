@@ -103,6 +103,46 @@ int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 int64_t sys_dev_set_meta(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                          int64_t unused1, int64_t unused2);
 
+// ENOSYS stubs (C group)
+int64_t sys_sendfile(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_link(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_symlink(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_readlink(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_chmod(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_fchmod(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_chown(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_fchown(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_linkat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_symlinkat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_readlinkat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_fchmodat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_fchownat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_utimensat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_clock_settime(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_getitimer(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_setitimer(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
+// trivial-return stubs (C2 group: return 0)
+int64_t sys_access(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_faccessat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
+// Thin wrappers (A group)
+int64_t sys_dup(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_dup3(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_mkdirat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_unlinkat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_renameat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_recvfrom(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_sendto(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_gettimeofday(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
+// Simple kernel implementations (B group)
+int64_t sys_pread64(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_pwrite64(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_readv(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_writev(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_uname(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
 // Socket (declared in socket.h, not repeated here)
 
 #endif // KERNEL_BSD_SYSCALL_H

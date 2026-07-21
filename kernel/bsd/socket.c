@@ -1902,7 +1902,8 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     if (deadline > 0) {
       uint64_t now = sched_clock();
       if (now >= deadline) {
-        __memset(kfds, 0, nfds * sizeof(struct pollfd));
+        for (nfds_t i = 0; i < nfds; i++)
+          kfds[i].revents = 0;
         if (copy_to_user(fds, kfds, nfds * sizeof(struct pollfd))) {
           ret = (int64_t)-EFAULT;
           goto poll_out;
@@ -1936,7 +1937,8 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
 
     if (proc->wait_timed_out && timeout_ms > 0) {
-      __memset(kfds, 0, nfds * sizeof(struct pollfd));
+      for (nfds_t i = 0; i < nfds; i++)
+        kfds[i].revents = 0;
       if (copy_to_user(fds, kfds, nfds * sizeof(struct pollfd))) {
         ret = (int64_t)-EFAULT;
         goto poll_out;
@@ -1997,4 +1999,418 @@ int64_t unix_sock_read(struct unix_sock *sock, void *buf, size_t len) {
   iov.iov_base = buf;
   iov.iov_len = len;
   return unix_sock_recvmsg(sock, &iov, 1, NULL, NULL, 0);
+}
+
+// A6: recvfrom(fd, buf, len, flags, addr, addrlen) — thin wrapper over recvmsg
+int64_t sys_recvfrom(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                     int64_t arg5, int64_t arg6) {
+  int fd = (int)arg1;
+  void __user *buf = (void __user *__force)arg2;
+  size_t len = (size_t)arg3;
+  (void)arg4; // flags — not used for AF_UNIX
+  struct sockaddr __user *addr = (struct sockaddr __user * __force) arg5;
+  socklen_t __user *addrlen = (socklen_t __user * __force) arg6;
+
+  xtask *proc = current_task;
+  if (fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    return -EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+
+  int64_t ret;
+  if (f->type != FD_SOCKET) {
+    ret = -ENOTSOCK;
+    goto out;
+  }
+  struct unix_sock *sock = f->sock;
+  if (!sock) {
+    ret = -EBADF;
+    goto out;
+  }
+
+  if (!buf) {
+    ret = -EFAULT;
+    goto out;
+  }
+  uint64_t ptr_start = (__force uint64_t)buf;
+  uint64_t ptr_end = ptr_start + len;
+  if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+      ptr_end > KERNEL_VMA_BOUNDARY) {
+    ret = -EFAULT;
+    goto out;
+  }
+
+  ret = unix_sock_read(sock, (void __force *)buf, len);
+
+  // Fill addr if requested (peer address for connected socket)
+  if (addr && ret > 0 && sock->peer_sock) {
+    struct sockaddr_un su;
+    __memset(&su, 0, sizeof(su));
+    su.sun_family = AF_UNIX;
+    if (sock->peer_sock->sun_path[0])
+      __memcpy(su.sun_path, sock->peer_sock->sun_path, UNIX_PATH_MAX);
+    socklen_t actual_len = sizeof(sa_family_t);
+    if (su.sun_path[0])
+      actual_len = sizeof(struct sockaddr_un);
+    if (copy_to_user(addr, &su, actual_len))
+      ret = -EFAULT;
+    if (addrlen) {
+      uint64_t al = (__force uint64_t)addrlen;
+      if (al < KERNEL_VMA_BOUNDARY)
+        *(__force socklen_t *)addrlen = actual_len;
+    }
+  }
+
+out:
+  file_put(f);
+  return ret;
+}
+
+// A7: sendto(fd, buf, len, flags, addr, addrlen) — thin wrapper over sendmsg
+int64_t sys_sendto(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                   int64_t arg5, int64_t arg6) {
+  int fd = (int)arg1;
+  const void __user *buf = (const void __user *__force)arg2;
+  size_t len = (size_t)arg3;
+  (void)arg4; // flags
+  const struct sockaddr __user *addr =
+      (const struct sockaddr __user *__force)arg5;
+  socklen_t addrlen = (socklen_t)arg6;
+
+  xtask *proc = current_task;
+  if (fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    return -EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+
+  int64_t ret;
+  if (f->type != FD_SOCKET) {
+    ret = -ENOTSOCK;
+    goto out;
+  }
+  struct unix_sock *sock = f->sock;
+  if (!sock) {
+    ret = -EBADF;
+    goto out;
+  }
+  if (!buf) {
+    ret = -EFAULT;
+    goto out;
+  }
+  uint64_t ptr_start = (__force uint64_t)buf;
+  uint64_t ptr_end = ptr_start + len;
+  if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+      ptr_end > KERNEL_VMA_BOUNDARY) {
+    ret = -EFAULT;
+    goto out;
+  }
+
+  // For AF_UNIX, sendto to a connected socket ignores addr (uses peer).
+  // sendto to unconnected + addr → connect-like send. We only support
+  // connected.
+  if (addr && addrlen > 0) {
+    if (!sock->peer_sock) {
+      ret = -EOPNOTSUPP;
+      goto out;
+    }
+  }
+
+  ret = unix_sock_write(sock, (const void __force *)buf, len);
+
+out:
+  file_put(f);
+  return ret;
+}
+
+// F1: getsockname(fd, addr, addrlen) — return bound address of socket
+int64_t sys_getsockname(int64_t arg1, int64_t arg2, int64_t arg3,
+                        int64_t unused1, int64_t unused2, int64_t unused3) {
+  int fd = (int)arg1;
+  struct sockaddr __user *addr = (struct sockaddr __user * __force) arg2;
+  socklen_t __user *addrlen_ptr = (socklen_t __user * __force) arg3;
+
+  if (fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+
+  xtask *proc = current_task;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    return -EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+
+  int64_t ret;
+  if (f->type != FD_SOCKET) {
+    ret = -ENOTSOCK;
+    goto out;
+  }
+  struct unix_sock *sock = f->sock;
+  if (!sock) {
+    ret = -EBADF;
+    goto out;
+  }
+
+  struct sockaddr_un su;
+  __memset(&su, 0, sizeof(su));
+  su.sun_family = AF_UNIX;
+  if (sock->sun_path[0])
+    __memcpy(su.sun_path, sock->sun_path, UNIX_PATH_MAX);
+
+  socklen_t actual_len = sizeof(sa_family_t);
+  if (su.sun_path[0])
+    actual_len = sizeof(struct sockaddr_un);
+
+  if (addr) {
+    if (copy_to_user(addr, &su, actual_len)) {
+      ret = -EFAULT;
+      goto out;
+    }
+  }
+  if (addrlen_ptr) {
+    uint64_t al = (__force uint64_t)addrlen_ptr;
+    if (al >= KERNEL_VMA_BOUNDARY) {
+      ret = -EFAULT;
+      goto out;
+    }
+    *(__force socklen_t *)addrlen_ptr = actual_len;
+  }
+  ret = 0;
+
+out:
+  file_put(f);
+  return ret;
+}
+
+// F2: getpeername(fd, addr, addrlen) — return peer address of connected socket
+int64_t sys_getpeername(int64_t arg1, int64_t arg2, int64_t arg3,
+                        int64_t unused1, int64_t unused2, int64_t unused3) {
+  int fd = (int)arg1;
+  struct sockaddr __user *addr = (struct sockaddr __user * __force) arg2;
+  socklen_t __user *addrlen_ptr = (socklen_t __user * __force) arg3;
+
+  if (fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+
+  xtask *proc = current_task;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    return -EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+
+  int64_t ret;
+  if (f->type != FD_SOCKET) {
+    ret = -ENOTSOCK;
+    goto out;
+  }
+  struct unix_sock *sock = f->sock;
+  if (!sock) {
+    ret = -EBADF;
+    goto out;
+  }
+  if (!sock->peer_sock) {
+    ret = -ENOTCONN;
+    goto out;
+  }
+
+  struct sockaddr_un su;
+  __memset(&su, 0, sizeof(su));
+  su.sun_family = AF_UNIX;
+  if (sock->peer_sock->sun_path[0])
+    __memcpy(su.sun_path, sock->peer_sock->sun_path, UNIX_PATH_MAX);
+
+  socklen_t actual_len = sizeof(sa_family_t);
+  if (su.sun_path[0])
+    actual_len = sizeof(struct sockaddr_un);
+
+  if (addr) {
+    if (copy_to_user(addr, &su, actual_len)) {
+      ret = -EFAULT;
+      goto out;
+    }
+  }
+  if (addrlen_ptr) {
+    uint64_t al = (__force uint64_t)addrlen_ptr;
+    if (al >= KERNEL_VMA_BOUNDARY) {
+      ret = -EFAULT;
+      goto out;
+    }
+    *(__force socklen_t *)addrlen_ptr = actual_len;
+  }
+  ret = 0;
+
+out:
+  file_put(f);
+  return ret;
+}
+
+// F3: getsockopt(fd, level, optname, optval, optlen) — return defaults for
+// common options
+int64_t sys_getsockopt(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                       int64_t arg5, int64_t unused) {
+  int fd = (int)arg1;
+  int level = (int)arg2;
+  int optname = (int)arg3;
+  void __user *optval = (void __user *__force)arg4;
+  socklen_t __user *optlen_ptr = (socklen_t __user * __force) arg5;
+
+  if (fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+
+  xtask *proc = current_task;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    return -EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+
+  int64_t ret;
+  if (f->type != FD_SOCKET) {
+    ret = -ENOTSOCK;
+    goto out;
+  }
+
+  if (level != SOL_SOCKET) {
+    ret = -ENOPROTOOPT;
+    goto out;
+  }
+
+  switch (optname) {
+  case SO_TYPE: {
+    int val = SOCK_STREAM;
+    if (optval && optlen_ptr) {
+      socklen_t len = *(__force socklen_t *)optlen_ptr;
+      if (len < sizeof(int)) {
+        ret = -EINVAL;
+        goto out;
+      }
+      if (copy_to_user(optval, &val, sizeof(int))) {
+        ret = -EFAULT;
+        goto out;
+      }
+      *(__force socklen_t *)optlen_ptr = sizeof(int);
+    }
+    ret = 0;
+    goto out;
+  }
+  case SO_ERROR: {
+    int val = 0;
+    if (optval && optlen_ptr) {
+      socklen_t len = *(__force socklen_t *)optlen_ptr;
+      if (len < sizeof(int)) {
+        ret = -EINVAL;
+        goto out;
+      }
+      if (copy_to_user(optval, &val, sizeof(int))) {
+        ret = -EFAULT;
+        goto out;
+      }
+      *(__force socklen_t *)optlen_ptr = sizeof(int);
+    }
+    ret = 0;
+    goto out;
+  }
+  case SO_SNDBUF: {
+    int val = 8192;
+    if (optval && optlen_ptr) {
+      socklen_t len = *(__force socklen_t *)optlen_ptr;
+      if (len < sizeof(int)) {
+        ret = -EINVAL;
+        goto out;
+      }
+      if (copy_to_user(optval, &val, sizeof(int))) {
+        ret = -EFAULT;
+        goto out;
+      }
+      *(__force socklen_t *)optlen_ptr = sizeof(int);
+    }
+    ret = 0;
+    goto out;
+  }
+  case SO_RCVBUF: {
+    int val = 8192;
+    if (optval && optlen_ptr) {
+      socklen_t len = *(__force socklen_t *)optlen_ptr;
+      if (len < sizeof(int)) {
+        ret = -EINVAL;
+        goto out;
+      }
+      if (copy_to_user(optval, &val, sizeof(int))) {
+        ret = -EFAULT;
+        goto out;
+      }
+      *(__force socklen_t *)optlen_ptr = sizeof(int);
+    }
+    ret = 0;
+    goto out;
+  }
+  case SO_PEERCRED: // not implemented
+  default:
+    ret = -ENOPROTOOPT;
+    goto out;
+  }
+
+out:
+  file_put(f);
+  return ret;
+}
+
+// F4: setsockopt(fd, level, optname, optval, optlen) — silent success for most
+// options
+int64_t sys_setsockopt(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                       int64_t arg5, int64_t unused) {
+  int fd = (int)arg1;
+  (void)arg2; // level
+  (void)arg3; // optname
+  (void)arg4; // optval
+  (void)arg5; // optlen
+
+  if (fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+
+  xtask *proc = current_task;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    return -EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+
+  int64_t ret;
+  if (f->type != FD_SOCKET) {
+    ret = -ENOTSOCK;
+    goto out;
+  }
+
+  // All socket options: silently return 0 (success but no-op)
+  ret = 0;
+
+out:
+  file_put(f);
+  return ret;
 }

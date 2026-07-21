@@ -334,6 +334,8 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   } else {
     f->type = FD_REGULAR;
     f->flags = flags & (O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK);
+    if (flags & O_CLOEXEC)
+      f->flags |= FD_CLOEXEC;
     f->inode = ip;
     f->offset = 0;
   }
@@ -730,7 +732,7 @@ int64_t sys_getdents(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EINVAL;
-  if (len == 0 || len > 4096)
+  if (len == 0 || len > 65536)
     return (int64_t)-EINVAL;
 
   rcu_read_lock();

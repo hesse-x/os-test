@@ -101,6 +101,52 @@
 #define SYS_SYNC 162
 #define SYS_MOUNT 165
 
+// ---- ENOSYS stubs (C group) ----
+#define SYS_SENDFILE 40
+#define SYS_LINK 86
+#define SYS_SYMLINK 88
+#define SYS_READLINK 89
+#define SYS_CHMOD 90
+#define SYS_FCHMOD 91
+#define SYS_CHOWN 92
+#define SYS_FCHOWN 93
+#define SYS_LINKAT 265
+#define SYS_SYMLINKAT 266
+#define SYS_READLINKAT 267
+#define SYS_FCHMODAT 268
+#define SYS_FCHOWNAT 260
+#define SYS_UTIMENSAT 280
+#define SYS_CLOCK_SETTIME 227
+#define SYS_GETITIMER 36
+#define SYS_SETITIMER 38
+
+// ---- trivial-return stubs (C2 group: return 0, not -ENOSYS) ----
+#define SYS_ACCESS 21
+#define SYS_FACCESSAT 269
+
+// ---- Thin wrappers (A group) ----
+#define SYS_DUP 32
+#define SYS_DUP3 292
+#define SYS_MKDIRAT 258
+#define SYS_UNLINKAT 263
+#define SYS_RENAMEAT 264
+#define SYS_RECVFROM 45
+#define SYS_SENDTO 44
+#define SYS_GETTIMEOFDAY 96
+
+// ---- Simple kernel implementations (B group) ----
+#define SYS_PREAD64 17
+#define SYS_PWRITE64 18
+#define SYS_READV 19
+#define SYS_WRITEV 20
+#define SYS_UNAME 63
+
+// ---- Socket thin wrappers (F group) ----
+#define SYS_GETSOCKNAME 51
+#define SYS_GETPEERNAME 52
+#define SYS_SETSOCKOPT 54
+#define SYS_GETSOCKOPT 55
+
 // ===================== OS-specific syscalls (1024+) =====================
 // 给 Linux 预留空间:1024 之前不占任何 OS 独有号;新增独有号往后追加。
 #define SYS_OS_BASE 1024

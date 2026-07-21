@@ -61,7 +61,7 @@ CheckOptions:
   # The __asan_[a-zA-Z0-9_]+ alternative covers the standard GCC/Clang ASAN
   # runtime interface (e.g. __asan_loadN, __asan_storeN_noabort).
   - key: readability-identifier-naming.FunctionIgnoredRegexp
-    value: '^(__libc_[a-z_]+|__assert_fail|__errno_location|__pthread_[a-z_]+|__syscall[0-6]|__memcpy|__memset|__memmove|__memcmp|__strcmp|__get_cwd|_exit|_toupper|__[a-z_]+|__asan_[a-zA-Z0-9_]+)$'
+    value: '^(__libc_[a-z_]+|__assert_fail|__errno_location|__pthread_[a-z_]+|__syscall[0-6]|__memcpy|__memset|__memmove|__memcmp|__strcmp|__get_cwd|_exit|_toupper|__[a-zA-Z_]+|__asan_[a-zA-Z0-9_]+)$'
 
   # Macro exceptions: Linux _/__ prefix, POSIX, include guards, spec, sparse, per-cpu, DRM, asm
   # The rb_* alternative covers the Linux kernel rbtree function-like macros
@@ -72,7 +72,7 @@ CheckOptions:
   # The _SC_[A-Z_]+ alternative covers POSIX sysconf() constants
   # (e.g. _SC_ARG_MAX, _SC_PAGESIZE, _SC_NPROCESSORS_ONLN).
   - key: readability-identifier-naming.MacroDefinitionIgnoredRegexp
-    value: '^(fpclassify|isfinite|isnormal|isnan|isinf|signbit|_IOC_[A-Z]+|_SC_[A-Z_]+|_IO$|_IOR$|_IOW$|_IOWR$|_IO[A-Z]+|_F_[A-Z]+|static_assert|input_event_(sec|usec)|errno|sa_handler|sa_sigaction|sigaddset|sigdelset|sigemptyset|sigfillset|sigismember|current_task|current_proc|current_xtask|Px[A-Z][a-zA-Z]*|Efi[A-Z][a-zA-Z]*|DRM_MODE_SUBCONNECTOR_Automatic|__[a-z_]+|assert|rb_[a-z_]+|_ASM_[A-Z]+|_.*_H)$'
+    value: '^(fpclassify|isfinite|isnormal|isnan|isinf|signbit|_IOC_[A-Z]+|_SC_[A-Z_]+|_IO$|_IOR$|_IOW$|_IOWR$|_IO[A-Z]+|_F_[A-Z]+|static_assert|input_event_(sec|usec)|errno|sa_handler|sa_sigaction|sigaddset|sigdelset|sigemptyset|sigfillset|sigismember|current_task|current_proc|current_xtask|Px[A-Z][a-zA-Z]*|Efi[A-Z][a-zA-Z]*|DRM_MODE_SUBCONNECTOR_Automatic|__[a-zA-Z_]+|assert|rb_[a-z_]+|_ASM_[A-Z]+|_.*_H)$'
 
   # Variable exceptions: TLS runtime, kernel internal, libc internals, linker section boundaries
   # The __start_/__stop_ alternatives cover linker-generated section boundary symbols

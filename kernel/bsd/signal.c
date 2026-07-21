@@ -274,10 +274,9 @@ void check_pending_signals(trapframe *tf) {
       case SIGUSR2:
       case SIGSTKFLT:
       default:
-        proc->proc->exit_code = -1;
         printk(LOG_ERROR, "signal: pid=%d terminated by signal %d\n", proc->pid,
                sig);
-        sys_exit(-1, 0, 0, 0, 0, 0);
+        do_exit_with_code(sig & 0x7f);
       }
     } else if (sa->__sigaction_handler._sa_handler == SIG_IGN) {
       continue;

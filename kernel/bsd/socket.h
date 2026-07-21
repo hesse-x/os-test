@@ -144,4 +144,14 @@ void unix_sock_wake_reader(struct unix_sock *sock);
 void unix_sock_wake_writer(struct unix_sock *sock);
 void unix_sock_close(struct unix_sock *sock);
 
+// recvfrom / sendto thin wrappers
+int64_t sys_recvfrom(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_sendto(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
+// Socket name/option thin wrappers (F group)
+int64_t sys_getsockname(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_getpeername(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_setsockopt(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_getsockopt(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
 #endif // KERNEL_SOCKET_H
