@@ -386,8 +386,9 @@ static inline int sys_kill(int32_t pid, int sig) {
 
 static inline int sys_sigaction(int sig, const struct sigaction *act,
                                 struct sigaction *oldact) {
-  int64_t r = __syscall3(SYS_RT_SIGACTION, (int64_t)sig,
-                         (int64_t)(uintptr_t)act, (int64_t)(uintptr_t)oldact);
+  int64_t r =
+      __syscall4(SYS_RT_SIGACTION, (int64_t)sig, (int64_t)(uintptr_t)act,
+                 (int64_t)(uintptr_t)oldact, (int64_t)sizeof(sigset_t));
   if (r < 0) {
     errno = -(int)r;
     return -1;
@@ -659,8 +660,9 @@ static inline int64_t sys_gettid(void) { return __syscall0(SYS_GETTID); }
 
 static inline int sys_sigprocmask(int how, const sigset_t *set,
                                   sigset_t *oldset) {
-  int64_t r = __syscall3(SYS_RT_SIGPROCMASK, (int64_t)how,
-                         (int64_t)(uintptr_t)set, (int64_t)(uintptr_t)oldset);
+  int64_t r =
+      __syscall4(SYS_RT_SIGPROCMASK, (int64_t)how, (int64_t)(uintptr_t)set,
+                 (int64_t)(uintptr_t)oldset, (int64_t)sizeof(sigset_t));
   if (r < 0) {
     errno = -(int)r;
     return -1;
@@ -772,7 +774,8 @@ static inline int sys_sync(void) {
 // sigpending: read the set of pending signals (per-task + shared, including
 // blocked) into *set. Returns 0 on success, -1/errno on failure.
 static inline int sys_sigpending(sigset_t *set) {
-  int64_t r = __syscall1(SYS_RT_SIGPENDING, (int64_t)(uintptr_t)set);
+  int64_t r = __syscall2(SYS_RT_SIGPENDING, (int64_t)(uintptr_t)set,
+                         (int64_t)sizeof(sigset_t));
   if (r < 0) {
     errno = -(int)r;
     return -1;

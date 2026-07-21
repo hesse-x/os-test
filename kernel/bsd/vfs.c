@@ -732,7 +732,7 @@ int64_t sys_getdents(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EINVAL;
-  if (len == 0 || len > 65536)
+  if (len == 0 || len > (size_t)1048576)
     return (int64_t)-EINVAL;
 
   rcu_read_lock();

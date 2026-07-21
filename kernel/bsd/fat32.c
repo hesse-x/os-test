@@ -1697,8 +1697,11 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
         lfn_buf[0] = '\0';
         continue;
       }
-      if (de->attr == 0x0F) {
-        collect_lfn_entry(de, lfn_buf);
+      /* Skip LFN entries and volume labels */
+      if (de->attr == 0x0F || de->attr & 0x08) {
+        if (de->attr == 0x0F)
+          collect_lfn_entry(de, lfn_buf);
+        lfn_buf[0] = '\0';
         continue;
       }
 
@@ -1756,8 +1759,9 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
       /* Fill entry */
       struct dirent64 *d = (struct dirent64 *)(out + written);
       d->d_ino = fat32_make_ino(scan_cluster, i);
+      d->d_off = entry_idx;
       d->d_reclen = reclen;
-      d->d_type = (de->attr & 0x10) ? 4 : 8; /* DT_DIR=4, DT_REG=8 */
+      d->d_type = (de->attr & 0x10) ? DT_DIR : DT_REG;
       int j;
       for (j = 0; j < name_len; j++)
         d->d_name[j] = name[j];

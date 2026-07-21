@@ -23,6 +23,7 @@
 #include "kernel/xcore/xtask.h"
 #include "xos/fcntl.h"
 #include <stddef.h>
+#include <xos/dirent.h>
 #include <xos/errno.h>
 #include <xos/stat.h>
 
@@ -639,19 +640,17 @@ void devtmpfs_remove(const char *name) {
 static ssize_t devtmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
   spin_lock(&devtmpfs_lock);
 
-  if (ctx->pos != 0) {
+  if (ctx->pos == (uint64_t)-1) {
     spin_unlock(&devtmpfs_lock);
     return 0;
   }
 
-  /* Determine if this is the root /dev directory or a subdirectory.
-   * Root has a dedicated inode (devtmpfs_root_ip). */
+  /* Determine if this is the root /dev directory or a subdirectory. */
   bool is_root = (devtmpfs_root_ip && dir->ino == devtmpfs_root_ip->ino);
   const char *prefix = NULL;
   int prefix_len = 0;
 
   if (!is_root) {
-    /* Find which subdirectory this inode belongs to */
     struct dev_dir *dd = dir_list;
     while (dd) {
       if (dd->ip && dd->ip->ino == dir->ino) {
@@ -662,46 +661,58 @@ static ssize_t devtmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
       }
       dd = dd->next;
     }
-    /* If no matching dev_dir found, treat as root */
     is_root = (prefix == NULL);
   }
 
+  size_t cur_pos = 0;
+
   if (is_root) {
-    /* Root /dev: emit all directories and top-level devices (no '/' in name) */
+    /* Root /dev: dir_list then top-level dev_list entries */
     struct dev_dir *d = dir_list;
     while (d) {
       size_t nl = 0;
       while (d->name[nl])
         nl++;
-      if (!dir_emit(ctx, d->name, (int)nl, ctx->written, d->ip->ino, DT_DIR))
-        break;
+      uint16_t r = (uint16_t)((sizeof(struct dirent64) + nl + 1 + 7) & ~7);
+      if (cur_pos < ctx->pos) {
+        cur_pos += r;
+        d = d->next;
+        continue;
+      }
+      if (!dir_emit(ctx, d->name, (int)nl, cur_pos, d->ip->ino, DT_DIR))
+        goto done;
+      cur_pos += r;
       d = d->next;
     }
-
     struct dev_entry *e = dev_list;
     while (e) {
-      int has_slash = 0;
       size_t nl = 0;
+      int has_slash = 0;
       while (e->name[nl]) {
         if (e->name[nl] == '/')
           has_slash = 1;
         nl++;
       }
       if (!has_slash) {
-        if (!dir_emit(ctx, e->name, (int)nl, ctx->written, e->ip->ino, DT_CHR))
-          break;
+        uint16_t r = (uint16_t)((sizeof(struct dirent64) + nl + 1 + 7) & ~7);
+        if (cur_pos < ctx->pos) {
+          cur_pos += r;
+          e = e->next;
+          continue;
+        }
+        if (!dir_emit(ctx, e->name, (int)nl, cur_pos, e->ip->ino, DT_CHR))
+          goto done;
+        cur_pos += r;
       }
       e = e->next;
     }
   } else {
-    /* Subdirectory listing: emit only device entries whose name starts with
-     * "prefix/" and has no further "/" after the prefix. */
+    /* Subdirectory: filtered dev_list entries */
     struct dev_entry *e = dev_list;
     while (e) {
       size_t nl = 0;
       while (e->name[nl])
         nl++;
-      /* Check if name starts with "prefix/" */
       if ((int)nl > prefix_len + 1 && e->name[prefix_len] == '/' &&
           __strncmp(e->name, prefix, (size_t)prefix_len) == 0) {
         const char *leaf = e->name + prefix_len + 1;
@@ -713,16 +724,25 @@ static ssize_t devtmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
           }
         }
         if (!has_inner_slash) {
-          if (!dir_emit(ctx, leaf, (int)(nl - prefix_len - 1), ctx->written,
-                        e->ip->ino, DT_CHR))
-            break;
+          size_t leaf_len = nl - prefix_len - 1;
+          uint16_t r =
+              (uint16_t)((sizeof(struct dirent64) + leaf_len + 1 + 7) & ~7);
+          if (cur_pos < ctx->pos) {
+            cur_pos += r;
+            e = e->next;
+            continue;
+          }
+          if (!dir_emit(ctx, leaf, (int)leaf_len, cur_pos, e->ip->ino, DT_CHR))
+            goto done;
+          cur_pos += r;
         }
       }
       e = e->next;
     }
   }
 
-  ctx->pos = (uint64_t)-1; /* EOF */
+  ctx->pos = (uint64_t)-1; /* EOF: all entries emitted */
+done:
   spin_unlock(&devtmpfs_lock);
   return (ssize_t)ctx->written;
 }

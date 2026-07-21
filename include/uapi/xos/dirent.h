@@ -24,6 +24,8 @@
  */
 struct dirent64 {
   uint64_t d_ino;
+  uint64_t d_off; /* offset for seekdir/telldir (fs-specific: fat32=entry index,
+                     in-memory=byte offset) */
   uint16_t d_reclen;
   uint8_t d_type;
   char d_name[];

@@ -7,7 +7,7 @@
 #ifndef KERNEL_MOUNT_H
 #define KERNEL_MOUNT_H
 
-#include "kernel/xcore/posix_types.h" // ssize_t
+#include "kernel/xcore/posix_types.h" // IWYU pragma: keep
 #include "kernel/xcore/sparse.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -46,7 +46,6 @@ struct dir_context {
   size_t written; /* bytes written so far */
 };
 
-struct kstat;
 struct mount_entry; /* forward: struct fstype.mount_root takes mount_entry*,
                      * defined below struct fstype */
 

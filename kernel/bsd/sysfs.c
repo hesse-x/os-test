@@ -6,6 +6,7 @@
 #include "kernel/bsd/sysfs.h"
 
 #include "arch/x64/utils.h"
+#include <xos/dirent.h>
 struct xtask;
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
@@ -232,16 +233,24 @@ ssize_t sysfs_getdents(struct inode *dir, struct dir_context *ctx) {
   if (!n || !n->is_dir)
     return 0;
   spin_lock(&sysfs_lock);
-  if (ctx->pos != 0) {
+  if (ctx->pos == (uint64_t)-1) {
     spin_unlock(&sysfs_lock);
     return 0;
   }
+  size_t cur_pos = 0;
   struct sysfs_node *c = n->children;
   while (c) {
     size_t nl = __strlen(c->name);
     unsigned dt = c->is_dir ? DT_DIR : DT_REG;
-    if (!dir_emit(ctx, c->name, (int)nl, ctx->written, c->ino, dt))
+    uint16_t r = (uint16_t)((sizeof(struct dirent64) + nl + 1 + 7) & ~7);
+    if (cur_pos < ctx->pos) {
+      cur_pos += r;
+      c = c->sibling;
+      continue;
+    }
+    if (!dir_emit(ctx, c->name, (int)nl, cur_pos, c->ino, dt))
       break;
+    cur_pos += r;
     c = c->sibling;
   }
   ctx->pos = (uint64_t)-1;

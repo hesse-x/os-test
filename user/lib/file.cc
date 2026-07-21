@@ -8,20 +8,22 @@
 // Kernel handles FAT32, devtmpfs, pipes, sockets, etc.
 // No libc-side fd_table — kernel's proc->fd_table is the single source of
 // truth.
+#include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>  // snprintf (rename cwd 相对化)
 #include <stdlib.h> // IWYU pragma: keep  // malloc/calloc/free in getdir/dup
 #include <string.h> // strlen (rename cwd 相对化)
+#include <syscall.h>
+#include <termios.h>
+#include <unistd.h>
+
 #include <sys/ioctl.h>
 #include <sys/ipc.h>
 #include <sys/poll.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <syscall.h>
-#include <termios.h>
-#include <unistd.h>
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/ioctl.h>
@@ -634,7 +636,7 @@ struct dirent *readdir(DIR *dirp) {
   struct dirent64 *d64 = (struct dirent64 *)(dir->buf + dir->buf_pos);
   static struct dirent result;
   result.d_ino = (ino_t)d64->d_ino;
-  result.d_off = (off_t)dir->buf_pos;
+  result.d_off = (off_t)d64->d_off;
   result.d_reclen = d64->d_reclen;
   int j = 0;
   while (d64->d_name[j] && j < 255) {

@@ -467,8 +467,10 @@ int64_t sys_tgkill(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 #define SIG_UNBLOCK 1
 #define SIG_SETMASK 2
 
-int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3,
-                        int64_t unused1, int64_t unused2, int64_t unused3) {
+int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                        int64_t unused2, int64_t unused3) {
+  if ((size_t)arg4 != sizeof(sigset_t))
+    return (int64_t)-EINVAL;
   int how = (int)arg1;
   const sigset_t *set = (const sigset_t *)arg2;
   sigset_t *oldset = (sigset_t *)arg3;
@@ -577,8 +579,10 @@ int64_t sys_pthread_set_cancel_handler(int64_t arg1, int64_t unused1,
 }
 
 // ===================== BSD syscall: sigaction =====================
-int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                       int64_t unused2, int64_t unused3) {
+  if ((size_t)arg4 != sizeof(sigset_t))
+    return (int64_t)-EINVAL;
   int sig = (int)arg1;
   const struct sigaction __user *act =
       (const struct sigaction __user *__force)arg2;
@@ -690,13 +694,10 @@ int64_t sys_sigreturn(int64_t unused1, int64_t unused2, int64_t unused3,
 // Return the set of pending signals (per-task + thread-group shared), WITHOUT
 // filtering by sig_blocked — POSIX sigpending reports all pending signals,
 // including those blocked. Distinct from check_pending_signals which filters.
-int64_t sys_sigpending(int64_t arg1, int64_t unused1, int64_t unused2,
+int64_t sys_sigpending(int64_t arg1, int64_t arg2, int64_t unused2,
                        int64_t unused3, int64_t unused4, int64_t unused5) {
-  (void)unused1;
-  (void)unused2;
-  (void)unused3;
-  (void)unused4;
-  (void)unused5;
+  if ((size_t)arg2 != sizeof(sigset_t))
+    return (int64_t)-EINVAL;
   sigset_t __user *set = (sigset_t __user *)arg1;
   if (!set)
     return (int64_t)-EFAULT;

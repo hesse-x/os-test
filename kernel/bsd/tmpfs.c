@@ -14,6 +14,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <xos/dirent.h>
 
 #include "arch/x64/utils.h"
 #include "kernel/bsd/fops.h"
@@ -506,18 +507,27 @@ static ssize_t tmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
   if (!ti)
     return 0;
   spin_lock(&ti->lock);
-  if (ctx->pos != 0) {
+  /* EOF marker from previous call */
+  if (ctx->pos == (uint64_t)-1) {
     spin_unlock(&ti->lock);
     return 0;
   }
+  size_t cur_pos = 0;
   struct tmpfs_inode_info *c = ti->children;
   while (c) {
     size_t nl = __strlen(c->name);
     unsigned dt = (c->inode && c->inode->type == INODE_DIR) ? DT_DIR : DT_REG;
     if (c->inode && c->inode->type == INODE_SOCKET)
       dt = DT_SOCK;
-    if (!dir_emit(ctx, c->name, (int)nl, ctx->written, c->inode->ino, dt))
+    uint16_t r = (uint16_t)((sizeof(struct dirent64) + nl + 1 + 7) & ~7);
+    if (cur_pos < ctx->pos) {
+      cur_pos += r;
+      c = c->sibling;
+      continue;
+    }
+    if (!dir_emit(ctx, c->name, (int)nl, cur_pos, c->inode->ino, dt))
       break;
+    cur_pos += r;
     c = c->sibling;
   }
   ctx->pos = (uint64_t)-1;

@@ -9,6 +9,7 @@
 #include "kernel/bsd/inode.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/spinlock.h"
+#include <xos/dirent.h>
 #include <xos/errno.h>
 
 #define MAX_FSTYPES 8
@@ -154,28 +155,22 @@ struct mount_entry *mount_of_inode(struct inode *ip) {
 
 bool dir_emit(struct dir_context *ctx, const char *name, int namlen,
               uint64_t offset, uint64_t ino, unsigned int d_type) {
-  /* dirent64 layout: d_ino(8) + d_reclen(2) + d_type(1) + d_name[namlen+1],
-   * padded to 8-byte alignment. */
-  uint16_t reclen = (uint16_t)(19 + namlen + 1);
+  /* dirent64 layout: d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) +
+   * d_name[namlen+1], padded to 8-byte alignment. */
+  uint16_t reclen = (uint16_t)(sizeof(struct dirent64) + namlen + 1);
   reclen = (reclen + 7) & ~7;
   if (ctx->written + reclen > ctx->len)
     return false;
-  /* struct dirent64 from <xos/dirent.h> */
-  struct dirent64 {
-    uint64_t d_ino;
-    uint16_t d_reclen;
-    uint8_t d_type;
-    char d_name[];
-  };
   struct dirent64 *d = (struct dirent64 *)((uint8_t *)ctx->buf + ctx->written);
   d->d_ino = ino;
+  d->d_off = offset;
   d->d_reclen = reclen;
   d->d_type = (uint8_t)d_type;
   for (int i = 0; i < namlen; i++)
     d->d_name[i] = name[i];
   d->d_name[namlen] = '\0';
   ctx->written += reclen;
-  ctx->pos = offset;
+  ctx->pos = offset + reclen; /* resumption point: next entry */
   return true;
 }
 

@@ -36,15 +36,15 @@ void signal_put(struct signal_struct *sig);
 // Thread syscalls (Phase 3a)
 int64_t sys_tgkill(int64_t tgid, int64_t tid, int64_t sig, int64_t, int64_t,
                    int64_t);
-int64_t sys_sigprocmask(int64_t how, int64_t set, int64_t oldset, int64_t,
-                        int64_t, int64_t);
+int64_t sys_sigprocmask(int64_t how, int64_t set, int64_t oldset,
+                        int64_t sigsetsize, int64_t, int64_t);
 int64_t sys_set_tid_address(int64_t tidptr, int64_t, int64_t, int64_t, int64_t,
                             int64_t);
 int64_t sys_arch_prctl(int64_t code, int64_t addr, int64_t, int64_t, int64_t,
                        int64_t);
 int64_t sys_pthread_set_cancel_handler(int64_t handler, int64_t, int64_t,
                                        int64_t, int64_t, int64_t);
-int64_t sys_sigpending(int64_t set, int64_t, int64_t, int64_t, int64_t,
-                       int64_t);
+int64_t sys_sigpending(int64_t set, int64_t sigsetsize, int64_t, int64_t,
+                       int64_t, int64_t);
 
 #endif // KERNEL_BSD_SIGNAL_H
