@@ -7,6 +7,9 @@
 #ifndef _COMMON_FCNTL_H
 #define _COMMON_FCNTL_H
 
+#include <stddef.h>
+#include <stdint.h>
+
 // Open flags (Linux x86-64 octal values)
 #define O_RDONLY 0
 #define O_WRONLY 1
@@ -48,6 +51,45 @@
 #define F_GETPIPE_SZ 31
 #define F_SETPIPE_SZ 32
 #define F_DUPFD_CLOEXEC 1030
+
+/* POSIX record lock types (struct flock.l_type). */
+#define F_RDLCK 0
+#define F_WRLCK 1
+#define F_UNLCK 2
+
+/* OFD (fd-open-description) locks — Linux 3.15+. Placeholder: the kernel
+ * returns -EINVAL (OFD semantics differ from POSIX process-level locks and
+ * cost roughly the same to implement). */
+#define F_OFD_GETLK 36
+#define F_OFD_SETLK 37
+#define F_OFD_SETLKW 38
+
+/* Maximum pipe capacity for F_SETPIPE_SZ (Linux PIPE_MAX_SIZE). */
+#define PIPE_MAX_SIZE (1 << 20)
+
+/* POSIX record lock descriptor (Linux x86-64 struct flock layout):
+ *   l_type(2) l_whence(2) pad(4) l_start(8) l_len(8) l_pid(4) pad(4) = 32
+ * bytes. long is 8 bytes on x86-64 (8-byte aligned → 4 bytes padding after
+ * l_whence); l_pid is a 4-byte pid_t (int32_t) with 4 bytes trailing padding.
+ * int32_t is used (not pid_t) to keep this uapi header from needing
+ * <xos/types.h>. */
+struct flock {
+  short l_type;
+  short l_whence;
+  long l_start;
+  long l_len;
+  int32_t l_pid;
+};
+
+#ifdef __cplusplus
+static_assert(offsetof(struct flock, l_type) == 0, "flock l_type");
+static_assert(offsetof(struct flock, l_start) == 8, "flock l_start");
+static_assert(sizeof(struct flock) == 32, "flock size (x86-64)");
+#else
+_Static_assert(offsetof(struct flock, l_type) == 0, "flock l_type");
+_Static_assert(offsetof(struct flock, l_start) == 8, "flock l_start");
+_Static_assert(sizeof(struct flock) == 32, "flock size (x86-64)");
+#endif
 
 /* Note: POSIX FD_CLOEXEC=1 is not defined here. The kernel internally uses
  * FD_CLOEXEC=0x8000 in kernel/bsd/types.h as the fd flags bit (separate from

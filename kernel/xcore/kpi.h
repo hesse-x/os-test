@@ -25,7 +25,8 @@ void mm_release(mm *mm, pid_t owner);
 void mm_release_pages(mm *mm);
 int copy_page_table(uint64_t *src, uint64_t *dst, mmap_region *regions);
 mmap_region *add_mmap_region(xtask *t, uint64_t vaddr, uint64_t size,
-                             uint64_t phys, struct shm *shm, uint32_t prot);
+                             uint64_t phys, struct shm *shm, uint32_t prot,
+                             int fd, uint64_t offset, uint32_t flags);
 
 // === IPC ===
 void notify_and_wake(pid_t target_pid, recv_msg *msg);

@@ -26,6 +26,7 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
+#include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
@@ -3455,8 +3456,11 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
   region->size = npages * PAGE_SIZE;
   region->phys = map_phys;
   region->shm_obj = NULL;
-  region->next = proc->mm->mmap_regions;
-  proc->mm->mmap_regions = region;
+  region->fd = -1; // DRM GEM is a physical mapping, not fd-backed
+  region->offset = 0;
+  region->flags = KMAP_PHYSICAL;
+  region->next = NULL;
+  vma_insert_sorted(proc->mm, region);
   proc->mm->mmap_brk = vaddr + npages * PAGE_SIZE;
 
   return vaddr;

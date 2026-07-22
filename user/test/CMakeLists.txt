@@ -161,6 +161,7 @@ if(TEST)
     add_user_dyn_elf(test_cloexec_perfd C SOURCES test_cloexec_perfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
     add_user_dyn_elf(test_openat_dirfd C SOURCES test_openat_dirfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
     add_user_dyn_elf(test_stat_real C SOURCES test_stat_real.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_vma_restructure C SOURCES test_vma_restructure.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
 endif()
 
 # libffi dynamic test (ffi_worklist §4.C): ffi_call int/double + ffi_closure

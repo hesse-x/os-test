@@ -280,6 +280,58 @@ void test_pipe_fd_limit(void) {
   }
 }
 
+/* ===================== S09: F_GETPIPE_SZ / F_SETPIPE_SZ =====================
+ */
+
+/* Default pipe capacity is PIPE_BUF_SIZE (4096). */
+void test_pipe_getpipe_sz_default(void) {
+  int fd[2];
+  pipe(fd);
+  int sz = fcntl(fd[0], F_GETPIPE_SZ);
+  TEST_ASSERT_TRUE(sz > 0);
+  TEST_ASSERT_EQUAL_INT(4096, sz);
+  close(fd[0]);
+  close(fd[1]);
+}
+
+/* F_SETPIPE_SZ grows the pipe to a power-of-two >= requested. */
+void test_pipe_setpipe_sz_grow(void) {
+  int fd[2];
+  pipe(fd);
+  int sz = fcntl(fd[1], F_SETPIPE_SZ, 8192);
+  TEST_ASSERT_TRUE(sz >= 8192);
+  /* Subsequent get reflects the new size. */
+  TEST_ASSERT_EQUAL_INT(sz, fcntl(fd[0], F_GETPIPE_SZ));
+  close(fd[0]);
+  close(fd[1]);
+}
+
+/* A tiny requested size is clamped up to PAGE_SIZE. */
+void test_pipe_setpipe_sz_clamp_min(void) {
+  int fd[2];
+  pipe(fd);
+  int sz = fcntl(fd[1], F_SETPIPE_SZ, 2);
+  TEST_ASSERT_EQUAL_INT(4096, sz);
+  close(fd[0]);
+  close(fd[1]);
+}
+
+/* An oversized request (above PIPE_MAX_SIZE) is rejected. */
+void test_pipe_setpipe_sz_too_big(void) {
+  int fd[2];
+  pipe(fd);
+  int r = fcntl(fd[1], F_SETPIPE_SZ, (1 << 21)); /* 2 MiB > 1 MiB cap */
+  TEST_ASSERT_EQUAL_INT(-1, r);
+  close(fd[0]);
+  close(fd[1]);
+}
+
+/* F_GETPIPE_SZ on a non-pipe fd is rejected. */
+void test_pipe_getpipe_sz_nonpipe(void) {
+  int sz = fcntl(0, F_GETPIPE_SZ); /* stdin */
+  TEST_ASSERT_EQUAL_INT(-1, sz);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -296,5 +348,10 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_pipe_big_transfer);
   RUN_TEST(test_pipe_multiple_write);
   RUN_TEST(test_pipe_fd_limit);
+  RUN_TEST(test_pipe_getpipe_sz_default);
+  RUN_TEST(test_pipe_setpipe_sz_grow);
+  RUN_TEST(test_pipe_setpipe_sz_clamp_min);
+  RUN_TEST(test_pipe_setpipe_sz_too_big);
+  RUN_TEST(test_pipe_getpipe_sz_nonpipe);
   return UNITY_END();
 }

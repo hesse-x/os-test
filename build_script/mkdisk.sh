@@ -122,7 +122,8 @@ if [ "$TEST" = "1" ]; then
                test_rename.elf test_udevd_db.elf test_udevd.elf test_dev_vfs_dynamic.elf \
                test_openat_dirfd.elf test_stat_real.elf \
                sigaltstack.elf test_dirent_seek.elf test_cloexec_perfd.elf \
-               test_mprotect.elf test_ffi.elf venus_channel.elf getrandom.elf; do
+               test_mprotect.elf test_ffi.elf venus_channel.elf getrandom.elf \
+               test_vma_restructure.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
     done
 fi

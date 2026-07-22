@@ -207,33 +207,58 @@ int chdir(const char *path) {
 // ===================== fcntl =====================
 
 int fcntl(int fd, int cmd, ...) {
+  int64_t r;
+  va_list ap;
+
   if (cmd == F_GETFL) {
-    return sys_fcntl(fd, F_GETFL, 0);
+    r = sys_fcntl(fd, F_GETFL, 0);
   } else if (cmd == F_SETFL) {
-    va_list ap;
     va_start(ap, cmd);
     int arg = va_arg(ap, int);
     va_end(ap);
-    int r = sys_fcntl(fd, cmd, arg);
-    return r;
+    r = sys_fcntl(fd, cmd, arg);
   } else if (cmd == F_GETFD) {
-    return sys_fcntl(fd, F_GETFD, 0);
+    r = sys_fcntl(fd, F_GETFD, 0);
   } else if (cmd == F_SETFD) {
-    va_list ap;
     va_start(ap, cmd);
     int arg = va_arg(ap, int);
     va_end(ap);
-    return sys_fcntl(fd, cmd, arg);
+    r = sys_fcntl(fd, cmd, arg);
   } else if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
-    va_list ap;
     va_start(ap, cmd);
     int min_fd = va_arg(ap, int);
     va_end(ap);
-    return sys_fcntl(fd, cmd, min_fd);
+    r = sys_fcntl(fd, cmd, min_fd);
+  } else if (cmd == F_GETLK || cmd == F_SETLK || cmd == F_SETLKW ||
+             cmd == F_OFD_GETLK || cmd == F_OFD_SETLK || cmd == F_OFD_SETLKW) {
+    va_start(ap, cmd);
+    struct flock *lk = va_arg(ap, struct flock *);
+    va_end(ap);
+    r = sys_fcntl(fd, cmd, (int64_t)(uintptr_t)lk);
+  } else if (cmd == F_SETOWN || cmd == F_SETSIG) {
+    va_start(ap, cmd);
+    int arg = va_arg(ap, int);
+    va_end(ap);
+    r = sys_fcntl(fd, cmd, arg);
+  } else if (cmd == F_GETOWN || cmd == F_GETSIG) {
+    r = sys_fcntl(fd, cmd, 0);
+  } else if (cmd == F_GETPIPE_SZ) {
+    r = sys_fcntl(fd, cmd, 0);
+  } else if (cmd == F_SETPIPE_SZ) {
+    va_start(ap, cmd);
+    int arg = va_arg(ap, int);
+    va_end(ap);
+    r = sys_fcntl(fd, cmd, arg);
+  } else {
+    errno = EINVAL;
+    return -1;
   }
 
-  errno = EINVAL;
-  return -1;
+  // sys_fcntl already maps kernel -errno → errno and returns -1 on failure, so
+  // no errno remapping here (re-deriving errno from the -1 return would yield
+  // EPERM and clobber the real error). cmds taking a pointer (F_*LK/F_OFD_*)
+  // pass it through arg3 unchanged.
+  return (int)r;
 }
 
 // ===================== FD_DEV helpers =====================

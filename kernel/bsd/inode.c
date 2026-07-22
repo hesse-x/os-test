@@ -5,6 +5,7 @@
  */
 
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/file_lock.h"
 #include "kernel/bsd/page_cache.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/slab.h"
@@ -75,6 +76,8 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
   ip->shm = NULL;
   ip->mount = NULL;
   ip->wq = NULL;
+  list_init(&ip->i_flock);
+  ip->i_flock_lock = SPINLOCK_INIT;
   ip->start_cluster = start_cluster;
   ip->dir_start_cluster = dir_cluster;
   ip->dir_entry_index = dir_entry_idx;
@@ -141,6 +144,8 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
   ip->shm = NULL;
   ip->mount = NULL;
   ip->wq = NULL;
+  list_init(&ip->i_flock);
+  ip->i_flock_lock = SPINLOCK_INIT;
   ip->start_cluster = start_cluster;
   ip->dir_start_cluster = dir_cluster;
   ip->dir_entry_index = dir_entry_idx;
@@ -158,6 +163,19 @@ struct inode *inode_get(struct inode *ip) {
   ASSERT(refcount_read(&ip->i_count) > 0);
   refcount_inc(&ip->i_count);
   return ip;
+}
+
+void inode_for_each(inode_iter_fn fn, void *ctx) {
+  /* Snapshot-walk the hash table under inode_hash_lock. fn is expected to be
+   * cheap (lock-list mutation) and must not drop the inode's refcount to zero
+   * (which would kfree it under us mid-walk); S09's pid cleanup only removes
+   * file_lock nodes, never the inode itself. */
+  spin_lock(&inode_hash_lock);
+  for (unsigned b = 0; b < INODE_HASH_SIZE; b++) {
+    for (struct inode *ip = inode_hash_table[b]; ip; ip = ip->hash_next)
+      fn(ip, ctx);
+  }
+  spin_unlock(&inode_hash_lock);
 }
 
 void inode_put(struct inode *ip) {
@@ -183,6 +201,12 @@ void inode_put(struct inode *ip) {
       shm_put(ip->shm);
       ip->shm = NULL;
     }
+
+    /* Drop any POSIX file locks still held against this inode. A live process
+     * should have released them on exit/close, but if an inode is evicted while
+     * locks remain (e.g. a process crashed without running cleanup) free them
+     * here rather than leaking the file_lock nodes. */
+    file_lock_release_all(ip);
 
     kfree(ip);
   } else {

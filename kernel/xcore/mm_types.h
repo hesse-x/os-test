@@ -37,12 +37,24 @@ typedef struct shm {
 // ===================== Memory mapping region =====================
 #define MAP_PHYSICAL_BASE 0x70000000
 
+// OS-internal mmap flag bits stored in mmap_region.flags (NOT in uapi mman.h,
+// which only carries the standard Linux MAP_* set). Kept here next to the
+// struct that records them so syscall.c and driver mmap paths share one
+// definition instead of redefining the magic numbers.
+#define KMAP_PHYSICAL                                                          \
+  0x80000000u         /* MAP_PHYSICAL: map a fixed physical range              \
+                       */
+#define KMAP_UC 0x08u /* map uncacheable (device MMIO) */
+
 typedef struct mmap_region {
   uint64_t vaddr;
   uint64_t size;
-  uint64_t phys;
-  struct shm *shm_obj;
-  uint32_t prot;
+  uint64_t phys;       // MAP_PHYSICAL physical base, 0 = not PHYSICAL
+  struct shm *shm_obj; // SHM mapping ref, non-NULL = SHM
+  uint32_t prot;       // PROT_* bits
+  int fd;              // -1 = anonymous; otherwise the mmap fd (ref NOT held)
+  uint64_t offset;     // mmap offset (phys offset / file offset / 0)
+  uint32_t flags;      // user MAP_* bits + OS-internal MAP_PHYSICAL/MAP_UC
   struct mmap_region *next;
 } mmap_region;
 

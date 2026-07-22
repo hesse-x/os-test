@@ -52,7 +52,7 @@ __poll file_poll(struct file *f, __poll events) {
           revents |= POLLIN;
       }
       // POLLOUT: space available or peer closed
-      if ((p->head + 1) % PIPE_BUF_SIZE != p->tail ||
+      if ((p->head + 1) % p->size != p->tail ||
           refcount_read(&p->p_count) <= 1) {
         if (events & POLLOUT)
           revents |= POLLOUT;

@@ -255,6 +255,9 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     stack_region->size = (uint64_t)user_stack_pages * PAGE_SIZE;
     stack_region->phys = 0; // not MAP_PHYSICAL — anonymous stack
     stack_region->prot = PROT_READ | PROT_WRITE;
+    stack_region->fd = -1; // anonymous
+    stack_region->offset = 0;
+    stack_region->flags = MAP_ANONYMOUS;
     stack_region->next = NULL;
     mm->mmap_regions = stack_region;
   }

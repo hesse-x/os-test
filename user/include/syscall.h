@@ -281,8 +281,8 @@ static inline int sys_dup(int old_fd) {
   return (int)r;
 }
 
-static inline int sys_fcntl(int fd, int cmd, int arg) {
-  int64_t r = __syscall3(SYS_FCNTL, (int64_t)fd, (int64_t)cmd, (int64_t)arg);
+static inline int sys_fcntl(int fd, int cmd, int64_t arg) {
+  int64_t r = __syscall3(SYS_FCNTL, (int64_t)fd, (int64_t)cmd, arg);
   if (r < 0) {
     errno = -(int)r;
     return -1;

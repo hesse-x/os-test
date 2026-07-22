@@ -6,13 +6,16 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <unity.h>
 
 #include <sys/ioctl.h>
+#include <sys/process.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <xos/errno.h>
 
 void setUp(void) {}
@@ -400,6 +403,178 @@ void test_fcntl_dupfd_cloexec(void) {
   close(fd[1]);
 }
 
+/* ===================== S09: POSIX file locks + owner/sig + OFD
+ * ===================== */
+
+/* F_GETLK on an unlocked regular file returns F_UNLCK. */
+void test_fcntl_getlk_unlocked(void) {
+  const char *path = "/local/fcntl_lock.txt";
+  int fd = open(path, O_RDWR | O_CREAT);
+  TEST_ASSERT_TRUE(fd >= 0);
+  write(fd, "lock-data", 9);
+
+  struct flock lk = {0};
+  lk.l_type = F_WRLCK;
+  lk.l_whence = SEEK_SET;
+  lk.l_start = 0;
+  lk.l_len = 0; /* to EOF */
+  int r = fcntl(fd, F_GETLK, &lk);
+  TEST_ASSERT_EQUAL_INT(0, r);
+  TEST_ASSERT_EQUAL_INT(F_UNLCK, lk.l_type);
+
+  close(fd);
+}
+
+/* F_SETLK write lock succeeds; a self F_GETLK returns F_UNLCK (own locks do
+ * not conflict with self — POSIX). */
+void test_fcntl_setlk_write_lock_self(void) {
+  const char *path = "/local/fcntl_lock2.txt";
+  int fd = open(path, O_RDWR | O_CREAT);
+  TEST_ASSERT_TRUE(fd >= 0);
+  write(fd, "data", 4);
+
+  struct flock lk = {0};
+  lk.l_type = F_WRLCK;
+  lk.l_whence = SEEK_SET;
+  lk.l_start = 0;
+  lk.l_len = 0;
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd, F_SETLK, &lk));
+
+  struct flock probe = {0};
+  probe.l_type = F_WRLCK;
+  probe.l_whence = SEEK_SET;
+  probe.l_start = 0;
+  probe.l_len = 0;
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd, F_GETLK, &probe));
+  TEST_ASSERT_EQUAL_INT(F_UNLCK, probe.l_type);
+
+  /* Unlock. */
+  lk.l_type = F_UNLCK;
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd, F_SETLK, &lk));
+
+  close(fd);
+}
+
+/* F_SETLK read lock succeeds. */
+void test_fcntl_setlk_read_lock(void) {
+  const char *path = "/local/fcntl_lock3.txt";
+  int fd = open(path, O_RDWR | O_CREAT);
+  TEST_ASSERT_TRUE(fd >= 0);
+
+  struct flock lk = {0};
+  lk.l_type = F_RDLCK;
+  lk.l_whence = SEEK_SET;
+  lk.l_start = 0;
+  lk.l_len = 16;
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd, F_SETLK, &lk));
+
+  lk.l_type = F_UNLCK;
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd, F_SETLK, &lk));
+  close(fd);
+}
+
+/* F_SETLK on a pipe fd is rejected (-ENOLCK, surfaced as -1/EINVAL via libc).
+ */
+void test_fcntl_setlk_pipe_rejected(void) {
+  int fd[2];
+  pipe(fd);
+
+  struct flock lk = {0};
+  lk.l_type = F_WRLCK;
+  lk.l_whence = SEEK_SET;
+  lk.l_start = 0;
+  lk.l_len = 0;
+  int r = fcntl(fd[0], F_SETLK, &lk);
+  TEST_ASSERT_EQUAL_INT(-1, r);
+  TEST_ASSERT_TRUE(errno == EINVAL || errno == ENOLCK);
+
+  close(fd[0]);
+  close(fd[1]);
+}
+
+/* Cross-process write-lock conflict: parent locks, child F_SETLK on the same
+ * range fails with -EAGAIN (non-blocking). */
+void test_fcntl_setlk_conflict_child(void) {
+  const char *path = "/local/fcntl_lock4.txt";
+  int fd = open(path, O_RDWR | O_CREAT);
+  TEST_ASSERT_TRUE(fd >= 0);
+  write(fd, "shared-file-content", 20);
+
+  struct flock lk = {0};
+  lk.l_type = F_WRLCK;
+  lk.l_whence = SEEK_SET;
+  lk.l_start = 0;
+  lk.l_len = 0;
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd, F_SETLK, &lk));
+
+  pid_t pid = fork();
+  TEST_ASSERT_TRUE(pid >= 0);
+  if (pid == 0) {
+    int cfd = open(path, O_RDWR);
+    if (cfd < 0)
+      _exit(100);
+    struct flock cl = {0};
+    cl.l_type = F_WRLCK;
+    cl.l_whence = SEEK_SET;
+    cl.l_start = 0;
+    cl.l_len = 0;
+    int r = fcntl(cfd, F_SETLK, &cl);
+    if (r == -1 && errno == EAGAIN)
+      _exit(0); /* expected: conflict */
+    _exit(1);   /* unexpected */
+  }
+  int status = 0;
+  pid_t w = waitpid(pid, &status, 0);
+  TEST_ASSERT_EQUAL_INT(pid, w);
+  TEST_ASSERT_TRUE(WIFEXITED(status));
+  TEST_ASSERT_EQUAL_INT(0, WEXITSTATUS(status));
+
+  lk.l_type = F_UNLCK;
+  fcntl(fd, F_SETLK, &lk);
+  close(fd);
+}
+
+/* F_OFD_SETLK placeholder returns -EINVAL. */
+void test_fcntl_ofd_setlk_einval(void) {
+  const char *path = "/local/fcntl_lock5.txt";
+  int fd = open(path, O_RDWR | O_CREAT);
+  TEST_ASSERT_TRUE(fd >= 0);
+
+  struct flock lk = {0};
+  lk.l_type = F_WRLCK;
+  lk.l_whence = SEEK_SET;
+  lk.l_start = 0;
+  lk.l_len = 0;
+  int r = fcntl(fd, F_OFD_SETLK, &lk);
+  TEST_ASSERT_EQUAL_INT(-1, r);
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  close(fd);
+}
+
+/* F_SETOWN/F_GETOWN round-trip (stored only, no SIGIO delivery). */
+void test_fcntl_getown_setown(void) {
+  int fd[2];
+  pipe(fd);
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd[0], F_SETOWN, 123));
+  TEST_ASSERT_EQUAL_INT(123, fcntl(fd[0], F_GETOWN));
+  /* Negative/zero pid rejected. */
+  TEST_ASSERT_EQUAL_INT(-1, fcntl(fd[0], F_SETOWN, 0));
+  close(fd[0]);
+  close(fd[1]);
+}
+
+/* F_SETSIG/F_GETSIG round-trip. */
+void test_fcntl_getsig_setsig(void) {
+  int fd[2];
+  pipe(fd);
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd[0], F_SETSIG, SIGUSR1));
+  TEST_ASSERT_EQUAL_INT(SIGUSR1, fcntl(fd[0], F_GETSIG));
+  /* Out-of-range signal rejected. */
+  TEST_ASSERT_EQUAL_INT(-1, fcntl(fd[0], F_SETSIG, 99999));
+  close(fd[0]);
+  close(fd[1]);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -428,5 +603,13 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_fcntl_dupfd_badarg);
   RUN_TEST(test_fcntl_dupfd_badfd);
   RUN_TEST(test_fcntl_dupfd_cloexec);
+  RUN_TEST(test_fcntl_getlk_unlocked);
+  RUN_TEST(test_fcntl_setlk_write_lock_self);
+  RUN_TEST(test_fcntl_setlk_read_lock);
+  RUN_TEST(test_fcntl_setlk_pipe_rejected);
+  RUN_TEST(test_fcntl_setlk_conflict_child);
+  RUN_TEST(test_fcntl_ofd_setlk_einval);
+  RUN_TEST(test_fcntl_getown_setown);
+  RUN_TEST(test_fcntl_getsig_setsig);
   return UNITY_END();
 }

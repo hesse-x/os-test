@@ -50,6 +50,7 @@
 
 typedef struct pipe {
   uint8_t *buf;
+  uint32_t size; // ring capacity (power-of-2, [PAGE_SIZE, PIPE_MAX_SIZE])
   uint32_t head;
   uint32_t tail;
   refcount_t p_count;
@@ -76,6 +77,8 @@ typedef struct file {
   wait_queue_head *wq;                // 惰性分配：NULL 表示无等待者
   const struct file_operations *f_op; // fd-I/O 分发（NULL=走 type 分发）
   void *private_data; // 类 Linux：broker/eventfd 等用；f_op->close 负责回收
+  pid_t f_owner;   // F_SETOWN target pid (0 = none); stored, no SIGIO delivery
+  int f_owner_sig; // F_SETSIG signal (0 → SIGIO default); stored, not delivered
   union {
     struct pipe *pipe;
     struct shm *shm;

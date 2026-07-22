@@ -8,6 +8,7 @@
 #define KERNEL_INODE_H
 
 #include "kernel/xcore/atomic.h"
+#include "kernel/xcore/list.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
@@ -58,6 +59,12 @@ struct inode {
   struct mount_entry *mount; /* owning mount (set by sys_open lookup) */
   wait_queue_head *wq; /* ringbuf-backed: shared wq for epoll/poll waiters */
 
+  /* POSIX file locks (S09): per-inode lock list + its own spinlock (independent
+   * of i_lock, which guards FAT32 metadata — flock ops never touch metadata).
+   */
+  list_node i_flock;     /* head of file_lock list (list_init on create) */
+  spinlock i_flock_lock; /* protects i_flock */
+
   /* FAT32 metadata (REGULAR/DIR only) */
   uint32_t start_cluster;
   uint32_t dir_start_cluster;
@@ -81,5 +88,11 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
                                   int dir_entry_idx);
 void inode_put(struct inode *ip);
 struct inode *inode_get(struct inode *ip);
+
+/* Walk every cached inode, calling fn(ip, ctx) for each. Used by S09 file-lock
+ * cleanup to release a dying process's POSIX locks across all inodes without
+ * exposing the static hash table. fn must not block on inode eviction. */
+typedef void (*inode_iter_fn)(struct inode *ip, void *ctx);
+void inode_for_each(inode_iter_fn fn, void *ctx);
 
 #endif

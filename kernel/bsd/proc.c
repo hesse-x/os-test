@@ -20,6 +20,7 @@
 #include "kernel/bsd/elf_loader.h"
 #include "kernel/bsd/eventpoll.h"
 #include "kernel/bsd/fat32.h"
+#include "kernel/bsd/file_lock.h"
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/ipcfd.h"
@@ -37,6 +38,7 @@
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
@@ -128,6 +130,12 @@ void proc_reap(xtask *proc) {
   if (!proc->proc)
     return;
   struct proc *bp = proc->proc;
+
+  // S09: release this process's POSIX file locks across all inodes (Linux
+  // exit(2) semantics — locks are released even if the process never ran an
+  // explicit F_UNLCK). Done before files_put so concurrent lockers blocked in
+  // F_SETLKW get woken promptly.
+  file_lock_release_pid(proc->pid);
 
   if (bp->files) {
     struct file *entries[MAX_FD];
@@ -1699,6 +1707,9 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     stack_region->size = (uint64_t)user_stack_pages * PAGE_SIZE;
     stack_region->phys = 0; // not MAP_PHYSICAL — anonymous stack
     stack_region->prot = PROT_READ | PROT_WRITE;
+    stack_region->fd = -1; // anonymous
+    stack_region->offset = 0;
+    stack_region->flags = MAP_ANONYMOUS;
     stack_region->next = NULL;
     proc->mm->mmap_regions = stack_region;
   }
@@ -1813,8 +1824,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 // ===================== mmap region allocation =====================
 
 mmap_region *add_mmap_region(xtask *proc, uint64_t vaddr, uint64_t size,
-                             uint64_t phys, struct shm *shm_obj,
-                             uint32_t prot) {
+                             uint64_t phys, struct shm *shm_obj, uint32_t prot,
+                             int fd, uint64_t offset, uint32_t flags) {
   if (!proc->mm)
     return NULL;
   mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
@@ -1825,8 +1836,14 @@ mmap_region *add_mmap_region(xtask *proc, uint64_t vaddr, uint64_t size,
   region->phys = phys;
   region->shm_obj = shm_obj;
   region->prot = prot;
-  region->next = proc->mm->mmap_regions;
-  proc->mm->mmap_regions = region;
+  region->fd = fd;
+  region->offset = offset;
+  region->flags = flags;
+  region->next = NULL;
+  if (vma_insert_sorted(proc->mm, region) != 0) {
+    kfree(region);
+    return NULL;
+  }
   return region;
 }
 

@@ -24,6 +24,7 @@
 #include "kernel/bsd/eventfd.h"
 #include "kernel/bsd/eventpoll.h"
 #include "kernel/bsd/fat32.h"
+#include "kernel/bsd/file_lock.h"
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/inode.h"
@@ -47,6 +48,7 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h" // copy_*/strncpy_from_user declarations
 #include "kernel/xcore/mem/slab.h"
+#include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
@@ -669,8 +671,11 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           region->size = size;
           region->phys = 0;
           region->shm_obj = target_shm;
-          region->next = proc->mm->mmap_regions;
-          proc->mm->mmap_regions = region;
+          region->fd = fd;
+          region->offset = offset;
+          region->flags = (uint32_t)flags;
+          region->next = NULL;
+          vma_insert_sorted(proc->mm, region);
           proc->mm->mmap_brk = vaddr + size;
 
           file_put(f);
@@ -734,8 +739,11 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     region->size = size;
     region->phys = 0;
     region->shm_obj = shm_get(shm);
-    region->next = proc->mm->mmap_regions;
-    proc->mm->mmap_regions = region;
+    region->fd = fd;
+    region->offset = offset;
+    region->flags = (uint32_t)flags;
+    region->next = NULL;
+    vma_insert_sorted(proc->mm, region);
     proc->mm->mmap_brk = vaddr + size;
 
     spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
@@ -801,8 +809,11 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     region->size = npages * PAGE_SIZE;
     region->phys = phys_start;
     region->shm_obj = NULL;
-    region->next = proc->mm->mmap_regions;
-    proc->mm->mmap_regions = region;
+    region->fd = -1;
+    region->offset = offset;
+    region->flags = (uint32_t)flags;
+    region->next = NULL;
+    vma_insert_sorted(proc->mm, region);
     proc->mm->mmap_phys_brk = vaddr + npages * PAGE_SIZE;
 
     spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
@@ -882,8 +893,11 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   region->phys = 0;
   region->shm_obj = NULL;
   region->prot = prot;
-  region->next = proc->mm->mmap_regions;
-  proc->mm->mmap_regions = region;
+  region->fd = fd;
+  region->offset = offset;
+  region->flags = (uint32_t)flags;
+  region->next = NULL;
+  vma_insert_sorted(proc->mm, region);
   proc->mm->mmap_brk = vaddr + size;
 
   kfree(phys_pages);
@@ -904,47 +918,49 @@ int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   uint64_t *pml4 =
       (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
-  mmap_region **pp = &proc->mm->mmap_regions;
-  while (*pp) {
-    if ((*pp)->vaddr == addr) {
-      mmap_region *region = *pp;
-      size = region->size;
+  // vma_find returns the region containing addr; munmap only unmaps a region
+  // whose start exactly matches addr (size is ignored — S13 adds partial
+  // unmap), so reject a hit that is not an exact start match.
+  mmap_region *region = vma_find(proc->mm, addr);
+  if (!region || region->vaddr != addr)
+    return (int64_t)-EINVAL;
 
-      size_t npages = size / PAGE_SIZE;
-      if (region->shm_obj || region->phys) {
-        for (size_t i = 0; i < npages; i++) {
-          uint64_t va = addr + i * PAGE_SIZE;
-          uint64_t *pdpt = ensure_pd(pml4, va);
-          if (!pdpt)
-            continue;
-          uint64_t *pd = ensure_pt_in_pd(pdpt, va, 2);
-          if (!pd)
-            continue;
-          uint64_t *pt = ensure_pt_in_pd(pd, va, 1);
-          if (!pt)
-            continue;
-          uint64_t pt_idx = (va >> 12) & 0x1FF;
-          pt[pt_idx] = 0;
-        }
-      } else {
-        for (size_t i = 0; i < npages; i++) {
-          uint64_t va = addr + i * PAGE_SIZE;
-          unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
-        }
-      }
+  size = region->size;
 
-      if (region->shm_obj) {
-        shm_put(region->shm_obj);
-      }
-
-      *pp = region->next;
-      kfree(region);
-      return 0;
+  size_t npages = size / PAGE_SIZE;
+  if (region->shm_obj || region->phys) {
+    for (size_t i = 0; i < npages; i++) {
+      uint64_t va = addr + i * PAGE_SIZE;
+      uint64_t *pdpt = ensure_pd(pml4, va);
+      if (!pdpt)
+        continue;
+      uint64_t *pd = ensure_pt_in_pd(pdpt, va, 2);
+      if (!pd)
+        continue;
+      uint64_t *pt = ensure_pt_in_pd(pd, va, 1);
+      if (!pt)
+        continue;
+      uint64_t pt_idx = (va >> 12) & 0x1FF;
+      pt[pt_idx] = 0;
     }
-    pp = &(*pp)->next;
+  } else {
+    for (size_t i = 0; i < npages; i++) {
+      uint64_t va = addr + i * PAGE_SIZE;
+      unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
+    }
   }
 
-  return (int64_t)-EINVAL;
+  if (region->shm_obj) {
+    shm_put(region->shm_obj);
+  }
+
+  // Unlink region from the sorted list.
+  mmap_region **pp = &proc->mm->mmap_regions;
+  while (*pp != region)
+    pp = &(*pp)->next;
+  *pp = region->next;
+  kfree(region);
+  return 0;
 }
 
 // ===================== BSD syscall: mprotect =====================
@@ -1007,13 +1023,12 @@ int64_t sys_mprotect(int64_t arg1, int64_t arg2, int64_t prot_arg,
     invlpg(va); // stale TLB would defeat RW→RX / R→PROTNONE transitions
   }
 
-  // Sync mmap_region->prot so fork COW honors the new protection.
-  for (mmap_region *mr = proc->mm->mmap_regions; mr; mr = mr->next) {
-    if (mr->vaddr == addr) {
-      mr->prot = (uint32_t)prot;
-      break;
-    }
-  }
+  // Sync mmap_region->prot so fork COW honors the new protection. Match only
+  // the region whose start equals addr (existing behavior; S13 adds interval
+  // splitting).
+  mmap_region *mr = vma_find(proc->mm, addr);
+  if (mr && mr->vaddr == addr)
+    mr->prot = (uint32_t)prot;
 
   spin_unlock_irqrestore(lk, flags);
   return 0;
@@ -1103,6 +1118,7 @@ int64_t sys_pipe(int64_t arg1, int64_t unused1, int64_t unused2,
     buf[i] = 0;
 
   p->buf = buf;
+  p->size = PIPE_BUF_SIZE;
   p->head = 0;
   p->tail = 0;
   p->wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
@@ -1453,7 +1469,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       ret = -EPIPE;
       goto out;
     }
-    if ((p->head + 1) % PIPE_BUF_SIZE == p->tail) {
+    if ((p->head + 1) % p->size == p->tail) {
       if (f->flags & O_NONBLOCK) {
         if (written > 0)
           break;
@@ -1472,7 +1488,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       for (;;) {
         proc->state = BLOCKED;
         proc->wait_event = WAIT_NONE;
-        if ((p->head + 1) % PIPE_BUF_SIZE != p->tail)
+        if ((p->head + 1) % p->size != p->tail)
           break; /* 有空间 */
         if (f->flags & O_NONBLOCK) {
           sched_cancel_spurious_wake(proc);
@@ -1527,7 +1543,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       continue; // 回外层 while 重查（含 p_count<=1 的 EPIPE）
     }
     p->buf[p->head] = ((const char __force *)buf)[written];
-    p->head = (p->head + 1) % PIPE_BUF_SIZE;
+    p->head = (p->head + 1) % p->size;
     written++;
   }
 
@@ -1929,7 +1945,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     size_t nread = 0;
     while (nread < len && p->head != p->tail) {
       ((char __force *)buf)[nread] = p->buf[p->tail];
-      p->tail = (p->tail + 1) % PIPE_BUF_SIZE;
+      p->tail = (p->tail + 1) % p->size;
       nread++;
     }
 
@@ -2008,6 +2024,16 @@ int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
 }
 
 // ===================== BSD syscall: fcntl =====================
+
+// Round v up to the next power of two (v already a power of two is unchanged).
+// Used by F_SETPIPE_SZ to clamp the requested pipe capacity to a power-of-two
+// ring size in [PAGE_SIZE, PIPE_MAX_SIZE].
+static uint32_t round_up_pow2(uint32_t v) {
+  if (v <= 1)
+    return 1;
+  return 1u << (32 - __builtin_clz(v - 1));
+}
+
 int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                   int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
@@ -2124,6 +2150,103 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       fd_set_cloexec(proc->proc->files, new_fd, 0);
     spin_unlock(fdlk);
     ret = (int64_t)new_fd;
+    goto out;
+  }
+  case F_GETPIPE_SZ: {
+    if (f->type != FD_PIPE || !f->pipe) {
+      ret = -EINVAL;
+      goto out;
+    }
+    ret = (int64_t)f->pipe->size;
+    goto out;
+  }
+  case F_SETPIPE_SZ: {
+    if (f->type != FD_PIPE || !f->pipe) {
+      ret = -EINVAL;
+      goto out;
+    }
+    struct pipe *p = f->pipe;
+    uint32_t new_size = (arg == 0) ? PAGE_SIZE : (uint32_t)arg;
+    new_size = round_up_pow2(new_size);
+    if (new_size < PAGE_SIZE)
+      new_size = PAGE_SIZE;
+    if (new_size > PIPE_MAX_SIZE) {
+      ret = -EINVAL;
+      goto out;
+    }
+    /* Refuse to shrink below the data currently in the ring (Linux -EBUSY). */
+    uint32_t used = (p->head + p->size - p->tail) % p->size;
+    if (new_size <= used) {
+      ret = -EBUSY;
+      goto out;
+    }
+    uint8_t *new_buf = (uint8_t *)krealloc(p->buf, new_size);
+    if (!new_buf) {
+      ret = -ENOMEM;
+      goto out;
+    }
+    p->buf = new_buf;
+    p->size = new_size;
+    /* head/tail are unchanged: ring math uses the new modulus, and since
+     * new_size > used the existing [tail, head) data still fits. Wake any
+     * blocked writer — a larger pipe may now have room. */
+    __wake_up(p->wq, POLLOUT);
+    ret = (int64_t)new_size;
+    goto out;
+  }
+  case F_SETOWN: {
+    /* Store the SIGIO recipient pid. This OS has no async-I/O completion path,
+     * so no SIGIO is ever delivered — the value is recorded for F_GETOWN only.
+     * Only positive pids are accepted (no process-group -pgid yet). */
+    if (arg <= 0) {
+      ret = -EINVAL;
+      goto out;
+    }
+    f->f_owner = (pid_t)arg;
+    ret = 0;
+    goto out;
+  }
+  case F_GETOWN:
+    ret = (int64_t)f->f_owner;
+    goto out;
+  case F_SETSIG: {
+    /* 0 restores the default SIGIO; otherwise [1, NSIG). Stored only. */
+    if (arg < 0 || arg >= NSIG) {
+      ret = -EINVAL;
+      goto out;
+    }
+    f->f_owner_sig = arg;
+    ret = 0;
+    goto out;
+  }
+  case F_GETSIG:
+    ret = (int64_t)f->f_owner_sig;
+    goto out;
+  case F_OFD_GETLK:
+  case F_OFD_SETLK:
+  case F_OFD_SETLKW:
+    /* OFD locks are not implemented (different fd-level semantics; tracked in
+     * doc/design/todo.md). */
+    ret = -EINVAL;
+    goto out;
+  case F_GETLK:
+  case F_SETLK:
+  case F_SETLKW: {
+    if (f->type != FD_REGULAR || !f->inode) {
+      /* pipe/socket/dev/shm/dir cannot carry POSIX file locks. */
+      ret = -ENOLCK;
+      goto out;
+    }
+    struct flock lk;
+    if (copy_from_user(&lk, (void __user *)(uintptr_t)arg3, sizeof(lk))) {
+      ret = -EFAULT;
+      goto out;
+    }
+    ret = do_fcntl_lock(proc, f, cmd, &lk);
+    if (cmd == F_GETLK && ret == 0) {
+      if (copy_to_user((void __user *)(uintptr_t)arg3, &lk, sizeof(lk)))
+        ret = -EFAULT;
+    }
     goto out;
   }
   default:
@@ -3591,8 +3714,12 @@ int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   region->vaddr = vaddr;
   region->size = size;
   region->phys = phys;
-  region->next = proc->mm->mmap_regions;
-  proc->mm->mmap_regions = region;
+  region->shm_obj = NULL;
+  region->fd = -1;
+  region->offset = 0;
+  region->flags = KMAP_PHYSICAL;
+  region->next = NULL;
+  vma_insert_sorted(proc->mm, region);
 
   {
     uint64_t vaddr_val = vaddr;
@@ -3614,27 +3741,27 @@ int64_t sys_dma_free(int64_t arg1, int64_t unused1, int64_t unused2,
 
   xtask *proc = current_task;
 
+  // Exact-start match only (mirrors sys_munmap behavior).
+  mmap_region *r = vma_find(proc->mm, vaddr);
+  if (!r || r->vaddr != vaddr)
+    return (int64_t)-EINVAL;
+
+  size_t npages = r->size / PAGE_SIZE;
+
+  unmap_user_pages(
+      (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3),
+      r->vaddr, r->vaddr + r->size, npages);
+
+  struct page *page = bfc_frames + (r->phys / PAGE_SIZE);
+  bfc_free_page(page, npages);
+
+  // Unlink from the sorted list.
   mmap_region **pp = &proc->mm->mmap_regions;
-  while (*pp) {
-    mmap_region *r = *pp;
-    if (r->vaddr == vaddr) {
-      size_t npages = r->size / PAGE_SIZE;
-
-      unmap_user_pages(
-          (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3),
-          r->vaddr, r->vaddr + r->size, npages);
-
-      struct page *page = bfc_frames + (r->phys / PAGE_SIZE);
-      bfc_free_page(page, npages);
-
-      *pp = r->next;
-      kfree(r);
-      return 0;
-    }
-    pp = &r->next;
-  }
-
-  return (int64_t)-EINVAL;
+  while (*pp != r)
+    pp = &(*pp)->next;
+  *pp = r->next;
+  kfree(r);
+  return 0;
 }
 
 // ===================== BSD syscall: lseek =====================
