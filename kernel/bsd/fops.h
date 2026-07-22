@@ -8,7 +8,7 @@
 
 #include <stddef.h>
 
-#include "kernel/bsd/poll_types.h"    // __poll
+#include "kernel/bsd/poll_types.h"    // IWYU pragma: keep
 #include "kernel/xcore/posix_types.h" // ssize_t
 
 struct file;

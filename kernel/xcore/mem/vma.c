@@ -13,9 +13,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "arch/x64/utils.h"
 #include "kernel/xcore/kpi.h"
+#include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/vma.h"
+
 #include <xos/errno.h>
+#include <xos/mman.h>
+#include <xos/page.h>
 
 // Matches sys_mprotect's user-space upper bound (syscall.c). Beyond this the
 // address space belongs to the kernel.
@@ -152,4 +157,138 @@ mmap_region *vma_merge(mm *mm, mmap_region *r) {
     return p;
   }
   return r;
+}
+
+// ===================== S11: mmap addr hint / MAP_FIXED support
+// =====================
+
+// Does [start, start+len) overlap any region? Sorted list lets us stop early.
+// Public for MAP_FIXED_NOREPLACE conflict detection.
+bool vma_overlaps_any(mm *mm, uint64_t start, uint64_t len) {
+  return vma_overlaps(mm, start, len);
+}
+
+// Release one region's pages + PTEs, unlink it from the sorted list, and free
+// the descriptor. Mirrors sys_munmap's two-branch release:
+//  - anonymous (shm_obj==NULL && phys==0): unmap_user_pages refcount-decs and
+//    frees the backing pages.
+//  - SHM (shm_obj != NULL): clear PTEs only (pages are SHM-owned), then
+//    shm_put the mapping-instance reference.
+//  - MAP_PHYSICAL (phys != 0): clear PTEs only (phys is external MMIO).
+// Caller holds mm->mmap_lock.
+static void free_one_region(mm *mm, uint64_t *pml4, mmap_region *r) {
+  size_t npages = r->size / PAGE_SIZE;
+
+  if (r->shm_obj || r->phys) {
+    // SHM / MAP_PHYSICAL: clear leaf PTEs without freeing the backing pages.
+    for (size_t i = 0; i < npages; i++) {
+      uint64_t va = r->vaddr + i * PAGE_SIZE;
+      uint64_t *pdpt = ensure_pd(pml4, va);
+      if (!pdpt)
+        continue;
+      uint64_t *pd = ensure_pt_in_pd(pdpt, va, 2);
+      if (!pd)
+        continue;
+      uint64_t *pt = ensure_pt_in_pd(pd, va, 1);
+      if (!pt)
+        continue;
+      uint64_t pt_idx = (va >> 12) & 0x1FF;
+      pt[pt_idx] = 0;
+      // PTE is now 0, but a stale TLB entry may still hold the old translation
+      // (vma_unmap_range is the MAP_FIXED overlap-unmap; the caller — sys_mmap
+      // SHM/anon — immediately writes a fresh PTE to this VA via
+      // map_user_page_direct, which refuses to overwrite a present PTE but
+      // cannot evict a cached one). Flush so the new mapping takes effect.
+      invlpg(va);
+    }
+    if (r->shm_obj)
+      shm_put(r->shm_obj);
+  } else {
+    // Anonymous: unmap_user_pages refcount-decs and frees pages + clears PTEs.
+    for (size_t i = 0; i < npages; i++) {
+      uint64_t va = r->vaddr + i * PAGE_SIZE;
+      unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
+      invlpg(
+          va); // see the SHM/phys branch: stale TLB would shadow the new PTE.
+    }
+  }
+
+  // Unlink from the sorted list.
+  mmap_region **pp = &mm->mmap_regions;
+  while (*pp != r)
+    pp = &(*pp)->next;
+  *pp = r->next;
+  kfree(r);
+}
+
+// Unmap every existing mapping overlapping [addr, addr+len). Fully-contained
+// regions are dropped; partially-overlapping ones are split first (front/tail
+// residue preserved via vma_split), then the overlapping piece is freed. This
+// is the MAP_FIXED overlap-unmap and the basis for S13's partial munmap.
+// Returns 0, or -ENOMEM if a vma_split OOMs (already-unmapped pieces are not
+// rolled back — matches Linux do_munmap). Caller holds mm->mmap_lock.
+int vma_unmap_range(mm *mm, uint64_t *pml4, uint64_t addr, uint64_t len) {
+  uint64_t end = addr + len;
+  mmap_region *cur = mm->mmap_regions;
+  while (cur) {
+    mmap_region *next = cur->next;
+    if (cur->vaddr >= end)
+      break; // sorted list: past the interval
+    if (cur->vaddr + cur->size <= addr) {
+      cur = next;
+      continue; // no overlap
+    }
+
+    if (cur->vaddr < addr) {
+      // Front residue: split [addr, min(cur->end, end)) out as the mid piece.
+      uint64_t split_len = (cur->vaddr + cur->size < end)
+                               ? (cur->vaddr + cur->size - addr)
+                               : (end - addr);
+      mmap_region *mid = vma_split(mm, cur, addr, split_len);
+      if (!mid)
+        return -ENOMEM;
+      free_one_region(mm, pml4, mid); // front residue (cur) stays
+      cur = next;
+      continue;
+    }
+
+    if (cur->vaddr + cur->size > end) {
+      // No front residue, but a tail residue: split [cur->vaddr, end) out.
+      mmap_region *mid = vma_split(mm, cur, cur->vaddr, end - cur->vaddr);
+      if (!mid)
+        return -ENOMEM;
+      free_one_region(mm, pml4, mid); // tail residue (cur's remainder) stays
+      cur = next;
+      continue;
+    }
+
+    // Fully contained in [addr, end).
+    free_one_region(mm, pml4, cur);
+    cur = next;
+  }
+  return 0;
+}
+
+// Pick the placement vaddr per the mmap addr-hint / MAP_FIXED semantics:
+//  - MAP_FIXED:           vma_unmap_range(addr,len) then return addr.
+//  - MAP_FIXED_NOREPLACE: -EEXIST on any overlap, else addr (no unmapping).
+//  - neither:             vma_find_gap(len, hint); 0 → -ENOMEM.
+// Returns the vaddr as a non-negative int64_t, or a negative -errno. The
+// caller advances mmap_brk only when the returned vaddr equals mmap_brk.
+// Caller holds mm->mmap_lock.
+int64_t vma_pick_addr(mm *mm, uint64_t *pml4, uint64_t addr, uint64_t len,
+                      uint32_t flags, uint64_t hint) {
+  if (flags & MAP_FIXED) {
+    int r = vma_unmap_range(mm, pml4, addr, len);
+    if (r < 0)
+      return r;
+    return (int64_t)addr;
+  }
+  if (flags & MAP_FIXED_NOREPLACE) {
+    if (vma_overlaps_any(mm, addr, len))
+      return -EEXIST;
+    return (int64_t)addr;
+  }
+  uint64_t v = vma_find_gap(mm, len, hint);
+  return v ? (int64_t)v : (int64_t)-ENOMEM;
 }

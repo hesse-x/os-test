@@ -11,13 +11,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <time.h>
 #include <unistd.h>
-#include <xos/input.h>
+
+#include "linux/input.h"
+#include "linux/linux/input-event-codes.h"
+
+#include <sys/ioctl.h>
+#include <xos/errno.h>
+#include <xos/fcntl.h>
+#include <xos/ioctl.h>
+#include <xos/time.h>
 
 #define EVDEV_BITS_PER_LONG (sizeof(long) * 8)
-#define NBITS(x) ((((x)-1) / EVDEV_BITS_PER_LONG) + 1)
+#define NBITS(x) ((((x) - 1) / EVDEV_BITS_PER_LONG) + 1)
 #define LONG(x) ((x) / EVDEV_BITS_PER_LONG)
 #define OFF(x) ((x) % EVDEV_BITS_PER_LONG)
 

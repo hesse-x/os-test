@@ -8,13 +8,17 @@
  * Merged from sys_device.cc + sys_irq.cc + sys_pci.cc + dev_ready.c
  */
 
+#include <errno.h>
 #include <stdint.h>
+#include <syscall.h>
+#include <unistd.h>
+
 #include <sys/device.h>
 #include <sys/ipc.h>
 #include <sys/irq.h>
 #include <sys/pci.h>
-#include <syscall.h>
-#include <unistd.h>
+#include <xos/syscall_asm.h>
+
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/syscall_nums.h>

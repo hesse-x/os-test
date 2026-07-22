@@ -12,6 +12,7 @@
 // Callers must hold mm->mmap_lock.
 
 #include "kernel/xcore/mm_types.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 // Return the region containing addr ([vaddr, vaddr+size)), or NULL.
@@ -38,5 +39,24 @@ mmap_region *vma_split(mm *mm, mmap_region *region, uint64_t addr,
 // prot+flags, contiguous vaddr). Returns the resulting region. Only merges
 // anonymous private mappings (fd==-1 && shm_obj==NULL && phys==0).
 mmap_region *vma_merge(mm *mm, mmap_region *region);
+
+// --- S11: mmap addr hint / MAP_FIXED support ---
+
+// True if [start, start+len) overlaps any existing region. Used by
+// MAP_FIXED_NOREPLACE conflict detection.
+bool vma_overlaps_any(mm *mm, uint64_t start, uint64_t len);
+
+// Unmap every mapping overlapping [addr, addr+len): fully-contained regions
+// are dropped, partially-overlapping ones are split first (front/tail residue
+// preserved). Returns 0, or -ENOMEM if a vma_split OOMs (already-unmapped
+// pieces are not rolled back). Caller holds mm->mmap_lock.
+int vma_unmap_range(mm *mm, uint64_t *pml4, uint64_t addr, uint64_t len);
+
+// Pick the placement vaddr per mmap addr-hint / MAP_FIXED / MAP_FIXED_NOREPLACE
+// semantics (see S11). Returns the vaddr as a non-negative int64_t, or a
+// negative -errno (-EEXIST / -ENOMEM). pml4 is the process page-table root
+// (needed for the MAP_FIXED overlap-unmap). Caller holds mm->mmap_lock.
+int64_t vma_pick_addr(mm *mm, uint64_t *pml4, uint64_t addr, uint64_t len,
+                      uint32_t flags, uint64_t hint);
 
 #endif // KERNEL_XCORE_MEM_VMA_H

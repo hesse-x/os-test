@@ -5,14 +5,17 @@
  */
 
 #include "kernel/bsd/elf_loader.h"
-#include "arch/x64/memlayout.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+
 #include "arch/x64/paging.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/sparse.h"
-#include <stdbool.h>
-#include <stddef.h>
+
 #include <xos/elf.h>
+#include <xos/page.h>
 
 // page_to_phys, phys_to_virt — defined in kernel/mem/alloc.c
 // ensure_pd, ensure_pt_in_pd, map_user_page_direct — defined in

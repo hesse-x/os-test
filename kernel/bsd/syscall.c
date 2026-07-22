@@ -570,7 +570,7 @@ int64_t sys_wait4(int64_t pid, int64_t wstatus, int64_t options, int64_t rusage,
 // ===================== BSD syscall: mmap =====================
 int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                  int64_t arg5, int64_t arg6) {
-  (void)arg1;
+  uint64_t addr = (uint64_t)arg1; // addr hint (or exact addr with MAP_FIXED)
   size_t size = (size_t)arg2;
   uint32_t prot = (uint32_t)arg3;
   int flags = (int)arg4;
@@ -581,12 +581,28 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     return -EINVAL;
   if (size > 128 * 1024 * 1024)
     return -EINVAL;
+  size = ALIGN_UP(size, PAGE_SIZE);
+
+  bool fixed = (flags & MAP_FIXED) || (flags & MAP_FIXED_NOREPLACE);
+  // MAP_FIXED / MAP_FIXED_NOREPLACE require a page-aligned addr (and offset for
+  // fd mappings); a non-aligned hint (no MAP_FIXED) is rounded down, never an
+  // error.
+  if (fixed) {
+    if (addr & (PAGE_SIZE - 1))
+      return -EINVAL;
+    if (fd >= 0 && (offset & (PAGE_SIZE - 1)))
+      return -EINVAL;
+  }
+  uint64_t hint = (!fixed && addr) ? ALIGN_DOWN(addr, PAGE_SIZE) : 0;
 
   xtask *proc = current_task;
   uint64_t mmap_flags;
   spin_lock_irqsave(&proc->mm->mmap_lock, &mmap_flags);
-  printk(LOG_DEBUG, "sys_mmap: pid=%d size=%zu flags=%d fd=%d offset=%llu\n",
-         proc->pid, size, flags, fd, (unsigned long long)offset);
+  printk(LOG_DEBUG,
+         "sys_mmap: pid=%d addr=0x%lx size=%zu flags=%d fd=%d "
+         "offset=%llu\n",
+         proc->pid, (unsigned long)addr, size, flags, fd,
+         (unsigned long long)offset);
   uint64_t *pml4 =
       (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
@@ -634,7 +650,15 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           size_t total_pages = npages + list_pages;
           size = total_pages * PAGE_SIZE;
 
-          uint64_t vaddr = proc->mm->mmap_brk;
+          int64_t picked =
+              vma_pick_addr(proc->mm, pml4, addr, size, (uint32_t)flags, hint);
+          if (picked < 0) {
+            shm_put(target_shm);
+            file_put(f);
+            spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+            return picked;
+          }
+          uint64_t vaddr = (uint64_t)picked;
           uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
 
           for (size_t i = 0; i < total_pages; i++) {
@@ -676,7 +700,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           region->flags = (uint32_t)flags;
           region->next = NULL;
           vma_insert_sorted(proc->mm, region);
-          proc->mm->mmap_brk = vaddr + size;
+          if (vaddr == proc->mm->mmap_brk)
+            proc->mm->mmap_brk = vaddr + size;
 
           file_put(f);
           spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
@@ -700,13 +725,28 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
       return -EBADF;
     }
+    // Take a reference for the new region up front, before vma_pick_addr may
+    // (under MAP_FIXED) vma_unmap_range the existing mappings of this same shm
+    // object. Those releases shm_put the old regions; without this get, the
+    // last one would drop refs to 0 and free shm while f->shm still points at
+    // it — then region->shm_obj = shm_get(shm) below would be a UAF. The
+    // region adopts this reference (no second shm_get on success).
+    shm_get(shm);
 
     size_t npages = shm->npages;
     size_t list_pages = shm->page_list ? (size_t)shm->num_pages : 0;
     size_t total_pages = npages + list_pages;
     size = total_pages * PAGE_SIZE;
 
-    uint64_t vaddr = proc->mm->mmap_brk;
+    int64_t picked =
+        vma_pick_addr(proc->mm, pml4, addr, size, (uint32_t)flags, hint);
+    if (picked < 0) {
+      shm_put(shm);
+      file_put(f);
+      spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+      return picked;
+    }
+    uint64_t vaddr = (uint64_t)picked;
     uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
 
     for (size_t i = 0; i < total_pages; i++) {
@@ -721,6 +761,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
         for (size_t j = 0; j < i; j++)
           unmap_user_pages(pml4, vaddr + j * PAGE_SIZE,
                            vaddr + (j + 1) * PAGE_SIZE, 1);
+        shm_put(shm);
+        file_put(f);
         spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
         return -ENOMEM;
       }
@@ -731,6 +773,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       for (size_t i = 0; i < total_pages; i++)
         unmap_user_pages(pml4, vaddr + i * PAGE_SIZE,
                          vaddr + (i + 1) * PAGE_SIZE, 1);
+      shm_put(shm);
+      file_put(f);
       spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
       return -ENOMEM;
     }
@@ -738,13 +782,14 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     region->vaddr = vaddr;
     region->size = size;
     region->phys = 0;
-    region->shm_obj = shm_get(shm);
+    region->shm_obj = shm;
     region->fd = fd;
     region->offset = offset;
     region->flags = (uint32_t)flags;
     region->next = NULL;
     vma_insert_sorted(proc->mm, region);
-    proc->mm->mmap_brk = vaddr + size;
+    if (vaddr == proc->mm->mmap_brk)
+      proc->mm->mmap_brk = vaddr + size;
 
     spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
     return vaddr;
@@ -752,6 +797,12 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   // MAP_PHYSICAL
   if (flags & MAP_PHYSICAL) {
+    // OS-internal MMIO mapping (no Linux equivalent): always bump-allocates
+    // from mmap_phys_brk and ignores MAP_FIXED/MAP_FIXED_NOREPLACE. Recorded
+    // in doc/design/todo.md.
+    if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE))
+      printk(LOG_DEBUG,
+             "mmap: MAP_FIXED* ignored on MAP_PHYSICAL (OS-internal)\n");
     uint64_t vaddr = proc->mm->mmap_phys_brk;
     uint64_t phys_start = ALIGN_DOWN(offset, PAGE_SIZE);
     uint64_t phys_end = ALIGN_UP(offset + size, PAGE_SIZE);
@@ -821,8 +872,13 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
 
   // Anonymous private mapping
-  size = ALIGN_UP(size, PAGE_SIZE);
-  uint64_t vaddr = proc->mm->mmap_brk;
+  int64_t picked =
+      vma_pick_addr(proc->mm, pml4, addr, size, (uint32_t)flags, hint);
+  if (picked < 0) {
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return picked;
+  }
+  uint64_t vaddr = (uint64_t)picked;
   // prot=0 (PROT_NONE) → guard page: map page but NOT present.
   // Access triggers #PF (desired for stack-overflow detection).
   uint64_t pte_flags = PTE_USER;
@@ -898,7 +954,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   region->flags = (uint32_t)flags;
   region->next = NULL;
   vma_insert_sorted(proc->mm, region);
-  proc->mm->mmap_brk = vaddr + size;
+  if (vaddr == proc->mm->mmap_brk)
+    proc->mm->mmap_brk = vaddr + size;
 
   kfree(phys_pages);
   spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
