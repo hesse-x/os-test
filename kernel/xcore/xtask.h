@@ -23,7 +23,10 @@ typedef enum proc_state {
   RUNNING,
   BLOCKED,
   ZOMBIE,
-  REAPING
+  REAPING,
+  STOPPED // S01: stopped by SIGSTOP/SIGTSTP/SIGTTOU/SIGTTIN (job control). Not
+          // scheduled, not on run_queue, not reapable. Resumed only by SIGCONT
+          // (do_cont). Distinct from BLOCKED (which awaits a resource wake).
 } proc_state;
 typedef enum wait_event {
   WAIT_NONE,
@@ -57,12 +60,13 @@ typedef struct xtask {
   int assigned_cpu;      // which CPU this process runs on
   uint8_t *iopm;         // IOPM bitmap (NULL = deny all), 8KB if allocated
 
-  list_node run_node;      // per-CPU run_queue
-  list_node wait_node;     // per-CPU timer_queue
-  uint64_t wait_deadline;  // sched_clock() nanosecond deadline
-  uint64_t alarm_deadline; // 0 = no alarm; else sched_clock() ns absolute
-                           // (POSIX alarm(); checked by timer_handler)
-  uint8_t wait_timed_out;  // 1 = timer expired wakeup, 0 = notify wakeup
+  list_node run_node;     // per-CPU run_queue
+  list_node wait_node;    // per-CPU timer_queue
+  uint64_t wait_deadline; // sched_clock() nanosecond deadline
+  // S03: alarm moved per-task → per-process (signal_struct.alarm_deadline).
+  // POSIX alarm() is process-wide; the old per-task field only delivered
+  // SIGALRM to the arming thread.
+  uint8_t wait_timed_out; // 1 = timer expired wakeup, 0 = notify wakeup
 
   // === unified recv queue ===
   uint8_t recv_buf[RECV_QUEUE_SIZE][RECV_MSG_SIZE];
@@ -119,6 +123,13 @@ typedef struct xtask {
   // Lives in xtask (static array, slot lifetime by tasks_lock) not proc
   // (kmalloc'd) so waitpid can read it safely without holding a proc ref.
   int32_t exit_code;
+
+  // === job-control stop (S01, valid when state == STOPPED) ===
+  // exit_code holds the WIFSTOPPED encoding ((stopsig << 8) | 0x7f) while
+  // stopped; stop_signo is the bare signal for clarity. stop_reported gates
+  // one-shot WUNTRACED reporting (cleared by do_cont / re-set by do_stop).
+  int32_t stop_signo;
+  uint8_t stop_reported;
 
   // === thread cleanup ownership (set by clone, read by sched_task_reap) ===
   struct thread_clone_info

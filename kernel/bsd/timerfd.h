@@ -8,7 +8,6 @@
 #define KERNEL_BSD_TIMERFD_H
 
 #include <stdint.h>
-#include <xos/time.h>
 
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/spinlock.h"

@@ -868,7 +868,7 @@ static ssize_t usb_hidraw_read(xtask *proc, int fd, void *buf, size_t count) {
       xtask *p = current_task;
       uint64_t pend = __atomic_load_n(&p->proc->sig_pending, __ATOMIC_ACQUIRE);
       uint64_t deliv = pend & ~p->proc->sig_blocked;
-      deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
       if (deliv) {
         ret = -EINTR;
         goto out;

@@ -37,6 +37,13 @@ add_user_dyn_elf(process C SOURCES test_process.c ${CMAKE_SOURCE_DIR}/third_part
 # Layer 8: signal
 add_user_dyn_elf(signal C SOURCES test_signal.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 
+# S01: job-control stop state (SIGSTOP/SIGTSTP/SIGCONT + WUNTRACED reporting)
+add_user_dyn_elf(signal_stop C SOURCES test_signal_stop.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+# S02: WCOREDUMP + SA_RESETHAND + SA_NODEFER + sa_restorer user trampoline
+add_user_dyn_elf(signal_flags C SOURCES test_signal_flags.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+# S03: kill/tgkill permission & scope + set_tid_address 64-bit + per-process alarm
+add_user_dyn_elf(kill_perm C SOURCES test_kill_perm.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+
 # Layer 9: poll
 add_user_dyn_elf(poll C SOURCES test_poll.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 

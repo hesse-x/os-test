@@ -15,9 +15,10 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. kill invalid pid returns -ESRCH */
+/* 1. kill invalid pid returns -ESRCH (S03: kill(-1) now broadcasts, so test a
+ * guaranteed-nonexistent pid instead). */
 void test_kill_invalid_pid(void) {
-  int r = kill(-1, SIGTERM);
+  int r = kill(999999, SIGTERM);
   TEST_ASSERT_TRUE(r < 0);
 }
 
@@ -57,13 +58,14 @@ void test_sigaction_mask_validation(void) {
   struct sigaction act;
   memset(&act, 0, sizeof(act));
   act.sa_handler = SIG_IGN;
-  act.sa_mask = (1ULL << SIGKILL); // illegal
+  sigaddset(&act.sa_mask, SIGKILL); // illegal
 
   int r = sigaction(SIGUSR1, &act, NULL);
   TEST_ASSERT_TRUE(r < 0); // should fail
 
   /* Also test SIGSTOP */
-  act.sa_mask = (1ULL << SIGSTOP);
+  sigemptyset(&act.sa_mask);
+  sigaddset(&act.sa_mask, SIGSTOP);
   r = sigaction(SIGUSR1, &act, NULL);
   TEST_ASSERT_TRUE(r < 0);
 }

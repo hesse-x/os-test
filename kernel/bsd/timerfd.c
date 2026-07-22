@@ -19,10 +19,10 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
-#include "xos/signal.h"
-#include <stddef.h>
+
 #include <xos/errno.h>
 #include <xos/fcntl.h>
+#include <xos/signal.h>
 #include <xos/socket.h>
 #include <xos/time.h>
 
@@ -210,7 +210,7 @@ int64_t timerfd_do_read(struct file *f, void *buf) {
       xtask *p = current_task;
       uint64_t pend = __atomic_load_n(&p->proc->sig_pending, __ATOMIC_ACQUIRE);
       uint64_t deliv = pend & ~p->proc->sig_blocked;
-      deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
       if (deliv) {
         current_task->state = RUNNING;
         ret = -EINTR;

@@ -58,7 +58,7 @@ uint64_t proc_signalfd_pending(signalfd_ctx *sfd) {
 int signalfd_consumes(proc *bp, int signo) {
   if (!bp || !bp->files)
     return 0;
-  uint64_t bit = 1ULL << signo;
+  uint64_t bit = 1ULL << (signo - 1);
   int consumes = 0;
   rcu_read_lock();
   for (int fd = 0; fd < MAX_FD; fd++) {
@@ -82,7 +82,7 @@ int signalfd_consumes(proc *bp, int signo) {
 wait_queue_head *signalfd_wq(proc *bp, int signo) {
   if (!bp || !bp->files)
     return NULL;
-  uint64_t bit = 1ULL << signo;
+  uint64_t bit = 1ULL << (signo - 1);
   for (int fd = 0; fd < MAX_FD; fd++) {
     struct file *f = fd_lookup(bp->files, fd);
     if (f && f->type == FD_SIGNALFD && f->signalfd) {
@@ -105,7 +105,7 @@ int64_t sys_signalfd4(int64_t fd, int64_t sigmask_ptr, int64_t sizemask,
   if (copy_from_user(&mask, (void *)sigmask_ptr, sizeof(mask)))
     return -EFAULT;
   // SIGKILL/SIGSTOP cannot be caught via signalfd (they always default-act).
-  mask &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
+  mask &= ~((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP)));
 
   xtask *proc = current_task;
   if (fd == -1) {
@@ -180,21 +180,22 @@ int64_t signalfd_do_read(struct file *f, void *buf) {
     uint64_t raw_priv =
         __atomic_load_n(&bp->sig_pending, __ATOMIC_ACQUIRE) & ctx->sigmask;
     uint64_t priv = raw_priv & ~blocked;
-    priv |= (raw_priv & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+    priv |= (raw_priv & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
     uint64_t shared = 0;
     if (bp->signal) {
-      spin_lock(&bp->signal->sig_lock);
+      uint64_t sflags;
+      spin_lock_irqsave(&bp->signal->sig_lock, &sflags);
       shared = bp->signal->shared_pending & ctx->sigmask & ~blocked;
-      spin_unlock(&bp->signal->sig_lock);
+      spin_unlock_irqrestore(&bp->signal->sig_lock, sflags);
     }
 
     int signo = 0;
     uint64_t source = 0; // 1 = private, 2 = shared
     if (priv) {
-      signo = __builtin_ctzll(priv);
+      signo = __builtin_ctzll(priv) + 1; // bit index = signo-1
       source = 1;
     } else if (shared) {
-      signo = __builtin_ctzll(shared);
+      signo = __builtin_ctzll(shared) + 1; // bit index = signo-1
       source = 2;
     }
 
@@ -205,12 +206,13 @@ int64_t signalfd_do_read(struct file *f, void *buf) {
       si.ssi_code = SI_USER;
       // Consume the pending bit.
       if (source == 1) {
-        __atomic_and_fetch(&bp->sig_pending, ~(1ULL << signo),
+        __atomic_and_fetch(&bp->sig_pending, ~(1ULL << (signo - 1)),
                            __ATOMIC_RELEASE);
       } else {
-        spin_lock(&bp->signal->sig_lock);
-        bp->signal->shared_pending &= ~(1ULL << signo);
-        spin_unlock(&bp->signal->sig_lock);
+        uint64_t sflags;
+        spin_lock_irqsave(&bp->signal->sig_lock, &sflags);
+        bp->signal->shared_pending &= ~(1ULL << (signo - 1));
+        spin_unlock_irqrestore(&bp->signal->sig_lock, sflags);
       }
       if (copy_to_user(buf, &si, sizeof(si)))
         ret = -EFAULT;
@@ -229,7 +231,7 @@ int64_t signalfd_do_read(struct file *f, void *buf) {
     {
       uint64_t pend = __atomic_load_n(&bp->sig_pending, __ATOMIC_ACQUIRE);
       uint64_t deliv = pend & ~bp->sig_blocked;
-      deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
       if (deliv) {
         current_task->state = RUNNING;
         ret = -EINTR;

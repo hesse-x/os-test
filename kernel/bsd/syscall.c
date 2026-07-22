@@ -170,18 +170,16 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   //    wakeup) BEFORE ZOMBIE — proc is alive, no concurrent sched_task_reap
   //    possible.
   if (proc->proc->clear_tid_addr) {
-    // Invariant: before clear, *clear_tid_addr must equal this thread's tid
-    // (written by CLONE_CHILD_SETTID before the child is scheduled). If it is
-    // 0, the parent thread had not yet let the kernel write tid after clone
-    // returned when the child exited — this is the timing-race signature of
-    // bug.md Bug 2. Panic on hit to avoid the silent deadlock where join
-    // never sees 0. Pure check, does not change semantics.
-    // __attribute__((unused)): in release builds ASSERT is a no-op and
-    // cur_tid_val is unused; in debug builds ASSERT consumes it.
-    pid_t cur_tid_val __attribute__((unused)) =
-        *((pid_t *)(uintptr_t)proc->proc->clear_tid_addr);
-    ASSERT(cur_tid_val == proc->pid);
-    *((pid_t *)(uintptr_t)proc->proc->clear_tid_addr) = 0;
+    // clear_tid_addr may be set two ways: CLONE_CHILD_SETTID (fork writes the
+    // child's tid there before scheduling it) or sys_set_tid_address (POSIX:
+    // the kernel only records the address; it does NOT write tid into it, so
+    // the word may hold any user value). The previous ASSERT(*==pid) guarded
+    // the CLONE_CHILD_SETTID timing race (bug.md Bug 2) but wrongly fired on
+    // the set_tid_address path (e.g. test_set_tid_address_64bit stores 0x1234).
+    // Linux's do_exit does not assert here — clearing + futex_wake is the
+    // whole contract — so the check is dropped. Bug 2's lost-wakeup is already
+    // prevented at fork (CLONE_CHILD_SETTID writes tid before the child runs).
+    *((int *)(uintptr_t)proc->proc->clear_tid_addr) = 0;
     sys_futex((int64_t)proc->proc->clear_tid_addr, (int64_t)FUTEX_WAKE, 1, 0, 0,
               0);
   }
@@ -214,7 +212,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
       // must not dereference it. Guard matches the pty SIGHUP path
       // (proc.c pty_close_file).
       if (parent->proc) {
-        __atomic_or_fetch(&parent->proc->sig_pending, 1ULL << SIGCHLD,
+        __atomic_or_fetch(&parent->proc->sig_pending, SIGMASK(SIGCHLD),
                           __ATOMIC_RELEASE);
         int pcpu = parent->assigned_cpu;
         uint64_t pflags;
@@ -271,10 +269,11 @@ int64_t sys_exit_group(int64_t arg1, int64_t unused1, int64_t unused2,
   int32_t status = (int32_t)arg1;
 
   // 1. Set group_exit flag
-  spin_lock(&sig->sig_lock);
+  uint64_t gflags;
+  spin_lock_irqsave(&sig->sig_lock, &gflags);
   sig->group_exit = 1;
   sig->group_exit_code = status;
-  spin_unlock(&sig->sig_lock);
+  spin_unlock_irqrestore(&sig->sig_lock, gflags);
 
   // 2. Scan tasks[], wake BLOCKED threads with the same tgid and != current
   for (int i = 0; i < MAX_PROC; i++) {
@@ -299,23 +298,44 @@ int64_t sys_exit_group(int64_t arg1, int64_t unused1, int64_t unused2,
 }
 
 // ===================== BSD syscall: waitpid =====================
-// Mirror of user/include/sys/wait.h options. Only WNOHANG is honored today;
-// WUNTRACED/WCONTINUED require stopped-state reporting (see
-// doc/design/todo.md).
+// Mirror of user/include/sys/wait.h options. WNOHANG returns 0 without
+// blocking. S01 adds WUNTRACED: a stopped child is reported once (one-shot
+// stop_reported flag) without being reaped, with *wstatus =
+// (stopsig << 8) | 0x7f.
 #define WNOHANG 1
 #define WUNTRACED 2
 #define WCONTINUED 4
+
+// S01 helper: report a stopped child to a waitpid caller. Writes the
+// WIFSTOPPED encoding into *wstatus and sets the one-shot stop_reported flag
+// so the same stop is not reported twice. Returns 1 if reported, 0 if the
+// caller did not request WUNTRACED or this stop was already reported.
+static int waitpid_report_stopped(xtask *child, int32_t __user *wstatus,
+                                  int wuntraced) {
+  if (!wuntraced || child->stop_reported)
+    return 0;
+  if (wstatus) {
+    uint64_t p = (__force uint64_t)wstatus;
+    if (p && p < KERNEL_VMA_BOUNDARY &&
+        p + sizeof(int32_t) - 1 < KERNEL_VMA_BOUNDARY)
+      *(__force int32_t *)wstatus = child->exit_code;
+  }
+  child->stop_reported = 1;
+  return 1;
+}
 
 int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
                     int64_t unused2, int64_t unused3, int64_t unused4) {
   pid_t pid = (pid_t)arg1;
   int32_t __user *exit_code_ptr = (int32_t __user * __force) arg2;
   int nohang = (int)options & WNOHANG;
+  int wuntraced = (int)options & WUNTRACED;
 
   if (pid == -1) {
     while (1) {
       spin_lock(&tasks_lock);
       xtask *zombie = NULL;
+      xtask *stopped = NULL;
       bool has_children = false;
       for (int i = 0; i < MAX_PROC; i++) {
         if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->mm &&
@@ -325,11 +345,22 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
             zombie = tasks[i];
             break;
           }
+          if (wuntraced && tasks[i]->state == STOPPED &&
+              !tasks[i]->stop_reported)
+            stopped = stopped ? stopped : tasks[i];
         }
       }
       if (!has_children) {
         spin_unlock(&tasks_lock);
         return (int64_t)-ECHILD;
+      }
+      // S01: report a stopped child without reaping it. The child stays
+      // STOPPED; stop_reported makes this a one-shot report.
+      if (stopped) {
+        spin_unlock(&tasks_lock);
+        if (waitpid_report_stopped(stopped, exit_code_ptr, wuntraced))
+          return (int64_t)stopped->pid;
+        continue;
       }
       if (zombie) {
         int cpu = zombie->assigned_cpu;
@@ -364,6 +395,7 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
       spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
       spin_lock(&tasks_lock);
       zombie = NULL;
+      stopped = NULL;
       has_children = false;
       for (int i = 0; i < MAX_PROC; i++) {
         if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->mm &&
@@ -373,6 +405,9 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
             zombie = tasks[i];
             break;
           }
+          if (wuntraced && tasks[i]->state == STOPPED &&
+              !tasks[i]->stop_reported)
+            stopped = stopped ? stopped : tasks[i];
         }
       }
       if (!has_children) {
@@ -385,6 +420,13 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
         spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
         continue;
       }
+      if (stopped) {
+        spin_unlock(&tasks_lock);
+        spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
+        if (waitpid_report_stopped(stopped, exit_code_ptr, wuntraced))
+          return (int64_t)stopped->pid;
+        continue;
+      }
       spin_unlock(&tasks_lock);
       current_task->wait_event = WAIT_CHILD;
       current_task->state = BLOCKED;
@@ -394,8 +436,8 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
         uint64_t pend =
             __atomic_load_n(&current_proc->sig_pending, __ATOMIC_ACQUIRE);
         uint64_t deliv = pend & ~current_proc->sig_blocked;
-        deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
-        deliv &= ~(1ULL << SIGCHLD);
+        deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
+        deliv &= ~(SIGMASK(SIGCHLD));
         if (deliv)
           return (int64_t)-EINTR;
       }
@@ -423,6 +465,18 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
   spin_unlock(&tasks_lock);
 
   while (1) {
+    // S01: report a stopped child once under WUNTRACED before blocking. The
+    // child stays STOPPED (not reaped); stop_reported is the one-shot gate.
+    if (wuntraced) {
+      int ccpu = child->assigned_cpu;
+      uint64_t cflags;
+      spin_lock_irqsave(&cpu_locals[ccpu].scheduler_lock, &cflags);
+      int is_stopped = (child->state == STOPPED);
+      spin_unlock_irqrestore(&cpu_locals[ccpu].scheduler_lock, cflags);
+      if (is_stopped && waitpid_report_stopped(child, exit_code_ptr, wuntraced))
+        return (int64_t)child->pid;
+    }
+
     int cpu = child->assigned_cpu;
     uint64_t flags;
     spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
@@ -470,8 +524,8 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
       uint64_t pend =
           __atomic_load_n(&current_proc->sig_pending, __ATOMIC_ACQUIRE);
       uint64_t deliv = pend & ~current_proc->sig_blocked;
-      deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
-      deliv &= ~(1ULL << SIGCHLD);
+      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
+      deliv &= ~(SIGMASK(SIGCHLD));
       if (deliv) {
         printk(LOG_WARN, "waitpid: pid=%d EINTR pending=0x%lx\n", pid, pend);
         return (int64_t)-EINTR;
@@ -1428,28 +1482,36 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
           ret = -EAGAIN;
           goto out;
         }
-        proc->wait_deadline = sched_clock() + 5000000000ULL;
-        {
+        /* Borrow the process alarm deadline (if armed) as the wake deadline so
+         * a pending SIGALRM can interrupt this indefinite blocking write —
+         * mirrors sys_pause / epoll_wait. Re-read each iteration: a prior block
+         * may have returned on alarm and the process may re-arm a new alarm. No
+         * user timeout exists for write(); with no alarm we block indefinitely
+         * (wait_deadline=0, not inserted) until space frees or readers close.
+         */
+        uint64_t alarm_dl = 0;
+        if (proc->proc && proc->proc->signal) {
+          uint64_t sflags;
+          spin_lock_irqsave(&proc->proc->signal->sig_lock, &sflags);
+          alarm_dl = proc->proc->signal->alarm_deadline;
+          spin_unlock_irqrestore(&proc->proc->signal->sig_lock, sflags);
+        }
+        if (alarm_dl != 0) {
+          proc->wait_deadline = alarm_dl;
           int cpu = proc->assigned_cpu;
           uint64_t flags;
           spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
           sched_timer_queue_insert(cpu, proc);
           spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+        } else {
+          proc->wait_deadline = 0;
         }
         schedule();
-        if (proc->wait_timed_out) {
-          sched_cancel_spurious_wake(proc);
-          remove_wait_queue(wq, &wait);
-          if (written > 0)
-            break;
-          ret = -ETIMEDOUT;
-          goto out;
-        }
         {
           uint64_t pend =
               __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
           uint64_t deliv = pend & ~proc->proc->sig_blocked;
-          deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+          deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
           if (deliv) {
             sched_cancel_spurious_wake(proc);
             remove_wait_queue(wq, &wait);
@@ -1821,26 +1883,36 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         ret = -EAGAIN;
         goto out;
       }
-      proc->wait_deadline = sched_clock() + 5000000000ULL;
-      {
+      /* Borrow the process alarm deadline (if armed) as the wake deadline so a
+       * pending SIGALRM can interrupt this indefinite blocking read — mirrors
+       * sys_pause / epoll_wait. No user timeout exists for read(); a deadline
+       * is armed only when a process alarm is set, so the timer queue wakes us
+       * on alarm expiry and the EINTR check below returns -EINTR. With no
+       * alarm we block indefinitely (wait_deadline=0, not inserted) until data
+       * arrives or the pipe closes. */
+      uint64_t alarm_dl = 0;
+      if (proc->proc && proc->proc->signal) {
+        uint64_t sflags;
+        spin_lock_irqsave(&proc->proc->signal->sig_lock, &sflags);
+        alarm_dl = proc->proc->signal->alarm_deadline;
+        spin_unlock_irqrestore(&proc->proc->signal->sig_lock, sflags);
+      }
+      if (alarm_dl != 0) {
+        proc->wait_deadline = alarm_dl;
         int cpu = proc->assigned_cpu;
         uint64_t flags;
         spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
         sched_timer_queue_insert(cpu, proc);
         spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+      } else {
+        proc->wait_deadline = 0;
       }
       schedule();
-      if (proc->wait_timed_out) {
-        sched_cancel_spurious_wake(proc);
-        remove_wait_queue(wq, &wait);
-        ret = -ETIMEDOUT;
-        goto out;
-      }
       {
         uint64_t pend =
             __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
         uint64_t deliv = pend & ~proc->proc->sig_blocked;
-        deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+        deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
         if (deliv) {
           sched_cancel_spurious_wake(proc);
           remove_wait_queue(wq, &wait);

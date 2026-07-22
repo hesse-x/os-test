@@ -8,6 +8,9 @@
 // Extracted from kernel/trap.c (phase 3 step 3.2)
 
 #include "kernel/bsd/signal.h"
+
+#include <stddef.h>
+
 #include "arch/x64/apic.h"
 #include "arch/x64/memlayout.h" // KERNEL_VMA_BOUNDARY
 #include "arch/x64/smp.h"
@@ -17,6 +20,7 @@
 #include "kernel/bsd/signalfd.h"
 #include "kernel/bsd/syscall.h"
 #include "kernel/xcore/kpi.h"
+#include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
@@ -25,7 +29,7 @@
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
-#include <stddef.h>
+
 #include <xos/errno.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
@@ -68,7 +72,12 @@ static void deliver_signal(xtask *proc, trapframe *tf, int sig,
                            sigaction_t *sa) {
   struct rt_sigframe frame;
   __memset(&frame, 0, sizeof(frame));
-  frame.pretcode = SIG_TRAMPOLINE_ADDR;
+  // S02: prefer a user-supplied restorer (glibc's __restore_rt); fall back to
+  // the kernel trampoline page when the action left sa_restorer NULL (this OS's
+  // hand-written libc sigaction wrapper does not set one).
+  uint64_t tramp =
+      sa->sa_restorer ? (uint64_t)sa->sa_restorer : SIG_TRAMPOLINE_ADDR;
+  frame.pretcode = tramp;
 
   // siginfo
   frame.info.si_signo = sig;
@@ -108,35 +117,59 @@ static void deliver_signal(xtask *proc, trapframe *tf, int sig,
   frame.uc.uc_flags = 0;
   frame.uc.uc_link = NULL;
 
-  // Update blocked: mask sa_mask + current signal during handler
-  proc->proc->sig_blocked |= sa->sa_mask | (1ULL << sig);
-  proc->proc->sig_blocked &= ~(1ULL << SIGKILL);
-  proc->proc->sig_blocked &= ~(1ULL << SIGSTOP);
+  // Update blocked: mask sa_mask + current signal during handler. S02
+  // SA_NODEFER suppresses the automatic add of the current signal.
+  sigset_t new_mask = sa->sa_mask;
+  if (!(sa->sa_flags & SA_NODEFER))
+    new_mask |= (1ULL << (sig - 1));
+  new_mask &= ~((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP)));
+  proc->proc->sig_blocked |= new_mask;
 
   // Clear sig_force_info (consumed)
   if (proc->proc->sig_force_info.si_signo == sig)
     proc->proc->sig_force_info.si_signo = 0;
 
-  // Push sigframe to user stack (CR3 switch)
-  // SysV AMD64 ABI requires rsp at a function's entry to be 8 mod 16 (the
-  // state after a `call` pushed the 8-byte return address). The handler is
-  // entered via iretq with [rsp]=pretcode as the return address, so we must
-  // place that return address at rsp-8 below the 16-aligned frame — making the
-  // handler's entry rsp exactly 8 mod 16. Otherwise a handler prologue using
-  // aligned SSE (movaps) faults with #GP, which re-delivers SIGSEGV into the
-  // same handler, recursing until rsp walks off the mapped stack and the
-  // kernel's sigframe memcpy page-faults -> panic.
+  // Push sigframe to user stack. SysV AMD64 ABI requires rsp at a function's
+  // entry to be 8 mod 16 (the state after a `call` pushed the 8-byte return
+  // address). The handler is entered via iretq with [rsp]=pretcode as the
+  // return address, so we place that return address at rsp-8 below the
+  // 16-aligned frame — making the handler's entry rsp exactly 8 mod 16.
+  // Otherwise a handler prologue using aligned SSE (movaps) faults with #GP.
+  //
+  // Writes go through copy_to_user under the user CR3 (user pages are not
+  // mapped in the kernel CR3). If the user stack is exhausted (e.g. unbounded
+  // SA_NODEFER re-entry), copy_to_user faults on an unmapped user page and its
+  // _ASM_EXTABLE fixup returns -EFAULT instead of panicking the kernel — we
+  // then force SIGSEGV on the target (default-terminate) and leave the
+  // trapframe unmodified so user mode re-enters and runs the SIGSEGV path.
   uint64_t user_rsp = tf->rsp - sizeof(struct rt_sigframe);
   user_rsp &= ~0xFULL; // 16-byte aligned base for the frame
 
   uint64_t saved_cr3;
   __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
   __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)proc->cr3) : "memory");
-  __memcpy((void *)user_rsp, &frame, sizeof(struct rt_sigframe));
+  size_t ctu_frame =
+      copy_to_user((void __user *)user_rsp, &frame, sizeof(struct rt_sigframe));
   // Return address sits 8 bytes below the frame; handler entry rsp is now
   // 8 mod 16 (matches a real `call`).
-  *(uint64_t *)(user_rsp - 8) = SIG_TRAMPOLINE_ADDR;
+  uint64_t ret_addr = tramp;
+  size_t ctu_ret =
+      copy_to_user((void __user *)(user_rsp - 8), &ret_addr, sizeof(ret_addr));
   __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+
+  if (ctu_frame || ctu_ret) {
+    // Stack overflow / unmapped user stack: cannot build the sigframe. Mirror
+    // Linux: force SIGSEGV (default-terminate; if a handler is installed it
+    // still cannot run with no stack, so this is terminal). Leave the
+    // trapframe unmodified so the task re-enters user mode and the forced
+    // SIGSEGV is delivered on the next check_pending_signals pass.
+    printk(LOG_ERROR,
+           "signal: pid=%d sigframe write faulted (frame=%zu ret=%zu) — "
+           "user stack exhausted, forcing SIGSEGV\n",
+           proc->pid, ctu_frame, ctu_ret);
+    force_sig(proc, SIGSEGV, SI_KERNEL, (void *)user_rsp);
+    return;
+  }
 
   // Modify trapframe → jump to handler
   tf->rip = (int64_t)sa->__sigaction_handler._sa_handler;
@@ -149,6 +182,111 @@ static void deliver_signal(xtask *proc, trapframe *tf, int sig,
   } else {
     tf->rdi = (int64_t)sig;
   }
+}
+
+// ===================== signal default actions (S01) =====================
+// Linux-aligned default-action classification (kernel/signal.c default_action).
+typedef enum { DA_TERM, DA_IGN, DA_STOP, DA_CONT, DA_CORE } default_act;
+
+static default_act sig_default_action(int sig) {
+  switch (sig) {
+  case SIGCHLD:
+  case SIGURG:
+  case SIGWINCH:
+  case SIGPWR:
+    return DA_IGN;
+  case SIGSTOP:
+  case SIGTSTP:
+  case SIGTTOU:
+  case SIGTTIN:
+    return DA_STOP;
+  case SIGCONT:
+    return DA_CONT;
+  case SIGQUIT:
+  case SIGILL:
+  case SIGABRT:
+  case SIGFPE:
+  case SIGSEGV:
+  case SIGBUS:
+  case SIGTRAP:
+  case SIGSYS:
+  case SIGXCPU:
+  case SIGXFSZ:
+    return DA_CORE;
+  case SIGKILL:
+  default:
+    return DA_TERM;
+  }
+}
+
+// Notify the parent of a child state change (stop/continue/exit) by pending
+// SIGCHLD. si_code is a CLD_* value; the parent reads the actual status via
+// wait4 (the encoding lives in xtask.exit_code), so siginfo only needs the
+// pending bit + a best-effort si_code (no CLD_* union member exists yet).
+// S02 SA_NOCLDSTOP: the parent's SIGCHLD action may suppress stop/continue
+// notifications.
+static void notify_parent_sigchld(xtask *child, int sig, int code) {
+  struct signal_struct *sig_s = child->proc->signal;
+  pid_t ppid = sig_s->parent_pid;
+  if (ppid < 0 || ppid >= MAX_PROC)
+    return;
+  xtask *parent = task_get(ppid);
+  if (parent->pid != ppid || !parent->proc)
+    return;
+  // S02 SA_NOCLDSTOP: skip SIGCHLD on stop/continue when the parent opted out.
+  if ((code == CLD_STOPPED || code == CLD_CONTINUED) &&
+      (parent->proc->signal->action[SIGCHLD].sa_flags & SA_NOCLDSTOP))
+    return;
+  __atomic_or_fetch(&parent->proc->sig_pending, SIGMASK(SIGCHLD),
+                    __ATOMIC_RELEASE);
+  int pcpu = parent->assigned_cpu;
+  uint64_t pflags;
+  spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
+  if (parent->state == BLOCKED && parent->wait_event == WAIT_CHILD)
+    wake_from_wait(parent);
+  spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
+}
+
+// Stop the current task (job control). Saves the WIFSTOPPED encoding into
+// xtask.exit_code for wait4(WUNTRACED), transitions to STOPPED (not on any
+// run_queue, not reapable), notifies the parent, and yields. Never returns to
+// user mode — schedule() picks another task. Caller is check_pending_signals
+// running on the current task, so `assigned_cpu` is the local CPU.
+static void do_stop(xtask *t, int sig) {
+  t->exit_code = (sig << 8) | 0x7f; // WIFSTOPPED encoding (wait4 reads this)
+  t->stop_signo = sig;
+  t->stop_reported = 0;
+  int cpu = t->assigned_cpu;
+  uint64_t flags;
+  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+  sched_timer_queue_cancel(t); // drop any pending timed-wait
+  t->state = STOPPED;
+  t->wait_event = WAIT_NONE;
+  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+
+  notify_parent_sigchld(t, sig, CLD_STOPPED);
+  schedule(); // yield; does not return here for the stopped task
+}
+
+// Resume a STOPPED task on SIGCONT. Called from the kill/tgkill delivery path
+// (cross-task) and from check_pending_signals when the current task is stopped
+// and a SIGCONT is consumed. Clears the one-shot stop report and re-arms the
+// run_queue. Notifies the parent of the continue.
+void do_cont(xtask *t) {
+  if (t->state != STOPPED)
+    return;
+  int cpu = t->assigned_cpu;
+  uint64_t flags;
+  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+  t->state = READY;
+  t->exit_code = 0;
+  t->stop_signo = 0;
+  t->stop_reported = 0;
+  t->wait_event = WAIT_NONE;
+  if (list_empty(&t->run_node))
+    run_queue_push(cpu, t);
+  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+  notify_parent_sigchld(t, SIGCONT, CLD_CONTINUED);
 }
 
 // ===================== check_pending_signals =====================
@@ -171,25 +309,26 @@ void check_pending_signals(trapframe *tf) {
     uint64_t pending =
         __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
     uint64_t deliverable = pending & ~proc->proc->sig_blocked;
-    deliverable |= (pending & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+    deliverable |= (pending & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
     int sig = 0;
     int sig_shared = 0; // 0 = private sig_pending, 1 = shared_pending
     if (deliverable) {
-      sig = __builtin_ctzll(deliverable);
-      __atomic_and_fetch(&proc->proc->sig_pending, ~(1ULL << sig),
+      sig = __builtin_ctzll(deliverable) + 1; // bit index = sig-1
+      __atomic_and_fetch(&proc->proc->sig_pending, ~(1ULL << (sig - 1)),
                          __ATOMIC_RELEASE);
     } else {
       // 2. Then check thread-group shared pending
-      spin_lock(&proc->proc->signal->sig_lock);
+      uint64_t sflags;
+      spin_lock_irqsave(&proc->proc->signal->sig_lock, &sflags);
       pending = proc->proc->signal->shared_pending & ~proc->proc->sig_blocked;
       pending |= (proc->proc->signal->shared_pending &
-                  ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+                  ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
       if (pending) {
-        sig = __builtin_ctzll(pending);
+        sig = __builtin_ctzll(pending) + 1; // bit index = sig-1
         sig_shared = 1;
-        proc->proc->signal->shared_pending &= ~(1ULL << sig);
+        proc->proc->signal->shared_pending &= ~(1ULL << (sig - 1));
       }
-      spin_unlock(&proc->proc->signal->sig_lock);
+      spin_unlock_irqrestore(&proc->proc->signal->sig_lock, sflags);
     }
 
     // bug.md Bug 2 (ls hang): even with no signal we must return to user
@@ -207,11 +346,12 @@ void check_pending_signals(trapframe *tf) {
     // it, then break out (signal stays pending until the signalfd read).
     if (signalfd_consumes(proc->proc, sig)) {
       if (sig_shared) {
-        spin_lock(&proc->proc->signal->sig_lock);
-        proc->proc->signal->shared_pending |= 1ULL << sig;
-        spin_unlock(&proc->proc->signal->sig_lock);
+        uint64_t sflags;
+        spin_lock_irqsave(&proc->proc->signal->sig_lock, &sflags);
+        proc->proc->signal->shared_pending |= 1ULL << (sig - 1);
+        spin_unlock_irqrestore(&proc->proc->signal->sig_lock, sflags);
       } else {
-        __atomic_or_fetch(&proc->proc->sig_pending, 1ULL << sig,
+        __atomic_or_fetch(&proc->proc->sig_pending, 1ULL << (sig - 1),
                           __ATOMIC_RELEASE);
       }
       // The wq belongs to the signalfd file; keep the RCU read-side
@@ -250,38 +390,51 @@ void check_pending_signals(trapframe *tf) {
     sigaction_t *sa = &proc->proc->signal->action[sig];
 
     if (sa->__sigaction_handler._sa_handler == SIG_DFL) {
-      switch (sig) {
-      case SIGCHLD:
-      case SIGSTOP:
-      case SIGTSTP:
-      case SIGCONT:
-      case SIGWINCH:
-        break;
-      case SIGKILL:
-      case SIGINT:
-      case SIGQUIT:
-      case SIGHUP:
-      case SIGTERM:
-      case SIGSEGV:
-      case SIGILL:
-      case SIGFPE:
-      case SIGABRT:
-      case SIGBUS:
-      case SIGTRAP:
-      case SIGPIPE:
-      case SIGALRM:
-      case SIGUSR1:
-      case SIGUSR2:
-      case SIGSTKFLT:
+      switch (sig_default_action(sig)) {
+      case DA_IGN:
+        continue;
+      case DA_STOP:
+        printk(LOG_INFO, "signal: pid=%d stopped by signal %d\n", proc->pid,
+               sig);
+        do_stop(proc, sig);
+        return; // do_stop yields via schedule(); not reached
+      case DA_CONT:
+        // SIGCONT default action is "resume if stopped, else ignore". A
+        // stopped task that consumed a pending SIGCONT resumes here; a running
+        // task just drops it.
+        if (proc->state == STOPPED) {
+          do_cont(proc);
+          return;
+        }
+        continue;
+      case DA_CORE:
+        printk(LOG_ERROR, "signal: pid=%d terminated by signal %d (core)\n",
+               proc->pid, sig);
+        do_exit_with_code((sig & 0x7f) | 0x80); // 0x80 = WCOREDUMP bit (S02)
+        return;
+      case DA_TERM:
       default:
         printk(LOG_ERROR, "signal: pid=%d terminated by signal %d\n", proc->pid,
                sig);
         do_exit_with_code(sig & 0x7f);
+        return;
       }
     } else if (sa->__sigaction_handler._sa_handler == SIG_IGN) {
       continue;
     } else {
       deliver_signal(proc, tf, sig, sa);
+      // S02 SA_RESETHAND: reset this signal's action to SIG_DFL after delivery
+      // (one-shot handler). SIGKILL/SIGSTOP are never user-modifiable so the
+      // reset is unconditional here; the action table is shared across the
+      // thread group (signal_struct), matching Linux CLONE_SIGHAND semantics.
+      if (sa->sa_flags & SA_RESETHAND) {
+        uint64_t sflags;
+        spin_lock_irqsave(&proc->proc->signal->sig_lock, &sflags);
+        proc->proc->signal->action[sig].__sigaction_handler._sa_handler =
+            SIG_DFL;
+        proc->proc->signal->action[sig].sa_flags = 0;
+        spin_unlock_irqrestore(&proc->proc->signal->sig_lock, sflags);
+      }
       break; // after delivery, return to user mode to run handler: fall through
              // to preemption point
     }
@@ -297,8 +450,9 @@ void check_pending_signals(trapframe *tf) {
 
 // ===================== force_sig =====================
 void force_sig(xtask *proc, int sig, int si_code, void *si_addr) {
-  __atomic_or_fetch(&proc->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
-  __atomic_and_fetch(&proc->proc->sig_blocked, ~(1ULL << sig),
+  __atomic_or_fetch(&proc->proc->sig_pending, 1ULL << (sig - 1),
+                    __ATOMIC_RELEASE);
+  __atomic_and_fetch(&proc->proc->sig_blocked, ~(1ULL << (sig - 1)),
                      __ATOMIC_RELEASE);
 
   proc->proc->sig_force_info.si_signo = sig;
@@ -314,8 +468,55 @@ void force_sig(xtask *proc, int sig, int si_code, void *si_addr) {
 
 // ===================== Signal delivery helpers =====================
 
+// Resume a STOPPED target so a pending signal can be processed when it next
+// runs. Used for SIGCONT (full resume + parent CLD_CONTINUED) and for SIGKILL
+// (resume to run_queue so check_pending_signals runs the DA_TERM exit — the
+// target must do_exit in its own context, not the sender's). For other signals
+// a STOPPED target stays stopped (Linux: only SIGKILL/SIGCONT wake a stopped
+// task).
+static void wake_stopped(xtask *target, int sig) {
+  if (target->state != STOPPED)
+    return;
+  if (sig == SIGCONT) {
+    do_cont(target); // full resume + CLD_CONTINUED notify
+    return;
+  }
+  if (sig == SIGKILL) {
+    // Re-arm the run_queue so the target runs and consumes the SIGKILL pending
+    // bit → DA_TERM → do_exit. No CLD_CONTINUED (the next notify is the exit).
+    int cpu = target->assigned_cpu;
+    uint64_t flags;
+    spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+    target->state = READY;
+    target->wait_event = WAIT_NONE;
+    if (list_empty(&target->run_node))
+      run_queue_push(cpu, target);
+    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+  }
+}
+
 void deliver_signal_to(xtask *target, int sig) {
-  __atomic_or_fetch(&target->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
+  // SIGCONT to a stopped target resumes it (and must not pend — Linux clears
+  // any pending SIGCONT/SIGSTOP pair on delivery). SIGKILL wakes it to exit.
+  if (target->state == STOPPED && (sig == SIGCONT || sig == SIGKILL)) {
+    if (sig == SIGCONT) {
+      // Clear a possibly-pending SIGSTOP first so "SIGCONT then SIGSTOP" does
+      // not re-stop immediately (Linux: SIGCONT wins if delivered after).
+      __atomic_and_fetch(&target->proc->sig_pending, ~(SIGMASK(SIGSTOP)),
+                         __ATOMIC_RELEASE);
+      uint64_t sflags;
+      spin_lock_irqsave(&target->proc->signal->sig_lock, &sflags);
+      target->proc->signal->shared_pending &= ~(SIGMASK(SIGSTOP));
+      spin_unlock_irqrestore(&target->proc->signal->sig_lock, sflags);
+    }
+    wake_stopped(target, sig);
+    // SIGCONT does not pend after resuming; SIGKILL still pends so the woken
+    // target exits when it runs.
+    if (sig == SIGCONT)
+      return;
+  }
+  __atomic_or_fetch(&target->proc->sig_pending, 1ULL << (sig - 1),
+                    __ATOMIC_RELEASE);
   // Signals must be able to interrupt any blocking state (including
   // WAIT_FUTEX, the pthread_cancel path); wake_process_any unconditionally
   // wakes any BLOCKED target regardless of event type.
@@ -328,22 +529,122 @@ int pgsignal(pid_t pgid, int sig) {
   for (int p = 0; p < MAX_PROC; p++) {
     if (tasks[p] && tasks[p]->pid == p && tasks[p]->proc &&
         tasks[p]->proc->pgid == pgid) {
-      deliver_signal_to(tasks[p], sig);
       found++;
+      // sig==0 is an existence/permission probe only; never deliver (see
+      // kill_all: SIGMASK(0) is a negative shift → spurious SIGRTMAX).
+      if (sig != 0)
+        deliver_signal_to(tasks[p], sig);
     }
   }
   return found > 0 ? 0 : -ESRCH;
 }
 
 // ===================== BSD syscall: kill =====================
+// S03: Linux-aligned permission + scope. NSIG=65 (RT signals 33-64). sig==0
+// does existence + permission validation only. euid==0 ≡ CAP_KILL (no real
+// capability subsystem yet — recorded as tech debt). pid==-1 broadcasts to
+// every sendable process except init and the sender.
+
+// Permission check: may `sender` post `sig` to `target`? Returns 0 / -EPERM.
+// (sig is unused today — real CAP_KILL would let root send any signal even to
+// a setuid process; the euid==0 short-circuit already grants that.)
+static int kill_permitted(xtask *sender, xtask *target, int sig) {
+  (void)sig;
+  if (!target || !target->proc)
+    return -ESRCH;
+  if (sender->proc->euid == 0)
+    return 0; // root ≡ CAP_KILL
+  if (sender->proc->euid == target->proc->uid ||
+      sender->proc->euid == target->proc->euid ||
+      sender->proc->uid == target->proc->euid)
+    return 0;
+  return -EPERM;
+}
+
+// Deliver to a process (thread-group shared_pending) and wake any blocked
+// thread that would accept it. SIGCONT/SIGKILL to a STOPPED leader resume it.
+static int deliver_signal_to_process(xtask *leader, int sig) {
+  if (leader->state == STOPPED && (sig == SIGCONT || sig == SIGKILL)) {
+    deliver_signal_to(leader, sig); // resume path (handles pending/wake)
+    return 0;
+  }
+  uint64_t sflags;
+  spin_lock_irqsave(&leader->proc->signal->sig_lock, &sflags);
+  leader->proc->signal->shared_pending |= (1ULL << (sig - 1));
+  spin_unlock_irqrestore(&leader->proc->signal->sig_lock, sflags);
+  if (!(leader->proc->sig_blocked & (1ULL << (sig - 1))) &&
+      leader->state == BLOCKED)
+    wake_process_any(leader);
+  return 0;
+}
+
+// kill(-1, sig): signal every sendable process except init (pid<=1) and the
+// sender. Returns 0 if at least one was signalled, else -ESRCH.
+static int kill_all(xtask *sender, int sig) {
+  int found = 0;
+  spin_lock(&tasks_lock);
+  for (int p = 0; p < MAX_PROC; p++) {
+    xtask *t = tasks[p];
+    if (!t || t->pid != p || !t->proc)
+      continue;
+    // Skip init (init_pid, NOT a hardcoded pid<=1 — init is pid=2 in this OS)
+    // and the sender.
+    if (t->pid == init_pid || t == sender)
+      continue;
+    // Only one thread per process: signal the leader (t->pid == t->tgid).
+    if (t->tgid != t->pid)
+      continue;
+    if (kill_permitted(sender, t, sig) == 0) {
+      found++;
+      // sig==0 is an existence/permission probe only — do NOT deliver.
+      // (deliver_signal_to_process would compute SIGMASK(0) = 1<<(0-1), a
+      // negative shift whose UB sets bit 63 = SIGRTMAX, spuriously killing
+      // the target. Linux semantics: sig 0 never pends.)
+      if (sig != 0) {
+        spin_unlock(&tasks_lock);
+        deliver_signal_to_process(t, sig);
+        spin_lock(&tasks_lock);
+      }
+    }
+  }
+  spin_unlock(&tasks_lock);
+  return found > 0 ? 0 : -ESRCH;
+}
+
 int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
                  int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
   pid_t pid = (pid_t)arg1;
   int sig = (int)arg2;
   if (sig < 0 || sig >= NSIG)
     return (int64_t)-EINVAL;
-  if (sig == 0)
-    return 0;
+
+  xtask *sender = current_task;
+
+  // sig==0: validate existence + permission only, no delivery.
+  if (sig == 0) {
+    if (pid > 0) {
+      if (pid >= MAX_PROC)
+        return (int64_t)-ESRCH;
+      xtask *t = task_get(pid);
+      if (t->pid != pid || !t->proc)
+        return (int64_t)-ESRCH;
+      return (int64_t)kill_permitted(sender, t, 0);
+    }
+    if (pid == 0) {
+      pid_t my_pgid = current_proc->pgid;
+      if (my_pgid == 0)
+        return (int64_t)-ESRCH;
+      // existence check: any process in our pgroup
+      return (int64_t)pgsignal(my_pgid, 0);
+    }
+    if (pid == -1)
+      return (int64_t)kill_all(sender, 0);
+    return (int64_t)pgsignal(-pid, 0);
+  }
 
   if (pid > 0) {
     if (pid >= MAX_PROC)
@@ -351,33 +652,27 @@ int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
     xtask *leader = task_get(pid);
     if (leader->pid != pid || !leader->proc)
       return (int64_t)-ESRCH;
-    // Deliver to process-level shared_pending
-    spin_lock(&leader->proc->signal->sig_lock);
-    leader->proc->signal->shared_pending |= (1ULL << sig);
-    spin_unlock(&leader->proc->signal->sig_lock);
-    // Wake the leader if signal not blocked and currently blocked
-    // (single-thread stage)
-    if (!(leader->proc->sig_blocked & (1ULL << sig)) &&
-        leader->state == BLOCKED) {
-      wake_process_any(leader);
-    }
-    return 0;
-  } else if (pid == 0) {
+    int p = kill_permitted(sender, leader, sig);
+    if (p)
+      return (int64_t)p;
+    return deliver_signal_to_process(leader, sig);
+  }
+  if (pid == 0) {
     pid_t my_pgid = current_proc->pgid;
     if (my_pgid == 0)
       return (int64_t)-ESRCH;
     return (int64_t)pgsignal(my_pgid, sig);
-  } else if (pid == -1) {
-    return (int64_t)-EPERM;
-  } else {
-    return (int64_t)pgsignal(-pid, sig);
   }
+  if (pid == -1)
+    return (int64_t)kill_all(sender, sig);
+  return (int64_t)pgsignal(-pid, sig); // pid < -1: pgid = -pid
 }
 
 // ===================== BSD syscall: alarm =====================
-// Set a real-time alarm (in seconds). Returns the number of seconds remaining
-// of any previously set alarm, or 0 if none. seconds==0 cancels a pending
-// alarm.
+// Set a real-time alarm (in seconds). POSIX alarm() is process-wide: the
+// deadline lives in the thread-group signal_struct and SIGALRM is deliverable
+// to any thread. Returns the seconds remaining of any previously set alarm,
+// or 0 if none. seconds==0 cancels a pending alarm.
 int64_t sys_alarm(int64_t arg1, int64_t unused2, int64_t unused3,
                   int64_t unused4, int64_t unused5, int64_t unused6) {
   (void)unused2;
@@ -387,19 +682,77 @@ int64_t sys_alarm(int64_t arg1, int64_t unused2, int64_t unused3,
   (void)unused6;
   unsigned seconds = (unsigned)arg1;
   uint64_t now = sched_clock();
+  struct signal_struct *sig = current_proc->signal;
+  uint64_t flags;
+  spin_lock_irqsave(&sig->sig_lock, &flags);
   uint64_t old_remaining = 0;
-  if (current_xtask->alarm_deadline != 0) {
-    uint64_t rem = current_xtask->alarm_deadline > now
-                       ? current_xtask->alarm_deadline - now
-                       : 0;
+  if (sig->alarm_deadline != 0) {
+    uint64_t rem = sig->alarm_deadline > now ? sig->alarm_deadline - now : 0;
     old_remaining = rem / 1000000000ULL;
   }
-  if (seconds == 0) {
-    current_xtask->alarm_deadline = 0;
-  } else {
-    current_xtask->alarm_deadline = now + (uint64_t)seconds * 1000000000ULL;
+  uint64_t new_deadline = 0;
+  if (seconds == 0)
+    sig->alarm_deadline = 0;
+  else {
+    new_deadline = now + (uint64_t)seconds * 1000000000ULL;
+    sig->alarm_deadline = new_deadline;
+  }
+  spin_unlock_irqrestore(&sig->sig_lock, flags);
+
+  // Alarm expiry is driven by the Xcore timer queue: a blocked thread that
+  // borrowed the alarm deadline as its wait_deadline is woken on expiry and
+  // alarm_check (the BSD alarm_check_hook) forces SIGALRM. But a thread may
+  // already be blocked in an interruptible wait (pipe read/write, …) WITHOUT
+  // having borrowed the deadline — e.g. it blocked before this alarm was armed,
+  // so it read alarm_deadline==0 and stayed off the timer queue. With no thread
+  // of the process on-CPU (the current_task alarm path in trap.c is idle) and
+  // none in the timer queue, the alarm would never fire and the blocked thread
+  // would hang. Mirror Linux's "arm a process timer that wakes a blocked thread
+  // on expiry": for each same-thread-group BLOCKED thread that has no deadline
+  // armed yet (wait_deadline==0 → not in any timer queue), borrow the new
+  // deadline so the timer queue will wake it and run alarm_check. Threads that
+  // already borrowed an (older) deadline stay; on their expiry alarm_check
+  // re-reads the live alarm_deadline and no-ops if it was pushed later, after
+  // which they re-borrow the current value. Lock order matches
+  // deliver_signal_to_process: sig_lock dropped before taking scheduler_lock.
+  if (new_deadline != 0) {
+    pid_t my_tgid = current_task->tgid;
+    for (int i = 0; i < MAX_PROC; i++) {
+      xtask *t = tasks[i];
+      if (!t || t->pid < 0 || t->tgid != my_tgid || t == current_task)
+        continue;
+      int cpu = t->assigned_cpu;
+      uint64_t sflags;
+      spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &sflags);
+      if (t->state == BLOCKED && t->wait_deadline == 0) {
+        t->wait_deadline = new_deadline;
+        sched_timer_queue_insert(cpu, t);
+      }
+      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, sflags);
+    }
   }
   return (int64_t)old_remaining;
+}
+
+// S03: per-process alarm expiry hook (registered as alarm_check_hook). Called
+// from the Xcore timer tick (IRQ context) for the current task, and from
+// timer-queue timeout wakes for a blocked task. If the thread-group alarm has
+// fired, force SIGALRM (deliverable to any thread) and clear the deadline.
+void alarm_check(xtask *t, uint64_t now) {
+  if (!t || !t->proc || !t->proc->signal)
+    return;
+  struct signal_struct *sig = t->proc->signal;
+  uint64_t flags;
+  spin_lock_irqsave(&sig->sig_lock, &flags);
+  uint64_t dl = sig->alarm_deadline;
+  if (dl != 0 && dl <= now) {
+    sig->alarm_deadline = 0;
+    spin_unlock_irqrestore(&sig->sig_lock, flags);
+    if (force_sig_hook)
+      force_sig_hook(t, SIGALRM, SI_KERNEL, NULL);
+    return;
+  }
+  spin_unlock_irqrestore(&sig->sig_lock, flags);
 }
 
 // ===================== BSD syscall: pause =====================
@@ -418,15 +771,21 @@ int64_t sys_pause(int64_t unused1, int64_t unused2, int64_t unused3,
       current_proc->signal->shared_pending != 0)
     return (int64_t)-EINTR;
 
+  // Borrow the process alarm deadline (if armed) as the wake deadline so the
+  // timer queue fires SIGALRM while we block. Read under sig_lock to avoid
+  // racing sys_alarm.
+  uint64_t alarm_dl = 0;
+  uint64_t sflags;
+  spin_lock_irqsave(&current_proc->signal->sig_lock, &sflags);
+  alarm_dl = current_proc->signal->alarm_deadline;
+  spin_unlock_irqrestore(&current_proc->signal->sig_lock, sflags);
+
   int cpu = get_cpu_local()->cpu_id;
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
   current_task->wait_event = WAIT_PAUSE;
-  // If an alarm is armed, let the timer queue wake us when it fires — the
-  // timer_handler delivers SIGALRM on WAIT_PAUSE expiry. Otherwise wait
-  // indefinitely for any signal (deliver_signal_to / wake_process_any).
-  if (current_xtask->alarm_deadline != 0) {
-    current_task->wait_deadline = current_xtask->alarm_deadline;
+  if (alarm_dl != 0) {
+    current_task->wait_deadline = alarm_dl;
     sched_timer_queue_insert(cpu, current_task);
   }
   current_task->state = BLOCKED;
@@ -439,22 +798,39 @@ int64_t sys_pause(int64_t unused1, int64_t unused2, int64_t unused3,
 }
 
 // ===================== BSD syscall: tgkill =====================
+// S03: Linux-aligned permission + NSIG=65 + sig==0 validation. tgkill targets
+// a specific thread (per-task sig_pending); SIGCONT/SIGKILL to a STOPPED target
+// resume it (do_cont / wake-to-exit).
 int64_t sys_tgkill(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                    int64_t unused2, int64_t unused3) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
   pid_t tgid = (pid_t)arg1;
   pid_t tid = (pid_t)arg2;
   int sig = (int)arg3;
   if (sig < 0 || sig >= NSIG)
     return (int64_t)-EINVAL;
-  if (sig == 0)
-    return 0;
   if (tid < 0 || tid >= MAX_PROC)
     return (int64_t)-ESRCH;
   xtask *target = task_get(tid);
   if (target->pid != tid || target->tgid != tgid || !target->proc)
     return (int64_t)-ESRCH;
+  if (sig == 0)
+    return (int64_t)kill_permitted(current_task, target, 0);
+  int p = kill_permitted(current_task, target, sig);
+  if (p)
+    return (int64_t)p;
+  // SIGCONT/SIGKILL to a STOPPED target resume it; deliver_signal_to handles
+  // the pending/wake bookkeeping (SIGCONT does not pend, SIGKILL pends so the
+  // woken target exits).
+  if (target->state == STOPPED && (sig == SIGCONT || sig == SIGKILL)) {
+    deliver_signal_to(target, sig);
+    return 0;
+  }
   // Deliver to the thread-level sig_pending (atomic, no sig_lock)
-  __atomic_or_fetch(&target->proc->sig_pending, 1ULL << sig, __ATOMIC_RELEASE);
+  __atomic_or_fetch(&target->proc->sig_pending, 1ULL << (sig - 1),
+                    __ATOMIC_RELEASE);
   // A signal delivered via tgkill must be able to interrupt any blocking
   // state (including WAIT_FUTEX, pthread_cancel goes through this path).
   if (target->state == BLOCKED)
@@ -511,7 +887,7 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       return (int64_t)-EINVAL;
     }
     // SIGKILL/SIGSTOP cannot be blocked
-    proc->proc->sig_blocked &= ~((1ULL << SIGKILL) | (1ULL << SIGSTOP));
+    proc->proc->sig_blocked &= ~((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP)));
   }
 
   if (oldset) {
@@ -533,9 +909,17 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 }
 
 // ===================== BSD syscall: set_tid_address =====================
+// S03: store the full 64-bit tid address (was pid_t, truncating higher-half
+// user pointers >4GiB and causing #PF on the do_exit clear). clear_tid_addr is
+// a user int* the kernel writes 0 to on thread exit (+ futex_wake for join).
 int64_t sys_set_tid_address(int64_t arg1, int64_t unused1, int64_t unused2,
                             int64_t unused3, int64_t unused4, int64_t unused5) {
-  current_task->proc->clear_tid_addr = (pid_t)arg1;
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  current_task->proc->clear_tid_addr = (void *)(uintptr_t)arg1;
   return (int64_t)current_task->pid; // returns tid
 }
 
@@ -630,11 +1014,11 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     }
     __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
 
-    if (new_act.sa_mask & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)))
+    if (new_act.sa_mask & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))))
       return (int64_t)-EINVAL;
 
     proc->proc->signal->action[sig] = new_act;
-    __atomic_and_fetch(&proc->proc->sig_pending, ~(1ULL << sig),
+    __atomic_and_fetch(&proc->proc->sig_pending, ~(1ULL << (sig - 1)),
                        __ATOMIC_RELEASE);
   }
 
@@ -684,8 +1068,8 @@ int64_t sys_sigreturn(int64_t unused1, int64_t unused2, int64_t unused3,
   tf->ss = sc->ss;
 
   proc->proc->sig_blocked = frame.uc.uc_sigmask;
-  proc->proc->sig_blocked &= ~(1ULL << SIGKILL);
-  proc->proc->sig_blocked &= ~(1ULL << SIGSTOP);
+  proc->proc->sig_blocked &= ~(SIGMASK(SIGKILL));
+  proc->proc->sig_blocked &= ~(SIGMASK(SIGSTOP));
 
   return 0;
 }
@@ -710,9 +1094,10 @@ int64_t sys_sigpending(int64_t arg1, int64_t arg2, int64_t unused2,
   xtask *proc = current_task;
   uint64_t pending =
       __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-  spin_lock(&proc->proc->signal->sig_lock);
+  uint64_t sflags;
+  spin_lock_irqsave(&proc->proc->signal->sig_lock, &sflags);
   pending |= proc->proc->signal->shared_pending;
-  spin_unlock(&proc->proc->signal->sig_lock);
+  spin_unlock_irqrestore(&proc->proc->signal->sig_lock, sflags);
 
   sigset_t out = (sigset_t)pending;
   uint64_t saved_cr3;

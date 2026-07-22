@@ -778,7 +778,9 @@ int pthread_setcancelstate(int state, int *oldstate) {
     return EINVAL;
   tcb->cancel_state = state;
   // Map to kernel sig_blocked: DISABLE → block SIGCANCEL, ENABLE → unblock
-  sigset_t block_set = (1ULL << SIGCANCEL);
+  sigset_t block_set;
+  sigemptyset(&block_set);
+  sigaddset(&block_set, SIGCANCEL);
   if (state == PTHREAD_CANCEL_DISABLE) {
     sys_sigprocmask(SIG_BLOCK, &block_set, NULL);
   } else {

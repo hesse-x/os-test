@@ -268,7 +268,7 @@ int64_t netlink_sock_recvmsg(netlink_sock *sock, const struct iovec *iov,
         uint64_t pend =
             __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
         uint64_t deliv = pend & ~proc->proc->sig_blocked;
-        deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+        deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
         if (deliv) {
           proc->state = RUNNING;
           remove_wait_queue(sock->wq, &wait);

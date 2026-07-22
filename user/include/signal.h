@@ -10,6 +10,14 @@
 #include <sys/cdefs.h>
 #include <xos/signal.h>
 
+/* User-side RT signal floor. The kernel reserves 32 (SIGCANCEL, used by
+ * pthread_cancel) and 33-34 for libc-internal signals, matching glibc's
+ * convention (glibc's __SIGRTMIN=32, user SIGRTMIN=35). The kernel-side
+ * floor in <xos/signal.h> stays 32 so sys_sigaction still rejects installing
+ * a handler on SIGCANCEL; user code must start RT signals at 35. */
+#undef SIGRTMIN
+#define SIGRTMIN 35
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -21,12 +29,15 @@ extern "C" {
 #define SIG_UNBLOCK 1
 #define SIG_SETMASK 2
 
-/* sigset_t bit operations (sigset_t = uint64_t, 64 signals) */
+/* sigset_t bit operations (sigset_t = uint64_t, signals 1..64).
+ * Linux convention: bit index = sig - 1, so SIGRTMAX (64) → bit 63 fits in
+ * uint64. Producer/consumer of a mask (sigaddset here, 1ULL<<(sig-1) in the
+ * kernel) must use the same index. */
 #define sigemptyset(s) (*(s) = (sigset_t)0)
 #define sigfillset(s) (*(s) = (sigset_t) ~(uint64_t)0)
-#define sigaddset(s, n) (*(s) |= (sigset_t)1 << (n))
-#define sigdelset(s, n) (*(s) &= (sigset_t) ~((uint64_t)1 << (n)))
-#define sigismember(s, n) (!!(*(s) & ((sigset_t)1 << (n))))
+#define sigaddset(s, n) (*(s) |= (sigset_t)1 << ((n) - 1))
+#define sigdelset(s, n) (*(s) &= (sigset_t) ~((uint64_t)1 << ((n) - 1)))
+#define sigismember(s, n) (!!(*(s) & ((sigset_t)1 << ((n) - 1))))
 
 // ===================== Function declarations =====================
 LIBC_EXPORT int kill(int pid, int sig);

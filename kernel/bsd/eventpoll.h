@@ -9,7 +9,7 @@
 
 #include <stdint.h>
 
-#include "kernel/bsd/devtmpfs.h" // __poll
+#include "kernel/bsd/poll_types.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/rbtree.h"
 #include "kernel/xcore/spinlock.h"

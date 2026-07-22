@@ -88,7 +88,7 @@ int pty_ring_read(uint8_t *buf, uint32_t head, uint32_t *tail, uint8_t *data,
 static int pty_eintr_check(xtask *proc) {
   uint64_t pend = __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
   uint64_t deliv = pend & ~proc->proc->sig_blocked;
-  deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+  deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
   return deliv ? 1 : 0;
 }
 
@@ -638,7 +638,7 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
         if (tasks[p] && tasks[p]->pid == p && tasks[p]->proc &&
             tasks[p]->proc->pgid == pty->t_pgid &&
             tasks[p]->proc->sid == pty->t_sid) {
-          __atomic_or_fetch(&tasks[p]->proc->sig_pending, 1ULL << SIGWINCH,
+          __atomic_or_fetch(&tasks[p]->proc->sig_pending, SIGMASK(SIGWINCH),
                             __ATOMIC_RELEASE);
           // SIGWINCH must interrupt any blocking state (including
           // WAIT_FUTEX/WAIT_CHILD); wake_process_any unconditionally wakes

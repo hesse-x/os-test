@@ -69,6 +69,7 @@ signal_pending_fn signal_pending_hook = NULL;
 force_sig_fn force_sig_hook = NULL;
 timer_poll_fn timer_poll_hook = NULL;
 timerfd_tick_fn timerfd_tick_hook = NULL;
+alarm_check_fn alarm_check_hook = NULL;
 
 // ===================== Trap dispatch =====================
 static uint64_t tick = 0;
@@ -610,19 +611,27 @@ static void timer_handler(trapframe *tf) {
       break; // sorted, stop at first unexpired
     timer_queue_wait_pop(p);
     if (p->state == BLOCKED) {
+      // pause() armed with an alarm: the timeout IS the alarm firing (sys_pause
+      // sets wait_deadline = the process alarm deadline). Force SIGALRM so the
+      // signal path (default-terminate or handler) runs when the task resumes;
+      // the pending bit is set before run_queue push so check_pending_signals
+      // sees it on resume. pause() is the only wait_event that carries an alarm
+      // deadline, so an expired WAIT_PAUSE here unambiguously means alarm fire.
+      int was_pause_alarm = (p->wait_event == WAIT_PAUSE);
       p->state = READY;
       p->wait_event = WAIT_NONE;
       p->wait_timed_out = 1;
       p->wait_deadline = 0;
-      // pause() armed with an alarm: the timeout IS the alarm firing.
-      // Force SIGALRM so the signal path (default-terminate or handler) runs
-      // when the task resumes; the pending bit is set before run_queue push so
-      // check_pending_signals sees it on resume.
-      if (p->alarm_deadline != 0) {
-        p->alarm_deadline = 0;
-        if (force_sig_hook)
-          force_sig_hook(p, SIGALRM, SI_KERNEL, NULL);
-      }
+      if (was_pause_alarm && force_sig_hook)
+        force_sig_hook(p, SIGALRM, SI_KERNEL, NULL);
+      // A thread blocked in epoll/read with an armed process alarm borrowed
+      // that alarm as its wait_deadline so the timer queue would wake it. On
+      // expiry the BSD alarm_check hook fires SIGALRM (and clears the process
+      // deadline) if the alarm is now due — distinct from the pause() path
+      // which already forced SIGALRM above. Non-alarm waits (plain timed
+      // epoll) have signal->alarm_deadline == 0 and the hook is a no-op.
+      if (!was_pause_alarm && p->proc && alarm_check_hook)
+        alarm_check_hook(p, now);
       list_push_back(&wakeup_list, &p->wait_node);
     } else {
       // Stale entry: process was woken but sched_timer_queue_remove was skipped
@@ -663,14 +672,12 @@ static void timer_handler(trapframe *tf) {
 
   // Running-task alarm: a process that armed an alarm and kept running (or is
   // blocked on something other than pause) is never in the timer_queue for its
-  // alarm. Check the current task's alarm deadline each tick and force SIGALRM
-  // when it fires; the user-mode signal check below then delivers it.
-  if (current_task && current_task->alarm_deadline != 0 &&
-      current_task->alarm_deadline <= now) {
-    current_task->alarm_deadline = 0;
-    if (force_sig_hook)
-      force_sig_hook(current_task, SIGALRM, SI_KERNEL, NULL);
-  }
+  // alarm. The BSD alarm_check hook inspects the current task's thread-group
+  // signal_struct and, if its process-wide alarm_deadline has passed, forces
+  // SIGALRM and clears the deadline. (S03: alarm moved per-task → per-process;
+  // the old current_task->alarm_deadline sweep is gone.)
+  if (current_task && current_task->proc && alarm_check_hook)
+    alarm_check_hook(current_task, now);
 
   if (tf->cs == 0x2B) { // from user mode
     // Check pending signals before rescheduling

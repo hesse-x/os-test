@@ -30,14 +30,33 @@
 #define SIGCONT 18
 #define SIGSTOP 19
 #define SIGTSTP 20
+#define SIGTTIN 21
+#define SIGTTOU 22
+#define SIGURG 23
+#define SIGXCPU 24
+#define SIGXFSZ 25
+#define SIGVTALRM 26
+#define SIGPROF 27
 #define SIGWINCH 28
+#define SIGPWR 29
+#define SIGSYS 31
 #define SIGCANCEL 32 // used by pthread_cancel (matches Linux glibc)
 
-#define NSIG 33
+// S03 lifts NSIG to 65 so RT signals 33-64 can be delivered. SIGRTMIN is the
+// kernel-side floor (covers this OS's SIGCANCEL=32); glibc's user-side floor
+// (35, reserving 32-34 for libc) is defined in user/include/signal.h.
+#define NSIG 65
+#define SIGRTMIN 32
+#define SIGRTMAX 64
 
 // ===================== Default actions =====================
 #define SIG_DFL ((void (*)(int))0) // default action (terminate)
 #define SIG_IGN ((void (*)(int))1) // ignore signal
+
+// Bitmask index for sigset_t (uint64, signals 1..64). Linux convention:
+// signal N occupies bit (N-1), so SIGRTMAX (64) → bit 63 fits in uint64.
+// Both kernel (1ULL<<(sig-1)) and user sigaddset/sigismember must use this.
+#define SIGMASK(sig) (1ULL << ((sig) - 1))
 
 // ===================== SA_* flags =====================
 #define SA_NOCLDSTOP 0x00000001
@@ -45,7 +64,20 @@
 #define SA_SIGINFO 0x00000004
 #define SA_RESETHAND 0x08000000
 #define SA_NODEFER 0x40000000
-#define SA_RESTART 0x10000000 // defined but not implemented this phase
+#define SA_RESTORER                                                            \
+  0x04000000 // S02: honor sa_restorer as the return trampoline
+#define SA_RESTART                                                             \
+  0x10000000 // implemented (S02); slow syscalls restart if a
+             // delivering handler sets SA_RESTART
+// SA_ONSTACK is provided by S04 (sigaltstack); not defined here yet.
+
+// ===================== SIGCHLD si_code (CLD_*) =====================
+#define CLD_EXITED 1
+#define CLD_KILLED 2
+#define CLD_DUMPED 3
+#define CLD_TRAPPED 4
+#define CLD_STOPPED 5
+#define CLD_CONTINUED 6
 
 // ===================== SI_* codes =====================
 #define SI_USER 0
@@ -98,7 +130,8 @@ struct sigaction {
   } __sigaction_handler;
   sigset_t sa_mask;
   int sa_flags;
-  void (*sa_restorer)(void); // kernel ignores this
+  void (*sa_restorer)(void); // user-supplied signal return trampoline (S02);
+                             // NULL → kernel SIG_TRAMPOLINE_ADDR
 };
 typedef struct sigaction sigaction_t;
 

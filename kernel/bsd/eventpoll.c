@@ -9,9 +9,9 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
-#include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/file_poll.h"
 #include "kernel/bsd/proc.h"
+#include "kernel/bsd/signal.h" // signal_struct (alarm_deadline / sig_lock)
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
@@ -410,11 +410,18 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
 
     // Block on WAIT_POLL
     uint64_t effective_deadline = deadline;
-    if (effective_deadline == 0 && proc->alarm_deadline != 0) {
-      // Indefinite wait but an alarm is armed: use it as the wake deadline so
-      // the timer queue can fire SIGALRM (otherwise the alarm never triggers
-      // while blocked in epoll_wait).
-      effective_deadline = proc->alarm_deadline;
+    uint64_t proc_alarm = 0;
+    if (proc->proc && proc->proc->signal) {
+      uint64_t sflags;
+      spin_lock_irqsave(&proc->proc->signal->sig_lock, &sflags);
+      proc_alarm = proc->proc->signal->alarm_deadline;
+      spin_unlock_irqrestore(&proc->proc->signal->sig_lock, sflags);
+    }
+    if (effective_deadline == 0 && proc_alarm != 0) {
+      // Indefinite wait but a process alarm is armed: use it as the wake
+      // deadline so the timer queue can fire SIGALRM (otherwise the alarm
+      // never triggers while blocked in epoll_wait).
+      effective_deadline = proc_alarm;
     }
     if (effective_deadline > 0) {
       uint64_t now = sched_clock();
@@ -442,7 +449,7 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
       uint64_t pend =
           __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
       uint64_t deliv = pend & ~proc->proc->sig_blocked;
-      deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
       if (deliv) {
         sched_cancel_spurious_wake(proc);
         remove_wait_queue(&ep->wq, &wait);
@@ -474,7 +481,7 @@ int64_t sys_epoll_pwait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
     if (copy_from_user(&new_mask, (void *)sigmask_ptr, sizeof(new_mask)))
       return -EFAULT;
     proc->proc->sig_blocked = new_mask;
-    proc->proc->sig_blocked |= ((1ULL << SIGKILL) | (1ULL << SIGSTOP));
+    proc->proc->sig_blocked |= ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP)));
     have_mask = 1;
   }
   int64_t ret = sys_epoll_wait(epfd, ev_ptr, maxevents, timeout_ms);

@@ -37,7 +37,9 @@ typedef struct proc {
   struct files *files; // fork: deep copy; clone(CLONE_FILES): ref++
 
   // === threading support ===
-  pid_t clear_tid_addr; // CLONE_CHILD_CLEARTID user address (0 = none)
+  void *clear_tid_addr; // S03: CLONE_CHILD_CLEARTID user address (64-bit; was
+                        // pid_t, truncating higher-half user pointers). The
+                        // kernel writes int 0 here on thread exit + futex_wake.
   list_node futex_node; // futex bucket list node
   uint64_t
       futex_uaddr; // user address being waited on (0 = not waiting on futex)
@@ -51,8 +53,6 @@ typedef struct proc {
   // in-memory inode cache. These fields gate the getters/setters and umask.
   // uint32_t (not uid_t/gid_t/mode_t) keeps kernel/driver/bsd_types.h's
   // byte-identical mirror free of user-side sys/types.h includes.
-  // (alarm_deadline lives in xtask — the Xcore timer handler needs to read it
-  // without crossing into the BSD layer.)
   uint32_t uid;   // real UID (default 0)
   uint32_t euid;  // effective UID (default 0)
   uint32_t gid;   // real GID (default 0)

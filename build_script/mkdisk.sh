@@ -110,7 +110,8 @@ mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello_dyn.elf"    ::local/hello_
 if [ "$TEST" = "1" ]; then
     for elf in test_runner.elf pipe.elf fcntl.elf string.elf malloc.elf \
                stdio.elf mmap.elf ipc.elf socket.elf process.elf \
-               signal.elf poll.elf pci.elf ioctl.elf dev_vfs.elf \
+               signal.elf signal_stop.elf signal_flags.elf kill_perm.elf \
+               poll.elf pci.elf ioctl.elf dev_vfs.elf \
                test_fpu.elf test_sse_smoke.elf pthread.elf \
                ld_test_single.elf ld_test_chain.elf \
                ld_test_diamond.elf ld_test_cycle.elf \

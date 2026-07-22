@@ -253,6 +253,10 @@ void test_epoll_lt_pipe_persistent(void) {
 void test_epoll_lt_pipe_consumed(void) {
   int fd[2];
   pipe(fd);
+  fcntl(fd[0], F_SETFL, O_NONBLOCK); /* non-blocking so the drain loop exits
+                                        with -EAGAIN once the pipe empties,
+                                        not by blocking (write end is still
+                                        open, so a blocking read would hang) */
   int ep = epoll_create1(0);
   struct epoll_event ev = {.events = EPOLLIN, .data.fd = fd[0]};
   epoll_ctl(ep, EPOLL_CTL_ADD, fd[0], &ev);

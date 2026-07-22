@@ -14,6 +14,7 @@
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/random.h"
+#include "kernel/bsd/signal.h"
 #include "kernel/bsd/syscall.h"
 #include "kernel/bsd/timerfd.h"
 #include "kernel/bsd/vfs.h"
@@ -42,7 +43,7 @@ static bool check_signal_pending(xtask *t) {
     return false;
   uint64_t pend = __atomic_load_n(&t->proc->sig_pending, __ATOMIC_ACQUIRE);
   uint64_t deliv = pend & ~t->proc->sig_blocked;
-  deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+  deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
   return deliv != 0;
 }
 
@@ -67,6 +68,9 @@ void bsd_init(void) {
   syscall_dispatch_hook = syscall_dispatch;
   signal_pending_hook = check_signal_pending;
   force_sig_hook = force_sig;
+  // S03: per-process alarm expiry (replaces the per-task alarm sweep in the
+  // Xcore timer handler).
+  alarm_check_hook = alarm_check;
   // timerfd: initialize global list + lock, register tick sweep hook
   timerfd_init();
   timerfd_tick_hook = timerfd_tick_all;

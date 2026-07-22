@@ -568,7 +568,7 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
         uint64_t pend =
             __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
         uint64_t deliv = pend & ~proc->proc->sig_blocked;
-        deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+        deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
         if (deliv) {
           proc->state = RUNNING;
           remove_wait_queue(sock->wq, &wait);
@@ -1087,7 +1087,7 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         uint64_t pend =
             __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
         uint64_t deliv = pend & ~proc->proc->sig_blocked;
-        deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+        deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
         if (deliv) {
           proc->state = RUNNING;
           remove_wait_queue(listen_sock->wq, &wait);
@@ -1929,7 +1929,7 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       uint64_t pend =
           __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
       uint64_t deliv = pend & ~proc->proc->sig_blocked;
-      deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
       if (deliv) {
         ret = (int64_t)-EINTR;
         goto poll_out;

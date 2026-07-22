@@ -109,7 +109,7 @@ typedef struct proc {
 
   struct files *files;
 
-  pid_t clear_tid_addr;
+  void *clear_tid_addr; // S03: 64-bit (mirror kernel/bsd/proc.h)
   list_node futex_node;
   uint64_t futex_uaddr;
 

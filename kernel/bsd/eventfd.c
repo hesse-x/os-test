@@ -127,7 +127,7 @@ int64_t eventfd_do_read(struct file *f, void *buf) {
       xtask *p = current_task;
       uint64_t pend = __atomic_load_n(&p->proc->sig_pending, __ATOMIC_ACQUIRE);
       uint64_t deliv = pend & ~p->proc->sig_blocked;
-      deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
       if (deliv) {
         current_task->state = RUNNING;
         ret = -EINTR;
@@ -196,7 +196,7 @@ int64_t eventfd_do_write(struct file *f, const void *buf, size_t len) {
       xtask *p = current_task;
       uint64_t pend = __atomic_load_n(&p->proc->sig_pending, __ATOMIC_ACQUIRE);
       uint64_t deliv = pend & ~p->proc->sig_blocked;
-      deliv |= (pend & ((1ULL << SIGKILL) | (1ULL << SIGSTOP)));
+      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
       if (deliv) {
         current_task->state = RUNNING;
         ret = -EINTR;

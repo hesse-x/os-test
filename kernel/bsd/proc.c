@@ -95,13 +95,12 @@ proc *proc_create(void) {
   // Per-task signal fields + threading fields
   list_init(&bp->futex_node);
   bp->futex_uaddr = 0;
-  bp->clear_tid_addr = 0;
+  bp->clear_tid_addr = NULL;
   bp->sig_pending = 0;
   bp->sig_blocked = 0;
 
   // POSIX identity defaults: single-user system (uid/gid=0). umask follows the
-  // conventional 0022 default. (alarm_deadline lives in xtask, zeroed by
-  // xtask_alloc.)
+  // conventional 0022 default.
   bp->uid = 0;
   bp->euid = 0;
   bp->gid = 0;
@@ -384,7 +383,7 @@ void pty_close_file(struct file *f) {
           if (tasks[p] && tasks[p]->pid == p && tasks[p]->proc &&
               tasks[p]->proc->pgid == pty->t_pgid &&
               tasks[p]->proc->sid == pty->t_sid) {
-            __atomic_or_fetch(&tasks[p]->proc->sig_pending, 1ULL << SIGHUP,
+            __atomic_or_fetch(&tasks[p]->proc->sig_pending, SIGMASK(SIGHUP),
                               __ATOMIC_RELEASE);
             // SIGHUP must interrupt any blocking state (including
             // WAIT_FUTEX/WAIT_CHILD); wake_process_any unconditionally wakes
@@ -976,14 +975,14 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   child_bp->sig_pending = 0;
   child_bp->sig_blocked = parent->proc->sig_blocked;
   // threading fields
-  child_bp->clear_tid_addr = 0;
+  child_bp->clear_tid_addr = NULL;
   list_init(&child_bp->futex_node);
   child_bp->futex_uaddr = 0;
   child_bp->sid = parent->proc->sid;
   child_bp->pgid = parent->proc->pgid;
   child_bp->ctty = parent->proc->ctty;
   // Inherit POSIX identity & permissions. alarm_deadline is NOT inherited —
-  // a fresh child has no pending alarm (POSIX: fork resets it).
+  // a fresh child gets a new signal_struct (zero-initialized) with no alarm.
   child_bp->uid = parent->proc->uid;
   child_bp->euid = parent->proc->euid;
   child_bp->gid = parent->proc->gid;
@@ -1198,18 +1197,20 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   child_bp->futex_uaddr = 0;
   list_init(&child_bp->futex_node);
   child_bp->clear_tid_addr =
-      (flags & CLONE_CHILD_CLEARTID) ? (pid_t)child_tid : 0;
+      (flags & CLONE_CHILD_CLEARTID) ? (void *)(uintptr_t)child_tid : NULL;
 
   // 9. CLONE_PARENT_SETTID / CLONE_CHILD_SETTID
   //    CHILD_SETTID must be written before the child thread is scheduled,
   //    otherwise the child's clear_tid_addr write of 0 + futex_wake on exit
   //    would be lost (the parent only writes tid after clone returns,
   //    overwriting 0 -> lost wake-up).
+  //    S03: the tid address is a full 64-bit user int* (set_tid_address /
+  //    clone child_tid are user pointers, never truncated).
   if (flags & CLONE_PARENT_SETTID) {
-    *((pid_t *)parent_tid) = (pid_t)alloc_idx;
+    *((int *)(uintptr_t)parent_tid) = (int)alloc_idx;
   }
   if (flags & CLONE_CHILD_SETTID) {
-    *((pid_t *)child_tid) = (pid_t)alloc_idx;
+    *((int *)(uintptr_t)child_tid) = (int)alloc_idx;
   }
 
   // 10. Fill child xtask
@@ -1247,7 +1248,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     child_bp->pgid = parent->proc->pgid;
     child_bp->ctty = parent->proc->ctty;
     // Inherit POSIX identity & permissions. alarm_deadline is NOT inherited
-    // (a fresh child has no pending alarm).
+    // (a fresh child gets a new signal_struct, zero-initialized).
     child_bp->uid = parent->proc->uid;
     child_bp->euid = parent->proc->euid;
     child_bp->gid = parent->proc->gid;

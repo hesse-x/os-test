@@ -53,6 +53,14 @@ extern timer_poll_fn timer_poll_hook;
 typedef void (*timerfd_tick_fn)(void);
 extern timerfd_tick_fn timerfd_tick_hook;
 
+// S03: per-process alarm expiry check (called every timer tick). The BSD layer
+// registers this; it inspects the current task's thread-group signal_struct
+// and, if its alarm_deadline has passed, forces SIGALRM on the thread group
+// and clears the deadline. Replaces the per-task alarm sweep that could only
+// deliver SIGALRM to the arming thread.
+typedef void (*alarm_check_fn)(xtask *t, uint64_t now);
+extern alarm_check_fn alarm_check_hook;
+
 // trap entry and syscall dispatch entry
 void trap_dispatch(trapframe *tf);
 void xcall_dispatch(trapframe *tf);
