@@ -201,6 +201,110 @@ int path_walk_parent(struct mount_entry *m, const char *relpath,
   }
 }
 
+/* path_walk_from:逐段 lookup,从给定 start inode 起解析 relpath(+1,调用者 put)。
+ * 与 path_walk 同语义,只是起点是 dirfd 指向的目录 inode 而非 mount root。
+ * relpath 不得以 '/' 开头(调用者对绝对路径退回 root 解析)。中间段须 INODE_DIR。
+ */
+struct inode *path_walk_from(struct inode *start, const char *relpath) {
+  if (!start)
+    return NULL;
+  struct inode *dir = inode_get(start);
+  const char *p = relpath;
+  while (*p) {
+    while (*p == '/')
+      p++;
+    if (!*p)
+      break; /* 尾部斜杠,dir 即目标 */
+    const char *seg = p;
+    while (*p && *p != '/')
+      p++;
+    int seglen = p - seg;
+    char name[256];
+    if (seglen >= 256) {
+      inode_put(dir);
+      return NULL;
+    }
+    __memcpy(name, seg, seglen);
+    name[seglen] = '\0';
+    if (dir->type != INODE_DIR || !dir->i_op || !dir->i_op->lookup) {
+      inode_put(dir);
+      return NULL;
+    }
+    struct inode *next = dir->i_op->lookup(dir, name); /* +1 */
+    inode_put(dir);
+    dir = next;
+    if (!dir)
+      return NULL;
+  }
+  return dir; /* +1,调用者 put */
+}
+
+/* path_walk_parent_from:同 path_walk_parent,但起点为 start inode(+1 parent,
+ * 调用者 put)+ 最后一段名。 */
+int path_walk_parent_from(struct inode *start, const char *relpath,
+                          struct inode **out_parent, char *lastname,
+                          size_t lastcap) {
+  *out_parent = NULL;
+  lastname[0] = '\0';
+  if (!start)
+    return -ENOENT;
+  if (!relpath[0] || (relpath[0] == '/' && relpath[1] == '\0'))
+    return -EBUSY; /* 根无 parent、无 lastname */
+  struct inode *dir = inode_get(start);
+  const char *p = relpath;
+  while (*p == '/')
+    p++;
+  const char *seg = p;
+  while (*p && *p != '/')
+    p++;
+  int seglen = p - seg;
+  for (;;) {
+    const char *next = p;
+    while (*next == '/')
+      next++;
+    if (!*next) {
+      /* seg 是最后一段 */
+      if (seglen >= (int)lastcap) {
+        inode_put(dir);
+        return -ENAMETOOLONG;
+      }
+      __memcpy(lastname, seg, seglen);
+      lastname[seglen] = '\0';
+      if (dir->type != INODE_DIR) {
+        inode_put(dir);
+        return -ENOTDIR;
+      }
+      *out_parent = dir;
+      return 0;
+    }
+    char name[256];
+    if (seglen >= 256) {
+      inode_put(dir);
+      return -ENAMETOOLONG;
+    }
+    __memcpy(name, seg, seglen);
+    name[seglen] = '\0';
+    if (dir->type != INODE_DIR) {
+      inode_put(dir);
+      return -ENOTDIR;
+    }
+    if (!dir->i_op || !dir->i_op->lookup) {
+      inode_put(dir);
+      return -ENOTDIR;
+    }
+    struct inode *child = dir->i_op->lookup(dir, name); /* +1 */
+    inode_put(dir);
+    dir = child;
+    if (!dir)
+      return -ENOENT;
+    p = next;
+    seg = p;
+    while (*p && *p != '/')
+      p++;
+    seglen = p - seg;
+  }
+}
+
 /* vfs_open_kern:内核态 path 解析,返 +1 inode 或 NULL(不装 fd、不做 user copy)。
  */
 struct inode *vfs_open_kern(const char *kpath) {
@@ -265,12 +369,21 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       inode_put(parent);
       return (int64_t)-EACCES;
     }
-    ip = parent->i_op->create(parent, lastname, (int)arg3); /* +1 新 inode */
+    /* S08: 应用 umask(mode & ~umask),创建后设 owner=当前进程 uid/gid。
+     * umask 在此减而非 create 内部:create 不知调用者 umask。 */
+    int eff_mode = (int)arg3 & 0777;
+    eff_mode = eff_mode & ~(int)current_proc->umask;
+    ip = parent->i_op->create(parent, lastname, eff_mode); /* +1 新 inode */
     inode_put(parent); /* 还 path_walk_parent 的 parent */
     if (IS_ERR(ip))
       return PTR_ERR(ip);
     if (!ip)
       return (int64_t)-ENOMEM;
+    /* S08: 新建文件 owner=创建进程(非硬编 0/调用者)。仅普通文件 create;
+     * socket 走 vfs_mknod_socket(mknod)路径。 */
+    ip->mode = (ip->mode & ~0777) | (uint32_t)eff_mode;
+    ip->uid = current_proc->uid;
+    ip->gid = current_proc->gid;
   } else {
     return (int64_t)-ENOENT;
   }
@@ -334,12 +447,13 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   } else {
     f->type = FD_REGULAR;
     f->flags = flags & (O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK);
-    if (flags & O_CLOEXEC)
-      f->flags |= FD_CLOEXEC;
     f->inode = ip;
     f->offset = 0;
   }
   fd_install(files, fd, f);
+  // S06: O_CLOEXEC is an fd-level attribute — set the per-fd bitmap bit, not
+  // the shared file's flags (a later dup would otherwise inherit it wrongly).
+  fd_set_cloexec(files, fd, (flags & O_CLOEXEC) ? 1 : 0);
   spin_unlock(fdlk);
   return (int64_t)fd;
 }
@@ -375,26 +489,231 @@ int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   return 0;
 }
 
-// 薄封装 §4.1:openat(AT_FDCWD,...) ≡ open;仅支持 AT_FDCWD(本 OS 无 fd-relative
-// open)。
-int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
-                   int64_t unused1, int64_t unused2) {
-  if ((int)dirfd != AT_FDCWD)
-    return -ENOSYS;
-  // 复用 sys_open(path, flags, mode);现有 sys_open 忽略用户态 mode,行为不变。
-  return sys_open(path, flags, mode, 0, 0, 0);
+// S07: resolve a *at dirfd to its starting directory inode (+1, caller puts),
+// or ERR_PTR(-errno). AT_FDCWD resolves to the root mount's root inode — this
+// kernel has no per-process CWD (no chdir), so AT_FDCWD ≡ "from root", matching
+// the existing absolute-path-only behaviour. A real dirfd must reference an
+// open directory (ENOTDIR otherwise). Absolute paths are handled by the caller
+// (fall back to sys_open/sys_stat/etc) before calling this.
+struct inode *resolve_dirfd_start(int dirfd) {
+  if (dirfd == AT_FDCWD) {
+    struct mount_entry *m = mount_of_inode(NULL); /* root mount "/" */
+    if (!m || !m->fs->mount_root)
+      return ERR_PTR(-ENOENT);
+    return m->fs->mount_root(m); /* +1 */
+  }
+  if (dirfd < 0)
+    return ERR_PTR(-EBADF);
+  xtask *proc = current_task;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, dirfd);
+  if (!f) {
+    rcu_read_unlock();
+    return ERR_PTR(-EBADF);
+  }
+  file_get(f);
+  rcu_read_unlock();
+  struct inode *ip = NULL;
+  if (!f->inode)
+    ip = ERR_PTR(-EBADF);
+  else if (f->inode->type != INODE_DIR)
+    ip = ERR_PTR(-ENOTDIR);
+  else
+    ip = inode_get(f->inode); /* +1 */
+  file_put(f);
+  return ip;
 }
 
-// 薄封装 §4.2:newfstatat(AT_FDCWD,...) ≡ stat;仅支持 AT_FDCWD,忽略
-// AT_SYMLINK_NOFOLLOW。
+// openat(dirfd, path, flags, mode). Absolute path → sys_open (mount-table
+// match, unchanged). Relative path → resolve from dirfd's directory inode via
+// path_walk_from/path_walk_parent_from. AT_FDCWD → from root (no CWD exists).
+int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
+                   int64_t unused1, int64_t unused2) {
+  (void)unused1;
+  (void)unused2;
+  const char __user *upath = (const char __user *__force)path;
+  if (!upath)
+    return (int64_t)-EFAULT;
+
+  char kpath[256];
+  long n = strncpy_from_user(kpath, upath, sizeof(kpath));
+  if (n < 0)
+    return (int64_t)-EFAULT;
+
+  /* Absolute path: dirfd ignored, resolve via mount table (existing path). */
+  if (kpath[0] == '/')
+    return sys_open(path, flags, mode, 0, 0, 0);
+
+  /* Relative path: resolve start inode from dirfd (or root for AT_FDCWD). */
+  struct inode *start = resolve_dirfd_start((int)dirfd);
+  if (IS_ERR(start))
+    return (int64_t)PTR_ERR(start);
+
+  char relpath[256];
+  if (normalize_path(kpath, relpath, sizeof(relpath)) < 0) {
+    inode_put(start);
+    return (int64_t)-ENAMETOOLONG;
+  }
+
+  int iflags = (int)flags;
+  struct inode *ip = path_walk_from(start, relpath); /* +1 or NULL */
+  if (ip) {
+    if ((iflags & O_CREAT) && (iflags & O_EXCL)) {
+      inode_put(ip);
+      inode_put(start);
+      return (int64_t)-EEXIST;
+    }
+    if ((iflags & O_TRUNC) && ip->type == INODE_REGULAR && ip->size > 0) {
+      if (!ip->i_op || !ip->i_op->setattr) {
+        inode_put(ip);
+        inode_put(start);
+        return (int64_t)-EPERM;
+      }
+      ip->i_op->setattr(ip, 0);
+    }
+  } else if (iflags & O_CREAT) {
+    char lastname[256];
+    struct inode *parent = NULL;
+    int rc = path_walk_parent_from(start, relpath, &parent, lastname,
+                                   sizeof(lastname));
+    if (rc) {
+      if (parent)
+        inode_put(parent);
+      inode_put(start);
+      return (int64_t)rc;
+    }
+    if (!parent->i_op || !parent->i_op->create) {
+      inode_put(parent);
+      inode_put(start);
+      return (int64_t)-EACCES;
+    }
+    int eff_mode = (int)mode & 0777;
+    eff_mode = eff_mode & ~(int)current_proc->umask;
+    ip = parent->i_op->create(parent, lastname, eff_mode); /* +1 */
+    inode_put(parent);
+    if (IS_ERR(ip)) {
+      inode_put(start);
+      return PTR_ERR(ip);
+    }
+    if (!ip) {
+      inode_put(start);
+      return (int64_t)-ENOMEM;
+    }
+    ip->mode = (ip->mode & ~0777) | (uint32_t)eff_mode;
+    ip->uid = current_proc->uid;
+    ip->gid = current_proc->gid;
+  } else {
+    inode_put(start);
+    return (int64_t)-ENOENT;
+  }
+  inode_put(start);
+  /* ip is +1 (from path_walk_from or create). */
+  ip->mount = mount_of_inode(ip); /* lazy, mirrors sys_open */
+
+  if (ip->type == INODE_DIR &&
+      (iflags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC))) {
+    inode_put(ip);
+    return (int64_t)-EISDIR;
+  }
+  if (ip->type == INODE_SOCKET) {
+    inode_put(ip);
+    return (int64_t)-ENXIO;
+  }
+
+  xtask *proc = current_task;
+  files *files = proc->proc->files;
+  spinlock *fdlk = &files->fd_lock;
+  spin_lock(fdlk);
+  int fd = alloc_fd(files, 3);
+  if (fd < 0) {
+    spin_unlock(fdlk);
+    inode_put(ip);
+    return (int64_t)-EMFILE;
+  }
+  struct file *f = (struct file *)kmalloc(sizeof(struct file));
+  if (!f) {
+    spin_unlock(fdlk);
+    inode_put(ip);
+    return (int64_t)-ENOMEM;
+  }
+  __memset(f, 0, sizeof(*f));
+  refcount_set(&f->f_count, 1);
+  if (ip->type == INODE_REGULAR && ip->mount &&
+      __strcmp(ip->mount->fs->name, "sysfs") == 0)
+    f->f_op = &sysfs_fops;
+  if (ip->type == INODE_REGULAR && ip->mount &&
+      __strcmp(ip->mount->fs->name, "tmpfs") == 0)
+    f->f_op = &tmpfs_file_fops;
+  if (ip->type == INODE_DIR) {
+    f->type = FD_DIR;
+    f->flags = O_RDONLY;
+    f->inode = ip;
+    f->offset = 0;
+  } else {
+    f->type = FD_REGULAR;
+    f->flags = iflags & (O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK);
+    f->inode = ip;
+    f->offset = 0;
+  }
+  fd_install(files, fd, f);
+  fd_set_cloexec(files, fd, (iflags & O_CLOEXEC) ? 1 : 0);
+  spin_unlock(fdlk);
+  return (int64_t)fd;
+}
+
+// newfstatat(dirfd, path, buf, flags). Absolute path → sys_stat. AT_EMPTY_PATH
+// with empty path → stat the dirfd itself (delegates to sys_fstat). Relative
+// path → resolve from dirfd. AT_SYMLINK_NOFOLLOW accepted but a no-op (no
+// symlinks in this OS).
 int64_t sys_newfstatat(int64_t dirfd, int64_t path, int64_t buf, int64_t flags,
                        int64_t unused1, int64_t unused2) {
-  if ((int)dirfd != AT_FDCWD)
-    return -ENOSYS;
-  if ((int)flags &
-      ~AT_SYMLINK_NOFOLLOW) // 本 OS 无 symlink,该 flag 忽略;其余拒绝
+  (void)unused1;
+  (void)unused2;
+  if ((int)flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
     return -EINVAL;
-  return sys_stat(path, buf, 0, 0, 0, 0);
+
+  const char __user *upath = (const char __user *__force)path;
+  char kpath[256];
+  long n = strncpy_from_user(kpath, upath, sizeof(kpath));
+  if (n < 0)
+    return (int64_t)-EFAULT;
+
+  /* AT_EMPTY_PATH: operate on dirfd itself (path == ""). */
+  if (((int)flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+    if ((int)dirfd == AT_FDCWD || dirfd < 0)
+      return -EINVAL;
+    return sys_fstat(dirfd, buf, 0, 0, 0, 0);
+  }
+
+  /* Absolute path: dirfd ignored, resolve via mount table (existing path). */
+  if (kpath[0] == '/')
+    return sys_stat(path, buf, 0, 0, 0, 0);
+
+  /* Relative path: resolve start inode from dirfd (or root for AT_FDCWD). */
+  struct inode *start = resolve_dirfd_start((int)dirfd);
+  if (IS_ERR(start))
+    return (int64_t)PTR_ERR(start);
+
+  char relpath[256];
+  if (normalize_path(kpath, relpath, sizeof(relpath)) < 0) {
+    inode_put(start);
+    return (int64_t)-ENAMETOOLONG;
+  }
+
+  struct inode *ip = path_walk_from(start, relpath); /* +1 */
+  inode_put(start);
+  if (!ip)
+    return (int64_t)-ENOENT;
+  uint8_t kstat_buf[256];
+  int rc = -ENOSYS;
+  if (ip->i_op && ip->i_op->getattr)
+    rc = ip->i_op->getattr(ip, (struct kstat *)kstat_buf);
+  inode_put(ip);
+  if (rc != 0)
+    return (int64_t)rc;
+  if (copy_to_user((void __user *__force)buf, kstat_buf, sizeof(struct kstat)))
+    return (int64_t)-EFAULT;
+  return 0;
 }
 
 /* sys_truncate(path, len) — SYS_TRUNCATE (group 3)
@@ -492,9 +811,21 @@ int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
     inode_put(parent);
     return (int64_t)-EPERM; /* 对齐 Linux vfs_mkdir:无 mkdir → EPERM */
   }
-  rc = parent->i_op->mkdir(parent, lastname, (int)arg2);
+  int eff_mode = ((int)arg2 & 0777) & ~(int)current_proc->umask;
+  rc = parent->i_op->mkdir(parent, lastname, eff_mode);
   inode_put(parent);
-  return (int64_t)rc;
+  if (rc != 0)
+    return (int64_t)rc;
+  /* S08: mkdir 不返 inode,取回新建目录设 owner=创建进程 + 应用 umask 权限位
+   * (保留目录类型位 S_IFDIR)。 */
+  struct inode *nip = path_walk(m, relpath); /* +1 */
+  if (nip) {
+    nip->mode = (nip->mode & ~0777) | (uint32_t)eff_mode;
+    nip->uid = current_proc->uid;
+    nip->gid = current_proc->gid;
+    inode_put(nip);
+  }
+  return 0;
 }
 
 /* sys_mknod(path, mode, dev) — SYS_MKNOD
@@ -536,12 +867,16 @@ int64_t sys_mknod(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     inode_put(parent);
     return (int64_t)-EPERM;
   }
-  struct inode *ip = parent->i_op->create(parent, lastname, mode);
+  /* S08: 权限位应用 umask,类型位保留;设 owner=创建进程。 */
+  int eff_mode = (mode & S_IFMT) | ((mode & 0777) & ~(int)current_proc->umask);
+  struct inode *ip = parent->i_op->create(parent, lastname, eff_mode);
   inode_put(parent);
   if (IS_ERR(ip))
     return PTR_ERR(ip);
   if (!ip)
     return (int64_t)-ENOMEM;
+  ip->uid = current_proc->uid;
+  ip->gid = current_proc->gid;
   inode_put(ip); /* create 已 inode_create 初始 +1，平衡 */
   return 0;
 }

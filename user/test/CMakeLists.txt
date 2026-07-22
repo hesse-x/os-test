@@ -43,6 +43,8 @@ add_user_dyn_elf(signal_stop C SOURCES test_signal_stop.c ${CMAKE_SOURCE_DIR}/th
 add_user_dyn_elf(signal_flags C SOURCES test_signal_flags.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 # S03: kill/tgkill permission & scope + set_tid_address 64-bit + per-process alarm
 add_user_dyn_elf(kill_perm C SOURCES test_kill_perm.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+# S04: sigaltstack + SA_ONSTACK alternate-signal-stack delivery
+add_user_dyn_elf(sigaltstack C SOURCES test_sigaltstack.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 
 # Layer 9: poll
 add_user_dyn_elf(poll C SOURCES test_poll.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
@@ -155,6 +157,10 @@ if(TEST)
     add_user_dyn_elf(test_vfs_dispatch C SOURCES test_vfs_dispatch.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
     add_user_dyn_elf(test_inode_refcount C SOURCES test_inode_refcount.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
     add_user_dyn_elf(test_tmpfs_socket C SOURCES test_tmpfs_socket.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_dirent_seek C SOURCES test_dirent_seek.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_cloexec_perfd C SOURCES test_cloexec_perfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_openat_dirfd C SOURCES test_openat_dirfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_stat_real C SOURCES test_stat_real.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
 endif()
 
 # libffi dynamic test (ffi_worklist §4.C): ffi_call int/double + ffi_closure

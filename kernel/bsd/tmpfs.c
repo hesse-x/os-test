@@ -123,11 +123,14 @@ static int tmpfs_getattr(struct inode *ip, struct kstat *ks) {
   __memset(ks, 0, sizeof(*ks));
   ks->st_ino = ip->ino;
   ks->st_mode = ip->mode;
+  ks->st_uid = ip->uid;
+  ks->st_gid = ip->gid;
   ks->st_nlink = (uint64_t)ip->nlink;
   ks->st_size = (int64_t)ip->size;
   ks->st_blksize = 4096;
-  /* st_uid/st_gid/st_rdev/st_*tim 留 0（对齐 fat32_getattr 现状，本 OS 无
-   * uid/gid/timestamp 语义） */
+  ks->st_blocks = (ip->size + 4095) / 4096;
+  /* S08: st_uid/st_gid 现报真实 ip->uid/gid(创建时由 sys_open/mkdir/mknod 设)。
+   * st_rdev/st_*tim 仍留 0(本 OS 无设备号语义/时间戳,记 todo)。 */
   return 0;
 }
 
@@ -249,10 +252,15 @@ static struct inode *tmpfs_create(struct inode *dir, const char *name,
     return ERR_PTR(-EEXIST);
   }
   /* mode & S_IFMT：S_IFSOCK 建 INODE_SOCKET；S_IFIFO 暂以普通文件承载
-   * （无 pipe fs），mode 保留 S_IFIFO 位供 stat 区分；其余建 INODE_REGULAR。 */
+   * （无 pipe fs），mode 保留 S_IFIFO 位供 stat 区分；其余建 INODE_REGULAR。
+   * S08: open(O_CREAT) 传入的 mode 仅权限位(无类型位),tmpfs_new_node 以
+   * keep_mode=1 原样写 ip->mode 会丢 S_IFREG 导致 stat S_ISREG 失败;此处对
+   * 普通文件补 S_IFREG 类型位(socket 由 mknod 传入 S_IFSOCK,保留)。 */
   int type = INODE_REGULAR;
   if ((mode & S_IFMT) == S_IFSOCK)
     type = INODE_SOCKET;
+  if (type == INODE_REGULAR && (mode & S_IFMT) == 0)
+    mode = S_IFREG | (mode & 0777);
   struct inode *ip = tmpfs_new_node(parent_ti, name, type, mode, 1);
   if (!ip)
     return ERR_PTR(-ENOMEM);

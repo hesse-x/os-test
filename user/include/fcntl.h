@@ -21,6 +21,7 @@ extern "C" {
 #define FD_CLOEXEC 1
 
 LIBC_EXPORT int open(const char *path, int flags, ...);
+LIBC_EXPORT int openat(int dirfd, const char *path, int flags, ...);
 LIBC_EXPORT int dup2(int old_fd, int new_fd);
 LIBC_EXPORT int fcntl(int fd, int cmd, ...);
 LIBC_EXPORT uint64_t fd_file_size(int fd);

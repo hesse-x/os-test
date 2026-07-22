@@ -21,6 +21,21 @@ void vfs_init(void);
 struct inode *path_walk(struct mount_entry *m, const char *relpath);
 int path_walk_parent(struct mount_entry *m, const char *relpath,
                      struct inode **out_parent, char *lastname, size_t lastcap);
+
+/* S07: dirfd-relative resolution. path_walk_from / path_walk_parent_from walk
+ * `relpath` starting from an explicit start inode (the dirfd's directory inode)
+ * instead of a mount root. Same +1 refcount contract as path_walk/_parent.
+ * relpath must NOT be absolute (caller strips a leading '/' / falls back to
+ * root for absolute paths). No fs-internal `..` crossing a mount boundary —
+ * callers pass a path already within the start inode's subtree. */
+struct inode *path_walk_from(struct inode *start, const char *relpath);
+int path_walk_parent_from(struct inode *start, const char *relpath,
+                          struct inode **out_parent, char *lastname,
+                          size_t lastcap);
+/* S07: dirfd → start directory inode (+1, caller puts) or ERR_PTR(-errno).
+ * AT_FDCWD → root mount root (no per-process CWD exists). Used by the *at
+ * syscalls in syscall.c (mkdirat/unlinkat/renameat). */
+struct inode *resolve_dirfd_start(int dirfd);
 struct inode *vfs_open_kern(const char *kpath);
 
 int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,

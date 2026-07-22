@@ -1955,6 +1955,9 @@ int64_t sys_close(int64_t arg1, int64_t unused1, int64_t unused2,
   spinlock *fdlk = &current_proc->files->fd_lock;
   spin_lock(fdlk);
   struct file *f = fd_uninstall(current_proc->files, fd);
+  // S06: clear the cloexec bitmap entry so the recycled slot does not leak a
+  // stale bit into a later fd that reuses it.
+  fd_set_cloexec(current_proc->files, fd, 0);
   spin_unlock(fdlk);
   if (!f)
     return (int64_t)-EBADF;
@@ -1992,6 +1995,9 @@ int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   file_get(old_f);
   if (old_f->type == FD_TTY)
     pty_dup_file(old_f);
+  // S06: dup2 never sets cloexec on the new fd (POSIX); clear the reused
+  // slot's bitmap bit so a stale value from the closed victim does not leak.
+  fd_set_cloexec(proc->proc->files, new_fd, 0);
 
   spin_unlock(fdlk);
   if (victim) {
@@ -2083,15 +2089,14 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     goto out;
   }
   case F_GETFD:
-    // Map kernel FD_CLOEXEC bit (0x8000) to POSIX userspace bit (1).
-    ret = (f->flags & FD_CLOEXEC) ? 1 : 0;
+    // S06: cloexec is per-fd (bitmap), not on the shared file. Report the
+    // POSIX userspace bit (1) for this fd's bitmap entry.
+    ret = fd_get_cloexec(proc->proc->files, fd) ? 1 : 0;
     goto out;
   case F_SETFD:
-    // POSIX userspace FD_CLOEXEC == 1; any other bits are ignored.
-    if (arg & 1)
-      f->flags |= FD_CLOEXEC;
-    else
-      f->flags &= ~FD_CLOEXEC;
+    // POSIX userspace FD_CLOEXEC == 1; any other bits are ignored. Toggle only
+    // the current fd's bitmap bit (a dup'd fd sharing this file is unaffected).
+    fd_set_cloexec(proc->proc->files, fd, arg & 1);
     ret = 0;
     goto out;
   case F_DUPFD:
@@ -2111,8 +2116,12 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     fd_install(proc->proc->files, new_fd, f);
     file_get(f);
+    // S06: only the NEW fd gets cloexec; the original fd (and any other dup)
+    // is untouched. The shared file's flags no longer carry cloexec.
     if (cmd == F_DUPFD_CLOEXEC)
-      f->flags |= FD_CLOEXEC;
+      fd_set_cloexec(proc->proc->files, new_fd, 1);
+    else
+      fd_set_cloexec(proc->proc->files, new_fd, 0);
     spin_unlock(fdlk);
     ret = (int64_t)new_fd;
     goto out;
@@ -2229,35 +2238,201 @@ int64_t sys_faccessat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
 // ===================== Thin wrappers (A group) =====================
 
 // A1: mkdirat(dirfd, path, mode) — AT_FDCWD-only thin wrapper over sys_mkdir
+// A1: mkdirat(dirfd, path, mode). Absolute path → sys_mkdir. Relative path →
+// resolve parent from dirfd's directory inode via path_walk_parent_from.
 int64_t sys_mkdirat(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                     int64_t unused2, int64_t unused3) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
   int dirfd = (int)arg1;
-  if (dirfd != AT_FDCWD)
-    return -ENOSYS;
-  return sys_mkdir(arg2, arg3, 0, 0, 0, 0);
+  const char __user *upath = (const char __user *__force)arg2;
+  if (!upath)
+    return (int64_t)-EFAULT;
+
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return (int64_t)-EFAULT;
+  if (kpath[0] == '/')
+    return sys_mkdir(arg2, arg3, 0, 0, 0, 0);
+
+  struct inode *start = resolve_dirfd_start(dirfd);
+  if (IS_ERR(start))
+    return (int64_t)PTR_ERR(start);
+  char relpath[256], lastname[256];
+  if (normalize_path(kpath, relpath, sizeof(relpath)) < 0) {
+    inode_put(start);
+    return (int64_t)-ENAMETOOLONG;
+  }
+  struct inode *parent = NULL;
+  int rc = path_walk_parent_from(start, relpath, &parent, lastname,
+                                 sizeof(lastname));
+  if (rc) {
+    inode_put(start);
+    if (parent)
+      inode_put(parent);
+    return (int64_t)rc;
+  }
+  if (!parent->i_op || !parent->i_op->mkdir) {
+    inode_put(start);
+    inode_put(parent);
+    return (int64_t)-EPERM;
+  }
+  int eff_mode = ((int)arg3 & 0777) & ~(int)current_proc->umask;
+  rc = parent->i_op->mkdir(parent, lastname, eff_mode);
+  inode_put(parent);
+  if (rc != 0) {
+    inode_put(start);
+    return (int64_t)rc;
+  }
+  /* S08: 取回新建目录设 owner + umask 权限位(对齐 sys_mkdir)。start 仍持 +1,
+   * 供 path_walk_from 解析。 */
+  struct inode *nip = path_walk_from(start, relpath); /* +1 */
+  inode_put(start);
+  if (nip) {
+    nip->mode = (nip->mode & ~0777) | (uint32_t)eff_mode;
+    nip->uid = current_proc->uid;
+    nip->gid = current_proc->gid;
+    inode_put(nip);
+  }
+  return 0;
 }
 
-// A2: unlinkat(dirfd, path, flags) — AT_FDCWD-only; AT_REMOVEDIR → rmdir, else
-// → unlink
+// A2: unlinkat(dirfd, path, flags). AT_REMOVEDIR → rmdir semantics, else
+// unlink. Absolute path → sys_unlink/sys_rmdir. Relative path → resolve from
+// dirfd.
 int64_t sys_unlinkat(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                      int64_t unused2, int64_t unused3) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
   int dirfd = (int)arg1;
   int flags = (int)arg3;
-  if (dirfd != AT_FDCWD)
-    return -ENOSYS;
-  if (flags & AT_REMOVEDIR)
-    return sys_rmdir(arg2, 0, 0, 0, 0, 0);
-  return sys_unlink(arg2, 0, 0, 0, 0, 0);
+  if (flags & ~AT_REMOVEDIR)
+    return (int64_t)-EINVAL;
+  const char __user *upath = (const char __user *__force)arg2;
+  if (!upath)
+    return (int64_t)-EFAULT;
+
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return (int64_t)-EFAULT;
+  if (kpath[0] == '/') {
+    if (flags & AT_REMOVEDIR)
+      return sys_rmdir(arg2, 0, 0, 0, 0, 0);
+    return sys_unlink(arg2, 0, 0, 0, 0, 0);
+  }
+
+  struct inode *start = resolve_dirfd_start(dirfd);
+  if (IS_ERR(start))
+    return (int64_t)PTR_ERR(start);
+  char relpath[256], lastname[256];
+  if (normalize_path(kpath, relpath, sizeof(relpath)) < 0) {
+    inode_put(start);
+    return (int64_t)-ENAMETOOLONG;
+  }
+  struct inode *parent = NULL;
+  int rc = path_walk_parent_from(start, relpath, &parent, lastname,
+                                 sizeof(lastname));
+  inode_put(start);
+  if (rc) {
+    if (parent)
+      inode_put(parent);
+    return (int64_t)rc;
+  }
+  if (flags & AT_REMOVEDIR) {
+    if (!parent->i_op || !parent->i_op->rmdir) {
+      inode_put(parent);
+      return (int64_t)-EPERM;
+    }
+    rc = parent->i_op->rmdir(parent, lastname);
+  } else {
+    if (!parent->i_op || !parent->i_op->unlink) {
+      inode_put(parent);
+      return (int64_t)-EPERM;
+    }
+    rc = parent->i_op->unlink(parent, lastname);
+  }
+  inode_put(parent);
+  return (int64_t)rc;
 }
 
-// A3: renameat(olddirfd, oldpath, newdirfd, newpath) — AT_FDCWD-only
+// A3: renameat(olddirfd, oldpath, newdirfd, newpath). Absolute path →
+// sys_rename component. Relative paths → resolve each side from its dirfd.
+// Cross-dirfd rename is allowed (both sides resolved to concrete parent
+// inodes); cross-fs is not (the two parents may belong to different fstypes —
+// caller's i_op->rename must handle a foreign new_parent; fat32/tmpfs rename is
+// intra-fs only).
 int64_t sys_renameat(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                      int64_t unused1, int64_t unused2) {
+  (void)unused1;
+  (void)unused2;
   int olddirfd = (int)arg1;
   int newdirfd = (int)arg3;
-  if (olddirfd != AT_FDCWD || newdirfd != AT_FDCWD)
-    return -ENOSYS;
-  return sys_rename(arg2, arg4, 0, 0, 0, 0);
+  const char __user *uold = (const char __user *__force)arg2;
+  const char __user *unew = (const char __user *__force)arg4;
+  if (!uold || !unew)
+    return (int64_t)-EFAULT;
+
+  char old_k[256], new_k[256];
+  if (strncpy_from_user(old_k, uold, sizeof(old_k)) < 0)
+    return (int64_t)-EFAULT;
+  if (strncpy_from_user(new_k, unew, sizeof(new_k)) < 0)
+    return (int64_t)-EFAULT;
+
+  /* Both absolute → existing sys_rename (mount-table match + same-mount check).
+   */
+  if (old_k[0] == '/' && new_k[0] == '/')
+    return sys_rename(arg2, arg4, 0, 0, 0, 0);
+
+  struct inode *old_start = resolve_dirfd_start(olddirfd);
+  if (IS_ERR(old_start))
+    return (int64_t)PTR_ERR(old_start);
+  struct inode *new_start = resolve_dirfd_start(newdirfd);
+  if (IS_ERR(new_start)) {
+    inode_put(old_start);
+    return (int64_t)PTR_ERR(new_start);
+  }
+
+  char old_rel[256], old_name[256];
+  char new_rel[256], new_name[256];
+  if (normalize_path(old_k, old_rel, sizeof(old_rel)) < 0 ||
+      normalize_path(new_k, new_rel, sizeof(new_rel)) < 0) {
+    inode_put(old_start);
+    inode_put(new_start);
+    return (int64_t)-ENAMETOOLONG;
+  }
+
+  struct inode *old_parent = NULL, *new_parent = NULL;
+  int rc = path_walk_parent_from(old_start, old_rel, &old_parent, old_name,
+                                 sizeof(old_name));
+  if (rc) {
+    if (old_parent)
+      inode_put(old_parent);
+    inode_put(old_start);
+    inode_put(new_start);
+    return (int64_t)rc;
+  }
+  rc = path_walk_parent_from(new_start, new_rel, &new_parent, new_name,
+                             sizeof(new_name));
+  inode_put(old_start);
+  inode_put(new_start);
+  if (rc) {
+    if (new_parent)
+      inode_put(new_parent);
+    inode_put(old_parent);
+    return (int64_t)rc;
+  }
+
+  if (!old_parent->i_op || !old_parent->i_op->rename) {
+    inode_put(old_parent);
+    inode_put(new_parent);
+    return (int64_t)-EPERM;
+  }
+  rc = old_parent->i_op->rename(old_parent, old_name, new_parent, new_name);
+  inode_put(old_parent);
+  inode_put(new_parent);
+  return (int64_t)rc;
 }
 
 // A4: dup(oldfd) — find lowest available fd ≥ 0, install same file
@@ -2282,14 +2457,16 @@ int64_t sys_dup(int64_t arg1, int64_t unused1, int64_t unused2, int64_t unused3,
   }
   fd_install(proc->proc->files, new_fd, old_f);
   file_get(old_f);
+  // S06: dup never produces a cloexec fd (POSIX). Clear the slot's bit in case
+  // a prior occupant left it set and the slot was recycled.
+  fd_set_cloexec(proc->proc->files, new_fd, 0);
   spin_unlock(fdlk);
   return (int64_t)new_fd;
 }
 
-// A5: dup3(oldfd, newfd, flags) — like dup2 but with O_CLOEXEC support
-// Temporary: sets FD_CLOEXEC on shared file struct (same bug as
-// F_DUPFD_CLOEXEC, complete fix deferred to per-fd-flags infrastructure, see
-// E3).
+// A5: dup3(oldfd, newfd, flags) — like dup2 but with O_CLOEXEC support.
+// S06: cloexec is per-fd (bitmap), so only `newfd` is affected; `oldfd` is
+// untouched. The victim's bitmap entry is replaced explicitly (slot reused).
 int64_t sys_dup3(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                  int64_t unused2, int64_t unused3) {
   int old_fd = (int)arg1;
@@ -2315,8 +2492,9 @@ int64_t sys_dup3(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   fd_install(proc->proc->files, new_fd, old_f);
   file_get(old_f);
 
-  if (flags & O_CLOEXEC)
-    old_f->flags |= FD_CLOEXEC; // known bug: sets on shared file (E3 deferred)
+  // only the new fd is cloexec; old_fd is untouched. dup3 replaces the
+  // victim's bitmap entry, so set/clear it explicitly (the slot is reused).
+  fd_set_cloexec(proc->proc->files, new_fd, (flags & O_CLOEXEC) ? 1 : 0);
 
   spin_unlock(fdlk);
   if (victim) {
@@ -2944,29 +3122,25 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
 
   int64_t ret;
   switch (f->type) {
-  case FD_REGULAR: {
-    struct inode *ip = f->inode;
-    if (!ip) {
-      ret = -(int64_t)EBADF;
-      goto out;
-    }
-    ks.st_ino = ip->ino;
-    ks.st_size = ip->size;
-    ks.st_mode = S_IFREG | 0644;
-    ks.st_uid = current_proc->uid;
-    ks.st_gid = current_proc->gid;
-    ks.st_blocks = (ip->size + 511) / 512;
-    break;
-  }
+  case FD_REGULAR:
   case FD_DIR: {
     struct inode *ip = f->inode;
     if (!ip) {
       ret = -(int64_t)EBADF;
       goto out;
     }
-    ks.st_ino = ip->ino;
-    ks.st_mode = S_IFDIR | 0755;
-    ks.st_blocks = 0;
+    /* S08: 委派 inode getattr 报真实 mode/uid/gid/blksize/nlink(对齐 sys_stat
+     * 走 i_op->getattr)。无 getattr 时回退填基本字段。 */
+    if (ip->i_op && ip->i_op->getattr) {
+      ip->i_op->getattr(ip, &ks);
+    } else {
+      ks.st_ino = ip->ino;
+      ks.st_mode = ip->mode;
+      ks.st_uid = ip->uid;
+      ks.st_gid = ip->gid;
+      ks.st_size = (int64_t)ip->size;
+      ks.st_nlink = (uint64_t)ip->nlink;
+    }
     break;
   }
   case FD_DEV: {
@@ -2975,18 +3149,25 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
       ret = -(int64_t)EBADF;
       goto out;
     }
-    ks.st_ino = ip->ino;
-    /* DRM 设备号同 devtmpfs_getattr（0.5-3）：libdrm fstat 判 render/primary。
-     */
-    struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-    if (ops && __strcmp(ops->subsystem, "drm") == 0)
-      ks.st_rdev = k_makedev(DRM_MAJOR_FOR_STAT, ops->minor);
-    else
-      ks.st_rdev = ip->ino;
-    if (ops && ops->is_block)
-      ks.st_mode = S_IFBLK | 0666;
-    else
-      ks.st_mode = S_IFCHR | 0666;
+    /* S08: 委派 devtmpfs_getattr 报真实 mode/uid/gid/st_rdev(DRM 设备号
+     * k_makedev(226,minor),libdrm fstat 判 render/primary)。无 i_op 时回退
+     * 原硬编码语义。 */
+    if (ip->i_op && ip->i_op->getattr) {
+      ip->i_op->getattr(ip, &ks);
+    } else {
+      ks.st_ino = ip->ino;
+      ks.st_uid = ip->uid;
+      ks.st_gid = ip->gid;
+      struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+      if (ops && __strcmp(ops->subsystem, "drm") == 0)
+        ks.st_rdev = k_makedev(DRM_MAJOR_FOR_STAT, ops->minor);
+      else
+        ks.st_rdev = ip->ino;
+      if (ops && ops->is_block)
+        ks.st_mode = S_IFBLK | 0666;
+      else
+        ks.st_mode = S_IFCHR | 0666;
+    }
     break;
   }
   case FD_PIPE:
@@ -3109,9 +3290,10 @@ int64_t sys_memfd_create(int64_t arg1, int64_t arg2, int64_t unused1,
   __memset(f, 0, sizeof(*f));
   refcount_set(&f->f_count, 1);
   f->type = FD_SHM;
-  f->flags = O_RDWR | ((flags & MFD_CLOEXEC) ? FD_CLOEXEC : 0);
+  f->flags = O_RDWR; // S06: cloexec is per-fd, set via the bitmap below
   f->shm = shm;
   fd_install(proc->proc->files, fd, f);
+  fd_set_cloexec(proc->proc->files, fd, (flags & MFD_CLOEXEC) ? 1 : 0);
   spin_unlock(fdlk);
 
   return (int64_t)fd;
@@ -3660,6 +3842,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_sigaction(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_RT_SIGRETURN:
     return sys_sigreturn(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SIGALTSTACK:
+    return sys_sigaltstack(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SETSID:
     return sys_setsid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SETPGID:

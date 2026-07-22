@@ -142,6 +142,17 @@ typedef struct xtask {
   size_t user_stack_size;    // stack+guard total size
 
   uint8_t need_resched; // 1 = current task must yield, checked at sched exit
+
+  // === sigaltstack (S04, per-thread) ===
+  // Linux stores sas_ss_* per task_struct so each thread has its own alternate
+  // signal stack. Mirrored here (not in the thread-group-shared signal_struct,
+  // which would leak one thread's altstack to its siblings). fork/clone clear
+  // these on the child (children do not inherit an altstack).
+  void *sas_ss_sp;       // altstack base (user vaddr), NULL when disabled
+  size_t sas_ss_size;    // altstack size in bytes (0 when disabled)
+  uint32_t sas_ss_flags; // SS_ONSTACK (kernel-set while handler runs) /
+                         // SS_DISABLE / SS_AUTODISARM
+
   // === pointer to BSD extension data (Xcore does not interpret contents) ===
   struct proc *proc; // NULL = idle/task without POSIX semantics
 

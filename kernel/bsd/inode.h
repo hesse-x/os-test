@@ -46,6 +46,8 @@ struct inode {
   uint32_t ino;
   uint64_t size;
   uint32_t mode;
+  uint32_t uid; /* owner uid (创建时设为创建进程 uid;存量 inode 默认 0) */
+  uint32_t gid; /* owner gid (创建时设为创建进程 gid;存量 inode 默认 0) */
   int nlink;
   refcount_t i_count;
   spinlock i_lock;

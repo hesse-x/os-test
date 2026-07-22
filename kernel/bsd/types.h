@@ -25,6 +25,10 @@
 // ===================== fd / pipe =====================
 #define MAX_FD 128
 #define PIPE_BUF_SIZE 4096
+// FD_CLOEXEC is the kernel-internal cloexec bit historically stored on the
+// shared struct file (S06 moves it to a per-fd bitmap in struct files). It is
+// kept only for the f->flags bit that pre-existing code paths may still
+// reference during the transition; the source of truth is now the bitmap.
 #define FD_CLOEXEC 0x8000
 
 #define FD_NONE 0
@@ -97,9 +101,15 @@ typedef struct file {
   };
 } file;
 
+// S06: per-fd close-on-exec bitmap. cloexec is an fd-level attribute, but the
+// old design stored it on the refcounted/shared struct file (so dup'd fds
+// shared one bit — F_DUPFD_CLOEXEC/dup3 wrongly flipped the original fd too).
+// The bitmap lives in struct files and is the single source of truth; struct
+// file.flags no longer carries cloexec. Caller must hold files->fd_lock.
 typedef struct files {
   spinlock fd_lock;
   struct file *fd_table[MAX_FD];
+  uint64_t close_on_exec[(MAX_FD + 63) / 64]; // bit fd => close on execve
   refcount_t f_count;
 } files;
 
@@ -134,6 +144,24 @@ static inline struct file *fd_uninstall(files *files, int fd) {
 
 static inline struct file *fd_lookup(files *files, int fd) {
   return RCU_DEREFERENCE(files->fd_table[fd]);
+}
+
+// S06: per-fd close-on-exec accessors. Call under files->fd_lock (the bitmap
+// shares the fd-table lock; no separate lock to keep alloc/install/lookup and
+// cloexec toggles mutually consistent).
+static inline void fd_set_cloexec(files *fl, int fd, int on) {
+  if (fd < 0 || fd >= MAX_FD)
+    return;
+  if (on)
+    fl->close_on_exec[fd / 64] |= (1ULL << (fd % 64));
+  else
+    fl->close_on_exec[fd / 64] &= ~(1ULL << (fd % 64));
+}
+
+static inline int fd_get_cloexec(files *fl, int fd) {
+  if (fd < 0 || fd >= MAX_FD)
+    return 0;
+  return (int)((fl->close_on_exec[fd / 64] >> (fd % 64)) & 1ULL);
 }
 
 #endif // KERNEL_BSD_TYPES_H

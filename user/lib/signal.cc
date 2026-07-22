@@ -31,6 +31,10 @@ int sigpending(sigset_t *set) {
   return sys_sigpending(set);
 }
 
+int sigaltstack(const stack_t *ss, stack_t *old_ss) {
+  return sys_sigaltstack(ss, old_ss);
+}
+
 int raise(int sig) { return kill(getpid(), sig); }
 
 sighandler_t signal(int sig, sighandler_t handler) {

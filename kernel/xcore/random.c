@@ -17,10 +17,12 @@
 
 #include "kernel/xcore/random.h"
 
-#include "arch/x64/apic.h" // sched_clock
+#include <stdint.h>
+
+#include "arch/x64/apic.h"
 #include "arch/x64/rdrand.h"
-#include "arch/x64/smp.h"   // get_cpu_local, MAX_CPUS
-#include "arch/x64/utils.h" // rdtsc64, __memcpy, __memset
+#include "arch/x64/smp.h"
+#include "arch/x64/utils.h"
 #include "kernel/xcore/log.h"
 
 // ===================== ChaCha20 块函数 =====================
@@ -205,11 +207,12 @@ void csprng_read(void *buf, size_t len) {
 // ===================== init（BSP） =====================
 
 // RFC 8439 §2.3.2 测试向量：key=00..1f, counter=1,
-// nonce=00:00:00:00:00:00:00:4a:00:00:00:00
+// nonce=00:00:00:09:00:00:00:4a:00:00:00:00（小端 word: 09000000 4a000000
+// 00000000）
 static const uint32_t selftest_state[16] = {
     0x61707865, 0x3320646e, 0x79622d32, 0x6b206574, 0x03020100, 0x07060504,
     0x0b0a0908, 0x0f0e0d0c, 0x13121110, 0x17161514, 0x1b1a1918, 0x1f1e1d1c,
-    0x00000001, 0x00000000, 0x0000004a, 0x00000000};
+    0x00000001, 0x09000000, 0x4a000000, 0x00000000};
 static const uint8_t selftest_expected[64] = {
     0x10, 0xf1, 0xe7, 0xe4, 0xd1, 0x3b, 0x59, 0x15, 0x50, 0x0f, 0xdd,
     0x1f, 0xa3, 0x20, 0x71, 0xc4, 0xc7, 0xd1, 0xf4, 0xc7, 0x33, 0xc0,

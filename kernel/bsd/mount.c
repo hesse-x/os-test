@@ -176,15 +176,21 @@ bool dir_emit(struct dir_context *ctx, const char *name, int namlen,
 
 int normalize_path(const char *in, char *out, size_t outcap) {
   /* String-level normalization: split by '/', skip '.', pop on '..'.
-   * Clamp '..' at root (cannot go above '/'). No symlink handling. */
-  if (in[0] != '/')
-    return -EINVAL;
+   * Clamp '..' at root (cannot go above '/'). No symlink handling.
+   * Accepts both absolute (in[0]=='/') and relative paths; the result
+   * keeps the same form, so *at dirfd-relative callers can pass a bare
+   * component like "subfile" through unchanged. */
   /* Stack of component start offsets in 'out' (in-place build). */
   int stack[64];
   int sp = 0;
   size_t outpos = 0;
-  out[outpos++] = '/';
-  size_t i = 1;
+  size_t i = 0;
+  if (in[0] == '/') {
+    if (outcap < 1)
+      return -ENAMETOOLONG;
+    out[outpos++] = '/';
+    i = 1;
+  }
   while (in[i]) {
     /* skip leading slashes */
     while (in[i] == '/')
@@ -201,10 +207,12 @@ int normalize_path(const char *in, char *out, size_t outcap) {
       /* pop */
       if (sp > 0) {
         sp--;
-        outpos = (sp == 0) ? 1 : stack[sp];
+        /* Absolute paths keep the leading '/' (outpos floors at 1);
+         * relative paths collapse to empty (outpos floors at 0). */
+        outpos = (sp == 0) ? (in[0] == '/' ? 1 : 0) : stack[sp];
       }
     } else {
-      if (outpos > 1)
+      if (outpos > 0 && out[outpos - 1] != '/')
         out[outpos++] = '/';
       if (outpos + complen + 1 > outcap)
         return -ENAMETOOLONG;
@@ -213,7 +221,7 @@ int normalize_path(const char *in, char *out, size_t outcap) {
         out[outpos++] = in[start + k];
     }
   }
-  if (outpos == 0)
+  if (outpos == 0 && in[0] == '/')
     out[outpos++] = '/';
   out[outpos] = '\0';
   return 0;

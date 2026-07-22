@@ -362,6 +362,8 @@ static uint32_t fat32_make_ino(uint32_t dir_cluster, int dir_entry_idx) {
 /* 前置声明:i_op 表在 R2-10 定义;簇读写 helper 定义在本文件后段。 */
 static const struct inode_operations fat32_dir_iop;
 static const struct inode_operations fat32_file_iop;
+static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
+                            struct inode *new_parent, const char *new_name);
 static uint8_t *read_cluster_buf(uint32_t cluster);
 static int write_cluster_sector(uint32_t cluster, int sector_idx,
                                 const uint8_t *data);
@@ -683,6 +685,39 @@ static int fat32_dir_unlink(struct inode *dir, const char *name) {
   return 0;
 }
 
+/* fat32_dir_is_empty:扫目录簇链,仅含 . / .. 或全 0x00 视为空,返 1;
+ *  否则 0。抽自 fat32_dir_rmdir 的内联验空段,供 rmdir/rename 共用。 */
+static int fat32_dir_is_empty(uint32_t cluster) {
+  uint32_t cc = cluster;
+  while (cc >= 2 && cc < 0x0FFFFFF8) {
+    uint8_t *dbuf = read_cluster_buf(cc);
+    if (!dbuf)
+      return 0;
+    int entries = bytes_per_cluster / 32;
+    for (int i = 0; i < entries; i++) {
+      struct fat_dir_entry *d = (struct fat_dir_entry *)(dbuf + i * 32);
+      if (d->name[0] == 0x00) {
+        kfree(dbuf);
+        return 1; /* 目录尾,之前只见 . .. → 空 */
+      }
+      if (d->name[0] == 0xE5)
+        continue;
+      if (d->name[0] == '.' && (d->name[1] == ' ' || d->name[1] == '.'))
+        continue;
+      if (d->name[0] == '.' && d->name[1] == '.')
+        continue;
+      kfree(dbuf);
+      return 0;
+    }
+    kfree(dbuf);
+    uint32_t next = fat32_read_entry(cc);
+    if (next >= 0x0FFFFFF8)
+      break;
+    cc = next;
+  }
+  return 1;
+}
+
 /* fat32_dir_rmdir:从 dir 删除空子目录 name。 */
 static int fat32_dir_rmdir(struct inode *dir, const char *name) {
   uint32_t cluster, dir_cluster;
@@ -697,60 +732,38 @@ static int fat32_dir_rmdir(struct inode *dir, const char *name) {
   uint32_t target_cluster = cluster;
   if (target_cluster == 0)
     target_cluster = root_cluster;
-  /* 验空:只有 . 与 .. */
-  uint32_t cc = target_cluster;
-  int is_empty = 1;
-  while (cc >= 2 && cc < 0x0FFFFFF8 && is_empty) {
-    uint8_t *dbuf = read_cluster_buf(cc);
-    if (!dbuf) {
-      is_empty = 0;
-      break;
-    }
-    int entries = bytes_per_cluster / 32;
-    for (int i = 0; i < entries; i++) {
-      struct fat_dir_entry *d = (struct fat_dir_entry *)(dbuf + i * 32);
-      if (d->name[0] == 0x00)
-        break;
-      if (d->name[0] == 0xE5)
-        continue;
-      if (d->name[0] == '.' && (d->name[1] == ' ' || d->name[1] == '.'))
-        continue;
-      if (d->name[0] == '.' && d->name[1] == '.')
-        continue;
-      is_empty = 0;
-      break;
-    }
-    kfree(dbuf);
-    uint32_t next = fat32_read_entry(cc);
-    if (next >= 0x0FFFFFF8)
-      break;
-    cc = next;
-  }
-  if (!is_empty)
+  if (!fat32_dir_is_empty(target_cluster))
     return -EBUSY;
+  spin_lock(&fat_lock);
   uint8_t *db = read_cluster_buf(dir_cluster);
-  if (!db)
+  if (!db) {
+    spin_unlock(&fat_lock);
     return -EIO;
+  }
   db[dir_idx * 32] = 0xE5;
   int sec = (dir_idx * 32) / 512;
   write_cluster_sector(dir_cluster, sec, db + sec * 512);
   kfree(db);
-  if (target_cluster >= 2 && target_cluster < 0x0FFFFFF8) {
-    spin_lock(&fat_lock);
+  if (target_cluster >= 2 && target_cluster < 0x0FFFFFF8)
     fat32_free_chain(target_cluster);
-    spin_unlock(&fat_lock);
-  }
+  spin_unlock(&fat_lock);
   return 0;
 }
 
-/* fat32_getattr:从 inode 字段填 kstat(size/mode/ino)。 */
+/* fat32_getattr:从 inode 字段填 kstat。S08: 报真实 ip->mode/uid/gid(创建时
+ * 由 sys_open/mkdir 设),blksize=fat32 簇大小。FAT32 磁盘不存权限位,mode/uid/gid
+ * 仅内存态(reboot 后回默认);本 OS 单 root,uid 多为 0,可接受(记 todo 真权限
+ * FS)。 */
 static int fat32_getattr(struct inode *ip, struct kstat *ks) {
   __memset(ks, 0, sizeof(*ks));
   ks->st_ino = ip->ino;
-  ks->st_mode = (ip->type == INODE_DIR) ? 0040755 : 0100644;
+  ks->st_mode = ip->mode;
+  ks->st_uid = ip->uid;
+  ks->st_gid = ip->gid;
   ks->st_nlink = 1;
   ks->st_size = (int64_t)ip->size;
   ks->st_blksize = (int64_t)fat32_bytes_per_cluster();
+  ks->st_blocks = (ip->size + 511) / 512;
   return 0;
 }
 
@@ -763,12 +776,233 @@ static int fat32_setattr(struct inode *ip, uint64_t size) {
   return rc;
 }
 
+/* fat32_dir_rename:将 old_parent 下 old_name 目录项改到 new_parent 下
+ * new_name。 实现策略:在 new_parent 找目标槽(若 new
+ * 已存在则就地覆盖其槽,否则找空闲 槽/扩簇),把 old 目录项 32B
+ * 原样复制到目标槽并仅重写 name 为 new_name 的 8.3 形式(attr/fst_clus/size 不变
+ * → inode 身份即首簇不变),再标 old 旧槽 0xE5;覆盖时释放 new 原簇链。锁序对齐
+ * fat32_dir_create:fat_lock 全程持有。
+ *
+ *  POSIX 语义(对齐 Linux rename(2)):
+ *   - old 不存在 → -ENOENT
+ *   - new 不存在 → 纯改名(目录项迁移,簇链不变)
+ *   - new 存在且为文件、old 亦文件 → 覆盖(释放 new 簇链)
+ *   - new 存在且为空目录、old 亦目录 → 覆盖(释放 new 目录簇链)
+ *   - new 存在且非空目录 → -ENOTEMPTY
+ *   - old 目录、new 文件 → -EISDIR;old 文件、new 目录 → -ENOTDIR
+ *   - old==new 同名 → 0 no-op
+ *   - 同一 inode(old/new 指向同首簇) → 0 no-op(防自覆盖)
+ *  跨目录目录移动需更新被移目录 .. 与防环,本实现暂不支持:old_parent !=
+ *  new_parent 且 old 为目录 → -EXDEV。同目录改名 .. 不变,天然无环。 */
+static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
+                            struct inode *new_parent, const char *new_name) {
+  if (!old_parent || !old_name || !new_parent || !new_name)
+    return -EFAULT;
+
+  /* old/new 同目录同名 → no-op(对齐 Linux)。 */
+  if (old_parent == new_parent && __strcmp(old_name, new_name) == 0)
+    return 0;
+
+  /* 跨目录移动目录需 .. 更新 + 防环,本实现不支持(对齐 mvfat:返 -EXDEV)。
+   * 同目录改名 .. 不变;跨目录文件移动无 .. 需求亦不支持以保边界清晰。 */
+  if (old_parent != new_parent)
+    return -EXDEV;
+
+  int namelen = 0;
+  while (new_name[namelen])
+    namelen++;
+  if (namelen == 0)
+    return -ENOENT;
+
+  uint32_t old_cluster, old_dir_cluster;
+  int old_dir_idx, old_is_dir;
+  uint64_t old_size;
+  (void)old_size;
+  int rc = fat32_lookup_in_dir(old_parent->start_cluster, old_name,
+                               &old_cluster, &old_dir_cluster, &old_dir_idx,
+                               &old_size, &old_is_dir);
+  if (rc != 0)
+    return rc; /* -ENOENT */
+
+  uint32_t new_cluster, new_dir_cluster;
+  int new_dir_idx, new_is_dir;
+  uint64_t new_size;
+  (void)new_size;
+  rc = fat32_lookup_in_dir(new_parent->start_cluster, new_name, &new_cluster,
+                           &new_dir_cluster, &new_dir_idx, &new_size,
+                           &new_is_dir);
+  int new_exists = (rc == 0);
+  if (rc != 0 && rc != -ENOENT)
+    return rc; /* -EIO 等 */
+
+  /* old/new 指向同一首簇 → 同一 inode,对齐 Linux 返 0(防"覆盖自身"误删)。 */
+  if (new_exists && old_cluster == new_cluster && old_cluster >= 2 &&
+      old_cluster < 0x0FFFFFF8)
+    return 0;
+
+  /* 覆盖语义边界校验(new 存在时)。 */
+  if (new_exists) {
+    if (old_is_dir) {
+      if (!new_is_dir)
+        return -EISDIR; /* old 目录 → new 文件 */
+      uint32_t new_dir_cluster0 = new_cluster ? new_cluster : root_cluster;
+      if (!fat32_dir_is_empty(new_dir_cluster0))
+        return -ENOTEMPTY;
+    } else {
+      if (new_is_dir)
+        return -ENOTDIR; /* old 文件 → new 目录 */
+    }
+  }
+
+  spin_lock(&fat_lock);
+
+  /* 读 old 目录项(保留 attr/fst_clus/size,仅重写 name 为 new_name 8.3)。 */
+  uint8_t *old_db = read_cluster_buf(old_dir_cluster);
+  if (!old_db) {
+    spin_unlock(&fat_lock);
+    return -EIO;
+  }
+  struct fat_dir_entry ne;
+  __memcpy(&ne, old_db + old_dir_idx * 32, sizeof(ne));
+  kfree(old_db);
+  format_83_name(new_name, namelen, ne.name);
+
+  /* 确定目标槽:覆盖用 new 的旧槽;纯改名找空闲槽(0x00/0xE5),不足则扩簇。 */
+  uint32_t target_cluster;
+  int target_idx;
+  int was_end_of_dir = 0;
+  if (new_exists) {
+    target_cluster = new_dir_cluster;
+    target_idx = new_dir_idx;
+  } else {
+    int entries = bytes_per_cluster / 32;
+    target_cluster = new_parent->start_cluster;
+    target_idx = -1;
+    uint32_t tail = new_parent->start_cluster;
+    uint32_t cur = new_parent->start_cluster;
+    while (cur >= 2 && cur < 0x0FFFFFF8) {
+      tail = cur;
+      uint8_t *db = read_cluster_buf(cur);
+      if (!db) {
+        spin_unlock(&fat_lock);
+        return -EIO;
+      }
+      for (int i = 0; i < entries; i++) {
+        struct fat_dir_entry *de = (struct fat_dir_entry *)(db + i * 32);
+        if (de->name[0] == 0x00) {
+          target_idx = i;
+          was_end_of_dir = 1;
+          break;
+        }
+        if (de->name[0] == 0xE5) {
+          target_idx = i;
+          break;
+        }
+      }
+      kfree(db);
+      if (target_idx >= 0) {
+        target_cluster = cur;
+        break;
+      }
+      cur = fat32_read_entry(cur);
+    }
+    if (target_idx < 0) {
+      uint32_t nc = fat32_allocate_cluster();
+      if (nc == 0) {
+        spin_unlock(&fat_lock);
+        return -ENOSPC;
+      }
+      if (fat32_link_cluster(tail, nc) != 0) {
+        fat32_write_fat_entry(nc, 0);
+        spin_unlock(&fat_lock);
+        return -EIO;
+      }
+      uint8_t *zb = (uint8_t *)kmalloc(bytes_per_cluster);
+      if (!zb) {
+        fat32_write_fat_entry(nc, 0);
+        fat32_write_fat_entry(tail, 0x0FFFFFFF);
+        spin_unlock(&fat_lock);
+        return -ENOMEM;
+      }
+      __memset(zb, 0, bytes_per_cluster);
+      uint32_t lba = data_start_lba + (nc - 2) * sectors_per_cluster;
+      blk_write(lba, sectors_per_cluster, zb);
+      kfree(zb);
+      target_cluster = nc;
+      target_idx = 0;
+      was_end_of_dir = 1;
+    }
+  }
+
+  /* 写目标槽:复制 old 目录项(已改 name)。维持 end-of-dir 标记。 */
+  uint8_t *new_db = read_cluster_buf(target_cluster);
+  if (!new_db) {
+    spin_unlock(&fat_lock);
+    return -EIO;
+  }
+  int entries = bytes_per_cluster / 32;
+  __memcpy(new_db + target_idx * 32, &ne, 32);
+  if (was_end_of_dir && target_idx + 1 < entries)
+    __memset(new_db + (target_idx + 1) * 32, 0, 32);
+  int sec = (target_idx * 32) / 512;
+  int wrc = write_cluster_sector(target_cluster, sec, new_db + sec * 512);
+  if (wrc == 0 && was_end_of_dir && target_idx + 1 < entries) {
+    int ns = ((target_idx + 1) * 32) / 512;
+    if (ns != sec)
+      wrc = write_cluster_sector(target_cluster, ns, new_db + ns * 512);
+  }
+  kfree(new_db);
+  if (wrc != 0) {
+    spin_unlock(&fat_lock);
+    return -EIO;
+  }
+
+  /* 删 old 旧槽(标 0xE5)。覆盖场景下 old 槽 ≠ new 槽(异名),独立标记。 */
+  if (old_dir_cluster != target_cluster || old_dir_idx != target_idx) {
+    uint8_t *odb = read_cluster_buf(old_dir_cluster);
+    if (!odb) {
+      spin_unlock(&fat_lock);
+      return -EIO;
+    }
+    odb[old_dir_idx * 32] = 0xE5;
+    int osec = (old_dir_idx * 32) / 512;
+    wrc = write_cluster_sector(old_dir_cluster, osec, odb + osec * 512);
+    kfree(odb);
+    if (wrc != 0) {
+      spin_unlock(&fat_lock);
+      return -EIO;
+    }
+  }
+
+  /* 覆盖:释放 new 原簇链。FAT32 无 nlink,簇链释放即数据删除。 */
+  if (new_exists) {
+    uint32_t nc = new_cluster;
+    if (nc >= 2 && nc < 0x0FFFFFF8)
+      fat32_free_chain(nc);
+  }
+
+  /* inode cache 同步:old inode 的 ino 随目录项位置变化,但其内容(首簇/size)
+   * 不变。照 unlink 失效其 page cache;已打开 fd 仍走首簇寻址,不受目录项位置
+   * 影响(FAT32 文件 I/O 经首簇,不依赖 ino 的 dir_idx)。不主动迁移 inode cache
+   * 条目;下次 lookup 按新位置 fat32_iget 建新 inode,旧 inode 关闭时回收。 */
+  struct inode *old_ip =
+      inode_lookup(fat32_make_ino(old_dir_cluster, old_dir_idx));
+  if (old_ip) {
+    page_cache_invalidate_inode(old_ip);
+    inode_put(old_ip);
+  }
+
+  spin_unlock(&fat_lock);
+  return 0;
+}
+
 static const struct inode_operations fat32_dir_iop = {
     .lookup = fat32_dir_lookup,
     .create = fat32_dir_create,
     .mkdir = fat32_dir_mkdir,
     .unlink = fat32_dir_unlink,
     .rmdir = fat32_dir_rmdir,
+    .rename = fat32_dir_rename,
     .getattr = fat32_getattr,
     .setattr = fat32_setattr,
 };

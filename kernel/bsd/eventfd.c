@@ -66,11 +66,10 @@ int64_t sys_eventfd2(int64_t initval, int64_t flags) {
   refcount_set(&f->f_count, 1);
   f->type = FD_EVENTFD;
   f->eventfd = ctx;
-  if (flags & EFD_CLOEXEC)
-    f->flags |= FD_CLOEXEC;
   if (flags & EFD_NONBLOCK)
     f->flags |= O_NONBLOCK;
   fd_install(proc->proc->files, fd, f);
+  fd_set_cloexec(proc->proc->files, fd, (flags & EFD_CLOEXEC) ? 1 : 0);
   spin_unlock(&proc->proc->files->fd_lock);
   return fd;
 }

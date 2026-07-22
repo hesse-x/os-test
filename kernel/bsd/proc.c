@@ -792,6 +792,8 @@ uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
 
 // Deep-copy fd_table from parent_files to child_files.
 // Bumps ref counts for pipe, SHM, file, inode, socket, TTY.
+// S06: also copies the per-fd close_on_exec bitmap so the child inherits the
+// parent's cloexec settings (Linux: fork/clone-without-CLONE_FILES copies).
 static void __attribute__((unused)) copy_fd_table(files *parent_files,
                                                   files *child_files) {
   for (int fd = 0; fd < MAX_FD; fd++) {
@@ -803,6 +805,8 @@ static void __attribute__((unused)) copy_fd_table(files *parent_files,
         pty_dup_file(f);
     }
   }
+  __memcpy(child_files->close_on_exec, parent_files->close_on_exec,
+           sizeof(child_files->close_on_exec));
 }
 
 // Deep-copy mmap_regions linked list from parent to child.
@@ -1638,14 +1642,17 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   // === Point of no return: old address space will be replaced ===
 
   // 8. Close FD_CLOEXEC fds
+  // S06: cloexec now lives in the per-fd bitmap (not f->flags), so execve
+  // closes exactly the fds whose bitmap bit is set.
   spinlock *fdlk = &proc->proc->files->fd_lock;
   struct file *cloexec_entries[MAX_FD];
   int cloexec_count = 0;
   spin_lock(fdlk);
   for (int i = 0; i < MAX_FD; i++) {
     struct file *f = fd_lookup(proc->proc->files, i);
-    if (f && (f->flags & FD_CLOEXEC)) {
+    if (f && fd_get_cloexec(proc->proc->files, i)) {
       fd_uninstall(proc->proc->files, i);
+      fd_set_cloexec(proc->proc->files, i, 0);
       cloexec_entries[cloexec_count++] = f;
     }
   }

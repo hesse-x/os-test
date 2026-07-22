@@ -132,11 +132,10 @@ int64_t sys_signalfd4(int64_t fd, int64_t sigmask_ptr, int64_t sizemask,
     refcount_set(&f->f_count, 1);
     f->type = FD_SIGNALFD;
     f->signalfd = ctx;
-    if (flags & SFD_CLOEXEC)
-      f->flags |= FD_CLOEXEC;
     if (flags & SFD_NONBLOCK)
       f->flags |= O_NONBLOCK;
     fd_install(proc->proc->files, newfd, f);
+    fd_set_cloexec(proc->proc->files, newfd, (flags & SFD_CLOEXEC) ? 1 : 0);
     spin_unlock(&proc->proc->files->fd_lock);
     return newfd;
   } else {

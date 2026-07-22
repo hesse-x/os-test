@@ -261,9 +261,8 @@ int64_t sys_epoll_create1(int64_t flags) {
   refcount_set(&f->f_count, 1);
   f->type = FD_EPOLL;
   f->epoll = ep;
-  if (flags & EPOLL_CLOEXEC)
-    f->flags |= FD_CLOEXEC;
   fd_install(proc->proc->files, fd, f);
+  fd_set_cloexec(proc->proc->files, fd, (flags & EPOLL_CLOEXEC) ? 1 : 0);
   spin_unlock(&proc->proc->files->fd_lock);
   return fd;
 }

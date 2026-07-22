@@ -117,6 +117,15 @@ static void deliver_signal(xtask *proc, trapframe *tf, int sig,
   frame.uc.uc_flags = 0;
   frame.uc.uc_link = NULL;
 
+  // S04: record the altstack in effect so rt_sigreturn can restore it and a
+  // handler can query it via sigaltstack(NULL,&old). Filled before the stack
+  // switch decision below mutates sas_ss_flags.
+  frame.uc.uc_stack.ss_sp = proc->sas_ss_sp;
+  frame.uc.uc_stack.ss_size = proc->sas_ss_size;
+  frame.uc.uc_stack.ss_flags = (proc->sas_ss_flags & SS_DISABLE)
+                                   ? SS_DISABLE
+                                   : (proc->sas_ss_flags & SS_ONSTACK);
+
   // Update blocked: mask sa_mask + current signal during handler. S02
   // SA_NODEFER suppresses the automatic add of the current signal.
   sigset_t new_mask = sa->sa_mask;
@@ -128,6 +137,25 @@ static void deliver_signal(xtask *proc, trapframe *tf, int sig,
   // Clear sig_force_info (consumed)
   if (proc->proc->sig_force_info.si_signo == sig)
     proc->proc->sig_force_info.si_signo = 0;
+
+  // S04: SA_ONSTACK delivery — run the handler on the alternate signal stack
+  // instead of the current user stack. Linux only switches when the thread is
+  // not already running on the altstack (no nested re-use of the same region).
+  uint64_t user_rsp;
+  if ((sa->sa_flags & SA_ONSTACK) && !(proc->sas_ss_flags & SS_DISABLE) &&
+      !(proc->sas_ss_flags & SS_ONSTACK) && proc->sas_ss_size > 0) {
+    user_rsp = (uint64_t)proc->sas_ss_sp + proc->sas_ss_size;
+    proc->sas_ss_flags |= SS_ONSTACK;
+    // Reflect the now-active on-stack state in the saved uc_stack so a handler
+    // querying sigaltstack(NULL,&old) sees SS_ONSTACK (matches Linux).
+    frame.uc.uc_stack.ss_flags = SS_ONSTACK;
+    // SS_AUTODISARM: disable the altstack on entry so a nested SA_ONSTACK
+    // signal cannot reuse it (would overflow). rt_sigreturn does NOT re-arm.
+    if (proc->sas_ss_flags & SS_AUTODISARM)
+      proc->sas_ss_flags |= SS_DISABLE;
+  } else {
+    user_rsp = tf->rsp;
+  }
 
   // Push sigframe to user stack. SysV AMD64 ABI requires rsp at a function's
   // entry to be 8 mod 16 (the state after a `call` pushed the 8-byte return
@@ -142,7 +170,7 @@ static void deliver_signal(xtask *proc, trapframe *tf, int sig,
   // _ASM_EXTABLE fixup returns -EFAULT instead of panicking the kernel — we
   // then force SIGSEGV on the target (default-terminate) and leave the
   // trapframe unmodified so user mode re-enters and runs the SIGSEGV path.
-  uint64_t user_rsp = tf->rsp - sizeof(struct rt_sigframe);
+  user_rsp -= sizeof(struct rt_sigframe);
   user_rsp &= ~0xFULL; // 16-byte aligned base for the frame
 
   uint64_t saved_cr3;
@@ -1071,6 +1099,103 @@ int64_t sys_sigreturn(int64_t unused1, int64_t unused2, int64_t unused3,
   proc->proc->sig_blocked &= ~(SIGMASK(SIGKILL));
   proc->proc->sig_blocked &= ~(SIGMASK(SIGSTOP));
 
+  // S04: restore the per-task sigaltstack state saved at delivery. If the
+  // handler ran on the altstack (SS_ONSTACK was set in uc_stack), clear it.
+  // SS_AUTODISARM disabled the altstack on entry; per Linux, sigreturn does
+  // NOT re-arm it — the user must sigaltstack() again. Clearing SS_ONSTACK
+  // here leaves the (possibly SS_DISABLE'd) base/size intact.
+  if (frame.uc.uc_stack.ss_flags & SS_ONSTACK)
+    proc->sas_ss_flags &= ~SS_ONSTACK;
+
+  return 0;
+}
+
+// ===================== BSD syscall: sigaltstack (S04) =====================
+// Set and/or query the per-thread alternate signal stack. ss==NULL queries
+// only; oss==NULL skips the old-value writeback. Mirrors Linux semantics:
+//   - user may not set SS_ONSTACK (kernel-only); only SS_DISABLE is accepted
+//     alongside the implicit "no flags" case. Any other flag → EINVAL.
+//   - SS_DISABLE tears down the altstack regardless of ss_size/ss_sp.
+//   - otherwise ss_size must be >= MINSIGSTKSZ and ss_sp must be a user vaddr.
+int64_t sys_sigaltstack(int64_t arg1, int64_t arg2, int64_t unused1,
+                        int64_t unused2, int64_t unused3, int64_t unused4) {
+  const stack_t __user *ss = (const stack_t __user *__force)arg1;
+  stack_t __user *oss = (stack_t __user * __force) arg2;
+  xtask *t = current_task;
+
+  // Write back the current altstack state first (before any change), so a
+  // query-only call (ss==NULL) still reports the pre-call value.
+  if (oss) {
+    uint64_t ptr = (__force uint64_t)oss;
+    if (ptr >= KERNEL_VMA_BOUNDARY ||
+        ptr + sizeof(stack_t) > KERNEL_VMA_BOUNDARY)
+      return (int64_t)-EFAULT;
+
+    stack_t kold;
+    kold.ss_sp = t->sas_ss_sp;
+    kold.ss_size = t->sas_ss_size;
+    // Report SS_DISABLE when no altstack is installed; otherwise the live
+    // flags (kernel may have set SS_ONSTACK if this is called from a handler
+    // running on the altstack — rare but Linux exposes it).
+    kold.ss_flags = (t->sas_ss_flags & SS_DISABLE)
+                        ? SS_DISABLE
+                        : (t->sas_ss_flags & SS_ONSTACK);
+
+    uint64_t saved_cr3;
+    __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+    __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)t->cr3) : "memory");
+    if (copy_to_user(oss, &kold, sizeof(stack_t))) {
+      __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+      return (int64_t)-EFAULT;
+    }
+    __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+  }
+
+  if (!ss)
+    return 0; // query-only
+
+  uint64_t sptr = (__force uint64_t)ss;
+  if (sptr >= KERNEL_VMA_BOUNDARY ||
+      sptr + sizeof(stack_t) > KERNEL_VMA_BOUNDARY)
+    return (int64_t)-EFAULT;
+
+  stack_t kss;
+  uint64_t saved_cr3;
+  __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+  __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)t->cr3) : "memory");
+  if (copy_from_user(&kss, ss, sizeof(stack_t))) {
+    __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+    return (int64_t)-EFAULT;
+  }
+  __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+
+  // Reject flags the user may not set. SS_ONSTACK is kernel-only; SS_DISABLE
+  // is the only user-settable flag. SS_AUTODISARM is honored below.
+  if (kss.ss_flags & ~(SS_DISABLE | SS_AUTODISARM))
+    return (int64_t)-EINVAL;
+
+  if (kss.ss_flags & SS_DISABLE) {
+    t->sas_ss_sp = NULL;
+    t->sas_ss_size = 0;
+    // Preserve a user-requested SS_AUTODISARM for a later re-arm, but mark
+    // disabled now. Linux: a disabled stack has only SS_DISABLE set.
+    t->sas_ss_flags = SS_DISABLE;
+    return 0;
+  }
+
+  if (kss.ss_size < MINSIGSTKSZ)
+    return (int64_t)-ENOMEM;
+
+  // The altstack base must live in user address space.
+  uint64_t base = (uint64_t)kss.ss_sp;
+  if (base >= KERNEL_VMA_BOUNDARY || base + kss.ss_size > KERNEL_VMA_BOUNDARY)
+    return (int64_t)-EFAULT;
+
+  t->sas_ss_sp = kss.ss_sp;
+  t->sas_ss_size = kss.ss_size;
+  // Armed: clear SS_DISABLE/SS_ONSTACK; keep SS_AUTODISARM so the delivery
+  // path can auto-disable on entry.
+  t->sas_ss_flags = kss.ss_flags & SS_AUTODISARM;
   return 0;
 }
 

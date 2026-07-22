@@ -65,6 +65,8 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
              : (type == INODE_DEV)    ? 0020000
              : (type == INODE_SOCKET) ? 0140000
                                       : 0100644;
+  ip->uid = 0;
+  ip->gid = 0;
   ip->nlink = 1;
   refcount_set(&ip->i_count, 1);
   ip->i_lock = SPINLOCK_INIT;
@@ -129,6 +131,8 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
              : (type == INODE_DEV)    ? 0020000
              : (type == INODE_SOCKET) ? 0140000
                                       : 0100644;
+  ip->uid = 0;
+  ip->gid = 0;
   ip->nlink = 1;
   refcount_set(&ip->i_count, 1);
   ip->i_lock = SPINLOCK_INIT;

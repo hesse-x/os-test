@@ -35,6 +35,14 @@ LIBC_EXPORT int scandir(const char *dirp, struct dirent ***namelist,
                         int (*filter)(const struct dirent *),
                         int (*compar)(const struct dirent **,
                                       const struct dirent **));
+/* S05: directory stream positioning + dirfd. seekdir/telldir use the kernel
+ * getdents d_off cookie via lseek on the dir fd; rewinddir resets to start. */
+LIBC_EXPORT long telldir(DIR *dirp);
+LIBC_EXPORT void seekdir(DIR *dirp, long loc);
+LIBC_EXPORT void rewinddir(DIR *dirp);
+LIBC_EXPORT int dirfd(DIR *dirp);
+LIBC_EXPORT int readdir_r(DIR *dirp, struct dirent *entry,
+                          struct dirent **result);
 
 #ifdef __cplusplus
 }

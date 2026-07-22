@@ -49,6 +49,19 @@ uint64_t fd_file_size(int fd) {
 // ===================== open =====================
 
 int open(const char *path, int flags, ...) {
+  // S08: open(O_CREAT, mode) — POSIX: the mode arg is the third (variadic)
+  // parameter, present only when O_CREAT is set, and is masked by umask in the
+  // kernel. Read it here and forward to sys_open; dropping it left rdx (the
+  // kernel's arg3) holding garbage, so created files got garbage permission
+  // bits (different per call path).
+  mode_t mode = 0;
+  if (flags & O_CREAT) {
+    va_list ap;
+    va_start(ap, flags);
+    mode = (mode_t)va_arg(ap, int);
+    va_end(ap);
+  }
+
   // Handle relative paths by prepending cwd
   char abs_path[256];
   if (path && path[0] != '/') {
@@ -71,8 +84,49 @@ int open(const char *path, int flags, ...) {
 
   // All paths go through sys_open — kernel dispatches FAT32 and devtmpfs
   // internally
-  int fd = sys_open(path, flags);
+  int fd = sys_open(path, flags, (int)mode);
   return fd;
+}
+
+// S07: resolve a *at(dirfd, path, ...) path for the user-side CWD model.
+// AT_FDCWD → prepend the userspace cwd_path (kernel has no CWD), returning a
+// buffer the caller must keep alive until the syscall. A real dirfd → return
+// `path` unchanged; the kernel resolves it relative to dirfd. Absolute paths
+// are returned unchanged. `buf` must be >=256 bytes.
+static const char *resolve_at_path(int dirfd, const char *path, char *buf) {
+  if (!path || path[0] == '/' || dirfd != AT_FDCWD)
+    return path;
+  int cwdi = 0;
+  while (cwd_path[cwdi] && cwdi < 254) {
+    buf[cwdi] = cwd_path[cwdi];
+    cwdi++;
+  }
+  if (cwdi > 0 && buf[cwdi - 1] != '/')
+    buf[cwdi++] = '/';
+  int pi = 0;
+  while (path[pi] && cwdi < 254)
+    buf[cwdi++] = path[pi++];
+  buf[cwdi] = '\0';
+  return buf;
+}
+
+// S07: openat(dirfd, path, flags, mode). AT_FDCWD → cwd-relative (absolute path
+// to the kernel); a real dirfd → kernel resolves the relative path from it.
+int openat(int dirfd, const char *path, int flags, ...) {
+  mode_t mode = 0;
+  if (flags & O_CREAT) {
+    va_list ap;
+    va_start(ap, flags);
+    mode = (mode_t)va_arg(ap, int);
+    va_end(ap);
+  }
+  char buf[256];
+  const char *p = resolve_at_path(dirfd, path, buf);
+  /* For AT_FDCWD the path is now absolute → sys_open (mode applied). For a real
+   * dirfd pass the original relative path + dirfd to sys_openat. */
+  if (dirfd == AT_FDCWD)
+    return sys_open(p, flags, (int)mode);
+  return sys_openat(dirfd, p, flags, (int)mode);
 }
 
 // ===================== read =====================
@@ -223,6 +277,9 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms) {
 // dup2 — duplicate fd
 int dup2(int old_fd, int new_fd) { return sys_dup2(old_fd, new_fd); }
 
+// dup — duplicate fd (lowest available slot)
+int dup(int old_fd) { return sys_dup(old_fd); }
+
 // ===================== getcwd =====================
 char *getcwd(char *buf, size_t size) {
   if (!buf) {
@@ -319,6 +376,23 @@ int unlink(const char *path) {
   return r;
 }
 
+// S07: unlinkat(dirfd, path, flags). AT_REMOVEDIR → rmdir semantics.
+// AT_FDCWD → cwd-relative; real dirfd → kernel resolves relative to it.
+int unlinkat(int dirfd, const char *path, int flags) {
+  if (!path) {
+    errno = EFAULT;
+    return -1;
+  }
+  char buf[256];
+  const char *p = resolve_at_path(dirfd, path, buf);
+  if (dirfd == AT_FDCWD) {
+    if (flags & AT_REMOVEDIR)
+      return sys_rmdir(p);
+    return sys_unlink(p);
+  }
+  return sys_unlinkat(dirfd, p, flags);
+}
+
 // ===================== rename (via sys_rename syscall) =====================
 int rename(const char *oldpath, const char *newpath) {
   if (!oldpath || !newpath) {
@@ -352,6 +426,22 @@ int rename(const char *oldpath, const char *newpath) {
   if (sys_rename(old_abs, new_abs) < 0)
     return -1;
   return 0;
+}
+
+// S07: renameat(olddirfd, oldpath, newdirfd, newpath). Each side independently:
+// AT_FDCWD → cwd-relative (absolute to kernel); real dirfd → kernel resolves.
+int renameat(int olddirfd, const char *oldpath, int newdirfd,
+             const char *newpath) {
+  if (!oldpath || !newpath) {
+    errno = EFAULT;
+    return -1;
+  }
+  char old_buf[256], new_buf[256];
+  const char *op = resolve_at_path(olddirfd, oldpath, old_buf);
+  const char *np = resolve_at_path(newdirfd, newpath, new_buf);
+  if (olddirfd == AT_FDCWD && newdirfd == AT_FDCWD)
+    return sys_rename(op, np);
+  return sys_renameat(olddirfd, op, newdirfd, np);
 }
 int rmdir(const char *path) {
   if (!path) {
@@ -528,6 +618,23 @@ int fstat(int fd, struct stat *st) {
   return (int)rc;
 }
 
+// S07: fstatat(dirfd, path, st, flags). AT_EMPTY_PATH + empty path →
+// fstat(dirfd). AT_FDCWD → cwd-relative; a real dirfd → kernel resolves
+// relative to it.
+int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
+  if (!st) {
+    errno = EFAULT;
+    return -1;
+  }
+  if ((flags & AT_EMPTY_PATH) && path && path[0] == '\0')
+    return fstat(dirfd, st);
+  char buf[256];
+  const char *p = resolve_at_path(dirfd, path, buf);
+  if (dirfd == AT_FDCWD)
+    return sys_stat(p, st);
+  return sys_newfstatat(dirfd, p, st, flags);
+}
+
 // ===================== mkdir (via sys_mkdir syscall) =====================
 int mkdir(const char *path, mode_t mode) {
   (void)mode; // FAT32 doesn't support permissions
@@ -556,6 +663,21 @@ int mkdir(const char *path, mode_t mode) {
   return r;
 }
 
+// S07: mkdirat(dirfd, path, mode). AT_FDCWD → cwd-relative; real dirfd →
+// kernel.
+int mkdirat(int dirfd, const char *path, mode_t mode) {
+  (void)mode;
+  if (!path) {
+    errno = EFAULT;
+    return -1;
+  }
+  char buf[256];
+  const char *p = resolve_at_path(dirfd, path, buf);
+  if (dirfd == AT_FDCWD)
+    return sys_mkdir(p, 0);
+  return sys_mkdirat(dirfd, p, mode);
+}
+
 // ===================== opendir / readdir / closedir =====================
 #include <dirent.h>
 #include <xos/dirent.h>
@@ -567,6 +689,10 @@ struct __dir {
   uint8_t *buf;
   size_t buf_pos;
   size_t buf_len;
+  struct dirent result; /* S05: per-DIR result buffer (readdir is reentrant
+                         * across distinct DIR streams; the old static buffer
+                         * made concurrent readdir() on two DIRs clobber each
+                         * other). */
 };
 
 DIR *opendir(const char *name) {
@@ -634,19 +760,19 @@ struct dirent *readdir(DIR *dirp) {
   }
   // Parse current dirent64 entry
   struct dirent64 *d64 = (struct dirent64 *)(dir->buf + dir->buf_pos);
-  static struct dirent result;
-  result.d_ino = (ino_t)d64->d_ino;
-  result.d_off = (off_t)d64->d_off;
-  result.d_reclen = d64->d_reclen;
+  struct dirent *result = &dir->result;
+  result->d_ino = (ino_t)d64->d_ino;
+  result->d_off = (off_t)d64->d_off;
+  result->d_reclen = d64->d_reclen;
   int j = 0;
   while (d64->d_name[j] && j < 255) {
-    result.d_name[j] = d64->d_name[j];
+    result->d_name[j] = d64->d_name[j];
     j++;
   }
-  result.d_name[j] = '\0';
+  result->d_name[j] = '\0';
 
   dir->buf_pos += d64->d_reclen;
-  return &result;
+  return result;
 }
 
 int closedir(DIR *dirp) {
@@ -659,6 +785,80 @@ int closedir(DIR *dirp) {
   close(dir->dd_fd);
   free(dir->buf);
   free(dir);
+  return 0;
+}
+
+// ===================== seekdir / telldir / rewinddir / dirfd (S05)
+// ===================== The kernel getdents64 cursor lives in the fd's
+// f->offset; lseek on a dir fd repositions it and the next getdents resumes
+// from there (verified: sys_lseek accepts arbitrary non-negative offsets on
+// FD_DIR). d_off is the per-entry seek cookie the kernel emits, so telldir
+// returns the next entry's d_off and seekdir restores the kernel cursor to it,
+// then invalidates the user buffer.
+long telldir(DIR *dirp) {
+  struct __dir *dir = (struct __dir *)dirp;
+  if (!dir) {
+    errno = EBADF;
+    return -1;
+  }
+  /* telldir must return the position of the entry just read by readdir() so
+   * that seekdir(loc) + readdir() yields that same entry again. After readdir
+   * returns entry X it advances buf_pos to point at entry X+1; the d_off of
+   * the NEXT entry (the old buf_pos-based read) is X+1's cookie, not X's.
+   * The cookie of the entry we actually handed back is preserved in
+   * dir->result.d_off, so return that. */
+  return (long)dir->result.d_off;
+}
+
+void seekdir(DIR *dirp, long loc) {
+  struct __dir *dir = (struct __dir *)dirp;
+  if (!dir)
+    return;
+  // Reposition the kernel getdents cursor to the cookie, then drop the
+  // prefetched user buffer so the next readdir refills from the new position.
+  lseek(dir->dd_fd, (off_t)loc, SEEK_SET);
+  dir->buf_pos = 0;
+  dir->buf_len = 0;
+}
+
+void rewinddir(DIR *dirp) {
+  struct __dir *dir = (struct __dir *)dirp;
+  if (!dir)
+    return;
+  lseek(dir->dd_fd, 0, SEEK_SET);
+  dir->buf_pos = 0;
+  dir->buf_len = 0;
+}
+
+int dirfd(DIR *dirp) {
+  struct __dir *dir = (struct __dir *)dirp;
+  if (!dir) {
+    errno = EBADF;
+    return -1;
+  }
+  return dir->dd_fd;
+}
+
+// readdir_r: explicit-result reentrant variant. Deprecated by glibc but still
+// provided for compatibility. Copies the next entry into the caller's buffer
+// and returns 0 with *result = entry (or NULL at EOF).
+int readdir_r(DIR *dirp, struct dirent *entry, struct dirent **result) {
+  if (!dirp || !entry || !result) {
+    if (result)
+      *result = NULL;
+    return EBADF;
+  }
+  // Save/restore errno around readdir so a benign EOF (which sets no errno
+  // here) does not leak a stale value to the caller.
+  int saved = errno;
+  struct dirent *e = readdir(dirp);
+  if (!e) {
+    *result = NULL;
+    errno = saved;
+    return 0;
+  }
+  *entry = *e;
+  *result = entry;
   return 0;
 }
 

@@ -29,6 +29,7 @@
 #include "kernel/xcore/xtask.h"
 
 #include <xos/page.h>
+#include <xos/signal.h> // SS_DISABLE (init_xtask_defaults sigaltstack state)
 #include <xos/syscall_nums.h>
 
 // Validate assembly offset assumptions in trapentry.S (switch_to uses hardcoded
@@ -108,6 +109,10 @@ static void init_xtask_defaults(xtask *t) {
   t->msg_replied = 0;
   list_init(&t->run_node);
   list_init(&t->wait_node);
+  // S04: a fresh task has no alternate signal stack. memset clears
+  // sas_ss_sp/size/flags to 0; make the disabled state explicit so the
+  // SA_ONSTACK delivery path can distinguish "no altstack" from a valid one.
+  t->sas_ss_flags = SS_DISABLE;
 }
 
 // xtask_alloc: scan from next_pid for an empty slot, allocate xtask,

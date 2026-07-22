@@ -272,6 +272,15 @@ static inline int sys_dup2(int old_fd, int new_fd) {
   return (int)r;
 }
 
+static inline int sys_dup(int old_fd) {
+  int64_t r = __syscall1(SYS_DUP, (int64_t)old_fd);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return (int)r;
+}
+
 static inline int sys_fcntl(int fd, int cmd, int arg) {
   int64_t r = __syscall3(SYS_FCNTL, (int64_t)fd, (int64_t)cmd, (int64_t)arg);
   if (r < 0) {
@@ -405,6 +414,16 @@ static inline int sys_sigreturn(void) {
   return 0;
 }
 
+static inline int sys_sigaltstack(const stack_t *ss, stack_t *old_ss) {
+  int64_t r = __syscall2(SYS_SIGALTSTACK, (int64_t)(uintptr_t)ss,
+                         (int64_t)(uintptr_t)old_ss);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
 static inline int sys_debug_memstat(struct kernel_mem_stats *buf, int len) {
   int64_t r =
       __syscall2(SYS_DEBUG_MEMSTAT, (int64_t)(uintptr_t)buf, (int64_t)len);
@@ -416,8 +435,13 @@ static inline int sys_debug_memstat(struct kernel_mem_stats *buf, int len) {
 }
 
 // --- VFS syscalls ---
-static inline int sys_open(const char *path, int flags, ...) {
-  int64_t r = __syscall2(SYS_OPEN, (int64_t)(uintptr_t)path, (int64_t)flags);
+// S08: open passes the creation mode (3rd arg) through to the kernel so
+// sys_open's umask application sees the real mode. __syscall2 here would leave
+// rdx (the kernel's arg3) holding whatever garbage it had on entry, so the
+// created file's permission bits were garbage (different per call path).
+static inline int sys_open(const char *path, int flags, int mode) {
+  int64_t r = __syscall3(SYS_OPEN, (int64_t)(uintptr_t)path, (int64_t)flags,
+                         (int64_t)mode);
   if (r < 0) {
     errno = -(int)r;
     return -1;
@@ -457,6 +481,39 @@ static inline int sys_newfstatat(int dirfd, const char *path, void *buf,
     return -1;
   }
   return 0;
+}
+
+// S07: *at dirfd-relative variants (sys_mkdirat/sys_unlinkat/sys_renameat).
+static inline int sys_mkdirat(int dirfd, const char *path, int mode) {
+  int64_t r = __syscall3(SYS_MKDIRAT, (int64_t)dirfd, (int64_t)(uintptr_t)path,
+                         (int64_t)mode);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return (int)r;
+}
+
+static inline int sys_unlinkat(int dirfd, const char *path, int flags) {
+  int64_t r = __syscall3(SYS_UNLINKAT, (int64_t)dirfd, (int64_t)(uintptr_t)path,
+                         (int64_t)flags);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return (int)r;
+}
+
+static inline int sys_renameat(int olddirfd, const char *oldpath, int newdirfd,
+                               const char *newpath) {
+  int64_t r =
+      __syscall4(SYS_RENAMEAT, (int64_t)olddirfd, (int64_t)(uintptr_t)oldpath,
+                 (int64_t)newdirfd, (int64_t)(uintptr_t)newpath);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return (int)r;
 }
 
 // --- Linux 薄封装(§4.4):clock_gettime(clk,&ts) ---

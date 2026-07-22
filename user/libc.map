@@ -40,9 +40,10 @@ global:
     ffs; strcasecmp; strncasecmp;
 
     /* <unistd.h> */
-    access; close; dup2; _exit; ftruncate; getcwd; getpid; gettid;
+    access; close; dup; dup2; _exit; ftruncate; getcwd; getpid; gettid;
     ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; read;
-    rmdir; sched_yield; sleep; ttyname; unlink; usleep; write;
+    rmdir; sched_yield; sleep; ttyname; unlink; unlinkat; rename; renameat;
+    usleep; write;
     getuid; geteuid; getgid; getegid; getppid; getpgrp; umask;
     gethostname; sethostname; alarm; pause;
     truncate; fsync; sync;
@@ -50,7 +51,7 @@ global:
     chown; readlink;
 
     /* <fcntl.h> */
-    fcntl; fd_file_size;
+    openat; fcntl; fd_file_size;
 
     /* <ctype.h> */
     isalnum; isalpha; isascii; isblank; iscntrl; isdigit; isgraph;
@@ -65,12 +66,14 @@ global:
 
     /* <signal.h> */
     kill; raise; sigaction; signal; sigreturn; sigprocmask; sigpending; abort;
+    sigaltstack;
 
     /* <termios.h> */
     tcgetattr; tcsetattr;
 
     /* <dirent.h> */
     closedir; opendir; readdir; scandir;
+    telldir; seekdir; rewinddir; dirfd; readdir_r;
 
     /* <errno.h> */
     __errno_location;
@@ -107,7 +110,7 @@ global:
     pthread_testcancel;
 
     /* <sys/stat.h> */
-    fstat; mkdir; mknod; stat;
+    fstat; fstatat; mkdir; mkdirat; mknod; stat;
     chmod;
 
     /* <sys/wait.h> */

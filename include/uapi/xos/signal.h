@@ -7,6 +7,7 @@
 #ifndef COMMON_SIGNAL_H
 #define COMMON_SIGNAL_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 // ===================== Signal numbers (Linux-compatible) =====================
@@ -59,17 +60,38 @@
 #define SIGMASK(sig) (1ULL << ((sig) - 1))
 
 // ===================== SA_* flags =====================
+// Values align with Linux x86-64. SA_RESETHAND is 0x80000000 (the high bit),
+// NOT 0x08000000 — that value belongs to SA_ONSTACK; the old value was a bug
+// (it collided with SA_ONSTACK, which S04 now defines).
 #define SA_NOCLDSTOP 0x00000001
 #define SA_NOCLDWAIT 0x00000002
 #define SA_SIGINFO 0x00000004
-#define SA_RESETHAND 0x08000000
+#define SA_ONSTACK 0x08000000
+#define SA_RESETHAND 0x80000000
 #define SA_NODEFER 0x40000000
 #define SA_RESTORER                                                            \
   0x04000000 // S02: honor sa_restorer as the return trampoline
 #define SA_RESTART                                                             \
   0x10000000 // implemented (S02); slow syscalls restart if a
              // delivering handler sets SA_RESTART
-// SA_ONSTACK is provided by S04 (sigaltstack); not defined here yet.
+
+// ===================== sigaltstack (S04) =====================
+// Alternate signal stack. ss_flags may carry SS_ONSTACK (set only by the
+// kernel while a handler runs on the altstack) and SS_DISABLE (no altstack
+// installed). SS_AUTODISARM is a user-requested flag that makes the kernel
+// disable the altstack on entry so a nested signal cannot reuse it.
+typedef struct {
+  void *ss_sp;
+  int ss_flags;
+  size_t ss_size;
+} stack_t;
+
+#define SS_ONSTACK 1
+#define SS_DISABLE 2
+#define SS_AUTODISARM (1u << 31)
+
+#define MINSIGSTKSZ 2048
+#define SIGSTKSZ 8192
 
 // ===================== SIGCHLD si_code (CLD_*) =====================
 #define CLD_EXITED 1
@@ -151,9 +173,13 @@ struct sigcontext {
 };
 
 // ===================== ucontext_t =====================
+// uc_stack records the alternate signal stack active at delivery time (S04).
+// rt_sigreturn restores the per-task sigaltstack state from it. The field
+// sits between uc_link and uc_sigmask to mirror Linux's x86-64 ucontext_t.
 struct ucontext_t {
   uint64_t uc_flags;          // cleared to 0
   struct ucontext_t *uc_link; // NULL
+  stack_t uc_stack;           // S04: altstack in effect at delivery
   sigset_t uc_sigmask;
   struct sigcontext uc_mcontext;
 };

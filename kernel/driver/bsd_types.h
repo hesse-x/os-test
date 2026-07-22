@@ -76,6 +76,7 @@ typedef struct file {
 typedef struct files {
   spinlock fd_lock;
   struct file *fd_table[MAX_FD];
+  uint64_t close_on_exec[(MAX_FD + 63) / 64]; // S06: mirrors kernel/bsd/types.h
   refcount_t f_count;
 } files;
 

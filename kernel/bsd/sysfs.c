@@ -160,6 +160,9 @@ static struct inode *sysfs_node_to_inode(struct sysfs_node *n) {
   struct inode *ip = inode_create(n->ino, type, 0, 0, 0, 0);
   if (!ip)
     return NULL;
+  /* S08: sysfs 属性文件只读 0100444(inode_create 默认 0100644 可写,不符 sysfs
+   * 语义);目录 0040755。owner 默认 0 root(内核建)。 */
+  ip->mode = n->is_dir ? 0040755 : 0100444;
   ip->i_priv = n->is_dir ? (void *)n : (void *)n->attr;
   ip->i_op = n->is_dir ? &sysfs_dir_iop : &sysfs_file_iop;
   n->ip = inode_get(ip);
@@ -191,14 +194,16 @@ static struct inode *sysfs_dir_lookup(struct inode *dir, const char *name) {
 }
 
 /* sysfs_getattr:从 ip 字段填(不 deref i_priv,避免 dir/node 与 file/attr
- * 脆弱判别)。 */
+ * 脆弱判别)。S08: 报真实 ip->mode/uid/gid(sysfs inode 内核建,owner 默认 0)。 */
 static int sysfs_getattr(struct inode *ip, struct kstat *ks) {
   __memset(ks, 0, sizeof(*ks));
   ks->st_ino = ip->ino;
-  ks->st_mode = (ip->type == INODE_DIR) ? 0040755 : 0100644;
+  ks->st_mode = ip->mode;
+  ks->st_uid = ip->uid;
+  ks->st_gid = ip->gid;
   ks->st_nlink = 1;
   ks->st_size = 0;
-  ks->st_blksize = 512;
+  ks->st_blksize = 4096;
   return 0;
 }
 

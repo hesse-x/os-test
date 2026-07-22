@@ -87,11 +87,10 @@ int64_t sys_timerfd_create(int64_t clockid, int64_t flags) {
   f->type = FD_TIMERFD;
   f->timerfd = tfd;
   tfd->f = f;
-  if (flags & TFD_CLOEXEC)
-    f->flags |= FD_CLOEXEC;
   if (flags & TFD_NONBLOCK)
     f->flags |= O_NONBLOCK;
   fd_install(proc->proc->files, fd, f);
+  fd_set_cloexec(proc->proc->files, fd, (flags & TFD_CLOEXEC) ? 1 : 0);
   spin_unlock(&proc->proc->files->fd_lock);
 
   uint64_t tfd_flags;

@@ -67,5 +67,8 @@
 #define AT_SYMLINK_NOFOLLOW 0x100
 #define AT_REMOVEDIR 0x200
 #define AT_EACCESS 0x200 /* same value as AT_REMOVEDIR on Linux x86-64 */
+#define AT_EMPTY_PATH                                                          \
+  0x1000 /* S07: fstatat/openat operate on dirfd itself when path=="" */
+#define AT_NO_AUTOMOUNT 0x800
 
 #endif /* _COMMON_FCNTL_H */

@@ -135,11 +135,14 @@ static struct inode *vfs_mknod_socket(const char *sun_path) {
     inode_put(parent);
     return ERR_PTR(-EOPNOTSUPP);
   }
-  struct inode *ip =
-      parent->i_op->create(parent, lastname, (int)(S_IFSOCK | 0777));
+  /* S08: 权限位应用 umask,设 owner=创建进程。 */
+  int eff_mode = S_IFSOCK | (0777 & ~(int)current_proc->umask);
+  struct inode *ip = parent->i_op->create(parent, lastname, eff_mode);
   inode_put(parent);
   if (IS_ERR(ip))
     return ip;
+  ip->uid = current_proc->uid;
+  ip->gid = current_proc->gid;
   return ip; /* +1 引用，挂 sock 用 */
 }
 
@@ -776,10 +779,9 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     f->flags = O_RDWR;
     if (sock_flags & SOCK_NONBLOCK)
       f->flags |= O_NONBLOCK;
-    if (sock_flags & SOCK_CLOEXEC)
-      f->flags |= FD_CLOEXEC;
     f->nlsock = nl;
     fd_install(proc->proc->files, fd, f);
+    fd_set_cloexec(proc->proc->files, fd, (sock_flags & SOCK_CLOEXEC) ? 1 : 0);
 
     spin_unlock(fdlk);
     return (int64_t)fd;
@@ -823,10 +825,9 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   f->flags = O_RDWR;
   if (sock_flags & SOCK_NONBLOCK)
     f->flags |= O_NONBLOCK;
-  if (sock_flags & SOCK_CLOEXEC)
-    f->flags |= FD_CLOEXEC;
   f->sock = sock;
   fd_install(proc->proc->files, fd, f);
+  fd_set_cloexec(proc->proc->files, fd, (sock_flags & SOCK_CLOEXEC) ? 1 : 0);
 
   spin_unlock(fdlk);
 

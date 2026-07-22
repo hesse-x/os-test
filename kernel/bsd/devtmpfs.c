@@ -237,13 +237,15 @@ static struct inode *devtmpfs_dir_lookup(struct inode *dir, const char *name) {
 }
 
 /* devtmpfs_getattr:从 ip 字段填。根 st_ino=ip->ino(修正旧硬编码 0)。
- *  st_rdev=ip->ino 是设备号架构 gap,记 todo 不动(§3.5)。 */
+ *  st_rdev=ip->ino 是设备号架构 gap,记 todo 不动(§3.5)。
+ *  S08: 报真实 ip->mode/uid/gid(devtmpfs inode 由内核建,owner 默认 0 root;
+ *  mode 在 devtmpfs_create 时设 S_IFCHR|0600,dir 默认 0040755)。 */
 static int devtmpfs_getattr(struct inode *ip, struct kstat *ks) {
   __memset(ks, 0, sizeof(*ks));
   if (ip->type == INODE_DIR) {
-    ks->st_mode = 0040755;
+    ks->st_mode = ip->mode ? ip->mode : 0040755;
   } else {
-    ks->st_mode = 0020000 | 0600; /* S_IFCHR | 0600 */
+    ks->st_mode = ip->mode ? ip->mode : (0020000 | 0600); /* S_IFCHR | 0600 */
     /* 设备号：DRM 设备返回真实 makedev(226, minor)（libdrm 靠 fstat.st_rdev
      * 判 render/primary，见 drmGetNodeTypeFromFd）；其余设备维持 =ino 现状
      *（架构 gap 记 todo §3.5，无消费者依赖）。子目录 inode 的 i_priv 是
@@ -256,9 +258,11 @@ static int devtmpfs_getattr(struct inode *ip, struct kstat *ks) {
       ks->st_rdev = (uint64_t)ip->ino;
   }
   ks->st_ino = ip->ino;
+  ks->st_uid = ip->uid;
+  ks->st_gid = ip->gid;
   ks->st_nlink = 1;
   ks->st_size = 0;
-  ks->st_blksize = 512;
+  ks->st_blksize = 4096;
   return 0;
 }
 
