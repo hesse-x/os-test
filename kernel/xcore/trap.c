@@ -245,8 +245,20 @@ void trap_dispatch(trapframe *tf) {
         return; // COW resolved, retry faulting instruction
       }
     }
-    // BSD layer file fault handler (e.g., mmap file page-in)
+    // BSD layer file fault handler (e.g., mmap file page-in).  This may block
+    // on page_cache / wait_queue and call schedule() to wait for the page to be
+    // filled.  #PF enters via an interrupt gate (0x8E), so IF is cleared on
+    // entry; schedule() saves IF at entry into its flags and restores that same
+    // IF on resume (see sched.c), so a schedule() with IF=0 would leave this
+    // task running with interrupts permanently disabled after resume → deadlock
+    // (no timer/wakeup IRQ can ever fire).  Re-enable interrupts before handing
+    // control to the fault handler so the blocking schedule runs with IF=1 and
+    // resumes with IF=1.  Safe here: we hold no lock whose consistency depends
+    // on staying atomic past this point (COW already returned above), and #PF
+    // is a synchronous exception in process context — scheduling inside it is
+    // legitimate.
     if (fault_handler && current_task->proc) {
+      sti();
       if (fault_handler(fault_addr, current_task)) {
         return; // BSD layer handled the fault
       }
