@@ -567,6 +567,191 @@ int64_t sys_wait4(int64_t pid, int64_t wstatus, int64_t options, int64_t rusage,
   return sys_waitpid(pid, wstatus, options, 0, 0, 0);
 }
 
+// ===================== S12: file-backed mmap =====================
+// Helpers below are called from sys_mmap *under* proc->mm->mmap_lock (the
+// dispatch takes the lock before calling them). They therefore do NOT take the
+// lock, but must spin_unlock_irqrestore it on every error return path (matching
+// sys_mmap's own error paths). On success they return the mapped vaddr (with
+// the lock still held so sys_mmap's tail unlocks once); the region records only
+// metadata — pages are faulted in on demand by file_fault_handler.
+
+// Place a fresh region describing [vaddr, vaddr+size) with the given backing
+// fields. Uses vma_pick_addr for placement (honors MAP_FIXED / hint per S11).
+// Returns the region (inserted) or NULL + *out_err set (caller
+// unlocks+returns).
+static mmap_region *mmap_place_file_region(xtask *proc, uint64_t *pml4,
+                                           uint64_t addr, uint64_t size,
+                                           uint32_t flags, uint64_t hint,
+                                           uint32_t prot, int fd,
+                                           uint64_t offset, int64_t *out_err) {
+  int64_t picked = vma_pick_addr(proc->mm, pml4, addr, size, flags, hint);
+  if (picked < 0) {
+    *out_err = picked;
+    return NULL;
+  }
+  uint64_t vaddr = (uint64_t)picked;
+  mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
+  if (!region) {
+    *out_err = -ENOMEM;
+    return NULL;
+  }
+  __memset(region, 0, sizeof(*region));
+  region->vaddr = vaddr;
+  region->size = size;
+  region->phys = 0;
+  region->shm_obj = NULL;
+  region->prot = prot;
+  region->fd = fd;
+  region->offset = offset;
+  region->flags = flags;
+  region->next = NULL;
+  if (vma_insert_sorted(proc->mm, region) != 0) {
+    kfree(region);
+    *out_err = -ENOMEM;
+    return NULL;
+  }
+  if (vaddr == proc->mm->mmap_brk)
+    proc->mm->mmap_brk = vaddr + size;
+  return region;
+}
+
+// memfd (FD_SHM) MAP_PRIVATE: private COW mapping of a memfd. The region holds
+// a shm_get reference to the source shm; file_fault_handler copies pages out of
+// shm->phys / shm->page_list into private user pages on demand.
+static int64_t sys_mmap_shm_private(xtask *proc, uint64_t *pml4, uint64_t addr,
+                                    uint64_t size, uint32_t flags,
+                                    uint64_t hint, uint32_t prot,
+                                    struct file *f, int fd, uint64_t offset,
+                                    uint64_t mmap_flags) {
+  struct shm *shm = f->shm;
+  if (!shm) {
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -EBADF;
+  }
+  // Reject mappings beyond the memfd's current size (ftruncate-grown). Linux
+  // allows mmap past EOF with zero pages; S12 rejects it (todo).
+  uint64_t shm_size = shm->page_list ? (uint64_t)shm->num_pages * PAGE_SIZE
+                                     : (uint64_t)shm->npages * PAGE_SIZE;
+  if (offset + size > shm_size) {
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -EINVAL;
+  }
+
+  shm_get(
+      shm); // region holds a reference; released in munmap/mm_release/execve
+  int64_t err = 0;
+  mmap_region *region = mmap_place_file_region(proc, pml4, addr, size, flags,
+                                               hint, prot, fd, offset, &err);
+  if (!region) {
+    shm_put(shm);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return err;
+  }
+  region->shm_private_src = shm;
+  // inode stays NULL: memfd has no page-cache inode; fault reads shm pages.
+
+  spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+  return (int64_t)region->vaddr;
+}
+
+// FD_REGULAR file-backed mmap (MAP_PRIVATE or MAP_SHARED). Takes an inode_get
+// reference on the region so the mapping survives close(fd) (Linux semantics);
+// file_fault_handler reads mr->inode directly, never fd_lookup.
+static int64_t sys_mmap_file_backed(xtask *proc, uint64_t *pml4, uint64_t addr,
+                                    uint64_t size, uint32_t prot, int flags,
+                                    int fd, uint64_t offset,
+                                    uint64_t mmap_flags, uint64_t hint) {
+  if (fd >= MAX_FD) {
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -EBADF;
+  }
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (f)
+    file_get(f);
+  rcu_read_unlock();
+  if (!f) {
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -EBADF;
+  }
+
+  // memfd (FD_SHM): MAP_SHARED stays on the existing shared page-list path;
+  // MAP_PRIVATE takes the new private COW path.
+  if (f->type == FD_SHM) {
+    if (flags & MAP_SHARED) {
+      // Hand back to sys_mmap's existing SHM path (it re-looks-up the fd).
+      file_put(f);
+      return (int64_t)-ENOSYS; // sentinel: caller falls through (lock held)
+    }
+    int64_t r = sys_mmap_shm_private(proc, pml4, addr, size, (uint32_t)flags,
+                                     hint, prot, f, fd, offset, mmap_flags);
+    file_put(f);
+    return r;
+  }
+
+  // FD_DEV (DRM GEM, framebuffer, char devices) is mapped via f_op->mmap /
+  // dev_ops->mmap in sys_mmap's existing MAP_SHARED+fd path — it is NOT a
+  // page-cache file mapping. Fall through to that path.
+  if (f->type == FD_DEV) {
+    file_put(f);
+    return (int64_t)-ENOSYS; // sentinel: caller falls through (lock held)
+  }
+
+  // Only FD_REGULAR (ordinary files backed by the page cache) take the
+  // demand-fault path below. Any other fd type is an invalid file mapping.
+  if (f->type != FD_REGULAR) {
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -EINVAL;
+  }
+
+  struct inode *ip = f->inode;
+  if (!ip) {
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -EBADF;
+  }
+  inode_get(ip); // region reference — survives close(fd)
+
+  // offset alignment (MAP_FIXED already checked in sys_mmap; re-check here for
+  // the non-fixed path too, matching Linux's -EINVAL on unaligned file offset).
+  if (offset & (PAGE_SIZE - 1)) {
+    inode_put(ip);
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -EINVAL;
+  }
+
+  // The mapping may extend past EOF within its last page: a short file (e.g. a
+  // 5-byte config) mmap'd into a whole 4KB page must succeed — page_cache_fill
+  // zero-fills the on-disk tail, and file_fault_handler zeroes the sub-EOF tail
+  // of the private copy. Only refuse when the mapping starts past EOF entirely
+  // (no file bytes are covered at all — neither useful nor what callers
+  // expect). Linux's full past-EOF semantics (zero pages beyond EOF + SIGBUS on
+  // write past EOF) remain deferred to todo.
+  if (offset >= ip->size && ip->size != 0) {
+    inode_put(ip);
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -EINVAL;
+  }
+
+  int64_t err = 0;
+  mmap_region *region = mmap_place_file_region(
+      proc, pml4, addr, size, (uint32_t)flags, hint, prot, fd, offset, &err);
+  if (!region) {
+    inode_put(ip);
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return err;
+  }
+  region->inode = ip;
+
+  file_put(f); // region holds the inode reference; fd may be closed now
+  spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+  return (int64_t)region->vaddr;
+}
+
 // ===================== BSD syscall: mmap =====================
 int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                  int64_t arg5, int64_t arg6) {
@@ -605,6 +790,23 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
          (unsigned long long)offset);
   uint64_t *pml4 =
       (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
+
+  // S12: file-backed mmap. fd >= 0 without MAP_ANONYMOUS and with an explicit
+  // MAP_PRIVATE/MAP_SHARED is a file (or memfd) mapping — route it to the
+  // demand-fault path. MAP_ANONYMOUS (even with an fd passed) stays anonymous,
+  // matching Linux. The helper returns -ENOSYS to fall through to the existing
+  // SHM/DEV path for memfd MAP_SHARED (which keeps its shared page-list
+  // mapping); every other return (vaddr or hard error) is final — the helper
+  // unlocked. -ENOSYS is returned with mmap_lock STILL HELD and no file ref
+  // kept, so the fall-through runs under the same lock acquisition as a normal
+  // entry.
+  if (fd >= 0 && !(flags & MAP_ANONYMOUS) &&
+      (flags & (MAP_PRIVATE | MAP_SHARED))) {
+    int64_t r = sys_mmap_file_backed(proc, pml4, addr, size, prot, flags, fd,
+                                     offset, mmap_flags, hint);
+    if (r != (int64_t)-ENOSYS)
+      return r;
+  }
 
   // MAP_SHARED + fd >= 0: SHM or DEV fd mapping
   if ((flags & MAP_SHARED) && fd >= 0) {
@@ -698,6 +900,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           region->fd = fd;
           region->offset = offset;
           region->flags = (uint32_t)flags;
+          region->inode = NULL;
+          region->shm_private_src = NULL;
           region->next = NULL;
           vma_insert_sorted(proc->mm, region);
           if (vaddr == proc->mm->mmap_brk)
@@ -786,6 +990,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     region->fd = fd;
     region->offset = offset;
     region->flags = (uint32_t)flags;
+    region->inode = NULL;
+    region->shm_private_src = NULL;
     region->next = NULL;
     vma_insert_sorted(proc->mm, region);
     if (vaddr == proc->mm->mmap_brk)
@@ -863,6 +1069,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     region->fd = -1;
     region->offset = offset;
     region->flags = (uint32_t)flags;
+    region->inode = NULL;
+    region->shm_private_src = NULL;
     region->next = NULL;
     vma_insert_sorted(proc->mm, region);
     proc->mm->mmap_phys_brk = vaddr + npages * PAGE_SIZE;
@@ -952,6 +1160,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   region->fd = fd;
   region->offset = offset;
   region->flags = (uint32_t)flags;
+  region->inode = NULL;
+  region->shm_private_src = NULL;
   region->next = NULL;
   vma_insert_sorted(proc->mm, region);
   if (vaddr == proc->mm->mmap_brk)
@@ -1010,6 +1220,14 @@ int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   if (region->shm_obj) {
     shm_put(region->shm_obj);
   }
+  // S12: release file-backed mmap refs owned by this region. The private user
+  // pages faulted in by file_fault_handler were freed above by unmap_user_pages
+  // (file-backed private regions have shm_obj==NULL && phys==0); the inode /
+  // source-shm references are dropped here.
+  if (region->inode)
+    inode_put(region->inode);
+  if (region->shm_private_src)
+    shm_put(region->shm_private_src);
 
   // Unlink region from the sorted list.
   mmap_region **pp = &proc->mm->mmap_regions;
@@ -3775,6 +3993,8 @@ int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   region->fd = -1;
   region->offset = 0;
   region->flags = KMAP_PHYSICAL;
+  region->inode = NULL;
+  region->shm_private_src = NULL;
   region->next = NULL;
   vma_insert_sorted(proc->mm, region);
 
@@ -3817,6 +4037,12 @@ int64_t sys_dma_free(int64_t arg1, int64_t unused1, int64_t unused2,
   while (*pp != r)
     pp = &(*pp)->next;
   *pp = r->next;
+  // S12: uniform invariant — drop any file-backed refs (DMA regions are
+  // KMAP_PHYSICAL and carry none, so these are no-ops here).
+  if (r->inode)
+    inode_put(r->inode);
+  if (r->shm_private_src)
+    shm_put(r->shm_private_src);
   kfree(r);
   return 0;
 }

@@ -55,6 +55,13 @@ typedef struct mmap_region {
   int fd;              // -1 = anonymous; otherwise the mmap fd (ref NOT held)
   uint64_t offset;     // mmap offset (phys offset / file offset / 0)
   uint32_t flags;      // user MAP_* bits + OS-internal MAP_PHYSICAL/MAP_UC
+  // S12: file-backed mmap. inode holds an inode_get reference for the lifetime
+  // of the region so fault-in still works after close(fd) (Linux semantics);
+  // NULL for anonymous/SHM/PHYSICAL. shm_private_src holds a shm_get reference
+  // for memfd MAP_PRIVATE (COW from the shm page list); NULL otherwise. Both
+  // are released in munmap/mm_release/execve and bumped in copy_mmap_regions.
+  struct inode *inode;
+  struct shm *shm_private_src;
   struct mmap_region *next;
 } mmap_region;
 

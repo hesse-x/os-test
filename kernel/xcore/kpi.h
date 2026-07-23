@@ -71,6 +71,12 @@ struct shm *shm_create_internal(uint64_t npages);
 struct shm *shm_get(struct shm *s);
 void shm_put(struct shm *s);
 
+// === inode refcount (BSD layer impl; declared here so Xcore VMA helpers can
+// drop file-backed mmap region refs uniformly with shm_put above) ===
+struct inode;
+struct inode *inode_get(struct inode *ip);
+void inode_put(struct inode *ip);
+
 // === infrastructure ===
 // printk/panic/spinlock declared in their own headers, not repeated here
 

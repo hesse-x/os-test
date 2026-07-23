@@ -11,6 +11,10 @@
  * Kernel constraint: C only (commit 18c91ca).
  */
 #include "kernel/bsd/fat32.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+
 #include "arch/x64/utils.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/page_cache.h"
@@ -18,7 +22,7 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/spinlock.h"
-#include <stddef.h>
+
 #include <xos/dirent.h>
 #include <xos/errno.h>
 #include <xos/fcntl.h>
@@ -1556,17 +1560,29 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
     /* Convert page_idx to cluster index for FAT chain walk */
     uint32_t clusters_per_page = 4096 / bytes_per_cluster;
     uint32_t cluster_idx = page_idx * clusters_per_page;
-    /* For write, we need the cluster corresponding to the write offset within
-     * the page */
-    uint32_t cluster_in_page = page_off / bytes_per_cluster;
-    uint32_t target_cluster =
-        fat32_walk_chain(ip->start_cluster, cluster_idx + cluster_in_page);
-    if (target_cluster < 2 || target_cluster >= 0x0FFFFFF8) {
-      /* Need to allocate a new cluster */
+    /* The page cache is 4KB-granular: page_cache_fill reads and
+     * page_cache_writeback writes every cluster spanning the page
+     * (clusters_per_page of them — 8 when the FAT32 cluster is 512B). For the
+     * writeback to persist the whole page, every cluster the write touches must
+     * already exist in the chain; allocating only the first one (as the old
+     * code did) leaves the rest unallocated, so writeback walks the chain, hits
+     * EOF after the first cluster, and bails — silently dropping everything
+     * past the first cluster and corrupting files >4KB. Allocate every cluster
+     * covering [page_off, page_off+chunk) here, in order, tail-linked onto the
+     * chain. */
+    uint32_t first_in_page = page_off / bytes_per_cluster;
+    uint32_t last_in_page = (page_off + chunk - 1) / bytes_per_cluster;
+    bool enospc = false;
+    for (uint32_t cip = first_in_page; cip <= last_in_page; cip++) {
+      uint32_t existing =
+          fat32_walk_chain(ip->start_cluster, cluster_idx + cip);
+      if (existing >= 2 && existing < 0x0FFFFFF8)
+        continue; /* already allocated */
       spin_lock(&fat_lock);
       uint32_t new_cluster = fat32_allocate_cluster();
       if (new_cluster == 0) {
         spin_unlock(&fat_lock);
+        enospc = true;
         break; /* ENOSPC */
       }
       /* Zero-fill new cluster */
@@ -1575,14 +1591,15 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
       uint32_t lba = data_start_lba + (new_cluster - 2) * sectors_per_cluster;
       blk_write(lba, sectors_per_cluster, zero_buf);
 
-      /* Link into chain */
-      if (ip->start_cluster == 0 || ip->size == 0) {
-        /* First cluster for this file */
+      /* Link into chain. Detect "first cluster" by start_cluster == 0 alone:
+       * ip->size is only updated AFTER the write loop (below), so it stays 0
+       * for every iteration of a multi-page write — gating on ip->size == 0
+       * would reset start_cluster to each newly-allocated cluster and skip the
+       * tail link, orphaning all but the last cluster and corrupting >4KB
+       * files. */
+      if (ip->start_cluster == 0) {
         ip->start_cluster = new_cluster;
-        ip->dir_start_cluster = ip->dir_start_cluster;
-        ip->dir_entry_index = ip->dir_entry_index;
       } else {
-        /* Find tail of chain and link */
         uint32_t tail = ip->start_cluster;
         int max_tail_walk = 1024;
         while (max_tail_walk-- > 0) {
@@ -1602,8 +1619,9 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
 
       /* Invalidate page cache — new cluster changes mapping */
       page_cache_invalidate_inode(ip);
-      target_cluster = new_cluster;
     }
+    if (enospc)
+      break;
 
     struct cache_page *cp = page_cache_fill(ip, page_idx);
     if (!cp)

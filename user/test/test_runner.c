@@ -65,6 +65,7 @@ static struct test_entry tests[] = {
     {"test_mprotect", "/test/test_mprotect.elf"},
     {"test_vma_restructure", "/test/test_vma_restructure.elf"},
     {"test_mmap_addr_hint", "/test/test_mmap_addr_hint.elf"},
+    {"test_mmap_file_private", "/test/test_mmap_file_private.elf"},
     {"test_ffi", "/test/test_ffi.elf"},
 #endif
     {"ioctl_varlen", "/test/ioctl_varlen.elf"},

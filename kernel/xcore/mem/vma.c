@@ -93,12 +93,23 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
   mid->offset = mid_off;
   mid->phys = r->phys ? (r->phys + delta) : 0;
   mid->next = NULL;
+  // mid is a new owner of r's inode/shm_private_src: take its own reference so
+  // every region struct independently owns exactly one ref (see free_one_region
+  // / copy_mmap_regions). r keeps its own ref until it is freed/shrunk below.
+  if (mid->inode)
+    inode_get(mid->inode);
+  if (mid->shm_private_src)
+    shm_get(mid->shm_private_src);
 
   // Tail piece (if any).
   mmap_region *tail = NULL;
   if (addr + size < r_end) {
     tail = (mmap_region *)kmalloc(sizeof(mmap_region));
     if (!tail) {
+      if (mid->inode)
+        inode_put(mid->inode);
+      if (mid->shm_private_src)
+        shm_put(mid->shm_private_src);
       kfree(mid);
       return NULL;
     }
@@ -109,15 +120,24 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
     tail->offset = r->offset + t_delta;
     tail->phys = r->phys ? (r->phys + t_delta) : 0;
     tail->next = NULL;
+    if (tail->inode)
+      inode_get(tail->inode);
+    if (tail->shm_private_src)
+      shm_get(tail->shm_private_src);
   }
 
   if (addr == r->vaddr) {
-    // No front piece: replace r in the list with mid (-> tail).
+    // No front piece: replace r in the list with mid (-> tail). r is destroyed,
+    // so release its own inode/shm reference (mid/tail each took their own).
     mmap_region **pp = &mm->mmap_regions;
     while (*pp != r)
       pp = &(*pp)->next;
     mid->next = tail;
     *pp = mid;
+    if (r->inode)
+      inode_put(r->inode);
+    if (r->shm_private_src)
+      shm_put(r->shm_private_src);
     kfree(r);
   } else {
     // Shrink r to the front piece.
@@ -132,13 +152,19 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
 }
 
 mmap_region *vma_merge(mm *mm, mmap_region *r) {
-  if (!r || r->fd != -1 || r->shm_obj || r->phys)
+  // Only purely-anonymous regions (no fd, no SHM, no PHYSICAL, no file-backed
+  // inode/shm_private_src ref) are eligible — merged regions are kfree'd
+  // without per-struct ref drop, so anything holding an inode/shm ref must be
+  // excluded to avoid leaks.
+  if (!r || r->fd != -1 || r->shm_obj || r->phys || r->inode ||
+      r->shm_private_src)
     return r;
 
   // Merge with the next region if anonymous-private, same prot/flags, adjacent.
   mmap_region *n = r->next;
-  if (n && n->fd == -1 && !n->shm_obj && !n->phys && n->prot == r->prot &&
-      n->flags == r->flags && r->vaddr + r->size == n->vaddr) {
+  if (n && n->fd == -1 && !n->shm_obj && !n->phys && !n->inode &&
+      !n->shm_private_src && n->prot == r->prot && n->flags == r->flags &&
+      r->vaddr + r->size == n->vaddr) {
     r->size += n->size;
     r->next = n->next;
     kfree(n);
@@ -149,8 +175,9 @@ mmap_region *vma_merge(mm *mm, mmap_region *r) {
   while (*pp && (*pp)->next != r)
     pp = &(*pp)->next;
   mmap_region *p = *pp;
-  if (p && p->fd == -1 && !p->shm_obj && !p->phys && p->prot == r->prot &&
-      p->flags == r->flags && p->vaddr + p->size == r->vaddr) {
+  if (p && p->fd == -1 && !p->shm_obj && !p->phys && !p->inode &&
+      !p->shm_private_src && p->prot == r->prot && p->flags == r->flags &&
+      p->vaddr + p->size == r->vaddr) {
     p->size += r->size;
     p->next = r->next;
     kfree(r);
@@ -218,6 +245,13 @@ static void free_one_region(mm *mm, uint64_t *pml4, mmap_region *r) {
   while (*pp != r)
     pp = &(*pp)->next;
   *pp = r->next;
+  // Drop file-backed mmap refs owned by this region struct (S12). Every region
+  // with a non-NULL inode/shm_private_src owns exactly one reference (taken in
+  // sys_mmap_file_backed / vma_split / copy_mmap_regions), released here.
+  if (r->inode)
+    inode_put(r->inode);
+  if (r->shm_private_src)
+    shm_put(r->shm_private_src);
   kfree(r);
 }
 

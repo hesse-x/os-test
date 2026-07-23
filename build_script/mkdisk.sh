@@ -123,7 +123,8 @@ if [ "$TEST" = "1" ]; then
                test_openat_dirfd.elf test_stat_real.elf \
                sigaltstack.elf test_dirent_seek.elf test_cloexec_perfd.elf \
                test_mprotect.elf test_ffi.elf venus_channel.elf getrandom.elf \
-               test_vma_restructure.elf test_mmap_addr_hint.elf; do
+               test_vma_restructure.elf test_mmap_addr_hint.elf \
+               test_mmap_file_private.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
     done
 fi

@@ -10,6 +10,7 @@
 #include "arch/x64/trap.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/evdev_broker.h"
+#include "kernel/bsd/file_fault.h"
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
@@ -78,7 +79,8 @@ void bsd_init(void) {
   evdev_broker_init();
   // random: register /dev/random + /dev/urandom
   random_dev_init();
-  // fault_handler = NULL;  // future: file-backed mmap page-in
+  // S12: file-backed mmap page-in (MAP_PRIVATE+fd demand fault + COW).
+  fault_handler = file_fault_handler;
 
   printk(LOG_INFO, "bsd_init: done\n");
 }

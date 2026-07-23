@@ -620,6 +620,15 @@ void mm_release(mm *mm, pid_t owner_pid) {
     if (region->shm_obj) {
       shm_put(region->shm_obj);
     }
+    // S12: release file-backed mmap refs. The faulted-in private user pages
+    // were handled in step 2 (the leaf-page walk above frees any present
+    // anonymous/private leaf and skips SHM/MAP_PHYSICAL; file-backed private
+    // pages are not flagged shared, so they are refcount-dec'd and freed
+    // there).
+    if (region->inode)
+      inode_put(region->inode);
+    if (region->shm_private_src)
+      shm_put(region->shm_private_src);
     kfree(region);
     region = next;
   }
@@ -830,6 +839,12 @@ copy_mmap_regions(mmap_region *src) {
     new_mr->next = NULL;
     if (mr->shm_obj)
       shm_get(mr->shm_obj);
+    // S12: each copied file-backed region owns its own inode/shm reference,
+    // released when the child's region is freed (munmap/mm_release/execve).
+    if (mr->inode)
+      inode_get(mr->inode);
+    if (mr->shm_private_src)
+      shm_get(mr->shm_private_src);
     if (!head)
       head = new_mr;
     else
@@ -1810,6 +1825,12 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
       mmap_region *next = region->next;
       if (region->shm_obj)
         shm_put(region->shm_obj);
+      // S12: release file-backed mmap refs (the old private user pages were
+      // freed in step 10's leaf-page walk, which skips SHM/MAP_PHYSICAL only).
+      if (region->inode)
+        inode_put(region->inode);
+      if (region->shm_private_src)
+        shm_put(region->shm_private_src);
       kfree(region);
       region = next;
     }
@@ -1839,6 +1860,8 @@ mmap_region *add_mmap_region(xtask *proc, uint64_t vaddr, uint64_t size,
   region->fd = fd;
   region->offset = offset;
   region->flags = flags;
+  region->inode = NULL;
+  region->shm_private_src = NULL;
   region->next = NULL;
   if (vma_insert_sorted(proc->mm, region) != 0) {
     kfree(region);

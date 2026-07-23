@@ -3459,6 +3459,8 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
   region->fd = -1; // DRM GEM is a physical mapping, not fd-backed
   region->offset = 0;
   region->flags = KMAP_PHYSICAL;
+  region->inode = NULL;
+  region->shm_private_src = NULL;
   region->next = NULL;
   vma_insert_sorted(proc->mm, region);
   proc->mm->mmap_brk = vaddr + npages * PAGE_SIZE;

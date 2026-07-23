@@ -86,13 +86,13 @@ extern "C" pid_t waitpid(pid_t pid, int *status, int options) {
 
 extern "C" void *mmap(void *addr, size_t length, int prot, int flags, int fd,
                       uint64_t offset) {
-  if (flags & MAP_SHARED) {
-    void *r = sys_mmap(addr, length, prot, flags, fd, offset);
-    if (r == MAP_FAILED)
-      return MAP_FAILED;
-    return r;
-  }
-  void *r = sys_mmap(addr, length, prot, flags, -1, offset);
+  // S12: pass fd through verbatim. The kernel sys_mmap dispatches by
+  // fd + flags: fd<0 or MAP_ANONYMOUS → anonymous; fd>=0 with MAP_PRIVATE/
+  // MAP_SHARED and !MAP_ANONYMOUS → file-backed (regular file page-cache
+  // demand-fault, or memfd MAP_SHARED shared page-list, or memfd MAP_PRIVATE
+  // private COW). The old "non-MAP_SHARED → fd=-1" hack starved MAP_PRIVATE+fd
+  // of its fd and forced every private file mapping to a zero page.
+  void *r = sys_mmap(addr, length, prot, flags, fd, offset);
   if (r == MAP_FAILED)
     return MAP_FAILED;
   return r;
