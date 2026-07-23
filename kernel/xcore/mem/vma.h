@@ -40,6 +40,16 @@ mmap_region *vma_split(mm *mm, mmap_region *region, uint64_t addr,
 // anonymous private mappings (fd==-1 && shm_obj==NULL && phys==0).
 mmap_region *vma_merge(mm *mm, mmap_region *region);
 
+// --- S13: mprotect interval splitting ---
+
+// Set prot on every mapping overlapping [addr, addr+len): partially-overlapping
+// regions are split (front/tail residue kept), the overlapping middle piece's
+// prot updated, fully-contained regions changed in place. Only region metadata
+// is touched — the caller rewrites the leaf PTEs separately. Returns 0, or
+// -ENOMEM if a vma_split OOMs (already-changed regions not rolled back). Caller
+// holds mm->mmap_lock.
+int vma_protect_range(mm *mm, uint64_t addr, uint64_t len, uint32_t prot);
+
 // --- S11: mmap addr hint / MAP_FIXED support ---
 
 // True if [start, start+len) overlaps any existing region. Used by

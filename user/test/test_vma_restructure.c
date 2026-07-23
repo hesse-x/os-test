@@ -4,15 +4,17 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_vma_restructure — S10 VMA refactor acceptance (behavior unchanged).
+/* test_vma_restructure — S10 VMA refactor + S13 interval semantics.
  *
  * The VMA list moved from head-insert (unordered) to a vaddr-sorted list with
- * vma_find/vma_insert_sorted, and mmap_region gained fd/offset/flags. This
- * suite pins the externally visible behavior that must NOT change:
+ * vma_find/vma_insert_sorted, and mmap_region gained fd/offset/flags. S13 then
+ * turned munmap/mprotect into interval operations. This suite pins the
+ * externally visible behavior:
  *
- *   TC1: munmap exact-start match succeeds; munmap of a non-start address
- *        (addr + 0x1000) inside a region returns -EINVAL (size still ignored,
- *        no partial unmap — that is S13).
+ *   TC1: munmap of a non-start sub-interval (addr + 0x1000) now punches a hole
+ *        and returns 0 (Linux interval semantics — the old S10 exact-match
+ *        rejection was removed in S13); the residue at the start survives, the
+ *        punched page faults.
  *   TC2: two adjacent anonymous mappings (bump-allocated) are both readable;
  *        fork's copy_mmap_regions shallow-copies the new fd/offset/flags and
  *        the child can read both.
@@ -20,8 +22,8 @@
  *        writing the now-read-only page is killed by SIGSEGV.
  *   TC4: memfd_create + MAP_SHARED mmap is visible to a forked child (shm_obj
  *        shallow-copied + shm_get on fork).
- *   TC5: a second munmap of an already-unmapped address returns -EINVAL
- *        (idempotent failure, no double-free).
+ *   TC5: a second munmap of an already-unmapped address returns 0 (Linux:
+ *        unmapping an empty interval is a silent no-op, not an error).
  */
 
 #include <errno.h>
@@ -40,21 +42,50 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* TC1: munmap exact-start match; non-start address rejected. */
+static volatile void *g_fault_page;
+static void segv_handler(int sig, siginfo_t *info, void *uctx) {
+  (void)sig;
+  (void)uctx;
+  (void)info;
+  _exit(SEGV_MAPERR);
+}
+static int reap_child_code(pid_t pid) {
+  int status;
+  waitpid(pid, &status, 0);
+  return WIFEXITED(status) ? WEXITSTATUS(status) : 0;
+}
+
+/* TC1: munmap sub-interval punches a hole; start residue survives. */
 void test_munmap_exact_start_and_non_start_rejected(void) {
-  void *p = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0);
+  char *p = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0);
   TEST_ASSERT_NOT_NULL(p);
   TEST_ASSERT_TRUE(p != MAP_FAILED);
+  p[0] = 'A';
+  p[0x1000] = 'B';
 
-  /* Non-start address inside the region must NOT unmap (size ignored, exact
-   * match only). */
+  /* Non-start sub-interval: S13 punches a hole at [p+0x1000, p+0x2000). */
   int r = munmap((void *)((uintptr_t)p + 0x1000), 0x1000);
-  TEST_ASSERT_EQUAL_INT(-1, r);
-  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
-
-  /* Exact start unmaps the whole region. */
-  r = munmap(p, 8192);
   TEST_ASSERT_EQUAL_INT(0, r);
+
+  /* The start residue is still mapped and intact. */
+  TEST_ASSERT_EQUAL_INT('A', p[0]);
+
+  /* The punched page is gone. */
+  g_fault_page = p + 0x1000;
+  pid_t pid = fork();
+  if (pid == 0) {
+    struct sigaction act;
+    memset(&act, 0, sizeof(act));
+    act.sa_sigaction = segv_handler;
+    act.sa_flags = SA_SIGINFO;
+    sigemptyset(&act.sa_mask);
+    sigaction(SIGSEGV, &act, NULL);
+    *(volatile char *)(p + 0x1000) = 'x';
+    _exit(0);
+  }
+  TEST_ASSERT_EQUAL_INT(SEGV_MAPERR, reap_child_code(pid));
+
+  munmap(p, 8192);
 }
 
 /* TC2: two mappings + fork shallow-copy. */
@@ -141,16 +172,17 @@ void test_memfd_shared_mapping_visible_to_child(void) {
   close(fd);
 }
 
-/* TC5: double munmap of same address returns -EINVAL (no double-free). */
-void test_double_munmap_returns_einval(void) {
+/* TC5: a second munmap of an already-unmapped address is a silent no-op
+ * (Linux: unmapping an empty interval succeeds, no double-free possible since
+ * the first unmap already dropped the region). */
+void test_double_munmap_is_noop(void) {
   void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0);
   TEST_ASSERT_NOT_NULL(p);
 
   TEST_ASSERT_EQUAL_INT(0, munmap(p, 4096));
 
   int r = munmap(p, 4096);
-  TEST_ASSERT_EQUAL_INT(-1, r);
-  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  TEST_ASSERT_EQUAL_INT(0, r);
 }
 
 int main(void) {
@@ -159,6 +191,6 @@ int main(void) {
   RUN_TEST(test_two_mappings_fork_child_reads_both);
   RUN_TEST(test_mprotect_readonly_fork_child_faults);
   RUN_TEST(test_memfd_shared_mapping_visible_to_child);
-  RUN_TEST(test_double_munmap_returns_einval);
+  RUN_TEST(test_double_munmap_is_noop);
   return UNITY_END();
 }

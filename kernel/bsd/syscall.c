@@ -81,6 +81,18 @@
 #define MAP_PHYSICAL 0x80000000
 #define MAP_UC 0x08 /* Map as uncacheable (device MMIO) */
 
+// Every MAP_* bit the kernel recognizes — uapi standard flags plus the two
+// OS-internal ones. Unknown bits (outside this set) are rejected with
+// -EINVAL; recognized-but-unsupported bits (HUGETLB/POPULATE/STACK/LOCKED/
+// NORESERVE/GROWSDOWN/GROWSUP) are silently no-op'd since the existing
+// sys_mmap branches only inspect SHARED/PRIVATE/FIXED*/ANONYMOUS/PHYSICAL/UC.
+// Kept here (not in a header) because MAP_PHYSICAL/MAP_UC are syscall.c-local.
+#define MAP_KNOWN_FLAGS                                                        \
+  (MAP_SHARED | MAP_PRIVATE | MAP_SHARED_VALIDATE | MAP_FIXED |                \
+   MAP_FIXED_NOREPLACE | MAP_ANONYMOUS | MAP_GROWSDOWN | MAP_GROWSUP |         \
+   MAP_LOCKED | MAP_NORESERVE | MAP_POPULATE | MAP_STACK | MAP_HUGETLB |       \
+   MAP_PHYSICAL | MAP_UC)
+
 // ===================== File protocol for FD_FILE <-> fs_driver IPC
 // =====================
 #define FILE_CMD_READ 2
@@ -764,7 +776,11 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   if (size == 0 && ((flags & MAP_SHARED) == 0 || fd < 0))
     return -EINVAL;
-  if (size > 128 * 1024 * 1024)
+  // Reject genuinely-unknown flag bits; recognized-but-unsupported bits
+  // (HUGETLB/POPULATE/STACK/LOCKED/NORESERVE/GROWSDOWN/GROWSUP) fall through
+  // as no-op. No hard size cap — the natural limit is bfc_alloc_page / address
+  // space failure → -ENOMEM (RLIMIT_AS is a future todo; the OS has no rlimit).
+  if ((flags & ~MAP_KNOWN_FLAGS) != 0)
     return -EINVAL;
   size = ALIGN_UP(size, PAGE_SIZE);
 
@@ -1173,6 +1189,12 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 }
 
 // ===================== BSD syscall: munmap =====================
+// Unmap every mapping overlapping [addr, addr+size): a region fully inside the
+// interval is dropped, a partially-overlapping one is split (front/tail
+// residue kept), matching Linux munmap(2). addr/size are page-aligned; an
+// empty interval (no mapping) is silently a no-op success. Delegates the
+// list/PTE/release work to vma_unmap_range (shared with MAP_FIXED), then
+// tries to merge any same-prot residue left adjacent by a hole punch.
 int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
                    int64_t unused3, int64_t unused4) {
   uint64_t addr = arg1;
@@ -1180,69 +1202,44 @@ int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
 
   if (size == 0)
     return (int64_t)-EINVAL;
+  if (addr & (PAGE_SIZE - 1))
+    return (int64_t)-EINVAL;
+  size = ALIGN_UP(size, PAGE_SIZE);
+  if (size == 0)
+    return (int64_t)-EINVAL; // ALIGN_UP overflow
 
   xtask *proc = current_task;
   uint64_t *pml4 =
       (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
 
-  // vma_find returns the region containing addr; munmap only unmaps a region
-  // whose start exactly matches addr (size is ignored — S13 adds partial
-  // unmap), so reject a hit that is not an exact start match.
-  mmap_region *region = vma_find(proc->mm, addr);
-  if (!region || region->vaddr != addr)
-    return (int64_t)-EINVAL;
-
-  size = region->size;
-
-  size_t npages = size / PAGE_SIZE;
-  if (region->shm_obj || region->phys) {
-    for (size_t i = 0; i < npages; i++) {
-      uint64_t va = addr + i * PAGE_SIZE;
-      uint64_t *pdpt = ensure_pd(pml4, va);
-      if (!pdpt)
-        continue;
-      uint64_t *pd = ensure_pt_in_pd(pdpt, va, 2);
-      if (!pd)
-        continue;
-      uint64_t *pt = ensure_pt_in_pd(pd, va, 1);
-      if (!pt)
-        continue;
-      uint64_t pt_idx = (va >> 12) & 0x1FF;
-      pt[pt_idx] = 0;
-    }
-  } else {
-    for (size_t i = 0; i < npages; i++) {
-      uint64_t va = addr + i * PAGE_SIZE;
-      unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
-    }
+  uint64_t flags;
+  spin_lock_irqsave(&proc->mm->mmap_lock, &flags);
+  int r = vma_unmap_range(proc->mm, pml4, addr, size);
+  if (r == 0) {
+    // A hole punch leaves residues on either side. They are normally separated
+    // by the unmapped gap, so vma_merge is a no-op; it only joins residues
+    // that end up adjacent (e.g. a cross-region unmap whose leftovers touch).
+    mmap_region *prev = (addr) ? vma_find(proc->mm, addr - 1) : NULL;
+    if (prev)
+      vma_merge(proc->mm, prev);
+    mmap_region *next = vma_find(proc->mm, addr + size);
+    if (next)
+      vma_merge(proc->mm, next);
   }
-
-  if (region->shm_obj) {
-    shm_put(region->shm_obj);
-  }
-  // S12: release file-backed mmap refs owned by this region. The private user
-  // pages faulted in by file_fault_handler were freed above by unmap_user_pages
-  // (file-backed private regions have shm_obj==NULL && phys==0); the inode /
-  // source-shm references are dropped here.
-  if (region->inode)
-    inode_put(region->inode);
-  if (region->shm_private_src)
-    shm_put(region->shm_private_src);
-
-  // Unlink region from the sorted list.
-  mmap_region **pp = &proc->mm->mmap_regions;
-  while (*pp != region)
-    pp = &(*pp)->next;
-  *pp = region->next;
-  kfree(region);
-  return 0;
+  spin_unlock_irqrestore(&proc->mm->mmap_lock, flags);
+  return (int64_t)r;
 }
 
 // ===================== BSD syscall: mprotect =====================
-// Change protection of existing user mappings page-by-page. Aligns with Linux:
-// PROT_NONE clears PTE_PRESENT and sets PTE_PROTNONE (hardware not-present, but
-// pte_present() recognizes it). partial-unmapped → -ENOMEM, already-changed
-// pages kept (Linux semantics). Does not split huge pages (→ -EINVAL).
+// Change protection of an existing user mapping interval [addr, addr+size).
+// Aligns with Linux: PROT_NONE clears PTE_PRESENT and sets PTE_PROTNONE
+// (hardware not-present, but pte_present() recognizes it). Region metadata is
+// split via vma_protect_range so a sub-interval change records its own prot
+// (fork COW honors it). PROT_GROWSDOWN/PROT_SEM are masked to no-op (the OS
+// has no stack-grow/sem-page semantics). Partial-unmapped → -ENOMEM,
+// already-changed pages kept (Linux semantics). Does not split huge pages
+// (→ -EINVAL). Metadata is committed first, PTEs second, so a split failure
+// leaves the user-visible protection unchanged.
 int64_t sys_mprotect(int64_t arg1, int64_t arg2, int64_t prot_arg,
                      int64_t unused1, int64_t unused2, int64_t unused3) {
   uint64_t addr = arg1;
@@ -1253,7 +1250,11 @@ int64_t sys_mprotect(int64_t arg1, int64_t arg2, int64_t prot_arg,
     return 0; // Linux: no-op
   if (addr & (PAGE_SIZE - 1))
     return (int64_t)-EINVAL;
-  if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
+  // Mask off flags the OS treats as no-op (PROT_GROWSDOWN/PROT_SEM); reject
+  // anything else beyond RWE. PROT_GROWSUP is an mmap-only flag — leaving it
+  // unmasked so it is rejected matches Linux mprotect(2).
+  uint32_t prot_masked = (uint32_t)prot & ~(PROT_GROWSDOWN | PROT_SEM);
+  if (prot_masked & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
     return (int64_t)-EINVAL;
   if (addr >= 0x800000000000ULL)
     return (int64_t)-EINVAL;
@@ -1265,16 +1266,25 @@ int64_t sys_mprotect(int64_t arg1, int64_t arg2, int64_t prot_arg,
   uint64_t flags;
   spin_lock_irqsave(lk, &flags);
 
-  // New leaf flags (PTE_USER always; physical address preserved per-page).
+  // (1) Commit region metadata first: split out the [addr, addr+size) piece
+  // and set its prot. A failure here (-ENOMEM on split) returns before any
+  // PTE is touched, so the user-visible protection is unchanged.
+  int r = vma_protect_range(proc->mm, addr, size, prot_masked);
+  if (r < 0) {
+    spin_unlock_irqrestore(lk, flags);
+    return (int64_t)r;
+  }
+
+  // (2) New leaf flags (PTE_USER always; physical address preserved per-page).
   uint64_t base = PTE_USER;
-  if (prot == 0) {
+  if (prot_masked == 0) {
     // PROT_NONE: present=0 + PROTNONE + NX
     base |= PTE_PROTNONE | PTE_NX;
   } else {
     base |= PTE_PRESENT;
-    if (prot & PROT_WRITE)
+    if (prot_masked & PROT_WRITE)
       base |= PTE_RW;
-    if (!(prot & PROT_EXEC))
+    if (!(prot_masked & PROT_EXEC))
       base |= PTE_NX;
   }
 
@@ -1284,6 +1294,9 @@ int64_t sys_mprotect(int64_t arg1, int64_t arg2, int64_t prot_arg,
     uint64_t *pte = lookup_pte(proc->mm->cr3, va);
     if (!pte) {
       // Page genuinely unmapped → -ENOMEM, already-changed pages kept (Linux).
+      // Metadata was already split above; the unmapped hole carries the new
+      // prot but has no PTE, which is harmless (no page to fault against until
+      // something maps it).
       spin_unlock_irqrestore(lk, flags);
       return (int64_t)-ENOMEM;
     }
@@ -1297,13 +1310,6 @@ int64_t sys_mprotect(int64_t arg1, int64_t arg2, int64_t prot_arg,
     *pte = phys | base;
     invlpg(va); // stale TLB would defeat RW→RX / R→PROTNONE transitions
   }
-
-  // Sync mmap_region->prot so fork COW honors the new protection. Match only
-  // the region whose start equals addr (existing behavior; S13 adds interval
-  // splitting).
-  mmap_region *mr = vma_find(proc->mm, addr);
-  if (mr && mr->vaddr == addr)
-    mr->prot = (uint32_t)prot;
 
   spin_unlock_irqrestore(lk, flags);
   return 0;

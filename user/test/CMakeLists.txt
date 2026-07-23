@@ -165,6 +165,11 @@ if(TEST)
     add_user_dyn_elf(test_mmap_addr_hint C SOURCES test_mmap_addr_hint.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
     # S12: MAP_PRIVATE+fd file-backed mmap + demand-fault page-in + COW.
     add_user_dyn_elf(test_mmap_file_private C SOURCES test_mmap_file_private.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    # S13: munmap partial/hole-punch + mprotect interval + flag handling + size limit.
+    add_user_dyn_elf(test_munmap_partial C SOURCES test_munmap_partial.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_mprotect_partial C SOURCES test_mprotect_partial.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_mmap_flags C SOURCES test_mmap_flags.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_mmap_size_limit C SOURCES test_mmap_size_limit.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
 endif()
 
 # libffi dynamic test (ffi_worklist §4.C): ffi_call int/double + ffi_closure

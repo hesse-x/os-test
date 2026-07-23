@@ -186,6 +186,63 @@ mmap_region *vma_merge(mm *mm, mmap_region *r) {
   return r;
 }
 
+// ===================== S13: mprotect interval splitting =====================
+
+// Set prot on every mapping overlapping [addr, addr+len): split out the
+// overlapping piece from partially-overlapping regions (front/tail residue
+// kept) and update the middle piece's prot. Fully-contained regions get their
+// prot changed in place. This only touches region metadata — the caller has
+// already (or will) rewrite the leaf PTEs page-by-page. Returns 0, or -ENOMEM
+// if a vma_split OOMs (already-changed regions are not rolled back, matching
+// Linux's partial-failure mprotect). Caller holds mm->mmap_lock.
+int vma_protect_range(mm *mm, uint64_t addr, uint64_t len, uint32_t prot) {
+  uint64_t end = addr + len;
+  mmap_region *cur = mm->mmap_regions;
+  while (cur) {
+    mmap_region *next = cur->next;
+    if (cur->vaddr >= end)
+      break; // sorted list: past the interval
+    if (cur->vaddr + cur->size <= addr) {
+      cur = next;
+      continue; // no overlap
+    }
+
+    if (cur->vaddr < addr) {
+      // Front residue: split [addr, min(cur->end, end)) out as the mid piece.
+      uint64_t split_len = (cur->vaddr + cur->size < end)
+                               ? (cur->vaddr + cur->size - addr)
+                               : (end - addr);
+      mmap_region *mid = vma_split(mm, cur, addr, split_len);
+      if (!mid)
+        return -ENOMEM;
+      mid->prot = prot;
+      cur = next; // front residue (cur) stays with its old prot
+      continue;
+    }
+
+    if (cur->vaddr + cur->size > end) {
+      // No front residue, but a tail residue: split [cur->vaddr, end) out.
+      mmap_region *mid = vma_split(mm, cur, cur->vaddr, end - cur->vaddr);
+      if (!mid)
+        return -ENOMEM;
+      mid->prot = prot;
+      cur = next;
+      continue;
+    }
+
+    // Fully contained in [addr, end): change prot in place, no split needed.
+    cur->prot = prot;
+    cur = next;
+  }
+
+  // No cross-region merge: a middle piece whose prot differs from its
+  // residues cannot merge with them, and conservatively merging two regions
+  // that happen to now share prot risks vma_merge's anonymous-private-only
+  // rule misfiring on adjacent file-backed holes. The fragmentation cost is
+  // negligible; revisit if mprotect churn becomes heavy.
+  return 0;
+}
+
 // ===================== S11: mmap addr hint / MAP_FIXED support
 // =====================
 

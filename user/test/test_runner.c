@@ -48,7 +48,6 @@ static struct test_entry tests[] = {
     {"drm_phase_c", "/test/drm_phase_c.elf"},
     {"drm_test_link", "/test/drm_test_link.elf"},
     {"venus_channel", "/test/venus_channel.elf"},
-#ifdef TEST
     {"test_sysfs", "/test/test_sysfs.elf"},
     {"test_libudev", "/test/test_libudev.elf"},
     {"test_vfs_dispatch", "/test/test_vfs_dispatch.elf"},
@@ -66,8 +65,11 @@ static struct test_entry tests[] = {
     {"test_vma_restructure", "/test/test_vma_restructure.elf"},
     {"test_mmap_addr_hint", "/test/test_mmap_addr_hint.elf"},
     {"test_mmap_file_private", "/test/test_mmap_file_private.elf"},
+    {"test_munmap_partial", "/test/test_munmap_partial.elf"},
+    {"test_mprotect_partial", "/test/test_mprotect_partial.elf"},
+    {"test_mmap_flags", "/test/test_mmap_flags.elf"},
+    {"test_mmap_size_limit", "/test/test_mmap_size_limit.elf"},
     {"test_ffi", "/test/test_ffi.elf"},
-#endif
     {"ioctl_varlen", "/test/ioctl_varlen.elf"},
     {"epoll", "/test/epoll.elf"},
     {"eventfd", "/test/eventfd.elf"},

@@ -124,7 +124,9 @@ if [ "$TEST" = "1" ]; then
                sigaltstack.elf test_dirent_seek.elf test_cloexec_perfd.elf \
                test_mprotect.elf test_ffi.elf venus_channel.elf getrandom.elf \
                test_vma_restructure.elf test_mmap_addr_hint.elf \
-               test_mmap_file_private.elf; do
+               test_mmap_file_private.elf \
+               test_munmap_partial.elf test_mprotect_partial.elf \
+               test_mmap_flags.elf test_mmap_size_limit.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
     done
 fi
