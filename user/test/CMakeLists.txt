@@ -36,6 +36,13 @@ add_user_dyn_elf(socket C SOURCES test_socket.c ${CMAKE_SOURCE_DIR}/third_party/
 # msg_flags writeback.
 add_user_dyn_elf(test_socket_msgflags C SOURCES test_socket_msgflags.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 
+# S17: AF_UNIX SOCK_DGRAM + recvmsg msg_name — bind/sendto path resolution,
+# message boundaries, connect default target, MSG_PEEK/MSG_TRUNC, SCM_RIGHTS,
+# EPROTOTYPE/ENOENT error semantics. TEST-gated (bind paths live under /run).
+if(TEST)
+    add_user_dyn_elf(test_unix_dgram C SOURCES test_unix_dgram.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+endif()
+
 # Layer 7: process
 add_user_dyn_elf(process C SOURCES test_process.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 

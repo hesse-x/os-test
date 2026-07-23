@@ -201,6 +201,49 @@ int unix_bind_lookup(const char *sun_path, struct unix_sock **out,
   return unix_bind_lookup_hash(sun_path, out, owner_pid);
 }
 
+/* DGRAM lookup: a bound SOCK_DGRAM socket is reachable by path. Unlike
+ * unix_bind_lookup (which requires UNIX_LISTEN), a DGRAM target is valid in
+ * UNIX_DGRAM_BOUND or UNIX_CONNECTED. Caller holds socket_lock; the returned
+ * pointer is borrowed for the locked section only. */
+int unix_bind_lookup_dgram(const char *sun_path, struct unix_sock **out) {
+  struct inode *ip = vfs_lookup_socket(sun_path);
+  if (!IS_ERR(ip) && ip) {
+    struct unix_sock *s = (struct unix_sock *)ip->i_priv;
+    if (s && s->type == SOCK_DGRAM &&
+        (s->state == UNIX_DGRAM_BOUND || s->state == UNIX_CONNECTED)) {
+      *out = s;
+      inode_put(ip);
+      return 0;
+    }
+    inode_put(ip);
+    if (s && s->type != SOCK_DGRAM)
+      return -EPROTOTYPE; // path bound to a STREAM socket
+    return -ECONNREFUSED; // socket inode exists but not a bound DGRAM
+  }
+  // Hash-table fallback (VFS path failed to resolve).
+  uint32_t h = unix_hash(sun_path);
+  for (struct unix_bind_entry *e = unix_bind_table[h]; e; e = e->next) {
+    int i = 0;
+    while (i < 108 && sun_path[i] == e->sun_path[i]) {
+      if (sun_path[i] == '\0')
+        break;
+      i++;
+    }
+    if (i < 108 && sun_path[i] == '\0' && e->sun_path[i] == '\0') {
+      if (e->sock && e->sock->type == SOCK_DGRAM &&
+          (e->sock->state == UNIX_DGRAM_BOUND ||
+           e->sock->state == UNIX_CONNECTED)) {
+        *out = e->sock;
+        return 0;
+      }
+      if (e->sock && e->sock->type != SOCK_DGRAM)
+        return -EPROTOTYPE;
+      return -ECONNREFUSED;
+    }
+  }
+  return -ENOENT;
+}
+
 void unix_bind_unregister(struct unix_sock *sock) {
   /* VFS 路径清理：清 inode->i_priv + 释放 bind 期间持有的 inode 引用。
    * bind_inode 为 NULL 时 no-op（哈希表路径）。 */
@@ -235,6 +278,8 @@ struct sk_buff *skb_alloc(uint32_t data_len) {
   skb->len = data_len;
   skb->consumed = 0;
   skb->num_fds = 0;
+  skb->has_sender = 0;
+  __memset(&skb->sender_addr, 0, sizeof(skb->sender_addr));
   return skb;
 }
 
@@ -283,6 +328,7 @@ struct unix_sock *unix_sock_alloc(void) {
   if (!sock)
     return NULL;
   sock->state = UNIX_FREE;
+  sock->type = SOCK_STREAM;
   sock->peer = -1;
   sock->peer_sock = NULL;
   refcount_set(&sock->u_count, 1);
@@ -296,6 +342,7 @@ struct unix_sock *unix_sock_alloc(void) {
   sock->shutdown_read = 0;
   sock->shutdown_write = 0;
   sock->sun_path[0] = '\0';
+  sock->dgram_dst_path[0] = '\0';
   sock->bind_inode = NULL;
   sock->owner_pid = -1;
   /* eager 分配 wq：阻塞 reader 改 add_wait_queue 后 wq 必须在创建时非
@@ -373,20 +420,359 @@ void unix_sock_wake_writer(struct unix_sock *sock) {
   __wake_up(sock->wq, POLLOUT);
 }
 
+// Fill the per-skb sender address from a bound DGRAM socket. has_sender is 0
+// for an anonymous (unbound) sender; recvmsg then reports only the family.
+static void unix_dgram_fill_sender(struct sk_buff *skb, struct unix_sock *src) {
+  skb->sender_addr.sun_family = AF_UNIX;
+  __memcpy(skb->sender_addr.sun_path, src->sun_path, UNIX_PATH_MAX);
+  skb->has_sender = (src->sun_path[0] != '\0');
+}
+
+// Forward decl: unix_scm_resolve is defined later (before unix_sock_sendmsg)
+// but used by unix_dgram_sendto here.
+static int unix_scm_resolve(struct sk_buff *skb, const void *control,
+                            size_t controllen);
+
+// DGRAM sendto: resolve dest path to a bound DGRAM socket, enqueue one whole
+// skb carrying the sender's address. The target's u_count is bumped under
+// socket_lock so the post-unlock wake cannot dereference a freed socket.
+int64_t unix_dgram_sendto(struct unix_sock *src, const struct sockaddr_un *dest,
+                          const struct iovec *iov, size_t iovlen,
+                          const void *control, size_t controllen, int flags) {
+  if (dest->sun_family != AF_UNIX)
+    return -EAFNOSUPPORT;
+  if (dest->sun_path[0] == '\0')
+    return -EINVAL;
+
+  // Total payload length and overflow check.
+  uint32_t total = 0;
+  for (size_t i = 0; i < iovlen; i++)
+    total += (uint32_t)iov[i].iov_len;
+  if (total > MAX_SOCKET_DATA)
+    return -EMSGSIZE;
+
+  struct sk_buff *skb = skb_alloc(total);
+  if (!skb)
+    return -ENOMEM;
+  uint32_t offset = 0;
+  for (size_t i = 0; i < iovlen; i++) {
+    if (iov[i].iov_base && iov[i].iov_len > 0) {
+      if (copy_from_user(skb->data + offset,
+                         (const void __user *)iov[i].iov_base,
+                         iov[i].iov_len)) {
+        skb_free(skb);
+        return -EFAULT;
+      }
+      offset += (uint32_t)iov[i].iov_len;
+    }
+  }
+  int sret = unix_scm_resolve(skb, control, controllen);
+  if (sret) {
+    skb_free(skb);
+    return sret;
+  }
+  unix_dgram_fill_sender(skb, src);
+
+  spin_lock(&socket_lock);
+  struct unix_sock *target = NULL;
+  int ret = unix_bind_lookup_dgram(dest->sun_path, &target);
+  if (ret) {
+    spin_unlock(&socket_lock);
+    skb_free(skb);
+    return ret;
+  }
+  if (target->shutdown_read) {
+    spin_unlock(&socket_lock);
+    skb_free(skb);
+    return -ECONNREFUSED;
+  }
+  if ((flags & MSG_DONTWAIT) && target->recv_queue_len > 128) {
+    spin_unlock(&socket_lock);
+    skb_free(skb);
+    return -EAGAIN;
+  }
+  refcount_inc(&target->u_count);
+  skb_enqueue(target, skb);
+  wait_queue_head *twq = target->wq;
+  spin_unlock(&socket_lock);
+
+  __wake_up(twq, POLLIN);
+  unix_sock_release(target);
+  return (int64_t)total;
+}
+
+// DGRAM recvmsg: read exactly one skb (preserving message boundaries), backfill
+// the sender address, and install SCM_RIGHTS. MSG_PEEK leaves the skb queued;
+// MSG_TRUNC reports the true datagram length. MSG_WAITALL is a no-op for
+// datagrams (a datagram cannot be coalesced across messages). Mirrors the
+// STREAM recvmsg blocking/EOFEINTR/SCM-install/cmsg-writeback structure.
+int64_t unix_dgram_recvmsg(struct unix_sock *sock, const struct iovec *iov,
+                           size_t iovlen, void *control, size_t *controllen,
+                           int flags, int *out_flags,
+                           struct sockaddr_un *sender_addr,
+                           size_t *sender_len) {
+  bool nonblock = (flags & MSG_DONTWAIT) != 0;
+  bool peek = (flags & MSG_PEEK) != 0;
+
+  for (;;) {
+    spin_lock(&socket_lock);
+    struct sk_buff *skb = sock->recv_queue_head;
+
+    if (!skb) {
+      // Empty queue. A DGRAM socket has no peer requirement (multiple senders
+      // may target one bound socket); only shutdown_read signals EOF.
+      if (sock->shutdown_read) {
+        spin_unlock(&socket_lock);
+        if (sender_len)
+          *sender_len = 0;
+        return 0;
+      }
+      if (nonblock) {
+        spin_unlock(&socket_lock);
+        return -EAGAIN;
+      }
+      // Block on sock->wq (same pattern as unix_sock_recvmsg).
+      xtask *proc = current_task;
+      wait_queue_t wait;
+      wait.func = poll_wait_cb;
+      wait.data = proc;
+      list_init(&wait.node);
+      add_wait_queue(sock->wq, &wait);
+      proc->state = BLOCKED;
+      proc->wait_event = WAIT_POLL;
+      proc->wait_deadline = sched_clock() + 30000000000ULL; // 30s
+      spin_unlock(&socket_lock);
+      int cpu = proc->assigned_cpu;
+      uint64_t rflags;
+      spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
+      sched_timer_queue_insert(cpu, proc);
+      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
+      schedule();
+      if (proc->wait_timed_out) {
+        proc->state = RUNNING;
+        remove_wait_queue(sock->wq, &wait);
+        return -ETIMEDOUT;
+      }
+      {
+        uint64_t pend =
+            __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
+        uint64_t deliv = pend & ~proc->proc->sig_blocked;
+        deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
+        if (deliv) {
+          proc->state = RUNNING;
+          remove_wait_queue(sock->wq, &wait);
+          return -EINTR;
+        }
+      }
+      proc->state = RUNNING;
+      remove_wait_queue(sock->wq, &wait);
+      continue;
+    }
+
+    // One whole datagram: copy min(iov capacity, skb->len). No partial-read
+    // cursor (consumed stays 0); a too-small buffer truncates and sets
+    // MSG_TRUNC.
+    uint32_t total = skb->len;
+    uint32_t iov_cap = 0;
+    for (size_t i = 0; i < iovlen; i++)
+      iov_cap += (uint32_t)iov[i].iov_len;
+    uint32_t to_read = iov_cap < total ? iov_cap : total;
+
+    uint32_t off = 0, rem = to_read;
+    for (size_t i = 0; i < iovlen && rem > 0; i++) {
+      if (iov[i].iov_base && iov[i].iov_len > 0) {
+        uint32_t c = (uint32_t)iov[i].iov_len;
+        if (c > rem)
+          c = rem;
+        if (copy_to_user((void __user *)iov[i].iov_base, skb->data + off, c)) {
+          spin_unlock(&socket_lock);
+          return -EFAULT;
+        }
+        off += c;
+        rem -= c;
+      }
+    }
+
+    // Backfill sender address.
+    if (sender_addr && sender_len) {
+      *sender_addr = skb->sender_addr;
+      *sender_len =
+          skb->has_sender ? sizeof(struct sockaddr_un) : sizeof(sa_family_t);
+    }
+
+    bool truncated = (total > iov_cap);
+
+    if (peek) {
+      // PEEK: do not consume the skb or transfer SCM_RIGHTS.
+      spin_unlock(&socket_lock);
+      if (control && controllen)
+        *controllen = 0;
+      if (truncated && out_flags)
+        *out_flags |= MSG_TRUNC;
+      // With MSG_TRUNC the caller learns the true datagram length; otherwise
+      // report the bytes actually visible (== to_read).
+      if ((flags & MSG_TRUNC) && truncated)
+        return (int64_t)total;
+      return (int64_t)to_read;
+    }
+
+    // Extract SCM_RIGHTS refs before releasing socket_lock (same ownership
+    // transfer as the STREAM path).
+    int num_fds_to_install = 0;
+    struct file *scm_files[SCM_MAX_FD];
+    if (skb->num_fds > 0) {
+      for (int i = 0; i < skb->num_fds && num_fds_to_install < SCM_MAX_FD; i++)
+        scm_files[num_fds_to_install++] = skb->files[i];
+      skb->num_fds = 0;
+    }
+    bool do_scm = (num_fds_to_install > 0);
+
+    skb_dequeue(sock);
+    skb_free(skb);
+    spin_unlock(&socket_lock);
+
+    // Install SCM_RIGHTS files into the receiver's fd table.
+    int installed_fds[SCM_MAX_FD];
+    int num_fds_installed = 0;
+    bool scm_truncated = false;
+    if (do_scm) {
+      xtask *proc = current_task;
+      for (int i = 0; i < num_fds_to_install && num_fds_installed < SCM_MAX_FD;
+           i++) {
+        struct file *src = scm_files[i];
+        spinlock *fdlk = &proc->proc->files->fd_lock;
+        spin_lock(fdlk);
+        int new_fd = alloc_fd(proc->proc->files, 0);
+        if (new_fd < 0) {
+          spin_unlock(fdlk);
+          file_put(src);
+          scm_truncated = true;
+          break;
+        }
+        fd_install(proc->proc->files, new_fd, src);
+        if (src->type == FD_TTY)
+          pty_dup_file(src);
+        spin_unlock(fdlk);
+        installed_fds[num_fds_installed++] = new_fd;
+      }
+      for (int i = num_fds_installed; i < num_fds_to_install; i++)
+        file_put(scm_files[i]);
+    }
+
+    // Write SCM_RIGHTS cmsg back to the control buffer.
+    if (num_fds_installed > 0 && control && controllen && *controllen > 0) {
+      struct cmsghdr *cmsg = (struct cmsghdr *)control;
+      size_t needed =
+          CMSG_ALIGN(sizeof(struct cmsghdr)) + num_fds_installed * sizeof(int);
+      if (*controllen >= needed) {
+        cmsg->cmsg_len = (uint32_t)(CMSG_ALIGN(sizeof(struct cmsghdr)) +
+                                    num_fds_installed * sizeof(int));
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        int *out_fds = (int *)CMSG_DATA(cmsg);
+        for (int i = 0; i < num_fds_installed; i++)
+          out_fds[i] = installed_fds[i];
+        *controllen = cmsg->cmsg_len;
+      } else {
+        *controllen = 0;
+        if (out_flags)
+          *out_flags |= MSG_CTRUNC;
+      }
+    } else if (control && controllen) {
+      *controllen = 0;
+    }
+    if (scm_truncated && out_flags)
+      *out_flags |= MSG_CTRUNC;
+
+    if (truncated && out_flags)
+      *out_flags |= MSG_TRUNC;
+
+    // With MSG_TRUNC a truncated datagram reports its true length; otherwise
+    // the bytes actually copied (== to_read).
+    if ((flags & MSG_TRUNC) && truncated)
+      return (int64_t)total;
+    return (int64_t)to_read;
+  }
+}
+
 // ===================== Internal sendmsg/recvmsg =====================
+
+// Resolve SCM_RIGHTS cmsgs in the control buffer into ref-held struct file*
+// stored on the skb (skb->files[]/num_fds). Resolves while the sender's fd
+// table is authoritative; file_get() keeps each file alive until the receiver
+// installs it (or skb_free drops the ref). Returns 0/-EINVAL/-EBADF.
+static int unix_scm_resolve(struct sk_buff *skb, const void *control,
+                            size_t controllen) {
+  if (!control || controllen < sizeof(struct cmsghdr))
+    return 0;
+  uint8_t *cmsg_ptr = (uint8_t *)control;
+  uint8_t *cmsg_end = cmsg_ptr + controllen;
+  while (cmsg_ptr + sizeof(struct cmsghdr) <= cmsg_end) {
+    struct cmsghdr *cmsg = (struct cmsghdr *)cmsg_ptr;
+    uint32_t aligned_len = CMSG_ALIGN(cmsg->cmsg_len);
+    if (aligned_len > (uint32_t)(cmsg_end - cmsg_ptr))
+      break;
+    if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+      int num_fds =
+          (cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int);
+      if (num_fds > SCM_MAX_FD)
+        return -EINVAL;
+      if (num_fds > 0) {
+        int *fds = (int *)CMSG_DATA(cmsg);
+        rcu_read_lock();
+        for (int i = 0; i < num_fds; i++) {
+          if (fds[i] < 0 || fds[i] >= MAX_FD) {
+            rcu_read_unlock();
+            return -EBADF;
+          }
+          struct file *tf = fd_lookup(current_proc->files, fds[i]);
+          if (!tf) {
+            rcu_read_unlock();
+            return -EBADF;
+          }
+          file_get(tf);
+          skb->files[skb->num_fds++] = tf;
+        }
+        rcu_read_unlock();
+      }
+    } else {
+      return -EINVAL;
+    }
+    cmsg_ptr += aligned_len;
+  }
+  return 0;
+}
 
 int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
                           size_t iovlen, const void *control, size_t controllen,
                           int flags) {
+  // DGRAM 已连接（connect() 缓存了目标 path）：无 addr 的 send/sendmsg/write
+  // 按 dgram_dst_path 动态查找目标，走 unix_dgram_sendto（它对 target 取
+  // 临时 u_count 引用，wake-after-unlock 安全）。DGRAM 不持有持久 peer_sock
+  // 指针，避免对端 close 后本端 peer_sock 悬空 UAF。带 addr 的 DGRAM 发送
+  // 在 sys_sendmsg/sys_sendto 入口已直接走 unix_dgram_sendto，不会到此。
+  if (sock->type == SOCK_DGRAM && sock->dgram_dst_path[0] != '\0') {
+    struct sockaddr_un dest;
+    __memset(&dest, 0, sizeof(dest));
+    dest.sun_family = AF_UNIX;
+    __memcpy(dest.sun_path, sock->dgram_dst_path, sizeof(dest.sun_path));
+    dest.sun_path[sizeof(dest.sun_path) - 1] = '\0';
+    return unix_dgram_sendto(sock, &dest, iov, iovlen, control, controllen,
+                             flags);
+  }
+
   // Check shutdown_write on our socket
   if (sock->shutdown_write) {
     if (!(flags & MSG_NOSIGNAL))
       deliver_signal_to(current_task, SIGPIPE);
     return -EPIPE;
   }
-  // Check peer shutdown_read — sending to a socket whose read side is shut down
-  // should EPIPE
+  // Check peer shutdown_read. STREAM sends to a shut-read peer → EPIPE
+  // (+SIGPIPE unless MSG_NOSIGNAL); DGRAM → ECONNREFUSED (no SIGPIPE: a
+  // connectionless socket never raises SIGPIPE on a refused peer).
   if (sock->peer_sock && sock->peer_sock->shutdown_read) {
+    if (sock->type == SOCK_DGRAM)
+      return -ECONNREFUSED;
     if (!(flags & MSG_NOSIGNAL))
       deliver_signal_to(current_task, SIGPIPE);
     return -EPIPE;
@@ -419,65 +805,31 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
     }
   }
 
-  // Process control data (SCM_RIGHTS)
-  if (control && controllen >= sizeof(struct cmsghdr)) {
-    uint8_t *cmsg_ptr = (uint8_t *)control;
-    uint8_t *cmsg_end = cmsg_ptr + controllen;
-    while (cmsg_ptr + sizeof(struct cmsghdr) <= cmsg_end) {
-      struct cmsghdr *cmsg = (struct cmsghdr *)cmsg_ptr;
-      uint32_t aligned_len = CMSG_ALIGN(cmsg->cmsg_len);
-      if (aligned_len > (uint32_t)(cmsg_end - cmsg_ptr))
-        break;
-      if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-        int num_fds =
-            (cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int);
-        if (num_fds > SCM_MAX_FD) {
-          skb_free(skb);
-          return -EINVAL;
-        }
-        if (num_fds > 0) {
-          int *fds = (int *)CMSG_DATA(cmsg);
-          // Resolve sender fds to struct file* here, while the sender's fd
-          // table is authoritative (Linux semantics). file_get() holds a ref
-          // so a later sender close() can't free the object before the
-          // receiver installs it. skb_free() drops any uninstalled refs.
-          rcu_read_lock();
-          for (int i = 0; i < num_fds; i++) {
-            if (fds[i] < 0 || fds[i] >= MAX_FD) {
-              rcu_read_unlock();
-              skb_free(skb);
-              return -EBADF;
-            }
-            struct file *tf = fd_lookup(current_proc->files, fds[i]);
-            if (!tf) {
-              rcu_read_unlock();
-              skb_free(skb);
-              return -EBADF;
-            }
-            file_get(tf);
-            skb->files[skb->num_fds++] = tf;
-          }
-          rcu_read_unlock();
-        }
-      } else {
-        skb_free(skb);
-        return -EINVAL;
-      }
-      cmsg_ptr += aligned_len;
-    }
+  // Resolve SCM_RIGHTS control messages into ref-held struct file* on the skb.
+  // Shared by STREAM and DGRAM send paths. On failure the caller must skb_free.
+  int sret = unix_scm_resolve(skb, control, controllen);
+  if (sret) {
+    skb_free(skb);
+    return sret;
   }
 
-  // Find peer socket via direct pointer (socketpair) or PID-based lookup
-  // (connect)
+  // Find peer socket via direct pointer (socketpair/connect) or PID-based
+  // lookup (connect)
   struct unix_sock *peer_sock = sock->peer_sock;
   if (!peer_sock) {
-    // peer_sock is always set during connect/socketpair; this should not be
-    // reached
-    WARN_ON(!peer_sock);
+    // STREAM: peer_sock is always set during connect/socketpair — unreachable.
+    // DGRAM: an unconnected DGRAM with no dest addr must not reach here (the
+    // sendto+addr path uses unix_dgram_sendto); a bare send/sendmsg on an
+    // unconnected DGRAM is ENOTCONN.
+    if (sock->type == SOCK_STREAM) {
+      WARN_ON(1);
+      skb_free(skb);
+      if (!(flags & MSG_NOSIGNAL))
+        deliver_signal_to(current_task, SIGPIPE);
+      return -EPIPE;
+    }
     skb_free(skb);
-    if (!(flags & MSG_NOSIGNAL))
-      deliver_signal_to(current_task, SIGPIPE);
-    return -EPIPE;
+    return -ENOTCONN;
   }
 
   // Check peer shutdown (under socket_lock)
@@ -485,6 +837,8 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
   if (peer_sock->shutdown_read) {
     spin_unlock(&socket_lock);
     skb_free(skb);
+    if (sock->type == SOCK_DGRAM)
+      return -ECONNREFUSED;
     if (!(flags & MSG_NOSIGNAL))
       deliver_signal_to(current_task, SIGPIPE);
     return -EPIPE;
@@ -500,6 +854,10 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
 
   // Enqueue
   skb_enqueue(peer_sock, skb);
+  // DGRAM: stamp the sender address onto the skb so the receiver's recvmsg/
+  // recvfrom can report msg_name. STREAM leaves has_sender=0 (no name).
+  if (sock->type == SOCK_DGRAM)
+    unix_dgram_fill_sender(skb, sock);
   spin_unlock(&socket_lock);
 
   // Wake reader (挂 peer_sock->wq) outside socket_lock
@@ -908,7 +1266,7 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   if (domain != AF_UNIX)
     return (int64_t)-EAFNOSUPPORT;
-  if (base_type != SOCK_STREAM)
+  if (base_type != SOCK_STREAM && base_type != SOCK_DGRAM)
     return (int64_t)-EPROTONOSUPPORT;
   if (protocol != 0)
     return (int64_t)-EPROTONOSUPPORT;
@@ -920,6 +1278,7 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   xtask *proc = current_task;
 
   sock->state = UNIX_FREE;
+  sock->type = base_type;
 
   spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
@@ -1052,6 +1411,9 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   spin_lock(&socket_lock);
 
+  // STREAM may bind while UNIX_FREE (listen transitions to UNIX_LISTEN). A
+  // DGRAM socket binds straight into UNIX_DGRAM_BOUND. Both start from
+  // UNIX_FREE here; UNIX_DGRAM_BOUND is rejected so a second bind fails.
   if (sock->state != UNIX_FREE) {
     spin_unlock(&socket_lock);
     file_put(bf);
@@ -1073,6 +1435,9 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     i++;
   }
   sock->sun_path[i] = '\0';
+
+  if (sock->type == SOCK_DGRAM)
+    sock->state = UNIX_DGRAM_BOUND;
 
   spin_unlock(&socket_lock);
 
@@ -1375,6 +1740,36 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   spin_lock(&socket_lock);
 
+  // DGRAM connect: just fix the default send target. No child socket, no
+  // backlog, no accept wake — Linux semantics for SOCK_DGRAM connect().
+  struct unix_sock *client_sock = cf->sock;
+  if (!client_sock) {
+    spin_unlock(&socket_lock);
+    file_put(cf);
+    return (int64_t)-EBADF;
+  }
+  if (client_sock->type == SOCK_DGRAM) {
+    struct unix_sock *target = NULL;
+    int dret = unix_bind_lookup_dgram(sun_path, &target);
+    if (dret) {
+      spin_unlock(&socket_lock);
+      file_put(cf);
+      return (int64_t)dret;
+    }
+    // DGRAM connect: 只缓存目标 path，不持 peer_sock 指针。对端 dgram
+    // socket 仅靠自身 fd 存活且无反向引用，缓存指针会在对端 close 后悬空
+    // （close 本端时读到已释放内存 → UAF）。发送时按 path 动态查找
+    // （unix_dgram_sendto 对 target 取临时 u_count 引用，wake-after-unlock
+    // 安全）。Linux DGRAM connect 同样不持久绑定 peer 对象。
+    __memcpy(client_sock->dgram_dst_path, sun_path,
+             sizeof(client_sock->dgram_dst_path));
+    client_sock->dgram_dst_path[sizeof(client_sock->dgram_dst_path) - 1] = '\0';
+    client_sock->state = UNIX_CONNECTED;
+    spin_unlock(&socket_lock);
+    file_put(cf);
+    return 0;
+  }
+
   // Look up listener and owner PID via sun_path hash
   struct unix_sock *listener = NULL;
   pid_t listener_pid = -1;
@@ -1409,19 +1804,19 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   child->peer = proc->pid;
 
   // Update our socket to CONNECTED and set peer
-  struct unix_sock *client_sock = cf->sock;
-  if (!client_sock) {
+  struct unix_sock *client_sock2 = cf->sock;
+  if (!client_sock2) {
     spin_unlock(&socket_lock);
     unix_sock_free(child);
     file_put(cf);
     return (int64_t)-EBADF;
   }
-  client_sock->state = UNIX_CONNECTED;
+  client_sock2->state = UNIX_CONNECTED;
 
-  client_sock->peer = listener_pid;
-  client_sock->peer_sock = child; // client's peer is the child (server-side)
+  client_sock2->peer = listener_pid;
+  client_sock2->peer_sock = child; // client's peer is the child (server-side)
   child->peer = proc->pid;
-  child->peer_sock = client_sock; // child's peer is the client
+  child->peer_sock = client_sock2; // child's peer is the client
 
   // Enqueue child to listener's backlog
   child->backlog_head = NULL;
@@ -1453,7 +1848,8 @@ int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   if (domain != AF_UNIX)
     return (int64_t)-EAFNOSUPPORT;
-  if (type != SOCK_STREAM)
+  int base_type = type & (SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET);
+  if (base_type != SOCK_STREAM && base_type != SOCK_DGRAM)
     return (int64_t)-EPROTONOSUPPORT;
   if (protocol != 0)
     return (int64_t)-EPROTONOSUPPORT;
@@ -1477,9 +1873,11 @@ int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
 
   a->state = UNIX_CONNECTED;
+  a->type = base_type;
   a->peer = proc->pid;
   a->peer_sock = b;
   b->state = UNIX_CONNECTED;
+  b->type = base_type;
   b->peer = proc->pid;
   b->peer_sock = a;
 
@@ -1500,9 +1898,11 @@ int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
 
   a->state = UNIX_CONNECTED;
+  a->type = base_type;
   a->peer = proc->pid;
   a->peer_sock = b;
   b->state = UNIX_CONNECTED;
+  b->type = base_type;
   b->peer = proc->pid;
   b->peer_sock = a;
 
@@ -1667,8 +2067,28 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       file_put(sf);
       return (int64_t)-EBADF;
     }
-    ret = unix_sock_sendmsg(sock, kiov, kmsg.msg_iovlen, kcontrol, kcontrollen,
-                            flags);
+    // DGRAM sendmsg with a destination address: resolve the path and enqueue
+    // directly (no connect/listen). Without msg_name a connected DGRAM falls
+    // through to unix_sock_sendmsg, which uses sock->peer_sock.
+    if (sock->type == SOCK_DGRAM && kmsg.msg_name && kmsg.msg_namelen > 0) {
+      struct sockaddr_un dest;
+      __memset(&dest, 0, sizeof(dest));
+      size_t dlen =
+          kmsg.msg_namelen > sizeof(dest) ? sizeof(dest) : kmsg.msg_namelen;
+      if (copy_from_user(&dest, (const void __user *)kmsg.msg_name, dlen)) {
+        kfree(kiov);
+        if (kcontrol)
+          kfree(kcontrol);
+        file_put(sf);
+        return (int64_t)-EFAULT;
+      }
+      dest.sun_path[UNIX_PATH_MAX - 1] = '\0';
+      ret = unix_dgram_sendto(sock, &dest, kiov, kmsg.msg_iovlen, kcontrol,
+                              kcontrollen, flags);
+    } else {
+      ret = unix_sock_sendmsg(sock, kiov, kmsg.msg_iovlen, kcontrol,
+                              kcontrollen, flags);
+    }
   }
 
   kfree(kiov);
@@ -1796,8 +2216,30 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       file_put(rf);
       return (int64_t)-EBADF;
     }
-    ret = unix_sock_recvmsg(sock, kiov, kmsg.msg_iovlen, kcontrol, &kcontrollen,
-                            flags, &kmsg.msg_flags);
+    if (sock->type == SOCK_DGRAM) {
+      sockaddr_un sender_addr;
+      size_t sender_len = 0;
+      __memset(&sender_addr, 0, sizeof(sender_addr));
+      ret = unix_dgram_recvmsg(sock, kiov, kmsg.msg_iovlen, kcontrol,
+                               &kcontrollen, flags, &kmsg.msg_flags,
+                               &sender_addr, &sender_len);
+      // Write back sender address to msg_name/msg_namelen (netlink-style).
+      if (ret >= 0 && kmsg.msg_name && sender_len > 0 &&
+          kmsg.msg_namelen >= sender_len) {
+        if (copy_to_user((void __user *)kmsg.msg_name, &sender_addr,
+                         sender_len))
+          ret = (int64_t)-EFAULT;
+        else {
+          socklen_t out_len = (socklen_t)sender_len;
+          if (copy_to_user((void __user *)((char __user *)msg + 4), &out_len,
+                           sizeof(socklen_t)))
+            ret = (int64_t)-EFAULT;
+        }
+      }
+    } else {
+      ret = unix_sock_recvmsg(sock, kiov, kmsg.msg_iovlen, kcontrol,
+                              &kcontrollen, flags, &kmsg.msg_flags);
+    }
     // Update msg_controllen in user space (existing code)
     if (ret >= 0) {
       if (kmsg.msg_control && kmsg.msg_controllen > 0) {
@@ -2188,6 +2630,29 @@ int64_t sys_recvfrom(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     goto out;
   }
 
+  // DGRAM: the source address comes from the datagram's sender (which may
+  // differ per message), not from a fixed peer_sock. Route through the DGRAM
+  // recvmsg path so the sender address is captured.
+  if (sock->type == SOCK_DGRAM) {
+    struct iovec iov = {.iov_base = (void __force *)buf, .iov_len = len};
+    struct sockaddr_un su;
+    size_t su_len = 0;
+    __memset(&su, 0, sizeof(su));
+    ret = unix_dgram_recvmsg(sock, &iov, 1, NULL, NULL, flags, NULL, &su,
+                             &su_len);
+    if (addr && ret >= 0 && su_len > 0) {
+      socklen_t actual_len = (socklen_t)su_len;
+      if (copy_to_user(addr, &su, actual_len))
+        ret = -EFAULT;
+      if (addrlen) {
+        uint64_t al = (__force uint64_t)addrlen;
+        if (al < KERNEL_VMA_BOUNDARY)
+          *(__force socklen_t *)addrlen = actual_len;
+      }
+    }
+    goto out;
+  }
+
   ret = unix_sock_read(sock, (void __force *)buf, len, flags);
 
   // Fill addr if requested (peer address for connected socket)
@@ -2261,11 +2726,30 @@ int64_t sys_sendto(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
 
   // For AF_UNIX, sendto to a connected socket ignores addr (uses peer).
-  // sendto to unconnected + addr → connect-like send. We only support
-  // connected.
+  // A DGRAM socket with an explicit dest addr resolves the path and enqueues
+  // directly into the target's recv queue (no connect/listen needed).
   if (addr && addrlen > 0) {
+    if (addrlen < sizeof(sa_family_t)) {
+      ret = -EINVAL;
+      goto out;
+    }
+    if (sock->type == SOCK_DGRAM) {
+      struct sockaddr_un dest;
+      __memset(&dest, 0, sizeof(dest));
+      size_t cpy = addrlen > sizeof(dest) ? sizeof(dest) : addrlen;
+      if (copy_from_user(&dest, addr, cpy)) {
+        ret = -EFAULT;
+        goto out;
+      }
+      dest.sun_path[UNIX_PATH_MAX - 1] = '\0';
+      struct iovec iov = {.iov_base = (void __force *)buf, .iov_len = len};
+      file_put(f);
+      return unix_dgram_sendto(sock, &dest, &iov, 1, NULL, 0, flags);
+    }
+    // STREAM + addr: ignore addr, fall through to peer_sock send (Linux:
+    // connected stream sendto ignores the supplied address).
     if (!sock->peer_sock) {
-      ret = -EOPNOTSUPP;
+      ret = -ENOTCONN;
       goto out;
     }
   }

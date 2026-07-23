@@ -7,17 +7,18 @@
 #ifndef KERNEL_SOCKET_H
 #define KERNEL_SOCKET_H
 
+#include <stdint.h>
+
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
-#include <stdint.h>
+
+#include <xos/socket.h>
 
 // ===================== sk_buff (socket buffer) =====================
 // One per sendmsg call. Flexible array member for data.
 #define MAX_SOCKET_DATA 65536 // 64KB soft limit (same as sys_msg)
 #define MAX_SCM_FDS 8         // max fd count per SCM_RIGHTS
-
-struct iovec;
 
 typedef struct sk_buff {
   struct sk_buff *next; // linked list next
@@ -25,6 +26,8 @@ typedef struct sk_buff {
   uint32_t consumed;    // bytes already read (SOCK_STREAM partial read)
   int num_fds;          // number of SCM_RIGHTS files carried
   struct file *files[MAX_SCM_FDS]; // SCM_RIGHTS files (ref-held at sendmsg)
+  struct sockaddr_un sender_addr;  // DGRAM: sender address; STREAM: unused
+  int has_sender;                  // 1 = sender_addr valid (DGRAM bound sender)
   uint8_t data[];                  // flexible array member
 } sk_buff;
 
@@ -39,12 +42,14 @@ typedef enum unix_sock_state {
   UNIX_LISTEN,
   UNIX_CONNECTED,
   UNIX_CLOSED,
+  UNIX_DGRAM_BOUND, // DGRAM after bind: named, not connected
 } unix_sock_state;
 
 // ===================== unix_sock (per-socket kernel structure)
 // =====================
 typedef struct unix_sock {
   int state;  // UNIX_* state
+  int type;   // SOCK_STREAM / SOCK_DGRAM (set at socket()/socketpair())
   pid_t peer; // peer PID (CONNECTED)
   struct unix_sock
       *peer_sock;     // direct pointer to peer socket (socketpair/connect)
@@ -68,6 +73,13 @@ typedef struct unix_sock {
 
   // Bind path (empty = unbound/anonymous)
   char sun_path[108];
+
+  // DGRAM connect 目标路径（DGRAM connect() 缓存，send()/sendmsg() 无 addr
+  // 时按此动态查找目标）。DGRAM 不缓存持久 peer_sock 指针——对端 dgram
+  // socket 仅靠自身 fd 存活，无反向引用，缓存指针会在对端 close 后悬空
+  // （UAF）。改为每次发送按 path 借用查找（unix_dgram_sendto 已对 target
+  // 取临时 u_count 引用）。空串 = 未连接。
+  char dgram_dst_path[108];
 
   struct inode
       *bind_inode; /* VFS bind 路径：socket inode 引用（NULL=哈希表占名） */
@@ -107,6 +119,11 @@ int unix_bind_lookup(const char *sun_path, struct unix_sock **out,
 int unix_bind_register(const char *sun_path, struct unix_sock *sock,
                        pid_t owner_pid);
 void unix_bind_unregister(struct unix_sock *sock);
+// DGRAM lookup: resolve a bound SOCK_DGRAM socket by path (caller holds
+// socket_lock; returns a borrowed pointer, no u_count bump). Returns
+// -EPROTOTYPE if the path is bound to a non-DGRAM socket, -ECONNREFUSED if
+// the path exists but the socket is not bound/connected, -ENOENT if absent.
+int unix_bind_lookup_dgram(const char *sun_path, struct unix_sock **out);
 
 int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
                           size_t iovlen, const void *control, size_t controllen,
@@ -114,6 +131,20 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
 int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
                           size_t iovlen, void *control, size_t *controllen,
                           int flags, int *out_flags);
+
+// DGRAM sendto: resolve dest path -> target socket, enqueue one whole skb with
+// the sender's address filled in. Bumps target->u_count for the duration so the
+// wake-after-unlock is safe. `iov`/`control` carry the payload and SCM_RIGHTS.
+int64_t unix_dgram_sendto(struct unix_sock *src, const struct sockaddr_un *dest,
+                          const struct iovec *iov, size_t iovlen,
+                          const void *control, size_t controllen, int flags);
+
+// DGRAM recvmsg: read one whole skb (preserving message boundaries), backfill
+// the sender address, install SCM_RIGHTS, honor MSG_PEEK/MSG_TRUNC.
+int64_t unix_dgram_recvmsg(struct unix_sock *sock, const struct iovec *iov,
+                           size_t iovlen, void *control, size_t *controllen,
+                           int flags, int *out_flags,
+                           struct sockaddr_un *sender_addr, size_t *sender_len);
 
 // Syscall implementations
 int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t,
