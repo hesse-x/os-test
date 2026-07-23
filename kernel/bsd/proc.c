@@ -813,17 +813,29 @@ uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
 // parent's cloexec settings (Linux: fork/clone-without-CLONE_FILES copies).
 static void __attribute__((unused)) copy_fd_table(files *parent_files,
                                                   files *child_files) {
+  // The parent fd table is mutated by concurrent sys_close/dup2 on another CPU
+  // (fd_uninstall + file_put). Reading fd_table[fd] and later file_get(f) in
+  // two separate steps opens a window: we read a stale f, the parent closes it
+  // (file_put drives f_count to 0 → kfree + 0xAA poison), then our file_get(f)
+  // touches freed memory (file_get BUG_ON, or the child later calls the
+  // poisoned f_op->ioctl → #GP). TCG's serialized vCPUs hid this; KVM's true
+  // SMP hit it. Take the parent fd_lock so the read and the refcount bump are
+  // atomic wrt close/dup. child_files is freshly created and only this CPU sees
+  // it, so it needs no lock. tasks_lock (held by both callers) does not cover
+  // fd_table.
+  spin_lock(&parent_files->fd_lock);
   for (int fd = 0; fd < MAX_FD; fd++) {
     struct file *f = parent_files->fd_table[fd];
-    child_files->fd_table[fd] = f;
     if (f) {
       file_get(f);
       if (f->type == FD_TTY)
         pty_dup_file(f);
     }
+    child_files->fd_table[fd] = f;
   }
   __memcpy(child_files->close_on_exec, parent_files->close_on_exec,
            sizeof(child_files->close_on_exec));
+  spin_unlock(&parent_files->fd_lock);
 }
 
 // Deep-copy mmap_regions linked list from parent to child.
