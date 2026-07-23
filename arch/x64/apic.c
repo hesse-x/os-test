@@ -6,6 +6,7 @@
 
 #include "arch/x64/apic.h"
 #include "arch/x64/paging.h"
+#include "arch/x64/rtc.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/xcore/acpi.h"
@@ -292,6 +293,16 @@ void apic_init() {
 
   // Record TSC baseline for sched_clock()
   tsc_base = rdtsc64();
+
+  // Anchor the wall-clock baseline immediately after the TSC baseline:
+  // sched_clock() is now zero-referenced, so CLOCK_REALTIME =
+  // wall_clock_boot_ns + sched_clock() lines up with no window.  apic_init()
+  // runs (via irq_init) before sched_init and smp_boot_aps, so every CPU sees
+  // the anchored value.
+  wall_clock_boot_ns = rtc_read_epoch_seconds() * 1000000000ULL;
+  printk(LOG_INFO, "rtc: wall_clock_boot_ns=%lu (%lu epoch s)\n",
+         (unsigned long)wall_clock_boot_ns,
+         (unsigned long)(wall_clock_boot_ns / 1000000000ULL));
 
   // Start LAPIC periodic timer
   lapic_write(LAPIC_TIMER_DCR, 0x0B); // divide by 1

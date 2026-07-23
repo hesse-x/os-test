@@ -3,6 +3,6 @@
 # SPDX-License-Identifier: MIT
 
 add_kernel_object(arch_x64
-    SOURCES paging.c trap.c smp.c apic.c rdrand.c
+    SOURCES paging.c trap.c smp.c apic.c rdrand.c rtc.c
     ASM_SOURCES start.S vectors.S trapentry.S ap_trampoline.S
 )

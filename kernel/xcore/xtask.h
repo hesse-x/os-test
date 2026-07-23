@@ -37,6 +37,7 @@ typedef enum wait_event {
   WAIT_POLL,
   WAIT_FUTEX,
   WAIT_PAUSE, // pause(): block until any signal; may carry an alarm deadline
+  WAIT_SLEEP, // nanosleep/clock_nanosleep: block until deadline or signal
 } wait_event;
 
 #define RECV_MSG_SIZE 64

@@ -541,6 +541,15 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
       spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
       return;
     }
+    // prev continues running (no runnable competitor).  Account its CPU time
+    // for the slice since last_sched and reset the base, so a CPU-monopolizing
+    // task still advances cpu_time_ns even when the timer-tick accounting in
+    // timer_handler raced with this path.  last_sched reset prevents the next
+    // tick/switch from double-counting this slice.
+    if (prev != idle && prev->last_sched != 0) {
+      prev->cpu_time_ns += sched_clock() - prev->last_sched;
+      prev->last_sched = sched_clock();
+    }
     spin_unlock_irqrestore(&cpu_locals[my_cpu].scheduler_lock, flags);
     return; // no runnable process, prev continues
   }

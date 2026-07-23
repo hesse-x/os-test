@@ -611,6 +611,23 @@ static void timer_handler(trapframe *tf) {
   // ASSERT(cnt == run_count) panic.
   int cpu = get_cpu_local()->cpu_id;
   uint64_t now = sched_clock();
+
+  // Account the running task's CPU time on every tick and reset its last_sched
+  // base.  This decouples CPU-time accounting from task switches: a task that
+  // monopolizes a CPU (run_queue empty, no competitor) still gets its
+  // cpu_time_ns advanced every tick.  Without this,
+  // CLOCK_THREAD/PROCESS_CPUTIME stay 0 for such tasks (schedule()'s "prev
+  // continues" early return at sched.c:545 never accounts), so a user burn-loop
+  // gated on cputime spins forever.  schedule()'s switch-out path still
+  // accounts the tick→switch remainder (last_sched was just reset here, no
+  // double-count).  idle never accumulates CPU time.
+  xtask *cur = current_task;
+  xtask *idle = get_cpu_local()->idle_proc;
+  if (cur && cur != idle && cur->last_sched != 0) {
+    cur->cpu_time_ns += now - cur->last_sched;
+    cur->last_sched = now;
+  }
+
   list_node wakeup_list;
   list_init(&wakeup_list);
 
@@ -778,6 +795,11 @@ static int64_t xcore_dispatch(trapframe *tf) {
   case SYS_CLOCK_GETTIME:
     return sys_clock_gettime(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
                              tf->r9);
+  case SYS_NANOSLEEP:
+    return sys_nanosleep(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_CLOCK_NANOSLEEP:
+    return sys_clock_nanosleep(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                               tf->r9);
   case SYS_GETTID:
     return sys_gettid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_IOPERM:
@@ -813,6 +835,10 @@ const char *syscall_name(uint64_t nr) {
     return "sched_yield";
   case SYS_CLOCK_GETTIME:
     return "clock_gettime";
+  case SYS_NANOSLEEP:
+    return "nanosleep";
+  case SYS_CLOCK_NANOSLEEP:
+    return "clock_nanosleep";
   case SYS_GETTID:
     return "gettid";
   case SYS_IOPERM:

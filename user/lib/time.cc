@@ -4,14 +4,16 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 #include <syscall.h>
 #include <time.h>
 #include <unistd.h>
 
-#include <sys/ipc.h>
+#include <sys/types.h>
 #include <xos/errno.h>
+#include <xos/syscall_asm.h>
 #include <xos/syscall_nums.h>
 #include <xos/time.h>
 
@@ -42,6 +44,18 @@ clock_t clock(void) {
 int clock_gettime(int clk, struct timespec *ts) {
   if (sys_clock_gettime(clk, ts) != 0)
     return -1;
+  return 0;
+}
+
+int clock_settime(clockid_t clk, const struct timespec *ts) {
+  if (!ts)
+    return -1;
+  int64_t r =
+      __syscall2(SYS_CLOCK_SETTIME, (int64_t)clk, (int64_t)(uintptr_t)ts);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
   return 0;
 }
 
@@ -434,37 +448,57 @@ char *ctime(const time_t *t) {
   return ctime_r(t, buf);
 }
 
-/* ===================== sleep / usleep / nanosleep ===================== */
-
-unsigned int sleep(unsigned seconds) {
-  struct recv_msg msg;
-  int r = recv(&msg, NULL, 0, seconds * 1000);
-  if (r == -ETIMEDOUT)
-    return 0;
-  return 0;
-}
-
-int usleep(unsigned usec) {
-  unsigned ms = usec / 1000;
-  if (ms == 0)
-    ms = 1;
-  struct recv_msg msg;
-  recv(&msg, NULL, 0, ms);
-  return 0;
-}
+/* ===================== sleep / usleep / nanosleep / clock_nanosleep
+ * =====================
+ *
+ * nanosleep/clock_nanosleep go through the kernel syscalls (SYS_nanosleep /
+ * SYS_clock_nanosleep); the old recv()-based sleep was woken prematurely by
+ * any IPC message and truncated sub-millisecond precision.  sleep()/usleep()
+ * are layered on nanosleep.  On EINTR, sleep() resumes the remaining interval
+ * (BSD sleep(3) "sleep the full duration" semantics); nanosleep/clock_nanosleep
+ * return -1/EINTR and write the remainder to *rem (POSIX).
+ */
 
 int nanosleep(const struct timespec *req, struct timespec *rem) {
   if (!req)
     return -1;
-  unsigned ms = (unsigned)(req->tv_sec * 1000 + req->tv_nsec / 1000000);
-  if (ms == 0 && req->tv_nsec > 0)
-    ms = 1;
-  struct recv_msg msg;
-  recv(&msg, NULL, 0, ms);
-  if (rem) {
-    rem->tv_sec = 0;
-    rem->tv_nsec = 0;
+  int64_t r = __syscall2(SYS_NANOSLEEP, (int64_t)(uintptr_t)req,
+                         (int64_t)(uintptr_t)rem);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
   }
+  return 0;
+}
+
+int clock_nanosleep(clockid_t clk, int flags, const struct timespec *req,
+                    struct timespec *rem) {
+  if (!req)
+    return -1;
+  int64_t r = __syscall4(SYS_CLOCK_NANOSLEEP, (int64_t)clk, (int64_t)flags,
+                         (int64_t)(uintptr_t)req, (int64_t)(uintptr_t)rem);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+unsigned int sleep(unsigned seconds) {
+  struct timespec req = {(time_t)seconds, 0};
+  struct timespec rem;
+  while (nanosleep(&req, &rem) == -1 && errno == EINTR)
+    req = rem; // resume the remaining interval after a signal
+  return 0;
+}
+
+int usleep(unsigned usec) {
+  struct timespec req;
+  req.tv_sec = (time_t)(usec / 1000000U);
+  req.tv_nsec = (long)((usec % 1000000U) * 1000U);
+  struct timespec rem;
+  while (nanosleep(&req, &rem) == -1 && errno == EINTR)
+    req = rem;
   return 0;
 }
 

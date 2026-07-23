@@ -59,9 +59,10 @@ global:
     toupper;
 
     /* <time.h> */
-    clock; clock_gettime; ctime; ctime_r; asctime; asctime_r; difftime;
-    gettimeofday; gmtime; gmtime_r; localtime; localtime_r; mktime;
-    nanosleep; strftime; time; timespec_get; timespec_to_tm; timezone;
+    clock; clock_gettime; clock_settime; ctime; ctime_r; asctime; asctime_r;
+    difftime; clock_nanosleep; gettimeofday; gmtime; gmtime_r; localtime;
+    localtime_r; mktime; nanosleep; strftime; time; timespec_get;
+    timespec_to_tm; timezone;
     daylight; tzname; tzset;
 
     /* <signal.h> */

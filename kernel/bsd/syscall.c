@@ -10,11 +10,11 @@
 #include "kernel/bsd/syscall.h"
 
 #include <stdbool.h>
-#include <stddef.h>
 
 #include "arch/x64/apic.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
+#include "arch/x64/rtc.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
@@ -2613,7 +2613,31 @@ int64_t sys_utimensat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
 }
 int64_t sys_clock_settime(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                           int64_t a5, int64_t a6) {
-  return -ENOSYS;
+  int clk = (int)a1;
+  const struct timespec __user *ts_u =
+      (const struct timespec __user *)(uintptr_t)a2;
+
+  // Only CLOCK_REALTIME / CLOCK_TAI may be set (Linux likewise); others -EPERM.
+  if (clk != CLOCK_REALTIME && clk != CLOCK_TAI)
+    return -EPERM;
+
+  // No capabilities framework yet — any process may set the wall clock (Linux
+  // requires CAP_SYS_TIME; todo: gate once capabilities land).
+  struct timespec kts;
+  if (copy_from_user(&kts, ts_u, sizeof(kts)))
+    return -EFAULT;
+  if (kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L)
+    return -EINVAL;
+
+  // Adjust the in-memory offset so the next CLOCK_REALTIME read returns new_ns
+  // at this instant: wall_clock_boot_ns = new_ns - sched_clock().  CMOS is not
+  // written back (todo: NVRAM persistence).  uint64 wraparound makes a past
+  // time still land on the right value modulo 2^64, matching Linux.
+  uint64_t new_ns =
+      (uint64_t)kts.tv_sec * 1000000000ULL + (uint64_t)kts.tv_nsec;
+  uint64_t boot_ns = new_ns - sched_clock();
+  __atomic_store_n(&wall_clock_boot_ns, boot_ns, __ATOMIC_RELEASE);
+  return 0;
 }
 int64_t sys_getitimer(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                       int64_t a5, int64_t a6) {
@@ -2910,8 +2934,8 @@ int64_t sys_dup3(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
 // A8: gettimeofday(tv, tz) — thin wrapper over clock_gettime(CLOCK_REALTIME)
 // tz is always ignored (Linux returns 0 for tz, most callers pass NULL).
-// NOTE: CLOCK_REALTIME currently uses sched_clock() (monotonic, same as
-// CLOCK_MONOTONIC) — no wall-clock source yet. See E7 (deferred).
+// CLOCK_REALTIME = wall_clock_boot_ns (RTC epoch anchored at boot) +
+// sched_clock() (monotonic nanoseconds since boot).
 int64_t sys_gettimeofday(int64_t arg1, int64_t arg2, int64_t unused1,
                          int64_t unused2, int64_t unused3, int64_t unused4) {
   struct timeval __user *tv = (struct timeval __user *)(uintptr_t)arg1;
@@ -2921,7 +2945,7 @@ int64_t sys_gettimeofday(int64_t arg1, int64_t arg2, int64_t unused1,
     return 0; // Linux: tv=NULL is valid (just don't fill it)
 
   uint64_t ns =
-      sched_clock(); // CLOCK_REALTIME = sched_clock() for now (E7 TODO)
+      __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
   struct timeval ktv;
   ktv.tv_sec = (time_t)(ns / 1000000000ULL);
   ktv.tv_usec = (long)(ns % 1000000000ULL) / 1000;

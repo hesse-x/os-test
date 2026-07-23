@@ -14,6 +14,7 @@
 
 typedef long clock_t;
 typedef long time_t;
+typedef int clockid_t;
 
 #define CLOCKS_PER_SEC 1000000
 
@@ -44,9 +45,14 @@ LIBC_EXPORT extern char *tzname[2];
 LIBC_EXPORT int timespec_get(struct timespec *ts, int base);
 LIBC_EXPORT clock_t clock(void);
 LIBC_EXPORT int nanosleep(const struct timespec *req, struct timespec *rem);
+LIBC_EXPORT int clock_nanosleep(clockid_t clk, int flags,
+                                const struct timespec *req,
+                                struct timespec *rem);
+LIBC_EXPORT int usleep(unsigned usec);
 
 /* clock_gettime / gettimeofday (wraps sys_clock_gettime) */
 LIBC_EXPORT int clock_gettime(int clk, struct timespec *ts);
+LIBC_EXPORT int clock_settime(clockid_t clk, const struct timespec *ts);
 LIBC_EXPORT int gettimeofday(struct timeval *tv, void *tz);
 
 /* Calendar conversion (UTC-only) */

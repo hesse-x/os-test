@@ -117,6 +117,7 @@ if [ "$TEST" = "1" ]; then
                ld_test_diamond.elf ld_test_cycle.elf \
                drm_test.elf drm_ioctl.elf drm_phase_c.elf ioctl_varlen.elf \
                epoll.elf eventfd.elf timerfd.elf signalfd.elf mount.elf \
+               test_clock_realtime.elf test_time_sleep.elf test_clock_cputime.elf \
                test_sysfs.elf test_libudev.elf drm_test_link.elf \
                test_vfs_dispatch.elf test_inode_refcount.elf test_tmpfs_socket.elf \
                test_rename.elf test_udevd_db.elf test_udevd.elf test_dev_vfs_dynamic.elf \

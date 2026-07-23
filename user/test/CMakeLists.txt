@@ -97,6 +97,13 @@ add_user_dyn_elf(timerfd C SOURCES test_timerfd.c ${CMAKE_SOURCE_DIR}/third_part
 # Layer 19: signalfd
 add_user_dyn_elf(signalfd C SOURCES test_signalfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 
+# S14: CLOCK_REALTIME wall clock (CMOS RTC) + clockid set + clock_settime
+add_user_dyn_elf(test_clock_realtime C SOURCES test_clock_realtime.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+# S15: nanosleep/clock_nanosleep (relative + TIMER_ABSTIME) + EINTR rem
+add_user_dyn_elf(test_time_sleep C SOURCES test_time_sleep.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+# S15: CLOCK_PROCESS_CPUTIME_ID process-level CPU time
+add_user_dyn_elf(test_clock_cputime C SOURCES test_clock_cputime.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+
 # Layer 20: getrandom (/dev/(u)random + libc 封装)
 add_user_dyn_elf(getrandom C SOURCES test_getrandom.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 

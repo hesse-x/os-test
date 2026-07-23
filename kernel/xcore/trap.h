@@ -82,6 +82,9 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
 int64_t sys_ioperm(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_gettid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_clock_gettime(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_nanosleep(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_clock_nanosleep(int64_t, int64_t, int64_t, int64_t, int64_t,
+                            int64_t);
 int64_t sys_pthread_setup(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // IRQ registration

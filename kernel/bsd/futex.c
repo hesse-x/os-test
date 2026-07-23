@@ -9,6 +9,7 @@
 // irqsave
 
 #include "kernel/bsd/futex.h"
+#include "arch/x64/rtc.h"
 #include "arch/x64/smp.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/xcore/kpi.h"
@@ -150,7 +151,16 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
   cur->wait_timed_out = 0;
   if (has_timeout) {
-    cur->wait_deadline = abstime_ns; // absolute abstime
+    // The abstime passed by pthread_mutex_timedlock/etc. is a CLOCK_REALTIME
+    // absolute instant (POSIX).  The timer_queue compares wait_deadline against
+    // sched_clock() (monotonic, zero at boot), so convert the wall-clock
+    // abstime into sched_clock coordinates by subtracting the boot wall-clock
+    // baseline.  Before S14, CLOCK_REALTIME == sched_clock() so this was a
+    // no-op; now CLOCK_REALTIME = wall_clock_boot_ns + sched_clock() and the
+    // subtraction is required.  Underflow (past time) wraps to a huge deadline
+    // that still lands on the right value modulo 2^64.
+    uint64_t boot_ns = __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED);
+    cur->wait_deadline = (uint64_t)abstime_ns - boot_ns;
     sched_timer_queue_insert(cpu, cur);
   }
   cur->wait_event = WAIT_FUTEX;

@@ -13,6 +13,7 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
+#include "arch/x64/rtc.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/xcore/acpi.h"
@@ -688,15 +689,47 @@ int64_t sys_clock_gettime(int64_t clk, int64_t ts_arg, int64_t unused3,
   struct timespec __user *ts = (struct timespec __user *)(uintptr_t)ts_arg;
   uint64_t ns;
   switch ((int)clk) {
+  // Monotonic family — this OS has no NTP/adjtimex and no suspend, so the raw,
+  // coarse and boottime clocks all equal the plain monotonic TSC clock.
   case CLOCK_MONOTONIC:
+  case CLOCK_MONOTONIC_RAW:
+  case CLOCK_MONOTONIC_COARSE:
+  case CLOCK_BOOTTIME:
     ns = sched_clock();
     break;
-  case CLOCK_PROCESS_CPUTIME_ID:
+  // Realtime family — wall_clock_boot_ns anchors RTC epoch at boot; coarse and
+  // TAI equal realtime (no coarse clock source, no TAI offset).
+  case CLOCK_REALTIME:
+  case CLOCK_REALTIME_COARSE:
+  case CLOCK_TAI:
+    ns = __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
+    break;
+  // Per-thread CPU time: xtask is the thread, cpu_time_ns is its user+sys
+  // total.
+  case CLOCK_THREAD_CPUTIME_ID:
     ns = current_task->cpu_time_ns;
     break;
-  case CLOCK_REALTIME:
-    ns = sched_clock(); // TODO: 真实时钟;暂复用单调时钟
+  // Per-process CPU time: sum cpu_time_ns over the whole thread group (all
+  // tasks sharing current's tgid).  Linear scan of the 1024-slot task table
+  // under tasks_lock — same order as alloc/reap; todo: thread-group list when
+  // process counts grow (with S19).
+  case CLOCK_PROCESS_CPUTIME_ID: {
+    uint64_t sum = 0;
+    pid_t my_tgid = current_task->tgid;
+    spin_lock(&tasks_lock);
+    for (int i = 0; i < MAX_PROC; i++) {
+      xtask *t = tasks[i];
+      if (!t)
+        continue;
+      if (t->state == UNUSED || t->state == REAPING)
+        continue;
+      if (t->tgid == my_tgid)
+        sum += t->cpu_time_ns;
+    }
+    spin_unlock(&tasks_lock);
+    ns = sum;
     break;
+  }
   default:
     return -EINVAL;
   }
@@ -705,6 +738,110 @@ int64_t sys_clock_gettime(int64_t clk, int64_t ts_arg, int64_t unused3,
   if (copy_to_user(ts, &kts, sizeof(kts)))
     return -EFAULT;
   return 0;
+}
+
+// sleep_until_deadline: arm a WAIT_SLEEP timed wait on `deadline_ns` (in
+// sched_clock coordinates), block, then return 0 on timeout or -EINTR on
+// signal interruption (writing the remaining time to *rem_u when non-NULL and
+// the wait was relative — abstime callers ignore rem per POSIX).  Mirrors the
+// sys_recv / sys_pause arm-under-scheduler_lock + schedule + signal-check
+// skeleton; WAIT_SLEEP differs from WAIT_PAUSE in that timeout does not force
+// a signal (plain wake).  `write_rem` gates the rem copyout (abstime never
+// writes rem).
+static int64_t sleep_until_deadline(uint64_t deadline_ns,
+                                    struct timespec __user *rem_u,
+                                    int write_rem) {
+  xtask *p = current_task;
+  int cpu = p->assigned_cpu;
+  uint64_t flags;
+  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+  p->wait_event = WAIT_SLEEP;
+  p->wait_deadline = deadline_ns;
+  p->wait_timed_out = 0;
+  p->state = BLOCKED;
+  timer_queue_wait_push(cpu, p);
+  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+
+  schedule();
+
+  if (p->wait_timed_out)
+    return 0;
+
+  // Interrupted by a signal (wake_process_any path cleared wait_timed_out).
+  if (rem_u && write_rem) {
+    uint64_t now = sched_clock();
+    uint64_t rem_ns = deadline_ns > now ? deadline_ns - now : 0;
+    struct timespec krem;
+    krem.tv_sec = (time_t)(rem_ns / 1000000000ULL);
+    krem.tv_nsec = (long)(rem_ns % 1000000000ULL);
+    if (copy_to_user(rem_u, &krem, sizeof(krem)))
+      return -EFAULT;
+  }
+  return -EINTR;
+}
+
+// nanosleep(35): sleep for a relative interval.  rem (if non-NULL) receives the
+// remaining time on EINTR.
+int64_t sys_nanosleep(int64_t req_arg, int64_t rem_arg, int64_t unused3,
+                      int64_t unused4, int64_t unused5, int64_t unused6) {
+  struct timespec __user *req = (struct timespec __user *)(uintptr_t)req_arg;
+  struct timespec __user *rem = (struct timespec __user *)(uintptr_t)rem_arg;
+  struct timespec kreq;
+  if (copy_from_user(&kreq, req, sizeof(kreq)))
+    return -EFAULT;
+  if (kreq.tv_sec < 0 || kreq.tv_nsec < 0 || kreq.tv_nsec >= 1000000000L)
+    return -EINVAL;
+  uint64_t req_ns =
+      (uint64_t)kreq.tv_sec * 1000000000ULL + (uint64_t)kreq.tv_nsec;
+  if (req_ns == 0)
+    req_ns = 1; // >=1ns: avoid a deadline == now busy-wakeup loop
+  uint64_t deadline = sched_clock() + req_ns;
+  return sleep_until_deadline(deadline, rem, 1);
+}
+
+// clock_nanosleep(230): relative or absolute (TIMER_ABSTIME) sleep on
+// CLOCK_MONOTONIC or CLOCK_REALTIME.  rem is meaningful only for relative
+// waits; abstime callers ignore it.
+int64_t sys_clock_nanosleep(int64_t clk, int64_t flags_arg, int64_t req_arg,
+                            int64_t rem_arg, int64_t unused5, int64_t unused6) {
+  int clockid = (int)clk;
+  int flags = (int)flags_arg;
+  if (flags & ~TIMER_ABSTIME)
+    return -EINVAL;
+  if (clockid != CLOCK_MONOTONIC && clockid != CLOCK_REALTIME)
+    return -EINVAL;
+
+  struct timespec __user *req = (struct timespec __user *)(uintptr_t)req_arg;
+  struct timespec __user *rem = (struct timespec __user *)(uintptr_t)rem_arg;
+  struct timespec kreq;
+  if (copy_from_user(&kreq, req, sizeof(kreq)))
+    return -EFAULT;
+  if (kreq.tv_sec < 0 || kreq.tv_nsec < 0 || kreq.tv_nsec >= 1000000000L)
+    return -EINVAL;
+  uint64_t req_ns =
+      (uint64_t)kreq.tv_sec * 1000000000ULL + (uint64_t)kreq.tv_nsec;
+
+  uint64_t deadline;
+  uint64_t now = sched_clock();
+  int abstime = (flags & TIMER_ABSTIME) ? 1 : 0;
+  if (abstime) {
+    if (clockid == CLOCK_MONOTONIC) {
+      deadline = req_ns; // already in sched_clock coordinates
+    } else {             // CLOCK_REALTIME: req is wall-clock ns
+      uint64_t boot_ns = __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED);
+      if (req_ns <= boot_ns)
+        return 0;                  // already in the past
+      deadline = req_ns - boot_ns; // convert to sched_clock coordinates
+    }
+    if (deadline <= now)
+      return 0; // already passed
+  } else {
+    if (req_ns == 0)
+      req_ns = 1;
+    deadline = now + req_ns;
+  }
+  // rem is only written for relative waits (POSIX: abstime ignores rem).
+  return sleep_until_deadline(deadline, rem, !abstime);
 }
 
 int64_t sys_pthread_setup(int64_t arg1, int64_t unused2, int64_t unused3,
