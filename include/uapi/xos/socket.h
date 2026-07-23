@@ -119,11 +119,20 @@ typedef struct pollfd {
 } pollfd;
 
 // ===================== Flags for sendmsg/recvmsg =====================
-#define MSG_EOR 0x80      // end of record
-#define MSG_TRUNC 0x20    // data truncated
-#define MSG_CTRUNC 0x08   // control data truncated
-#define MSG_OOB 0x01      // out-of-band data
-#define MSG_DONTWAIT 0x40 // nonblocking
+#define MSG_EOR 0x80        // end of record
+#define MSG_TRUNC 0x20      // data truncated
+#define MSG_CTRUNC 0x08     // control data truncated
+#define MSG_OOB 0x01        // out-of-band data
+#define MSG_DONTWAIT 0x40   // nonblocking
+#define MSG_PEEK 0x02       // peek without consuming
+#define MSG_WAITALL 0x100   // block until full request is satisfied
+#define MSG_NOSIGNAL 0x4000 // don't raise SIGPIPE on EPIPE
+// Defined for UAPI completeness; not yet implemented (see doc/design/todo.md).
+#define MSG_ERRQUEUE 0x2000         // socket error queue (no infra)
+#define MSG_PROBE 0x10              // probe connection without sending
+#define MSG_CONFIRM 0x800           // confirm path validity
+#define MSG_MORE 0x8000             // coalesce pending sends
+#define MSG_CMSG_CLOEXEC 0x40000000 // set CLOEXEC on SCM_RIGHTS fds (needs S06)
 
 // ===================== Socket options (SOL_SOCKET level) =====================
 #define SO_DEBUG 1

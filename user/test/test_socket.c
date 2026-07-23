@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <signal.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -127,7 +128,9 @@ void test_shutdown_write(void) {
   close(sv[1]);
 }
 
-/* 9. shutdown SHUT_RD → peer write returns error */
+/* 9. shutdown SHUT_RD → peer write returns -EPIPE. S16 made sendmsg raise
+ * SIGPIPE on this EPIPE path (POSIX default); the test ignores SIGPIPE so the
+ * process survives to observe the -EPIPE return value. */
 void test_shutdown_read(void) {
   int sv[2];
   socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
@@ -136,7 +139,7 @@ void test_shutdown_read(void) {
 
   /* Writing from sv[1] to sv[0] which has shut down read */
   ssize_t w = sock_send(sv[1], "x", 1);
-  (void)w;
+  TEST_ASSERT_TRUE(w < 0);
 
   close(sv[0]);
   close(sv[1]);
@@ -179,6 +182,10 @@ int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
   (void)envp;
+  /* S16: sendmsg/pipe now raise SIGPIPE on EPIPE (POSIX default). Several
+   * tests below write to a peer whose read end is shut/closed; ignore SIGPIPE
+   * process-wide so those writes return -EPIPE instead of killing the test. */
+  signal(SIGPIPE, SIG_IGN);
   UNITY_BEGIN();
   RUN_TEST(test_socket_create);
   RUN_TEST(test_bind_listen);

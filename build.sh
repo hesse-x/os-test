@@ -41,11 +41,12 @@ fi
 
 # 1. CMake build (kernel + userspace)
 mkdir -p build && cd build
-cmake -DCMAKE_TOOLCHAIN_FILE=../build_script/cmake/toolchain-x86_64.cmake \
+cmake -GNinja \
+      -DCMAKE_TOOLCHAIN_FILE=../build_script/cmake/toolchain-x86_64.cmake \
       -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
       $CMAKE_EXTRA \
       ..
-make
+ninja
 cd ..
 
 # 2. Publish sysroot artifacts (UAPI headers + libs → self-contained cross-target)

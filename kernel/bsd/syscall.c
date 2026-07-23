@@ -1618,7 +1618,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       ret = -EBADF;
       goto out;
     }
-    ret = unix_sock_write(sock, (const void __force *)buf, len);
+    ret = unix_sock_write(sock, (const void __force *)buf, len, 0);
     goto out;
   }
 
@@ -1747,6 +1747,12 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     if (refcount_read(&p->p_count) <= 1) {
       if (written > 0)
         break;
+      // All read ends closed: POSIX raises SIGPIPE on pipe write by default.
+      // Use the normal delivery path (not force_sig) so an explicit SIG_IGN or
+      // blocked SIGPIPE is honored — write still returns -EPIPE either way.
+      // force_sig would reset SIG_IGN→SIG_DFL, defeating
+      // signal(SIGPIPE,SIG_IGN).
+      deliver_signal_to(current_task, SIGPIPE);
       ret = -EPIPE;
       goto out;
     }
@@ -2006,7 +2012,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       ret = -EBADF;
       goto out;
     }
-    ret = unix_sock_read(sock, (void __force *)buf, len);
+    ret = unix_sock_read(sock, (void __force *)buf, len, 0);
     goto out;
   }
 

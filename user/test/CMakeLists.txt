@@ -31,6 +31,11 @@ add_user_dyn_elf(ipc C SOURCES test_ipc.c ${CMAKE_SOURCE_DIR}/third_party/Unity/
 # Layer 6: socket
 add_user_dyn_elf(socket C SOURCES test_socket.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 
+# S16: recvmsg/sendmsg/poll flag semantics — MSG_PEEK / MSG_TRUNC / MSG_WAITALL
+# / EPIPE→SIGPIPE (MSG_NOSIGNAL) / SCM_RIGHTS MSG_CTRUNC / poll POLLNVAL /
+# msg_flags writeback.
+add_user_dyn_elf(test_socket_msgflags C SOURCES test_socket_msgflags.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+
 # Layer 7: process
 add_user_dyn_elf(process C SOURCES test_process.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 

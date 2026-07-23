@@ -26,6 +26,7 @@ static struct test_entry tests[] = {
     {"mmap", "/test/mmap.elf"},
     {"ipc", "/test/ipc.elf"},
     {"socket", "/test/socket.elf"},
+    {"socket_msgflags", "/test/test_socket_msgflags.elf"},
     {"process", "/test/process.elf"},
     {"signal", "/test/signal.elf"},
     {"signal_stop", "/test/signal_stop.elf"},

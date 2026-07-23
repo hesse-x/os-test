@@ -759,7 +759,14 @@ static __attribute__((unused)) int drm_fence_wait(struct drm_fence *fence,
     }
     schedule();
   }
-  current_task->state = READY;
+  // prepare_to_wait: the loop marks BLOCKED at the top. If a concurrent
+  // fence ISR woke us (state=READY + run_node pushed) between marking BLOCKED
+  // and the signaled/reached check, breaking out without schedule() leaves a
+  // dangling run_node — a steal would later ASSERT(state==READY) on a RUNNING
+  // task. Cancel any such spurious wake; RUNNING is unconditional because the
+  // first-iteration break path never ran schedule() (state still BLOCKED).
+  current_task->state = RUNNING;
+  sched_cancel_spurious_wake(current_task);
   remove_wait_queue(&fence->wq, &wait);
   return ret;
 }
@@ -960,7 +967,11 @@ static int drm_syncobj_wait_one(struct drm_syncobj *so, uint64_t point,
     }
     schedule();
   }
-  current_task->state = READY;
+  // prepare_to_wait: see drm_fence_wait — cancel a spurious wake that pushed
+  // run_node without a matching schedule() dequeue, and force RUNNING for the
+  // first-iteration break path (state still BLOCKED, never scheduled).
+  current_task->state = RUNNING;
+  sched_cancel_spurious_wake(current_task);
   remove_wait_queue(&so->wq, &wait);
   return ret;
 }

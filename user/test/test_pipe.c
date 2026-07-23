@@ -7,6 +7,7 @@
 #include "user/test/test_helpers.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -123,15 +124,20 @@ void test_pipe_close_read_eof(void) {
   close(fd[0]);
 }
 
-/* 7. Close read end → write returns -EPIPE */
+/* 7. Close read end → write returns -EPIPE. POSIX raises SIGPIPE on this by
+ * default (which would terminate the test process before write() returns);
+ * install SIG_IGN so the process survives to observe the -EPIPE return. */
 void test_pipe_close_write_epipe(void) {
   int fd[2];
   pipe(fd);
 
   close(fd[0]);
 
+  void *oldh = signal(SIGPIPE, SIG_IGN);
   ssize_t w = write(fd[1], "x", 1);
+  signal(SIGPIPE, oldh);
   TEST_ASSERT_TRUE(w < 0);
+  TEST_ASSERT_EQUAL_INT(EPIPE, errno);
 
   close(fd[1]);
 }

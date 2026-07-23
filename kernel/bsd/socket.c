@@ -18,6 +18,7 @@
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/socket.h"
+#include "kernel/bsd/syscall.h" // deliver_signal_to, SIGPIPE
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/vfs.h"
 #include "kernel/xcore/list.h"
@@ -378,12 +379,18 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
                           size_t iovlen, const void *control, size_t controllen,
                           int flags) {
   // Check shutdown_write on our socket
-  if (sock->shutdown_write)
+  if (sock->shutdown_write) {
+    if (!(flags & MSG_NOSIGNAL))
+      deliver_signal_to(current_task, SIGPIPE);
     return -EPIPE;
+  }
   // Check peer shutdown_read — sending to a socket whose read side is shut down
   // should EPIPE
-  if (sock->peer_sock && sock->peer_sock->shutdown_read)
+  if (sock->peer_sock && sock->peer_sock->shutdown_read) {
+    if (!(flags & MSG_NOSIGNAL))
+      deliver_signal_to(current_task, SIGPIPE);
     return -EPIPE;
+  }
 
   // Calculate total data length
   uint32_t total = 0;
@@ -468,6 +475,8 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
     // reached
     WARN_ON(!peer_sock);
     skb_free(skb);
+    if (!(flags & MSG_NOSIGNAL))
+      deliver_signal_to(current_task, SIGPIPE);
     return -EPIPE;
   }
 
@@ -476,6 +485,8 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
   if (peer_sock->shutdown_read) {
     spin_unlock(&socket_lock);
     skb_free(skb);
+    if (!(flags & MSG_NOSIGNAL))
+      deliver_signal_to(current_task, SIGPIPE);
     return -EPIPE;
   }
 
@@ -499,10 +510,32 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
 
 int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
                           size_t iovlen, void *control, size_t *controllen,
-                          int flags) {
+                          int flags, int *out_flags) {
   bool nonblock = (flags & MSG_DONTWAIT) != 0;
+  bool peek = (flags & MSG_PEEK) != 0;
+  bool waitall = (flags & MSG_WAITALL) != 0 && !nonblock;
 
-  while (1) {
+  // Writable iov copy so MSG_WAITALL can advance iov_base/iov_len across
+  // multiple skb deliveries without mutating the caller's array. sendmsg uses
+  // the same kiov pattern (symmetry). For the common single-recv path this is
+  // one small allocation.
+  struct iovec *kiov = (struct iovec *)kmalloc(iovlen * sizeof(struct iovec));
+  if (!kiov)
+    return -ENOMEM;
+  for (size_t i = 0; i < iovlen; i++)
+    kiov[i] = iov[i];
+
+  size_t total_want = 0; // bytes still requested across all iovs
+  for (size_t i = 0; i < iovlen; i++)
+    total_want += kiov[i].iov_len;
+
+  size_t total_filled = 0; // bytes filled so far (WAITALL accumulation)
+  // Length of the most recently read skb (full skb->len, independent of how
+  // much fit in the buffer). Used for MSG_TRUNC's DGRAM-style return value
+  // (report the true datagram/record length even when the buffer was smaller).
+  uint32_t last_skb_len = 0;
+
+  for (;;) {
     spin_lock(&socket_lock);
 
     // Check recv queue
@@ -513,12 +546,12 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
       // 1) Our own shutdown_read
       if (sock->shutdown_read) {
         spin_unlock(&socket_lock);
-        return 0; // EOF
+        break; // EOF
       }
       // 2) Peer shutdown_write (we will never receive more data)
       if (sock->peer_sock && sock->peer_sock->shutdown_write) {
         spin_unlock(&socket_lock);
-        return 0; // EOF — peer shut down write side
+        break; // EOF — peer shut down write side
       }
       // 3) Socket closed or peer zombie
       if (sock->state == UNIX_CLOSED ||
@@ -532,12 +565,19 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
         }
         if (peer_closed) {
           spin_unlock(&socket_lock);
-          return 0; // EOF
+          break; // EOF
         }
       }
 
+      // MSG_WAITALL with partial data already filled: if the peer hit EOF
+      // mid-fill, fall through to return what we have (Linux: short read on
+      // EOF). Detected above via the break paths; reaching here means the
+      // queue is still empty but not EOF — block (or EAGAIN/EINTR).
       if (nonblock) {
         spin_unlock(&socket_lock);
+        kfree(kiov);
+        if (total_filled > 0)
+          return (int64_t)total_filled;
         return -EAGAIN;
       }
 
@@ -564,6 +604,9 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
       if (proc->wait_timed_out) {
         proc->state = RUNNING;
         remove_wait_queue(sock->wq, &wait);
+        kfree(kiov);
+        if (total_filled > 0)
+          return (int64_t)total_filled;
         return -ETIMEDOUT;
       }
       // EINTR check
@@ -575,6 +618,11 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
         if (deliv) {
           proc->state = RUNNING;
           remove_wait_queue(sock->wq, &wait);
+          kfree(kiov);
+          // Linux MSG_WAITALL: a signal interrupting a partial read returns
+          // the bytes already copied; with nothing copied, return -EINTR.
+          if (total_filled > 0)
+            return (int64_t)total_filled;
           return (int64_t)-EINTR;
         }
       }
@@ -583,32 +631,54 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
       continue; // 醒后回顶重新 lock → 重查 recv_queue
     }
 
-    ; // We have data. Calculate how much to read.
+    // We have data. Calculate how much to read into the remaining iov space.
+    last_skb_len = skb->len;
     uint32_t avail = skb->len - skb->consumed;
     uint32_t to_read = 0;
     for (size_t i = 0; i < iovlen && to_read < avail; i++) {
-      uint32_t copy = (uint32_t)iov[i].iov_len;
+      uint32_t copy = (uint32_t)kiov[i].iov_len;
       if (copy > avail - to_read)
         copy = avail - to_read;
       to_read += copy;
     }
 
-    // Copy data to iovecs
+    // Copy data to iovecs (from the writable kiov, which carries the
+    // per-iov offset advanced by prior WAITALL iterations).
     uint32_t data_offset = skb->consumed;
     uint32_t remaining = to_read;
     for (size_t i = 0; i < iovlen && remaining > 0; i++) {
-      if (iov[i].iov_base && iov[i].iov_len > 0) {
-        uint32_t copy = (uint32_t)iov[i].iov_len;
+      if (kiov[i].iov_base && kiov[i].iov_len > 0) {
+        uint32_t copy = (uint32_t)kiov[i].iov_len;
         if (copy > remaining)
           copy = remaining;
-        if (copy_to_user((void __user *)iov[i].iov_base,
+        if (copy_to_user((void __user *)kiov[i].iov_base,
                          skb->data + data_offset, copy)) {
           spin_unlock(&socket_lock);
+          kfree(kiov);
           return -EFAULT;
         }
         data_offset += copy;
         remaining -= copy;
       }
+    }
+
+    // MSG_PEEK: do not consume the skb. Data stays in the queue for the next
+    // recv; ancillary (SCM_RIGHTS) fds are not transferred on PEEK (Linux:
+    // PEEK leaves ancillary data in the queue for a subsequent normal recv).
+    // The reported byte count is normally `to_read` (PEEK returns the same
+    // count as a normal read, it just doesn't advance). MSG_TRUNC|PEEK
+    // returns the full skb length instead.
+    if (peek) {
+      spin_unlock(&socket_lock);
+      if (control && controllen)
+        *controllen = 0;
+      kfree(kiov);
+      if (flags & MSG_TRUNC) {
+        if (out_flags && last_skb_len > to_read)
+          *out_flags |= MSG_TRUNC;
+        return (int64_t)last_skb_len;
+      }
+      return (int64_t)to_read;
     }
 
     skb->consumed += to_read;
@@ -642,6 +712,7 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
     // listening fd is bound by init but accept/sendmsg run in udevd).
     int installed_fds[SCM_MAX_FD];
     int num_fds_installed = 0;
+    bool scm_truncated = false; // EMFILE: fewer installed than requested
     if (do_scm) {
       xtask *proc = current_task;
       for (int i = 0; i < num_fds_to_install && num_fds_installed < SCM_MAX_FD;
@@ -655,7 +726,8 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
         if (new_fd < 0) {
           spin_unlock(fdlk);
           file_put(src); // drop this file's ref
-          break;         // no free fd slots
+          scm_truncated = true;
+          break; // no free fd slots
         }
         fd_install(proc->proc->files, new_fd,
                    src); // install pointer directly, no extra bump needed
@@ -687,14 +759,61 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
         }
         *controllen = cmsg->cmsg_len;
       } else {
+        // Control buffer too small for even one fd: report truncation. The
+        // fds are still installed in the receiver's table (consumed); only the
+        // ancillary report is lost. Linux sets MSG_CTRUNC and zeroes
+        // msg_controllen.
         *controllen = 0;
+        if (out_flags)
+          *out_flags |= MSG_CTRUNC;
       }
     } else if (control && controllen) {
       *controllen = 0;
     }
+    // EMFILE mid-install: fewer fds installed than the skb carried. The
+    // receiver got a partial set; signal that ancillary data was truncated.
+    if (scm_truncated && out_flags)
+      *out_flags |= MSG_CTRUNC;
 
-    return (int64_t)to_read;
+    // Advance the writable iov copy by the bytes just filled, so a subsequent
+    // WAITALL iteration continues filling where this one left off.
+    {
+      uint32_t adv = to_read;
+      for (size_t i = 0; i < iovlen && adv > 0; i++) {
+        if (kiov[i].iov_len <= adv) {
+          adv -= (uint32_t)kiov[i].iov_len;
+          kiov[i].iov_len = 0;
+        } else {
+          kiov[i].iov_base =
+              (void *)((char *)(__force uintptr_t)kiov[i].iov_base + adv);
+          kiov[i].iov_len -= adv;
+          adv = 0;
+        }
+      }
+    }
+    total_filled += to_read;
+
+    if (!waitall || total_filled >= total_want)
+      break; // request satisfied (or single-recv semantics)
+    // WAITALL: loop to fetch the next skb (blocking again at queue head).
   }
+
+  kfree(kiov);
+
+  // MSG_TRUNC (DGRAM-style semantics for AF_UNIX STREAM, per S16 design):
+  // the return value is the true length of the datagram/record on the queue
+  // (the full skb), even when the user buffer was smaller and only part was
+  // copied. The buffer is still filled with whatever fit. Flag MSG_TRUNC so
+  // the caller knows the record was larger than the buffer. For WAITALL the
+  // relevant record is the final skb read (last_skb_len); without WAITALL a
+  // single recv reads exactly one skb, so last_skb_len is that skb's length.
+  if (flags & MSG_TRUNC) {
+    if (out_flags && last_skb_len > total_filled)
+      *out_flags |= MSG_TRUNC;
+    return (int64_t)last_skb_len;
+  }
+
+  return (int64_t)total_filled;
 }
 
 // ===================== socket close / cleanup =====================
@@ -1640,6 +1759,11 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     kcontrollen = kmsg.msg_controllen;
   }
 
+  // recvmsg(2): msg_flags is an output field; the value passed in is ignored
+  // and the kernel writes the result flags (e.g. MSG_TRUNC/MSG_CTRUNC) here.
+  // Zero it before the recv so unix_sock_recvmsg can OR in status bits.
+  kmsg.msg_flags = 0;
+
   int64_t ret;
   if (rf->type == FD_NETLINK) {
     struct netlink_sock *nlsock = rf->nlsock;
@@ -1673,12 +1797,22 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       return (int64_t)-EBADF;
     }
     ret = unix_sock_recvmsg(sock, kiov, kmsg.msg_iovlen, kcontrol, &kcontrollen,
-                            flags);
+                            flags, &kmsg.msg_flags);
     // Update msg_controllen in user space (existing code)
     if (ret >= 0) {
       if (kmsg.msg_control && kmsg.msg_controllen > 0) {
         if (copy_to_user((void __user *)((char __user *)msg + 40), &kcontrollen,
                          sizeof(size_t)))
+          ret = (int64_t)-EFAULT;
+      }
+      // Write back msg_flags (MSG_TRUNC/MSG_CTRUNC) so the caller can detect
+      // truncation. Use offsetof rather than a hardcoded offset so this stays
+      // correct if the msghdr layout ever changes. user/kernel share the same
+      // <xos/socket.h> msghdr, so the offset is identical.
+      if (ret >= 0) {
+        size_t flags_off = offsetof(struct msghdr, msg_flags);
+        if (copy_to_user((void __user *)((char __user *)msg + flags_off),
+                         &kmsg.msg_flags, sizeof(int)))
           ret = (int64_t)-EFAULT;
       }
     }
@@ -1827,7 +1961,10 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       int pfd = kfds[i].fd;
 
       if (pfd < 0 || pfd >= MAX_FD) {
-        kfds[i].revents = POLLERR;
+        // Invalid fd (out of range or closed): Linux returns POLLNVAL, not
+        // POLLERR. POLLERR is reserved for "fd valid but underlying error"
+        // (e.g. socket error); an unresolvable fd is POLLNVAL.
+        kfds[i].revents = POLLNVAL;
         ready++;
         continue;
       }
@@ -1839,7 +1976,7 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         file_get(f);
       rcu_read_unlock();
       if (!f) {
-        kfds[i].revents = POLLERR;
+        kfds[i].revents = POLLNVAL;
         ready++;
         continue;
       }
@@ -1988,18 +2125,21 @@ poll_out:
 // ===================== unix_sock_write / unix_sock_read (for
 // sys_write/sys_read FD_SOCKET dispatch) =====================
 
-int64_t unix_sock_write(struct unix_sock *sock, const void *buf, size_t len) {
+int64_t unix_sock_write(struct unix_sock *sock, const void *buf, size_t len,
+                        int flags) {
   struct iovec iov;
   iov.iov_base = (void *)buf;
   iov.iov_len = len;
-  return unix_sock_sendmsg(sock, &iov, 1, NULL, 0, 0);
+  return unix_sock_sendmsg(sock, &iov, 1, NULL, 0, flags);
 }
 
-int64_t unix_sock_read(struct unix_sock *sock, void *buf, size_t len) {
+int64_t unix_sock_read(struct unix_sock *sock, void *buf, size_t len,
+                       int flags) {
   struct iovec iov;
   iov.iov_base = buf;
   iov.iov_len = len;
-  return unix_sock_recvmsg(sock, &iov, 1, NULL, NULL, 0);
+  int dummy_flags = 0;
+  return unix_sock_recvmsg(sock, &iov, 1, NULL, NULL, flags, &dummy_flags);
 }
 
 // A6: recvfrom(fd, buf, len, flags, addr, addrlen) — thin wrapper over recvmsg
@@ -2008,7 +2148,7 @@ int64_t sys_recvfrom(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   int fd = (int)arg1;
   void __user *buf = (void __user *__force)arg2;
   size_t len = (size_t)arg3;
-  (void)arg4; // flags — not used for AF_UNIX
+  int flags = (int)arg4;
   struct sockaddr __user *addr = (struct sockaddr __user * __force) arg5;
   socklen_t __user *addrlen = (socklen_t __user * __force) arg6;
 
@@ -2048,7 +2188,7 @@ int64_t sys_recvfrom(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     goto out;
   }
 
-  ret = unix_sock_read(sock, (void __force *)buf, len);
+  ret = unix_sock_read(sock, (void __force *)buf, len, flags);
 
   // Fill addr if requested (peer address for connected socket)
   if (addr && ret > 0 && sock->peer_sock) {
@@ -2080,7 +2220,7 @@ int64_t sys_sendto(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   int fd = (int)arg1;
   const void __user *buf = (const void __user *__force)arg2;
   size_t len = (size_t)arg3;
-  (void)arg4; // flags
+  int flags = (int)arg4;
   const struct sockaddr __user *addr =
       (const struct sockaddr __user *__force)arg5;
   socklen_t addrlen = (socklen_t)arg6;
@@ -2130,7 +2270,7 @@ int64_t sys_sendto(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     }
   }
 
-  ret = unix_sock_write(sock, (const void __force *)buf, len);
+  ret = unix_sock_write(sock, (const void __force *)buf, len, flags);
 
 out:
   file_put(f);

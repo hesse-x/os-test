@@ -184,7 +184,9 @@ void test_poll_dev_kms(void) {
   }
 }
 
-/* 10. poll on bad fd → POLLERR */
+/* 10. poll on bad fd → POLLNVAL. S16 aligned this with Linux: an invalid fd
+ * (negative, out of range, or closed) returns POLLNVAL, not POLLERR — POLLERR
+ * is reserved for "fd valid but underlying error" (e.g. socket error). */
 void test_poll_bad_fd(void) {
   struct pollfd pfd;
   pfd.fd = -1;
@@ -192,12 +194,8 @@ void test_poll_bad_fd(void) {
   pfd.revents = 0;
 
   int r = poll(&pfd, 1, 0);
-  if (r > 0) {
-    TEST_ASSERT_TRUE(pfd.revents & POLLERR);
-  } else {
-    /* Some implementations return 0 for bad fds */
-    TEST_ASSERT_TRUE(1);
-  }
+  TEST_ASSERT_EQUAL_INT(1, r);
+  TEST_ASSERT_TRUE(pfd.revents & POLLNVAL);
 }
 
 /* 11. poll on /dev/serial with O_NONBLOCK + timeout=0 */
