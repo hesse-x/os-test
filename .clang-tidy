@@ -77,8 +77,10 @@ CheckOptions:
   # Variable exceptions: TLS runtime, kernel internal, libc internals, linker section boundaries
   # The __start_/__stop_ alternatives cover linker-generated section boundary symbols
   # (e.g. __start_kasan_globals, __start___ex_table) — Linux kernel convention.
+  # The __text_start/__rodata_end/__data_start alternatives cover linker.ld
+  # explicit section boundary symbols used for W^X page mapping.
   - key: readability-identifier-naming.VariableIgnoredRegexp
-    value: '^(__tls_[a-z_]+|__tdata_[a-z_]+|__tbss_[a-z_]+|__pthread_[a-z_]+|__head|__n|__vectors|__start_[a-zA-Z_]+|__stop_[a-zA-Z_]+)$'
+    value: '^(__tls_[a-z_]+|__tdata_[a-z_]+|__tbss_[a-z_]+|__pthread_[a-z_]+|__head|__n|__vectors|__start_[a-zA-Z_]+|__stop_[a-zA-Z_]+|__text_start|__rodata_end|__data_start)$'
 
   # Parameter exceptions: UEFI spec
   - key: readability-identifier-naming.ParameterIgnoredRegexp

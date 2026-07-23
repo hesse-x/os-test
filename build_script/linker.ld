@@ -6,12 +6,22 @@ ENTRY(_start)
 
 . = 0xFFFFFF8000100000;
 SECTIONS {
-    /* Code section */
+    /* Code section — 4K-aligned start/end so paging.c can map .text as
+       read-only 4K pages (W^X). Without page alignment the segment boundary
+       falls inside a 2MB huge page shared with .data, so code pages can't be
+       made RO independently and a wild write silently corrupts kernel
+       instructions (observed: syscall_fast_entry bytes 00 00 -> FF FF -> #UD). */
+    . = ALIGN(4096);
+    __text_start = .;
     .text : AT(ADDR(.text) - 0xFFFFFF8000000000) {
         *(.text)
         *(.text.*)
     } :text
+    . = ALIGN(4096);
+    __text_end = .;
 
+    . = ALIGN(4096);
+    __rodata_start = .;
     .rodata : AT(ADDR(.rodata) - 0xFFFFFF8000000000) {
         *(.rodata)
         *(.rodata.*)
@@ -25,8 +35,12 @@ SECTIONS {
         KEEP(*(__ex_table))
     } :rodata
     __stop___ex_table = .;
+    . = ALIGN(4096);
+    __rodata_end = .;
 
     /*Initialized data section*/
+    . = ALIGN(4096);
+    __data_start = .;
     .data : AT(ADDR(.data) - 0xFFFFFF8000000000) {
         *(.data)
         *(.data.*)
@@ -49,6 +63,7 @@ SECTIONS {
     __stop_kasan_globals = .;
 
     . = ALIGN(4096);
+    __data_end = .;
     /* Uninitialized data section (BSS) - 4KB aligned for page table use */
     .bss (NOLOAD) : AT(ADDR(.bss) - 0xFFFFFF8000000000) {
         *(.bss)

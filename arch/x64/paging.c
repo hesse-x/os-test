@@ -13,6 +13,17 @@
 #include "kernel/efi.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/log.h"
+
+// Kernel image section boundaries (linker.ld). In the physical-address phase
+// their addresses ARE physical (same convention as kernel_end), so we map
+// [__text_start, __rodata_end) as read-only 4K pages (code + rodata +
+// __ex_table) and [__data_start, kernel_end) as read-write 4K pages, instead
+// of one writable 2MB huge page covering the whole image. Without this split a
+// wild/DMA write landing in .text silently corrupts kernel instructions
+// (observed: syscall_fast_entry 00 00 -> FF FF -> #UD on the next syscall).
+extern uint8_t __text_start[];
+extern uint8_t __rodata_end[];
+extern uint8_t __data_start[];
 #include "kernel/xcore/mem/alloc.h"
 #include "utils/macro.h"
 
@@ -53,7 +64,13 @@ void reload_cs(void);
 // Temporary TSS for the physical-address phase only
 static struct tss_struct boot_tss;
 
-const uint8_t stack_bottom[8192] __attribute__((aligned(16))) = {0};
+// Early kernel stack used during the physical-address phase and the first
+// virtual-address steps until per-CPU kernel stacks are set up. Must be
+// WRITABLE: call/ret push return addresses here. Declared non-const + zero-
+// initialized (no initializer) so it lands in .bss (RW) rather than .rodata
+// (RO) — once .text/.rodata are mapped read-only a const stack here would
+// #PF on the first push after load_cr3 (triple fault → reboot loop).
+uint8_t stack_bottom[8192] __attribute__((aligned(16)));
 
 __attribute__((no_sanitize("kernel-address"))) void gdt_init() {
   // Physical-address phase: use a static GDT (RIP-relative addressing
@@ -221,8 +238,35 @@ enable_paging(boot_info *bi_phys) {
     uint64_t pd_phys = (uint64_t)pd;
     uint64_t phys_base = (uint64_t)n * 0x40000000;
     for (int i = 0; i < 512; i++) {
-      pd[i] = (phys_base + (uint64_t)i * PAGE_SIZE_2M) | PTE_PRESENT | PTE_RW |
-              PTE_PS;
+      // The 2MB block at phys 0 (block 0, PD[0]) contains the kernel image.
+      // Split it into 4K pages so code/rodata can be mapped read-only (W^X);
+      // every other 2MB block stays a writable huge page.
+      uint64_t block_phys = phys_base + (uint64_t)i * PAGE_SIZE_2M;
+      if (n == 0 && i == 0) {
+        // Carve a 4K PT page for the 512 x 4K pages of this 2MB block.
+        uint64_t *pt = (uint64_t *)early_bump;
+        early_bump += 4096;
+        uint64_t pt_phys = (uint64_t)pt;
+        uintptr_t ro_start = (uintptr_t)__text_start; // == phys 0x100000
+        uintptr_t ro_end = (uintptr_t)__rodata_end;   // end of rodata+ex_table
+        for (int j = 0; j < 512; j++) {
+          uint64_t page_phys = block_phys + (uint64_t)j * PAGE_SIZE;
+          // Read-only for kernel code + rodata + __ex_table; writable
+          // everywhere else in the block (data/bss below the image, plus the
+          // low 1MB and the tail of the 2MB block past kernel_end). EFER.NXE
+          // is not yet enabled here, so we set no NX bit — RO alone blocks the
+          // silent instruction-corruption writes we are after.
+          uint64_t flags = PTE_PRESENT;
+          if (page_phys >= ro_start && page_phys < ro_end)
+            flags &= ~PTE_RW; // code/rodata: read-only (no PTE_RW)
+          else
+            flags |= PTE_RW; // data/bss/rest: writable
+          pt[j] = page_phys | flags;
+        }
+        pd[i] = pt_phys | PTE_PRESENT | PTE_RW; // PD entry -> 4K PT (no PTE_PS)
+        continue;
+      }
+      pd[i] = block_phys | PTE_PRESENT | PTE_RW | PTE_PS;
     }
 
     // identity: PDPT_ident[n] -> PD
@@ -242,9 +286,11 @@ enable_paging(boot_info *bi_phys) {
   // Load CR3 — UEFI's identity map is replaced by our direct map, which
   // covers all RAM up to max_map_addr in both identity and higher-half form.
   load_cr3(pml4_phys);
+  outb(0x3F8, 'P'); // diagnostic: paging installed + still executing (RO test)
 
   // Program PAT MSR after paging is enabled
   pat_init();
+  outb(0x3F8, 'p');
 }
 
 // ===================== Global variable definitions =====================
