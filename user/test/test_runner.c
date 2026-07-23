@@ -77,11 +77,15 @@ static struct test_entry tests[] = {
     {"test_ffi", "/test/test_ffi.elf"},
     {"ioctl_varlen", "/test/ioctl_varlen.elf"},
     {"epoll", "/test/epoll.elf"},
+    {"epoll_oneshot", "/test/test_epoll_oneshot.elf"},
     {"eventfd", "/test/eventfd.elf"},
     {"timerfd", "/test/timerfd.elf"},
     {"signalfd", "/test/signalfd.elf"},
     {"getrandom", "/test/getrandom.elf"},
     {"mount", "/test/mount.elf"},
+    /* S18 accept_no_timeout sleeps up to 35s by design — run last so it does
+     * not gate the rest of the suite on its deliberate long block. */
+    {"accept_no_timeout", "/test/test_accept_no_timeout.elf"},
 };
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))

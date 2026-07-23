@@ -1770,6 +1770,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       wait_queue_t wait;
       wait.func = pipe_wake_cb;
       wait.data = proc;
+      wait.exclusive = 0;
       list_init(&wait.node);
       add_wait_queue(wq, &wait);
       for (;;) {
@@ -2167,6 +2168,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     wait_queue_t wait;
     wait.func = pipe_wake_cb;
     wait.data = proc;
+    wait.exclusive = 0;
     list_init(&wait.node);
     add_wait_queue(wq, &wait);
     for (;;) {

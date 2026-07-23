@@ -29,7 +29,10 @@ typedef void (*wait_queue_func_t)(struct wait_queue_t *wq, unsigned long flags);
 typedef struct wait_queue_t {
   list_node node;
   wait_queue_func_t func;
-  void *data; // 通常指向 epitem
+  void *data;    // 通常指向 epitem
+  int exclusive; // 1 = exclusive waiter：__wake_up 唤醒一个即跳过其余
+                 // exclusive waiter（非 exclusive 全唤醒），防惊群。
+                 // 栈上 wait 节点须显式初始化（0 或 1），勿留栈残值。
 } wait_queue_t;
 
 void init_wait_queue_head(wait_queue_head *wq);

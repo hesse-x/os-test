@@ -242,6 +242,7 @@ int64_t netlink_sock_recvmsg(netlink_sock *sock, const struct iovec *iov,
       wait_queue_t wait;
       wait.func = nl_recv_wake_cb;
       wait.data = proc;
+      wait.exclusive = 0;
       list_init(&wait.node);
       add_wait_queue(sock->wq, &wait);
       proc->state = BLOCKED;

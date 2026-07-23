@@ -279,6 +279,7 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
   wait_queue_t wait;
   wait.func = virtio_gpu_wake_cb;
   wait.data = current_task;
+  wait.exclusive = 0;
   list_init(&wait.node);
   add_wait_queue(&vgpu->cmd_wq, &wait);
 
@@ -744,6 +745,7 @@ static __attribute__((unused)) int drm_fence_wait(struct drm_fence *fence,
   wait_queue_t wait;
   wait.func = virtio_gpu_wake_cb; /* reuse: data=current_task, wake_wq_target */
   wait.data = current_task;
+  wait.exclusive = 0;
   list_init(&wait.node);
   add_wait_queue(&fence->wq, &wait);
 
@@ -949,6 +951,7 @@ static int drm_syncobj_wait_one(struct drm_syncobj *so, uint64_t point,
   wait_queue_t wait;
   wait.func = virtio_gpu_wake_cb;
   wait.data = current_task;
+  wait.exclusive = 0;
   list_init(&wait.node);
   add_wait_queue(&so->wq, &wait);
   uint64_t deadline = (timeout_ns != 0) ? sched_clock() + timeout_ns : 0;

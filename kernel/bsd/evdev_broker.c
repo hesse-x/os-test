@@ -412,6 +412,7 @@ static ssize_t evdev_consumer_read(struct xtask *proc, struct file *f,
     wait_queue_t wait;
     wait.func = evdev_client_wake_cb;
     wait.data = current_task;
+    wait.exclusive = 0;
     list_init(&wait.node);
     add_wait_queue(wq, &wait);
     /* client->wq was resolved at open (evdev_consumer_open_cb) to this same

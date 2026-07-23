@@ -86,6 +86,7 @@ int64_t eventfd_do_read(struct file *f, void *buf) {
   if (wq) {
     wait.func = eventfd_wake_cb;
     wait.data = current_task;
+    wait.exclusive = 0;
     list_init(&wait.node);
     add_wait_queue(wq, &wait);
   }
@@ -166,6 +167,7 @@ int64_t eventfd_do_write(struct file *f, const void *buf, size_t len) {
   if (wq) {
     wait.func = eventfd_wake_cb;
     wait.data = current_task;
+    wait.exclusive = 0;
     list_init(&wait.node);
     add_wait_queue(wq, &wait);
   }

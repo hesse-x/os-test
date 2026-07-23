@@ -177,6 +177,7 @@ int64_t timerfd_do_read(struct file *f, void *buf) {
   if (wq) {
     wait.func = timerfd_wake_cb;
     wait.data = current_task;
+    wait.exclusive = 0;
     list_init(&wait.node);
     add_wait_queue(wq, &wait);
   }

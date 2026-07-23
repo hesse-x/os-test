@@ -17,6 +17,7 @@
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
+#include "kernel/bsd/signal.h" // signal_struct (alarm_deadline / sig_lock)
 #include "kernel/bsd/socket.h"
 #include "kernel/bsd/syscall.h" // deliver_signal_to, SIGPIPE
 #include "kernel/bsd/types.h"
@@ -536,6 +537,7 @@ int64_t unix_dgram_recvmsg(struct unix_sock *sock, const struct iovec *iov,
       wait_queue_t wait;
       wait.func = poll_wait_cb;
       wait.data = proc;
+      wait.exclusive = 0;
       list_init(&wait.node);
       add_wait_queue(sock->wq, &wait);
       proc->state = BLOCKED;
@@ -945,6 +947,7 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
       wait_queue_t wait;
       wait.func = poll_wait_cb;
       wait.data = proc;
+      wait.exclusive = 0;
       list_init(&wait.node);
       add_wait_queue(sock->wq, &wait);
       proc->state = BLOCKED;
@@ -1548,26 +1551,38 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       wait_queue_t wait;
       wait.func = poll_wait_cb;
       wait.data = proc;
+      wait.exclusive = 0;
       list_init(&wait.node);
       add_wait_queue(listen_sock->wq, &wait);
       proc->state = BLOCKED;
       proc->wait_event = WAIT_POLL;
-      proc->wait_deadline = sched_clock() + 30000000000ULL; // 30 second timeout
-      spin_unlock(&socket_lock);
-      int cpu = proc->assigned_cpu;
-      uint64_t rflags;
-      spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
-      sched_timer_queue_insert(cpu, proc);
-      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
-      schedule();
-      // Timeout check
-      if (proc->wait_timed_out) {
-        proc->state = RUNNING;
-        remove_wait_queue(listen_sock->wq, &wait);
-        ret = -ETIMEDOUT;
-        goto out;
+      // Linux blocking accept has no built-in timeout: it waits indefinitely
+      // for a connection, returning only on a signal (EINTR) or fd close.
+      // The previous 30s wait_deadline forced -ETIMEDOUT on idle listeners,
+      // making long-lived servers (udevd/shell) wrongly bail out. Wait forever,
+      // but borrow an armed process alarm deadline (if any) as the wake
+      // deadline so the timer queue can fire SIGALRM and interrupt via EINTR —
+      // mirrors sys_epoll_wait / F_SETLKW (indefinite, signal-interruptible).
+      uint64_t alarm_dl = 0;
+      if (proc->proc && proc->proc->signal) {
+        uint64_t sflags;
+        spin_lock_irqsave(&proc->proc->signal->sig_lock, &sflags);
+        alarm_dl = proc->proc->signal->alarm_deadline;
+        spin_unlock_irqrestore(&proc->proc->signal->sig_lock, sflags);
       }
-      // EINTR check
+      if (alarm_dl != 0) {
+        proc->wait_deadline = alarm_dl;
+        int cpu = proc->assigned_cpu;
+        uint64_t rflags;
+        spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
+        sched_timer_queue_insert(cpu, proc);
+        spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
+      } else {
+        proc->wait_deadline = 0;
+      }
+      spin_unlock(&socket_lock);
+      schedule();
+      // EINTR check (signal is the only way out of an idle blocking accept)
       {
         uint64_t pend =
             __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);

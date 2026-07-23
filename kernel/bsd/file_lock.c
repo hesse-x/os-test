@@ -218,6 +218,7 @@ static int64_t apply_lock(struct inode *ip, pid_t pid, int type, uint64_t start,
     wait_queue_t wait;
     wait.func = flock_wake_cb;
     wait.data = proc;
+    wait.exclusive = 0;
     list_init(&wait.node);
     add_wait_queue(wq, &wait);
     proc->state = BLOCKED;

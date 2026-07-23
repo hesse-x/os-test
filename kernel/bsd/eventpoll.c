@@ -49,6 +49,14 @@ static void ep_poll_callback(wait_queue_t *wq, unsigned long flags) {
   epitem *epi = wq->data;
   eventpoll *ep = epi->ep;
   spin_lock(&ep->lock);
+  // EPOLLONESHOT: after the single ready report (epoll_wait path sets
+  // is_disarmed), stop re-enqueuing on subsequent wakeups until EPOLL_CTL_MOD
+  // clears is_disarmed. Holds ep->lock, races only with ep_modify (also under
+  // ep->lock) — no tearing.
+  if (epi->is_disarmed) {
+    spin_unlock(&ep->lock);
+    return;
+  }
   if (epi->is_et) {
     // ET: enqueue only on first transition to ready
     if (!epi->is_ready) {
@@ -142,14 +150,20 @@ int ep_insert(eventpoll *ep, struct file *f, struct epoll_event *ev) {
     return -ENOMEM;
   epi->file = f;
   file_get(f);
-  epi->events = ev->events & ~EPOLLET;
+  // Mode flags (EPOLLET/EPOLLONESHOT/EPOLLEXCLUSIVE) live on dedicated flags,
+  // not in the event mask — events stores only real poll events (IN/OUT/...).
+  epi->events = ev->events & ~(EPOLLET | EPOLLONESHOT | EPOLLEXCLUSIVE);
   epi->is_et = !!(ev->events & EPOLLET);
+  epi->is_oneshot = !!(ev->events & EPOLLONESHOT);
+  epi->is_disarmed = 0;
+  epi->is_exclusive = !!(ev->events & EPOLLEXCLUSIVE);
   epi->user_data = ev->data.u64;
   epi->revents = 0;
   epi->is_ready = 0;
   epi->ep = ep;
   epi->wait.func = ep_poll_callback;
   epi->wait.data = epi;
+  epi->wait.exclusive = epi->is_exclusive;
   list_init(&epi->rdllist_node);
   wait_queue_head *wq = ep_target_wq(f);
   if (wq) {
@@ -204,9 +218,16 @@ int ep_modify(eventpoll *ep, struct file *f, struct epoll_event *ev) {
   if (!node)
     return -ENOENT;
   epitem *epi = rb_entry(node, epitem, rb_node);
+  // Linux: EPOLLEXCLUSIVE may only be set at ADD time; MOD that flips the
+  // exclusive state returns -EINVAL. Toggling ONESHOT/ET on MOD is allowed.
+  int new_is_exclusive = !!(ev->events & EPOLLEXCLUSIVE);
+  if (new_is_exclusive != epi->is_exclusive)
+    return -EINVAL;
   spin_lock(&ep->lock);
-  epi->events = ev->events & ~EPOLLET;
+  epi->events = ev->events & ~(EPOLLET | EPOLLONESHOT | EPOLLEXCLUSIVE);
   epi->is_et = !!(ev->events & EPOLLET);
+  epi->is_oneshot = !!(ev->events & EPOLLONESHOT);
+  epi->is_disarmed = 0; // EPOLL_CTL_MOD re-arms a disarmed ONESHOT item
   epi->user_data = ev->data.u64;
   __poll revents = file_poll(f, epi->events);
   if (revents && !epi->is_ready) {
@@ -289,6 +310,17 @@ int64_t sys_epoll_ctl(int64_t epfd, int64_t op, int64_t fd, int64_t ev_ptr) {
   file_get(f);
   rcu_read_unlock();
 
+  // epfd == fd: registering an epoll fd onto itself would let the fd's
+  // ep_poll_callback feed its own ready_list, forming a report→wake→report
+  // loop. Linux rejects this with -EINVAL (after fd resolution, so bad fds
+  // still get -EBADF). ef and f are the same struct file here, so file_get
+  // bumped its refcount twice — balance with two file_put.
+  if ((int)epfd == (int)fd) {
+    file_put(f);
+    file_put(ef);
+    return -EINVAL;
+  }
+
   int ret;
   if (op != EPOLL_CTL_DEL) {
     struct epoll_event ev;
@@ -337,6 +369,7 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
   wait_queue_t wait;
   wait.func = ep_wait_callback;
   wait.data = proc;
+  wait.exclusive = 0; // epoll_wait waiters are shared — all must be woken
   list_init(&wait.node);
   add_wait_queue(&ep->wq, &wait);
 
@@ -371,8 +404,13 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
           }
           epi->revents = revents;
           // Still ready: re-enqueue for subsequent epoll_wait calls (LT).
-          list_push_back(&ep->ready_list, &epi->rdllist_node);
-          epi->is_ready = 1;
+          // EPOLLONESHOT defers disarm until after the report succeeds below,
+          // so it must NOT be re-enqueued here — once reported it is disarmed
+          // until EPOLL_CTL_MOD re-arms it.
+          if (!epi->is_oneshot) {
+            list_push_back(&ep->ready_list, &epi->rdllist_node);
+            epi->is_ready = 1;
+          }
         }
         struct epoll_event ev = {.events = epi->revents,
                                  .data = {.u64 = epi->user_data}};
@@ -384,6 +422,13 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
           return -EFAULT;
         }
         n++;
+        // EPOLLONESHOT: the single report just happened — disarm so neither
+        // this LT re-enqueue path nor ep_poll_callback can re-report until
+        // EPOLL_CTL_MOD clears is_disarmed. is_ready is already 0 (removed
+        // above and not re-enqueued for oneshot). For ET+ONESHOT this is
+        // redundant-but-harmless (ET reports once anyway) and matches Linux.
+        if (epi->is_oneshot)
+          epi->is_disarmed = 1;
         if (it == pass_end)
           break; // reached end of this pass
         it = next;

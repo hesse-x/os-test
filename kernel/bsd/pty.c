@@ -324,6 +324,7 @@ int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
   wait_queue_t wait;
   wait.func = pty_wake_cb;
   wait.data = proc;
+  wait.exclusive = 0;
   list_init(&wait.node);
   add_wait_queue(pty->wq, &wait);
   while (pty_ring_avail(pty->s_to_m_head, pty->s_to_m_tail) == 0) {
@@ -420,6 +421,7 @@ int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
     wait_queue_t wait;
     wait.func = pty_wake_cb;
     wait.data = proc;
+    wait.exclusive = 0;
     list_init(&wait.node);
     add_wait_queue(pty->wq, &wait);
     proc->state = BLOCKED;
@@ -458,6 +460,7 @@ int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
   wait_queue_t wait;
   wait.func = pty_wake_cb;
   wait.data = proc;
+  wait.exclusive = 0;
   list_init(&wait.node);
   add_wait_queue(pty->wq, &wait);
   while (pty_ring_avail(pty->m_to_s_head, pty->m_to_s_tail) == 0) {
@@ -545,6 +548,7 @@ int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
     wait_queue_t wait;
     wait.func = pty_wake_cb;
     wait.data = proc;
+    wait.exclusive = 0;
     list_init(&wait.node);
     add_wait_queue(pty->wq, &wait);
     proc->state = BLOCKED;

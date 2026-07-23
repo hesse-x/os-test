@@ -830,6 +830,7 @@ static ssize_t usb_hidraw_read(xtask *proc, int fd, void *buf, size_t count) {
   if (!nonblock && hidraw_wq) {
     wait.func = hidraw_wake_cb;
     wait.data = current_task;
+    wait.exclusive = 0;
     list_init(&wait.node);
     add_wait_queue(hidraw_wq, &wait);
     queued = true;

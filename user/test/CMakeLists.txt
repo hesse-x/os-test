@@ -100,6 +100,14 @@ add_user_dyn_elf(ioctl_varlen C SOURCES test_ioctl_varlen.c ${CMAKE_SOURCE_DIR}/
 # Layer 16: epoll
 add_user_dyn_elf(epoll C SOURCES test_epoll.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 
+# S18: EPOLLONESHOT (report-once + disarm + MOD re-arm) / EPOLLEXCLUSIVE
+# (anti-thundering-herd unicast wake) / epoll_ctl epfd==fd self-register EINVAL
+# / EXCLUSIVE MOD-toggle EINVAL.
+add_user_dyn_elf(test_epoll_oneshot C SOURCES test_epoll_oneshot.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+# S18: accept() no longer arms a 30s false timeout — idle blocking accept blocks
+# past 30s until SIGALRM/EINTR. NOTE: sleeps up to 35s by design (regression proof).
+add_user_dyn_elf(test_accept_no_timeout C SOURCES test_accept_no_timeout.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+
 # Layer 17: eventfd
 add_user_dyn_elf(eventfd C SOURCES test_eventfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
 

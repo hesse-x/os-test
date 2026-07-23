@@ -44,10 +44,15 @@ void remove_wait_queue(wait_queue_head *wq, wait_queue_t *wait) {
 // 嵌套 __wake_up 是不同 wq 实例，非同锁重入；各层 irqsave 保存各自栈上 flags，
 // irqrestore 正确恢复。
 // flags 透传给每个回调，xcore 不解释其含义（poll 掩码语义由 bsd 回调解释）。
+//
+// EPOLLEXCLUSIVE 单播：exclusive waiter 唤醒一个后跳过其余 exclusive waiter，
+// 非 exclusive waiter 仍全唤醒（对齐 Linux __wake_up_common）。用于多进程/多
+// epoll 监听同一 listen socket 的防惊群。
 void __wake_up(wait_queue_head *wq, unsigned long flags) {
   uint64_t irqflags;
   spin_lock_irqsave(&wq->lock, &irqflags);
   list_node *it = wq->head.next;
+  int woken_exclusive = 0;
   while (it != &wq->head) {
     wait_queue_t *wq_entry = LIST_ENTRY(it, wait_queue_t, node);
     // 先取 next：回调（wake_with_event）只改 wq_entry->state 不摘节点；
@@ -61,8 +66,19 @@ void __wake_up(wait_queue_head *wq, unsigned long flags) {
       WARN_ON_ONCE(1);
       break;
     }
-    if (wq_entry->func)
-      wq_entry->func(wq_entry, flags);
+    if (wq_entry->exclusive) {
+      if (woken_exclusive) {
+        // 已唤醒过一个 exclusive waiter，跳过其余 exclusive（防惊群）。
+        it = next;
+        continue;
+      }
+      if (wq_entry->func)
+        wq_entry->func(wq_entry, flags);
+      woken_exclusive = 1;
+    } else {
+      if (wq_entry->func)
+        wq_entry->func(wq_entry, flags);
+    }
     it = next;
   }
   spin_unlock_irqrestore(&wq->lock, irqflags);

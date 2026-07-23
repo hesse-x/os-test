@@ -25,11 +25,14 @@ typedef struct epitem {
   list_node rdllist_node; // in eventpoll.ready_list
   wait_queue_t wait;      // on monitored file/sock/pipe wq
   struct file *file;      // monitored fd's file (held via file_get)
-  __poll events;          // user-registered event mask (excludes EPOLLET)
+  __poll events;          // user-registered event mask (excludes mode flags)
   __poll revents;         // current ready events
   uint64_t user_data;     // epoll_event.data.u64
   int is_ready;           // currently on ready_list
   int is_et;              // EPOLLET mode flag
+  int is_oneshot;         // EPOLLONESHOT mode flag (set on ADD/MOD)
+  int is_disarmed;        // ONESHOT: reported once, disarmed until MOD re-arms
+  int is_exclusive;       // EPOLLEXCLUSIVE: unicast wake (one exclusive waiter)
   struct eventpoll *ep;   // back-pointer
 } epitem;
 
