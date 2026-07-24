@@ -351,7 +351,7 @@ int64_t sys_recv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
     // EINTR check: signal pending and deliverable
     if (signal_pending_hook && signal_pending_hook(proc))
-      return (int64_t)-EINTR;
+      return (int64_t)-ERESTART;
 
     // Woken up: check if timed out
     if (proc->wait_timed_out) {
@@ -456,7 +456,7 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   // EINTR check
   if (signal_pending_hook && signal_pending_hook(proc))
-    return (int64_t)-EINTR;
+    return (int64_t)-ERESTART;
 
   // Woken up by sys_resp or proc_reap
   if (proc->req_result != 0)
@@ -921,7 +921,7 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
 
   // EINTR check
   if (signal_pending_hook && signal_pending_hook(proc))
-    return (int64_t)-EINTR;
+    return (int64_t)-ERESTART;
 
   if (proc->msg_result != 0)
     return (int64_t)proc->msg_result;

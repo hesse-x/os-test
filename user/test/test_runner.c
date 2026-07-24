@@ -90,6 +90,9 @@ static struct test_entry tests[] = {
     {"mount", "/test/mount.elf"},
     /* S18 accept_no_timeout sleeps up to 35s by design — run last so it does
      * not gate the rest of the suite on its deliberate long block. */
+    {"getdents_resume", "/test/test_getdents_resume.elf"},
+    {"sa_restart", "/test/test_sa_restart.elf"},
+    {"sa_nocldwait", "/test/test_sa_nocldwait.elf"},
     {"accept_no_timeout", "/test/test_accept_no_timeout.elf"},
 };
 

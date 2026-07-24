@@ -12,7 +12,6 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/netlink.h"
-#include "kernel/bsd/proc.h"
 #include "kernel/bsd/socket.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
@@ -22,9 +21,9 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
+
 #include <xos/errno.h>
 #include <xos/netlink.h>
-#include <xos/signal.h>
 #include <xos/socket.h>
 
 // copy_from_user/copy_to_user have no dedicated header; forward-declare.
@@ -266,14 +265,10 @@ int64_t netlink_sock_recvmsg(netlink_sock *sock, const struct iovec *iov,
 
       // EINTR check
       {
-        uint64_t pend =
-            __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-        uint64_t deliv = pend & ~proc->proc->sig_blocked;
-        deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-        if (deliv) {
+        if (signal_pending(proc)) {
           proc->state = RUNNING;
           remove_wait_queue(sock->wq, &wait);
-          return (int64_t)-EINTR;
+          return (int64_t)-ERESTART;
         }
       }
 

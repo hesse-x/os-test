@@ -6,6 +6,8 @@
 
 #include "kernel/bsd/eventfd.h"
 
+#include <stddef.h>
+
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/file_poll.h"
@@ -18,10 +20,9 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
-#include <stddef.h>
+
 #include <xos/errno.h>
 #include <xos/fcntl.h>
-#include <xos/signal.h>
 #include <xos/socket.h>
 
 // copy_from_user/copy_to_user have no dedicated header; forward-declare.
@@ -124,13 +125,9 @@ int64_t eventfd_do_read(struct file *f, void *buf) {
     }
     // EINTR check (mirror epoll_wait)
     {
-      xtask *p = current_task;
-      uint64_t pend = __atomic_load_n(&p->proc->sig_pending, __ATOMIC_ACQUIRE);
-      uint64_t deliv = pend & ~p->proc->sig_blocked;
-      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-      if (deliv) {
+      if (signal_pending(current_task)) {
         current_task->state = RUNNING;
-        ret = -EINTR;
+        ret = -ERESTART;
         goto out;
       }
     }
@@ -194,13 +191,9 @@ int64_t eventfd_do_write(struct file *f, const void *buf, size_t len) {
       goto out;
     }
     {
-      xtask *p = current_task;
-      uint64_t pend = __atomic_load_n(&p->proc->sig_pending, __ATOMIC_ACQUIRE);
-      uint64_t deliv = pend & ~p->proc->sig_blocked;
-      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-      if (deliv) {
+      if (signal_pending(current_task)) {
         current_task->state = RUNNING;
-        ret = -EINTR;
+        ret = -ERESTART;
         goto out;
       }
     }

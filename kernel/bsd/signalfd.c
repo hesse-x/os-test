@@ -234,7 +234,7 @@ int64_t signalfd_do_read(struct file *f, void *buf) {
       deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
       if (deliv) {
         current_task->state = RUNNING;
-        ret = -EINTR;
+        ret = -ERESTART;
         goto out;
       }
     }

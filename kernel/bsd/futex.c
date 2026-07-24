@@ -172,7 +172,9 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // 3. Post-wakeup cleanup + return value decision
   int64_t ret_val = 0;
   if (signal_pending_hook && signal_pending_hook(cur))
-    ret_val = (int64_t)-EINTR;
+    // 02: a timed FUTEX_WAIT surfaces -EINTR (restarting would lose the elapsed
+    // time); an untimed wait returns -ERESTART so SA_RESTART re-executes it.
+    ret_val = has_timeout ? (int64_t)-EINTR : (int64_t)-ERESTART;
   else if (cur->wait_timed_out)
     ret_val = (int64_t)-ETIMEDOUT;
 

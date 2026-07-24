@@ -490,15 +490,11 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
 
     // EINTR check (signal priority over timeout), mirrors sys_poll
     {
-      uint64_t pend =
-          __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-      uint64_t deliv = pend & ~proc->proc->sig_blocked;
-      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-      if (deliv) {
+      if (signal_pending(proc)) {
         sched_cancel_spurious_wake(proc);
         remove_wait_queue(&ep->wq, &wait);
         file_put(ef);
-        return -EINTR;
+        return -ERESTART;
       }
     }
 

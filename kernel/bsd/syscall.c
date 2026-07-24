@@ -208,6 +208,27 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   int esig = proc->proc->exit_signal;
   atomic_dec(&sig->live_count);
   int notify_parent = atomic_dec_and_test(&sig->thread_count);
+  /* 02 SA_NOCLDWAIT: the parent opted out of zombies — skip SIGCHLD posting
+   * and have init reap this child. We can NOT sched_task_reap() here: the
+   * dying task is still current and its cr3 is live, so freeing its mm/PML4
+   * mid-exit would triple-fault. Instead reparent the child to init (mirrors
+   * orphan adoption in step 3) and wake init's WAIT_CHILD — init reaps the
+   * zombie in its own context. Read the original parent here (step 5, sig
+   * alive); after ZOMBIE only the local bool + reparented parent_pid are
+   * used. */
+  bool auto_reap = false;
+  if (notify_parent && ppid >= 0 && ppid < MAX_PROC &&
+      task_get(ppid)->pid == ppid) {
+    xtask *parent = task_get(ppid);
+    if (parent->proc &&
+        (parent->proc->signal->action[SIGCHLD].sa_flags & SA_NOCLDWAIT)) {
+      auto_reap = true;
+      if (init_pid >= 0) {
+        sig->parent_pid = init_pid;
+        ppid = init_pid;
+      }
+    }
+  }
 
   // 6. Set ZOMBIE
   //    GATE: after this, sched_task_reap/proc_reap on another CPU may kfree
@@ -243,7 +264,9 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
       // must not dereference it. Guard matches the pty SIGHUP path
       // (proc.c pty_close_file).
       if (parent->proc) {
-        if (esig != 0) {
+        // 02 SA_NOCLDWAIT: skip SIGCHLD posting (parent opted out; when
+        // auto_reap reparented to init, init reaps without needing SIGCHLD).
+        if (!auto_reap && esig != 0) {
           __atomic_or_fetch(&parent->proc->sig_pending, SIGMASK(esig),
                             __ATOMIC_RELEASE);
         }
@@ -283,6 +306,9 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   //    do_exit does NOT do mm_put/files_put/signal_put —
   //    sched_task_reap/proc_reap owns all freeing. 3b will revisit do_exit
   //    ownership with proper proc lifetime (RCU or per-task reap lock).
+  //    02 SA_NOCLDWAIT: no reap here — the child is ZOMBIE and will be reaped
+  //    by init (reparented in step 5) via waitpid(-1). Reaping current would
+  //    free the live cr3 mid-exit.
   schedule();
   return 0;
 }
@@ -521,6 +547,21 @@ static int64_t sys_waitpid_rusage(int64_t arg1, int64_t arg2, int64_t options,
       if (nohang)
         return 0;
 
+      // Snapshot the merged pending set (private sig_pending + thread-group
+      // shared_pending) BEFORE taking scheduler_lock. We can't call
+      // signal_pending() under scheduler_lock (it takes sig_lock → reversed
+      // order vs the wake path's sig_lock→scheduler_lock). A signal arriving
+      // after this snapshot still wakes us via wake_process_any and the next
+      // loop iteration re-snapshots.
+      uint64_t pend =
+          __atomic_load_n(&current_proc->sig_pending, __ATOMIC_ACQUIRE);
+      {
+        uint64_t sflags;
+        spin_lock_irqsave(&current_proc->signal->sig_lock, &sflags);
+        pend |= current_proc->signal->shared_pending;
+        spin_unlock_irqrestore(&current_proc->signal->sig_lock, sflags);
+      }
+
       int pcpu = current_task->assigned_cpu;
       uint64_t pflags;
       spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
@@ -572,9 +613,9 @@ static int64_t sys_waitpid_rusage(int64_t arg1, int64_t arg2, int64_t options,
       // sleeping. Checking here (not after schedule()) lets a wakeup that
       // simultaneously marks a child ZOMBIE and posts its exit_signal be
       // resolved as a reaped child (loop top re-scan) instead of EINTR.
+      // `pend` was snapshotted before scheduler_lock (merges shared_pending so
+      // a kill()-delivered signal interrupts waitpid too).
       {
-        uint64_t pend =
-            __atomic_load_n(&current_proc->sig_pending, __ATOMIC_ACQUIRE);
         uint64_t deliv = pend & ~current_proc->sig_blocked;
         deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
         deliv &= ~(SIGMASK(SIGCHLD));
@@ -657,9 +698,14 @@ static int64_t sys_waitpid_rusage(int64_t arg1, int64_t arg2, int64_t options,
     // with both "child is ZOMBIE" and "signal pending" true, and we must let
     // the loop top reap the ZOMBIE (returning pid) instead of bailing with
     // EINTR. Linux/POSIX: report a ready child state change over an interrupt.
+    // Merge shared_pending so kill()-delivered signals interrupt waitpid too.
     {
       uint64_t pend =
           __atomic_load_n(&current_proc->sig_pending, __ATOMIC_ACQUIRE);
+      uint64_t sflags;
+      spin_lock_irqsave(&current_proc->signal->sig_lock, &sflags);
+      pend |= current_proc->signal->shared_pending;
+      spin_unlock_irqrestore(&current_proc->signal->sig_lock, sflags);
       uint64_t deliv = pend & ~current_proc->sig_blocked;
       deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
       deliv &= ~(SIGMASK(SIGCHLD));
@@ -1989,16 +2035,14 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         }
         schedule();
         {
-          uint64_t pend =
-              __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-          uint64_t deliv = pend & ~proc->proc->sig_blocked;
-          deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-          if (deliv) {
+          /* Merge shared_pending so kill()-delivered signals interrupt a
+           * blocking pipe write (see pipe read). */
+          if (signal_pending(proc)) {
             sched_cancel_spurious_wake(proc);
             remove_wait_queue(wq, &wait);
             if (written > 0)
               break;
-            ret = -EINTR;
+            ret = -ERESTART;
             goto out;
           }
         }
@@ -2391,14 +2435,13 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       }
       schedule();
       {
-        uint64_t pend =
-            __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-        uint64_t deliv = pend & ~proc->proc->sig_blocked;
-        deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-        if (deliv) {
+        /* Merge shared_pending so kill()-delivered signals interrupt a
+         * blocking pipe read (signal_pending merges sig_pending +
+         * shared_pending under sig_lock). */
+        if (signal_pending(proc)) {
           sched_cancel_spurious_wake(proc);
           remove_wait_queue(wq, &wait);
-          ret = -EINTR;
+          ret = -ERESTART;
           goto out;
         }
       }

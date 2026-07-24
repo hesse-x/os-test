@@ -7,8 +7,11 @@
 #include "kernel/bsd/mount.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/proc.h" // current_proc (euid permission gate)
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/xtask.h"
+
 #include <xos/dirent.h>
 #include <xos/errno.h>
 
@@ -229,8 +232,11 @@ int normalize_path(const char *in, char *out, size_t outcap) {
 
 /* SYS_MOUNT(source, target, fstype, flags, data) — Linux 5-param signature.
  * source/data currently reserved (passed 0/NULL; this OS mount has no source
- * concept and fstype takes no mount data). No permission check: this OS has
- * no user/capability model (recorded in todo.md — do not fake CAP_SYS_ADMIN).
+ * concept and fstype takes no mount data).
+ * Permission: Linux requires CAP_SYS_ADMIN. This OS has no capability bitmap
+ * — euid==0 is the established root stand-in (cf. kill_permitted in signal.c,
+ * the setuid ladder in proc.c). Non-root → -EPERM. Revisit when a real
+ * capability model lands (todo.md).
  * flags: MS_REMOUNT/MS_BIND are not implemented and rejected with -ENOSYS so a
  * caller cannot believe a remount/bind succeeded when it was silently dropped.
  * MS_RDONLY/NOSUID/NODEV/NOEXEC are accepted but have no effect (no permission
@@ -240,6 +246,14 @@ int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   (void)arg1; // source: no source concept (mount fstype onto target); NULL OK
   (void)arg5; // data: fstype takes no mount data
   (void)unused;
+
+  /* euid==0 ≡ CAP_SYS_ADMIN (no capability bitmap in this OS; cf.
+   * kill_permitted in signal.c). Single-user root-default system, so the gate
+   * is a no-op today and only bites when a non-root euid is later introduced.
+   */
+  if (current_proc->euid != 0)
+    return (int64_t)-EPERM;
+
   unsigned int flags = (unsigned int)arg4;
 
   if (flags & (MS_REMOUNT | MS_BIND))

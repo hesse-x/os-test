@@ -12,9 +12,9 @@
 
 #include "kernel/bsd/tmpfs.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <xos/dirent.h>
 
 #include "arch/x64/utils.h"
 #include "kernel/bsd/fops.h"
@@ -26,6 +26,7 @@
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/spinlock.h"
 
+#include <xos/dirent.h>
 #include <xos/errno.h>
 #include <xos/stat.h>
 
@@ -509,6 +510,25 @@ static int tmpfs_rmdir(struct inode *dir, const char *name) {
   return -ENOENT;
 }
 
+/* Emit the synthetic "." and ".." entries at the head of a directory listing.
+ * Like a real child, each honors the resume cursor (skip while cur_pos <
+ * ctx->pos) and stops on a buffer-full dir_emit. "." is the directory itself;
+ * ".." is the parent (the tmpfs root points to itself, matching Linux). Returns
+ * false if the buffer filled before the requested entry could be emitted. */
+static bool tmpfs_emit_dot(struct dir_context *ctx, size_t *cur_pos,
+                           const char *name, uint64_t ino) {
+  size_t nl = __strlen(name);
+  uint16_t r = (uint16_t)((sizeof(struct dirent64) + nl + 1 + 7) & ~7);
+  if (*cur_pos < ctx->pos) {
+    *cur_pos += r;
+    return true;
+  }
+  if (!dir_emit(ctx, name, (int)nl, *cur_pos, ino, DT_DIR))
+    return false;
+  *cur_pos += r;
+  return true;
+}
+
 /* ===== getdents（fstype 回调）===== */
 static ssize_t tmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
   struct tmpfs_inode_info *ti = (struct tmpfs_inode_info *)dir->i_priv;
@@ -521,6 +541,14 @@ static ssize_t tmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
     return 0;
   }
   size_t cur_pos = 0;
+  /* Synthetic "." and ".." precede real children (POSIX/Linux convention for
+   * in-memory filesystems, which have no on-disk dot entries). */
+  uint64_t parent_ino =
+      ti->parent ? ti->parent->inode->ino : dir->ino; /* root: .. → self */
+  if (!tmpfs_emit_dot(ctx, &cur_pos, ".", dir->ino))
+    goto done;
+  if (!tmpfs_emit_dot(ctx, &cur_pos, "..", parent_ino))
+    goto done;
   struct tmpfs_inode_info *c = ti->children;
   while (c) {
     size_t nl = __strlen(c->name);
@@ -534,11 +562,12 @@ static ssize_t tmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
       continue;
     }
     if (!dir_emit(ctx, c->name, (int)nl, cur_pos, c->inode->ino, dt))
-      break;
+      goto done;
     cur_pos += r;
     c = c->sibling;
   }
-  ctx->pos = (uint64_t)-1;
+  ctx->pos = (uint64_t)-1; /* EOF: all entries emitted */
+done:
   spin_unlock(&ti->lock);
   return (ssize_t)ctx->written;
 }

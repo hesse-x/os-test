@@ -7,6 +7,8 @@
 // kernel/bsd/init.c — BSD layer initialization and hook registration
 // Extracted from kernel/kernel.c (phase 5 step 5.3)
 
+#include <stdbool.h>
+
 #include "arch/x64/trap.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/evdev_broker.h"
@@ -25,9 +27,6 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
-#include <stdbool.h>
-#include <stdint.h>
-#include <xos/signal.h>
 
 // Wrapper to adapt check_pending_signals(trapframe*) to
 // signal_check_fn(xtask*, trapframe*) check_pending_signals uses
@@ -39,14 +38,7 @@ static void check_signals(xtask *task, trapframe *tf) {
 }
 
 // Check if a signal is pending and deliverable for the given task
-static bool check_signal_pending(xtask *t) {
-  if (!t->proc)
-    return false;
-  uint64_t pend = __atomic_load_n(&t->proc->sig_pending, __ATOMIC_ACQUIRE);
-  uint64_t deliv = pend & ~t->proc->sig_blocked;
-  deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-  return deliv != 0;
-}
+static bool check_signal_pending(xtask *t) { return signal_pending(t); }
 
 void bsd_init(void) {
   vfs_init();

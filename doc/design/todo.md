@@ -260,7 +260,7 @@ udevd 设备数据库 + 规则引擎 + coldplug **已落地**（对齐 Linux `in
 
 S20（[../../refact_syscall/S20_misc_finish.md](../../refact_syscall/S20_misc_finish.md)）以最小代价对齐 Linux x86-64 语义；下列属"需要更大子系统才能真实生效"的项，S20 仅接常量/退化语义或显式拒绝，真实语义延后：
 
-- **mount 权限校验**（`kernel/bsd/mount.c` `sys_mount`）：本 OS 无 user/capability 模型，`mount` 不伪造 `CAP_SYS_ADMIN`（伪造反而误导）。当前仅 init/root 调用。引入 capability 模型后补 `CAP_SYS_ADMIN` 校验。S20 已接 `flags` 最低语义：`MS_REMOUNT`/`MS_BIND` 显式 `-ENOSYS`（未实现，优于静默吞），`MS_RDONLY`/`MS_NOSUID`/`MS_NODEV`/`MS_NOEXEC` 接受但无生效（本 FS 无权限/执行位语义），随权限 FS 上线。
+- **mount 权限校验**（`kernel/bsd/mount.c` `sys_mount`）：已加 `euid==0` 门（等价 `CAP_SYS_ADMIN`，复用 `kill_permitted`/`setuid` 的 euid==0 root 阶梯，非伪造能力位图）。单用户 root-default 系统下为 no-op，仅当未来引入非 root euid 时生效。引入真实 capability 模型后改为 `capable(CAP_SYS_ADMIN)`，届时 `kill_permitted`/`setuid`/`mount` 一并迁移。S20 已接 `flags` 最低语义：`MS_REMOUNT`/`MS_BIND` 显式 `-ENOSYS`（未实现，优于静默吞），`MS_RDONLY`/`MS_NOSUID`/`MS_NODEV`/`MS_NOEXEC` 接受但无生效（本 FS 无权限/执行位语义），随权限 FS 上线。`data`(arg5) 透传未做——无 fstype 消费，等真实 mount 选项需求出现时连同 `mount_root` 回调签名一起加。
 - **`MS_RDONLY`/`NOSUID`/`NODEV`/`NOEXEC` 真实生效**：本 FS（FAT32/tmpfs/devtmpfs）无权限位与执行位语义，四 flag 接受为 no-op。需权限 FS + suid/exec 位模型。
 - **`MAP_GROWSDOWN` 栈自动扩展**（`include/uapi/xos/mman.h`）：S20 补常量 `0x100`，接受为 no-op（本 OS 栈固定）。真实 growsdown 栈扩展需 fault handler 在栈 guard 页 fault 时向下扩展 VMA，属 S10 范围。
 - **`PROT_GROWSDOWN` 栈 guard 扩展**（`kernel/bsd/syscall.c` `sys_mprotect`）：S20 接受该位（mask 掉不报错），但无栈自动扩展语义。同 `MAP_GROWSDOWN`，属 S10。

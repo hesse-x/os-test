@@ -243,6 +243,26 @@ ssize_t sysfs_getdents(struct inode *dir, struct dir_context *ctx) {
     return 0;
   }
   size_t cur_pos = 0;
+  /* Synthetic "." and ".." precede real children (in-memory fs has no on-disk
+   * dot entries). sysfs_node.parent is NULL at the root, so root ".." → self.
+   */
+  uint64_t parent_ino = n->parent ? n->parent->ino : n->ino;
+  {
+    size_t nl = 1; /* "." */
+    uint16_t r = (uint16_t)((sizeof(struct dirent64) + nl + 1 + 7) & ~7);
+    if (cur_pos >= ctx->pos &&
+        !dir_emit(ctx, ".", (int)nl, cur_pos, n->ino, DT_DIR))
+      goto done;
+    cur_pos += r;
+  }
+  {
+    size_t nl = 2; /* ".." */
+    uint16_t r = (uint16_t)((sizeof(struct dirent64) + nl + 1 + 7) & ~7);
+    if (cur_pos >= ctx->pos &&
+        !dir_emit(ctx, "..", (int)nl, cur_pos, parent_ino, DT_DIR))
+      goto done;
+    cur_pos += r;
+  }
   struct sysfs_node *c = n->children;
   while (c) {
     size_t nl = __strlen(c->name);
@@ -254,11 +274,12 @@ ssize_t sysfs_getdents(struct inode *dir, struct dir_context *ctx) {
       continue;
     }
     if (!dir_emit(ctx, c->name, (int)nl, cur_pos, c->ino, dt))
-      break;
+      goto done;
     cur_pos += r;
     c = c->sibling;
   }
-  ctx->pos = (uint64_t)-1;
+  ctx->pos = (uint64_t)-1; /* EOF: all entries emitted */
+done:
   spin_unlock(&sysfs_lock);
   return (ssize_t)ctx->written;
 }

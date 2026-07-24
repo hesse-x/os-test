@@ -204,6 +204,11 @@ if(TEST)
     add_user_dyn_elf(test_wait4_pgid_rusage C SOURCES test_wait4_pgid_rusage.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_setuid_saved C SOURCES test_setuid_saved.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_execve_vfs C SOURCES test_execve_vfs.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    # 02: getdents64 chunked resume (tmpfs/sysfs) + SA_RESTART restart +
+    # SA_NOCLDWAIT auto-reap.
+    add_user_dyn_elf(test_getdents_resume C SOURCES test_getdents_resume.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_sa_restart C SOURCES test_sa_restart.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_sa_nocldwait C SOURCES test_sa_nocldwait.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
 endif()
 
 # libffi dynamic test (ffi_worklist §4.C): ffi_call int/double + ffi_closure

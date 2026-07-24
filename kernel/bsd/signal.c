@@ -9,6 +9,7 @@
 
 #include "kernel/bsd/signal.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "arch/x64/apic.h"
@@ -267,6 +268,7 @@ static void notify_parent_sigchld(xtask *child, int sig, int code) {
     return;
   __atomic_or_fetch(&parent->proc->sig_pending, SIGMASK(SIGCHLD),
                     __ATOMIC_RELEASE);
+  recalc_sigpending(parent);
   int pcpu = parent->assigned_cpu;
   uint64_t pflags;
   spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
@@ -413,6 +415,13 @@ void check_pending_signals(trapframe *tf) {
       sa.__sigaction_handler._sa_handler = (void (*)(int))handler;
       sa.sa_mask = 0;
       sa.sa_flags = 0;
+      // 02 SA_RESTART: SIGCANCEL's kernel-built action has sa_flags=0 (no
+      // SA_RESTART), so an armed -ERESTART surfaces as -EINTR after the
+      // handler.
+      if (current_task->restart_armed) {
+        tf->rax = (uint64_t)(int64_t)-EINTR;
+        current_task->restart_armed = false;
+      }
       deliver_signal(proc, tf, sig, &sa);
       break; // after delivery, return to user mode to run handler: fall through
              // to preemption point
@@ -425,6 +434,12 @@ void check_pending_signals(trapframe *tf) {
       case DA_IGN:
         continue;
       case DA_STOP:
+        // 02: a syscall interrupted then stopped surfaces as -EINTR on resume
+        // (no restart across a stop/continue cycle).
+        if (current_task->restart_armed) {
+          tf->rax = (uint64_t)(int64_t)-EINTR;
+          current_task->restart_armed = false;
+        }
         printk(LOG_INFO, "signal: pid=%d stopped by signal %d\n", proc->pid,
                sig);
         do_stop(proc, sig);
@@ -453,6 +468,21 @@ void check_pending_signals(trapframe *tf) {
     } else if (sa->__sigaction_handler._sa_handler == SIG_IGN) {
       continue;
     } else {
+      // 02 SA_RESTART: a syscall returned -ERESTART (armed in xcall_dispatch).
+      // If this handler requests SA_RESTART, rewind rip to the syscall
+      // instruction and restore rax to the original nr — deliver_signal saves
+      // both into the sigframe, so after the handler returns rt_sigreturn
+      // re-executes the syscall with the original nr + args. Otherwise surface
+      // -EINTR. Either way the conduit is consumed here.
+      if (current_task->restart_armed) {
+        if (sa->sa_flags & SA_RESTART) {
+          tf->rip -= 2;
+          tf->rax = (uint64_t)current_task->restart_nr;
+        } else {
+          tf->rax = (uint64_t)(int64_t)-EINTR;
+        }
+        current_task->restart_armed = false;
+      }
       deliver_signal(proc, tf, sig, sa);
       // S02 SA_RESETHAND: reset this signal's action to SIG_DFL after delivery
       // (one-shot handler). SIGKILL/SIGSTOP are never user-modifiable so the
@@ -470,6 +500,23 @@ void check_pending_signals(trapframe *tf) {
              // to preemption point
     }
   }
+
+  // 02 SA_RESTART: if a syscall returned -ERESTART and no catching handler
+  // consumed it (signal was ignored, default-ignored, signalfd-deferred, or no
+  // signal ended up delivered to a handler), restart by rewinding rip to the
+  // syscall instruction and restoring the original nr. This mirrors Linux's
+  // ERESTARTNOHAND default (restart when no handler ran).
+  if (current_task->restart_armed) {
+    tf->rip -= 2;
+    tf->rax = (uint64_t)current_task->restart_nr;
+    current_task->restart_armed = false;
+  }
+
+  // The consume loop above drained every deliverable signal (or deferred one to
+  // a signalfd, leaving its bit set). Recalc the cached xcore bit so a freshly
+  // emptied task no longer reports signal_pending() — without this an
+  // interruptible wait started before the next delivery would spuriously EINTR.
+  recalc_sigpending(current_task);
 
   // Reschedule loop: keep calling schedule() until need_resched is cleared.
   // schedule() clears need_resched at entry; if re-set by another IPI/wake
@@ -495,9 +542,36 @@ void force_sig(xtask *proc, int sig, int si_code, void *si_addr) {
       SIG_IGN) {
     proc->proc->signal->action[sig].__sigaction_handler._sa_handler = SIG_DFL;
   }
+  recalc_sigpending(proc);
 }
 
 // ===================== Signal delivery helpers =====================
+
+// Recompute the xcore-cached t->sig_pending bit from live BSD signal state.
+// Mirrors Linux recalc_sigpending: merge per-task private sig_pending with the
+// thread-group shared_pending (where kill()/pgsignal() post) under sig_lock,
+// apply the block mask, then force SIGKILL/SIGSTOP through. The result is the
+// same "any deliverable signal pending?" predicate the old signal_pending()
+// computed on every call — now cached in t->sig_pending so xcore/drivers test
+// a single bit. Call at every state-changing point (see signal.h).
+//
+// Lock order: sig_lock only — never taken while holding scheduler_lock, so
+// callers running under scheduler_lock (waitpid's pre-block check) cannot use
+// this and read the merge inline instead.
+void recalc_sigpending(xtask *t) {
+  if (!t->proc) {
+    t->sig_pending = 0;
+    return;
+  }
+  uint64_t pend = __atomic_load_n(&t->proc->sig_pending, __ATOMIC_ACQUIRE);
+  uint64_t sflags;
+  spin_lock_irqsave(&t->proc->signal->sig_lock, &sflags);
+  pend |= t->proc->signal->shared_pending;
+  spin_unlock_irqrestore(&t->proc->signal->sig_lock, sflags);
+  uint64_t deliv = pend & ~t->proc->sig_blocked;
+  deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
+  t->sig_pending = (deliv != 0);
+}
 
 // Resume a STOPPED target so a pending signal can be processed when it next
 // runs. Used for SIGCONT (full resume + parent CLD_CONTINUED) and for SIGKILL
@@ -543,11 +617,14 @@ void deliver_signal_to(xtask *target, int sig) {
     wake_stopped(target, sig);
     // SIGCONT does not pend after resuming; SIGKILL still pends so the woken
     // target exits when it runs.
-    if (sig == SIGCONT)
+    if (sig == SIGCONT) {
+      recalc_sigpending(target);
       return;
+    }
   }
   __atomic_or_fetch(&target->proc->sig_pending, 1ULL << (sig - 1),
                     __ATOMIC_RELEASE);
+  recalc_sigpending(target);
   // Signals must be able to interrupt any blocking state (including
   // WAIT_FUTEX, the pthread_cancel path); wake_process_any unconditionally
   // wakes any BLOCKED target regardless of event type.
@@ -603,6 +680,7 @@ static int deliver_signal_to_process(xtask *leader, int sig) {
   spin_lock_irqsave(&leader->proc->signal->sig_lock, &sflags);
   leader->proc->signal->shared_pending |= (1ULL << (sig - 1));
   spin_unlock_irqrestore(&leader->proc->signal->sig_lock, sflags);
+  recalc_sigpending(leader);
   if (!(leader->proc->sig_blocked & (1ULL << (sig - 1))) &&
       leader->state == BLOCKED)
     wake_process_any(leader);
@@ -862,6 +940,7 @@ int64_t sys_tgkill(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   // Deliver to the thread-level sig_pending (atomic, no sig_lock)
   __atomic_or_fetch(&target->proc->sig_pending, 1ULL << (sig - 1),
                     __ATOMIC_RELEASE);
+  recalc_sigpending(target);
   // A signal delivered via tgkill must be able to interrupt any blocking
   // state (including WAIT_FUTEX, pthread_cancel goes through this path).
   if (target->state == BLOCKED)
@@ -919,6 +998,11 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     }
     // SIGKILL/SIGSTOP cannot be blocked
     proc->proc->sig_blocked &= ~((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP)));
+    // A mask change can make a previously-blocked pending signal deliverable
+    // (SIG_UNBLOCK) or hide one (SIG_BLOCK); recalc so signal_pending() tracks
+    // the new deliverable set. Mirrors Linux recalc_sigpending() in
+    // set_current_blocked().
+    recalc_sigpending(proc);
   }
 
   if (oldset) {
@@ -1051,6 +1135,7 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     proc->proc->signal->action[sig] = new_act;
     __atomic_and_fetch(&proc->proc->sig_pending, ~(1ULL << (sig - 1)),
                        __ATOMIC_RELEASE);
+    recalc_sigpending(proc);
   }
 
   return 0;
@@ -1101,6 +1186,9 @@ int64_t sys_sigreturn(int64_t unused1, int64_t unused2, int64_t unused3,
   proc->proc->sig_blocked = frame.uc.uc_sigmask;
   proc->proc->sig_blocked &= ~(SIGMASK(SIGKILL));
   proc->proc->sig_blocked &= ~(SIGMASK(SIGSTOP));
+  // Restoring the pre-handler block mask can make a pending signal deliverable
+  // again (or hide one); recalc the cached bit like sigprocmask above.
+  recalc_sigpending(proc);
 
   // S04: restore the per-task sigaltstack state saved at delivery. If the
   // handler ran on the altstack (SS_ONSTACK was set in uc_stack), clear it.

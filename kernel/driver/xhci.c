@@ -866,12 +866,8 @@ static ssize_t usb_hidraw_read(xtask *proc, int fd, void *buf, size_t count) {
     }
     // EINTR on pending signal (mirror eventfd read).
     {
-      xtask *p = current_task;
-      uint64_t pend = __atomic_load_n(&p->proc->sig_pending, __ATOMIC_ACQUIRE);
-      uint64_t deliv = pend & ~p->proc->sig_blocked;
-      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-      if (deliv) {
-        ret = -EINTR;
+      if (signal_pending(current_task)) {
+        ret = -ERESTART;
         goto out;
       }
     }

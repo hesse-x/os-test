@@ -133,7 +133,8 @@ if [ "$TEST" = "1" ]; then
                test_mmap_flags.elf test_mmap_size_limit.elf \
                test_clone_exit_signal.elf test_clone_settid_fault.elf \
                test_wait4_pgid_rusage.elf test_setuid_saved.elf \
-               test_execve_vfs.elf; do
+               test_execve_vfs.elf \
+               test_getdents_resume.elf test_sa_restart.elf test_sa_nocldwait.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
     done
 fi

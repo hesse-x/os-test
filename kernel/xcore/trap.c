@@ -918,10 +918,19 @@ const char *syscall_name(uint64_t nr) {
 void xcall_dispatch(trapframe *tf) {
   get_cpu_local()->cur_tf = tf;
   int64_t nr = tf->rax;
+  // 02 SA_RESTART: clear any stale armed restart from a prior syscall so a
+  // non-syscall entry path (page fault) whose tf->rax coincidentally equals
+  // -ERESTART cannot drive a bogus restart.
+  current_task->restart_armed = false;
 
   int64_t r = xcore_dispatch(tf);
   if (r != XCALL_NOT_OWNED) {
     tf->rax = r;
+    // 02: arm restart for an Xcore-owned slow syscall that returned -ERESTART.
+    if ((int64_t)r == -ERESTART) {
+      current_task->restart_nr = nr;
+      current_task->restart_armed = true;
+    }
   } else if (nr >= 0) {
     // Xcore 未认领 → BSD 层
     int64_t ret =
@@ -930,6 +939,12 @@ void xcall_dispatch(trapframe *tf) {
     // 覆盖 tf->rax,否则信号投递时保存的返回值(-EINTR 等)被改回 0。
     if (nr != SYS_RT_SIGRETURN)
       tf->rax = ret;
+    // 02: arm restart for a BSD slow syscall that returned -ERESTART (not for
+    // rt_sigreturn, which itself restores rax from the sigframe).
+    if (nr != SYS_RT_SIGRETURN && (int64_t)ret == -ERESTART) {
+      current_task->restart_nr = nr;
+      current_task->restart_armed = true;
+    }
   } else {
     printk(LOG_WARN, "xcall_dispatch: unknown syscall nr=%lu pid=%d\n",
            (unsigned long)tf->rax, current_task->pid);

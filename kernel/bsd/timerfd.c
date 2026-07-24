@@ -22,7 +22,6 @@
 
 #include <xos/errno.h>
 #include <xos/fcntl.h>
-#include <xos/signal.h>
 #include <xos/socket.h>
 #include <xos/time.h>
 
@@ -207,13 +206,9 @@ int64_t timerfd_do_read(struct file *f, void *buf) {
       goto out;
     }
     {
-      xtask *p = current_task;
-      uint64_t pend = __atomic_load_n(&p->proc->sig_pending, __ATOMIC_ACQUIRE);
-      uint64_t deliv = pend & ~p->proc->sig_blocked;
-      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-      if (deliv) {
+      if (signal_pending(current_task)) {
         current_task->state = RUNNING;
-        ret = -EINTR;
+        ret = -ERESTART;
         goto out;
       }
     }

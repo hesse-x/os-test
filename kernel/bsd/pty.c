@@ -5,6 +5,10 @@
  */
 
 #include "kernel/bsd/pty.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/inode.h"
@@ -18,8 +22,7 @@
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
-#include <stdbool.h>
-#include <stddef.h>
+
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/signal.h>
@@ -85,12 +88,7 @@ int pty_ring_read(uint8_t *buf, uint32_t head, uint32_t *tail, uint8_t *data,
 }
 
 // ===================== Helpers =====================
-static int pty_eintr_check(xtask *proc) {
-  uint64_t pend = __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-  uint64_t deliv = pend & ~proc->proc->sig_blocked;
-  deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-  return deliv ? 1 : 0;
-}
+static int pty_eintr_check(xtask *proc) { return signal_pending(proc) ? 1 : 0; }
 
 // pty wq 回调：__wake_up → 唤醒挂在 pty->wq 的阻塞 reader/writer。
 // 不查 wait_event（队列身份制：在 pty->wq 上即唤醒）。
@@ -350,13 +348,13 @@ int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
       if (pty_eintr_check(proc)) {
         proc->state = RUNNING;
         remove_wait_queue(pty->wq, &wait);
-        return -EINTR;
+        return -ERESTART;
       }
       schedule();
       if (pty_eintr_check(proc)) {
         proc->state = RUNNING;
         remove_wait_queue(pty->wq, &wait);
-        return -EINTR;
+        return -ERESTART;
       }
       continue; // re-check conditions after wake
     }
@@ -371,13 +369,13 @@ int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
     if (pty_eintr_check(proc)) {
       proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
-      return -EINTR;
+      return -ERESTART;
     }
     schedule();
     if (pty_eintr_check(proc)) {
       proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
-      return -EINTR;
+      return -ERESTART;
     }
   }
   proc->state = RUNNING;
@@ -431,7 +429,7 @@ int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
       remove_wait_queue(pty->wq, &wait);
       if (written > 0)
         break;
-      return -EINTR;
+      return -ERESTART;
     }
     schedule();
     proc->state = RUNNING;
@@ -439,7 +437,7 @@ int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
     if (pty_eintr_check(proc)) {
       if (written > 0)
         break;
-      return -EINTR;
+      return -ERESTART;
     }
   }
 
@@ -480,13 +478,13 @@ int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
     if (pty_eintr_check(proc)) {
       proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
-      return -EINTR;
+      return -ERESTART;
     }
     schedule();
     if (pty_eintr_check(proc)) {
       proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
-      return -EINTR;
+      return -ERESTART;
     }
     if (pty->master_refs == 0) {
       proc->state = RUNNING;
@@ -558,7 +556,7 @@ int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
       remove_wait_queue(pty->wq, &wait);
       if (written > 0)
         break;
-      return -EINTR;
+      return -ERESTART;
     }
     schedule();
     proc->state = RUNNING;
@@ -566,7 +564,7 @@ int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
     if (pty_eintr_check(proc)) {
       if (written > 0)
         break;
-      return -EINTR;
+      return -ERESTART;
     }
   }
 

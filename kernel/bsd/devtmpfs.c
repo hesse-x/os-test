@@ -670,6 +670,26 @@ static ssize_t devtmpfs_getdents(struct inode *dir, struct dir_context *ctx) {
 
   size_t cur_pos = 0;
 
+  /* Synthetic "." and ".." precede real children (in-memory fs has no on-disk
+   * dot entries). devtmpfs tracks no parent link, so both point at this
+   * directory (root-like ".." → self, matching FAT-root behavior). */
+  {
+    size_t nl = 1; /* "." */
+    uint16_t r = (uint16_t)((sizeof(struct dirent64) + nl + 1 + 7) & ~7);
+    if (cur_pos >= ctx->pos &&
+        !dir_emit(ctx, ".", (int)nl, cur_pos, dir->ino, DT_DIR))
+      goto done;
+    cur_pos += r;
+  }
+  {
+    size_t nl = 2; /* ".." */
+    uint16_t r = (uint16_t)((sizeof(struct dirent64) + nl + 1 + 7) & ~7);
+    if (cur_pos >= ctx->pos &&
+        !dir_emit(ctx, "..", (int)nl, cur_pos, dir->ino, DT_DIR))
+      goto done;
+    cur_pos += r;
+  }
+
   if (is_root) {
     /* Root /dev: dir_list then top-level dev_list entries */
     struct dev_dir *d = dir_list;

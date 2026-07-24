@@ -36,7 +36,6 @@
 
 #include <xos/errno.h>
 #include <xos/fcntl.h>
-#include <xos/signal.h>
 #include <xos/syscall_nums.h>
 
 // A single POSIX byte-range lock. Lives on inode->i_flock.
@@ -170,14 +169,7 @@ static wait_queue_head *inode_wq_get(struct inode *ip) {
 
 // True if the current task has an unblocked signal pending (interrupts an
 // indefinite F_SETLKW). Mirrors the pipe-write check.
-static bool task_signal_pending(xtask *proc) {
-  if (!proc->proc)
-    return false;
-  uint64_t pend = __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-  uint64_t deliv = pend & ~proc->proc->sig_blocked;
-  deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-  return deliv != 0;
-}
+static bool task_signal_pending(xtask *proc) { return signal_pending(proc); }
 
 // Apply a lock (F_RDLCK/F_WRLCK) or unlock (F_UNLCK) for pid over [start,end).
 // blocking=1 makes a conflicting F_SETLKW wait on inode->wq (signal-interrupt).
@@ -247,7 +239,7 @@ static int64_t apply_lock(struct inode *ip, pid_t pid, int type, uint64_t start,
     sched_cancel_spurious_wake(proc);
     remove_wait_queue(wq, &wait);
     if (task_signal_pending(proc))
-      return -EINTR;
+      return -ERESTART;
     // loop: re-check conflict under i_flock_lock
   }
 }

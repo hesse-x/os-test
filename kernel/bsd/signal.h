@@ -7,10 +7,12 @@
 #ifndef KERNEL_BSD_SIGNAL_H
 #define KERNEL_BSD_SIGNAL_H
 
+#include <stdint.h>
+
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h" // xtask (do_cont / alarm_check prototypes)
-#include <stdint.h>
+
 #include <xos/signal.h>
 #include <xos/types.h>
 
@@ -49,6 +51,20 @@ void signal_put(struct signal_struct *sig);
 // WUNTRACED one-shot report). Exported because the kill/tgkill delivery paths
 // live in the same TU but are referenced from tests/debug.
 void do_cont(xtask *t);
+
+// signal_pending() has moved to kernel/xcore/xtask.h (Linux TIF_SIGPENDING
+// model): a per-task cached boolean that drivers/xcore may test without a
+// layering violation. The BSD signal path maintains it via recalc_sigpending()
+// below — delivery, sigprocmask, rt_sigreturn, and the check_pending_signals
+// drain all recalc so the cached bit tracks "any deliverable signal pending?".
+
+// Recompute t->sig_pending (the xcore cached bit) from the live BSD state
+// (private sig_pending ∪ thread-group shared_pending, then block-mask filtered
+// with the SIGKILL/SIGSTOP override). Call at every point that changes pending
+// bits or sig_blocked: after a delivery, after sigprocmask/rt_sigreturn, and
+// after check_pending_signals consumes a signal. Mirrors Linux
+// recalc_sigpending.
+void recalc_sigpending(xtask *t);
 
 // S03: per-process alarm expiry check (registered as the Xcore alarm_check_hook
 // from bsd_init). If the current task's thread-group alarm_deadline has passed,

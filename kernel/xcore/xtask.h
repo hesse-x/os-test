@@ -156,6 +156,14 @@ typedef struct xtask {
 
   uint8_t need_resched; // 1 = current task must yield, checked at sched exit
 
+  // Linux TIF_SIGPENDING equivalent: a per-task boolean cached by
+  // recalc_sigpending() (bsd/signal.c) so interruptible blocking waits can
+  // cheaply test "any deliverable signal pending?" via signal_pending() without
+  // touching BSD signal_struct state. Set/cleared only by the BSD signal path
+  // (delivery, sigprocmask, rt_sigreturn, check_pending_signals drain); xcore
+  // treats it as an opaque cached bit and never writes it.
+  uint8_t sig_pending;
+
   // === sigaltstack (S04, per-thread) ===
   // Linux stores sas_ss_* per task_struct so each thread has its own alternate
   // signal stack. Mirrored here (not in the thread-group-shared signal_struct,
@@ -183,6 +191,15 @@ typedef struct xtask {
   //     cpu_local.pending_dead).  xtask_alloc must not reuse a REAPING slot
   //     until exit_done == 1.
   volatile uint32_t exit_done;
+
+  // === SA_RESTART restart conduit (02) ===
+  // Set by xcall_dispatch when a syscall returns -ERESTART (orig syscall nr);
+  // consumed+cleared by check_pending_signals at delivery to rewind rip and
+  // restore rax. Cleared on every syscall entry so a stale value from a prior
+  // call cannot drive a bogus restart on a non-syscall entry path (page fault)
+  // whose tf->rax coincidentally equals -ERESTART.
+  int64_t restart_nr;
+  uint8_t restart_armed;
 } xtask;
 
 // STATIC_ASSERT: verify first 8 fields offset match old task_t exactly
@@ -211,6 +228,17 @@ extern xtask *tasks[MAX_PROC];
 extern spinlock tasks_lock;
 extern pid_t next_pid;
 extern pid_t init_pid;
+
+// signal_pending(): Linux TIF_SIGPENDING test. A cheap per-task boolean cached
+// by the BSD signal path's recalc_sigpending() so interruptible blocking waits
+// (driver/xcore) can ask "should this sleep be interrupted by a signal?"
+// without pulling in BSD signal_struct state. Lives in xcore because it is a
+// scheduling concern, not a signal-subsystem implementation detail — drivers
+// may call it without a layering violation. Returns false for tasks without a
+// BSD proc.
+static inline bool signal_pending(xtask *t) {
+  return t && t->proc && t->sig_pending;
+}
 
 // task_get: pid -> xtask* unified access helper.
 // debug: validates pid is valid and slot non-NULL (encodes lock-free-read

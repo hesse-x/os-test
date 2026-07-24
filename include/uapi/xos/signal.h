@@ -72,8 +72,11 @@
 #define SA_RESTORER                                                            \
   0x04000000 // S02: honor sa_restorer as the return trampoline
 #define SA_RESTART                                                             \
-  0x10000000 // implemented (S02); slow syscalls restart if a
-             // delivering handler sets SA_RESTART
+  0x10000000 // S02-style restart: a slow syscall that returns -ERESTART is
+             // re-executed (rip -= 2, rax = orig nr) when the delivering
+             // handler has SA_RESTART set; otherwise it surfaces as -EINTR.
+             // See refact_syscall/02. Never-restart syscalls (pause, sleep,
+             // nanosleep, poll-with-timeout, futex-with-timeout) return EINTR.
 
 // ===================== sigaltstack (S04) =====================
 // Alternate signal stack. ss_flags may carry SS_ONSTACK (set only by the

@@ -556,14 +556,12 @@ int64_t unix_dgram_recvmsg(struct unix_sock *sock, const struct iovec *iov,
         return -ETIMEDOUT;
       }
       {
-        uint64_t pend =
-            __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-        uint64_t deliv = pend & ~proc->proc->sig_blocked;
-        deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-        if (deliv) {
+        /* Merge shared_pending so kill()-delivered signals interrupt the
+         * recv wait (signal_pending merges sig_pending + shared_pending). */
+        if (signal_pending(proc)) {
           proc->state = RUNNING;
           remove_wait_queue(sock->wq, &wait);
-          return -EINTR;
+          return -ERESTART;
         }
       }
       proc->state = RUNNING;
@@ -972,19 +970,16 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
       }
       // EINTR check
       {
-        uint64_t pend =
-            __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-        uint64_t deliv = pend & ~proc->proc->sig_blocked;
-        deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-        if (deliv) {
+        if (signal_pending(proc)) {
           proc->state = RUNNING;
           remove_wait_queue(sock->wq, &wait);
           kfree(kiov);
           // Linux MSG_WAITALL: a signal interrupting a partial read returns
-          // the bytes already copied; with nothing copied, return -EINTR.
+          // the bytes already copied; with nothing copied, return -ERESTART so
+          // SA_RESTART re-executes the recv.
           if (total_filled > 0)
             return (int64_t)total_filled;
-          return (int64_t)-EINTR;
+          return (int64_t)-ERESTART;
         }
       }
       proc->state = RUNNING;
@@ -1584,14 +1579,10 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       schedule();
       // EINTR check (signal is the only way out of an idle blocking accept)
       {
-        uint64_t pend =
-            __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-        uint64_t deliv = pend & ~proc->proc->sig_blocked;
-        deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-        if (deliv) {
+        if (signal_pending(proc)) {
           proc->state = RUNNING;
           remove_wait_queue(listen_sock->wq, &wait);
-          ret = -EINTR;
+          ret = -ERESTART;
           goto out;
         }
       }
@@ -2521,12 +2512,8 @@ int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
     // EINTR check (before timeout check: signal priority over timeout)
     {
-      uint64_t pend =
-          __atomic_load_n(&proc->proc->sig_pending, __ATOMIC_ACQUIRE);
-      uint64_t deliv = pend & ~proc->proc->sig_blocked;
-      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-      if (deliv) {
-        ret = (int64_t)-EINTR;
+      if (signal_pending(proc)) {
+        ret = (int64_t)-ERESTART;
         goto poll_out;
       }
     }
