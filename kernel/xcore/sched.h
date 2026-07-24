@@ -31,6 +31,17 @@ void sched_try_steal_task(void);
 void sched_timer_queue_insert(int cpu, xtask *proc);
 void sched_timer_queue_remove(xtask *proc);
 
+// (frame_opt.md 块四) Stack canary + high-water-mark accounting.  Each task's
+// kernel stack gets a canary word at its bottom (lowest address); schedule()
+// verifies it on entry so an overrun into neighboring heap objects is caught
+// at the next switch rather than silently corrupting state.  The high-water
+// mark estimates the deepest RSP seen on the current task's stack and warns
+// before it approaches the limit.
+void kstack_canary_write(xtask *t);
+void kstack_canary_check(xtask *t);
+void kstack_highwater_check(void);
+void irq_stack_canary_check(void);
+
 // xtask-dedicated slab cache (defined in kernel/xcore/sched.c).
 // After dynamic allocation, xtask is allocated via kmem_cache_alloc from this
 // cache; slot reuse frees back to this cache.  Failure rollback paths in

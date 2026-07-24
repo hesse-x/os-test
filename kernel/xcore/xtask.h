@@ -110,6 +110,11 @@ typedef struct xtask {
   uint64_t cpu_time_ns;
   uint64_t last_sched;
 
+  // (frame_opt.md 块四) deepest kernel-stack usage observed for this task
+  // (k_stack_top - lowest RSP).  Updated by kstack_highwater_check() at the
+  // schedule() entry choke point; warns when usage approaches the 16KB limit.
+  uint64_t stack_highwater;
+
   // === threading support (appended at end, preserves existing offsets) ===
   uint64_t fs_base;      // TLS base (FS_BASE MSR mirror), loaded by __trapret
   struct page *fpu_page; // fxsave area page (pre-allocated at creation time:

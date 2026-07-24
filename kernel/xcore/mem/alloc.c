@@ -7,6 +7,7 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
+#include "arch/x64/smp.h" // AP_TRAMPOLINE_PHYS (reserve out of BFC free list)
 #include "kernel/efi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
@@ -340,6 +341,22 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
            j++) {
         frames[page_idx + j].status = PAGE_FREE;
       }
+    }
+  }
+
+  // 5b. Reserve the AP real-mode trampoline page (arch/x64/smp.h
+  // AP_TRAMPOLINE_PHYS).  UEFI reports low RAM as EfiConventionalMemory, so
+  // step 5 marks 0x8000 FREE; without this, bfc_alloc_page() could hand it to
+  // sig_init, whose signal-trampoline page would then be overwritten when
+  // smp_boot_aps() copies the 16-bit AP stub to the same physical 0x8000 —
+  // the user-mode signal return would jump there and #GP on a kernel-segment
+  // load (the signal-test SIGSEGV).  Mirrors Linux's memblock_reserve on its
+  // real-mode blob: the page is owned by AP startup and never free for BFC.
+  {
+    size_t ap_idx = PHY_TO_PAGE(AP_TRAMPOLINE_PHYS);
+    if (ap_idx < total_page_frames) {
+      frames[ap_idx].status = PAGE_RESERVED;
+      refcount_set(&frames[ap_idx].p_refcount, 0);
     }
   }
 

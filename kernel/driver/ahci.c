@@ -374,9 +374,14 @@ static void ahci_irq_handler(trapframe *tf) {
   // to preempt our completion processing
   lapic_eoi();
 
-  // Re-enable CPU interrupts (IF=1) so the LAPIC can deliver higher-priority
-  // interrupts (e.g. timer at priority class 7) while we process completion.
-  __asm__ volatile("sti");
+  // (frame_opt.md 块二) No sti here.  This is a hard-IRQ handler: every IDT
+  // gate is an interrupt gate (IF=0 on entry), and hard-IRQs must stay
+  // non-reentrant.  Re-enabling interrupts let the LAPIC timer nest into the
+  // AHCI completion path, multiplying stack depth on the shared task stack
+  // (the #DF root cause).  Completion processing does not block (synchronous
+  // bounce-buffer copy), so IF=0 throughout is correct.  EOI ≠ sti: the early
+  // lapic_eoi() above already lets the LAPIC latch the next interrupt, which
+  // is delivered once we IRETQ with IF=1.
 
   // Check if a command was in flight
   if (!ahci_current_req) {

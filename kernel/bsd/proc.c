@@ -988,6 +988,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   child->state = READY;
   child->k_rsp = k_rsp;
   child->k_stack_top = k_stack_top;
+  kstack_canary_write(child); // (frame_opt.md 块四) canary at stack bottom
   child->cr3 = child_mm->cr3; // cached
   child->entry = parent->entry;
   child->wait_event = WAIT_NONE;
@@ -1338,6 +1339,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   child->state = READY;
   child->k_rsp = k_rsp;
   child->k_stack_top = k_stack_top;
+  kstack_canary_write(child); // (frame_opt.md 块四) canary at stack bottom
   child->entry = parent->entry;
   child->wait_event = WAIT_NONE;
   child->mm = child_mm;

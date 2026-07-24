@@ -37,6 +37,13 @@
 #define KERNEL_STACK_PAGES 4
 #define KERNEL_STACK_SIZE (KERNEL_STACK_PAGES * PAGE_SIZE)
 
+// (frame_opt.md 块四) Canary value written to the bottom of every kernel task
+// stack and per-CPU IRQ stack; verified at switch/IRQ-entry choke points to
+// catch stack overruns into neighboring heap objects (the #DF root mechanism).
+#define KSTACK_CANARY 0xC0FFEE42C0FFEE42ULL
+#define IRQ_STACK_CANARY 0xDEADBEEFDEADBEEFULL
+#define IRQ_STACK_BYTES (4 * PAGE_SIZE) // matches IRQ_STACK_PAGES in smp.c
+
 // Linker symbol: end of kernel image (used by allocators)
 #include <stdint.h>
 extern uint8_t kernel_end[];

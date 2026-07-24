@@ -26,9 +26,39 @@ static const char *level_tags[] = {"DEBUG", "INFO", "WARN", "ERROR", "PANIC"};
 
 static void dump_stack_trace_locked(void);
 
+// (frame_opt.md 块三) Decrement the printk re-entry depth on any return from
+// printk's body — paired with the increment below.  A cleanup attribute keeps
+// it correct even if serial output faults mid-line.
+static void printk_depth_leave(void *arg) {
+  (void)arg;
+  get_cpu_local()->printk_depth--;
+}
+
 void printk(int level, const char *fmt, ...) {
   if (level < log_level && level != LOG_PANIC)
     return;
+
+  // (frame_opt.md 块三) Re-entry guard.  trap_dispatch dumps a lot of state via
+  // printk, and printk can itself fault (formatting a corrupt pointer, touching
+  // an unmapped symbol).  We track nesting depth on this CPU: the outermost
+  // printk (depth 0 → 1) prints normally; any re-entrant printk (depth already
+  // ≥1) means we faulted inside a printk body, so emit only a bare marker and
+  // bail — re-formatting would risk another fault and an unbounded
+  // fault-during-fault cascade.  PANIC bypasses the guard so the panic message
+  // is never suppressed.  (Previously trap_dispatch armed a flag before the
+  // dump, which made every dump-time printk look "recursive" and suppressed
+  // the banner itself — only a bare BACKTRACE survived.)
+  cpu_local *cl = get_cpu_local();
+  if (level != LOG_PANIC && cl->printk_depth >= 1) {
+    uint64_t flags = serial_tx_acquire();
+    serial_printf_locked("\n[recursive oops — printk re-entered]\n");
+    serial_tx_release(flags);
+    return;
+  }
+
+  cl->printk_depth++;
+  int depth_guard __attribute__((cleanup(printk_depth_leave))) = 1;
+  (void)depth_guard;
 
   // Hold the TX lock across tag+body so one printk line is never split by
   // output from another CPU.

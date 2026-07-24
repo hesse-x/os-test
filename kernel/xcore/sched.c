@@ -43,10 +43,29 @@ _Static_assert(sizeof(trapframe) == 176,
 _Static_assert(
     offsetof(cpu_local, tss_rsp0) == 48,
     "syscall_fast_entry asm: tss_rsp0 offset mismatch (expected 48)");
+// GS offsets consumed by __irq_entry (trapentry.S): the hard-IRQ stack switch
+// and the in_hardirq sti-gate read these via gs:<offset>.  Pin them so a layout
+// change is caught at compile time rather than corrupting per-CPU state.
+_Static_assert(offsetof(cpu_local, irq_stack_top) >= 56,
+               "__irq_entry asm: irq_stack_top must follow tss_rsp0");
+_Static_assert(offsetof(cpu_local, irq_stack_saved_rsp) >= 56,
+               "__irq_entry asm: irq_stack_saved_rsp must follow tss_rsp0");
+_Static_assert(offsetof(cpu_local, in_hardirq) >= 56,
+               "__irq_entry asm: in_hardirq must follow tss_rsp0");
 
 // fs_base offset consumed by trapentry.S (wrmsr FS_BASE before returning to
 // user mode). Pinned by static_assert at the bottom of this file.
 const uint64_t xtask_fs_base_offset = offsetof(xtask, fs_base);
+
+// GS-offset constants for the hard-IRQ stack fields (consumed by __irq_entry
+// and the #PF sti gate in trapentry.S). Mirrors the xtask_fs_base_offset
+// pattern: emit the offsetof here so asm reads it via a RIP-relative symbol
+// instead of hardcoding padded struct offsets.
+const uint64_t cpu_local_irq_stack_top_offset =
+    offsetof(cpu_local, irq_stack_top);
+const uint64_t cpu_local_irq_stack_saved_rsp_offset =
+    offsetof(cpu_local, irq_stack_saved_rsp);
+const uint64_t cpu_local_in_hardirq_offset = offsetof(cpu_local, in_hardirq);
 
 xtask *tasks[MAX_PROC];
 // current_task is per-CPU (in cpu_local), accessed via macro
@@ -284,6 +303,7 @@ xtask *sched_create_idle_process(int cpu_id) {
   proc->state = RUNNING; // idle starts as RUNNING on its CPU
   proc->k_rsp = k_rsp;
   proc->k_stack_top = k_stack_top;
+  kstack_canary_write(proc); // (frame_opt.md 块四) canary at stack bottom
   proc->cr3 = (__force uint64_t)PHY_ADDR(
       (uintptr_t)pml4); // kernel PML4 physical address (cached)
   proc->entry = (uint64_t)sched_idle_entry;
@@ -480,10 +500,89 @@ int xcore_fpu_alloc(xtask *t) {
   return 1;
 }
 
+// (frame_opt.md 块四) Stack canary + high-water accounting.
+//
+// Each task kernel stack gets a canary word written at its BOTTOM (lowest
+// address = k_stack_top - KERNEL_STACK_SIZE).  schedule() checks it on entry:
+// an overrun that walked past the stack bottom would clobber this word, and we
+// BUG_ON so the corruption is attributed to the task rather than silently
+// corrupting neighboring heap objects (the bug.md §4 / #DF root mechanism).
+// KSTACK_CANARY / IRQ_STACK_CANARY / IRQ_STACK_BYTES are in memlayout.h.
+// Warn when the current task's stack has less than this much free below the
+// deepest RSP seen (i.e. usage approaches the limit).  16KB stack, 4KB headroom
+// → warn past 12KB used.  Non-fatal: only reports.
+#define KSTACK_HIGHWATER_WARN (KERNEL_STACK_SIZE - 4096)
+
+void kstack_canary_write(xtask *t) {
+  if (!t->k_stack_top)
+    return;
+  *(uint64_t *)(t->k_stack_top - KERNEL_STACK_SIZE) = KSTACK_CANARY;
+}
+
+void kstack_canary_check(xtask *t) {
+  if (!t->k_stack_top)
+    return;
+  uint64_t *slot = (uint64_t *)(t->k_stack_top - KERNEL_STACK_SIZE);
+  BUG_ON(*slot != KSTACK_CANARY);
+}
+
+void kstack_highwater_check(void) {
+  xtask *t = current_task;
+  if (!t || !t->k_stack_top)
+    return;
+  uint64_t rsp;
+  __asm__ volatile("movq %%rsp, %0" : "=r"(rsp));
+  uint64_t stack_base = t->k_stack_top - KERNEL_STACK_SIZE;
+  if (rsp < stack_base || rsp >= t->k_stack_top)
+    return; // not on this task's stack (e.g. IRQ stack) — skip
+  uint64_t used = t->k_stack_top - rsp;
+  if (used > t->stack_highwater)
+    t->stack_highwater = used;
+  if (t->stack_highwater > KSTACK_HIGHWATER_WARN) {
+    printk(LOG_WARN,
+           "STACK-HIGHWATER pid=%d used=%lu/%d bytes (approaching limit)\n",
+           t->pid, (unsigned long)t->stack_highwater, KERNEL_STACK_SIZE);
+  }
+}
+
+// (frame_opt.md 块四) Verify this CPU's IRQ-stack canary.  Called from the IRQ
+// path of trap_dispatch while running on the IRQ stack; the canary sits at the
+// stack bottom (irq_stack_top - IRQ_STACK_BYTES).  An overrun that walked past
+// the bottom clobbers it — BUG_ON attributes it before the next IRQ silently
+// corrupts neighboring objects.
+void irq_stack_canary_check(void) {
+  cpu_local *cl = get_cpu_local();
+  if (!cl->irq_stack_top)
+    return;
+  uint64_t *slot = (uint64_t *)(cl->irq_stack_top - IRQ_STACK_BYTES);
+  BUG_ON(*slot != IRQ_STACK_CANARY);
+}
+
 __attribute__((no_sanitize("kernel-address"))) void schedule() {
   int my_cpu = get_cpu_local()->cpu_id;
   xtask *idle = get_cpu_local()->idle_proc;
   xtask *prev = current_task;
+
+  // might_sleep guard (frame_opt.md 块二): refuse to schedule from hard-IRQ
+  // context.  switch_to stores the current RSP into prev->k_rsp; if that RSP
+  // is the per-CPU IRQ stack, the task would later resume with RSP pointing
+  // into the IRQ stack → corruption.  in_hardirq>0 means we are inside a
+  // hard-IRQ handler body (or an IRQ-stack handler that forgot to switch
+  // back).  We assert on in_hardirq only, NOT on RFLAGS.IF: legitimate callers
+  // (e.g. timer-driven preemption via check_pending_signals) reach schedule()
+  // with IF=0 because the timer interrupt gate cleared it — flags are saved
+  // and restored by spin_lock_irqsave, so IF=0 here is normal and must not
+  // fire.  in_hardirq==0 is the correct invariant (the IRQ exit slow path
+  // runs after in_hardirq has been decremented back to 0).
+  BUG_ON(get_cpu_local()->in_hardirq != 0);
+
+  // (frame_opt.md 块四) Verify prev's stack canary at this switch choke point,
+  // then record the high-water mark of the stack we're about to leave.  An
+  // overrun that clobbered the bottom canary is attributed to prev here rather
+  // than silently corrupting neighboring heap objects (the #DF root mechanism).
+  if (prev)
+    kstack_canary_check(prev);
+  kstack_highwater_check();
 
   uint64_t flags;
   spin_lock_irqsave(&cpu_locals[my_cpu].scheduler_lock, &flags);

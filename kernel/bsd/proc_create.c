@@ -222,7 +222,8 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   proc->state = READY;
   proc->k_rsp = k_rsp;
   proc->k_stack_top = k_stack_top;
-  proc->cr3 = pml4_phys; // cached
+  kstack_canary_write(proc); // (frame_opt.md 块四) canary at stack bottom
+  proc->cr3 = pml4_phys;     // cached
   proc->entry = lr.entry;
   proc->wait_event = WAIT_NONE;
   proc->tgid = proc->pid;

@@ -12,7 +12,6 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
-#include "boot/boot.h"
 #include "kernel/xcore/acpi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
@@ -28,9 +27,18 @@ gdt_ptr per_cpu_gdtr[MAX_CPUS];
 struct tss_struct per_cpu_tss[MAX_CPUS];
 uint64_t per_cpu_ist_stack[MAX_CPUS][3]; // IST1=NMI, IST2=DF, IST3=MCE
 
-// Trampoline page at physical 0x8000, mapped via identity map
-#define AP_TRAMPOLINE_PHYS 0x8000
-#define AP_TRAMPOLINE_VIRT (AP_TRAMPOLINE_PHYS + VMA_BASE)
+// Per-CPU hard-IRQ stack tops (frame_opt.md 块一). 16KB each (IRQ_STACK_PAGES),
+// allocated in smp_init_cpu alongside the IST stacks.  Hardware IRQs switch to
+// this stack in __irq_entry so they no longer consume the task's kernel stack.
+// Like per_cpu_ist_stack, this stores only the stack TOP per CPU; the actual
+// pages come from bfc_alloc_page and the top is mirrored into
+// cpu_local.irq_stack_top for the asm entry to read.
+#define IRQ_STACK_PAGES 4
+uint64_t per_cpu_irq_stack[MAX_CPUS];
+
+// AP real-mode trampoline: physical 0x8000, mapped via identity map.
+// AP_TRAMPOLINE_PHYS / AP_TRAMPOLINE_VIRT are defined in arch/x64/smp.h so
+// init_mem can reserve the page out of the BFC free list (see comment there).
 
 // Trampoline data layout (offsets within the trampoline page at 0x8000)
 // BSP writes these before sending SIPI; AP reads them in real/protected mode
@@ -120,6 +128,30 @@ smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
   tss->ist[0] = per_cpu_ist_stack[cpu_id][0]; // IST1 = NMI (#2)
   tss->ist[1] = per_cpu_ist_stack[cpu_id][1]; // IST2 = Double Fault (#8)
   tss->ist[2] = per_cpu_ist_stack[cpu_id][2]; // IST3 = Machine Check (#18)
+
+  // Allocate per-CPU hard-IRQ stack (frame_opt.md 块一).  Same region as the
+  // IST stacks (single point covers BSP via irq_init→smp_init_cpu(0) and APs
+  // via smp_boot_aps→smp_init_cpu(i)).  __irq_entry switches to this stack so
+  // hardware IRQs no longer push onto the task kernel stack.  No TSS change:
+  // IRQs use IST=0/RSP0 and __irq_entry switches RSP manually; the TSS IST
+  // slots above remain NMI/DF/MCE only.
+  {
+    struct page *irq_pages = bfc_alloc_page(IRQ_STACK_PAGES);
+    if (!irq_pages) {
+      printk(LOG_ERROR, "smp_init_cpu: IRQ stack alloc failed\n");
+      halt();
+    }
+    uint64_t irq_phys = (uint64_t)(irq_pages - bfc_frames) * PAGE_SIZE;
+    uint64_t irq_base =
+        (__force uint64_t)phys_to_virt((__force phys_addr_t)irq_phys);
+    uint64_t irq_top = irq_base + IRQ_STACK_PAGES * PAGE_SIZE;
+    per_cpu_irq_stack[cpu_id] = irq_top; // store top for reference/debug
+    cpu_locals[cpu_id].irq_stack_top = irq_top;
+    cpu_locals[cpu_id].irq_stack_saved_rsp = 0;
+    cpu_locals[cpu_id].in_hardirq = 0;
+    // Write a canary at the bottom word of the IRQ stack (frame_opt.md 块四).
+    *(uint64_t *)irq_base = IRQ_STACK_CANARY;
+  }
 
   set_tss_gate(gdt, 6, (uint64_t)tss, sizeof(struct tss_struct) - 1);
 

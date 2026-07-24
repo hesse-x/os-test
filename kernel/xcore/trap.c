@@ -175,10 +175,118 @@ static void restore_cur_tf(void *arg) {
   get_cpu_local()->cur_tf = *saved;
 }
 
+// (frame_opt.md 块三) The printk re-entry guard now lives entirely in printk
+// itself (printk_depth, see log.c): it counts nested printk frames, so the
+// outermost call prints normally and only a genuine fault-during-printk
+// re-entry is folded to the "[recursive oops]" marker.  trap_dispatch no
+// longer arms a flag here — arming before the dump made every dump-time
+// printk look "recursive" and suppressed the banner, leaving only a bare
+// BACKTRACE.  No cleanup helper is needed on this path anymore.
+
+// (frame_opt.md 块三) #PF cross-process physical-page overlap + same-process
+// alias diagnostics. Pure diagnostics (not functional); previously inlined in
+// trap_dispatch where its locals (4-level page-table walk) bloated the trap
+// frame to ~1KB on the genuine-#PF error path.  Moved out and compiled only
+// under DEBUG_PF_DIAG so release/normal builds carry no frame cost.  The walk
+// uses only scalar locals; if richer buffers are added later, allocate them
+// with kmalloc (diagnostics may skip on allocation failure).
+#ifdef DEBUG_PF_DIAG
+static void diag_overlap_dump(trapframe *tf) {
+  uint64_t rip_page = tf->rip & ~0xFFF;
+  uint64_t my_phys = 0;
+  if (current_task) {
+    uint64_t *pte = lookup_pte(current_task->cr3, rip_page);
+    if (pte)
+      my_phys = *pte & 0x000FFFFFFFFFF000ULL;
+  }
+  printk(LOG_ERROR, "\n  OVERLAP-DIAG: rip_page=0x%lX phys=0x%lX", rip_page,
+         my_phys);
+  if (my_phys) {
+    int hits = 0;
+    for (int i = 0; i < MAX_PROC; i++) {
+      xtask *t = tasks[i];
+      if (!t || !t->cr3)
+        continue;
+      // skip kernel/idle
+      if (t->pid == 0)
+        continue;
+      uint64_t *pte = lookup_pte(t->cr3, rip_page);
+      if (pte && (*pte & 0x000FFFFFFFFFF000ULL) == my_phys) {
+        printk(LOG_ERROR, " pid%d@cr3=0x%lX", t->pid, t->cr3);
+        hits++;
+      }
+    }
+    printk(LOG_ERROR, " (total %d mapping this phys page)\n", hits);
+  } else {
+    printk(LOG_ERROR, " (rip_page not mapped in current task)\n");
+  }
+  // DIAG2: full walk of CURRENT task's page table, find ALL virtual addresses
+  // mapping to my_phys (same-process alias). If the .text phys page is also
+  // mapped at a .data vaddr, a write to .data corrupts .text.
+  if (my_phys && current_task) {
+    uint64_t *pml4 =
+        (uint64_t *)phys_to_virt((__force phys_addr_t)current_task->cr3);
+    int aliases = 0;
+    for (int i4 = 0; i4 < 512; i4++) {
+      if (!(pml4[i4] & 1))
+        continue;
+      uint64_t *pdpt = (uint64_t *)phys_to_virt(
+          (__force phys_addr_t)(pml4[i4] & 0x000FFFFFFFFFF000ULL));
+      for (int i3 = 0; i3 < 512; i3++) {
+        if (!(pdpt[i3] & 1))
+          continue;
+        if (pdpt[i3] & 0x80) // 1GB huge page
+          continue;
+        uint64_t *pd = (uint64_t *)phys_to_virt(
+            (__force phys_addr_t)(pdpt[i3] & 0x000FFFFFFFFFF000ULL));
+        for (int i2 = 0; i2 < 512; i2++) {
+          if (!(pd[i2] & 1))
+            continue;
+          if (pd[i2] & 0x80) // 2MB huge page
+            continue;
+          uint64_t *pt = (uint64_t *)phys_to_virt(
+              (__force phys_addr_t)(pd[i2] & 0x000FFFFFFFFFF000ULL));
+          for (int i1 = 0; i1 < 512; i1++) {
+            if (!(pt[i1] & 1))
+              continue;
+            if ((pt[i1] & 0x000FFFFFFFFFF000ULL) == my_phys) {
+              uint64_t va = ((uint64_t)i4 << 39) | ((uint64_t)i3 << 30) |
+                            ((uint64_t)i2 << 21) | ((uint64_t)i1 << 12);
+              if (i4 >= 256)
+                va |= 0xFFFF000000000000ULL;
+              printk(LOG_ERROR, "\n    ALIAS va=0x%lX pte=0x%lX", va, pt[i1]);
+              aliases++;
+            }
+          }
+        }
+      }
+    }
+    printk(LOG_ERROR, "\n    ALIAS total=%d vaddr(s) map phys 0x%lX\n", aliases,
+           my_phys);
+  }
+}
+#else
+static void diag_overlap_dump(trapframe *tf) { (void)tf; }
+#endif
+
 void trap_dispatch(trapframe *tf) {
   trapframe *saved_cur_tf __attribute__((cleanup(restore_cur_tf))) =
       get_cpu_local()->cur_tf;
   get_cpu_local()->cur_tf = tf;
+
+  // in_hardirq is managed by the entry asm: __irq_entry increments before
+  // calling us for hardware IRQs (trapno>=32) and decrements on return;
+  // __alltraps leaves it 0 for exceptions (trapno<32).  The #PF sti gate in
+  // __alltraps and the might_sleep() guard in schedule() read this counter,
+  // so trap_dispatch itself must not touch it (frame_opt.md 块一/块二).
+
+  // (frame_opt.md 块四) For hardware IRQs we are now running on the per-CPU IRQ
+  // stack; verify its bottom canary so an overrun from a previous IRQ is caught
+  // here rather than silently corrupting a neighbor.  Exceptions (trapno<32)
+  // run on the task stack and are covered by kstack_canary_check in schedule().
+  if (tf->trapno >= 32)
+    irq_stack_canary_check();
+
   // Hardware IRQ: check user-space driver binding first
   if (tf->trapno >= 32 && tf->trapno < MAX_IRQ_HANDLERS &&
       __atomic_load_n(&irq_owner[tf->trapno], __ATOMIC_ACQUIRE) >= 0) {
@@ -251,14 +359,18 @@ void trap_dispatch(trapframe *tf) {
     // entry; schedule() saves IF at entry into its flags and restores that same
     // IF on resume (see sched.c), so a schedule() with IF=0 would leave this
     // task running with interrupts permanently disabled after resume → deadlock
-    // (no timer/wakeup IRQ can ever fire).  Re-enable interrupts before handing
-    // control to the fault handler so the blocking schedule runs with IF=1 and
-    // resumes with IF=1.  Safe here: we hold no lock whose consistency depends
-    // on staying atomic past this point (COW already returned above), and #PF
-    // is a synchronous exception in process context — scheduling inside it is
-    // legitimate.
+    // (no timer/wakeup IRQ can ever fire).  Re-enabling interrupts before
+    // handing control to the fault handler so the blocking schedule runs with
+    // IF=1 and resumes with IF=1 is the Linux-standard idtentry behavior.
+    // (frame_opt.md 块二) The sti is now done in the __alltraps entry asm,
+    // gated on trapno==14 && in_hardirq==0, BEFORE calling trap_dispatch — so
+    // this C handler and its schedule() downstream run with IF=1.  IRQ-context
+    // #PFs (in_hardirq>0) are unrecoverable kernel bugs and stay IF=0 so they
+    // panic rather than nesting into the single IRQ-stack RSP slot.  Safe here:
+    // we hold no lock whose consistency depends on staying atomic past this
+    // point (COW already returned above), and a process-context #PF scheduling
+    // inside it is legitimate.
     if (fault_handler && current_task->proc) {
-      sti();
       if (fault_handler(fault_addr, current_task)) {
         return; // BSD layer handled the fault
       }
@@ -273,6 +385,10 @@ void trap_dispatch(trapframe *tf) {
     fpu_lazy_switch(current_task);
     return;
   }
+  // (frame_opt.md 块三) The printk re-entry guard is now self-managed inside
+  // printk (printk_depth), so there is nothing to arm here.  The error dump
+  // below calls printk normally; only a genuine fault *inside* a printk body
+  // re-enters printk and is folded to the marker.
   if (tf->trapno == 14) {
     uint64_t cr2;
     __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
@@ -282,81 +398,13 @@ void trap_dispatch(trapframe *tf) {
     // page mapped into two address spaces. Walk all tasks, look up the PTE
     // for the faulting rip's page, record which pids map the SAME physical
     // page. If >1 pid maps it → double allocation in bfc_alloc_page.
-    {
-      uint64_t rip_page = tf->rip & ~0xFFF;
-      uint64_t my_phys = 0;
-      if (current_task) {
-        uint64_t *pte = lookup_pte(current_task->cr3, rip_page);
-        if (pte)
-          my_phys = *pte & 0x000FFFFFFFFFF000ULL;
-      }
-      printk(LOG_ERROR, "\n  OVERLAP-DIAG: rip_page=0x%lX phys=0x%lX", rip_page,
-             my_phys);
-      if (my_phys) {
-        int hits = 0;
-        for (int i = 0; i < MAX_PROC; i++) {
-          xtask *t = tasks[i];
-          if (!t || !t->cr3)
-            continue;
-          // skip kernel/idle
-          if (t->pid == 0)
-            continue;
-          uint64_t *pte = lookup_pte(t->cr3, rip_page);
-          if (pte && (*pte & 0x000FFFFFFFFFF000ULL) == my_phys) {
-            printk(LOG_ERROR, " pid%d@cr3=0x%lX", t->pid, t->cr3);
-            hits++;
-          }
-        }
-        printk(LOG_ERROR, " (total %d mapping this phys page)\n", hits);
-      } else {
-        printk(LOG_ERROR, " (rip_page not mapped in current task)\n");
-      }
-      // DIAG2: full walk of CURRENT task's page table, find ALL virtual
-      // addresses mapping to my_phys (same-process alias). If the .text phys
-      // page is also mapped at a .data vaddr, a write to .data corrupts .text.
-      if (my_phys && current_task) {
-        uint64_t *pml4 =
-            (uint64_t *)phys_to_virt((__force phys_addr_t)current_task->cr3);
-        int aliases = 0;
-        for (int i4 = 0; i4 < 512; i4++) {
-          if (!(pml4[i4] & 1))
-            continue;
-          uint64_t *pdpt = (uint64_t *)phys_to_virt(
-              (__force phys_addr_t)(pml4[i4] & 0x000FFFFFFFFFF000ULL));
-          for (int i3 = 0; i3 < 512; i3++) {
-            if (!(pdpt[i3] & 1))
-              continue;
-            if (pdpt[i3] & 0x80) // 1GB huge page
-              continue;
-            uint64_t *pd = (uint64_t *)phys_to_virt(
-                (__force phys_addr_t)(pdpt[i3] & 0x000FFFFFFFFFF000ULL));
-            for (int i2 = 0; i2 < 512; i2++) {
-              if (!(pd[i2] & 1))
-                continue;
-              if (pd[i2] & 0x80) // 2MB huge page
-                continue;
-              uint64_t *pt = (uint64_t *)phys_to_virt(
-                  (__force phys_addr_t)(pd[i2] & 0x000FFFFFFFFFF000ULL));
-              for (int i1 = 0; i1 < 512; i1++) {
-                if (!(pt[i1] & 1))
-                  continue;
-                if ((pt[i1] & 0x000FFFFFFFFFF000ULL) == my_phys) {
-                  uint64_t va = ((uint64_t)i4 << 39) | ((uint64_t)i3 << 30) |
-                                ((uint64_t)i2 << 21) | ((uint64_t)i1 << 12);
-                  if (i4 >= 256)
-                    va |= 0xFFFF000000000000ULL;
-                  printk(LOG_ERROR, "\n    ALIAS va=0x%lX pte=0x%lX", va,
-                         pt[i1]);
-                  aliases++;
-                }
-              }
-            }
-          }
-        }
-        printk(LOG_ERROR, "\n    ALIAS total=%d vaddr(s) map phys 0x%lX\n",
-               aliases, my_phys);
-      }
-    }
+    //
+    // (frame_opt.md 块三) This whole cross-process + full page-table walk is
+    // pure diagnostics — it was the bulk of trap_dispatch's 392B stack frame.
+    // It now lives in a separate, DEBUG_PF_DIAG-gated function so the normal
+    // trap path doesn't materialize its locals, and release builds compile it
+    // out entirely.
+    diag_overlap_dump(tf);
     // err code decoding: speed up NX/write-protect/page-not-present diagnosis
     // bit0: 0=not present 1=protection violation
     // bit1: 0=read 1=write
@@ -709,10 +757,15 @@ static void timer_handler(trapframe *tf) {
     alarm_check_hook(current_task, now);
 
   if (tf->cs == 0x2B) { // from user mode
-    // Check pending signals before rescheduling
-    if (signal_check_hook && current_task->proc) {
-      signal_check_hook(current_task, tf);
-    }
+    // (frame_opt.md 块二) Do NOT call signal_check_hook (=
+    // check_pending_signals) here.  check_pending_signals runs
+    // schedule()/do_stop/do_exit, which is forbidden from hard-IRQ context
+    // (might_sleep guard) and — once 块一 lands the per-CPU IRQ stack — would
+    // run on the IRQ stack and store the IRQ stack RSP into prev->k_rsp. Signal
+    // delivery + preemption are handled by
+    // __trapret's call to check_pending_signals, which runs after the IRQ exit
+    // path has switched back to the task stack and decremented in_hardirq.
+    // The need_resched=1 below arms preemption for that exit path to consume.
     // EXPERIMENT (NO_PREEMPT): skip setting need_resched so user-mode tasks
     // are never preempted mid-execution. If the libc.so .text corruption
     // disappears, the write happens during a context switch; if it remains,

@@ -7,6 +7,8 @@
 #ifndef ARCH_X64_SMP_H
 #define ARCH_X64_SMP_H
 
+#include <stdint.h>
+
 #include "arch/x64/paging.h"
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
@@ -14,7 +16,8 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
-#include <stdint.h>
+
+#include <boot/boot.h>
 
 #define MAX_CPUS 4
 #define MSR_GS_BASE 0xC0000101
@@ -79,6 +82,33 @@ typedef struct cpu_local {
   // this CPU is guaranteed to have left the dead task's kernel stack and to
   // have completed all writes to its xtask.  See xtask.exit_done (bug.md §4).
   struct xtask *pending_dead;
+
+  // ---- per-CPU hard-IRQ stack + context marker (frame_opt.md 块一/块二) ----
+  // These three fields MUST stay after tss_rsp0 (offset 48); the GS offsets
+  // below are pinned by _Static_assert in sched.c and consumed by trapentry.S.
+  //   irq_stack_top      — top of this CPU's 16KB hard-IRQ stack (page-aligned)
+  //   irq_stack_saved_rsp — task-stack RSP saved across an IRQ stack switch
+  //   in_hardirq         — >0 while executing a hard-IRQ handler body
+  //
+  // in_hardirq is the HARDIRQ_OFFSET subset of Linux preempt_count: it marks
+  // "currently inside a hard-IRQ handler body" so schedule()'s might_sleep()
+  // guard rejects scheduling from IRQ context.  It is NOT an IRQ nesting
+  // counter — every IDT gate here is an interrupt gate (IF=0 on entry) and
+  // (after 块二 removes the AHCI sti) hard-IRQs never nest, so a single slot
+  // (irq_stack_saved_rsp) suffices for the IRQ-stack switch.
+  uint64_t irq_stack_top;
+  uint64_t irq_stack_saved_rsp;
+  int in_hardirq;
+
+  // (frame_opt.md 块三) printk re-entry guard.  Counts printk frames nested on
+  // this CPU: printk increments on entry and decrements on exit (cleanup), so
+  // the outermost call runs depth 1 and prints normally.  A genuine
+  // fault-during-printk re-enters printk (depth > 1); we then emit only a bare
+  // "recursive oops" marker and bail, bounding a fault-during-fault cascade.
+  // trap_dispatch no longer arms this itself — that suppressed the dump's own
+  // banner (every dump-time printk looked "recursive" and folded to the
+  // marker, leaving only a bare BACKTRACE).  PANIC bypasses the guard.
+  int printk_depth;
 } cpu_local;
 
 extern cpu_local cpu_locals[MAX_CPUS];
@@ -87,6 +117,25 @@ extern gdt_entry per_cpu_gdt[MAX_CPUS][8];
 extern gdt_ptr per_cpu_gdtr[MAX_CPUS];
 extern struct tss_struct per_cpu_tss[MAX_CPUS];
 extern uint64_t per_cpu_ist_stack[MAX_CPUS][3]; // IST1=NMI, IST2=DF, IST3=MCE
+extern uint64_t per_cpu_irq_stack[MAX_CPUS];    // per-CPU hard-IRQ stack tops
+
+// GS-offset constants for the hard-IRQ stack fields, consumed by __irq_entry /
+// the #PF sti gate in trapentry.S. Defined (offsetof) in sched.c, mirroring the
+// xtask_fs_base_offset pattern — avoids hardcoding struct-padded offsets in
+// asm.
+extern const uint64_t cpu_local_irq_stack_top_offset;
+extern const uint64_t cpu_local_irq_stack_saved_rsp_offset;
+extern const uint64_t cpu_local_in_hardirq_offset;
+
+// AP real-mode trampoline: BSP copies a 16-bit startup stub to this fixed low
+// physical address, and SIPI vectors APs to start executing there.  The page
+// is occupied for the lifetime of the kernel (APs may be brought up again on
+// CPU hotplug), so the BFC allocator must never hand it out — init_mem reserves
+// it (mirroring Linux's memblock_reserve on the real-mode blob).  Exposed here
+// so both smp.c (the copy site) and alloc.c (the reserve site) share one
+// definition and cannot drift apart.
+#define AP_TRAMPOLINE_PHYS 0x8000
+#define AP_TRAMPOLINE_VIRT (AP_TRAMPOLINE_PHYS + VMA_BASE)
 
 static inline void set_cpu_local(cpu_local *p) {
   // Kernel GS base holds cpu_local pointer; swapgs will exchange it to GS_BASE
