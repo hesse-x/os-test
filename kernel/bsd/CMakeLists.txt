@@ -10,3 +10,5 @@ add_kernel_object(bsd_obj
             netlink.c fops.c ipcfd.c random.c file_fault.c
             evdev_broker.c kfifo.c
 )
+# 层间依赖图（reface_cmake.md §4.1/§3.5）：bsd_obj 依赖 xcore_obj（传递 xcore_mem/arch_x64）。
+target_link_libraries(bsd_obj PUBLIC xcore_obj)

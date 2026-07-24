@@ -53,11 +53,16 @@ build_script/cmake/kernel_rules.cmake — add_kernel_object(lib_name SOURCES ...
 
 ### 内核链接
 
-顶层 CMakeLists.txt add_custom_target(link) 调 do_link.cmake：
+顶层 CMakeLists.txt 用 add_executable(myos.elf) + target_link_libraries(myos.elf
+PRIVATE kernel_obj) 托管链接，覆写 CMAKE_C_LINK_EXECUTABLE 强制裸 ld：
 
-ld -m elf_x86_64 -T build_script/linker.ld <obj_files> -o build/myos.elf
+ld -m elf_x86_64 --no-relax -T build_script/linker.ld <objects> -o build/myos.elf
 
-do_link.cmake 处理 $<TARGET_OBJECTS> 的分号/空格混合分隔，统一为 CMake list 后传 ld。
+六个内核 OBJECT 库经层间 PUBLIC 依赖图聚合（kernel_obj → driver_obj → bsd_obj →
+xcore_obj → xcore_mem → arch_x64）。OBJECT 库的传递聚合不递归（不像 STATIC 库），
+故 myos.elf 显式 target_sources($<TARGET_OBJECTS:...>) 列全六库对象兜底；依赖图同时
+传递层间 include/flag 的 usage requirement。--no-relax：内核 -fPIE 小码模型 +
+higher-half VMA 在 GOTPCREL→LEA 松弛窗口外，必须保留（见 reface_cmake.md §4.1）。
 
 链接脚本 build_script/linker.ld：VMA=0xFFFFFF8000100000（KERNEL_VMA_BASE = VMA_BASE + 0x100000），LMA 用 AT(ADDR(.section) - VMA_BASE) 指定。段顺序 .text → .rodata → .data → .got → .bss。导出 kernel_end。
 
@@ -116,8 +121,8 @@ mkdisk.sh 生成单盘两分区 build/disk.img（192MB）：
 - 工具链：build_script/cmake/toolchain-x86_64.cmake
 - 内核规则：build_script/cmake/kernel_rules.cmake
 - 用户态规则：build_script/cmake/user_rules.cmake
+- 第三方规则：build_script/cmake/third_party_rules.cmake
 - 链接脚本：build_script/linker.ld
-- 链接辅助：build_script/cmake/do_link.cmake
 - 磁盘映像：build_script/mkdisk.sh
 - 顶层构建：CMakeLists.txt / build.sh
 
@@ -125,6 +130,8 @@ mkdisk.sh 生成单盘两分区 build/disk.img（192MB）：
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
+| mkdisk 消费 CMake manifest | mkdisk.sh 的测试 ELF 拷贝列表（~30 项）与 CMake test target 一一对应但需手动同步，是产物清单第二真相源。方案：CMake 各 target 声明 OS_IMAGE_PATH，末尾 custom target 扫描写出 manifest.txt，mkdisk 读 manifest 替代硬编码列表。镜像布局映射（evdev.elf→driver/evdev.dev 等）仍保留在 mkdisk。见 reface_cmake.md §4.5 | 中 |
+| install-headers/libs.sh manifest 化 | 同上思路，install 脚本消费 CMake manifest 而非硬编码头/库清单 | 低 |
 | ld --remove-section 替代 objcopy | ld 命令中加 --remove-section .note.gnu.property，省掉中间 stripped.o | 低 |
 | 用户态放开 red zone / SSE | 内核实现 FXSAVE/RXRSTORE 后，用户态可移除 -mno-red-zone -mno-sse -mno-sse2 -mno-mmx | 中 |
 | 缺少 -mcmodel=kernel | C 文件用 -fno-pie 绝对寻址，应改为 -mcmodel=kernel | 低 |

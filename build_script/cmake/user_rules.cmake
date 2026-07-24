@@ -85,6 +85,46 @@ function(user_assert_no_sse_disable target_name)
     endforeach()
 endfunction()
 
+# _collect_iface_compile_definitions(out_var lib1 lib2 ...)
+# Bare-gcc custom commands (add_user_elf/add_user_dyn_elf) do not inherit CMake
+# target usage requirements, so to consume a linked library's PUBLIC/INTERFACE
+# compile definitions we must read them manually. Walks each lib's
+# INTERFACE_COMPILE_DEFINITIONS (transitively, via INTERFACE_LINK_LIBRARIES) and
+# collects unique -D entries. This lets test ELF link `unity` (whose
+# UNITY_EXCLUDE_SETJMP_H/UNITY_EXCLUDE_MATH_H are now PUBLIC on the unity target)
+# instead of re-declaring those DEFS at every call site.
+function(_collect_iface_compile_definitions out_var)
+    set(_seen "")
+    set(_result "")
+    set(_queue ${ARGN})
+    while(_queue)
+        list(POP_FRONT _queue _lib)
+        # Guard against cycles / revisits.
+        if(_lib IN_LIST _seen)
+            continue()
+        endif()
+        list(APPEND _seen ${_lib})
+        if(TARGET ${_lib})
+            get_target_property(_defs ${_lib} INTERFACE_COMPILE_DEFINITIONS)
+            if(_defs)
+                foreach(_d ${_defs})
+                    list(APPEND _result -D${_d})
+                endforeach()
+            endif()
+            # Walk transitive link libraries (e.g. unity's own INTERFACE_LINK_LIBRARIES).
+            get_target_property(_links ${_lib} INTERFACE_LINK_LIBRARIES)
+            if(_links)
+                foreach(_l ${_links})
+                    if(NOT _l MATCHES "^[^;]+:")
+                        list(APPEND _queue ${_l})
+                    endif()
+                endforeach()
+            endif()
+        endif()
+    endwhile()
+    set(${out_var} "${_result}" PARENT_SCOPE)
+endfunction()
+
 # add_user_lib: userspace library (libc.a static / libc.so shared / generic .so)
 # Usage: add_user_lib(name [C] SOURCES ... [FLAGS ...] [SHARED] [OUTPUT_NAME ...]
 #                     [VERSION_MAP ...] [SO_LINK_LIBS ...] [INCLUDE_DIRS ...]
@@ -209,6 +249,9 @@ function(add_user_lib lib_name)
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_SOURCE_DIR}/user/include
         )
+        # UAPI 契约头（include/uapi → #include "xos/*.h"）经 os_uapi 取得
+        # （reface_cmake.md §4.7 阶段 2：替代根目录作用域 include/uapi）。
+        target_link_libraries(${lib_name} PRIVATE os_uapi)
 
         if(ARG_FLAGS)
             separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
@@ -328,6 +371,10 @@ function(add_user_elf elf_name)
                 endif()
             endif()
         endforeach()
+        # Propagate INTERFACE_COMPILE_DEFINITIONS from linked targets (e.g. unity's
+        # UNITY_EXCLUDE_SETJMP_H/UNITY_EXCLUDE_MATH_H) so consumers need not re-declare.
+        _collect_iface_compile_definitions(_iface_defs ${ARG_LINK_LIBS})
+        list(APPEND COMPILE_FLAGS ${_iface_defs})
     endif()
 
     # Extra compile definitions (-D flags)
@@ -453,7 +500,7 @@ endfunction()
 #              bare-gcc add_custom_command doesn't auto-track configure_file outputs, so
 #              listing them forces a re-compile when the template changes.
 function(add_user_dyn_elf name)
-    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS;INCLUDE_DIRS;GEN_HEADERS" ${ARGN})
+    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;STATIC_LIBS;DEFS;INCLUDE_DIRS;GEN_HEADERS" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
     if(ARG_C)
         set(COMPILE_CMD ${CMAKE_C_COMPILER})
@@ -470,9 +517,12 @@ function(add_user_dyn_elf name)
     endif()
 
     # Propagate INTERFACE_INCLUDE_DIRECTORIES from linked library targets
-    # (same logic as add_user_elf — see comment there).
-    if(ARG_LINK_LIBS)
-        foreach(lib ${ARG_LINK_LIBS})
+    # (same logic as add_user_elf — see comment there). Both LINK_LIBS (.so) and
+    # STATIC_LIBS (.a) carry usage requirements (e.g. unity's INTERFACE include +
+    # PUBLIC compile definitions), so merge them for compile-time propagation.
+    set(_all_link_libs ${ARG_LINK_LIBS} ${ARG_STATIC_LIBS})
+    if(_all_link_libs)
+        foreach(lib ${_all_link_libs})
             if(TARGET ${lib})
                 get_target_property(_iface_includes ${lib} INTERFACE_INCLUDE_DIRECTORIES)
                 if(_iface_includes)
@@ -482,6 +532,10 @@ function(add_user_dyn_elf name)
                 endif()
             endif()
         endforeach()
+        # Propagate INTERFACE_COMPILE_DEFINITIONS from linked targets (e.g. unity's
+        # UNITY_EXCLUDE_SETJMP_H/UNITY_EXCLUDE_MATH_H) so consumers need not re-declare.
+        _collect_iface_compile_definitions(_iface_defs ${_all_link_libs})
+        list(APPEND COMPILE_FLAGS ${_iface_defs})
     endif()
 
     # Extra compile definitions (-D flags)
@@ -516,14 +570,20 @@ function(add_user_dyn_elf name)
     # crt0.o must be first in link input (provides _start)
     set(LD_ARGS ${CMAKE_BINARY_DIR}/crt0.o ${OBJ_FILES})
     set(SO_DEPS "")
-    if(ARG_LINK_LIBS)
-        foreach(lib ${ARG_LINK_LIBS})
-            # Dynamic ELF prefers .so (full path, avoids -lc mistakenly selecting libc.a)
-            set(so_path ${CMAKE_BINARY_DIR}/lib${lib}.so)
-            list(APPEND LD_ARGS ${so_path})
-            list(APPEND SO_DEPS ${so_path})
-        endforeach()
-    endif()
+    # LINK_LIBS → lib<lib>.so (dynamic, records DT_NEEDED; full path avoids -lc
+    # selecting libc.a). STATIC_LIBS → lib<lib>.a (compile-time link, e.g. unity —
+    # a true STATIC library with no .so variant). Separating the two avoids the
+    # creation-order ambiguity of detecting .so variants by target scan.
+    foreach(lib ${ARG_LINK_LIBS})
+        set(_lib_path ${CMAKE_BINARY_DIR}/lib${lib}.so)
+        list(APPEND LD_ARGS ${_lib_path})
+        list(APPEND SO_DEPS ${_lib_path})
+    endforeach()
+    foreach(lib ${ARG_STATIC_LIBS})
+        set(_lib_path ${CMAKE_BINARY_DIR}/lib${lib}.a)
+        list(APPEND LD_ARGS ${_lib_path})
+        list(APPEND SO_DEPS ${_lib_path})
+    endforeach()
     add_custom_command(OUTPUT ${ELF_FILE}
         COMMAND gcc -fno-pie -no-pie
                 -Wl,--dynamic-linker,/lib/ld.so
@@ -536,4 +596,19 @@ function(add_user_dyn_elf name)
         COMMENT "Linking dynamic ${name}.elf")
     add_custom_target(${name}_dyn_elf ALL DEPENDS ${ELF_FILE})
     add_dependencies(${name}_dyn_elf crt0_obj)
+    # Build ordering for LINK_LIBS (.so variant targets, named <lib>_so or
+    # lib<lib>_so) and STATIC_LIBS (the lib target itself). CMake archives are not
+    # path-resolvable by Ninja from a bare DEPENDS file list, so declare target deps.
+    foreach(lib ${ARG_LINK_LIBS})
+        foreach(_cand ${lib}_so lib${lib}_so)
+            if(TARGET ${_cand})
+                add_dependencies(${name}_dyn_elf ${_cand})
+            endif()
+        endforeach()
+    endforeach()
+    foreach(lib ${ARG_STATIC_LIBS})
+        if(TARGET ${lib})
+            add_dependencies(${name}_dyn_elf ${lib})
+        endif()
+    endforeach()
 endfunction()

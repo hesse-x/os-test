@@ -66,18 +66,20 @@ add_user_lib(m_so
 )
 
 
-# Unity test framework (static library)
-add_user_lib(unity SOURCES ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c)
-target_include_directories(unity PRIVATE
-    ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/user/include
-    ${CMAKE_SOURCE_DIR}/third_party/Unity/src
-)
-# UNITY_EXCLUDE_SETJMP_H / UNITY_EXCLUDE_MATH_H: exclude host <setjmp.h>/<math.h>.
-# Under freestanding + -nostdlib, <sys/cdefs.h> is not pulled in; host math.h's
-# __BEGIN_DECLS and similar macros would fail to resolve. Unity ships its own
-# UNITY_IS_NAN/IS_INF fallback.
-target_compile_definitions(unity PRIVATE UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+# Unity test framework (third_party 例外：编译期符号依赖，STATIC 链入 test ELF)
+# add_third_party_lib(unity STATIC ...)：关 warning(-w)，仅 link os_base_options 取共性基础项，
+# 不被我方 -Werror 门禁污染。test ELF 链 unity 替代内联 unity.c（消除 28 处内联 + 重复 DEFS）。
+# UNITY_EXCLUDE_SETJMP_H / UNITY_EXCLUDE_MATH_H：排除 host <setjmp.h>/<math.h>。freestanding +
+# -nostdlib 下 <sys/cdefs.h> 不被拉入，host math.h 的 __BEGIN_DECLS 等宏无法解析；Unity 自带
+# UNITY_IS_NAN/IS_INF fallback。定义挂在 unity target，经 INTERFACE 传给链入它的 test ELF。
+add_third_party_lib(unity STATIC
+    SOURCES ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c
+    INCLUDE_DIRS
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/user/include
+        ${CMAKE_SOURCE_DIR}/third_party/Unity/src
+    INTERFACE_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+target_compile_definitions(unity PUBLIC UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H UNITY_INCLUDE_DOUBLE)
 
 add_user_elf(hello  C SOURCES hello.c  LINK_LIBS c)
 add_user_dyn_elf(test_fpu C SOURCES test/test_fpu.c LINK_LIBS c)
@@ -97,9 +99,9 @@ add_user_ldso(ldso SOURCES
 
 # hello_dyn (phase 2b+3: full dynamic chain verification)
 # LINK_LIBS c -> -lc resolves to libc.so (dynamic link, records DT_NEEDED libc.so)
+# add_user_dyn_elf 内部已自动解析 LINK_LIBS→<lib>_so/lib<lib>_so target 并 add_dependencies
+# （见 user_rules.cmake），无需手写 add_dependencies(hello_dyn_dyn_elf c_so)。
 add_user_dyn_elf(hello_dyn C SOURCES hello_dyn.c LINK_LIBS c)
-# Ensure libc.so is built before hello_dyn
-add_dependencies(hello_dyn_dyn_elf c_so)
 
 # terminal — dynamic ELF (libc.so + libinput.so), PT_INTERP → ld.so
 add_user_dyn_elf(terminal
@@ -107,7 +109,6 @@ add_user_dyn_elf(terminal
     LINK_LIBS input drm m c udev
     INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/third_party/libinput/src;${CMAKE_SOURCE_DIR}/third_party/libinput/include;${CMAKE_SOURCE_DIR}/user/lib/udev-shim;${CMAKE_SOURCE_DIR}/user/lib/evdev-shim;${CMAKE_SOURCE_DIR}/third_party/drm;${CMAKE_SOURCE_DIR}/third_party/drm/include/drm"
 )
-add_dependencies(terminal_dyn_elf libinput_so drm_so m_so)
 
 # evdev: real keyboard event source (xHCI HID → SHM ring → terminal) +
 # EVIOCG* ioctl query. Replaces the kbd driver for terminal input.
@@ -171,37 +172,33 @@ set(LIBINPUT_INCLUDE_DIRS
 
 target_include_directories(input PRIVATE ${LIBINPUT_INCLUDE_DIRS})
 
-# libinput.so (shared library, dynamically linked into terminal.elf)
-# Uses -fvisibility=hidden — libinput's public API is marked with LIBINPUT_EXPORT
-# (__attribute__((visibility("default")))) so only public symbols are exported.
-# Links libc.so via SO_LINK_LIBS c to record DT_NEEDED libc.so.
-add_user_lib(libinput_so
+# libinput.so (shared library, third_party SHARED-only, dynamically linked into terminal.elf)
+# add_third_party_lib（分支 B）关 warning(-w)、用 os_base_options 等价基础项。-fvisibility=hidden
+# + libinput 的 LIBINPUT_EXPORT(visibility("default")) 标记公共 API，仅导出公共符号。
+# SO_LINK_LIBS c udev 记 DT_NEEDED libc.so + libudev.so。
+add_third_party_lib(libinput_so
     SOURCES ${LIBINPUT_SOURCES}
     C
-    FLAGS "-O2 -DHAVE_QUIRKS -Wno-unused-parameter -Wno-duplicate-decl-specifier -Wno-implicit-function-declaration -Wno-return-type -Wno-int-conversion -Wno-format -Wno-implicit-fallthrough -Wno-sign-compare -Wno-error=cpp -Wno-maybe-uninitialized -Wno-macro-redefined"
-    SHARED
     OUTPUT_NAME input
     SO_LINK_LIBS c udev
+    FLAGS "-O2 -DHAVE_QUIRKS"
     INCLUDE_DIRS ${LIBINPUT_INCLUDE_DIRS}
 )
-add_dependencies(libinput_so c_so libudev_so)
 
-# libudev.so (独立共享库,完整 Linux 模式):udev-shim 的 udev_* API 导出供
-# 终端 main(libinput_udev_create_context 前的 udev_new())与 libinput.so 内部
-# (udev-seat.c 调 udev_*)共享。add_user_lib SHARED 默认 -fvisibility=hidden,
-# 此处 FLAGS 追加 -fvisibility=default 覆盖——udev.c 内非 static 函数全为公共
-# udev_* API(无内部泄漏),故默认可见即全导出,无需逐个 UDEV_EXPORT 标记。
-# 对齐 Linux:libudev 与 libinput 分离;静态消费者(test_udevd/test_libudev/
-# test_udevd_db 各自 SOURCES 编 udev.c)不受影响。
-add_user_lib(libudev_so
+# libudev.so (独立共享库,完整 Linux 模式,third_party SHARED-only):udev-shim 的
+# udev_* API 导出供终端 main(libinput_udev_create_context 前的 udev_new())与 libinput.so
+# 内部(udev-seat.c 调 udev_*)共享。add_third_party_lib（分支 B）关 warning(-w)、用
+# os_base_options 等价基础项。FLAGS 追加 -fvisibility=default 覆盖默认 hidden——udev.c 内
+# 非 static 函数全为公共 udev_* API(无内部泄漏),故默认可见即全导出,无需逐个 UDEV_EXPORT 标记。
+# 对齐 Linux:libudev 与 libinput 分离;静态消费者(test_udevd/test_libudev/test_udevd_db
+# 各自 SOURCES 编 udev.c)不受影响。
+add_third_party_lib(libudev_so
     SOURCES lib/udev-shim/udev.c
     C
-    FLAGS "-O2 -fvisibility=default"
-    SHARED
     OUTPUT_NAME udev
     SO_LINK_LIBS c
+    FLAGS "-fvisibility=default -O2"
 )
-add_dependencies(libudev_so c_so)
 
 if(TEST)
     add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c DEFS TEST)
@@ -333,22 +330,22 @@ add_dependencies(drm libdrm_fourcc_table)
 # propagate automatically from the drm target's INTERFACE_INCLUDE_DIRS.
 add_user_elf(drm_test_link C SOURCES test/drm_test_link.c LINK_LIBS drm c)
 
-# ===== libdrm.so (shared library) — Phase A =====
-add_user_lib(drm_so
+# ===== libdrm.so (shared library, third_party SHARED-only) — Phase A =====
+# add_third_party_lib（分支 B：custom-command .so）关 warning(-w)、用 os_base_options
+# 等价基础项，不携带我方 WARN_FLAGS(-Werror)，实现第三方 warning 自治。SO_LINK_LIBS c
+# 记 DT_NEEDED libc.so。LINK_DEPS 挂 fourcc 表生成 target。-fvisibility=hidden + drm_public
+# (via HAVE_VISIBILITY) gate exports（无 VERSION_MAP：verify_libc_exports.sh 不处理 drm* glob）。
+add_third_party_lib(drm_so
     SOURCES ${LIBDRM_SOURCES}
     C
-    SHARED
     OUTPUT_NAME drm
     SO_LINK_LIBS c
-    # NOTE: no VERSION_MAP — verify_libc_exports.sh doesn't handle glob
-    # patterns (drm*) in .map. -fvisibility=hidden + drm_public (via
-    # HAVE_VISIBILITY) already gate exports correctly.
+    LINK_DEPS libdrm_fourcc_table
     FLAGS "-Wno-unused-parameter -D__linux__ -include ${CMAKE_BINARY_DIR}/libdrm_config.h"
     INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/drm/include/drm
                  ${CMAKE_SOURCE_DIR}/third_party/drm
                  ${CMAKE_BINARY_DIR}
 )
-add_dependencies(drm_so c_so libdrm_fourcc_table)
 
 # ===== libffi (third_party/libffi, full-feature incl. closures) — ffi_worklist =====
 # fficonfig.h: hand-written fixed template (COPYONLY copy into build tree).
@@ -433,16 +430,14 @@ set(LIBFFI_INCLUDE_DIRS
 # `if (abi == FFI_EFI64 || FFI_GNUW64)` branches are dead — but the link-time
 # symbol refs must still resolve, same story as tramp.c. Symbols are
 # FFI_HIDDEN so they don't pollute the exported ABI.
-add_user_lib(ffi_so
+add_third_party_lib(ffi_so
     SOURCES ${LIBFFI_SOURCES}
     C
-    FLAGS "-O2 -fvisibility=default -Wno-error"
-    SHARED
     OUTPUT_NAME ffi
     SO_LINK_LIBS c
+    FLAGS "-fvisibility=default -O2"
     INCLUDE_DIRS ${LIBFFI_INCLUDE_DIRS}
     GEN_HEADERS ${CMAKE_BINARY_DIR}/fficonfig.h
                 ${CMAKE_BINARY_DIR}/ffi.h
                 ${CMAKE_BINARY_DIR}/ffitarget.h
 )
-add_dependencies(ffi_so c_so)

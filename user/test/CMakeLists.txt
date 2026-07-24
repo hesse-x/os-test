@@ -12,63 +12,63 @@ else()
 endif()
 
 # Layer 1: unistd (pipe/read/write/close)
-add_user_dyn_elf(pipe C SOURCES test_pipe.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(pipe C SOURCES test_pipe.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 2: fcntl (open/close/dup2/fcntl/lseek)
-add_user_dyn_elf(fcntl C SOURCES test_fcntl.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(fcntl C SOURCES test_fcntl.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 3: string / malloc / stdio
-add_user_dyn_elf(string C SOURCES test_string.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
-add_user_dyn_elf(malloc C SOURCES test_malloc.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
-add_user_dyn_elf(stdio C SOURCES test_stdio.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(string C SOURCES test_string.c LINK_LIBS c STATIC_LIBS unity)
+add_user_dyn_elf(malloc C SOURCES test_malloc.c LINK_LIBS c STATIC_LIBS unity)
+add_user_dyn_elf(stdio C SOURCES test_stdio.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 4: sys/mman
-add_user_dyn_elf(mmap C SOURCES test_mmap.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(mmap C SOURCES test_mmap.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 5: IPC
-add_user_dyn_elf(ipc C SOURCES test_ipc.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(ipc C SOURCES test_ipc.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 6: socket
-add_user_dyn_elf(socket C SOURCES test_socket.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(socket C SOURCES test_socket.c LINK_LIBS c STATIC_LIBS unity)
 
 # S16: recvmsg/sendmsg/poll flag semantics — MSG_PEEK / MSG_TRUNC / MSG_WAITALL
 # / EPIPE→SIGPIPE (MSG_NOSIGNAL) / SCM_RIGHTS MSG_CTRUNC / poll POLLNVAL /
 # msg_flags writeback.
-add_user_dyn_elf(test_socket_msgflags C SOURCES test_socket_msgflags.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(test_socket_msgflags C SOURCES test_socket_msgflags.c LINK_LIBS c STATIC_LIBS unity)
 
 # S17: AF_UNIX SOCK_DGRAM + recvmsg msg_name — bind/sendto path resolution,
 # message boundaries, connect default target, MSG_PEEK/MSG_TRUNC, SCM_RIGHTS,
 # EPROTOTYPE/ENOENT error semantics. TEST-gated (bind paths live under /run).
 if(TEST)
-    add_user_dyn_elf(test_unix_dgram C SOURCES test_unix_dgram.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_unix_dgram C SOURCES test_unix_dgram.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
 endif()
 
 # Layer 7: process
-add_user_dyn_elf(process C SOURCES test_process.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(process C SOURCES test_process.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 8: signal
-add_user_dyn_elf(signal C SOURCES test_signal.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(signal C SOURCES test_signal.c LINK_LIBS c STATIC_LIBS unity)
 
 # S01: job-control stop state (SIGSTOP/SIGTSTP/SIGCONT + WUNTRACED reporting)
-add_user_dyn_elf(signal_stop C SOURCES test_signal_stop.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(signal_stop C SOURCES test_signal_stop.c LINK_LIBS c STATIC_LIBS unity)
 # S02: WCOREDUMP + SA_RESETHAND + SA_NODEFER + sa_restorer user trampoline
-add_user_dyn_elf(signal_flags C SOURCES test_signal_flags.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(signal_flags C SOURCES test_signal_flags.c LINK_LIBS c STATIC_LIBS unity)
 # S03: kill/tgkill permission & scope + set_tid_address 64-bit + per-process alarm
-add_user_dyn_elf(kill_perm C SOURCES test_kill_perm.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(kill_perm C SOURCES test_kill_perm.c LINK_LIBS c STATIC_LIBS unity)
 # S04: sigaltstack + SA_ONSTACK alternate-signal-stack delivery
-add_user_dyn_elf(sigaltstack C SOURCES test_sigaltstack.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(sigaltstack C SOURCES test_sigaltstack.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 9: poll
-add_user_dyn_elf(poll C SOURCES test_poll.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(poll C SOURCES test_poll.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 10: PCI/device
-add_user_dyn_elf(pci C SOURCES test_pci.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(pci C SOURCES test_pci.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 11: ioctl/fstat/isatty
-add_user_dyn_elf(ioctl C SOURCES test_ioctl.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(ioctl C SOURCES test_ioctl.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 12: device VFS unified path
-add_user_dyn_elf(dev_vfs C SOURCES test_dev_vfs.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(dev_vfs C SOURCES test_dev_vfs.c LINK_LIBS c STATIC_LIBS unity)
 
 # FPU/SSE smoke test: explicit inline-asm movsd+mulsd to verify user-mode
 # SSE path (CR4.OSFXSR + lazy FPU #NM handler). No Unity — simple printf+exit.
@@ -79,75 +79,75 @@ add_user_dyn_elf(test_sse_smoke C SOURCES test_sse_smoke.c LINK_LIBS c)
 add_user_dyn_elf(test_cpu_burn C SOURCES test_cpu_burn.c LINK_LIBS c)
 
 # Layer 13: pthread
-add_user_dyn_elf(pthread C SOURCES test_pthread.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(pthread C SOURCES test_pthread.c LINK_LIBS c STATIC_LIBS unity)
 
 # DRM virtio-gpu test (no Unity — diagnostic printf)
 add_user_dyn_elf(drm_test C SOURCES drm_test.c LINK_LIBS c)
 
 # Layer 14: DRM ioctl (GET_MAGIC, AUTH_MAGIC, ADDFB2, GEM_CLOSE, GETFB, caps)
-add_user_dyn_elf(drm_ioctl C SOURCES test_drm_ioctl.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(drm_ioctl C SOURCES test_drm_ioctl.c LINK_LIBS c STATIC_LIBS unity)
 
 # plan2: Venus channel end-to-end (GETPARAM/GET_CAPS/CONTEXT_INIT/CREATE_BLOB/
 # SYNCOBJ timeline/EXECBUFFER + sync_file). Raw ioctls like drm_ioctl, no libdrm.
-add_user_dyn_elf(venus_channel C SOURCES test_venus_channel.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(venus_channel C SOURCES test_venus_channel.c LINK_LIBS c STATIC_LIBS unity)
 
 # Phase C: DRM property/master/cursor/cleanup tests
-add_user_dyn_elf(drm_phase_c C SOURCES test_drm_mode.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(drm_phase_c C SOURCES test_drm_mode.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 15: ioctl variable-length (user-space driver proxy, RECV_IOCTL path)
-add_user_dyn_elf(ioctl_varlen C SOURCES test_ioctl_varlen.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(ioctl_varlen C SOURCES test_ioctl_varlen.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 16: epoll
-add_user_dyn_elf(epoll C SOURCES test_epoll.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(epoll C SOURCES test_epoll.c LINK_LIBS c STATIC_LIBS unity)
 
 # S18: EPOLLONESHOT (report-once + disarm + MOD re-arm) / EPOLLEXCLUSIVE
 # (anti-thundering-herd unicast wake) / epoll_ctl epfd==fd self-register EINVAL
 # / EXCLUSIVE MOD-toggle EINVAL.
-add_user_dyn_elf(test_epoll_oneshot C SOURCES test_epoll_oneshot.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(test_epoll_oneshot C SOURCES test_epoll_oneshot.c LINK_LIBS c STATIC_LIBS unity)
 # S18: accept() no longer arms a 30s false timeout — idle blocking accept blocks
 # past 30s until SIGALRM/EINTR. NOTE: sleeps up to 35s by design (regression proof).
-add_user_dyn_elf(test_accept_no_timeout C SOURCES test_accept_no_timeout.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(test_accept_no_timeout C SOURCES test_accept_no_timeout.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 17: eventfd
-add_user_dyn_elf(eventfd C SOURCES test_eventfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(eventfd C SOURCES test_eventfd.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 18: timerfd
-add_user_dyn_elf(timerfd C SOURCES test_timerfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(timerfd C SOURCES test_timerfd.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 19: signalfd
-add_user_dyn_elf(signalfd C SOURCES test_signalfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(signalfd C SOURCES test_signalfd.c LINK_LIBS c STATIC_LIBS unity)
 
 # S14: CLOCK_REALTIME wall clock (CMOS RTC) + clockid set + clock_settime
-add_user_dyn_elf(test_clock_realtime C SOURCES test_clock_realtime.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(test_clock_realtime C SOURCES test_clock_realtime.c LINK_LIBS c STATIC_LIBS unity)
 # S15: nanosleep/clock_nanosleep (relative + TIMER_ABSTIME) + EINTR rem
-add_user_dyn_elf(test_time_sleep C SOURCES test_time_sleep.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(test_time_sleep C SOURCES test_time_sleep.c LINK_LIBS c STATIC_LIBS unity)
 # S15: CLOCK_PROCESS_CPUTIME_ID process-level CPU time
-add_user_dyn_elf(test_clock_cputime C SOURCES test_clock_cputime.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(test_clock_cputime C SOURCES test_clock_cputime.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 20: getrandom (/dev/(u)random + libc 封装)
-add_user_dyn_elf(getrandom C SOURCES test_getrandom.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(getrandom C SOURCES test_getrandom.c LINK_LIBS c STATIC_LIBS unity)
 
 # mprotect + PROT_NONE round-trip + sysconf (plan1.md §1.5 缺口1 hard acceptance)
-add_user_dyn_elf(test_mprotect C SOURCES test_mprotect.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(test_mprotect C SOURCES test_mprotect.c LINK_LIBS c STATIC_LIBS unity)
 
 # mount framework test
-add_user_dyn_elf(mount C SOURCES test_mount.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H)
+add_user_dyn_elf(mount C SOURCES test_mount.c LINK_LIBS c STATIC_LIBS unity)
 
 # sysfs + file_operations + ringbuf (TEST build only — evdev sysfs needs stubs)
 if(TEST)
-    add_user_dyn_elf(test_sysfs C SOURCES test_sysfs.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libinput/include/linux)
+    add_user_dyn_elf(test_sysfs C SOURCES test_sysfs.c LINK_LIBS c STATIC_LIBS unity DEFS TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libinput/include/linux)
 endif()
 
 # Phase B: libdrm.so composite loading test (plan_drm2)
+# LINK_LIBS drm c → add_user_dyn_elf 内部自动 add_dependencies(drm_so/c_so)。
 add_user_dyn_elf(hello_drm_dyn C SOURCES hello_drm_dyn.c LINK_LIBS drm c)
-add_dependencies(hello_drm_dyn_dyn_elf drm_so)
 
 # Phase B: modetest — drmOpen + GETRESOURCES + CONNECTOR + DUMB + ADDFB + SETCRTC + PAGE_FLIP
 add_user_elf(modetest C SOURCES modetest.c LINK_LIBS drm c)
 add_dependencies(modetest_elf libdrm_fourcc_table)
 
+# LINK_LIBS drm c → add_user_dyn_elf 内部自动 add_dependencies(drm_so)。
 add_user_dyn_elf(modetest_dyn C SOURCES modetest_dyn.c LINK_LIBS drm c)
-add_dependencies(modetest_dyn_dyn_elf drm_so)
 
 # libudev shim 阶段 A 回归测试（TEST 构建——依赖 evdev 真实注册态）。
 # 仿 test_sysfs：TEST 门控 + udev-shim 头文件 include 路径。
@@ -155,80 +155,85 @@ add_dependencies(modetest_dyn_dyn_elf drm_so)
 # 链接整个 input 静态库（避免拖入 libinput 全套依赖）。默认 -Iinclude/uapi
 # 已覆盖 udev.c 的 <xos/input.h>/<xos/ioctl.h>。
 if(TEST)
-    add_user_dyn_elf(test_libudev C SOURCES test_libudev.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
+    add_user_dyn_elf(test_libudev C SOURCES test_libudev.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c LINK_LIBS c STATIC_LIBS unity DEFS TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
 endif()
 
 # udevd daemon 通道端到端测试(TEST 构建——依赖 udevd 真实运行态 + evdev 注册态)。
 # 仿 test_libudev:TEST 门控 + udev-shim 头文件 include 路径。
 # test_udevd 直接调 udev_* 符号 → SOURCES 编入 udev.c(避免拖整个 input 静态库)。
 if(TEST)
-    add_user_dyn_elf(test_udevd C SOURCES test_udevd.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
+    add_user_dyn_elf(test_udevd C SOURCES test_udevd.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c LINK_LIBS c STATIC_LIBS unity DEFS TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
 endif()
 
 # udevd db + 规则引擎端到端测试(TEST 构建——依赖 udevd 真实运行态 + evdev 注册态)。
 # 仿 test_libudev:TEST 门控 + udev-shim 头文件 include 路径。
 # test_udevd_db 直接调 udev_* 符号 → SOURCES 编入 udev.c。
 if(TEST)
-    add_user_dyn_elf(test_rename C SOURCES test_rename.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_udevd_db C SOURCES test_udevd_db.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
+    add_user_dyn_elf(test_rename C SOURCES test_rename.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_udevd_db C SOURCES test_udevd_db.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c LINK_LIBS c STATIC_LIBS unity DEFS TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
 endif()
 
 # devtmpfs 设备表动态化回归(work2_design §5.5.1)— TEST 门控,不调 udev_*,
 # 只调 sys_dev_create/open/opendir(走 libc + syscall),无需编入 udev.c。
 if(TEST)
-    add_user_dyn_elf(test_dev_vfs_dynamic C SOURCES test_dev_vfs_dynamic.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_dev_vfs_dynamic C SOURCES test_dev_vfs_dynamic.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
 endif()
 
 # VFS i_op dispatch + inode refcount tests (TEST build only)
 if(TEST)
-    add_user_dyn_elf(test_vfs_dispatch C SOURCES test_vfs_dispatch.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_inode_refcount C SOURCES test_inode_refcount.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_tmpfs_socket C SOURCES test_tmpfs_socket.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_dirent_seek C SOURCES test_dirent_seek.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_cloexec_perfd C SOURCES test_cloexec_perfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_openat_dirfd C SOURCES test_openat_dirfd.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_stat_real C SOURCES test_stat_real.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_vma_restructure C SOURCES test_vma_restructure.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_mmap_addr_hint C SOURCES test_mmap_addr_hint.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_vfs_dispatch C SOURCES test_vfs_dispatch.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_inode_refcount C SOURCES test_inode_refcount.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_tmpfs_socket C SOURCES test_tmpfs_socket.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_dirent_seek C SOURCES test_dirent_seek.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_cloexec_perfd C SOURCES test_cloexec_perfd.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_openat_dirfd C SOURCES test_openat_dirfd.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_stat_real C SOURCES test_stat_real.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_vma_restructure C SOURCES test_vma_restructure.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_mmap_addr_hint C SOURCES test_mmap_addr_hint.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # S12: MAP_PRIVATE+fd file-backed mmap + demand-fault page-in + COW.
-    add_user_dyn_elf(test_mmap_file_private C SOURCES test_mmap_file_private.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_mmap_file_private C SOURCES test_mmap_file_private.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # S13: munmap partial/hole-punch + mprotect interval + flag handling + size limit.
-    add_user_dyn_elf(test_munmap_partial C SOURCES test_munmap_partial.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_mprotect_partial C SOURCES test_mprotect_partial.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_mmap_flags C SOURCES test_mmap_flags.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_mmap_size_limit C SOURCES test_mmap_size_limit.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_munmap_partial C SOURCES test_munmap_partial.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_mprotect_partial C SOURCES test_mprotect_partial.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_mmap_flags C SOURCES test_mmap_flags.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_mmap_size_limit C SOURCES test_mmap_size_limit.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # S19: process cluster — clone exit_signal/SETTID-fault, wait4 pgid/rusage,
     # setuid saved-set ladder, execve VFS read.
-    add_user_dyn_elf(test_clone_exit_signal C SOURCES test_clone_exit_signal.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_clone_settid_fault C SOURCES test_clone_settid_fault.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_wait4_pgid_rusage C SOURCES test_wait4_pgid_rusage.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_setuid_saved C SOURCES test_setuid_saved.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
-    add_user_dyn_elf(test_execve_vfs C SOURCES test_execve_vfs.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_clone_exit_signal C SOURCES test_clone_exit_signal.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_clone_settid_fault C SOURCES test_clone_settid_fault.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_wait4_pgid_rusage C SOURCES test_wait4_pgid_rusage.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_setuid_saved C SOURCES test_setuid_saved.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_execve_vfs C SOURCES test_execve_vfs.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
 endif()
 
 # libffi dynamic test (ffi_worklist §4.C): ffi_call int/double + ffi_closure
 # callback (FFI_MMAP_EXEC_WRIT double-map closure path) + mprotect independent
 # case.
 # LINK_LIBS ffi → -lffi resolves to libffi.so (dynamic link, DT_NEEDED).
+# STATIC_LIBS unity → libunity.a (compile-time link; UNITY_EXCLUDE_* propagate
+# from the unity target's PUBLIC compile_definitions).
 # add_dependencies on target ffi_so ensures build ordering; INCLUDE_DIRS
 # ${CMAKE_BINARY_DIR} alone covers all three public headers — ffi.h and
 # fficonfig.h (generated) plus ffitarget.h (COPYONLY'd into build/ alongside
 # them, matching upstream nodist_include_HEADERS). No reach into src/x86.
 # DEFS adds UNITY_INCLUDE_DOUBLE (on top of the shared UNITY_EXCLUDE_*): case 2
 # asserts via TEST_ASSERT_EQUAL_DOUBLE, which unity_internals.h:286 gates off
-# unless UNITY_INCLUDE_DOUBLE is defined at the test's compile time (Unity is
-# compiled inline as unity.c, not linked as a library, so the define must ride
-# the test ELF's DEFS, not target_compile_definitions). Unity's double compare
-# (unity.c:898) is pure arithmetic, no math.h, so it coexists with EXCLUDE_MATH.
+# unless UNITY_INCLUDE_DOUBLE is defined at the test's compile time. Unity is
+# linked as libunity.a (UNITY_EXCLUDE_SETJMP_H/UNITY_EXCLUDE_MATH_H propagate
+# from the unity target's PUBLIC compile_definitions to this test via
+# _collect_iface_compile_definitions), but UNITY_INCLUDE_DOUBLE is test-local
+# (only test_ffi needs double asserts), so it stays on this ELF's DEFS. Unity's
+# double compare (unity.c:898) is pure arithmetic, no math.h, so it coexists
+# with EXCLUDE_MATH.
 # GEN_HEADERS lists the generated libffi public headers (configure_file outputs
 # in build/) that test_ffi.c #includes via <ffi.h>; bare-gcc custom commands
 # don't auto-track these, so editing the template wouldn't re-compile the test.
 add_user_dyn_elf(test_ffi C SOURCES test_ffi.c
-    ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c
     LINK_LIBS ffi c
-    DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H UNITY_INCLUDE_DOUBLE
+    STATIC_LIBS unity
     INCLUDE_DIRS ${CMAKE_BINARY_DIR}
     GEN_HEADERS ${CMAKE_BINARY_DIR}/ffi.h
                 ${CMAKE_BINARY_DIR}/fficonfig.h
                 ${CMAKE_BINARY_DIR}/ffitarget.h)
-add_dependencies(test_ffi_dyn_elf ffi_so)
+# LINK_LIBS ffi c → add_user_dyn_elf 内部自动 add_dependencies(ffi_so/c_so)；
+# GEN_HEADERS 由各对象 custom-command 的 DEPENDS 追踪（编辑模板触发重编）。
