@@ -909,6 +909,26 @@ copy_mmap_regions(mmap_region *src) {
 
 // ===================== sys_fork =====================
 
+// fork(2) is clone(SIGCHLD, 0, 0, 0, 0) on Linux: a full address-space copy
+// with no flags. Delegate to sys_clone so fork and clone share one
+// implementation (COW page-table copy, fd/signal/identity inheritance,
+// SETTID/CLEARTID handling). Verified equivalent for the fork case:
+//   - stack==0 with no CLONE_VM passes the guard at line ~1168 (which only
+//     rejects CLONE_VM && stack==0); new_rsp then falls back to parent_tf->rsp
+//     (line ~1304), matching the old fork path that built the child stack from
+//     the parent trapframe unchanged.
+//   - exit_signal = flags & 0xff = SIGCHLD (0x11 < NSIG); the child's
+//     exit_signal is SIGCHLD, identical to the old hardcoded value.
+//   - no CLONE_CHILD_CLEARTID → child_bp->clear_tid_addr = NULL. This matches
+//     Linux: a forked child does NOT inherit the parent's clear_tid_addr.
+//   - no CLONE_THREAD → tgid = alloc_idx (own group leader), signal_struct is
+//     an independent copy with parent_pid = parent->pid, sid/pgid/ctty
+//     inherited — all identical to the old fork path.
+// One harmless behavioral delta: clone's non-CLONE_THREAD path picks a CPU with
+// sched_pick_cpu() (global least-loaded) whereas the old fork preferred the
+// parent's CPU (cache/COW locality). This is a placement heuristic only — the
+// child is still correctly scheduled and balanced across CPUs. See
+// refact_syscall/03_fork_settid_cleartid.md.
 int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                  int64_t a6) {
   (void)a1;
@@ -917,190 +937,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   (void)a4;
   (void)a5;
   (void)a6;
-  xtask *parent = current_task;
-
-  // 1. Allocate new xtask slot
-  spin_lock(&tasks_lock);
-  int alloc_idx = -1;
-  xtask *child = xtask_alloc(&alloc_idx);
-  if (!child) {
-    spin_unlock(&tasks_lock);
-    return (int64_t)-ENOMEM;
-  }
-
-  // 2. Allocate new mm
-  mm *child_mm = mm_create();
-  if (!child_mm) {
-    spin_unlock(&tasks_lock);
-    return (int64_t)-ENOMEM;
-  }
-
-  // 3. Deep-copy parent user page tables
-  uint64_t *src_pml4 =
-      (uint64_t *)phys_to_virt((__force phys_addr_t)parent->mm->cr3);
-  uint64_t *dst_pml4 =
-      (uint64_t *)phys_to_virt((__force phys_addr_t)child_mm->cr3);
-  int ret = copy_page_table(src_pml4, dst_pml4, parent->mm->mmap_regions);
-  if (ret < 0) {
-    mm_put(child_mm);
-    spin_unlock(&tasks_lock);
-    return (int64_t)ret;
-  }
-
-  // Flush parent's TLB — copy_page_table modified parent's RW PTEs to COW,
-  // stale TLB entries would still show the old writable mappings
-  load_cr3(parent->mm->cr3);
-
-  // 4. Create child proc + copy fd_table
-  proc *child_bp = proc_create();
-  if (!child_bp) {
-    mm_put(child_mm);
-    spin_unlock(&tasks_lock);
-    return (int64_t)-ENOMEM;
-  }
-  child->proc = child_bp;
-  child_bp->xtask = child;
-  copy_fd_table(parent->proc->files, child_bp->files);
-
-  // 5. Copy mmap_regions (including user stack region)
-  child_mm->mmap_regions = copy_mmap_regions(parent->mm->mmap_regions);
-  child_mm->mmap_brk = parent->mm->mmap_brk;
-  child_mm->mmap_phys_brk = parent->mm->mmap_phys_brk;
-  child_mm->parent_pid = parent->pid;
-
-  // 6. Allocate new kernel stack, copy parent trapframe (rax=0 for child
-  // return)
-  struct page *stack_pages = bfc_alloc_page(KERNEL_STACK_PAGES);
-  if (!stack_pages) {
-    mm_put(child_mm);
-    spin_unlock(&tasks_lock);
-    return (int64_t)-ENOMEM;
-  }
-  uint64_t k_stack_phys = (__force uint64_t)page_to_phys(stack_pages);
-  uint64_t k_stack_top =
-      (__force uint64_t)phys_to_virt((__force phys_addr_t)k_stack_phys) +
-      KERNEL_STACK_SIZE;
-
-  // 6b. FPU inheritance: child pre-allocates fpu_page + copies parent's
-  // current FPU snapshot (POSIX fork semantics)
-  if (!xcore_fpu_alloc(child)) {
-    bfc_free_page(stack_pages, KERNEL_STACK_PAGES);
-    proc_free(child_bp);
-    child->proc = NULL;
-    mm_put(child_mm);
-    spin_unlock(&tasks_lock);
-    return (int64_t)-ENOMEM;
-  }
-  ASSERT(parent->fpu_page != NULL);
-  void *parent_fpu =
-      (void *)(__force uintptr_t)phys_to_virt(page_to_phys(parent->fpu_page));
-  void *child_fpu =
-      (void *)(__force uintptr_t)phys_to_virt(page_to_phys(child->fpu_page));
-  kernel_fpu_save(parent_fpu); // save parent's current live xmm (fxsave does
-                               // not modify registers, parent keeps running)
-  __memcpy(child_fpu, parent_fpu, PAGE_SIZE);
-
-  // 6. Build child kernel stack (reuse build_kstack_from_tf helper)
-  trapframe *parent_tf = get_cpu_local()->cur_tf;
-  uint64_t k_rsp = build_kstack_from_tf(k_stack_top, parent_tf, 0);
-
-  // 7. Fill child xtask
-  // Ordering constraint: assigned_cpu must be set before pid (the wake path
-  // reads assigned_cpu locklessly before taking the lock, prevent OOB if pid
-  // takes effect while assigned_cpu is still -1); affinity to parent CPU
-  child->assigned_cpu = sched_pick_cpu_pref(parent->assigned_cpu);
-  child->pid = alloc_idx;
-  child->state = READY;
-  child->k_rsp = k_rsp;
-  child->k_stack_top = k_stack_top;
-  kstack_canary_write(child); // (frame_opt.md 块四) canary at stack bottom
-  child->cr3 = child_mm->cr3; // cached
-  child->entry = parent->entry;
-  child->wait_event = WAIT_NONE;
-  child->tgid = child->pid;
-  child->mm = child_mm;
-  // fs_base inheritance: fork child shares parent's address space (COW), and
-  // the parent TCB page mapping remains in the child's space, so the child
-  // must inherit parent's fs_base to access errno/TLS. Missing it leaves child
-  // FS_BASE=0, and the first errno read (mov %fs:0) triggers #PF and gets
-  // killed (e.g. libc wrapper writing errno after execve failure).
-  // sys_clone's CLONE_SETTLS branch handles TLS separately; the fork path here
-  // always inherits the parent's value.
-  child->fs_base = parent->fs_base;
-  child->iopm = NULL; // fork does not inherit IOPM
-  child->recv_head = 0;
-  child->recv_tail = 0;
-  child->recv_lock = SPINLOCK_INIT;
-  child->req_caller_pid = -1;
-  child->req_reply_buf = NULL;
-  child->req_replied = 0;
-  child->msg_caller_pid = -1;
-  child->msg_reply_buf = NULL;
-  child->msg_replied = 0;
-  child->cpu_time_ns = 0;
-  child->last_sched = 0;
-  child->exit_code = 0;
-  // POSIX fields are in proc
-  child_bp->exit_code = 0;
-  // signal_struct: fork independent copy (no CLONE_SIGHAND)
-  // proc_create already allocated a fresh signal_struct; deep-copy action[]
-  __memcpy(child_bp->signal->action, parent->proc->signal->action,
-           sizeof(parent->proc->signal->action));
-  child_bp->signal->shared_pending = 0;
-  child_bp->signal->group_exit = 0;
-  child_bp->signal->group_exit_code = 0;
-  child_bp->signal->parent_pid = parent->pid;
-  atomic_set(&child_bp->signal->thread_count, 1);
-  atomic_set(&child_bp->signal->live_count, 1);
-  // per-task signal fields
-  child_bp->sig_pending = 0;
-  child_bp->sig_blocked = parent->proc->sig_blocked;
-  // threading fields
-  child_bp->clear_tid_addr = NULL;
-  list_init(&child_bp->futex_node);
-  child_bp->futex_uaddr = 0;
-  child_bp->sid = parent->proc->sid;
-  child_bp->pgid = parent->proc->pgid;
-  child_bp->ctty = parent->proc->ctty;
-  // Inherit POSIX identity & permissions. alarm_deadline is NOT inherited —
-  // a fresh child gets a new signal_struct (zero-initialized) with no alarm.
-  child_bp->uid = parent->proc->uid;
-  child_bp->euid = parent->proc->euid;
-  child_bp->suid = parent->proc->suid;
-  child_bp->gid = parent->proc->gid;
-  child_bp->egid = parent->proc->egid;
-  child_bp->sgid = parent->proc->sgid;
-  child_bp->umask = parent->proc->umask;
-  // fork() has no flags, so the child uses the POSIX default exit notification
-  // (SIGCHLD), not whatever the parent's clone exit_signal was.
-  child_bp->exit_signal = SIGCHLD;
-  list_init(&child->run_node);
-  list_init(&child->wait_node);
-
-  spin_unlock(&tasks_lock);
-
-  // 8. Enqueue to scheduler
-  int cpu = child->assigned_cpu;
-  uint64_t rflags;
-  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
-  // TOCTOU recheck: if the target CPU has been filled past the threshold
-  // during enqueue, re-pick a CPU
-  if (__atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) >
-      RECHECK_THRESHOLD) {
-    int new_cpu = sched_pick_cpu_pref(parent->assigned_cpu);
-    if (new_cpu != cpu) {
-      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
-      child->assigned_cpu = new_cpu; // not yet enqueued, safe to mutate field
-      cpu = new_cpu;
-      spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
-    }
-  }
-  run_queue_push(cpu, child);
-  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
-
-  // 9. Parent returns child PID
-  printk(LOG_INFO, "sys_fork: parent=%d → child=%d\n", parent->pid, child->pid);
-  return (int64_t)child->pid;
+  return sys_clone((int64_t)SIGCHLD, 0, 0, 0, 0);
 }
 
 // ===================== sys_clone =====================
