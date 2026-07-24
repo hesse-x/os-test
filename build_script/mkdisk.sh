@@ -108,7 +108,7 @@ mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello_dyn.elf"    ::local/hello_
 
 # Copy test ELFs to /test/ directory (test build only)
 if [ "$TEST" = "1" ]; then
-    for elf in test_runner.elf pipe.elf fcntl.elf string.elf malloc.elf \
+    for elf in test_runner.elf pipe.elf fcntl.elf fcntl_ofd.elf string.elf malloc.elf \
                stdio.elf mmap.elf ipc.elf socket.elf process.elf \
                test_socket_msgflags.elf \
                test_unix_dgram.elf \
@@ -132,7 +132,7 @@ if [ "$TEST" = "1" ]; then
                test_munmap_partial.elf test_mprotect_partial.elf \
                test_mmap_flags.elf test_mmap_size_limit.elf \
                test_clone_exit_signal.elf test_clone_settid_fault.elf \
-               test_wait4_pgid_rusage.elf test_setuid_saved.elf \
+               test_wait4_pgid_rusage.elf test_wait4_options.elf test_setuid_saved.elf \
                test_execve_vfs.elf \
                test_getdents_resume.elf test_sa_restart.elf test_sa_nocldwait.elf; do
         mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/

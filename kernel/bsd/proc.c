@@ -224,6 +224,13 @@ void file_put(struct file *f) {
   if (f->f_op && f->f_op->close)
     f->f_op->close(current_task, f);
 
+  /* Release OFD (per open file description) locks before dropping the inode
+   * reference: they are owned by this description, not the process, so the
+   * close of its last fd (this path) is where they must vanish. No-op for
+   * files without an inode or that never held OFD locks. Must precede the
+   * per-type inode_put below so f->inode stays valid. */
+  file_lock_release_file(f);
+
   switch (f->type) {
   case FD_NONE:
     break;

@@ -534,8 +534,9 @@ void test_fcntl_setlk_conflict_child(void) {
   close(fd);
 }
 
-/* F_OFD_SETLK placeholder returns -EINVAL. */
-void test_fcntl_ofd_setlk_einval(void) {
+/* F_OFD_SETLK now implemented (per open file description). A single-fd lock
+ * over the whole file succeeds and returns 0. */
+void test_fcntl_ofd_setlk_basic(void) {
   const char *path = "/local/fcntl_lock5.txt";
   int fd = open(path, O_RDWR | O_CREAT);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -546,8 +547,10 @@ void test_fcntl_ofd_setlk_einval(void) {
   lk.l_start = 0;
   lk.l_len = 0;
   int r = fcntl(fd, F_OFD_SETLK, &lk);
-  TEST_ASSERT_EQUAL_INT(-1, r);
-  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  TEST_ASSERT_EQUAL_INT(0, r);
+
+  lk.l_type = F_UNLCK;
+  fcntl(fd, F_OFD_SETLK, &lk);
   close(fd);
 }
 
@@ -571,6 +574,49 @@ void test_fcntl_getsig_setsig(void) {
   TEST_ASSERT_EQUAL_INT(SIGUSR1, fcntl(fd[0], F_GETSIG));
   /* Out-of-range signal rejected. */
   TEST_ASSERT_EQUAL_INT(-1, fcntl(fd[0], F_SETSIG, 99999));
+  close(fd[0]);
+  close(fd[1]);
+}
+
+/* F_SETOWN_EX / F_GETOWN_EX round-trip (stored only, no SIGIO delivery).
+ * Covers TID/PID/PGRP recipient classes, the negative-pgid readback for
+ * F_OWNER_PGRP, illegal-type rejection, and the legacy F_SETOWN →
+ * F_GETOWN_EX downgrade path. */
+void test_fcntl_setown_ex(void) {
+  int fd[2];
+  pipe(fd);
+  pid_t me = getpid();
+
+  /* F_OWNER_TID: read back verbatim. */
+  struct f_owner_ex ex = {.type = F_OWNER_TID, .pid = me};
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd[0], F_SETOWN_EX, &ex));
+  struct f_owner_ex rd = {0};
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd[0], F_GETOWN_EX, &rd));
+  TEST_ASSERT_EQUAL_INT(F_OWNER_TID, rd.type);
+  TEST_ASSERT_EQUAL_INT(me, rd.pid);
+
+  /* F_OWNER_PGRP: stored internally as -pgid, read back as positive. */
+  ex.type = F_OWNER_PGRP;
+  ex.pid = 5;
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd[0], F_SETOWN_EX, &ex));
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd[0], F_GETOWN_EX, &rd));
+  TEST_ASSERT_EQUAL_INT(F_OWNER_PGRP, rd.type);
+  TEST_ASSERT_EQUAL_INT(5, rd.pid);
+  /* Legacy F_GETOWN sees the stored negative value (pgid convention). */
+  TEST_ASSERT_EQUAL_INT(-5, fcntl(fd[0], F_GETOWN));
+
+  /* Illegal type rejected. */
+  ex.type = 3;
+  ex.pid = me;
+  TEST_ASSERT_EQUAL_INT(-1, fcntl(fd[0], F_SETOWN_EX, &ex));
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+
+  /* Legacy F_SETOWN sets F_OWNER_PID; F_GETOWN_EX reports it. */
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd[0], F_SETOWN, me));
+  TEST_ASSERT_EQUAL_INT(0, fcntl(fd[0], F_GETOWN_EX, &rd));
+  TEST_ASSERT_EQUAL_INT(F_OWNER_PID, rd.type);
+  TEST_ASSERT_EQUAL_INT(me, rd.pid);
+
   close(fd[0]);
   close(fd[1]);
 }
@@ -608,8 +654,9 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_fcntl_setlk_read_lock);
   RUN_TEST(test_fcntl_setlk_pipe_rejected);
   RUN_TEST(test_fcntl_setlk_conflict_child);
-  RUN_TEST(test_fcntl_ofd_setlk_einval);
+  RUN_TEST(test_fcntl_ofd_setlk_basic);
   RUN_TEST(test_fcntl_getown_setown);
   RUN_TEST(test_fcntl_getsig_setsig);
+  RUN_TEST(test_fcntl_setown_ex);
   return UNITY_END();
 }

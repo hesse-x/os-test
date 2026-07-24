@@ -17,6 +17,9 @@ add_user_dyn_elf(pipe C SOURCES test_pipe.c LINK_LIBS c STATIC_LIBS unity)
 # Layer 2: fcntl (open/close/dup2/fcntl/lseek)
 add_user_dyn_elf(fcntl C SOURCES test_fcntl.c LINK_LIBS c STATIC_LIBS unity)
 
+# 05: OFD (F_OFD_*) record locks + F_SETOWN_EX/F_GETOWN_EX.
+add_user_dyn_elf(fcntl_ofd C SOURCES test_fcntl_ofd.c LINK_LIBS c STATIC_LIBS unity)
+
 # Layer 3: string / malloc / stdio
 add_user_dyn_elf(string C SOURCES test_string.c LINK_LIBS c STATIC_LIBS unity)
 add_user_dyn_elf(malloc C SOURCES test_malloc.c LINK_LIBS c STATIC_LIBS unity)
@@ -202,6 +205,7 @@ if(TEST)
     add_user_dyn_elf(test_clone_exit_signal C SOURCES test_clone_exit_signal.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_clone_settid_fault C SOURCES test_clone_settid_fault.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_wait4_pgid_rusage C SOURCES test_wait4_pgid_rusage.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_wait4_options C SOURCES test_wait4_options.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_setuid_saved C SOURCES test_setuid_saved.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_execve_vfs C SOURCES test_execve_vfs.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # 02: getdents64 chunked resume (tmpfs/sysfs) + SA_RESTART restart +

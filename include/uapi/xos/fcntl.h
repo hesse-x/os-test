@@ -48,6 +48,8 @@
 #define F_GETOWN 9
 #define F_SETSIG 10
 #define F_GETSIG 11
+#define F_SETOWN_EX 15
+#define F_GETOWN_EX 16
 #define F_GETPIPE_SZ 31
 #define F_SETPIPE_SZ 32
 #define F_DUPFD_CLOEXEC 1030
@@ -57,12 +59,19 @@
 #define F_WRLCK 1
 #define F_UNLCK 2
 
-/* OFD (fd-open-description) locks — Linux 3.15+. Placeholder: the kernel
- * returns -EINVAL (OFD semantics differ from POSIX process-level locks and
- * cost roughly the same to implement). */
+/* OFD (open file description) locks — Linux 3.15+. Owned by the open file
+ * description (struct file*) rather than the process: two independent open()s
+ * of the same file conflict (unlike POSIX), while dup()'d fds sharing one
+ * description do not. Implemented in kernel/bsd/file_lock.c. */
 #define F_OFD_GETLK 36
 #define F_OFD_SETLK 37
 #define F_OFD_SETLKW 38
+
+/* f_owner_ex.type — F_SETOWN_EX/F_GETOWN_EX recipient class. This OS stores
+ * the value (no SIGIO delivery path) so F_GETOWN_EX round-trips it verbatim. */
+#define F_OWNER_TID 0
+#define F_OWNER_PID 1
+#define F_OWNER_PGRP 2
 
 /* Maximum pipe capacity for F_SETPIPE_SZ (Linux PIPE_MAX_SIZE). */
 #define PIPE_MAX_SIZE (1 << 20)
@@ -79,6 +88,14 @@ struct flock {
   long l_start;
   long l_len;
   int32_t l_pid;
+};
+
+/* F_SETOWN_EX / F_GETOWN_EX recipient descriptor (Linux x86-64 layout):
+ *   type(4) pid(4) = 8 bytes. int32_t (not pid_t) keeps this uapi header free
+ *   of <xos/types.h>; matches struct flock's l_pid convention. */
+struct f_owner_ex {
+  int32_t type;
+  int32_t pid;
 };
 
 #ifdef __cplusplus

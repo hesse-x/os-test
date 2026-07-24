@@ -20,6 +20,7 @@ struct test_entry {
 static struct test_entry tests[] = {
     {"pipe", "/test/pipe.elf"},
     {"fcntl", "/test/fcntl.elf"},
+    {"fcntl_ofd", "/test/fcntl_ofd.elf"},
     {"string", "/test/string.elf"},
     {"malloc", "/test/malloc.elf"},
     {"stdio", "/test/stdio.elf"},
@@ -77,6 +78,7 @@ static struct test_entry tests[] = {
     {"clone_exit_signal", "/test/test_clone_exit_signal.elf"},
     {"clone_settid_fault", "/test/test_clone_settid_fault.elf"},
     {"wait4_pgid_rusage", "/test/test_wait4_pgid_rusage.elf"},
+    {"wait4_options", "/test/test_wait4_options.elf"},
     {"setuid_saved", "/test/test_setuid_saved.elf"},
     {"execve_vfs", "/test/test_execve_vfs.elf"},
     {"test_ffi", "/test/test_ffi.elf"},

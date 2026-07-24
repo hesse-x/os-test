@@ -240,8 +240,17 @@ int fcntl(int fd, int cmd, ...) {
     int arg = va_arg(ap, int);
     va_end(ap);
     r = sys_fcntl(fd, cmd, arg);
-  } else if (cmd == F_GETOWN || cmd == F_GETSIG) {
+  } else if (cmd == F_GETOWN) {
+    /* F_GETOWN legitimately returns a negative pgid, so it must bypass
+     * sys_fcntl's "r < 0 → errno" mapping (matches glibc: raw syscall). */
+    r = __syscall3(SYS_FCNTL, (int64_t)fd, (int64_t)cmd, 0);
+  } else if (cmd == F_GETSIG) {
     r = sys_fcntl(fd, cmd, 0);
+  } else if (cmd == F_SETOWN_EX || cmd == F_GETOWN_EX) {
+    va_start(ap, cmd);
+    struct f_owner_ex *ox = va_arg(ap, struct f_owner_ex *);
+    va_end(ap);
+    r = sys_fcntl(fd, cmd, (int64_t)(uintptr_t)ox);
   } else if (cmd == F_GETPIPE_SZ) {
     r = sys_fcntl(fd, cmd, 0);
   } else if (cmd == F_SETPIPE_SZ) {

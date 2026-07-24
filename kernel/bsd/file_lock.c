@@ -7,12 +7,17 @@
 // POSIX (fcntl) record locks — S09.
 //
 // per-inode lock list (inode->i_flock) + conflict resolution. Only FD_REGULAR
-// files may carry locks; pipe/socket/dev/shm/dir get -ENOLCK. F_SETLKW blocks
-// on the inode's shared wait queue (inode->wq, the same ringbuf-backed wq
-// epoll/poll use) and is signal-interruptible.
+// files may carry locks; pipe/socket/dev/shm/dir get -ENOLCK. F_SETLKW / OFD
+// SETLKW block on the inode's shared wait queue (inode->wq, the same
+// ringbuf-backed wq epoll/poll use) and is signal-interruptible.
+//
+// POSIX and OFD locks coexist on inode->i_flock, distinguished by is_ofd:
+//   POSIX (F_GETLK/SETLK/SETLKW): per-process (owner_pid). Released on exit
+//     (file_lock_release_pid).
+//   OFD   (F_OFD_*):              per open file description (owner_file).
+//     Released when the description's last fd closes (file_lock_release_file).
 //
 // Scope (deliberately NOT in this file, tracked in doc/design/todo.md):
-//   - OFD locks (F_OFD_*)  → placeholder -EINVAL (sys_fcntl side).
 //   - F_SETOWN/F_SETSIG actual SIGIO delivery → only stored, no AIO path.
 //   - per-pid reverse lock index → linear inode scan on exit (inode count
 //   small).
@@ -38,13 +43,23 @@
 #include <xos/fcntl.h>
 #include <xos/syscall_nums.h>
 
-// A single POSIX byte-range lock. Lives on inode->i_flock.
+// A single byte-range lock. Lives on inode->i_flock. POSIX and OFD locks
+// coexist on the same list, distinguished by is_ofd:
+//   POSIX (F_GETLK/SETLK/SETLKW): owned by owner_pid (per-process). Same pid
+//     never conflicts; released on process exit (file_lock_release_pid).
+//   OFD   (F_OFD_*):              owned by owner_file (per open file
+//     description). Same struct file never conflicts (dup'd fds share one
+//     description); released when the last fd of that description closes
+//     (file_lock_release_file). owner_pid is the creator's pid, used only to
+//     report l_pid in F_OFD_GETLK (the lock itself does not track pid).
 struct file_lock {
-  list_node node;  // link into inode->i_flock
-  pid_t owner_pid; // lock holder (POSIX: locks are per-process)
-  int type;        // F_RDLCK / F_WRLCK
-  uint64_t start;  // absolute byte start (resolved from l_whence)
-  uint64_t end;    // absolute byte end (exclusive); UINT64_MAX = to EOF
+  list_node node;          // link into inode->i_flock
+  pid_t owner_pid;         // POSIX owner; OFD: creator pid (l_pid reporter)
+  struct file *owner_file; // OFD owner (NULL for POSIX locks)
+  bool is_ofd;             // true = OFD (per-file-description) lock
+  int type;                // F_RDLCK / F_WRLCK
+  uint64_t start;          // absolute byte start (resolved from l_whence)
+  uint64_t end;            // absolute byte end (exclusive); UINT64_MAX = to EOF
 };
 
 // EOF is represented as an unbounded end. l_len==0 means "to end of file".
@@ -56,18 +71,29 @@ static uint64_t flock_end(uint64_t start, uint64_t len) {
   return start + len;
 }
 
-// Same-process locks never conflict (POSIX: a process may re-lock/extend its
-// own ranges). Read-read never conflicts. Conflict otherwise needs an
-// overlapping range with at least one writer. (Kept inline in find_conflict.)
+// Same-ownership-class locks never conflict (POSIX: same pid; OFD: same struct
+// file — dup'd fds share one description). Read-read never conflicts. Conflict
+// otherwise needs an overlapping range with at least one writer. POSIX vs OFD
+// is always a cross-class pair → they conflict on overlap (read-read still
+// skips), matching Linux.
 
 // Find a lock on ip that conflicts with a (type, [start,end)) lock owned by
-// pid. Caller holds ip->i_flock_lock. Returns NULL if none.
-static struct file_lock *find_conflict(struct inode *ip, pid_t pid, int type,
-                                       uint64_t start, uint64_t end) {
+// (pid, fowner, is_ofd). Caller holds ip->i_flock_lock. Returns NULL if none.
+static struct file_lock *find_conflict(struct inode *ip, pid_t pid,
+                                       struct file *fowner, bool is_ofd,
+                                       int type, uint64_t start, uint64_t end) {
   for (list_node *n = ip->i_flock.next; n != &ip->i_flock; n = n->next) {
     struct file_lock *fl = (struct file_lock *)n;
-    if (fl->owner_pid == pid)
-      continue;
+    if (fl->is_ofd == is_ofd) {
+      /* Same class: same owner never conflicts. */
+      if (is_ofd) {
+        if (fl->owner_file == fowner)
+          continue;
+      } else if (fl->owner_pid == pid) {
+        continue;
+      }
+    }
+    /* Different class (POSIX vs OFD): always treated as distinct owners. */
     if (fl->type == F_RDLCK && type == F_RDLCK)
       continue;
     if (fl->start < end && start < fl->end)
@@ -76,17 +102,21 @@ static struct file_lock *find_conflict(struct inode *ip, pid_t pid, int type,
   return NULL;
 }
 
-// Remove and free every lock owned by pid that overlaps [start,end), splitting
-// the boundaries of partially-overlapping locks so only the requested range is
-// released (Linux posix_locks_unlock semantics). Caller holds i_flock_lock.
-static void locks_delete_range(struct inode *ip, pid_t pid, uint64_t start,
-                               uint64_t end) {
+// Remove and free every lock of the same ownership class & owner that overlaps
+// [start,end), splitting partially-overlapping locks so only the requested
+// range is released (Linux posix_locks_unlock / ofd_delete_range semantics).
+// Caller holds i_flock_lock.
+static void locks_delete_range(struct inode *ip, pid_t pid, struct file *fowner,
+                               bool is_ofd, uint64_t start, uint64_t end) {
   list_node *n = ip->i_flock.next;
   while (n != &ip->i_flock) {
     struct file_lock *fl = (struct file_lock *)n;
     n = n->next;
 
-    if (fl->owner_pid != pid)
+    /* Only same-class & same-owner locks are released. */
+    if (fl->is_ofd != is_ofd)
+      continue;
+    if (is_ofd ? (fl->owner_file != fowner) : (fl->owner_pid != pid))
       continue;
     // No overlap?
     if (fl->end <= start || end <= fl->start)
@@ -104,6 +134,8 @@ static void locks_delete_range(struct inode *ip, pid_t pid, uint64_t start,
           (struct file_lock *)kmalloc(sizeof(struct file_lock));
       if (front) {
         front->owner_pid = pid;
+        front->owner_file = fowner;
+        front->is_ofd = is_ofd;
         front->type = fl_type;
         front->start = fl_start;
         front->end = start;
@@ -115,6 +147,8 @@ static void locks_delete_range(struct inode *ip, pid_t pid, uint64_t start,
           (struct file_lock *)kmalloc(sizeof(struct file_lock));
       if (back) {
         back->owner_pid = pid;
+        back->owner_file = fowner;
+        back->is_ofd = is_ofd;
         back->type = fl_type;
         back->start = end;
         back->end = fl_end;
@@ -124,19 +158,21 @@ static void locks_delete_range(struct inode *ip, pid_t pid, uint64_t start,
   }
 }
 
-// Insert a new lock for pid. POSIX "replace" semantics on same-pid overlap are
-// simplified: delete any overlapping same-pid ranges first, then insert. This
-// matches Linux for the common cases (re-lock, upgrade/downgrade within owned
-// ranges). Caller holds i_flock_lock.
-static int locks_insert(struct inode *ip, pid_t pid, int type, uint64_t start,
-                        uint64_t end) {
-  // Remove same-pid locks overlapping the new range (replace semantics).
-  locks_delete_range(ip, pid, start, end);
+// Insert a new lock for (pid, fowner, is_ofd). "Replace" semantics on
+// same-owner overlap: delete any overlapping same-owner ranges first, then
+// insert. Matches Linux for the common cases (re-lock, upgrade/downgrade within
+// owned ranges). Caller holds i_flock_lock.
+static int locks_insert(struct inode *ip, pid_t pid, struct file *fowner,
+                        bool is_ofd, int type, uint64_t start, uint64_t end) {
+  // Remove same-owner locks overlapping the new range (replace semantics).
+  locks_delete_range(ip, pid, fowner, is_ofd, start, end);
 
   struct file_lock *fl = (struct file_lock *)kmalloc(sizeof(struct file_lock));
   if (!fl)
     return -ENOMEM;
   fl->owner_pid = pid;
+  fl->owner_file = fowner;
+  fl->is_ofd = is_ofd;
   fl->type = type;
   fl->start = start;
   fl->end = end;
@@ -171,25 +207,28 @@ static wait_queue_head *inode_wq_get(struct inode *ip) {
 // indefinite F_SETLKW). Mirrors the pipe-write check.
 static bool task_signal_pending(xtask *proc) { return signal_pending(proc); }
 
-// Apply a lock (F_RDLCK/F_WRLCK) or unlock (F_UNLCK) for pid over [start,end).
-// blocking=1 makes a conflicting F_SETLKW wait on inode->wq (signal-interrupt).
-static int64_t apply_lock(struct inode *ip, pid_t pid, int type, uint64_t start,
-                          uint64_t end, int blocking) {
+// Apply a lock (F_RDLCK/F_WRLCK) or unlock (F_UNLCK) for (pid, fowner, is_ofd)
+// over [start,end). blocking=1 makes a conflicting F_SETLKW/F_OFD_SETLKW wait
+// on inode->wq (signal-interrupt).
+static int64_t apply_lock(struct inode *ip, pid_t pid, struct file *fowner,
+                          bool is_ofd, int type, uint64_t start, uint64_t end,
+                          int blocking) {
   wait_queue_head *wq = NULL;
 
   for (;;) {
     spin_lock(&ip->i_flock_lock);
     if (type == F_UNLCK) {
-      locks_delete_range(ip, pid, start, end);
+      locks_delete_range(ip, pid, fowner, is_ofd, start, end);
       spin_unlock(&ip->i_flock_lock);
       // Wake any blocked SETLKW waiters — a released range may satisfy them.
       if (ip->wq)
         __wake_up(ip->wq, 0);
       return 0;
     }
-    struct file_lock *conf = find_conflict(ip, pid, type, start, end);
+    struct file_lock *conf =
+        find_conflict(ip, pid, fowner, is_ofd, type, start, end);
     if (!conf) {
-      int r = locks_insert(ip, pid, type, start, end);
+      int r = locks_insert(ip, pid, fowner, is_ofd, type, start, end);
       spin_unlock(&ip->i_flock_lock);
       if (ip->wq)
         __wake_up(ip->wq, 0); // wake SETLKW waiters that may now succeed
@@ -285,7 +324,8 @@ int64_t do_fcntl_lock(xtask *proc, struct file *f, int cmd, struct flock *lk) {
   /* 3. F_GETLK: probe (never blocks). */
   if (cmd == F_GETLK) {
     spin_lock(&ip->i_flock_lock);
-    struct file_lock *conf = find_conflict(ip, pid, lk->l_type, start, end);
+    struct file_lock *conf =
+        find_conflict(ip, pid, NULL, false, lk->l_type, start, end);
     if (conf) {
       lk->l_type = (short)conf->type;
       lk->l_whence = SEEK_SET;
@@ -306,7 +346,74 @@ int64_t do_fcntl_lock(xtask *proc, struct file *f, int cmd, struct flock *lk) {
 
   /* 4. F_SETLK / F_SETLKW. */
   int blocking = (cmd == F_SETLKW) ? 1 : 0;
-  return apply_lock(ip, pid, lk->l_type, start, end, blocking);
+  return apply_lock(ip, pid, NULL, false, lk->l_type, start, end, blocking);
+}
+
+int64_t do_fcntl_lock_ofd(xtask *proc, struct file *f, int cmd,
+                          struct flock *lk) {
+  if (!f->inode)
+    return -ENOLCK;
+
+  /* 1. Validate l_type / l_whence. */
+  if (lk->l_type != F_RDLCK && lk->l_type != F_WRLCK && lk->l_type != F_UNLCK)
+    return -EINVAL;
+  if (lk->l_whence != SEEK_SET && lk->l_whence != SEEK_CUR &&
+      lk->l_whence != SEEK_END)
+    return -EINVAL;
+
+  /* 2. Resolve absolute byte range (same rules as POSIX path). */
+  uint64_t base;
+  switch (lk->l_whence) {
+  case SEEK_SET:
+    base = 0;
+    break;
+  case SEEK_CUR:
+    base = f->offset;
+    break;
+  case SEEK_END:
+    base = f->inode->size;
+    break;
+  default:
+    return -EINVAL;
+  }
+  if (lk->l_start < 0)
+    return -EINVAL;
+  uint64_t start = base + (uint64_t)lk->l_start;
+  uint64_t end = flock_end(start, (uint64_t)lk->l_len);
+  if (end < start)
+    return -EINVAL;
+
+  struct inode *ip = f->inode;
+  pid_t pid = proc->pid;
+
+  /* 3. F_OFD_GETLK: probe (never blocks). OFD locks report the holder's creator
+   *    pid in l_pid (Linux behavior: the lock is per-file-description, but the
+   *    conflict report still names a pid). */
+  if (cmd == F_OFD_GETLK) {
+    spin_lock(&ip->i_flock_lock);
+    struct file_lock *conf =
+        find_conflict(ip, pid, f, true, lk->l_type, start, end);
+    if (conf) {
+      lk->l_type = (short)conf->type;
+      lk->l_whence = SEEK_SET;
+      lk->l_start = (long)conf->start;
+      lk->l_len =
+          (conf->end == FLOCK_END_EOF) ? 0 : (long)(conf->end - conf->start);
+      lk->l_pid = conf->owner_pid;
+    } else {
+      lk->l_type = F_UNLCK;
+      lk->l_whence = SEEK_SET;
+      lk->l_start = 0;
+      lk->l_len = 0;
+      lk->l_pid = 0;
+    }
+    spin_unlock(&ip->i_flock_lock);
+    return 0;
+  }
+
+  /* 4. F_OFD_SETLK / F_OFD_SETLKW. */
+  int blocking = (cmd == F_OFD_SETLKW) ? 1 : 0;
+  return apply_lock(ip, pid, f, true, lk->l_type, start, end, blocking);
 }
 
 // --- process-exit & inode-eviction cleanup ---
@@ -319,7 +426,9 @@ static void release_pid_on_inode(struct inode *ip, void *ctx) {
   while (n != &ip->i_flock) {
     struct file_lock *fl = (struct file_lock *)n;
     n = n->next;
-    if (fl->owner_pid == dead_pid) {
+    /* POSIX only: OFD locks outlive their creating process (owned by the
+     * open file description, released by file_lock_release_file). */
+    if (!fl->is_ofd && fl->owner_pid == dead_pid) {
       list_remove(&fl->node);
       kfree(fl);
       changed = true;
@@ -332,6 +441,32 @@ static void release_pid_on_inode(struct inode *ip, void *ctx) {
 
 void file_lock_release_pid(pid_t dead_pid) {
   inode_for_each(release_pid_on_inode, (void *)(uintptr_t)dead_pid);
+}
+
+// Release every OFD lock owned by this open file description. Called from
+// file_put on the last reference (close of the last dup'd fd sharing this
+// description). Must run while f->inode is still referenced by this file
+// (i.e. before inode_put). No-op for files without an inode (pipe/socket/etc.)
+// and for files that never held OFD locks.
+void file_lock_release_file(struct file *f) {
+  struct inode *ip = f->inode;
+  if (!ip)
+    return;
+  spin_lock(&ip->i_flock_lock);
+  list_node *n = ip->i_flock.next;
+  bool changed = false;
+  while (n != &ip->i_flock) {
+    struct file_lock *fl = (struct file_lock *)n;
+    n = n->next;
+    if (fl->is_ofd && fl->owner_file == f) {
+      list_remove(&fl->node);
+      kfree(fl);
+      changed = true;
+    }
+  }
+  spin_unlock(&ip->i_flock_lock);
+  if (changed && ip->wq)
+    __wake_up(ip->wq, 0);
 }
 
 void file_lock_release_all(struct inode *ip) {

@@ -365,6 +365,20 @@ int64_t sys_exit_group(int64_t arg1, int64_t unused1, int64_t unused2,
 #define WNOHANG 1
 #define WUNTRACED 2
 #define WCONTINUED 4
+// Linux wait4/waitid extension flags (bits/waitflags.h values). This kernel has
+// no thread-group vs clone-child distinction — all children already match
+// (child_matches keys on signal->parent_pid), so __WALL/__WNOTHREAD are no-ops
+// and __WCLONE is accepted-but-equivalent-to-__WALL.
+#define __WCLONE 0x80000000
+#define __WALL 0x40000000
+#define __WNOTHREAD 0x20000000
+// Mask of every wait option bit this kernel recognizes (mirrors Linux do_wait,
+// which rejects unknown option bits). __WALL/__WNOTHREAD are no-ops here (all
+// children already match; wait doesn't cross threads); __WCLONE has no
+// distinguishable semantics without a tgroup field, so it is accepted but
+// treated like __WALL.
+#define __W_KNOWN                                                              \
+  (WNOHANG | WUNTRACED | WCONTINUED | __WALL | __WCLONE | __WNOTHREAD)
 
 // S19 §5: kernel-side rusage layout, byte-identical to
 // user/include/sys/resource.h (struct timeval comes from <xos/time.h>). Filled
@@ -471,6 +485,10 @@ static int64_t sys_waitpid_rusage(int64_t arg1, int64_t arg2, int64_t options,
   int nohang = (int)options & WNOHANG;
   int wuntraced = (int)options & WUNTRACED;
   int wcontinued = (int)options & WCONTINUED;
+  // Accept the Linux wait4 extension flags. Reject any genuinely unknown
+  // option bit (see __W_KNOWN above).
+  if ((int)options & ~__W_KNOWN)
+    return (int64_t)-EINVAL;
   pid_t caller_pid = current_task->pid;
   pid_t caller_pgid = current_proc ? current_proc->pgid : 0;
 
@@ -2712,12 +2730,44 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       goto out;
     }
     f->f_owner = (pid_t)arg;
+    f->f_owner_type = F_OWNER_PID;
     ret = 0;
     goto out;
   }
   case F_GETOWN:
     ret = (int64_t)f->f_owner;
     goto out;
+  case F_SETOWN_EX: {
+    /* F_SETOWN_EX extends F_SETOWN with a recipient class (TID/PID/PGRP).
+     * Stored only (no SIGIO delivery path, same as F_SETOWN/F_SETSIG) so
+     * F_GETOWN_EX round-trips it. F_OWNER_PGRP stores a negative pgid in
+     * f_owner (matching legacy F_SETOWN's -pgid convention); read back as
+     * positive via F_GETOWN_EX. */
+    struct f_owner_ex ex;
+    if (copy_from_user(&ex, (void __user *)(uintptr_t)arg3, sizeof(ex))) {
+      ret = -EFAULT;
+      goto out;
+    }
+    if (ex.type != F_OWNER_TID && ex.type != F_OWNER_PID &&
+        ex.type != F_OWNER_PGRP) {
+      ret = -EINVAL;
+      goto out;
+    }
+    f->f_owner_type = ex.type;
+    f->f_owner = (ex.type == F_OWNER_PGRP) ? -(pid_t)ex.pid : ex.pid;
+    ret = 0;
+    goto out;
+  }
+  case F_GETOWN_EX: {
+    struct f_owner_ex ex;
+    ex.type = f->f_owner_type;
+    ex.pid = (f->f_owner_type == F_OWNER_PGRP) ? -f->f_owner : f->f_owner;
+    if (copy_to_user((void __user *)(uintptr_t)arg3, &ex, sizeof(ex)))
+      ret = -EFAULT;
+    else
+      ret = 0;
+    goto out;
+  }
   case F_SETSIG: {
     /* 0 restores the default SIGIO; otherwise [1, NSIG). Stored only. */
     if (arg < 0 || arg >= NSIG) {
@@ -2733,11 +2783,26 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     goto out;
   case F_OFD_GETLK:
   case F_OFD_SETLK:
-  case F_OFD_SETLKW:
-    /* OFD locks are not implemented (different fd-level semantics; tracked in
-     * doc/design/todo.md). */
-    ret = -EINVAL;
+  case F_OFD_SETLKW: {
+    /* OFD locks are owned by the open file description, not the process.
+     * Only regular files carry byte-range locks. */
+    if (f->type != FD_REGULAR || !f->inode) {
+      ret = -ENOLCK;
+      goto out;
+    }
+    struct flock ofd_lk;
+    if (copy_from_user(&ofd_lk, (void __user *)(uintptr_t)arg3,
+                       sizeof(ofd_lk))) {
+      ret = -EFAULT;
+      goto out;
+    }
+    ret = do_fcntl_lock_ofd(proc, f, cmd, &ofd_lk);
+    if (cmd == F_OFD_GETLK && ret == 0) {
+      if (copy_to_user((void __user *)(uintptr_t)arg3, &ofd_lk, sizeof(ofd_lk)))
+        ret = -EFAULT;
+    }
     goto out;
+  }
   case F_GETLK:
   case F_SETLK:
   case F_SETLKW: {

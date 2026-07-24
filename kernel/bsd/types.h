@@ -85,6 +85,8 @@ typedef struct file {
   void *private_data; // 类 Linux：broker/eventfd 等用；f_op->close 负责回收
   pid_t f_owner;   // F_SETOWN target pid (0 = none); stored, no SIGIO delivery
   int f_owner_sig; // F_SETSIG signal (0 → SIGIO default); stored, not delivered
+  int f_owner_type; // F_OWNER_TID/PID/PGRP (F_SETOWN_EX); F_OWNER_PID for
+                    // legacy F_SETOWN. Stored only (no SIGIO delivery).
   union {
     struct pipe *pipe;
     struct shm *shm;
