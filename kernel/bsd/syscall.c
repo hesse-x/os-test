@@ -160,21 +160,21 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
     proc->last_sched = 0;
   }
 
-  // 3. Orphan adoption: reparent all children whose mm->parent_pid matches
-  //    the dying process.  Update BOTH mm->parent_pid (used by waitpid/child
-  //    scan) AND signal->parent_pid (used by do_exit's SIGCHLD notification and
-  //    sys_getppid).  The old code only updated mm->parent_pid, leaving
-  //    signal->parent_pid pointing at a dead/reused PID, causing SIGCHLD to hit
-  //    the wrong task (guarded but lost) and getppid to return garbage for
-  //    orphans.
+  // 3. Orphan adoption: reparent all children whose signal->parent_pid matches
+  //    the dying process. The parent relationship is per-process
+  //    (signal->parent_pid), NOT per-mm: a CLONE_VM child shares its parent's
+  //    mm (whose parent_pid is the grandparent), so matching on mm->parent_pid
+  //    would miss shared-vm children and leave them pointing at a dead PID.
+  //    Update signal->parent_pid (used by waitpid/child scan, do_exit's SIGCHLD
+  //    notification, and sys_getppid) to init. mm->parent_pid is left as-is; it
+  //    is no longer the authority for parentage.
   if (init_pid >= 0) {
     spin_lock(&tasks_lock);
     for (int i = 0; i < MAX_PROC; i++) {
-      if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->mm &&
-          tasks[i]->mm->parent_pid == proc->pid) {
-        tasks[i]->mm->parent_pid = init_pid;
-        if (tasks[i]->proc && tasks[i]->proc->signal)
-          tasks[i]->proc->signal->parent_pid = init_pid;
+      if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->proc &&
+          tasks[i]->proc->signal &&
+          tasks[i]->proc->signal->parent_pid == proc->pid) {
+        tasks[i]->proc->signal->parent_pid = init_pid;
       }
     }
     spin_unlock(&tasks_lock);
@@ -202,6 +202,10 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   //    Read signal fields into locals — after ZOMBIE we must not touch sig.
   struct signal_struct *sig = proc->proc->signal;
   pid_t ppid = sig->parent_pid;
+  // S19 §1: exit_signal selects which signal the parent is notified with on
+  // the last thread's exit (default SIGCHLD; 0 = do not notify, e.g. a
+  // CLONE_THREAD exit reports via clear_tid_addr + futex, not a signal).
+  int esig = proc->proc->exit_signal;
   atomic_dec(&sig->live_count);
   int notify_parent = atomic_dec_and_test(&sig->thread_count);
 
@@ -214,8 +218,21 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   proc->state = ZOMBIE;
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
 
-  // 7. Notify parent (last thread) — uses local ppid, not sig->parent_pid
-  if (notify_parent) {
+  // 7. Notify parent (last thread) — uses local ppid, not sig->parent_pid.
+  //    Two independent effects:
+  //    - wake a parent blocked in waitpid: a reapable child is a thread-group
+  //      *leader* (tgid == pid). Its exit must wake the parent's WAIT_CHILD
+  //      even when exit_signal==0 — clone's low byte 0 means "no SIGCHLD
+  //      posted", NOT "do not reap". A non-leader thread exit (CLONE_THREAD)
+  //      keeps esig==0 and is not a reapable child; it relies on clear_tid_addr
+  //      + futex_wake, so it does NOT wake waitpid (would spuriously wake a
+  //      waitpid targeting a different child).
+  //    - post the exit signal: only when esig != 0 (SIGCHLD default, or the
+  //      clone low byte; 0 = post nothing).
+  //    tgid==pid leader detection is correct because step 6 of sys_clone sets
+  //    tgid = alloc_idx (= pid) for non-CLONE_THREAD children.
+  bool is_leader = (proc->tgid == proc->pid);
+  if (notify_parent && (is_leader || esig != 0)) {
     if (ppid >= 0 && ppid < MAX_PROC && task_get(ppid)->pid == ppid) {
       xtask *parent = task_get(ppid);
       // parent->proc is NULL for non-POSIX tasks (idle processes, see
@@ -226,12 +243,15 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
       // must not dereference it. Guard matches the pty SIGHUP path
       // (proc.c pty_close_file).
       if (parent->proc) {
-        __atomic_or_fetch(&parent->proc->sig_pending, SIGMASK(SIGCHLD),
-                          __ATOMIC_RELEASE);
+        if (esig != 0) {
+          __atomic_or_fetch(&parent->proc->sig_pending, SIGMASK(esig),
+                            __ATOMIC_RELEASE);
+        }
         int pcpu = parent->assigned_cpu;
         uint64_t pflags;
         spin_lock_irqsave(&cpu_locals[pcpu].scheduler_lock, &pflags);
-        if (parent->state == BLOCKED && parent->wait_event == WAIT_CHILD) {
+        if (is_leader && parent->state == BLOCKED &&
+            parent->wait_event == WAIT_CHILD) {
           wake_from_wait(parent);
         }
         spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
@@ -320,6 +340,67 @@ int64_t sys_exit_group(int64_t arg1, int64_t unused1, int64_t unused2,
 #define WUNTRACED 2
 #define WCONTINUED 4
 
+// S19 §5: kernel-side rusage layout, byte-identical to
+// user/include/sys/resource.h (struct timeval comes from <xos/time.h>). Filled
+// from the child's cpu_time_ns before sched_task_reap frees the xtask;
+// copy_to_user delivers it to the caller. Only ru_utime is populated (this OS
+// does not separate user/system CPU time yet — recorded in todo.md); the rest
+// is zeroed.
+struct k_rusage {
+  struct timeval ru_utime;
+  struct timeval ru_stime;
+  long ru_maxrss;
+  long ru_ixrss;
+  long ru_idrss;
+  long ru_isrss;
+  long ru_minflt;
+  long ru_majflt;
+  long ru_nswap;
+  long ru_inblock;
+  long ru_oublock;
+  long ru_msgsnd;
+  long ru_msgrcv;
+  long ru_nsignals;
+  long ru_nvcsw;
+  long ru_nivcsw;
+};
+
+// S19 §5.1: does `candidate` match the waitpid/wait4 selection rule?
+//   pid == -1  : any child of caller
+//   pid == 0   : any child whose pgid == caller's pgid
+//   pid < -1   : any child whose pgid == -pid
+//   pid > 0    : the specific child pid
+// "child of caller" = candidate's signal->parent_pid == caller_pid. The parent
+// relationship is per-process (signal->parent_pid), NOT per-mm: a CLONE_VM
+// child shares its parent's mm, whose parent_pid is the *grandparent*, so using
+// mm->parent_pid here would reject shared-vm children (see test_clone_*).
+// Called under tasks_lock (caller's proc/pgid stable; candidate fields read
+// under the lock).
+static inline bool child_matches(xtask *candidate, pid_t pid, pid_t caller_pid,
+                                 pid_t caller_pgid) {
+  if (!candidate || candidate->pid < 0 || !candidate->proc ||
+      !candidate->proc->signal)
+    return false;
+  if (candidate->proc->signal->parent_pid != caller_pid)
+    return false;
+  if (pid == -1)
+    return true;
+  if (pid == 0)
+    return candidate->proc->pgid == caller_pgid;
+  if (pid < -1)
+    return candidate->proc->pgid == -pid;
+  // pid > 0
+  return candidate->pid == pid;
+}
+
+// S19 §5.2: fill a kernel rusage from a reaped child's cpu_time_ns. The whole
+// CPU time is reported as ru_utime (no user/sys split yet); ru_stime stays 0.
+static void fill_rusage(struct k_rusage *ru, uint64_t cpu_time_ns) {
+  __memset(ru, 0, sizeof(*ru));
+  ru->ru_utime.tv_sec = (long)(cpu_time_ns / 1000000000ULL);
+  ru->ru_utime.tv_usec = (long)((cpu_time_ns % 1000000000ULL) / 1000);
+}
+
 // S01 helper: report a stopped child to a waitpid caller. Writes the
 // WIFSTOPPED encoding into *wstatus and sets the one-shot stop_reported flag
 // so the same stop is not reported twice. Returns 1 if reported, 0 if the
@@ -338,42 +419,74 @@ static int waitpid_report_stopped(xtask *child, int32_t __user *wstatus,
   return 1;
 }
 
-int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
-                    int64_t unused2, int64_t unused3, int64_t unused4) {
+// S19 §5.3: report a continued child to a waitpid caller under WCONTINUED.
+// Writes the WIFCONTINUED status (0xffff, see user/include/sys/wait.h) and
+// clears the one-shot cont_pending. Returns 1 if reported, 0 if the caller did
+// not request WCONTINUED or this continue was already reported.
+static int waitpid_report_continued(xtask *child, int32_t __user *wstatus,
+                                    int wcontinued) {
+  if (!wcontinued || !child->cont_pending)
+    return 0;
+  if (wstatus) {
+    uint64_t p = (__force uint64_t)wstatus;
+    if (p && p < KERNEL_VMA_BOUNDARY &&
+        p + sizeof(int32_t) - 1 < KERNEL_VMA_BOUNDARY)
+      *(__force int32_t *)wstatus = (int32_t)0xffff;
+  }
+  child->cont_pending = 0;
+  return 1;
+}
+
+static int64_t sys_waitpid_rusage(int64_t arg1, int64_t arg2, int64_t options,
+                                  struct k_rusage *rusage_out, int64_t unused3,
+                                  int64_t unused4) {
   pid_t pid = (pid_t)arg1;
   int32_t __user *exit_code_ptr = (int32_t __user * __force) arg2;
   int nohang = (int)options & WNOHANG;
   int wuntraced = (int)options & WUNTRACED;
+  int wcontinued = (int)options & WCONTINUED;
+  pid_t caller_pid = current_task->pid;
+  pid_t caller_pgid = current_proc ? current_proc->pgid : 0;
 
-  if (pid == -1) {
+  // S19 §5.1: pid <= 0 selects a *set* of children (any / by process group),
+  // scanned over the whole task table. pid > 0 targets one specific child.
+  if (pid <= 0) {
     while (1) {
       spin_lock(&tasks_lock);
       xtask *zombie = NULL;
       xtask *stopped = NULL;
+      xtask *continued = NULL;
       bool has_children = false;
       for (int i = 0; i < MAX_PROC; i++) {
-        if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->mm &&
-            tasks[i]->mm->parent_pid == current_task->pid) {
-          has_children = true;
-          if (tasks[i]->state == ZOMBIE) {
-            zombie = tasks[i];
-            break;
-          }
-          if (wuntraced && tasks[i]->state == STOPPED &&
-              !tasks[i]->stop_reported)
-            stopped = stopped ? stopped : tasks[i];
+        xtask *t = tasks[i];
+        if (!child_matches(t, pid, caller_pid, caller_pgid))
+          continue;
+        has_children = true;
+        if (t->state == ZOMBIE) {
+          zombie = t;
+          break;
         }
+        if (wuntraced && t->state == STOPPED && !t->stop_reported)
+          stopped = stopped ? stopped : t;
+        if (wcontinued && t->cont_pending)
+          continued = continued ? continued : t;
       }
       if (!has_children) {
         spin_unlock(&tasks_lock);
         return (int64_t)-ECHILD;
       }
-      // S01: report a stopped child without reaping it. The child stays
-      // STOPPED; stop_reported makes this a one-shot report.
+      // S01: report a stopped child without reaping it (one-shot).
       if (stopped) {
         spin_unlock(&tasks_lock);
         if (waitpid_report_stopped(stopped, exit_code_ptr, wuntraced))
           return (int64_t)stopped->pid;
+        continue;
+      }
+      // S19 §5.3: report a continued child without reaping it (one-shot).
+      if (continued) {
+        spin_unlock(&tasks_lock);
+        if (waitpid_report_continued(continued, exit_code_ptr, wcontinued))
+          return (int64_t)continued->pid;
         continue;
       }
       if (zombie) {
@@ -395,6 +508,10 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
               (ptr_val + sizeof(int32_t) - 1) < KERNEL_VMA_BOUNDARY)
             *(__force int32_t *)exit_code_ptr = zombie->exit_code;
         }
+        // S19 §5.2: capture rusage BEFORE sched_task_reap frees the xtask
+        // (reap may kmem_cache_free the xtask object → UAF if read after).
+        if (rusage_out)
+          fill_rusage(rusage_out, zombie->cpu_time_ns);
         sched_task_reap(zombie);
         return (int64_t)zpid;
       }
@@ -410,19 +527,21 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
       spin_lock(&tasks_lock);
       zombie = NULL;
       stopped = NULL;
+      continued = NULL;
       has_children = false;
       for (int i = 0; i < MAX_PROC; i++) {
-        if (tasks[i] && tasks[i]->pid >= 0 && tasks[i]->mm &&
-            tasks[i]->mm->parent_pid == current_task->pid) {
-          has_children = true;
-          if (tasks[i]->state == ZOMBIE) {
-            zombie = tasks[i];
-            break;
-          }
-          if (wuntraced && tasks[i]->state == STOPPED &&
-              !tasks[i]->stop_reported)
-            stopped = stopped ? stopped : tasks[i];
+        xtask *t = tasks[i];
+        if (!child_matches(t, pid, caller_pid, caller_pgid))
+          continue;
+        has_children = true;
+        if (t->state == ZOMBIE) {
+          zombie = t;
+          break;
         }
+        if (wuntraced && t->state == STOPPED && !t->stop_reported)
+          stopped = stopped ? stopped : t;
+        if (wcontinued && t->cont_pending)
+          continued = continued ? continued : t;
       }
       if (!has_children) {
         spin_unlock(&tasks_lock);
@@ -441,24 +560,38 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
           return (int64_t)stopped->pid;
         continue;
       }
+      if (continued) {
+        spin_unlock(&tasks_lock);
+        spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
+        if (waitpid_report_continued(continued, exit_code_ptr, wcontinued))
+          return (int64_t)continued->pid;
+        continue;
+      }
       spin_unlock(&tasks_lock);
-      current_task->wait_event = WAIT_CHILD;
-      current_task->state = BLOCKED;
-      spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
-      schedule();
+      // Before blocking: if a signal is pending, return EINTR rather than
+      // sleeping. Checking here (not after schedule()) lets a wakeup that
+      // simultaneously marks a child ZOMBIE and posts its exit_signal be
+      // resolved as a reaped child (loop top re-scan) instead of EINTR.
       {
         uint64_t pend =
             __atomic_load_n(&current_proc->sig_pending, __ATOMIC_ACQUIRE);
         uint64_t deliv = pend & ~current_proc->sig_blocked;
         deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
         deliv &= ~(SIGMASK(SIGCHLD));
-        if (deliv)
+        if (deliv) {
+          spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
           return (int64_t)-EINTR;
+        }
       }
+      current_task->wait_event = WAIT_CHILD;
+      current_task->state = BLOCKED;
+      spin_unlock_irqrestore(&cpu_locals[pcpu].scheduler_lock, pflags);
+      schedule();
     }
   }
 
-  if (pid < 0 || pid >= MAX_PROC) {
+  // pid > 0: wait for a specific child. pid is in range [1, MAX_PROC) here.
+  if (pid >= MAX_PROC) {
     printk(LOG_WARN, "waitpid: pid=%d out of range\n", pid);
     return -EINVAL;
   }
@@ -466,13 +599,15 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
   xtask *child = task_get(pid);
 
   spin_lock(&tasks_lock);
-  if (child->pid != pid || !child->mm ||
-      child->mm->parent_pid != current_task->pid) {
+  if (!child_matches(child, pid, caller_pid, caller_pgid)) {
     printk(LOG_WARN,
-           "waitpid: pid=%d validation fail: child_pid=%d mm=%p parent_pid=%d "
+           "waitpid: pid=%d validation fail: child_pid=%d parent_pid=%d "
            "caller=%d\n",
-           pid, child->pid, child->mm, child->mm ? child->mm->parent_pid : -1,
-           current_task->pid);
+           pid, child->pid,
+           (child->proc && child->proc->signal)
+               ? child->proc->signal->parent_pid
+               : -1,
+           caller_pid);
     spin_unlock(&tasks_lock);
     return -ECHILD;
   }
@@ -490,6 +625,17 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
       if (is_stopped && waitpid_report_stopped(child, exit_code_ptr, wuntraced))
         return (int64_t)child->pid;
     }
+    // S19 §5.3: report a continued child once under WCONTINUED before blocking.
+    if (wcontinued) {
+      int ccpu = child->assigned_cpu;
+      uint64_t cflags;
+      spin_lock_irqsave(&cpu_locals[ccpu].scheduler_lock, &cflags);
+      int wants_cont = child->cont_pending;
+      spin_unlock_irqrestore(&cpu_locals[ccpu].scheduler_lock, cflags);
+      if (wants_cont &&
+          waitpid_report_continued(child, exit_code_ptr, wcontinued))
+        return (int64_t)child->pid;
+    }
 
     int cpu = child->assigned_cpu;
     uint64_t flags;
@@ -504,6 +650,24 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
     // WNOHANG: child not a zombie yet, don't block — return 0.
     if (nohang)
       return 0;
+
+    // Before blocking: if a signal is pending, return EINTR now rather than
+    // sleeping. Checking here (not after schedule()) matters when the child
+    // exited and posted its exit_signal in the same wakeup — schedule() returns
+    // with both "child is ZOMBIE" and "signal pending" true, and we must let
+    // the loop top reap the ZOMBIE (returning pid) instead of bailing with
+    // EINTR. Linux/POSIX: report a ready child state change over an interrupt.
+    {
+      uint64_t pend =
+          __atomic_load_n(&current_proc->sig_pending, __ATOMIC_ACQUIRE);
+      uint64_t deliv = pend & ~current_proc->sig_blocked;
+      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
+      deliv &= ~(SIGMASK(SIGCHLD));
+      if (deliv) {
+        printk(LOG_WARN, "waitpid: pid=%d EINTR pending=0x%lx\n", pid, pend);
+        return (int64_t)-EINTR;
+      }
+    }
 
     int pcpu = current_task->assigned_cpu;
     if (pcpu == cpu) {
@@ -534,18 +698,6 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
     }
     schedule();
 
-    {
-      uint64_t pend =
-          __atomic_load_n(&current_proc->sig_pending, __ATOMIC_ACQUIRE);
-      uint64_t deliv = pend & ~current_proc->sig_blocked;
-      deliv |= (pend & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))));
-      deliv &= ~(SIGMASK(SIGCHLD));
-      if (deliv) {
-        printk(LOG_WARN, "waitpid: pid=%d EINTR pending=0x%lx\n", pid, pend);
-        return (int64_t)-EINTR;
-      }
-    }
-
     spin_lock(&tasks_lock);
     if (child->pid != pid) {
       printk(LOG_WARN, "waitpid: pid=%d child reaped by someone else\n", pid);
@@ -567,16 +719,41 @@ int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
     }
     *(__force int32_t *)exit_code_ptr = child->exit_code;
   }
+  // S19 §5.2: capture rusage BEFORE sched_task_reap frees the xtask.
+  if (rusage_out)
+    fill_rusage(rusage_out, child->cpu_time_ns);
   sched_task_reap(child);
   return (int64_t)pid;
 }
 
-// 薄封装 §4.3:wait4(pid,wstatus,options,NULL) ≡ waitpid;不实现 rusage。
+// sys_waitpid: user-side waitpid() entry. No rusage (wait4 provides it).
+int64_t sys_waitpid(int64_t arg1, int64_t arg2, int64_t options,
+                    int64_t unused2, int64_t unused3, int64_t unused4) {
+  return sys_waitpid_rusage(arg1, arg2, options, NULL, unused3, unused4);
+}
+
+// wait4(pid, wstatus, options, rusage). S19 §5: rusage (if non-NULL) is filled
+// from the reaped child's cpu_time_ns before reap and copied out to the caller.
 int64_t sys_wait4(int64_t pid, int64_t wstatus, int64_t options, int64_t rusage,
                   int64_t unused1, int64_t unused2) {
-  if (rusage != 0)
-    return -ENOSYS; // 不实现 rusage(Linux 允许 NULL)
-  return sys_waitpid(pid, wstatus, options, 0, 0, 0);
+  struct k_rusage kru;
+  struct k_rusage *ru_out = (rusage != 0) ? &kru : NULL;
+  int64_t ret = sys_waitpid_rusage(pid, wstatus, options, ru_out, 0, 0);
+  if (ret < 0 || !ru_out)
+    return ret;
+  // ret == reaped pid. copy_to_user under the user CR3 (user pages are not
+  // mapped in the kernel CR3). A fault here is unrecoverable (child already
+  // reaped) — return -EFAULT as Linux does on a bad rusage pointer.
+  uint64_t saved_cr3;
+  __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
+  __asm__ volatile("movq %0, %%cr3" ::"r"((int64_t)current_task->cr3)
+                   : "memory");
+  size_t ctu = copy_to_user((void __user *)(uintptr_t)rusage, &kru,
+                            sizeof(struct k_rusage));
+  __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
+  if (ctu)
+    return (int64_t)-EFAULT;
+  return ret;
 }
 
 // ===================== S12: file-backed mmap =====================
@@ -4199,12 +4376,16 @@ int64_t sys_setpgid(int64_t arg1, int64_t arg2, int64_t unused1,
   if (pid >= MAX_PROC || task_get(pid)->pid != pid)
     return (int64_t)-ESRCH;
   if (pid != current_task->pid) {
-    if (task_get(pid)->mm->parent_pid != current_task->pid)
+    xtask *t = task_get(pid);
+    if (!t->proc || !t->proc->signal ||
+        t->proc->signal->parent_pid != current_task->pid)
       return (int64_t)-ESRCH;
-    if (task_get(pid)->proc->sid != current_proc->sid)
+    if (t->proc->sid != current_proc->sid)
       return (int64_t)-EPERM;
+    t->proc->pgid = pgid;
+  } else {
+    task_get(pid)->proc->pgid = pgid;
   }
-  task_get(pid)->proc->pgid = pgid;
   return 0;
 }
 

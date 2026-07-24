@@ -132,6 +132,13 @@ typedef struct xtask {
   int32_t stop_signo;
   uint8_t stop_reported;
 
+  // === job-control continue (S19, valid after do_cont) ===
+  // Set by do_cont when a STOPPED child is resumed (CLD_CONTINUED notify).
+  // sys_waitpid(WCONTINUED) reports the child once, then clears it. One-shot,
+  // mirroring stop_reported. When S01's do_cont lands it arms this; until then
+  // WCONTINUED reporting stays a safe no-op (no writer).
+  uint8_t cont_pending;
+
   // === thread cleanup ownership (set by clone, read by sched_task_reap) ===
   struct thread_clone_info
       pending_pthread_setup; // §4.5:由 sys_pthread_setup

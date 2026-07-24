@@ -311,6 +311,9 @@ void do_cont(xtask *t) {
   t->stop_signo = 0;
   t->stop_reported = 0;
   t->wait_event = WAIT_NONE;
+  // S19 §5.3: arm one-shot WCONTINUED reporting so a parent waitpid(WCONTINUED)
+  // observes this resume (cleared by sys_waitpid when reported).
+  t->cont_pending = 1;
   if (list_empty(&t->run_node))
     run_queue_push(cpu, t);
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);

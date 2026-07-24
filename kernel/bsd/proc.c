@@ -19,7 +19,6 @@
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/elf_loader.h"
 #include "kernel/bsd/eventpoll.h"
-#include "kernel/bsd/fat32.h"
 #include "kernel/bsd/file_lock.h"
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
@@ -38,6 +37,7 @@
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/rcu.h"
@@ -102,18 +102,34 @@ proc *proc_create(void) {
   bp->sig_blocked = 0;
 
   // POSIX identity defaults: single-user system (uid/gid=0). umask follows the
-  // conventional 0022 default.
+  // conventional 0022 default. saved-set (suid/sgid) start at 0 (Linux: a
+  // freshly created proc has suid==euid==uid; here 0 for the root default).
+  // exit_signal defaults to SIGCHLD (a process exit notifies its parent with
+  // SIGCHLD unless a clone overrode it; CLONE_THREAD forces 0).
   bp->uid = 0;
   bp->euid = 0;
+  bp->suid = 0;
   bp->gid = 0;
   bp->egid = 0;
+  bp->sgid = 0;
   bp->umask = 0022;
+  bp->exit_signal = SIGCHLD;
   return bp;
 }
 
 void proc_free(proc *bp) {
   if (!bp)
     return;
+  // Release the signal_struct. proc_create() gives every proc a fresh
+  // signal (refcount 1); CLONE_SIGHAND swaps in the parent's shared signal
+  // and refcount_inc's it. proc_free is the teardown for the two clone/fork
+  // error-rollbacks (sys_fork FPU-alloc failure, sys_clone SETTID fault);
+  // without this, both leak the signal — and the CLONE_SIGHAND SETTID path
+  // leaks a reference on the PARENT's shared signal_struct (it survives the
+  // parent's own exit). The normal exit path uses proc_reap, which does its
+  // own signal_put; this only runs on the never-published error paths.
+  if (bp->signal)
+    signal_put(bp->signal);
   if (bp->files)
     files_put(bp->files);
   // xtask_free is handled by the caller (sched_task_reap resets the xtask slot)
@@ -1024,9 +1040,14 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   // a fresh child gets a new signal_struct (zero-initialized) with no alarm.
   child_bp->uid = parent->proc->uid;
   child_bp->euid = parent->proc->euid;
+  child_bp->suid = parent->proc->suid;
   child_bp->gid = parent->proc->gid;
   child_bp->egid = parent->proc->egid;
+  child_bp->sgid = parent->proc->sgid;
   child_bp->umask = parent->proc->umask;
+  // fork() has no flags, so the child uses the POSIX default exit notification
+  // (SIGCHLD), not whatever the parent's clone exit_signal was.
+  child_bp->exit_signal = SIGCHLD;
   list_init(&child->run_node);
   list_init(&child->wait_node);
 
@@ -1067,6 +1088,27 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 #define CLONE_CHILD_CLEARTID 0x00200000
 #define CLONE_CHILD_SETTID 0x01000000
 #define CLONE_SETTLS 0x00080000
+// S19: CLONE_PARENT — the new child shares the caller's parent (its parent_pid
+// is the caller's parent_pid, not the caller). Useful and simple; landed.
+#define CLONE_PARENT 0x00000080
+
+// S19: namespace / io flags this kernel does not implement. Rejecting (rather
+// than silently ignoring) prevents a program from believing it ran in a private
+// namespace / io context when it actually ran globally. Values are the Linux
+// uapi constants (linux/sched.h): CLONE_NEWPID/NEWNET/NEWUSER/NEWNS/IO are
+// distinct bits; the ambiguous low-byte ns flags (NEWTIME) and the leftover
+// VFORK/SYSVSEM/PTRACE/CLEAR_SIGHAND are silently ignored (recorded in
+// todo.md).
+#define CLONE_NEWNS 0x00020000
+#define CLONE_NEWUTS 0x08000000
+#define CLONE_NEWIPC 0x10000000
+#define CLONE_NEWUSER 0x10000000
+#define CLONE_NEWPID 0x20000000
+#define CLONE_NEWNET 0x40000000
+#define CLONE_IO 0x80000000
+#define CLONE_UNSUPPORTED_MASK                                                 \
+  (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID |  \
+   CLONE_NEWNET | CLONE_IO)
 
 int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                   int64_t arg5) {
@@ -1076,6 +1118,21 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   uint64_t child_tid = (uint64_t)arg4;
   uint64_t tls = (uint64_t)arg5;
   xtask *parent = current_task;
+
+  // S19 §1: extract exit_signal from the low byte of clone flags. Linux lets a
+  // caller pick which signal the parent gets on child exit (default SIGCHLD);
+  // 0 means "do not notify". CLONE_THREAD forces 0 — a thread exit is reported
+  // via clear_tid_addr + futex, never a signal to the parent.
+  int exit_signal = (int)(flags & 0xff);
+  if (exit_signal != 0 && exit_signal >= NSIG)
+    return (int64_t)-EINVAL;
+  if (flags & CLONE_THREAD)
+    exit_signal = 0;
+
+  // S19 §3: reject namespace / io flags we do not implement, so a program does
+  // not silently run globally while believing it is namespaced.
+  if (flags & CLONE_UNSUPPORTED_MASK)
+    return (int64_t)-EINVAL;
 
   // flag combination constraint validation
   if ((flags & CLONE_SIGHAND) && !(flags & CLONE_VM))
@@ -1193,7 +1250,12 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     child_bp->signal->shared_pending = 0;
     child_bp->signal->group_exit = 0;
     child_bp->signal->group_exit_code = 0;
-    child_bp->signal->parent_pid = parent->pid;
+    // S19 §3: CLONE_PARENT makes the child share the caller's parent — its
+    // parent_pid is the caller's parent_pid, not the caller's pid.
+    // (CLONE_THREAD implies this too, but takes the CLONE_SIGHAND branch above
+    // and inherits the shared signal_struct wholesale.)
+    child_bp->signal->parent_pid =
+        (flags & CLONE_PARENT) ? parent->proc->signal->parent_pid : parent->pid;
     atomic_set(&child_bp->signal->thread_count, 1);
     atomic_set(&child_bp->signal->live_count, 1);
   }
@@ -1204,7 +1266,11 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     atomic_inc(&child_bp->signal->thread_count);
     atomic_inc(&child_bp->signal->live_count);
   } else {
-    child->tgid = child->pid;
+    // child->pid is not assigned until step 10 (child->pid = alloc_idx), so use
+    // alloc_idx directly — a non-CLONE_THREAD child is its own group leader,
+    // tgid == pid. Reading child->pid here would copy the xtask_init default
+    // (-1), leaving tgid stuck at -1 and breaking leader detection / getpid.
+    child->tgid = alloc_idx;
   }
 
   // 7. trapframe: rax=0, rsp=(CLONE_VM? stack : parent_tf->rsp)
@@ -1245,11 +1311,21 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   //    overwriting 0 -> lost wake-up).
   //    S03: the tid address is a full 64-bit user int* (set_tid_address /
   //    clone child_tid are user pointers, never truncated).
-  if (flags & CLONE_PARENT_SETTID) {
-    *((int *)(uintptr_t)parent_tid) = (int)alloc_idx;
-  }
-  if (flags & CLONE_CHILD_SETTID) {
-    *((int *)(uintptr_t)child_tid) = (int)alloc_idx;
+  //    S19 §2: write through copy_to_user so a bad pointer returns -EFAULT
+  //    instead of a kernel #PF (mirrors sys_recv ipc.c). On fault, roll back
+  //    everything allocated so far (in reverse order) and return -EFAULT.
+  {
+    pid_t tid_val = (pid_t)alloc_idx;
+    if (flags & CLONE_PARENT_SETTID) {
+      if (copy_to_user((void __user *)(uintptr_t)parent_tid, &tid_val,
+                       sizeof(pid_t)))
+        goto cleanup_settid_fault;
+    }
+    if (flags & CLONE_CHILD_SETTID) {
+      if (copy_to_user((void __user *)(uintptr_t)child_tid, &tid_val,
+                       sizeof(pid_t)))
+        goto cleanup_settid_fault;
+    }
   }
 
   // 10. Fill child xtask
@@ -1281,18 +1357,27 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   list_init(&child->run_node);
   list_init(&child->wait_node);
 
+  // S19 §6.3: POSIX identity (uid/euid/suid/gid/egid/sgid/umask) is inherited
+  // by every child, including CLONE_THREAD — a thread shares the process
+  // identity, so a non-root parent's child thread must not reset to uid 0.
+  // (The old code only inherited inside the non-CLONE_THREAD block, leaving
+  // child threads at the proc_create default of 0 — a latent identity bug.)
+  // session/job-control (sid/pgid/ctty) stays in the non-CLONE_THREAD block:
+  // a thread does not become a new session leader.
+  child_bp->uid = parent->proc->uid;
+  child_bp->euid = parent->proc->euid;
+  child_bp->suid = parent->proc->suid;
+  child_bp->gid = parent->proc->gid;
+  child_bp->egid = parent->proc->egid;
+  child_bp->sgid = parent->proc->sgid;
+  child_bp->umask = parent->proc->umask;
+  child_bp->exit_signal = (uint8_t)exit_signal; // 0 for CLONE_THREAD (forced)
+
   // Inherit session/job control when not CLONE_THREAD
   if (!(flags & CLONE_THREAD)) {
     child_bp->sid = parent->proc->sid;
     child_bp->pgid = parent->proc->pgid;
     child_bp->ctty = parent->proc->ctty;
-    // Inherit POSIX identity & permissions. alarm_deadline is NOT inherited
-    // (a fresh child gets a new signal_struct, zero-initialized).
-    child_bp->uid = parent->proc->uid;
-    child_bp->euid = parent->proc->euid;
-    child_bp->gid = parent->proc->gid;
-    child_bp->egid = parent->proc->egid;
-    child_bp->umask = parent->proc->umask;
   }
 
   spin_unlock(&tasks_lock);
@@ -1327,6 +1412,44 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
 
   return (int64_t)child->pid;
+
+// S19 §2: SETTID hit a bad user pointer. Roll back everything allocated in
+// reverse order and return -EFAULT. Reachable only from step 9, while
+// tasks_lock is held and before the child is published (assigned_cpu/pid not
+// yet set, never enqueued).
+//
+// Resource accounting at the fault point:
+//   step 4 (files): CLONE_FILES -> child_bp->files = parent's shared table
+//     (refcount_inc'd), default stashed in deferred_files; otherwise
+//     child_bp->files is the proc_create default (deep-copied fd table).
+//   step 5 (signal): CLONE_SIGHAND -> child_bp->signal = parent's shared
+//     signal (refcount_inc'd), default already signal_put; otherwise
+//     child_bp->signal is the proc_create default.
+//   step 6 (thread-group): CLONE_THREAD -> child_bp->signal (the parent's
+//     shared signal) thread_count/live_count were atomic_inc'd.
+// proc_free drops child_bp->files and child_bp->signal (refcount-correct in
+// every branch: shared tables get their inc undone, defaults get freed), then
+// we drop deferred_files (the CLONE_FILES default) and undo the step-6 thread
+// count bumps so the parent's thread group is not left over-counted.
+cleanup_settid_fault:
+  if (flags & CLONE_THREAD) {
+    atomic_dec(&child_bp->signal->thread_count);
+    atomic_dec(&child_bp->signal->live_count);
+  }
+  proc_free(child_bp);
+  child->proc = NULL;
+  if (!(flags & CLONE_VM))
+    mm_put(child_mm);
+  bfc_free_page(child->fpu_page, 1);
+  child->fpu_page = NULL;
+  bfc_free_page(stack_pages, KERNEL_STACK_PAGES);
+  if (deferred_files)
+    files_put(deferred_files);
+  // Free the xtask object and release the slot so xtask_alloc may reuse it.
+  kmem_cache_free(xtask_cache, child);
+  tasks[alloc_idx] = NULL;
+  spin_unlock(&tasks_lock);
+  return (int64_t)-EFAULT;
 }
 
 // ===================== sys_execve =====================
@@ -1375,8 +1498,10 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     return (int64_t)-ENOMEM;
   }
 
-  // Use fat32_read directly (sys_read rejects kernel-space buffers)
-  int nread = fat32_read(ip, 0, (void *)elf_buf, file_size);
+  // S19 §7: VFS generic kernel-mode read (supports fat32 now, tmpfs/etc later)
+  // instead of hardcoding fat32_read. sys_read rejects kernel-space buffers,
+  // so execve reads the whole image into a kmalloc'd buffer here.
+  int nread = vfs_read_kernel(ip, 0, (void *)elf_buf, file_size);
   sys_close((int64_t)fd, 0, 0, 0, 0, 0);
   ip = NULL; /* ip is now dangling after sys_close — do not dereference */
 
@@ -1470,7 +1595,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
       free_table_page(pml4_phys);
       return (int64_t)-ENOMEM;
     }
-    int ld_nread = fat32_read(ld_ip, 0, (void *)ld_buf, ld_size);
+    int ld_nread = vfs_read_kernel(ld_ip, 0, (void *)ld_buf, ld_size);
     inode_put(ld_ip);
     if (ld_nread < 0 || (uint64_t)ld_nread < ld_size) {
       kfree(ld_buf);
@@ -1940,10 +2065,23 @@ int64_t sys_setuid(int64_t arg1, int64_t unused2, int64_t unused3,
   (void)unused5;
   (void)unused6;
   uint32_t uid = (uint32_t)arg1;
-  // Relaxed: a single-user root system has no setuid-bit privilege ladder.
-  // euid=uid lets root drop/raise identity freely.
-  current_proc->uid = uid;
-  current_proc->euid = uid;
+  proc *p = current_proc;
+  // S19 §6.2: Linux permission ladder.
+  //  euid==0 (root): set real + effective + saved-set to uid (drop/raise
+  //  freely;
+  //    suid lets a later non-root euid raise back to a saved value).
+  //  otherwise: euid may only be set to the current real uid or saved-set uid;
+  //    real + saved-set are unchanged. This prevents a non-root process from
+  //    escalating to an arbitrary uid (incl. root) it never held.
+  if (p->euid == 0) {
+    p->uid = uid;
+    p->euid = uid;
+    p->suid = uid;
+  } else {
+    if (uid != p->uid && uid != p->suid)
+      return (int64_t)-EPERM;
+    p->euid = uid;
+  }
   return 0;
 }
 
@@ -1955,8 +2093,17 @@ int64_t sys_setgid(int64_t arg1, int64_t unused2, int64_t unused3,
   (void)unused5;
   (void)unused6;
   uint32_t gid = (uint32_t)arg1;
-  current_proc->gid = gid;
-  current_proc->egid = gid;
+  proc *p = current_proc;
+  // S19 §6.2: same ladder as setuid, over gid/egid/sgid.
+  if (p->egid == 0) {
+    p->gid = gid;
+    p->egid = gid;
+    p->sgid = gid;
+  } else {
+    if (gid != p->gid && gid != p->sgid)
+      return (int64_t)-EPERM;
+    p->egid = gid;
+  }
   return 0;
 }
 

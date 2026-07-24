@@ -27,8 +27,13 @@ struct signal_struct {
   sigaction_t action[NSIG]; // handler table (shared across thread group)
   uint8_t group_exit;       // exit_group flag
   int32_t group_exit_code;  // exit_group exit code
-  pid_t parent_pid; // thread group's parent PID (mirrored from mm.parent_pid
-                    // to avoid UAF after mm freed)
+  pid_t parent_pid; // thread group's parent PID — the authority for the
+                    // parent relationship (waitpid child scan, orphan
+                    // reparenting, getppid, SIGCHLD target). Stored per-process
+                    // (not per-mm) so CLONE_VM children, which share their
+                    // parent's mm, still resolve to the correct parent.
+                    // Set at fork/clone to the caller's pid (or the caller's
+                    // parent_pid under CLONE_PARENT/CLONE_THREAD).
   // S03: per-process alarm (POSIX alarm() is process-wide, shared by all
   // CLONE_THREAD threads). Replaces the per-task alarm_deadline that only
   // delivered SIGALRM to the arming thread. Read/written under sig_lock;

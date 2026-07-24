@@ -38,6 +38,17 @@ int path_walk_parent_from(struct inode *start, const char *relpath,
 struct inode *resolve_dirfd_start(int dirfd);
 struct inode *vfs_open_kern(const char *kpath);
 
+/* S19 §7: kernel-mode inode-read helper for execve/elf_loader. Reads `count`
+ * bytes at `offset` from inode `ip` into a KERNEL-space buffer `buf` and
+ * returns the byte count (>=0) or a negative errno. Unlike f_op->read (fd-I/O,
+ * advances f->offset, takes a struct file), this is an inode+offset read with
+ * no fd and no offset advance — suited to loading an ELF image into a kmalloc'd
+ * buffer. Dispatches by inode type/fs: fat32 regular files via fat32_read;
+ * directories are -EISDIR; everything else (devtmpfs char devices, sysfs, tmpfs
+ * — tmpfs kernel-read is deferred, see doc/design/todo.md) is -ENOEXEC since
+ * none is executable. */
+int vfs_read_kernel(struct inode *ip, uint64_t offset, void *buf, size_t count);
+
 int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                  int64_t unused2, int64_t unused3);
 int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,

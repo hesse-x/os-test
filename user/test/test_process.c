@@ -147,18 +147,25 @@ void test_umask_roundtrip(void) {
   TEST_ASSERT_EQUAL_INT(0022, umask(0022)); /* back to default, return cur */
 }
 
-/* 11. setuid/setgid update real+effective */
+/* 11. setuid/setgid update real+effective. Saved-set ladder (S19 §6): root
+ * setuid writes real+effective+saved-set all to the target, so after dropping
+ * to a non-root id you cannot climb back to root — setuid(0) must fail EPERM.
+ * Restoring to the dropped id is allowed (== real/saved-set). */
 void test_setuid_setgid(void) {
   TEST_ASSERT_EQUAL_INT(0, setuid(123));
   TEST_ASSERT_EQUAL_INT(123, getuid());
   TEST_ASSERT_EQUAL_INT(123, geteuid());
-  TEST_ASSERT_EQUAL_INT(0, setuid(0)); /* restore root */
-  TEST_ASSERT_EQUAL_INT(0, getuid());
+  TEST_ASSERT_EQUAL_INT(-1, setuid(0)); /* root dropped from saved-set: EPERM */
+  TEST_ASSERT_EQUAL_INT(EPERM, errno);
+  TEST_ASSERT_EQUAL_INT(123, getuid());  /* unchanged */
+  TEST_ASSERT_EQUAL_INT(0, setuid(123)); /* == real uid: allowed */
 
   TEST_ASSERT_EQUAL_INT(0, setgid(456));
   TEST_ASSERT_EQUAL_INT(456, getgid());
   TEST_ASSERT_EQUAL_INT(456, getegid());
-  TEST_ASSERT_EQUAL_INT(0, setgid(0));
+  TEST_ASSERT_EQUAL_INT(-1, setgid(0)); /* sgid dropped: EPERM */
+  TEST_ASSERT_EQUAL_INT(EPERM, errno);
+  TEST_ASSERT_EQUAL_INT(0, setgid(456)); /* == real gid: allowed */
 }
 
 /* 12. gethostname/sethostname round-trip */

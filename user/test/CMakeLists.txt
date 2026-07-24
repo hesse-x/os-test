@@ -197,6 +197,13 @@ if(TEST)
     add_user_dyn_elf(test_mprotect_partial C SOURCES test_mprotect_partial.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
     add_user_dyn_elf(test_mmap_flags C SOURCES test_mmap_flags.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
     add_user_dyn_elf(test_mmap_size_limit C SOURCES test_mmap_size_limit.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    # S19: process cluster — clone exit_signal/SETTID-fault, wait4 pgid/rusage,
+    # setuid saved-set ladder, execve VFS read.
+    add_user_dyn_elf(test_clone_exit_signal C SOURCES test_clone_exit_signal.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_clone_settid_fault C SOURCES test_clone_settid_fault.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_wait4_pgid_rusage C SOURCES test_wait4_pgid_rusage.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_setuid_saved C SOURCES test_setuid_saved.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
+    add_user_dyn_elf(test_execve_vfs C SOURCES test_execve_vfs.c ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c LINK_LIBS c DEFS UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H TEST)
 endif()
 
 # libffi dynamic test (ffi_worklist §4.C): ffi_call int/double + ffi_closure

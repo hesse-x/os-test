@@ -55,9 +55,20 @@ typedef struct proc {
   // byte-identical mirror free of user-side sys/types.h includes.
   uint32_t uid;   // real UID (default 0)
   uint32_t euid;  // effective UID (default 0)
+  uint32_t suid;  // saved-set UID (Linux permission ladder: euid!=0 can only
+                  // raise euid back to uid or suid)
   uint32_t gid;   // real GID (default 0)
   uint32_t egid;  // effective GID (default 0)
+  uint32_t sgid;  // saved-set GID (Linux permission ladder)
   uint32_t umask; // file creation mask (default 0022)
+
+  // === clone exit signal (S19) ===
+  // Low byte of clone flags. The thread group leader's exit notifies the parent
+  // with this signal (do_exit step 7). 0 = do not notify (CLONE_THREAD forces
+  // 0; a thread exit is reported via clear_tid_addr + futex, not a signal).
+  // fork/proc_create default to SIGCHLD. uint8_t suffices: NSIG=65,
+  // SIGRTMAX=64.
+  uint8_t exit_signal;
 } proc;
 
 // ABI drift guard: kernel/driver/bsd_types.h maintains a parallel proc for
@@ -76,7 +87,7 @@ STATIC_ASSERT(
     offsetof(proc, signal) == 176,
     "proc.signal must be a POINTER to a separately-allocated signal_struct, "
     "not an inline struct — inlining shifts the offset of files");
-STATIC_ASSERT(sizeof(proc) == 256,
+STATIC_ASSERT(sizeof(proc) == 264,
               "proc size changed — update kernel/driver/bsd_types.h to match");
 #undef STATIC_ASSERT
 

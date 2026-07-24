@@ -315,6 +315,26 @@ struct inode *vfs_open_kern(const char *kpath) {
   return path_walk(m, relpath); /* +1,调用者 put */
 }
 
+/* S19 §7: kernel-mode inode read for execve. Only regular files backed by a
+ * real filesystem (fat32) are readable here; char devices / pseudo-fs / tmpfs
+ * are not executable, so execve bails with -ENOEXEC before touching the inode
+ * data. tmpfs kernel-read (for memfd-style tmpfs binaries) is deferred — the
+ * interface stays generic so adding it later does not touch execve again. */
+int vfs_read_kernel(struct inode *ip, uint64_t offset, void *buf,
+                    size_t count) {
+  if (!ip || !buf)
+    return -EINVAL;
+  if (ip->type == INODE_DIR)
+    return -EISDIR;
+  if (ip->type != INODE_REGULAR)
+    return -ENOEXEC;
+  /* fat32 is the only regular-file fs with a kernel inode-read (fat32_read);
+   * it keys off ip->start_cluster, so any INODE_REGULAR it created is readable.
+   * A regular inode from another fs would have no backing read here — but the
+   * only regular-file fs today is fat32 (tmpfs regulars are read via f_op). */
+  return fat32_read(ip, offset, buf, count);
+}
+
 /* sys_open(path, flags, mode) — SYS_OPEN */
 int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                  int64_t unused2, int64_t unused3) {
