@@ -59,6 +59,19 @@ struct fstype {
   /* 重构后 lookup/mkdir/unlink/rmdir/stat 全局回调删除,改走 i_op。 */
 };
 
+/* mount(2) flags — Linux x86-64 values (uapi linux/fs.h). Only the bits the
+ * kernel inspects are named here. MS_RDONLY/NOSUID/NODEV/NOEXEC are accepted
+ * but have no effect (this FS has no permission/execute-bit semantics); see
+ * todo.md. MS_REMOUNT/MS_BIND are not implemented and rejected with -ENOSYS
+ * so a caller cannot believe a remount/bind happened when it was silently
+ * dropped. */
+#define MS_RDONLY 0x00000001
+#define MS_NOSUID 0x00000002
+#define MS_NODEV 0x00000004
+#define MS_NOEXEC 0x00000008
+#define MS_BIND 0x00001000
+#define MS_REMOUNT 0x80000000
+
 #define MAX_MOUNTS 8
 #define MNTPOINT_MAX 64
 #define RELPATH_MAX 256

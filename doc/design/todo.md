@@ -254,7 +254,19 @@ udevd 设备数据库 + 规则引擎 + coldplug **已落地**（对齐 Linux `in
 
 - `devtmpfs_getdents` 不支持分批续传（`kernel/bsd/devtmpfs.c:556`）：`ctx->pos != 0` 即返 0（`:559`），且末尾无条件 `ctx->pos = (uint64_t)-1` 标 EOF（`:642`）。`dir_emit` buffer 满 break 时直落 EOF 覆盖，故"装得下则一次返回全部、装不下则静默丢失剩余条目"。libc `readdir` 用 4096 buffer 分批拉（`user/lib/file.cc:626`），`/dev` 条目总 reclen 超 4096 即漏设备。**根因**：pos 当 EOF 标记而非"上次发到第几个节点"的游标。**修复**：pos 改节点序号游标，emit 成功 pos++、buffer 满则 break 存回 pos、下次从 pos 续传。**障碍**：root `/dev` 是两段遍历（先 `dir_list` 发子目录 `:588`、再 `dev_list` 发顶层设备 `:598`），跨段续传需统一编号（dir 段 [0,dir_count) + dev 段 [dir_count,...)），但 dev_count/dir_count 已随 devtmpfs 动态化删除——改用节点指针当 pos 或独立段计数。work2_design §3.6 明令 getdents 零改动，此为独立改进。发现于 devtmpfs 动态化 `test_dev_vfs_dynamic`（90 条 ≈ 3600 字节逼近 4096 边界）。
 - `sys_read`/`sys_write` 单次上限 65536（`kernel/bsd/syscall.c:1306` read / `:960` write）：`if (len > 65536) len = 65536;` 静默截断，用户态不检查返回值会以为读/写全。阻塞大 uevent、大 props、大文件单次 I/O 场景。**修复**：移除截断改为循环 I/O 或按调用方需求放宽（对齐 Linux 无单次上限）。注意 socket/msg 已有同源 64KB 限制（`kernel/bsd/socket.h:17 MAX_SOCKET_DATA`、`kernel/xcore/ipc.c:844/:928`），属 IPC 层独立约束，不与此处 read/write 同步改。
-- fd 表固定上限 `MAX_FD`（`kernel/bsd/types.h:26` `#define MAX_FD 128`，进程 `files->fd_table[MAX_FD]` 固定数组 `:95`）：fd 数超 128 即 `EMFILE`，无法运行时扩张。对齐 Linux 动态 fd 表（`files_struct` + `fdtable` 可扩容 `krealloc`）。**修复**：fd_table 改 `krealloc` 动态数组 + 容量翻倍（tmpfs `ti->data`/`ti->cap` 模式可参考，`kernel/bsd/tmpfs.c:161`）。与 devtmpfs 动态化同类（静态数组→动态），但属进程 fd 子系统独立改进。
+- fd 表固定上限 `MAX_FD`（`kernel/bsd/types.h:26` `#define MAX_FD 1024`，进程 `files->fd_table[MAX_FD]` 固定数组 `:114`）：S20 由 128 提升到 1024（对齐 Linux `RLIMIT_NOFILE` soft 默认），`struct files` 增到 ~8KB/进程（堆分配，`files_create` kmalloc），proc.c 三处 fd-collect-then-put 快照（`proc_reap`/`files_put`/execve cloexec）改 `kmalloc` 避免撑爆 16KB 内核栈。仍为固定上限——fd 数超 1024 即 `EMFILE`，无法运行时扩张。对齐 Linux 动态 fd 表（`files_struct` + `fdtable` 可扩容 `krealloc` + `RLIMIT_NOFILE` 软硬限）作为独立改进。**修复**：fd_table 改 `krealloc` 动态数组 + 容量翻倍（tmpfs `ti->data`/`ti->cap` 模式可参考，`kernel/bsd/tmpfs.c:161`）。与 devtmpfs 动态化同类（静态数组→动态），但属进程 fd 子系统独立改进。见 [../../refact_syscall/S20_misc_finish.md](../../refact_syscall/S20_misc_finish.md) §5
+
+### S20 杂项收尾延后项
+
+S20（[../../refact_syscall/S20_misc_finish.md](../../refact_syscall/S20_misc_finish.md)）以最小代价对齐 Linux x86-64 语义；下列属"需要更大子系统才能真实生效"的项，S20 仅接常量/退化语义或显式拒绝，真实语义延后：
+
+- **mount 权限校验**（`kernel/bsd/mount.c` `sys_mount`）：本 OS 无 user/capability 模型，`mount` 不伪造 `CAP_SYS_ADMIN`（伪造反而误导）。当前仅 init/root 调用。引入 capability 模型后补 `CAP_SYS_ADMIN` 校验。S20 已接 `flags` 最低语义：`MS_REMOUNT`/`MS_BIND` 显式 `-ENOSYS`（未实现，优于静默吞），`MS_RDONLY`/`MS_NOSUID`/`MS_NODEV`/`MS_NOEXEC` 接受但无生效（本 FS 无权限/执行位语义），随权限 FS 上线。
+- **`MS_RDONLY`/`NOSUID`/`NODEV`/`NOEXEC` 真实生效**：本 FS（FAT32/tmpfs/devtmpfs）无权限位与执行位语义，四 flag 接受为 no-op。需权限 FS + suid/exec 位模型。
+- **`MAP_GROWSDOWN` 栈自动扩展**（`include/uapi/xos/mman.h`）：S20 补常量 `0x100`，接受为 no-op（本 OS 栈固定）。真实 growsdown 栈扩展需 fault handler 在栈 guard 页 fault 时向下扩展 VMA，属 S10 范围。
+- **`PROT_GROWSDOWN` 栈 guard 扩展**（`kernel/bsd/syscall.c` `sys_mprotect`）：S20 接受该位（mask 掉不报错），但无栈自动扩展语义。同 `MAP_GROWSDOWN`，属 S10。
+- **sparse 文件真实 hole 跟踪**（`kernel/bsd/syscall.c` `sys_lseek` `SEEK_DATA`/`SEEK_HOLE`）：S20 补 `SEEK_DATA 3`/`SEEK_HOLE 4`，退化到 Linux "无洞文件"语义（全文件=data，尾部=hole，`offset>=size` 返 `ENXIO`）。本 FS 无 sparse/punch，真实 hole 报告随 sparse FS。
+- **`CLONE_VFORK` 父阻塞语义**：见技术债 #40（S19 已记），需 wait 通道。
+
 ## 调度与唤醒子系统重构
 
 bug.md 的 virtio-gpu 卡死根因(跨源误唤醒 → run_node 二次 enqueue → 环损坏)经审查定位为**唤醒模型抽象问题**,非 schedule 模型问题。拆为两阶段:

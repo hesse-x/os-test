@@ -228,13 +228,25 @@ int normalize_path(const char *in, char *out, size_t outcap) {
 }
 
 /* SYS_MOUNT(source, target, fstype, flags, data) — Linux 5-param signature.
- * source/flags/data currently reserved (passed 0/NULL). No permission
- * check: this OS has no user/capability model. */
+ * source/data currently reserved (passed 0/NULL; this OS mount has no source
+ * concept and fstype takes no mount data). No permission check: this OS has
+ * no user/capability model (recorded in todo.md — do not fake CAP_SYS_ADMIN).
+ * flags: MS_REMOUNT/MS_BIND are not implemented and rejected with -ENOSYS so a
+ * caller cannot believe a remount/bind succeeded when it was silently dropped.
+ * MS_RDONLY/NOSUID/NODEV/NOEXEC are accepted but have no effect (no permission
+ * or execute-bit semantics in this FS) — recorded in todo.md. */
 int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                   int64_t arg5, int64_t unused) {
-  (void)arg4;
-  (void)arg5;
+  (void)arg1; // source: no source concept (mount fstype onto target); NULL OK
+  (void)arg5; // data: fstype takes no mount data
   (void)unused;
+  unsigned int flags = (unsigned int)arg4;
+
+  if (flags & (MS_REMOUNT | MS_BIND))
+    return (int64_t)-ENOSYS; // not implemented; explicit over silent drop
+  // MS_RDONLY/NOSUID/NODEV/NOEXEC accepted as no-op (no permission/exec-bit
+  // semantics); see todo.md.
+
   const char __user *utarget = (const char __user *__force)arg2;
   const char __user *utype = (const char __user *__force)arg3;
 

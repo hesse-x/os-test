@@ -116,7 +116,7 @@ int64_t sys_signalfd4(int64_t fd, int64_t sigmask_ptr, int64_t sizemask,
     ctx->sigmask = mask;
     ctx->lock = SPINLOCK_INIT;
     spin_lock(&proc->proc->files->fd_lock);
-    int newfd = alloc_fd(proc->proc->files, 3);
+    int newfd = alloc_fd(proc->proc->files, 0);
     if (newfd < 0) {
       spin_unlock(&proc->proc->files->fd_lock);
       kfree(ctx);

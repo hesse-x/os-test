@@ -1547,7 +1547,7 @@ int64_t sys_pipe(int64_t arg1, int64_t unused1, int64_t unused2,
 
   spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
-  int read_fd = alloc_fd(proc->proc->files, 3);
+  int read_fd = alloc_fd(proc->proc->files, 0);
   int write_fd =
       (read_fd >= 0) ? alloc_fd(proc->proc->files, read_fd + 1) : -EMFILE;
   if (read_fd < 0 || write_fd < 0) {
@@ -4117,7 +4117,7 @@ int64_t sys_install_fd_impl(int64_t arg1, int64_t arg2, int64_t arg3,
 
   spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
-  int fd = alloc_fd(proc->proc->files, 3);
+  int fd = alloc_fd(proc->proc->files, 0);
   if (fd < 0) {
     spin_unlock(fdlk);
     return (int64_t)-EMFILE;
@@ -4308,6 +4308,25 @@ int64_t sys_lseek(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     case SEEK_END:
       new_offset = (int64_t)ip->size + offset;
       break;
+    case SEEK_DATA:
+    case SEEK_HOLE: {
+      // No sparse tracking: the whole file is data, the tail beyond EOF is a
+      // single hole. Directories have no data/hole notion → -EINVAL (Linux).
+      if (f->type == FD_DIR) {
+        ret = -EINVAL;
+        goto out;
+      }
+      if (offset < 0) {
+        ret = -EINVAL;
+        goto out;
+      }
+      if ((uint64_t)offset >= ip->size) {
+        ret = -ENXIO;
+        goto out;
+      }
+      new_offset = (whence == SEEK_DATA) ? offset : (int64_t)ip->size;
+      break;
+    }
     default: {
       ret = -EINVAL;
       goto out;

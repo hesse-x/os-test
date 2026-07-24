@@ -231,7 +231,7 @@ long evdev_control_ioctl(uint32_t cmd, void *arg) {
   /* 分配 owner write-fd 装入调用者。 */
   xtask *proc = current_task;
   spin_lock(&proc->proc->files->fd_lock);
-  int fd = alloc_fd(proc->proc->files, 3);
+  int fd = alloc_fd(proc->proc->files, 0);
   if (fd < 0) {
     spin_unlock(&proc->proc->files->fd_lock);
     devtmpfs_remove(inst->name);

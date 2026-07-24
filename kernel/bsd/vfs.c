@@ -429,7 +429,7 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   files *files = proc->proc->files;
   spinlock *fdlk = &files->fd_lock;
   spin_lock(fdlk);
-  int fd = alloc_fd(files, 3);
+  int fd = alloc_fd(files, 0);
   if (fd < 0) {
     spin_unlock(fdlk);
     inode_put(ip);
@@ -644,7 +644,7 @@ int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
   files *files = proc->proc->files;
   spinlock *fdlk = &files->fd_lock;
   spin_lock(fdlk);
-  int fd = alloc_fd(files, 3);
+  int fd = alloc_fd(files, 0);
   if (fd < 0) {
     spin_unlock(fdlk);
     inode_put(ip);

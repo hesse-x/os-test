@@ -32,7 +32,7 @@
 
 #ifndef KERNEL_BSD_TYPES_H
 
-#define MAX_FD 128
+#define MAX_FD 1024
 #define FD_CLOEXEC 0x8000
 
 #define FD_NONE 0

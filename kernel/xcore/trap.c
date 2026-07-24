@@ -688,26 +688,22 @@ static void timer_handler(trapframe *tf) {
       break; // sorted, stop at first unexpired
     timer_queue_wait_pop(p);
     if (p->state == BLOCKED) {
-      // pause() armed with an alarm: the timeout IS the alarm firing (sys_pause
-      // sets wait_deadline = the process alarm deadline). Force SIGALRM so the
-      // signal path (default-terminate or handler) runs when the task resumes;
-      // the pending bit is set before run_queue push so check_pending_signals
-      // sees it on resume. pause() is the only wait_event that carries an alarm
-      // deadline, so an expired WAIT_PAUSE here unambiguously means alarm fire.
-      int was_pause_alarm = (p->wait_event == WAIT_PAUSE);
+      // A thread borrowed a deadline onto the timer queue. On expiry the BSD
+      // alarm_check hook re-reads the live process alarm_deadline under
+      // sig_lock: if now due it clears the deadline AND forces SIGALRM,
+      // otherwise it no-ops (the alarm was re-armed later or cancelled). This
+      // covers both pause() (wait_event==WAIT_PAUSE, deadline == the alarm) and
+      // epoll/read with a borrowed process alarm. Forcing SIGALRM directly here
+      // — as this code used to do for WAIT_PAUSE — skips clearing
+      // alarm_deadline, so the per-tick running-task alarm_check_hook below
+      // re-fires a stale SIGALRM on the next tick and double-delivers (e.g.
+      // test_alarm_pause then killed the signal test with a second SIGALRM at
+      // SIG_DFL).
       p->state = READY;
       p->wait_event = WAIT_NONE;
       p->wait_timed_out = 1;
       p->wait_deadline = 0;
-      if (was_pause_alarm && force_sig_hook)
-        force_sig_hook(p, SIGALRM, SI_KERNEL, NULL);
-      // A thread blocked in epoll/read with an armed process alarm borrowed
-      // that alarm as its wait_deadline so the timer queue would wake it. On
-      // expiry the BSD alarm_check hook fires SIGALRM (and clears the process
-      // deadline) if the alarm is now due — distinct from the pause() path
-      // which already forced SIGALRM above. Non-alarm waits (plain timed
-      // epoll) have signal->alarm_deadline == 0 and the hook is a no-op.
-      if (!was_pause_alarm && p->proc && alarm_check_hook)
+      if (p->proc && alarm_check_hook)
         alarm_check_hook(p, now);
       list_push_back(&wakeup_list, &p->wait_node);
     } else {

@@ -154,14 +154,28 @@ void proc_reap(xtask *proc) {
   file_lock_release_pid(proc->pid);
 
   if (bp->files) {
-    struct file *entries[MAX_FD];
-    for (int fd = 0; fd < MAX_FD; fd++) {
-      entries[fd] = fd_uninstall(bp->files, fd);
-    }
-    synchronize_rcu();
-    for (int fd = 0; fd < MAX_FD; fd++) {
-      if (entries[fd])
-        file_put(entries[fd]);
+    // Heap-allocate the snapshot: MAX_FD=1024 makes this 8KB, too large for
+    // the 16KB kernel stack on the reap path. collect → synchronize_rcu → put
+    // mirrors files_put; failure to allocate falls back to per-fd put (still
+    // correct, just no batched RCU sync before dropping the last refs).
+    struct file **entries =
+        (struct file **)kmalloc(sizeof(struct file *) * MAX_FD);
+    if (entries) {
+      for (int fd = 0; fd < MAX_FD; fd++) {
+        entries[fd] = fd_uninstall(bp->files, fd);
+      }
+      synchronize_rcu();
+      for (int fd = 0; fd < MAX_FD; fd++) {
+        if (entries[fd])
+          file_put(entries[fd]);
+      }
+      kfree(entries);
+    } else {
+      for (int fd = 0; fd < MAX_FD; fd++) {
+        struct file *f = fd_uninstall(bp->files, fd);
+        if (f)
+          file_put(f);
+      }
     }
     files_put(bp->files);
     bp->files = NULL;
@@ -353,7 +367,7 @@ int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence) {
     return -EINVAL;
 
   spin_lock(&proc->proc->files->fd_lock);
-  int fd = alloc_fd(proc->proc->files, 3);
+  int fd = alloc_fd(proc->proc->files, 0);
   if (fd < 0) {
     spin_unlock(&proc->proc->files->fd_lock);
     return -EMFILE;
@@ -466,14 +480,25 @@ void files_put(files *files) {
   if (!files)
     return;
   if (refcount_dec_and_test(&files->f_count)) {
-    struct file *entries[MAX_FD];
-    for (int fd = 0; fd < MAX_FD; fd++) {
-      entries[fd] = fd_uninstall(files, fd);
-    }
-    synchronize_rcu();
-    for (int fd = 0; fd < MAX_FD; fd++) {
-      if (entries[fd])
-        file_put(entries[fd]);
+    // Heap snapshot: MAX_FD=1024 → 8KB, too large for the 16KB kernel stack.
+    struct file **entries =
+        (struct file **)kmalloc(sizeof(struct file *) * MAX_FD);
+    if (entries) {
+      for (int fd = 0; fd < MAX_FD; fd++) {
+        entries[fd] = fd_uninstall(files, fd);
+      }
+      synchronize_rcu();
+      for (int fd = 0; fd < MAX_FD; fd++) {
+        if (entries[fd])
+          file_put(entries[fd]);
+      }
+      kfree(entries);
+    } else {
+      for (int fd = 0; fd < MAX_FD; fd++) {
+        struct file *f = fd_uninstall(files, fd);
+        if (f)
+          file_put(f);
+      }
     }
     kfree(files);
   }
@@ -1805,9 +1830,11 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
   // 8. Close FD_CLOEXEC fds
   // S06: cloexec now lives in the per-fd bitmap (not f->flags), so execve
-  // closes exactly the fds whose bitmap bit is set.
+  // closes exactly the fds whose bitmap bit is set. Heap-allocate the snapshot:
+  // MAX_FD=1024 → 8KB, too large for the 16KB kernel stack on this deep path.
   spinlock *fdlk = &proc->proc->files->fd_lock;
-  struct file *cloexec_entries[MAX_FD];
+  struct file **cloexec_entries =
+      (struct file **)kmalloc(sizeof(struct file *) * MAX_FD);
   int cloexec_count = 0;
   spin_lock(fdlk);
   for (int i = 0; i < MAX_FD; i++) {
@@ -1815,7 +1842,14 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     if (f && fd_get_cloexec(proc->proc->files, i)) {
       fd_uninstall(proc->proc->files, i);
       fd_set_cloexec(proc->proc->files, i, 0);
-      cloexec_entries[cloexec_count++] = f;
+      if (cloexec_entries) {
+        cloexec_entries[cloexec_count++] = f;
+      } else {
+        // OOM during snapshot alloc: drop the fd-table ref now. file_put's
+        // close path does not take fd_lock, so this is safe under the lock;
+        // the normal batched-RCU-then-put is skipped only on this rare path.
+        file_put(f);
+      }
     }
   }
   spin_unlock(fdlk);
@@ -1824,6 +1858,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     for (int i = 0; i < cloexec_count; i++)
       file_put(cloexec_entries[i]);
   }
+  if (cloexec_entries)
+    kfree(cloexec_entries);
 
   // 9. Switch to new address space
 

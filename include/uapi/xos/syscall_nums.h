@@ -236,5 +236,13 @@ typedef struct pci_dev_info {
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2
+// SEEK_DATA/SEEK_HOLE: this OS has no sparse/hole tracking (FAT32/tmpfs files
+// are contiguous, no punched holes). The semantics degrade to the Linux
+// "no-hole file" case: the whole file is one data segment, the tail beyond
+// EOF is a single hole. SEEK_DATA(offset) returns offset (data starts there);
+// SEEK_HOLE(offset) returns size (the hole is the tail). offset>=size → ENXIO.
+// Directories return -EINVAL (Linux: dirs have no data/hole notion).
+#define SEEK_DATA 3
+#define SEEK_HOLE 4
 
 #endif /* COMMON_SYSCALL_NUMS_H */

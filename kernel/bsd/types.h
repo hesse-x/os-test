@@ -23,7 +23,13 @@
 #include "kernel/bsd/fops.h"
 
 // ===================== fd / pipe =====================
-#define MAX_FD 128
+// MAX_FD aligns with Linux's RLIMIT_NOFILE soft default (1024). struct files is
+// heap-allocated (files_create kmalloc), so the ~8KB fd_table/close_on_exec is
+// per-process heap, not stack. The fd-collect-then-put snapshots in proc.c
+// (proc_reap/files_put/execve cloexec) use kmalloc'd arrays rather than stack
+// arrays to avoid blowing the 16KB kernel stack. Dynamic fdtable (rlimit +
+// krealloc growth) is deferred to todo.md.
+#define MAX_FD 1024
 #define PIPE_BUF_SIZE 4096
 // FD_CLOEXEC is the kernel-internal cloexec bit historically stored on the
 // shared struct file (S06 moves it to a per-fd bitmap in struct files). It is

@@ -449,7 +449,7 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
     files *fs = proc->proc->files;
     spinlock *fdlk = &fs->fd_lock;
     spin_lock(fdlk);
-    int fd = alloc_fd(fs, 3);
+    int fd = alloc_fd(fs, 0);
     if (fd < 0) {
       spin_unlock(fdlk);
       inode_put(ip); /* drop the lookup reference on failure */
@@ -486,7 +486,7 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
 
   spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
-  int fd = alloc_fd(proc->proc->files, 3);
+  int fd = alloc_fd(proc->proc->files, 0);
   if (fd < 0) {
     spin_unlock(fdlk);
     if (ops)

@@ -11,19 +11,21 @@
 //   - 永不阻塞（Linux 5.6+ 行为），不返回 EAGAIN/EINTR
 //   - flags 三值（GRND_NONBLOCK/GRND_RANDOM/GRND_INSECURE）语义同义：单池
 //   - 单次上限 32MiB-1（Linux urandom 上限），超出短读
-//   - 信号短读：每完成一块（≥256B）后检查未决信号，有则提前返回已拷字节数
+//   - 不被信号中断：池恒就绪（csprng_read 同步），循环到 done==len；
+//     Linux getrandom(2) 在池就绪后亦不返回短读。仅 copy_to_user 失败时
+//     以短读形式返回（EFAULT 语义，Linux 同款）。
 
 #include "kernel/bsd/random.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/bsd/poll_types.h"
 #include "kernel/bsd/syscall.h"
-#include "kernel/xcore/log.h"
 #include "kernel/xcore/random.h"
 #include "kernel/xcore/sparse.h"
-#include "kernel/xcore/trap.h" // signal_pending_hook
 #include "kernel/xcore/xtask.h"
 
 #include <xos/epoll.h>
@@ -40,7 +42,7 @@ size_t copy_to_user(void *dst, const void *src, size_t size);
 #define GETRANDOM_MAX 33554431 // 32MiB-1，Linux urandom 单次上限
 #define RANDOM_CHUNK 256 // 单块 ≤256B，保持 Linux ≤256B 原子性保证
 
-// 核心：循环 csprng_read 取内核小块 → copy_to_user 追加；信号短读
+// 核心：循环 csprng_read 取内核小块 → copy_to_user 追加；不被信号中断
 static int64_t random_read_common(void __user *ubuf, size_t len) {
   uint8_t chunk[RANDOM_CHUNK];
   size_t done = 0;
@@ -50,12 +52,9 @@ static int64_t random_read_common(void __user *ubuf, size_t len) {
     if (copy_to_user((void __force *)(uint8_t __user *)ubuf + done, chunk, n)) {
       if (done == 0)
         return -EFAULT;
-      break; // 已拷部分以短读形式返回
+      break; // 已拷部分以短读形式返回（EFAULT 语义，Linux 同款）
     }
     done += n;
-    // 信号短读：首个 256B 完成后才检查，保持 ≤256B 原子性
-    if (signal_pending_hook && signal_pending_hook(current_task))
-      break;
   }
   return (int64_t)done;
 }

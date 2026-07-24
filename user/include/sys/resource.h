@@ -8,6 +8,7 @@
 #define _SYS_RESOURCE_H
 
 #include <sys/cdefs.h>
+#include <sys/time.h> // struct timeval (for ru_utime/ru_stime below)
 #include <sys/types.h>
 
 #ifdef __cplusplus

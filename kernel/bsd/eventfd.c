@@ -50,7 +50,7 @@ int64_t sys_eventfd2(int64_t initval, int64_t flags) {
 
   xtask *proc = current_task;
   spin_lock(&proc->proc->files->fd_lock);
-  int fd = alloc_fd(proc->proc->files, 3);
+  int fd = alloc_fd(proc->proc->files, 0);
   if (fd < 0) {
     spin_unlock(&proc->proc->files->fd_lock);
     kfree(ctx);

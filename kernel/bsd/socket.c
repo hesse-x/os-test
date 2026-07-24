@@ -1240,7 +1240,7 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     spinlock *fdlk = &proc->proc->files->fd_lock;
     spin_lock(fdlk);
 
-    int fd = alloc_fd(proc->proc->files, 3);
+    int fd = alloc_fd(proc->proc->files, 0);
     if (fd < 0) {
       spin_unlock(fdlk);
       netlink_sock_release(nl);
@@ -1287,7 +1287,7 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   spin_lock(fdlk);
 
   // Find free fd slot
-  int fd = alloc_fd(proc->proc->files, 3);
+  int fd = alloc_fd(proc->proc->files, 0);
   if (fd < 0) {
     spin_unlock(fdlk);
     unix_sock_release(sock);
@@ -1612,7 +1612,7 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     // nesting)
     spinlock *fdlk = &proc->proc->files->fd_lock;
     spin_lock(fdlk);
-    int new_fd = alloc_fd(proc->proc->files, 3);
+    int new_fd = alloc_fd(proc->proc->files, 0);
 
     if (new_fd < 0) {
       spin_unlock(fdlk);
@@ -1899,7 +1899,7 @@ int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
 
-  int fd_a = alloc_fd(proc->proc->files, 3);
+  int fd_a = alloc_fd(proc->proc->files, 0);
   int fd_b = -1;
   if (fd_a >= 0) {
     fd_b = alloc_fd(proc->proc->files, fd_a + 1);
