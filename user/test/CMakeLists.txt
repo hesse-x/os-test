@@ -246,3 +246,10 @@ add_user_dyn_elf(test_ffi C SOURCES test_ffi.c
                 ${CMAKE_BINARY_DIR}/ffitarget.h)
 # LINK_LIBS ffi c → add_user_dyn_elf 内部自动 add_dependencies(ffi_so/c_so)；
 # GEN_HEADERS 由各对象 custom-command 的 DEPENDS 追踪（编辑模板触发重编）。
+
+# expat smoke test: XML_ParserCreate / Parse / Free / error handling
+add_user_dyn_elf(test_expat C SOURCES test_expat.c
+    LINK_LIBS expat c
+    STATIC_LIBS unity
+    INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libexpat/expat/lib
+                ${CMAKE_BINARY_DIR})

@@ -82,6 +82,7 @@ static struct test_entry tests[] = {
     {"setuid_saved", "/test/test_setuid_saved.elf"},
     {"execve_vfs", "/test/test_execve_vfs.elf"},
     {"test_ffi", "/test/test_ffi.elf"},
+    {"test_expat", "/test/test_expat.elf"},
     {"ioctl_varlen", "/test/ioctl_varlen.elf"},
     {"epoll", "/test/epoll.elf"},
     {"epoll_oneshot", "/test/test_epoll_oneshot.elf"},
