@@ -176,6 +176,49 @@ void test_openat_errors(void) {
   cleanup_base();
 }
 
+/* O_DIRECTORY on a non-directory must fail with ENOTDIR (POSIX/Linux).
+ * Covers all three open code paths that now enforce it:
+ *   - sys_open via an absolute path (and openat-absolute, which delegates)
+ *   - openat relative-path branch against a dirfd (uses path_walk_from)
+ * And O_DIRECTORY on a real directory still succeeds. */
+void test_open_odirectory(void) {
+  cleanup_base();
+  mkdir(BASE, 0755);
+  int reg = open(BASE "/regfile", O_CREAT | O_RDWR | O_TRUNC, 0644);
+  TEST_ASSERT_GREATER_OR_EQUAL_INT(0, reg);
+  close(reg);
+
+  /* Absolute path → sys_open. */
+  int fd = open(BASE "/regfile", O_DIRECTORY | O_RDONLY);
+  TEST_ASSERT_EQUAL_INT(-1, fd);
+  TEST_ASSERT_EQUAL_INT(ENOTDIR, errno);
+
+  /* openat with an absolute path delegates to sys_open. */
+  int fd2 = openat(AT_FDCWD, BASE "/regfile", O_DIRECTORY | O_RDONLY);
+  TEST_ASSERT_EQUAL_INT(-1, fd2);
+  TEST_ASSERT_EQUAL_INT(ENOTDIR, errno);
+
+  /* openat relative path (dirfd-relative branch, path_walk_from). */
+  int dfd = open(BASE, O_DIRECTORY | O_RDONLY);
+  TEST_ASSERT_GREATER_OR_EQUAL_INT(0, dfd);
+  int fd3 = openat(dfd, "regfile", O_DIRECTORY | O_RDONLY);
+  TEST_ASSERT_EQUAL_INT(-1, fd3);
+  TEST_ASSERT_EQUAL_INT(ENOTDIR, errno);
+
+  /* AT_FDCWD relative path → resolve from root, relative branch. */
+  int fd4 = openat(AT_FDCWD, "openat_dirfd_base/regfile", O_DIRECTORY | O_RDONLY);
+  TEST_ASSERT_EQUAL_INT(-1, fd4);
+  TEST_ASSERT_EQUAL_INT(ENOTDIR, errno);
+
+  /* O_DIRECTORY on a real directory succeeds. */
+  int fd5 = open(BASE, O_DIRECTORY | O_RDONLY);
+  TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd5);
+  close(fd5);
+
+  close(dfd);
+  cleanup_base();
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_openat_relative_create);
@@ -186,5 +229,6 @@ int main(void) {
   RUN_TEST(test_unlinkat_relative);
   RUN_TEST(test_renameat_relative);
   RUN_TEST(test_openat_errors);
+  RUN_TEST(test_open_odirectory);
   return UNITY_END();
 }

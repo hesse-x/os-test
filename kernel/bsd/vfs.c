@@ -417,6 +417,12 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     return (int64_t)-EISDIR;
   }
 
+  /* O_DIRECTORY: caller requires a directory; non-dir → ENOTDIR (Linux). */
+  if ((flags & O_DIRECTORY) && ip->type != INODE_DIR) {
+    inode_put(ip);
+    return (int64_t)-ENOTDIR;
+  }
+
   /* Linux 语义：open() 一个 socket 文件返 ENXIO（任何 flags）。
    * socket 文件只能经 bind/connect 访问，不能 open 出 fd 读写。 */
   if (ip->type == INODE_SOCKET) {
@@ -634,6 +640,11 @@ int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
       (iflags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC))) {
     inode_put(ip);
     return (int64_t)-EISDIR;
+  }
+  /* O_DIRECTORY: caller requires a directory; non-dir → ENOTDIR (Linux). */
+  if ((iflags & O_DIRECTORY) && ip->type != INODE_DIR) {
+    inode_put(ip);
+    return (int64_t)-ENOTDIR;
   }
   if (ip->type == INODE_SOCKET) {
     inode_put(ip);

@@ -287,6 +287,7 @@ evdev 中断投递正规化(技术债 #34)独立于本重构,走路径 3,见 [..
 - [ ] libc: lseek/mkdir/unlink/rmdir/access/isatty
 - [ ] libc: memcmp/strstr/strtok/strtok_r/strerror/qsort/rand/abs
 - [ ] `open()` mode 管线接通：`O_CREAT` 时第三个 `mode_t` 参数当前三层全断——wrapper `user/lib/file.cc` 不取 va_arg、libc inline `sys_open` 用 `__syscall2`、内核 `sys_open` 第 3 参命名 `_u1` 忽略。FAT32 无权限位故 mode 本就无意义（与 `mkdir` 同样 `(void)mode`），属合理技术妥协；未来支持权限的 FS 上线时三层接通（wrapper 取 va_arg → inline 改 `__syscall3` 传 mode → 内核用 arg3）。详见 [vfs.md](kernel/vfs.md) 待完成项
+- [x] **O_DIRECTORY 强制**（已落地，`kernel/bsd/vfs.c`）：`sys_open` 与 `sys_openat` 相对路径分支在 EISDIR 门控后、SOCKET/ENXIO 前补 `O_DIRECTORY` 校验——非目录返 `-ENOTDIR`（对齐 Linux 原子语义）。`O_CREAT|O_DIRECTORY` 新建的普通文件 `type==INODE_REGULAR` 命中 `!= INODE_DIR` → ENOTDIR，符合 Linux。**未覆盖**：① `sys_open` 对 devtmpfs 设备文件的委派分支（`vfs.c:356-359` 在校验前 `return devtmpfs_open(...)`）——`/dev` 下设备节点 `INODE_DEV` 用 O_DIRECTORY 理论应 ENOTDIR，本内核不拦截（场景极少，留作后续微调）；② `O_NOFOLLOW`/`O_DIRECT` 维持 no-op（无 symlink 子系统、无 direct-IO 旁路路径，`mount.c:179` 明注无 symlink 处理，全树 0 引用），待对应子系统上线再激活。测试 `test_openat_dirfd.c::test_open_odirectory`。
 - [ ] link/symlink/readlink：FAT32 不支持硬链接与符号链接。三条路：① 暂报 `ENOSYS`/`EPERM`（推荐短期，最干净，不污染路径解析）；② 伪符号链接——用 Windows 式 `.SYMLINK` 伪文件存目标路径，`lstat` 识别 `S_IFLNK`，路径解析时跟随（工作量中等，污染纯路径解析，违背 FAT 语义）；③ 换文件系统（ext2/TAR 等，长期）。`lstat` 在无 symlink 前提下语义等价 `stat`，可直接别名。详见 [vfs.md](kernel/vfs.md) 待完成项
 
 ## udev 测试
