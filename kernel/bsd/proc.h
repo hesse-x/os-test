@@ -69,6 +69,11 @@ typedef struct proc {
   // fork/proc_create default to SIGCHLD. uint8_t suffices: NSIG=65,
   // SIGRTMAX=64.
   uint8_t exit_signal;
+
+  // === Working directory (cwd) ===
+  // FAT32 has no dentry tree, so cwd is stored as an absolute path string.
+  // Initialized to "/" by proc_create. 256 bytes covers typical path limits.
+  char cwd[256];
 } proc;
 
 // ABI drift guard: kernel/driver/bsd_types.h maintains a parallel proc for
@@ -87,7 +92,7 @@ STATIC_ASSERT(
     offsetof(proc, signal) == 176,
     "proc.signal must be a POINTER to a separately-allocated signal_struct, "
     "not an inline struct — inlining shifts the offset of files");
-STATIC_ASSERT(sizeof(proc) == 264,
+STATIC_ASSERT(sizeof(proc) == 520,
               "proc size changed — update kernel/driver/bsd_types.h to match");
 #undef STATIC_ASSERT
 

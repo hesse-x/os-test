@@ -65,6 +65,8 @@
 #include <xos/ioctl.h>
 #include <xos/mman.h>
 #include <xos/page.h>
+#include <xos/prctl.h>
+#include <xos/sched.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
 #include <xos/stat.h>
@@ -4536,6 +4538,313 @@ int64_t sys_getsid(int64_t arg1, int64_t unused1, int64_t unused2,
   return (int64_t)task_get(pid)->proc->sid;
 }
 
+// ===================== getcpu =====================
+int64_t sys_getcpu(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                   int64_t unused3, int64_t unused4) {
+  uint32_t __user *cpu = (uint32_t __user *)arg1;
+  uint32_t __user *node = (uint32_t __user *)arg2;
+  if (cpu) {
+    uint32_t c = (uint32_t)get_cpu_local()->cpu_id;
+    if (copy_to_user(cpu, &c, sizeof(c)))
+      return (int64_t)-EFAULT;
+  }
+  if (node) {
+    uint32_t n = 0;
+    if (copy_to_user(node, &n, sizeof(n)))
+      return (int64_t)-EFAULT;
+  }
+  return 0;
+}
+
+// ===================== sched_get_priority_max / min =====================
+int64_t sys_sched_get_priority_max(int64_t arg1, int64_t unused1,
+                                   int64_t unused2, int64_t unused3,
+                                   int64_t unused4, int64_t unused5) {
+  int policy = (int)arg1;
+  (void)policy;
+  // SCHED_FIFO/SCHED_RR priority range: 1-99, SCHED_OTHER: 0
+  return 99;
+}
+
+int64_t sys_sched_get_priority_min(int64_t arg1, int64_t unused1,
+                                   int64_t unused2, int64_t unused3,
+                                   int64_t unused4, int64_t unused5) {
+  int policy = (int)arg1;
+  (void)policy;
+  return 1;
+}
+
+// ===================== sched_rr_get_interval =====================
+int64_t sys_sched_rr_get_interval(int64_t arg1, int64_t arg2, int64_t unused1,
+                                  int64_t unused2, int64_t unused3,
+                                  int64_t unused4) {
+  struct timespec ts;
+  ts.tv_sec = 0;
+  ts.tv_nsec = 100000000; // 100ms timeslice
+  if (copy_to_user((void __user *)arg2, &ts, sizeof(ts)))
+    return (int64_t)-EFAULT;
+  return 0;
+}
+
+// ===================== sched_setparam / getparam =====================
+int64_t sys_sched_setparam(int64_t arg1, int64_t arg2, int64_t unused1,
+                           int64_t unused2, int64_t unused3, int64_t unused4) {
+  pid_t pid = (pid_t)arg1;
+  xtask *t = (pid == 0) ? current_task : task_get(pid);
+  if (pid != 0 && (pid < 0 || pid >= MAX_PROC || t->pid != pid))
+    return (int64_t)-ESRCH;
+  struct sched_param {
+    int sched_priority;
+  } param;
+  if (copy_from_user(&param, (void __user *)arg2, sizeof(param)))
+    return (int64_t)-EFAULT;
+  t->sched_priority = param.sched_priority;
+  return 0;
+}
+
+int64_t sys_sched_getparam(int64_t arg1, int64_t arg2, int64_t unused1,
+                           int64_t unused2, int64_t unused3, int64_t unused4) {
+  pid_t pid = (pid_t)arg1;
+  xtask *t = (pid == 0) ? current_task : task_get(pid);
+  if (pid != 0 && (pid < 0 || pid >= MAX_PROC || t->pid != pid))
+    return (int64_t)-ESRCH;
+  struct sched_param {
+    int sched_priority;
+  } param;
+  param.sched_priority = t->sched_priority;
+  if (copy_to_user((void __user *)arg2, &param, sizeof(param)))
+    return (int64_t)-EFAULT;
+  return 0;
+}
+
+// ===================== sched_setscheduler / getscheduler =====================
+int64_t sys_sched_setscheduler(int64_t arg1, int64_t arg2, int64_t arg3,
+                               int64_t unused1, int64_t unused2,
+                               int64_t unused3) {
+  pid_t pid = (pid_t)arg1;
+  xtask *t = (pid == 0) ? current_task : task_get(pid);
+  if (pid != 0 && (pid < 0 || pid >= MAX_PROC || t->pid != pid))
+    return (int64_t)-ESRCH;
+  int policy = (int)arg2;
+  struct sched_param {
+    int sched_priority;
+  } param;
+  if (copy_from_user(&param, (void __user *)arg3, sizeof(param)))
+    return (int64_t)-EFAULT;
+  int old_policy = t->policy;
+  t->policy = policy;
+  t->sched_priority = param.sched_priority;
+  return (int64_t)old_policy;
+}
+
+int64_t sys_sched_getscheduler(int64_t arg1, int64_t unused1, int64_t unused2,
+                               int64_t unused3, int64_t unused4,
+                               int64_t unused5) {
+  pid_t pid = (pid_t)arg1;
+  xtask *t = (pid == 0) ? current_task : task_get(pid);
+  if (pid != 0 && (pid < 0 || pid >= MAX_PROC || t->pid != pid))
+    return (int64_t)-ESRCH;
+  return (int64_t)t->policy;
+}
+
+// ===================== sched_setaffinity / getaffinity =====================
+int64_t sys_sched_setaffinity(int64_t arg1, int64_t arg2, int64_t arg3,
+                              int64_t unused1, int64_t unused2,
+                              int64_t unused3) {
+  pid_t pid = (pid_t)arg1;
+  size_t cpusetsize = (size_t)arg2;
+  xtask *t = (pid == 0) ? current_task : task_get(pid);
+  if (pid != 0 && (pid < 0 || pid >= MAX_PROC || t->pid != pid))
+    return (int64_t)-ESRCH;
+  uint64_t mask = 0;
+  size_t copy_sz = (cpusetsize < sizeof(mask)) ? cpusetsize : sizeof(mask);
+  if (copy_from_user(&mask, (void __user *)arg3, copy_sz))
+    return (int64_t)-EFAULT;
+  t->cpumask = mask;
+  return 0;
+}
+
+int64_t sys_sched_getaffinity(int64_t arg1, int64_t arg2, int64_t arg3,
+                              int64_t unused1, int64_t unused2,
+                              int64_t unused3) {
+  pid_t pid = (pid_t)arg1;
+  size_t cpusetsize = (size_t)arg2;
+  xtask *t = (pid == 0) ? current_task : task_get(pid);
+  if (pid != 0 && (pid < 0 || pid >= MAX_PROC || t->pid != pid))
+    return (int64_t)-ESRCH;
+  size_t copy_sz =
+      (cpusetsize < sizeof(t->cpumask)) ? cpusetsize : sizeof(t->cpumask);
+  if (copy_to_user((void __user *)arg3, &t->cpumask, copy_sz))
+    return (int64_t)-EFAULT;
+  return 0;
+}
+
+// ===================== prctl =====================
+int64_t sys_prctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                  int64_t arg5, int64_t unused) {
+  int option = (int)arg1;
+  switch (option) {
+  case PR_SET_NAME: {
+    char comm[16];
+    __builtin_memset(comm, 0, sizeof(comm));
+    if (strncpy_from_user(comm, (const char __user *)arg2, sizeof(comm) - 1) <
+        0)
+      return (int64_t)-EFAULT;
+    __strncpy(current_task->comm, comm, sizeof(current_task->comm) - 1);
+    current_task->comm[sizeof(current_task->comm) - 1] = '\0';
+    return 0;
+  }
+  case PR_GET_NAME: {
+    char comm[16];
+    __builtin_memset(comm, 0, sizeof(comm));
+    __strncpy(comm, current_task->comm, sizeof(comm) - 1);
+    comm[sizeof(comm) - 1] = '\0';
+    if (copy_to_user((void __user *)arg2, comm, sizeof(comm)))
+      return (int64_t)-EFAULT;
+    return 0;
+  }
+  case PR_SET_PDEATHSIG:
+    // stub: no parent-death signal support
+    return 0;
+  case PR_GET_PDEATHSIG:
+    return (int64_t)-EINVAL;
+  case PR_SET_DUMPABLE:
+    // stub: core dumps not supported, but accept the call
+    return 0;
+  case PR_GET_DUMPABLE:
+    return 1; // always dumpable
+  case PR_SET_PTRACER:
+    // stub: accept any tracer
+    return 0;
+  case PR_GET_AUXV:
+    return (int64_t)-EINVAL;
+  case PR_SET_VMA:
+    // stub: PR_SET_VMA_ANON_NAME is a no-op (no /proc/self/maps support)
+    return 0;
+  default:
+    return (int64_t)-EINVAL;
+  }
+}
+
+// ===================== chdir / fchdir / getcwd =====================
+int64_t sys_getcwd(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                   int64_t unused3, int64_t unused4) {
+  char __user *buf = (char __user *)arg1;
+  size_t size = (size_t)arg2;
+
+  if (!buf || !size)
+    return (int64_t)-EINVAL;
+
+  proc *bp = current_proc;
+  size_t len = __strlen(bp->cwd) + 1; // include null terminator
+  if (len > size)
+    return (int64_t)-ERANGE;
+
+  if (copy_to_user(buf, bp->cwd, len))
+    return (int64_t)-EFAULT;
+  return (int64_t)len;
+}
+
+int64_t sys_chdir(int64_t arg1, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4, int64_t unused5) {
+  const char __user *pathname = (const char __user *)arg1;
+
+  // Resolve the path to verify it exists and is a directory
+  char kpath[256];
+  __builtin_memset(kpath, 0, sizeof(kpath));
+  if (strncpy_from_user(kpath, pathname, sizeof(kpath) - 1) < 0)
+    return (int64_t)-EFAULT;
+  kpath[sizeof(kpath) - 1] = '\0';
+
+  // Build absolute path relative to current cwd
+  char abs_path[512];
+  proc *bp = current_proc;
+  if (kpath[0] == '/') {
+    __strncpy(abs_path, kpath, sizeof(abs_path) - 1);
+    abs_path[sizeof(abs_path) - 1] = '\0';
+  } else {
+    size_t cwd_len = __strlen(bp->cwd);
+    size_t klen = __strlen(kpath);
+    // cwd + '/' + kpath + null
+    if (cwd_len + 1 + klen + 1 > sizeof(abs_path))
+      return (int64_t)-ENAMETOOLONG;
+    __strncpy(abs_path, bp->cwd, sizeof(abs_path) - 1);
+    size_t pos = __strlen(abs_path);
+    if (pos > 0 && abs_path[pos - 1] != '/') {
+      abs_path[pos++] = '/';
+    }
+    for (size_t i = 0; i <= klen; i++) {
+      abs_path[pos + i] = kpath[i];
+    }
+  }
+
+  // Verify the path is a directory via vfs_open_kern
+  struct inode *ip = vfs_open_kern(abs_path);
+  if (!ip)
+    return (int64_t)-ENOENT;
+  if (!S_ISDIR(ip->mode)) {
+    inode_put(ip);
+    return (int64_t)-ENOTDIR;
+  }
+  inode_put(ip);
+
+  // Store the normalized absolute path
+  size_t abs_len = __strlen(abs_path);
+  if (abs_len + 1 > sizeof(bp->cwd))
+    return (int64_t)-ENAMETOOLONG;
+  __strncpy(bp->cwd, abs_path, sizeof(bp->cwd) - 1);
+  bp->cwd[sizeof(bp->cwd) - 1] = '\0';
+
+  return 0;
+}
+
+int64_t sys_fchdir(int64_t arg1, int64_t unused1, int64_t unused2,
+                   int64_t unused3, int64_t unused4, int64_t unused5) {
+  int fd = (int)arg1;
+
+  // Look up fd
+  struct file *f;
+  rcu_read_lock();
+  f = fd_lookup(current_proc->files, fd);
+  if (f)
+    file_get(f);
+  rcu_read_unlock();
+  if (!f)
+    return (int64_t)-EBADF;
+
+  // fd must be a directory
+  if (f->type != FD_DIR) {
+    file_put(f);
+    return (int64_t)-ENOTDIR;
+  }
+
+  struct inode *ip = f->inode;
+  if (!ip || !S_ISDIR(ip->mode)) {
+    file_put(f);
+    return (int64_t)-ENOTDIR;
+  }
+
+  // Use the mount point path for this directory.
+  // For mount roots (e.g. "/dev", "/sys") this gives the correct path.
+  // For subdirectories within a mount (FAT32), the OS cannot reconstruct the
+  // full path without a dentry tree; callers should prefer chdir(pathname).
+  // We use mount_of_inode() which returns the mount entry whose mntpoint
+  // we store as the new cwd.
+  struct mount_entry *m = mount_of_inode(ip);
+  file_put(f);
+
+  if (!m)
+    return (int64_t)-ENOENT;
+
+  size_t mlen = __strlen(m->mntpoint);
+  if (mlen + 1 > sizeof(current_proc->cwd))
+    return (int64_t)-ENAMETOOLONG;
+  __strncpy(current_proc->cwd, m->mntpoint, sizeof(current_proc->cwd) - 1);
+  current_proc->cwd[sizeof(current_proc->cwd) - 1] = '\0';
+
+  return 0;
+}
+
 // ===================== BSD syscall dispatch =====================
 int64_t syscall_dispatch(trapframe *tf) {
   int64_t nr = tf->rax;
@@ -4662,6 +4971,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_getsockopt(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_POLL:
     return sys_poll(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_PPOLL:
+    return sys_ppoll(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // Thread syscalls
   case SYS_EXIT_GROUP:
     return sys_exit_group(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
@@ -4798,6 +5109,47 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_sendto(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_GETTIMEOFDAY:
     return sys_gettimeofday(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // getcpu (group 5)
+  case SYS_GETCPU:
+    return sys_getcpu(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // sched_* (group 6)
+  case SYS_SCHED_SETPARAM:
+    return sys_sched_setparam(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                              tf->r9);
+  case SYS_SCHED_GETPARAM:
+    return sys_sched_getparam(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                              tf->r9);
+  case SYS_SCHED_SETSCHEDULER:
+    return sys_sched_setscheduler(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                                  tf->r9);
+  case SYS_SCHED_GETSCHEDULER:
+    return sys_sched_getscheduler(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                                  tf->r9);
+  case SYS_SCHED_GET_PRIORITY_MAX:
+    return sys_sched_get_priority_max(tf->rdi, tf->rsi, tf->rdx, tf->r10,
+                                      tf->r8, tf->r9);
+  case SYS_SCHED_GET_PRIORITY_MIN:
+    return sys_sched_get_priority_min(tf->rdi, tf->rsi, tf->rdx, tf->r10,
+                                      tf->r8, tf->r9);
+  case SYS_SCHED_RR_GET_INTERVAL:
+    return sys_sched_rr_get_interval(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                                     tf->r9);
+  case SYS_SCHED_SETAFFINITY:
+    return sys_sched_setaffinity(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                                 tf->r9);
+  case SYS_SCHED_GETAFFINITY:
+    return sys_sched_getaffinity(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                                 tf->r9);
+  // prctl (group 7)
+  case SYS_PRCTL:
+    return sys_prctl(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // chdir / fchdir / getcwd (group 8)
+  case SYS_GETCWD:
+    return sys_getcwd(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_CHDIR:
+    return sys_chdir(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_FCHDIR:
+    return sys_fchdir(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // Simple kernel implementations (B group)
   case SYS_PREAD64:
     return sys_pread64(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);

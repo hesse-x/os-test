@@ -37,6 +37,7 @@
 #include <xos/signal.h>
 #include <xos/socket.h>
 #include <xos/stat.h>
+#include <xos/time.h>
 
 // ===================== Global socket lock =====================
 spinlock socket_lock = SPINLOCK_INIT;
@@ -2336,12 +2337,11 @@ static void poll_wait_cb(wait_queue_t *wq, unsigned long flags) {
   wake_wq_target(proc);
 }
 
-int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
-                 int64_t unused2, int64_t unused3) {
-  struct pollfd __user *fds = (struct pollfd __user *)arg1;
-  nfds_t nfds = (nfds_t)arg2;
-  int timeout_ms = (int)arg3;
-
+// Core poll implementation shared by sys_poll and sys_ppoll.
+// fds is a USER-SPACE pointer (validated and used for copy_from_user /
+// copy_to_user on each loop pass).
+static int64_t do_sys_poll(struct pollfd __user *fds, nfds_t nfds,
+                           int timeout_ms) {
   xtask *proc = current_task;
 
   // Validate user pointer
@@ -2563,6 +2563,70 @@ poll_out:
   kfree(kfds);
   kfree(polled);
   kfree(pwq);
+  return ret;
+}
+
+int64_t sys_poll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                 int64_t unused2, int64_t unused3) {
+  return do_sys_poll((struct pollfd __user *)arg1, (nfds_t)arg2, (int)arg3);
+}
+
+// ===================== ppoll =====================
+// ppoll(fds, nfds, timeout_ts, sigmask, sigsetsize)
+// Wraps do_sys_poll with:
+//   1. timespec → ms conversion (NULL timeout = indefinite)
+//   2. Temporary sigmask replacement (atomically unblock signals during poll)
+int64_t sys_ppoll(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                  int64_t arg5, int64_t unused) {
+  struct pollfd __user *fds = (struct pollfd __user *)arg1;
+  nfds_t nfds = (nfds_t)arg2;
+  struct timespec __user *ts = (struct timespec __user *)arg3;
+  const sigset_t __user *sigmask = (const sigset_t __user *)arg4;
+  size_t sigsetsize = (size_t)arg5;
+
+  // Convert timespec to ms
+  int timeout_ms = -1; // indefinite
+  if (ts) {
+    struct timespec kts;
+    if (copy_from_user(&kts, ts, sizeof(kts)))
+      return (int64_t)-EFAULT;
+    if (kts.tv_sec < 0 || kts.tv_nsec < 0) {
+      timeout_ms = -1; // indefinite (matches Linux: negative = block forever)
+    } else {
+      uint64_t total_ns =
+          (uint64_t)kts.tv_sec * 1000000000ULL + (uint64_t)kts.tv_nsec;
+      timeout_ms = (int)(total_ns / 1000000ULL);
+      if (total_ns > 0 && timeout_ms == 0)
+        timeout_ms = 1; // minimum 1ms (Linux rounds up 0 < nanos < 1ms)
+    }
+  }
+
+  // Temporary sigmask replacement
+  sigset_t old_mask = 0;
+  int have_sigmask = (sigmask && sigsetsize >= sizeof(sigset_t));
+  if (have_sigmask) {
+    sigset_t new_mask;
+    if (copy_from_user(&new_mask, sigmask, sizeof(new_mask)))
+      return (int64_t)-EFAULT;
+    xtask *t = current_task;
+    if (t->proc) {
+      old_mask = t->proc->sig_blocked;
+      t->proc->sig_blocked = new_mask;
+      recalc_sigpending(t);
+    }
+  }
+
+  int64_t ret = do_sys_poll(fds, nfds, timeout_ms);
+
+  // Restore original sigmask
+  if (have_sigmask) {
+    xtask *t = current_task;
+    if (t->proc) {
+      t->proc->sig_blocked = old_mask;
+      recalc_sigpending(t);
+    }
+  }
+
   return ret;
 }
 

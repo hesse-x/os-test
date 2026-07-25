@@ -104,6 +104,25 @@
 #define SYS_SYNC 162
 #define SYS_MOUNT 165
 
+// ---- chdir/fchdir/getcwd ----
+#define SYS_GETCWD 79
+#define SYS_CHDIR 80
+#define SYS_FCHDIR 81
+
+// ---- sched_* (group) ----
+#define SYS_SCHED_SETPARAM 142
+#define SYS_SCHED_GETPARAM 143
+#define SYS_SCHED_SETSCHEDULER 144
+#define SYS_SCHED_GETSCHEDULER 145
+#define SYS_SCHED_GET_PRIORITY_MAX 146
+#define SYS_SCHED_GET_PRIORITY_MIN 147
+#define SYS_SCHED_RR_GET_INTERVAL 148
+#define SYS_PRCTL 157
+#define SYS_SCHED_SETAFFINITY 203
+#define SYS_SCHED_GETAFFINITY 204
+#define SYS_PPOLL 271
+#define SYS_GETCPU 309
+
 // ---- ENOSYS stubs (C group) ----
 #define SYS_SENDFILE 40
 #define SYS_LINK 86

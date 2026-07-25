@@ -114,6 +114,9 @@ proc *proc_create(void) {
   bp->sgid = 0;
   bp->umask = 0022;
   bp->exit_signal = SIGCHLD;
+  // Working directory: default to root
+  bp->cwd[0] = '/';
+  bp->cwd[1] = '\0';
   return bp;
 }
 
@@ -859,8 +862,8 @@ uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
 // Bumps ref counts for pipe, SHM, file, inode, socket, TTY.
 // S06: also copies the per-fd close_on_exec bitmap so the child inherits the
 // parent's cloexec settings (Linux: fork/clone-without-CLONE_FILES copies).
-static void __attribute__((unused)) copy_fd_table(files *parent_files,
-                                                  files *child_files) {
+static void __attribute__((unused))
+copy_fd_table(files *parent_files, files *child_files) {
   // The parent fd table is mutated by concurrent sys_close/dup2 on another CPU
   // (fd_uninstall + file_put). Reading fd_table[fd] and later file_get(f) in
   // two separate steps opens a window: we read a stale f, the parent closes it

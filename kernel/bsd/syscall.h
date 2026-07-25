@@ -101,6 +101,11 @@ int64_t sys_sync(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                   int64_t arg5, int64_t unused);
 
+// chdir / fchdir / getcwd (group 5)
+int64_t sys_getcwd(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_chdir(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_fchdir(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
 int64_t sys_dev_set_meta(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                          int64_t unused1, int64_t unused2);
 
@@ -137,12 +142,39 @@ int64_t sys_recvfrom(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_sendto(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_gettimeofday(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
+// sched_* (group 6)
+int64_t sys_getcpu(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_sched_get_priority_max(int64_t, int64_t, int64_t, int64_t, int64_t,
+                                   int64_t);
+int64_t sys_sched_get_priority_min(int64_t, int64_t, int64_t, int64_t, int64_t,
+                                   int64_t);
+int64_t sys_sched_rr_get_interval(int64_t, int64_t, int64_t, int64_t, int64_t,
+                                  int64_t);
+int64_t sys_sched_setparam(int64_t, int64_t, int64_t, int64_t, int64_t,
+                           int64_t);
+int64_t sys_sched_getparam(int64_t, int64_t, int64_t, int64_t, int64_t,
+                           int64_t);
+int64_t sys_sched_setscheduler(int64_t, int64_t, int64_t, int64_t, int64_t,
+                               int64_t);
+int64_t sys_sched_getscheduler(int64_t, int64_t, int64_t, int64_t, int64_t,
+                               int64_t);
+int64_t sys_sched_setaffinity(int64_t, int64_t, int64_t, int64_t, int64_t,
+                              int64_t);
+int64_t sys_sched_getaffinity(int64_t, int64_t, int64_t, int64_t, int64_t,
+                              int64_t);
+
+// prctl (group 7)
+int64_t sys_prctl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
 // Simple kernel implementations (B group)
 int64_t sys_pread64(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_pwrite64(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_readv(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_writev(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_uname(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
+// ppoll (declared in socket.h)
+int64_t sys_ppoll(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // Socket (declared in socket.h, not repeated here)
 

@@ -200,6 +200,15 @@ typedef struct xtask {
   // whose tf->rax coincidentally equals -ERESTART.
   int64_t restart_nr;
   uint8_t restart_armed;
+
+  // === sched_* fields (sys_sched_setparam/getparam/setscheduler/getscheduler)
+  // ===
+  int sched_priority; // SCHED_FIFO/RR priority (1-99, 0=SCHED_OTHER)
+  int policy;         // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2
+  uint64_t cpumask;   // CPU affinity mask (bit 0 = CPU 0)
+
+  // === prctl PR_SET_NAME/PR_GET_NAME task comm (16 bytes, like Linux) ===
+  char comm[16];
 } xtask;
 
 // STATIC_ASSERT: verify first 8 fields offset match old task_t exactly

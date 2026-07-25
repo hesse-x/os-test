@@ -24,12 +24,14 @@
 #include <stdint.h>
 #include <xos/errno.h>
 #include <xos/mman.h>
+#include <xos/prctl.h> // PR_* constants (sys_prctl)
+#include <xos/sched.h> // SCHED_* constants
 #include <xos/signal.h>
 #include <xos/syscall.h> // struct kernel_mem_stats (UAPI, shared layout)
 #include <xos/syscall_asm.h>
 #include <xos/syscall_nums.h>
 #include <xos/thread.h> // struct thread_clone_info (sys_pthread_setup)
-#include <xos/time.h>   // struct timespec (sys_clock_gettime)
+#include <xos/time.h>   // struct timespec (sys_clock_gettime / sys_ppoll)
 
 #ifdef __cplusplus
 extern "C" {
@@ -858,6 +860,169 @@ static inline int64_t sys_dev_set_meta(const char *name, const char *subsys,
   return __syscall4(SYS_DEV_SET_META, (int64_t)(uintptr_t)name,
                     (int64_t)(uintptr_t)subsys, (int64_t)(uintptr_t)devtype,
                     (int64_t)(uintptr_t)props);
+}
+
+// ===================== chdir / fchdir / getcwd (group 5) =====================
+static inline int sys_getcwd(char *buf, size_t size) {
+  int64_t r = __syscall2(SYS_GETCWD, (int64_t)(uintptr_t)buf, (int64_t)size);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return (int)r;
+}
+
+static inline int sys_chdir(const char *path) {
+  int64_t r = __syscall1(SYS_CHDIR, (int64_t)(uintptr_t)path);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_fchdir(int fd) {
+  int64_t r = __syscall1(SYS_FCHDIR, (int64_t)fd);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+// ===================== sched_* (group 6) =====================
+struct sched_param {
+  int sched_priority;
+};
+
+static inline int sys_sched_setparam(pid_t pid,
+                                     const struct sched_param *param) {
+  int64_t r =
+      __syscall2(SYS_SCHED_SETPARAM, (int64_t)pid, (int64_t)(uintptr_t)param);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_sched_getparam(pid_t pid, struct sched_param *param) {
+  int64_t r =
+      __syscall2(SYS_SCHED_GETPARAM, (int64_t)pid, (int64_t)(uintptr_t)param);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_sched_setscheduler(pid_t pid, int policy,
+                                         const struct sched_param *param) {
+  int64_t r = __syscall3(SYS_SCHED_SETSCHEDULER, (int64_t)pid, (int64_t)policy,
+                         (int64_t)(uintptr_t)param);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return (int)r;
+}
+
+static inline int sys_sched_getscheduler(pid_t pid) {
+  int64_t r = __syscall1(SYS_SCHED_GETSCHEDULER, (int64_t)pid);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return (int)r;
+}
+
+static inline int sys_sched_get_priority_max(int policy) {
+  int64_t r = __syscall1(SYS_SCHED_GET_PRIORITY_MAX, (int64_t)policy);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return (int)r;
+}
+
+static inline int sys_sched_get_priority_min(int policy) {
+  int64_t r = __syscall1(SYS_SCHED_GET_PRIORITY_MIN, (int64_t)policy);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return (int)r;
+}
+
+static inline int sys_sched_rr_get_interval(pid_t pid, struct timespec *tp) {
+  int64_t r = __syscall2(SYS_SCHED_RR_GET_INTERVAL, (int64_t)pid,
+                         (int64_t)(uintptr_t)tp);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_sched_setaffinity(pid_t pid, size_t cpusetsize,
+                                        const uint64_t *mask) {
+  int64_t r = __syscall3(SYS_SCHED_SETAFFINITY, (int64_t)pid,
+                         (int64_t)cpusetsize, (int64_t)(uintptr_t)mask);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_sched_getaffinity(pid_t pid, size_t cpusetsize,
+                                        uint64_t *mask) {
+  int64_t r = __syscall3(SYS_SCHED_GETAFFINITY, (int64_t)pid,
+                         (int64_t)cpusetsize, (int64_t)(uintptr_t)mask);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+// ===================== getcpu (group 6) =====================
+static inline int sys_getcpu(uint32_t *cpu, uint32_t *node) {
+  int64_t r =
+      __syscall2(SYS_GETCPU, (int64_t)(uintptr_t)cpu, (int64_t)(uintptr_t)node);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+// ===================== prctl (group 7) =====================
+static inline int sys_prctl(int option, uint64_t arg2, uint64_t arg3,
+                            uint64_t arg4, uint64_t arg5) {
+  int64_t r = __syscall5(SYS_PRCTL, (int64_t)option, (int64_t)arg2,
+                         (int64_t)arg3, (int64_t)arg4, (int64_t)arg5);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+// ===================== ppoll (group 8) =====================
+// Linux signature: ppoll(fds, nfds, timeout, sigmask, sigsetsize)
+struct pollfd; // forward decl; include <poll.h> for full definition
+static inline int sys_ppoll(struct pollfd *fds, uint64_t nfds,
+                            const struct timespec *timeout,
+                            const sigset_t *sigmask, size_t sigsetsize) {
+  int64_t r = __syscall5(SYS_PPOLL, (int64_t)(uintptr_t)fds, (int64_t)nfds,
+                         (int64_t)(uintptr_t)timeout,
+                         (int64_t)(uintptr_t)sigmask, (int64_t)sigsetsize);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return (int)r;
 }
 
 #endif // USER_SYSCALL_H
