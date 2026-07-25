@@ -53,6 +53,12 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                  int64_t unused2, int64_t unused3);
 int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
                  int64_t unused3, int64_t unused4);
+struct statx;
+/* statx 核心：SYS_STATX 与 legacy stat 薄封装的共同实现。kpath 为内核字
+ * 符串（调用方已完成 copy_from_user）。 */
+int vfs_statx(int dirfd, const char *kpath, unsigned flags, struct statx *stx);
+int64_t sys_statx(int64_t dirfd, int64_t path, int64_t flags, int64_t mask,
+                  int64_t buf, int64_t unused);
 int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
                   int64_t unused3, int64_t unused4);
 int64_t sys_mknod(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,

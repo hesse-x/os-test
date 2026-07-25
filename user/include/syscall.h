@@ -485,6 +485,20 @@ static inline int sys_newfstatat(int dirfd, const char *path, void *buf,
   return 0;
 }
 
+// statx(dirfd, path, flags, mask, buf) — 唯一的元数据 syscall；stat/fstat 等
+// legacy 接口在 libc 内全部经由此实现（见 user/lib/file.cc）。
+static inline int sys_statx(int dirfd, const char *path, int flags,
+                            unsigned int mask, void *buf) {
+  int64_t r =
+      __syscall5(SYS_STATX, (int64_t)dirfd, (int64_t)(uintptr_t)path,
+                 (int64_t)flags, (int64_t)mask, (int64_t)(uintptr_t)buf);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
 // S07: *at dirfd-relative variants (sys_mkdirat/sys_unlinkat/sys_renameat).
 static inline int sys_mkdirat(int dirfd, const char *path, int mode) {
   int64_t r = __syscall3(SYS_MKDIRAT, (int64_t)dirfd, (int64_t)(uintptr_t)path,

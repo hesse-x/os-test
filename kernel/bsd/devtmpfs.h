@@ -24,6 +24,15 @@ static inline uint64_t k_makedev(uint32_t major, uint32_t minor) {
          ((uint64_t)(minor & 0xff)) | ((uint64_t)(minor & ~0xff) << 12);
 }
 
+/* 解码端（statx stx_dev/stx_rdev 拆 major/minor 用），与 k_makedev 互逆。 */
+static inline uint32_t k_major(uint64_t dev) {
+  return (uint32_t)(((dev >> 8) & 0xfff) | ((dev >> 32) & 0xfffff000));
+}
+
+static inline uint32_t k_minor(uint64_t dev) {
+  return (uint32_t)((dev & 0xff) | ((dev >> 12) & 0xffffff00));
+}
+
 struct shm;
 
 struct dev_ops {

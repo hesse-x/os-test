@@ -23,6 +23,7 @@
 #include <sys/ipc.h>
 #include <sys/poll.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <xos/errno.h>
 #include <xos/fcntl.h>
@@ -340,8 +341,41 @@ off_t lseek(int fd, off_t offset, int whence) {
   return (off_t)sys_lseek(fd, offset, whence);
 }
 
-// ===================== stat (via sys_stat syscall) =====================
-int stat(const char *path, struct stat *st) {
+// ===================== statx（内核唯一元数据 syscall）=====================
+/* statx→stat 缩窄转换：内核只暴露 statx，struct stat 接口全部经此转换。 */
+static void statx_to_stat(const struct statx *sx, struct stat *st) {
+  __builtin_memset(st, 0, sizeof(*st));
+  st->st_dev = makedev(sx->stx_dev_major, sx->stx_dev_minor);
+  st->st_ino = sx->stx_ino;
+  st->st_nlink = sx->stx_nlink;
+  st->st_mode = sx->stx_mode;
+  st->st_uid = sx->stx_uid;
+  st->st_gid = sx->stx_gid;
+  st->st_rdev = makedev(sx->stx_rdev_major, sx->stx_rdev_minor);
+  st->st_size = (off_t)sx->stx_size;
+  st->st_blksize = (blksize_t)sx->stx_blksize;
+  st->st_blocks = (blkcnt_t)sx->stx_blocks;
+  st->st_atim.tv_sec = sx->stx_atime.tv_sec;
+  st->st_atim.tv_nsec = sx->stx_atime.tv_nsec;
+  st->st_mtim.tv_sec = sx->stx_mtime.tv_sec;
+  st->st_mtim.tv_nsec = sx->stx_mtime.tv_nsec;
+  st->st_ctim.tv_sec = sx->stx_ctime.tv_sec;
+  st->st_ctim.tv_nsec = sx->stx_ctime.tv_nsec;
+}
+
+int statx(int dirfd, const char *path, int flags, unsigned int mask,
+          struct statx *stx) {
+  if (!stx) {
+    errno = EFAULT;
+    return -1;
+  }
+  return sys_statx(dirfd, path, flags, mask, stx);
+}
+
+/* 路径类 stat 公共体：相对路径先拼 cwd 成绝对路径（内核路径解析仅接受绝
+ * 对路径），再走 statx。flags = 0（stat）或 AT_SYMLINK_NOFOLLOW（lstat，
+ * 本 OS 无 symlink，语义相同）。 */
+static int do_stat_path(const char *path, int flags, struct stat *st) {
   if (!path || !st) {
     errno = EFAULT;
     return -1;
@@ -364,8 +398,19 @@ int stat(const char *path, struct stat *st) {
     path = abs_path;
   }
 
-  int r = sys_stat(path, st);
-  return r;
+  struct statx sx;
+  if (sys_statx(AT_FDCWD, path, flags, STATX_BASIC_STATS, &sx) != 0)
+    return -1;
+  statx_to_stat(&sx, st);
+  return 0;
+}
+
+int stat(const char *path, struct stat *st) {
+  return do_stat_path(path, 0, st);
+}
+
+int lstat(const char *path, struct stat *st) {
+  return do_stat_path(path, AT_SYMLINK_NOFOLLOW, st);
 }
 
 // ===================== access =====================
@@ -642,31 +687,39 @@ int ioctl(int fd, uint32_t cmd, ...) {
   return (int)rc;
 }
 
-// ===================== fstat =====================
+// ===================== fstat（经 statx AT_EMPTY_PATH）=====================
 int fstat(int fd, struct stat *st) {
   if (!st) {
     errno = EFAULT;
     return -1;
   }
-  long rc = sys_fstat(fd, (uint64_t)st);
-  return (int)rc;
+  struct statx sx;
+  if (sys_statx(fd, "", AT_EMPTY_PATH, STATX_BASIC_STATS, &sx) != 0)
+    return -1;
+  statx_to_stat(&sx, st);
+  return 0;
 }
 
-// S07: fstatat(dirfd, path, st, flags). AT_EMPTY_PATH + empty path →
-// fstat(dirfd). AT_FDCWD → cwd-relative; a real dirfd → kernel resolves
-// relative to it.
+// S07: fstatat(dirfd, path, st, flags) — 直接透传 statx。AT_EMPTY_PATH +
+// 空路径 → 内核 stat dirfd 本身（不能走 resolve_at_path，会把 "" 拼成
+// cwd+"/"）。AT_FDCWD + 相对路径 → 拼 cwd；真实 dirfd → 内核相对解析。
 int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
   if (!st) {
     errno = EFAULT;
     return -1;
   }
-  if ((flags & AT_EMPTY_PATH) && path && path[0] == '\0')
-    return fstat(dirfd, st);
-  char buf[256];
-  const char *p = resolve_at_path(dirfd, path, buf);
-  if (dirfd == AT_FDCWD)
-    return sys_stat(p, st);
-  return sys_newfstatat(dirfd, p, st, flags);
+  struct statx sx;
+  if ((flags & AT_EMPTY_PATH) && path && path[0] == '\0') {
+    if (sys_statx(dirfd, "", flags, STATX_BASIC_STATS, &sx) != 0)
+      return -1;
+  } else {
+    char buf[256];
+    const char *p = resolve_at_path(dirfd, path, buf);
+    if (sys_statx(dirfd, p, flags, STATX_BASIC_STATS, &sx) != 0)
+      return -1;
+  }
+  statx_to_stat(&sx, st);
+  return 0;
 }
 
 // ===================== mkdir (via sys_mkdir syscall) =====================

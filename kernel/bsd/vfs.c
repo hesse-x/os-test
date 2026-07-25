@@ -34,6 +34,11 @@
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/stat.h>
+#include <xos/statx.h>
+
+/* DRM 主号（仅 stat 设备号用，与 virtio_gpu.c DRM_MAJOR 同值；226 是 DRM 语义、
+ * 不属于 devtmpfs 通用层，故各 .c 顶部各自定义而非放公共头）。 */
+#define DRM_MAJOR_FOR_STAT 226
 
 void vfs_init(void) {
   // inode_init, page_cache_init, devtmpfs_init are called in kernel_main before
@@ -484,33 +489,235 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   return (int64_t)fd;
 }
 
-/* sys_stat(path, stat_buf) — SYS_STAT */
-int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
-                 int64_t unused3, int64_t unused4) {
-  const char __user *upath = (const char __user *__force)arg1;
-  void __user *stat_buf = (void __user *__force)arg2;
+/* ===================== statx core =====================
+ * vfs_statx(dirfd, kpath, flags, stx) — 唯一的元数据获取核心，SYS_STATX 直
+ * 接暴露；legacy SYS_STAT/SYS_FSTAT/SYS_NEWFSTATAT 是缩窄到 struct kstat 的
+ * 薄封装。解析对齐 Linux statx：
+ *   AT_EMPTY_PATH + "" → stat fd 本身（per-fd-type 填充）
+ *   绝对路径           → mount 表最长前缀匹配
+ *   相对路径           → 从 dirfd 解析（AT_FDCWD ≡ root；内核无 per-process
+ *                        CWD，libc 调用前已拼好绝对路径）
+ * AT_SYMLINK_NOFOLLOW/AT_NO_AUTOMOUNT 接受但无操作（本 OS 无 symlink）。
+ * fs 层 getattr 仍填 struct kstat（不动），此处 statx_from_kstat 展开；
+ * stx_mask 只报 STATX_BASIC_STATS —— btime/attributes/mnt_id 未提供，调用
+ * 方不得读。 */
 
+/* kstat → statx 展开。stx_mode/stx_nlink 缩窄安全（值域远小于位宽）。 */
+static void statx_from_kstat(struct statx *stx, const struct kstat *ks) {
+  __memset(stx, 0, sizeof(*stx));
+  stx->stx_mask = STATX_BASIC_STATS;
+  stx->stx_blksize = (uint32_t)ks->st_blksize;
+  stx->stx_nlink = (uint32_t)ks->st_nlink;
+  stx->stx_uid = ks->st_uid;
+  stx->stx_gid = ks->st_gid;
+  stx->stx_mode = (uint16_t)ks->st_mode;
+  stx->stx_ino = ks->st_ino;
+  stx->stx_size = (uint64_t)ks->st_size;
+  stx->stx_blocks = (uint64_t)ks->st_blocks;
+  stx->stx_atime.tv_sec = ks->st_atim.tv_sec;
+  stx->stx_atime.tv_nsec = (uint32_t)ks->st_atim.tv_nsec;
+  stx->stx_mtime.tv_sec = ks->st_mtim.tv_sec;
+  stx->stx_mtime.tv_nsec = (uint32_t)ks->st_mtim.tv_nsec;
+  stx->stx_ctime.tv_sec = ks->st_ctim.tv_sec;
+  stx->stx_ctime.tv_nsec = (uint32_t)ks->st_ctim.tv_nsec;
+  stx->stx_rdev_major = k_major(ks->st_rdev);
+  stx->stx_rdev_minor = k_minor(ks->st_rdev);
+  stx->stx_dev_major = k_major(ks->st_dev);
+  stx->stx_dev_minor = k_minor(ks->st_dev);
+}
+
+/* statx → kstat 缩窄（legacy SYS_STAT/SYS_FSTAT/SYS_NEWFSTATAT 用）。对本系
+ * 统的值域是无损往返。 */
+static void kstat_from_statx(struct kstat *ks, const struct statx *stx) {
+  __memset(ks, 0, sizeof(*ks));
+  ks->st_dev = k_makedev(stx->stx_dev_major, stx->stx_dev_minor);
+  ks->st_ino = stx->stx_ino;
+  ks->st_nlink = stx->stx_nlink;
+  ks->st_mode = stx->stx_mode;
+  ks->st_uid = stx->stx_uid;
+  ks->st_gid = stx->stx_gid;
+  ks->st_rdev = k_makedev(stx->stx_rdev_major, stx->stx_rdev_minor);
+  ks->st_size = (int64_t)stx->stx_size;
+  ks->st_blksize = (int64_t)stx->stx_blksize;
+  ks->st_blocks = (int64_t)stx->stx_blocks;
+  ks->st_atim.tv_sec = stx->stx_atime.tv_sec;
+  ks->st_atim.tv_nsec = stx->stx_atime.tv_nsec;
+  ks->st_mtim.tv_sec = stx->stx_mtime.tv_sec;
+  ks->st_mtim.tv_nsec = stx->stx_mtime.tv_nsec;
+  ks->st_ctim.tv_sec = stx->stx_ctime.tv_sec;
+  ks->st_ctim.tv_nsec = stx->stx_ctime.tv_nsec;
+}
+
+/* per-fd-type kstat 填充（原 sys_fstat 的 switch 本体）。FD_REGULAR/FD_DIR/
+ * FD_DEV 委派 inode getattr 报真实字段，无 getattr 时回退填基本字段；其余
+ * fd 类型（pipe/tty/shm）无 inode，按类型硬编码 st_mode。 */
+static int fstat_fill(struct file *f, struct kstat *ks) {
+  __memset(ks, 0, sizeof(*ks));
+  ks->st_nlink = 1;
+  ks->st_blksize = 512;
+  switch (f->type) {
+  case FD_REGULAR:
+  case FD_DIR: {
+    struct inode *ip = f->inode;
+    if (!ip)
+      return -EBADF;
+    if (ip->i_op && ip->i_op->getattr) {
+      ip->i_op->getattr(ip, ks);
+    } else {
+      ks->st_ino = ip->ino;
+      ks->st_mode = ip->mode;
+      ks->st_uid = ip->uid;
+      ks->st_gid = ip->gid;
+      ks->st_size = (int64_t)ip->size;
+      ks->st_nlink = (uint64_t)ip->nlink;
+    }
+    return 0;
+  }
+  case FD_DEV: {
+    struct inode *ip = f->inode;
+    if (!ip)
+      return -EBADF;
+    if (ip->i_op && ip->i_op->getattr) {
+      ip->i_op->getattr(ip, ks);
+    } else {
+      ks->st_ino = ip->ino;
+      ks->st_uid = ip->uid;
+      ks->st_gid = ip->gid;
+      struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
+      if (ops && __strcmp(ops->subsystem, "drm") == 0)
+        ks->st_rdev = k_makedev(DRM_MAJOR_FOR_STAT, ops->minor);
+      else
+        ks->st_rdev = ip->ino;
+      if (ops && ops->is_block)
+        ks->st_mode = S_IFBLK | 0666;
+      else
+        ks->st_mode = S_IFCHR | 0666;
+    }
+    return 0;
+  }
+  case FD_PIPE:
+    ks->st_mode = S_IFIFO | 0644;
+    return 0;
+  case FD_TTY:
+    ks->st_mode = S_IFCHR | 0666;
+    return 0;
+  case FD_SHM:
+    ks->st_mode = S_IFREG | 0666;
+    return 0;
+  default:
+    return -EBADF;
+  }
+}
+
+/* fd 路径填充：AT_EMPTY_PATH + 空路径 → stat fd 本身。 */
+static int vfs_fstat_fd(int fd, struct kstat *ks) {
+  xtask *proc = current_task;
+  if (fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    return -EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+  int rc = fstat_fill(f, ks);
+  file_put(f);
+  return rc;
+}
+
+int vfs_statx(int dirfd, const char *kpath, unsigned flags, struct statx *stx) {
+  /* Linux do_statx: FORCE_SYNC|DONT_SYNC 同时置位非法；未知 flag 位非法。 */
+  if ((flags & AT_STATX_SYNC_TYPE) == AT_STATX_SYNC_TYPE)
+    return -EINVAL;
+  if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH |
+                AT_STATX_SYNC_TYPE))
+    return -EINVAL;
+
+  struct kstat ks;
+  struct inode *ip = NULL;
+  int rc;
+
+  if (kpath[0] == '\0') {
+    /* 空路径仅在 AT_EMPTY_PATH 下合法（stat fd 本身），否则 ENOENT。 */
+    if (!(flags & AT_EMPTY_PATH))
+      return -ENOENT;
+    rc = vfs_fstat_fd(dirfd, &ks);
+  } else {
+    char relpath[256];
+    if (kpath[0] == '/') {
+      /* 绝对路径：dirfd 忽略，mount 表最长前缀匹配。 */
+      char norm[256];
+      if (normalize_path(kpath, norm, sizeof(norm)) < 0)
+        return -ENAMETOOLONG;
+      struct mount_entry *m = vfs_resolve(norm, relpath, sizeof(relpath));
+      if (!m)
+        return -ENOENT;
+      ip = path_walk(m, relpath); /* +1 */
+    } else {
+      /* 相对路径：从 dirfd 解析（AT_FDCWD ≡ root，内核无 CWD）。 */
+      if (normalize_path(kpath, relpath, sizeof(relpath)) < 0)
+        return -ENAMETOOLONG;
+      struct inode *start = resolve_dirfd_start(dirfd);
+      if (IS_ERR(start))
+        return (int)PTR_ERR(start);
+      ip = path_walk_from(start, relpath); /* +1 */
+      inode_put(start);
+    }
+    if (!ip)
+      return -ENOENT;
+    rc = -ENOSYS;
+    if (ip->i_op && ip->i_op->getattr)
+      rc = ip->i_op->getattr(ip, &ks);
+    inode_put(ip);
+  }
+  if (rc)
+    return rc;
+  statx_from_kstat(stx, &ks);
+  return 0;
+}
+
+/* sys_statx(dirfd, path, flags, mask, buf) — SYS_STATX */
+int64_t sys_statx(int64_t dirfd, int64_t path, int64_t flags, int64_t mask,
+                  int64_t buf, int64_t unused) {
+  (void)unused;
+  (void)mask; /* 请求掩码仅 advisory —— 始终回填 STATX_BASIC_STATS */
+  const char __user *upath = (const char __user *__force)path;
   if (!upath)
     return (int64_t)-EFAULT;
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return (int64_t)-EFAULT;
+  struct statx stx = {0};
+  int rc = vfs_statx((int)dirfd, kpath, (unsigned)flags, &stx);
+  if (rc)
+    return (int64_t)rc;
+  if (copy_to_user((void __user *__force)buf, &stx, sizeof(stx)))
+    return (int64_t)-EFAULT;
+  return 0;
+}
 
-  char relpath[256];
-  struct mount_entry *m = vfs_resolve_user(upath, relpath, sizeof(relpath));
-  if (IS_ERR(m))
-    return PTR_ERR(m);
-  if (!m)
-    return (int64_t)-ENOENT;
-
-  struct inode *ip = path_walk(m, relpath); /* +1 */
-  if (!ip)
-    return (int64_t)-ENOENT;
-  uint8_t kstat_buf[256];
-  int rc = -ENOSYS;
-  if (ip->i_op && ip->i_op->getattr)
-    rc = ip->i_op->getattr(ip, (struct kstat *)kstat_buf);
-  inode_put(ip);
-  if (rc != 0)
-    return rc;
-  if (copy_to_user(stat_buf, kstat_buf, sizeof(struct kstat)))
+/* sys_stat(path, stat_buf) — SYS_STAT：vfs_statx 薄封装（缩窄到 kstat）。 */
+int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                 int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  const char __user *upath = (const char __user *__force)arg1;
+  if (!upath)
+    return (int64_t)-EFAULT;
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return (int64_t)-EFAULT;
+  struct statx stx = {0};
+  int rc = vfs_statx(AT_FDCWD, kpath, 0, &stx);
+  if (rc)
+    return (int64_t)rc;
+  struct kstat ks;
+  kstat_from_statx(&ks, &stx);
+  if (copy_to_user((void __user *__force)arg2, &ks, sizeof(ks)))
     return (int64_t)-EFAULT;
   return 0;
 }
@@ -692,57 +899,45 @@ int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
   return (int64_t)fd;
 }
 
-// newfstatat(dirfd, path, buf, flags). Absolute path → sys_stat. AT_EMPTY_PATH
-// with empty path → stat the dirfd itself (delegates to sys_fstat). Relative
-// path → resolve from dirfd. AT_SYMLINK_NOFOLLOW accepted but a no-op (no
-// symlinks in this OS).
+/* newfstatat(dirfd, path, buf, flags) — vfs_statx 薄封装（缩窄到 kstat）。
+ * AT_EMPTY_PATH + 空路径 → stat dirfd 本身；AT_SYMLINK_NOFOLLOW 接受但无操
+ * 作（无 symlink）。 */
 int64_t sys_newfstatat(int64_t dirfd, int64_t path, int64_t buf, int64_t flags,
                        int64_t unused1, int64_t unused2) {
   (void)unused1;
   (void)unused2;
-  if ((int)flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
-    return -EINVAL;
-
   const char __user *upath = (const char __user *__force)path;
-  char kpath[256];
-  long n = strncpy_from_user(kpath, upath, sizeof(kpath));
-  if (n < 0)
+  if (!upath)
     return (int64_t)-EFAULT;
-
-  /* AT_EMPTY_PATH: operate on dirfd itself (path == ""). */
-  if (((int)flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
-    if ((int)dirfd == AT_FDCWD || dirfd < 0)
-      return -EINVAL;
-    return sys_fstat(dirfd, buf, 0, 0, 0, 0);
-  }
-
-  /* Absolute path: dirfd ignored, resolve via mount table (existing path). */
-  if (kpath[0] == '/')
-    return sys_stat(path, buf, 0, 0, 0, 0);
-
-  /* Relative path: resolve start inode from dirfd (or root for AT_FDCWD). */
-  struct inode *start = resolve_dirfd_start((int)dirfd);
-  if (IS_ERR(start))
-    return (int64_t)PTR_ERR(start);
-
-  char relpath[256];
-  if (normalize_path(kpath, relpath, sizeof(relpath)) < 0) {
-    inode_put(start);
-    return (int64_t)-ENAMETOOLONG;
-  }
-
-  struct inode *ip = path_walk_from(start, relpath); /* +1 */
-  inode_put(start);
-  if (!ip)
-    return (int64_t)-ENOENT;
-  uint8_t kstat_buf[256];
-  int rc = -ENOSYS;
-  if (ip->i_op && ip->i_op->getattr)
-    rc = ip->i_op->getattr(ip, (struct kstat *)kstat_buf);
-  inode_put(ip);
-  if (rc != 0)
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return (int64_t)-EFAULT;
+  struct statx stx = {0};
+  int rc = vfs_statx((int)dirfd, kpath, (unsigned)flags, &stx);
+  if (rc)
     return (int64_t)rc;
-  if (copy_to_user((void __user *__force)buf, kstat_buf, sizeof(struct kstat)))
+  struct kstat ks;
+  kstat_from_statx(&ks, &stx);
+  if (copy_to_user((void __user *__force)buf, &ks, sizeof(ks)))
+    return (int64_t)-EFAULT;
+  return 0;
+}
+
+/* sys_fstat(fd, stat_buf) — SYS_FSTAT：vfs_statx 薄封装（AT_EMPTY_PATH 路
+ * 径，缩窄到 kstat）。 */
+int64_t sys_fstat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  struct statx stx = {0};
+  int rc = vfs_statx((int)arg1, "", AT_EMPTY_PATH, &stx);
+  if (rc)
+    return (int64_t)rc;
+  struct kstat ks;
+  kstat_from_statx(&ks, &stx);
+  if (copy_to_user((void __user *__force)arg2, &ks, sizeof(ks)))
     return (int64_t)-EFAULT;
   return 0;
 }

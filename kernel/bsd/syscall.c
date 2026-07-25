@@ -75,10 +75,6 @@
 #include <xos/time.h>
 #include <xos/utsname.h>
 
-/* DRM 主号（仅 stat 设备号用，与 virtio_gpu.c DRM_MAJOR 同值；226 是 DRM 语义、
- * 不属于 devtmpfs 通用层，故各 .c 顶部各自定义而非放公共头）。 */
-#define DRM_MAJOR_FOR_STAT 226
-
 // OS-unique mmap flags (not in uapi mman.h, collision-free in 1024+ namespace)
 #define MAP_PHYSICAL 0x80000000
 #define MAP_UC 0x08 /* Map as uncacheable (device MMIO) */
@@ -3819,104 +3815,6 @@ out:
   return ret;
 }
 
-// ===================== BSD syscall: fstat =====================
-int64_t sys_fstat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
-                  int64_t unused3, int64_t unused4) {
-  int fd = (int)arg1;
-  struct kstat __user *ust = (struct kstat __user * __force) arg2;
-
-  xtask *proc = current_task;
-  if (fd < 0 || fd >= MAX_FD)
-    return (int64_t)(-(int64_t)EBADF);
-
-  rcu_read_lock();
-  struct file *f = fd_lookup(proc->proc->files, fd);
-  if (!f) {
-    rcu_read_unlock();
-    return (int64_t)(-(int64_t)EBADF);
-  }
-  file_get(f);
-  rcu_read_unlock();
-
-  struct kstat ks;
-  __memset(&ks, 0, sizeof(ks));
-  ks.st_nlink = 1;
-  ks.st_blksize = 512;
-
-  int64_t ret;
-  switch (f->type) {
-  case FD_REGULAR:
-  case FD_DIR: {
-    struct inode *ip = f->inode;
-    if (!ip) {
-      ret = -(int64_t)EBADF;
-      goto out;
-    }
-    /* S08: 委派 inode getattr 报真实 mode/uid/gid/blksize/nlink(对齐 sys_stat
-     * 走 i_op->getattr)。无 getattr 时回退填基本字段。 */
-    if (ip->i_op && ip->i_op->getattr) {
-      ip->i_op->getattr(ip, &ks);
-    } else {
-      ks.st_ino = ip->ino;
-      ks.st_mode = ip->mode;
-      ks.st_uid = ip->uid;
-      ks.st_gid = ip->gid;
-      ks.st_size = (int64_t)ip->size;
-      ks.st_nlink = (uint64_t)ip->nlink;
-    }
-    break;
-  }
-  case FD_DEV: {
-    struct inode *ip = f->inode;
-    if (!ip) {
-      ret = -(int64_t)EBADF;
-      goto out;
-    }
-    /* S08: 委派 devtmpfs_getattr 报真实 mode/uid/gid/st_rdev(DRM 设备号
-     * k_makedev(226,minor),libdrm fstat 判 render/primary)。无 i_op 时回退
-     * 原硬编码语义。 */
-    if (ip->i_op && ip->i_op->getattr) {
-      ip->i_op->getattr(ip, &ks);
-    } else {
-      ks.st_ino = ip->ino;
-      ks.st_uid = ip->uid;
-      ks.st_gid = ip->gid;
-      struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-      if (ops && __strcmp(ops->subsystem, "drm") == 0)
-        ks.st_rdev = k_makedev(DRM_MAJOR_FOR_STAT, ops->minor);
-      else
-        ks.st_rdev = ip->ino;
-      if (ops && ops->is_block)
-        ks.st_mode = S_IFBLK | 0666;
-      else
-        ks.st_mode = S_IFCHR | 0666;
-    }
-    break;
-  }
-  case FD_PIPE:
-    ks.st_mode = S_IFIFO | 0644;
-    break;
-  case FD_TTY:
-    ks.st_mode = S_IFCHR | 0666;
-    break;
-  case FD_SHM:
-    ks.st_mode = S_IFREG | 0666;
-    break;
-  default:
-    ret = -(int64_t)EBADF;
-    goto out;
-  }
-
-  if (copy_to_user(ust, &ks, sizeof(ks))) {
-    ret = -(int64_t)EFAULT;
-    goto out;
-  }
-  ret = 0;
-out:
-  file_put(f);
-  return ret;
-}
-
 // ===================== BSD syscall: fdev_pid =====================
 int64_t sys_fdev_pid(int64_t arg1, int64_t unused2, int64_t unused3,
                      int64_t unused4, int64_t unused5, int64_t unused6) {
@@ -4930,6 +4828,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_openat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_NEWFSTATAT:
     return sys_newfstatat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_STATX:
+    return sys_statx(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MKDIR:
     return sys_mkdir(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_UNLINK:

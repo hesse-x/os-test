@@ -466,32 +466,23 @@ static struct inode *fat32_dir_lookup(struct inode *dir, const char *name) {
   return fat32_iget(ino, type, size, cluster, dir_cluster, dir_idx);
 }
 
-/* fat32_dir_create:在目录 dir 内建普通文件 name,返 +1 新 inode 或
- * ERR_PTR(-errno)。 */
-static struct inode *fat32_dir_create(struct inode *dir, const char *name,
-                                      int mode) {
-  (void)mode;
-  int namelen = 0;
-  while (name[namelen])
-    namelen++;
-  if (namelen == 0)
-    return ERR_PTR(-ENOENT);
-
-  spin_lock(&fat_lock);
-  /* 在 dir->start_cluster 的簇链上找空闲槽(0x00 或 0xE5),不足则扩展一簇。 */
+/* fat32_dir_find_slot:在目录簇链 start_cluster 上找空闲目录项槽(0x00 或
+ * 0xE5),链上无空槽则在链尾扩展一清零新簇。返回 0 命中(填充 out_cluster/
+ * out_idx/out_was_end:槽所在簇/槽下标/是否原为目录尾)/-errno。
+ * 调用方需持 fat_lock。 */
+static int fat32_dir_find_slot(uint32_t start_cluster, uint32_t *out_cluster,
+                               int *out_idx, int *out_was_end) {
   int entries = bytes_per_cluster / 32;
-  uint32_t target_cluster = dir->start_cluster;
   int free_idx = -1;
   int was_end_of_dir = 0;
-  uint32_t tail = dir->start_cluster;
-  uint32_t cur = dir->start_cluster;
+  uint32_t target_cluster = start_cluster;
+  uint32_t tail = start_cluster;
+  uint32_t cur = start_cluster;
   while (cur >= 2 && cur < 0x0FFFFFF8) {
     tail = cur;
     uint8_t *db = read_cluster_buf(cur);
-    if (!db) {
-      spin_unlock(&fat_lock);
-      return ERR_PTR(-EIO);
-    }
+    if (!db)
+      return -EIO;
     for (int i = 0; i < entries; i++) {
       struct fat_dir_entry *de = (struct fat_dir_entry *)(db + i * 32);
       if (de->name[0] == 0x00) {
@@ -513,21 +504,17 @@ static struct inode *fat32_dir_create(struct inode *dir, const char *name,
   }
   if (free_idx < 0) {
     uint32_t nc = fat32_allocate_cluster();
-    if (nc == 0) {
-      spin_unlock(&fat_lock);
-      return ERR_PTR(-ENOSPC);
-    }
+    if (nc == 0)
+      return -ENOSPC;
     if (fat32_link_cluster(tail, nc) != 0) {
       fat32_write_fat_entry(nc, 0);
-      spin_unlock(&fat_lock);
-      return ERR_PTR(-EIO);
+      return -EIO;
     }
     uint8_t *zb = (uint8_t *)kmalloc(bytes_per_cluster);
     if (!zb) {
       fat32_write_fat_entry(nc, 0);
       fat32_write_fat_entry(tail, 0x0FFFFFFF);
-      spin_unlock(&fat_lock);
-      return ERR_PTR(-ENOMEM);
+      return -ENOMEM;
     }
     __memset(zb, 0, bytes_per_cluster);
     uint32_t lba = data_start_lba + (nc - 2) * sectors_per_cluster;
@@ -536,6 +523,34 @@ static struct inode *fat32_dir_create(struct inode *dir, const char *name,
     target_cluster = nc;
     free_idx = 0;
     was_end_of_dir = 1;
+  }
+  *out_cluster = target_cluster;
+  *out_idx = free_idx;
+  *out_was_end = was_end_of_dir;
+  return 0;
+}
+
+/* fat32_dir_create:在目录 dir 内建普通文件 name,返 +1 新 inode 或
+ * ERR_PTR(-errno)。 */
+static struct inode *fat32_dir_create(struct inode *dir, const char *name,
+                                      int mode) {
+  (void)mode;
+  int namelen = 0;
+  while (name[namelen])
+    namelen++;
+  if (namelen == 0)
+    return ERR_PTR(-ENOENT);
+
+  spin_lock(&fat_lock);
+  /* 在 dir->start_cluster 的簇链上找空闲槽(0x00 或 0xE5),不足则扩展一簇。 */
+  int entries = bytes_per_cluster / 32;
+  uint32_t target_cluster;
+  int free_idx, was_end_of_dir;
+  int frc = fat32_dir_find_slot(dir->start_cluster, &target_cluster, &free_idx,
+                                &was_end_of_dir);
+  if (frc != 0) {
+    spin_unlock(&fat_lock);
+    return ERR_PTR(frc);
   }
   uint8_t *db = read_cluster_buf(target_cluster);
   if (!db) {
@@ -608,27 +623,23 @@ static int fat32_dir_mkdir(struct inode *dir, const char *name, int mode) {
   uint32_t lba = data_start_lba + (new_cluster - 2) * sectors_per_cluster;
   blk_write(lba, sectors_per_cluster, db);
   kfree(db);
-  /* 在父目录 dir->start_cluster 找空闲槽写新目录项 */
-  uint8_t *pb = read_cluster_buf(dir->start_cluster);
+  /* 在父目录 dir->start_cluster 的簇链上找空闲槽(0x00 或 0xE5),不足则扩
+   * 展一簇(同 fat32_dir_create,经共享 helper)。 */
+  int entries = bytes_per_cluster / 32;
+  uint32_t target_cluster;
+  int free_idx, was_end_of_dir;
+  int frc = fat32_dir_find_slot(dir->start_cluster, &target_cluster, &free_idx,
+                                &was_end_of_dir);
+  if (frc != 0) {
+    fat32_free_chain(new_cluster);
+    spin_unlock(&fat_lock);
+    return frc;
+  }
+  uint8_t *pb = read_cluster_buf(target_cluster);
   if (!pb) {
     fat32_free_chain(new_cluster);
     spin_unlock(&fat_lock);
     return -EIO;
-  }
-  int entries = bytes_per_cluster / 32;
-  int free_idx = -1;
-  for (int i = 0; i < entries; i++) {
-    struct fat_dir_entry *de = (struct fat_dir_entry *)(pb + i * 32);
-    if (de->name[0] == 0x00 || de->name[0] == 0xE5) {
-      free_idx = i;
-      break;
-    }
-  }
-  if (free_idx < 0) {
-    kfree(pb);
-    fat32_free_chain(new_cluster);
-    spin_unlock(&fat_lock);
-    return -ENOSPC;
   }
   struct fat_dir_entry ne;
   __memset(&ne, 0, sizeof(ne));
@@ -638,16 +649,25 @@ static int fat32_dir_mkdir(struct inode *dir, const char *name, int mode) {
   ne.fst_clus_lo = new_cluster & 0xFFFF;
   ne.file_size = 0;
   __memcpy(pb + free_idx * 32, &ne, 32);
+  /* 占用的是目录尾槽时清零下一槽作链扫描终止标记(同 fat32_dir_create)。 */
+  if (was_end_of_dir && free_idx + 1 < entries)
+    __memset(pb + (free_idx + 1) * 32, 0, 32);
   int sec = (free_idx * 32) / 512;
-  int wrc = write_cluster_sector(dir->start_cluster, sec, pb + sec * 512);
+  int wrc = write_cluster_sector(target_cluster, sec, pb + sec * 512);
+  if (wrc == 0 && was_end_of_dir && free_idx + 1 < entries) {
+    int ns = ((free_idx + 1) * 32) / 512;
+    if (ns != sec)
+      wrc = write_cluster_sector(target_cluster, ns, pb + ns * 512);
+  }
   kfree(pb);
   spin_unlock(&fat_lock);
   if (wrc != 0)
     return -EIO;
-  /* 预建 inode cache 条目(调用者 sys_mkdir 不取回 inode,仅判定成败)。 */
-  uint32_t ino = fat32_make_ino(dir->start_cluster, free_idx);
+  /* 预建 inode cache 条目(调用者 sys_mkdir 不取回 inode,仅判定成败)。
+   * ino 必须按槽实际所在簇 target_cluster 生成(与 lookup 一致)。 */
+  uint32_t ino = fat32_make_ino(target_cluster, free_idx);
   struct inode *ip =
-      fat32_iget(ino, INODE_DIR, 0, new_cluster, dir->start_cluster, free_idx);
+      fat32_iget(ino, INODE_DIR, 0, new_cluster, target_cluster, free_idx);
   if (ip)
     inode_put(ip); /* cache 持基准 ref,此处还掉 iget 的 +1 */
   return 0;

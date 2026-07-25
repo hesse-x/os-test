@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <xos/stat.h>
+#include <xos/statx.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,9 +58,12 @@ _Static_assert(sizeof(struct stat) == sizeof(struct kstat),
  * (included above) — single source of truth shared with the kernel. */
 
 LIBC_EXPORT int stat(const char *path, struct stat *st);
+LIBC_EXPORT int lstat(const char *path, struct stat *st);
 LIBC_EXPORT int fstat(int fd, struct stat *st);
 LIBC_EXPORT int fstatat(int dirfd, const char *path, struct stat *st,
                         int flags);
+LIBC_EXPORT int statx(int dirfd, const char *path, int flags, unsigned int mask,
+                      struct statx *stx);
 LIBC_EXPORT int mkdir(const char *path, mode_t mode);
 LIBC_EXPORT int mkdirat(int dirfd, const char *path, mode_t mode);
 LIBC_EXPORT int mknod(const char *path, mode_t mode, dev_t dev);

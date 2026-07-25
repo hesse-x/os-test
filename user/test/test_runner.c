@@ -64,6 +64,7 @@ static struct test_entry tests[] = {
     {"test_cloexec_perfd", "/test/test_cloexec_perfd.elf"},
     {"test_openat_dirfd", "/test/test_openat_dirfd.elf"},
     {"test_stat_real", "/test/test_stat_real.elf"},
+    {"test_statx", "/test/test_statx.elf"},
     {"test_udevd_db", "/test/test_udevd_db.elf"},
     {"test_udevd", "/test/test_udevd.elf"},
     {"test_dev_vfs_dynamic", "/test/test_dev_vfs_dynamic.elf"},

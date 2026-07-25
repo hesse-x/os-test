@@ -111,7 +111,7 @@ global:
     pthread_testcancel;
 
     /* <sys/stat.h> */
-    fstat; fstatat; mkdir; mkdirat; mknod; stat;
+    fstat; fstatat; lstat; mkdir; mkdirat; mknod; stat; statx;
     chmod;
 
     /* <sys/wait.h> */
