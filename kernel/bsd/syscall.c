@@ -1596,9 +1596,11 @@ static void pipe_wake_cb(wait_queue_t *wq, unsigned long flags) {
 }
 
 // ===================== BSD syscall: pipe =====================
-int64_t sys_pipe(int64_t arg1, int64_t unused1, int64_t unused2,
-                 int64_t unused3, int64_t unused4, int64_t unused5) {
-  int __user *fd_ptr = (int __user *__force)arg1;
+// 公共实现：flags 仅接受 O_CLOEXEC（per-fd bitmap）| O_NONBLOCK（f->flags）。
+// sys_pipe → do_pipe(fd_ptr, 0)；sys_pipe2 传入用户 flags。
+static int64_t do_pipe(int __user *fd_ptr, int flags) {
+  if (flags & ~(O_CLOEXEC | O_NONBLOCK))
+    return (int64_t)-EINVAL;
 
   uint64_t ptr = (__force uint64_t)fd_ptr;
   if (!ptr || ptr >= KERNEL_VMA_BOUNDARY ||
@@ -1688,10 +1690,22 @@ int64_t sys_pipe(int64_t arg1, int64_t unused1, int64_t unused2,
   fw->pipe = p;
   fd_install(proc->proc->files, write_fd, fw);
 
+  // pipe2 flags：仍在 fd_lock 内设置，对 execve 的 cloexec 扫描原子。
+  if (flags & O_NONBLOCK) {
+    fr->flags |= O_NONBLOCK;
+    fw->flags |= O_NONBLOCK;
+  }
+  if (flags & O_CLOEXEC) {
+    fd_set_cloexec(proc->proc->files, read_fd, 1);
+    fd_set_cloexec(proc->proc->files, write_fd, 1);
+  }
+
   int fd_pair[2] = {read_fd, write_fd};
   if (copy_to_user(fd_ptr, fd_pair, sizeof(fd_pair))) {
     struct file *f_r = fd_uninstall(proc->proc->files, read_fd);
     struct file *f_w = fd_uninstall(proc->proc->files, write_fd);
+    fd_set_cloexec(proc->proc->files, read_fd, 0);
+    fd_set_cloexec(proc->proc->files, write_fd, 0);
     spin_unlock(fdlk);
     synchronize_rcu();
     file_put(f_r);
@@ -1701,6 +1715,16 @@ int64_t sys_pipe(int64_t arg1, int64_t unused1, int64_t unused2,
 
   spin_unlock(fdlk);
   return 0;
+}
+
+int64_t sys_pipe(int64_t arg1, int64_t unused1, int64_t unused2,
+                 int64_t unused3, int64_t unused4, int64_t unused5) {
+  return do_pipe((int __user *__force)arg1, 0);
+}
+
+int64_t sys_pipe2(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4) {
+  return do_pipe((int __user *__force)arg1, (int)arg2);
 }
 
 // ===================== BSD syscall: write =====================
@@ -4763,6 +4787,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_getrandom(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_PIPE:
     return sys_pipe(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_PIPE2:
+    return sys_pipe2(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_WRITE:
     return sys_write(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_READ:

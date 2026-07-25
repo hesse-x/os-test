@@ -41,7 +41,7 @@ global:
 
     /* <unistd.h> */
     access; close; dup; dup2; _exit; ftruncate; getcwd; getpid; gettid;
-    ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; read;
+    ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; pipe2; read;
     rmdir; sched_yield; sleep; ttyname; unlink; unlinkat; rename; renameat;
     usleep; write;
     getuid; geteuid; getgid; getegid; getppid; getpgrp; umask;

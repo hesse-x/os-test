@@ -18,6 +18,7 @@ int64_t syscall_dispatch(trapframe *tf);
 // BSD layer syscall function declarations (grouped by subsystem)
 // fd operations
 int64_t sys_pipe(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_pipe2(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_write(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_read(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_close(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);

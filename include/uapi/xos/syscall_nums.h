@@ -32,6 +32,7 @@
 #define SYS_RT_SIGRETURN 15
 #define SYS_IOCTL 16
 #define SYS_PIPE 22
+#define SYS_PIPE2 293
 #define SYS_SCHED_YIELD 24
 #define SYS_PAUSE 34
 #define SYS_NANOSLEEP 35

@@ -150,6 +150,8 @@ int close(int fd) { return sys_close(fd); }
 
 int pipe(int fd[2]) { return sys_pipe(fd); }
 
+int pipe2(int fd[2], int flags) { return sys_pipe2(fd, flags); }
+
 // ===================== chdir =====================
 
 int chdir(const char *path) {

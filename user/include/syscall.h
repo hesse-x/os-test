@@ -213,6 +213,15 @@ static inline int sys_pipe(int *fd_ptr) {
   return 0;
 }
 
+static inline int sys_pipe2(int *fd_ptr, int flags) {
+  int64_t r = __syscall2(SYS_PIPE2, (int64_t)(uintptr_t)fd_ptr, (int64_t)flags);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
 // --- write/read/lseek ---
 static inline int64_t sys_write(int fd, const void *buf, size_t len) {
   int64_t r =

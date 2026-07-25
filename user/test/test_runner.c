@@ -62,6 +62,7 @@ static struct test_entry tests[] = {
     {"test_rename", "/test/test_rename.elf"},
     {"test_dirent_seek", "/test/test_dirent_seek.elf"},
     {"test_cloexec_perfd", "/test/test_cloexec_perfd.elf"},
+    {"test_pipe2", "/test/test_pipe2.elf"},
     {"test_openat_dirfd", "/test/test_openat_dirfd.elf"},
     {"test_stat_real", "/test/test_stat_real.elf"},
     {"test_statx", "/test/test_statx.elf"},

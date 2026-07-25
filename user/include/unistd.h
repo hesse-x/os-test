@@ -38,6 +38,7 @@ LIBC_EXPORT ssize_t read(int fd, void *buf, size_t count);
 LIBC_EXPORT ssize_t write(int fd, const void *buf, size_t count);
 LIBC_EXPORT int close(int fd);
 LIBC_EXPORT int pipe(int fd[2]);
+LIBC_EXPORT int pipe2(int fd[2], int flags);
 LIBC_EXPORT int open(const char *path, int flags, ...);
 LIBC_EXPORT int dup2(int old_fd, int new_fd);
 LIBC_EXPORT int dup(int old_fd);
