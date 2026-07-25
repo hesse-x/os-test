@@ -606,10 +606,14 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
 #ifndef NDEBUG
     ASSERT(cpu_locals[my_cpu].run_count == 0);
 #endif
-    // If prev is BLOCKED, ZOMBIE, or REAPING, it cannot continue running —
-    // switch to idle so the CPU halts until an IRQ wakes a process.
-    if (prev != idle && (prev->state == BLOCKED || prev->state == ZOMBIE ||
-                         prev->state == REAPING)) {
+    // If prev is BLOCKED, STOPPED, ZOMBIE, or REAPING, it cannot continue
+    // running — switch to idle so the CPU halts until an IRQ wakes a process.
+    // STOPPED must be listed: do_stop() sets state=STOPPED then calls
+    // schedule(); with an empty run_queue a missing STOPPED here falls into
+    // "prev continues" below and the stopped task runs on to _exit() without
+    // ever receiving SIGCONT (flaky signal_stop failure).
+    if (prev != idle && (prev->state == BLOCKED || prev->state == STOPPED ||
+                         prev->state == ZOMBIE || prev->state == REAPING)) {
 #ifndef NDEBUG
       if (prev->state == BLOCKED) {
         printk(LOG_DEBUG, "schedule: pid=%d BLOCKED wait_event=%d\n", prev->pid,

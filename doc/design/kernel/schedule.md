@@ -26,7 +26,7 @@
 
 **task_t**（kernel/proc.h : task_t）
   pid : pid_t — 进程 ID
-  state : proc_state_t — READY / RUNNING / BLOCKED / ZOMBIE / REAPING
+  state : proc_state_t — READY / RUNNING / BLOCKED / ZOMBIE / REAPING / STOPPED
   k_rsp : uint64_t — 内核栈保存的 RSP（switch_to 用）
   k_stack_top : uint64_t — 内核栈虚拟地址顶部（2 页 = 8KB）
   entry : uint64_t — 用户态入口 RIP
@@ -122,7 +122,7 @@
 
 1. 获取 per-CPU scheduler_lock（irqsave）
 2. CPU 时间统计：`prev->cpu_time_ns += sched_clock() - prev->last_sched`（idle 除外）
-3. **BLOCKED/ZOMBIE/REAPING 快速路径**：prev 不可运行且 run_queue 为空 → 直接切到 idle，return
+3. **BLOCKED/STOPPED/ZOMBIE/REAPING 快速路径**：prev 不可运行且 run_queue 为空 → 直接切到 idle，return（STOPPED 必须在此列出，否则 do_stop 后空队列时 prev 会继续运行）
 4. 从 per-CPU run_queue 取下一个进程（FIFO，front 取出 remove）
 5. run_queue 空：prev==idle 则 return（idle→idle 无需切换），否则 next=idle
 6. prev==next：return

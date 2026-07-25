@@ -2435,14 +2435,17 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     for (;;) {
       proc->state = BLOCKED;
       proc->wait_event = WAIT_NONE;
+      /* 有数据优先于 EOF：写端关闭前已入队的字节必须先读出（POSIX drain
+       * 语义）。原顺序先查 p_count==1，write+close 紧挨着执行时 reader 醒来
+       * 会无视缓冲区的数据直接返回 0（flaky socket_msgflags Case A）。 */
+      if (p->head != p->tail)
+        break; /* 有数据 */
       if (refcount_read(&p->p_count) == 1) {
         sched_cancel_spurious_wake(proc);
         remove_wait_queue(wq, &wait);
         ret = 0;
         goto out;
       }
-      if (p->head != p->tail)
-        break; /* 有数据 */
       if (f->flags & O_NONBLOCK) {
         sched_cancel_spurious_wake(proc);
         remove_wait_queue(wq, &wait);

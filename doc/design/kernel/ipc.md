@@ -387,7 +387,7 @@ socket / bind / listen / accept / connect / socketpair / sendmsg / recvmsg / shu
 
 # 三、Pipe
 
-pipe 为匿名单向字节流，ring buffer 大小 4KB，通过 sys_pipe 创建一对 fd（读端 + 写端）。
+pipe 为匿名单向字节流，ring buffer 大小 4KB，通过 sys_pipe 创建一对 fd（读端 + 写端）。阻塞读的唤醒重查顺序为 **数据优先于 EOF**（先查 `head != tail`，再查 `p_count == 1`）：写端 close 前已入队的字节必须先 drain，POSIX drain 语义。
 
 内核 sys_read/sys_write/sys_close 根据 fd_type 分发：
 - FD_PIPE → pipe ring buffer（4KB，byte-by-byte 拷贝）
