@@ -3667,6 +3667,17 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       *(uint32_t *)(req_data + 52) = ops->minor;
       __memcpy(hdr->data, req_data, 56);
 
+      // Arm per-request reply state BEFORE enqueue: sys_resp publishes
+      // req_result/req_replied under our scheduler_lock; clearing them after
+      // enqueue could clobber an already-delivered reply from a fast target
+      // on another CPU (lost wake → 3s -ETIMEDOUT, bug.md Bug 1).
+      proc->req_target_pid = target_pid;
+      proc->req_reply_buf = arg;
+      proc->req_reply_len = arg_size;
+      proc->req_result = 0;
+      proc->req_replied = 0;
+      proc->wait_timed_out = 0;
+
       spin_lock(&target->recv_lock);
       uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
       if (next == target->recv_tail) {
@@ -3696,26 +3707,19 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
           __wake_up(iwq, POLLIN);
       }
 
-      // Block caller on WAIT_REQ_REPLY. Arm the wait (set BLOCKED + deadline +
-      // insert timer) under our own scheduler_lock, in the same critical
-      // section. Without this, the target (evdev on another CPU) can receive
-      // the REQ, run sys_resp() and try to wake us between the wake above and
-      // setting BLOCKED below — sys_resp's wake-check then sees us
-      // not-yet-BLOCKED and drops the wake, stranding us until the 3s timeout.
-      // Now that sys_recv's lost-wake is fixed, evdev replies fast, so this
-      // caller-side window is the more likely failure; close it the same way.
+      // Block caller on WAIT_REQ_REPLY. Arm the wait under our own
+      // scheduler_lock, in the same critical section. Without this, the target
+      // (evdev on another CPU) can receive the REQ, run sys_resp() and try to
+      // wake us between the wake above and setting BLOCKED below — sys_resp's
+      // wake-check then sees us not-yet-BLOCKED and drops the wake, stranding
+      // us until the 3s timeout. Now that sys_recv's lost-wake is fixed, evdev
+      // replies fast, so this caller-side window is the more likely failure;
+      // close it the same way.
       //
       // req_replied is set by sys_resp under this lock before its wake-check;
-      // we clear it before arming and re-check it under the lock. If the reply
-      // already landed, stay RUNNING and return without sleeping (lost-wake
-      // guard). See sys_req for the full rationale.
-      proc->req_target_pid = target_pid;
-      proc->req_reply_buf = arg;
-      proc->req_reply_len = arg_size;
-      proc->req_result = 0;
-      proc->req_replied = 0;
-      proc->wait_timed_out = 0;
-
+      // it was cleared before the enqueue above and is re-checked under the
+      // lock. If the reply already landed, stay RUNNING and return without
+      // sleeping (lost-wake guard). See sys_req for the full rationale.
       if (sched_arm_timed_wait(proc, WAIT_REQ_REPLY,
                                sched_clock() + 3000000000ULL,
                                &proc->req_replied))
@@ -3761,6 +3765,16 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     hdr->ioctl.len = arg_size;
     hdr->ioctl.minor = ops->minor;
 
+    // Arm per-request reply state BEFORE enqueue — same lost-wake rationale
+    // as the inline path above (sys_resp publishes under our scheduler_lock;
+    // a post-enqueue clear could clobber a fast reply).
+    proc->req_target_pid = target_pid;
+    proc->req_reply_buf = arg;
+    proc->req_reply_len = arg_size;
+    proc->req_result = 0;
+    proc->req_replied = 0;
+    proc->wait_timed_out = 0;
+
     spin_lock(&target->recv_lock);
     uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
     if (next == target->recv_tail) {
@@ -3794,13 +3808,6 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     // Block caller on WAIT_REQ_REPLY. Arm the wait under our own scheduler_lock
     // — same caller-side lost-wake fix + req_replied guard as the inline path
     // above (see comment there).
-    proc->req_target_pid = target_pid;
-    proc->req_reply_buf = arg;
-    proc->req_reply_len = arg_size;
-    proc->req_result = 0;
-    proc->req_replied = 0;
-    proc->wait_timed_out = 0;
-
     if (sched_arm_timed_wait(proc, WAIT_REQ_REPLY,
                              sched_clock() + 3000000000ULL, &proc->req_replied))
       schedule();

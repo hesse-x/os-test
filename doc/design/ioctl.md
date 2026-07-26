@@ -89,6 +89,13 @@ RECV_IOCTL 的 union 布局（offset 相对 recv_msg）：
 
 ### 锁模型
 
+调用侧（sys_ioctl 两条路径 / sys_req / sys_msg_to / evdev broker consumer
+ioctl）统一遵守 **arm-before-enqueue** 不变式：`req_result`/`req_replied`
+（或 `msg_*`）等 per-request 字段在请求入队**之前**清零。sys_resp 在 caller
+的 scheduler_lock 下发布 result + replied=1，`sched_arm_timed_wait` 在同一把
+锁下 re-check replied 决定是否睡眠。若入队之后才清零，target 在另一 CPU
+上的快速回复会被清零覆盖（lost wake → 3s -ETIMEDOUT，bug.md Bug 1）。
+
 变长路径 sys_resp 的 CR3 switch 区间无锁，依赖 `caller->pid != caller_pid` 检查防 caller 已退出（caller 提前被 kill 时 sched_task_reap 设 pid=-1/cr3=0，sys_resp 检查后返回 ESRCH）。检查与 CR3 switch 间的 TOCTOU 窗口是既有竞态，变长路径不引入新风险。
 
 ### 回写数据约定

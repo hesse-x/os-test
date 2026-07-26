@@ -401,6 +401,20 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   if (copy_from_user(hdr->data, request, 56))
     return (int64_t)-EFAULT;
 
+  xtask *proc = current_task;
+  // Arm per-request reply state BEFORE enqueue: sys_resp publishes
+  // req_result/req_replied under our scheduler_lock; clearing them after
+  // enqueue could clobber an already-delivered reply from a fast target on
+  // another CPU (lost wake → timeout). The locked re-check in
+  // sched_arm_timed_wait then only ever observes a reply to THIS request.
+  proc->req_target_pid = target_pid;
+  proc->req_reply_buf = reply;
+  proc->req_reply_len = RECV_MSG_SIZE;
+  proc->req_result = 0;
+  proc->req_replied = 0; // cleared before arming so the post-arm check detects
+                         // only a reply to THIS request
+  proc->wait_timed_out = 0;
+
   // Enqueue to target's recv queue
   spin_lock(&target->recv_lock);
   uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
@@ -435,15 +449,6 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   // insert timer) under our own scheduler_lock so the target's sys_resp() can't
   // race between our wake above and setting BLOCKED — same lost-wake fix as
   // sys_recv / sys_ioctl proxy paths.
-  xtask *proc = current_task;
-  proc->req_target_pid = target_pid;
-  proc->req_reply_buf = reply;
-  proc->req_reply_len = RECV_MSG_SIZE;
-  proc->req_result = 0;
-  proc->req_replied = 0; // cleared before arming so the post-arm check detects
-                         // only a reply to THIS request
-  proc->wait_timed_out = 0;
-
   if (sched_arm_timed_wait(proc, WAIT_REQ_REPLY,
                            sched_clock() + 5000000000ULL, // 5 second timeout
                            &proc->req_replied))
@@ -874,6 +879,18 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
   hdr->msg.kmaddr = kbuf;
   hdr->msg.len = msg_len;
 
+  // Arm per-request reply state BEFORE enqueue — same lost-wake rationale as
+  // sys_req (sys_msg_resp publishes msg_result/msg_replied under our
+  // scheduler_lock; a post-enqueue clear could clobber a fast reply).
+  xtask *proc = current_task;
+  proc->msg_target_pid = target_pid;
+  proc->msg_reply_buf = (void __user *__force)reply_buf;
+  proc->msg_reply_len = reply_len;
+  proc->msg_result = 0;
+  proc->msg_replied = 0; // cleared before arming so the post-arm check detects
+                         // only a reply to THIS message
+  proc->wait_timed_out = 0;
+
   spin_lock(&target->recv_lock);
   uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
   if (next == target->recv_tail) {
@@ -902,15 +919,6 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
 
   // Block caller on WAIT_MSG_REPLY. Arm the wait under our own scheduler_lock
   // — same caller-side lost-wake fix as sys_req / sys_recv / sys_ioctl proxy.
-  xtask *proc = current_task;
-  proc->msg_target_pid = target_pid;
-  proc->msg_reply_buf = (void __user *__force)reply_buf;
-  proc->msg_reply_len = reply_len;
-  proc->msg_result = 0;
-  proc->msg_replied = 0; // cleared before arming so the post-arm check detects
-                         // only a reply to THIS message
-  proc->wait_timed_out = 0;
-
   if (sched_arm_timed_wait(proc, WAIT_MSG_REPLY, sched_clock() + 5000000000ULL,
                            &proc->msg_replied))
     schedule();

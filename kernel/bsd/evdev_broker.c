@@ -493,6 +493,18 @@ static long evdev_consumer_ioctl(struct xtask *proc, struct file *f,
   hdr->src = (uint32_t)proc->pid;
   __memcpy(hdr->data, req_data, 56);
 
+  /* Arm per-request reply state BEFORE enqueue（对齐 sys_req / sys_ioctl
+   * proxy 的 canonical 顺序）：sys_resp 在 caller scheduler_lock 下发布
+   * req_result/req_replied；若 enqueue 之后才清零，target 在另一 CPU 上
+   * 快速回复时，已送达的 reply 会被这里的清零覆盖（lost wake → 3s
+   * -ETIMEDOUT，bug.md Bug 1 的 test_libudev flaky 根因）。 */
+  proc->req_target_pid = target_pid;
+  proc->req_reply_buf = arg;
+  proc->req_reply_len = arg_size;
+  proc->req_result = 0;
+  proc->req_replied = 0;
+  proc->wait_timed_out = 0;
+
   /* Enqueue to target's recv queue（仿 sys_req）。target 的 recv() 会据此设
    * target->req_caller_pid = proc->pid，使 target 的 sys_resp 回到本进程。 */
   spin_lock(&target->recv_lock);
@@ -518,26 +530,11 @@ static long evdev_consumer_ioctl(struct xtask *proc, struct file *f,
       __wake_up(iwq, POLLIN);
   }
 
-  /* arm WAIT_REQ_REPLY（caller 侧 lost-wake guard，仿 sys_req:480-508） */
-  proc->req_target_pid = target_pid;
-  proc->req_reply_buf = arg;
-  proc->req_reply_len = arg_size;
-  proc->req_result = 0;
-  proc->req_replied = 0;
-  proc->wait_timed_out = 0;
-  proc->wait_deadline = sched_clock() + EVDEV_IOCTL_REPLY_TIMEOUT_NS;
-
-  int cpu = proc->assigned_cpu;
-  uint64_t fl2;
-  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &fl2);
-  bool need_sleep = !proc->req_replied;
-  if (need_sleep) {
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_REQ_REPLY;
-    sched_timer_queue_insert(cpu, proc);
-  }
-  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, fl2);
-  if (need_sleep)
+  /* arm WAIT_REQ_REPLY：locked re-check req_replied（sys_resp 在同一把
+   * scheduler_lock 下发布），reply 已送达则不睡眠。 */
+  if (sched_arm_timed_wait(proc, WAIT_REQ_REPLY,
+                           sched_clock() + EVDEV_IOCTL_REPLY_TIMEOUT_NS,
+                           &proc->req_replied))
     schedule();
 
   if (proc->wait_timed_out)

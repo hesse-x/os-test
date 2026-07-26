@@ -230,7 +230,7 @@ endif()
 # DEFS adds UNITY_INCLUDE_DOUBLE (on top of the shared UNITY_EXCLUDE_*): case 2
 # asserts via TEST_ASSERT_EQUAL_DOUBLE, which unity_internals.h:286 gates off
 # unless UNITY_INCLUDE_DOUBLE is defined at the test's compile time. Unity is
-# linked as libunity.a (UNITY_EXCLUDE_SETJMP_H/UNITY_EXCLUDE_MATH_H propagate
+# linked as libunity.a (UNITY_EXCLUDE_MATH_H propagates
 # from the unity target's PUBLIC compile_definitions to this test via
 # _collect_iface_compile_definitions), but UNITY_INCLUDE_DOUBLE is test-local
 # (only test_ffi needs double asserts), so it stays on this ELF's DEFS. Unity's

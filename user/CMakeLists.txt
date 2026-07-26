@@ -69,9 +69,12 @@ add_user_lib(m_so
 # Unity test framework (third_party 例外：编译期符号依赖，STATIC 链入 test ELF)
 # add_third_party_lib(unity STATIC ...)：关 warning(-w)，仅 link os_base_options 取共性基础项，
 # 不被我方 -Werror 门禁污染。test ELF 链 unity 替代内联 unity.c（消除 28 处内联 + 重复 DEFS）。
-# UNITY_EXCLUDE_SETJMP_H / UNITY_EXCLUDE_MATH_H：排除 host <setjmp.h>/<math.h>。freestanding +
-# -nostdlib 下 <sys/cdefs.h> 不被拉入，host math.h 的 __BEGIN_DECLS 等宏无法解析；Unity 自带
-# UNITY_IS_NAN/IS_INF fallback。定义挂在 unity target，经 INTERFACE 传给链入它的 test ELF。
+# UNITY_EXCLUDE_MATH_H：排除 host <math.h>。freestanding + -nostdlib 下 <sys/cdefs.h>
+# 不被拉入，host math.h 的 __BEGIN_DECLS 等宏无法解析；Unity 自带 UNITY_IS_NAN/IS_INF fallback。
+# 注意不要再加 UNITY_EXCLUDE_SETJMP_H：那会把 TEST_ABORT() 退化为 return，断言失败后
+# 测试继续执行（NULL 级联解引用杀掉整个测试二进制，bug.md Bug 1）。user/include/setjmp.h
+# + lib/setjmp.S 提供可用的 setjmp/longjmp，断言失败经 longjmp 正确中止单个测试。
+# 定义挂在 unity target，经 INTERFACE 传给链入它的 test ELF。
 add_third_party_lib(unity STATIC
     SOURCES ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c
     INCLUDE_DIRS
@@ -79,7 +82,7 @@ add_third_party_lib(unity STATIC
         ${CMAKE_SOURCE_DIR}/user/include
         ${CMAKE_SOURCE_DIR}/third_party/Unity/src
     INTERFACE_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/Unity/src)
-target_compile_definitions(unity PUBLIC UNITY_EXCLUDE_SETJMP_H UNITY_EXCLUDE_MATH_H UNITY_INCLUDE_DOUBLE)
+target_compile_definitions(unity PUBLIC UNITY_EXCLUDE_MATH_H UNITY_INCLUDE_DOUBLE)
 
 add_user_elf(hello  C SOURCES hello.c  LINK_LIBS c)
 add_user_dyn_elf(test_fpu C SOURCES test/test_fpu.c LINK_LIBS c)

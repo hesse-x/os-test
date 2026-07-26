@@ -91,7 +91,7 @@ endfunction()
 # compile definitions we must read them manually. Walks each lib's
 # INTERFACE_COMPILE_DEFINITIONS (transitively, via INTERFACE_LINK_LIBRARIES) and
 # collects unique -D entries. This lets test ELF link `unity` (whose
-# UNITY_EXCLUDE_SETJMP_H/UNITY_EXCLUDE_MATH_H are now PUBLIC on the unity target)
+# UNITY_EXCLUDE_MATH_H is now PUBLIC on the unity target)
 # instead of re-declaring those DEFS at every call site.
 function(_collect_iface_compile_definitions out_var)
     set(_seen "")
@@ -372,7 +372,7 @@ function(add_user_elf elf_name)
             endif()
         endforeach()
         # Propagate INTERFACE_COMPILE_DEFINITIONS from linked targets (e.g. unity's
-        # UNITY_EXCLUDE_SETJMP_H/UNITY_EXCLUDE_MATH_H) so consumers need not re-declare.
+        # UNITY_EXCLUDE_MATH_H) so consumers need not re-declare.
         _collect_iface_compile_definitions(_iface_defs ${ARG_LINK_LIBS})
         list(APPEND COMPILE_FLAGS ${_iface_defs})
     endif()
@@ -533,7 +533,7 @@ function(add_user_dyn_elf name)
             endif()
         endforeach()
         # Propagate INTERFACE_COMPILE_DEFINITIONS from linked targets (e.g. unity's
-        # UNITY_EXCLUDE_SETJMP_H/UNITY_EXCLUDE_MATH_H) so consumers need not re-declare.
+        # UNITY_EXCLUDE_MATH_H) so consumers need not re-declare.
         _collect_iface_compile_definitions(_iface_defs ${_all_link_libs})
         list(APPEND COMPILE_FLAGS ${_iface_defs})
     endif()

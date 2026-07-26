@@ -25,7 +25,7 @@
 #include <xos/socket.h>
 
 #define EVDEV_BITS_PER_LONG (sizeof(long) * 8)
-#define NBITS(x) ((((x) - 1) / EVDEV_BITS_PER_LONG) + 1)
+#define NBITS(x) ((((x)-1) / EVDEV_BITS_PER_LONG) + 1)
 #define LONG(x) ((x) / EVDEV_BITS_PER_LONG)
 #define OFF(x) ((x) % EVDEV_BITS_PER_LONG)
 
@@ -90,11 +90,16 @@ static int match_pattern(const char *pattern, const char *name) {
 static int device_is_keyboard(const char *devnode) {
   // Attempt to detect keyboard via EVIOCGBIT
   int fd = open(devnode, O_RDONLY);
-  if (fd < 0)
+  if (fd < 0) {
+    fprintf(stderr, "udev-shim: open(%s) failed errno=%d\n", devnode, errno);
     return 0;
+  }
   unsigned long bits[NBITS(EV_MAX + 1)];
   memset(bits, 0, sizeof(bits));
   int rc = ioctl(fd, EVIOCGBIT(0, sizeof(bits)), bits);
+  if (rc < 0)
+    fprintf(stderr, "udev-shim: EVIOCGBIT(%s) rc=%d errno=%d\n", devnode, rc,
+            errno);
   close(fd);
   if (rc < 0)
     return 0;
