@@ -165,6 +165,39 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
   cur->wait_event = WAIT_FUTEX;
   cur->state = BLOCKED;
+  // Re-check signal_pending AFTER arming the wait. A signal (e.g. SIGCANCEL
+  // from pthread_cancel) may have pended between the value check above
+  // (line ~116) and here — while cur was still RUNNING, so wake_process_any
+  // in deliver_signal_to was a no-op (it only wakes BLOCKED targets). Without
+  // this recheck, cur would block in schedule() with a pending signal and
+  // never be woken (the signal already fired its wake attempt, to no avail
+  // because the target was not yet BLOCKED) → lost wake-up / permanent hang
+  // (the test_pthread_join_cancel deadlock, see bug.md). Mirror Linux's
+  // interruptible-wait pattern: set TASK_INTERRUPTIBLE, then re-check
+  // signal_pending before schedule(). Abort the wait and let the normal
+  // syscall return path (xcall_dispatch → check_pending_signals) deliver the
+  // pending signal.
+  if (signal_pending_hook && signal_pending_hook(cur)) {
+    cur->state = RUNNING;
+    cur->wait_event = WAIT_NONE;
+    if (has_timeout)
+      sched_timer_queue_cancel(cur);
+    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+    // bucket->lock is still held from the value-check above (line ~116);
+    // remove from the waiter list directly. Re-acquiring it here would be a
+    // recursive same-CPU lock and trip spinlock.h's BUG_ON (the futex-wait
+    // signal-recheck deadlock).
+    if (cur->proc->futex_uaddr) {
+      list_remove(&cur->proc->futex_node);
+      cur->proc->futex_uaddr = 0;
+    }
+    spin_unlock_irqrestore(&bucket->lock, bflags);
+    // Same return value as the post-wakeup path: untimed→-ERESTART,
+    // timed→-EINTR. xcall_dispatch then runs check_pending_signals, which
+    // delivers the pending signal (e.g. SIGCANCEL → __pthread_cancel_check →
+    // pthread_exit).
+    return has_timeout ? (int64_t)-EINTR : (int64_t)-ERESTART;
+  }
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
   spin_unlock_irqrestore(&bucket->lock, bflags);
   schedule();

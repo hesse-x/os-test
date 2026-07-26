@@ -231,12 +231,16 @@ int normalize_path(const char *in, char *out, size_t outcap) {
 }
 
 /* SYS_MOUNT(source, target, fstype, flags, data) — Linux 5-param signature.
- * source/data currently reserved (passed 0/NULL; this OS mount has no source
- * concept and fstype takes no mount data).
+ * source is reserved (passed NULL; this OS mount has no source concept — it
+ * mounts an fstype onto a target path).
  * Permission: Linux requires CAP_SYS_ADMIN. This OS has no capability bitmap
  * — euid==0 is the established root stand-in (cf. kill_permitted in signal.c,
  * the setuid ladder in proc.c). Non-root → -EPERM. Revisit when a real
  * capability model lands (todo.md).
+ * data (arg5): passed through to mount_table.fs_data as a forward hook for
+ * future fstype mount-option parsing. No current fstype reads m->fs_data
+ * (NULL OK); a fstype that later consumes it must copy_from_user it under its
+ * own defined layout.
  * flags: MS_REMOUNT/MS_BIND are not implemented and rejected with -ENOSYS so a
  * caller cannot believe a remount/bind succeeded when it was silently dropped.
  * MS_RDONLY/NOSUID/NODEV/NOEXEC are accepted but have no effect (no permission
@@ -244,7 +248,6 @@ int normalize_path(const char *in, char *out, size_t outcap) {
 int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                   int64_t arg5, int64_t unused) {
   (void)arg1; // source: no source concept (mount fstype onto target); NULL OK
-  (void)arg5; // data: fstype takes no mount data
   (void)unused;
 
   /* euid==0 ≡ CAP_SYS_ADMIN (no capability bitmap in this OS; cf.
@@ -283,5 +286,9 @@ int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   if (!fs)
     return -ENODEV;
 
-  return mount_internal(fs, target, NULL);
+  /* data (arg5): raw user pointer stored as a forward hook — no fstype reads
+   * m->fs_data yet. A future fstype that parses mount options must
+   * copy_from_user this under its own defined layout (todo.md). */
+  void *fs_data = (void *)(uintptr_t)arg5;
+  return mount_internal(fs, target, fs_data);
 }

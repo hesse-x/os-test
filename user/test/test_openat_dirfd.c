@@ -206,7 +206,8 @@ void test_open_odirectory(void) {
   TEST_ASSERT_EQUAL_INT(ENOTDIR, errno);
 
   /* AT_FDCWD relative path → resolve from root, relative branch. */
-  int fd4 = openat(AT_FDCWD, "openat_dirfd_base/regfile", O_DIRECTORY | O_RDONLY);
+  int fd4 =
+      openat(AT_FDCWD, "openat_dirfd_base/regfile", O_DIRECTORY | O_RDONLY);
   TEST_ASSERT_EQUAL_INT(-1, fd4);
   TEST_ASSERT_EQUAL_INT(ENOTDIR, errno);
 

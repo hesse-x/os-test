@@ -862,8 +862,8 @@ uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
 // Bumps ref counts for pipe, SHM, file, inode, socket, TTY.
 // S06: also copies the per-fd close_on_exec bitmap so the child inherits the
 // parent's cloexec settings (Linux: fork/clone-without-CLONE_FILES copies).
-static void __attribute__((unused))
-copy_fd_table(files *parent_files, files *child_files) {
+static void __attribute__((unused)) copy_fd_table(files *parent_files,
+                                                  files *child_files) {
   // The parent fd table is mutated by concurrent sys_close/dup2 on another CPU
   // (fd_uninstall + file_put). Reading fd_table[fd] and later file_get(f) in
   // two separate steps opens a window: we read a stale f, the parent closes it
@@ -952,7 +952,7 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
 // ===================== sys_clone =====================
 
-// clone flag definitions (matches Linux)
+// clone flag definitions (matches Linux uapi, linux/sched.h)
 #define CLONE_VM 0x00000100
 #define CLONE_FILES 0x00000400
 #define CLONE_SIGHAND 0x00000800
@@ -963,25 +963,50 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 #define CLONE_SETTLS 0x00080000
 // S19: CLONE_PARENT — the new child shares the caller's parent (its parent_pid
 // is the caller's parent_pid, not the caller). Useful and simple; landed.
-#define CLONE_PARENT 0x00000080
+#define CLONE_PARENT 0x00008000
 
-// S19: namespace / io flags this kernel does not implement. Rejecting (rather
-// than silently ignoring) prevents a program from believing it ran in a private
-// namespace / io context when it actually ran globally. Values are the Linux
-// uapi constants (linux/sched.h): CLONE_NEWPID/NEWNET/NEWUSER/NEWNS/IO are
-// distinct bits; the ambiguous low-byte ns flags (NEWTIME) and the leftover
-// VFORK/SYSVSEM/PTRACE/CLEAR_SIGHAND are silently ignored (recorded in
-// todo.md).
+// CLONE_VFORK (0x4000): the parent should block until the child execs/exits.
+// This kernel has no completion primitive yet, so it is accepted but
+// downgraded to no-block (the parent does not suspend). Real vfork
+// synchronization is recorded in todo.md. Rejecting would break callers that
+// pass it harmlessly; the downgrade is safe because this OS has no libc
+// vfork/posix_spawn consumer that depends on strict parent suspension.
+#define CLONE_VFORK 0x00004000
+
+// CLONE_CLEAR_SIGHAND (bit 32): reset every child signal handler to SIG_DFL.
+// Mutually exclusive with CLONE_SIGHAND (Linux: -EINVAL if both) — checked in
+// the constraint block below, before CLONE_SIGHAND can share the parent's
+// signal_struct. Carried because `flags` is uint64_t (proc.c arg1 → rdi, full
+// 64-bit, no truncation).
+#define CLONE_CLEAR_SIGHAND 0x100000000ULL
+
+// S19 / S07: namespace / io / ptrace / sysvsem flags this kernel does not
+// implement. Rejecting (rather than silently ignoring) prevents a program from
+// believing it ran in a private namespace / io / traced / sysvsem-shared
+// context when it actually ran globally. Values are the Linux uapi constants
+// (linux/sched.h).
+//
+// Value-history note: CLONE_PARENT/NEWUTS/NEWIPC previously held wrong bits
+// (0x80/0x08000000/0x10000000), which collided with NEWTIME / each other and
+// made the unsupported mask merge bits and silently ignore the canonical
+// values. They are now aligned to Linux so a caller passing the canonical
+// value hits the right bit.
 #define CLONE_NEWNS 0x00020000
-#define CLONE_NEWUTS 0x08000000
-#define CLONE_NEWIPC 0x10000000
+#define CLONE_NEWUTS 0x04000000
+#define CLONE_NEWIPC 0x08000000
 #define CLONE_NEWUSER 0x10000000
 #define CLONE_NEWPID 0x20000000
 #define CLONE_NEWNET 0x40000000
+#define CLONE_NEWTIME 0x00000080
 #define CLONE_IO 0x80000000
+// PTRACE/SYSVSEM: this kernel has no ptrace subsystem and no SysV IPC, so
+// honoring these would let a caller believe a child is traced / sharing a
+// semaphore UNDO list when it is not. Reject instead of lying.
+#define CLONE_PTRACE 0x00002000
+#define CLONE_SYSVSEM 0x00040000
 #define CLONE_UNSUPPORTED_MASK                                                 \
   (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID |  \
-   CLONE_NEWNET | CLONE_IO)
+   CLONE_NEWNET | CLONE_NEWTIME | CLONE_PTRACE | CLONE_SYSVSEM | CLONE_IO)
 
 int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                   int64_t arg5) {
@@ -1013,6 +1038,11 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   if ((flags & CLONE_THREAD) && !(flags & CLONE_SIGHAND))
     return (int64_t)-EINVAL;
   if ((flags & CLONE_VM) && stack == 0)
+    return (int64_t)-EINVAL;
+  // S07: CLONE_CLEAR_SIGHAND is mutually exclusive with CLONE_SIGHAND. Linux
+  // returns -EINVAL when both are set. Checked here, before step 5 can share
+  // the parent's signal_struct, so there is no refcount to roll back.
+  if ((flags & CLONE_SIGHAND) && (flags & CLONE_CLEAR_SIGHAND))
     return (int64_t)-EINVAL;
 
   // 1. Allocate an xtask slot
@@ -1131,6 +1161,18 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
         (flags & CLONE_PARENT) ? parent->proc->signal->parent_pid : parent->pid;
     atomic_set(&child_bp->signal->thread_count, 1);
     atomic_set(&child_bp->signal->live_count, 1);
+    // S07: CLONE_CLEAR_SIGHAND (bit 32) — reset every child signal handler to
+    // SIG_DFL, clearing sa_flags/sa_mask as Linux does. Safe only on this
+    // independent-copy path: CLONE_SIGHAND (which shares the parent's
+    // signal_struct) is rejected above when combined with CLEAR_SIGHAND, so we
+    // never mutate the parent's handlers here.
+    if (flags & CLONE_CLEAR_SIGHAND) {
+      for (int s = 0; s < NSIG; s++) {
+        child_bp->signal->action[s].sa_handler = SIG_DFL;
+        child_bp->signal->action[s].sa_flags = 0;
+        child_bp->signal->action[s].sa_mask = 0;
+      }
+    }
   }
 
   // 6. tgid + thread-group count
