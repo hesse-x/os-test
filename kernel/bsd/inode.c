@@ -57,7 +57,9 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
   /* devtmpfs directories and device nodes have no FAT32 start_cluster to
    * use as an ino, and passing 0 collides with FAT32 files whose
    * start_cluster is 0 — allocate a unique ino from the dev range. */
-  ip->ino = (type == INODE_DEV || type == INODE_DIR) ? next_dev_ino++ : ino;
+  ip->ino = (type == INODE_DEV || type == INODE_DIR || type == INODE_LNK)
+                ? next_dev_ino++
+                : ino;
   /* ino=0 is a reserved sentinel (FAT32 empty files historically
    * collided here); the final hashed ino must never be 0. */
   ASSERT(ip->ino != 0);
@@ -65,6 +67,7 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
   ip->mode = (type == INODE_DIR)      ? 0040755
              : (type == INODE_DEV)    ? 0020000
              : (type == INODE_SOCKET) ? 0140000
+             : (type == INODE_LNK)    ? 0120777 /* S_IFLNK | 0777 */
                                       : 0100644;
   ip->uid = 0;
   ip->gid = 0;
@@ -76,6 +79,7 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
   ip->shm = NULL;
   ip->mount = NULL;
   ip->wq = NULL;
+  ip->atime = ip->mtime = ip->ctime = 0; /* 时间戳内存态:由 update_time 写 */
   list_init(&ip->i_flock);
   ip->i_flock_lock = SPINLOCK_INIT;
   ip->start_cluster = start_cluster;
@@ -133,6 +137,7 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
   ip->mode = (type == INODE_DIR)      ? 0040755
              : (type == INODE_DEV)    ? 0020000
              : (type == INODE_SOCKET) ? 0140000
+             : (type == INODE_LNK)    ? 0120777 /* S_IFLNK | 0777 */
                                       : 0100644;
   ip->uid = 0;
   ip->gid = 0;
@@ -144,6 +149,7 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
   ip->shm = NULL;
   ip->mount = NULL;
   ip->wq = NULL;
+  ip->atime = ip->mtime = ip->ctime = 0;
   list_init(&ip->i_flock);
   ip->i_flock_lock = SPINLOCK_INIT;
   ip->start_cluster = start_cluster;

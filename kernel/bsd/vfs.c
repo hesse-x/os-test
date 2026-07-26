@@ -101,7 +101,46 @@ void vfs_init(void) {
 
 /* path_walk:逐段 lookup 查目标 inode(已 inode_get,+1,调用者 put)。
  * relpath 始终在单个 mount 内(vfs_resolve 已剥离挂载点前缀);不做 fs 内
- * `..` 跨 mount 穿越。中间段须为 INODE_DIR,否则返 NULL。最后一段不校验类型。 */
+ * `..` 跨 mount 穿越。中间段须为 INODE_DIR,否则返 NULL。最后一段不校验类型。
+ *
+ * §3.3.3 symlink 跟随:中间段若为 INODE_LNK,经 follow_symlink 解析 target
+ * 串替换 dir 继续走(对齐 Linux walk 中间组件跟随);末段 LNK 原样返回——
+ * stat/access 等调用方决定是否跟随末段(AT_SYMLINK_NOFOLLOW / readlink 取
+ * link inode 本身)。SYMLINK_MAX 防 target 循环 → ELOOP。 */
+#define SYMLINK_MAX 40 /* 对齐 Linux MAXSYMLINKS */
+
+/* follow_symlink:跟随 LNK inode 的 target 串(经 i_op->readlink),返回解析
+ * 后的目标 inode(+1,调用者 put)。depth 防 target 循环 → ELOOP。target 绝对
+ * 路径从 root mount 重解(vfs_resolve);相对路径从 lnk 的父目录起解(本 OS
+ * tmpfs inode 无 parent_dir 回指,相对 target 罕见,fallback 从 root 走)。 */
+static struct inode *follow_symlink(struct inode *lnk, int *depth) {
+  if (!lnk || lnk->type != INODE_LNK || !lnk->i_op || !lnk->i_op->readlink)
+    return ERR_PTR(-EINVAL);
+  if (++(*depth) > SYMLINK_MAX)
+    return ERR_PTR(-ELOOP);
+  char target[256];
+  int n = lnk->i_op->readlink(lnk, target, sizeof(target));
+  if (n < 0)
+    return ERR_PTR(n);
+  if (n >= (int)sizeof(target))
+    return ERR_PTR(-ENAMETOOLONG);
+  target[n] = '\0';
+  if (target[0] == '/') {
+    char relpath[256];
+    struct mount_entry *m = vfs_resolve(target, relpath, sizeof(relpath));
+    if (!m)
+      return ERR_PTR(-ENOENT);
+    return path_walk(m, relpath); /* +1 */
+  }
+  /* 相对 target:本 OS tmpfs inode 无 parent_dir 回指,从 root 起解
+   * (软链相对 target 罕见;绝对 target 是常见用例)。 */
+  char relpath[256];
+  struct mount_entry *m = vfs_resolve(target, relpath, sizeof(relpath));
+  if (!m)
+    return ERR_PTR(-ENOENT);
+  return path_walk(m, relpath); /* +1 */
+}
+
 struct inode *path_walk(struct mount_entry *m, const char *relpath) {
   if (!m->fs->mount_root)
     return NULL;
@@ -109,6 +148,7 @@ struct inode *path_walk(struct mount_entry *m, const char *relpath) {
   if (!dir)
     return NULL;
   const char *p = relpath;
+  int sym_depth = 0; /* §3.3.3 SYMLINK_MAX 防 target 循环 */
   while (*p) {
     while (*p == '/')
       p++;
@@ -117,6 +157,11 @@ struct inode *path_walk(struct mount_entry *m, const char *relpath) {
     const char *seg = p;
     while (*p && *p != '/')
       p++;
+    /* 后续是否还有非斜杠段(决定本段是否"中间段"):跳过尾随斜杠后 *p 非空。 */
+    const char *after = p;
+    while (*after == '/')
+      after++;
+    int has_more = (*after != '\0');
     int seglen = p - seg;
     char name[256];
     if (seglen >= 256) {
@@ -134,6 +179,15 @@ struct inode *path_walk(struct mount_entry *m, const char *relpath) {
     dir = next;
     if (!dir)
       return NULL;
+    /* §3.3.3 中间段 symlink 跟随:本段非末段且为 LNK → follow_symlink 替换
+     * dir 为 target 解析结果(+1)。末段 LNK 原样返回(stat 决定跟随与否)。 */
+    if (has_more && dir->type == INODE_LNK) {
+      struct inode *resolved = follow_symlink(dir, &sym_depth);
+      inode_put(dir);
+      dir = resolved;
+      if (IS_ERR(dir))
+        return NULL; /* ELOOP/ENOENT/ENAMETOOLONG → 解析失败 */
+    }
   }
   return dir; /* 目标,+1,调用者 put */
 }
@@ -215,6 +269,7 @@ struct inode *path_walk_from(struct inode *start, const char *relpath) {
     return NULL;
   struct inode *dir = inode_get(start);
   const char *p = relpath;
+  int sym_depth = 0; /* §3.3.3 SYMLINK_MAX */
   while (*p) {
     while (*p == '/')
       p++;
@@ -223,6 +278,10 @@ struct inode *path_walk_from(struct inode *start, const char *relpath) {
     const char *seg = p;
     while (*p && *p != '/')
       p++;
+    const char *after = p;
+    while (*after == '/')
+      after++;
+    int has_more = (*after != '\0');
     int seglen = p - seg;
     char name[256];
     if (seglen >= 256) {
@@ -240,6 +299,15 @@ struct inode *path_walk_from(struct inode *start, const char *relpath) {
     dir = next;
     if (!dir)
       return NULL;
+    /* §3.3.3 中间段 symlink 跟随(同 path_walk)。相对 target 从 root 起解
+     * (本 OS tmpfs inode 无 parent_dir 回指)。 */
+    if (has_more && dir->type == INODE_LNK) {
+      struct inode *resolved = follow_symlink(dir, &sym_depth);
+      inode_put(dir);
+      dir = resolved;
+      if (IS_ERR(dir))
+        return NULL;
+    }
   }
   return dir; /* +1,调用者 put */
 }
@@ -318,6 +386,50 @@ struct inode *vfs_open_kern(const char *kpath) {
   if (!m)
     return NULL;
   return path_walk(m, relpath); /* +1,调用者 put */
+}
+
+/* inode_permission:按 euid 判定 mask 权限(Q4)。本 OS 有完整 permission ladder
+ * (proc.h uid/euid/suid/gid/egid/sgid,默认 0=root;test_setuid_saved 证 ladder
+ * 真在跑),故按 euid 判定非"无脑 root 放行"。返 0=允许,负=-EACCES/-ENOENT。 */
+int inode_permission(struct inode *ip, int mask) {
+  if (!ip)
+    return -ENOENT;
+  if (mask == F_OK)
+    return 0;                         /* 存在性:path_walk 成功即存在 */
+  uint32_t euid = current_proc->euid; /* proc.h:57 euid(default 0=root) */
+  if (euid == 0)
+    return 0; /* root 放行(CAP_DAC_OVERRIDE 等价) */
+  /* 非 root:按 mode 的 owner/group/other 位。euid 匹配 owner → owner 位;
+   * 否则 egid 匹配 gid → group 位;否则 other 位。 */
+  uint32_t mode = ip->mode;
+  uint32_t bits = (euid == ip->uid)                 ? (mode >> 6) & 7
+                  : (current_proc->egid == ip->gid) ? (mode >> 3) & 7
+                                                    : mode & 7;
+  if ((mask & R_OK) && !(bits & R_OK))
+    return -EACCES;
+  if ((mask & W_OK) && !(bits & W_OK))
+    return -EACCES;
+  if ((mask & X_OK) && !(bits & X_OK))
+    return -EACCES;
+  return 0;
+}
+
+/* generic_update_time:VFS 层默认时间戳更新(内存态,Q5)。按 which 位写非 OMIT
+ * 的时间戳。OMIT 哨兵由调用方(sys_utimensat)解释,此处只写显式传入的值。
+ * 各 fs .update_time 可置 NULL,VFS 回退到此。 */
+int generic_update_time(struct inode *ip, uint64_t at, uint64_t mt, uint64_t ct,
+                        int which) {
+  if (!ip)
+    return -ENOENT;
+  spin_lock(&ip->i_lock);
+  if ((which & ATIME_BIT))
+    ip->atime = at;
+  if ((which & MTIME_BIT))
+    ip->mtime = mt;
+  if ((which & CTIME_BIT))
+    ip->ctime = ct;
+  spin_unlock(&ip->i_lock);
+  return 0;
 }
 
 /* S19 §7: kernel-mode inode read for execve. Only regular files backed by a
@@ -667,6 +779,17 @@ int vfs_statx(int dirfd, const char *kpath, unsigned flags, struct statx *stx) {
     }
     if (!ip)
       return -ENOENT;
+    /* §3.3.4 末段 symlink 跟随:未设 AT_SYMLINK_NOFOLLOW 时跟随末段 LNK
+     * (stat 默认跟随,lstat 设 NOFOLLOW 取 link 本身)。中间段已由 path_walk
+     * 跟随;此处分理末段。depth 防 target 循环 → ELOOP。 */
+    if (ip->type == INODE_LNK && !(flags & AT_SYMLINK_NOFOLLOW)) {
+      int sym_depth = 0;
+      struct inode *resolved = follow_symlink(ip, &sym_depth);
+      inode_put(ip);
+      ip = resolved;
+      if (IS_ERR(ip))
+        return (int)PTR_ERR(ip);
+    }
     rc = -ENOSYS;
     if (ip->i_op && ip->i_op->getattr)
       rc = ip->i_op->getattr(ip, &ks);

@@ -15,10 +15,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "arch/x64/apic.h" /* sched_clock() — realtime ns for inode timestamps */
+#include "arch/x64/rtc.h" /* wall_clock_boot_ns — RTC-epoch baseline */
 #include "arch/x64/utils.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/page_cache.h"
 #include "kernel/driver/blk_dev.h"
+#include "kernel/xcore/atomic.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/spinlock.h"
@@ -383,6 +386,16 @@ static struct inode *fat32_iget(uint32_t ino, int type, uint64_t size,
   if (!ip)
     return NULL;
   ip->i_op = (type == INODE_DIR) ? &fat32_dir_iop : &fat32_file_iop;
+  /* Q5:fat32 inode 无 fs 内部强引用,utimensat 释放后可被回收,再 lookup 建
+   * 新 inode 时间戳回 0。cache miss(新建,refcount==1)时初始化 atime/mtime/
+   * ctime 为当前 realtime ns,使 stat 永远返非零 mtime(而非 0);utimensat 设
+   * 的显式值在 inode 回收后丢失(不落盘,可接受)。cache hit 复用旧 inode,
+   * 时间戳保留 utimensat 写入值。 */
+  if (refcount_read(&ip->i_count) == 1) {
+    uint64_t now =
+        __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
+    ip->atime = ip->mtime = ip->ctime = now;
+  }
   return ip;
 }
 
@@ -788,6 +801,14 @@ static int fat32_getattr(struct inode *ip, struct kstat *ks) {
   ks->st_size = (int64_t)ip->size;
   ks->st_blksize = (int64_t)fat32_bytes_per_cluster();
   ks->st_blocks = (ip->size + 511) / 512;
+  /* 时间戳(Q5 内存态):getattr 读 ns 拆 sec/nsec。FAT32 磁盘不存时间戳,
+   * inode 字段由 update_time/utimensat 写(reboot 后回 0,可接受)。 */
+  ks->st_atim.tv_sec = (int64_t)(ip->atime / 1000000000ULL);
+  ks->st_atim.tv_nsec = (int64_t)(ip->atime % 1000000000ULL);
+  ks->st_mtim.tv_sec = (int64_t)(ip->mtime / 1000000000ULL);
+  ks->st_mtim.tv_nsec = (int64_t)(ip->mtime % 1000000000ULL);
+  ks->st_ctim.tv_sec = (int64_t)(ip->ctime / 1000000000ULL);
+  ks->st_ctim.tv_nsec = (int64_t)(ip->ctime % 1000000000ULL);
   return 0;
 }
 

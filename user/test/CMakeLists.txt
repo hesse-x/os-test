@@ -195,6 +195,17 @@ if(TEST)
     add_user_dyn_elf(test_openat_dirfd C SOURCES test_openat_dirfd.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_stat_real C SOURCES test_stat_real.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_statx C SOURCES test_statx.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    # path-based inode 元数据/链接 syscall(§3.2/§3.5):access/faccessat 按 euid
+    # 判定(Q4);utimensat 内存时间戳(Q5)。对齐 test_stat_real 风格,FAT32+tmpfs
+    # 双夹具。阶段 3 link 部分经 TEST_LINK 启用(见 test_link_utimensat.c)。
+    add_user_dyn_elf(test_access C SOURCES test_access.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    add_user_dyn_elf(test_link_utimensat C SOURCES test_link_utimensat.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    # §3.3 symlink/readlink(tmpfs 真实现,Q2):round-trip / lstat vs stat /
+    # EEXIST / FAT32 ENOSYS / readlink 非 softlink EINVAL。对齐 test_stat_real。
+    add_user_dyn_elf(test_symlink C SOURCES test_symlink.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    # §3.4 link/linkat(tmpfs 硬链 + nlink 全链路,Q3):data 共享 / unlink 保
+    # 数据 nlink-- / 目录 EPERM / 跨 fs EXDEV / FAT32 EPERM / EEXIST / flags EINVAL。
+    add_user_dyn_elf(test_link C SOURCES test_link.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_vma_restructure C SOURCES test_vma_restructure.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_mmap_addr_hint C SOURCES test_mmap_addr_hint.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # S12: MAP_PRIVATE+fd file-backed mmap + demand-fault page-in + COW.

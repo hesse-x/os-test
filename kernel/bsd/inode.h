@@ -7,17 +7,28 @@
 #ifndef KERNEL_INODE_H
 #define KERNEL_INODE_H
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
-#include <stdint.h>
 
 #define INODE_REGULAR 1
 #define INODE_DIR 2
 #define INODE_DEV 3
 #define INODE_SOCKET 4
+#define INODE_LNK                                                              \
+  5 /* 符号链接:target 串由各 fs 自存(i_priv 或 fs 私有数据)     \
+     */
+
+/* utimensat / update_time 选择位:标记要更新的时间戳字段(对齐 Linux
+ * inode_operations.update_time 的 mask 语义)。 */
+#define ATIME_BIT 0x1
+#define MTIME_BIT 0x2
+#define CTIME_BIT 0x4
 
 struct inode;
 struct kstat;
@@ -40,6 +51,20 @@ struct inode_operations {
                 struct inode *new_dir, const char *new_name);
   int (*getattr)(struct inode *ip, struct kstat *ks);
   int (*setattr)(struct inode *ip, uint64_t size);
+  /* 符号链接 / 硬链接 / 权限 / 时间戳(对齐 Linux inode_operations 子集)。
+   * 各 fs 按能力挂载;NULL → VFS 层回退到通用实现或返 -ENOSYS/-EPERM。
+   *   symlink(dir,name,target):在 dir 下建名为 name、指向 target 的 LNK inode
+   *   link(dir,target,newname):在 dir 下建名为 newname 的硬链(target inode)
+   *   readlink(ip,buf,bufsiz):拷出 target 串到 buf,返回长度(不 NUL 终止)
+   *   permission(ip,mask):0=允许,负=-errno;NULL → VFS 通用 inode_permission
+   *   update_time(ip,at,mt,ct,which):按 which 位写 at/mt/ct;NULL → generic */
+  struct inode *(*symlink)(struct inode *dir, const char *name,
+                           const char *target);
+  int (*link)(struct inode *dir, struct inode *target, const char *newname);
+  int (*readlink)(struct inode *ip, char *buf, size_t bufsiz);
+  int (*permission)(struct inode *ip, int mask);
+  int (*update_time)(struct inode *ip, uint64_t at, uint64_t mt, uint64_t ct,
+                     int which);
 };
 
 struct inode {
@@ -69,6 +94,14 @@ struct inode {
   uint32_t start_cluster;
   uint32_t dir_start_cluster;
   int dir_entry_index;
+
+  /* POSIX timestamps in ns since epoch (CLOCK_REALTIME). In-memory only —
+   * FAT32 stores no timestamps (Q5: llvm libc utimensat tests don't survive
+   * reboot); getattr reads these. Updated by update_time / generic_update_time.
+   */
+  uint64_t atime;
+  uint64_t mtime;
+  uint64_t ctime;
 
   /* Hash chain */
   struct inode *hash_next;

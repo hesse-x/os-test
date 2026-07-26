@@ -100,6 +100,16 @@ static int tmpfs_rename(struct inode *old_dir, const char *old_name,
                         struct inode *new_dir, const char *new_name);
 static int tmpfs_getattr(struct inode *ip, struct kstat *ks);
 static int tmpfs_setattr(struct inode *ip, uint64_t size);
+/* §3.3 symlink:在 dir 下建名为 name、指向 target 的 LNK inode。 */
+static struct inode *tmpfs_symlink(struct inode *dir, const char *name,
+                                   const char *target);
+/* §3.3 readlink:拷出 LNK inode 的 target 串到 buf,返回长度(不 NUL 终止)。 */
+static int tmpfs_readlink(struct inode *ip, char *buf, size_t bufsiz);
+/* §3.4 link:在 dir 下建名为 newname 的硬链(target inode)。target 须非目录
+ * (POSIX EPERM)、同 fs(EXDEV)、重名 EEXIST。目录项持新 inode 引用 + nlink++。
+ */
+static int tmpfs_link(struct inode *dir, struct inode *target,
+                      const char *newname);
 
 static const struct inode_operations tmpfs_dir_iop = {
     .lookup = tmpfs_lookup,
@@ -110,11 +120,21 @@ static const struct inode_operations tmpfs_dir_iop = {
     .rename = tmpfs_rename, /* 本方案新增 */
     .getattr = tmpfs_getattr,
     .setattr = tmpfs_setattr,
+    .symlink = tmpfs_symlink, /* §3.3 symlink */
+    .link = tmpfs_link,       /* §3.4 硬链接 */
 };
 
 static const struct inode_operations tmpfs_file_iop = {
     .getattr = tmpfs_getattr,
     .setattr = tmpfs_setattr,
+};
+
+/* LNK inode iop:readlink 读 target(存 tmpfs_inode_info.data);getattr/setattr
+ * 复用文件版(LNK inode size=target 串长)。 */
+static const struct inode_operations tmpfs_lnk_iop = {
+    .getattr = tmpfs_getattr,
+    .setattr = tmpfs_setattr,
+    .readlink = tmpfs_readlink,
 };
 
 /* ===== i_op 实现 ===== */
@@ -131,7 +151,14 @@ static int tmpfs_getattr(struct inode *ip, struct kstat *ks) {
   ks->st_blksize = 4096;
   ks->st_blocks = (ip->size + 4095) / 4096;
   /* S08: st_uid/st_gid 现报真实 ip->uid/gid(创建时由 sys_open/mkdir/mknod 设)。
-   * st_rdev/st_*tim 仍留 0(本 OS 无设备号语义/时间戳,记 todo)。 */
+   * 时间戳(Q5):内存态 atime/mtime/ctime,getattr 读出 ns 拆 sec/nsec。
+   * st_rdev 仍留 0。 */
+  ks->st_atim.tv_sec = (int64_t)(ip->atime / 1000000000ULL);
+  ks->st_atim.tv_nsec = (int64_t)(ip->atime % 1000000000ULL);
+  ks->st_mtim.tv_sec = (int64_t)(ip->mtime / 1000000000ULL);
+  ks->st_mtim.tv_nsec = (int64_t)(ip->mtime % 1000000000ULL);
+  ks->st_ctim.tv_sec = (int64_t)(ip->ctime / 1000000000ULL);
+  ks->st_ctim.tv_nsec = (int64_t)(ip->ctime % 1000000000ULL);
   return 0;
 }
 
@@ -210,7 +237,9 @@ static struct inode *tmpfs_new_node(struct tmpfs_inode_info *parent_ti,
     return NULL;
   if (keep_mode)
     ip->mode = (uint32_t)mode;
-  ip->i_op = (type == INODE_DIR) ? &tmpfs_dir_iop : &tmpfs_file_iop;
+  ip->i_op = (type == INODE_DIR)   ? &tmpfs_dir_iop
+             : (type == INODE_LNK) ? &tmpfs_lnk_iop
+                                   : &tmpfs_file_iop;
   struct tmpfs_inode_info *ti = new_tmpfs_info(ip, parent_ti);
   if (!ti) {
     inode_put(ip);
@@ -268,6 +297,106 @@ static struct inode *tmpfs_create(struct inode *dir, const char *name,
   return ip; /* i_count=2：1 目录项 + 1 返回给调用者(由调用者 put) */
 }
 
+/* §3.3 tmpfs_symlink:在 dir 下建名为 name、指向 target 的 LNK inode。
+ * target 串存 tmpfs_inode_info.data(NUL 终止);ip->size=strlen(target),
+ * 使 getattr 报 st_size=target 串长、readlink 读 ip->size 为长度。
+ * i_count=2(对齐 tmpfs_create):1 目录项 + 1 返回给调用者(由调用者 put)。 */
+static struct inode *tmpfs_symlink(struct inode *dir, const char *name,
+                                   const char *target) {
+  struct tmpfs_inode_info *parent_ti = (struct tmpfs_inode_info *)dir->i_priv;
+  if (!parent_ti)
+    return ERR_PTR(-EFAULT);
+  /* 重名检查：tmpfs_lookup 返 +1 引用，须 put 平衡 */
+  struct inode *exist = tmpfs_lookup(dir, name);
+  if (exist) {
+    inode_put(exist);
+    return ERR_PTR(-EEXIST);
+  }
+  size_t tlen = __strlen(target);
+  if (tlen >= 256) /* RELPATH_MAX:内核 path 解析 256 字节,软链目标超长无意义 */
+    return ERR_PTR(-ENAMETOOLONG);
+  struct inode *ip = tmpfs_new_node(parent_ti, name, INODE_LNK, 0, 0);
+  if (!ip)
+    return ERR_PTR(-ENOMEM);
+  struct tmpfs_inode_info *ti = (struct tmpfs_inode_info *)ip->i_priv;
+  ti->data = kmalloc(tlen + 1);
+  if (!ti->data) {
+    inode_put(ip); /* 摘目录项引用 + 调用者引用 → 0 触发 inode kfree */
+    return ERR_PTR(-ENOMEM);
+  }
+  __memcpy(ti->data, target, tlen + 1);
+  ti->size = tlen;
+  ti->cap = tlen + 1;
+  ip->size = tlen;
+  return ip; /* i_count=2 */
+}
+
+/* §3.3 tmpfs_readlink:拷出 LNK inode 的 target 串到 buf,返回长度(POSIX:
+ * 不 NUL 终止)。target 存 tmpfs_inode_info.data,长度 = ip->size。bufsiz 截断
+ * 由调用方(sys_readlink)处理;此处按 bufsiz 拷 min(size,bufsiz) 字节。 */
+static int tmpfs_readlink(struct inode *ip, char *buf, size_t bufsiz) {
+  if (!ip || ip->type != INODE_LNK)
+    return -EINVAL;
+  struct tmpfs_inode_info *ti = (struct tmpfs_inode_info *)ip->i_priv;
+  if (!ti || !ti->data)
+    return -EIO; /* i_priv 应指向存 target 的 info;无 data 视为 I/O 错 */
+  size_t n = (ti->size < bufsiz) ? ti->size : bufsiz;
+  __memcpy(buf, ti->data, n);
+  return (int)n;
+}
+
+/* §3.4 tmpfs_link:在 dir 下建名为 newname 的硬链(指向 target inode)。
+ * 对齐 Linux tmpfs_link:
+ *   - target 须非目录(POSIX:硬链目录 → EPERM;仅 root 可,本 OS 不开)
+ *   - 重名 → EEXIST
+ *   - 新建 tmpfs_inode_info 挂新目录项,inode_get(target) 持目录项引用,
+ *     target->nlink++(目录项计数)。
+ * 跨 fs 由 do_linkat 保证:target 与 newdir 同 mount(path_walk 与
+ * path_walk_parent 在同一 mount 内解析);真跨 fs(link FAT32 文件到 tmpfs)
+ * 的 target 来自 fat32 mount,newdir->i_op->link 派发到 fat32 iop(link==NULL)
+ * → do_linkat 返 EPERM。故此处无需 mount 比较(且 inode.mount 惰性设置,
+ * inode_create 初始化 NULL、仅 sys_open/stat 路径设值,比较会误判 EXDEV)。 */
+static int tmpfs_link(struct inode *dir, struct inode *target,
+                      const char *newname) {
+  if (!dir || !target || !newname)
+    return -EFAULT;
+  if (target->type == INODE_DIR)
+    return -EPERM;
+  struct tmpfs_inode_info *parent_ti = (struct tmpfs_inode_info *)dir->i_priv;
+  if (!parent_ti)
+    return -EFAULT;
+  /* 重名检查:tmpfs_lookup 返 +1 引用,须 put 平衡。 */
+  struct inode *exist = tmpfs_lookup(dir, newname);
+  if (exist) {
+    inode_put(exist);
+    return -EEXIST;
+  }
+  /* 新建 info 挂新目录项(头插 parent_ti->children)。data/size 留空——硬链
+   * 目录项是名字→inode 的映射,内容来自 target inode 本身,新 info 不持数据。 */
+  struct tmpfs_inode_info *ti = new_tmpfs_info(target, parent_ti);
+  if (!ti)
+    return -ENOMEM;
+  int i = 0;
+  while (newname[i] && i < 255) {
+    ti->name[i] = newname[i];
+    i++;
+  }
+  ti->name[i] = '\0';
+  /* 目录项持 target inode 引用(对齐 tmpfs_new_node:250-260):inode_get 使
+   * 文件存在期间 inode 不被释放,与原目录项共享同一 inode。 */
+  inode_get(target);
+  spin_lock(&parent_ti->lock);
+  ti->sibling = parent_ti->children;
+  parent_ti->children = ti;
+  spin_unlock(&parent_ti->lock);
+  /* nlink++:目录项计数。i_lock 保护 nlink(对齐 setattr/getattr 的 i_lock 用)。
+   */
+  spin_lock(&target->i_lock);
+  target->nlink++;
+  spin_unlock(&target->i_lock);
+  return 0;
+}
+
 static int tmpfs_mkdir(struct inode *dir, const char *name, int mode) {
   (void)mode;
   struct tmpfs_inode_info *parent_ti = (struct tmpfs_inode_info *)dir->i_priv;
@@ -283,6 +412,14 @@ static int tmpfs_mkdir(struct inode *dir, const char *name, int mode) {
   if (!ip)
     return -ENOMEM;
   inode_put(ip); /* mkdir 不返 inode，平衡 tmpfs_new_node 出口的 +1 返回引用 */
+  /* §3.4 nlink 维护:新子目录使父目录 nlink++(目录的 "."/".." 自引用 + 子项
+   * 计数);新目录自身 nlink=2("." 自引 + ".." 指父)。对齐 Linux tmpfs_mkdir。 */
+  spin_lock(&dir->i_lock);
+  dir->nlink++;
+  spin_unlock(&dir->i_lock);
+  spin_lock(&ip->i_lock);
+  ip->nlink = 2;
+  spin_unlock(&ip->i_lock);
   return 0;
 }
 
@@ -305,6 +442,15 @@ static int tmpfs_unlink(struct inode *dir, const char *name) {
       struct inode *ip = c->inode;
       int last = (refcount_read(&ip->i_count) == 1);
       int is_dir = (ip->type == INODE_DIR);
+      /* §3.4 nlink 维护:unlink 摘目录项 → ip->nlink--(对齐 link 的 ++)。
+       * 在 spin_unlock 前调整,避免与 getattr/stat 的 i_lock 竞争。归 0 由
+       * inode_put 回收(目录项引用释放),nlink 不再被读。 */
+      if (!is_dir) {
+        spin_lock(&ip->i_lock);
+        if (ip->nlink > 0) /* 防御:不应为 0(unlink 已摘的项不会再被找到) */
+          ip->nlink--;
+        spin_unlock(&ip->i_lock);
+      }
       spin_unlock(&parent_ti->lock);
       inode_put(ip); /* 摘目录项的引用；若 i_count 归 0 触发 inode kfree */
       if (last && !is_dir) {
@@ -499,6 +645,11 @@ static int tmpfs_rmdir(struct inode *dir, const char *name) {
         parent_ti->children = c->sibling;
       struct inode *ip = c->inode;
       spin_unlock(&parent_ti->lock);
+      /* §3.4 nlink 维护:rmdir 子目录使父目录 nlink--(对齐 mkdir 的 ++)。
+       * 在 ip 释放前调整父 nlink;ip 自身随 inode_put 回收(nlink 不再被读)。 */
+      spin_lock(&dir->i_lock);
+      dir->nlink--;
+      spin_unlock(&dir->i_lock);
       kfree(c);
       inode_put(ip);
       return 0;

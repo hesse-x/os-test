@@ -40,10 +40,13 @@ global:
     ffs; strcasecmp; strncasecmp;
 
     /* <unistd.h> */
-    access; close; dup; dup2; _exit; ftruncate; getcwd; getpid; gettid;
+    access; faccessat; close; dup; dup2; _exit; ftruncate; getcwd; getpid; gettid;
     ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; pipe2; read;
     rmdir; sched_yield; sleep; ttyname; unlink; unlinkat; rename; renameat;
     usleep; write;
+    utimensat;
+    symlink; symlinkat; readlinkat;
+    link; linkat;
     getuid; geteuid; getgid; getegid; getppid; getpgrp; umask;
     gethostname; sethostname; alarm; pause;
     truncate; fsync; sync;

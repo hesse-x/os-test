@@ -17,6 +17,7 @@
 #include <string.h> // strlen (rename cwd 相对化)
 #include <syscall.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <sys/ioctl.h>
@@ -29,6 +30,7 @@
 #include <xos/fcntl.h>
 #include <xos/ioctl.h>
 #include <xos/socket.h>
+#include <xos/statx.h>
 #include <xos/syscall_asm.h>
 #include <xos/syscall_nums.h>
 
@@ -415,19 +417,94 @@ int lstat(const char *path, struct stat *st) {
   return do_stat_path(path, AT_SYMLINK_NOFOLLOW, st);
 }
 
-// ===================== access =====================
+// ===================== access / faccessat / utimensat =====================
+// access(path,mode):检查进程对 path 的 mode(R_OK/W_OK/X_OK/F_OK)权限。
+// 现走真实 sys_access syscall(内核 inode_permission 按 euid 判定,Q4),
+// 取代旧的 stat 兜底实现(旧实现忽略 mode,FAT32 单 root 恒放行)。
 int access(const char *path, int mode) {
   if (!path) {
     errno = EFAULT;
     return -1;
   }
+  return sys_access(path, mode);
+}
 
-  // F_OK: just check if file exists via stat
-  struct stat st;
-  if (stat(path, &st) != 0)
+// faccessat(dirfd,path,mode,flags):access 的 dirfd 相对变体。AT_FDCWD ≡
+// 当前根(内核无 per-process CWD)。flags 透传 AT_EACCESS/AT_SYMLINK_NOFOLLOW/
+// AT_EMPTY_PATH(内核校验)。
+int faccessat(int dirfd, const char *path, int mode, int flags) {
+  if (!path) {
+    errno = EFAULT;
     return -1;
-  (void)mode; // ignore R_OK/W_OK/X_OK — no permissions in FAT32
-  return 0;
+  }
+  return sys_faccessat(dirfd, path, mode, flags);
+}
+
+// utimensat(dirfd,path,times,flags):设 path 的 atime/mtime。times 各项
+// tv_nsec=UTIME_NOW(=now)/UTIME_OMIT(不变);times=NULL → atime=mtime=now
+// (需写权限)。flags 仅 AT_SYMLINK_NOFOLLOW(本 OS 无 symlink,接受同语义)。
+int utimensat(int dirfd, const char *path, const struct timespec times[2],
+              int flags) {
+  if (path && !path[0]) {
+    errno = EINVAL;
+    return -1;
+  }
+  return sys_utimensat(dirfd, path, times, flags);
+}
+
+// ===================== symlink / readlink (§3.3) =====================
+// symlink(target, linkpath):建指向 target 的符号链接。走 sys_symlink
+// (内核 tmpfs 真实现,FAT32 → ENOSYS/EPERM)。errno 转换在 syscall.h 薄封装。
+int symlink(const char *target, const char *linkpath) {
+  if (!target || !linkpath) {
+    errno = EFAULT;
+    return -1;
+  }
+  return sys_symlink(target, linkpath);
+}
+int symlinkat(const char *target, int newdirfd, const char *linkpath) {
+  if (!target || !linkpath) {
+    errno = EFAULT;
+    return -1;
+  }
+  return sys_symlinkat(target, newdirfd, linkpath);
+}
+// readlink(path, buf, bufsiz):读 path 指向软链的 target 到 buf,返回长度
+// (不 NUL 终止)。走 sys_readlink(内核 readlink 钩子)。bufsiz==0 → EINVAL
+// (glibc 依赖;内核已校验,此处重复防御对齐 glibc 契约)。
+ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
+  if (!path || !buf) {
+    errno = EFAULT;
+    return -1;
+  }
+  return sys_readlink(path, buf, bufsiz);
+}
+ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
+  if (!path || !buf) {
+    errno = EFAULT;
+    return -1;
+  }
+  return sys_readlinkat(dirfd, path, buf, bufsiz);
+}
+
+// ===================== link / linkat (§3.4 硬链接 + nlink)
+// ===================== link(old, new):建硬链 new → old(共享 inode,nlink++)。走
+// sys_link (内核 tmpfs_link 真实现:nlink 维护 + 跨 fs EXDEV + 目录 EPERM; FAT32
+// → EPERM)。
+int link(const char *oldpath, const char *newpath) {
+  if (!oldpath || !newpath) {
+    errno = EFAULT;
+    return -1;
+  }
+  return sys_link(oldpath, newpath);
+}
+int linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath,
+           int flags) {
+  if (!oldpath || !newpath) {
+    errno = EFAULT;
+    return -1;
+  }
+  return sys_linkat(olddirfd, oldpath, newdirfd, newpath, flags);
 }
 
 // ===================== unlink (via sys_unlink syscall) =====================

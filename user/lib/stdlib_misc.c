@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -332,14 +333,6 @@ int chmod(const char *path, mode_t mode) {
 }
 
 int remove(const char *path) { return unlink(path); }
-
-ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
-  (void)path;
-  (void)buf;
-  (void)bufsiz;
-  errno = ENOSYS;
-  return -1;
-}
 
 ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
   (void)lineptr;

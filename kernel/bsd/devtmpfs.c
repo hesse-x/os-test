@@ -263,6 +263,13 @@ static int devtmpfs_getattr(struct inode *ip, struct kstat *ks) {
   ks->st_nlink = 1;
   ks->st_size = 0;
   ks->st_blksize = 4096;
+  /* 时间戳(Q5 内存态):getattr 读 ns 拆 sec/nsec。 */
+  ks->st_atim.tv_sec = (int64_t)(ip->atime / 1000000000ULL);
+  ks->st_atim.tv_nsec = (int64_t)(ip->atime % 1000000000ULL);
+  ks->st_mtim.tv_sec = (int64_t)(ip->mtime / 1000000000ULL);
+  ks->st_mtim.tv_nsec = (int64_t)(ip->mtime % 1000000000ULL);
+  ks->st_ctim.tv_sec = (int64_t)(ip->ctime / 1000000000ULL);
+  ks->st_ctim.tv_nsec = (int64_t)(ip->ctime % 1000000000ULL);
   return 0;
 }
 

@@ -2862,17 +2862,257 @@ int64_t sys_sendfile(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                      int64_t a6) {
   return -ENOSYS;
 }
+/* §3.3 do_symlinkat:symlinkat 的共同实现(内核串)。ktarget/klink 已 copy_
+ * from_user。解析 linkpath 的父目录 + 末段名,调 dir->i_op->symlink;FAT32
+ * (symlink==NULL) → -ENOSYS。目标已存在 → -EEXIST。 */
+static int do_symlinkat(const char *ktarget, int newdirfd, const char *klink) {
+  struct inode *dir;
+  char lname[256];
+  int err;
+  if (klink[0] == '/') {
+    char relpath[256];
+    struct mount_entry *m = vfs_resolve(klink, relpath, sizeof(relpath));
+    if (!m)
+      return -ENOENT;
+    err = path_walk_parent(m, relpath, &dir, lname, sizeof(lname));
+  } else {
+    struct inode *start = resolve_dirfd_start(newdirfd);
+    if (IS_ERR(start))
+      return (int)PTR_ERR(start);
+    char relpath[256];
+    if (normalize_path(klink, relpath, sizeof(relpath)) < 0) {
+      inode_put(start);
+      return -ENAMETOOLONG;
+    }
+    err = path_walk_parent_from(start, relpath, &dir, lname, sizeof(lname));
+    inode_put(start);
+  }
+  if (err) {
+    if (dir)
+      inode_put(dir);
+    return err;
+  }
+  if (!dir->i_op || !dir->i_op->symlink) {
+    inode_put(dir);
+    return -ENOSYS; /* FAT32 物理不支持 symlink */
+  }
+  /* 目标已存在 → EEXIST。lookup 返 +1 引用,须 put 平衡。 */
+  struct inode *exist = dir->i_op->lookup(dir, lname);
+  if (exist) {
+    inode_put(exist);
+    inode_put(dir);
+    return -EEXIST;
+  }
+  struct inode *ip = dir->i_op->symlink(dir, lname, ktarget); /* i_count=2 */
+  inode_put(dir);
+  if (IS_ERR(ip))
+    return (int)PTR_ERR(ip);
+  inode_put(ip); /* 平衡 symlink 出口的 +1 返回引用,目录项留 1 */
+  return 0;
+}
+
+/* §3.3 do_readlinkat:readlinkat 的共同实现(内核串)。kpath 已 copy_from_user。
+ * 不跟随末段 symlink(readlink 语义:取 link inode 本身)。INODE_LNK 校验 +
+ * readlink 钩子;拷出 target 到内核 kbuf 再 copy_to_user 截断 bufsiz(Linux
+ * 语义:返 min(实际长度, bufsiz),不 NUL 终止)。 */
+static int do_readlinkat(int dirfd, const char *kpath, char __user *ubuf,
+                         size_t bufsiz) {
+  if (bufsiz == 0)
+    return -EINVAL; /* Linux:bufsiz==0 → EINVAL(非 POSIX,但 glibc 依赖) */
+  struct inode *ip;
+  if (kpath[0] == '/') {
+    char relpath[256];
+    struct mount_entry *m = vfs_resolve(kpath, relpath, sizeof(relpath));
+    if (!m)
+      return -ENOENT;
+    ip = path_walk(m, relpath); /* +1;path_walk 跟随中间段,末段 LNK 原样返回 */
+  } else {
+    struct inode *start = resolve_dirfd_start(dirfd);
+    if (IS_ERR(start))
+      return (int)PTR_ERR(start);
+    char relpath[256];
+    if (normalize_path(kpath, relpath, sizeof(relpath)) < 0) {
+      inode_put(start);
+      return -ENAMETOOLONG;
+    }
+    ip = path_walk_from(start, relpath); /* +1 */
+    inode_put(start);
+  }
+  if (!ip)
+    return -ENOENT;
+  if (ip->type != INODE_LNK || !ip->i_op || !ip->i_op->readlink) {
+    inode_put(ip);
+    return -EINVAL; /* 非软链 → EINVAL(Linux readlink 语义) */
+  }
+  char kbuf[256];
+  int n = ip->i_op->readlink(ip, kbuf, sizeof(kbuf));
+  inode_put(ip);
+  if (n < 0)
+    return n;
+  int wn = (n < (int)bufsiz) ? n : (int)bufsiz; /* 截断返 bufsiz(Linux 语义) */
+  if (copy_to_user(ubuf, kbuf, wn))
+    return -EFAULT;
+  return wn;
+}
+
+/* §3.4 do_linkat:linkat 的共同实现(内核串)。kold/knew 已 copy_from_user。
+ * 解析 old 的目标 inode(follow 语义见下)+ new 的父目录 + 末段名,调
+ * newdir->i_op->link;FAT32(link==NULL) → -EPERM。目标已存在 → EEXIST。
+ *
+ * Linux linkat flags:默认 0 = 跟随 old 的 symlink(若 old 是软链,链其目标);
+ * AT_SYMLINK_FOLLOW(0x400) 显式跟随(与默认同);无 NOFOLLOW 位(linkat 不
+ * 支持 AT_SYMLINK_NOFOLLOW,故 old 恒跟随)。本 OS 用 vfs_resolve 的 follow
+ * 行为(path_walk 跟随中间段、末段由调用方定)——此处 old 取跟随末段的结果
+ * (stat 语义),对齐 Linux link(默认跟随)。 */
+static int do_linkat(int olddirfd, const char *kold, int newdirfd,
+                     const char *knew, int flags) {
+  if (flags & ~AT_SYMLINK_FOLLOW)
+    return -EINVAL;
+  /* 解析 old 目标 inode(+1,调用者 put)。绝对路径走 mount 表;相对走 dirfd。
+   * follow=true:跟随末段 symlink(stat 语义,Linux link 默认)。
+   * m_old:target 解析归属的 mount(绝对路径=vfs_resolve 的 m;相对路径=dirfd
+   * 的 start 所在 mount,见下)。用于 VFS 层跨 fs EXDEV 判定(对齐 Linux
+   * vfs_link:target->i_sb != newdir->i_sb → EXDEV),不依赖惰性 inode.mount
+   * 字段(inode_create 初始化 NULL、仅 sys_open/stat 路径设值,fs 层比较误判)。
+   */
+  struct inode *target;
+  struct mount_entry *m_old = NULL;
+  if (kold[0] == '/') {
+    char relpath[256];
+    m_old = vfs_resolve(kold, relpath, sizeof(relpath));
+    if (!m_old)
+      return -ENOENT;
+    target = path_walk(m_old, relpath); /* +1 */
+  } else {
+    struct inode *start = resolve_dirfd_start(olddirfd);
+    if (IS_ERR(start))
+      return (int)PTR_ERR(start);
+    /* 相对路径 target 与 olddirfd 同 mount:dirfd 指向的目录 inode 归属的
+     * mount 即 target 的 mount。优先用 inode.mount(若 dirfd 经 sys_open
+     * 解析过已设);否则 fallback root mount("/"),与 mount_of_inode 语义一致。 */
+    m_old = mount_of_inode(start);
+    char relpath[256];
+    if (normalize_path(kold, relpath, sizeof(relpath)) < 0) {
+      inode_put(start);
+      return -ENAMETOOLONG;
+    }
+    target = path_walk_from(start, relpath); /* +1 */
+    inode_put(start);
+  }
+  if (!target) {
+    return -ENOENT;
+  }
+
+  /* 解析 new 的父目录 + 末段名(不建末段,link 在父目录下加新名)。
+   * m_new:new 归属 mount,与 m_old 同源取(绝对路径=vfs_resolve 的 m;相对路径
+   * =dirfd start 所属 mount)。不依赖惰性 inode.mount(tmpfs 经 path_walk_parent
+   * 取出的 newdir.mount 仍为 NULL,fallback 会误判为 root mount)。 */
+  struct inode *newdir;
+  char newname[256];
+  struct mount_entry *m_new = NULL;
+  int err;
+  if (knew[0] == '/') {
+    char relpath[256];
+    m_new = vfs_resolve(knew, relpath, sizeof(relpath));
+    if (!m_new) {
+      inode_put(target);
+      return -ENOENT;
+    }
+    err = path_walk_parent(m_new, relpath, &newdir, newname, sizeof(newname));
+  } else {
+    struct inode *start = resolve_dirfd_start(newdirfd);
+    if (IS_ERR(start)) {
+      inode_put(target);
+      return (int)PTR_ERR(start);
+    }
+    m_new = mount_of_inode(start);
+    char relpath[256];
+    if (normalize_path(knew, relpath, sizeof(relpath)) < 0) {
+      inode_put(start);
+      inode_put(target);
+      return -ENAMETOOLONG;
+    }
+    err = path_walk_parent_from(start, relpath, &newdir, newname,
+                                sizeof(newname));
+    inode_put(start);
+  }
+  if (err) {
+    if (newdir)
+      inode_put(newdir);
+    inode_put(target);
+    return err;
+  }
+  /* 跨 fs EXDEV 先于 EPERM 判定(对齐 Linux vfs_link:target->i_sb != dir->i_sb
+   * → EXDEV 优先于 dir->i_op->link NULL 检查)。m_old/m_new 同源取自 mount 解析,
+   * 不依赖惰性 inode.mount。 */
+  if (m_old != m_new) {
+    inode_put(newdir);
+    inode_put(target);
+    return -EXDEV;
+  }
+  if (!newdir->i_op || !newdir->i_op->link) {
+    inode_put(newdir);
+    inode_put(target);
+    return -EPERM; /* FAT32 无硬链接 → EPERM(Linux fat 对 link 返 EPERM) */
+  }
+  err = newdir->i_op->link(newdir, target, newname);
+  inode_put(newdir);
+  inode_put(target);
+  return err;
+}
+
 int64_t sys_link(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                  int64_t a6) {
-  return -ENOSYS;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+  /* link(old, new) = linkat(AT_FDCWD, old, AT_FDCWD, new, 0)。 */
+  const char __user *uold = (const char __user *__force)a1;
+  const char __user *unew = (const char __user *__force)a2;
+  if (!uold || !unew)
+    return -EFAULT;
+  char kold[256], knew[256];
+  if (strncpy_from_user(kold, uold, sizeof(kold)) < 0)
+    return -EFAULT;
+  if (strncpy_from_user(knew, unew, sizeof(knew)) < 0)
+    return -EFAULT;
+  return do_linkat(AT_FDCWD, kold, AT_FDCWD, knew, 0);
 }
 int64_t sys_symlink(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                     int64_t a6) {
-  return -ENOSYS;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+  /* symlink(target, linkpath) = symlinkat(target, AT_FDCWD, linkpath)。 */
+  const char __user *utarget = (const char __user *__force)a1;
+  const char __user *ulink = (const char __user *__force)a2;
+  if (!utarget || !ulink)
+    return -EFAULT;
+  char ktarget[256];
+  if (strncpy_from_user(ktarget, utarget, sizeof(ktarget)) < 0)
+    return -EFAULT;
+  char klink[256];
+  if (strncpy_from_user(klink, ulink, sizeof(klink)) < 0)
+    return -EFAULT;
+  return do_symlinkat(ktarget, AT_FDCWD, klink);
 }
 int64_t sys_readlink(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                      int64_t a6) {
-  return -ENOSYS;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+  /* readlink(path, buf, bufsiz) = readlinkat(AT_FDCWD, path, buf, bufsiz)。 */
+  const char __user *upath = (const char __user *__force)a1;
+  char __user *ubuf = (char __user *__force)a2;
+  size_t bufsiz = (size_t)a3;
+  if (!upath || !ubuf)
+    return -EFAULT;
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return -EFAULT;
+  return do_readlinkat(AT_FDCWD, kpath, ubuf, bufsiz);
 }
 int64_t sys_chmod(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                   int64_t a6) {
@@ -2900,15 +3140,56 @@ int64_t sys_fchown(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 }
 int64_t sys_linkat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                    int64_t a6) {
-  return -ENOSYS;
+  (void)a5;
+  (void)a6;
+  /* linkat(olddirfd, old, newdirfd, new, flags)。 */
+  int olddirfd = (int)a1;
+  const char __user *uold = (const char __user *__force)a2;
+  int newdirfd = (int)a3;
+  const char __user *unew = (const char __user *__force)a4;
+  int flags = (int)a5;
+  if (!uold || !unew)
+    return -EFAULT;
+  char kold[256], knew[256];
+  if (strncpy_from_user(kold, uold, sizeof(kold)) < 0)
+    return -EFAULT;
+  if (strncpy_from_user(knew, unew, sizeof(knew)) < 0)
+    return -EFAULT;
+  return do_linkat(olddirfd, kold, newdirfd, knew, flags);
 }
 int64_t sys_symlinkat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                       int64_t a5, int64_t a6) {
-  return -ENOSYS;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+  /* symlinkat(target, newdirfd, linkpath)。 */
+  const char __user *utarget = (const char __user *__force)a1;
+  int newdirfd = (int)a2;
+  const char __user *ulink = (const char __user *__force)a3;
+  if (!utarget || !ulink)
+    return -EFAULT;
+  char ktarget[256], klink[256];
+  if (strncpy_from_user(ktarget, utarget, sizeof(ktarget)) < 0)
+    return -EFAULT;
+  if (strncpy_from_user(klink, ulink, sizeof(klink)) < 0)
+    return -EFAULT;
+  return do_symlinkat(ktarget, newdirfd, klink);
 }
 int64_t sys_readlinkat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                        int64_t a5, int64_t a6) {
-  return -ENOSYS;
+  (void)a5;
+  (void)a6;
+  /* readlinkat(dirfd, path, buf, bufsiz)。 */
+  int dirfd = (int)a1;
+  const char __user *upath = (const char __user *__force)a2;
+  char __user *ubuf = (char __user *__force)a3;
+  size_t bufsiz = (size_t)a4;
+  if (!upath || !ubuf)
+    return -EFAULT;
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return -EFAULT;
+  return do_readlinkat(dirfd, kpath, ubuf, bufsiz);
 }
 int64_t sys_fchmodat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                      int64_t a6) {
@@ -2924,10 +3205,6 @@ int64_t sys_fchownat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   (void)a3;
   (void)a4;
   return 0;
-}
-int64_t sys_utimensat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
-                      int64_t a5, int64_t a6) {
-  return -ENOSYS;
 }
 int64_t sys_clock_settime(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                           int64_t a5, int64_t a6) {
@@ -2967,18 +3244,203 @@ int64_t sys_setitimer(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
 }
 
 // ===================== trivial-return stubs (C2 group) =====================
-int64_t sys_access(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
-                   int64_t a6) {
-  (void)a1;
-  (void)a2;
-  return 0;
+
+/* ===================== path-based inode 元数据/链接 syscall
+ * ===================== 9
+ * 个:access(21)/faccessat(269)/readlink(89)/readlinkat(267)/link(86)/
+ * linkat(265)/symlink(88)/symlinkat(266)/utimensat(280)。服务「在本 OS 上编译
+ * llvm libc」目标,语义对齐 glibc/Linux(Q6 严格 flags)。
+ *
+ * 解析模型:绝对路径 → mount 表最长前缀匹配(vfs_resolve)+ path_walk;
+ * 相对路径(dirfd)→ resolve_dirfd_start + path_walk_from。AT_FDCWD ≡ root
+ * (内核无 per-process CWD,libc 调用前已拼绝对路径)。
+ * 权限(Q4):inode_permission 按 euid 判定,非"无脑 root 放行"(本 OS 有完整
+ * permission ladder,proc.h uid/euid/...,test_setuid_saved 证 ladder 真在跑)。
+ * 时间戳(Q5):inode 内存态 atime/mtime/ctime,getattr 读;不落盘 FAT32
+ * (llvm libc utimensat test 不跨重启)。UTIME_NOW/OMIT 见 uapi fcntl.h。
+ * symlink/link(Q2/Q3):tmpfs/devtmpfs 真实现(阶段2/3);FAT32 物理不支持 →
+ * symlink/link 返 -EPERM/-ENOSYS(readlink 同)。详见 tmp1.md。
+ */
+
+/* do_faccessat:access(path,mode)=faccessat(AT_FDCWD,path,mode,0) 的共同实现。
+ * kpath 为内核字符串(调用方已 copy_from_user)。flags 严格校验(Q6)。 */
+static int do_faccessat(int dirfd, const char *kpath, int mode, int flags) {
+  if (mode & ~(R_OK | W_OK | X_OK | F_OK))
+    return -EINVAL;
+  if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+    return -EINVAL;
+
+  struct inode *ip;
+  if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+    /* stat fd 本身:复用 vfs_statx 的 fd 路径。 */
+    if (dirfd < 0)
+      return -EBADF;
+    xtask *proc = current_task;
+    rcu_read_lock();
+    struct file *f = fd_lookup(proc->proc->files, dirfd);
+    if (!f) {
+      rcu_read_unlock();
+      return -EBADF;
+    }
+    file_get(f);
+    rcu_read_unlock();
+    int r = f->inode ? inode_permission(f->inode, mode) : -EBADF;
+    file_put(f);
+    return r;
+  }
+
+  if (kpath[0] == '/') {
+    char relpath[256];
+    struct mount_entry *m = vfs_resolve(kpath, relpath, sizeof(relpath));
+    if (!m)
+      return -ENOENT;
+    ip = path_walk(m, relpath); /* +1 */
+  } else {
+    struct inode *start = resolve_dirfd_start(dirfd);
+    if (IS_ERR(start))
+      return (int)PTR_ERR(start);
+    ip = path_walk_from(start, kpath); /* +1 */
+    inode_put(start);
+  }
+  if (!ip)
+    return -ENOENT;
+  int r = inode_permission(ip, mode);
+  inode_put(ip);
+  return r;
 }
+
+int64_t sys_access(int64_t a1, int64_t a2, int64_t unused1, int64_t unused2,
+                   int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  const char __user *upath = (const char __user *__force)a1;
+  int mode = (int)a2;
+  if (!upath)
+    return -EFAULT;
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return -EFAULT;
+  return do_faccessat(AT_FDCWD, kpath, mode, 0);
+}
+
 int64_t sys_faccessat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
-                      int64_t a5, int64_t a6) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  return 0;
+                      int64_t unused5, int64_t unused6) {
+  (void)unused5;
+  (void)unused6;
+  int dirfd = (int)a1;
+  const char __user *upath = (const char __user *__force)a2;
+  int mode = (int)a3;
+  int flags = (int)a4;
+  if (!upath)
+    return -EFAULT;
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return -EFAULT;
+  return do_faccessat(dirfd, kpath, mode, flags);
+}
+
+/* do_utimensat:utimensat 的共同实现。kpath 内核串;times 为 NULL 时 atime=
+ * mtime=now(需写权限)。UTIME_NOW/OMIT 见 uapi。flags 仅 AT_SYMLINK_NOFOLLOW
+ * 合法(本 OS 无 symlink,接受但语义同 follow;Q6 严格校验未知位)。 */
+static int do_utimensat(int dirfd, const char *kpath, struct timespec *ktimes,
+                        int flags) {
+  if (flags & ~AT_SYMLINK_NOFOLLOW)
+    return -EINVAL;
+
+  uint64_t na, nm; /* atime/mtime ns;UINT64_MAX=OMIT 哨兵,不写该字段 */
+  if (ktimes) {
+    /* 校验 tv_nsec:合法值 ∈ [0,1e9) ∪ {UTIME_NOW,UTIME_OMIT}(Q6 严格)。
+     * 不改写 ktimes——NOW/OMIT 的判定在下方 na/nm 计算时仍需原值。 */
+    for (int i = 0; i < 2; i++) {
+      if (ktimes[i].tv_nsec == UTIME_NOW || ktimes[i].tv_nsec == UTIME_OMIT)
+        continue;
+      if (ktimes[i].tv_nsec < 0 || ktimes[i].tv_nsec >= 1000000000L)
+        return -EINVAL;
+    }
+    uint64_t now =
+        __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
+    na = (ktimes[0].tv_nsec == UTIME_OMIT) ? UINT64_MAX
+         : (ktimes[0].tv_nsec == UTIME_NOW)
+             ? now
+             : (uint64_t)ktimes[0].tv_sec * 1000000000ULL +
+                   (uint64_t)ktimes[0].tv_nsec;
+    nm = (ktimes[1].tv_nsec == UTIME_OMIT) ? UINT64_MAX
+         : (ktimes[1].tv_nsec == UTIME_NOW)
+             ? now
+             : (uint64_t)ktimes[1].tv_sec * 1000000000ULL +
+                   (uint64_t)ktimes[1].tv_nsec;
+  } else {
+    /* times=NULL:atime=mtime=now,需写权限(对齐 Linux)。 */
+    uint64_t now =
+        __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
+    na = nm = now;
+  }
+
+  struct inode *ip;
+  int need_write_perm = !ktimes; /* times=NULL 需写权限 */
+  if (kpath[0] == '/') {
+    char relpath[256];
+    struct mount_entry *m = vfs_resolve(kpath, relpath, sizeof(relpath));
+    if (!m)
+      return -ENOENT;
+    ip = path_walk(m, relpath); /* +1 */
+  } else {
+    struct inode *start = resolve_dirfd_start(dirfd);
+    if (IS_ERR(start))
+      return (int)PTR_ERR(start);
+    ip = path_walk_from(start, kpath); /* +1 */
+    inode_put(start);
+  }
+  if (!ip)
+    return -ENOENT;
+  if (need_write_perm) {
+    int r = inode_permission(ip, W_OK);
+    if (r) {
+      inode_put(ip);
+      return r;
+    }
+  }
+  int which = ((na != UINT64_MAX) ? ATIME_BIT : 0) |
+              ((nm != UINT64_MAX) ? MTIME_BIT : 0);
+  int err;
+  if (ip->i_op && ip->i_op->update_time)
+    err = ip->i_op->update_time(ip, na, nm, 0, which);
+  else
+    err = generic_update_time(ip, na, nm, 0, which);
+  inode_put(ip);
+  return err;
+}
+
+int64_t sys_utimensat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
+                      int64_t unused5, int64_t unused6) {
+  (void)unused5;
+  (void)unused6;
+  int dirfd = (int)a1;
+  const char __user *upath = (const char __user *__force)a2;
+  const struct timespec __user *utimes =
+      (const struct timespec __user *)(uintptr_t)a3;
+  int flags = (int)a4;
+
+  char kpath[256];
+  if (upath) {
+    if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+      return -EFAULT;
+  } else {
+    /* path=NULL:作用于 dirfd 本身(对齐 Linux utimensat(2))。 */
+    kpath[0] = '\0';
+    flags |= AT_EMPTY_PATH;
+  }
+
+  struct timespec kt[2];
+  struct timespec *kp = NULL;
+  if (utimes) {
+    if (copy_from_user(kt, utimes, sizeof(kt)))
+      return -EFAULT;
+    kp = kt;
+  }
+  return do_utimensat(dirfd, kpath, kp, flags);
 }
 
 // ===================== Thin wrappers (A group) =====================

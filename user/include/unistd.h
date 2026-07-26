@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <sys/cdefs.h>
 #include <sys/types.h>
+#include <time.h>      /* struct timespec — utimensat(2) signature */
+#include <xos/fcntl.h> /* F_OK/R_OK/W_OK/X_OK + AT_* (shared kernel+user uapi) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,11 +23,6 @@ extern "C" {
 #define SEEK_END 2
 #define SEEK_DATA 3
 #define SEEK_HOLE 4
-
-#define F_OK 0
-#define R_OK 4
-#define W_OK 2
-#define X_OK 1
 
 #define STDIN_FILENO 0
 #define STDOUT_FILENO 1
@@ -51,6 +48,20 @@ LIBC_EXPORT int memfd_create(const char *name, unsigned int flags);
 LIBC_EXPORT unsigned int sleep(unsigned seconds);
 LIBC_EXPORT int usleep(unsigned usec);
 LIBC_EXPORT int access(const char *path, int mode);
+LIBC_EXPORT int faccessat(int dirfd, const char *path, int mode, int flags);
+LIBC_EXPORT int utimensat(int dirfd, const char *path,
+                          const struct timespec times[2], int flags);
+/* §3.3 symlink/readlink — path-based 链接 + 读软链 target。 */
+LIBC_EXPORT int symlink(const char *target, const char *linkpath);
+LIBC_EXPORT int symlinkat(const char *target, int newdirfd,
+                          const char *linkpath);
+LIBC_EXPORT ssize_t readlink(const char *path, char *buf, size_t bufsiz);
+LIBC_EXPORT ssize_t readlinkat(int dirfd, const char *path, char *buf,
+                               size_t bufsiz);
+/* §3.4 link/linkat — path-based 硬链接(nlink 全链路)。 */
+LIBC_EXPORT int link(const char *oldpath, const char *newpath);
+LIBC_EXPORT int linkat(int olddirfd, const char *oldpath, int newdirfd,
+                       const char *newpath, int flags);
 LIBC_EXPORT int unlink(const char *path);
 LIBC_EXPORT int unlinkat(int dirfd, const char *path, int flags);
 LIBC_EXPORT int rmdir(const char *path);

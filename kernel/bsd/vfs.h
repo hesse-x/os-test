@@ -38,6 +38,16 @@ int path_walk_parent_from(struct inode *start, const char *relpath,
 struct inode *resolve_dirfd_start(int dirfd);
 struct inode *vfs_open_kern(const char *kpath);
 
+/* inode_permission:按 euid 判定 mask(R_OK/W_OK/X_OK/F_OK)权限(Q4)。root 放行;
+ * 非 root 按 mode 的 owner/group/other 位。返 0=允许,负=-EACCES/-ENOENT。
+ * 通用实现:各 fs .permission 暂置 NULL,VFS 回退到本函数。 */
+int inode_permission(struct inode *ip, int mask);
+/* generic_update_time:VFS 层默认时间戳更新(内存态,Q5)。按 which(ATIME_BIT/
+ * MTIME_BIT/CTIME_BIT 组合)写非 OMIT 的时间戳。各 fs .update_time 可置 NULL,
+ * VFS 回退到此。 */
+int generic_update_time(struct inode *ip, uint64_t at, uint64_t mt, uint64_t ct,
+                        int which);
+
 /* S19 §7: kernel-mode inode-read helper for execve/elf_loader. Reads `count`
  * bytes at `offset` from inode `ip` into a KERNEL-space buffer `buf` and
  * returns the byte count (>=0) or a negative errno. Unlike f_op->read (fd-I/O,

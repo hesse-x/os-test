@@ -129,5 +129,19 @@ _Static_assert(sizeof(struct flock) == 32, "flock size (x86-64)");
 #define AT_EMPTY_PATH                                                          \
   0x1000 /* S07: fstatat/openat operate on dirfd itself when path=="" */
 #define AT_NO_AUTOMOUNT 0x800
+#define AT_SYMLINK_FOLLOW                                                      \
+  0x400 /* linkat: follow symlink at linkpath creation */
+
+/* access(2)/faccessat(2) mode bits. Shared kernel+user uapi so the kernel
+ * inode_permission() and the user-side access() agree on the same literals. */
+#define F_OK 0 /* file exists */
+#define R_OK 4 /* test for read permission */
+#define W_OK 2 /* test for write permission */
+#define X_OK 1 /* test for execute (search) permission */
+
+/* utimensat times[] special tv_nsec values (Linux uapi). Used by sys_utimensat
+ * to set atime/mtime to now or leave them unchanged. */
+#define UTIME_NOW 1073741822  /* (1U<<30)-2 */
+#define UTIME_OMIT 1073741823 /* (1U<<30)-1 */
 
 #endif /* _COMMON_FCNTL_H */

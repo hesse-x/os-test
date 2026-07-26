@@ -590,9 +590,110 @@ static inline int sys_unlink(const char *path) {
   return 0;
 }
 
+// access(2)/faccessat(2)/utimensat(2) — path-based inode 元数据/时间戳
+// syscall 薄封装(对齐 sys_unlink 模式)。errno 转换在 user/lib/file.cc 的
+// POSIX 封装层。
+static inline int sys_access(const char *path, int mode) {
+  int64_t r = __syscall2(SYS_ACCESS, (int64_t)(uintptr_t)path, (int64_t)mode);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_faccessat(int dirfd, const char *path, int mode,
+                                int flags) {
+  int64_t r =
+      __syscall4(SYS_FACCESSAT, (int64_t)dirfd, (int64_t)(uintptr_t)path,
+                 (int64_t)mode, (int64_t)flags);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_utimensat(int dirfd, const char *path,
+                                const struct timespec times[2], int flags) {
+  int64_t r =
+      __syscall4(SYS_UTIMENSAT, (int64_t)dirfd, (int64_t)(uintptr_t)path,
+                 (int64_t)(uintptr_t)times, (int64_t)flags);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
 static inline int sys_rename(const char *oldpath, const char *newpath) {
   int64_t r = __syscall2(SYS_RENAME, (int64_t)(uintptr_t)oldpath,
                          (int64_t)(uintptr_t)newpath);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+// symlink(2)/readlink(2) — path-based 链接/读取软链 target(§3.3)。errno
+// 转换在 user/lib/file.cc 的 POSIX 封装层。
+static inline int sys_symlink(const char *target, const char *linkpath) {
+  int64_t r = __syscall2(SYS_SYMLINK, (int64_t)(uintptr_t)target,
+                         (int64_t)(uintptr_t)linkpath);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+static inline int sys_symlinkat(const char *target, int newdirfd,
+                                const char *linkpath) {
+  int64_t r = __syscall3(SYS_SYMLINKAT, (int64_t)(uintptr_t)target,
+                         (int64_t)newdirfd, (int64_t)(uintptr_t)linkpath);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+static inline int64_t sys_readlink(const char *path, char *buf, size_t bufsiz) {
+  int64_t r = __syscall3(SYS_READLINK, (int64_t)(uintptr_t)path,
+                         (int64_t)(uintptr_t)buf, (int64_t)bufsiz);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return r;
+}
+static inline int64_t sys_readlinkat(int dirfd, const char *path, char *buf,
+                                     size_t bufsiz) {
+  int64_t r =
+      __syscall4(SYS_READLINKAT, (int64_t)dirfd, (int64_t)(uintptr_t)path,
+                 (int64_t)(uintptr_t)buf, (int64_t)bufsiz);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return r;
+}
+
+// link(2)/linkat(2) — path-based 硬链接(§3.4 nlink 全链路)。errno 转换在
+// user/lib/file.cc 的 POSIX 封装层。
+static inline int sys_link(const char *oldpath, const char *newpath) {
+  int64_t r = __syscall2(SYS_LINK, (int64_t)(uintptr_t)oldpath,
+                         (int64_t)(uintptr_t)newpath);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+static inline int sys_linkat(int olddirfd, const char *oldpath, int newdirfd,
+                             const char *newpath, int flags) {
+  int64_t r = __syscall5(SYS_LINKAT, (int64_t)olddirfd,
+                         (int64_t)(uintptr_t)oldpath, (int64_t)newdirfd,
+                         (int64_t)(uintptr_t)newpath, (int64_t)flags);
   if (r < 0) {
     errno = -(int)r;
     return -1;
