@@ -44,10 +44,13 @@ endfunction()
 #                     [SO_LINK_LIBS lib ...]            — SHARED 运行时库的 .so 依赖（记 DT_NEEDED）
 #                     [GEN_HEADERS hdr ...]             — configure_file 产物，编译期依赖追踪
 #                     [LINK_DEPS target ...])           — 编译前置依赖（如 fourcc 表生成 target）
+#                     [IMAGE_PATH dest] [IMAGE_ARTIFACT name] [IMAGE_PARTITION <1|2>] [NO_IMAGE]
 # 缺省 SHARED-only 运行时库（分支 B：custom-command .so）；STATIC 标记 Unity 类编译期链入。
+# IMAGE_*：磁盘镜像 manifest 登记（reface_cmake.md §6）。SHARED 自动默认 lib/lib<out>.so @ root；
+#   STATIC 无自动默认（编译期链入，不单独进镜像）。NO_IMAGE 关闭 SHARED 默认。
 function(add_third_party_lib name)
-    set(option_args STATIC C)
-    set(one_args OUTPUT_NAME)
+    set(option_args STATIC C NO_IMAGE)
+    set(one_args OUTPUT_NAME IMAGE_PATH IMAGE_ARTIFACT IMAGE_PARTITION)
     set(multi_args SOURCES INCLUDE_DIRS INTERFACE_INCLUDE_DIRS FLAGS SO_LINK_LIBS GEN_HEADERS LINK_DEPS)
     cmake_parse_arguments(ARG "${option_args}" "${one_args}" "${multi_args}" ${ARGN})
 
@@ -56,6 +59,11 @@ function(add_third_party_lib name)
         set(_output_name ${ARG_OUTPUT_NAME})
     else()
         set(_output_name ${name})
+    endif()
+
+    # IMAGE_PARTITION default = 2 (root); ESP placement must be explicit.
+    if(NOT DEFINED ARG_IMAGE_PARTITION)
+        set(ARG_IMAGE_PARTITION 2)
     endif()
 
     # 共性编译 flag：os_base_options 等价（freestanding + -m64 + config -O/-g），不含 WARN_FLAGS。
@@ -164,6 +172,20 @@ function(add_third_party_lib name)
             # INTERFACE 属性。约定：需要 third_party 头的消费者额外 link ${name}_iface。
             # 现有调用方（drm_test_link/modetest 等）仍通过原 INCLUDE_DIRS 或 INTERFACE 路径取头，
             # 暂不强制改消费者（阶段 5 统一收口）。
+        endif()
+
+        # 磁盘镜像 manifest（reface_cmake.md §6）：SHARED 运行时 .so 自动默认
+        # lib/lib<out>.so @ root。NO_IMAGE 关闭默认；IMAGE_PATH/IMAGE_ARTIFACT/IMAGE_PARTITION 覆盖。
+        if(NOT ARG_NO_IMAGE)
+            set(_img_artifact "lib${_output_name}.so")
+            if(ARG_IMAGE_ARTIFACT)
+                set(_img_artifact ${ARG_IMAGE_ARTIFACT})
+            endif()
+            set(_img_dest "lib/lib${_output_name}.so")
+            if(ARG_IMAGE_PATH)
+                set(_img_dest ${ARG_IMAGE_PATH})
+            endif()
+            os_image_path(${name} ${_img_artifact} ${_img_dest} PARTITION ${ARG_IMAGE_PARTITION})
         endif()
     endif()
 

@@ -106,9 +106,10 @@ Terminal 和驱动不链接 libc，使用 syscall 原语。
 mkdisk.sh 生成单盘两分区 build/disk.img（192MB）：
 - sfdisk 创建 MBR 分区表（分区1: ESP type 0xEF FAT16 1MB 对齐，分区2: 根 type 0x0C FAT32）
 - mkfs.fat 格式化两个分区（ESP FAT16，根 FAT32 512B 簇）
-- mmd + mcopy 创建 FHS 目录结构并复制文件
-- ESP 放 \EFI\BOOT\BOOTX64.EFI + myos.elf + init.elf（stub 把 init.elf 读进内存传给内核，initrd-style）
-- 根分区放 /driver、/usr/bin、/usr/lib、/lib、/local 等用户态文件
+- 产物清单由 CMake manifest 驱动：`build/image_manifest.txt`（configure 时由 `os_image_path()` 累积 + `os_write_image_manifest()` 写出，每行 `build_relpath<TAB>image_path<TAB>partition(1=ESP,2=root)`）。mkdisk 读 manifest 做依赖检查、目录骨架派生（按深度升序 mmd）与 mcopy，不再硬编码产物列表。各 helper（add_user_elf/dyn_elf/ldso/lib、add_third_party_lib）经 `IMAGE_PATH`/`NO_IMAGE`/`IMAGE_ARTIFACT`/`IMAGE_PARTITION` 参数登记镜像归属，`add_user_dyn_elf` 默认 `test/<name>.elf`、SHARED 默认 `lib/lib<out>.so`。详见 `build_script/cmake/image_rules.cmake` 与 reface_cmake.md §6。
+- ESP 放 \EFI\BOOT\BOOTX64.EFI + myos.elf + init.elf（stub 把 init.elf 读进内存传给内核，initrd-style；三者经 manifest partition=1 登记）
+- 根分区放 /driver、/usr/bin、/usr/lib、/lib、/local、/test 等用户态文件（经 manifest partition=2 登记）
+- 非构建产物（libinput quirks、README）保持显式 mcopy（不经 manifest），mkdisk 注释标明
 
 ### 添加新源文件
 
@@ -122,6 +123,7 @@ mkdisk.sh 生成单盘两分区 build/disk.img（192MB）：
 - 内核规则：build_script/cmake/kernel_rules.cmake
 - 用户态规则：build_script/cmake/user_rules.cmake
 - 第三方规则：build_script/cmake/third_party_rules.cmake
+- 磁盘镜像 manifest：build_script/cmake/image_rules.cmake
 - 链接脚本：build_script/linker.ld
 - 磁盘映像：build_script/mkdisk.sh
 - 顶层构建：CMakeLists.txt / build.sh
@@ -130,8 +132,7 @@ mkdisk.sh 生成单盘两分区 build/disk.img（192MB）：
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| mkdisk 消费 CMake manifest | mkdisk.sh 的测试 ELF 拷贝列表（~30 项）与 CMake test target 一一对应但需手动同步，是产物清单第二真相源。方案：CMake 各 target 声明 OS_IMAGE_PATH，末尾 custom target 扫描写出 manifest.txt，mkdisk 读 manifest 替代硬编码列表。镜像布局映射（evdev.elf→driver/evdev.dev 等）仍保留在 mkdisk。见 reface_cmake.md §4.5 | 中 |
-| install-headers/libs.sh manifest 化 | 同上思路，install 脚本消费 CMake manifest 而非硬编码头/库清单 | 低 |
+| install-headers/libs.sh manifest 化 | 同 mkdisk manifest 思路，install 脚本消费 CMake manifest 而非硬编码头/库清单 | 低 |
 | ld --remove-section 替代 objcopy | ld 命令中加 --remove-section .note.gnu.property，省掉中间 stripped.o | 低 |
 | 用户态放开 red zone / SSE | 内核实现 FXSAVE/RXRSTORE 后，用户态可移除 -mno-red-zone -mno-sse -mno-sse2 -mno-mmx | 中 |
 | 缺少 -mcmodel=kernel | C 文件用 -fno-pie 绝对寻址，应改为 -mcmodel=kernel | 低 |

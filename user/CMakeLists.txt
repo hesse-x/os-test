@@ -23,10 +23,14 @@ set(LIBC_SOURCES
 )
 
 # libc.a (static, -fno-pie -DDYNAMIC=0)
+# IMAGE_PATH usr/lib/libc.a: ship the static libc.a into the root FS (STATIC has
+# no auto-default). IMAGE_ARTIFACT libc.a overrides the default lib<c>.a build name.
 add_user_lib(c
     SOURCES ${LIBC_SOURCES}
     C
     FLAGS "-fno-pie -DDYNAMIC=0"
+    IMAGE_PATH usr/lib/libc.a
+    IMAGE_ARTIFACT libc.a
 )
 
 # libc.so (dynamic, -fPIC -DDYNAMIC=1)
@@ -84,10 +88,20 @@ add_third_party_lib(unity STATIC
     INTERFACE_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 target_compile_definitions(unity PUBLIC UNITY_EXCLUDE_MATH_H UNITY_INCLUDE_DOUBLE)
 
-add_user_elf(hello  C SOURCES hello.c  LINK_LIBS c)
-add_user_dyn_elf(test_fpu C SOURCES test/test_fpu.c LINK_LIBS c)
+add_user_elf(hello  C SOURCES hello.c  LINK_LIBS c IMAGE_PATH local/hello.elf)
+# test_fpu / ld_test_* / drm_test_link are diagnostic ELFs shipped only under /test/.
+# In non-TEST builds they still compile (consumed nowhere at runtime — test_runner
+# itself is TEST-gated in user/test/), but are NOT shipped to the image, preserving
+# the pre-manifest mkdisk behavior (those ELFs were never in the non-TEST image).
+# The TEST flag selects whether to register the manifest entry.
+if(TEST)
+    add_user_dyn_elf(test_fpu C SOURCES test/test_fpu.c LINK_LIBS c)
+else()
+    add_user_dyn_elf(test_fpu C SOURCES test/test_fpu.c LINK_LIBS c NO_IMAGE)
+endif()
 
 # ld.so (phase 2b+3: full load chain)
+# IMAGE_PATH lib/ld.so: ship the dynamic loader as /lib/ld.so (artifact ldso.elf).
 add_user_ldso(ldso SOURCES
     ldso/start.S
     ldso/dls3.c
@@ -98,24 +112,29 @@ add_user_ldso(ldso SOURCES
     ldso/link_map.c
     ldso/dl_puts.c
     ldso/minilibc.c
+    IMAGE_PATH lib/ld.so
 )
 
 # hello_dyn (phase 2b+3: full dynamic chain verification)
 # LINK_LIBS c -> -lc resolves to libc.so (dynamic link, records DT_NEEDED libc.so)
 # add_user_dyn_elf 内部已自动解析 LINK_LIBS→<lib>_so/lib<lib>_so target 并 add_dependencies
 # （见 user_rules.cmake），无需手写 add_dependencies(hello_dyn_dyn_elf c_so)。
-add_user_dyn_elf(hello_dyn C SOURCES hello_dyn.c LINK_LIBS c)
+# IMAGE_PATH local/hello_dyn.elf: ship to /local/ (override dyn-elf default test/).
+add_user_dyn_elf(hello_dyn C SOURCES hello_dyn.c LINK_LIBS c IMAGE_PATH local/hello_dyn.elf)
 
 # terminal — dynamic ELF (libc.so + libinput.so), PT_INTERP → ld.so
+# IMAGE_PATH usr/bin/terminal: override dyn-elf default test/.
 add_user_dyn_elf(terminal
     SOURCES driver/terminal_libinput.cc
     LINK_LIBS input drm m c udev
     INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/third_party/libinput/src;${CMAKE_SOURCE_DIR}/third_party/libinput/include;${CMAKE_SOURCE_DIR}/user/lib/udev-shim;${CMAKE_SOURCE_DIR}/user/lib/evdev-shim;${CMAKE_SOURCE_DIR}/third_party/drm;${CMAKE_SOURCE_DIR}/third_party/drm/include/drm"
+    IMAGE_PATH usr/bin/terminal
 )
 
 # evdev: real keyboard event source (xHCI HID → SHM ring → terminal) +
 # EVIOCG* ioctl query. Replaces the kbd driver for terminal input.
-add_user_elf(evdev  SOURCES driver/evdev.cc lib/usb_kbd.cc  LINK_LIBS c)
+# IMAGE_PATH driver/evdev.dev: rename evdev.elf → driver/evdev.dev in the image.
+add_user_elf(evdev  SOURCES driver/evdev.cc lib/usb_kbd.cc  LINK_LIBS c IMAGE_PATH driver/evdev.dev)
 
 # ===== libinput (static library, keyboard subset) =====
 # Provides libinput event processing pipeline. Wraps libevdev/udev shims.
@@ -204,13 +223,13 @@ add_third_party_lib(libudev_so
 )
 
 if(TEST)
-    add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c DEFS TEST)
+    add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c DEFS TEST IMAGE_PATH usr/bin/shell)
 else()
-    add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c)
+    add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c IMAGE_PATH usr/bin/shell)
 endif()
 
 # udev/ — device event daemon (subscribes to netlink uevent group)
-add_user_elf(udevd C SOURCES udev/udevd.c LINK_LIBS c)
+add_user_elf(udevd C SOURCES udev/udevd.c LINK_LIBS c IMAGE_PATH usr/bin/udevd)
 
 # ===== ld.so multi-dependency unit tests (ld.md §8 / plan_ld phase D) =====
 # Fully decoupled from drm: use stub .so topologies + a dynamic main ELF to
@@ -253,6 +272,9 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/liba.so
     COMMENT "Linking liba.so (ld.so stub, NEEDED libb.so+libc.so)")
 add_custom_target(ld_stub_a_so ALL DEPENDS ${CMAKE_BINARY_DIR}/liba.so)
 add_dependencies(ld_stub_a_so c_so)
+# Ship liba.so to /test/lib/liba.so (ld.so load fallback path — separate from
+# production /lib/; standalone custom targets aren't covered by helper defaults).
+os_image_path(ld_stub_a_so liba.so test/lib/liba.so)
 # 3. libb.so: NEEDED liba.so + libc.so (lda_answer reference tolerated via --allow-shlib-undefined)
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/libb.so
     COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
@@ -265,18 +287,25 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/libb.so
     COMMENT "Linking libb.so (ld.so stub, NEEDED liba.so+libc.so)")
 add_custom_target(ld_stub_b_so ALL DEPENDS ${CMAKE_BINARY_DIR}/libb.so)
 add_dependencies(ld_stub_b_so ld_stub_a_so c_so)
+os_image_path(ld_stub_b_so libb.so test/lib/libb.so)
 
 # 4 dynamic main ELFs: one per scenario, hooked into test_runner.c's tests[] table (D9)
+# Diagnostic-only (test_runner is TEST-gated): ship to /test/ only in TEST builds.
+if(TEST)
+    set(_LD_TEST_NO_IMAGE "")
+else()
+    set(_LD_TEST_NO_IMAGE NO_IMAGE)
+endif()
 # Scenario 1 single-dependency regression
-add_user_dyn_elf(ld_test_single C SOURCES test/ld_test_single.c LINK_LIBS c)
+add_user_dyn_elf(ld_test_single C SOURCES test/ld_test_single.c LINK_LIBS c ${_LD_TEST_NO_IMAGE})
 # Scenario 2 linear chain (main -> b -> {a, libc})
-add_user_dyn_elf(ld_test_chain C SOURCES test/ld_test_chain.c LINK_LIBS b a c)
+add_user_dyn_elf(ld_test_chain C SOURCES test/ld_test_chain.c LINK_LIBS b a c ${_LD_TEST_NO_IMAGE})
 add_dependencies(ld_test_chain_dyn_elf ld_stub_b_so ld_stub_a_so c_so)
 # Scenario 3 diamond dedup (main -> {a, libc}, a -> libc)
-add_user_dyn_elf(ld_test_diamond C SOURCES test/ld_test_diamond.c LINK_LIBS a c)
+add_user_dyn_elf(ld_test_diamond C SOURCES test/ld_test_diamond.c LINK_LIBS a c ${_LD_TEST_NO_IMAGE})
 add_dependencies(ld_test_diamond_dyn_elf ld_stub_a_so c_so)
 # Scenario 4 cycle detection (a<->b mutual NEEDED)
-add_user_dyn_elf(ld_test_cycle C SOURCES test/ld_test_cycle.c LINK_LIBS a b c)
+add_user_dyn_elf(ld_test_cycle C SOURCES test/ld_test_cycle.c LINK_LIBS a b c ${_LD_TEST_NO_IMAGE})
 add_dependencies(ld_test_cycle_dyn_elf ld_stub_a_so ld_stub_b_so c_so)
 
 # ===== libdrm (third_party/drm, core only) — plan_drm2 =====
@@ -331,7 +360,14 @@ add_dependencies(drm libdrm_fourcc_table)
 # libdrm.a 验证小程序 (libdrm.md §3.4: drmOpen + drmModeGetResources)
 # xf86drm.h / xf86drmMode.h and upstream <drm.h> resolution paths
 # propagate automatically from the drm target's INTERFACE_INCLUDE_DIRS.
-add_user_elf(drm_test_link C SOURCES test/drm_test_link.c LINK_LIBS drm c)
+# IMAGE_PATH test/drm_test_link.elf: ship to /test/ in TEST builds only (diagnostic;
+# test_runner is TEST-gated). In non-TEST builds, NO_IMAGE keeps it out of the image
+# (matching the pre-manifest mkdisk, which never shipped it outside the TEST loop).
+if(TEST)
+    add_user_elf(drm_test_link C SOURCES test/drm_test_link.c LINK_LIBS drm c IMAGE_PATH test/drm_test_link.elf)
+else()
+    add_user_elf(drm_test_link C SOURCES test/drm_test_link.c LINK_LIBS drm c NO_IMAGE)
+endif()
 
 # ===== libdrm.so (shared library, third_party SHARED-only) — Phase A =====
 # add_third_party_lib（分支 B：custom-command .so）关 warning(-w)、用 os_base_options

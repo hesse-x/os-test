@@ -127,6 +127,10 @@ include_directories(${CMAKE_SOURCE_DIR})
 include(build_script/cmake/kernel_rules.cmake)
 include(build_script/cmake/user_rules.cmake)
 include(build_script/cmake/third_party_rules.cmake)
+# Disk-image manifest machinery (reface_cmake.md §6 / §4.5). Included after the
+# helpers because the helpers call os_image_path() internally; defined before
+# any target is added that uses it.
+include(build_script/cmake/image_rules.cmake)
 
 # Boot loader (standalone EFI application, compiled with GNU-EFI)
 add_subdirectory(boot)
@@ -180,6 +184,10 @@ target_sources(myos.elf PRIVATE
     $<TARGET_OBJECTS:kernel_obj>)
 set_target_properties(myos.elf PROPERTIES OUTPUT_NAME "myos.elf")
 
+# Kernel ELF lives at the ESP image root (partition 1). Register for the
+# disk-image manifest (reface_cmake.md §6).
+os_image_path(myos.elf myos.elf myos.elf PARTITION 1)
+
 # Copy EFI bootloader to build/ root directory
 add_custom_target(copy_boot ALL
     COMMAND ${CMAKE_COMMAND} -E copy
@@ -188,3 +196,10 @@ add_custom_target(copy_boot ALL
     DEPENDS boot_bin
     COMMENT "Copying BOOTX64.EFI to build/"
 )
+
+# EFI bootloader lands at EFI/BOOT/BOOTX64.EFI in the ESP (partition 1).
+os_image_path(copy_boot BOOTX64.EFI EFI/BOOT/BOOTX64.EFI PARTITION 1)
+
+# Write the disk-image manifest now that every target above has registered.
+# (reface_cmake.md §6: single source of truth for mkdisk.sh.)
+os_write_image_manifest()

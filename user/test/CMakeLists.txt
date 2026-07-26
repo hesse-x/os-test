@@ -79,7 +79,7 @@ add_user_dyn_elf(test_sse_smoke C SOURCES test_sse_smoke.c LINK_LIBS c)
 
 # CPU-bound stress test for work-stealing balance verification (launched
 # manually as multiple instances; not a test_runner regression)
-add_user_dyn_elf(test_cpu_burn C SOURCES test_cpu_burn.c LINK_LIBS c)
+add_user_dyn_elf(test_cpu_burn C SOURCES test_cpu_burn.c LINK_LIBS c NO_IMAGE)
 
 # Layer 13: pthread
 add_user_dyn_elf(pthread C SOURCES test_pthread.c LINK_LIBS c STATIC_LIBS unity)
@@ -143,14 +143,16 @@ endif()
 
 # Phase B: libdrm.so composite loading test (plan_drm2)
 # LINK_LIBS drm c → add_user_dyn_elf 内部自动 add_dependencies(drm_so/c_so)。
-add_user_dyn_elf(hello_drm_dyn C SOURCES hello_drm_dyn.c LINK_LIBS drm c)
+# NO_IMAGE: manual diagnostic ELF, not in test_runner's table.
+add_user_dyn_elf(hello_drm_dyn C SOURCES hello_drm_dyn.c LINK_LIBS drm c NO_IMAGE)
 
 # Phase B: modetest — drmOpen + GETRESOURCES + CONNECTOR + DUMB + ADDFB + SETCRTC + PAGE_FLIP
 add_user_elf(modetest C SOURCES modetest.c LINK_LIBS drm c)
 add_dependencies(modetest_elf libdrm_fourcc_table)
 
 # LINK_LIBS drm c → add_user_dyn_elf 内部自动 add_dependencies(drm_so)。
-add_user_dyn_elf(modetest_dyn C SOURCES modetest_dyn.c LINK_LIBS drm c)
+# NO_IMAGE: manual diagnostic ELF, not in test_runner's table.
+add_user_dyn_elf(modetest_dyn C SOURCES modetest_dyn.c LINK_LIBS drm c NO_IMAGE)
 
 # libudev shim 阶段 A 回归测试（TEST 构建——依赖 evdev 真实注册态）。
 # 仿 test_sysfs：TEST 门控 + udev-shim 头文件 include 路径。

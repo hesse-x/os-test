@@ -128,7 +128,9 @@ endfunction()
 # add_user_lib: userspace library (libc.a static / libc.so shared / generic .so)
 # Usage: add_user_lib(name [C] SOURCES ... [FLAGS ...] [SHARED] [OUTPUT_NAME ...]
 #                     [VERSION_MAP ...] [SO_LINK_LIBS ...] [INCLUDE_DIRS ...]
-#                     [GEN_HEADERS hdr1 ...])
+#                     [GEN_HEADERS hdr1 ...]
+#                     [IMAGE_PATH dest] [IMAGE_ARTIFACT name] [IMAGE_PARTITION <1|2>]
+#                     [NO_IMAGE])
 # C: flag to use C compiler (consistent with add_user_elf)
 # SHARED: produce .so (gcc -shared -fPIC custom command, plan_ld2b3 decision 1 fallback)
 # OUTPUT_NAME: custom base output name (without lib prefix); default = lib_name
@@ -146,12 +148,29 @@ endfunction()
 #              to each object's DEPENDS so editing the template re-compiles the library.
 #              (The STATIC path uses add_library, which tracks configure_file outputs
 #              automatically, so GEN_HEADERS is unused there.)
+# IMAGE_PATH/IMAGE_ARTIFACT/IMAGE_PARTITION/NO_IMAGE: disk-image manifest registration
+#              (reface_cmake.md §6). SHARED auto-defaults to lib/lib<out>.so @ part 2;
+#              STATIC has no auto-default (register only with explicit IMAGE_PATH, e.g.
+#              libc.a → usr/lib/libc.a). NO_IMAGE opts out of the SHARED default.
 # Otherwise: add_library(STATIC), preserve target interface (unity uses target_include_directories)
 function(add_user_lib lib_name)
-    set(option_args SHARED C)
+    set(option_args SHARED C NO_IMAGE)
     set(multi_args SOURCES FLAGS SO_LINK_LIBS INCLUDE_DIRS GEN_HEADERS)
-    set(one_args OUTPUT_NAME VERSION_MAP)
+    set(one_args OUTPUT_NAME VERSION_MAP IMAGE_PATH IMAGE_ARTIFACT IMAGE_PARTITION)
     cmake_parse_arguments(ARG "${option_args}" "${one_args}" "${multi_args}" ${ARGN})
+
+    # Artifact base name (default = lib_name). The SHARED path's SO_FILE and the
+    # disk-image default path both derive from this; OUTPUT_NAME stays untouched
+    # for the STATIC if/else below (preserving its original semantics).
+    if(ARG_OUTPUT_NAME)
+        set(_out_base ${ARG_OUTPUT_NAME})
+    else()
+        set(_out_base ${lib_name})
+    endif()
+    # IMAGE_PARTITION default = 2 (root); ESP placement must be explicit.
+    if(NOT DEFINED ARG_IMAGE_PARTITION)
+        set(ARG_IMAGE_PARTITION 2)
+    endif()
 
     if(ARG_SHARED)
         # Shared library libc.so — add_library(SHARED) is unavailable in this toolchain, use custom command
@@ -194,7 +213,21 @@ function(add_user_lib lib_name)
             math(EXPR idx "${idx} + 1")
         endforeach()
 
-        set(SO_FILE ${CMAKE_BINARY_DIR}/lib${ARG_OUTPUT_NAME}.so)
+        set(SO_FILE ${CMAKE_BINARY_DIR}/lib${_out_base}.so)
+
+        # Disk-image manifest: SHARED .so auto-defaults to lib/lib<out>.so @ root.
+        # NO_IMAGE opts out; IMAGE_PATH/IMAGE_ARTIFACT/IMAGE_PARTITION override.
+        if(NOT ARG_NO_IMAGE)
+            set(_img_artifact "lib${_out_base}.so")
+            if(ARG_IMAGE_ARTIFACT)
+                set(_img_artifact ${ARG_IMAGE_ARTIFACT})
+            endif()
+            set(_img_dest "lib/lib${_out_base}.so")
+            if(ARG_IMAGE_PATH)
+                set(_img_dest ${ARG_IMAGE_PATH})
+            endif()
+            os_image_path(${lib_name} ${_img_artifact} ${_img_dest} PARTITION ${ARG_IMAGE_PARTITION})
+        endif()
 
         # --- Link dependencies (object files + version map if any) ---
         set(SO_LINK_DEPS ${OBJ_FILES})
@@ -272,6 +305,18 @@ function(add_user_lib lib_name)
         endif()
 
         user_assert_no_sse_disable(${lib_name})
+
+        # Disk-image manifest: STATIC has NO auto-default (most static libs aren't
+        # shipped). Register only with an explicit IMAGE_PATH (e.g. libc.a →
+        # usr/lib/libc.a). IMAGE_ARTIFACT defaults to lib<out>.a. NO_IMAGE is a
+        # no-op here but accepted for call-site symmetry with SHARED.
+        if(ARG_IMAGE_PATH AND NOT ARG_NO_IMAGE)
+            set(_img_artifact "lib${_out_base}.a")
+            if(ARG_IMAGE_ARTIFACT)
+                set(_img_artifact ${ARG_IMAGE_ARTIFACT})
+            endif()
+            os_image_path(${lib_name} ${_img_artifact} ${ARG_IMAGE_PATH} PARTITION ${ARG_IMAGE_PARTITION})
+        endif()
     endif()
 endfunction()
 
@@ -333,9 +378,14 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/crt0.o
 add_custom_target(crt0_obj ALL DEPENDS ${CMAKE_BINARY_DIR}/crt0.o)
 
 # add_user_elf: userspace ELF (compile → objcopy → ld)
-# Usage: add_user_elf(name [C] SOURCES source1 ... [LINK_LIBS lib1 ...] [DEFS def1 ...])
+# Usage: add_user_elf(name [C] SOURCES source1 ... [LINK_LIBS lib1 ...] [DEFS def1 ...]
+#                     [INCLUDE_DIRS ...] [IMAGE_PATH dest] [IMAGE_ARTIFACT name]
+#                     [IMAGE_PARTITION <1|2>] [NO_IMAGE])
+# IMAGE_PATH: explicit disk-image destination (no auto-default — most static ELFs
+#   are non-test and shipped individually). IMAGE_ARTIFACT defaults to <name>.elf.
+#   IMAGE_PARTITION defaults to 2. NO_IMAGE is a no-op (no default to suppress).
 function(add_user_elf elf_name)
-    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;DEFS;INCLUDE_DIRS" ${ARGN})
+    cmake_parse_arguments(ARG "C;NO_IMAGE" "IMAGE_PATH;IMAGE_ARTIFACT;IMAGE_PARTITION" "SOURCES;LINK_LIBS;DEFS;INCLUDE_DIRS" ${ARGN})
 
     set(ELF_DIR ${CMAKE_BINARY_DIR})
     set(ELF_FILE ${ELF_DIR}/${elf_name}.elf)
@@ -455,12 +505,26 @@ function(add_user_elf elf_name)
     if(ARG_LINK_LIBS)
         add_dependencies(${elf_name}_elf ${ARG_LINK_LIBS})
     endif()
+
+    # Disk-image manifest: no auto-default — register only with explicit IMAGE_PATH.
+    if(ARG_IMAGE_PATH AND NOT ARG_NO_IMAGE)
+        set(_img_artifact "${elf_name}.elf")
+        if(ARG_IMAGE_ARTIFACT)
+            set(_img_artifact ${ARG_IMAGE_ARTIFACT})
+        endif()
+        if(NOT DEFINED ARG_IMAGE_PARTITION)
+            set(ARG_IMAGE_PARTITION 2)
+        endif()
+        os_image_path(${elf_name} ${_img_artifact} ${ARG_IMAGE_PATH} PARTITION ${ARG_IMAGE_PARTITION})
+    endif()
 endfunction()
 
 # add_user_ldso: ld.so specific (-shared -fPIC, with built-in minilibc, does not link libc.a)
 # ld.md §3.4.4
+# IMAGE_PATH: explicit disk-image destination (no auto-default). IMAGE_ARTIFACT
+#   defaults to <name>.elf. IMAGE_PARTITION defaults to 2.
 function(add_user_ldso name)
-    cmake_parse_arguments(ARG "" "" "SOURCES" ${ARGN})
+    cmake_parse_arguments(ARG "NO_IMAGE" "IMAGE_PATH;IMAGE_ARTIFACT;IMAGE_PARTITION" "SOURCES" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
     set(COMPILE_FLAGS -m64 ${WARN_FLAGS} ${FREESTANDING_FLAGS}
                       -fPIC -fvisibility=hidden
@@ -489,6 +553,18 @@ function(add_user_ldso name)
         DEPENDS ${OBJ_FILES}
         COMMENT "Linking ld.so (${name}.elf)")
     add_custom_target(${name}_elf ALL DEPENDS ${ELF_FILE})
+
+    # Disk-image manifest: no auto-default — register only with explicit IMAGE_PATH.
+    if(ARG_IMAGE_PATH AND NOT ARG_NO_IMAGE)
+        set(_img_artifact "${name}.elf")
+        if(ARG_IMAGE_ARTIFACT)
+            set(_img_artifact ${ARG_IMAGE_ARTIFACT})
+        endif()
+        if(NOT DEFINED ARG_IMAGE_PARTITION)
+            set(ARG_IMAGE_PARTITION 2)
+        endif()
+        os_image_path(${name} ${_img_artifact} ${ARG_IMAGE_PATH} PARTITION ${ARG_IMAGE_PARTITION})
+    endif()
 endfunction()
 
 # add_user_dyn_elf: dynamic main ELF, linked by gcc driver
@@ -500,7 +576,7 @@ endfunction()
 #              bare-gcc add_custom_command doesn't auto-track configure_file outputs, so
 #              listing them forces a re-compile when the template changes.
 function(add_user_dyn_elf name)
-    cmake_parse_arguments(ARG "C" "" "SOURCES;LINK_LIBS;STATIC_LIBS;DEFS;INCLUDE_DIRS;GEN_HEADERS" ${ARGN})
+    cmake_parse_arguments(ARG "C;NO_IMAGE" "IMAGE_PATH;IMAGE_ARTIFACT;IMAGE_PARTITION" "SOURCES;LINK_LIBS;STATIC_LIBS;DEFS;INCLUDE_DIRS;GEN_HEADERS" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
     if(ARG_C)
         set(COMPILE_CMD ${CMAKE_C_COMPILER})
@@ -611,4 +687,24 @@ function(add_user_dyn_elf name)
             add_dependencies(${name}_dyn_elf ${lib})
         endif()
     endforeach()
+
+    # Disk-image manifest (reface_cmake.md §6). Auto-default test/<name>.elf @ root —
+    # the majority of add_user_dyn_elf callers are test ELFs (user/test/CMakeLists.txt
+    # + a few in user/CMakeLists.txt like test_fpu/ld_test_*), all shipped under /test/.
+    # Non-test dyn ELFs (hello_dyn/terminal/hello_drm_dyn/modetest_dyn) must pass an
+    # explicit IMAGE_PATH or NO_IMAGE to avoid being mis-shipped to /test/.
+    if(NOT ARG_NO_IMAGE)
+        set(_img_artifact "${name}.elf")
+        if(ARG_IMAGE_ARTIFACT)
+            set(_img_artifact ${ARG_IMAGE_ARTIFACT})
+        endif()
+        set(_img_dest "test/${name}.elf")
+        if(ARG_IMAGE_PATH)
+            set(_img_dest ${ARG_IMAGE_PATH})
+        endif()
+        if(NOT DEFINED ARG_IMAGE_PARTITION)
+            set(ARG_IMAGE_PARTITION 2)
+        endif()
+        os_image_path(${name} ${_img_artifact} ${_img_dest} PARTITION ${ARG_IMAGE_PARTITION})
+    endif()
 endfunction()

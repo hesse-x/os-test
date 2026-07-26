@@ -3,36 +3,53 @@
 #
 # Layout:
 #   LBA 0:           MBR + partition table
-#   Partition 1 (ESP): FAT32, ~32MB — UEFI boot files
+#   Partition 1 (ESP): FAT16, ~32MB — UEFI boot files
 #     /EFI/BOOT/BOOTX64.EFI
 #     /myos.elf
 #     /init.elf          ← stub loads into memory and passes to kernel (initrd-style)
 #   Partition 2 (root):  FAT32, ~160MB — root file system
 #     /driver/kbd.dev
-#     /usr/bin/{terminal,shell}
-#     /lib/{ld.so,libc.so,libinput.so,libudev.so,libm.so,libdrm.so,libffi.so,libexpat.so}
+#     /usr/bin/{terminal,shell,udevd}
 #     /usr/lib/libc.a
+#     /lib/{ld.so,libc.so,libinput.so,libudev.so,libm.so,libdrm.so,libffi.so,libexpat.so}
 #     /local/{hello,hello_dyn}.elf
-#     /test/drm_test.elf          ← only copied in test builds
+#     /test/*.elf + /test/lib/{liba,libb}.so
+#     /usr/share/libinput/*.quirks
 #     /README
 #
 # The kernel gets init.elf from boot_info to create the init process, no longer needs a raw LBA slot.
 # The FAT32 driver parses the MBR partition table itself to find the root partition start LBA (fat32_init).
+#
+# Artifact list is driven by build/image_manifest.txt (CMake-generated, reface_cmake.md §6).
+# Each manifest line: build_relpath<TAB>image_path<TAB>partition(1=ESP,2=root).
+# Only static, non-build assets (libinput quirks, README) stay hardcoded below.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${PROJECT_DIR}/build"
 TESTDATA_DIR="${PROJECT_DIR}/testdata"
+MANIFEST="${BUILD_DIR}/image_manifest.txt"
 
-# Check dependency files
-for f in init.elf myos.elf BOOTX64.EFI evdev.elf terminal.elf shell.elf \
-         libc.a libc.so libinput.so libudev.so libm.so libdrm.so libffi.so libexpat.so hello.elf ldso.elf hello_dyn.elf udevd.elf; do
-    if [ ! -f "${BUILD_DIR}/${f}" ]; then
-        echo "mkdisk.sh: ${BUILD_DIR}/${f} not found, run build.sh first"
+# The manifest is generated at CMake configure time. If missing, the build was not
+# configured (or an old build dir predates the manifest machinery).
+if [ ! -f "${MANIFEST}" ]; then
+    echo "mkdisk.sh: ${MANIFEST} not found, run build.sh first (CMake writes the image manifest)"
+    exit 1
+fi
+
+# Dependency check: every build_relpath in the manifest must exist under build/.
+# (mkdisk runs after ninja, so all artifacts are already built; this guards against
+#  a stale manifest or a partially-built tree.)
+while IFS=$'\t' read -r artifact image part; do
+    # Skip comment / blank lines.
+    [ -z "$artifact" ] && continue
+    case "$artifact" in '#'*) continue ;; esac
+    if [ ! -f "${BUILD_DIR}/${artifact}" ]; then
+        echo "mkdisk.sh: ${BUILD_DIR}/${artifact} not found (manifest entry -> ${image}), run build.sh first"
         exit 1
     fi
-done
+done < "${MANIFEST}"
 
 # Total disk size: 192MB = 393216 sectors
 DISK_SECTORS=$((192 * 1024 * 1024 / 512))
@@ -64,11 +81,25 @@ dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part1.img" bs=512 skip=${PART1_ST
 # UEFI spec allows FAT12/16/32; OVMF boots FAT16 ESP well.
 mkfs.fat -F 16 -n ESP "${BUILD_DIR}/part1.img" >/dev/null
 
-mmd -i "${BUILD_DIR}/part1.img" ::EFI
-mmd -i "${BUILD_DIR}/part1.img" ::EFI/BOOT
-mcopy -i "${BUILD_DIR}/part1.img" "${BUILD_DIR}/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI
-mcopy -i "${BUILD_DIR}/part1.img" "${BUILD_DIR}/myos.elf"     ::myos.elf
-mcopy -i "${BUILD_DIR}/part1.img" "${BUILD_DIR}/init.elf"     ::init.elf
+# Create parent directories for partition-1 entries (depth-ascending so parents
+# precede children), then copy. image_root entries (parent == ".") skip mmd.
+declare -A esp_dirs
+esp_entries=()
+while IFS=$'\t' read -r artifact image part; do
+    [ -z "$artifact" ] && continue
+    case "$artifact" in '#'*) continue ;; esac
+    [ "$part" = "1" ] || continue
+    esp_entries+=("${artifact}"$'\t'"${image}")
+    p=$(dirname "$image")
+    while [ "$p" != "." ] && [ -n "$p" ]; do esp_dirs["$p"]=1; p=$(dirname "$p"); done
+done < "${MANIFEST}"
+for d in $(printf '%s\n' "${!esp_dirs[@]}" | awk '{print gsub(/\//,"/"), $0}' | sort -n | cut -d' ' -f2-); do
+    mmd -i "${BUILD_DIR}/part1.img" "::${d}"
+done
+for e in "${esp_entries[@]}"; do
+    IFS=$'\t' read -r artifact image <<<"$e"
+    mcopy -i "${BUILD_DIR}/part1.img" "${BUILD_DIR}/${artifact}" "::${image}"
+done
 
 dd if="${BUILD_DIR}/part1.img" of="${BUILD_DIR}/disk.img" bs=512 seek=${PART1_START} conv=notrunc status=none
 rm -f "${BUILD_DIR}/part1.img"
@@ -78,71 +109,36 @@ dd if="${BUILD_DIR}/disk.img" of="${BUILD_DIR}/part2.img" bs=512 skip=${PART2_ST
 mkfs.fat -F 32 -s 1 "${BUILD_DIR}/part2.img" >/dev/null
 # Note: -s 1 (512B/cluster) at 64MB yields enough clusters (newer mtools requires ≥65525 clusters).
 
-# Create directory structure
-mmd -i "${BUILD_DIR}/part2.img" ::driver
-mmd -i "${BUILD_DIR}/part2.img" ::usr ::usr/bin ::usr/lib
-mmd -i "${BUILD_DIR}/part2.img" ::local
-mmd -i "${BUILD_DIR}/part2.img" ::lib
-mmd -i "${BUILD_DIR}/part2.img" ::usr/share ::usr/share/libinput
+# Derive the full directory skeleton from partition-2 image_paths: collect every
+# ancestor of every image_path, dedupe (associative array), then mmd in depth-
+# ascending order so a parent always precedes its children (mtools mmd requires
+# the parent to exist first).
+declare -A root_dirs
+root_entries=()
+while IFS=$'\t' read -r artifact image part; do
+    [ -z "$artifact" ] && continue
+    case "$artifact" in '#'*) continue ;; esac
+    [ "$part" = "2" ] || continue
+    root_entries+=("${artifact}"$'\t'"${image}")
+    p=$(dirname "$image")
+    while [ "$p" != "." ] && [ -n "$p" ]; do root_dirs["$p"]=1; p=$(dirname "$p"); done
+done < "${MANIFEST}"
+for d in $(printf '%s\n' "${!root_dirs[@]}" | awk '{print gsub(/\//,"/"), $0}' | sort -n | cut -d' ' -f2-); do
+    mmd -i "${BUILD_DIR}/part2.img" "::${d}"
+done
 
-# Copy files into directory structure
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/evdev.elf"        ::driver/evdev.dev
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/terminal.elf"     ::usr/bin/terminal
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/shell.elf"        ::usr/bin/shell
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/udevd.elf"        ::usr/bin/udevd
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.a"           ::usr/lib/libc.a
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello.elf"        ::local/hello.elf
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/ldso.elf"         ::lib/ld.so
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libc.so"          ::lib/libc.so
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libinput.so"     ::lib/libinput.so
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libudev.so"      ::lib/libudev.so
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libm.so"        ::lib/libm.so
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libdrm.so"     ::lib/libdrm.so
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libffi.so"     ::lib/libffi.so
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libexpat.so"     ::lib/libexpat.so
-# ld.so multi-dependency test stub .so (plan_ld phase D): placed in /test/lib/ separate from production /lib/,
-# ld.so load_one() tries /lib/ first and falls back to /test/lib/ on failure (mirrors Linux DT_RPATH idea)
-mmd -i "${BUILD_DIR}/part2.img" ::test ::test/lib
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/liba.so"          ::test/lib/liba.so
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/libb.so"          ::test/lib/libb.so
-mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/hello_dyn.elf"    ::local/hello_dyn.elf
+# Copy every partition-2 build artifact into its image_path.
+for e in "${root_entries[@]}"; do
+    IFS=$'\t' read -r artifact image <<<"$e"
+    mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${artifact}" "::${image}"
+done
 
-# Copy test ELFs to /test/ directory (test build only)
-if [ "$TEST" = "1" ]; then
-    for elf in test_runner.elf pipe.elf fcntl.elf fcntl_ofd.elf string.elf malloc.elf \
-               stdio.elf mmap.elf ipc.elf socket.elf process.elf \
-               test_socket_msgflags.elf \
-               test_unix_dgram.elf \
-               signal.elf signal_stop.elf signal_flags.elf kill_perm.elf \
-               poll.elf pci.elf ioctl.elf dev_vfs.elf \
-               test_fpu.elf test_sse_smoke.elf pthread.elf \
-               ld_test_single.elf ld_test_chain.elf \
-               ld_test_diamond.elf ld_test_cycle.elf \
-               drm_test.elf drm_ioctl.elf drm_phase_c.elf ioctl_varlen.elf \
-               epoll.elf eventfd.elf timerfd.elf signalfd.elf mount.elf \
-               test_epoll_oneshot.elf test_accept_no_timeout.elf \
-               test_clock_realtime.elf test_time_sleep.elf test_clock_cputime.elf \
-               test_sysfs.elf test_libudev.elf drm_test_link.elf \
-               test_vfs_dispatch.elf test_inode_refcount.elf test_tmpfs_socket.elf \
-               test_rename.elf test_udevd_db.elf test_udevd.elf test_dev_vfs_dynamic.elf \
-               test_openat_dirfd.elf test_stat_real.elf test_statx.elf \
-               sigaltstack.elf test_dirent_seek.elf test_cloexec_perfd.elf \
-               test_pipe2.elf \
-               test_mprotect.elf test_ffi.elf venus_channel.elf getrandom.elf \
-               test_vma_restructure.elf test_mmap_addr_hint.elf \
-               test_mmap_file_private.elf \
-               test_munmap_partial.elf test_mprotect_partial.elf \
-               test_mmap_flags.elf test_mmap_size_limit.elf \
-               test_clone_exit_signal.elf test_clone_settid_fault.elf \
-               test_wait4_pgid_rusage.elf test_wait4_options.elf test_setuid_saved.elf \
-               test_execve_vfs.elf \
-               test_getdents_resume.elf test_sa_restart.elf test_sa_nocldwait.elf \
-	               test_expat.elf; do
-        mcopy -i "${BUILD_DIR}/part2.img" "${BUILD_DIR}/${elf}" ::test/
-    done
-fi
-
-# Copy libinput quirks
+# ===================== Static (non-build) assets =====================
+# These are repo files, not build artifacts, so they stay explicit here (not in
+# the manifest). Their target directories are not necessarily created by the
+# manifest-driven skeleton above (no build artifact lands under usr/share/), so
+# create them explicitly before the copy — mirroring the old hardcoded skeleton.
+mmd -i "${BUILD_DIR}/part2.img" ::usr/share ::usr/share/libinput 2>/dev/null || true
 mcopy -i "${BUILD_DIR}/part2.img" "${PROJECT_DIR}/third_party/libinput/quirks/10-generic-keyboard.quirks"  ::usr/share/libinput/
 mcopy -i "${BUILD_DIR}/part2.img" "${PROJECT_DIR}/third_party/libinput/quirks/10-generic-mouse.quirks"     ::usr/share/libinput/
 
