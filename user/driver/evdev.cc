@@ -208,7 +208,10 @@ static void init_caps(struct evdev_device *dev) {
   }
 }
 
-int main(int argc, char **argv, char **envp) {
+// extern "C": clang under -ffreestanding mangles a C++ `main`, breaking the
+// crt0.o `main` reference; gcc leaves `main` unmangled regardless. See
+// shell.cc.
+extern "C" int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
   (void)envp;

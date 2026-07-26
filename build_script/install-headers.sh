@@ -26,7 +26,7 @@
 #   ./install-headers.sh /path/to/sysroot/usr/include
 #
 # Verification (no cross toolchain required):
-#   gcc -nostdinc -ffreestanding -I<dest> -E -H user/hello.c
+#   ${CC:-clang} -nostdinc -ffreestanding -I<dest> -E -H user/hello.c
 #   → every header in <stdio.h>+<time.h>'s closure resolves under <dest> with no
 #     "No such file" lines, proving the published tree is self-contained.
 set -euo pipefail
@@ -57,13 +57,19 @@ echo "Installed tree:"
 # --target=x86_64-xos cross gcc ships). -I$DEST makes the sysroot the include root,
 # exactly as -isysroot would expose /usr/include. -H lists every header opened; a
 # fatal "No such file" means the repo-owned closure broke (a real bug).
+#
+# CC selects the compiler (default clang, matching build.sh's default). The
+# freestanding dir differs by compiler (gcc → …/gcc/<v>/include, clang →
+# …/clang/<v>/include), so $FREESTANDING is queried per-compiler and the
+# closure filter excludes that exact path instead of a hardcoded "/gcc/".
 echo
 echo "Closure check: preprocessing user/hello.c against $DEST ..."
-FREESTANDING="$(gcc -print-file-name=include)"
-if gcc -nostdinc -ffreestanding -isystem "$FREESTANDING" "-I$DEST" -E -H "$SRC/user/hello.c" >/dev/null 2>/tmp/closure.log; then
+CC="${CC:-clang}"
+FREESTANDING="$($CC -print-file-name=include)"
+if $CC -nostdinc -ffreestanding -isystem "$FREESTANDING" "-I$DEST" -E -H "$SRC/user/hello.c" >/dev/null 2>/tmp/closure.log; then
   # -H emits one line per header opened (indented by depth). Lines from the toolchain's
-  # freestanding dir contain "/gcc/"; everything else is a sysroot-owned header.
-  repo_opened=$(grep -vc '/gcc/' /tmp/closure.log || true)
+  # freestanding dir are excluded by exact path match; everything else is a sysroot-owned header.
+  repo_opened=$(grep -vcF "$FREESTANDING" /tmp/closure.log || true)
   echo "OK: hello.c closure resolved ($repo_opened sysroot-owned header opens, 0 missing)."
 else
   echo "FAIL: hello.c closure broken against sysroot:" >&2
@@ -79,7 +85,7 @@ failed=0
 while IFS= read -r h; do
   rel="${h#"$DEST/"}"
   printf '#include <%s>\n' "$rel" > /tmp/hdr_probe.c
-  if ! gcc -nostdinc -ffreestanding -isystem "$FREESTANDING" "-I$DEST" -E -H /tmp/hdr_probe.c >/dev/null 2>/tmp/hdr.log; then
+  if ! $CC -nostdinc -ffreestanding -isystem "$FREESTANDING" "-I$DEST" -E -H /tmp/hdr_probe.c >/dev/null 2>/tmp/hdr.log; then
     echo "  FAIL: <$rel> closure broken:" >&2
     grep -E 'fatal|error' /tmp/hdr.log | head -3 | sed 's/^/      /' >&2
     failed=$((failed+1))

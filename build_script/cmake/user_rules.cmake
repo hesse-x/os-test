@@ -254,7 +254,7 @@ function(add_user_lib lib_name)
         endif()
 
         add_custom_command(OUTPUT ${SO_FILE}
-            COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
+            COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -nostdlib -nodefaultlibs
                     -Wl,--hash-style=gnu
                     -Wl,-soname,lib${ARG_OUTPUT_NAME}.so
                     ${SO_EXTRA_LDFLAGS}
@@ -372,7 +372,7 @@ endfunction()
 # Build crt0.o (_start entry, linked into every static main ELF)
 # plan_ld2b3 T5
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/crt0.o
-    COMMAND gcc -ffreestanding -fno-pie -c ${CMAKE_SOURCE_DIR}/user/lib/crt0.S -o ${CMAKE_BINARY_DIR}/crt0.o
+    COMMAND ${CMAKE_C_COMPILER} -ffreestanding -fno-pie -c ${CMAKE_SOURCE_DIR}/user/lib/crt0.S -o ${CMAKE_BINARY_DIR}/crt0.o
     DEPENDS ${CMAKE_SOURCE_DIR}/user/lib/crt0.S
     COMMENT "Compiling crt0.o")
 add_custom_target(crt0_obj ALL DEPENDS ${CMAKE_BINARY_DIR}/crt0.o)
@@ -540,13 +540,13 @@ function(add_user_ldso name)
         endif()
         set(src_obj ${ELF_FILE}.${idx}.o)
         add_custom_command(OUTPUT ${src_obj}
-            COMMAND gcc ${COMPILE_FLAGS} -c ${src_full} -o ${src_obj}
+            COMMAND ${CMAKE_C_COMPILER} ${COMPILE_FLAGS} -c ${src_full} -o ${src_obj}
             DEPENDS ${src_full})
         list(APPEND OBJ_FILES ${src_obj})
         math(EXPR idx "${idx} + 1")
     endforeach()
     add_custom_command(OUTPUT ${ELF_FILE}
-        COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
+        COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -nostdlib -nodefaultlibs
                 -Wl,-e,_start -Wl,--hash-style=gnu
                 -o ${ELF_FILE} ${OBJ_FILES}
         COMMAND bash ${CMAKE_SOURCE_DIR}/build_script/cmake/verify_ldso_rela_plt.sh ${ELF_FILE}
@@ -661,7 +661,7 @@ function(add_user_dyn_elf name)
         list(APPEND SO_DEPS ${_lib_path})
     endforeach()
     add_custom_command(OUTPUT ${ELF_FILE}
-        COMMAND gcc -fno-pie -no-pie
+        COMMAND ${CMAKE_C_COMPILER} -fno-pie -no-pie
                 -Wl,--dynamic-linker,/lib/ld.so
                 -Wl,--hash-style=gnu
                 -Wl,--no-as-needed

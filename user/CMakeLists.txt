@@ -171,10 +171,19 @@ set(LIBINPUT_SOURCES
     # (完整 Linux 模式:libudev 独立 .so,见下方 libudev_so)。
 )
 
+# Shared warning-suppression list for the libinput third-party sources, used by
+# both the static `input` library (below) and the shared `libinput.so` (further
+# below). libinput upstream relies on implicit function declarations and other
+# patterns that clang treats as hard errors in C11+ (not downgraded by -w), so
+# these must be suppressed explicitly per-target. -Wno-unknown-warning-option
+# lets the same list pass under gcc (which doesn't know the clang-only entries).
+set(LIBINPUT_WARN_FLAGS
+    "-Wno-unused-parameter -Wno-duplicate-decl-specifier -Wno-implicit-function-declaration -Wno-return-type -Wno-int-conversion -Wno-format -Wno-implicit-fallthrough -Wno-sign-compare -Wno-error=cpp -Wno-maybe-uninitialized -Wno-sometimes-uninitialized -Wno-unknown-warning-option")
+
 add_user_lib(input
     SOURCES ${LIBINPUT_SOURCES}
     C
-    FLAGS "-O2 -DLIBINPUT_QUIRKS_DIR=\\\"/usr/share/libinput\\\" -DHAVE_QUIRKS -Wno-unused-parameter -Wno-duplicate-decl-specifier -Wno-implicit-function-declaration -Wno-return-type -Wno-int-conversion -Wno-format -Wno-implicit-fallthrough -Wno-sign-compare -Wno-error=cpp -Wno-maybe-uninitialized"
+    FLAGS "-O2 -DLIBINPUT_QUIRKS_DIR=\\\"/usr/share/libinput\\\" -DHAVE_QUIRKS ${LIBINPUT_WARN_FLAGS}"
     OUTPUT_NAME input
 )
 
@@ -203,7 +212,7 @@ add_third_party_lib(libinput_so
     C
     OUTPUT_NAME input
     SO_LINK_LIBS c udev
-    FLAGS "-O2 -DHAVE_QUIRKS"
+    FLAGS "-O2 -DHAVE_QUIRKS ${LIBINPUT_WARN_FLAGS}"
     INCLUDE_DIRS ${LIBINPUT_INCLUDE_DIRS}
 )
 
@@ -254,7 +263,7 @@ add_user_elf(udevd C SOURCES udev/udevd.c LINK_LIBS c IMAGE_PATH usr/bin/udevd)
 
 # 1. libb.so.seed: bootstrap seed (empty .so, SONAME=libb.so, only NEEDED libc.so)
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/libb.so.seed
-    COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
+    COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -nostdlib -nodefaultlibs
             -Wl,--hash-style=gnu -Wl,-soname,libb.so
             -o ${CMAKE_BINARY_DIR}/libb.so.seed -x c /dev/null
             -L${CMAKE_BINARY_DIR} -Wl,--no-as-needed -lc
@@ -262,7 +271,7 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/libb.so.seed
     COMMENT "Linking libb.so.seed (ld.so stub bootstrap)")
 # 2. liba.so: NEEDED libb.so (seed SONAME) + libc.so
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/liba.so
-    COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
+    COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -nostdlib -nodefaultlibs
             -Wl,--hash-style=gnu -Wl,-soname,liba.so
             -Wl,--no-as-needed -Wl,--allow-shlib-undefined
             -o ${CMAKE_BINARY_DIR}/liba.so ${CMAKE_SOURCE_DIR}/user/test/ld_stub_a.c
@@ -277,7 +286,7 @@ add_dependencies(ld_stub_a_so c_so)
 os_image_path(ld_stub_a_so liba.so test/lib/liba.so)
 # 3. libb.so: NEEDED liba.so + libc.so (lda_answer reference tolerated via --allow-shlib-undefined)
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/libb.so
-    COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
+    COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -nostdlib -nodefaultlibs
             -Wl,--hash-style=gnu -Wl,-soname,libb.so
             -Wl,--no-as-needed -Wl,--allow-shlib-undefined
             -o ${CMAKE_BINARY_DIR}/libb.so ${CMAKE_SOURCE_DIR}/user/test/ld_stub_b.c
@@ -353,7 +362,7 @@ add_drm_lib(drm C SOURCES ${LIBDRM_SOURCES}
                          ${CMAKE_BINARY_DIR}
             INTERFACE_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/drm/include/drm
                                    ${CMAKE_SOURCE_DIR}/third_party/drm
-            FLAGS "-Wno-unused-parameter -D__linux__ -include ${CMAKE_BINARY_DIR}/libdrm_config.h")
+            FLAGS "-Wno-unused-parameter -Wno-format -D__linux__ -include ${CMAKE_BINARY_DIR}/libdrm_config.h")
 # ensure generated_static_table_fourcc.h exists before libdrm sources compile
 add_dependencies(drm libdrm_fourcc_table)
 
@@ -380,7 +389,7 @@ add_third_party_lib(drm_so
     OUTPUT_NAME drm
     SO_LINK_LIBS c
     LINK_DEPS libdrm_fourcc_table
-    FLAGS "-Wno-unused-parameter -D__linux__ -include ${CMAKE_BINARY_DIR}/libdrm_config.h"
+    FLAGS "-Wno-unused-parameter -Wno-format -D__linux__ -include ${CMAKE_BINARY_DIR}/libdrm_config.h"
     INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/drm/include/drm
                  ${CMAKE_SOURCE_DIR}/third_party/drm
                  ${CMAKE_BINARY_DIR}

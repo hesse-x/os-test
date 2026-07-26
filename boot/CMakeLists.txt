@@ -57,8 +57,13 @@ target_compile_options(boot_obj PRIVATE
     -fno-stack-check
     -fshort-wchar
     -mno-red-zone
-    -maccumulate-outgoing-args
 )
+
+# -maccumulate-outgoing-args: gcc-only ABI hint (x86-64 default is already on);
+# clang does not accept this flag, so gate it to gcc.
+if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(boot_obj PRIVATE -maccumulate-outgoing-args)
+endif()
 
 target_compile_definitions(boot_obj PRIVATE
     -DEFI_FUNCTION_WRAPPER

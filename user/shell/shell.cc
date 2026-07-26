@@ -311,7 +311,10 @@ static const cmd_entry cmds[] = {
 
 // ===================== Main =====================
 
-int main(int argc, char **argv, char **envp) {
+// extern "C": clang under -ffreestanding mangles a C++ `main` (no hosted entry
+// point concept), which breaks the crt0.o `main` reference. gcc leaves `main`
+// unmangled regardless, so this is a no-op for gcc and required for clang.
+extern "C" int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
   (void)envp;

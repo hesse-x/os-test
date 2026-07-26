@@ -27,6 +27,12 @@
 #define __must_check
 #endif
 
+// __maybe_unused: silence -Wunused-function/-Wunused-variable on entities that
+// are deliberately kept (e.g. register-accessor stubs in an in-progress
+// driver). gcc already tolerates unused static inline; clang warns, so this is
+// needed for the clang build. Mirrors the Linux kernel annotation.
+#define __maybe_unused __attribute__((unused))
+
 // ===================== Strong address-space types =====================
 typedef uint64_t __bitwise phys_addr_t;  // physical address
 typedef uint64_t __bitwise kern_vaddr_t; // kernel virtual address

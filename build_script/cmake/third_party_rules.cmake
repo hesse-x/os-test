@@ -141,7 +141,7 @@ function(add_third_party_lib name)
         endif()
 
         add_custom_command(OUTPUT ${SO_FILE}
-            COMMAND gcc -shared -fPIC -nostdlib -nodefaultlibs
+            COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -nostdlib -nodefaultlibs
                     -Wl,--hash-style=gnu
                     -Wl,-soname,lib${_output_name}.so
                     ${SO_EXTRA_LDFLAGS}

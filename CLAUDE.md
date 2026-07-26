@@ -33,6 +33,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./run.sh -s         # QEMU + GDB 远程调试服务器
 ```
 
+**编译器：** 默认用 clang 构建；`./build.sh --gcc` 切回 gcc（两套工具链均支持，经 `OS_COMPILER` 变量切换，见 `build_script/cmake/toolchain-x86_64.cmake`）。
+
 构建体系为 CMake + 自定义链接脚本。详见 `doc/design/cmake.md`。
 
 **磁盘布局**：disk.img（192MB），单盘两分区：分区1=ESP(FAT16, LBA 2048 起, 32MB，放 BOOTX64.EFI/myos.elf/init.elf)，分区2=根(FAT32, LBA 67648 起)。stub 把 init.elf 读进内存传给内核（initrd-style），内核不再用裸 LBA slot。详见 `doc/design/vfs.md`。

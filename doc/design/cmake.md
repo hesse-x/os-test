@@ -28,7 +28,7 @@ build.sh 两步流程：CMake configure + make → mkdisk.sh
 build_script/cmake/toolchain-x86_64.cmake：
 
 - CMAKE_SYSTEM_NAME = Generic（裸机，无 OS）
-- 编译器：gcc / g++ / gcc（ASM）
+- 编译器：默认 clang / clang++ / clang（ASM）；`-DOS_COMPILER=gcc`（或 `build.sh --gcc`）切回 gcc / g++。两套工具链均支持。
 - 全局 -m64
 - CMAKE_TRY_COMPILE_TARGET_TYPE = STATIC_LIBRARY（跳过 link check）
 
@@ -76,15 +76,15 @@ build_script/cmake/user_rules.cmake — add_user_lib() 和 add_user_elf()
 
 构建类型 flags：CMake 目标（内核 OBJECT lib、static libc.a）自动继承
 `CMAKE_<LANG>_FLAGS_<CONFIG>`；但 add_user_elf / add_user_ldso / SHARED libc.so /
-add_user_dyn_elf 用 `add_custom_command` 裸调 gcc，不继承这些 flags。user_rules.cmake
+add_user_dyn_elf 用 `add_custom_command` 裸调 `${CMAKE_C_COMPILER}`，不继承这些 flags。user_rules.cmake
 据此定义 `USER_BUILD_FLAGS` 按 CMAKE_BUILD_TYPE 显式补齐（Release=-O3 -DNDEBUG，
 Debug=-g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG，RelWithDebInfo/MinSizeRel 同 CMake
-默认），并注入每个裸 gcc 命令。crt0.S 是纯汇编，不参与。
+默认），并注入每个裸编译器命令。crt0.S 是纯汇编，不参与。
 
 add_user_lib(lib_name SOURCES ...) — 创建 STATIC library（如 libc.a，target 名 c → libc.a）。
 
 add_user_elf(name [C] SOURCES ... [LINK_LIBS ...]) — 三步管线：compile → objcopy → ld
-- C 标记选择 gcc/g++
+- C 标记选择 C/C++ 编译器（`${CMAKE_C_COMPILER}` / `${CMAKE_CXX_COMPILER}`）
 - objcopy --remove-section .note.gnu.property
 - ld -m elf_x86_64 -Ttext 0x400000 <obj> [libs] -o <name>.elf
 - LINK_LIBS 声明依赖（如 c 即 libc.a）

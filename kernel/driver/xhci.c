@@ -275,7 +275,7 @@ static inline uint32_t xhci_read(uint64_t offset) {
   return readl((void __iomem *)((uint8_t __iomem *)mmio_base + offset));
 }
 
-static inline void xhci_write(uint64_t offset, uint32_t val) {
+static inline __maybe_unused void xhci_write(uint64_t offset, uint32_t val) {
   writel((void __iomem *)((uint8_t __iomem *)mmio_base + offset), val);
 }
 
@@ -287,11 +287,11 @@ static inline void op_write(uint64_t offset, uint32_t val) {
   writel((void __iomem *)((uint8_t __iomem *)op_base + offset), val);
 }
 
-static inline uint32_t rt_read(uint64_t offset) {
+static inline __maybe_unused uint32_t rt_read(uint64_t offset) {
   return readl((void __iomem *)((uint8_t __iomem *)rt_base + offset));
 }
 
-static inline void rt_write(uint64_t offset, uint32_t val) {
+static inline __maybe_unused void rt_write(uint64_t offset, uint32_t val) {
   writel((void __iomem *)((uint8_t __iomem *)rt_base + offset), val);
 }
 

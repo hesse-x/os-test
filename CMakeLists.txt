@@ -25,10 +25,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # still resolves, while host glibc headers (/usr/include/stdio.h etc.)
 # stay out of the search path — the build is now truly host-independent.
 # -isystem (not -I) marks them as system headers so -Werror does not fire
-# on their internals. The freestanding dir is queried from gcc at configure
-# time (not hardcoded) so it survives gcc version changes.
+# on their internals. The freestanding dir is queried from the active compiler
+# at configure time (not hardcoded) so it survives version changes and works
+# for both gcc (…/gcc/<ver>/include) and clang (…/clang/<ver>/include).
 execute_process(
-    COMMAND gcc -print-file-name=include
+    COMMAND ${CMAKE_C_COMPILER} -print-file-name=include
     OUTPUT_VARIABLE GCC_FREESTANDING_INC
     OUTPUT_STRIP_TRAILING_WHITESPACE)
 
@@ -90,6 +91,18 @@ target_include_directories(os_uapi INTERFACE ${CMAKE_SOURCE_DIR}/include/uapi)
 # 为取 freestanding 选项而被连带打开 -Werror。
 add_library(os_warn INTERFACE)
 target_compile_options(os_warn INTERFACE ${WARN_FLAGS})
+
+# ---- os_kernel_warn: 内核 unused-parameter 豁免 INTERFACE 库 ----
+# 承载 -Wno-unused-parameter。必须经 INTERFACE 库在 os_warn *之后* link，而非
+# target_compile_options：CMake 把 target 自身 compile_options 排在 link 库的 usage
+# requirement 之前，故直接 target_compile_options(-Wno-unused-parameter) 会落在
+# os_warn 的 -Wall -Wextra -Werror 之前。gcc 无害（gcc 对 -Wno- 为粘性覆盖，后续
+# -Wall 不再重开 -Wunused-parameter），但 clang 严格按顺序处理 -Wall/-Wextra 会重开
+# -Wunused-parameter，覆盖前置的 -Wno-unused-parameter，导致内核 syscall stub 的一排
+# unusedN 占位参数全部 -Werror 失败。经 INTERFACE 库在 os_warn 之后 link 即保证顺序
+# （target_link_libraries 的 INTERFACE 库按列出顺序展开 usage requirement）。
+add_library(os_kernel_warn INTERFACE)
+target_compile_options(os_kernel_warn INTERFACE -Wno-unused-parameter)
 
 # 阶段 3 flag 去重（reface_cmake.md §3.3/§5.3）：拆除根 CMAKE_C_FLAGS/CMAKE_CXX_FLAGS 字符串拼装。
 # 历史上 WARN_FLAGS+FREESTANDING_FLAGS+-fPIE/-fno-pie+-std=gnu17 拼进全局字符串，CMake

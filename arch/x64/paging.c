@@ -21,9 +21,9 @@
 // of one writable 2MB huge page covering the whole image. Without this split a
 // wild/DMA write landing in .text silently corrupts kernel instructions
 // (observed: syscall_fast_entry 00 00 -> FF FF -> #UD on the next syscall).
-extern uint8_t __text_start[];
-extern uint8_t __rodata_end[];
-extern uint8_t __data_start[];
+extern uint8_t __text_start[] __attribute__((visibility("hidden")));
+extern uint8_t __rodata_end[] __attribute__((visibility("hidden")));
+extern uint8_t __data_start[] __attribute__((visibility("hidden")));
 #include "kernel/xcore/mem/alloc.h"
 #include "utils/macro.h"
 

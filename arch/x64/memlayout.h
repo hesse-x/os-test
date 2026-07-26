@@ -46,6 +46,14 @@
 
 // Linker symbol: end of kernel image (used by allocators)
 #include <stdint.h>
-extern uint8_t kernel_end[];
+// hidden visibility: kernel_end is a linker-script symbol with no in-TU
+// definition. Under -fPIE clang routes such externs through a GOT load
+// (R_X86_64_REX_GOTPCRELX) whose slot holds the higher-half VMA, and
+// --no-relax blocks the GOTPCREL->LEA relaxation. In enable_paging's
+// physical-address phase (pre-load_cr3, UEFI identity map only) that yields
+// the unmapped VMA instead of the physical address -> #PF on the first PT
+// page write. hidden keeps it a local relocation so clang emits lea, which
+// computes RIP+disp32 = physical address while executing at physical RIP.
+extern uint8_t kernel_end[] __attribute__((visibility("hidden")));
 
 #endif // ARCH_X64_MEMLAYOUT_H

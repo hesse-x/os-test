@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 add_kernel_object(xcore_mem
-    SOURCES alloc.c user_mapping.c vma.c slab.c copy_user.c
+    SOURCES alloc.c user_mapping.c vma.c slab.c copy_user.c string.c
 )
 
 if(SANITIZE)

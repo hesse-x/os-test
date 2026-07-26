@@ -8,6 +8,8 @@ git config core.hooksPath build_script/githooks
 # Build type: default Release, -d for Debug (with -g debug info)
 BUILD_TYPE=Release
 CMAKE_EXTRA=""
+# Compiler: default clang, --gcc to switch. Both toolchains are supported.
+OS_COMPILER=clang
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -27,8 +29,16 @@ while [[ $# -gt 0 ]]; do
             CMAKE_EXTRA="$CMAKE_EXTRA -DPERF=1"
             shift
             ;;
+        --gcc)
+            OS_COMPILER=gcc
+            shift
+            ;;
+        --clang)
+            OS_COMPILER=clang
+            shift
+            ;;
         *)
-            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf]"
+            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf] [--gcc] [--clang]"
             exit 1
             ;;
     esac
@@ -44,10 +54,19 @@ mkdir -p build && cd build
 cmake -GNinja \
       -DCMAKE_TOOLCHAIN_FILE=../build_script/cmake/toolchain-x86_64.cmake \
       -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+      -DOS_COMPILER=$OS_COMPILER \
       $CMAKE_EXTRA \
       ..
 ninja
 cd ..
+
+# install-headers.sh reads CC to locate the matching freestanding include dir
+# (gcc → …/gcc/<v>/include, clang → …/clang/<v>/include).
+if [[ "$OS_COMPILER" == "gcc" ]]; then
+    export CC=gcc
+else
+    export CC=clang
+fi
 
 # 2. Publish sysroot artifacts (UAPI headers + libs → self-contained cross-target)
 bash build_script/install-headers.sh

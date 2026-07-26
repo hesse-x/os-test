@@ -65,7 +65,7 @@ extern "C" int pci_dev_info_get(uint8_t bus, uint8_t dev, uint8_t func,
 
 extern "C" void wait_dev_ready(const char *dev_path) {
   int fd;
-  for (int tries = 0;; tries++) {
+  for (;;) {
     fd = open(dev_path, O_RDWR);
     if (fd >= 0)
       break;
