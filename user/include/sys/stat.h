@@ -68,6 +68,8 @@ LIBC_EXPORT int mkdir(const char *path, mode_t mode);
 LIBC_EXPORT int mkdirat(int dirfd, const char *path, mode_t mode);
 LIBC_EXPORT int mknod(const char *path, mode_t mode, dev_t dev);
 LIBC_EXPORT int chmod(const char *path, mode_t mode);
+LIBC_EXPORT int fchmod(int fd, mode_t mode);
+LIBC_EXPORT int fchmodat(int dirfd, const char *path, mode_t mode, int flags);
 
 #ifdef __cplusplus
 }

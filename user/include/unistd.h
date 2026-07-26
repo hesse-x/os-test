@@ -92,6 +92,9 @@ LIBC_EXPORT void wait_dev_ready(const char *dev_path);
 
 /* file ownership / symlink — used by libdrm device-node & sysfs paths */
 LIBC_EXPORT int chown(const char *path, uid_t owner, gid_t group);
+LIBC_EXPORT int fchown(int fd, uid_t owner, gid_t group);
+LIBC_EXPORT int fchownat(int dirfd, const char *path, uid_t owner, gid_t group,
+                         int flags);
 LIBC_EXPORT ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 
 /* sysconf() — POSIX runtime configuration query. _SC_* constants live in the

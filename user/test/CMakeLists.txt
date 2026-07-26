@@ -206,6 +206,10 @@ if(TEST)
     # §3.4 link/linkat(tmpfs 硬链 + nlink 全链路,Q3):data 共享 / unlink 保
     # 数据 nlink-- / 目录 EPERM / 跨 fs EXDEV / FAT32 EPERM / EEXIST / flags EINVAL。
     add_user_dyn_elf(test_link C SOURCES test_link.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    # chmod/chown 系(阶段1 capable 收口):mode/uid/gid 真写 inode + setuid 位清除
+    # 规则(apply_chmod/apply_chown,root CAP_FSETID 保留 / 非特权清)。落盘仅内存
+    # (与 utimensat 一致)。非 root 用例经 fork 子 setuid(1000)+_exit 码 + 父 waitpid。
+    add_user_dyn_elf(test_chmod C SOURCES test_chmod.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_vma_restructure C SOURCES test_vma_restructure.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_mmap_addr_hint C SOURCES test_mmap_addr_hint.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # S12: MAP_PRIVATE+fd file-backed mmap + demand-fault page-in + COW.

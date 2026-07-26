@@ -114,7 +114,7 @@ NR_SYSCALL=95（编号 0-94 连续，无空槽）。
 | 时间 | timespec_get, clock, sleep, usleep | time.h, unistd.h | SYS_GETTIME/CLOCK/RECV(timeout) |
 | 信号 | kill, sigaction, sigprocmask, sigpending, raise, signal, alarm, pause | signal.h | SYS_KILL/SIGACTION/SIGRETURN/SIGPENDING/ALARM/PAUSE |
 | TTY | isatty, tcgetattr, tcsetattr, ttyname, ioctl | termios.h, sys/ioctl.h | SYS_IOCTL |
-| 文件系统 | stat, fstat, mkdir, unlink, rmdir, opendir, readdir, closedir, getcwd, access | sys/stat.h, dirent.h, unistd.h | SYS_STAT/FSTAT/MKDIR/UNLINK/RMDIR/GETDENTS |
+| 文件系统 | stat, fstat, mkdir, unlink, rmdir, opendir, readdir, closedir, getcwd, access, chmod, fchmod, chown, fchown | sys/stat.h, dirent.h, unistd.h | SYS_STAT/FSTAT/MKDIR/UNLINK/RMDIR/GETDENTS/CHMOD/FCHMOD/CHOWN/FCHOWN |
 | 进程信息 | uname | sys/utsname.h | SYS_DEBUG_PRINT (内核填充) |
 | 断言 | assert | assert.h | — (abort 用 _exit) |
 

@@ -38,6 +38,11 @@ int path_walk_parent_from(struct inode *start, const char *relpath,
 struct inode *resolve_dirfd_start(int dirfd);
 struct inode *vfs_open_kern(const char *kpath);
 
+/* follow_symlink:跟随 LNK inode 的 target 串,返回解析后目标 inode(+1,调用者
+ * put)或 ERR_PTR(-errno)。depth 防 target 循环。chmod/chown 等 syscall 复用
+ * 末段 symlink 跟随(默认跟随;AT_SYMLINK_NOFOLLOW 时调用方不调本函数)。 */
+struct inode *follow_symlink(struct inode *lnk, int *depth);
+
 /* inode_permission:按 euid 判定 mask(R_OK/W_OK/X_OK/F_OK)权限(Q4)。root 放行;
  * 非 root 按 mode 的 owner/group/other 位。返 0=允许,负=-EACCES/-ENOENT。
  * 通用实现:各 fs .permission 暂置 NULL,VFS 回退到本函数。 */

@@ -70,6 +70,7 @@ static struct test_entry tests[] = {
     {"test_link_utimensat", "/test/test_link_utimensat.elf"},
     {"test_symlink", "/test/test_symlink.elf"},
     {"test_link", "/test/test_link.elf"},
+    {"test_chmod", "/test/test_chmod.elf"},
     {"test_udevd_db", "/test/test_udevd_db.elf"},
     {"test_udevd", "/test/test_udevd.elf"},
     {"test_dev_vfs_dynamic", "/test/test_dev_vfs_dynamic.elf"},

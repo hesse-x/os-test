@@ -7,6 +7,7 @@
 #ifndef KERNEL_BSD_PROC_H
 #define KERNEL_BSD_PROC_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -118,6 +119,10 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);
 // Build child kernel stack from parent trapframe (used by sys_fork/sys_clone)
 uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
                               uint64_t new_rax);
+
+/* capable(cap):特权检查单一收口(CAP_* 见 xos/capability.h)。今天等价 euid==0,
+ * 未来按 cap 分流到 capability bitmap 只改实现不改调用点。 */
+bool capable(int cap);
 
 // sys_clone (Phase 3b)
 int64_t sys_clone(int64_t flags, int64_t stack, int64_t parent_tid,

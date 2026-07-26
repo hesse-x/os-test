@@ -59,6 +59,7 @@
 #include "kernel/xcore/xtask.h"
 #include "utils/macro.h"
 
+#include <xos/capability.h>
 #include <xos/confname.h> // _SC_* (shared with user-side sysconf)
 #include <xos/errno.h>
 #include <xos/fcntl.h>
@@ -3114,29 +3115,215 @@ int64_t sys_readlink(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     return -EFAULT;
   return do_readlinkat(AT_FDCWD, kpath, ubuf, bufsiz);
 }
+/* ===================== chmod/fchmod/fchmodat =====================
+ * do_utimensat/do_faccessat 模式:kpath 内核串(调用方已 strncpy_from_user),
+ * flags 严格校验。落盘仅内存(与 utimensat Q5 一致:FAT32 不写 mode 到磁盘目录项,
+ * inode 内存态 mode/uid/gid/ctime)。setuid 位清除规则是安全基石(apply_chmod)。
+ */
+
+/* resolve_path_or_fd:chmod/chown 共用路径解析。返 +1 inode(调用方 inode_put)
+ * 或 ERR_PTR(-errno)/NULL。flags 含 AT_EMPTY_PATH 且 kpath 空 → fd 路径(照
+ * vfs_fstat_fd vfs.c:725:rcu_read_lock→fd_lookup→file_get→rcu_read_unlock→
+ * inode_get(f->inode)→file_put);否则 path_walk 解析,末段 symlink 默认跟随
+ * (AT_SYMLINK_NOFOLLOW 时取 link 本身,照 vfs_statx vfs.c:785)。 */
+static struct inode *resolve_path_or_fd(int dirfd, const char *kpath,
+                                        int flags) {
+  if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+    if (dirfd < 0)
+      return ERR_PTR(-EBADF);
+    xtask *proc = current_task;
+    rcu_read_lock();
+    struct file *f = fd_lookup(proc->proc->files, dirfd);
+    if (!f) {
+      rcu_read_unlock();
+      return ERR_PTR(-EBADF);
+    }
+    file_get(f);
+    rcu_read_unlock();
+    struct inode *ip =
+        f->inode ? inode_get(f->inode) : ERR_PTR(-EBADF); /* +1 */
+    file_put(f);
+    return ip;
+  }
+
+  struct inode *ip;
+  if (kpath[0] == '/') {
+    char relpath[256];
+    struct mount_entry *m = vfs_resolve(kpath, relpath, sizeof(relpath));
+    if (!m)
+      return ERR_PTR(-ENOENT);
+    ip = path_walk(m, relpath); /* +1 */
+  } else {
+    struct inode *start = resolve_dirfd_start(dirfd);
+    if (IS_ERR(start))
+      return start;
+    ip = path_walk_from(start, kpath); /* +1 */
+    inode_put(start);
+  }
+  if (!ip)
+    return ERR_PTR(-ENOENT);
+  /* 末段 symlink 跟随:未设 AT_SYMLINK_NOFOLLOW 时跟随(chmod 默认作用于目标,
+   * 非 link 本身)。中间段已由 path_walk 跟随。 */
+  if (ip->type == INODE_LNK && !(flags & AT_SYMLINK_NOFOLLOW)) {
+    int sym_depth = 0;
+    struct inode *resolved = follow_symlink(ip, &sym_depth);
+    inode_put(ip);
+    return resolved; /* +1 或 ERR_PTR */
+  }
+  return ip; /* +1 */
+}
+
+/* update_ctime:写 inode ctime(改 mode/uid/gid 后)。dispatch i_op->update_time
+ * 或 generic 回退(照 do_utimensat:3408)。仅 CTIME_BIT。 */
+static int update_ctime(struct inode *ip) {
+  uint64_t now =
+      __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
+  if (ip->i_op && ip->i_op->update_time)
+    return ip->i_op->update_time(ip, 0, 0, now, CTIME_BIT);
+  return generic_update_time(ip, 0, 0, now, CTIME_BIT);
+}
+
+/* apply_chmod:持 i_lock 改 mode(保留 S_IFMT 文件类型位),非特权 chmod 清
+ * setuid/setgid 位(对齐 Linux chmod_common)。锁序:仅持 i_lock(leaf lock,
+ * 照 fat32 i_lock→fat_lock 序,i_lock 在内层),不碰 fat_lock/page_cache_lock。 */
+static void apply_chmod(struct inode *ip, unsigned int new_mode) {
+  spin_lock(&ip->i_lock);
+  ip->mode = (ip->mode & S_IFMT) | (new_mode & 07777); /* 保留文件类型位 */
+  if (!capable(CAP_FSETID) && S_ISREG(ip->mode))
+    ip->mode &= ~(S_ISUID | S_ISGID); /* 非特权 chmod 必清 setuid 位 */
+  if (!capable(CAP_FSETID) && S_ISDIR(ip->mode))
+    ip->mode &= ~S_ISVTX;
+  spin_unlock(&ip->i_lock);
+}
+
+/* do_fchmodat:chmod/fchmod/fchmodat 共同实现。flags 校验照 do_utimensat(接受
+ * AT_SYMLINK_NOFOLLOW + AT_EMPTY_PATH)。权限:CAP_FOWNER 放行,否则 euid 须匹配
+ * owner(对齐 Linux chmod_common + inode_owner_or_capable)。 */
+static int do_fchmodat(int dirfd, const char *kpath, unsigned int mode,
+                       int flags) {
+  if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+    return -EINVAL;
+  unsigned int new_mode =
+      mode & 07777; /* 剥文件类型位,保留 S_ISUID/S_ISGID/S_ISVTX */
+
+  struct inode *ip = resolve_path_or_fd(dirfd, kpath, flags);
+  if (IS_ERR(ip))
+    return (int)PTR_ERR(ip);
+  if (!ip) {
+    return -ENOENT;
+  }
+
+  int err = 0;
+  if (!capable(CAP_FOWNER) && current_proc->euid != ip->uid) {
+    err = -EPERM;
+  } else {
+    apply_chmod(ip, new_mode);
+    err = update_ctime(ip);
+  }
+  inode_put(ip);
+  return err;
+}
+
 int64_t sys_chmod(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                   int64_t a6) {
-  (void)a1;
-  return 0;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+  /* chmod(path, mode) = fchmodat(AT_FDCWD, path, mode, 0)。 */
+  const char __user *upath = (const char __user *__force)a1;
+  unsigned int mode = (unsigned int)a2;
+  if (!upath)
+    return -EFAULT;
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return -EFAULT;
+  return do_fchmodat(AT_FDCWD, kpath, mode, 0);
 }
 int64_t sys_fchmod(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                    int64_t a6) {
-  (void)a1;
-  return 0;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+  /* fchmod(fd, mode) = fchmodat(fd, "", mode, AT_EMPTY_PATH)。 */
+  int fd = (int)a1;
+  unsigned int mode = (unsigned int)a2;
+  return do_fchmodat(fd, "", mode, AT_EMPTY_PATH);
 }
+/* ===================== chown/fchown/fchownat =====================
+ * do_fchmodat 同模式:复用 resolve_path_or_fd/update_ctime。落盘仅内存(与
+ * chmod/utimensat 一致)。权限简化为 CAP_CHOWN(root-only);Linux 复杂规则
+ * (属主改 group 到自己所在 group)留 todo(单用户 root-default 不破坏现有测试)。
+ */
+
+/* apply_chown:持 i_lock 改 uid/gid((uid_t)-1/(gid_t)-1 = 不变),非特权 chown
+ * 清 setuid/setgid 位(对齐 Linux chown_common)。锁序同 apply_chmod:仅 i_lock。
+ */
+static void apply_chown(struct inode *ip, unsigned int uid, unsigned int gid) {
+  spin_lock(&ip->i_lock);
+  if (uid != (unsigned int)-1)
+    ip->uid = uid;
+  if (gid != (unsigned int)-1)
+    ip->gid = gid;
+  if (!capable(CAP_FSETID) && S_ISREG(ip->mode))
+    ip->mode &= ~(S_ISUID | S_ISGID); /* chown 改 owner 后非特权清 setuid 位 */
+  spin_unlock(&ip->i_lock);
+}
+
+/* do_fchownat:chown/fchown/fchownat 共同实现。flags 校验同 chmod(接受
+ * AT_SYMLINK_NOFOLLOW + AT_EMPTY_PATH)。(uid_t)-1/(gid_t)-1 =
+ * 该字段不变(POSIX)。 */
+static int do_fchownat(int dirfd, const char *kpath, unsigned int owner,
+                       unsigned int group, int flags) {
+  if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+    return -EINVAL;
+
+  struct inode *ip = resolve_path_or_fd(dirfd, kpath, flags);
+  if (IS_ERR(ip))
+    return (int)PTR_ERR(ip);
+  if (!ip) {
+    return -ENOENT;
+  }
+
+  int err = 0;
+  if (!capable(CAP_CHOWN)) {
+    err = -EPERM; /* 简化为 root-only(对齐 plan 决策) */
+  } else {
+    apply_chown(ip, owner, group);
+    err = update_ctime(ip);
+  }
+  inode_put(ip);
+  return err;
+}
+
 int64_t sys_chown(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                   int64_t a6) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  return 0;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+  /* chown(path, owner, group) = fchownat(AT_FDCWD, path, owner, group, 0)。 */
+  const char __user *upath = (const char __user *__force)a1;
+  unsigned int owner = (unsigned int)a2;
+  unsigned int group = (unsigned int)a3;
+  if (!upath)
+    return -EFAULT;
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return -EFAULT;
+  return do_fchownat(AT_FDCWD, kpath, owner, group, 0);
 }
 int64_t sys_fchown(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                    int64_t a6) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  return 0;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+  /* fchown(fd, owner, group) = fchownat(fd, "", owner, group, AT_EMPTY_PATH)。
+   */
+  int fd = (int)a1;
+  unsigned int owner = (unsigned int)a2;
+  unsigned int group = (unsigned int)a3;
+  return do_fchownat(fd, "", owner, group, AT_EMPTY_PATH);
 }
 int64_t sys_linkat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                    int64_t a6) {
@@ -3193,18 +3380,35 @@ int64_t sys_readlinkat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
 }
 int64_t sys_fchmodat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                      int64_t a6) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  return 0;
+  (void)a5;
+  (void)a6;
+  /* fchmodat(dirfd, path, mode, flags)。 */
+  int dirfd = (int)a1;
+  const char __user *upath = (const char __user *__force)a2;
+  unsigned int mode = (unsigned int)a3;
+  int flags = (int)a4;
+  if (!upath)
+    return -EFAULT;
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return -EFAULT;
+  return do_fchmodat(dirfd, kpath, mode, flags);
 }
 int64_t sys_fchownat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                      int64_t a6) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  return 0;
+  (void)a6;
+  /* fchownat(dirfd, path, owner, group, flags)。 */
+  int dirfd = (int)a1;
+  const char __user *upath = (const char __user *__force)a2;
+  unsigned int owner = (unsigned int)a3;
+  unsigned int group = (unsigned int)a4;
+  int flags = (int)a5;
+  if (!upath)
+    return -EFAULT;
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return -EFAULT;
+  return do_fchownat(dirfd, kpath, owner, group, flags);
 }
 int64_t sys_clock_settime(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                           int64_t a5, int64_t a6) {
@@ -3216,8 +3420,10 @@ int64_t sys_clock_settime(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
   if (clk != CLOCK_REALTIME && clk != CLOCK_TAI)
     return -EPERM;
 
-  // No capabilities framework yet — any process may set the wall clock (Linux
-  // requires CAP_SYS_TIME; todo: gate once capabilities land).
+  // CAP_SYS_TIME via capable() 收口(今天等价 euid==0;Linux 要求 CAP_SYS_TIME)。
+  if (!capable(CAP_SYS_TIME))
+    return -EPERM;
+
   struct timespec kts;
   if (copy_from_user(&kts, ts_u, sizeof(kts)))
     return -EFAULT;

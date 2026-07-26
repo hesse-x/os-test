@@ -314,22 +314,15 @@ int mknod(const char *path, mode_t mode, dev_t dev) {
 
 /* POSIX functions referenced by upstream libdrm's device-enumeration and
  * node-creation paths (chown/chmod/remove/readlink/getline/sscanf/fscanf).
- * None lie on the drmOpen/drmModeGetResources path verified in plan_drm2
- * step 10; stubs keep the libdrm compile/link unit whole and return failure
- * (errno=ENOSYS) if reached, matching the mknod stub above. */
+ * chown/chmod now back the real sys_chown/sys_chmod syscalls(落盘仅内存,
+ * setuid 位清除见 kernel/bsd/syscall.c);the rest remain stubs matching the
+ * mknod stub above. */
 int chown(const char *path, uid_t owner, gid_t group) {
-  (void)path;
-  (void)owner;
-  (void)group;
-  errno = ENOSYS;
-  return -1;
+  return sys_chown(path, (unsigned int)owner, (unsigned int)group);
 }
 
 int chmod(const char *path, mode_t mode) {
-  (void)path;
-  (void)mode;
-  errno = ENOSYS;
-  return -1;
+  return sys_chmod(path, (unsigned int)mode);
 }
 
 int remove(const char *path) { return unlink(path); }

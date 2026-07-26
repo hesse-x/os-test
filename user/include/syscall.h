@@ -626,6 +626,67 @@ static inline int sys_utimensat(int dirfd, const char *path,
   return 0;
 }
 
+// chmod(2)/fchmod(2)/fchmodat(2) — 落盘仅内存(与 utimensat 一致);setuid 位
+// 清除规则见 kernel/bsd/syscall.c apply_chmod。errno 转换在 POSIX 封装层。
+static inline int sys_chmod(const char *path, unsigned int mode) {
+  int64_t r = __syscall2(SYS_CHMOD, (int64_t)(uintptr_t)path, (int64_t)mode);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+static inline int sys_fchmod(int fd, unsigned int mode) {
+  int64_t r = __syscall2(SYS_FCHMOD, (int64_t)fd, (int64_t)mode);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+static inline int sys_fchmodat(int dirfd, const char *path, unsigned int mode,
+                               int flags) {
+  int64_t r = __syscall4(SYS_FCHMODAT, (int64_t)dirfd, (int64_t)(uintptr_t)path,
+                         (int64_t)mode, (int64_t)flags);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+// chown(2)/fchown(2)/fchownat(2) — 权限简化为 root-only(CAP_CHOWN);
+// (uid_t)-1/(gid_t)-1 = 该字段不变。errno 转换在 POSIX 封装层。
+static inline int sys_chown(const char *path, unsigned int owner,
+                            unsigned int group) {
+  int64_t r = __syscall3(SYS_CHOWN, (int64_t)(uintptr_t)path, (int64_t)owner,
+                         (int64_t)group);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+static inline int sys_fchown(int fd, unsigned int owner, unsigned int group) {
+  int64_t r =
+      __syscall3(SYS_FCHOWN, (int64_t)fd, (int64_t)owner, (int64_t)group);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+static inline int sys_fchownat(int dirfd, const char *path, unsigned int owner,
+                               unsigned int group, int flags) {
+  int64_t r = __syscall5(SYS_FCHOWNAT, (int64_t)dirfd, (int64_t)(uintptr_t)path,
+                         (int64_t)owner, (int64_t)group, (int64_t)flags);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
 static inline int sys_rename(const char *oldpath, const char *newpath) {
   int64_t r = __syscall2(SYS_RENAME, (int64_t)(uintptr_t)oldpath,
                          (int64_t)(uintptr_t)newpath);

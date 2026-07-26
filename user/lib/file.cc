@@ -452,6 +452,33 @@ int utimensat(int dirfd, const char *path, const struct timespec times[2],
   return sys_utimensat(dirfd, path, times, flags);
 }
 
+// ===================== fchmod / fchmodat / fchown / fchownat
+// ===================== 落盘仅内存(与 utimensat 一致);setuid 位清除见
+// kernel/bsd/syscall.c。 errno 转换在 syscall.h 薄封装;此处仅 NULL-path
+// 防护(fchmod/fchown 走 fd, 无 path)。
+int fchmod(int fd, mode_t mode) { return sys_fchmod(fd, (unsigned int)mode); }
+
+int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
+  if (!path) {
+    errno = EFAULT;
+    return -1;
+  }
+  return sys_fchmodat(dirfd, path, (unsigned int)mode, flags);
+}
+
+int fchown(int fd, uid_t owner, gid_t group) {
+  return sys_fchown(fd, (unsigned int)owner, (unsigned int)group);
+}
+
+int fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flags) {
+  if (!path) {
+    errno = EFAULT;
+    return -1;
+  }
+  return sys_fchownat(dirfd, path, (unsigned int)owner, (unsigned int)group,
+                      flags);
+}
+
 // ===================== symlink / readlink (§3.3) =====================
 // symlink(target, linkpath):建指向 target 的符号链接。走 sys_symlink
 // (内核 tmpfs 真实现,FAT32 → ENOSYS/EPERM)。errno 转换在 syscall.h 薄封装。

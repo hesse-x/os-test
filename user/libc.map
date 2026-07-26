@@ -51,7 +51,7 @@ global:
     gethostname; sethostname; alarm; pause;
     truncate; fsync; sync;
     getpagesize; sysconf;
-    chown; readlink;
+    chown; fchown; fchownat; readlink;
 
     /* <fcntl.h> */
     openat; fcntl; fd_file_size;
@@ -115,7 +115,7 @@ global:
 
     /* <sys/stat.h> */
     fstat; fstatat; lstat; mkdir; mkdirat; mknod; stat; statx;
-    chmod;
+    chmod; fchmod; fchmodat;
 
     /* <sys/wait.h> */
     waitpid;

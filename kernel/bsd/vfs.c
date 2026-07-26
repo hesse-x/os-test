@@ -31,6 +31,7 @@
 #include "kernel/xcore/xtask.h"
 #include <stdbool.h>
 #include <stddef.h>
+#include <xos/capability.h>
 #include <xos/errno.h>
 #include <xos/fcntl.h>
 #include <xos/stat.h>
@@ -112,8 +113,10 @@ void vfs_init(void) {
 /* follow_symlink:跟随 LNK inode 的 target 串(经 i_op->readlink),返回解析
  * 后的目标 inode(+1,调用者 put)。depth 防 target 循环 → ELOOP。target 绝对
  * 路径从 root mount 重解(vfs_resolve);相对路径从 lnk 的父目录起解(本 OS
- * tmpfs inode 无 parent_dir 回指,相对 target 罕见,fallback 从 root 走)。 */
-static struct inode *follow_symlink(struct inode *lnk, int *depth) {
+ * tmpfs inode 无 parent_dir 回指,相对 target 罕见,fallback 从 root 走)。
+ * 非 static:chmod/chown 等 syscall 需复用末段 symlink 跟随(vfs_statx 同模式)。
+ */
+struct inode *follow_symlink(struct inode *lnk, int *depth) {
   if (!lnk || lnk->type != INODE_LNK || !lnk->i_op || !lnk->i_op->readlink)
     return ERR_PTR(-EINVAL);
   if (++(*depth) > SYMLINK_MAX)
@@ -397,8 +400,8 @@ int inode_permission(struct inode *ip, int mask) {
   if (mask == F_OK)
     return 0;                         /* 存在性:path_walk 成功即存在 */
   uint32_t euid = current_proc->euid; /* proc.h:57 euid(default 0=root) */
-  if (euid == 0)
-    return 0; /* root 放行(CAP_DAC_OVERRIDE 等价) */
+  if (capable(CAP_DAC_OVERRIDE))
+    return 0; /* root 放行(CAP_DAC_OVERRIDE;今天等价 euid==0) */
   /* 非 root:按 mode 的 owner/group/other 位。euid 匹配 owner → owner 位;
    * 否则 egid 匹配 gid → group 位;否则 other 位。 */
   uint32_t mode = ip->mode;

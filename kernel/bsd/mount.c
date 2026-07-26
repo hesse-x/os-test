@@ -10,8 +10,8 @@
 #include "kernel/bsd/proc.h" // current_proc (euid permission gate)
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/spinlock.h"
-#include "kernel/xcore/xtask.h"
 
+#include <xos/capability.h>
 #include <xos/dirent.h>
 #include <xos/errno.h>
 
@@ -250,11 +250,10 @@ int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   (void)arg1; // source: no source concept (mount fstype onto target); NULL OK
   (void)unused;
 
-  /* euid==0 ≡ CAP_SYS_ADMIN (no capability bitmap in this OS; cf.
-   * kill_permitted in signal.c). Single-user root-default system, so the gate
-   * is a no-op today and only bites when a non-root euid is later introduced.
-   */
-  if (current_proc->euid != 0)
+  /* CAP_SYS_ADMIN via capable() 收口(今天等价 euid==0;无 capability bitmap,
+   * cf. kill_permitted in signal.c)。单用户 root-default,故 gate 今天是 no-op,
+   * 仅在引入非 root euid 时才 bite。 */
+  if (!capable(CAP_SYS_ADMIN))
     return (int64_t)-EPERM;
 
   unsigned int flags = (unsigned int)arg4;

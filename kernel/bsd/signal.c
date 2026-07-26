@@ -31,6 +31,7 @@
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 
+#include <xos/capability.h>
 #include <xos/errno.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
@@ -649,19 +650,19 @@ int pgsignal(pid_t pgid, int sig) {
 
 // ===================== BSD syscall: kill =====================
 // S03: Linux-aligned permission + scope. NSIG=65 (RT signals 33-64). sig==0
-// does existence + permission validation only. euid==0 ≡ CAP_KILL (no real
-// capability subsystem yet — recorded as tech debt). pid==-1 broadcasts to
-// every sendable process except init and the sender.
+// does existence + permission validation only. CAP_KILL via capable() 收口
+// (今天等价 euid==0;未来 capability bitmap 落地只改 capable)。pid==-1
+// broadcasts to every sendable process except init and the sender.
 
 // Permission check: may `sender` post `sig` to `target`? Returns 0 / -EPERM.
 // (sig is unused today — real CAP_KILL would let root send any signal even to
-// a setuid process; the euid==0 short-circuit already grants that.)
+// a setuid process; the capable(CAP_KILL) short-circuit already grants that.)
 static int kill_permitted(xtask *sender, xtask *target, int sig) {
   (void)sig;
   if (!target || !target->proc)
     return -ESRCH;
-  if (sender->proc->euid == 0)
-    return 0; // root ≡ CAP_KILL
+  if (capable(CAP_KILL))
+    return 0; // root ≡ CAP_KILL(今天等价 euid==0)
   if (sender->proc->euid == target->proc->uid ||
       sender->proc->euid == target->proc->euid ||
       sender->proc->uid == target->proc->euid)

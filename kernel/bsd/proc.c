@@ -201,6 +201,17 @@ void proc_reap_idle(void) {
   // in sched_task_reap, but provides defense-in-depth)
 }
 
+/* capable(cap):特权检查单一收口。今天无 capability bitmap——所有 cap 等价
+ * euid==0(root 放行)。(void)cap 预留分流钩子:未来加 cap_effective/inheritable/
+ * permitted bitmap + secbits 时,按 cap 分流只改本函数,所有调用点零改动。
+ * 各特权点(inode_permission/kill_permitted/sys_mount/clock_settime/chmod/chown)
+ * 统一经此函数,而非各自判 euid==0。CAP_* 编号对齐 Linux(见 xos/capability.h)。
+ */
+bool capable(int cap) {
+  (void)cap; /* 未来按 cap 分流到 bitmap/secbits */
+  return current_proc->euid == 0;
+}
+
 // ===================== files lifecycle =====================
 
 files *files_create(void) {
