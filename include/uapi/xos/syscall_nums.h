@@ -157,6 +157,8 @@
 #define SYS_RECVFROM 45
 #define SYS_SENDTO 44
 #define SYS_GETTIMEOFDAY 96
+#define SYS_FACCESSAT2                                                         \
+  439 // alias of faccessat (flags pass-through; llvm-libc hard-requires)
 
 // ---- Simple kernel implementations (B group) ----
 #define SYS_PREAD64 17
@@ -164,6 +166,9 @@
 #define SYS_READV 19
 #define SYS_WRITEV 20
 #define SYS_UNAME 63
+#define SYS_STATFS                                                             \
+  137 // filesystem stats (capacity fields 0 today; see todo.md)
+#define SYS_FSTATFS 138 // fd variant of statfs
 
 // ---- Socket thin wrappers (F group) ----
 #define SYS_GETSOCKNAME 51

@@ -142,6 +142,7 @@ int64_t sys_renameat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_recvfrom(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_sendto(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_gettimeofday(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_faccessat2(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // sched_* (group 6)
 int64_t sys_getcpu(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
@@ -173,6 +174,8 @@ int64_t sys_pwrite64(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_readv(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_writev(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_uname(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_statfs(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_fstatfs(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // ppoll (declared in socket.h)
 int64_t sys_ppoll(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);

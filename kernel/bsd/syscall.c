@@ -41,6 +41,7 @@
 #include "kernel/bsd/vfs.h"
 #include "kernel/driver/ahci.h"
 #include "kernel/driver/pci.h"
+#include "kernel/kernel.h" // hostname_get (sys_uname nodename)
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/list.h"
@@ -71,6 +72,7 @@
 #include <xos/signal.h>
 #include <xos/socket.h>
 #include <xos/stat.h>
+#include <xos/statfs.h>
 #include <xos/syscall.h>
 #include <xos/syscall_nums.h>
 #include <xos/time.h>
@@ -3547,6 +3549,117 @@ int64_t sys_faccessat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
   return do_faccessat(dirfd, kpath, mode, flags);
 }
 
+/* sys_faccessat2(dirfd, path, mode, flags) — SYS_FACCESSAT2 (439).  LLVM libc
+ * hard-#errors without SYS_faccessat2 (faccessat.cpp).  The legacy
+ * SYS_faccessat (269) accepts the same flags; the only Linux difference is
+ * that the old entry ignored `flags`, while this kernel's do_faccessat has
+ * always honoured them.  So this is a verbatim alias of sys_faccessat. */
+int64_t sys_faccessat2(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
+                       int64_t unused5, int64_t unused6) {
+  (void)unused5;
+  (void)unused6;
+  int dirfd = (int)a1;
+  const char __user *upath = (const char __user *__force)a2;
+  int mode = (int)a3;
+  int flags = (int)a4;
+  if (!upath)
+    return -EFAULT;
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return -EFAULT;
+  return do_faccessat(dirfd, kpath, mode, flags);
+}
+
+/* fill_statfs: populate struct statfs for a mount.  Per the decision in
+ * doc/design/todo.md, capacity fields (f_blocks/f_bfree/f_bavail/f_files/
+ * f_ffree) stay 0 — FAT32 keeps no free-cluster counter and llvm-libc's
+ * pathconf() only reads f_type/f_bsize/f_frsize/f_namelen.  f_type is chosen
+ * by fstype name so FAT32 honestly reports MSDOS_SUPER_MAGIC (FAT has no
+ * symlink support, matching _PC_2_SYMLINKS=0).  Returns the magic, or 0 if
+ * the fstype is unknown (f_type 0 + the caller still copies out). */
+static long statfs_magic_for(const struct mount_entry *m) {
+  if (!m || !m->fs)
+    return 0;
+  const char *name = m->fs->name;
+  if (__strcmp(name, "fat32") == 0)
+    return MSDOS_SUPER_MAGIC;
+  if (__strcmp(name, "tmpfs") == 0 || __strcmp(name, "devtmpfs") == 0)
+    return TMPFS_MAGIC;
+  if (__strcmp(name, "sysfs") == 0)
+    return SYSFS_MAGIC;
+  return 0;
+}
+
+static void fill_statfs(struct statfs *ks, const struct mount_entry *m) {
+  __memset(ks, 0, sizeof(*ks));
+  long magic = statfs_magic_for(m);
+  ks->f_type = magic;
+  long bsize = (magic == MSDOS_SUPER_MAGIC) ? (long)fat32_bytes_per_cluster()
+                                            : (long)PAGE_SIZE;
+  ks->f_bsize = bsize;
+  ks->f_frsize = bsize;
+  ks->f_namelen = 255; /* FAT32 LFN / tmpfs / sysfs all cap at 255 */
+}
+
+/* sys_statfs(path, buf) — SYS_STATFS (137).  Resolves path to its mount via
+ * vfs_resolve (longest-prefix mount-table match), same entry path as
+ * sys_access.  fd-less; AT_FDCWD not applicable. */
+int64_t sys_statfs(int64_t a1, int64_t a2, int64_t unused3, int64_t unused4,
+                   int64_t unused5, int64_t unused6) {
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
+  const char __user *upath = (const char __user *__force)a1;
+  struct statfs __user *ubuf = (struct statfs __user *)(uintptr_t)a2;
+  if (!upath || !ubuf)
+    return -EFAULT;
+  char kpath[256];
+  if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
+    return -EFAULT;
+  char relpath[256];
+  struct mount_entry *m = vfs_resolve(kpath, relpath, sizeof(relpath));
+  if (!m)
+    return -ENOENT;
+  struct statfs ks;
+  fill_statfs(&ks, m);
+  if (copy_to_user(ubuf, &ks, sizeof(ks)))
+    return -EFAULT;
+  return 0;
+}
+
+/* sys_fstatfs(fd, buf) — SYS_FSTATFS (138).  Resolves fd → file → inode →
+ * mount (mount_of_inode), mirroring do_faccessat's AT_EMPTY_PATH fd path. */
+int64_t sys_fstatfs(int64_t a1, int64_t a2, int64_t unused3, int64_t unused4,
+                    int64_t unused5, int64_t unused6) {
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
+  int fd = (int)a1;
+  struct statfs __user *ubuf = (struct statfs __user *)(uintptr_t)a2;
+  if (!ubuf)
+    return -EFAULT;
+  if (fd < 0)
+    return -EBADF;
+  xtask *proc = current_task;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    return -EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+  struct mount_entry *m = f->inode ? mount_of_inode(f->inode) : NULL;
+  struct statfs ks;
+  fill_statfs(&ks, m);
+  file_put(f);
+  if (copy_to_user(ubuf, &ks, sizeof(ks)))
+    return -EFAULT;
+  return 0;
+}
+
 /* do_utimensat:utimensat 的共同实现。kpath 内核串;times 为 NULL 时 atime=
  * mtime=now(需写权限)。UTIME_NOW/OMIT 见 uapi。flags 仅 AT_SYMLINK_NOFOLLOW
  * 合法(本 OS 无 symlink,接受但语义同 follow;Q6 严格校验未知位)。 */
@@ -4165,7 +4278,12 @@ int64_t sys_uname(int64_t arg1, int64_t unused1, int64_t unused2,
   struct new_utsname kbuf;
   __memset(&kbuf, 0, sizeof(kbuf));
   __strncpy(kbuf.sysname, "Xos", __NEW_UTS_LEN);
-  __strncpy(kbuf.nodename, "(hostname)", __NEW_UTS_LEN);
+  // nodename reflects the live hostname (sethostname/hostname_set) so
+  // llvm-libc's gethostname() — which reads uname.nodename, Linux having no
+  // SYS_gethostname — agrees with the OS-specific SYS_GETHOSTNAME path.
+  // hostname_get NUL-terminates only when n < maxlen; force-cap the field.
+  hostname_get(kbuf.nodename, __NEW_UTS_LEN);
+  kbuf.nodename[__NEW_UTS_LEN - 1] = '\0';
   __strncpy(kbuf.release, "0.1", __NEW_UTS_LEN);
   __strncpy(kbuf.version, "#1 SMP", __NEW_UTS_LEN);
   __strncpy(kbuf.machine, "x86_64", __NEW_UTS_LEN);
@@ -5534,6 +5652,10 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_newfstatat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_STATX:
     return sys_statx(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_STATFS:
+    return sys_statfs(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_FSTATFS:
+    return sys_fstatfs(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MKDIR:
     return sys_mkdir(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_UNLINK:
@@ -5684,6 +5806,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_access(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_FACCESSAT:
     return sys_faccessat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_FACCESSAT2:
+    return sys_faccessat2(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_CHMOD:
     return sys_chmod(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_FCHMOD:

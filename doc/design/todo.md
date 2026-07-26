@@ -265,6 +265,7 @@ S20（[../../refact_syscall/S20_misc_finish.md](../../refact_syscall/S20_misc_fi
 - **`MAP_GROWSDOWN` 栈自动扩展**（`include/uapi/xos/mman.h`）：S20 补常量 `0x100`，接受为 no-op（本 OS 栈固定）。真实 growsdown 栈扩展需 fault handler 在栈 guard 页 fault 时向下扩展 VMA，属 S10 范围。
 - **`PROT_GROWSDOWN` 栈 guard 扩展**（`kernel/bsd/syscall.c` `sys_mprotect`）：S20 接受该位（mask 掉不报错），但无栈自动扩展语义。同 `MAP_GROWSDOWN`，属 S10。
 - **sparse 文件真实 hole 跟踪**（`kernel/bsd/syscall.c` `sys_lseek` `SEEK_DATA`/`SEEK_HOLE`）：S20 补 `SEEK_DATA 3`/`SEEK_HOLE 4`，退化到 Linux "无洞文件"语义（全文件=data，尾部=hole，`offset>=size` 返 `ENXIO`）。本 FS 无 sparse/punch，真实 hole 报告随 sparse FS。
+- **`statfs`/`fstatfs` 容量字段**（`SYS_STATFS 137`/`SYS_FSTATFS 138`，`kernel/bsd/syscall.c` `sys_statfs`/`sys_fstatfs`）：已实现，但 `f_blocks`/`f_bfree`/`f_bavail`/`f_files`/`f_ffree` 返回 0——FAT32 不维护 free-cluster 计数器，且 llvm-libc 的 `pathconf()` 只读 `f_type`/`f_bsize`/`f_frsize`/`f_namelen` 四字段（本任务仅为打通 llvm-libc unistd/time 模块）。`f_type` 按 mount fstype 名选 magic：fat32→`MSDOS_SUPER_MAGIC`（诚实反映 FAT 不支持符号链接，与 `_PC_2_SYMLINKS=0` 一致）、tmpfs/devtmpfs→`TMPFS_MAGIC`、sysfs→`SYSFS_MAGIC`。**修复**：未来 df/磁盘工具需要真实容量时，给 fat32 加 `fat32_total_clusters()`（导出 `static total_data_clusters`）+ `fat32_free_clusters()`（新增 `used_clusters` 计数器在 `fat32_allocate_cluster`/`fat32_free_chain` 维护，或慢 FAT 扫描），再在 `fill_statfs` 填入 `f_blocks`/`f_bfree`/`f_bavail`。
 - **`CLONE_VFORK` 父阻塞语义**：见技术债 #40（S19 已记），需 wait 通道。
 
 ## 调度与唤醒子系统重构
@@ -289,6 +290,15 @@ evdev 中断投递正规化(技术债 #34)独立于本重构,走路径 3,见 [..
 - [ ] `open()` mode 管线接通：`O_CREAT` 时第三个 `mode_t` 参数当前三层全断——wrapper `user/lib/file.cc` 不取 va_arg、libc inline `sys_open` 用 `__syscall2`、内核 `sys_open` 第 3 参命名 `_u1` 忽略。FAT32 无权限位故 mode 本就无意义（与 `mkdir` 同样 `(void)mode`），属合理技术妥协；未来支持权限的 FS 上线时三层接通（wrapper 取 va_arg → inline 改 `__syscall3` 传 mode → 内核用 arg3）。详见 [vfs.md](kernel/vfs.md) 待完成项
 - [x] **O_DIRECTORY 强制**（已落地，`kernel/bsd/vfs.c`）：`sys_open` 与 `sys_openat` 相对路径分支在 EISDIR 门控后、SOCKET/ENXIO 前补 `O_DIRECTORY` 校验——非目录返 `-ENOTDIR`（对齐 Linux 原子语义）。`O_CREAT|O_DIRECTORY` 新建的普通文件 `type==INODE_REGULAR` 命中 `!= INODE_DIR` → ENOTDIR，符合 Linux。**未覆盖**：① `sys_open` 对 devtmpfs 设备文件的委派分支（`vfs.c:356-359` 在校验前 `return devtmpfs_open(...)`）——`/dev` 下设备节点 `INODE_DEV` 用 O_DIRECTORY 理论应 ENOTDIR，本内核不拦截（场景极少，留作后续微调）；② `O_NOFOLLOW`/`O_DIRECT` 维持 no-op（无 symlink 子系统、无 direct-IO 旁路路径，`mount.c:179` 明注无 symlink 处理，全树 0 引用），待对应子系统上线再激活。测试 `test_openat_dirfd.c::test_open_odirectory`。
 - [ ] link/symlink/readlink：FAT32 不支持硬链接与符号链接。三条路：① 暂报 `ENOSYS`/`EPERM`（推荐短期，最干净，不污染路径解析）；② 伪符号链接——用 Windows 式 `.SYMLINK` 伪文件存目标路径，`lstat` 识别 `S_IFLNK`，路径解析时跟随（工作量中等，污染纯路径解析，违背 FAT 语义）；③ 换文件系统（ext2/TAR 等，长期）。`lstat` 在无 symlink 前提下语义等价 `stat`，可直接别名。详见 [vfs.md](kernel/vfs.md) 待完成项
+
+### chmod/chown + capable() 收口后续
+
+`chmod/fchmod/fchmodat/chown/fchown/fchownat` 6 个 syscall 已填实（落盘仅内存，setuid 位清除规则见 [vfs.md](kernel/vfs.md)），`capable()` 单一收口已落地（今天等价 euid==0，CAP_* 编号对齐 Linux，见 `include/uapi/xos/capability.h`）。下一步：
+
+- [ ] **execve S_ISUID 处理（sudo 真正使能点）**：chmod 现能设 S_ISUID 位（root chmod 04755 保留），但 `sys_execve` 不读该位切换 euid。下一步 execve 检测 `S_ISREG && (mode & S_ISUID)` → 子进程 euid/suid=inode->uid，配套 S_ISGID+egid、`MNT_NOSUID` 跳过。这是 sudo 工作的前提——chmod 设位 + execve 读位才闭环。
+- [ ] **capability bitmap 实化**：`capable()` 现仅判 euid==0（`(void)cap` 预留分流钩子）。需按 cap 分流时给 proc 加 `cap_effective/inheritable/permitted` bitmap（届时更新 `proc.h` 的 `STATIC_ASSERT(sizeof(proc)==520)` + `kernel/driver/bsd_types.h` 镜像）+ secbits（SECBIT_NOROOT 等）。各调用点（inode_permission/kill_permitted/sys_mount/clock_settime/chmod/chown）届时零改动，只改 `capable()` 实现。
+- [ ] **inode_permission 拆 CAP_DAC_OVERRIDE vs CAP_DAC_READ_SEARCH**：现 root 的 R/W/X 全走 `CAP_DAC_OVERRIDE`。Linux 拆分：W/X 走 DAC_OVERRIDE，R 走 DAC_READ_SEARCH（目录 +x 也走后者）。本轮统一不拆（零行为变化），拆分留此。
+- [ ] **chown 复杂规则**：现 chown 简化为 `capable(CAP_CHOWN)`（root-only）。Linux 允许"属主把文件 chown 到自己所在的 group"（不需 CAP_CHOWN）。引入多 group 概念后放宽到此规则；届时 `apply_chown` 的非特权清 setuid 位路径才有真实触发点（本轮 chown root-only，非 root 得 EPERM 不执行清位，故 `test_chown_root_keeps_setuid` 验证的是 root CAP_FSETID 保留语义）。
 
 ## udev 测试
 

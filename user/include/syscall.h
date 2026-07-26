@@ -614,6 +614,43 @@ static inline int sys_faccessat(int dirfd, const char *path, int mode,
   return 0;
 }
 
+// sys_faccessat2 — SYS_FACCESSAT2 (439). LLVM libc hard-requires this entry
+// (faccessat.cpp #errors without it); the kernel handler is a verbatim alias
+// of faccessat with flags honoured.
+static inline int sys_faccessat2(int dirfd, const char *path, int mode,
+                                 int flags) {
+  int64_t r =
+      __syscall4(SYS_FACCESSAT2, (int64_t)dirfd, (int64_t)(uintptr_t)path,
+                 (int64_t)mode, (int64_t)flags);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+// sys_statfs / sys_fstatfs — filesystem statistics (SYS_STATFS 137 /
+// SYS_FSTATFS 138). buf is struct statfs * (xos/statfs.h); passed as void *
+// here to avoid pulling the layout header into every syscall.h consumer.
+static inline int sys_statfs(const char *path, void *buf) {
+  int64_t r =
+      __syscall2(SYS_STATFS, (int64_t)(uintptr_t)path, (int64_t)(uintptr_t)buf);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_fstatfs(int fd, void *buf) {
+  int64_t r = __syscall2(SYS_FSTATFS, (int64_t)fd, (int64_t)(uintptr_t)buf);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
 static inline int sys_utimensat(int dirfd, const char *path,
                                 const struct timespec times[2], int flags) {
   int64_t r =
