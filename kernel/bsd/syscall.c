@@ -68,7 +68,6 @@
 #include <xos/mman.h>
 #include <xos/page.h>
 #include <xos/prctl.h>
-#include <xos/sched.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
 #include <xos/stat.h>
@@ -198,6 +197,13 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
     sys_futex((int64_t)proc->proc->clear_tid_addr, (int64_t)FUTEX_WAKE, 1, 0, 0,
               0);
   }
+
+  // 4b. robust-futex list: walk the dying thread's robust list and mark any
+  //     still-held robust mutex with FUTEX_OWNER_DIED + wake a waiter, so a
+  //     blocked acquirer can recover the lock. Must run before ZOMBIE / mm_put
+  //     (proc->proc alive and pml4 alive so copy_from_user on user pointers
+  //     works). No-op if set_robust_list was never called (in-tree pthread).
+  exit_robust_list(proc->proc, proc->pid);
 
   // 5. Thread-group bookkeeping BEFORE ZOMBIE (proc/signal alive).
   //    Read signal fields into locals — after ZOMBIE we must not touch sig.
@@ -5704,6 +5710,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_exit_group(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_TGKILL:
     return sys_tgkill(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_TKILL:
+    return sys_tkill(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_RT_SIGPROCMASK:
     return sys_sigprocmask(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SET_TID_ADDRESS:
@@ -5713,6 +5721,12 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_clone(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8);
   case SYS_FUTEX:
     return sys_futex(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SET_ROBUST_LIST:
+    return sys_set_robust_list(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                               tf->r9);
+  case SYS_GET_ROBUST_LIST:
+    return sys_get_robust_list(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                               tf->r9);
   case SYS_ARCH_PRCTL:
     return sys_arch_prctl(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_PTHREAD_SET_CANCEL_HANDLER:

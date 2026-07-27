@@ -923,6 +923,15 @@ static inline int sys_tgkill(int32_t tgid, int32_t tid, int sig) {
   return 0;
 }
 
+static inline int sys_tkill(int32_t tid, int sig) {
+  int64_t r = __syscall2(SYS_TKILL, (int64_t)tid, (int64_t)sig);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
 static inline void sys_exit_group(int32_t status) {
   __syscall1(SYS_EXIT_GROUP, (int64_t)status);
   __builtin_unreachable();

@@ -1010,14 +1010,15 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 #define CLONE_NEWNET 0x40000000
 #define CLONE_NEWTIME 0x00000080
 #define CLONE_IO 0x80000000
-// PTRACE/SYSVSEM: this kernel has no ptrace subsystem and no SysV IPC, so
-// honoring these would let a caller believe a child is traced / sharing a
-// semaphore UNDO list when it is not. Reject instead of lying.
+// PTRACE: this kernel has no ptrace subsystem, so honoring it would let a
+// caller believe a child is traced when it is not. Reject instead of lying.
+// SYSVSEM is accepted but ignored (no SysV semundo list) — musl pthread_create
+// unconditionally passes CLONE_SYSVSEM, so rejecting it breaks musl threads.
 #define CLONE_PTRACE 0x00002000
 #define CLONE_SYSVSEM 0x00040000
 #define CLONE_UNSUPPORTED_MASK                                                 \
   (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID |  \
-   CLONE_NEWNET | CLONE_NEWTIME | CLONE_PTRACE | CLONE_SYSVSEM | CLONE_IO)
+   CLONE_NEWNET | CLONE_NEWTIME | CLONE_PTRACE | CLONE_IO)
 
 int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                   int64_t arg5) {
@@ -1212,7 +1213,10 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   child->fs_base = (flags & CLONE_SETTLS) ? tls : parent->fs_base;
   if (flags & CLONE_THREAD) {
     // §4.5:TLS/栈信息由 sys_pthread_setup 预置到 current_task,此处消费即清;
-    // 未预置则为零值(非 pthread 的 CLONE_THREAD 不存在)。
+    // 未预置则为零值。仓库 pthread 走 sys_pthread_setup 两步握手;musl pthread
+    // 走纯 5 参 Linux clone 不预置 → ci 全零 → detached=0 → sched_task_reap 的
+    // TLS/stack 回收分支 no-op(由 musl __unmapself 自管),clear_tid_addr 路径仍
+    // 兑现 CLONE_CHILD_CLEARTID 的 join 同步。两条路径共存,无 double-free。
     struct thread_clone_info ci = current_task->pending_pthread_setup;
     __memset(&current_task->pending_pthread_setup, 0,
              sizeof(struct thread_clone_info));

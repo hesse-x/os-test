@@ -21,6 +21,7 @@
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
 #include <xos/errno.h>
+#include <xos/robust_list.h>
 #include <xos/time.h>
 
 struct futex_bucket futex_table[FUTEX_HASH_SIZE];
@@ -218,4 +219,91 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
   spin_unlock_irqrestore(&bucket->lock, bflags);
   return ret_val;
+}
+
+// ===================== Robust-futex list =====================
+// musl pthread robust mutexes register a per-thread linked list of held locks
+// via set_robust_list(2). On thread exit the kernel walks it: for any futex
+// still owned by the dying thread, set FUTEX_OWNER_DIED and wake one waiter so
+// a blocked acquirer can detect the dead owner and recover the lock. Mirrors
+// Linux's exit_robust_list / handle_futex_death.
+//
+// Runs from do_exit_with_code step 4, before ZOMBIE (proc->proc alive) and
+// before mm_put (pml4 alive so copy_from_user on the dying thread's user
+// pointers works).
+
+static void robust_mark_died(uintptr_t uaddr, pid_t owner_tid) {
+  uint32_t uval;
+  if (copy_from_user(&uval, (void __user *)uaddr, sizeof(uval)) != 0)
+    return; // bad futex word — skip this entry
+  // Only mark locks actually owned by the dying thread. A lock held by another
+  // thread (or unowned) is left untouched.
+  if ((uval & FUTEX_TID_MASK) != (uint32_t)owner_tid)
+    return;
+  uint32_t nval = (uval & FUTEX_TID_MASK) | FUTEX_OWNER_DIED;
+  (void)copy_to_user((void __user *)uaddr, &nval, sizeof(nval));
+  // Wake one waiter the same way clear_tid_addr does on thread exit.
+  sys_futex((int64_t)uaddr, (int64_t)FUTEX_WAKE, 1, 0, 0, 0);
+}
+
+void exit_robust_list(struct proc *bp, pid_t owner_tid) {
+  if (!bp || !bp->robust_list_head)
+    return; // not registered — no-op for the in-tree pthread
+  struct robust_list_head head;
+  if (copy_from_user(&head, (void __user *)bp->robust_list_head,
+                     sizeof(head)) != 0)
+    return; // bad head pointer — cannot walk safely, give up
+  long foff = head.futex_offset;
+
+  // A lock being acquired/released at the instant of exit never made it onto
+  // (or off) the .next chain; handle it first so its waiter is released.
+  if ((uintptr_t)head.list_op_pending)
+    robust_mark_died((uintptr_t)head.list_op_pending + foff, owner_tid);
+
+  // Walk the chain of held locks. Bound the walk so a cyclic/hostile list
+  // cannot keep the kernel here forever.
+  struct robust_list *entry = head.list.next;
+  for (int i = 0; entry && i < ROBUST_LIST_LIMIT; i++) {
+    struct robust_list node;
+    if (copy_from_user(&node, (void __user *)entry, sizeof(node)) != 0)
+      break; // bad node — list untrustworthy, stop (matches Linux)
+    robust_mark_died((uintptr_t)entry + foff, owner_tid);
+    entry = node.next;
+  }
+}
+
+int64_t sys_set_robust_list(int64_t head, int64_t len, int64_t unused1,
+                            int64_t unused2, int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  // Linux requires len == sizeof(struct robust_list_head); a mismatched len
+  // signals an ABI mismatch, so reject rather than store a bogus size. head
+  // may be NULL (deregistration).
+  if ((size_t)len != sizeof(struct robust_list_head))
+    return (int64_t)-EINVAL;
+  current_task->proc->robust_list_head = (void *)(uintptr_t)head;
+  current_task->proc->robust_list_len = (size_t)len;
+  return 0;
+}
+
+int64_t sys_get_robust_list(int64_t pid, int64_t head_ptr, int64_t len_ptr,
+                            int64_t unused1, int64_t unused2, int64_t unused3) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  // Reading another task's robust list requires CAP_SYS_PTRACE in Linux; this
+  // kernel has no ptrace/capability gate, so restrict to self (pid==0 or
+  // current->pid).
+  if ((pid_t)pid != 0 && (pid_t)pid != current_task->pid)
+    return (int64_t)-EPERM;
+  void *head = current_task->proc->robust_list_head;
+  size_t len = current_task->proc->robust_list_len;
+  if (head_ptr &&
+      copy_to_user((void __user *)head_ptr, &head, sizeof(head)) != 0)
+    return (int64_t)-EFAULT;
+  if (len_ptr && copy_to_user((void __user *)len_ptr, &len, sizeof(len)) != 0)
+    return (int64_t)-EFAULT;
+  return 0;
 }

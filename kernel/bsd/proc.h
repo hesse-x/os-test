@@ -75,6 +75,16 @@ typedef struct proc {
   // FAT32 has no dentry tree, so cwd is stored as an absolute path string.
   // Initialized to "/" by proc_create. 256 bytes covers typical path limits.
   char cwd[256];
+
+  // === robust-futex list (musl pthread robust mutexes) ===
+  // Per-thread head registered via set_robust_list(2). 0 = not registered
+  // (the in-tree pthread never registers, so exit_robust_list is a no-op for
+  // it). On thread exit the kernel walks the list and marks still-held robust
+  // locks with FUTEX_OWNER_DIED + wakes one waiter.
+  void *robust_list_head;
+  size_t
+      robust_list_len; // set_robust_list passes len; must equal sizeof(struct
+                       // robust_list_head); 0 when head is NULL
 } proc;
 
 // ABI drift guard: kernel/driver/bsd_types.h maintains a parallel proc for
@@ -93,7 +103,7 @@ STATIC_ASSERT(
     offsetof(proc, signal) == 176,
     "proc.signal must be a POINTER to a separately-allocated signal_struct, "
     "not an inline struct — inlining shifts the offset of files");
-STATIC_ASSERT(sizeof(proc) == 520,
+STATIC_ASSERT(sizeof(proc) == 536,
               "proc size changed — update kernel/driver/bsd_types.h to match");
 #undef STATIC_ASSERT
 

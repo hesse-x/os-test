@@ -131,6 +131,10 @@ typedef struct proc {
 
   // === Working directory (mirror kernel/bsd/proc.h) ===
   char cwd[256];
+
+  // === robust-futex list (mirror kernel/bsd/proc.h) ===
+  void *robust_list_head;
+  size_t robust_list_len;
 } proc;
 
 // ABI drift guard: must match kernel/bsd/proc.h byte-for-byte.
@@ -143,7 +147,7 @@ DRV_STATIC_ASSERT(offsetof(proc, files) == 184,
                   "driver proc.files offset drift");
 DRV_STATIC_ASSERT(offsetof(proc, signal) == 176,
                   "driver proc.signal must be POINTER not inline");
-DRV_STATIC_ASSERT(sizeof(proc) == 520, "driver proc size drift");
+DRV_STATIC_ASSERT(sizeof(proc) == 536, "driver proc size drift");
 #undef DRV_STATIC_ASSERT
 
 #endif /* KERNEL_BSD_PROC_H */

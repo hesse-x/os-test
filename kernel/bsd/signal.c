@@ -949,7 +949,42 @@ int64_t sys_tgkill(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   return 0;
 }
 
-// ===================== BSD syscall: sigprocmask =====================
+// ===================== BSD syscall: tkill =====================
+// Like tgkill but with no tgid cross-check: tkill(tid, sig) targets a thread
+// within the *current* thread group. musl uses this in pthread_kill and in
+// the cancel re-raise path. Equivalent to tgkill(current_tgid, tid, sig).
+int64_t sys_tkill(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  pid_t tid = (pid_t)arg1;
+  int sig = (int)arg2;
+  if (sig < 0 || sig >= NSIG)
+    return (int64_t)-EINVAL;
+  if (tid < 0 || tid >= MAX_PROC)
+    return (int64_t)-ESRCH;
+  xtask *target = task_get(tid);
+  // tkill is same-thread-group only: caller must own the target's tgid.
+  if (target->pid != tid || target->tgid != current_task->tgid || !target->proc)
+    return (int64_t)-ESRCH;
+  if (sig == 0)
+    return (int64_t)kill_permitted(current_task, target, 0);
+  int p = kill_permitted(current_task, target, sig);
+  if (p)
+    return (int64_t)p;
+  if (target->state == STOPPED && (sig == SIGCONT || sig == SIGKILL)) {
+    deliver_signal_to(target, sig);
+    return 0;
+  }
+  __atomic_or_fetch(&target->proc->sig_pending, 1ULL << (sig - 1),
+                    __ATOMIC_RELEASE);
+  recalc_sigpending(target);
+  if (target->state == BLOCKED)
+    wake_process_any(target);
+  return 0;
+}
 #define SIG_BLOCK 0
 #define SIG_UNBLOCK 1
 #define SIG_SETMASK 2

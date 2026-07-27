@@ -75,6 +75,7 @@ void alarm_check(xtask *t, uint64_t now);
 // Thread syscalls (Phase 3a)
 int64_t sys_tgkill(int64_t tgid, int64_t tid, int64_t sig, int64_t, int64_t,
                    int64_t);
+int64_t sys_tkill(int64_t tid, int64_t sig, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_sigprocmask(int64_t how, int64_t set, int64_t oldset,
                         int64_t sigsetsize, int64_t, int64_t);
 int64_t sys_set_tid_address(int64_t tidptr, int64_t, int64_t, int64_t, int64_t,
