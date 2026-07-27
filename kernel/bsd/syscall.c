@@ -1478,6 +1478,22 @@ int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   return (int64_t)r;
 }
 
+// ===================== BSD syscall: mremap (stub) =====================
+// musl pthread_getattr_np.c:19 用 mremap 探测主线程栈大小,失败即走 fallback。
+// 真 mremap 需 vma 查找/分裂/合并 + 页表重映射,工作量大且非正确性路径,故 stub。
+// 返回 -ENOSYS 让 musl 干净退出探测循环。**绝不返回 -ENOMEM**:musl 的循环条件是
+// `mremap()==MAP_FAILED && errno==ENOMEM`,返回 ENOMEM 会让它死循环探测。
+int64_t sys_mremap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                   int64_t arg5, int64_t unused) {
+  (void)arg1;
+  (void)arg2;
+  (void)arg3;
+  (void)arg4;
+  (void)arg5;
+  (void)unused;
+  return (int64_t)-ENOSYS;
+}
+
 // ===================== BSD syscall: mprotect =====================
 // Change protection of an existing user mapping interval [addr, addr+size).
 // Aligns with Linux: PROT_NONE clears PTE_PRESENT and sets PTE_PROTNONE
@@ -5721,6 +5737,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_clone(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8);
   case SYS_FUTEX:
     return sys_futex(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_MREMAP:
+    return sys_mremap(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SET_ROBUST_LIST:
     return sys_set_robust_list(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
                                tf->r9);

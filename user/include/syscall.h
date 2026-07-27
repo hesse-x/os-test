@@ -183,6 +183,23 @@ static inline int sys_munmap(void *addr, size_t size) {
   return 0;
 }
 
+// mremap stub: kernel returns -ENOSYS. Mirrors Linux mremap signature
+// (old, old_size, new_size, flags, new_addr). On failure sets errno + returns
+// MAP_FAILED, matching musl pthread_getattr_np.c:19's
+// `mremap()==MAP_FAILED && errno==ENOMEM` loop (which then exits cleanly —
+// errno here is ENOSYS, not ENOMEM, so no infinite probe loop).
+static inline void *sys_mremap(void *old, size_t old_size, size_t new_size,
+                               int flags, void *new_addr) {
+  int64_t r = __syscall5(SYS_MREMAP, (int64_t)(uintptr_t)old, (int64_t)old_size,
+                         (int64_t)new_size, (int64_t)flags,
+                         (int64_t)(uintptr_t)new_addr);
+  if (r < 0) {
+    errno = -(int)r;
+    return MAP_FAILED;
+  }
+  return (void *)(uintptr_t)r;
+}
+
 static inline int sys_mprotect(void *addr, size_t size, int prot) {
   int64_t r = __syscall3(SYS_MPROTECT, (int64_t)(uintptr_t)addr, (int64_t)size,
                          (int64_t)prot);

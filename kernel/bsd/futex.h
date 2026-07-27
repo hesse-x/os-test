@@ -17,6 +17,14 @@
 
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
+// musl pthread condvar 接力迁移(cond_timedwait.c unlock_requeue):把被 barrier
+// 挡住的下一个等待者从 cv 迁到 mutex 上,省一次用户态往返、避免惊群。缺失时 musl
+// 的 fallback 是逐级重试 REQUEUE|PRIVATE→REQUEUE(非降级为 WAKE),两条都 ENOSYS
+// 则静默丢唤醒 → 多等待者逐个 signal 时接力断点处等待者永久阻塞,直到 broadcast
+// 才解套。所以这是功能正确性项,非 perf。
+#define FUTEX_REQUEUE 3
+#define FUTEX_CMP_REQUEUE                                                      \
+  4 // 同 REQUEUE,投递前校验 *uaddr1==cmpval,不等 -EAGAIN
 
 // Robust-futex word layout (kernel-internal masks). The low 30 bits hold the
 // owning TID; bit 30 is FUTEX_OWNER_DIED (set by the kernel on exit if the

@@ -9,6 +9,9 @@
 // irqsave
 
 #include "kernel/bsd/futex.h"
+
+#include <stdbool.h>
+
 #include "arch/x64/rtc.h"
 #include "arch/x64/smp.h"
 #include "kernel/bsd/proc.h"
@@ -20,6 +23,7 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
+
 #include <xos/errno.h>
 #include <xos/robust_list.h>
 #include <xos/time.h>
@@ -51,9 +55,124 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   int op = (int)arg2;
   uint32_t val = (uint32_t)arg3;
   xtask *cur = current_task;
+  int real_op = op & 0x7f; // FUTEX_PRIVATE (128) is eaten by the 0x7f mask
 
-  // Only FUTEX_WAIT / FUTEX_WAKE are supported
-  int real_op = op & 0x7f;
+  // 批收集唤醒者上限:持桶锁时只往小定长数组收集,释桶锁后再 wake_with_event
+  // (取目标 scheduler_lock,持桶锁时唤醒会形成 bucket→scheduler 锁序嵌套)。
+  // kernel 栈仅 2 页(8KB),曾用 xtask*[MAX_PROC](8KB) 撑满栈溢出。REQUEUE 与
+  // WAKE 共用此批模式。函数作用域宏:WAKE 与 REQUEUE 分支都引用。
+#define FUTEX_WAKE_BATCH 32
+
+  // FUTEX_REQUEUE / FUTEX_CMP_REQUEUE — musl pthread condvar 接力迁移
+  // (pthread_cond_timedwait.c unlock_requeue):把被 barrier 挡住的下一个等待者从
+  // cv 迁到 mutex 上,省一次用户态往返、避免惊群。musl 调用形如
+  //   REQUEUE(uaddr1=cv, nr_wake=0, nr_requeue=1, *, uaddr2=mutex)
+  // —— 先 a_store(l,0) 释 cv 锁,再 requeue 不唤醒(nr_wake=0):被迁移者继续在
+  // mutex 上睡,被未来 mutex unlock 的 WAKE 唤醒。本仓库等待者只记
+  // futex_uaddr(不存期望值), 匹配仅靠 futex_uaddr==uaddr1(同 WAKE 范式
+  // futex.c:94);CMP_REQUEUE 的 val2 在 Linux
+  // 用于第二地址值校验,本仓库无此机制,musl 传 val2=0,无影响。
+  if (real_op == FUTEX_REQUEUE || real_op == FUTEX_CMP_REQUEUE) {
+    uint64_t uaddr1 = uaddr;
+    int nr_wake = (int)val; // arg3
+    int nr_requeue = (int)arg4;
+    uint64_t cmpval = (real_op == FUTEX_CMP_REQUEUE) ? (uint64_t)arg5 : 0;
+    uint64_t uaddr2 =
+        (real_op == FUTEX_REQUEUE) ? (uint64_t)arg5 : (uint64_t)arg6;
+    // CMP 校验:*uaddr1 != cmpval → -EAGAIN(投递前原子性保证,同 Linux)。
+    // copy_from_user 负责用户指针越界/不可读 → EFAULT,与 WAIT
+    // 路径(futex.c:119)一致, 本仓库 futex 全路径不做显式 uaddr 边界检查。
+    if (cmpval) {
+      uint32_t cur_val1;
+      if (copy_from_user(&cur_val1, (void __user *)uaddr1, 4) != 0)
+        return (int64_t)-EFAULT;
+      if (cur_val1 != (uint32_t)cmpval)
+        return (int64_t)-EAGAIN;
+    }
+
+    struct futex_key key1, key2;
+    get_futex_key(uaddr1, cur->mm, &key1);
+    get_futex_key(uaddr2, cur->mm, &key2);
+    struct futex_bucket *bucket1 = &futex_table[futex_hash(&key1)];
+    struct futex_bucket *bucket2 = &futex_table[futex_hash(&key2)];
+    uint32_t h1 = futex_hash(&key1), h2 = futex_hash(&key2);
+
+    // 双 bucket 锁序(防死锁):按 hash 值小→大加锁,全局一致。同桶特例只锁一次
+    // (自旋锁 spinlock.h 禁同 CPU 重入)。唤醒部分复用 WAKE 的批收集 + 释桶锁后
+    // wake_with_event 范式(futex.c:65-67):避免持桶锁时取目标 scheduler_lock
+    // 形成 bucket→scheduler 锁序嵌套。
+    int woken = 0, requeued = 0;
+    while (woken < nr_wake || requeued < nr_requeue) {
+      xtask *to_wake[FUTEX_WAKE_BATCH];
+      int nwake = 0;
+      bool same_bucket = (bucket1 == bucket2);
+      uint64_t b1f = 0, b2f = 0;
+      if (same_bucket) {
+        spin_lock_irqsave(&bucket1->lock, &b1f);
+      } else if (h1 < h2) {
+        spin_lock_irqsave(&bucket1->lock, &b1f);
+        spin_lock_irqsave(&bucket2->lock, &b2f);
+      } else {
+        spin_lock_irqsave(&bucket2->lock, &b2f);
+        spin_lock_irqsave(&bucket1->lock, &b1f);
+      }
+
+      // 遍历 bucket1,匹配 futex_uaddr==uaddr1(同 WAKE):先填 nr_wake
+      // 个进唤醒批次, 余下的改 futex_uaddr=uaddr2 挂 bucket2(不唤醒)。被
+      // requeue 者 state 仍 BLOCKED、 wait_event 仍 WAIT_FUTEX,只是换了等待地址
+      // → 未来 mutex WAKE 按 futex_uaddr==mutex 匹配时自然命中(futex.c:94)。
+      list_node *node = bucket1->waiters.next;
+      int batch_wake = nr_wake - woken;
+      if (batch_wake > FUTEX_WAKE_BATCH)
+        batch_wake = FUTEX_WAKE_BATCH;
+      while (node != &bucket1->waiters) {
+        if (woken >= nr_wake && requeued >= nr_requeue)
+          break;
+        proc *p = LIST_ENTRY(node, proc, futex_node);
+        list_node *next = node->next;
+        node = next;
+        if (p->futex_uaddr != uaddr1)
+          continue;
+        if (woken < nr_wake && nwake < batch_wake) {
+          to_wake[nwake++] = p->xtask;
+          list_remove(&p->futex_node);
+          p->futex_uaddr = 0;
+          woken++;
+        } else if (requeued < nr_requeue) {
+          list_remove(&p->futex_node);
+          p->futex_uaddr = uaddr2;
+          list_push_back(&bucket2->waiters, &p->futex_node);
+          requeued++;
+        }
+      }
+
+      if (same_bucket) {
+        spin_unlock_irqrestore(&bucket1->lock, b1f);
+      } else {
+        spin_unlock_irqrestore(&bucket1->lock, b1f);
+        spin_unlock_irqrestore(&bucket2->lock, b2f);
+      }
+      for (int i = 0; i < nwake; i++)
+        wake_with_event(to_wake[i], WAIT_FUTEX);
+
+      // 本批没取满 → bucket1 已无匹配等待者,收尾(等价 WAKE 的
+      // futex.c:105-106)。
+      if (nwake < batch_wake && !(requeued < nr_requeue && requeued > 0)) {
+        // 注意:nr_wake==0(musl 实际调用)时 batch_wake==0,nwake 恒 0,此分支仅靠
+        // requeued 是否推进判定;requeued 未变说明 bucket1 无匹配者可迁 → 终止。
+        if (requeued == 0 || requeued >= nr_requeue)
+          break;
+      }
+      if (nwake == 0 && requeued == 0)
+        break;
+    }
+    printk(LOG_DEBUG,
+           "futex REQUEUE: pid=%d u1=%p u2=%p woken=%d requeued=%d\n",
+           (int)cur->pid, (void *)uaddr1, (void *)uaddr2, woken, requeued);
+    return (int64_t)(woken + requeued);
+  }
+
+  // Only FUTEX_WAIT / FUTEX_WAKE are supported beyond this point
   if (real_op != FUTEX_WAIT && real_op != FUTEX_WAKE)
     return (int64_t)-ENOSYS;
 
@@ -62,22 +181,22 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   struct futex_bucket *bucket = &futex_table[futex_hash(&key)];
 
   if (real_op == FUTEX_WAKE) {
-// Collect waiters then release the bucket lock before waking: wake_with_event
-// takes the target's scheduler_lock, so waking while holding the bucket lock
-// would form a bucket->scheduler lock-order nesting.
-//
-// Note: we previously allocated xtask *to_wake[MAX_PROC] (8KB) on the stack to
-// collect waiters, but the kernel stack is only 2 pages (8KB); that array
-// filled the whole stack and overflowed downward, corrupting the slab object
-// adjacent below the stack (typical symptom: after sys_exit's clear_tid
-// futex_wake, signal->parent_pid became stack-residual garbage, and do_exit's
-// access to parent->proc->sig_pending triggered #PF).
-// Switched to batching: each batch uses a small fixed array to collect <= 32
-// waiters and wakes them, looping until val waiters have been woken or the
-// bucket has no more matching waiters. futex wake semantics is "wake at most
-// val", so batching is equivalent. val comes from user space and is untrusted;
-// batching also avoids the stack/heap overhead of a large val.
-#define FUTEX_WAKE_BATCH 32
+    // Collect waiters then release the bucket lock before waking:
+    // wake_with_event takes the target's scheduler_lock, so waking while
+    // holding the bucket lock would form a bucket->scheduler lock-order
+    // nesting.
+    //
+    // Note: we previously allocated xtask *to_wake[MAX_PROC] (8KB) on the stack
+    // to collect waiters, but the kernel stack is only 2 pages (8KB); that
+    // array filled the whole stack and overflowed downward, corrupting the slab
+    // object adjacent below the stack (typical symptom: after sys_exit's
+    // clear_tid futex_wake, signal->parent_pid became stack-residual garbage,
+    // and do_exit's access to parent->proc->sig_pending triggered #PF).
+    // Switched to batching: each batch uses a small fixed array to collect <=
+    // 32 waiters and wakes them, looping until val waiters have been woken or
+    // the bucket has no more matching waiters. futex wake semantics is "wake at
+    // most val", so batching is equivalent. val comes from user space and is
+    // untrusted; batching also avoids the stack/heap overhead of a large val.
     int total_woken = 0;
     while (total_woken < (int)val) {
       xtask *to_wake[FUTEX_WAKE_BATCH];
@@ -108,7 +227,6 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     printk(LOG_DEBUG, "futex WAKE: pid=%d uaddr=%p val=%d nwake=%d\n",
            (int)cur->pid, (void *)uaddr, (int)val, total_woken);
     return (int64_t)total_woken;
-#undef FUTEX_WAKE_BATCH
   }
 
   // FUTEX_WAIT

@@ -30,6 +30,9 @@
 #define SYS_RT_SIGACTION 13
 #define SYS_RT_SIGPROCMASK 14
 #define SYS_RT_SIGRETURN 15
+#define SYS_MREMAP                                                             \
+  25 // stub: -ENOSYS. musl pthread_getattr_np.c:19 用它探测主线程
+     // 栈大小,失败即走 fallback。绝不能返回 -ENOMEM(musl 会死循环探测)。
 #define SYS_IOCTL 16
 #define SYS_PIPE 22
 #define SYS_PIPE2 293
