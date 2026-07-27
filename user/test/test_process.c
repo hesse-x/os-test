@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <sys/process.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <unity.h>

@@ -108,6 +108,16 @@
 #define SYS_GETEGID 108
 #define SYS_SETUID 105
 #define SYS_SETGID 106
+// Linux x86-64 set*id ladder + groups (numbers per musl
+// arch/x86_64/bits/syscall.h.in):
+//   setreuid=113 setregid=114 getgroups=115 setgroups=116 setresuid=117
+//   setresgid=119.
+#define SYS_SETREUID 113
+#define SYS_SETREGID 114
+#define SYS_GETGROUPS 115
+#define SYS_SETGROUPS 116
+#define SYS_SETRESUID 117
+#define SYS_SETRESGID 119
 #define SYS_RT_SIGPENDING 127
 #define SYS_SYNC 162
 #define SYS_MOUNT 165

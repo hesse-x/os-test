@@ -23,3 +23,6 @@
 [submodule "third_party/llvm-project"]
 	path = third_party/llvm-project
 	url = https://gitee.com/artorias123/llvm-projec-shallow.git
+[submodule "third_party/musl"]
+	path = third_party/musl
+	url = https://github.com/justmirror/musl.git

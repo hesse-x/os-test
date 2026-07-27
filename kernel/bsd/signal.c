@@ -778,53 +778,30 @@ int64_t sys_kill(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   return (int64_t)pgsignal(-pid, sig); // pid < -1: pgid = -pid
 }
 
-// ===================== BSD syscall: alarm =====================
-// Set a real-time alarm (in seconds). POSIX alarm() is process-wide: the
-// deadline lives in the thread-group signal_struct and SIGALRM is deliverable
-// to any thread. Returns the seconds remaining of any previously set alarm,
-// or 0 if none. seconds==0 cancels a pending alarm.
-int64_t sys_alarm(int64_t arg1, int64_t unused2, int64_t unused3,
-                  int64_t unused4, int64_t unused5, int64_t unused6) {
-  (void)unused2;
-  (void)unused3;
-  (void)unused4;
-  (void)unused5;
-  (void)unused6;
-  unsigned seconds = (unsigned)arg1;
-  uint64_t now = sched_clock();
+// ===================== alarm_deadline swap + borrow =====================
+// Atomically swap the thread-group alarm_deadline (sched_clock() ns, absolute;
+// 0 = cancel) under sig_lock, then borrow the new deadline onto every other
+// BLOCKED same-tgid thread that has no wait_deadline yet (wait_deadline==0 ⇒
+// not in any timer queue) so the Xcore timer queue wakes it on expiry to run
+// alarm_check → force SIGALRM. A thread may already be blocked in an
+// interruptible wait (pipe read/write, pause, …) WITHOUT having borrowed the
+// deadline — it blocked before this alarm was armed. With no thread of the
+// process on-CPU and none in the timer queue, the alarm would never fire and
+// the blocked thread would hang. Mirrors Linux "arm a process timer that wakes
+// a blocked thread on expiry". Threads that already borrowed an (older)
+// deadline stay; on expiry alarm_check re-reads the live alarm_deadline and
+// no-ops if it was pushed later, after which they re-borrow the current value.
+// Lock order matches deliver_signal_to_process: sig_lock dropped before
+// taking scheduler_lock. Shared by sys_alarm (seconds) and sys_setitimer
+// (ITIMER_REAL, µs). Returns the previous deadline (ns absolute; 0 if none).
+uint64_t alarm_set_deadline(uint64_t new_deadline) {
   struct signal_struct *sig = current_proc->signal;
   uint64_t flags;
   spin_lock_irqsave(&sig->sig_lock, &flags);
-  uint64_t old_remaining = 0;
-  if (sig->alarm_deadline != 0) {
-    uint64_t rem = sig->alarm_deadline > now ? sig->alarm_deadline - now : 0;
-    old_remaining = rem / 1000000000ULL;
-  }
-  uint64_t new_deadline = 0;
-  if (seconds == 0)
-    sig->alarm_deadline = 0;
-  else {
-    new_deadline = now + (uint64_t)seconds * 1000000000ULL;
-    sig->alarm_deadline = new_deadline;
-  }
+  uint64_t old = sig->alarm_deadline;
+  sig->alarm_deadline = new_deadline;
   spin_unlock_irqrestore(&sig->sig_lock, flags);
 
-  // Alarm expiry is driven by the Xcore timer queue: a blocked thread that
-  // borrowed the alarm deadline as its wait_deadline is woken on expiry and
-  // alarm_check (the BSD alarm_check_hook) forces SIGALRM. But a thread may
-  // already be blocked in an interruptible wait (pipe read/write, …) WITHOUT
-  // having borrowed the deadline — e.g. it blocked before this alarm was armed,
-  // so it read alarm_deadline==0 and stayed off the timer queue. With no thread
-  // of the process on-CPU (the current_task alarm path in trap.c is idle) and
-  // none in the timer queue, the alarm would never fire and the blocked thread
-  // would hang. Mirror Linux's "arm a process timer that wakes a blocked thread
-  // on expiry": for each same-thread-group BLOCKED thread that has no deadline
-  // armed yet (wait_deadline==0 → not in any timer queue), borrow the new
-  // deadline so the timer queue will wake it and run alarm_check. Threads that
-  // already borrowed an (older) deadline stay; on their expiry alarm_check
-  // re-reads the live alarm_deadline and no-ops if it was pushed later, after
-  // which they re-borrow the current value. Lock order matches
-  // deliver_signal_to_process: sig_lock dropped before taking scheduler_lock.
   if (new_deadline != 0) {
     pid_t my_tgid = current_task->tgid;
     for (int i = 0; i < MAX_PROC; i++) {
@@ -841,7 +818,27 @@ int64_t sys_alarm(int64_t arg1, int64_t unused2, int64_t unused3,
       spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, sflags);
     }
   }
-  return (int64_t)old_remaining;
+  return old;
+}
+
+// ===================== BSD syscall: alarm =====================
+// Set a real-time alarm (in seconds). POSIX alarm() is process-wide: the
+// deadline lives in the thread-group signal_struct and SIGALRM is deliverable
+// to any thread. Returns the seconds remaining of any previously set alarm,
+// or 0 if none. seconds==0 cancels a pending alarm.
+int64_t sys_alarm(int64_t arg1, int64_t unused2, int64_t unused3,
+                  int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
+  unsigned seconds = (unsigned)arg1;
+  uint64_t now = sched_clock();
+  uint64_t new_deadline = seconds ? now + (uint64_t)seconds * 1000000000ULL : 0;
+  uint64_t old = alarm_set_deadline(new_deadline);
+  uint64_t old_remaining = (old && old > now) ? old - now : 0;
+  return (int64_t)(old_remaining / 1000000000ULL);
 }
 
 // S03: per-process alarm expiry hook (registered as alarm_check_hook). Called

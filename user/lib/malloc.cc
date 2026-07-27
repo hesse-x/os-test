@@ -8,8 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syscall.h>
-#include <unistd.h>
 
+#include <sched.h>
 #include <xos/page.h> /* PAGE_SIZE (UAPI) */
 
 #include <xos/mman.h>

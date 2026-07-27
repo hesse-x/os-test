@@ -10,6 +10,7 @@
 #include "kernel/bsd/proc.h" // current_proc (euid permission gate)
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/xtask.h"
 
 #include <xos/capability.h>
 #include <xos/dirent.h>
@@ -133,9 +134,43 @@ struct mount_entry *vfs_resolve_user(const char __user *upath, char *relpath,
   char norm[256];
   if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
     return ERR_PTR(-EFAULT);
-  if (kpath[0] != '/')
-    return ERR_PTR(-EINVAL);
-  if (normalize_path(kpath, norm, sizeof(norm)) < 0)
+
+  /* Resolve relative paths against the process cwd before normalization.
+   *
+   * This kernel does NOT do per-syscall cwd-relative path resolution anywhere
+   * except sys_chdir/sys_mount — vfs_resolve() itself requires an absolute
+   * path. Previously a relative upath was rejected here with -EINVAL, which
+   * forced the userspace libc to manually prepend its own cwd copy to every
+   * path syscall (user/lib/file.cc cwd_path / resolve_at_path). That dupled
+   * the cwd state (kernel bp->cwd AND libc cwd_path) and blocked adopting
+   * musl's upstream unistd path wrappers, which pass paths straight through
+   * to the kernel the way Linux does.
+   *
+   * Aligning with Linux semantics: resolve a relative path against
+   * current_proc->cwd (the single source of truth, maintained by sys_chdir),
+   * then normalize + resolve. Absolute paths are unaffected. This mirrors the
+   * abs_path construction in sys_chdir (kernel/bsd/syscall.c). */
+  char abs[512];
+  const char *resolve = kpath;
+  if (kpath[0] != '/') {
+    proc *bp = current_proc;
+    size_t cwd_len = __strlen(bp->cwd);
+    size_t klen = __strlen(kpath);
+    /* cwd + '/' + kpath + null */
+    if (cwd_len + 1 + klen + 1 > sizeof(abs))
+      return ERR_PTR(-ENAMETOOLONG);
+    __strncpy(abs, bp->cwd, sizeof(abs) - 1);
+    size_t pos = __strlen(abs);
+    if (pos > 0 && abs[pos - 1] != '/') {
+      abs[pos++] = '/';
+    }
+    for (size_t i = 0; i <= klen; i++) {
+      abs[pos + i] = kpath[i];
+    }
+    resolve = abs;
+  }
+
+  if (normalize_path(resolve, norm, sizeof(norm)) < 0)
     return ERR_PTR(-ENAMETOOLONG);
   return vfs_resolve(norm, relpath, relcap);
 }

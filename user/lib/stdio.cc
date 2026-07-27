@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>

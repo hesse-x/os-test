@@ -25,6 +25,7 @@
 #include <xos/input.h>
 #include <xos/ioctl.h>
 #include <xos/socket.h>
+#include <xos/unistd_ext.h>
 
 void setUp(void) {}
 void tearDown(void) {}

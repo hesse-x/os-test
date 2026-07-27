@@ -226,6 +226,11 @@ if(TEST)
     add_user_dyn_elf(test_wait4_pgid_rusage C SOURCES test_wait4_pgid_rusage.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_wait4_options C SOURCES test_wait4_options.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_setuid_saved C SOURCES test_setuid_saved.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    # M1.1 (unistd.md §2.A1/A2): setresuid/setresgid/setreuid/setregid +
+    # getgroups. Permission ladder + -1 unchanged + suid-preservation rule
+    # (man setresuid(2)/setreuid(2)), process-wide semantics. Non-root cases via
+    # fork child setuid/setresuid(1000) + _exit code + parent waitpid.
+    add_user_dyn_elf(test_setxid C SOURCES test_setxid.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_execve_vfs C SOURCES test_execve_vfs.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # 02: getdents64 chunked resume (tmpfs/sysfs) + SA_RESTART restart +
     # SA_NOCLDWAIT auto-reap.

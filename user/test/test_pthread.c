@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h> // sched_yield (musl <unistd.h> no longer declares it)
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -13,7 +14,6 @@
 #include <unistd.h>
 #include <unity.h>
 #include <xos/errno.h>
-// sched_yield() is already declared by <unistd.h>; no <sched.h> needed.
 // This OS does not have that header, and angle brackets would fall back to the
 // host's /usr/include/sched.h, pulling in the host's struct timespec which
 // conflicts with our xos/time.h (redefinition).

@@ -12,6 +12,13 @@
 #   include/uapi/xos/*.h → $DEST/xos/          (UAPI contract headers — shared kernel/user ABI)
 #   user/include/*.h     → $DEST/              (POSIX/C standard headers — the libc side)
 #   user/include/sys/*.h → $DEST/sys/
+#   user/include/bits/*.h → $DEST/bits/         (musl-aligned arch bits: alltypes/posix/syscall.
+#                                              musl's <unistd.h> does #include <bits/alltypes.h>,
+#                                              <bits/posix.h>; published so the closure resolves.)
+#   third_party/musl/include/unistd.h → $DEST/unistd.h   (musl's real <unistd.h> replaces the
+#   third_party/musl/include/sys/time.h → $DEST/sys/time.h  source-tree shim at publish time —
+#                                              the shim forwards via "musl/include/..." which
+#                                              only resolves with -I third_party at build time.)
 #
 # What is NOT published (deliberately):
 #   utils/             — non-UAPI shared implementation:
@@ -44,9 +51,21 @@ mkdir -p "$DEST/xos"
 cp "$SRC"/include/uapi/xos/*.h "$DEST/xos/"
 
 # 2. Standard / POSIX headers (user/include/) — the libc side.
-#    Top-level *.h → $DEST/; sys/*.h → $DEST/sys/.
+#    Top-level *.h → $DEST/; sys/*.h → $DEST/sys/; bits/*.h → $DEST/bits/.
 cp    "$SRC"/user/include/*.h  "$DEST/"
 cp -r "$SRC"/user/include/sys/. "$DEST/sys/"
+mkdir -p "$DEST/bits"
+cp    "$SRC"/user/include/bits/*.h "$DEST/bits/"
+
+# 3. Replace the shim <unistd.h> / <sys/time.h> with musl's real headers.
+#    The repo's user/include/unistd.h and sys/time.h are source-tree shims that
+#    forward to musl via #include "musl/include/..." (resolved at build time by
+#    -I third_party). The published sysroot has no third_party on its search path,
+#    so it ships musl's headers directly at the standard paths instead. musl's
+#    <unistd.h> pulls <features.h>, <bits/alltypes.h>, <bits/posix.h>; <sys/time.h>
+#    pulls <sys/select.h> — all already published above.
+cp "$SRC"/third_party/musl/include/unistd.h     "$DEST/unistd.h"
+cp "$SRC"/third_party/musl/include/sys/time.h   "$DEST/sys/time.h"
 
 echo "Installed tree:"
 ( cd "$DEST" && find . -type f | sort | sed 's/^\.\//  /' )

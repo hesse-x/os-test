@@ -3468,9 +3468,65 @@ int64_t sys_getitimer(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                       int64_t a5, int64_t a6) {
   return -ENOSYS;
 }
+// ===================== BSD syscall: setitimer =====================
+// ITIMER_REAL routes onto the per-process alarm_deadline (signal_struct) via
+// alarm_set_deadline, so musl's alarm()/ualarm() — which call setitimer
+// (ITIMER_REAL, &it, &it) and read the old remaining back from the `old`
+// arg — actually arm a timer and see the previous value. Without this, alarm()
+// silently no-ops (kernel returned -ENOSYS, musl ignored it, `it` was not
+// overwritten) → alarm(5) returned 5 not 0, and alarm(1)+pause() never fired
+// SIGALRM → pause() hung forever (signal.elf freeze).
+//
+// Single-shot only: it_value arms alarm_deadline for one SIGALRM. it_interval
+// (repeating) is NOT yet supported — the alarm_check mechanism consumes the
+// deadline on expiry and does not re-arm. Recorded in doc/design/todo.md.
+// ITIMER_VIRTUAL/ITIMER_PROF unsupported → -ENOSYS.
+struct k_itimerval {
+  struct timeval it_interval;
+  struct timeval it_value;
+};
 int64_t sys_setitimer(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                       int64_t a5, int64_t a6) {
-  return -ENOSYS;
+  (void)a4;
+  (void)a5;
+  (void)a6;
+  int which = (int)a1;
+  if (which != 0 /* ITIMER_REAL */)
+    return (int64_t)-ENOSYS;
+
+  const struct k_itimerval __user *newv =
+      (const struct k_itimerval __user *)(uintptr_t)a2;
+  struct k_itimerval __user *oldv = (struct k_itimerval __user *)(uintptr_t)a3;
+
+  uint64_t now = sched_clock();
+  uint64_t old;
+  if (newv) {
+    struct k_itimerval knew;
+    if (copy_from_user(&knew, newv, sizeof(knew)))
+      return (int64_t)-EFAULT;
+    uint64_t dur = (uint64_t)knew.it_value.tv_sec * 1000000000ULL +
+                   (uint64_t)knew.it_value.tv_usec * 1000ULL;
+    uint64_t new_deadline = dur ? now + dur : 0;
+    old = alarm_set_deadline(new_deadline);
+  } else {
+    // Query-only (newv == NULL): return old without changing the deadline.
+    struct signal_struct *sig = current_proc->signal;
+    uint64_t sflags;
+    spin_lock_irqsave(&sig->sig_lock, &sflags);
+    old = sig->alarm_deadline;
+    spin_unlock_irqrestore(&sig->sig_lock, sflags);
+  }
+
+  if (oldv) {
+    uint64_t rem_ns = (old && old > now) ? old - now : 0;
+    struct k_itimerval kold;
+    __memset(&kold, 0, sizeof(kold));
+    kold.it_value.tv_sec = (long)(rem_ns / 1000000000ULL);
+    kold.it_value.tv_usec = (long)((rem_ns % 1000000000ULL) / 1000ULL);
+    if (copy_to_user(oldv, &kold, sizeof(kold)))
+      return (int64_t)-EFAULT;
+  }
+  return 0;
 }
 
 // ===================== trivial-return stubs (C2 group) =====================
@@ -5763,6 +5819,16 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_setuid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SETGID:
     return sys_setgid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SETRESUID:
+    return sys_setresuid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SETRESGID:
+    return sys_setresgid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SETREUID:
+    return sys_setreuid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_SETREGID:
+    return sys_setregid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETGROUPS:
+    return sys_getgroups(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_GETPPID:
     return sys_getppid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_GETPGRP:

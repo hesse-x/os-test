@@ -1017,6 +1017,63 @@ static inline int sys_setgid(uint32_t gid) {
   return 0;
 }
 
+/* M1.1 — setresuid/setresgid/setreuid/setregid/getgroups. (uid_t)-1 /
+ * (gid_t)-1 (== 0xFFFFFFFF) means "leave unchanged" and must arrive at the
+ * kernel as a sign-extended -1 (0xFFFF...FFFF), so the cast chain goes through
+ * int32_t, not straight to int64_t (a uint32_t→int64_t cast zero-extends,
+ * turning the sentinel into 0xFFFFFFFF and breaking the kernel's != -1 guard).
+ * uint32_t (not uid_t/gid_t) matches the existing setuid/setgid wrappers —
+ * this header does not pull in <sys/types.h>. */
+static inline int sys_setresuid(uint32_t ruid, uint32_t euid, uint32_t suid) {
+  int64_t r = __syscall3(SYS_SETRESUID, (int64_t)(int32_t)ruid,
+                         (int64_t)(int32_t)euid, (int64_t)(int32_t)suid);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_setresgid(uint32_t rgid, uint32_t egid, uint32_t sgid) {
+  int64_t r = __syscall3(SYS_SETRESGID, (int64_t)(int32_t)rgid,
+                         (int64_t)(int32_t)egid, (int64_t)(int32_t)sgid);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_setreuid(uint32_t ruid, uint32_t euid) {
+  int64_t r =
+      __syscall2(SYS_SETREUID, (int64_t)(int32_t)ruid, (int64_t)(int32_t)euid);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_setregid(uint32_t rgid, uint32_t egid) {
+  int64_t r =
+      __syscall2(SYS_SETREGID, (int64_t)(int32_t)rgid, (int64_t)(int32_t)egid);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return 0;
+}
+
+static inline int sys_getgroups(int size, uint32_t *list) {
+  int64_t r =
+      __syscall2(SYS_GETGROUPS, (int64_t)size, (int64_t)(uintptr_t)list);
+  if (r < 0) {
+    errno = -(int)r;
+    return -1;
+  }
+  return (int)r;
+}
+
 static inline int sys_gethostname(char *buf, size_t len) {
   int64_t r =
       __syscall2(SYS_GETHOSTNAME, (int64_t)(uintptr_t)buf, (int64_t)len);

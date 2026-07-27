@@ -11,16 +11,22 @@
 #include <errno.h>
 #include <stdint.h>
 #include <syscall.h>
-#include <unistd.h>
+#include <unistd.h> // IWYU pragma: keep
 
 #include <sys/mman.h>
 #include <sys/process.h>
 #include <sys/wait.h>
 #include <xos/mman.h>
+#include <xos/unistd_ext.h>
 
 extern "C" char **environ;
 
 // ===================== process management =====================
+
+/* gettid: thread ID of the calling thread (Linux gettid(2)). musl has no
+ * public declaration, so this OS exposes it via <xos/unistd_ext.h>; the
+ * LIBC_EXPORT there gives the definition C linkage + default visibility. */
+extern "C" pid_t gettid(void) { return (pid_t)sys_gettid(); }
 
 extern "C" pid_t fork(void) {
   int64_t r = sys_fork();
@@ -46,34 +52,14 @@ extern "C" pid_t spawn(const char *path) {
   return pid;
 }
 
-extern "C" pid_t setsid(void) {
-  int64_t r = sys_setsid();
-  if (r < 0)
-    return -1;
-  return (pid_t)r;
-}
-
-extern "C" int setpgid(pid_t pid, pid_t pgid) {
-  return sys_setpgid((uint64_t)pid, (uint64_t)pgid);
-}
-
-extern "C" pid_t getpgid(pid_t pid) {
-  int64_t r = sys_getpgid((uint64_t)pid);
-  if (r < 0)
-    return -1;
-  return (pid_t)r;
-}
-
-extern "C" pid_t getsid(pid_t pid) {
-  int64_t r = sys_getsid((uint64_t)pid);
-  if (r < 0)
-    return -1;
-  return (pid_t)r;
-}
-
-extern "C" int setuid(uid_t uid) { return sys_setuid((uint32_t)uid); }
-
-extern "C" int setgid(gid_t gid) { return sys_setgid((uint32_t)gid); }
+/* setsid/setpgid/getpgid/getsid/setuid/setgid/setresuid/setresgid/setreuid/
+ * setregid/seteuid/setegid/getgroups are provided by musl src/unistd
+ * (musl_unistd_objs). The set*id variants call __setxid, supplied by
+ * lib/musl_shim/syscall_cp.c as a plain __syscall3 (process-wide, no
+ * __synccall broadcast) — identical to the kernel's process-wide creds and
+ * to this repo's former direct-syscall wrappers. errno mapping is musl's
+ * __syscall_ret. The saved-set / permission-ladder semantics exercised by
+ * test_setxid.c are in the kernel's sys_setresuid etc., unchanged. */
 
 extern "C" pid_t waitpid(pid_t pid, int *status, int options) {
   int64_t r = sys_waitpid(pid, status, options);

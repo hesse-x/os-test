@@ -12,9 +12,10 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdint.h>
-#include <stdio.h>  // snprintf (rename cwd 相对化)
-#include <stdlib.h> // IWYU pragma: keep  // malloc/calloc/free in getdir/dup
-#include <string.h> // strlen (rename cwd 相对化)
+#include <stdio.h>     // snprintf (rename cwd 相对化)
+#include <stdlib.h>    // IWYU pragma: keep  // malloc/calloc/free in getdir/dup
+#include <string.h>    // strlen (rename cwd 相对化)
+#include <sys/cdefs.h> // LIBC_EXPORT (retained wrappers export from libc.so)
 #include <syscall.h>
 #include <termios.h>
 #include <time.h>
@@ -132,27 +133,10 @@ int openat(int dirfd, const char *path, int flags, ...) {
   return sys_openat(dirfd, p, flags, (int)mode);
 }
 
-// ===================== read =====================
-
-ssize_t read(int fd, void *buf, size_t count) {
-  return (ssize_t)sys_read(fd, buf, count);
-}
-
-// ===================== write =====================
-
-ssize_t write(int fd, const void *buf, size_t count) {
-  return (ssize_t)sys_write(fd, buf, count);
-}
-
-// ===================== close =====================
-
-int close(int fd) { return sys_close(fd); }
-
-// ===================== pipe =====================
-
-int pipe(int fd[2]) { return sys_pipe(fd); }
-
-int pipe2(int fd[2], int flags) { return sys_pipe2(fd, flags); }
+// read/write/close/pipe/pipe2 are provided by musl src/unistd
+// (musl_unistd_objs, merged into libc.a/libc.so). This file's fd helpers below
+// call close/lseek, which the linker resolves to the musl definitions in the
+// same archive.
 
 // ===================== chdir =====================
 
@@ -313,14 +297,10 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms) {
   return (int)ret;
 }
 
-// dup2 — duplicate fd
-int dup2(int old_fd, int new_fd) { return sys_dup2(old_fd, new_fd); }
-
-// dup — duplicate fd (lowest available slot)
-int dup(int old_fd) { return sys_dup(old_fd); }
+// dup/dup2 are provided by musl src/unistd (musl_unistd_objs).
 
 // ===================== getcwd =====================
-char *getcwd(char *buf, size_t size) {
+LIBC_EXPORT char *getcwd(char *buf, size_t size) {
   if (!buf) {
     errno = EFAULT;
     return NULL;
@@ -340,10 +320,8 @@ char *getcwd(char *buf, size_t size) {
   return buf;
 }
 
-// ===================== lseek =====================
-off_t lseek(int fd, off_t offset, int whence) {
-  return (off_t)sys_lseek(fd, offset, whence);
-}
+// lseek is provided by musl src/unistd (musl_unistd_objs); seekdir/rewinddir
+// below call it, resolved from the same archive.
 
 // ===================== statx（内核唯一元数据 syscall）=====================
 /* statx→stat 缩窄转换：内核只暴露 statx，struct stat 接口全部经此转换。 */
@@ -418,21 +396,14 @@ int lstat(const char *path, struct stat *st) {
 }
 
 // ===================== access / faccessat / utimensat =====================
-// access(path,mode):检查进程对 path 的 mode(R_OK/W_OK/X_OK/F_OK)权限。
-// 现走真实 sys_access syscall(内核 inode_permission 按 euid 判定,Q4),
-// 取代旧的 stat 兜底实现(旧实现忽略 mode,FAT32 单 root 恒放行)。
-int access(const char *path, int mode) {
-  if (!path) {
-    errno = EFAULT;
-    return -1;
-  }
-  return sys_access(path, mode);
-}
-
-// faccessat(dirfd,path,mode,flags):access 的 dirfd 相对变体。AT_FDCWD ≡
-// 当前根(内核无 per-process CWD)。flags 透传 AT_EACCESS/AT_SYMLINK_NOFOLLOW/
-// AT_EMPTY_PATH(内核校验)。
-int faccessat(int dirfd, const char *path, int mode, int flags) {
+// access is provided by musl src/unistd (musl_unistd_objs); on x86-64 musl
+// routes it to syscall(SYS_access), which this kernel resolves via
+// vfs_resolve_user (cwd-relative). faccessat below is retained (musl's
+// AT_EACCESS clone path is not adopted this batch — see user/CMakeLists.txt
+// MUSL_UNISTD_EXCLUDE). faccessat(dirfd,path,mode,flags):access 的 dirfd
+// 相对变体。AT_FDCWD ≡ 当前根(内核无 per-process CWD)。flags 透传
+// AT_EACCESS/AT_SYMLINK_NOFOLLOW/ AT_EMPTY_PATH(内核校验)。
+LIBC_EXPORT int faccessat(int dirfd, const char *path, int mode, int flags) {
   if (!path) {
     errno = EFAULT;
     return -1;
@@ -466,104 +437,22 @@ int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
   return sys_fchmodat(dirfd, path, (unsigned int)mode, flags);
 }
 
-int fchown(int fd, uid_t owner, gid_t group) {
-  return sys_fchown(fd, (unsigned int)owner, (unsigned int)group);
-}
+// fchown/fchownat are provided by musl src/unistd (musl_unistd_objs). musl's
+// fchown has a /proc/self/fd EBADF fallback (via __procfdname, src/internal/
+// procfdname.c — also compiled into musl_unistd_objs); this kernel's sys_fchown
+// is real, so the fallback branch is dead but the symbol resolves. fchownat is
+// a pure syscall(SYS_fchownat) passthrough.
 
-int fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flags) {
-  if (!path) {
-    errno = EFAULT;
-    return -1;
-  }
-  return sys_fchownat(dirfd, path, (unsigned int)owner, (unsigned int)group,
-                      flags);
-}
-
-// ===================== symlink / readlink (§3.3) =====================
-// symlink(target, linkpath):建指向 target 的符号链接。走 sys_symlink
-// (内核 tmpfs 真实现,FAT32 → ENOSYS/EPERM)。errno 转换在 syscall.h 薄封装。
-int symlink(const char *target, const char *linkpath) {
-  if (!target || !linkpath) {
-    errno = EFAULT;
-    return -1;
-  }
-  return sys_symlink(target, linkpath);
-}
-int symlinkat(const char *target, int newdirfd, const char *linkpath) {
-  if (!target || !linkpath) {
-    errno = EFAULT;
-    return -1;
-  }
-  return sys_symlinkat(target, newdirfd, linkpath);
-}
-// readlink(path, buf, bufsiz):读 path 指向软链的 target 到 buf,返回长度
-// (不 NUL 终止)。走 sys_readlink(内核 readlink 钩子)。bufsiz==0 → EINVAL
-// (glibc 依赖;内核已校验,此处重复防御对齐 glibc 契约)。
-ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
-  if (!path || !buf) {
-    errno = EFAULT;
-    return -1;
-  }
-  return sys_readlink(path, buf, bufsiz);
-}
-ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
-  if (!path || !buf) {
-    errno = EFAULT;
-    return -1;
-  }
-  return sys_readlinkat(dirfd, path, buf, bufsiz);
-}
-
-// ===================== link / linkat (§3.4 硬链接 + nlink)
-// ===================== link(old, new):建硬链 new → old(共享 inode,nlink++)。走
-// sys_link (内核 tmpfs_link 真实现:nlink 维护 + 跨 fs EXDEV + 目录 EPERM; FAT32
-// → EPERM)。
-int link(const char *oldpath, const char *newpath) {
-  if (!oldpath || !newpath) {
-    errno = EFAULT;
-    return -1;
-  }
-  return sys_link(oldpath, newpath);
-}
-int linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath,
-           int flags) {
-  if (!oldpath || !newpath) {
-    errno = EFAULT;
-    return -1;
-  }
-  return sys_linkat(olddirfd, oldpath, newdirfd, newpath, flags);
-}
-
-// ===================== unlink (via sys_unlink syscall) =====================
-int unlink(const char *path) {
-  if (!path) {
-    errno = EFAULT;
-    return -1;
-  }
-
-  char abs_path[256];
-  if (path[0] != '/') {
-    int cwdi = 0;
-    while (cwd_path[cwdi] && cwdi < 254) {
-      abs_path[cwdi] = cwd_path[cwdi];
-      cwdi++;
-    }
-    if (cwdi > 0 && abs_path[cwdi - 1] != '/')
-      abs_path[cwdi++] = '/';
-    int pi = 0;
-    while (path[pi] && cwdi < 254)
-      abs_path[cwdi++] = path[pi++];
-    abs_path[cwdi] = '\0';
-    path = abs_path;
-  }
-
-  int r = sys_unlink(path);
-  return r;
-}
+// symlink/symlinkat/readlink/readlinkat/link/linkat/unlink are provided by musl
+// src/unistd (musl_unistd_objs). On x86-64 musl routes the plain forms to
+// syscall(SYS_symlink/SYS_readlink/SYS_link/SYS_unlink), which this kernel
+// resolves cwd-relative via vfs_resolve_user; the *at forms pass AT_FDCWD
+// straight through (resolved from root — see user/CMakeLists.txt block
+// comment). unlinkat below is retained (it prepends cwd_path for AT_FDCWD).
 
 // S07: unlinkat(dirfd, path, flags). AT_REMOVEDIR → rmdir semantics.
 // AT_FDCWD → cwd-relative; real dirfd → kernel resolves relative to it.
-int unlinkat(int dirfd, const char *path, int flags) {
+LIBC_EXPORT int unlinkat(int dirfd, const char *path, int flags) {
   if (!path) {
     errno = EFAULT;
     return -1;
@@ -628,34 +517,15 @@ int renameat(int olddirfd, const char *oldpath, int newdirfd,
     return sys_rename(op, np);
   return sys_renameat(olddirfd, op, newdirfd, np);
 }
-int rmdir(const char *path) {
-  if (!path) {
-    errno = EFAULT;
-    return -1;
-  }
 
-  char abs_path[256];
-  if (path[0] != '/') {
-    int cwdi = 0;
-    while (cwd_path[cwdi] && cwdi < 254) {
-      abs_path[cwdi] = cwd_path[cwdi];
-      cwdi++;
-    }
-    if (cwdi > 0 && abs_path[cwdi - 1] != '/')
-      abs_path[cwdi++] = '/';
-    int pi = 0;
-    while (path[pi] && cwdi < 254)
-      abs_path[cwdi++] = path[pi++];
-    abs_path[cwdi] = '\0';
-    path = abs_path;
-  }
-
-  int r = sys_rmdir(path);
-  return r;
-}
+// rmdir is provided by musl src/unistd (musl_unistd_objs); on x86-64 musl
+// routes it to syscall(SYS_rmdir), resolved cwd-relative via vfs_resolve_user.
 
 // ===================== isatty =====================
-int isatty(int fd) {
+// Retained (musl isatty.c excluded): musl probes TIOCGWINSZ, but this kernel's
+// serial tty only answers TCGETS — so musl's isatty would mis-report the serial
+// console as not-a-tty. TCGETS works for both PTY and serial.
+LIBC_EXPORT int isatty(int fd) {
   // Use ioctl TCGETS to detect tty devices
   long rc = sys_ioctl(fd, TCGETS, 0);
   return (rc == 0) ? 1 : 0;
@@ -688,7 +558,7 @@ int tcsetattr(int fd, int optional_actions, const struct termios *termios_p) {
 }
 
 // ===================== ttyname =====================
-char *ttyname(int fd) {
+LIBC_EXPORT char *ttyname(int fd) {
   if (!isatty(fd))
     return NULL;
   static char name[32];

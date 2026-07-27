@@ -72,6 +72,13 @@ void recalc_sigpending(xtask *t);
 // tick (IRQ context) and from timer-queue timeout wakes.
 void alarm_check(xtask *t, uint64_t now);
 
+// Swap the thread-group alarm_deadline (sched_clock() ns, absolute; 0 = cancel)
+// and borrow the new deadline onto every other BLOCKED same-tgid thread with
+// no wait_deadline yet, so the timer queue wakes it on expiry to run
+// alarm_check → SIGALRM. Returns the previous deadline (ns; 0 if none). Shared
+// by sys_alarm (seconds) and sys_setitimer (ITIMER_REAL, µs).
+uint64_t alarm_set_deadline(uint64_t new_deadline);
+
 // Thread syscalls (Phase 3a)
 int64_t sys_tgkill(int64_t tgid, int64_t tid, int64_t sig, int64_t, int64_t,
                    int64_t);

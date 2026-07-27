@@ -300,6 +300,39 @@ evdev 中断投递正规化(技术债 #34)独立于本重构,走路径 3,见 [..
 - [ ] **inode_permission 拆 CAP_DAC_OVERRIDE vs CAP_DAC_READ_SEARCH**：现 root 的 R/W/X 全走 `CAP_DAC_OVERRIDE`。Linux 拆分：W/X 走 DAC_OVERRIDE，R 走 DAC_READ_SEARCH（目录 +x 也走后者）。本轮统一不拆（零行为变化），拆分留此。
 - [ ] **chown 复杂规则**：现 chown 简化为 `capable(CAP_CHOWN)`（root-only）。Linux 允许"属主把文件 chown 到自己所在的 group"（不需 CAP_CHOWN）。引入多 group 概念后放宽到此规则；届时 `apply_chown` 的非特权清 setuid 位路径才有真实触发点（本轮 chown root-only，非 root 得 EPERM 不执行清位，故 `test_chown_root_keeps_setuid` 验证的是 root CAP_FSETID 保留语义）。
 
+### 剩余未迁移接口（按阻断原因分组）                                                                                                                                                                                                        
+                                                                                                                                                                                                                                            
+| 分组 | 接口 | 阻断原因 | 解锁路径 |                                                                                                                                                                                                       
+|------|------|----------|----------|                                                                                                                                                                                                       
+| **EXCLUDE 保留 repo 版**（musl 源被排除，repo 自实现） | `chdir`/`getcwd`/`renameat`/`unlinkat` | AT_FDCWD→cwd 内核债：`*at` 解析到 root 非 cwd，repo 用 `cwd_path` 绕过 | M0.4：内核 resolve_dirfd_start 解 AT_FDCWD→bp→cwd 后，下掉 4 个
+ repo 版 + `cwd_path` |                                                                                                                                                                                                                     
+| | `faccessat` | AT_EACCESS 路径要 `__block_all_sigs`/`__restore_sigs`/`__clone` clone shim | 补 clone shim 后接入 musl `faccessat.c` |                                                                                                    
+| | `isatty` | musl 探 `TIOCGWINSZ`；串口（`driver/serial.c:211`）只答 `TCGETS`，余返 `-ENOTTY` | 串口补 `TIOCGWINSZ`（或 repo `isatty` 改用 `TCGETS`，已保留） |                                                                           
+| | `sleep`/`usleep` | musl 遇 `EINTR` 返剩余秒，repo 语义是 EINTR 后重试 | 统一 EINTR 语义后接入；repo 版当前更贴合本 OS 信号 resume |                                                                                                     
+| | `ttyname`/`ttyname_r` | musl `readlink("/proc/self/fd/N")` + `stat`/`fstat` dev/ino 交叉校验，硬依赖 procfs 魔幻 symlink | 上 procfs（合成 `/proc/self/fd/N`→设备路径）；repo 版走 `TIOCGPTN` 拼 `/dev/ptsN` 已够 PTY 用，非 PTY tty 仍 
+返 NULL |                                                                                                                                                                                                                                   
+| | `gethostname` | musl 返 `uname().nodename`（"（none）"）；repo 走 `sys_gethostname`（sethostname 回环） | `uname` nodename 正确填充后可换 musl 版 |                                                                                     
+| **musl 声明但内核无 syscall/无实现（欠账）** | `getgroups`/`setgroups` | 内核无 groups 数组 | proc 加 `groups[]` + syscall |                                                                                                              
+| | `getresuid`/`getresgid`/`setresuid`/`setresgid` | 内核无 saved-set 查询/三参 res 版本 | proc 加 suid/sgid + `sys_setresuid/setresgid`（凭证已进程级） |                                                                                 
+| | `nice` | 依赖 `getpriority`/`setpriority`（musl 已编进）+ 调度器 priority | 接 `sys_getpriority`/`sys_setpriority` + 调度优先级 |                                                                                                       
+| | `acct` | 依赖 acct syscall + 记账写盘 | 上 acct syscall（非常后期） |                                                                                                                                                                   
+| | `chroot`/`vhangup` | 无对应 syscall | 上 `sys_chroot`/`sys_vhangup` |                                                                                                                                                                   
+| | `brk`/`sbrk` | malloc 走静态 freelist，不用 brk | 返 `-ENOSYS` 或 mmap 近似（非必须） |                                                                                                                                                 
+| | `getdtablesize`/`issetugid`/`ctermid`/`get_current_dir_name`/`syncfs` | 边缘/可用户态包装 | 逐项用户态 shim 或 edge syscall |                                                                                                           
+| | `euidaccess`/`eaccess` | 依赖 `faccessat(AT_EACCESS)` | 随 `faccessat` 解锁 |                                                                                                                                                           
+| | `vfork`/`fexecve` | `vfork` 需 CLONE_VFORK-ish；`fexecve` 需 fd-as-exec | clone 扩展 + `execveat` |                                                                                                                                     
+| | `crypt`/`encrypt`/`gethostid`/`sethostid`/`getdomainname`/`setdomainname` | 边缘 legacy | 用户态 stub 或 edge syscall |                                                                                                                 
+| | `getlogin`/`getlogin_r` | 依赖 utmp | 上 utmp（非常后期） |                                                                                                                                                                             
+| | `setpgrp` | = `setpgid(0,0)` | 一行 shim |                                                                                                                                                                                              
+| | `pathconf`/`fpathconf`/`confstr` | musl 在 `src/misc`，本批只拉了 setpriority/getpriority | 补编 `src/misc/pathconf.c`/`confstr.c` + 内核 `_PC_*`/`_CS_*` 取值 |                                                                        
+| | `daemon`/`getpass`/`getusershell`/`setusershell`/`endusershell` | 边缘功能 | 用户态包装或忽略 |                                                                                                                                         
+| **机制缝（已 shim 降级，非 musl 真实现）** | `__syscall_cp`（cancellable 系列底层） | musl 原版走 `__syscall_cp_asm` + pthread_cancel；自研 pthread 无 cancel | 实现 `pthread_cancel` + 取消点后可上 musl 真 `__syscall_cp` |             
+| | `__setxid`（set*id 系列） | musl 原版走 `__synccall` 跨线程广播；本内核凭证进程级 | 多线程凭证同步需求出现时再做（当前降级为单次 syscall 等价） |                                                                                       
+                                                                                                                                                                                                                                            
+**剩余债（M0.4 及之后）**：① AT_FDCWD→cwd 内核修后下掉 `chdir`/`getcwd`/`renameat`/`unlinkat` repo 版与 `cwd_path`（CMakeLists 注释标 M0.4）；② procfs 上线后下掉 `ttyname`/`ttyname_r`；③ 串口补 `TIOCGWINSZ` 后可换 `isatty` 到 musl；④ `i
+t_interval` 重复 alarm（`alarm_check` 到期重 arm）+ ITIMER_VIRTUAL/PROF；⑤ shim 目录 `user/lib/musl_shim/` 仍未 `git add`（untracked），errno 双包装修复在 diff 盲区。                                                                      
+                                                                                                                                                                              
+
 ## udev 测试
 
 - **test_dev_notify.c 废弃（P3-T3）**：base_worklist §2.4 P3-T3 列的 `test_dev_notify.c` 要测"内核通知 syscall"——但 `SYS_DEV_NOTIFY`(88) 已被 epoll 占用（base_worklist §2 开头），syscall 不存在。P3-T3 是 worklist 未同步架构演进的残留。内核 uevent 通知走 netlink（`nl_uevent_broadcast`），其测试已隐含在 test_udevd 的"收 uevent"路径里。**不再新增 test_dev_notify.c。**

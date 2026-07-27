@@ -7,12 +7,16 @@
 #ifndef COMMON_ERRNO_H
 #define COMMON_ERRNO_H
 
-// Linux x86-64 errno values (aligned to asm-generic/errno-base.h + errno.h,
-// matching musl arch/generic/bits/errno.h exactly).
-// Former misaligned values (ENOMEM=3, EINVAL=4, etc.) are replaced wholesale.
-// Collision items (EMFILE old=13 vs EACCES=13; ENFILE old=23 vs
-// ECONNREFUSED=23) are resolved: EACCES=13, EMFILE=24, ENFILE=23,
-// ECONNREFUSED=111.
+// Linux x86-64 errno values, aligned 1:1 to asm-generic/errno-base.h +
+// asm-generic/errno.h (the same table musl's arch/generic/bits/errno.h uses).
+// The kernel returns -<errno> from syscalls; musl's __syscall_ret() (in the
+// dynamically linked libc.so) translates that to errno=<value> + ret=-1.
+// Because libc.so is built against this same table, the two sides MUST agree
+// on every numeric value — any divergence surfaces as tests seeing the wrong
+// errno (e.g. kernel -ECONNREFUSED=-111 read back as musl ECONNREFUSED=111).
+// Former misaligned values (ENOMEM=3, EINVAL=4, ECONNREFUSED=23, etc.) are
+// replaced wholesale; the network errnos occupy the asm-generic 88-115 block
+// (NOT colliding 90/91/93/94/95... as in the previous layout).
 
 #define EPERM 1            /* Operation not permitted */
 #define ENOENT 2           /* No such file or directory */
@@ -54,6 +58,7 @@
 #define ENOSYS 38          /* Function not implemented */
 #define ENOTEMPTY 39       /* Directory not empty */
 #define ELOOP 40           /* Too many symbolic links encountered */
+#define EWOULDBLOCK EAGAIN /* Same as EAGAIN (Linux convention) */
 #define ENOMSG 42          /* No message of desired type */
 #define EIDRM 43           /* Identifier removed */
 #define ECHRNG 44          /* Channel number out of range */
@@ -70,7 +75,7 @@
 #define ENOANO 55          /* No anode */
 #define EBADRQC 56         /* Invalid request code */
 #define EBADSLT 57         /* Invalid slot */
-#define EDEADLOCK 58       /* EDEADLK (same value on x86-64) */
+#define EDEADLOCK EDEADLK  /* EDEADLK (same value on x86-64) */
 #define EBFONT 59          /* Bad font file format */
 #define ENOSTR 60          /* Device not a stream */
 #define ENODATA 61         /* No data available */
@@ -147,6 +152,5 @@
 #define ENOTRECOVERABLE 131 /* State not recoverable */
 #define ERFKILL 132         /* Operation not possible due to RF-kill */
 #define EHWPOISON 133       /* Memory page has hardware error */
-#define EWOULDBLOCK EAGAIN  /* Same as EAGAIN (Linux convention) */
 
 #endif // COMMON_ERRNO_H

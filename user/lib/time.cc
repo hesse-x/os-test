@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/cdefs.h> // LIBC_EXPORT (sleep/usleep retained wrappers export from libc.so)
 #include <syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -484,7 +485,7 @@ int clock_nanosleep(clockid_t clk, int flags, const struct timespec *req,
   return 0;
 }
 
-unsigned int sleep(unsigned seconds) {
+LIBC_EXPORT unsigned int sleep(unsigned seconds) {
   struct timespec req = {(time_t)seconds, 0};
   struct timespec rem;
   while (nanosleep(&req, &rem) == -1 && errno == EINTR)
@@ -492,7 +493,7 @@ unsigned int sleep(unsigned seconds) {
   return 0;
 }
 
-int usleep(unsigned usec) {
+LIBC_EXPORT int usleep(unsigned usec) {
   struct timespec req;
   req.tv_sec = (time_t)(usec / 1000000U);
   req.tv_nsec = (long)((usec % 1000000U) * 1000U);

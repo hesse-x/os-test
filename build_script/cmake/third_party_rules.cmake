@@ -69,9 +69,13 @@ function(add_third_party_lib name)
     # 共性编译 flag：os_base_options 等价（freestanding + -m64 + config -O/-g），不含 WARN_FLAGS。
     _tp_base_compile_flags(_base_flags)
 
-    # 私有 include：项目根（root-relative include 风格）+ UAPI 契约头 + user/include + 本库 INCLUDE_DIRS。
+    # 私有 include：项目根（root-relative include 风格）+ third_party（musl shim:
+    # user/include/unistd.h does #include "musl/include/unistd.h", resolved via
+    # -I third_party → third_party/musl/include/unistd.h）+ UAPI 契约头 +
+    # user/include + 本库 INCLUDE_DIRS。
     set(_include_flags
         -I${CMAKE_SOURCE_DIR}
+        -I${CMAKE_SOURCE_DIR}/third_party
         -I${CMAKE_SOURCE_DIR}/include/uapi
         -I${CMAKE_SOURCE_DIR}/user/include)
     foreach(_dir ${ARG_INCLUDE_DIRS})
@@ -87,6 +91,7 @@ function(add_third_party_lib name)
         target_link_libraries(${name} PRIVATE os_base_options)
         target_include_directories(${name} PRIVATE
             ${CMAKE_SOURCE_DIR}
+            ${CMAKE_SOURCE_DIR}/third_party
             ${CMAKE_SOURCE_DIR}/include/uapi
             ${CMAKE_SOURCE_DIR}/user/include
             ${ARG_INCLUDE_DIRS})

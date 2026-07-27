@@ -129,6 +129,7 @@ endfunction()
 # Usage: add_user_lib(name [C] SOURCES ... [FLAGS ...] [SHARED] [OUTPUT_NAME ...]
 #                     [VERSION_MAP ...] [SO_LINK_LIBS ...] [INCLUDE_DIRS ...]
 #                     [GEN_HEADERS hdr1 ...]
+#                     [EXTRA_OBJS obj1 ...]
 #                     [IMAGE_PATH dest] [IMAGE_ARTIFACT name] [IMAGE_PARTITION <1|2>]
 #                     [NO_IMAGE])
 # C: flag to use C compiler (consistent with add_user_elf)
@@ -148,6 +149,13 @@ endfunction()
 #              to each object's DEPENDS so editing the template re-compiles the library.
 #              (The STATIC path uses add_library, which tracks configure_file outputs
 #              automatically, so GEN_HEADERS is unused there.)
+# EXTRA_OBJS: pre-built .o files (e.g. from an OBJECT library via $<TARGET_OBJECTS:...>)
+#              to splice into the library archive/link in addition to SOURCES. Used by
+#              the musl-unistd integration: musl sources need a different include order
+#              (musl src/internal before user/include) than the rest of libc, so they are
+#              built by a separate add_library(OBJECT) target (musl_unistd_objs) and its
+#              objects are merged into libc.a/libc.so via this parameter. Both the STATIC
+#              (add_library STATIC archive) and SHARED (bare-gcc link) paths consume them.
 # IMAGE_PATH/IMAGE_ARTIFACT/IMAGE_PARTITION/NO_IMAGE: disk-image manifest registration
 #              (reface_cmake.md §6). SHARED auto-defaults to lib/lib<out>.so @ part 2;
 #              STATIC has no auto-default (register only with explicit IMAGE_PATH, e.g.
@@ -155,7 +163,7 @@ endfunction()
 # Otherwise: add_library(STATIC), preserve target interface (unity uses target_include_directories)
 function(add_user_lib lib_name)
     set(option_args SHARED C NO_IMAGE)
-    set(multi_args SOURCES FLAGS SO_LINK_LIBS INCLUDE_DIRS GEN_HEADERS)
+    set(multi_args SOURCES FLAGS SO_LINK_LIBS INCLUDE_DIRS GEN_HEADERS EXTRA_OBJS)
     set(one_args OUTPUT_NAME VERSION_MAP IMAGE_PATH IMAGE_ARTIFACT IMAGE_PARTITION)
     cmake_parse_arguments(ARG "${option_args}" "${one_args}" "${multi_args}" ${ARGN})
 
@@ -188,7 +196,7 @@ function(add_user_lib lib_name)
         # When VERSION_MAP is set, .map + verify_libc_exports.sh gates the exports.
         # Libraries like libinput use LIBINPUT_EXPORT (__attribute__((visibility("default")))) markings.
         # -fPIC: required for all .so objects (position-independent code).
-        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fPIC ${DRM_INCLUDE_FLAGS} -fvisibility=hidden ${ARG_FLAGS_LIST})
+        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fPIC ${DRM_INCLUDE_FLAGS} -fvisibility=hidden ${ARG_FLAGS_LIST})
         if(ARG_INCLUDE_DIRS)
             foreach(_dir ${ARG_INCLUDE_DIRS})
                 list(APPEND COMPILE_FLAGS_BASE -I${_dir})
@@ -212,6 +220,11 @@ function(add_user_lib lib_name)
             list(APPEND OBJ_FILES ${src_obj})
             math(EXPR idx "${idx} + 1")
         endforeach()
+
+        # EXTRA_OBJS is spliced into the link below as its own COMMAND argument
+        # (see the add_custom_command) — NOT folded into OBJ_FILES here, because
+        # $<TARGET_OBJECTS:...> expands to a ;-joined list that would otherwise
+        # glue into one list element and confuse the shell.
 
         set(SO_FILE ${CMAKE_BINARY_DIR}/lib${_out_base}.so)
 
@@ -239,6 +252,12 @@ function(add_user_lib lib_name)
                 list(APPEND SO_LINK_DEPS ${CMAKE_BINARY_DIR}/lib${_so_lib}.so)
             endforeach()
         endif()
+        # EXTRA_OBJS carries the object-target dependency too: a $<TARGET_OBJECTS:t>
+        # generator expression in DEPENDS makes ninja build target t's objects before
+        # this link runs. (The same expression in COMMAND supplies the .o paths.)
+        if(ARG_EXTRA_OBJS)
+            list(APPEND SO_LINK_DEPS ${ARG_EXTRA_OBJS})
+        endif()
 
         # --- Extra link flags (version script + libc.so dependency) ---
         set(SO_EXTRA_LDFLAGS "")
@@ -253,13 +272,28 @@ function(add_user_lib lib_name)
             endforeach()
         endif()
 
+        # EXTRA_OBJS (e.g. $<TARGET_OBJECTS:musl_unistd_objs>) splices pre-built
+        # object files into the link. It is emitted as its own COMMAND argument
+        # (kept out of OBJ_FILES) so CMake evaluates the $<TARGET_OBJECTS:...>
+        # generator expression at *generate* time and splits its result into one
+        # argv entry per object. Folding it into OBJ_FILES via list(APPEND) would
+        # collapse the whole expansion into a single list element with embedded
+        # semicolons, and the shell would then treat each ';' as a command
+        # separator (every object path executed as a command → "Permission
+        # denied"). The DEPENDS line below carries the object target dependency.
+        set(_extra_objs "")
+        if(ARG_EXTRA_OBJS)
+            set(_extra_objs ${ARG_EXTRA_OBJS})
+        endif()
+
         add_custom_command(OUTPUT ${SO_FILE}
             COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -nostdlib -nodefaultlibs
                     -Wl,--hash-style=gnu
                     -Wl,-soname,lib${ARG_OUTPUT_NAME}.so
                     ${SO_EXTRA_LDFLAGS}
-                    -o ${SO_FILE} ${OBJ_FILES}
+                    -o ${SO_FILE} ${OBJ_FILES} ${_extra_objs}
             DEPENDS ${SO_LINK_DEPS}
+            COMMAND_EXPAND_LISTS
             COMMENT "Linking ${lib_name}.so")
 
         # Post-link verification (libc-specific, only when VERSION_MAP is provided)
@@ -275,11 +309,14 @@ function(add_user_lib lib_name)
 
         add_custom_target(${lib_name} ALL DEPENDS ${SO_FILE})
     else()
-        # Static library — add_library(STATIC), preserve target interface
-        add_library(${lib_name} STATIC ${ARG_SOURCES})
+        # Static library — add_library(STATIC), preserve target interface.
+        # EXTRA_OBJS (e.g. $<TARGET_OBJECTS:musl_unistd_objs>) are passed as additional
+        # sources; CMake archives them into the .a alongside the compiled SOURCES.
+        add_library(${lib_name} STATIC ${ARG_SOURCES} ${ARG_EXTRA_OBJS})
 
         target_include_directories(${lib_name} PRIVATE
             ${CMAKE_SOURCE_DIR}
+            ${CMAKE_SOURCE_DIR}/third_party
             ${CMAKE_SOURCE_DIR}/user/include
         )
         # UAPI 契约头（include/uapi → #include "xos/*.h"）经 os_uapi 取得
@@ -345,6 +382,7 @@ function(add_drm_lib lib_name)
     # INCLUDE_DIRS so the lib controls its own resolution order.
     target_include_directories(${lib_name} PRIVATE
         ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party
         ${CMAKE_SOURCE_DIR}/include/uapi
         ${CMAKE_SOURCE_DIR}/user/include
         ${ARG_INCLUDE_DIRS}
@@ -396,7 +434,7 @@ function(add_user_elf elf_name)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra include directories
     if(ARG_INCLUDE_DIRS)
@@ -583,7 +621,7 @@ function(add_user_dyn_elf name)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra include directories
     if(ARG_INCLUDE_DIRS)

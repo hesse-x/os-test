@@ -21,6 +21,7 @@
  * parent probes, so a mismatch verdict is deterministic. */
 
 #include <errno.h>
+#include <sched.h> // sched_yield (musl <unistd.h> no longer declares it)
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

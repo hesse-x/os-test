@@ -16,9 +16,11 @@
 #include <sys/ipc.h>
 #include <sys/process.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <xos/unistd_ext.h>
 
 static int spawn_service(const char *path) {
   printf("spawn: %s\n", path);

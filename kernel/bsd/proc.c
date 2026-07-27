@@ -48,6 +48,8 @@
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 
+#include "kernel/user_check.h"
+#include <xos/capability.h>
 #include <xos/elf.h>
 #include <xos/errno.h>
 #include <xos/fcntl.h>
@@ -2047,6 +2049,158 @@ int64_t sys_setgid(int64_t arg1, int64_t unused2, int64_t unused3,
     p->egid = gid;
   }
   return 0;
+}
+
+// ===================== setresuid/setresgid/setreuid/setregid
+// ===================== M1.1 (unistd.md §2.A1/A2). Linux permission ladder,
+// process-wide semantics (not per-thread; §4.3 documents why we do not compile
+// musl setxid.c). -1 means "leave unchanged" (uid_t/gid_t sentinel; survives
+// the uint32_t cred narrowing because callers pass (uid_t)-1 == 0xFFFFFFFF).
+//
+// setresuid(r,e,s): privileged (CAP_SETUID, == euid==0 today) may set each of
+// real/effective/saved to any value; unprivileged may set each only to one of
+// the *current* real/effective/saved. All three are independent (each arg
+// applied iff != -1). glibc/man-page semantics.
+int64_t sys_setresuid(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused4,
+                      int64_t unused5, int64_t unused6) {
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
+  uint32_t ruid = (uint32_t)arg1;
+  uint32_t euid = (uint32_t)arg2;
+  uint32_t suid = (uint32_t)arg3;
+  proc *p = current_proc;
+  if (!capable(CAP_SETUID)) {
+    // Each non-(-1) target must equal one of the current real/effective/saved.
+    if (arg1 != -1 && ruid != p->uid && ruid != p->euid && ruid != p->suid)
+      return (int64_t)-EPERM;
+    if (arg2 != -1 && euid != p->uid && euid != p->euid && euid != p->suid)
+      return (int64_t)-EPERM;
+    if (arg3 != -1 && suid != p->uid && suid != p->euid && suid != p->suid)
+      return (int64_t)-EPERM;
+  }
+  if (arg1 != -1)
+    p->uid = ruid;
+  if (arg2 != -1)
+    p->euid = euid;
+  if (arg3 != -1)
+    p->suid = suid;
+  return 0;
+}
+
+int64_t sys_setresgid(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused4,
+                      int64_t unused5, int64_t unused6) {
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
+  uint32_t rgid = (uint32_t)arg1;
+  uint32_t egid = (uint32_t)arg2;
+  uint32_t sgid = (uint32_t)arg3;
+  proc *p = current_proc;
+  if (!capable(CAP_SETGID)) {
+    if (arg1 != -1 && rgid != p->gid && rgid != p->egid && rgid != p->sgid)
+      return (int64_t)-EPERM;
+    if (arg2 != -1 && egid != p->gid && egid != p->egid && egid != p->sgid)
+      return (int64_t)-EPERM;
+    if (arg3 != -1 && sgid != p->gid && sgid != p->egid && sgid != p->sgid)
+      return (int64_t)-EPERM;
+  }
+  if (arg1 != -1)
+    p->gid = rgid;
+  if (arg2 != -1)
+    p->egid = egid;
+  if (arg3 != -1)
+    p->sgid = sgid;
+  return 0;
+}
+
+// setreuid(r,e): -1 = unchanged. Man-page setreuid(2):
+//  - unprivileged: euid may be set to current real/effective/saved; ruid may be
+//    set to current real or effective only.
+//  - if ruid is set (!= -1) OR euid is set to a value != the previous real uid,
+//    the saved-set is set to the NEW effective uid (Linux "suid preservation":
+//    a setreuid that changes euid must scrub the saved-set so the prior euid
+//    cannot be restored via seteuid). This is the rule that makes
+//    setreuid(rootdrop) irreversible, mirroring setuid's root branch.
+int64_t sys_setreuid(int64_t arg1, int64_t arg2, int64_t unused3,
+                     int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
+  uint32_t ruid = (uint32_t)arg1;
+  uint32_t euid = (uint32_t)arg2;
+  proc *p = current_proc;
+  if (!capable(CAP_SETUID)) {
+    if (arg1 != -1 && ruid != p->uid && ruid != p->euid)
+      return (int64_t)-EPERM;
+    if (arg2 != -1 && euid != p->uid && euid != p->euid && euid != p->suid)
+      return (int64_t)-EPERM;
+  }
+  uint32_t prev_ruid = p->uid;
+  if (arg1 != -1)
+    p->uid = ruid;
+  if (arg2 != -1)
+    p->euid = euid;
+  // suid preservation: set suid to the new euid when ruid changed or when euid
+  // moved away from the previous real uid (man setreuid(2)).
+  if (arg1 != -1 || (arg2 != -1 && p->euid != prev_ruid))
+    p->suid = p->euid;
+  return 0;
+}
+
+int64_t sys_setregid(int64_t arg1, int64_t arg2, int64_t unused3,
+                     int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
+  uint32_t rgid = (uint32_t)arg1;
+  uint32_t egid = (uint32_t)arg2;
+  proc *p = current_proc;
+  if (!capable(CAP_SETGID)) {
+    if (arg1 != -1 && rgid != p->gid && rgid != p->egid)
+      return (int64_t)-EPERM;
+    if (arg2 != -1 && egid != p->gid && egid != p->egid && egid != p->sgid)
+      return (int64_t)-EPERM;
+  }
+  uint32_t prev_rgid = p->gid;
+  if (arg1 != -1)
+    p->gid = rgid;
+  if (arg2 != -1)
+    p->egid = egid;
+  // sgid preservation, mirroring setreuid over gid/egid/sgid.
+  if (arg1 != -1 || (arg2 != -1 && p->egid != prev_rgid))
+    p->sgid = p->egid;
+  return 0;
+}
+
+// getgroups(size, list): POSIX getgroups(2). With size==0, return the number of
+// supplementary groups (without filling list); with size>0, fill up to size and
+// return the count; size too small → -EINVAL. The cred has no groups array yet
+// (M1.1 ships the 0-group baseline, which is POSIX-legal: a process may have no
+// supplementary groups). Group management lands with a later batches.
+int64_t sys_getgroups(int64_t arg1, int64_t arg2, int64_t unused3,
+                      int64_t unused4, int64_t unused5, int64_t unused6) {
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  (void)unused6;
+  int size = (int)arg1;
+  uint32_t *list = (uint32_t *)(uintptr_t)arg2;
+  const int ngroups = 0; // M1.1 baseline: no supplementary groups
+  if (size < 0)
+    return (int64_t)-EINVAL;
+  if (size == 0)
+    return (int64_t)ngroups;
+  if (size < ngroups)
+    return (int64_t)-EINVAL;
+  // POSIX: with size>0 the caller's list must be writable even when the group
+  // count is 0 (validate the range; nothing to populate yet). gid_t is uint32_t
+  // (LP64, user/include/sys/types.h), so the per-entry width is 4 bytes here.
+  if (!validate_user_buf(list, (size_t)size * sizeof(uint32_t)))
+    return (int64_t)-EFAULT;
+  return (int64_t)ngroups;
 }
 
 int64_t sys_getppid(int64_t unused1, int64_t unused2, int64_t unused3,

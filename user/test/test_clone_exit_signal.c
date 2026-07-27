@@ -22,6 +22,7 @@
  * pthread.cc but stores the fn pointer on the child stack instead of in a TCB
  * (no pthread dependency for these raw-clone tests). */
 
+#include <sched.h> // sched_yield (musl <unistd.h> no longer declares it)
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>

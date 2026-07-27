@@ -71,6 +71,10 @@ LIBC_EXPORT int chmod(const char *path, mode_t mode);
 LIBC_EXPORT int fchmod(int fd, mode_t mode);
 LIBC_EXPORT int fchmodat(int dirfd, const char *path, mode_t mode, int flags);
 
+LIBC_EXPORT mode_t umask(mode_t mask);
+LIBC_EXPORT int utimensat(int dirfd, const char *path,
+                          const struct timespec times[2], int flags);
+
 #ifdef __cplusplus
 }
 #endif

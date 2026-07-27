@@ -49,9 +49,13 @@ global:
     link; linkat;
     getuid; geteuid; getgid; getegid; getppid; getpgrp; umask;
     gethostname; sethostname; alarm; pause;
+    setitimer;
     truncate; fsync; sync;
     getpagesize; sysconf;
+    nice; getpriority; setpriority;
     chown; fchown; fchownat; readlink;
+    /* M1.1 — set*id ladder + getgroups (unistd.md §2.A1/A2). */
+    setresuid; setresgid; setreuid; setregid; seteuid; setegid; getgroups;
 
     /* <fcntl.h> */
     openat; fcntl; fd_file_size;

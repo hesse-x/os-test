@@ -22,11 +22,147 @@ set(LIBC_SOURCES
     ${CMAKE_SOURCE_DIR}/utils/kvformat.c
 )
 
+# ===================== musl unistd integration (unistd_worklist M0.2/M0.3) =====================
+# Build the upstream musl src/unistd/*.c into libc via a separate OBJECT library with a
+# musl-internal include order. The musl sources #include "syscall.h" / "libc.h" (quoted),
+# which must resolve to musl's OWN src/internal/{syscall,libc}.h — NOT this repo's
+# user/include/syscall.h (the sys_* wrapper layer). Achieved by ordering musl src/internal
+# ahead of user/include on this target's include path only; the rest of libc keeps the
+# repo order (user/include first). <bits/syscall.h> (SYS_*/__NR_* numbers) is generated
+# into user/include/bits/syscall.h (matching musl's Makefile sed product), shared by both.
+#
+# pthread-mechanism downgrade (unistd_try.md §已定决策 2): musl's cancellable wrappers
+# (read/write/fsync/pause/...) call syscall_cp(...) → __syscall_cp, and the set*id
+# wrappers call __setxid. The real musl implementations route through the pthread
+# cancel/synccall machinery (src/thread/__syscall_cp.c, syscall_cp.s, synccall.c,
+# setxid.c, pthread_cancel.c). This OS's self-authored pthread (user/lib/pthread.cc)
+# does not implement pthread_cancel, and credentials are process-wide — so those musl
+# thread sources are NOT compiled. Instead lib/musl_shim/syscall_cp.c provides a
+# non-cancellable __syscall_cp (plain inline __syscall6) and a no-broadcast __setxid
+# (direct syscall), matching the existing repo behaviour (sys_process.cc:84).
+#
+# musl's src/internal/syscall_ret.c provides __syscall_ret (the -errno → -1+errno
+# translation) that every musl unistd wrapper's syscall(...) macro depends on.
+#
+# faccessat.c is intentionally EXCLUDED this batch: its AT_EACCESS path needs
+# __block_all_sigs/__restore_sigs/__clone shims; the repo's existing faccessat
+# (file.cc) is retained for now (tracked in unistd_worklist problem 4).
+#
+# ttyname.c / ttyname_r.c are EXCLUDED: musl's ttyname_r readlinks /proc/self/fd/N
+# (via __procfdname, src/internal/procfdname.c) and stats the result — this kernel
+# has no procfs. The repo's existing ttyname (file.cc) uses ioctl(TIOCGPTN) instead
+# and is retained. ttyname_r deficit recorded in doc/design/todo.md.
+#
+# isatty.c is EXCLUDED: musl probes TIOCGWINSZ, but this kernel's serial tty
+# (kernel/driver/serial.c:211) only answers TCGETS and returns -ENOTTY for anything
+# else — so musl's isatty would report the serial console (where the shell runs) as
+# not-a-tty. The repo's isatty (file.cc) uses TCGETS, which both PTY and serial
+# answer, and is retained.
+#
+# chdir.c / getcwd.c are EXCLUDED together with renameat.c / unlinkat.c: this
+# kernel's *at syscalls still resolve AT_FDCWD to the root mount (resolve_dirfd_start
+# in kernel/bsd/vfs.c returns the root inode; only vfs_resolve_user — the plain
+# syscall path — was taught to resolve relatives against bp->cwd this batch). The
+# repo's *at wrappers that take an AT_FDCWD-relative path (unlinkat, renameat) work
+# around this by prepending a userspace cwd copy in resolve_at_path (file.cc), which
+# in turn relies on the repo's chdir/getcwd maintaining that copy (cwd_path). musl's
+# chdir/getcwd would make bp->cwd the sole source of truth and leave cwd_path stale,
+# and musl's unlinkat/renameat pass AT_FDCWD straight through (→ root, not cwd). So
+# all four are retained as a coupled set. The kernel AT_FDCWD→cwd fix that would let
+# us drop all four (and cwd_path) is recorded as M0.4 debt in doc/design/todo.md.
+set(MUSL_DIR ${CMAKE_SOURCE_DIR}/third_party/musl)
+
+# musl unistd sources to adopt (pure wrappers + cancellable + set*id + library-logic).
+# Built as an OBJECT library so its .o files merge into both libc.a and libc.so via
+# add_user_lib(EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs>).
+file(GLOB MUSL_UNISTD_SOURCES ${MUSL_DIR}/src/unistd/*.c)
+# Exclude sources we are not adopting this batch (see comments above / below).
+set(MUSL_UNISTD_EXCLUDE
+    ${MUSL_DIR}/src/unistd/faccessat.c   # AT_EACCESS clone path — repo faccessat retained
+    ${MUSL_DIR}/src/unistd/setxid.c      # __setxid provided by musl_shim/syscall_cp.c
+    ${MUSL_DIR}/src/unistd/ttyname.c     # wraps ttyname_r (excluded below)
+    ${MUSL_DIR}/src/unistd/ttyname_r.c   # needs /proc/self/fd (no procfs) — repo ttyname retained
+    ${MUSL_DIR}/src/unistd/isatty.c      # musl probes TIOCGWINSZ; serial only answers TCGETS — repo isatty retained
+    ${MUSL_DIR}/src/unistd/gethostname.c # musl returns uname.nodename ("(none)"); repo reads sys_gethostname (sethostname round-trip) — retained
+    ${MUSL_DIR}/src/unistd/sleep.c       # repo sleep resumes after EINTR (musl returns remaining); retained for signal-resume semantics
+    ${MUSL_DIR}/src/unistd/usleep.c      # repo usleep resumes after EINTR (musl returns early); retained (same reason as sleep)
+    ${MUSL_DIR}/src/unistd/chdir.c       # repo chdir maintains cwd_path for resolve_at_path — see block comment
+    ${MUSL_DIR}/src/unistd/getcwd.c      # coupled with chdir/cwd_path — see block comment
+    ${MUSL_DIR}/src/unistd/renameat.c    # uses resolve_at_path (AT_FDCWD→cwd_path) — see block comment
+    ${MUSL_DIR}/src/unistd/unlinkat.c    # uses resolve_at_path (AT_FDCWD→cwd_path) — see block comment
+)
+list(REMOVE_ITEM MUSL_UNISTD_SOURCES ${MUSL_UNISTD_EXCLUDE})
+
+add_library(musl_unistd_objs OBJECT
+    ${MUSL_UNISTD_SOURCES}
+    ${MUSL_DIR}/src/internal/syscall_ret.c
+    ${MUSL_DIR}/src/internal/procfdname.c
+    ${MUSL_DIR}/src/exit/_Exit.c
+    ${MUSL_DIR}/src/sched/sched_yield.c
+    # nice.c (in src/unistd) calls setpriority/getpriority, whose impls live in
+    # src/misc — pull them in or libc.so has an unresolved PLT 'setpriority'.
+    ${MUSL_DIR}/src/misc/setpriority.c
+    ${MUSL_DIR}/src/misc/getpriority.c
+    # alarm.c / ualarm.c (in src/unistd) call setitimer, impl in src/signal.
+    ${MUSL_DIR}/src/signal/setitimer.c
+    lib/musl_shim/syscall_cp.c
+)
+# musl-internal include order: musl src/internal BEFORE user/include so the musl
+# sources' quoted #include "syscall.h"/"libc.h" resolve to musl's own headers.
+# arch/x86_64 provides syscall_arch.h (inline __syscallN stubs); arch/generic is the
+# bits fallback. user/include carries the generated bits/syscall.h + xos headers.
+# Relaxed warnings (-Wno-all): upstream musl is third-party code, not under our
+# -Werror gate (same rationale as add_drm_lib for third_party/drm).
+target_include_directories(musl_unistd_objs PRIVATE
+    ${MUSL_DIR}/src/internal
+    ${MUSL_DIR}/include
+    ${MUSL_DIR}/arch/x86_64
+    ${MUSL_DIR}/arch/generic
+    ${CMAKE_SOURCE_DIR}/user/include
+    ${CMAKE_SOURCE_DIR}/include/uapi
+)
+target_compile_options(musl_unistd_objs PRIVATE
+    -m64 ${FREESTANDING_FLAGS} -fno-pie -Wno-all)
+
+# libc.so needs PIC objects (the -fno-pie objects above produce non-PIC
+# relocations like R_X86_64_32 against .rodata, which ld rejects when building a
+# shared object). Mirror the repo's libc.a(-fno-pie)/libc.so(-fPIC) dual build:
+# a second OBJECT library, musl_unistd_objs_so, compiles the SAME musl sources
+# with -fPIC for the shared link. Same sources, same include order, same shim —
+# only the code model differs.
+add_library(musl_unistd_objs_so OBJECT
+    ${MUSL_UNISTD_SOURCES}
+    ${MUSL_DIR}/src/internal/syscall_ret.c
+    ${MUSL_DIR}/src/internal/procfdname.c
+    ${MUSL_DIR}/src/exit/_Exit.c
+    ${MUSL_DIR}/src/sched/sched_yield.c
+    ${MUSL_DIR}/src/misc/setpriority.c
+    ${MUSL_DIR}/src/misc/getpriority.c
+    ${MUSL_DIR}/src/signal/setitimer.c
+    lib/musl_shim/syscall_cp.c
+)
+target_include_directories(musl_unistd_objs_so PRIVATE
+    ${MUSL_DIR}/src/internal
+    ${MUSL_DIR}/include
+    ${MUSL_DIR}/arch/x86_64
+    ${MUSL_DIR}/arch/generic
+    ${CMAKE_SOURCE_DIR}/user/include
+    ${CMAKE_SOURCE_DIR}/include/uapi
+)
+target_compile_options(musl_unistd_objs_so PRIVATE
+    -m64 ${FREESTANDING_FLAGS} -fPIC -Wno-all)
+# The SHARED libc.so link consumes the PIC objects as bare .o files; the STATIC
+# libc.a path consumes the -fno-pie objects via $<TARGET_OBJECTS:...>. Both are
+# wired through EXTRA_OBJS below.
+
 # libc.a (static, -fno-pie -DDYNAMIC=0)
 # IMAGE_PATH usr/lib/libc.a: ship the static libc.a into the root FS (STATIC has
 # no auto-default). IMAGE_ARTIFACT libc.a overrides the default lib<c>.a build name.
+# EXTRA_OBJS: musl unistd upstream objects (musl_unistd_objs) merged into the archive,
+# replacing the repo's hand-written unistd wrappers (unistd_worklist M0.2/M0.3).
 add_user_lib(c
     SOURCES ${LIBC_SOURCES}
+    EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs>
     C
     FLAGS "-fno-pie -DDYNAMIC=0"
     IMAGE_PATH usr/lib/libc.a
@@ -37,6 +173,7 @@ add_user_lib(c
 # OUTPUT_NAME c -> artifact libc.so (gcc -shared -Wl,-soname,libc.so)
 add_user_lib(c_so
     SOURCES ${LIBC_SOURCES}
+    EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs_so>
     C
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED

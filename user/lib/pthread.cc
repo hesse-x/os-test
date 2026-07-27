@@ -16,6 +16,7 @@
 #include <syscall.h>
 #include <unistd.h>
 
+#include <sched.h>
 #include <sys/mman.h>
 #include <sys/tls.h>
 #include <xos/errno.h>

@@ -83,4 +83,23 @@
 
   # ---- ELF types ----
   { include: ["<elf.h>", public, "<xos/elf.h>", public ] },
+
+  # ---- musl unistd re-export (private impl → public face) ----
+  # The project vendors musl; unistd symbols (read/write/close/...) are really
+  # defined in "musl/include/unistd.h" (resolved via -I third_party), which the
+  # user/include/unistd.h shim re-exports. Mark the musl-internal path PRIVATE
+  # so iwyu flags any TU that includes it directly and tells it to use the
+  # public <unistd.h> face instead. (<unistd.h> publicly re-exports the musl
+  # path, so TUs including <unistd.h> are satisfied and never told to add the
+  # musl path.)
+  { include: ["\"musl/include/unistd.h\"", private, "<unistd.h>", public ] },
+
+  # ---- clang freestanding stdarg internals (private impl → public face) ----
+  # clang's <stdarg.h> is a shim that re-exports __stdarg_va_arg.h /
+  # __stdarg_va_copy.h (the real definers of va_arg / va_copy). Mark those
+  # internal headers PRIVATE so iwyu flags any TU that includes them directly
+  # and tells it to use the public <stdarg.h> face instead. (<stdarg.h>
+  # publicly re-exports them, so TUs including <stdarg.h> are satisfied.)
+  { include: ["<__stdarg_va_arg.h>", private, "<stdarg.h>", public ] },
+  { include: ["<__stdarg_va_copy.h>", private, "<stdarg.h>", public ] },
 ]

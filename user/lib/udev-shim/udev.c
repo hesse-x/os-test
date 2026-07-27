@@ -8,6 +8,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h> // open (musl/repo fcntl.h; old unistd.h no longer declares it)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,7 +26,7 @@
 #include <xos/socket.h>
 
 #define EVDEV_BITS_PER_LONG (sizeof(long) * 8)
-#define NBITS(x) ((((x)-1) / EVDEV_BITS_PER_LONG) + 1)
+#define NBITS(x) ((((x) - 1) / EVDEV_BITS_PER_LONG) + 1)
 #define LONG(x) ((x) / EVDEV_BITS_PER_LONG)
 #define OFF(x) ((x) % EVDEV_BITS_PER_LONG)
 

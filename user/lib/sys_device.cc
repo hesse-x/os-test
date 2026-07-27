@@ -9,6 +9,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <syscall.h>
 #include <unistd.h>
@@ -17,11 +18,11 @@
 #include <sys/ipc.h>
 #include <sys/irq.h>
 #include <sys/pci.h>
-#include <xos/syscall_asm.h>
-
 #include <xos/errno.h>
 #include <xos/fcntl.h>
+#include <xos/syscall_asm.h>
 #include <xos/syscall_nums.h>
+#include <xos/unistd_ext.h>
 
 // ===================== device registration =====================
 
