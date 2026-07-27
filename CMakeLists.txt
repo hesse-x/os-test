@@ -174,14 +174,23 @@ endif()
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/build_script/linker.ld)
 set(BIN_FILE ${CMAKE_BINARY_DIR}/myos.elf)
 
-# 强制链接接器为裸 ld（绕开 gcc 驱动隐式输入），覆写 C 链接规则为 ld + --no-relax + linker.ld。
+# 内核链接器：clang→lld，gcc→GNU ld。两者均支持 --no-relax + linker.ld；
+# 当前内核未开 -flto，链接器选择仅为与工具链配对（lld 与 clang、ld 与 gcc 同源）。
+if(OS_COMPILER STREQUAL "gcc")
+    set(KERNEL_LINKER ld)
+else()
+    set(KERNEL_LINKER ld.lld)
+endif()
+
+# 强制链接器为裸 ld/lld（绕开 gcc 驱动隐式输入），覆写 C 链接规则为 ld + --no-relax + linker.ld。
+# --no-relax 配合 -fPIE 小码模型：禁用 RIP-relative relax，保留 higher-half 所需的绝对/PC-相对重定位。
 # OBJECT 库的对象经 target_link_libraries 聚合进 <OBJECTS>。但 CMake 对 OBJECT 库的传递聚合
 # 不像 STATIC 库那样递归：myos.elf PRIVATE 链 kernel_obj→driver_obj→bsd_obj→xcore_obj→xcore_mem→arch_x64
 # 中，只有直接 link 的对象会自动并入 <OBJECTS>；传递链上更深层的 OBJECT 库对象不会自动全部聚合
 # （实测缺 printk 等 xcore_obj 符号）。故显式用 $<TARGET_OBJECTS:...> 列全六库对象兜底。
 # 依赖图（层间 PUBLIC link）仍保留其 usage-requirement 传递收益（include/flag 经 PUBLIC 向下游传）。
 set(CMAKE_C_LINK_EXECUTABLE
-    "ld -m elf_x86_64 --no-relax -T ${LINKER_SCRIPT} <OBJECTS> -o <TARGET>")
+    "${KERNEL_LINKER} -m elf_x86_64 --no-relax -T ${LINKER_SCRIPT} <OBJECTS> -o <TARGET>")
 
 add_executable(myos.elf)
 # 聚合六个 OBJECT 库的对象：经 $<TARGET_OBJECTS:...> 显式列出，确保链接命令含全部内核对象

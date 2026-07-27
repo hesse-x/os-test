@@ -16,7 +16,9 @@ function(add_kernel_object lib_name)
     target_link_libraries(${lib_name} PRIVATE os_base_options os_warn os_kernel_warn)
     # 内核 C 代码模型：-fPIE（小码模型，higher-half 需 --no-relax 配套，见根 CMakeLists 托管链接规则）+
     # -std=gnu17。ASM 源不取 -fPIE（下方 ASM_SOURCES 分支仅给 -m64）。
-    target_compile_options(${lib_name} PRIVATE -fPIE -std=gnu17)
+    # -fvisibility=hidden：把 C 符号默认标 STV_HIDDEN，缩小 symtab。静态内核最终单次链接，
+    # 跨对象引用与 asm 的 .globl 入口不受影响（同链接域内仍正常解析）。
+    target_compile_options(${lib_name} PRIVATE -fPIE -std=gnu17 -fvisibility=hidden)
     target_compile_definitions(${lib_name} PRIVATE __KERNEL__)
 
     if(PERF)
