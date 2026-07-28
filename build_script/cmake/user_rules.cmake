@@ -4,13 +4,25 @@
 # Bare-gcc custom commands (add_user_elf / add_user_ldso / SHARED libc.so /
 # crt0) do NOT inherit global CMAKE_C_FLAGS, so they must carry these flags
 # explicitly to resolve freestanding headers like <stdint.h> and to get the
-# warning gate. They reference the shared FREESTANDING_FLAGS / WARN_FLAGS
+# warning gate. They reference the shared USER_FREESTANDING_FLAGS / WARN_FLAGS
 # variables defined in CMakeLists.txt — the single source of truth — so a flag
 # change there propagates here without manual mirroring. ( gcc accepts
-# duplicate -nostdinc/-isystem, so this is also harmless for the CMake-target
+# duplicate -nostdinc, so this is also harmless for the CMake-target
 # static-library path in add_user_lib, which gets the same flags via
 # target_compile_options below. )
-set(USER_COMPILE_FLAGS -m64 ${WARN_FLAGS} ${FREESTANDING_FLAGS} -fno-pie)
+#
+# Userspace freestanding std headers (stdint/stddef/stdarg/stdbool) are provided
+# by musl, NOT the compiler's -isystem freestanding dir (USER_FREESTANDING_FLAGS
+# drops -isystem). MUSL_INCLUDE_FLAGS puts musl/include + arch on the search
+# path. Include order matters: user/include MUST precede musl so our static
+# user/include/bits/alltypes.h wins over musl's arch bits/alltypes.h.in template
+# (musl stdint/stddef #include <bits/alltypes.h>). Appended after -I user/include
+# in each bare-gcc COMPILE_FLAGS below.
+set(MUSL_INCLUDE_FLAGS
+    -I${CMAKE_SOURCE_DIR}/third_party/musl/include
+    -I${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
+    -I${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic)
+set(USER_COMPILE_FLAGS -m64 ${WARN_FLAGS} ${USER_FREESTANDING_FLAGS} -fno-pie)
 
 # When the kernel is built with KASAN (-DSANITIZE=1), propagate the SANITIZER
 # macro to userspace too — WITHOUT -fsanitize=kernel-address (that is
@@ -196,7 +208,7 @@ function(add_user_lib lib_name)
         # When VERSION_MAP is set, .map + verify_libc_exports.sh gates the exports.
         # Libraries like libinput use LIBINPUT_EXPORT (__attribute__((visibility("default")))) markings.
         # -fPIC: required for all .so objects (position-independent code).
-        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -fPIC ${DRM_INCLUDE_FLAGS} -fvisibility=hidden ${ARG_FLAGS_LIST})
+        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${MUSL_INCLUDE_FLAGS} -fPIC ${DRM_INCLUDE_FLAGS} -fvisibility=hidden ${ARG_FLAGS_LIST})
         if(ARG_INCLUDE_DIRS)
             foreach(_dir ${ARG_INCLUDE_DIRS})
                 list(APPEND COMPILE_FLAGS_BASE -I${_dir})
@@ -318,6 +330,9 @@ function(add_user_lib lib_name)
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_SOURCE_DIR}/third_party
             ${CMAKE_SOURCE_DIR}/user/include
+            ${CMAKE_SOURCE_DIR}/third_party/musl/include
+            ${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
+            ${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic
         )
         # UAPI 契约头（include/uapi → #include "xos/*.h"）经 os_uapi 取得
         # （reface_cmake.md §4.7 阶段 2：替代根目录作用域 include/uapi）。
@@ -385,6 +400,9 @@ function(add_drm_lib lib_name)
         ${CMAKE_SOURCE_DIR}/third_party
         ${CMAKE_SOURCE_DIR}/include/uapi
         ${CMAKE_SOURCE_DIR}/user/include
+        ${CMAKE_SOURCE_DIR}/third_party/musl/include
+        ${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
+        ${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic
         ${ARG_INCLUDE_DIRS}
     )
 
@@ -398,7 +416,7 @@ function(add_drm_lib lib_name)
     # Third-party upstream code is not subject to our -Werror gate; any
     # warning suppression must be passed explicitly via FLAGS.
     separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
-    target_compile_options(${lib_name} PRIVATE -m64 ${FREESTANDING_FLAGS} -fno-pie ${ARG_FLAGS_LIST})
+    target_compile_options(${lib_name} PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -fno-pie ${ARG_FLAGS_LIST})
 
     set_target_properties(${lib_name} PROPERTIES
         ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -434,7 +452,7 @@ function(add_user_elf elf_name)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra include directories
     if(ARG_INCLUDE_DIRS)
@@ -564,10 +582,10 @@ endfunction()
 function(add_user_ldso name)
     cmake_parse_arguments(ARG "NO_IMAGE" "IMAGE_PATH;IMAGE_ARTIFACT;IMAGE_PARTITION" "SOURCES" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
-    set(COMPILE_FLAGS -m64 ${WARN_FLAGS} ${FREESTANDING_FLAGS}
+    set(COMPILE_FLAGS -m64 ${WARN_FLAGS} ${USER_FREESTANDING_FLAGS}
                       -fPIC -fvisibility=hidden
                       ${USER_BUILD_FLAGS}
-                      -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${DRM_INCLUDE_FLAGS})
+                      -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS})
     set(OBJ_FILES "")
     set(idx 0)
     foreach(src ${ARG_SOURCES})
@@ -621,7 +639,7 @@ function(add_user_dyn_elf name)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra include directories
     if(ARG_INCLUDE_DIRS)

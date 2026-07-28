@@ -120,7 +120,7 @@ target_include_directories(musl_unistd_objs PRIVATE
     ${CMAKE_SOURCE_DIR}/include/uapi
 )
 target_compile_options(musl_unistd_objs PRIVATE
-    -m64 ${FREESTANDING_FLAGS} -fno-pie -Wno-all)
+    -m64 ${USER_FREESTANDING_FLAGS} -fno-pie -Wno-all)
 
 # libc.so needs PIC objects (the -fno-pie objects above produce non-PIC
 # relocations like R_X86_64_32 against .rodata, which ld rejects when building a
@@ -149,7 +149,7 @@ target_include_directories(musl_unistd_objs_so PRIVATE
     ${CMAKE_SOURCE_DIR}/include/uapi
 )
 target_compile_options(musl_unistd_objs_so PRIVATE
-    -m64 ${FREESTANDING_FLAGS} -fPIC -Wno-all)
+    -m64 ${USER_FREESTANDING_FLAGS} -fPIC -Wno-all)
 # The SHARED libc.so link consumes the PIC objects as bare .o files; the STATIC
 # libc.a path consumes the -fno-pie objects via $<TARGET_OBJECTS:...>. Both are
 # wired through EXTRA_OBJS below.
@@ -192,7 +192,7 @@ target_include_directories(musl_fcntl_objs PRIVATE
     ${MUSL_DIR}/arch/generic
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
-target_compile_options(musl_fcntl_objs PRIVATE -m64 ${FREESTANDING_FLAGS} -fno-pie -Wno-all)
+target_compile_options(musl_fcntl_objs PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -fno-pie -Wno-all)
 
 # libc.so needs PIC objects (mirror the libc.a(-fno-pie)/libc.so(-fPIC) dual
 # build): a second OBJECT library, musl_fcntl_objs_so, compiles the SAME musl
@@ -205,7 +205,7 @@ target_include_directories(musl_fcntl_objs_so PRIVATE
     ${MUSL_DIR}/arch/generic
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
-target_compile_options(musl_fcntl_objs_so PRIVATE -m64 ${FREESTANDING_FLAGS} -fPIC -Wno-all)
+target_compile_options(musl_fcntl_objs_so PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -fPIC -Wno-all)
 
 # libc.a (static, -fno-pie -DDYNAMIC=0)
 # IMAGE_PATH usr/lib/libc.a: ship the static libc.a into the root FS (STATIC has

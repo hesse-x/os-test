@@ -50,7 +50,18 @@ execute_process(
 # CMAKE_<LANG>_FLAGS *string* below, string(JOIN) flattens the list with single
 # spaces — without it the list's semicolons would leak into the string and
 # break the compiler invocation.
-set(FREESTANDING_FLAGS -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -mno-red-zone -nostdinc -isystem ${GCC_FREESTANDING_INC})
+# FREESTANDING_FLAGS: freestanding runtime basics. The kernel and EFI stub keep
+# -isystem ${GCC_FREESTANDING_INC} (compiler-bundled std*.h) — musl headers break
+# in-kernel builds (sigset_t/sigaction_t undefined, struct proc sizeof assertion
+# fails). Userspace instead consumes musl's stdint/stddef/stdarg/stdbool via
+# USER_FREESTANDING_FLAGS (+ musl/include on the search path in user_rules.cmake),
+# making the user sysroot self-contained without the compiler freestanding dir.
+# KERNEL_FREESTANDING_FLAGS retains -isystem; USER_FREESTANDING_FLAGS drops it.
+# The FREESTANDING_FLAGS alias still equals the kernel variant so os_base_options
+# (kernel/EFI, below) is unchanged.
+set(KERNEL_FREESTANDING_FLAGS -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -mno-red-zone -nostdinc -isystem ${GCC_FREESTANDING_INC})
+set(USER_FREESTANDING_FLAGS  -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -mno-red-zone -nostdinc)
+set(FREESTANDING_FLAGS ${KERNEL_FREESTANDING_FLAGS})
 set(WARN_FLAGS -Wall -Wextra -Werror)
 
 # ---- os_base_options: 共性基础选项 INTERFACE 库（reface_cmake.md §3.3 / §4.7）----
@@ -73,6 +84,25 @@ elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
     list(APPEND _base_opts -Os -DNDEBUG)
 endif()
 target_compile_options(os_base_options INTERFACE ${_base_opts})
+
+# ---- os_user_base_options: 用户态共性基础选项 INTERFACE 库 ----
+# 镜像 os_base_options 结构，但用 USER_FREESTANDING_FLAGS（无 -isystem）+ -m64。
+# 用户态 freestanding 标准头（stdint/stddef/stdarg/stdbool）改由 musl 独占提供，
+# 编译器 freestanding dir 不再参与用户态搜索路径。专供 CMake 托管的用户态 target
+# （third_party STATIC 即 unity）。bare-gcc custom-command 用户态路径（libc.a/libc.so/
+# user ELF/ld.so）经 USER_FREESTANDING_FLAGS + MUSL_INCLUDE_FLAGS（user_rules.cmake）自给自足。
+add_library(os_user_base_options INTERFACE)
+set(_user_base_opts ${USER_FREESTANDING_FLAGS} -m64)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    list(APPEND _user_base_opts -g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG)
+elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
+    list(APPEND _user_base_opts -O3 -DNDEBUG)
+elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    list(APPEND _user_base_opts -O2 -g -DNDEBUG)
+elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
+    list(APPEND _user_base_opts -Os -DNDEBUG)
+endif()
+target_compile_options(os_user_base_options INTERFACE ${_user_base_opts})
 
 # ---- os_uapi: UAPI 契约头 INTERFACE 库（reface_cmake.md §4.7 阶段 2 试点）----
 # 纯头文件库，承载 include/uapi → #include "xos/*.h"（及 linux/asm/compat 子树）。

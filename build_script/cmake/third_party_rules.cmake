@@ -23,7 +23,7 @@
 # usage requirement，故需手工展开 os_base_options 等价 flag。与根 CMakeLists 的
 # os_base_options 保持同步（单一逻辑：freestanding 基础 + build-type 优化/调试）。
 function(_tp_base_compile_flags out_var)
-    set(_flags ${FREESTANDING_FLAGS} -m64)
+    set(_flags ${USER_FREESTANDING_FLAGS} -m64)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         list(APPEND _flags -g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG)
     elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -72,12 +72,18 @@ function(add_third_party_lib name)
     # 私有 include：项目根（root-relative include 风格）+ third_party（musl shim:
     # user/include/unistd.h does #include "musl/include/unistd.h", resolved via
     # -I third_party → third_party/musl/include/unistd.h）+ UAPI 契约头 +
-    # user/include + 本库 INCLUDE_DIRS。
+    # user/include + musl freestanding std headers (stdint/stddef/stdarg/stdbool —
+    # now that -isystem is dropped, third_party SHARED libs pull <stdint.h> etc.
+    # from musl; user/include precedes musl so our static bits/alltypes.h wins)
+    # + 本库 INCLUDE_DIRS。
     set(_include_flags
         -I${CMAKE_SOURCE_DIR}
         -I${CMAKE_SOURCE_DIR}/third_party
         -I${CMAKE_SOURCE_DIR}/include/uapi
-        -I${CMAKE_SOURCE_DIR}/user/include)
+        -I${CMAKE_SOURCE_DIR}/user/include
+        -I${CMAKE_SOURCE_DIR}/third_party/musl/include
+        -I${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
+        -I${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic)
     foreach(_dir ${ARG_INCLUDE_DIRS})
         list(APPEND _include_flags -I${_dir})
     endforeach()
@@ -88,12 +94,15 @@ function(add_third_party_lib name)
     if(ARG_STATIC)
         # ---- STATIC（Unity 类）：真 add_library(STATIC)，正常可用 ----
         add_library(${name} STATIC ${ARG_SOURCES})
-        target_link_libraries(${name} PRIVATE os_base_options)
+        target_link_libraries(${name} PRIVATE os_user_base_options)
         target_include_directories(${name} PRIVATE
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_SOURCE_DIR}/third_party
             ${CMAKE_SOURCE_DIR}/include/uapi
             ${CMAKE_SOURCE_DIR}/user/include
+            ${CMAKE_SOURCE_DIR}/third_party/musl/include
+            ${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
+            ${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic
             ${ARG_INCLUDE_DIRS})
         if(ARG_INTERFACE_INCLUDE_DIRS)
             target_include_directories(${name} INTERFACE ${ARG_INTERFACE_INCLUDE_DIRS})

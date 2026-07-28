@@ -12,13 +12,16 @@
 #   include/uapi/xos/*.h → $DEST/xos/          (UAPI contract headers — shared kernel/user ABI)
 #   user/include/*.h     → $DEST/              (POSIX/C standard headers — the libc side)
 #   user/include/sys/*.h → $DEST/sys/
-#   user/include/bits/*.h → $DEST/bits/         (musl-aligned arch bits: alltypes/posix/syscall.
-#                                              musl's <unistd.h> does #include <bits/alltypes.h>,
-#                                              <bits/posix.h>; published so the closure resolves.)
+#   user/include/bits/*.h → $DEST/bits/         (musl-aligned arch bits: alltypes/posix/syscall/
+#                                              stdint. musl's <unistd.h> does #include <bits/alltypes.h>,
+#                                              <bits/posix.h>; <stdint.h> does #include <bits/stdint.h>;
+#                                              published so the closure resolves.)
 #   third_party/musl/include/unistd.h → $DEST/unistd.h   (musl's real <unistd.h> replaces the
 #   third_party/musl/include/sys/time.h → $DEST/sys/time.h  source-tree shim at publish time —
-#                                              the shim forwards via "musl/include/..." which
-#                                              only resolves with -I third_party at build time.)
+#   third_party/musl/include/fcntl.h  → $DEST/fcntl.h        the shim forwards via "musl/include/..."
+#   third_party/musl/include/{stdint,stddef,stdarg,stdbool}.h → $DEST/  (musl freestanding std
+#                                              headers — replace the compiler's -isystem freestanding
+#                                              dir so the sysroot is self-contained without it.)
 #
 # What is NOT published (deliberately):
 #   utils/             — non-UAPI shared implementation:
@@ -78,28 +81,37 @@ cp "$SRC"/third_party/musl/include/unistd.h     "$DEST/unistd.h"
 cp "$SRC"/third_party/musl/include/sys/time.h   "$DEST/sys/time.h"
 cp "$SRC"/third_party/musl/include/fcntl.h      "$DEST/fcntl.h"
 
+# 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
+#    compiler's -isystem freestanding dir. The published sysroot must be usable
+#    with -nostdinc and NO -isystem (the Mesa milestone consumes it via -isysroot),
+#    so these resolve here rather than from the toolchain's bundled std*.h.
+#    <bits/alltypes.h> + <bits/stdint.h> (published in step 2) provide the types
+#    these pull via #include <bits/...>.
+for h in stdint.h stddef.h stdarg.h stdbool.h; do
+  cp "$SRC"/third_party/musl/include/$h "$DEST/$h"
+done
+
 echo "Installed tree:"
 ( cd "$DEST" && find . -type f | sort | sed 's/^\.\//  /' )
 
+# Precheck: the static user/include/bits set (alltypes.h + stdint.h) must have
+# been published in step 2 — musl's freestanding std headers #include <bits/...>
+# and the closure below resolves only if those are in place.
+[ -f "$DEST/bits/alltypes.h" ] || { echo "FAIL: $DEST/bits/alltypes.h missing (user/include/bits not published)." >&2; exit 1; }
+
 # Self-test: prove the published tree is self-contained by preprocessing hello.c
-# against ONLY the sysroot (-nostdinc) plus the toolchain's freestanding headers
-# (-isystem, which supplies stdint.h/stddef.h/stdarg.h — the same headers a real
-# --target=x86_64-xos cross gcc ships). -I$DEST makes the sysroot the include root,
-# exactly as -isysroot would expose /usr/include. -H lists every header opened; a
-# fatal "No such file" means the repo-owned closure broke (a real bug).
-#
-# CC selects the compiler (default clang, matching build.sh's default). The
-# freestanding dir differs by compiler (gcc → …/gcc/<v>/include, clang →
-# …/clang/<v>/include), so $FREESTANDING is queried per-compiler and the
-# closure filter excludes that exact path instead of a hardcoded "/gcc/".
+# against ONLY the sysroot (-nostdinc + -I$DEST), with NO -isystem freestanding
+# fallback. The sysroot ships musl's stdint/stddef/stdarg/stdbool + bits/alltypes
+# + bits/stdint itself, so every header in <stdio.h>+<time.h>'s closure must
+# resolve under $DEST. -H lists every header opened; a fatal "No such file" means
+# a repo-owned closure broke (a real bug). CC selects the compiler (default clang).
 echo
 echo "Closure check: preprocessing user/hello.c against $DEST ..."
 CC="${CC:-clang}"
-FREESTANDING="$($CC -print-file-name=include)"
-if $CC -nostdinc -ffreestanding -isystem "$FREESTANDING" "-I$DEST" -E -H "$SRC/user/hello.c" >/dev/null 2>/tmp/closure.log; then
-  # -H emits one line per header opened (indented by depth). Lines from the toolchain's
-  # freestanding dir are excluded by exact path match; everything else is a sysroot-owned header.
-  repo_opened=$(grep -vcF "$FREESTANDING" /tmp/closure.log || true)
+if $CC -nostdinc -ffreestanding "-I$DEST" -E -H "$SRC/user/hello.c" >/dev/null 2>/tmp/closure.log; then
+  # -H emits one line per header opened (indented by depth). Every opened header
+  # is now sysroot-owned (no -isystem fallback), so the count is the full closure.
+  repo_opened=$(wc -l < /tmp/closure.log || true)
   echo "OK: hello.c closure resolved ($repo_opened sysroot-owned header opens, 0 missing)."
 else
   echo "FAIL: hello.c closure broken against sysroot:" >&2
@@ -109,13 +121,14 @@ fi
 
 # Stronger regression guard: every published header's own include closure must also
 # resolve under the sysroot — not just hello's path. Catches breaks like pthread.h
-# → xos/signal.h that hello.c never exercises.
+# → xos/signal.h that hello.c never exercises. Same pure -nostdinc + -I$DEST (no
+# -isystem): the sysroot must stand alone.
 echo "Scanning every published header for self-contained closure ..."
 failed=0
 while IFS= read -r h; do
   rel="${h#"$DEST/"}"
   printf '#include <%s>\n' "$rel" > /tmp/hdr_probe.c
-  if ! $CC -nostdinc -ffreestanding -isystem "$FREESTANDING" "-I$DEST" -E -H /tmp/hdr_probe.c >/dev/null 2>/tmp/hdr.log; then
+  if ! $CC -nostdinc -ffreestanding "-I$DEST" -E -H /tmp/hdr_probe.c >/dev/null 2>/tmp/hdr.log; then
     echo "  FAIL: <$rel> closure broken:" >&2
     grep -E 'fatal|error' /tmp/hdr.log | head -3 | sed 's/^/      /' >&2
     failed=$((failed+1))

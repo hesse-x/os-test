@@ -10,6 +10,11 @@
 #   Partition 2 (root):  FAT32, ~160MB — root file system
 #     /driver/kbd.dev
 #     /usr/bin/{terminal,shell,udevd}
+#     /usr/include/         ← published header tree (install-headers.sh output:
+#     │                        xos/ + sys/ + bits/ + std/unistd/time/fcntl +
+#     │                        musl stdint/stddef/stdarg/stdbool). Self-contained
+#     │                        so the OS can host native builds (gcc/Mesa) reading
+#     │                        /usr/include with -nostdinc and no -isystem fallback.
 #     /usr/lib/libc.a
 #     /lib/{ld.so,libc.so,libinput.so,libudev.so,libm.so,libdrm.so,libffi.so,libexpat.so}
 #     /local/{hello,hello_dyn}.elf
@@ -141,6 +146,23 @@ done
 mmd -i "${BUILD_DIR}/part2.img" ::usr/share ::usr/share/libinput 2>/dev/null || true
 mcopy -i "${BUILD_DIR}/part2.img" "${PROJECT_DIR}/third_party/libinput/quirks/10-generic-keyboard.quirks"  ::usr/share/libinput/
 mcopy -i "${BUILD_DIR}/part2.img" "${PROJECT_DIR}/third_party/libinput/quirks/10-generic-mouse.quirks"     ::usr/share/libinput/
+
+# Published header tree → /usr/include/ (standard FHS layout).
+# install-headers.sh (run before mkdisk in build.sh) already published the
+# self-contained header closure to build/sysroot/usr/include/ (xos/ + sys/ +
+# bits/ + std/unistd/time/fcntl + musl freestanding stdint/stddef/stdarg/stdbool).
+# Copy that whole tree into the image so the OS hosts native builds (gcc/Mesa)
+# that read /usr/include with -nostdinc and no compiler -isystem fallback. Not a
+# build artifact (it is a published aggregate), so it stays here rather than the
+# manifest. mcopy -s recurses the source dir tree, creating image subdirs as needed.
+SYSROOT_INC="${BUILD_DIR}/sysroot/usr/include"
+if [ -d "${SYSROOT_INC}" ]; then
+    mmd -i "${BUILD_DIR}/part2.img" ::usr/include 2>/dev/null || true
+    mcopy -i "${BUILD_DIR}/part2.img" -s "${SYSROOT_INC}"/* "::usr/include/"
+else
+    echo "mkdisk.sh: ${SYSROOT_INC} missing — run install-headers.sh first (build.sh does this)." >&2
+    exit 1
+fi
 
 # Preserve root directory README
 mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/README" ::README
