@@ -27,8 +27,8 @@
 #include "kernel/xcore/wait_queue.h" // wait_queue_head, __wake_up, add/remove
 #include "kernel/xcore/xtask.h"
 
+#include "kernel/bsd/kfcntl.h"
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/hidraw.h>
 #include <xos/input.h>
 #include <xos/ioctl.h> // HID_BIND_IRQFD / HID_UNBIND_IRQFD

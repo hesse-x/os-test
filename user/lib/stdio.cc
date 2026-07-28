@@ -16,7 +16,6 @@
 #include <unistd.h>
 
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 
 #include "utils/kvformat.h"
 

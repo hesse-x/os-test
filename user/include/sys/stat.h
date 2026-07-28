@@ -75,6 +75,13 @@ LIBC_EXPORT mode_t umask(mode_t mask);
 LIBC_EXPORT int utimensat(int dirfd, const char *path,
                           const struct timespec times[2], int flags);
 
+/* utimensat(2) times[] special tv_nsec values (Linux uapi). musl places these
+ * in <sys/stat.h>; the kernel's copy lives in kernel/bsd/kfcntl.h. The values
+ * MUST match Linux/musl exactly (the repo's old shared xos/fcntl.h had them
+ * swapped — fixed during the fcntl header split, fcntl_worklist §3b). */
+#define UTIME_NOW 0x3fffffff  /* (1U<<30)-1 */
+#define UTIME_OMIT 0x3ffffffe /* (1U<<30)-2 */
+
 #ifdef __cplusplus
 }
 #endif

@@ -19,7 +19,6 @@
 #include <sys/irq.h>
 #include <sys/pci.h>
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/syscall_asm.h>
 #include <xos/syscall_nums.h>
 #include <xos/unistd_ext.h>

@@ -8,6 +8,7 @@
 #include "arch/x64/utils.h"
 #include "kernel/bsd/evdev_broker.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/kfcntl.h"
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
@@ -21,7 +22,6 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
-#include "xos/fcntl.h"
 #include <stddef.h>
 #include <xos/dirent.h>
 #include <xos/errno.h>

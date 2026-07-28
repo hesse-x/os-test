@@ -59,17 +59,14 @@ set(LIBC_SOURCES
 # not-a-tty. The repo's isatty (file.cc) uses TCGETS, which both PTY and serial
 # answer, and is retained.
 #
-# chdir.c / getcwd.c are EXCLUDED together with renameat.c / unlinkat.c: this
-# kernel's *at syscalls still resolve AT_FDCWD to the root mount (resolve_dirfd_start
-# in kernel/bsd/vfs.c returns the root inode; only vfs_resolve_user — the plain
-# syscall path — was taught to resolve relatives against bp->cwd this batch). The
-# repo's *at wrappers that take an AT_FDCWD-relative path (unlinkat, renameat) work
-# around this by prepending a userspace cwd copy in resolve_at_path (file.cc), which
-# in turn relies on the repo's chdir/getcwd maintaining that copy (cwd_path). musl's
-# chdir/getcwd would make bp->cwd the sole source of truth and leave cwd_path stale,
-# and musl's unlinkat/renameat pass AT_FDCWD straight through (→ root, not cwd). So
-# all four are retained as a coupled set. The kernel AT_FDCWD→cwd fix that would let
-# us drop all four (and cwd_path) is recorded as M0.4 debt in doc/design/todo.md.
+# chdir.c / getcwd.c / renameat.c / unlinkat.c ARE ADOPTED: the kernel's *at
+# syscalls resolve AT_FDCWD to the process cwd (resolve_dirfd_start in
+# kernel/bsd/vfs.c resolves bp->cwd to its inode — the M0.4 fix), and the plain
+# syscalls resolve relatives against bp->cwd via vfs_resolve_user. musl's
+# chdir/getcwd make bp->cwd the sole source of truth (no userspace cwd_path
+# copy), and musl's unlinkat/renameat pass AT_FDCWD straight through to the
+# kernel, which honors chdir. The repo's file.cc openat/chdir/getcwd/unlinkat/
+# renameat wrappers and the cwd_path/resolve_at_path helpers are deleted.
 set(MUSL_DIR ${CMAKE_SOURCE_DIR}/third_party/musl)
 
 # musl unistd sources to adopt (pure wrappers + cancellable + set*id + library-logic).
@@ -86,10 +83,6 @@ set(MUSL_UNISTD_EXCLUDE
     ${MUSL_DIR}/src/unistd/gethostname.c # musl returns uname.nodename ("(none)"); repo reads sys_gethostname (sethostname round-trip) — retained
     ${MUSL_DIR}/src/unistd/sleep.c       # repo sleep resumes after EINTR (musl returns remaining); retained for signal-resume semantics
     ${MUSL_DIR}/src/unistd/usleep.c      # repo usleep resumes after EINTR (musl returns early); retained (same reason as sleep)
-    ${MUSL_DIR}/src/unistd/chdir.c       # repo chdir maintains cwd_path for resolve_at_path — see block comment
-    ${MUSL_DIR}/src/unistd/getcwd.c      # coupled with chdir/cwd_path — see block comment
-    ${MUSL_DIR}/src/unistd/renameat.c    # uses resolve_at_path (AT_FDCWD→cwd_path) — see block comment
-    ${MUSL_DIR}/src/unistd/unlinkat.c    # uses resolve_at_path (AT_FDCWD→cwd_path) — see block comment
 )
 list(REMOVE_ITEM MUSL_UNISTD_SOURCES ${MUSL_UNISTD_EXCLUDE})
 
@@ -105,6 +98,11 @@ add_library(musl_unistd_objs OBJECT
     ${MUSL_DIR}/src/misc/getpriority.c
     # alarm.c / ualarm.c (in src/unistd) call setitimer, impl in src/signal.
     ${MUSL_DIR}/src/signal/setitimer.c
+    # rename.c lives in src/stdio (not src/unistd); adopt musl's (routes to
+    # SYS_rename, resolved cwd-relative via vfs_resolve_user) so the repo's
+    # file.cc rename wrapper — which lacked LIBC_EXPORT and was hidden in
+    # libc.so despite being in libc.map — is dropped.
+    ${MUSL_DIR}/src/stdio/rename.c
     lib/musl_shim/syscall_cp.c
 )
 # musl-internal include order: musl src/internal BEFORE user/include so the musl
@@ -139,6 +137,7 @@ add_library(musl_unistd_objs_so OBJECT
     ${MUSL_DIR}/src/misc/setpriority.c
     ${MUSL_DIR}/src/misc/getpriority.c
     ${MUSL_DIR}/src/signal/setitimer.c
+    ${MUSL_DIR}/src/stdio/rename.c
     lib/musl_shim/syscall_cp.c
 )
 target_include_directories(musl_unistd_objs_so PRIVATE
@@ -155,14 +154,68 @@ target_compile_options(musl_unistd_objs_so PRIVATE
 # libc.a path consumes the -fno-pie objects via $<TARGET_OBJECTS:...>. Both are
 # wired through EXTRA_OBJS below.
 
+# ===================== musl fcntl integration (fcntl_worklist §3d) =====================
+# Build the upstream musl src/fcntl/*.c into libc via a separate OBJECT library,
+# mirroring musl_unistd_objs (same musl-internal include order, same shim).
+# musl's open.c / openat.c / fcntl.c / creat.c / posix_fadvise.c /
+# posix_fallocate.c replace the repo's hand-written file.cc wrappers —
+# open/openat/fcntl are deleted from file.cc this batch.
+#
+# openat.c IS adopted: musl's openat passes AT_FDCWD straight to SYS_openat,
+# and the kernel's sys_openat resolves AT_FDCWD to the process cwd (the M0.4
+# resolve_dirfd_start fix in kernel/bsd/vfs.c resolves bp->cwd to its inode),
+# so openat(AT_FDCWD, rel) honors a prior chdir. The repo's file.cc openat
+# wrapper (which prepended a userspace cwd copy via resolve_at_path) and the
+# fcntl_ext.h LIBC_EXPORT re-declaration are deleted.
+#
+# open.c routes to SYS_open (SYS_open is defined in bits/syscall.h, so musl's
+# __sys_open_cp picks the 2/3-arg SYS_open path, not SYS_openat). The kernel's
+# sys_open resolves relatives against bp->cwd via vfs_resolve_user. musl chdir
+# (adopted via musl_unistd_objs) keeps bp->cwd in sync.
+#
+# No need to re-pull syscall_ret.c / syscall_cp.c: __syscall_ret and syscall_cp
+# are already merged into libc via musl_unistd_objs; the fcntl wrappers' syscall(...)
+# / syscall_cp(...) / __syscall(...) resolve at link time.
+set(MUSL_FCNTL_SOURCES
+    ${MUSL_DIR}/src/fcntl/open.c
+    ${MUSL_DIR}/src/fcntl/openat.c
+    ${MUSL_DIR}/src/fcntl/fcntl.c
+    ${MUSL_DIR}/src/fcntl/creat.c
+    ${MUSL_DIR}/src/fcntl/posix_fadvise.c
+    ${MUSL_DIR}/src/fcntl/posix_fallocate.c)
+
+add_library(musl_fcntl_objs OBJECT ${MUSL_FCNTL_SOURCES})
+target_include_directories(musl_fcntl_objs PRIVATE
+    ${MUSL_DIR}/src/internal
+    ${MUSL_DIR}/include
+    ${MUSL_DIR}/arch/x86_64
+    ${MUSL_DIR}/arch/generic
+    ${CMAKE_SOURCE_DIR}/user/include
+    ${CMAKE_SOURCE_DIR}/include/uapi)
+target_compile_options(musl_fcntl_objs PRIVATE -m64 ${FREESTANDING_FLAGS} -fno-pie -Wno-all)
+
+# libc.so needs PIC objects (mirror the libc.a(-fno-pie)/libc.so(-fPIC) dual
+# build): a second OBJECT library, musl_fcntl_objs_so, compiles the SAME musl
+# sources with -fPIC for the shared link.
+add_library(musl_fcntl_objs_so OBJECT ${MUSL_FCNTL_SOURCES})
+target_include_directories(musl_fcntl_objs_so PRIVATE
+    ${MUSL_DIR}/src/internal
+    ${MUSL_DIR}/include
+    ${MUSL_DIR}/arch/x86_64
+    ${MUSL_DIR}/arch/generic
+    ${CMAKE_SOURCE_DIR}/user/include
+    ${CMAKE_SOURCE_DIR}/include/uapi)
+target_compile_options(musl_fcntl_objs_so PRIVATE -m64 ${FREESTANDING_FLAGS} -fPIC -Wno-all)
+
 # libc.a (static, -fno-pie -DDYNAMIC=0)
 # IMAGE_PATH usr/lib/libc.a: ship the static libc.a into the root FS (STATIC has
 # no auto-default). IMAGE_ARTIFACT libc.a overrides the default lib<c>.a build name.
-# EXTRA_OBJS: musl unistd upstream objects (musl_unistd_objs) merged into the archive,
-# replacing the repo's hand-written unistd wrappers (unistd_worklist M0.2/M0.3).
+# EXTRA_OBJS: musl unistd + fcntl upstream objects merged into the archive,
+# replacing the repo's hand-written wrappers (unistd_worklist M0.2/M0.3,
+# fcntl_worklist §3d).
 add_user_lib(c
     SOURCES ${LIBC_SOURCES}
-    EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs>
+    EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs> $<TARGET_OBJECTS:musl_fcntl_objs>
     C
     FLAGS "-fno-pie -DDYNAMIC=0"
     IMAGE_PATH usr/lib/libc.a
@@ -173,7 +226,7 @@ add_user_lib(c
 # OUTPUT_NAME c -> artifact libc.so (gcc -shared -Wl,-soname,libc.so)
 add_user_lib(c_so
     SOURCES ${LIBC_SOURCES}
-    EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs_so>
+    EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs_so> $<TARGET_OBJECTS:musl_fcntl_objs_so>
     C
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED

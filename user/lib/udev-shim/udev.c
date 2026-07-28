@@ -15,7 +15,6 @@
 #include <unistd.h>
 
 #include "xos/errno.h"
-#include "xos/fcntl.h"
 
 #include <sys/ioctl.h>
 #include <sys/socket.h>

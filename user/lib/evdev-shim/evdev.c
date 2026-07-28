@@ -18,7 +18,6 @@
 
 #include <sys/ioctl.h>
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/ioctl.h>
 #include <xos/time.h>
 

@@ -10,6 +10,7 @@
 struct xtask;
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/kfcntl.h"
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/types.h"
@@ -17,7 +18,6 @@ struct xtask;
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/spinlock.h"
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/stat.h>
 
 /* ===== sysfs 节点树 ===== */

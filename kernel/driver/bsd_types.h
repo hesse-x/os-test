@@ -23,7 +23,6 @@
 #include "kernel/xcore/xtask.h" // xtask
 #include <stddef.h>
 #include <stdint.h>
-#include <xos/fcntl.h>
 #include <xos/signal.h> // NSIG, sigset_t, sigaction, siginfo_t
 #include <xos/types.h>  // pid_t
 

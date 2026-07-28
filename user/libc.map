@@ -58,7 +58,7 @@ global:
     setresuid; setresgid; setreuid; setregid; seteuid; setegid; getgroups;
 
     /* <fcntl.h> */
-    openat; fcntl; fd_file_size;
+    openat; fcntl;
 
     /* <ctype.h> */
     isalnum; isalpha; isascii; isblank; iscntrl; isdigit; isgraph;

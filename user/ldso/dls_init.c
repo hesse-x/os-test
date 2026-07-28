@@ -8,11 +8,11 @@
 // ld.md §3.3 / §8.2.2 recursive loading of multiple dependencies / plan_ld2b3
 // T14
 
+#include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/link_map.h>
 #include <xos/elf.h>
-#include <xos/fcntl.h>
 #include <xos/syscall_nums.h>
 
 // bootstrap stage helpers (hidden: visible across files but not via PLT)

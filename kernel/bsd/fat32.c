@@ -26,9 +26,9 @@
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/spinlock.h"
 
+#include "kernel/bsd/kfcntl.h"
 #include <xos/dirent.h>
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/stat.h>
 
 /* ==================== FAT32 volume state ==================== */
@@ -72,28 +72,50 @@ static int fat_cache_lookup(uint32_t sector_lba) {
   return -1;
 }
 
-static int fat_cache_alloc(uint32_t sector_lba) {
+/* Read FAT sector into cache, returns cache slot.
+ *
+ * SMP-safe fill: the victim slot is invalidated (sector_lba cleared) BEFORE
+ * blk_read fills its data, and the new sector_lba is published only AFTER the
+ * read completes (with a release barrier). Without this, a concurrent
+ * fat_cache_lookup that hits the slot between its tag being published and
+ * blk_read finishing the fill would read a zeroed/partial buffer — causing an
+ * allocator to see an in-use cluster (e.g. /test's directory cluster) as
+ * free and overwrite it. */
+static int fat_cache_read(uint32_t sector_lba) {
+  int slot = fat_cache_lookup(sector_lba);
+  if (slot >= 0)
+    return slot;
+
+  /* Pick an LRU victim under fat_cache_lock and invalidate it immediately so
+   * no concurrent lookup reads the buffer while we refill it. Re-check the
+   * tag inside the lock in case another CPU just filled this sector. */
   spin_lock(&fat_cache_lock);
+  for (int i = 0; i < FAT_CACHE_PAGES; i++) {
+    if (fat_cache[i].sector_lba == sector_lba) {
+      fat_cache_age[i] = ++fat_cache_time;
+      spin_unlock(&fat_cache_lock);
+      return i;
+    }
+  }
   int best = 0;
   for (int i = 1; i < FAT_CACHE_PAGES; i++) {
     if (fat_cache_age[i] < fat_cache_age[best])
       best = i;
   }
-  fat_cache[best].sector_lba = sector_lba;
+  fat_cache[best].sector_lba = 0xFFFFFFFF; /* invalidate victim */
   fat_cache_age[best] = ++fat_cache_time;
   spin_unlock(&fat_cache_lock);
-  return best;
-}
 
-/* Read FAT sector into cache, returns cache slot */
-static int fat_cache_read(uint32_t sector_lba) {
-  int slot = fat_cache_lookup(sector_lba);
-  if (slot >= 0)
-    return slot;
-  slot = fat_cache_alloc(sector_lba);
-  if (blk_read_sector(sector_lba, fat_cache[slot].data) != 0)
+  /* Fill the buffer with no fat_cache_lock held (blk_read is polling and takes
+   * ahci_lock itself). The slot is invisible to lookups during the fill. */
+  if (blk_read_sector(sector_lba, fat_cache[best].data) != 0)
     return -1;
-  return slot;
+
+  /* Publish the tag after the data is filled so a concurrent reader that hits
+   * this slot sees the completed buffer. */
+  __sync_synchronize();
+  fat_cache[best].sector_lba = sector_lba;
+  return best;
 }
 
 /* Invalidate FAT cache entries for a given sector */
@@ -185,15 +207,19 @@ uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index) {
 /* ==================== Cluster allocation ==================== */
 
 /* Find a free cluster and mark it as EOF. Returns cluster number or 0 on
- * failure. */
+ * failure. Caller holds fat_lock (so no concurrent FAT writer), but FAT
+ * readers (directory lookups) don't take fat_lock and can refill/evict a
+ * shared fat_cache slot mid-scan, which would let us read a buffer changing
+ * under us. Read the sector into a private stack buffer so the scan bytes are
+ * stable. */
 static uint32_t fat32_allocate_cluster(void) {
+  uint8_t sec[512];
   for (uint32_t sector = 0; sector < spf32; sector++) {
     uint32_t abs_sector = ((next_free_hint / 128) + sector) % spf32;
-    int slot = fat_cache_read(fat_start_lba + abs_sector);
-    if (slot < 0)
+    if (blk_read_sector(fat_start_lba + abs_sector, sec) != 0)
       continue;
 
-    uint8_t *fd = fat_cache[slot].data;
+    const uint8_t *fd = sec;
     for (int i = 0; i < 128; i++) {
       uint32_t c = abs_sector * 128 + i;
       if (c < 2 || c >= total_data_clusters + 2)

@@ -99,8 +99,16 @@ fi
 
 # Collect all kernel .c files (exclude user-space code), then narrow to the diff
 # set in incremental mode.
+# kernel/bsd/fcntl_sync.c is a zero-code compile-time ABI-sync guard TU: it
+# deliberately #includes musl's <bits/fcntl.h> to _Static_assert musl↔kernel
+# constant/struct parity under the real kernel build (clang + -I musl/arch/x86_64
+# + -nostdinc). sparse can't reproduce that environment (musl -I absent, and
+# -nostdinc is intentionally omitted per the note above), so <bits/fcntl.h>
+# resolves to host glibc's and explodes — pure noise on a TU with no runtime
+# surface to analyze. Exclude it.
 ALL_KERNEL_SOURCES=()
 for f in kernel/xcore/*.c arch/x64/*.c kernel/xcore/mem/*.c kernel/bsd/*.c kernel/driver/*.c; do
+    [ "$f" = "kernel/bsd/fcntl_sync.c" ] && continue
     [ -f "$f" ] && ALL_KERNEL_SOURCES+=("$f")
 done
 
@@ -178,10 +186,14 @@ if grep -rn '#include "kernel/driver/' kernel/xcore/ 2>/dev/null; then
 fi
 
 # kernel/driver/ must not include kernel/bsd/ headers
-# (devtmpfs/sysfs for VFS plumbing; poll_types for the __poll typedef only)
+# (devtmpfs/sysfs for VFS plumbing; poll_types for the __poll typedef only;
+#  kfcntl.h for O_* flag constants read out of f->flags in dev_ops callbacks —
+#  the single authoritative source guarded by fcntl_sync.c, NOT mirrored into
+#  bsd_types.h since O_* is kernel↔user ABI and an unguarded third copy would
+#  risk silent drift)
 echo "Checking kernel/driver/ #include violations..."
-if grep -rn '#include "kernel/bsd/' kernel/driver/ 2>/dev/null | grep -v devtmpfs | grep -v sysfs | grep -v poll_types; then
-    echo "FAIL: driver includes bsd (except devtmpfs/sysfs/poll_types)"
+if grep -rn '#include "kernel/bsd/' kernel/driver/ 2>/dev/null | grep -v devtmpfs | grep -v sysfs | grep -v poll_types | grep -v kfcntl; then
+    echo "FAIL: driver includes bsd (except devtmpfs/sysfs/poll_types/kfcntl)"
     INCLUDE_FAIL=1
 fi
 

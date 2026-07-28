@@ -53,6 +53,8 @@ int64_t sys_openat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_newfstatat(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_memfd_create(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_ftruncate(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_fallocate(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_fadvise64(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // DMA/PCI/Block
 int64_t sys_dma_alloc(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);

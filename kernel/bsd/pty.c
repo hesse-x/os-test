@@ -23,8 +23,8 @@
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 
+#include "kernel/bsd/kfcntl.h"
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
 

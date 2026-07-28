@@ -2,10 +2,18 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
+ *
+ * Kernel-private fcntl constants and struct layouts. This was the shared UAPI
+ * header include/uapi/xos/fcntl.h; during the musl fcntl adoption
+ * (fcntl_worklist §3b) it moved here so the userspace libc could switch to
+ * musl's real <fcntl.h> without O_*, F_*, struct flock colliding. The userspace
+ * <fcntl.h> is now a shim to musl; cross-consistency between this header and
+ * musl's bits/fcntl.h is locked at compile time by kernel/bsd/fcntl_sync.c
+ * (fcntl_worklist §3c). NOT published to the sysroot.
  */
 
-#ifndef _COMMON_FCNTL_H
-#define _COMMON_FCNTL_H
+#ifndef _KERNEL_BSD_KFCNTL_H
+#define _KERNEL_BSD_KFCNTL_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -20,17 +28,16 @@
 #define O_TRUNC 01000
 #define O_APPEND 02000
 #define O_NONBLOCK 04000
-#define O_DSYNC                                                                \
-  04000 /* same as O_NONBLOCK on x86-64; Linux uses O_DSYNC=010000 separately  \
-         */
+// Linux x86-64 octal values (aligned with musl arch/x86_64/bits/fcntl.h).
+#define O_DSYNC 010000
 #define __O_SYNC 04000000
-#define O_SYNC (__O_SYNC | O_DSYNC)
-#define O_CLOEXEC 020000000
+#define O_SYNC (__O_SYNC | O_DSYNC) /* = 04010000 */
+#define O_CLOEXEC 02000000
 #define O_DIRECT 040000
 #define O_DIRECTORY 0200000
-#define O_NOFOLLOW 04000000
-#define O_PATH 0100000000
-#define O_TMPFILE 02020000000
+#define O_NOFOLLOW 0400000
+#define O_PATH 010000000
+#define O_TMPFILE 020200000 /* __O_TMPFILE(020000000) | O_DIRECTORY */
 #define O_LARGEFILE 0
 
 #define O_SETFL_MASK (O_NONBLOCK | O_APPEND)
@@ -50,8 +57,8 @@
 #define F_GETSIG 11
 #define F_SETOWN_EX 15
 #define F_GETOWN_EX 16
-#define F_GETPIPE_SZ 31
-#define F_SETPIPE_SZ 32
+#define F_GETPIPE_SZ 1032
+#define F_SETPIPE_SZ 1031
 #define F_DUPFD_CLOEXEC 1030
 
 /* POSIX record lock types (struct flock.l_type). */
@@ -110,7 +117,7 @@ _Static_assert(sizeof(struct flock) == 32, "flock size (x86-64)");
 
 /* Note: POSIX FD_CLOEXEC=1 is not defined here. The kernel internally uses
  * FD_CLOEXEC=0x8000 in kernel/bsd/types.h as the fd flags bit (separate from
- * O_*). The userspace FD_CLOEXEC is defined in user/include/fcntl.h (=1, POSIX
+ * O_*). The userspace FD_CLOEXEC=1 comes from musl's <fcntl.h> (POSIX
  * convention). */
 
 // Linux-compatible sealing constants (for memfd_create + fcntl)
@@ -140,8 +147,13 @@ _Static_assert(sizeof(struct flock) == 32, "flock size (x86-64)");
 #define X_OK 1 /* test for execute (search) permission */
 
 /* utimensat times[] special tv_nsec values (Linux uapi). Used by sys_utimensat
- * to set atime/mtime to now or leave them unchanged. */
-#define UTIME_NOW 1073741822  /* (1U<<30)-2 */
-#define UTIME_OMIT 1073741823 /* (1U<<30)-1 */
+ * (do_utimensat in kernel/bsd/syscall.c) to set atime/mtime to now or leave
+ * them unchanged. These MUST match Linux/musl exactly: musl's <sys/stat.h>
+ * defines UTIME_NOW=0x3fffffff, UTIME_OMIT=0x3ffffffe. The old shared
+ * xos/fcntl.h had the two swapped (UTIME_NOW=(1<<30)-2, UTIME_OMIT=(1<<30)-1);
+ * masked because kernel+userspace shared the same wrong values. The split
+ * exposed it — fixed here, and locked by kernel/bsd/fcntl_sync.c. */
+#define UTIME_NOW 0x3fffffff  /* (1U<<30)-1 */
+#define UTIME_OMIT 0x3ffffffe /* (1U<<30)-2 */
 
-#endif /* _COMMON_FCNTL_H */
+#endif /* _KERNEL_BSD_KFCNTL_H */

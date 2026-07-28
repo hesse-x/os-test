@@ -186,6 +186,10 @@
   137 // filesystem stats (capacity fields 0 today; see todo.md)
 #define SYS_FSTATFS 138 // fd variant of statfs
 
+// ---- fadvise64 / fallocate (B group) ----
+#define SYS_fadvise64 221
+#define SYS_fallocate 285
+
 // ---- Socket thin wrappers (F group) ----
 #define SYS_GETSOCKNAME 51
 #define SYS_GETPEERNAME 52

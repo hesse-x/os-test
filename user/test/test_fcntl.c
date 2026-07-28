@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: MIT
  */
 
+/* musl's <fcntl.h> gates F_OWNER_TID/PID/PGRP and struct f_owner_ex behind
+ * _GNU_SOURCE; this test exercises F_SETOWN_EX/F_GETOWN_EX. */
+#define _GNU_SOURCE
+
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>

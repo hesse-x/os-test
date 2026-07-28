@@ -70,8 +70,8 @@
   { include: ["<sys/uio.h>", public, "<xos/socket.h>", public ] },
 
   # ---- file control / open flags ----
-  { include: ["<fcntl.h>", public, "<xos/fcntl.h>", public ] },
-  { include: ["<sys/fcntl.h>", public, "<xos/fcntl.h>", public ] },
+  # (userspace <fcntl.h> is now the musl real header via the shim — no xos
+  #  mapping. The kernel uses its private kernel/bsd/kfcntl.h, never <fcntl.h>.)
 
   # ---- stat / mode bits ----
   { include: ["<sys/stat.h>", public, "<xos/stat.h>", public ] },
@@ -93,6 +93,8 @@
   # path, so TUs including <unistd.h> are satisfied and never told to add the
   # musl path.)
   { include: ["\"musl/include/unistd.h\"", private, "<unistd.h>", public ] },
+  { include: ["\"musl/include/fcntl.h\"", private, "<fcntl.h>", public ] },
+  { include: ["\"bits/fcntl.h\"", private, "<fcntl.h>", public ] },
 
   # ---- clang freestanding stdarg internals (private impl → public face) ----
   # clang's <stdarg.h> is a shim that re-exports __stdarg_va_arg.h /

@@ -16,7 +16,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/unistd_ext.h>
 
 void exit(int status) {

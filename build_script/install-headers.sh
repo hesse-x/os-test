@@ -47,8 +47,14 @@ mkdir -p "$DEST/sys"
 
 # 1. UAPI contract headers (include/uapi/xos/) — the OS's include/uapi/.
 #    Only *.h: the dir also holds CMakeLists.txt (a build file, not an installed header).
+#    Plus the user-side OS-extension headers under user/include/xos/ (e.g.
+#    xos/unistd_ext.h — OS-specific declarations musl's standard <unistd.h>
+#    doesn't carry; consumers #include it explicitly, like musl's own
+#    <bits/*.h> companions). These are NOT UAPI (kernel has no copy), but
+#    live alongside the UAPI xos/ set in the published sysroot.
 mkdir -p "$DEST/xos"
 cp "$SRC"/include/uapi/xos/*.h "$DEST/xos/"
+cp "$SRC"/user/include/xos/*.h "$DEST/xos/" 2>/dev/null || true
 
 # 2. Standard / POSIX headers (user/include/) — the libc side.
 #    Top-level *.h → $DEST/; sys/*.h → $DEST/sys/; bits/*.h → $DEST/bits/.
@@ -57,15 +63,20 @@ cp -r "$SRC"/user/include/sys/. "$DEST/sys/"
 mkdir -p "$DEST/bits"
 cp    "$SRC"/user/include/bits/*.h "$DEST/bits/"
 
-# 3. Replace the shim <unistd.h> / <sys/time.h> with musl's real headers.
-#    The repo's user/include/unistd.h and sys/time.h are source-tree shims that
-#    forward to musl via #include "musl/include/..." (resolved at build time by
+# 3. Replace the shim <unistd.h> / <sys/time.h> / <fcntl.h> with musl's real headers.
+#    The repo's user/include/unistd.h, sys/time.h, and fcntl.h are source-tree shims
+#    that forward to musl via #include "musl/include/..." (resolved at build time by
 #    -I third_party). The published sysroot has no third_party on its search path,
 #    so it ships musl's headers directly at the standard paths instead. musl's
 #    <unistd.h> pulls <features.h>, <bits/alltypes.h>, <bits/posix.h>; <sys/time.h>
-#    pulls <sys/select.h> — all already published above.
+#    pulls <sys/select.h>; <fcntl.h> pulls <bits/fcntl.h> (published above) — all
+#    already published. Note: <xos/fcntl.h> is NO LONGER published (moved to
+#    the kernel-private kernel/bsd/kfcntl.h during the fcntl header split;
+#    fcntl needs no OS-specific extension header — musl's <fcntl.h> plus the
+#    kernel M0.4 resolve_dirfd_start fix cover openat fully).
 cp "$SRC"/third_party/musl/include/unistd.h     "$DEST/unistd.h"
 cp "$SRC"/third_party/musl/include/sys/time.h   "$DEST/sys/time.h"
+cp "$SRC"/third_party/musl/include/fcntl.h      "$DEST/fcntl.h"
 
 echo "Installed tree:"
 ( cd "$DEST" && find . -type f | sort | sed 's/^\.\//  /' )

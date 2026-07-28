@@ -48,11 +48,11 @@
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 
+#include "kernel/bsd/kfcntl.h"
 #include "kernel/user_check.h"
 #include <xos/capability.h>
 #include <xos/elf.h>
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/mman.h>
 #include <xos/page.h>
 #include <xos/signal.h>

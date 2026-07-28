@@ -8,12 +8,12 @@
 #define KERNEL_PTY_H
 
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/bsd/kfcntl.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 #include <stdint.h>
-#include <xos/fcntl.h>
 #include <xos/socket.h>
 
 struct inode;

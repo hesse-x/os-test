@@ -60,10 +60,10 @@
 #include "kernel/xcore/xtask.h"
 #include "utils/macro.h"
 
+#include "kernel/bsd/kfcntl.h"
 #include <xos/capability.h>
 #include <xos/confname.h> // _SC_* (shared with user-side sysconf)
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/ioctl.h>
 #include <xos/mman.h>
 #include <xos/page.h>
@@ -3538,8 +3538,9 @@ int64_t sys_setitimer(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
  * llvm libc」目标,语义对齐 glibc/Linux(Q6 严格 flags)。
  *
  * 解析模型:绝对路径 → mount 表最长前缀匹配(vfs_resolve)+ path_walk;
- * 相对路径(dirfd)→ resolve_dirfd_start + path_walk_from。AT_FDCWD ≡ root
- * (内核无 per-process CWD,libc 调用前已拼绝对路径)。
+ * 相对路径(dirfd)→ resolve_dirfd_start + path_walk_from。AT_FDCWD 解析到
+ * bp->cwd 的 inode(resolve_dirfd_start,musl *at wrapper 直送 AT_FDCWD;
+ * bp->cwd 由 sys_chdir 维护,是 cwd 唯一真相)。
  * 权限(Q4):inode_permission 按 euid 判定,非"无脑 root 放行"(本 OS 有完整
  * permission ladder,proc.h uid/euid/...,test_setuid_saved 证 ladder 真在跑)。
  * 时间戳(Q5):inode 内存态 atime/mtime/ctime,getattr 读;不落盘 FAT32
@@ -4969,6 +4970,109 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t unused1,
   return 0;
 }
 
+// ===================== BSD syscall: fallocate =====================
+// sys_fallocate(fd, mode, offset, len). x86-64 ABI: rdi=fd rsi=mode
+// rdx=offset r10=len. 仅支持 mode=0(posix_fallocate 默认)：普通文件经
+// i_op->setattr grow+zero(fat32/tmpfs setattr 内部分配并清零、drop stale
+// page cache)；memfd(SHM) 委派 sys_ftruncate 的 grow 分支(遵 F_SEAL_GROW)。
+// 其它 mode(KEEP_SIZE/PUNCH_HOLE/...)一律 -EOPNOTSUPP(FAT32 连续无洞)。
+int64_t sys_fallocate(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                      int64_t unused1, int64_t unused2) {
+  int fd = (int)arg1;
+  int mode = (int)arg2;
+  int64_t off = (int64_t)arg3;
+  int64_t len = (int64_t)arg4;
+
+  if (fd < 0 || fd >= MAX_FD)
+    return (int64_t)-EBADF;
+  if (off < 0 || len <= 0)
+    return (int64_t)-EINVAL;
+  uint64_t total = (uint64_t)off + (uint64_t)len;
+  if (total < (uint64_t)off) /* overflow */
+    return (int64_t)-EINVAL;
+  if (mode != 0)
+    return (int64_t)-EOPNOTSUPP;
+
+  xtask *proc = current_task;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    return (int64_t)-EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+
+  int64_t ret;
+  if (f->type == FD_REGULAR) {
+    if (!(f->flags & (O_WRONLY | O_RDWR))) {
+      ret = -EBADF;
+      goto out;
+    }
+    struct inode *ip = f->inode;
+    if (!ip) {
+      ret = -EBADF;
+      goto out;
+    }
+    if (total <= ip->size) { /* FAT32 连续无洞,已分配 */
+      ret = 0;
+      goto out;
+    }
+    if (!ip->i_op || !ip->i_op->setattr) {
+      ret = -EOPNOTSUPP;
+      goto out;
+    }
+    ret = (int64_t)ip->i_op->setattr(ip, total); /* grow + zero-fill */
+  } else if (f->type == FD_SHM) {
+    struct shm *shm = f->shm;
+    if (!shm) {
+      ret = -EBADF;
+      goto out;
+    }
+    uint64_t cur = shm->page_list ? (uint64_t)shm->num_pages * PAGE_SIZE
+                                  : (uint64_t)shm->npages * PAGE_SIZE;
+    if (total <= cur) {
+      ret = 0;
+      goto out;
+    }
+    /* target>cur → sys_ftruncate 只走 grow 分支(遵 F_SEAL_GROW)。
+     * 释放本函数的引用后委派,避免双引用。 */
+    file_put(f);
+    return sys_ftruncate((int64_t)fd, (int64_t)total, 0, 0, 0, 0);
+  } else {
+    ret = -EINVAL; /* pipe/socket/dev/dir */
+  }
+out:
+  file_put(f);
+  return ret;
+}
+
+// ===================== BSD syscall: fadvise64 =====================
+// sys_fadvise64(fd, offset, len, advice). x86-64 ABI: rdi=fd rsi=offset
+// rdx=len r10=advice. 全部 POSIX_FADV_* advice 为 advisory no-op(无 readahead
+// 基建,无逐 range 安全丢页 API):仅校验 fd + advice 范围后返 0。DONTNEED 不
+// 真丢页(技术债见 doc/design/todo.md)。
+int64_t sys_fadvise64(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                      int64_t unused1, int64_t unused2) {
+  int fd = (int)arg1;
+  int advice = (int)arg4;
+  (void)arg2;
+  (void)arg3;
+
+  if (advice < 0 || advice > 5) /* POSIX_FADV_NORMAL..NOREUSE */
+    return (int64_t)-EINVAL;
+  if (fd < 0 || fd >= MAX_FD)
+    return (int64_t)-EBADF;
+
+  xtask *proc = current_task;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  rcu_read_unlock();
+  if (!f)
+    return (int64_t)-EBADF;
+  return 0;
+}
+
 // ===================== BSD syscall: block_async =====================
 int64_t sys_block_async(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                         int64_t unused1, int64_t unused2) {
@@ -5685,6 +5789,10 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_memfd_create(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_FTRUNCATE:
     return sys_ftruncate(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_fallocate:
+    return sys_fallocate(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_fadvise64:
+    return sys_fadvise64(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_DMA_ALLOC:
     return sys_dma_alloc(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_DMA_FREE:

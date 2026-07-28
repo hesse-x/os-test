@@ -10,6 +10,7 @@
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/kfcntl.h"
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/page_cache.h"
 #include "kernel/bsd/proc.h"
@@ -33,7 +34,6 @@
 #include <stddef.h>
 #include <xos/capability.h>
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/stat.h>
 #include <xos/statx.h>
 
@@ -849,17 +849,27 @@ int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
 }
 
 // S07: resolve a *at dirfd to its starting directory inode (+1, caller puts),
-// or ERR_PTR(-errno). AT_FDCWD resolves to the root mount's root inode — this
-// kernel has no per-process CWD (no chdir), so AT_FDCWD ≡ "from root", matching
-// the existing absolute-path-only behaviour. A real dirfd must reference an
-// open directory (ENOTDIR otherwise). Absolute paths are handled by the caller
-// (fall back to sys_open/sys_stat/etc) before calling this.
+// or ERR_PTR(-errno). AT_FDCWD resolves to the process cwd's inode: musl's *at
+// wrappers (openat/unlinkat/renameat/mkdirat/fstatat/faccessat) pass AT_FDCWD
+// straight to the syscall, so the kernel must honor a prior chdir. bp->cwd is
+// the single source of truth (maintained by sys_chdir/sys_fchdir); it is always
+// absolute, so normalize (in case of a trailing slash / '.' / '..') and resolve
+// to its inode. A real dirfd must reference an open directory (ENOTDIR
+// otherwise). Absolute paths are handled by the caller (fall back to
+// sys_open/sys_stat/etc) before calling this.
 struct inode *resolve_dirfd_start(int dirfd) {
   if (dirfd == AT_FDCWD) {
-    struct mount_entry *m = mount_of_inode(NULL); /* root mount "/" */
-    if (!m || !m->fs->mount_root)
+    proc *bp = current_proc;
+    char norm[256];
+    if (normalize_path(bp->cwd, norm, sizeof(norm)) < 0)
+      return ERR_PTR(-ENAMETOOLONG);
+    struct inode *ip = vfs_open_kern(norm); /* +1 or NULL */
+    /* cwd is only ever set by sys_chdir/sys_fchdir after a S_ISDIR check, so a
+     * valid cwd resolves to a directory; NULL (cwd removed out from under us)
+     * → ENOENT, matching Linux. */
+    if (!ip)
       return ERR_PTR(-ENOENT);
-    return m->fs->mount_root(m); /* +1 */
+    return ip;
   }
   if (dirfd < 0)
     return ERR_PTR(-EBADF);
@@ -885,7 +895,8 @@ struct inode *resolve_dirfd_start(int dirfd) {
 
 // openat(dirfd, path, flags, mode). Absolute path → sys_open (mount-table
 // match, unchanged). Relative path → resolve from dirfd's directory inode via
-// path_walk_from/path_walk_parent_from. AT_FDCWD → from root (no CWD exists).
+// path_walk_from/path_walk_parent_from. AT_FDCWD → from the process cwd
+// (resolve_dirfd_start resolves bp->cwd to its inode).
 int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
                    int64_t unused1, int64_t unused2) {
   (void)unused1;

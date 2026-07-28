@@ -68,10 +68,20 @@ typedef struct sockaddr_un {
 } sockaddr_un;
 
 // ===================== iovec =====================
+// Guard with musl's __DEFINED_struct_iovec idiom: musl's
+// <fcntl.h>/<sys/socket.h> set __NEED_struct_iovec under _GNU_SOURCE (which
+// clang++ predefines for all C++ TUs), so musl's <bits/alltypes.h> also defines
+// struct iovec. If this header is included after musl's alltypes, skip our copy
+// (already defined); if before (kernel TUs have no musl alltypes), define it
+// and set the flag so a later musl alltypes skips. Either order yields exactly
+// one definition.
+#if !defined(__DEFINED_struct_iovec)
 typedef struct iovec {
   void *iov_base; // buffer address
   size_t iov_len; // buffer length
 } iovec;
+#define __DEFINED_struct_iovec
+#endif
 
 // ===================== cmsghdr / CMSG macros =====================
 // Linux UAPI compatible layout (cmsg_len is socklen_t = uint32_t on x86-64)

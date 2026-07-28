@@ -82,6 +82,9 @@ LIBC_EXPORT int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 
 /* file rename (POSIX rename(3), via sys_rename) */
 LIBC_EXPORT int rename(const char *oldpath, const char *newpath);
+/* renameat(3) — dirfd-relative rename (musl places this in <stdio.h>). */
+LIBC_EXPORT int renameat(int olddirfd, const char *oldpath, int newdirfd,
+                         const char *newpath);
 
 /* scanf family */
 LIBC_EXPORT int fscanf(FILE *f, const char *fmt, ...);

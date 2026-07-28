@@ -139,17 +139,15 @@ struct mount_entry *vfs_resolve_user(const char __user *upath, char *relpath,
    *
    * This kernel does NOT do per-syscall cwd-relative path resolution anywhere
    * except sys_chdir/sys_mount — vfs_resolve() itself requires an absolute
-   * path. Previously a relative upath was rejected here with -EINVAL, which
-   * forced the userspace libc to manually prepend its own cwd copy to every
-   * path syscall (user/lib/file.cc cwd_path / resolve_at_path). That dupled
-   * the cwd state (kernel bp->cwd AND libc cwd_path) and blocked adopting
-   * musl's upstream unistd path wrappers, which pass paths straight through
-   * to the kernel the way Linux does.
+   * path. A relative upath is resolved against current_proc->cwd (the single
+   * source of truth, maintained by sys_chdir), then normalized + resolved.
+   * Absolute paths are unaffected. This mirrors the abs_path construction in
+   * sys_chdir (kernel/bsd/syscall.c).
    *
-   * Aligning with Linux semantics: resolve a relative path against
-   * current_proc->cwd (the single source of truth, maintained by sys_chdir),
-   * then normalize + resolve. Absolute paths are unaffected. This mirrors the
-   * abs_path construction in sys_chdir (kernel/bsd/syscall.c). */
+   * The *at syscalls (sys_openat/sys_statx/sys_unlinkat/sys_renameat/
+   * sys_mkdirat/sys_faccessat) reach the same cwd via resolve_dirfd_start,
+   * which resolves AT_FDCWD to bp->cwd's inode. Both plain and *at paths thus
+   * honor chdir, so the libc no longer needs a userspace cwd copy. */
   char abs[512];
   const char *resolve = kpath;
   if (kpath[0] != '/') {

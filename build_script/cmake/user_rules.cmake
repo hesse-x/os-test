@@ -567,7 +567,7 @@ function(add_user_ldso name)
     set(COMPILE_FLAGS -m64 ${WARN_FLAGS} ${FREESTANDING_FLAGS}
                       -fPIC -fvisibility=hidden
                       ${USER_BUILD_FLAGS}
-                      -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${DRM_INCLUDE_FLAGS})
+                      -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${DRM_INCLUDE_FLAGS})
     set(OBJ_FILES "")
     set(idx 0)
     foreach(src ${ARG_SOURCES})

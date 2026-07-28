@@ -7,6 +7,7 @@
 #ifndef KERNEL_BSD_TYPES_H
 #define KERNEL_BSD_TYPES_H
 
+#include "kernel/bsd/kfcntl.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/mem/alloc.h"
@@ -16,7 +17,6 @@
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h" // pid_t, xtask
 #include <stdint.h>
-#include <xos/fcntl.h>
 #include <xos/mman.h>
 #include <xos/types.h>
 

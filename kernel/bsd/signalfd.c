@@ -22,8 +22,8 @@
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 
+#include "kernel/bsd/kfcntl.h"
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/signal.h>
 
 // copy_from_user/copy_to_user have no dedicated header; forward-declare.

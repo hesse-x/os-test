@@ -25,6 +25,7 @@
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/kfcntl.h"
 #include "kernel/bsd/poll_types.h"
 #include "kernel/bsd/proc.h"  // alloc_fd, fd_install, fd_lookup
 #include "kernel/bsd/types.h" // struct file
@@ -34,7 +35,6 @@
 #include "kernel/xcore/sched.h" // schedule, wake_with_event, sched_clock
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
-#include "xos/fcntl.h"
 #include "xos/syscall_nums.h" // __force
 
 #define EVDEV_MAX_INSTANCES 8

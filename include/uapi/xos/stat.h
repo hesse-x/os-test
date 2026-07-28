@@ -66,7 +66,13 @@ struct kstat {
 #define S_IFCHR 0020000
 #define S_IFIFO 0010000
 
-// Set-user-ID / set-group-ID / sticky bit
+// Set-user-ID / set-group-ID / sticky bit, and permission bits.
+// musl's <fcntl.h> defines the identical S_* set under #ifndef S_IRUSR; guard
+// this block the same way so the two headers coexist regardless of include
+// order (xf86drm.c / file.cc include <fcntl.h> before <sys/stat.h>). The
+// values are identical to musl's; only the octal spelling differs, so without
+// this guard -Wmacro-redefined fires on the spelling difference.
+#ifndef S_IRUSR
 #define S_ISUID 0004000
 #define S_ISGID 0002000
 #define S_ISVTX 0001000
@@ -84,6 +90,7 @@ struct kstat {
 #define S_IROTH 00004
 #define S_IWOTH 00002
 #define S_IXOTH 00001
+#endif
 
 // File type tests
 #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)

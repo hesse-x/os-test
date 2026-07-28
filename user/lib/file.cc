@@ -4,17 +4,28 @@
  * SPDX-License-Identifier: MIT
  */
 
+// musl's <fcntl.h> (consumed via the shim) gates AT_EMPTY_PATH / F_SEAL_* etc.
+// behind _GNU_SOURCE||_BSD_SOURCE; file.cc uses AT_EMPTY_PATH (fstat/fstatat).
+// Define _DEFAULT_SOURCE before any include so AT_EMPTY_PATH is visible (musl
+// features.h turns _DEFAULT_SOURCE into _BSD_SOURCE=1). _DEFAULT_SOURCE rather
+// than _GNU_SOURCE: _GNU_SOURCE would also pull musl's __NEED_struct_iovec
+// (via <fcntl.h>'s #ifdef _GNU_SOURCE block), colliding with <xos/socket.h>'s
+// struct iovec. fcntl_worklist §3e feature-guard gap.
+#define _DEFAULT_SOURCE
+
 // libc file I/O: all file operations go through syscalls directly.
 // Kernel handles FAT32, devtmpfs, pipes, sockets, etc.
 // No libc-side fd_table — kernel's proc->fd_table is the single source of
-// truth.
+// truth. open/openat/fcntl/creat/posix_fadvise/posix_fallocate are provided by
+// musl src/fcntl/*.c (musl_fcntl_objs); chdir/getcwd/unlinkat/renameat by musl
+// src/unistd/*.c (musl_unistd_objs). The kernel resolves relative paths against
+// bp->cwd (vfs_resolve_user for plain syscalls, resolve_dirfd_start for *at
+// syscalls), so no libc-side cwd copy is needed.
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdint.h>
-#include <stdio.h>     // snprintf (rename cwd 相对化)
-#include <stdlib.h>    // IWYU pragma: keep  // malloc/calloc/free in getdir/dup
-#include <string.h>    // strlen (rename cwd 相对化)
+#include <stdlib.h>    // IWYU pragma: keep  // malloc/calloc/free/realloc
 #include <sys/cdefs.h> // LIBC_EXPORT (retained wrappers export from libc.so)
 #include <syscall.h>
 #include <termios.h>
@@ -28,236 +39,37 @@
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/ioctl.h>
 #include <xos/socket.h>
 #include <xos/statx.h>
 #include <xos/syscall_asm.h>
 #include <xos/syscall_nums.h>
 
-// ===================== Working directory (per-process) =====================
-static char cwd_path[256] = "/";
+// ===================== Working directory =====================
+// chdir / getcwd are provided by musl src/unistd/*.c (musl_unistd_objs). The
+// kernel's sys_chdir/sys_getcwd are the single source of truth for bp->cwd; no
+// libc-side cwd copy is maintained. Relative paths in the plain syscalls
+// (sys_open/sys_unlink/sys_mkdir/sys_rename/...) resolve against bp->cwd via
+// vfs_resolve_user, and the *at syscalls resolve AT_FDCWD via
+// resolve_dirfd_start (kernel/bsd/vfs.c).
 
-const char *__get_cwd(void) { return cwd_path; }
-
-uint64_t fd_file_size(int fd) {
-  // Use sys_lseek(SEEK_END) to get file size from kernel
-  int64_t size = sys_lseek(fd, 0, SEEK_END);
-  if (size < 0)
-    return 0;
-  // Restore position to beginning
-  sys_lseek(fd, 0, SEEK_SET);
-  return (uint64_t)size;
-}
-
-// ===================== open =====================
-
-int open(const char *path, int flags, ...) {
-  // S08: open(O_CREAT, mode) — POSIX: the mode arg is the third (variadic)
-  // parameter, present only when O_CREAT is set, and is masked by umask in the
-  // kernel. Read it here and forward to sys_open; dropping it left rdx (the
-  // kernel's arg3) holding garbage, so created files got garbage permission
-  // bits (different per call path).
-  mode_t mode = 0;
-  if (flags & O_CREAT) {
-    va_list ap;
-    va_start(ap, flags);
-    mode = (mode_t)va_arg(ap, int);
-    va_end(ap);
-  }
-
-  // Handle relative paths by prepending cwd
-  char abs_path[256];
-  if (path && path[0] != '/') {
-    abs_path[0] = '\0';
-    int cwdi = 0;
-    while (cwd_path[cwdi] && cwdi < 254) {
-      abs_path[cwdi] = cwd_path[cwdi];
-      cwdi++;
-    }
-    if (cwdi > 0 && abs_path[cwdi - 1] != '/') {
-      abs_path[cwdi++] = '/';
-    }
-    int pi = 0;
-    while (path[pi] && cwdi < 254) {
-      abs_path[cwdi++] = path[pi++];
-    }
-    abs_path[cwdi] = '\0';
-    path = abs_path;
-  }
-
-  // All paths go through sys_open — kernel dispatches FAT32 and devtmpfs
-  // internally
-  int fd = sys_open(path, flags, (int)mode);
-  return fd;
-}
-
-// S07: resolve a *at(dirfd, path, ...) path for the user-side CWD model.
-// AT_FDCWD → prepend the userspace cwd_path (kernel has no CWD), returning a
-// buffer the caller must keep alive until the syscall. A real dirfd → return
-// `path` unchanged; the kernel resolves it relative to dirfd. Absolute paths
-// are returned unchanged. `buf` must be >=256 bytes.
-static const char *resolve_at_path(int dirfd, const char *path, char *buf) {
-  if (!path || path[0] == '/' || dirfd != AT_FDCWD)
-    return path;
-  int cwdi = 0;
-  while (cwd_path[cwdi] && cwdi < 254) {
-    buf[cwdi] = cwd_path[cwdi];
-    cwdi++;
-  }
-  if (cwdi > 0 && buf[cwdi - 1] != '/')
-    buf[cwdi++] = '/';
-  int pi = 0;
-  while (path[pi] && cwdi < 254)
-    buf[cwdi++] = path[pi++];
-  buf[cwdi] = '\0';
-  return buf;
-}
-
-// S07: openat(dirfd, path, flags, mode). AT_FDCWD → cwd-relative (absolute path
-// to the kernel); a real dirfd → kernel resolves the relative path from it.
-int openat(int dirfd, const char *path, int flags, ...) {
-  mode_t mode = 0;
-  if (flags & O_CREAT) {
-    va_list ap;
-    va_start(ap, flags);
-    mode = (mode_t)va_arg(ap, int);
-    va_end(ap);
-  }
-  char buf[256];
-  const char *p = resolve_at_path(dirfd, path, buf);
-  /* For AT_FDCWD the path is now absolute → sys_open (mode applied). For a real
-   * dirfd pass the original relative path + dirfd to sys_openat. */
-  if (dirfd == AT_FDCWD)
-    return sys_open(p, flags, (int)mode);
-  return sys_openat(dirfd, p, flags, (int)mode);
-}
+// open/openat/fcntl/creat/posix_fadvise/posix_fallocate are provided by musl
+// src/fcntl/*.c (musl_fcntl_objs). musl's open/openat route to SYS_open/
+// SYS_openat; the kernel resolves relatives against bp->cwd. No libc-side
+// wrapper is needed.
 
 // read/write/close/pipe/pipe2 are provided by musl src/unistd
 // (musl_unistd_objs, merged into libc.a/libc.so). This file's fd helpers below
 // call close/lseek, which the linker resolves to the musl definitions in the
 // same archive.
 
-// ===================== chdir =====================
-
-int chdir(const char *path) {
-  if (!path) {
-    errno = EFAULT;
-    return -1;
-  }
-
-  // Resolve path: if it doesn't start with '/', prepend cwd
-  char abs_path[256];
-  if (path[0] != '/') {
-    int cwdi = 0;
-    while (cwd_path[cwdi] && cwdi < 254) {
-      abs_path[cwdi] = cwd_path[cwdi];
-      cwdi++;
-    }
-    if (cwdi > 0 && abs_path[cwdi - 1] != '/') {
-      abs_path[cwdi++] = '/';
-    }
-    int pi = 0;
-    while (path[pi] && cwdi < 254) {
-      abs_path[cwdi++] = path[pi++];
-    }
-    abs_path[cwdi] = '\0';
-    path = abs_path;
-  }
-
-  // Normalize: remove trailing slash (except for "/")
-  char norm[256];
-  int ni = 0;
-  while (path[ni] && ni < 255) {
-    norm[ni] = path[ni];
-    ni++;
-  }
-  norm[ni] = '\0';
-  while (ni > 1 && norm[ni - 1] == '/') {
-    norm[ni - 1] = '\0';
-    ni--;
-  }
-
-  // Validate path exists via stat
-  struct stat st;
-  if (stat(norm, &st) != 0)
-    return -1;
-
-  // Update cwd
-  int i = 0;
-  while (norm[i] && i < 255) {
-    cwd_path[i] = norm[i];
-    i++;
-  }
-  cwd_path[i] = '\0';
-  return 0;
-}
-
-// ===================== fcntl =====================
-
-int fcntl(int fd, int cmd, ...) {
-  int64_t r;
-  va_list ap;
-
-  if (cmd == F_GETFL) {
-    r = sys_fcntl(fd, F_GETFL, 0);
-  } else if (cmd == F_SETFL) {
-    va_start(ap, cmd);
-    int arg = va_arg(ap, int);
-    va_end(ap);
-    r = sys_fcntl(fd, cmd, arg);
-  } else if (cmd == F_GETFD) {
-    r = sys_fcntl(fd, F_GETFD, 0);
-  } else if (cmd == F_SETFD) {
-    va_start(ap, cmd);
-    int arg = va_arg(ap, int);
-    va_end(ap);
-    r = sys_fcntl(fd, cmd, arg);
-  } else if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
-    va_start(ap, cmd);
-    int min_fd = va_arg(ap, int);
-    va_end(ap);
-    r = sys_fcntl(fd, cmd, min_fd);
-  } else if (cmd == F_GETLK || cmd == F_SETLK || cmd == F_SETLKW ||
-             cmd == F_OFD_GETLK || cmd == F_OFD_SETLK || cmd == F_OFD_SETLKW) {
-    va_start(ap, cmd);
-    struct flock *lk = va_arg(ap, struct flock *);
-    va_end(ap);
-    r = sys_fcntl(fd, cmd, (int64_t)(uintptr_t)lk);
-  } else if (cmd == F_SETOWN || cmd == F_SETSIG) {
-    va_start(ap, cmd);
-    int arg = va_arg(ap, int);
-    va_end(ap);
-    r = sys_fcntl(fd, cmd, arg);
-  } else if (cmd == F_GETOWN) {
-    /* F_GETOWN legitimately returns a negative pgid, so it must bypass
-     * sys_fcntl's "r < 0 → errno" mapping (matches glibc: raw syscall). */
-    r = __syscall3(SYS_FCNTL, (int64_t)fd, (int64_t)cmd, 0);
-  } else if (cmd == F_GETSIG) {
-    r = sys_fcntl(fd, cmd, 0);
-  } else if (cmd == F_SETOWN_EX || cmd == F_GETOWN_EX) {
-    va_start(ap, cmd);
-    struct f_owner_ex *ox = va_arg(ap, struct f_owner_ex *);
-    va_end(ap);
-    r = sys_fcntl(fd, cmd, (int64_t)(uintptr_t)ox);
-  } else if (cmd == F_GETPIPE_SZ) {
-    r = sys_fcntl(fd, cmd, 0);
-  } else if (cmd == F_SETPIPE_SZ) {
-    va_start(ap, cmd);
-    int arg = va_arg(ap, int);
-    va_end(ap);
-    r = sys_fcntl(fd, cmd, arg);
-  } else {
-    errno = EINVAL;
-    return -1;
-  }
-
-  // sys_fcntl already maps kernel -errno → errno and returns -1 on failure, so
-  // no errno remapping here (re-deriving errno from the -1 return would yield
-  // EPERM and clobber the real error). cmds taking a pointer (F_*LK/F_OFD_*)
-  // pass it through arg3 unchanged.
-  return (int)r;
-}
+// fcntl is provided by musl src/fcntl/fcntl.c (musl_fcntl_objs, fcntl_worklist
+// §3d). musl's fcntl handles F_SETFL (|O_LARGEFILE), F_SETLKW (cancellable),
+// F_GETOWN (via F_GETOWN_EX + raw fallback), F_DUPFD_CLOEXEC (with fallback),
+// and routes F_SETLK/F_GETLK/F_*OWN_EX/F_OFD_* through syscall(SYS_fcntl).
+// The kernel's sys_fcntl implements every cmd the repo's old wrapper did
+// (fcntl_worklist §二 aligned all constants). fcntl.c declares _GNU_SOURCE
+// itself, so F_GETOWN_EX / struct f_owner_ex are visible at its build.
 
 // ===================== FD_DEV helpers =====================
 
@@ -299,26 +111,8 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms) {
 
 // dup/dup2 are provided by musl src/unistd (musl_unistd_objs).
 
-// ===================== getcwd =====================
-LIBC_EXPORT char *getcwd(char *buf, size_t size) {
-  if (!buf) {
-    errno = EFAULT;
-    return NULL;
-  }
-  const char *cwd = __get_cwd();
-  int len = 0;
-  while (cwd[len])
-    len++;
-  if ((size_t)len >= size) {
-    errno = ERANGE;
-    return NULL;
-  }
-  int i;
-  for (i = 0; cwd[i]; i++)
-    buf[i] = cwd[i];
-  buf[i] = '\0';
-  return buf;
-}
+// getcwd is provided by musl src/unistd/getcwd.c (musl_unistd_objs): musl calls
+// SYS_getcwd, which returns bp->cwd (the kernel's single source of truth).
 
 // lseek is provided by musl src/unistd (musl_unistd_objs); seekdir/rewinddir
 // below call it, resolved from the same archive.
@@ -354,32 +148,14 @@ int statx(int dirfd, const char *path, int flags, unsigned int mask,
   return sys_statx(dirfd, path, flags, mask, stx);
 }
 
-/* 路径类 stat 公共体：相对路径先拼 cwd 成绝对路径（内核路径解析仅接受绝
- * 对路径），再走 statx。flags = 0（stat）或 AT_SYMLINK_NOFOLLOW（lstat，
+/* 路径类 stat 公共体：直接透传 statx，相对路径由内核 resolve_dirfd_start
+ * (AT_FDCWD→bp->cwd) 解析。flags = 0（stat）或 AT_SYMLINK_NOFOLLOW（lstat，
  * 本 OS 无 symlink，语义相同）。 */
 static int do_stat_path(const char *path, int flags, struct stat *st) {
   if (!path || !st) {
     errno = EFAULT;
     return -1;
   }
-
-  // Resolve path to absolute
-  char abs_path[256];
-  if (path[0] != '/') {
-    int cwdi = 0;
-    while (cwd_path[cwdi] && cwdi < 254) {
-      abs_path[cwdi] = cwd_path[cwdi];
-      cwdi++;
-    }
-    if (cwdi > 0 && abs_path[cwdi - 1] != '/')
-      abs_path[cwdi++] = '/';
-    int pi = 0;
-    while (path[pi] && cwdi < 254)
-      abs_path[cwdi++] = path[pi++];
-    abs_path[cwdi] = '\0';
-    path = abs_path;
-  }
-
   struct statx sx;
   if (sys_statx(AT_FDCWD, path, flags, STATX_BASIC_STATS, &sx) != 0)
     return -1;
@@ -443,80 +219,16 @@ int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
 // is real, so the fallback branch is dead but the symbol resolves. fchownat is
 // a pure syscall(SYS_fchownat) passthrough.
 
-// symlink/symlinkat/readlink/readlinkat/link/linkat/unlink are provided by musl
-// src/unistd (musl_unistd_objs). On x86-64 musl routes the plain forms to
-// syscall(SYS_symlink/SYS_readlink/SYS_link/SYS_unlink), which this kernel
-// resolves cwd-relative via vfs_resolve_user; the *at forms pass AT_FDCWD
-// straight through (resolved from root — see user/CMakeLists.txt block
-// comment). unlinkat below is retained (it prepends cwd_path for AT_FDCWD).
+// symlink/symlinkat/readlink/readlinkat/link/linkat/unlink/unlinkat/renameat
+// are provided by musl src/unistd (musl_unistd_objs). On x86-64 musl routes the
+// plain forms to syscall(SYS_symlink/SYS_readlink/SYS_link/SYS_unlink) and the
+// *at forms to syscall(SYS_*at) with AT_FDCWD passed straight through; the
+// kernel resolves AT_FDCWD against bp->cwd (resolve_dirfd_start) and plain
+// relatives via vfs_resolve_user. unlinkat's AT_REMOVEDIR flag is honored by
+// the kernel's sys_unlinkat.
 
-// S07: unlinkat(dirfd, path, flags). AT_REMOVEDIR → rmdir semantics.
-// AT_FDCWD → cwd-relative; real dirfd → kernel resolves relative to it.
-LIBC_EXPORT int unlinkat(int dirfd, const char *path, int flags) {
-  if (!path) {
-    errno = EFAULT;
-    return -1;
-  }
-  char buf[256];
-  const char *p = resolve_at_path(dirfd, path, buf);
-  if (dirfd == AT_FDCWD) {
-    if (flags & AT_REMOVEDIR)
-      return sys_rmdir(p);
-    return sys_unlink(p);
-  }
-  return sys_unlinkat(dirfd, p, flags);
-}
-
-// ===================== rename (via sys_rename syscall) =====================
-int rename(const char *oldpath, const char *newpath) {
-  if (!oldpath || !newpath) {
-    errno = EFAULT;
-    return -1;
-  }
-  const char *old_abs = oldpath;
-  const char *new_abs = newpath;
-  char old_abs_path[256], new_abs_path[256];
-  if (oldpath[0] != '/') {
-    /* cwd 相对化(照 file.cc 既有 unlink/mkdir wrapper 惯例) */
-    getcwd(old_abs_path, sizeof(old_abs_path));
-    size_t cl = strlen(old_abs_path);
-    if (cl + 1 + strlen(oldpath) + 1 > sizeof(old_abs_path)) {
-      errno = ENAMETOOLONG;
-      return -1;
-    }
-    snprintf(old_abs_path + cl, sizeof(old_abs_path) - cl, "/%s", oldpath);
-    old_abs = old_abs_path;
-  }
-  if (newpath[0] != '/') {
-    getcwd(new_abs_path, sizeof(new_abs_path));
-    size_t cl = strlen(new_abs_path);
-    if (cl + 1 + strlen(newpath) + 1 > sizeof(new_abs_path)) {
-      errno = ENAMETOOLONG;
-      return -1;
-    }
-    snprintf(new_abs_path + cl, sizeof(new_abs_path) - cl, "/%s", newpath);
-    new_abs = new_abs_path;
-  }
-  if (sys_rename(old_abs, new_abs) < 0)
-    return -1;
-  return 0;
-}
-
-// S07: renameat(olddirfd, oldpath, newdirfd, newpath). Each side independently:
-// AT_FDCWD → cwd-relative (absolute to kernel); real dirfd → kernel resolves.
-int renameat(int olddirfd, const char *oldpath, int newdirfd,
-             const char *newpath) {
-  if (!oldpath || !newpath) {
-    errno = EFAULT;
-    return -1;
-  }
-  char old_buf[256], new_buf[256];
-  const char *op = resolve_at_path(olddirfd, oldpath, old_buf);
-  const char *np = resolve_at_path(newdirfd, newpath, new_buf);
-  if (olddirfd == AT_FDCWD && newdirfd == AT_FDCWD)
-    return sys_rename(op, np);
-  return sys_renameat(olddirfd, op, newdirfd, np);
-}
+// rename is provided by musl src/stdio/rename.c (musl_unistd_objs): musl
+// routes it to SYS_rename, resolved cwd-relative via vfs_resolve_user.
 
 // rmdir is provided by musl src/unistd (musl_unistd_objs); on x86-64 musl
 // routes it to syscall(SYS_rmdir), resolved cwd-relative via vfs_resolve_user.
@@ -677,8 +389,8 @@ int fstat(int fd, struct stat *st) {
 }
 
 // S07: fstatat(dirfd, path, st, flags) — 直接透传 statx。AT_EMPTY_PATH +
-// 空路径 → 内核 stat dirfd 本身（不能走 resolve_at_path，会把 "" 拼成
-// cwd+"/"）。AT_FDCWD + 相对路径 → 拼 cwd；真实 dirfd → 内核相对解析。
+// 空路径 → 内核 stat dirfd 本身；相对路径由内核 resolve_dirfd_start
+// (AT_FDCWD→bp->cwd) 解析。
 int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
   if (!st) {
     errno = EFAULT;
@@ -688,11 +400,8 @@ int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
   if ((flags & AT_EMPTY_PATH) && path && path[0] == '\0') {
     if (sys_statx(dirfd, "", flags, STATX_BASIC_STATS, &sx) != 0)
       return -1;
-  } else {
-    char buf[256];
-    const char *p = resolve_at_path(dirfd, path, buf);
-    if (sys_statx(dirfd, p, flags, STATX_BASIC_STATS, &sx) != 0)
-      return -1;
+  } else if (sys_statx(dirfd, path, flags, STATX_BASIC_STATS, &sx) != 0) {
+    return -1;
   }
   statx_to_stat(&sx, st);
   return 0;
@@ -705,40 +414,19 @@ int mkdir(const char *path, mode_t mode) {
     errno = EFAULT;
     return -1;
   }
-
-  char abs_path[256];
-  if (path[0] != '/') {
-    int cwdi = 0;
-    while (cwd_path[cwdi] && cwdi < 254) {
-      abs_path[cwdi] = cwd_path[cwdi];
-      cwdi++;
-    }
-    if (cwdi > 0 && abs_path[cwdi - 1] != '/')
-      abs_path[cwdi++] = '/';
-    int pi = 0;
-    while (path[pi] && cwdi < 254)
-      abs_path[cwdi++] = path[pi++];
-    abs_path[cwdi] = '\0';
-    path = abs_path;
-  }
-
-  int r = sys_mkdir(path, 0);
-  return r;
+  return sys_mkdir(path, 0);
 }
 
-// S07: mkdirat(dirfd, path, mode). AT_FDCWD → cwd-relative; real dirfd →
-// kernel.
+// S07: mkdirat(dirfd, path, mode) — thin pass-through; the kernel's
+// sys_mkdirat resolves AT_FDCWD→bp->cwd via resolve_dirfd_start. (musl's
+// mkdirat lives in src/stat/, not pulled, so the repo keeps this wrapper.)
 int mkdirat(int dirfd, const char *path, mode_t mode) {
-  (void)mode;
+  (void)mode; // FAT32 doesn't support permissions
   if (!path) {
     errno = EFAULT;
     return -1;
   }
-  char buf[256];
-  const char *p = resolve_at_path(dirfd, path, buf);
-  if (dirfd == AT_FDCWD)
-    return sys_mkdir(p, 0);
-  return sys_mkdirat(dirfd, p, mode);
+  return sys_mkdirat(dirfd, path, mode);
 }
 
 // ===================== opendir / readdir / closedir =====================
@@ -764,23 +452,8 @@ DIR *opendir(const char *name) {
     return NULL;
   }
 
-  // Resolve path
-  char abs_path[256];
-  if (name[0] != '/') {
-    int cwdi = 0;
-    while (cwd_path[cwdi] && cwdi < 254) {
-      abs_path[cwdi] = cwd_path[cwdi];
-      cwdi++;
-    }
-    if (cwdi > 0 && abs_path[cwdi - 1] != '/')
-      abs_path[cwdi++] = '/';
-    int pi = 0;
-    while (name[pi] && cwdi < 254)
-      abs_path[cwdi++] = name[pi++];
-    abs_path[cwdi] = '\0';
-    name = abs_path;
-  }
-
+  // musl's open (musl_fcntl_objs) resolves relative paths against bp->cwd via
+  // the kernel; no libc-side cwd prepend needed.
   int fd = open(name, O_RDONLY);
   if (fd < 0)
     return NULL;

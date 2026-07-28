@@ -20,8 +20,8 @@
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 
+#include "kernel/bsd/kfcntl.h"
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/socket.h>
 #include <xos/time.h>
 

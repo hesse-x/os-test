@@ -14,6 +14,7 @@
 #include "arch/x64/utils.h"
 #include "kernel/bsd/file_poll.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/kfcntl.h"
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
@@ -32,12 +33,11 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/netlink.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
 #include <xos/stat.h>
-#include <xos/time.h>
+#include <xos/time.h> // IWYU pragma: keep
 
 // ===================== Global socket lock =====================
 spinlock socket_lock = SPINLOCK_INIT;

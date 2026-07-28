@@ -91,7 +91,7 @@ struct statx {
 /* statx flags — sync semantics (accepted, no-op: this FS has no writeback
  * cache that could be out of sync). AT_STATX_SYNC_TYPE covering both bits is
  * invalid (Linux). AT_SYMLINK_NOFOLLOW / AT_NO_AUTOMOUNT / AT_EMPTY_PATH live
- * in xos/fcntl.h. */
+ * in kernel/bsd/kfcntl.h. */
 #define AT_STATX_SYNC_AS_STAT 0x0000
 #define AT_STATX_FORCE_SYNC 0x2000
 #define AT_STATX_DONT_SYNC 0x4000

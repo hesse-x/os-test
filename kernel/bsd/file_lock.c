@@ -39,8 +39,8 @@
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
 
+#include "kernel/bsd/kfcntl.h"
 #include <xos/errno.h>
-#include <xos/fcntl.h>
 #include <xos/syscall_nums.h>
 
 // A single byte-range lock. Lives on inode->i_flock. POSIX and OFD locks
