@@ -182,6 +182,9 @@ global:
     /* __dls2 在 ldso 自身 dynsym 里 find_sym("__dls3") 调用 stage-3 (dynlink.c:1439)；musl 自身 libc.so 本就导出 __dls3，被 local:* 误伤需显式导出 */
     __dls3;
 
+    /* <dlfcn.h> — dlopen/dladdr/dl_iterate_phdr from fused dynlink.c; dlsym/dlclose/dlinfo from musl_dl_objs. dlerror 由 musl_loader_shim.c 提供 stub（musl dlerror.c 未编译，pthread 布局不匹配），Phase 3 换真实现时此行不动。 */
+    dlopen; dlsym; dlclose; dlerror; dladdr; dlinfo; dl_iterate_phdr;
+
 local:
     *;
 };

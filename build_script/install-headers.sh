@@ -19,6 +19,8 @@
 #   third_party/musl/include/unistd.h → $DEST/unistd.h   (musl's real <unistd.h> replaces the
 #   third_party/musl/include/sys/time.h → $DEST/sys/time.h  source-tree shim at publish time —
 #   third_party/musl/include/fcntl.h  → $DEST/fcntl.h        the shim forwards via "musl/include/..."
+#   third_party/musl/include/dlfcn.h  → $DEST/dlfcn.h        (dlopen/dlsym/dlclose/dlerror/dladdr/Dl_info;
+#                                              user/include has no dlfcn.h, so musl's ships verbatim)
 #   third_party/musl/include/{stdint,stddef,stdarg,stdbool}.h → $DEST/  (musl freestanding std
 #                                              headers — replace the compiler's -isystem freestanding
 #                                              dir so the sysroot is self-contained without it.)
@@ -80,6 +82,17 @@ cp    "$SRC"/user/include/bits/*.h "$DEST/bits/"
 cp "$SRC"/third_party/musl/include/unistd.h     "$DEST/unistd.h"
 cp "$SRC"/third_party/musl/include/sys/time.h   "$DEST/sys/time.h"
 cp "$SRC"/third_party/musl/include/fcntl.h      "$DEST/fcntl.h"
+
+# 3b. musl dlfcn.h — dynamic linking API (dlopen/dlsym/dlclose/dlerror/dladdr/
+#     Dl_info). user/include has no dlfcn.h, so publish musl's verbatim. Its
+#     only include is <features.h> (already published in step 2), so the closure
+#     self-check stays green. dlinfo/dl_iterate_phdr (struct link_map /
+#     dl_phdr_info in <link.h>) are deliberately NOT published: link.h pulls
+#     musl's elf.h (3121 lines) + arch/generic bits/link.h into the public ABI,
+#     a larger commitment left for when dlinfo/dl_iterate_phdr are exercised
+#     userspace-side. The dlinfo symbol is still compiled into libc (see
+#     musl_dl_objs); only the <link.h> header is absent.
+cp "$SRC"/third_party/musl/include/dlfcn.h      "$DEST/dlfcn.h"
 
 # 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
 #    compiler's -isystem freestanding dir. The published sysroot must be usable

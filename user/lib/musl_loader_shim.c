@@ -29,8 +29,8 @@
 //                                          reloc; never called w/o -mtlsdesc)
 //   __tls_get_addr                        — general-dynamic TLS (no __thread →
 //                                          never called)
-//   __dl_vseterr                          — dlerror formatter (dlopen errors)
-//   dprintf, vdprintf                     — loader debug/error messages
+//   __dl_vseterr, __dl_seterr                — dlerror formatter (dlopen
+//   errors) dprintf, vdprintf                     — loader debug/error messages
 //                                          (real impl via vsnprintf+write)
 //   getdelim                              — reading /etc/ld.so.* (absent on
 //                                          this OS; real impl for safety)
@@ -49,6 +49,7 @@
 #include <syscall.h>
 #include <unistd.h>
 
+#include <sys/cdefs.h>
 #include <xos/errno.h>
 
 // ===================== musl struct __libc (verbatim) =====================
@@ -147,10 +148,39 @@ void *__tls_get_addr(size_t *v) {
 
 // ===================== dlerror formatter (dlopen errors only)
 // =====================
+// __dl_vseterr: musl's dlerror.c stores a per-thread formatted error string
+// via __pthread_self()->dlerror_buf. Our runtime fs:0 points at the
+// hand-written struct tcb (no dlerror fields), so musl's dlerror.c is NOT
+// compiled in; this no-op keeps the loader's error-formatting call sites (and
+// the musl_dl_objs wrappers dlsym.c/dlclose.c/dlinfo.c that call __dl_seterr)
+// from needing a real backing. dlerror() text is Phase 3+ (pthread full TLS
+// layout).
 void __dl_vseterr(const char *fmt, va_list ap) {
   (void)fmt;
   (void)ap;
 }
+
+// __dl_seterr: va_list wrapper over __dl_vseterr (mirrors musl dlerror.c:47).
+// Declared hidden in musl's dlopen.c/__dlsym.c/dlinfo.c; dlinfo.c (compiled via
+// musl_dl_objs) references it, so provide the definition here alongside
+// __dl_vseterr.
+void __dl_seterr(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  __dl_vseterr(fmt, ap);
+  va_end(ap);
+}
+
+// dlerror: musl's dlerror.c (which owns this) is NOT compiled (pthread struct
+// layout mismatch — see __dl_vseterr note). Provide a stub returning NULL
+// (= "no error pending", matching musl's initial dlerror_flag=0 state) so
+// callers link and run without crashing. Exported in libc.map so the dlfcn
+// API surface is complete; Phase 3 replaces this stub with musl's real
+// dlerror.c once pthread TLS layout is musl-aligned (the map line stays).
+// LIBC_EXPORT overrides this file's -fvisibility=hidden (c_so default) so the
+// symbol is actually exported, not just listed in the map (a hidden symbol
+// stays LOCAL regardless of the version script's global: clause).
+LIBC_EXPORT char *dlerror(void) { return NULL; }
 
 // ===================== dprintf / vdprintf (loader debug + error paths)
 // ===================== The hand-written libc has snprintf/vsnprintf but not

@@ -54,6 +54,11 @@ static struct test_entry tests[] = {
     {"ld_chain", "/test/ld_test_chain.elf"},
     {"ld_diamond", "/test/ld_test_diamond.elf"},
     {"ld_cycle", "/test/ld_test_cycle.elf"},
+    /* dlfcn API smoke (DL-001~006): dlopen(NULL)/dlsym/dlclose/dlerror/dladdr
+     * against the fused loader + musl_dl_objs wrappers. Not a real .so load
+     * (Phase 3) — dlopen(NULL) returns the head handle, dlsym resolves against
+     * the existing global chain. */
+    {"test_dl", "/test/test_dl.elf"},
     {"drm_ioctl", "/test/drm_ioctl.elf"},
     {"drm_phase_c", "/test/drm_phase_c.elf"},
     {"drm_test_link", "/test/drm_test_link.elf"},

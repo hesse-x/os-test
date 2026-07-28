@@ -277,3 +277,11 @@ add_user_dyn_elf(test_expat C SOURCES test_expat.c
     STATIC_LIBS unity
     INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libexpat/expat/lib
                 ${CMAKE_BINARY_DIR})
+
+# dlfcn API smoke test (DL-001~006): dlopen(NULL)/dlsym/dlclose/dlerror/dladdr
+# against the fused musl loader + musl_dl_objs wrappers. NOT a real .so load
+# (that is Phase 3); dlopen(NULL) returns the head handle and dlsym resolves
+# against the existing global symbol chain. _GNU_SOURCE for Dl_info/dladdr in
+# <dlfcn.h>. No Unity — each step prints a marker and the ELF exits nonzero on
+# any failure so test_runner reports [FAIL].
+add_user_dyn_elf(test_dl C SOURCES test_dl.c LINK_LIBS c DEFS _GNU_SOURCE)
