@@ -96,6 +96,17 @@
   { include: ["\"musl/include/fcntl.h\"", private, "<fcntl.h>", public ] },
   { include: ["\"bits/fcntl.h\"", private, "<fcntl.h>", public ] },
 
+  # ---- bare quote "unistd.h" → angle <unistd.h> (spelling preference fix) ----
+  # The user/include/unistd.h shim is found via -I, so iwyu's "preferred
+  # spelling" for it is the quoted form "unistd.h" — even though the project
+  # spells POSIX wrappers with angle brackets (<unistd.h>) by convention, and
+  # <unistd.h> and "unistd.h" resolve to the SAME physical file. iwyu fails to
+  # reconcile the two spellings, so it tells a TU that already includes
+  # <unistd.h> to ALSO add a duplicate "unistd.h" (a bare-quote add with no
+  # matching remove). Rewrite the quote spelling to the angle face: iwyu then
+  # sees <unistd.h> already present and stops emitting the spurious add.
+  { include: ["\"unistd.h\"", public, "<unistd.h>", public ] },
+
   # ---- clang freestanding stdarg internals (private impl → public face) ----
   # clang's <stdarg.h> is a shim that re-exports __stdarg_va_arg.h /
   # __stdarg_va_copy.h (the real definers of va_arg / va_copy). Mark those

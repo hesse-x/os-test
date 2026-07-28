@@ -393,6 +393,9 @@ void trap_dispatch(trapframe *tf) {
     uint64_t cr2;
     __asm__ volatile("movq %%cr2, %0" : "=r"(cr2));
     printk(LOG_ERROR, "PAGE FAULT: fault addr=0x%016lX", cr2);
+    printk(0, " [DIAG] pid=%d cur_fs_base=0x%lX MSR_FS_BASE=0x%lX\n",
+           current_task->pid, (unsigned long)current_task->fs_base,
+           (unsigned long)rdmsr(0xC0000100));
     // DIAG: detect cross-process physical-page overlap. The faulting rip's
     // page (libc.so .text) was overwritten at runtime; suspect a physical
     // page mapped into two address spaces. Walk all tasks, look up the PTE

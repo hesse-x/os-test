@@ -200,6 +200,26 @@ void test_mprotect_cross_region(void) {
   munmap(b, PAGE);
 }
 
+/* TC8: splitting at a VMA start must retain the following VMA chain. */
+void test_mprotect_start_split_preserves_successor(void) {
+  char *p = mmap(NULL, 2 * PAGE, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  char *successor = mmap(NULL, PAGE, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  TEST_ASSERT_NOT_NULL(p);
+  TEST_ASSERT_NOT_NULL(successor);
+  p[PAGE] = 't';
+  successor[0] = 's';
+
+  TEST_ASSERT_EQUAL_INT(0, mprotect(p, PAGE, PROT_READ));
+  TEST_ASSERT_EQUAL_INT('t', p[PAGE]);
+  successor[0] = 'S';
+  TEST_ASSERT_EQUAL_INT('S', successor[0]);
+
+  munmap(p, 2 * PAGE);
+  munmap(successor, PAGE);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -212,6 +232,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_mprotect_sem_noop);
   RUN_TEST(test_mprotect_fork_inherits_split);
   RUN_TEST(test_mprotect_cross_region);
+  RUN_TEST(test_mprotect_start_split_preserves_successor);
 #endif
   RUN_TEST(test_mprotect_unmapped_enomem);
   return UNITY_END();

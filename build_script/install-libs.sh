@@ -12,7 +12,8 @@
 #   build/libm.so     → $DEST/libm.so     (libm shared, if present)
 #   build/libdrm.a    → $DEST/libdrm.a    (libdrm static)
 #   build/libdrm.so   → $DEST/libdrm.so   (libdrm shared, if present)
-#   build/ldso.elf    → $DEST/ld.so       (dynamic linker; PT_INTERP = /lib/ld.so)
+#   build/libc.so     → $DEST/ld-musl-x86_64.so.1  (fused libc.so is also the
+#                       dynamic interpreter; PT_INTERP = /lib/ld-musl-x86_64.so.1)
 #
 # Dependency order: run AFTER make produces the libraries. libdrm depends on libc,
 # so libc is already in place by build time.
@@ -23,7 +24,7 @@
 #   ./install-libs.sh /path/to/sysroot/usr/lib
 #
 # Verification:
-#   ls $DEST → libc.a, libc.so, libdrm.a, ld.so (+ libdrm.so, libm.a, libm.so if built)
+#   ls $DEST → libc.a, libc.so, libdrm.a, ld-musl-x86_64.so.1 (+ libdrm.so, libm.a, libm.so if built)
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
@@ -34,12 +35,13 @@ echo "Installing libraries → $DEST"
 mkdir -p "$DEST"
 
 # Files that are mandatory at this stage (build won't reach a useful state without them).
-# Each entry: "srcname:dstname" — dstname differs only for the dynamic linker.
+# The fused libc.so is published under both its soname and the interpreter path
+# (mirroring the disk image, ldso.md §3).
 mandatory=(
   "libc.a:libc.a"
   "libc.so:libc.so"
+  "libc.so:ld-musl-x86_64.so.1"
   "libdrm.a:libdrm.a"
-  "ldso.elf:ld.so"
 )
 
 # Files that are optional (built by later phases; absent is fine, not a failure).

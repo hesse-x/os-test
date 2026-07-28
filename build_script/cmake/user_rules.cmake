@@ -1,8 +1,8 @@
 # user_rules.cmake — add_user_lib() / add_user_elf() wrappers for userspace build rules
 
 # Userspace common compile flags (CMake list, semicolon-separated)
-# Bare-gcc custom commands (add_user_elf / add_user_ldso / SHARED libc.so /
-# crt0) do NOT inherit global CMAKE_C_FLAGS, so they must carry these flags
+# Bare-gcc custom commands (add_user_elf / add_user_dyn_elf / SHARED libc.so)
+# do NOT inherit global CMAKE_C_FLAGS, so they must carry these flags
 # explicitly to resolve freestanding headers like <stdint.h> and to get the
 # warning gate. They reference the shared USER_FREESTANDING_FLAGS / WARN_FLAGS
 # variables defined in CMakeLists.txt — the single source of truth — so a flag
@@ -55,8 +55,8 @@ set(DRM_INCLUDE_FLAGS
     -I${DRM_XF86_INCLUDE_DIR}
     -I${DRM_XF86_INCLUDE_DIR2})
 
-# Build-type flags for the bare-gcc commands below (add_user_elf / add_user_ldso /
-# SHARED libc.so / add_user_dyn_elf). CMake targets (kernel OBJECT libs, static
+# Build-type flags for the bare-gcc commands below (add_user_elf /
+# add_user_dyn_elf / SHARED libc.so). CMake targets (kernel OBJECT libs, static
 # libc.a) inherit CMAKE_<LANG>_FLAGS_<CONFIG> automatically; these custom-command
 # gcc invocations do NOT, so they would otherwise compile at -O0 even in Release
 # and miss -g in Debug. Keep this in sync with CMake's defaults for each config.
@@ -176,7 +176,7 @@ endfunction()
 function(add_user_lib lib_name)
     set(option_args SHARED C NO_IMAGE)
     set(multi_args SOURCES FLAGS SO_LINK_LIBS INCLUDE_DIRS GEN_HEADERS EXTRA_OBJS)
-    set(one_args OUTPUT_NAME VERSION_MAP IMAGE_PATH IMAGE_ARTIFACT IMAGE_PARTITION)
+    set(one_args OUTPUT_NAME VERSION_MAP IMAGE_PATH IMAGE_ARTIFACT IMAGE_PARTITION ENTRY)
     cmake_parse_arguments(ARG "${option_args}" "${one_args}" "${multi_args}" ${ARGN})
 
     # Artifact base name (default = lib_name). The SHARED path's SO_FILE and the
@@ -194,7 +194,7 @@ function(add_user_lib lib_name)
 
     if(ARG_SHARED)
         # Shared library libc.so — add_library(SHARED) is unavailable in this toolchain, use custom command
-        # plan_ld2b3 decision 1 fallback (same pattern as add_user_ldso)
+        # (plan_ld2b3 decision 1 fallback: bare-gcc link line)
         if(ARG_C)
             set(COMPILE_CMD ${CMAKE_C_COMPILER})
             set(DEP_LANG "C")
@@ -273,6 +273,9 @@ function(add_user_lib lib_name)
 
         # --- Extra link flags (version script + libc.so dependency) ---
         set(SO_EXTRA_LDFLAGS "")
+        if(ARG_ENTRY)
+            list(APPEND SO_EXTRA_LDFLAGS "-Wl,-e,${ARG_ENTRY}")
+        endif()
         if(ARG_VERSION_MAP)
             list(APPEND SO_EXTRA_LDFLAGS
                  "-Wl,--version-script,${CMAKE_SOURCE_DIR}/${ARG_VERSION_MAP}")
@@ -425,13 +428,12 @@ function(add_drm_lib lib_name)
     user_assert_no_sse_disable(${lib_name})
 endfunction()
 
-# Build crt0.o (_start entry, linked into every static main ELF)
-# plan_ld2b3 T5
-add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/crt0.o
-    COMMAND ${CMAKE_C_COMPILER} -ffreestanding -fno-pie -c ${CMAKE_SOURCE_DIR}/user/lib/crt0.S -o ${CMAKE_BINARY_DIR}/crt0.o
-    DEPENDS ${CMAKE_SOURCE_DIR}/user/lib/crt0.S
-    COMMENT "Compiling crt0.o")
-add_custom_target(crt0_obj ALL DEPENDS ${CMAKE_BINARY_DIR}/crt0.o)
+# musl crt objects (Scrt1/crt1/crti/crtn) are produced by the musl subproject
+# target `musl_libc` under ${MUSL_LIB_DIR} (build_script/cmake/musl_rules.cmake).
+# Static main ELFs (add_user_elf) link crt1.o + crti.o + crtn.o; dynamic main
+# ELFs (add_user_dyn_elf) link the PIC Scrt1.o + crti.o + crtn.o. The hand-
+# written user/lib/crt0.S is retired (ldso.md Phase 1/2). Callers depend on
+# musl_libc so these .o exist before the link.
 
 # add_user_elf: userspace ELF (compile → objcopy → ld)
 # Usage: add_user_elf(name [C] SOURCES source1 ... [LINK_LIBS lib1 ...] [DEFS def1 ...]
@@ -532,9 +534,13 @@ function(add_user_elf elf_name)
         math(EXPR idx "${idx} + 1")
     endforeach()
 
-    # Step 2: ld — crt0.o must be first in link input (provides _start)
-    set(LD_DEPS ${CMAKE_BINARY_DIR}/crt0.o ${OBJ_FILES})
-    set(LD_ARGS ${CMAKE_BINARY_DIR}/crt0.o ${OBJ_FILES})
+    # Step 2: ld — musl crt1.o (static _start) + crti.o/crtn.o (.init/.fini
+    # brackets) must bracket the object files. crt1.o is first (provides
+    # _start → _start_c → __libc_start_main).
+    set(MUSL_CRT  ${MUSL_LIB_DIR}/crt1.o ${MUSL_LIB_DIR}/crti.o)
+    set(MUSL_CRTN ${MUSL_LIB_DIR}/crtn.o)
+    set(LD_DEPS ${MUSL_CRT} ${OBJ_FILES} ${MUSL_CRTN})
+    set(LD_ARGS ${MUSL_CRT} ${OBJ_FILES} ${MUSL_CRTN})
 
     if(ARG_LINK_LIBS)
         # Use --start-group/--end-group to handle circular dependencies within
@@ -556,8 +562,8 @@ function(add_user_elf elf_name)
 
     add_custom_target(${elf_name}_elf ALL DEPENDS ${ELF_FILE})
 
-    # Dependency declarations
-    add_dependencies(${elf_name}_elf crt0_obj)
+    # musl_libc produces crt1.o/crti.o/crtn.o
+    add_dependencies(${elf_name}_elf musl_libc)
     if(ARG_LINK_LIBS)
         add_dependencies(${elf_name}_elf ${ARG_LINK_LIBS})
     endif()
@@ -575,57 +581,11 @@ function(add_user_elf elf_name)
     endif()
 endfunction()
 
-# add_user_ldso: ld.so specific (-shared -fPIC, with built-in minilibc, does not link libc.a)
-# ld.md §3.4.4
-# IMAGE_PATH: explicit disk-image destination (no auto-default). IMAGE_ARTIFACT
-#   defaults to <name>.elf. IMAGE_PARTITION defaults to 2.
-function(add_user_ldso name)
-    cmake_parse_arguments(ARG "NO_IMAGE" "IMAGE_PATH;IMAGE_ARTIFACT;IMAGE_PARTITION" "SOURCES" ${ARGN})
-    set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
-    set(COMPILE_FLAGS -m64 ${WARN_FLAGS} ${USER_FREESTANDING_FLAGS}
-                      -fPIC -fvisibility=hidden
-                      ${USER_BUILD_FLAGS}
-                      -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS})
-    set(OBJ_FILES "")
-    set(idx 0)
-    foreach(src ${ARG_SOURCES})
-        if(src MATCHES "^/")
-            set(src_full ${src})
-        else()
-            set(src_full ${CMAKE_CURRENT_SOURCE_DIR}/${src})
-        endif()
-        set(src_obj ${ELF_FILE}.${idx}.o)
-        add_custom_command(OUTPUT ${src_obj}
-            COMMAND ${CMAKE_C_COMPILER} ${COMPILE_FLAGS} -c ${src_full} -o ${src_obj}
-            DEPENDS ${src_full})
-        list(APPEND OBJ_FILES ${src_obj})
-        math(EXPR idx "${idx} + 1")
-    endforeach()
-    add_custom_command(OUTPUT ${ELF_FILE}
-        COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -nostdlib -nodefaultlibs
-                -Wl,-e,_start -Wl,--hash-style=gnu
-                -o ${ELF_FILE} ${OBJ_FILES}
-        COMMAND bash ${CMAKE_SOURCE_DIR}/build_script/cmake/verify_ldso_rela_plt.sh ${ELF_FILE}
-        DEPENDS ${OBJ_FILES}
-        COMMENT "Linking ld.so (${name}.elf)")
-    add_custom_target(${name}_elf ALL DEPENDS ${ELF_FILE})
-
-    # Disk-image manifest: no auto-default — register only with explicit IMAGE_PATH.
-    if(ARG_IMAGE_PATH AND NOT ARG_NO_IMAGE)
-        set(_img_artifact "${name}.elf")
-        if(ARG_IMAGE_ARTIFACT)
-            set(_img_artifact ${ARG_IMAGE_ARTIFACT})
-        endif()
-        if(NOT DEFINED ARG_IMAGE_PARTITION)
-            set(ARG_IMAGE_PARTITION 2)
-        endif()
-        os_image_path(${name} ${_img_artifact} ${ARG_IMAGE_PATH} PARTITION ${ARG_IMAGE_PARTITION})
-    endif()
-endfunction()
-
 # add_user_dyn_elf: dynamic main ELF, linked by gcc driver
-# ld.md §3.4.4 / plan_ld2b3 T5
-# crt0.o linked first (provides _start), libc.so linked via -L/-l (records DT_NEEDED)
+# ldso.md: musl Scrt1.o (PIC _start) + crti.o/crtn.o bracket the objects; libc.so
+# (the fused musl-loader + hand-written libc) is linked via -L/-l so the main
+# ELF records DT_NEEDED libc.so, which the fused interp (=/lib/ld-musl-x86_64.so.1
+# = /lib/libc.so) satisfies at runtime. PT_INTERP → /lib/ld-musl-x86_64.so.1.
 # Supports both C and C++ sources: pass C flag for C, omit for C++ (like add_user_elf)
 # GEN_HEADERS: generated headers (configure_file outputs in ${CMAKE_BINARY_DIR}) that
 #              the ELF's sources #include. Same rationale as add_user_lib's GEN_HEADERS:
@@ -699,9 +659,12 @@ function(add_user_dyn_elf name)
         math(EXPR idx "${idx} + 1")
     endforeach()
 
-    # crt0.o must be first in link input (provides _start)
-    set(LD_ARGS ${CMAKE_BINARY_DIR}/crt0.o ${OBJ_FILES})
-    set(SO_DEPS "")
+    # musl Scrt1.o (PIC _start) first, crti.o brackets the .init, crtn.o closes
+    # it after the objects. libc.so linked via -L/-l (records DT_NEEDED libc.so).
+    set(MUSL_CRT  ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o)
+    set(MUSL_CRTN ${MUSL_LIB_DIR}/crtn.o)
+    set(LD_ARGS ${MUSL_CRT} ${OBJ_FILES} ${MUSL_CRTN})
+    set(SO_DEPS ${MUSL_CRT} ${MUSL_CRTN})
     # LINK_LIBS → lib<lib>.so (dynamic, records DT_NEEDED; full path avoids -lc
     # selecting libc.a). STATIC_LIBS → lib<lib>.a (compile-time link, e.g. unity —
     # a true STATIC library with no .so variant). Separating the two avoids the
@@ -718,16 +681,16 @@ function(add_user_dyn_elf name)
     endforeach()
     add_custom_command(OUTPUT ${ELF_FILE}
         COMMAND ${CMAKE_C_COMPILER} -fno-pie -no-pie
-                -Wl,--dynamic-linker,/lib/ld.so
+                -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1
                 -Wl,--hash-style=gnu
                 -Wl,--no-as-needed
                 -Wl,--allow-shlib-undefined
                 -nostdlib -nodefaultlibs
                 -o ${ELF_FILE} ${LD_ARGS}
-        DEPENDS ${OBJ_FILES} ${CMAKE_BINARY_DIR}/crt0.o ${SO_DEPS}
+        DEPENDS ${OBJ_FILES} ${SO_DEPS}
         COMMENT "Linking dynamic ${name}.elf")
     add_custom_target(${name}_dyn_elf ALL DEPENDS ${ELF_FILE})
-    add_dependencies(${name}_dyn_elf crt0_obj)
+    add_dependencies(${name}_dyn_elf musl_libc)
     # Build ordering for LINK_LIBS (.so variant targets, named <lib>_so or
     # lib<lib>_so) and STATIC_LIBS (the lib target itself). CMake archives are not
     # path-resolvable by Ninja from a bare DEPENDS file list, so declare target deps.

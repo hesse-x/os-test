@@ -6,6 +6,8 @@
 
 #include "utils/kvformat.h"
 
+#include <stdarg.h> /* va_arg / va_list are used directly below */
+
 /* Helper: emit unsigned integer in given base */
 static int kvfmt_uint(void (*putc)(char c, void *arg), void *arg,
                       unsigned long val, int base, int uppercase, int width,
@@ -305,10 +307,23 @@ int kvformat(void (*putc)(char c, void *arg), void *arg, const char *fmt,
     int precision = -1;
     if (*fmt == '.') {
       fmt++;
-      precision = 0;
-      while (*fmt >= '0' && *fmt <= '9') {
-        precision = precision * 10 + (*fmt - '0');
+      if (*fmt == '*') {
+        /* C99: precision read from a vararg int. A negative value means
+           precision is ignored (treated as unspecified). Required by musl's
+           loader, e.g. path_open's snprintf("%.*s/%s", (int)l, s, name) which
+           truncates a colon-delimited path segment to length l. Without this,
+           the '*' is silently dropped, the precision vararg is never consumed,
+           and every subsequent vararg (s, here) shifts by one — s reads the
+           int precision (e.g. 4) as a pointer and faults scanning it. */
+        int star = va_arg(ap, int);
+        precision = star < 0 ? -1 : star;
         fmt++;
+      } else {
+        precision = 0;
+        while (*fmt >= '0' && *fmt <= '9') {
+          precision = precision * 10 + (*fmt - '0');
+          fmt++;
+        }
       }
     }
 
@@ -350,6 +365,10 @@ int kvformat(void (*putc)(char c, void *arg), void *arg, const char *fmt,
       int slen = 0;
       while (s[slen])
         slen++;
+      /* C99: an explicit precision caps the number of bytes read from s
+         (it does NOT require s to be NUL-terminated within precision). */
+      if (precision >= 0 && precision < slen)
+        slen = precision;
       if (left_align) {
         for (int i = 0; i < slen; i++)
           putc(s[i], arg);

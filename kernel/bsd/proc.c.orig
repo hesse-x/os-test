@@ -1698,10 +1698,6 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   // dropped, so the ld_* chain tests can't find liba/libb. Value 0 is safe:
   // musl never dereferences aux[AT_PLATFORM] in the loader path.
   int auxc = 15;
-  uint64_t table_size = (uint64_t)(auxc + 1) * 16 + (uint64_t)(envc + 1) * 8 +
-                        (uint64_t)(argc + 1) * 8 + 8;
-  if (table_size % 16 != 0)
-    sp_user -= 8;
   sp_user -= (auxc + 1) * 16;
   uint64_t *auxv = (uint64_t *)STACK_KV(sp_user);
   int ai = 0;

@@ -1083,6 +1083,8 @@ int64_t sys_arch_prctl(int64_t arg1, int64_t arg2, int64_t unused1,
   (void)unused4;
   int code = (int)arg1;
   uint64_t addr = (uint64_t)arg2;
+  printk(0, "arch_prctl: pid=%d code=%d addr=%lx\n", current_task->pid, code,
+         addr);
   switch (code) {
   case ARCH_SET_FS:
     current_task->fs_base = addr;

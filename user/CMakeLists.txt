@@ -19,6 +19,7 @@ set(LIBC_SOURCES
     lib/sys_process.cc
     lib/sys_device.cc
     lib/sys_ipc.cc
+    lib/musl_loader_shim.c
     ${CMAKE_SOURCE_DIR}/utils/kvformat.c
 )
 
@@ -222,18 +223,31 @@ add_user_lib(c
     IMAGE_ARTIFACT libc.a
 )
 
-# libc.so (dynamic, -fPIC -DDYNAMIC=1)
-# OUTPUT_NAME c -> artifact libc.so (gcc -shared -Wl,-soname,libc.so)
+# libc.so (dynamic, -fPIC -DDYNAMIC=1) — FUSED musl loader + hand-written libc
+# (ldso.md). The musl loader objects (dynlink.lo/dlstart.lo, PIC) are spliced in
+# via EXTRA_OBJS; -e _dlstart makes the loader entry the .so entry point. The
+# loader's musl-internal symbol dependencies (__libc/__init_tp/__copy_tls/...)
+# are satisfied by lib/musl_loader_shim.c (in LIBC_SOURCES). After bootstrap the
+# loader jumps to the main ELF _start; the hand-written __libc_start_main then
+# overrides fs_base to struct tcb (loader dormant — ldso.md §2).
 add_user_lib(c_so
     SOURCES ${LIBC_SOURCES}
     EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs_so> $<TARGET_OBJECTS:musl_fcntl_objs_so>
+               $<TARGET_OBJECTS:musl_loader_objs>
     C
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED
     OUTPUT_NAME c
+    ENTRY _dlstart
     VERSION_MAP user/libc.map
     # NOTE: no SO_LINK_LIBS — libc.so is the base library, does not record DT_NEEDED on itself
 )
+add_dependencies(c_so musl_libc)
+# Publish the fused libc.so under BOTH names (ldso.md §3 Phase 2, mirroring
+# musl Makefile:214's hardlink): the SHARED auto-default already ships it to
+# /lib/libc.so (DT_NEEDED soname target); this extra entry ships the SAME
+# artifact to /lib/ld-musl-x86_64.so.1 (PT_INTERP path the kernel opens).
+os_image_path(c_so libc.so lib/ld-musl-x86_64.so.1 PARTITION 2)
 
 # libm source list
 set(LIBM_SOURCES
@@ -289,21 +303,6 @@ if(TEST)
 else()
     add_user_dyn_elf(test_fpu C SOURCES test/test_fpu.c LINK_LIBS c NO_IMAGE)
 endif()
-
-# ld.so (phase 2b+3: full load chain)
-# IMAGE_PATH lib/ld.so: ship the dynamic loader as /lib/ld.so (artifact ldso.elf).
-add_user_ldso(ldso SOURCES
-    ldso/start.S
-    ldso/dls3.c
-    ldso/dls_init.c
-    ldso/load_so.c
-    ldso/relocate.c
-    ldso/symtab.c
-    ldso/link_map.c
-    ldso/dl_puts.c
-    ldso/minilibc.c
-    IMAGE_PATH lib/ld.so
-)
 
 # hello_dyn (phase 2b+3: full dynamic chain verification)
 # LINK_LIBS c -> -lc resolves to libc.so (dynamic link, records DT_NEEDED libc.so)

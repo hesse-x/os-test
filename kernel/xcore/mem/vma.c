@@ -132,7 +132,10 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
     mmap_region **pp = &mm->mmap_regions;
     while (*pp != r)
       pp = &(*pp)->next;
-    mid->next = tail;
+    mmap_region *after = r->next;
+    mid->next = tail ? tail : after;
+    if (tail)
+      tail->next = after;
     *pp = mid;
     if (r->inode)
       inode_put(r->inode);

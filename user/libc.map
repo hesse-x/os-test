@@ -156,7 +156,7 @@ global:
 
     /* <sys/tls.h> — 半公开内部入口（crt0/pthread 跨文件，已声明即契约） */
     alloc_tls_block; __libc_tls_init_rest; __pthread_cancel_check;
-    __pthread_current_tcb; collect_tls_from_link_map;
+    __pthread_current_tcb;
 
     /* <sys/process.h> */
     execve; fork; getpgid; getsid; setpgid; setsid; spawn; setuid; setgid;
@@ -176,8 +176,11 @@ global:
     /* <unistd.h> */
     wait_dev_ready;
 
-    /* 事实 ABI：crt0.S 跨 .so 调用 */
+    /* 事实 ABI：musl crt1/Scrt1 跨 .so 调用 */
     __libc_start_main;
+
+    /* __dls2 在 ldso 自身 dynsym 里 find_sym("__dls3") 调用 stage-3 (dynlink.c:1439)；musl 自身 libc.so 本就导出 __dls3，被 local:* 误伤需显式导出 */
+    __dls3;
 
 local:
     *;

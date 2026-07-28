@@ -175,7 +175,7 @@ HID 驱动 → evdev SHM ring (struct input_event[256], 24B per event)
 - **evdev 驱动**：evdev 进程维护 SHM ring buffer，libinput 作为 consumer 通过 `read(/dev/input/event0)` 拉取事件。详见 [evdev.md](evdev.md)
 - **terminal**：libinput 集成在 terminal 进程内，作为键盘输入源。详见 [terminal.md](terminal.md)
 - **libc**：libinput.so 运行时依赖 libc.so（clock_gettime、malloc、字符串等）。详见 [libc.md](libc.md)
-- **ld.so**：dynamic ELF 加载 libinput.so + libc.so。详见 [ld.md](ld.md)
+- **ld.so**：dynamic ELF 由 fused `libc.so`(musl loader + 手写 libc)作 interp 加载 libinput.so + libc.so。详见 [ldso.md](../../ldso.md)
 - **devtmpfs**：SHM-backed FD_DEV 自动挂 ringbuf_fops。详见 [vfs.md](vfs.md)
 
 ## 待完成项

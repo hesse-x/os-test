@@ -174,6 +174,10 @@ include(build_script/cmake/third_party_rules.cmake)
 # helpers because the helpers call os_image_path() internally; defined before
 # any target is added that uses it.
 include(build_script/cmake/image_rules.cmake)
+# musl subproject (ldso.md Phase 0): build musl libc.so (fused loader) + crt as a
+# standalone ./configure && make subproject, ADDITIVE to the hand-written stack.
+# Downstream (hello_musl_dyn) consumes the `musl_libc` target + MUSL_LIB_DIR.
+include(build_script/cmake/musl_rules.cmake)
 
 # Boot loader (standalone EFI application, compiled with GNU-EFI)
 add_subdirectory(boot)

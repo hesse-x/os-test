@@ -186,7 +186,7 @@ while i < n:
             entry = violations.setdefault(file, {'add': [], 'remove': []})
             if kind == 'add':
                 for line in content:
-                    if not unresolvable_add(line, file):
+                    if not unresolvable_add(line, file) and line not in entry['add']:
                         entry['add'].append(line)
             else:
                 entry['remove'] = content

@@ -46,6 +46,10 @@ static struct test_entry tests[] = {
     {"time_sleep", "/test/test_time_sleep.elf"},
     {"clock_cputime", "/test/test_clock_cputime.elf"},
     {"hello_dyn", "/local/hello_dyn.elf"},
+    /* ldso.md Phase 1.5 go/no-go: musl fused libc.so self-bootstraps as
+     * PT_INTERP /lib/ld-musl-x86_64.so.1 and jumps to main. The ld_* ELFs pull
+     * liba.so/ libb.so from /test/lib via LD_LIBRARY_PATH (see child_env in
+     * main). */
     {"ld_single", "/test/ld_test_single.elf"},
     {"ld_chain", "/test/ld_test_chain.elf"},
     {"ld_diamond", "/test/ld_test_diamond.elf"},
@@ -115,6 +119,14 @@ int main(int argc, char **argv, char **envp) {
   (void)envp;
   printf("=== Test Runner ===\n");
 
+  // Child search path for the dynamic loader: /lib (libc.so / ld-musl) plus
+  // /test/lib (the ld_* chain/diamond/cycle stub libs liba.so/libb.so, shipped
+  // there by os_image_path). The kernel propagates envp to the new image and
+  // the musl loader reads LD_LIBRARY_PATH, so this is enough — no RPATH and no
+  // global loader config change needed. We can't use spawn() because it passes
+  // a NULL envp (empty environment, envc=0), so fork+execve with this env.
+  char *child_env[] = {"LD_LIBRARY_PATH=/lib:/test/lib", NULL};
+
   int pass_count = 0;
   int fail_count = 0;
   int skip_count = 0;
@@ -125,8 +137,12 @@ int main(int argc, char **argv, char **envp) {
 
     printf("[RUN]  %-20s ... running\n", name);
 
-    pid_t pid = spawn(path);
-    if (pid <= 0) {
+    pid_t pid = fork();
+    if (pid == 0) {
+      execve(path, NULL, child_env);
+      _exit(127);
+    }
+    if (pid < 0) {
       printf("[SKIP] %-20s (cannot spawn)\n", name);
       skip_count++;
       continue;
