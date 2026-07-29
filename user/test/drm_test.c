@@ -138,7 +138,7 @@ int main(void) {
   printf("drm_test: done — check screen for test pattern\n");
   while (1) {
     struct recv_msg m;
-    recv(&m, NULL, 0, 0);
+    ipc_recv(&m, NULL, 0, 0);
   }
   return 0;
 }

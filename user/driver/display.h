@@ -51,7 +51,7 @@ static inline int display_client_init(void) {
   while ((fd = open("/dev/dri/card0", O_RDWR)) < 0) {
     printf("display_client_init: open failed, recv wait\n");
     struct recv_msg m;
-    recv(&m, NULL, 0, 1);
+    ipc_recv(&m, NULL, 0, 1);
   }
   display_dev_fd = fd;
 

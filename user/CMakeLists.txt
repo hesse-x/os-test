@@ -217,6 +217,69 @@ target_include_directories(musl_fcntl_objs_so PRIVATE
     ${CMAKE_SOURCE_DIR}/include/uapi)
 target_compile_options(musl_fcntl_objs_so PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -fPIC -Wno-all)
 
+# ===================== musl socket integration (wayland §1.5) =====================
+# Build the upstream musl src/network socket-syscall wrappers into libc, mirroring
+# musl_fcntl_objs (same musl-internal include order, same dual -fno-pie/-fPIC build).
+# These are NOT a network stack — each is a 6-30 line syscall passthrough. On x86_64
+# (SYSCALL_USE_SOCKETCALL undefined) musl expands socketcall_cp(recvmsg,...) →
+# syscall_cp(SYS_recvmsg, ...) → direct __NR_recvmsg, NOT the i386 socketcall(2)
+# multiplex. The actual socket semantics live in the kernel's AF_UNIX SOCK_STREAM +
+# SCM_RIGHTS impl (socket.c); wayland only uses AF_UNIX domain sockets, never TCP/IP,
+# so no network stack is required. syscall_cp (cancellation point) is provided by
+# musl_pthread.
+#
+# NOT globbed on purpose: src/network/ also holds the DNS resolver (getaddrinfo/
+# resolv/res_msend/dns/lookup_*) which needs /etc/resolv.conf + a real network
+# stack and would drag in undefined symbols. Only the pure socket-syscall wrappers
+# are listed explicitly — same discipline as musl_fcntl_objs.
+#
+# Excluded from this list (supplied elsewhere):
+#   accept4.c — hand-written wrapper in user/lib/sys_socket.cc (commit e3e5e16),
+#              already exported; musl's would multi-define.
+#   recv.c was previously excluded for a name collision with the microkernel IPC
+#   `recv` primitive, but that IPC symbol has been renamed to `ipc_recv` (see
+#   user/include/sys/ipc.h), freeing the POSIX `recv` name — musl recv.c is now
+#   included.
+set(MUSL_SOCKET_SOURCES
+    ${MUSL_DIR}/src/network/socket.c
+    ${MUSL_DIR}/src/network/socketpair.c
+    ${MUSL_DIR}/src/network/accept.c
+    ${MUSL_DIR}/src/network/connect.c
+    ${MUSL_DIR}/src/network/bind.c
+    ${MUSL_DIR}/src/network/listen.c
+    ${MUSL_DIR}/src/network/shutdown.c
+    ${MUSL_DIR}/src/network/getsockname.c
+    ${MUSL_DIR}/src/network/getpeername.c
+    ${MUSL_DIR}/src/network/getsockopt.c
+    ${MUSL_DIR}/src/network/setsockopt.c
+    ${MUSL_DIR}/src/network/send.c
+    ${MUSL_DIR}/src/network/recv.c
+    ${MUSL_DIR}/src/network/sendto.c
+    ${MUSL_DIR}/src/network/recvfrom.c
+    ${MUSL_DIR}/src/network/sendmsg.c
+    ${MUSL_DIR}/src/network/recvmsg.c)
+
+add_library(musl_socket_objs OBJECT ${MUSL_SOCKET_SOURCES})
+target_include_directories(musl_socket_objs PRIVATE
+    ${MUSL_DIR}/src/internal
+    ${MUSL_DIR}/include
+    ${MUSL_DIR}/arch/x86_64
+    ${MUSL_DIR}/arch/generic
+    ${CMAKE_SOURCE_DIR}/user/include
+    ${CMAKE_SOURCE_DIR}/include/uapi)
+target_compile_options(musl_socket_objs PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -fno-pie -Wno-all)
+
+# libc.so needs PIC objects (mirror the libc.a(-fno-pie)/libc.so(-fPIC) dual build).
+add_library(musl_socket_objs_so OBJECT ${MUSL_SOCKET_SOURCES})
+target_include_directories(musl_socket_objs_so PRIVATE
+    ${MUSL_DIR}/src/internal
+    ${MUSL_DIR}/include
+    ${MUSL_DIR}/arch/x86_64
+    ${MUSL_DIR}/arch/generic
+    ${CMAKE_SOURCE_DIR}/user/include
+    ${CMAKE_SOURCE_DIR}/include/uapi)
+target_compile_options(musl_socket_objs_so PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -fPIC -Wno-all)
+
 # ===================== musl dlfcn integration (dlfcn) =====================
 # Build the upstream musl src/ldso/{dlsym,dlclose,dlinfo,dlerror}.c into libc,
 # mirroring musl_fcntl_objs (same musl-internal include order, same dual
@@ -325,7 +388,7 @@ target_include_directories(musl_dirent_objs PRIVATE
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
 target_compile_options(musl_dirent_objs PRIVATE
-    -m64 ${USER_FREESTANDING_FLAGS} -fno-pie -Wno-all)
+    -m64 ${USER_FREESTANDING_FLAGS} -fno-pie -Wno-all -Wno-ignored-attributes)
 
 # libc.so PIC mirror (same as musl_fcntl_objs_so above).
 add_library(musl_dirent_objs_so OBJECT ${MUSL_DIRENT_SOURCES})
@@ -337,7 +400,7 @@ target_include_directories(musl_dirent_objs_so PRIVATE
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
 target_compile_options(musl_dirent_objs_so PRIVATE
-    -m64 ${USER_FREESTANDING_FLAGS} -fPIC -Wno-all)
+    -m64 ${USER_FREESTANDING_FLAGS} -fPIC -Wno-all -Wno-ignored-attributes)
 
 # ===================== musl pthread integration (pthread.md §八) =====================
 # Generate musl's build-time headers (bits/alltypes.h + bits/syscall.h) into
@@ -471,6 +534,7 @@ add_musl_lib(musl_pthread SOURCES ${MUSL_PTHREAD_SOURCES})
 add_user_lib(c
     SOURCES ${LIBC_SOURCES}
     EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs> $<TARGET_OBJECTS:musl_fcntl_objs>
+               $<TARGET_OBJECTS:musl_socket_objs>
                $<TARGET_OBJECTS:musl_dl_objs> $<TARGET_OBJECTS:musl_dirent_objs>
                $<TARGET_OBJECTS:musl_pthread>
     C
@@ -497,6 +561,7 @@ add_user_lib(c
 add_user_lib(c_so
     SOURCES ${LIBC_SOURCES}
     EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs_so> $<TARGET_OBJECTS:musl_fcntl_objs_so>
+               $<TARGET_OBJECTS:musl_socket_objs_so>
                $<TARGET_OBJECTS:musl_dl_objs_so> $<TARGET_OBJECTS:musl_dirent_objs_so>
                $<TARGET_OBJECTS:musl_loader_objs> $<TARGET_OBJECTS:musl_pthread>
     C

@@ -74,7 +74,7 @@
 // ===================== FD_DEV helpers =====================
 
 // notify_fd — notify device driver via fd (uses sys_fdev_pid to find target)
-int notify_fd(int fd) {
+int ipc_notify_fd(int fd) {
   int64_t target_pid = sys_fdev_pid(fd);
   if (target_pid < 0)
     return -1;
@@ -86,8 +86,8 @@ int notify_fd(int fd) {
 }
 
 // msg_fd — send variable-length message to device driver via fd
-int msg_fd(int fd, const void *msg_buf, size_t msg_len, void *reply_buf,
-           size_t reply_len) {
+int ipc_msg_fd(int fd, const void *msg_buf, size_t msg_len, void *reply_buf,
+               size_t reply_len) {
   int64_t target_pid = sys_fdev_pid(fd);
   if (target_pid < 0)
     return -1;

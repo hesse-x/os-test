@@ -60,12 +60,12 @@ void test_shm_refcount(void) {
 /* 4. notify basic — send notify to self */
 void test_notify_basic(void) {
   /* notify ourselves */
-  int r = notify(getpid());
+  int r = ipc_notify(getpid());
   TEST_ASSERT_EQUAL_INT(0, r);
 
   /* recv should pick up the RECV_NOTIFY */
   struct recv_msg m;
-  int rr = recv(&m, NULL, 0, 1000);
+  int rr = ipc_recv(&m, NULL, 0, 1000);
   TEST_ASSERT_TRUE(rr >= 0);
 }
 
@@ -100,7 +100,7 @@ void test_msg_max_size(void) {
 /* 9. recv timeout */
 void test_req_timeout(void) {
   struct recv_msg m;
-  int r = recv(&m, NULL, 0, 100);
+  int r = ipc_recv(&m, NULL, 0, 100);
   /* Timeout with no message should return error or 0 */
   (void)r;
   TEST_ASSERT_TRUE(1);
@@ -126,12 +126,12 @@ void test_shm_size_verify(void) {
 
 /* 11. notify + recv data verification */
 void test_notify_recv_data(void) {
-  int r = notify(getpid());
+  int r = ipc_notify(getpid());
   TEST_ASSERT_EQUAL_INT(0, r);
 
   struct recv_msg m;
   memset(&m, 0, sizeof(m));
-  int rr = recv(&m, NULL, 0, 1000);
+  int rr = ipc_recv(&m, NULL, 0, 1000);
   TEST_ASSERT_TRUE(rr >= 0);
   TEST_ASSERT_EQUAL_INT(RECV_NOTIFY, (int)m.type);
 }
@@ -139,7 +139,7 @@ void test_notify_recv_data(void) {
 /* 12. recv with short timeout (non-blocking-like) */
 void test_recv_zero_timeout(void) {
   struct recv_msg m;
-  int r = recv(&m, NULL, 0, 1);
+  int r = ipc_recv(&m, NULL, 0, 1);
   /* No pending message → should return -ETIMEDOUT or error */
   (void)r;
   TEST_ASSERT_TRUE(1); /* No crash = pass */

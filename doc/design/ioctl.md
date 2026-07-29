@@ -59,7 +59,7 @@ RECV_IOCTL 的 union 布局（offset 相对 recv_msg）：
 1. arg==0 → EINVAL；kmalloc(arg_size)，`_IOC_WRITE` 时 copy_from_user
 2. 构造 `RECV_IOCTL`（hdr->ioctl = {cmd, arg_size, kbuf, arg_size}）入队，唤醒驱动
 3. 调用者阻塞 `WAIT_REQ_REPLY`，`req_reply_buf=arg`，`req_reply_len=arg_size`
-4. 驱动 `recv(&msg, data_buf, data_buf_len, ...)`：
+4. 驱动 `ipc_recv(&msg, data_buf, data_buf_len, ...)`：
    - data_buf 不足 → kfree kbuf，回传 len，返回 EINVAL（驱动可探测后重试）
    - 正常 → copy_to_user(data_buf, kbuf, len)，kfree kbuf
 5. 驱动 handle → `sys_resp(reply_data, len, result)`
@@ -113,14 +113,14 @@ ioctl）统一遵守 **arm-before-enqueue** 不变式：`req_result`/`req_replie
 
 驱动主循环按 msg.type 分支处理（user/lib/sys_ipc.cc : resp → sys_resp）：
 
-- `RECV_REQ`：inline 路径，cmd/arg 从 msg.data 解包，`resp(data, len, result)` 回传
-- `RECV_IOCTL`：变长路径，cmd/arg_size 从 msg.ioctl 解包，arg 数据在 recv 的 data_buf 中，`resp(data, len, result)` 回传
+- `RECV_REQ`：inline 路径，cmd/arg 从 msg.data 解包，`ipc_resp(data, len, result)` 回传
+- `RECV_IOCTL`：变长路径，cmd/arg_size 从 msg.ioctl 解包，arg 数据在 recv 的 data_buf 中，`ipc_resp(data, len, result)` 回传
 
-`recv(&msg, data_buf, data_buf_len, timeout)`：RECV_IOCTL 需提供 data_buf 接收 arg 数据；不确定大小时可先传 NULL 探测，返回 EINVAL 后按 umsg->ioctl.len 分配重试。
+`ipc_recv(&msg, data_buf, data_buf_len, timeout)`：RECV_IOCTL 需提供 data_buf 接收 arg 数据；不确定大小时可先传 NULL 探测，返回 EINVAL 后按 umsg->ioctl.len 分配重试。
 
 现有调用点：
 - user/lib/input_driver.cc : INPUT_BIND 调用 `sys_resp(&reply, sizeof(reply), result)`（reply 含 result 字段，_IOWR 回写 8B + result 独立通道，冗余兼容）
-- user/driver/evdev.cc : `resp(data, data_len, result)`（纯数据 + result 分离，见 [evdev.md](evdev.md)）
+- user/driver/evdev.cc : `ipc_resp(data, data_len, result)`（纯数据 + result 分离，见 [evdev.md](evdev.md)）
 
 ### 数据流
 
@@ -133,7 +133,7 @@ inline 路径（arg ≤ 48B）：
 
 变长路径（arg > 48B）：
 ```
-客户端 sys_ioctl → kmalloc+copy_from_user(arg) → RECV_IOCTL 入队 → 驱动 recv(data_buf)
+客户端 sys_ioctl → kmalloc+copy_from_user(arg) → RECV_IOCTL 入队 → 驱动 ipc_recv(data_buf)
   → kfree kbuf → handle → sys_resp(reply_data, len, result)
   → kmalloc+copy_from_user+CR3 switch+copy_to_user(arg) + req_result=result → 唤醒
   → sys_ioctl return req_result
@@ -165,5 +165,5 @@ test_ioctl.c / test_dev_vfs.c：INPUT_BIND 断言读 ioctl 返回值 `r`（非 a
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| evdev 处理 RECV_IOCTL | evdev.cc 主循环增加 RECV_IOCTL 分支，recv 传 data_buf，支持 >48B getter（完整 KEY 位图 96B 等）。当前 `recv(&msg, NULL, 0, 0)` 传 data_buf=NULL，RECV_IOCTL 收到也返回 EINVAL。是接 libinput 前硬前置 | 高 |
+| evdev 处理 RECV_IOCTL | evdev.cc 主循环增加 RECV_IOCTL 分支，recv 传 data_buf，支持 >48B getter（完整 KEY 位图 96B 等）。当前 `ipc_recv(&msg, NULL, 0, 0)` 传 data_buf=NULL，RECV_IOCTL 收到也返回 EINVAL。是接 libinput 前硬前置 | 高 |
 | libc ioctl 客户端 cap 提升 | libc `ioctl()` 用户态 240B 栈 buffer 限制 >240B 命令在客户端即 EINVAL，无法到达内核 64KB 变长路径。需改为动态分配以支持完整 evdev 大 getter | 中 |

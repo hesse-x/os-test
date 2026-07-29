@@ -43,13 +43,13 @@ evdev_device（user/driver/evdev.cc : evdev_device）：
 
 evdev 进程主循环（user/driver/evdev.cc : main）：
 1. `#ifdef TEST`：`register_stubs()` 建桩设备 + `device_register_shm("input/eventN", -1, minor)` 注册节点
-2. `recv(&msg, data_buf, 256, 0)` 阻塞等消息；`data_buf` 接收变长 RECV_IOCTL 的 arg 数据（kernel 从 kmalloc buffer copy 出并 kfree），传 NULL 会被 kernel 以 EINVAL 拒绝并丢请求
+2. `ipc_recv(&msg, data_buf, 256, 0)` 阻塞等消息；`data_buf` 接收变长 RECV_IOCTL 的 arg 数据（kernel 从 kmalloc buffer copy 出并 kfree），传 NULL 会被 kernel 以 EINVAL 拒绝并丢请求
 3. 按 `msg.type` 分流：RECV_REQ（inline，arg≤48B）从 `msg.data[0..4]` 读 cmd、`msg.data[52..56]` 读 minor、WRITE 方向从 `msg.data[4..]` 读 grab_val；RECV_IOCTL（变长，arg>48B）从 `msg.ioctl.cmd` / `msg.ioctl.minor` 读（minor 由内核 `sys_ioctl` 变长路径填入 `recv_msg.ioctl.minor`）
 4. 统一调 `handle_ioctl(cmd, minor, src, grab_val)` 处理（变长路径 grab_val 传 0；EVIOCGRAB 的 `_IOC_SIZE==sizeof(int)≤48` 永远走 inline）
 
 handle_ioctl 分派（user/driver/evdev.cc : handle_ioctl）：
-1. `find_device(minor)` 路由，未找到 → `resp(NULL, 0, -ENODEV)`
-3. grab 检查：`cmd != EVIOCGRAB && dev->grabbed && dev->grab_client != src` → `resp(NULL, 0, -EBUSY)`
+1. `find_device(minor)` 路由，未找到 → `ipc_resp(NULL, 0, -ENODEV)`
+3. grab 检查：`cmd != EVIOCGRAB && dev->grabbed && dev->grab_client != src` → `ipc_resp(NULL, 0, -EBUSY)`
 4. 按 `_IOC_NR(cmd)` 分派：
 
 | ioctl | _IOC_NR | 行为 |
@@ -63,11 +63,11 @@ handle_ioctl 分派（user/driver/evdev.cc : handle_ioctl）：
 | EVIOCGRAB | 0x90 | arg=1 设置 grabbed/grab_client=src，arg=0 清除；无 data 返回 |
 | 其它 | — | result = -ENOSYS |
 
-5. `resp(data, data_len, result)` 回传
+5. `ipc_resp(data, data_len, result)` 回传
 
 ### 回复契约
 
-`resp(data, data_len, result)`（user/lib/sys_ipc.cc : resp → sys_resp）三参分离：
+`ipc_resp(data, data_len, result)`（user/lib/sys_ipc.cc : resp → sys_resp）三参分离：
 - `result`（int32）写到 `caller->req_result`，作为客户端 ioctl 返回值（0 成功 / 负 errno）
 - `data`（≤56B 纯数据）copy 到 `caller->req_reply_buf`（客户端 ioctl 的 arg 缓冲区），copy_len = `min(data_len, req_reply_len)`
 

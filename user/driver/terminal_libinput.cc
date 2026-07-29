@@ -494,7 +494,7 @@ extern "C" int main(int argc, char **argv, char **envp) {
     printf("terminal: display_client_init FAILED\n");
     while (1) {
       struct recv_msg m;
-      recv(&m, NULL, 0, 0);
+      ipc_recv(&m, NULL, 0, 0);
     }
   }
 
@@ -509,7 +509,7 @@ extern "C" int main(int argc, char **argv, char **envp) {
     li = libinput_udev_create_context(&interface, NULL, udev);
     if (!li) {
       struct recv_msg m;
-      recv(&m, NULL, 0, 1);
+      ipc_recv(&m, NULL, 0, 1);
     }
   }
 
@@ -523,7 +523,7 @@ extern "C" int main(int argc, char **argv, char **envp) {
     printf("terminal: libinput_udev_assign_seat FAILED (udevd down?)\n");
     while (1) {
       struct recv_msg m;
-      recv(&m, NULL, 0, 0);
+      ipc_recv(&m, NULL, 0, 0);
     }
   }
 
@@ -545,7 +545,7 @@ extern "C" int main(int argc, char **argv, char **envp) {
     printf("terminal: mmap cells FAILED\n");
     while (1) {
       struct recv_msg m;
-      recv(&m, NULL, 0, 0);
+      ipc_recv(&m, NULL, 0, 0);
     }
   }
 

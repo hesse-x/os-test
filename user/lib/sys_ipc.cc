@@ -16,27 +16,27 @@
 
 // ===================== IPC =====================
 
-extern "C" int notify(pid_t pid) { return sys_notify(pid); }
+extern "C" int ipc_notify(pid_t pid) { return sys_notify(pid); }
 
-extern "C" int recv(struct recv_msg *msg, void *data_buf, size_t data_buf_len,
-                    uint32_t timeout_ms) {
+extern "C" int ipc_recv(struct recv_msg *msg, void *data_buf,
+                        size_t data_buf_len, uint32_t timeout_ms) {
   return sys_recv(msg, data_buf, data_buf_len, timeout_ms);
 }
 
-extern "C" int req(pid_t pid, void *req_ptr, void *resp) {
+extern "C" int ipc_req(pid_t pid, void *req_ptr, void *resp) {
   return sys_req(pid, req_ptr, resp);
 }
 
-extern "C" int resp(void *resp, size_t len, int32_t result) {
+extern "C" int ipc_resp(void *resp, size_t len, int32_t result) {
   return sys_resp(resp, len, result);
 }
 
-extern "C" int msg(int32_t pid, void *req_buf, size_t req_len, void *resp_buf,
-                   size_t resp_len) {
+extern "C" int ipc_msg(int32_t pid, void *req_buf, size_t req_len,
+                       void *resp_buf, size_t resp_len) {
   return sys_msg(pid, req_buf, req_len, resp_buf, resp_len);
 }
 
-extern "C" int msg_resp(void *resp_buf, size_t resp_len) {
+extern "C" int ipc_msg_resp(void *resp_buf, size_t resp_len) {
   return sys_msg_resp(resp_buf, resp_len);
 }
 

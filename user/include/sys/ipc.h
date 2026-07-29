@@ -17,17 +17,17 @@
 extern "C" {
 #endif
 
-LIBC_EXPORT int notify(pid_t pid);
-LIBC_EXPORT int notify_fd(int fd);
-LIBC_EXPORT int msg_fd(int fd, const void *msg_buf, size_t msg_len,
-                       void *reply_buf, size_t reply_len);
-LIBC_EXPORT int recv(struct recv_msg *msg, void *data_buf, size_t data_buf_len,
-                     uint32_t timeout_ms);
-LIBC_EXPORT int req(pid_t pid, void *req, void *resp);
-LIBC_EXPORT int resp(void *resp, size_t len, int32_t result);
-LIBC_EXPORT int msg(int32_t pid, void *req_buf, size_t req_len, void *resp_buf,
-                    size_t resp_len);
-LIBC_EXPORT int msg_resp(void *resp_buf, size_t resp_len);
+LIBC_EXPORT int ipc_notify(pid_t pid);
+LIBC_EXPORT int ipc_notify_fd(int fd);
+LIBC_EXPORT int ipc_msg_fd(int fd, const void *msg_buf, size_t msg_len,
+                           void *reply_buf, size_t reply_len);
+LIBC_EXPORT int ipc_recv(struct recv_msg *msg, void *data_buf,
+                         size_t data_buf_len, uint32_t timeout_ms);
+LIBC_EXPORT int ipc_req(pid_t pid, void *req, void *resp);
+LIBC_EXPORT int ipc_resp(void *resp, size_t len, int32_t result);
+LIBC_EXPORT int ipc_msg(int32_t pid, void *req_buf, size_t req_len,
+                        void *resp_buf, size_t resp_len);
+LIBC_EXPORT int ipc_msg_resp(void *resp_buf, size_t resp_len);
 LIBC_EXPORT int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms);
 
 // Create an FD_IPC fd bound to the caller's own recv queue (evdev's

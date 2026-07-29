@@ -67,7 +67,7 @@ static void run_driver(void) {
   for (int i = 0; i < 200; i++) {
     struct recv_msg msg;
     uint8_t data_buf[65536];
-    int rc = recv(&msg, data_buf, sizeof(data_buf), 500);
+    int rc = ipc_recv(&msg, data_buf, sizeof(data_buf), 500);
     if (rc < 0) {
       if (errno == EINTR)
         continue;
@@ -186,7 +186,7 @@ void test_timeout(void) {
     sys_dev_create(TEST_DEV, -1, 0);
     // Receive the REQ but deliberately never respond, and keep the driver
     // alive and silent past the caller's 3s deadline. A plain sleep(5) won't
-    // do: sleep() is recv()-based, so the ioctl's RECV_IOCTL delivery wakes
+    // do: sleep() is ipc_recv()-based, so the ioctl's RECV_IOCTL delivery wakes
     // it and the driver exits before the caller times out (caller then sees
     // ESRCH, not ETIMEDOUT). Loop on recv with a long timeout and a real
     // data_buf (RECV_IOCTL with a NULL data_buf returns -EINVAL, which would
@@ -195,7 +195,7 @@ void test_timeout(void) {
     // the caller's 3s ioctl timeout has fired.
     struct recv_msg msg;
     uint8_t data_buf[256];
-    while (recv(&msg, data_buf, sizeof(data_buf), 5000) == 0)
+    while (ipc_recv(&msg, data_buf, sizeof(data_buf), 5000) == 0)
       ;
     _exit(0);
   }

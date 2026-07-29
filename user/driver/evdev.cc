@@ -98,7 +98,7 @@ static void handle_ioctl(uint32_t cmd, uint32_t minor, pid_t src,
                          int32_t grab_val) {
   uint8_t nr = _IOC_NR(cmd);
   uint16_t size = _IOC_SIZE(cmd);
-  // Reply data buffer (pure data — result is passed separately to resp()).
+  // Reply data buffer (pure data — result is passed separately to ipc_resp()).
   uint8_t data[REPLY_BUF_SIZE];
   memset(data, 0, REPLY_BUF_SIZE);
   int32_t result = 0;
@@ -106,14 +106,14 @@ static void handle_ioctl(uint32_t cmd, uint32_t minor, pid_t src,
 
   struct evdev_device *dev = find_device(minor);
   if (!dev) {
-    resp(NULL, 0, -ENODEV);
+    ipc_resp(NULL, 0, -ENODEV);
     return;
   }
 
   // EVIOCGRAB itself bypasses grab check (holder must be able to release)
   if (cmd != (uint32_t)EVIOCGRAB) {
     if (dev->grabbed && dev->grab_client != src) {
-      resp(NULL, 0, -EBUSY);
+      ipc_resp(NULL, 0, -EBUSY);
       return;
     }
   }
@@ -176,7 +176,7 @@ static void handle_ioctl(uint32_t cmd, uint32_t minor, pid_t src,
     break;
   }
 
-  resp(data, data_len, result);
+  ipc_resp(data, data_len, result);
 }
 
 // Advertise EV_KEY support + the set of keys the terminal can map to ASCII.

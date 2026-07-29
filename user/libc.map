@@ -59,13 +59,19 @@ global:
     setresuid; setresgid; setreuid; setregid; seteuid; setegid; getgroups;
 
     /* <fcntl.h> */
-    openat; fcntl;
+    openat; fcntl; posix_fallocate;
 
     /* <sys/file.h> */
     flock;
 
+    /* <sys/uio.h> — musl src/unistd/{readv,writev}.c, compiled but hidden by local:* */
+    readv; writev;
+
     /* <sys/socket.h> */
     accept4;
+    socket; socketpair; accept; connect; bind; listen; shutdown;
+    getsockname; getpeername; getsockopt; setsockopt;
+    send; recv; sendto; recvfrom; sendmsg; recvmsg;
 
     /* <ctype.h> */
     isalnum; isalpha; isascii; isblank; iscntrl; isdigit; isgraph;
@@ -171,7 +177,8 @@ global:
     execve; fork; getpgid; getsid; setpgid; setsid; spawn; setuid; setgid;
 
     /* <sys/ipc.h> — 微内核 IPC 用户态入口 */
-    msg; msg_fd; msg_resp; notify; notify_fd; recv; req; resp;
+    ipc_msg; ipc_msg_fd; ipc_msg_resp; ipc_notify; ipc_notify_fd;
+    ipc_recv; ipc_req; ipc_resp;
 
     /* <sys/irq.h> */
     irq_bind;

@@ -505,7 +505,7 @@ static long evdev_consumer_ioctl(struct xtask *proc, struct file *f,
   proc->req_replied = 0;
   proc->wait_timed_out = 0;
 
-  /* Enqueue to target's recv queue（仿 sys_req）。target 的 recv() 会据此设
+  /* Enqueue to target's recv queue（仿 sys_req）。target 的 ipc_recv() 会据此设
    * target->req_caller_pid = proc->pid，使 target 的 sys_resp 回到本进程。 */
   spin_lock(&target->recv_lock);
   uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;

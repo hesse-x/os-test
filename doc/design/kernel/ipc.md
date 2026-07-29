@@ -159,7 +159,7 @@ WAIT_NONE / WAIT_RECV / WAIT_REQ_REPLY / WAIT_MSG_REPLY / WAIT_CHILD / WAIT_PIPE
 2. 内核 copy_from_user 请求到 recv_msg.data
 3. 入队 target->recv_buf (type=RECV_REQ)，唤醒 target (WAIT_RECV → READY)
 4. 阻塞调用者 (WAIT_REQ_REPLY)
-5. 服务端 recv() 返回 RECV_REQ，处理请求
+5. 服务端 ipc_recv() 返回 RECV_REQ，处理请求
 6. 服务端 sys_resp(reply)：CR3 切换 → copy_to_user → 唤醒调用者 (WAIT_REQ_REPLY → READY)
 7. 调用者恢复，返回 0 或负 errno
 
@@ -168,7 +168,7 @@ WAIT_NONE / WAIT_RECV / WAIT_REQ_REPLY / WAIT_MSG_REPLY / WAIT_CHILD / WAIT_PIPE
 1. 调用者 sys_msg(pid, msg_buf, msg_len, reply_buf, reply_len)
 2. 内核验证参数，kmalloc(msg_len)，copy_from_user
 3. 入队 RECV_MSG(kmaddr, len)，唤醒 target (WAIT_RECV → READY)，阻塞调用者 (WAIT_MSG_REPLY)
-4. 服务端 recv() 返回 RECV_MSG：内核 copy_to_user(data_buf, kmaddr, len)，kfree(kmaddr)，记录 msg_caller_pid
+4. 服务端 ipc_recv() 返回 RECV_MSG：内核 copy_to_user(data_buf, kmaddr, len)，kfree(kmaddr)，记录 msg_caller_pid
 5. 服务端 sys_msg_resp(resp_buf, resp_len)：copy_from_user → CR3 切换 → copy_to_user → kfree(kbuf_resp) → 唤醒调用者
 
 #### IRQ 分发
@@ -201,9 +201,9 @@ IRQ 到达时向绑定进程的 recv 队列入 RECV_IRQ 消息，然后唤醒（
 
 定义：user/include/sys/ipc.h
 
-recv(req_msg, data_buf, data_buf_len, timeout_ms) / req(pid, req_buf, resp_buf) / resp(resp_buf) / msg(pid, req_buf, req_len, resp_buf, resp_len) / msg_resp(resp_buf, resp_len)
+ipc_recv(req_msg, data_buf, data_buf_len, timeout_ms) / ipc_req(pid, req_buf, resp_buf) / ipc_resp(resp_buf) / ipc_msg(pid, req_buf, req_len, resp_buf, resp_len) / ipc_msg_resp(resp_buf, resp_len)
 
-fd-based 变体：notify_fd(fd) — 从 fd_table 查 target_pid 后调 sys_notify；msg_fd(fd, ...) — 从 fd_table 查 target_pid 后调 sys_msg
+fd-based 变体：ipc_notify_fd(fd) — 从 fd_table 查 target_pid 后调 sys_notify；ipc_msg_fd(fd, ...) — 从 fd_table 查 target_pid 后调 sys_msg
 
 ---
 

@@ -84,9 +84,9 @@ int64_t ipcfd_do_read(struct file *f, void __user *buf, void __user *data_buf,
 
 // sys_ipcfd_read: the FD_IPC read syscall.  read(fd, buf, count) is only
 // 3-arg, but ipcfd needs the recv_msg target + variable-length payload
-// (data_buf + len) — the same shape as recv().  Resolves the fd, owner-checks
-// via ipcfd_do_read, and returns its result verbatim (0 / -EAGAIN / -EPERM /
-// -EINVAL / -EFAULT).  (evdev_refact.md §4.3)
+// (data_buf + len) — the same shape as ipc_recv().  Resolves the fd,
+// owner-checks via ipcfd_do_read, and returns its result verbatim (0 / -EAGAIN
+// / -EPERM / -EINVAL / -EFAULT).  (evdev_refact.md §4.3)
 int64_t sys_ipcfd_read(int64_t fd, int64_t buf, int64_t data_buf,
                        int64_t data_buf_len) {
   if (fd < 0 || fd >= MAX_FD)

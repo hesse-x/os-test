@@ -70,7 +70,7 @@ extern "C" void wait_dev_ready(const char *dev_path) {
     if (fd >= 0)
       break;
     struct recv_msg m;
-    recv(&m, NULL, 0, 10);
+    ipc_recv(&m, NULL, 0, 10);
   }
   close(fd);
 }

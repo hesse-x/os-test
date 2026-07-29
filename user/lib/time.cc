@@ -5,9 +5,9 @@
  */
 
 #include <errno.h>
+#include <sched.h>
 #include <stdint.h>
-#include <string.h>
-#include <sys/cdefs.h> // LIBC_EXPORT (sleep/usleep retained wrappers export from libc.so)
+#include <sys/cdefs.h>
 #include <syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -453,7 +453,7 @@ char *ctime(const time_t *t) {
  * =====================
  *
  * nanosleep/clock_nanosleep go through the kernel syscalls (SYS_nanosleep /
- * SYS_clock_nanosleep); the old recv()-based sleep was woken prematurely by
+ * SYS_clock_nanosleep); the old ipc_recv()-based sleep was woken prematurely by
  * any IPC message and truncated sub-millisecond precision.  sleep()/usleep()
  * are layered on nanosleep.  On EINTR, sleep() resumes the remaining interval
  * (BSD sleep(3) "sleep the full duration" semantics); nanosleep/clock_nanosleep
