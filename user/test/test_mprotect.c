@@ -68,7 +68,7 @@ static void segv_handler(int sig, siginfo_t *info, void *uctx) {
   (void)sig;
   (void)uctx;
   int code = info->si_code;
-  void *addr = info->_sifields.si_addr;
+  void *addr = info->si_addr;
   /* Sanity: the fault must be on the page we expect. A wrong addr means the
    * kernel delivered siginfo for a different fault — fail the child with a
    * sentinel the parent can distinguish from a genuine SEGV_* code. */

@@ -11,18 +11,21 @@
 # static-library path in add_user_lib, which gets the same flags via
 # target_compile_options below. )
 #
+set(USER_COMPILE_FLAGS -m64 ${WARN_FLAGS} ${USER_FREESTANDING_FLAGS} -fno-pie)
+
 # Userspace freestanding std headers (stdint/stddef/stdarg/stdbool) are provided
 # by musl, NOT the compiler's -isystem freestanding dir (USER_FREESTANDING_FLAGS
 # drops -isystem). MUSL_INCLUDE_FLAGS puts musl/include + arch on the search
 # path. Include order matters: user/include MUST precede musl so our static
 # user/include/bits/alltypes.h wins over musl's arch bits/alltypes.h.in template
 # (musl stdint/stddef #include <bits/alltypes.h>). Appended after -I user/include
-# in each bare-gcc COMPILE_FLAGS below.
+# in each bare-gcc COMPILE_FLAGS below. With pthread switched to musl, musl's
+# <pthread.h>/<signal.h>/<sched.h> (the repo's own copies were deleted) also
+# resolve from here.
 set(MUSL_INCLUDE_FLAGS
     -I${CMAKE_SOURCE_DIR}/third_party/musl/include
     -I${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
     -I${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic)
-set(USER_COMPILE_FLAGS -m64 ${WARN_FLAGS} ${USER_FREESTANDING_FLAGS} -fno-pie)
 
 # When the kernel is built with KASAN (-DSANITIZE=1), propagate the SANITIZER
 # macro to userspace too — WITHOUT -fsanitize=kernel-address (that is
@@ -54,6 +57,19 @@ set(DRM_INCLUDE_FLAGS
     -I${DRM_INCLUDE_DIR}
     -I${DRM_XF86_INCLUDE_DIR}
     -I${DRM_XF86_INCLUDE_DIR2})
+
+# Generated-musl-header paths used by the bare-gcc DEPENDS lines below and by
+# add_musl_lib (pthread payload). musl_generate_headers() (called in
+# user/CMakeLists.txt) writes bits/alltypes.h / bits/syscall.h here and exports
+# MUSL_GEN_INCLUDE_DIR (PARENT_SCOPE); the files are also listed verbatim so
+# custom-command DEPENDS force ordering (generation before any musl-pulling
+# compile). Our own static user/include/bits/{alltypes,syscall}.h (checked in,
+# per the master ldso integration) still wins for non-musl-pthread compiles via
+# the -I user/include that precedes MUSL_INCLUDE_FLAGS on every path.
+set(MUSL_GEN_DIR ${CMAKE_BINARY_DIR}/musl_gen)
+set(MUSL_GEN_HEADERS
+    ${MUSL_GEN_DIR}/bits/alltypes.h
+    ${MUSL_GEN_DIR}/bits/syscall.h)
 
 # Build-type flags for the bare-gcc commands below (add_user_elf /
 # add_user_dyn_elf / SHARED libc.so). CMake targets (kernel OBJECT libs, static
@@ -226,7 +242,7 @@ function(add_user_lib lib_name)
             set(src_obj ${CMAKE_BINARY_DIR}/${lib_name}_${idx}.o)
             add_custom_command(OUTPUT ${src_obj}
                 COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS_BASE} -c ${src_full} -o ${src_obj}
-                DEPENDS ${src_full} ${ARG_GEN_HEADERS}
+                DEPENDS ${src_full} ${ARG_GEN_HEADERS} ${MUSL_GEN_HEADERS}
                 IMPLICIT_DEPENDS ${DEP_LANG} ${src_full}
                 COMMENT "Compiling ${lib_name}_${idx}.o (SHARED)")
             list(APPEND OBJ_FILES ${src_obj})
@@ -323,16 +339,29 @@ function(add_user_lib lib_name)
         endif()
 
         add_custom_target(${lib_name} ALL DEPENDS ${SO_FILE})
+        # EXTRA_OBJS carries an object-target dependency too: a $<TARGET_OBJECTS:t>
+        # generator expression in DEPENDS (SO_LINK_DEPS above) makes ninja build
+        # target t's objects before this link runs.
     else()
         # Static library — add_library(STATIC), preserve target interface.
         # EXTRA_OBJS (e.g. $<TARGET_OBJECTS:musl_unistd_objs>) are passed as additional
         # sources; CMake archives them into the .a alongside the compiled SOURCES.
         add_library(${lib_name} STATIC ${ARG_SOURCES} ${ARG_EXTRA_OBJS})
 
+        # Include paths: project root + third_party + user/include (our stdio/
+        # string/time/unistd win over musl's) + musl_gen (generated <bits/
+        # alltypes.h> — 128-byte sigset_t / struct sigaction that our libc's
+        # signal.cc/io_multiplex.cc use) + musl headers (pthread.h/signal.h/
+        # sched.h — ours deleted — and arch bits). user/include FIRST so our
+        # libc headers win; musl_gen + musl appended after so pthread/signal
+        # resolve. Added unconditionally because our stdio.h includes <pthread.h>,
+        # which now lives only in musl/include — every static user lib (libc,
+        # libm, libinput, ...) needs it.
         target_include_directories(${lib_name} PRIVATE
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_SOURCE_DIR}/third_party
             ${CMAKE_SOURCE_DIR}/user/include
+            ${MUSL_GEN_DIR}
             ${CMAKE_SOURCE_DIR}/third_party/musl/include
             ${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
             ${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic
@@ -360,6 +389,11 @@ function(add_user_lib lib_name)
         endif()
 
         user_assert_no_sse_disable(${lib_name})
+
+        # Generated musl headers (bits/alltypes.h / bits/syscall.h) must exist
+        # before any source compiles — every static user lib pulls musl headers
+        # (stdio.h -> <pthread.h> -> <bits/alltypes.h>) via the include dirs above.
+        add_dependencies(${lib_name} musl_headers)
 
         # Disk-image manifest: STATIC has NO auto-default (most static libs aren't
         # shipped). Register only with an explicit IMAGE_PATH (e.g. libc.a →
@@ -396,13 +430,16 @@ function(add_drm_lib lib_name)
     add_library(${lib_name} STATIC ${ARG_SOURCES})
 
     # Common include paths every third_party lib needs (freestanding headers,
-    # project-wide uapi, user/include). Library-specific headers go via
-    # INCLUDE_DIRS so the lib controls its own resolution order.
+    # project-wide uapi, user/include, and musl headers — our stdio.h includes
+    # <pthread.h>, which after the musl switch lives only in musl/include).
+    # Library-specific headers go via INCLUDE_DIRS so the lib controls its own
+    # resolution order.
     target_include_directories(${lib_name} PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/third_party
         ${CMAKE_SOURCE_DIR}/include/uapi
         ${CMAKE_SOURCE_DIR}/user/include
+        ${MUSL_GEN_DIR}
         ${CMAKE_SOURCE_DIR}/third_party/musl/include
         ${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
         ${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic
@@ -424,6 +461,123 @@ function(add_drm_lib lib_name)
     set_target_properties(${lib_name} PROPERTIES
         ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
+
+    user_assert_no_sse_disable(${lib_name})
+
+    # Generated musl headers must exist before drm sources compile (xf86drm*.c
+    # include <stdint.h> -> musl's stdint.h -> <bits/alltypes.h>).
+    add_dependencies(${lib_name} musl_headers)
+endfunction()
+
+# musl_generate_headers: produce musl's two build-time-generated headers
+# (bits/alltypes.h from arch/x86_64/bits/alltypes.h.in + include/alltypes.h.in
+# via tools/mkalltypes.sed; bits/syscall.h from arch/x86_64/bits/syscall.h.in
+# via __NR_→SYS_ sed) into ${CMAKE_BINARY_DIR}/musl_gen. musl ships only the
+# .in templates; the generated headers are required for any compilation that
+# pulls musl's <pthread.h>/<signal.h>/internal headers (they #include
+# <bits/alltypes.h>, which only exists after generation). No musl ./configure
+# is needed — these two sed steps are the entire generation musl requires for
+# the headers we use.
+#
+# Exports:
+#   MUSL_GEN_INCLUDE_DIR — directory to put FIRST on include paths so
+#     <bits/alltypes.h> / <bits/syscall.h> resolve to the generated copies
+#     (they live under musl_gen/bits/, shadowing nothing — the arch .in files
+#     have different names). Non-generated <bits/signal.h> etc. still resolve
+#     from third_party/musl/arch/x86_64.
+#   musl_headers target  — depends all consumers add_dependencies on, so the
+#     headers exist before any musl source or consumer compiles.
+function(musl_generate_headers)
+    set(MUSL_SRC ${CMAKE_SOURCE_DIR}/third_party/musl)
+    set(MUSL_GEN_INCLUDE_DIR ${CMAKE_BINARY_DIR}/musl_gen PARENT_SCOPE)
+    set(_gendir ${CMAKE_BINARY_DIR}/musl_gen/bits)
+
+    add_custom_command(
+        OUTPUT ${_gendir}/alltypes.h
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${_gendir}
+        COMMAND sed -f ${MUSL_SRC}/tools/mkalltypes.sed
+                ${MUSL_SRC}/arch/x86_64/bits/alltypes.h.in
+                ${MUSL_SRC}/include/alltypes.h.in
+                > ${_gendir}/alltypes.h
+        DEPENDS ${MUSL_SRC}/arch/x86_64/bits/alltypes.h.in
+                ${MUSL_SRC}/include/alltypes.h.in
+                ${MUSL_SRC}/tools/mkalltypes.sed
+        COMMENT "Generating musl bits/alltypes.h")
+
+    add_custom_command(
+        OUTPUT ${_gendir}/syscall.h
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${_gendir}
+        COMMAND cp ${MUSL_SRC}/arch/x86_64/bits/syscall.h.in ${_gendir}/syscall.h
+        COMMAND sed -n -e s/__NR_/SYS_/p
+                < ${MUSL_SRC}/arch/x86_64/bits/syscall.h.in
+                >> ${_gendir}/syscall.h
+        DEPENDS ${MUSL_SRC}/arch/x86_64/bits/syscall.h.in
+        COMMENT "Generating musl bits/syscall.h")
+
+    add_custom_target(musl_headers ALL
+        DEPENDS ${_gendir}/alltypes.h ${_gendir}/syscall.h)
+endfunction()
+
+# add_musl_lib: musl upstream source compiled into an OBJECT library (relaxed
+# warnings, musl-internal include paths). OBJECT (not STATIC) so its objects
+# can be merged directly into libc.a and libc.so via $<TARGET_OBJECTS:...>
+# (see add_user_lib EXTRA_OBJS) — musl's design puts pthread in libc, so
+# musl_pthread has no standalone .a/.so product. Mirrors add_drm_lib's
+# third-party posture (no WARN_FLAGS, own -I list) but fixes the include order
+# for musl: musl's own headers (src/internal, arch/x86_64, arch/generic,
+# include) MUST resolve before the GCC freestanding -isystem dir shipped in
+# FREESTANDING_FLAGS, so we prepend them via target_include_directories(BEFORE)
+# rather than APPEND. The generated-headers dir (MUSL_GEN_INCLUDE_DIR, from
+# musl_generate_headers) is prepended FIRST so <bits/alltypes.h>/<bits/syscall.h>
+# resolve to the generated copies.
+# Usage: add_musl_lib(name SOURCES ... [INCLUDE_DIRS ...] [FLAGS ...])
+function(add_musl_lib lib_name)
+    set(option_args "")
+    set(multi_args SOURCES INCLUDE_DIRS FLAGS)
+    cmake_parse_arguments(ARG "${option_args}" "" "${multi_args}" ${ARGN})
+
+    add_library(${lib_name} OBJECT ${ARG_SOURCES})
+
+    # musl-internal + arch headers first (BEFORE so they win over the
+    # FREESTANDING_FLAGS -isystem GCC dir), then the project-wide baselines.
+    # MUSL_GEN_INCLUDE_DIR first so generated bits/alltypes.h & bits/syscall.h
+    # win over the arch .in templates.
+    target_include_directories(${lib_name} BEFORE PRIVATE
+        ${MUSL_GEN_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal
+        ${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
+        ${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic
+        ${CMAKE_SOURCE_DIR}/third_party/musl/include
+        ${ARG_INCLUDE_DIRS}
+    )
+    target_include_directories(${lib_name} PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/include/uapi
+        ${CMAKE_SOURCE_DIR}/user/include
+    )
+    # Generated headers must exist before any musl source compiles.
+    add_dependencies(${lib_name} musl_headers)
+
+    # Relaxed flags: -m64 + freestanding (already carries -fno-stack-protector,
+    # -nostdinc + -isystem GCC dir) + -fPIC. The same objects merge into BOTH
+    # libc.a (static, -no-pie ELFs) and libc.so (shared). -fPIC is required for
+    # the .so link (a non-PIC object referencing a global like __libc yields
+    # R_X86_64_32S, rejected when making a shared object); -fPIC objects also
+    # link fine into a static -no-pie ELF, so one compile serves both consumers.
+    # NO WARN_FLAGS (musl upstream is not subject to our -Werror gate).
+    # -Wno-everything silences musl's own warnings under our freestanding setup.
+    separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
+    target_compile_options(${lib_name} PRIVATE
+        -m64 ${FREESTANDING_FLAGS} -fPIC -Wno-everything ${ARG_FLAGS_LIST})
+    # musl's bare .s sources (src/signal/x86_64/restore.s, src/thread/x86_64/*.s,
+    # src/internal/x86_64/syscall.s) carry no .note.GNU-stack, so each linked
+    # object without the note trips `ld: warning: ... missing .note.GNU-stack
+    # section implies executable stack` (one warning per ELF link, attributed to
+    # whichever note-less .o the linker hits first — here restore.s.obj).
+    # -Wa,--noexecstack makes the assembler inject an empty .note.GNU-stack,
+    # matching the crti.s/crtn.s handling in musl_rules.cmake. Harmless on the C
+    # sources: clang already emits the note, so this only adds it to the .s ones.
+    target_compile_options(${lib_name} PRIVATE -Wa,--noexecstack)
 
     user_assert_no_sse_disable(${lib_name})
 endfunction()
@@ -517,7 +671,7 @@ function(add_user_elf elf_name)
         add_custom_command(
             OUTPUT ${src_obj}
             COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS} -c ${src_full} -o ${src_obj}
-            DEPENDS ${src_full}
+            DEPENDS ${src_full} ${MUSL_GEN_HEADERS}
             IMPLICIT_DEPENDS ${DEP_LANG} ${src_full}
             COMMENT "Compiling ${elf_name}_${idx}.o"
         )
@@ -653,7 +807,7 @@ function(add_user_dyn_elf name)
         endif()
         add_custom_command(OUTPUT ${src_obj}
             COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS} -c ${src_full} -o ${src_obj}
-            DEPENDS ${src_full} ${ARG_GEN_HEADERS}
+            DEPENDS ${src_full} ${ARG_GEN_HEADERS} ${MUSL_GEN_HEADERS}
             IMPLICIT_DEPENDS ${DEP_LANG} ${src_full})
         list(APPEND OBJ_FILES ${src_obj})
         math(EXPR idx "${idx} + 1")

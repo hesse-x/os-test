@@ -72,15 +72,17 @@ function(add_third_party_lib name)
     # 私有 include：项目根（root-relative include 风格）+ third_party（musl shim:
     # user/include/unistd.h does #include "musl/include/unistd.h", resolved via
     # -I third_party → third_party/musl/include/unistd.h）+ UAPI 契约头 +
-    # user/include + musl freestanding std headers (stdint/stddef/stdarg/stdbool —
-    # now that -isystem is dropped, third_party SHARED libs pull <stdint.h> etc.
-    # from musl; user/include precedes musl so our static bits/alltypes.h wins)
-    # + 本库 INCLUDE_DIRS。
+    # user/include + musl headers（stdint/stddef/stdarg/stdbool 等从 musl 取，
+    # 因 -isystem 已弃；user/include 优先，我们的 bits/alltypes.h 胜出。
+    # pthread/signal/sched 接入 musl 后，third_party 若 include <pthread.h>/
+    # <signal.h> 会落到 musl/include 并拉 <bits/alltypes.h>，故需 musl_gen
+    # 生成头目录在前）+ 本库 INCLUDE_DIRS。
     set(_include_flags
         -I${CMAKE_SOURCE_DIR}
         -I${CMAKE_SOURCE_DIR}/third_party
         -I${CMAKE_SOURCE_DIR}/include/uapi
         -I${CMAKE_SOURCE_DIR}/user/include
+        -I${CMAKE_BINARY_DIR}/musl_gen
         -I${CMAKE_SOURCE_DIR}/third_party/musl/include
         -I${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
         -I${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic)
@@ -100,6 +102,7 @@ function(add_third_party_lib name)
             ${CMAKE_SOURCE_DIR}/third_party
             ${CMAKE_SOURCE_DIR}/include/uapi
             ${CMAKE_SOURCE_DIR}/user/include
+            ${MUSL_GEN_DIR}
             ${CMAKE_SOURCE_DIR}/third_party/musl/include
             ${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
             ${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic
@@ -111,6 +114,9 @@ function(add_third_party_lib name)
         set_target_properties(${name} PROPERTIES
             ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
             OUTPUT_NAME ${_output_name})
+        # Generated musl headers must exist before unity compiles (it pulls
+        # musl headers via the include dirs above).
+        add_dependencies(${name} musl_headers)
     else()
         # ---- SHARED 运行时库（分支 B：custom-command .so，因 Generic 平台无 SHARED target）----
         if(ARG_C)
@@ -134,7 +140,7 @@ function(add_third_party_lib name)
             set(src_obj ${CMAKE_BINARY_DIR}/${name}_${idx}.o)
             add_custom_command(OUTPUT ${src_obj}
                 COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS_BASE} -c ${src_full} -o ${src_obj}
-                DEPENDS ${src_full} ${ARG_GEN_HEADERS}
+                DEPENDS ${src_full} ${ARG_GEN_HEADERS} ${MUSL_GEN_HEADERS}
                 IMPLICIT_DEPENDS ${DEP_LANG} ${src_full}
                 COMMENT "Compiling ${name}_${idx}.o (third_party SHARED)")
             list(APPEND OBJ_FILES ${src_obj})

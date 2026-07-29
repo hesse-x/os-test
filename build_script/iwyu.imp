@@ -95,6 +95,7 @@
   { include: ["\"musl/include/unistd.h\"", private, "<unistd.h>", public ] },
   { include: ["\"musl/include/fcntl.h\"", private, "<fcntl.h>", public ] },
   { include: ["\"bits/fcntl.h\"", private, "<fcntl.h>", public ] },
+  { include: ["\"bits/signal.h\"", private, "<signal.h>", public ] },
 
   # ---- bare quote "unistd.h" → angle <unistd.h> (spelling preference fix) ----
   # The user/include/unistd.h shim is found via -I, so iwyu's "preferred

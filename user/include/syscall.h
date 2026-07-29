@@ -20,6 +20,8 @@
  */
 
 #include <errno.h>
+#include <sched.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <xos/errno.h>
@@ -1196,9 +1198,11 @@ static inline int sys_fchdir(int fd) {
 }
 
 // ===================== sched_* (group 6) =====================
-struct sched_param {
-  int sched_priority;
-};
+// struct sched_param comes from musl's <sched.h> (included above). musl's
+// layout is larger than this OS's kernel-side struct (adds sporadic-server
+// fields), but sched_priority sits at offset 0 in both, and the kernel's
+// sys_sched_setparam/getparam read only that field via copy_from_user of the
+// kernel's own (smaller) struct — so passing musl's larger struct is safe.
 
 static inline int sys_sched_setparam(pid_t pid,
                                      const struct sched_param *param) {

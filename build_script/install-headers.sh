@@ -21,6 +21,10 @@
 #   third_party/musl/include/fcntl.h  → $DEST/fcntl.h        the shim forwards via "musl/include/..."
 #   third_party/musl/include/dlfcn.h  → $DEST/dlfcn.h        (dlopen/dlsym/dlclose/dlerror/dladdr/Dl_info;
 #                                              user/include has no dlfcn.h, so musl's ships verbatim)
+#   third_party/musl/include/{pthread,signal,sched}.h → $DEST/  (musl's pthread/signal/sched —
+#                                              repo's own were deleted when pthread switched to musl)
+#   third_party/musl/arch/x86_64/bits/signal.h → $DEST/bits/signal.h  (<signal.h>'s arch bits;
+#                                              self-contained, no collision with repo bits)
 #   third_party/musl/include/{stdint,stddef,stdarg,stdbool}.h → $DEST/  (musl freestanding std
 #                                              headers — replace the compiler's -isystem freestanding
 #                                              dir so the sysroot is self-contained without it.)
@@ -93,6 +97,21 @@ cp "$SRC"/third_party/musl/include/fcntl.h      "$DEST/fcntl.h"
 #     userspace-side. The dlinfo symbol is still compiled into libc (see
 #     musl_dl_objs); only the <link.h> header is absent.
 cp "$SRC"/third_party/musl/include/dlfcn.h      "$DEST/dlfcn.h"
+
+# 3c. musl pthread/signal/sched headers. The repo's user/include/pthread.h,
+#     signal.h, sched.h were deleted when pthread switched to musl (pthread.md
+#     §八) — these three now come from musl. <signal.h> pulls <bits/signal.h>
+#     (musl arch/x86_64/bits/signal.h, self-contained: sigset_t/stack_t/size_t
+#     come from the already-published <bits/alltypes.h>); it does not collide
+#     with any repo user/include/bits/*.h (alltypes/fcntl/posix/stdint/syscall),
+#     so publish it. <pthread.h> needs only <bits/alltypes.h> + <sched.h> +
+#     <time.h>; <sched.h> needs only <bits/alltypes.h>. <features.h> (pulled by
+#     all three) is the repo's own, already published in step 2 (it is
+#     equivalent to musl's).
+cp "$SRC"/third_party/musl/include/pthread.h    "$DEST/pthread.h"
+cp "$SRC"/third_party/musl/include/signal.h     "$DEST/signal.h"
+cp "$SRC"/third_party/musl/include/sched.h      "$DEST/sched.h"
+cp "$SRC"/third_party/musl/arch/x86_64/bits/signal.h "$DEST/bits/signal.h"
 
 # 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
 #    compiler's -isystem freestanding dir. The published sysroot must be usable

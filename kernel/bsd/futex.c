@@ -12,7 +12,7 @@
 
 #include <stdbool.h>
 
-#include "arch/x64/rtc.h"
+#include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/xcore/kpi.h"
@@ -249,8 +249,9 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   printk(LOG_DEBUG, "futex WAIT: pid=%d uaddr=%p val=%d\n", (int)cur->pid,
          (void *)uaddr, (int)val);
 
-  // timeout: arg4 = absolute abstime ns (struct timespec * passed as int64_t)
-  int64_t abstime_ns = 0;
+  // FUTEX_WAIT uses a relative timeout. Absolute deadlines belong to
+  // FUTEX_WAIT_BITSET, which is not implemented here.
+  uint64_t timeout_ns = 0;
   int has_timeout = 0;
   if (arg4 != 0) {
     struct timespec ts;
@@ -260,7 +261,13 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       spin_unlock_irqrestore(&bucket->lock, bflags);
       return (int64_t)-EFAULT;
     }
-    abstime_ns = (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+    if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000L) {
+      list_remove(&cur->proc->futex_node);
+      cur->proc->futex_uaddr = 0;
+      spin_unlock_irqrestore(&bucket->lock, bflags);
+      return (int64_t)-EINVAL;
+    }
+    timeout_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
     has_timeout = 1;
   }
 
@@ -270,16 +277,7 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
   cur->wait_timed_out = 0;
   if (has_timeout) {
-    // The abstime passed by pthread_mutex_timedlock/etc. is a CLOCK_REALTIME
-    // absolute instant (POSIX).  The timer_queue compares wait_deadline against
-    // sched_clock() (monotonic, zero at boot), so convert the wall-clock
-    // abstime into sched_clock coordinates by subtracting the boot wall-clock
-    // baseline.  Before S14, CLOCK_REALTIME == sched_clock() so this was a
-    // no-op; now CLOCK_REALTIME = wall_clock_boot_ns + sched_clock() and the
-    // subtraction is required.  Underflow (past time) wraps to a huge deadline
-    // that still lands on the right value modulo 2^64.
-    uint64_t boot_ns = __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED);
-    cur->wait_deadline = (uint64_t)abstime_ns - boot_ns;
+    cur->wait_deadline = sched_clock() + timeout_ns;
     sched_timer_queue_insert(cpu, cur);
   }
   cur->wait_event = WAIT_FUTEX;

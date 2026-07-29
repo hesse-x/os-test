@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+/* musl's <signal.h> gates sighandler_t behind _GNU_SOURCE. */
+#define _GNU_SOURCE
 #include "user/test/test_helpers.h"
 #include <signal.h>
 #include <string.h>

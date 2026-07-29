@@ -41,8 +41,10 @@ set(MUSL_INCLUDES
 # Mirrors musl_unistd_objs_so: same musl-internal include order, same -fPIC for
 # the shared link. dynlink.c is the dynamic linker (fused per ldso.md §0);
 # dlstart.c is the arch bootstrap that calls __dls2. Their musl-internal
-# references (__libc, __hwcap, __init_tp, __copy_tls, ...) are satisfied at link
-# time by lib/musl_loader_shim.c + the hand-written libc.
+# references (__libc, __hwcap, __init_tp, __copy_tls, __block_all_sigs, ...) are
+# satisfied at link time by the musl_pthread objects (spliced into libc.so via
+# EXTRA_OBJS); the loader-only, non-pthread symbols (dprintf/getdelim/
+# __tlsdesc_*/__libc_get_version/__dl_vseterr) come from lib/musl_loader_shim.c.
 add_library(musl_loader_objs OBJECT
     ${MUSL_SRC}/ldso/dynlink.c
     ${MUSL_SRC}/ldso/dlstart.c)

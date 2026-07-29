@@ -7,12 +7,17 @@
 # libc source list (dual artifacts from same source: libc.a + libc.so)
 # start.cc removed (_start moved to crt0.o, see plan_ld2b3 T4/T21)
 # Added start_main.cc (__libc_start_main, T11), atexit.c (T8), init_array.c (T10)
+# pthread.cc/tls.cc/errno.cc removed: pthread now comes from musl (musl_pthread
+# sub-library below). __errno_location is provided by musl's
+# src/errno/__errno_location.c (reads musl struct pthread at %fs:0). musl_glue.c
+# provides the hidden internal aliases musl pthread calls.
 set(LIBC_SOURCES
     lib/stdio.cc lib/string.cc lib/malloc.cc
     lib/unistd.cc lib/time.cc lib/file.cc
     lib/ctype.c lib/strtol.c lib/stdlib_misc.c lib/uname.c
-    lib/assert.c lib/errno.cc lib/signal.cc lib/getrandom.c
-    lib/tls.cc lib/pthread.cc
+    lib/assert.c lib/signal.cc lib/getrandom.c
+    lib/musl_missing.c
+    lib/musl_glue.c
     lib/setjmp.S
     lib/start_main.cc
     lib/io_multiplex.cc
@@ -32,18 +37,22 @@ set(LIBC_SOURCES
 # repo order (user/include first). <bits/syscall.h> (SYS_*/__NR_* numbers) is generated
 # into user/include/bits/syscall.h (matching musl's Makefile sed product), shared by both.
 #
-# pthread-mechanism downgrade (unistd_try.md §已定决策 2): musl's cancellable wrappers
-# (read/write/fsync/pause/...) call syscall_cp(...) → __syscall_cp, and the set*id
-# wrappers call __setxid. The real musl implementations route through the pthread
-# cancel/synccall machinery (src/thread/__syscall_cp.c, syscall_cp.s, synccall.c,
-# setxid.c, pthread_cancel.c). This OS's self-authored pthread (user/lib/pthread.cc)
-# does not implement pthread_cancel, and credentials are process-wide — so those musl
-# thread sources are NOT compiled. Instead lib/musl_shim/syscall_cp.c provides a
-# non-cancellable __syscall_cp (plain inline __syscall6) and a no-broadcast __setxid
-# (direct syscall), matching the existing repo behaviour (sys_process.cc:84).
+# pthread-mechanism coupling: musl's cancellable wrappers (read/write/fsync/
+# pause/...) call syscall_cp(...) → __syscall_cp, and the set*id wrappers call
+# __setxid. The real musl implementations route through the pthread cancel/
+# synccall machinery (src/thread/__syscall_cp.c, syscall_cp.s, synccall.c,
+# setxid.c, pthread_cancel.c). Now that the repo uses musl's pthread
+# (musl_pthread, see below), __syscall_cp comes from musl's REAL
+# src/thread/__syscall_cp.c + x86_64/syscall_cp.s (cancel is live). __setxid
+# still cannot use musl's setxid.c — it needs __synccall (procfs /proc/self/task,
+# absent), and this kernel's creds are process-wide — so lib/musl_shim/syscall_cp.c
+# keeps a no-broadcast __setxid (direct syscall), matching sys_process.cc.
 #
-# musl's src/internal/syscall_ret.c provides __syscall_ret (the -errno → -1+errno
-# translation) that every musl unistd wrapper's syscall(...) macro depends on.
+# __syscall_ret (the -errno → -1+errno translation every musl wrapper's
+# syscall(...) macro depends on) is provided by musl_pthread's
+# src/internal/syscall_ret.c — the single source for both unistd and fcntl
+# wrappers (and musl's own thread sources). It is NOT pulled into
+# musl_unistd_objs to avoid a duplicate-definition clash with musl_pthread.
 #
 # faccessat.c is intentionally EXCLUDED this batch: its AT_EACCESS path needs
 # __block_all_sigs/__restore_sigs/__clone shims; the repo's existing faccessat
@@ -89,7 +98,6 @@ list(REMOVE_ITEM MUSL_UNISTD_SOURCES ${MUSL_UNISTD_EXCLUDE})
 
 add_library(musl_unistd_objs OBJECT
     ${MUSL_UNISTD_SOURCES}
-    ${MUSL_DIR}/src/internal/syscall_ret.c
     ${MUSL_DIR}/src/internal/procfdname.c
     ${MUSL_DIR}/src/exit/_Exit.c
     ${MUSL_DIR}/src/sched/sched_yield.c
@@ -131,7 +139,6 @@ target_compile_options(musl_unistd_objs PRIVATE
 # only the code model differs.
 add_library(musl_unistd_objs_so OBJECT
     ${MUSL_UNISTD_SOURCES}
-    ${MUSL_DIR}/src/internal/syscall_ret.c
     ${MUSL_DIR}/src/internal/procfdname.c
     ${MUSL_DIR}/src/exit/_Exit.c
     ${MUSL_DIR}/src/sched/sched_yield.c
@@ -174,9 +181,10 @@ target_compile_options(musl_unistd_objs_so PRIVATE
 # sys_open resolves relatives against bp->cwd via vfs_resolve_user. musl chdir
 # (adopted via musl_unistd_objs) keeps bp->cwd in sync.
 #
-# No need to re-pull syscall_ret.c / syscall_cp.c: __syscall_ret and syscall_cp
-# are already merged into libc via musl_unistd_objs; the fcntl wrappers' syscall(...)
-# / syscall_cp(...) / __syscall(...) resolve at link time.
+# No need to pull syscall_ret.c / __syscall_cp.c here: __syscall_ret and
+# __syscall_cp are provided by musl_pthread (the single source for both);
+# the fcntl wrappers' syscall(...) / syscall_cp(...) / __syscall(...) resolve
+# at link time.
 set(MUSL_FCNTL_SOURCES
     ${MUSL_DIR}/src/fcntl/open.c
     ${MUSL_DIR}/src/fcntl/openat.c
@@ -209,25 +217,22 @@ target_include_directories(musl_fcntl_objs_so PRIVATE
 target_compile_options(musl_fcntl_objs_so PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -fPIC -Wno-all)
 
 # ===================== musl dlfcn integration (dlfcn) =====================
-# Build the upstream musl src/ldso/{dlsym,dlclose,dlinfo}.c wrappers into libc,
+# Build the upstream musl src/ldso/{dlsym,dlclose,dlinfo,dlerror}.c into libc,
 # mirroring musl_fcntl_objs (same musl-internal include order, same dual
-# -fno-pie/-fPIC build). These three wrap symbols the fused loader already
-# defines in dynlink.c (__dlsym, __dl_invalid_handle), so they pull the
+# -fno-pie/-fPIC build). dlsym/dlclose/dlinfo wrap symbols the fused loader
+# already defines in dynlink.c (__dlsym, __dl_invalid_handle), so they pull the
 # non-stub implementations in over musl's weak stubs (src/ldso/*.c ship a
 # weak_alias "not supported" fallback that dynlink.c's strong defs override).
+# dlerror.c provides the real dlerror()/__dl_seterr/__dl_vseterr: now that the
+# runtime fs:0 points at musl's struct pthread (musl_pthread provides the full
+# layout incl. dlerror_buf/dlerror_flag), musl's dlerror.c reads/writes the
+# correct offsets — no stub needed.
 #
 # NOT included here:
 #   dlopen.c / dladdr.c / dl_iterate_phdr.c — strong definitions already live
 #     in the fused ldso/dynlink.c (spliced into libc.so via musl_loader_objs);
 #     the weak stubs in src/ldso/*.c would only be needed for a static build
 #     without the loader, which we don't have.
-#   dlerror.c — depends on __pthread_self() + struct pthread's dlerror_buf/
-#     dlerror_flag fields. Our runtime fs:0 points at the hand-written struct
-#     tcb (user/include/sys/tls.h), whose layout has no dlerror fields, so
-#     musl's dlerror.c would read/write wrong offsets. The __dl_seterr →
-#     __dl_vseterr error-formatting path is instead satisfied by the repo's
-#     own (no-op) __dl_vseterr in musl_loader_shim.c. Real dlerror() text is
-#     Phase 3+ (pthread full TLS layout), same as dlopen/real TLS.
 #   __dlsym.c — provides a weak stub __dlsym; dynlink.c already defines the
 #     strong one, so the stub is dead weight. dlsym.c (the public wrapper) is
 #     all we need.
@@ -239,7 +244,8 @@ target_compile_options(musl_fcntl_objs_so PRIVATE -m64 ${USER_FREESTANDING_FLAGS
 set(MUSL_DL_SOURCES
     ${MUSL_DIR}/src/ldso/dlsym.c
     ${MUSL_DIR}/src/ldso/dlclose.c
-    ${MUSL_DIR}/src/ldso/dlinfo.c)
+    ${MUSL_DIR}/src/ldso/dlinfo.c
+    ${MUSL_DIR}/src/ldso/dlerror.c)
 
 add_library(musl_dl_objs OBJECT ${MUSL_DL_SOURCES})
 target_include_directories(musl_dl_objs PRIVATE
@@ -264,16 +270,123 @@ target_include_directories(musl_dl_objs_so PRIVATE
 target_compile_options(musl_dl_objs_so PRIVATE
     -m64 ${USER_FREESTANDING_FLAGS} -fPIC -Wno-all)
 
+# ===================== musl pthread integration (pthread.md §八) =====================
+# Generate musl's build-time headers (bits/alltypes.h + bits/syscall.h) into
+# ${CMAKE_BINARY_DIR}/musl_gen BEFORE any musl source or consumer compiles.
+# add_musl_lib depends on the musl_headers target; the global include path
+# added below points consumers at musl_gen so <bits/alltypes.h> resolves.
+musl_generate_headers()
+
+# musl pthread sub-library — compiled from musl upstream with musl-internal
+# include paths (see add_musl_lib in build_script/cmake/user_rules.cmake).
+# Provides: full pthread API (src/thread/*), TLS startup (__init_tls/__init_tp/
+# __copy_tls), the struct __libc __libc global, __errno_location, block/restore
+# signal internals, stack-canary init, sigaction restorer (__restore_rt), AND
+# the sigset_t set-mutation functions (sigemptyset/fillset/addset/delset/
+# ismember) — these operate on musl's 128-byte sigset_t and must be compiled
+# under musl's internal headers, not our libc's. synccall.c excluded (needs
+# procfs /proc/self/task; only reached by multithreaded setxid/setrlimit).
+# Public symbols (malloc/memcpy/exit/...) stay in our libc; musl pthread
+# reaches them via the hidden aliases in musl_glue.c.
+file(GLOB MUSL_THREAD_SOURCES ${CMAKE_SOURCE_DIR}/third_party/musl/src/thread/*.c)
+# Drop C sources that have an arch asm equivalent (src/thread/x86_64/<name>.s).
+# On x86-64 musl uses the .s versions (clone/__set_thread_area/__unmapself/
+# syscall_cp); the .c versions are fallbacks for archs without asm. Compiling
+# both would duplicate the symbols at link, and __unmapself.c additionally
+# pulls dynlink.h whose `typedef _Noreturn void (*stage3_func)` clang rejects.
+# The .s versions are added explicitly below.
+list(REMOVE_ITEM MUSL_THREAD_SOURCES
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/thread/synccall.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/thread/__unmapself.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/thread/clone.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/thread/__set_thread_area.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/thread/syscall_cp.c)
+set(MUSL_PTHREAD_SOURCES
+    ${MUSL_THREAD_SOURCES}
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/thread/x86_64/clone.s
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/thread/x86_64/__set_thread_area.s
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/thread/x86_64/__unmapself.s
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/thread/x86_64/syscall_cp.s
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/env/__init_tls.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/env/__stack_chk_fail.c
+    # musl stdio symbols referenced by pthread_create's single-thread→threaded
+    # transition (src/thread/pthread_create.c:200-210): it walks the open-FILE
+    # list (__ofl_lock/__ofl_unlock, src/stdio/ofl.c) and re-locks
+    # __stdin_used/__stdout_used/__stderr_used. We keep our own stdio
+    # (user/lib/stdio.cc) — our FILE objects don't register on musl's ofl list,
+    # and the three *_used symbols are weak-aliased to a NULL dummy
+    # (src/stdio/__stdio_exit.c:3-6), so init_file_lock(NULL) is a no-op
+    # (pthread_create.c:179-182) and the ofl walk iterates an empty list. These
+    # two files are compiled only to PROVIDE those symbols so the dynamic
+    # linker stops failing libc.so relocation with "unresolved PLT symbol
+    # __ofl_unlock"; at runtime they do nothing.
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/stdio/ofl.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/stdio/__stdio_exit.c
+    # __lockfile: pulled in by __stdio_exit.c's close_file() via FFINALLOCK.
+    # Its deps (__pthread_self, a_cas, __wait, a_store, __wake) are all already
+    # in musl_pthread, so it adds no further undefined chain. It operates on
+    # musl FILE->lock/waiters, which is fine — our stdio never enters musl's
+    # ofl list, so __lockfile is only reachable via __stdio_exit (which we do
+    # not call; our exit path is __libc_run_atexit + fflush(stdout)).
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/stdio/__lockfile.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/block.c
+    # sigset_t set-mutation helpers (musl's 128-byte sigset_t). Compiled here
+    # under musl-internal headers, then merged into libc so every consumer
+    # (libc.so's abort()/sigprocmask path, and any program) gets them.
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/sigemptyset.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/sigfillset.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/sigaddset.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/sigdelset.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/sigismember.c
+    # SIGRTMIN/SIGRTMAX macros in musl <signal.h> expand to
+    # __libc_current_sigrtmin()/__libc_current_sigrtmax(); without these two
+    # sources those are undefined references. They stay hidden (internal) — the
+    # macros are the public surface.
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/sigrtmin.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/sigrtmax.c
+    # restore.s provides __restore_rt (mov $15; syscall = rt_sigreturn), used by
+    # musl_glue.c's __libc_sigaction as the kernel sa_restorer so rt_sigreturn
+    # returns correctly after a musl-installed handler (the pthread_cancel
+    # handler in particular).
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/x86_64/restore.s
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal/libc.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/errno/__errno_location.c
+    # __syscall (asm) + __syscall_ret (C): the two low-level syscall primitives
+    # musl's thread code calls (src/thread/__futex.c → syscall(SYS_futex);
+    # src/thread/__syscall_cp.c → __syscall; many src/env/*.c → __syscall_ret).
+    # Declarations live in src/internal/syscall.h:25 but their definitions are
+    # NOT in the src/thread/*.c glob: __syscall is per-arch asm
+    # (src/internal/x86_64/syscall.s — loads %rax=n, shuffles args to the Linux
+    # x86-64 syscall register order rdi/rsi/rdx/r10/r8/r9, `syscall`), and
+    # __syscall_ret is src/internal/syscall_ret.c (errno translation for values
+    # > -4096). Our kernel dispatch uses the identical Linux x86-64 numbers
+    # (verified: futex=202/clone=56/tkill=200/rt_sigaction=13/...), so musl's
+    # __syscall reaches our kernel with no glue. Both must be compiled here so
+    # the merged libc.a/libc.so define them; otherwise the link fails with
+    # "hidden symbol `__syscall`/`__syscall_ret` isn't defined".
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal/x86_64/syscall.s
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal/syscall_ret.c
+    # musl-side startup bridge: sets libc.page_size/auxv for our __libc_start_main
+    # (compiled here so it sees musl's private struct __libc via libc.h).
+    ${CMAKE_SOURCE_DIR}/user/lib/musl_startup.c
+)
+add_musl_lib(musl_pthread SOURCES ${MUSL_PTHREAD_SOURCES})
+
 # libc.a (static, -fno-pie -DDYNAMIC=0)
 # IMAGE_PATH usr/lib/libc.a: ship the static libc.a into the root FS (STATIC has
 # no auto-default). IMAGE_ARTIFACT libc.a overrides the default lib<c>.a build name.
-# EXTRA_OBJS: musl unistd + fcntl upstream objects merged into the archive,
-# replacing the repo's hand-written wrappers (unistd_worklist M0.2/M0.3,
-# fcntl_worklist §3d).
+# EXTRA_OBJS: musl unistd + fcntl upstream objects (unistd_worklist M0.2/M0.3,
+# fcntl_worklist §3d) merged into the archive, replacing the repo's hand-written
+# wrappers, AND musl_pthread so every static-linked ELF automatically gets
+# __init_tls, __errno_location, pthread_*, sigemptyset/..., __restore_rt, struct
+# __libc — required because errno lives at %fs:0 (musl TCB) and EVERY ELF (even
+# single-threaded hello) must run __init_tls at startup or the first errno fetch
+# crashes. musl_pthread is built -fPIC by add_musl_lib (one compile serves both
+# the static -no-pie ELF and the shared libc.so links).
 add_user_lib(c
     SOURCES ${LIBC_SOURCES}
     EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs> $<TARGET_OBJECTS:musl_fcntl_objs>
-               $<TARGET_OBJECTS:musl_dl_objs>
+               $<TARGET_OBJECTS:musl_dl_objs> $<TARGET_OBJECTS:musl_pthread>
     C
     FLAGS "-fno-pie -DDYNAMIC=0"
     IMAGE_PATH usr/lib/libc.a
@@ -283,15 +396,23 @@ add_user_lib(c
 # libc.so (dynamic, -fPIC -DDYNAMIC=1) — FUSED musl loader + hand-written libc
 # (ldso.md). The musl loader objects (dynlink.lo/dlstart.lo, PIC) are spliced in
 # via EXTRA_OBJS; -e _dlstart makes the loader entry the .so entry point. The
-# loader's musl-internal symbol dependencies (__libc/__init_tp/__copy_tls/...)
-# are satisfied by lib/musl_loader_shim.c (in LIBC_SOURCES). After bootstrap the
+# loader's musl-internal symbol dependencies (__libc/__init_tp/__copy_tls/
+# __block_all_sigs/... ) are satisfied by the musl_pthread objects below — the
+# loader runs musl's real TLS setup during __dls3 (FS_BASE → musl struct
+# pthread), and __libc_start_main does NOT override fs_base. Only the
+# loader-only, non-pthread symbols (dprintf/getdelim/__tlsdesc_*/__libc_get_version)
+# still come from lib/musl_loader_shim.c (in LIBC_SOURCES). After bootstrap the
 # loader jumps to the main ELF _start; the hand-written __libc_start_main then
-# overrides fs_base to struct tcb (loader dormant — ldso.md §2).
+# runs the loader's __libc_start_init() (do_init_fni) over every DSO's
+# .init_array (loader dormant thereafter — ldso.md §2).
+# Merges musl_pthread's objects too so libc.so carries __init_tls/__errno_location/
+# pthread_*/sigset helpers — the dynamic loader and every dyn ELF depend on
+# libc.so for these.
 add_user_lib(c_so
     SOURCES ${LIBC_SOURCES}
     EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs_so> $<TARGET_OBJECTS:musl_fcntl_objs_so>
                $<TARGET_OBJECTS:musl_dl_objs_so>
-               $<TARGET_OBJECTS:musl_loader_objs>
+               $<TARGET_OBJECTS:musl_loader_objs> $<TARGET_OBJECTS:musl_pthread>
     C
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED

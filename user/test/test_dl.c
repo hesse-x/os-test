@@ -18,12 +18,11 @@
  *   DL-001  dlopen(NULL, RTLD_LAZY) returns non-NULL (the head handle).
  *   DL-002  dlsym(head, "printf") resolves a libc global symbol (non-NULL).
  *   DL-003  dlsym(head, "<bogus>") returns NULL for a missing symbol.
- *   DL-004  dlerror() returns NULL after a successful dlsym (no pending error)
- *           and a non-NULL string right after the failed dlsym. NOTE: musl's
- *           dlerror.c is NOT compiled in (pthread struct layout mismatch — see
- *           musl_loader_shim.c's __dl_vseterr no-op); dlerror() itself is the
- *           weak stub returning a static "not supported" pointer or NULL. We
- *           only assert it does not crash / does not return a wild pointer.
+ *   DL-004  dlerror() is musl's real implementation (src/ldso/dlerror.c in
+ *           musl_dl_objs, now that musl_pthread provides the struct pthread
+ *           dlerror_buf/dlerror_flag layout at %fs:0). After a failed dlsym the
+ *           loader's error() path calls __dl_vseterr, so dlerror() must return
+ * a non-NULL "Symbol not found: ..." string; before any failure it is NULL.
  *   DL-005  dladdr(&printf, &info) returns nonzero and fills dli_fname/sname.
  *   DL-006  dlclose(head) returns 0 (head is a valid handle; dlclose is a
  *           no-op for the main program).
@@ -71,15 +70,21 @@ int main(int argc, char **argv, char **envp) {
     printf("DL-003 ok: dlsym(bogus) = NULL\n");
   }
 
-  /* DL-004: dlerror() must not crash. We do not assert its exact value: musl's
-   * dlerror.c is deliberately not built (see file header), so dlerror is the
-   * weak stub. Reading it before and after a failed dlsym proves the symbol is
-   * linked and callable. */
-  char *e1 = dlerror();
+  /* DL-004: dlerror() is musl's real implementation (dlerror.c in
+   * musl_dl_objs). dlerror() consumes the pending error (clears dlerror_flag),
+   * so call it once first to drain anything left by earlier steps. Then a
+   * failed dlsym sets the error via the loader's error()→__dl_vseterr path, and
+   * the next dlerror() must return a non-NULL "Symbol not found: ..." string.
+   */
+  (void)dlerror(); /* drain any pending error from DL-002/DL-003 */
   (void)dlsym(handle, "__dl_test_bogus_symbol_xyz");
   char *e2 = dlerror();
-  printf("DL-004 ok: dlerror() before=%p after-failed-dlsym=%p (callable)\n",
-         (void *)e1, (void *)e2);
+  if (e2 == NULL) {
+    printf("DL-004 FAIL: dlerror() returned NULL after a failed dlsym "
+           "(real dlerror not wired)\n");
+    return 4;
+  }
+  printf("DL-004 ok: dlerror() after failed dlsym = \"%s\"\n", e2);
 
   /* DL-005: dladdr on a known symbol. Use printf_addr from DL-002 (fall back to
    * our own &printf if DL-002 failed, so the step still exercises dladdr). */

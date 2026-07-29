@@ -47,7 +47,7 @@ static volatile void *g_fault_page;
 static void segv_handler(int sig, siginfo_t *info, void *uctx) {
   (void)sig;
   (void)uctx;
-  void *addr = info->_sifields.si_addr;
+  void *addr = info->si_addr;
   if (!((uintptr_t)addr >= (uintptr_t)g_fault_page &&
         (uintptr_t)addr < (uintptr_t)g_fault_page + PAGE))
     _exit(0xfe);

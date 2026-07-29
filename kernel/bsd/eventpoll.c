@@ -516,7 +516,10 @@ int64_t sys_epoll_pwait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
   sigset_t new_mask;
   int have_mask = 0;
   if (sigmask_ptr) {
-    if (sigsetsize != sizeof(sigset_t))
+    // Accept any sigsetsize >= our 8-byte sigset_t (musl passes 128; we read
+    // only the low 8 bytes = signals 1..64). The strict != check rejected
+    // musl's 128 → EINVAL.
+    if (sigsetsize < (int64_t)sizeof(sigset_t))
       return -EINVAL;
     if (copy_from_user(&new_mask, (void *)sigmask_ptr, sizeof(new_mask)))
       return -EFAULT;

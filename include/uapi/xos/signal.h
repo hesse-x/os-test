@@ -10,79 +10,244 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// ===================== Signal numbers (Linux-compatible) =====================
-#define SIGHUP 1
-#define SIGINT 2
-#define SIGQUIT 3
-#define SIGILL 4
-#define SIGTRAP 5
-#define SIGABRT 6
-#define SIGBUS 7
-#define SIGFPE 8
-#define SIGKILL 9
-#define SIGUSR1 10
-#define SIGSEGV 11
-#define SIGUSR2 12
-#define SIGPIPE 13
-#define SIGALRM 14
-#define SIGTERM 15
-#define SIGSTKFLT 16
-#define SIGCHLD 17
-#define SIGCONT 18
-#define SIGSTOP 19
-#define SIGTSTP 20
-#define SIGTTIN 21
-#define SIGTTOU 22
-#define SIGURG 23
-#define SIGXCPU 24
-#define SIGXFSZ 25
-#define SIGVTALRM 26
-#define SIGPROF 27
-#define SIGWINCH 28
-#define SIGPWR 29
-#define SIGSYS 31
-#define SIGCANCEL 32 // used by pthread_cancel (matches Linux glibc)
+// ===================================================================
+// This header is shared by the kernel and userspace, but the two see
+// DIFFERENT signal ABIs and only the constant block is common:
+//
+//   - Signal numbers, SA_* flags, si_code constants: identical between
+//     this OS and musl. Defined below under #ifndef so that in userspace
+//     musl's own <signal.h> definitions win (same values) and we never
+//     redefine; in kernel builds (no musl headers) the guards let ours
+//     through.
+//
+//   - Wire-format structs (sigset_t, struct sigaction, siginfo_t,
+//     ucontext_t, stack_t, sigcontext): the kernel's 8-byte-mask /
+//     32-byte-struct syscall ABI. Userspace uses musl's larger ABIs
+//     (128-byte sigset_t, 152-byte struct sigaction) from <signal.h>;
+//     musl_glue.c::__libc_sigaction converts between the two at the
+//     syscall boundary. Those struct/typedef definitions are therefore
+//     KERNEL-ONLY, gated by __KERNEL__ (defined for all kernel objects
+//     in kernel_rules.cmake, absent for userspace). Userspace gets them
+//     from musl's headers instead.
+// ===================================================================
 
-// S03 lifts NSIG to 65 so RT signals 33-64 can be delivered. SIGRTMIN is the
-// kernel-side floor (covers this OS's SIGCANCEL=32); glibc's user-side floor
-// (35, reserving 32-34 for libc) is defined in user/include/signal.h.
+// ===================== Signal numbers (Linux-compatible) =====================
+#ifndef SIGHUP
+#define SIGHUP 1
+#endif
+#ifndef SIGINT
+#define SIGINT 2
+#endif
+#ifndef SIGQUIT
+#define SIGQUIT 3
+#endif
+#ifndef SIGILL
+#define SIGILL 4
+#endif
+#ifndef SIGTRAP
+#define SIGTRAP 5
+#endif
+#ifndef SIGABRT
+#define SIGABRT 6
+#endif
+#ifndef SIGBUS
+#define SIGBUS 7
+#endif
+#ifndef SIGFPE
+#define SIGFPE 8
+#endif
+#ifndef SIGKILL
+#define SIGKILL 9
+#endif
+#ifndef SIGUSR1
+#define SIGUSR1 10
+#endif
+#ifndef SIGSEGV
+#define SIGSEGV 11
+#endif
+#ifndef SIGUSR2
+#define SIGUSR2 12
+#endif
+#ifndef SIGPIPE
+#define SIGPIPE 13
+#endif
+#ifndef SIGALRM
+#define SIGALRM 14
+#endif
+#ifndef SIGTERM
+#define SIGTERM 15
+#endif
+#ifndef SIGSTKFLT
+#define SIGSTKFLT 16
+#endif
+#ifndef SIGCHLD
+#define SIGCHLD 17
+#endif
+#ifndef SIGCONT
+#define SIGCONT 18
+#endif
+#ifndef SIGSTOP
+#define SIGSTOP 19
+#endif
+#ifndef SIGTSTP
+#define SIGTSTP 20
+#endif
+#ifndef SIGTTIN
+#define SIGTTIN 21
+#endif
+#ifndef SIGTTOU
+#define SIGTTOU 22
+#endif
+#ifndef SIGURG
+#define SIGURG 23
+#endif
+#ifndef SIGXCPU
+#define SIGXCPU 24
+#endif
+#ifndef SIGXFSZ
+#define SIGXFSZ 25
+#endif
+#ifndef SIGVTALRM
+#define SIGVTALRM 26
+#endif
+#ifndef SIGPROF
+#define SIGPROF 27
+#endif
+#ifndef SIGWINCH
+#define SIGWINCH 28
+#endif
+#ifndef SIGPWR
+#define SIGPWR 29
+#endif
+#ifndef SIGSYS
+#define SIGSYS 31
+#endif
+// SIGCANCEL: this OS's kernel uses 32 for its legacy in-kernel cancel hook
+// (signal.c SIGCANCEL=32 special-case). musl uses 33 (SIGCANCEL in musl's
+// pthread_impl.h). Both coexist: the kernel keeps 32 (never reached by musl's
+// user-space cancel which uses 33). Not #ifndef-guarded — musl does NOT define
+// SIGCANCEL in its public <signal.h>, so ours is the only definition users
+// see, and the kernel keeps its own 32 here.
+#define SIGCANCEL 32
+
+// S03 lifts NSIG to 65 so RT signals 33-64 can be delivered. In userspace
+// musl defines NSIG = _NSIG = 65 (same value) — #ifndef lets musl's win.
+#ifndef NSIG
 #define NSIG 65
+#endif
+// Kernel-side SIGRTMIN floor (covers this OS's SIGCANCEL=32). musl's user-side
+// SIGRTMIN/__libc_current_sigrtmin() reserves 32-34 for libc and is the
+// authoritative userspace value; #ifndef lets it win in userspace.
+#ifndef SIGRTMIN
 #define SIGRTMIN 32
+#endif
+#ifndef SIGRTMAX
 #define SIGRTMAX 64
+#endif
 
 // ===================== Default actions =====================
+#ifndef SIG_DFL
 #define SIG_DFL ((void (*)(int))0) // default action (terminate)
+#endif
+#ifndef SIG_IGN
 #define SIG_IGN ((void (*)(int))1) // ignore signal
+#endif
 
-// Bitmask index for sigset_t (uint64, signals 1..64). Linux convention:
-// signal N occupies bit (N-1), so SIGRTMAX (64) → bit 63 fits in uint64.
-// Both kernel (1ULL<<(sig-1)) and user sigaddset/sigismember must use this.
+// Bitmask index for the kernel's 8-byte sigset_t (uint64, signals 1..64).
+// Linux convention: signal N occupies bit (N-1). Kernel-internal only;
+// userspace sigset_t is musl's 128-byte struct and musl's sigaddset/sigismember
+// index .__bits directly, so SIGMASK() is not used in userspace.
 #define SIGMASK(sig) (1ULL << ((sig) - 1))
 
 // ===================== SA_* flags =====================
-// Values align with Linux x86-64. SA_RESETHAND is 0x80000000 (the high bit),
-// NOT 0x08000000 — that value belongs to SA_ONSTACK; the old value was a bug
-// (it collided with SA_ONSTACK, which S04 now defines).
+// Values align with Linux x86-64 and musl. #ifndef so musl's definitions win
+// in userspace (identical values either way).
+#ifndef SA_NOCLDSTOP
 #define SA_NOCLDSTOP 0x00000001
+#endif
+#ifndef SA_NOCLDWAIT
 #define SA_NOCLDWAIT 0x00000002
+#endif
+#ifndef SA_SIGINFO
 #define SA_SIGINFO 0x00000004
+#endif
+#ifndef SA_ONSTACK
 #define SA_ONSTACK 0x08000000
+#endif
+#ifndef SA_RESETHAND
 #define SA_RESETHAND 0x80000000
+#endif
+#ifndef SA_NODEFER
 #define SA_NODEFER 0x40000000
+#endif
+#ifndef SA_RESTORER
 #define SA_RESTORER                                                            \
   0x04000000 // S02: honor sa_restorer as the return trampoline
+#endif
+#ifndef SA_RESTART
 #define SA_RESTART                                                             \
-  0x10000000 // S02-style restart: a slow syscall that returns -ERESTART is
-             // re-executed (rip -= 2, rax = orig nr) when the delivering
-             // handler has SA_RESTART set; otherwise it surfaces as -EINTR.
-             // See refact_syscall/02. Never-restart syscalls (pause, sleep,
+  0x10000000 // S02-style restart: a slow syscall that returns -ERESTART is   \
+             // re-executed (rip -= 2, rax = orig nr) when the delivering      \
+             // handler has SA_RESTART set; otherwise it surfaces as -EINTR.   \
+             // See refact_syscall/02. Never-restart syscalls (pause, sleep,   \
              // nanosleep, poll-with-timeout, futex-with-timeout) return EINTR.
+#endif
+
+// ===================== SIGCHLD si_code (CLD_*) =====================
+#ifndef CLD_EXITED
+#define CLD_EXITED 1
+#endif
+#ifndef CLD_KILLED
+#define CLD_KILLED 2
+#endif
+#ifndef CLD_DUMPED
+#define CLD_DUMPED 3
+#endif
+#ifndef CLD_TRAPPED
+#define CLD_TRAPPED 4
+#endif
+#ifndef CLD_STOPPED
+#define CLD_STOPPED 5
+#endif
+#ifndef CLD_CONTINUED
+#define CLD_CONTINUED 6
+#endif
+
+// ===================== SI_* codes =====================
+#ifndef SI_USER
+#define SI_USER 0
+#endif
+#ifndef SI_KERNEL
+#define SI_KERNEL 128
+#endif
+#ifndef SI_QUEUE
+#define SI_QUEUE -1
+#endif
+
+// ===================== SIGSEGV si_code =====================
+#ifndef SEGV_MAPERR
+#define SEGV_MAPERR 1 // address not mapped
+#endif
+#ifndef SEGV_ACCERR
+#define SEGV_ACCERR 2 // permission violation
+#endif
+
+// ===================== SIGFPE si_code =====================
+#ifndef FPE_INTDIV
+#define FPE_INTDIV 1 // integer divide by zero
+#endif
+
+// ===================== SIGILL si_code =====================
+#ifndef ILL_ILLOPC
+#define ILL_ILLOPC 1 // illegal opcode
+#endif
+
+// ------------------------------------------------------------------
+// KERNEL-ONLY wire-format types (see top-of-file note).
+// ------------------------------------------------------------------
+#ifdef __KERNEL__
 
 // ===================== sigaltstack (S04) =====================
-// Alternate signal stack. ss_flags may carry SS_ONSTACK (set only by the
-// kernel while a handler runs on the altstack) and SS_DISABLE (no altstack
-// installed). SS_AUTODISARM is a user-requested flag that makes the kernel
-// disable the altstack on entry so a nested signal cannot reuse it.
 typedef struct {
   void *ss_sp;
   int ss_flags;
@@ -95,29 +260,6 @@ typedef struct {
 
 #define MINSIGSTKSZ 2048
 #define SIGSTKSZ 8192
-
-// ===================== SIGCHLD si_code (CLD_*) =====================
-#define CLD_EXITED 1
-#define CLD_KILLED 2
-#define CLD_DUMPED 3
-#define CLD_TRAPPED 4
-#define CLD_STOPPED 5
-#define CLD_CONTINUED 6
-
-// ===================== SI_* codes =====================
-#define SI_USER 0
-#define SI_KERNEL 128
-#define SI_QUEUE -1
-
-// ===================== SIGSEGV si_code =====================
-#define SEGV_MAPERR 1 // address not mapped
-#define SEGV_ACCERR 2 // permission violation
-
-// ===================== SIGFPE si_code =====================
-#define FPE_INTDIV 1 // integer divide by zero
-
-// ===================== SIGILL si_code =====================
-#define ILL_ILLOPC 1 // illegal opcode
 
 #ifndef __ASSEMBLER__
 
@@ -196,6 +338,8 @@ struct rt_sigframe {
 
 #endif // __ASSEMBLER__
 
+#endif // __KERNEL__
+
 // Trampoline page: mapped at this fixed user-space address in every process
 // (read-only, executable, no NX)
 #define SIG_TRAMPOLINE_ADDR 0x50000000ULL
@@ -204,4 +348,4 @@ struct rt_sigframe {
 // The trampoline code is:  mov rax, SYS_SIGRETURN; syscall
 // SYS_SIGRETURN = 45
 
-#endif // COMMON_SIGNAL_H
+#endif /* COMMON_SIGNAL_H */

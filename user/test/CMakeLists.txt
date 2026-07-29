@@ -81,7 +81,9 @@ add_user_dyn_elf(test_sse_smoke C SOURCES test_sse_smoke.c LINK_LIBS c)
 # manually as multiple instances; not a test_runner regression)
 add_user_dyn_elf(test_cpu_burn C SOURCES test_cpu_burn.c LINK_LIBS c NO_IMAGE)
 
-# Layer 13: pthread
+# Layer 13: pthread (musl upstream — musl_pthread is merged into libc.a and
+# libc.so via MERGE_LIBS, so pthread_* / __init_tls / __errno_location come
+# from libc alone; no separate musl_pthread link needed).
 add_user_dyn_elf(pthread C SOURCES test_pthread.c LINK_LIBS c STATIC_LIBS unity)
 
 # DRM virtio-gpu test (no Unity — diagnostic printf)

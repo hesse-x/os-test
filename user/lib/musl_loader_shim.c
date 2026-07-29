@@ -4,41 +4,46 @@
  * SPDX-License-Identifier: MIT
  */
 
-// musl_loader_shim — symbols the musl dynamic loader (dynlink.lo/dlstart.lo,
-// fused into libc.so per ldso.md) references but the hand-written libc does not
-// define. We do NOT link musl's src/*.o (would clash with the hand-written
-// libc), so these musl-internal symbols must be provided here.
+// musl_loader_shim — the few symbols the musl dynamic loader (dynlink.lo/
+// dlstart.lo, fused into libc.so per ldso.md) references that are NOT supplied
+// by either the hand-written libc or the musl_pthread sub-library
+// (src/thread/*, src/env/__init_tls.c, src/internal/libc.c, src/signal/block.c,
+// ... merged into libc.so via $<TARGET_OBJECTS:musl_pthread>). Everything
+// pthread/TLS-related
+// (__libc, __hwcap, __init_tp, __copy_tls, __block_all_sigs/__restore_sigs,
+// __inhibit_ptc/__release_ptc, __tls_get_addr) now comes from musl_pthread for
+// real — the loader runs musl's actual TLS setup during __dls3 and the
+// hand-written __libc_start_main no longer overrides fs_base. Only the
+// loader-only / non-pthread symbols remain here.
 //
-// The loader is dormant after it jumps to the main ELF entry (ldso.md §2:
-// "loader 跳 entry 后 dormant,覆盖安全"). The hand-written __libc_start_main
-// then overrides fs_base to the hand-written struct tcb. Hence the TLS-model
-// symbols (__init_tp/__copy_tls) only need to survive the brief bootstrap
-// window; they are NOT a faithful musl pthread implementation. dlopen/real TLS
-// is Phase 3+ (ldso.md §3 Phase 3 / §5.3).
-//
-// Symbol surface (from `nm -u` on dynlink.lo + dlstart.lo, minus what the
-// hand-written libc already defines):
-//   __libc, __hwcap, __environ            — musl globals (struct __libc must
-//                                          match musl's libc.h field-for-field)
-//   __init_tp, __copy_tls                 — TLS setup (shimmed; fs_base later
-//                                          overridden by __libc_tls_init_rest)
-//   __libc_get_version                    — ldd banner (never on exec path)
-//   __block_all_sigs, __restore_sigs      — signal mask (only __tls_get_new)
-//   __inhibit_ptc, __release_ptc          — lazy-TLS ptc lock (only dlopen/gd)
-//   __tlsdesc_static, __tlsdesc_dynamic   — TLSDESC handlers (address taken by
-//                                          reloc; never called w/o -mtlsdesc)
-//   __tls_get_addr                        — general-dynamic TLS (no __thread →
-//                                          never called)
-//   __dl_vseterr, __dl_seterr                — dlerror formatter (dlopen
-//   errors) dprintf, vdprintf                     — loader debug/error messages
-//                                          (real impl via vsnprintf+write)
+// Symbol surface still provided here (loader refs not covered elsewhere):
+//   __libc_get_version                    — ldd banner (dynlink.c:1554; never
+//                                            on the normal exec path)
+//   __tlsdesc_static, __tlsdesc_dynamic   — TLSDESC handlers whose addresses
+//                                            are stored by R_X86_64_TLSDESC
+//                                            relocs (dynlink.c:434/437). musl
+//                                            defines them in ldso/tlsdesc.c,
+//                                            which is NOT in musl_loader_objs
+//                                            nor musl_pthread, so the shim
+//                                            must provide them. They are only
+//                                            reached under -mtls-dialect=desc,
+//                                            which we never use.
+//   dprintf, vdprintf                     — loader debug/error messages
+//                                            (real impl via vsnprintf+write)
 //   getdelim                              — reading /etc/ld.so.* (absent on
-//                                          this OS; real impl for safety)
+//                                            this OS; real impl for safety)
 //
-// _dl_link_map: the hand-written ldso used to build this list; the fused
-// loader does not. Defined here as NULL so the (legacy) dynamic-path
-// collect_tls_from_link_map(_dl_link_map) returns empty tls_info without
-// crashing — the new __libc_start_main dynamic path does not use it.
+// NOT here anymore (now supplied elsewhere, so dropped from the shim):
+//   __dl_vseterr / __dl_seterr / dlerror  — musl's dlerror.c (in musl_dl_objs)
+//                                            provides them now that
+//                                            musl_pthread gives the full struct
+//                                            pthread (dlerror_buf/dlerror_flag)
+//                                            at %fs:0.
+//   __tls_get_addr                        — musl_pthread
+//   (src/thread/__tls_get_addr.c).
+//
+// __environ is defined in start_main.cc (environ is aliased to it); declared
+// extern here because the loader (dynlink.c:1464) writes it during __dls3.
 
 #include <errno.h>
 #include <stdarg.h>
@@ -46,165 +51,139 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <syscall.h>
 #include <unistd.h>
 
-#include <sys/cdefs.h>
 #include <xos/errno.h>
+#include <xos/syscall_nums.h>
 
-// ===================== musl struct __libc (verbatim) =====================
-// Copied field-for-field from third_party/musl/src/internal/libc.h so the
-// loader's `libc.<field>` accesses hit the right offsets. Do NOT reorder.
-
-struct __locale_struct {
-  const struct __locale_map *volatile cat[6];
-};
-struct tls_module {
-  struct tls_module *next;
-  void *image;
-  size_t len, size, align, offset;
-};
-struct __libc {
-  int can_do_threads;
-  int threaded;
-  int secure;
-  volatile int threads_minus_1;
-  size_t *auxv;
-  struct tls_module *tls_head;
-  size_t tls_size, tls_align, tls_cnt;
-  size_t page_size;
-  struct __locale_struct global_locale;
-};
-
-// `__libc` is referenced HIDDEN by the loader. Define it here (zeroed BSS);
-// the loader fills auxv/page_size/secure/tls_size during __dls3.
-struct __libc __libc;
-
-size_t __hwcap;
-// __environ is defined in start_main.cc (where `environ` is aliased to it, so
-// getenv reads the loader's __environ = envp assignment before __libc_env_init
-// runs). Declared extern here; the loader (dynlink.c:1464) writes it.
 extern char **__environ;
-
-// ===================== TLS setup (bootstrap-only shims) =====================
-// musl's real __copy_tls/__init_tp build a musl struct pthread at fs:0. We
-// override fs_base to struct tcb in __libc_start_main, so these only need to
-// (a) set fs_base to a valid pointer (so the loader's __pthread_self() inline
-// %fs:0 read during __dls3 returns a comparable pointer), and
-// (b) keep __dls3's `__copy_tls(builtin_tls) != __pthread_self()` assertion
-//     true: __copy_tls returns its arg unchanged, and __init_tp sets fs:0 to
-//     that same arg → the two compare equal.
-//
-// p points at musl's builtin_tls, laid out as struct pthread. musl and the
-// hand-written tcb both put `self` at offset 0 and read the thread pointer via
-// `mov %fs:0` (single dereference — see pthread_arch.h /
-// __pthread_current_tcb).
-// __init_tp MUST write self=p *before* setting fs_base, otherwise the very
-// first errno-path syscall in the loader (e.g. writev → __syscall_ret →
-// __errno_location, which does *(fs:0) to get the tcb) reads self=0 from BSS
-// and returns &errno = 0 + 0x458 → SIGSEGV. Mirrors upstream __init_tls.c:14.
-void *__copy_tls(unsigned char *mem) { return mem; }
-
-int __init_tp(void *p) {
-  struct pthread_shim {
-    struct pthread_shim *self;
-  };
-  ((struct pthread_shim *)p)->self = (struct pthread_shim *)p;
-  sys_arch_prctl(ARCH_SET_FS, (int64_t)(uintptr_t)p);
-  __libc.can_do_threads = 1;
-  return 0;
-}
 
 // ===================== ldd / version (never on exec path)
 // =====================
 const char *__libc_get_version(void) {
-  return "1.1.19 (fused hand-written libc)";
+  return "1.1.19 (fused hand-written libc + musl pthread)";
 }
-
-// ===================== signal mask (only __tls_get_new / dlopen)
-// ===================== Stubs: the exec bootstrap never calls them. Real impl
-// belongs to Phase 3.
-void __block_all_sigs(void *set) { (void)set; }
-void __restore_sigs(void *set) { (void)set; }
-
-// ===================== lazy-TLS / pthread-tp-cache lock (dlopen only)
-// =====================
-void __inhibit_ptc(void) {}
-void __release_ptc(void) {}
 
 // ===================== TLSDESC handlers (address taken by reloc)
 // ===================== Only emitted with -mtls-dialect=desc; our objects never
 // use TLSDESC, so the reloc branch that stores these addresses never runs and
-// they are never called.
+// they are never called. musl's real definitions live in ldso/tlsdesc.c, which
+// is not part of musl_loader_objs or musl_pthread, so the shim must satisfy the
+// reference.
 ptrdiff_t __tlsdesc_static(void) { return 0; }
 ptrdiff_t __tlsdesc_dynamic(void) { return 0; }
 
-// ===================== general-dynamic TLS (no __thread in hand-written libc)
-// =====================
-void *__tls_get_addr(size_t *v) {
-  (void)v;
-  return NULL;
-}
-
-// ===================== dlerror formatter (dlopen errors only)
-// =====================
-// __dl_vseterr: musl's dlerror.c stores a per-thread formatted error string
-// via __pthread_self()->dlerror_buf. Our runtime fs:0 points at the
-// hand-written struct tcb (no dlerror fields), so musl's dlerror.c is NOT
-// compiled in; this no-op keeps the loader's error-formatting call sites (and
-// the musl_dl_objs wrappers dlsym.c/dlclose.c/dlinfo.c that call __dl_seterr)
-// from needing a real backing. dlerror() text is Phase 3+ (pthread full TLS
-// layout).
-void __dl_vseterr(const char *fmt, va_list ap) {
-  (void)fmt;
-  (void)ap;
-}
-
-// __dl_seterr: va_list wrapper over __dl_vseterr (mirrors musl dlerror.c:47).
-// Declared hidden in musl's dlopen.c/__dlsym.c/dlinfo.c; dlinfo.c (compiled via
-// musl_dl_objs) references it, so provide the definition here alongside
-// __dl_vseterr.
-void __dl_seterr(const char *fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-  __dl_vseterr(fmt, ap);
-  va_end(ap);
-}
-
-// dlerror: musl's dlerror.c (which owns this) is NOT compiled (pthread struct
-// layout mismatch — see __dl_vseterr note). Provide a stub returning NULL
-// (= "no error pending", matching musl's initial dlerror_flag=0 state) so
-// callers link and run without crashing. Exported in libc.map so the dlfcn
-// API surface is complete; Phase 3 replaces this stub with musl's real
-// dlerror.c once pthread TLS layout is musl-aligned (the map line stays).
-// LIBC_EXPORT overrides this file's -fvisibility=hidden (c_so default) so the
-// symbol is actually exported, not just listed in the map (a hidden symbol
-// stays LOCAL regardless of the version script's global: clause).
-LIBC_EXPORT char *dlerror(void) { return NULL; }
-
 // ===================== dprintf / vdprintf (loader debug + error paths)
-// ===================== The hand-written libc has snprintf/vsnprintf but not
-// dprintf/vdprintf. The loader calls them for LD_DEBUG output and load-failure
-// diagnostics; provide real implementations backed by vsnprintf + write.
+// ===================== ld.so may diagnose failures before relocating its own
+// PLT. Keep this tiny formatter self-contained and write through raw syscalls
+// only.
+
+static long loader_raw_write(int fd, const char *buf, size_t len) {
+  long ret;
+  __asm__ volatile("syscall"
+                   : "=a"(ret)
+                   : "a"((long)SYS_WRITE), "D"((long)fd), "S"(buf),
+                     "d"((long)len)
+                   : "rcx", "r11", "memory");
+  return ret;
+}
+
+static int loader_write_str(int fd, const char *s) {
+  size_t len = 0;
+  if (!s)
+    s = "(null)";
+  while (s[len])
+    len++;
+  long ret = loader_raw_write(fd, s, len);
+  return ret < 0 ? -1 : (int)ret;
+}
+
+static int loader_write_uint(int fd, uint64_t value, unsigned base) {
+  static const char digits[] = "0123456789abcdef";
+  char buf[32];
+  size_t pos = sizeof(buf);
+  do {
+    buf[--pos] = digits[value % base];
+    value /= base;
+  } while (value);
+  long ret = loader_raw_write(fd, buf + pos, sizeof(buf) - pos);
+  return ret < 0 ? -1 : (int)ret;
+}
+
+static int loader_vprint(int fd, const char *fmt, va_list ap) {
+  int total = 0;
+  const char *text = fmt;
+
+  while (*fmt) {
+    if (*fmt++ != "%"[0])
+      continue;
+    if (fmt - 1 > text) {
+      long ret = loader_raw_write(fd, text, (size_t)((fmt - 1) - text));
+      if (ret < 0)
+        return -1;
+      total += (int)ret;
+    }
+
+    int ret;
+    if (*fmt == "s"[0]) {
+      ret = loader_write_str(fd, va_arg(ap, const char *));
+      fmt++;
+    } else if (*fmt == "d"[0]) {
+      int value = va_arg(ap, int);
+      if (value < 0) {
+        ret = (int)loader_raw_write(fd, "-", 1);
+        if (ret >= 0) {
+          int n = loader_write_uint(fd, 0u - (unsigned)value, 10);
+          ret = n < 0 ? -1 : ret + n;
+        }
+      } else {
+        ret = loader_write_uint(fd, (unsigned)value, 10);
+      }
+      fmt++;
+    } else if (*fmt == "z"[0] && fmt[1] == "u"[0]) {
+      ret = loader_write_uint(fd, va_arg(ap, size_t), 10);
+      fmt += 2;
+    } else if (*fmt == "p"[0]) {
+      ret = (int)loader_raw_write(fd, "0x", 2);
+      if (ret >= 0) {
+        int n = loader_write_uint(fd, (uintptr_t)va_arg(ap, void *), 16);
+        ret = n < 0 ? -1 : ret + n;
+      }
+      fmt++;
+    } else if (*fmt == "m"[0]) {
+      ret = loader_write_str(fd, "<errno>");
+      fmt++;
+    } else if (*fmt == "%"[0]) {
+      ret = (int)loader_raw_write(fd, "%", 1);
+      fmt++;
+    } else {
+      ret = (int)loader_raw_write(fd, "%", 1);
+    }
+    if (ret < 0)
+      return -1;
+    total += ret;
+    text = fmt;
+  }
+
+  if (fmt > text) {
+    long ret = loader_raw_write(fd, text, (size_t)(fmt - text));
+    if (ret < 0)
+      return -1;
+    total += (int)ret;
+  }
+  return total;
+}
 
 int vdprintf(int fd, const char *fmt, va_list ap) {
-  char buf[512];
-  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
-  if (n < 0)
-    return -1;
-  size_t w = (size_t)n;
-  if (w > sizeof(buf))
-    w = sizeof(buf);
-  ssize_t r = write(fd, buf, w);
-  return r < 0 ? -1 : n;
+  return loader_vprint(fd, fmt, ap);
 }
 
 int dprintf(int fd, const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  int n = vdprintf(fd, fmt, ap);
+  int ret = loader_vprint(fd, fmt, ap);
   va_end(ap);
-  return n;
+  return ret;
 }
 
 // ===================== getdelim (loader reads /etc/ld.so.* — absent here)

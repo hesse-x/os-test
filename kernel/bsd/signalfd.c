@@ -96,7 +96,11 @@ wait_queue_head *signalfd_wq(proc *bp, int signo) {
 
 int64_t sys_signalfd4(int64_t fd, int64_t sigmask_ptr, int64_t sizemask,
                       int64_t flags) {
-  if (sizemask != sizeof(sigset_t))
+  // Accept any mask >= our 8-byte sigset_t. musl's signalfd() passes
+  // sizeof(musl sigset_t) = 128 (its _NSIG=65 → unsigned long[16]); we read
+  // only the low 8 bytes (signals 1..64) below, matching the kernel's 8-byte
+  // sigset_t. The strict != check rejected musl's 128 → EINVAL; allow >=.
+  if (sizemask < (int64_t)sizeof(sigset_t))
     return -EINVAL;
   if (flags & ~(SFD_CLOEXEC | SFD_NONBLOCK))
     return -EINVAL;

@@ -15,8 +15,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/cdefs.h>
-#include <sys/tls.h>
 #include <syscall.h>
+#include <xos/elf.h>
 #include <xos/errno.h>
 
 // ===================== atexit =====================
@@ -266,22 +266,33 @@ extern "C" void __libc_env_init(char **envp) {
 // (crt/crt1.c). _init/_fini are the crti/crtn .init/.fini brackets; the 6th
 // arg is the loader's ldso_fini (NULL here — we exit via sys_exit_group).
 //
-// Static path (DYNAMIC=0): no loader — TLS template + init_array come from
-// user_linker.ld symbols (__tls_template_*, __init_array_start/_end).
+// TLS / thread-pointer init delegates to musl's __init_tls (compiled into the
+// musl_pthread sub-library, merged into libc.a + libc.so). musl's __init_tls
+// scans the auxv for PT_TLS (via AT_PHDR/AT_PHNUM/AT_PHENT), mmaps the TLS
+// block, and sets FS_BASE via __init_tp (arch_prctl SET_FS), set_tid_address,
+// and the robust-list head — all the per-thread state musl pthread_create
+// expects. errno lives at %fs:0 (musl TCB), so every ELF must run __init_tls
+// at startup or the first errno fetch crashes.
 //
-// Dynamic path (DYNAMIC=1): the musl loader (fused into libc.so) already set
-// fs_base to a musl struct pthread during __dls3. We override fs_base to the
-// hand-written struct tcb (errno/cancel live here) and let the loader's
-// __libc_start_init() run .init_array of every loaded DSO (incl. the main
-// ELF) via do_init_fini(tail). g_tls_info is empty: the hand-written libc has
-// no __thread vars, so child threads get a bare tcb; per-DSO TLS / user
-// __thread is deferred to ldso.md Phase 3+ (loader is dormant after entry).
+// Static path (DYNAMIC=0): no loader — __libc_start_main decodes the kernel-
+// built pair-form auxv into the flat AT_*-indexed array musl expects, then
+// calls __init_tls + __init_ssp + musl_libc_init_aux (sets libc.page_size /
+// libc.auxv, which __init_tls does not set but pthread_create reads). TLS
+// template comes from a PT_TLS segment the linker emits; .init_array ranges
+// come from user_linker.ld symbols (__init_array_start/_end).
+//
+// Dynamic path (DYNAMIC=1): the musl loader (fused into libc.so) already ran
+// __dls3, which decoded the auxv, set __environ / libc.page_size / libc.secure
+// / __hwcap, and called __init_tp(__copy_tls(builtin_tls)) to set FS_BASE to a
+// musl struct pthread. We therefore do NOT re-init TLS here — only run the
+// loader's __libc_start_init() (do_init_fini(tail)) to fire .init_array of
+// every loaded DSO (incl. the main ELF).
 
-extern "C" void __libc_tls_init(void);
-extern "C" void __libc_tls_init_rest(void);
-extern "C" struct tls_info g_tls_info;
+extern "C" void __init_tls(size_t *aux);
+extern "C" void __init_ssp(void *entropy);
+extern "C" void musl_libc_init_aux(size_t *aux, size_t *auxv_pairs);
 extern "C" void
-__libc_start_init(void); // musl loader (dynlink.c): do_init_fini(tail)
+__libc_start_init(void); // musl loader (dynlink.c): do_init_fni(tail)
 
 #if !DYNAMIC
 // user_linker.ld symbols (static main ELF only — Scrt1/crt1 do not pass
@@ -299,6 +310,36 @@ extern "C" void __libc_fini_array_trampoline(void) {
   __libc_run_fini_array(g_fini_start, g_fini_end);
 }
 
+#if !DYNAMIC
+// Walk envp to its terminating NULL, returning a pointer to the auxv that
+// follows it on the kernel-built stack
+// ([argc][argv…][NULL][envp…][NULL][auxv…]).
+static size_t *auxv_from_envp(char **envp) {
+  char **p = envp;
+  while (*p)
+    p++;
+  return (size_t *)(p + 1);
+}
+
+// musl's __init_tls / __init_ssp index aux as a FLAT array keyed by AT_* value
+// (aux[AT_PHDR], aux[AT_RANDOM], ...), NOT as the kernel-built [type,value]*
+// pairs. musl's own __libc_start_main decodes the pair-form auxv into this flat
+// form before calling __init_tls (src/env/__libc_start_main.c:28). Our custom
+// __libc_start_main must do the same decode on the static path, or __init_tls
+// reads aux[AT_PHDR] (= aux[3]) as the 4th element of the pair-form auxv
+// (AT_PHENT's value 0x38) and crashes dereferencing it as a Phdr pointer.
+// AUX_CNT mirrors musl (38). The dynamic path does not need this: the loader's
+// __dls3 already decoded the auxv and ran __init_tls itself.
+#define AUX_CNT 38
+static void decode_auxv(size_t *auxv_pairs, size_t aux[AUX_CNT]) {
+  for (size_t i = 0; i < AUX_CNT; i++)
+    aux[i] = 0;
+  for (size_t i = 0; auxv_pairs[i]; i += 2)
+    if (auxv_pairs[i] < AUX_CNT)
+      aux[auxv_pairs[i]] = auxv_pairs[i + 1];
+}
+#endif
+
 extern "C" LIBC_EXPORT int __libc_start_main(int (*main)(int, char **, char **),
                                              int argc, char **argv,
                                              void (*init)(void),
@@ -308,21 +349,37 @@ extern "C" LIBC_EXPORT int __libc_start_main(int (*main)(int, char **, char **),
   (void)fini;
   (void)ldso_fini;
 
+  char **envp = argv + argc + 1;
+
 #if DYNAMIC
-  g_tls_info = {};
-  __libc_tls_init_rest(); // override fs_base → hand-written struct tcb
-  __libc_start_init();    // run .init_array of all DSOs (musl loader)
+  // The fused musl loader already set up TLS (FS_BASE → musl struct pthread),
+  // __environ, and libc.{auxv,page_size,secure} during __dls3. Only run the
+  // .init_array of every loaded DSO (incl. the main ELF) via the loader's
+  // do_init_fni(tail). No fini-array range to trampoline (loader owns DSO
+  // fini via atexit-registered __libc_start_init).
+  __libc_start_init();
   g_fini_start = nullptr;
   g_fini_end = nullptr;
 #else
-  __libc_tls_init(); // g_tls_info from __tls_template_* + fs_base=tcb
+  // Static path: no loader. Decode the kernel pair-form auxv and run musl's
+  // __init_tls (mmaps PT_TLS, sets FS_BASE via __init_tp, set_tid_address,
+  // robust-list head). __init_tls must run before __init_ssp: __init_ssp
+  // writes the stack canary via __pthread_self() (mov %fs:0), valid only after
+  // __init_tp sets FS_BASE. musl_libc_init_aux sets libc.page_size (read by
+  // pthread_create's ROUND macro) and libc.auxv (walked by pthread_getattr_np);
+  // __init_tls sets neither. Then fire the main ELF's .init_array.
+  size_t *auxv_pairs = auxv_from_envp(envp);
+  size_t aux[AUX_CNT];
+  decode_auxv(auxv_pairs, aux);
+  __init_tls(aux);
+  musl_libc_init_aux(aux, auxv_pairs);
+  __init_ssp((void *)aux[AT_RANDOM]);
   __libc_run_init_array(__init_array_start, __init_array_end);
   g_fini_start = __fini_array_start;
   g_fini_end = __fini_array_end;
 #endif
   atexit(__libc_fini_array_trampoline);
 
-  char **envp = argv + argc + 1;
   __libc_env_init(envp);
 
   int ret = main(argc, argv, envp);

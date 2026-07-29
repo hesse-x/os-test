@@ -75,6 +75,10 @@ global:
     /* <signal.h> */
     kill; raise; sigaction; signal; sigreturn; sigprocmask; sigpending; abort;
     sigaltstack;
+    /* sigset_t helpers from musl src/signal/*.c (128-byte sigset_t) */
+    sigemptyset; sigfillset; sigaddset; sigdelset; sigismember;
+    /* SIGRTMIN/SIGRTMAX macros expand to these (musl private, exported for dyn ELF) */
+    __libc_current_sigrtmin; __libc_current_sigrtmax;
 
     /* <termios.h> */
     tcgetattr; tcsetattr;
@@ -102,7 +106,8 @@ global:
     pthread_attr_setdetachstate; pthread_attr_setguardsize;
     pthread_attr_setstack; pthread_attr_setstacksize;
     pthread_barrier_destroy; pthread_barrier_init; pthread_barrier_wait;
-    pthread_cancel; pthread_cleanup_pop; pthread_cleanup_push;
+    pthread_cancel;
+    /* pthread_cleanup_push/pop are macros in musl <pthread.h>, not symbols */
     pthread_cond_broadcast; pthread_cond_destroy; pthread_cond_init;
     pthread_cond_signal; pthread_cond_wait; pthread_create; pthread_detach;
     pthread_equal; pthread_exit; pthread_getspecific; pthread_join;
@@ -154,10 +159,6 @@ global:
     /* <sys/random.h> */
     getrandom; getentropy;
 
-    /* <sys/tls.h> — 半公开内部入口（crt0/pthread 跨文件，已声明即契约） */
-    alloc_tls_block; __libc_tls_init_rest; __pthread_cancel_check;
-    __pthread_current_tcb;
-
     /* <sys/process.h> */
     execve; fork; getpgid; getsid; setpgid; setsid; spawn; setuid; setgid;
 
@@ -179,10 +180,13 @@ global:
     /* 事实 ABI：musl crt1/Scrt1 跨 .so 调用 */
     __libc_start_main;
 
+    /* musl-compatible public ABI used by fused libc internals */
+    prctl; strnlen; mremap; shm_unlink;
+
     /* __dls2 在 ldso 自身 dynsym 里 find_sym("__dls3") 调用 stage-3 (dynlink.c:1439)；musl 自身 libc.so 本就导出 __dls3，被 local:* 误伤需显式导出 */
     __dls3;
 
-    /* <dlfcn.h> — dlopen/dladdr/dl_iterate_phdr from fused dynlink.c; dlsym/dlclose/dlinfo from musl_dl_objs. dlerror 由 musl_loader_shim.c 提供 stub（musl dlerror.c 未编译，pthread 布局不匹配），Phase 3 换真实现时此行不动。 */
+    /* <dlfcn.h> — dlopen/dladdr/dl_iterate_phdr from fused dynlink.c; dlsym/dlclose/dlinfo/dlerror from musl_dl_objs (dlerror.c reads musl struct pthread's dlerror_buf/flag at %fs:0, now that musl_pthread provides the full layout). */
     dlopen; dlsym; dlclose; dlerror; dladdr; dlinfo; dl_iterate_phdr;
 
 local:

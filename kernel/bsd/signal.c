@@ -1331,7 +1331,10 @@ int64_t sys_sigaltstack(int64_t arg1, int64_t arg2, int64_t unused1,
 // including those blocked. Distinct from check_pending_signals which filters.
 int64_t sys_sigpending(int64_t arg1, int64_t arg2, int64_t unused2,
                        int64_t unused3, int64_t unused4, int64_t unused5) {
-  if ((size_t)arg2 != sizeof(sigset_t))
+  // Accept any sigsetsize >= our 8-byte sigset_t (musl/userspace may pass 128
+  // for the 128-byte musl sigset_t; we read/write only the low 8 bytes =
+  // signals 1..64). The strict != check rejected the larger size → EINVAL.
+  if ((size_t)arg2 < sizeof(sigset_t))
     return (int64_t)-EINVAL;
   sigset_t __user *set = (sigset_t __user *)arg1;
   if (!set)

@@ -755,7 +755,11 @@ static void timer_handler(trapframe *tf) {
   if (current_task && current_task->proc && alarm_check_hook)
     alarm_check_hook(current_task, now);
 
-  if (tf->cs == 0x2B) { // from user mode
+  // Arm preemption for user tasks even when the tick interrupted their
+  // syscall. The syscall return path will consume the flag after leaving IRQ
+  // context; ignoring kernel-mode samples lets syscall-heavy tasks monopolize
+  // a CPU indefinitely.
+  if (current_task && current_task != idle && current_task->proc) {
     // (frame_opt.md 块二) Do NOT call signal_check_hook (=
     // check_pending_signals) here.  check_pending_signals runs
     // schedule()/do_stop/do_exit, which is forbidden from hard-IRQ context
@@ -764,7 +768,7 @@ static void timer_handler(trapframe *tf) {
     // delivery + preemption are handled by
     // __trapret's call to check_pending_signals, which runs after the IRQ exit
     // path has switched back to the task stack and decremented in_hardirq.
-    // The need_resched=1 below arms preemption for that exit path to consume.
+    // The need_resched=1 below arms the next return-to-user path to consume it.
     // EXPERIMENT (NO_PREEMPT): skip setting need_resched so user-mode tasks
     // are never preempted mid-execution. If the libc.so .text corruption
     // disappears, the write happens during a context switch; if it remains,

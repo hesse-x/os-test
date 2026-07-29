@@ -45,7 +45,9 @@ void test_pthread_self(void) {
   TEST_ASSERT_EQUAL_INT(
       0, pthread_create(&t, NULL, thread_self_fn, &self_captured));
   pthread_join(t, NULL);
-  TEST_ASSERT_EQUAL_INT((int)t, (int)self_captured);
+  /* pthread_t is a pointer (struct __pthread *) under musl; compare as
+   * pointers rather than truncating to int. */
+  TEST_ASSERT_EQUAL_PTR(t, self_captured);
 }
 
 static pthread_mutex_t test_mutex;

@@ -98,5 +98,7 @@ CheckOptions:
     value: '^(ImageHandle|SystemTable)$'
 
   # Struct exceptions: ELF spec, libc internals
+  # __sigset_t is the musl/bits alltypes.h backing struct for sigset_t — kept
+  # as a __-prefix libc internal (typedef'd away as sigset_t), not a defect.
   - key: readability-identifier-naming.StructIgnoredRegexp
-    value: '^(Elf64_[A-Za-z]+|__dir|_FILE|__locale_struct|__libc)$'
+    value: '^(Elf64_[A-Za-z]+|__dir|_FILE|__locale_struct|__libc|__sigset_t)$'
