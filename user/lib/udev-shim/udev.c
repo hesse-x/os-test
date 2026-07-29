@@ -603,9 +603,25 @@ udev_monitor_receive_device(struct udev_monitor *udev_monitor) {
     p = val + strlen(val) + 1;
   }
 
-  /* sysname = syspath 末段 */
+  /* sysname = syspath 末段(DEVPATH 末段,如 "event0")。先从原始 syspath
+   * 取,后续再归一 syspath 本身。 */
   const char *slash = strrchr(d->syspath, '/');
   strncpy(d->sysname, slash ? slash + 1 : d->syspath, sizeof(d->sysname) - 1);
+  d->sysname[sizeof(d->sysname) - 1] = '\0';
+
+  /* 归一 syspath 为 "/sys/class/<subsystem>/<sysname>",与扫描路径
+   * create_udev_device(:153) 一致。内核 netlink 发的 DEVPATH 是裸相对路径
+   * ("input/event0",无 /sys/ 前缀),若原样保留会与扫描表里
+   * "/sys/class/input/event0" 不等,导致 libinput:
+   *   - filter_duplicates(udev-seat.c:62) 去重失败,重播 add 事件穿透;
+   *   - evdev_device_have_same_syspath(evdev.c:2274) 校验失败,静默 goto err,
+   *     报 "failed to create input device"。 */
+  if (d->subsystem[0] && d->sysname[0]) {
+    char norm[256];
+    snprintf(norm, sizeof(norm), "/sys/class/%s/%s", d->subsystem, d->sysname);
+    strncpy(d->syspath, norm, sizeof(d->syspath) - 1);
+    d->syspath[sizeof(d->syspath) - 1] = '\0';
+  }
   return d;
 }
 

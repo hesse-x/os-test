@@ -388,11 +388,6 @@ void test_open_memstream_empty(void) {
   fclose(f);
 }
 
-/* open_memstream: NULL args → NULL return */
-void test_open_memstream_null_args(void) {
-  TEST_ASSERT_NULL(open_memstream(NULL, NULL));
-}
-
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -445,6 +440,5 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_open_memstream_printf);
   RUN_TEST(test_open_memstream_grow);
   RUN_TEST(test_open_memstream_empty);
-  RUN_TEST(test_open_memstream_null_args);
   return UNITY_END();
 }

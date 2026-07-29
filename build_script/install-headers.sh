@@ -234,6 +234,19 @@ int memfd_create(const char *, unsigned int);
 #endif
 __MMAN_EXT__
 
+# 3k. musl stdio.h. The repo's user/include/stdio.h was a full hand-written
+#     header (custom struct _FILE + _F_* flags + LIBC_EXPORT decls); the stdio
+#     → musl migration (stdio.md) reduced it to a source-tree shim forwarding to
+#     musl via #include "musl/include/stdio.h" (resolved at build time by
+#     -I third_party). The published sysroot has no third_party on its search
+#     path, so publish musl's real <stdio.h> here. musl's <stdio.h> pulls
+#     <bits/alltypes.h> (step 2; __NEED_FILE → FILE = struct _IO_FILE, plus
+#     size_t/off_t/ssize_t/va_list). This OS has NO declaration musl's
+#     <stdio.h> lacks (unlike the mman module's memfd_create), so — unlike §3j —
+#     there is no heredoc extension to append: the verbatim copy is complete.
+#     Closure self-check below verifies the <stdio.h> → <bits/alltypes.h> chain.
+cp "$SRC"/third_party/musl/include/stdio.h "$DEST/stdio.h"
+
 # 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
 #    compiler's -isystem freestanding dir. The published sysroot must be usable
 #    with -nostdinc and NO -isystem (the Mesa milestone consumes it via -isysroot),

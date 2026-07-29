@@ -10,16 +10,36 @@
 
 LIBC_1.0 {
 global:
-    /* <stdio.h> */
-    fclose; feof; ferror; fflush; fgetc; fgets; fileno; fopen; fprintf; fputc;
-    fputs; fread; freopen; fseek; ftell; fwrite; getchar; perror; printf;
-    putchar; puts; rewind; snprintf; sprintf; vfprintf; vprintf; vsnprintf;
-    vsprintf; fdopen; clearerr; setbuf; setvbuf; ungetc; flockfile;
-    funlockfile; ftrylockfile; fgetc_unlocked; fputc_unlocked;
-    getchar_unlocked; putchar_unlocked; fread_unlocked; fwrite_unlocked;
-    open_memstream; vasprintf; asprintf; fscanf; scanf; sscanf; vsscanf; getline; remove;
-    rename;
-    stdin; stdout; stderr;
+    /* <stdio.h> — musl upstream src/stdio (musl_stdio_objs, stdio.md). FILE is
+     * musl's struct _IO_FILE; the full narrow-char stdio family now ships:
+     * printf/scanf engines + wrappers, byte getc/putc family + *_unlocked,
+     * fopen/fclose/fread/fwrite/fseek/ftell + fseeko/ftello, getdelim/getline,
+     * open_memstream/fmemopen/fopencookie, flockfile/..., asprintf/vasprintf.
+     * stdin/stdout/stderr are OBJECT symbols (musl stdin.c/stdout.c/stderr.c).
+     * Deliberately NOT exported (stay hidden under local: *;):
+     *   rename        — in musl_unistd_objs (unistd block below), not re-listed here
+     *   dprintf/vdprintf — musl native stdio impl (routes through vfprintf); not
+     *                   public. The loader resolves to them but no app consumer
+     *                   needs them exported.
+     *   __isoc99_x / _IO_x / __getdelim / x_used — internal aliases (weak_alias), no
+     *                   consumer references them (not declared in <stdio.h>)
+     *   wide-char w* family (fwprintf/fgetwc/wscanf/...) — defined by
+     *                   musl_stdio_objs but declared in <wchar.h>, which this OS
+     *                   does NOT publish, so no consumer can reference them;
+     *                   hidden to keep the ABI minimal (a <wchar.h> block would
+     *                   be added if/when wide stdio is needed) */
+    asprintf; clearerr; clearerr_unlocked; ctermid; fclose; fdopen; feof;
+    feof_unlocked; ferror; ferror_unlocked; fflush; fflush_unlocked; fgetc;
+    fgetc_unlocked; fgetln; fgetpos; fgets; fgets_unlocked; fileno;
+    fileno_unlocked; flockfile; fmemopen; fopen; fopencookie; fprintf; fputc;
+    fputc_unlocked; fputs; fputs_unlocked; fread; fread_unlocked; freopen;
+    fscanf; fseek; fseeko; fsetpos; ftell; ftello; ftrylockfile; funlockfile;
+    fwrite; fwrite_unlocked; getc; getchar; getchar_unlocked; getc_unlocked;
+    getdelim; getline; gets; getw; open_memstream; perror; printf; putc;
+    putchar; putchar_unlocked; putc_unlocked; puts; putw; remove; rewind;
+    scanf; setbuf; setbuffer; setlinebuf; setvbuf; snprintf; sprintf; sscanf;
+    stdin; stdout; stderr; ungetc; vasprintf; vfprintf; vfscanf; vprintf;
+    vscanf; vsnprintf; vsprintf; vsscanf;
 
     /* <stdlib.h> — pure compute + startup/env/exit chain from musl_stdlib_objs
      * (stdlib.md). abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv, atoi/atol/

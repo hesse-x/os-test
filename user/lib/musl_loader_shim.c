@@ -28,12 +28,18 @@
 //                                            must provide them. They are only
 //                                            reached under -mtls-dialect=desc,
 //                                            which we never use.
-//   dprintf, vdprintf                     — loader debug/error messages
-//                                            (real impl via vsnprintf+write)
-//   getdelim                              — reading /etc/ld.so.* (absent on
-//                                            this OS; real impl for safety)
 //
 // NOT here anymore (now supplied elsewhere, so dropped from the shim):
+//   dprintf, vdprintf                     — musl src/stdio/{d,vd}printf.c
+//                                            (musl_stdio_objs). Verified that
+//                                            every loader call site runs AFTER
+//                                            reloc_all(&ldso) (dynlink.c:1432),
+//                                            i.e. with the loader's own PLT
+//                                            already relocated, so the musl
+//                                            native impl (routes through
+//                                            vfprintf) is safe. The previous
+//                                            boot-safe raw-syscall pair that
+//                                            lived here has been removed.
 //   __dl_vseterr / __dl_seterr / dlerror  — musl's dlerror.c (in musl_dl_objs)
 //                                            provides them now that
 //                                            musl_pthread gives the full struct
@@ -41,20 +47,17 @@
 //                                            at %fs:0.
 //   __tls_get_addr                        — musl_pthread
 //   (src/thread/__tls_get_addr.c).
+//   getdelim                              — musl src/stdio/getdelim.c
+//                                            (musl_stdio_objs, stdio.md). The
+//                                            loader's /etc/ld.so.* read path is
+//                                            unreachable on this OS (no such
+//                                            files), so musl's version is a
+//                                            drop-in.
 //
 // __environ is defined in start_main.cc (environ is aliased to it); declared
 // extern here because the loader (dynlink.c:1464) writes it during __dls3.
 
-#include <errno.h>
-#include <stdarg.h>
 #include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-
-#include <xos/errno.h>
-#include <xos/syscall_nums.h>
 
 extern char **__environ;
 
@@ -73,157 +76,18 @@ const char *__libc_get_version(void) {
 ptrdiff_t __tlsdesc_static(void) { return 0; }
 ptrdiff_t __tlsdesc_dynamic(void) { return 0; }
 
-// ===================== dprintf / vdprintf (loader debug + error paths)
-// ===================== ld.so may diagnose failures before relocating its own
-// PLT. Keep this tiny formatter self-contained and write through raw syscalls
-// only.
+// ===================== dprintf / vdprintf — supplied by musl stdio
+// ===================== The loader resolves dprintf/vdprintf to musl's
+// src/stdio/{d,vd}printf.c (musl_stdio_objs), which route through vfprintf.
+// Every loader call site (dynlink.c error/ldd paths) runs AFTER
+// reloc_all(&ldso) (dynlink.c:1432), so the loader's own PLT is already
+// relocated by the time vfprintf's PLT is reached — the musl native impl is
+// safe. A boot-safe raw-syscall pair used to live here as insurance; it was
+// removed after verifying the ordering holds.
 
-static long loader_raw_write(int fd, const char *buf, size_t len) {
-  long ret;
-  __asm__ volatile("syscall"
-                   : "=a"(ret)
-                   : "a"((long)SYS_WRITE), "D"((long)fd), "S"(buf),
-                     "d"((long)len)
-                   : "rcx", "r11", "memory");
-  return ret;
-}
-
-static int loader_write_str(int fd, const char *s) {
-  size_t len = 0;
-  if (!s)
-    s = "(null)";
-  while (s[len])
-    len++;
-  long ret = loader_raw_write(fd, s, len);
-  return ret < 0 ? -1 : (int)ret;
-}
-
-static int loader_write_uint(int fd, uint64_t value, unsigned base) {
-  static const char digits[] = "0123456789abcdef";
-  char buf[32];
-  size_t pos = sizeof(buf);
-  do {
-    buf[--pos] = digits[value % base];
-    value /= base;
-  } while (value);
-  long ret = loader_raw_write(fd, buf + pos, sizeof(buf) - pos);
-  return ret < 0 ? -1 : (int)ret;
-}
-
-static int loader_vprint(int fd, const char *fmt, va_list ap) {
-  int total = 0;
-  const char *text = fmt;
-
-  while (*fmt) {
-    if (*fmt++ != "%"[0])
-      continue;
-    if (fmt - 1 > text) {
-      long ret = loader_raw_write(fd, text, (size_t)((fmt - 1) - text));
-      if (ret < 0)
-        return -1;
-      total += (int)ret;
-    }
-
-    int ret;
-    if (*fmt == "s"[0]) {
-      ret = loader_write_str(fd, va_arg(ap, const char *));
-      fmt++;
-    } else if (*fmt == "d"[0]) {
-      int value = va_arg(ap, int);
-      if (value < 0) {
-        ret = (int)loader_raw_write(fd, "-", 1);
-        if (ret >= 0) {
-          int n = loader_write_uint(fd, 0u - (unsigned)value, 10);
-          ret = n < 0 ? -1 : ret + n;
-        }
-      } else {
-        ret = loader_write_uint(fd, (unsigned)value, 10);
-      }
-      fmt++;
-    } else if (*fmt == "z"[0] && fmt[1] == "u"[0]) {
-      ret = loader_write_uint(fd, va_arg(ap, size_t), 10);
-      fmt += 2;
-    } else if (*fmt == "p"[0]) {
-      ret = (int)loader_raw_write(fd, "0x", 2);
-      if (ret >= 0) {
-        int n = loader_write_uint(fd, (uintptr_t)va_arg(ap, void *), 16);
-        ret = n < 0 ? -1 : ret + n;
-      }
-      fmt++;
-    } else if (*fmt == "m"[0]) {
-      ret = loader_write_str(fd, "<errno>");
-      fmt++;
-    } else if (*fmt == "%"[0]) {
-      ret = (int)loader_raw_write(fd, "%", 1);
-      fmt++;
-    } else {
-      ret = (int)loader_raw_write(fd, "%", 1);
-    }
-    if (ret < 0)
-      return -1;
-    total += ret;
-    text = fmt;
-  }
-
-  if (fmt > text) {
-    long ret = loader_raw_write(fd, text, (size_t)(fmt - text));
-    if (ret < 0)
-      return -1;
-    total += (int)ret;
-  }
-  return total;
-}
-
-int vdprintf(int fd, const char *fmt, va_list ap) {
-  return loader_vprint(fd, fmt, ap);
-}
-
-int dprintf(int fd, const char *fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-  int ret = loader_vprint(fd, fmt, ap);
-  va_end(ap);
-  return ret;
-}
-
-// ===================== getdelim (loader reads /etc/ld.so.* — absent here)
-// ===================== Real implementation: the loader calls getdelim on an
-// already-opened FILE* to read library-path config. On this OS those files do
-// not exist so fopen returns NULL upstream and getdelim is never reached;
-// implement it properly regardless so a future config file works.
-ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream) {
-  if (!lineptr || !n || !stream) {
-    errno = EINVAL;
-    return -1;
-  }
-  size_t i = 0;
-  int c;
-  // Ensure a minimum buffer.
-  if (!*lineptr || *n == 0) {
-    *n = 128;
-    *lineptr = (char *)malloc(*n);
-    if (!*lineptr) {
-      errno = ENOMEM;
-      return -1;
-    }
-  }
-  while ((c = fgetc(stream)) != EOF) {
-    if (i + 1 >= *n) {
-      size_t newcap = *n * 2;
-      char *p = (char *)realloc(*lineptr, newcap);
-      if (!p) {
-        errno = ENOMEM;
-        return -1;
-      }
-      *lineptr = p;
-      *n = newcap;
-    }
-    (*lineptr)[i++] = (char)c;
-    if (c == delim)
-      break;
-  }
-  if (i == 0)
-    return -1; // EOF, nothing read
-  (*lineptr)[i] = '\0';
-  return (ssize_t)i;
-}
+// ===================== getdelim — REMOVED (stdio.md) =====================
+// musl's src/stdio/getdelim.c (now built via musl_stdio_objs) supplies the real
+// getdelim; the hand-written fgetc-loop that used to live here would
+// multi-define it. The loader reads /etc/ld.so.* via getdelim, but those files
+// are absent on this OS (fopen returns NULL upstream), so the symbol is never
+// reached on the loader path — musl's version is a drop-in either way.

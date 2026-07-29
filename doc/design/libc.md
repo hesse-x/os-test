@@ -6,57 +6,35 @@
 
 | # | 决策 | 选择 | 理由 |
 |---|------|------|------|
-| 1 | 输出机制 | FILE 缓冲 + write_fn 抽象 | 改 flush 函数即可适配新输出路径，printf 不动 |
-| 2 | printf 格式 | 实用集（无 %f） | %s/%d/%u/%c/%x/%X/%p/%ld/%lu/%lX/%% + 宽度前缀（%02x），覆盖 OS 调试场景 |
-| 3 | FILE 结构 | fd/buffer/mode/flags/write_fn | 为 read/write 预留，加 sys_read/sys_write 后 FILE 可直接使用 |
+| 1 | 输出机制 | musl 上游 FILE（`struct _IO_FILE`）+ `__stdio_write` | stdio 整体迁 musl（`musl_stdio_objs`，详见下“stdio 模块”）；printf/fread/fopen 全家由 musl `src/stdio/*` 提供 |
+| 2 | printf 格式 | musl vfprintf 全集（含 %f/%g/%e 浮点） | %s/%d/%u/%c/%x/%X/%p/%ld/%lu/%lX/%% + 宽度/精度/左对齐/标志 + %f/%g/%e（vfprintf 内置 `fmt_fp`，链接 libm）。旧手写版无 %f 的缺口随迁移补齐 |
+| 3 | FILE 结构 | musl `struct _IO_FILE`（`src/internal/stdio_impl.h`） | flags/rpos/rend/close/wend/wpos/wbase/read/write/seek/buf/buf_size/prev/next/fd/.../lock/cookie。旧手写 `struct _FILE` 已退役 |
 | 4 | libc _start | 提供 | 用户程序写 main() 即可 |
-| 5 | stdout buffer | 静态数组（1024 字节） | 不依赖 malloc，malloc 坏了 printf 还可用于调试 |
-| 6 | stderr | 无缓冲（_IONBF） | 错误输出立即可见 |
+| 5 | stdout buffer | musl 行缓冲，串口下退化无缓冲 | musl `__stdout_write` 探 `TIOCGWINSZ`；`/dev/serial` 只答 `TCGETS` → `lbf=-1` 无缓冲。PTY 答案 TIOCGWINSZ 保持行缓冲。exit 时 `__stdio_exit` 仍 flush 全部流（详见 todo.md“stdio 全量迁移”剩余缺口） |
+| 6 | stderr | 无缓冲（`__stderr_write`） | 错误输出立即可见 |
 | 7 | 用户态 malloc | size-class slab + sys_mmap | 替代旧 sbrk + 显式空闲链表。详见 [mem.md](mem.md) |
 | 8 | 时间接口 | timespec_get(TIME_UTC) + clock() | 内核 sys_gettime/sys_clock 封装，C11/C99 标准接口 |
 | 9 | 时间语义 | 单调时间（非 wall time） | 内核无 RTC，timespec_get 返回系统启动后单调时间；clock 返回进程 CPU 时间 |
 | 10 | 数学库（libm） | 独立 `libm.a`/`libm.so`，`__builtin_*` 包装器 | GCC x86-64 builtin 直接编译为 `fsin`/`fcos`/`sqrtsd` 等指令，无需手写数值算法。`math.h` 的 `static inline` 在 `-O0` 和 `hypot` 等场景仍需外部符号 |
 | 11 | libm 构建 | `add_user_lib(m ...)` + `add_user_lib(m_so ...)`，独立 `libm.map` 版本脚本 | libm 是独立标准库，不与 libc 合并维护。`LIBM_1.0` 版本节点导出全部 math.h 符号 + sincos 等 GNU 扩展 |
 
-### FILE 结构体
+### stdio 模块（musl 上游）
 
-user/include/stdio.h : FILE（typedef struct _FILE）
+stdio 整体迁 musl 上游 `src/stdio/*`（`musl_stdio_objs`，最后一个核心 libc 模块；详见 todo.md“stdio 全量迁移到 musl”）。`user/include/stdio.h` 是薄 shim，纯转发 `#include "musl/include/stdio.h"`（编译期 `-I third_party` 解析；`install-headers.sh` §3k 发布 musl 真身到 sysroot）。旧手写 `user/lib/stdio.cc`（799 行）+ `user/include/stdio.h`（自定义 `struct _FILE`）已退役。
 
-字段：
-- fd : int — 文件描述符（stdout=1, stderr=2, stdin=0）
-- buf : char* — I/O 缓冲区
-- buf_size : int — 缓冲区容量
-- buf_pos : int — 缓冲区当前写入位置
-- buf_mode : int — _IONBF / _IOLBF / _IOFBF
-- flags : int — _F_WRITE / _F_READ / _F_EOF / _F_ERR
-- write_fn : 函数指针 — 输出函数（FILE*, const char*, int len）
-- read_fn : 函数指针 — 输入函数（FILE*, char*, int len）
-- offset : off_t — 当前文件偏移（fseek/ftell）
-- ungot : int — ungetc 推回（-1 表示无）
-- lock : pthread_mutex_t — per-FILE 锁（flockfile/funlockfile）
-- user_data : void* — 自定义流用户指针（open_memstream 存 memstream_ctx）
+FILE 是 musl `struct _IO_FILE`（`third_party/musl/src/internal/stdio_impl.h`）：`flags/rpos/rend/close/wend/wpos/wbase/read/write/seek/buf/buf_size/prev/next/fd/.../lock/cookie`。`bits/alltypes.h` 已 `typedef struct _IO_FILE FILE`。全树无非-stdio 代码解引用 FILE 字段（全走 API），布局翻转无害。
 
-常量：EOF(-1), _IONBF(0), _IOLBF(1), _IOFBF(2), _F_WRITE(1), _F_READ(2), _F_EOF(4), _F_ERR(8)
+提供全家：printf/scanf 引擎（vfprintf/vfscanf）+ 包装器、字节 getc/putc 家族 + `*_unlocked`、fopen/fclose/fread/fwrite/fseek/ftell + fseeko/ftello、getdelim/getline、open_memstream/fmemopen/fopencookie、flockfile/...、asprintf/vasprintf。vfprintf 内置 `fmt_fp` 浮点打印（链接 libm，补齐旧手写版 `%f`/`%g`/`%e` 缺口）；vfscanf 经 `__intscan`/`__floatscan`（在 `musl_stdlib_objs`）。
 
-### stdout / stderr
+ofl 链（open-FILE-list）转真：`__ofl_lock`/`__ofl_unlock`/`__ofl_add`（`ofl.c`/`ofl_add.c` 在 `musl_pthread`）把 FILE 挂全局链；`__lockfile.c`（FLOCK/FUNLOCK）真被 musl stdio 路径调用；`__stdin_used`/`__stdout_used`/`__stderr_used` 由 musl stdin.c/stdout.c/stderr.c 强定义；exit 时 `__stdio_exit`（`__stdio_exit.c`，`musl_stdio_objs` glob）走 ofl + `*_used` flush 全部流。
 
-user/lib/stdio.cc 内部：
-- stdout：fd=1，line-buffered（_IOLBF），静态 buf[1024]，write_fn=sys_putc_flush
-- stderr：fd=2，unbuffered（_IONBF），write_fn=sys_putc_flush
+exclude 名单（8 防多定义/拖依赖 + 23 宽字符）：`ofl.c`/`__lockfile.c`（在 `musl_pthread`）、`rename.c`（在 `musl_unistd_objs`）、`popen.c`/`pclose.c`（需 posix_spawn）、`tmpfile.c`/`tmpnam.c`/`tempnam.c`（需 `__randname`→`__clock_gettime`，time 未迁）；`dprintf.c`/`vdprintf.c` **不** exclude——loader 直接解析到 musl 原生版（走 vfprintf），所有 loader 调用点都在 `reloc_all(&ldso)`（`dynlink.c:1432`）之后，PLT 已就绪，无需 boot-safe shim。23 个宽字符 w* 文件（`vfwprintf`/`vfwscanf`/`fgetwc`/...）引用 `isw*`/`wcsnlen`/`btowc`/`__c_locale` 等未编译符号，带上会导致 ld-musl 运行期重定位失败，且本 OS 无宽字符消费方、不发布 `<wchar.h>`，故排除。`__stdio_exit.c` 由 glob 带入（旧手写 `stdio_exit.c` 已删）。`libc.map` `<stdio.h>` 块导出 81 个窄字符符号；内部 `__isoc99_*`/`_IO_*` 别名隐藏。multibyte 缩到窄路径最小集（`wctomb`/`wcrtomb`/`mbrtowc`/`mbsinit`/`internal`，供 `%ls` link-time 引用）。详见 todo.md“stdio 全量迁移”剩余缺口。
 
-sys_putc_flush：逐字节 sys_putc 输出。sys_write_flush（一次 syscall 输出整段）为待完成项。
-
-### printf / vfprintf
-
-user/lib/stdio.cc : vfprintf
-
-支持的 specifier：%d, %u, %ld, %lu, %x, %X, %lX, %p, %s, %c, %%。宽度前缀：%02x。不支持精度、左对齐、+标志。
-
-内部流程：vfprintf 逐字符扫描 fmt → 遇 % 解析参数 → 格式化到 FILE buffer → fputc_internal 判断缓冲条件（unbuffered 直接 write_fn，line-buffered 遇 \n flush，full-buffered 满 flush）。
+stdout 行为变化（非 bug）：musl `__stdout_write` 探 `TIOCGWINSZ`，`/dev/serial` 只答 `TCGETS` → stdout `lbf=-1` 无缓冲（每字符一次 `sys_write`）；PTY 答 TIOCGWINSZ 保持行缓冲。功能不损（exit flush 生效）。
 
 ### _start 入口点
 
-user/lib/start.cc : _start — stdio_init → main → sys_exit(ret)
+`_start` → `__libc_start_main`（musl `src/env`，`musl_stdlib_objs`）→ main → exit。详见 todo.md“stdlib 全量迁移到 musl”节。
 
 ld 按需拉入 libc.a 成员。shell 链接 libc.a 时 shell.o 已定义 _start，libc.a 的 _start.o 不会被拉入，无冲突。
 
@@ -80,20 +58,6 @@ clock()：sys_clock() 获取 cpu_time_ns → 返回 (clock_t)(ns / 1000)，匹�
 per-process CPU 时间记账：proc_t 字段 cpu_time_ns + last_sched。schedule() 切出前累加 cpu_time_ns，sys_exit 设 ZOMBIE 前最终记账。详见 [schedule.md](schedule.md)。
 
 timespec 结构字段：tv_sec : time_t, tv_nsec : long
-
-### open_memstream
-
-user/include/stdio.h : open_memstream（POSIX.1-2008 动态内存流）
-
-user/lib/stdio.cc : open_memstream / memstream_write_fn
-
-动态内存流：调用方提供 `char **bufptr` 和 `size_t *sizeptr`，写入的数据通过 `write_fn` 回调实时管理动态缓冲（realloc 扩容）。fclose 释放 FILE 和内部 `memstream_ctx`，但保留 `*bufptr` 缓冲（所有权转用户）。
-
-实现要点（W1/F2 方案）：
-- FILE 配置 `_IONBF` + `buf=NULL`，走 `file_putc_internal` 直写路径，不碰 `f->buf`/`f->buf_pos`
-- `bufptr`/`sizeptr` 存入堆分配的 `struct memstream_ctx`，挂到 `f->user_data`
-- `memstream_write_fn` 从 `user_data` 取 ctx，用 `*sizeptr` 作写入游标、`f->buf_size` 作容量槽
-- `fclose` 统一 `if (f->user_data) free(f->user_data)`（F2 逻辑），依赖所有静态 FILE 的 `user_data=NULL` 初始化
 
 ### 标准头补全
 
@@ -121,14 +85,14 @@ include 路径：-I. -Iuser/include → 自定义头文件优先。宿主机 fre
 | 模块 | 源文件 | 内容 |
 |------|--------|------|
 | _start | musl `src/env/__libc_start_main.c`（`musl_stdlib_objs`） | `__libc_start_main` + `__init_libc` + `libc_start_init`（weak → 动态路径被 dynlink `do_init_fini` 覆盖）。退役手写 `start_main.cc`/`musl_startup.c`（stdlib.md） |
-| stdio | user/lib/stdio.cc | FILE, printf/vfprintf, fputc/fputs/puts/fflush, **fgets** |
+| stdio | musl `src/stdio/*`（`musl_stdio_objs`） | FILE(`struct _IO_FILE`), printf/vfprintf/vfscanf, getc/putc 家族 + `*_unlocked`, fopen/fclose/fread/fwrite/fseek/ftell + fseeko/ftello, getdelim/getline, open_memstream/fmemopen/fopencookie, flockfile/..., asprintf/vasprintf。`user/include/stdio.h` 薄 shim 转 musl 头；详见上“stdio 模块” |
 | string | musl `src/string/*`（`musl_string_objs`） | strlen/strcmp/strcpy/strcat/strchr, memcpy/memmove/memset(x86_64 asm), **ffs**/basename/dirname |
 | malloc | user/lib/malloc.cc | size-class slab + sys_mmap |
 | time | user/lib/time.cc | timespec_get, clock |
 | unistd | musl `src/unistd/*`（`musl_unistd_objs`）+ user/lib/unistd.cc 残留 | POSIX syscall 封装 |
 | file | user/lib/file.cc | fopen/fclose/fread/fwrite/fseek/rewind/feof/ferror/freopen/ftell/fdopen/flockfile/funlockfile |
-| stdlib | musl `src/stdlib/*`+`src/prng/{rand,rand_r}`+`src/internal/{intscan,shgetc,floatscan}`+`src/env/*`+`src/exit/*`（`musl_stdlib_objs`） | abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv, atoi/atol/atoll, strtol 全家(strtoimax/strtoumax), strtod/strtof/strtold/atof, qsort/bsearch, rand/srand/rand_r(RAND_MAX=0x7fffffff), environ/getenv/setenv/putenv/unsetenv/clearenv, exit/atexit/abort/quick_exit/at_quick_exit/_Exit, __libc_start_main 启动链。`__stdio_exit` 由 user/lib/stdio_exit.c 覆盖（fflush stdout/stderr） |
-| stdlib_misc | user/lib/stdlib_misc.c | 暂留子集：mkstemp/mktemp/realpath/mknod/chmod/remove/getline/fscanf/scanf/getpagesize/sysconf（musl 无法替换，详见 todo.md） |
+| stdlib | musl `src/stdlib/*`+`src/prng/{rand,rand_r}`+`src/internal/{intscan,shgetc,floatscan}`+`src/env/*`+`src/exit/*`（`musl_stdlib_objs`） | abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv, atoi/atol/atoll, strtol 全家(strtoimax/strtoumax), strtod/strtof/strtold/atof, qsort/bsearch, rand/srand/rand_r(RAND_MAX=0x7fffffff), environ/getenv/setenv/putenv/unsetenv/clearenv, exit/atexit/abort/quick_exit/at_quick_exit/_Exit, __libc_start_main 启动链 |
+| stdlib_misc | user/lib/stdlib_misc.c | 暂留子集：mkstemp/mktemp/realpath/mknod/chmod/getpagesize/sysconf（musl 无法替换，详见 todo.md）。remove/getline/getdelim/fscanf/scanf/sscanf/vfscanf 已随 stdio 迁 musl 移出 |
 | sys_ipc | user/lib/sys_ipc.cc | IPC 封装 |
 | sys_shm | user/lib/sys_shm.cc | SHM 封装 |
 | sys_wait | user/lib/sys_wait.cc | waitpid 封装 |
@@ -176,8 +140,8 @@ libm 编译不依赖 libc（freestanding，`-nostdlib`），但运行时 libm.so
 
 ### 关键源码位置
 
-- FILE 和 printf：user/lib/stdio.cc / user/include/stdio.h
-- _start：user/lib/start.cc
+- FILE 和 printf：musl `src/stdio/*`（`musl_stdio_objs`）/ `user/include/stdio.h`（薄 shim 转 musl 头）
+- _start：musl `src/env/__libc_start_main.c`（`musl_stdlib_objs`）
 - string：user/lib/string.cc / user/include/string.h
 - malloc：user/lib/malloc.cc / user/include/stdlib.h
 - time：user/lib/time.cc / user/include/time.h
@@ -187,7 +151,5 @@ libm 编译不依赖 libc（freestanding，`-nostdlib`），但运行时 libm.so
 
 | 项目 | 说明 | 优先级 |
 |------|------|--------|
-| sys_write 输出优化 | 当前 stdout 逐字节 sys_putc，改为 sys_write 一次 syscall 输出整段 | 高 |
-| %f 浮点格式化 | 依赖用户态 SSE/FPU 上下文保存 + 浮点格式化算法 | 低 |
 | time() / gettimeofday() | wall time 接口，需 RTC 硬件支撑 | 低 |
 | strftime | 时间格式化，依赖 time() | 低 |

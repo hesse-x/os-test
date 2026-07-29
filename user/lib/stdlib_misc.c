@@ -19,22 +19,20 @@
  *   mknod/chmod     — wrap sys_mknod / sys_chmod (kernel has these syscalls;
  *                     musl's wrappers route through the same numbers, but
  *                     kept here to avoid pulling src/misc/sysm.c machinery).
- *   remove          — musl's is in stdio (rename.c lives there too); kept
- *                     here as unlink() alias for now (misplaced, deferred).
- *   getline/fscanf/scanf — stubs (ENOSYS); musl's need the full stdio scan
- *                     chain (__uflow/tofrom), kept as ENOSYS until stdio tier.
  *   getpagesize/sysconf — musl src/legacy/getpagesize.c + src/conf/sysconf.c
  *                     redefined _SC_NPROCESSORS_ONLN semantics; repo
  *                     sys_sysconf-backed wrappers kept.
  *
- * Declares come from: stdlib.h (mkstemp/mktemp/realpath via musl), stdio.h
- * (remove/getline/fscanf/scanf), sys/stat.h (mknod/chmod), xos/unistd_ext.h
- * (getpagesize/sysconf).
+ * Moved OUT to musl (stdio.md): remove/getline/getdelim/fscanf/scanf/sscanf/
+ * vfscanf — were ENOSYS stubs here (the repo's hand-written stdio.cc had a
+ * non-musl FILE layout so musl's scan chain could not link); now supplied by
+ * musl src/stdio (musl_stdio_objs). Declares come from: stdlib.h
+ * (mkstemp/mktemp/realpath via musl), sys/stat.h (mknod/chmod),
+ * xos/unistd_ext.h (getpagesize/sysconf).
  */
 
 #include <errno.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syscall.h>
@@ -211,33 +209,14 @@ int mknod(const char *path, mode_t mode, dev_t dev) {
  * node-creation paths (chown/chmod/remove/readlink/getline/sscanf/fscanf).
  * chown is provided by musl src/unistd (musl_unistd_objs); on x86-64 musl
  * routes it to syscall(SYS_chown). chmod below backs the real sys_chmod syscall
- * (落盘仅内存, setuid 位清除见 kernel/bsd/syscall.c); the rest remain stubs
- * matching the mknod stub above. */
+ * (落盘仅内存, setuid 位清除见 kernel/bsd/syscall.c).
+ * remove/getline/sscanf/fscanf/scanf used to be ENOSYS stubs here (stdlib_misc
+ * could not adopt musl's because the repo's hand-written stdio.cc had a
+ * non-musl FILE layout); the stdio→musl migration (musl_stdio_objs) now
+ * supplies the real musl remove/getline/getdelim/vfscanf/scanf/fscanf/sscanf,
+ * so those stubs are deleted from this file. */
 int chmod(const char *path, mode_t mode) {
   return sys_chmod(path, (unsigned int)mode);
-}
-
-int remove(const char *path) { return unlink(path); }
-
-ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
-  (void)lineptr;
-  (void)n;
-  (void)stream;
-  errno = ENOSYS;
-  return -1;
-}
-
-int fscanf(FILE *f, const char *fmt, ...) {
-  (void)f;
-  (void)fmt;
-  errno = ENOSYS;
-  return 0;
-}
-
-int scanf(const char *fmt, ...) {
-  (void)fmt;
-  errno = ENOSYS;
-  return 0;
 }
 
 /* getpagesize / sysconf: musl's <unistd.h> declares getpagesize only under

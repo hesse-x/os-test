@@ -484,11 +484,13 @@ void fpu_context_switch(xtask *prev, xtask *next) {
 }
 
 // Allocate an FPU state page and initialize it as a valid fxsave image.
-// In the 512-byte fxsave layout MXCSR is at offset 24 and must be a valid
-// value (otherwise fxrstor triggers #GP). memset 0 + setting MXCSR=0x1F80
-// (default: all exception mask bits set, rounding=nearest) is equivalent to
-// the init state after fninit+ldmxcsr. Pure memory operations, no SSE
-// instructions, does not clobber caller's xmm registers.
+// fxsave layout (512 bytes): FCW at offset 0 (2B), MXCSR at offset 24 (4B).
+// MXCSR must be valid or fxrstor triggers #GP. FCW must mask all x87
+// exceptions (IM/DM/ZM/OM/UM/PM = 0x3F) or the first inexact x87 op (e.g.
+// musl fmt_fp long-double math in printf %f) raises #MF (vector 16) and kills
+// the process. memset 0 + FCW=0x037F + MXCSR=0x1F80 reproduces the fninit+
+// ldmxcsr init state: all exceptions masked, double precision, round-to-
+// nearest. Pure memory ops, no SSE/x87 instructions, clobbers no xmm regs.
 int xcore_fpu_alloc(xtask *t) {
   t->fpu_page = bfc_alloc_page(1);
   if (!t->fpu_page)
@@ -496,6 +498,7 @@ int xcore_fpu_alloc(xtask *t) {
   void *fpu_data =
       (void *)(__force uintptr_t)phys_to_virt(page_to_phys(t->fpu_page));
   __memset(fpu_data, 0, 512);
+  *(uint16_t *)((uint8_t *)fpu_data + 0) = 0x037F;  // FCW: mask all x87 exc
   *(uint32_t *)((uint8_t *)fpu_data + 24) = 0x1F80; // MXCSR default
   return 1;
 }

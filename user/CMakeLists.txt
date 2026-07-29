@@ -11,24 +11,29 @@
 # set (environ/getenv/setenv/putenv/unsetenv/clearenv), and .init/.fini-array
 # handling all come from musl upstream (src/env + src/exit). strtol.c removed
 # (stdlib.md): musl src/stdlib/strtol.c + strtod.c + atoi/atol/atoll.c cover
-# the whole strto* / ato* family. stdio_exit.c provides the strong __stdio_exit
-# that overrides musl exit.c's weak dummy (repo FILE isn't on musl's ofl list).
+# the whole strto* / ato* family. stdio.cc + stdio_exit.c removed (stdio.md):
+# musl src/stdio/*.c (musl_stdio_objs) now provides the full stdio family with
+# musl's struct _IO_FILE; musl's own __stdio_exit.c (globbed in) walks the ofl
+# list + __stdin_used/__stdout_used/__stderr_used at exit, so the repo's
+# stdout/stderr fflush override (stdio_exit.c) is obsolete. utils/kvformat.c
+# removed from here: the only userspace caller was stdio.cc (gone); the kernel
+# has its own -D__KERNEL__ -mno-sse compile of the same file (utils/CMakeLists
+# .txt deliberately dual-compiles), so it is unaffected and utils/kvformat.{c,h}
+# are NOT deleted.
 set(LIBC_SOURCES
-    lib/stdio.cc lib/malloc.cc
+    lib/malloc.cc
     lib/unistd.cc lib/time.cc lib/file.cc
     lib/ctype.c lib/stdlib_misc.c lib/uname.c
     lib/assert.c lib/signal.cc lib/getrandom.c
     lib/musl_missing.c
     lib/musl_glue.c
     lib/setjmp.S
-    lib/stdio_exit.c
     lib/io_multiplex.cc
     lib/sys_process.cc
     lib/sys_device.cc
     lib/sys_ipc.cc
     lib/sys_socket.cc
     lib/musl_loader_shim.c
-    ${CMAKE_SOURCE_DIR}/utils/kvformat.c
 )
 
 # ===================== musl unistd integration (unistd_worklist M0.2/M0.3) =====================
@@ -476,6 +481,126 @@ target_include_directories(musl_mman_objs_so PRIVATE
     ${CMAKE_SOURCE_DIR}/include/uapi)
 target_compile_options(musl_mman_objs_so PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -fPIC -Wno-all -Wno-ignored-attributes)
 
+# ===================== musl stdio integration (musl_worklist stdio) =====================
+# Build the upstream musl src/stdio/*.c into libc via add_musl_lib (single
+# -fPIC OBJECT lib, same musl-internal include order). This replaces the
+# hand-written user/lib/stdio.cc + user/lib/stdio_exit.c (deleted this batch):
+# the repo's custom struct _FILE → musl's struct _IO_FILE (stdio_impl.h), with
+# the full printf/scanf/getline/getdelim/open_memstream/fmemopen/... family now
+# from upstream. vfprintf.c carries the built-in fmt_fp (long double) float
+# printer — %f/%g/%e work (was a TODO in the hand-written version); it links
+# libm (already merged). vfscanf.c uses __intscan/__floatscan (already in
+# musl_stdlib_objs). vfprintf's narrow path references wctomb; vfscanf's
+# references mbrtowc + mbsinit — supplied by the musl_multibyte_objs block
+# (narrow-path 5-file subset). The 23 wide-char stdio files (vfwprintf/fgetwc/
+# ...) are EXCLUDED — see the REMOVE_ITEM list; they drag isw*/wcsnlen/btowc/
+# __c_locale which this OS doesn't compile, causing ld-musl runtime reloc
+# failures, and no consumer + no <wchar.h> publication justifies them.
+# No UAPI sync step (no xos/stdio.h).
+#
+# glob + exclude: src/stdio holds 117 files; a handful clash or drag heavy deps
+# and are removed. The exclude rationale:
+#   ofl.c, __lockfile.c — ALREADY compiled into musl_pthread (ofl.c PROVIDES
+#     __ofl_lock/__ofl_unlock; __lockfile.c PROVIDES __lockfile/__unlockfile,
+#     whose deps __pthread_self/a_cas/__wait/a_store/__wake are all in
+#     musl_pthread). Recompiling here would multi-define. After this migration
+#     the ofl list IS real (musl __fdopen/fopen call __ofl_add) and FLOCK IS
+#     real (musl stdio paths call __lockfile) — see the updated musl_pthread
+#     comment below.
+#   rename.c — already in musl_unistd_objs (+ _so); recompiling multi-defines.
+#   popen.c, pclose.c — popen needs posix_spawn (the whole src/process spawn
+#     chain); pclose is useless without popen. No consumer; excluded.
+#   tmpfile.c, tmpnam.c, tempnam.c — need __randname → __clock_gettime; the time
+#     module is not yet migrated (same blocker as mkstemp, todo.md:345).
+#   dprintf.c, vdprintf.c — NOT excluded. The musl dynamic loader (fused into
+#     libc.so via musl_loader_objs) resolves its dprintf/vdprintf to these musl
+#     native impls (which route through vfprintf). Every loader call site runs
+#     AFTER reloc_all(&ldso) (dynlink.c:1432), so the loader's own PLT is
+#     already relocated when vfprintf's PLT is reached — no boot-safe shim
+#     needed. dprintf/vdprintf are NOT public libc symbols (hidden under
+#     -fvisibility=hidden in the c_so SHARED path; libc.map does not list them).
+# ofl_add.c is NOT excluded — it is currently compiled nowhere, and musl
+# __fdopen/fopen call __ofl_add to register each FILE on the global open-FILE
+# list (which __stdio_exit walks at exit). The glob brings it in.
+file(GLOB MUSL_STDIO_SOURCES ${MUSL_DIR}/src/stdio/*.c)
+list(REMOVE_ITEM MUSL_STDIO_SOURCES
+    ${MUSL_DIR}/src/stdio/ofl.c          # in musl_pthread (PROVIDE __ofl_lock/__ofl_unlock)
+    ${MUSL_DIR}/src/stdio/__lockfile.c   # in musl_pthread (PROVIDE __lockfile/__unlockfile)
+    ${MUSL_DIR}/src/stdio/rename.c       # in musl_unistd_objs (+ _so)
+    ${MUSL_DIR}/src/stdio/popen.c        # needs posix_spawn (src/process chain); no consumer
+    ${MUSL_DIR}/src/stdio/pclose.c       # pair with popen; useless without it
+    ${MUSL_DIR}/src/stdio/tmpfile.c      # needs __randname → __clock_gettime; time not migrated
+    ${MUSL_DIR}/src/stdio/tmpnam.c       # same
+    ${MUSL_DIR}/src/stdio/tempnam.c      # same
+    # NOTE: dprintf.c/vdprintf.c are NOT excluded — the loader resolves its
+    # dprintf/vdprintf to musl's native stdio impl (routes through vfprintf).
+    # Every loader call site runs AFTER reloc_all(&ldso) (dynlink.c:1432), so
+    # the loader's own PLT is already relocated when vfprintf's PLT is reached.
+    # musl_loader_shim.c no longer provides a boot-safe pair.
+    # --- wide-char stdio (23 w* files) — EXCLUDED (no consumer + runtime reloc cost)
+    # vfwprintf/vfwscanf/fgetwc/fputwc/fputws/fgetws/ungetwc/fwide/fwprintf/fwscanf/
+    # wprintf/wscanf/swprintf/swscanf/vwprintf/vwscanf/vswprintf/vswscanf/getwc/getwchar/
+    # putwc/putwchar/open_wmemstream. These reference iswspace/iswdigit (wide ctype,
+    # src/ctype/isw*.c), wcsnlen (src/string), btowc/wctob (src/multibyte), and the
+    # C-locale objects __c_locale/__c_dot_utf8_locale (src/locale/c_locale.c) — none of
+    # which this OS compiles into libc. With them included, libc.so links (the symbols
+    # are just UND) but the dynamic loader fails at runtime: "Error relocating
+    # /lib/ld-musl-x86_64.so.1: iswspace: symbol not found" (and wcsnlen/iswdigit/
+    # __c_locale/__c_dot_utf8_locale). This OS has NO wide-char stdio consumer and does
+    # NOT publish <wchar.h> (where the w* decls live), so excluding them loses nothing
+    # and keeps the ABI/locale/ctype dependency chain out of libc. If wide-char stdio is
+    # ever needed: publish <wchar.h>, add a libc.map <wchar.h> block, and compile
+    # src/ctype/isw*.c + src/string/wcsnlen.c + src/locale/c_locale.c + btowc/wctob.
+    ${MUSL_DIR}/src/stdio/fgetwc.c
+    ${MUSL_DIR}/src/stdio/fgetws.c
+    ${MUSL_DIR}/src/stdio/fputwc.c
+    ${MUSL_DIR}/src/stdio/fputws.c
+    ${MUSL_DIR}/src/stdio/fwide.c
+    ${MUSL_DIR}/src/stdio/fwprintf.c
+    ${MUSL_DIR}/src/stdio/fwscanf.c
+    ${MUSL_DIR}/src/stdio/getwc.c
+    ${MUSL_DIR}/src/stdio/getwchar.c
+    ${MUSL_DIR}/src/stdio/open_wmemstream.c
+    ${MUSL_DIR}/src/stdio/putwc.c
+    ${MUSL_DIR}/src/stdio/putwchar.c
+    ${MUSL_DIR}/src/stdio/swprintf.c
+    ${MUSL_DIR}/src/stdio/swscanf.c
+    ${MUSL_DIR}/src/stdio/ungetwc.c
+    ${MUSL_DIR}/src/stdio/vfwprintf.c
+    ${MUSL_DIR}/src/stdio/vfwscanf.c
+    ${MUSL_DIR}/src/stdio/vswprintf.c
+    ${MUSL_DIR}/src/stdio/vswscanf.c
+    ${MUSL_DIR}/src/stdio/vwprintf.c
+    ${MUSL_DIR}/src/stdio/vwscanf.c
+    ${MUSL_DIR}/src/stdio/wprintf.c
+    ${MUSL_DIR}/src/stdio/wscanf.c)
+add_musl_lib(musl_stdio_objs SOURCES ${MUSL_STDIO_SOURCES})
+
+# ===================== musl multibyte subset (narrow stdio %ls/%lc only) ====================
+# vfprintf.c references wctomb (%ls/%lc wide-string formatting) and vfscanf.c
+# references mbrtowc + mbsinit (%ls scanning) — these are link-time refs in the
+# narrow-char printf/scanf path, so they must be satisfied. They live in musl
+# src/multibyte, which no other musl_*_objs compiles. We compile only the minimal
+# narrow-path closure, NOT the whole src/multibyte glob:
+#   wctomb.c  → calls wcrtomb
+#   wcrtomb.c → UTF-8 encoder (MB_CUR_MAX resolves inline; no link ref to bittab)
+#   mbrtowc.c → UTF-8 decoder, references bittab (the __fsmu8 table)
+#   mbsinit.c → pure (no deps)
+#   internal.c → provides bittab (__fsmu8)
+# The OTHER multibyte files (btowc/wctob/mbtowc/mblen/mbsrtowcs/wcsrtombs/...) are
+# NOT compiled: they are only referenced by the wide-char stdio files (vfwprintf/
+# fgetwc/...), which are excluded from musl_stdio_objs above. Including them would
+# pull the C-locale objects __c_locale/__c_dot_utf8_locale (src/locale/c_locale.c)
+# and recreate the runtime reloc failure. MB_CUR_MAX → (CURRENT_UTF8 ? 4 : 1) reads
+# __pthread_self()->locale at runtime (set by __init_tp in musl_pthread) — no link
+# dep on __c_locale. No public API here is exported (backs stdio internals).
+add_musl_lib(musl_multibyte_objs SOURCES
+    ${MUSL_DIR}/src/multibyte/wctomb.c
+    ${MUSL_DIR}/src/multibyte/wcrtomb.c
+    ${MUSL_DIR}/src/multibyte/mbrtowc.c
+    ${MUSL_DIR}/src/multibyte/mbsinit.c
+    ${MUSL_DIR}/src/multibyte/internal.c)
+
 # ===================== musl pthread integration (pthread.md §八) =====================
 # Generate musl's build-time headers (bits/alltypes.h + bits/syscall.h) into
 # ${CMAKE_BINARY_DIR}/musl_gen BEFORE any musl source or consumer compiles.
@@ -518,26 +643,27 @@ set(MUSL_PTHREAD_SOURCES
     # musl stdio symbols referenced by pthread_create's single-thread→threaded
     # transition (src/thread/pthread_create.c:200-210): it walks the open-FILE
     # list (__ofl_lock/__ofl_unlock, src/stdio/ofl.c) and re-locks
-    # __stdin_used/__stdout_used/__stderr_used. We keep our own stdio
-    # (user/lib/stdio.cc) — our FILE objects don't register on musl's ofl list,
-    # and the three *_used symbols are weak-aliased to a NULL dummy
-    # BY pthread_create.c itself (src/thread/pthread_create.c:175-177), so
-    # init_file_lock(NULL) is a no-op (pthread_create.c:179-182) and the ofl
-    # walk iterates an empty list. ofl.c is compiled only to PROVIDE
-    # __ofl_lock/__ofl_unlock so the dynamic linker stops failing libc.so
-    # relocation with "unresolved PLT symbol __ofl_unlock"; at runtime it does
-    # nothing. src/stdio/__stdio_exit.c is NOT compiled here (stdlib.md): it
-    # defined __stdio_exit + close_file, but exit is now musl's src/exit/exit.c
-    # (musl_stdlib_objs) and __stdio_exit is overridden by our strong
-    # user/lib/stdio_exit.c (fflush stdout/stderr); the *_used weak aliases it
-    # duplicated are already provided by pthread_create.c, so it is dead weight.
+    # __stdin_used/__stdout_used/__stderr_used. Now that stdio is musl upstream
+    # (musl_stdio_objs, stdio.md), the ofl list IS real — musl __fdopen/fopen
+    # call __ofl_add to register each FILE, and the three *_used symbols are
+    # STRONG-defined by musl stdin.c/stdout.c/stderr.c (no longer the NULL-dummy
+    # weak aliases pthread_create.c falls back to). So init_file_lock walks a
+    # populated list and the ofl_lock/unlock here are live, not just PROVIDE.
+    # ofl.c + __lockfile.c stay compiled HERE (not in musl_stdio_objs) to keep a
+    # single owner — musl_stdio_objs EXCLUDES them (see the musl stdio block) to
+    # avoid a multi-define clash; their deps (__lock/a_cas/__wait/a_store/
+    # __wake/__pthread_self) are all in musl_pthread already.
+    # src/stdio/__stdio_exit.c is NOT here either: it is now built via the
+    # musl_stdio_objs glob (it walks the ofl list + __stdin_used/__stdout_used to
+    # flush on exit), and the repo's strong user/lib/stdio_exit.c override is
+    # deleted (it flushed the repo's non-musl stdout/stderr, which no longer
+    # exist). exit is musl's src/exit/exit.c (musl_stdlib_objs) → __stdio_exit.
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/stdio/ofl.c
-    # __lockfile: referenced by musl stdio internals; its deps (__pthread_self,
-    # a_cas, __wait, a_store, __wake) are all already in musl_pthread, so it
-    # adds no further undefined chain. It operates on musl FILE->lock/waiters,
-    # which is fine — our stdio never enters musl's ofl list, so __lockfile is
-    # only reachable via musl's __stdio_exit (which we replace); kept as a
-    # harmless provider in case other musl internals reference it.
+    # __lockfile/__unlockfile: the FLOCK/FUNLOCK/FFINALLOCK primitives every
+    # locked musl stdio function expands (fopen/fclose/fread/fwrite/...). Now
+    # genuinely reachable via musl stdio paths (no longer "only via __stdio_exit
+    # which we replace"). Deps (__pthread_self, a_cas, __wait, a_store, __wake)
+    # are all in musl_pthread; operates on musl FILE->lock/waiters.
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/stdio/__lockfile.c
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/block.c
     # sigset_t set-mutation helpers (musl's 128-byte sigset_t). Compiled here
@@ -676,6 +802,8 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_stdlib_objs>
                $<TARGET_OBJECTS:musl_mman_objs>
                $<TARGET_OBJECTS:musl_time_objs>
+               $<TARGET_OBJECTS:musl_stdio_objs>
+               $<TARGET_OBJECTS:musl_multibyte_objs>
     C
     FLAGS "-fno-pie -DDYNAMIC=0"
     IMAGE_PATH usr/lib/libc.a
@@ -689,7 +817,7 @@ add_user_lib(c
 # __block_all_sigs/... ) are satisfied by the musl_pthread objects below — the
 # loader runs musl's real TLS setup during __dls3 (FS_BASE → musl struct
 # pthread), and __libc_start_main does NOT override fs_base. Only the
-# loader-only, non-pthread symbols (dprintf/getdelim/__tlsdesc_*/__libc_get_version)
+# loader-only, non-pthread symbols (dprintf/vdprintf/__tlsdesc_*/__libc_get_version)
 # still come from lib/musl_loader_shim.c (in LIBC_SOURCES). After bootstrap the
 # loader jumps to the main ELF _start; the hand-written __libc_start_main then
 # runs the loader's __libc_start_init() (do_init_fni) over every DSO's
@@ -708,6 +836,8 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_stdlib_objs>
                $<TARGET_OBJECTS:musl_mman_objs_so>
                $<TARGET_OBJECTS:musl_time_objs>
+               $<TARGET_OBJECTS:musl_stdio_objs>
+               $<TARGET_OBJECTS:musl_multibyte_objs>
     C
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED
@@ -881,8 +1011,9 @@ set(MUSL_STDLIB_SOURCES
     ${MUSL_DIR}/src/prng/rand.c
     ${MUSL_DIR}/src/prng/rand_r.c
     # strtod/strtol scanner deps (src/internal, pure compute — __floatscan uses
-    # only libm + errno; __shgetc fallback-references __uflow, which the stub
-    # below satisfies and is never reached at runtime for string scanning).
+    # only libm + errno; __shgetc fallback-references __uflow). __uflow is now
+    # supplied by musl src/stdio/__uflow.c in the musl_stdio_objs glob (the old
+    # scan_uflow_stub.c stub is deleted — see the __stdio_exit/at_quick_exit note).
     ${MUSL_DIR}/src/internal/intscan.c
     ${MUSL_DIR}/src/internal/shgetc.c
     ${MUSL_DIR}/src/internal/floatscan.c
@@ -900,9 +1031,12 @@ set(MUSL_STDLIB_SOURCES
     ${MUSL_DIR}/src/exit/abort.c
     ${MUSL_DIR}/src/exit/quick_exit.c
     ${MUSL_DIR}/src/exit/at_quick_exit.c
-    # __uflow stub — satisfies the link-time reference musl's shgetc.c emits;
-    # unreachable at runtime (see user/lib/musl_shim/scan_uflow_stub.c).
-    ${CMAKE_SOURCE_DIR}/user/lib/musl_shim/scan_uflow_stub.c)
+    # __uflow: musl's src/stdio/__uflow.c (musl_stdio_objs glob) now provides the
+    # real definition that satisfies the link-time reference musl's shgetc.c
+    # emits. The hand-written user/lib/musl_shim/scan_uflow_stub.c stub (added
+    # when stdio was NOT yet migrated and __uflow existed nowhere) is deleted —
+    # it would multi-define __uflow against the real one.
+)
 add_musl_lib(musl_stdlib_objs SOURCES ${MUSL_STDLIB_SOURCES})
 
 # ===================== musl time integration (time.md) =====================
