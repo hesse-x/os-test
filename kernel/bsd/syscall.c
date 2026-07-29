@@ -2611,6 +2611,33 @@ static uint32_t round_up_pow2(uint32_t v) {
   return 1u << (32 - __builtin_clz(v - 1));
 }
 
+int64_t sys_flock(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  int fd = (int)arg1;
+  int operation = (int)arg2;
+
+  if (fd < 0 || fd >= MAX_FD)
+    return (int64_t)-EBADF;
+
+  xtask *proc = current_task;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    return (int64_t)-EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+
+  int64_t ret = do_flock(f, operation);
+  file_put(f);
+  return ret;
+}
+
 int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                   int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;
@@ -5777,6 +5804,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_dup2(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_FCNTL:
     return sys_fcntl(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_FLOCK:
+    return sys_flock(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_IOCTL:
     return sys_ioctl(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_FSTAT:
@@ -5863,6 +5892,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_listen(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_ACCEPT:
     return sys_accept(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_ACCEPT4:
+    return sys_accept4(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_CONNECT:
     return sys_connect(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SOCKETPAIR:

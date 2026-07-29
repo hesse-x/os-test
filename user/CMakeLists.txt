@@ -24,6 +24,7 @@ set(LIBC_SOURCES
     lib/sys_process.cc
     lib/sys_device.cc
     lib/sys_ipc.cc
+    lib/sys_socket.cc
     lib/musl_loader_shim.c
     ${CMAKE_SOURCE_DIR}/utils/kvformat.c
 )

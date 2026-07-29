@@ -21,6 +21,8 @@ static struct test_entry tests[] = {
     {"pipe", "/test/pipe.elf"},
     {"fcntl", "/test/fcntl.elf"},
     {"fcntl_ofd", "/test/fcntl_ofd.elf"},
+    {"flock", "/test/flock.elf"},
+    {"accept4", "/test/accept4.elf"},
     {"string", "/test/string.elf"},
     {"malloc", "/test/malloc.elf"},
     {"stdio", "/test/stdio.elf"},

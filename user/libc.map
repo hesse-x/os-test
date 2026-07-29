@@ -60,6 +60,12 @@ global:
     /* <fcntl.h> */
     openat; fcntl;
 
+    /* <sys/file.h> */
+    flock;
+
+    /* <sys/socket.h> */
+    accept4;
+
     /* <ctype.h> */
     isalnum; isalpha; isascii; isblank; iscntrl; isdigit; isgraph;
     islower; isprint; ispunct; isspace; isupper; isxdigit; tolower;

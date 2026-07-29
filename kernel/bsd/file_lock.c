@@ -16,6 +16,10 @@
 //     (file_lock_release_pid).
 //   OFD   (F_OFD_*):              per open file description (owner_file).
 //     Released when the description's last fd closes (file_lock_release_file).
+//   BSD   (flock(2)):             whole-file, per open file description
+//     (owner_file), conflicts per-inode. Shares the list (is_bsd); never
+//     conflicts with POSIX/OFD (distinct universe). Released on last close
+//     (file_lock_release_file), like OFD. Sockets (no inode) never conflict.
 //
 // Scope (deliberately NOT in this file, tracked in doc/design/todo.md):
 //   - F_SETOWN/F_SETSIG actual SIGIO delivery → only stored, no AIO path.
@@ -57,9 +61,10 @@ struct file_lock {
   pid_t owner_pid;         // POSIX owner; OFD: creator pid (l_pid reporter)
   struct file *owner_file; // OFD owner (NULL for POSIX locks)
   bool is_ofd;             // true = OFD (per-file-description) lock
-  int type;                // F_RDLCK / F_WRLCK
-  uint64_t start;          // absolute byte start (resolved from l_whence)
-  uint64_t end;            // absolute byte end (exclusive); UINT64_MAX = to EOF
+  bool is_bsd;    // true = BSD flock(2) whole-file lock (per-file-desc)
+  int type;       // F_RDLCK / F_WRLCK
+  uint64_t start; // absolute byte start (resolved from l_whence)
+  uint64_t end;   // absolute byte end (exclusive); UINT64_MAX = to EOF
 };
 
 // EOF is represented as an unbounded end. l_len==0 means "to end of file".
@@ -84,6 +89,8 @@ static struct file_lock *find_conflict(struct inode *ip, pid_t pid,
                                        int type, uint64_t start, uint64_t end) {
   for (list_node *n = ip->i_flock.next; n != &ip->i_flock; n = n->next) {
     struct file_lock *fl = (struct file_lock *)n;
+    if (fl->is_bsd)
+      continue; // BSD flock locks never conflict with POSIX/OFD record locks
     if (fl->is_ofd == is_ofd) {
       /* Same class: same owner never conflicts. */
       if (is_ofd) {
@@ -114,6 +121,8 @@ static void locks_delete_range(struct inode *ip, pid_t pid, struct file *fowner,
     n = n->next;
 
     /* Only same-class & same-owner locks are released. */
+    if (fl->is_bsd)
+      continue; // BSD flock is released via its own path (file_put)
     if (fl->is_ofd != is_ofd)
       continue;
     if (is_ofd ? (fl->owner_file != fowner) : (fl->owner_pid != pid))
@@ -136,6 +145,7 @@ static void locks_delete_range(struct inode *ip, pid_t pid, struct file *fowner,
         front->owner_pid = pid;
         front->owner_file = fowner;
         front->is_ofd = is_ofd;
+        front->is_bsd = false;
         front->type = fl_type;
         front->start = fl_start;
         front->end = start;
@@ -149,6 +159,7 @@ static void locks_delete_range(struct inode *ip, pid_t pid, struct file *fowner,
         back->owner_pid = pid;
         back->owner_file = fowner;
         back->is_ofd = is_ofd;
+        back->is_bsd = false;
         back->type = fl_type;
         back->start = end;
         back->end = fl_end;
@@ -173,6 +184,7 @@ static int locks_insert(struct inode *ip, pid_t pid, struct file *fowner,
   fl->owner_pid = pid;
   fl->owner_file = fowner;
   fl->is_ofd = is_ofd;
+  fl->is_bsd = false;
   fl->type = type;
   fl->start = start;
   fl->end = end;
@@ -418,6 +430,170 @@ int64_t do_fcntl_lock_ofd(xtask *proc, struct file *f, int cmd,
 
 // --- process-exit & inode-eviction cleanup ---
 
+// BSD flock(2) whole-file advisory locks.
+//
+// LOCK_* op constants (musl sys/file.h): SH=1, EX=2, NB=4, UN=8. NB makes a
+// conflicting LOCK_SH->LOCK_EX (etc.) return -EWOULDBLOCK instead of blocking.
+//
+// Locks are whole-file, owned by the open file description (struct file), and
+// conflict per-inode: two independent open()s of the same file conflict; dup'd
+// fds sharing one description do not (upgrade/downgrade replaces in place).
+// They share inode->i_flock with POSIX/OFD locks but never conflict with them.
+// A blocking conflicting flock waits on inode->wq (signal-interruptible, like
+// F_SETLKW). Socket fds have no inode → the lock is per-struct-file and can
+// never conflict (each socket is its own description); it is a no-op success.
+#define LOCK_SH 1
+#define LOCK_EX 2
+#define LOCK_NB 4
+#define LOCK_UN 8
+
+// Map LOCK_SH/EX to F_RDLCK/F_WRLCK; LOCK_UN and anything else → -1.
+static int flock_op_type(int op) {
+  if (op == LOCK_SH)
+    return F_RDLCK;
+  if (op == LOCK_EX)
+    return F_WRLCK;
+  return -1;
+}
+
+// BSD conflict: same description (owner_file) never conflicts (upgrade/
+// replace); read-read compatible; otherwise conflict. Caller holds
+// i_flock_lock. Whole-file → no range check.
+static struct file_lock *bsd_flock_conflict(struct inode *ip, struct file *f,
+                                            int type) {
+  for (list_node *n = ip->i_flock.next; n != &ip->i_flock; n = n->next) {
+    struct file_lock *fl = (struct file_lock *)n;
+    if (!fl->is_bsd)
+      continue;
+    if (fl->owner_file == f)
+      continue; // same description: never conflicts with itself
+    if (fl->type == F_RDLCK && type == F_RDLCK)
+      continue; // SH|SH compatible
+    return fl;  // SH|EX, EX|SH, EX|EX conflict
+  }
+  return NULL;
+}
+
+// Remove BSD flock entries owned by f (release / replace-in-place). Caller
+// holds i_flock_lock.
+static void bsd_flock_drop(struct inode *ip, struct file *f) {
+  list_node *n = ip->i_flock.next;
+  while (n != &ip->i_flock) {
+    struct file_lock *fl = (struct file_lock *)n;
+    n = n->next;
+    if (fl->is_bsd && fl->owner_file == f) {
+      list_remove(&fl->node);
+      kfree(fl);
+    }
+  }
+}
+
+int64_t do_flock(struct file *f, int operation) {
+  int op = operation & ~LOCK_NB;
+  int nb = operation & LOCK_NB;
+
+  // Socket / no-inode fd: lock is per-struct-file and can never conflict
+  // (each socket is its own description; dup'd fds share the struct file and
+  // thus the lock). Validate the op and succeed.
+  if (!f->inode) {
+    if (op != LOCK_SH && op != LOCK_EX && op != LOCK_UN)
+      return -EINVAL;
+    return 0;
+  }
+
+  struct inode *ip = f->inode;
+  pid_t pid = current_task->pid;
+  wait_queue_head *wq = NULL;
+
+  for (;;) {
+    spin_lock(&ip->i_flock_lock);
+    if (op == LOCK_UN) {
+      bsd_flock_drop(ip, f);
+      spin_unlock(&ip->i_flock_lock);
+      // A released BSD lock may unblock a conflicting LOCK_EX/SH waiter.
+      if (ip->wq)
+        __wake_up(ip->wq, 0);
+      return 0;
+    }
+    int type = flock_op_type(op);
+    if (type < 0) {
+      spin_unlock(&ip->i_flock_lock);
+      return -EINVAL;
+    }
+    struct file_lock *conf = bsd_flock_conflict(ip, f, type);
+    if (!conf) {
+      // No conflict: replace this description's existing BSD lock (handles
+      // upgrade/downgrade) then insert the new whole-file entry.
+      bsd_flock_drop(ip, f);
+      struct file_lock *fl =
+          (struct file_lock *)kmalloc(sizeof(struct file_lock));
+      if (!fl) {
+        spin_unlock(&ip->i_flock_lock);
+        return -ENOMEM;
+      }
+      fl->owner_pid = pid;
+      fl->owner_file = f;
+      fl->is_ofd = false;
+      fl->is_bsd = true;
+      fl->type = type;
+      fl->start = 0;
+      fl->end = FLOCK_END_EOF;
+      list_push_back(&ip->i_flock, &fl->node);
+      spin_unlock(&ip->i_flock_lock);
+      // A downgrade SH->EX->SH may unblock a compatible waiter.
+      if (ip->wq)
+        __wake_up(ip->wq, 0);
+      return 0;
+    }
+    // Conflict.
+    spin_unlock(&ip->i_flock_lock);
+    if (nb)
+      return -EWOULDBLOCK;
+
+    // Block on inode->wq until the conflict clears or a signal arrives.
+    if (!wq)
+      wq = inode_wq_get(ip);
+    if (!wq)
+      return -ENOMEM; // cannot block without a wq
+
+    xtask *proc = current_task;
+    wait_queue_t wait;
+    wait.func = flock_wake_cb;
+    wait.data = proc;
+    wait.exclusive = 0;
+    list_init(&wait.node);
+    add_wait_queue(wq, &wait);
+    proc->state = BLOCKED;
+    proc->wait_event = WAIT_NONE;
+    /* No user timeout for flock (indefinite, signal-interruptible only).
+     * Borrow the process alarm deadline (if armed) so a pending SIGALRM can
+     * interrupt, mirroring F_SETLKW / blocking pipe write. */
+    uint64_t alarm_dl = 0;
+    if (proc->proc && proc->proc->signal) {
+      uint64_t sflags;
+      spin_lock_irqsave(&proc->proc->signal->sig_lock, &sflags);
+      alarm_dl = proc->proc->signal->alarm_deadline;
+      spin_unlock_irqrestore(&proc->proc->signal->sig_lock, sflags);
+    }
+    if (alarm_dl != 0) {
+      proc->wait_deadline = alarm_dl;
+      int cpu = proc->assigned_cpu;
+      uint64_t flags;
+      spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+      sched_timer_queue_insert(cpu, proc);
+      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+    } else {
+      proc->wait_deadline = 0;
+    }
+    schedule();
+    sched_cancel_spurious_wake(proc);
+    remove_wait_queue(wq, &wait);
+    if (task_signal_pending(proc))
+      return -ERESTART;
+    // loop: re-check conflict under i_flock_lock
+  }
+}
+
 static void release_pid_on_inode(struct inode *ip, void *ctx) {
   pid_t dead_pid = (pid_t)(uintptr_t)ctx;
   spin_lock(&ip->i_flock_lock);
@@ -443,11 +619,11 @@ void file_lock_release_pid(pid_t dead_pid) {
   inode_for_each(release_pid_on_inode, (void *)(uintptr_t)dead_pid);
 }
 
-// Release every OFD lock owned by this open file description. Called from
-// file_put on the last reference (close of the last dup'd fd sharing this
-// description). Must run while f->inode is still referenced by this file
-// (i.e. before inode_put). No-op for files without an inode (pipe/socket/etc.)
-// and for files that never held OFD locks.
+// Release every OFD and BSD flock lock owned by this open file description.
+// Called from file_put on the last reference (close of the last dup'd fd
+// sharing this description). Must run while f->inode is still referenced by
+// this file (i.e. before inode_put). No-op for files without an inode
+// (pipe/socket/etc.) and for files that never held OFD/BSD locks.
 void file_lock_release_file(struct file *f) {
   struct inode *ip = f->inode;
   if (!ip)
@@ -458,7 +634,7 @@ void file_lock_release_file(struct file *f) {
   while (n != &ip->i_flock) {
     struct file_lock *fl = (struct file_lock *)n;
     n = n->next;
-    if (fl->is_ofd && fl->owner_file == f) {
+    if (fl->owner_file == f && (fl->is_ofd || fl->is_bsd)) {
       list_remove(&fl->node);
       kfree(fl);
       changed = true;

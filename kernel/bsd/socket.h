@@ -155,6 +155,8 @@ int64_t sys_listen(int64_t arg1, int64_t arg2, int64_t, int64_t, int64_t,
                    int64_t);
 int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t,
                    int64_t);
+int64_t sys_accept4(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                    int64_t, int64_t);
 int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t, int64_t,
                     int64_t);
 int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,

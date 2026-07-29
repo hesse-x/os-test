@@ -24,6 +24,7 @@ int64_t sys_read(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_close(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_dup2(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_fcntl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_flock(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // process semantics
 int64_t sys_exit(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);

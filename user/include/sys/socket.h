@@ -64,6 +64,11 @@ static inline int accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
   return (int)ret;
 }
 
+// accept4 is a libc.so symbol (not inline): SYS_ACCEPT4 carries the flags
+// (SOCK_CLOEXEC / SOCK_NONBLOCK) the kernel applies to the new fd. Declared
+// here so callers see the prototype; defined in lib/sys_socket.cc.
+int accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags);
+
 static inline int connect(int fd, const struct sockaddr *addr,
                           socklen_t addrlen) {
   int64_t ret = __syscall3(SYS_CONNECT, (int64_t)fd, (int64_t)(uintptr_t)addr,

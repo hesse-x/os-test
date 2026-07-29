@@ -1482,8 +1482,14 @@ int64_t sys_listen(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   return 0;
 }
 
-int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
-                   int64_t unused2, int64_t unused3) {
+// accept4(fd, addr, addrlen, flags): like accept but honors SOCK_CLOEXEC (set
+// FD_CLOEXEC on the new fd) and SOCK_NONBLOCK (set O_NONBLOCK on the new
+// socket). accept() is do_accept with flags=0.
+static int64_t do_accept(int64_t arg1, int64_t arg2, int64_t arg3,
+                         int64_t flags) {
+  if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
+    return (int64_t)-EINVAL;
+
   int fd = (int)arg1;
   struct sockaddr_un __user *addr = (struct sockaddr_un __user *)arg2;
   socklen_t __user *addrlen = (socklen_t __user *)arg3;
@@ -1650,8 +1656,12 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     refcount_set(&f->f_count, 1);
     f->type = FD_SOCKET;
     f->flags = O_RDWR;
+    if (flags & SOCK_NONBLOCK)
+      f->flags |= O_NONBLOCK;
     f->sock = child;
     fd_install(proc->proc->files, new_fd, f);
+    if (flags & SOCK_CLOEXEC)
+      fd_set_cloexec(proc->proc->files, new_fd, 1);
 
     spin_unlock(fdlk);
     if (addr && addrlen) {
@@ -1686,6 +1696,21 @@ int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 out:
   file_put(af);
   return ret;
+}
+
+int64_t sys_accept(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
+                   int64_t unused2, int64_t unused3) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  return do_accept(arg1, arg2, arg3, 0);
+}
+
+int64_t sys_accept4(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                    int64_t unused1, int64_t unused2) {
+  (void)unused1;
+  (void)unused2;
+  return do_accept(arg1, arg2, arg3, arg4);
 }
 
 int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,

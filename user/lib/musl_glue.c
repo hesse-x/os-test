@@ -42,7 +42,6 @@
 #include <time.h> // IWYU pragma: keep
 
 #include <sys/types.h>
-// #include <bits/signal.h>
 #include <xos/syscall_asm.h>
 #include <xos/syscall_nums.h>
 /* musl internal TCB / __libc touchpoints are reached via these forwarders only;

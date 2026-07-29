@@ -50,4 +50,12 @@ void file_lock_release_all(struct inode *ip);
 // (the last dup'd fd), not when the creating process exits.
 void file_lock_release_file(struct file *f);
 
+// Apply a BSD flock(2) request to f. LOCK_SH/LOCK_EX acquire a whole-file
+// advisory lock (shared/exclusive); LOCK_UN releases it; LOCK_NB makes a
+// conflicting acquire return -EWOULDBLOCK instead of blocking on inode->wq
+// (signal-interruptible, like F_SETLKW). Regular files: per-inode conflict
+// (two independent open()s conflict, dup'd fds do not). Socket/no-inode fds
+// never conflict (the lock is per-struct-file). Returns 0 or negative -errno.
+int64_t do_flock(struct file *f, int operation);
+
 #endif // KERNEL_BSD_FILE_LOCK_H

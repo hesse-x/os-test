@@ -20,6 +20,10 @@ add_user_dyn_elf(fcntl C SOURCES test_fcntl.c LINK_LIBS c STATIC_LIBS unity)
 # 05: OFD (F_OFD_*) record locks + F_SETOWN_EX/F_GETOWN_EX.
 add_user_dyn_elf(fcntl_ofd C SOURCES test_fcntl_ofd.c LINK_LIBS c STATIC_LIBS unity)
 
+# BSD flock(2) + accept4(2) (SOCK_CLOEXEC / SOCK_NONBLOCK).
+add_user_dyn_elf(flock C SOURCES test_flock.c LINK_LIBS c STATIC_LIBS unity)
+add_user_dyn_elf(accept4 C SOURCES test_accept4.c LINK_LIBS c STATIC_LIBS unity)
+
 # Layer 3: string / malloc / stdio
 add_user_dyn_elf(string C SOURCES test_string.c LINK_LIBS c STATIC_LIBS unity)
 add_user_dyn_elf(malloc C SOURCES test_malloc.c LINK_LIBS c STATIC_LIBS unity)
