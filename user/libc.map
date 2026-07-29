@@ -34,6 +34,7 @@ global:
     memchr; memmem; strcat; strchr; strcmp; strcpy; strcspn; strdup;
     strerror; strerror_r; strerror_l; strlen; strncat; strncmp; strncpy; strndup;
     strpbrk; strrchr; strspn; strstr; strtok; strtok_r;
+    strverscmp;
     basename;
 
     /* <strings.h> */
@@ -92,6 +93,7 @@ global:
     /* <dirent.h> */
     closedir; opendir; readdir; scandir;
     telldir; seekdir; rewinddir; dirfd; readdir_r;
+    fdopendir; versionsort;
 
     /* <errno.h> */
     __errno_location;

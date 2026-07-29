@@ -23,6 +23,12 @@
 #define HAVE_QUIRKS 1
 #define LIBINPUT_QUIRKS_DIR "/usr/share/libinput"
 
+/* libc.so now provides versionsort + strverscmp (musl dirent/string). Tell
+ * libinput-versionsort.h (HAVE_VERSIONSORT) to drop its own static inline
+ * copies and use the system ones — avoids a "static follows non-static" clash
+ * with <dirent.h>'s versionsort declaration (libinput defines _GNU_SOURCE). */
+#define HAVE_VERSIONSORT 1
+
 #define LIBINPUT_QUIRKS_OVERRIDE_FILE "/usr/share/libinput/quirks"
 #define LIBINPUT_PLUGIN_ETCDIR "/etc/libinput"
 #define LIBINPUT_PLUGIN_LIBDIR "/usr/lib/libinput"

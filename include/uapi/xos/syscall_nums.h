@@ -75,6 +75,12 @@
 #define SYS_GETTID 186
 #define SYS_SET_TID_ADDRESS 218
 #define SYS_GETDENTS64 217
+// SYS_GETDENTS (78) is aliased onto sys_getdents in the BSD dispatch, so musl's
+// dirent readdir()/__getdents() — which issue syscall(78, …) — reach the same
+// handler that returns dirent64 records (== musl struct dirent layout). This is
+// a deliberate divergence from real Linux (where 78 returns linux_dirent w/o a
+// d_type field); recorded as tech debt in doc/design/todo.md.
+#define SYS_GETDENTS 78
 #define SYS_FUTEX 202
 #define SYS_SET_ROBUST_LIST 273
 #define SYS_GET_ROBUST_LIST 274

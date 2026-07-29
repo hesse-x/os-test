@@ -49,6 +49,11 @@ LIBC_EXPORT void *memcpy(void *dst, const void *src, size_t n);
 LIBC_EXPORT void *memset(void *s, int c, size_t n);
 LIBC_EXPORT void *memmove(void *dst, const void *src, size_t n);
 
+#if defined(_GNU_SOURCE)
+/* GNU extension: version-comparison string sort (used by versionsort). */
+LIBC_EXPORT int strverscmp(const char *l0, const char *r0);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

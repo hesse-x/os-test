@@ -6112,6 +6112,11 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_dev_create(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_GETDENTS64:
     return sys_getdents(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  // SYS_GETDENTS (78): musl dirent readdir()/__getdents() issue syscall(78).
+  // Alias onto the same sys_getdents handler — it returns dirent64 records,
+  // whose layout matches musl's struct dirent, so musl reads d_type too.
+  case SYS_GETDENTS:
+    return sys_getdents(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // Socket syscalls (implemented in kernel/socket.c)
   case SYS_SOCKET:
     return sys_socket(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);

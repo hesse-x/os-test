@@ -10,17 +10,15 @@
 #include <stdint.h>
 
 /*
- * Kernel-internal dirent64 layout — used by sys_getdents and libc readdir().
- * Both kernel (fat32.c) and userspace (user/lib/file.cc) must use this
- * single definition so the layout can never silently diverge.
+ * Kernel-internal dirent64 layout — used by sys_getdents (syscall 217 and the
+ * aliased 78) and by libc's readdir(). Both kernel (fat32.c) and the musl
+ * dirent sources (third_party/musl/src/dirent) consume this same layout, so it
+ * must stay field-for-field identical to musl's struct dirent (and to
+ * user/include/dirent.h's struct dirent).
  *
- * NOTE: this is NOT a duplicate of user/include/dirent.h's `struct dirent`.
- * The two are deliberately different and intentionally unrelated by field:
- *   - struct dirent64  (here): variable-length, d_reclen/d_type, what the
- *     kernel hands back from sys_getdents into a caller-provided buffer.
- *   - struct dirent    (user/include/dirent.h): fixed NAME_MAX+1 name, what
- *     libc's readdir() returns to applications. libc's readdir() reads
- *     dirent64 records via sys_getdents and copies d_name into a dirent.
+ * musl's readdir() returns a pointer straight into the getdents buffer cast to
+ * struct dirent — no per-field copy — so the two structs are intentionally
+ * layout-identical, not unrelated. The kernel fills d_type (DT_DIR/DT_REG/...).
  */
 struct dirent64 {
   uint64_t d_ino;
