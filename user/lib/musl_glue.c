@@ -38,10 +38,8 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdint.h>
-#include <syscall.h>
 #include <time.h> // IWYU pragma: keep
 
-#include <sys/types.h>
 #include <xos/syscall_asm.h>
 #include <xos/syscall_nums.h>
 /* musl internal TCB / __libc touchpoints are reached via these forwarders only;
@@ -157,6 +155,17 @@ MUSL_HIDDEN int __libc_sigaction(int sig, const void *restrict sa_v,
  * the forwarders used, so behaviour is unchanged (musl's mmap.c additionally
  * fixes an EPERM→ENOMEM and validates offset alignment — an improvement). */
 
-MUSL_HIDDEN int __clock_gettime(clockid_t clk, struct timespec *ts) {
-  return sys_clock_gettime((int)clk, ts);
+/* __vdsosym — musl's clock_gettime.c probes for a vdso clock_gettime via
+ * __vdsosym (compiled in because arch/x86_64/syscall_arch.h #defines
+ * VDSO_CGT_SYM). This OS maps no vdso; return NULL so clock_gettime's first
+ * call caches vdso_func=NULL (via cgt_init) and falls back to
+ * __syscall(SYS_clock_gettime) — identical to musl on a no-vdso kernel.
+ * musl's src/internal/vdso.c is NOT compiled (it would walk libc.auxv for
+ * AT_SYSINFO_EHDR, unnecessary and risky if the loader leaves libc.auxv
+ * unset). __clock_gettime itself now comes from musl's clock_gettime.c
+ * (musl_time_objs), so the old __clock_gettime forwarder is retired. */
+MUSL_HIDDEN void *__vdsosym(const char *vername, const char *name) {
+  (void)vername;
+  (void)name;
+  return 0;
 }

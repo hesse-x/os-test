@@ -19,8 +19,11 @@
 #   third_party/musl/include/unistd.h → $DEST/unistd.h   (musl's real <unistd.h> replaces the
 #   third_party/musl/include/sys/time.h → $DEST/sys/time.h  source-tree shim at publish time —
 #   third_party/musl/include/fcntl.h  → $DEST/fcntl.h        the shim forwards via "musl/include/..."
-#   third_party/musl/include/dlfcn.h  → $DEST/dlfcn.h        (dlopen/dlsym/dlclose/dlerror/dladdr/Dl_info;
-#                                              user/include has no dlfcn.h, so musl's ships verbatim)
+#   third_party/musl/include/time.h   → $DEST/time.h         which only resolves with -I third_party;
+#   third_party/musl/include/dlfcn.h  → $DEST/dlfcn.h        the sysroot has no third_party, so musl's
+#                                              real header ships at the standard path instead.
+#                                              dlfcn.h is musl verbatim — user/include has no
+#                                              dlfcn.h shim (dlopen/dlsym/dlclose/dlerror/dladdr/Dl_info).
 #   third_party/musl/include/{pthread,signal,sched}.h → $DEST/  (musl's pthread/signal/sched —
 #                                              repo's own were deleted when pthread switched to musl)
 #   third_party/musl/arch/x86_64/bits/signal.h → $DEST/bits/signal.h  (<signal.h>'s arch bits;
@@ -72,20 +75,29 @@ cp -r "$SRC"/user/include/sys/. "$DEST/sys/"
 mkdir -p "$DEST/bits"
 cp    "$SRC"/user/include/bits/*.h "$DEST/bits/"
 
-# 3. Replace the shim <unistd.h> / <sys/time.h> / <fcntl.h> with musl's real headers.
-#    The repo's user/include/unistd.h, sys/time.h, and fcntl.h are source-tree shims
-#    that forward to musl via #include "musl/include/..." (resolved at build time by
-#    -I third_party). The published sysroot has no third_party on its search path,
-#    so it ships musl's headers directly at the standard paths instead. musl's
-#    <unistd.h> pulls <features.h>, <bits/alltypes.h>, <bits/posix.h>; <sys/time.h>
-#    pulls <sys/select.h>; <fcntl.h> pulls <bits/fcntl.h> (published above) — all
-#    already published. Note: <xos/fcntl.h> is NO LONGER published (moved to
-#    the kernel-private kernel/bsd/kfcntl.h during the fcntl header split;
+# 3. Replace the shim <unistd.h> / <sys/time.h> / <fcntl.h> / <time.h> with
+#    musl's real headers. The repo's user/include/unistd.h, sys/time.h, fcntl.h,
+#    and time.h are source-tree shims that forward to musl via
+#    #include "musl/include/..." (resolved at build time by -I third_party).
+#    The published sysroot has no third_party on its search path, so it ships
+#    musl's headers directly at the standard paths instead. musl's <unistd.h>
+#    pulls <features.h>, <bits/alltypes.h>, <bits/posix.h>; <sys/time.h> pulls
+#    <sys/select.h>; <fcntl.h> pulls <bits/fcntl.h> (published above); <time.h>
+#    pulls <features.h> + <bits/alltypes.h> — all already published. Note: the
+#    source-tree <time.h> shim additionally pulls struct timeval via
+#    __NEED_struct_timeval (a compat convenience for in-tree sources that
+#    historically got timeval from <time.h> via <xos/time.h>); that compat
+#    block is NOT in the published sysroot copy — sysroot consumers use musl's
+#    real <time.h> and get struct timeval from <sys/time.h>/<sys/select.h>
+#    (POSIX). Note: <xos/fcntl.h> is NO LONGER published (moved to the
+#    kernel-private kernel/bsd/kfcntl.h during the fcntl header split;
 #    fcntl needs no OS-specific extension header — musl's <fcntl.h> plus the
 #    kernel M0.4 resolve_dirfd_start fix cover openat fully).
 cp "$SRC"/third_party/musl/include/unistd.h     "$DEST/unistd.h"
 cp "$SRC"/third_party/musl/include/sys/time.h   "$DEST/sys/time.h"
 cp "$SRC"/third_party/musl/include/fcntl.h      "$DEST/fcntl.h"
+cp "$SRC"/third_party/musl/include/time.h       "$DEST/time.h"
+cp "$SRC"/third_party/musl/include/sys/timerfd.h "$DEST/sys/timerfd.h"
 
 # 3b. musl dlfcn.h — dynamic linking API (dlopen/dlsym/dlclose/dlerror/dladdr/
 #     Dl_info). user/include has no dlfcn.h, so publish musl's verbatim. Its

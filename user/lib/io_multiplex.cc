@@ -11,6 +11,8 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdint.h>
+
+#include <sys/cdefs.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/poll.h>
@@ -186,7 +188,7 @@ extern "C" int ipcfd_read(int fd, struct recv_msg *msg, void *data_buf,
 
 // ===================== timerfd =====================
 
-extern "C" int timerfd_create(int clockid, int flags) {
+extern "C" LIBC_EXPORT int timerfd_create(int clockid, int flags) {
   int64_t ret =
       __syscall2(SYS_TIMERFD_CREATE, (int64_t)clockid, (int64_t)flags);
   if (ret < 0) {
@@ -196,9 +198,9 @@ extern "C" int timerfd_create(int clockid, int flags) {
   return (int)ret;
 }
 
-extern "C" int timerfd_settime(int fd, int flags,
-                               const struct itimerspec *new_value,
-                               struct itimerspec *old_value) {
+extern "C" LIBC_EXPORT int timerfd_settime(int fd, int flags,
+                                           const struct itimerspec *new_value,
+                                           struct itimerspec *old_value) {
   int64_t ret =
       __syscall4(SYS_TIMERFD_SETTIME, (int64_t)fd, (int64_t)flags,
                  (int64_t)(uintptr_t)new_value, (int64_t)(uintptr_t)old_value);

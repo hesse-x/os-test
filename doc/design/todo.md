@@ -307,7 +307,7 @@ evdev 中断投递正规化(技术债 #34)独立于本重构,走路径 3,见 [..
 | **[已落地 2026-07-28]** M0.4 内核 `*at` AT_FDCWD→cwd 修 | `chdir`/`getcwd`/`renameat`/`unlinkat`/`openat`/`rename` | ~~AT_FDCWD→cwd 内核债~~ 已修：`resolve_dirfd_start(AT_FDCWD)` 解析 `bp->cwd` 为 inode（`kernel/bsd/vfs.c`，非 root）；plain syscall 走 `vfs_resolve_user` 已解析 `bp->cwd`。`bp->cwd` 成 cwd 唯一真相 | 已下掉：repo `chdir`/`getcwd`/`unlinkat`/`renameat`/`openat`/`rename` + `cwd_path`/`resolve_at_path`/`__get_cwd`；接入 musl `openat.c`（fcntl）+ `chdir.c`/`getcwd.c`/`renameat.c`/`unlinkat.c`（unistd）+ `src/stdio/rename.c`；删 `user/include/xos/fcntl_ext.h`。`do_stat_path`/`fstatat`/`mkdir`/`mkdirat`/`opendir` 的 cwd 前缀拼装一并下掉（相对路径直送内核）。`rename` 缺 `LIBC_EXPORT` 在 libc.so 隐藏（libc.map 列了但不导出）的潜在 bug 由强制重编暴露、改采 musl `rename` 修复 |
 | | `faccessat` | AT_EACCESS 路径要 `__block_all_sigs`/`__restore_sigs`/`__clone` clone shim | 补 clone shim 后接入 musl `faccessat.c` |                                                                                                    
 | | `isatty` | musl 探 `TIOCGWINSZ`；串口（`driver/serial.c:211`）只答 `TCGETS`，余返 `-ENOTTY` | 串口补 `TIOCGWINSZ`（或 repo `isatty` 改用 `TCGETS`，已保留） |                                                                           
-| | `sleep`/`usleep` | musl 遇 `EINTR` 返剩余秒，repo 语义是 EINTR 后重试 | 统一 EINTR 语义后接入；repo 版当前更贴合本 OS 信号 resume |                                                                                                     
+| | `sleep`/`usleep` | musl 遇 `EINTR` 返剩余秒，repo 语义是 EINTR 后重试睡满 | time 已迁 musl（见下「time 全量迁移」），`sleep`/`usleep` 仍在 `time.cc` 故意保留 EINTR-resume 语义（musl `sleep.c`/`usleep.c` 仍排除于 `MUSL_UNISTD_EXCLUDE`）；仅当确认无消费者依赖"睡满"语义且想统一 POSIX 返回值时再换 musl 版 |                                                                                                     
 | | `ttyname`/`ttyname_r` | musl `readlink("/proc/self/fd/N")` + `stat`/`fstat` dev/ino 交叉校验，硬依赖 procfs 魔幻 symlink | 上 procfs（合成 `/proc/self/fd/N`→设备路径）；repo 版走 `TIOCGPTN` 拼 `/dev/ptsN` 已够 PTY 用，非 PTY tty 仍 
 返 NULL |                                                                                                                                                                                                                                   
 | | `gethostname` | musl 返 `uname().nodename`（"（none）"）；repo 走 `sys_gethostname`（sethostname 回环） | `uname` nodename 正确填充后可换 musl 版 |                                                                                     
@@ -341,7 +341,7 @@ stdlib 模块（纯计算 + 启动/env/exit 链）切到 musl 上游（`musl_std
 
 **暂留子集（musl 无法替换，待后续模块迁移解锁）**：
 - `realpath`（`stdlib_misc.c`）：musl `src/misc/realpath.c` 需 `__procfdname` + `readlink("/proc/self/fd/N")` + `O_PATH`（内核皆无 procfs）。解锁：上 procfs（合成 `/proc/self/fd/N`→设备路径）+ readlink 子系统后切 musl 版。
-- `mkstemp`/`mktemp`（`stdlib_misc.c`）：musl `src/temp/__randname.c` 调 `__clock_gettime(CLOCK_REALTIME)`，依赖时间链（会撞 repo `time.cc:clock_gettime`）。解锁：time 模块迁移到 musl 后切 `__randname`/`__clock_gettime`。
+- `mkstemp`/`mktemp`（`stdlib_misc.c`）：musl `src/temp/__randname.c` 调 `__clock_gettime(CLOCK_REALTIME)`。~~解锁：time 模块迁移到 musl 后切 `__randname`/`__clock_gettime`~~ time 已迁 musl（见下「time 全量迁移」，`__clock_gettime` 现由 musl `clock_gettime.c` 提供），阻断已消除；切 musl `mkstemp` 为 stdlib 收尾子任务。
 - `getline`/`fscanf`/`scanf`（`stdlib_misc.c`，当前 ENOSYS stub）：musl 把它们放 `src/stdio/`，依赖整套 musl stdio 的 `__uflow`/shgetc 扫描链；repo stdio 是自写 `stdio.cc`（非 musl FILE），硬塞接不上。解锁：stdio 整体迁 musl 时一起上。
 - `sysconf`/`getpagesize`（`stdlib_misc.c`）：musl `src/conf/sysconf.c`（217 行）改 `_SC_NPROCESSORS_ONLN` 语义，repo 走 `sys_sysconf` syscall。解锁：对齐 ncpu 取值语义后切 musl 版（连带 `src/legacy/getpagesize.c`）。
 - `mknod`/`chmod`/`remove`（`stdlib_misc.c`）：薄 syscall 封装，musl 版走同一 syscall 号但拖 `src/misc/sysm.c` 机制，收益≈0；`remove` 在 musl 属 stdio。低优先级，随 stat/stdio 迁移归位。
@@ -350,6 +350,20 @@ stdlib 模块（纯计算 + 启动/env/exit 链）切到 musl 上游（`musl_std
 - `arc4random_buf`/`arc4random_uniform`（`user/lib/getrandom.c`）：**永久留 repo**——musl 无此源文件（BSD 扩展，musl 不实现 arc4random）。已在 `user/include/sys/random.h` 用 `LIBC_EXPORT` 声明导出。
 - `abort`（曾留 `signal.cc`）：已迁——musl `src/exit/abort.c` 接管，`signal.cc` 删旧实现。                                
                                                                                                                                                                               
+
+### time 全量迁移到 musl
+
+time 模块（日历换算 + strftime/strptime + TZ + clock/nanosleep 包装）切到 musl 上游（`musl_time_objs`，`add_musl_lib` 单 -fPIC OBJECT lib 同时喂 libc.a + libc.so，同 string/math/stdlib 模式）。源清单：`src/time/{difftime,__year_to_secs,__month_to_secs,__tm_to_secs,__secs_to_tm,__tz,__map_file,gmtime,gmtime_r,localtime,localtime_r,mktime,timegm,asctime,asctime_r,__asctime,ctime,ctime_r,strftime,strptime,clock,clock_gettime,clock_settime,clock_getres,clock_getcpuclockid,clock_nanosleep,nanosleep,gettimeofday,time,timespec_get,times,utime,ftime,getdate}.c` + `src/locale/langinfo.c`（`__nl_langinfo_l`/`nl_langinfo` C-locale 提供者，喂 `__asctime.c`/`strftime.c`/`strptime.c` 的 weekday/month 名）。
+
+退役 shim：`user/lib/time.cc` 精简至**仅** `sleep`/`usleep`（EINTR-resume 故意保留，见上表 sleep/usleep 行）；删 `timespec_to_tm`（仓库非标准，0 调用者，musl 无对应，`libc.map`/`time.h` 同步删）。`user/include/time.h` 改转发 musl `include/time.h`（同 `sys/time.h` shim），拿到带 `__tm_gmtoff`/`__tm_zone` 的 `struct tm`（musl `gmtime_r`/`mktime`/`strftime` 写这些字段）。
+
+`user/lib/musl_glue.c` 删 `__clock_gettime` forwarder（musl `clock_gettime.c` 现 strong 定义 `__clock_gettime` + weak `clock_gettime`，会 multi-def；`__timedwait.c`/`__randname.c` 改用 musl 版）；新增 `__vdsosym` 桩返回 NULL（`arch/x86_64/syscall_arch.h` 定义 `VDSO_CGT_SYM` 故 `clock_gettime.c` 编进 vdso 探测，本 OS 无 vdso → 首调缓存 `vdso_func=NULL` 回落 `__syscall`，不编 `src/internal/vdso.c`）。
+
+源码核实：(1) 内核已实现 `SYS_clock_gettime(228)`/`clock_settime(227)`/`clock_nanosleep(230)`/`nanosleep(35)`/`gettimeofday(96)`/`utimensat(280)`；`clock_getres`/`times` 内核无 impl，musl 走 `__syscall` 返 `-ENOSYS`（0 调用者，可接受）。(2) `__tz.c` 走 `getenv("TZ")`+`__map_file("/etc/localtime")`（absent → 默认 UTC，等价旧 repo UTC-only 桩但支持 TZ），依赖 `__munmap`/`__mmap`（musl_glue）、`__sys_open`（musl `syscall.h` 宏）、`__lock`/`a_cas`/`a_crash`/`a_store`/`__wait`/`__wake`（musl_pthread）、`getenv`（musl_stdlib）、`memcpy/strlen`（musl_string）——均已就绪。(3) `__asctime.c` 用 `snprintf`（repo `stdio.cc`）+ `__nl_langinfo_l`（langinfo.c）+ `a_crash`（inline）。(4) `utime.c` 调 `utimensat`（`musl_unistd_objs` glob 已含 `src/unistd/utimensat.c`）。
+
+**延后项**：
+- `wcsftime.c` — 依赖 wchar 层（`wcstoul`/`mbstowcs`/`wmemcpy` 未迁移），同 string 排除 wcs*/wmem*；随 wchar 迁移 tier 接入。
+- `timer_create.c`/`timer_settime.c`/`timer_delete.c`/`timer_gettime.c`/`timer_getoverrun.c` — 内核无 `SYS_timer_*`（返 `-ENOSYS`）且 SIGEV_THREAD 路径要重 pthread 内部（`pthread_barrier_*`/`__reset_tls`/`SIGTIMER`/`__libc_sigaction`），0 调用者。解锁：内核加 POSIX timer 系 syscall（`sys_timer_create/settime/gettime/getoverrun/delete`，timerfd 已有类似机制可参考）后接入。
 
 ### musl pthread + ldso 切换过渡层收尾
 

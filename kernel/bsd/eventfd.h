@@ -14,7 +14,8 @@
 
 #define EFD_SEMAPHORE 0x1
 #define EFD_NONBLOCK 0x800
-#define EFD_CLOEXEC 0x8000
+/* Must equal O_CLOEXEC (02000000, kernel/bsd/kfcntl.h) — see timerfd.h. */
+#define EFD_CLOEXEC 02000000
 #define EVENTFD_MAX 0xFFFFFFFFFFFFFFFEULL
 
 typedef struct eventfd_ctx {

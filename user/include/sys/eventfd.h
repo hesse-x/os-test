@@ -12,7 +12,7 @@
 
 #define EFD_SEMAPHORE 0x1
 #define EFD_NONBLOCK 0x800
-#define EFD_CLOEXEC 0x8000
+#define EFD_CLOEXEC 0x80000
 
 #ifdef __cplusplus
 extern "C" {

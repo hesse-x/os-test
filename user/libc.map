@@ -307,12 +307,21 @@ global:
     ynf;
 
 
-    /* <time.h> */
-    clock; clock_gettime; clock_settime; ctime; ctime_r; asctime; asctime_r;
+    /* <time.h> — musl upstream (src/time/* + src/locale/langinfo.c via
+     * musl_time_objs, time.md). clock_getres, clock_getcpuclockid, times
+     * have no kernel syscall impl and return -ENOSYS (0 callers). The timer
+     * family and wcsftime are NOT built (deferred, see todo.md).
+     * timespec_to_tm (repo non-std) is deleted. */
+    clock; clock_gettime; clock_settime; clock_getres; clock_getcpuclockid;
+    ctime; ctime_r; asctime; asctime_r;
     difftime; clock_nanosleep; gettimeofday; gmtime; gmtime_r; localtime;
-    localtime_r; mktime; nanosleep; strftime; time; timespec_get;
-    timespec_to_tm; timezone;
-    daylight; tzname; tzset;
+    localtime_r; mktime; timegm; nanosleep; strftime; strptime;
+    time; timespec_get; times; utime; ftime; getdate; getdate_err;
+    timezone; daylight; tzname; tzset;
+
+    /* <langinfo.h> — C-locale provider compiled into musl_time_objs
+     * (src/locale/langinfo.c) for __asctime/strftime/strptime. */
+    nl_langinfo; nl_langinfo_l;
 
     /* <signal.h> */
     kill; raise; sigaction; signal; sigreturn; sigprocmask; sigpending; abort;

@@ -2,81 +2,39 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
+ *
+ * Thin shim forwarding to the unmodified musl time.h. musl declares the full
+ * POSIX/GNU time surface (struct tm with the __tm_gmtoff and __tm_zone fields
+ * that musl gmtime_r/mktime/strftime write, struct itimerspec, all CLOCK and
+ * TIMER constants, TIMER_ABSTIME, the timer family, strptime, getdate,
+ * timegm, tzset, timezone, daylight, tzname) and pulls time_t, clock_t,
+ * timer_t, locale_t, and struct timespec via bits/alltypes.h (the checked-in
+ * user/include/bits/alltypes.h). The old repo time.h defined a UTC-only
+ * struct tm WITHOUT the __tm_gmtoff/__tm_zone fields, which the now-adopted
+ * musl src/time sources (musl_time_objs) write to, so it had to go. Same
+ * shim pattern as sys/time.h. The guard name is deliberately NOT _TIME_H:
+ * musl header uses that, and reusing it would make its ifndef skip the body.
+ *
+ * The kernel-side shared UAPI stays in xos/time.h (struct timespec, struct
+ * timeval, time_t, the CLOCK constants, for the kernel, which does not
+ * include musl headers); its __DEFINED_ guards coexist with musl alltypes
+ * so the two never double-define when both are pulled into one userspace TU
+ * (e.g. via syscall.h).
  */
+#ifndef _USER_TIME_SHIM_H
+#define _USER_TIME_SHIM_H
+#include "musl/include/time.h"
 
-#ifndef _TIME_H
-#define _TIME_H
-
-#include <stddef.h>
-#include <stdint.h>
-#include <sys/cdefs.h>
-#include <xos/time.h>
-
-typedef long clock_t;
-typedef long time_t;
-typedef int clockid_t;
-
-#define CLOCKS_PER_SEC 1000000
-
-#define TIME_UTC 1
-
-/* Calendar time (UTC-only, D10: system has no timezone, localtime = gmtime) */
-struct tm {
-  int tm_sec;   /* seconds [0-60] (60 = leap second) */
-  int tm_min;   /* minutes [0-59] */
-  int tm_hour;  /* hours [0-23] */
-  int tm_mday;  /* day of month [1-31] */
-  int tm_mon;   /* month [0-11] */
-  int tm_year;  /* year - 1900 */
-  int tm_wday;  /* day of week [0-6], 0=Sunday */
-  int tm_yday;  /* day of year [0-365] */
-  int tm_isdst; /* daylight saving flag (always 0 in this OS) */
-};
-
-#ifdef __cplusplus
-extern "C" {
+/* Compat: the old repo <time.h> pulled in <xos/time.h>, which defined
+ * struct timeval alongside struct timespec. musl's <time.h> only defines
+ * struct timespec (POSIX puts struct timeval in <sys/time.h>/<sys/select.h>).
+ * Several in-tree sources historically rely on <time.h> providing timeval
+ * (evdev.cc, test_clock_realtime.c, io_multiplex.cc via <sys/select.h>).
+ * Preserve that contract by pulling struct timeval from bits/alltypes.h
+ * here. Idempotent via __DEFINED_struct_timeval, so a later <sys/time.h>
+ * re-include is a no-op. suseconds_t is pulled alongside (timeval's
+ * tv_usec uses it). */
+#define __NEED_suseconds_t
+#define __NEED_struct_timeval
+#include <bits/alltypes.h>
 #endif
-
-/* Timezone stub (D10: no timezone, fixed UTC) */
-LIBC_EXPORT extern long timezone;
-LIBC_EXPORT extern int daylight;
-LIBC_EXPORT extern char *tzname[2];
-
-LIBC_EXPORT int timespec_get(struct timespec *ts, int base);
-LIBC_EXPORT clock_t clock(void);
-LIBC_EXPORT int nanosleep(const struct timespec *req, struct timespec *rem);
-LIBC_EXPORT int clock_nanosleep(clockid_t clk, int flags,
-                                const struct timespec *req,
-                                struct timespec *rem);
-LIBC_EXPORT int usleep(unsigned usec);
-
-/* clock_gettime / gettimeofday (wraps sys_clock_gettime) */
-LIBC_EXPORT int clock_gettime(int clk, struct timespec *ts);
-LIBC_EXPORT int clock_settime(clockid_t clk, const struct timespec *ts);
-LIBC_EXPORT int gettimeofday(struct timeval *tv, void *tz);
-
-/* Calendar conversion (UTC-only) */
-LIBC_EXPORT time_t time(time_t *t);
-LIBC_EXPORT struct tm *gmtime(const time_t *t);
-LIBC_EXPORT struct tm *gmtime_r(const time_t *t, struct tm *result);
-LIBC_EXPORT struct tm *localtime(const time_t *t);
-LIBC_EXPORT struct tm *localtime_r(const time_t *t, struct tm *result);
-LIBC_EXPORT time_t mktime(struct tm *tm);
-LIBC_EXPORT struct tm *timespec_to_tm(const struct timespec *ts,
-                                      struct tm *result);
-
-/* Formatting */
-LIBC_EXPORT size_t strftime(char *buf, size_t max, const char *fmt,
-                            const struct tm *tm);
-LIBC_EXPORT char *asctime_r(const struct tm *tm, char *buf);
-LIBC_EXPORT char *asctime(const struct tm *tm);
-LIBC_EXPORT char *ctime_r(const time_t *t, char *buf);
-LIBC_EXPORT char *ctime(const time_t *t);
-LIBC_EXPORT double difftime(time_t a, time_t b);
-LIBC_EXPORT void tzset(void);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* _TIME_H */

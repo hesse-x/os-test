@@ -12,7 +12,11 @@
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/spinlock.h"
 
-#define TFD_CLOEXEC 0x8000
+/* *_CLOEXEC must equal O_CLOEXEC (02000000, kernel/bsd/kfcntl.h) — musl's
+ * <sys/timerfd.h> defines TFD_CLOEXEC = O_CLOEXEC and passes it raw through
+ * the syscall. The old 0x8000 (the kernel-internal FD_CLOEXEC fd-bit) made
+ * sys_timerfd_create reject standard callers with -EINVAL. */
+#define TFD_CLOEXEC 02000000
 #define TFD_NONBLOCK 0x800
 #define TFD_TIMER_ABSTIME 0x01
 

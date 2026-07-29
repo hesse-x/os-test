@@ -107,19 +107,20 @@ void test_clock_nanosleep_realtime_abstime(void) {
   TEST_ASSERT_TRUE(dt >= 40 && dt < 500);
 }
 
-/* TS-009: clock_nanosleep on PROCESS_CPUTIME_ID -> EINVAL (not sleepable). */
+/* TS-009: clock_nanosleep on PROCESS_CPUTIME_ID -> EINVAL (not sleepable).
+ * POSIX clock_nanosleep returns the error number directly (not -1/errno);
+ * musl follows this, so assert EINVAL as the return value. */
 void test_clock_nanosleep_cputime_einval(void) {
   struct timespec req = {0, 50 * 1000 * 1000L};
   TEST_ASSERT_EQUAL_INT(
-      -1, clock_nanosleep(CLOCK_PROCESS_CPUTIME_ID, 0, &req, NULL));
-  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+      EINVAL, clock_nanosleep(CLOCK_PROCESS_CPUTIME_ID, 0, &req, NULL));
 }
 
-/* TS-010: clock_nanosleep bad flags -> EINVAL. */
+/* TS-010: clock_nanosleep bad flags -> EINVAL (returned directly, POSIX). */
 void test_clock_nanosleep_bad_flags_einval(void) {
   struct timespec req = {0, 50 * 1000 * 1000L};
-  TEST_ASSERT_EQUAL_INT(-1, clock_nanosleep(CLOCK_MONOTONIC, 0xFF, &req, NULL));
-  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  TEST_ASSERT_EQUAL_INT(EINVAL,
+                        clock_nanosleep(CLOCK_MONOTONIC, 0xFF, &req, NULL));
 }
 
 static volatile int sigusr1_count = 0;
