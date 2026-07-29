@@ -36,7 +36,23 @@ LIBC_EXPORT pid_t waitpid(pid_t pid, int *status, int options);
  * (do_exit: normal exit = (code & 0xff) << 8; death by signal = sig & 0x7f;
  * stopped = (stopsig << 8) | 0x7f). WIFSTOPPED/WSTOPSIG are live as of S01
  * (stopped-state reporting); WIFCONTINUED/WCONTINUED reporting is not yet
- * implemented. */
+ * implemented.
+ *
+ * musl's <stdlib.h> defines the FULL W* set (WNOHANG/WUNTRACED/WEXITSTATUS/
+ * WTERMSIG/WSTOPSIG/WIFEXITED/WIFSTOPPED/WIFSIGNALED under the POSIX gate, and
+ * WCOREDUMP/WIFCONTINUED under the _GNU_SOURCE/_BSD_SOURCE gate), with
+ * simplified forms that differ from these kernel-tuned ones → would trip
+ * -Werror,-Wmacro-redefined when a source includes both <stdlib.h> and
+ * <sys/wait.h>. #undef first so ours win regardless of which was defined
+ * earlier. */
+#undef WIFEXITED
+#undef WEXITSTATUS
+#undef WIFSIGNALED
+#undef WTERMSIG
+#undef WCOREDUMP
+#undef WIFSTOPPED
+#undef WSTOPSIG
+#undef WIFCONTINUED
 #define WIFEXITED(status) (!WIFSIGNALED(status) && !WIFSTOPPED(status))
 #define WEXITSTATUS(status) (((status) >> 8) & 0xff)
 #define WIFSIGNALED(status)                                                    \

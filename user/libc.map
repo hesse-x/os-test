@@ -21,13 +21,19 @@ global:
     rename;
     stdin; stdout; stderr;
 
-    /* <stdlib.h> */
+    /* <stdlib.h> — pure compute + startup/env/exit chain from musl_stdlib_objs
+     * (stdlib.md). abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv, atoi/atol/
+     * atoll, strtol/strtoul/strtoll/strtoull/strtoimax/strtoumax, strtod/strtof/
+     * strtold/atof, qsort/bsearch, rand/srand/rand_r, getenv/setenv/putenv/
+     * unsetenv/clearenv/environ, exit/atexit/abort/quick_exit/at_quick_exit/
+     * _Exit, __libc_start_main all come from musl upstream now. */
     abs; atexit; atoi; atol; atoll; calloc; exit; free; labs; llabs;
     malloc; qsort; bsearch; rand; rand_r; realloc; srand; strtol; strtoul;
-    strtoll; strtoull; strtod; atof; div; ldiv; lldiv; imaxabs; imaxdiv;
+    strtoll; strtoull; strtod; strtof; strtold; atof; div; ldiv; lldiv;
+    imaxabs; imaxdiv; strtoimax; strtoumax;
     getenv; setenv; putenv; unsetenv; clearenv; environ;
+    _Exit; quick_exit; at_quick_exit; __cxa_atexit; __cxa_finalize;
     mkstemp; mktemp; realpath;
-    arc4random_buf; arc4random_uniform;
 
     /* <string.h> — musl upstream (src/string/* + x86_64 asm memcpy/memmove/memset
      * + src/misc basename). The extension symbols musl compiles but we do NOT
@@ -395,6 +401,7 @@ global:
 
     /* <sys/random.h> */
     getrandom; getentropy;
+    arc4random_buf; arc4random_uniform;
 
     /* <sys/process.h> */
     execve; fork; getpgid; getsid; setpgid; setsid; spawn; setuid; setgid;

@@ -22,6 +22,11 @@
 #                   still #include third_party headers (e.g. drm/drm.h), and
 #                   HeaderFilterRegex '.*' makes clang-tidy analyze those headers
 #                   too, so third_party/ paths are dropped from the final result.
+#   build/       — generated musl headers (build/musl_gen/bits/alltypes.h etc.)
+#                   define libc-internal structs (_IO_FILE, __sigset_t, ...);
+#                   first-party TUs include them and HeaderFilterRegex '.*'
+#                   surfaces their naming. Generated artifacts we don't author,
+#                   so build/ paths are dropped from the final result.
 #   .S files     — not in compile DB, clang-tidy cannot parse assembly.
 #   Non-naming   — clang-analyzer / other checks may leak in; only
 #                   readability-identifier-naming findings are reported.
@@ -131,13 +136,16 @@ echo "$TU_LIST" | run-clang-tidy \
 # also includes a check-list diagnostic line that merely says
 # "readability-identifier-naming" without a warning/error prefix — that is NOT
 # a violation, just a "these checks are active" banner.
-# Drop findings in third_party/ headers: first-party TUs include upstream
-# headers (drm/drm.h, etc.) and HeaderFilterRegex '.*' surfaces their naming,
-# which is upstream style we don't own — the per-category IgnoredRegexp in
-# .clang-tidy only exempts specific symbols, not whole upstream trees.
+# Drop findings in third_party/ and build/ headers: first-party TUs include
+# upstream headers (drm/drm.h, etc.) and generated musl headers
+# (build/musl_gen/bits/alltypes.h defines libc-internal structs like _IO_FILE),
+# and HeaderFilterRegex '.*' surfaces their naming — both are code we don't own
+# (upstream style / generated artifacts), so the per-category IgnoredRegexp in
+# .clang-tidy (which only exempts specific symbols) is the wrong tool; drop whole
+# trees here instead.
 NAMING=$(grep -E 'warning:|error:' "$WARNFILE" \
     | grep '\[readability-identifier-naming\]' \
-    | grep -v 'third_party/' || true)
+    | grep -v 'third_party/\|build/' || true)
 
 if [ -n "$NAMING" ]; then
     N_VIOLATIONS=$(echo "$NAMING" | wc -l)

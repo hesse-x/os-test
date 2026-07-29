@@ -329,7 +329,26 @@ evdev 中断投递正规化(技术债 #34)独立于本重构,走路径 3,见 [..
 | | ~~`__syscall_cp`（cancellable 系列底层）~~ | ~~musl 原版走 `__syscall_cp_asm` + pthread_cancel；自研 pthread 无 cancel~~ | ✅ 已落地：pthread 切到 musl 真实现后 `__syscall_cp` 来自 `musl_pthread`（`src/thread/__syscall_cp.c` + `x86_64/syscall_cp.s`），取消点已 live；`musl_shim/syscall_cp.c` 不再定义 `__syscall_cp`（防与 musl_pthread 重复符号），仅留 `__setxid` |                                                                                       
                                                                                                                                                                                                                                             
 **剩余债（M0.4 之后）**：~~① AT_FDCWD→cwd 内核修后下掉 `chdir`/`getcwd`/`renameat`/`unlinkat` repo 版与 `cwd_path`~~ ✅ 已落地（2026-07-28，见上表 M0.4 行）；② procfs 上线后下掉 `ttyname`/`ttyname_r`；③ 串口补 `TIOCGWINSZ` 后可换 `isatty` 到 musl；④ `i
-t_interval` 重复 alarm（`alarm_check` 到期重 arm）+ ITIMER_VIRTUAL/PROF；⑤ shim 目录 `user/lib/musl_shim/` 仍未 `git add`（untracked），errno 双包装修复在 diff 盲区。                                                                      
+t_interval` 重复 alarm（`alarm_check` 到期重 arm）+ ITIMER_VIRTUAL/PROF；⑤ shim 目录 `user/lib/musl_shim/` 仍未 `git add`（untracked），errno 双包装修复在 diff 盲区。
+
+### stdlib 全量迁移到 musl（含启动/env/exit 链，退役 shim）
+
+stdlib 模块（纯计算 + 启动/env/exit 链）切到 musl 上游（`musl_stdlib_objs`，`add_musl_lib` 单 -fPIC OBJECT lib 同时喂 libc.a + libc.so，同 string/math 模式）。源清单：`src/stdlib/{abs,labs,llabs,imaxabs,imaxdiv,div,ldiv,lldiv,atoi,atol,atoll,strtol,strtod,atof,bsearch,qsort}.c` + `src/prng/{rand,rand_r}.c` + `src/internal/{intscan,shgetc,floatscan}.c` + `src/env/__libc_start_main.c` + `src/env/{__environ,getenv,setenv,putenv,unsetenv,clearenv}.c` + `src/exit/{exit,atexit,abort,quick_exit,at_quick_exit}.c`。
+
+退役 shim：删 `user/lib/start_main.cc`（`__libc_start_main`/atexit/`__libc_run_*`/environ 全家/`__libc_env_init`/`decode_auxv`/`__libc_fini_array_trampoline`）、`user/lib/musl_startup.c`（`musl_libc_init_aux` 冗余——musl `__init_libc` 自设 `libc.page_size`/`libc.auxv`）、`user/lib/strtol.c`（musl strtol.c/strtod.c/atoi/atol/atoll 覆盖全 strto*/ato* 家族）。`stdlib_misc.c` 精简至暂留子集；`signal.cc` 删 `abort`（musl `src/exit/abort.c` 接管）；`__stdio_exit` 由新增 `user/lib/stdio_exit.c`（fflush stdout+stderr）覆盖 musl `exit.c` 的 weak dummy（repo FILE 不在 musl ofl 链）。
+
+源码核实（两条曾担心的大问题都不成立）：(1) TLS 重复初始化不成立——dynlink.c 的 `__init_tls` 是空 no-op（loader 在 `__dls3` 自做 TLS），musl `__libc_start_main→__init_libc→__init_tls` 动态路径等于空操作，静态路径用 `src/env` 的真 `__init_tls`（已在 `musl_pthread`）；(2) env 握手不成立——musl `__putenv` 第一次 `setenv` 时懒拷贝栈 `envp` 到堆，替代仓库 `__libc_env_init` 预拷贝；loader 在 `__libc_start_main` 前 `__environ=envp`+`getenv("LD_LIBRARY_PATH")` 的时序由 musl `__environ.c`(`weak_alias(__environ,environ)`) + `getenv.c` 直读 `__environ` 满足。内核 auxv（`kernel/bsd/proc.c` execve / `proc_create.c`）提供 `AT_PHDR/PHENT/PHNUM/ENTRY/PAGESZ/RANDOM/EXECFN` + `AT_UID==AT_EUID==AT_GID==AT_EGID==0`/`AT_SECURE=0`，故 `__init_libc` 的 secure-check 早返（不开 `/dev/null`）。`crt1.c` 6 参调用 `__libc_start_main` 与 musl 3 参定义在 x86-64 ABI 兼容（多余参在寄存器被忽略）。`_Exit.c` 不在此批（已在 `musl_unistd_objs`，编入会 multi-def）。`__uflow` 由 `user/lib/musl_shim/scan_uflow_stub.c`（返回 EOF，运行时不可达——strtol/strtod 把 `shend` 设为巨大哨兵，`rpos` 永不到 `shend`）满足 musl 扫描器链的 link-time 引用。
+
+**暂留子集（musl 无法替换，待后续模块迁移解锁）**：
+- `realpath`（`stdlib_misc.c`）：musl `src/misc/realpath.c` 需 `__procfdname` + `readlink("/proc/self/fd/N")` + `O_PATH`（内核皆无 procfs）。解锁：上 procfs（合成 `/proc/self/fd/N`→设备路径）+ readlink 子系统后切 musl 版。
+- `mkstemp`/`mktemp`（`stdlib_misc.c`）：musl `src/temp/__randname.c` 调 `__clock_gettime(CLOCK_REALTIME)`，依赖时间链（会撞 repo `time.cc:clock_gettime`）。解锁：time 模块迁移到 musl 后切 `__randname`/`__clock_gettime`。
+- `getline`/`fscanf`/`scanf`（`stdlib_misc.c`，当前 ENOSYS stub）：musl 把它们放 `src/stdio/`，依赖整套 musl stdio 的 `__uflow`/shgetc 扫描链；repo stdio 是自写 `stdio.cc`（非 musl FILE），硬塞接不上。解锁：stdio 整体迁 musl 时一起上。
+- `sysconf`/`getpagesize`（`stdlib_misc.c`）：musl `src/conf/sysconf.c`（217 行）改 `_SC_NPROCESSORS_ONLN` 语义，repo 走 `sys_sysconf` syscall。解锁：对齐 ncpu 取值语义后切 musl 版（连带 `src/legacy/getpagesize.c`）。
+- `mknod`/`chmod`/`remove`（`stdlib_misc.c`）：薄 syscall 封装，musl 版走同一 syscall 号但拖 `src/misc/sysm.c` 机制，收益≈0；`remove` 在 musl 属 stdio。低优先级，随 stat/stdio 迁移归位。
+- **`malloc`/`calloc`/`realloc`/`free`（`user/lib/malloc.cc`）——独立里程碑**：musl mallocng 是整套分配器，需接 `__mmap`/`__munmap`/`__madvise`/`__brk` OS hook 层，且会废弃 `mem.md` 的 slab+mmap 设计。不在 stdlib 迁移范围（stdlib 只迁纯计算/env/exit）。解锁：作为独立「malloc 迁 musl mallocng」里程碑，重接 OS hook + 重写 `mem.md`。
+- **`getrandom`/`getentropy`（`user/lib/getrandom.c`）——独立里程碑**：musl 有（`src/linux/getrandom.c`），但属 syscall wrapper（`src/linux/`），不在 stdlib 迁移范围（只迁 `src/stdlib/`）。解锁：作为「`src/linux/` syscall wrapper 批次迁移」里程碑接入。
+- `arc4random_buf`/`arc4random_uniform`（`user/lib/getrandom.c`）：**永久留 repo**——musl 无此源文件（BSD 扩展，musl 不实现 arc4random）。已在 `user/include/sys/random.h` 用 `LIBC_EXPORT` 声明导出。
+- `abort`（曾留 `signal.cc`）：已迁——musl `src/exit/abort.c` 接管，`signal.cc` 删旧实现。                                
                                                                                                                                                                               
 
 ### musl pthread + ldso 切换过渡层收尾

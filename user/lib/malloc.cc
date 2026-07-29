@@ -6,11 +6,13 @@
 
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
 #include <syscall.h>
 
 #include <sched.h>
-#include <xos/page.h> /* PAGE_SIZE (UAPI) */
+#include <sys/cdefs.h> /* LIBC_EXPORT — musl <stdlib.h> declares malloc/calloc/
+                        * realloc/free without a visibility attribute; without
+                        * this they'd be hidden under libc.so's -fvisibility=hidden */
+#include <xos/page.h>  /* PAGE_SIZE (UAPI) */
 
 #include <xos/mman.h>
 
@@ -125,7 +127,7 @@ static size_t get_alloc_size(void *ptr) {
 }
 
 // ===================== malloc =====================
-void *malloc(size_t size) {
+LIBC_EXPORT void *malloc(size_t size) {
   if (size == 0)
     size = 1;
 
@@ -200,7 +202,7 @@ void *malloc(size_t size) {
 }
 
 // ===================== free =====================
-void free(void *ptr) {
+LIBC_EXPORT void free(void *ptr) {
   if (!ptr)
     return;
 
@@ -224,7 +226,7 @@ void free(void *ptr) {
 }
 
 // ===================== calloc =====================
-void *calloc(size_t nmemb, size_t size) {
+LIBC_EXPORT void *calloc(size_t nmemb, size_t size) {
   if (nmemb && size && nmemb > (size_t)-1 / size)
     return NULL;
   size_t total = nmemb * size;
@@ -235,7 +237,7 @@ void *calloc(size_t nmemb, size_t size) {
 }
 
 // ===================== realloc =====================
-void *realloc(void *ptr, size_t size) {
+LIBC_EXPORT void *realloc(void *ptr, size_t size) {
   if (!ptr)
     return malloc(size);
   if (size == 0) {

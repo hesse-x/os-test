@@ -6,20 +6,22 @@
 
 # libc source list (dual artifacts from same source: libc.a + libc.so)
 # start.cc removed (_start moved to crt0.o, see plan_ld2b3 T4/T21)
-# Added start_main.cc (__libc_start_main, T11), atexit.c (T8), init_array.c (T10)
-# pthread.cc/tls.cc/errno.cc removed: pthread now comes from musl (musl_pthread
-# sub-library below). __errno_location is provided by musl's
-# src/errno/__errno_location.c (reads musl struct pthread at %fs:0). musl_glue.c
-# provides the hidden internal aliases musl pthread calls.
+# start_main.cc removed (stdlib.md): musl src/env/__libc_start_main.c now
+# provides __libc_start_main + __init_libc; atexit/__libc_run_atexit, the env
+# set (environ/getenv/setenv/putenv/unsetenv/clearenv), and .init/.fini-array
+# handling all come from musl upstream (src/env + src/exit). strtol.c removed
+# (stdlib.md): musl src/stdlib/strtol.c + strtod.c + atoi/atol/atoll.c cover
+# the whole strto* / ato* family. stdio_exit.c provides the strong __stdio_exit
+# that overrides musl exit.c's weak dummy (repo FILE isn't on musl's ofl list).
 set(LIBC_SOURCES
     lib/stdio.cc lib/malloc.cc
     lib/unistd.cc lib/time.cc lib/file.cc
-    lib/ctype.c lib/strtol.c lib/stdlib_misc.c lib/uname.c
+    lib/ctype.c lib/stdlib_misc.c lib/uname.c
     lib/assert.c lib/signal.cc lib/getrandom.c
     lib/musl_missing.c
     lib/musl_glue.c
     lib/setjmp.S
-    lib/start_main.cc
+    lib/stdio_exit.c
     lib/io_multiplex.cc
     lib/sys_process.cc
     lib/sys_device.cc
@@ -447,19 +449,23 @@ set(MUSL_PTHREAD_SOURCES
     # __stdin_used/__stdout_used/__stderr_used. We keep our own stdio
     # (user/lib/stdio.cc) — our FILE objects don't register on musl's ofl list,
     # and the three *_used symbols are weak-aliased to a NULL dummy
-    # (src/stdio/__stdio_exit.c:3-6), so init_file_lock(NULL) is a no-op
-    # (pthread_create.c:179-182) and the ofl walk iterates an empty list. These
-    # two files are compiled only to PROVIDE those symbols so the dynamic
-    # linker stops failing libc.so relocation with "unresolved PLT symbol
-    # __ofl_unlock"; at runtime they do nothing.
+    # BY pthread_create.c itself (src/thread/pthread_create.c:175-177), so
+    # init_file_lock(NULL) is a no-op (pthread_create.c:179-182) and the ofl
+    # walk iterates an empty list. ofl.c is compiled only to PROVIDE
+    # __ofl_lock/__ofl_unlock so the dynamic linker stops failing libc.so
+    # relocation with "unresolved PLT symbol __ofl_unlock"; at runtime it does
+    # nothing. src/stdio/__stdio_exit.c is NOT compiled here (stdlib.md): it
+    # defined __stdio_exit + close_file, but exit is now musl's src/exit/exit.c
+    # (musl_stdlib_objs) and __stdio_exit is overridden by our strong
+    # user/lib/stdio_exit.c (fflush stdout/stderr); the *_used weak aliases it
+    # duplicated are already provided by pthread_create.c, so it is dead weight.
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/stdio/ofl.c
-    ${CMAKE_SOURCE_DIR}/third_party/musl/src/stdio/__stdio_exit.c
-    # __lockfile: pulled in by __stdio_exit.c's close_file() via FFINALLOCK.
-    # Its deps (__pthread_self, a_cas, __wait, a_store, __wake) are all already
-    # in musl_pthread, so it adds no further undefined chain. It operates on
-    # musl FILE->lock/waiters, which is fine — our stdio never enters musl's
-    # ofl list, so __lockfile is only reachable via __stdio_exit (which we do
-    # not call; our exit path is __libc_run_atexit + fflush(stdout)).
+    # __lockfile: referenced by musl stdio internals; its deps (__pthread_self,
+    # a_cas, __wait, a_store, __wake) are all already in musl_pthread, so it
+    # adds no further undefined chain. It operates on musl FILE->lock/waiters,
+    # which is fine — our stdio never enters musl's ofl list, so __lockfile is
+    # only reachable via musl's __stdio_exit (which we replace); kept as a
+    # harmless provider in case other musl internals reference it.
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/stdio/__lockfile.c
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/block.c
     # sigset_t set-mutation helpers (musl's 128-byte sigset_t). Compiled here
@@ -514,9 +520,6 @@ set(MUSL_PTHREAD_SOURCES
     # "hidden symbol `__syscall`/`__syscall_ret` isn't defined".
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal/x86_64/syscall.s
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal/syscall_ret.c
-    # musl-side startup bridge: sets libc.page_size/auxv for our __libc_start_main
-    # (compiled here so it sees musl's private struct __libc via libc.h).
-    ${CMAKE_SOURCE_DIR}/user/lib/musl_startup.c
 )
 add_musl_lib(musl_pthread SOURCES ${MUSL_PTHREAD_SOURCES})
 
@@ -598,6 +601,7 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_pthread>
                $<TARGET_OBJECTS:musl_string_objs>
                $<TARGET_OBJECTS:musl_math_objs>
+               $<TARGET_OBJECTS:musl_stdlib_objs>
     C
     FLAGS "-fno-pie -DDYNAMIC=0"
     IMAGE_PATH usr/lib/libc.a
@@ -627,6 +631,7 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_loader_objs> $<TARGET_OBJECTS:musl_pthread>
                $<TARGET_OBJECTS:musl_string_objs>
                $<TARGET_OBJECTS:musl_math_objs>
+               $<TARGET_OBJECTS:musl_stdlib_objs>
     C
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED
@@ -720,6 +725,109 @@ list(APPEND MUSL_MATH_SOURCES
     ${MUSL_DIR}/src/fenv/feupdateenv.c
     ${MUSL_DIR}/src/fenv/__flt_rounds.c)
 add_musl_lib(musl_math_objs SOURCES ${MUSL_MATH_SOURCES})
+
+# ===================== musl stdlib integration (stdlib.md) =====================
+# Build the upstream musl stdlib + prng + env + exit chain into libc, mirroring
+# musl_string_objs / musl_math_objs (one -fPIC OBJECT sub-library via add_musl_lib,
+# wired into BOTH libc.a and libc.so via EXTRA_OBJS — -fPIC objects link fine
+# into a -no-pie static ELF too, so a single compile serves both).
+#
+# This batch RETIRES the repo's hand-written startup/env/exit shim:
+#   user/lib/start_main.cc (deleted)   — __libc_start_main, atexit,
+#     __libc_run_atexit, __libc_run_init_array/__libc_run_fini_array,
+#     __libc_fini_array_trampoline, decode_auxv, environ/__environ,
+#     getenv/setenv/putenv/unsetenv/clearenv, __libc_env_init.
+#   user/lib/musl_startup.c (deleted)  — musl_libc_init_aux (set libc.page_size/
+#     auxv); redundant now that musl __init_libc sets them.
+#   user/lib/stdlib_misc.c (slimmed)   — exit, rand/srand/rand_r,
+#     abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv, qsort/bsearch removed.
+#   user/lib/signal.cc (abort deleted) — musl src/exit/abort.c takes over.
+#   user/lib/strtol.c (deleted)        — musl strtol.c/strtod.c/atoi/atol/atoll
+#     cover the whole strto*/ato* family.
+# musl's __libc_start_main (src/env/__libc_start_main.c) drives BOTH paths:
+#   static (DYNAMIC=0): __init_libc decodes the kernel pair-form auxv into the
+#     flat AT_*-indexed array musl expects, sets __environ/libc.page_size/
+#     __hwcap/__sysinfo/__progname, calls __init_tls (mmaps PT_TLS, sets
+#     FS_BASE) + __init_ssp (canary); then libc_start_init walks
+#     __init_array_start..end. exit() runs __libc_exit_fini (exit.c walks
+#     __fini_array_start..end + _fini) — the linker script provides these.
+#   dynamic (DYNAMIC=1): the fused loader (__dls3 in dynlink.c) already set
+#     __environ/libc.page_size/__hwcap and ran __init_tp for TLS before jumping
+#     to the main ELF _start; musl __libc_start_main then calls __init_libc
+#     (idempotent — __init_tls is a no-op in dynlink.c, __init_ssp re-sets the
+#     canary) and __libc_start_init = dynlink do_init_fini(tail) over every
+#     DSO's .init_array. exit() runs __libc_exit_fini = dynlink's fini walk.
+# The kernel-built auxv (kernel/bsd/proc.c execve / proc_create.c) provides
+# AT_PHDR/PHENT/PHNUM/ENTRY/PAGESZ/RANDOM/EXECFN + AT_UID==AT_EUID==AT_GID==
+# AT_EGID==0, AT_SECURE=0, so __init_libc's secure-check returns early (no
+# /dev/null open) and getenv("LD_LIBRARY_PATH") works in the loader.
+#
+# EXCLUDED from this batch (kept as repo implementations, tracked in todo.md):
+#   src/misc/realpath.c   — needs /proc/self/fd/N + readlink + O_PATH (no
+#     procfs); repo stdlib_misc.c:realpath (getcwd + lexical collapse) kept.
+#   src/temp/{mkstemp,__randname,...}.c — __randname needs __clock_gettime
+#     (time module not yet migrated; would clash with repo time.cc); repo
+#     stdlib_misc.c:mkstemp/mktemp (getpid-based) kept.
+#   src/conf/sysconf.c + src/legacy/getpagesize.c — musl sysconf redefines
+#     _SC_NPROCESSORS_ONLN semantics; repo stdlib_misc.c (sys_sysconf-backed)
+#     kept.
+#   src/stdlib/{wcstod,wcstol}.c — wchar tier (not migrated).
+#   src/stdlib/{ecvt,fcvt,gcvt}.c — deprecated BSD, 0 callers, sprintf chain.
+#   src/env/{__init_tls,__stack_chk_fail,__reset_tls}.c — already in
+#     musl_pthread; compiling here would multi-define.
+#   src/exit/assert.c — repo lib/assert.c keeps __assert_fail.
+#   src/exit/_Exit.c — already in musl_unistd_objs (+ _so); would multi-def _Exit.
+#   src/prng/{random,drand48,...}.c — 0 callers (rand/rand_r suffice).
+set(MUSL_STDLIB_SOURCES
+    # pure compute
+    ${MUSL_DIR}/src/stdlib/abs.c
+    ${MUSL_DIR}/src/stdlib/labs.c
+    ${MUSL_DIR}/src/stdlib/llabs.c
+    ${MUSL_DIR}/src/stdlib/imaxabs.c
+    ${MUSL_DIR}/src/stdlib/imaxdiv.c
+    ${MUSL_DIR}/src/stdlib/div.c
+    ${MUSL_DIR}/src/stdlib/ldiv.c
+    ${MUSL_DIR}/src/stdlib/lldiv.c
+    ${MUSL_DIR}/src/stdlib/atoi.c
+    ${MUSL_DIR}/src/stdlib/atol.c
+    ${MUSL_DIR}/src/stdlib/atoll.c
+    # one file provides strtol/strtoul/strtoll/strtoull/strtoimax/strtoumax +
+    # the __strtol_internal weak aliases.
+    ${MUSL_DIR}/src/stdlib/strtol.c
+    # one file provides strtod/strtof/strtold + _l weak aliases (deps on
+    # floatscan + shgetc, both in src/internal, + libm already merged in libc).
+    ${MUSL_DIR}/src/stdlib/strtod.c
+    ${MUSL_DIR}/src/stdlib/atof.c
+    ${MUSL_DIR}/src/stdlib/bsearch.c
+    ${MUSL_DIR}/src/stdlib/qsort.c
+    # prng: musl's LCG (31-bit, RAND_MAX=0x7fffffff) replaces the repo's
+    # 15-bit LCG. random/drand48 excluded (0 callers).
+    ${MUSL_DIR}/src/prng/rand.c
+    ${MUSL_DIR}/src/prng/rand_r.c
+    # strtod/strtol scanner deps (src/internal, pure compute — __floatscan uses
+    # only libm + errno; __shgetc fallback-references __uflow, which the stub
+    # below satisfies and is never reached at runtime for string scanning).
+    ${MUSL_DIR}/src/internal/intscan.c
+    ${MUSL_DIR}/src/internal/shgetc.c
+    ${MUSL_DIR}/src/internal/floatscan.c
+    # startup + env + exit chain (the shim retirement core)
+    ${MUSL_DIR}/src/env/__libc_start_main.c
+    ${MUSL_DIR}/src/env/__environ.c
+    ${MUSL_DIR}/src/env/getenv.c
+    ${MUSL_DIR}/src/env/setenv.c
+    ${MUSL_DIR}/src/env/putenv.c
+    ${MUSL_DIR}/src/env/unsetenv.c
+    ${MUSL_DIR}/src/env/clearenv.c
+    # _Exit.c intentionally NOT here (already in musl_unistd_objs/_so).
+    ${MUSL_DIR}/src/exit/exit.c
+    ${MUSL_DIR}/src/exit/atexit.c
+    ${MUSL_DIR}/src/exit/abort.c
+    ${MUSL_DIR}/src/exit/quick_exit.c
+    ${MUSL_DIR}/src/exit/at_quick_exit.c
+    # __uflow stub — satisfies the link-time reference musl's shgetc.c emits;
+    # unreachable at runtime (see user/lib/musl_shim/scan_uflow_stub.c).
+    ${CMAKE_SOURCE_DIR}/user/lib/musl_shim/scan_uflow_stub.c)
+add_musl_lib(musl_stdlib_objs SOURCES ${MUSL_STDLIB_SOURCES})
 
 # ===================== musl single-libc philosophy =====================
 # Real math (musl src/math + src/fenv) is merged INTO libc (c + c_so) via

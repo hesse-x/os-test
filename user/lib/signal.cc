@@ -6,7 +6,6 @@
 
 #include <sched.h>
 #include <signal.h>
-#include <stdlib.h>
 #include <syscall.h>
 #include <unistd.h>
 
@@ -64,21 +63,6 @@ LIBC_EXPORT sighandler_t signal(int sig, sighandler_t handler) {
   return old.sa_handler;
 }
 
-/* abort (D13): first raise(SIGABRT); if ignored/caught, reset SIGABRT to
- * SIG_DFL and raise again to ensure the process terminates. */
-LIBC_EXPORT void abort(void) {
-  sigset_t set;
-  sigemptyset(&set);
-  sigaddset(&set, SIGABRT);
-  sigprocmask(SIG_UNBLOCK, &set, NULL);
-  raise(SIGABRT);
-  /* Still alive → a handler intercepted SIGABRT; reset to default action and
-   * raise */
-  struct sigaction dfl;
-  memset(&dfl, 0, sizeof(dfl));
-  dfl.sa_handler = SIG_DFL;
-  sigaction(SIGABRT, &dfl, NULL);
-  raise(SIGABRT);
-  /* Should not reach here */
-  _exit(127);
-}
+/* abort is provided by musl src/exit/abort.c (musl_stdlib_objs):
+ * raise(SIGABRT),
+ * __block_all_sigs, a_crash, raise(SIGKILL), _Exit(127). */

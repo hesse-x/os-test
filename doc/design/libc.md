@@ -120,13 +120,15 @@ include 路径：-I. -Iuser/include → 自定义头文件优先。宿主机 fre
 
 | 模块 | 源文件 | 内容 |
 |------|--------|------|
-| _start | user/lib/start_main.cc | `__libc_start_main` 入口点（crt0.o 提供 `_start`） |
+| _start | musl `src/env/__libc_start_main.c`（`musl_stdlib_objs`） | `__libc_start_main` + `__init_libc` + `libc_start_init`（weak → 动态路径被 dynlink `do_init_fini` 覆盖）。退役手写 `start_main.cc`/`musl_startup.c`（stdlib.md） |
 | stdio | user/lib/stdio.cc | FILE, printf/vfprintf, fputc/fputs/puts/fflush, **fgets** |
-| string | user/lib/string.cc | strlen/strcmp/strcpy/strcat/strchr, memcpy/memset/memmove, **ffs** |
+| string | musl `src/string/*`（`musl_string_objs`） | strlen/strcmp/strcpy/strcat/strchr, memcpy/memmove/memset(x86_64 asm), **ffs**/basename/dirname |
 | malloc | user/lib/malloc.cc | size-class slab + sys_mmap |
 | time | user/lib/time.cc | timespec_get, clock |
-| unistd | user/lib/unistd.cc | POSIX syscall 封装 |
-| file | user/lib/file.cc | fopen/fclose/fread/fwrite/fseek/rewind/feof/ferror/freopen/ftell/fdopen/flockfile/funlockfile, **scandir** |
+| unistd | musl `src/unistd/*`（`musl_unistd_objs`）+ user/lib/unistd.cc 残留 | POSIX syscall 封装 |
+| file | user/lib/file.cc | fopen/fclose/fread/fwrite/fseek/rewind/feof/ferror/freopen/ftell/fdopen/flockfile/funlockfile |
+| stdlib | musl `src/stdlib/*`+`src/prng/{rand,rand_r}`+`src/internal/{intscan,shgetc,floatscan}`+`src/env/*`+`src/exit/*`（`musl_stdlib_objs`） | abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv, atoi/atol/atoll, strtol 全家(strtoimax/strtoumax), strtod/strtof/strtold/atof, qsort/bsearch, rand/srand/rand_r(RAND_MAX=0x7fffffff), environ/getenv/setenv/putenv/unsetenv/clearenv, exit/atexit/abort/quick_exit/at_quick_exit/_Exit, __libc_start_main 启动链。`__stdio_exit` 由 user/lib/stdio_exit.c 覆盖（fflush stdout/stderr） |
+| stdlib_misc | user/lib/stdlib_misc.c | 暂留子集：mkstemp/mktemp/realpath/mknod/chmod/remove/getline/fscanf/scanf/getpagesize/sysconf（musl 无法替换，详见 todo.md） |
 | sys_ipc | user/lib/sys_ipc.cc | IPC 封装 |
 | sys_shm | user/lib/sys_shm.cc | SHM 封装 |
 | sys_wait | user/lib/sys_wait.cc | waitpid 封装 |
@@ -137,8 +139,6 @@ include 路径：-I. -Iuser/include → 自定义头文件优先。宿主机 fre
 | sys_pci | user/lib/sys_pci.cc | PCI 封装 |
 | signal | user/lib/signal.cc | 信号封装（kill/sigaction/sigprocmask/sigpending/raise/signal/alarm/pause） |
 | ctype | user/lib/ctype.c | isdigit/isalpha 等 |
-| strtol | user/lib/strtol.c | strtol/atoi |
-| stdlib_misc | user/lib/stdlib_misc.c | exit/abort/mkstemp/mktemp/realpath/qsort/rand/srand 等 |
 | uname | user/lib/uname.c | uname |
 | sleep | user/lib/sleep.c | sleep/usleep |
 | assert | user/lib/assert.c | assert |

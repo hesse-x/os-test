@@ -21,6 +21,12 @@ extern "C" {
 
 LIBC_EXPORT ssize_t getrandom(void *buf, size_t buflen, unsigned int flags);
 LIBC_EXPORT int getentropy(void *buf, size_t buflen);
+/* BSD arc4random family — implemented in user/lib/getrandom.c atop the kernel
+ * ChaCha20 PRNG; musl does not provide these. Declared with LIBC_EXPORT so the
+ * plain definitions inherit default visibility under libc.so's
+ * -fvisibility=hidden. */
+LIBC_EXPORT void arc4random_buf(void *buf, size_t n);
+LIBC_EXPORT uint32_t arc4random_uniform(uint32_t upper_bound);
 
 #ifdef __cplusplus
 }

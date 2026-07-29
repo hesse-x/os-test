@@ -161,6 +161,32 @@ cp "$SRC"/third_party/musl/include/math.h           "$DEST/math.h"
 cp "$SRC"/third_party/musl/include/fenv.h           "$DEST/fenv.h"
 cp "$SRC"/third_party/musl/arch/x86_64/bits/fenv.h  "$DEST/bits/fenv.h"
 
+# 3h. musl stdlib.h. The repo's user/include/stdlib.h was deleted when stdlib
+#     switched to musl (stdlib.md): the pure-compute subset (abs/labs/llabs/
+#     imaxabs/imaxdiv/div/ldiv/lldiv, atoi/atol/atoll, strtol/strtoul/strtoll/
+#     strtoull/strtoimax/strtoumax, strtod/strtof/strtold, atof, qsort/bsearch,
+#     rand/srand/rand_r) AND the startup/env/exit chain (__libc_start_main,
+#     environ/getenv/setenv/putenv/unsetenv/clearenv, exit/atexit/abort/
+#     quick_exit/at_quick_exit, _Exit) all come from musl upstream now.
+#     musl's stdlib.h typedefs div_t/ldiv_t/lldiv_t inline and pulls
+#     <features.h> (repo's own, step 2) + <bits/alltypes.h> (step 2;
+#     __NEED_size_t/__NEED_wchar_t). imaxdiv_t/strtoimax/strtoumax are declared
+#     in <inttypes.h> (musl), published below. RAND_MAX is 0x7fffffff (31-bit)
+#     in musl vs the old repo 32767 — more correct; the parked subset
+#     (mkstemp/mktemp/realpath/mknod/chmod/remove/getline/fscanf/scanf/
+#     getpagesize/sysconf) is declared in stdio.h / sys/stat.h / xos/unistd_ext.h,
+#     NOT stdlib.h, so switching drops no parked declaration. arc4random_*
+#     (repo-only decls, 0 callers, no definition) are dropped with the switch.
+cp "$SRC"/third_party/musl/include/stdlib.h "$DEST/stdlib.h"
+
+# 3i. musl inttypes.h. Declares imaxdiv_t / strtoimax / strtoumax / imaxabs /
+#     imaxdiv (now all provided by musl_stdlib_objs's strtol.c + src/stdlib/
+#     {imaxabs,imaxdiv}.c), which the old repo stdlib.h used to declare.
+#     musl's <inttypes.h> pulls <features.h> (step 2) + <bits/alltypes.h>
+#     (step 2; __NEED_imaxdiv_t/__NEED_intmax_t/__NEED_uintmax_t) + <stdint.h>
+#     (step 4). Closure self-check below verifies it.
+cp "$SRC"/third_party/musl/include/inttypes.h "$DEST/inttypes.h"
+
 # 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
 #    compiler's -isystem freestanding dir. The published sysroot must be usable
 #    with -nostdinc and NO -isystem (the Mesa milestone consumes it via -isysroot),

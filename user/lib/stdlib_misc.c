@@ -2,6 +2,34 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
+ *
+ * Parked stdlib subset that musl upstream cannot yet replace in this OS
+ * (stdlib.md). Everything else (abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv,
+ * atoi/atol/atoll, strtol/strtoul/strtoll/strtoull/strtoimax/strtoumax,
+ * strtod/strtof/strtold/atof, qsort/bsearch, rand/srand/rand_r, exit/atexit/
+ * abort/quick_exit/at_quick_exit/_Exit, environ/getenv/setenv/putenv/unsetenv/
+ * clearenv, __libc_start_main + the .init/.fini-array + env startup chain) now
+ * comes from musl upstream via musl_stdlib_objs.
+ *
+ * Remaining here:
+ *   mkstemp/mktemp  — musl src/temp/ tree needs __randname → __clock_gettime
+ * (time module not yet migrated); getpid-based impl kept. realpath        —
+ * musl src/misc/realpath.c needs /proc/self/fd/N + readlink
+ *                     + O_PATH (no procfs); getcwd + lexical collapse kept.
+ *   mknod/chmod     — wrap sys_mknod / sys_chmod (kernel has these syscalls;
+ *                     musl's wrappers route through the same numbers, but
+ *                     kept here to avoid pulling src/misc/sysm.c machinery).
+ *   remove          — musl's is in stdio (rename.c lives there too); kept
+ *                     here as unlink() alias for now (misplaced, deferred).
+ *   getline/fscanf/scanf — stubs (ENOSYS); musl's need the full stdio scan
+ *                     chain (__uflow/tofrom), kept as ENOSYS until stdio tier.
+ *   getpagesize/sysconf — musl src/legacy/getpagesize.c + src/conf/sysconf.c
+ *                     redefined _SC_NPROCESSORS_ONLN semantics; repo
+ *                     sys_sysconf-backed wrappers kept.
+ *
+ * Declares come from: stdlib.h (mkstemp/mktemp/realpath via musl), stdio.h
+ * (remove/getline/fscanf/scanf), sys/stat.h (mknod/chmod), xos/unistd_ext.h
+ * (getpagesize/sysconf).
  */
 
 #include <errno.h>
@@ -13,143 +41,11 @@
 #include <unistd.h>
 
 #include <fcntl.h>
+#include <sys/cdefs.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <xos/errno.h>
 #include <xos/unistd_ext.h>
-
-void exit(int status) {
-  fflush(stdout);
-  fflush(stderr);
-  _exit(status);
-}
-
-static unsigned long next_rand = 1;
-
-int rand(void) {
-  next_rand = next_rand * 1103515245 + 12345;
-  return (int)((next_rand / 65536) % 32768);
-}
-
-void srand(unsigned seed) { next_rand = seed; }
-
-int rand_r(unsigned *seedp) {
-  *seedp = *seedp * 1103515245 + 12345;
-  return (int)((*seedp / 65536) % 32768);
-}
-
-int abs(int x) { return x < 0 ? -x : x; }
-
-long labs(long x) { return x < 0 ? -x : x; }
-
-long long llabs(long long x) { return x < 0 ? -x : x; }
-
-intmax_t imaxabs(intmax_t x) { return x < 0 ? -x : x; }
-
-imaxdiv_t imaxdiv(intmax_t numer, intmax_t denom) {
-  imaxdiv_t r;
-  r.quot = numer / denom;
-  r.rem = numer % denom;
-  return r;
-}
-
-div_t div(int numer, int denom) {
-  div_t r;
-  r.quot = numer / denom;
-  r.rem = numer % denom;
-  return r;
-}
-
-ldiv_t ldiv(long numer, long denom) {
-  ldiv_t r;
-  r.quot = numer / denom;
-  r.rem = numer % denom;
-  return r;
-}
-
-lldiv_t lldiv(long long numer, long long denom) {
-  lldiv_t r;
-  r.quot = numer / denom;
-  r.rem = numer % denom;
-  return r;
-}
-
-/* qsort — a real quicksort (median-of-three + insertion sort for small arrays).
- * The original implementation was pure insertion sort, O(n²) worst case. */
-static void swap_bytes(char *a, char *b, size_t size) {
-  while (size--) {
-    char t = *a;
-    *a++ = *b;
-    *b++ = t;
-  }
-}
-
-static void qsort_range(char *arr, size_t lo, size_t hi, size_t size,
-                        int (*cmp)(const void *, const void *)) {
-  while (lo < hi) {
-    /* Use insertion sort for small arrays to avoid recursion overhead */
-    if (hi - lo < 8) {
-      for (size_t i = lo + 1; i <= hi; i++) {
-        size_t j = i;
-        while (j > lo && cmp(&arr[j * size], &arr[(j - 1) * size]) < 0) {
-          swap_bytes(&arr[j * size], &arr[(j - 1) * size], size);
-          j--;
-        }
-      }
-      return;
-    }
-    /* median-of-three pivot selection, place pivot at hi */
-    size_t mid = lo + (hi - lo) / 2;
-    if (cmp(&arr[mid * size], &arr[hi * size]) > 0)
-      swap_bytes(&arr[mid * size], &arr[hi * size], size);
-    if (cmp(&arr[lo * size], &arr[hi * size]) > 0)
-      swap_bytes(&arr[lo * size], &arr[hi * size], size);
-    if (cmp(&arr[mid * size], &arr[lo * size]) > 0)
-      swap_bytes(&arr[mid * size], &arr[lo * size], size);
-    char *pivot = &arr[lo * size];
-    size_t i = lo;
-    for (size_t j = lo + 1; j <= hi; j++) {
-      if (cmp(&arr[j * size], pivot) < 0) {
-        i++;
-        swap_bytes(&arr[i * size], &arr[j * size], size);
-      }
-    }
-    swap_bytes(&arr[lo * size], &arr[i * size], size);
-    /* Tail-call elimination: recurse on the shorter side, loop on the longer
-     * side */
-    if (i - lo < hi - i) {
-      qsort_range(arr, lo, i - 1, size, cmp);
-      lo = i + 1;
-    } else {
-      qsort_range(arr, i + 1, hi, size, cmp);
-      hi = i - 1;
-    }
-  }
-}
-
-void qsort(void *base, size_t nmemb, size_t size,
-           int (*cmp)(const void *, const void *)) {
-  if (nmemb <= 1)
-    return;
-  qsort_range((char *)base, 0, nmemb - 1, size, cmp);
-}
-
-void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
-              int (*cmp)(const void *, const void *)) {
-  const char *arr = (const char *)base;
-  size_t lo = 0, hi = nmemb;
-  while (lo < hi) {
-    size_t mid = lo + (hi - lo) / 2;
-    int c = cmp(key, &arr[mid * size]);
-    if (c == 0)
-      return (void *)&arr[mid * size];
-    if (c < 0)
-      hi = mid;
-    else
-      lo = mid + 1;
-  }
-  return NULL;
-}
 
 /* ==================== mkstemp / mktemp (group 3) ====================
  * Replace the trailing X's in template with random letters, then open with
@@ -183,7 +79,7 @@ static int find_xrun(char *tmpl, int *start, int *len) {
   return 0;
 }
 
-int mkstemp(char *tmpl) {
+LIBC_EXPORT int mkstemp(char *tmpl) {
   int start, len;
   if (find_xrun(tmpl, &start, &len) < 0 || len < 6) {
     errno = EINVAL;
@@ -205,7 +101,7 @@ int mkstemp(char *tmpl) {
 /* mktemp: fill the template with a unique name that does not exist, without
  * opening it. Returns template on success, "" on failure. Inherently racy
  * (POSIX warns so); acceptable for this libc. */
-char *mktemp(char *tmpl) {
+LIBC_EXPORT char *mktemp(char *tmpl) {
   int start, len;
   if (find_xrun(tmpl, &start, &len) < 0 || len < 6) {
     tmpl[0] = '\0';
@@ -229,7 +125,7 @@ char *mktemp(char *tmpl) {
  * No symlinks exist in this FS yet, so realpath reduces to: make the path
  * absolute (relative → getcwd join) then collapse . / .. / redundant slashes.
  * Returns resolved (or buf if non-NULL) on success, NULL on failure. */
-char *realpath(const char *path, char *resolved) {
+LIBC_EXPORT char *realpath(const char *path, char *resolved) {
   if (!path || !path[0]) {
     errno = EINVAL;
     return NULL;
@@ -256,7 +152,6 @@ char *realpath(const char *path, char *resolved) {
   }
 
   /* Canonicalize: split on '/', drop empty + ".", apply "..". */
-  char *out = buf;
   size_t outcap = 4096;
   /* Stack of component start offsets within buf. */
   int starts[256];
@@ -301,7 +196,6 @@ char *realpath(const char *path, char *resolved) {
     buf[o++] = '/';
   }
   buf[o] = '\0';
-  (void)out;
   return buf;
 }
 
