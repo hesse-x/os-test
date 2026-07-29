@@ -4,17 +4,19 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <sched.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <syscall.h>
 
-#include <sched.h>
-#include <sys/cdefs.h> /* LIBC_EXPORT — musl <stdlib.h> declares malloc/calloc/
-                        * realloc/free without a visibility attribute; without
-                        * this they'd be hidden under libc.so's -fvisibility=hidden */
-#include <xos/page.h>  /* PAGE_SIZE (UAPI) */
+#include <sys/cdefs.h>
+#include <sys/mman.h>
+#include <xos/page.h>
 
-#include <xos/mman.h>
+/* MAP_FAILED / PROT_READ / PROT_WRITE come from <sys/mman.h> via <syscall.h>
+ * above (musl, now the userspace source of truth for mman). <xos/mman.h> is no
+ * longer included here — it would co-define the common MAP_xx / PROT_xx set
+ * with musl's <sys/mman.h> and trip -Wmacro-redefined. */
 
 // ===================== Size class definitions =====================
 #define NUM_KMALLOC_CLASSES 9

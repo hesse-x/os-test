@@ -16,7 +16,6 @@
 #include <sys/mman.h>
 #include <sys/process.h>
 #include <sys/wait.h>
-#include <xos/mman.h>
 #include <xos/unistd_ext.h>
 
 extern "C" char **environ;
@@ -69,28 +68,14 @@ extern "C" pid_t waitpid(pid_t pid, int *status, int options) {
 }
 
 // ===================== memory management =====================
-
-extern "C" void *mmap(void *addr, size_t length, int prot, int flags, int fd,
-                      uint64_t offset) {
-  // S12: pass fd through verbatim. The kernel sys_mmap dispatches by
-  // fd + flags: fd<0 or MAP_ANONYMOUS → anonymous; fd>=0 with MAP_PRIVATE/
-  // MAP_SHARED and !MAP_ANONYMOUS → file-backed (regular file page-cache
-  // demand-fault, or memfd MAP_SHARED shared page-list, or memfd MAP_PRIVATE
-  // private COW). The old "non-MAP_SHARED → fd=-1" hack starved MAP_PRIVATE+fd
-  // of its fd and forced every private file mapping to a zero page.
-  void *r = sys_mmap(addr, length, prot, flags, fd, offset);
-  if (r == MAP_FAILED)
-    return MAP_FAILED;
-  return r;
-}
-
-extern "C" int munmap(void *addr, size_t length) {
-  return sys_munmap(addr, length);
-}
-
-extern "C" int mprotect(void *addr, size_t length, int prot) {
-  return sys_mprotect(addr, length, prot);
-}
+//
+// mmap/munmap/mprotect/mremap are provided by musl upstream (musl_mman_objs,
+// src/mman/*.c) — deleted from here when the mman module switched to musl.
+// musl's wrappers route through the same SYS_mmap(9)/SYS_munmap(11)/
+// SYS_mprotect(10)/SYS_mremap(25) the old hand-written ones used (mmap.c
+// additionally fixes EPERM→ENOMEM and validates offset alignment).
+// memfd_create is RETAINED here: musl src/mman has no memfd_create (it lives
+// in musl src/linux/), and pulling that in would drag the whole src/linux glob.
 
 extern "C" int memfd_create(const char *name, unsigned int flags) {
   int fd = sys_memfd_create(name, flags);

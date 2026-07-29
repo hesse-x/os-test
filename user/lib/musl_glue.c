@@ -145,18 +145,17 @@ MUSL_HIDDEN int __libc_sigaction(int sig, const void *restrict sa_v,
  * with arg4 = _NSIG/8 = 8 and a low-8-byte mask — already kernel-compatible.
  * No glue needed for sigprocmask. */
 
-MUSL_HIDDEN void *__mmap(void *addr, size_t len, int prot, int flags, int fd,
-                         off_t off) {
-  return sys_mmap(addr, len, prot, flags, fd, off);
-}
-
-MUSL_HIDDEN int __munmap(void *addr, size_t len) {
-  return sys_munmap(addr, len);
-}
-
-MUSL_HIDDEN int __mprotect(void *addr, size_t len, int prot) {
-  return sys_mprotect(addr, len, prot);
-}
+/* __mmap/__munmap/__mprotect/__mremap are NO LONGER provided here. They were
+ * hidden forwarders to sys_mmap/sys_munmap/sys_mprotect that existed only
+ * because the repo's own libc had no real mmap/munmap/mprotect/mremap objects
+ * for musl's pthread/malloc/locale/time to link against. The mman module has
+ * switched to musl upstream (musl_mman_objs): musl's src/mman/{mmap,munmap,
+ * mprotect,mremap}.c now supply the real __mmap/__munmap/__mprotect/__mremap
+ * (weak_alias to mmap/munmap/mprotect/mremap). Keeping the forwarders here
+ * would multi-define those hidden symbols at link. musl's versions route
+ * through the same SYS_mmap(9)/SYS_munmap(11)/SYS_mprotect(10)/SYS_mremap(25)
+ * the forwarders used, so behaviour is unchanged (musl's mmap.c additionally
+ * fixes an EPERM→ENOMEM and validates offset alignment — an improvement). */
 
 MUSL_HIDDEN int __clock_gettime(clockid_t clk, struct timespec *ts) {
   return sys_clock_gettime((int)clk, ts);

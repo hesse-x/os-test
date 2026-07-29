@@ -99,16 +99,18 @@ fi
 
 # Collect all kernel .c files (exclude user-space code), then narrow to the diff
 # set in incremental mode.
-# kernel/bsd/fcntl_sync.c is a zero-code compile-time ABI-sync guard TU: it
-# deliberately #includes musl's <bits/fcntl.h> to _Static_assert musl↔kernel
-# constant/struct parity under the real kernel build (clang + -I musl/arch/x86_64
-# + -nostdinc). sparse can't reproduce that environment (musl -I absent, and
-# -nostdinc is intentionally omitted per the note above), so <bits/fcntl.h>
-# resolves to host glibc's and explodes — pure noise on a TU with no runtime
-# surface to analyze. Exclude it.
+# The kernel/bsd/*_sync.c TUs (fcntl_sync.c, mman_sync.c) are zero-code
+# compile-time ABI-sync guards: they deliberately #include <bits/<mod>.h> to
+# _Static_assert userspace↔kernel constant parity under the real kernel build
+# (clang + -I user/include or musl/arch/x86_64 + -nostdinc). sparse can't
+# reproduce that environment (musl/user -I absent, and -nostdinc is
+# intentionally omitted per the note above), so <bits/<mod>.h> resolves to host
+# glibc's and explodes — pure noise on TUs with no runtime surface to analyze.
+# Exclude them.
 ALL_KERNEL_SOURCES=()
 for f in kernel/xcore/*.c arch/x64/*.c kernel/xcore/mem/*.c kernel/bsd/*.c kernel/driver/*.c; do
     [ "$f" = "kernel/bsd/fcntl_sync.c" ] && continue
+    [ "$f" = "kernel/bsd/mman_sync.c" ] && continue
     [ -f "$f" ] && ALL_KERNEL_SOURCES+=("$f")
 done
 

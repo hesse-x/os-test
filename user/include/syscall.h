@@ -24,8 +24,15 @@
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/mman.h> /* MAP_FAILED (+ MAP_xx / PROT_xx / MFD_xx flags) — musl
+                      * <sys/mman.h> is the userspace source of truth now that
+                      * the mman module switched to musl. Previously this pulled
+                      * <xos/mman.h>, but musl <sys/mman.h> and xos/mman.h both
+                      * define the common MAP_xx / PROT_xx set without per-macro
+                      * guards, so including both in one TU (common: <syscall.h>
+                      * + <sys/mman.h>) trips -Wmacro-redefined. xos/mman.h is
+                      * now kernel-only. */
 #include <xos/errno.h>
-#include <xos/mman.h>
 #include <xos/prctl.h> // PR_* constants (sys_prctl)
 #include <xos/sched.h> // SCHED_* constants
 #include <xos/signal.h>

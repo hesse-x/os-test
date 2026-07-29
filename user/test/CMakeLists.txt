@@ -30,7 +30,7 @@ add_user_dyn_elf(malloc C SOURCES test_malloc.c LINK_LIBS c STATIC_LIBS unity)
 add_user_dyn_elf(stdio C SOURCES test_stdio.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 4: sys/mman
-add_user_dyn_elf(mmap C SOURCES test_mmap.c LINK_LIBS c STATIC_LIBS unity)
+add_user_dyn_elf(mmap C SOURCES test_mmap.c LINK_LIBS c STATIC_LIBS unity DEFS _GNU_SOURCE)
 
 # Layer 5: IPC
 add_user_dyn_elf(ipc C SOURCES test_ipc.c LINK_LIBS c STATIC_LIBS unity)

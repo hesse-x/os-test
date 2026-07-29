@@ -238,7 +238,8 @@ target_sources(myos.elf PRIVATE
     $<TARGET_OBJECTS:bsd_obj>
     $<TARGET_OBJECTS:driver_obj>
     $<TARGET_OBJECTS:kernel_obj>
-    $<TARGET_OBJECTS:fcntl_sync_check>)
+    $<TARGET_OBJECTS:fcntl_sync_check>
+    $<TARGET_OBJECTS:mman_sync_check>)
 set_target_properties(myos.elf PROPERTIES OUTPUT_NAME "myos.elf")
 
 # Kernel ELF lives at the ESP image root (partition 1). Register for the

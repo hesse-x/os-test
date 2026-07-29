@@ -78,8 +78,8 @@
   { include: ["<stat.h>", public, "<xos/stat.h>", public ] },
 
   # ---- mmap protection / map flags ----
-  { include: ["<sys/mman.h>", public, "<xos/mman.h>", public ] },
-  { include: ["<mman.h>", public, "<xos/mman.h>", public ] },
+  { include: ["\"sys/mman.h\"", public, "<sys/mman.h>", public ] },
+  { include: ["<mman.h>", public, "<sys/mman.h>", public ] },
 
   # ---- ELF types ----
   { include: ["<elf.h>", public, "<xos/elf.h>", public ] },

@@ -187,6 +187,41 @@ cp "$SRC"/third_party/musl/include/stdlib.h "$DEST/stdlib.h"
 #     (step 4). Closure self-check below verifies it.
 cp "$SRC"/third_party/musl/include/inttypes.h "$DEST/inttypes.h"
 
+# 3j. musl sys/mman.h. The repo's user/include/sys/mman.h was a source-tree
+#     shim forwarding to musl via #include "musl/include/sys/mman.h" (resolved
+#     at build time by -I third_party). The published sysroot has no third_party
+#     on its search path, so publish musl's real <sys/mman.h> here. musl's
+#     <sys/mman.h> pulls <bits/alltypes.h> (step 2) + <bits/mman.h>; the repo's
+#     user/include/bits/mman.h is already published in step 2 (it supplies
+#     MAP_32BIT + the OS-specific MAP_FIXED_NOREPLACE/MAP_SHARED_VALIDATE/
+#     MAP_GROWSUP/PROT_SEM/MFD_* musl's generic header lacks, with static_assert
+#     parity against include/uapi/xos/mman.h — published in step 1 as $DEST/xos/
+#     mman.h, so the #ifdef __XOS_MMAN_UAPI_AVAILABLE asserts resolve).
+#
+#     The shim's ONE addition over musl — the memfd_create declaration (musl
+#     src/mman has no memfd_create; the wrapper is retained in
+#     user/lib/sys_process.cc) — is appended to the published copy so consumers
+#     of <sys/mman.h> see it. Done by post-processing the file rather than
+#     shipping a divergent copy, keeping musl's header the source of truth for
+#     everything else.
+cp "$SRC"/third_party/musl/include/sys/mman.h "$DEST/sys/mman.h"
+cat >> "$DEST/sys/mman.h" <<'__MMAN_EXT__'
+
+/* OS-specific extension appended by install-headers.sh (mman §3j). musl's
+ * <sys/mman.h> has no memfd_create (it lives in musl src/linux/, not adopted);
+ * this OS exposes it under <sys/mman.h> (matching glibc's _GNU_SOURCE placement).
+ * Defined in user/lib/sys_process.cc, routes to SYS_MEMFD_CREATE (319).
+ * MFD_CLOEXEC/MFD_ALLOW_SEALING come from <bits/mman.h> above. */
+#include <sys/cdefs.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+int memfd_create(const char *, unsigned int);
+#ifdef __cplusplus
+}
+#endif
+__MMAN_EXT__
+
 # 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
 #    compiler's -isystem freestanding dir. The published sysroot must be usable
 #    with -nostdinc and NO -isystem (the Mesa milestone consumes it via -isysroot),
