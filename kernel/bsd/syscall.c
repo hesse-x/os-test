@@ -1478,20 +1478,249 @@ int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   return (int64_t)r;
 }
 
-// ===================== BSD syscall: mremap (stub) =====================
-// musl pthread_getattr_np.c:19 用 mremap 探测主线程栈大小,失败即走 fallback。
-// 真 mremap 需 vma 查找/分裂/合并 + 页表重映射,工作量大且非正确性路径,故 stub。
-// 返回 -ENOSYS 让 musl 干净退出探测循环。**绝不返回 -ENOMEM**:musl 的循环条件是
-// `mremap()==MAP_FAILED && errno==ENOMEM`,返回 ENOMEM 会让它死循环探测。
+// ===================== BSD syscall: mremap =====================
+// Resize (and optionally relocate) a mapping. Linux mremap signature:
+//   mremap(old_addr, old_size, new_size, flags, new_addr)
+//   flags: MREMAP_MAYMOVE | MREMAP_FIXED (new_addr used only with FIXED).
+//
+// Scope: operates on a *whole* region — old_addr must equal region->vaddr and
+// old_size must equal region->size (musl always mremaps whole regions: malloc
+// heap grow/shrink at the region base; pthread_getattr_np probes mid-stack,
+// which is not a region start → -EFAULT, exiting its probe loop cleanly with
+// errno≠ENOMEM, same as the old stub). No sub-region mremap.
+//
+// Backing-type handling:
+//  - anonymous:        shrink / grow-in-place / move (+grow) fully supported.
+//  - file-backed (inode) / memfd MAP_PRIVATE (shm_private_src): shrink and move
+//    supported; grow leaves new pages to demand fault-in. Moving relocates
+//    already-faulted private pages.
+//  - SHM shared / MAP_PHYSICAL: shrink and same-size move supported (PTEs are
+//    relocated without refcount churn). Grow is rejected (-ENOMEM): the backing
+//    extent is fixed/external. Callers fall back (musl malloc → copy_realloc).
+//
+// PROT_NONE pages (PTE_PROTNONE) are relocated like any present PTE so the
+// protection is preserved at the new VA. Never-faulted file pages are skipped
+// (no leaf PTE); fault-in works off region metadata.
+//
+// musl call sites:
+//  - malloc.c:407  __mremap(base, oldlen, newlen, MREMAP_MAYMOVE) — realloc
+//    fast path; failure (MAP_FAILED) falls to copy_realloc, so an mremap
+//    that cannot place the new size must return -ENOMEM (not -ENOSYS).
+//  - pthread_getattr_np.c:19  mremap(p-l-PAGE_SIZE, PAGE_SIZE, 2*PAGE_SIZE, 0)
+//    — no MAYMOVE: in-place grow only; -EFAULT (mid-region) ends the loop
+//    without the infinite retry that -ENOMEM would cause.
+
+// Build the leaf-PTE flag bits for an anonymous page from PROT_* (mirrors the
+// sys_mmap anon path at ~line 1356).
+static uint64_t prot_to_pte_flags(uint32_t prot) {
+  uint64_t f = PTE_USER;
+  if (prot == 0)
+    return f | PTE_PROTNONE | PTE_NX;
+  f |= PTE_PRESENT;
+  if (prot & PROT_WRITE)
+    f |= PTE_RW;
+  if (!(prot & PROT_EXEC))
+    f |= PTE_NX;
+  return f;
+}
+
+// Map the growth portion [base+old_npages*P, base+new_npages*P) for region r at
+// virtual base `base` (the region's current or destination vaddr). Only touches
+// the new tail; existing pages are the caller's concern (in-place: untouched;
+// move: relocated by move_user_pages first). Returns 0 or -errno.
+//  - anon: allocate zero pages with the region's prot-derived PTE flags.
+//  - inode / shm_private_src: no-op (demand fault-in fills them).
+//  - shm_obj / phys: -ENOMEM (fixed/external backing; no grow).
+static int grow_region_pages(xtask *proc, uint64_t *pml4, mmap_region *r,
+                             uint64_t base, size_t old_npages,
+                             size_t new_npages) {
+  if (new_npages <= old_npages)
+    return 0;
+  if (r->shm_obj || r->phys)
+    return -ENOMEM;
+  if (r->inode || r->shm_private_src)
+    return 0; // fault-in
+
+  uint64_t gstart = base + old_npages * PAGE_SIZE;
+  size_t grow = new_npages - old_npages;
+  int mapped = 0;
+  if (!map_user_pages(pml4, gstart, gstart + grow * PAGE_SIZE,
+                      prot_to_pte_flags(r->prot), &mapped)) {
+    if (mapped)
+      unmap_user_pages(pml4, gstart, gstart + mapped * PAGE_SIZE, mapped);
+    return -ENOMEM;
+  }
+  return 0;
+}
+
+// Free the old-VA tail [base+keep_npages*P, base+old_npages*P) after a move
+// that shrank the mapping (the moved prefix [0,keep) was already cleared by
+// move_user_pages). SHM/MAP_PHYSICAL: clear PTEs only (externally-owned pages
+// not freed). anon / file-private: unmap_user_pages frees + refcount-decs the
+// private pages.
+static void free_old_tail(uint64_t *pml4, mmap_region *r, uint64_t base,
+                          size_t keep_npages, size_t old_npages) {
+  for (size_t i = keep_npages; i < old_npages; i++) {
+    uint64_t va = base + i * PAGE_SIZE;
+    if (r->shm_obj || r->phys)
+      clear_user_pte(pml4, va);
+    else
+      unmap_user_pages(pml4, va, va + PAGE_SIZE, 1);
+  }
+}
+
 int64_t sys_mremap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                    int64_t arg5, int64_t unused) {
-  (void)arg1;
-  (void)arg2;
-  (void)arg3;
-  (void)arg4;
-  (void)arg5;
   (void)unused;
-  return (int64_t)-ENOSYS;
+  uint64_t old_addr = arg1;
+  uint64_t old_size = arg2;
+  uint64_t new_size = arg3;
+  uint32_t flags = (uint32_t)arg4;
+  uint64_t new_addr = arg5;
+
+  if (old_addr & (PAGE_SIZE - 1))
+    return (int64_t)-EINVAL;
+  if (flags & ~((uint32_t)MREMAP_MAYMOVE | (uint32_t)MREMAP_FIXED))
+    return (int64_t)-EINVAL;
+  if ((flags & MREMAP_FIXED) && !(flags & MREMAP_MAYMOVE))
+    return (int64_t)-EINVAL;
+  if (new_size == 0)
+    return (int64_t)-EINVAL;
+  if ((flags & MREMAP_FIXED) && (new_addr & (PAGE_SIZE - 1)))
+    return (int64_t)-EINVAL;
+
+  old_size = ALIGN_UP(old_size, PAGE_SIZE);
+  new_size = ALIGN_UP(new_size, PAGE_SIZE);
+  if (old_size == 0 || new_size == 0)
+    return (int64_t)-EINVAL; // overflow
+
+  xtask *proc = current_task;
+  uint64_t *pml4 =
+      (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
+
+  uint64_t irqf;
+  spin_lock_irqsave(&proc->mm->mmap_lock, &irqf);
+  int64_t ret;
+
+  mmap_region *r = vma_find(proc->mm, old_addr);
+  // Whole-region contract: old_addr must be a region start and old_size its
+  // full size. Sub-range mremap is not supported (musl never needs it).
+  if (!r || r->vaddr != old_addr || r->size != old_size) {
+    ret = -EFAULT;
+    goto out;
+  }
+
+  size_t old_npages = old_size / PAGE_SIZE;
+  size_t new_npages = new_size / PAGE_SIZE;
+  uint64_t old_end = old_addr + old_size;
+  uint64_t new_end = old_addr + new_size; // in-place candidate end
+
+  // Decide in-place vs move. Shrink/same always in place. Grow in place only
+  // if the extension is free and within the user VA bound.
+  bool want_move = false;
+  if (flags & MREMAP_FIXED)
+    want_move = true;
+  else if (new_size > old_size) {
+    uint64_t grow = new_size - old_size;
+    if (old_end + grow > USER_VMA_UPPER_BOUND ||
+        vma_overlaps_any(proc->mm, old_end, grow))
+      want_move = true;
+  }
+
+  if (!want_move) {
+    // --- In-place resize ---
+    if (new_size < old_size) {
+      // Shrink: unmap the tail [old_addr+new_size, old_end). vma_unmap_range
+      // splits the tail off (front residue [old_addr, old_addr+new_size)
+      // stays) and frees its pages/refs per the region's backing type.
+      int ur = vma_unmap_range(proc->mm, pml4, old_addr + new_size,
+                               old_size - new_size);
+      if (ur < 0) {
+        ret = ur;
+        goto out;
+      }
+    } else if (new_size > old_size) {
+      int g =
+          grow_region_pages(proc, pml4, r, old_addr, old_npages, new_npages);
+      if (g < 0) {
+        ret = g;
+        goto out;
+      }
+      r->size = new_size;
+      if (old_end == proc->mm->mmap_brk)
+        proc->mm->mmap_brk = new_end;
+    }
+    ret = (int64_t)old_addr;
+    goto out;
+  }
+
+  // --- Relocate ---
+  uint64_t new_va;
+  if (flags & MREMAP_FIXED) {
+    new_va = new_addr;
+    int ur = vma_unmap_range(proc->mm, pml4, new_va, new_size);
+    if (ur < 0) {
+      ret = ur;
+      goto out;
+    }
+  } else {
+    // MREMAP_MAYMOVE (no FIXED): musl passes new_addr=0 here. Treat it as a
+    // hint; vma_find_gap falls back to the mmap_brk scan when the hint is not a
+    // free gap.
+    uint64_t gap = vma_find_gap(proc->mm, new_size, new_addr);
+    if (!gap || vma_overlaps_any(proc->mm, gap, new_size)) {
+      ret = -ENOMEM;
+      goto out;
+    }
+    new_va = gap;
+  }
+
+  // 1. Grow at the destination first (may fail → nothing moved, r intact).
+  if (new_size > old_size) {
+    int g = grow_region_pages(proc, pml4, r, new_va, old_npages, new_npages);
+    if (g < 0) {
+      ret = g;
+      goto out;
+    }
+  }
+  // 2. Relocate existing pages old→new (two-phase; cannot fail mid-way — see
+  //    move_user_pages). Relocates present PTEs only.
+  if (!move_user_pages(pml4, old_addr, new_va, old_npages)) {
+    // Only fails on destination page-table allocation. The growth pages mapped
+    // in step 1 (if any) are orphaned; rare OOM, accepted.
+    ret = -ENOMEM;
+    goto out;
+  }
+  // 3. Free the old-VA tail when shrinking (the moved prefix was cleared by
+  //    move_user_pages).
+  if (new_size < old_size)
+    free_old_tail(pml4, r, old_addr, new_npages, old_npages);
+  // 4. Relink region metadata at the new VA.
+  {
+    mmap_region **pp = &proc->mm->mmap_regions;
+    while (*pp != r)
+      pp = &(*pp)->next;
+    *pp = r->next;
+    r->vaddr = new_va;
+    r->size = new_size;
+    r->next = NULL;
+    // phys base is unchanged: a MAP_PHYSICAL mapping relocates the same phys
+    // range to a new VA from offset 0 (only same-size move reaches here for
+    // phys, since grow is rejected).
+    if (vma_insert_sorted(proc->mm, r) != 0) {
+      // Should not happen: new_va was a validated free gap. If it does, the
+      // mapping is already moved at the PTE level; report failure.
+      ret = -ENOMEM;
+      goto out;
+    }
+    if (new_va == proc->mm->mmap_brk)
+      proc->mm->mmap_brk = new_va + new_size;
+  }
+  ret = (int64_t)new_va;
+
+out:
+  spin_unlock_irqrestore(&proc->mm->mmap_lock, irqf);
+  return ret;
 }
 
 // ===================== BSD syscall: mprotect =====================

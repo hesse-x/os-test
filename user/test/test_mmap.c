@@ -218,6 +218,79 @@ void test_sys_time_gettimeofday(void) {
   TEST_ASSERT_TRUE(tv.tv_sec >= 0);
 }
 
+/* 18. mremap anon grow in place: existing data preserved, new tail usable */
+void test_mremap_anon_grow(void) {
+  char *p = (char *)mmap(NULL, 4096, PROT_READ | PROT_WRITE, 0, -1, 0);
+  TEST_ASSERT_NOT_NULL(p);
+  memset(p, 'G', 4096);
+
+  char *q = (char *)mremap(p, 4096, 8192, MREMAP_MAYMOVE);
+  TEST_ASSERT_TRUE(q != MAP_FAILED && q != NULL);
+  /* Existing page content survived the resize. */
+  TEST_ASSERT_EQUAL_INT('G', q[0]);
+  TEST_ASSERT_EQUAL_INT('G', q[4095]);
+  /* New tail is a fresh writable page. */
+  q[4096] = 'T';
+  q[8191] = 'T';
+  TEST_ASSERT_EQUAL_INT('T', q[4096]);
+  TEST_ASSERT_EQUAL_INT('T', q[8191]);
+  munmap(q, 8192);
+}
+
+/* 19. mremap anon shrink: head data preserved, tail released */
+void test_mremap_anon_shrink(void) {
+  char *p = (char *)mmap(NULL, 8192, PROT_READ | PROT_WRITE, 0, -1, 0);
+  TEST_ASSERT_NOT_NULL(p);
+  memset(p, 'H', 8192);
+
+  char *q = (char *)mremap(p, 8192, 4096, MREMAP_MAYMOVE);
+  TEST_ASSERT_TRUE(q != MAP_FAILED && q != NULL);
+  TEST_ASSERT_EQUAL_INT('H', q[0]);
+  TEST_ASSERT_EQUAL_INT('H', q[4095]);
+  munmap(q, 4096);
+}
+
+/* 20. mremap MREMAP_FIXED move: pages relocated to a new VA, content preserved
+ */
+void test_mremap_fixed_move(void) {
+  char *p = (char *)mmap(NULL, 2 * 4096, PROT_READ | PROT_WRITE, 0, -1, 0);
+  TEST_ASSERT_NOT_NULL(p);
+  /* Distinctive pattern so we can verify the *same* pages moved. */
+  p[0] = 'A';
+  p[4096] = 'B';
+  p[8191] = 'C';
+
+  /* Pick a non-conflicting fixed destination in user VA space. */
+  void *dst = (void *)0x40000000ULL;
+  char *q =
+      (char *)mremap(p, 2 * 4096, 2 * 4096, MREMAP_MAYMOVE | MREMAP_FIXED, dst);
+  TEST_ASSERT_EQUAL_PTR(dst, q);
+  TEST_ASSERT_EQUAL_INT('A', q[0]);
+  TEST_ASSERT_EQUAL_INT('B', q[4096]);
+  TEST_ASSERT_EQUAL_INT('C', q[8191]);
+  munmap(q, 2 * 4096);
+}
+
+/* 21. mremap FIXED move + grow: relocated pages preserved AND new tail usable
+ */
+void test_mremap_fixed_move_grow(void) {
+  char *p = (char *)mmap(NULL, 4096, PROT_READ | PROT_WRITE, 0, -1, 0);
+  TEST_ASSERT_NOT_NULL(p);
+  memset(p, 'M', 4096);
+
+  void *dst = (void *)0x41000000ULL;
+  char *q =
+      (char *)mremap(p, 4096, 2 * 4096, MREMAP_MAYMOVE | MREMAP_FIXED, dst);
+  TEST_ASSERT_EQUAL_PTR(dst, q);
+  /* Moved page preserved. */
+  TEST_ASSERT_EQUAL_INT('M', q[0]);
+  TEST_ASSERT_EQUAL_INT('M', q[4095]);
+  /* Grown tail is a fresh page. */
+  q[4096] = 'Z';
+  TEST_ASSERT_EQUAL_INT('Z', q[4096]);
+  munmap(q, 2 * 4096);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -240,5 +313,9 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_getpagesize_matches_param);
   RUN_TEST(test_getpagesize_mmap_boundary);
   RUN_TEST(test_sys_time_gettimeofday);
+  RUN_TEST(test_mremap_anon_grow);
+  RUN_TEST(test_mremap_anon_shrink);
+  RUN_TEST(test_mremap_fixed_move);
+  RUN_TEST(test_mremap_fixed_move_grow);
   return UNITY_END();
 }

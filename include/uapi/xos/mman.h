@@ -37,6 +37,10 @@
 // mmap return value on failure
 #define MAP_FAILED ((void *)-1)
 
+// mremap flags (Linux x86-64 values)
+#define MREMAP_MAYMOVE 1
+#define MREMAP_FIXED 2
+
 // memfd_create flags
 #define MFD_CLOEXEC 0x0001U
 #define MFD_ALLOW_SEALING 0x0002U

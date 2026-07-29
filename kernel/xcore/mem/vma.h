@@ -15,6 +15,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// Upper bound of the user VMA region; beyond this belongs to the kernel.
+// Matches sys_mprotect's user-space upper bound (syscall.c).
+#define USER_VMA_UPPER_BOUND 0x800000000000ULL
+
 // Return the region containing addr ([vaddr, vaddr+size)), or NULL.
 mmap_region *vma_find(mm *mm, uint64_t addr);
 

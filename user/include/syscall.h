@@ -185,11 +185,12 @@ static inline int sys_munmap(void *addr, size_t size) {
   return 0;
 }
 
-// mremap stub: kernel returns -ENOSYS. Mirrors Linux mremap signature
-// (old, old_size, new_size, flags, new_addr). On failure sets errno + returns
-// MAP_FAILED, matching musl pthread_getattr_np.c:19's
-// `mremap()==MAP_FAILED && errno==ENOMEM` loop (which then exits cleanly —
-// errno here is ENOSYS, not ENOMEM, so no infinite probe loop).
+// mremap: resizes (and optionally relocates) a mapping. Mirrors Linux mremap
+// signature (old, old_size, new_size, flags, new_addr). On failure sets errno +
+// returns MAP_FAILED. The kernel implements shrink / grow-in-place / move for
+// whole-region mappings (musl's contract); a mid-region old_addr yields -EFAULT
+// so musl pthread_getattr_np.c:19's probe loop exits cleanly (errno≠ENOMEM,
+// no infinite retry).
 static inline void *sys_mremap(void *old, size_t old_size, size_t new_size,
                                int flags, void *new_addr) {
   int64_t r = __syscall5(SYS_MREMAP, (int64_t)(uintptr_t)old, (int64_t)old_size,

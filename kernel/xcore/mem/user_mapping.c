@@ -13,6 +13,7 @@
 
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
+#include "arch/x64/utils.h" // invlpg
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/mem/alloc.h"
@@ -201,6 +202,92 @@ unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
     }
     vaddr += PAGE_SIZE;
   }
+}
+
+// Non-allocating walk to the leaf PTE slot for a user VA. Returns NULL if any
+// intermediate page-table level is missing; otherwise &pt[leaf_idx] regardless
+// of whether the leaf itself is present (caller reads/writes the slot). Unlike
+// lookup_pte, it does NOT require the leaf to be present — needed to clear or
+// restore a PTE that has been zeroed.
+__attribute__((no_sanitize("kernel-address"))) static uint64_t *
+walk_pte_slot(uint64_t *pml4, uint64_t vaddr) {
+  uint64_t pml4_idx = (vaddr >> 39) & 0x1FF;
+  if (!(pml4[pml4_idx] & PTE_PRESENT))
+    return NULL;
+  uint64_t *pdpt = (uint64_t *)phys_to_virt(
+      (__force phys_addr_t)(pml4[pml4_idx] & PTE_PHYS_MASK));
+  uint64_t pdpt_idx = (vaddr >> 30) & 0x1FF;
+  if (!(pdpt[pdpt_idx] & PTE_PRESENT))
+    return NULL;
+  uint64_t *pd = (uint64_t *)phys_to_virt(
+      (__force phys_addr_t)(pdpt[pdpt_idx] & PTE_PHYS_MASK));
+  uint64_t pd_idx = (vaddr >> 21) & 0x1FF;
+  if (!(pd[pd_idx] & PTE_PRESENT))
+    return NULL;
+  uint64_t *pt = (uint64_t *)phys_to_virt(
+      (__force phys_addr_t)(pd[pd_idx] & PTE_PHYS_MASK));
+  return &pt[(vaddr >> 12) & 0x1FF];
+}
+
+// Clear a single user leaf PTE if present, without touching the backing page's
+// refcount. Used to drop a SHM/MAP_PHYSICAL mapping's view of an externally
+// owned page (the page is not freed here). PROT_NONE (PTE_PROTNONE) entries
+// are also cleared. No-op if no leaf table exists or the PTE is already clear.
+__attribute__((no_sanitize("kernel-address"))) void
+clear_user_pte(uint64_t *pml4, uint64_t vaddr) {
+  uint64_t *slot = walk_pte_slot(pml4, vaddr);
+  if (slot && pte_present(*slot)) {
+    *slot = 0;
+    invlpg(vaddr);
+  }
+}
+
+// Relocate present leaf PTEs from [old_va, old_va + npages*PAGE) to
+// [new_va, new_va + npages*PAGE) without touching backing-page refcounts —
+// the pages are moved, not freed/re-allocated. Both normal pages (PTE_PRESENT)
+// and mprotect'd PROT_NONE pages (PTE_PROTNONE; pte_present() honors it) are
+// relocated so PROT_NONE is preserved at the new VA (trap.c keys the
+// SEGV_ACCERR/MAPERR decision off the leaf PTE_PROTNONE marker). Never-faulted
+// file-backed pages (no leaf PTE) are skipped — fault-in works off region
+// metadata at the new VA.
+//
+// Two-phase so a page-table allocation failure cannot leave a half-moved
+// mapping: phase 1 ensures all destination intermediate tables (may allocate →
+// may fail; on failure nothing has been moved, source PTEs are untouched); the
+// orphaned empty table pages on a mid-phase-1 failure are a rare OOM leak.
+// Phase 2 is allocation-free and thus cannot fail — it clears each source PTE
+// only after writing the destination PTE. The destination range must be free
+// (caller guarantees via gap selection / MREMAP_FIXED unmap).
+__attribute__((no_sanitize("kernel-address"))) bool
+move_user_pages(uint64_t *pml4, uint64_t old_va, uint64_t new_va,
+                size_t npages) {
+  // Phase 1: ensure destination intermediate tables.
+  for (size_t i = 0; i < npages; i++) {
+    uint64_t dva = new_va + i * PAGE_SIZE;
+    uint64_t *pdpt = ensure_pd(pml4, dva);
+    if (!pdpt)
+      return false;
+    uint64_t *pd = ensure_pt_in_pd(pdpt, dva, 2);
+    if (!pd)
+      return false;
+    if (!ensure_pt_in_pd(pd, dva, 1))
+      return false;
+  }
+  // Phase 2: relocate present PTEs (allocation-free).
+  for (size_t i = 0; i < npages; i++) {
+    uint64_t sva = old_va + i * PAGE_SIZE;
+    uint64_t dva = new_va + i * PAGE_SIZE;
+    uint64_t *src = walk_pte_slot(pml4, sva);
+    if (!src || !pte_present(*src))
+      continue; // nothing to move
+    uint64_t entry = *src;
+    uint64_t *dst = walk_pte_slot(pml4, dva); // exists (phase 1)
+    *dst = entry;
+    *src = 0;
+    invlpg(dva);
+    invlpg(sva);
+  }
+  return true;
 }
 
 // Deep-copy user page tables from src_pml4 to dst_pml4.

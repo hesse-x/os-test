@@ -97,5 +97,13 @@ bool map_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
 void unmap_user_pages(uint64_t *pml4, uint64_t vaddr_start, uint64_t vaddr_end,
                       int count);
 uint64_t *lookup_pte(uint64_t cr3_phys, uint64_t vaddr);
+// Clear a single user leaf PTE if present without touching the backing page's
+// refcount (SHM/MAP_PHYSICAL views). No-op if no leaf or already clear.
+void clear_user_pte(uint64_t *pml4, uint64_t vaddr);
+// Relocate present leaf PTEs old_va→new_va (npages) without refcount churn.
+// Two-phase: returns false only on destination page-table alloc failure, with
+// nothing moved (source untouched). Caller guarantees the dest range is free.
+bool move_user_pages(uint64_t *pml4, uint64_t old_va, uint64_t new_va,
+                     size_t npages) __must_check;
 
 #endif // KERNEL_MEM_ALLOC_H

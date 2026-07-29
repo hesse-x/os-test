@@ -22,9 +22,7 @@
 #include <xos/mman.h>
 #include <xos/page.h>
 
-// Matches sys_mprotect's user-space upper bound (syscall.c). Beyond this the
-// address space belongs to the kernel.
-#define USER_VMA_UPPER_BOUND 0x800000000000ULL
+// USER_VMA_UPPER_BOUND now lives in vma.h (shared with sys_mremap).
 
 mmap_region *vma_find(mm *mm, uint64_t addr) {
   for (mmap_region *mr = mm->mmap_regions; mr; mr = mr->next) {

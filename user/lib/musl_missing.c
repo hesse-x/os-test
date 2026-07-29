@@ -12,9 +12,11 @@
 #include <unistd.h>
 
 #include <sys/cdefs.h>
+#include <sys/mman.h> // MREMAP_FIXED
 #include <xos/errno.h>
+#include <xos/mman.h>
 
-enum { MUSL_MREMAP_FIXED = 2, MUSL_NAME_MAX = 255 };
+enum { MUSL_NAME_MAX = 255 };
 
 LIBC_EXPORT size_t strnlen(const char *s, size_t maxlen) {
   size_t len = 0;
@@ -37,7 +39,7 @@ LIBC_EXPORT int prctl(int option, ...) {
 LIBC_EXPORT void *mremap(void *old_addr, size_t old_size, size_t new_size,
                          int flags, ...) {
   void *new_addr = NULL;
-  if (flags & MUSL_MREMAP_FIXED) {
+  if (flags & MREMAP_FIXED) {
     va_list ap;
     va_start(ap, flags);
     new_addr = va_arg(ap, void *);
