@@ -147,6 +147,20 @@ cp "$SRC"/third_party/musl/include/sys/socket.h     "$DEST/sys/socket.h"
 cp "$SRC"/third_party/musl/include/sys/un.h         "$DEST/sys/un.h"
 cp "$SRC"/third_party/musl/arch/x86_64/bits/socket.h "$DEST/bits/socket.h"
 
+# 3g. musl math/fenv headers. The repo's user/include/math.h was deleted when
+#     libm switched to musl (the old header made acos/sqrt/... static inline
+#     __builtin_* wrappers; musl's declares them out-of-line, and adds the
+#     long-double (*l) set + fenv). <math.h> pulls <features.h> (repo's own,
+#     step 2) + <bits/alltypes.h> (step 2; defines float_t/double_t via
+#     __NEED_float_t/__NEED_double_t — on x86_64 both are long double). <fenv.h>
+#     pulls only <bits/fenv.h> (arch/x86_64), published here. fenv.h is needed
+#     because musl src/math/{nearbyint,fma,...}.c #include <fenv.h>; consumers
+#     using <fenv.h> get it here too. All three closures resolve within the
+#     sysroot (verified by the per-header self-check below).
+cp "$SRC"/third_party/musl/include/math.h           "$DEST/math.h"
+cp "$SRC"/third_party/musl/include/fenv.h           "$DEST/fenv.h"
+cp "$SRC"/third_party/musl/arch/x86_64/bits/fenv.h  "$DEST/bits/fenv.h"
+
 # 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
 #    compiler's -isystem freestanding dir. The published sysroot must be usable
 #    with -nostdinc and NO -isystem (the Mesa milestone consumes it via -isysroot),

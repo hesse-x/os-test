@@ -597,6 +597,7 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_dl_objs> $<TARGET_OBJECTS:musl_dirent_objs>
                $<TARGET_OBJECTS:musl_pthread>
                $<TARGET_OBJECTS:musl_string_objs>
+               $<TARGET_OBJECTS:musl_math_objs>
     C
     FLAGS "-fno-pie -DDYNAMIC=0"
     IMAGE_PATH usr/lib/libc.a
@@ -625,6 +626,7 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_dl_objs_so> $<TARGET_OBJECTS:musl_dirent_objs_so>
                $<TARGET_OBJECTS:musl_loader_objs> $<TARGET_OBJECTS:musl_pthread>
                $<TARGET_OBJECTS:musl_string_objs>
+               $<TARGET_OBJECTS:musl_math_objs>
     C
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED
@@ -640,28 +642,106 @@ add_dependencies(c_so musl_libc)
 # artifact to /lib/ld-musl-x86_64.so.1 (PT_INTERP path the kernel opens).
 os_image_path(c_so libc.so lib/ld-musl-x86_64.so.1 PARTITION 2)
 
-# libm source list
-set(LIBM_SOURCES
-    lib/math/math_basic.c
-    lib/math/math_float.c
-    lib/math/sincos.c
-)
+# ===================== musl math integration (libm) =====================
+# Build the upstream musl src/math/*.c + x86_64/*.s + fenv/x86_64/fenv.s into
+# libm, replacing the hand-written __builtin_* wrappers in the deleted
+# user/lib/math/*.c. Mirrors musl_string_objs: one -fPIC OBJECT sub-library
+# (add_musl_lib) wired into BOTH the static libm.a (m) and shared libm.so
+# (m_so) via EXTRA_OBJS — -fPIC objects link fine into a -no-pie static archive
+# too, so a single compile serves both (same as musl_string_objs → c/c_so).
+#
+# src/math/*.c is one-function-per-file. The x86_64/*.s asm versions REPLACE the
+# C ones for 29 symbols (acosl asinl atan2l atanl ceill exp2l expl expm1l fabs
+# fabsf fabsl floorl fmodl llrint llrintf llrintl log10l log1pl log2l logl lrint
+# lrintf lrintl remainderl rintl sqrt sqrtf sqrtl truncl, plus __invtrigl) —
+# compiling both the .c and .s would multi-define those symbols, so the .c
+# twins are dropped from the glob (same pattern as MUSL_STRING_SOURCES drops the
+# .c that have a .s twin). The asm .s set is added explicitly via GLOB below.
+#
+# fenv: src/math/{nearbyint,fma,fmaf,fmal,llrint,...}.c #include <fenv.h> and
+# call feclearexcept/feraiseexcept/fetestexcept. On x86_64 musl implements the
+# entire fenv ABI in one assembly file — src/fenv/x86_64/fenv.s — so pull it in
+# to satisfy those references. musl <fenv.h> needs <bits/fenv.h> (published via
+# install-headers.sh), already on this target's musl arch include path.
+#
+# Internal helpers (__fpclassify* __signbit* __math_* __polevll __sinl __cosl
+# __tanl __rem_pio2* __expo2* __signgam __lgamma_r ...) are all caught by the
+# src/math/__*.c glob and stay hidden (not in libm.map). The only external
+# reference math sources make is errno via __errno_location (provided by
+# musl_pthread in libc), resolved at program link time.
+file(GLOB MUSL_MATH_SOURCES ${MUSL_DIR}/src/math/*.c)
+list(REMOVE_ITEM MUSL_MATH_SOURCES
+    # C versions superseded by the x86_64 .s asm below — keep them out or the
+    # link multi-defines these symbols.
+    ${MUSL_DIR}/src/math/acosl.c
+    ${MUSL_DIR}/src/math/asinl.c
+    ${MUSL_DIR}/src/math/atan2l.c
+    ${MUSL_DIR}/src/math/atanl.c
+    ${MUSL_DIR}/src/math/ceill.c
+    ${MUSL_DIR}/src/math/exp2l.c
+    ${MUSL_DIR}/src/math/expl.c
+    ${MUSL_DIR}/src/math/expm1l.c
+    ${MUSL_DIR}/src/math/fabs.c
+    ${MUSL_DIR}/src/math/fabsf.c
+    ${MUSL_DIR}/src/math/fabsl.c
+    ${MUSL_DIR}/src/math/floorl.c
+    ${MUSL_DIR}/src/math/fmodl.c
+    ${MUSL_DIR}/src/math/__invtrigl.c
+    ${MUSL_DIR}/src/math/llrint.c
+    ${MUSL_DIR}/src/math/llrintf.c
+    ${MUSL_DIR}/src/math/llrintl.c
+    ${MUSL_DIR}/src/math/log10l.c
+    ${MUSL_DIR}/src/math/log1pl.c
+    ${MUSL_DIR}/src/math/log2l.c
+    ${MUSL_DIR}/src/math/logl.c
+    ${MUSL_DIR}/src/math/lrint.c
+    ${MUSL_DIR}/src/math/lrintf.c
+    ${MUSL_DIR}/src/math/lrintl.c
+    ${MUSL_DIR}/src/math/remainderl.c
+    ${MUSL_DIR}/src/math/rintl.c
+    ${MUSL_DIR}/src/math/sqrt.c
+    ${MUSL_DIR}/src/math/sqrtf.c
+    ${MUSL_DIR}/src/math/sqrtl.c
+    ${MUSL_DIR}/src/math/truncl.c)
+file(GLOB MUSL_MATH_ASM_SOURCES ${MUSL_DIR}/src/math/x86_64/*.s)
+list(APPEND MUSL_MATH_SOURCES
+    ${MUSL_MATH_ASM_SOURCES}
+    ${MUSL_DIR}/src/fenv/x86_64/fenv.s
+    # Generic fenv wrappers NOT provided by x86_64/fenv.s. The .s defines the
+    # low-level feclearexcept/feraiseexcept/fetestexcept/fegetenv/fesetenv/
+    # fegetround/__fesetround; these generic .c wrap __fesetround/fegetenv/etc.
+    # to provide the remaining public fenv API. fenv.c is EXCLUDED — it defines
+    # feclearexcept/etc. that the .s already provides (multi-def). __flt_rounds
+    # backs the FLT_ROUNDS macro in <float.h>.
+    ${MUSL_DIR}/src/fenv/fesetround.c
+    ${MUSL_DIR}/src/fenv/fegetexceptflag.c
+    ${MUSL_DIR}/src/fenv/fesetexceptflag.c
+    ${MUSL_DIR}/src/fenv/feholdexcept.c
+    ${MUSL_DIR}/src/fenv/feupdateenv.c
+    ${MUSL_DIR}/src/fenv/__flt_rounds.c)
+add_musl_lib(musl_math_objs SOURCES ${MUSL_MATH_SOURCES})
 
-# libm.a (static)
-add_user_lib(m
-    SOURCES ${LIBM_SOURCES}
-    C
-    FLAGS "-fno-pie -D__LIBM_BUILD__"
-)
+# ===================== musl single-libc philosophy =====================
+# Real math (musl src/math + src/fenv) is merged INTO libc (c + c_so) via
+# EXTRA_OBJS below — every static ELF gets math from libc.a, every dynamic
+# ELF/.so gets it from libc.so, with zero -lm bookkeeping. libm.so is kept
+# only as an EMPTY stub .so (see m_so below) so legacy `-lm` links succeed
+# (the build-gcc / Mesa milestones pass -lm and expect libm.so to exist); it
+# contributes no symbols, math resolves from libc.so at runtime. Same pattern
+# glibc uses after merging libm/libpthread/libdl into libc. libpthread.so stub
+# can be added the same way if a `-lpthread` consumer appears (pthread is
+# already in libc via musl_pthread).
 
-# libm.so (dynamic)
+# libm.so — empty stub ELF. No SOURCES/EXTRA_OBJS → the link emits a .so with
+# only a SONAME and no dynsym exports. Shipped to lib/libm.so so -lm resolves
+# at link time; runtime math comes from libc.so. (If a future -lm-static
+# consumer appears, add an empty static `m` stub analogously; none exists now.)
 add_user_lib(m_so
-    SOURCES ${LIBM_SOURCES}
+    SOURCES lib/libm_stub.c
     C
-    FLAGS "-fPIC -DDYNAMIC=1 -D__LIBM_BUILD__ -fvisibility=default"
+    FLAGS "-fPIC -fvisibility=default"
     SHARED
     OUTPUT_NAME m
-    VERSION_MAP user/libm.map
 )
 
 
@@ -684,6 +764,9 @@ add_third_party_lib(unity STATIC
 target_compile_definitions(unity PUBLIC UNITY_EXCLUDE_MATH_H UNITY_INCLUDE_DOUBLE)
 
 add_user_elf(hello  C SOURCES hello.c  LINK_LIBS c IMAGE_PATH local/hello.elf)
+# mathsink — musl libm end-to-end smoke (sqrt/sin/exp/copysignl/fmodl/sincos).
+# Temporary diagnostic; ships to /usr/bin so the shell can run it.
+add_user_elf(mathsink C SOURCES test/mathsink.c LINK_LIBS c IMAGE_PATH usr/bin/mathsink)
 # test_fpu / ld_test_* / drm_test_link are diagnostic ELFs shipped only under /test/.
 # In non-TEST builds they still compile (consumed nowhere at runtime — test_runner
 # itself is TEST-gated in user/test/), but are NOT shipped to the image, preserving
