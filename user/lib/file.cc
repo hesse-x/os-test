@@ -23,15 +23,15 @@
 // syscalls), so no libc-side cwd copy is needed.
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
-#include <stdlib.h>    // IWYU pragma: keep  // malloc/calloc/free/realloc
-#include <sys/cdefs.h> // LIBC_EXPORT (retained wrappers export from libc.so)
+#include <stdlib.h> // IWYU pragma: keep
 #include <syscall.h>
 #include <termios.h>
-#include <time.h>
 #include <unistd.h>
 
+#include <sys/cdefs.h>
 #include <sys/ioctl.h>
 #include <sys/ipc.h>
 #include <sys/poll.h>
@@ -107,6 +107,16 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms) {
     return -1;
   }
   return (int)ret;
+}
+
+// ppoll — poll with a timespec timeout and an atomic signal-mask swap.
+// Thin wrapper over the kernel's SYS_PPOLL (sys_ppoll in socket.c), which
+// already does the timespec→ms conversion and the temporary sigmask
+// replacement. libwayland-client dlopen's this symbol, so it must be
+// exported from libc.so even though poll(2) above stays on SYS_POLL.
+int ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout_ts,
+          const sigset_t *sigmask) {
+  return sys_ppoll(fds, nfds, timeout_ts, sigmask, sizeof(sigset_t));
 }
 
 // dup/dup2 are provided by musl src/unistd (musl_unistd_objs).

@@ -284,6 +284,21 @@ add_user_dyn_elf(test_expat C SOURCES test_expat.c
     INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libexpat/expat/lib
                 ${CMAKE_BINARY_DIR})
 
+# libwayland-client.so 纯逻辑测试: wl_array (init/add/for_each/copy/release) +
+# wl_list (init/insert/remove/length/empty/insert_list). 仅覆盖不依赖真实
+# compositor 的容器层; wl_display_*/wl_proxy 路径属 e2e, 不在本测范围.
+# LINK_LIBS wayland-client → -lwayland-client resolves to libwayland-client.so
+# (DT_NEEDED). INCLUDE_DIRS 同 wayland_client_so target 的取头路径:
+# wayland-client.h (src) → wayland-client-protocol.h (build, 生成).
+add_user_dyn_elf(test_wayland_client C SOURCES test_wayland_client.c
+    LINK_LIBS wayland-client c
+    STATIC_LIBS unity
+    INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/wayland/src
+                ${CMAKE_SOURCE_DIR}/third_party/wayland
+                ${CMAKE_BINARY_DIR}
+    GEN_HEADERS ${CMAKE_BINARY_DIR}/wayland-client-protocol.h
+                ${CMAKE_BINARY_DIR}/wayland-client-protocol-core.h)
+
 # dlfcn API smoke test (DL-001~006): dlopen(NULL)/dlsym/dlclose/dlerror/dladdr
 # against the fused musl loader + musl_dl_objs wrappers. NOT a real .so load
 # (that is Phase 3); dlopen(NULL) returns the head handle and dlsym resolves

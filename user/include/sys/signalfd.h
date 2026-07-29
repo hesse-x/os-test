@@ -14,7 +14,7 @@
 #define SFD_CLOEXEC 0x8000
 #define SFD_NONBLOCK 0x800
 
-typedef struct {
+typedef struct signalfd_siginfo {
   uint32_t ssi_signo;
   int32_t ssi_errno;
   int32_t ssi_code;

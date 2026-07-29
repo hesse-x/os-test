@@ -9,6 +9,13 @@
  * the -I third_party include path. OS-specific declarations that musl's
  * <unistd.h> does not carry live in <xos/unistd_ext.h> (gettid,
  * wait_dev_ready), <sys/io.h> (ioperm), and <sys/stat.h> (umask, utimensat).
+ *
+ * <xos/unistd_ext.h> is pulled in here so that OS additions like gettid() are
+ * visible to any consumer of <unistd.h> (matching glibc, which declares gettid
+ * in <unistd.h>). Third-party sources (e.g. wayland connection.c) call gettid()
+ * after only #include <unistd.h> and expect it resolved. The ext header has its
+ * own include guard, so explicit `#include <xos/unistd_ext.h>` elsewhere is a
+ * harmless no-op.
  */
 #ifndef _USER_UNISTD_SHIM_H
 #define _USER_UNISTD_SHIM_H
@@ -24,5 +31,6 @@
 #endif
 #include "musl/include/unistd.h"
 #include <stddef.h>
+#include <xos/unistd_ext.h>
 
 #endif
