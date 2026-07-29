@@ -32,7 +32,7 @@ global:
     /* <string.h> */
     bzero; bcmp; bcopy; index; rindex; memcmp; memcpy; memmove; memset;
     memchr; memmem; strcat; strchr; strcmp; strcpy; strcspn; strdup;
-    strerror; strerror_r; strlen; strncat; strncmp; strncpy; strndup;
+    strerror; strerror_r; strerror_l; strlen; strncat; strncmp; strncpy; strndup;
     strpbrk; strrchr; strspn; strstr; strtok; strtok_r;
     basename;
 

@@ -352,6 +352,22 @@ set(MUSL_PTHREAD_SOURCES
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/x86_64/restore.s
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal/libc.c
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/errno/__errno_location.c
+    # strerror.c builds errid[]/errmsg[] from __strerror.h (double-inclusion
+    # macro table) and provides strerror/__strerror_l/strerror_l, replacing the
+    # hand-written switch in user/lib/string.cc so every errno maps to the
+    # canonical Linux/glibc message. It routes messages through LCTRANS/
+    # CURRENT_LOCALE (src/internal/locale_impl.h): CURRENT_LOCALE =
+    # __pthread_self()->locale, set to &libc.global_locale by __init_tp
+    # (__init_tls.c:19, libc.c already above) — non-null at runtime. LCTRANS →
+    # __lctrans(msg, loc->cat[LC_MESSAGES]) comes from __lctrans.c, whose
+    # weak_alias(dummy, __lctrans_impl) pass-through returns msg unchanged
+    # (we deliberately do NOT compile locale_map.c's strong __lctrans_impl —
+    # no gettext/catalog in this OS, so C-locale English text wins, exactly
+    # like a no-i18n musl build). __lctrans.c is strerror.c's only locale dep;
+    # no other locale sources are pulled in. The mips EDQUOT==1133 remap guard
+    # in strerror.c is dead on x86-64 (EDQUOT==122), compiled to nothing.
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/errno/strerror.c
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/locale/__lctrans.c
     # __syscall (asm) + __syscall_ret (C): the two low-level syscall primitives
     # musl's thread code calls (src/thread/__futex.c → syscall(SYS_futex);
     # src/thread/__syscall_cp.c → __syscall; many src/env/*.c → __syscall_ret).
