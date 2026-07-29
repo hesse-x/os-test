@@ -133,6 +133,20 @@ cp "$SRC"/third_party/musl/include/strings.h "$DEST/strings.h"
 #     u_process.c) get the declaration here in the sysroot.
 cp "$SRC"/third_party/musl/include/libgen.h "$DEST/libgen.h"
 
+# 3f. musl socket headers. The repo's user/include/sys/socket.h was deleted
+#     when socket switched to musl — <sys/socket.h> now comes from musl both at
+#     build time (-I third_party/musl/include, MUSL_INCLUDE_FLAGS) and in the
+#     published sysroot. <sys/socket.h> pulls <features.h> (step 2) +
+#     <bits/alltypes.h> (step 2; defines struct iovec via __NEED_struct_iovec,
+#     which musl's socket.h sets) + <bits/socket.h> (musl arch/x86_64 — struct
+#     msghdr/cmsghdr, self-contained). <sys/un.h> pulls <features.h> +
+#     <bits/alltypes.h>. The published xos/socket.h user face forwards to
+#     <sys/socket.h> + <sys/un.h>, so both must ship here or its closure breaks.
+#     <sys/poll.h> stays the repo shim (includes <xos/socket.h> for pollfd).
+cp "$SRC"/third_party/musl/include/sys/socket.h     "$DEST/sys/socket.h"
+cp "$SRC"/third_party/musl/include/sys/un.h         "$DEST/sys/un.h"
+cp "$SRC"/third_party/musl/arch/x86_64/bits/socket.h "$DEST/bits/socket.h"
+
 # 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
 #    compiler's -isystem freestanding dir. The published sysroot must be usable
 #    with -nostdinc and NO -isystem (the Mesa milestone consumes it via -isysroot),

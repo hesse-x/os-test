@@ -517,12 +517,18 @@ int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
 
   int got_fd = -1;
   struct cmsghdr *cmsg;
+  // musl's CMSG_NXTHDR compares size_t against a signed pointer difference;
+  // silence the inherent -Wsign-compare under our -Werror gate (musl's own
+  // sources build with -Wno-all for the same reason).
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wsign-compare"
   for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
     if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
       memcpy(&got_fd, CMSG_DATA(cmsg), sizeof(int));
       break;
     }
   }
+#pragma clang diagnostic pop
   if (got_fd < 0) {
     close(sfd);
     return -EPROTO;

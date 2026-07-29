@@ -24,6 +24,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include <xos/input.h>
 #include <xos/input_key.h>

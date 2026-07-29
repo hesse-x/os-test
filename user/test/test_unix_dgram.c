@@ -30,6 +30,7 @@
 #include <sys/process.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <syscall.h>
 #include <time.h>
 #include <unistd.h>
 

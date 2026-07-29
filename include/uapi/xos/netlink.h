@@ -9,8 +9,10 @@
 
 #include <stdint.h>
 
-// ===================== Address family =====================
-#define AF_NETLINK 2
+// AF_NETLINK comes from <xos/socket.h> (kernel) / musl <sys/socket.h> (user),
+// both defining the Linux-standard value 16. Do not redefine here — musl's
+// AF_NETLINK expands to PF_NETLINK, a different token sequence, which would
+// trip -Werror on redefinition.
 
 // ===================== Netlink protocol / group =====================
 #define NETLINK_KOBJECT_UEVENT 1
@@ -46,7 +48,7 @@ typedef struct nlmsghdr {
 #include <xos/socket.h> // sa_family_t
 
 typedef struct sockaddr_nl {
-  sa_family_t nl_family; // AF_NETLINK = 2
+  sa_family_t nl_family; // AF_NETLINK = 16
   uint16_t nl_pad;       // 填充
   uint32_t nl_pid;       // 端口 ID（0 = 自动分配 PID）
   uint32_t nl_groups;    // 订阅的 group bitmask

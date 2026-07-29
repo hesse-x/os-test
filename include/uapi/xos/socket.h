@@ -7,6 +7,40 @@
 #ifndef COMMON_SOCKET_H
 #define COMMON_SOCKET_H
 
+/* musl's <sys/un.h> hardcodes sun_path[108] and does not export UNIX_PATH_MAX;
+ * define it up here so the kernel-side sockaddr_un below can use it. */
+#ifndef UNIX_PATH_MAX
+#define UNIX_PATH_MAX 108
+#endif
+
+/*
+ * Socket UAPI. Two faces, one source:
+ *
+ *  - User TUs (no __KERNEL__): forward to musl's <sys/socket.h>/<sys/un.h> for
+ *    sockaddr/msghdr/cmsghdr/iovec/socklen_t and the AF/SOCK/SO/MSG/SHUT/SOL/
+ *    CMSG/SCM constants, so the kernel UAPI header and the libc header never
+ *    define those twice in the same TU (musl's headers can't be edited to honor
+ *    our guards). musl/include + musl/arch/x86_64 are on the global user
+ *    include path via MUSL_INCLUDE_FLAGS (after user/include), so these resolve
+ *    to upstream musl directly — nothing of musl's is copied here.
+ *
+ *  - Kernel TUs (__KERNEL__): musl is not on the kernel include path, so this
+ *    header is self-contained for the socket types. Layouts/values are aligned
+ *    to musl's x86_64 definitions and locked by _Static_assert below — the
+ *    single source of truth that the two faces stay byte-compatible.
+ *
+ * pollfd, the POLL_xxx flags and nfds_t are NOT in musl's <sys/socket.h> (musl
+ * puts them in <poll.h>); they are xos UAPI, defined once in the common section
+ * below for both faces (the <sys/poll.h> shim and direct includers share this).
+ */
+
+#ifndef __KERNEL__
+
+#include <sys/socket.h>
+#include <sys/un.h>
+
+#else /* __KERNEL__ */
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -19,7 +53,7 @@ typedef uint16_t sa_family_t;
 
 // ===================== Address family =====================
 #define AF_UNIX 1
-#define AF_NETLINK 2
+#define AF_NETLINK 16
 #define AF_LOCAL AF_UNIX
 
 // ===================== Socket types =====================
@@ -40,19 +74,6 @@ typedef uint16_t sa_family_t;
 #define SHUT_WR 1
 #define SHUT_RDWR 2
 
-// ===================== Poll events =====================
-#define POLLIN 0x001
-#define POLLPRI 0x002
-#define POLLOUT 0x004
-#define POLLERR 0x008
-#define POLLHUP 0x010
-#define POLLNVAL 0x020
-#define POLLRDNORM 0x040
-#define POLLRDBAND 0x080
-#define POLLWRNORM 0x100
-#define POLLWRBAND 0x200
-#define POLLRDHUP 0x400
-
 // ===================== sockaddr (generic) =====================
 typedef struct sockaddr {
   sa_family_t sa_family; // address family (AF_UNIX = 1)
@@ -60,8 +81,6 @@ typedef struct sockaddr {
 } sockaddr;
 
 // ===================== sockaddr_un =====================
-#define UNIX_PATH_MAX 108
-
 typedef struct sockaddr_un {
   sa_family_t sun_family;       // AF_UNIX = 1
   char sun_path[UNIX_PATH_MAX]; // path or abstract (\0 prefix)
@@ -71,10 +90,8 @@ typedef struct sockaddr_un {
 // Guard with musl's __DEFINED_struct_iovec idiom: musl's
 // <fcntl.h>/<sys/socket.h> set __NEED_struct_iovec under _GNU_SOURCE (which
 // clang++ predefines for all C++ TUs), so musl's <bits/alltypes.h> also defines
-// struct iovec. If this header is included after musl's alltypes, skip our copy
-// (already defined); if before (kernel TUs have no musl alltypes), define it
-// and set the flag so a later musl alltypes skips. Either order yields exactly
-// one definition.
+// struct iovec. Kernel TUs have no musl alltypes, so define it here and set the
+// flag so a later musl alltypes (never, in-kernel) would skip.
 #if !defined(__DEFINED_struct_iovec)
 typedef struct iovec {
   void *iov_base; // buffer address
@@ -84,9 +101,13 @@ typedef struct iovec {
 #endif
 
 // ===================== cmsghdr / CMSG macros =====================
-// Linux UAPI compatible layout (cmsg_len is socklen_t = uint32_t on x86-64)
+// musl arch/x86_64 layout: cmsg_len + __pad1 + cmsg_level + cmsg_type (16 B).
+// recvmsg writes this struct straight into the user control buffer for
+// SCM_RIGHTS (kernel/bsd/socket.c), so the field offsets MUST match what
+// musl's user-side CMSG_* macros assume.
 typedef struct cmsghdr {
   uint32_t cmsg_len; // data byte count including header (socklen_t)
+  int __pad1;        // padding (matches musl/glibc x86-64 cmsghdr)
   int cmsg_level;    // originating protocol
   int cmsg_type;     // protocol-specific type
                      // followed by unsigned char cmsg_data[];
@@ -107,7 +128,9 @@ typedef struct cmsghdr {
 #define CMSG_SPACE(len) (CMSG_ALIGN(sizeof(struct cmsghdr)) + CMSG_ALIGN(len))
 
 // ===================== msghdr =====================
-// Linux UAPI x86-64 exact layout
+// Byte-compatible with musl arch/x86_64 msghdr: the size_t msg_iovlen and
+// msg_controllen slots coincide with musl's (int + __pad) on little-endian
+// (value in the low 4 bytes). _Static_assert below pins the offsets/size.
 typedef struct msghdr {
   void *msg_name;        // optional address
   uint32_t msg_namelen;  // 4-byte
@@ -119,24 +142,15 @@ typedef struct msghdr {
   int msg_flags;         // flags on received message
 } msghdr;
 
-// ===================== pollfd =====================
-typedef unsigned long nfds_t;
-
-typedef struct pollfd {
-  int fd;        // fd to poll
-  short events;  // requested events
-  short revents; // returned events
-} pollfd;
-
 // ===================== Flags for sendmsg/recvmsg =====================
-#define MSG_EOR 0x80        // end of record
-#define MSG_TRUNC 0x20      // data truncated
-#define MSG_CTRUNC 0x08     // control data truncated
-#define MSG_OOB 0x01        // out-of-band data
-#define MSG_DONTWAIT 0x40   // nonblocking
-#define MSG_PEEK 0x02       // peek without consuming
-#define MSG_WAITALL 0x100   // block until full request is satisfied
-#define MSG_NOSIGNAL 0x4000 // don't raise SIGPIPE on EPIPE
+#define MSG_EOR 0x80                // end of record
+#define MSG_TRUNC 0x20              // data truncated
+#define MSG_CTRUNC 0x08             // control data truncated
+#define MSG_OOB 0x01                // out-of-band data
+#define MSG_DONTWAIT 0x40           // nonblocking
+#define MSG_PEEK 0x02               // peek without consuming
+#define MSG_WAITALL 0x100           // block until full request is satisfied
+#define MSG_NOSIGNAL 0x4000         // don't raise SIGPIPE on EPIPE
 // Defined for UAPI completeness; not yet implemented (see doc/design/todo.md).
 #define MSG_ERRQUEUE 0x2000         // socket error queue (no infra)
 #define MSG_PROBE 0x10              // probe connection without sending
@@ -171,8 +185,81 @@ typedef struct pollfd {
 // ===================== socklen_t =====================
 typedef uint32_t socklen_t;
 
-// ===================== SCM_RIGHTS fd count limit =====================
+#ifdef __cplusplus
+}
+#endif
+
+// ===================== Layout/value parity with musl x86_64 (static assert)
+// ===================== Single source of truth that the kernel self-contained
+// definitions above stay byte-compatible with musl's
+// <sys/socket.h>/<bits/socket.h> on x86-64. If any constant or field offset
+// drifts away from the Linux/musl standard, the kernel build fails here.
+_Static_assert(AF_UNIX == 1 && AF_NETLINK == 16 && AF_LOCAL == 1,
+               "xos AF_* must match musl/Linux");
+_Static_assert(SOCK_STREAM == 1 && SOCK_DGRAM == 2 && SOCK_SEQPACKET == 5 &&
+                   SOCK_CLOEXEC == 02000000 && SOCK_NONBLOCK == 04000,
+               "xos SOCK_* must match musl/Linux");
+_Static_assert(SOL_SOCKET == 1 && SCM_RIGHTS == 1,
+               "xos SOL_SOCKET/SCM_RIGHTS must match musl/Linux");
+_Static_assert(SHUT_RD == 0 && SHUT_WR == 1 && SHUT_RDWR == 2,
+               "xos SHUT_* must match musl/Linux");
+_Static_assert(offsetof(msghdr, msg_iovlen) == 24,
+               "msghdr.msg_iovlen offset must match musl x86_64");
+_Static_assert(offsetof(msghdr, msg_control) == 32,
+               "msghdr.msg_control offset must match musl x86_64");
+_Static_assert(offsetof(msghdr, msg_controllen) == 40,
+               "msghdr.msg_controllen offset must match musl x86_64");
+_Static_assert(offsetof(msghdr, msg_flags) == 48,
+               "msghdr.msg_flags offset must match musl x86_64");
+_Static_assert(sizeof(msghdr) == 56, "msghdr size must match musl x86_64 (56)");
+_Static_assert(offsetof(cmsghdr, cmsg_level) == 8,
+               "cmsghdr.cmsg_level offset must match musl x86_64 (8)");
+_Static_assert(offsetof(cmsghdr, cmsg_type) == 12,
+               "cmsghdr.cmsg_type offset must match musl x86_64 (12)");
+_Static_assert(sizeof(cmsghdr) == 16,
+               "cmsghdr size must match musl x86_64 (16)");
+
+#endif /* __KERNEL__ */
+
+// ===================== pollfd / POLL flags (common: xos UAPI, not in musl
+// socket.h) =====================
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// musl's <sys/socket.h> does not define pollfd, the POLL_xxx flags, or nfds_t
+// (they live in musl <poll.h>); define them here so <sys/poll.h> and direct
+// <xos/socket.h> includers see them in both faces without pulling musl
+// <poll.h> (which would need <bits/poll.h> plumbing). Guard against a prior
+// musl <poll.h>.
+#ifndef __DEFINED_pollfd
+typedef unsigned long nfds_t;
+typedef struct pollfd {
+  int fd;        // fd to poll
+  short events;  // requested events
+  short revents; // returned events
+} pollfd;
+#define __DEFINED_pollfd
+#endif
+
+#ifndef POLLIN
+#define POLLIN 0x001
+#define POLLPRI 0x002
+#define POLLOUT 0x004
+#define POLLERR 0x008
+#define POLLHUP 0x010
+#define POLLNVAL 0x020
+#define POLLRDNORM 0x040
+#define POLLRDBAND 0x080
+#define POLLWRNORM 0x100
+#define POLLWRBAND 0x200
+#define POLLRDHUP 0x400
+#endif
+
+// Kernel-private SCM_RIGHTS fd cap; not in musl.
+#ifndef SCM_MAX_FD
 #define SCM_MAX_FD 8
+#endif
 
 #ifdef __cplusplus
 }
