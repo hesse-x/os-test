@@ -29,13 +29,21 @@ global:
     mkstemp; mktemp; realpath;
     arc4random_buf; arc4random_uniform;
 
-    /* <string.h> */
+    /* <string.h> — musl upstream (src/string/* + x86_64 asm memcpy/memmove/memset
+     * + src/misc basename). The extension symbols musl compiles but we do NOT
+     * list here (stpcpy/stpncpy/memrchr/strsep/strlcpy/strlcat/memccpy/mempcpy/
+     * strchrnul/strcasestr/strverscmp/ffsl/ffsll/swab) are intentionally
+     * unexported — `local: *;` hides them from the dynsym. strcoll/strxfrm/
+     * strcoll_l/strxfrm_l/strcasecmp_l/strncasecmp_l are declared by musl's
+     * <string.h>/<strings.h> but have NO implementation yet (src/locale/, not
+     * compiled); 0 callers — deferred to the locale tier. */
     bzero; bcmp; bcopy; index; rindex; memcmp; memcpy; memmove; memset;
     memchr; memmem; strcat; strchr; strcmp; strcpy; strcspn; strdup;
     strerror; strerror_r; strerror_l; strlen; strncat; strncmp; strncpy; strndup;
     strpbrk; strrchr; strspn; strstr; strtok; strtok_r;
     strverscmp;
     basename;
+    dirname;
 
     /* <strings.h> */
     ffs; strcasecmp; strncasecmp;

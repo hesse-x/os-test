@@ -34,8 +34,26 @@ expected=$(awk '
     /^[[:space:]]*global:[[:space:]]*$/ {ing=1; next}
     /^[[:space:]]*local:[[:space:]]*$/  {ing=0; next}
     !ing {next}
-    # Strip inline /* */ comments
-    {line=$0; sub(/\/\*.*\*\//,"",line); print line}
+    # Strip /* */ comments that may span multiple lines. While inside a comment,
+    # swallow lines until the closing */; on the opening line, drop from /* to EOL
+    # if there is no closing */ on that same line (symbols before the /* survive).
+    incomment {
+        if (match($0, /\*\//)) { $0 = substr($0, RSTART+RLENGTH); incomment=0 }
+        else { next }
+    }
+    {
+        line=$0
+        while (match(line, /\/\*/)) {
+            before = substr(line, 1, RSTART-1)
+            rest   = substr(line, RSTART+2)
+            if (match(rest, /\*\//)) {
+                line = before substr(rest, RSTART+2+RLENGTH)
+            } else {
+                line = before; incomment=1; break
+            }
+        }
+        print line
+    }
 ' "$map" | tr ';' '\n' \
     | sed -e 's/[{}*]//g' -e 's/[[:space:]]//g' \
     | grep -vE '^(|global|local)$' \

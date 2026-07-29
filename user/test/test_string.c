@@ -5,6 +5,7 @@
  */
 
 #include <alloca.h>
+#include <libgen.h>
 #include <string.h>
 #include <unity.h>
 
@@ -109,17 +110,19 @@ void test_basename_with_slash(void) {
   TEST_ASSERT_EQUAL_STRING("libfoo.so", basename(buf));
 }
 
-/* 17. basename: root path → empty string */
+/* 17. basename: root path → "/" (POSIX: trailing slash stripped, only "/"
+ *      remains so the result is "/" itself, not "") */
 void test_basename_root(void) {
   char buf[] = "/";
-  TEST_ASSERT_EQUAL_STRING("", basename(buf));
+  TEST_ASSERT_EQUAL_STRING("/", basename(buf));
 }
 
-/* 18. basename: trailing slash stripped by strrchr semantics */
+/* 18. basename: trailing slash stripped (POSIX basename peels trailing slashes
+ *      then returns the last component) */
 void test_basename_trailing_slash(void) {
   char buf[] = "/usr/bin/";
-  /* strrchr finds last '/', returns pointer to it; +1 → empty string */
-  TEST_ASSERT_EQUAL_STRING("", basename(buf));
+  /* trailing '/' peeled → "/usr/bin" → last component "bin" */
+  TEST_ASSERT_EQUAL_STRING("bin", basename(buf));
 }
 
 /* 19. alloca: stack allocation, usable like malloc */

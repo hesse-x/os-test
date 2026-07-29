@@ -113,6 +113,26 @@ cp "$SRC"/third_party/musl/include/signal.h     "$DEST/signal.h"
 cp "$SRC"/third_party/musl/include/sched.h      "$DEST/sched.h"
 cp "$SRC"/third_party/musl/arch/x86_64/bits/signal.h "$DEST/bits/signal.h"
 
+# 3d. musl string/strings headers. The repo's user/include/string.h, strings.h
+#     were deleted when string switched to musl (string.md) — these now come
+#     from musl. <string.h> pulls <features.h> (repo's own, step 2) + <bits/
+#     alltypes.h> (step 2; defines locale_t via __NEED_locale_t at 425-427);
+#     under _BSD_SOURCE/_GNU_SOURCE it auto-#includes <strings.h>. <strings.h>
+#     pulls <bits/alltypes.h> (locale_t again). Both closures resolve within
+#     the sysroot (verified by the per-header self-check below). basename is
+#     declared only under _GNU_SOURCE in <string.h>; consumers that don't
+#     define it get it from <libgen.h> (published in step 3e).
+cp "$SRC"/third_party/musl/include/string.h  "$DEST/string.h"
+cp "$SRC"/third_party/musl/include/strings.h "$DEST/strings.h"
+
+# 3e. musl libgen.h. The repo's user/include/libgen.h was deleted when libgen
+#     switched to musl (declares basename only; basename.c+dirname.c are in
+#     src/misc/, compiled via musl_string_objs). musl's libgen.h declares both
+#     basename and dirname — both now have implementations — so publish it
+#     verbatim. Consumers (libdrm xf86drm.c, libinput util-files.h, Mesa
+#     u_process.c) get the declaration here in the sysroot.
+cp "$SRC"/third_party/musl/include/libgen.h "$DEST/libgen.h"
+
 # 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
 #    compiler's -isystem freestanding dir. The published sysroot must be usable
 #    with -nostdinc and NO -isystem (the Mesa milestone consumes it via -isysroot),

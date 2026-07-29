@@ -18,13 +18,6 @@
 
 enum { MUSL_NAME_MAX = 255 };
 
-LIBC_EXPORT size_t strnlen(const char *s, size_t maxlen) {
-  size_t len = 0;
-  while (len < maxlen && s[len])
-    len++;
-  return len;
-}
-
 LIBC_EXPORT int prctl(int option, ...) {
   va_list ap;
   va_start(ap, option);

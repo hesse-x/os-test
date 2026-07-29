@@ -102,11 +102,11 @@ user/lib/stdio.cc : open_memstream / memstream_write_fn
 | 头文件 | 内容 | 备注 |
 |--------|------|------|
 | `alloca.h` | `alloca(sz)` → `__builtin_alloca(sz)` | 纯宏 |
-| `libgen.h` | `basename(char *path)` 声明 | glibc 语义（返回内部指针，不修改入参） |
+| `libgen.h` | `basename(char *path)` 声明 | POSIX 语义（musl `src/misc/basename.c`，可能修改入参：截断尾部 `/`） |
 | `sys/time.h` | `#include <xos/time.h>` | 最小集：提供 `struct timeval`/`time_t`；`gettimeofday` 等留待按需补 |
 | `sys/param.h` | `PAGE_SIZE`（来自 `arch/x64/memlayout.h`）/ `PAGESIZE` / `MIN` / `MAX` | `PAGE_SIZE` 为架构相关常量，不硬编码 |
 
-`basename` 实现在 user/lib/string.cc：`strrchr(path, '/') + 1`，无 `/` 返回原指针。等价 glibc `_GNU_SOURCE` 版，libdrm 调用安全。
+`basename` 由 musl `src/misc/basename.c` 提供，随 `musl_string_objs` 一并编入 libc（详见 `string.md`）；POSIX 语义，会截断尾部 `/`（写入 `\0`），故不可对只读字面量调用。`__xpg_basename` 为其 weak alias。
 
 `getpagesize` 实现在 user/lib/unistd.cc：返回 4096（x86-64）。
 

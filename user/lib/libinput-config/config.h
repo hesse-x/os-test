@@ -35,6 +35,15 @@
 
 #define HTTP_DOC_LINK "https://wayland.freedesktop.org/libinput/doc/1.30.4"
 
+/* HAVE_VERSIONSORT: this libc provides strverscmp/versionsort (musl
+ * src/string/strverscmp.c, merged into libc.a). libinput's
+ * libinput-versionsort.h #ifndef-guards a static-inline strverscmp fallback;
+ * under _GNU_SOURCE musl's <string.h> also declares strverscmp (non-static),
+ * so without this the static definition clashes ("static declaration follows
+ * non-static declaration"). Defining HAVE_VERSIONSORT skips libinput's
+ * fallback — mirroring libinput's own meson feature-probe (meson.build:116). */
+#define HAVE_VERSIONSORT 1
+
 #undef HAVE_LIBWACOM
 #undef HAVE_LUA
 #undef HAVE_MTDEV

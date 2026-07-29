@@ -12,7 +12,7 @@
 # src/errno/__errno_location.c (reads musl struct pthread at %fs:0). musl_glue.c
 # provides the hidden internal aliases musl pthread calls.
 set(LIBC_SOURCES
-    lib/stdio.cc lib/string.cc lib/malloc.cc
+    lib/stdio.cc lib/malloc.cc
     lib/unistd.cc lib/time.cc lib/file.cc
     lib/ctype.c lib/strtol.c lib/stdlib_misc.c lib/uname.c
     lib/assert.c lib/signal.cc lib/getrandom.c
@@ -361,9 +361,10 @@ target_compile_options(musl_dl_objs_so PRIVATE
 #
 # alphasort.c is intentionally EXCLUDED (dirent.md §4a): it calls strcoll, which
 # drags in the locale chain — not worth it for a newly-added API no in-tree
-# consumer uses. versionsort.c IS included; its only dep strverscmp.c
-# (src/string/, no locale) is pulled in below. user/include/dirent.h does not
-# declare alphasort.
+# consumer uses. versionsort.c IS included; its only dep strverscmp is now
+# supplied by the musl_string_objs glob (src/string/*.c, see string.md) — no
+# separate strverscmp.c here, or both tiers multi-define strverscmp.
+# user/include/dirent.h does not declare alphasort.
 set(MUSL_DIRENT_SOURCES
     ${MUSL_DIR}/src/dirent/opendir.c
     ${MUSL_DIR}/src/dirent/readdir.c
@@ -376,8 +377,7 @@ set(MUSL_DIRENT_SOURCES
     ${MUSL_DIR}/src/dirent/scandir.c
     ${MUSL_DIR}/src/dirent/__getdents.c
     ${MUSL_DIR}/src/dirent/fdopendir.c
-    ${MUSL_DIR}/src/dirent/versionsort.c
-    ${MUSL_DIR}/src/string/strverscmp.c)   # versionsort's only dependency
+    ${MUSL_DIR}/src/dirent/versionsort.c)
 
 add_library(musl_dirent_objs OBJECT ${MUSL_DIRENT_SOURCES})
 target_include_directories(musl_dirent_objs PRIVATE
@@ -520,6 +520,65 @@ set(MUSL_PTHREAD_SOURCES
 )
 add_musl_lib(musl_pthread SOURCES ${MUSL_PTHREAD_SOURCES})
 
+# ===================== musl string integration (string.md) =====================
+# Build the upstream musl src/string/*.c into libc, replacing hand-written
+# user/lib/string.cc. Pure-compute module (zero syscall dependency) — the
+# "compile-through" tier in libc_worklist §A and a prerequisite for the wchar/
+# locale tiers. Benefits: x86_64 rep movsq/stosq asm memcpy/memmove/memset
+# (vs hand-written byte loops), canonical strerror/strerror_r, and the full
+# POSIX/GNU extension set (stpcpy/stpncpy/strlcpy/strlcat/strsep/memccpy/
+# mempcpy/memrchr/strchrnul/strcasestr/strnlen/strverscmp/swab/ffsl/ffsll/...).
+#
+# src/string/*.c is one-function-per-file. The x86_64/{memcpy,memmove,memset}.s
+# asm versions REPLACE the C ones — compiling both would multi-define those
+# three symbols (the .c and .s each define memcpy/memmove/memset), so the .c
+# trio is dropped from the glob (same pattern as MUSL_THREAD_SOURCES drops the
+# .c that have a .s twin). strerror/strsignal route messages through LCTRANS/
+# CURRENT_LOCALE, but strerror.c + __lctrans.c are ALREADY compiled into
+# musl_pthread (commit 3902dfc moved strerror there) — they are NOT re-added
+# here to avoid a duplicate-definition clash. strsignal.c is excluded too:
+# 0 callers, and its locale mechanism (__lctrans/__lctrans_cur) is already
+# pulled in by strerror in musl_pthread. strcoll/strxfrm/strerror_l/strcoll_l/
+# strxfrm_l/strcasecmp_l/strncasecmp_l live in src/locale/ and need the full
+# locale subsystem — not compiled, so musl <string.h> declares them with no
+# implementation (0 callers; deferred to the locale tier). Wide-character
+# wcs*/wmem* (and wcpcpy/wcpncpy) are excluded — they belong to the wchar tier.
+file(GLOB MUSL_STRING_SOURCES ${MUSL_DIR}/src/string/*.c)
+list(REMOVE_ITEM MUSL_STRING_SOURCES
+    # C versions superseded by the x86_64 .s asm below — keep them out or the
+    # link multi-defines memcpy/memmove/memset.
+    ${MUSL_DIR}/src/string/memcpy.c
+    ${MUSL_DIR}/src/string/memmove.c
+    ${MUSL_DIR}/src/string/memset.c
+    # 0 callers; locale machinery already introduced by strerror in musl_pthread.
+    ${MUSL_DIR}/src/string/strsignal.c
+    # Wide-character set — deferred to the wchar migration tier (not this batch).
+    ${MUSL_DIR}/src/string/wcpcpy.c
+    ${MUSL_DIR}/src/string/wcpncpy.c)
+# Drop the remaining wcs*/wmem* files caught by the glob (GLOB can't express
+# the prefix wildcard inside REMOVE_ITEM reliably, so filter by filename).
+foreach(_src ${MUSL_STRING_SOURCES})
+    get_filename_component(_name ${_src} NAME)
+    if(_src MATCHES "/(wcs|wmem)" OR _name MATCHES "^(wcs|wmem)")
+        list(REMOVE_ITEM MUSL_STRING_SOURCES ${_src})
+    endif()
+endforeach()
+list(APPEND MUSL_STRING_SOURCES
+    ${MUSL_DIR}/src/string/x86_64/memcpy.s
+    ${MUSL_DIR}/src/string/x86_64/memmove.s
+    ${MUSL_DIR}/src/string/x86_64/memset.s
+    # ffs/ffsl/ffsll are in src/misc/ (declared in <strings.h>); basename +
+    # dirname are in src/misc/ (POSIX libgen.h, replacing the hand-written
+    # strrchr+1 basename in the deleted user/lib/string.cc). dirname is pulled
+    # in alongside basename so musl's libgen.h (which declares both) links
+    # cleanly — libinput util-files.h calls dirname().
+    ${MUSL_DIR}/src/misc/ffs.c
+    ${MUSL_DIR}/src/misc/ffsl.c
+    ${MUSL_DIR}/src/misc/ffsll.c
+    ${MUSL_DIR}/src/misc/basename.c
+    ${MUSL_DIR}/src/misc/dirname.c)
+add_musl_lib(musl_string_objs SOURCES ${MUSL_STRING_SOURCES})
+
 # libc.a (static, -fno-pie -DDYNAMIC=0)
 # IMAGE_PATH usr/lib/libc.a: ship the static libc.a into the root FS (STATIC has
 # no auto-default). IMAGE_ARTIFACT libc.a overrides the default lib<c>.a build name.
@@ -537,6 +596,7 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_socket_objs>
                $<TARGET_OBJECTS:musl_dl_objs> $<TARGET_OBJECTS:musl_dirent_objs>
                $<TARGET_OBJECTS:musl_pthread>
+               $<TARGET_OBJECTS:musl_string_objs>
     C
     FLAGS "-fno-pie -DDYNAMIC=0"
     IMAGE_PATH usr/lib/libc.a
@@ -564,6 +624,7 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_socket_objs_so>
                $<TARGET_OBJECTS:musl_dl_objs_so> $<TARGET_OBJECTS:musl_dirent_objs_so>
                $<TARGET_OBJECTS:musl_loader_objs> $<TARGET_OBJECTS:musl_pthread>
+               $<TARGET_OBJECTS:musl_string_objs>
     C
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED
@@ -697,7 +758,7 @@ set(LIBINPUT_SOURCES
 # these must be suppressed explicitly per-target. -Wno-unknown-warning-option
 # lets the same list pass under gcc (which doesn't know the clang-only entries).
 set(LIBINPUT_WARN_FLAGS
-    "-Wno-unused-parameter -Wno-duplicate-decl-specifier -Wno-implicit-function-declaration -Wno-return-type -Wno-int-conversion -Wno-format -Wno-implicit-fallthrough -Wno-sign-compare -Wno-error=cpp -Wno-maybe-uninitialized -Wno-sometimes-uninitialized -Wno-unknown-warning-option")
+    "-Wno-unused-parameter -Wno-duplicate-decl-specifier -Wno-implicit-function-declaration -Wno-return-type -Wno-int-conversion -Wno-format -Wno-implicit-fallthrough -Wno-sign-compare -Wno-error=cpp -Wno-maybe-uninitialized -Wno-sometimes-uninitialized -Wno-unknown-warning-option -Wno-deprecated-non-prototype")
 
 add_user_lib(input
     SOURCES ${LIBINPUT_SOURCES}
@@ -881,7 +942,7 @@ add_drm_lib(drm C SOURCES ${LIBDRM_SOURCES}
                          ${CMAKE_BINARY_DIR}
             INTERFACE_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/drm/include/drm
                                    ${CMAKE_SOURCE_DIR}/third_party/drm
-            FLAGS "-Wno-unused-parameter -Wno-format -D__linux__ -include ${CMAKE_BINARY_DIR}/libdrm_config.h")
+            FLAGS "-Wno-unused-parameter -Wno-format -D__linux__ -include ${CMAKE_BINARY_DIR}/libdrm_config.h -Wno-unknown-warning-option -Wno-deprecated-non-prototype")
 # ensure generated_static_table_fourcc.h exists before libdrm sources compile
 add_dependencies(drm libdrm_fourcc_table)
 
