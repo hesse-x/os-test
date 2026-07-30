@@ -537,43 +537,20 @@ list(REMOVE_ITEM MUSL_STDIO_SOURCES
     # Every loader call site runs AFTER reloc_all(&ldso) (dynlink.c:1432), so
     # the loader's own PLT is already relocated when vfprintf's PLT is reached.
     # musl_loader_shim.c no longer provides a boot-safe pair.
-    # --- wide-char stdio (23 w* files) — EXCLUDED (no consumer + runtime reloc cost)
-    # vfwprintf/vfwscanf/fgetwc/fputwc/fputws/fgetws/ungetwc/fwide/fwprintf/fwscanf/
-    # wprintf/wscanf/swprintf/swscanf/vwprintf/vwscanf/vswprintf/vswscanf/getwc/getwchar/
-    # putwc/putwchar/open_wmemstream. These reference iswspace/iswdigit (wide ctype,
-    # src/ctype/isw*.c), wcsnlen (src/string), btowc/wctob (src/multibyte), and the
-    # C-locale objects __c_locale/__c_dot_utf8_locale (src/locale/c_locale.c) — none of
-    # which this OS compiles into libc. With them included, libc.so links (the symbols
-    # are just UND) but the dynamic loader fails at runtime: "Error relocating
-    # /lib/ld-musl-x86_64.so.1: iswspace: symbol not found" (and wcsnlen/iswdigit/
-    # __c_locale/__c_dot_utf8_locale). This OS has NO wide-char stdio consumer and does
-    # NOT publish <wchar.h> (where the w* decls live), so excluding them loses nothing
-    # and keeps the ABI/locale/ctype dependency chain out of libc. If wide-char stdio is
-    # ever needed: publish <wchar.h>, add a libc.map <wchar.h> block, and compile
-    # src/ctype/isw*.c + src/string/wcsnlen.c + src/locale/c_locale.c + btowc/wctob.
-    ${MUSL_DIR}/src/stdio/fgetwc.c
-    ${MUSL_DIR}/src/stdio/fgetws.c
-    ${MUSL_DIR}/src/stdio/fputwc.c
-    ${MUSL_DIR}/src/stdio/fputws.c
-    ${MUSL_DIR}/src/stdio/fwide.c
-    ${MUSL_DIR}/src/stdio/fwprintf.c
-    ${MUSL_DIR}/src/stdio/fwscanf.c
-    ${MUSL_DIR}/src/stdio/getwc.c
-    ${MUSL_DIR}/src/stdio/getwchar.c
-    ${MUSL_DIR}/src/stdio/open_wmemstream.c
-    ${MUSL_DIR}/src/stdio/putwc.c
-    ${MUSL_DIR}/src/stdio/putwchar.c
-    ${MUSL_DIR}/src/stdio/swprintf.c
-    ${MUSL_DIR}/src/stdio/swscanf.c
-    ${MUSL_DIR}/src/stdio/ungetwc.c
-    ${MUSL_DIR}/src/stdio/vfwprintf.c
-    ${MUSL_DIR}/src/stdio/vfwscanf.c
-    ${MUSL_DIR}/src/stdio/vswprintf.c
-    ${MUSL_DIR}/src/stdio/vswscanf.c
-    ${MUSL_DIR}/src/stdio/vwprintf.c
-    ${MUSL_DIR}/src/stdio/vwscanf.c
-    ${MUSL_DIR}/src/stdio/wprintf.c
-    ${MUSL_DIR}/src/stdio/wscanf.c)
+    # --- wide-char stdio (23 w* files) — INCLUDED. vfwprintf/vfwscanf/fgetwc/
+    # fputwc/fputws/fgetws/ungetwc/fwide/fwprintf/fwscanf/wprintf/wscanf/swprintf/
+    # swscanf/vwprintf/vwscanf/vswprintf/vswscanf/getwc/getwchar/putwc/putwchar/
+    # open_wmemstream. These were once excluded because they referenced isw*/
+    # wcsnlen/btowc/wctob + __c_locale/__c_dot_utf8_locale, none of which were
+    # compiled — the dynamic loader failed with "iswspace: symbol not found".
+    # All those deps are now satisfied: musl_wchar_objs provides isw*/wcsnlen/
+    # btowc/wctob, and __c_locale/__c_dot_utf8_locale ship in musl_time_objs
+    # (src/locale/c_locale.c). <wchar.h> (where the w* decls live) is now
+    # published, so including these makes the wide-stdio family genuinely
+    # usable, not declare-only. libc.map exports them under <wchar.h>. Their
+    # engine helpers (__fgetwc_unlocked/__fputwc_unlocked/__fwritex/...) come
+    # from these same files or musl_stdio_objs — no new hidden deps.
+    )
 add_musl_lib(musl_stdio_objs SOURCES ${MUSL_STDIO_SOURCES})
 
 # ===================== musl multibyte subset (narrow stdio %ls/%lc only) ====================
@@ -600,6 +577,94 @@ add_musl_lib(musl_multibyte_objs SOURCES
     ${MUSL_DIR}/src/multibyte/mbrtowc.c
     ${MUSL_DIR}/src/multibyte/mbsinit.c
     ${MUSL_DIR}/src/multibyte/internal.c)
+
+# ============== musl wchar/wctype/uchar integration (wchar tier) ==============
+# Single -fPIC OBJECT lib (add_musl_lib) feeds BOTH libc.a + libc.so (one compile
+# serves both, same as musl_string_objs/musl_stdlib_objs). Publishes <wchar.h>/
+# <wctype.h>/<uchar.h> with zero in-tree consumers — pure additive ABI, no
+# regression surface. DEFERRED:
+#   wide-char stdio (23 w* files) — kept excluded in musl_stdio_objs (no consumer);
+#   wcscoll/wcsxfrm (+_l) — need src/locale (not built), declare-only (libc.map
+#   does not list, not compiled, 0 callers), same treatment as strcoll/strxfrm.
+# internal.c/wctomb.c/wcrtomb.c/mbrtowc.c/mbsinit.c are NOT re-listed here (in
+# musl_multibyte_objs) — recompiling would multi-define bittab/wcrtomb/mbrtowc/
+# mbsinit/wctomb. Narrow ctype (isalnum/tolower/...) stays in user/lib/ctype.c
+# (libc.map already exports) — NOT compiled here.
+add_musl_lib(musl_wchar_objs SOURCES
+    # <uchar.h>: 4 thin wrappers, built on wcrtomb/mbrtowc (in musl_multibyte_objs)
+    ${MUSL_DIR}/src/multibyte/c16rtomb.c
+    ${MUSL_DIR}/src/multibyte/mbrtoc16.c
+    ${MUSL_DIR}/src/multibyte/c32rtomb.c
+    ${MUSL_DIR}/src/multibyte/mbrtoc32.c
+    # <wctype.h>: isw* classification + iswctype/wctype/towctrans/wctrans/towupper/towlower + _l
+    ${MUSL_DIR}/src/ctype/iswalnum.c
+    ${MUSL_DIR}/src/ctype/iswalpha.c
+    ${MUSL_DIR}/src/ctype/iswblank.c
+    ${MUSL_DIR}/src/ctype/iswcntrl.c
+    ${MUSL_DIR}/src/ctype/iswdigit.c
+    ${MUSL_DIR}/src/ctype/iswgraph.c
+    ${MUSL_DIR}/src/ctype/iswlower.c
+    ${MUSL_DIR}/src/ctype/iswprint.c
+    ${MUSL_DIR}/src/ctype/iswpunct.c
+    ${MUSL_DIR}/src/ctype/iswspace.c
+    ${MUSL_DIR}/src/ctype/iswupper.c
+    ${MUSL_DIR}/src/ctype/iswxdigit.c
+    ${MUSL_DIR}/src/ctype/iswctype.c
+    ${MUSL_DIR}/src/ctype/wctrans.c
+    ${MUSL_DIR}/src/ctype/towctrans.c
+    ${MUSL_DIR}/src/ctype/wcwidth.c
+    ${MUSL_DIR}/src/ctype/wcswidth.c
+    # <wchar.h> wcs*/wmem* string set (musl_string_objs still excludes them; built
+    # separately here to avoid disturbing the stable string block)
+    ${MUSL_DIR}/src/string/wcscpy.c
+    ${MUSL_DIR}/src/string/wcsncpy.c
+    ${MUSL_DIR}/src/string/wcscat.c
+    ${MUSL_DIR}/src/string/wcsncat.c
+    ${MUSL_DIR}/src/string/wcscmp.c
+    ${MUSL_DIR}/src/string/wcsncmp.c
+    ${MUSL_DIR}/src/string/wcschr.c
+    ${MUSL_DIR}/src/string/wcsrchr.c
+    ${MUSL_DIR}/src/string/wcscspn.c
+    ${MUSL_DIR}/src/string/wcsspn.c
+    ${MUSL_DIR}/src/string/wcspbrk.c
+    ${MUSL_DIR}/src/string/wcstok.c
+    ${MUSL_DIR}/src/string/wcslen.c
+    ${MUSL_DIR}/src/string/wcsnlen.c
+    ${MUSL_DIR}/src/string/wcsstr.c
+    ${MUSL_DIR}/src/string/wcswcs.c
+    ${MUSL_DIR}/src/string/wcscasecmp.c
+    ${MUSL_DIR}/src/string/wcsncasecmp.c
+    ${MUSL_DIR}/src/string/wcscasecmp_l.c
+    ${MUSL_DIR}/src/string/wcsncasecmp_l.c
+    ${MUSL_DIR}/src/string/wcsdup.c
+    ${MUSL_DIR}/src/string/wcpcpy.c
+    ${MUSL_DIR}/src/string/wcpncpy.c
+    ${MUSL_DIR}/src/string/wmemchr.c
+    ${MUSL_DIR}/src/string/wmemcmp.c
+    ${MUSL_DIR}/src/string/wmemcpy.c
+    ${MUSL_DIR}/src/string/wmemmove.c
+    ${MUSL_DIR}/src/string/wmemset.c
+    # <wchar.h> remaining multibyte (wctomb/wcrtomb/mbrtowc/mbsinit/internal already
+    # in musl_multibyte_objs, not re-listed)
+    ${MUSL_DIR}/src/multibyte/btowc.c
+    ${MUSL_DIR}/src/multibyte/wctob.c
+    ${MUSL_DIR}/src/multibyte/mblen.c
+    ${MUSL_DIR}/src/multibyte/mbrlen.c
+    ${MUSL_DIR}/src/multibyte/mbstowcs.c
+    ${MUSL_DIR}/src/multibyte/wcstombs.c
+    ${MUSL_DIR}/src/multibyte/mbsrtowcs.c
+    ${MUSL_DIR}/src/multibyte/wcsrtombs.c
+    ${MUSL_DIR}/src/multibyte/mbsnrtowcs.c
+    ${MUSL_DIR}/src/multibyte/wcsnrtombs.c
+    ${MUSL_DIR}/src/multibyte/mbtowc.c
+    # <wchar.h> wide numeric conversion (__intscan/__floatscan/shlim/shcnt from
+    # musl_stdlib_objs resolve via the merged libc.a/libc.so; wcstol.c derefs
+    # struct _IO_FILE fields, resolved by src/internal/stdio_impl.h ahead in path)
+    ${MUSL_DIR}/src/stdlib/wcstol.c
+    ${MUSL_DIR}/src/stdlib/wcstod.c
+    # <wchar.h> wcsftime (time machinery from musl_time_objs; see todo.md for the
+    # __strftime_fmt_1 signature-mismatch upstream bug — compiled verbatim)
+    ${MUSL_DIR}/src/time/wcsftime.c)
 
 # ===================== musl pthread integration (pthread.md §八) =====================
 # Generate musl's build-time headers (bits/alltypes.h + bits/syscall.h) into
@@ -743,7 +808,8 @@ add_musl_lib(musl_pthread SOURCES ${MUSL_PTHREAD_SOURCES})
 # strxfrm_l/strcasecmp_l/strncasecmp_l live in src/locale/ and need the full
 # locale subsystem — not compiled, so musl <string.h> declares them with no
 # implementation (0 callers; deferred to the locale tier). Wide-character
-# wcs*/wmem* (and wcpcpy/wcpncpy) are excluded — they belong to the wchar tier.
+# wcs*/wmem* (and wcpcpy/wcpncpy) are excluded here — built in musl_wchar_objs
+# (wchar tier). See the musl_wchar_objs block above for the full set.
 file(GLOB MUSL_STRING_SOURCES ${MUSL_DIR}/src/string/*.c)
 list(REMOVE_ITEM MUSL_STRING_SOURCES
     # C versions superseded by the x86_64 .s asm below — keep them out or the
@@ -753,7 +819,7 @@ list(REMOVE_ITEM MUSL_STRING_SOURCES
     ${MUSL_DIR}/src/string/memset.c
     # 0 callers; locale machinery already introduced by strerror in musl_pthread.
     ${MUSL_DIR}/src/string/strsignal.c
-    # Wide-character set — deferred to the wchar migration tier (not this batch).
+    # Wide-character set — built in musl_wchar_objs (wchar tier), not here.
     ${MUSL_DIR}/src/string/wcpcpy.c
     ${MUSL_DIR}/src/string/wcpncpy.c)
 # Drop the remaining wcs*/wmem* files caught by the glob (GLOB can't express
@@ -804,6 +870,7 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_time_objs>
                $<TARGET_OBJECTS:musl_stdio_objs>
                $<TARGET_OBJECTS:musl_multibyte_objs>
+               $<TARGET_OBJECTS:musl_wchar_objs>
     C
     FLAGS "-fno-pie -DDYNAMIC=0"
     IMAGE_PATH usr/lib/libc.a
@@ -838,6 +905,7 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_time_objs>
                $<TARGET_OBJECTS:musl_stdio_objs>
                $<TARGET_OBJECTS:musl_multibyte_objs>
+               $<TARGET_OBJECTS:musl_wchar_objs>
     C
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED
@@ -977,7 +1045,7 @@ add_musl_lib(musl_math_objs SOURCES ${MUSL_MATH_SOURCES})
 #   src/conf/sysconf.c + src/legacy/getpagesize.c — musl sysconf redefines
 #     _SC_NPROCESSORS_ONLN semantics; repo stdlib_misc.c (sys_sysconf-backed)
 #     kept.
-#   src/stdlib/{wcstod,wcstol}.c — wchar tier (not migrated).
+#   src/stdlib/{wcstod,wcstol}.c — compiled in musl_wchar_objs (wchar tier).
 #   src/stdlib/{ecvt,fcvt,gcvt}.c — deprecated BSD, 0 callers, sprintf chain.
 #   src/env/{__init_tls,__stack_chk_fail,__reset_tls}.c — already in
 #     musl_pthread; compiling here would multi-define.
@@ -1097,8 +1165,11 @@ add_musl_lib(musl_stdlib_objs SOURCES ${MUSL_STDLIB_SOURCES})
 # semantic choice was made in the unistd migration (MUSL_UNISTD_EXCLUDE);
 # retained here. They call the now-musl nanosleep().
 #
-# wcsftime.c EXCLUDED: needs wchar tier (wcstoul/mbstowcs/wmemcpy not yet
-# migrated), same as musl_string_objs excludes wcs*/wmem*. Deferred.
+# wcsftime.c now compiled in musl_wchar_objs (wchar tier landed); its time deps
+# (the strftime machinery below) resolve via the merged libc.a/libc.so. Known
+# upstream bug: wcsftime.c declares/calls 5-arg __strftime_fmt_1 while strftime.c
+# defines 6-arg (..., int pad) — on x86-64 SysV ABI %r9 (pad) is garbage. 0
+# in-tree callers; compiled verbatim (matches musl upstream). See todo.md.
 #
 # timer_create.c / timer_settime.c / timer_delete.c / timer_gettime.c /
 # timer_getoverrun.c EXCLUDED: kernel has no SYS_timer_* (return -ENOSYS) AND

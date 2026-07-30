@@ -23,11 +23,10 @@ global:
      *                   needs them exported.
      *   __isoc99_x / _IO_x / __getdelim / x_used — internal aliases (weak_alias), no
      *                   consumer references them (not declared in <stdio.h>)
-     *   wide-char w* family (fwprintf/fgetwc/wscanf/...) — defined by
-     *                   musl_stdio_objs but declared in <wchar.h>, which this OS
-     *                   does NOT publish, so no consumer can reference them;
-     *                   hidden to keep the ABI minimal (a <wchar.h> block would
-     *                   be added if/when wide stdio is needed) */
+     *   wide-char w* family (fwprintf/fgetwc/wscanf/...) — NOW exported under the
+     *                   <wchar.h> block below (musl_stdio_objs compiles them; deps
+     *                   satisfied by musl_wchar_objs + musl_time_objs). Only the
+     *                   *_unlocked and __isoc99_* aliases stay hidden here. */
     asprintf; clearerr; clearerr_unlocked; ctermid; fclose; fdopen; feof;
     feof_unlocked; ferror; ferror_unlocked; fflush; fflush_unlocked; fgetc;
     fgetc_unlocked; fgetln; fgetpos; fgets; fgets_unlocked; fileno;
@@ -330,7 +329,9 @@ global:
     /* <time.h> — musl upstream (src/time/* + src/locale/langinfo.c via
      * musl_time_objs, time.md). clock_getres, clock_getcpuclockid, times
      * have no kernel syscall impl and return -ENOSYS (0 callers). The timer
-     * family and wcsftime are NOT built (deferred, see todo.md).
+     * family is NOT built (deferred, see todo.md). wcsftime IS built (in
+     * musl_wchar_objs — see the <wchar.h> block below; its time deps resolve
+     * via the merged libc).
      * timespec_to_tm (repo non-std) is deleted. */
     clock; clock_gettime; clock_settime; clock_getres; clock_getcpuclockid;
     ctime; ctime_r; asctime; asctime_r;
@@ -413,6 +414,58 @@ global:
     madvise; posix_madvise; mincore;
     mlock; munlock; mlockall; munlockall;
     shm_open; shm_unlink;
+
+    /* <uchar.h> — musl src/multibyte/{c16,c32}{rtomb,rtoc16,rtoc32}.c (thin
+     * wrappers over wcrtomb/mbrtowc in musl_multibyte_objs). C11 char16_t/
+     * char32_t conversion. */
+    c16rtomb; mbrtoc16; c32rtomb; mbrtoc32;
+
+    /* <wctype.h> — musl src/ctype/{isw*,iswctype,wctrans,towctrans,wcwidth,
+     * wcswidth}.c. Pure compute; locale_t pass-through (the _l variants forward
+     * to the non-_l). Narrow ctype (isalnum/tolower/...) stays in user/lib/
+     * ctype.c — NOT compiled here. iswdigit is both a real function
+     * (iswdigit.c) and a macro in <wchar.h>/<wctype.h>; the symbol is exported
+     * (the macro shadows it for C callers). */
+    iswalnum; iswalpha; iswblank; iswcntrl; iswdigit; iswgraph; iswlower;
+    iswprint; iswpunct; iswspace; iswupper; iswxdigit;
+    iswctype; wctype; wctrans; towctrans; towlower; towupper;
+    wcwidth; wcswidth;
+    iswalnum_l; iswalpha_l; iswblank_l; iswcntrl_l; iswdigit_l; iswgraph_l;
+    iswlower_l; iswprint_l; iswpunct_l; iswspace_l; iswupper_l; iswxdigit_l;
+    iswctype_l; wctype_l; wctrans_l; towctrans_l; towlower_l; towupper_l;
+
+    /* <wchar.h> — musl src/string wcs and wmem families + src/multibyte (btowc/wctob/
+     * mbsrtowcs/...) + src/stdlib/{wcstol,wcstod}.c + src/time/wcsftime.c,
+     * all compiled in musl_wchar_objs (mbsinit/mbrtowc/wcrtomb/wctomb come from
+     * musl_multibyte_objs but <wchar.h> now declares them as public API, so
+     * they are listed here to become GLOBAL — libc.map's local: otherwise
+     * hides them). wcstoimax/wcstoumax are also declared in <inttypes.h>.
+     * The wide-char stdio family below (wprintf/fwprintf/swprintf/wscanf/.../
+     * fgetwc/fputwc/fgetws/fputws/ungetwc/fwide/getwc/getwchar/putwc/putwchar/
+     * open_wmemstream) is compiled in musl_stdio_objs — its deps (isw families,
+     * wcsnlen, btowc/wctob + __c_locale) are now satisfied by musl_wchar_objs +
+     * musl_time_objs. Only the *_unlocked and __isoc99_* internal aliases stay
+     * hidden (not declared in <wchar.h>, no consumer — same rule as narrow stdio).
+     * DEFERRED (declared by <wchar.h>, NOT compiled, 0 callers, NOT listed):
+     *   wcscoll/wcsxfrm/wcscoll_l/wcsxfrm_l — need src/locale (not built), same
+     *     declare-only treatment as strcoll/strxfrm;
+     *   wcsftime_l — weak_alias in wcsftime.c, no header decl consumer (hidden). */
+    wcscpy; wcsncpy; wcscat; wcsncat; wcscmp; wcsncmp; wcschr; wcsrchr;
+    wcscspn; wcsspn; wcspbrk; wcstok; wcslen; wcsnlen; wcsstr; wcswcs;
+    wcscasecmp; wcsncasecmp; wcscasecmp_l; wcsncasecmp_l;
+    wcsdup; wcpcpy; wcpncpy;
+    wmemchr; wmemcmp; wmemcpy; wmemmove; wmemset;
+    btowc; wctob; mblen; mbrlen; mbstowcs; wcstombs; mbsrtowcs; wcsrtombs;
+    mbsnrtowcs; wcsnrtombs; mbtowc; wctomb;
+    mbsinit; mbrtowc; wcrtomb;
+    wcstof; wcstod; wcstold; wcstol; wcstoul; wcstoll; wcstoull;
+    wcstoimax; wcstoumax;
+    wcsftime;
+    /* wide-char stdio (musl_stdio_objs, declared in <wchar.h>) */
+    fwide; wprintf; fwprintf; swprintf; vwprintf; vfwprintf; vswprintf;
+    wscanf; fwscanf; swscanf; vwscanf; vfwscanf; vswscanf;
+    fgetwc; getwc; getwchar; fputwc; putwc; putwchar;
+    fgetws; fputws; ungetwc; open_wmemstream;
 
     /* <sys/ioctl.h> */
     ioctl;

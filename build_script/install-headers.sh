@@ -247,6 +247,17 @@ __MMAN_EXT__
 #     Closure self-check below verifies the <stdio.h> → <bits/alltypes.h> chain.
 cp "$SRC"/third_party/musl/include/stdio.h "$DEST/stdio.h"
 
+# 3l. musl wchar/wctype/uchar headers. user/include has no source-tree shim for
+#     these three (zero in-tree consumers — same publish-only pattern as
+#     dlfcn.h §3b). All three closures need <bits/alltypes.h> (step 2; provides
+#     wchar_t/wint_t/wctype_t/mbstate_t/locale_t) + <features.h>. <wchar.h> also
+#     pulls FILE (alltypes __NEED_FILE → struct _IO_FILE) + struct tm (forward
+#     declared). No new bits/ header required. Closure self-check below covers
+#     all three.
+cp "$SRC"/third_party/musl/include/wchar.h  "$DEST/wchar.h"
+cp "$SRC"/third_party/musl/include/wctype.h "$DEST/wctype.h"
+cp "$SRC"/third_party/musl/include/uchar.h  "$DEST/uchar.h"
+
 # 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
 #    compiler's -isystem freestanding dir. The published sysroot must be usable
 #    with -nostdinc and NO -isystem (the Mesa milestone consumes it via -isysroot),
