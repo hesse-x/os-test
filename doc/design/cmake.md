@@ -128,6 +128,23 @@ mkdisk.sh 生成单盘两分区 build/disk.img（192MB）：
 - 磁盘映像：build_script/mkdisk.sh
 - 顶层构建：CMakeLists.txt / build.sh
 
+第三方库 per-lib 构建规则住 `build_script/third_party/<lib>/`，从 `user/CMakeLists.txt`
+经 `include()` 按序引入（与内联时同作用域，target/变量行为不变）：
+
+- libinput：build_script/third_party/libinput/libinput.cmake
+- libdrm：build_script/third_party/libdrm/libdrm.cmake（config 模板仍在 `build_script/libdrm/`）
+- libffi：build_script/third_party/libffi/libffi.cmake（config 模板仍在 `build_script/libffi/`）
+- libexpat：build_script/third_party/libexpat/libexpat.cmake（config 模板仍在 `build_script/libexpat/`）
+- wayland：build_script/third_party/wayland/wayland.cmake（config 模板仍在 `build_script/wayland/`）
+- musl：build_script/third_party/musl/musl_rules.cmake（独立子项目：loader/crt；编进 libc 的
+  musl OBJECT 库仍内联在 `user/CMakeLists.txt`）
+
+include 顺序约束：libffi → libexpat → wayland。wayland 的 host wayland-scanner 在
+configure 期读 `LIBEXPAT_DIR`（由 libexpat.cmake 设置）拼 host-scanner flags 与 DEPENDS，
+故 libexpat 必须先 include；wayland 的 .so 经 `SO_LINK_LIBS ffi` 依赖 libffi 的 `ffi` target。
+libdrm 的 include 须早于同文件内留存的 `drm_test_link` 测试 ELF（其链接 `drm`/`drm_so`）。
+
+
 ## 待完成项
 
 | 项目 | 说明 | 优先级 |
