@@ -48,6 +48,7 @@ static struct test_entry tests[] = {
     {"clock_realtime", "/test/test_clock_realtime.elf"},
     {"time_sleep", "/test/test_time_sleep.elf"},
     {"clock_cputime", "/test/test_clock_cputime.elf"},
+    {"membarrier", "/test/test_membarrier.elf"},
     {"hello_dyn", "/local/hello_dyn.elf"},
     /* ldso.md Phase 1.5 go/no-go: musl fused libc.so self-bootstraps as
      * PT_INTERP /lib/ld-musl-x86_64.so.1 and jumps to main. The ld_* ELFs pull

@@ -5835,6 +5835,80 @@ int64_t sys_sched_getaffinity(int64_t arg1, int64_t arg2, int64_t arg3,
   return 0;
 }
 
+// ===================== membarrier =====================
+// membarrier(cmd, flags). Ordered memory access barrier across threads.
+//
+// On x86-64 the memory model is Total Store Order + program-store-order: a
+// thread's stores become globally visible in program order, and a store is
+// visible to a peer's load once it has landed in the global order. musl's one
+// in-tree user — the dynamic linker (ldso/dynlink.c) — does
+//   store new DTV contents;
+//   membarrier(PRIVATE_EXPEDITED, 0);
+//   store per-thread DTV pointer;
+// so the contents-to-pointer store order is what must be globally ordered, and
+// TSO already guarantees that for stores. The contract membarrier provides
+// (caller's pre-membarrier stores precede any peer's post-membarrier loads) is
+// therefore satisfied by a *local* fence on the caller — the peer threads are
+// not touched at all. This matches real Linux's behaviour on x86 even though
+// Linux still IPIs: there the IPI carries no ordering work because the arch
+// already orders stores.
+//
+// We do NOT implement the cross-CPU IPI broadcast/acknowledge barrier (a new
+// IPI vector, per-CPU ack, wait-with-timeout loop touching scheduler_lock under
+// a potentially-held tasks_lock — real deadlock surface). On TSO it adds no
+// correctness; on weaker archs it would. Recording as tech debt if this OS ever
+// runs on a non-TSO model. Returning 0 instead of -ENOSYS lets musl skip its
+// SIGSYNCCALL+tkill emulation (slow, signals every thread) and trust the
+// kernel barrier — strictly faster.
+//
+// Commands (values from <sys/membarrier.h>, musl/user share the header):
+//   QUERY                                     → supported command bitmask
+//   GLOBAL / GLOBAL_EXPEDITED                 → fence, return 0
+//   REGISTER_GLOBAL_EXPEDITED                 → no-op success (no per-process
+//                                               registration state;
+//                                               registration is not enforced)
+//   PRIVATE_EXPEDITED / REGISTER_PRIVATE_EXPEDITED → same as GLOBAL variants
+//   *_SYNC_CORE / *_RSEQ                      → -EINVAL: core-serialization
+//                                               needs iret/cpuid and we have no
+//                                               rseq infrastructure
+//   MEMBARRIER_CMD_FLAG_CPU (single-cpu dir.) → -EINVAL: not implemented
+//
+// flags != 0 → -EINVAL (Linux likewise rejects unknown flag bits; FLAG_CPU is
+// the only flag and it is not implemented, so all flags!=0 fail identically).
+int64_t sys_membarrier(int64_t arg1, int64_t arg2, int64_t unused1,
+                       int64_t unused2, int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  int cmd = (int)arg1;
+  int flags = (int)arg2;
+
+  if (flags != 0)
+    return (int64_t)-EINVAL;
+
+  switch (cmd) {
+  case 0: /* MEMBARRIER_CMD_QUERY */
+    // GLOBAL(1) | GLOBAL_EXPEDITED(2) | REGISTER_GLOBAL_EXPEDITED(4) |
+    // PRIVATE_EXPEDITED(8) | REGISTER_PRIVATE_EXPEDITED(16).
+    return (int64_t)(1 | 2 | 4 | 8 | 16);
+  case 1: /* MEMBARRIER_CMD_GLOBAL */
+  case 2: /* MEMBARRIER_CMD_GLOBAL_EXPEDITED */
+  case 8: /* MEMBARRIER_CMD_PRIVATE_EXPEDITED */
+    __asm__ volatile("mfence" ::: "memory");
+    return 0;
+  case 4:  /* MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED */
+  case 16: /* MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED */
+    // Registration accepted but not enforced (see rationale above).
+    return 0;
+  default:
+    // SYNC_CORE(32)/REGISTER_SYNC_CORE(64)/RSEQ(128)/REGISTER_RSEQ(256): not
+    // supported. QUERY reported them absent, so a caller using them gets
+    // -EINVAL, mirroring Linux for a command the kernel did not advertise.
+    return (int64_t)-EINVAL;
+  }
+}
+
 // ===================== prctl =====================
 int64_t sys_prctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                   int64_t arg5, int64_t unused) {
@@ -6339,6 +6413,8 @@ int64_t syscall_dispatch(trapframe *tf) {
   case SYS_SCHED_GETAFFINITY:
     return sys_sched_getaffinity(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
                                  tf->r9);
+  case SYS_MEMBARRIER:
+    return sys_membarrier(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // prctl (group 7)
   case SYS_PRCTL:
     return sys_prctl(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);

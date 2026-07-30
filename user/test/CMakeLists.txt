@@ -138,6 +138,9 @@ add_user_dyn_elf(test_clock_realtime C SOURCES test_clock_realtime.c LINK_LIBS c
 add_user_dyn_elf(test_time_sleep C SOURCES test_time_sleep.c LINK_LIBS c STATIC_LIBS unity)
 # S15: CLOCK_PROCESS_CPUTIME_ID process-level CPU time
 add_user_dyn_elf(test_clock_cputime C SOURCES test_clock_cputime.c LINK_LIBS c STATIC_LIBS unity)
+# membarrier(2): QUERY bitmask, advertised-command success, -EINVAL on unknown
+# cmd/flags, peer-thread ordering smoke (x86-64 TSO: local fence, no IPI).
+add_user_dyn_elf(test_membarrier C SOURCES test_membarrier.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 20: getrandom (/dev/(u)random + libc 封装)
 add_user_dyn_elf(getrandom C SOURCES test_getrandom.c LINK_LIBS c STATIC_LIBS unity)

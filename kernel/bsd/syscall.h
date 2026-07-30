@@ -175,6 +175,9 @@ int64_t sys_sched_setaffinity(int64_t, int64_t, int64_t, int64_t, int64_t,
 int64_t sys_sched_getaffinity(int64_t, int64_t, int64_t, int64_t, int64_t,
                               int64_t);
 
+// membarrier (group 6) — x86-64 TSO: no cross-CPU IPI, see sys_membarrier.
+int64_t sys_membarrier(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
 // prctl (group 7)
 int64_t sys_prctl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 

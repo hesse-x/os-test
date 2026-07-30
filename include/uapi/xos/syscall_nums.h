@@ -148,6 +148,13 @@
 #define SYS_SCHED_GETAFFINITY 204
 #define SYS_PPOLL 271
 #define SYS_GETCPU 309
+// MEMBARRIER (324) — backed by sys_membarrier. On x86-64 TSO the ordering
+// guarantee (caller's pre-membarrier stores visible to peer threads' post-
+// membarrier loads) already holds for stores-to-stores; the command emits a
+// local fence and returns 0 so musl's ldso (which calls PRIVATE_EXPEDITED
+// before installing per-thread DTV pointers) skips its SIGSYNCCALL emulation.
+// No cross-CPU IPI broadcast/ack is performed — see sys_membarrier rationale.
+#define SYS_MEMBARRIER 324
 
 // ---- ENOSYS stubs (C group) ----
 #define SYS_SENDFILE 40
