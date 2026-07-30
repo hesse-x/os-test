@@ -132,10 +132,10 @@ mkdisk.sh 生成单盘两分区 build/disk.img（192MB）：
 经 `include()` 按序引入（与内联时同作用域，target/变量行为不变）：
 
 - libinput：build_script/third_party/libinput/libinput.cmake
-- libdrm：build_script/third_party/libdrm/libdrm.cmake（config 模板仍在 `build_script/libdrm/`）
-- libffi：build_script/third_party/libffi/libffi.cmake（config 模板仍在 `build_script/libffi/`）
-- libexpat：build_script/third_party/libexpat/libexpat.cmake（config 模板仍在 `build_script/libexpat/`）
-- wayland：build_script/third_party/wayland/wayland.cmake（config 模板仍在 `build_script/wayland/`）
+- libdrm：build_script/third_party/libdrm/libdrm.cmake（config 模板 `config.h`/`libdrm.map` 同目录）
+- libffi：build_script/third_party/libffi/libffi.cmake（config 模板 `fficonfig.h` 同目录）
+- libexpat：build_script/third_party/libexpat/libexpat.cmake（config 模板 `expat_config.h`/`expat_config_host.h` 同目录）
+- wayland：build_script/third_party/wayland/wayland.cmake（config 模板 `config.h` 同目录）
 - musl：build_script/third_party/musl/musl_rules.cmake（入口：顶部 `musl_generate_headers()`
   + `MUSL_DIR` 别名；loader/crt + `musl_libc` 聚合 target；末尾 include 14 个模块文件）；
   modules/{unistd,fcntl,socket,dl,dirent,mman,stdio,multibyte,wchar,pthread,string,math,

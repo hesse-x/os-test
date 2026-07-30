@@ -19,9 +19,10 @@
 # libc wrappers or syscall gaps remain — only the build adapter (this section).
 
 # ---- 1. config.h + wayland-version.h (consumed by the freestanding .so) ----
-# config.h template lives in the main repo (build_script/wayland/config.h), NOT in
-# the wayland submodule working tree — mirrors libdrm (config.h in build_script/libdrm).
-# Copied to build/wayland_config.h and force-injected via -include (see FLAGS below).
+# config.h template lives alongside this .cmake (build_script/third_party/wayland/),
+# NOT in the wayland submodule working tree — mirrors libdrm (config.h in
+# build_script/third_party/libdrm). Copied to build/wayland_config.h and
+# force-injected via -include (see FLAGS below).
 #
 # Three sources have EXPLICIT config includes that -include cannot satisfy (the
 # preprocessor still tries to resolve the literal #include):
@@ -34,7 +35,7 @@
 # rewrite the include to "wayland_config.h", resolved via -I build. The other .so
 # sources compile straight from the submodule untouched. The -include remains as a
 # belt-and-suspenders injection for any TU that lacks an explicit include.
-configure_file(${CMAKE_SOURCE_DIR}/build_script/wayland/config.h
+configure_file(${CMAKE_CURRENT_LIST_DIR}/config.h
                ${CMAKE_BINARY_DIR}/wayland_config.h COPYONLY)
 
 # Rewrite the 3 explicit config includes → "wayland_config.h" in build/ copies.
@@ -115,14 +116,15 @@ _wayland_generate_version_header()
 # expat's ~6k-line warnings (host build, not gated by -Werror).
 # Entropy: the shared build/expat_config.h defines XML_DEV_URANDOM, which makes
 # xmlparse.c call writeRandomBytes_dev_urandom (supplied by random_dev_urandom.c).
-# For the host scanner we use a SEPARATE host expat config (build_script/libexpat/
-# expat_config_host.h → build/wayland_host/expat_config.h) that defines
+# For the host scanner we use a SEPARATE host expat config
+# (build_script/third_party/libexpat/expat_config_host.h →
+# build/wayland_host/expat_config.h) that defines
 # HAVE_GETRANDOM instead, and compile random_getrandom.c (not random_dev_urandom.c)
 # — host glibc >=2.25 provides getrandom(2). Codegen needs no cryptographic
 # entropy; this only seeds expat's hash randomization. The host expat objects put
 # -I build/wayland_host ahead of -I build so "expat_config.h" resolves to the host
 # copy, overriding the shared freestanding one.
-configure_file(${CMAKE_SOURCE_DIR}/build_script/libexpat/expat_config_host.h
+configure_file(${CMAKE_SOURCE_DIR}/build_script/third_party/libexpat/expat_config_host.h
                ${CMAKE_BINARY_DIR}/wayland_host/expat_config.h COPYONLY)
 set(WAYLAND_SCANNER_HOST_FLAGS
     -O2 -w

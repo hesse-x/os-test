@@ -7,16 +7,16 @@
 # ===== libdrm (third_party/drm, core only) — plan_drm2 =====
 # libdrm 公共编译参数 (libdrm.md §3.3)
 #
-# config.h / libdrm.map live in the MAIN repo (build_script/libdrm/), not in
-# the third_party/drm submodule — we must not pollute the upstream submodule
+# config.h / libdrm.map live alongside this .cmake (build_script/third_party/libdrm/),
+# not in the third_party/drm submodule — we must not pollute the upstream submodule
 # working tree. CMake copies them into the build tree (configure_file) so the
 # -include path resolves to build/libdrm_config.h and the (phase-4) version
 # script to build/libdrm.map. generated_static_table_fourcc.h is produced by
 # upstream's gen_table_fourcc.py (add_custom_command) so the build is fully
 # reproducible with no manual one-shot steps.
-configure_file(${CMAKE_SOURCE_DIR}/build_script/libdrm/config.h
+configure_file(${CMAKE_CURRENT_LIST_DIR}/config.h
                ${CMAKE_BINARY_DIR}/libdrm_config.h COPYONLY)
-configure_file(${CMAKE_SOURCE_DIR}/build_script/libdrm/libdrm.map
+configure_file(${CMAKE_CURRENT_LIST_DIR}/libdrm.map
                ${CMAKE_BINARY_DIR}/libdrm.map COPYONLY)
 add_custom_command(
     OUTPUT ${CMAKE_BINARY_DIR}/generated_static_table_fourcc.h

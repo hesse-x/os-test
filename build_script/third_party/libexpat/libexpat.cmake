@@ -5,8 +5,9 @@
 
 # ===================== libexpat.so =====================
 #
-# expat_config.h: hand-written, mirrors build_script/libffi/fficonfig.h approach
-configure_file(${CMAKE_SOURCE_DIR}/build_script/libexpat/expat_config.h
+# expat_config.h: hand-written, mirrors the fficonfig.h approach (config template
+# lives alongside its .cmake).
+configure_file(${CMAKE_CURRENT_LIST_DIR}/expat_config.h
                ${CMAKE_BINARY_DIR}/expat_config.h COPYONLY)
 
 set(LIBEXPAT_DIR ${CMAKE_SOURCE_DIR}/third_party/libexpat/expat)

@@ -1,12 +1,13 @@
 /* expat_config_host.h — host-side expat config for the wayland-scanner build
  * tool.
  *
- * The freestanding libexpat.so uses build_script/libexpat/expat_config.h with
- * XML_DEV_URANDOM (entropy from /dev/urandom via random_dev_urandom.c). The
- * host wayland-scanner is a build-time tool that runs on the dev machine; it
- * has no need for /dev/urandom and the dev box may not wire it the same way.
- * Instead we enable HAVE_GETRANDOM (host glibc >=2.25 provides getrandom(2))
- * and compile random_getrandom.c, dropping the XML_DEV_URANDOM path entirely.
+ * The freestanding libexpat.so uses
+ * build_script/third_party/libexpat/expat_config.h with XML_DEV_URANDOM
+ * (entropy from /dev/urandom via random_dev_urandom.c). The host
+ * wayland-scanner is a build-time tool that runs on the dev machine; it has no
+ * need for /dev/urandom and the dev box may not wire it the same way. Instead
+ * we enable HAVE_GETRANDOM (host glibc >=2.25 provides getrandom(2)) and
+ * compile random_getrandom.c, dropping the XML_DEV_URANDOM path entirely.
  * Codegen needs no cryptographic entropy — this only seeds expat's hash
  * randomization.
  *

@@ -7,7 +7,7 @@
 # Pre-defines FFI_MMAP_EXEC_SELINUX/PAX=0 to skip /proc/mounts/statfs probing,
 # HAVE_MEMFD_CREATE=1 so closures.c open_temp_exec_file picks memfd first, and
 # HAVE_MREMAP=0 (kernel has no mremap). See libffi.md §3.2 / ffi_worklist §1.
-configure_file(${CMAKE_SOURCE_DIR}/build_script/libffi/fficonfig.h
+configure_file(${CMAKE_CURRENT_LIST_DIR}/fficonfig.h
                ${CMAKE_BINARY_DIR}/fficonfig.h COPYONLY)
 
 # ffitarget.h: upstream public header (include/Makefile.am:9 nodist_include_HEADERS

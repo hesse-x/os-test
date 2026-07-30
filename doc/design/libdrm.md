@@ -122,7 +122,7 @@ fallback：`drmOpen` 失败时直接 `open("/dev/dri/card0")`（terminal 始终�
 
 #### libdrm.so 导出符号
 
-通过 `build_script/libdrm/libdrm.map` 版本脚本控制，仅导出 `drm*` glob（~60-80 个符号）。
+通过 `build_script/third_party/libdrm/libdrm.map` 版本脚本控制，仅导出 `drm*` glob（~60-80 个符号）。
 
 核心连接管理：`drmOpen`, `drmClose`, `drmIoctl`, `drmSetMaster`, `drmDropMaster`, `drmGetVersion`, `drmGetCap`, `drmSetClientCap`, `drmGetMagic`, `drmAuthMagic`
 
@@ -158,7 +158,7 @@ libdrm.so CMake target（`user/CMakeLists.txt`）：
 - target 名：`drm_so`（`add_user_lib(SHARED)`)
 - 源文件：`xf86drm.c` / `xf86drmMode.c` / `xf86drmHash.c` / `xf86drmRandom.c` / `xf86drmSL.c`
 - 输出：`libdrm.so`（soname），`DT_NEEDED libc.so`
-- 版本脚本：`build_script/libdrm/libdrm.map`（仅导出 `drm*` 符号）
+- 版本脚本：`build_script/third_party/libdrm/libdrm.map`（仅导出 `drm*` 符号）
 - 编译：`-fPIC`（SHARED 自动追加），`-fvisibility=hidden`
 - 依赖：`c_so`（libc.so 先构建）、`libdrm_fourcc_table`（fourcc code 表）
 
