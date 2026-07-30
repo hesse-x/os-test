@@ -44,6 +44,7 @@ static struct test_entry tests[] = {
     {"fpu", "/test/test_fpu.elf"},
     {"sse_smoke", "/test/test_sse_smoke.elf"},
     {"pthread", "/test/pthread.elf"},
+    {"c11threads", "/test/c11threads.elf"},
     {"clock_realtime", "/test/test_clock_realtime.elf"},
     {"time_sleep", "/test/test_time_sleep.elf"},
     {"clock_cputime", "/test/test_clock_cputime.elf"},

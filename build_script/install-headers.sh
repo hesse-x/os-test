@@ -121,6 +121,7 @@ cp "$SRC"/third_party/musl/include/dlfcn.h      "$DEST/dlfcn.h"
 #     all three) is the repo's own, already published in step 2 (it is
 #     equivalent to musl's).
 cp "$SRC"/third_party/musl/include/pthread.h    "$DEST/pthread.h"
+cp "$SRC"/third_party/musl/include/threads.h    "$DEST/threads.h"
 cp "$SRC"/third_party/musl/include/signal.h     "$DEST/signal.h"
 cp "$SRC"/third_party/musl/include/sched.h      "$DEST/sched.h"
 cp "$SRC"/third_party/musl/arch/x86_64/bits/signal.h "$DEST/bits/signal.h"

@@ -90,6 +90,10 @@ add_user_dyn_elf(test_cpu_burn C SOURCES test_cpu_burn.c LINK_LIBS c NO_IMAGE)
 # from libc alone; no separate musl_pthread link needed).
 add_user_dyn_elf(pthread C SOURCES test_pthread.c LINK_LIBS c STATIC_LIBS unity)
 
+# Layer 13b: C11 <threads.h> (musl src/thread/{thrd,mtx,cnd,tss,call_once}_*.c,
+# same musl_pthread glob; symbols exported via libc.map <threads.h> block).
+add_user_dyn_elf(c11threads C SOURCES test_c11threads.c LINK_LIBS c STATIC_LIBS unity)
+
 # DRM virtio-gpu test (no Unity — diagnostic printf)
 add_user_dyn_elf(drm_test C SOURCES drm_test.c LINK_LIBS c)
 
