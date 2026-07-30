@@ -20,8 +20,12 @@
 # has its own -D__KERNEL__ -mno-sse compile of the same file (utils/CMakeLists
 # .txt deliberately dual-compiles), so it is unaffected and utils/kvformat.{c,h}
 # are NOT deleted.
+# malloc.cc removed (malloc.md): musl src/malloc/mallocng/*.c + src/malloc/*.c
+# (musl_malloc_objs) now provide the full malloc/free/calloc/realloc/aligned_alloc
+# family plus the __libc_malloc/__libc_free/__malloc_replaced surface musl 1.2.x's
+# loader requires. mallocng runs in mmap-only mode (this kernel's sys_brk is a
+# fail stub; see kernel/bsd/syscall.c).
 set(LIBC_SOURCES
-    lib/malloc.cc
     lib/unistd.cc lib/time.cc lib/file.cc
     lib/ctype.c lib/stdlib_misc.c lib/uname.c
     lib/assert.c lib/signal.cc lib/getrandom.c
@@ -67,6 +71,7 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_string_objs>
                $<TARGET_OBJECTS:musl_math_objs>
                $<TARGET_OBJECTS:musl_stdlib_objs>
+               $<TARGET_OBJECTS:musl_malloc_objs>
                $<TARGET_OBJECTS:musl_mman_objs>
                $<TARGET_OBJECTS:musl_time_objs>
                $<TARGET_OBJECTS:musl_stdio_objs>
@@ -85,8 +90,8 @@ add_user_lib(c
 # __block_all_sigs/... ) are satisfied by the musl_pthread objects below — the
 # loader runs musl's real TLS setup during __dls3 (FS_BASE → musl struct
 # pthread), and __libc_start_main does NOT override fs_base. Only the
-# loader-only, non-pthread symbols (dprintf/vdprintf/__tlsdesc_*/__libc_get_version)
-# still come from lib/musl_loader_shim.c (in LIBC_SOURCES). After bootstrap the
+# loader-only, non-pthread symbols (__tlsdesc_static/__tlsdesc_dynamic) still
+# come from lib/musl_loader_shim.c (in LIBC_SOURCES). After bootstrap the
 # loader jumps to the main ELF _start; the hand-written __libc_start_main then
 # runs the loader's __libc_start_init() (do_init_fni) over every DSO's
 # .init_array (loader dormant thereafter — ldso.md §2).
@@ -102,6 +107,7 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_string_objs>
                $<TARGET_OBJECTS:musl_math_objs>
                $<TARGET_OBJECTS:musl_stdlib_objs>
+               $<TARGET_OBJECTS:musl_malloc_objs_so>
                $<TARGET_OBJECTS:musl_mman_objs_so>
                $<TARGET_OBJECTS:musl_time_objs>
                $<TARGET_OBJECTS:musl_stdio_objs>

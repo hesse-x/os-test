@@ -39,6 +39,19 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
+/* The user-facing UAPI must agree with the musl structures it forwards to. */
+#if defined(__cplusplus)
+static_assert(__builtin_offsetof(struct cmsghdr, cmsg_level) == 8 &&
+                  __builtin_offsetof(struct cmsghdr, cmsg_type) == 12 &&
+                  sizeof(struct cmsghdr) == 16,
+              "musl cmsghdr ABI must match xos UAPI");
+#else
+_Static_assert(__builtin_offsetof(struct cmsghdr, cmsg_level) == 8 &&
+                   __builtin_offsetof(struct cmsghdr, cmsg_type) == 12 &&
+                   sizeof(struct cmsghdr) == 16,
+               "musl cmsghdr ABI must match xos UAPI");
+#endif
+
 #else /* __KERNEL__ */
 
 #include <stddef.h>

@@ -34,6 +34,7 @@ set(MUSL_DL_SOURCES
 
 add_library(musl_dl_objs OBJECT ${MUSL_DL_SOURCES})
 target_include_directories(musl_dl_objs PRIVATE
+    ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
     ${MUSL_DIR}/arch/x86_64
@@ -41,11 +42,12 @@ target_include_directories(musl_dl_objs PRIVATE
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
 target_compile_options(musl_dl_objs PRIVATE
-    -m64 ${USER_FREESTANDING_FLAGS} -fno-pie -Wno-all)
+    -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fno-pie -Wno-all)
 
 # libc.so PIC mirror (same as musl_fcntl_objs_so above).
 add_library(musl_dl_objs_so OBJECT ${MUSL_DL_SOURCES})
 target_include_directories(musl_dl_objs_so PRIVATE
+    ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
     ${MUSL_DIR}/arch/x86_64
@@ -53,4 +55,4 @@ target_include_directories(musl_dl_objs_so PRIVATE
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
 target_compile_options(musl_dl_objs_so PRIVATE
-    -m64 ${USER_FREESTANDING_FLAGS} -fPIC -Wno-all)
+    -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fPIC -Wno-all)

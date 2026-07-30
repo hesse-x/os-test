@@ -38,7 +38,13 @@
 #define O_NOFOLLOW 0400000
 #define O_PATH 010000000
 #define O_TMPFILE 020200000 /* __O_TMPFILE(020000000) | O_DIRECTORY */
-#define O_LARGEFILE 0
+// musl 1.2.x dropped arch/x86_64/bits/fcntl.h and falls through to
+// arch/generic/bits/fcntl.h, which defines O_LARGEFILE = 0100000 (the Linux
+// UAPI asm-generic value). On 64-bit it is a no-op (off_t is already 64-bit),
+// so the kernel ignores the bit; the value must still match musl so the
+// fcntl_sync.c ABI guard passes and userspace's O_LARGEFILE round-trips
+// cleanly through open(). v1.1.19's x86-64 bits/fcntl.h had 0 here.
+#define O_LARGEFILE 0100000
 
 #define O_SETFL_MASK (O_NONBLOCK | O_APPEND)
 

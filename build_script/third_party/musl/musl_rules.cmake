@@ -36,14 +36,28 @@ set(MUSL_DIR ${MUSL_SRC})
 # musl-internal include order: musl src/internal BEFORE user/include so musl
 # sources' quoted #include "syscall.h"/"libc.h" resolve to musl's own headers.
 # arch/x86_64 provides syscall_arch.h; arch/generic is the bits fallback.
+# src/include precedes src/internal per musl's Makefile (-Isrc/include
+# -Isrc/internal): since 1.2.x, src/internal/syscall.h #includes <features.h>,
+# and the internal macros hidden/weak/weak_alias live ONLY in
+# src/include/features.h (v1.1.19 had no hidden keyword; weak_alias was defined
+# in libc.h). Without src/include, <features.h> resolves to user/include and
+# every musl source errors with "unknown type name 'hidden'".
 # user/include carries the pre-generated bits/syscall.h + bits/alltypes.h +
 # xos headers. Relaxed warnings (-Wno-all): upstream musl is third-party code,
 # not under our -Werror gate (same rationale as musl_unistd_objs).
+# MUSL_GEN_INCLUDE_DIR (build/musl_gen, from musl_generate_headers above) is
+# FIRST so <bits/alltypes.h> resolves to the v1.2.6-generated copy — it defines
+# __LONG_MAX, which musl 1.2.x <limits.h> references (#define LONG_MAX
+# __LONG_MAX). Our static user/include/bits/alltypes.h is a v1.1.19-era hand
+# write (no __LONG_MAX), so without musl_gen first, ldso/dynlink.c fails with
+# "use of undeclared identifier '__LONG_MAX'". Mirrors add_musl_lib's order.
 set(MUSL_INCLUDES
-    ${MUSL_SRC}/src/internal
-    ${MUSL_SRC}/include
+    ${MUSL_GEN_INCLUDE_DIR}
     ${MUSL_SRC}/arch/x86_64
     ${MUSL_SRC}/arch/generic
+    ${MUSL_SRC}/src/include
+    ${MUSL_SRC}/src/internal
+    ${MUSL_SRC}/include
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
 
@@ -62,6 +76,16 @@ add_library(musl_loader_objs OBJECT
     ${MUSL_SRC}/ldso/dynlink.c
     ${MUSL_SRC}/ldso/dlstart.c)
 target_include_directories(musl_loader_objs PRIVATE ${MUSL_INCLUDES})
+# Unlike add_musl_lib (which wires musl_headers internally), this is a raw
+# add_library, so the generated-header dependency must be added by hand: dynlink.c
+# pulls musl <limits.h> → LONG_MAX → __LONG_MAX, defined ONLY in the generated
+# bits/alltypes.h (build/musl_gen/bits/, from arch/x86_64/bits/alltypes.h.in).
+# The static user/include/bits/alltypes.h fallback has no __LONG_MAX. v1.1.19's
+# dynlink.c never referenced __LONG_MAX so the missing dep was latent; v1.2.6's
+# does (the SSIZE_MAX/PATH_MAX and n_th overflow checks), and without this dep a
+# fast/parallel build can compile the loader before alltypes.h is generated,
+# falling back to the static header and failing with "undeclared __LONG_MAX".
+add_dependencies(musl_loader_objs musl_headers)
 # Force -O2 regardless of CMAKE_BUILD_TYPE. The loader is bootstrap-critical:
 # at -O0 clang lowers every aggregate zero-init (e.g. `struct symdef def = {0}`
 # in find_sym, dynlink.c:264) to a `call memset@plt`. But reloc_all(&ldso)
@@ -99,7 +123,7 @@ add_custom_command(
     COMMAND ${CMAKE_C_COMPILER} ${_crt_c_flags} ${_crt_c_inc}
                 -fno-pie -c ${MUSL_SRC}/crt/crt1.c
                 -o ${MUSL_LIB_DIR}/crt1.o
-    DEPENDS ${MUSL_SRC}/crt/crt1.c
+    DEPENDS ${MUSL_SRC}/crt/crt1.c musl_headers
     COMMENT "musl crt1.o (static _start, -DCRT)"
     VERBATIM)
 
@@ -108,7 +132,7 @@ add_custom_command(
     COMMAND ${CMAKE_C_COMPILER} ${_crt_c_flags} ${_crt_c_inc}
                 -fPIC -c ${MUSL_SRC}/crt/Scrt1.c
                 -o ${MUSL_LIB_DIR}/Scrt1.o
-    DEPENDS ${MUSL_SRC}/crt/Scrt1.c ${MUSL_SRC}/crt/crt1.c
+    DEPENDS ${MUSL_SRC}/crt/Scrt1.c ${MUSL_SRC}/crt/crt1.c musl_headers
     COMMENT "musl Scrt1.o (dynamic _start, -DCRT -fPIC)"
     VERBATIM)
 
@@ -149,7 +173,7 @@ add_custom_target(musl_libc ALL
 # but musl_generate_headers() above MUST run before any add_musl_lib here.
 set(_musl_modules
     unistd fcntl socket dl dirent mman
-    stdio multibyte wchar pthread string math stdlib time)
+    stdio multibyte wchar pthread string math stdlib malloc time)
 foreach(_m ${_musl_modules})
     include(${CMAKE_CURRENT_LIST_DIR}/modules/${_m}.cmake)
 endforeach()

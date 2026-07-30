@@ -93,6 +93,7 @@ add_library(musl_unistd_objs OBJECT
 # Relaxed warnings (-Wno-all): upstream musl is third-party code, not under our
 # -Werror gate (same rationale as add_drm_lib for third_party/drm).
 target_include_directories(musl_unistd_objs PRIVATE
+    ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
     ${MUSL_DIR}/arch/x86_64
@@ -100,8 +101,13 @@ target_include_directories(musl_unistd_objs PRIVATE
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi
 )
+# -Wno-visibility: like -Wempty-body, -Wvisibility is NOT grouped under -Wall
+# (clang keeps it outside -Wno-all). musl's <termios.h> declares
+# tcsetwinsize(int, const struct winsize *) right after __NEED_struct_winsize,
+# before the full struct definition is in scope, so tcsetpgrp.c/tcgetpgrp.c
+# (which #include <termios.h>) trip -Wvisibility. Third-party source — silence.
 target_compile_options(musl_unistd_objs PRIVATE
-    -m64 ${USER_FREESTANDING_FLAGS} -fno-pie -Wno-all)
+    -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fno-pie -Wno-all -Wno-visibility)
 
 # libc.so needs PIC objects (the -fno-pie objects above produce non-PIC
 # relocations like R_X86_64_32 against .rodata, which ld rejects when building a
@@ -121,6 +127,7 @@ add_library(musl_unistd_objs_so OBJECT
     ${CMAKE_SOURCE_DIR}/user/lib/musl_shim/syscall_cp.c
 )
 target_include_directories(musl_unistd_objs_so PRIVATE
+    ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
     ${MUSL_DIR}/arch/x86_64
@@ -129,7 +136,7 @@ target_include_directories(musl_unistd_objs_so PRIVATE
     ${CMAKE_SOURCE_DIR}/include/uapi
 )
 target_compile_options(musl_unistd_objs_so PRIVATE
-    -m64 ${USER_FREESTANDING_FLAGS} -fPIC -Wno-all)
+    -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fPIC -Wno-all -Wno-visibility)
 # The SHARED libc.so link consumes the PIC objects as bare .o files; the STATIC
 # libc.a path consumes the -fno-pie objects via $<TARGET_OBJECTS:...>. Both are
 # wired through EXTRA_OBJS below.

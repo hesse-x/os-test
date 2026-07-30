@@ -27,6 +27,13 @@
 #define SYS_MMAP 9
 #define SYS_MPROTECT 10
 #define SYS_MUNMAP 11
+#define SYS_BRK 12
+// Stub: always returns 0 (current break) so musl mallocng's brk probe
+// (brk(new) != new) fails cleanly and it falls back to its mmap-only path —
+// this kernel has no brk heap (user heap is mmap-managed), mirroring musl on
+// brk-less archs (aarch64 Linux has no brk syscall). See sys_brk in
+// kernel/bsd/syscall.c. Do NOT return -ENOSYS: brk is not routed through
+// __syscall_ret, so a negative would be stored as the break verbatim.
 #define SYS_RT_SIGACTION 13
 #define SYS_RT_SIGPROCMASK 14
 #define SYS_RT_SIGRETURN 15

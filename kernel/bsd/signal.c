@@ -109,13 +109,12 @@ static void deliver_signal(xtask *proc, trapframe *tf, int sig,
   frame.uc.uc_mcontext.rip = tf->rip;
   frame.uc.uc_mcontext.eflags = tf->rflags;
   frame.uc.uc_mcontext.cs = tf->cs;
-  frame.uc.uc_mcontext.ss = tf->ss;
   frame.uc.uc_mcontext.cr2 =
       (proc->proc->sig_force_info.si_signo == sig)
           ? (int64_t)proc->proc->sig_force_info._sifields.si_addr
           : 0;
 
-  frame.uc.uc_sigmask = proc->proc->sig_blocked;
+  frame.uc.uc_sigmask[0] = proc->proc->sig_blocked;
   frame.uc.uc_flags = 0;
   frame.uc.uc_link = NULL;
 
@@ -399,18 +398,11 @@ void check_pending_signals(trapframe *tf) {
       break;
     }
 
-    // SIGCANCEL: does not go through the sigaction table; the kernel delivers
-    // directly to cancel_handler
-    if (sig == SIGCANCEL) {
+    // Legacy libc registers a direct cancellation hook. Musl installs its
+    // SIGCANCEL action through rt_sigaction instead, so only bypass the action
+    // table when the compatibility hook is actually present.
+    if (sig == SIGCANCEL && proc->proc->cancel_handler != 0) {
       uint64_t handler = proc->proc->cancel_handler;
-      if (handler == 0) {
-        // Death by signal: exit_code is encoded as a Linux wait status
-        // (sig & 0x7f). Go through do_exit_with_code rather than sys_exit
-        // to avoid sys_exit's (code<<8) encoding misplacing the signal
-        // number into the exit status bits. D13.
-        do_exit_with_code(sig & 0x7f);
-        return;
-      }
       sigaction_t sa;
       __memset(&sa, 0, sizeof(sa));
       sa.__sigaction_handler._sa_handler = (void (*)(int))handler;
@@ -1126,8 +1118,8 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     return (int64_t)-EINVAL;
   if (sig == SIGKILL || sig == SIGSTOP)
     return (int64_t)-EINVAL;
-  if (sig == SIGCANCEL)
-    return (int64_t)-EINVAL;
+  // SIGCANCEL is an internal libc signal, but the kernel must still accept
+  // its rt_sigaction registration. Libc hides it from application-facing APIs.
 
   xtask *proc = current_task;
 
@@ -1164,8 +1156,11 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     }
     __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
 
-    if (new_act.sa_mask & ((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP))))
-      return (int64_t)-EINVAL;
+    /* SIGKILL and SIGSTOP cannot be blocked; Linux silently clears both
+     * bits instead of rejecting an otherwise valid sigaction. This is needed
+     * for musl's pthread cancellation handler, whose all-signals mask
+     * deliberately includes them. */
+    new_act.sa_mask &= ~(SIGMASK(SIGKILL) | SIGMASK(SIGSTOP));
 
     proc->proc->signal->action[sig] = new_act;
     __atomic_and_fetch(&proc->proc->sig_pending, ~(1ULL << (sig - 1)),
@@ -1216,9 +1211,8 @@ int64_t sys_sigreturn(int64_t unused1, int64_t unused2, int64_t unused3,
   tf->rip = sc->rip;
   tf->rflags = sc->eflags;
   tf->cs = sc->cs;
-  tf->ss = sc->ss;
 
-  proc->proc->sig_blocked = frame.uc.uc_sigmask;
+  proc->proc->sig_blocked = frame.uc.uc_sigmask[0];
   proc->proc->sig_blocked &= ~(SIGMASK(SIGKILL));
   proc->proc->sig_blocked &= ~(SIGMASK(SIGSTOP));
   // Restoring the pre-handler block mask can make a pending signal deliverable

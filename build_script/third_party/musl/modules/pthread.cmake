@@ -81,6 +81,36 @@ set(MUSL_PTHREAD_SOURCES
     # handler in particular).
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/signal/x86_64/restore.s
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal/libc.c
+    # defsysinfo.c defines `size_t __sysinfo;` — the vdso syscall-entry cache.
+    # musl 1.2.x's loader (dynlink.c) reads AT_SYSINFO into __sysinfo and stores
+    # it into the TCB (td->sysinfo); __libc_start_main does the same on the
+    # static path. This kernel has no vdso, so AT_SYSINFO is always 0 and
+    # __sysinfo stays 0 — but the symbol must still be defined or libc.so fails
+    # to link (R_X86_64_PC32 against undefined hidden `__sysinfo`). v1.1.19's
+    # loader did not reference __sysinfo, so defsysinfo.c was not needed then.
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal/defsysinfo.c
+    # version.c defines `const char __libc_version[] = VERSION;` (VERSION comes
+    # from the generated version.h, see musl_generate_headers). The 1.2.x loader
+    # references it for the ldd banner (dynlink.c:1895).
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal/version.c
+    # membarrier.c defines `int __membarrier(int, int)` (+ weak membarrier alias).
+    # v1.2.6's loader (ldso/dynlink.c:1686) calls __membarrier(PRIVATE_EXPEDITED,
+    # 0) after building a new DTV for dynamically-loaded TLS, to make the new DTV
+    # contents visible to peer threads before publishing the pointer. v1.1.19's
+    # loader did not do this. The function first tries __syscall(SYS_membarrier);
+    # on failure (older kernels) it falls back to a signal-broadcast emulation:
+    # __block_app_sigs → install a SIGSYNCCALL handler via __libc_sigaction →
+    # tkill every peer thread → sem_wait on a barrier. This OS's sys_membarrier
+    # returns 0 for PRIVATE_EXPEDITED/REGISTER on x86-64 TSO (stores-to-stores
+    # ordering already holds; no IPI), so the syscall path succeeds and the
+    # signal fallback is dead code. Its deps are nonetheless all present in case
+    # a future command lands on it: __block_app_sigs/__restore_sigs (block.c
+    # below), sem_*/__pthread_self (this module), __libc_sigaction (musl_glue.c's
+    # hand-written copy — NOT musl's src/signal/sigaction.c, which is deliberately
+    # not compiled: our kernel rt_sigaction wants an 8-byte mask, musl's builds a
+    # 16-byte k_sigaction), __tl_lock/__tl_unlock (weak_alias dummy_0 in this
+    # file). SYS_tkill (200) + SYS_membarrier (324) both exist in the dispatch.
+    ${CMAKE_SOURCE_DIR}/third_party/musl/src/linux/membarrier.c
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/errno/__errno_location.c
     # strerror.c builds errid[]/errmsg[] from __strerror.h (double-inclusion
     # macro table) and provides strerror/__strerror_l/strerror_l, replacing the
@@ -98,20 +128,19 @@ set(MUSL_PTHREAD_SOURCES
     # in strerror.c is dead on x86-64 (EDQUOT==122), compiled to nothing.
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/errno/strerror.c
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/locale/__lctrans.c
-    # __syscall (asm) + __syscall_ret (C): the two low-level syscall primitives
-    # musl's thread code calls (src/thread/__futex.c → syscall(SYS_futex);
+    # __syscall + __syscall_ret: the two low-level syscall primitives musl's
+    # thread code calls (src/thread/__futex.c → syscall(SYS_futex);
     # src/thread/__syscall_cp.c → __syscall; many src/env/*.c → __syscall_ret).
-    # Declarations live in src/internal/syscall.h:25 but their definitions are
-    # NOT in the src/thread/*.c glob: __syscall is per-arch asm
-    # (src/internal/x86_64/syscall.s — loads %rax=n, shuffles args to the Linux
-    # x86-64 syscall register order rdi/rsi/rdx/r10/r8/r9, `syscall`), and
     # __syscall_ret is src/internal/syscall_ret.c (errno translation for values
-    # > -4096). Our kernel dispatch uses the identical Linux x86-64 numbers
-    # (verified: futex=202/clone=56/tkill=200/rt_sigaction=13/...), so musl's
-    # __syscall reaches our kernel with no glue. Both must be compiled here so
-    # the merged libc.a/libc.so define them; otherwise the link fails with
-    # "hidden symbol `__syscall`/`__syscall_ret` isn't defined".
-    ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal/x86_64/syscall.s
+    # > -4096). __syscall itself is a static inline in
+    # arch/x86_64/syscall_arch.h (__syscall0..6 via __SYSCALL_DISP) since musl
+    # 1.2.x — the standalone src/internal/x86_64/syscall.s that v1.1.19 exported
+    # was removed, so every call site inlines the `syscall` insn and no object
+    # file is needed. Our kernel dispatch uses the identical Linux x86-64
+    # numbers (futex=202/clone=56/tkill=200/rt_sigaction=13/...), so musl's
+    # inlined __syscall reaches our kernel with no glue. __syscall_ret must be
+    # compiled here so the merged libc.a/libc.so defines it; otherwise the link
+    # fails with "hidden symbol `__syscall_ret` isn't defined".
     ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal/syscall_ret.c
 )
 add_musl_lib(musl_pthread SOURCES ${MUSL_PTHREAD_SOURCES})

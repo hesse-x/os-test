@@ -17,8 +17,6 @@
 // loader-only / non-pthread symbols remain here.
 //
 // Symbol surface still provided here (loader refs not covered elsewhere):
-//   __libc_get_version                    — ldd banner (dynlink.c:1554; never
-//                                            on the normal exec path)
 //   __tlsdesc_static, __tlsdesc_dynamic   — TLSDESC handlers whose addresses
 //                                            are stored by R_X86_64_TLSDESC
 //                                            relocs (dynlink.c:434/437). musl
@@ -60,12 +58,6 @@
 #include <stddef.h>
 
 extern char **__environ;
-
-// ===================== ldd / version (never on exec path)
-// =====================
-const char *__libc_get_version(void) {
-  return "1.1.19 (fused hand-written libc + musl pthread)";
-}
 
 // ===================== TLSDESC handlers (address taken by reloc)
 // ===================== Only emitted with -mtls-dialect=desc; our objects never

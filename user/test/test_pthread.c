@@ -7,9 +7,11 @@
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h> // sched_yield (musl <unistd.h> no longer declares it)
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <unity.h>
@@ -246,18 +248,21 @@ void test_pthread_main_exit_safe(void) {
   // the NULL-entry path is covered by other test cases.
 }
 
-static void *thread_guard_overflow_fn(void *arg) {
-  (void)arg;
-  void *g = mmap(NULL, 4096, 0, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-  if (g == MAP_FAILED)
-    return NULL;
-  *(volatile char *)g = 1; // should trigger #PF
-  return NULL;
-}
 void test_pthread_guard_pf(void) {
-  pthread_t t;
-  pthread_create(&t, NULL, thread_guard_overflow_fn, NULL);
-  pthread_join(t, NULL);
+  pid_t child = fork();
+  TEST_ASSERT_TRUE(child >= 0);
+  if (child == 0) {
+    void *g = mmap(NULL, 4096, 0, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (g == MAP_FAILED)
+      _exit(2);
+    *(volatile char *)g = 1; // must terminate this child with SIGSEGV
+    _exit(3);
+  }
+
+  int status;
+  TEST_ASSERT_EQUAL_INT(child, waitpid(child, &status, 0));
+  TEST_ASSERT_TRUE(WIFSIGNALED(status));
+  TEST_ASSERT_EQUAL_INT(SIGSEGV, WTERMSIG(status));
 }
 
 static void *thread_detached_fn(void *arg) {

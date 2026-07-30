@@ -1478,6 +1478,36 @@ int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   return (int64_t)r;
 }
 
+// ===================== BSD syscall: brk =====================
+// Linux brk(addr) semantics: returns the new program break on success, or the
+// CURRENT break on failure (it does NOT set errno — brk is one of the few
+// syscalls whose raw return is the break, not an error code). musl's mallocng
+// (src/malloc/mallocng/malloc.c) probes it once: brk(0) reads the current
+// break, then brk(new) tries to extend it; if brk(new) != new it sets
+// ctx.brk = -1 and permanently falls back to a pure mmap path for meta-area
+// allocation.
+//
+// This kernel has no brk heap — user heap is managed entirely via mmap
+// (sys_mmap), mirroring musl on brk-less architectures (e.g. aarch64 Linux,
+// where the brk syscall does not exist at all). We implement the clean
+// "always-fail" form: return 0 for every request. Since mallocng only ever
+// calls brk(new) with new >= pagesize > 0, brk(new) != new is always true,
+// ctx.brk becomes -1 on first probe, and mallocng runs in mmap-only mode —
+// identical to the hand-written user/lib/malloc.cc it replaces. Returning a
+// negative -ENOSYS here would be wrong: musl does not route brk through
+// __syscall_ret, so a negative would be stored into ctx.brk verbatim, and
+// (ctx.brk != -1) would keep the brk branch live with a garbage break.
+int64_t sys_brk(int64_t arg1, int64_t unused1, int64_t unused2, int64_t unused3,
+                int64_t unused4, int64_t unused5) {
+  (void)arg1;
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  return 0;
+}
+
 // ===================== BSD syscall: mremap =====================
 // Resize (and optionally relocate) a mapping. Linux mremap signature:
 //   mremap(old_addr, old_size, new_size, flags, new_addr)
@@ -6087,6 +6117,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_mmap(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MUNMAP:
     return sys_munmap(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_BRK:
+    return sys_brk(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MPROTECT:
     return sys_mprotect(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SYSCONF:

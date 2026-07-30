@@ -53,70 +53,36 @@
 # to __syscall(SYS_clock_gettime). Identical to musl on a no-vdso kernel.
 # vdso.c is therefore NOT compiled.
 #
-# sleep.c / usleep.c are EXCLUDED from this list: the repo's sleep/usleep
-# (kept in the slimmed user/lib/time.cc) loop on EINTR to sleep the FULL
-# duration, whereas musl's return the remaining interval. This deliberate
-# semantic choice was made in the unistd migration (MUSL_UNISTD_EXCLUDE);
-# retained here. They call the now-musl nanosleep().
-#
-# wcsftime.c now compiled in musl_wchar_objs (wchar tier landed); its time deps
-# (the strftime machinery below) resolve via the merged libc.a/libc.so. Known
-# upstream bug: wcsftime.c declares/calls 5-arg __strftime_fmt_1 while strftime.c
-# defines 6-arg (..., int pad) — on x86-64 SysV ABI %r9 (pad) is garbage. 0
-# in-tree callers; compiled verbatim (matches musl upstream). See todo.md.
+# sleep.c / usleep.c are NOT in src/time/ (they live in src/unistd/ and are
+# handled by the unistd module's MUSL_UNISTD_EXCLUDE). musl's versions return
+# the *remaining* interval on EINTR; this OS keeps the BSD "sleep the full
+# duration" loop in user/lib/time.cc instead. That retention is a deliberate
+# semantic choice, not a glob concern — file(GLOB src/time/*.c) never reaches
+# src/unistd. Revisit (align to musl's non-looping semantics) is tracked in
+# todo.md.
 #
 # timer_create.c / timer_settime.c / timer_delete.c / timer_gettime.c /
-# timer_getoverrun.c EXCLUDED: kernel has no SYS_timer_* (return -ENOSYS) AND
-# the SIGEV_THREAD path needs heavy pthread internals (pthread_barrier_*/
-# __reset_tls/SIGTIMER/__libc_sigaction). 0 callers. Deferred to todo.md.
+# timer_getoverrun.c EXCLUDED from the glob: kernel has no SYS_timer_*
+# (return -ENOSYS) AND the SIGEV_THREAD path needs heavy pthread internals
+# (pthread_barrier_*/__reset_tls/SIGTIMER/__libc_sigaction). 0 callers.
+# Deferred to todo.md.
 #
 # timespec_to_tm (repo non-standard, 0 callers) is deleted from time.cc and
 # libc.map; musl has no equivalent.
-set(MUSL_TIME_SOURCES
-    # pure compute
-    ${MUSL_DIR}/src/time/difftime.c
-    # calendar conversion helpers (used by gmtime_r/mktime/timegm/strftime)
-    ${MUSL_DIR}/src/time/__year_to_secs.c
-    ${MUSL_DIR}/src/time/__month_to_secs.c
-    ${MUSL_DIR}/src/time/__tm_to_secs.c
-    ${MUSL_DIR}/src/time/__secs_to_tm.c
-    # timezone machinery: __secs_to_zone (localtime/mktime), __utc (gmtime_r/
-    # timegm), tzset/timezone/daylight/tzname. Reads TZ env + /etc/localtime
-    # (absent → defaults UTC, matching the old repo UTC-only stub).
-    ${MUSL_DIR}/src/time/__tz.c
-    ${MUSL_DIR}/src/time/__map_file.c
-    # calendar wrappers
-    ${MUSL_DIR}/src/time/gmtime.c
-    ${MUSL_DIR}/src/time/gmtime_r.c
-    ${MUSL_DIR}/src/time/localtime.c
-    ${MUSL_DIR}/src/time/localtime_r.c
-    ${MUSL_DIR}/src/time/mktime.c
-    ${MUSL_DIR}/src/time/timegm.c
-    # asctime/ctime (deps: snprintf + __nl_langinfo_l via __asctime.c)
-    ${MUSL_DIR}/src/time/asctime.c
-    ${MUSL_DIR}/src/time/asctime_r.c
-    ${MUSL_DIR}/src/time/__asctime.c
-    ${MUSL_DIR}/src/time/ctime.c
-    ${MUSL_DIR}/src/time/ctime_r.c
-    # formatting (deps: __nl_langinfo_l, __tm_to_secs)
-    ${MUSL_DIR}/src/time/strftime.c
-    ${MUSL_DIR}/src/time/strptime.c
-    # syscall-backed clock wrappers
-    ${MUSL_DIR}/src/time/clock.c
-    ${MUSL_DIR}/src/time/clock_gettime.c
-    ${MUSL_DIR}/src/time/clock_settime.c
-    ${MUSL_DIR}/src/time/clock_getres.c
-    ${MUSL_DIR}/src/time/clock_getcpuclockid.c
-    ${MUSL_DIR}/src/time/clock_nanosleep.c
-    ${MUSL_DIR}/src/time/nanosleep.c
-    ${MUSL_DIR}/src/time/gettimeofday.c
-    ${MUSL_DIR}/src/time/time.c
-    ${MUSL_DIR}/src/time/timespec_get.c
-    # legacy / misc (0 callers, trivial compile-through; deps already in place)
-    ${MUSL_DIR}/src/time/times.c
-    ${MUSL_DIR}/src/time/utime.c
-    ${MUSL_DIR}/src/time/ftime.c
-    ${MUSL_DIR}/src/time/getdate.c
+file(GLOB MUSL_TIME_SOURCES ${MUSL_DIR}/src/time/*.c)
+list(REMOVE_ITEM MUSL_TIME_SOURCES
+    # wcsftime.c lives in src/time/ but is owned by the wchar module
+    # (musl_wchar_objs) — compiling it here too multi-defines
+    # __wcsftime_l/wcsftime at link. Known upstream quirk: wcsftime.c declares
+    # a 5-arg __strftime_fmt_1 while strftime.c defines 6-arg (..., int pad);
+    # on x86-64 SysV %r9 (pad) is garbage. 0 in-tree callers. See todo.md.
+    ${MUSL_DIR}/src/time/wcsftime.c
+    ${MUSL_DIR}/src/time/timer_create.c
+    ${MUSL_DIR}/src/time/timer_settime.c
+    ${MUSL_DIR}/src/time/timer_delete.c
+    ${MUSL_DIR}/src/time/timer_gettime.c
+    ${MUSL_DIR}/src/time/timer_getoverrun.c)
+list(APPEND MUSL_TIME_SOURCES
     # locale: __nl_langinfo_l/nl_langinfo/nl_langinfo_l provider (C-locale)
     # for __asctime.c/strftime.c/strptime.c. c_locale.c defines
     # __c_locale (referenced by the C_LOCALE macro __asctime.c passes to

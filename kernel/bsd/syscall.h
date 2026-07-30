@@ -39,6 +39,7 @@ int64_t sys_fork(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_execve(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_mmap(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_munmap(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_brk(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_mremap(int64_t, int64_t, int64_t, int64_t, int64_t,
                    int64_t); // stub
 int64_t sys_mprotect(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);

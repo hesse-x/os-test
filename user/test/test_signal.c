@@ -55,21 +55,22 @@ void test_sigaction_restore(void) {
   sigaction(SIGUSR1, &old_act, NULL);
 }
 
-/* 4. sa_mask validation: SIGKILL/SIGSTOP cannot be masked */
+/* 4. Linux accepts sa_mask with SIGKILL/SIGSTOP and clears those bits. */
 void test_sigaction_mask_validation(void) {
-  struct sigaction act;
+  struct sigaction act, got;
   memset(&act, 0, sizeof(act));
   act.sa_handler = SIG_IGN;
-  sigaddset(&act.sa_mask, SIGKILL); // illegal
+  sigaddset(&act.sa_mask, SIGKILL);
 
-  int r = sigaction(SIGUSR1, &act, NULL);
-  TEST_ASSERT_TRUE(r < 0); // should fail
+  TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR1, &act, NULL));
+  TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR1, NULL, &got));
+  TEST_ASSERT_EQUAL_INT(0, sigismember(&got.sa_mask, SIGKILL));
 
-  /* Also test SIGSTOP */
   sigemptyset(&act.sa_mask);
   sigaddset(&act.sa_mask, SIGSTOP);
-  r = sigaction(SIGUSR1, &act, NULL);
-  TEST_ASSERT_TRUE(r < 0);
+  TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR1, &act, NULL));
+  TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR1, NULL, &got));
+  TEST_ASSERT_EQUAL_INT(0, sigismember(&got.sa_mask, SIGSTOP));
 }
 
 /* 5. SIGKILL/SIGSTOP cannot be caught */

@@ -8,6 +8,21 @@
 #define _Int64 long
 #define _Reg long
 
+/* Keep musl ABI conditionals valid when this checked-in header shadows
+ * the generated arch header. */
+#ifndef __LITTLE_ENDIAN
+#define __LITTLE_ENDIAN 1234
+#endif
+#ifndef __BIG_ENDIAN
+#define __BIG_ENDIAN 4321
+#endif
+#ifndef __BYTE_ORDER
+#define __BYTE_ORDER __LITTLE_ENDIAN
+#endif
+#ifndef __LONG_MAX
+#define __LONG_MAX 0x7fffffffffffffffL
+#endif
+
 #if defined(__NEED_va_list) && !defined(__DEFINED_va_list)
 typedef __builtin_va_list va_list;
 #define __DEFINED_va_list

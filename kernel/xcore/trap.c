@@ -790,14 +790,15 @@ static void timer_handler(trapframe *tf) {
   {
     int cpu = get_cpu_local()->cpu_id;
     if (current_task && current_task->need_resched) {
-      if (++cpu_locals[cpu].preempt_stall_ticks >= 100) { // ~1s unconsumed
-        printk(
-            LOG_WARN,
-            "PREEMPT-STALLED cpu%d pid%d need_resched unconsumed for %u ticks, "
-            "this CPU run_queue ready=%d (preemption point bypassed? check "
-            "check_pending_signals)\n",
-            cpu, current_task->pid, cpu_locals[cpu].preempt_stall_ticks,
-            cpu_locals[cpu].run_count);
+      uint32_t stalled = ++cpu_locals[cpu].preempt_stall_ticks;
+      if (stalled >= 100 && stalled % 100 == 0) { // once per second
+        printk(LOG_WARN,
+               "PREEMPT-STALLED cpu%d pid%d rip=%p cs=%lx state=%d wait=%d "
+               "sig=%d assigned=%d ticks=%u ready=%d\n",
+               cpu, current_task->pid, (void *)tf->rip, tf->cs,
+               current_task->state, current_task->wait_event,
+               current_task->sig_pending, current_task->assigned_cpu, stalled,
+               cpu_locals[cpu].run_count);
       }
     } else {
       cpu_locals[cpu].preempt_stall_ticks = 0;

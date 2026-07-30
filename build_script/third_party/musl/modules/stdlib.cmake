@@ -74,7 +74,13 @@ set(MUSL_STDLIB_SOURCES
     ${MUSL_DIR}/src/stdlib/strtod.c
     ${MUSL_DIR}/src/stdlib/atof.c
     ${MUSL_DIR}/src/stdlib/bsearch.c
+    # qsort_r lives in qsort.c (__qsort_r + weak_alias qsort_r); the public
+    # qsort (no _r) lives in qsort_nr.c — a thin wrapper that calls __qsort_r
+    # with a 2-arg→3-arg cmp adapter. v1.1.19 had qsort in qsort.c directly;
+    # v1.2.6 split it (the nr variant is the default non-recursive qsort). Both
+    # must be compiled or the public qsort (libc.map) is undefined.
     ${MUSL_DIR}/src/stdlib/qsort.c
+    ${MUSL_DIR}/src/stdlib/qsort_nr.c
     # prng: musl's LCG (31-bit, RAND_MAX=0x7fffffff) replaces the repo's
     # 15-bit LCG. random/drand48 excluded (0 callers).
     ${MUSL_DIR}/src/prng/rand.c
@@ -97,6 +103,12 @@ set(MUSL_STDLIB_SOURCES
     # _Exit.c intentionally NOT here (already in musl_unistd_objs/_so).
     ${MUSL_DIR}/src/exit/exit.c
     ${MUSL_DIR}/src/exit/atexit.c
+    # abort_lock.c defines `volatile int __abort_lock[1];` — the lock abort.c
+    # (line 19) and _Fork/clone/posix_spawn take around the abort path. v1.1.19
+    # inlined this lock; v1.2.6 split it out (src/exit/abort_lock.c), so it is
+    # now a separate TU that must be compiled or `abort.c` fails with an
+    # undefined reference to __abort_lock. Sits here next to abort.c.
+    ${MUSL_DIR}/src/exit/abort_lock.c
     ${MUSL_DIR}/src/exit/abort.c
     ${MUSL_DIR}/src/exit/quick_exit.c
     ${MUSL_DIR}/src/exit/at_quick_exit.c

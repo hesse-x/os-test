@@ -311,22 +311,21 @@ struct sigcontext {
   uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
   uint64_t rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp;
   uint64_t rip, eflags;
-  uint16_t cs, ss, ds, es, fs, gs;
-  uint64_t fs_base, gs_base;
-  uint64_t cr2;
-  uint64_t _pad1; // align to 8 bytes
+  uint16_t cs, gs, fs, __pad0;
+  uint64_t err, trapno, oldmask, cr2;
+  void *fpstate;
+  uint64_t __reserved1[8];
 };
 
-// ===================== ucontext_t =====================
-// uc_stack records the alternate signal stack active at delivery time (S04).
-// rt_sigreturn restores the per-task sigaltstack state from it. The field
-// sits between uc_link and uc_sigmask to mirror Linux's x86-64 ucontext_t.
+// Linux x86-64 signal-frame ABI. Userspace libc indexes uc_mcontext as 23
+// general registers and expects a 128-byte sigset followed by fpstate storage.
 struct ucontext_t {
-  uint64_t uc_flags;          // cleared to 0
-  struct ucontext_t *uc_link; // NULL
-  stack_t uc_stack;           // S04: altstack in effect at delivery
-  sigset_t uc_sigmask;
+  uint64_t uc_flags;
+  struct ucontext_t *uc_link;
+  stack_t uc_stack;
   struct sigcontext uc_mcontext;
+  uint64_t uc_sigmask[16];
+  uint64_t __fpregs_mem[64];
 };
 
 // ===================== rt_sigframe =====================

@@ -416,13 +416,17 @@ global:
 
     /* <sys/mman.h> — musl upstream (src/mman/*.c via musl_mman_objs) + the
      * retained hand-written memfd_create (musl src/mman has none). mmap64 is
-     * musl's LFS64(mmap) weak_alias of __mmap. msync/madvise/mlock/mlockall/
-     * munlock/munlockall/mincore have no kernel handler (the syscall dispatch
-     * returns -ENOSYS) but the symbols are exported so callers link; they
-     * return -1/ENOSYS at runtime (POSIX-symbol-present / kernel-feature-absent
-     * middle state, doc/design/todo.md). remap_file_pages is NOT built (musl
-     * mremap.c does not define it). */
-    memfd_create; mmap; mmap64; munmap; mprotect; mremap; msync;
+     * NOT a symbol: musl's <sys/mman.h> does `#define mmap64 mmap` (LFS
+     * alias), so every mmap64 call site rewrites to mmap at preprocess time
+     * and no object exports mmap64 — listing it here made the export check
+     * fail under v1.2.6 (it was tolerated earlier only because a prior build
+     * path defined it). msync/madvise/mlock/mlockall/munlock/munlockall/
+     * mincore have no kernel handler (the syscall dispatch returns -ENOSYS)
+     * but the symbols are exported so callers link; they return -1/ENOSYS at
+     * runtime (POSIX-symbol-present / kernel-feature-absent middle state,
+     * doc/design/todo.md). remap_file_pages is NOT built (musl mremap.c does
+     * not define it). */
+    memfd_create; mmap; munmap; mprotect; mremap; msync;
     madvise; posix_madvise; mincore;
     mlock; munlock; mlockall; munlockall;
     shm_open; shm_unlink;
@@ -533,7 +537,9 @@ global:
     /* musl-compatible public ABI used by fused libc internals */
     prctl; strnlen;
 
-    /* __dls2 在 ldso 自身 dynsym 里 find_sym("__dls3") 调用 stage-3 (dynlink.c:1439)；musl 自身 libc.so 本就导出 __dls3，被 local:* 误伤需显式导出 */
+    /* Bootstrap stages are reached through find_sym() before normal dynamic
+       linking is available, so both must remain in ldso's dynsym. */
+    __dls2b;
     __dls3;
 
     /* <dlfcn.h> — dlopen/dladdr/dl_iterate_phdr from fused dynlink.c; dlsym/dlclose/dlinfo/dlerror from musl_dl_objs (dlerror.c reads musl struct pthread's dlerror_buf/flag at %fs:0, now that musl_pthread provides the full layout). */

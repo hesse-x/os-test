@@ -54,21 +54,23 @@ set(MUSL_MMAN_SOURCES
 
 add_library(musl_mman_objs OBJECT ${MUSL_MMAN_SOURCES})
 target_include_directories(musl_mman_objs PRIVATE
+    ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
     ${MUSL_DIR}/arch/x86_64
     ${MUSL_DIR}/arch/generic
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
-target_compile_options(musl_mman_objs PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -fno-pie -Wno-all -Wno-ignored-attributes)
+target_compile_options(musl_mman_objs PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fno-pie -Wno-all -Wno-ignored-attributes)
 
 # libc.so PIC mirror (same as musl_fcntl_objs_so above).
 add_library(musl_mman_objs_so OBJECT ${MUSL_MMAN_SOURCES})
 target_include_directories(musl_mman_objs_so PRIVATE
+    ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
     ${MUSL_DIR}/arch/x86_64
     ${MUSL_DIR}/arch/generic
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
-target_compile_options(musl_mman_objs_so PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -fPIC -Wno-all -Wno-ignored-attributes)
+target_compile_options(musl_mman_objs_so PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fPIC -Wno-all -Wno-ignored-attributes)

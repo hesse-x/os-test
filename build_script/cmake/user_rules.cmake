@@ -514,6 +514,21 @@ function(musl_generate_headers)
         DEPENDS ${MUSL_SRC}/arch/x86_64/bits/syscall.h.in
         COMMENT "Generating musl bits/syscall.h")
 
+    # version.h — consumed by src/internal/version.c (`const char __libc_version[]
+    # = VERSION;`), which the 1.2.x loader references for its ldd banner
+    # (dynlink.c:1895). musl's Makefile generates obj/src/internal/version.h from
+    # `sh tools/version.sh` (which, with no .git, just `cat VERSION`). We mirror
+    # that into musl_gen (top level, NOT bits/) so src/internal/version.c's
+    # #include "version.h" resolves to it via MUSL_GEN_INCLUDE_DIR. v1.1.19's
+    # loader did not reference __libc_version, so this was not generated before.
+    # Done at configure time (file READ/WRITE) rather than as a build-time custom
+    # command: VERSION is a checked-in static file, and shell $(cat) inside a
+    # CMake custom command collides with ninja's $var syntax.
+    file(READ ${MUSL_SRC}/VERSION _musl_version)
+    string(STRIP "${_musl_version}" _musl_version)
+    file(WRITE ${CMAKE_BINARY_DIR}/musl_gen/version.h
+         "#define VERSION \"${_musl_version}\"\n")
+
     add_custom_target(musl_headers ALL
         DEPENDS ${_gendir}/alltypes.h ${_gendir}/syscall.h)
 endfunction()
@@ -541,12 +556,20 @@ function(add_musl_lib lib_name)
     # musl-internal + arch headers first (BEFORE so they win over the
     # FREESTANDING_FLAGS -isystem GCC dir), then the project-wide baselines.
     # MUSL_GEN_INCLUDE_DIR first so generated bits/alltypes.h & bits/syscall.h
-    # win over the arch .in templates.
+    # win over the arch .in templates. src/include precedes src/internal per
+    # musl's own Makefile order (-Isrc/include -Isrc/internal): since musl
+    # 1.2.x, src/internal/syscall.h starts with #include <features.h>, and the
+    # internal macros hidden/weak/weak_alias are defined ONLY in
+    # src/include/features.h (v1.1.19 defined weak_alias in libc.h and had no
+    # hidden keyword at all). Without src/include on the path, <features.h>
+    # falls through to user/include/features.h and every musl source fails with
+    # "unknown type name 'hidden'".
     target_include_directories(${lib_name} BEFORE PRIVATE
         ${MUSL_GEN_INCLUDE_DIR}
-        ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal
         ${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
         ${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic
+        ${CMAKE_SOURCE_DIR}/third_party/musl/src/include
+        ${CMAKE_SOURCE_DIR}/third_party/musl/src/internal
         ${CMAKE_SOURCE_DIR}/third_party/musl/include
         ${ARG_INCLUDE_DIRS}
     )
@@ -566,9 +589,30 @@ function(add_musl_lib lib_name)
     # link fine into a static -no-pie ELF, so one compile serves both consumers.
     # NO WARN_FLAGS (musl upstream is not subject to our -Werror gate).
     # -Wno-everything silences musl's own warnings under our freestanding setup.
+    # -D_XOPEN_SOURCE=700 mirrors musl's own Makefile (CFLAGS_ALL += -D_XOPEN_SOURCE=700)
+    # and the loader target in musl_rules.cmake. It is load-bearing: without it,
+    # musl <features.h>'s default branch fires (it enables _BSD_SOURCE only when
+    # _XOPEN_SOURCE is undefined) and sets _BSD_SOURCE=1. That in turn makes
+    # <unistd.h>'s `#if defined(_GNU_SOURCE) || defined(_BSD_SOURCE)` block
+    # (which declares `long syscall(long, ...)`) active — and since
+    # src/internal/syscall.h #defines `syscall(...)` as a macro, that prototype
+    # is macro-expanded into a garbage `__syscall_ret(...)` declaration that
+    # conflicts with the real one (musl 1.2.x; v1.1.19 did not ship
+    # src/include/unistd.h so the collision did not arise). With _XOPEN_SOURCE=700
+    # set, _BSD_SOURCE stays undefined and the `long syscall` prototype is skipped.
     separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
     target_compile_options(${lib_name} PRIVATE
-        -m64 ${FREESTANDING_FLAGS} -fPIC -Wno-everything ${ARG_FLAGS_LIST})
+        -m64 ${FREESTANDING_FLAGS} -fPIC -Wno-everything -D_XOPEN_SOURCE=700 ${ARG_FLAGS_LIST})
+    # -Wno-everything does NOT silence -Wvisibility in clang (visibility is a
+    # hard warning outside the -everything group, like -Wempty-body below).
+    # musl's <termios.h> declares tcgetwinsize/tcsetwinsize taking `struct
+    # winsize *` after setting __NEED_struct_winsize; if the resolved
+    # bits/alltypes.h does not emit the struct definition (a musl-version /
+    # generated-header mismatch), clang warns the declaration "will not be
+    # visible outside of this function" on every src/unistd/tc{get,set}pgrp.c
+    # compile. musl is third-party upstream not under our -Werror gate, so
+    # silence it here across all musl modules — same rationale as -Wno-everything.
+    target_compile_options(${lib_name} PRIVATE -Wno-visibility)
     # musl's bare .s sources (src/signal/x86_64/restore.s, src/thread/x86_64/*.s,
     # src/internal/x86_64/syscall.s) carry no .note.GNU-stack, so each linked
     # object without the note trips `ld: warning: ... missing .note.GNU-stack

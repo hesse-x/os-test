@@ -169,3 +169,26 @@ MUSL_HIDDEN void *__vdsosym(const char *vername, const char *name) {
   (void)name;
   return 0;
 }
+
+/* __fstat — musl's src/time/__map_file.c (mapped-file reader for TZ/locale
+ * data: __tz.c reads /etc/localtime, locale_map.c/catopen read locale files)
+ * calls the hidden __fstat to get the size of an already-open fd before
+ * __mmap'ing it. This OS has no /etc/localtime and no locale data, so
+ * __map_file's callers short-circuit (NULL path / open fails) and __fstat is
+ * effectively dead at runtime — but it is still a link-time reference that
+ * must resolve or libc.so fails with "undefined hidden symbol `__fstat`".
+ *
+ * We do NOT compile musl's src/stat/fstat.c here: that drags in fstatat.c's
+ * statx→stat conversion (a whole stat module), and would multi-define the
+ * public fstat/stat/fstatat that this repo's user/lib/file.cc already
+ * provides via the same statx AT_EMPTY_PATH path the kernel implements
+ * (SYS_STATX=332; SYS_fstatat/SYS_lstat are absent). Instead, mirror musl's
+ * own fstat.c trick: provide the hidden __fstat and let it forward to the
+ * public fstat (defined in file.cc), so both the hidden musl reference and
+ * the public libc surface resolve to the same code. See malloc.md / the
+ * time-module note for the broader "hidden-symbol glue" pattern. */
+struct stat; /* forward — full prototype is in <sys/stat.h> (public header) */
+MUSL_HIDDEN int __fstat(int fd, struct stat *st) {
+  extern int fstat(int fd, struct stat *st);
+  return fstat(fd, st);
+}
