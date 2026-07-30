@@ -136,8 +136,11 @@ mkdisk.sh 生成单盘两分区 build/disk.img（192MB）：
 - libffi：build_script/third_party/libffi/libffi.cmake（config 模板仍在 `build_script/libffi/`）
 - libexpat：build_script/third_party/libexpat/libexpat.cmake（config 模板仍在 `build_script/libexpat/`）
 - wayland：build_script/third_party/wayland/wayland.cmake（config 模板仍在 `build_script/wayland/`）
-- musl：build_script/third_party/musl/musl_rules.cmake（独立子项目：loader/crt；编进 libc 的
-  musl OBJECT 库仍内联在 `user/CMakeLists.txt`）
+- musl：build_script/third_party/musl/musl_rules.cmake（入口：顶部 `musl_generate_headers()`
+  + `MUSL_DIR` 别名；loader/crt + `musl_libc` 聚合 target；末尾 include 14 个模块文件）；
+  modules/{unistd,fcntl,socket,dl,dirent,mman,stdio,multibyte,wchar,pthread,string,math,
+  stdlib,time}.cmake（编进 libc 的 14 个 musl OBJECT 库，从 user/CMakeLists.txt 迁出）。
+  顶层 CMakeLists.txt 仍只 include musl_rules.cmake（单入口），与内联时同作用域。
 
 include 顺序约束：libffi → libexpat → wayland。wayland 的 host wayland-scanner 在
 configure 期读 `LIBEXPAT_DIR`（由 libexpat.cmake 设置）拼 host-scanner flags 与 DEPENDS，

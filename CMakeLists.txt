@@ -177,6 +177,10 @@ include(build_script/cmake/image_rules.cmake)
 # musl subproject (ldso.md Phase 0): build musl libc.so (fused loader) + crt as a
 # standalone ./configure && make subproject, ADDITIVE to the hand-written stack.
 # Downstream (hello_musl_dyn) consumes the `musl_libc` target + MUSL_LIB_DIR.
+# musl_rules.cmake is the single entry point: it runs musl_generate_headers() +
+# sets MUSL_DIR up top, builds loader/crt/`musl_libc`, then includes the 14 libc
+# OBJECT libs (modules/{unistd,fcntl,socket,dl,dirent,mman,stdio,multibyte,wchar,
+# pthread,string,math,stdlib,time}.cmake) that feed libc.a/libc.so via EXTRA_OBJS.
 include(build_script/third_party/musl/musl_rules.cmake)
 
 # Boot loader (standalone EFI application, compiled with GNU-EFI)

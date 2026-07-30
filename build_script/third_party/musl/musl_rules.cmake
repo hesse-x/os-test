@@ -23,6 +23,16 @@ set(MUSL_SRC ${CMAKE_SOURCE_DIR}/third_party/musl)
 set(MUSL_BUILD ${CMAKE_BINARY_DIR}/musl)
 set(MUSL_LIB_DIR ${MUSL_BUILD}/lib)
 
+# Generate musl's build-time headers (bits/alltypes.h + bits/syscall.h) and
+# export MUSL_GEN_INCLUDE_DIR to this (top-level) directory scope BEFORE any
+# add_musl_lib / raw musl target is defined. Previously called from
+# user/CMakeLists.txt (pthread block); moved up so the 14 libc OBJECT libs
+# (modules/*.cmake, included at the bottom of this file) see it.
+musl_generate_headers()
+# Alias used by modules/*.cmake source lists (mirrors the MUSL_DIR that used to
+# be set in user/CMakeLists.txt). Same value as MUSL_SRC.
+set(MUSL_DIR ${MUSL_SRC})
+
 # musl-internal include order: musl src/internal BEFORE user/include so musl
 # sources' quoted #include "syscall.h"/"libc.h" resolve to musl's own headers.
 # arch/x86_64 provides syscall_arch.h; arch/generic is the bits fallback.
@@ -130,3 +140,16 @@ add_custom_target(musl_libc ALL
             ${MUSL_LIB_DIR}/Scrt1.o
             ${MUSL_LIB_DIR}/crti.o
             ${MUSL_LIB_DIR}/crtn.o)
+
+# ===================== libc OBJECT libs (14 modules, fed into libc.a/libc.so) =====================
+# Each module file defines one or two musl OBJECT sub-libraries (source list +
+# exclude + add_musl_lib / raw add_library), moved out of user/CMakeLists.txt.
+# Order matches the original inline layout (unistd → time); CMake resolves
+# target deps at generate time so order is for readability, not correctness —
+# but musl_generate_headers() above MUST run before any add_musl_lib here.
+set(_musl_modules
+    unistd fcntl socket dl dirent mman
+    stdio multibyte wchar pthread string math stdlib time)
+foreach(_m ${_musl_modules})
+    include(${CMAKE_CURRENT_LIST_DIR}/modules/${_m}.cmake)
+endforeach()
