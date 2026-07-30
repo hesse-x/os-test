@@ -64,7 +64,7 @@ static struct test_entry tests[] = {
     {"drm_ioctl", "/test/drm_ioctl.elf"},
     {"drm_phase_c", "/test/drm_phase_c.elf"},
     {"drm_test_link", "/test/drm_test_link.elf"},
-    {"venus_channel", "/test/venus_channel.elf"},
+    {"virgl_channel", "/test/virgl_channel.elf"},
     {"test_sysfs", "/test/test_sysfs.elf"},
     {"test_libudev", "/test/test_libudev.elf"},
     {"test_vfs_dispatch", "/test/test_vfs_dispatch.elf"},

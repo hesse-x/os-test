@@ -96,12 +96,14 @@ add_user_dyn_elf(drm_test C SOURCES drm_test.c LINK_LIBS c)
 # Layer 14: DRM ioctl (GET_MAGIC, AUTH_MAGIC, ADDFB2, GEM_CLOSE, GETFB, caps)
 add_user_dyn_elf(drm_ioctl C SOURCES test_drm_ioctl.c LINK_LIBS c STATIC_LIBS unity)
 
-# plan2: Venus channel end-to-end (GETPARAM/GET_CAPS/CONTEXT_INIT/CREATE_BLOB/
-# SYNCOBJ timeline/EXECBUFFER + sync_file). Raw ioctls like drm_ioctl, no libdrm.
-add_user_dyn_elf(venus_channel C SOURCES test_venus_channel.c LINK_LIBS c STATIC_LIBS unity)
-
 # Phase C: DRM property/master/cursor/cleanup tests
 add_user_dyn_elf(drm_phase_c C SOURCES test_drm_mode.c LINK_LIBS c STATIC_LIBS unity)
+
+# virgl (GL) legacy command plane (GETPARAM/GET_CAPS/CONTEXT_INIT/
+# RESOURCE_CREATE v1/TRANSFER/WAIT/GEM_CLOSE). Raw ioctls, no libdrm.
+# Host-independent capability probes assert; host-dependent virgl-path cases
+# self-skip when no virglrenderer back-end (capset 1/2) is present.
+add_user_dyn_elf(virgl_channel C SOURCES test_virgl_channel.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 15: ioctl variable-length (user-space driver proxy, RECV_IOCTL path)
 add_user_dyn_elf(ioctl_varlen C SOURCES test_ioctl_varlen.c LINK_LIBS c STATIC_LIBS unity)

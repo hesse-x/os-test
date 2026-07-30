@@ -409,17 +409,6 @@ int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence) {
   return fd;
 }
 
-/* FD_SYNC_FILE (plan2) lookup: return the fence bound to a sync_file fd, or
- * NULL if the fd is not a sync_file. Driver syncobj-import path uses this
- * instead of dereferencing struct file / fd table directly. The fence ref is
- * not borrowed here — the fd still owns it for its lifetime. */
-struct drm_fence *bsd_sync_file_fd_fence(xtask *proc, int fd) {
-  struct file *f = fd_lookup(proc->proc->files, fd);
-  if (!f || f->type != FD_SYNC_FILE)
-    return NULL;
-  return f->sync_file_fence;
-}
-
 void pty_dup_file(struct file *f) {
   struct pty *pty = f->pty;
   if (!pty)

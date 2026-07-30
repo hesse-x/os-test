@@ -97,18 +97,16 @@ extern struct drm_cursor g_drm_cursor;
 
 #define MAX_CAPSETS 8
 #define MAX_CTX_IDS 256
-#define MAX_BLOB_RESOURCES 64
 
-#define MAX_SYNCOBJS_PER_FD 256
+/* virgl legacy (v1) resources: GEM handles allocated from VIRGL_HANDLE_BASE
+ * upward so they never collide numerically with dumb (1..16) handles, letting
+ * GEM_CLOSE / RESOURCE_INFO dispatch by a single range test. */
+#define MAX_VIRGL_RESOURCES 128
+#define VIRGL_HANDLE_BASE 0x1000u
+
 #define MAX_FENCES 256
 
-/* Fence: one per submitted EXECBUFFER with FENCE_FD_OUT or out_syncobj. */
-struct drm_fence_syncobj_signal {
-  struct drm_syncobj *syncobj; /* direct pointer (not handle): per-fd handle
-                                * is ambiguous across drm_files */
-  uint64_t point;
-};
-
+/* Fence: one per submitted EXECBUFFER with FENCE_FD_OUT (sync_file). */
 struct drm_fence {
   uint32_t ctx_id; /* 0 = free slot */
   uint8_t ring_idx;
@@ -117,30 +115,19 @@ struct drm_fence {
   refcount_t refcount; /* see 2A-3 / 2D-1: sync_file fd holds a ref */
   spinlock lock;       /* irqsave: signal runs in ISR, add runs in process */
   wait_queue_head wq;  /* tasks waiting for signal */
-  struct drm_fence_syncobj_signal *syncobj_signals;
-  uint32_t num_syncobj_signals;
 };
 
-/* Timeline syncobj: Vulkan timeline semaphore backing. */
-struct drm_syncobj {
-  uint32_t handle;         /* 1-based, 0 reserved (sentinel) */
-  uint64_t timeline_point; /* highest signaled point */
-  spinlock lock;
-  wait_queue_head wq; /* tasks waiting for timeline_point to advance */
-};
-
-struct drm_blob_resource {
-  uint32_t bo_handle;  /* GEM handle (1-based) */
-  uint32_t res_handle; /* virtio-gpu resource id (host) */
-  uint32_t blob_mem;   /* VIRTGPU_BLOB_MEM_HOST3D (0x2) */
-  uint32_t blob_flags; /* MAPPABLE | SHAREABLE */
+/* virgl legacy (v1) resource: kernel-allocated guest backing attached to a
+ * host 3D resource. The winsys passes only bo_handle to TRANSFER/WAIT, so the
+ * kernel persists bo_handle→res_handle here and resolves it internally. */
+struct drm_virgl_resource {
+  uint32_t bo_handle;  /* == VIRGL_HANDLE_BASE + index, 0 = free slot */
+  uint32_t res_handle; /* host virtio-gpu resource id (== bo_handle) */
+  uint64_t guest_phys; /* guest physical address of backing pages */
+  void *kernel_vaddr;  /* kernel virtual address of backing pages */
   uint64_t size;
-  uint64_t blob_id;      /* 0 for shmem, or Venus mem_id */
-  uint64_t mmap_offset;  /* handle << PAGE_SHIFT */
-  uint64_t guest_phys;   /* host-visible phys from MAP_BLOB resp */
-  uint64_t kernel_vaddr; /* phys_to_virt(guest_phys) */
   int refcount;
-  bool mapped; /* MAP_BLOB executed */
+  bool ctx_attached; /* reserved for future CTX_ATTACH_RESOURCE */
 };
 
 /* Cached capset info fetched at init via GET_CAPSET_INFO/GET_CAPSET. */
@@ -149,17 +136,6 @@ struct drm_capset {
   uint32_t ver;
   uint32_t size;
   void *data; /* kmalloc'd capset payload */
-};
-
-/* Venus capset (capset id 4) synthetic payload (from Mesa venus_hw.h). */
-struct virgl_renderer_capset_venus {
-  uint32_t wire_format_version;
-  uint32_t vk_xml_version;
-  uint32_t vk_ext_command_serialization;
-  uint32_t vk_mesa_venus_protocol;
-  uint32_t supports_blob_id_0;
-  uint32_t supports_multiple_timelines;
-  uint32_t allow_vk_wait_syncs;
 };
 
 struct drm_file {
@@ -177,13 +153,9 @@ struct drm_file {
   uint32_t poll_rings_mask;
   uint64_t *ring_fence_counters; /* per-ring fence counter (plan2 uses) */
 
-  int created_blob_handles[MAX_BLOB_RESOURCES];
-  int created_blob_count;
-
-  /* syncobj table (plan2). syncobjs[0] is a sentinel (never used). */
-  struct drm_syncobj *syncobjs[MAX_SYNCOBJS_PER_FD];
-  uint32_t
-      next_syncobj_handle; /* 0 init; create uses ++next (first handle=1) */
+  /* virgl legacy (v1) resources created by this fd (for drm_close cleanup) */
+  int created_virgl_handles[MAX_VIRGL_RESOURCES];
+  int created_virgl_count;
 
   /* Tracking of resources owned by this fd */
   int created_fb_ids[MAX_FRAMEBUFFERS];
@@ -255,10 +227,10 @@ struct drm_device {
                          32]; /* bit i set = ctx_id i+1 in use */
   spinlock ctx_id_lock;
 
-  /* blob resource table (plan1 CREATE_BLOB) */
-  struct drm_blob_resource blobs[MAX_BLOB_RESOURCES];
-  uint32_t next_blob_handle; /* 1-based, monotonic */
-  spinlock blob_lock;
+  /* virgl legacy (v1) resource table. Handles start at VIRGL_HANDLE_BASE. */
+  struct drm_virgl_resource virgl_res[MAX_VIRGL_RESOURCES];
+  uint32_t next_virgl_handle; /* monotonic from VIRGL_HANDLE_BASE */
+  spinlock virgl_lock;
 
   /* fence table (plan2). slot free iff ctx_id==0. */
   struct drm_fence fences[MAX_FENCES];

@@ -16,6 +16,13 @@ rm -f "$LOGFILE"
 
 SERIAL_OPTS="-serial file:$LOGFILE -monitor stdio"
 
+# virgl GL backend: QEMU 8.2.2 has no virtio-gpu-pci.gl property — virgl 3D is
+# driven by the display backend. -display egl-headless gives virtio-gpu an EGL
+# GL context (no GUI window), so the host advertises virgl capsets 1/2 and the
+# kernel caches them. This run is headless/serial-only (-vga none, monitor on
+# stdio), so egl-headless rather than gtk,gl=on. Then /dev/dri/renderD128
+# GETPARAM(SUPPORTED_CAPSET_IDs) reports VIRGL/VIRGL2, and the virgl_channel
+# host-dependent cases run instead of self-skipping.
 qemu-system-x86_64 \
     -machine q35 \
     --enable-kvm -cpu host \
@@ -25,7 +32,8 @@ qemu-system-x86_64 \
     -device usb-kbd,bus=xhci.0 \
     -device usb-mouse,bus=xhci.0 \
     -vga none \
-    -device virtio-gpu-pci \
+    -device virtio-gpu-gl \
+    -display sdl,gl=on \
     -m 2G -bios /usr/share/ovmf/OVMF.fd \
     -smp 2 \
     $SERIAL_OPTS \

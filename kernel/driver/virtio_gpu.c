@@ -100,11 +100,10 @@ extern dev_driver virtio_gpu_driver;
  * boundary (only devtmpfs/sysfs/poll_types are allowed). drm_fence is opaque to
  * the BSD layer; the pointer is just handed across. */
 int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence);
-struct drm_fence *bsd_sync_file_fd_fence(xtask *proc, int fd);
 
 /* plan2 forward declarations: these are defined later in the file but used by
- * the ISR (drm_fence_find/signal) and the syncobj/EXECBUFFER ioctls
- * (drm_file_current) which precede their definitions. */
+ * the ISR (drm_fence_find/signal) and the EXECBUFFER ioctl (drm_file_current)
+ * which precede their definitions. */
 static struct drm_fence *drm_fence_find(uint32_t ctx_id, uint8_t ring_idx,
                                         uint64_t fence_id);
 static void drm_fence_signal(struct drm_fence *fence);
@@ -643,8 +642,6 @@ static struct drm_fence *drm_fence_create(uint32_t ctx_id, uint8_t ring_idx,
       f->ring_idx = ring_idx;
       f->fence_id = fence_id;
       f->signaled = false;
-      f->syncobj_signals = NULL;
-      f->num_syncobj_signals = 0;
       refcount_set(&f->refcount, 1);
       f->lock = SPINLOCK_INIT;
       init_wait_queue_head(&f->wq);
@@ -684,10 +681,6 @@ void drm_fence_put(struct drm_fence *fence) {
     spin_unlock(&g_drm.fence_lock);
     return;
   }
-  if (fence->syncobj_signals)
-    kfree(fence->syncobj_signals);
-  fence->syncobj_signals = NULL;
-  fence->num_syncobj_signals = 0;
   fence->ctx_id = 0; /* mark slot free */
   spin_unlock(&g_drm.fence_lock);
 }
@@ -703,9 +696,9 @@ bool drm_fence_is_signaled(struct drm_fence *fence) {
   return s;
 }
 
-/* ISR: mark fence signaled, advance attached syncobjs (by pointer), wake
- * waiters. Runs in interrupt context — MUST use irqsave. Does NOT free the
- * fence (refcount may be held by a sync_file fd); only marks signaled. */
+/* ISR: mark fence signaled and wake waiters. Runs in interrupt context — MUST
+ * use irqsave. Does NOT free the fence (refcount may be held by a sync_file
+ * fd); only marks signaled. */
 static void drm_fence_signal(struct drm_fence *fence) {
   if (!fence)
     return;
@@ -716,20 +709,6 @@ static void drm_fence_signal(struct drm_fence *fence) {
     return;
   }
   fence->signaled = true;
-  for (uint32_t i = 0; i < fence->num_syncobj_signals; i++) {
-    struct drm_syncobj *so = fence->syncobj_signals[i].syncobj;
-    if (!so)
-      continue;
-    /* so->lock is also taken from process context (timeline_signal/wait/reset/
-     * query). This runs in GPU ISR → must be irqsave to avoid same-CPU
-     * reentrant deadlock (spinlock.h:58 BUG_ON would panic in debug builds). */
-    uint64_t soflags;
-    spin_lock_irqsave(&so->lock, &soflags);
-    if (fence->syncobj_signals[i].point > so->timeline_point)
-      so->timeline_point = fence->syncobj_signals[i].point;
-    spin_unlock_irqrestore(&so->lock, soflags);
-    __wake_up(&so->wq, 0);
-  }
   spin_unlock_irqrestore(&fence->lock, flags);
   __wake_up(&fence->wq, 0);
 }
@@ -773,46 +752,6 @@ static __attribute__((unused)) int drm_fence_wait(struct drm_fence *fence,
   return ret;
 }
 
-/* Attach (syncobj, point) to fence so drm_fence_signal advances it. Process
- * context — must be called BEFORE submit (see 2C-2 ordering). Uses
- * spin_lock_irqsave to serialize with ISR's drm_fence_signal. Stores the
- * syncobj pointer directly (not the handle). */
-static int drm_fence_add_syncobj_signal(struct drm_fence *fence,
-                                        struct drm_syncobj *so,
-                                        uint64_t point) {
-  uint64_t flags;
-  spin_lock_irqsave(&fence->lock, &flags);
-  void *arr = kmalloc((fence->num_syncobj_signals + 1) *
-                      sizeof(struct drm_fence_syncobj_signal));
-  if (!arr) {
-    spin_unlock_irqrestore(&fence->lock, flags);
-    return -ENOMEM;
-  }
-  if (fence->num_syncobj_signals && fence->syncobj_signals)
-    __memcpy(arr, fence->syncobj_signals,
-             fence->num_syncobj_signals *
-                 sizeof(struct drm_fence_syncobj_signal));
-  ((struct drm_fence_syncobj_signal *)arr)[fence->num_syncobj_signals].syncobj =
-      so;
-  ((struct drm_fence_syncobj_signal *)arr)[fence->num_syncobj_signals].point =
-      point;
-  if (fence->syncobj_signals)
-    kfree(fence->syncobj_signals);
-  fence->syncobj_signals = arr;
-  fence->num_syncobj_signals++;
-  spin_unlock_irqrestore(&fence->lock, flags);
-  return 0;
-}
-
-/* ===== Syncobj (plan2) ===== */
-
-static struct drm_syncobj *syncobj_lookup(struct drm_file *df,
-                                          uint32_t handle) {
-  if (!df || handle == 0 || handle >= MAX_SYNCOBJS_PER_FD)
-    return NULL;
-  return df->syncobjs[handle];
-}
-
 /* Install a sync_file fd bound to a fence. Takes a ref on the fence (released
  * when the fd is closed via file_put's switch case for FD_SYNC_FILE). poll(fd)
  * returns POLLIN once fence->signaled. Modeled on eventfd/timerfd fd install.
@@ -834,280 +773,6 @@ static int drm_fence_install_sync_file(struct drm_fence *fence, xtask *proc) {
   if (fd < 0)
     drm_fence_put(fence); /* reclaim the ref the fd won't be holding */
   return fd;
-}
-
-/* ===== Syncobj ioctls (plan2) ===== */
-
-static long drm_ioctl_syncobj_create(void *arg) {
-  struct drm_syncobj_create *c = (struct drm_syncobj_create *)arg;
-  struct drm_file *df = drm_file_current();
-  if (!df)
-    return -EBADF;
-
-  uint32_t handle =
-      ++df->next_syncobj_handle; /* first handle = 1; 0 reserved */
-  if (handle >= MAX_SYNCOBJS_PER_FD)
-    return -ENOMEM;
-
-  struct drm_syncobj *so = kmalloc(sizeof(*so));
-  if (!so)
-    return -ENOMEM;
-  __memset(so, 0, sizeof(*so));
-  so->handle = handle;
-  so->lock = SPINLOCK_INIT;
-  init_wait_queue_head(&so->wq);
-  if (c->flags & DRM_SYNCOBJ_CREATE_SIGNALED)
-    so->timeline_point = 1;
-
-  df->syncobjs[handle] = so;
-  c->handle = handle;
-  return 0;
-}
-
-static long drm_ioctl_syncobj_destroy(void *arg) {
-  struct drm_syncobj_destroy *d = (struct drm_syncobj_destroy *)arg;
-  struct drm_file *df = drm_file_current();
-  if (!df)
-    return -EBADF;
-  struct drm_syncobj *so = syncobj_lookup(df, d->handle);
-  if (!so)
-    return -ENOENT;
-  df->syncobjs[d->handle] = NULL;
-  kfree(so);
-  return 0;
-}
-
-static long drm_ioctl_syncobj_reset(void *arg) {
-  struct drm_syncobj_array *a = (struct drm_syncobj_array *)arg;
-  struct drm_file *df = drm_file_current();
-  if (!df)
-    return -EBADF;
-  uint32_t *handles = kmalloc(a->count_handles * sizeof(uint32_t));
-  if (!handles)
-    return -ENOMEM;
-  if (copy_from_user(handles, (void *)(uintptr_t)a->handles,
-                     a->count_handles * sizeof(uint32_t))) {
-    kfree(handles);
-    return -EFAULT;
-  }
-  for (uint32_t i = 0; i < a->count_handles; i++) {
-    struct drm_syncobj *so = syncobj_lookup(df, handles[i]);
-    if (so) {
-      uint64_t soflags;
-      spin_lock_irqsave(&so->lock, &soflags);
-      so->timeline_point = 0;
-      spin_unlock_irqrestore(&so->lock, soflags);
-    }
-  }
-  kfree(handles);
-  return 0;
-}
-
-static long drm_ioctl_syncobj_query(void *arg) {
-  struct drm_syncobj_timeline_array *q =
-      (struct drm_syncobj_timeline_array *)arg;
-  struct drm_file *df = drm_file_current();
-  if (!df)
-    return -EBADF;
-  uint32_t *handles = kmalloc(q->count_handles * sizeof(uint32_t));
-  uint64_t *points = kmalloc(q->count_handles * sizeof(uint64_t));
-  if (!handles || !points) {
-    kfree(handles);
-    kfree(points);
-    return -ENOMEM;
-  }
-  if (copy_from_user(handles, (void *)(uintptr_t)q->handles,
-                     q->count_handles * sizeof(uint32_t))) {
-    kfree(handles);
-    kfree(points);
-    return -EFAULT;
-  }
-  for (uint32_t i = 0; i < q->count_handles; i++) {
-    struct drm_syncobj *so = syncobj_lookup(df, handles[i]);
-    if (so) {
-      uint64_t soflags;
-      spin_lock_irqsave(&so->lock, &soflags);
-      points[i] = so->timeline_point;
-      spin_unlock_irqrestore(&so->lock, soflags);
-    } else {
-      points[i] = 0; /* bad handle reports 0 */
-    }
-  }
-  if (copy_to_user((void *)(uintptr_t)q->points, points,
-                   q->count_handles * sizeof(uint64_t))) {
-    kfree(handles);
-    kfree(points);
-    return -EFAULT;
-  }
-  kfree(handles);
-  kfree(points);
-  return 0;
-}
-
-/* Block on so->wq until timeline_point >= point, or timeout_ns elapses.
- * timeout_ns==0 → wait forever. Returns 0 on reached, -ETIME on timeout. */
-static int drm_syncobj_wait_one(struct drm_syncobj *so, uint64_t point,
-                                uint64_t timeout_ns) {
-  wait_queue_t wait;
-  wait.func = virtio_gpu_wake_cb;
-  wait.data = current_task;
-  wait.exclusive = 0;
-  list_init(&wait.node);
-  add_wait_queue(&so->wq, &wait);
-  uint64_t deadline = (timeout_ns != 0) ? sched_clock() + timeout_ns : 0;
-  int ret = 0;
-  for (;;) {
-    current_task->state = BLOCKED;
-    uint64_t soflags;
-    spin_lock_irqsave(&so->lock, &soflags);
-    bool reached = so->timeline_point >= point;
-    spin_unlock_irqrestore(&so->lock, soflags);
-    if (reached)
-      break;
-    if (timeout_ns != 0 && sched_clock() >= deadline) {
-      ret = -ETIME;
-      break;
-    }
-    schedule();
-  }
-  // prepare_to_wait: see drm_fence_wait — cancel a spurious wake that pushed
-  // run_node without a matching schedule() dequeue, and force RUNNING for the
-  // first-iteration break path (state still BLOCKED, never scheduled).
-  current_task->state = RUNNING;
-  sched_cancel_spurious_wake(current_task);
-  remove_wait_queue(&so->wq, &wait);
-  return ret;
-}
-
-static long drm_ioctl_syncobj_timeline_signal(void *arg) {
-  struct drm_syncobj_timeline_array *s =
-      (struct drm_syncobj_timeline_array *)arg;
-  struct drm_file *df = drm_file_current();
-  if (!df)
-    return -EBADF;
-  uint32_t *handles = kmalloc(s->count_handles * sizeof(uint32_t));
-  uint64_t *points = kmalloc(s->count_handles * sizeof(uint64_t));
-  if (!handles || !points) {
-    kfree(handles);
-    kfree(points);
-    return -ENOMEM;
-  }
-  if (copy_from_user(handles, (void *)(uintptr_t)s->handles,
-                     s->count_handles * sizeof(uint32_t)) ||
-      copy_from_user(points, (void *)(uintptr_t)s->points,
-                     s->count_handles * sizeof(uint64_t))) {
-    kfree(handles);
-    kfree(points);
-    return -EFAULT;
-  }
-  for (uint32_t i = 0; i < s->count_handles; i++) {
-    struct drm_syncobj *so = syncobj_lookup(df, handles[i]);
-    if (so) {
-      uint64_t soflags;
-      spin_lock_irqsave(&so->lock, &soflags);
-      if (points[i] > so->timeline_point)
-        so->timeline_point = points[i];
-      spin_unlock_irqrestore(&so->lock, soflags);
-      __wake_up(&so->wq, 0);
-    }
-  }
-  kfree(handles);
-  kfree(points);
-  return 0;
-}
-
-static long drm_ioctl_syncobj_timeline_wait(void *arg) {
-  struct drm_syncobj_timeline_wait *w = (struct drm_syncobj_timeline_wait *)arg;
-  struct drm_file *df = drm_file_current();
-  if (!df)
-    return -EBADF;
-  uint32_t *handles = kmalloc(w->count_handles * sizeof(uint32_t));
-  uint64_t *points = kmalloc(w->count_handles * sizeof(uint64_t));
-  if (!handles || !points) {
-    kfree(handles);
-    kfree(points);
-    return -ENOMEM;
-  }
-  if (copy_from_user(handles, (void *)(uintptr_t)w->handles,
-                     w->count_handles * sizeof(uint32_t)) ||
-      copy_from_user(points, (void *)(uintptr_t)w->points,
-                     w->count_handles * sizeof(uint64_t))) {
-    kfree(handles);
-    kfree(points);
-    return -EFAULT;
-  }
-  /* WAIT_ALL (default): wait every handle; WAIT_ANY would return first. */
-  for (uint32_t i = 0; i < w->count_handles; i++) {
-    struct drm_syncobj *so = syncobj_lookup(df, handles[i]);
-    if (!so)
-      continue;
-    int wrc = drm_syncobj_wait_one(so, points[i], (uint64_t)w->timeout_nsec);
-    if (wrc) {
-      kfree(handles);
-      kfree(points);
-      return wrc;
-    }
-  }
-  kfree(handles);
-  kfree(points);
-  return 0;
-}
-
-static long drm_ioctl_syncobj_handle_to_fd(void *arg) {
-  struct drm_syncobj_handle *h = (struct drm_syncobj_handle *)arg;
-  struct drm_file *df = drm_file_current();
-  if (!df)
-    return -EBADF;
-  struct drm_syncobj *so = syncobj_lookup(df, h->handle);
-  if (!so)
-    return -ENOENT;
-  /* Synthesize a fence already signaled at the syncobj's current point.
-   * (Simplified: a real impl would bind to the syncobj's backing fence.) */
-  struct drm_fence *f = drm_fence_create(df->ctx_id, 0, 0);
-  if (!f)
-    return -ENOMEM;
-  uint64_t fflags;
-  spin_lock_irqsave(&f->lock, &fflags);
-  f->signaled = true;
-  spin_unlock_irqrestore(&f->lock, fflags);
-  int fd = drm_fence_install_sync_file(f, current_task);
-  drm_fence_put(f); /* fd holds a ref */
-  if (fd < 0)
-    return fd;
-  h->fd = fd;
-  return 0;
-}
-
-static long drm_ioctl_syncobj_fd_to_handle(void *arg) {
-  struct drm_syncobj_handle *h = (struct drm_syncobj_handle *)arg;
-  struct drm_file *df = drm_file_current();
-  if (!df)
-    return -EBADF;
-  /* Import: look up the sync_file fd, create a syncobj signaled at its fence
-   * state. Fence lookup goes through the BSD KPI so the driver doesn't read
-   * struct file / the fd table directly. */
-  struct drm_fence *fence = bsd_sync_file_fd_fence(current_task, h->fd);
-  if (!fence)
-    return -ENOENT;
-  uint32_t handle = ++df->next_syncobj_handle;
-  if (handle >= MAX_SYNCOBJS_PER_FD)
-    return -ENOMEM;
-  struct drm_syncobj *so = kmalloc(sizeof(*so));
-  if (!so)
-    return -ENOMEM;
-  __memset(so, 0, sizeof(*so));
-  so->handle = handle;
-  so->lock = SPINLOCK_INIT;
-  init_wait_queue_head(&so->wq);
-  if (fence) {
-    uint64_t fflags;
-    spin_lock_irqsave(&fence->lock, &fflags);
-    so->timeline_point = fence->signaled ? 1 : 0;
-    spin_unlock_irqrestore(&fence->lock, fflags);
-  }
-  df->syncobjs[handle] = so;
-  h->handle = handle;
-  return 0;
 }
 
 static uint32_t drm_property_create_range(const char *name, uint32_t min,
@@ -1368,10 +1033,10 @@ static long drm_ioctl_virtgpu_getparam(void *arg) {
     val = 1;
     break;
   case VIRTGPU_PARAM_RESOURCE_BLOB:
-    val = 1;
+    val = 0; /* blob path retired (Venus-only); virgl uses v1 RESOURCE_CREATE */
     break;
   case VIRTGPU_PARAM_HOST_VISIBLE:
-    val = 1; /* HOST3D blob */
+    val = 0; /* was a HOST3D blob property; blob path retired */
     break;
   case VIRTGPU_PARAM_CONTEXT_INIT:
     val = 1;
@@ -1380,7 +1045,14 @@ static long drm_ioctl_virtgpu_getparam(void *arg) {
     val = 0; /* not supported */
     break;
   case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs:
-    val = (1 << 4); /* bit4 = Venus (capset id 4) */
+    /* Bitmask: bit N advertises capset id N (bit1=VIRGL, bit2=VIRGL2).
+     * Built from whatever the host advertised; nothing is synthesized, so the
+     * mask is 0 when the host exposes no capsets (e.g. no virgl back-end). */
+    val = 0;
+    spin_lock(&g_drm.capset_lock);
+    for (uint32_t i = 0; i < g_drm.num_capsets; i++)
+      val |= (1u << g_drm.capsets[i].id);
+    spin_unlock(&g_drm.capset_lock);
     break;
   default:
     printk(LOG_WARN, "drm: unknown virtgpu param %llu\n",
@@ -1402,22 +1074,24 @@ static long drm_ioctl_virtgpu_getparam(void *arg) {
   return 0;
 }
 
-/* Forward declarations (plan1: ctx_id pool + blob helpers, defined later). */
+/* Forward declarations (plan1: ctx_id pool helpers, defined later). */
 static struct drm_file *drm_file_current(void);
 static uint32_t alloc_ctx_id(void);
 static void free_ctx_id(uint32_t id);
-static uint32_t alloc_blob_handle(void);
-static void free_blob_handle(uint32_t handle);
-static struct drm_blob_resource *drm_find_blob_resource(uint32_t handle);
-static int drm_blob_map_to_host(struct drm_blob_resource *blob);
+
+/* virgl legacy (v1) helpers + capset probe, defined later. */
+static uint32_t alloc_virgl_handle(void);
+static void free_virgl_handle(uint32_t handle);
+static struct drm_virgl_resource *drm_find_virgl_resource(uint32_t handle);
+static bool virgl_capset_present(uint32_t capset_id);
 
 /* DRM_IOCTL_VIRTGPU_GET_CAPS — return cached capset payload. addr is a
- * user-space pointer; copy up to c->size bytes. Currently only Venus (id=4). */
+ * user-space pointer; copy up to c->size bytes. Serves any host-cached capset
+ * (virgl id=1/2 when the host advertises them). An unknown id returns -EINVAL:
+ * the virgl winsys checks errno==EINVAL to fall back from capset 2 (VIRGL2) to
+ * capset 1 (VIRGL), so -ENOENT would break that path. */
 static long drm_ioctl_virtgpu_get_caps(void *arg) {
   struct drm_virtgpu_get_caps *c = (struct drm_virtgpu_get_caps *)arg;
-
-  if (c->cap_set_id != VIRTGPU_DRM_CAPSET_VENUS)
-    return -EINVAL;
 
   const void *data = NULL;
   uint32_t data_size = 0;
@@ -1431,7 +1105,7 @@ static long drm_ioctl_virtgpu_get_caps(void *arg) {
   }
   spin_unlock(&g_drm.capset_lock);
   if (!data)
-    return -ENOENT;
+    return -EINVAL;
 
   uint32_t copy_size = (c->size < data_size) ? c->size : data_size;
   if (copy_to_user((void *)(uintptr_t)c->addr, data, copy_size))
@@ -1458,12 +1132,14 @@ static long drm_ioctl_virtgpu_context_init(void *arg) {
   }
 
   uint32_t capset_id = 0, num_rings = 0, poll_rings_mask = 0;
+  bool have_num_rings = false;
   for (uint32_t i = 0; i < ci->num_params; i++) {
     switch (params[i].param) {
     case VIRTGPU_CONTEXT_PARAM_CAPSET_ID:
       capset_id = (uint32_t)params[i].value;
       break;
     case VIRTGPU_CONTEXT_PARAM_NUM_RINGS:
+      have_num_rings = true;
       num_rings = (uint32_t)params[i].value;
       break;
     case VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK:
@@ -1475,8 +1151,13 @@ static long drm_ioctl_virtgpu_context_init(void *arg) {
   }
   kfree(params);
 
-  if (capset_id != VIRTGPU_DRM_CAPSET_VENUS)
+  /* Accept any capset the host advertised (Venus 4, virgl 1/2). The virgl
+   * winsys only sets CAPSET_ID (num_params=1) and never NUM_RINGS, so default
+   * to a single ring in that case — EXECBUFFER then accepts ring_idx=0. */
+  if (!virgl_capset_present(capset_id))
     return -EINVAL;
+  if (!have_num_rings)
+    num_rings = 1;
   if (num_rings == 0 || num_rings > 64)
     return -EINVAL;
 
@@ -1529,180 +1210,214 @@ static long drm_ioctl_virtgpu_context_init(void *arg) {
   return 0;
 }
 
-/* DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB — HOST3D host-visible blob only. */
-static long drm_ioctl_virtgpu_resource_create_blob(void *arg) {
-  struct drm_virtgpu_resource_create_blob *b =
-      (struct drm_virtgpu_resource_create_blob *)arg;
+/* DRM_IOCTL_VIRTGPU_RESOURCE_CREATE — virgl legacy v1 path. The winsys passes
+ * target/format/bind/dims/stride/size in and reads back res_handle (host id)
+ * + bo_handle (new GEM). It never calls ATTACH_BACKING separately, so the
+ * kernel allocates guest backing and attaches it to the host resource here.
+ * The bo_handle→res_handle mapping is persisted in g_drm.virgl_res[] so later
+ * TRANSFER_TO/FROM_HOST and WAIT (which pass only bo_handle) can resolve it. */
+static long drm_ioctl_virtgpu_resource_create(void *arg) {
+  struct drm_virtgpu_resource_create *rc =
+      (struct drm_virtgpu_resource_create *)arg;
 
-  if (b->blob_mem != VIRTGPU_BLOB_MEM_HOST3D)
+  if (rc->bo_handle != 0) /* winsys always passes 0 in */
     return -EINVAL;
-  if (b->size == 0)
+  if (rc->size == 0 || rc->width == 0 || rc->height == 0)
     return -EINVAL;
-  if (b->cmd_size != 0) /* Venus does not use inline cmd */
+  if (rc->flags & ~VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP)
     return -EINVAL;
 
-  uint32_t handle = alloc_blob_handle();
+  uint32_t handle = alloc_virgl_handle();
   if (handle == 0)
     return -ENOMEM;
-  uint32_t res_id = handle; /* reuse GEM handle as virtio resource id */
+  uint32_t res_id = handle; /* host resource id == GEM handle */
 
-  struct virtio_gpu_resource_create_blob cmd;
+  uint32_t npages = (rc->size + PAGE_SIZE - 1) / PAGE_SIZE;
+  void *vaddr = bfc_alloc_page_data(npages);
+  if (!vaddr) {
+    free_virgl_handle(handle);
+    return -ENOMEM;
+  }
+  __memset(vaddr, 0, rc->size);
+  uint64_t guest_phys = (uint64_t)PHY_ADDR((uintptr_t)vaddr);
+
+  struct virtio_gpu_resource_create_3d cmd;
   __memset(&cmd, 0, sizeof(cmd));
-  cmd.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB;
-  cmd.hdr.ctx_id = 0; /* HOST3D blob: no ctx required */
+  cmd.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_3D;
   cmd.resource_id = res_id;
-  cmd.blob_mem = b->blob_mem;
-  cmd.blob_flags = b->blob_flags;
-  cmd.nr_entries = 0;
-  cmd.blob_id = b->blob_id;
-  cmd.size = b->size;
+  cmd.target = rc->target;
+  cmd.format = rc->format;
+  cmd.bind = rc->bind;
+  cmd.width = rc->width;
+  cmd.height = rc->height;
+  cmd.depth = rc->depth;
+  cmd.array_size = rc->array_size;
+  cmd.last_level = rc->last_level;
+  cmd.nr_samples = rc->nr_samples;
+  cmd.flags = rc->flags;
+
+  struct virtio_gpu_ctrl_hdr_response resp;
+  __memset(&resp, 0, sizeof(resp));
+  int rc2 = virtio_gpu_send_cmd_3d(&g_virtio_gpu, &cmd, sizeof(cmd), &resp,
+                                   sizeof(resp));
+  if (rc2 || resp.hdr.type != VIRTIO_GPU_RESP_OK_NODATA) {
+    bfc_free_page_data(vaddr, npages);
+    free_virgl_handle(handle);
+    return rc2 ? rc2 : -EIO;
+  }
+
+  if (virtio_gpu_attach_backing(res_id, guest_phys, (uint32_t)rc->size) < 0) {
+    virtio_gpu_resource_unref(res_id);
+    bfc_free_page_data(vaddr, npages);
+    free_virgl_handle(handle);
+    return -EIO;
+  }
+
+  struct drm_virgl_resource *r = &g_drm.virgl_res[handle - VIRGL_HANDLE_BASE];
+  r->bo_handle = handle;
+  r->res_handle = res_id;
+  r->guest_phys = guest_phys;
+  r->kernel_vaddr = vaddr;
+  r->size = rc->size;
+  r->refcount = 1;
+  r->ctx_attached = false;
+
+  rc->bo_handle = handle;
+  rc->res_handle = res_id;
+
+  struct drm_file *df = drm_file_current();
+  if (df && df->created_virgl_count < MAX_VIRGL_RESOURCES)
+    df->created_virgl_handles[df->created_virgl_count++] = (int)handle;
+
+  printk(LOG_DEBUG,
+         "drm: RESOURCE_CREATE(v1) %ux%ux%u fmt=%u -> bo=%u res=%u\n",
+         rc->width, rc->height, rc->depth, rc->format, handle, res_id);
+  return 0;
+}
+
+/* DRM_IOCTL_VIRTGPU_RESOURCE_INFO — return res_handle/size/blob_mem.
+ * virgl legacy (v1) resources only; handles live at/above VIRGL_HANDLE_BASE. */
+static long drm_ioctl_virtgpu_resource_info(void *arg) {
+  struct drm_virtgpu_resource_info *ri =
+      (struct drm_virtgpu_resource_info *)arg;
+
+  struct drm_virgl_resource *r = drm_find_virgl_resource(ri->bo_handle);
+  if (!r)
+    return -EINVAL;
+
+  ri->res_handle = r->res_handle;
+  ri->size = (uint32_t)r->size;
+  ri->blob_mem = 0;
+  return 0;
+}
+
+/* Forward declaration for the plan2 sync_file fd install helper, used by
+ * EXECBUFFER's FENCE_FD_OUT but defined later in the file. */
+static int drm_fence_install_sync_file(struct drm_fence *fence, xtask *proc);
+
+/* Build + send a 3D host transfer (TO/FROM) for a virgl v1 resource. The
+ * winsys passes only bo_handle; resolve to the host res_handle here. v1
+ * transfers are not context-bound on the host (ctx_id=0); virglrenderer
+ * reaches the guest backing via the resource id. */
+static long virgl_transfer_host_3d(void *arg, uint32_t cmd_type) {
+  struct drm_virtgpu_3d_transfer_to_host *t =
+      (struct drm_virtgpu_3d_transfer_to_host *)arg;
+  /* drm_virtgpu_3d_transfer_from_host has an identical field layout. */
+
+  struct drm_virgl_resource *r = drm_find_virgl_resource(t->bo_handle);
+  if (!r)
+    return -ENOENT;
+
+  struct virtio_gpu_transfer_host_3d cmd;
+  __memset(&cmd, 0, sizeof(cmd));
+  cmd.hdr.type = cmd_type;
+  cmd.hdr.ctx_id = 0;
+  cmd.box.x = t->box.x;
+  cmd.box.y = t->box.y;
+  cmd.box.z = t->box.z;
+  cmd.box.w = t->box.w;
+  cmd.box.h = t->box.h;
+  cmd.box.d = t->box.d;
+  cmd.offset = t->offset;
+  cmd.resource_id = r->res_handle;
+  cmd.level = t->level;
+  cmd.stride = t->stride;
+  cmd.layer_stride = t->layer_stride;
 
   struct virtio_gpu_ctrl_hdr_response resp;
   __memset(&resp, 0, sizeof(resp));
   int rc = virtio_gpu_send_cmd_3d(&g_virtio_gpu, &cmd, sizeof(cmd), &resp,
                                   sizeof(resp));
-  if (rc || resp.hdr.type != VIRTIO_GPU_RESP_OK_NODATA) {
-    free_blob_handle(handle);
+  if (rc || resp.hdr.type != VIRTIO_GPU_RESP_OK_NODATA)
     return rc ? rc : -EIO;
-  }
+  return 0;
+}
 
-  struct drm_blob_resource *blob = &g_drm.blobs[handle - 1];
-  blob->bo_handle = handle;
-  blob->res_handle = res_id;
-  blob->blob_mem = b->blob_mem;
-  blob->blob_flags = b->blob_flags;
-  blob->size = b->size;
-  blob->blob_id = b->blob_id;
-  blob->mmap_offset = (uint64_t)handle << PAGE_SHIFT;
-  blob->refcount = 1;
-  blob->mapped = false;
+/* DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST — upload guest backing → host resource. */
+static long drm_ioctl_virtgpu_transfer_to_host(void *arg) {
+  return virgl_transfer_host_3d(arg, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D);
+}
 
-  b->bo_handle = handle;
-  b->res_handle = res_id;
+/* DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST — download host resource → guest
+ * backing. */
+static long drm_ioctl_virtgpu_transfer_from_host(void *arg) {
+  return virgl_transfer_host_3d(arg, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D);
+}
 
-  /* If MAPPABLE, eagerly MAP_BLOB to get host-visible phys. */
-  if (b->blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE) {
-    if (drm_blob_map_to_host(blob) < 0) {
-      /* blob created but not mapped; mmap will lazy-MAP via ioctl VIRTGPU_MAP
-       */
-      blob->mapped = false;
-    }
-  }
+/* DRM_IOCTL_VIRTGPU_WAIT — virgl legacy busy/block query. `handle` is a GEM
+ * bo_handle. v1 TRANSFERs are synchronous (send_cmd_3d blocks until the host
+ * responds), so only in-flight EXECBUFFER (SUBMIT_3D) fences can make a
+ * resource busy. Granularity is approximated to the owning context: a resource
+ * is reported busy if any unsignaled fence for the current fd's context exists.
+ * This is conservative (a different resource's submit may be in flight) but
+ * never races — virgl only uses this to decide whether to stall. */
+static long drm_ioctl_virtgpu_3d_wait(void *arg) {
+  struct drm_virtgpu_3d_wait *w = (struct drm_virtgpu_3d_wait *)arg;
 
-  /* Track per-fd for cleanup */
+  if (!drm_find_virgl_resource(w->handle))
+    return -ENOENT;
+
   struct drm_file *df = drm_file_current();
-  if (df && df->created_blob_count < MAX_BLOB_RESOURCES)
-    df->created_blob_handles[df->created_blob_count++] = (int)handle;
-
-  printk(LOG_DEBUG,
-         "drm: CREATE_BLOB mem=%u size=%llu blob_id=%llu -> h=%u res=%u\n",
-         b->blob_mem, (unsigned long long)b->size,
-         (unsigned long long)b->blob_id, handle, res_id);
-  return 0;
-}
-
-/* DRM_IOCTL_VIRTGPU_MAP — return mmap offset (handle << PAGE_SHIFT).
- * Lazy-MAP_BLOB if not already mapped. */
-static long drm_ioctl_virtgpu_map(void *arg) {
-  struct drm_virtgpu_map *m = (struct drm_virtgpu_map *)arg;
-
-  struct drm_blob_resource *blob = drm_find_blob_resource(m->handle);
-  if (!blob)
-    return -EINVAL;
-
-  if (!blob->mapped) {
-    if (drm_blob_map_to_host(blob) < 0)
-      return -EAGAIN; /* host not host-visible yet */
+  uint32_t ctx_id = df ? df->ctx_id : 0;
+  if (ctx_id == 0) {
+    /* No context → no async submits can be in flight → always idle. */
+    return 0;
   }
 
-  m->offset = blob->mmap_offset;
-  return 0;
-}
+  bool nowait = w->flags & VIRTGPU_WAIT_NOWAIT;
 
-/* DRM_IOCTL_VIRTGPU_RESOURCE_INFO — return res_handle/size/blob_mem. */
-static long drm_ioctl_virtgpu_resource_info(void *arg) {
-  struct drm_virtgpu_resource_info *ri =
-      (struct drm_virtgpu_resource_info *)arg;
-
-  struct drm_blob_resource *blob = drm_find_blob_resource(ri->bo_handle);
-  if (!blob)
-    return -EINVAL;
-
-  ri->res_handle = blob->res_handle;
-  ri->size = (uint32_t)blob->size;
-  ri->blob_mem = blob->blob_mem;
-  return 0;
-}
-
-/* Forward declarations for plan2 helpers defined further below (2D-1, 2D-5):
- * sync_file fd install and timeline wait are used by EXECBUFFER but defined
- * later in the file. */
-static int drm_fence_install_sync_file(struct drm_fence *fence, xtask *proc);
-static int drm_syncobj_wait_one(struct drm_syncobj *so, uint64_t point,
-                                uint64_t timeout_ns);
-
-/* Copy + validate out_syncobjs and attach each (syncobj ptr, point) to the
- * fence. Process context, before submit. */
-static int drm_execbuf_attach_out_syncobjs(struct drm_file *df,
-                                           struct drm_virtgpu_execbuffer *eb,
-                                           struct drm_fence *fence) {
-  struct drm_virtgpu_execbuffer_syncobj *sos =
-      kmalloc(eb->num_out_syncobjs * eb->syncobj_stride);
-  if (!sos)
-    return -ENOMEM;
-  if (copy_from_user(sos, (void *)(uintptr_t)eb->out_syncobjs,
-                     eb->num_out_syncobjs * eb->syncobj_stride)) {
-    kfree(sos);
-    return -EFAULT;
-  }
-  for (uint32_t i = 0; i < eb->num_out_syncobjs; i++) {
-    struct drm_syncobj *so = syncobj_lookup(df, sos[i].handle);
-    if (!so) {
-      kfree(sos);
-      return -ENOENT;
+  for (;;) {
+    /* Find one unsignaled fence for this context under fence_lock, take a ref
+     * so the slot can't be reclaimed before we wait, then drop the lock. */
+    struct drm_fence *fence = NULL;
+    spin_lock(&g_drm.fence_lock);
+    for (int i = 0; i < MAX_FENCES; i++) {
+      if (g_drm.fences[i].ctx_id == ctx_id && !g_drm.fences[i].signaled) {
+        fence = &g_drm.fences[i];
+        refcount_inc(&fence->refcount);
+        break;
+      }
     }
-    int arc = drm_fence_add_syncobj_signal(fence, so, sos[i].point);
-    if (arc) {
-      kfree(sos);
-      return arc;
+    spin_unlock(&g_drm.fence_lock);
+
+    if (!fence)
+      return 0; /* all ctx fences signaled → idle */
+
+    if (nowait) {
+      drm_fence_put(fence);
+      return -EBUSY;
     }
+
+    /* Block until this fence signals, then drop the ref and re-scan for more.
+     */
+    drm_fence_wait(fence, 0);
+    drm_fence_put(fence);
   }
-  kfree(sos);
-  return 0;
 }
 
-/* Block on each in_syncobj's wq until timeline_point >= point. Uses the shared
- * timeline_wait helper (2D-5). */
-static int drm_execbuf_wait_in_syncobjs(struct drm_file *df,
-                                        struct drm_virtgpu_execbuffer *eb) {
-  struct drm_virtgpu_execbuffer_syncobj *sos =
-      kmalloc(eb->num_in_syncobjs * eb->syncobj_stride);
-  if (!sos)
-    return -ENOMEM;
-  if (copy_from_user(sos, (void *)(uintptr_t)eb->in_syncobjs,
-                     eb->num_in_syncobjs * eb->syncobj_stride)) {
-    kfree(sos);
-    return -EFAULT;
-  }
-  for (uint32_t i = 0; i < eb->num_in_syncobjs; i++) {
-    struct drm_syncobj *so = syncobj_lookup(df, sos[i].handle);
-    if (!so) {
-      kfree(sos);
-      return -ENOENT;
-    }
-    int wrc = drm_syncobj_wait_one(so, sos[i].point, 0 /* forever */);
-    if (wrc) {
-      kfree(sos);
-      return wrc;
-    }
-  }
-  kfree(sos);
-  return 0;
-}
-
-/* DRM_IOCTL_VIRTGPU_EXECBUFFER — submit Venus command stream on a ring.
- * Out-fence: optional sync_file fd (FENCE_FD_OUT) + optional out_syncobjs
- * advanced when the host completes this submission. */
+/* DRM_IOCTL_VIRTGPU_EXECBUFFER — submit a 3D command stream on a ring.
+ * Out-fence: optional sync_file fd (FENCE_FD_OUT) signaled when the host
+ * completes this submission. */
 static long drm_ioctl_virtgpu_execbuffer(void *arg) {
   struct drm_virtgpu_execbuffer *eb = (struct drm_virtgpu_execbuffer *)arg;
   struct drm_file *df = drm_file_current();
@@ -1713,15 +1428,7 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg) {
   if (eb->ring_idx >= df->num_rings)
     return -EINVAL;
   if (eb->flags & VIRTGPU_EXECBUF_FENCE_FD_IN)
-    return -EINVAL; /* Venus does not use in-fence fd */
-
-  /* in_syncobjs: block (wq + timeout) until each timeline point is reached
-   * BEFORE submitting. (2D-5 timeline_wait helper.) */
-  if (eb->num_in_syncobjs > 0 && eb->in_syncobjs) {
-    int wrc = drm_execbuf_wait_in_syncobjs(df, eb);
-    if (wrc)
-      return wrc;
-  }
+    return -EINVAL; /* in-fence fd not supported */
 
   uint64_t fence_id = ++df->ring_fence_counters[eb->ring_idx];
 
@@ -1757,18 +1464,6 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg) {
   if (!fence) {
     kfree(submit_buf);
     return -ENOMEM;
-  }
-
-  /* Attach out_syncobjs BEFORE submit: if the host completes between kick and
-   * this attach, drm_fence_signal would run with an empty signal list and the
-   * syncobj would never advance. (修订点 3) */
-  if (eb->num_out_syncobjs > 0 && eb->out_syncobjs) {
-    int orc = drm_execbuf_attach_out_syncobjs(df, eb, fence);
-    if (orc) {
-      drm_fence_put(fence);
-      kfree(submit_buf);
-      return orc;
-    }
   }
 
   /* Submit async: send_cmd_3d_async copies submit_buf/resp into heap nodes
@@ -2593,6 +2288,32 @@ static long drm_ioctl_gem_close(void *arg) {
   if (!c)
     return -EFAULT;
 
+  /* virgl legacy (v1) resource: handle lives at/above VIRGL_HANDLE_BASE. */
+  if ((uint32_t)c->handle >= VIRGL_HANDLE_BASE) {
+    spin_lock(&g_drm.virgl_lock);
+    struct drm_virgl_resource *r = drm_find_virgl_resource((uint32_t)c->handle);
+    if (!r) {
+      spin_unlock(&g_drm.virgl_lock);
+      return -ENOENT;
+    }
+    r->refcount--;
+    if (r->refcount > 0) {
+      spin_unlock(&g_drm.virgl_lock);
+      return 0;
+    }
+    uint32_t rid = r->res_handle;
+    void *vaddr = r->kernel_vaddr;
+    uint64_t sz = r->size;
+    free_virgl_handle((uint32_t)c->handle); /* zeroes the slot */
+    spin_unlock(&g_drm.virgl_lock);
+    /* Tear down host resource + free guest backing outside the spinlock
+     * (these block/sleep on the host). */
+    virtio_gpu_resource_unref(rid);
+    uint32_t npages = (sz + PAGE_SIZE - 1) / PAGE_SIZE;
+    bfc_free_page_data(vaddr, npages);
+    return 0;
+  }
+
   if (c->handle == 0 || c->handle > MAX_DUMB_BUFFERS)
     return -ENOENT;
 
@@ -2916,30 +2637,18 @@ long drm_ioctl(uint32_t cmd, void *arg) {
     return drm_ioctl_virtgpu_get_caps(arg);
   case DRM_IOCTL_VIRTGPU_CONTEXT_INIT:
     return drm_ioctl_virtgpu_context_init(arg);
-  case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB:
-    return drm_ioctl_virtgpu_resource_create_blob(arg);
-  case DRM_IOCTL_VIRTGPU_MAP:
-    return drm_ioctl_virtgpu_map(arg);
+  case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE:
+    return drm_ioctl_virtgpu_resource_create(arg);
   case DRM_IOCTL_VIRTGPU_RESOURCE_INFO:
     return drm_ioctl_virtgpu_resource_info(arg);
   case DRM_IOCTL_VIRTGPU_EXECBUFFER:
     return drm_ioctl_virtgpu_execbuffer(arg);
-  case DRM_IOCTL_SYNCOBJ_CREATE:
-    return drm_ioctl_syncobj_create(arg);
-  case DRM_IOCTL_SYNCOBJ_DESTROY:
-    return drm_ioctl_syncobj_destroy(arg);
-  case DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD:
-    return drm_ioctl_syncobj_handle_to_fd(arg);
-  case DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE:
-    return drm_ioctl_syncobj_fd_to_handle(arg);
-  case DRM_IOCTL_SYNCOBJ_RESET:
-    return drm_ioctl_syncobj_reset(arg);
-  case DRM_IOCTL_SYNCOBJ_QUERY:
-    return drm_ioctl_syncobj_query(arg);
-  case DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL:
-    return drm_ioctl_syncobj_timeline_signal(arg);
-  case DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT:
-    return drm_ioctl_syncobj_timeline_wait(arg);
+  case DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST:
+    return drm_ioctl_virtgpu_transfer_to_host(arg);
+  case DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST:
+    return drm_ioctl_virtgpu_transfer_from_host(arg);
+  case DRM_IOCTL_VIRTGPU_WAIT:
+    return drm_ioctl_virtgpu_3d_wait(arg);
   case DRM_IOCTL_GET_CAP:
     return drm_ioctl_get_cap(arg);
   case DRM_IOCTL_SET_CLIENT_CAP:
@@ -3046,53 +2755,47 @@ static void free_ctx_id(uint32_t id) {
 }
 
 /* blob handle: monotonic 1-based; slot reuse keyed by bo_handle. */
-static uint32_t alloc_blob_handle(void) {
-  spin_lock(&g_drm.blob_lock);
-  uint32_t h = g_drm.next_blob_handle++;
-  spin_unlock(&g_drm.blob_lock);
-  if (h == 0 || h > MAX_BLOB_RESOURCES)
+/* virgl legacy (v1) resource handle: monotonic from VIRGL_HANDLE_BASE.
+ * Returns 0 when the table is exhausted. Slot is keyed by bo_handle. */
+static uint32_t alloc_virgl_handle(void) {
+  spin_lock(&g_drm.virgl_lock);
+  uint32_t h = g_drm.next_virgl_handle++;
+  spin_unlock(&g_drm.virgl_lock);
+  if (h < VIRGL_HANDLE_BASE || h >= VIRGL_HANDLE_BASE + MAX_VIRGL_RESOURCES)
     return 0;
   return h;
 }
 
-static struct drm_blob_resource *drm_find_blob_resource(uint32_t handle) {
-  if (handle == 0 || handle > MAX_BLOB_RESOURCES)
+static struct drm_virgl_resource *drm_find_virgl_resource(uint32_t handle) {
+  if (handle < VIRGL_HANDLE_BASE ||
+      handle >= VIRGL_HANDLE_BASE + MAX_VIRGL_RESOURCES)
     return NULL;
-  struct drm_blob_resource *b = &g_drm.blobs[handle - 1];
-  return (b->bo_handle == handle) ? b : NULL;
+  struct drm_virgl_resource *r = &g_drm.virgl_res[handle - VIRGL_HANDLE_BASE];
+  return (r->bo_handle == handle) ? r : NULL;
 }
 
-static void free_blob_handle(uint32_t handle) {
-  if (handle == 0 || handle > MAX_BLOB_RESOURCES)
+static void free_virgl_handle(uint32_t handle) {
+  if (handle < VIRGL_HANDLE_BASE ||
+      handle >= VIRGL_HANDLE_BASE + MAX_VIRGL_RESOURCES)
     return;
-  struct drm_blob_resource *b = &g_drm.blobs[handle - 1];
-  if (b->bo_handle != handle)
+  struct drm_virgl_resource *r = &g_drm.virgl_res[handle - VIRGL_HANDLE_BASE];
+  if (r->bo_handle != handle)
     return;
-  __memset(b, 0, sizeof(*b));
+  __memset(r, 0, sizeof(*r));
 }
 
-/* Send RESOURCE_MAP_BLOB and store host-visible phys into the blob slot.
- * Returns 0 on success (blob->mapped=true), negative on host error. */
-static int drm_blob_map_to_host(struct drm_blob_resource *blob) {
-  struct virtio_gpu_resource_map_blob map_cmd;
-  __memset(&map_cmd, 0, sizeof(map_cmd));
-  map_cmd.hdr.type = VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB;
-  map_cmd.hdr.ctx_id = 0; /* HOST3D blob: no ctx required */
-  map_cmd.resource_id = blob->res_handle;
-
-  struct virtio_gpu_resp_map_info map_resp;
-  __memset(&map_resp, 0, sizeof(map_resp));
-  int rc = virtio_gpu_send_cmd_3d(&g_virtio_gpu, &map_cmd, sizeof(map_cmd),
-                                  &map_resp, sizeof(map_resp));
-  if (rc || map_resp.hdr.type != VIRTIO_GPU_RESP_OK_MAP_INFO) {
-    printk(LOG_WARN, "drm: MAP_BLOB failed for res %u (rc=%d type=0x%x)\n",
-           blob->res_handle, rc, map_resp.hdr.type);
-    return rc ? rc : -EIO;
+/* True if capset_id was cached from the host. */
+static bool virgl_capset_present(uint32_t capset_id) {
+  bool found = false;
+  spin_lock(&g_drm.capset_lock);
+  for (uint32_t i = 0; i < g_drm.num_capsets; i++) {
+    if (g_drm.capsets[i].id == capset_id) {
+      found = true;
+      break;
+    }
   }
-  blob->guest_phys = map_resp.offset;
-  blob->kernel_vaddr = (uint64_t)phys_to_virt((phys_addr_t)blob->guest_phys);
-  blob->mapped = true;
-  return 0;
+  spin_unlock(&g_drm.capset_lock);
+  return found;
 }
 
 /* ===== DRM device ops ===== */
@@ -3227,24 +2930,30 @@ int drm_close(xtask *proc, int fd) {
       f->ring_fence_counters = NULL;
     }
 
-    /* Release blob resources (plan1) */
-    for (int j = 0; j < f->created_blob_count; j++) {
-      struct drm_blob_resource *blob =
-          drm_find_blob_resource((uint32_t)f->created_blob_handles[j]);
-      if (blob) {
-        if (--blob->refcount <= 0)
-          free_blob_handle(blob->bo_handle);
+    /* Release virgl legacy (v1) resources: unref host resource + free guest
+     * backing. Per-fd tracking guarantees each handle is torn down once. */
+    for (int j = 0; j < f->created_virgl_count; j++) {
+      uint32_t h = (uint32_t)f->created_virgl_handles[j];
+      spin_lock(&g_drm.virgl_lock);
+      struct drm_virgl_resource *r = drm_find_virgl_resource(h);
+      if (!r) {
+        spin_unlock(&g_drm.virgl_lock);
+        continue;
       }
-    }
-
-    /* Release syncobjs (plan2) */
-    for (uint32_t i = 0; i < MAX_SYNCOBJS_PER_FD; i++) {
-      if (f->syncobjs[i]) {
-        kfree(f->syncobjs[i]);
-        f->syncobjs[i] = NULL;
+      r->refcount--;
+      if (r->refcount > 0) {
+        spin_unlock(&g_drm.virgl_lock);
+        continue;
       }
+      uint32_t rid = r->res_handle;
+      void *vaddr = r->kernel_vaddr;
+      uint64_t sz = r->size;
+      free_virgl_handle(h);
+      spin_unlock(&g_drm.virgl_lock);
+      virtio_gpu_resource_unref(rid);
+      uint32_t npages = (sz + PAGE_SIZE - 1) / PAGE_SIZE;
+      bfc_free_page_data(vaddr, npages);
     }
-    f->next_syncobj_handle = 0;
 
     if (f->is_master) {
       g_drm.is_master = false;
@@ -3411,7 +3120,7 @@ void drm_dev_register(void) {
    by matching size. Map its physical pages into user space. */
 __attribute__((no_sanitize("kernel-address"))) uint64_t
 drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
-  /* offset = handle << PAGE_SHIFT (from MODE_MAP_DUMB or VIRTGPU_MAP). */
+  /* offset = handle << PAGE_SHIFT (from MODE_MAP_DUMB). */
   uint32_t handle = (uint32_t)(offset >> PAGE_SHIFT);
 
   spin_lock(&g_drm.dumb_lock);
@@ -3421,26 +3130,14 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
     target = &g_drm.dumbs[handle - 1];
   spin_unlock(&g_drm.dumb_lock);
 
-  /* blob resource path (plan1) */
-  struct drm_blob_resource *blob = drm_find_blob_resource(handle);
-
-  if (!target && !blob) {
+  if (!target) {
     printk(LOG_ERROR, "drm_mmap: no buffer for handle %u (offset=0x%llx)\n",
            handle, (unsigned long long)offset);
     return 0;
   }
 
-  uint64_t map_phys;
-  uint64_t map_size;
-  if (blob) {
-    if (!blob->mapped)
-      return -EAGAIN; /* caller must VIRTGPU_MAP first */
-    map_phys = blob->guest_phys;
-    map_size = blob->size;
-  } else {
-    map_phys = target->guest_phys;
-    map_size = target->size;
-  }
+  uint64_t map_phys = target->guest_phys;
+  uint64_t map_size = target->size;
 
   size_t npages = (map_size + PAGE_SIZE - 1) / PAGE_SIZE;
   uint64_t *pml4 =
@@ -3522,8 +3219,10 @@ static ssize_t drm_read(xtask *proc, int fd, void *buf, size_t count) {
 }
 
 /* Pre-query all capsets via GET_CAPSET_INFO + GET_CAPSET and cache them in
- * g_drm.capsets[]. Venus (id=4) is synthesized locally if the host does not
- * report it, so GET_CAPS always succeeds for the Venus capset. */
+ * g_drm.capsets[]. The bitmask surfaced by GETPARAM(SUPPORTED_CAPSET_IDs) and
+ * the capsets served by GET_CAPS reflect exactly what the host advertises —
+ * nothing is synthesized. The Venus path is retired; only host-provided virgl
+ * capsets (1/2) drive the GL winsys. */
 static void drm_query_capsets(struct virtio_gpu_device *vgpu) {
   g_drm.capset_lock = SPINLOCK_INIT;
   uint32_t n = vgpu->config.num_capsets;
@@ -3575,32 +3274,6 @@ static void drm_query_capsets(struct virtio_gpu_device *vgpu) {
     g_drm.num_capsets++;
   }
 
-  /* Ensure Venus (id=4) exists; synthesize if host omitted it. */
-  bool have_venus = false;
-  for (uint32_t i = 0; i < g_drm.num_capsets; i++)
-    if (g_drm.capsets[i].id == VIRTGPU_DRM_CAPSET_VENUS)
-      have_venus = true;
-  if (!have_venus && g_drm.num_capsets < MAX_CAPSETS) {
-    struct virgl_renderer_capset_venus v = {
-        .wire_format_version = 1,
-        .vk_xml_version =
-            (1u << 22) | (3u << 12) | 0u, /* VK_MAKE_VERSION(1,3,0) */
-        .vk_ext_command_serialization = 1,
-        .vk_mesa_venus_protocol = 1,
-        .supports_blob_id_0 = 1,
-        .supports_multiple_timelines = 1,
-        .allow_vk_wait_syncs = 1,
-    };
-    void *cdata = kmalloc(sizeof(v));
-    if (cdata) {
-      __memcpy(cdata, &v, sizeof(v));
-      g_drm.capsets[g_drm.num_capsets].id = VIRTGPU_DRM_CAPSET_VENUS;
-      g_drm.capsets[g_drm.num_capsets].ver = 1;
-      g_drm.capsets[g_drm.num_capsets].size = sizeof(v);
-      g_drm.capsets[g_drm.num_capsets].data = cdata;
-      g_drm.num_capsets++;
-    }
-  }
   printk(LOG_INFO, "drm: cached %u capsets\n", g_drm.num_capsets);
 }
 
@@ -3628,11 +3301,10 @@ void virtio_gpu_init(void) {
     return;
   }
 
-  /* Negotiate features: VERSION_1 + VIRGL(3D/context) + RESOURCE_BLOB +
-   * CONTEXT_INIT(multi-ring). HOST_VISIBLE is a HOST3D blob property, not a
-   * feature bit, so it is not negotiated here. */
+  /* Negotiate features: VERSION_1 + VIRGL(3D/context) + CONTEXT_INIT(multi-
+   * ring). The blob feature (Venus resource model) is retired; virgl uses the
+   * legacy v1 RESOURCE_CREATE path and does not need it. */
   uint64_t want = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_GPU_F_VIRGL) |
-                  (1ULL << VIRTIO_GPU_F_RESOURCE_BLOB) |
                   (1ULL << VIRTIO_GPU_F_CONTEXT_INIT);
   if (virtio_pci_negotiate_features(&vgpu->vpci, want) < 0) {
     printk(LOG_ERROR, "virtio_gpu: feature negotiation failed\n");
@@ -3681,9 +3353,9 @@ void virtio_gpu_init(void) {
   g_drm.event_lock = SPINLOCK_INIT;
   init_wait_queue_head(&g_drm.event_wq);
   g_drm.ctx_id_lock = SPINLOCK_INIT;
-  g_drm.blob_lock = SPINLOCK_INIT;
   g_drm.fence_lock = SPINLOCK_INIT;
-  g_drm.next_blob_handle = 1;
+  g_drm.virgl_lock = SPINLOCK_INIT;
+  g_drm.next_virgl_handle = VIRGL_HANDLE_BASE;
   g_drm.next_dumb_handle = 1;
   g_drm.next_fb_id = 1;
   /* Query capsets after g_drm is zeroed/initialized. */

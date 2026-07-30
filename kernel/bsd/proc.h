@@ -121,7 +121,6 @@ void proc_reap_idle(void);   // idle hook: scan for orphaned zombies
 // close by file_put's FD_SYNC_FILE case. drm_fence is opaque here.
 struct drm_fence;
 int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence);
-struct drm_fence *bsd_sync_file_fd_fence(xtask *proc, int fd);
 
 // Process creation (kernel/bsd/proc_create.c)
 xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);

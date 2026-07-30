@@ -142,6 +142,51 @@ struct virtio_gpu_resource_create_2d {
   uint32_t height;
 };
 
+/* 3D box (used by TRANSFER_TO/FROM_HOST_3D) */
+struct virtio_gpu_box {
+  uint32_t x, y, z;
+  uint32_t w, h, d;
+};
+
+/* RESOURCE_CREATE_3D command (virgl legacy path). Field layout matches the
+ * upstream virtio-gpu spec; the kernel maps drm_virtgpu_resource_create
+ * (UAPI) into this before sending to the host. */
+#define VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP (1 << 0)
+struct virtio_gpu_resource_create_3d {
+  struct virtio_gpu_ctrl_hdr hdr;
+  uint32_t resource_id;
+  uint32_t target;
+  uint32_t format;
+  uint32_t bind;
+  uint32_t width;
+  uint32_t height;
+  uint32_t depth;
+  uint32_t array_size;
+  uint32_t last_level;
+  uint32_t nr_samples;
+  uint32_t flags;
+  uint32_t padding;
+};
+
+/* TRANSFER_TO_HOST_3D / TRANSFER_FROM_HOST_3D command (virgl legacy path). */
+struct virtio_gpu_transfer_host_3d {
+  struct virtio_gpu_ctrl_hdr hdr;
+  struct virtio_gpu_box box;
+  uint64_t offset;
+  uint32_t resource_id;
+  uint32_t level;
+  uint32_t stride;
+  uint32_t layer_stride;
+};
+
+/* CTX_ATTACH_RESOURCE / CTX_DETACH_RESOURCE command. Not on the virgl basic
+ * render path (Mesa winsys does not issue these) — kept for future use. */
+struct virtio_gpu_ctx_resource {
+  struct virtio_gpu_ctrl_hdr hdr;
+  uint32_t resource_id;
+  uint32_t padding;
+};
+
 /* RESOURCE_UNREF command */
 struct virtio_gpu_resource_unref {
   struct virtio_gpu_ctrl_hdr hdr;
