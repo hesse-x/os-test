@@ -66,6 +66,7 @@ add_user_lib(c
     EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs> $<TARGET_OBJECTS:musl_fcntl_objs>
                $<TARGET_OBJECTS:musl_socket_objs>
                $<TARGET_OBJECTS:musl_dl_objs> $<TARGET_OBJECTS:musl_dirent_objs>
+               $<TARGET_OBJECTS:musl_resource_objs>
                $<TARGET_OBJECTS:musl_pthread>
                $<TARGET_OBJECTS:musl_signal_objs>
                $<TARGET_OBJECTS:musl_string_objs>
@@ -108,6 +109,7 @@ add_user_lib(c_so
     EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs_so> $<TARGET_OBJECTS:musl_fcntl_objs_so>
                $<TARGET_OBJECTS:musl_socket_objs_so>
                $<TARGET_OBJECTS:musl_dl_objs_so> $<TARGET_OBJECTS:musl_dirent_objs_so>
+               $<TARGET_OBJECTS:musl_resource_objs>
                $<TARGET_OBJECTS:musl_loader_objs> $<TARGET_OBJECTS:musl_pthread>
                $<TARGET_OBJECTS:musl_signal_objs>
                $<TARGET_OBJECTS:musl_string_objs>

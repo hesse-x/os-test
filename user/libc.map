@@ -395,7 +395,10 @@ global:
     /* <dirent.h> */
     closedir; opendir; readdir; scandir;
     telldir; seekdir; rewinddir; dirfd; readdir_r;
-    fdopendir; alphasort; versionsort;
+    fdopendir; alphasort; versionsort; posix_getdents; getdents;
+
+    /* <sys/resource.h> */
+    getrlimit; setrlimit; getrusage; prlimit;
 
     /* <errno.h> */
     __errno_location;

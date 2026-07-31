@@ -152,16 +152,20 @@ if (child->state == STOPPED && !child->stop_reported &&
 
 #### sys_execve（kernel/proc.c : sys_execve）
 
-1. 内核打开 pathname（VFS/FAT32），fstat 获取文件大小
+1. 内核打开 pathname（VFS，经 `vfs_read_kernel` 跨 fs 读：tmpfs→`tmpfs_read_kern`，fat32→`fat32_read`），fstat 获取文件大小。**close 前捕获** `ip->mode/uid/gid` + `mount_of_inode(ip)->m_flags`（ip 在 close 后 dangling）
 2. kmalloc 缓冲区，read 整个 ELF 到内核
 3. 验证 ELF magic，无效则 kfree + 返回 -ENOEXEC
-4. 关闭 FD_CLOEXEC 标记的 fd（遍历 fd_table）
-5. mm_release_pages 释放旧地址空间（用户页+PML4+栈，跳过 SHM/MAP_PHYSICAL）
-6. 分配新 PML4，拷贝内核条目，elf_load 加载新 ELF
-7. 分配新用户栈，映射信号 trampoline 页
-8. 原地修改 trapframe：rip=entry, rsp=stack_top
-9. 更新 mm_t 字段（cr3, mmap_brk 重置）
-10. kfree ELF 缓冲区，返回用户态执行新程序
+4. **S_ISUID/S_ISGID 预计算**（对齐 Linux `prepare_binfmt`）：`!(m_flags & MS_NOSUID)` 时，`mode & S_ISUID` → new_euid/new_suid=inode->uid；`mode & S_ISGID` → new_egid/new_sgid=inode->gid。real uid/gid 不动。此处仅算新值，不写 proc
+5. 关闭 FD_CLOEXEC 标记的 fd（遍历 fd_table）
+6. mm_release_pages 释放旧地址空间（用户页+PML4+栈，跳过 SHM/MAP_PHYSICAL）
+7. 分配新 PML4，拷贝内核条目，elf_load 加载新 ELF
+8. 分配新用户栈，映射信号 trampoline 页；构建 argc/argv/envp/auxv——auxv 的 `AT_EUID/AT_EGID/AT_SECURE` 用预计算的 new_euid/new_egid（AT_SECURE 非零 → musl 进 secure-execution 模式 drop LD_*）
+9. **point-of no-return 后提交凭证**（对齐 Linux `commit_creds`）：`euid/suid=new_euid/new_suid`、`egid/sgid=new_egid/new_sgid`。此后无 return 失败路径（失败走 sys_exit），零凭证泄露窗口
+10. 原地修改 trapframe：rip=entry, rsp=stack_top
+11. 更新 mm_t 字段（cr3, mmap_brk 重置）
+12. kfree ELF 缓冲区，返回用户态执行新程序
+
+setuid/setgid 凭证阶梯（setuid/setgid/setresuid/setresgid/setreuid/setregid，`kernel/bsd/proc.c`）的特权 gate 统一经 `capable(CAP_SETUID/CAP_SETGID)`（对齐 Linux setuid(2) 判 CAP_SETUID，非裸 euid==0），与 chmod/chown/mount/kill/clock_settime 同一收口；未来 capability bitmap 实化只改 `capable()` 实现。
 
 ### 生命周期
 
@@ -237,8 +241,8 @@ fork:
 | CLONE_VM / 线程 | task_t/mm_t/files_t 拆分已预留，需实现 pthread 级别的线程创建（共享地址空间） | 中 |
 | ~~WNOHANG 非阻塞 waitpid~~ | ~~当前 waitpid 只有阻塞模式~~ | 已实现：`options` 三层打通（libc inline `__syscall3` + wrapper 转发 + 内核 `sys_waitpid` 读 `options`），两条等待路径（pid==-1 / pid>=0）在无 ZOMBIE 时按 `WNOHANG` 短路返回 0。`wait.h` 补齐 `WIFEXITED/WEXITSTATUS/WIFSIGNALED/WTERMSIG` 宏（内核 wait status 编码已就绪） |
 | 停止态上报（`WUNTRACED`/`WCONTINUED`） | `xtask_t` 加 `STOPPED` 状态 + `stop_sig`/`stop_reported` 字段；SIGSTOP/SIGTSTP/SIGCONT 默认动作（当前 `signal.c` SIG_DFL 分支为 `break`=忽略）改为置 STOPPED + `schedule()` / SIGCONT 唤醒回 RUNNABLE；`sys_waitpid` 扫描识别 STOPPED 并按 `(stop_sig<<8)|0x7f` 编码上报（不 reap，子进程仍存活）。涉及 SMP 锁顺序（state 读写走 `scheduler_lock[child->cpu]`）。设计详见 `extend_wait.md` P2/P3。job control 基础，待真实需求触发 | 中 |
-| execve argv/envp 传递 | 当前 argv=NULL, envp=NULL，需支持命令行参数和环境变量传入新进程 | 高 |
-| ELF 数据内核复制 | execve 当前直接用用户态指针（同步调用安全），防御性编程应先 kfree 到内核再加载 | 低 |
+| ~~execve argv/envp 传递~~ | ~~当前 argv=NULL, envp=NULL~~ | 已实现：execve 构建完整 argc/argv/envp/auxv 栈（SysV ABI），PT_INTERP 动态可执行加载 ld.so，envp 经 procfs pinfo 侧表抓取 |
+| ~~ELF 数据内核复制~~ | ~~execve 当前直接用用户态指针~~ | 已实现：execve 先 `vfs_read_kernel` 读整 ELF 到 kmalloc 缓冲再校验/加载（跨 fs：tmpfs→`tmpfs_read_kern`，fat32→`fat32_read`） |
 | 进程优先级 | 当前所有进程同等优先级，需 nice 值或实时优先级支持 | 低 |
 | 用户栈仅 4KB 无 guard page | 栈溢出触发 #PF 被 kill，应扩栈 + 加 guard page | 中 |
 | 内核栈仅 8KB | 深层调用路径偏紧，应扩栈或加溢出检测 | 中 |

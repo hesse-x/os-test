@@ -260,8 +260,8 @@ udevd 设备数据库 + 规则引擎 + coldplug **已落地**（对齐 Linux `in
 
 S20（[../../refact_syscall/S20_misc_finish.md](../../refact_syscall/S20_misc_finish.md)）以最小代价对齐 Linux x86-64 语义；下列属"需要更大子系统才能真实生效"的项，S20 仅接常量/退化语义或显式拒绝，真实语义延后：
 
-- **mount 权限校验**（`kernel/bsd/mount.c` `sys_mount`）：已加 `euid==0` 门（等价 `CAP_SYS_ADMIN`，复用 `kill_permitted`/`setuid` 的 euid==0 root 阶梯，非伪造能力位图）。单用户 root-default 系统下为 no-op，仅当未来引入非 root euid 时生效。引入真实 capability 模型后改为 `capable(CAP_SYS_ADMIN)`，届时 `kill_permitted`/`setuid`/`mount` 一并迁移。S20 已接 `flags` 最低语义：`MS_REMOUNT`/`MS_BIND` 显式 `-ENOSYS`（未实现，优于静默吞），`MS_RDONLY`/`MS_NOSUID`/`MS_NODEV`/`MS_NOEXEC` 接受但无生效（本 FS 无权限/执行位语义），随权限 FS 上线。`data`(arg5) 透传未做——无 fstype 消费，等真实 mount 选项需求出现时连同 `mount_root` 回调签名一起加。
-- **`MS_RDONLY`/`NOSUID`/`NODEV`/`NOEXEC` 真实生效**：本 FS（FAT32/tmpfs/devtmpfs）无权限位与执行位语义，四 flag 接受为 no-op。需权限 FS + suid/exec 位模型。
+- **mount 权限校验**（`kernel/bsd/mount.c` `sys_mount`）：已加 `capable(CAP_SYS_ADMIN)` 门（今天等价 `euid==0`，与 `kill_permitted`/setuid 阶梯同一收口）。单用户 root-default 系统下为 no-op，仅当未来引入非 root euid 时生效；引入真实 capability 模型后只改 `capable()` 实现。`MS_RDONLY`/`MS_NOSUID`/`MS_NODEV`/`MS_NOEXEC` 已存入 `mount_entry.m_flags`——`MS_NOSUID` 被 execve 消费（跳过 setuid/setgid 位，见 [proc.md](kernel/proc.md) execve 段），其余三 flag 存而未强制。`MS_REMOUNT`/`MS_BIND` 显式 `-ENOSYS`（未实现，优于静默吞）。`data`(arg5) 透传未做——无 fstype 消费，等真实 mount 选项需求出现时连同 `mount_root` 回调签名一起加。
+- **`MS_RDONLY`/`NODEV`/`NOEXEC` 真实生效**：本 FS（FAT32/tmpfs/devtmpfs）无权限位与执行位语义，三 flag 存 `m_flags` 但不强制（`MS_NOSUID` 已生效，见上）。需权限 FS + 执行位模型。
 - **`MAP_GROWSDOWN` 栈自动扩展**（`include/uapi/xos/mman.h`）：S20 补常量 `0x100`，接受为 no-op（本 OS 栈固定）。真实 growsdown 栈扩展需 fault handler 在栈 guard 页 fault 时向下扩展 VMA，属 S10 范围。
 - **`PROT_GROWSDOWN` 栈 guard 扩展**（`kernel/bsd/syscall.c` `sys_mprotect`）：S20 接受该位（mask 掉不报错），但无栈自动扩展语义。同 `MAP_GROWSDOWN`，属 S10。
 - **sparse 文件真实 hole 跟踪**（`kernel/bsd/syscall.c` `sys_lseek` `SEEK_DATA`/`SEEK_HOLE`）：S20 补 `SEEK_DATA 3`/`SEEK_HOLE 4`，退化到 Linux "无洞文件"语义（全文件=data，尾部=hole，`offset>=size` 返 `ENXIO`）。本 FS 无 sparse/punch，真实 hole 报告随 sparse FS。
@@ -293,10 +293,11 @@ evdev 中断投递正规化(技术债 #34)独立于本重构,走路径 3,见 [..
 
 ### chmod/chown + capable() 收口后续
 
-`chmod/fchmod/fchmodat/chown/fchown/fchownat` 6 个 syscall 已填实（落盘仅内存，setuid 位清除规则见 [vfs.md](kernel/vfs.md)），`capable()` 单一收口已落地（今天等价 euid==0，CAP_* 编号对齐 Linux，见 `include/uapi/xos/capability.h`）。下一步：
+`chmod/fchmod/fchmodat/chown/fchown/fchownat` 6 个 syscall 已填实（落盘仅内存，setuid 位清除规则见 [vfs.md](kernel/vfs.md)），`capable()` 单一收口已落地（今天等价 euid==0，CAP_* 编号对齐 Linux，见 `include/uapi/xos/capability.h`）。setuid/setgid 凭证阶梯 6 个函数（setuid/setgid/setresuid/setresgid/setreuid/setregid）的特权 gate 统一经 `capable(CAP_SETUID/CAP_SETGID)`（对齐 Linux setuid(2) 判 CAP_SETUID，非裸 euid==0）；未来 bitmap 实化只改 `capable()`。下一步：
 
-- [ ] **execve S_ISUID 处理（sudo 真正使能点）**：chmod 现能设 S_ISUID 位（root chmod 04755 保留），但 `sys_execve` 不读该位切换 euid。下一步 execve 检测 `S_ISREG && (mode & S_ISUID)` → 子进程 euid/suid=inode->uid，配套 S_ISGID+egid、`MNT_NOSUID` 跳过。这是 sudo 工作的前提——chmod 设位 + execve 读位才闭环。
-- [ ] **capability bitmap 实化**：`capable()` 现仅判 euid==0（`(void)cap` 预留分流钩子）。需按 cap 分流时给 proc 加 `cap_effective/inheritable/permitted` bitmap（届时更新 `proc.h` 的 `STATIC_ASSERT(sizeof(proc)==520)` + `kernel/driver/bsd_types.h` 镜像）+ secbits（SECBIT_NOROOT 等）。各调用点（inode_permission/kill_permitted/sys_mount/clock_settime/chmod/chown）届时零改动，只改 `capable()` 实现。
+- [x] **execve S_ISUID/S_ISGID 处理（sudo 真正使能点）**：已实现（`kernel/bsd/proc.c` sys_execve）。close 前捕获 `ip->mode/uid/gid` + `mount_of_inode(ip)->m_flags`，ELF 校验后**预计算** new_euid/egid（不写 proc，对齐 Linux prepare_binfmt），auxv 的 `AT_EUID/AT_EGID/AT_SECURE` 用新值构建（AT_SECURE 非零 → musl 进 secure-execution 模式 drop LD_*），point-of-no-return 后才**提交**（commit_creds，对齐 Linux，零失败路径凭证泄露窗口）。`S_ISREG && (mode & S_ISUID)` → euid/suid=inode->uid；S_ISGID → egid/sgid=inode->gid；`MS_NOSUID` 跳过。real uid/gid 保持调用者（setuid 程序能 setuid(getuid()) 永久 drop 特权的前提）。测试 `test_setuid_exec`（helper ELF 复制到 tmpfs /run 使 path chmod 持久，再 drop root execve 断 euid 切换）。配套扩了 `vfs_read_kernel` 支持 tmpfs（见下）。
+- [x] **`vfs_read_kernel` 跨 fs（execve 不再绑死 fat32）**：`kernel/bsd/vfs.c` 按 `ip->mount->fs->name` 分发——tmpfs→`tmpfs_read_kern`（`kernel/bsd/tmpfs.c`，__memcpy 到内核 buf），其余→`fat32_read`。解锁 execve 从 tmpfs 执行（此前 tmpfs 普通文件只能经 f_op 的 `sys_read`，execve 的内核态读路径读不了）。`MS_NOSUID` 亦因此可达测试。
+- [ ] **capability bitmap 实化**：`capable()` 现仅判 euid==0（`(void)cap` 预留分流钩子）。需按 cap 分流时给 proc 加 `cap_effective/inheritable/permitted` bitmap（届时更新 `proc.h` 的 `STATIC_ASSERT(sizeof(proc)==520)` + `kernel/driver/bsd_types.h` 镜像）+ secbits（SECBIT_NOROOT 等）。各调用点（inode_permission/kill_permitted/sys_mount/clock_settime/chmod/chown/setuid 阶梯）届时零改动，只改 `capable()` 实现。注意：bitmap 落地后 setgid 阶梯的 `CAP_SETGID` 应独立于 euid（今天 capable 只看 euid 是粗糙近似；bitmap 真实化后 CAP_SETGID 与 euid 解耦）。
 - [ ] **inode_permission 拆 CAP_DAC_OVERRIDE vs CAP_DAC_READ_SEARCH**：现 root 的 R/W/X 全走 `CAP_DAC_OVERRIDE`。Linux 拆分：W/X 走 DAC_OVERRIDE，R 走 DAC_READ_SEARCH（目录 +x 也走后者）。本轮统一不拆（零行为变化），拆分留此。
 - [ ] **chown 复杂规则**：现 chown 简化为 `capable(CAP_CHOWN)`（root-only）。Linux 允许"属主把文件 chown 到自己所在的 group"（不需 CAP_CHOWN）。引入多 group 概念后放宽到此规则；届时 `apply_chown` 的非特权清 setuid 位路径才有真实触发点（本轮 chown root-only，非 root 得 EPERM 不执行清位，故 `test_chown_root_keeps_setuid` 验证的是 root CAP_FSETID 保留语义）。
 

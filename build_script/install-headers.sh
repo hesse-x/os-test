@@ -381,6 +381,13 @@ cp "$SRC"/third_party/musl/include/locale.h "$DEST/locale.h"
 cp "$SRC"/third_party/musl/include/regex.h   "$DEST/regex.h"
 cp "$SRC"/third_party/musl/include/fnmatch.h "$DEST/fnmatch.h"
 
+# 3r. dirent/resource now use musl headers verbatim. Their arch-independent
+#     bits headers define the public dirent layout and resource constants.
+cp "$SRC"/third_party/musl/include/dirent.h "$DEST/dirent.h"
+cp "$SRC"/third_party/musl/arch/generic/bits/dirent.h "$DEST/bits/dirent.h"
+cp "$SRC"/third_party/musl/include/sys/resource.h "$DEST/sys/resource.h"
+cp "$SRC"/third_party/musl/arch/generic/bits/resource.h "$DEST/bits/resource.h"
+
 # 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
 #    compiler's -isystem freestanding dir. The published sysroot must be usable
 #    with -nostdinc and NO -isystem (the Mesa milestone consumes it via -isysroot),
