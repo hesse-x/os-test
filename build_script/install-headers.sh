@@ -375,6 +375,12 @@ cp "$SRC"/third_party/musl/arch/x86_64/bits/setjmp.h  "$DEST/bits/setjmp.h"
 #     Closure self-check below covers it.
 cp "$SRC"/third_party/musl/include/locale.h "$DEST/locale.h"
 
+# 3q. POSIX regex and fnmatch. Both implementations are built from musl's
+#     src/regex module and exported by libc. No OS-specific ABI definitions are
+#     involved; regoff_t comes from the already-published bits/alltypes.h.
+cp "$SRC"/third_party/musl/include/regex.h   "$DEST/regex.h"
+cp "$SRC"/third_party/musl/include/fnmatch.h "$DEST/fnmatch.h"
+
 # 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
 #    compiler's -isystem freestanding dir. The published sysroot must be usable
 #    with -nostdinc and NO -isystem (the Mesa milestone consumes it via -isysroot),

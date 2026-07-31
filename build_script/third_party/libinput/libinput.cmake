@@ -31,7 +31,6 @@ set(LIBINPUT_SOURCES
     # os-test compat layer (scandir etc.)
     lib/libinput-compat/compat.c
     lib/libinput-compat/stubs.c
-    lib/fnmatch.c
     # evdev/udev shims (needed by libinput internal)
     lib/evdev-shim/evdev.c
     # udev.c 不在此:libinput.so 经 SO_LINK_LIBS udev 链 libudev.so 取 udev_*

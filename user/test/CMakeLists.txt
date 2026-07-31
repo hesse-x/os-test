@@ -164,6 +164,9 @@ add_user_dyn_elf(test_inttypes C SOURCES test_inttypes.c LINK_LIBS c STATIC_LIBS
 # _XOPEN_SOURCE 700 (musl features.h) already gates the locale_t API.
 add_user_dyn_elf(test_locale C SOURCES test_locale.c LINK_LIBS c STATIC_LIBS unity)
 
+# POSIX regular expressions + shell-pattern matching from musl src/regex.
+add_user_dyn_elf(test_regex C SOURCES test_regex.c LINK_LIBS c STATIC_LIBS unity)
+
 # Layer 20: getrandom (/dev/(u)random + libc 封装)
 add_user_dyn_elf(getrandom C SOURCES test_getrandom.c LINK_LIBS c STATIC_LIBS unity)
 
