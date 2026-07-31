@@ -264,6 +264,12 @@ if(TEST)
     add_user_dyn_elf(test_wait4_pgid_rusage C SOURCES test_wait4_pgid_rusage.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_wait4_options C SOURCES test_wait4_options.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_setuid_saved C SOURCES test_setuid_saved.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    # execve S_ISUID/S_ISGID 凭证切换验证：setuid_helper.elf 用退出码报
+    # geteuid/getegid/getuid，主测试 chmod 04755+chown(1000,1000) 后 fork 子
+    # setuid(2000) drop root 再 execve helper，断 euid 切到 1000、real uid 保持。
+    # 兼带 setuid 阶梯 gate 自洽化(阶段0 capable(CAP_SETUID))回归。
+    add_user_dyn_elf(setuid_helper C SOURCES setuid_helper.c LINK_LIBS c)
+    add_user_dyn_elf(test_setuid_exec C SOURCES test_setuid_exec.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # M1.1 (unistd.md §2.A1/A2): setresuid/setresgid/setreuid/setregid +
     # getgroups. Permission ladder + -1 unchanged + suid-preservation rule
     # (man setresuid(2)/setreuid(2)), process-wide semantics. Non-root cases via

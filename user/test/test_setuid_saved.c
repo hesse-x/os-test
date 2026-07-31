@@ -83,6 +83,9 @@ void test_setgid_ladder(void) {
   if (child == 0) {
     FAIL_IF(setgid(1000) != 0);
     FAIL_IF(getgid() != 1000 || getegid() != 1000);
+    /* CAP_SETGID follows euid, so drop root before testing the saved-GID
+     * permission ladder. */
+    FAIL_IF(setuid(1000) != 0);
     if (setgid(0) != -1 || errno != EPERM)
       _exit(1);
     FAIL_IF(setgid(1000) != 0);

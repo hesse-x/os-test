@@ -46,7 +46,8 @@ struct fstype *find_fstype_by_name(const char *name) {
   return NULL;
 }
 
-int mount_internal(struct fstype *fs, const char *target, void *fs_data) {
+int mount_internal(struct fstype *fs, const char *target, void *fs_data,
+                   uint32_t flags) {
   if (target[0] != '/')
     return -EINVAL;
   spin_lock(&mount_lock);
@@ -74,6 +75,7 @@ int mount_internal(struct fstype *fs, const char *target, void *fs_data) {
   mount_table[slot].mntpoint[j] = '\0';
   mount_table[slot].fs = fs;
   mount_table[slot].fs_data = fs_data;
+  mount_table[slot].m_flags = flags;
   mount_table[slot].in_use = true;
   spin_unlock(&mount_lock);
   return 0;
@@ -276,8 +278,10 @@ int normalize_path(const char *in, char *out, size_t outcap) {
  * own defined layout.
  * flags: MS_REMOUNT/MS_BIND are not implemented and rejected with -ENOSYS so a
  * caller cannot believe a remount/bind succeeded when it was silently dropped.
- * MS_RDONLY/NOSUID/NODEV/NOEXEC are accepted but have no effect (no permission
- * or execute-bit semantics in this FS) — recorded in todo.md. */
+ * MS_RDONLY/NOSUID/NODEV/NOEXEC are accepted and stored in mount_entry.m_flags.
+ * MS_NOSUID is consumed by execve (setuid/setgid bits honored only without it);
+ * RDONLY/NODEV/NOEXEC are stored but not yet enforced (no permission/exec-bit
+ * semantics in this FS) — recorded in todo.md. */
 int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                   int64_t arg5, int64_t unused) {
   (void)arg1; // source: no source concept (mount fstype onto target); NULL OK
@@ -293,8 +297,11 @@ int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   if (flags & (MS_REMOUNT | MS_BIND))
     return (int64_t)-ENOSYS; // not implemented; explicit over silent drop
-  // MS_RDONLY/NOSUID/NODEV/NOEXEC accepted as no-op (no permission/exec-bit
-  // semantics); see todo.md.
+  // MS_RDONLY/NOSUID/NODEV/NOEXEC accepted and stored in mount_entry.m_flags.
+  // MS_NOSUID is consumed by execve (setuid/setgid bits honored only without
+  // it); RDNODEV/NOEXEC are stored but not yet enforced (no permission/exec-bit
+  // semantics in this FS); see todo.md.
+  uint32_t accepted = flags & (MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC);
 
   const char __user *utarget = (const char __user *__force)arg2;
   const char __user *utype = (const char __user *__force)arg3;
@@ -322,5 +329,5 @@ int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
    * m->fs_data yet. A future fstype that parses mount options must
    * copy_from_user this under its own defined layout (todo.md). */
   void *fs_data = (void *)(uintptr_t)arg5;
-  return mount_internal(fs, target, fs_data);
+  return mount_internal(fs, target, fs_data, accepted);
 }

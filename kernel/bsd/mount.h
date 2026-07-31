@@ -60,11 +60,12 @@ struct fstype {
 };
 
 /* mount(2) flags — Linux x86-64 values (uapi linux/fs.h). Only the bits the
- * kernel inspects are named here. MS_RDONLY/NOSUID/NODEV/NOEXEC are accepted
- * but have no effect (this FS has no permission/execute-bit semantics); see
- * todo.md. MS_REMOUNT/MS_BIND are not implemented and rejected with -ENOSYS
- * so a caller cannot believe a remount/bind happened when it was silently
- * dropped. */
+ * kernel inspects are named here. MS_NOSUID is consumed by execve
+ * (setuid/setgid bit honored only on mounts without MS_NOSUID).
+ * MS_RDONLY/NODEV/NOEXEC are accepted and stored in mount_entry.m_flags but not
+ * yet enforced (no permission/execute-bit semantics in this FS); see todo.md.
+ * MS_REMOUNT/MS_BIND are not implemented and rejected with -ENOSYS so a caller
+ * cannot believe a remount/bind happened when it was silently dropped. */
 #define MS_RDONLY 0x00000001
 #define MS_NOSUID 0x00000002
 #define MS_NODEV 0x00000004
@@ -79,7 +80,9 @@ struct fstype {
 struct mount_entry {
   char mntpoint[MNTPOINT_MAX]; /* "/" / "/dev" / "/sys" */
   struct fstype *fs;
-  void *fs_data; /* mount-private data (NULL for fat32/devtmpfs) */
+  void *fs_data;    /* mount-private data (NULL for fat32/devtmpfs) */
+  uint32_t m_flags; /* MS_* bits accepted at mount(2) (MS_NOSUID consumed by
+                     * execve; RDONLY/NODEV/NOEXEC stored, not yet enforced) */
   bool in_use;
 };
 
@@ -90,7 +93,8 @@ struct mount_entry *vfs_resolve(const char *path, char *relpath, size_t relcap);
 struct mount_entry *vfs_resolve_user(const char __user *upath, char *relpath,
                                      size_t relcap);
 struct mount_entry *mount_of_inode(struct inode *ip);
-int mount_internal(struct fstype *fs, const char *target, void *fs_data);
+int mount_internal(struct fstype *fs, const char *target, void *fs_data,
+                   uint32_t flags);
 bool dir_emit(struct dir_context *ctx, const char *name, int namlen,
               uint64_t offset, uint64_t ino, unsigned int d_type);
 int normalize_path(const char *in, char *out, size_t outcap);

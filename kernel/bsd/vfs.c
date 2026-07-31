@@ -67,7 +67,7 @@ void vfs_init(void) {
       register_fstype(&tmpfs_fstype);
       register_fstype(&procfs_fstype);
       sysfs_init();
-      mount_internal(&fat32_fstype, "/", NULL);
+      mount_internal(&fat32_fstype, "/", NULL, 0);
       /* Create /dev directory entry on FAT32 root so getdents("/") sees it.
        * fat32_mkdir is not idempotent (it allocates a cluster unconditionally),
        * so only create when the entry is missing. */
@@ -76,14 +76,14 @@ void vfs_init(void) {
         if (fat32_stat("/dev", ksb) != 0)
           fat32_mkdir("/dev");
       }
-      mount_internal(&devtmpfs_fstype, "/dev", NULL);
+      mount_internal(&devtmpfs_fstype, "/dev", NULL, 0);
       /* Create /sys directory on FAT32 root for getdents("/") visibility */
       {
         uint8_t ksb[256];
         if (fat32_stat("/sys", ksb) != 0)
           fat32_mkdir("/sys");
       }
-      mount_internal(&sysfs_fstype, "/sys", sysfs_root_node());
+      mount_internal(&sysfs_fstype, "/sys", sysfs_root_node(), 0);
       /* procfs(procfs.md §2.4):建 /proc 目录挂 procfs_fstype。 */
       {
         uint8_t ksb[256];
@@ -91,7 +91,7 @@ void vfs_init(void) {
           fat32_mkdir("/proc");
       }
       procfs_init();
-      mount_internal(&procfs_fstype, "/proc", procfs_root_node());
+      mount_internal(&procfs_fstype, "/proc", procfs_root_node(), 0);
       /* Create /run directory on FAT32 root for getdents("/") visibility,
        * then mount tmpfs on /run (内存 fs，udevd db/socket 前置)。 */
       {
@@ -99,7 +99,7 @@ void vfs_init(void) {
         if (fat32_stat("/run", ksb) != 0)
           fat32_mkdir("/run");
       }
-      mount_internal(&tmpfs_fstype, "/run", NULL);
+      mount_internal(&tmpfs_fstype, "/run", NULL, 0);
       devtmpfs_create("sda", &blk_dev_ops, NULL);
       break;
     }
@@ -458,10 +458,12 @@ int vfs_read_kernel(struct inode *ip, uint64_t offset, void *buf,
     return -EISDIR;
   if (ip->type != INODE_REGULAR)
     return -ENOEXEC;
-  /* fat32 is the only regular-file fs with a kernel inode-read (fat32_read);
-   * it keys off ip->start_cluster, so any INODE_REGULAR it created is readable.
-   * A regular inode from another fs would have no backing read here — but the
-   * only regular-file fs today is fat32 (tmpfs regulars are read via f_op). */
+  /* 按 fstype 分发:tmpfs 普通文件走 tmpfs_read_kern(内存 buffer),其余(fat32)
+   * 走 fat32_read(page cache)。ip->mount 由 sys_open 设(execve 经 sys_open
+   * 打开,故非 NULL);NULL 时回退 fat32(根挂载,与历史行为一致)。这让 execve
+   * 不再绑死 fat32——tmpfs 上的 ELF 亦可执行(解锁 S_ISUID-on-exec 测试)。 */
+  if (ip->mount && __strcmp(ip->mount->fs->name, "tmpfs") == 0)
+    return tmpfs_read_kern(ip, offset, buf, count);
   return fat32_read(ip, offset, buf, count);
 }
 

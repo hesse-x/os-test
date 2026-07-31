@@ -761,6 +761,25 @@ static ssize_t tmpfs_read(struct xtask *proc, struct file *f, void *buf,
   return (ssize_t)n;
 }
 
+/* tmpfs_read_kern:内核态读 tmpfs 普通文件(execve 经 vfs_read_kernel 调)。
+ * 与 tmpfs_read 的差异:显式 offset(非 f->offset)、__memcpy 到内核 buf(非
+ * copy_to_user)。签名对齐 fat32_read,供 vfs_read_kernel 按 fstype 分发。 */
+int tmpfs_read_kern(struct inode *ip, uint64_t offset, void *buf,
+                    size_t count) {
+  struct tmpfs_inode_info *ti = (struct tmpfs_inode_info *)ip->i_priv;
+  if (!ti)
+    return -EFAULT;
+  spin_lock(&ti->lock);
+  if (offset >= ti->size) {
+    spin_unlock(&ti->lock);
+    return 0;
+  }
+  size_t n = ti->size - offset < count ? ti->size - offset : count;
+  __memcpy(buf, (char *)ti->data + offset, n);
+  spin_unlock(&ti->lock);
+  return (ssize_t)n;
+}
+
 static ssize_t tmpfs_write(struct xtask *proc, struct file *f, const void *buf,
                            size_t count) {
   (void)proc;

@@ -153,6 +153,12 @@ void test_umask_roundtrip(void) {
  * to a non-root id you cannot climb back to root — setuid(0) must fail EPERM.
  * Restoring to the dropped id is allowed (== real/saved-set). */
 void test_setuid_setgid(void) {
+  /* Drop GID first: once setuid() drops euid 0, CAP_SETGID is gone. */
+  TEST_ASSERT_EQUAL_INT(0, setgid(456));
+  TEST_ASSERT_EQUAL_INT(456, getgid());
+  TEST_ASSERT_EQUAL_INT(456, getegid());
+  TEST_ASSERT_EQUAL_INT(0, setgid(456)); /* privileged while euid is still 0 */
+
   TEST_ASSERT_EQUAL_INT(0, setuid(123));
   TEST_ASSERT_EQUAL_INT(123, getuid());
   TEST_ASSERT_EQUAL_INT(123, geteuid());
@@ -161,9 +167,6 @@ void test_setuid_setgid(void) {
   TEST_ASSERT_EQUAL_INT(123, getuid());  /* unchanged */
   TEST_ASSERT_EQUAL_INT(0, setuid(123)); /* == real uid: allowed */
 
-  TEST_ASSERT_EQUAL_INT(0, setgid(456));
-  TEST_ASSERT_EQUAL_INT(456, getgid());
-  TEST_ASSERT_EQUAL_INT(456, getegid());
   TEST_ASSERT_EQUAL_INT(-1, setgid(0)); /* sgid dropped: EPERM */
   TEST_ASSERT_EQUAL_INT(EPERM, errno);
   TEST_ASSERT_EQUAL_INT(0, setgid(456)); /* == real gid: allowed */

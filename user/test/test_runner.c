@@ -103,6 +103,7 @@ static struct test_entry tests[] = {
     {"wait4_pgid_rusage", "/test/test_wait4_pgid_rusage.elf"},
     {"wait4_options", "/test/test_wait4_options.elf"},
     {"setuid_saved", "/test/test_setuid_saved.elf"},
+    {"setuid_exec", "/test/test_setuid_exec.elf"},
     {"setxid", "/test/test_setxid.elf"},
     {"execve_vfs", "/test/test_execve_vfs.elf"},
     {"test_ffi", "/test/test_ffi.elf"},

@@ -23,6 +23,7 @@
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/ipcfd.h"
+#include "kernel/bsd/mount.h" // mount_of_inode, MS_NOSUID (execve setuid gate)
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/procfs.h"
@@ -48,6 +49,7 @@
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
+#include <xos/stat.h> // S_ISUID/S_ISGID (execve setuid/setgid bit)
 
 #include "kernel/bsd/kfcntl.h"
 #include "kernel/user_check.h"
@@ -1418,6 +1420,16 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   }
   uint32_t saved_ino = ip->ino;
   uint64_t file_size = ip->size;
+  /* S_ISUID/S_ISGID 凭证切换前置：ip 在 sys_close 后 dangling，须在此捕获
+   * 文件 mode/uid/gid 与所在挂载的 NOSUID 标志。point-of-no-return 后才提交
+   * new_euid/egid（见步骤 9b），失败路径不污染调用者凭证。 */
+  uint32_t file_mode = ip->mode;
+  uint32_t file_uid = ip->uid;
+  uint32_t file_gid = ip->gid;
+  uint32_t mnt_flags = 0;
+  struct mount_entry *me = mount_of_inode(ip);
+  if (me)
+    mnt_flags = me->m_flags;
 
   // 3. kmalloc buffer, read entire ELF into kernel
   uint8_t *elf_buf = (uint8_t *)kmalloc(file_size);
@@ -1452,6 +1464,24 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   }
   printk(LOG_INFO, "execve: pid=%d path=%s size=%lu magic OK\n", proc->pid,
          pathname, (unsigned long)file_size);
+
+  /* S_ISUID/S_ISGID 预计算（对齐 Linux prepare_binfmt → commit_creds 分离）。
+   * 只切 euid/suid（egid/sgid），real uid/gid 保持调用者——setuid 程序能
+   * setuid(getuid()) 永久 drop 特权的前提。MNT_NOSUID 跳过（todo #1
+   * 核心消费点）。 此处仅算新值，不写 proc；point-of-no-return 后才提交（步骤
+   * 9b），故后续 ld.so 加载/栈分配等失败路径 return 时调用者凭证原封不动。 */
+  uint32_t new_euid = proc->proc->euid, new_suid = proc->proc->suid;
+  uint32_t new_egid = proc->proc->egid, new_sgid = proc->proc->sgid;
+  if (!(mnt_flags & MS_NOSUID)) {
+    if (file_mode & S_ISUID) {
+      new_euid = file_uid;
+      new_suid = file_uid;
+    }
+    if (file_mode & S_ISGID) {
+      new_egid = file_gid;
+      new_sgid = file_gid;
+    }
+  }
 
   // 5. Allocate new PML4, copy kernel entries (before releasing old space)
   struct page *pml4_page = bfc_alloc_page(1);
@@ -1719,16 +1749,20 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   auxv[ai++] = AT_UID;
   auxv[ai++] = current_proc->uid;
   auxv[ai++] = AT_EUID;
-  auxv[ai++] = current_proc->euid;
+  auxv[ai++] =
+      new_euid; /* S_ISUID exec 后的新 euid（未设 setuid 位则 == euid） */
   auxv[ai++] = AT_GID;
   auxv[ai++] = current_proc->gid;
   auxv[ai++] = AT_EGID;
-  auxv[ai++] = current_proc->egid;
+  auxv[ai++] = new_egid; /* S_ISGID exec 后的新 egid */
   auxv[ai++] = AT_PLATFORM;
   auxv[ai++] = 0;
   auxv[ai++] = AT_SECURE;
-  auxv[ai++] = (current_proc->euid != current_proc->uid) ||
-               (current_proc->egid != current_proc->gid);
+  /* AT_SECURE: euid!=uid 或 egid!=gid → musl 进 secure-execution 模式 drop
+   * LD_*。 setuid exec 使 euid 切到 inode owner → AT_SECURE 非零（setuid
+   * 程序应得隔离）。 */
+  auxv[ai++] =
+      (new_euid != current_proc->uid) || (new_egid != current_proc->gid);
   auxv[ai++] = AT_HWCAP;
   auxv[ai++] = 0;
   auxv[ai++] = AT_NULL;
@@ -1787,6 +1821,15 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   kfree(envp_str_vaddrs);
 
   // === Point of no return: old address space will be replaced ===
+
+  /* commit_creds: 提交预计算的 setuid/setgid 凭证（对齐 Linux commit_creds 在
+   * point-of-no-return 之后）。此后无 return 失败路径（cloexec/换地址空间失败
+   * 走 sys_exit），故不存在把切过的 euid 带回调用者的窗口。real uid/gid 不动。
+   */
+  proc->proc->euid = new_euid;
+  proc->proc->suid = new_suid;
+  proc->proc->egid = new_egid;
+  proc->proc->sgid = new_sgid;
 
   // 8. Close FD_CLOEXEC fds
   // S06: cloexec now lives in the per-fd bitmap (not f->flags), so execve
@@ -2072,13 +2115,16 @@ int64_t sys_setuid(int64_t arg1, int64_t unused2, int64_t unused3,
   uint32_t uid = (uint32_t)arg1;
   proc *p = current_proc;
   // S19 §6.2: Linux permission ladder.
-  //  euid==0 (root): set real + effective + saved-set to uid (drop/raise
-  //  freely;
-  //    suid lets a later non-root euid raise back to a saved value).
+  //  has CAP_SETUID (== euid==0 today): set real + effective + saved-set to uid
+  //    (drop/raise freely; suid lets a later non-root euid raise back to a
+  //    saved value).
   //  otherwise: euid may only be set to the current real uid or saved-set uid;
   //    real + saved-set are unchanged. This prevents a non-root process from
   //    escalating to an arbitrary uid (incl. root) it never held.
-  if (p->euid == 0) {
+  //  Gate经 capable() 单一收口(对齐 Linux setuid(2) 判 CAP_SETUID 而非裸
+  //  euid==0; setresuid/setreuid 同收口),未来 capability bitmap 实化只改
+  //  capable()。
+  if (capable(CAP_SETUID)) {
     p->uid = uid;
     p->euid = uid;
     p->suid = uid;
@@ -2099,8 +2145,9 @@ int64_t sys_setgid(int64_t arg1, int64_t unused2, int64_t unused3,
   (void)unused6;
   uint32_t gid = (uint32_t)arg1;
   proc *p = current_proc;
-  // S19 §6.2: same ladder as setuid, over gid/egid/sgid.
-  if (p->egid == 0) {
+  // S19 §6.2: same ladder as setuid, over gid/egid/sgid. Gate 经 capable()
+  // 收口(对齐 setgid(2) 判 CAP_SETGID;setresgid/setregid 同收口)。
+  if (capable(CAP_SETGID)) {
     p->gid = gid;
     p->egid = gid;
     p->sgid = gid;
