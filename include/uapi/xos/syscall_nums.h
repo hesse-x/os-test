@@ -165,6 +165,12 @@
 
 // ---- ENOSYS stubs (C group) ----
 #define SYS_SENDFILE 40
+// setpriority(140)/getpriority(141) — backed by sys_setpriority/sys_getpriority
+// (PRIO_PROCESS nice, stored in xtask.nice). Match the Linux x86-64 numbers
+// used in user/include/bits/syscall.h so musl's SYS_setpriority/getpriority hit
+// these.
+#define SYS_SETPRIORITY 140
+#define SYS_GETPRIORITY 141
 #define SYS_LINK 86
 #define SYS_SYMLINK 88
 #define SYS_READLINK 89

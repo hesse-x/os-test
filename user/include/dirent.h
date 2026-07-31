@@ -50,6 +50,11 @@ LIBC_EXPORT int scandir(const char *dirp, struct dirent ***namelist,
                         int (*filter)(const struct dirent *),
                         int (*compar)(const struct dirent **,
                                       const struct dirent **));
+/* POSIX comparators for scandir(). alphasort() orders by strcoll() (C-locale
+ * code-point via the locale tier — see libc.map); versionsort() by strverscmp.
+ * Both take the same signature as scandir's compar and need no _GNU_SOURCE. */
+LIBC_EXPORT int alphasort(const struct dirent **, const struct dirent **);
+LIBC_EXPORT int versionsort(const struct dirent **, const struct dirent **);
 /* seekdir/telldir use the kernel getdents d_off cookie via lseek on the dir
  * fd; rewinddir resets to start. fdopendir wraps an already-open dir fd. */
 LIBC_EXPORT long telldir(DIR *dirp);

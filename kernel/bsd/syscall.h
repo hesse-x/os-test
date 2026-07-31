@@ -176,6 +176,11 @@ int64_t sys_sched_setaffinity(int64_t, int64_t, int64_t, int64_t, int64_t,
 int64_t sys_sched_getaffinity(int64_t, int64_t, int64_t, int64_t, int64_t,
                               int64_t);
 
+// setpriority / getpriority (group 6, PRIO_PROCESS nice). Kernel stores
+// t->nice; scheduler not yet weighted — see sys_setpriority comment.
+int64_t sys_setpriority(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_getpriority(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
 // membarrier (group 6) — x86-64 TSO: no cross-CPU IPI, see sys_membarrier.
 int64_t sys_membarrier(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 

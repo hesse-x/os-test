@@ -30,12 +30,15 @@
 # source needed. fdopendir.c's fstat + fcntl deps come from file.cc's statx
 # AT_EMPTY_PATH fstat and musl_fcntl_objs respectively.
 #
-# alphasort.c is intentionally EXCLUDED (dirent.md §4a): it calls strcoll, which
-# drags in the locale chain — not worth it for a newly-added API no in-tree
-# consumer uses. versionsort.c IS included; its only dep strverscmp is now
-# supplied by the musl_string_objs glob (src/string/*.c, see string.md) — no
-# separate strverscmp.c here, or both tiers multi-define strverscmp.
-# user/include/dirent.h does not declare alphasort.
+# alphasort.c IS included (alongside versionsort.c): it calls strcoll, whose
+# locale chain (src/locale/strcoll.c — musl_locale_objs, libc.map <locale.h>
+# block) is now built (see doc/design/todo.md §412). The original §4a exclusion
+# ("not worth dragging in the locale chain for a no-consumer API") is stale:
+# strcoll is already exported (strcoll@@LIBC_1.0), so alphasort is free, and
+# Mesa's xmlconfig.c (scandir(..., alphasort) under _GNU_SOURCE) needs it.
+# versionsort's only dep strverscmp is supplied by the musl_string_objs glob
+# (src/string/*.c, see string.md) — no separate strverscmp.c here, or both
+# tiers multi-define strverscmp.
 set(MUSL_DIRENT_SOURCES
     ${MUSL_DIR}/src/dirent/opendir.c
     ${MUSL_DIR}/src/dirent/readdir.c
@@ -46,6 +49,7 @@ set(MUSL_DIRENT_SOURCES
     ${MUSL_DIR}/src/dirent/rewinddir.c
     ${MUSL_DIR}/src/dirent/dirfd.c
     ${MUSL_DIR}/src/dirent/scandir.c
+    ${MUSL_DIR}/src/dirent/alphasort.c
     ${MUSL_DIR}/src/linux/getdents.c
     ${MUSL_DIR}/src/dirent/fdopendir.c
     ${MUSL_DIR}/src/dirent/versionsort.c)

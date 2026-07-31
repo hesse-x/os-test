@@ -11,6 +11,13 @@
 #include <sys/time.h> // struct timeval (for ru_utime/ru_stime below)
 #include <sys/types.h>
 
+/* id_t for the getpriority/setpriority signature (musl: int (int, id_t, int)).
+ * bits/alltypes.h gates the typedef on __NEED_id_t; define it so the include
+ * above (sys/types.h → bits/alltypes.h) exposes id_t. Mesa's u_queue.c calls
+ * setpriority(PRIO_PROCESS, ...) and needs both the decl and PRIO_PROCESS. */
+#define __NEED_id_t
+#include <bits/alltypes.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -41,6 +48,23 @@ extern "C" {
 /* Resource usage (empty — no per-process statistics yet) */
 #define RUSAGE_SELF 0
 #define RUSAGE_CHILDREN (-1)
+
+/* Priority (nice) control. setpriority/getpriority are exported by libc
+ * (musl src/misc/{set,get}priority.c → syscall(SYS_setpriority/getpriority)),
+ * BUT the kernel does not yet implement those two syscalls (no dispatch case in
+ * kernel/bsd/syscall.c) — so the wrappers return -ENOSYS. They are exported
+ * only so callers that merely reference the symbol (Mesa's u_queue.c lowers
+ * worker- thread priority; failure is benign) link and compile. Decl +
+ * constants are the minimal <sys/resource.h> surface needed; full priority
+ * support is a kernel TODO. */
+#define PRIO_MIN (-20)
+#define PRIO_MAX 20
+#define PRIO_PROCESS 0
+#define PRIO_PGRP 1
+#define PRIO_USER 2
+
+int getpriority(int which, id_t who);
+int setpriority(int which, id_t who, int prio);
 
 typedef unsigned long rlim_t;
 

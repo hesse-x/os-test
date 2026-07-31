@@ -5944,6 +5944,64 @@ int64_t sys_sched_getaffinity(int64_t arg1, int64_t arg2, int64_t arg3,
   return 0;
 }
 
+// ===================== setpriority / getpriority =====================
+// setpriority(which, who, prio) / getpriority(which, who). Linux nice value
+// -20..19 (0 default). musl's getpriority returns 20-nice; setpriority takes
+// the nice value directly as prio. We accept PRIO_PROCESS (which=0, who=pid,
+// 0=self), PRIO_PGRP (1), PRIO_USER (2) — but this kernel has no
+// process-group/user scheduling, so PGRP/USER are treated as PRIO_PROCESS
+// against the target pid (who==0 still means "self"). The constants are
+// user-side (user/include/ sys/resource.h); the kernel ABI just passes ints, so
+// we spell them here. The scheduler is fixed-timeslice round-robin and does not
+// yet weight by nice; the field is the stored truth so getpriority round-trips
+// and a future weighted scheduler has somewhere to read. EINVAL for which out
+// of range or prio out of
+// [-20,19], ESRCH for a non-existent target pid. Permission checks are not
+// enforced (single-cred environment).
+#define K_PRIO_PROCESS 0
+#define K_PRIO_PGRP 1
+#define K_PRIO_USER 2
+#define K_PRIO_MIN (-20)
+#define K_PRIO_MAX 19
+int64_t sys_setpriority(int64_t arg1, int64_t arg2, int64_t arg3,
+                        int64_t unused1, int64_t unused2, int64_t unused3) {
+  int which = (int)arg1;
+  int who = (int)arg2;
+  int prio = (int)arg3;
+  if (which < K_PRIO_PROCESS || which > K_PRIO_USER)
+    return (int64_t)-EINVAL;
+  // who==0 means the calling task regardless of which (Linux convention).
+  pid_t pid = (who == 0) ? 0 : (pid_t)who;
+  xtask *t = (pid == 0) ? current_task : task_get(pid);
+  if (pid != 0 && (pid < 0 || pid >= MAX_PROC || t->pid != pid))
+    return (int64_t)-ESRCH;
+  if (prio < K_PRIO_MIN || prio > K_PRIO_MAX)
+    return (int64_t)-EINVAL;
+  t->nice = prio;
+  return 0;
+}
+
+int64_t sys_getpriority(int64_t arg1, int64_t arg2, int64_t unused1,
+                        int64_t unused2, int64_t unused3, int64_t unused4) {
+  int which = (int)arg1;
+  int who = (int)arg2;
+  if (which < K_PRIO_PROCESS || which > K_PRIO_USER)
+    return (int64_t)-EINVAL;
+  pid_t pid = (who == 0) ? 0 : (pid_t)who;
+  xtask *t = (pid == 0) ? current_task : task_get(pid);
+  if (pid != 0 && (pid < 0 || pid >= MAX_PROC || t->pid != pid))
+    return (int64_t)-ESRCH;
+  // glibc/musl convention: return 20-nice (the "raw priority"), so the libc
+  // wrapper (which subtracts 20) recovers the nice value. Clamp to the legacy
+  // 1..40 raw range to match Linux's visible result.
+  int raw = 20 - t->nice;
+  if (raw > 40)
+    raw = 40;
+  if (raw < 1)
+    raw = 1;
+  return (int64_t)raw;
+}
+
 // ===================== membarrier =====================
 // membarrier(cmd, flags). Ordered memory access barrier across threads.
 //
@@ -6524,6 +6582,10 @@ int64_t syscall_dispatch(trapframe *tf) {
   case SYS_SCHED_GETAFFINITY:
     return sys_sched_getaffinity(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
                                  tf->r9);
+  case SYS_SETPRIORITY:
+    return sys_setpriority(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_GETPRIORITY:
+    return sys_getpriority(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MEMBARRIER:
     return sys_membarrier(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // prctl (group 7)

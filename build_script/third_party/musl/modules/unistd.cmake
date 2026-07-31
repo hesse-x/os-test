@@ -92,6 +92,16 @@ add_library(musl_unistd_objs OBJECT
     # file.cc rename wrapper — which lacked LIBC_EXPORT and was hidden in
     # libc.so despite being in libc.map — is dropped.
     ${MUSL_DIR}/src/stdio/rename.c
+    # sendfile.c lives in src/linux (not src/unistd); adopt musl's (thin
+    # SYS_sendfile wrapper). The kernel already implements sys_sendfile
+    # (kernel/bsd/syscall.c SYS_SENDFILE), but libc had neither the symbol nor
+    # the declaration, so libc++'s filesystem copy_file — which gates on
+    # __has_include(<sys/sendfile.h>) — picked up musl's <sys/sendfile.h>
+    # (published to the sysroot) and compiled the sendfile path with no symbol
+    # to link against → undefined reference. sendfile.c's only deps are
+    # <sys/sendfile.h> (in sysroot) + "syscall.h" (musl-internal, on this
+    # target's include path) — same as the unistd wrappers.
+    ${MUSL_DIR}/src/linux/sendfile.c
     ${CMAKE_SOURCE_DIR}/user/lib/musl_shim/syscall_cp.c
 )
 # musl-internal include order: musl src/internal BEFORE user/include so the musl
@@ -133,6 +143,16 @@ add_library(musl_unistd_objs_so OBJECT
     ${MUSL_DIR}/src/misc/syscall.c
     ${MUSL_DIR}/src/signal/setitimer.c
     ${MUSL_DIR}/src/stdio/rename.c
+    # sendfile.c lives in src/linux (not src/unistd); adopt musl's (thin
+    # SYS_sendfile wrapper). The kernel already implements sys_sendfile
+    # (kernel/bsd/syscall.c SYS_SENDFILE), but libc had neither the symbol nor
+    # the declaration, so libc++'s filesystem copy_file — which gates on
+    # __has_include(<sys/sendfile.h>) — picked up musl's <sys/sendfile.h>
+    # (published to the sysroot) and compiled the sendfile path with no symbol
+    # to link against → undefined reference. sendfile.c's only deps are
+    # <sys/sendfile.h> (in sysroot) + "syscall.h" (musl-internal, on this
+    # target's include path) — same as the unistd wrappers.
+    ${MUSL_DIR}/src/linux/sendfile.c
     ${CMAKE_SOURCE_DIR}/user/lib/musl_shim/syscall_cp.c
 )
 target_include_directories(musl_unistd_objs_so PRIVATE

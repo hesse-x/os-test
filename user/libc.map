@@ -62,16 +62,18 @@ global:
 
     /* <string.h> — musl upstream (src/string/* + x86_64 asm memcpy/memmove/memset
      * + src/misc basename). The extension symbols musl compiles but we do NOT
-     * list here (stpcpy/stpncpy/memrchr/strsep/strlcpy/strlcat/memccpy/mempcpy/
+     * list here (stpncpy/memrchr/strsep/strlcpy/strlcat/memccpy/mempcpy/
      * strchrnul/strcasestr/strverscmp/ffsl/ffsll/swab) are intentionally
      * unexported — `local: *;` hides them from the dynsym. strcoll/strxfrm/
      * strcoll_l/strxfrm_l live in src/locale/ (built + exported by the
      * <locale.h> block below — musl_locale_objs); strcasecmp_l/strncasecmp_l
      * are still NOT compiled (musl has them in src/locale/strcasecmp_l.c,
-     * 0 callers, out of the locale tier's scope) so they stay declare-only. */
+     * 0 callers, out of the locale tier's scope) so they stay declare-only.
+     * stpcpy IS exported (Mesa vtn_opencl.c's stpcpy path links against it). */
     bzero; bcmp; bcopy; index; rindex; memcmp; memcpy; memmove; memset;
     memchr; memmem; strcat; strchr; strcmp; strcpy; strcspn; strdup;
     strerror; strerror_r; strerror_l; strlen; strncat; strncmp; strncpy; strndup;
+    stpcpy;
     strpbrk; strrchr; strspn; strstr; strtok; strtok_r;
     strverscmp;
     /* strsignal — musl src/string/strsignal.c, built in musl_signal_objs (not
@@ -89,6 +91,7 @@ global:
     ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; pipe2; read;
     rmdir; sched_yield; sleep; ttyname; ttyname_r; unlink; unlinkat; rename; renameat;
     usleep; write;
+    sendfile; /* <sys/sendfile.h> — musl src/linux/sendfile.c, thin SYS_sendfile wrapper. */
     chdir; fchdir;
     utimensat;
     symlink; symlinkat; readlinkat;
@@ -387,7 +390,7 @@ global:
     /* <dirent.h> */
     closedir; opendir; readdir; scandir;
     telldir; seekdir; rewinddir; dirfd; readdir_r;
-    fdopendir; versionsort;
+    fdopendir; alphasort; versionsort;
 
     /* <errno.h> */
     __errno_location;
@@ -449,6 +452,7 @@ global:
     pthread_rwlock_rdlock; pthread_rwlock_unlock; pthread_rwlock_wrlock;
     pthread_self; pthread_setcancelstate; pthread_setcanceltype;
     pthread_setname_np; pthread_setspecific; pthread_sigmask;
+    pthread_setschedparam; pthread_getschedparam; pthread_getcpuclockid;
     pthread_testcancel;
 
     /* TLS — musl src/thread/__tls_get_addr.c (musl_pthread). __tls_get_addr is

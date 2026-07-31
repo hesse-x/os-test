@@ -207,6 +207,17 @@ typedef struct xtask {
   int policy;         // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2
   uint64_t cpumask;   // CPU affinity mask (bit 0 = CPU 0)
 
+  // === nice (sys_setpriority/sys_getpriority, PRIO_PROCESS) ===
+  // Linux nice value -20..19 (0 = default); init_xtask_defaults memsets it to
+  // 0. getpriority returns 20-nice (the "raw priority" convention), setpriority
+  // stores prio directly as the nice value. The scheduler is currently a fixed
+  // timeslice round-robin and does NOT yet consume nice for weighting — this
+  // field is the stored truth so getpriority round-trips and future scheduler
+  // weighting has somewhere to read. PRIO_PGRP/PRIO_USER are accepted but, with
+  // no process-group scheduling, treated as PRIO_PROCESS against the target
+  // pid.
+  int nice;
+
   // === prctl PR_SET_NAME/PR_GET_NAME task comm (16 bytes, like Linux) ===
   char comm[16];
 } xtask;
