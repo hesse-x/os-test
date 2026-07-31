@@ -5,10 +5,13 @@
 # Single -fPIC OBJECT lib (add_musl_lib) feeds BOTH libc.a + libc.so (one compile
 # serves both, same as musl_string_objs/musl_stdlib_objs). Publishes <wchar.h>/
 # <wctype.h>/<uchar.h> with zero in-tree consumers — pure additive ABI, no
-# regression surface. DEFERRED:
-#   wide-char stdio (23 w* files) — kept excluded in musl_stdio_objs (no consumer);
-#   wcscoll/wcsxfrm (+_l) — need src/locale (not built), declare-only (libc.map
-#   does not list, not compiled, 0 callers), same treatment as strcoll/strxfrm.
+# regression surface. Built elsewhere (NOT here — would multi-define):
+#   wide-char stdio (23 w* files) — built in musl_stdio_objs (wchar migration
+#   moved them out of its REMOVE_ITEM); <wchar.h> declares them, now real.
+#   wcscoll/wcsxfrm (+_l) — built + exported by the locale module
+#   (musl_locale_objs, src/locale/{wcscoll,wcsxfrm}.c), not here; C-locale
+#   code-point stubs (wcscmp/wcslen+wmemcpy). strcasecmp_l/strncasecmp_l are
+#   still declare-only (locale tier scope excluded them, 0 callers).
 # internal.c/wctomb.c/wcrtomb.c/mbrtowc.c/mbsinit.c are NOT re-listed here (in
 # musl_multibyte_objs) — recompiling would multi-define bittab/wcrtomb/mbrtowc/
 # mbsinit/wctomb. Narrow ctype (isalnum/tolower/...) stays in user/lib/ctype.c

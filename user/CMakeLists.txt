@@ -27,11 +27,10 @@
 # fail stub; see kernel/bsd/syscall.c).
 set(LIBC_SOURCES
     lib/unistd.cc lib/time.cc lib/file.cc
-    lib/ctype.c lib/stdlib_misc.c lib/uname.c
+    lib/stdlib_misc.c lib/uname.c
     lib/assert.c lib/signal.cc lib/getrandom.c
     lib/musl_missing.c
     lib/musl_glue.c
-    lib/setjmp.S
     lib/io_multiplex.cc
     lib/sys_process.cc
     lib/sys_device.cc
@@ -68,12 +67,16 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_socket_objs>
                $<TARGET_OBJECTS:musl_dl_objs> $<TARGET_OBJECTS:musl_dirent_objs>
                $<TARGET_OBJECTS:musl_pthread>
+               $<TARGET_OBJECTS:musl_signal_objs>
                $<TARGET_OBJECTS:musl_string_objs>
+               $<TARGET_OBJECTS:musl_ctype_objs>
+               $<TARGET_OBJECTS:musl_setjmp_objs>
                $<TARGET_OBJECTS:musl_math_objs>
                $<TARGET_OBJECTS:musl_stdlib_objs>
                $<TARGET_OBJECTS:musl_malloc_objs>
                $<TARGET_OBJECTS:musl_mman_objs>
                $<TARGET_OBJECTS:musl_time_objs>
+               $<TARGET_OBJECTS:musl_locale_objs>
                $<TARGET_OBJECTS:musl_stdio_objs>
                $<TARGET_OBJECTS:musl_multibyte_objs>
                $<TARGET_OBJECTS:musl_wchar_objs>
@@ -104,12 +107,16 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_socket_objs_so>
                $<TARGET_OBJECTS:musl_dl_objs_so> $<TARGET_OBJECTS:musl_dirent_objs_so>
                $<TARGET_OBJECTS:musl_loader_objs> $<TARGET_OBJECTS:musl_pthread>
+               $<TARGET_OBJECTS:musl_signal_objs>
                $<TARGET_OBJECTS:musl_string_objs>
+               $<TARGET_OBJECTS:musl_ctype_objs>
+               $<TARGET_OBJECTS:musl_setjmp_objs>
                $<TARGET_OBJECTS:musl_math_objs>
                $<TARGET_OBJECTS:musl_stdlib_objs>
                $<TARGET_OBJECTS:musl_malloc_objs_so>
                $<TARGET_OBJECTS:musl_mman_objs_so>
                $<TARGET_OBJECTS:musl_time_objs>
+               $<TARGET_OBJECTS:musl_locale_objs>
                $<TARGET_OBJECTS:musl_stdio_objs>
                $<TARGET_OBJECTS:musl_multibyte_objs>
                $<TARGET_OBJECTS:musl_wchar_objs>

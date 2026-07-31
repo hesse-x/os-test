@@ -262,6 +262,73 @@ cp "$SRC"/third_party/musl/include/wchar.h  "$DEST/wchar.h"
 cp "$SRC"/third_party/musl/include/wctype.h "$DEST/wctype.h"
 cp "$SRC"/third_party/musl/include/uchar.h  "$DEST/uchar.h"
 
+# 3m. musl ctype.h. The repo's user/include/ctype.h (declaration-only shim,
+#     15 LIBC_EXPORT prototypes) was deleted when narrow ctype switched to musl
+#     (musl_worklist ctype module). musl's <ctype.h> is a strict superset (the
+#     15 plain prototypes + inline-macro optimizations for
+#     isalpha/isdigit/islower/isupper/isprint/isgraph/isspace + the 14 _l
+#     locale_t variants + isascii/toascii under the _POSIX/_XOPEN gate). It
+#     pulls only <features.h> (repo's own, step 2) + <bits/alltypes.h> (step 2;
+#     locale_t via __NEED_locale_t). No OS-specific declaration to append, so
+#     the verbatim copy is complete (same as stdio §3k). Closure self-check
+#     below covers it.
+cp "$SRC"/third_party/musl/include/ctype.h "$DEST/ctype.h"
+
+# 3n. musl errno.h + bits/errno.h. The repo's user/include/errno.h was a
+#     hand-written shim (#include <xos/errno.h> + a LIBC_EXPORT __errno_location
+#     decl + the errno macro); the errno → musl migration reduced it to a
+#     source-tree shim forwarding to musl via #include "musl/include/errno.h".
+#     The published sysroot has no third_party on its search path, so publish
+#     musl's real <errno.h> here. musl's <errno.h> #includes <bits/errno.h>
+#     (the E*-macro table) — there is no user/include/bits/errno.h, so publish
+#     musl's arch/generic copy (the same table include/uapi/xos/errno.h mirrors
+#     1:1; the kernel keeps xos/errno.h as its frozen UAPI source). <errno.h>
+#     also pulls <features.h> (repo's own, step 2). Under _GNU_SOURCE it
+#     declares program_invocation_short_name/name — both ARE defined (musl
+#     libc.c weak_alias to __progname/__progname_full, set by
+#     __libc_start_main), so no undefined-reference risk. Closure self-check
+#     below covers the <errno.h> → <bits/errno.h> chain.
+cp "$SRC"/third_party/musl/include/errno.h           "$DEST/errno.h"
+cp "$SRC"/third_party/musl/arch/generic/bits/errno.h "$DEST/bits/errno.h"
+
+# 3o. musl setjmp.h + bits/setjmp.h. The repo's user/include/setjmp.h (custom
+#     `typedef long long jmp_buf[8]` + LIBC_EXPORT prototypes) was deleted when
+#     setjmp switched to musl (musl_worklist setjmp module); musl's <setjmp.h>
+#     is the published replacement. musl's jmp_buf is `struct __jmp_buf_tag {
+#     __jmp_buf __jb; unsigned long __fl; unsigned long __ss[128/sizeof(long)];
+#     }[1]` where __jb comes from <bits/setjmp.h> (`unsigned long[8]` on x86_64,
+#     from arch/x86_64/bits/setjmp.h). The setjmp/longjmp asm only touches the
+#     first 64 bytes (__jb[0..7]) so this is behavior-identical to the deleted
+#     repo asm (same 8 callee-saved regs). musl's <setjmp.h> additionally
+#     declares sigjmp_buf/sigsetjmp/siglongjmp (gated _POSIX/_XOPEN) — sigsetjmp
+#     is declare-only (no x86_64 musl impl, 0 callers; todo.md), siglongjmp is
+#     built in musl_signal_objs — and marks setjmp with __returns_twice__.
+#     <setjmp.h> pulls <features.h> (repo's own, step 2) + <bits/setjmp.h>
+#     (published here, arch/x86_64 — self-contained). No OS-specific
+#     declaration to append, so the verbatim copy is complete (same as stdio
+#     §3k / ctype §3m). Closure self-check below covers it.
+cp "$SRC"/third_party/musl/include/setjmp.h           "$DEST/setjmp.h"
+cp "$SRC"/third_party/musl/arch/x86_64/bits/setjmp.h  "$DEST/bits/setjmp.h"
+
+# 3p. musl locale.h. The repo had NO user/include/locale.h (the locale tier was
+#     declare-only via other headers' locale_t until this migration), so publish
+#     musl's <locale.h> verbatim — no shim to replace. It declares the 6 POSIX
+#     locale managers (setlocale/localeconv/newlocale/duplocale/freelocale/
+#     uselocale) unconditionally, plus the LC_* category constants and struct
+#     lconv; under _POSIX/_XOPEN/_GNU_SOURCE it also declares duplocale/
+#     freelocale/newlocale/uselocale (locale_t) + the LC_*_MASK /
+#     LC_GLOBAL_LOCALE macros. locale_t itself comes from <bits/alltypes.h>
+#     (step 2, __NEED_locale_t — already pulled by <ctype.h>/<wchar.h>).
+#     <locale.h> pulls <features.h> (repo's own, step 2) + <bits/alltypes.h>
+#     (step 2); no bits/locale.h exists (LC_* are inline #defines here, unlike
+#     errno/signal whose arch bits table is a separate include). All 6 managers
+#     + strcoll/strxfrm/wcscoll/wcsxfrm (+_l) are now built (musl_locale_objs)
+#     and exported (libc.map), so the declarations are not declare-only. No
+#     OS-specific declaration to append (unlike mman's memfd_create), so the
+#     verbatim copy is complete (same as stdio §3k / ctype §3m / setjmp §3o).
+#     Closure self-check below covers it.
+cp "$SRC"/third_party/musl/include/locale.h "$DEST/locale.h"
+
 # 4. musl freestanding std headers (stdint/stddef/stdarg/stdbool) — replace the
 #    compiler's -isystem freestanding dir. The published sysroot must be usable
 #    with -nostdinc and NO -isystem (the Mesa milestone consumes it via -isysroot),

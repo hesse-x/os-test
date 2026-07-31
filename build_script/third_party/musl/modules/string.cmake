@@ -19,10 +19,12 @@
 # musl_pthread (commit 3902dfc moved strerror there) — they are NOT re-added
 # here to avoid a duplicate-definition clash. strsignal.c is excluded too:
 # 0 callers, and its locale mechanism (__lctrans/__lctrans_cur) is already
-# pulled in by strerror in musl_pthread. strcoll/strxfrm/strerror_l/strcoll_l/
-# strxfrm_l/strcasecmp_l/strncasecmp_l live in src/locale/ and need the full
-# locale subsystem — not compiled, so musl <string.h> declares them with no
-# implementation (0 callers; deferred to the locale tier). Wide-character
+# pulled in by strerror in musl_pthread. strcoll/strxfrm/strcoll_l/strxfrm_l
+# live in src/locale/ and are built + exported by the locale module
+# (musl_locale_objs) — NOT here, to avoid multi-defining them. strerror_l is
+# built in musl_pthread (strerror.c). strcasecmp_l/strncasecmp_l (src/locale/
+# strcasecmp_l.c) are still NOT compiled (0 callers, outside the locale tier's
+# scope) — musl <string.h> declares them with no implementation. Wide-character
 # wcs*/wmem* (and wcpcpy/wcpncpy) are excluded here — built in musl_wchar_objs
 # (wchar tier). See the musl_wchar_objs block above for the full set.
 file(GLOB MUSL_STRING_SOURCES ${MUSL_DIR}/src/string/*.c)

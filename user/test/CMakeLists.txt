@@ -142,6 +142,19 @@ add_user_dyn_elf(test_clock_cputime C SOURCES test_clock_cputime.c LINK_LIBS c S
 # cmd/flags, peer-thread ordering smoke (x86-64 TSO: local fence, no IPI).
 add_user_dyn_elf(test_membarrier C SOURCES test_membarrier.c LINK_LIBS c STATIC_LIBS unity)
 
+# <inttypes.h> → musl: strtoimax/strtoumax/imaxabs/imaxdiv/wcstoimax (musl
+# stdlib/wchar objs) + PRI*/SCN* format macros (musl header, "l" modifier
+# matching int64_t=long; repo macro-only shim deleted). Pure compute, no FS.
+add_user_dyn_elf(test_inttypes C SOURCES test_inttypes.c LINK_LIBS c STATIC_LIBS unity)
+
+# <locale.h> → musl: 6 POSIX locale managers (setlocale/localeconv/newlocale/
+# duplocale/freelocale/uselocale) + 4 collate (strcoll/strxfrm/wcscoll/wcsxfrm
+# +_l), built by musl_locale_objs (src/locale/*). C-locale only (no .mo catalog
+# / no iconv in this OS) — collate are musl's code-point stubs (strcmp/strlen/
+# wcscmp/wcslen). Pure compute + stdio/wchar, no FS. No DEFS: test default
+# _XOPEN_SOURCE 700 (musl features.h) already gates the locale_t API.
+add_user_dyn_elf(test_locale C SOURCES test_locale.c LINK_LIBS c STATIC_LIBS unity)
+
 # Layer 20: getrandom (/dev/(u)random + libc 封装)
 add_user_dyn_elf(getrandom C SOURCES test_getrandom.c LINK_LIBS c STATIC_LIBS unity)
 

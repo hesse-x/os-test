@@ -59,14 +59,19 @@ global:
      * list here (stpcpy/stpncpy/memrchr/strsep/strlcpy/strlcat/memccpy/mempcpy/
      * strchrnul/strcasestr/strverscmp/ffsl/ffsll/swab) are intentionally
      * unexported — `local: *;` hides them from the dynsym. strcoll/strxfrm/
-     * strcoll_l/strxfrm_l/strcasecmp_l/strncasecmp_l are declared by musl's
-     * <string.h>/<strings.h> but have NO implementation yet (src/locale/, not
-     * compiled); 0 callers — deferred to the locale tier. */
+     * strcoll_l/strxfrm_l live in src/locale/ (built + exported by the
+     * <locale.h> block below — musl_locale_objs); strcasecmp_l/strncasecmp_l
+     * are still NOT compiled (musl has them in src/locale/strcasecmp_l.c,
+     * 0 callers, out of the locale tier's scope) so they stay declare-only. */
     bzero; bcmp; bcopy; index; rindex; memcmp; memcpy; memmove; memset;
     memchr; memmem; strcat; strchr; strcmp; strcpy; strcspn; strdup;
     strerror; strerror_r; strerror_l; strlen; strncat; strncmp; strncpy; strndup;
     strpbrk; strrchr; strspn; strstr; strtok; strtok_r;
     strverscmp;
+    /* strsignal — musl src/string/strsignal.c, built in musl_signal_objs (not
+     * musl_string_objs, which excludes it); psignal depends on it. Declared by
+     * <string.h> under _GNU_SOURCE. */
+    strsignal;
     basename;
     dirname;
 
@@ -106,10 +111,17 @@ global:
     getsockname; getpeername; getsockopt; setsockopt;
     send; recv; sendto; recvfrom; sendmsg; recvmsg;
 
-    /* <ctype.h> */
+    /* <ctype.h> — musl src/ctype/{isalnum,isalpha,isblank,iscntrl,isdigit,
+     * isgraph,islower,isprint,ispunct,isspace,isupper,isxdigit,tolower,toupper,
+     * isascii,toascii}.c (musl_ctype_objs, narrow set). The _l variants are
+     * weak_alias(__<fn>_l, <fn>_l) per file; both plain + _l need entries to
+     * export. The wide isw / wctype set is in musl_wchar_objs (see below). */
     isalnum; isalpha; isascii; isblank; iscntrl; isdigit; isgraph;
     islower; isprint; ispunct; isspace; isupper; isxdigit; tolower;
     toupper;
+    isalnum_l; isalpha_l; isblank_l; iscntrl_l; isdigit_l; isgraph_l;
+    islower_l; isprint_l; ispunct_l; isspace_l; isupper_l; isxdigit_l;
+    tolower_l; toupper_l;
 
     /* <math.h> + <fenv.h> — musl src/math + src/fenv merged into libc (musl single-libc philosophy; libm.so is an empty -lm stub). */
     fesetround; fegetexceptflag; fesetexceptflag; feholdexcept; feupdateenv;
@@ -351,6 +363,15 @@ global:
     sigemptyset; sigfillset; sigaddset; sigdelset; sigismember;
     /* SIGRTMIN/SIGRTMAX macros expand to these (musl private, exported for dyn ELF) */
     __libc_current_sigrtmin; __libc_current_sigrtmax;
+    /* Safe musl signal additions (musl_signal_objs): pure-userspace or thin-
+     * syscall sources NOT defined in user/lib/signal.cc. sigaction/sigprocmask
+     * they call route to the repo's musl_glue::__libc_sigaction adapter.
+     * sigwait/sigwaitinfo/sigtimedwait/sigqueue/sigsuspend/sigpause are NOT
+     * exported — they need SYS_rt_sigtimedwait/queueinfo/suspend the kernel
+     * lacks (deferred, doc/design/todo.md). */
+    killpg; sigorset; sigandset; sigisemptyset;
+    sighold; sigignore; siginterrupt; sigrelse; sigset;
+    siglongjmp; getitimer; psignal; psiginfo;
 
     /* <termios.h> */
     tcgetattr; tcsetattr;
@@ -368,6 +389,23 @@ global:
 
     /* <setjmp.h> */
     setjmp; longjmp; _setjmp; _longjmp;
+
+    /* <locale.h> — musl upstream (musl_locale_objs, src/locale/*). The 6 POSIX
+     * locale managers + 4 collate functions (each + its _l weak_alias). All
+     * pure-userspace, no kernel syscall; all collapse to the C locale at
+     * runtime (no .mo catalog / no iconv in this OS — same C-locale policy as
+     * strerror/langinfo). 0 in-tree callers; exported per the ctype/string/
+     * wchar "export caller-less POSIX symbols" precedent so Mesa/libinput/
+     * Proton-style consumers link cleanly. Scope decided via AskUserQuestion
+     * (full POSIX locale management + collate). NOT exported (out of scope,
+     * 0 callers, i18n-heavy): iconv/iconv_close, catgets family, gettext
+     * family (textdomain/bind_textdomain_codeset/dcngettext), strfmon,
+     * strtod_l, pleval. strcoll/strxfrm/wcscoll/wcsxfrm are also declared by
+     * <string.h>/<wchar.h> (see those blocks) but owned + exported here. */
+    setlocale; localeconv;
+    newlocale; duplocale; freelocale; uselocale;
+    strcoll; strcoll_l; strxfrm; strxfrm_l;
+    wcscoll; wcscoll_l; wcsxfrm; wcsxfrm_l;
 
     /* <sched.h> */
     sched_yield;
@@ -438,10 +476,10 @@ global:
 
     /* <wctype.h> — musl src/ctype/{isw*,iswctype,wctrans,towctrans,wcwidth,
      * wcswidth}.c. Pure compute; locale_t pass-through (the _l variants forward
-     * to the non-_l). Narrow ctype (isalnum/tolower/...) stays in user/lib/
-     * ctype.c — NOT compiled here. iswdigit is both a real function
-     * (iswdigit.c) and a macro in <wchar.h>/<wctype.h>; the symbol is exported
-     * (the macro shadows it for C callers). */
+     * to the non-_l). The narrow ctype set (isalnum/tolower/...) is built in
+     * musl_ctype_objs (see the <ctype.h> block above), NOT here. iswdigit is
+     * both a real function (iswdigit.c) and a macro in <wchar.h>/<wctype.h>;
+     * the symbol is exported (the macro shadows it for C callers). */
     iswalnum; iswalpha; iswblank; iswcntrl; iswdigit; iswgraph; iswlower;
     iswprint; iswpunct; iswspace; iswupper; iswxdigit;
     iswctype; wctype; wctrans; towctrans; towlower; towupper;
@@ -462,10 +500,9 @@ global:
      * wcsnlen, btowc/wctob + __c_locale) are now satisfied by musl_wchar_objs +
      * musl_time_objs. Only the *_unlocked and __isoc99_* internal aliases stay
      * hidden (not declared in <wchar.h>, no consumer — same rule as narrow stdio).
-     * DEFERRED (declared by <wchar.h>, NOT compiled, 0 callers, NOT listed):
-     *   wcscoll/wcsxfrm/wcscoll_l/wcsxfrm_l — need src/locale (not built), same
-     *     declare-only treatment as strcoll/strxfrm;
-     *   wcsftime_l — weak_alias in wcsftime.c, no header decl consumer (hidden). */
+     * wcscoll/wcsxfrm/wcscoll_l/wcsxfrm_l are built + exported by the <locale.h>
+     * block below (musl_locale_objs); wcsftime_l is a weak_alias in wcsftime.c
+     * with no header-decl consumer (hidden). */
     wcscpy; wcsncpy; wcscat; wcsncat; wcscmp; wcsncmp; wcschr; wcsrchr;
     wcscspn; wcsspn; wcspbrk; wcstok; wcslen; wcsnlen; wcsstr; wcswcs;
     wcscasecmp; wcsncasecmp; wcscasecmp_l; wcsncasecmp_l;
