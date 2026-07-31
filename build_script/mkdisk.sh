@@ -164,6 +164,34 @@ else
     exit 1
 fi
 
+# ===================== libc++ (opt-in, probe-driven) =====================
+# libc++ 由 build_libcxx.sh（./build.sh --cxx）单独编译装进 sysroot，默认 build.sh 不编。
+# 这里只做探测分发：sysroot 有就拷进 img /lib，没有静默跳过（不报错、不影响 img）。
+# 头（include/c++/v1/*）已随上面 sysroot/usr/include 整树 mcopy -s 进 img /usr/include，无需单独处理。
+# .so 需单独拷：libc++ ninja install 产 .so.1.0（真实文件）+ .so.1/.so（symlink→1.0），
+# FAT32 不支持 symlink，必须按 soname 名字把 .so.1.0 真实文件分别拷（仿 install-libs.sh
+# 的 ld-musl-x86_64.so.1 双名处理：运行时 loader 按 DT_NEEDED 找 libc++.so.1、链接期找
+# libc++.so、真实内容在 libc++.so.1.0，三个名字都拷成真实文件副本）。
+LIBCXX_LIB="${BUILD_DIR}/sysroot/usr/lib"
+if [ -f "${LIBCXX_LIB}/libc++.so.1.0" ]; then
+  # 三个 C++ 运行时库，各拷 soname 真实文件 + 开发名（都指向 .so.VERSION.0 真实文件）。
+  for lib in libc++ libc++abi libunwind; do
+    # 找该库的真实大版本文件（.so.1.0 形态）。探测锚点用 .so.1.0 真实文件（非 symlink），
+    # 避开宿主机 sysroot 里 .so 是 symlink 的解析歧义。
+    real=$(ls "${LIBCXX_LIB}/${lib}.so."* 2>/dev/null | sort -V | tail -1 || true)
+    if [ -n "$real" ] && [ -f "$real" ]; then
+      base=$(basename "$real")   # e.g. libc++.so.1.0
+      mcopy -i "${BUILD_DIR}/part2.img" "$real" "::lib/${base}"
+      # 补开发名 libc++.so 与 soname libc++.so.1（FAT32 无 symlink → 真实文件副本）。
+      mcopy -i "${BUILD_DIR}/part2.img" "$real" "::lib/${lib}.so"
+      mcopy -i "${BUILD_DIR}/part2.img" "$real" "::lib/${lib}.so.1" 2>/dev/null || true
+      echo "  libc++: $base → /lib/$base (+ ${lib}.so, ${lib}.so.1)"
+    fi
+  done
+else
+  echo "  libc++: not built (run ./build.sh --cxx to enable) — skipping /lib/libc++*"
+fi
+
 # Preserve root directory README
 mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/README" ::README
 

@@ -80,6 +80,7 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_stdio_objs>
                $<TARGET_OBJECTS:musl_multibyte_objs>
                $<TARGET_OBJECTS:musl_wchar_objs>
+               $<TARGET_OBJECTS:compiler_rt_int128>
     C
     FLAGS "-fno-pie -DDYNAMIC=0"
     IMAGE_PATH usr/lib/libc.a
@@ -120,6 +121,7 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_stdio_objs>
                $<TARGET_OBJECTS:musl_multibyte_objs>
                $<TARGET_OBJECTS:musl_wchar_objs>
+               $<TARGET_OBJECTS:compiler_rt_int128>
     C
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED
@@ -187,6 +189,77 @@ endif()
 # （见 user_rules.cmake），无需手写 add_dependencies(hello_dyn_dyn_elf c_so)。
 # IMAGE_PATH local/hello_dyn.elf: ship to /local/ (override dyn-elf default test/).
 add_user_dyn_elf(hello_dyn C SOURCES hello_dyn.c LINK_LIBS c IMAGE_PATH local/hello_dyn.elf)
+
+# ===================== libc++ smoke ELF (opt-in, -DLIBCXX=1) =====================
+# libc++ 端到端回归（refact_cmake.md §3.6）：覆盖 vector/string、throw/catch（libc++abi
+# TLS __cxa_thread_atexit）、filesystem（int128 compiler runtime）、messages facet（catgets）
+# 四条历史上反复断链的路径。test_runner 报 [PASS]/[FAIL]。
+#
+# 不走 add_user_dyn_elf：那条路径硬编码 -nostdlib -nodefaultlibs 链接，无法注入
+# -stdlib=libc++ + libc++/libc++abi/libunwind 运行时（terminal 能用它只因零 STL/异常）。
+# 这里照 ld_test_* stub 模式用手写 add_custom_command：clang++ 驱动 + -stdlib=libc++
+# + sysroot 的 c++/v1 头与 libc++*.so 库（build_libcxx.sh 装入 build/sysroot/usr）。
+#
+# 时序：libc++ 由 build_libcxx.sh 在主 ninja 之后装 sysroot（--cxx），故本 target
+# EXCLUDE_FROM_ALL——默认 ./build.sh 不构建（sysroot 可能无 libc++，强编会链接失败）；
+# 仅 -DLIBCXX=1（./build.sh --cxx 传）时纳入构建。os_image_path 仍注册到 test/，但
+# EXCLUDE_FROM_ALL target 不进 ninja 默认目标，manifest 里的依赖检查由 mkdisk 在
+# 实际构建后满足。
+if(LIBCXX)
+    set(LIBCXX_SYSROOT ${CMAKE_BINARY_DIR}/sysroot)
+    set(LIBCXX_LIB_DIR ${LIBCXX_SYSROOT}/usr/lib)
+    set(LIBCXX_SMOKE_ELF ${CMAKE_BINARY_DIR}/libcxx_smoke.elf)
+    set(LIBCXX_SMOKE_OBJ ${CMAKE_BINARY_DIR}/libcxx_smoke.o)
+
+    # 编译：--sysroot + -stdlib=libc++ 让 clang 自然解析 sysroot 的 c++/v1 头（C++ 标准库）
+    # 与 sysroot 的 musl C 头（<cstdio>→<stdio.h>）。不用 USER_FREESTANDING_FLAGS：其 -nostdinc
+    # 会同时禁掉 sysroot 的 c++/v1 搜索路径，导致 <cstdio> 找不到；其 -ffreestanding 会让
+    # clang 把 main 当普通函数 mangling（freestanding 下 main 不特殊）→ Scrt1.o 的 _start_c
+    # 找不到 C 链接的 main。本程序是 hosted 动态 ELF（有 PT_INTERP、libc、main），故去掉
+    # -ffreestanding。只用 C++ 标准库头，无 OS 专有头依赖，故无需项目 -I 路径（user/include
+    # shim 反会抢先匹配 <stdio.h>）。--sysroot 已把搜索限制在 sysroot 内（无 host /usr/include
+    # 泄漏，已验证）。
+    add_custom_command(OUTPUT ${LIBCXX_SMOKE_OBJ}
+        COMMAND ${CMAKE_CXX_COMPILER}
+                -m64 -fno-builtin -fno-stack-protector -mno-red-zone
+                -fno-pie ${USER_BUILD_FLAGS}
+                --sysroot=${LIBCXX_SYSROOT} -stdlib=libc++
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/test/libcxx_smoke.cpp
+                -o ${LIBCXX_SMOKE_OBJ}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test/libcxx_smoke.cpp
+        IMPLICIT_DEPENDS CXX ${CMAKE_CURRENT_SOURCE_DIR}/test/libcxx_smoke.cpp
+        COMMENT "Compiling libcxx_smoke.o (libc++, opt-in)")
+
+    # 链接：clang++ 驱动（理解 -stdlib=libc++ 的隐式运行时）+ Scrt1/crti/crtn + libc.so
+    # + sysroot 的 libc++/libc++abi/libunwind。--no-as-needed 保留 libc++ DT_NEEDED；
+    # --allow-shlib-undefined 容忍 libc++ → libc++abi → libunwind 的传递依赖。
+    # libc++*.so 来自 sysroot（build_libcxx.sh 装入），不是 build/ 的 CMake target，
+    # 故无 CMake target 依赖——EXCLUDE_FROM_ALL 下由 --cxx 全流程保证其在场。
+    add_custom_command(OUTPUT ${LIBCXX_SMOKE_ELF}
+        COMMAND ${CMAKE_CXX_COMPILER} -fno-pie -no-pie
+                -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1
+                -Wl,--hash-style=gnu -Wl,--no-as-needed -Wl,--allow-shlib-undefined
+                --sysroot=${LIBCXX_SYSROOT} -stdlib=libc++ -nostdlib -nodefaultlibs
+                -o ${LIBCXX_SMOKE_ELF}
+                ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o
+                ${LIBCXX_SMOKE_OBJ}
+                -L${LIBCXX_LIB_DIR} -lc++ -lc++abi -lunwind
+                ${CMAKE_BINARY_DIR}/libc.so
+                ${MUSL_LIB_DIR}/crtn.o
+        DEPENDS ${LIBCXX_SMOKE_OBJ}
+                ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o ${MUSL_LIB_DIR}/crtn.o
+                ${CMAKE_BINARY_DIR}/libc.so
+        COMMENT "Linking libcxx_smoke.elf (libc++, opt-in)")
+    # No ALL keyword → not in the default build (the main `ninja` skips it); built on
+    # demand by `ninja libcxx_smoke_elf` in build.sh after build_libcxx.sh installs libc++.
+    add_custom_target(libcxx_smoke_elf DEPENDS ${LIBCXX_SMOKE_ELF})
+    add_dependencies(libcxx_smoke_elf musl_libc c_so)
+
+    # Ship to /test/ for test_runner (registered even though EXCLUDE_FROM_ALL; built only
+    # when -DLIBCXX=1 drives the target, which always coincides with --cxx having installed
+    # libc++ into the sysroot and mkdisk probe-shipped the runtime .so into /lib).
+    os_image_path(libcxx_smoke_elf libcxx_smoke.elf test/libcxx_smoke.elf PARTITION 2)
+endif()
 
 # terminal — dynamic ELF (libc.so + libinput.so), PT_INTERP → ld.so
 # IMAGE_PATH usr/bin/terminal: override dyn-elf default test/.

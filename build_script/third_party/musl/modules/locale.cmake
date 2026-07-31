@@ -48,8 +48,12 @@
 #     __c_dot_utf8/__c_dot_utf8_locale/__nl_langinfo_l/nl_langinfo. NOT listed.
 #   iconv.c / iconv_close.c — full iconv charset converter tables (codepages/
 #     big5/gb18030/jis0208/ksc/hkscs headers); no in-tree consumer, heavy.
-#   catopen.c / catgets.c / catclose.c — POSIX catgets message catalog (legacy
-#     NL_CAT_LOCALE); 0 callers.
+#   catopen.c / catgets.c / catclose.c — POSIX catgets message catalog. NOW
+#     COMPILED (see below): libc++'s std::messages facet (locale.cpp do_open/
+#     do_get/do_close) calls catopen/catgets/catclose. musl's catopen maps the
+#     catalog via __map_file + __mo_lookup (both already in libc) and falls back
+#     to (nl_catd)-1 when no catalog is found — so the C-locale no-catalog policy
+#     holds at runtime, zero new i18n surface beyond the three POSIX entry points.
 #   textdomain.c / bind_textdomain_codeset.c / dcngettext.c — gettext/
 #     dcgettext/dcngettext/bind_textdomain_codeset (the full GNU gettext API);
 #     0 callers, would pull __mo_lookup + catalog mapping chain redundantly.
@@ -80,4 +84,17 @@ add_musl_lib(musl_locale_objs SOURCES
     ${MUSL_DIR}/src/locale/strcoll.c
     ${MUSL_DIR}/src/locale/strxfrm.c
     ${MUSL_DIR}/src/locale/wcscoll.c
-    ${MUSL_DIR}/src/locale/wcsxfrm.c)
+    ${MUSL_DIR}/src/locale/wcsxfrm.c
+    # _l-suffixed numeric conversion (strtof_l/strtod_l/strtold_l) — thin
+    # wrappers that ignore the locale arg and call the plain strtof/strtod/
+    # strtold (already in musl_stdlib_objs). libc++ locale's __num_get_float
+    # calls strtod_l/strtof_l/strtold_l. One file provides all three (weak_alias).
+    ${MUSL_DIR}/src/locale/strtod_l.c
+    # catgets family — libc++ std::messages facet (locale.cpp do_open/do_get/
+    # do_close) calls catopen/catgets/catclose. catopen maps the catalog via
+    # __map_file (musl_time_objs) + __mo_lookup (above) + __munmap (musl_glue);
+    # returns (nl_catd)-1 when no catalog is found, so C-locale no-catalog policy
+    # holds at runtime. catgets/catclose are pure compute over the mapped image.
+    ${MUSL_DIR}/src/locale/catopen.c
+    ${MUSL_DIR}/src/locale/catgets.c
+    ${MUSL_DIR}/src/locale/catclose.c)

@@ -117,5 +117,16 @@ set(MUSL_STDLIB_SOURCES
     # emits. The hand-written user/lib/musl_shim/scan_uflow_stub.c stub (added
     # when stdio was NOT yet migrated and __uflow existed nowhere) is deleted —
     # it would multi-define __uflow against the real one.
+    # conf/ — pathconf/fpathconf (src/conf). libc++ filesystem::__current_path
+    # calls pathconf(_PC_PATH_MAX). pathconf is a thin wrapper over fpathconf,
+    # so both must ship. Pure compute (a static table of _POSIX_* / NAME_MAX /
+    # PATH_MAX / PIPE_BUF / FILESIZEBITS from <limits.h>); no syscall.
+    ${MUSL_DIR}/src/conf/pathconf.c
+    ${MUSL_DIR}/src/conf/fpathconf.c
+    # stat/ — statvfs (src/stat). libc++ filesystem::__space calls statvfs for
+    # filesystem capacity. Depends on <sys/statvfs.h> + <sys/statfs.h> (both
+    # published) + syscall(SYS_statfs/SYS_fstatfs, both in bits/syscall.h: 137/
+    # 138). __statfs/__fstatfs fallbacks below feed statvfs's struct copy.
+    ${MUSL_DIR}/src/stat/statvfs.c
 )
 add_musl_lib(musl_stdlib_objs SOURCES ${MUSL_STDLIB_SOURCES})

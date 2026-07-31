@@ -44,4 +44,7 @@ add_musl_lib(musl_ctype_objs SOURCES
     ${MUSL_DIR}/src/ctype/tolower.c
     ${MUSL_DIR}/src/ctype/toupper.c
     ${MUSL_DIR}/src/ctype/isascii.c
-    ${MUSL_DIR}/src/ctype/toascii.c)
+    ${MUSL_DIR}/src/ctype/toascii.c
+    # __ctype_get_mb_cur_max — returns MB_CUR_MAX; libc++ codecvt::do_encoding/
+    # do_max_length call it. Pure compute (reads MB_CUR_MAX from <stdlib.h>).
+    ${MUSL_DIR}/src/ctype/__ctype_get_mb_cur_max.c)

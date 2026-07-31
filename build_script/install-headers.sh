@@ -68,6 +68,14 @@ mkdir -p "$DEST/xos"
 cp "$SRC"/include/uapi/xos/*.h "$DEST/xos/"
 cp "$SRC"/user/include/xos/*.h "$DEST/xos/" 2>/dev/null || true
 
+# 1b. Linux-compatible UAPI headers (include/uapi/linux/) — headers under the
+#     <linux/...> path that cross-built consumers expect from a Linux-ABI target.
+#     e.g. libc++'s <atomic> wait/wake #include <linux/futex.h> and syscall
+#     (SYS_futex, FUTEX_WAIT_PRIVATE). The kernel side mirrors Linux's futex(2)
+#     ABI, so these are the genuine Linux UAPI constants published verbatim.
+mkdir -p "$DEST/linux"
+cp "$SRC"/include/uapi/linux/*.h "$DEST/linux/"
+
 # 2. Standard / POSIX headers (user/include/) — the libc side.
 #    Top-level *.h → $DEST/; sys/*.h → $DEST/sys/; bits/*.h → $DEST/bits/.
 cp    "$SRC"/user/include/*.h  "$DEST/"
@@ -102,13 +110,51 @@ cp "$SRC"/third_party/musl/include/sys/timerfd.h "$DEST/sys/timerfd.h"
 # 3b. musl dlfcn.h — dynamic linking API (dlopen/dlsym/dlclose/dlerror/dladdr/
 #     Dl_info). user/include has no dlfcn.h, so publish musl's verbatim. Its
 #     only include is <features.h> (already published in step 2), so the closure
-#     self-check stays green. dlinfo/dl_iterate_phdr (struct link_map /
-#     dl_phdr_info in <link.h>) are deliberately NOT published: link.h pulls
-#     musl's elf.h (3121 lines) + arch/generic bits/link.h into the public ABI,
-#     a larger commitment left for when dlinfo/dl_iterate_phdr are exercised
-#     userspace-side. The dlinfo symbol is still compiled into libc (see
-#     musl_dl_objs); only the <link.h> header is absent.
+#     self-check stays green. The dlinfo symbol is still compiled into libc (see
+#     musl_dl_objs).
 cp "$SRC"/third_party/musl/include/dlfcn.h      "$DEST/dlfcn.h"
+
+# 3b'. musl link.h + elf.h + bits/link.h — the dynamic-linker/link-map headers
+#      (struct link_map, dl_phdr_info, dl_iterate_phdr, ElfW() macros). link.h
+#      pulls musl's elf.h (3121 lines, the ELF format spec) + arch/generic
+#      bits/link.h. These were once deliberately withheld to avoid dragging the
+#      large elf.h into the public ABI before any consumer needed dl_iterate_phdr
+#      userspace-side. libunwind (built as a runtimes sibling of libc++ for the
+#      Mesa C++ stdlib) is now that consumer — its AddressSpace.hpp #includes
+#      <link.h>. musl carries all three verbatim, so publish them. elf.h is
+#      self-contained (no further includes); bits/link.h needs only <elf.h> +
+#      the already-published <bits/alltypes.h>.
+cp "$SRC"/third_party/musl/include/elf.h        "$DEST/elf.h"
+cp "$SRC"/third_party/musl/include/link.h       "$DEST/link.h"
+cp "$SRC"/third_party/musl/arch/generic/bits/link.h "$DEST/bits/link.h"
+
+# 3b''. musl nl_types.h — POSIX message-catalogue API (catopen/catgets/catclose,
+#       nl_catd/nl_item). Tiny and dependency-free (no further includes). libc++
+#       #includes <nl_types.h> under _LIBCPP_HAS_CATOPEN, which its <locale> defines
+#       for any __unix__ target that isn't BIONIC/newlib/emscripten — musl matches,
+#       so the header must be present for libc++ to compile. musl implements the
+#       symbols; this was simply not previously published (no prior consumer).
+cp "$SRC"/third_party/musl/include/nl_types.h   "$DEST/nl_types.h"
+
+# 3b'''. musl langinfo.h — POSIX locale-langinfo API (nl_langinfo/nl_langinfo_l,
+#        the DAY_*/ABDAY_*/MON_*/ABMON_*/AM_STR/PM_STR/codeset constants). libc++'s
+#        <locale> #includes <langinfo.h> under _LIBCPP_HAS_CATOPEN/musl. Depends
+#        only on <features.h> + <nl_types.h> (published in 3b'') + <bits/alltypes.h>
+#        (for locale_t via __NEED_locale_t). musl implements nl_langinfo.
+cp "$SRC"/third_party/musl/include/langinfo.h  "$DEST/langinfo.h"
+
+# 3b''''. musl sys/syscall.h — thin wrapper that #include <bits/syscall.h> (the
+#        repo's __NR_*/SYS_* table, already published in $DEST/bits/syscall.h).
+#        libc++'s <atomic> does `#include <sys/syscall.h>` then syscall(SYS_futex,
+#        ...); without the wrapper the <sys/syscall.h> path is absent even though
+#        the bits table is present.
+cp "$SRC"/third_party/musl/include/sys/syscall.h "$DEST/sys/syscall.h"
+
+# 3b'''''. musl sys/statvfs.h — POSIX statvfs/fstatvfs (struct statvfs +
+#         ST_* flags). libc++'s filesystem posix_compat.h #includes it. Depends
+#         only on <features.h> + <bits/alltypes.h> (fsblkcnt_t/fsfilcnt_t, both
+#         already in the published alltypes). musl implements statvfs.
+cp "$SRC"/third_party/musl/include/sys/statvfs.h "$DEST/sys/statvfs.h"
 
 # 3c. musl pthread/signal/sched headers. The repo's user/include/pthread.h,
 #     signal.h, sched.h were deleted when pthread switched to musl (pthread.md

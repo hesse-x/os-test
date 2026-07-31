@@ -107,6 +107,12 @@ static struct test_entry tests[] = {
     {"test_ffi", "/test/test_ffi.elf"},
     {"test_expat", "/test/test_expat.elf"},
     {"test_wayland_client", "/test/test_wayland_client.elf"},
+#if defined(LIBCXX)
+    /* libc++ end-to-end regression (refact_cmake.md §3.6): vector/string,
+     * throw/catch (libc++abi TLS), filesystem (int128 runtime), messages facet
+     * (catgets). Only present when built with -DLIBCXX=1 (./build.sh --cxx). */
+    {"libcxx_smoke", "/test/libcxx_smoke.elf"},
+#endif
     {"ioctl_varlen", "/test/ioctl_varlen.elf"},
     {"epoll", "/test/epoll.elf"},
     {"epoll_oneshot", "/test/test_epoll_oneshot.elf"},

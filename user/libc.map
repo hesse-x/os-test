@@ -52,6 +52,12 @@ global:
     imaxabs; imaxdiv; strtoimax; strtoumax;
     getenv; setenv; putenv; unsetenv; clearenv; environ;
     _Exit; quick_exit; at_quick_exit; __cxa_atexit; __cxa_finalize;
+    /* aligned allocation family — musl src/malloc/{aligned_alloc,memalign,
+     * posix_memalign,reallocarray}.c (musl_malloc_objs). C11 aligned_alloc +
+     * the posix/gnu companions; needed by C++ runtimes (libc++abi's operator
+     * new(std::align_val_t) routes to aligned_alloc) and by cross-built
+     * consumers that link -lc. */
+    aligned_alloc; memalign; posix_memalign; reallocarray;
     mkstemp; mktemp; realpath;
 
     /* <string.h> — musl upstream (src/string/* + x86_64 asm memcpy/memmove/memset
@@ -83,6 +89,7 @@ global:
     ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; pipe2; read;
     rmdir; sched_yield; sleep; ttyname; unlink; unlinkat; rename; renameat;
     usleep; write;
+    chdir; fchdir;
     utimensat;
     symlink; symlinkat; readlinkat;
     link; linkat;
@@ -91,6 +98,7 @@ global:
     setitimer;
     truncate; fsync; sync;
     getpagesize; sysconf;
+    pathconf; fpathconf;
     nice; getpriority; setpriority;
     chown; fchown; fchownat; readlink;
     /* M1.1 — set*id ladder + getgroups (unistd.md §2.A1/A2). */
@@ -348,7 +356,7 @@ global:
     clock; clock_gettime; clock_settime; clock_getres; clock_getcpuclockid;
     ctime; ctime_r; asctime; asctime_r;
     difftime; clock_nanosleep; gettimeofday; gmtime; gmtime_r; localtime;
-    localtime_r; mktime; timegm; nanosleep; strftime; strptime;
+    localtime_r; mktime; timegm; nanosleep; strftime; strftime_l; strptime;
     time; timespec_get; times; utime; ftime; getdate; getdate_err;
     timezone; daylight; tzname; tzset;
 
@@ -398,14 +406,23 @@ global:
      * wchar "export caller-less POSIX symbols" precedent so Mesa/libinput/
      * Proton-style consumers link cleanly. Scope decided via AskUserQuestion
      * (full POSIX locale management + collate). NOT exported (out of scope,
-     * 0 callers, i18n-heavy): iconv/iconv_close, catgets family, gettext
-     * family (textdomain/bind_textdomain_codeset/dcngettext), strfmon,
-     * strtod_l, pleval. strcoll/strxfrm/wcscoll/wcsxfrm are also declared by
-     * <string.h>/<wchar.h> (see those blocks) but owned + exported here. */
+     * 0 callers, i18n-heavy): iconv/iconv_close, gettext family (textdomain/
+     * bind_textdomain_codeset/dcngettext), strfmon, pleval.
+     * strtof_l/strtod_l/strtold_l ARE now exported: libc++'s locale
+     * __num_get_float calls them (they ignore the locale arg and delegate to
+     * the plain strtof/strtod/strtold). strcoll/strxfrm/wcscoll/wcsxfrm are
+     * also declared by <string.h>/<wchar.h> (see those blocks) but owned +
+     * exported here. catopen/catgets/catclose ARE now exported: libc++'s
+     * std::messages facet (do_open/do_get/do_close) calls them; musl catopen
+     * returns (nl_catd)-1 when no catalog is found, so the C-locale no-catalog
+     * policy holds at runtime. */
     setlocale; localeconv;
     newlocale; duplocale; freelocale; uselocale;
     strcoll; strcoll_l; strxfrm; strxfrm_l;
     wcscoll; wcscoll_l; wcsxfrm; wcsxfrm_l;
+    strtof_l; strtod_l; strtold_l;
+    __ctype_get_mb_cur_max;
+    catopen; catgets; catclose;
 
     /* <sched.h> */
     sched_yield;
@@ -420,7 +437,8 @@ global:
     pthread_cancel;
     /* pthread_cleanup_push/pop are macros in musl <pthread.h>, not symbols */
     pthread_cond_broadcast; pthread_cond_destroy; pthread_cond_init;
-    pthread_cond_signal; pthread_cond_wait; pthread_create; pthread_detach;
+    pthread_cond_signal; pthread_cond_wait; pthread_cond_timedwait;
+    pthread_create; pthread_detach;
     pthread_equal; pthread_exit; pthread_getspecific; pthread_join;
     pthread_key_create; pthread_kill;
     pthread_mutexattr_destroy; pthread_mutexattr_gettype;
@@ -432,6 +450,21 @@ global:
     pthread_self; pthread_setcancelstate; pthread_setcanceltype;
     pthread_setname_np; pthread_setspecific; pthread_sigmask;
     pthread_testcancel;
+
+    /* TLS — musl src/thread/__tls_get_addr.c (musl_pthread). __tls_get_addr is
+     * the Itanium C++ ABI TLS-access helper (emitted by clang for
+     * thread_local with dynamic-initialization TLS models); libc++abi's
+     * __cxa_thread_atexit / per-thread static dtors reference it. A __-prefixed
+     * ABI symbol, exported because cross-built C++ runtimes link against it. */
+    __tls_get_addr;
+
+    /* compiler-rt int128 runtime — vendored third_party/llvm-project/compiler-rt
+     * /lib/builtins/{divti3,udivmodti4,udivti3,umodti3,muloti4}.c
+     * (modules/compiler_rt.cmake). clang lowers __int128 div/mul to these; musl
+     * does not provide them. libc++ <filesystem> (operations.cpp timestamps,
+     * int128_builtins.cpp __muloti4) references them. Folded into libc so every
+     * static/dynamic consumer resolves them via -lc with no extra -l. */
+    __divti3; __udivti3; __umodti3; __udivmodti4; __muloti4;
 
     /* <threads.h> — C11 threads. musl src/thread/{thrd,mtx,cnd,tss,call_once}_*.c
      * are pulled in by the src/thread/*.c glob in pthread.cmake (they alias the
@@ -448,6 +481,9 @@ global:
     /* <sys/stat.h> */
     fstat; fstatat; lstat; mkdir; mkdirat; mknod; stat; statx;
     chmod; fchmod; fchmodat;
+
+    /* <sys/statvfs.h> — src/stat/statvfs.c. libc++ filesystem::__space. */
+    statvfs; fstatvfs;
 
     /* <sys/wait.h> */
     waitpid;
@@ -544,6 +580,13 @@ global:
 
     /* <sys/utsname.h> */
     uname;
+
+    /* <sys/syscall.h> — musl src/misc/syscall.c. The indirect-syscall primitive
+     * (syscall(number, ...)); used by libc++'s <atomic> wait/wake via
+     * syscall(SYS_futex, ...). A thin wrapper over the arch __syscallN; exported
+     * because cross-built runtimes (libc++abi __cxa_guard_acquire uses it for
+     * futex-based once-init) link against it. */
+    syscall;
 
     /* <sys/random.h> */
     getrandom; getentropy;

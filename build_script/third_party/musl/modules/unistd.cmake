@@ -77,6 +77,13 @@ add_library(musl_unistd_objs OBJECT
     # src/misc — pull them in or libc.so has an unresolved PLT 'setpriority'.
     ${MUSL_DIR}/src/misc/setpriority.c
     ${MUSL_DIR}/src/misc/getpriority.c
+    # src/misc/syscall.c — the public indirect-syscall primitive syscall(number,
+    # ...) (va_arg wrapper over arch __syscallN + __syscall_ret). Cross-built C++
+    # runtimes need it: libc++abi's __cxa_guard_acquire uses syscall(SYS_gettid)
+    # and syscall(SYS_futex, ...) for thread-safe static-init, and libc++'s
+    # <atomic> wait/wake does the same. No module compiled it before, so libc.so
+    # had no `syscall` symbol — exported via libc.map's <sys/syscall.h> block.
+    ${MUSL_DIR}/src/misc/syscall.c
     # alarm.c / ualarm.c (in src/unistd) call setitimer, impl in src/signal.
     ${MUSL_DIR}/src/signal/setitimer.c
     # rename.c lives in src/stdio (not src/unistd); adopt musl's (routes to
@@ -122,6 +129,7 @@ add_library(musl_unistd_objs_so OBJECT
     ${MUSL_DIR}/src/sched/sched_yield.c
     ${MUSL_DIR}/src/misc/setpriority.c
     ${MUSL_DIR}/src/misc/getpriority.c
+    ${MUSL_DIR}/src/misc/syscall.c
     ${MUSL_DIR}/src/signal/setitimer.c
     ${MUSL_DIR}/src/stdio/rename.c
     ${CMAKE_SOURCE_DIR}/user/lib/musl_shim/syscall_cp.c

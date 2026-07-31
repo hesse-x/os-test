@@ -4,9 +4,18 @@
 
 # user/test/ — Unity-based test ELF targets
 
-# Test runner (no Unity needed)
+# Test runner (no Unity needed). Propagate -DLIBCXX when libc++ is enabled so the
+# static tests[] table's libcxx_smoke entry (guarded by #if defined(LIBCXX) in
+# test_runner.c) is compiled in. See refact_cmake.md §3.6.
+set(_TEST_RUNNER_DEFS "")
 if(TEST)
-    add_user_dyn_elf(test_runner C SOURCES test_runner.c LINK_LIBS c DEFS TEST)
+    list(APPEND _TEST_RUNNER_DEFS TEST)
+endif()
+if(LIBCXX)
+    list(APPEND _TEST_RUNNER_DEFS LIBCXX)
+endif()
+if(_TEST_RUNNER_DEFS)
+    add_user_dyn_elf(test_runner C SOURCES test_runner.c LINK_LIBS c DEFS ${_TEST_RUNNER_DEFS})
 else()
     add_user_dyn_elf(test_runner C SOURCES test_runner.c LINK_LIBS c)
 endif()

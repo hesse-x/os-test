@@ -11,7 +11,21 @@
 #include <stdint.h>
 #include <sys/cdefs.h>
 #include <sys/types.h>
-#include <time.h>
+
+/* struct timeval / suseconds_t are requested here via musl's __NEED mechanism
+ * (resolved by <bits/alltypes.h>): POSIX places struct timeval in
+ * <sys/time.h>/<sys/select.h>, not in <time.h> (musl's <time.h> only defines
+ * struct timespec). Without these __NEED lines, <bits/alltypes.h> never emits
+ * struct timeval, so select()'s `struct timeval *timeout` and <sys/time.h>'s
+ * `struct itimerval` fields are left as incomplete types — which breaks
+ * cross-built consumers (libc++) that pull only <sys/select.h>/<sys/time.h>. */
+#define __NEED_size_t
+#define __NEED_time_t
+#define __NEED_suseconds_t
+#define __NEED_struct_timeval
+#define __NEED_struct_timespec
+#define __NEED_sigset_t
+#include <bits/alltypes.h>
 
 #ifdef __cplusplus
 extern "C" {
