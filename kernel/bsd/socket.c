@@ -24,7 +24,6 @@
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/vfs.h"
 #include "kernel/xcore/list.h"
-#include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/rcu.h"
@@ -762,23 +761,6 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
                              flags);
   }
 
-  // Check shutdown_write on our socket
-  if (sock->shutdown_write) {
-    if (!(flags & MSG_NOSIGNAL))
-      deliver_signal_to(current_task, SIGPIPE);
-    return -EPIPE;
-  }
-  // Check peer shutdown_read. STREAM sends to a shut-read peer → EPIPE
-  // (+SIGPIPE unless MSG_NOSIGNAL); DGRAM → ECONNREFUSED (no SIGPIPE: a
-  // connectionless socket never raises SIGPIPE on a refused peer).
-  if (sock->peer_sock && sock->peer_sock->shutdown_read) {
-    if (sock->type == SOCK_DGRAM)
-      return -ECONNREFUSED;
-    if (!(flags & MSG_NOSIGNAL))
-      deliver_signal_to(current_task, SIGPIPE);
-    return -EPIPE;
-  }
-
   // Calculate total data length
   uint32_t total = 0;
   for (size_t i = 0; i < iovlen; i++) {
@@ -814,55 +796,47 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
     return sret;
   }
 
-  // Find peer socket via direct pointer (socketpair/connect) or PID-based
-  // lookup (connect)
-  struct unix_sock *peer_sock = sock->peer_sock;
-  if (!peer_sock) {
-    // STREAM: peer_sock is always set during connect/socketpair — unreachable.
-    // DGRAM: an unconnected DGRAM with no dest addr must not reach here (the
-    // sendto+addr path uses unix_dgram_sendto); a bare send/sendmsg on an
-    // unconnected DGRAM is ENOTCONN.
-    if (sock->type == SOCK_STREAM) {
-      WARN_ON(1);
-      skb_free(skb);
-      if (!(flags & MSG_NOSIGNAL))
-        deliver_signal_to(current_task, SIGPIPE);
-      return -EPIPE;
-    }
-    skb_free(skb);
-    return -ENOTCONN;
-  }
-
-  // Check peer shutdown (under socket_lock)
+  // peer_sock is a borrowed pointer owned by the connection. Resolve it and
+  // take a temporary reference while holding socket_lock so close cannot
+  // detach/free the peer before the post-unlock wakeup.
+  struct unix_sock *peer_sock = NULL;
+  int send_error = 0;
   spin_lock(&socket_lock);
-  if (peer_sock->shutdown_read) {
-    spin_unlock(&socket_lock);
-    skb_free(skb);
-    if (sock->type == SOCK_DGRAM)
-      return -ECONNREFUSED;
-    if (!(flags & MSG_NOSIGNAL))
-      deliver_signal_to(current_task, SIGPIPE);
-    return -EPIPE;
+  if (sock->shutdown_write) {
+    send_error = -EPIPE;
+  } else {
+    peer_sock = sock->peer_sock;
+    if (!peer_sock) {
+      // A connected STREAM remains in UNIX_CONNECTED after its peer closes;
+      // a socket which never connected must report ENOTCONN instead.
+      send_error = (sock->type == SOCK_STREAM && sock->state == UNIX_CONNECTED)
+                       ? -EPIPE
+                       : -ENOTCONN;
+    } else if (peer_sock->shutdown_read) {
+      send_error = sock->type == SOCK_DGRAM ? -ECONNREFUSED : -EPIPE;
+    } else if ((flags & MSG_DONTWAIT) && peer_sock->recv_queue_len > 128) {
+      send_error = -EAGAIN;
+    } else {
+      refcount_inc(&peer_sock->u_count);
+      skb_enqueue(peer_sock, skb);
+      // DGRAM: stamp the sender address onto the skb so the receiver's
+      // recvmsg/recvfrom can report msg_name. STREAM leaves has_sender=0.
+      if (sock->type == SOCK_DGRAM)
+        unix_dgram_fill_sender(skb, sock);
+    }
   }
-
-  // If O_NONBLOCK and queue is "full" (more than a reasonable limit), return
-  // EAGAIN
-  if ((flags & MSG_DONTWAIT) && peer_sock->recv_queue_len > 128) {
-    spin_unlock(&socket_lock);
-    skb_free(skb);
-    return -EAGAIN;
-  }
-
-  // Enqueue
-  skb_enqueue(peer_sock, skb);
-  // DGRAM: stamp the sender address onto the skb so the receiver's recvmsg/
-  // recvfrom can report msg_name. STREAM leaves has_sender=0 (no name).
-  if (sock->type == SOCK_DGRAM)
-    unix_dgram_fill_sender(skb, sock);
   spin_unlock(&socket_lock);
 
-  // Wake reader (挂 peer_sock->wq) outside socket_lock
+  if (send_error) {
+    skb_free(skb);
+    if (send_error == -EPIPE && !(flags & MSG_NOSIGNAL))
+      deliver_signal_to(current_task, SIGPIPE);
+    return send_error;
+  }
+
+  // The temporary reference keeps peer_sock and its wait queue alive here.
   __wake_up(peer_sock->wq, POLLIN);
+  unix_sock_release(peer_sock);
 
   return (int64_t)total;
 }
@@ -1199,14 +1173,18 @@ void unix_sock_close(struct unix_sock *sock) {
     peer_s->shutdown_read = 1;
     // Detach back-reference so the peer never dereferences us after free.
     peer_s->peer_sock = NULL;
+    // Keep the peer and its wait queue alive across the unlocked wakeup.
+    refcount_inc(&peer_s->u_count);
   }
 
   spin_unlock(&socket_lock);
 
   // 唤醒本端与对端阻塞 reader/writer（各自挂自己 wq）+ epoll 等待者（POLLHUP）
   __wake_up(sock->wq, POLLHUP | POLLIN | POLLOUT);
-  if (peer_s)
+  if (peer_s) {
     __wake_up(peer_s->wq, POLLHUP | POLLIN | POLLOUT);
+    unix_sock_release(peer_s);
+  }
 
   // Release reference (actual free when ref_count hits 0)
   unix_sock_release(sock);
@@ -2341,13 +2319,17 @@ int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t unused1,
   }
 
   struct unix_sock *peer_s = sock->peer_sock;
+  if (peer_s)
+    refcount_inc(&peer_s->u_count);
 
   spin_unlock(&socket_lock);
 
   // 唤醒本端与对端阻塞 reader/writer（各自挂自己 wq）
   __wake_up(sock->wq, POLLHUP | POLLIN | POLLOUT);
-  if (peer_s)
+  if (peer_s) {
     __wake_up(peer_s->wq, POLLHUP | POLLIN | POLLOUT);
+    unix_sock_release(peer_s);
+  }
 
   file_put(shf);
   return 0;

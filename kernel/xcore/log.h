@@ -55,7 +55,7 @@ void dump_stack_trace(void);
   ({                                                                           \
     __typeof__(cond) __ret_warn_on = (cond);                                   \
     if (__ret_warn_on)                                                         \
-      printk(LOG_WARN, "WARN_ON: %s at %s:%d", #cond, __FILE__, __LINE__);     \
+      printk(LOG_WARN, "WARN_ON: %s at %s:%d\n", #cond, __FILE__, __LINE__);   \
     __ret_warn_on;                                                             \
   })
 
@@ -70,7 +70,7 @@ void dump_stack_trace(void);
     if ((cond) && !__warned_once) {                                            \
       __warned_once = true;                                                    \
       __ret = true;                                                            \
-      printk(LOG_WARN, "WARN_ON_ONCE: %s at %s:%d", #cond, __FILE__,           \
+      printk(LOG_WARN, "WARN_ON_ONCE: %s at %s:%d\n", #cond, __FILE__,         \
              __LINE__);                                                        \
       dump_stack_trace();                                                      \
     }                                                                          \
