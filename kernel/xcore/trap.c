@@ -755,6 +755,11 @@ static void timer_handler(trapframe *tf) {
   if (current_task && current_task->proc && alarm_check_hook)
     alarm_check_hook(current_task, now);
 
+#ifndef NDEBUG
+  // Snapshot the previous request before this tick arms a new one.
+  bool preempt_was_pending = current_task && current_task->need_resched;
+#endif
+
   // Arm preemption for user tasks even when the tick interrupted their
   // syscall. The syscall return path will consume the flag after leaving IRQ
   // context; ignoring kernel-mode samples lets syscall-heavy tasks monopolize
@@ -780,16 +785,17 @@ static void timer_handler(trapframe *tf) {
   }
 
 #ifndef NDEBUG
-  // Preempt-stall watchdog (debug only): if need_resched is set but N
-  // consecutive timer ticks pass without schedule() consuming it (schedule
-  // clears need_resched on entry), a preemption point was bypassed.
+  // Preempt-stall watchdog (debug only): if the request observed before this
+  // tick re-armed need_resched survived N consecutive ticks, schedule() has
+  // not consumed it and a preemption point was bypassed.
   // Historically bug.md Bug 2 (ls hang) was caused by an unreachable
   // reschedule loop in check_pending_signals.  Print a warning pointing
   // at the preemption path to avoid misdiagnosing as work stealing /
-  // load balance.  Zero cost in release builds.
+  // load balance. With no runnable waiter, delayed preemption is harmless and
+  // must not age the watchdog. Zero cost in release builds.
   {
     int cpu = get_cpu_local()->cpu_id;
-    if (current_task && current_task->need_resched) {
+    if (preempt_was_pending && cpu_locals[cpu].run_count > 0) {
       uint32_t stalled = ++cpu_locals[cpu].preempt_stall_ticks;
       if (stalled >= 100 && stalled % 100 == 0) { // once per second
         printk(LOG_WARN,

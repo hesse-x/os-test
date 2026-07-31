@@ -579,6 +579,11 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
   // runs after in_hardirq has been decremented back to 0).
   BUG_ON(get_cpu_local()->in_hardirq != 0);
 
+#ifndef NDEBUG
+  // Entering schedule() proves this CPU's pending preemption was serviced.
+  cpu_locals[my_cpu].preempt_stall_ticks = 0;
+#endif
+
   // (frame_opt.md 块四) Verify prev's stack canary at this switch choke point,
   // then record the high-water mark of the stack we're about to leave.  An
   // overrun that clobbered the bottom canary is attributed to prev here rather
