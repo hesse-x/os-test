@@ -25,6 +25,7 @@
 #include "kernel/bsd/ipcfd.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
+#include "kernel/bsd/procfs.h"
 #include "kernel/bsd/pty.h"
 #include "kernel/bsd/signal.h"
 #include "kernel/bsd/socket.h"
@@ -190,6 +191,11 @@ void proc_reap(xtask *proc) {
     signal_put(bp->signal);
     bp->signal = NULL;
   }
+
+  /* procfs 侧表清理(procfs.md §3.5):reap 在无锁下被调,字符串自带 refcount,
+   * 持引用的读者放完才 free。须在 pid 复用前清(否则新进程读到旧 exe/cmdline)。
+   */
+  procfs_pinfo_clear(proc->pid);
 
   kfree(bp);
   proc->proc = NULL;
@@ -1760,6 +1766,19 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
   uint64_t user_sp = sp_user;
 #undef STACK_KV
+
+  /* procfs 侧表填充(procfs.md §3.5):exe/cmdline 必须在 execve 时抓(运行期栈
+   * 即将释放)。argv_strings[0] 即 argv[0]=exe 路径(Linux 约定),cmdline = argv
+   * \0 拼接。须在 kfree(argv_strings) 之前。NULL envp:本期不存 environ(留
+   * TODO)。 */
+  {
+    const char *pinfo_argv[ARG_MAX + 1];
+    for (int i = 0; i < argc && i < ARG_MAX; i++)
+      pinfo_argv[i] = argv_strings[i];
+    pinfo_argv[argc < ARG_MAX ? argc : ARG_MAX] = NULL;
+    procfs_pinfo_set(proc->pid, argv_strings[0], (char *const *)pinfo_argv,
+                     NULL);
+  }
 #undef ARG_MAX
 
   kfree(argv_strings);
@@ -1822,8 +1841,13 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   tf->rax = 0;
 
   // 9b. Update mm fields
+  // 持 mmap_lock 换 mmap_regions/cr3：procfs maps_show 是首个跨进程读者，
+  // 无锁 swap 会让另一核读到 NULL/半构建链（procfs.md §3.3.3）。对齐
+  // vma.h:12 "Callers must hold mm->mmap_lock" 契约。
   uint64_t old_cr3 = proc->mm->cr3;
   mmap_region *old_regions = proc->mm->mmap_regions;
+  uint64_t mmlock_flags;
+  spin_lock_irqsave(&proc->mm->mmap_lock, &mmlock_flags);
   proc->mm->mmap_regions = NULL;
   proc->mm->cr3 = pml4_phys;
   proc->cr3 = pml4_phys; // cached
@@ -1845,6 +1869,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     stack_region->next = NULL;
     proc->mm->mmap_regions = stack_region;
   }
+  spin_unlock_irqrestore(&proc->mm->mmap_lock, mmlock_flags);
 
   // 9d. Flush CR3
   __asm__ volatile("movq %0, %%cr3" ::"r"(pml4_phys) : "memory");

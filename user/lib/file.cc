@@ -21,7 +21,6 @@
 // src/unistd/*.c (musl_unistd_objs). The kernel resolves relative paths against
 // bp->cwd (vfs_resolve_user for plain syscalls, resolve_dirfd_start for *at
 // syscalls), so no libc-side cwd copy is needed.
-#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -248,8 +247,11 @@ int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
 // serial tty only answers TCGETS — so musl's isatty would mis-report the serial
 // console as not-a-tty. TCGETS works for both PTY and serial.
 LIBC_EXPORT int isatty(int fd) {
-  // Use ioctl TCGETS to detect tty devices
-  long rc = sys_ioctl(fd, TCGETS, 0);
+  // Use ioctl TCGETS to detect tty devices. TCGETS writes a struct termios to
+  // arg — passing NULL (arg=0) makes the kernel's copy_to_user fail with
+  // -EFAULT, so isatty would mis-report real ttys. Supply a real buffer.
+  struct termios t;
+  long rc = sys_ioctl(fd, TCGETS, (uint64_t)&t);
   return (rc == 0) ? 1 : 0;
 }
 
@@ -280,35 +282,10 @@ int tcsetattr(int fd, int optional_actions, const struct termios *termios_p) {
 }
 
 // ===================== ttyname =====================
-LIBC_EXPORT char *ttyname(int fd) {
-  if (!isatty(fd))
-    return NULL;
-  static char name[32];
-  int index = -1;
-  long rc = sys_ioctl(fd, TIOCGPTN, (uint64_t)&index);
-  if (rc < 0 || index < 0)
-    return NULL;
-  // Build "/dev/ptsN"
-  const char *prefix = "/dev/pts";
-  int pos = 0;
-  for (int i = 0; prefix[i]; i++)
-    name[pos++] = prefix[i];
-  if (index == 0) {
-    name[pos++] = '0';
-  } else {
-    char tmp[8];
-    int tpos = 0;
-    int n = index;
-    while (n > 0) {
-      tmp[tpos++] = '0' + (n % 10);
-      n /= 10;
-    }
-    for (int i = tpos - 1; i >= 0; i--)
-      name[pos++] = tmp[i];
-  }
-  name[pos] = '\0';
-  return name;
-}
+// ADOPTED musl upstream (src/unistd/ttyname.c wraps ttyname_r): procfs M4 now
+// provides /proc/self/fd/N, so musl's ttyname_r readlinks it + stat/fstat
+// dev+ino cross-check (Linux-canonical). The old repo version (ioctl TIOCGPTN)
+// is removed — see build_script/third_party/musl/modules/unistd.cmake.
 
 // ===================== ioctl =====================
 //

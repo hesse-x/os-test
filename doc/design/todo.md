@@ -246,7 +246,7 @@ udevd 设备数据库 + 规则引擎 + coldplug **已落地**（对齐 Linux `in
 
 延后项（use_udev U4 测试收尾，**极低优先级，非验收必需**——基建已全落地，terminal 切 udev 后端 + monitor 重连已可手动验收，下列仅为测试补全，都差不多了不如顺手做完）：
 - test_udevd 热插拔 add 测点（`plan_use_udev.md` U4-T2）：桩设备走两步注册（`device_register_shm`+`device_set_meta` 触发 `nl_uevent_broadcast("add")`，`devtmpfs.c:776`，对齐 `test_sysfs.c:register_event1()`）→ udevd → client pipe，验证 monitor 端到端（非 coldplug 快照路径）。落地即 +1 测点（5→6）。
-- test_udevd crash respawn 重连测点（`plan_use_udev.md` U4 推迟项）：**前置基建缺失**——当前 OS 无 pid 发现机制（无 `/proc`、udevd 不写 pid 文件、`udevd_pid` 仅存 `init.c:116` 栈变量、netlink 广播 `nlmsg_pid=0`，`test_udevd` 是 udevd 兄弟进程无法发现其 pid → `kill_udevd` 不可行）。需先扩 `init.c` spawn udevd 后写 `/run/udev/udevd.pid`（respawn 时刷新），测点读此文件 kill。crash 重连本身已由 U3 终端 spin→`suspend`/`resume` 人工驱动验收（use_udev_design.md §4.2 层2）。
+- test_udevd crash respawn 重连测点（`plan_use_udev.md` U4 推迟项）：**前置基建**——procfs 已上线（[procfs.md](procfs.md)），可扫 `/proc/[pid]/comm` 找 udevd（pid 发现不再缺）；但 `udevd_pid` 仅存 `init.c:116` 栈变量、netlink 广播 `nlmsg_pid=0` 的现状未变，`test_udevd` 仍难直接发现其 pid。落地可走 procfs 扫 pid+comm 定位 udevd（替代 pid 文件），或保留 `init.c` spawn udevd 后写 `/run/udev/udevd.pid`（respawn 刷新）方案。crash 重连本身已由 U3 终端 spin→`suspend`/`resume` 人工驱动验收（use_udev_design.md §4.2 层2）。
 
 ## 内核限制与已知缺陷（静默截断 / 固定上限类）
 
@@ -308,8 +308,7 @@ evdev 中断投递正规化(技术债 #34)独立于本重构,走路径 3,见 [..
 | | `faccessat` | AT_EACCESS 路径要 `__block_all_sigs`/`__restore_sigs`/`__clone` clone shim | 补 clone shim 后接入 musl `faccessat.c` |                                                                                                    
 | | `isatty` | musl 探 `TIOCGWINSZ`；串口（`driver/serial.c:211`）只答 `TCGETS`，余返 `-ENOTTY` | 串口补 `TIOCGWINSZ`（或 repo `isatty` 改用 `TCGETS`，已保留） |                                                                           
 | | `sleep`/`usleep` | musl 遇 `EINTR` 返剩余秒，repo 语义是 EINTR 后重试睡满 | time 已迁 musl（见下「time 全量迁移」），`sleep`/`usleep` 仍在 `time.cc` 故意保留 EINTR-resume 语义（musl `sleep.c`/`usleep.c` 仍排除于 `MUSL_UNISTD_EXCLUDE`）；仅当确认无消费者依赖"睡满"语义且想统一 POSIX 返回值时再换 musl 版 |                                                                                                     
-| | `ttyname`/`ttyname_r` | musl `readlink("/proc/self/fd/N")` + `stat`/`fstat` dev/ino 交叉校验，硬依赖 procfs 魔幻 symlink | 上 procfs（合成 `/proc/self/fd/N`→设备路径）；repo 版走 `TIOCGPTN` 拼 `/dev/ptsN` 已够 PTY 用，非 PTY tty 仍 
-返 NULL |                                                                                                                                                                                                                                   
+| | `ttyname`/`ttyname_r` | musl `readlink("/proc/self/fd/N")` + `stat`/`fstat` dev/ino 交叉校验，硬依赖 procfs 魔幻 symlink | ✅ procfs 已上线（`/proc/self/fd/N`→`/dev/ptsN` 或 `/dev/ttyS0`，见 [procfs.md](procfs.md) §3.4）。解锁条件具备，但 musl `ttyname_r` 的 `stat`/`fstat` dev+ino 交叉校验要求 `/dev/ptsN` 路径解析到的 devtmpfs inode 与 tty fd 的 `fstat` 命中同一 (dev,ino)——当前 repo 版走 `TIOCGPTN` 拼 `/dev/ptsN` 已够 PTY 用，切 musl 上游版前需先验证该交叉校验精度，避免 ENODEV 回退。已登记 procfs TODO（见文末） |
 | | `gethostname` | musl 返 `uname().nodename`（"（none）"）；repo 走 `sys_gethostname`（sethostname 回环） | `uname` nodename 正确填充后可换 musl 版 |                                                                                     
 | **musl 声明但内核无 syscall/无实现（欠账）** | `getgroups`/`setgroups` | 内核无 groups 数组 | proc 加 `groups[]` + syscall |                                                                                                              
 | | `getresuid`/`getresgid`/`setresuid`/`setresgid` | 内核无 saved-set 查询/三参 res 版本 | proc 加 suid/sgid + `sys_setresuid/setresgid`（凭证已进程级） |                                                                                 
@@ -328,7 +327,7 @@ evdev 中断投递正规化(技术债 #34)独立于本重构,走路径 3,见 [..
 | **机制缝（已 shim 降级，非 musl 真实现）** | `__setxid`（set*id 系列） | musl 原版走 `__synccall` 跨线程广播；本内核凭证进程级 | 多线程凭证同步需求出现时再做（当前降级为单次 syscall 等价，见 `user/lib/musl_shim/syscall_cp.c`） |
 | | ~~`__syscall_cp`（cancellable 系列底层）~~ | ~~musl 原版走 `__syscall_cp_asm` + pthread_cancel；自研 pthread 无 cancel~~ | ✅ 已落地：pthread 切到 musl 真实现后 `__syscall_cp` 来自 `musl_pthread`（`src/thread/__syscall_cp.c` + `x86_64/syscall_cp.s`），取消点已 live；`musl_shim/syscall_cp.c` 不再定义 `__syscall_cp`（防与 musl_pthread 重复符号），仅留 `__setxid` |                                                                                       
                                                                                                                                                                                                                                             
-**剩余债（M0.4 之后）**：~~① AT_FDCWD→cwd 内核修后下掉 `chdir`/`getcwd`/`renameat`/`unlinkat` repo 版与 `cwd_path`~~ ✅ 已落地（2026-07-28，见上表 M0.4 行）；② procfs 上线后下掉 `ttyname`/`ttyname_r`；③ 串口补 `TIOCGWINSZ` 后可换 `isatty` 到 musl；④ `i
+**剩余债（M0.4 之后）**：~~① AT_FDCWD→cwd 内核修后下掉 `chdir`/`getcwd`/`renameat`/`unlinkat` repo 版与 `cwd_path`~~ ✅ 已落地（2026-07-28，见上表 M0.4 行）；~~② procfs 上线后下掉 `ttyname`/`ttyname_r`~~ ✅ procfs 已上线（[procfs.md](procfs.md)），`/proc/self/fd/N` 魔幻 symlink 就位；切 musl 上游 `ttyname_r` 待 dev+ino 交叉校验精度验证（见 procfs TODO）；③ 串口补 `TIOCGWINSZ` 后可换 `isatty` 到 musl；④ `i
 t_interval` 重复 alarm（`alarm_check` 到期重 arm）+ ITIMER_VIRTUAL/PROF；⑤ shim 目录 `user/lib/musl_shim/` 仍未 `git add`（untracked），errno 双包装修复在 diff 盲区。
 
 ### stdlib 全量迁移到 musl（含启动/env/exit 链，退役 shim）
@@ -340,7 +339,7 @@ stdlib 模块（纯计算 + 启动/env/exit 链）切到 musl 上游（`musl_std
 源码核实（两条曾担心的大问题都不成立）：(1) TLS 重复初始化不成立——dynlink.c 的 `__init_tls` 是空 no-op（loader 在 `__dls3` 自做 TLS），musl `__libc_start_main→__init_libc→__init_tls` 动态路径等于空操作，静态路径用 `src/env` 的真 `__init_tls`（已在 `musl_pthread`）；(2) env 握手不成立——musl `__putenv` 第一次 `setenv` 时懒拷贝栈 `envp` 到堆，替代仓库 `__libc_env_init` 预拷贝；loader 在 `__libc_start_main` 前 `__environ=envp`+`getenv("LD_LIBRARY_PATH")` 的时序由 musl `__environ.c`(`weak_alias(__environ,environ)`) + `getenv.c` 直读 `__environ` 满足。内核 auxv（`kernel/bsd/proc.c` execve / `proc_create.c`）提供 `AT_PHDR/PHENT/PHNUM/ENTRY/PAGESZ/RANDOM/EXECFN` + `AT_UID==AT_EUID==AT_GID==AT_EGID==0`/`AT_SECURE=0`，故 `__init_libc` 的 secure-check 早返（不开 `/dev/null`）。`crt1.c` 6 参调用 `__libc_start_main` 与 musl 3 参定义在 x86-64 ABI 兼容（多余参在寄存器被忽略）。`_Exit.c` 不在此批（已在 `musl_unistd_objs`，编入会 multi-def）。`__uflow` 当时由 `user/lib/musl_shim/scan_uflow_stub.c`（返回 EOF，运行时不可达——strtol/strtod 把 `shend` 设为巨大哨兵，`rpos` 永不到 `shend`）满足 musl 扫描器链的 link-time 引用。该 stub 在后续 stdio 全量迁移（见下节）删除——musl `src/stdio/__uflow.c`（`musl_stdio_objs` glob）提供真 `__uflow`，同时满足扫描链引用与 stdio 运行期，stub 再留会 multi-define。
 
 **暂留子集（musl 无法替换，待后续模块迁移解锁）**：
-- `realpath`（`stdlib_misc.c`）：musl `src/misc/realpath.c` 需 `__procfdname` + `readlink("/proc/self/fd/N")` + `O_PATH`（内核皆无 procfs）。解锁：上 procfs（合成 `/proc/self/fd/N`→设备路径）+ readlink 子系统后切 musl 版。
+- `realpath`（`stdlib_misc.c`）：musl `src/misc/realpath.c` 需 `__procfdname` + `readlink("/proc/self/fd/N")` + `O_PATH`。✅ procfs 已上线（[procfs.md](procfs.md)），`/proc/self/fd/N` + readlink 子系统就位；`O_PATH` 内核尚未支持是剩余阻断，补 `O_PATH` 后切 musl `realpath`。
 - `mkstemp`/`mktemp`（`stdlib_misc.c`）：musl `src/temp/__randname.c` 调 `__clock_gettime(CLOCK_REALTIME)`。~~解锁：time 模块迁移到 musl 后切 `__randname`/`__clock_gettime`~~ time 已迁 musl（见下「time 全量迁移」，`__clock_gettime` 现由 musl `clock_gettime.c` 提供），阻断已消除；切 musl `mkstemp` 为 stdlib 收尾子任务。
 - ~~`getline`/`fscanf`/`scanf`（`stdlib_misc.c`，当前 ENOSYS stub）：musl 把它们放 `src/stdio/`，依赖整套 musl stdio 的 `__uflow`/shgetc 扫描链；repo stdio 是自写 `stdio.cc`（非 musl FILE），硬塞接不上。解锁：stdio 整体迁 musl 时一起上。~~ ✅ 已落地（stdio 全量迁 musl，见下「stdio 全量迁移」节）：musl `src/stdio` 真实现接管，stub 删除。
 - `sysconf`/`getpagesize`（`stdlib_misc.c`）：musl `src/conf/sysconf.c`（217 行）改 `_SC_NPROCESSORS_ONLN` 语义，repo 走 `sys_sysconf` syscall。解锁：对齐 ncpu 取值语义后切 musl 版（连带 `src/legacy/getpagesize.c`）。
@@ -457,4 +456,16 @@ pthread（commit `8d19e24`，删 `user/lib/{pthread,tls,errno}.cc` + 旧头，`_
 - [ ] **fcntl cmds 未实现**：`sys_fcntl` switch 的 `default` 返 `-EINVAL`，下列 musl `<fcntl.h>` 声明的 cmd 内核不认：`F_SETLEASE`/`F_GETLEASE`（file lease，需 lease 子系统）、`F_NOTIFY`（目录变更通知 DN_*）、`F_CANCELLK`、`F_GETOWNER_UIDS`、`F_GET_RW_HINT`/`F_SET_RW_HINT`/`F_GET_FILE_RW_HINT`/`F_SET_FILE_RW_HINT`（write-life hint，RWF_*）。当前无消费方，留待对应子系统/需求上线。
 - [ ] **libc 侧 `lockf(3)` + `fallocate(3)`（glibc 非 POSIX 变体）未提供**：musl `<fcntl.h>` 在 `_GNU_SOURCE` 下声明二者，但 musl 源在 `src/misc/lockf.c`、`src/linux/fallocate.c`，未并入 `musl_fcntl_objs`（只拉 `src/fcntl/*.c`）→ 用户态调用会链接未定义。需用时把这俩源并入 libc（或并入 `musl_unistd_objs` 的 src/linux glob）。
 - [ ] **`splice`/`tee`/`vmsplice`/`readahead`/`sync_file_range` 缺失（libc + kernel 双侧）**：musl `<fcntl.h>` 在 `_GNU_SOURCE` 下声明，源在 `src/linux/*.c`（未被 `musl_unistd_objs` 的 `src/unistd` glob 覆盖，未并入）；内核无 `SYS_splice`(275)/`SYS_tee`(276)/`SYS_vmsplice`(278)/`SYS_readahead`(187)/`SYS_sync_file_range`(277) 的 dispatch（`syscall_nums.h`+`syscall.c` 均无）。需 kernel pipe/splice 子系统 + 这批 syscall + libc 源一并补。
+
+## procfs 后续（procfs.md §6 "后续 TODO"）
+
+procfs M0-M6 已上线（[procfs.md](procfs.md)）：`/proc/{meminfo,cpuinfo,uptime,version,self}` + per-pid `status/stat/comm/cmdline/maps/cwd/exe/fd/N`，回归测试 `test_procfs`（14 例，`user/test/test_procfs.c`）。后续缺口：
+
+- [ ] **`/proc/[pid]/task/[tid]` 线程级**：解锁 musl `pthread_getname_np`/`pthread_setname_np`（读写 `/proc/self/task/%d/comm`）。需 per-tid 目录 + comm 字段，xtask 已有 tgid/tid 区分（`xtask.h`）。
+- [ ] **切 musl 上游 `ttyname`/`ttyname_r`**：procfs `/proc/self/fd/N` 已就位，但 musl `ttyname_r` 做 `stat(路径)` vs `fstat(fd)` 的 dev+ino 交叉校验，要求 `/dev/ptsN` 解析到的 devtmpfs inode 与 tty fd `fstat` 命中同一 (dev,ino)。切之前需验证该校验精度，否则 musl 版返 ENODEV 反不如 repo 版 `TIOCGPTN` 拼 `/dev/ptsN`。届时移除 `build_script/third_party/musl/modules/unistd.cmake` 的 `ttyname.c`/`ttyname_r.c` REMOVE + 删 `user/lib/file.cc` repo 版。
+- [ ] **`/proc/sys/`（可写 sysctl）**：当前 procfs 全只读。`/proc/sys/` 需可写 store 回调 + 内核参数读写收口。
+- [ ] **`/proc/[pid]/environ`**：pinfo 侧表已留 `environ` 槽（`procfs_pinfo`），execve hook 当前只抓 exe/cmdline（`procfs_pinfo_set` 忽略 envp）；补 envp 抓取即可。
+- [ ] **`/proc/loadavg`**：运行队列长度 + 负载均值，需调度器统计（`sched.c` run_queue 计数）。
+- [ ] **seq_file（>页属性）**：当前 show 回调写单 4KB 页（`procfs_file_read` kbuf[4096]）。`/proc/[pid]/maps` 等大属性可能超页，需 seq_file 风格的多页迭代。当前 maps_show 在 VMA 多时可能截断。
+- [ ] **`FD_REGULAR` 真路径反查**：`/proc/[pid]/fd/N` 对磁盘文件当前返 `anon_inode:[regular]`（`struct inode` 不存路径）。真路径需动 inode/VFS（inode 记录路径或 dentry 反查），超出 procfs 范围。procps `ls -l /proc/*/fd/*` 对磁盘文件显示 anon_inode 串，不崩。
 

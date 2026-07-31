@@ -17,6 +17,7 @@
 #include "arch/x64/utils.h"
 #include "kernel/bsd/elf_loader.h"
 #include "kernel/bsd/proc.h"
+#include "kernel/bsd/procfs.h"
 #include "kernel/bsd/signal.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/list.h"
@@ -291,6 +292,15 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
          proc->pid, k_stack_phys, k_stack_top);
 
   spin_unlock(&tasks_lock);
+
+  /* procfs 侧表填充(procfs.md §3.5):init 由内核直接建,无 execve 路径,这里补抓
+   * exe/cmdline。须在 tasks_lock 释放后(procfs_pinfo_set 自取
+   * tasks_lock,嵌套死锁)。 argv 内核硬编码 "/init"(proc_create.c:127),cmdline =
+   * "/init\0"。 */
+  {
+    const char *init_argv[] = {"/init", NULL};
+    procfs_pinfo_set(proc->pid, "/init", (char *const *)init_argv, NULL);
+  }
 
   // Enqueue to target CPU's run_queue under scheduler_lock
   int cpu = proc->assigned_cpu;

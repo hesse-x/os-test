@@ -24,4 +24,7 @@ size_t hostname_get(char *dst, size_t maxlen);
 void xcore_init(boot_info *bi);
 void driver_init(void);
 void bsd_init(void);
+
+// procfs /proc/version 内容(procfs.md §3.3)。编译器与构建标识随构建注入。
+#define KERNEL_VERSION "os2 0.1"
 #endif // KERNEL_H

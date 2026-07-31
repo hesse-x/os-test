@@ -112,6 +112,22 @@ void test_memfd_mmap(void) {
   close(fd);
 }
 
+/* write(memfd) grows the object and is visible through MAP_SHARED. */
+void test_memfd_write_mmap(void) {
+  int fd = memfd_create("test_write", MFD_CLOEXEC);
+  TEST_ASSERT_TRUE(fd >= 0);
+
+  const char msg[] = "memfd_write";
+  TEST_ASSERT_EQUAL_INT(sizeof(msg), write(fd, msg, sizeof(msg)));
+
+  char *p = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
+  TEST_ASSERT_TRUE(p != NULL && p != MAP_FAILED);
+  TEST_ASSERT_EQUAL_STRING(msg, p);
+
+  munmap(p, 4096);
+  close(fd);
+}
+
 /* 9. ftruncate grow memfd */
 void test_ftruncate_grow(void) {
   int fd = memfd_create("test_grow", 0);
@@ -304,6 +320,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_mmap_shm_fd);
   RUN_TEST(test_memfd_create);
   RUN_TEST(test_memfd_mmap);
+  RUN_TEST(test_memfd_write_mmap);
   RUN_TEST(test_ftruncate_grow);
   RUN_TEST(test_mmap_prot_exec);
   RUN_TEST(test_mmap_memfd_shared_cross);

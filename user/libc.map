@@ -87,7 +87,7 @@ global:
     /* <unistd.h> */
     access; faccessat; close; dup; dup2; _exit; ftruncate; getcwd; getpid; gettid;
     ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; pipe2; read;
-    rmdir; sched_yield; sleep; ttyname; unlink; unlinkat; rename; renameat;
+    rmdir; sched_yield; sleep; ttyname; ttyname_r; unlink; unlinkat; rename; renameat;
     usleep; write;
     chdir; fchdir;
     utimensat;

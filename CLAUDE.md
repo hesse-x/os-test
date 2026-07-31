@@ -125,6 +125,7 @@ kernel/
     page_cache.c / page_cache.h — 4KB page cache（LRU淘汰+写回）
     devtmpfs.c / devtmpfs.h — /dev/ 内存伪文件系统（设备节点注册+open）
     elf_loader.c / elf_loader.h — ELF 加载器
+    procfs.c / procfs.h  — /proc 伪文件系统（全局统计 + per-pid 字段 + self/fd 魔幻链接 + pinfo 侧表）
     socket.c / socket.h  — AF_UNIX SOCK_STREAM + SCM_RIGHTS
     netlink.c / netlink.h — AF_NETLINK 多播事件通知（uevent 广播 + group 注册表）
     pty.c / pty.h        — PTY/TTY 子系统
@@ -220,6 +221,7 @@ kernel/
 | `vfs.md` | VFS + 文件系统设计（FAT32 + inode + page cache + devtmpfs） | BSD |
 | `mount.md` | Mount 框架（mount_table + 最长前缀匹配 + fstype 注册 + dir_context） | BSD |
 | `posix.md` | POSIX 接口覆盖现状 | BSD |
+| `procfs.md` | procfs 伪文件系统（`/proc`：全局 meminfo/cpuinfo/uptime/version + per-pid status/stat/comm/cmdline/maps/cwd/exe/fd/N + self 魔幻链接 + pinfo 侧表） | BSD |
 | `thread.md` | 多线程设计（xtask_t + proc_t + signal_struct + clone + pthread，含 TLS/FPU lazy switch/futex/两级信号） | BSD/Xcore |
 | `pcie.md` | PCIe ECAM 枚举与 BAR 分配 | Driver |
 | `xhci.md` | xHCI USB 控制器驱动 | Driver |

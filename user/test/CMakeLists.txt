@@ -176,6 +176,7 @@ add_user_dyn_elf(mount C SOURCES test_mount.c LINK_LIBS c STATIC_LIBS unity)
 # sysfs + file_operations + ringbuf (TEST build only — evdev sysfs needs stubs)
 if(TEST)
     add_user_dyn_elf(test_sysfs C SOURCES test_sysfs.c LINK_LIBS c STATIC_LIBS unity DEFS TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libinput/include/linux)
+    add_user_dyn_elf(test_procfs C SOURCES test_procfs.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
 endif()
 
 # Phase B: libdrm.so composite loading test (plan_drm2)

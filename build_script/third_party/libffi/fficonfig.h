@@ -39,7 +39,7 @@
 /* 闭包路径(closures.c FFI_MMAP_EXEC_WRIT 分支) */
 #define FFI_MMAP_EXEC_WRIT 1    /* 走双映射 */
 #define FFI_MMAP_EXEC_SELINUX 0 /* 关 selinux 探测(跳过 statfs/proc/mounts) */
-#define FFI_MMAP_PAX 0          /* 关 PaX 探测 */
+/* Keep FFI_MMAP_PAX undefined: closures.c tests it with #if defined. */
 /* HAVE_MNTENT 不定义 → 跳过 mntent.h */
 #define HAVE_MMAP 1
 #define HAVE_MEMFD_CREATE 1 /* 走 memfd(closures.c:726 opts 第一项) */

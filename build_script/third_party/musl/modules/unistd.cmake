@@ -31,10 +31,13 @@
 # __block_all_sigs/__restore_sigs/__clone shims; the repo's existing faccessat
 # (file.cc) is retained for now (tracked in unistd_worklist problem 4).
 #
-# ttyname.c / ttyname_r.c are EXCLUDED: musl's ttyname_r readlinks /proc/self/fd/N
-# (via __procfdname, src/internal/procfdname.c) and stats the result — this kernel
-# has no procfs. The repo's existing ttyname (file.cc) uses ioctl(TIOCGPTN) instead
-# and is retained. ttyname_r deficit recorded in doc/design/todo.md.
+# ttyname.c / ttyname_r.c ARE ADOPTED: procfs now provides /proc/self/fd/N
+# (procfs M4), so musl's ttyname_r readlinks it and stats the result for
+# dev+ino cross-check (the Linux-canonical path). The repo's old ttyname
+# (file.cc, ioctl TIOCGPTN) is deleted to avoid a duplicate definition.
+# musl's ttyname_r calls isatty() — the repo's isatty (file.cc, TCGETS) is
+# retained (musl's isatty.c still excluded — it probes TIOCGWINSZ which the
+# serial tty doesn't answer).
 #
 # isatty.c is EXCLUDED: musl probes TIOCGWINSZ, but this kernel's serial tty
 # (kernel/driver/serial.c:211) only answers TCGETS and returns -ENOTTY for anything
@@ -59,8 +62,6 @@ file(GLOB MUSL_UNISTD_SOURCES ${MUSL_DIR}/src/unistd/*.c)
 set(MUSL_UNISTD_EXCLUDE
     ${MUSL_DIR}/src/unistd/faccessat.c   # AT_EACCESS clone path — repo faccessat retained
     ${MUSL_DIR}/src/unistd/setxid.c      # __setxid provided by musl_shim/syscall_cp.c
-    ${MUSL_DIR}/src/unistd/ttyname.c     # wraps ttyname_r (excluded below)
-    ${MUSL_DIR}/src/unistd/ttyname_r.c   # needs /proc/self/fd (no procfs) — repo ttyname retained
     ${MUSL_DIR}/src/unistd/isatty.c      # musl probes TIOCGWINSZ; serial only answers TCGETS — repo isatty retained
     ${MUSL_DIR}/src/unistd/gethostname.c # musl returns uname.nodename ("(none)"); repo reads sys_gethostname (sethostname round-trip) — retained
     ${MUSL_DIR}/src/unistd/sleep.c       # repo sleep resumes after EINTR (musl returns remaining); retained for signal-resume semantics

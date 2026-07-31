@@ -1125,7 +1125,11 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
             return picked;
           }
           uint64_t vaddr = (uint64_t)picked;
-          uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+          uint64_t pte_flags = PTE_PRESENT | PTE_USER;
+          if (prot & PROT_WRITE)
+            pte_flags |= PTE_RW;
+          if (!(prot & PROT_EXEC))
+            pte_flags |= PTE_NX;
 
           for (size_t i = 0; i < total_pages; i++) {
             uint64_t page_phys;
@@ -1215,7 +1219,11 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       return picked;
     }
     uint64_t vaddr = (uint64_t)picked;
-    uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
+    uint64_t pte_flags = PTE_PRESENT | PTE_USER;
+    if (prot & PROT_WRITE)
+      pte_flags |= PTE_RW;
+    if (!(prot & PROT_EXEC))
+      pte_flags |= PTE_NX;
 
     for (size_t i = 0; i < total_pages; i++) {
       uint64_t page_phys;
@@ -2256,6 +2264,77 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   // FD_EVENTFD: 8-byte counter write
   if (f->type == FD_EVENTFD) {
     ret = eventfd_do_write(f, buf, len);
+    goto out;
+  }
+
+  // memfd write: grow the backing SHM as needed, then copy into its pages.
+  // libffi uses this path to populate the file before creating its paired
+  // writable/executable MAP_SHARED mappings.
+  if (f->type == FD_SHM) {
+    if (!(f->flags & (O_WRONLY | O_RDWR))) {
+      ret = -EBADF;
+      goto out;
+    }
+    struct shm *shm = f->shm;
+    if (!shm) {
+      ret = -EBADF;
+      goto out;
+    }
+    if (shm->seals & F_SEAL_WRITE) {
+      ret = -EPERM;
+      goto out;
+    }
+    if (len == 0) {
+      ret = 0;
+      goto out;
+    }
+    if (!buf) {
+      ret = -EFAULT;
+      goto out;
+    }
+
+    uint64_t ptr_start = (__force uint64_t)buf;
+    uint64_t ptr_end = ptr_start + len;
+    uint64_t offset = (f->flags & O_APPEND) ? shm->file_size : f->offset;
+    uint64_t end = offset + len;
+    if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+        ptr_end > KERNEL_VMA_BOUNDARY || end < offset) {
+      ret = -EFAULT;
+      goto out;
+    }
+
+    if (end > shm->file_size) {
+      ret = sys_ftruncate(fd, (int64_t)end, 0, 0, 0, 0);
+      if (ret < 0)
+        goto out;
+    }
+
+    size_t written = 0;
+    while (written < len) {
+      uint64_t pos = offset + written;
+      size_t page_index = (size_t)(pos / PAGE_SIZE);
+      size_t page_offset = (size_t)(pos % PAGE_SIZE);
+      size_t chunk = PAGE_SIZE - page_offset;
+      if (chunk > len - written)
+        chunk = len - written;
+
+      uint64_t page_phys = shm->page_list ? shm->page_list[page_index]
+                                          : shm->phys + page_index * PAGE_SIZE;
+      void *dst = (__force void *)((uint64_t)phys_to_virt(
+                                       (__force phys_addr_t)page_phys) +
+                                   page_offset);
+      if (copy_from_user(dst, buf + written, chunk)) {
+        if (written == 0) {
+          ret = -EFAULT;
+          goto out;
+        }
+        break;
+      }
+      written += chunk;
+    }
+
+    f->offset = offset + written;
+    ret = (int64_t)written;
     goto out;
   }
 

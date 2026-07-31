@@ -100,6 +100,7 @@
   { include: ["\"bits/signal.h\"", private, "<signal.h>", public ] },
   { include: ["\"fcntl.h\"", private, "<fcntl.h>", public ] },
   { include: ["\"stdio.h\"", private, "<stdio.h>", public ] },
+  { include: ["\"errno.h\"", private, "<errno.h>", public ] },
 
   # ---- bare quote "unistd.h" → angle <unistd.h> (spelling preference fix) ----
   # The user/include/unistd.h shim is found via -I, so iwyu's "preferred

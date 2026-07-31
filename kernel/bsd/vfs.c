@@ -14,6 +14,7 @@
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/page_cache.h"
 #include "kernel/bsd/proc.h"
+#include "kernel/bsd/procfs.h"
 #include "kernel/bsd/pty.h"
 #include "kernel/bsd/syscall.h"
 #include "kernel/bsd/sysfs.h"
@@ -64,6 +65,7 @@ void vfs_init(void) {
       register_fstype(&devtmpfs_fstype);
       register_fstype(&sysfs_fstype);
       register_fstype(&tmpfs_fstype);
+      register_fstype(&procfs_fstype);
       sysfs_init();
       mount_internal(&fat32_fstype, "/", NULL);
       /* Create /dev directory entry on FAT32 root so getdents("/") sees it.
@@ -82,6 +84,14 @@ void vfs_init(void) {
           fat32_mkdir("/sys");
       }
       mount_internal(&sysfs_fstype, "/sys", sysfs_root_node());
+      /* procfs(procfs.md §2.4):建 /proc 目录挂 procfs_fstype。 */
+      {
+        uint8_t ksb[256];
+        if (fat32_stat("/proc", ksb) != 0)
+          fat32_mkdir("/proc");
+      }
+      procfs_init();
+      mount_internal(&procfs_fstype, "/proc", procfs_root_node());
       /* Create /run directory on FAT32 root for getdents("/") visibility,
        * then mount tmpfs on /run (内存 fs，udevd db/socket 前置)。 */
       {
@@ -577,6 +587,10 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   if (ip->type == INODE_REGULAR && ip->mount &&
       __strcmp(ip->mount->fs->name, "sysfs") == 0)
     f->f_op = &sysfs_fops;
+  /* procfs 属性文件: 设 f_op = procfs_fops */
+  if (ip->type == INODE_REGULAR && ip->mount &&
+      __strcmp(ip->mount->fs->name, "procfs") == 0)
+    f->f_op = &procfs_fops;
   /* tmpfs 普通文件: 设 f_op = tmpfs_file_fops（read/write 走 tmpfs 内存
    * buffer）。 sys_read/sys_write 在 f_op 非 NULL 时优先走 fop 回调，NULL 则落
    * FD_REGULAR→ FAT32 page cache（对 tmpfs inode 错误），故 tmpfs
@@ -713,9 +727,21 @@ static int fstat_fill(struct file *f, struct kstat *ks) {
   case FD_PIPE:
     ks->st_mode = S_IFIFO | 0644;
     return 0;
-  case FD_TTY:
+  case FD_TTY: {
+    /* tty fd 的 f->inode 即 devtmpfs /dev/ptsN 节点(打开时由 sys_open 绑定)。
+     * musl ttyname_r 用 stat(path) vs fstat(fd) 的 (dev,ino) 交叉校验确认
+     * /proc/self/fd/N 链接所指即该 fd——故 fstat 必须回填与 stat 一致的
+     * st_ino/st_rdev,否则闭环误判 ENODEV(procfs.md §3.4.1)。 */
+    struct inode *ip = f->inode;
+    if (ip) {
+      ks->st_ino = ip->ino;
+      ks->st_rdev = ip->ino; /* 字符设备 rdev = ino(devtmpfs 约定,见 FD_DEV) */
+      ks->st_uid = ip->uid;
+      ks->st_gid = ip->gid;
+    }
     ks->st_mode = S_IFCHR | 0666;
     return 0;
+  }
   case FD_SHM:
     ks->st_mode = S_IFREG | 0666;
     return 0;
@@ -1016,6 +1042,10 @@ int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
   if (ip->type == INODE_REGULAR && ip->mount &&
       __strcmp(ip->mount->fs->name, "sysfs") == 0)
     f->f_op = &sysfs_fops;
+  /* procfs 属性文件: 设 f_op = procfs_fops */
+  if (ip->type == INODE_REGULAR && ip->mount &&
+      __strcmp(ip->mount->fs->name, "procfs") == 0)
+    f->f_op = &procfs_fops;
   if (ip->type == INODE_REGULAR && ip->mount &&
       __strcmp(ip->mount->fs->name, "tmpfs") == 0)
     f->f_op = &tmpfs_file_fops;
