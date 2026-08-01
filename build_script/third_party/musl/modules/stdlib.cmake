@@ -81,6 +81,12 @@ set(MUSL_STDLIB_SOURCES
     # must be compiled or the public qsort (libc.map) is undefined.
     ${MUSL_DIR}/src/stdlib/qsort.c
     ${MUSL_DIR}/src/stdlib/qsort_nr.c
+    # temp: mkstemps is a suffix-preserving wrapper over __mkostemps. These
+    # three sources have their clock/pthread dependencies supplied by the
+    # already-migrated time and pthread modules.
+    ${MUSL_DIR}/src/temp/__randname.c
+    ${MUSL_DIR}/src/temp/mkostemps.c
+    ${MUSL_DIR}/src/temp/mkstemps.c
     # prng: musl's LCG (31-bit, RAND_MAX=0x7fffffff) replaces the repo's
     # 15-bit LCG. random/drand48 excluded (0 callers).
     ${MUSL_DIR}/src/prng/rand.c

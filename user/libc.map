@@ -59,7 +59,14 @@ global:
      * new(std::align_val_t) routes to aligned_alloc) and by cross-built
      * consumers that link -lc. */
     aligned_alloc; memalign; posix_memalign; reallocarray;
-    mkstemp; mktemp; realpath;
+    mkstemp; mktemp; mkstemps; realpath;
+
+    /* <syslog.h> -- musl src/misc/syslog.c (musl_misc_objs). */
+    closelog; openlog; setlogmask; syslog; vsyslog;
+
+    /* GNU <errno.h> startup-name variables, initialized by musl
+     * __libc_start_main and defined in src/internal/libc.c. */
+    program_invocation_name; program_invocation_short_name;
 
     /* <string.h> — musl upstream (src/string/* + x86_64 asm memcpy/memmove/memset
      * + src/misc basename). The extension symbols musl compiles but we do NOT

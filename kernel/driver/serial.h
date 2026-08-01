@@ -7,9 +7,12 @@
 #ifndef KERNEL_SERIAL_H
 #define KERNEL_SERIAL_H
 
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #include "kernel/driver/driver.h"
 #include "kernel/xcore/spinlock.h"
-#include <stdarg.h>
 
 // ===================== 16550 UART register offsets from COM1 base
 // =====================

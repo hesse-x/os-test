@@ -104,6 +104,12 @@ int main(int argc, char **argv, char **envp) {
   }
 
   printf("init: started\n");
+  mkdir("/var", 0755);
+  mkdir("/var/log", 0755);
+  unlink("/run/syslogd.ready");
+  int syslogd_pid = spawn_service("/usr/bin/syslogd");
+  for (int i = 0; i < 200 && access("/run/syslogd.ready", F_OK) < 0; i++)
+    usleep(10 * 1000);
 
   // 2. Spawn evdev (keyboard event source + EVIOCG* ioctl query), wait for
   //    /dev/input/event0. Replaces the old kbd driver.
@@ -142,6 +148,7 @@ int main(int argc, char **argv, char **envp) {
 #define START_LIMIT_BURST 5
   int udevd_crashes = 0;
   int evdev_crashes = 0;
+  int syslogd_crashes = 0;
   while (1) {
     int status;
     pid_t ret = waitpid(-1, &status, 0);
@@ -149,6 +156,17 @@ int main(int argc, char **argv, char **envp) {
       continue;
     int crashed =
         WIFSIGNALED(status) || (WIFEXITED(status) && WEXITSTATUS(status) != 0);
+
+    if (ret == syslogd_pid) {
+      if (!crashed)
+        continue;
+      if (++syslogd_crashes > START_LIMIT_BURST)
+        continue;
+      sleep(RESTART_SEC);
+      unlink("/run/syslogd.ready");
+      syslogd_pid = spawn_service("/usr/bin/syslogd");
+      continue;
+    }
 
     if (ret == udevd_pid) {
       if (!crashed) {

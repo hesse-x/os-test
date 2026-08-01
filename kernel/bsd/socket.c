@@ -1199,7 +1199,7 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   int protocol = (int)arg3;
 
   // Strip socket type flags before checking base type
-  int sock_flags = type & ~(SOCK_CLOEXEC | SOCK_NONBLOCK);
+  int sock_flags = type & (SOCK_CLOEXEC | SOCK_NONBLOCK);
   int base_type = type & (SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET);
 
   // Only AF_UNIX SOCK_STREAM supported

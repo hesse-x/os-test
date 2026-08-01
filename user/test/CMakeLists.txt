@@ -160,6 +160,10 @@ add_user_dyn_elf(test_membarrier C SOURCES test_membarrier.c LINK_LIBS c STATIC_
 # matching int64_t=long; repo macro-only shim deleted). Pure compute, no FS.
 add_user_dyn_elf(test_inttypes C SOURCES test_inttypes.c LINK_LIBS c STATIC_LIBS unity)
 
+# musl temp/syslog APIs plus GNU startup-name variables. syslogd is not part of
+# this image, so the test covers the libc API state rather than log delivery.
+add_user_dyn_elf(test_musl_misc C SOURCES test_musl_misc.c LINK_LIBS c STATIC_LIBS unity DEFS _GNU_SOURCE)
+
 # <locale.h> → musl: 6 POSIX locale managers (setlocale/localeconv/newlocale/
 # duplocale/freelocale/uselocale) + 4 collate (strcoll/strxfrm/wcscoll/wcsxfrm
 # +_l), built by musl_locale_objs (src/locale/*). C-locale only (no .mo catalog
@@ -353,3 +357,9 @@ add_user_dyn_elf(test_wayland_client C SOURCES test_wayland_client.c
 # <dlfcn.h>. No Unity — each step prints a marker and the ELF exits nonzero on
 # any failure so test_runner reports [FAIL].
 add_user_dyn_elf(test_dl C SOURCES test_dl.c LINK_LIBS c DEFS _GNU_SOURCE)
+
+# /dev/console device test. console aliases the serial port (same serial_ops,
+# second devtmpfs node). Guards open/write/poll/stat + read-unsupported, and
+# that the node exists for the musl LOG_CONS fallback (syslog.c opens it when
+# /dev/log is unreachable).
+add_user_dyn_elf(test_console C SOURCES test_console.c LINK_LIBS c STATIC_LIBS unity)

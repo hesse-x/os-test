@@ -82,6 +82,8 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_multibyte_objs>
                $<TARGET_OBJECTS:musl_wchar_objs>
                $<TARGET_OBJECTS:musl_regex_objs>
+               $<TARGET_OBJECTS:musl_misc_objs>
+               $<TARGET_OBJECTS:compiler_rt_int128>
     C
     FLAGS "-fno-pie -DDYNAMIC=0"
     IMAGE_PATH usr/lib/libc.a
@@ -126,6 +128,8 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_multibyte_objs>
                $<TARGET_OBJECTS:musl_wchar_objs>
                $<TARGET_OBJECTS:musl_regex_objs>
+               $<TARGET_OBJECTS:musl_misc_objs>
+               $<TARGET_OBJECTS:compiler_rt_int128>
     C
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED
@@ -320,6 +324,7 @@ os_image_path(shell shell.elf bin/sh)
 
 # udev/ — device event daemon (subscribes to netlink uevent group)
 add_user_elf(udevd C SOURCES udev/udevd.c LINK_LIBS c IMAGE_PATH usr/bin/udevd)
+add_user_elf(syslogd C SOURCES syslogd.c LINK_LIBS c IMAGE_PATH usr/bin/syslogd)
 
 # ===== ld.so multi-dependency unit tests (ld.md §8 / plan_ld phase D) =====
 # Fully decoupled from drm: use stub .so topologies + a dynamic main ELF to

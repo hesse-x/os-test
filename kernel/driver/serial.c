@@ -11,6 +11,7 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/bsd/poll_types.h"
 #include "kernel/driver/serial.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/sparse.h"
@@ -237,6 +238,15 @@ void serial_dev_register(void) {
   int rc = devtmpfs_create("serial", &serial_ops, NULL);
   if (rc != 0) {
     printk(LOG_ERROR, "serial_dev_register: failed (rc=%d)\n", rc);
+  }
+
+  // /dev/console aliases the serial port — same ops, second node. This is
+  // the syslog LOG_CONS fallback target (musl _vsyslog opens /dev/console
+  // when /dev/log is unreachable) and the conventional sink for kernel/init
+  // console output. Output-only, like serial (no .read).
+  rc = devtmpfs_create("console", &serial_ops, NULL);
+  if (rc != 0 && rc != -EEXIST) {
+    printk(LOG_ERROR, "console dev_register: failed (rc=%d)\n", rc);
   }
 }
 

@@ -209,6 +209,11 @@ cp "$SRC"/third_party/musl/include/sys/socket.h     "$DEST/sys/socket.h"
 cp "$SRC"/third_party/musl/include/sys/un.h         "$DEST/sys/un.h"
 cp "$SRC"/third_party/musl/arch/generic/bits/socket.h "$DEST/bits/socket.h"
 
+# 3f'. musl syslog.h. The syslog API implementation is compiled from
+# src/misc/syslog.c; publish its standalone public header with the socket
+# headers it depends on at runtime.
+cp "$SRC"/third_party/musl/include/syslog.h "$DEST/syslog.h"
+
 # 3g. musl math/fenv headers. The repo's user/include/math.h was deleted when
 #     libm switched to musl (the old header made acos/sqrt/... static inline
 #     __builtin_* wrappers; musl's declares them out-of-line, and adds the

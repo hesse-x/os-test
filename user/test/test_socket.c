@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <fcntl.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -18,6 +19,15 @@ void tearDown(void) {}
 void test_socket_create(void) {
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   TEST_ASSERT_TRUE(fd >= 0);
+  close(fd);
+}
+
+/* SOCK_CLOEXEC and SOCK_NONBLOCK must configure the new descriptor. */
+void test_socket_create_flags(void) {
+  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+  TEST_ASSERT_TRUE(fd >= 0);
+  TEST_ASSERT_EQUAL_INT(FD_CLOEXEC, fcntl(fd, F_GETFD) & FD_CLOEXEC);
+  TEST_ASSERT_EQUAL_INT(O_NONBLOCK, fcntl(fd, F_GETFL) & O_NONBLOCK);
   close(fd);
 }
 
@@ -188,6 +198,7 @@ int main(int argc, char **argv, char **envp) {
   signal(SIGPIPE, SIG_IGN);
   UNITY_BEGIN();
   RUN_TEST(test_socket_create);
+  RUN_TEST(test_socket_create_flags);
   RUN_TEST(test_bind_listen);
   RUN_TEST(test_connect_accept);
   RUN_TEST(test_socketpair_basic);
