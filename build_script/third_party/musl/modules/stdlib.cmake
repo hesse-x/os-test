@@ -38,8 +38,10 @@
 # /dev/null open) and getenv("LD_LIBRARY_PATH") works in the loader.
 #
 # EXCLUDED from this batch (kept as repo implementations, tracked in todo.md):
-#   src/misc/realpath.c   — needs /proc/self/fd/N + readlink + O_PATH (no
-#     procfs); repo stdlib_misc.c:realpath (getcwd + lexical collapse) kept.
+#   src/misc/realpath.c   — now ADOPTED via the misc module (modules/misc.cmake):
+#     current musl realpath.c is pure lexical (readlink + getcwd + strdup +
+#     SYMLOOP_MAX), NOT the /proc/self/fd + O_PATH path this stale note once
+#     described; the repo's getcwd-only realpath (stdlib_misc.c) is deleted.
 #   src/temp/{mkstemp,__randname,...}.c — __randname needs __clock_gettime
 #     (time module not yet migrated; would clash with repo time.cc); repo
 #     stdlib_misc.c:mkstemp/mktemp (getpid-based) kept.

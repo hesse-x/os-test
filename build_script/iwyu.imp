@@ -80,6 +80,7 @@
   # ---- mmap protection / map flags ----
   { include: ["\"sys/mman.h\"", public, "<sys/mman.h>", public ] },
   { include: ["\"sys/timerfd.h\"", public, "<sys/timerfd.h>", public ] },
+  { include: ["\"xos/ioctl.h\"", public, "<sys/ioctl.h>", public ] },
   { include: ["<mman.h>", public, "<sys/mman.h>", public ] },
   { include: ["\"time.h\"", public, "<time.h>", public ] },
 

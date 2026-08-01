@@ -53,6 +53,7 @@ static struct test_entry tests[] = {
     {"membarrier", "/test/test_membarrier.elf"},
     {"test_inttypes", "/test/test_inttypes.elf"},
     {"test_musl_misc", "/test/test_musl_misc.elf"},
+    {"test_misc", "/test/test_misc.elf"},
     {"test_console", "/test/test_console.elf"},
     {"test_locale", "/test/test_locale.elf"},
     {"test_regex", "/test/test_regex.elf"},

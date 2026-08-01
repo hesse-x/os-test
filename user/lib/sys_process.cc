@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * Process/memory syscall wrappers: fork/execve/waitpid/mmap/…
+ * Process/memory syscall wrappers: fork/spawn/mmap/…
  *
  * Merged from sys_process.cc + sys_wait.cc + sys_mman.cc
  */
@@ -14,9 +14,6 @@
 #include <unistd.h> // IWYU pragma: keep
 
 #include <sys/process.h>
-#include <sys/wait.h>
-
-extern "C" char **environ;
 
 // ===================== process management =====================
 
@@ -35,10 +32,14 @@ extern "C" pid_t fork(void) {
   return (pid_t)r;
 }
 
-extern "C" int execve(const char *pathname, char *const argv[],
-                      char *const envp[]) {
-  return sys_execve(pathname, argv, envp ? envp : environ);
-}
+/* execve/wait/waitpid/waitid (and the execl/execle/execlp/execv/execvp/fexecve
+ * varargs wrappers) now come from musl src/process (musl_process_objs). musl's
+ * execve is `syscall(SYS_execve)` — the kernel tolerates envp==NULL
+ * (kernel/bsd/proc.c:1718 `if (envp_ptr)`), so it matches the former hand-
+ * written `envp ? envp : environ` fallback. waitpid routes through
+ * sys_wait4_cp (a cancellation point, per POSIX) instead of the former bare
+ * sys_waitpid. Kept here: fork (bare sys_fork; musl's fork pulls the atfork
+ * lock table + TLS reset, out of scope) and spawn (private, non-POSIX). */
 
 extern "C" pid_t spawn(const char *path) {
   pid_t pid = fork();
@@ -58,13 +59,6 @@ extern "C" pid_t spawn(const char *path) {
  * to this repo's former direct-syscall wrappers. errno mapping is musl's
  * __syscall_ret. The saved-set / permission-ladder semantics exercised by
  * test_setxid.c are in the kernel's sys_setresuid etc., unchanged. */
-
-extern "C" pid_t waitpid(pid_t pid, int *status, int options) {
-  int64_t r = sys_waitpid(pid, status, options);
-  if (r < 0)
-    return -1;
-  return (pid_t)r;
-}
 
 // ===================== memory management =====================
 //

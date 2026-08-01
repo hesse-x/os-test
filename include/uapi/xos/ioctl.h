@@ -39,8 +39,8 @@
 #define TIOCSCTTY 0x540E
 #define TIOCGPGRP 0x540F
 #define TIOCSPGRP 0x5410
-#define TIOCGPTN 0x5406
-#define TIOCSPTLCK 0x5407
+#define TIOCGPTN 0x80045430   /* _IOR('T',0x30,int) — Linux/glibc/musl ABI */
+#define TIOCSPTLCK 0x40045431 /* _IOW('T',0x31,int) — Linux/glibc/musl ABI */
 #define TIOCGWINSZ 0x5413
 #define TIOCSWINSZ 0x5414
 

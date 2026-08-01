@@ -64,6 +64,39 @@ global:
     /* <syslog.h> -- musl src/misc/syslog.c (musl_misc_objs). */
     closelog; openlog; setlogmask; syslog; vsyslog;
 
+    /* <stdlib.h> / <unistd.h> / <pty.h> / <ftw.h> / <mntent.h> / <wordexp.h> /
+     * <fmtmsg.h> / <sys/auxv.h> -- the rest of musl src/misc (musl_misc_objs),
+     * migrated as a glob+exclude (see modules/misc.cmake). Excluded files'
+     * symbols (getresuid/getresgid/setdomainname/initgroups, whose routed
+     * syscalls the kernel does not implement) are deliberately NOT exported.
+     * basename/dirname/ffs are exported in the <string.h>/<strings.h> blocks
+     * above; realpath/getpriority/setpriority/getrlimit/setrlimit/getrusage/
+     * syscall/ioctl/uname are exported in their family blocks below. */
+    a64l; l64a;
+    fmtmsg;
+    forkpty; openpty; login_tty;
+    /* POSIX pty master-allocation family (src/misc/pty.c). posix_openpt/
+     * grantpt/unlockpt are public <stdlib.h> symbols that musl leaves at
+     * default visibility (hidden by local:* unless listed here). */
+    posix_openpt; grantpt; unlockpt;
+    getauxval;
+    get_current_dir_name;
+    getdomainname;
+    gethostid;
+    /* getopt() + getopt_long() (functions) and their global state variables
+     * (src/misc/getopt.c): optarg/optind/opterr/optopt are data symbols the
+     * application reads/writes, so they must be exported too (local:* would
+     * hide them and break every getopt consumer under dynamic linking). */
+    getopt; getopt_long;
+    optarg; optind; opterr; optopt;
+    getsubopt;
+    issetugid;
+    lockf;
+    setmntent; getmntent; addmntent; endmntent; hasmntopt;
+    nftw; ftw;
+    ptsname; ptsname_r;
+    wordexp; wordfree;
+
     /* GNU <errno.h> startup-name variables, initialized by musl
      * __libc_start_main and defined in src/internal/libc.c. */
     program_invocation_name; program_invocation_short_name;
@@ -519,8 +552,9 @@ global:
     /* <sys/statvfs.h> — src/stat/statvfs.c. libc++ filesystem::__space. */
     statvfs; fstatvfs;
 
-    /* <sys/wait.h> */
-    waitpid;
+    /* <sys/wait.h> — musl src/process/{wait,waitpid,waitid}.c. musl folds
+     * wait4 into waitpid (no standalone wait4.c), so wait4 is not a symbol. */
+    waitpid; wait; waitid;
 
     /* <sys/mman.h> — musl upstream (src/mman/*.c via musl_mman_objs) + the
      * retained hand-written memfd_create (musl src/mman has none). mmap64 is
@@ -626,8 +660,11 @@ global:
     getrandom; getentropy;
     arc4random_buf; arc4random_uniform;
 
-    /* <sys/process.h> */
-    execve; fork; getpgid; getsid; setpgid; setsid; spawn; setuid; setgid;
+    /* <sys/process.h> — execve/fork/spawn are hand-written (user/lib);
+     * execl/execle/execlp/execv/execvp/execvpe/fexecve come from musl
+     * src/process (musl_process_objs). execvp.c also weak_aliases execvpe. */
+    execl; execle; execlp; execv; execve; execvp; execvpe; fexecve;
+    fork; getpgid; getsid; setpgid; setsid; spawn; setuid; setgid;
 
     /* <sys/ipc.h> — 微内核 IPC 用户态入口 */
     ipc_msg; ipc_msg_fd; ipc_msg_resp; ipc_notify; ipc_notify_fd;

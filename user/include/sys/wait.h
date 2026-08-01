@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 LIBC_EXPORT pid_t waitpid(pid_t pid, int *status, int options);
+LIBC_EXPORT pid_t wait(int *status);
 
 /* options flags for waitpid() */
 #define WNOHANG 1 /* don't block; return 0 if no child exited */

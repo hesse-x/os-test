@@ -378,6 +378,22 @@ void trap_dispatch(trapframe *tf) {
     }
   }
 
+  // Kernel-mode #PF on a user pointer (copy_from_user/copy_to_user hitting an
+  // unmapped/wild address, e.g. the user-RIP dump below reading tf->rip): the
+  // faulting instruction is _ASM_EXTABLE-annotated, so fixup_exception rewrites
+  // tf->rip to the fixup label and the caller gets -EFAULT. This is an
+  // expected, handled fault — NOT a kernel bug — so suppress the verbose
+  // register/ backtrace/stack dump and the panic below. A genuine kernel #PF
+  // (no extable entry) misses here and falls through to the dump + panic as
+  // before.
+  if (tf->trapno == 14 && tf->cs == 0x08) {
+    uint64_t fixup = fixup_exception(tf);
+    if (fixup) {
+      tf->rip = fixup;
+      return;
+    }
+  }
+
   // CPU exception: kill user process, halt for kernel exceptions
   // vector 7: #NM (Device Not Available) — lazy FPU switch
   if (tf->trapno == 7) {
@@ -510,23 +526,24 @@ void trap_dispatch(trapframe *tf) {
   }
 
   if (tf->cs == 0x2B) {
-    // User-mode: dump faulting instruction bytes so SSE/illegal-insn are
-    // recognizable without offline objdump (e.g. f2 0f 10 = movsd).
-    // User rip is mapped in the current CR3; safe to read from kernel.
-    // Guard against NULL rip (e.g. jump to address 0) — reading from
-    // address 0 in kernel context would cause a second page fault.
-    {
-      uint8_t *rip_ptr = (uint8_t *)tf->rip;
-      printk(LOG_ERROR, "  user RIP bytes:");
-      if (rip_ptr) {
-        for (int i = 0; i < 16; i++) {
-          printk(LOG_ERROR, " %02X", rip_ptr[i]);
-        }
-      } else {
-        printk(LOG_ERROR, " (NULL)");
-      }
-      printk(LOG_ERROR, "\n");
+    // Dump up to 16 bytes at faulting rip so SSE/illegal-insn are recognizable
+    // without offline objdump (e.g. f2 0f 10 = movsd). tf->rip may be an
+    // unmapped wild address (e.g. a jump through a corrupted pointer / bad
+    // relocation during ld.so bootstrap), so read it through copy_from_user:
+    // a fault returns -EFAULT instead of double-faulting the kernel. A direct
+    // dereference here (the old code) PANICed on any non-NULL unmapped user
+    // RIP. access_ok inside copy_from_user also covers the NULL-rip case.
+    uint8_t rip_bytes[16] = {0};
+    printk(LOG_ERROR, "  user RIP bytes:");
+    if (copy_from_user(rip_bytes, (const void __user *)tf->rip,
+                       sizeof(rip_bytes)) == 0) {
+      for (int i = 0; i < 16; i++)
+        printk(LOG_ERROR, " %02X", rip_bytes[i]);
+    } else {
+      printk(LOG_ERROR, " (unmapped, fault addr 0x%016lX)",
+             (unsigned long)tf->rip);
     }
+    printk(LOG_ERROR, "\n");
 
     // User-mode exception: translate to signal instead of killing process
     int sig = 0;

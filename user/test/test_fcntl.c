@@ -329,17 +329,34 @@ void test_mkstemp(void) {
   close(fd2);
 }
 
-/* 18. realpath collapses . and .. */
+/* 18. realpath collapses . and .. (POSIX: every component must exist) */
 void test_realpath(void) {
-  char *r = realpath("/local/a/../b/./c", NULL);
-  TEST_ASSERT_NOT_NULL(r);
-  TEST_ASSERT_EQUAL_STRING("/local/b/c", r);
-  free(r); // realpath(NULL) returns caller-owned storage.
+  /* musl's realpath resolves each component via readlink, so the leaf and
+   * every intermediate dir must exist (unlike the old lexical-only impl).
+   * Build /local/real_test/{a,b,b/c,x,x/y} under the writable scratch dir. */
+  TEST_ASSERT_EQUAL_INT(0, mkdir("/local/real_test", 0755));
+  TEST_ASSERT_EQUAL_INT(0, mkdir("/local/real_test/a", 0755));
+  TEST_ASSERT_EQUAL_INT(0, mkdir("/local/real_test/b", 0755));
+  TEST_ASSERT_EQUAL_INT(0, mkdir("/local/real_test/b/c", 0755));
+  TEST_ASSERT_EQUAL_INT(0, mkdir("/local/real_test/x", 0755));
+  TEST_ASSERT_EQUAL_INT(0, mkdir("/local/real_test/x/y", 0755));
 
+  /* .. cancels a, . is a no-op, leaf c exists → /local/real_test/b/c. */
+  char *r = realpath("/local/real_test/a/../b/./c", NULL);
+  TEST_ASSERT_NOT_NULL(r);
+  TEST_ASSERT_EQUAL_STRING("/local/real_test/b/c", r);
+  free(r); /* realpath(NULL) returns caller-owned storage. */
+
+  /* resolved-buffer form: writes into the caller's buf and returns it. */
   char buf[256];
-  char *r2 = realpath("/local/x/y", buf);
+  char *r2 = realpath("/local/real_test/x/y", buf);
   TEST_ASSERT_EQUAL_PTR(buf, r2);
-  TEST_ASSERT_EQUAL_STRING("/local/x/y", r2);
+  TEST_ASSERT_EQUAL_STRING("/local/real_test/x/y", r2);
+
+  /* Non-existent leaf → NULL + ENOENT (standard POSIX behavior). */
+  errno = 0;
+  TEST_ASSERT_NULL(realpath("/local/real_test/missing", buf));
+  TEST_ASSERT_EQUAL_INT(ENOENT, errno);
 }
 
 /* 19. F_DUPFD returns the lowest fd >= arg */

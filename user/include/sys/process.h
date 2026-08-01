@@ -18,6 +18,14 @@ extern "C" {
 LIBC_EXPORT pid_t fork(void);
 LIBC_EXPORT int execve(const char *pathname, char *const argv[],
                        char *const envp[]);
+LIBC_EXPORT int execv(const char *pathname, char *const argv[]);
+LIBC_EXPORT int execl(const char *pathname, const char *arg, ...);
+LIBC_EXPORT int execle(const char *pathname, const char *arg, ...);
+LIBC_EXPORT int execlp(const char *file, const char *arg, ...);
+LIBC_EXPORT int execvp(const char *file, char *const argv[]);
+LIBC_EXPORT int execvpe(const char *file, char *const argv[],
+                        char *const envp[]);
+LIBC_EXPORT int fexecve(int fd, char *const argv[], char *const envp[]);
 LIBC_EXPORT pid_t spawn(const char *path);
 LIBC_EXPORT pid_t setsid(void);
 LIBC_EXPORT int setpgid(pid_t pid, pid_t pgid);

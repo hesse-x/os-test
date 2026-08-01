@@ -13,9 +13,7 @@
  *
  * Remaining here:
  *   mkstemp/mktemp  — musl src/temp/ tree needs __randname → __clock_gettime
- * (time module not yet migrated); getpid-based impl kept. realpath        —
- * musl src/misc/realpath.c needs /proc/self/fd/N + readlink
- *                     + O_PATH (no procfs); getcwd + lexical collapse kept.
+ * (time module not yet migrated); getpid-based impl kept.
  *   mknod/chmod     — wrap sys_mknod / sys_chmod (kernel has these syscalls;
  *                     musl's wrappers route through the same numbers, but
  *                     kept here to avoid pulling src/misc/sysm.c machinery).
@@ -119,93 +117,13 @@ LIBC_EXPORT char *mktemp(char *tmpl) {
   return tmpl;
 }
 
-// ==================== realpath (group 3) ====================
-// No symlinks exist in this FS yet, so realpath reduces to: make the path
-// absolute (relative → getcwd join) then collapse . / .. / redundant slashes.
-// When resolved is NULL, POSIX requires a caller-owned allocated result.
-LIBC_EXPORT char *realpath(const char *path, char *resolved) {
-  if (!path || !path[0]) {
-    errno = EINVAL;
-    return NULL;
-  }
-  char *buf = resolved;
-  if (!buf) {
-    buf = malloc(4096);
-    if (!buf) {
-      errno = ENOMEM;
-      return NULL;
-    }
-  }
-
-  char abs[4096];
-  if (path[0] == '/') {
-    strncpy(abs, path, sizeof(abs) - 1);
-    abs[sizeof(abs) - 1] = '\0';
-  } else {
-    if (!getcwd(abs, sizeof(abs))) {
-      goto fail;
-    }
-    size_t cl = strlen(abs);
-    if (cl + 1 + strlen(path) + 1 > sizeof(abs)) {
-      errno = ENAMETOOLONG;
-      goto fail;
-    }
-    abs[cl++] = '/';
-    strcpy(abs + cl, path);
-  }
-
-  // Canonicalize: split on '/', drop empty + ".", apply "..".
-  size_t outcap = 4096;
-  // Stack of component start offsets within buf.
-  int starts[256];
-  int depth = 0;
-  size_t o = 0;
-  const char *p = abs;
-  while (*p) {
-    while (*p == '/')
-      p++;
-    if (!*p)
-      break;
-    const char *seg = p;
-    while (*p && *p != '/')
-      p++;
-    size_t seglen = (size_t)(p - seg);
-    if (seglen == 1 && seg[0] == '.')
-      continue;
-    if (seglen == 2 && seg[0] == '.' && seg[1] == '.') {
-      if (depth > 0) {
-        depth--;
-        // Pop the previous component: starts[depth] points just past its
-        // leading '/', so rewind one further to drop that '/' too. This
-        // prevents the next component from producing a doubled "//".
-        o = (size_t)starts[depth] - 1;
-      }
-      continue;
-    }
-    if (depth == (int)(sizeof(starts) / sizeof(starts[0])) || o + 1 >= outcap) {
-      errno = ENAMETOOLONG;
-      goto fail;
-    }
-    buf[o++] = '/';
-    starts[depth++] = (int)o;
-    if (o + seglen >= outcap) {
-      errno = ENAMETOOLONG;
-      goto fail;
-    }
-    memcpy(buf + o, seg, seglen);
-    o += seglen;
-  }
-  if (o == 0) {
-    buf[o++] = '/';
-  }
-  buf[o] = '\0';
-  return buf;
-
-fail:
-  if (!resolved)
-    free(buf);
-  return NULL;
-}
+// ==================== realpath ====================
+// ADOPTED musl upstream (src/misc/realpath.c, musl_misc_objs): pure lexical
+// resolver (readlink + getcwd + strdup + SYMLOOP_MAX link loop). The old repo
+// realpath here assumed "no symlinks exist in this FS" and skipped readlink
+// entirely — wrong now that procfs/devtmpfs provide /proc/self and mount
+// points. musl's handles symlinks correctly and replaces this. See
+// build_script/third_party/musl/modules/misc.cmake.
 
 int mknod(const char *path, mode_t mode, dev_t dev) {
   if (!path) {

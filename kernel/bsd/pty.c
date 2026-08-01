@@ -12,6 +12,7 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/kfcntl.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/types.h"
 #include "kernel/driver/serial.h"
@@ -23,8 +24,8 @@
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 
-#include "kernel/bsd/kfcntl.h"
 #include <xos/errno.h>
+#include <xos/ioctl.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
 
@@ -655,7 +656,7 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
     return 0;
   }
 
-  case TIOCGPTN: // 0x5406 — get PTY index
+  case TIOCGPTN: // 0x80045430 — get PTY index
   {
     int idx = pty->index;
     if (copy_to_user((void __user *)arg, &idx, sizeof(int)))
@@ -663,7 +664,7 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
     return 0;
   }
 
-  case TIOCSPTLCK: // 0x5407 — lock/unlock slave (stub)
+  case TIOCSPTLCK: // 0x40045431 — lock/unlock slave (stub)
     return 0;
 
   case TIOCSCTTY: // 0x540E — set controlling terminal

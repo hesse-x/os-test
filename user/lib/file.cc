@@ -23,7 +23,6 @@
 // syscalls), so no libc-side cwd copy is needed.
 #include <fcntl.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h> // IWYU pragma: keep
 #include <syscall.h>
@@ -37,7 +36,6 @@
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <xos/errno.h>
-#include <xos/ioctl.h>
 #include <xos/statx.h>
 
 // ===================== Working directory =====================
@@ -265,79 +263,18 @@ int tcsetattr(int fd, int optional_actions, const struct termios *termios_p) {
 // is removed — see build_script/third_party/musl/modules/unistd.cmake.
 
 // ===================== ioctl =====================
-//
-// Buffer strategy — hybrid stack/heap:
-//   ≤64B  → stack (zero alloc overhead)
-//   >64B  → heap via static reusable buffer (realloc grows-on-demand)
-//   >4KB  → rejected (kernel-side limit safety)
-//
-// The reusable heap buffer lives until process exit, avoiding repeated
-// malloc/free churn for large ioctls (EVIOCGNAME(256), DRM structs, etc.).
-// Not thread-safe (same convention as strtok/ttyname in this libc).
-int ioctl(int fd, uint32_t cmd, ...) {
-  va_list ap;
-  va_start(ap, cmd);
-  uint64_t arg = va_arg(ap, uint64_t);
-  va_end(ap);
-
-  uint16_t arg_size = _IOC_SIZE(cmd);
-  // Legacy ioctl commands (TCGETS, TCSETS, TIOCGPGRP, etc.) don't encode
-  // direction/size in the _IOC format — _IOC_SIZE=0, _IOC_DIR=_IOC_NONE.
-  // The buf intermediary relies on these fields to copy data, so it silently
-  // drops data transfer for legacy commands. Pass the user pointer directly
-  // so the kernel's copy_to_user/copy_from_user handle it correctly.
-  if (arg_size == 0) {
-    long rc = sys_ioctl(fd, cmd, arg);
-    return (int)rc;
-  }
-
-  // Cap at a reasonable max — no individual ioctl struct should need more
-  if (arg_size > 4096) {
-    errno = EINVAL;
-    return -1;
-  }
-
-  // Choose buffer: stack for small, heap (reusable) for large
-  uint8_t stack_buf[64];
-  void *buf;
-
-  if (arg_size <= sizeof(stack_buf)) {
-    buf = stack_buf;
-    __builtin_memset(buf, 0, arg_size);
-  } else {
-    // Reusable heap buffer — allocate once, grow on demand, never freed
-    // (process teardown reclaims it).
-    static void *heap_buf = NULL;
-    static size_t heap_cap = 0;
-
-    if (heap_cap < arg_size) {
-      void *nb = realloc(heap_buf, arg_size);
-      if (!nb) {
-        errno = ENOMEM;
-        return -1;
-      }
-      heap_buf = nb;
-      heap_cap = arg_size;
-    }
-    buf = heap_buf;
-    // Only zero the portion we'll use (reused buffer may have stale data).
-    __builtin_memset(buf, 0, arg_size);
-  }
-
-  // Copy-in: user arg → buf (only if direction includes WRITE)
-  if ((_IOC_DIR(cmd) & _IOC_WRITE) && arg != 0 && arg_size > 0)
-    __builtin_memcpy(buf, (const void *)arg, arg_size);
-
-  long rc = sys_ioctl(fd, cmd, (uint64_t)(uintptr_t)buf);
-  if (rc < 0)
-    return (int)rc;
-
-  // Copy-out: buf → user arg (only if direction includes READ)
-  if ((_IOC_DIR(cmd) & _IOC_READ) && arg != 0 && arg_size > 0)
-    __builtin_memcpy((void *)arg, buf, arg_size);
-
-  return (int)rc;
-}
+// ADOPTED musl upstream (src/misc/ioctl.c, musl_misc_objs): a thin
+// __syscall(SYS_ioctl, fd, req, arg) shim that forwards the raw user pointer.
+// The kernel's sys_ioctl (kernel/bsd/syscall.c) already performs the
+// _IOC_SIZE/_IOC_DIR copy_in/copy_out itself (f_op->ioctl path gets the user
+// pointer directly; FD_DEV direct path copy_from_user/copy_to_user into kbuf),
+// so the repo's old libc-side second copy layer + reusable heap buffer were
+// redundant, and its arg_size==0 legacy-pointer special-case was wrong for the
+// f_op->ioctl path (which expects the user pointer). musl's shim is correct
+// against the kernel's IPC-based dispatch (libc only forwards fd/cmd/arg);
+// kernel-internal routing to user-space drivers is unaffected. musl's ioctl.c
+// also gains the SIOCGSTAMP/SIOCGSTAMPNS time64 compat translation.
+// — see build_script/third_party/musl/modules/misc.cmake.
 
 // ===================== fstat (via statx AT_EMPTY_PATH) =====================
 int fstat(int fd, struct stat *st) {

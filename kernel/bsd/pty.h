@@ -88,18 +88,11 @@ struct termios {
 // Default termios
 extern const struct termios default_termios;
 
-// ===================== ioctl commands (Linux x86-64) =====================
-#define TCGETS 0x5401
-#define TCSETS 0x5402
-#define TCSETSW 0x5403
-#define TCSETSF 0x5404
-#define TIOCGPTN 0x5406
-#define TIOCSPTLCK 0x5407
-#define TIOCSCTTY 0x540E
-#define TIOCGPGRP 0x540F
-#define TIOCSPGRP 0x5410
-#define TIOCGWINSZ 0x5413
-#define TIOCSWINSZ 0x5414
+// ===================== ioctl commands =====================
+// Terminal ioctl command numbers live in the shared UAPI header
+// <xos/ioctl.h> (TCGETS/TCSETS/TCSETSW/TCSETSF, TIOCGPTN/TIOCSPTLCK,
+// TIOCSCTTY/TIOCGPGRP/TIOCSPGRP, TIOCGWINSZ/TIOCSWINSZ) — included here so
+// pty.c and the termios ldisc share one source of truth with user space.
 
 // ===================== struct winsize (Linux ABI) =====================
 struct winsize {

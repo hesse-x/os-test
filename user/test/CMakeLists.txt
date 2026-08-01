@@ -197,6 +197,11 @@ add_user_dyn_elf(test_inttypes C SOURCES test_inttypes.c LINK_LIBS c STATIC_LIBS
 # this image, so the test covers the libc API state rather than log delivery.
 add_user_dyn_elf(test_musl_misc C SOURCES test_musl_misc.c LINK_LIBS c STATIC_LIBS unity DEFS _GNU_SOURCE)
 
+# musl src/misc glob migration (modules/misc.cmake): getopt/getopt_long,
+# a64l/l64a, getsubopt, get_current_dir_name, gethostid, getauxval,
+# ptsname/ptsname_r, mntent, lockf, nftw, fmtmsg, uname(6-field ABI fix).
+add_user_dyn_elf(test_misc C SOURCES test_misc.c LINK_LIBS c STATIC_LIBS unity DEFS _GNU_SOURCE)
+
 # <locale.h> → musl: 6 POSIX locale managers (setlocale/localeconv/newlocale/
 # duplocale/freelocale/uselocale) + 4 collate (strcoll/strxfrm/wcscoll/wcsxfrm
 # +_l), built by musl_locale_objs (src/locale/*). C-locale only (no .mo catalog
@@ -333,6 +338,10 @@ if(TEST)
     # fork child setuid/setresuid(1000) + _exit code + parent waitpid.
     add_user_dyn_elf(test_setxid C SOURCES test_setxid.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_execve_vfs C SOURCES test_execve_vfs.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    # musl process module exec-family varargs wrappers (execl/execv/execlp):
+    # exercises the varargs→argv conversion that was missing from libc (the
+    # `undefined reference to execl` that broke the --cxx libc++ probe link).
+    add_user_dyn_elf(test_exec_varargs C SOURCES test_exec_varargs.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # 02: getdents64 chunked resume (tmpfs/sysfs) + SA_RESTART restart +
     # SA_NOCLDWAIT auto-reap.
     add_user_dyn_elf(test_getdents_resume C SOURCES test_getdents_resume.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
