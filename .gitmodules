@@ -29,3 +29,18 @@
 [submodule "third_party/zlib"]
 	path = third_party/zlib
 	url = https://github.com/madler/zlib.git
+[submodule "third_party/wlroots"]
+	path = third_party/wlroots
+	url = https://gitlab.freedesktop.org/wlroots/wlroots.git
+[submodule "third_party/libxkbcommon"]
+	path = third_party/libxkbcommon
+	url = https://github.com/xkbcommon/libxkbcommon.git
+[submodule "third_party/pixman"]
+	path = third_party/pixman
+	url = https://gitlab.freedesktop.org/pixman/pixman.git
+[submodule "third_party/seatd"]
+	path = third_party/seatd
+	url = https://gitlab.com/freedesktop-sdk/mirrors/kennylevinsen/seatd.git
+[submodule "third_party/libdisplay-info"]
+	path = third_party/libdisplay-info
+	url = https://gitlab.freedesktop.org/emersion/libdisplay-info.git

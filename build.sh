@@ -50,8 +50,14 @@ while [[ $# -gt 0 ]]; do
             FORCE_MESA=1
             shift
             ;;
+        --wlroots)
+            # This first wlroots milestone only builds its four standalone
+            # dependencies. wlroots itself is intentionally not built yet.
+            BUILD_WLROOTS_DEPS=1
+            shift
+            ;;
         *)
-            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf] [--gcc] [--clang] [--cxx] [--mesa]"
+            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf] [--gcc] [--clang] [--cxx] [--mesa] [--wlroots]"
             exit 1
             ;;
     esac
@@ -97,6 +103,11 @@ fi
 # CMake needs the image entries even when the corresponding compiler step is
 # skipped because complete artifacts are reused from a previous build.
 CMAKE_EXTRA="$CMAKE_EXTRA -DLIBCXX=1 -DMESA=1"
+if [ "${BUILD_WLROOTS_DEPS:-0}" = "1" ]; then
+    CMAKE_EXTRA="$CMAKE_EXTRA -DWLROOTS_DEPS=1"
+else
+    CMAKE_EXTRA="$CMAKE_EXTRA -DWLROOTS_DEPS=0"
+fi
 
 # 1. CMake build (kernel + userspace)
 mkdir -p build && cd build
@@ -134,6 +145,145 @@ if [ "${BUILD_LIBCXX:-0}" = "1" ]; then
     # libcxx_smoke_elf), after libc++ is installed and before mkdisk's manifest check.
     echo "=== Building libc++ smoke ELF ==="
     ninja -C build libcxx_smoke_elf
+fi
+
+# 3. wlroots prerequisites. Keep these in the sysroot so the later wlroots
+# build resolves them through pkg-config rather than accidentally using host libs.
+if [ "${BUILD_WLROOTS_DEPS:-0}" = "1" ]; then
+    echo "=== Building wlroots prerequisites (pixman, xkbcommon, libdisplay-info, seatd) ==="
+
+    MESON_VENV=build/.mesa-venv
+    if [[ ! -x "$MESON_VENV/bin/meson" ]]; then
+        python3 -m venv "$MESON_VENV"
+        "$MESON_VENV/bin/pip" install -q --upgrade pip
+        "$MESON_VENV/bin/pip" install -q "meson>=1.4"
+    fi
+    export PATH="$MESON_VENV/bin:$PATH"
+
+    WLROOTS_CROSS=build/wlroots-cross.txt
+    CC_BIN=clang; CXX_BIN=clang++
+    if [[ "$OS_COMPILER" == "gcc" ]]; then
+        CC_BIN=gcc; CXX_BIN=g++
+    fi
+    SYSROOT="$(cd build/sysroot && pwd)"
+    PYTHON_BIN="$(cd "$MESON_VENV" && pwd)/bin/python3"
+    sed -e "s#@CC@#$CC_BIN#g" -e "s#@CXX@#$CXX_BIN#g" -e "s#@PYTHON@#$PYTHON_BIN#g" \
+        -e "s#@SYSROOT@#$SYSROOT#g" \
+        build_script/third_party/mesa/meson-cross-x86_64.txt.in > "$WLROOTS_CROSS"
+
+    # All four projects are C-only. --prefix/--libdir make `meson install`
+    # place their headers, libraries and pkg-config files directly in the target sysroot.
+    build_wlroots_dependency() {
+        local name="$1"
+        local source="$2"
+        shift 2
+        local build_dir="build/wlroots/$name"
+        local setup=("$build_dir" "$source" --prefix /usr --libdir lib --buildtype=release \
+            --default-library=shared -Dwerror=false --cross-file "$WLROOTS_CROSS" "$@")
+
+        if [[ -d "$build_dir" ]]; then
+            meson setup --reconfigure "${setup[@]}"
+        else
+            meson setup "${setup[@]}"
+        fi
+        # Meson's default target (including `meson install`) also builds upstream
+        # tests and benchmarks. Build only products Meson marks for installation,
+        # then install without invoking the default target a second time.
+        local installed_targets=()
+        mapfile -t installed_targets < <(python3 - "$build_dir" "$name" <<'PY'
+import json
+import os
+import sys
+
+build_dir = sys.argv[1]
+project = sys.argv[2]
+targets = json.load(open(os.path.join(build_dir, 'meson-info', 'intro-targets.json')))
+for target in targets:
+    # This milestone ships libraries only, except for the seatd daemon. Some
+    # projects mark diagnostic tools as installable; do not build those yet.
+    is_library = target.get('type') == 'shared library'
+    is_seatd_daemon = project == 'seatd' and target.get('name') == 'seatd'
+    if not target.get('installed') or not (is_library or is_seatd_daemon):
+        continue
+    filenames = target.get('filename', [])
+    if isinstance(filenames, str):
+        filenames = [filenames]
+    for filename in filenames:
+        print(os.path.relpath(filename, build_dir))
+PY
+)
+        if [[ ${#installed_targets[@]} -eq 0 ]]; then
+            echo "ERROR: Meson reported no installable targets for $name" >&2
+            return 1
+        fi
+        ninja -C "$build_dir" "${installed_targets[@]}"
+
+        # libdisplay-info and seatd install diagnostic/helper executables in
+        # addition to the products needed for wlroots. Install their selected
+        # library/daemon payload explicitly so those unrelated programs stay
+        # outside this first dependency milestone.
+        case "$name" in
+            libdisplay-info)
+                install -d "$SYSROOT/usr/lib/pkgconfig" "$SYSROOT/usr/include"
+                install -m 755 "$build_dir/libdisplay-info.so.0.4.0" "$SYSROOT/usr/lib/"
+                ln -sf libdisplay-info.so.0.4.0 "$SYSROOT/usr/lib/libdisplay-info.so.0"
+                ln -sf libdisplay-info.so.0 "$SYSROOT/usr/lib/libdisplay-info.so"
+                cp -a "$source/include/libdisplay-info" "$SYSROOT/usr/include/"
+                install -m 644 "$build_dir/meson-private/libdisplay-info.pc" "$SYSROOT/usr/lib/pkgconfig/"
+                ;;
+            seatd)
+                install -d "$SYSROOT/usr/lib/pkgconfig" "$SYSROOT/usr/include" "$SYSROOT/usr/bin"
+                install -m 755 "$build_dir/libseat.so.1" "$SYSROOT/usr/lib/"
+                ln -sf libseat.so.1 "$SYSROOT/usr/lib/libseat.so"
+                install -m 755 "$build_dir/seatd" "$SYSROOT/usr/bin/"
+                install -m 644 "$source/include/libseat.h" "$SYSROOT/usr/include/"
+                install -m 644 "$build_dir/meson-private/libseat.pc" "$SYSROOT/usr/lib/pkgconfig/"
+                ;;
+            *)
+                meson install -C "$build_dir" --no-rebuild --destdir "$SYSROOT"
+                ;;
+        esac
+    }
+
+    build_wlroots_dependency pixman third_party/pixman \
+        -Dgtk=disabled -Ddemos=disabled -Dtests=disabled -Dlibpng=disabled -Dopenmp=disabled
+    build_wlroots_dependency libxkbcommon third_party/libxkbcommon \
+        -Denable-tools=false -Denable-x11=false -Denable-xkbregistry=false \
+        -Denable-wayland=false -Denable-bash-completion=false
+    build_wlroots_dependency libdisplay-info third_party/libdisplay-info
+    build_wlroots_dependency seatd third_party/seatd \
+        -Dlibseat-logind=disabled -Dlibseat-builtin=disabled -Dlibseat-seatd=enabled \
+        -Dserver=enabled -Dexamples=disabled -Dman-pages=disabled \
+        -Ddefaultpath=/run/seatd.sock
+
+    # Disk images are FAT32, so copy each runtime name as a real file instead
+    # of preserving the symlinks Meson installs into the sysroot.
+    python3 - "$SYSROOT" <<'PY'
+import os
+import shutil
+import sys
+
+sysroot = sys.argv[1]
+libdir = os.path.join(sysroot, 'usr', 'lib')
+staged = {
+    'libpixman-1.so': ['libpixman-1.so', 'libpixman-1.so.0', 'libpixman-1.so.0.46.4'],
+    'libxkbcommon.so': ['libxkbcommon.so', 'libxkbcommon.so.0', 'libxkbcommon.so.0.13.2'],
+    'libdisplay-info.so': ['libdisplay-info.so', 'libdisplay-info.so.0', 'libdisplay-info.so.0.4.0'],
+    'libseat.so': ['libseat.so', 'libseat.so.1'],
+}
+for names in staged.values():
+    source = next((os.path.join(libdir, name) for name in reversed(names)
+                   if os.path.exists(os.path.join(libdir, name))), None)
+    if source is None:
+        raise SystemExit(f'ERROR: missing installed wlroots prerequisite: {names[0]}')
+    for name in names:
+        shutil.copy2(source, os.path.join('build', name), follow_symlinks=True)
+
+seatd = os.path.join(sysroot, 'usr', 'bin', 'seatd')
+if not os.path.isfile(seatd):
+    raise SystemExit('ERROR: missing installed seatd executable')
+shutil.copy2(seatd, os.path.join('build', 'seatd'))
+PY
 fi
 
 # 3. Mesa cross-build (auto when products are missing; --mesa forces it).

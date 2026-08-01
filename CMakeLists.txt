@@ -301,6 +301,20 @@ if(MESA)
     os_image_path(mesa_dri_gbm      dri_gbm.so             lib/dri_gbm.so             PARTITION 2)
 endif()
 
+if(WLROOTS_DEPS)
+    # build.sh --wlroots stages these Meson products as real files because the
+    # root filesystem is FAT32 and cannot represent the usual SONAME symlinks.
+    os_image_path(pixman_lib          libpixman-1.so          lib/libpixman-1.so          PARTITION 2)
+    os_image_path(pixman_soname       libpixman-1.so.0        lib/libpixman-1.so.0        PARTITION 2)
+    os_image_path(xkbcommon_lib       libxkbcommon.so         lib/libxkbcommon.so         PARTITION 2)
+    os_image_path(xkbcommon_soname    libxkbcommon.so.0       lib/libxkbcommon.so.0       PARTITION 2)
+    os_image_path(display_info_lib    libdisplay-info.so      lib/libdisplay-info.so      PARTITION 2)
+    os_image_path(display_info_soname libdisplay-info.so.0    lib/libdisplay-info.so.0    PARTITION 2)
+    os_image_path(libseat_lib         libseat.so              lib/libseat.so              PARTITION 2)
+    os_image_path(libseat_soname      libseat.so.1            lib/libseat.so.1            PARTITION 2)
+    os_image_path(seatd_bin           seatd                   usr/bin/seatd               PARTITION 2)
+endif()
+
 # Write the disk-image manifest now that every target above has registered.
 # (reface_cmake.md §6: single source of truth for mkdisk.sh.)
 os_write_image_manifest()
