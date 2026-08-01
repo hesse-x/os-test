@@ -119,6 +119,8 @@ static void init_xtask_defaults(xtask *t) {
   t->state = UNUSED;
   t->tgid = -1;
   t->assigned_cpu = -1;
+  t->vfork_child_pid = -1;
+  t->vfork_parent_pid = -1;
   t->recv_lock = SPINLOCK_INIT;
   t->req_caller_pid = -1;
   t->req_target_pid = -1;

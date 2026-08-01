@@ -20,6 +20,8 @@
 #include <sys/wait.h>
 #include <xos/errno.h>
 
+#include "shell_command.h"
+
 // Current working directory
 static char cwd[256] = "/";
 
@@ -315,9 +317,13 @@ static const cmd_entry cmds[] = {
 // point concept), which breaks the crt0.o `main` reference. gcc leaves `main`
 // unmangled regardless, so this is a no-op for gcc and required for clang.
 extern "C" int main(int argc, char **argv, char **envp) {
-  (void)argc;
-  (void)argv;
   (void)envp;
+  if (argc >= 3 && strcmp(argv[1], "-c") == 0)
+    return shell_run_command(argv[2]);
+  if (argc != 1) {
+    fprintf(stderr, "usage: sh [-c command]\n");
+    return 2;
+  }
   // VFS is in-kernel, no need to wait for fs_driver
   printf("shell: ready\n");
 

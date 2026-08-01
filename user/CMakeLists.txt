@@ -67,6 +67,7 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_socket_objs>
                $<TARGET_OBJECTS:musl_dl_objs> $<TARGET_OBJECTS:musl_dirent_objs>
                $<TARGET_OBJECTS:musl_resource_objs>
+               $<TARGET_OBJECTS:musl_process_objs>
                $<TARGET_OBJECTS:musl_pthread>
                $<TARGET_OBJECTS:musl_signal_objs>
                $<TARGET_OBJECTS:musl_string_objs>
@@ -110,6 +111,7 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_socket_objs_so>
                $<TARGET_OBJECTS:musl_dl_objs_so> $<TARGET_OBJECTS:musl_dirent_objs_so>
                $<TARGET_OBJECTS:musl_resource_objs>
+               $<TARGET_OBJECTS:musl_process_objs>
                $<TARGET_OBJECTS:musl_loader_objs> $<TARGET_OBJECTS:musl_pthread>
                $<TARGET_OBJECTS:musl_signal_objs>
                $<TARGET_OBJECTS:musl_string_objs>
@@ -301,10 +303,11 @@ add_third_party_lib(libudev_so
 )
 
 if(TEST)
-    add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c DEFS TEST IMAGE_PATH usr/bin/shell)
+    add_user_elf(shell SOURCES shell/shell.cc shell/shell_command.cc LINK_LIBS c DEFS TEST IMAGE_PATH usr/bin/shell)
 else()
-    add_user_elf(shell SOURCES shell/shell.cc LINK_LIBS c IMAGE_PATH usr/bin/shell)
+    add_user_elf(shell SOURCES shell/shell.cc shell/shell_command.cc LINK_LIBS c IMAGE_PATH usr/bin/shell)
 endif()
+os_image_path(shell shell.elf bin/sh)
 
 # udev/ — device event daemon (subscribes to netlink uevent group)
 add_user_elf(udevd C SOURCES udev/udevd.c LINK_LIBS c IMAGE_PATH usr/bin/udevd)

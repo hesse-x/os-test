@@ -61,6 +61,7 @@ endif()
 
 # Layer 7: process
 add_user_dyn_elf(process C SOURCES test_process.c LINK_LIBS c STATIC_LIBS unity)
+add_user_dyn_elf(test_spawn_popen C SOURCES test_spawn_popen.c LINK_LIBS c STATIC_LIBS unity DEFS _GNU_SOURCE)
 
 # Layer 8: signal
 add_user_dyn_elf(signal C SOURCES test_signal.c LINK_LIBS c STATIC_LIBS unity)

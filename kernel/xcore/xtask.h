@@ -36,6 +36,7 @@ typedef enum wait_event {
   WAIT_MSG_REPLY,
   WAIT_POLL,
   WAIT_FUTEX,
+  WAIT_VFORK,
   WAIT_PAUSE, // pause(): block until any signal; may carry an alarm deadline
   WAIT_SLEEP, // nanosleep/clock_nanosleep: block until deadline or signal
 } wait_event;
@@ -217,6 +218,11 @@ typedef struct xtask {
   // no process-group scheduling, treated as PRIO_PROCESS against the target
   // pid.
   int nice;
+
+  // vfork completion condition. Both links are protected by the parent's
+  // scheduler lock; -1 means that no vfork relationship is armed.
+  pid_t vfork_child_pid;
+  pid_t vfork_parent_pid;
 
   // === prctl PR_SET_NAME/PR_GET_NAME task comm (16 bytes, like Linux) ===
   char comm[16];

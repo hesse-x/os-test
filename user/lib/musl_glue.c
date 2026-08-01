@@ -38,6 +38,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdint.h>
+#include <string.h>
 #include <time.h> // IWYU pragma: keep
 
 #include <xos/syscall_asm.h>
@@ -100,6 +101,13 @@ struct musl_sigaction {
  * exported libc ABI (musl_pthread.a resolves them by plain global name). */
 #define MUSL_HIDDEN __attribute__((visibility("hidden")))
 
+static uint64_t handler_set;
+
+MUSL_HIDDEN void __get_handler_set(sigset_t *set) {
+  memset(set, 0, sizeof(*set));
+  memcpy(set, &handler_set, sizeof(handler_set));
+}
+
 MUSL_HIDDEN int __libc_sigaction(int sig, const void *restrict sa_v,
                                  void *restrict old_v) {
   const struct musl_sigaction *sa = (const struct musl_sigaction *)sa_v;
@@ -107,6 +115,8 @@ MUSL_HIDDEN int __libc_sigaction(int sig, const void *restrict sa_v,
 
   struct k_sigaction ksa, ksa_old;
   if (sa) {
+    if ((uintptr_t)sa->_u._handler > 1 && sig > 0 && sig <= 64)
+      __atomic_fetch_or(&handler_set, 1ULL << (sig - 1), __ATOMIC_RELAXED);
     ksa._u._handler = sa->_u._handler;
     ksa.sa_flags = sa->sa_flags | SA_RESTORER;
     ksa.sa_restorer = (sa->sa_flags & SA_SIGINFO) ? __restore_rt : __restore_rt;

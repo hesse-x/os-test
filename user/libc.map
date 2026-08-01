@@ -39,6 +39,7 @@ global:
     scanf; setbuf; setbuffer; setlinebuf; setvbuf; snprintf; sprintf; sscanf;
     stdin; stdout; stderr; ungetc; vasprintf; vfprintf; vfscanf; vprintf;
     vscanf; vsnprintf; vsprintf; vsscanf;
+    popen; pclose;
 
     /* <stdlib.h> — pure compute + startup/env/exit chain from musl_stdlib_objs
      * (stdlib.md). abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv, atoi/atol/
@@ -399,6 +400,20 @@ global:
 
     /* <sys/resource.h> */
     getrlimit; setrlimit; getrusage; prlimit;
+
+    /* <spawn.h> */
+    posix_spawn; posix_spawnp;
+    posix_spawnattr_init; posix_spawnattr_destroy;
+    posix_spawnattr_setflags; posix_spawnattr_getflags;
+    posix_spawnattr_setpgroup; posix_spawnattr_getpgroup;
+    posix_spawnattr_setsigmask; posix_spawnattr_getsigmask;
+    posix_spawnattr_setsigdefault; posix_spawnattr_getsigdefault;
+    posix_spawnattr_setschedparam; posix_spawnattr_getschedparam;
+    posix_spawnattr_setschedpolicy; posix_spawnattr_getschedpolicy;
+    posix_spawn_file_actions_init; posix_spawn_file_actions_destroy;
+    posix_spawn_file_actions_addopen; posix_spawn_file_actions_addclose;
+    posix_spawn_file_actions_adddup2; posix_spawn_file_actions_addchdir_np;
+    posix_spawn_file_actions_addfchdir_np;
 
     /* <errno.h> */
     __errno_location;

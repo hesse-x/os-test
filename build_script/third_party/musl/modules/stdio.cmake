@@ -28,8 +28,7 @@
 #     real (musl stdio paths call __lockfile) — see the updated musl_pthread
 #     comment below.
 #   rename.c — already in musl_unistd_objs (+ _so); recompiling multi-defines.
-#   popen.c, pclose.c — popen needs posix_spawn (the whole src/process spawn
-#     chain); pclose is useless without popen. No consumer; excluded.
+#   popen.c and pclose.c are included; musl_process_objs supplies spawn.
 #   tmpfile.c, tmpnam.c, tempnam.c — need __randname → __clock_gettime; the time
 #     module is not yet migrated (same blocker as mkstemp, todo.md:345).
 #   dprintf.c, vdprintf.c — NOT excluded. The musl dynamic loader (fused into
@@ -47,8 +46,6 @@ list(REMOVE_ITEM MUSL_STDIO_SOURCES
     ${MUSL_DIR}/src/stdio/ofl.c          # in musl_pthread (PROVIDE __ofl_lock/__ofl_unlock)
     ${MUSL_DIR}/src/stdio/__lockfile.c   # in musl_pthread (PROVIDE __lockfile/__unlockfile)
     ${MUSL_DIR}/src/stdio/rename.c       # in musl_unistd_objs (+ _so)
-    ${MUSL_DIR}/src/stdio/popen.c        # needs posix_spawn (src/process chain); no consumer
-    ${MUSL_DIR}/src/stdio/pclose.c       # pair with popen; useless without it
     ${MUSL_DIR}/src/stdio/tmpfile.c      # needs __randname → __clock_gettime; time not migrated
     ${MUSL_DIR}/src/stdio/tmpnam.c       # same
     ${MUSL_DIR}/src/stdio/tempnam.c      # same

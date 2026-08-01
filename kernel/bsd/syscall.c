@@ -205,6 +205,10 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   //     works). No-op if set_robust_list was never called (in-tree pthread).
   exit_robust_list(proc->proc, proc->pid);
 
+  // The task cannot return to userspace after this point. Release a vfork
+  // parent now; zombie creation and wait4 reaping remain independent below.
+  vfork_complete(proc);
+
   // 5. Thread-group bookkeeping BEFORE ZOMBIE (proc/signal alive).
   //    Read signal fields into locals — after ZOMBIE we must not touch sig.
   struct signal_struct *sig = proc->proc->signal;

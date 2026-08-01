@@ -1019,6 +1019,33 @@ int64_t sys_fork(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID |  \
    CLONE_NEWNET | CLONE_NEWTIME | CLONE_PTRACE | CLONE_IO)
 
+void vfork_complete(xtask *child) {
+  pid_t parent_pid = child->vfork_parent_pid;
+  if (parent_pid < 0 || parent_pid >= MAX_PROC)
+    return;
+
+  spin_lock(&tasks_lock);
+  xtask *parent = tasks[parent_pid];
+  if (!parent || parent->pid != parent_pid) {
+    child->vfork_parent_pid = -1;
+    spin_unlock(&tasks_lock);
+    return;
+  }
+
+  int cpu = parent->assigned_cpu;
+  uint64_t flags;
+  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+  if (child->vfork_parent_pid == parent_pid &&
+      parent->vfork_child_pid == child->pid) {
+    child->vfork_parent_pid = -1;
+    parent->vfork_child_pid = -1;
+    if (parent->state == BLOCKED && parent->wait_event == WAIT_VFORK)
+      wake_from_wait(parent);
+  }
+  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+  spin_unlock(&tasks_lock);
+}
+
 int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                   int64_t arg5) {
   uint64_t flags = (uint64_t)arg1;
@@ -1047,6 +1074,8 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   if ((flags & CLONE_SIGHAND) && !(flags & CLONE_VM))
     return (int64_t)-EINVAL;
   if ((flags & CLONE_THREAD) && !(flags & CLONE_SIGHAND))
+    return (int64_t)-EINVAL;
+  if ((flags & CLONE_THREAD) && (flags & CLONE_VFORK))
     return (int64_t)-EINVAL;
   if ((flags & CLONE_VM) && stack == 0)
     return (int64_t)-EINVAL;
@@ -1260,9 +1289,11 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // 10. Fill child xtask
   // Ordering constraint: assigned_cpu must be set before pid; CLONE_THREAD
   // has affinity to the parent CPU, otherwise no affinity
-  child->assigned_cpu = (flags & CLONE_THREAD)
-                            ? sched_pick_cpu_pref(parent->assigned_cpu)
-                            : sched_pick_cpu();
+  child->assigned_cpu =
+      (flags & CLONE_VFORK)
+          ? parent->assigned_cpu
+          : ((flags & CLONE_THREAD) ? sched_pick_cpu_pref(parent->assigned_cpu)
+                                    : sched_pick_cpu());
   child->pid = alloc_idx;
   child->state = READY;
   child->k_rsp = k_rsp;
@@ -1270,6 +1301,8 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   kstack_canary_write(child); // (frame_opt.md 块四) canary at stack bottom
   child->entry = parent->entry;
   child->wait_event = WAIT_NONE;
+  child->vfork_child_pid = -1;
+  child->vfork_parent_pid = -1;
   child->mm = child_mm;
   child->iopm = NULL;
   child->recv_head = 0;
@@ -1326,8 +1359,9 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
   // TOCTOU recheck: if the target CPU has been filled past the threshold
   // during enqueue, re-pick a CPU
-  if (__atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) >
-      RECHECK_THRESHOLD) {
+  if (!(flags & CLONE_VFORK) &&
+      __atomic_load_n(&cpu_locals[cpu].run_count, __ATOMIC_RELAXED) >
+          RECHECK_THRESHOLD) {
     int new_cpu = (flags & CLONE_THREAD)
                       ? sched_pick_cpu_pref(parent->assigned_cpu)
                       : sched_pick_cpu();
@@ -1338,8 +1372,28 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
     }
   }
+  if (flags & CLONE_VFORK) {
+    child->vfork_parent_pid = parent->pid;
+    parent->vfork_child_pid = child->pid;
+    parent->state = BLOCKED;
+    parent->wait_event = WAIT_VFORK;
+  }
   run_queue_push(cpu, child);
   spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
+
+  if (flags & CLONE_VFORK) {
+    for (;;) {
+      schedule();
+      spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &rflags);
+      if (parent->vfork_child_pid < 0) {
+        spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
+        break;
+      }
+      parent->state = BLOCKED;
+      parent->wait_event = WAIT_VFORK;
+      spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, rflags);
+    }
+  }
 
   return (int64_t)child->pid;
 
@@ -1483,13 +1537,14 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     }
   }
 
-  // 5. Allocate new PML4, copy kernel entries (before releasing old space)
-  struct page *pml4_page = bfc_alloc_page(1);
-  if (!pml4_page) {
+  // 5. Build the new image in a separately owned mm. The current mm remains
+  // untouched until commit, which is required when a vfork child shares it.
+  mm *new_mm = mm_create();
+  if (!new_mm) {
     kfree(elf_buf);
     return (int64_t)-ENOMEM;
   }
-  uint64_t pml4_phys = (__force uint64_t)page_to_phys(pml4_page);
+  uint64_t pml4_phys = new_mm->cr3;
   uint64_t pml4_virt =
       (__force uint64_t)phys_to_virt((__force phys_addr_t)pml4_phys);
   uint64_t *new_pml4 = (uint64_t *)pml4_virt;
@@ -1505,7 +1560,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   elf_load_result lr = elf_load(elf_buf, file_size, new_pml4);
   if (!lr.success) {
     kfree(elf_buf);
-    free_table_page(pml4_phys);
+    mm_put(new_mm);
     printk(LOG_ERROR, "execve: elf_load failed pid=%d\n", proc->pid);
     return (int64_t)-ENOEXEC;
   }
@@ -1521,7 +1576,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
       if (ph->p_type == PT_INTERP) {
         if (ph->p_filesz >= sizeof(interp_path)) {
           kfree(elf_buf);
-          free_table_page(pml4_phys);
+          mm_put(new_mm);
           return (int64_t)-ENOENT;
         }
         __memcpy(interp_path, elf_buf + ph->p_offset, ph->p_filesz);
@@ -1540,7 +1595,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     struct inode *ld_ip = vfs_open_kern(interp_path);
     if (!ld_ip) {
       kfree(elf_buf);
-      free_table_page(pml4_phys);
+      mm_put(new_mm);
       printk(LOG_ERROR, "execve: ld.so open failed pid=%d path=%s err=%d\n",
              proc->pid, interp_path, ENOENT);
       return (int64_t)-ENOENT;
@@ -1550,7 +1605,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     if (!ld_buf) {
       inode_put(ld_ip);
       kfree(elf_buf);
-      free_table_page(pml4_phys);
+      mm_put(new_mm);
       return (int64_t)-ENOMEM;
     }
     int ld_nread = vfs_read_kernel(ld_ip, 0, (void *)ld_buf, ld_size);
@@ -1558,14 +1613,14 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     if (ld_nread < 0 || (uint64_t)ld_nread < ld_size) {
       kfree(ld_buf);
       kfree(elf_buf);
-      free_table_page(pml4_phys);
+      mm_put(new_mm);
       return (int64_t)-EIO;
     }
     ld_lr = elf_load_at(ld_buf, ld_size, new_pml4, LD_SO_BASE);
     kfree(ld_buf);
     if (!ld_lr.success) {
       kfree(elf_buf);
-      free_table_page(pml4_phys);
+      mm_put(new_mm);
       printk(LOG_ERROR, "execve: ld.so load failed pid=%d\n", proc->pid);
       return (int64_t)-ENOEXEC;
     }
@@ -1576,8 +1631,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   struct page *user_stack_page = bfc_alloc_page(user_stack_pages);
   if (!user_stack_page) {
     kfree(elf_buf);
-    sys_exit((int64_t)-ENOMEM, 0, 0, 0, 0, 0);
-    __builtin_unreachable();
+    mm_put(new_mm);
+    return (int64_t)-ENOMEM;
   }
   uint64_t user_stack_phys = (__force uint64_t)page_to_phys(user_stack_page);
   uint64_t stack_base = USER_STACK_TOP - (uint64_t)user_stack_pages * PAGE_SIZE;
@@ -1586,8 +1641,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                               user_stack_phys + i * PAGE_SIZE,
                               PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
       kfree(elf_buf);
-      sys_exit((int64_t)-ENOMEM, 0, 0, 0, 0, 0);
-      __builtin_unreachable();
+      mm_put(new_mm);
+      return (int64_t)-ENOMEM;
     }
   }
 
@@ -1596,6 +1651,20 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     map_user_page_direct(new_pml4, SIG_TRAMPOLINE_ADDR, sig_trampoline_phys,
                          PTE_PRESENT | PTE_USER);
   }
+
+  mmap_region *stack_region = (mmap_region *)kmalloc(sizeof(mmap_region));
+  if (!stack_region) {
+    kfree(elf_buf);
+    mm_put(new_mm);
+    return (int64_t)-ENOMEM;
+  }
+  __memset(stack_region, 0, sizeof(*stack_region));
+  stack_region->vaddr = stack_base;
+  stack_region->size = (uint64_t)user_stack_pages * PAGE_SIZE;
+  stack_region->prot = PROT_READ | PROT_WRITE;
+  stack_region->fd = -1;
+  stack_region->flags = MAP_ANONYMOUS;
+  new_mm->mmap_regions = stack_region;
 
 // === argc/argv/envp/auxv stack construction (standard SysV ABI) ===
 // The stack is contiguous physical memory (user_stack_phys, user_stack_pages
@@ -1617,7 +1686,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     if (envp_str_vaddrs)
       kfree(envp_str_vaddrs);
     kfree(elf_buf);
-    free_table_page(pml4_phys);
+    mm_put(new_mm);
     return (int64_t)-ENOMEM;
   }
   int argc = 0;
@@ -1883,145 +1952,20 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   ASSERT(tf->rsp % 16 == 0);
   tf->rax = 0;
 
-  // 9b. Update mm fields
-  // 持 mmap_lock 换 mmap_regions/cr3：procfs maps_show 是首个跨进程读者，
-  // 无锁 swap 会让另一核读到 NULL/半构建链（procfs.md §3.3.3）。对齐
-  // vma.h:12 "Callers must hold mm->mmap_lock" 契约。
-  uint64_t old_cr3 = proc->mm->cr3;
-  mmap_region *old_regions = proc->mm->mmap_regions;
-  uint64_t mmlock_flags;
-  spin_lock_irqsave(&proc->mm->mmap_lock, &mmlock_flags);
-  proc->mm->mmap_regions = NULL;
-  proc->mm->cr3 = pml4_phys;
-  proc->cr3 = pml4_phys; // cached
-  proc->mm->mmap_brk = 0x800000;
-  proc->mm->mmap_phys_brk = MAP_PHYSICAL_BASE;
+  // 9b. Publish the fully built mm as one transaction. Another CLONE_VM owner
+  // retains old_mm and continues to execute the original image.
+  mm *old_mm = proc->mm;
+  proc->mm = new_mm;
+  proc->cr3 = new_mm->cr3;
   proc->entry = lr.entry;
 
-  // 9c. Create user stack mmap_region
-  mmap_region *stack_region = (mmap_region *)kmalloc(sizeof(mmap_region));
-  if (stack_region) {
-    __memset(stack_region, 0, sizeof(mmap_region));
-    stack_region->vaddr = stack_base;
-    stack_region->size = (uint64_t)user_stack_pages * PAGE_SIZE;
-    stack_region->phys = 0; // not MAP_PHYSICAL — anonymous stack
-    stack_region->prot = PROT_READ | PROT_WRITE;
-    stack_region->fd = -1; // anonymous
-    stack_region->offset = 0;
-    stack_region->flags = MAP_ANONYMOUS;
-    stack_region->next = NULL;
-    proc->mm->mmap_regions = stack_region;
-  }
-  spin_unlock_irqrestore(&proc->mm->mmap_lock, mmlock_flags);
-
-  // 9d. Flush CR3
+  // 9c. Flush CR3 before releasing old_mm or a vfork parent.
   __asm__ volatile("movq %0, %%cr3" ::"r"(pml4_phys) : "memory");
 
-  // 10. Release old address space
-  {
-    uint64_t *old_pml4_virt =
-        (uint64_t *)phys_to_virt((__force phys_addr_t)old_cr3);
-    for (int pml4_idx = 0; pml4_idx < 256; pml4_idx++) {
-      uint64_t pdpt_entry = old_pml4_virt[pml4_idx];
-      if (!(pdpt_entry & PTE_PRESENT))
-        continue;
+  mm_put(old_mm);
+  vfork_complete(proc);
 
-      uint64_t pdpt_phys = pdpt_entry & 0x000FFFFFFFFFF000ULL;
-      uint64_t *pdpt_virt =
-          (uint64_t *)phys_to_virt((__force phys_addr_t)pdpt_phys);
-
-      for (int pdpt_idx = 0; pdpt_idx < 512; pdpt_idx++) {
-        uint64_t pd_entry = pdpt_virt[pdpt_idx];
-        if (!(pd_entry & PTE_PRESENT))
-          continue;
-        if (pd_entry & PTE_PS)
-          continue;
-
-        uint64_t pd_phys = pd_entry & 0x000FFFFFFFFFF000ULL;
-        uint64_t *pd_virt =
-            (uint64_t *)phys_to_virt((__force phys_addr_t)pd_phys);
-
-        for (int pd_idx = 0; pd_idx < 512; pd_idx++) {
-          uint64_t pt_entry = pd_virt[pd_idx];
-          if (!(pt_entry & PTE_PRESENT))
-            continue;
-          if (pt_entry & PTE_PS)
-            continue;
-
-          uint64_t pt_phys = pt_entry & 0x000FFFFFFFFFF000ULL;
-          uint64_t *pt_virt =
-              (uint64_t *)phys_to_virt((__force phys_addr_t)pt_phys);
-
-          for (int pt_idx = 0; pt_idx < 512; pt_idx++) {
-            uint64_t pte = pt_virt[pt_idx];
-            if (pte_present(pte)) {
-              uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
-              bool skip = false;
-              for (mmap_region *mr = old_regions; mr; mr = mr->next) {
-                if (mr->shm_obj) {
-                  shm *s = mr->shm_obj;
-                  if (s->page_list) {
-                    for (int pi = 0; pi < s->num_pages; pi++)
-                      if (leaf_phys == s->page_list[pi]) {
-                        skip = true;
-                        break;
-                      }
-                  } else if (s->phys && s->npages) {
-                    if (leaf_phys >= s->phys &&
-                        leaf_phys < s->phys + s->npages * PAGE_SIZE) {
-                      skip = true;
-                      break;
-                    }
-                  }
-                }
-                if (mr->phys && leaf_phys >= mr->phys &&
-                    leaf_phys < mr->phys + mr->size) {
-                  skip = true;
-                  break;
-                }
-              }
-              if (sig_trampoline_phys && leaf_phys == sig_trampoline_phys)
-                skip = true;
-              if (!skip) {
-                struct page *leaf_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
-                if (refcount_dec_and_test(&leaf_page->p_refcount)) {
-                  bfc_free_page(leaf_page, 1);
-                }
-              }
-              pt_virt[pt_idx] = 0;
-            }
-          }
-          free_table_page(pt_phys);
-          pd_virt[pd_idx] = 0;
-        }
-        free_table_page(pd_phys);
-        pdpt_virt[pdpt_idx] = 0;
-      }
-      free_table_page(pdpt_phys);
-      old_pml4_virt[pml4_idx] = 0;
-    }
-    free_table_page(old_cr3);
-  }
-
-  // 11. Free old mmap_regions + release SHM references
-  {
-    mmap_region *region = old_regions;
-    while (region) {
-      mmap_region *next = region->next;
-      if (region->shm_obj)
-        shm_put(region->shm_obj);
-      // S12: release file-backed mmap refs (the old private user pages were
-      // freed in step 10's leaf-page walk, which skips SHM/MAP_PHYSICAL only).
-      if (region->inode)
-        inode_put(region->inode);
-      if (region->shm_private_src)
-        shm_put(region->shm_private_src);
-      kfree(region);
-      region = next;
-    }
-  }
-
-  // 12. kfree ELF buffer
+  // 10. kfree ELF buffer
   kfree(elf_buf);
 
   return 0;

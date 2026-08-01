@@ -136,6 +136,7 @@ bool capable(int cap);
 // sys_clone (Phase 3b)
 int64_t sys_clone(int64_t flags, int64_t stack, int64_t parent_tid,
                   int64_t child_tid, int64_t tls);
+void vfork_complete(xtask *child);
 
 // Convenience macros (gradually replace current_task, eventually delete
 // current_task alias)

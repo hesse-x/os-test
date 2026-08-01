@@ -32,6 +32,7 @@ static struct test_entry tests[] = {
     {"socket_msgflags", "/test/test_socket_msgflags.elf"},
     {"unix_dgram", "/test/test_unix_dgram.elf"},
     {"process", "/test/process.elf"},
+    {"spawn_popen", "/test/test_spawn_popen.elf"},
     {"signal", "/test/signal.elf"},
     {"signal_stop", "/test/signal_stop.elf"},
     {"signal_flags", "/test/signal_flags.elf"},

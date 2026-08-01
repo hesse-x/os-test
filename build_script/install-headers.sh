@@ -296,6 +296,7 @@ __MMAN_EXT__
 #     there is no heredoc extension to append: the verbatim copy is complete.
 #     Closure self-check below verifies the <stdio.h> → <bits/alltypes.h> chain.
 cp "$SRC"/third_party/musl/include/stdio.h "$DEST/stdio.h"
+cp "$SRC"/third_party/musl/include/spawn.h "$DEST/spawn.h"
 
 # 3l. musl wchar/wctype/uchar headers. user/include has no source-tree shim for
 #     these three (zero in-tree consumers — same publish-only pattern as
