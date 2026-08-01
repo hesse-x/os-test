@@ -26,6 +26,7 @@ static struct test_entry tests[] = {
     {"string", "/test/string.elf"},
     {"malloc", "/test/malloc.elf"},
     {"stdio", "/test/stdio.elf"},
+    {"tmpfile", "/test/tmpfile.elf"},
     {"mmap", "/test/mmap.elf"},
     {"ipc", "/test/ipc.elf"},
     {"socket", "/test/socket.elf"},

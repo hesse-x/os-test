@@ -21,6 +21,9 @@ global:
      *   dprintf/vdprintf — musl native stdio impl (routes through vfprintf); not
      *                   public. The loader resolves to them but no app consumer
      *                   needs them exported.
+     *   tmpfile/tmpnam/tempnam — NOW exported (their __randname → __clock_gettime
+     *                   dep is satisfied since the time module migrated; same
+     *                   blocker as stdlib mkstemp, todo.md:344/379/391).
      *   __isoc99_x / _IO_x / __getdelim / x_used — internal aliases (weak_alias), no
      *                   consumer references them (not declared in <stdio.h>)
      *   wide-char w* family (fwprintf/fgetwc/wscanf/...) — NOW exported under the
@@ -40,6 +43,7 @@ global:
     stdin; stdout; stderr; ungetc; vasprintf; vfprintf; vfscanf; vprintf;
     vscanf; vsnprintf; vsprintf; vsscanf;
     popen; pclose;
+    tmpfile; tmpnam; tempnam;
 
     /* <stdlib.h> — pure compute + startup/env/exit chain from musl_stdlib_objs
      * (stdlib.md). abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv, atoi/atol/

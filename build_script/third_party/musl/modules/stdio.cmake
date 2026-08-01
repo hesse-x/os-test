@@ -29,8 +29,11 @@
 #     comment below.
 #   rename.c — already in musl_unistd_objs (+ _so); recompiling multi-defines.
 #   popen.c and pclose.c are included; musl_process_objs supplies spawn.
-#   tmpfile.c, tmpnam.c, tempnam.c — need __randname → __clock_gettime; the time
-#     module is not yet migrated (same blocker as mkstemp, todo.md:345).
+#   tmpfile.c, tmpnam.c, tempnam.c — NOT excluded. They need __randname →
+#     __clock_gettime; the time module is now migrated (musl clock_gettime.c
+#     provides __clock_gettime), and __randname ships in musl_stdlib_objs —
+#     same blocker that stdlib mkstemp had (todo.md:344), already resolved.
+#     Added back this batch (todo.md:379/391).
 #   dprintf.c, vdprintf.c — NOT excluded. The musl dynamic loader (fused into
 #     libc.so via musl_loader_objs) resolves its dprintf/vdprintf to these musl
 #     native impls (which route through vfprintf). Every loader call site runs
@@ -46,9 +49,6 @@ list(REMOVE_ITEM MUSL_STDIO_SOURCES
     ${MUSL_DIR}/src/stdio/ofl.c          # in musl_pthread (PROVIDE __ofl_lock/__ofl_unlock)
     ${MUSL_DIR}/src/stdio/__lockfile.c   # in musl_pthread (PROVIDE __lockfile/__unlockfile)
     ${MUSL_DIR}/src/stdio/rename.c       # in musl_unistd_objs (+ _so)
-    ${MUSL_DIR}/src/stdio/tmpfile.c      # needs __randname → __clock_gettime; time not migrated
-    ${MUSL_DIR}/src/stdio/tmpnam.c       # same
-    ${MUSL_DIR}/src/stdio/tempnam.c      # same
     # NOTE: dprintf.c/vdprintf.c are NOT excluded — the loader resolves its
     # dprintf/vdprintf to musl's native stdio impl (routes through vfprintf).
     # Every loader call site runs AFTER reloc_all(&ldso) (dynlink.c:1432), so
