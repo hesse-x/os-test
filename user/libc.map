@@ -94,7 +94,7 @@ global:
     /* <unistd.h> */
     access; faccessat; close; dup; dup2; _exit; ftruncate; getcwd; getpid; gettid;
     ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; pipe2; read;
-    rmdir; sched_yield; sleep; ttyname; ttyname_r; unlink; unlinkat; rename; renameat;
+    rmdir; sleep; ttyname; ttyname_r; unlink; unlinkat; rename; renameat;
     usleep; write;
     sendfile; /* <sys/sendfile.h> — musl src/linux/sendfile.c, thin SYS_sendfile wrapper. */
     chdir; fchdir;
@@ -436,7 +436,10 @@ global:
     catopen; catgets; catclose;
 
     /* <sched.h> */
-    sched_yield;
+    sched_get_priority_max; sched_get_priority_min;
+    sched_getaffinity; sched_getcpu; sched_getparam; sched_getscheduler;
+    sched_rr_get_interval; sched_setaffinity; sched_setparam;
+    sched_setscheduler; sched_yield; __sched_cpucount;
 
     /* <pthread.h> */
     pthread_attr_destroy; pthread_attr_getdetachstate;
@@ -446,6 +449,7 @@ global:
     pthread_attr_setstack; pthread_attr_setstacksize;
     pthread_barrier_destroy; pthread_barrier_init; pthread_barrier_wait;
     pthread_cancel;
+    pthread_getaffinity_np; pthread_setaffinity_np;
     /* pthread_cleanup_push/pop are macros in musl <pthread.h>, not symbols */
     pthread_cond_broadcast; pthread_cond_destroy; pthread_cond_init;
     pthread_cond_signal; pthread_cond_wait; pthread_cond_timedwait;

@@ -103,6 +103,9 @@ add_user_dyn_elf(pthread C SOURCES test_pthread.c LINK_LIBS c STATIC_LIBS unity)
 # same musl_pthread glob; symbols exported via libc.map <threads.h> block).
 add_user_dyn_elf(c11threads C SOURCES test_c11threads.c LINK_LIBS c STATIC_LIBS unity)
 
+# musl src/sched glob: verify the GNU sched_getcpu wrapper reaches getcpu(2).
+add_user_dyn_elf(test_sched C SOURCES test_sched.c LINK_LIBS c STATIC_LIBS unity DEFS _GNU_SOURCE)
+
 # DRM virtio-gpu test (no Unity — diagnostic printf)
 add_user_dyn_elf(drm_test C SOURCES drm_test.c LINK_LIBS c)
 

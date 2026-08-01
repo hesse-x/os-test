@@ -58,6 +58,7 @@
 # Built as an OBJECT library so its .o files merge into both libc.a and libc.so via
 # add_user_lib(EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs>).
 file(GLOB MUSL_UNISTD_SOURCES ${MUSL_DIR}/src/unistd/*.c)
+file(GLOB MUSL_SCHED_SOURCES CONFIGURE_DEPENDS ${MUSL_DIR}/src/sched/*.c)
 # Exclude sources we are not adopting this batch (see comments above / below).
 set(MUSL_UNISTD_EXCLUDE
     ${MUSL_DIR}/src/unistd/faccessat.c   # AT_EACCESS clone path — repo faccessat retained
@@ -71,9 +72,9 @@ list(REMOVE_ITEM MUSL_UNISTD_SOURCES ${MUSL_UNISTD_EXCLUDE})
 
 add_library(musl_unistd_objs OBJECT
     ${MUSL_UNISTD_SOURCES}
+    ${MUSL_SCHED_SOURCES}
     ${MUSL_DIR}/src/internal/procfdname.c
     ${MUSL_DIR}/src/exit/_Exit.c
-    ${MUSL_DIR}/src/sched/sched_yield.c
     # nice.c (in src/unistd) calls setpriority/getpriority, whose impls live in
     # src/misc — pull them in or libc.so has an unresolved PLT 'setpriority'.
     ${MUSL_DIR}/src/misc/setpriority.c
@@ -135,9 +136,9 @@ target_compile_options(musl_unistd_objs PRIVATE
 # only the code model differs.
 add_library(musl_unistd_objs_so OBJECT
     ${MUSL_UNISTD_SOURCES}
+    ${MUSL_SCHED_SOURCES}
     ${MUSL_DIR}/src/internal/procfdname.c
     ${MUSL_DIR}/src/exit/_Exit.c
-    ${MUSL_DIR}/src/sched/sched_yield.c
     ${MUSL_DIR}/src/misc/setpriority.c
     ${MUSL_DIR}/src/misc/getpriority.c
     ${MUSL_DIR}/src/misc/syscall.c
