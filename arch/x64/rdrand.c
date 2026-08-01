@@ -4,21 +4,22 @@
  * SPDX-License-Identifier: MIT
  */
 
-// arch/x64/rdrand.c — RDRAND 硬件熵源
+// arch/x64/rdrand.c — RDRAND hardware entropy source
 //
-// CPUID.(EAX=07H,ECX=0):EBX[bit30] = RDRAND 支持位。探测结果在 BSP
-// 初始化时缓存（rdrand_init 一次性写入），AP 只读。
-// 开发机 i7-4500U（Haswell）有 RDRAND 无 RDSEED（Broadwell+），
-// 本驱动不使用 RDSEED。
+// CPUID.(EAX=07H,ECX=0):EBX[bit30] is the RDRAND support bit. Probed and
+// cached by the BSP in rdrand_init; APs only read it. The dev machine
+// (i7-4500U, Haswell) has RDRAND but not RDSEED (Broadwell+); this driver
+// does not use RDSEED.
 
 #include "arch/x64/rdrand.h"
 #include "kernel/xcore/log.h"
 
-#define RDRAND_RETRIES 10 // Intel SDM 建议的重试上限
+#define RDRAND_RETRIES 10 // Intel SDM recommended retry limit
 
 static int has_rdrand;
 
-// BSP 早期调用（xcore_random_init 内），探测并缓存 RDRAND 支持位。
+// Called early on the BSP (xcore_random_init) to probe and cache RDRAND
+// support.
 void rdrand_init(void) {
   uint32_t eax = 7, ebx, ecx = 0, edx;
   __asm__ volatile("cpuid"

@@ -20,7 +20,7 @@ struct xtask;
 #include <xos/errno.h>
 #include <xos/stat.h>
 
-/* ===== sysfs 节点树 ===== */
+// ===== sysfs node tree =====
 static struct sysfs_node *sysfs_root;
 static spinlock sysfs_lock = SPINLOCK_INIT;
 static uint32_t sysfs_ino_counter = 0x10000;
@@ -44,7 +44,7 @@ struct sysfs_node *sysfs_create_dir(struct sysfs_node *parent,
   if (!parent)
     return NULL;
   spin_lock(&sysfs_lock);
-  /* 检查是否已存在 */
+  // Check for an existing entry.
   for (struct sysfs_node *c = parent->children; c; c = c->sibling) {
     if (__strcmp(c->name, name) == 0) {
       spin_unlock(&sysfs_lock);
@@ -88,13 +88,13 @@ void sysfs_remove_dir(struct sysfs_node *dir) {
   if (!dir || !dir->parent)
     return;
   spin_lock(&sysfs_lock);
-  /* 从父节点 children 链中摘除 */
+  // Detach from the parent's children list.
   struct sysfs_node **pp = &dir->parent->children;
   while (*pp && *pp != dir)
     pp = &(*pp)->sibling;
   if (*pp)
     *pp = dir->sibling;
-  /* 递归释放子节点 */
+  // Recursively free children.
   struct sysfs_node *c = dir->children;
   while (c) {
     struct sysfs_node *next = c->sibling;
@@ -120,7 +120,7 @@ struct sysfs_node *sysfs_class_dir(const char *subsystem) {
   return sysfs_create_dir(class_dir, subsystem);
 }
 
-/* ===== 查找: 逐组件走树 ===== */
+// ===== lookup: walk the tree component by component =====
 static struct sysfs_node *sysfs_walk(const char *relpath) {
   struct sysfs_node *cur = sysfs_root;
   const char *p = relpath;
@@ -160,8 +160,9 @@ static struct inode *sysfs_node_to_inode(struct sysfs_node *n) {
   struct inode *ip = inode_create(n->ino, type, 0, 0, 0, 0);
   if (!ip)
     return NULL;
-  /* S08: sysfs 属性文件只读 0100444(inode_create 默认 0100644 可写,不符 sysfs
-   * 语义);目录 0040755。owner 默认 0 root(内核建)。 */
+  // S08: sysfs attribute files are read-only 0100444 (inode_create defaults to
+  // 0100644 writable, which doesn't match sysfs semantics); directories are
+  // 0040755. Owner defaults to 0 (root) — kernel-created.
   ip->mode = n->is_dir ? 0040755 : 0100444;
   ip->i_priv = n->is_dir ? (void *)n : (void *)n->attr;
   ip->i_op = n->is_dir ? &sysfs_dir_iop : &sysfs_file_iop;
@@ -169,8 +170,8 @@ static struct inode *sysfs_node_to_inode(struct sysfs_node *n) {
   return ip;
 }
 
-/* sysfs_dir_lookup:在目录 inode dir 内查名为 name 的子项,返 +1 inode 或 NULL。
- */
+// sysfs_dir_lookup: look up `name` under directory inode `dir`; returns +1
+// inode or NULL.
 static struct inode *sysfs_dir_lookup(struct inode *dir, const char *name) {
   struct sysfs_node *parent = (struct sysfs_node *)dir->i_priv;
   if (!parent || !parent->is_dir)
@@ -193,8 +194,9 @@ static struct inode *sysfs_dir_lookup(struct inode *dir, const char *name) {
   return sysfs_node_to_inode(found);
 }
 
-/* sysfs_getattr:从 ip 字段填(不 deref i_priv,避免 dir/node 与 file/attr
- * 脆弱判别)。S08: 报真实 ip->mode/uid/gid(sysfs inode 内核建,owner 默认 0)。 */
+// sysfs_getattr: fill from ip fields (does not deref i_priv, avoiding a fragile
+// dir/node vs file/attr distinction). S08: reports the real ip->mode/uid/gid
+// (sysfs inodes are kernel-created, owner defaults to 0).
 static int sysfs_getattr(struct inode *ip, struct kstat *ks) {
   __memset(ks, 0, sizeof(*ks));
   ks->st_ino = ip->ino;
@@ -204,7 +206,7 @@ static int sysfs_getattr(struct inode *ip, struct kstat *ks) {
   ks->st_nlink = 1;
   ks->st_size = 0;
   ks->st_blksize = 4096;
-  /* 时间戳(Q5 内存态):getattr 读 ns 拆 sec/nsec。 */
+  // Timestamps (Q5, in-memory): getattr reads ns and splits into sec/nsec.
   ks->st_atim.tv_sec = (int64_t)(ip->atime / 1000000000ULL);
   ks->st_atim.tv_nsec = (int64_t)(ip->atime % 1000000000ULL);
   ks->st_mtim.tv_sec = (int64_t)(ip->mtime / 1000000000ULL);
@@ -223,7 +225,7 @@ static const struct inode_operations sysfs_file_iop = {
     .getattr = sysfs_getattr,
 };
 
-/* sysfs_mount_root:返回 /sys 根 inode(已 inode_get)。 */
+// sysfs_mount_root: returns the /sys root inode (with inode_get taken).
 static struct inode *sysfs_mount_root(struct mount_entry *m) {
   (void)m;
   return sysfs_node_to_inode(sysfs_root);
@@ -285,7 +287,7 @@ ssize_t sysfs_getdents(struct inode *dir, struct dir_context *ctx) {
     cur_pos += r;
     c = c->sibling;
   }
-  ctx->pos = (uint64_t)-1; /* EOF: all entries emitted */
+  ctx->pos = (uint64_t)-1; // EOF: all entries emitted
 done:
   spin_unlock(&sysfs_lock);
   return (ssize_t)ctx->written;
@@ -308,16 +310,18 @@ int sysfs_stat(const char *relpath, struct kstat *ks) {
   return 0;
 }
 
-/* ===== uevent store 回调(对齐 Linux kobject uevent 属性写) ===== */
-/* uevent_store:写 "add" 到 /sys/.../uevent → 重广播 uevent。
- * 走与原始广播(devtmpfs.c device_create/device_set_meta)完全相同的 netlink
- * 路径(nl_uevent_broadcast),使 coldplug 与热插拔同路。本轮只接受 "add"
- * action(Linux 接受 add/remove/change,记 todo)。 */
+// ===== uevent store callback (mirrors Linux kobject uevent attribute writes)
+// =====
+// uevent_store: writing "add" to /sys/.../uevent re-broadcasts the uevent. It
+// goes through the same netlink path (nl_uevent_broadcast) as the original
+// broadcast (devtmpfs.c device_create/device_set_meta), so coldplug and hotplug
+// share a path. This round accepts only "add" (Linux accepts add/remove/change;
+// todo).
 static ssize_t uevent_store(const char *buf, size_t len, void *priv) {
   struct uevent_attr_priv *p = (struct uevent_attr_priv *)priv;
   if (!p)
     return -EIO;
-  /* 解析 action:到首个 '\n'/'\0' 止 */
+  // Parse the action: up to the first '\n' or '\0'.
   size_t alen = 0;
   while (alen < len && buf[alen] != '\n' && buf[alen] != '\0')
     alen++;
@@ -325,18 +329,18 @@ static ssize_t uevent_store(const char *buf, size_t len, void *priv) {
     nl_uevent_broadcast("add", p->devpath, p->subsystem);
     return (ssize_t)len;
   }
-  /* 本轮只 input coldplug 用 add;remove/change 记 todo */
+  // This round only input coldplug uses "add"; remove/change are todo.
   return -EINVAL;
 }
 
-/* ===== sysfs_fops.write ===== */
+// ===== sysfs_fops.write =====
 static ssize_t sysfs_file_write(struct xtask *proc, struct file *f,
                                 const void *buf, size_t count) {
   (void)proc;
   struct inode *ip = f->inode;
   if (!ip || !ip->i_priv)
     return -ENODEV;
-  /* sysfs_fops 同时服务 read/write:防 O_RDONLY 写 */
+  // sysfs_fops serves both read and write: reject O_RDONLY writes.
   if (!(f->flags & (O_WRONLY | O_RDWR)))
     return -EBADF;
   struct sysfs_attr *attr = (struct sysfs_attr *)ip->i_priv;
@@ -350,7 +354,7 @@ static ssize_t sysfs_file_write(struct xtask *proc, struct file *f,
   return attr->store(kbuf, count, attr->priv);
 }
 
-/* ===== sysfs_fops.read ===== */
+// ===== sysfs_fops.read =====
 static ssize_t sysfs_file_read(struct xtask *proc, struct file *f, void *buf,
                                size_t count) {
   (void)proc;
@@ -378,15 +382,15 @@ const struct file_operations sysfs_fops = {
     .write = sysfs_file_write,
 };
 
-/* ===== fstype ===== */
-/* R1 stub:返 NULL。R3(plan_vfs1.md)以 sysfs_mount_root 取代。 */
+// ===== fstype =====
+// R1 stub: returns NULL. R3 (plan_vfs1.md) replaces this with sysfs_mount_root.
 struct fstype sysfs_fstype = {
     .name = "sysfs",
     .mount_root = sysfs_mount_root,
     .getdents = sysfs_getdents,
 };
 
-/* ===== 初始化 ===== */
+// ===== initialization =====
 void sysfs_init(void) {
   if (sysfs_root)
     return;
@@ -400,7 +404,7 @@ void sysfs_init(void) {
 
 struct sysfs_node *sysfs_root_node(void) { return sysfs_root; }
 
-/* evdev show 回调 (priv = input_dev_props*) */
+// evdev show callback (priv = input_dev_props*)
 static ssize_t evdev_show_name(char *buf, size_t len, void *priv) {
   struct input_dev_props *p = (struct input_dev_props *)priv;
   if (!p)
@@ -443,9 +447,11 @@ const struct sysfs_attr evdev_attr_product = {.name = "product",
 const struct sysfs_attr evdev_attr_version = {.name = "version",
                                               .show = evdev_show_version};
 
-/* 可写 uevent 属性模板(coldplug 用):priv = uevent_attr_priv*。devtmpfs 逐设备
- * 拷贝此模板并填 priv(对齐 evdev id/ attr 拷贝模式),使 uevent_store 保持
- * static(无需导出符号)。show=NULL(本轮只写不读,Linux uevent 可读记 todo)。 */
+// Writable uevent attribute template (for coldplug): priv = uevent_attr_priv*.
+// devtmpfs copies this template per-device and fills priv (mirroring the evdev
+// id/attr copy pattern) so uevent_store stays static (no symbol export).
+// show=NULL (this round is write-only; making Linux-style uevent readable is a
+// todo).
 const struct sysfs_attr uevent_attr = {
     .name = "uevent", .show = NULL, .store = uevent_store};
 

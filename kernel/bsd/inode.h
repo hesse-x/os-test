@@ -21,11 +21,11 @@
 #define INODE_DEV 3
 #define INODE_SOCKET 4
 #define INODE_LNK                                                              \
-  5 /* 符号链接:target 串由各 fs 自存(i_priv 或 fs 私有数据)     \
-     */
+  5 // symlink: target string stored per-fs (i_priv or fs-private data)        \
+     //
 
-/* utimensat / update_time 选择位:标记要更新的时间戳字段(对齐 Linux
- * inode_operations.update_time 的 mask 语义)。 */
+// utimensat / update_time selection bits: mark which timestamp fields to update
+// (matches Linux inode_operations.update_time mask semantics).
 #define ATIME_BIT 0x1
 #define MTIME_BIT 0x2
 #define CTIME_BIT 0x4
@@ -33,31 +33,35 @@
 struct inode;
 struct kstat;
 
-/* per-inode 行为表(对齐 Linux struct inode_operations,裁剪子集)。
- * lookup/create/mkdir/unlink/rmdir 由父目录 inode 的 i_op 分发;
- * getattr/setattr 由目标 inode 的 i_op 分发。
- * read/write/getdents 属 f_op/数据层,不在本表(§6.1)。 */
+// per-inode behavior table (mirrors Linux struct inode_operations, trimmed).
+// lookup/create/mkdir/unlink/rmdir dispatch from the parent directory's i_op;
+// getattr/setattr dispatch from the target inode's i_op.
+// read/write/getdents belong to f_op/data layer, not this table (§6.1).
 struct inode_operations {
   struct inode *(*lookup)(struct inode *dir, const char *name);
   struct inode *(*create)(struct inode *dir, const char *name, int mode);
   int (*mkdir)(struct inode *dir, const char *name, int mode);
   int (*unlink)(struct inode *dir, const char *name);
   int (*rmdir)(struct inode *dir, const char *name);
-  /* rename:将 old_dir 下 old_name 节点移到 new_dir 下 new_name。
-   * 完整 rename(2) 语义(对齐 Linux):同/跨目录均支持且原子;new 存在
-   * 原子替换;目录边界(ENOTEMPTY/EISDIR/ENOTDIR/EINVAL 循环);old==new
-   * no-op;已 open fd 不受影响(inode 引用计数)。NULL → -EPERM。 */
+  // rename: move the old_name node under old_dir to new_name under new_dir.
+  // Full rename(2) semantics (matches Linux): same/cross-directory atomic;
+  // new exists → atomic replace; directory boundary checks
+  // (ENOTEMPTY/EISDIR/ENOTDIR/EINVAL cycle); old==new no-op; open fds
+  // unaffected (inode refcount). NULL → -EPERM.
   int (*rename)(struct inode *old_dir, const char *old_name,
                 struct inode *new_dir, const char *new_name);
   int (*getattr)(struct inode *ip, struct kstat *ks);
   int (*setattr)(struct inode *ip, uint64_t size);
-  /* 符号链接 / 硬链接 / 权限 / 时间戳(对齐 Linux inode_operations 子集)。
-   * 各 fs 按能力挂载;NULL → VFS 层回退到通用实现或返 -ENOSYS/-EPERM。
-   *   symlink(dir,name,target):在 dir 下建名为 name、指向 target 的 LNK inode
-   *   link(dir,target,newname):在 dir 下建名为 newname 的硬链(target inode)
-   *   readlink(ip,buf,bufsiz):拷出 target 串到 buf,返回长度(不 NUL 终止)
-   *   permission(ip,mask):0=允许,负=-errno;NULL → VFS 通用 inode_permission
-   *   update_time(ip,at,mt,ct,which):按 which 位写 at/mt/ct;NULL → generic */
+  // symlink / hard link / permission / timestamp (Linux inode_operations
+  // subset). Each fs attaches what it supports; NULL → VFS layer falls back to
+  // the generic implementation or returns -ENOSYS/-EPERM.
+  //   symlink(dir,name,target): create an LNK inode named name under dir
+  //   pointing to target link(dir,target,newname): create a hard link named
+  //   newname under dir (target inode) readlink(ip,buf,bufsiz): copy the target
+  //   string to buf, return length (no NUL terminator) permission(ip,mask):
+  //   0=allow, negative=-errno; NULL → VFS generic inode_permission
+  //   update_time(ip,at,mt,ct,which): write at/mt/ct per which bits; NULL →
+  //   generic
   struct inode *(*symlink)(struct inode *dir, const char *name,
                            const char *target);
   int (*link)(struct inode *dir, struct inode *target, const char *newname);
@@ -72,14 +76,17 @@ struct inode {
   uint32_t ino;
   uint64_t size;
   uint32_t mode;
-  uint32_t uid; /* owner uid (创建时设为创建进程 uid;存量 inode 默认 0) */
-  uint32_t gid; /* owner gid (创建时设为创建进程 gid;存量 inode 默认 0) */
+  uint32_t
+      uid; // owner uid (set to creator's uid; existing inodes default to 0)
+  uint32_t
+      gid; // owner gid (set to creator's gid; existing inodes default to 0)
   int nlink;
   refcount_t i_count;
   spinlock i_lock;
   void *i_priv; /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
   const struct inode_operations
-      *i_op; /* 行为表(iget 出口挂);未挂则 dispatch 返 -ENOSYS/-EACCES */
+      *i_op; // behavior table (attached at iget exit); unmounted → dispatch
+             // returns -ENOSYS/-EACCES
   struct shm *shm;           /* INODE_DEV -> shared memory (NULL = no SHM) */
   struct mount_entry *mount; /* owning mount (set by sys_open lookup) */
   wait_queue_head *wq; /* ringbuf-backed: shared wq for epoll/poll waiters */

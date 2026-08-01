@@ -94,7 +94,7 @@ struct mount_entry *vfs_resolve(const char *path, char *relpath,
     while (mp[mplen])
       mplen++;
     if (mplen == 1 && mp[0] == '/') {
-      /* root mount matches any absolute path */
+      // root mount matches any absolute path
       if (mplen > best_len) {
         best = &mount_table[i];
         best_len = mplen;
@@ -137,26 +137,26 @@ struct mount_entry *vfs_resolve_user(const char __user *upath, char *relpath,
   if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
     return ERR_PTR(-EFAULT);
 
-  /* Resolve relative paths against the process cwd before normalization.
-   *
-   * This kernel does NOT do per-syscall cwd-relative path resolution anywhere
-   * except sys_chdir/sys_mount — vfs_resolve() itself requires an absolute
-   * path. A relative upath is resolved against current_proc->cwd (the single
-   * source of truth, maintained by sys_chdir), then normalized + resolved.
-   * Absolute paths are unaffected. This mirrors the abs_path construction in
-   * sys_chdir (kernel/bsd/syscall.c).
-   *
-   * The *at syscalls (sys_openat/sys_statx/sys_unlinkat/sys_renameat/
-   * sys_mkdirat/sys_faccessat) reach the same cwd via resolve_dirfd_start,
-   * which resolves AT_FDCWD to bp->cwd's inode. Both plain and *at paths thus
-   * honor chdir, so the libc no longer needs a userspace cwd copy. */
+  // Resolve relative paths against the process cwd before normalization.
+  //
+  // This kernel does NOT do per-syscall cwd-relative path resolution anywhere
+  // except sys_chdir/sys_mount — vfs_resolve() itself requires an absolute
+  // path. A relative upath is resolved against current_proc->cwd (the single
+  // source of truth, maintained by sys_chdir), then normalized + resolved.
+  // Absolute paths are unaffected. This mirrors the abs_path construction in
+  // sys_chdir (kernel/bsd/syscall.c).
+  //
+  // The *at syscalls (sys_openat/sys_statx/sys_unlinkat/sys_renameat/
+  // sys_mkdirat/sys_faccessat) reach the same cwd via resolve_dirfd_start,
+  // which resolves AT_FDCWD to bp->cwd's inode. Both plain and *at paths thus
+  // honor chdir, so the libc no longer needs a userspace cwd copy.
   char abs[512];
   const char *resolve = kpath;
   if (kpath[0] != '/') {
     proc *bp = current_proc;
     size_t cwd_len = __strlen(bp->cwd);
     size_t klen = __strlen(kpath);
-    /* cwd + '/' + kpath + null */
+    // cwd + '/' + kpath + null
     if (cwd_len + 1 + klen + 1 > sizeof(abs))
       return ERR_PTR(-ENAMETOOLONG);
     __strncpy(abs, bp->cwd, sizeof(abs) - 1);
@@ -178,7 +178,7 @@ struct mount_entry *vfs_resolve_user(const char __user *upath, char *relpath,
 struct mount_entry *mount_of_inode(struct inode *ip) {
   if (ip && ip->mount)
     return ip->mount;
-  /* Fallback: find root mount "/" */
+  // Fallback: find root mount "/"
   spin_lock(&mount_lock);
   for (int i = 0; i < MAX_MOUNTS; i++) {
     if (mount_table[i].in_use && mount_table[i].mntpoint[0] == '/' &&
@@ -193,8 +193,8 @@ struct mount_entry *mount_of_inode(struct inode *ip) {
 
 bool dir_emit(struct dir_context *ctx, const char *name, int namlen,
               uint64_t offset, uint64_t ino, unsigned int d_type) {
-  /* dirent64 layout: d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) +
-   * d_name[namlen+1], padded to 8-byte alignment. */
+  // dirent64 layout: d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) +
+  // d_name[namlen+1], padded to 8-byte alignment.
   uint16_t reclen = (uint16_t)(sizeof(struct dirent64) + namlen + 1);
   reclen = (reclen + 7) & ~7;
   if (ctx->written + reclen > ctx->len)
@@ -208,17 +208,17 @@ bool dir_emit(struct dir_context *ctx, const char *name, int namlen,
     d->d_name[i] = name[i];
   d->d_name[namlen] = '\0';
   ctx->written += reclen;
-  ctx->pos = offset + reclen; /* resumption point: next entry */
+  ctx->pos = offset + reclen; // resumption point: next entry
   return true;
 }
 
 int normalize_path(const char *in, char *out, size_t outcap) {
-  /* String-level normalization: split by '/', skip '.', pop on '..'.
-   * Clamp '..' at root (cannot go above '/'). No symlink handling.
-   * Accepts both absolute (in[0]=='/') and relative paths; the result
-   * keeps the same form, so *at dirfd-relative callers can pass a bare
-   * component like "subfile" through unchanged. */
-  /* Stack of component start offsets in 'out' (in-place build). */
+  // String-level normalization: split by '/', skip '.', pop on '..'. Clamp
+  // '..' at root (cannot go above '/'). No symlink handling. Accepts both
+  // absolute (in[0]=='/') and relative paths; the result keeps the same form,
+  // so *at dirfd-relative callers can pass a bare component like "subfile"
+  // through unchanged.
+  // Stack of component start offsets in 'out' (in-place build).
   int stack[64];
   int sp = 0;
   size_t outpos = 0;
@@ -230,7 +230,7 @@ int normalize_path(const char *in, char *out, size_t outcap) {
     i = 1;
   }
   while (in[i]) {
-    /* skip leading slashes */
+    // skip leading slashes
     while (in[i] == '/')
       i++;
     if (!in[i])
@@ -240,13 +240,13 @@ int normalize_path(const char *in, char *out, size_t outcap) {
       i++;
     size_t complen = i - start;
     if (complen == 1 && in[start] == '.') {
-      /* skip */
+      // skip
     } else if (complen == 2 && in[start] == '.' && in[start + 1] == '.') {
-      /* pop */
+      // pop
       if (sp > 0) {
         sp--;
-        /* Absolute paths keep the leading '/' (outpos floors at 1);
-         * relative paths collapse to empty (outpos floors at 0). */
+        // Absolute paths keep the leading '/' (outpos floors at 1); relative
+        // paths collapse to empty (outpos floors at 0).
         outpos = (sp == 0) ? (in[0] == '/' ? 1 : 0) : stack[sp];
       }
     } else {
@@ -265,31 +265,31 @@ int normalize_path(const char *in, char *out, size_t outcap) {
   return 0;
 }
 
-/* SYS_MOUNT(source, target, fstype, flags, data) — Linux 5-param signature.
- * source is reserved (passed NULL; this OS mount has no source concept — it
- * mounts an fstype onto a target path).
- * Permission: Linux requires CAP_SYS_ADMIN. This OS has no capability bitmap
- * — euid==0 is the established root stand-in (cf. kill_permitted in signal.c,
- * the setuid ladder in proc.c). Non-root → -EPERM. Revisit when a real
- * capability model lands (todo.md).
- * data (arg5): passed through to mount_table.fs_data as a forward hook for
- * future fstype mount-option parsing. No current fstype reads m->fs_data
- * (NULL OK); a fstype that later consumes it must copy_from_user it under its
- * own defined layout.
- * flags: MS_REMOUNT/MS_BIND are not implemented and rejected with -ENOSYS so a
- * caller cannot believe a remount/bind succeeded when it was silently dropped.
- * MS_RDONLY/NOSUID/NODEV/NOEXEC are accepted and stored in mount_entry.m_flags.
- * MS_NOSUID is consumed by execve (setuid/setgid bits honored only without it);
- * RDONLY/NODEV/NOEXEC are stored but not yet enforced (no permission/exec-bit
- * semantics in this FS) — recorded in todo.md. */
+// SYS_MOUNT(source, target, fstype, flags, data) — Linux 5-param signature.
+// source is reserved (passed NULL; this OS mount has no source concept — it
+// mounts an fstype onto a target path).
+// Permission: Linux requires CAP_SYS_ADMIN. This OS has no capability bitmap
+// — euid==0 is the established root stand-in (cf. kill_permitted in signal.c,
+// the setuid ladder in proc.c). Non-root → -EPERM. Revisit when a real
+// capability model lands (todo.md).
+// data (arg5): passed through to mount_table.fs_data as a forward hook for
+// future fstype mount-option parsing. No current fstype reads m->fs_data
+// (NULL OK); a fstype that later consumes it must copy_from_user it under its
+// own defined layout.
+// flags: MS_REMOUNT/MS_BIND are not implemented and rejected with -ENOSYS so a
+// caller cannot believe a remount/bind succeeded when it was silently dropped.
+// MS_RDONLY/NOSUID/NODEV/NOEXEC are accepted and stored in mount_entry.m_flags.
+// MS_NOSUID is consumed by execve (setuid/setgid bits honored only without it);
+// RDONLY/NODEV/NOEXEC are stored but not yet enforced (no permission/exec-bit
+// semantics in this FS) — recorded in todo.md.
 int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                   int64_t arg5, int64_t unused) {
   (void)arg1; // source: no source concept (mount fstype onto target); NULL OK
   (void)unused;
 
-  /* CAP_SYS_ADMIN via capable() 收口(今天等价 euid==0;无 capability bitmap,
-   * cf. kill_permitted in signal.c)。单用户 root-default,故 gate 今天是 no-op,
-   * 仅在引入非 root euid 时才 bite。 */
+  // CAP_SYS_ADMIN via capable() (today equivalent to euid==0; no capability
+  // bitmap, cf. kill_permitted in signal.c). Single-user root-default, so the
+  // gate is a no-op today and only bites once non-root euid is introduced.
   if (!capable(CAP_SYS_ADMIN))
     return (int64_t)-EPERM;
 
@@ -325,9 +325,9 @@ int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   if (!fs)
     return -ENODEV;
 
-  /* data (arg5): raw user pointer stored as a forward hook — no fstype reads
-   * m->fs_data yet. A future fstype that parses mount options must
-   * copy_from_user this under its own defined layout (todo.md). */
+  // data (arg5): raw user pointer stored as a forward hook — no fstype reads
+  // m->fs_data yet. A future fstype that parses mount options must
+  // copy_from_user this under its own defined layout (todo.md).
   void *fs_data = (void *)(uintptr_t)arg5;
   return mount_internal(fs, target, fs_data, accepted);
 }

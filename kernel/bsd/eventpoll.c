@@ -375,8 +375,9 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
 
   int n = 0;
   while (1) {
-    // prepare_to_wait: 先标 BLOCKED 再持 ep->lock 查 ready_list，使
-    // ep_poll_callback 的 __wake_up 若在重查后到达命中已 BLOCKED 的 task。
+    // prepare_to_wait: mark BLOCKED before taking ep->lock and re-checking
+    // ready_list, so a late ep_poll_callback __wake_up hits an already-BLOCKED
+    // task.
     proc->state = BLOCKED;
     proc->wait_event = WAIT_POLL;
     proc->wait_timed_out = 0;
@@ -434,10 +435,10 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
         it = next;
       }
       spin_unlock(&ep->lock);
-      // prepare_to_wait: 循环顶部标过 BLOCKED，若 re-check 期间
-      // ep_wait_callback 的 wake_wq_target 命中把 run_node push 进了
-      // run_queue（state=READY），此 break 不 走 schedule() 会留下悬空
-      // run_node。cancel 掉虚假唤醒：摘 run_node + state=RUNNING。
+      // prepare_to_wait: the loop top marked BLOCKED; if a wake hit during
+      // re-check and pushed run_node into the run_queue (state=READY), this
+      // break without schedule() would leave a dangling run_node. Cancel the
+      // spurious wake: drop run_node + reset state to RUNNING.
       sched_cancel_spurious_wake(proc);
       remove_wait_queue(&ep->wq, &wait);
       file_put(ef);

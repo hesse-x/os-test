@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_rename.c — 验证 §3.1 SYS_RENAME(tmpfs rename 原子写基座)。
- * Unity freestanding:setUp/tearDown 空实现;断言 TEST_ASSERT_*。
- * 参考 test_libudev 模板(同构于其它 vfs 测试)。 */
+// test_rename.c — verify §3.1 SYS_RENAME (tmpfs rename atomic-write base).
+// Unity freestanding: empty setUp/tearDown; TEST_ASSERT_* assertions.
+// Modeled on test_libudev (isomorphic to other vfs tests).
 #include "unity.h"
 #include <fcntl.h>
 #include <stdio.h>
@@ -15,7 +15,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* 测试在 /run(RAM tmpfs) 下工作,对齐 db 实际落点目录语义。 */
+// Tests work under /run (RAM tmpfs), matching the db's actual on-disk dir
+// semantics.
 #define RENAME_DIR "/run/udev/data"
 
 void setUp(void) {}
@@ -42,7 +43,7 @@ static int read_file(const char *path, char *buf, size_t cap) {
   return 0;
 }
 
-/* 同目录 rename(基本):db 场景核心。 */
+// Same-dir rename (basic): core db scenario.
 void test_rename_same_dir(void) {
   const char *oldp = RENAME_DIR "/rename_basic_old";
   const char *newp = RENAME_DIR "/rename_basic_new";
@@ -51,7 +52,7 @@ void test_rename_same_dir(void) {
   char buf[64];
   TEST_ASSERT_EQUAL_INT(0, read_file(newp, buf, sizeof(buf)));
   TEST_ASSERT_EQUAL_STRING("hello", buf);
-  /* 旧路径应 ENOENT */
+  // old path should be ENOENT
   int fd = open(oldp, O_RDONLY);
   if (fd >= 0)
     close(fd);
@@ -59,7 +60,7 @@ void test_rename_same_dir(void) {
   unlink(newp);
 }
 
-/* rename 覆盖已存在目标:db 原子更新覆盖语义。 */
+// rename over an existing target: db atomic-update overwrite semantics.
 void test_rename_overwrite(void) {
   const char *oldp = RENAME_DIR "/rename_overwrite_old";
   const char *newp = RENAME_DIR "/rename_overwrite_new";
@@ -72,14 +73,14 @@ void test_rename_overwrite(void) {
   unlink(newp);
 }
 
-/* rename old 不存在 → -1/ENOENT:错误路径。 */
+// rename with missing old -> -1/ENOENT: error path.
 void test_rename_old_missing(void) {
   const char *oldp = RENAME_DIR "/rename_nope_missing";
   const char *newp = RENAME_DIR "/rename_nope_new";
   TEST_ASSERT_EQUAL_INT(-1, rename(oldp, newp));
 }
 
-/* rename 后旧路径 ENOENT + 新路径可读:原子切换验证。 */
+// After rename, old path is ENOENT and new path is readable: atomic switch.
 void test_rename_atomicity(void) {
   const char *oldp = RENAME_DIR "/rename_atom_old";
   const char *newp = RENAME_DIR "/rename_atom_new";

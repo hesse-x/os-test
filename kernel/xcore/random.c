@@ -4,16 +4,20 @@
  * SPDX-License-Identifier: MIT
  */
 
-// kernel/xcore/random.c — ChaCha20 CSPRNG（per-CPU state，对齐 Linux crng
-// 极简版）
+// kernel/xcore/random.c — ChaCha20 CSPRNG (per-CPU state, a minimal analogue
+// of the Linux crng).
 //
-// 熵源：RDRAND（有则用之），兜底 RDTSC 抖动 + cpu_id + 启动时间混合。
-// 三条对外路径（sys_getrandom / /dev/random / /dev/urandom）共用 csprng_read。
+// Entropy source: RDRAND when available, otherwise a fallback mixing RDTSC
+// jitter + cpu_id + boot time.  Three consumers (sys_getrandom, /dev/random,
+// /dev/urandom) all share csprng_read.
 //
-// 并发模型：取数时关中断（防同核嵌套 + 防迁移），临界区内只做
-// 播种检查 → 生成到栈上固定小块 → reseed 判定；copy_to_user 在临界区外。
+// Concurrency: disable interrupts while reading (guards against same-core
+// nesting and migration).  Inside the critical section we only check reseed
+// state, generate a fixed-size chunk onto a stack buffer, and decide on
+// reseed; copy_to_user happens outside the section.
 //
-// 熵源相关故障一律 WARN 不 panic：随机数降级是可运行状态。
+// Entropy-source failures are WARN, never panic: degraded randomness is still
+// a runnable state.
 
 #include "kernel/xcore/random.h"
 
@@ -25,7 +29,7 @@
 #include "arch/x64/utils.h"
 #include "kernel/xcore/log.h"
 
-// ===================== ChaCha20 块函数 =====================
+// ===================== ChaCha20 block function =====================
 
 #define CHACHA_ROTL32(x, r) (((x) << (r)) | ((x) >> (32 - (r))))
 #define CHACHA_QR(a, b, c, d)                                                  \
@@ -44,12 +48,12 @@
     b = CHACHA_ROTL32(b, 7);                                                   \
   } while (0)
 
-// out[64] = chacha20_block(state[16])；调用方保证 out/state 不重叠
+// out[16] = chacha20_block(state[16]); caller ensures out/state do not overlap.
 static void chacha20_block(const uint32_t state[16], uint32_t out[16]) {
   uint32_t w[16];
   for (int i = 0; i < 16; i++)
     w[i] = state[i];
-  for (int i = 0; i < 10; i++) { // 20 轮 = 10 次双轮
+  for (int i = 0; i < 10; i++) { // 20 rounds = 10 double-rounds
     CHACHA_QR(w[0], w[4], w[8], w[12]);
     CHACHA_QR(w[1], w[5], w[9], w[13]);
     CHACHA_QR(w[2], w[6], w[10], w[14]);
@@ -66,29 +70,30 @@ static void chacha20_block(const uint32_t state[16], uint32_t out[16]) {
 // ===================== per-CPU state =====================
 
 typedef struct {
-  uint32_t state[16];      // 常量4 + key8 + counter2 + nonce2
-  uint64_t generated;      // 已输出字节数（reseed 字节触发）
-  uint64_t last_reseed_ns; // 上次 reseed 时间（sched_clock）
-  uint8_t initialized;     // 惰性播种标志
+  uint32_t state[16];      // constant4 + key8 + counter2 + nonce2
+  uint64_t generated;      // bytes output since last reseed (triggers reseed)
+  uint64_t last_reseed_ns; // last reseed time (sched_clock)
+  uint8_t initialized;     // lazy-seeding flag
 } csprng_state;
 
 static csprng_state rng_states[MAX_CPUS];
 
 #define RESEED_BYTES (1u << 20)                     // 1 MiB
-#define RESEED_INTERVAL_NS (300ULL * 1000000000ULL) // 5 分钟
-#define CHUNK_SIZE 256 // 临界区内单次生成的栈上小块上限
+#define RESEED_INTERVAL_NS (300ULL * 1000000000ULL) // 5 minutes
+#define CHUNK_SIZE 256 // max stack chunk generated inside the critical section
 
 static void secure_zero(void *p, size_t n) {
   __memset(p, 0, n);
   __asm__ volatile("" ::: "memory");
 }
 
-// ===================== 熵源 =====================
+// ===================== entropy source =====================
 
 static int fallback_warned;
 
-// 兜底混合源（仅用于播种/reseed，不直接输出）：TSC 抖动 + cpu_id + 时间。
-// 明确降级语义：只保证"可用、不崩、每次启动不同"，不宣称密码学强度。
+// Fallback mixing source (used only for seeding/reseed, never direct output):
+// TSC jitter + cpu_id + time.  Explicit degraded semantics: only guarantees
+// "usable, does not crash, differs per boot" — makes no cryptographic claim.
 static void fallback_entropy(uint8_t *out, size_t len) {
   if (!fallback_warned) {
     fallback_warned = 1;
@@ -97,7 +102,7 @@ static void fallback_entropy(uint8_t *out, size_t len) {
   size_t off = 0;
   while (off < len) {
     uint64_t v = 0;
-    for (int i = 0; i < 8; i++) // 采样 8 次取低 8 bit 异或
+    for (int i = 0; i < 8; i++) // sample 8 times, xor low 8 bits
       v ^= rdtsc64();
     v ^= (uint64_t)get_cpu_local()->cpu_id * 0x9e3779b97f4a7c15ULL;
     v ^= sched_clock();
@@ -121,9 +126,9 @@ static void get_entropy(uint8_t *out, size_t len) {
   }
 }
 
-// ===================== 播种 / reseed =====================
+// ===================== seeding / reseed =====================
 
-// 调用方须持本核临界区（关中断）
+// Caller must hold this CPU's critical section (interrupts disabled).
 static void seed_cpu(csprng_state *s) {
   uint8_t seed[40]; // 32B key + 8B nonce
   get_entropy(seed, sizeof(seed));
@@ -138,7 +143,8 @@ static void seed_cpu(csprng_state *s) {
   s->generated = 0;
   s->last_reseed_ns = sched_clock();
   secure_zero(seed, sizeof(seed));
-  // key 全零检测：实现 bug 信号，WARN_ON 提示开发期介入
+  // Detect all-zero key: signal of an implementation bug; WARN_ON prompts
+  // investigation during development.
   uint32_t acc = 0;
   for (int i = 4; i < 12; i++)
     acc |= s->state[i];
@@ -146,7 +152,8 @@ static void seed_cpu(csprng_state *s) {
   s->initialized = 1;
 }
 
-// reseed：块函数输出前 32B 作新 key，再混入 32B 新鲜熵（前向安全）
+// reseed: first 32 bytes of block output become the new key, mixed with 32
+// bytes of fresh entropy (forward secrecy).
 static void reseed_cpu(csprng_state *s) {
   uint32_t out[16];
   chacha20_block(s->state, out);
@@ -164,7 +171,8 @@ static void reseed_cpu(csprng_state *s) {
 
 // ===================== csprng_read =====================
 
-// 关中断保护的 per-CPU 临界区：定位本核 state + 生成到内核 buf
+// Per-CPU critical section with interrupts disabled: locate this CPU's state
+// and generate into a kernel buffer.
 static void generate_chunk(void *buf, size_t n) {
   uint64_t flags;
   __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags));
@@ -181,7 +189,7 @@ static void generate_chunk(void *buf, size_t n) {
   while (off < n) {
     uint32_t block[16];
     chacha20_block(s->state, block);
-    // counter 自增（64 bit，跨 state[12]/[13]）
+    // increment counter (64-bit across state[12]/[13])
     if (++s->state[12] == 0)
       s->state[13]++;
     size_t k = n - off < 64 ? n - off : 64;
@@ -204,11 +212,11 @@ void csprng_read(void *buf, size_t len) {
   }
 }
 
-// ===================== init（BSP） =====================
+// ===================== init (BSP) =====================
 
-// RFC 8439 §2.3.2 测试向量：key=00..1f, counter=1,
-// nonce=00:00:00:09:00:00:00:4a:00:00:00:00（小端 word: 09000000 4a000000
-// 00000000）
+// RFC 8439 §2.3.2 test vector: key=00..1f, counter=1,
+// nonce=00:00:00:09:00:00:00:4a:00:00:00:00 (little-endian words: 09000000
+// 4a000000 00000000).
 static const uint32_t selftest_state[16] = {
     0x61707865, 0x3320646e, 0x79622d32, 0x6b206574, 0x03020100, 0x07060504,
     0x0b0a0908, 0x0f0e0d0c, 0x13121110, 0x17161514, 0x1b1a1918, 0x1f1e1d1c,
@@ -240,6 +248,6 @@ static void chacha20_selftest(void) {
 void xcore_random_init(void) {
   chacha20_selftest();
   rdrand_init();
-  // CPU0（BSP）立即播种；AP 首次 csprng_read 时惰性播种
+  // CPU0 (BSP) is seeded immediately; APs lazily seed on first csprng_read.
   seed_cpu(&rng_states[0]);
 }

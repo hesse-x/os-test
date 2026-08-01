@@ -7,6 +7,6 @@
 #ifndef KERNEL_BSD_RANDOM_H
 #define KERNEL_BSD_RANDOM_H
 
-void random_dev_init(void); // 注册 /dev/random + /dev/urandom
+void random_dev_init(void); // registers /dev/random and /dev/urandom
 
 #endif // KERNEL_BSD_RANDOM_H

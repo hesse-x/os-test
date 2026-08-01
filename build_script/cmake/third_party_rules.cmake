@@ -1,27 +1,33 @@
 # third_party_rules.cmake — add_third_party_lib() for third-party submodule libraries
 #
-# 自治边界（reface_cmake.md §3.4）：third_party target 住在我方构建里，但各自维护
-# 编译选项、关闭 warning，只通过 link os_base_options 获取共性基础项。我方专属选项
-# （WARN_FLAGS、-mno-sse 等）不泄漏进 third_party。
+# Autonomy boundary: third_party targets live in our build but each maintains its
+# own compile options and disables warnings; they only pull common freestanding
+# basics via link os_base_options. Our-specific options (WARN_FLAGS, -mno-sse, etc.)
+# do not leak into third_party.
 #
-# 产物形态：
-#   - 运行时库（drm/ffi/input/udev）缺省 SHARED-only：编 .so，脚本拷 img，关 warning。
-#     消费者不静态链第三方代码、运行时经 ld.so 加载（见 §3.4 附 6）。
-#   - Unity 例外（编译期符号依赖）：STATIC 标记，test ELF 编译期链入 unity。
+# Product forms:
+#   - Runtime libs (drm/ffi/input/udev) default to SHARED-only: build .so, copy
+#     to the image, disable warnings. Consumers do not statically link third-party
+#     code; loaded at runtime via ld.so.
+#   - Unity exception (compile-time symbol dependency): STATIC flag, test ELFs
+#     link unity at compile time.
 #
-# SHARED 实现选型（reface_cmake.md §4.2 验证结论）：
-#   add_library(SHARED) 在本工具链下 *不可用* —— toolchain 设 CMAKE_SYSTEM_NAME=Generic，
-#   Generic 平台不提供共享库规则，显式 add_library(x SHARED ...) 也被降级为 STATIC
-#   （实测：build rule 为 C_STATIC_LIBRARY_LINKER）。故 SHARED 走分支 B：custom-command
-#   产 .so（与 add_user_lib SHARED 同一机制），但 flag 源用 os_base_options + -w，不携带
-#   我方 WARN_FLAGS(-Werror)，实现第三方 warning 自治。
-#   STATIC（Unity）走真 add_library(STATIC)，正常可用。
+# SHARED implementation choice: add_library(SHARED) is *unavailable* under this
+# toolchain — toolchain sets CMAKE_SYSTEM_NAME=Generic, and Generic provides no
+# shared-library rules; even explicit add_library(x SHARED ...) is downgraded to
+# STATIC (observed: build rule becomes C_STATIC_LIBRARY_LINKER). So SHARED uses
+# branch B: a custom command produces .so (same mechanism as add_user_lib SHARED),
+# but flags come from os_base_options + -w, without our WARN_FLAGS(-Werror),
+# keeping third-party warning autonomy. STATIC (Unity) uses a real
+# add_library(STATIC), which works normally.
 
 # _tp_base_compile_flags(out_var)
-# 镜像 os_base_options 的共性基础项（freestanding + -m64 + config -O/-g），以 list 形式
-# 返回供 custom-command 的 bare-gcc 调用直接消费。custom-command 不继承 CMake target
-# usage requirement，故需手工展开 os_base_options 等价 flag。与根 CMakeLists 的
-# os_base_options 保持同步（单一逻辑：freestanding 基础 + build-type 优化/调试）。
+# Mirrors os_base_options' common basics (freestanding + -m64 + config -O/-g),
+# returned as a list for direct consumption by custom-command bare-gcc calls.
+# Custom commands do not inherit CMake target usage requirements, so os_base_options'
+# equivalent flags must be expanded manually. Kept in sync with the root
+# CMakeLists os_base_options (single logic: freestanding basics + build-type
+# optimization/debug).
 function(_tp_base_compile_flags out_var)
     set(_flags ${USER_FREESTANDING_FLAGS} -m64)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -37,24 +43,26 @@ function(_tp_base_compile_flags out_var)
 endfunction()
 
 # add_third_party_lib(name [C] [STATIC] SOURCES ...
-#                     [OUTPUT_NAME name]               — 产物 base 名（缺省 = name）
-#                     [INCLUDE_DIRS dir ...]            — 私有编译期 include（本库源用）
-#                     [INTERFACE_INCLUDE_DIRS dir ...]  — 暴露给消费者的 include
-#                     [FLAGS "..."]                     — 第三方自身选项（-D/-Wno-*/-include 等）
-#                     [SO_LINK_LIBS lib ...]            — SHARED 运行时库的 .so 依赖（记 DT_NEEDED）
-#                     [GEN_HEADERS hdr ...]             — configure_file 产物，编译期依赖追踪
-#                     [LINK_DEPS target ...])           — 编译前置依赖（如 fourcc 表生成 target）
+#                     [OUTPUT_NAME name]               — artifact base name (default = name)
+#                     [INCLUDE_DIRS dir ...]            — private compile-time include (for this lib's sources)
+#                     [INTERFACE_INCLUDE_DIRS dir ...]  — include exposed to consumers
+#                     [FLAGS "..."]                     — third-party's own options (-D/-Wno-*/-include etc.)
+#                     [SO_LINK_LIBS lib ...]            — SHARED runtime lib .so deps (recorded as DT_NEEDED)
+#                     [GEN_HEADERS hdr ...]             — configure_file outputs, compile-time dep tracking
+#                     [LINK_DEPS target ...])           — compile prerequisite deps (e.g. fourcc table-gen target)
 #                     [IMAGE_PATH dest] [IMAGE_ARTIFACT name] [IMAGE_PARTITION <1|2>] [NO_IMAGE]
-# 缺省 SHARED-only 运行时库（分支 B：custom-command .so）；STATIC 标记 Unity 类编译期链入。
-# IMAGE_*：磁盘镜像 manifest 登记（reface_cmake.md §6）。SHARED 自动默认 lib/lib<out>.so @ root；
-#   STATIC 无自动默认（编译期链入，不单独进镜像）。NO_IMAGE 关闭 SHARED 默认。
+# Default SHARED-only runtime lib (branch B: custom-command .so); STATIC for
+# Unity-style compile-time linking.
+# IMAGE_*: disk-image manifest registration. SHARED auto-defaults to
+#   lib/lib<out>.so @ root; STATIC has no auto-default (compile-time linked, not
+#   shipped separately). NO_IMAGE disables the SHARED default.
 function(add_third_party_lib name)
     set(option_args STATIC C NO_IMAGE)
     set(one_args OUTPUT_NAME IMAGE_PATH IMAGE_ARTIFACT IMAGE_PARTITION)
     set(multi_args SOURCES INCLUDE_DIRS INTERFACE_INCLUDE_DIRS FLAGS SO_LINK_LIBS GEN_HEADERS LINK_DEPS)
     cmake_parse_arguments(ARG "${option_args}" "${one_args}" "${multi_args}" ${ARGN})
 
-    # 产物 base 名（缺省 = name）。SHARED → lib<output>.so，STATIC → lib<output>.a。
+    # Artifact base name (default = name). SHARED → lib<output>.so, STATIC → lib<output>.a.
     if(ARG_OUTPUT_NAME)
         set(_output_name ${ARG_OUTPUT_NAME})
     else()
@@ -66,17 +74,19 @@ function(add_third_party_lib name)
         set(ARG_IMAGE_PARTITION 2)
     endif()
 
-    # 共性编译 flag：os_base_options 等价（freestanding + -m64 + config -O/-g），不含 WARN_FLAGS。
+    # Common compile flags: os_base_options equivalent (freestanding + -m64 +
+    # config -O/-g), no WARN_FLAGS.
     _tp_base_compile_flags(_base_flags)
 
-    # 私有 include：项目根（root-relative include 风格）+ third_party（musl shim:
-    # user/include/unistd.h does #include "musl/include/unistd.h", resolved via
-    # -I third_party → third_party/musl/include/unistd.h）+ UAPI 契约头 +
-    # user/include + musl headers（stdint/stddef/stdarg/stdbool 等从 musl 取，
-    # 因 -isystem 已弃；user/include 优先，我们的 bits/alltypes.h 胜出。
-    # pthread/signal/sched 接入 musl 后，third_party 若 include <pthread.h>/
-    # <signal.h> 会落到 musl/include 并拉 <bits/alltypes.h>，故需 musl_gen
-    # 生成头目录在前）+ 本库 INCLUDE_DIRS。
+    # Private includes: project root (root-relative include style) + third_party
+    # (musl shim: user/include/unistd.h does #include "musl/include/unistd.h",
+    # resolved via -I third_party → third_party/musl/include/unistd.h) + UAPI
+    # contract headers + user/include + musl headers (stdint/stddef/stdarg/stdbool
+    # from musl since -isystem is dropped; user/include first so our
+    # bits/alltypes.h wins. After pthread/signal/sched switched to musl,
+    # third_party including <pthread.h>/<signal.h> lands in musl/include and pulls
+    # <bits/alltypes.h>, so musl_gen's generated-header dir must precede it) +
+    # this lib's INCLUDE_DIRS.
     set(_include_flags
         -I${CMAKE_SOURCE_DIR}
         -I${CMAKE_SOURCE_DIR}/third_party
@@ -90,11 +100,12 @@ function(add_third_party_lib name)
         list(APPEND _include_flags -I${_dir})
     endforeach()
 
-    # 第三方自身选项。FLAGS 可能是字符串，转 list。-w 关 warning（不参与我方 -Werror 门禁）。
+    # Third-party's own options. FLAGS may be a string, convert to list. -w
+    # disables warnings (not subject to our -Werror gate).
     separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
 
     if(ARG_STATIC)
-        # ---- STATIC（Unity 类）：真 add_library(STATIC)，正常可用 ----
+        # ---- STATIC (Unity-style): real add_library(STATIC), works normally ----
         add_library(${name} STATIC ${ARG_SOURCES})
         target_link_libraries(${name} PRIVATE os_user_base_options)
         target_include_directories(${name} PRIVATE
@@ -118,7 +129,8 @@ function(add_third_party_lib name)
         # musl headers via the include dirs above).
         add_dependencies(${name} musl_headers)
     else()
-        # ---- SHARED 运行时库（分支 B：custom-command .so，因 Generic 平台无 SHARED target）----
+        # ---- SHARED runtime lib (branch B: custom-command .so, because the
+        #      Generic platform has no SHARED target) ----
         if(ARG_C)
             set(COMPILE_CMD ${CMAKE_C_COMPILER})
             set(DEP_LANG "C")
@@ -126,7 +138,8 @@ function(add_third_party_lib name)
             set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
             set(DEP_LANG "CXX")
         endif()
-        # -fPIC（.so 必需）+ -fvisibility=hidden（默认隐藏，仅 export 标记导出；个别库经 FLAGS 覆盖）。
+        # -fPIC (required for .so) + -fvisibility=hidden (default hidden, only
+        # export-marked declarations are exported; some libs override via FLAGS).
         set(COMPILE_FLAGS_BASE ${_base_flags} ${_include_flags} -fPIC -fvisibility=hidden ${ARG_FLAGS_LIST} -w)
 
         set(OBJ_FILES "")
@@ -149,7 +162,7 @@ function(add_third_party_lib name)
 
         set(SO_FILE ${CMAKE_BINARY_DIR}/lib${_output_name}.so)
 
-        # 链依赖：对象 + .so 依赖（SO_LINK_LIBS → lib<dep>.so 文件）。
+        # Link deps: objects + .so deps (SO_LINK_LIBS → lib<dep>.so files).
         set(SO_LINK_DEPS ${OBJ_FILES})
         set(SO_EXTRA_LDFLAGS "")
         if(ARG_SO_LINK_LIBS)
@@ -170,7 +183,8 @@ function(add_third_party_lib name)
             COMMENT "Linking lib${_output_name}.so (third_party SHARED)")
         add_custom_target(${name} ALL DEPENDS ${SO_FILE})
 
-        # SO_LINK_LIBS 的 .so 依赖 target（<dep>_so 或 lib<dep>_so 命名不一致，两者都试）。
+        # SO_LINK_LIBS .so dep targets (<dep>_so or lib<dep>_so naming differs,
+        # try both).
         if(ARG_SO_LINK_LIBS)
             foreach(_dep ${ARG_SO_LINK_LIBS})
                 foreach(_cand ${_dep}_so lib${_dep}_so)
@@ -181,21 +195,26 @@ function(add_third_party_lib name)
             endforeach()
         endif()
 
-        # INTERFACE include 暴露给消费者：用一个 INTERFACE 库承载，消费者经 target_link_libraries
-        # 取头（add_user_elf/add_user_dyn_elf 已读 INTERFACE_INCLUDE_DIRECTORIES）。
+        # INTERFACE includes exposed to consumers: carried by an INTERFACE lib;
+        # consumers get headers via target_link_libraries (add_user_elf/
+        # add_user_dyn_elf already read INTERFACE_INCLUDE_DIRECTORIES).
         if(ARG_INTERFACE_INCLUDE_DIRS)
             add_library(${name}_iface INTERFACE)
             target_include_directories(${name}_iface INTERFACE ${ARG_INTERFACE_INCLUDE_DIRS})
-            # 让 ${name} 依赖 ${name}_iface（仅表达关联，iface 无构建产物）。
+            # Make ${name} depend on ${name}_iface (just expresses association;
+            # iface has no build product).
             add_dependencies(${name} ${name}_iface)
-            # 消费者 link ${name} 时也应能拿到 iface 的 include —— 但 custom target 无
-            # INTERFACE 属性。约定：需要 third_party 头的消费者额外 link ${name}_iface。
-            # 现有调用方（drm_test_link/modetest 等）仍通过原 INCLUDE_DIRS 或 INTERFACE 路径取头，
-            # 暂不强制改消费者（阶段 5 统一收口）。
+            # Consumers linking ${name} should also get iface's includes — but
+            # custom targets have no INTERFACE property. Convention: consumers
+            # needing third_party headers additionally link ${name}_iface.
+            # Existing call sites (drm_test_link/modetest etc.) still get headers
+            # via the original INCLUDE_DIRS or INTERFACE path; consumers are not
+            # force-changed yet (phase 5 will unify).
         endif()
 
-        # 磁盘镜像 manifest（reface_cmake.md §6）：SHARED 运行时 .so 自动默认
-        # lib/lib<out>.so @ root。NO_IMAGE 关闭默认；IMAGE_PATH/IMAGE_ARTIFACT/IMAGE_PARTITION 覆盖。
+        # Disk-image manifest: SHARED runtime .so auto-defaults to
+        # lib/lib<out>.so @ root. NO_IMAGE disables the default; IMAGE_PATH/
+        # IMAGE_ARTIFACT/IMAGE_PARTITION override.
         if(NOT ARG_NO_IMAGE)
             set(_img_artifact "lib${_output_name}.so")
             if(ARG_IMAGE_ARTIFACT)
@@ -209,7 +228,7 @@ function(add_third_party_lib name)
         endif()
     endif()
 
-    # 编译前置依赖（fourcc 表生成 / configure_file 产物的 target）。
+    # Compile prerequisite deps (fourcc table generation / configure_file output targets).
     if(ARG_LINK_DEPS)
         add_dependencies(${name} ${ARG_LINK_DEPS})
     endif()

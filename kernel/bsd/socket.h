@@ -59,7 +59,8 @@ typedef struct unix_sock {
   struct sk_buff *recv_queue_head;
   struct sk_buff *recv_queue_tail;
   int recv_queue_len;
-  // 阻塞等待者改挂 sock->wq，不再记录 pid（队列身份制，§5.1）
+  // Blocked waiters hang on sock->wq; no longer tracked by pid (queue
+  // identity model, §5.1)
 
   // Listen backlog (un-accepted connections)
   struct unix_sock *backlog_head;
@@ -74,19 +75,22 @@ typedef struct unix_sock {
   // Bind path (empty = unbound/anonymous)
   char sun_path[108];
 
-  // DGRAM connect 目标路径（DGRAM connect() 缓存，send()/sendmsg() 无 addr
-  // 时按此动态查找目标）。DGRAM 不缓存持久 peer_sock 指针——对端 dgram
-  // socket 仅靠自身 fd 存活，无反向引用，缓存指针会在对端 close 后悬空
-  // （UAF）。改为每次发送按 path 借用查找（unix_dgram_sendto 已对 target
-  // 取临时 u_count 引用）。空串 = 未连接。
+  // DGRAM connect cached destination path (used by send()/sendmsg() with no
+  // addr to look up the target dynamically). DGRAM does not cache a persistent
+  // peer_sock pointer — the peer dgram socket stays alive only via its own fd
+  // with no back-reference, so caching a pointer would dangle (UAF) after the
+  // peer closes. Instead each send looks up by path under a temporary ref
+  // (unix_dgram_sendto already takes a temporary u_count ref on the target).
+  // Empty string = unconnected.
   char dgram_dst_path[108];
 
-  struct inode
-      *bind_inode; /* VFS bind 路径：socket inode 引用（NULL=哈希表占名） */
-  pid_t owner_pid; /* bind 进程 pid（VFS 路径用，对齐 bind_entry.owner_pid） */
+  struct inode *bind_inode; // VFS bind path: socket inode reference (NULL =
+                            // hash-table name claim)
+  pid_t owner_pid;          // binding process pid (VFS path; aligns with
+                            // bind_entry.owner_pid)
 
-  wait_queue_head *wq; // eager 分配（unix_sock_create 即 kmalloc），阻塞
-                       // reader/epoll 等待者挂此
+  wait_queue_head *wq; // eagerly allocated (kmalloc in unix_sock_create);
+                       // blocked reader/epoll waiters hang here
 } unix_sock;
 
 // ===================== Bind name space =====================

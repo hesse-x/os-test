@@ -208,10 +208,10 @@ add_user_dyn_elf(test_locale C SOURCES test_locale.c LINK_LIBS c STATIC_LIBS uni
 # POSIX regular expressions + shell-pattern matching from musl src/regex.
 add_user_dyn_elf(test_regex C SOURCES test_regex.c LINK_LIBS c STATIC_LIBS unity)
 
-# Layer 20: getrandom (/dev/(u)random + libc 封装)
+# Layer 20: getrandom (/dev/(u)random + libc wrapper)
 add_user_dyn_elf(getrandom C SOURCES test_getrandom.c LINK_LIBS c STATIC_LIBS unity)
 
-# mprotect + PROT_NONE round-trip + sysconf (plan1.md §1.5 缺口1 hard acceptance)
+# mprotect + PROT_NONE round-trip + sysconf (plan1.md §1.5 gap 1 hard acceptance)
 add_user_dyn_elf(test_mprotect C SOURCES test_mprotect.c LINK_LIBS c STATIC_LIBS unity)
 
 # mount framework test
@@ -224,7 +224,7 @@ if(TEST)
 endif()
 
 # Phase B: libdrm.so composite loading test (plan_drm2)
-# LINK_LIBS drm c → add_user_dyn_elf 内部自动 add_dependencies(drm_so/c_so)。
+# LINK_LIBS drm c → add_user_dyn_elf internally auto-add_dependencies(drm_so/c_so).
 # NO_IMAGE: manual diagnostic ELF, not in test_runner's table.
 add_user_dyn_elf(hello_drm_dyn C SOURCES hello_drm_dyn.c LINK_LIBS drm c NO_IMAGE)
 
@@ -232,36 +232,41 @@ add_user_dyn_elf(hello_drm_dyn C SOURCES hello_drm_dyn.c LINK_LIBS drm c NO_IMAG
 add_user_elf(modetest C SOURCES modetest.c LINK_LIBS drm c)
 add_dependencies(modetest_elf libdrm_fourcc_table)
 
-# LINK_LIBS drm c → add_user_dyn_elf 内部自动 add_dependencies(drm_so)。
+# LINK_LIBS drm c → add_user_dyn_elf internally auto-add_dependencies(drm_so).
 # NO_IMAGE: manual diagnostic ELF, not in test_runner's table.
 add_user_dyn_elf(modetest_dyn C SOURCES modetest_dyn.c LINK_LIBS drm c NO_IMAGE)
 
-# libudev shim 阶段 A 回归测试（TEST 构建——依赖 evdev 真实注册态）。
-# 仿 test_sysfs：TEST 门控 + udev-shim 头文件 include 路径。
-# SOURCES 直接编入 udev.c：udev_* 符号实现于此文件，单独编译即可，无需
-# 链接整个 input 静态库（避免拖入 libinput 全套依赖）。默认 -Iinclude/uapi
-# 已覆盖 udev.c 的 <xos/input.h>/<xos/ioctl.h>。
+# libudev shim phase A regression (TEST build — depends on real evdev registration).
+# Mirrors test_sysfs: TEST-gated + udev-shim header include path.
+# SOURCES compiles udev.c directly: udev_* symbols are implemented in that file,
+# standalone compilation suffices, no need to link the whole input static lib
+# (avoids pulling in all libinput deps). Default -Iinclude/uapi already covers
+# udev.c's <xos/input.h>/<xos/ioctl.h>.
 if(TEST)
     add_user_dyn_elf(test_libudev C SOURCES test_libudev.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c LINK_LIBS c STATIC_LIBS unity DEFS TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
 endif()
 
-# udevd daemon 通道端到端测试(TEST 构建——依赖 udevd 真实运行态 + evdev 注册态)。
-# 仿 test_libudev:TEST 门控 + udev-shim 头文件 include 路径。
-# test_udevd 直接调 udev_* 符号 → SOURCES 编入 udev.c(避免拖整个 input 静态库)。
+# udevd daemon channel end-to-end test (TEST build — depends on real udevd
+# runtime + evdev registration).
+# Mirrors test_libudev: TEST-gated + udev-shim header include path.
+# test_udevd calls udev_* symbols directly → SOURCES compiles udev.c (avoids
+# pulling in the whole input static lib).
 if(TEST)
     add_user_dyn_elf(test_udevd C SOURCES test_udevd.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c LINK_LIBS c STATIC_LIBS unity DEFS TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
 endif()
 
-# udevd db + 规则引擎端到端测试(TEST 构建——依赖 udevd 真实运行态 + evdev 注册态)。
-# 仿 test_libudev:TEST 门控 + udev-shim 头文件 include 路径。
-# test_udevd_db 直接调 udev_* 符号 → SOURCES 编入 udev.c。
+# udevd db + rules engine end-to-end test (TEST build — depends on real udevd
+# runtime + evdev registration).
+# Mirrors test_libudev: TEST-gated + udev-shim header include path.
+# test_udevd_db calls udev_* symbols directly → SOURCES compiles udev.c.
 if(TEST)
     add_user_dyn_elf(test_rename C SOURCES test_rename.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_udevd_db C SOURCES test_udevd_db.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c LINK_LIBS c STATIC_LIBS unity DEFS TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
 endif()
 
-# devtmpfs 设备表动态化回归(work2_design §5.5.1)— TEST 门控,不调 udev_*,
-# 只调 sys_dev_create/open/opendir(走 libc + syscall),无需编入 udev.c。
+# devtmpfs device-table dynamic regression (work2_design §5.5.1) — TEST-gated,
+# does not call udev_*, only sys_dev_create/open/opendir (via libc + syscall),
+# no need to compile in udev.c.
 if(TEST)
     add_user_dyn_elf(test_dev_vfs_dynamic C SOURCES test_dev_vfs_dynamic.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
 endif()
@@ -279,20 +284,24 @@ if(TEST)
     add_user_dyn_elf(test_openat_dirfd C SOURCES test_openat_dirfd.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_stat_real C SOURCES test_stat_real.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_statx C SOURCES test_statx.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
-    # path-based inode 元数据/链接 syscall(§3.2/§3.5):access/faccessat 按 euid
-    # 判定(Q4);utimensat 内存时间戳(Q5)。对齐 test_stat_real 风格,FAT32+tmpfs
-    # 双夹具。阶段 3 link 部分经 TEST_LINK 启用(见 test_link_utimensat.c)。
+    # path-based inode metadata/link syscalls (§3.2/§3.5): access/faccessat by
+    # euid (Q4); utimensat in-memory timestamps (Q5). Mirrors test_stat_real
+    # style, FAT32+tmpfs dual fixture. Phase 3 link part enabled via TEST_LINK
+    # (see test_link_utimensat.c).
     add_user_dyn_elf(test_access C SOURCES test_access.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_link_utimensat C SOURCES test_link_utimensat.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
-    # §3.3 symlink/readlink(tmpfs 真实现,Q2):round-trip / lstat vs stat /
-    # EEXIST / FAT32 ENOSYS / readlink 非 softlink EINVAL。对齐 test_stat_real。
+    # §3.3 symlink/readlink (tmpfs real impl, Q2): round-trip / lstat vs stat /
+    # EEXIST / FAT32 ENOSYS / readlink non-softlink EINVAL. Mirrors test_stat_real.
     add_user_dyn_elf(test_symlink C SOURCES test_symlink.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
-    # §3.4 link/linkat(tmpfs 硬链 + nlink 全链路,Q3):data 共享 / unlink 保
-    # 数据 nlink-- / 目录 EPERM / 跨 fs EXDEV / FAT32 EPERM / EEXIST / flags EINVAL。
+    # §3.4 link/linkat (tmpfs hardlink + full nlink path, Q3): data sharing /
+    # unlink keeps data nlink-- / directory EPERM / cross-fs EXDEV / FAT32 EPERM
+    # / EEXIST / flags EINVAL.
     add_user_dyn_elf(test_link C SOURCES test_link.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
-    # chmod/chown 系(阶段1 capable 收口):mode/uid/gid 真写 inode + setuid 位清除
-    # 规则(apply_chmod/apply_chown,root CAP_FSETID 保留 / 非特权清)。落盘仅内存
-    # (与 utimensat 一致)。非 root 用例经 fork 子 setuid(1000)+_exit 码 + 父 waitpid。
+    # chmod/chown family (phase 1 capable closure): mode/uid/gid truly write
+    # inode + setuid-bit clear rules (apply_chmod/apply_chown: root CAP_FSETID
+    # retained / non-privileged cleared). Persistence is in-memory only (like
+    # utimensat). Non-root cases via fork child setuid(1000) + _exit code +
+    # parent waitpid.
     add_user_dyn_elf(test_chmod C SOURCES test_chmod.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_vma_restructure C SOURCES test_vma_restructure.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_mmap_addr_hint C SOURCES test_mmap_addr_hint.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
@@ -310,10 +319,12 @@ if(TEST)
     add_user_dyn_elf(test_wait4_pgid_rusage C SOURCES test_wait4_pgid_rusage.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_wait4_options C SOURCES test_wait4_options.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_setuid_saved C SOURCES test_setuid_saved.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
-    # execve S_ISUID/S_ISGID 凭证切换验证：setuid_helper.elf 用退出码报
-    # geteuid/getegid/getuid，主测试 chmod 04755+chown(1000,1000) 后 fork 子
-    # setuid(2000) drop root 再 execve helper，断 euid 切到 1000、real uid 保持。
-    # 兼带 setuid 阶梯 gate 自洽化(阶段0 capable(CAP_SETUID))回归。
+    # execve S_ISUID/S_ISGID credential switch verification: setuid_helper.elf
+    # reports geteuid/getegid/getuid via its exit code; the main test chmods
+    # 04755+chown(1000,1000), forks a child that setuid(2000) drops root, then
+    # execve's helper, asserting euid switches to 1000 and real uid is retained.
+    # Also exercises setuid-ladder gate self-consistency (phase 0 capable
+    # (CAP_SETUID)) regression.
     add_user_dyn_elf(setuid_helper C SOURCES setuid_helper.c LINK_LIBS c)
     add_user_dyn_elf(test_setuid_exec C SOURCES test_setuid_exec.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # M1.1 (unistd.md §2.A1/A2): setresuid/setresgid/setreuid/setregid +
@@ -358,8 +369,9 @@ add_user_dyn_elf(test_ffi C SOURCES test_ffi.c
     GEN_HEADERS ${CMAKE_BINARY_DIR}/ffi.h
                 ${CMAKE_BINARY_DIR}/fficonfig.h
                 ${CMAKE_BINARY_DIR}/ffitarget.h)
-# LINK_LIBS ffi c → add_user_dyn_elf 内部自动 add_dependencies(ffi_so/c_so)；
-# GEN_HEADERS 由各对象 custom-command 的 DEPENDS 追踪（编辑模板触发重编）。
+# LINK_LIBS ffi c → add_user_dyn_elf internally auto-add_dependencies(ffi_so/c_so).
+# GEN_HEADERS is tracked by each object's custom-command DEPENDS (editing a
+# template triggers a rebuild).
 
 # expat smoke test: XML_ParserCreate / Parse / Free / error handling
 add_user_dyn_elf(test_expat C SOURCES test_expat.c
@@ -368,12 +380,13 @@ add_user_dyn_elf(test_expat C SOURCES test_expat.c
     INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libexpat/expat/lib
                 ${CMAKE_BINARY_DIR})
 
-# libwayland-client.so 纯逻辑测试: wl_array (init/add/for_each/copy/release) +
-# wl_list (init/insert/remove/length/empty/insert_list). 仅覆盖不依赖真实
-# compositor 的容器层; wl_display_*/wl_proxy 路径属 e2e, 不在本测范围.
+# libwayland-client.so pure-logic test: wl_array (init/add/for_each/copy/release)
+# + wl_list (init/insert/remove/length/empty/insert_list). Covers only the
+# container layer (no real compositor needed); wl_display_*/wl_proxy paths are
+# e2e, out of scope here.
 # LINK_LIBS wayland-client → -lwayland-client resolves to libwayland-client.so
-# (DT_NEEDED). INCLUDE_DIRS 同 wayland_client_so target 的取头路径:
-# wayland-client.h (src) → wayland-client-protocol.h (build, 生成).
+# (DT_NEEDED). INCLUDE_DIRS mirrors the wayland_client_so target header paths:
+# wayland-client.h (src) → wayland-client-protocol.h (build, generated).
 add_user_dyn_elf(test_wayland_client C SOURCES test_wayland_client.c
     LINK_LIBS wayland-client c
     STATIC_LIBS unity

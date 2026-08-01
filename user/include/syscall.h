@@ -7,31 +7,29 @@
 #ifndef USER_SYSCALL_H
 #define USER_SYSCALL_H
 
-/*
- * User-space semantic syscall wrappers (sys_getpid, sys_recv, ...).
- *
- * These issue the raw syscall via the __syscallN inline-assembly wrappers from
- * xos/syscall_asm.h and translate the unified return convention
- * (>=0 success, -errno failure) into the libc-style (-1 + errno) convention.
- *
- * This is the userspace counterpart to the kernel's UAPI headers; it is NOT a
- * standard POSIX header (glibc has no <syscall.h> at this path) and is meant
- * for libc internals and programs that issue syscalls directly.
- */
+// User-space semantic syscall wrappers (sys_getpid, sys_recv, ...).
+//
+// These issue the raw syscall via the __syscallN inline-assembly wrappers from
+// xos/syscall_asm.h and translate the unified return convention
+// (>=0 success, -errno failure) into the libc-style (-1 + errno) convention.
+//
+// This is the userspace counterpart to the kernel's UAPI headers; it is NOT a
+// standard POSIX header (glibc has no <syscall.h> at this path) and is meant
+// for libc internals and programs that issue syscalls directly.
 
 #include <errno.h>
 #include <sched.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/mman.h> /* MAP_FAILED (+ MAP_xx / PROT_xx / MFD_xx flags) — musl
-                      * <sys/mman.h> is the userspace source of truth now that
-                      * the mman module switched to musl. Previously this pulled
-                      * <xos/mman.h>, but musl <sys/mman.h> and xos/mman.h both
-                      * define the common MAP_xx / PROT_xx set without per-macro
-                      * guards, so including both in one TU (common: <syscall.h>
-                      * + <sys/mman.h>) trips -Wmacro-redefined. xos/mman.h is
-                      * now kernel-only. */
+#include <sys/mman.h> // MAP_FAILED (+ MAP_xx / PROT_xx / MFD_xx flags) — musl
+                      // <sys/mman.h> is the userspace source of truth now that
+// the mman module switched to musl. Previously this pulled
+// <xos/mman.h>, but musl <sys/mman.h> and xos/mman.h both
+// define the common MAP_xx / PROT_xx set without per-macro
+// guards, so including both in one TU (common: <syscall.h>
+// + <sys/mman.h>) trips -Wmacro-redefined. xos/mman.h is
+// now kernel-only.
 #include <xos/errno.h>
 #include <xos/prctl.h> // PR_* constants (sys_prctl)
 #include <xos/sched.h> // SCHED_* constants
@@ -145,7 +143,7 @@ static inline void sys_exit(int32_t exit_code) {
 }
 
 // --- fork/waitpid/execve ---
-// 统一走 wait4(§4.3):wait4(pid,wstatus,options,NULL) ≡ waitpid
+// All go through wait4 (§4.3): wait4(pid,wstatus,options,NULL) ≡ waitpid
 static inline int64_t sys_waitpid(int32_t pid, int32_t *exit_code,
                                   int options) {
   int64_t r = __syscall4(SYS_WAIT4, (int64_t)pid, (int64_t)(uintptr_t)exit_code,
@@ -497,8 +495,9 @@ static inline int sys_stat(const char *path, void *stat_buf) {
   return 0;
 }
 
-// --- Linux 薄封装(§4.1/§4.2):at 变体,仅支持 AT_FDCWD ---
-// 固定 4 参(非变参):grep openat user/ 为空,当前无调用方,避免 va_arg 陷阱
+// --- Linux thin wrappers (§4.1/§4.2): *at variants, only AT_FDCWD supported
+// --- Fixed 4 args (not varargs): grep openat user/ is empty, no current
+// caller, avoiding va_arg pitfalls.
 static inline int sys_openat(int dirfd, const char *path, int flags, int mode) {
   int64_t r = __syscall4(SYS_OPENAT, (int64_t)dirfd, (int64_t)(uintptr_t)path,
                          (int64_t)flags, (int64_t)mode);
@@ -521,8 +520,9 @@ static inline int sys_newfstatat(int dirfd, const char *path, void *buf,
   return 0;
 }
 
-// statx(dirfd, path, flags, mask, buf) — 唯一的元数据 syscall；stat/fstat 等
-// legacy 接口在 libc 内全部经由此实现（见 user/lib/file.cc）。
+// statx(dirfd, path, flags, mask, buf) — the sole metadata syscall; legacy
+// interfaces like stat/fstat all route through this in libc (see
+// user/lib/file.cc).
 static inline int sys_statx(int dirfd, const char *path, int flags,
                             unsigned int mask, void *buf) {
   int64_t r =
@@ -568,7 +568,7 @@ static inline int sys_renameat(int olddirfd, const char *oldpath, int newdirfd,
   return (int)r;
 }
 
-// --- Linux 薄封装(§4.4):clock_gettime(clk,&ts) ---
+// --- Linux thin wrapper (§4.4): clock_gettime(clk,&ts) ---
 static inline int sys_clock_gettime(int clk, struct timespec *ts) {
   int64_t r =
       __syscall2(SYS_CLOCK_GETTIME, (int64_t)clk, (int64_t)(uintptr_t)ts);
@@ -579,7 +579,8 @@ static inline int sys_clock_gettime(int clk, struct timespec *ts) {
   return 0;
 }
 
-// --- OS 独有(§4.5):pthread 创建线程前预置 thread_clone_info ---
+// --- OS-specific (§4.5): pre-set thread_clone_info before pthread creates a
+// thread ---
 static inline int sys_pthread_setup(struct thread_clone_info *ci) {
   int64_t r = __syscall1(SYS_PTHREAD_SETUP, (int64_t)(uintptr_t)ci);
   if (r < 0) {
@@ -617,9 +618,9 @@ static inline int sys_unlink(const char *path) {
   return 0;
 }
 
-// access(2)/faccessat(2)/utimensat(2) — path-based inode 元数据/时间戳
-// syscall 薄封装(对齐 sys_unlink 模式)。errno 转换在 user/lib/file.cc 的
-// POSIX 封装层。
+// access(2)/faccessat(2)/utimensat(2) — thin path-based inode
+// metadata/timestamp syscall wrappers (mirroring the sys_unlink pattern).
+// errno translation happens in the POSIX wrapper layer in user/lib/file.cc.
 static inline int sys_access(const char *path, int mode) {
   int64_t r = __syscall2(SYS_ACCESS, (int64_t)(uintptr_t)path, (int64_t)mode);
   if (r < 0) {
@@ -690,8 +691,9 @@ static inline int sys_utimensat(int dirfd, const char *path,
   return 0;
 }
 
-// chmod(2)/fchmod(2)/fchmodat(2) — 落盘仅内存(与 utimensat 一致);setuid 位
-// 清除规则见 kernel/bsd/syscall.c apply_chmod。errno 转换在 POSIX 封装层。
+// chmod(2)/fchmod(2)/fchmodat(2) — persistence is in-memory only (same as
+// utimensat); setuid-bit clearing rules are in kernel/bsd/syscall.c
+// apply_chmod. errno translation lives in the POSIX wrapper layer.
 static inline int sys_chmod(const char *path, unsigned int mode) {
   int64_t r = __syscall2(SYS_CHMOD, (int64_t)(uintptr_t)path, (int64_t)mode);
   if (r < 0) {
@@ -719,8 +721,9 @@ static inline int sys_fchmodat(int dirfd, const char *path, unsigned int mode,
   return 0;
 }
 
-// chown(2)/fchown(2)/fchownat(2) — 权限简化为 root-only(CAP_CHOWN);
-// (uid_t)-1/(gid_t)-1 = 该字段不变。errno 转换在 POSIX 封装层。
+// chown(2)/fchown(2)/fchownat(2) — permissions simplified to root-only
+// (CAP_CHOWN); (uid_t)-1/(gid_t)-1 = leave that field unchanged. errno
+// translation lives in the POSIX wrapper layer.
 static inline int sys_chown(const char *path, unsigned int owner,
                             unsigned int group) {
   int64_t r = __syscall3(SYS_CHOWN, (int64_t)(uintptr_t)path, (int64_t)owner,
@@ -761,8 +764,8 @@ static inline int sys_rename(const char *oldpath, const char *newpath) {
   return 0;
 }
 
-// symlink(2)/readlink(2) — path-based 链接/读取软链 target(§3.3)。errno
-// 转换在 user/lib/file.cc 的 POSIX 封装层。
+// symlink(2)/readlink(2) — path-based link / read-symlink-target (§3.3).
+// errno translation lives in the POSIX wrapper layer in user/lib/file.cc.
 static inline int sys_symlink(const char *target, const char *linkpath) {
   int64_t r = __syscall2(SYS_SYMLINK, (int64_t)(uintptr_t)target,
                          (int64_t)(uintptr_t)linkpath);
@@ -803,8 +806,8 @@ static inline int64_t sys_readlinkat(int dirfd, const char *path, char *buf,
   return r;
 }
 
-// link(2)/linkat(2) — path-based 硬链接(§3.4 nlink 全链路)。errno 转换在
-// user/lib/file.cc 的 POSIX 封装层。
+// link(2)/linkat(2) — path-based hardlink (§3.4 nlink full path). errno
+// translation lives in the POSIX wrapper layer in user/lib/file.cc.
 static inline int sys_link(const char *oldpath, const char *newpath) {
   int64_t r = __syscall2(SYS_LINK, (int64_t)(uintptr_t)oldpath,
                          (int64_t)(uintptr_t)newpath);
@@ -1027,13 +1030,13 @@ static inline int sys_setgid(uint32_t gid) {
   return 0;
 }
 
-/* M1.1 — setresuid/setresgid/setreuid/setregid/getgroups. (uid_t)-1 /
- * (gid_t)-1 (== 0xFFFFFFFF) means "leave unchanged" and must arrive at the
- * kernel as a sign-extended -1 (0xFFFF...FFFF), so the cast chain goes through
- * int32_t, not straight to int64_t (a uint32_t→int64_t cast zero-extends,
- * turning the sentinel into 0xFFFFFFFF and breaking the kernel's != -1 guard).
- * uint32_t (not uid_t/gid_t) matches the existing setuid/setgid wrappers —
- * this header does not pull in <sys/types.h>. */
+// M1.1 — setresuid/setresgid/setreuid/setregid/getgroups. (uid_t)-1 /
+// (gid_t)-1 (== 0xFFFFFFFF) means "leave unchanged" and must arrive at the
+// kernel as a sign-extended -1 (0xFFFF...FFFF), so the cast chain goes through
+// int32_t, not straight to int64_t (a uint32_t→int64_t cast zero-extends,
+// turning the sentinel into 0xFFFFFFFF and breaking the kernel's != -1 guard).
+// uint32_t (not uid_t/gid_t) matches the existing setuid/setgid wrappers —
+// this header does not pull in <sys/types.h>.
 static inline int sys_setresuid(uint32_t ruid, uint32_t euid, uint32_t suid) {
   int64_t r = __syscall3(SYS_SETRESUID, (int64_t)(int32_t)ruid,
                          (int64_t)(int32_t)euid, (int64_t)(int32_t)suid);

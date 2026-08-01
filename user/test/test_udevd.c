@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: MIT
  */
 
-// udevd daemon 通道端到端测试(TEST 构建)。
-// 覆盖 udev_design.md §8.5.2:AF_UNIX connect + SCM_RIGHTS 收 pipe fd +
-// monitor 收 uevent + coldplug 现有设备 add 快照。
-// 依赖:udevd 真实运行态(init 已 spawn udevd)+ evdev 注册态(event0)。
-// 桩触发:本测试不注册测试设备——coldplug 路径由 udevd 启动时对
-// /sys/class/input/event0 触发,首个 client connect 后再触发一轮。
+// udevd daemon end-to-end test (TEST build).
+// Covers udev_design.md §8.5.2: AF_UNIX connect + SCM_RIGHTS pipe fd +
+// monitor uevent receive + coldplug snapshot of existing devices.
+// Requires udevd running (init spawned it) and evdev registered (event0).
+// Coldplug fires from udevd startup over /sys/class/input/event0; a second
+// round fires after the first client connects. No test device is registered
+// for coldplug.
 
 #include <errno.h>
 #include <stdio.h>
@@ -21,14 +22,14 @@
 
 #include "libudev.h"
 #include <sys/device.h>
-#include <xos/input.h> /* BUS_USB(dev_props.bustype) */
+#include <xos/input.h> // BUS_USB(dev_props.bustype)
 
 void setUp(void) {}
 void tearDown(void) {}
 
-/* monitor 通道握手:enable_receiving 成功表示 connect /run/udev/socket +
- * SCM_RIGHTS 收到 pipe rd fd。udevd 未起/socket 不存在时返 -ENOENT——
- * 测试需 udevd 已运行,故断言 == 0。 */
+// monitor handshake: enable_receiving succeeds ⇒ connected /run/udev/socket
+// and received the pipe rd fd via SCM_RIGHTS. Returns -ENOENT if udevd is not
+// running or the socket is absent; this test requires udevd, so assert == 0.
 void test_monitor_enable_receiving(void) {
   struct udev *u = udev_new();
   TEST_ASSERT_NOT_NULL(u);
@@ -36,12 +37,13 @@ void test_monitor_enable_receiving(void) {
   TEST_ASSERT_NOT_NULL(m);
   TEST_ASSERT_EQUAL_INT(0, udev_monitor_enable_receiving(m));
   int fd = udev_monitor_get_fd(m);
-  TEST_ASSERT_TRUE(fd >= 0); /* pipe rd fd 可 epoll */
+  TEST_ASSERT_TRUE(fd >= 0); // pipe rd fd, epoll-able
   udev_monitor_unref(m);
   udev_unref(u);
 }
 
-/* get_fd 返 pipe rd fd(非 -1),与 enable_receiving 后状态一致。 */
+// get_fd returns the pipe rd fd (not -1), consistent with
+// post-enable_receiving.
 void test_monitor_get_fd(void) {
   struct udev *u = udev_new();
   struct udev_monitor *m = udev_monitor_new_from_netlink(u, "udev");
@@ -52,11 +54,11 @@ void test_monitor_get_fd(void) {
   udev_unref(u);
 }
 
-/* coldplug 快照:首个 client connect 后 udevd 触发一轮 coldplug,
- * 现有设备 event0 的 add 经 pipe 到达 client。receive_device 解析出
- * udev_device,action=="add",sysname 以 "event" 开头。
- * 注:pipe 读可能需短暂等待(udevd 重广播回环),用 poll 超时兜底;
- * 若 5s 内无事件判失败(不阻塞测试框架)。 */
+// coldplug snapshot: after the first client connects, udevd fires a coldplug
+// round; the existing event0 add arrives via the pipe. receive_device parses a
+// udev_device with action == "add" and sysname starting with "event".
+// A short poll wait covers udevd's rebroadcast loop; fail if no event in 5s
+// (non-blocking for the framework).
 static struct udev_device *recv_with_timeout(struct udev_monitor *m, int ms) {
   int fd = udev_monitor_get_fd(m);
   if (fd < 0)
@@ -85,10 +87,10 @@ void test_monitor_receive_coldplug_add(void) {
   udev_unref(u);
 }
 
-/* monitor device 的 property(ID_INPUT)来自 pipe KV(§5.3/§6 grill 决议:
- * 对齐 Linux libudev——monitor device 的 property 随 uevent KV 到达 client,
- * 存 device->props,get_property_value 查内存表,不查 db)。
- * coldplug add 收到 event0 后,get_property_value("ID_INPUT") 应为 "1"。 */
+// monitor device properties come from pipe KV (§5.3/§6 grill decision: match
+// Linux libudev — properties arrive with the uevent KV, stored in
+// device->props, get_property_value reads the in-memory table, not the db).
+// After coldplug add of event0, get_property_value("ID_INPUT") == "1".
 void test_monitor_device_property_id_input(void) {
   struct udev *u = udev_new();
   struct udev_monitor *m = udev_monitor_new_from_netlink(u, "udev");
@@ -106,7 +108,7 @@ void test_monitor_device_property_id_input(void) {
   udev_unref(u);
 }
 
-/* filter 本轮 no-op stub,返 0(不报错)。 */
+// filter is a no-op stub this round; returns 0 (no error).
 void test_monitor_filter_noop(void) {
   struct udev *u = udev_new();
   struct udev_monitor *m = udev_monitor_new_from_netlink(u, "udev");
@@ -116,13 +118,14 @@ void test_monitor_filter_noop(void) {
   udev_unref(u);
 }
 
-/* 两步注册桩(对齐 test_sysfs.c:register_event1 同源理念):device_register_shm
- * 建 devtmpfs 节点 → device_set_meta 建 sysfs 子树 + nl_uevent_broadcast("add")
- * (devtmpfs.c:776-777) → udevd 收 uevent → 补全 → 广播进 client pipe。
- * 桩作 #ifdef TEST 额外测试节点门控,不和真实设备来源耦合
- * ([[evdev-real-device-source-untouched-this-round]])。
- * 注:无设备移除 API + uevent_store 只接受 "add"(sysfs.c:316 拒 remove),
- * 故不清理测试设备(同 test_udevd_db.c/test_sysfs.c 既有做法,TEST 镜像留痕)。 */
+// Two-step registration stub (mirrors test_sysfs.c register_event1):
+// device_register_shm creates the devtmpfs node → device_set_meta builds the
+// sysfs subtree and nl_uevent_broadcast("add") (devtmpfs.c:776-777) → udevd
+// receives the uevent → enriches → broadcasts into the client pipe.
+// Gated by #ifdef TEST, decoupled from real device sources.
+// No device-removal API and uevent_store accepts only "add" (sysfs.c:316
+// rejects remove), so test devices are not cleaned up (matches existing
+// test_udevd_db.c / test_sysfs.c behavior; TEST image retains the traces).
 static void trigger_test_device(const char *name, uint32_t minor) {
   TEST_ASSERT_EQUAL_INT(0, device_register_shm(name, -1, minor));
   struct dev_props props = {.bustype = BUS_USB,
@@ -134,19 +137,20 @@ static void trigger_test_device(const char *name, uint32_t minor) {
   TEST_ASSERT_EQUAL_INT(0, device_set_meta(name, "input", "evdev", &props));
 }
 
-/* 热插拔 add(§4.1):桩设备走两步注册触发真实 add uevent → udevd 收 → 补全
- * → 广播进 pipe。验证 monitor 端到端(非 coldplug 快照路径)。
- * 注:enable_receiving 时 udevd accept_client 会重触发 coldplug,先排空 event0
- * 的 coldplug add,再触发 event9,在有限轮内读到 sysname==event9 即通过
- * (避免误收 coldplug 的 event0)。 */
+// hotplug add (§4.1): the stub device goes through two-step registration,
+// triggering a real add uevent → udevd → enrich → pipe. Exercises the monitor
+// end-to-end (not the coldplug snapshot path).
+// enable_receiving triggers a coldplug via udevd accept_client; drain the
+// event0 coldplug add first, then trigger event9 and read until sysname ==
+// event9 (avoid mistaking the coldplug event0).
 void test_monitor_hotplug_add(void) {
   struct udev *u = udev_new();
   TEST_ASSERT_NOT_NULL(u);
   struct udev_monitor *m = udev_monitor_new_from_netlink(u, "udev");
   TEST_ASSERT_NOT_NULL(m);
   TEST_ASSERT_EQUAL_INT(0, udev_monitor_enable_receiving(m));
-  /* 排空 enable_receiving 触发的 coldplug add(event0 等),poll
-   * 短超时:无数据即排空。 */
+  // Drain coldplug add triggered by enable_receiving (event0 etc.);
+  // short poll timeout ⇒ no data means drained.
   for (int i = 0; i < 8; i++) {
     struct udev_device *stale = recv_with_timeout(m, 200);
     if (!stale)
@@ -154,7 +158,7 @@ void test_monitor_hotplug_add(void) {
     udev_device_unref(stale);
   }
   trigger_test_device("input/event9", 9);
-  /* 在有限轮内读 add 事件直到 event9 到达(coldplug 残余与 event9 竞态兜底)。 */
+  // Read add events until event9 arrives (coldplug residue vs event9 race).
   struct udev_device *d = NULL;
   for (int i = 0; i < 8 && !d; i++) {
     struct udev_device *e = recv_with_timeout(m, 5000);

@@ -45,7 +45,7 @@ __attribute__((no_sanitize("kernel-address"))) void xcore_init(boot_info *bi) {
   sig_init();   // allocate signal trampoline page (shared across all processes)
   sched_init(); // initialize process table + cpu_locals
 
-  xcore_random_init(); // RDRAND 探测 + ChaCha20 自检 + CPU0 播种
+  xcore_random_init(); // RDRAND probe + ChaCha20 self-test + seed CPU0
 
   smp_boot_aps();
 

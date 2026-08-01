@@ -4,18 +4,22 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_wayland_client — libwayland-client.so 纯逻辑 Unity 测试.
- *
- * 只覆盖 client 库里不依赖真实 compositor 连接的纯逻辑层:
- *   - wl_array: init/add/for_each/copy/release(动态数组 + 容量增长)
- *   - wl_list:  init/insert/remove/length/empty/insert_list(侵入式双向链表)
- * wl_display_xxx / wl_proxy_create / marshal 路径需要 socket + display,
- * 不在本测范围(那是 e2e, 见 doc/design/todo.md wayland 验收).
- *
- * LINK_LIBS wayland-client c (DT_NEEDED libwayland-client.so); STATIC_LIBS
- * unity 编译期链入. 头经 INCLUDE_DIRS (third_party/wayland/src +
- * third_party/wayland + build/) 解析 wayland-client.h -> 生成协议头.
- */
+// test_wayland_client — libwayland-client.so pure-logic Unity tests.
+//
+// Covers only the pure-logic layer that does not need a real compositor:
+//   - wl_array: init/add/for_each/copy/release (dynamic array + capacity
+//   growth)
+//   - wl_list:  init/insert/remove/length/empty/insert_list (intrusive
+//   doubly-linked list)
+// wl_display_xxx / wl_proxy_create / marshal paths require socket + display and
+// are out of scope here (that is e2e; see doc/design/todo.md wayland
+// acceptance).
+//
+// LINK_LIBS wayland-client c (DT_NEEDED libwayland-client.so); STATIC_LIBS
+// unity linked at compile time. Headers resolved via INCLUDE_DIRS
+// (third_party/wayland/src
+// + third_party/wayland + build/) → wayland-client.h → generated protocol
+// headers.
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -26,9 +30,9 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* ===================== wl_array ===================== */
+// ===================== wl_array =====================
 
-/* init 后 size=0,可立即 for_each 零次遍历,且 release 不泄漏. */
+// After init, size=0; for_each iterates zero times; release leaks nothing.
 void test_wl_array_init_zero(void) {
   struct wl_array a;
   wl_array_init(&a);
@@ -37,7 +41,8 @@ void test_wl_array_init_zero(void) {
   TEST_ASSERT_EQUAL_INT(0, a.size);
 }
 
-/* add 分配并返回可写槽位;数据落点正确且 size 累计. */
+// add allocates and returns a writable slot; data lands correctly and size
+// accumulates.
 void test_wl_array_add_and_read(void) {
   struct wl_array a;
   wl_array_init(&a);
@@ -58,7 +63,7 @@ void test_wl_array_add_and_read(void) {
   wl_array_release(&a);
 }
 
-/* 连续 add 多个元素,容量(alloc)非递减且 for_each 顺序正确. */
+// Multiple adds: capacity (alloc) non-decreasing and for_each order preserved.
 void test_wl_array_add_multiple(void) {
   struct wl_array a;
   wl_array_init(&a);
@@ -82,7 +87,8 @@ void test_wl_array_add_multiple(void) {
   wl_array_release(&a);
 }
 
-/* copy 复制源数据到已 init 的目标,size 一致且内容逐元素相等. */
+// copy duplicates source into an inited dest; sizes match, contents equal
+// elementwise.
 void test_wl_array_copy(void) {
   struct wl_array src, dst;
   wl_array_init(&src);
@@ -106,7 +112,7 @@ void test_wl_array_copy(void) {
   wl_array_release(&dst);
 }
 
-/* release 后可重新 init 复用(add 仍正常工作). */
+// After release, re-init and reuse (add still works).
 void test_wl_array_reuse_after_release(void) {
   struct wl_array a;
   wl_array_init(&a);
@@ -123,14 +129,14 @@ void test_wl_array_reuse_after_release(void) {
   wl_array_release(&a);
 }
 
-/* ===================== wl_list ===================== */
+// ===================== wl_list =====================
 
 struct item {
   int value;
   struct wl_list link;
 };
 
-/* init 后链表为空,length=0,empty=true. */
+// After init the list is empty: length=0, empty=true.
 void test_wl_list_init_empty(void) {
   struct wl_list list;
   wl_list_init(&list);
@@ -138,7 +144,7 @@ void test_wl_list_init_empty(void) {
   TEST_ASSERT_EQUAL_INT(0, wl_list_length(&list));
 }
 
-/* insert 头插,for_each 按插入逆序遍历(后插在前). */
+// insert prepends; for_each iterates in reverse insertion order (newest first).
 void test_wl_list_insert_iterate(void) {
   struct wl_list list;
   wl_list_init(&list);
@@ -152,7 +158,7 @@ void test_wl_list_insert_iterate(void) {
   TEST_ASSERT_FALSE(wl_list_empty(&list));
 
   struct item *cur;
-  int seq[] = {3, 2, 1}; /* 头插: c,b,a */
+  int seq[] = {3, 2, 1}; // head insert: c,b,a
   int idx = 0;
   wl_list_for_each(cur, &list, link) {
     TEST_ASSERT_EQUAL_INT(seq[idx++], cur->value);
@@ -160,7 +166,7 @@ void test_wl_list_insert_iterate(void) {
   TEST_ASSERT_EQUAL_INT(3, idx);
 }
 
-/* remove 中间元素后链表仍连贯,length 递减. */
+// remove a middle element; list stays coherent, length decreases.
 void test_wl_list_remove_middle(void) {
   struct wl_list list;
   wl_list_init(&list);
@@ -174,18 +180,19 @@ void test_wl_list_remove_middle(void) {
   TEST_ASSERT_EQUAL_INT(2, wl_list_length(&list));
 
   struct item *cur;
-  int seq[] = {3, 1}; /* c,a */
+  int seq[] = {3, 1}; // c,a
   int idx = 0;
   wl_list_for_each(cur, &list, link) {
     TEST_ASSERT_EQUAL_INT(seq[idx++], cur->value);
   }
   TEST_ASSERT_EQUAL_INT(2, idx);
 
-  /* b 已脱离,其 link 自指(wayland 惯例),不影响 list */
+  // b detached; its link self-references (wayland convention), no effect on
+  // list
   TEST_ASSERT_EQUAL_INT(2, b.value);
 }
 
-/* remove 唯一元素后链表回到空. */
+// remove the only element; list returns to empty.
 void test_wl_list_remove_only(void) {
   struct wl_list list;
   wl_list_init(&list);
@@ -198,30 +205,30 @@ void test_wl_list_remove_only(void) {
   TEST_ASSERT_EQUAL_INT(0, wl_list_length(&list));
 }
 
-/* insert_list 把整条 other 接到 list 头部,拆分点连贯且 other 自身仍有效. */
+// insert_list splices the whole other list onto list's head; splice point is
+// coherent and other itself stays valid.
 void test_wl_list_insert_list(void) {
   struct wl_list list, other;
   wl_list_init(&list);
   wl_list_init(&other);
 
-  struct item a = {1, {0}}, b = {2, {0}}; /* list: a,b */
-  struct item c = {3, {0}}, d = {4, {0}}; /* other: c,d */
+  struct item a = {1, {0}}, b = {2, {0}}; // list: a,b
+  struct item c = {3, {0}}, d = {4, {0}}; // other: c,d
   wl_list_insert(&list, &b.link);
-  wl_list_insert(&list, &a.link); /* 头插 → list: a,b */
+  wl_list_insert(&list, &a.link); // head insert → list: a,b
   wl_list_insert(&other, &d.link);
-  wl_list_insert(&other, &c.link); /* 头插 → other: c,d */
+  wl_list_insert(&other, &c.link); // head insert → other: c,d
 
   wl_list_insert_list(&list, &other);
 
   TEST_ASSERT_EQUAL_INT(4, wl_list_length(&list));
 
-  /* insert_list 把 other 整段插到 list 头: c,d,a,b.
-   * 注意: 上游 wl_list_insert_list 不重置 other 哨兵——其 next/prev 仍指向
-   * 已splice进 list 的节点, 故 other 此刻非"空"（wl_list_empty(&other) 为假）,
-   * 与 wayland 自带 list-test.c 的断言口径一致（那里只校验 list 内容, 不校验
-   * other 是否清空）。因此这里只验证 list 的长度与顺序。 */
-
-  /* insert_list 把 other 整段插到 list 头: c,d,a,b */
+  // insert_list splices the whole other segment to the list head: c,d,a,b.
+  // Upstream wl_list_insert_list does not reset the other sentinel — its
+  // next/prev still point at nodes spliced into list, so other is not "empty"
+  // now (wl_list_empty(&other) is false). This matches upstream list-test.c,
+  // which only checks list contents, not other emptiness. So we only verify
+  // list length and order here.
   struct item *cur;
   int seq[] = {3, 4, 1, 2};
   int idx = 0;
@@ -236,13 +243,13 @@ int main(int argc, char **argv, char **envp) {
   (void)argv;
   (void)envp;
   UNITY_BEGIN();
-  /* wl_array */
+  // wl_array
   RUN_TEST(test_wl_array_init_zero);
   RUN_TEST(test_wl_array_add_and_read);
   RUN_TEST(test_wl_array_add_multiple);
   RUN_TEST(test_wl_array_copy);
   RUN_TEST(test_wl_array_reuse_after_release);
-  /* wl_list */
+  // wl_list
   RUN_TEST(test_wl_list_init_empty);
   RUN_TEST(test_wl_list_insert_iterate);
   RUN_TEST(test_wl_list_remove_middle);

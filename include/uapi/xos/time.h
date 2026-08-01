@@ -45,7 +45,7 @@ struct timeval {
 };
 #endif
 
-// ===================== clock_gettime clock IDs (对齐 Linux)
+// ===================== clock_gettime clock IDs (aligned with Linux)
 // =====================
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
@@ -57,7 +57,7 @@ struct timeval {
 #define CLOCK_BOOTTIME 7
 #define CLOCK_TAI 11
 
-// clock_nanosleep flags (对齐 Linux bit/timerfd.h)
+// clock_nanosleep flags (aligned with Linux bit/timerfd.h)
 #define TIMER_ABSTIME 1
 
 #endif /* COMMON_TIME_H */

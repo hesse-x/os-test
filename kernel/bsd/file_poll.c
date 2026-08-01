@@ -30,8 +30,8 @@
 #include <xos/socket.h>
 
 struct drm_fence;
-// 从 sys_poll 抽取的 per-type 就绪判断。纯查询，不阻塞、不加长锁。
-// 语义与 socket.c sys_poll 的 if-else 链完全一致（无语义改变）。
+// Per-type readiness probe extracted from sys_poll. Pure query: no blocking,
+// no long locks. Semantics match the if-else chain in socket.c sys_poll.
 __poll file_poll(struct file *f, __poll events) {
   __poll revents = 0;
   if (!f)
@@ -160,7 +160,7 @@ __poll file_poll(struct file *f, __poll events) {
   } else if (f->type == FD_IPC) {
     // FD_IPC: POLLIN iff owner's recv queue is non-empty.  Non-owner
     // (cross-process hand-off) reports 0 — never ready, harmless to a
-    // foreign epoll (evdev_refact.md §4.3 越权防御).
+    // foreign epoll (evdev_refact.md §4.3 cross-ownership defense).
     pid_t owner_pid = f->ipcfd_owner_pid;
     if (owner_pid >= 0 && owner_pid < MAX_PROC) {
       xtask *o = task_get(owner_pid);

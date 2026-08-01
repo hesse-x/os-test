@@ -4,11 +4,11 @@
 
 # boot/ - EFI bootloader stub (standalone low-address EFI application)
 
-# GNU-EFI paths — discovered via find_*(reface_cmake.md §4.6)，替换硬编码 host 路径。
-# 缺失则 FATAL_ERROR 带安装提示（gnuefi 包名），避免在缺少 GNU-EFI 的环境里
-# 给出误导性的编译错误。find_path 找 efi.h 所在目录（stub.c 用 #include <efi.h>，
-# 故返回 /usr/include/efi 而非 /usr/include）；find_file 找 crt0 对象与 EFI 链接脚本
-# （.lds 不是库，find_library 只搜 .so/.a，故用 find_file）。
+# GNU-EFI paths — discovered via find_* (replacing hardcoded host paths).
+# FATAL_ERROR with install hint on missing, avoiding misleading compile errors.
+# find_path locates efi.h (stub.c uses #include <efi.h>, so it returns
+# /usr/include/efi not /usr/include); find_file locates crt0 object + EFI linker
+# script (.lds is not a library, find_library only searches .so/.a, so find_file).
 find_path(GNU_EFI_INCLUDE_DIR efi.h
     PATHS /usr/include/efi /usr/local/include/efi)
 if(NOT GNU_EFI_INCLUDE_DIR)
@@ -43,13 +43,12 @@ target_include_directories(boot_obj PRIVATE
     ${GNU_EFI_ARCH_INCLUDE_DIR}
     ${CMAKE_SOURCE_DIR}
 )
-# UAPI 契约头（include/uapi → <xos/elf.h>）经 os_uapi 取得
-# （reface_cmake.md §4.7 阶段 2：替代根目录作用域 include/uapi）。
+# UAPI contract headers (include/uapi → <xos/elf.h>) via os_uapi.
 target_link_libraries(boot_obj PRIVATE os_uapi)
-# 阶段 3 flag 去重（reface_cmake.md §3.3）：freestanding 基础 + config 经 os_base_options；
-# WARN_FLAGS 门禁经 os_warn。替代历史 CMAKE_C_FLAGS 字符串继承。
+# Freestanding basics + config via os_base_options; WARN_FLAGS gate via os_warn.
+# Replaces the legacy CMAKE_C_FLAGS string inheritance.
 target_link_libraries(boot_obj PRIVATE os_base_options os_warn)
-# -fPIE + -std=gnu17（与内核一致）；下方 C_STANDARD 11 会把 -std 覆盖为 gnu11。
+# -fPIE + -std=gnu17 (matches kernel); C_STANDARD 11 below overrides -std to gnu11.
 target_compile_options(boot_obj PRIVATE -fPIE -std=gnu17)
 
 target_compile_options(boot_obj PRIVATE

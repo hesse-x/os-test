@@ -30,16 +30,17 @@ struct udev_device {
   char sysname[64];
   char subsystem[32];
   char devtype[32];
-  char
-      action[16]; /* monitor device 的 ACTION(add/remove/change);直读设备为空 */
+  char action[16]; // monitor device's ACTION (add/remove/change); empty for
+                   // direct-read device
   dev_t devnum;
   int initialized;
-  /* property 表(monitor device 从 pipe KV 收到的 ID_INPUT_*、ID_SEAT 等)。
-   * 对齐 Linux libudev 的 properties hashmap——monitor 路径 property 随 uevent
-   * KV 到达 client,存 device 内存,get_property_value 查此表(不查 db)。
-   * 数组代替 hashmap:freestanding user 态无现成 hashmap。32 槽覆盖
-   * ID_INPUT*(12) + ID_SEAT + 少数 WL_*、MOUSE_DPI 等。nprops=0 表示无 property
-   * (直读 device,走 db fallback)。 */
+  // Property table (KV received over the pipe for monitor devices:
+  // ID_INPUT_*, ID_SEAT, etc.). Mirrors Linux libudev's properties hashmap —
+  // monitor-path properties arrive with the uevent KV, are stored in device
+  // memory, and get_property_value reads this table (not the db). Array
+  // stands in for a hashmap: freestanding userspace has no ready hashmap.
+  // 32 slots cover ID_INPUT* (12) + ID_SEAT + a few WL_*, MOUSE_DPI, etc.
+  // nprops=0 means no properties (direct-read device, db fallback).
   struct {
     char key[UDEV_PROP_KEYLEN];
     char value[UDEV_PROP_VALLEN];
@@ -54,18 +55,20 @@ struct udev_list_entry {
 };
 
 struct udev_monitor {
-  struct udev *udev; /* udev_ref 持有,unref 时释放 */
-  int sock_fd; /* AF_UNIX conn fd(connect 后短暂持有,拿 pipe fd 后关) */
-  int pipe_fd; /* SCM_RIGHTS 收到的 pipe rd fd(get_fd 返此,可 epoll) */
-  int subscribed; /* enable_receiving 后置 1(幂等) */
+  struct udev *udev; // held via udev_ref, released on unref
+  int sock_fd; // AF_UNIX conn fd (held briefly after connect, closed once pipe
+               // fd is taken)
+  int pipe_fd; // pipe rd fd received via SCM_RIGHTS (get_fd returns this;
+               // epoll-able)
+  int subscribed; // set to 1 after enable_receiving (idempotent)
 };
 
 struct udev_enumerate {
   int refcount;
   struct udev *udev;
-  char subsystem_filter[32];       // "input" 等，空串表示不过滤
-  char sysname_filter[64];         // "event*" 等，空串表示不过滤
-  struct udev_list_entry *devices; // scan 结果链表头
+  char subsystem_filter[32];       // e.g. "input"; empty string = no filter
+  char sysname_filter[64];         // e.g. "event*"; empty string = no filter
+  struct udev_list_entry *devices; // scan result list head
 };
 
 // Forward declarations needed by cleanup functions
@@ -110,9 +113,9 @@ udev_list_entry_get_next(struct udev_list_entry *list_entry);
 const char *udev_list_entry_get_name(struct udev_list_entry *list_entry);
 const char *udev_list_entry_get_value(struct udev_list_entry *list_entry);
 
-/* 对齐 Linux libudev：udev-seat.c:172 用此宏遍历 enumerate 结果。
- * get_next 已由 shim 提供（声明见上 / 实现见 udev.c:437），此处仅补 foreach
- * 宏。 */
+// Mirrors Linux libudev: udev-seat.c:172 uses this macro to iterate
+// enumerate results. get_next is already provided by the shim (declared
+// above / implemented at udev.c:437); this only adds the foreach macro.
 #define udev_list_entry_foreach(list_entry, first_entry)                       \
   for (list_entry = (first_entry); list_entry != NULL;                         \
        list_entry = udev_list_entry_get_next(list_entry))

@@ -83,7 +83,7 @@ typedef struct cpu_local {
   // have completed all writes to its xtask.  See xtask.exit_done (bug.md §4).
   struct xtask *pending_dead;
 
-  // ---- per-CPU hard-IRQ stack + context marker (frame_opt.md 块一/块二) ----
+  // ---- per-CPU hard-IRQ stack + context marker (frame_opt.md block 1/2) ----
   // These three fields MUST stay after tss_rsp0 (offset 48); the GS offsets
   // below are pinned by _Static_assert in sched.c and consumed by trapentry.S.
   //   irq_stack_top      — top of this CPU's 16KB hard-IRQ stack (page-aligned)
@@ -92,22 +92,22 @@ typedef struct cpu_local {
   //
   // in_hardirq is the HARDIRQ_OFFSET subset of Linux preempt_count: it marks
   // "currently inside a hard-IRQ handler body" so schedule()'s might_sleep()
-  // guard rejects scheduling from IRQ context.  It is NOT an IRQ nesting
+  // guard rejects scheduling from IRQ context. It is NOT an IRQ nesting
   // counter — every IDT gate here is an interrupt gate (IF=0 on entry) and
-  // (after 块二 removes the AHCI sti) hard-IRQs never nest, so a single slot
-  // (irq_stack_saved_rsp) suffices for the IRQ-stack switch.
+  // (after block 2 removes the AHCI sti) hard-IRQs never nest, so a single
+  // slot (irq_stack_saved_rsp) suffices for the IRQ-stack switch.
   uint64_t irq_stack_top;
   uint64_t irq_stack_saved_rsp;
   int in_hardirq;
 
-  // (frame_opt.md 块三) printk re-entry guard.  Counts printk frames nested on
-  // this CPU: printk increments on entry and decrements on exit (cleanup), so
-  // the outermost call runs depth 1 and prints normally.  A genuine
-  // fault-during-printk re-enters printk (depth > 1); we then emit only a bare
-  // "recursive oops" marker and bail, bounding a fault-during-fault cascade.
-  // trap_dispatch no longer arms this itself — that suppressed the dump's own
-  // banner (every dump-time printk looked "recursive" and folded to the
-  // marker, leaving only a bare BACKTRACE).  PANIC bypasses the guard.
+  // (frame_opt.md block 3) printk re-entry guard. Counts printk frames nested
+  // on this CPU: printk increments on entry and decrements on exit (cleanup),
+  // so the outermost call runs depth 1 and prints normally. A genuine
+  // fault-during-printk re-enters printk (depth > 1); we then emit only a
+  // bare "recursive oops" marker and bail, bounding a fault-during-fault
+  // cascade. trap_dispatch no longer arms this itself — that suppressed the
+  // dump's own banner (every dump-time printk looked "recursive" and folded
+  // to the marker, leaving only a bare BACKTRACE). PANIC bypasses the guard.
   int printk_depth;
 } cpu_local;
 

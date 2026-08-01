@@ -60,8 +60,8 @@ typedef struct pipe {
   uint32_t head;
   uint32_t tail;
   refcount_t p_count;
-  wait_queue_head
-      *wq; // eager 分配：数据就绪(POLLIN/POLLOUT) + close(POLLHUP) 共用
+  wait_queue_head *wq; // eagerly allocated: shared by data-ready
+                       // (POLLIN/POLLOUT) and close (POLLHUP)
 } pipe;
 
 struct unix_sock;
@@ -80,9 +80,11 @@ typedef struct file {
   int flags;
   struct inode *inode;
   uint64_t offset;
-  wait_queue_head *wq;                // 惰性分配：NULL 表示无等待者
-  const struct file_operations *f_op; // fd-I/O 分发（NULL=走 type 分发）
-  void *private_data; // 类 Linux：broker/eventfd 等用；f_op->close 负责回收
+  wait_queue_head *wq; // lazily allocated: NULL means no waiters
+  const struct file_operations
+      *f_op;          // fd-I/O dispatch (NULL = type-based dispatch)
+  void *private_data; // Linux-style: used by broker/eventfd etc.; freed by
+                      // f_op->close
   pid_t f_owner;   // F_SETOWN target pid (0 = none); stored, no SIGIO delivery
   int f_owner_sig; // F_SETSIG signal (0 → SIGIO default); stored, not delivered
   int f_owner_type; // F_OWNER_TID/PID/PGRP (F_SETOWN_EX); F_OWNER_PID for

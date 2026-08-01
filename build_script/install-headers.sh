@@ -171,7 +171,7 @@ cp "$SRC"/third_party/musl/include/sys/statvfs.h "$DEST/sys/statvfs.h"
 
 # 3c. musl pthread/signal/sched headers. The repo's user/include/pthread.h,
 #     signal.h, sched.h were deleted when pthread switched to musl (pthread.md
-#     §八) — these three now come from musl. <signal.h> pulls <bits/signal.h>
+#     §8) — these three now come from musl. <signal.h> pulls <bits/signal.h>
 #     (musl arch/x86_64/bits/signal.h, self-contained: sigset_t/stack_t/size_t
 #     come from the already-published <bits/alltypes.h>); it does not collide
 #     with any repo user/include/bits/*.h (alltypes/fcntl/posix/stdint/syscall),

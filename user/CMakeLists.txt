@@ -171,15 +171,21 @@ add_user_lib(m_so
 )
 
 
-# Unity test framework (third_party 例外：编译期符号依赖，STATIC 链入 test ELF)
-# add_third_party_lib(unity STATIC ...)：关 warning(-w)，仅 link os_base_options 取共性基础项，
-# 不被我方 -Werror 门禁污染。test ELF 链 unity 替代内联 unity.c（消除 28 处内联 + 重复 DEFS）。
-# UNITY_EXCLUDE_MATH_H：排除 host <math.h>。freestanding + -nostdlib 下 <sys/cdefs.h>
-# 不被拉入，host math.h 的 __BEGIN_DECLS 等宏无法解析；Unity 自带 UNITY_IS_NAN/IS_INF fallback。
-# 注意不要再加 UNITY_EXCLUDE_SETJMP_H：那会把 TEST_ABORT() 退化为 return，断言失败后
-# 测试继续执行（NULL 级联解引用杀掉整个测试二进制，bug.md Bug 1）。user/include/setjmp.h
-# + lib/setjmp.S 提供可用的 setjmp/longjmp，断言失败经 longjmp 正确中止单个测试。
-# 定义挂在 unity target，经 INTERFACE 传给链入它的 test ELF。
+# Unity test framework (third_party exception: compile-time symbol dependency,
+# STATIC-linked into test ELF).
+# add_third_party_lib(unity STATIC ...): disables warnings (-w), only links
+# os_base_options for common basics, not polluted by our -Werror gate. Test ELF
+# links unity instead of inlining unity.c (eliminating 28 inlines + duplicate DEFS).
+# UNITY_EXCLUDE_MATH_H: exclude host <math.h>. Under freestanding + -nostdlib,
+# <sys/cdefs.h> is not pulled in, so host math.h's __BEGIN_DECLS macros do not
+# resolve; Unity provides UNITY_IS_NAN/IS_INF fallbacks.
+# Do NOT add UNITY_EXCLUDE_SETJMP_H: that degrades TEST_ABORT() to a return, so
+# after an assertion failure the test keeps running (a NULL cascading deref
+# kills the whole test binary, bug.md Bug 1). user/include/setjmp.h +
+# lib/setjmp.S provide working setjmp/longjmp, so assertion failures longjmp to
+# correctly abort a single test.
+# Definitions live on the unity target and propagate via INTERFACE to linking
+# test ELFs.
 add_third_party_lib(unity STATIC
     SOURCES ${CMAKE_SOURCE_DIR}/third_party/Unity/src/unity.c
     INCLUDE_DIRS
@@ -206,40 +212,49 @@ endif()
 
 # hello_dyn (phase 2b+3: full dynamic chain verification)
 # LINK_LIBS c -> -lc resolves to libc.so (dynamic link, records DT_NEEDED libc.so)
-# add_user_dyn_elf 内部已自动解析 LINK_LIBS→<lib>_so/lib<lib>_so target 并 add_dependencies
-# （见 user_rules.cmake），无需手写 add_dependencies(hello_dyn_dyn_elf c_so)。
+# add_user_dyn_elf already resolves LINK_LIBS → <lib>_so/lib<lib>_so target and
+# add_dependencies internally (see user_rules.cmake), no need to hand-write
+# add_dependencies(hello_dyn_dyn_elf c_so).
 # IMAGE_PATH local/hello_dyn.elf: ship to /local/ (override dyn-elf default test/).
 add_user_dyn_elf(hello_dyn C SOURCES hello_dyn.c LINK_LIBS c IMAGE_PATH local/hello_dyn.elf)
 
 # ===================== libc++ smoke ELF (opt-in, -DLIBCXX=1) =====================
-# libc++ 端到端回归（refact_cmake.md §3.6）：覆盖 vector/string、throw/catch（libc++abi
-# TLS __cxa_thread_atexit）、filesystem（int128 compiler runtime）、messages facet（catgets）
-# 四条历史上反复断链的路径。test_runner 报 [PASS]/[FAIL]。
+# libc++ end-to-end regression (refact_cmake.md §3.6): covers vector/string,
+# throw/catch (libc++abi TLS __cxa_thread_atexit), filesystem (int128 compiler
+# runtime), and the messages facet (catgets) — four historically recurring
+# break paths. test_runner reports [PASS]/[FAIL].
 #
-# 不走 add_user_dyn_elf：那条路径硬编码 -nostdlib -nodefaultlibs 链接，无法注入
-# -stdlib=libc++ + libc++/libc++abi/libunwind 运行时（terminal 能用它只因零 STL/异常）。
-# 这里照 ld_test_* stub 模式用手写 add_custom_command：clang++ 驱动 + -stdlib=libc++
-# + sysroot 的 c++/v1 头与 libc++*.so 库（build_libcxx.sh 装入 build/sysroot/usr）。
+# Does NOT use add_user_dyn_elf: that path hard-codes -nostdlib -nodefaultlibs
+# linking and cannot inject -stdlib=libc++ + libc++/libc++abi/libunwind runtimes
+# (terminal can use it only because it has zero STL/exceptions). Here, following
+# the ld_test_* stub pattern, a hand-written add_custom_command: clang++ driver
+# + -stdlib=libc++ + sysroot's c++/v1 headers and libc++*.so libs (build_libcxx.sh
+# installs into build/sysroot/usr).
 #
-# 时序：libc++ 由 build_libcxx.sh 在主 ninja 之后装 sysroot（--cxx），故本 target
-# EXCLUDE_FROM_ALL——默认 ./build.sh 不构建（sysroot 可能无 libc++，强编会链接失败）；
-# 仅 -DLIBCXX=1（./build.sh --cxx 传）时纳入构建。os_image_path 仍注册到 test/，但
-# EXCLUDE_FROM_ALL target 不进 ninja 默认目标，manifest 里的依赖检查由 mkdisk 在
-# 实际构建后满足。
+# Timing: libc++ is installed into the sysroot by build_libcxx.sh after the main
+# ninja (--cxx), so this target is EXCLUDE_FROM_ALL — default ./build.sh does not
+# build it (sysroot may lack libc++; forcing the build would fail the link). Only
+# -DLIBCXX=1 (passed by ./build.sh --cxx) pulls it into the build. os_image_path
+# still registers it under test/, but an EXCLUDE_FROM_ALL target is not in
+# ninja's default target set; the manifest's dependency check is satisfied by
+# mkdisk after the actual build.
 if(LIBCXX)
     set(LIBCXX_SYSROOT ${CMAKE_BINARY_DIR}/sysroot)
     set(LIBCXX_LIB_DIR ${LIBCXX_SYSROOT}/usr/lib)
     set(LIBCXX_SMOKE_ELF ${CMAKE_BINARY_DIR}/libcxx_smoke.elf)
     set(LIBCXX_SMOKE_OBJ ${CMAKE_BINARY_DIR}/libcxx_smoke.o)
 
-    # 编译：--sysroot + -stdlib=libc++ 让 clang 自然解析 sysroot 的 c++/v1 头（C++ 标准库）
-    # 与 sysroot 的 musl C 头（<cstdio>→<stdio.h>）。不用 USER_FREESTANDING_FLAGS：其 -nostdinc
-    # 会同时禁掉 sysroot 的 c++/v1 搜索路径，导致 <cstdio> 找不到；其 -ffreestanding 会让
-    # clang 把 main 当普通函数 mangling（freestanding 下 main 不特殊）→ Scrt1.o 的 _start_c
-    # 找不到 C 链接的 main。本程序是 hosted 动态 ELF（有 PT_INTERP、libc、main），故去掉
-    # -ffreestanding。只用 C++ 标准库头，无 OS 专有头依赖，故无需项目 -I 路径（user/include
-    # shim 反会抢先匹配 <stdio.h>）。--sysroot 已把搜索限制在 sysroot 内（无 host /usr/include
-    # 泄漏，已验证）。
+    # Compile: --sysroot + -stdlib=libc++ lets clang naturally resolve sysroot's
+    # c++/v1 headers (C++ stdlib) and sysroot's musl C headers
+    # (<cstdio>→<stdio.h>). USER_FREESTANDING_FLAGS is NOT used: its -nostdinc
+    # would also disable sysroot's c++/v1 search path, breaking <cstdio>; its
+    # -ffreestanding makes clang mangle main as an ordinary function (under
+    # freestanding main is not special) → Scrt1.o's _start_c cannot find the
+    # C-linkage main. This is a hosted dynamic ELF (has PT_INTERP, libc, main),
+    # so -ffreestanding is dropped. Only C++ stdlib headers are used, no
+    # OS-specific header dependency, so no project -I paths are needed (the
+    # user/include shim would preempt <stdio.h>). --sysroot already restricts
+    # the search to the sysroot (no host /usr/include leakage, verified).
     add_custom_command(OUTPUT ${LIBCXX_SMOKE_OBJ}
         COMMAND ${CMAKE_CXX_COMPILER}
                 -m64 -fno-builtin -fno-stack-protector -mno-red-zone
@@ -251,11 +266,13 @@ if(LIBCXX)
         IMPLICIT_DEPENDS CXX ${CMAKE_CURRENT_SOURCE_DIR}/test/libcxx_smoke.cpp
         COMMENT "Compiling libcxx_smoke.o (libc++, opt-in)")
 
-    # 链接：clang++ 驱动（理解 -stdlib=libc++ 的隐式运行时）+ Scrt1/crti/crtn + libc.so
-    # + sysroot 的 libc++/libc++abi/libunwind。--no-as-needed 保留 libc++ DT_NEEDED；
-    # --allow-shlib-undefined 容忍 libc++ → libc++abi → libunwind 的传递依赖。
-    # libc++*.so 来自 sysroot（build_libcxx.sh 装入），不是 build/ 的 CMake target，
-    # 故无 CMake target 依赖——EXCLUDE_FROM_ALL 下由 --cxx 全流程保证其在场。
+    # Link: clang++ driver (understands -stdlib=libc++'s implicit runtime) +
+    # Scrt1/crti/crtn + libc.so + sysroot's libc++/libc++abi/libunwind.
+    # --no-as-needed keeps libc++ DT_NEEDED; --allow-shlib-undefined tolerates
+    # libc++ → libc++abi → libunwind transitive deps.
+    # libc++*.so comes from the sysroot (installed by build_libcxx.sh), not a
+    # build/ CMake target, so there is no CMake target dependency — under
+    # EXCLUDE_FROM_ALL the --cxx full flow guarantees its presence.
     add_custom_command(OUTPUT ${LIBCXX_SMOKE_ELF}
         COMMAND ${CMAKE_CXX_COMPILER} -fno-pie -no-pie
                 -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1
@@ -302,13 +319,17 @@ add_user_elf(evdev  SOURCES driver/evdev.cc lib/usb_kbd.cc  LINK_LIBS c IMAGE_PA
 # LIBINPUT_* vars behave exactly as when inlined.
 include(${CMAKE_SOURCE_DIR}/build_script/third_party/libinput/libinput.cmake)
 
-# libudev.so (独立共享库,完整 Linux 模式,third_party SHARED-only):udev-shim 的
-# udev_* API 导出供终端 main(libinput_udev_create_context 前的 udev_new())与 libinput.so
-# 内部(udev-seat.c 调 udev_*)共享。add_third_party_lib（分支 B）关 warning(-w)、用
-# os_base_options 等价基础项。FLAGS 追加 -fvisibility=default 覆盖默认 hidden——udev.c 内
-# 非 static 函数全为公共 udev_* API(无内部泄漏),故默认可见即全导出,无需逐个 UDEV_EXPORT 标记。
-# 对齐 Linux:libudev 与 libinput 分离;静态消费者(test_udevd/test_libudev/test_udevd_db
-# 各自 SOURCES 编 udev.c)不受影响。
+# libudev.so (standalone shared lib, full Linux mode, third_party SHARED-only):
+# udev-shim's udev_* API exports are shared by terminal main
+# (libinput_udev_create_context's preceding udev_new()) and libinput.so's
+# internals (udev-seat.c calls udev_*). add_third_party_lib (branch B) disables
+# warnings (-w) and uses os_base_options-equivalent basics. FLAGS adds
+# -fvisibility=default to override the default hidden — every non-static
+# function in udev.c is a public udev_* API (no internal leakage), so default
+# visibility exports all, no per-symbol UDEV_EXPORT marking needed.
+# Aligns with Linux: libudev is separate from libinput; static consumers
+# (test_udevd/test_libudev/test_udevd_db each compile udev.c via SOURCES) are
+# unaffected.
 add_third_party_lib(libudev_so
     SOURCES lib/udev-shim/udev.c
     C
@@ -411,7 +432,7 @@ add_dependencies(ld_test_cycle_dyn_elf ld_stub_a_so ld_stub_b_so c_so)
 # when it links them.
 include(${CMAKE_SOURCE_DIR}/build_script/third_party/libdrm/libdrm.cmake)
 
-# libdrm.a 验证小程序 (libdrm.md §3.4: drmOpen + drmModeGetResources)
+# libdrm.a smoke test (libdrm.md §3.4: drmOpen + drmModeGetResources)
 # xf86drm.h / xf86drmMode.h and upstream <drm.h> resolution paths
 # propagate automatically from the drm target's INTERFACE_INCLUDE_DIRS.
 # IMAGE_PATH test/drm_test_link.elf: ship to /test/ in TEST builds only (diagnostic;

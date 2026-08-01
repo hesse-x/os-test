@@ -23,23 +23,23 @@ struct iovec;
 #define NL_MAX_GROUPS 32
 
 typedef struct netlink_sock {
-  uint32_t groups; // 已订阅的 group bitmask
-  uint32_t portid; // 绑定的端口 ID（默认 = PID）
-  int protocol;    // NETLINK_KOBJECT_UEVENT 等
+  uint32_t groups; // subscribed group bitmask
+  uint32_t portid; // bound port ID (default = PID)
+  int protocol;    // e.g. NETLINK_KOBJECT_UEVENT
 
-  // Receive queue（复用 sk_buff）
+  // Receive queue (reuses sk_buff)
   struct sk_buff *recv_queue_head;
   struct sk_buff *recv_queue_tail;
   int recv_queue_len;
 
-  // Wait queue（epoll 集成）
-  wait_queue_head *wq; // 惰性分配，epoll 等待者挂此
+  // Wait queue (epoll integration); lazily allocated, epoll waiters park here
+  wait_queue_head *wq;
 
-  refcount_t n_count; // fd ref count（dup2 sharing）
-  pid_t owner_pid;    // 创建此 socket 的进程 PID
+  refcount_t n_count; // fd ref count (dup2 sharing)
+  pid_t owner_pid;    // PID of the process that created this socket
 } netlink_sock;
 
-// ===================== nl_group 注册表 =====================
+// ===================== nl_group registry =====================
 typedef struct nl_group_member {
   struct netlink_sock *sock;
   struct nl_group_member *next;
@@ -51,7 +51,7 @@ void netlink_sock_free(netlink_sock *sock);
 void netlink_sock_release(netlink_sock *sock);
 void netlink_sock_close(netlink_sock *sock);
 
-// ===================== Syscall 路径 =====================
+// ===================== Syscall paths =====================
 int64_t netlink_sock_bind(netlink_sock *sock, const sockaddr_nl *addr);
 int64_t netlink_sock_sendmsg(netlink_sock *sock, const struct iovec *iov,
                              size_t iovlen, int flags);

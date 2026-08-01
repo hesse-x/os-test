@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_getrandom — 随机熵子系统 Unity tests (random.md §5.3). */
+// test_getrandom — random entropy subsystem Unity tests (random.md §5.3).
 
 #include <errno.h>
 #include <fcntl.h>
@@ -22,7 +22,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. 两次 getrandom(32B) 结果不同 */
+// 1. Two getrandom(32B) calls return different results.
 void test_basic_unique(void) {
   uint8_t a[32], b[32];
   TEST_ASSERT_EQUAL_INT(32, (int)getrandom(a, sizeof(a), 0));
@@ -30,13 +30,13 @@ void test_basic_unique(void) {
   TEST_ASSERT_TRUE(memcmp(a, b, sizeof(a)) != 0);
 }
 
-/* 2. len=0 返回 0 */
+// 2. len=0 returns 0.
 void test_len_zero(void) {
   uint8_t buf[8];
   TEST_ASSERT_EQUAL_INT(0, (int)getrandom(buf, 0, 0));
 }
 
-/* 3. 边界长度均全量返回 */
+// 3. Boundary lengths all return the full count.
 void test_len_boundary(void) {
   static uint8_t buf[4096];
   const size_t lens[] = {1, 255, 256, 257, 4096};
@@ -44,7 +44,7 @@ void test_len_boundary(void) {
     TEST_ASSERT_EQUAL_INT((int)lens[i], (int)getrandom(buf, lens[i], 0));
 }
 
-/* 4. 1 MiB 全量返回，非全零，前后两段不同 */
+// 4. 1 MiB full read, not all zero, front/back halves differ.
 void test_large(void) {
   enum { LEN = 1 << 20 };
   uint8_t *buf = malloc(LEN);
@@ -63,14 +63,14 @@ void test_large(void) {
   free(buf);
 }
 
-/* 5. 非法 flags → EINVAL */
+// 5. Invalid flags → EINVAL.
 void test_flags_invalid(void) {
   uint8_t buf[8];
   TEST_ASSERT_EQUAL_INT(-1, (int)getrandom(buf, sizeof(buf), 0x8));
   TEST_ASSERT_EQUAL_INT(EINVAL, errno);
 }
 
-/* 6. 合法 flags（含组合）均成功 */
+// 6. Valid flags (including combinations) all succeed.
 void test_flags_valid(void) {
   uint8_t buf[16];
   const unsigned flags[] = {GRND_NONBLOCK, GRND_RANDOM, GRND_INSECURE,
@@ -79,13 +79,13 @@ void test_flags_valid(void) {
     TEST_ASSERT_EQUAL_INT(16, (int)getrandom(buf, sizeof(buf), flags[i]));
 }
 
-/* 7. 非法 buf → EFAULT */
+// 7. Invalid buf → EFAULT.
 void test_bad_buf(void) {
   TEST_ASSERT_EQUAL_INT(-1, (int)getrandom((void *)1, 32, 0));
   TEST_ASSERT_EQUAL_INT(EFAULT, errno);
 }
 
-/* 8. getentropy 上限：>256 → EIO，256 → 0 */
+// 8. getentropy limit: >256 → EIO, 256 → 0.
 void test_getentropy_limit(void) {
   static uint8_t buf[257];
   TEST_ASSERT_EQUAL_INT(-1, getentropy(buf, 257));
@@ -93,7 +93,8 @@ void test_getentropy_limit(void) {
   TEST_ASSERT_EQUAL_INT(0, getentropy(buf, 256));
 }
 
-/* 9. arc4random_buf 两次不同；arc4random_uniform(6) 无越界且六值均出现 */
+// 9. arc4random_buf differs across calls; arc4random_uniform(6) stays in range
+// and all six values appear.
 void test_arc4random(void) {
   uint8_t a[32], b[32];
   arc4random_buf(a, sizeof(a));
@@ -110,7 +111,7 @@ void test_arc4random(void) {
     TEST_ASSERT_TRUE(seen[i] > 0);
 }
 
-/* 10. /dev/urandom 读 32B 成功，两次不同 */
+// 10. /dev/urandom reads 32B successfully, differs across reads.
 void test_dev_urandom(void) {
   int fd = open("/dev/urandom", O_RDONLY);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -121,7 +122,7 @@ void test_dev_urandom(void) {
   close(fd);
 }
 
-/* 11. /dev/random 行为与 urandom 一致 */
+// 11. /dev/random behaves the same as urandom.
 void test_dev_random(void) {
   int fd = open("/dev/random", O_RDONLY);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -132,7 +133,8 @@ void test_dev_random(void) {
   close(fd);
 }
 
-/* 12. fork 后父子各取 32B 不同（pipe 回传比对） */
+// 12. After fork, parent and child each get 32B that differ (compared via
+// pipe).
 void test_fork_diverge(void) {
   int pfd[2];
   TEST_ASSERT_EQUAL_INT(0, pipe(pfd));

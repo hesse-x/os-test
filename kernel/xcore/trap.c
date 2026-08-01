@@ -175,7 +175,7 @@ static void restore_cur_tf(void *arg) {
   get_cpu_local()->cur_tf = *saved;
 }
 
-// (frame_opt.md 块三) The printk re-entry guard now lives entirely in printk
+// (frame_opt.md block 3) The printk re-entry guard now lives entirely in printk
 // itself (printk_depth, see log.c): it counts nested printk frames, so the
 // outermost call prints normally and only a genuine fault-during-printk
 // re-entry is folded to the "[recursive oops]" marker.  trap_dispatch no
@@ -183,7 +183,7 @@ static void restore_cur_tf(void *arg) {
 // printk look "recursive" and suppressed the banner, leaving only a bare
 // BACKTRACE.  No cleanup helper is needed on this path anymore.
 
-// (frame_opt.md 块三) #PF cross-process physical-page overlap + same-process
+// (frame_opt.md block 3) #PF cross-process physical-page overlap + same-process
 // alias diagnostics. Pure diagnostics (not functional); previously inlined in
 // trap_dispatch where its locals (4-level page-table walk) bloated the trap
 // frame to ~1KB on the genuine-#PF error path.  Moved out and compiled only
@@ -278,12 +278,13 @@ void trap_dispatch(trapframe *tf) {
   // calling us for hardware IRQs (trapno>=32) and decrements on return;
   // __alltraps leaves it 0 for exceptions (trapno<32).  The #PF sti gate in
   // __alltraps and the might_sleep() guard in schedule() read this counter,
-  // so trap_dispatch itself must not touch it (frame_opt.md 块一/块二).
+  // so trap_dispatch itself must not touch it (frame_opt.md block 1/2).
 
-  // (frame_opt.md 块四) For hardware IRQs we are now running on the per-CPU IRQ
-  // stack; verify its bottom canary so an overrun from a previous IRQ is caught
-  // here rather than silently corrupting a neighbor.  Exceptions (trapno<32)
-  // run on the task stack and are covered by kstack_canary_check in schedule().
+  // (frame_opt.md block 4) For hardware IRQs we are now running on the per-CPU
+  // IRQ stack; verify its bottom canary so an overrun from a previous IRQ is
+  // caught here rather than silently corrupting a neighbor.  Exceptions
+  // (trapno<32) run on the task stack and are covered by kstack_canary_check in
+  // schedule().
   if (tf->trapno >= 32)
     irq_stack_canary_check();
 
@@ -362,7 +363,7 @@ void trap_dispatch(trapframe *tf) {
     // (no timer/wakeup IRQ can ever fire).  Re-enabling interrupts before
     // handing control to the fault handler so the blocking schedule runs with
     // IF=1 and resumes with IF=1 is the Linux-standard idtentry behavior.
-    // (frame_opt.md 块二) The sti is now done in the __alltraps entry asm,
+    // (frame_opt.md block 2) The sti is now done in the __alltraps entry asm,
     // gated on trapno==14 && in_hardirq==0, BEFORE calling trap_dispatch — so
     // this C handler and its schedule() downstream run with IF=1.  IRQ-context
     // #PFs (in_hardirq>0) are unrecoverable kernel bugs and stay IF=0 so they
@@ -385,7 +386,7 @@ void trap_dispatch(trapframe *tf) {
     fpu_lazy_switch(current_task);
     return;
   }
-  // (frame_opt.md 块三) The printk re-entry guard is now self-managed inside
+  // (frame_opt.md block 3) The printk re-entry guard is now self-managed inside
   // printk (printk_depth), so there is nothing to arm here.  The error dump
   // below calls printk normally; only a genuine fault *inside* a printk body
   // re-enters printk and is folded to the marker.
@@ -402,7 +403,7 @@ void trap_dispatch(trapframe *tf) {
     // for the faulting rip's page, record which pids map the SAME physical
     // page. If >1 pid maps it → double allocation in bfc_alloc_page.
     //
-    // (frame_opt.md 块三) This whole cross-process + full page-table walk is
+    // (frame_opt.md block 3) This whole cross-process + full page-table walk is
     // pure diagnostics — it was the bulk of trap_dispatch's 392B stack frame.
     // It now lives in a separate, DEBUG_PF_DIAG-gated function so the normal
     // trap path doesn't materialize its locals, and release builds compile it
@@ -765,12 +766,12 @@ static void timer_handler(trapframe *tf) {
   // context; ignoring kernel-mode samples lets syscall-heavy tasks monopolize
   // a CPU indefinitely.
   if (current_task && current_task != idle && current_task->proc) {
-    // (frame_opt.md 块二) Do NOT call signal_check_hook (=
+    // (frame_opt.md block 2) Do NOT call signal_check_hook (=
     // check_pending_signals) here.  check_pending_signals runs
     // schedule()/do_stop/do_exit, which is forbidden from hard-IRQ context
-    // (might_sleep guard) and — once 块一 lands the per-CPU IRQ stack — would
-    // run on the IRQ stack and store the IRQ stack RSP into prev->k_rsp. Signal
-    // delivery + preemption are handled by
+    // (might_sleep guard) and — once block 1 lands the per-CPU IRQ stack —
+    // would run on the IRQ stack and store the IRQ stack RSP into prev->k_rsp.
+    // Signal delivery + preemption are handled by
     // __trapret's call to check_pending_signals, which runs after the IRQ exit
     // path has switched back to the task stack and decremented in_hardirq.
     // The need_resched=1 below arms the next return-to-user path to consume it.
@@ -844,15 +845,16 @@ void irq_init() {
 }
 
 // ===================== Syscall dispatch =====================
-// Xcore 认领的 syscall(通用/时钟 Linux 号 + IPC/pthread OS 独有 1024+)在此
-// switch 分发;default 返回 XCALL_NOT_OWNED 哨兵,主入口据此 fallthrough 到 BSD
-// 层。 单一真相源:归属在 switch 里,不维护两张号→层归属表。
+// Xcore-owned syscalls (generic/clock Linux numbers + IPC/pthread OS-private
+// 1024+) are dispatched in this switch; default returns the XCALL_NOT_OWNED
+// sentinel so the main entry falls through to the BSD layer.  Single source of
+// truth: ownership lives in the switch, no separate number→layer table.
 #define XCALL_NOT_OWNED ((int64_t)0x8000000000000001LL)
 
 static int64_t xcore_dispatch(trapframe *tf) {
   int64_t nr = tf->rax;
   switch (nr) {
-  // ---- Linux 号:通用/时钟(Xcore 机制层) ----
+  // ---- Linux numbers: generic/clock (Xcore mechanism layer) ----
   case SYS_SCHED_YIELD:
     return sys_yield(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_CLOCK_GETTIME:
@@ -869,7 +871,7 @@ static int64_t xcore_dispatch(trapframe *tf) {
     return sys_ioperm(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_GETPID:
     return sys_getpid(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
-  // ---- OS 独有 1024+(IPC 原语 + pthread_setup) ----
+  // ---- OS-private 1024+ (IPC primitives + pthread_setup) ----
   case SYS_REQ:
     return sys_req(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_RESP:
@@ -946,11 +948,13 @@ void xcall_dispatch(trapframe *tf) {
       current_task->restart_armed = true;
     }
   } else if (nr >= 0) {
-    // Xcore 未认领 → BSD 层
+    // Xcore did not claim it → BSD layer
     int64_t ret =
         syscall_dispatch_hook ? syscall_dispatch_hook(tf) : (int64_t)-ENOSYS;
-    // sys_sigreturn 从信号帧恢复完整 trapframe(含 rax),其自身返回值不得
-    // 覆盖 tf->rax,否则信号投递时保存的返回值(-EINTR 等)被改回 0。
+    // sys_sigreturn restores the full trapframe from the signal frame
+    // (including rax); its own return value must not overwrite tf->rax,
+    // otherwise the return value saved at signal delivery (-EINTR etc.) is
+    // reset to 0.
     if (nr != SYS_RT_SIGRETURN)
       tf->rax = ret;
     // 02: arm restart for a BSD slow syscall that returned -ERESTART (not for

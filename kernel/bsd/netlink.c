@@ -30,8 +30,9 @@
 size_t copy_from_user(void *dst, const void *src, size_t size);
 size_t copy_to_user(void *dst, const void *src, size_t size);
 
-// netlink recv 阻塞点的 wq 回调：__wake_up → 唤醒挂在 sock->wq 的 reader。
-// 不查 wait_event（队列身份制：在 wq 上即唤醒），与 socket/pty 一致。
+// wq callback for the netlink recv blocking point: __wake_up wakes the
+// reader parked on sock->wq. Does not consult wait_event (queue-identity
+// discipline: being on the wq means wake), consistent with socket/pty.
 static void nl_recv_wake_cb(wait_queue_t *wq, unsigned long flags) {
   xtask *target = (xtask *)wq->data;
   (void)flags;
@@ -85,8 +86,8 @@ netlink_sock *netlink_sock_alloc(int protocol) {
   sock->recv_queue_head = NULL;
   sock->recv_queue_tail = NULL;
   sock->recv_queue_len = 0;
-  /* eager 分配 wq：netlink recv 阻塞点转 add_wait_queue 后 wq 必须非
-   * NULL（§5.3）。 */
+  // Eagerly allocate wq: once the netlink recv block point switches to
+  // add_wait_queue, wq must be non-NULL (§5.3).
   sock->wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
   if (!sock->wq) {
     kfree(sock);
@@ -135,7 +136,7 @@ void netlink_sock_close(netlink_sock *sock) {
   // Wake blocked reader
   spin_unlock(&nl_group_lock);
 
-  // 唤醒阻塞 reader（挂 sock->wq）与 epoll 等待者
+  // Wake blocked reader (on sock->wq) and epoll waiters
   __wake_up(sock->wq, POLLHUP | POLLIN);
 
   netlink_sock_release(sock);
@@ -235,8 +236,9 @@ int64_t netlink_sock_recvmsg(netlink_sock *sock, const struct iovec *iov,
         return -EAGAIN;
       }
 
-      // Block reader: 持 nl_group_lock 挂 wq（模式2，条件检查与挂 wq
-      // 同一临界区防丢唤醒）。
+      // Block reader: hold nl_group_lock while parking on wq (mode 2: the
+      // condition check and wq enqueue share one critical section to avoid
+      // lost wakeups).
       xtask *proc = current_task;
       wait_queue_t wait;
       wait.func = nl_recv_wake_cb;
@@ -274,7 +276,7 @@ int64_t netlink_sock_recvmsg(netlink_sock *sock, const struct iovec *iov,
 
       proc->state = RUNNING;
       remove_wait_queue(sock->wq, &wait);
-      continue; // 醒后回顶重新 lock → 重查 recv_queue
+      continue; // woke up: loop top re-acquires lock and re-checks recv_queue
     }
 
     // We have data. Copy to user iov.
@@ -412,7 +414,7 @@ void nl_group_broadcast(uint32_t group_bit, const void *data, size_t len,
     __memcpy(skb->data, data, len);
     nl_skb_enqueue(sock, skb);
 
-    // 唤醒阻塞 reader（挂 sock->wq）与 epoll 等待者，统一走 __wake_up
+    // Wake blocked reader (on sock->wq) and epoll waiters via __wake_up
     __wake_up(sock->wq, POLLIN);
   }
 

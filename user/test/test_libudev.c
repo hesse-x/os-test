@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-// libudev shim 阶段 A 回归测试（TEST 构建，依赖 evdev 真实注册态）。
-// 覆盖 udev_design1.md §6.2：get_sysattr_value / syspath / enumerate /
-// devnum 三边一致 / ID_INPUT_* 属性。
+// libudev shim phase-A regression tests (TEST build; depends on real evdev
+// registration state). Covers udev_design1.md §6.2: get_sysattr_value / syspath
+// / enumerate / devnum three-way consistency / ID_INPUT_* properties.
 
 #include <dirent.h>
 #include <errno.h>
@@ -23,8 +23,8 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 选取实际存在的 evdev 设备作为测试目标。返回 /dev/input/eventN 路径，
- * 失败则 TEST_FAIL。 */
+// Pick an actually-present evdev device as the test target. Returns the
+// /dev/input/eventN path, or NULL on failure.
 static const char *pick_evdev_devnode(void) {
   DIR *dir = opendir("/dev/input");
   if (!dir)
@@ -42,7 +42,7 @@ static const char *pick_evdev_devnode(void) {
   return NULL;
 }
 
-/* ---- P0: get_sysattr_value 读 sysfs 真文件 ---- */
+// ---- P0: get_sysattr_value reads real sysfs files ----
 
 void test_get_sysattr_name(void) {
   const char *dn = pick_evdev_devnode();
@@ -50,8 +50,9 @@ void test_get_sysattr_name(void) {
   struct udev *u = udev_new();
   TEST_ASSERT_NOT_NULL(u);
   struct udev_device *d = udev_device_new_from_devnum(u, 'c', 0);
-  /* 先靠扫描建立设备表；再用 devnum 匹配。下面统一用 from_subsystem_sysname
-   * 兜底取设备，避免依赖 devnum 数值。 */
+  // Rely on a scan to build the device table first, then match by devnum.
+  // Below we uniformly use from_subsystem_sysname as a fallback to obtain the
+  // device, avoiding dependence on the devnum value.
   (void)d;
   struct udev_device *dev =
       udev_device_new_from_subsystem_sysname(u, "input", strrchr(dn, '/') + 1);
@@ -72,7 +73,7 @@ void test_get_sysattr_vendor(void) {
   TEST_ASSERT_NOT_NULL(dev);
   const char *vendor = udev_device_get_sysattr_value(dev, "vendor");
   TEST_ASSERT_NOT_NULL(vendor);
-  /* vendor 为 hex4，长度 > 0 */
+  // vendor is hex4, length > 0
   TEST_ASSERT_TRUE(strlen(vendor) > 0);
   udev_device_unref(dev);
   udev_unref(u);
@@ -99,14 +100,14 @@ void test_get_sysattr_enoent(void) {
   struct udev_device *dev =
       udev_device_new_from_subsystem_sysname(u, "input", strrchr(dn, '/') + 1);
   TEST_ASSERT_NOT_NULL(dev);
-  /* 不存在的属性 → 内核 sysfs_lookup 返回 NULL → open 失败 → 返回 NULL */
+  // Non-existent attr → kernel sysfs_lookup returns NULL → open fails → NULL.
   const char *v = udev_device_get_sysattr_value(dev, "no_such_attr_xyz");
   TEST_ASSERT_NULL(v);
   udev_device_unref(dev);
   udev_unref(u);
 }
 
-/* ---- P1: syspath 真实路径 ---- */
+// ---- P1: syspath real path ----
 
 void test_syspath_real_path(void) {
   const char *dn = pick_evdev_devnode();
@@ -122,7 +123,7 @@ void test_syspath_real_path(void) {
   udev_unref(u);
 }
 
-/* ---- P0(devnum): devnum 三边一致性 ---- */
+// ---- P0(devnum): devnum three-way consistency ----
 
 void test_devnum_ino_consistency(void) {
   const char *dn = pick_evdev_devnode();
@@ -131,7 +132,7 @@ void test_devnum_ino_consistency(void) {
   TEST_ASSERT_EQUAL_INT(0, stat(dn, &st));
 
   struct udev *u = udev_new();
-  /* libinput 路径：stat → st.st_rdev → new_from_devnum 匹配同一 ino 值 */
+  // libinput path: stat → st.st_rdev → new_from_devnum matches the same ino.
   struct udev_device *dev = udev_device_new_from_devnum(u, 'c', st.st_rdev);
   TEST_ASSERT_NOT_NULL(dev);
   TEST_ASSERT_EQUAL_INT((int)st.st_rdev, (int)udev_device_get_devnum(dev));
@@ -139,7 +140,7 @@ void test_devnum_ino_consistency(void) {
   udev_unref(u);
 }
 
-/* ---- P2: enumerate ---- */
+// ---- P2: enumerate ----
 
 void test_enumerate_input(void) {
   struct udev *u = udev_new();
@@ -150,7 +151,7 @@ void test_enumerate_input(void) {
 
   struct udev_list_entry *le = udev_enumerate_get_list_entry(e);
   TEST_ASSERT_NOT_NULL(le);
-  /* /sys/class/input 下至少存在 event0 */
+  // /sys/class/input should contain at least event0.
   int found_event0 = 0;
   for (; le; le = udev_list_entry_get_next(le)) {
     const char *name = udev_list_entry_get_name(le);
@@ -172,7 +173,7 @@ void test_enumerate_sysname_filter(void) {
   struct udev_list_entry *le = udev_enumerate_get_list_entry(e);
   for (; le; le = udev_list_entry_get_next(le)) {
     const char *name = udev_list_entry_get_name(le);
-    /* 过滤后每条 syspath 的末段都应以 "event" 开头 */
+    // After filtering, every syspath's last segment must start with "event".
     const char *base = strrchr(name, '/');
     base = base ? base + 1 : name;
     TEST_ASSERT_EQUAL_INT(0, strncmp(base, "event", 5));
@@ -191,7 +192,7 @@ void test_enumerate_empty_subsys(void) {
   udev_unref(u);
 }
 
-/* ---- P0: ID_INPUT_* 属性 ---- */
+// ---- P0: ID_INPUT_* properties ----
 
 void test_property_id_input(void) {
   const char *dn = pick_evdev_devnode();

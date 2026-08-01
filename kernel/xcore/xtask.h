@@ -111,7 +111,7 @@ typedef struct xtask {
   uint64_t cpu_time_ns;
   uint64_t last_sched;
 
-  // (frame_opt.md 块四) deepest kernel-stack usage observed for this task
+  // (frame_opt.md block 4) deepest kernel-stack usage observed for this task
   // (k_stack_top - lowest RSP).  Updated by kstack_highwater_check() at the
   // schedule() entry choke point; warns when usage approaches the 16KB limit.
   uint64_t stack_highwater;
@@ -147,8 +147,8 @@ typedef struct xtask {
 
   // === thread cleanup ownership (set by clone, read by sched_task_reap) ===
   struct thread_clone_info
-      pending_pthread_setup; // §4.5:由 sys_pthread_setup
-                             // 预置,sys_clone(CLONE_THREAD) 消费即清
+      pending_pthread_setup; // §4.5: preset by sys_pthread_setup,
+                             // consumed-and-cleared by sys_clone(CLONE_THREAD)
   int detached;              // 1 = sched_task_reap owns TLS/stack unmap
   uint64_t tls_page;         // user vaddr of TLS+TCB page (0 if N/A)
   size_t tls_total;          // size of TLS+TCB mapping

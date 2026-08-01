@@ -782,7 +782,7 @@ static int usb_hid_kbd_open(xtask *proc, int fd) {
 // usb_hid_kbd_close: drop any irqfd slots still bound by this process
 // (e.g. evdev exited without HID_UNBIND_IRQFD).  The normal path is
 // HID_UNBIND_IRQFD (hid_ops_ioctl); this is the safety net for fd-table
-// teardown.  (evdev_refact.md §4.2 生命周期)
+// teardown.  (evdev_refact.md §4.2 lifecycle)
 static int usb_hid_kbd_close(xtask *proc, int fd) {
   (void)fd;
   (void)proc;

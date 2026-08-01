@@ -63,8 +63,9 @@
 // F_GETOWN (via F_GETOWN_EX + raw fallback), F_DUPFD_CLOEXEC (with fallback),
 // and routes F_SETLK/F_GETLK/F_*OWN_EX/F_OFD_* through syscall(SYS_fcntl).
 // The kernel's sys_fcntl implements every cmd the repo's old wrapper did
-// (fcntl_worklist §二 aligned all constants). fcntl.c declares _GNU_SOURCE
-// itself, so F_GETOWN_EX / struct f_owner_ex are visible at its build.
+// (fcntl_worklist section 2 aligned all constants). fcntl.c declares
+// _GNU_SOURCE itself, so F_GETOWN_EX / struct f_owner_ex are visible at its
+// build.
 
 // ===================== FD_DEV helpers =====================
 
@@ -103,8 +104,9 @@ int ipc_msg_fd(int fd, const void *msg_buf, size_t msg_len, void *reply_buf,
 // lseek is provided by musl src/unistd (musl_unistd_objs); seekdir/rewinddir
 // below call it, resolved from the same archive.
 
-// ===================== statx（内核唯一元数据 syscall）=====================
-/* statx→stat 缩窄转换：内核只暴露 statx，struct stat 接口全部经此转换。 */
+// ===================== statx (kernel's sole metadata syscall)
+// ===================== statx→stat narrowing: kernel only exposes statx; every
+// struct stat interface routes through this conversion.
 static void statx_to_stat(const struct statx *sx, struct stat *st) {
   __builtin_memset(st, 0, sizeof(*st));
   st->st_dev = makedev(sx->stx_dev_major, sx->stx_dev_minor);
@@ -125,12 +127,13 @@ static void statx_to_stat(const struct statx *sx, struct stat *st) {
   st->st_ctim.tv_nsec = sx->stx_ctime.tv_nsec;
 }
 
-/* statx() 本身由 musl src/linux/statx.c 提供（musl_linux_objs，直接走
- * SYS_statx；其 fstatat 回退分支因 SYS_statx 已实现而不可达），不在此定义。 */
+// statx() itself is provided by musl src/linux/statx.c (musl_linux_objs,
+// issuing SYS_statx directly; its fstatat fallback branch is unreachable
+// because SYS_statx is implemented). Not defined here.
 
-/* 路径类 stat 公共体：直接透传 statx，相对路径由内核 resolve_dirfd_start
- * (AT_FDCWD→bp->cwd) 解析。flags = 0（stat）或 AT_SYMLINK_NOFOLLOW（lstat，
- * 本 OS 无 symlink，语义相同）。 */
+// Common path-stat body: pass through to statx; relative paths are resolved
+// by the kernel's resolve_dirfd_start (AT_FDCWD→bp->cwd). flags = 0 (stat) or
+// AT_SYMLINK_NOFOLLOW (lstat; this OS has no symlinks, so semantics match).
 static int do_stat_path(const char *path, int flags, struct stat *st) {
   if (!path || !st) {
     errno = EFAULT;
@@ -156,9 +159,10 @@ int lstat(const char *path, struct stat *st) {
 // routes it to syscall(SYS_access), which this kernel resolves via
 // vfs_resolve_user (cwd-relative). faccessat below is retained (musl's
 // AT_EACCESS clone path is not adopted this batch — see user/CMakeLists.txt
-// MUSL_UNISTD_EXCLUDE). faccessat(dirfd,path,mode,flags):access 的 dirfd
-// 相对变体。AT_FDCWD ≡ 当前根(内核无 per-process CWD)。flags 透传
-// AT_EACCESS/AT_SYMLINK_NOFOLLOW/ AT_EMPTY_PATH(内核校验)。
+// MUSL_UNISTD_EXCLUDE). faccessat(dirfd,path,mode,flags): dirfd-relative
+// variant of access. AT_FDCWD ≡ current root (kernel has no per-process CWD).
+// flags pass through AT_EACCESS / AT_SYMLINK_NOFOLLOW / AT_EMPTY_PATH
+// (kernel-validated).
 LIBC_EXPORT int faccessat(int dirfd, const char *path, int mode, int flags) {
   if (!path) {
     errno = EFAULT;
@@ -167,9 +171,10 @@ LIBC_EXPORT int faccessat(int dirfd, const char *path, int mode, int flags) {
   return sys_faccessat(dirfd, path, mode, flags);
 }
 
-// utimensat(dirfd,path,times,flags):设 path 的 atime/mtime。times 各项
-// tv_nsec=UTIME_NOW(=now)/UTIME_OMIT(不变);times=NULL → atime=mtime=now
-// (需写权限)。flags 仅 AT_SYMLINK_NOFOLLOW(本 OS 无 symlink,接受同语义)。
+// utimensat(dirfd,path,times,flags): set atime/mtime of path. Each times
+// entry's tv_nsec=UTIME_NOW (=now) / UTIME_OMIT (unchanged); times=NULL →
+// atime=mtime=now (requires write permission). flags is only
+// AT_SYMLINK_NOFOLLOW (this OS has no symlinks; same semantics accepted).
 int utimensat(int dirfd, const char *path, const struct timespec times[2],
               int flags) {
   if (path && !path[0]) {
@@ -180,9 +185,10 @@ int utimensat(int dirfd, const char *path, const struct timespec times[2],
 }
 
 // ===================== fchmod / fchmodat / fchown / fchownat
-// ===================== 落盘仅内存(与 utimensat 一致);setuid 位清除见
-// kernel/bsd/syscall.c。 errno 转换在 syscall.h 薄封装;此处仅 NULL-path
-// 防护(fchmod/fchown 走 fd, 无 path)。
+// ===================== Persistence is in-memory only (same as utimensat);
+// setuid-bit clearing is in kernel/bsd/syscall.c. errno translation lives in
+// the syscall.h thin wrappers; here only NULL-path guards (fchmod/fchown take
+// an fd, no path).
 int fchmod(int fd, mode_t mode) { return sys_fchmod(fd, (unsigned int)mode); }
 
 int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
@@ -333,7 +339,7 @@ int ioctl(int fd, uint32_t cmd, ...) {
   return (int)rc;
 }
 
-// ===================== fstat（经 statx AT_EMPTY_PATH）=====================
+// ===================== fstat (via statx AT_EMPTY_PATH) =====================
 int fstat(int fd, struct stat *st) {
   if (!st) {
     errno = EFAULT;
@@ -346,9 +352,9 @@ int fstat(int fd, struct stat *st) {
   return 0;
 }
 
-// S07: fstatat(dirfd, path, st, flags) — 直接透传 statx。AT_EMPTY_PATH +
-// 空路径 → 内核 stat dirfd 本身；相对路径由内核 resolve_dirfd_start
-// (AT_FDCWD→bp->cwd) 解析。
+// S07: fstatat(dirfd, path, st, flags) — pass through to statx. AT_EMPTY_PATH
+// + empty path → kernel stats the dirfd itself; relative paths are resolved
+// by the kernel's resolve_dirfd_start (AT_FDCWD→bp->cwd).
 int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
   if (!st) {
     errno = EFAULT;

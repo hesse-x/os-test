@@ -93,10 +93,10 @@ void test_sa_resethand(void) {
  * (the kernel now survives the resulting stack overflow by forcing SIGSEGV
  * instead of panicking, but the test should not rely on that).
  *
- * (The S02 design note phrases this as "sigpending 含当前信号"; the observable
- * kernel behavior SA_NODEFER controls is the blocked-mask auto-add at
- * deliver_signal time — signal.c: new_mask |= (1<<sig) only when !SA_NODEFER —
- * so we assert on sigprocmask, which is the direct, non-recursive check.) */
+ * (The S02 design note calls this "sigpending includes the current signal"; the
+ * observable kernel behavior SA_NODEFER controls is the blocked-mask auto-add
+ * at deliver_signal time — signal.c: new_mask |= (1<<sig) only when !SA_NODEFER
+ * — so we assert on sigprocmask, which is the direct, non-recursive check.) */
 static volatile int nodefer_sigusr1_blocked;
 static volatile int nodefer_handler_fired;
 static void nodefer_handler(int sig) {

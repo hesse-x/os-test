@@ -3,15 +3,18 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * evdev 内核态 broker 实现。对齐 refact_evdev.md §5。
- *  - 控制节点 /dev/input/control：driver_pid==0，ops.ioctl =
- * evdev_control_ioctl （走 sys_ioctl direct path，能 alloc_fd/fd_install 返回
- * owner write-fd）。
- *  - owner write-fd：evdev 持有，write 广播到该实例所有 client kfifo。
- *  - consumer fd：/dev/input/eventN open 分配，f_op=evdev_consumer_fops，
- *    read/poll/ioctl(EVIOCG*|GRAB) 均在此处理；EVIOCG* 转发给 manager_pid（§6.3
- * Q 方案）。
  */
+// evdev kernel broker. Mirrors refact_evdev.md §5.
+//  - control node /dev/input/control: driver_pid==0, ops.ioctl =
+//  evdev_control_ioctl
+//    (runs via sys_ioctl direct path, can alloc_fd/fd_install to return owner
+//    write-fd).
+//  - owner write-fd: held by evdev; write broadcasts to all client k fifos of
+//  the instance.
+//  - consumer fd: allocated on /dev/input/eventN open,
+//  f_op=evdev_consumer_fops;
+//    read/poll/ioctl(EVIOCG*|GRAB) handled here; EVIOCG* forwarded to
+//    manager_pid (§6.3 Q).
 #include "kernel/bsd/evdev_broker.h"
 
 #include <xos/errno.h>
@@ -38,17 +41,17 @@
 #include "xos/syscall_nums.h" // __force
 
 #define EVDEV_MAX_INSTANCES 8
-#define EVDEV_CLIENT_KFIFO_CAP 64 /* 每个 client 最多 64 个 input_event */
-#define EVDEV_IOCTL_REPLY_TIMEOUT_NS 3000000000ULL /* 3s */
+#define EVDEV_CLIENT_KFIFO_CAP 64 // max 64 input_event per client
+#define EVDEV_IOCTL_REPLY_TIMEOUT_NS 3000000000ULL // 3s
 
-/* UAPI：register 请求（由 evdev 用户态经 ioctl 传入）。
- * name 与 caps 由 evdev 进程自持，register 仅传 minor/name。 */
+// UAPI: register request (passed in by evdev user-space via ioctl).
+// evdev owns name/caps; register carries only minor/name.
 struct input_register_arg {
-  char name[64];  /* "input/eventN" */
-  uint32_t minor; /* 设备 minor（evdev 内部路由用） */
+  char name[64];  // "input/eventN"
+  uint32_t minor; // device minor (internal evdev routing)
 };
 
-/* owner write-fd 的 private_data：回指实例 + owner token。 */
+// owner write-fd private_data: back-pointer to instance + owner token.
 struct input_producer {
   struct evdev_instance *inst;
   pid_t owner_pid;
@@ -77,17 +80,20 @@ static struct evdev_instance *find_instance_by_minor(uint32_t minor) {
 
 bool input_register_check_perm(xtask *proc) {
   (void)proc;
-  return true; /* §8：当前恒 true，未来权限接入只改此函数 */
+  return true; // §8: currently always true; future permission wiring only
+               // changes here
 }
 
-/* ---- 控制 fd fops ---- */
-/* 控制 fd open：devtmpfs_open 对 /dev/input/control 调用。input_control_fd 的
- * 分配 + 挂入 f->private_data 在 devtmpfs_open 的控制节点特判中完成
- * （见 devtmpfs.c：ops->ioctl == evdev_control_ioctl 标识）。故此控制节点不需要
- * dev_ops.open 回调（open 仅设 FD_DEV 元数据，特判补 private_data）。 */
+// ---- control fd fops ----
+// Control fd open: invoked by devtmpfs_open for /dev/input/control.
+// input_control_fd allocation + f->private_data wiring is done in
+// devtmpfs_open's control-node special case (devtmpfs.c identifies it via
+// ops->ioctl == evdev_control_ioctl). So the control node needs no dev_ops.open
+// callback (open only sets FD_DEV metadata; the special case fills
+// private_data).
 
-/* 控制节点 dev_ops（静态单例）：/dev/input/control，driver_pid==0，
- * ioctl = evdev_control_ioctl 走 sys_ioctl direct path。 */
+// Control node dev_ops (static singleton): /dev/input/control, driver_pid==0,
+// ioctl = evdev_control_ioctl runs via sys_ioctl direct path.
 static struct dev_ops evdev_control_ops;
 
 void evdev_broker_init(void) {
@@ -101,16 +107,17 @@ void evdev_broker_init(void) {
   devtmpfs_create("input/control", &evdev_control_ops, NULL);
 }
 
-/* 控制 fd close：§7.2 遍历 ctrl->instances 失效+remove。在 f_op->close 调用。
- */
+// Control fd close: §7.2 — iterate ctrl->instances, invalidate + remove. Called
+// from f_op->close.
 static int evdev_control_close(struct xtask *proc, struct file *f) {
   (void)proc;
   struct input_control_fd *ctrl = (struct input_control_fd *)f->private_data;
   if (!ctrl)
     return 0;
 
-  /* §7.2：遍历该 evdev 注册的所有实例，逐个失效 + devtmpfs_remove。阻塞的
-   * consumer 在 read/ioctl 重检时见 inst->dead→-ENODEV（§5.4/§12.2）。 */
+  // §7.2: invalidate + devtmpfs_remove every instance this evdev registered.
+  // Blocked consumers see inst->dead → -ENODEV on read/ioctl recheck
+  // (§5.4/§12.2).
   list_node *n = ctrl->instances.next;
   while (n && n != &ctrl->instances) {
     struct evdev_instance *inst =
@@ -118,7 +125,8 @@ static int evdev_control_close(struct xtask *proc, struct file *f) {
     n = n->next;
     inst->dead = true;
     inst->ctrl = NULL;
-    /* 唤醒该实例所有阻塞 reader：遍历 client，对其 wq __wake_up。 */
+    // Wake all blocked readers of this instance: iterate clients, __wake_up
+    // each wq.
     spin_lock(&inst->client_lock);
     list_node *cn = inst->client_list.next;
     while (cn && cn != &inst->client_list) {
@@ -128,12 +136,13 @@ static int evdev_control_close(struct xtask *proc, struct file *f) {
         __wake_up(client->wq, POLLIN);
     }
     spin_unlock(&inst->client_lock);
-    devtmpfs_remove(inst->name); /* 广播 "remove" uevent */
+    devtmpfs_remove(inst->name); // broadcast "remove" uevent
   }
 
-  /* 从全局表移除该 ctrl 拥有的实例（crash 后无活跃 client 的常见情形）。
-   * 仍有活跃 client 的实例：client close 时 consumer_close 仅 list_remove 不
-   * kfree inst；此处移除引用避免野指针，inst 由 g_inst_lock 临界区置 NULL。 */
+  // Remove instances owned by this ctrl from the global table (common case: no
+  // live client after crash). Instances with live clients: consumer_close only
+  // list_removes, does not kfree inst; nulling here prevents dangling pointers
+  // under g_inst_lock.
   spin_lock(&g_inst_lock);
   for (int i = 0; i < EVDEV_MAX_INSTANCES; i++) {
     if (g_instances[i] && g_instances[i]->ctrl == ctrl)
@@ -150,14 +159,14 @@ const struct file_operations evdev_control_fops = {
     .close = evdev_control_close,
 };
 
-/* ---- register：控制节点 ioctl direct path ---- */
+// ---- register: control node ioctl direct path ----
 long evdev_control_ioctl(uint32_t cmd, void *arg) {
   if (cmd != INPUT_REGISTER)
     return -ENOTTY;
 
   struct input_register_arg req;
   __memset(&req, 0, sizeof(req));
-  /* 经 sys_ioctl 的 INPUT_REGISTER 早路由调用，arg 是用户指针。 */
+  // Called via sys_ioctl INPUT_REGISTER early routing; arg is a user pointer.
   if (copy_from_user(&req, arg, sizeof(req)))
     return -EFAULT;
 
@@ -195,9 +204,9 @@ long evdev_control_ioctl(uint32_t cmd, void *arg) {
   g_instances[slot] = inst;
   spin_unlock(&g_inst_lock);
 
-  /* 创建 /dev/input/eventN devtmpfs 节点（driver_pid==0 自动广播 "add"
-   * uevent）。 ops 静态分配（单实例 minor=0；多设备时需 per-instance
-   * ops，见下）。 */
+  // Create /dev/input/eventN devtmpfs node (driver_pid==0 auto-broadcasts "add"
+  // uevent). ops is statically allocated (single instance minor=0; multi-device
+  // needs per-instance ops, see below).
   static struct dev_ops broker_ops[EVDEV_MAX_INSTANCES];
   struct dev_ops *ops = &broker_ops[slot];
   __memset(ops, 0, sizeof(*ops));
@@ -209,7 +218,8 @@ long evdev_control_ioctl(uint32_t cmd, void *arg) {
   ops->open = evdev_consumer_open_cb;
   devtmpfs_create(inst->name, ops, NULL);
 
-  /* 把新实例链入当前控制 fd 的 ctrl->instances（crash 清理用）。 */
+  // Link the new instance into the current control fd's ctrl->instances (crash
+  // cleanup).
   {
     struct input_control_fd *ctrl = NULL;
     xtask *self = current_task;
@@ -228,7 +238,7 @@ long evdev_control_ioctl(uint32_t cmd, void *arg) {
     }
   }
 
-  /* 分配 owner write-fd 装入调用者。 */
+  // Allocate owner write-fd and install it in the caller.
   xtask *proc = current_task;
   spin_lock(&proc->proc->files->fd_lock);
   int fd = alloc_fd(proc->proc->files, 0);
@@ -268,7 +278,7 @@ long evdev_control_ioctl(uint32_t cmd, void *arg) {
   return (long)fd;
 }
 
-/* ---- owner write-fd fops ---- */
+// ---- owner write-fd fops ----
 static ssize_t evdev_owner_write(struct xtask *proc, struct file *f,
                                  const void *buf, size_t count) {
   struct input_producer *prod = (struct input_producer *)f->private_data;
@@ -282,7 +292,8 @@ static ssize_t evdev_owner_write(struct xtask *proc, struct file *f,
   if (nev == 0)
     return 0;
 
-  /* 批广播：对每个 client 整批入队，遵循 SYN_DROPPED 帧语义（§5.6）。 */
+  // Batch broadcast: enqueue the whole batch per client, honoring SYN_DROPPED
+  // frame semantics (§5.6).
   spin_lock(&inst->client_lock);
   list_node *n = inst->client_list.next;
   while (n && n != &inst->client_list) {
@@ -293,8 +304,9 @@ static ssize_t evdev_owner_write(struct xtask *proc, struct file *f,
       const input_event *ev =
           (const input_event *)((const uint8_t *)buf + i * sizeof(input_event));
 
-      /* 帧感知 SYN_DROPPED（§5.6）：in_frame 期间持续丢弃到下一个 SYN_REPORT，
-       * 在该帧边界注入一个 SYN_DROPPED。 */
+      // Frame-aware SYN_DROPPED (§5.6): while in_frame, keep dropping until
+      // next SYN_REPORT, then inject a single SYN_DROPPED at that frame
+      // boundary.
       if (client->in_frame) {
         if (ev->type == EV_SYN && ev->code == SYN_REPORT) {
           input_event drop;
@@ -305,11 +317,11 @@ static ssize_t evdev_owner_write(struct xtask *proc, struct file *f,
             any_new = true;
           client->in_frame = false;
         }
-        continue; /* 否则继续丢弃该帧残余事件 */
+        continue; // otherwise keep dropping remaining events of this frame
       }
 
       if (!kfifo_in(&client->buffer, ev)) {
-        /* drop-new：满时置 dropped + in_frame，丢弃本事件。 */
+        // drop-new: on full, set dropped + in_frame, discard this event.
         client->dropped++;
         client->in_frame = true;
       } else {
@@ -337,15 +349,16 @@ const struct file_operations evdev_owner_fops = {
     .close = evdev_owner_close,
 };
 
-/* ---- consumer path ---- */
+// ---- consumer path ----
 static void evdev_client_wake_cb(wait_queue_t *wq, unsigned long flags) {
   xtask *target = (xtask *)wq->data;
   (void)flags;
   wake_with_event(target, WAIT_POLL);
 }
 
-/* consumer open：devtmpfs_open 对 /dev/input/eventN 调用。分配 evdev_client，
- * 挂入 f->private_data，装 evdev_consumer_fops，链入 inst->client_list。 */
+// consumer open: invoked by devtmpfs_open for /dev/input/eventN. Allocates
+// evdev_client, wires it into f->private_data, installs evdev_consumer_fops,
+// links into inst->client_list.
 int evdev_consumer_open_cb(xtask *proc, int fd) {
   struct file *f = fd_lookup(proc->proc->files, fd);
   if (!f || !f->inode || !f->inode->i_priv)
@@ -367,7 +380,7 @@ int evdev_consumer_open_cb(xtask *proc, int fd) {
   }
   client->inst = inst;
   client->owner_pid = proc->pid;
-  client->wq = NULL; /* set below via file_wq_get before returning */
+  client->wq = NULL; // Set below via file_wq_get before returning.
   client->dropped = 0;
   client->in_frame = false;
   list_init(&client->node);
@@ -378,14 +391,14 @@ int evdev_consumer_open_cb(xtask *proc, int fd) {
 
   f->private_data = client;
   f->f_op = &evdev_consumer_fops;
-  /* Eagerly resolve the per-fd wq so owner write's __wake_up(client->wq)
-   * reaches epoll/poll waiters — not just blocking read. Without this,
-   * client->wq stays NULL until a blocking read (which never happens when
-   * libinput monitors the fd via epoll), so posted events pile up in the
-   * kfifo with no wakeup: input appears dead (bug.md). file_wq_get lazily
-   * allocates f->wq here, and every later file_wq_get(consumer_fd) — by
-   * sys_poll's add_wait_queue or epoll's ep_target_wq — returns the same
-   * f->wq, so the wakeup target and the waiter's wq are one object. */
+  // Eagerly resolve the per-fd wq so owner write's __wake_up(client->wq)
+  // reaches epoll/poll waiters — not just blocking read. Without this,
+  // client->wq stays NULL until a blocking read (which never happens when
+  // libinput monitors the fd via epoll), so posted events pile up in the
+  // kfifo with no wakeup: input appears dead (bug.md). file_wq_get lazily
+  // allocates f->wq here, and every later file_wq_get(consumer_fd) — by
+  // sys_poll's add_wait_queue or epoll's ep_target_wq — returns the same
+  // f->wq, so the wakeup target and the waiter's wq are one object.
   client->wq = file_wq_get(f);
   return 0;
 }
@@ -397,15 +410,15 @@ static ssize_t evdev_consumer_read(struct xtask *proc, struct file *f,
   if (!client || !client->inst || client->inst->dead)
     return -ENODEV;
   if (count == 0)
-    return 0; /* POSIX: read of zero bytes returns zero */
+    return 0; // POSIX: read of zero bytes returns zero
   if (count < sizeof(input_event))
     return -EINVAL;
 
   if (kfifo_len(&client->buffer) == 0) {
     if (f->flags & O_NONBLOCK)
       return -EAGAIN;
-    /* 阻塞等待：加入 per-file wq，schedule，被 owner write 的 __wake_up
-     * 唤醒后重试。 仿 ring.c:64-91 的本地约定。 */
+    // Block: join per-file wq, schedule, retried after owner write's __wake_up
+    // wakes us. Local convention follows ring.c:64-91.
     wait_queue_head *wq = file_wq_get(f);
     if (!wq)
       return -EAGAIN;
@@ -415,8 +428,8 @@ static ssize_t evdev_consumer_read(struct xtask *proc, struct file *f,
     wait.exclusive = 0;
     list_init(&wait.node);
     add_wait_queue(wq, &wait);
-    /* client->wq was resolved at open (evdev_consumer_open_cb) to this same
-     * f->wq, so owner write already wakes us — nothing to assign here. */
+    // client->wq was resolved at open (evdev_consumer_open_cb) to this same
+    // f->wq, so owner write already wakes us — nothing to assign here.
 
     while (kfifo_len(&client->buffer) == 0) {
       if (client->inst->dead) {
@@ -452,10 +465,11 @@ static __poll evdev_consumer_poll(struct xtask *proc, struct file *f,
   return 0;
 }
 
-/* EVIOCG*_与_EVIOCGRAB 转发给 manager evdev（§6.3 Q 方案）。
- * f_op->ioctl 在 sys_ioctl 早于 type 分发（syscall.c:1878）执行，broker 在此
- * 手工复制 sys_req 的 RECV_REQ + WAIT_REQ_REPLY 模式转发给 inst->manager_pid。
- * liveness 前置检查：inst->dead 或 manager 失效 → 立即 -ENODEV（§12.2）。 */
+// EVIOCG*_with_EVIOCGRAB forwarded to manager evdev (§6.3 Q). f_op->ioctl runs
+// in sys_ioctl before type dispatch (syscall.c:1878); broker manually replays
+// the sys_req RECV_REQ + WAIT_REQ_REPLY pattern to forward to
+// inst->manager_pid. Liveness pre-check: inst->dead or manager gone → immediate
+// -ENODEV (§12.2).
 static long evdev_consumer_ioctl(struct xtask *proc, struct file *f,
                                  uint32_t cmd, void *arg) {
   struct evdev_client *client = (struct evdev_client *)f->private_data;
@@ -463,7 +477,7 @@ static long evdev_consumer_ioctl(struct xtask *proc, struct file *f,
     return -ENODEV;
   struct evdev_instance *inst = client->inst;
 
-  /* liveness 前置检查（§5.4/§12.2） */
+  // Liveness pre-check (§5.4/§12.2).
   if (inst->dead)
     return -ENODEV;
   pid_t target_pid = inst->manager_pid;
@@ -476,7 +490,8 @@ static long evdev_consumer_ioctl(struct xtask *proc, struct file *f,
   uint16_t arg_size = _IOC_SIZE(cmd);
   uint8_t dir = _IOC_DIR(cmd);
 
-  /* 复用 sys_ioctl inline 路径布局：req_data[56] = [cmd][arg≤48B][minor@52] */
+  // Reuse sys_ioctl inline path layout: req_data[56] =
+  // [cmd][arg≤48B][minor@52].
   uint8_t req_data[56];
   __memset(req_data, 0, 56);
   *(uint32_t *)req_data = cmd;
@@ -493,11 +508,12 @@ static long evdev_consumer_ioctl(struct xtask *proc, struct file *f,
   hdr->src = (uint32_t)proc->pid;
   __memcpy(hdr->data, req_data, 56);
 
-  /* Arm per-request reply state BEFORE enqueue（对齐 sys_req / sys_ioctl
-   * proxy 的 canonical 顺序）：sys_resp 在 caller scheduler_lock 下发布
-   * req_result/req_replied；若 enqueue 之后才清零，target 在另一 CPU 上
-   * 快速回复时，已送达的 reply 会被这里的清零覆盖（lost wake → 3s
-   * -ETIMEDOUT，bug.md Bug 1 的 test_libudev flaky 根因）。 */
+  // Arm per-request reply state BEFORE enqueue (canonical order from sys_req /
+  // sys_ioctl proxy): sys_resp publishes req_result/req_replied under the
+  // caller's scheduler_lock; if we cleared after enqueue, a fast reply from
+  // target on another CPU could land first and then be clobbered by our clear
+  // here (lost wake → 3s -ETIMEDOUT; bug.md Bug 1 root cause of test_libudev
+  // flakiness).
   proc->req_target_pid = target_pid;
   proc->req_reply_buf = arg;
   proc->req_reply_len = arg_size;
@@ -505,8 +521,9 @@ static long evdev_consumer_ioctl(struct xtask *proc, struct file *f,
   proc->req_replied = 0;
   proc->wait_timed_out = 0;
 
-  /* Enqueue to target's recv queue（仿 sys_req）。target 的 ipc_recv() 会据此设
-   * target->req_caller_pid = proc->pid，使 target 的 sys_resp 回到本进程。 */
+  // Enqueue to target's recv queue (mirrors sys_req). target's ipc_recv() then
+  // sets target->req_caller_pid = proc->pid so target's sys_resp returns to
+  // this process.
   spin_lock(&target->recv_lock);
   uint32_t next = (target->recv_head + 1) % RECV_QUEUE_SIZE;
   if (next == target->recv_tail) {
@@ -517,21 +534,21 @@ static long evdev_consumer_ioctl(struct xtask *proc, struct file *f,
   target->recv_head = next;
   spin_unlock(&target->recv_lock);
 
-  /* 唤醒 target 若在 WAIT_RECV */
+  // Wake target if in WAIT_RECV.
   wake_with_event(target, WAIT_RECV);
 
-  /* Wake target's ipcfd wq（对齐 notify_and_wake §5.6）：evdev 主循环在
-   * epoll_wait(WAIT_POLL) 阻塞，仅 ipcfd wq 的 __wake_up 才能触发
-   * ep_poll_callback → 让 epoll_wait 返回。wake_with_event(WAIT_RECV)
-   * 只唤醒 sys_recv 阻塞者，不触达 epoll 路径。 */
+  // Wake target's ipcfd wq (mirrors notify_and_wake §5.6): evdev's main loop
+  // blocks in epoll_wait(WAIT_POLL); only the ipcfd wq's __wake_up triggers
+  // ep_poll_callback and lets epoll_wait return. wake_with_event(WAIT_RECV)
+  // only wakes sys_recv blockers, not the epoll path.
   if (target->ipcfd_file) {
     wait_queue_head *iwq = file_wq_get(target->ipcfd_file);
     if (iwq)
       __wake_up(iwq, POLLIN);
   }
 
-  /* arm WAIT_REQ_REPLY：locked re-check req_replied（sys_resp 在同一把
-   * scheduler_lock 下发布），reply 已送达则不睡眠。 */
+  // Arm WAIT_REQ_REPLY: locked re-check of req_replied (sys_resp publishes
+  // under the same scheduler_lock); if the reply already landed, don't sleep.
   if (sched_arm_timed_wait(proc, WAIT_REQ_REPLY,
                            sched_clock() + EVDEV_IOCTL_REPLY_TIMEOUT_NS,
                            &proc->req_replied))
@@ -552,8 +569,8 @@ static int evdev_consumer_close(struct xtask *proc, struct file *f) {
     list_remove(&client->node);
     spin_unlock(&inst->client_lock);
   }
-  kfifo_free(&client->buffer); /* 锁外回收 */
-  kfree(client);               /* 锁外回收 */
+  kfifo_free(&client->buffer); // reclaim outside the lock
+  kfree(client);               // reclaim outside the lock
   f->private_data = NULL;
   (void)proc;
   return 0;

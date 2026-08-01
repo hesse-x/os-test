@@ -12,10 +12,12 @@
 #include <xos/ioctl.h>
 
 // ===================== Linux x86-64 syscall numbers =====================
-// 对齐 /usr/include/x86_64-linux-gnu/asm/unistd_64.h。
-// 内核分发表与用户态共用本宏;llvm-libc 经宿主 <sys/syscall.h> 取 __NR_* 直达,
-// 内核收到的号即 Linux 号。仅定义本 OS 已实现的 syscall;未实现的 Linux 号
-// 留空(dispatch default 返 -ENOSYS)。
+// Aligned with /usr/include/x86_64-linux-gnu/asm/unistd_64.h. The kernel
+// dispatch table shares these macros with userspace; llvm-libc reaches
+// __NR_* directly via the host <sys/syscall.h>, so the number the kernel
+// receives is the Linux number. Only syscalls this OS implements are defined;
+// unimplemented Linux numbers are left empty (dispatch default returns
+// -ENOSYS).
 #define SYS_READ 0
 #define SYS_WRITE 1
 #define SYS_OPEN 2
@@ -38,8 +40,9 @@
 #define SYS_RT_SIGPROCMASK 14
 #define SYS_RT_SIGRETURN 15
 #define SYS_MREMAP                                                             \
-  25 // stub: -ENOSYS. musl pthread_getattr_np.c:19 用它探测主线程
-     // 栈大小,失败即走 fallback。绝不能返回 -ENOMEM(musl 会死循环探测)。
+  25 // stub: -ENOSYS. musl pthread_getattr_np.c:19 uses it to probe the main
+     // thread's stack size and falls back on failure. Must never return
+     // -ENOMEM (musl would loop forever on the probe).
 #define SYS_IOCTL 16
 #define SYS_PIPE 22
 #define SYS_PIPE2 293
@@ -227,7 +230,8 @@
 #define SYS_GETSOCKOPT 55
 
 // ===================== OS-specific syscalls (1024+) =====================
-// 给 Linux 预留空间:1024 之前不占任何 OS 独有号;新增独有号往后追加。
+// Reserve space for Linux: claim no OS-specific numbers below 1024; new
+// OS-specific numbers are appended after that.
 #define SYS_OS_BASE 1024
 #define SYS_REQ (SYS_OS_BASE + 0)
 #define SYS_RESP (SYS_OS_BASE + 1)

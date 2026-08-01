@@ -6,25 +6,29 @@ function(add_kernel_object lib_name)
     add_library(${lib_name} OBJECT ${ARG_SOURCES} ${ARG_ASM_SOURCES})
 
     target_include_directories(${lib_name} PRIVATE ${CMAKE_SOURCE_DIR})
-    # UAPI 契约头（include/uapi → #include "xos/*.h"）经 os_uapi 取得
-    # （reface_cmake.md §4.7 阶段 2：替代根目录作用域 include/uapi）。
+    # UAPI contract headers (include/uapi → #include "xos/*.h") via os_uapi,
+    # replacing the prior root-scope include_directories(include/uapi).
     target_link_libraries(${lib_name} PRIVATE os_uapi)
-    # 阶段 3 flag 去重（reface_cmake.md §3.3）：freestanding 基础 + config(-O3/-g/...)
-    # 经 os_base_options；WARN_FLAGS 门禁经 os_warn。-Wno-unused-parameter 经 os_kernel_warn
-    # （必须在 os_warn 之后展开——clang 严格按序处理 -Wall/-Wextra 会重开 -Wunused-parameter，
-    # 见根 CMakeLists os_kernel_warn 注释）。
+    # Phase 3 flag dedup: freestanding basics + config (-O3/-g/...) via
+    # os_base_options; WARN_FLAGS gate via os_warn. -Wno-unused-parameter via
+    # os_kernel_warn (MUST expand after os_warn — clang processes -Wall/-Wextra
+    # in order and reopens -Wunused-parameter; see the root CMakeLists
+    # os_kernel_warn comment).
     target_link_libraries(${lib_name} PRIVATE os_base_options os_warn os_kernel_warn)
-    # 内核 C 代码模型：-fPIE（小码模型，higher-half 需 --no-relax 配套，见根 CMakeLists 托管链接规则）+
-    # -std=gnu17。ASM 源不取 -fPIE（下方 ASM_SOURCES 分支仅给 -m64）。
-    # -fvisibility=hidden：把 C 符号默认标 STV_HIDDEN，缩小 symtab。静态内核最终单次链接，
-    # 跨对象引用与 asm 的 .globl 入口不受影响（同链接域内仍正常解析）。
+    # Kernel C code model: -fPIE (small code model; higher-half needs --no-relax,
+    # see the managed link rule in the root CMakeLists) + -std=gnu17. ASM sources
+    # do not take -fPIE (the ASM_SOURCES branch below only gets -m64).
+    # -fvisibility=hidden: marks C symbols STV_HIDDEN by default, shrinking the
+    # symtab. The static kernel links in one pass; cross-object references and
+    # asm .globl entry points are unaffected (resolved within the same link unit).
     target_compile_options(${lib_name} PRIVATE -fPIE -std=gnu17 -fvisibility=hidden)
     target_compile_definitions(${lib_name} PRIVATE __KERNEL__)
 
     if(PERF)
         target_compile_definitions(${lib_name} PRIVATE PERF)
     endif()
-    # -Wno-unused-parameter 已移至 os_kernel_warn INTERFACE 库（顺序敏感，见上注释）。
+    # -Wno-unused-parameter moved to the os_kernel_warn INTERFACE lib (order-
+    # sensitive, see comment above).
 
     # Kernel is built without SSE/SSE2/MMX: the x86-64 ABI would otherwise
     # pass/return double via XMM, and the kernel deliberately never touches

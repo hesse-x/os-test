@@ -12,19 +12,20 @@
 
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/poll_types.h" // __poll
-#include "kernel/xcore/atomic.h"   // refcount_t (§5: dev_ops 引用计数)
+#include "kernel/xcore/atomic.h"   // refcount_t (§5: dev_ops refcount)
 #include "kernel/xcore/xtask.h"    // pid_t
 
 struct inode;
 
-/* Linux 64-bit dev_t 编码（搬自 user/include/sys/sysmacros.h，内核侧共用）。
- * 内核不依赖用户态 sysmacros.h，故在此独立定义；纯算术无外部依赖。 */
+// Linux 64-bit dev_t encoding (mirrors user sysmacros.h; pure arithmetic, no
+// deps).
 static inline uint64_t k_makedev(uint32_t major, uint32_t minor) {
   return ((uint64_t)(major & 0xfff) << 8) | ((uint64_t)(major & ~0xfff) << 32) |
          ((uint64_t)(minor & 0xff)) | ((uint64_t)(minor & ~0xff) << 12);
 }
 
-/* 解码端（statx stx_dev/stx_rdev 拆 major/minor 用），与 k_makedev 互逆。 */
+// Decode side (splits statx stx_dev/stx_rdev into major/minor), inverse of
+// k_makedev.
 static inline uint32_t k_major(uint64_t dev) {
   return (uint32_t)(((dev >> 8) & 0xfff) | ((dev >> 32) & 0xfffff000));
 }
@@ -40,19 +41,19 @@ struct dev_ops {
   bool is_block;    // true = block device, false = char device
   uint32_t minor;   // device minor number (ioctl req routing)
 
-  /* §5: ops 生命周期引用计数(FUSE fuse_conn 式)。ops 脱离 inode/fd 引用
-   * 计数独立计数:devtmpfs_create 取注册引用,devtmpfs_open 取 fd 引用,
-   * file_put/cleanup_pid 放引用,归 0 才 kfree。仅 user-space driver
-   * (driver_pid>0,kmalloc ops)会归 0;kernel device ops 为 static,注册引用
-   * 永在,refcount 永不归 0。fd 持引用覆盖 read/write/ioctl/poll 裸读 i_priv
-   * 的生命周期,故那些路径不必逐个 get/put。*/
+  // §5: ops lifecycle refcount (FUSE fuse_conn style). Independent of inode/fd
+  // refs: devtmpfs_create takes registration ref, devtmpfs_open takes fd ref,
+  // file_put/cleanup_pid drop; reaches 0 → kfree. Only user-space drivers
+  // (driver_pid>0, kmalloc'd ops) reach 0; kernel device ops are static,
+  // registration ref is permanent. fd ref covers raw i_priv reads in
+  // read/write/ioctl/poll, so those paths need no per-call get/put.
   refcount_t refcount;
 
   char subsystem[8]; // "input" / "drm" / "block" / "tty"
   char devtype[8];   // "evdev" / "card" / "disk" / "ptmx"
   void *subsys_priv; // -> input_dev_props* / NULL
-  void *uevent_priv; // -> uevent_attr_priv* (sysfs uevent attr 的 priv) / NULL
-  struct sysfs_node *sysfs_dir; // sysfs 子树根 (移除时用)
+  void *uevent_priv; // -> uevent_attr_priv* (sysfs uevent attr priv) / NULL
+  struct sysfs_node *sysfs_dir; // sysfs subtree root (used on removal)
 
   // VFS callbacks (only called when driver_pid == 0)
   int (*open)(xtask *proc, int fd);
@@ -72,11 +73,12 @@ struct inode *devtmpfs_lookup(const char *name);
 void devtmpfs_cleanup_pid(pid_t pid);
 void devtmpfs_remove(const char *name);
 
-/* §5: dev_ops 引用计数(FUSE fuse_conn 式);见 devtmpfs.c。*/
+// §5: dev_ops refcount (FUSE fuse_conn style); see devtmpfs.c.
 void dev_ops_get(struct dev_ops *ops);
 void dev_ops_put(struct dev_ops *ops);
-/* §5: 锁下读 inode->i_priv 返回 ops 指针(不加引用);调用方持 fd 引用,
- * ops 在本 fd close 前不归 0,读出后可安全用。防 borrow-window UAF。*/
+// §5: under lock, reads inode->i_priv and returns ops (no ref taken); caller
+// holds fd ref so ops won't reach 0 before this fd closes. Prevents
+// borrow-window UAF.
 struct dev_ops *dev_ops_peek_by_inode(struct inode *ip);
 
 extern struct fstype devtmpfs_fstype;

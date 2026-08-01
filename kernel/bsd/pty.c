@@ -90,8 +90,9 @@ int pty_ring_read(uint8_t *buf, uint32_t head, uint32_t *tail, uint8_t *data,
 // ===================== Helpers =====================
 static int pty_eintr_check(xtask *proc) { return signal_pending(proc) ? 1 : 0; }
 
-// pty wq 回调：__wake_up → 唤醒挂在 pty->wq 的阻塞 reader/writer。
-// 不查 wait_event（队列身份制：在 pty->wq 上即唤醒）。
+// pty wq callback: __wake_up wakes the blocked reader/writer on pty->wq.
+// wait_event is not consulted (queue-identity model: being on pty->wq means
+// wake).
 static void pty_wake_cb(wait_queue_t *wq, unsigned long flags) {
   xtask *target = (xtask *)wq->data;
   (void)flags;
@@ -185,8 +186,9 @@ struct pty *pty_alloc(int *out_index) {
   pty->t_pgid = 0;
   pty->pts_priv = NULL;
 
-  /* eager 分配 wq：pty close 路径（proc.c pty_close_file）需对 pty->wq 调
-   * __wake_up 唤醒对端（§5.2）。OOM 回退：释放 pty 后返回 NULL。 */
+  // Eager-allocate wq: the pty close path (proc.c pty_close_file) must call
+  // __wake_up on pty->wq to wake the peer (§5.2). OOM fallback: free pty,
+  // return NULL.
   pty->wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
   if (!pty->wq) {
     spin_unlock(&pty_alloc_lock);

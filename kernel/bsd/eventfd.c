@@ -135,9 +135,9 @@ int64_t eventfd_do_read(struct file *f, void *buf) {
   }
 
 out:
-  // prepare_to_wait: 循环顶部标过 BLOCKED，若 break 前被 wake 命中把 run_node
-  // push 进 了 run_queue（state=READY），goto out 不走 schedule() 会留下悬空
-  // run_node。cancel 掉。
+  // prepare_to_wait: the loop top marked BLOCKED; if a wake hit before the
+  // break and pushed run_node into the run_queue (state=READY), going to out
+  // without schedule() would leave a dangling run_node. Cancel it.
   sched_cancel_spurious_wake(current_task);
   if (wq)
     remove_wait_queue(wq, &wait);
@@ -201,9 +201,9 @@ int64_t eventfd_do_write(struct file *f, const void *buf, size_t len) {
   }
 
 out:
-  // prepare_to_wait: 循环顶部标过 BLOCKED，若 break 前被 wake 命中把 run_node
-  // push 进 了 run_queue（state=READY），goto out 不走 schedule() 会留下悬空
-  // run_node。cancel 掉。
+  // prepare_to_wait: the loop top marked BLOCKED; if a wake hit before the
+  // break and pushed run_node into the run_queue (state=READY), going to out
+  // without schedule() would leave a dangling run_node. Cancel it.
   sched_cancel_spurious_wake(current_task);
   if (wq)
     remove_wait_queue(wq, &wait);

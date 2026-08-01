@@ -23,7 +23,8 @@ typedef int64_t blkcnt_t;
 typedef unsigned long nfds_t;
 
 typedef long ssize_t;
-typedef unsigned useconds_t; /* Linux/musl ABI：unsigned int（勿改回 long，见
-                                bits/alltypes.h） */
+// Linux/musl ABI: unsigned int (do not change back to long; see
+// bits/alltypes.h)
+typedef unsigned useconds_t;
 
 #endif /* _SYS_TYPES_H */

@@ -7,9 +7,10 @@
 #define KERNEL_BSD_FOPS_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "kernel/bsd/poll_types.h"    // IWYU pragma: keep
-#include "kernel/xcore/posix_types.h" // ssize_t
+#include "kernel/xcore/posix_types.h" // IWYU pragma: keep
 
 struct file;
 struct xtask;

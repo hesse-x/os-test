@@ -4,17 +4,18 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_statx.c — SYS_STATX(332) 直连 + stat/lstat/fstat/fstatat 收敛验证。
- *
- * 内核只暴露 statx 一个元数据 syscall；libc 的 stat/lstat/fstat/fstatat 全
- * 部经 statx 实现并做 statx→stat 缩窄转换。本测试交叉验证：
- *   1. statx 基本字段（mask/mode/ino/size/nlink/blksize/uid/gid/rdev）与
- *      stat() 结果一致（转换无损）。
- *   2. AT_EMPTY_PATH + 空路径 ≡ fstat；dirfd + 相对路径解析正确。
- *   3. lstat/fstatat 与 stat 交叉一致。
- *   4. 无 inode 的 fd 类型（pipe）经 statx 报 S_IFIFO。
- *   5. devtmpfs 设备节点 rdev major/minor 重组 == legacy st_rdev。
- *   6. 错误路径：ENOENT / EBADF / EINVAL（SYNC 双置位、未知 flag 位）。 */
+// test_statx.c — SYS_STATX(332) direct + stat/lstat/fstat/fstatat convergence.
+//
+// The kernel exposes only statx for metadata; libc's stat/lstat/fstat/fstatat
+// all route through statx with a statx→stat narrowing conversion. This test
+// cross-validates:
+//   1. statx basic fields (mask/mode/ino/size/nlink/blksize/uid/gid/rdev)
+//      match stat() (lossless conversion).
+//   2. AT_EMPTY_PATH + empty path ≡ fstat; dirfd + relative path resolves.
+//   3. lstat/fstatat consistent with stat.
+//   4. inode-less fd types (pipe) report S_IFIFO via statx.
+//   5. devtmpfs device nodes: rdev major/minor recombine == legacy st_rdev.
+//   6. Error paths: ENOENT / EBADF / EINVAL (both SYNC bits, unknown flags).
 #include "unity.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -24,7 +25,7 @@
 #include <sys/sysmacros.h>
 #include <unistd.h>
 
-/* FAT32-root fixtures（簇 512B，同 test_stat_real）。 */
+// FAT32-root fixtures (cluster 512B, same as test_stat_real).
 #define FAT "/statx_fat"
 
 void setUp(void) { mkdir(FAT, 0755); }
@@ -44,7 +45,7 @@ static int make_file(const char *path, const char *data, int len) {
   return 0;
 }
 
-/* statx 基本字段与 stat() 一致；掩码恰为 STATX_BASIC_STATS。 */
+// statx basic fields match stat(); mask is exactly STATX_BASIC_STATS.
 void test_statx_basic_fields(void) {
   cleanup();
   umask(0);
@@ -54,7 +55,7 @@ void test_statx_basic_fields(void) {
   TEST_ASSERT_EQUAL_INT(0, stat(FAT "/u", &st));
 
   struct statx sx;
-  memset(&sx, 0xA5, sizeof(sx)); /* 毒药填充：验证内核写全字段 */
+  memset(&sx, 0xA5, sizeof(sx)); // poison fill: verify kernel writes all fields
   TEST_ASSERT_EQUAL_INT(0,
                         statx(AT_FDCWD, FAT "/u", 0, STATX_BASIC_STATS, &sx));
 
@@ -67,10 +68,10 @@ void test_statx_basic_fields(void) {
   TEST_ASSERT_EQUAL_INT(st.st_nlink, sx.stx_nlink);
   TEST_ASSERT_EQUAL_UINT64(st.st_ino, sx.stx_ino);
   TEST_ASSERT_EQUAL_UINT64(5, sx.stx_size);
-  TEST_ASSERT_EQUAL_INT(512, sx.stx_blksize); /* FAT32 root 簇大小 */
+  TEST_ASSERT_EQUAL_INT(512, sx.stx_blksize); // FAT32 root cluster size
   TEST_ASSERT_EQUAL_INT(st.st_blksize, sx.stx_blksize);
   TEST_ASSERT_EQUAL_UINT64(st.st_blocks, sx.stx_blocks);
-  /* major/minor 重组 == legacy dev_t 编码 */
+  // major/minor recombine == legacy dev_t encoding
   TEST_ASSERT_EQUAL_UINT64(st.st_rdev,
                            makedev(sx.stx_rdev_major, sx.stx_rdev_minor));
   TEST_ASSERT_EQUAL_UINT64(st.st_dev,
@@ -79,7 +80,7 @@ void test_statx_basic_fields(void) {
   unlink(FAT "/u");
 }
 
-/* AT_EMPTY_PATH + 空路径 ≡ fstat（同 fd 同结果）。 */
+// AT_EMPTY_PATH + empty path ≡ fstat (same fd, same result).
 void test_statx_empty_path_matches_fstat(void) {
   cleanup();
   int fd = open(FAT "/u", O_CREAT | O_RDWR | O_TRUNC, 0644);
@@ -100,7 +101,8 @@ void test_statx_empty_path_matches_fstat(void) {
   unlink(FAT "/u");
 }
 
-/* lstat（经 statx AT_SYMLINK_NOFOLLOW）与 stat 一致（本 OS 无 symlink）。 */
+// lstat (via statx AT_SYMLINK_NOFOLLOW) matches stat (no symlink support in
+// this OS).
 void test_lstat_matches_stat(void) {
   cleanup();
   TEST_ASSERT_EQUAL_INT(0, make_file(FAT "/u", "x", 1));
@@ -115,7 +117,7 @@ void test_lstat_matches_stat(void) {
   unlink(FAT "/u");
 }
 
-/* dirfd + 相对路径：statx 与 fstatat 都解析到同一 inode。 */
+// dirfd + relative path: statx and fstatat resolve to the same inode.
 void test_statx_dirfd_relative(void) {
   cleanup();
   TEST_ASSERT_EQUAL_INT(0, make_file(FAT "/u", "abc", 3));
@@ -131,7 +133,7 @@ void test_statx_dirfd_relative(void) {
   TEST_ASSERT_EQUAL_UINT64(st.st_ino, sx.stx_ino);
   TEST_ASSERT_EQUAL_UINT64(3, sx.stx_size);
 
-  /* fstatat（libc 亦走 statx）同路径一致 */
+  // fstatat (libc also routes through statx) matches same path
   struct stat st2;
   TEST_ASSERT_EQUAL_INT(0, fstatat(dfd, "u", &st2, 0));
   TEST_ASSERT_EQUAL_UINT64(st.st_ino, st2.st_ino);
@@ -141,7 +143,7 @@ void test_statx_dirfd_relative(void) {
   unlink(FAT "/u");
 }
 
-/* 无 inode 的 fd 类型：pipe 经 statx 报 S_IFIFO。 */
+// inode-less fd: pipe reports S_IFIFO via statx.
 void test_statx_pipe_fd(void) {
   int p[2];
   TEST_ASSERT_EQUAL_INT(0, pipe(p));
@@ -155,7 +157,7 @@ void test_statx_pipe_fd(void) {
   close(p[1]);
 }
 
-/* devtmpfs 设备节点：statx rdev major/minor 重组 == legacy st_rdev。 */
+// devtmpfs device node: statx rdev major/minor recombine == legacy st_rdev.
 void test_statx_dev_rdev(void) {
   struct stat st;
   TEST_ASSERT_EQUAL_INT(0, stat("/dev/sda", &st));
@@ -169,38 +171,38 @@ void test_statx_dev_rdev(void) {
   TEST_ASSERT_EQUAL_INT(st.st_mode, sx.stx_mode);
 }
 
-/* 目录：statx("/") 报 S_IFDIR。 */
+// directory: statx("/") reports S_IFDIR.
 void test_statx_directory(void) {
   struct statx sx;
   TEST_ASSERT_EQUAL_INT(0, statx(AT_FDCWD, "/", 0, STATX_BASIC_STATS, &sx));
   TEST_ASSERT_TRUE((sx.stx_mode & S_IFMT) == S_IFDIR);
 }
 
-/* 错误路径：ENOENT / EBADF / EINVAL。 */
+// error paths: ENOENT / EBADF / EINVAL.
 void test_statx_errors(void) {
   struct statx sx;
 
-  /* 不存在路径 → ENOENT */
+  // nonexistent path → ENOENT
   TEST_ASSERT_EQUAL_INT(
       -1, statx(AT_FDCWD, FAT "/nonexistent", 0, STATX_BASIC_STATS, &sx));
   TEST_ASSERT_EQUAL_INT(ENOENT, errno);
 
-  /* 坏 fd + AT_EMPTY_PATH → EBADF */
+  // bad fd + AT_EMPTY_PATH → EBADF
   TEST_ASSERT_EQUAL_INT(-1,
                         statx(9999, "", AT_EMPTY_PATH, STATX_BASIC_STATS, &sx));
   TEST_ASSERT_EQUAL_INT(EBADF, errno);
 
-  /* FORCE_SYNC|DONT_SYNC 同置 → EINVAL（Linux do_statx） */
+  // FORCE_SYNC|DONT_SYNC both set → EINVAL (Linux do_statx)
   TEST_ASSERT_EQUAL_INT(-1, statx(AT_FDCWD, "/",
                                   AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC,
                                   STATX_BASIC_STATS, &sx));
   TEST_ASSERT_EQUAL_INT(EINVAL, errno);
 
-  /* 未知 flag 位 → EINVAL */
+  // unknown flag bit → EINVAL
   TEST_ASSERT_EQUAL_INT(-1, statx(AT_FDCWD, "/", 0x20, STATX_BASIC_STATS, &sx));
   TEST_ASSERT_EQUAL_INT(EINVAL, errno);
 
-  /* 空路径无 AT_EMPTY_PATH → ENOENT */
+  // empty path without AT_EMPTY_PATH → ENOENT
   TEST_ASSERT_EQUAL_INT(-1, statx(AT_FDCWD, "", 0, STATX_BASIC_STATS, &sx));
   TEST_ASSERT_EQUAL_INT(ENOENT, errno);
 }

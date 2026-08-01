@@ -6,8 +6,9 @@
 
 // Terminal process (libinput variant): VT100 state machine + cell buffer +
 // compositor. Uses libinput for keyboard event processing via
-// libinput_udev_create_context() + libinput_udev_assign_seat() — 设备增删由
-// udev 后端 monitor 自动管理,终端经 udevd 管道收热插拔 uevent。
+// libinput_udev_create_context() + libinput_udev_assign_seat() — device
+// add/remove is managed automatically by the udev backend monitor; the
+// terminal receives hotplug uevents over the udevd pipe.
 // Keyboard events reach libinput via the evdev broker: /dev/input/eventN
 // consumer fds (in-kernel read/poll, per-client kfifo).
 //
@@ -440,36 +441,45 @@ static const struct libinput_interface interface = {
     .close_restricted = close_restricted,
 };
 
-// ===================== monitor 重连(M4) =====================
+// ===================== monitor reconnect (M4) =====================
 
-// spin 判定 monitor 死后:suspend 清死 monitor + 6×sleep(1) 退避 resume
-// 重建(§3.3)。 resume 失败可重试:enable_receiving 失败路径干净清理保
-// udev_monitor==NULL(:259 短路守卫不触发)。
+// On detecting monitor death via spin: suspend clears the dead monitor, then
+// back off with 6×sleep(1) before resume rebuilds it (§3.3). Resume failure
+// is retryable: enable_receiving's failure path cleans up so udev_monitor==NULL
+// (the :259 short-circuit guard doesn't fire).
 static int resume_reconnect(struct libinput *li) {
-  libinput_suspend(li); /* udev_input_disable:unref+置 NULL+删 epoll source */
+  libinput_suspend(
+      li); // udev_input_disable: unref + NULL + remove epoll source
   for (int attempt = 0; attempt < 6;
-       attempt++) { /* 覆盖 init START_LIMIT_BURST=5 的 ~5s 窗口 + 1 余量 */
-    write(2, "R", 1); /* 单字符进度:rebuild 尝试 */
+       attempt++) {   // covers init's START_LIMIT_BURST=5 ~5s window + 1 margin
+    write(2, "R", 1); // single-char progress: rebuild attempt
     if (libinput_resume(li) == 0)
-      return 0; /* resume 成功:monitor 重建 + udev_input_add_devices 重开设备 */
-    sleep(1); /* udevd 重启窗口 socket 名空洞,退避(对齐 init RESTART_SEC=1) */
+      return 0; // resume ok: monitor rebuilt + udev_input_add_devices reopens
+                // devices
+    sleep(1);   // udevd restart window leaves socket name hollow; back off
+                // (matches init RESTART_SEC=1)
   }
-  return -1; /* 6 次耗尽 → enter_degraded_hold */
+  return -1; // 6 attempts exhausted → enter_degraded_hold
 }
 
-// 6 次耗尽(§3.4):停紧邻重试,保 pty/shell 活(会话不丢),输入断,5s 低频探活自愈。
-// 填补本 OS 无 systemd 保活 udevd 与 Linux"udevd 回来自然恢复"语义差。
-// 探活期间持续 drain master_fd(pty 输出)并渲染——否则 pty 缓冲撑满会反压
-// shell 写阻塞,与"shell 活/会话不丢"相悖(§3.4 设计意图)。master_fd 为
-// O_NONBLOCK(read 返 -1/EAGAIN 即无数据),故 drain 不阻塞探活节奏。
+// 6 attempts exhausted (§3.4): stop the tight retry, keep the pty/shell alive
+// (session preserved), input dropped, low-frequency 5s probing for self-heal.
+// This bridges the gap between this OS having no systemd to keep udevd alive
+// and Linux's "udevd comes back and naturally recovers" semantics. During
+// probing, keep draining master_fd (pty output) and rendering — otherwise the
+// pty buffer fills and back-pressures the shell into write-blocking, which
+// contradicts "shell alive / session preserved" (§3.4 design intent).
+// master_fd is O_NONBLOCK (read returns -1/EAGAIN when no data), so draining
+// doesn't block the probe cadence.
 static void enter_degraded_hold(struct libinput *li) {
-  write(2, "D", 1); /* 单字符进度:degraded */
+  write(2, "D", 1); // single-char progress: degraded
   fprintf(stderr, "terminal: monitor dead, input degraded\n");
   while (1) {
-    sleep(5); /* 低频探活 */
+    sleep(5); // low-frequency probe
     if (libinput_resume(li) == 0)
-      return; /* 探活成功:monitor 重建,返回主循环恢复输入 */
-    /* drain pty 输出保 shell 活(会话不丢) */
+      return; // probe succeeded: monitor rebuilt, return to main loop, restore
+              // input
+    // drain pty output to keep the shell alive (session preserved)
     char b[4096];
     int64_t n;
     while ((n = read(master_fd, b, sizeof(b))) > 0) {
@@ -498,11 +508,12 @@ extern "C" int main(int argc, char **argv, char **envp) {
     }
   }
 
-  // Create libinput context (udev backend):udev_new + udev_create_context +
-  // assign_seat("seat0")。assign_seat → udev_input_enable 建 udevd monitor +
-  // 首轮 enumerate 直读 /sys 补现有设备(§2.1/§2.4)。
-  // udevd 未起/crash → assign_seat 失败 → 黑屏(有意信号,不回退 path
-  // 后端,§2.4)。
+  // Create libinput context (udev backend): udev_new + udev_create_context +
+  // assign_seat("seat0"). assign_seat → udev_input_enable builds the udevd
+  // monitor + a first-round enumerate reading /sys to pick up existing devices
+  // (§2.1/§2.4).
+  // udevd not started / crashed → assign_seat fails → black screen (intentional
+  // signal, no fallback to the path backend, §2.4).
   struct udev *udev = udev_new();
   struct libinput *li = NULL;
   while (!li) {
@@ -517,8 +528,10 @@ extern "C" int main(int argc, char **argv, char **envp) {
   libinput_log_set_handler(li, libinput_log);
   libinput_log_set_priority(li, LIBINPUT_LOG_PRIORITY_DEBUG);
 
-  // assign_seat 触发首轮 enumerate + 建 monitor(取代显式 path_add_device)。
-  // 设备增删事件由 udev 后端自动管理,终端无需处理 ADDED/REMOVED(§2.3)。
+  // assign_seat triggers the first-round enumerate + builds the monitor
+  // (replacing explicit path_add_device). Device add/remove events are handled
+  // automatically by the udev backend; the terminal need not handle
+  // ADDED/REMOVED (§2.3).
   if (libinput_udev_assign_seat(li, "seat0") != 0) {
     printf("terminal: libinput_udev_assign_seat FAILED (udevd down?)\n");
     while (1) {
@@ -601,8 +614,9 @@ extern "C" int main(int argc, char **argv, char **envp) {
   char linebuf[256];
   int linebuf_len = 0;
 
-  // monitor 死亡检测:连续「零真实事件即时返回」计数(§3.2)。EOF busy-spin
-  // 是 level-triggered epoll 下 pipe rd 常驻可读的唯一可观测副作用(§3.1)。
+  // monitor death detection: count of consecutive "immediate return with zero
+  // real events" (§3.2). EOF busy-spin is the only observable side effect of a
+  // permanently-readable pipe rd under level-triggered epoll (§3.1).
   int spin_count = 0;
   const int SPIN_THRESHOLD = 2000;
 
@@ -701,7 +715,7 @@ extern "C" int main(int argc, char **argv, char **envp) {
           for (int i = 0; i < ascii_len; i++)
             vt100_feed(ascii_buf[i]);
         }
-      } /* if KEYBOARD_KEY */
+      } // if KEYBOARD_KEY
       libinput_event_destroy(lev);
     }
 
@@ -709,7 +723,7 @@ extern "C" int main(int argc, char **argv, char **envp) {
     char buf[4096];
     int64_t n = read(master_fd, buf, sizeof(buf));
     if (n > 0) {
-      got_event = 1; /* pty 数据算真实活动,复位 spin */
+      got_event = 1; // pty data counts as real activity; reset spin
       for (int64_t i = 0; i < n; i++) {
         vt100_feed(buf[i]);
         if (dirty_row_end - dirty_row_start >= 4)
@@ -756,15 +770,16 @@ extern "C" int main(int argc, char **argv, char **envp) {
     pfds[1].revents = 0;
     int pr = poll(pfds, 2, -1);
 
-    // spin 检测:li_fd 常驻可读却永无事件 = monitor pipe EOF busy-spin(§3.2)。
-    // 真实事件(键/pty)复位;唯 EOF busy-spin 能累到阈值。pty 重建后 master_fd
-    // 每轮重新组装,与 resume 正交(§3.3,grill Q6)。
+    // spin detection: li_fd permanently readable but never yielding events =
+    // monitor pipe EOF busy-spin (§3.2). Real events (key/pty) reset it; only
+    // EOF busy-spin accumulates to the threshold. master_fd is reassembled
+    // each round after pty rebuild, orthogonal to resume (§3.3, grill Q6).
     int real_activity = got_event || (pfds[1].revents & POLLIN);
     if (!real_activity && pr > 0 && (pfds[0].revents & POLLIN)) {
       if (++spin_count >= SPIN_THRESHOLD) {
         spin_count = 0;
-        if (resume_reconnect(li) != 0) /* 路径 B:suspend→resume 重建 */
-          enter_degraded_hold(li);     /* 路径 C:degraded hold + 5s 探活 */
+        if (resume_reconnect(li) != 0) // path B: suspend→resume rebuild
+          enter_degraded_hold(li);     // path C: degraded hold + 5s probing
       }
     } else {
       spin_count = 0;

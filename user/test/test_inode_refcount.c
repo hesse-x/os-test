@@ -12,7 +12,8 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. 多次开关同一文件,path_walk 中间段 inode_put 配对不泄漏(hash 表不膨胀)。 */
+// 1. Repeated open/close of the same file: path_walk's intermediate inode_put
+// pairs must not leak (hash table must not grow).
 void test_inode_refcount_repeat_open_close(void) {
   for (int i = 0; i < 50; i++) {
     int fd = open("/vfs_test_rc", O_CREAT | O_RDWR, 0644);
@@ -20,7 +21,8 @@ void test_inode_refcount_repeat_open_close(void) {
     if (fd >= 0)
       close(fd);
   }
-  /* 若 path_walk 中间段泄漏,多次后 hash 表/内存耗尽导致 open 失败。 */
+  // If path_walk's intermediate segments leak, repeated runs exhaust the hash
+  // table/memory and open fails.
   int fd = open("/vfs_test_rc", O_RDONLY);
   TEST_ASSERT_TRUE(fd >= 0);
   if (fd >= 0)
@@ -28,7 +30,7 @@ void test_inode_refcount_repeat_open_close(void) {
   unlink("/vfs_test_rc");
 }
 
-/* 2. 深层路径多次开关(每段 path_walk lookup+put 配对)。 */
+// 2. Deep path repeated open/close (each path_walk segment lookup+put paired).
 void test_inode_refcount_deep_path(void) {
   mkdir("/vfs_rc_d", 0755);
   for (int i = 0; i < 20; i++) {

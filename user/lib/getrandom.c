@@ -24,7 +24,7 @@ int getentropy(void *buf, size_t buflen) {
     errno = EIO;
     return -1;
   }
-  // 短读重试直到填满
+  // Retry on short reads until the buffer is full.
   size_t done = 0;
   while (done < buflen) {
     ssize_t n = getrandom((char *)buf + done, buflen - done, 0);
@@ -40,7 +40,8 @@ void arc4random_buf(void *buf, size_t n) {
   while (done < n) {
     ssize_t r = getrandom((char *)buf + done, n - done, 0);
     if (r <= 0) {
-      // 校验失败属编程错误（内核不失败路径下不应到达）：填 0 防御并返回
+      // Verification failure is a programming error (unreachable on kernel
+      // non-failure paths): defensively zero-fill and return.
       memset((char *)buf + done, 0, n - done);
       return;
     }
@@ -54,7 +55,7 @@ uint32_t arc4random_uniform(uint32_t upper_bound) {
     arc4random_buf(&r, sizeof(r));
     return r;
   }
-  // 拒绝采样消除模偏置：min = 2^32 mod upper_bound
+  // Rejection sampling to eliminate modulo bias: min = 2^32 mod upper_bound
   uint32_t min = (uint32_t)(-upper_bound) % upper_bound;
   for (;;) {
     uint32_t r;

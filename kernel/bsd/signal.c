@@ -642,9 +642,10 @@ int pgsignal(pid_t pgid, int sig) {
 
 // ===================== BSD syscall: kill =====================
 // S03: Linux-aligned permission + scope. NSIG=65 (RT signals 33-64). sig==0
-// does existence + permission validation only. CAP_KILL via capable() 收口
-// (今天等价 euid==0;未来 capability bitmap 落地只改 capable)。pid==-1
-// broadcasts to every sendable process except init and the sender.
+// does existence + permission validation only. CAP_KILL via capable() gates
+// (today equivalent to euid==0; once capability bitmaps land, only capable()
+// changes). pid==-1 broadcasts to every sendable process except init and the
+// sender.
 
 // Permission check: may `sender` post `sig` to `target`? Returns 0 / -EPERM.
 // (sig is unused today — real CAP_KILL would let root send any signal even to
@@ -654,7 +655,7 @@ static int kill_permitted(xtask *sender, xtask *target, int sig) {
   if (!target || !target->proc)
     return -ESRCH;
   if (capable(CAP_KILL))
-    return 0; // root ≡ CAP_KILL(今天等价 euid==0)
+    return 0; // root ≡ CAP_KILL (today equivalent to euid==0)
   if (sender->proc->euid == target->proc->uid ||
       sender->proc->euid == target->proc->euid ||
       sender->proc->uid == target->proc->euid)
@@ -1156,10 +1157,10 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     }
     __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
 
-    /* SIGKILL and SIGSTOP cannot be blocked; Linux silently clears both
-     * bits instead of rejecting an otherwise valid sigaction. This is needed
-     * for musl's pthread cancellation handler, whose all-signals mask
-     * deliberately includes them. */
+    // SIGKILL and SIGSTOP cannot be blocked; Linux silently clears both
+    // bits instead of rejecting an otherwise valid sigaction. Needed for
+    // musl's pthread cancellation handler, whose all-signals mask
+    // deliberately includes them.
     new_act.sa_mask &= ~(SIGMASK(SIGKILL) | SIGMASK(SIGSTOP));
 
     proc->proc->signal->action[sig] = new_act;

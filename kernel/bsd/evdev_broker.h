@@ -3,11 +3,12 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * evdev 内核态字符设备 broker（对齐 Linux drivers/input/evdev.c 的内核层）。
- * evdev 用户态进程经 /dev/input/control 的 INPUT_REGISTER ioctl 注册设备，
- * broker 在 /dev/input/eventN 呈标准 evdev
- * 语义（read/poll/EVIOCG*_与_EVIOCGRAB）， 持有 per-client kfifo 广播输入事件。
  */
+// evdev kernel char-device broker (mirrors Linux drivers/input/evdev.c kernel
+// layer). evdev user-space process registers devices via INPUT_REGISTER ioctl
+// on /dev/input/control; broker exposes /dev/input/eventN with standard evdev
+// semantics (read/poll/EVIOCG*_with_EVIOCGRAB) and per-client kfifo event
+// broadcast.
 #ifndef KERNEL_BSD_EVDEV_BROKER_H
 #define KERNEL_BSD_EVDEV_BROKER_H
 
@@ -21,56 +22,59 @@
 #include "kernel/xcore/wait_queue.h" // wait_queue_head
 #include "kernel/xcore/xtask.h"      // pid_t, xtask
 
-/* 每个消费者 fd 的状态。f->private_data 指向它。 */
+// Per-consumer fd state. f->private_data points to it.
 struct evdev_client {
-  kfifo buffer;   // per-consumer 事件环（SPSC，定长 input_event）
-  list_node node; // 链入 inst->client_list
-  struct evdev_instance *inst; // 回指所属实例
-  wait_queue_head *wq; // per-fd 等待队列（= file_wq_get(consumer_fd)）
-  uint32_t dropped;    // SYN_DROPPED 计数
-  bool in_frame;       // 帧中间状态（SYN_DROPPED 帧边界用）
-  pid_t owner_pid;     // 消费者 pid
+  kfifo buffer;   // per-consumer event ring (SPSC, fixed-size input_event)
+  list_node node; // linked into inst->client_list
+  struct evdev_instance *inst; // back-pointer to owning instance
+  wait_queue_head *wq;         // per-fd wait queue (= file_wq_get(consumer_fd))
+  uint32_t dropped;            // SYN_DROPPED counter
+  bool in_frame;               // mid-frame flag (SYN_DROPPED frame boundary)
+  pid_t owner_pid;             // consumer pid
 };
 
-/* 每个 eventN 实例。devtmpfs inode->i_priv 指向它。 */
+// Per eventN instance. devtmpfs inode->i_priv points to it.
 struct evdev_instance {
   char name[64]; // "input/eventN"
   uint32_t minor;
-  list_node client_list; // 消费者列表头
-  spinlock client_lock;  // 保护 client_list（遍历持锁，释放锁外）
-  pid_t manager_pid;     // 注册它的 evdev pid（=控制 fd 持有者）
-  struct input_control_fd *ctrl; // 回指注册它的控制 fd（crash 清理用）
-  list_node ctrl_node; // 链入 ctrl->instances（crash 清理遍历用）
-  bool dead;           // 实例已失效（evdev crash 后）
+  list_node client_list; // consumer list head
+  spinlock client_lock;  // guards client_list (iterate under lock, drop before
+                         // release)
+  pid_t manager_pid;     // pid of registering evdev (= control fd owner)
+  struct input_control_fd *ctrl; // back-pointer to control fd (crash cleanup)
+  list_node ctrl_node; // linked into ctrl->instances (crash cleanup traversal)
+  bool dead;           // instance invalidated (after evdev crash)
 };
 
-/* 控制节点 fd（evdev 持有）。f->private_data 指向它。 */
+// Control node fd (held by evdev). f->private_data points to it.
 struct input_control_fd {
   pid_t manager_pid;   // = current_task->pid at open
-  list_node instances; // 此 fd 注册的所有 instance（crash 清理用）
+  list_node instances; // all instances registered by this fd (crash cleanup)
 };
 
-/* 控制 fd 的 ioctl：register。在 sys_ioctl 的 dev_ops direct path 执行
- * （driver_pid==0），返回 owner write-fd。 */
+// Control fd ioctl: register. Runs in sys_ioctl dev_ops direct path
+// (driver_pid==0), returns owner write-fd.
 long evdev_control_ioctl(uint32_t cmd, void *arg);
 
-/* 初始化：创建 /dev/input/control 控制节点。由 bsd_init 调用。 */
+// Init: create /dev/input/control control node. Called from bsd_init.
 void evdev_broker_init(void);
 
-/* /dev/input/eventN 的 dev_ops.open（分配 evdev_client，装 consumer fops）。 */
+// dev_ops.open for /dev/input/eventN (allocates evdev_client, installs consumer
+// fops).
 int evdev_consumer_open_cb(xtask *proc, int fd);
 
-/* owner write-fd 的 fops。read/poll 返回 -EINVAL，write 广播，close 释放
- * producer。 */
+// Owner write-fd fops. read/poll return -EINVAL, write broadcasts, close
+// releases the producer.
 extern const struct file_operations evdev_owner_fops;
 
-/* 消费者 fd 的 fops。read/poll/ioctl(EVIOCG*|GRAB)/close。 */
+// Consumer fd fops: read/poll/ioctl(EVIOCG*|GRAB)/close.
 extern const struct file_operations evdev_consumer_fops;
 
-/* 控制 fd 的 fops：close 遍历 instances 触发失效+remove（§7.2）。 */
+// Control fd fops: close iterates instances, triggers invalidation + remove
+// (§7.2).
 extern const struct file_operations evdev_control_fops;
 
-/* 权限校验占位（当前恒 true，§8）。 */
+// Permission check placeholder (currently always true, §8).
 bool input_register_check_perm(xtask *proc);
 
-#endif /* KERNEL_BSD_EVDEV_BROKER_H */
+#endif // KERNEL_BSD_EVDEV_BROKER_H

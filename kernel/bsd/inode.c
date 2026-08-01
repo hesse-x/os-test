@@ -15,13 +15,14 @@
 static struct inode *inode_hash_table[INODE_HASH_SIZE];
 static spinlock inode_hash_lock = SPINLOCK_INIT;
 static uint32_t next_dev_ino = 0x80000000;
-/* ino 段分区（全局 hash 唯一）：
- *   FAT32     cluster 派生      (< 0x80000000)
- *   devtmpfs  next_dev_ino      (0x80000000+, 设备/目录)
- *   tmpfs     next_tmpfs_ino    (0xC0000000+, 内存 fs 文件/socket)
- * 注意：inode_create 对 INODE_DIR 强制走 next_dev_ino 自增（忽略调用者 ino），
- * 故 tmpfs 目录 inode 落在 dev 段；tmpfs 文件/socket inode 用调用者传入的
- * 0xC0000000+ ino（走 else 分支保留）。各 fs 自维护计数器，全局 hash 去重。 */
+// ino range partitioning (globally hash-unique):
+//   FAT32     cluster-derived     (< 0x80000000)
+//   devtmpfs  next_dev_ino        (0x80000000+, devices/dirs)
+//   tmpfs     next_tmpfs_ino      (0xC0000000+, in-memory fs files/sockets)
+// Note: inode_create forces INODE_DIR through next_dev_ino increment (ignoring
+// the caller's ino), so tmpfs dir inodes land in the dev range; tmpfs
+// file/socket inodes use the caller-supplied 0xC0000000+ ino (else branch
+// preserves it). Each fs maintains its own counter; the global hash dedups.
 
 static unsigned inode_hash(uint32_t ino) { return ino & (INODE_HASH_SIZE - 1); }
 
@@ -75,11 +76,12 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
   refcount_set(&ip->i_count, 1);
   ip->i_lock = SPINLOCK_INIT;
   ip->i_priv = NULL;
-  ip->i_op = NULL; /* 未挂的 inode dispatch 安全返 -ENOSYS/-EACCES */
+  ip->i_op = NULL; // unmounted inode dispatch safely returns -ENOSYS/-EACCES
   ip->shm = NULL;
   ip->mount = NULL;
   ip->wq = NULL;
-  ip->atime = ip->mtime = ip->ctime = 0; /* 时间戳内存态:由 update_time 写 */
+  ip->atime = ip->mtime = ip->ctime =
+      0; // timestamps in-memory, written by update_time
   list_init(&ip->i_flock);
   ip->i_flock_lock = SPINLOCK_INIT;
   ip->start_cluster = start_cluster;
@@ -145,7 +147,8 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
   refcount_set(&ip->i_count, 1);
   ip->i_lock = SPINLOCK_INIT;
   ip->i_priv = NULL;
-  ip->i_op = NULL; /* cache miss 新建;命中分支复用旧 inode,iget 出口幂等补挂 */
+  ip->i_op = NULL; // cache miss new inode; the hit branch reuses the old one,
+                   // iget attaches i_op idempotently at the exit
   ip->shm = NULL;
   ip->mount = NULL;
   ip->wq = NULL;

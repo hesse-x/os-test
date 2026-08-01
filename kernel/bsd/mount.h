@@ -15,9 +15,9 @@
 
 struct inode;
 
-/* d_type constants (Linux DT_* values) — used by dir_emit and fstype
- * getdents callbacks. No named constants existed before; fat32.c used
- * inline magic numbers 4/8. */
+// d_type constants (Linux DT_* values) — used by dir_emit and fstype
+// getdents callbacks. No named constants existed before; fat32.c used
+// inline magic numbers 4/8.
 #define DT_UNKNOWN 0
 #define DT_FIFO 1
 #define DT_CHR 2
@@ -27,45 +27,46 @@ struct inode;
 #define DT_LNK 10
 #define DT_SOCK 12
 
-/* Pointer-encoded error helpers (Linux convention). The kernel did not
- * define these before; vfs_resolve_user returns ERR_PTR(-errno) on
- * failure so callers can distinguish "no mount matched" (NULL) from
- * "user copy failed" (ERR_PTR). */
+// Pointer-encoded error helpers (Linux convention). The kernel did not
+// define these before; vfs_resolve_user returns ERR_PTR(-errno) on
+// failure so callers can distinguish "no mount matched" (NULL) from
+// "user copy failed" (ERR_PTR).
 #define IS_ERR_VALUE(x) ((unsigned long)(void *)(x) >= (unsigned long)(-4095UL))
 #define ERR_PTR(e) ((void *)(long)(e))
 #define PTR_ERR(p) ((long)(p))
 #define IS_ERR(p) IS_ERR_VALUE((unsigned long)(void *)(p))
 
-/* Directory emit context — aligned with Linux dir_context/dir_emit model.
- * fstype->getdents callbacks call dir_emit() for each entry; sys_getdents
- * sets up ctx (buf/len/pos=f->offset) and writes back f->offset=ctx->pos. */
+// Directory emit context — aligned with Linux dir_context/dir_emit model.
+// fstype->getdents callbacks call dir_emit() for each entry; sys_getdents
+// sets up ctx (buf/len/pos=f->offset) and writes back f->offset=ctx->pos.
 struct dir_context {
-  uint64_t pos;   /* IN: f->offset; OUT: updated cursor */
-  void *buf;      /* kernel buffer */
-  size_t len;     /* buffer capacity */
-  size_t written; /* bytes written so far */
+  uint64_t pos;   // IN: f->offset; OUT: updated cursor
+  void *buf;      // kernel buffer
+  size_t len;     // buffer capacity
+  size_t written; // bytes written so far
 };
 
-struct mount_entry; /* forward: struct fstype.mount_root takes mount_entry*,
-                     * defined below struct fstype */
+struct mount_entry; // forward: struct fstype.mount_root takes mount_entry*,
+                    // defined below struct fstype
 
 struct fstype {
-  const char *name; /* "fat32" / "devtmpfs" / "sysfs" */
+  const char *name; // "fat32" / "devtmpfs" / "sysfs"
   struct inode *(*mount_root)(
-      struct mount_entry *m); /* 返回挂载点根 inode(已 inode_get) */
+      struct mount_entry *m); // return mountpoint root inode (inode_get'd)
   ssize_t (*getdents)(
       struct inode *dir,
-      struct dir_context *ctx); /* fops 层 per-inode,不进 i_op */
-  /* 重构后 lookup/mkdir/unlink/rmdir/stat 全局回调删除,改走 i_op。 */
+      struct dir_context *ctx); // fops-layer per-inode; not in i_op
+  // After refactor, lookup/mkdir/unlink/rmdir/stat global callbacks were
+  // removed; they go through i_op instead.
 };
 
-/* mount(2) flags — Linux x86-64 values (uapi linux/fs.h). Only the bits the
- * kernel inspects are named here. MS_NOSUID is consumed by execve
- * (setuid/setgid bit honored only on mounts without MS_NOSUID).
- * MS_RDONLY/NODEV/NOEXEC are accepted and stored in mount_entry.m_flags but not
- * yet enforced (no permission/execute-bit semantics in this FS); see todo.md.
- * MS_REMOUNT/MS_BIND are not implemented and rejected with -ENOSYS so a caller
- * cannot believe a remount/bind happened when it was silently dropped. */
+// mount(2) flags — Linux x86-64 values (uapi linux/fs.h). Only the bits the
+// kernel inspects are named here. MS_NOSUID is consumed by execve
+// (setuid/setgid bit honored only on mounts without MS_NOSUID).
+// MS_RDONLY/NODEV/NOEXEC are accepted and stored in mount_entry.m_flags but not
+// yet enforced (no permission/execute-bit semantics in this FS); see todo.md.
+// MS_REMOUNT/MS_BIND are not implemented and rejected with -ENOSYS so a caller
+// cannot believe a remount/bind happened when it was silently dropped.
 #define MS_RDONLY 0x00000001
 #define MS_NOSUID 0x00000002
 #define MS_NODEV 0x00000004
@@ -78,11 +79,11 @@ struct fstype {
 #define RELPATH_MAX 256
 
 struct mount_entry {
-  char mntpoint[MNTPOINT_MAX]; /* "/" / "/dev" / "/sys" */
+  char mntpoint[MNTPOINT_MAX]; // "/" / "/dev" / "/sys"
   struct fstype *fs;
-  void *fs_data;    /* mount-private data (NULL for fat32/devtmpfs) */
-  uint32_t m_flags; /* MS_* bits accepted at mount(2) (MS_NOSUID consumed by
-                     * execve; RDONLY/NODEV/NOEXEC stored, not yet enforced) */
+  void *fs_data;    // mount-private data (NULL for fat32/devtmpfs)
+  uint32_t m_flags; // MS_* bits accepted at mount(2) (MS_NOSUID consumed by
+                    // execve; RDONLY/NODEV/NOEXEC stored, not yet enforced)
   bool in_use;
 };
 

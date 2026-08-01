@@ -35,7 +35,7 @@ bool kfifo_in(kfifo *kf, const void *elem) {
   uint32_t h = __atomic_load_n(&kf->head, __ATOMIC_ACQUIRE);
   uint32_t t = kf->tail;
   uint32_t next = (t + 1) % kf->cap;
-  if (next == h) // 满
+  if (next == h) // full
     return false;
   __memcpy((uint8_t *)kf->buf + (size_t)t * kf->esize, elem, kf->esize);
   __atomic_store_n(&kf->tail, next, __ATOMIC_RELEASE);
@@ -60,7 +60,7 @@ bool kfifo_out(kfifo *kf, void *out) {
     return false;
   uint32_t h = kf->head;
   uint32_t t = __atomic_load_n(&kf->tail, __ATOMIC_ACQUIRE);
-  if (h == t) // 空
+  if (h == t) // empty
     return false;
   __memcpy(out, (uint8_t *)kf->buf + (size_t)h * kf->esize, kf->esize);
   __atomic_store_n(&kf->head, (h + 1) % kf->cap, __ATOMIC_RELEASE);

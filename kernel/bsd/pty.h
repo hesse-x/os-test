@@ -126,7 +126,8 @@ struct pty {
   uint8_t s_to_m_buf[PTY_BUF_SIZE]; // slave->master (shell output)
   uint32_t s_to_m_head, s_to_m_tail;
 
-  // 阻塞等待者改挂 pty->wq，不再记录 pid（队列身份制，§5.2）
+  // Blocked waiters now hang on pty->wq; pid is no longer recorded
+  // (queue-identity model, §5.2)
 
   // termios (kernel stored, user reads via TCGETS)
   struct termios t_termios;
@@ -148,7 +149,7 @@ struct pty {
   // Pointer to slave device priv (for cleanup)
   struct pts_dev_priv *pts_priv;
 
-  wait_queue_head *wq; // 惰性分配，epoll 等待者挂此
+  wait_queue_head *wq; // lazily allocated; epoll waiters hang here
 };
 
 // ===================== Global PTY table =====================

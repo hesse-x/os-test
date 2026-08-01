@@ -11,5 +11,5 @@ add_kernel_object(driver_obj
 # included as "drm/drm.h" by virtio_gpu.c (and drm_internal.h).
 target_include_directories(driver_obj PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/drm/include)
-# 层间依赖图（reface_cmake.md §4.1/§3.5）：driver_obj 依赖 bsd_obj（传递 xcore_obj→mem→arch）。
+# Layer dependency graph: driver_obj -> bsd_obj (transitively xcore_obj->mem->arch).
 target_link_libraries(driver_obj PUBLIC bsd_obj)

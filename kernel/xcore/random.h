@@ -9,7 +9,7 @@
 
 #include <stddef.h>
 
-void xcore_random_init(void); // BSP 早期调用（含 ChaCha20 自检）
-void csprng_read(void *buf, size_t len); // 内核 buf，永不失败/阻塞
+void xcore_random_init(void); // BSP early call (includes ChaCha20 self-test)
+void csprng_read(void *buf, size_t len); // kernel buffer, never fails/blocks
 
 #endif // KERNEL_XCORE_RANDOM_H

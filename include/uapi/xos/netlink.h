@@ -37,11 +37,11 @@
    (nlh)->nlmsg_len >= sizeof(struct nlmsghdr) && (nlh)->nlmsg_len <= (len))
 
 typedef struct nlmsghdr {
-  uint32_t nlmsg_len;   // 消息总长度（包括头部）
-  uint16_t nlmsg_type;  // 消息类型
-  uint16_t nlmsg_flags; // 附加标志
-  uint32_t nlmsg_seq;   // 序列号
-  uint32_t nlmsg_pid;   // 发送进程端口 ID
+  uint32_t nlmsg_len;   // total message length including header
+  uint16_t nlmsg_type;  // message type
+  uint16_t nlmsg_flags; // additional flags
+  uint32_t nlmsg_seq;   // sequence number
+  uint32_t nlmsg_pid;   // sending process port ID
 } nlmsghdr;
 
 // ===================== sockaddr_nl =====================
@@ -49,9 +49,9 @@ typedef struct nlmsghdr {
 
 typedef struct sockaddr_nl {
   sa_family_t nl_family; // AF_NETLINK = 16
-  uint16_t nl_pad;       // 填充
-  uint32_t nl_pid;       // 端口 ID（0 = 自动分配 PID）
-  uint32_t nl_groups;    // 订阅的 group bitmask
+  uint16_t nl_pad;       // padding
+  uint32_t nl_pid;       // port ID (0 = auto-assign PID)
+  uint32_t nl_groups;    // subscribed group bitmask
 } sockaddr_nl;
 
 #endif // XOS_NETLINK_H

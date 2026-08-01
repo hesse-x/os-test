@@ -73,10 +73,10 @@ static void scan_devices_if_needed(void) {
   scan_devices();
 }
 
-// 尾部 '*' 通配符匹配（libinput 常用
-// udev_enumerate_add_match_sysname("event*")）。 仅支持形如 "event*"
-// 的尾部通配；无 '*' 时退化为精确 strcmp。 返回 1 匹配 / 0 不匹配（user 态无
-// stdbool.h，用 int）。
+// Trailing '*' wildcard match (libinput commonly calls
+// udev_enumerate_add_match_sysname("event*")). Only supports trailing
+// wildcards of the form "event*"; without '*', degrades to exact strcmp.
+// Returns 1 on match / 0 on no match (userspace has no stdbool.h, use int).
 static int match_pattern(const char *pattern, const char *name) {
   if (!pattern || !name)
     return 0;
@@ -132,21 +132,21 @@ static struct udev_device *create_udev_device(struct udev *udev,
   strncpy(d->devnode, devnode, sizeof(d->devnode) - 1);
   d->devnode[sizeof(d->devnode) - 1] = '\0';
 
-  // subsystem 固定 "input"（scan_devices 仅扫描 /dev/input），先填以便 syspath
-  // 构造引用。
+  // subsystem is fixed to "input" (scan_devices only scans /dev/input);
+  // fill it first so syspath construction can reference it.
   strncpy(d->subsystem, "input", sizeof(d->subsystem) - 1);
   d->subsystem[sizeof(d->subsystem) - 1] = '\0';
 
-  // Build syspath: /sys/class/<subsystem>/<sysname>（与内核 sysfs
-  // 实际挂载路径一致）
+  // Build syspath: /sys/class/<subsystem>/<sysname> (matches the kernel
+  // sysfs mount path).
   const char *basename = strrchr(devnode, '/');
   if (!basename)
     basename = devnode;
   else
     basename++;
 
-  // subsystem 此时已固定为 "input"；保留分支结构以便后续
-  // 扩展到 drm 等其它子系统。
+  // subsystem is currently fixed to "input"; keep the branch structure so
+  // extending to drm and other subsystems later is straightforward.
   if (strcmp(d->subsystem, "drm") == 0)
     snprintf(d->syspath, sizeof(d->syspath), "/sys/class/drm/%s", basename);
   else
@@ -280,44 +280,49 @@ void udev_device_unref(struct udev_device *udev_device) {
   }
 }
 
-/* udev.c — udev_device_get_property_value 乙落地(user 态 C,int 代 bool) */
+// udev.c — udev_device_get_property_value landed here (userspace C, int as
+// bool)
 const char *udev_device_get_property_value(struct udev_device *udev_device,
                                            const char *key) {
   if (!udev_device || !key)
     return NULL;
 
-  /* monitor device:property 从 pipe KV 收到存 device->props(对齐 Linux
-   * libudev properties hashmap——monitor 路径 property 随 uevent 到达 client,
-   * 存内存查内存,不查 db;§5.3/§6 grill 决议走 pipe KV 路径,remove 事件不依赖
-   * db 还在)。nprops>0 表示 monitor 来源,先查表命中即返。 */
+  // monitor device: properties arrive as pipe KV and are stored in
+  // device->props (mirrors Linux libudev's properties hashmap — monitor-path
+  // properties arrive with the uevent, are stored in memory and read from
+  // memory, not the db; §5.3/§6 grill decision went with the pipe KV path, so
+  // remove events don't depend on the db still being present). nprops>0 means
+  // monitor source: look up the table and return on hit.
   if (udev_device->nprops > 0) {
     for (int i = 0; i < udev_device->nprops; i++) {
       if (strcmp(udev_device->props[i].key, key) == 0)
         return udev_device->props[i].value;
     }
-    return NULL; /* monitor device 表里没有 → 返 NULL(不 fallback db,
-                  * 对齐 Linux:monitor device 的 property 只来自 uevent KV) */
+    return NULL; // not in the monitor table → NULL (no db fallback, mirrors
+                 // Linux: a monitor device's properties come only from uevent
+                 // KV)
   }
 
-  /* 直读 device(nprops==0):走 db(对齐 Linux libudev 直读 /run/udev/data/<key>)
-   */
+  // Direct-read device (nprops==0): go through the db (mirrors Linux libudev
+  // reading /run/udev/data/<key>).
   char key_str[32], path[80];
   snprintf(key_str, sizeof(key_str), "%u", (unsigned)udev_device->devnum);
   snprintf(path, sizeof(path), "/run/udev/data/%s", key_str);
 
   int fd = open(path, O_RDONLY);
   if (fd < 0)
-    return NULL; /* db 文件不存在(udevd 未起/未写过)→ 返 NULL(降级,§5.2) */
+    return NULL; // db file missing (udevd not started / hasn't written) → NULL
+                 // (degraded, §5.2)
 
-  static char
-      db_buf[2048]; /* 单次调用有效,调用者需立即拷贝(对齐 Linux libudev) */
+  static char db_buf[2048]; // valid for a single call; caller must copy
+                            // immediately (mirrors Linux libudev)
   ssize_t n = read(fd, db_buf, sizeof(db_buf) - 1);
   close(fd);
   if (n <= 0)
     return NULL;
   db_buf[n] = '\0';
 
-  /* 解析 KEY=VALUE\n 找指定 key */
+  // Parse KEY=VALUE\n lines looking for the requested key.
   char *line = db_buf;
   while (line && *line) {
     char *eol = strchr(line, '\n');
@@ -327,7 +332,7 @@ const char *udev_device_get_property_value(struct udev_device *udev_device,
     if (eq) {
       *eq = '\0';
       if (strcmp(line, key) == 0) {
-        return eq + 1; /* 返指向 db_buf 内的指针,调用者需立即拷贝 */
+        return eq + 1; // points into db_buf; caller must copy immediately
       }
       *eq = '=';
     }
@@ -357,8 +362,8 @@ dev_t udev_device_get_devnum(struct udev_device *udev_device) {
 }
 
 const char *udev_device_get_action(struct udev_device *udev_device) {
-  /* monitor device 返 "add"/"remove"/"change";直读 device action[0]=='\0' 返
-   * NULL(Q3) */
+  // monitor device returns "add"/"remove"/"change"; a direct-read device has
+  // action[0]=='\0' and returns NULL (Q3).
   if (!udev_device || udev_device->action[0] == '\0')
     return NULL;
   return udev_device->action;
@@ -377,10 +382,11 @@ const char *udev_device_get_sysattr_value(struct udev_device *udev_device,
   if (!udev_device || !sysattr)
     return NULL;
 
-  // syspath 已为 "/sys/class/input/event0"（P1 修复后）。
-  // evdev 布局：name 在设备目录根，bustype/vendor/product/version 在 id/ 子目录
-  // （见 devtmpfs.c:661 target = (i==0) ? devdir : iddir）。
-  // drm 等其它子系统属性在类目录根。
+  // syspath is already "/sys/class/input/event0" (after P1 fix).
+  // evdev layout: name lives at the device dir root, bustype/vendor/product/
+  // version live under the id/ subdir (see devtmpfs.c:661
+  // target = (i==0) ? devdir : iddir).
+  // drm and other subsystems keep attributes at the class-dir root.
   char path[128];
   if (strcmp(udev_device->subsystem, "input") == 0) {
     if (strcmp(sysattr, "name") == 0)
@@ -395,8 +401,8 @@ const char *udev_device_get_sysattr_value(struct udev_device *udev_device,
   if (fd < 0)
     return NULL;
 
-  // 单次调用有效的静态缓冲区，下次调用覆盖（与 Linux libudev 行为一致，
-  // 调用者需立即拷贝）。
+  // Single-call-valid static buffer; the next call overwrites it (matches
+  // Linux libudev behavior — caller must copy immediately).
   static char attr_buf[256];
   ssize_t n = read(fd, attr_buf, sizeof(attr_buf) - 1);
   close(fd);
@@ -451,12 +457,13 @@ const char *udev_list_entry_get_value(struct udev_list_entry *list_entry) {
   return list_entry ? list_entry->value : NULL;
 }
 
-// ======================== monitor (真实实现: AF_UNIX + SCM_RIGHTS + pipe)
+// ======================== monitor (real impl: AF_UNIX + SCM_RIGHTS + pipe)
 // ========================
 
 struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev,
                                                    const char *name) {
-  (void)name; /* 对齐 Linux 取 "udev";本 OS 无 "kernel" 直连选项 */
+  (void)name; // mirrors Linux taking "udev"; this OS has no "kernel" direct
+              // option
   struct udev_monitor *m = calloc(1, sizeof(struct udev_monitor));
   if (m) {
     m->udev = udev_ref(udev);
@@ -473,14 +480,14 @@ int udev_monitor_filter_add_match_subsystem_devtype(
   (void)udev_monitor;
   (void)subsystem;
   (void)devtype;
-  return 0; /* 本轮 no-op stub(Q5),留 TODO */
+  return 0; // no-op stub this round (Q5), TODO left in place
 }
 
 int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
   if (!udev_monitor)
     return -EINVAL;
   if (udev_monitor->subscribed)
-    return 0; /* 幂等 */
+    return 0; // idempotent
 
   int sfd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (sfd < 0)
@@ -491,13 +498,14 @@ int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
   addr.sun_family = AF_UNIX;
   strncpy(addr.sun_path, "/run/udev/socket", sizeof(addr.sun_path) - 1);
   if (connect(sfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    /* udevd 未起 / socket 不存在 → -ENOENT,path-seat 仍可用(§5.4) */
+    // udevd not started / socket missing → -ENOENT; path-seat still works
+    // (§5.4)
     close(sfd);
     return -ENOENT;
   }
 
-  /* 收 SCM_RIGHTS:udevd 回传 pipe rd fd(§4.4 step 5-6)。带 1 字节 dummy iov。
-   */
+  // Receive SCM_RIGHTS: udevd sends back the pipe rd fd (§4.4 step 5-6).
+  // Carries a 1-byte dummy iov.
   char dummy;
   char cmsgbuf[CMSG_SPACE(sizeof(int))];
   struct iovec iov;
@@ -534,7 +542,8 @@ int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
     return -EPROTO;
   }
 
-  /* 关 conn fd(connect 即订阅,Q5,拿 pipe fd 后不再通信) */
+  // Close the conn fd (connect == subscribe, Q5; after taking the pipe fd we
+  // no longer communicate over it).
   close(sfd);
   udev_monitor->pipe_fd = got_fd;
   udev_monitor->subscribed = 1;
@@ -542,7 +551,7 @@ int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
 }
 
 int udev_monitor_get_fd(struct udev_monitor *udev_monitor) {
-  /* 返 pipe rd fd(可 epoll),对齐 Linux monitor fd 语义 */
+  // Returns the pipe rd fd (epoll-able), mirroring Linux monitor fd semantics.
   return udev_monitor ? udev_monitor->pipe_fd : -1;
 }
 
@@ -554,7 +563,7 @@ udev_monitor_receive_device(struct udev_monitor *udev_monitor) {
   char buf[4096];
   ssize_t len = read(udev_monitor->pipe_fd, buf, sizeof(buf) - 1);
   if (len <= 0)
-    return NULL; /* 0=EOF(udevd crash/关 pipe),<0=EAGAIN/错误 */
+    return NULL; // 0=EOF (udevd crash / closed pipe), <0=EAGAIN/error
   buf[len] = '\0';
 
   struct udev_device *d = calloc(1, sizeof(struct udev_device));
@@ -563,7 +572,7 @@ udev_monitor_receive_device(struct udev_monitor *udev_monitor) {
   d->refcount = 1;
   d->initialized = 1;
 
-  /* 解析 \0 分隔 key=value(与 netlink uevent 同源解析器,Q4) */
+  // Parse \0-separated key=value (same parser origin as netlink uevent, Q4).
   char *p = buf, *end = buf + len;
   while (p < end) {
     char *eq = strchr(p, '=');
@@ -587,11 +596,13 @@ udev_monitor_receive_device(struct udev_monitor *udev_monitor) {
     else if (strcmp(key, "DEVNUM") == 0)
       d->devnum = (dev_t)strtoul(val, NULL, 10);
     else {
-      /* 非标识键 → property(ID_INPUT_*、ID_SEAT、WL_*、MOUSE_DPI 等),
-       * 存进 device 的 property 表(对齐 Linux libudev:monitor device 的
-       * property 随 uevent KV 到达 client,存内存,get_property_value 查此表,
-       * 不查 db——§5.3/§6 grill 决议:走 pipe KV 路径,remove 事件不依赖 db
-       * 还在)。表满则丢该 property(32 槽够)。 */
+      // Non-identifier key → property (ID_INPUT_*, ID_SEAT, WL_*, MOUSE_DPI,
+      // etc.). Store into the device's property table (mirrors Linux libudev:
+      // a monitor device's properties arrive with the uevent KV, are held in
+      // memory, and get_property_value reads this table, not the db — §5.3/§6
+      // grill decision: take the pipe KV path; remove events don't depend on
+      // the db still being present). Drop the property if the table is full
+      // (32 slots is enough).
       if (d->nprops < UDEV_DEV_PROPS_MAX) {
         strncpy(d->props[d->nprops].key, key, UDEV_PROP_KEYLEN - 1);
         d->props[d->nprops].key[UDEV_PROP_KEYLEN - 1] = '\0';
@@ -603,19 +614,20 @@ udev_monitor_receive_device(struct udev_monitor *udev_monitor) {
     p = val + strlen(val) + 1;
   }
 
-  /* sysname = syspath 末段(DEVPATH 末段,如 "event0")。先从原始 syspath
-   * 取,后续再归一 syspath 本身。 */
+  // sysname = last segment of syspath (last DEVPATH segment, e.g. "event0").
+  // Take it from the raw syspath first; normalize syspath itself afterwards.
   const char *slash = strrchr(d->syspath, '/');
   strncpy(d->sysname, slash ? slash + 1 : d->syspath, sizeof(d->sysname) - 1);
   d->sysname[sizeof(d->sysname) - 1] = '\0';
 
-  /* 归一 syspath 为 "/sys/class/<subsystem>/<sysname>",与扫描路径
-   * create_udev_device(:153) 一致。内核 netlink 发的 DEVPATH 是裸相对路径
-   * ("input/event0",无 /sys/ 前缀),若原样保留会与扫描表里
-   * "/sys/class/input/event0" 不等,导致 libinput:
-   *   - filter_duplicates(udev-seat.c:62) 去重失败,重播 add 事件穿透;
-   *   - evdev_device_have_same_syspath(evdev.c:2274) 校验失败,静默 goto err,
-   *     报 "failed to create input device"。 */
+  // Normalize syspath to "/sys/class/<subsystem>/<sysname>", matching the
+  // scan path in create_udev_device (:153). The kernel netlink sends DEVPATH
+  // as a bare relative path ("input/event0", no /sys/ prefix); leaving it as
+  // is would make it unequal to the scan table's "/sys/class/input/event0",
+  // causing libinput to:
+  //   - fail dedup in filter_duplicates (udev-seat.c:62), replaying add events;
+  //   - fail the evdev_device_have_same_syspath check (evdev.c:2274), silently
+  //     goto err and log "failed to create input device".
   if (d->subsystem[0] && d->sysname[0]) {
     char norm[256];
     snprintf(norm, sizeof(norm), "/sys/class/%s/%s", d->subsystem, d->sysname);
@@ -682,13 +694,13 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
   if (!udev_enumerate)
     return -EINVAL;
 
-  // 已知子系统白名单。无 subsystem_filter 时扫描全部。
+  // Known-subsystem whitelist. Without a subsystem_filter, scan all of them.
   const char *subsystems[] = {"input", "drm", NULL};
   const char *only_subsys = udev_enumerate->subsystem_filter[0]
                                 ? udev_enumerate->subsystem_filter
                                 : NULL;
 
-  // 清除旧结果（支持重复 scan）。
+  // Clear stale results (supports repeated scan).
   struct udev_list_entry *cur = udev_enumerate->devices;
   while (cur) {
     struct udev_list_entry *next = cur->next;

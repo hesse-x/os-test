@@ -64,14 +64,13 @@ set(USER_FREESTANDING_FLAGS  -ffreestanding -nostdlib -fno-builtin -fno-stack-pr
 set(FREESTANDING_FLAGS ${KERNEL_FREESTANDING_FLAGS})
 set(WARN_FLAGS -Wall -Wextra -Werror)
 
-# ---- os_base_options: 共性基础选项 INTERFACE 库（reface_cmake.md §3.3 / §4.7）----
-# third_party 与仓库内 target 按需 link 获取共性 freestanding 基础项：
-# -ffreestanding/-nostdlib/-fno-builtin/-fno-stack-protector/-mno-red-zone/-nostdinc/-isystem/-m64
-# + 随 CMAKE_BUILD_TYPE 变化的 -O/-g（镜像 CMake 各 config 默认，替代 user_rules.cmake
-#   的 USER_BUILD_FLAGS 手工镜像）。不含 WARN_FLAGS、不含 -mno-sse 等专属选项——
-# those 由各 target 自身 target_compile_options 决定，避免泄漏进 third_party。
-# 阶段 1 仅作为 third_party 的基础选项原语；阶段 3 将让仓库内 target 全面消费它
-# 并拆除全局 CMAKE_C_FLAGS 字符串拼装。
+# ---- os_base_options: shared baseline INTERFACE lib ----
+# third_party and in-repo targets link as needed to get the common freestanding
+# basics (-ffreestanding/-nostdlib/-fno-builtin/-fno-stack-protector/-mno-red-zone/
+# -nostdinc/-isystem/-m64) + build-type -O/-g (mirroring CMake's per-config
+# defaults, replacing the manual USER_BUILD_FLAGS mirror in user_rules.cmake).
+# Excludes WARN_FLAGS and -mno-sse (target-specific); those stay per-target to
+# avoid leaking into third_party.
 add_library(os_base_options INTERFACE)
 set(_base_opts ${FREESTANDING_FLAGS} -m64)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -85,12 +84,13 @@ elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
 endif()
 target_compile_options(os_base_options INTERFACE ${_base_opts})
 
-# ---- os_user_base_options: 用户态共性基础选项 INTERFACE 库 ----
-# 镜像 os_base_options 结构，但用 USER_FREESTANDING_FLAGS（无 -isystem）+ -m64。
-# 用户态 freestanding 标准头（stdint/stddef/stdarg/stdbool）改由 musl 独占提供，
-# 编译器 freestanding dir 不再参与用户态搜索路径。专供 CMake 托管的用户态 target
-# （third_party STATIC 即 unity）。bare-gcc custom-command 用户态路径（libc.a/libc.so/
-# user ELF/ld.so）经 USER_FREESTANDING_FLAGS + MUSL_INCLUDE_FLAGS（user_rules.cmake）自给自足。
+# ---- os_user_base_options: userspace baseline INTERFACE lib ----
+# Mirrors os_base_options but with USER_FREESTANDING_FLAGS (no -isystem) + -m64.
+# Userspace freestanding std headers (stdint/stddef/stdarg/stdbool) come from
+# musl exclusively; the compiler freestanding dir is no longer on the userspace
+# search path. Used by CMake-managed userspace targets (third_party STATIC, i.e.
+# unity). bare-gcc custom-command paths (libc.a/libc.so/user ELF/ld.so) are
+# self-contained via USER_FREESTANDING_FLAGS + MUSL_INCLUDE_FLAGS (user_rules.cmake).
 add_library(os_user_base_options INTERFACE)
 set(_user_base_opts ${USER_FREESTANDING_FLAGS} -m64)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -104,47 +104,56 @@ elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
 endif()
 target_compile_options(os_user_base_options INTERFACE ${_user_base_opts})
 
-# ---- os_uapi: UAPI 契约头 INTERFACE 库（reface_cmake.md §4.7 阶段 2 试点）----
-# 纯头文件库，承载 include/uapi → #include "xos/*.h"（及 linux/asm/compat 子树）。
-# 消费方 target_link_libraries(<t> PRIVATE os_uapi) 取得头路径，替代阶段 2 前的
-# 根目录作用域 include_directories(include/uapi)。零编译、零链接行为变更。
-# 注意：bare-gcc custom-command（add_user_elf/dyn_elf/ldso/add_user_lib SHARED/crt0/
-# third_party SHARED）不继承目录作用域，本就手工 -I.../include/uapi 自给自足，故
-# 此处仅服务 CMake 托管 target（内核 OBJECT 库 / 静态用户库 / boot_obj）。
+# ---- os_uapi: UAPI contract headers INTERFACE lib ----
+# Header-only lib carrying include/uapi → #include "xos/*.h" (and the
+# linux/asm/compat subtrees). Consumers target_link_libraries(<t> PRIVATE os_uapi)
+# to get the include path, replacing the prior root-scope
+# include_directories(include/uapi). Zero compile/link behavior change.
+# Note: bare-gcc custom commands (add_user_elf/dyn_elf/ldso/add_user_lib SHARED/
+# crt0/third_party SHARED) do not inherit directory scope and already add
+# -I.../include/uapi manually, so this only serves CMake-managed targets
+# (kernel OBJECT libs / static user libs / boot_obj).
 add_library(os_uapi INTERFACE)
 target_include_directories(os_uapi INTERFACE ${CMAKE_SOURCE_DIR}/include/uapi)
 
-# ---- os_warn: 仓库内 warning 门禁 INTERFACE 库（reface_cmake.md §3.3 阶段 3）----
-# 承载 WARN_FLAGS（-Wall -Wextra -Werror），供内核/boot/用户态 target 按需 link 取得。
-# third_party 不 link（其代码关 warning，不参与我方 -Werror 门禁，见 third_party_rules）。
-# 与 os_base_options 分离：freestanding 基础项与 warning 门禁职责不同，避免 third_party
-# 为取 freestanding 选项而被连带打开 -Werror。
+# ---- os_warn: in-repo warning gate INTERFACE lib ----
+# Carries WARN_FLAGS (-Wall -Wextra -Werror); kernel/boot/userspace targets link
+# as needed. third_party does NOT link (its code disables warnings and stays out
+# of our -Werror gate — see third_party_rules). Kept separate from os_base_options
+# so third_party can pull freestanding basics without being force-opened into -Werror.
 add_library(os_warn INTERFACE)
 target_compile_options(os_warn INTERFACE ${WARN_FLAGS})
 
-# ---- os_kernel_warn: 内核 unused-parameter 豁免 INTERFACE 库 ----
-# 承载 -Wno-unused-parameter。必须经 INTERFACE 库在 os_warn *之后* link，而非
-# target_compile_options：CMake 把 target 自身 compile_options 排在 link 库的 usage
-# requirement 之前，故直接 target_compile_options(-Wno-unused-parameter) 会落在
-# os_warn 的 -Wall -Wextra -Werror 之前。gcc 无害（gcc 对 -Wno- 为粘性覆盖，后续
-# -Wall 不再重开 -Wunused-parameter），但 clang 严格按顺序处理 -Wall/-Wextra 会重开
-# -Wunused-parameter，覆盖前置的 -Wno-unused-parameter，导致内核 syscall stub 的一排
-# unusedN 占位参数全部 -Werror 失败。经 INTERFACE 库在 os_warn 之后 link 即保证顺序
-# （target_link_libraries 的 INTERFACE 库按列出顺序展开 usage requirement）。
+# ---- os_kernel_warn: kernel unused-parameter exemption INTERFACE lib ----
+# Carries -Wno-unused-parameter. MUST be linked via INTERFACE lib AFTER os_warn,
+# not via target_compile_options: CMake places a target's own compile_options
+# before the usage requirements of linked libs, so a direct
+# target_compile_options(-Wno-unused-parameter) would land BEFORE os_warn's
+# -Wall -Wextra -Werror. gcc is sticky on -Wno-* (later -Wall does not reopen
+# -Wunused-parameter), but clang processes -Wall/-Wextra in order and reopens
+# -Wunused-parameter, overriding the earlier -Wno-unused-parameter and making
+# the kernel syscall stubs' unusedN placeholder params fail under -Werror.
+# Linking the INTERFACE lib after os_warn guarantees order (target_link_libraries
+# expands INTERFACE libs' usage requirements in listed order).
 add_library(os_kernel_warn INTERFACE)
 target_compile_options(os_kernel_warn INTERFACE -Wno-unused-parameter)
 
-# 阶段 3 flag 去重（reface_cmake.md §3.3/§5.3）：拆除根 CMAKE_C_FLAGS/CMAKE_CXX_FLAGS 字符串拼装。
-# 历史上 WARN_FLAGS+FREESTANDING_FLAGS+-fPIE/-fno-pie+-std=gnu17 拼进全局字符串，CMake
-# 托管 target（内核 OBJECT 库 / boot_obj / 静态用户库）经继承取得。现拆为 per-target：
-#   - 内核/boot：target_link_libraries(os_base_options os_warn) + per-target -fPIE -std=gnu17
-#     （见 kernel_rules.cmake / boot/CMakeLists.txt）。
-#   - 静态用户库：经 add_user_lib 静态路径的 USER_COMPILE_FLAGS（target_compile_options）自给自足。
-#   - bare-gcc custom-command（add_user_elf/dyn_elf/ldso/SHARED libc.so/crt0）：本就手工引用
-#     FREESTANDING_FLAGS/WARN_FLAGS 变量，不继承全局字符串，不受影响。
-# 全局字符串退回工具链基线（-m64，见 toolchain-x86_64.cmake），不再做目录作用域 flag 注入。
-# config flag（-O3 -DNDEBUG 等）由 CMake 各 config 默认 + os_base_options 共同提供；
-# 两者对 CMake target 会重复，gcc 接受重复 flag，无害（与 libc.a 双副本 USER_COMPILE_FLAGS 一致）。
+# Phase 3 flag dedup: removes the root CMAKE_C_FLAGS/CMAKE_CXX_FLAGS string
+# assembly. Historically WARN_FLAGS+FREESTANDING_FLAGS+-fPIE/-fno-pie+-std=gnu17
+# were glued into the global string and inherited by CMake-managed targets
+# (kernel OBJECT libs / boot_obj / static user libs). Now per-target:
+#   - kernel/boot: target_link_libraries(os_base_options os_warn) + per-target
+#     -fPIE -std=gnu17 (see kernel_rules.cmake / boot/CMakeLists.txt).
+#   - static user libs: self-contained via add_user_lib static path's
+#     USER_COMPILE_FLAGS (target_compile_options).
+#   - bare-gcc custom commands (add_user_elf/dyn_elf/ldso/SHARED libc.so/crt0):
+#     already reference FREESTANDING_FLAGS/WARN_FLAGS variables manually, do not
+#     inherit the global string, unaffected.
+# The global string reverts to the toolchain baseline (-m64, see
+# toolchain-x86_64.cmake); no more directory-scope flag injection.
+# Config flags (-O3 -DNDEBUG etc.) come from CMake's per-config defaults +
+# os_base_options; both are redundant for CMake targets, gcc accepts duplicate
+# flags (harmless, matching libc.a's dual USER_COMPILE_FLAGS copies).
 
 # KASAN sanitizer flags (applied only to kernel OBJECT libraries via kernel_rules.cmake)
 # KASAN_SHADOW_OFFSET must match kasan.h's #define: gcc's -fsanitize=kernel-address
@@ -162,9 +171,10 @@ endif()
 
 # Include project root for #include "arch/x64/..." etc.
 include_directories(${CMAKE_SOURCE_DIR})
-# UAPI 契约头（include/uapi → #include "xos/*.h"）已迁移到 os_uapi INTERFACE 库，
-# 消费方经 target_link_libraries(<t> PRIVATE os_uapi) 取得（reface_cmake.md §4.7 阶段 2）。
-# bare-gcc custom-command 仍各自手工 -I.../include/uapi，不受此变更影响。
+# UAPI contract headers (include/uapi → #include "xos/*.h") migrated to the
+# os_uapi INTERFACE lib; consumers get them via
+# target_link_libraries(<t> PRIVATE os_uapi). bare-gcc custom commands still add
+# -I.../include/uapi manually, unaffected.
 
 # Build rule wrappers
 include(build_script/cmake/kernel_rules.cmake)
@@ -199,41 +209,56 @@ if(TEST)
     add_subdirectory(user/test)
 endif()
 
-# Link kernel ELF（reface_cmake.md §4.1 托管链接，阶段 4）
-# 从 script 模式 do_link.cmake 迁移到 add_executable + 重写 CMAKE_C_LINK_EXECUTABLE：
-#   - target_link_libraries(myos.elf PRIVATE kernel_obj) 经依赖图聚合六个 OBJECT 库，
-#     新增内核库只需在所属层 target_link_libraries 挂一处，根链接命令零改动。
-#   - 重写链接规则强制裸 ld（拦截 gcc 驱动隐式塞 crt0/libgcc/默认入口/自身松弛，约束 C2），
-#     保留 --no-relax（约束 C1：-fPIE 小码模型 + higher-half VMA 在 GOTPCREL→LEA 松弛窗口外）。
-# OBJECT 库对象进入链接命令的归属：经 target_link_libraries 传递的 OBJECT 库，其对象在
-# CMake 3.21+ 会出现在 <LINK_LIBRARIES> 中（以 $<TARGET_OBJECTS:...> 形式聚合）。但为防
-# 版本行为差异，显式补 $<TARGET_OBJECTS:...> 兜底——重复对象 ld 会 dedup（同一对象文件路径
-# 出现两次，ld 仅链接一次），与金标准对象集等价。此兜底在 §6.2 验证通过后可考虑移除。
+# Link kernel ELF (managed link).
+# Migrated from the script-mode do_link.cmake to add_executable + a rewritten
+# CMAKE_C_LINK_EXECUTABLE:
+#   - target_link_libraries(myos.elf PRIVATE kernel_obj) aggregates the six
+#     OBJECT libs via the dependency graph; adding a kernel lib only needs a
+#     target_link_libraries at its layer, the root link rule is untouched.
+#   - The rewritten link rule forces bare ld (intercepting the gcc driver's
+#     implicit crt0/libgcc/default-entry/self-relax, constraint C2), keeping
+#     --no-relax (constraint C1: -fPIE small code model + higher-half VMA are
+#     outside the GOTPCREL→LEA relaxation window).
+# OBJECT lib objects enter the link: in CMake 3.21+, OBJECT libs passed via
+# target_link_libraries appear in <LINK_LIBRARIES> (aggregated as
+# $<TARGET_OBJECTS:...>). To guard against version-specific behavior, an
+# explicit $<TARGET_OBJECTS:...> fallback is added — ld dedups duplicate
+# objects (same object file path twice links once), equivalent to the golden
+# object set. This fallback may be removed once §6.2 verifies it.
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/build_script/linker.ld)
 set(BIN_FILE ${CMAKE_BINARY_DIR}/myos.elf)
 
-# 内核链接器：clang→lld，gcc→GNU ld。两者均支持 --no-relax + linker.ld；
-# 当前内核未开 -flto，链接器选择仅为与工具链配对（lld 与 clang、ld 与 gcc 同源）。
+# Kernel linker: clang→lld, gcc→GNU ld. Both support --no-relax + linker.ld;
+# the kernel has no -flto, so the choice only pairs with the toolchain (lld with
+# clang, ld with gcc, same origin).
 if(OS_COMPILER STREQUAL "gcc")
     set(KERNEL_LINKER ld)
 else()
     set(KERNEL_LINKER ld.lld)
 endif()
 
-# 强制链接器为裸 ld/lld（绕开 gcc 驱动隐式输入），覆写 C 链接规则为 ld + --no-relax + linker.ld。
-# --no-relax 配合 -fPIE 小码模型：禁用 RIP-relative relax，保留 higher-half 所需的绝对/PC-相对重定位。
-# OBJECT 库的对象经 target_link_libraries 聚合进 <OBJECTS>。但 CMake 对 OBJECT 库的传递聚合
-# 不像 STATIC 库那样递归：myos.elf PRIVATE 链 kernel_obj→driver_obj→bsd_obj→xcore_obj→xcore_mem→arch_x64
-# 中，只有直接 link 的对象会自动并入 <OBJECTS>；传递链上更深层的 OBJECT 库对象不会自动全部聚合
-# （实测缺 printk 等 xcore_obj 符号）。故显式用 $<TARGET_OBJECTS:...> 列全六库对象兜底。
-# 依赖图（层间 PUBLIC link）仍保留其 usage-requirement 传递收益（include/flag 经 PUBLIC 向下游传）。
+# Force bare ld/lld (bypass the gcc driver's implicit inputs); rewrite the C
+# link rule as ld + --no-relax + linker.ld. --no-relax pairs with -fPIE small
+# code model: disables RIP-relative relax, keeping the absolute/PC-relative
+# relocations the higher-half needs.
+# OBJECT lib objects are aggregated into <OBJECTS> via target_link_libraries,
+# but CMake's transitive aggregation of OBJECT libs is not recursive like
+# STATIC: myos.elf PRIVATE links kernel_obj→driver_obj→bsd_obj→xcore_obj→
+# xcore_mem→arch_x64, only directly-linked objects auto-join <OBJECTS>; deeper
+# transitively-linked OBJECT lib objects are not all aggregated (in practice
+# xcore_obj symbols like printk were missing). So $<TARGET_OBJECTS:...> lists
+# all six libs explicitly as a fallback.
+# The dependency graph (inter-layer PUBLIC link) still carries its usage-
+# requirement transitive benefits (include/flag propagation via PUBLIC).
 set(CMAKE_C_LINK_EXECUTABLE
     "${KERNEL_LINKER} -m elf_x86_64 --no-relax -T ${LINKER_SCRIPT} <OBJECTS> -o <TARGET>")
 
 add_executable(myos.elf)
-# 聚合六个 OBJECT 库的对象：经 $<TARGET_OBJECTS:...> 显式列出，确保链接命令含全部内核对象
-# （OBJECT 库传递聚合不递归，见上注释）。依赖图（kernel_obj PUBLIC driver_obj → ... → arch_x64）
-# 同时建立构建顺序依赖 + 传递 include，新增内核对象若挂在现有层链上则无需改此处。
+# Aggregate the six OBJECT libs' objects: explicit $<TARGET_OBJECTS:...> ensures
+# the link command has all kernel objects (OBJECT lib transitive aggregation is
+# not recursive, see above). The dependency graph (kernel_obj PUBLIC driver_obj
+# → ... → arch_x64) also establishes build-order deps + transitive includes;
+# adding a kernel object on an existing layer chain needs no change here.
 target_link_libraries(myos.elf PRIVATE kernel_obj)
 target_sources(myos.elf PRIVATE
     $<TARGET_OBJECTS:arch_x64>

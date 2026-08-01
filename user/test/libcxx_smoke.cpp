@@ -1,12 +1,13 @@
-// libcxx_smoke.cpp — libc++ 端到端回归冒烟（refact_cmake.md §3.6）
+// libcxx_smoke.cpp — libc++ end-to-end regression smoke (refact_cmake.md §3.6)
 //
-// libc++ 历史上反复在四类缺口断链：int128 compiler runtime、catgets POSIX 符号、
-// TLS（异常 __cxa_thread_atexit）、fused libc.so POSIX 符号。本程序各覆盖一条已修
-// 路径，运行通过即回归通过。无 Unity——每步打印标记，任一失败 _exit 非零，
-// test_runner 报 [FAIL]。
+// libc++ has historically broken linkage on four gaps: int128 compiler runtime,
+// catgets POSIX symbol, TLS (exception __cxa_thread_atexit), and fused libc.so
+// POSIX symbols. This program covers one fixed path each; passing = regression
+// passing. No Unity — each step prints a marker, any failure _exit's non-zero,
+// test_runner reports [FAIL].
 //
-// 链接：-stdlib=libc++ + sysroot 的 libc++/libc++abi/libunwind（build_libcxx.sh 装入）。
-// 仅在 libc++ 启用（-DLIBCXX=1）时构建。
+// Links -stdlib=libc++ against sysroot libc++/libc++abi/libunwind (installed by
+// build_libcxx.sh). Built only when libc++ is enabled (-DLIBCXX=1).
 
 #include <cstdio>
 #include <cstdlib>
@@ -22,7 +23,7 @@ static int fail(const char *what) {
 }
 
 int main() {
-    // 1. 基础 STL：<vector> + std::string（heap/异常基础路径）
+    // 1. Basic STL: <vector> + std::string (heap/exception base path)
     std::vector<std::string> v;
     for (int i = 0; i < 8; ++i) v.push_back(std::string("elem") + std::to_string(i));
     std::string joined;
@@ -30,7 +31,7 @@ int main() {
     printf("STL: %zu items, joined[%zu]\n", v.size(), joined.size());
     if (v.size() != 8 || joined.empty()) return fail("vector/string");
 
-    // 2. 异常 → libc++abi → TLS __cxa_thread_atexit 路径
+    // 2. Exception → libc++abi → TLS __cxa_thread_atexit path
     try {
         throw std::runtime_error("boom");
     } catch (const std::exception &e) {
@@ -40,16 +41,14 @@ int main() {
         return fail("exception caught wrong handler");
     }
 
-    // 3. std::filesystem → int128 compiler runtime（__divti3/__muloti4）路径
+    // 3. std::filesystem → int128 compiler runtime (__divti3/__muloti4) path
     std::error_code ec;
     auto cwd = std::filesystem::current_path(ec);
     if (ec) return fail("filesystem current_path");
     printf("filesystem: cwd length %zu\n", std::string(cwd.string()).size());
-    // file_size on a *regular file* exercises operations.cpp's __file_size (int128
-    // timestamp arithmetic in posix_stat). Note: file_size() on a directory is an
-    // error by libc++ design (errc::is_a_directory), so test against a real file.
-    // /etc/README ships in the image (mkdisk root README); fall back to argv[0]
-    // (the smoke ELF itself) if absent.
+    // file_size on a regular file exercises int128 timestamp arithmetic in
+    // posix_stat. file_size() on a directory errors by libc++ design, so test
+    // against a real file. Fall back to the smoke ELF itself if /README is absent.
     auto sz = std::filesystem::file_size("/README", ec);
     if (ec) {
         // Image layout may put README elsewhere; retry against the program path.
@@ -58,7 +57,7 @@ int main() {
     if (ec) return fail("filesystem file_size");
     printf("filesystem: file size %lld\n", (long long)sz);
 
-    // 4. std::messages facet → catgets 路径（musl catopen 无 catalog 时降级）
+    // 4. std::messages facet → catgets path (musl catopen degrades when no catalog)
     try {
         std::locale loc;
         const std::messages<char> &msg = std::use_facet<std::messages<char>>(loc);

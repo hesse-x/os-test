@@ -57,21 +57,26 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   xtask *cur = current_task;
   int real_op = op & 0x7f; // FUTEX_PRIVATE (128) is eaten by the 0x7f mask
 
-  // 批收集唤醒者上限:持桶锁时只往小定长数组收集,释桶锁后再 wake_with_event
-  // (取目标 scheduler_lock,持桶锁时唤醒会形成 bucket→scheduler 锁序嵌套)。
-  // kernel 栈仅 2 页(8KB),曾用 xtask*[MAX_PROC](8KB) 撑满栈溢出。REQUEUE 与
-  // WAKE 共用此批模式。函数作用域宏:WAKE 与 REQUEUE 分支都引用。
+  // Batched wake collector cap: under the bucket lock only collect into a small
+  // fixed array, then wake_with_event after releasing the bucket lock (it takes
+  // the target scheduler_lock; waking under the bucket lock would form a
+  // bucket→scheduler lock-order nesting). The kernel stack is only 2 pages
+  // (8KB); an earlier xtask*[MAX_PROC] (8KB) overflowed the stack. REQUEUE and
+  // WAKE share this batched pattern. Function-scope macro: both WAKE and
+  // REQUEUE branches reference it.
 #define FUTEX_WAKE_BATCH 32
 
-  // FUTEX_REQUEUE / FUTEX_CMP_REQUEUE — musl pthread condvar 接力迁移
-  // (pthread_cond_timedwait.c unlock_requeue):把被 barrier 挡住的下一个等待者从
-  // cv 迁到 mutex 上,省一次用户态往返、避免惊群。musl 调用形如
+  // FUTEX_REQUEUE / FUTEX_CMP_REQUEUE — musl pthread condvar hand-off
+  // (pthread_cond_timedwait.c unlock_requeue): moves the next waiter blocked on
+  // the barrier from cv to mutex, saving a user-space round-trip and avoiding a
+  // thundering herd. musl calls it as
   //   REQUEUE(uaddr1=cv, nr_wake=0, nr_requeue=1, *, uaddr2=mutex)
-  // —— 先 a_store(l,0) 释 cv 锁,再 requeue 不唤醒(nr_wake=0):被迁移者继续在
-  // mutex 上睡,被未来 mutex unlock 的 WAKE 唤醒。本仓库等待者只记
-  // futex_uaddr(不存期望值), 匹配仅靠 futex_uaddr==uaddr1(同 WAKE 范式
-  // futex.c:94);CMP_REQUEUE 的 val2 在 Linux
-  // 用于第二地址值校验,本仓库无此机制,musl 传 val2=0,无影响。
+  // — first a_store(l,0) releases the cv lock, then requeue without waking
+  // (nr_wake=0): the migrated waiter keeps sleeping on mutex, woken by a future
+  // mutex unlock WAKE. This repo's waiters only record futex_uaddr (no expected
+  // value), so matching is purely futex_uaddr==uaddr1 (same as the WAKE pattern
+  // at futex.c:94). CMP_REQUEUE's val2 is used by Linux for a second-address
+  // value check, which this repo lacks; musl passes val2=0, so it's harmless.
   if (real_op == FUTEX_REQUEUE || real_op == FUTEX_CMP_REQUEUE) {
     uint64_t uaddr1 = uaddr;
     int nr_wake = (int)val; // arg3
@@ -79,9 +84,10 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     uint64_t cmpval = (real_op == FUTEX_CMP_REQUEUE) ? (uint64_t)arg5 : 0;
     uint64_t uaddr2 =
         (real_op == FUTEX_REQUEUE) ? (uint64_t)arg5 : (uint64_t)arg6;
-    // CMP 校验:*uaddr1 != cmpval → -EAGAIN(投递前原子性保证,同 Linux)。
-    // copy_from_user 负责用户指针越界/不可读 → EFAULT,与 WAIT
-    // 路径(futex.c:119)一致, 本仓库 futex 全路径不做显式 uaddr 边界检查。
+    // CMP check: *uaddr1 != cmpval → -EAGAIN (pre-delivery atomicity
+    // guarantee, same as Linux). copy_from_user handles user-pointer
+    // out-of-range/unreadable → EFAULT, matching the WAIT path (futex.c:119);
+    // this repo's futex paths do no explicit uaddr bounds check.
     if (cmpval) {
       uint32_t cur_val1;
       if (copy_from_user(&cur_val1, (void __user *)uaddr1, 4) != 0)
@@ -97,10 +103,12 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     struct futex_bucket *bucket2 = &futex_table[futex_hash(&key2)];
     uint32_t h1 = futex_hash(&key1), h2 = futex_hash(&key2);
 
-    // 双 bucket 锁序(防死锁):按 hash 值小→大加锁,全局一致。同桶特例只锁一次
-    // (自旋锁 spinlock.h 禁同 CPU 重入)。唤醒部分复用 WAKE 的批收集 + 释桶锁后
-    // wake_with_event 范式(futex.c:65-67):避免持桶锁时取目标 scheduler_lock
-    // 形成 bucket→scheduler 锁序嵌套。
+    // Dual bucket lock order (deadlock avoidance): lock by hash value low→high,
+    // globally consistent. Same-bucket special case locks only once (spinlock.h
+    // forbids same-CPU re-entry). The wake part reuses WAKE's batched-collect +
+    // wake_with_event-after-bucket-unlock pattern (futex.c:65-67): avoids
+    // taking the target scheduler_lock while holding the bucket lock, which
+    // would form a bucket→scheduler lock-order nesting.
     int woken = 0, requeued = 0;
     while (woken < nr_wake || requeued < nr_requeue) {
       xtask *to_wake[FUTEX_WAKE_BATCH];
@@ -117,10 +125,11 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
         spin_lock_irqsave(&bucket1->lock, &b1f);
       }
 
-      // 遍历 bucket1,匹配 futex_uaddr==uaddr1(同 WAKE):先填 nr_wake
-      // 个进唤醒批次, 余下的改 futex_uaddr=uaddr2 挂 bucket2(不唤醒)。被
-      // requeue 者 state 仍 BLOCKED、 wait_event 仍 WAIT_FUTEX,只是换了等待地址
-      // → 未来 mutex WAKE 按 futex_uaddr==mutex 匹配时自然命中(futex.c:94)。
+      // Walk bucket1, matching futex_uaddr==uaddr1 (same as WAKE): fill nr_wake
+      // into the wake batch; the rest get futex_uaddr=uaddr2 and move to
+      // bucket2 (no wake). Requeued waiters stay state=BLOCKED,
+      // wait_event=WAIT_FUTEX, only the wait address changes → a future mutex
+      // WAKE matching futex_uaddr==mutex naturally hits them (futex.c:94).
       list_node *node = bucket1->waiters.next;
       int batch_wake = nr_wake - woken;
       if (batch_wake > FUTEX_WAKE_BATCH)
@@ -155,11 +164,13 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       for (int i = 0; i < nwake; i++)
         wake_with_event(to_wake[i], WAIT_FUTEX);
 
-      // 本批没取满 → bucket1 已无匹配等待者,收尾(等价 WAKE 的
-      // futex.c:105-106)。
+      // Batch not full → bucket1 has no more matching waiters; finish
+      // (equivalent to WAKE's futex.c:105-106).
       if (nwake < batch_wake && !(requeued < nr_requeue && requeued > 0)) {
-        // 注意:nr_wake==0(musl 实际调用)时 batch_wake==0,nwake 恒 0,此分支仅靠
-        // requeued 是否推进判定;requeued 未变说明 bucket1 无匹配者可迁 → 终止。
+        // Note: when nr_wake==0 (musl's actual call) batch_wake==0 and nwake is
+        // always 0; this branch only decides by whether requeued advanced. If
+        // requeued didn't change, bucket1 has no matching waiter to migrate →
+        // stop.
         if (requeued == 0 || requeued >= nr_requeue)
           break;
       }

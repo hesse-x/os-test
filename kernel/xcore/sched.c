@@ -305,7 +305,7 @@ xtask *sched_create_idle_process(int cpu_id) {
   proc->state = RUNNING; // idle starts as RUNNING on its CPU
   proc->k_rsp = k_rsp;
   proc->k_stack_top = k_stack_top;
-  kstack_canary_write(proc); // (frame_opt.md 块四) canary at stack bottom
+  kstack_canary_write(proc); // (frame_opt.md block 4) canary at stack bottom
   proc->cr3 = (__force uint64_t)PHY_ADDR(
       (uintptr_t)pml4); // kernel PML4 physical address (cached)
   proc->entry = (uint64_t)sched_idle_entry;
@@ -505,7 +505,7 @@ int xcore_fpu_alloc(xtask *t) {
   return 1;
 }
 
-// (frame_opt.md 块四) Stack canary + high-water accounting.
+// (frame_opt.md block 4) Stack canary + high-water accounting.
 //
 // Each task kernel stack gets a canary word written at its BOTTOM (lowest
 // address = k_stack_top - KERNEL_STACK_SIZE).  schedule() checks it on entry:
@@ -550,11 +550,11 @@ void kstack_highwater_check(void) {
   }
 }
 
-// (frame_opt.md 块四) Verify this CPU's IRQ-stack canary.  Called from the IRQ
-// path of trap_dispatch while running on the IRQ stack; the canary sits at the
-// stack bottom (irq_stack_top - IRQ_STACK_BYTES).  An overrun that walked past
-// the bottom clobbers it — BUG_ON attributes it before the next IRQ silently
-// corrupts neighboring objects.
+// (frame_opt.md block 4) Verify this CPU's IRQ-stack canary.  Called from the
+// IRQ path of trap_dispatch while running on the IRQ stack; the canary sits at
+// the stack bottom (irq_stack_top - IRQ_STACK_BYTES).  An overrun that walked
+// past the bottom clobbers it — BUG_ON attributes it before the next IRQ
+// silently corrupts neighboring objects.
 void irq_stack_canary_check(void) {
   cpu_local *cl = get_cpu_local();
   if (!cl->irq_stack_top)
@@ -568,7 +568,7 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
   xtask *idle = get_cpu_local()->idle_proc;
   xtask *prev = current_task;
 
-  // might_sleep guard (frame_opt.md 块二): refuse to schedule from hard-IRQ
+  // might_sleep guard (frame_opt.md block 2): refuse to schedule from hard-IRQ
   // context.  switch_to stores the current RSP into prev->k_rsp; if that RSP
   // is the per-CPU IRQ stack, the task would later resume with RSP pointing
   // into the IRQ stack → corruption.  in_hardirq>0 means we are inside a
@@ -586,10 +586,11 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
   cpu_locals[my_cpu].preempt_stall_ticks = 0;
 #endif
 
-  // (frame_opt.md 块四) Verify prev's stack canary at this switch choke point,
-  // then record the high-water mark of the stack we're about to leave.  An
-  // overrun that clobbered the bottom canary is attributed to prev here rather
-  // than silently corrupting neighboring heap objects (the #DF root mechanism).
+  // (frame_opt.md block 4) Verify prev's stack canary at this switch choke
+  // point, then record the high-water mark of the stack we're about to leave.
+  // An overrun that clobbered the bottom canary is attributed to prev here
+  // rather than silently corrupting neighboring heap objects (the #DF root
+  // mechanism).
   if (prev)
     kstack_canary_check(prev);
   kstack_highwater_check();
@@ -739,10 +740,12 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
 
 // design1 §6.2: sched_timer_queue_insert is now the sorted-insert body only;
 // single-tenancy assertion lives in the timer_queue_wait_push wrapper.  The
-// former "remove from any existing list first" defensive hop is REMOVED —
-// push 入口已断言 list_empty(&wait_node), 重复插入由断言抓（类 A 残余/开发期
-// bug）， 不再静默吸收（与 §4.3 run_node 幂等保留不同：wait_node 无类 B
-// 合法竞态， 单一归属由 insert/remove 严格配对保证）。
+// former "remove from any existing list first" defensive hop is REMOVED — the
+// push entry already asserts list_empty(&wait_node), so duplicate inserts are
+// caught by the assertion (class-A residual / development bug) rather than
+// silently absorbed (unlike §4.3 run_node idempotent retention: wait_node has
+// no class-B legal race, single ownership is guaranteed by strict
+// insert/remove pairing).
 void sched_timer_queue_insert(int cpu, xtask *proc) {
   list_node *head = &cpu_locals[cpu].timer_queue;
   list_node *node = head->next;

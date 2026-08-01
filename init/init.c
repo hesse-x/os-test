@@ -28,18 +28,20 @@ static int spawn_service(const char *path) {
   return (pid > 0) ? (int)pid : -1;
 }
 
-/* spawn_with_fd: fork+exec 传 fd 到子进程 fd 3（socket activation）。
- * 本 OS FD_CLOEXEC 是 per-struct-file（非 per-fd），fork 后父子共享同一 struct
- * file， 无法做到"父持 CLOEXEC 阻泄漏、子清 CLOEXEC 保留 fd"的 Linux per-fd
- * 语义。 故不设 CLOEXEC：listen fd
- * 会泄漏给兄弟进程（evdev/terminal），但无害（多一个不用 的 fd）。子进程只做
- * dup2 归位 fd 3 + close(4..31) 防 fd 表垃圾 + execve。 失败返 -1。 */
+// spawn_with_fd: fork+exec passes fd to the child as fd 3 (socket activation).
+// This OS's FD_CLOEXEC is per-struct-file (not per-fd); after fork parent and
+// child share the same struct file, so the Linux per-fd trick ("parent holds
+// CLOEXEC to prevent leakage, child clears CLOEXEC to keep fd") is not
+// possible. So CLOEXEC is not set: the listen fd leaks to sibling processes
+// (evdev/terminal) but is harmless (one extra unused fd). The child only does
+// dup2 to land fd 3 + close(4..31) to clear fd-table garbage + execve.
+// Returns -1 on failure.
 static int spawn_with_fd(const char *path, int listen_fd) {
   pid_t pid = fork();
   if (pid < 0)
     return -1;
   if (pid == 0) {
-    /* 子进程：归一到 fd 3 + 关泄漏 fd + execve */
+    // Child: normalize to fd 3 + close leaked fds + execve
     if (dup2(listen_fd, 3) < 0)
       _exit(127);
     for (int fd = 4; fd < 32; fd++)
@@ -50,15 +52,16 @@ static int spawn_with_fd(const char *path, int listen_fd) {
   return (int)pid;
 }
 
-/* create_udev_socket：建 AF_UNIX listen socket 绑 /run/udev/socket。
- * 返 listen fd（期望 fd 3）或 -1（失败时 udevd 走自 bind 降级）。
- * getsockname 在本 OS 不存在，靠 socket() 返回最小空闲 fd 约定
- * （stdio 占 0/1/2 → fd 3）；若被占则 dup2 强制归位 fd 3。 */
+// create_udev_socket: create an AF_UNIX listen socket bound to
+// /run/udev/socket. Returns the listen fd (expected fd 3) or -1 (on failure
+// udevd falls back to self-bind). getsockname does not exist in this OS; we
+// rely on socket() returning the lowest free fd (stdio holds 0/1/2 -> fd 3),
+// and dup2 forces it back to fd 3 if occupied.
 static int create_udev_socket(void) {
-  /* ↓↓↓ 本方案新增:先建 /run/udev 目录 ↓↓↓
-   * 现状无 mkdir,vfs_mknod_socket path_walk_parent 失败 → bind 降级 hash 表。
-   * mkdir 幂等(EEXIST 忽略)。 */
-  mkdir("/run/udev", 0755); /* /run 已是 tmpfs mount,可 mkdir */
+  // Create /run/udev first. Without mkdir, vfs_mknod_socket path_walk_parent
+  // fails -> bind falls back to the hash table. mkdir is idempotent (EEXIST
+  // ignored).
+  mkdir("/run/udev", 0755); // /run is already a tmpfs mount, mkdir works
 
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0)
@@ -75,7 +78,8 @@ static int create_udev_socket(void) {
     close(fd);
     return -1;
   }
-  /* fd 3 归位：若 socket() 返回非 3（被其它 fd 占），dup2 强制归位 */
+  // Normalize to fd 3: if socket() returned something other than 3 (some
+  // other fd occupied it), dup2 forces it back to fd 3
   if (fd != 3) {
     if (dup2(fd, 3) < 0) {
       close(fd);
@@ -118,9 +122,10 @@ int main(int argc, char **argv, char **envp) {
   wait_dev_ready("/dev/input/event0");
   printf("init: evdev ready\n");
 
-  // 3. Spawn udevd (socket activation: init 建 listen socket 传 udevd)
+  // 3. Spawn udevd (socket activation: init creates the listen socket and
+  //    passes it to udevd)
   printf("init: spawning udevd\n");
-  int listen_fd = create_udev_socket(); /* <0 则 udevd 走自 bind 降级 */
+  int listen_fd = create_udev_socket(); // <0: udevd falls back to self-bind
   int udevd_pid;
   if (listen_fd >= 0) {
     udevd_pid = spawn_with_fd("/usr/bin/udevd", listen_fd);
@@ -129,11 +134,13 @@ int main(int argc, char **argv, char **envp) {
   }
 
   // 4. Spawn terminal (which spawns shell internally)
-  /* settled gate:轮询 /run/udev/settled(udevd coldplug drain 后建),保证 db
-   * 就绪再 spawn terminal,否则 libinput 读 ID_INPUT_* 为空判 unsupported →
-   * terminal block 黑屏(根因见 fix.md)。最多等 ~2s,超时仍 spawn(退化为原
-   * 行为,不阻塞启动;对齐 systemd udev settle,偏离:文件标志 + init 轮询,
-   * 无 IPC 命令通道)。 */
+  // Settled gate: poll /run/udev/settled (created by udevd after coldplug
+  // drain) so the db is ready before spawning terminal, otherwise libinput
+  // reads empty ID_INPUT_* and judges unsupported -> terminal block is a
+  // black screen (root cause in fix.md). Wait at most ~2s; on timeout spawn
+  // anyway (degrades to original behavior, does not block boot; aligned with
+  // systemd udev settle, diverging via a file marker + init polling rather
+  // than an IPC command channel).
   for (int i = 0; i < 200; i++) {
     if (access("/run/udev/settled", F_OK) == 0)
       break;
@@ -206,7 +213,7 @@ int main(int argc, char **argv, char **envp) {
         wait_dev_ready("/dev/input/event0");
       continue;
     }
-    /* 其它子进程收尸，忽略 */
+    // Reap other children, ignored
   }
 
   return 0;

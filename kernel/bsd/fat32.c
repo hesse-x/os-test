@@ -4,19 +4,18 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* kernel/fat32.c — In-kernel FAT32 filesystem (synchronous)
- * Ported from driver/fs_driver.cc, converting async state machines
- * to simple synchronous loops using blk_read/blk_write.
- *
- * Kernel constraint: C only (commit 18c91ca).
- */
+// kernel/fat32.c — in-kernel FAT32 filesystem (synchronous).
+// Ported from driver/fs_driver.cc, converting async state machines to simple
+// synchronous loops using blk_read/blk_write.
+//
+// Kernel constraint: C only (commit 18c91ca).
 #include "kernel/bsd/fat32.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "arch/x64/apic.h" /* sched_clock() — realtime ns for inode timestamps */
-#include "arch/x64/rtc.h" /* wall_clock_boot_ns — RTC-epoch baseline */
+#include "arch/x64/apic.h" // sched_clock() — realtime ns for inode timestamps
+#include "arch/x64/rtc.h"  // wall_clock_boot_ns — RTC-epoch baseline
 #include "arch/x64/utils.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/page_cache.h"
@@ -31,7 +30,7 @@
 #include <xos/errno.h>
 #include <xos/stat.h>
 
-/* ==================== FAT32 volume state ==================== */
+// ==================== FAT32 volume state ====================
 static uint32_t part_start_lba;
 static uint32_t fat_start_lba;
 static uint32_t data_start_lba;
@@ -42,11 +41,11 @@ static uint32_t total_data_clusters;
 static uint32_t spf32;
 static uint32_t next_free_hint = 2;
 
-/* Global FAT lock: protects FAT modifications (free cluster scan + FAT entry
- * writes). Lock order: i_lock -> fat_lock -> ahci_lock (via blk_write) */
+// Global FAT lock: protects FAT modifications (free cluster scan + FAT entry
+// writes). Lock order: i_lock → fat_lock → ahci_lock (via blk_write).
 static spinlock fat_lock = SPINLOCK_INIT;
 
-/* ==================== FAT sector cache (16 slots, LRU) ==================== */
+// ==================== FAT sector cache (16 slots, LRU) ====================
 #define FAT_CACHE_PAGES 16
 
 struct fat_cache_entry {
@@ -72,23 +71,23 @@ static int fat_cache_lookup(uint32_t sector_lba) {
   return -1;
 }
 
-/* Read FAT sector into cache, returns cache slot.
- *
- * SMP-safe fill: the victim slot is invalidated (sector_lba cleared) BEFORE
- * blk_read fills its data, and the new sector_lba is published only AFTER the
- * read completes (with a release barrier). Without this, a concurrent
- * fat_cache_lookup that hits the slot between its tag being published and
- * blk_read finishing the fill would read a zeroed/partial buffer — causing an
- * allocator to see an in-use cluster (e.g. /test's directory cluster) as
- * free and overwrite it. */
+// Read FAT sector into cache, returns cache slot.
+//
+// SMP-safe fill: the victim slot is invalidated (sector_lba cleared) BEFORE
+// blk_read fills its data, and the new sector_lba is published only AFTER the
+// read completes (with a release barrier). Without this, a concurrent
+// fat_cache_lookup that hits the slot between its tag being published and
+// blk_read finishing the fill would read a zeroed/partial buffer — causing an
+// allocator to see an in-use cluster (e.g. /test's directory cluster) as free
+// and overwrite it.
 static int fat_cache_read(uint32_t sector_lba) {
   int slot = fat_cache_lookup(sector_lba);
   if (slot >= 0)
     return slot;
 
-  /* Pick an LRU victim under fat_cache_lock and invalidate it immediately so
-   * no concurrent lookup reads the buffer while we refill it. Re-check the
-   * tag inside the lock in case another CPU just filled this sector. */
+  // Pick an LRU victim under fat_cache_lock and invalidate it immediately so no
+  // concurrent lookup reads the buffer while we refill it. Re-check the tag
+  // inside the lock in case another CPU just filled this sector.
   spin_lock(&fat_cache_lock);
   for (int i = 0; i < FAT_CACHE_PAGES; i++) {
     if (fat_cache[i].sector_lba == sector_lba) {
@@ -102,23 +101,23 @@ static int fat_cache_read(uint32_t sector_lba) {
     if (fat_cache_age[i] < fat_cache_age[best])
       best = i;
   }
-  fat_cache[best].sector_lba = 0xFFFFFFFF; /* invalidate victim */
+  fat_cache[best].sector_lba = 0xFFFFFFFF; // invalidate victim
   fat_cache_age[best] = ++fat_cache_time;
   spin_unlock(&fat_cache_lock);
 
-  /* Fill the buffer with no fat_cache_lock held (blk_read is polling and takes
-   * ahci_lock itself). The slot is invisible to lookups during the fill. */
+  // Fill the buffer with no fat_cache_lock held (blk_read is polling and takes
+  // ahci_lock itself). The slot is invisible to lookups during the fill.
   if (blk_read_sector(sector_lba, fat_cache[best].data) != 0)
     return -1;
 
-  /* Publish the tag after the data is filled so a concurrent reader that hits
-   * this slot sees the completed buffer. */
+  // Publish the tag after the data is filled so a concurrent reader that hits
+  // this slot sees the completed buffer.
   __sync_synchronize();
   fat_cache[best].sector_lba = sector_lba;
   return best;
 }
 
-/* Invalidate FAT cache entries for a given sector */
+// Invalidate FAT cache entries for a given sector.
 static void fat_cache_invalidate_sector(uint32_t sector_lba) {
   spin_lock(&fat_cache_lock);
   for (int i = 0; i < FAT_CACHE_PAGES; i++) {
@@ -130,9 +129,9 @@ static void fat_cache_invalidate_sector(uint32_t sector_lba) {
   spin_unlock(&fat_cache_lock);
 }
 
-/* ==================== FAT entry read/write ==================== */
+// ==================== FAT entry read/write ====================
 
-/* Read a FAT entry (synchronous, uses FAT cache) */
+// Read a FAT entry (synchronous, uses FAT cache).
 static uint32_t fat32_read_entry(uint32_t cluster) {
   uint32_t fat_offset = cluster * 4;
   uint32_t fat_sector = fat_start_lba + (fat_offset / 512);
@@ -148,7 +147,7 @@ static uint32_t fat32_read_entry(uint32_t cluster) {
   return entry_val & 0x0FFFFFFF;
 }
 
-/* Write a FAT entry (dual-write to FAT1 and FAT2) */
+// Write a FAT entry (dual-write to FAT1 and FAT2).
 static int fat32_write_fat_entry(uint32_t cluster, uint32_t value) {
   uint32_t fat_offset = cluster * 4;
   uint32_t fat_sector = fat_start_lba + (fat_offset / 512);
@@ -167,23 +166,23 @@ static int fat32_write_fat_entry(uint32_t cluster, uint32_t value) {
   p[2] = (nv >> 16) & 0xFF;
   p[3] = (nv >> 24) & 0xFF;
 
-  /* Write FAT1 */
+  // Write FAT1.
   if (blk_write(fat_sector, 1, sector_buf) != 0)
     return -EIO;
-  /* Write FAT2 */
+  // Write FAT2.
   if (blk_write(fat_sector + spf32, 1, sector_buf) != 0)
     return -EIO;
 
-  /* Invalidate cache for this sector so subsequent reads get fresh data */
+  // Invalidate cache for this sector so subsequent reads get fresh data.
   fat_cache_invalidate_sector(fat_sector);
   fat_cache_invalidate_sector(fat_sector + spf32);
 
   return 0;
 }
 
-/* ==================== FAT chain walk ==================== */
+// ==================== FAT chain walk ====================
 
-/* Walk FAT chain from start_cluster, return the cluster at page_index */
+// Walk FAT chain from start_cluster, return the cluster at page_index.
 uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index) {
   uint32_t c = start_cluster;
   uint64_t max_walk =
@@ -204,14 +203,13 @@ uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index) {
   return c;
 }
 
-/* ==================== Cluster allocation ==================== */
+// ==================== Cluster allocation ====================
 
-/* Find a free cluster and mark it as EOF. Returns cluster number or 0 on
- * failure. Caller holds fat_lock (so no concurrent FAT writer), but FAT
- * readers (directory lookups) don't take fat_lock and can refill/evict a
- * shared fat_cache slot mid-scan, which would let us read a buffer changing
- * under us. Read the sector into a private stack buffer so the scan bytes are
- * stable. */
+// Find a free cluster and mark it as EOF. Returns cluster number or 0 on
+// failure. Caller holds fat_lock (so no concurrent FAT writer), but FAT readers
+// (directory lookups) don't take fat_lock and can refill/evict a shared
+// fat_cache slot mid-scan, which would let us read a buffer changing under us.
+// Read the sector into a private stack buffer so the scan bytes are stable.
 static uint32_t fat32_allocate_cluster(void) {
   uint8_t sec[512];
   for (uint32_t sector = 0; sector < spf32; sector++) {
@@ -229,7 +227,7 @@ static uint32_t fat32_allocate_cluster(void) {
                    ((uint32_t)fd[i * 4 + 3] << 24);
       e &= 0x0FFFFFFF;
       if (e == 0) {
-        /* Found free cluster — mark as EOF in FAT */
+        // Found free cluster — mark as EOF in FAT.
         next_free_hint = c + 1;
         if (next_free_hint >= total_data_clusters + 2)
           next_free_hint = 2;
@@ -239,10 +237,10 @@ static uint32_t fat32_allocate_cluster(void) {
       }
     }
   }
-  return 0; /* ENOSPC */
+  return 0; // ENOSPC
 }
 
-/* Free an entire cluster chain starting from start_cluster */
+// Free an entire cluster chain starting from start_cluster.
 static void fat32_free_chain(uint32_t start_cluster) {
   uint32_t c = start_cluster;
   int max_free = 1024; // safety limit: max clusters in a single chain
@@ -261,12 +259,12 @@ static void fat32_free_chain(uint32_t start_cluster) {
   }
 }
 
-/* Link a new cluster after tail_cluster in the FAT chain */
+// Link a new cluster after tail_cluster in the FAT chain.
 static int fat32_link_cluster(uint32_t tail_cluster, uint32_t new_cluster) {
   return fat32_write_fat_entry(tail_cluster, new_cluster);
 }
 
-/* ==================== 8.3 name helpers ==================== */
+// ==================== 8.3 name helpers ====================
 
 static void format_83_name(const char *user, int user_len, uint8_t out[11]) {
   if (user_len == 1 && user[0] == '.') {
@@ -316,7 +314,7 @@ static int match_83_name(const uint8_t stored[11], const char *name,
   return 1;
 }
 
-/* ==================== LFN helpers ==================== */
+// ==================== LFN helpers ====================
 
 static int collect_lfn_entry(const struct fat_dir_entry *de, char *lfn_buf) {
   const uint8_t *raw = (const uint8_t *)de;
@@ -365,34 +363,34 @@ static int match_lfn_name(const char *lfn_buf, const char *name, int name_len) {
   return lfn_buf[name_len] == '\0';
 }
 
-/* ==================== Volume geometry accessors ==================== */
+// ==================== Volume geometry accessors ====================
 
 uint32_t fat32_data_start_lba(void) { return data_start_lba; }
 uint32_t fat32_sectors_per_cluster(void) { return sectors_per_cluster; }
 uint32_t fat32_bytes_per_cluster(void) { return bytes_per_cluster; }
 
-/* ==================== Inode numbering ====================
- *
- * FAT32 has no on-disk inode number. We previously used the file's
- * start_cluster as the ino, but a freshly created empty file has
- * start_cluster == 0, so every empty file mapped to ino 0 and shared a
- * single inode cache entry (data corruption), and it also collided with
- * devtmpfs directory inodes that used ino 0. Use the stable, unique
- * location of the file's directory entry instead: the entry's directory
- * cluster and its index within that cluster. This is unique even for
- * empty files (their dir entry exists before any cluster is allocated).
- *
- * Layout: ino = dir_cluster * entries_per_cluster + dir_entry_index,
- * which stays below the devtmpfs range (0x80000000+) for any realistic
- * disk. The root directory (dir_idx < 0) keeps ino = root_cluster.
- */
+// ==================== Inode numbering ====================
+//
+// FAT32 has no on-disk inode number. We previously used the file's
+// start_cluster as the ino, but a freshly created empty file has start_cluster
+// == 0, so every empty file mapped to ino 0 and shared a single inode cache
+// entry (data corruption), and it also collided with devtmpfs directory inodes
+// that used ino 0. Use the stable, unique location of the file's directory
+// entry instead: the entry's directory cluster and its index within that
+// cluster. This is unique even for empty files (their dir entry exists before
+// any cluster is allocated).
+//
+// Layout: ino = dir_cluster * entries_per_cluster + dir_entry_index,
+// which stays below the devtmpfs range (0x80000000+) for any realistic disk.
+// The root directory (dir_idx < 0) keeps ino = root_cluster.
 static uint32_t fat32_make_ino(uint32_t dir_cluster, int dir_entry_idx) {
   if (dir_entry_idx < 0)
     return root_cluster;
   return dir_cluster * (bytes_per_cluster / 32) + (uint32_t)dir_entry_idx;
 }
 
-/* 前置声明:i_op 表在 R2-10 定义;簇读写 helper 定义在本文件后段。 */
+// Forward declarations: i_op tables are defined in R2-10; cluster read/write
+// helpers are defined later in this file.
 static const struct inode_operations fat32_dir_iop;
 static const struct inode_operations fat32_file_iop;
 static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
@@ -401,9 +399,10 @@ static uint8_t *read_cluster_buf(uint32_t cluster);
 static int write_cluster_sector(uint32_t cluster, int sector_idx,
                                 const uint8_t *data);
 
-/* fat32_iget:经 inode_get_or_create 取/建 inode 并挂 i_op(唯一出口)。
- * cache 命中复用同 ino(幂等赋值 i_op 同值无竞态);miss 新建。
- * fat32 inode 无 fs 内部强引用,可被回收,故用 inode_get_or_create。 */
+// fat32_iget: via inode_get_or_create, get/create an inode and set i_op (only
+// exit point). Cache hit reuses the same ino (idempotent i_op assignment — same
+// value, no race); miss creates new. fat32 inodes have no fs-internal strong
+// ref and can be reaped, hence inode_get_or_create.
 static struct inode *fat32_iget(uint32_t ino, int type, uint64_t size,
                                 uint32_t cluster, uint32_t dir_cluster,
                                 int dir_idx) {
@@ -412,11 +411,13 @@ static struct inode *fat32_iget(uint32_t ino, int type, uint64_t size,
   if (!ip)
     return NULL;
   ip->i_op = (type == INODE_DIR) ? &fat32_dir_iop : &fat32_file_iop;
-  /* Q5:fat32 inode 无 fs 内部强引用,utimensat 释放后可被回收,再 lookup 建
-   * 新 inode 时间戳回 0。cache miss(新建,refcount==1)时初始化 atime/mtime/
-   * ctime 为当前 realtime ns,使 stat 永远返非零 mtime(而非 0);utimensat 设
-   * 的显式值在 inode 回收后丢失(不落盘,可接受)。cache hit 复用旧 inode,
-   * 时间戳保留 utimensat 写入值。 */
+  // Q5: fat32 inodes have no fs-internal strong ref; after utimensat releases
+  // them they can be reaped, and a later lookup builds a new inode whose
+  // timestamps reset to 0. On cache miss (new build, refcount==1) initialize
+  // atime/mtime/ctime to the current realtime ns so stat always returns a
+  // non-zero mtime (never 0); explicit utimensat values are lost once the inode
+  // is reaped (not persisted, acceptable). Cache hit reuses the old inode and
+  // keeps the utimensat-written timestamps.
   if (refcount_read(&ip->i_count) == 1) {
     uint64_t now =
         __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
@@ -425,9 +426,10 @@ static struct inode *fat32_iget(uint32_t ino, int type, uint64_t size,
   return ip;
 }
 
-/* fat32_lookup_in_dir:在目录簇 dir_cluster 的整条 FAT 链上扫描名为 name
- *  的目录项,返回 0 命中(填充 out_*)/-ENOENT 未找到/-EIO。抽取自
- *  fat32_resolve_path 的内联扫描循环(§6.5 唯一目录扫描原语)。 */
+// fat32_lookup_in_dir: scan the whole FAT chain of dir_cluster for an entry
+// named `name`; returns 0 on hit (fills out_*) / -ENOENT if not found / -EIO.
+// Extracted from fat32_resolve_path's inline scan loop (§6.5 sole directory
+// scan primitive).
 static int fat32_lookup_in_dir(uint32_t dir_cluster, const char *name,
                                uint32_t *out_cluster, uint32_t *out_dir_cluster,
                                int *out_dir_idx, uint64_t *out_size,
@@ -490,8 +492,8 @@ static int fat32_lookup_in_dir(uint32_t dir_cluster, const char *name,
   return -ENOENT;
 }
 
-/* fat32_dir_lookup:在目录 inode dir 内查名为 name 的直接子项,返 +1 inode 或
- * NULL。 */
+// fat32_dir_lookup: find a direct child named `name` in dir; returns +1 inode
+// or NULL.
 static struct inode *fat32_dir_lookup(struct inode *dir, const char *name) {
   uint32_t cluster, dir_cluster;
   int dir_idx, is_dir;
@@ -505,10 +507,11 @@ static struct inode *fat32_dir_lookup(struct inode *dir, const char *name) {
   return fat32_iget(ino, type, size, cluster, dir_cluster, dir_idx);
 }
 
-/* fat32_dir_find_slot:在目录簇链 start_cluster 上找空闲目录项槽(0x00 或
- * 0xE5),链上无空槽则在链尾扩展一清零新簇。返回 0 命中(填充 out_cluster/
- * out_idx/out_was_end:槽所在簇/槽下标/是否原为目录尾)/-errno。
- * 调用方需持 fat_lock。 */
+// fat32_dir_find_slot: find a free dir-entry slot (0x00 or 0xE5) on the cluster
+// chain start_cluster; if no free slot on the chain, extend it with a zeroed
+// new cluster. Returns 0 on hit (fills out_cluster/out_idx/out_was_end: slot's
+// cluster / slot index / whether slot was originally the dir end) / -errno.
+// Caller must hold fat_lock.
 static int fat32_dir_find_slot(uint32_t start_cluster, uint32_t *out_cluster,
                                int *out_idx, int *out_was_end) {
   int entries = bytes_per_cluster / 32;
@@ -569,8 +572,8 @@ static int fat32_dir_find_slot(uint32_t start_cluster, uint32_t *out_cluster,
   return 0;
 }
 
-/* fat32_dir_create:在目录 dir 内建普通文件 name,返 +1 新 inode 或
- * ERR_PTR(-errno)。 */
+// fat32_dir_create: create regular file `name` in dir; returns +1 new inode or
+// ERR_PTR(-errno).
 static struct inode *fat32_dir_create(struct inode *dir, const char *name,
                                       int mode) {
   (void)mode;
@@ -581,7 +584,8 @@ static struct inode *fat32_dir_create(struct inode *dir, const char *name,
     return ERR_PTR(-ENOENT);
 
   spin_lock(&fat_lock);
-  /* 在 dir->start_cluster 的簇链上找空闲槽(0x00 或 0xE5),不足则扩展一簇。 */
+  // Find a free slot (0x00 or 0xE5) on dir->start_cluster's chain; extend a
+  // cluster if none.
   int entries = bytes_per_cluster / 32;
   uint32_t target_cluster;
   int free_idx, was_end_of_dir;
@@ -621,7 +625,8 @@ static struct inode *fat32_dir_create(struct inode *dir, const char *name,
   return fat32_iget(ino, INODE_REGULAR, 0, 0, target_cluster, free_idx);
 }
 
-/* fat32_dir_mkdir:在 dir 内建子目录 name,返 0 成功 / -errno 失败。 */
+// fat32_dir_mkdir: create subdirectory `name` in dir; returns 0 on success /
+// -errno on failure.
 static int fat32_dir_mkdir(struct inode *dir, const char *name, int mode) {
   (void)mode;
   int namelen = 0;
@@ -662,8 +667,8 @@ static int fat32_dir_mkdir(struct inode *dir, const char *name, int mode) {
   uint32_t lba = data_start_lba + (new_cluster - 2) * sectors_per_cluster;
   blk_write(lba, sectors_per_cluster, db);
   kfree(db);
-  /* 在父目录 dir->start_cluster 的簇链上找空闲槽(0x00 或 0xE5),不足则扩
-   * 展一簇(同 fat32_dir_create,经共享 helper)。 */
+  // Find a free slot (0x00 or 0xE5) on dir->start_cluster's chain; extend a
+  // cluster if none (same as fat32_dir_create, via the shared helper).
   int entries = bytes_per_cluster / 32;
   uint32_t target_cluster;
   int free_idx, was_end_of_dir;
@@ -688,7 +693,8 @@ static int fat32_dir_mkdir(struct inode *dir, const char *name, int mode) {
   ne.fst_clus_lo = new_cluster & 0xFFFF;
   ne.file_size = 0;
   __memcpy(pb + free_idx * 32, &ne, 32);
-  /* 占用的是目录尾槽时清零下一槽作链扫描终止标记(同 fat32_dir_create)。 */
+  // When the slot taken was the dir-end, zero the next slot as a chain-scan
+  // terminator (same as fat32_dir_create).
   if (was_end_of_dir && free_idx + 1 < entries)
     __memset(pb + (free_idx + 1) * 32, 0, 32);
   int sec = (free_idx * 32) / 512;
@@ -702,17 +708,18 @@ static int fat32_dir_mkdir(struct inode *dir, const char *name, int mode) {
   spin_unlock(&fat_lock);
   if (wrc != 0)
     return -EIO;
-  /* 预建 inode cache 条目(调用者 sys_mkdir 不取回 inode,仅判定成败)。
-   * ino 必须按槽实际所在簇 target_cluster 生成(与 lookup 一致)。 */
+  // Pre-build the inode cache entry (caller sys_mkdir doesn't take the inode
+  // back, only checks success). ino must be generated from the slot's actual
+  // cluster target_cluster (consistent with lookup).
   uint32_t ino = fat32_make_ino(target_cluster, free_idx);
   struct inode *ip =
       fat32_iget(ino, INODE_DIR, 0, new_cluster, target_cluster, free_idx);
   if (ip)
-    inode_put(ip); /* cache 持基准 ref,此处还掉 iget 的 +1 */
+    inode_put(ip); // cache holds the base ref; here we drop iget's +1
   return 0;
 }
 
-/* fat32_dir_unlink:从 dir 删除子文件 name。 */
+// fat32_dir_unlink: delete child file `name` from dir.
 static int fat32_dir_unlink(struct inode *dir, const char *name) {
   uint32_t cluster, dir_cluster;
   int dir_idx, is_dir;
@@ -748,8 +755,9 @@ static int fat32_dir_unlink(struct inode *dir, const char *name) {
   return 0;
 }
 
-/* fat32_dir_is_empty:扫目录簇链,仅含 . / .. 或全 0x00 视为空,返 1;
- *  否则 0。抽自 fat32_dir_rmdir 的内联验空段,供 rmdir/rename 共用。 */
+// fat32_dir_is_empty: scan the directory cluster chain; if only . / .. or all
+// 0x00, treat as empty, return 1; else 0. Extracted from fat32_dir_rmdir's
+// inline emptiness check, shared by rmdir/rename.
 static int fat32_dir_is_empty(uint32_t cluster) {
   uint32_t cc = cluster;
   while (cc >= 2 && cc < 0x0FFFFFF8) {
@@ -761,7 +769,7 @@ static int fat32_dir_is_empty(uint32_t cluster) {
       struct fat_dir_entry *d = (struct fat_dir_entry *)(dbuf + i * 32);
       if (d->name[0] == 0x00) {
         kfree(dbuf);
-        return 1; /* 目录尾,之前只见 . .. → 空 */
+        return 1; // dir end, only . .. seen so far → empty
       }
       if (d->name[0] == 0xE5)
         continue;
@@ -781,7 +789,7 @@ static int fat32_dir_is_empty(uint32_t cluster) {
   return 1;
 }
 
-/* fat32_dir_rmdir:从 dir 删除空子目录 name。 */
+// fat32_dir_rmdir: delete empty subdirectory `name` from dir.
 static int fat32_dir_rmdir(struct inode *dir, const char *name) {
   uint32_t cluster, dir_cluster;
   int dir_idx, is_dir;
@@ -813,10 +821,11 @@ static int fat32_dir_rmdir(struct inode *dir, const char *name) {
   return 0;
 }
 
-/* fat32_getattr:从 inode 字段填 kstat。S08: 报真实 ip->mode/uid/gid(创建时
- * 由 sys_open/mkdir 设),blksize=fat32 簇大小。FAT32 磁盘不存权限位,mode/uid/gid
- * 仅内存态(reboot 后回默认);本 OS 单 root,uid 多为 0,可接受(记 todo 真权限
- * FS)。 */
+// fat32_getattr: fill kstat from inode fields. S08: report real
+// ip->mode/uid/gid (set by sys_open/mkdir at creation); blksize = fat32 cluster
+// size. FAT32 disk stores no permission bits; mode/uid/gid are in-memory only
+// (revert to defaults on reboot). This OS is single-root, uid is mostly 0,
+// acceptable (todo: a real permission FS).
 static int fat32_getattr(struct inode *ip, struct kstat *ks) {
   __memset(ks, 0, sizeof(*ks));
   ks->st_ino = ip->ino;
@@ -827,8 +836,9 @@ static int fat32_getattr(struct inode *ip, struct kstat *ks) {
   ks->st_size = (int64_t)ip->size;
   ks->st_blksize = (int64_t)fat32_bytes_per_cluster();
   ks->st_blocks = (ip->size + 511) / 512;
-  /* 时间戳(Q5 内存态):getattr 读 ns 拆 sec/nsec。FAT32 磁盘不存时间戳,
-   * inode 字段由 update_time/utimensat 写(reboot 后回 0,可接受)。 */
+  // Timestamps (Q5 in-memory): getattr splits ns into sec/nsec. FAT32 disk
+  // stores no timestamps; inode fields are written by update_time/utimensat
+  // (revert to 0 on reboot, acceptable).
   ks->st_atim.tv_sec = (int64_t)(ip->atime / 1000000000ULL);
   ks->st_atim.tv_nsec = (int64_t)(ip->atime % 1000000000ULL);
   ks->st_mtim.tv_sec = (int64_t)(ip->mtime / 1000000000ULL);
@@ -838,8 +848,9 @@ static int fat32_getattr(struct inode *ip, struct kstat *ks) {
   return 0;
 }
 
-/* fat32_setattr:改 inode 大小。锁序 i_lock -> fat_lock(§6.6):setattr 内部
- *  自取 i_lock 再调 fat32_ftruncate(内部取 fat_lock)。调用者不持 i_lock。 */
+// fat32_setattr: change inode size. Lock order i_lock → fat_lock (§6.6):
+// setattr takes i_lock itself, then calls fat32_ftruncate (which takes
+// fat_lock internally). Caller does not hold i_lock.
 static int fat32_setattr(struct inode *ip, uint64_t size) {
   spin_lock(&ip->i_lock);
   int rc = fat32_ftruncate(ip, size);
@@ -847,35 +858,44 @@ static int fat32_setattr(struct inode *ip, uint64_t size) {
   return rc;
 }
 
-/* fat32_dir_rename:将 old_parent 下 old_name 目录项改到 new_parent 下
- * new_name。 实现策略:在 new_parent 找目标槽(若 new
- * 已存在则就地覆盖其槽,否则找空闲 槽/扩簇),把 old 目录项 32B
- * 原样复制到目标槽并仅重写 name 为 new_name 的 8.3 形式(attr/fst_clus/size 不变
- * → inode 身份即首簇不变),再标 old 旧槽 0xE5;覆盖时释放 new 原簇链。锁序对齐
- * fat32_dir_create:fat_lock 全程持有。
- *
- *  POSIX 语义(对齐 Linux rename(2)):
- *   - old 不存在 → -ENOENT
- *   - new 不存在 → 纯改名(目录项迁移,簇链不变)
- *   - new 存在且为文件、old 亦文件 → 覆盖(释放 new 簇链)
- *   - new 存在且为空目录、old 亦目录 → 覆盖(释放 new 目录簇链)
- *   - new 存在且非空目录 → -ENOTEMPTY
- *   - old 目录、new 文件 → -EISDIR;old 文件、new 目录 → -ENOTDIR
- *   - old==new 同名 → 0 no-op
- *   - 同一 inode(old/new 指向同首簇) → 0 no-op(防自覆盖)
- *  跨目录目录移动需更新被移目录 .. 与防环,本实现暂不支持:old_parent !=
- *  new_parent 且 old 为目录 → -EXDEV。同目录改名 .. 不变,天然无环。 */
+// fat32_dir_rename: move the entry old_name under old_parent to new_name under
+// new_parent. Strategy: find a target slot in new_parent (overwrite new's slot
+// if new already exists, else find a free slot / extend a cluster), copy the
+// old entry's 32B verbatim to the target slot and rewrite only the name as
+// new_name's 8.3 form (attr/fst_clus/size unchanged → inode identity, i.e. the
+// first cluster, unchanged), then mark the old slot 0xE5; on overwrite, free
+// new's original chain. Lock order matches fat32_dir_create: fat_lock held
+// throughout.
+//
+// POSIX semantics (mirrors Linux rename(2)):
+//  - old doesn't exist → -ENOENT
+//  - new doesn't exist → pure rename (entry migration, chain unchanged)
+//  - new exists and is a file, old is a file → overwrite (free new's chain)
+//  - new exists and is an empty dir, old is a dir → overwrite (free new's dir
+//  chain)
+//  - new exists and is a non-empty dir → -ENOTEMPTY
+//  - old is a dir, new is a file → -EISDIR; old is a file, new is a dir →
+//  -ENOTDIR
+//  - old==new same name → 0 no-op
+//  - same inode (old/new point to same first cluster) → 0 no-op (prevents
+//    self-overwrite)
+// Cross-directory dir moves need to update the moved dir's .. and guard against
+// cycles; this implementation doesn't support that: old_parent != new_parent
+// and old is a dir → -EXDEV. Same-directory rename leaves .. unchanged, so no
+// cycle is possible.
 static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
                             struct inode *new_parent, const char *new_name) {
   if (!old_parent || !old_name || !new_parent || !new_name)
     return -EFAULT;
 
-  /* old/new 同目录同名 → no-op(对齐 Linux)。 */
+  // old/new same dir and same name → no-op (mirrors Linux).
   if (old_parent == new_parent && __strcmp(old_name, new_name) == 0)
     return 0;
 
-  /* 跨目录移动目录需 .. 更新 + 防环,本实现不支持(对齐 mvfat:返 -EXDEV)。
-   * 同目录改名 .. 不变;跨目录文件移动无 .. 需求亦不支持以保边界清晰。 */
+  // Cross-directory dir moves need .. update + cycle guard; this implementation
+  // doesn't support them (mirrors mvfat: return -EXDEV). Same-directory rename
+  // leaves .. unchanged; cross-directory file moves also unsupported to keep
+  // the boundary clear.
   if (old_parent != new_parent)
     return -EXDEV;
 
@@ -893,7 +913,7 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
                                &old_cluster, &old_dir_cluster, &old_dir_idx,
                                &old_size, &old_is_dir);
   if (rc != 0)
-    return rc; /* -ENOENT */
+    return rc; // -ENOENT
 
   uint32_t new_cluster, new_dir_cluster;
   int new_dir_idx, new_is_dir;
@@ -904,30 +924,32 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
                            &new_is_dir);
   int new_exists = (rc == 0);
   if (rc != 0 && rc != -ENOENT)
-    return rc; /* -EIO 等 */
+    return rc; // -EIO etc.
 
-  /* old/new 指向同一首簇 → 同一 inode,对齐 Linux 返 0(防"覆盖自身"误删)。 */
+  // old/new point to the same first cluster → same inode; mirrors Linux
+  // returning 0 (prevents "overwrite self" accidental deletion).
   if (new_exists && old_cluster == new_cluster && old_cluster >= 2 &&
       old_cluster < 0x0FFFFFF8)
     return 0;
 
-  /* 覆盖语义边界校验(new 存在时)。 */
+  // Overwrite semantic boundary checks (when new exists).
   if (new_exists) {
     if (old_is_dir) {
       if (!new_is_dir)
-        return -EISDIR; /* old 目录 → new 文件 */
+        return -EISDIR; // old is a dir → new is a file
       uint32_t new_dir_cluster0 = new_cluster ? new_cluster : root_cluster;
       if (!fat32_dir_is_empty(new_dir_cluster0))
         return -ENOTEMPTY;
     } else {
       if (new_is_dir)
-        return -ENOTDIR; /* old 文件 → new 目录 */
+        return -ENOTDIR; // old is a file → new is a dir
     }
   }
 
   spin_lock(&fat_lock);
 
-  /* 读 old 目录项(保留 attr/fst_clus/size,仅重写 name 为 new_name 8.3)。 */
+  // Read the old entry (keep attr/fst_clus/size, only rewrite name to
+  // new_name's 8.3 form).
   uint8_t *old_db = read_cluster_buf(old_dir_cluster);
   if (!old_db) {
     spin_unlock(&fat_lock);
@@ -938,7 +960,8 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
   kfree(old_db);
   format_83_name(new_name, namelen, ne.name);
 
-  /* 确定目标槽:覆盖用 new 的旧槽;纯改名找空闲槽(0x00/0xE5),不足则扩簇。 */
+  // Pick the target slot: overwrite uses new's old slot; pure rename finds a
+  // free slot (0x00/0xE5), extending a cluster if none.
   uint32_t target_cluster;
   int target_idx;
   int was_end_of_dir = 0;
@@ -1005,7 +1028,8 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
     }
   }
 
-  /* 写目标槽:复制 old 目录项(已改 name)。维持 end-of-dir 标记。 */
+  // Write the target slot: copy the old entry (name already changed). Preserve
+  // the end-of-dir marker.
   uint8_t *new_db = read_cluster_buf(target_cluster);
   if (!new_db) {
     spin_unlock(&fat_lock);
@@ -1028,7 +1052,8 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
     return -EIO;
   }
 
-  /* 删 old 旧槽(标 0xE5)。覆盖场景下 old 槽 ≠ new 槽(异名),独立标记。 */
+  // Delete the old slot (mark 0xE5). In the overwrite case old slot ≠ new slot
+  // (different names), mark independently.
   if (old_dir_cluster != target_cluster || old_dir_idx != target_idx) {
     uint8_t *odb = read_cluster_buf(old_dir_cluster);
     if (!odb) {
@@ -1045,17 +1070,21 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
     }
   }
 
-  /* 覆盖:释放 new 原簇链。FAT32 无 nlink,簇链释放即数据删除。 */
+  // Overwrite: free new's original chain. FAT32 has no nlink, so chain release
+  // is data deletion.
   if (new_exists) {
     uint32_t nc = new_cluster;
     if (nc >= 2 && nc < 0x0FFFFFF8)
       fat32_free_chain(nc);
   }
 
-  /* inode cache 同步:old inode 的 ino 随目录项位置变化,但其内容(首簇/size)
-   * 不变。照 unlink 失效其 page cache;已打开 fd 仍走首簇寻址,不受目录项位置
-   * 影响(FAT32 文件 I/O 经首簇,不依赖 ino 的 dir_idx)。不主动迁移 inode cache
-   * 条目;下次 lookup 按新位置 fat32_iget 建新 inode,旧 inode 关闭时回收。 */
+  // inode cache sync: the old inode's ino changes with the dir-entry position,
+  // but its content (first cluster/size) is unchanged. Invalidate its page
+  // cache like unlink does; already-open fds still address via the first
+  // cluster and are unaffected by the dir-entry position (FAT32 file I/O goes
+  // through the first cluster, doesn't depend on ino's dir_idx). We don't
+  // actively migrate the inode cache entry; the next lookup builds a new inode
+  // via fat32_iget at the new position; the old inode is reaped when closed.
   struct inode *old_ip =
       inode_lookup(fat32_make_ino(old_dir_cluster, old_dir_idx));
   if (old_ip) {
@@ -1083,15 +1112,15 @@ static const struct inode_operations fat32_file_iop = {
     .setattr = fat32_setattr,
 };
 
-/* fat32_mount_root:返回挂载点根 inode(已 inode_get,+1)。根 ino=root_cluster。
- *  经 fat32_iget 出口挂 fat32_dir_iop——修复 R1 stub 漏挂 i_op 导致的启动死锁。
- */
+// fat32_mount_root: return the mount-point root inode (with inode_get, +1).
+// Root ino = root_cluster. Goes through fat32_iget to install fat32_dir_iop —
+// fixes the boot deadlock caused by the R1 stub missing i_op.
 static struct inode *fat32_mount_root(struct mount_entry *m) {
   (void)m;
   return fat32_iget(root_cluster, INODE_DIR, 0, root_cluster, root_cluster, -1);
 }
 
-/* ==================== Path resolution (synchronous) ==================== */
+// ==================== Path resolution (synchronous) ====================
 
 static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
                               uint32_t *out_dir_cluster, int *out_dir_entry_idx,
@@ -1099,7 +1128,7 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
   if (!path || path[0] != '/')
     return -ENOENT;
 
-  /* Root directory */
+  // Root directory.
   if (path[1] == '\0') {
     *out_cluster = root_cluster;
     *out_dir_cluster = root_cluster;
@@ -1108,10 +1137,10 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
     return 0;
   }
 
-  /* For is_parent mode: find last slash,
-   * resolve the parent path, then return parent dir info */
+  // For is_parent mode: find last slash, resolve the parent path, then return
+  // parent dir info.
   int leaf_len = 0;
-  int parent_end = -1; /* index of last '/' in path */
+  int parent_end = -1; // index of last '/' in path
 
   if (is_parent) {
     int path_len = 0;
@@ -1126,15 +1155,15 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
     if (parent_end < 0)
       return -ENOENT;
     if (parent_end == 0) {
-      /* Parent is root */
+      // Parent is root.
       *out_cluster = root_cluster;
       *out_dir_cluster = root_cluster;
       *out_dir_entry_idx = -1;
       *out_file_size = 0;
       return 0;
     }
-    /* Extract leaf name length after last slash (not stored, just advance past
-     * it) */
+    // Extract leaf name length after last slash (not stored, just advance past
+    // it).
     const char *ls = path + parent_end + 1;
     while (ls[leaf_len] && leaf_len < 255) {
       leaf_len++;
@@ -1143,10 +1172,10 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
 
   uint32_t cluster = root_cluster;
   uint32_t prev_dir_cluster = root_cluster;
-  const char *p = path + 1; /* skip leading '/' */
+  const char *p = path + 1; // skip leading '/'
 
   while (*p) {
-    /* Extract next path component */
+    // Extract next path component.
     char component[256];
     int clen = 0;
     while (*p && *p != '/' && clen < 255)
@@ -1157,16 +1186,16 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
 
     int is_last = (*p == '\0');
 
-    /* In is_parent mode: if the remaining path is past parent_end,
-     * treat this component as the last one (it's the parent directory) */
+    // In is_parent mode: if the remaining path is past parent_end, treat this
+    // component as the last one (it's the parent directory).
     int is_parent_last = 0;
     if (is_parent && (p - path) > parent_end) {
       is_parent_last = 1;
     }
 
-    /* Handle "." and ".." */
+    // Handle "." and "..".
     if (component[0] == '.' && component[1] == '\0') {
-      /* "." — stay in current directory */
+      // "." — stay in current directory.
       if (is_last || is_parent_last) {
         *out_cluster = cluster;
         *out_dir_cluster = prev_dir_cluster;
@@ -1177,12 +1206,11 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
       continue;
     }
     if (component[0] == '.' && component[1] == '.' && component[2] == '\0') {
-      /* ".." — go to parent directory.
-       * Read the ".." entry to find parent cluster.
-       * For root, ".." points to root itself. */
+      // ".." — go to parent directory. Read the ".." entry to find the parent
+      // cluster. For root, ".." points to root itself.
       if (cluster != root_cluster) {
-        /* Scan current dir for ".." entry to get parent cluster */
-        uint32_t parent_cluster = root_cluster; /* default */
+        // Scan current dir for ".." entry to get parent cluster.
+        uint32_t parent_cluster = root_cluster; // default
         uint32_t scan2 = cluster;
         while (scan2 >= 2 && scan2 < 0x0FFFFFF8) {
           uint32_t lba2 = data_start_lba + (scan2 - 2) * sectors_per_cluster;
@@ -1219,7 +1247,7 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
         prev_dir_cluster = cluster;
         cluster = parent_cluster;
       }
-      /* else: already at root, stay */
+      // else: already at root, stay.
       if (is_last || is_parent_last) {
         *out_cluster = cluster;
         *out_dir_cluster = prev_dir_cluster;
@@ -1230,7 +1258,7 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
       continue;
     }
 
-    /* Scan current directory for this component */
+    // Scan current directory for this component.
     int found = 0;
     uint32_t scan_cluster = cluster;
     char lfn_buf[256];
@@ -1250,7 +1278,7 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
       for (int i = 0; i < entries; i++) {
         struct fat_dir_entry *de = (struct fat_dir_entry *)(buf + i * 32);
         if (de->name[0] == 0x00) {
-          /* End of directory */
+          // End of directory.
           kfree(buf);
           return -ENOENT;
         }
@@ -1263,7 +1291,7 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
           continue;
         }
 
-        /* Short name entry — check match */
+        // Short name entry — check match.
         int matched = 0;
         if (lfn_buf[0] != '\0')
           matched = match_lfn_name(lfn_buf, component, clen);
@@ -1278,7 +1306,7 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
             entry_cluster = root_cluster;
 
           if (is_last || is_parent_last) {
-            /* Found the target */
+            // Found the target.
             *out_cluster = entry_cluster;
             *out_dir_cluster = scan_cluster;
             *out_dir_entry_idx = i;
@@ -1287,7 +1315,7 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
             return 0;
           }
 
-          /* Intermediate component — descend */
+          // Intermediate component — descend.
           if (!(de->attr & 0x10)) {
             kfree(buf);
             return -ENOTDIR;
@@ -1303,7 +1331,7 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
       if (found)
         break;
 
-      /* Follow FAT chain */
+      // Follow FAT chain.
       uint32_t next = fat32_read_entry(scan_cluster);
       if (next >= 0x0FFFFFF8)
         return -ENOENT;
@@ -1317,10 +1345,9 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
   return -ENOENT;
 }
 
-/* ==================== Directory entry read/write helpers ====================
- */
+// ==================== Directory entry read/write helpers ====================
 
-/* Read a cluster from disk into a kmalloc'd buffer */
+// Read a cluster from disk into a kmalloc'd buffer.
 static uint8_t *read_cluster_buf(uint32_t cluster) {
   uint8_t *buf = (uint8_t *)kmalloc(bytes_per_cluster);
   if (!buf)
@@ -1333,7 +1360,7 @@ static uint8_t *read_cluster_buf(uint32_t cluster) {
   return buf;
 }
 
-/* Write back a single sector from a cluster buffer */
+// Write back a single sector from a cluster buffer.
 static int write_cluster_sector(uint32_t cluster, int sector_idx,
                                 const uint8_t *data) {
   uint32_t lba =
@@ -1341,7 +1368,7 @@ static int write_cluster_sector(uint32_t cluster, int sector_idx,
   return blk_write(lba, 1, data);
 }
 
-/* Update directory entry on disk */
+// Update directory entry on disk.
 static int fat32_update_dir_entry(uint32_t dir_cluster, int dir_idx,
                                   uint32_t start_cluster, uint32_t file_size) {
   uint8_t *buf = read_cluster_buf(dir_cluster);
@@ -1360,24 +1387,23 @@ static int fat32_update_dir_entry(uint32_t dir_cluster, int dir_idx,
   return rc;
 }
 
-/* ==================== Truncate (free cluster chain, zero size)
- * ==================== */
+// ==================== Truncate (free cluster chain, zero size)
+// ====================
 
 static int fat32_truncate(uint32_t cluster, uint32_t dir_cluster, int dir_idx) {
   spin_lock(&fat_lock);
   fat32_free_chain(cluster);
   spin_unlock(&fat_lock);
 
-  /* Update directory entry: cluster=0, size=0 */
+  // Update directory entry: cluster=0, size=0.
   return fat32_update_dir_entry(dir_cluster, dir_idx, 0, 0);
 }
 
-/* ==================== ftruncate to an arbitrary length ====================
- */
-/* Grow or shrink an existing regular file to exactly len bytes. New bytes
- * (when growing) read back as zero. Updates the inode size + on-disk dir entry
- * and invalidates the page cache so subsequent reads see the new length.
- * Caller holds ip->i_lock. */
+// ==================== ftruncate to an arbitrary length ====================
+// Grow or shrink an existing regular file to exactly len bytes. New bytes (when
+// growing) read back as zero. Updates the inode size + on-disk dir entry and
+// invalidates the page cache so subsequent reads see the new length.
+// Caller holds ip->i_lock.
 int fat32_ftruncate(struct inode *ip, uint64_t len) {
   if (ip->type != INODE_REGULAR)
     return -EINVAL;
@@ -1386,12 +1412,12 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
   if (bpc == 0)
     return -EIO;
 
-  /* No work if size already matches. */
+  // No work if size already matches.
   if (ip->size == len)
     return 0;
 
   if (len == 0) {
-    /* Shrink-to-zero reuses the simple path. */
+    // Shrink-to-zero reuses the simple path.
     int rc = fat32_truncate(ip->start_cluster, ip->dir_start_cluster,
                             ip->dir_entry_index);
     if (rc)
@@ -1405,18 +1431,18 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
   uint32_t keep_clusters = (uint32_t)((len + bpc - 1) / bpc);
 
   if (len < ip->size) {
-    /* Shrink: free every cluster past the keep boundary. */
+    // Shrink: free every cluster past the keep boundary.
     spin_lock(&fat_lock);
     if (ip->start_cluster == 0) {
       spin_unlock(&fat_lock);
       return -EIO;
     }
-    /* Walk to the last cluster we keep (index keep_clusters-1). */
+    // Walk to the last cluster we keep (index keep_clusters-1).
     uint32_t c = ip->start_cluster;
     uint32_t prev = 0;
     for (uint32_t i = 0; i < keep_clusters; i++) {
       if (c < 2 || c >= 0x0FFFFFF8) {
-        /* Chain shorter than keep_clusters — nothing to free. */
+        // Chain shorter than keep_clusters — nothing to free.
         c = 0;
         break;
       }
@@ -1424,13 +1450,13 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
       c = fat32_read_entry(c);
     }
     if (prev != 0 && c >= 2 && c < 0x0FFFFFF8) {
-      /* Terminate the kept chain and free the rest. */
+      // Terminate the kept chain and free the rest.
       fat32_write_fat_entry(prev, 0x0FFFFFFF);
       fat32_free_chain(c);
     }
     spin_unlock(&fat_lock);
   } else {
-    /* Grow: allocate clusters until the chain holds keep_clusters. */
+    // Grow: allocate clusters until the chain holds keep_clusters.
     spin_lock(&fat_lock);
     if (ip->start_cluster == 0) {
       uint32_t first = fat32_allocate_cluster();
@@ -1439,14 +1465,14 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
         return -ENOSPC;
       }
       ip->start_cluster = first;
-      /* Zero the new cluster on disk. */
+      // Zero the new cluster on disk.
       uint8_t z[4096];
       __memset(z, 0, bpc);
       uint32_t lba = data_start_lba + (first - 2) * sectors_per_cluster;
       blk_write(lba, sectors_per_cluster, z);
       keep_clusters -= 1;
     }
-    /* Find current tail. */
+    // Find current tail.
     uint32_t tail = ip->start_cluster;
     uint32_t have = 1;
     int guard = 1024;
@@ -1457,12 +1483,12 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
       tail = next;
       have++;
     }
-    /* Append (keep_clusters - have) new zeroed clusters. */
+    // Append (keep_clusters - have) new zeroed clusters.
     while (have < keep_clusters) {
       uint32_t nc = fat32_allocate_cluster();
       if (nc == 0) {
         spin_unlock(&fat_lock);
-        /* Partial grow: update size to what we have so far. */
+        // Partial grow: update size to what we have so far.
         ip->size = len;
         fat32_update_dir_entry(ip->dir_start_cluster, ip->dir_entry_index,
                                ip->start_cluster, (uint32_t)ip->size);
@@ -1488,25 +1514,25 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
   return 0;
 }
 
-/* ==================== FAT32 init ==================== */
+// ==================== FAT32 init ====================
 
 int fat32_init(void) {
   printk(LOG_INFO, "fat32_init: starting\n");
 
-  /* Initialize FAT cache */
+  // Initialize FAT cache.
   for (int i = 0; i < FAT_CACHE_PAGES; i++) {
     fat_cache[i].sector_lba = 0xFFFFFFFF;
     fat_cache_age[i] = 0;
   }
 
-  /* Read MBR (LBA 0) */
+  // Read MBR (LBA 0).
   uint8_t mbr[512];
   if (blk_read_sector(0, mbr) != 0) {
     printk(LOG_ERROR, "fat32_init: MBR read failed\n");
     return -EIO;
   }
 
-  /* Scan partition table for FAT32 (type 0x0B or 0x0C) */
+  // Scan partition table for FAT32 (type 0x0B or 0x0C).
   part_start_lba = 0;
   uint32_t part_total_sectors = 0;
   for (int i = 0; i < 4; i++) {
@@ -1523,14 +1549,14 @@ int fat32_init(void) {
     }
   }
 
-  /* Fallback: if no partition found, try LBA 2149 (current disk layout) */
+  // Fallback: if no partition found, try LBA 2149 (current disk layout).
   if (part_start_lba == 0) {
     printk(LOG_WARN,
            "fat32_init: no FAT32 partition in MBR, trying LBA 2149\n");
     part_start_lba = 2149;
   }
 
-  /* Read BPB */
+  // Read BPB.
   uint8_t bpb[512];
   if (blk_read_sector(part_start_lba, bpb) != 0) {
     printk(LOG_ERROR, "fat32_init: BPB read failed\n");
@@ -1565,7 +1591,7 @@ int fat32_init(void) {
     total_data_clusters = 0;
   }
 
-  /* Pre-warm FAT cache */
+  // Pre-warm FAT cache.
   for (uint32_t s = 0; s < spf32; s++) {
     fat_cache_read(fat_start_lba + s);
   }
@@ -1578,7 +1604,7 @@ int fat32_init(void) {
   return 0;
 }
 
-/* ==================== File read ==================== */
+// ==================== File read ====================
 
 int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count) {
   if (offset >= ip->size)
@@ -1605,13 +1631,13 @@ int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count) {
   return (int)nread;
 }
 
-/* ==================== File write ==================== */
+// ==================== File write ====================
 
 int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
                 size_t count) {
   spin_lock(&ip->i_lock);
 
-  /* O_APPEND: write at end of file */
+  // O_APPEND: write at end of file.
   if (ip->mode & O_APPEND) {
     offset = ip->size;
   }
@@ -1624,19 +1650,19 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
     if (chunk > count - written)
       chunk = count - written;
 
-    /* Convert page_idx to cluster index for FAT chain walk */
+    // Convert page_idx to cluster index for FAT chain walk.
     uint32_t clusters_per_page = 4096 / bytes_per_cluster;
     uint32_t cluster_idx = page_idx * clusters_per_page;
-    /* The page cache is 4KB-granular: page_cache_fill reads and
-     * page_cache_writeback writes every cluster spanning the page
-     * (clusters_per_page of them — 8 when the FAT32 cluster is 512B). For the
-     * writeback to persist the whole page, every cluster the write touches must
-     * already exist in the chain; allocating only the first one (as the old
-     * code did) leaves the rest unallocated, so writeback walks the chain, hits
-     * EOF after the first cluster, and bails — silently dropping everything
-     * past the first cluster and corrupting files >4KB. Allocate every cluster
-     * covering [page_off, page_off+chunk) here, in order, tail-linked onto the
-     * chain. */
+    // The page cache is 4KB-granular: page_cache_fill reads and
+    // page_cache_writeback writes every cluster spanning the page
+    // (clusters_per_page of them — 8 when the FAT32 cluster is 512B). For the
+    // writeback to persist the whole page, every cluster the write touches must
+    // already exist in the chain; allocating only the first one (as the old
+    // code did) leaves the rest unallocated, so writeback walks the chain, hits
+    // EOF after the first cluster, and bails — silently dropping everything
+    // past the first cluster and corrupting files >4KB. Allocate every cluster
+    // covering [page_off, page_off+chunk) here, in order, tail-linked onto the
+    // chain.
     uint32_t first_in_page = page_off / bytes_per_cluster;
     uint32_t last_in_page = (page_off + chunk - 1) / bytes_per_cluster;
     bool enospc = false;
@@ -1644,26 +1670,26 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
       uint32_t existing =
           fat32_walk_chain(ip->start_cluster, cluster_idx + cip);
       if (existing >= 2 && existing < 0x0FFFFFF8)
-        continue; /* already allocated */
+        continue; // already allocated
       spin_lock(&fat_lock);
       uint32_t new_cluster = fat32_allocate_cluster();
       if (new_cluster == 0) {
         spin_unlock(&fat_lock);
         enospc = true;
-        break; /* ENOSPC */
+        break; // ENOSPC
       }
-      /* Zero-fill new cluster */
+      // Zero-fill new cluster.
       uint8_t zero_buf[4096];
       __memset(zero_buf, 0, bytes_per_cluster);
       uint32_t lba = data_start_lba + (new_cluster - 2) * sectors_per_cluster;
       blk_write(lba, sectors_per_cluster, zero_buf);
 
-      /* Link into chain. Detect "first cluster" by start_cluster == 0 alone:
-       * ip->size is only updated AFTER the write loop (below), so it stays 0
-       * for every iteration of a multi-page write — gating on ip->size == 0
-       * would reset start_cluster to each newly-allocated cluster and skip the
-       * tail link, orphaning all but the last cluster and corrupting >4KB
-       * files. */
+      // Link into chain. Detect "first cluster" by start_cluster == 0 alone:
+      // ip->size is only updated AFTER the write loop (below), so it stays 0
+      // for every iteration of a multi-page write — gating on ip->size == 0
+      // would reset start_cluster to each newly-allocated cluster and skip the
+      // tail link, orphaning all but the last cluster and corrupting >4KB
+      // files.
       if (ip->start_cluster == 0) {
         ip->start_cluster = new_cluster;
       } else {
@@ -1684,7 +1710,7 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
       }
       spin_unlock(&fat_lock);
 
-      /* Invalidate page cache — new cluster changes mapping */
+      // Invalidate page cache — new cluster changes mapping.
       page_cache_invalidate_inode(ip);
     }
     if (enospc)
@@ -1703,7 +1729,7 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
   uint64_t new_end = offset + written;
   if (new_end > ip->size) {
     ip->size = new_end;
-    /* Update directory entry */
+    // Update directory entry.
     if (ip->dir_start_cluster >= 2) {
       fat32_update_dir_entry(ip->dir_start_cluster, ip->dir_entry_index,
                              ip->start_cluster, (uint32_t)ip->size);
@@ -1714,10 +1740,10 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
   return (int)written;
 }
 
-/* ==================== Mkdir ==================== */
+// ==================== Mkdir ====================
 
 int fat32_mkdir(const char *path) {
-  /* Resolve parent directory */
+  // Resolve parent directory.
   uint32_t parent_cluster, dummy_cluster;
   int dummy_idx;
   uint64_t dummy_size;
@@ -1726,7 +1752,7 @@ int fat32_mkdir(const char *path) {
   if (rc != 0)
     return rc;
 
-  /* Extract leaf name */
+  // Extract leaf name.
   int path_len = 0;
   while (path[path_len])
     path_len++;
@@ -1743,12 +1769,12 @@ int fat32_mkdir(const char *path) {
   if (leaf_len == 0)
     return -ENOENT;
 
-  /* Allocate a cluster for the new directory */
+  // Allocate a cluster for the new directory.
   uint32_t new_cluster = fat32_allocate_cluster();
   if (new_cluster == 0)
     return -ENOSPC;
 
-  /* Zero-fill the cluster */
+  // Zero-fill the cluster.
   uint8_t *dir_buf = (uint8_t *)kmalloc(bytes_per_cluster);
   if (!dir_buf) {
     fat32_write_fat_entry(new_cluster, 0);
@@ -1756,7 +1782,7 @@ int fat32_mkdir(const char *path) {
   }
   __memset(dir_buf, 0, bytes_per_cluster);
 
-  /* Create "." and ".." entries */
+  // Create "." and ".." entries.
   struct fat_dir_entry *dot = (struct fat_dir_entry *)dir_buf;
   __memset(dot, 0, 32);
   dot->name[0] = '.';
@@ -1776,12 +1802,12 @@ int fat32_mkdir(const char *path) {
   dotdot->fst_clus_hi = (parent_cluster >> 16) & 0xFFFF;
   dotdot->fst_clus_lo = parent_cluster & 0xFFFF;
 
-  /* Write new directory cluster to disk */
+  // Write new directory cluster to disk.
   uint32_t lba = data_start_lba + (new_cluster - 2) * sectors_per_cluster;
   blk_write(lba, sectors_per_cluster, dir_buf);
   kfree(dir_buf);
 
-  /* Add entry in parent directory */
+  // Add entry in parent directory.
   uint8_t *parent_buf = read_cluster_buf(dummy_cluster);
   if (!parent_buf)
     return -EIO;
@@ -1817,7 +1843,7 @@ int fat32_mkdir(const char *path) {
   return wrc == 0 ? 0 : -EIO;
 }
 
-/* ==================== Unlink ==================== */
+// ==================== Unlink ====================
 
 int fat32_unlink(const char *path) {
   uint32_t cluster, dir_cluster;
@@ -1829,7 +1855,7 @@ int fat32_unlink(const char *path) {
   if (rc != 0)
     return rc;
 
-  /* Read directory entry to check it's not a directory */
+  // Read directory entry to check it's not a directory.
   uint8_t *dir_buf = read_cluster_buf(dir_cluster);
   if (!dir_buf)
     return -EIO;
@@ -1842,20 +1868,20 @@ int fat32_unlink(const char *path) {
 
   uint32_t target_cluster = ((uint32_t)de->fst_clus_hi << 16) | de->fst_clus_lo;
 
-  /* Invalidate page cache for this inode (lookup by dir-entry location ino). */
+  // Invalidate page cache for this inode (lookup by dir-entry location ino).
   struct inode *ip = inode_lookup(fat32_make_ino(dir_cluster, dir_idx));
   if (ip) {
     page_cache_invalidate_inode(ip);
     inode_put(ip);
   }
 
-  /* Mark entry as deleted (0xE5) */
+  // Mark entry as deleted (0xE5).
   dir_buf[dir_idx * 32] = 0xE5;
   int sector_idx = (dir_idx * 32) / 512;
   write_cluster_sector(dir_cluster, sector_idx, dir_buf + sector_idx * 512);
   kfree(dir_buf);
 
-  /* Free cluster chain */
+  // Free cluster chain.
   if (target_cluster >= 2 && target_cluster < 0x0FFFFFF8) {
     spin_lock(&fat_lock);
     fat32_free_chain(target_cluster);
@@ -1865,7 +1891,7 @@ int fat32_unlink(const char *path) {
   return 0;
 }
 
-/* ==================== Rmdir ==================== */
+// ==================== Rmdir ====================
 
 int fat32_rmdir(const char *path) {
   uint32_t cluster, dir_cluster;
@@ -1877,7 +1903,7 @@ int fat32_rmdir(const char *path) {
   if (rc != 0)
     return rc;
 
-  /* Check it's a directory */
+  // Check it's a directory.
   uint8_t *dir_buf = read_cluster_buf(dir_cluster);
   if (!dir_buf)
     return -EIO;
@@ -1892,7 +1918,7 @@ int fat32_rmdir(const char *path) {
   if (target_cluster == 0)
     target_cluster = root_cluster;
 
-  /* Check directory is empty (only . and ..) */
+  // Check directory is empty (only . and ..).
   uint32_t cc = target_cluster;
   int is_empty = 1;
   while (cc >= 2 && cc < 0x0FFFFFF8 && is_empty) {
@@ -1927,13 +1953,13 @@ int fat32_rmdir(const char *path) {
     return -EBUSY;
   }
 
-  /* Mark entry deleted in parent */
+  // Mark entry deleted in parent.
   dir_buf[dir_idx * 32] = 0xE5;
   int sector_idx = (dir_idx * 32) / 512;
   write_cluster_sector(dir_cluster, sector_idx, dir_buf + sector_idx * 512);
   kfree(dir_buf);
 
-  /* Free directory cluster chain */
+  // Free directory cluster chain.
   if (target_cluster >= 2 && target_cluster < 0x0FFFFFF8) {
     spin_lock(&fat_lock);
     fat32_free_chain(target_cluster);
@@ -1943,7 +1969,7 @@ int fat32_rmdir(const char *path) {
   return 0;
 }
 
-/* ==================== Stat ==================== */
+// ==================== Stat ====================
 
 int fat32_stat(const char *path, void *stat_buf) {
   uint32_t cluster, dir_cluster;
@@ -1960,8 +1986,7 @@ int fat32_stat(const char *path, void *stat_buf) {
   st->st_ino = fat32_make_ino(dir_cluster, dir_idx);
 
   if (dir_idx < 0) {
-    /* Reached via root, "." or ".." — no parent dir entry; treat as directory
-     */
+    // Reached via root, "." or ".." — no parent dir entry; treat as directory.
     st->st_mode = 0040755;
     st->st_nlink = 1;
     st->st_size = 0;
@@ -1969,7 +1994,7 @@ int fat32_stat(const char *path, void *stat_buf) {
     return 0;
   }
 
-  /* Read directory entry for attributes */
+  // Read directory entry for attributes.
   uint8_t *dir_buf = read_cluster_buf(dir_cluster);
   if (!dir_buf)
     return -EIO;
@@ -1984,11 +2009,10 @@ int fat32_stat(const char *path, void *stat_buf) {
   return 0;
 }
 
-/* ==================== getdents: read directory entries into user buffer
- * ==================== */
-/* Each entry: struct dirent64 — defined in xos/dirent.h
- * pos tracks how many dir entries we've consumed so far.
- * Returns total bytes written, or negative errno. */
+// ==================== getdents: read directory entries into user buffer
+// ==================== Each entry: struct dirent64 — defined in xos/dirent.h.
+// pos tracks how many dir entries we've consumed so far.
+// Returns total bytes written, or negative errno.
 
 int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
   uint8_t *out = (uint8_t *)buf;
@@ -2007,16 +2031,16 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
     for (int i = 0; i < entries; i++) {
       struct fat_dir_entry *de = (struct fat_dir_entry *)(cbuf + i * 32);
       if (de->name[0] == 0x00) {
-        /* End of directory */
+        // End of directory.
         kfree(cbuf);
-        *pos = (uint64_t)-1; /* signal EOF */
+        *pos = (uint64_t)-1; // signal EOF
         return (int)written;
       }
       if (de->name[0] == 0xE5) {
         lfn_buf[0] = '\0';
         continue;
       }
-      /* Skip LFN entries and volume labels */
+      // Skip LFN entries and volume labels.
       if (de->attr == 0x0F || de->attr & 0x08) {
         if (de->attr == 0x0F)
           collect_lfn_entry(de, lfn_buf);
@@ -2024,14 +2048,14 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
         continue;
       }
 
-      /* Skip entries we've already consumed (for resuming after pos) */
+      // Skip entries we've already consumed (for resuming after pos).
       if (entry_idx < *pos) {
         entry_idx++;
         lfn_buf[0] = '\0';
         continue;
       }
 
-      /* Build name */
+      // Build name.
       char name[256];
       if (lfn_buf[0] != '\0') {
         int j;
@@ -2039,7 +2063,7 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
           name[j] = lfn_buf[j];
         name[j] = '\0';
       } else {
-        /* Convert 8.3 name */
+        // Convert 8.3 name.
         int j = 0;
         for (int k = 0; k < 8 && de->name[k] != ' '; k++) {
           char c = de->name[k];
@@ -2060,22 +2084,22 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
       }
       lfn_buf[0] = '\0';
 
-      /* Compute entry size: dirent64 header + name + null + padding to 8-byte
-       * align */
+      // Compute entry size: dirent64 header + name + null + padding to 8-byte
+      // align.
       int name_len = 0;
       while (name[name_len])
         name_len++;
       uint16_t reclen = (uint16_t)(sizeof(struct dirent64) + name_len + 1);
-      reclen = (reclen + 7) & ~7; /* 8-byte align */
+      reclen = (reclen + 7) & ~7; // 8-byte align
 
-      /* If this entry doesn't fit, stop here */
+      // If this entry doesn't fit, stop here.
       if (written + reclen > len) {
         kfree(cbuf);
         *pos = entry_idx;
         return (int)written;
       }
 
-      /* Fill entry */
+      // Fill entry.
       struct dirent64 *d = (struct dirent64 *)(out + written);
       d->d_ino = fat32_make_ino(scan_cluster, i);
       d->d_off = entry_idx;
@@ -2092,10 +2116,10 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
 
     kfree(cbuf);
 
-    /* Follow FAT chain */
+    // Follow FAT chain.
     uint32_t next = fat32_read_entry(scan_cluster);
     if (next >= 0x0FFFFFF8) {
-      *pos = (uint64_t)-1; /* EOF */
+      *pos = (uint64_t)-1; // EOF
       return (int)written;
     }
     scan_cluster = next;
@@ -2105,10 +2129,10 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
   return (int)written;
 }
 
-/* ==================== FAT32 fstype shims ==================== */
-/* fat32_resolve_path requires path[0]=='/', so relpath callbacks prepend '/'.
- * fat32_getdents takes (dir_cluster, &pos, buf, len); shim extracts
- * dir->start_cluster and passes &ctx->pos. */
+// ==================== FAT32 fstype shims ====================
+// fat32_resolve_path requires path[0]=='/', so relpath callbacks prepend '/'.
+// fat32_getdents takes (dir_cluster, &pos, buf, len); shim extracts
+// dir->start_cluster and passes &ctx->pos.
 
 #include "kernel/bsd/mount.h"
 

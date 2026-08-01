@@ -9,24 +9,24 @@
 .text
 .code64
 
-# ===================== __irq_entry (hardware IRQs, frame_opt.md 块一) =====
+# ===================== __irq_entry (hardware IRQs, frame_opt.md block 1) =====
 # Mirror Linux common_interrupt: hardware IRQs (vector32..127, 236) switch to a
 # per-CPU IRQ stack for the C handler, while pt_regs STAYS on the task stack.
 # pt_regs (iret frame + 15 GPs) is always on the task stack; only the handler
-# call chain + locals run on the IRQ stack.  Returning switches RSP back to the
+# call chain + locals run on the IRQ stack. Returning switches RSP back to the
 # task stack and jumps to __trapret, which pops pt_regs + iretq from there.
 #
 # Why pt_regs stays on the task stack (not the IRQ stack): fixup_exception and
 # deliver_signal rewrite tf->rip/rsp and rely on iretq popping that same frame.
 # A kernel #PF (copy_from_user) takes __alltraps (stays on task stack); moving
-# IRQ pt_regs to the IRQ stack would split tf from the iretq pop site.  Keeping
+# IRQ pt_regs to the IRQ stack would split tf from the iretq pop site. Keeping
 # pt_regs on the task stack for BOTH entry types makes user/kernel-origin IRQ
 # handling identical (no per-origin branch) and leaves cur_tf/fixup/signal/iretq
 # untouched.
 #
 # No nesting counter: every IDT gate here is an interrupt gate (IF=0 on entry)
-# and 块二 removed the AHCI sti, so hard-IRQs never nest — the single
-# irq_stack_saved_rsp slot is safe.  NMI uses IST1 and never reaches here.
+# and block 2 removed the AHCI sti, so hard-IRQs never nest — the single
+# irq_stack_saved_rsp slot is safe. NMI uses IST1 and never reaches here.
 .globl __irq_entry
 __irq_entry:
     # 1. Push 15 GP registers onto the TASK stack (same order/offsets as
@@ -63,11 +63,11 @@ __irq_entry:
 1:
 
     # 3. Save the task-stack RSP (top of pt_regs) and switch to the per-CPU IRQ
-    #    stack.  Unconditional: hard-IRQs are IF=0 and never nest (块二), so the
-    #    single irq_stack_saved_rsp slot cannot be overwritten.  IF=0 here is the
-    #    load-bearing invariant — if a future ISR re-enables interrupts, this
-    #    single-slot assumption silently breaks; 块二's might_sleep guard is the
-    #    intended backstop, not a nesting counter here.
+    #    stack. Unconditional: hard-IRQs are IF=0 and never nest (block 2), so
+    #    the single irq_stack_saved_rsp slot cannot be overwritten. IF=0 here
+    #    is the load-bearing invariant — if a future ISR re-enables
+    #    interrupts, this single-slot assumption silently breaks; block 2's
+    #    might_sleep guard is the intended backstop, not a nesting counter.
     movq cpu_local_irq_stack_saved_rsp_offset(%rip), %rcx
     movq %rsp, %gs:(%rcx)          # save task-stack RSP (pt_regs top)
     movq cpu_local_irq_stack_top_offset(%rip), %rcx
@@ -135,20 +135,21 @@ __alltraps:
     jne 1f
     swapgs
 1:
-    # (frame_opt.md 块二) #PF sti gate — mirror Linux idtentry, which ENABLES
-    # interrupts before calling do_page_fault.  #PF enters via an interrupt
-    # gate (0x8E) so IF=0 on entry; the BSD file-fault handler below may block
-    # in schedule(), which saves/restores the *entry* IF — running it with IF=0
-    # would leave the task permanently interrupts-disabled on resume (deadlock).
-    # So for trapno==14 (#PF) AND in_hardirq==0 (process context, not an
-    # IRQ-body #PF) we sti before calling trap_dispatch, making the C handler
-    # and its schedule() downstream run with IF=1.  An IRQ-context #PF
-    # (in_hardirq>0) is an unrecoverable kernel bug: sti would let a nested
-    # IRQ overwrite the single IRQ-stack RSP slot, so we keep IF=0 and let it
-    # panic.  Only #PF is gated; other exceptions stay IF=0 (their handlers do
-    # not block).  Hardware IRQs do not reach __alltraps after 块一 splits them
-    # to __irq_entry; until then IRQs come here too but trapno>=32, so this
-    # trapno==14 gate never fires for them.
+    # (frame_opt.md block 2) #PF sti gate — mirror Linux idtentry, which
+    # ENABLES interrupts before calling do_page_fault. #PF enters via an
+    # interrupt gate (0x8E) so IF=0 on entry; the BSD file-fault handler below
+    # may block in schedule(), which saves/restores the *entry* IF — running
+    # it with IF=0 would leave the task permanently interrupts-disabled on
+    # resume (deadlock). So for trapno==14 (#PF) AND in_hardirq==0 (process
+    # context, not an IRQ-body #PF) we sti before calling trap_dispatch,
+    # making the C handler and its schedule() downstream run with IF=1. An
+    # IRQ-context #PF (in_hardirq>0) is an unrecoverable kernel bug: sti
+    # would let a nested IRQ overwrite the single IRQ-stack RSP slot, so we
+    # keep IF=0 and let it panic. Only #PF is gated; other exceptions stay
+    # IF=0 (their handlers do not block). Hardware IRQs do not reach
+    # __alltraps after block 1 splits them to __irq_entry; until then IRQs
+    # come here too but trapno>=32, so this trapno==14 gate never fires for
+    # them.
     cmpq $14, 120(%rsp)           # trapno == 14 (#PF)?
     jne 2f
     movq cpu_local_in_hardirq_offset(%rip), %rcx
@@ -352,9 +353,9 @@ switch_to:
     pushq %r14
     pushq %r15
 
-    movq %rsp, 8(%rdi)       /* prev->k_rsp = RSP  */
-    movq 8(%rsi), %rsp       /* RSP = next->k_rsp  */
-    movq 24(%rsi), %rax      /* rax = next->cr3     */
+    movq %rsp, 8(%rdi)       // prev->k_rsp = RSP
+    movq 8(%rsi), %rsp       // RSP = next->k_rsp
+    movq 24(%rsi), %rax      // rax = next->cr3
     movq %rax, %cr3
 
     popq %r15

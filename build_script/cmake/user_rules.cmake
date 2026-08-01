@@ -366,8 +366,8 @@ function(add_user_lib lib_name)
             ${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
             ${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic
         )
-        # UAPI 契约头（include/uapi → #include "xos/*.h"）经 os_uapi 取得
-        # （reface_cmake.md §4.7 阶段 2：替代根目录作用域 include/uapi）。
+        # UAPI contract headers (include/uapi → #include "xos/*.h") via os_uapi,
+        # replacing the prior root-scope include_directories(include/uapi).
         target_link_libraries(${lib_name} PRIVATE os_uapi)
 
         if(ARG_FLAGS)

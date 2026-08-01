@@ -33,21 +33,23 @@ void remove_wait_queue(wait_queue_head *wq, wait_queue_t *wait) {
   spin_unlock_irqrestore(&wq->lock, flags);
 }
 
-// 持 wq->lock 遍历并在锁内回调。这是根治栈上 wait 节点 UAF 的关键：wait 节点
-// 常是调用者栈上变量（sys_epoll_wait/timerfd/signalfd/eventfd/poll/ring），
-// remove_wait_queue 同样取 wq->lock，二者互斥 ⇒ 回调期间 waiter 无法摘除/销毁
-// 节点，回调用的节点必定有效。锁序见 doc/design/kernel/epoll.md：
-//   A 类 waiter 回调取 scheduler_lock（wq->lock → scheduler_lock，无反向边——
-//     持 scheduler_lock 的代码段内不调用任何 wait_queue 操作）；
-//   B 类 epitem 回调（ep_poll_callback）持 ep->lock 再嵌套 __wake_up(&ep->wq)，
-//     锁序 W_fd → ep->lock → W_ep → scheduler_lock，全程单向无环。
-// 嵌套 __wake_up 是不同 wq 实例，非同锁重入；各层 irqsave 保存各自栈上 flags，
-// irqrestore 正确恢复。
-// flags 透传给每个回调，xcore 不解释其含义（poll 掩码语义由 bsd 回调解释）。
+// Traverse wq->head under wq->lock and call callbacks in-loop. This cures the
+// stack-allocated wait-node UAF: wait nodes usually live on the caller's stack
+// (sys_epoll_wait/timerfd/signalfd/eventfd/poll/ring), and remove_wait_queue
+// takes the same lock, so a waiter cannot detach its node during the callback —
+// the node stays valid. Lock order (doc/design/kernel/epoll.md):
+//   A: waiter callback takes scheduler_lock (wq->lock → scheduler_lock; no
+//      reverse edge — scheduler_lock holders never call wait_queue ops);
+//   B: ep_poll_callback holds ep->lock then nests __wake_up(&ep->wq):
+//      W_fd → ep->lock → W_ep → scheduler_lock, acyclic.
+// Nested __wake_up targets a different wq (not a self-relock); each irqsave
+// level keeps its own stack flags. flags is opaque to xcore (bsd callbacks
+// define the poll-mask semantics).
 //
-// EPOLLEXCLUSIVE 单播：exclusive waiter 唤醒一个后跳过其余 exclusive waiter，
-// 非 exclusive waiter 仍全唤醒（对齐 Linux __wake_up_common）。用于多进程/多
-// epoll 监听同一 listen socket 的防惊群。
+// EPOLLEXCLUSIVE unicast: after waking one exclusive waiter, skip the remaining
+// exclusive waiters but still wake all non-exclusive ones (matches Linux
+// __wake_up_common) — anti-thundering-herd for many processes/epolls sharing a
+// listen socket.
 void __wake_up(wait_queue_head *wq, unsigned long flags) {
   uint64_t irqflags;
   spin_lock_irqsave(&wq->lock, &irqflags);
@@ -55,20 +57,25 @@ void __wake_up(wait_queue_head *wq, unsigned long flags) {
   int woken_exclusive = 0;
   while (it != &wq->head) {
     wait_queue_t *wq_entry = LIST_ENTRY(it, wait_queue_t, node);
-    // 先取 next：回调（wake_with_event）只改 wq_entry->state 不摘节点；
-    // 摘节点仅由 remove_wait_queue 做，而它要等我们放锁，故遍历期间链表稳定。
+    // Save next first: the callback (wake_with_event) only flips
+    // wq_entry->state without unlinking; unlinking is done solely by
+    // remove_wait_queue, which must wait for our lock release — so the list
+    // stays stable while we walk.
     list_node *next = it->next;
-    // 防御：自指节点（next==self）是不在任何链表里的已摘除节点。正常链表里不会
-    // 出现它；一旦出现说明有调用者把栈上 wait 节点残留在了 wq 上且栈已被复用
-    // （见 sys_poll 的 wait 节点泄漏修复）。此时若继续遍历会因 it==next 死循环
-    // 把整机卡死，故告警并提前结束本次唤醒——根治仍是不让节点残留。
+    // Defense: a self-referential node (next==self) is a detached node not in
+    // any list. It can't appear in a healthy list; seeing one means a caller
+    // left a stack wait node on the wq and the stack was reused (see the
+    // sys_poll wait leak fix). Continuing would spin forever on it==next and
+    // wedge the box, so warn and abort this wake — the fix is to never leave
+    // nodes behind.
     if (next == it) {
       WARN_ON_ONCE(1);
       break;
     }
     if (wq_entry->exclusive) {
       if (woken_exclusive) {
-        // 已唤醒过一个 exclusive waiter，跳过其余 exclusive（防惊群）。
+        // Already woke one exclusive waiter; skip the rest
+        // (anti-thundering-herd).
         it = next;
         continue;
       }

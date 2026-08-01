@@ -3,9 +3,10 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * hidraw UAPI（对齐 <linux/hidraw.h>，type 'H'）。/dev/hidraw0 是 xHCI 键盘
- * 的裸 HID 报告节点：read() 出队 8B Boot 报告，HIDIOCG* 查询设备信息。
- * 与 evdev 经 mmap 共享同一 SHM 子环（Ring #1，refact_evdev.md §14）。
+ * hidraw UAPI (aligned with <linux/hidraw.h>, type 'H'). /dev/hidraw0 is the
+ * raw HID report node for the xHCI keyboard: read() dequeues 8B Boot reports,
+ * HIDIOCG* queries device info. Shares the same SHM sub-ring with evdev via
+ * mmap (Ring #1, refact_evdev.md sec 14).
  */
 #ifndef COMMON_HIDRAW_H
 #define COMMON_HIDRAW_H
@@ -19,7 +20,7 @@ struct hidraw_devinfo {
   int32_t product;
 };
 
-/* HIDIOCGRAWINFO: _IOR('H', 0x03, struct hidraw_devinfo) */
+// HIDIOCGRAWINFO: _IOR('H', 0x03, struct hidraw_devinfo)
 #define HIDIOCGRAWINFO _IOR('H', 0x03, struct hidraw_devinfo)
 #define HIDIOCGRDESCSIZE _IOR('H', 0x01, int)
 #define HIDIOCGRDESC _IOR('H', 0x02, char[4096])

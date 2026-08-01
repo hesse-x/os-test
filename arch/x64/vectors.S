@@ -8,10 +8,10 @@
 # 64-bit: pushq $0 (dummy error) + pushq $vector_num, then jmp to the entry.
 # CPU-exception vectors that push error code (8,10-14,17) only push the vector num.
 #
-# (frame_opt.md 块一) Two entry points, mirroring Linux idtentry vs
+# (frame_opt.md block 1) Two entry points, mirroring Linux idtentry vs
 # common_interrupt:
-#   vector0..31  (synchronous exceptions) → jmp __alltraps  (stays on task stack)
-#   vector32..127 + vector236 (hardware IRQs)  → jmp __irq_entry (switches to
+#   vector0..31  (synchronous exceptions) -> jmp __alltraps  (stays on task stack)
+#   vector32..127 + vector236 (hardware IRQs)  -> jmp __irq_entry (switches to
 #                                                  the per-CPU IRQ stack)
 .text
 .code64

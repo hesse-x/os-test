@@ -58,7 +58,7 @@ void synchronize_rcu(void) {
   // ingests no generation) was invisible to the writer, which then freed the
   // object the new reader was using (use-after-free → file_get BUG_ON, the
   // §2/§3/§4 panics). TCG's serialized vCPUs closed that window; KVM's true
-  // parallel SMP opened it. See bug.md "★ 突破".
+  // parallel SMP opened it. See bug.md "breakthrough".
   for (int i = 0; i < ncpu; i++) {
     if (i == my_cpu)
       continue;

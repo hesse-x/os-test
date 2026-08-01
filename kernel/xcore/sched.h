@@ -31,12 +31,12 @@ void sched_try_steal_task(void);
 void sched_timer_queue_insert(int cpu, xtask *proc);
 void sched_timer_queue_remove(xtask *proc);
 
-// (frame_opt.md 块四) Stack canary + high-water-mark accounting.  Each task's
-// kernel stack gets a canary word at its bottom (lowest address); schedule()
-// verifies it on entry so an overrun into neighboring heap objects is caught
-// at the next switch rather than silently corrupting state.  The high-water
-// mark estimates the deepest RSP seen on the current task's stack and warns
-// before it approaches the limit.
+// (frame_opt.md block 4) Stack canary + high-water-mark accounting.  Each
+// task's kernel stack gets a canary word at its bottom (lowest address);
+// schedule() verifies it on entry so an overrun into neighboring heap objects
+// is caught at the next switch rather than silently corrupting state.  The
+// high-water mark estimates the deepest RSP seen on the current task's stack
+// and warns before it approaches the limit.
 void kstack_canary_write(xtask *t);
 void kstack_canary_check(xtask *t);
 void kstack_highwater_check(void);
@@ -151,12 +151,12 @@ static inline void wake_from_wait(xtask *p) {
   p->wait_event = WAIT_NONE;
   p->wait_timed_out = 0;
   int cpu = p->assigned_cpu;
-  /* Idempotent enqueue: if run_node is already on a run_queue (a prior wake
-     already enqueued p but schedule() hasn't dequeued it yet — possible when
-     multiple wake sources race), do NOT push again.  A second list_push_back
-     on a linked node rewires its prev/next and corrupts the run_queue ring.
-     Just ensure state=READY and leave run_count untouched: p is already
-     runnable and will be dequeued by the next schedule() on `cpu`. */
+  // Idempotent enqueue: if run_node is already on a run_queue (a prior wake
+  // already enqueued p but schedule() hasn't dequeued it yet — possible when
+  // multiple wake sources race), do NOT push again.  A second list_push_back
+  // on a linked node rewires its prev/next and corrupts the run_queue ring.
+  // Just ensure state=READY and leave run_count untouched: p is already
+  // runnable and will be dequeued by the next schedule() on `cpu`.
   if (list_empty(&p->run_node)) {
     run_queue_push(cpu, p);
   }
@@ -227,10 +227,12 @@ static inline void wake_with_event(xtask *target, wait_event expected_event) {
 }
 
 // wake_wq_target: hold target's scheduler_lock; wake if target is BLOCKED.
-// 队列身份制下的资源就绪唤醒：不查 wait_event（task 在我 wq 上即唤醒）。
-// wake_from_wait 内部已设 wait_event=WAIT_NONE，故无需额外设。
-// 用于 wq 回调（如 virtio_gpu_wake_cb）：语义即"task 在我 wq 上就唤醒"，
-// 是去 guard 的 wake_with_event。锁序同 wake_with_event：scheduler_lock 单锁。
+// Resource-ready wake under queue identity: do not check wait_event (a task on
+// my wq is simply woken). wake_from_wait already sets wait_event=WAIT_NONE, so
+// no extra assignment is needed. Used by wq callbacks (e.g.
+// virtio_gpu_wake_cb): the semantics is "a task on my wq is woken", an
+// unguarded wake_with_event. Lock order matches wake_with_event:
+// scheduler_lock only.
 static inline void wake_wq_target(xtask *target) {
   int tcpu = target->assigned_cpu;
   uint64_t flags;

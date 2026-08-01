@@ -246,7 +246,7 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
   proc->state = READY;
   proc->k_rsp = k_rsp;
   proc->k_stack_top = k_stack_top;
-  kstack_canary_write(proc); // (frame_opt.md 块四) canary at stack bottom
+  kstack_canary_write(proc); // (frame_opt.md §4) canary at stack bottom
   proc->cr3 = pml4_phys;     // cached
   proc->entry = lr.entry;
   proc->wait_event = WAIT_NONE;
@@ -293,10 +293,11 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
 
   spin_unlock(&tasks_lock);
 
-  /* procfs 侧表填充(procfs.md §3.5):init 由内核直接建,无 execve 路径,这里补抓
-   * exe/cmdline。须在 tasks_lock 释放后(procfs_pinfo_set 自取
-   * tasks_lock,嵌套死锁)。 argv 内核硬编码 "/init"(proc_create.c:127),cmdline =
-   * "/init\0"。 */
+  // procfs side-table fill (procfs.md §3.5): init is built directly by the
+  // kernel with no execve path, so exe/cmdline are captured here. Must run
+  // after tasks_lock release (procfs_pinfo_set takes tasks_lock itself; nested
+  // locking would deadlock). argv is hard-coded "/init" (proc_create.c:127),
+  // so cmdline = "/init\0".
   {
     const char *init_argv[] = {"/init", NULL};
     procfs_pinfo_set(proc->pid, "/init", (char *const *)init_argv, NULL);

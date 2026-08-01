@@ -4,27 +4,29 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_setuid_exec.c — 验证 execve 的 S_ISUID/S_ISGID 凭证切换(proc.c
- * sys_execve)
- * + setuid 阶梯 gate 自洽化(阶段0:sys_setuid/setgid 经
- * capable(CAP_SETUID/GID))。
- *
- * 机制：helper ELF(/test/setuid_helper.elf,FAT32 打包)先复制到 /run(tmpfs)，
- * 在 tmpfs 上 chmod 04755 + chown(1000,1000)——tmpfs 子项持 inode 引用，path
- * chmod 持久不回收（FAT32 会回收丢位，见 test_chmod.c:18-24）。fork 子
- * setuid(2000) drop root，子 execve(/run/setuid_helper.elf,"euid") →
- * 退出码应反映 euid 切到 1000。 execve 能读 tmpfs 是本任务配套扩的
- * vfs_read_kernel tmpfs 分发（vfs.c）。
- *
- * 退出码约定：uid/gid > 255 装不进 WEXITSTATUS(8-bit)，故 helper 报 (val &
- * 0x7f)， 测试断言 (expected & 0x7f)。1000&0x7f=104、2000&0x7f=80，区分足够。
- *
- * 关键决策（已与用户敲定）：
- *   - 抉择1=A：setuid exec 只切 euid/suid(egid/sgid)，real uid/gid 保持调用者。
- *   - 抉择2=B：NOSUID 用例降级——不在 QEMU 测试里建 NOSUID 挂载；留 todo +
- * 手测。
- *   - 抉择3=B：凭证在 point-of-no-return 后提交，auxv
- * 用预计算新值(内核已实现)。 */
+// test_setuid_exec.c — verify execve S_ISUID/S_ISGID credential switching
+// (proc.c sys_execve) + setuid ladder gate self-consistency (stage 0:
+// sys_setuid/setgid via capable(CAP_SETUID/GID)).
+//
+// Mechanism: the helper ELF (/test/setuid_helper.elf, packed on FAT32) is
+// first copied to /run (tmpfs), where chmod 04755 + chown(1000,1000) are
+// done on the tmpfs child — the child holds an inode reference, so the path
+// chmod persists (FAT32 would discard it; see test_chmod.c:18-24). A forked
+// child setuid(2000) drops root, then execve(/run/setuid_helper.elf,"euid")
+// -> exit code should reflect euid switched to 1000. execve being able to
+// read tmpfs is via this task's vfs_read_kernel tmpfs dispatch (vfs.c).
+//
+// Exit-code convention: uid/gid > 255 don't fit in WEXITSTATUS (8-bit), so
+// the helper reports (val & 0x7f) and the test asserts (expected & 0x7f).
+// 1000&0x7f=104, 2000&0x7f=80 — distinguishable enough.
+//
+// Key decisions (settled with the user):
+//   - Choice1=A: setuid exec switches only euid/suid (egid/sgid); real
+//     uid/gid stay as the caller's.
+//   - Choice2=B: NOSUID case deferred — no NOSUID mount built in the QEMU
+//     test; left to todo + manual testing.
+//   - Choice3=B: credentials committed past point-of-no-return; auxv uses
+//     the precomputed new values (already implemented in-kernel).
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -36,8 +38,8 @@
 #include <unistd.h>
 #include <unity.h>
 
-#define SRC_HELPER "/test/setuid_helper.elf" /* FAT32 打包的 helper 源 */
-#define HELPER "/run/su_exec_helper.elf"     /* tmpfs 副本(chmod 持久) */
+#define SRC_HELPER "/test/setuid_helper.elf" // FAT32-packed helper source
+#define HELPER "/run/su_exec_helper.elf"     // tmpfs copy (chmod persists)
 #define TARGET_UID 1000
 #define TARGET_GID 1000
 #define CALLER_UID 2000
@@ -45,9 +47,9 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* copy_helper:把 FAT32 上的 helper 源复制到 tmpfs /run（chmod 持久的前提）。
- * tmpfs 文件经 open(O_CREAT)+read/write 建，ELF ~14KB < TMPFS_FILE_CAP 64KB。
- */
+// copy_helper: copy the FAT32 helper source to tmpfs /run (so chmod persists).
+// The tmpfs file is created via open(O_CREAT)+read/write; ELF ~14KB <
+// TMPFS_FILE_CAP 64KB.
 static void copy_helper(void) {
   int in = open(SRC_HELPER, O_RDONLY);
   TEST_ASSERT_GREATER_OR_EQUAL_INT(0, in);
@@ -64,18 +66,18 @@ static void copy_helper(void) {
   close(out);
 }
 
-/* run_helper_as:fork 子 drop root 后 execve helper，返 helper
- * 退出码(WEXITSTATUS)。 mode = "euid"/"egid"/"uid"/"gid"。execve 失败 relay 成
- * 127。 */
+// run_helper_as: fork a child that drops root then execve's the helper;
+// returns the helper's exit code (WEXITSTATUS). mode = "euid"/"egid"/
+// "uid"/"gid". execve failure is relayed as 127.
 static int run_helper_as(const char *mode) {
   pid_t child = fork();
   if (child == 0) {
     setgid(CALLER_UID);
-    setuid(CALLER_UID); /* drop root:uid=euid=suid=2000 */
+    setuid(CALLER_UID); // drop root: uid=euid=suid=2000
     char *const argv[] = {(char *)"setuid_helper", (char *)mode, NULL};
     char *const envp[] = {NULL};
     execve(HELPER, argv, envp);
-    _exit(127); /* execve failed */
+    _exit(127); // execve failed
   }
   TEST_ASSERT_TRUE(child > 0);
   int status = 0;
@@ -84,9 +86,10 @@ static int run_helper_as(const char *mode) {
   return WEXITSTATUS(status);
 }
 
-/* ---- 1. S_ISUID exec：euid 切到 inode owner(1000) ----
- * tmpfs 上 chmod 04755(设 S_ISUID,CAP_FSETID 保留)+chown(1000,1000)。子
- * setuid(2000) 后 execve → euid 应切到 1000。退出码 = 1000 & 0x7f = 104。 */
+// ---- 1. S_ISUID exec: euid switches to inode owner (1000) ----
+// On tmpfs chmod 04755 (sets S_ISUID; CAP_FSETID kept) + chown(1000,1000).
+// Child setuid(2000) then execve -> euid should switch to 1000. Exit code =
+// 1000 & 0x7f = 104.
 void test_setuid_exec_euid_switch(void) {
   copy_helper();
   TEST_ASSERT_EQUAL_INT(0, chown(HELPER, TARGET_UID, TARGET_GID));
@@ -94,8 +97,9 @@ void test_setuid_exec_euid_switch(void) {
   TEST_ASSERT_EQUAL_INT(TARGET_UID & 0x7f, run_helper_as("euid"));
 }
 
-/* ---- 2. S_ISGID exec：egid 切到 inode group(1000) ----
- * 只设 S_ISGID(02755)。egid 切到 1000，euid 保持调用者 2000(对照 run 5)。 */
+// ---- 2. S_ISGID exec: egid switches to inode group (1000) ----
+// Only S_ISGID set (02755). egid switches to 1000, euid stays as caller 2000
+// (contrast with run 5).
 void test_setgid_exec_egid_switch(void) {
   copy_helper();
   TEST_ASSERT_EQUAL_INT(0, chown(HELPER, TARGET_UID, TARGET_GID));
@@ -103,7 +107,8 @@ void test_setgid_exec_egid_switch(void) {
   TEST_ASSERT_EQUAL_INT(TARGET_GID & 0x7f, run_helper_as("egid"));
 }
 
-/* ---- 3. real uid 保持调用者(2000)，不被 setuid exec 切走(抉择1=A) ---- */
+// ---- 3. real uid stays as caller (2000), not switched by setuid exec
+// (Choice1=A) ----
 void test_setuid_exec_real_uid_kept(void) {
   copy_helper();
   TEST_ASSERT_EQUAL_INT(0, chown(HELPER, TARGET_UID, TARGET_GID));
@@ -111,7 +116,8 @@ void test_setuid_exec_real_uid_kept(void) {
   TEST_ASSERT_EQUAL_INT(CALLER_UID & 0x7f, run_helper_as("uid"));
 }
 
-/* ---- 4. S_ISGID 不影响 real gid：real gid 保持调用者(2000) ---- */
+// ---- 4. S_ISGID does not affect real gid: real gid stays as caller (2000)
+// ----
 void test_setgid_exec_real_gid_kept(void) {
   copy_helper();
   TEST_ASSERT_EQUAL_INT(0, chown(HELPER, TARGET_UID, TARGET_GID));
@@ -119,9 +125,10 @@ void test_setgid_exec_real_gid_kept(void) {
   TEST_ASSERT_EQUAL_INT(CALLER_UID & 0x7f, run_helper_as("gid"));
 }
 
-/* ---- 5. 无 setuid 位：euid 不切，保持调用者(2000) ----
- * chmod 0755(清 S_ISUID/S_ISGID)→ execve 不切 euid，应得 2000&0x7f=80。对照组，
- * 排除"helper 退出码恒为某值"的伪通过。 */
+// ---- 5. No setuid bit: euid not switched, stays as caller (2000) ----
+// chmod 0755 (clears S_ISUID/S_ISGID) -> execve does not switch euid, should
+// get 2000&0x7f=80. Control group, rules out a "helper exit code is always
+// some fixed value" false pass.
 void test_no_setuid_bit_no_switch(void) {
   copy_helper();
   TEST_ASSERT_EQUAL_INT(0, chown(HELPER, TARGET_UID, TARGET_GID));
@@ -129,9 +136,12 @@ void test_no_setuid_bit_no_switch(void) {
   TEST_ASSERT_EQUAL_INT(CALLER_UID & 0x7f, run_helper_as("euid"));
 }
 
-/* ---- 6. setuid 阶梯 gate 自洽化回归：drop root 后 setuid(0) 仍 EPERM ----
- * 验证阶段0把 sys_setuid 的 gate 从裸 euid==0 改 capable(CAP_SETUID) 后行为不变
- * (今天等价 euid==0)。drop 到 2000 后 setuid(0) 须 EPERM(suid 不再持 0)。 */
+// ---- 6. setuid ladder gate self-consistency regression: after dropping root,
+// setuid(0) still EPERM ----
+// Verifies stage 0 changing sys_setuid's gate from bare euid==0 to
+// capable(CAP_SETUID) leaves behavior unchanged (today equivalent to
+// euid==0). After dropping to 2000, setuid(0) must EPERM (suid no longer
+// holds 0).
 void test_setuid_ladder_drop_then_eperm(void) {
   pid_t child = fork();
   if (child == 0) {

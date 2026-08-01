@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_dev_vfs_dynamic.c — devtmpfs 设备表动态化回归(work2_design §5.5.1)。
- * 验证 >32 设备 + >16 子目录无 ENOMEM,getdents 枚举完整。桩 #ifdef TEST 门控:
- * sys_dev_create 造的 dyn_testN 是 driver_pid=current 的用户态占位设备(minor=0,
- * callbacks NULL),与真实设备同走 devtmpfs_create→kmalloc 路径,不污染非 TEST
- * 启动 设备空间。user 态 C 用 int 代 bool(无 stdbool)。 */
+// test_dev_vfs_dynamic.c — devtmpfs dynamic device-table regression
+// (work2_design §5.5.1). Verifies >32 devices + >16 subdirs without ENOMEM,
+// and complete getdents enumeration. Stubs gated by #ifdef TEST: the dyn_testN
+// created via sys_dev_create are user-space placeholder devices (minor=0,
+// callbacks NULL) with driver_pid=current, taking the same devtmpfs_create→
+// kmalloc path as real devices, without polluting non-TEST boots. User C uses
+// int for bool (no stdbool).
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -24,7 +26,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* >32 设备无 ENOMEM:循环造 40 个,全部返 0 */
+// >32 devices without ENOMEM: create 40 in a loop, all return 0.
 static void test_dyn_dev_more_than_32(void) {
   for (int i = 0; i < DYN_DEV_COUNT; i++) {
     char name[32];
@@ -34,7 +36,7 @@ static void test_dyn_dev_more_than_32(void) {
   }
 }
 
-/* 造出的设备可 open(fd >= 0) */
+// Created devices can be opened (fd >= 0).
 static void test_dyn_dev_open(void) {
   char name[32];
   snprintf(name, sizeof(name), "dyn_test%d", DYN_DEV_COUNT / 2);
@@ -46,7 +48,8 @@ static void test_dyn_dev_open(void) {
     close(fd);
 }
 
-/* getdents 枚举完整:opendir("/dev") + readdir 确认 40 个 dyn_testN 全出现 */
+// getdents enumeration complete: opendir("/dev") + readdir confirms all 40
+// dyn_testN appear.
 static void test_dyn_dev_getdents(void) {
   DIR *d = opendir("/dev");
   TEST_ASSERT_TRUE(d != NULL);
@@ -71,7 +74,8 @@ static void test_dyn_dev_getdents(void) {
     TEST_ASSERT_TRUE(seen[i]);
 }
 
-/* >16 子目录无上限:循环造 subN/devX 触发 >16 个子目录,全部成功 */
+// >16 subdirs without cap: create subN/devX in a loop to trigger >16 subdirs,
+// all succeed.
 static void test_dyn_subdir_more_than_16(void) {
   for (int i = 0; i < DYN_SUB_COUNT; i++) {
     char name[32];
@@ -81,7 +85,7 @@ static void test_dyn_subdir_more_than_16(void) {
   }
 }
 
-/* 子目录 getdents:opendir("/dev/subN") 枚举其下设备 */
+// Subdir getdents: opendir("/dev/subN") enumerates its devices.
 static void test_dyn_subdir_getdents(void) {
   char path[64];
   snprintf(path, sizeof(path), "/dev/sub%d", DYN_SUB_COUNT / 2);

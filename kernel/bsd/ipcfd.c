@@ -113,7 +113,7 @@ int64_t sys_ipcfd_read(int64_t fd, int64_t buf, int64_t data_buf,
 // task's ipcfd_file back-link and drops the reference taken in
 // sys_ipcfd_create.  After this, enqueue paths see NULL and skip the ipcfd
 // wake (the fd is going away).  Idempotent: a NULL owner means already
-// cleared.  (evdev_refact.md §4.3 生命周期 / §5.6)
+// cleared.  (evdev_refact.md §4.3 lifecycle / §5.6)
 void ipcfd_close(struct file *f) {
   pid_t owner_pid = f->ipcfd_owner_pid;
   if (owner_pid < 0 || owner_pid >= MAX_PROC)

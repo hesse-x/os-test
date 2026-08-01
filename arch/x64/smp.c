@@ -27,12 +27,12 @@ gdt_ptr per_cpu_gdtr[MAX_CPUS];
 struct tss_struct per_cpu_tss[MAX_CPUS];
 uint64_t per_cpu_ist_stack[MAX_CPUS][3]; // IST1=NMI, IST2=DF, IST3=MCE
 
-// Per-CPU hard-IRQ stack tops (frame_opt.md 块一). 16KB each (IRQ_STACK_PAGES),
-// allocated in smp_init_cpu alongside the IST stacks.  Hardware IRQs switch to
-// this stack in __irq_entry so they no longer consume the task's kernel stack.
-// Like per_cpu_ist_stack, this stores only the stack TOP per CPU; the actual
-// pages come from bfc_alloc_page and the top is mirrored into
-// cpu_local.irq_stack_top for the asm entry to read.
+// Per-CPU hard-IRQ stack tops (frame_opt.md block 1). 16KB each
+// (IRQ_STACK_PAGES), allocated in smp_init_cpu alongside the IST stacks.
+// Hardware IRQs switch to this stack in __irq_entry so they no longer consume
+// the task's kernel stack. Like per_cpu_ist_stack, this stores only the stack
+// TOP per CPU; the pages come from bfc_alloc_page and the top is mirrored
+// into cpu_local.irq_stack_top for the asm entry to read.
 #define IRQ_STACK_PAGES 4
 uint64_t per_cpu_irq_stack[MAX_CPUS];
 
@@ -129,10 +129,10 @@ smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
   tss->ist[1] = per_cpu_ist_stack[cpu_id][1]; // IST2 = Double Fault (#8)
   tss->ist[2] = per_cpu_ist_stack[cpu_id][2]; // IST3 = Machine Check (#18)
 
-  // Allocate per-CPU hard-IRQ stack (frame_opt.md 块一).  Same region as the
-  // IST stacks (single point covers BSP via irq_init→smp_init_cpu(0) and APs
-  // via smp_boot_aps→smp_init_cpu(i)).  __irq_entry switches to this stack so
-  // hardware IRQs no longer push onto the task kernel stack.  No TSS change:
+  // Allocate per-CPU hard-IRQ stack (frame_opt.md block 1). Single point
+  // covers BSP (irq_init->smp_init_cpu(0)) and APs
+  // (smp_boot_aps->smp_init_cpu(i)). __irq_entry switches to this stack so
+  // hardware IRQs no longer push onto the task kernel stack. No TSS change:
   // IRQs use IST=0/RSP0 and __irq_entry switches RSP manually; the TSS IST
   // slots above remain NMI/DF/MCE only.
   {
@@ -149,7 +149,8 @@ smp_init_cpu(int cpu_id, uint32_t apic_id, uint64_t kernel_stack) {
     cpu_locals[cpu_id].irq_stack_top = irq_top;
     cpu_locals[cpu_id].irq_stack_saved_rsp = 0;
     cpu_locals[cpu_id].in_hardirq = 0;
-    // Write a canary at the bottom word of the IRQ stack (frame_opt.md 块四).
+    // Write a canary at the bottom word of the IRQ stack (frame_opt.md block
+    // 4).
     *(uint64_t *)irq_base = IRQ_STACK_CANARY;
   }
 

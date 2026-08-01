@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* DRM ioctl regression test: verify new ioctls (GET_MAGIC, AUTH_MAGIC, ADDFB2,
- * GEM_CLOSE, GETFB, DRM_CAP_ADDFB2_MODIFIERS) work correctly. */
+// DRM ioctl regression test: verify new ioctls (GET_MAGIC, AUTH_MAGIC, ADDFB2,
+// GEM_CLOSE, GETFB, DRM_CAP_ADDFB2_MODIFIERS) work correctly.
 #include "drm/drm.h"
 #include "drm/drm_fourcc.h"
 #include <errno.h>
@@ -22,7 +22,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. GET_MAGIC: returns non-zero magic */
+// 1. GET_MAGIC: returns non-zero magic
 void test_drm_get_magic(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -39,7 +39,7 @@ void test_drm_get_magic(void) {
   close(fd);
 }
 
-/* 2. AUTH_MAGIC: get magic then auth it */
+// 2. AUTH_MAGIC: get magic then auth it
 void test_drm_auth_magic(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -47,7 +47,7 @@ void test_drm_auth_magic(void) {
     return;
   }
 
-  /* Need to be master first — skip if display holds master */
+  // Need to be master first — skip if display holds master
   int rc = ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
   if (rc < 0 && errno == EBUSY) {
     close(fd);
@@ -61,14 +61,14 @@ void test_drm_auth_magic(void) {
   rc = ioctl(fd, DRM_IOCTL_GET_MAGIC, &auth);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* Auth with the same magic */
+  // Auth with the same magic
   rc = ioctl(fd, DRM_IOCTL_AUTH_MAGIC, &auth);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
   close(fd);
 }
 
-/* 3. DRM_CAP_ADDFB2_MODIFIERS: capability query */
+// 3. DRM_CAP_ADDFB2_MODIFIERS: capability query
 void test_drm_cap_addfb2_modifiers(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -78,15 +78,15 @@ void test_drm_cap_addfb2_modifiers(void) {
 
   struct drm_get_cap cap;
   memset(&cap, 0, sizeof(cap));
-  cap.capability = 0x10; /* DRM_CAP_ADDFB2_MODIFIERS */
+  cap.capability = 0x10; // DRM_CAP_ADDFB2_MODIFIERS
   int rc = ioctl(fd, DRM_IOCTL_GET_CAP, &cap);
   TEST_ASSERT_EQUAL_INT(0, rc);
-  TEST_ASSERT_EQUAL_INT(0, cap.value); /* no modifiers support */
+  TEST_ASSERT_EQUAL_INT(0, cap.value); // no modifiers support
 
   close(fd);
 }
 
-/* 4. ADDFB2 + GETFB roundtrip */
+// 4. ADDFB2 + GETFB roundtrip
 void test_drm_addfb2_getfb(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -94,7 +94,7 @@ void test_drm_addfb2_getfb(void) {
     return;
   }
 
-  /* Create a dumb buffer */
+  // Create a dumb buffer
   struct drm_mode_create_dumb dumb;
   memset(&dumb, 0, sizeof(dumb));
   dumb.width = 800;
@@ -104,7 +104,7 @@ void test_drm_addfb2_getfb(void) {
   TEST_ASSERT_EQUAL_INT(0, rc);
   TEST_ASSERT_TRUE(dumb.handle != 0);
 
-  /* ADDFB2 */
+  // ADDFB2
   struct drm_mode_fb_cmd2 fb2;
   memset(&fb2, 0, sizeof(fb2));
   fb2.width = 800;
@@ -116,7 +116,7 @@ void test_drm_addfb2_getfb(void) {
   TEST_ASSERT_EQUAL_INT(0, rc);
   TEST_ASSERT_TRUE(fb2.fb_id != 0);
 
-  /* GETFB — read back */
+  // GETFB — read back
   struct drm_mode_fb_cmd getfb;
   memset(&getfb, 0, sizeof(getfb));
   getfb.fb_id = fb2.fb_id;
@@ -128,14 +128,14 @@ void test_drm_addfb2_getfb(void) {
   TEST_ASSERT_EQUAL_INT(dumb.pitch, getfb.pitch);
   TEST_ASSERT_EQUAL_INT(24, getfb.depth);
 
-  /* Cleanup */
+  // Cleanup
   rc = ioctl(fd, DRM_IOCTL_MODE_RMFB, &fb2.fb_id);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
   close(fd);
 }
 
-/* 5. GEM_CLOSE: create dumb + close handle */
+// 5. GEM_CLOSE: create dumb + close handle
 void test_drm_gem_close(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -143,7 +143,7 @@ void test_drm_gem_close(void) {
     return;
   }
 
-  /* Create a dumb buffer */
+  // Create a dumb buffer
   struct drm_mode_create_dumb dumb;
   memset(&dumb, 0, sizeof(dumb));
   dumb.width = 800;
@@ -153,7 +153,7 @@ void test_drm_gem_close(void) {
   TEST_ASSERT_EQUAL_INT(0, rc);
   TEST_ASSERT_TRUE(dumb.handle != 0);
 
-  /* Create a framebuffer via ADDFB2 (bumps refcount) */
+  // Create a framebuffer via ADDFB2 (bumps refcount)
   struct drm_mode_fb_cmd2 fb2;
   memset(&fb2, 0, sizeof(fb2));
   fb2.width = 800;
@@ -164,22 +164,22 @@ void test_drm_gem_close(void) {
   rc = ioctl(fd, DRM_IOCTL_MODE_ADDFB2, &fb2);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* GEM_CLOSE — Mesa calls this after ADDFB2 to release handle reference */
+  // GEM_CLOSE — Mesa calls this after ADDFB2 to release handle reference
   struct drm_gem_close gc;
   memset(&gc, 0, sizeof(gc));
   gc.handle = dumb.handle;
   rc = ioctl(fd, DRM_IOCTL_GEM_CLOSE, &gc);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* Cleanup framebuffer */
+  // Cleanup framebuffer
   rc = ioctl(fd, DRM_IOCTL_MODE_RMFB, &fb2.fb_id);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
   close(fd);
 }
 
-/* 6. renderD128 的 fstat.st_rdev 必须是 makedev(226,128)，否则 libdrm 判不出
- * render */
+// 6. renderD128's fstat.st_rdev must be makedev(226,128), else libdrm won't
+// recognize it as a render node.
 void test_drm_render_rdev(void) {
   int fd = open("/dev/dri/renderD128", O_RDWR);
   if (fd < 0) {

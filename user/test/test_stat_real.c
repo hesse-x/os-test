@@ -4,21 +4,21 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_stat_real.c — S08: umask 应用 + inode owner/mode 字段 + fstat
- * 报真实字段。
- *
- * Verifies the post-S08 stat semantics:
- *   1. open(O_CREAT, mode) applies umask: st_mode & 0777 == mode & ~umask.
- *   2. Newly created files report the creator's uid/gid (not a hardcoded 0,
- *      and not the stat caller's identity when they differ conceptually).
- *   3. mkdir(mode) applies umask and reports S_IFDIR with masked perms.
- *   4. st_blksize reflects the backing fs (FAT32 root = 512, tmpfs /run = 4096)
- *      rather than the old hardcoded 512.
- *   5. fstat on an open fd and stat by path agree (both delegate to the
- *      inode's getattr).
- *
- * FAT32 root cluster size is 512 (mkdisk.sh part2: mkfs.fat -F 32 -s 1).
- * /run is a RAM-backed tmpfs mount (blksize 4096). */
+// test_stat_real.c — S08: umask applied + inode owner/mode fields + fstat
+// reports the real fields.
+//
+// Verifies the post-S08 stat semantics:
+//   1. open(O_CREAT, mode) applies umask: st_mode & 0777 == mode & ~umask.
+//   2. Newly created files report the creator's uid/gid (not a hardcoded 0,
+//      and not the stat caller's identity when they differ conceptually).
+//   3. mkdir(mode) applies umask and reports S_IFDIR with masked perms.
+//   4. st_blksize reflects the backing fs (FAT32 root = 512, tmpfs /run = 4096)
+//      rather than the old hardcoded 512.
+//   5. fstat on an open fd and stat by path agree (both delegate to the
+//      inode's getattr).
+//
+// FAT32 root cluster size is 512 (mkdisk.sh part2: mkfs.fat -F 32 -s 1).
+// /run is a RAM-backed tmpfs mount (blksize 4096).
 #include "unity.h"
 #include <errno.h>
 #include <fcntl.h>
