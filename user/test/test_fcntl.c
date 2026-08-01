@@ -275,6 +275,27 @@ void test_fsync_regular(void) {
   sync();
 }
 
+/* fdatasync shares fsync writeback while preserving fd validation errors. */
+void test_fdatasync_regular_and_errors(void) {
+  int fd = open("/local/fdatasync.txt", O_WRONLY | O_CREAT | O_TRUNC);
+  TEST_ASSERT_TRUE(fd >= 0);
+  TEST_ASSERT_EQUAL_INT(4, (int)write(fd, "data", 4));
+  TEST_ASSERT_EQUAL_INT(0, fdatasync(fd));
+  close(fd);
+
+  errno = 0;
+  TEST_ASSERT_EQUAL_INT(-1, fdatasync(-1));
+  TEST_ASSERT_EQUAL_INT(EBADF, errno);
+
+  int pipefd[2];
+  TEST_ASSERT_EQUAL_INT(0, pipe(pipefd));
+  errno = 0;
+  TEST_ASSERT_EQUAL_INT(-1, fdatasync(pipefd[0]));
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  close(pipefd[0]);
+  close(pipefd[1]);
+}
+
 /* 16. O_CREAT|O_EXCL fails on existing file */
 void test_open_excl(void) {
   int fd = open("/local/excl.txt", O_CREAT | O_WRONLY, 0644);
@@ -682,6 +703,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_ftruncate_grow);
   RUN_TEST(test_truncate_path);
   RUN_TEST(test_fsync_regular);
+  RUN_TEST(test_fdatasync_regular_and_errors);
   RUN_TEST(test_open_excl);
   RUN_TEST(test_mkstemp);
   RUN_TEST(test_realpath);

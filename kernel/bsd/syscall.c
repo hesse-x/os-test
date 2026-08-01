@@ -6539,6 +6539,8 @@ int64_t syscall_dispatch(trapframe *tf) {
   case SYS_TRUNCATE:
     return sys_truncate(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_FSYNC:
+  case SYS_FDATASYNC:
+    /* Metadata changes are synchronous, so fdatasync shares fsync writeback. */
     return sys_fsync(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SYNC:
     return sys_sync(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);

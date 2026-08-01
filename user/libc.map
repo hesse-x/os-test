@@ -105,7 +105,7 @@ global:
     getuid; geteuid; getgid; getegid; getppid; getpgrp; umask;
     gethostname; sethostname; alarm; pause;
     setitimer;
-    truncate; fsync; sync;
+    truncate; fsync; fdatasync; sync;
     getpagesize; sysconf;
     pathconf; fpathconf;
     nice; getpriority; setpriority;
