@@ -29,13 +29,11 @@ set(LIBC_SOURCES
     lib/unistd.cc lib/time.cc lib/file.cc
     lib/stdlib_misc.c lib/uname.c
     lib/assert.c lib/signal.cc lib/getrandom.c
-    lib/musl_missing.c
     lib/musl_glue.c
     lib/io_multiplex.cc
     lib/sys_process.cc
     lib/sys_device.cc
     lib/sys_ipc.cc
-    lib/sys_socket.cc
     lib/musl_loader_shim.c
 )
 
@@ -65,7 +63,8 @@ add_user_lib(c
     SOURCES ${LIBC_SOURCES}
     EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs> $<TARGET_OBJECTS:musl_fcntl_objs>
                $<TARGET_OBJECTS:musl_socket_objs>
-               $<TARGET_OBJECTS:musl_dl_objs> $<TARGET_OBJECTS:musl_dirent_objs>
+               $<TARGET_OBJECTS:musl_dl_objs> $<TARGET_OBJECTS:musl_linux_objs>
+               $<TARGET_OBJECTS:musl_dirent_objs>
                $<TARGET_OBJECTS:musl_resource_objs>
                $<TARGET_OBJECTS:musl_process_objs>
                $<TARGET_OBJECTS:musl_pthread>
@@ -109,7 +108,8 @@ add_user_lib(c_so
     SOURCES ${LIBC_SOURCES}
     EXTRA_OBJS $<TARGET_OBJECTS:musl_unistd_objs_so> $<TARGET_OBJECTS:musl_fcntl_objs_so>
                $<TARGET_OBJECTS:musl_socket_objs_so>
-               $<TARGET_OBJECTS:musl_dl_objs_so> $<TARGET_OBJECTS:musl_dirent_objs_so>
+               $<TARGET_OBJECTS:musl_dl_objs_so> $<TARGET_OBJECTS:musl_linux_objs_so>
+               $<TARGET_OBJECTS:musl_dirent_objs_so>
                $<TARGET_OBJECTS:musl_resource_objs>
                $<TARGET_OBJECTS:musl_process_objs>
                $<TARGET_OBJECTS:musl_loader_objs> $<TARGET_OBJECTS:musl_pthread>

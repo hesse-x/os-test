@@ -310,13 +310,13 @@ evdev 中断投递正规化(技术债 #34)独立于本重构,走路径 3,见 [..
 | | `isatty` | musl 探 `TIOCGWINSZ`；串口（`driver/serial.c:211`）只答 `TCGETS`，余返 `-ENOTTY` | 串口补 `TIOCGWINSZ`（或 repo `isatty` 改用 `TCGETS`，已保留） |                                                                           
 | | `sleep`/`usleep` | musl 遇 `EINTR` 返剩余秒，repo 语义是 EINTR 后重试睡满 | time 已迁 musl（见下「time 全量迁移」），`sleep`/`usleep` 仍在 `time.cc` 故意保留 EINTR-resume 语义（musl `sleep.c`/`usleep.c` 仍排除于 `MUSL_UNISTD_EXCLUDE`）；仅当确认无消费者依赖"睡满"语义且想统一 POSIX 返回值时再换 musl 版 |                                                                                                     
 | | `ttyname`/`ttyname_r` | musl `readlink("/proc/self/fd/N")` + `stat`/`fstat` dev/ino 交叉校验，硬依赖 procfs 魔幻 symlink | ✅ procfs 已上线（`/proc/self/fd/N`→`/dev/ptsN` 或 `/dev/ttyS0`，见 [procfs.md](procfs.md) §3.4）。解锁条件具备，但 musl `ttyname_r` 的 `stat`/`fstat` dev+ino 交叉校验要求 `/dev/ptsN` 路径解析到的 devtmpfs inode 与 tty fd 的 `fstat` 命中同一 (dev,ino)——当前 repo 版走 `TIOCGPTN` 拼 `/dev/ptsN` 已够 PTY 用，切 musl 上游版前需先验证该交叉校验精度，避免 ENODEV 回退。已登记 procfs TODO（见文末） |
-| | `gethostname` | musl 返 `uname().nodename`（"（none）"）；repo 走 `sys_gethostname`（sethostname 回环） | `uname` nodename 正确填充后可换 musl 版 |                                                                                     
+| | `gethostname` | musl 返 `uname().nodename`（"（none）"）；repo 走 `sys_gethostname`（sethostname 回环） | `uname` nodename 正确填充后可换 musl 版。注：`sethostname` 已随 `src/linux` 批次迁到 musl `src/linux/sethostname.c`（`musl_linux_objs`），仅 `gethostname` 仍留 `uname.c`（因 `uname` 硬编码 nodename="(none)"，musl `gethostname` 会忽略 `sethostname()` 永读 "(none)"） |                                                                                     
 | **musl 声明但内核无 syscall/无实现（欠账）** | `getgroups`/`setgroups` | 内核无 groups 数组 | proc 加 `groups[]` + syscall |                                                                                                              
 | | `getresuid`/`getresgid`/`setresuid`/`setresgid` | 内核无 saved-set 查询/三参 res 版本 | proc 加 suid/sgid + `sys_setresuid/setresgid`（凭证已进程级） |                                                                                 
 | | `nice` | 依赖 `getpriority`/`setpriority`（musl 已编进）+ 调度器 priority | 接 `sys_getpriority`/`sys_setpriority` + 调度优先级 |                                                                                                       
 | | `acct` | 依赖 acct syscall + 记账写盘 | 上 acct syscall（非常后期） |                                                                                                                                                                   
 | | `chroot`/`vhangup` | 无对应 syscall | 上 `sys_chroot`/`sys_vhangup` |                                                                                                                                                                   
-| | `brk`/`sbrk` | malloc 走静态 freelist，不用 brk | 返 `-ENOSYS` 或 mmap 近似（非必须） |                                                                                                                                                 
+| | ~~`brk`/`sbrk`~~ | ~~malloc 走静态 freelist，不用 brk~~ | ✅ 已落地（`src/linux` 批次）：musl `src/linux/{brk,sbrk}.c` 接入（`musl_linux_objs`）。`brk.c` 直接返 `__syscall_ret(-ENOMEM)`（无 syscall）；`sbrk.c` 调 `__syscall(SYS_brk, 0)`——内核 `sys_brk` 是 fail stub，故二者运行期均返 `-ENOMEM`，与仓库 malloc 走 mmap-only（`sys_brk` fail stub）的现状一致，0 调用者，无行为变化 |                                                                                                                                                 
 | | `getdtablesize`/`issetugid`/`ctermid`/`get_current_dir_name`/`syncfs` | 边缘/可用户态包装 | 逐项用户态 shim 或 edge syscall |                                                                                                           
 | | `euidaccess`/`eaccess` | 依赖 `faccessat(AT_EACCESS)` | 随 `faccessat` 解锁 |                                                                                                                                                           
 | | `vfork`/`fexecve` | `vfork` 需 CLONE_VFORK-ish；`fexecve` 需 fd-as-exec | clone 扩展 + `execveat` |                                                                                                                                     
@@ -345,7 +345,7 @@ stdlib 模块（纯计算 + 启动/env/exit 链）切到 musl 上游（`musl_std
 - ~~`getline`/`fscanf`/`scanf`（`stdlib_misc.c`，当前 ENOSYS stub）：musl 把它们放 `src/stdio/`，依赖整套 musl stdio 的 `__uflow`/shgetc 扫描链；repo stdio 是自写 `stdio.cc`（非 musl FILE），硬塞接不上。解锁：stdio 整体迁 musl 时一起上。~~ ✅ 已落地（stdio 全量迁 musl，见下「stdio 全量迁移」节）：musl `src/stdio` 真实现接管，stub 删除。
 - `sysconf`/`getpagesize`（`stdlib_misc.c`）：musl `src/conf/sysconf.c`（217 行）改 `_SC_NPROCESSORS_ONLN` 语义，repo 走 `sys_sysconf` syscall。解锁：对齐 ncpu 取值语义后切 musl 版（连带 `src/legacy/getpagesize.c`）。
 - `mknod`/`chmod`/~~`remove`~~（`stdlib_misc.c`）：薄 syscall 封装，musl 版走同一 syscall 号但拖 `src/misc/sysm.c` 机制，收益≈0；~~`remove` 在 musl 属 stdio~~ ✅ `remove` 已迁——musl `src/stdio/remove.c` 接管（stdio 全量迁移）。`mknod`/`chmod` 低优先级，仍留。
-- **`getrandom`/`getentropy`（`user/lib/getrandom.c`）——独立里程碑**：musl 有（`src/linux/getrandom.c`），但属 syscall wrapper（`src/linux/`），不在 stdlib 迁移范围（只迁 `src/stdlib/`）。解锁：作为「`src/linux/` syscall wrapper 批次迁移」里程碑接入。
+- ~~**`getrandom`/`getentropy`（`user/lib/getrandom.c`）——独立里程碑**：musl 有（`src/linux/getrandom.c`），但属 syscall wrapper（`src/linux/`），不在 stdlib 迁移范围（只迁 `src/stdlib/`）。解锁：作为「`src/linux/` syscall wrapper 批次迁移」里程碑接入。~~ ✅ 已落地（见下「`src/linux` 批次迁移」）：`getrandom` 由 musl `src/linux/getrandom.c` 接管（`musl_linux_objs`）；`getentropy` 仍留 `getrandom.c`（trivial getrandom 循环 + 256B 上限，同文件 `arc4random_*` 一起留，musl `src/misc/getentropy.c` 未单列模块）。
 - `arc4random_buf`/`arc4random_uniform`（`user/lib/getrandom.c`）：**永久留 repo**——musl 无此源文件（BSD 扩展，musl 不实现 arc4random）。已在 `user/include/sys/random.h` 用 `LIBC_EXPORT` 声明导出。
 - `abort`（曾留 `signal.cc`）：已迁——musl `src/exit/abort.c` 接管，`signal.cc` 删旧实现。                                
 
@@ -392,6 +392,61 @@ exclude 名单（10 文件，防 multi-define / 拖依赖）：
 - **loader dprintf/vdprintf 已归一**：~~shim 的 boot-safe raw-syscall 版保留，musl `dprintf.c`/`vdprintf.c` 从 `musl_stdio_objs` exclude~~ ✅ 已改——shim 的 `dprintf`/`vdprintf` 已删，`dprintf.c`/`vdprintf.c` 不再 exclude，loader 直接用 musl 原生版（走 vfprintf）。所有 loader 调用点在 `reloc_all(&ldso)`（`dynlink.c:1432`）后，PLT 已就绪，原生版安全（boot + 多次 exec 验证通过）。公开 libc 仍无 `dprintf`/`vdprintf` 导出。
 - ~~**宽字符 w* 系列已排除**（非"顺带纳入"）~~ ✅ **已纳入**（随「wchar/wctype/uchar 全量迁移」，见下节）：23 个 w* 文件（`vfwprintf`/`vfwscanf`/`fgetwc`/`fputwc`/`fputws`/`fgetws`/`ungetwc`/`fwide`/`fwprintf`/`fwscanf`/`wprintf`/`wscanf`/`swprintf`/`swscanf`/`v{w,sw}{printf,scanf}`/`getwc`/`getwchar`/`putwc`/`putwchar`/`open_wmemstream`）已从 `musl_stdio_objs` 的 REMOVE_ITEM 移出，编进 libc 并在 libc.map `<wchar.h>` 块导出。它们引用的 `isw*`/`wcsnlen`/`btowc`/`wctob` 由 `musl_wchar_objs` 提供、`__c_locale`/`__c_dot_utf8_locale` 由 `musl_time_objs` 提供，依赖已就绪故旧"运行期重定位失败：`iswspace: symbol not found`" blocker 彻底消解。`<wchar.h>` 已发布，故 wide-stdio 家族现**真可用**（不再 declare-only）。`*_unlocked`/`__isoc99_*` 内部别名仍 hidden（同窄 stdio 纪律）。multibyte 窄路径最小集（`wctomb`/`wcrtomb`/`mbrtowc`/`mbsinit`/`internal` 五文件，供 vfprintf `%ls`/vfscanf `%ls` link-time 引用）不变。
 
+### `src/linux` 批次迁移到 musl（退役 io_multiplex.cc / sys_socket.cc / musl_missing.c 的 syscall 薄封装）
+
+新建 `modules/linux.cmake`（仿 `dl.cmake` 裸 dual-build：`musl_linux_objs` -fno-pie + `musl_linux_objs_so` -fPIC，接入 `musl_rules.cmake` 的 `_musl_modules` 列表，喂 libc.a + libc.so）。**不 glob 整个 `src/linux/`**——67 个文件里 ~52 个路由到内核未实现 syscall 或拖重依赖（ptrace/xattr/fanotify/inotify/quotactl/module/klogctl/pivot_root/swap/setns/unshare/reboot/vhangup/process_vm/copy_file_range/...），glob + 巨型 `REMOVE_ITEM` 不比显式 include 清晰。显式 15 文件清单精确记录"支持什么"，每个文件的每条 musl wrapper 路由的 syscall 都经内核两层分发（`kernel/bsd/syscall.c` 167 项 + `kernel/xcore/trap.c` 15 项）核实已实现。
+
+**选源规则**：一个文件被纳入当且仅当其 musl wrapper 路由的**每个** syscall 内核都已实现（任一分发层命中即算）。多路径文件（如 `pwritev2.c` 先试 `SYS_pwritev2` 再回落 `SYS_pwritev`）若**任一路径**的 syscall 缺失则排除——否则 ENOSYS 符号漏进 libc。需复杂内核机制的文件（ptrace/xattr/...）排除，保持未实现。
+
+ INCLUDED（15）：
+- `arch_prctl.c` — `SYS_arch_prctl`（bsd）。新符号，无 repo wrapper。
+- `brk.c`/`sbrk.c` — `brk.c` 直接返 `__syscall_ret(-ENOMEM)`（无 syscall）；`sbrk.c` 调 `__syscall(SYS_brk, 0)`。内核 `sys_brk` 是 fail stub，运行期均返 `-ENOMEM`，与仓库 malloc mmap-only 现状一致。勾销上表 `brk`/`sbrk` 欠账。
+- `epoll.c` — `SYS_epoll_{create,create1,ctl,wait,pwait}`（bsd）。替换 `io_multiplex.cc` 的 epoll 全家。
+- `eventfd.c` — `SYS_eventfd2`（bsd）；`SYS_eventfd` 回落分支不可达。替换 `io_multiplex.cc`。
+- `fallocate.c` — `SYS_fallocate`(285，bsd，小写)。新符号。勾销下文 :458 `fallocate` 欠账（`lockf` 仍欠，源在 `src/misc` 非 `src/linux`）。
+- `flock.c` — `SYS_flock`（bsd）。替换 `sys_socket.cc`。
+- `getrandom.c` — `SYS_getrandom`（bsd，cancellable via `syscall_cp`）。替换 `getrandom.c` 的 getrandom（`getentropy`/`arc4random_*` 留，见下）。
+- `gettid.c` — 读 `__pthread_self()->tid`（无 syscall；tid 由 `__init_tls.c:22` 经 `SYS_set_tid_address` 设置，每个 ELF startup 跑）。替换 `sys_process.cc` 的 gettid（原走 per-call `sys_gettid()`，语义等价）。
+- `ioperm.c` — `SYS_ioperm`（**xcore/trap.c**，非 bsd 层）。替换 `unistd.cc` 的 ioperm（`umask` 留，musl 在 `src/stat/umask.c`，无模块 glob `src/stat/`）。
+- `memfd_create.c` — `SYS_memfd_create`（bsd）。替换 `sys_process.cc`。注意 mman 模块**不**编译它（`mman.cmake:27` 注释），故此前是 `sys_process.cc` 手写。
+- `prctl.c` — `SYS_prctl`（bsd）。替换 `musl_missing.c`（整文件随 `prctl` 迁出而删除，已从 `LIBC_SOURCES` 移除）。
+- `sethostname.c` — `SYS_sethostname`（bsd）。替换 `uname.c`（`gethostname` 留，见下）。
+- `signalfd.c` — `SYS_signalfd4`（bsd）。替换 `io_multiplex.cc`。sigsetsize：musl 传 `_NSIG/8`=8，repo 旧传 `sizeof(sigset_t)`=128——内核 `sys_signalfd4` 接受 `sizemask >= sizeof(sigset_t)`(8) 读低 8 字节，二者皆 OK。
+- `statx.c` — `SYS_statx`（bsd）；`fstatat` 回落分支因 `SYS_statx` 已实现而不可达。替换 `file.cc` 的 `statx`（repo 版仅多 EFAULT 守卫；`statx_to_stat` + `stat`/`lstat`/`fstat`/`fstatat` 留——它们 wrap `sys_statx`，非 `statx()`）。
+
+ Multi-path/deps EXCLUDED（保留 repo 手写版，若存在）：
+- `mount.c` — `umount`/`umount2` → `SYS_umount2` 缺失；repo `sys_ipc.cc` mount 留。
+- `timerfd.c` — `timerfd_gettime` → `SYS_timerfd_gettime` 缺失；repo `timerfd_create`/`timerfd_settime` 留（`io_multiplex.cc`）。
+- `utimes.c` — deps `__futimesat`（`src/stat/futimesat.c`，编译于任何处皆无）→ link fail。
+- `renameat2.c` — flags≠0 → `SYS_renameat2` 缺失。
+- `preadv2.c`/`pwritev2.c` — flags≠0 路径 `SYS_preadv2`/`SYS_pwritev2` 缺失（pwritev2 即便 flags==0 的 `SYS_pwritev` 路径也缺失）。
+- `wait4.c`/`wait3.c` — time64 回落 → `SYS_wait4_time64`（dead branch，但按严格规则排除）；repo `waitpid` 留（`sys_process.cc`）。
+
+ Candidates needing only a simple kernel syscall（**不在本批**，登记待后续）：
+- `renameat2`（`SYS_renameat2`~`SYS_RENAMEAT`）、`pwritev`/`preadv2`/`pwritev2`、`timerfd_gettime`、`chroot`、`personality`、`syncfs`、`mlock2`、`umount2`、`iopl`、`settimeofday`/`stime`、`setfsgid`/`setfsuid`、`setgroups`、`sysinfo` 等。本批严格"只迁内核已实现 syscall 的接口，不动内核"（见 `feedback-record-design-decisions`：scope 决策经 AskUserQuestion 确认 + todo 登记，不在迁移动作内擅自扩 scope 补内核 syscall）。
+
+ 已在其它模块编译（multi-define guard，**不**列此处）：`getdents.c`(dirent)、`membarrier.c`(pthread)、`prlimit.c`(resource)、`sendfile.c`(unistd)。
+
+ 退役手写实现：
+- 删 `user/lib/sys_socket.cc`（`flock`→musl linux、`accept4`→musl socket，见下）。已从 `LIBC_SOURCES` 移除。
+- 删 `user/lib/musl_missing.c`（`prctl`→musl linux；`mremap` 早由 `sys_mremap` 提供，该文件仅剩 `prctl`）。已从 `LIBC_SOURCES` 移除。
+- `io_multiplex.cc` 精简至 `select` + `ipcfd_create`/`ipcfd_read` + `timerfd_create`/`timerfd_settime`（epoll/eventfd/signalfd 删，由 musl 接管）。`select` 留——musl `src/select/select.c` 未迁（`src/select` 批次单独，本批只 `src/linux`）；`ipcfd_*` 是 OS 专有 FD_IPC fd（evdev 下游 IPC，非 POSIX）；`timerfd_*` 留因 `timerfd.c` 整文件被排除（见上）。
+- `sys_process.cc` 删 `gettid`/`memfd_create`（→musl linux）；`fork`/`execve`/`waitpid`/`spawn` 留（`src/process` 整目录未迁，见 `libc_extend.md` §2.1）。
+- `unistd.cc` 删 `ioperm`（→musl linux）；`umask` 留。
+- `uname.c` 删 `sethostname`（→musl linux）；`gethostname` 留（见下）。
+- `file.cc` 删 `statx` 函数定义（→musl linux）；`statx_to_stat` + `stat`/`lstat`/`fstat`/`fstatat` 留。
+- `getrandom.c` 删 `getrandom`（→musl linux）；`getentropy`/`arc4random_buf`/`arc4random_uniform` 留（`getentropy` 仍 trivial getrandom 循环 + 256B 上限；`arc4random_*` 永久留——musl 无 BSD arc4random 源，见 :349）。`getentropy` 仍留 repo 而非拉 musl `src/misc/getentropy.c`：trivial 封装、且与 `arc4random_*` 同文件，单列模块收益≈0。
+
+ 故意保留（musl 有源码但 repo 语义/ABI 不兼容，或同文件其它保留项连带）：
+- `gethostname`（`uname.c`）— musl `src/unistd/gethostname.c` 返 `uname().nodename`，但 repo `uname` 硬编码 `nodename="(none)"` → musl 版会忽略 `sethostname()` 永读 "(none)"。repo 版走 `sys_gethostname`（读内核 live hostname），`test_process.c` hostname 回环依赖此。`sethostname` 已迁 musl，`gethostname` 仍留（见上表 gethostname 行）。
+- `signalfd` 的 sigsetsize 差异（musl 8 / repo 128）非保留原因——内核两值皆接受，已迁。
+
+ socket 模块加 `accept4`（顺带）：`modules/socket.cmake` 的显式源清单新增 `src/network/accept4.c`（原注释"与 `sys_socket.cc` 手写版重复定义故故意不含"随 `sys_socket.cc` 删除而下掉）。musl `accept4.c` 在 x86_64（`SYSCALL_USE_SOCKETCALL` undefined）展开 `socketcall_cp(accept4,...)` → `syscall_cp(SYS_accept4, ...)` 直连 `__NR_accept4`（非 i386 socketcall(2) 多路复用）；`ENOSYS`/`EINVAL` 回落分支因内核 `sys_accept4`(`bsd/socket.c:1687`) 已实现而不可达，但自包含（`accept` + `fcntl`，二者已在 socket 模块）。`test_accept4.elf` 验证。
+
+ 构建验证：`nm libc.a` 核对 19 个 musl linux 符号 + `accept4` 各 count=1（repo 副本已删，无 multi-define）；repo 保留符号（`select`/`poll`/`ppoll`/`timerfd_*`/`ipcfd_*`/`umask`/`gethostname`/`getentropy`/`arc4random_*`）各 count=1。test_runner 覆盖：`flock`/`accept4`/`process`(gettid/sethostname/gethostname 回环)/`getrandom`/`epoll`/`epoll_oneshot`/`eventfd`/`signalfd`/`test_statx` 全部注册并 PASS。
+
+
+
 
 ### wchar/wctype/uchar 全量迁移到 musl
 
@@ -426,10 +481,10 @@ pthread（commit `8d19e24`，删 `user/lib/{pthread,tls,errno}.cc` + 旧头，`_
 - [ ] **`musl_loader_shim.c`（ldso 重构残留，loader-only 非 pthread 符号）**：commit `48b8d32` 删整个手写 `user/ldso/`(`dls3.c`/`dls_init.c`/`load_so.c`/`relocate.c`/`symtab.c`/`link_map.c`/`minilibc.c`/`dl_puts.c`/`start.S` + 旧 `doc/design/ld.md` 2381 行)，换 musl fused loader(`ldso/dynlink.c`+`ldso/dlstart.c` 经 `musl_loader_objs` 融入 libc.so)。这个 shim 现仅提供 loader 引用、且 musl_pthread 与自留 libc 都不提供的符号：`__tlsdesc_static`/`__tlsdesc_dynamic`(TLSDESC handler 地址被 `R_X86_64_TLSDESC` reloc 存取，musl 定义在 `ldso/tlsdesc.c` 但未并入 `musl_loader_objs`/`musl_pthread`，仅 `-mtls-dialect=desc` 用，本 OS 从不用)。pthread/TLS 相关(`__libc`/`__hwcap`/`__init_tp`/`__copy_tls`/`__block_all_sigs`/`__inhibit_ptc`/`__tls_get_addr`...)已由 musl_pthread 真提供，loader 在 `__dls3` 跑 musl 真实 TLS 建立且自留 `__libc_start_main` 不再覆盖 fs_base。根治：loader 也整体切 musl dynlink 后由 musl 自身吸收，本 shim 删除。
 - [ ] **ldso cmake wiring 的两处过渡机制（`musl_rules.cmake`）**：① `musl_loader_objs` 强制 `-O2`（无视 `CMAKE_BUILD_TYPE`）——规避自举陷阱：`-Os` 会把 dynlink.c 的 `find_sym` 内的 memset 循环降为 `call memset@plt`，而 `reloc_all(&ldso)` 解的是 ldso **自己**的 PLT GOT 槽，memset GOT 槽此时指向未映射野地址(0x6476)→ 崩溃。上游 musl 在 ldso 阶段 `-Os` 能跑因它整树一体；我们 fused 手写 libc + musl loader 的混合结构使该优化不安全。② `-Wno-all` 抑制 dynlink.c:1394 `for(...); auxv++;` idiom 警告。二者都是"fused 手写 libc + musl loader"混合期的临时约束，整体切 musl libc.so（loader 与 libc 同源）后这两处特殊编译参数随 `musl_loader_objs` 规则一并归一，不再需要。
 - [ ] **`musl_startup.c` 桥（填 `libc.page_size`/`libc.auxv`）**：musl `pthread_create` 读 `libc.page_size`(经 `PAGE_SIZE` 宏)与 `libc.tls_size`；`__init_tls` 设 TLS 字段但**不**设 page_size，musl 原版 `__libc_start_main` 从 `aux[AT_PAGESZ]` 设。本仓库保留自己的 `__libc_start_main`(musl 的要读 `AT_SYSINFO`/`AT_UID`/`AT_SECURE`/...，内核不提供)，故此桥补 page_size + auxv(后者 `pthread_getattr_np` 走 mremap 探主栈用)。根治：内核补齐 auxv(`AT_SYSINFO`/`AT_UID`/`AT_EUID`/`AT_GID`/`AT_SECURE`/`AT_ENTRY`...)后换 musl `__libc_start_main`，本桥与自留 `start_main.cc` 一并下掉。
-- [ ] **`musl_missing.c`（`strnlen`/`prctl`/`mremap` 补丁）**：musl 头声明、自留 libc 未提供或语义不同的兜底。`mremap` 已实现（`sys_mremap` in `kernel/bsd/syscall.c`，复用 `vma_*` + 新增 `move_user_pages`/`clear_user_pte` 原语）：shrink / 原地 grow / `MREMAP_MAYMOVE` move / `MREMAP_FIXED`，匿名全支持，file-backed/memfd-private 支持且 grow 走 demand fault-in，SHM/MAP_PHYSICAL 仅 shrink + 等量 move（grow 报 `-ENOMEM`，musl malloc 走 `copy_realloc` fallback）。**作用域限制：只处理整 region**（`old_addr==region->vaddr && old_size==region->size`），子区 mremap 报 `-EFAULT`——musl `malloc.c:407` 整 region 满足；`pthread_getattr_np.c:19` 的栈探测 old_addr 落在栈 region 中段，得 `-EFAULT`（errno≠ENOMEM），探测循环干净退出（与 stub 期行为一致，无回归）。根治随整体 musl libc.so 切换：`strnlen`/`prctl` 由 musl `src/string`/`src/linux` 真实现接管，`mremap` 直接用 musl `src/linux/mremap.c`（内核侧 `sys_mremap` 不变）。
+- [ ] **`musl_missing.c`（`mremap` 补丁残留）**：musl 头声明、自留 libc 未提供或语义不同的兜底。~~`strnlen`/`prctl`~~ ✅ 已落地（`src/linux` 批次 + string 模块）：`prctl` 由 musl `src/linux/prctl.c` 接管（`musl_linux_objs`，本文件随 `prctl` 迁出而删除，已从 `LIBC_SOURCES` 移除）；`strnlen` 早由 `musl_string_objs` 提供（string.cmake 注释列明，非 exclude）。仅 `mremap` 仍留：`mremap` 已实现（`sys_mremap` in `kernel/bsd/syscall.c`，复用 `vma_*` + 新增 `move_user_pages`/`clear_user_pte` 原语）：shrink / 原地 grow / `MREMAP_MAYMOVE` move / `MREMAP_FIXED`，匿名全支持，file-backed/memfd-private 支持且 grow 走 demand fault-in，SHM/MAP_PHYSICAL 仅 shrink + 等量 move（grow 报 `-ENOMEM`，musl malloc 走 `copy_realloc` fallback）。**作用域限制：只处理整 region**（`old_addr==region->vaddr && old_size==region->size`），子区 mremap 报 `-EFAULT`——musl `malloc.c:407` 整 region 满足；`pthread_getattr_np.c:19` 的栈探测 old_addr 落在栈 region 中段，得 `-EFAULT`（errno≠ENOMEM），探测循环干净退出（与 stub 期行为一致，无回归）。根治随整体 musl libc.so 切换：`mremap` 直接用 musl `src/linux/mremap.c`（内核侧 `sys_mremap` 不变）。
 - [ ] **`user/lib/musl_shim/` 目录仍未 `git add`（untracked）**：见"剩余债⑤"。内含 `syscall_cp.c`(`__setxid` shim，见上表机制缝)，errno 双包装修复落在 diff 盲区。整体切 musl 后 `__setxid` 随多线程凭证同步需求重做，本目录归档。
 
-**统一切换前提**：上述各项的共同根治路径是"整体切 musl libc.so"——即不再保留自留 malloc/...，全部用 musl `src/` 树，动态链接器也走 musl dynlink。届时 musl_pthread 不再是"子库"而是 libc.so 本体，所有 glue/shim 桥文件(`musl_glue.c`/`musl_loader_shim.c`/`musl_startup.c`/`musl_missing.c`/`musl_shim/`)与 ldso cmake 特殊编译参数成批删除/归一。在此之前它们各自独立、可单独演进，是 pthread/ldso 已可用、stdio 已迁、但 startup/malloc 尚未整体迁移的**预期中间态**(非 bug)。切换的大前置是内核 auxv 补齐(第 5 项)——`AT_SYSINFO`/`AT_UID`/`AT_EUID`/`AT_GID`/`AT_SECURE`/`AT_ENTRY` 等，补齐后才能换掉自留 `__libc_start_main`(`start_main.cc`) 与 `musl_startup.c` 桥。
+**统一切换前提**：上述各项的共同根治路径是"整体切 musl libc.so"——即不再保留自留 malloc/...，全部用 musl `src/` 树，动态链接器也走 musl dynlink。届时 musl_pthread 不再是"子库"而是 libc.so 本体，所有 glue/shim 桥文件(`musl_glue.c`/`musl_loader_shim.c`/`musl_startup.c`/`musl_shim/`)与 ldso cmake 特殊编译参数成批删除/归一（`musl_missing.c` 已随 `src/linux` 批次 `prctl` 迁出而删除）。在此之前它们各自独立、可单独演进，是 pthread/ldso 已可用、stdio 已迁、但 startup/malloc 尚未整体迁移的**预期中间态**(非 bug)。切换的大前置是内核 auxv 补齐(第 5 项)——`AT_SYSINFO`/`AT_UID`/`AT_EUID`/`AT_GID`/`AT_SECURE`/`AT_ENTRY` 等，补齐后才能换掉自留 `__libc_start_main`(`start_main.cc`) 与 `musl_startup.c` 桥。
 
 ## udev 测试
 
@@ -455,7 +510,7 @@ pthread（commit `8d19e24`，删 `user/lib/{pthread,tls,errno}.cc` + 旧头，`_
 
 - [ ] **`fallocate` 仅 mode=0**（`kernel/bsd/syscall.c` `sys_fallocate`：普通文件 grow+zero、SHM 委派 ftruncate；其它 mode 一律 `-EOPNOTSUPP`）。缺 `FALLOC_FL_KEEP_SIZE`/`PUNCH_HOLE`/`COLLAPSE_RANGE`/`INSERT_RANGE`/`ZERO_RANGE`/`UNSHARE_RANGE`——FAT32 连续无洞天然不支持，需 tmpfs/ext2 等有洞 fs 上线后再做。`posix_fallocate`（mode=0）已够 musl `posix_fallocate.c` 用。
 - [ ] **fcntl cmds 未实现**：`sys_fcntl` switch 的 `default` 返 `-EINVAL`，下列 musl `<fcntl.h>` 声明的 cmd 内核不认：`F_SETLEASE`/`F_GETLEASE`（file lease，需 lease 子系统）、`F_NOTIFY`（目录变更通知 DN_*）、`F_CANCELLK`、`F_GETOWNER_UIDS`、`F_GET_RW_HINT`/`F_SET_RW_HINT`/`F_GET_FILE_RW_HINT`/`F_SET_FILE_RW_HINT`（write-life hint，RWF_*）。当前无消费方，留待对应子系统/需求上线。
-- [ ] **libc 侧 `lockf(3)` + `fallocate(3)`（glibc 非 POSIX 变体）未提供**：musl `<fcntl.h>` 在 `_GNU_SOURCE` 下声明二者，但 musl 源在 `src/misc/lockf.c`、`src/linux/fallocate.c`，未并入 `musl_fcntl_objs`（只拉 `src/fcntl/*.c`）→ 用户态调用会链接未定义。需用时把这俩源并入 libc（或并入 `musl_unistd_objs` 的 src/linux glob）。
+- [ ] **libc 侧 `lockf(3)` 未提供（~~`fallocate(3)`~~ 已落地）**：musl `<fcntl.h>` 在 `_GNU_SOURCE` 下声明 `lockf`/`fallocate`，但二者源分属 `src/misc/lockf.c`、`src/linux/fallocate.c`，均未并入 `musl_fcntl_objs`（只拉 `src/fcntl/*.c`）→ 用户态调用会链接未定义。~~`fallocate`~~ ✅ 已落地（`src/linux` 批次）：musl `src/linux/fallocate.c` 接入 `musl_linux_objs`，路由 `SYS_fallocate`(285，内核已实现 `bsd/syscall.c:6364`)。`lockf` 仍未并入（源在 `src/misc/lockf.c`，不在 `src/linux` 批次范围；`src/misc` 未整体迁移），需用时补编 `src/misc/lockf.c` 到 libc。
 - [ ] **`splice`/`tee`/`vmsplice`/`readahead`/`sync_file_range` 缺失（libc + kernel 双侧）**：musl `<fcntl.h>` 在 `_GNU_SOURCE` 下声明，源在 `src/linux/*.c`（未被 `musl_unistd_objs` 的 `src/unistd` glob 覆盖，未并入）；内核无 `SYS_splice`(275)/`SYS_tee`(276)/`SYS_vmsplice`(278)/`SYS_readahead`(187)/`SYS_sync_file_range`(277) 的 dispatch（`syscall_nums.h`+`syscall.c` 均无）。需 kernel pipe/splice 子系统 + 这批 syscall + libc 源一并补。
 
 ## procfs 后续（procfs.md §6 "后续 TODO"）

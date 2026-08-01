@@ -3,21 +3,18 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * I/O multiplexing: select, epoll, eventfd, timerfd, signalfd
- *
- * Merged from select.c + epoll.cc + eventfd.cc + timerfd.cc + signalfd.cc
+ * I/O multiplexing residuals: select, ipcfd (evdev downstream-IPC fd),
+ * timerfd_create/timerfd_settime. epoll/eventfd/signalfd migrated to musl
+ * src/linux (musl_linux_objs); select stays (src/select batch deferred).
  */
 
-#include <errno.h>
-#include <signal.h>
+#include <errno.h> // IWYU pragma: keep
 #include <stdint.h>
+#include <xos/time.h>
 
 #include <sys/cdefs.h>
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
 #include <sys/poll.h>
 #include <sys/select.h>
-#include <sys/signalfd.h>
 #include <sys/timerfd.h>
 #include <xos/errno.h>
 #include <xos/socket.h>
@@ -25,8 +22,9 @@
 #include <xos/syscall_nums.h>
 
 // ===================== select =====================
-// Implemented on top of poll(2).
-
+// Implemented on top of poll(2). musl's src/select/select.c is not yet compiled
+// into libc (the src/select batch is deferred), so this poll-based select
+// stays.
 extern "C" int select(int nfds, fd_set *readfds, fd_set *writefds,
                       fd_set *exceptfds, struct timeval *timeout) {
   if (nfds < 0) {
@@ -94,73 +92,6 @@ extern "C" int select(int nfds, fd_set *readfds, fd_set *writefds,
   return result;
 }
 
-// ===================== epoll =====================
-
-extern "C" int epoll_create(int size) {
-  (void)size;
-  int64_t ret = __syscall1(SYS_EPOLL_CREATE, (int64_t)size);
-  if (ret < 0) {
-    errno = (int)(-ret);
-    return -1;
-  }
-  return (int)ret;
-}
-
-extern "C" int epoll_create1(int flags) {
-  int64_t ret = __syscall1(SYS_EPOLL_CREATE1, (int64_t)flags);
-  if (ret < 0) {
-    errno = (int)(-ret);
-    return -1;
-  }
-  return (int)ret;
-}
-
-extern "C" int epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
-  int64_t ret = __syscall4(SYS_EPOLL_CTL, (int64_t)epfd, (int64_t)op,
-                           (int64_t)fd, (int64_t)(uintptr_t)ev);
-  if (ret < 0) {
-    errno = (int)(-ret);
-    return -1;
-  }
-  return (int)ret;
-}
-
-extern "C" int epoll_wait(int epfd, struct epoll_event *events, int maxevents,
-                          int timeout) {
-  int64_t ret =
-      __syscall4(SYS_EPOLL_WAIT, (int64_t)epfd, (int64_t)(uintptr_t)events,
-                 (int64_t)maxevents, (int64_t)timeout);
-  if (ret < 0) {
-    errno = (int)(-ret);
-    return -1;
-  }
-  return (int)ret;
-}
-
-extern "C" int epoll_pwait(int epfd, struct epoll_event *events, int maxevents,
-                           int timeout, const sigset_t *sigmask) {
-  int64_t ret = __syscall6(SYS_EPOLL_PWAIT, (int64_t)epfd,
-                           (int64_t)(uintptr_t)events, (int64_t)maxevents,
-                           (int64_t)timeout, (int64_t)(uintptr_t)sigmask,
-                           sigmask ? (int64_t)sizeof(sigset_t) : 0);
-  if (ret < 0) {
-    errno = (int)(-ret);
-    return -1;
-  }
-  return (int)ret;
-}
-
-// ===================== eventfd =====================
-
-extern "C" int eventfd(unsigned int initval, int flags) {
-  int64_t ret = __syscall2(SYS_EVENTFD2, (int64_t)initval, (int64_t)flags);
-  if (ret < 0) {
-    errno = (int)(-ret);
-    return -1;
-  }
-  return (int)ret;
-}
-
 // ===================== ipcfd (evdev downstream-IPC fd) =====================
 
 extern "C" int ipcfd_create(void) {
@@ -187,6 +118,12 @@ extern "C" int ipcfd_read(int fd, struct recv_msg *msg, void *data_buf,
 }
 
 // ===================== timerfd =====================
+//
+// RETAINED: musl's src/linux/timerfd.c also defines timerfd_gettime, which
+// routes to SYS_timerfd_gettime (unimplemented in this kernel → leaks an
+// ENOSYS symbol into libc). Only timerfd_create/timerfd_settime are kept here
+// (the kernel implements those two). Migrating the full file is deferred until
+// SYS_timerfd_gettime lands; see libc_extend.md §2.2.
 
 extern "C" LIBC_EXPORT int timerfd_create(int clockid, int flags) {
   int64_t ret =
@@ -204,18 +141,6 @@ extern "C" LIBC_EXPORT int timerfd_settime(int fd, int flags,
   int64_t ret =
       __syscall4(SYS_TIMERFD_SETTIME, (int64_t)fd, (int64_t)flags,
                  (int64_t)(uintptr_t)new_value, (int64_t)(uintptr_t)old_value);
-  if (ret < 0) {
-    errno = (int)(-ret);
-    return -1;
-  }
-  return (int)ret;
-}
-
-// ===================== signalfd =====================
-
-extern "C" int signalfd(int fd, const sigset_t *mask, int flags) {
-  int64_t ret = __syscall4(SYS_SIGNALFD4, (int64_t)fd, (int64_t)(uintptr_t)mask,
-                           (int64_t)sizeof(sigset_t), (int64_t)flags);
   if (ret < 0) {
     errno = (int)(-ret);
     return -1;

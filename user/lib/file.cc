@@ -148,14 +148,8 @@ static void statx_to_stat(const struct statx *sx, struct stat *st) {
   st->st_ctim.tv_nsec = sx->stx_ctime.tv_nsec;
 }
 
-int statx(int dirfd, const char *path, int flags, unsigned int mask,
-          struct statx *stx) {
-  if (!stx) {
-    errno = EFAULT;
-    return -1;
-  }
-  return sys_statx(dirfd, path, flags, mask, stx);
-}
+/* statx() 本身由 musl src/linux/statx.c 提供（musl_linux_objs，直接走
+ * SYS_statx；其 fstatat 回退分支因 SYS_statx 已实现而不可达），不在此定义。 */
 
 /* 路径类 stat 公共体：直接透传 statx，相对路径由内核 resolve_dirfd_start
  * (AT_FDCWD→bp->cwd) 解析。flags = 0（stat）或 AT_SYMLINK_NOFOLLOW（lstat，

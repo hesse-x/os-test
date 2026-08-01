@@ -21,22 +21,16 @@ int uname(struct utsname *buf) {
   return 0;
 }
 
-/* gethostname / sethostname: musl's <unistd.h> declares gethostname
- * unconditionally but without a visibility attribute (→ HIDDEN under
- * -fvisibility=hidden), and sethostname only under _GNU_SOURCE/_BSD_SOURCE
- * (not enabled in the libc build). The LIBC_EXPORT re-declarations in
- * <xos/unistd_ext.h> give these C-linkage default-visible definitions.
- *
- * gethostname is RETAINED (musl src/unistd/gethostname.c is excluded from
+/* gethostname is RETAINED (musl src/unistd/gethostname.c is excluded from
  * musl_unistd_objs — see user/CMakeLists.txt): musl's version returns
  * uname().nodename, but this repo's uname hard-codes nodename="(none)", so
  * musl's gethostname would ignore sethostname() and always read "(none)".
  * The repo version reads the kernel's live hostname (sys_gethostname),
  * which sethostname() updates — the test_process.c hostname round-trip
- * depends on this. sethostname lives in musl src/linux/ (not adopted) and
- * stays here alongside uname (system identity cluster). */
+ * depends on this. sethostname now comes from musl src/linux/sethostname.c
+ * (musl_linux_objs, routes to SYS_sethostname), so it is no longer defined
+ * here. The LIBC_EXPORT re-declaration in <xos/unistd_ext.h> gives this
+ * definition C linkage + default visibility (musl's <unistd.h> declares
+ * gethostname without a visibility attribute → HIDDEN under
+ * -fvisibility=hidden). */
 int gethostname(char *name, size_t len) { return sys_gethostname(name, len); }
-
-int sethostname(const char *name, size_t len) {
-  return sys_sethostname(name, len);
-}

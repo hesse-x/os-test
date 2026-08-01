@@ -18,8 +18,6 @@
 # are listed explicitly — same discipline as musl_fcntl_objs.
 #
 # Excluded from this list (supplied elsewhere):
-#   accept4.c — hand-written wrapper in user/lib/sys_socket.cc (commit e3e5e16),
-#              already exported; musl's would multi-define.
 #   recv.c was previously excluded for a name collision with the microkernel IPC
 #   `recv` primitive, but that IPC symbol has been renamed to `ipc_recv` (see
 #   user/include/sys/ipc.h), freeing the POSIX `recv` name — musl recv.c is now
@@ -28,6 +26,7 @@ set(MUSL_SOCKET_SOURCES
     ${MUSL_DIR}/src/network/socket.c
     ${MUSL_DIR}/src/network/socketpair.c
     ${MUSL_DIR}/src/network/accept.c
+    ${MUSL_DIR}/src/network/accept4.c
     ${MUSL_DIR}/src/network/connect.c
     ${MUSL_DIR}/src/network/bind.c
     ${MUSL_DIR}/src/network/listen.c

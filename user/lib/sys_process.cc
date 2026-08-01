@@ -13,19 +13,18 @@
 #include <syscall.h>
 #include <unistd.h> // IWYU pragma: keep
 
-#include <sys/mman.h>
 #include <sys/process.h>
 #include <sys/wait.h>
-#include <xos/unistd_ext.h>
 
 extern "C" char **environ;
 
 // ===================== process management =====================
 
-/* gettid: thread ID of the calling thread (Linux gettid(2)). musl has no
- * public declaration, so this OS exposes it via <xos/unistd_ext.h>; the
- * LIBC_EXPORT there gives the definition C linkage + default visibility. */
-extern "C" pid_t gettid(void) { return (pid_t)sys_gettid(); }
+/* gettid now comes from musl src/linux/gettid.c (musl_linux_objs): musl's
+ * version returns the cached __pthread_self()->tid set by __init_tls via
+ * SYS_set_tid_address (every ELF runs __init_tls at startup), equivalent to
+ * the former per-call sys_gettid() here. It is declared in musl's <unistd.h>
+ * under _GNU_SOURCE. */
 
 extern "C" pid_t fork(void) {
   int64_t r = sys_fork();
@@ -74,12 +73,6 @@ extern "C" pid_t waitpid(pid_t pid, int *status, int options) {
 // musl's wrappers route through the same SYS_mmap(9)/SYS_munmap(11)/
 // SYS_mprotect(10)/SYS_mremap(25) the old hand-written ones used (mmap.c
 // additionally fixes EPERM→ENOMEM and validates offset alignment).
-// memfd_create is RETAINED here: musl src/mman has no memfd_create (it lives
-// in musl src/linux/), and pulling that in would drag the whole src/linux glob.
-
-extern "C" int memfd_create(const char *name, unsigned int flags) {
-  int fd = sys_memfd_create(name, flags);
-  if (fd < 0)
-    return -1;
-  return fd;
-}
+// memfd_create now comes from musl src/linux/memfd_create.c (musl_linux_objs,
+// routes to SYS_memfd_create). The musl mman module does NOT compile it
+// (mman.cmake:27) — it lives in src/linux, now pulled in by this batch.

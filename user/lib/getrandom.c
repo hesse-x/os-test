@@ -4,29 +4,20 @@
  * SPDX-License-Identifier: MIT
  */
 
-// getrandom/getentropy/arc4random_buf/arc4random_uniform 封装
-//
-// 内核 SYS_GETRANDOM 语义对齐 Linux getrandom(2)：永不阻塞、
-// 信号短读以返回字节数形式体现（不返回 EAGAIN/EINTR）。
+// getentropy + arc4random_* (BSD extensions) — getrandom itself comes from
+// musl src/linux/getrandom.c (musl_linux_objs), so it is no longer defined
+// here. arc4random_buf/arc4random_uniform are BSD APIs musl does not ship;
+// they stay (todo.md:349). getentropy is also kept here rather than pulling
+// musl src/misc/getentropy.c into a new module: it is a trivial getrandom
+// loop with a 256-byte cap, and getrandom now resolves from the musl object
+// in the same archive at link time.
 
 #include <errno.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
-#include <sys/random.h>
-#include <xos/errno.h>
-#include <xos/syscall_asm.h>
-#include <xos/syscall_nums.h>
 
-ssize_t getrandom(void *buf, size_t buflen, unsigned int flags) {
-  int64_t r = __syscall3(SYS_GETRANDOM, (int64_t)(uintptr_t)buf,
-                         (int64_t)buflen, (int64_t)flags);
-  if (r < 0) {
-    errno = (int)(-r);
-    return -1;
-  }
-  return (ssize_t)r;
-}
+#include <sys/random.h>
+#include <sys/types.h>
 
 int getentropy(void *buf, size_t buflen) {
   if (buflen > 256) {
