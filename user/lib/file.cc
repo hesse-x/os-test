@@ -33,16 +33,12 @@
 #include <sys/cdefs.h>
 #include <sys/ioctl.h>
 #include <sys/ipc.h>
-#include <sys/poll.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <xos/errno.h>
 #include <xos/ioctl.h>
-#include <xos/socket.h>
 #include <xos/statx.h>
-#include <xos/syscall_asm.h>
-#include <xos/syscall_nums.h>
 
 // ===================== Working directory =====================
 // chdir / getcwd are provided by musl src/unistd/*.c (musl_unistd_objs). The
@@ -97,26 +93,7 @@ int ipc_msg_fd(int fd, const void *msg_buf, size_t msg_len, void *reply_buf,
   return sys_msg(target_pid, (void *)msg_buf, msg_len, reply_buf, reply_len);
 }
 
-// poll — wait for events (kernel-implemented via SYS_POLL)
-int poll(struct pollfd *fds, nfds_t nfds, int timeout_ms) {
-  int64_t ret = __syscall3(SYS_POLL, (int64_t)(uintptr_t)fds, (int64_t)nfds,
-                           (int64_t)timeout_ms);
-  if (ret < 0) {
-    errno = (int)(-ret);
-    return -1;
-  }
-  return (int)ret;
-}
-
-// ppoll — poll with a timespec timeout and an atomic signal-mask swap.
-// Thin wrapper over the kernel's SYS_PPOLL (sys_ppoll in socket.c), which
-// already does the timespec→ms conversion and the temporary sigmask
-// replacement. libwayland-client dlopen's this symbol, so it must be
-// exported from libc.so even though poll(2) above stays on SYS_POLL.
-int ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout_ts,
-          const sigset_t *sigmask) {
-  return sys_ppoll(fds, nfds, timeout_ts, sigmask, sizeof(sigset_t));
-}
+// poll/ppoll are provided by musl src/select/{poll,ppoll}.c.
 
 // dup/dup2 are provided by musl src/unistd (musl_unistd_objs).
 

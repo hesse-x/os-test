@@ -89,6 +89,25 @@ void test_poll_timeout(void) {
   close(fd[1]);
 }
 
+/* ppoll is the musl wrapper over SYS_PPOLL; cover both timeout and readiness.
+ */
+void test_ppoll_timeout_and_ready(void) {
+  int fd[2];
+  pipe(fd);
+
+  struct pollfd pfd = {.fd = fd[0], .events = POLLIN, .revents = 0};
+  const struct timespec timeout = {.tv_sec = 0, .tv_nsec = 0};
+  TEST_ASSERT_EQUAL_INT(0, ppoll(&pfd, 1, &timeout, NULL));
+
+  write(fd[1], "x", 1);
+  const struct timespec wait = {.tv_sec = 1, .tv_nsec = 0};
+  TEST_ASSERT_EQUAL_INT(1, ppoll(&pfd, 1, &wait, NULL));
+  TEST_ASSERT_TRUE(pfd.revents & POLLIN);
+
+  close(fd[0]);
+  close(fd[1]);
+}
+
 /* 5. poll on socketpair */
 void test_poll_socketpair(void) {
   int sv[2];
@@ -284,6 +303,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_poll_pipe_writable);
   RUN_TEST(test_poll_pipe_empty);
   RUN_TEST(test_poll_timeout);
+  RUN_TEST(test_ppoll_timeout_and_ready);
   RUN_TEST(test_poll_socketpair);
   RUN_TEST(test_poll_multiple_fd);
   RUN_TEST(test_poll_wakeup);
