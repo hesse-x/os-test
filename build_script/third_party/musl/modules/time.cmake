@@ -32,7 +32,7 @@
 #   proven by the unistd cancellable wrappers).
 #   utimensat — musl_unistd_objs glob already builds src/unistd/utimensat.c;
 #     musl utime.c calls it.
-#   snprintf — user/lib/stdio.cc (__asctime.c uses it).
+#   snprintf — musl_stdio_objs (stdio 全量迁移后接管；__asctime.c uses it).
 #
 # __nl_langinfo_l/nl_langinfo (src/locale/langinfo.c): __asctime.c/strftime.c/
 # strptime.c pull weekday/month names via __nl_langinfo_l(CURRENT_LOCALE).

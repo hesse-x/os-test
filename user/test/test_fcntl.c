@@ -19,6 +19,7 @@
 #include <sys/ioctl.h>
 #include <sys/process.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <xos/errno.h>
 
@@ -625,6 +626,42 @@ void test_fcntl_setown_ex(void) {
   close(fd[1]);
 }
 
+static void check_positional_read(const char *path) {
+  int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+  TEST_ASSERT_TRUE(fd >= 0);
+  TEST_ASSERT_EQUAL_INT(10, write(fd, "ABCDEFGHIJ", 10));
+  TEST_ASSERT_EQUAL_INT(2, lseek(fd, 2, SEEK_SET));
+
+  char one[4] = {0};
+  TEST_ASSERT_EQUAL_INT(3, pread(fd, one, 3, 5));
+  TEST_ASSERT_EQUAL_STRING("FGH", one);
+  TEST_ASSERT_EQUAL_INT(2, lseek(fd, 0, SEEK_CUR));
+
+  char first[3] = {0};
+  char second[4] = {0};
+  struct iovec iov[] = {
+      {.iov_base = first, .iov_len = 2},
+      {.iov_base = second, .iov_len = 3},
+  };
+  TEST_ASSERT_EQUAL_INT(5, preadv(fd, iov, 2, 3));
+  TEST_ASSERT_EQUAL_STRING("DE", first);
+  TEST_ASSERT_EQUAL_STRING("FGH", second);
+  TEST_ASSERT_EQUAL_INT(2, lseek(fd, 0, SEEK_CUR));
+
+  errno = 0;
+  TEST_ASSERT_EQUAL_INT(-1, pread(fd, one, 1, -1));
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  errno = 0;
+  TEST_ASSERT_EQUAL_INT(-1, preadv(fd, iov, 2, -1));
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  close(fd);
+}
+
+void test_pread_and_preadv_preserve_offset(void) {
+  check_positional_read("/local/preadv_test.txt");
+  check_positional_read("/run/preadv_test.txt");
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -662,5 +699,6 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_fcntl_getown_setown);
   RUN_TEST(test_fcntl_getsig_setsig);
   RUN_TEST(test_fcntl_setown_ex);
+  RUN_TEST(test_pread_and_preadv_preserve_offset);
   return UNITY_END();
 }

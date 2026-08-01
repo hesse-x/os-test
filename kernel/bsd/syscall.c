@@ -4501,17 +4501,54 @@ int64_t sys_gettimeofday(int64_t arg1, int64_t arg2, int64_t unused1,
 // ===================== Simple kernel implementations (B group)
 // =====================
 
+static int64_t file_pread(xtask *proc, struct file *f, void __user *buf,
+                          size_t count, uint64_t offset) {
+  if (f->type != FD_REGULAR) {
+    return -ESPIPE;
+  }
+  if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR)) {
+    return -EBADF;
+  }
+  struct inode *ip = f->inode;
+  if (!ip) {
+    return -EBADF;
+  }
+  if (count == 0)
+    return 0;
+  if (!buf)
+    return -EFAULT;
+  uint64_t ptr_start = (__force uint64_t)buf;
+  uint64_t ptr_end = ptr_start + count;
+  if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
+      ptr_end > KERNEL_VMA_BOUNDARY)
+    return -EFAULT;
+
+  if (f->f_op)
+    return f->f_op->read_at
+               ? f->f_op->read_at(proc, f, (void __force *)buf, count, offset)
+               : -ESPIPE;
+
+  if (offset >= ip->size) {
+    return 0;
+  }
+  size_t avail = ip->size - (size_t)offset;
+  if (count > avail)
+    count = avail;
+  int nread = fat32_read(ip, offset, (void __force *)buf, count);
+  return (int64_t)nread;
+}
+
 // B1: pread64(fd, buf, count, offset) — read at specified offset without
 // changing file offset
 int64_t sys_pread64(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                     int64_t unused1, int64_t unused2) {
+  (void)unused1;
+  (void)unused2;
   int fd = (int)arg1;
-  void __user *buf = (void __user *__force)arg2;
-  size_t count = (size_t)arg3;
-  uint64_t offset = (uint64_t)arg4;
-
   if (fd < 0 || fd >= MAX_FD)
     return -EBADF;
+  if (arg4 < 0)
+    return -EINVAL;
 
   xtask *proc = current_task;
   rcu_read_lock();
@@ -4523,49 +4560,83 @@ int64_t sys_pread64(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   file_get(f);
   rcu_read_unlock();
 
-  int64_t ret;
-  if (f->type != FD_REGULAR) {
-    ret = -ESPIPE;
-    goto out;
-  }
-  if ((f->flags & O_WRONLY) && !(f->flags & O_RDWR)) {
-    ret = -EBADF;
-    goto out;
-  }
-  struct inode *ip = f->inode;
-  if (!ip) {
-    ret = -EBADF;
-    goto out;
-  }
-  if (!buf) {
-    ret = -EFAULT;
-    goto out;
-  }
-  uint64_t ptr_start = (__force uint64_t)buf;
-  uint64_t ptr_end = ptr_start + count;
-  if (ptr_end < ptr_start || ptr_start >= KERNEL_VMA_BOUNDARY ||
-      ptr_end > KERNEL_VMA_BOUNDARY) {
-    ret = -EFAULT;
-    goto out;
-  }
+  int64_t ret = file_pread(proc, f, (void __user *__force)arg2, (size_t)arg3,
+                           (uint64_t)arg4);
 
-  if (offset >= ip->size) {
-    ret = 0;
-    goto out;
-  }
-  size_t avail = ip->size - (size_t)offset;
-  if (count > avail)
-    count = avail;
-  int nread = fat32_read(ip, offset, (void __force *)buf, count);
-  if (nread < 0) {
-    ret = -(int64_t)nread;
-    goto out;
-  }
-  ret = (int64_t)nread;
-
-out:
   file_put(f);
   return ret;
+}
+
+int64_t sys_preadv(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                   int64_t unused1, int64_t unused2) {
+  (void)unused1;
+  (void)unused2;
+  int fd = (int)arg1;
+  const struct iovec __user *uiov = (const struct iovec __user *__force)arg2;
+  int iovcnt = (int)arg3;
+  int64_t offset = arg4;
+
+  if (fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+  if (iovcnt < 0 || iovcnt > 1024 || offset < 0)
+    return -EINVAL;
+  if (iovcnt == 0)
+    return 0;
+  if (!uiov)
+    return -EFAULT;
+
+  struct iovec *kiov =
+      (struct iovec *)kmalloc(sizeof(struct iovec) * (size_t)iovcnt);
+  if (!kiov)
+    return -ENOMEM;
+  if (copy_from_user(kiov, uiov, sizeof(struct iovec) * (size_t)iovcnt)) {
+    kfree(kiov);
+    return -EFAULT;
+  }
+
+  uint64_t requested = 0;
+  for (int i = 0; i < iovcnt; i++) {
+    if (kiov[i].iov_len > (uint64_t)INT64_MAX - requested) {
+      kfree(kiov);
+      return -EINVAL;
+    }
+    requested += kiov[i].iov_len;
+  }
+  if ((uint64_t)offset > (uint64_t)INT64_MAX - requested) {
+    kfree(kiov);
+    return -EINVAL;
+  }
+
+  xtask *proc = current_task;
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (!f) {
+    rcu_read_unlock();
+    kfree(kiov);
+    return -EBADF;
+  }
+  file_get(f);
+  rcu_read_unlock();
+
+  int64_t total = 0;
+  for (int i = 0; i < iovcnt; i++) {
+    if (kiov[i].iov_len == 0)
+      continue;
+    int64_t r = file_pread(proc, f, kiov[i].iov_base, kiov[i].iov_len,
+                           (uint64_t)offset + (uint64_t)total);
+    if (r < 0) {
+      if (total == 0)
+        total = r;
+      break;
+    }
+    total += r;
+    if ((size_t)r < kiov[i].iov_len)
+      break;
+  }
+
+  file_put(f);
+  kfree(kiov);
+  return total;
 }
 
 // B2: pwrite64(fd, buf, count, offset) — write at specified offset without
@@ -6601,6 +6672,8 @@ int64_t syscall_dispatch(trapframe *tf) {
   // Simple kernel implementations (B group)
   case SYS_PREAD64:
     return sys_pread64(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_PREADV:
+    return sys_preadv(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_PWRITE64:
     return sys_pwrite64(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_READV:

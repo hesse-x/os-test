@@ -16,6 +16,8 @@ struct xtask;
 
 struct file_operations {
   ssize_t (*read)(struct xtask *proc, struct file *f, void *buf, size_t count);
+  ssize_t (*read_at)(struct xtask *proc, struct file *f, void *buf,
+                     size_t count, uint64_t offset);
   ssize_t (*write)(struct xtask *proc, struct file *f, const void *buf,
                    size_t count);
   long (*ioctl)(struct xtask *proc, struct file *f, uint32_t cmd, void *arg);

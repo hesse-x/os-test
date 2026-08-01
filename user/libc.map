@@ -93,7 +93,7 @@ global:
 
     /* <unistd.h> */
     access; faccessat; close; dup; dup2; _exit; ftruncate; getcwd; getpid; gettid;
-    ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; pipe2; read;
+    ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; pipe2; pread; read;
     rmdir; sleep; ttyname; ttyname_r; unlink; unlinkat; rename; renameat;
     usleep; write;
     sendfile; /* <sys/sendfile.h> — musl src/linux/sendfile.c, thin SYS_sendfile wrapper. */
@@ -118,8 +118,8 @@ global:
     /* <sys/file.h> */
     flock;
 
-    /* <sys/uio.h> — musl src/unistd/{readv,writev}.c, compiled but hidden by local:* */
-    readv; writev;
+    /* <sys/uio.h> */
+    preadv; readv; writev;
 
     /* <sys/socket.h> */
     accept4;

@@ -189,6 +189,7 @@ int64_t sys_prctl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // Simple kernel implementations (B group)
 int64_t sys_pread64(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_preadv(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_pwrite64(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_readv(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_writev(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);

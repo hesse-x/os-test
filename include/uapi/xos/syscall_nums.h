@@ -209,6 +209,7 @@
 #define SYS_PWRITE64 18
 #define SYS_READV 19
 #define SYS_WRITEV 20
+#define SYS_PREADV 295
 #define SYS_UNAME 63
 #define SYS_STATFS                                                             \
   137 // filesystem stats (capacity fields 0 today; see todo.md)
