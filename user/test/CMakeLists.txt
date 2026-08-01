@@ -214,6 +214,10 @@ add_user_dyn_elf(test_locale C SOURCES test_locale.c LINK_LIBS c STATIC_LIBS uni
 # POSIX regular expressions + shell-pattern matching from musl src/regex.
 add_user_dyn_elf(test_regex C SOURCES test_regex.c LINK_LIBS c STATIC_LIBS unity)
 
+# getpwnam/getpwuid/getgrnam/getgrgid + _r + getpwent — musl src/passwd. Writes
+# /etc/passwd + /etc/group itself (kernel ships neither /etc nor the files).
+add_user_dyn_elf(test_passwd C SOURCES test_passwd.c LINK_LIBS c STATIC_LIBS unity)
+
 # Layer 20: getrandom (/dev/(u)random + libc wrapper)
 add_user_dyn_elf(getrandom C SOURCES test_getrandom.c LINK_LIBS c STATIC_LIBS unity)
 

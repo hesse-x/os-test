@@ -376,7 +376,7 @@ exclude 名单（10 文件，防 multi-define / 拖依赖）：
 - `rename.c` — 已在 `musl_unistd_objs`（src/stdio/rename.c 编入 unistd）。
 - `dprintf.c`/`vdprintf.c` — **不 exclude**。loader 直接解析到 musl 原生版（走 vfprintf）；所有 loader 调用点都在 `reloc_all(&ldso)`（`dynlink.c:1432`）之后，PLT 已就绪，无需 boot-safe shim（已验证：boot + 多次 exec ld.so 正常）。
 - `popen.c`/`pclose.c` — 需 `posix_spawn`（`src/process` 重依赖），无消费方，本期排除。
-- `tmpfile.c`/`tmpnam.c`/`tempnam.c` — 需 `__randname`→`__clock_gettime`，~~time 模块未迁~~ time 已迁 musl（见上「time 全量迁移」，`__clock_gettime` 由 musl `clock_gettime.c` 提供，同 stdlib `mkstemp` 阻断已消除）；这三源本期未纳入纯属迁移范围未含，解锁即为补编。
+- ~~`tmpfile.c`/`tmpnam.c`/`tempnam.c` — 需 `__randname`→`__clock_gettime`，~~time 已迁 musl（见上「time 全量迁移」，`__clock_gettime` 由 musl `clock_gettime.c` 提供，同 stdlib `mkstemp` 阻断已消除）~~；这三源本期未纳入纯属迁移范围未含，解锁即为补编。~~ ✅ **已落地**：从 `musl_stdio_objs` 的 REMOVE_ITEM 移出（`modules/stdio.cmake`），`tmpfile`/`tmpnam`/`tempnam` 编入并在 `libc.map` `<stdio.h>` 块导出；`tmpnam`/`tempnam` 走 `__randname`+`SYS_readlink(89)`/`SYS_readlinkat(267)`（内核 `sys_readlink`/`sys_readlinkat` 已 dispatch）探测唯一名。`test_tmpfile`（6 用例：tmpfile 写回读/空 EOF、tmpnam NULL/buf、tempnam 默认/自定义）经 test_runner 验证通过。注：三个函数硬编码 `/tmp`，而内核不预创 `/tmp`（`vfs.c` 只建 `/dev`/`/sys`/`/proc`/`/run`），测试用 `mkdir("/tmp")` 兜底自洽。
 
 `libc.map` `<stdio.h>` 块扩至 81 符号（全窄字符 stdio 家族 + `*_unlocked` + `fseeko`/`ftello` + `stdin`/`stdout`/`stderr` OBJECT）；不导出 `__isoc99_*`/`_IO_*`/`__getdelim`/`*_used`（内部 `weak_alias`，头文件未声明，无消费方引用，`local: *;` 兜底隐藏）；不导出宽字符 w* 家族（`fwprintf`/`fgetwc`/`wscanf`/... 定义在 `musl_stdio_objs` 但声明在 `<wchar.h>`，本 OS 未发布 `<wchar.h>`，无消费方可引用，隐藏以保持 ABI 最小）；不导出 `dprintf`/`vdprintf`（musl 原生 stdio 实现，loader 解析到它们但无 app 消费方需导出，`local: *;` 隐藏）；`rename` 留在 unistd 块不重列。
 
@@ -388,9 +388,29 @@ exclude 名单（10 文件，防 multi-define / 拖依赖）：
 **剩余缺口（迁移不解决/新引入，非 bug）**：
 - **stdout 串口无缓冲**（行为变化）：musl `__stdout_write` 探 `TIOCGWINSZ`，`/dev/serial`（init dup2 成 fd 0/1/2）只答 `TCGETS`、`TIOCGWINSZ` 返 `-ENOTTY` → stdout `lbf=-1` 无缓冲（每字符一次 `sys_write`）。PTY 答 TIOCGWINSZ 保持行缓冲。旧手写 stdio 硬编码 `_IOLBF` 才有行缓冲。功能不损（exit 时 `__stdio_exit` 仍 flush 全部流）。若需恢复行缓冲：给 `kernel/driver/serial.c` ioctl 加 TIOCGWINSZ 分支返默认 winsize（即 todo.md:309/331③"串口补 TIOCGWINSZ"同一内核改动）。
 - **popen/pclose 未采用**：需 `posix_spawn`，本期排除，无消费方。
-- **tmpfile/tmpnam/tempnam 未采用**：需 `__randname`→`__clock_gettime`，time 已迁 musl（见上「time 全量迁移」），阻断已消除；本期未纳入纯属迁移范围未含，解锁即为补编（同 stdlib `mkstemp`，:344 同源）。
+- ~~**tmpfile/tmpnam/tempnam 未采用**：需 `__randname`→`__clock_gettime`，time 已迁 musl（见上「time 全量迁移」），阻断已消除；本期未纳入纯属迁移范围未含，解锁即为补编（同 stdlib `mkstemp`，:344 同源）。~~ ✅ 已落地（见上 stdio 缺口块 :379）。
 - **loader dprintf/vdprintf 已归一**：~~shim 的 boot-safe raw-syscall 版保留，musl `dprintf.c`/`vdprintf.c` 从 `musl_stdio_objs` exclude~~ ✅ 已改——shim 的 `dprintf`/`vdprintf` 已删，`dprintf.c`/`vdprintf.c` 不再 exclude，loader 直接用 musl 原生版（走 vfprintf）。所有 loader 调用点在 `reloc_all(&ldso)`（`dynlink.c:1432`）后，PLT 已就绪，原生版安全（boot + 多次 exec 验证通过）。公开 libc 仍无 `dprintf`/`vdprintf` 导出。
 - ~~**宽字符 w* 系列已排除**（非"顺带纳入"）~~ ✅ **已纳入**（随「wchar/wctype/uchar 全量迁移」，见下节）：23 个 w* 文件（`vfwprintf`/`vfwscanf`/`fgetwc`/`fputwc`/`fputws`/`fgetws`/`ungetwc`/`fwide`/`fwprintf`/`fwscanf`/`wprintf`/`wscanf`/`swprintf`/`swscanf`/`v{w,sw}{printf,scanf}`/`getwc`/`getwchar`/`putwc`/`putwchar`/`open_wmemstream`）已从 `musl_stdio_objs` 的 REMOVE_ITEM 移出，编进 libc 并在 libc.map `<wchar.h>` 块导出。它们引用的 `isw*`/`wcsnlen`/`btowc`/`wctob` 由 `musl_wchar_objs` 提供、`__c_locale`/`__c_dot_utf8_locale` 由 `musl_time_objs` 提供，依赖已就绪故旧"运行期重定位失败：`iswspace: symbol not found`" blocker 彻底消解。`<wchar.h>` 已发布，故 wide-stdio 家族现**真可用**（不再 declare-only）。`*_unlocked`/`__isoc99_*` 内部别名仍 hidden（同窄 stdio 纪律）。multibyte 窄路径最小集（`wctomb`/`wcrtomb`/`mbrtowc`/`mbsinit`/`internal` 五文件，供 vfprintf `%ls`/vfscanf `%ls` link-time 引用）不变。
+
+### `src/passwd` 批次迁移到 musl（getpwnam/getpwuid/getgrnam/getgrgid + _r + ent 系列 + shadow + getgrouplist）
+
+passwd 数据库模块（`getpwnam`/`getpwuid`/`getgrnam`/`getgrgid` 及 `_r` 变体、`getpwent`/`getgrent` + `set`/`end`、shadow 系列 `getspnam`/`getspent` + `set`/`end`、`fget*`/`put*`、`lckpwdf`/`ulckpwdf`、`getgrouplist`）切到 musl 上游（`musl_passwd_objs`，`add_musl_lib` 单 -fPIC OBJECT lib 同时喂 libc.a + libc.so，同 stdio/time 模式）。源清单：`file(GLOB src/passwd/*.c)` 整目录，**无 exclude**（22 条目 = 20 `.c` + `pwf.h` + `nscd.h`）。
+
+repo 此前**完全无** `pwd.h`/`grp.h` 与任何 `getpw*`/`getgr*` 实现——这是净新增迁移，不替换既有代码、不退役任何 shim。头文件 `pwd.h`/`grp.h`/`shadow.h` 直接落 musl `include/`，已在用户程序 `-I` 路径（`MUSL_INCLUDE_FLAGS`，`user_rules.cmake:26`），**无需垫片**（同 `sched.h`/`fnmatch.h`/`regex.h`：repo 不提供、直接解析到 musl 头）。
+
+源码核实（无新 syscall / 无新内核机制）：
+- 全部走 `fopen("/etc/passwd"|"group"|"shadow")` + `getline` 解析冒号字段，**miss 后回退 nscd**（`__nscd_query` → AF_UNIX `connect("/var/run/nscd/socket")` + `sendmsg`），二者皆失败时返回 `NULL`+`errno=ENOENT`（正常 "not found"）。不直接发任何 syscall。
+- 依赖全部已迁：`fopen`/`getline`/`fread`/`fdopen`（stdio）、`realloc`/`calloc`/`free`（malloc/stdlib）、`pthread_setcancelstate`（pthread）、`socket`/`connect`/`sendmsg` PF_UNIX（socket）、`bswap_32`（string）。`getspnam_r.c` 另用 `open`/`fstat`（unistd/fcntl）+ 同文件 `__parsespent`。
+- `pwf.h`/`nscd.h` 是 musl 内部头，由 `add_musl_lib` 的 `src/internal`+`src/include` 路径解析。
+
+`libc.map` 新增 `<pwd.h>`+`<grp.h>`+`<shadow.h>` 块导出：`getpwnam`/`getpwuid`/`getpwnam_r`/`getpwuid_r`/`getpwent`/`setpwent`/`endpwent`、`getgrnam`/`getgrgid`/`getgrnam_r`/`getgrgid_r`/`getgrent`/`setgrent`/`endgrent`、`getgrouplist`、`getspnam`/`getspnam_r`/`getspent`/`setspent`/`endspent`、`fgetpwent`/`putpwent`/`fgetgrent`/`putgrent`/`fgetspent`/`putspent`、`lckpwdf`/`ulckpwdf`。
+
+测试 `test_passwd`（8 用例：getpwnam("root") 字段、getpwuid(1000) gecos、getpwnam 缺失 errno=0、getpwnam_r 成功/ERANGE、getgrnam("users") 成员表、getgrgid(0) 空成员、getpwent 顺序枚举）。
+
+**已知缺口（迁移不解决/新引入，非 bug）**：
+- **`/etc/passwd`+`/etc/group`+`/etc/shadow` 不在 disk.img**：musl `getpwnam` 硬编码读 `/etc/passwd`（路径不可改）。内核 `vfs.c` 只建 `/dev`/`/sys`/`/proc`/`/run`，不预创 `/etc`，磁盘也无这些文件 → 当前所有 lookup 恒返回 not-found（`fopen` ENOENT → nscd connect ENOENT → `NULL`+`errno=ENOENT`）。**功能正确**（正常 not-found 语义，非崩溃），只是要等磁盘上有真实 `/etc/passwd`/`group` 才返回数据。同 [tmp-dir-not-precreated] 模式——`test_passwd` 自建 `/etc` + 写文件验证解析逻辑（`mkdir("/etc")` 兜底，`fopen("w")` 覆写保证幂等）。若要让 OS 运行态返回真实数据：`mkdisk.sh` mcopy 预置 `/etc/passwd`+`/etc/group` 到根分区（独立子任务，本批不做）。
+- **`initgroups` 仍排除**（在 `src/misc`，非 `src/passwd`，本 glob 不会带入）：`misc.cmake` 既有规则排除它——依赖 `getgrouplist`（本批得）+ `setgroups`（`src/linux/setgroups.c` 走 `__synccall(SYS_setgroups)`），而**内核无 `SYS_setgroups` case**（`getgroups` 内核有，`setgroups` 无，见上表 :314 "musl 声明但内核无 syscall/无实现"）。`getgrouplist` 本身无 syscall（纯读文件 + nscd），故本批安全编入并导出；`initgroups` 仍留 excluded，待内核加 `SYS_setgroups` 后随 `src/misc` 批次补入。
+- **`glob.c`（GLOB_TILDE）暂不解锁**：`regex.cmake` 当前 `REMOVE_ITEM glob.c`，`libc.map:131` 注释明确写 "until the passwd database APIs required by GLOB_TILDE are migrated"。`glob.c:206-207` 的 GLOB_TILDE 正用 `getpwnam_r`/`getpwuid_r`（本批已得）。**本批刻意不动 regex.cmake / glob.c**——迁移爆炸半径最小化（passwd 模块独立编译/链接/测试），`glob.c` 解锁 + 导出 `glob`/`globfree` 留作下一轮（届时需验证 GLOB_TILDE 真实执行 `getpwnam_r` 的解析路径）。`libc.map:131` 注释保留不动。
 
 ### `src/linux` 批次迁移到 musl（退役 io_multiplex.cc / sys_socket.cc / musl_missing.c 的 syscall 薄封装）
 

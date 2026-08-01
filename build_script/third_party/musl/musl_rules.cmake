@@ -165,7 +165,7 @@ add_custom_target(musl_libc ALL
             ${MUSL_LIB_DIR}/crti.o
             ${MUSL_LIB_DIR}/crtn.o)
 
-# ===================== libc OBJECT libs (16 modules, fed into libc.a/libc.so) =====================
+# ===================== libc OBJECT libs (17 modules, fed into libc.a/libc.so) =====================
 # Each module file defines one or two musl OBJECT sub-libraries (source list +
 # exclude + add_musl_lib / raw add_library), moved out of user/CMakeLists.txt.
 # Order matches the original inline layout (unistd → time); CMake resolves
@@ -173,7 +173,7 @@ add_custom_target(musl_libc ALL
 # but musl_generate_headers() above MUST run before any add_musl_lib here.
 set(_musl_modules
     unistd fcntl socket select dl linux dirent resource process mman
-    stdio multibyte wchar pthread signal string ctype setjmp math stdlib malloc time locale regex misc legacy)
+    stdio multibyte wchar pthread signal string ctype setjmp math stdlib malloc time locale regex passwd misc legacy)
 foreach(_m ${_musl_modules})
     include(${CMAKE_CURRENT_LIST_DIR}/modules/${_m}.cmake)
 endforeach()

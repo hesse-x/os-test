@@ -128,10 +128,25 @@ global:
     basename;
     dirname;
 
-    /* <regex.h> + <fnmatch.h> - musl src/regex. glob/globfree are excluded
-     * until the passwd database APIs required by GLOB_TILDE are migrated. */
+    /* <regex.h> + <fnmatch.h> - musl src/regex. glob/globfree stay excluded:
+     * GLOB_TILDE needs getpwnam_r/getpwuid_r, now migrated (src/passwd module),
+     * but glob.c is deliberately left for a follow-up so the passwd migration
+     * ships/testable in isolation (see passwd section in doc/design/todo.md). */
     regcomp; regexec; regerror; regfree;
     fnmatch;
+
+    /* <pwd.h> + <grp.h> + <shadow.h> - musl src/passwd (passwd_worklist).
+     * Whole-directory glob; reads /etc/passwd /etc/group /etc/shadow via stdio
+     * + nscd AF_UNIX fallback (no syscalls of its own). getgrouplist here;
+     * initgroups stays in src/misc (excluded — needs SYS_setgroups). */
+    getpwnam; getpwuid; getpwnam_r; getpwuid_r;
+    getpwent; setpwent; endpwent;
+    getgrnam; getgrgid; getgrnam_r; getgrgid_r;
+    getgrent; setgrent; endgrent;
+    getgrouplist;
+    getspnam; getspnam_r; getspent; setspent; endspent;
+    fgetpwent; putpwent; fgetgrent; putgrent; fgetspent; putspent;
+    lckpwdf; ulckpwdf;
 
     /* <strings.h> */
     ffs; strcasecmp; strncasecmp;

@@ -58,6 +58,7 @@ static struct test_entry tests[] = {
     {"test_console", "/test/test_console.elf"},
     {"test_locale", "/test/test_locale.elf"},
     {"test_regex", "/test/test_regex.elf"},
+    {"test_passwd", "/test/test_passwd.elf"},
 #if defined(TEST)
     {"egl_smoke", "/test/test_egl_smoke.elf"},
 #endif

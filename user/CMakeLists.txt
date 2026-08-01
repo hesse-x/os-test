@@ -83,6 +83,7 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_multibyte_objs>
                $<TARGET_OBJECTS:musl_wchar_objs>
                $<TARGET_OBJECTS:musl_regex_objs>
+               $<TARGET_OBJECTS:musl_passwd_objs>
                $<TARGET_OBJECTS:musl_misc_objs>
                $<TARGET_OBJECTS:musl_legacy_objs>
                $<TARGET_OBJECTS:compiler_rt_int128>
@@ -131,6 +132,7 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_multibyte_objs>
                $<TARGET_OBJECTS:musl_wchar_objs>
                $<TARGET_OBJECTS:musl_regex_objs>
+               $<TARGET_OBJECTS:musl_passwd_objs>
                $<TARGET_OBJECTS:musl_misc_objs>
                $<TARGET_OBJECTS:musl_legacy_objs>
                $<TARGET_OBJECTS:compiler_rt_int128>

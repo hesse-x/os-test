@@ -27,11 +27,10 @@
 #   getresuid.c    SYS_getresuid (#118, no case in bsd/syscall.c → stub)
 #   getresgid.c    SYS_getresgid (#120, stub)
 #   setdomainname.c SYS_setdomainname (#171, stub)
-#   initgroups.c   needs getgrouplist (src/passwd/, not compiled) + setgroups
-#                 (src/linux/, not compiled) → link failure. (setdomainname is
-#                 the only one of these with no kernel case; the resuid/resgid
-#                 stubs are ENOSYS leaks rather than link errors, but excluded
-#                 for the same reason as linux.cmake's multi-path rule.)
+#   initgroups.c   needs getgrouplist (now compiled by the passwd module) +
+#                 setgroups (src/linux/, routes to SYS_setgroups which the kernel
+#                 does NOT implement → ENOSYS leak). Still excluded; revisit once
+#                 SYS_setgroups lands.
 #
 # INCLUDED (24): a64l fmtmsg forkpty getauxval get_current_dir_name getdomainname
 #   gethostid getopt getopt_long getsubopt ioctl issetugid lockf login_tty mntent
