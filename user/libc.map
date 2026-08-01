@@ -489,14 +489,6 @@ global:
      * ABI symbol, exported because cross-built C++ runtimes link against it. */
     __tls_get_addr;
 
-    /* compiler-rt int128 runtime — vendored third_party/llvm-project/compiler-rt
-     * /lib/builtins/{divti3,udivmodti4,udivti3,umodti3,muloti4}.c
-     * (modules/compiler_rt.cmake). clang lowers __int128 div/mul to these; musl
-     * does not provide them. libc++ <filesystem> (operations.cpp timestamps,
-     * int128_builtins.cpp __muloti4) references them. Folded into libc so every
-     * static/dynamic consumer resolves them via -lc with no extra -l. */
-    __divti3; __udivti3; __umodti3; __udivmodti4; __muloti4;
-
     /* <threads.h> — C11 threads. musl src/thread/{thrd,mtx,cnd,tss,call_once}_*.c
      * are pulled in by the src/thread/*.c glob in pthread.cmake (they alias the
      * pthread implementation: thrd_current/tss_get/thrd_detach are weak_alias of

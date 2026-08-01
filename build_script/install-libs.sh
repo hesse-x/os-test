@@ -8,6 +8,7 @@
 # What gets published:
 #   build/libc.a      → $DEST/libc.a      (libc static)
 #   build/libc.so     → $DEST/libc.so     (libc shared)
+#   build/libclang_rt.so → $DEST/libclang_rt.so (compiler-rt int128 runtime)
 #   build/libm.a      → $DEST/libm.a      (libm static, if present)
 #   build/libm.so     → $DEST/libm.so     (libm shared, if present)
 #   build/libdrm.a    → $DEST/libdrm.a    (libdrm static)
@@ -49,6 +50,7 @@ mkdir -p "$DEST"
 mandatory=(
   "libc.a:libc.a"
   "libc.so:libc.so"
+  "libclang_rt.so:libclang_rt.so"
   "libc.so:ld-musl-x86_64.so.1"
   "libdrm.a:libdrm.a"
 )

@@ -82,7 +82,6 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_multibyte_objs>
                $<TARGET_OBJECTS:musl_wchar_objs>
                $<TARGET_OBJECTS:musl_regex_objs>
-               $<TARGET_OBJECTS:compiler_rt_int128>
     C
     FLAGS "-fno-pie -DDYNAMIC=0"
     IMAGE_PATH usr/lib/libc.a
@@ -127,7 +126,6 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_multibyte_objs>
                $<TARGET_OBJECTS:musl_wchar_objs>
                $<TARGET_OBJECTS:musl_regex_objs>
-               $<TARGET_OBJECTS:compiler_rt_int128>
     C
     FLAGS "-fPIC -DDYNAMIC=1"
     SHARED
@@ -142,6 +140,17 @@ add_dependencies(c_so musl_libc)
 # /lib/libc.so (DT_NEEDED soname target); this extra entry ships the SAME
 # artifact to /lib/ld-musl-x86_64.so.1 (PT_INTERP path the kernel opens).
 os_image_path(c_so libc.so lib/ld-musl-x86_64.so.1 PARTITION 2)
+
+# compiler-rt's __int128 arithmetic helpers are an implementation runtime, not
+# libc ABI. libc++ links this DSO explicitly when it needs them.
+add_user_lib(clang_rt
+    SOURCES
+    EXTRA_OBJS $<TARGET_OBJECTS:compiler_rt_int128>
+    C
+    FLAGS "-fPIC"
+    SHARED
+    OUTPUT_NAME clang_rt
+)
 
 # libm.so — empty stub ELF. No SOURCES/EXTRA_OBJS → the link emits a .so with
 # only a SONAME and no dynsym exports. Shipped to lib/libm.so so -lm resolves
@@ -249,17 +258,17 @@ if(LIBCXX)
                 -o ${LIBCXX_SMOKE_ELF}
                 ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o
                 ${LIBCXX_SMOKE_OBJ}
-                -L${LIBCXX_LIB_DIR} -lc++ -lc++abi -lunwind
-                ${CMAKE_BINARY_DIR}/libc.so
+                -L${LIBCXX_LIB_DIR} -lc++ -lc++abi -lunwind -lclang_rt
+                ${CMAKE_BINARY_DIR}/libc.so ${CMAKE_BINARY_DIR}/libclang_rt.so
                 ${MUSL_LIB_DIR}/crtn.o
         DEPENDS ${LIBCXX_SMOKE_OBJ}
                 ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o ${MUSL_LIB_DIR}/crtn.o
-                ${CMAKE_BINARY_DIR}/libc.so
+                ${CMAKE_BINARY_DIR}/libc.so ${CMAKE_BINARY_DIR}/libclang_rt.so
         COMMENT "Linking libcxx_smoke.elf (libc++, opt-in)")
     # No ALL keyword → not in the default build (the main `ninja` skips it); built on
     # demand by `ninja libcxx_smoke_elf` in build.sh after build_libcxx.sh installs libc++.
     add_custom_target(libcxx_smoke_elf DEPENDS ${LIBCXX_SMOKE_ELF})
-    add_dependencies(libcxx_smoke_elf musl_libc c_so)
+    add_dependencies(libcxx_smoke_elf musl_libc c_so clang_rt)
 
     # Ship to /test/ for test_runner (registered even though EXCLUDE_FROM_ALL; built only
     # when -DLIBCXX=1 drives the target, which always coincides with --cxx having installed

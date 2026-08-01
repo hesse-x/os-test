@@ -180,5 +180,5 @@ endforeach()
 
 # compiler-rt int128 runtime (NOT a musl module — vendored LLVM compiler-rt).
 # Provides __divti3/__udivti3/__umodti3/__muloti4 for __int128 arithmetic the
-# C/C++ compiler emits (libc++ <filesystem>); folded into libc.a + libc.so.
+# C/C++ compiler emits (libc++ <filesystem>) as a separate libclang_rt.so.
 include(${CMAKE_CURRENT_LIST_DIR}/modules/compiler_rt.cmake)

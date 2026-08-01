@@ -17,9 +17,14 @@ LIBCXX_SO="$SYSROOT/usr/lib/libc++.so"
 LIBCXX_HEADERS="$SYSROOT/usr/include/c++/v1"
 
 # ---- 0. 探测：已构建则秒过（不重复构建）----
-if [ -e "$LIBCXX_SO" ] && [ -d "$LIBCXX_HEADERS" ]; then
-  echo "libc++ already installed at $SYSROOT — nothing to do."
+if [ -e "$LIBCXX_SO" ] && [ -d "$LIBCXX_HEADERS" ] && \
+   readelf -d "$LIBCXX_SO" 2>/dev/null | grep -Fq "Shared library: [libclang_rt.so]"; then
+  echo "libc++ already installed at $SYSROOT with libclang_rt.so — nothing to do."
   exit 0
+fi
+
+if [ -e "$LIBCXX_SO" ] || [ -d "$LIBCXX_HEADERS" ]; then
+  echo "libc++ installation lacks libclang_rt.so dependency — rebuilding."
 fi
 
 # ---- 1. 前置校验：sysroot 必须就绪（crt + stub + 头 + libc.so 导出符号）----
@@ -32,8 +37,9 @@ check_sysroot() {
   for o in crt1.o Scrt1.o crti.o crtn.o; do
     [ -f "$SYSROOT/usr/lib/$o" ] || { echo "FAIL: $SYSROOT/usr/lib/$o missing — run ./build.sh first." >&2; miss=1; }
   done
-  # libc（fused libc.so 既是库也是 interpreter）
+  # libc（fused libc.so 既是库也是 interpreter）和 compiler-rt int128 runtime。
   [ -f "$SYSROOT/usr/lib/libc.so" ] || { echo "FAIL: libc.so missing — run ./build.sh first." >&2; miss=1; }
+  [ -f "$SYSROOT/usr/lib/libclang_rt.so" ] || { echo "FAIL: libclang_rt.so missing — run ./build.sh first." >&2; miss=1; }
   [ -f "$SYSROOT/usr/lib/ld-musl-x86_64.so.1" ] || { echo "FAIL: ld-musl interpreter missing — run ./build.sh first." >&2; miss=1; }
   # stub .so（musl 折进 libc 的 5 个 INPUT(libc.so) 脚本）
   for s in librt libdl libpthread libresolv libxnet; do
@@ -76,7 +82,7 @@ cmake -G Ninja -S "$SRC/third_party/llvm-project/runtimes" -B "$LIBCXX_BUILD" \
   -DCMAKE_C_FLAGS="--sysroot=$SYSROOT -nodefaultlibs -I$SYSROOT/usr/include" \
   -DCMAKE_CXX_FLAGS="--sysroot=$SYSROOT -nodefaultlibs -I$SYSROOT/usr/include -nostdinc++" \
   -DCMAKE_EXE_LINKER_FLAGS="--sysroot=$SYSROOT -nodefaultlibs -lc" \
-  -DCMAKE_SHARED_LINKER_FLAGS="--sysroot=$SYSROOT -nodefaultlibs" \
+  -DCMAKE_SHARED_LINKER_FLAGS="--sysroot=$SYSROOT -nodefaultlibs -Wl,--no-as-needed -lclang_rt -Wl,--as-needed" \
   -DLIBCXX_HAS_MUSL_LIBC=ON \
   -DLIBCXX_ENABLE_SHARED=ON -DLIBCXX_ENABLE_STATIC=ON \
   -DLIBCXXABI_ENABLE_SHARED=ON -DLIBCXXABI_ENABLE_STATIC=ON \

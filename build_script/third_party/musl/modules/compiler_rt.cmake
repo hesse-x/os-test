@@ -1,4 +1,4 @@
-# modules/compiler_rt.cmake — int128 compiler-runtime objects folded into libc.
+# modules/compiler_rt.cmake — standalone compiler-rt int128 runtime.
 # Included once at the bottom of musl_rules.cmake (NOT in _musl_modules: this
 # is compiler-rt, not musl). Provides the 128-bit integer div/mul runtime
 # helpers the C/C++ compiler emits implicitly for __int128 arithmetic but
@@ -8,8 +8,8 @@
 # __muloti4) performs __int128 division/multiplication, so clang lowers those to
 # calls to __divti3 / __udivti3 / __umodti3 / __muloti4. On x86-64 these are NOT
 # inline CPU instructions — they are compiler-rt library entry points. musl does
-# not ship them; the fused libc.so therefore fails to link libc++.so with
-# "undefined reference to __divti3/__udivti3/__muloti4".
+# not ship them. They are supplied by libclang_rt.so, which libc++ records as
+# a normal dynamic dependency instead of extending the libc ABI.
 #
 # Closure (vendored third_party/llvm-project/compiler-rt/lib/builtins/):
 #   divti3.c      __divti3  -> __udivmodti4 (via int_div_impl.inc)
@@ -23,10 +23,8 @@
 # (x86-64 always has __int128; the macro gates the #ifdef CRT_HAS_128BIT bodies).
 # COMPILER_RT_ABI expands to empty on x86-64 (only ARM uses __pcs__("aapcs")).
 #
-# Built -fPIC so a single OBJECT lib serves BOTH libc.a (static -fno-pie ELF)
-# and libc.so (shared) via EXTRA_OBJS in user/CMakeLists.txt — same one-compile-
-# both-artifacts pattern as musl_string_objs/musl_ctype_objs. Exported via the
-# <compiler-rt int128 runtime> block in libc.map so cross-built consumers link.
+# Built -fPIC as its own DSO. Keeping compiler runtime entry points out of
+# libc prevents implementation-specific symbols from becoming libc ABI.
 #
 # NOTE on flags: uses KERNEL_FREESTANDING_FLAGS (with -isystem ${GCC_FREESTANDING_INC}),
 # NOT USER_FREESTANDING_FLAGS — int_lib.h includes <float.h>/<stdint.h>/<limits.h>
