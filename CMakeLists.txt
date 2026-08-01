@@ -262,6 +262,20 @@ add_custom_target(copy_boot ALL
 # EFI bootloader lands at EFI/BOOT/BOOTX64.EFI in the ESP (partition 1).
 os_image_path(copy_boot BOOTX64.EFI EFI/BOOT/BOOTX64.EFI PARTITION 1)
 
+if(MESA)
+    # Mesa is built outside CMake by build.sh --mesa. Register its staged files
+    # only for that opt-in, otherwise mkdisk must not require them. FAT32 has
+    # no symlinks, so the runtime SONAME aliases must be copied as real files.
+    os_image_path(mesa_egl          libEGL.so              lib/libEGL.so              PARTITION 2)
+    os_image_path(mesa_egl_soname   libEGL.so.1            lib/libEGL.so.1            PARTITION 2)
+    os_image_path(mesa_gles2        libGLESv2.so           lib/libGLESv2.so           PARTITION 2)
+    os_image_path(mesa_gles2_soname libGLESv2.so.2         lib/libGLESv2.so.2         PARTITION 2)
+    os_image_path(mesa_gallium      libgallium-26.1.4.so   lib/libgallium-26.1.4.so   PARTITION 2)
+    os_image_path(mesa_gbm          libgbm.so              lib/libgbm.so              PARTITION 2)
+    os_image_path(mesa_gbm_soname   libgbm.so.1            lib/libgbm.so.1            PARTITION 2)
+    os_image_path(mesa_dri_gbm      dri_gbm.so             lib/dri_gbm.so             PARTITION 2)
+endif()
+
 # Write the disk-image manifest now that every target above has registered.
 # (reface_cmake.md §6: single source of truth for mkdisk.sh.)
 os_write_image_manifest()

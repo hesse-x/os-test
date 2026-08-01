@@ -334,6 +334,7 @@ void test_realpath(void) {
   char *r = realpath("/local/a/../b/./c", NULL);
   TEST_ASSERT_NOT_NULL(r);
   TEST_ASSERT_EQUAL_STRING("/local/b/c", r);
+  free(r); // realpath(NULL) returns caller-owned storage.
 
   char buf[256];
   char *r2 = realpath("/local/x/y", buf);

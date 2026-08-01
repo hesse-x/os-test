@@ -20,6 +20,39 @@ else()
     add_user_dyn_elf(test_runner C SOURCES test_runner.c LINK_LIBS c)
 endif()
 
+# EGL/GLES2 end-to-end smoke. Mesa is built and staged by build.sh after the
+# main CMake ninja, so this target deliberately stays out of ALL and is built
+# on demand once build/libEGL.so and build/libGLESv2.so exist.
+if(TEST)
+    set(EGL_SMOKE_ELF ${CMAKE_BINARY_DIR}/test_egl_smoke.elf)
+    set(EGL_SMOKE_OBJ ${CMAKE_BINARY_DIR}/test_egl_smoke.elf.0.o)
+    add_custom_command(OUTPUT ${EGL_SMOKE_OBJ}
+        COMMAND ${CMAKE_C_COMPILER} ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS}
+                -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party
+                -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include
+                ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS}
+                -I${CMAKE_SOURCE_DIR}/third_party/mesa/include
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/test_egl_smoke.c -o ${EGL_SMOKE_OBJ}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_egl_smoke.c ${MUSL_GEN_HEADERS}
+        IMPLICIT_DEPENDS C ${CMAKE_CURRENT_SOURCE_DIR}/test_egl_smoke.c
+        COMMENT "Compiling test_egl_smoke.elf.0.o")
+    add_custom_command(OUTPUT ${EGL_SMOKE_ELF}
+        COMMAND ${CMAKE_C_COMPILER} -fno-pie -no-pie
+                -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1
+                -Wl,--hash-style=gnu -Wl,--no-as-needed -Wl,--allow-shlib-undefined
+                -nostdlib -nodefaultlibs -o ${EGL_SMOKE_ELF}
+                ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o ${EGL_SMOKE_OBJ}
+                ${CMAKE_BINARY_DIR}/libEGL.so ${CMAKE_BINARY_DIR}/libGLESv2.so
+                ${CMAKE_BINARY_DIR}/libc.so ${MUSL_LIB_DIR}/crtn.o
+        DEPENDS ${EGL_SMOKE_OBJ} ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o
+                ${MUSL_LIB_DIR}/crtn.o ${CMAKE_BINARY_DIR}/libEGL.so
+                ${CMAKE_BINARY_DIR}/libGLESv2.so ${CMAKE_BINARY_DIR}/libc.so
+        COMMENT "Linking test_egl_smoke.elf")
+    add_custom_target(test_egl_smoke_elf DEPENDS ${EGL_SMOKE_ELF})
+    add_dependencies(test_egl_smoke_elf musl_libc c_so)
+    os_image_path(test_egl_smoke_elf test_egl_smoke.elf test/test_egl_smoke.elf PARTITION 2)
+endif()
+
 # Layer 1: unistd (pipe/read/write/close)
 add_user_dyn_elf(pipe C SOURCES test_pipe.c LINK_LIBS c STATIC_LIBS unity)
 

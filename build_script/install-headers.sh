@@ -54,6 +54,19 @@ SRC="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${1:-$SRC/build/sysroot/usr/include}"
 
 echo "Installing UAPI headers → $DEST"
+# Preserve the libc++ header tree (c++/v1/) across the republish: it is a
+# co-managed artifact owned by build_libcxx.sh (--cxx), NOT part of this
+# script's UAPI/POSIX closure. The blanket rm below would otherwise wipe it,
+# and a subsequent default-flow build (./build.sh without --cxx) would then
+# run the Mesa cross-build with -stdlib=libc++ but no c++/v1 headers in the
+# sysroot → fatal "thread"/"vector"/... "file not found" in the C++ GLSL
+# compiler. Move it aside and restore after republishing (no-op if absent,
+# i.e. libc++ never built).
+libcxx_hdr_backup=""
+if [ -d "$DEST/c++" ]; then
+    libcxx_hdr_backup="$(mktemp -d)"
+    mv "$DEST/c++" "$libcxx_hdr_backup/c++"
+fi
 rm -rf "$DEST"
 mkdir -p "$DEST/sys"
 
@@ -404,6 +417,193 @@ for h in stdint.h stddef.h stdarg.h stdbool.h; do
   cp "$SRC"/third_party/musl/include/$h "$DEST/$h"
 done
 
+# 4b. Publish the FULL musl include tree (do-not-clobber) so the sysroot is a
+#     complete POSIX/C header set for cross builds (Mesa pulls <sys/shm.h>,
+#     <sys/ipc.h>, <sys/stat.h>, <sys/uio.h>, <sys/utsname.h>, <netinet/*>,
+#     <arpa/*>, <net/*>, <grp.h>, <pwd.h>, <glob.h>, <regex.h>, ... — far more
+#     than the curated subset above). Steps 1-4 + the §3 replacements have already
+#     placed every OS-specific header (features.h, errno.h, bits/*, xos/*, the
+#     musl §3 replacements for unistd/stdio/stdlib/time/fcntl/socket/mman/math/...),
+#     so `cp -rn` (no-clobber) fills ONLY the gaps musl provides — it never
+#     overwrites an OS-owned file. This mirrors the build-time search order
+#     (MUSL_INCLUDE_FLAGS: musl/include → arch/x86_64 → arch/generic, with
+#     user/include first): arch/x86_64/bits wins over arch/generic/bits, and our
+#     user/include/bits already on disk wins over both.
+#     *.in templates (alltypes.h.in, syscall.h.in) are skipped — alltypes.h is
+#     published in step 2, syscall.h in step 2; the .in forms need musl's
+#     configure step and are not usable as headers.
+cp -rn "$SRC"/third_party/musl/include/. "$DEST/"
+cp -rn "$SRC"/third_party/musl/arch/x86_64/bits/. "$DEST/bits/"
+cp -rn "$SRC"/third_party/musl/arch/generic/bits/. "$DEST/bits/"
+find "$DEST" -name '*.in' -delete
+
+# 4c. Mesa POSIX-completeness fixes for repo shims that shadow musl's fuller
+#     headers. Step 2 published the repo's hand-written user/include/sys/*.h and
+#     user/include/limits.h, and step 4b's `cp -rn` (no-clobber) could NOT
+#     overwrite them — so several shims that are thinner than musl's POSIX
+#     versions win in the sysroot, dropping types/macros Mesa needs:
+#       - sys/select.h shim has no __NEED_struct_timeval → struct timeval never
+#         defined. musl's <sys/time.h> (published in §3) #includes <sys/select.h>
+#         expecting it to pull struct timeval via bits/alltypes.h; the shim breaks
+#         that chain, so os_time.c fails "field has incomplete type 'struct timeval'".
+#       - sys/stat.h shim has st_atim/st_mtim/st_ctim but NOT the st_atime/st_mtime/
+#         st_ctime macro aliases (musl defines them) → disk_cache_os.c fails
+#         "no member named 'st_atime'".
+#       - sys/eventfd.h shim lacks eventfd_t/eventfd_read/eventfd_write →
+#         os_file_notify.c fails "use of undeclared identifier 'eventfd_t'".
+#       - limits.h shim (LLVM-libc-derived C23 set) lacks NAME_MAX and the
+#         runtime-limits block → os_file_notify.c fails "undeclared 'NAME_MAX'".
+#     The sysroot is consumed ONLY by the Mesa cross-build (the OS itself compiles
+#     against the source tree via -I user/include + -I third_party/musl; the sysroot
+#     is also copied verbatim into the image's /usr/include by mkdisk.sh, where
+#     POSIX-complete headers are what native builds want). So these edits affect
+#     Mesa/the image, not the OS's own build.
+#
+#     Two policies by header, matching whether the shim carries OS-specific content:
+#       A) REPLACE with musl's version — for shims that are pure thin POSIX
+#          wrappers with NO OS kernel ABI. sys/select.h (its `select` decl points
+#          at an unexported symbol anyway — the OS implements select via a poll
+#          fallback; Mesa only needs the types/macros) and sys/eventfd.h (the shim
+#          is just EFD_* + eventfd decl; musl's adds eventfd_t/read/write + uses
+#          O_CLOEXEC/O_NONBLOCK from <fcntl.h>, already published). musl's versions
+#          declare select/eventfd the same way the OS libc expects.
+#       B) APPEND musl's missing fragment — for shims that carry OS kernel ABI we
+#          must keep. sys/stat.h keeps the OS struct stat (mirrors struct kstat,
+#          static_assert-locked to the kernel layout) and gains the st_atime/
+#          st_mtime/st_ctime aliases appended. limits.h keeps the repo's C23 macro
+#          set and gains musl's runtime-limits block (NAME_MAX et al.) appended
+#          under the same _POSIX_SOURCE/_GNU_SOURCE guard musl uses.
+
+# 4c-A: replace thin POSIX-wrapper shims with musl's full versions.
+cp "$SRC"/third_party/musl/include/sys/select.h "$DEST/sys/select.h"
+cp "$SRC"/third_party/musl/include/sys/eventfd.h "$DEST/sys/eventfd.h"
+
+# 4c-B1: sys/stat.h — append the st_atime/st_mtime/st_ctime macro aliases musl
+#        defines (st_atim/st_mtim/st_ctim are the OS struct's timespec fields;
+#        the aliases let consumers use the POSIX st_atime spelling Mesa expects).
+#        Insert before the include-guard #endif so the macros sit in the public
+#        scope; guarded so re-inclusion is a no-op.
+if grep -q '^struct stat {' "$DEST/sys/stat.h"; then
+  cat >> "$DEST/sys/stat.h" <<'__STAT_POSIX_ALIASES__'
+
+/* POSIX st_atime/st_mtime/st_ctime aliases (appended by install-headers.sh §4c-B1).
+ * musl's <sys/stat.h> defines these as st_atim.tv_sec etc.; the repo shim keeps
+ * the OS struct stat (with st_atim/st_mtim/st_ctim timespec fields) but omitted
+ * the second-level aliases. Mesa's disk_cache_os.c uses st_atime/st_mtime. */
+#ifndef _XOS_STAT_TIME_ALIASES
+#define _XOS_STAT_TIME_ALIASES
+#define st_atime st_atim.tv_sec
+#define st_mtime st_mtim.tv_sec
+#define st_ctime st_ctim.tv_sec
+#endif
+__STAT_POSIX_ALIASES__
+fi
+
+# 4c-B2: limits.h — append musl's runtime-limits block (NAME_MAX, SYMLINK_MAX,
+#        PATH_MAX-if-not-set, NZERO, NGROUPS_MAX, ARG_MAX, IOV_MAX, SYMLOOP_MAX,
+#        TZNAME_MAX, TTY_NAME_MAX, HOST_NAME_MAX, ...). The repo shim only has
+#        the C23 macro set + POSIX minimums (_POSIX_NAME_MAX etc.), missing the
+#        actual NAME_MAX=255 Mesa's os_file_notify.c sizes its inotify buffer with.
+#        Guarded by the same _POSIX_SOURCE/_GNU_SOURCE/_BSD_SOURCE feature macro
+#        musl uses, and each #define is #ifndef-wrapped so the repo's existing
+#        values (e.g. PATH_MAX=4096) win. Appended before the include-guard #endif.
+if grep -q '_LIMITS_H' "$DEST/limits.h"; then
+  cat >> "$DEST/limits.h" <<'__LIMITS_RUNTIME__'
+
+/* Runtime limits (appended by install-headers.sh §4c-B2). musl's <limits.h>
+ * defines NAME_MAX/SYMLINK_MAX/NZERO/NGROUPS_MAX/ARG_MAX/IOV_MAX/SYMLOOP_MAX/
+ * TZNAME_MAX/TTY_NAME_MAX/HOST_NAME_MAX/... under the POSIX feature guard; the
+ * repo's LLVM-libc-derived shim only carries the C23 set + _POSIX_* minimums, so
+ * Mesa (os_file_notify.c uses NAME_MAX) and other POSIX consumers miss them.
+ * Each macro is #ifndef-wrapped so the repo's own values (PATH_MAX etc.) win. */
+#if defined(_POSIX_SOURCE) || defined(_POSIX_C_SOURCE) \
+ || defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
+#ifndef NAME_MAX
+#define NAME_MAX 255
+#endif
+#ifndef SYMLINK_MAX
+#define SYMLINK_MAX 255
+#endif
+#ifndef NZERO
+#define NZERO 20
+#endif
+#ifndef NGROUPS_MAX
+#define NGROUPS_MAX 32
+#endif
+#ifndef ARG_MAX
+#define ARG_MAX 131072
+#endif
+#ifndef IOV_MAX
+#define IOV_MAX 1024
+#endif
+#ifndef SYMLOOP_MAX
+#define SYMLOOP_MAX 40
+#endif
+#ifndef TZNAME_MAX
+#define TZNAME_MAX 6
+#endif
+#ifndef TTY_NAME_MAX
+#define TTY_NAME_MAX 32
+#endif
+#ifndef HOST_NAME_MAX
+#define HOST_NAME_MAX 255
+#endif
+#ifndef LOGIN_NAME_MAX
+#define LOGIN_NAME_MAX 256
+#endif
+#ifndef PIPE_BUF
+#define PIPE_BUF 4096
+#endif
+#ifndef LINE_MAX
+#define LINE_MAX 4096
+#endif
+#ifndef RE_DUP_MAX
+#define RE_DUP_MAX 255
+#endif
+#endif
+__LIMITS_RUNTIME__
+fi
+
+# 5. Third-party library headers (libdrm / libexpat / zlib / libffi) + the linux/ &
+#    asm/ UAPI shims they pull. These are Mesa cross-build deps: Mesa's meson resolves
+#    libdrm/expat/zlib/ffi via pkg-config (gen-pkgconfig.sh) and compiles against the
+#    sysroot, so each lib's public header must ship here. The libdrm layout mirrors the
+#    upstream install (third_party/drm/meson.build:302-314): the userspace interface
+#    headers (xf86drm.h/xf86drmMode.h/libsync.h) at the include TOP LEVEL, and the
+#    kernel UAPI headers (drm.h/drm_mode.h/drm_fourcc.h/virtgpu_drm.h/...) under a
+#    libdrm/ subdir. xf86drm.h does `#include <drm.h>` (top-level style), so
+#    libdrm.pc's Cflags adds -I${includedir}/libdrm (gen-pkgconfig.sh) to resolve it.
+#    libdrm's xf86drm.h also does #include <linux/types.h> + <asm/ioctl.h>; Mesa's own
+#    drm-uapi/virtgpu_drm.h pulls the same. The repo's include/uapi/linux/types.h and
+#    include/uapi/asm/ioctl.h are the shims that map those to freestanding stdint +
+#    xos/ioctl.h (xos/ already published in step 1) — publish them at the standard
+#    <linux/>/<asm/> paths so the sysroot resolves them with -isysroot alone.
+mkdir -p "$DEST/drm" "$DEST/libdrm" "$DEST/linux" "$DEST/asm"
+cp "$SRC"/include/uapi/linux/types.h "$DEST/linux/types.h"
+cp "$SRC"/include/uapi/asm/ioctl.h   "$DEST/asm/ioctl.h"
+# Kernel UAPI headers → libdrm/ (upstream layout). Also keep the drm/ copy for any
+# consumer using #include <drm/...> (our own libdrm.so build uses the drm/ path).
+cp "$SRC"/third_party/drm/include/drm/*.h "$DEST/libdrm/"
+cp "$SRC"/third_party/drm/include/drm/*.h "$DEST/drm/"
+# libdrm userspace interface headers → include top level (matches upstream install).
+cp "$SRC"/third_party/drm/xf86drm.h    "$DEST/xf86drm.h"
+cp "$SRC"/third_party/drm/xf86drmMode.h "$DEST/xf86drmMode.h"
+cp "$SRC"/third_party/drm/libsync.h     "$DEST/libsync.h"
+cp "$SRC"/third_party/libexpat/expat/lib/expat.h          "$DEST/expat.h"
+cp "$SRC"/third_party/libexpat/expat/lib/expat_external.h "$DEST/expat_external.h"
+cp "$SRC"/third_party/zlib/zlib.h  "$DEST/zlib.h"
+cp "$SRC"/third_party/zlib/zconf.h "$DEST/zconf.h"
+# libffi's public headers are generated by libffi.cmake into $BUILD (ffi.h from
+# ffi.h.in @-substitution, ffitarget.h + fficonfig.h COPYONLY). Publish them only if
+# the build has produced them (install-headers may run before libffi is built in a
+# partial build); absent ffi.h is fine for non-ffi consumers.
+BUILD_DIR="${BUILD:-$SRC/build}"
+for fh in ffi.h ffitarget.h fficonfig.h; do
+  if [ -f "$BUILD_DIR/$fh" ]; then
+    cp "$BUILD_DIR/$fh" "$DEST/$fh"
+  fi
+done
+
 echo "Installed tree:"
 ( cd "$DEST" && find . -type f | sort | sed 's/^\.\//  /' )
 
@@ -436,7 +636,16 @@ fi
 # resolve under the sysroot — not just hello's path. Catches breaks like pthread.h
 # → xos/signal.h that hello.c never exercises. Same pure -nostdinc + -I$DEST (no
 # -isystem): the sysroot must stand alone.
-echo "Scanning every published header for self-contained closure ..."
+#
+# Scope: only the OS-owned closure (musl/repo/xos/bits/sys headers we maintain).
+# The vendored third-party set published in step 5 (drm/ + libdrm/ + linux/ + asm/
+# shims + xf86drm.h/xf86drmMode.h/libsync.h + expat.h/zlib.h/zconf.h/ffi*.h) is
+# EXCLUDED — those are Mesa cross-build deps, not our closure to guarantee, and
+# several are intentionally not self-contained (drm/via_drm.h pulls a vendor-only
+# via_drmclient.h; xf86drm.h pulls <atomic_ops.h>/<sys/ioccom.h> absent from musl;
+# ffitarget.h #errors when included directly — it is meant to be pulled via ffi.h
+# only). Their resolution is validated by the Mesa meson build itself, not by this scan.
+echo "Scanning every OS-owned published header for self-contained closure ..."
 failed=0
 while IFS= read -r h; do
   rel="${h#"$DEST/"}"
@@ -446,11 +655,42 @@ while IFS= read -r h; do
     grep -E 'fatal|error' /tmp/hdr.log | head -3 | sed 's/^/      /' >&2
     failed=$((failed+1))
   fi
-done < <(find "$DEST" -name '*.h' -type f)
+done < <(find "$DEST" -name '*.h' -type f \
+  ! -path "$DEST/drm/*" \
+  ! -path "$DEST/libdrm/*" \
+  ! -path "$DEST/linux/*" \
+  ! -path "$DEST/asm/*" \
+  ! -name 'expat.h' ! -name 'expat_external.h' \
+  ! -name 'xf86drm.h' ! -name 'xf86drmMode.h' ! -name 'libsync.h' \
+  ! -name 'zlib.h' ! -name 'zconf.h' \
+  ! -name 'ffi.h' ! -name 'ffitarget.h' ! -name 'fficonfig.h' \
+  ! -name 'kd.h' ! -name 'soundcard.h' ! -name 'vt.h')
+# sys/kd.h, sys/soundcard.h, sys/vt.h (from the full musl tree, step 4b) each
+# #include <linux/{kd,soundcard,vt}.h> — kernel console/sound UAPI we don't ship
+# (no kernel headers_install in this sysroot). Excluded like the third-party set
+# above: not our closure to guarantee, and unused by Mesa EGL/GLES/softpipe.
 if [ "$failed" -ne 0 ]; then
   echo "FAIL: $failed published header(s) had broken closure." >&2
   exit 1
 fi
+scanned=$(find "$DEST" -name '*.h' -type f \
+  ! -path "$DEST/drm/*" \
+  ! -path "$DEST/libdrm/*" \
+  ! -path "$DEST/linux/*" \
+  ! -path "$DEST/asm/*" \
+  ! -name 'expat.h' ! -name 'expat_external.h' \
+  ! -name 'xf86drm.h' ! -name 'xf86drmMode.h' ! -name 'libsync.h' \
+  ! -name 'zlib.h' ! -name 'zconf.h' \
+  ! -name 'ffi.h' ! -name 'ffitarget.h' ! -name 'fficonfig.h' \
+  ! -name 'kd.h' ! -name 'soundcard.h' ! -name 'vt.h' | wc -l)
 total=$(find "$DEST" -name '*.h' -type f | wc -l)
-echo "OK: all $total published headers have self-contained closure."
+echo "OK: all $scanned OS-owned headers have self-contained closure ($total total published, third-party set excluded)."
+
+# Restore the libc++ header tree moved aside before the republish (see top of
+# script). Kept here so it survives even the closure-scan block above.
+if [ -n "$libcxx_hdr_backup" ] && [ -d "$libcxx_hdr_backup/c++" ]; then
+    mv "$libcxx_hdr_backup/c++" "$DEST/c++"
+    rmdir "$libcxx_hdr_backup" 2>/dev/null || true
+fi
+
 echo "Done. Sysroot ready at $DEST"

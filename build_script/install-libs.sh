@@ -13,6 +13,9 @@
 #   build/libm.so     → $DEST/libm.so     (libm shared, if present)
 #   build/libdrm.a    → $DEST/libdrm.a    (libdrm static)
 #   build/libdrm.so   → $DEST/libdrm.so   (libdrm shared, if present)
+#   build/libexpat.so → $DEST/libexpat.so (Mesa idep_xmlconfig runtime dep, if present)
+#   build/libz.so     → $DEST/libz.so     (Mesa driconf/mesa_util runtime dep, if present)
+#   build/libffi.so   → $DEST/libffi.so   (gallium GL dispatch, if present)
 #   build/libc.so     → $DEST/ld-musl-x86_64.so.1  (fused libc.so is also the
 #                       dynamic interpreter; PT_INTERP = /lib/ld-musl-x86_64.so.1)
 #   build/musl/lib/{crt1,Scrt1,crti,crtn}.o → $DEST/*.o  (musl crt objects, so
@@ -56,10 +59,17 @@ mandatory=(
 )
 
 # Files that are optional (built by later phases; absent is fine, not a failure).
+# libexpat/libz/libffi are Mesa cross-build runtime deps (idep_xmlconfig / driconf /
+# gallium GL dispatch); published here so gen-pkgconfig.sh + Mesa meson resolve them
+# from the sysroot. Optional because install-libs runs before the Mesa step and must
+# not fail if a third-party .so hasn't been built yet.
 optional=(
   "libm.a:libm.a"
   "libm.so:libm.so"
   "libdrm.so:libdrm.so"
+  "libexpat.so:libexpat.so"
+  "libz.so:libz.so"
+  "libffi.so:libffi.so"
 )
 
 # musl crt objects — produced by the musl subproject (musl_rules.cmake) under
@@ -117,7 +127,7 @@ done
 
 # Compat stub .so for libraries musl folds into libc: rt, dl, pthread, resolv,
 # xnet. glibc ships these as separate .so; musl provides all their symbols from
-# libc.so. Cross consumers (Mesa links -lrt -ldl -lpthread; libc++ runtimes link
+# libc.so. Cross consumers (Mesa links -lrt -ldl/-lpthread; libc++ runtimes link
 # -lpthread/-lrt) need the names to resolve, so each stub is a one-line linker
 # script `INPUT(libc.so)` redirecting the -l lookup to the fused libc. This
 # matches the Mesa cross-file's stated precondition (crt + stubs in sysroot).

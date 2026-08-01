@@ -428,6 +428,14 @@ endif()
 # wayland (which SO_LINK_LIBS ffi) / libexpat.
 include(${CMAKE_SOURCE_DIR}/build_script/third_party/libffi/libffi.cmake)
 
+# ===== zlib (third_party/zlib, v1.3.1) — see build_script/third_party/zlib/zlib.cmake =====
+# Shared `zlib.so` build rules. Mesa's meson cross-build resolves zlib via pkg-config
+# (zlib.pc emitted by gen-pkgconfig.sh); the .so + headers reach the sysroot via
+# install-libs.sh / install-headers.sh. No in-repo consumer links zlib directly yet —
+# it is built solely to populate the sysroot for Mesa. Include() runs in this scope,
+# after libdrm and before wayland (zlib has no dependencies, placement is flexible).
+include(${CMAKE_SOURCE_DIR}/build_script/third_party/zlib/zlib.cmake)
+
 # ===================== libexpat.so — see build_script/third_party/libexpat/libexpat.cmake =====================
 # Shared `expat.so` build rules extracted. Sets LIBEXPAT_DIR (consumed by
 # wayland's host scanner) — include() runs in this scope, BEFORE wayland.cmake.

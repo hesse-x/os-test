@@ -192,6 +192,10 @@ else
   echo "  libc++: not built (run ./build.sh --cxx to enable) — skipping /lib/libc++*"
 fi
 
+# Mesa artifacts are registered in image_manifest.txt by CMake and copied in
+# the manifest loop above. Do not copy them again here: mcopy rejects duplicate
+# destination names and would abort disk creation after the files are present.
+
 # Preserve root directory README
 mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/README" ::README
 

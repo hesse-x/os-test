@@ -31,7 +31,7 @@
  * xos/unistd_ext.h (getpagesize/sysconf).
  */
 
-#include <errno.h>
+#include <errno.h> // IWYU pragma: keep
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -122,14 +122,20 @@ LIBC_EXPORT char *mktemp(char *tmpl) {
 /* ==================== realpath (group 3) ====================
  * No symlinks exist in this FS yet, so realpath reduces to: make the path
  * absolute (relative → getcwd join) then collapse . / .. / redundant slashes.
- * Returns resolved (or buf if non-NULL) on success, NULL on failure. */
+ * When resolved is NULL, POSIX requires a caller-owned allocated result. */
 LIBC_EXPORT char *realpath(const char *path, char *resolved) {
   if (!path || !path[0]) {
     errno = EINVAL;
     return NULL;
   }
-  static char buf_storage[4096];
-  char *buf = resolved ? resolved : buf_storage;
+  char *buf = resolved;
+  if (!buf) {
+    buf = malloc(4096);
+    if (!buf) {
+      errno = ENOMEM;
+      return NULL;
+    }
+  }
 
   char abs[4096];
   if (path[0] == '/') {
@@ -137,13 +143,12 @@ LIBC_EXPORT char *realpath(const char *path, char *resolved) {
     abs[sizeof(abs) - 1] = '\0';
   } else {
     if (!getcwd(abs, sizeof(abs))) {
-      errno = ENAMETOOLONG;
-      return NULL;
+      goto fail;
     }
     size_t cl = strlen(abs);
     if (cl + 1 + strlen(path) + 1 > sizeof(abs)) {
       errno = ENAMETOOLONG;
-      return NULL;
+      goto fail;
     }
     abs[cl++] = '/';
     strcpy(abs + cl, path);
@@ -177,15 +182,15 @@ LIBC_EXPORT char *realpath(const char *path, char *resolved) {
       }
       continue;
     }
-    if (o + 1 >= outcap) {
+    if (depth == (int)(sizeof(starts) / sizeof(starts[0])) || o + 1 >= outcap) {
       errno = ENAMETOOLONG;
-      return NULL;
+      goto fail;
     }
     buf[o++] = '/';
     starts[depth++] = (int)o;
     if (o + seglen >= outcap) {
       errno = ENAMETOOLONG;
-      return NULL;
+      goto fail;
     }
     memcpy(buf + o, seg, seglen);
     o += seglen;
@@ -195,6 +200,11 @@ LIBC_EXPORT char *realpath(const char *path, char *resolved) {
   }
   buf[o] = '\0';
   return buf;
+
+fail:
+  if (!resolved)
+    free(buf);
+  return NULL;
 }
 
 int mknod(const char *path, mode_t mode, dev_t dev) {

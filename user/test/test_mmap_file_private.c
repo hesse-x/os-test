@@ -146,7 +146,23 @@ void test_mmap_file_private_survives_close(void) {
   unlink_file("mfp_close");
 }
 
-/* TC6: memfd MAP_PRIVATE — ftruncate sizes the memfd, data is written through a
+/* TC6: mprotect must accept an unfaulted file-backed page. Dynamic loaders do
+ * this for PT_GNU_RELRO before every page in the protected interval is read. */
+void test_mprotect_unfaulted_file_page(void) {
+  int fd = make_file("mfp_relro", "hello", 5);
+  TEST_ASSERT_TRUE(fd >= 0);
+
+  char *p =
+      (char *)mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+  TEST_ASSERT_TRUE(p != NULL && p != MAP_FAILED);
+  TEST_ASSERT_EQUAL_INT(0, mprotect(p, PAGE, PROT_READ));
+  TEST_ASSERT_EQUAL_INT('h', p[0]); // Fault-in must retain the new protection.
+  munmap(p, PAGE);
+  close(fd);
+  unlink_file("mfp_relro");
+}
+
+/* TC7: memfd MAP_PRIVATE — ftruncate sizes the memfd, data is written through a
  * MAP_SHARED mapping, then a MAP_PRIVATE mapping reads a private COW copy. */
 void test_mmap_memfd_private_cow(void) {
   int fd = memfd_create("mfp_memfd", 0);
@@ -169,7 +185,7 @@ void test_mmap_memfd_private_cow(void) {
   close(fd);
 }
 
-/* TC7: fork independence. fork copies the parent's address space, so the child
+/* TC8: fork independence. fork copies the parent's address space, so the child
  * inherits the parent's in-flight MAP_PRIVATE write ('P') — that is NOT a write
  * to the backing file, it is private memory, and fork snapshots it. The
  * invariant that MAP_PRIVATE guarantees is post-fork isolation: the child's
@@ -216,6 +232,7 @@ int main(void) {
   RUN_TEST(test_mmap_file_private_multi_page);
   RUN_TEST(test_mmap_file_private_offset);
   RUN_TEST(test_mmap_file_private_survives_close);
+  RUN_TEST(test_mprotect_unfaulted_file_page);
   RUN_TEST(test_mmap_memfd_private_cow);
   RUN_TEST(test_mmap_file_private_fork_independent);
   return UNITY_END();

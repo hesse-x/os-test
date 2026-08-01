@@ -1,0 +1,144 @@
+# Meson cross-file for building Mesa against this OS's sysroot.
+#
+# build.sh sed-substitutes @CC@ / @CXX@ with the host compiler selected by
+# OS_COMPILER (clang/clang++ or gcc/g++), then passes the result to
+# `meson setup --cross-file`. Regenerating (changing compilers) requires
+# `rm -rf build/mesa` so meson reconfigures against the new cross-file.
+#
+# Key choices:
+#   - [host_machine] system = 'linux': Mesa's system_has_kms_drm list (meson.build:159)
+#     includes 'linux', which gates dep_libdrm non-null and thus virgl/dri/gbm.
+#     Without it, dep_libdrm = null_dep and virgl is disabled. We are ABI-compatible
+#     enough (Linux UAPI + musl) that 'linux' is the honest answer.
+#   - NO exe_wrapper: meson's sanity-check would try to run cross-built probe ELFs
+#     and fail ("Executables ... are not runnable") on any environment quirk. With no
+#     exe_wrapper set, meson (compilers.py:1399) *skips* the sanity run and
+#     `has_function` uses link-only probing — the standard cross-compile path, correct
+#     for musl since the symbols are in libc.so regardless. The lone cc.run in
+#     meson.build (the TLSDESC probe at :610) is guarded by `is_cross_build() and not
+#     can_run_host_binaries()` (:600), so it degrades to a warning + compiler default
+#     instead of running. (The sysroot's ld-musl loader CAN run a properly-linked
+#     cross ELF — hello_dyn.elf — and our probe links would run under it; we still
+#     omit exe_wrapper to keep the build robust and because link-only probing is
+#     sufficient.)
+#   - sys_root via [properties] is NOT enough on meson 1.3.2: that key is honored
+#     only by pkg-config (pkgconfig.py) and cmake, NOT translated into a compiler/
+#     linker --sysroot flag. So cc.find_library('m'/'rt'/'dl') falls back to the
+#     host's default lib search (/usr/lib/x86_64-linux-gnu) and leaks host glibc
+#     .so into the Mesa link lines. We therefore pass --sysroot=<sysroot> explicitly
+#     in c_args/cpp_args AND c_link_args/cpp_link_args: with --sysroot on the
+#     compile/link command, cc.find_library and the has_function link probes are
+#     restricted to the sysroot (verified: clang --sysroot=<s> -print-file-name=
+#     libm.so → <s>/usr/lib/libm.so). crt objects (Scrt1/crti/crtn) and the
+#     librt/libdl/libpthread compat stubs (INPUT(libc.so)) are published into the
+#     sysroot by install-libs.sh so --sysroot resolves them instead of the host's.
+#   - c_args = -nodefaultlibs (NOT -nostdlib -nodefaultlibs -ffreestanding): Mesa is
+#     a *hosted* libc user — it links against and calls libc (sysconf, strtof, ...).
+#     -nodefaultlibs drops the host's implicit libgcc_s/default libs (preventing
+#     host-gcc-runtime leakage) but still lets explicit -lc/-lm resolve from the
+#     sysroot. -nostdlib would additionally forbid libc; -ffreestanding is a
+#     semantic no-op for code that calls hosted libc and only misled. The freestanding
+#     triple belongs to the OS's hand-written SHARED libs (third_party_rules.cmake),
+#     which are self-contained; Mesa is not.
+#   - has_function: with --sysroot + -nodefaultlibs + sysroot crt + -lc, the probe
+#     executable links and even runs under the musl loader (exe_wrapper). We set no
+#     exe_wrapper intentionally (see below): link-only probing is the correct cross
+#     path and avoids meson's sanity "Executables are not runnable" failure.
+#   - b_staticpic = true: Mesa bundles ~32 static support libs into the megadriver
+#     .so, so the static libs must be PIC. This is the userspace SHARED family;
+#     CLAUDE.md's "OBJECT libs must not be PIC" rule is kernel-only and unaffected.
+#   - python3.12 + pkg-config in [binaries] (HOST machine — Mesa's find_program/
+#     dependency() default to host): both are build-time tools that run on the
+#     configure host, declared with ABSOLUTE paths. Absolute is load-bearing for
+#     python: meson resolves PATH-found programs to a path relative to source_dir,
+#     then runs the find_program version probe with in_builddir=True (cwd=build_dir),
+#     so a relative path `build/.mesa-venv/bin/python3.12` is unresolvable from
+#     build/mesa and raises "Could not execute command" (FileNotFoundError). An
+#     absolute path is cwd-independent. The key must be `python3.12` exactly — Mesa's
+#     find_program loop (meson.build:1049) tries 'python3.16'..'python3.12' before
+#     'python', and lookup_binary_entry does exact-name matching, so a `python` entry
+#     is never consulted before the versioned probe fails. pkg-config likewise must be
+#     named here or meson reports "Pkg-config binary missing from cross or native file"
+#     and dependency('libdrm') finds nothing despite our .pc files.
+
+[host_machine]
+system = 'linux'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+
+[binaries]
+c = '@CC@'
+cpp = '@CXX@'
+ar = '/usr/bin/ar'
+strip = '/usr/bin/strip'
+ld = '/usr/bin/ld'
+pkg-config = '/usr/bin/pkg-config'
+python3.12 = '@PYTHON@'
+
+[built-in options]
+# --sysroot=<s> in c_args/cpp_args AND c_link_args/cpp_link_args is load-bearing:
+# meson (any version, incl. 1.11) does NOT turn [properties] sys_root into a
+# compiler/linker --sysroot (that key feeds pkg-config/cmake only). Without an
+# explicit --sysroot on the command, cc.find_library('m'/'rt'/'dl') and the
+# has_function link probes fall back to the host's default lib search and pull in
+# host glibc .so. With --sysroot present, both resolve solely from the sysroot
+# (crt objects + librt/libdl/libpthread compat stubs published there by
+# install-libs.sh). -nodefaultlibs drops the host's implicit libgcc_s/defaults
+# (no host-runtime leak) while keeping libc reachable via explicit -lc/-lm.
+#
+# -lc in *_link_args: -nodefaultlibs removes libc from the implicit link set, so
+# meson's executable link probes (has_function, the atomic/sync checks, the
+# configure sanity link) fail "undefined reference to __libc_start_main" — clang
+# auto-links Scrt1.o from the sysroot (its _start calls __libc_start_main in libc)
+# but -lc is never passed. Adding -lc to the link args fixes every executable
+# probe AND makes the Mesa .so products carry an explicit DT_NEEDED libc.so
+# (correct — they depend on libc). For .so links meson passes -shared, which skips
+# crt entirely, so -lc there only adds the libc dependency (no _start/crt clash).
+c_args = ['-m64', '-fPIC', '--sysroot=@SYSROOT@', '-nodefaultlibs', '-fvisibility=hidden', '-Wno-macro-redefined']
+# cpp_args adds -stdlib=libc++ (vs c_args): Mesa's C++ (libglsl, 51 .cpp — structurally
+# forced by any gallium driver) needs a C++ stdlib. The sysroot has musl (C only), so the
+# C++ stdlib is libc++ (built by build_libcxx.sh under --cxx, installed into the sysroot's
+# include/c++/v1 + usr/lib). -stdlib=libc++ makes clang resolve C++ headers from the sysroot's
+# c++/v1 (with --sysroot already constraining the search). -nodefaultlibs is link-only and
+# does not affect compile, so it coexists with -stdlib=libc++ here.
+cpp_args = ['-m64', '-fPIC', '--sysroot=@SYSROOT@', '-nodefaultlibs', '-stdlib=libc++', '-fvisibility=hidden', '-Wno-macro-redefined']
+# -nodefaultlibs ALSO in *_link_args (not just *_args): meson passes c_args/cpp_args
+# to compile only and *_link_args to link only — they do not cross. With -nodefaultlibs
+# absent from the link step, clang++ re-adds its implicit runtime, and on this host the
+# default --rtlib=libgcc pulls in -lgcc_s → ld looks for libgcc_s.so.1 under --sysroot,
+# doesn't find it (it's a host GCC runtime, not in our sysroot), and the .so link fails
+# ("找不到 libgcc_s.so.1"). Putting -nodefaultlibs in the link args too makes the
+# suppression actually reach ld. The runtimes it removes are supplied explicitly:
+# C++ ABI/stdlib via -lc++ -lc++abi (cpp_link_args), unwind via libc++abi's DT_NEEDED
+# libunwind.so.1, and compiler-rt builtins (int128 etc.) via -lc (merged into libc.so
+# by build_libcxx.sh). -nodefaultlibs still lets the startfiles (crti/crtn/crtbeginS)
+# through — those are startfiles, not defaultlibs — so -shared links and the executable
+# has_function probes (which get Scrt1.o + -lc's __libc_start_main) keep working.
+c_link_args = ['--rtlib=compiler-rt', '-nodefaultlibs', '-Wl,--hash-style=gnu', '-Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1', '--sysroot=@SYSROOT@', '-lc']
+# cpp_link_args adds -lc++ -lc++abi (vs c_link_args): -nodefaultlibs removed the implicit C++
+# runtime, so it must be supplied explicitly. -lc++ is the C++ stdlib; -lc++abi is libc++.so's
+# DT_NEEDED (exception/CX runtime) and must be link-visible under --sysroot (both in sysroot
+# usr/lib). Mesa setup passes -Dlibunwind=disabled, so Mesa does NOT consume the sysroot's
+# libunwind — only -lc++ -lc++abi are needed (libunwind's own dep is internal to build_libcxx.sh).
+cpp_link_args = ['--rtlib=compiler-rt', '-nodefaultlibs', '-stdlib=libc++', '-Wl,--hash-style=gnu', '-Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1', '--sysroot=@SYSROOT@', '-lc++', '-lc++abi', '-lc']
+b_staticpic = true
+b_pie = false
+
+[properties]
+# sys_root belongs in [properties] (envconfig.py: MachineProperties.get_sys_root),
+# NOT in [built-in options] — putting it there fails with "Unknown option: sys_root".
+# It feeds pkg-config (PKG_CONFIG_SYSROOT_DIR) + cmake only; the compiler/linker
+# --sysroot that actually isolates the build is passed explicitly in [built-in options]
+# above (see comment there).
+sys_root = '@SYSROOT@'
+# pkg_config_libdir restricts pkg-config to search ONLY this dir (sets
+# PKG_CONFIG_LIBDIR, pkgconfig.py:286). Without it, meson sets PKG_CONFIG_SYSROOT_DIR
+# from sys_root but leaves the search path at the host system's compiled defaults
+# (/usr/lib/x86_64-linux-gnu/pkgconfig ...), so zlib/expat resolve from the HOST
+# distro's .pc (wrong headers/libs) and libdrm fails outright (host has no libdrm.pc).
+# Pinning the libdir to our sysroot makes every dependency resolve from the .pc files
+# gen-pkgconfig.sh emitted there — full sysroot isolation, no host leakage.
+# (pkg_config_path is a *built-in option* in meson ≥1.4, so it would go in
+# [built-in options]; pkg_config_libdir is a [properties] key — envconfig.py:195.)
+pkg_config_libdir = ['@SYSROOT@/usr/lib/pkgconfig']

@@ -475,6 +475,10 @@ global:
     /* pthread_cleanup_push/pop are macros in musl <pthread.h>, not symbols */
     pthread_cond_broadcast; pthread_cond_destroy; pthread_cond_init;
     pthread_cond_signal; pthread_cond_wait; pthread_cond_timedwait;
+    /* Condition attributes are pure user-space state. EGL creates a monotonic
+     * fence condition variable and therefore needs init + setclock at link time. */
+    pthread_condattr_destroy; pthread_condattr_init; pthread_condattr_setclock;
+    pthread_condattr_setpshared;
     pthread_create; pthread_detach;
     pthread_equal; pthread_exit; pthread_getspecific; pthread_join;
     pthread_key_create; pthread_kill;

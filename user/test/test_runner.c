@@ -56,6 +56,9 @@ static struct test_entry tests[] = {
     {"test_console", "/test/test_console.elf"},
     {"test_locale", "/test/test_locale.elf"},
     {"test_regex", "/test/test_regex.elf"},
+#if defined(TEST)
+    {"egl_smoke", "/test/test_egl_smoke.elf"},
+#endif
     {"hello_dyn", "/local/hello_dyn.elf"},
     /* ldso.md Phase 1.5 go/no-go: musl fused libc.so self-bootstraps as
      * PT_INTERP /lib/ld-musl-x86_64.so.1 and jumps to main. The ld_* ELFs pull

@@ -1791,10 +1791,12 @@ int64_t sys_mprotect(int64_t arg1, int64_t arg2, int64_t prot_arg,
   uint32_t prot_masked = (uint32_t)prot & ~(PROT_GROWSDOWN | PROT_SEM);
   if (prot_masked & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
     return (int64_t)-EINVAL;
-  if (addr >= 0x800000000000ULL)
+  if (addr >= USER_VMA_UPPER_BOUND)
     return (int64_t)-EINVAL;
 
   size = ALIGN_UP(size, PAGE_SIZE);
+  if (size > USER_VMA_UPPER_BOUND - addr)
+    return (int64_t)-ENOMEM;
 
   xtask *proc = current_task;
   spinlock *lk = &proc->mm->mmap_lock;
@@ -1828,12 +1830,15 @@ int64_t sys_mprotect(int64_t arg1, int64_t arg2, int64_t prot_arg,
     uint64_t va = addr + i * PAGE_SIZE;
     uint64_t *pte = lookup_pte(proc->mm->cr3, va);
     if (!pte) {
-      // Page genuinely unmapped → -ENOMEM, already-changed pages kept (Linux).
-      // Metadata was already split above; the unmapped hole carries the new
-      // prot but has no PTE, which is harmless (no page to fault against until
-      // something maps it).
-      spin_unlock_irqrestore(lk, flags);
-      return (int64_t)-ENOMEM;
+      // A missing leaf PTE is normal for an unfaulted file-backed mapping;
+      // its VMA carries the new protection for the eventual fault-in. ELF
+      // exec segments have no VMA but are pre-populated, so a missing PTE
+      // without a VMA remains a genuinely unmapped page.
+      if (!vma_find(proc->mm, va)) {
+        spin_unlock_irqrestore(lk, flags);
+        return (int64_t)-ENOMEM;
+      }
+      continue;
     }
     if (*pte & PTE_PS) {
       // Refuse to split huge pages (no anonymous huge-page mprotect users).

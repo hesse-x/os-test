@@ -1,0 +1,1037 @@
+
+## EGL  [shared library]
+- **deps**: expat, , libdrm, threads, dep127903723980555518857207391713828603916, zlib, m, valgrind, libzstd, libunwind
+- sources (c):
+  - src/egl/main/eglapi.c
+  - src/egl/main/eglarray.c
+  - src/egl/main/eglconfigdebug.c
+  - src/egl/main/eglconfig.c
+  - src/egl/main/eglcontext.c
+  - src/egl/main/eglcurrent.c
+  - src/egl/main/egldevice.c
+  - src/egl/main/egldisplay.c
+  - src/egl/main/eglglobals.c
+  - src/egl/main/eglimage.c
+  - src/egl/main/egllog.c
+  - src/egl/main/eglsurface.c
+  - src/egl/main/eglsync.c
+  - src/egl/drivers/dri2/egl_dri2.c
+  - src/egl/drivers/dri2/platform_device.c
+  - src/egl/drivers/dri2/platform_surfaceless.c
+  - src/egl/drivers/dri2/platform_drm.c
+
+## GLESv2  [shared library]
+- **deps**: threads, libdrm, m, , valgrind
+- sources (c):
+  - src/mesa/glapi/es2api/libgles2_public.c
+
+## gallium-26.1.4  [shared library]
+- **deps**: libdrm, llvm, threads, expat, , dep127903723980555518857207391713828603916, zlib, m, valgrind, libzstd, libunwind, dep32060262975816799786263072986440126212
+- sources (c):
+  - src/gallium/targets/dri/dri_target.c
+
+## gbm  [shared library]
+- **deps**: libdrm, expat, 
+- sources (c):
+  - src/gbm/main/backend.c
+  - src/gbm/main/gbm.c
+
+## dri_gbm  [shared library]
+- **deps**: , libdrm, dep127903723980555518857207391713828603916, zlib, threads, m, valgrind, libzstd, libunwind, expat
+- sources (c):
+  - src/gbm/backends/dri/gbm_dri.c
+
+## gallium  [static library]
+- **deps**: libdrm, llvm, , m, threads, sensors, ws2_32, dep127903723980555518857207391713828603916, zlib, valgrind, libzstd, libunwind
+- sources (c):
+  - src/gallium/auxiliary/cso_cache/cso_cache.c
+  - src/gallium/auxiliary/cso_cache/cso_context.c
+  - src/gallium/auxiliary/cso_cache/cso_hash.c
+  - src/gallium/auxiliary/draw/draw_context.c
+  - src/gallium/auxiliary/draw/draw_fs.c
+  - src/gallium/auxiliary/draw/draw_gs.c
+  - src/gallium/auxiliary/draw/draw_mesh.c
+  - src/gallium/auxiliary/draw/draw_mesh_prim.c
+  - src/gallium/auxiliary/draw/draw_pipe_aaline.c
+  - src/gallium/auxiliary/draw/draw_pipe_aapoint.c
+  - src/gallium/auxiliary/draw/draw_pipe.c
+  - src/gallium/auxiliary/draw/draw_pipe_clip.c
+  - src/gallium/auxiliary/draw/draw_pipe_cull.c
+  - src/gallium/auxiliary/draw/draw_pipe_flatshade.c
+  - src/gallium/auxiliary/draw/draw_pipe_offset.c
+  - src/gallium/auxiliary/draw/draw_pipe_pstipple.c
+  - src/gallium/auxiliary/draw/draw_pipe_stipple.c
+  - src/gallium/auxiliary/draw/draw_pipe_twoside.c
+  - src/gallium/auxiliary/draw/draw_pipe_unfilled.c
+  - src/gallium/auxiliary/draw/draw_pipe_user_cull.c
+  - src/gallium/auxiliary/draw/draw_pipe_util.c
+  - src/gallium/auxiliary/draw/draw_pipe_validate.c
+  - src/gallium/auxiliary/draw/draw_pipe_vbuf.c
+  - src/gallium/auxiliary/draw/draw_pipe_wide_line.c
+  - src/gallium/auxiliary/draw/draw_pipe_wide_point.c
+  - src/gallium/auxiliary/draw/draw_prim_assembler.c
+  - src/gallium/auxiliary/draw/draw_pt.c
+  - src/gallium/auxiliary/draw/draw_pt_emit.c
+  - src/gallium/auxiliary/draw/draw_pt_fetch.c
+  - src/gallium/auxiliary/draw/draw_pt_fetch_shade_emit.c
+  - src/gallium/auxiliary/draw/draw_pt_fetch_shade_pipeline.c
+  - src/gallium/auxiliary/draw/draw_pt_mesh_pipeline.c
+  - src/gallium/auxiliary/draw/draw_pt_post_vs.c
+  - src/gallium/auxiliary/draw/draw_pt_so_emit.c
+  - src/gallium/auxiliary/draw/draw_pt_util.c
+  - src/gallium/auxiliary/draw/draw_pt_vsplit.c
+  - src/gallium/auxiliary/draw/draw_tess.c
+  - src/gallium/auxiliary/draw/draw_vertex.c
+  - src/gallium/auxiliary/draw/draw_vs.c
+  - src/gallium/auxiliary/draw/draw_vs_exec.c
+  - src/gallium/auxiliary/draw/draw_vs_variant.c
+  - src/gallium/auxiliary/driver_ddebug/dd_context.c
+  - src/gallium/auxiliary/driver_ddebug/dd_draw.c
+  - src/gallium/auxiliary/driver_ddebug/dd_screen.c
+  - src/gallium/auxiliary/driver_noop/noop_pipe.c
+  - src/gallium/auxiliary/driver_noop/noop_state.c
+  - src/gallium/auxiliary/driver_trace/tr_context.c
+  - src/gallium/auxiliary/driver_trace/tr_dump.c
+  - src/gallium/auxiliary/driver_trace/tr_dump_state.c
+  - src/gallium/auxiliary/driver_trace/tr_screen.c
+  - src/gallium/auxiliary/driver_trace/tr_texture.c
+  - src/gallium/auxiliary/driver_trace/tr_video.c
+  - src/gallium/auxiliary/hud/font.c
+  - src/gallium/auxiliary/hud/hud_context.c
+  - src/gallium/auxiliary/hud/hud_cpu.c
+  - src/gallium/auxiliary/hud/hud_nic.c
+  - src/gallium/auxiliary/hud/hud_cpufreq.c
+  - src/gallium/auxiliary/hud/hud_diskstat.c
+  - src/gallium/auxiliary/hud/hud_sensors_temp.c
+  - src/gallium/auxiliary/hud/hud_driver_query.c
+  - src/gallium/auxiliary/hud/hud_fps.c
+  - src/gallium/auxiliary/indices/u_primconvert.c
+  - src/gallium/auxiliary/pipebuffer/pb_buffer_fenced.c
+  - src/gallium/auxiliary/pipebuffer/pb_bufmgr_cache.c
+  - src/gallium/auxiliary/pipebuffer/pb_bufmgr_debug.c
+  - src/gallium/auxiliary/pipebuffer/pb_bufmgr_mm.c
+  - src/gallium/auxiliary/pipebuffer/pb_bufmgr_slab.c
+  - src/gallium/auxiliary/pipebuffer/pb_cache.c
+  - src/gallium/auxiliary/pipebuffer/pb_validate.c
+  - src/gallium/auxiliary/postprocess/pp_celshade.c
+  - src/gallium/auxiliary/postprocess/pp_colors.c
+  - src/gallium/auxiliary/postprocess/pp_init.c
+  - src/gallium/auxiliary/postprocess/pp_mlaa.c
+  - src/gallium/auxiliary/postprocess/pp_program.c
+  - src/gallium/auxiliary/postprocess/pp_run.c
+  - src/gallium/auxiliary/rtasm/rtasm_execmem.c
+  - src/gallium/auxiliary/rtasm/rtasm_x86sse.c
+  - src/gallium/auxiliary/tgsi/tgsi_aa_point.c
+  - src/gallium/auxiliary/tgsi/tgsi_build.c
+  - src/gallium/auxiliary/tgsi/tgsi_dump.c
+  - src/gallium/auxiliary/tgsi/tgsi_dynamic_indexing.c
+  - src/gallium/auxiliary/tgsi/tgsi_exec.c
+  - src/gallium/auxiliary/tgsi/tgsi_from_mesa.c
+  - src/gallium/auxiliary/tgsi/tgsi_info.c
+  - src/gallium/auxiliary/tgsi/tgsi_iterate.c
+  - src/gallium/auxiliary/tgsi/tgsi_lowering.c
+  - src/gallium/auxiliary/tgsi/tgsi_parse.c
+  - src/gallium/auxiliary/tgsi/tgsi_point_sprite.c
+  - src/gallium/auxiliary/tgsi/tgsi_sanity.c
+  - src/gallium/auxiliary/tgsi/tgsi_scan.c
+  - src/gallium/auxiliary/tgsi/tgsi_strings.c
+  - src/gallium/auxiliary/tgsi/tgsi_text.c
+  - src/gallium/auxiliary/tgsi/tgsi_transform.c
+  - src/gallium/auxiliary/tgsi/tgsi_two_side.c
+  - src/gallium/auxiliary/tgsi/tgsi_ureg.c
+  - src/gallium/auxiliary/tgsi/tgsi_util.c
+  - src/gallium/auxiliary/tgsi/tgsi_vpos.c
+  - src/gallium/auxiliary/translate/translate.c
+  - src/gallium/auxiliary/translate/translate_cache.c
+  - src/gallium/auxiliary/translate/translate_generic.c
+  - src/gallium/auxiliary/translate/translate_sse.c
+  - src/gallium/auxiliary/util/u_async_debug.c
+  - src/gallium/auxiliary/util/u_bitmask.c
+  - src/gallium/auxiliary/util/u_blitter.c
+  - src/gallium/auxiliary/util/u_debug_describe.c
+  - src/gallium/auxiliary/util/u_debug_flush.c
+  - src/gallium/auxiliary/util/u_debug_image.c
+  - src/gallium/auxiliary/util/u_debug_refcnt.c
+  - src/gallium/auxiliary/util/u_draw.c
+  - src/gallium/auxiliary/util/u_draw_quad.c
+  - src/gallium/auxiliary/util/u_driconf.c
+  - src/gallium/auxiliary/util/u_dump_defines.c
+  - src/gallium/auxiliary/util/u_dump_state.c
+  - src/gallium/auxiliary/util/u_framebuffer.c
+  - src/gallium/auxiliary/util/u_gen_mipmap.c
+  - src/gallium/auxiliary/util/u_handle_table.c
+  - src/gallium/auxiliary/util/u_helpers.c
+  - src/gallium/auxiliary/util/u_index_modify.c
+  - src/gallium/auxiliary/util/u_live_shader_cache.c
+  - src/gallium/auxiliary/util/u_log.c
+  - src/gallium/auxiliary/util/u_prim.c
+  - src/gallium/auxiliary/util/u_prim_restart.c
+  - src/gallium/auxiliary/util/u_pstipple.c
+  - src/gallium/auxiliary/util/u_resource.c
+  - src/gallium/auxiliary/util/u_sample_positions.c
+  - src/gallium/auxiliary/util/u_sampler.c
+  - src/gallium/auxiliary/util/u_screen.c
+  - src/gallium/auxiliary/util/u_simple_shaders.c
+  - src/gallium/auxiliary/util/u_split_draw.c
+  - src/gallium/auxiliary/util/u_suballoc.c
+  - src/gallium/auxiliary/util/u_surface.c
+  - src/gallium/auxiliary/util/u_tests.c
+  - src/gallium/auxiliary/util/u_texture.c
+  - src/gallium/auxiliary/util/u_tile.c
+  - src/gallium/auxiliary/util/u_transfer.c
+  - src/gallium/auxiliary/util/u_transfer_helper.c
+  - src/gallium/auxiliary/util/u_threaded_context.c
+  - src/gallium/auxiliary/util/u_trace_gallium.c
+  - src/gallium/auxiliary/util/u_upload_mgr.c
+  - src/gallium/auxiliary/util/u_vbuf.c
+  - src/gallium/auxiliary/util/u_vertex_state_cache.c
+  - src/gallium/auxiliary/nir/tgsi_to_nir.c
+  - src/gallium/auxiliary/nir/nir_to_tgsi.c
+  - src/gallium/auxiliary/nir/nir_draw_helpers.c
+  - src/gallium/auxiliary/renderonly/renderonly.c
+  - <gen> /tmp/mesa_probe/src/gallium/auxiliary/draw_nir_lower_opcodes.c
+  - <gen> /tmp/mesa_probe/src/gallium/auxiliary/tr_util.c
+  - <gen> /tmp/mesa_probe/src/gallium/auxiliary/u_tracepoints.c
+  - <gen> /tmp/mesa_probe/src/gallium/auxiliary/u_indices_gen.c
+  - <gen> /tmp/mesa_probe/src/gallium/auxiliary/u_unfilled_gen.c
+
+## dri  [static library]
+- **deps**: libdrm, dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind
+- sources (c):
+  - src/gallium/frontends/dri/dri_context.c
+  - src/gallium/frontends/dri/dri_drawable.c
+  - src/gallium/frontends/dri/dri_helpers.c
+  - src/gallium/frontends/dri/dri_query_renderer.c
+  - src/gallium/frontends/dri/dri_screen.c
+  - src/gallium/frontends/dri/dri_util.c
+  - src/gallium/frontends/dri/drisw.c
+  - src/gallium/frontends/dri/dri2.c
+  - src/gallium/frontends/dri/kopper_stubs.c
+
+## softpipe  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/gallium/drivers/softpipe/sp_buffer.c
+  - src/gallium/drivers/softpipe/sp_clear.c
+  - src/gallium/drivers/softpipe/sp_context.c
+  - src/gallium/drivers/softpipe/sp_compute.c
+  - src/gallium/drivers/softpipe/sp_draw_arrays.c
+  - src/gallium/drivers/softpipe/sp_fence.c
+  - src/gallium/drivers/softpipe/sp_flush.c
+  - src/gallium/drivers/softpipe/sp_fs_exec.c
+  - src/gallium/drivers/softpipe/sp_image.c
+  - src/gallium/drivers/softpipe/sp_prim_vbuf.c
+  - src/gallium/drivers/softpipe/sp_quad_blend.c
+  - src/gallium/drivers/softpipe/sp_quad_depth_test.c
+  - src/gallium/drivers/softpipe/sp_quad_fs.c
+  - src/gallium/drivers/softpipe/sp_quad_pipe.c
+  - src/gallium/drivers/softpipe/sp_query.c
+  - src/gallium/drivers/softpipe/sp_screen.c
+  - src/gallium/drivers/softpipe/sp_setup.c
+  - src/gallium/drivers/softpipe/sp_state_blend.c
+  - src/gallium/drivers/softpipe/sp_state_clip.c
+  - src/gallium/drivers/softpipe/sp_state_derived.c
+  - src/gallium/drivers/softpipe/sp_state_image.c
+  - src/gallium/drivers/softpipe/sp_state_rasterizer.c
+  - src/gallium/drivers/softpipe/sp_state_sampler.c
+  - src/gallium/drivers/softpipe/sp_state_shader.c
+  - src/gallium/drivers/softpipe/sp_state_so.c
+  - src/gallium/drivers/softpipe/sp_state_surface.c
+  - src/gallium/drivers/softpipe/sp_state_vertex.c
+  - src/gallium/drivers/softpipe/sp_surface.c
+  - src/gallium/drivers/softpipe/sp_tex_sample.c
+  - src/gallium/drivers/softpipe/sp_tex_tile_cache.c
+  - src/gallium/drivers/softpipe/sp_texture.c
+  - src/gallium/drivers/softpipe/sp_tile_cache.c
+
+## glapi  [static library]
+- **deps**: threads, dep127903723980555518857207391713828603916, zlib, , m, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/mesa/glapi/shared-glapi/core.c
+
+## loader  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/loader/loader_dri_helper.c
+  - src/loader/loader.c
+
+## mesa  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm, SPIRV-Tools
+- sources (c):
+  - src/mesa/main/accum.c
+  - src/mesa/main/api_arrayelt.c
+  - src/mesa/main/arbprogram.c
+  - src/mesa/main/arrayobj.c
+  - src/mesa/main/atifragshader.c
+  - src/mesa/main/attrib.c
+  - src/mesa/main/barrier.c
+  - src/mesa/main/bbox.c
+  - src/mesa/main/blend.c
+  - src/mesa/main/blit.c
+  - src/mesa/main/bufferobj.c
+  - src/mesa/main/buffers.c
+  - src/mesa/main/clear.c
+  - src/mesa/main/clip.c
+  - src/mesa/main/compute.c
+  - src/mesa/main/condrender.c
+  - src/mesa/main/conservativeraster.c
+  - src/mesa/main/context.c
+  - src/mesa/main/copyimage.c
+  - src/mesa/main/debug.c
+  - src/mesa/main/debug_output.c
+  - src/mesa/main/depth.c
+  - src/mesa/main/dlist.c
+  - src/mesa/main/draw.c
+  - src/mesa/main/draw_validate.c
+  - src/mesa/main/drawpix.c
+  - src/mesa/main/drawtex.c
+  - src/mesa/main/enable.c
+  - src/mesa/main/errors.c
+  - src/mesa/main/es1_conversion.c
+  - src/mesa/main/eval.c
+  - src/mesa/main/extensions.c
+  - src/mesa/main/extensions_table.c
+  - src/mesa/main/externalobjects.c
+  - src/mesa/main/fbobject.c
+  - src/mesa/main/feedback.c
+  - src/mesa/main/ff_fragment_shader.c
+  - src/mesa/main/ffvertex_prog.c
+  - src/mesa/main/fog.c
+  - src/mesa/main/format_utils.c
+  - src/mesa/main/formatquery.c
+  - src/mesa/main/formats.c
+  - src/mesa/main/framebuffer.c
+  - src/mesa/main/genmipmap.c
+  - src/mesa/main/get.c
+  - src/mesa/main/getstring.c
+  - src/mesa/main/glformats.c
+  - src/mesa/main/glspirv.c
+  - src/mesa/main/glthread.c
+  - src/mesa/main/glthread_bufferobj.c
+  - src/mesa/main/glthread_draw.c
+  - src/mesa/main/glthread_draw_unroll.c
+  - src/mesa/main/glthread_get.c
+  - src/mesa/main/glthread_list.c
+  - src/mesa/main/glthread_pixels.c
+  - src/mesa/main/glthread_shaderobj.c
+  - src/mesa/main/glthread_varray.c
+  - src/mesa/main/hash.c
+  - src/mesa/main/hint.c
+  - src/mesa/main/image.c
+  - src/mesa/main/light.c
+  - src/mesa/main/lines.c
+  - src/mesa/main/matrix.c
+  - src/mesa/main/mesh_shader.c
+  - src/mesa/main/mipmap.c
+  - src/mesa/main/multisample.c
+  - src/mesa/main/objectlabel.c
+  - src/mesa/main/pack.c
+  - src/mesa/main/pbo.c
+  - src/mesa/main/performance_monitor.c
+  - src/mesa/main/performance_query.c
+  - src/mesa/main/pipelineobj.c
+  - src/mesa/main/pixel.c
+  - src/mesa/main/pixelstore.c
+  - src/mesa/main/pixeltransfer.c
+  - src/mesa/main/points.c
+  - src/mesa/main/polygon.c
+  - src/mesa/main/program_binary.c
+  - src/mesa/main/program_resource.c
+  - src/mesa/main/querymatrix.c
+  - src/mesa/main/queryobj.c
+  - src/mesa/main/rastpos.c
+  - src/mesa/main/readpix.c
+  - src/mesa/main/renderbuffer.c
+  - src/mesa/main/robustness.c
+  - src/mesa/main/samplerobj.c
+  - src/mesa/main/scissor.c
+  - src/mesa/main/shaderapi.c
+  - src/mesa/main/shaderimage.c
+  - src/mesa/main/shaderobj.c
+  - src/mesa/main/shared.c
+  - src/mesa/main/spirv_capabilities.c
+  - src/mesa/main/spirv_extensions.c
+  - src/mesa/main/state.c
+  - src/mesa/main/stencil.c
+  - src/mesa/main/syncobj.c
+  - src/mesa/main/texcompress.c
+  - src/mesa/main/texcompress_bptc.c
+  - src/mesa/main/texcompress_cpal.c
+  - src/mesa/main/texcompress_etc.c
+  - src/mesa/main/texcompress_fxt1.c
+  - src/mesa/main/texcompress_rgtc.c
+  - src/mesa/main/texcompress_s3tc.c
+  - src/mesa/main/texenv.c
+  - src/mesa/main/texgen.c
+  - src/mesa/main/texgetimage.c
+  - src/mesa/main/teximage.c
+  - src/mesa/main/texobj.c
+  - src/mesa/main/texparam.c
+  - src/mesa/main/texstate.c
+  - src/mesa/main/texstorage.c
+  - src/mesa/main/texstore.c
+  - src/mesa/main/texturebindless.c
+  - src/mesa/main/textureview.c
+  - src/mesa/main/transformfeedback.c
+  - src/mesa/main/uniforms.c
+  - src/mesa/main/varray.c
+  - src/mesa/main/version.c
+  - src/mesa/main/viewport.c
+  - src/mesa/math/m_eval.c
+  - src/mesa/math/m_matrix.c
+  - src/mesa/program/arbprogparse.c
+  - src/mesa/program/prog_cache.c
+  - src/mesa/program/prog_instruction.c
+  - src/mesa/program/prog_parameter.c
+  - src/mesa/program/prog_parameter_layout.c
+  - src/mesa/program/prog_print.c
+  - src/mesa/program/prog_statevars.c
+  - src/mesa/program/prog_to_nir.c
+  - src/mesa/program/program.c
+  - src/mesa/program/program_parse_extra.c
+  - src/mesa/program/symbol_table.c
+  - src/mesa/state_tracker/st_atifs_to_nir.c
+  - src/mesa/state_tracker/st_atom_atomicbuf.c
+  - src/mesa/state_tracker/st_atom_blend.c
+  - src/mesa/state_tracker/st_atom_clip.c
+  - src/mesa/state_tracker/st_atom_constbuf.c
+  - src/mesa/state_tracker/st_atom_depth.c
+  - src/mesa/state_tracker/st_atom_framebuffer.c
+  - src/mesa/state_tracker/st_atom_image.c
+  - src/mesa/state_tracker/st_atom_msaa.c
+  - src/mesa/state_tracker/st_atom_pixeltransfer.c
+  - src/mesa/state_tracker/st_atom_rasterizer.c
+  - src/mesa/state_tracker/st_atom_sampler.c
+  - src/mesa/state_tracker/st_atom_scissor.c
+  - src/mesa/state_tracker/st_atom_shader.c
+  - src/mesa/state_tracker/st_atom_stipple.c
+  - src/mesa/state_tracker/st_atom_storagebuf.c
+  - src/mesa/state_tracker/st_atom_tess.c
+  - src/mesa/state_tracker/st_atom_texture.c
+  - src/mesa/state_tracker/st_atom_viewport.c
+  - src/mesa/state_tracker/st_cb_bitmap.c
+  - src/mesa/state_tracker/st_cb_clear.c
+  - src/mesa/state_tracker/st_cb_copyimage.c
+  - src/mesa/state_tracker/st_cb_drawpixels.c
+  - src/mesa/state_tracker/st_cb_drawtex.c
+  - src/mesa/state_tracker/st_cb_eglimage.c
+  - src/mesa/state_tracker/st_cb_feedback.c
+  - src/mesa/state_tracker/st_cb_flush.c
+  - src/mesa/state_tracker/st_cb_rasterpos.c
+  - src/mesa/state_tracker/st_cb_readpixels.c
+  - src/mesa/state_tracker/st_cb_texture.c
+  - src/mesa/state_tracker/st_context.c
+  - src/mesa/state_tracker/st_copytex.c
+  - src/mesa/state_tracker/st_debug.c
+  - src/mesa/state_tracker/st_draw.c
+  - src/mesa/state_tracker/st_draw_feedback.c
+  - src/mesa/state_tracker/st_draw_hw_select.c
+  - src/mesa/state_tracker/st_extensions.c
+  - src/mesa/state_tracker/st_format.c
+  - src/mesa/state_tracker/st_gen_mipmap.c
+  - src/mesa/state_tracker/st_interop.c
+  - src/mesa/state_tracker/st_manager.c
+  - src/mesa/state_tracker/st_nir_builtins.c
+  - src/mesa/state_tracker/st_nir_lower_alpha_test.c
+  - src/mesa/state_tracker/st_nir_lower_builtin.c
+  - src/mesa/state_tracker/st_nir_lower_drawpixels.c
+  - src/mesa/state_tracker/st_nir_lower_fog.c
+  - src/mesa/state_tracker/st_nir_lower_point_size_mov.c
+  - src/mesa/state_tracker/st_nir_lower_position_invariant.c
+  - src/mesa/state_tracker/st_nir_lower_tex_src_plane.c
+  - src/mesa/state_tracker/st_pbo.c
+  - src/mesa/state_tracker/st_pbo_compute.c
+  - src/mesa/state_tracker/st_program.c
+  - src/mesa/state_tracker/st_sampler_view.c
+  - src/mesa/state_tracker/st_scissor.c
+  - src/mesa/state_tracker/st_shader_cache.c
+  - src/mesa/state_tracker/st_texcompress_compute.c
+  - src/mesa/state_tracker/st_texture.c
+  - src/mesa/vbo/vbo_context.c
+  - src/mesa/vbo/vbo_exec.c
+  - src/mesa/vbo/vbo_exec_api.c
+  - src/mesa/vbo/vbo_exec_draw.c
+  - src/mesa/vbo/vbo_exec_eval.c
+  - src/mesa/vbo/vbo_minmax_index.c
+  - src/mesa/vbo/vbo_noop.c
+  - src/mesa/vbo/vbo_save.c
+  - src/mesa/vbo/vbo_save_api.c
+  - src/mesa/vbo/vbo_save_draw.c
+  - src/mesa/vbo/vbo_save_loopback.c
+  - <gen> /tmp/mesa_probe/src/mesa/program/lex.yy.c
+  - <gen> /tmp/mesa_probe/src/mesa/program/program_parse.tab.c
+  - <gen> /tmp/mesa_probe/src/mesa/glapi/glapi/gen/api_exec_init.c
+  - <gen> /tmp/mesa_probe/src/mesa/glapi/glapi/gen/enums.c
+  - <gen> /tmp/mesa_probe/src/mesa/format_fallback.c
+  - <gen> /tmp/mesa_probe/src/mesa/glapi/glapi/gen/unmarshal_table.c
+  - <gen> /tmp/mesa_probe/src/mesa/glapi/glapi/gen/marshal_generated0.c
+  - <gen> /tmp/mesa_probe/src/mesa/glapi/glapi/gen/marshal_generated1.c
+  - <gen> /tmp/mesa_probe/src/mesa/glapi/glapi/gen/marshal_generated2.c
+  - <gen> /tmp/mesa_probe/src/mesa/glapi/glapi/gen/marshal_generated3.c
+  - <gen> /tmp/mesa_probe/src/mesa/glapi/glapi/gen/marshal_generated4.c
+  - <gen> /tmp/mesa_probe/src/mesa/glapi/glapi/gen/marshal_generated5.c
+  - <gen> /tmp/mesa_probe/src/mesa/glapi/glapi/gen/marshal_generated6.c
+  - <gen> /tmp/mesa_probe/src/mesa/glapi/glapi/gen/marshal_generated7.c
+- sources (cpp):
+  - src/mesa/main/shader_query.cpp
+  - src/mesa/main/uniform_query.cpp
+  - src/mesa/state_tracker/st_atom_array.cpp
+  - src/mesa/state_tracker/st_glsl_to_nir.cpp
+
+## nir  [static library]
+- **deps**: valgrind, dep127903723980555518857207391713828603916, zlib, , threads, m, libzstd, libunwind, libdrm
+- sources (c):
+  - src/compiler/nir/nir.c
+  - src/compiler/nir/nir_builder.c
+  - src/compiler/nir/nir_builtin_builder.c
+  - src/compiler/nir/nir_clip_cull_distance_io_utils.c
+  - src/compiler/nir/nir_clone.c
+  - src/compiler/nir/nir_control_flow.c
+  - src/compiler/nir/nir_deref.c
+  - src/compiler/nir/nir_divergence_analysis.c
+  - src/compiler/nir/nir_dominance.c
+  - src/compiler/nir/nir_dominance_lca.c
+  - src/compiler/nir/nir_downgrade_pls_vars.c
+  - src/compiler/nir/nir_fixup_is_exported.c
+  - src/compiler/nir/nir_format_convert.c
+  - src/compiler/nir/nir_from_ssa.c
+  - src/compiler/nir/nir_functions.c
+  - src/compiler/nir/nir_gather_info.c
+  - src/compiler/nir/nir_gather_output_deps.c
+  - src/compiler/nir/nir_gather_tcs_info.c
+  - src/compiler/nir/nir_gather_types.c
+  - src/compiler/nir/nir_gather_xfb_info.c
+  - src/compiler/nir/nir_opt_group_loads.c
+  - src/compiler/nir/nir_gs_count_vertices.c
+  - src/compiler/nir/nir_inline_sysval.c
+  - src/compiler/nir/nir_inline_uniforms.c
+  - src/compiler/nir/nir_instr_set.c
+  - src/compiler/nir/nir_io_add_xfb_info.c
+  - src/compiler/nir/nir_legacy.c
+  - src/compiler/nir/nir_linking_helpers.c
+  - src/compiler/nir/nir_liveness.c
+  - src/compiler/nir/nir_loop_analyze.c
+  - src/compiler/nir/nir_lower_alu.c
+  - src/compiler/nir/nir_lower_alu_width.c
+  - src/compiler/nir/nir_lower_alpha.c
+  - src/compiler/nir/nir_lower_amul.c
+  - src/compiler/nir/nir_lower_array_deref_of_vec.c
+  - src/compiler/nir/nir_lower_atomics_to_ssbo.c
+  - src/compiler/nir/nir_lower_bitmap.c
+  - src/compiler/nir/nir_lower_blend.c
+  - src/compiler/nir/nir_lower_bool_to_float.c
+  - src/compiler/nir/nir_lower_bool_to_int32.c
+  - src/compiler/nir/nir_lower_calls_to_builtins.c
+  - src/compiler/nir/nir_lower_cl_images.c
+  - src/compiler/nir/nir_lower_clamp_color_outputs.c
+  - src/compiler/nir/nir_lower_clip.c
+  - src/compiler/nir/nir_lower_clip_disable.c
+  - src/compiler/nir/nir_lower_clip_halfz.c
+  - src/compiler/nir/nir_lower_const_arrays_to_uniforms.c
+  - src/compiler/nir/nir_lower_continue_constructs.c
+  - src/compiler/nir/nir_lower_convert_alu_types.c
+  - src/compiler/nir/nir_lower_cooperative_matrix.c
+  - src/compiler/nir/nir_lower_variable_initializers.c
+  - src/compiler/nir/nir_lower_discard_if.c
+  - src/compiler/nir/nir_lower_double_ops.c
+  - src/compiler/nir/nir_lower_explicit_io.c
+  - src/compiler/nir/nir_lower_fb_read.c
+  - src/compiler/nir/nir_lower_flatshade.c
+  - src/compiler/nir/nir_lower_floats.c
+  - src/compiler/nir/nir_lower_flrp.c
+  - src/compiler/nir/nir_lower_fp16_conv.c
+  - src/compiler/nir/nir_lower_fragcoord_wtrans.c
+  - src/compiler/nir/nir_lower_frag_coord_to_pixel_coord.c
+  - src/compiler/nir/nir_lower_fragcolor.c
+  - src/compiler/nir/nir_lower_frexp.c
+  - src/compiler/nir/nir_lower_global_vars_to_local.c
+  - src/compiler/nir/nir_lower_goto_ifs.c
+  - src/compiler/nir/nir_lower_gs_intrinsics.c
+  - src/compiler/nir/nir_lower_halt_to_return.c
+  - src/compiler/nir/nir_lower_helper_writes.c
+  - src/compiler/nir/nir_lower_load_const_to_scalar.c
+  - src/compiler/nir/nir_lower_locals_to_regs.c
+  - src/compiler/nir/nir_lower_idiv.c
+  - src/compiler/nir/nir_lower_image.c
+  - src/compiler/nir/nir_lower_image_atomics_to_global.c
+  - src/compiler/nir/nir_lower_indirect_derefs_to_if_else_trees.c
+  - src/compiler/nir/nir_lower_input_attachments.c
+  - src/compiler/nir/nir_lower_int64.c
+  - src/compiler/nir/nir_lower_interpolation.c
+  - src/compiler/nir/nir_lower_int_to_float.c
+  - src/compiler/nir/nir_lower_io.c
+  - src/compiler/nir/nir_lower_io_array_vars_to_elements.c
+  - src/compiler/nir/nir_lower_io_indirect_loads.c
+  - src/compiler/nir/nir_lower_io_vars_to_temporaries.c
+  - src/compiler/nir/nir_lower_io_to_scalar.c
+  - src/compiler/nir/nir_lower_io_vars_to_scalar.c
+  - src/compiler/nir/nir_lower_is_helper_invocation.c
+  - src/compiler/nir/nir_lower_multiview.c
+  - src/compiler/nir/nir_lower_mediump.c
+  - src/compiler/nir/nir_lower_mem_access_bit_sizes.c
+  - src/compiler/nir/nir_lower_memcpy.c
+  - src/compiler/nir/nir_lower_memory_model.c
+  - src/compiler/nir/nir_lower_non_uniform_access.c
+  - src/compiler/nir/nir_lower_packing.c
+  - src/compiler/nir/nir_lower_passthrough_edgeflags.c
+  - src/compiler/nir/nir_lower_patch_vertices.c
+  - src/compiler/nir/nir_lower_phis_to_scalar.c
+  - src/compiler/nir/nir_lower_pntc_ytransform.c
+  - src/compiler/nir/nir_lower_point_size.c
+  - src/compiler/nir/nir_lower_point_smooth.c
+  - src/compiler/nir/nir_lower_poly_line_smooth.c
+  - src/compiler/nir/nir_lower_printf.c
+  - src/compiler/nir/nir_lower_reg_intrinsics_to_ssa.c
+  - src/compiler/nir/nir_lower_readonly_images_to_tex.c
+  - src/compiler/nir/nir_lower_returns.c
+  - src/compiler/nir/nir_lower_robust_access.c
+  - src/compiler/nir/nir_lower_samplers.c
+  - src/compiler/nir/nir_lower_sample_shading.c
+  - src/compiler/nir/nir_lower_scratch.c
+  - src/compiler/nir/nir_lower_scratch_to_var.c
+  - src/compiler/nir/nir_lower_shader_calls.c
+  - src/compiler/nir/nir_lower_single_sampled.c
+  - src/compiler/nir/nir_lower_ssbo.c
+  - src/compiler/nir/nir_lower_subgroups.c
+  - src/compiler/nir/nir_lower_system_values.c
+  - src/compiler/nir/nir_lower_task_shader.c
+  - src/compiler/nir/nir_lower_terminate_to_demote.c
+  - src/compiler/nir/nir_lower_tess_coord_z.c
+  - src/compiler/nir/nir_lower_tex_shadow.c
+  - src/compiler/nir/nir_lower_tex.c
+  - src/compiler/nir/nir_lower_texcoord_replace.c
+  - src/compiler/nir/nir_lower_texcoord_replace_late.c
+  - src/compiler/nir/nir_lower_two_sided_color.c
+  - src/compiler/nir/nir_lower_undef_to_zero.c
+  - src/compiler/nir/nir_lower_vars_to_ssa.c
+  - src/compiler/nir/nir_lower_var_copies.c
+  - src/compiler/nir/nir_lower_vec_to_regs.c
+  - src/compiler/nir/nir_lower_vec3_to_vec4.c
+  - src/compiler/nir/nir_lower_view_index_to_device_index.c
+  - src/compiler/nir/nir_lower_viewport_transform.c
+  - src/compiler/nir/nir_lower_wpos_center.c
+  - src/compiler/nir/nir_lower_wpos_ytransform.c
+  - src/compiler/nir/nir_lower_wrmasks.c
+  - src/compiler/nir/nir_lower_bit_size.c
+  - src/compiler/nir/nir_lower_ubo_vec4.c
+  - src/compiler/nir/nir_lower_uniforms_to_ubo.c
+  - src/compiler/nir/nir_lower_workgroup_size.c
+  - src/compiler/nir/nir_lower_sysvals_to_varyings.c
+  - src/compiler/nir/nir_metadata.c
+  - src/compiler/nir/nir_mod_analysis.c
+  - src/compiler/nir/nir_move_output_stores_to_end.c
+  - src/compiler/nir/nir_move_vec_src_uses_to_dest.c
+  - src/compiler/nir/nir_normalize_cubemap_coords.c
+  - src/compiler/nir/nir_normalize_sin_cos.c
+  - src/compiler/nir/nir_opt_access.c
+  - src/compiler/nir/nir_opt_barriers.c
+  - src/compiler/nir/nir_opt_barycentric.c
+  - src/compiler/nir/nir_opt_call.c
+  - src/compiler/nir/nir_opt_clip_cull_const.c
+  - src/compiler/nir/nir_opt_combine_stores.c
+  - src/compiler/nir/nir_opt_comparison_pre.c
+  - src/compiler/nir/nir_opt_constant_folding.c
+  - src/compiler/nir/nir_opt_copy_prop_vars.c
+  - src/compiler/nir/nir_opt_copy_propagate.c
+  - src/compiler/nir/nir_opt_cse.c
+  - src/compiler/nir/nir_opt_dce.c
+  - src/compiler/nir/nir_opt_dead_cf.c
+  - src/compiler/nir/nir_opt_dead_write_vars.c
+  - src/compiler/nir/nir_opt_find_array_copies.c
+  - src/compiler/nir/nir_opt_fp_math_ctrl.c
+  - src/compiler/nir/nir_opt_frag_coord_to_pixel_coord.c
+  - src/compiler/nir/nir_opt_fragdepth.c
+  - src/compiler/nir/nir_opt_gcm.c
+  - src/compiler/nir/nir_opt_generate_bfi.c
+  - src/compiler/nir/nir_opt_idiv_const.c
+  - src/compiler/nir/nir_opt_if.c
+  - src/compiler/nir/nir_opt_intrinsics.c
+  - src/compiler/nir/nir_opt_large_constants.c
+  - src/compiler/nir/nir_opt_licm.c
+  - src/compiler/nir/nir_opt_load_skip_helpers.c
+  - src/compiler/nir/nir_opt_load_store_vectorize.c
+  - src/compiler/nir/nir_opt_loop.c
+  - src/compiler/nir/nir_opt_loop_unroll.c
+  - src/compiler/nir/nir_opt_memcpy.c
+  - src/compiler/nir/nir_opt_move.c
+  - src/compiler/nir/nir_opt_move_discards_to_top.c
+  - src/compiler/nir/nir_opt_move_to_top.c
+  - src/compiler/nir/nir_opt_mqsad.c
+  - src/compiler/nir/nir_opt_non_uniform_access.c
+  - src/compiler/nir/nir_opt_offsets.c
+  - src/compiler/nir/nir_opt_peephole_select.c
+  - src/compiler/nir/nir_opt_phi_precision.c
+  - src/compiler/nir/nir_opt_phi_to_bool.c
+  - src/compiler/nir/nir_opt_preamble.c
+  - src/compiler/nir/nir_opt_ray_queries.c
+  - src/compiler/nir/nir_opt_reassociate.c
+  - src/compiler/nir/nir_opt_reassociate_bfi.c
+  - src/compiler/nir/nir_opt_rematerialize_compares.c
+  - src/compiler/nir/nir_opt_remove_phis.c
+  - src/compiler/nir/nir_opt_shrink_stores.c
+  - src/compiler/nir/nir_opt_shrink_vectors.c
+  - src/compiler/nir/nir_opt_sink.c
+  - src/compiler/nir/nir_opt_undef.c
+  - src/compiler/nir/nir_opt_uniform_atomics.c
+  - src/compiler/nir/nir_opt_uniform_subgroup.c
+  - src/compiler/nir/nir_opt_uub.c
+  - src/compiler/nir/nir_opt_varyings.c
+  - src/compiler/nir/nir_opt_vectorize.c
+  - src/compiler/nir/nir_opt_vectorize_io.c
+  - src/compiler/nir/nir_opt_vectorize_io_vars.c
+  - src/compiler/nir/nir_passthrough_gs.c
+  - src/compiler/nir/nir_passthrough_tcs.c
+  - src/compiler/nir/nir_phi_builder.c
+  - src/compiler/nir/nir_print.c
+  - src/compiler/nir/nir_propagate_invariant.c
+  - src/compiler/nir/nir_range_analysis.c
+  - src/compiler/nir/nir_recompute_io_bases.c
+  - src/compiler/nir/nir_remove_dead_variables.c
+  - src/compiler/nir/nir_remove_outputs.c
+  - src/compiler/nir/nir_remove_tex_shadow.c
+  - src/compiler/nir/nir_repair_ssa.c
+  - src/compiler/nir/nir_scale_fdiv.c
+  - src/compiler/nir/nir_schedule.c
+  - src/compiler/nir/nir_search.c
+  - src/compiler/nir/nir_separate_merged_clip_cull_io.c
+  - src/compiler/nir/nir_serialize.c
+  - src/compiler/nir/nir_shader_bisect.c
+  - src/compiler/nir/nir_split_64bit_vec3_and_vec4.c
+  - src/compiler/nir/nir_split_conversions.c
+  - src/compiler/nir/nir_split_per_member_structs.c
+  - src/compiler/nir/nir_split_var_copies.c
+  - src/compiler/nir/nir_split_vars.c
+  - src/compiler/nir/nir_sweep.c
+  - src/compiler/nir/nir_to_lcssa.c
+  - src/compiler/nir/nir_trivialize_registers.c
+  - src/compiler/nir/nir_unlower_io_to_vars.c
+  - src/compiler/nir/nir_use_dominance.c
+  - src/compiler/nir/nir_validate.c
+  - src/compiler/nir/nir_worklist.c
+  - src/compiler/nir/nir_lower_atomics.c
+  - <gen> /tmp/mesa_probe/src/compiler/nir/nir_opt_algebraic.c
+  - <gen> /tmp/mesa_probe/src/compiler/nir/nir_opcodes.c
+  - <gen> /tmp/mesa_probe/src/compiler/nir/nir_constant_expressions.c
+  - <gen> /tmp/mesa_probe/src/compiler/nir/nir_intrinsics.c
+
+## glsl  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (cpp):
+  - src/compiler/glsl/ast_array_index.cpp
+  - src/compiler/glsl/ast_expr.cpp
+  - src/compiler/glsl/ast_function.cpp
+  - src/compiler/glsl/ast_to_hir.cpp
+  - src/compiler/glsl/ast_type.cpp
+  - src/compiler/glsl/builtin_functions.cpp
+  - src/compiler/glsl/builtin_types.cpp
+  - src/compiler/glsl/builtin_variables.cpp
+  - src/compiler/glsl/glsl_parser_extras.cpp
+  - src/compiler/glsl/glsl_symbol_table.cpp
+  - src/compiler/glsl/glsl_to_nir.cpp
+  - src/compiler/glsl/hir_field_selection.cpp
+  - src/compiler/glsl/ir_basic_block.cpp
+  - src/compiler/glsl/ir_builder.cpp
+  - src/compiler/glsl/ir_clone.cpp
+  - src/compiler/glsl/ir_constant_expression.cpp
+  - src/compiler/glsl/ir.cpp
+  - src/compiler/glsl/ir_expression_flattening.cpp
+  - src/compiler/glsl/ir_function_detect_recursion.cpp
+  - src/compiler/glsl/ir_function.cpp
+  - src/compiler/glsl/ir_hierarchical_visitor.cpp
+  - src/compiler/glsl/ir_hv_accept.cpp
+  - src/compiler/glsl/ir_print_visitor.cpp
+  - src/compiler/glsl/ir_rvalue_visitor.cpp
+  - src/compiler/glsl/ir_validate.cpp
+  - src/compiler/glsl/ir_variable_refcount.cpp
+  - src/compiler/glsl/linker_util.cpp
+  - src/compiler/glsl/lower_builtins.cpp
+  - src/compiler/glsl/lower_instructions.cpp
+  - src/compiler/glsl/lower_jumps.cpp
+  - src/compiler/glsl/lower_mat_op_to_vec.cpp
+  - src/compiler/glsl/lower_packing_builtins.cpp
+  - src/compiler/glsl/lower_precision.cpp
+  - src/compiler/glsl/lower_subroutine.cpp
+  - src/compiler/glsl/lower_vec_index_to_cond_assign.cpp
+  - src/compiler/glsl/lower_vector_derefs.cpp
+  - src/compiler/glsl/opt_algebraic.cpp
+  - src/compiler/glsl/opt_dead_builtin_variables.cpp
+  - src/compiler/glsl/opt_dead_code.cpp
+  - src/compiler/glsl/opt_flatten_nested_if_blocks.cpp
+  - src/compiler/glsl/opt_function_inlining.cpp
+  - src/compiler/glsl/opt_if_simplification.cpp
+  - src/compiler/glsl/opt_minmax.cpp
+  - src/compiler/glsl/opt_rebalance_tree.cpp
+  - src/compiler/glsl/opt_tree_grafting.cpp
+  - src/compiler/glsl/propagate_invariance.cpp
+  - src/compiler/glsl/string_to_uint_map.cpp
+  - src/compiler/glsl/serialize.cpp
+  - src/compiler/glsl/shader_cache.cpp
+  - <gen> /tmp/mesa_probe/src/compiler/glsl/glsl_parser.cpp
+  - <gen> /tmp/mesa_probe/src/compiler/glsl/glsl_lexer.cpp
+- sources (c):
+  - src/compiler/glsl/gl_nir_detect_function_recursion.c
+  - src/compiler/glsl/gl_nir_lower_atomics.c
+  - src/compiler/glsl/gl_nir_lower_images.c
+  - src/compiler/glsl/gl_nir_lower_blend_equation_advanced.c
+  - src/compiler/glsl/gl_nir_lower_buffers.c
+  - src/compiler/glsl/gl_nir_lower_discard_flow.c
+  - src/compiler/glsl/gl_nir_lower_named_interface_blocks.c
+  - src/compiler/glsl/gl_nir_lower_packed_varyings.c
+  - src/compiler/glsl/gl_nir_lower_samplers.c
+  - src/compiler/glsl/gl_nir_lower_samplers_as_deref.c
+  - src/compiler/glsl/gl_nir_lower_xfb_varying.c
+  - src/compiler/glsl/gl_nir_link_atomics.c
+  - src/compiler/glsl/gl_nir_link_functions.c
+  - src/compiler/glsl/gl_nir_link_interface_blocks.c
+  - src/compiler/glsl/gl_nir_link_uniform_blocks.c
+  - src/compiler/glsl/gl_nir_link_uniform_initializers.c
+  - src/compiler/glsl/gl_nir_link_uniforms.c
+  - src/compiler/glsl/gl_nir_link_varyings.c
+  - src/compiler/glsl/gl_nir_link_xfb.c
+  - src/compiler/glsl/gl_nir_linker.c
+
+## glcpp  [executable]
+- **deps**: m, , dep127903723980555518857207391713828603916, zlib, threads, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/compiler/glsl/glcpp/glcpp.c
+
+## glsl_standalone  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (cpp):
+  - src/compiler/glsl/standalone_scaffolding.cpp
+  - src/compiler/glsl/standalone.cpp
+
+## glsl_util  [static library]
+- **deps**: valgrind, dep127903723980555518857207391713828603916, zlib, , threads, m, libzstd, libunwind, libdrm
+- sources (c):
+  - src/mesa/main/extensions_table.c
+  - src/mesa/program/prog_parameter.c
+  - src/mesa/program/symbol_table.c
+  - src/mesa/program/dummy_errors.c
+
+## glcpp_standalone  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/compiler/glsl/glcpp/pp_standalone_scaffolding.c
+
+## pipe_loader_static  [static library]
+- **deps**: libdrm, expat, , dep127903723980555518857207391713828603916, zlib, threads, m, valgrind, libzstd, libunwind
+- sources (c):
+  - src/gallium/auxiliary/pipe-loader/pipe_loader.c
+  - src/gallium/auxiliary/pipe-loader/pipe_loader_sw.c
+  - src/gallium/auxiliary/pipe-loader/pipe_loader_drm.c
+
+## ws_null  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/gallium/winsys/sw/null/null_sw_winsys.c
+
+## wsw  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/gallium/winsys/sw/wrapper/wrapper_sw_winsys.c
+
+## swdri  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/gallium/winsys/sw/dri/dri_sw_winsys.c
+
+## swkmsdri  [static library]
+- **deps**: libdrm, dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind
+- sources (c):
+  - src/gallium/winsys/sw/kms-dri/kms_dri_sw_winsys.c
+
+## galliumvl  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/gallium/auxiliary/vl/vl_codec.c
+  - src/gallium/auxiliary/vl/vl_compositor.c
+  - src/gallium/auxiliary/vl/vl_compositor_gfx.c
+  - src/gallium/auxiliary/vl/vl_compositor_cs.c
+  - src/gallium/auxiliary/vl/vl_csc.c
+  - src/gallium/auxiliary/vl/vl_deint_filter.c
+  - src/gallium/auxiliary/vl/vl_deint_filter_cs.c
+  - src/gallium/auxiliary/vl/vl_mpeg12_bitstream.c
+  - src/gallium/auxiliary/vl/vl_vertex_buffers.c
+  - src/gallium/auxiliary/vl/vl_video_buffer.c
+
+## galliumvl_stub  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/gallium/auxiliary/vl/vl_stubs.c
+
+## galliumvlwinsys  [static library]
+- **deps**: libdrm, dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind
+- sources (c):
+  - src/gallium/auxiliary/vl/vl_winsys_drm.c
+  - src/gallium/auxiliary/vl/vl_winsys_dri_vgem.c
+
+## mesa_util  [static library]
+- **deps**: zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/util/anon_file.c
+  - src/util/bitscan.c
+  - src/util/blob.c
+  - src/util/build_id.c
+  - src/util/cnd_monotonic.c
+  - src/util/compress.c
+  - src/util/thread_sched.c
+  - src/util/crc32.c
+  - src/util/dag.c
+  - src/util/disk_cache.c
+  - src/util/disk_cache_os.c
+  - src/util/double.c
+  - src/util/fast_idiv_by_const.c
+  - src/util/float8.c
+  - src/util/fossilize_db.c
+  - src/util/futex.c
+  - src/util/half_float.c
+  - src/util/hash_table.c
+  - src/util/helpers.c
+  - src/util/u_idalloc.c
+  - src/util/log.c
+  - src/util/lut.c
+  - src/util/memstream.c
+  - src/util/mesa-blake3.c
+  - src/util/os_time.c
+  - src/util/os_file.c
+  - src/util/os_file_notify.c
+  - src/util/os_memory_fd.c
+  - src/util/os_misc.c
+  - src/util/os_socket.c
+  - src/util/pb_slab.c
+  - src/util/perf/u_trace.c
+  - src/util/u_process.c
+  - src/util/rwlock.c
+  - src/util/ralloc.c
+  - src/util/rand_xor.c
+  - src/util/range_minimum_query.c
+  - src/util/rb_tree.c
+  - src/util/register_allocate.c
+  - src/util/rgtc.c
+  - src/util/set.c
+  - src/util/simple_mtx.c
+  - src/util/slab.c
+  - src/util/softfloat.c
+  - src/util/sparse_array.c
+  - src/util/string_buffer.c
+  - src/util/strndup.c
+  - src/util/strtod.c
+  - src/util/u_atomic.c
+  - src/util/u_call_once.c
+  - src/util/u_dl.c
+  - src/util/u_dynarray.c
+  - src/util/u_hash_table.c
+  - src/util/u_queue.c
+  - src/util/u_range_remap.c
+  - src/util/u_string.c
+  - src/util/u_thread.c
+  - src/util/u_vector.c
+  - src/util/u_math.c
+  - src/util/u_mm.c
+  - src/util/u_debug.c
+  - src/util/u_debug_memory.c
+  - src/util/u_cpu_detect.c
+  - src/util/u_printf.c
+  - src/util/u_worklist.c
+  - src/util/vl_zscan_data.c
+  - src/util/vma.c
+  - src/util/mesa_cache_db.c
+  - src/util/mesa_cache_db_multipart.c
+  - src/util/format/u_format.c
+  - src/util/format/u_format_bptc.c
+  - src/util/format/u_format_etc.c
+  - src/util/format/u_format_fxt1.c
+  - src/util/format/u_format_latc.c
+  - src/util/format/u_format_other.c
+  - src/util/format/u_format_rgtc.c
+  - src/util/format/u_format_s3tc.c
+  - src/util/format/u_format_tests.c
+  - src/util/format/u_format_unpack_neon.c
+  - src/util/format/u_format_yuv.c
+  - src/util/format/u_format_zs.c
+  - src/util/u_sync_provider.c
+  - src/util/u_debug_stack.c
+  - src/util/u_debug_symbol.c
+  - <gen> /tmp/mesa_probe/src/util/format/u_format_table.c
+  - <gen> /tmp/mesa_probe/src/util/format_srgb.c
+- sources (cpp):
+  - src/util/u_qsort.cpp
+  - src/util/texcompress_astc_luts.cpp
+  - src/util/texcompress_astc_luts_wrap.cpp
+  - src/util/texcompress_astc.cpp
+
+## mesa_util_c11  [static library]
+- sources (c):
+  - src/c11/impl/time.c
+  - src/c11/impl/threads_posix.c
+
+## mesa_util_simd  [static library]
+- sources (c):
+  - src/util/streaming-load-memcpy.c
+
+## mesa_util_clflush  [static library]
+- sources (c):
+  - src/util/cache_ops_x86.c
+
+## mesa_util_clflushopt  [static library]
+- sources (c):
+  - src/util/cache_ops_x86_clflushopt.c
+
+## mesa_sse41  [static library]
+- sources (c):
+  - src/mesa/main/sse_minmax.c
+
+## xmlconfig  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm, expat
+- sources (c):
+  - src/util/xmlconfig.c
+
+## blake3  [static library]
+- sources (c):
+  - src/util/blake3/blake3.c
+  - src/util/blake3/blake3_dispatch.c
+  - src/util/blake3/blake3_portable.c
+  - src/util/blake3/blake3_sse2_x86-64_unix.S
+  - src/util/blake3/blake3_sse41_x86-64_unix.S
+  - src/util/blake3/blake3_avx2_x86-64_unix.S
+  - src/util/blake3/blake3_avx512_x86-64_unix.S
+
+## isaspec  [static library]
+- **deps**: dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/compiler/isaspec/isaspec.c
+
+## parson  [static library]
+- sources (c):
+  - src/util/parson.c
+
+## vtn  [static library]
+- **deps**: SPIRV-Tools, dep127903723980555518857207391713828603916, zlib, , threads, m, valgrind, libzstd, libunwind, libdrm
+- sources (c):
+  - src/compiler/spirv/gl_spirv.c
+  - src/compiler/spirv/spirv_to_nir.c
+  - src/compiler/spirv/vtn_alu.c
+  - src/compiler/spirv/vtn_amd.c
+  - src/compiler/spirv/vtn_cfg.c
+  - src/compiler/spirv/vtn_cmat.c
+  - src/compiler/spirv/vtn_debug.c
+  - src/compiler/spirv/vtn_glsl450.c
+  - src/compiler/spirv/vtn_opencl.c
+  - src/compiler/spirv/vtn_structured_cfg.c
+  - src/compiler/spirv/vtn_subgroup.c
+  - src/compiler/spirv/vtn_variables.c
+  - <gen> /tmp/mesa_probe/src/compiler/spirv/spirv_info.c
+  - <gen> /tmp/mesa_probe/src/compiler/spirv/vtn_gather_types.c
+
+## compiler  [static library]
+- **deps**: valgrind
+- sources (c):
+  - src/compiler/glsl_types.c
+  - src/compiler/shader_enums.c
+  - <gen> /tmp/mesa_probe/src/compiler/builtin_types.c
+
+## gtest  [static library]
+- sources (cpp):
+  - src/gtest/src/gtest-all.cc
+  - src/gtest/src/gtest_main.cc
