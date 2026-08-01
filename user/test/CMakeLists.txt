@@ -294,6 +294,10 @@ if(TEST)
     # style, FAT32+tmpfs dual fixture. Phase 3 link part enabled via TEST_LINK
     # (see test_link_utimensat.c).
     add_user_dyn_elf(test_access C SOURCES test_access.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
+    # ruid/euid split: access(2) uses real uid, eaccess/faccessat(AT_EACCESS)
+    # uses effective uid (kernel do_faccessat AT_EACCESS select). setresuid
+    # splits r/e/s on a 0640 root-owned tmpfs file; plus secure_getenv==getenv.
+    add_user_dyn_elf(test_eaccess C SOURCES test_eaccess.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     add_user_dyn_elf(test_link_utimensat C SOURCES test_link_utimensat.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # §3.3 symlink/readlink (tmpfs real impl, Q2): round-trip / lstat vs stat /
     # EEXIST / FAT32 ENOSYS / readlink non-softlink EINVAL. Mirrors test_stat_real.

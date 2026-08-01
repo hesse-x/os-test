@@ -51,7 +51,7 @@ global:
     malloc; qsort; bsearch; rand; rand_r; realloc; srand; strtol; strtoul;
     strtoll; strtoull; strtod; strtof; strtold; atof; div; ldiv; lldiv;
     imaxabs; imaxdiv; strtoimax; strtoumax;
-    getenv; setenv; putenv; unsetenv; clearenv; environ;
+    getenv; setenv; putenv; unsetenv; clearenv; environ; secure_getenv;
     _Exit; quick_exit; at_quick_exit; __cxa_atexit; __cxa_finalize;
     /* aligned allocation family — musl src/malloc/{aligned_alloc,memalign,
      * posix_memalign,reallocarray}.c (musl_malloc_objs). C11 aligned_alloc +
@@ -133,7 +133,7 @@ global:
     ffs; strcasecmp; strncasecmp;
 
     /* <unistd.h> */
-    access; faccessat; close; dup; dup2; _exit; ftruncate; getcwd; getpid; gettid;
+    access; faccessat; eaccess; euidaccess; close; dup; dup2; _exit; ftruncate; getcwd; getpid; gettid;
     ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; pipe2; pread; read;
     rmdir; sleep; ttyname; ttyname_r; unlink; unlinkat; rename; renameat;
     usleep; write;

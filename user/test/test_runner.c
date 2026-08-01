@@ -94,6 +94,7 @@ static struct test_entry tests[] = {
     {"test_stat_real", "/test/test_stat_real.elf"},
     {"test_statx", "/test/test_statx.elf"},
     {"test_access", "/test/test_access.elf"},
+    {"test_eaccess", "/test/test_eaccess.elf"},
     {"test_link_utimensat", "/test/test_link_utimensat.elf"},
     {"test_symlink", "/test/test_symlink.elf"},
     {"test_link", "/test/test_link.elf"},

@@ -4,15 +4,19 @@
  * SPDX-License-Identifier: MIT
  */
 
-// test_access.c — verify §3.2 access(2)/faccessat(2) (kernel inode_permission
-// keyed on euid, Q4). Mirrors test_rename.c/test_stat_real.c: Unity
-// freestanding, FAT32 (/ prefix) + tmpfs (/run prefix) dual fixtures.
+// test_access.c — verify §3.2 access(2)/faccessat(2). Mirrors
+// test_rename.c/test_stat_real.c: Unity freestanding, FAT32 (/ prefix) + tmpfs
+// (/run prefix) dual fixtures.
 //
-// This OS defaults to euid=0=root; inode_permission lets root through
-// (equivalent to CAP_DAC_OVERRIDE), so R_OK/W_OK/X_OK always return 0 for root.
+// inode_permission now takes caller-supplied check_uid/check_gid; root-override
+// (capable(CAP_DAC_OVERRIDE)) still keyed on euid, but owner/group/other bit
+// selection uses the passed creds. access(2) passes the REAL uid,
+// faccessat(AT_EACCESS)/eaccess the EFFECTIVE uid (see test_eaccess.c for the
+// ruid/euid split). This OS defaults to ruid=euid=0=root; inode_permission lets
+// root through (CAP_DAC_OVERRIDE), so R_OK/W_OK/X_OK always return 0 for root.
 // Mainly verifies existence (F_OK=0), non-existence (ENOENT), and the faccessat
-// AT_FDCWD/dirfd paths. Non-root permission-bit checks live in
-// test_setuid_saved.
+// AT_FDCWD/dirfd paths. Non-root permission-bit + ruid/euid split checks live
+// in test_eaccess.c.
 #include "unity.h"
 #include <errno.h>
 #include <fcntl.h>

@@ -401,23 +401,29 @@ struct inode *vfs_open_kern(const char *kpath) {
   return path_walk(m, relpath); /* +1,调用者 put */
 }
 
-/* inode_permission:按 euid 判定 mask 权限(Q4)。本 OS 有完整 permission ladder
- * (proc.h uid/euid/suid/gid/egid/sgid,默认 0=root;test_setuid_saved 证 ladder
- * 真在跑),故按 euid 判定非"无脑 root 放行"。返 0=允许,负=-EACCES/-ENOENT。 */
-int inode_permission(struct inode *ip, int mask) {
+/* inode_permission:按 check_uid/check_gid 判定 mask 权限(Q4)。本 OS 有完整
+ * permission ladder (proc.h uid/euid/suid/gid/egid/sgid,默认
+ * 0=root;test_setuid_saved 证 ladder 真在跑),故按位判定非"无脑 root 放行"。
+ * root 放行经 capable(CAP_DAC_OVERRIDE)——仍按 EFFECTIVE
+ * uid(current_proc->euid)判, 不随 check_uid 走:setuid-root 程序 ruid=nobody 时
+ * root 放行仍须生效(有效凭据语义)。 check_uid/check_gid 仅驱动
+ * owner/group/other 位选择:access(2) 传 real uid, faccessat(AT_EACCESS)/eaccess
+ * 传 effective uid,其余(open/utimensat)传 euid。 返 0=允许,负=-EACCES/-ENOENT。
+ */
+int inode_permission(struct inode *ip, int mask, uint32_t check_uid,
+                     uint32_t check_gid) {
   if (!ip)
     return -ENOENT;
   if (mask == F_OK)
-    return 0;                         /* 存在性:path_walk 成功即存在 */
-  uint32_t euid = current_proc->euid; /* proc.h:57 euid(default 0=root) */
+    return 0; /* 存在性:path_walk 成功即存在 */
   if (capable(CAP_DAC_OVERRIDE))
-    return 0; /* root 放行(CAP_DAC_OVERRIDE;今天等价 euid==0) */
-  /* 非 root:按 mode 的 owner/group/other 位。euid 匹配 owner → owner 位;
-   * 否则 egid 匹配 gid → group 位;否则 other 位。 */
+    return 0; /* root 放行(CAP_DAC_OVERRIDE;按 euid,不随 check_uid) */
+  /* 非 root:按 mode 的 owner/group/other 位。check_uid 匹配 owner → owner 位;
+   * 否则 check_gid 匹配 gid → group 位;否则 other 位。 */
   uint32_t mode = ip->mode;
-  uint32_t bits = (euid == ip->uid)                 ? (mode >> 6) & 7
-                  : (current_proc->egid == ip->gid) ? (mode >> 3) & 7
-                                                    : mode & 7;
+  uint32_t bits = (check_uid == ip->uid)   ? (mode >> 6) & 7
+                  : (check_gid == ip->gid) ? (mode >> 3) & 7
+                                           : mode & 7;
   if ((mask & R_OK) && !(bits & R_OK))
     return -EACCES;
   if ((mask & W_OK) && !(bits & W_OK))

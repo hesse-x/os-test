@@ -3945,7 +3945,10 @@ static int do_faccessat(int dirfd, const char *kpath, int mode, int flags) {
     }
     file_get(f);
     rcu_read_unlock();
-    int r = f->inode ? inode_permission(f->inode, mode) : -EBADF;
+    /* fd 路径同样按 AT_EACCESS 选 real/effective uid(对齐 Linux)。 */
+    uint32_t cu = (flags & AT_EACCESS) ? current_proc->euid : current_proc->uid;
+    uint32_t cg = (flags & AT_EACCESS) ? current_proc->egid : current_proc->gid;
+    int r = f->inode ? inode_permission(f->inode, mode, cu, cg) : -EBADF;
     file_put(f);
     return r;
   }
@@ -3965,7 +3968,11 @@ static int do_faccessat(int dirfd, const char *kpath, int mode, int flags) {
   }
   if (!ip)
     return -ENOENT;
-  int r = inode_permission(ip, mode);
+  /* AT_EACCESS(对齐 Linux eaccess/faccessat):用 EFFECTIVE uid 判;不带则用 REAL
+   * uid(access(2) 语义)。capable(CAP_DAC_OVERRIDE) 的 root 放行仍按 euid。 */
+  uint32_t cu = (flags & AT_EACCESS) ? current_proc->euid : current_proc->uid;
+  uint32_t cg = (flags & AT_EACCESS) ? current_proc->egid : current_proc->gid;
+  int r = inode_permission(ip, mode, cu, cg);
   inode_put(ip);
   return r;
 }
@@ -4168,7 +4175,7 @@ static int do_utimensat(int dirfd, const char *kpath, struct timespec *ktimes,
   if (!ip)
     return -ENOENT;
   if (need_write_perm) {
-    int r = inode_permission(ip, W_OK);
+    int r = inode_permission(ip, W_OK, current_proc->euid, current_proc->egid);
     if (r) {
       inode_put(ip);
       return r;

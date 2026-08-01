@@ -43,10 +43,16 @@ struct inode *vfs_open_kern(const char *kpath);
  * 末段 symlink 跟随(默认跟随;AT_SYMLINK_NOFOLLOW 时调用方不调本函数)。 */
 struct inode *follow_symlink(struct inode *lnk, int *depth);
 
-/* inode_permission:按 euid 判定 mask(R_OK/W_OK/X_OK/F_OK)权限(Q4)。root 放行;
- * 非 root 按 mode 的 owner/group/other 位。返 0=允许,负=-EACCES/-ENOENT。
- * 通用实现:各 fs .permission 暂置 NULL,VFS 回退到本函数。 */
-int inode_permission(struct inode *ip, int mask);
+/* inode_permission:按 check_uid/check_gid 判定
+ * mask(R_OK/W_OK/X_OK/F_OK)权限(Q4)。 root 放行经
+ * capable(CAP_DAC_OVERRIDE)——仍按 EFFECTIVE uid(current_proc->euid)判, 不随
+ * check_uid 走(setuid-root 程序 ruid=nobody 仍应放行);check_uid/check_gid
+ * 仅驱动 owner/group/other 位选择。access(2) 传 real
+ * uid,faccessat(AT_EACCESS)/eaccess 传 effective uid,其余(open/utimensat 等)传
+ * euid。返 0=允许,负=-EACCES/-ENOENT。 通用实现:各 fs .permission 暂置 NULL,VFS
+ * 回退到本函数。 */
+int inode_permission(struct inode *ip, int mask, uint32_t check_uid,
+                     uint32_t check_gid);
 /* generic_update_time:VFS 层默认时间戳更新(内存态,Q5)。按 which(ATIME_BIT/
  * MTIME_BIT/CTIME_BIT 组合)写非 OMIT 的时间戳。各 fs .update_time 可置 NULL,
  * VFS 回退到此。 */

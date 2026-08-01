@@ -173,7 +173,7 @@ add_custom_target(musl_libc ALL
 # but musl_generate_headers() above MUST run before any add_musl_lib here.
 set(_musl_modules
     unistd fcntl socket select dl linux dirent resource process mman
-    stdio multibyte wchar pthread signal string ctype setjmp math stdlib malloc time locale regex misc)
+    stdio multibyte wchar pthread signal string ctype setjmp math stdlib malloc time locale regex misc legacy)
 foreach(_m ${_musl_modules})
     include(${CMAKE_CURRENT_LIST_DIR}/modules/${_m}.cmake)
 endforeach()

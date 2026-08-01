@@ -108,6 +108,10 @@ set(MUSL_STDLIB_SOURCES
     ${MUSL_DIR}/src/env/putenv.c
     ${MUSL_DIR}/src/env/unsetenv.c
     ${MUSL_DIR}/src/env/clearenv.c
+    # secure_getenv: libc.secure ? NULL : getenv(name). libc.secure 由
+    # __libc_start_main.c:56 在 secure-exec(AT_SECURE)时置位;本内核 auxv
+    # AT_SECURE=0,故常等价 getenv。依赖已就位(libc.secure + getenv)。
+    ${MUSL_DIR}/src/env/secure_getenv.c
     # _Exit.c intentionally NOT here (already in musl_unistd_objs/_so).
     ${MUSL_DIR}/src/exit/exit.c
     ${MUSL_DIR}/src/exit/atexit.c
