@@ -14,7 +14,8 @@
 void kernel_main(boot_info *bi);
 void kernel_init_finish(void);
 
-// POSIX hostname (group 1). Accessed by sys_gethostname/sys_sethostname.
+// POSIX hostname (group 1). Read by sys_uname (nodename) / written by
+// sys_sethostname.
 #define HOSTNAME_MAX 256
 extern char hostname[HOSTNAME_MAX];
 void hostname_set(const char *name, size_t len);

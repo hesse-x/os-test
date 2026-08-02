@@ -75,7 +75,6 @@ file(GLOB MUSL_SCHED_SOURCES CONFIGURE_DEPENDS ${MUSL_DIR}/src/sched/*.c)
 set(MUSL_UNISTD_EXCLUDE
     ${MUSL_DIR}/src/unistd/setxid.c      # __setxid provided by musl_shim/syscall_cp.c
     ${MUSL_DIR}/src/unistd/isatty.c      # musl probes TIOCGWINSZ; serial only answers TCGETS — repo isatty retained
-    ${MUSL_DIR}/src/unistd/gethostname.c # musl returns uname.nodename ("(none)"); repo reads sys_gethostname (sethostname round-trip) — retained
 )
 list(REMOVE_ITEM MUSL_UNISTD_SOURCES ${MUSL_UNISTD_EXCLUDE})
 

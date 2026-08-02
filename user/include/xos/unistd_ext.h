@@ -49,11 +49,12 @@ LIBC_EXPORT pid_t gettid(void);
 LIBC_EXPORT void wait_dev_ready(const char *dev_path);
 
 /* Hostname get/set. musl unistd.h declares gethostname unconditionally but
- * without a visibility attribute (→ HIDDEN under -fvisibility=hidden), and
- * sethostname only under _GNU_SOURCE/_BSD_SOURCE (not enabled in the libc
- * build → no prior C declaration → C++ mangling). Re-declared here with
- * LIBC_EXPORT so the definitions in uname.c export cleanly. */
-LIBC_EXPORT int gethostname(char *name, size_t len);
+ * without a visibility attribute (→ HIDDEN under -fvisibility=hidden); musl's
+ * src/unistd/gethostname.c is adopted (reads uname.nodename), so no repo
+ * definition and no re-export needed. sethostname is declared by musl only
+ * under _GNU_SOURCE/_BSD_SOURCE (not enabled in the libc build → no prior C
+ * declaration → C++ mangling); re-declared here with LIBC_EXPORT so musl's
+ * src/linux/sethostname.c definition exports cleanly. */
 LIBC_EXPORT int sethostname(const char *name, size_t len);
 
 /* Page size. musl unistd.h declares this only under _GNU_SOURCE/_BSD_SOURCE

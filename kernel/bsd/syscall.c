@@ -4822,10 +4822,10 @@ int64_t sys_uname(int64_t arg1, int64_t unused1, int64_t unused2,
   struct new_utsname kbuf;
   __memset(&kbuf, 0, sizeof(kbuf));
   __strncpy(kbuf.sysname, "Xos", __NEW_UTS_LEN);
-  // nodename reflects the live hostname (sethostname/hostname_set) so
-  // llvm-libc's gethostname() — which reads uname.nodename, Linux having no
-  // SYS_gethostname — agrees with the OS-specific SYS_GETHOSTNAME path.
-  // hostname_get NUL-terminates only when n < maxlen; force-cap the field.
+  // nodename reflects the live hostname (sethostname/hostname_set) so musl's
+  // gethostname() — which reads uname.nodename, Linux having no SYS_gethostname
+  // — returns the live host. hostname_get NUL-terminates only when n < maxlen;
+  // force-cap the field.
   hostname_get(kbuf.nodename, __NEW_UTS_LEN);
   kbuf.nodename[__NEW_UTS_LEN - 1] = '\0';
   __strncpy(kbuf.release, "0.1", __NEW_UTS_LEN);
@@ -6552,8 +6552,6 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_getpgrp(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_UMASK:
     return sys_umask(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
-  case SYS_GETHOSTNAME:
-    return sys_gethostname(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SETHOSTNAME:
     return sys_sethostname(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // alarm / pause (group 2)

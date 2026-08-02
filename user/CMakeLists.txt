@@ -31,7 +31,7 @@
 # <time.h> already comes from musl_time_objs (time.cmake).
 set(LIBC_SOURCES
     lib/file.cc
-    lib/stdlib_misc.c lib/uname.c
+    lib/stdlib_misc.c
     lib/assert.c lib/signal.cc lib/getrandom.c
     lib/lfs64_compat.c
     lib/musl_glue.c

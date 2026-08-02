@@ -98,7 +98,6 @@ int64_t sys_getgroups(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_getppid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_getpgrp(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_umask(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-int64_t sys_gethostname(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_sethostname(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // alarm / pause (group 2)

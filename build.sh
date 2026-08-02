@@ -389,9 +389,20 @@ fi
 #   mako (>=0.8, nir/glsl/glapi codegen), packaging (mako version-compare; distutils
 #   is gone in py3.12 so packaging is mandatory), pyyaml (u_format.yaml + driconf).
 MESA_VENV=build/.mesa-venv
-if [[ ! -x "$MESA_VENV/bin/meson" ]]; then
+# Create the venv if missing, then verify every required module is importable
+# every run (not just when meson is absent). A half-populated venv — e.g. meson
+# present but mako/packaging/pyyaml missing after a pip install hiccup — would
+# otherwise slip through the old `[[ ! -x .../meson ]]` gate and crash Mesa's
+# configure-time mako probe. Reinstalling the wheels is cheap (cached), so we
+# always re-check rather than trust a stale venv.
+if [[ ! -x "$MESA_VENV/bin/python3" ]]; then
     python3 -m venv "$MESA_VENV"
     "$MESA_VENV/bin/pip" install -q --upgrade pip
+fi
+# -q on the import probe keeps this quiet when all modules are present.
+# (meson ships as a bin/meson script, not an importable module — probe it via -x.)
+if [[ ! -x "$MESA_VENV/bin/meson" ]] || \
+   ! "$MESA_VENV/bin/python3" -c "import mako, packaging, yaml" 2>/dev/null; then
     "$MESA_VENV/bin/pip" install -q "meson>=1.4" mako packaging pyyaml
 fi
 export PATH="$MESA_VENV/bin:$PATH"

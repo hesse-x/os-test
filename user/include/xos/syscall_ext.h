@@ -1087,16 +1087,6 @@ static inline int sys_getgroups(int size, uint32_t *list) {
   return (int)r;
 }
 
-static inline int sys_gethostname(char *buf, size_t len) {
-  int64_t r =
-      __syscall2(SYS_GETHOSTNAME, (int64_t)(uintptr_t)buf, (int64_t)len);
-  if (r < 0) {
-    errno = -(int)r;
-    return -1;
-  }
-  return 0;
-}
-
 static inline int sys_sethostname(const char *name, size_t len) {
   int64_t r =
       __syscall2(SYS_SETHOSTNAME, (int64_t)(uintptr_t)name, (int64_t)len);

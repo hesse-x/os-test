@@ -2297,26 +2297,6 @@ int64_t sys_umask(int64_t arg1, int64_t unused2, int64_t unused3,
   return (int64_t)old;
 }
 
-// gethostname(buf, len) — copy out the kernel hostname string.
-int64_t sys_gethostname(int64_t arg1, int64_t arg2, int64_t unused3,
-                        int64_t unused4, int64_t unused5, int64_t unused6) {
-  (void)unused3;
-  (void)unused4;
-  (void)unused5;
-  (void)unused6;
-  char __user *ubuf = (char __user *__force)arg1;
-  size_t len = (size_t)arg2;
-  if (!ubuf || len == 0)
-    return (int64_t)-EFAULT;
-  char kbuf[HOSTNAME_MAX];
-  size_t n = hostname_get(kbuf, sizeof(kbuf));
-  if (n >= len)
-    return (int64_t)-EINVAL;           // buffer too small (would not fit NUL)
-  if (copy_to_user(ubuf, kbuf, n + 1)) // include terminator
-    return (int64_t)-EFAULT;
-  return 0;
-}
-
 // sethostname(name, len) — replace the kernel hostname.
 int64_t sys_sethostname(int64_t arg1, int64_t arg2, int64_t unused3,
                         int64_t unused4, int64_t unused5, int64_t unused6) {

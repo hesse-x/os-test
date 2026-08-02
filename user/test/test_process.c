@@ -187,11 +187,16 @@ void test_hostname_roundtrip(void) {
   TEST_ASSERT_EQUAL_INT(0, gethostname(buf, sizeof(buf)));
   TEST_ASSERT_EQUAL_STRING(test_hostname, buf);
 
-  /* buffer too small returns -1 + EINVAL */
+  /* buffer too small: musl gethostname truncates to len and returns 0
+   * (POSIX-permitted silent truncation; matches musl src/unistd/gethostname.c,
+   * which reads uname.nodename and caps at len). No -1/EINVAL — that was the
+   * old repo SYS_gethostname path, now retired. */
   errno = 0;
   char tiny[4];
-  TEST_ASSERT_EQUAL_INT(-1, gethostname(tiny, sizeof(tiny)));
-  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  TEST_ASSERT_EQUAL_INT(0, gethostname(tiny, sizeof(tiny)));
+  TEST_ASSERT_EQUAL_INT(0, errno);
+  tiny[3] = '\0'; /* musl NUL-terminates at name[len-1] */
+  TEST_ASSERT_EQUAL_STRING("tes", tiny); /* "testhost" truncated to 3 chars */
 
   /* restore */
   TEST_ASSERT_EQUAL_INT(
