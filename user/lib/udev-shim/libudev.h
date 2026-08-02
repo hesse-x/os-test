@@ -143,6 +143,10 @@ udev_enumerate_get_list_entry(struct udev_enumerate *udev_enumerate);
 
 const char *udev_device_get_driver(struct udev_device *udev_device);
 struct udev_device *udev_device_get_parent(struct udev_device *udev_device);
+struct udev_device *
+udev_device_get_parent_with_subsystem_devtype(struct udev_device *udev_device,
+                                              const char *subsystem,
+                                              const char *devtype);
 struct udev *udev_device_get_udev(struct udev_device *udev_device);
 
 char *udev_device_get_property_value_w(char *property, size_t property_size,

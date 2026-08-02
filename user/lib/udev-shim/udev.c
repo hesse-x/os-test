@@ -437,6 +437,23 @@ struct udev_device *udev_device_get_parent(struct udev_device *udev_device) {
   return NULL;
 }
 
+struct udev_device *
+udev_device_get_parent_with_subsystem_devtype(struct udev_device *udev_device,
+                                              const char *subsystem,
+                                              const char *devtype) {
+  struct udev_device *parent = udev_device_get_parent(udev_device);
+  while (parent) {
+    const char *parent_subsystem = udev_device_get_subsystem(parent);
+    const char *parent_devtype = udev_device_get_devtype(parent);
+    if ((!subsystem ||
+         (parent_subsystem && strcmp(parent_subsystem, subsystem) == 0)) &&
+        (!devtype || (parent_devtype && strcmp(parent_devtype, devtype) == 0)))
+      return parent;
+    parent = udev_device_get_parent(parent);
+  }
+  return NULL;
+}
+
 struct udev *udev_device_get_udev(struct udev_device *udev_device) {
   (void)udev_device;
   return NULL;

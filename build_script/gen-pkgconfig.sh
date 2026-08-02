@@ -37,7 +37,7 @@ includedir=\${prefix}/usr/include
 
 Name: libdrm
 Description: Userspace interface to kernel DRM services (freestanding OS port)
-Version: 2.4.109
+Version: 2.4.134
 Libs: -L\${libdir} -ldrm
 # -I\${includedir}/libdrm mirrors upstream libdrm.pc.in: xf86drm.h does
 # `#include <drm.h>` (top-level style) while the UAPI headers ship under libdrm/

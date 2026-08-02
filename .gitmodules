@@ -44,3 +44,6 @@
 [submodule "third_party/libdisplay-info"]
 	path = third_party/libdisplay-info
 	url = https://gitlab.freedesktop.org/emersion/libdisplay-info.git
+[submodule "third_party/wayland-protocols"]
+	path = third_party/wayland-protocols
+	url = https://gitlab.freedesktop.org/wayland/wayland-protocols.git

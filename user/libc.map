@@ -33,7 +33,7 @@ global:
     asprintf; clearerr; clearerr_unlocked; ctermid; fclose; fdopen; feof;
     feof_unlocked; ferror; ferror_unlocked; fflush; fflush_unlocked; fgetc;
     fgetc_unlocked; fgetln; fgetpos; fgets; fgets_unlocked; fileno;
-    fileno_unlocked; flockfile; fmemopen; fopen; fopencookie; fprintf; fputc;
+    fileno_unlocked; flockfile; fmemopen; fopen; fopen64; fopencookie; fprintf; fputc;
     fputc_unlocked; fputs; fputs_unlocked; fread; fread_unlocked; freopen;
     fscanf; fseek; fseeko; fsetpos; ftell; ftello; ftrylockfile; funlockfile;
     fwrite; fwrite_unlocked; getc; getchar; getchar_unlocked; getc_unlocked;
@@ -153,7 +153,7 @@ global:
 
     /* <unistd.h> */
     access; faccessat; eaccess; euidaccess; close; dup; dup2; _exit; ftruncate; getcwd; getpid; gettid;
-    ioperm; isatty; lseek; memfd_create; mkdir; open; pipe; pipe2; pread; read;
+    ioperm; isatty; lseek; memfd_create; mkdir; open; open64; pipe; pipe2; pread; read;
     rmdir; sleep; ttyname; ttyname_r; unlink; unlinkat; rename; renameat;
     usleep; write;
     sendfile; /* <sys/sendfile.h> — musl src/linux/sendfile.c, thin SYS_sendfile wrapper. */
@@ -173,7 +173,7 @@ global:
     setresuid; setresgid; setreuid; setregid; seteuid; setegid; getgroups;
 
     /* <fcntl.h> */
-    openat; fcntl; posix_fallocate;
+    openat; fcntl; fcntl64; posix_fallocate;
 
     /* <sys/file.h> */
     flock;
@@ -565,7 +565,7 @@ global:
     tss_create; tss_delete; tss_get; tss_set;
 
     /* <sys/stat.h> */
-    fstat; fstatat; lstat; mkdir; mkdirat; mknod; stat; statx;
+    fstat; fstatat; lstat; lstat64; mkdir; mkdirat; mknod; stat; statx;
     chmod; fchmod; fchmodat;
 
     /* <sys/statvfs.h> — src/stat/statvfs.c. libc++ filesystem::__space. */

@@ -29,6 +29,7 @@ set(LIBC_SOURCES
     lib/unistd.cc lib/time.cc lib/file.cc
     lib/stdlib_misc.c lib/uname.c
     lib/assert.c lib/signal.cc lib/getrandom.c
+    lib/lfs64_compat.c
     lib/musl_glue.c
     lib/io_multiplex.cc
     lib/sys_process.cc

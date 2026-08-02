@@ -167,8 +167,12 @@ if [ "${BUILD_WLROOTS_DEPS:-0}" = "1" ]; then
     fi
     SYSROOT="$(cd build/sysroot && pwd)"
     PYTHON_BIN="$(cd "$MESON_VENV" && pwd)/bin/python3"
+    # wlroots controls its public ABI with wlroots.syms.  Unlike Mesa and the
+    # local libraries, its headers do not mark each public function with a
+    # visibility attribute, so a hidden default would produce an empty dynsym.
     sed -e "s#@CC@#$CC_BIN#g" -e "s#@CXX@#$CXX_BIN#g" -e "s#@PYTHON@#$PYTHON_BIN#g" \
         -e "s#@SYSROOT@#$SYSROOT#g" \
+        -e "s/-fvisibility=hidden/-fvisibility=default/g" \
         build_script/third_party/mesa/meson-cross-x86_64.txt.in > "$WLROOTS_CROSS"
 
     # All four projects are C-only. --prefix/--libdir make `meson install`
