@@ -19,12 +19,19 @@ struct udev {
   int refcount;
 };
 
+struct udev_list_entry;
+
 #define UDEV_DEV_PROPS_MAX 32
-#define UDEV_PROP_KEYLEN 32
-#define UDEV_PROP_VALLEN 64
+#define UDEV_PROP_KEYLEN 64
+#define UDEV_PROP_VALLEN 256
+#define UDEV_FRAME_HEADER_SIZE 12
+#define UDEV_FRAME_PAYLOAD_MAX 4096
+typedef char
+    udev_frame_header_must_be_12_bytes[UDEV_FRAME_HEADER_SIZE == 12 ? 1 : -1];
 
 struct udev_device {
   int refcount;
+  struct udev *udev;
   char devnode[256];
   char syspath[256];
   char sysname[64];
@@ -46,6 +53,8 @@ struct udev_device {
     char value[UDEV_PROP_VALLEN];
   } props[UDEV_DEV_PROPS_MAX];
   int nprops;
+  int properties_loaded;
+  struct udev_list_entry *properties_list;
 };
 
 struct udev_list_entry {
@@ -61,6 +70,14 @@ struct udev_monitor {
   int pipe_fd; // pipe rd fd received via SCM_RIGHTS (get_fd returns this;
                // epoll-able)
   int subscribed; // set to 1 after enable_receiving (idempotent)
+  char subsystem_filter[32];
+  char devtype_filter[32];
+  unsigned char frame_header[UDEV_FRAME_HEADER_SIZE];
+  size_t frame_header_used;
+  unsigned char frame_payload[UDEV_FRAME_PAYLOAD_MAX];
+  size_t frame_payload_used;
+  size_t frame_payload_len;
+  int protocol_errors;
 };
 
 struct udev_enumerate {

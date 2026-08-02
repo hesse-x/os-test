@@ -13,6 +13,7 @@
 // for coldplug.
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +39,8 @@ void test_monitor_enable_receiving(void) {
   TEST_ASSERT_EQUAL_INT(0, udev_monitor_enable_receiving(m));
   int fd = udev_monitor_get_fd(m);
   TEST_ASSERT_TRUE(fd >= 0); // pipe rd fd, epoll-able
+  TEST_ASSERT_TRUE(fcntl(fd, F_GETFL) & O_NONBLOCK);
+  TEST_ASSERT_TRUE(fcntl(fd, F_GETFD) & FD_CLOEXEC);
   udev_monitor_unref(m);
   udev_unref(u);
 }
@@ -108,8 +111,8 @@ void test_monitor_device_property_id_input(void) {
   udev_unref(u);
 }
 
-// filter is a no-op stub this round; returns 0 (no error).
-void test_monitor_filter_noop(void) {
+// A successful filter registration must be retained by the monitor.
+void test_monitor_filter_registration(void) {
   struct udev *u = udev_new();
   struct udev_monitor *m = udev_monitor_new_from_netlink(u, "udev");
   TEST_ASSERT_EQUAL_INT(
@@ -185,7 +188,7 @@ int main(void) {
   RUN_TEST(test_monitor_get_fd);
   RUN_TEST(test_monitor_receive_coldplug_add);
   RUN_TEST(test_monitor_device_property_id_input);
-  RUN_TEST(test_monitor_filter_noop);
+  RUN_TEST(test_monitor_filter_registration);
   RUN_TEST(test_monitor_hotplug_add);
   return UNITY_END();
 }

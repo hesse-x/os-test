@@ -9,6 +9,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h> // open (musl/repo fcntl.h; old unistd.h no longer declares it)
+#include <fnmatch.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,23 +26,7 @@
 #include <xos/ioctl.h>
 #include <xos/socket.h>
 
-#define EVDEV_BITS_PER_LONG (sizeof(long) * 8)
-#define NBITS(x) ((((x) - 1) / EVDEV_BITS_PER_LONG) + 1)
-#define LONG(x) ((x) / EVDEV_BITS_PER_LONG)
-#define OFF(x) ((x) % EVDEV_BITS_PER_LONG)
-
-// Path-seat mode backend: minimal udev shim that only supports the calls
-// libinput's path-seat mode uses.
-
-static int scan_devices(void);
-static int device_is_keyboard(const char *devnode);
-static struct udev_device *find_device_by_devnum(dev_t devnum);
-
-// Simple device table
 #define MAX_UDEV_DEVICES 16
-static struct udev_device *udev_device_table[MAX_UDEV_DEVICES];
-static int udev_device_count;
-static int udev_table_scanned;
 
 // ======================== udev ========================
 
@@ -62,198 +48,159 @@ void udev_unref(struct udev *udev) {
     free(udev);
 }
 
-// ======================== internal helpers ========================
-
-static void scan_devices_if_needed(void) {
-  if (udev_table_scanned)
-    return;
-  udev_table_scanned = 1;
-  udev_device_count = 0;
-  memset(udev_device_table, 0, sizeof(udev_device_table));
-  scan_devices();
-}
-
-// Trailing '*' wildcard match (libinput commonly calls
-// udev_enumerate_add_match_sysname("event*")). Only supports trailing
-// wildcards of the form "event*"; without '*', degrades to exact strcmp.
-// Returns 1 on match / 0 on no match (userspace has no stdbool.h, use int).
 static int match_pattern(const char *pattern, const char *name) {
-  if (!pattern || !name)
-    return 0;
-  const char *star = strchr(pattern, '*');
-  if (!star)
-    return strcmp(pattern, name) == 0;
-  size_t prefix_len = star - pattern;
-  return strncmp(name, pattern, prefix_len) == 0;
+  return pattern && name && fnmatch(pattern, name, 0) == 0;
 }
 
-static int device_is_keyboard(const char *devnode) {
-  // Attempt to detect keyboard via EVIOCGBIT
-  int fd = open(devnode, O_RDONLY);
-  if (fd < 0) {
-    fprintf(stderr, "udev-shim: open(%s) failed errno=%d\n", devnode, errno);
+static int all_digits(const char *s) {
+  if (!s || !*s)
     return 0;
-  }
-  unsigned long bits[NBITS(EV_MAX + 1)];
-  memset(bits, 0, sizeof(bits));
-  int rc = ioctl(fd, EVIOCGBIT(0, sizeof(bits)), bits);
-  if (rc < 0)
-    fprintf(stderr, "udev-shim: EVIOCGBIT(%s) rc=%d errno=%d\n", devnode, rc,
-            errno);
-  close(fd);
-  if (rc < 0)
-    return 0;
-  return !!(bits[LONG(EV_KEY)] & (1UL << OFF(EV_KEY)));
+  for (; *s; s++)
+    if (*s < '0' || *s > '9')
+      return 0;
+  return 1;
 }
 
-static struct udev_device *find_device_by_devnum(dev_t devnum) {
-  scan_devices_if_needed();
-  for (int i = 0; i < udev_device_count; i++) {
-    if (udev_device_table[i] && udev_device_table[i]->devnum == devnum)
-      return udev_device_table[i];
+static int valid_sysname(const char *subsystem, const char *sysname) {
+  if (strcmp(subsystem, "input") == 0)
+    return strncmp(sysname, "event", 5) == 0 && all_digits(sysname + 5);
+  if (strcmp(subsystem, "drm") == 0) {
+    if (strncmp(sysname, "card", 4) == 0)
+      return all_digits(sysname + 4);
+    if (strncmp(sysname, "renderD", 7) == 0)
+      return all_digits(sysname + 7);
   }
-  return NULL;
+  return 0;
 }
 
 static struct udev_device *create_udev_device(struct udev *udev,
-                                              const char *devnode) {
-  (void)udev;
-  struct stat st;
-  if (stat(devnode, &st) < 0)
+                                              const char *subsystem,
+                                              const char *sysname) {
+  if (!udev || !subsystem || !sysname || !valid_sysname(subsystem, sysname)) {
+    errno = EINVAL;
     return NULL;
+  }
+
+  char devnode[256];
+  char syspath[256];
+  int n;
+  if (strcmp(subsystem, "input") == 0)
+    n = snprintf(devnode, sizeof(devnode), "/dev/input/%s", sysname);
+  else
+    n = snprintf(devnode, sizeof(devnode), "/dev/dri/%s", sysname);
+  if (n < 0 || (size_t)n >= sizeof(devnode)) {
+    errno = ENAMETOOLONG;
+    return NULL;
+  }
+  n = snprintf(syspath, sizeof(syspath), "/sys/class/%s/%s", subsystem,
+               sysname);
+  if (n < 0 || (size_t)n >= sizeof(syspath)) {
+    errno = ENAMETOOLONG;
+    return NULL;
+  }
+
+  struct stat st;
+  if (stat(syspath, &st) < 0 || stat(devnode, &st) < 0)
+    return NULL;
+  if (!S_ISCHR(st.st_mode)) {
+    errno = ENODEV;
+    return NULL;
+  }
 
   struct udev_device *d = calloc(1, sizeof(struct udev_device));
   if (!d)
     return NULL;
   d->refcount = 1;
+  d->udev = udev_ref(udev);
   d->initialized = 1;
   d->devnum = st.st_rdev;
 
-  strncpy(d->devnode, devnode, sizeof(d->devnode) - 1);
-  d->devnode[sizeof(d->devnode) - 1] = '\0';
-
-  // subsystem is fixed to "input" (scan_devices only scans /dev/input);
-  // fill it first so syspath construction can reference it.
-  strncpy(d->subsystem, "input", sizeof(d->subsystem) - 1);
-  d->subsystem[sizeof(d->subsystem) - 1] = '\0';
-
-  // Build syspath: /sys/class/<subsystem>/<sysname> (matches the kernel
-  // sysfs mount path).
-  const char *basename = strrchr(devnode, '/');
-  if (!basename)
-    basename = devnode;
-  else
-    basename++;
-
-  // subsystem is currently fixed to "input"; keep the branch structure so
-  // extending to drm and other subsystems later is straightforward.
-  if (strcmp(d->subsystem, "drm") == 0)
-    snprintf(d->syspath, sizeof(d->syspath), "/sys/class/drm/%s", basename);
-  else
-    snprintf(d->syspath, sizeof(d->syspath), "/sys/class/%s/%s", d->subsystem,
-             basename);
-
-  strncpy(d->sysname, basename, sizeof(d->sysname) - 1);
-  d->sysname[sizeof(d->sysname) - 1] = '\0';
-
-  // Detect if input or evdev type
-  const char *s = strrchr(devnode, '/');
-  if (s && strstr(s, "event") != NULL) {
-    strncpy(d->devtype, "evdev", sizeof(d->devtype) - 1);
-    d->devtype[sizeof(d->devtype) - 1] = '\0';
-  }
+  snprintf(d->devnode, sizeof(d->devnode), "%s", devnode);
+  snprintf(d->syspath, sizeof(d->syspath), "%s", syspath);
+  snprintf(d->subsystem, sizeof(d->subsystem), "%s", subsystem);
+  snprintf(d->sysname, sizeof(d->sysname), "%s", sysname);
+  if (strcmp(subsystem, "input") == 0)
+    snprintf(d->devtype, sizeof(d->devtype), "evdev");
 
   return d;
-}
-
-static int scan_devices(void) {
-  DIR *dir = opendir("/dev/input");
-  if (!dir)
-    return 0;
-
-  struct dirent *entry;
-  while ((entry = readdir(dir)) != NULL &&
-         udev_device_count < MAX_UDEV_DEVICES) {
-    if (strncmp(entry->d_name, "event", 5) != 0)
-      continue;
-    char devnode[64];
-    snprintf(devnode, sizeof(devnode), "/dev/input/%s", entry->d_name);
-    struct stat st;
-    if (stat(devnode, &st) < 0)
-      continue;
-    // Check if keyboard
-    if (!device_is_keyboard(devnode))
-      continue;
-    struct udev_device *d = create_udev_device(NULL, devnode);
-    if (d)
-      udev_device_table[udev_device_count++] = d;
-  }
-  closedir(dir);
-  return udev_device_count;
 }
 
 // ======================== udev_device ========================
 
 struct udev_device *udev_device_new_from_syspath(struct udev *udev,
                                                  const char *syspath) {
-  (void)udev;
-  scan_devices_if_needed();
-  for (int i = 0; i < udev_device_count; i++) {
-    if (udev_device_table[i] &&
-        strcmp(udev_device_table[i]->syspath, syspath) == 0)
-      return udev_device_ref(udev_device_table[i]);
+  static const char prefix[] = "/sys/class/";
+  if (!udev || !syspath || strncmp(syspath, prefix, sizeof(prefix) - 1) != 0 ||
+      strstr(syspath, "//") || strstr(syspath, "/../") ||
+      strlen(syspath) >= 256) {
+    errno = EINVAL;
+    return NULL;
   }
-  return NULL;
+  const char *subsystem = syspath + sizeof(prefix) - 1;
+  const char *slash = strchr(subsystem, '/');
+  if (!slash || slash == subsystem || strchr(slash + 1, '/')) {
+    errno = EINVAL;
+    return NULL;
+  }
+  char subsystem_buf[32];
+  size_t subsystem_len = (size_t)(slash - subsystem);
+  if (subsystem_len >= sizeof(subsystem_buf)) {
+    errno = EINVAL;
+    return NULL;
+  }
+  memcpy(subsystem_buf, subsystem, subsystem_len);
+  subsystem_buf[subsystem_len] = '\0';
+  return create_udev_device(udev, subsystem_buf, slash + 1);
 }
 
 struct udev_device *udev_device_new_from_devnum(struct udev *udev, char type,
                                                 dev_t devnum) {
-  (void)udev;
-  (void)type;
-  // Shortcut: try to stat /dev/input/event* to find the device
-  struct udev_device *d = find_device_by_devnum(devnum);
-  if (d) {
-    return udev_device_ref(d);
-  }
-
-  // Fallback: scan /dev/input/ for matching devnum
-  DIR *dir = opendir("/dev/input");
-  if (!dir)
+  if (!udev || type != 'c' || devnum == 0) {
+    errno = EINVAL;
     return NULL;
-
-  struct dirent *entry;
-  while ((entry = readdir(dir)) != NULL) {
-    if (strncmp(entry->d_name, "event", 5) != 0)
-      continue;
-    char devnode[64];
-    snprintf(devnode, sizeof(devnode), "/dev/input/%s", entry->d_name);
-    struct stat st;
-    if (stat(devnode, &st) < 0)
-      continue;
-    if (st.st_rdev != devnum)
-      continue;
-    closedir(dir);
-    d = create_udev_device(udev, devnode);
-    if (d && udev_device_count < MAX_UDEV_DEVICES)
-      udev_device_table[udev_device_count++] = udev_device_ref(d);
-    return d;
   }
-  closedir(dir);
-  return NULL;
+  const char *subsystems[] = {"input", "drm"};
+  struct udev_device *found = NULL;
+  for (size_t si = 0; si < sizeof(subsystems) / sizeof(subsystems[0]); si++) {
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/class/%s", subsystems[si]);
+    DIR *dir = opendir(path);
+    if (!dir)
+      continue;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+      if (!valid_sysname(subsystems[si], entry->d_name))
+        continue;
+      struct udev_device *candidate =
+          create_udev_device(udev, subsystems[si], entry->d_name);
+      if (!candidate)
+        continue;
+      if (candidate->devnum != devnum) {
+        udev_device_unref(candidate);
+        continue;
+      }
+      if (found) {
+        fprintf(stderr, "udev-shim DEVICE_STAT duplicate devnum=%u\n",
+                (unsigned)devnum);
+        udev_device_unref(candidate);
+        udev_device_unref(found);
+        closedir(dir);
+        errno = EEXIST;
+        return NULL;
+      }
+      found = candidate;
+    }
+    closedir(dir);
+  }
+  if (!found)
+    errno = ENOENT;
+  return found;
 }
 
 struct udev_device *
 udev_device_new_from_subsystem_sysname(struct udev *udev, const char *subsystem,
                                        const char *sysname) {
-  (void)udev;
-  scan_devices_if_needed();
-  for (int i = 0; i < udev_device_count; i++) {
-    if (udev_device_table[i] &&
-        strcmp(udev_device_table[i]->subsystem, subsystem) == 0 &&
-        strcmp(udev_device_table[i]->sysname, sysname) == 0)
-      return udev_device_ref(udev_device_table[i]);
-  }
-  return NULL;
+  return create_udev_device(udev, subsystem, sysname);
 }
 
 struct udev_device *udev_device_ref(struct udev_device *udev_device) {
@@ -266,78 +213,61 @@ void udev_device_unref(struct udev_device *udev_device) {
   if (!udev_device)
     return;
   if (--udev_device->refcount == 0) {
-    // If this is in the static table, leave it there (don't free)
-    // Only free if not in the table
-    int in_table = 0;
-    for (int i = 0; i < udev_device_count; i++) {
-      if (udev_device_table[i] == udev_device) {
-        in_table = 1;
-        break;
-      }
+    struct udev_list_entry *entry = udev_device->properties_list;
+    while (entry) {
+      struct udev_list_entry *next = entry->next;
+      free(entry);
+      entry = next;
     }
-    if (!in_table)
-      free(udev_device);
+    udev_unref(udev_device->udev);
+    free(udev_device);
   }
 }
 
-// udev.c — udev_device_get_property_value landed here (userspace C, int as
-// bool)
-const char *udev_device_get_property_value(struct udev_device *udev_device,
-                                           const char *key) {
-  if (!udev_device || !key)
-    return NULL;
-
-  // monitor device: properties arrive as pipe KV and are stored in
-  // device->props (mirrors Linux libudev's properties hashmap — monitor-path
-  // properties arrive with the uevent, are stored in memory and read from
-  // memory, not the db; §5.3/§6 grill decision went with the pipe KV path, so
-  // remove events don't depend on the db still being present). nprops>0 means
-  // monitor source: look up the table and return on hit.
-  if (udev_device->nprops > 0) {
-    for (int i = 0; i < udev_device->nprops; i++) {
-      if (strcmp(udev_device->props[i].key, key) == 0)
-        return udev_device->props[i].value;
-    }
-    return NULL; // not in the monitor table → NULL (no db fallback, mirrors
-                 // Linux: a monitor device's properties come only from uevent
-                 // KV)
-  }
-
-  // Direct-read device (nprops==0): go through the db (mirrors Linux libudev
-  // reading /run/udev/data/<key>).
-  char key_str[32], path[80];
-  snprintf(key_str, sizeof(key_str), "%u", (unsigned)udev_device->devnum);
-  snprintf(path, sizeof(path), "/run/udev/data/%s", key_str);
-
+static void load_device_properties(struct udev_device *d) {
+  if (d->properties_loaded)
+    return;
+  d->properties_loaded = 1;
+  char path[80];
+  snprintf(path, sizeof(path), "/run/udev/data/%u", (unsigned)d->devnum);
   int fd = open(path, O_RDONLY);
   if (fd < 0)
-    return NULL; // db file missing (udevd not started / hasn't written) → NULL
-                 // (degraded, §5.2)
-
-  static char db_buf[2048]; // valid for a single call; caller must copy
-                            // immediately (mirrors Linux libudev)
-  ssize_t n = read(fd, db_buf, sizeof(db_buf) - 1);
+    return;
+  char buf[UDEV_FRAME_PAYLOAD_MAX + 1];
+  ssize_t n = read(fd, buf, sizeof(buf));
   close(fd);
-  if (n <= 0)
-    return NULL;
-  db_buf[n] = '\0';
-
-  // Parse KEY=VALUE\n lines looking for the requested key.
-  char *line = db_buf;
-  while (line && *line) {
+  if (n <= 0 || n > UDEV_FRAME_PAYLOAD_MAX)
+    return;
+  buf[n] = '\0';
+  char *line = buf;
+  while (*line && d->nprops < UDEV_DEV_PROPS_MAX) {
     char *eol = strchr(line, '\n');
     if (eol)
       *eol = '\0';
     char *eq = strchr(line, '=');
-    if (eq) {
-      *eq = '\0';
-      if (strcmp(line, key) == 0) {
-        return eq + 1; // points into db_buf; caller must copy immediately
-      }
-      *eq = '=';
+    size_t key_len = eq ? (size_t)(eq - line) : 0;
+    size_t value_len = eq ? strlen(eq + 1) : 0;
+    if (key_len > 0 && key_len < UDEV_PROP_KEYLEN &&
+        value_len < UDEV_PROP_VALLEN) {
+      memcpy(d->props[d->nprops].key, line, key_len);
+      d->props[d->nprops].key[key_len] = '\0';
+      memcpy(d->props[d->nprops].value, eq + 1, value_len + 1);
+      d->nprops++;
     }
-    line = eol ? eol + 1 : NULL;
+    if (!eol)
+      break;
+    line = eol + 1;
   }
+}
+
+const char *udev_device_get_property_value(struct udev_device *udev_device,
+                                           const char *key) {
+  if (!udev_device || !key)
+    return NULL;
+  load_device_properties(udev_device);
+  for (int i = 0; i < udev_device->nprops; i++)
+    if (strcmp(udev_device->props[i].key, key) == 0)
+      return udev_device->props[i].value;
   return NULL;
 }
 
@@ -417,8 +347,24 @@ const char *udev_device_get_sysattr_value(struct udev_device *udev_device,
 
 struct udev_list_entry *
 udev_device_get_properties_list_entry(struct udev_device *udev_device) {
-  (void)udev_device;
-  return NULL;
+  if (!udev_device)
+    return NULL;
+  load_device_properties(udev_device);
+  if (!udev_device->properties_list) {
+    struct udev_list_entry **tail = &udev_device->properties_list;
+    for (int i = 0; i < udev_device->nprops; i++) {
+      struct udev_list_entry *entry = calloc(1, sizeof(*entry));
+      if (!entry)
+        break;
+      snprintf(entry->name, sizeof(entry->name), "%s",
+               udev_device->props[i].key);
+      snprintf(entry->value, sizeof(entry->value), "%s",
+               udev_device->props[i].value);
+      *tail = entry;
+      tail = &entry->next;
+    }
+  }
+  return udev_device->properties_list;
 }
 
 struct udev_list_entry *
@@ -455,8 +401,7 @@ udev_device_get_parent_with_subsystem_devtype(struct udev_device *udev_device,
 }
 
 struct udev *udev_device_get_udev(struct udev_device *udev_device) {
-  (void)udev_device;
-  return NULL;
+  return udev_device ? udev_device->udev : NULL;
 }
 
 // ======================== list_entry ========================
@@ -479,8 +424,10 @@ const char *udev_list_entry_get_value(struct udev_list_entry *list_entry) {
 
 struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev,
                                                    const char *name) {
-  (void)name; // mirrors Linux taking "udev"; this OS has no "kernel" direct
-              // option
+  if (!udev || !name || strcmp(name, "udev") != 0) {
+    errno = EINVAL;
+    return NULL;
+  }
   struct udev_monitor *m = calloc(1, sizeof(struct udev_monitor));
   if (m) {
     m->udev = udev_ref(udev);
@@ -494,10 +441,24 @@ struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev,
 int udev_monitor_filter_add_match_subsystem_devtype(
     struct udev_monitor *udev_monitor, const char *subsystem,
     const char *devtype) {
-  (void)udev_monitor;
-  (void)subsystem;
-  (void)devtype;
-  return 0; // no-op stub this round (Q5), TODO left in place
+  if (!udev_monitor || !subsystem || !*subsystem)
+    return -EINVAL;
+  if (strlen(subsystem) >= sizeof(udev_monitor->subsystem_filter) ||
+      (devtype && strlen(devtype) >= sizeof(udev_monitor->devtype_filter)))
+    return -EINVAL;
+  if (udev_monitor->subsystem_filter[0]) {
+    if (strcmp(udev_monitor->subsystem_filter, subsystem) == 0 &&
+        ((!devtype && !udev_monitor->devtype_filter[0]) ||
+         (devtype && strcmp(udev_monitor->devtype_filter, devtype) == 0)))
+      return 0;
+    return -EOPNOTSUPP;
+  }
+  snprintf(udev_monitor->subsystem_filter,
+           sizeof(udev_monitor->subsystem_filter), "%s", subsystem);
+  if (devtype)
+    snprintf(udev_monitor->devtype_filter, sizeof(udev_monitor->devtype_filter),
+             "%s", devtype);
+  return 0;
 }
 
 int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
@@ -515,10 +476,12 @@ int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
   addr.sun_family = AF_UNIX;
   strncpy(addr.sun_path, "/run/udev/socket", sizeof(addr.sun_path) - 1);
   if (connect(sfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    // udevd not started / socket missing → -ENOENT; path-seat still works
-    // (§5.4)
+    int saved = errno;
     close(sfd);
-    return -ENOENT;
+    fprintf(stderr,
+            "udev-shim MON_CONNECT errno=%d path=/run/udev/socket fatal=1\n",
+            saved);
+    return -saved;
   }
 
   // Receive SCM_RIGHTS: udevd sends back the pipe rd fd (§4.4 step 5-6).
@@ -535,9 +498,10 @@ int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
   msg.msg_control = cmsgbuf;
   msg.msg_controllen = sizeof(cmsgbuf);
 
-  if (recvmsg(sfd, &msg, 0) < 0) {
+  if (recvmsg(sfd, &msg, MSG_CMSG_CLOEXEC) < 0) {
+    int saved = errno;
     close(sfd);
-    return -errno;
+    return -saved;
   }
 
   int got_fd = -1;
@@ -559,11 +523,26 @@ int udev_monitor_enable_receiving(struct udev_monitor *udev_monitor) {
     return -EPROTO;
   }
 
+  int flags = fcntl(got_fd, F_GETFL);
+  int fdflags = fcntl(got_fd, F_GETFD);
+  if (flags < 0 || fdflags < 0 ||
+      fcntl(got_fd, F_SETFL, flags | O_NONBLOCK) < 0 ||
+      fcntl(got_fd, F_SETFD, fdflags | FD_CLOEXEC) < 0) {
+    int saved = errno;
+    close(got_fd);
+    close(sfd);
+    return -saved;
+  }
+
   // Close the conn fd (connect == subscribe, Q5; after taking the pipe fd we
   // no longer communicate over it).
   close(sfd);
   udev_monitor->pipe_fd = got_fd;
   udev_monitor->subscribed = 1;
+  fprintf(stderr, "udev-shim monitor filter=%s fd=%d framed=v1\n",
+          udev_monitor->subsystem_filter[0] ? udev_monitor->subsystem_filter
+                                            : "*",
+          got_fd);
   return 0;
 }
 
@@ -574,84 +553,172 @@ int udev_monitor_get_fd(struct udev_monitor *udev_monitor) {
 
 struct udev_device *
 udev_monitor_receive_device(struct udev_monitor *udev_monitor) {
-  if (!udev_monitor || udev_monitor->pipe_fd < 0)
+  if (!udev_monitor || udev_monitor->pipe_fd < 0) {
+    errno = EINVAL;
     return NULL;
+  }
 
-  char buf[4096];
-  ssize_t len = read(udev_monitor->pipe_fd, buf, sizeof(buf) - 1);
-  if (len <= 0)
-    return NULL; // 0=EOF (udevd crash / closed pipe), <0=EAGAIN/error
-  buf[len] = '\0';
+  for (int budget = 0; budget < 32; budget++) {
+    while (udev_monitor->frame_header_used < UDEV_FRAME_HEADER_SIZE) {
+      ssize_t n =
+          read(udev_monitor->pipe_fd,
+               udev_monitor->frame_header + udev_monitor->frame_header_used,
+               UDEV_FRAME_HEADER_SIZE - udev_monitor->frame_header_used);
+      if (n > 0) {
+        udev_monitor->frame_header_used += (size_t)n;
+        continue;
+      }
+      if (n == 0) {
+        errno = EPIPE;
+        return NULL;
+      }
+      return NULL;
+    }
+    unsigned char *h = udev_monitor->frame_header;
+    size_t payload_len = (size_t)h[8] | ((size_t)h[9] << 8) |
+                         ((size_t)h[10] << 16) | ((size_t)h[11] << 24);
+    if (memcmp(h, "UDEV", 4) != 0 || h[4] != 1 || h[5] != 0 || h[6] != 0 ||
+        h[7] != 0 || payload_len == 0 || payload_len > UDEV_FRAME_PAYLOAD_MAX) {
+      fprintf(stderr, "udev-shim MON_FRAME errno=%d fatal=1\n", EPROTO);
+      close(udev_monitor->pipe_fd);
+      udev_monitor->pipe_fd = -1;
+      errno = EPROTO;
+      return NULL;
+    }
+    udev_monitor->frame_payload_len = payload_len;
+    while (udev_monitor->frame_payload_used < payload_len) {
+      ssize_t n =
+          read(udev_monitor->pipe_fd,
+               udev_monitor->frame_payload + udev_monitor->frame_payload_used,
+               payload_len - udev_monitor->frame_payload_used);
+      if (n > 0) {
+        udev_monitor->frame_payload_used += (size_t)n;
+        continue;
+      }
+      if (n == 0) {
+        errno = EPIPE;
+        return NULL;
+      }
+      return NULL;
+    }
 
-  struct udev_device *d = calloc(1, sizeof(struct udev_device));
-  if (!d)
-    return NULL;
-  d->refcount = 1;
-  d->initialized = 1;
-
-  // Parse \0-separated key=value (same parser origin as netlink uevent, Q4).
-  char *p = buf, *end = buf + len;
-  while (p < end) {
-    char *eq = strchr(p, '=');
-    if (!eq) {
-      int sl = (int)strlen(p);
-      p += sl + 1;
+    unsigned char payload[UDEV_FRAME_PAYLOAD_MAX];
+    memcpy(payload, udev_monitor->frame_payload, payload_len);
+    udev_monitor->frame_header_used = 0;
+    udev_monitor->frame_payload_used = 0;
+    udev_monitor->frame_payload_len = 0;
+    if (payload[payload_len - 1] != '\0') {
+      if (++udev_monitor->protocol_errors >= 3) {
+        close(udev_monitor->pipe_fd);
+        udev_monitor->pipe_fd = -1;
+        errno = EPROTO;
+        return NULL;
+      }
       continue;
     }
-    *eq = '\0';
-    char *key = p, *val = eq + 1;
-    if (strcmp(key, "ACTION") == 0)
-      strncpy(d->action, val, sizeof(d->action) - 1);
-    else if (strcmp(key, "DEVNAME") == 0)
-      strncpy(d->devnode, val, sizeof(d->devnode) - 1);
-    else if (strcmp(key, "DEVPATH") == 0)
-      strncpy(d->syspath, val, sizeof(d->syspath) - 1);
-    else if (strcmp(key, "SUBSYSTEM") == 0)
-      strncpy(d->subsystem, val, sizeof(d->subsystem) - 1);
-    else if (strcmp(key, "DEVTYPE") == 0)
-      strncpy(d->devtype, val, sizeof(d->devtype) - 1);
-    else if (strcmp(key, "DEVNUM") == 0)
-      d->devnum = (dev_t)strtoul(val, NULL, 10);
-    else {
-      // Non-identifier key → property (ID_INPUT_*, ID_SEAT, WL_*, MOUSE_DPI,
-      // etc.). Store into the device's property table (mirrors Linux libudev:
-      // a monitor device's properties arrive with the uevent KV, are held in
-      // memory, and get_property_value reads this table, not the db — §5.3/§6
-      // grill decision: take the pipe KV path; remove events don't depend on
-      // the db still being present). Drop the property if the table is full
-      // (32 slots is enough).
-      if (d->nprops < UDEV_DEV_PROPS_MAX) {
-        strncpy(d->props[d->nprops].key, key, UDEV_PROP_KEYLEN - 1);
-        d->props[d->nprops].key[UDEV_PROP_KEYLEN - 1] = '\0';
-        strncpy(d->props[d->nprops].value, val, UDEV_PROP_VALLEN - 1);
-        d->props[d->nprops].value[UDEV_PROP_VALLEN - 1] = '\0';
-        d->nprops++;
+
+    struct udev_device *d = calloc(1, sizeof(*d));
+    if (!d)
+      return NULL;
+    d->refcount = 1;
+    d->udev = udev_ref(udev_monitor->udev);
+    d->initialized = 1;
+    d->properties_loaded = 1;
+    int malformed = 0;
+    size_t offset = 0;
+    while (offset < payload_len) {
+      char *segment = (char *)payload + offset;
+      size_t remaining = payload_len - offset;
+      char *nul = memchr(segment, '\0', remaining);
+      if (!nul) {
+        malformed = 1;
+        break;
       }
+      size_t segment_len = (size_t)(nul - segment);
+      offset += segment_len + 1;
+      if (segment_len == 0)
+        continue;
+      char *eq = memchr(segment, '=', segment_len);
+      if (!eq)
+        continue;
+      *eq = '\0';
+      const char *key = segment;
+      const char *value = eq + 1;
+      size_t key_len = strlen(key);
+      size_t value_len = strlen(value);
+#define SET_ONCE(field)                                                        \
+  do {                                                                         \
+    if (d->field[0] || value_len >= sizeof(d->field))                          \
+      malformed = 1;                                                           \
+    else                                                                       \
+      memcpy(d->field, value, value_len + 1);                                  \
+  } while (0)
+      if (strcmp(key, "ACTION") == 0)
+        SET_ONCE(action);
+      else if (strcmp(key, "DEVNAME") == 0)
+        SET_ONCE(devnode);
+      else if (strcmp(key, "DEVPATH") == 0)
+        SET_ONCE(syspath);
+      else if (strcmp(key, "SUBSYSTEM") == 0)
+        SET_ONCE(subsystem);
+      else if (strcmp(key, "DEVTYPE") == 0)
+        SET_ONCE(devtype);
+      else if (strcmp(key, "DEVNUM") == 0) {
+        char *endptr = NULL;
+        unsigned long value_num = strtoul(value, &endptr, 10);
+        if (d->devnum || !*value || !endptr || *endptr || value_num == 0)
+          malformed = 1;
+        else
+          d->devnum = (dev_t)value_num;
+      } else if (key_len > 0 && key_len < UDEV_PROP_KEYLEN &&
+                 value_len < UDEV_PROP_VALLEN &&
+                 d->nprops < UDEV_DEV_PROPS_MAX) {
+        for (int i = 0; i < d->nprops; i++)
+          if (strcmp(d->props[i].key, key) == 0)
+            malformed = 1;
+        if (!malformed) {
+          memcpy(d->props[d->nprops].key, key, key_len + 1);
+          memcpy(d->props[d->nprops].value, value, value_len + 1);
+          d->nprops++;
+        }
+      } else {
+        malformed = 1;
+      }
+#undef SET_ONCE
     }
-    p = val + strlen(val) + 1;
+    if (!d->action[0] || !d->devnode[0] || !d->subsystem[0] || !d->devnum)
+      malformed = 1;
+    const char *slash = strrchr(d->devnode, '/');
+    const char *sysname = slash ? slash + 1 : d->devnode;
+    if (!malformed && valid_sysname(d->subsystem, sysname)) {
+      snprintf(d->sysname, sizeof(d->sysname), "%s", sysname);
+      snprintf(d->syspath, sizeof(d->syspath), "/sys/class/%s/%s", d->subsystem,
+               d->sysname);
+    } else {
+      malformed = 1;
+    }
+    if (malformed) {
+      udev_device_unref(d);
+      if (++udev_monitor->protocol_errors >= 3) {
+        close(udev_monitor->pipe_fd);
+        udev_monitor->pipe_fd = -1;
+        errno = EPROTO;
+        return NULL;
+      }
+      continue;
+    }
+    udev_monitor->protocol_errors = 0;
+    if ((udev_monitor->subsystem_filter[0] &&
+         strcmp(udev_monitor->subsystem_filter, d->subsystem) != 0) ||
+        (udev_monitor->devtype_filter[0] &&
+         strcmp(udev_monitor->devtype_filter, d->devtype) != 0)) {
+      udev_device_unref(d);
+      continue;
+    }
+    return d;
   }
-
-  // sysname = last segment of syspath (last DEVPATH segment, e.g. "event0").
-  // Take it from the raw syspath first; normalize syspath itself afterwards.
-  const char *slash = strrchr(d->syspath, '/');
-  strncpy(d->sysname, slash ? slash + 1 : d->syspath, sizeof(d->sysname) - 1);
-  d->sysname[sizeof(d->sysname) - 1] = '\0';
-
-  // Normalize syspath to "/sys/class/<subsystem>/<sysname>", matching the
-  // scan path in create_udev_device (:153). The kernel netlink sends DEVPATH
-  // as a bare relative path ("input/event0", no /sys/ prefix); leaving it as
-  // is would make it unequal to the scan table's "/sys/class/input/event0",
-  // causing libinput to:
-  //   - fail dedup in filter_duplicates (udev-seat.c:62), replaying add events;
-  //   - fail the evdev_device_have_same_syspath check (evdev.c:2274), silently
-  //     goto err and log "failed to create input device".
-  if (d->subsystem[0] && d->sysname[0]) {
-    char norm[256];
-    snprintf(norm, sizeof(norm), "/sys/class/%s/%s", d->subsystem, d->sysname);
-    strncpy(d->syspath, norm, sizeof(d->syspath) - 1);
-    d->syspath[sizeof(d->syspath) - 1] = '\0';
-  }
-  return d;
+  errno = EAGAIN;
+  return NULL;
 }
 
 void udev_monitor_unref(struct udev_monitor *udev_monitor) {
@@ -668,8 +735,15 @@ void udev_monitor_unref(struct udev_monitor *udev_monitor) {
 // ======================== enumerate (no-op stubs) ========================
 
 struct udev_enumerate *udev_enumerate_new(struct udev *udev) {
-  (void)udev;
+  if (!udev) {
+    errno = EINVAL;
+    return NULL;
+  }
   struct udev_enumerate *e = calloc(1, sizeof(struct udev_enumerate));
+  if (e) {
+    e->refcount = 1;
+    e->udev = udev_ref(udev);
+  }
   return e;
 }
 
@@ -682,12 +756,16 @@ void udev_enumerate_unref(struct udev_enumerate *udev_enumerate) {
     free(cur);
     cur = next;
   }
+  udev_unref(udev_enumerate->udev);
   free(udev_enumerate);
 }
 
 int udev_enumerate_add_match_subsystem(struct udev_enumerate *udev_enumerate,
                                        const char *subsystem) {
   if (!udev_enumerate || !subsystem)
+    return -EINVAL;
+  if (!*subsystem ||
+      strlen(subsystem) >= sizeof(udev_enumerate->subsystem_filter))
     return -EINVAL;
   strncpy(udev_enumerate->subsystem_filter, subsystem,
           sizeof(udev_enumerate->subsystem_filter) - 1);
@@ -700,6 +778,8 @@ int udev_enumerate_add_match_sysname(struct udev_enumerate *udev_enumerate,
                                      const char *sysname) {
   if (!udev_enumerate || !sysname)
     return -EINVAL;
+  if (!*sysname || strlen(sysname) >= sizeof(udev_enumerate->sysname_filter))
+    return -EINVAL;
   strncpy(udev_enumerate->sysname_filter, sysname,
           sizeof(udev_enumerate->sysname_filter) - 1);
   udev_enumerate->sysname_filter[sizeof(udev_enumerate->sysname_filter) - 1] =
@@ -711,13 +791,23 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
   if (!udev_enumerate)
     return -EINVAL;
 
-  // Known-subsystem whitelist. Without a subsystem_filter, scan all of them.
   const char *subsystems[] = {"input", "drm", NULL};
   const char *only_subsys = udev_enumerate->subsystem_filter[0]
                                 ? udev_enumerate->subsystem_filter
                                 : NULL;
 
-  // Clear stale results (supports repeated scan).
+  if (only_subsys && strcmp(only_subsys, "input") != 0 &&
+      strcmp(only_subsys, "drm") != 0) {
+    struct udev_list_entry *old = udev_enumerate->devices;
+    udev_enumerate->devices = NULL;
+    while (old) {
+      struct udev_list_entry *next = old->next;
+      free(old);
+      old = next;
+    }
+    return 0;
+  }
+
   struct udev_list_entry *cur = udev_enumerate->devices;
   while (cur) {
     struct udev_list_entry *next = cur->next;
@@ -725,6 +815,8 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
     cur = next;
   }
   udev_enumerate->devices = NULL;
+  char paths[MAX_UDEV_DEVICES][128];
+  int count = 0;
 
   for (int si = 0; subsystems[si]; si++) {
     if (only_subsys && strcmp(subsystems[si], only_subsys) != 0)
@@ -733,6 +825,8 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
     char class_path[64];
     snprintf(class_path, sizeof(class_path), "/sys/class/%s", subsystems[si]);
     DIR *dir = opendir(class_path);
+    if (!dir && only_subsys)
+      return -errno;
     if (!dir)
       continue;
 
@@ -743,21 +837,64 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
       if (udev_enumerate->sysname_filter[0] &&
           !match_pattern(udev_enumerate->sysname_filter, entry->d_name))
         continue;
-
-      char syspath[128];
-      snprintf(syspath, sizeof(syspath), "/sys/class/%s/%s", subsystems[si],
-               entry->d_name);
-
-      struct udev_list_entry *le = calloc(1, sizeof(struct udev_list_entry));
-      if (!le)
+      if (count == MAX_UDEV_DEVICES) {
+        closedir(dir);
+        return -E2BIG;
+      }
+      int n = snprintf(paths[count], sizeof(paths[count]), "/sys/class/%s/%s",
+                       subsystems[si], entry->d_name);
+      if (n < 0 || (size_t)n >= sizeof(paths[count]))
         continue;
-      strncpy(le->name, syspath, sizeof(le->name) - 1);
-      le->name[sizeof(le->name) - 1] = '\0';
-      le->next = udev_enumerate->devices;
-      udev_enumerate->devices = le;
+      count++;
     }
     closedir(dir);
   }
+
+  for (int i = 0; i < count; i++) {
+    for (int j = i + 1; j < count; j++) {
+      const char *a = strrchr(paths[i], '/') + 1;
+      const char *b = strrchr(paths[j], '/') + 1;
+      int cmp;
+      if (strncmp(a, "card", 4) == 0 && all_digits(a + 4) &&
+          strncmp(b, "card", 4) == 0 && all_digits(b + 4)) {
+        unsigned long an = strtoul(a + 4, NULL, 10);
+        unsigned long bn = strtoul(b + 4, NULL, 10);
+        cmp = an == bn ? 0 : (an < bn ? -1 : 1);
+      } else {
+        cmp = strcmp(paths[i], paths[j]);
+      }
+      if (cmp > 0) {
+        char tmp[128];
+        memcpy(tmp, paths[i], sizeof(tmp));
+        memcpy(paths[i], paths[j], sizeof(tmp));
+        memcpy(paths[j], tmp, sizeof(tmp));
+      }
+    }
+  }
+  struct udev_list_entry **tail = &udev_enumerate->devices;
+  for (int i = 0; i < count; i++) {
+    struct udev_list_entry *entry = calloc(1, sizeof(*entry));
+    if (!entry) {
+      struct udev_list_entry *allocated = udev_enumerate->devices;
+      udev_enumerate->devices = NULL;
+      while (allocated) {
+        struct udev_list_entry *next = allocated->next;
+        free(allocated);
+        allocated = next;
+      }
+      errno = ENOMEM;
+      return -ENOMEM;
+    }
+    snprintf(entry->name, sizeof(entry->name), "%s", paths[i]);
+    *tail = entry;
+    tail = &entry->next;
+  }
+
+  fprintf(stderr, "udev-shim enumerate subsystem=%s pattern=%s count=%d\n",
+          only_subsys ? only_subsys : "*",
+          udev_enumerate->sysname_filter[0] ? udev_enumerate->sysname_filter
+                                            : "*",
+          count);
 
   return 0;
 }

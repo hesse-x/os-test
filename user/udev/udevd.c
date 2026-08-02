@@ -37,15 +37,20 @@
 // udevd). The conn fd is closed once the pipe rd fd is taken (§4.4 step 8);
 // only the pipe wr end goes into epoll (drained when writable).
 #define UDEV_MAX_CLIENTS 8
+#define UDEV_FRAME_HEADER_SIZE 12
+#define UDEV_FRAME_PAYLOAD_MAX 4096
+#define UDEV_CLIENT_QUEUE_SIZE 16384
 
 struct udev_client {
   int pipe_wr; // write end held by udevd (rd handed to client via SCM_RIGHTS).
                // <0 = free slot
-  char wbuf[4096]; // pending pipe buffer (dropped if pipe full, Q2)
-  int wlen;        // bytes used in wbuf
+  unsigned char wbuf[UDEV_CLIENT_QUEUE_SIZE];
+  int wlen;
+  int epollout_registered;
 };
 
 static struct udev_client udev_clients[UDEV_MAX_CLIENTS];
+static int daemon_epfd = -1;
 
 // Single-char progress chain (§8.6 debug discipline): u=uevent a=accept
 // c=coldplug r=remove w=write
@@ -92,6 +97,7 @@ static int client_alloc(void) {
       udev_clients[i].pipe_wr =
           -2; // placeholder against reentry; real fd filled shortly
       udev_clients[i].wlen = 0;
+      udev_clients[i].epollout_registered = 0;
       return i;
     }
   }
@@ -286,36 +292,77 @@ static int device_complete_kv(const char *action, const char *name,
 // try to drain it to the pipe. If the pipe is full, drop that event for that
 // client (Q2 non-blocking). Single-threaded; table structure is unchanged
 // during iteration.
-static void clients_broadcast(const char *kv, int olen) {
-  if (olen <= 0)
+static void client_close(struct udev_client *c) {
+  if (c->epollout_registered && daemon_epfd >= 0)
+    epoll_ctl(daemon_epfd, EPOLL_CTL_DEL, c->pipe_wr, NULL);
+  if (c->pipe_wr >= 0)
+    close(c->pipe_wr);
+  c->pipe_wr = -1;
+  c->wlen = 0;
+  c->epollout_registered = 0;
+}
+
+static void client_flush(struct udev_client *c) {
+  while (c->pipe_wr >= 0 && c->wlen > 0) {
+    ssize_t n = write(c->pipe_wr, c->wbuf, (size_t)c->wlen);
+    if (n > 0) {
+      memmove(c->wbuf, c->wbuf + n, (size_t)(c->wlen - n));
+      c->wlen -= (int)n;
+      continue;
+    }
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n < 0 && errno == EAGAIN)
+      break;
+    client_close(c);
     return;
+  }
+  if (c->pipe_wr < 0 || daemon_epfd < 0)
+    return;
+  if (c->wlen > 0 && !c->epollout_registered) {
+    struct epoll_event event;
+    event.events = EPOLLOUT | EPOLLERR | EPOLLHUP;
+    event.data.fd = c->pipe_wr;
+    if (epoll_ctl(daemon_epfd, EPOLL_CTL_ADD, c->pipe_wr, &event) == 0)
+      c->epollout_registered = 1;
+    else
+      client_close(c);
+  } else if (c->wlen == 0 && c->epollout_registered) {
+    epoll_ctl(daemon_epfd, EPOLL_CTL_DEL, c->pipe_wr, NULL);
+    c->epollout_registered = 0;
+  }
+}
+
+static void clients_broadcast(const char *kv, int olen) {
+  if (olen <= 0 || olen > UDEV_FRAME_PAYLOAD_MAX)
+    return;
+  unsigned char frame[UDEV_FRAME_HEADER_SIZE + UDEV_FRAME_PAYLOAD_MAX];
+  memcpy(frame, "UDEV", 4);
+  frame[4] = 1;
+  frame[5] = 0;
+  frame[6] = 0;
+  frame[7] = 0;
+  frame[8] = (unsigned char)((unsigned)olen & 0xff);
+  frame[9] = (unsigned char)(((unsigned)olen >> 8) & 0xff);
+  frame[10] = (unsigned char)(((unsigned)olen >> 16) & 0xff);
+  frame[11] = (unsigned char)(((unsigned)olen >> 24) & 0xff);
+  memcpy(frame + UDEV_FRAME_HEADER_SIZE, kv, (size_t)olen);
+  int frame_len = UDEV_FRAME_HEADER_SIZE + olen;
   for (int i = 0; i < UDEV_MAX_CLIENTS; i++) {
     if (udev_clients[i].pipe_wr < 0)
       continue;
     struct udev_client *c = &udev_clients[i];
-    int space = (int)sizeof(c->wbuf) - c->wlen;
-    if (olen > space) {
-      // Buffer full: try to drain first, then decide drop/keep
-      int w = write(c->pipe_wr, c->wbuf, (size_t)c->wlen);
-      if (w > 0) {
-        memmove(c->wbuf, c->wbuf + w, (size_t)(c->wlen - w));
-        c->wlen -= w;
-        space = (int)sizeof(c->wbuf) - c->wlen;
-      }
+    client_flush(c);
+    if (c->pipe_wr < 0)
+      continue;
+    if (frame_len > (int)sizeof(c->wbuf) - c->wlen) {
+      printf("udevd: monitor queue overflow fd=%d fatal=1\n", c->pipe_wr);
+      client_close(c);
+      continue;
     }
-    if (olen <= space) {
-      memcpy(c->wbuf + c->wlen, kv, (size_t)olen);
-      c->wlen += olen;
-    }
-    // Drain (non-blocking): on EAGAIN leave it in wbuf for the next EPOLLOUT /
-    // next broadcast
-    if (c->wlen > 0) {
-      int w = write(c->pipe_wr, c->wbuf, (size_t)c->wlen);
-      if (w > 0) {
-        memmove(c->wbuf, c->wbuf + w, (size_t)(c->wlen - w));
-        c->wlen -= w;
-      }
-    }
+    memcpy(c->wbuf + c->wlen, frame, (size_t)frame_len);
+    c->wlen += frame_len;
+    client_flush(c);
   }
 }
 
@@ -333,7 +380,7 @@ static void accept_client(int listen_fd) {
     return;
 
   int pfd[2];
-  if (pipe(pfd) < 0) {
+  if (pipe2(pfd, O_NONBLOCK | O_CLOEXEC) < 0) {
     close(cfd);
     return;
   }
@@ -630,6 +677,7 @@ int main(void) {
     close(nl_fd);
     return 1;
   }
+  daemon_epfd = epfd;
 
   // Register netlink fd with epoll
   struct epoll_event ev;
@@ -732,18 +780,13 @@ int main(void) {
         /* 新 client 连接:accept → 建 pipe → SCM_RIGHTS 回传 pipe rd fd
          * → 首个 client 补 coldplug(§4.4/§4.5)。 */
         accept_client(listen_fd);
-      }
-    }
-
-    /* 兜底排空:本轮可能写满 wbuf(pipe EAGAIN),尝试再排一次。
-     * 现状 pipe wr 未入 epoll EPOLLOUT,靠每次广播自排空;满则丢(Q2)。 */
-    for (int i = 0; i < UDEV_MAX_CLIENTS; i++) {
-      if (udev_clients[i].pipe_wr >= 0 && udev_clients[i].wlen > 0) {
-        struct udev_client *c = &udev_clients[i];
-        int w = write(c->pipe_wr, c->wbuf, (size_t)c->wlen);
-        if (w > 0) {
-          memmove(c->wbuf, c->wbuf + w, (size_t)(c->wlen - w));
-          c->wlen -= w;
+      } else {
+        int slot = client_find_by_wr(events[i].data.fd);
+        if (slot >= 0) {
+          if (events[i].events & (EPOLLERR | EPOLLHUP))
+            client_close(&udev_clients[slot]);
+          else
+            client_flush(&udev_clients[slot]);
         }
       }
     }

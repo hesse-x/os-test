@@ -342,10 +342,11 @@ include(${CMAKE_SOURCE_DIR}/build_script/third_party/libinput/libinput.cmake)
 # Aligns with Linux: libudev is separate from libinput; static consumers
 # (test_udevd/test_libudev/test_udevd_db each compile udev.c via SOURCES) are
 # unaffected.
-add_third_party_lib(libudev_so
+add_user_lib(libudev_so SHARED
     SOURCES lib/udev-shim/udev.c
     C
     OUTPUT_NAME udev
+    VERSION_MAP user/lib/udev-shim/libudev.map
     SO_LINK_LIBS c
     FLAGS "-fvisibility=default -O2"
 )
@@ -359,6 +360,11 @@ os_image_path(shell shell.elf bin/sh)
 
 # udev/ — device event daemon (subscribes to netlink uevent group)
 add_user_elf(udevd C SOURCES udev/udevd.c LINK_LIBS c IMAGE_PATH usr/bin/udevd)
+add_user_dyn_elf(udev_drm_smoke C
+    SOURCES test/udev_drm_smoke.c
+    LINK_LIBS udev c
+    INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim
+    IMAGE_PATH usr/bin/udev-drm-smoke)
 add_user_elf(syslogd C SOURCES syslogd.c LINK_LIBS c IMAGE_PATH usr/bin/syslogd)
 
 # ===== ld.so multi-dependency unit tests (ld.md §8 / plan_ld phase D) =====
