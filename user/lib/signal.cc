@@ -13,21 +13,12 @@
 
 LIBC_EXPORT int kill(int pid, int sig) { return sys_kill((int)pid, sig); }
 
-// __libc_sigaction converts the user-facing musl struct sigaction (152B,
-// 128B sa_mask) to this OS's 32-byte kernel wire struct, sets sa_restorer to
-// __restore_rt, and issues rt_sigaction with mask-size 8. Defined in
-// musl_glue.c. Users now pass musl's struct sigaction (the only definition
-// visible in userspace after the musl header switch), so the public
-// sigaction() must NOT call sys_sigaction directly (it would hand the kernel
-// the 152B musl layout, which mismatches the 32B wire struct the kernel
-// reads).
-extern "C" int __libc_sigaction(int sig, const struct sigaction *act,
-                                struct sigaction *oldact);
-
-LIBC_EXPORT int sigaction(int sig, const struct sigaction *act,
-                          struct sigaction *oldact) {
-  return __libc_sigaction(sig, act, oldact);
-}
+// sigaction() is provided by musl's upstream src/signal/sigaction.c (compiled
+// via signal.cmake as musl_signal_objs): weak_alias(__sigaction, sigaction).
+// The kernel's sys_sigaction wire ABI now matches musl's struct k_sigaction
+// (handler/flags/restorer/mask[2], 40B) and accepts any sigsetsize >= 8, so
+// musl's __libc_sigaction issues rt_sigaction directly with no glue. signal()
+// below calls the public sigaction(), which routes to musl's __sigaction.
 
 /* sigreturn is OS-specific (musl's <signal.h> doesn't declare it), so without
  * an extern "C" declaration the C++ compiler mangles it to _Z9sigreturnv and
