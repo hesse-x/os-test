@@ -25,8 +25,12 @@
 # family plus the __libc_malloc/__libc_free/__malloc_replaced surface musl 1.2.x's
 # loader requires. mallocng runs in mmap-only mode (this kernel's sys_brk is a
 # fail stub; see kernel/bsd/syscall.c).
+# time.cc removed (sleep/usleep migrated to musl): musl src/unistd/sleep.c +
+# usleep.c are now ADOPTED by unistd.cmake (they return the remaining interval on
+# EINTR — the POSIX behavior — rather than the old repo loop-resume). The rest of
+# <time.h> already comes from musl_time_objs (time.cmake).
 set(LIBC_SOURCES
-    lib/time.cc lib/file.cc
+    lib/file.cc
     lib/stdlib_misc.c lib/uname.c
     lib/assert.c lib/signal.cc lib/getrandom.c
     lib/lfs64_compat.c

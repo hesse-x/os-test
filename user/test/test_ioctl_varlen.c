@@ -186,13 +186,15 @@ void test_timeout(void) {
     sys_dev_create(TEST_DEV, -1, 0);
     // Receive the REQ but deliberately never respond, and keep the driver
     // alive and silent past the caller's 3s deadline. A plain sleep(5) won't
-    // do: sleep() is ipc_recv()-based, so the ioctl's RECV_IOCTL delivery wakes
-    // it and the driver exits before the caller times out (caller then sees
-    // ESRCH, not ETIMEDOUT). Loop on recv with a long timeout and a real
-    // data_buf (RECV_IOCTL with a NULL data_buf returns -EINVAL, which would
-    // break the loop and let the driver exit early); each delivery returns
-    // without responding, and we only exit after the 10s timeout — well after
-    // the caller's 3s ioctl timeout has fired.
+    // do: the driver must actively drain the inbound REQ via ipc_recv — sleep()
+    // is a pure timed wait (WAIT_SLEEP in the kernel), so a sleeping driver
+    // never dequeues the ioctl's RECV_IOCTL, the caller's deadline fires
+    // against a driver that never received its request, and the result is ESRCH
+    // (driver exits on wake) rather than the intended ETIMEDOUT. Loop on recv
+    // with a long timeout and a real data_buf (RECV_IOCTL with a NULL data_buf
+    // returns -EINVAL, which would break the loop and let the driver exit
+    // early); each delivery returns without responding, and we only exit after
+    // the 10s timeout — well after the caller's 3s ioctl timeout has fired.
     struct recv_msg msg;
     uint8_t data_buf[256];
     while (ipc_recv(&msg, data_buf, sizeof(data_buf), 5000) == 0)

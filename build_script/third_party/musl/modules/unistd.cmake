@@ -49,6 +49,14 @@
 # not-a-tty. The repo's isatty (file.cc) uses TCGETS, which both PTY and serial
 # answer, and is retained.
 #
+# sleep.c / usleep.c ARE ADOPTED: musl returns the *remaining* interval on EINTR
+# (the POSIX/SUS behavior); the repo's old time.cc wrappers looped to resume the
+# remainder (BSD sleep(3) "sleep the full duration"). No caller in-tree depends on
+# the return value (all use bare `sleep(n);`/`usleep(n);`), and init/terminal
+# crash-restart backoff tolerates early return (the waitpid retry loop re-scans).
+# musl's sleep.c/usleep.c layer on the already-built nanosleep (time.cmake). The
+# repo's time.cc is deleted (it held only sleep/usleep).
+#
 # chdir.c / getcwd.c / renameat.c / unlinkat.c ARE ADOPTED: the kernel's *at
 # syscalls resolve AT_FDCWD to the process cwd (resolve_dirfd_start in
 # kernel/bsd/vfs.c resolves bp->cwd to its inode — the M0.4 fix), and the plain
@@ -68,8 +76,6 @@ set(MUSL_UNISTD_EXCLUDE
     ${MUSL_DIR}/src/unistd/setxid.c      # __setxid provided by musl_shim/syscall_cp.c
     ${MUSL_DIR}/src/unistd/isatty.c      # musl probes TIOCGWINSZ; serial only answers TCGETS — repo isatty retained
     ${MUSL_DIR}/src/unistd/gethostname.c # musl returns uname.nodename ("(none)"); repo reads sys_gethostname (sethostname round-trip) — retained
-    ${MUSL_DIR}/src/unistd/sleep.c       # repo sleep resumes after EINTR (musl returns remaining); retained for signal-resume semantics
-    ${MUSL_DIR}/src/unistd/usleep.c      # repo usleep resumes after EINTR (musl returns early); retained (same reason as sleep)
 )
 list(REMOVE_ITEM MUSL_UNISTD_SOURCES ${MUSL_UNISTD_EXCLUDE})
 

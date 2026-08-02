@@ -30,9 +30,9 @@ void page_cache_init(void);
 void devtmpfs_init(void);
 void sysfs_init(void);
 
-// POSIX hostname (group 1). Default "myos"; guarded against concurrent
+// POSIX hostname (group 1). Default "hesse-pc"; guarded against concurrent
 // sethostname/gethostname. Plain NUL-terminated C string, len < HOSTNAME_MAX.
-char hostname[HOSTNAME_MAX] = "myos";
+char hostname[HOSTNAME_MAX] = "hesse-pc";
 static spinlock hostname_lock = SPINLOCK_INIT;
 
 void hostname_set(const char *name, size_t len) {

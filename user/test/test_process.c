@@ -6,6 +6,7 @@
 
 #include "user/test/test_helpers.h"
 #include <errno.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/process.h>
 #include <sys/stat.h>
@@ -174,15 +175,17 @@ void test_setuid_setgid(void) {
 
 /* 12. gethostname/sethostname round-trip */
 void test_hostname_roundtrip(void) {
+  char original_hostname[256] = {0};
   char buf[256] = {0};
-  TEST_ASSERT_EQUAL_INT(0, gethostname(buf, sizeof(buf)));
-  /* default is non-empty ("myos") */
-  TEST_ASSERT_TRUE(buf[0] != '\0');
+  TEST_ASSERT_EQUAL_INT(
+      0, gethostname(original_hostname, sizeof(original_hostname)));
+  TEST_ASSERT_TRUE(original_hostname[0] != '\0');
 
-  TEST_ASSERT_EQUAL_INT(0, sethostname("testhost", 8));
+  const char *test_hostname = "testhost";
+  TEST_ASSERT_EQUAL_INT(0, sethostname(test_hostname, strlen(test_hostname)));
   buf[0] = '\0';
   TEST_ASSERT_EQUAL_INT(0, gethostname(buf, sizeof(buf)));
-  TEST_ASSERT_EQUAL_STRING("testhost", buf);
+  TEST_ASSERT_EQUAL_STRING(test_hostname, buf);
 
   /* buffer too small returns -1 + EINVAL */
   errno = 0;
@@ -191,7 +194,8 @@ void test_hostname_roundtrip(void) {
   TEST_ASSERT_EQUAL_INT(EINVAL, errno);
 
   /* restore */
-  sethostname("myos", 4);
+  TEST_ASSERT_EQUAL_INT(
+      0, sethostname(original_hostname, strlen(original_hostname)));
 }
 
 int main(int argc, char **argv, char **envp) {

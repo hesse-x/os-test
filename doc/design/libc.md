@@ -42,11 +42,7 @@ ld 按需拉入 libc.a 成员。shell 链接 libc.a 时 shell.o 已定义 _start
 
 user/include/time.h : struct timespec / timespec_get / clock / CLOCKS_PER_SEC / TIME_UTC
 
-user/lib/time.cc：
-
-timespec_get(ts, TIME_UTC)：sys_gettime() 获取纳秒 → tv_sec = ns / 10^9, tv_nsec = ns % 10^9 → 返回 base。非 TIME_UTC 返回 0。
-
-clock()：sys_clock() 获取 cpu_time_ns → 返回 (clock_t)(ns / 1000)，匹配 CLOCKS_PER_SEC=1000000。
+`timespec_get`/`clock` 及其余 `<time.h>` 全量来自 musl（`musl_time_objs`，`time.cmake`）；`sleep`/`usleep` 来自 musl `src/unistd/{sleep,usleep}.c`（`musl_unistd_objs`，POSIX 语义：EINTR 返回剩余）。仓库已无 `time.cc`。
 
 内核侧时间 syscall：
 
@@ -88,8 +84,8 @@ include 路径：-I. -Iuser/include → 自定义头文件优先。宿主机 fre
 | stdio | musl `src/stdio/*`（`musl_stdio_objs`） | FILE(`struct _IO_FILE`), printf/vfprintf/vfscanf, getc/putc 家族 + `*_unlocked`, fopen/fclose/fread/fwrite/fseek/ftell + fseeko/ftello, getdelim/getline, open_memstream/fmemopen/fopencookie, flockfile/..., asprintf/vasprintf。`user/include/stdio.h` 薄 shim 转 musl 头；详见上“stdio 模块” |
 | string | musl `src/string/*`（`musl_string_objs`） | strlen/strcmp/strcpy/strcat/strchr, memcpy/memmove/memset(x86_64 asm), **ffs**/basename/dirname |
 | malloc | user/lib/malloc.cc | size-class slab + sys_mmap |
-| time | user/lib/time.cc | timespec_get, clock |
-| unistd | musl `src/unistd/*`（`musl_unistd_objs`）+ user/lib/unistd.cc 残留 | POSIX syscall 封装 |
+| time | musl `src/time/*`（`musl_time_objs`） | timespec_get, clock, nanosleep/clock_nanosleep, gmtime/localtime/mktime, strftime/strptime, __tz |
+| unistd | musl `src/unistd/*`（`musl_unistd_objs`）+ user/lib/unistd.cc 残留 | POSIX syscall 封装（含 sleep/usleep，POSIX EINTR 返剩余） |
 | file | user/lib/file.cc | fopen/fclose/fread/fwrite/fseek/rewind/feof/ferror/freopen/ftell/fdopen/flockfile/funlockfile |
 | stdlib | musl `src/stdlib/*`+`src/prng/{rand,rand_r}`+`src/internal/{intscan,shgetc,floatscan}`+`src/env/*`+`src/exit/*`（`musl_stdlib_objs`） | abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv, atoi/atol/atoll, strtol 全家(strtoimax/strtoumax), strtod/strtof/strtold/atof, qsort/bsearch, rand/srand/rand_r(RAND_MAX=0x7fffffff), environ/getenv/setenv/putenv/unsetenv/clearenv, exit/atexit/abort/quick_exit/at_quick_exit/_Exit, __libc_start_main 启动链 |
 | stdlib_misc | user/lib/stdlib_misc.c | 暂留子集：mkstemp/mktemp/realpath/mknod/chmod/getpagesize/sysconf（musl 无法替换，详见 todo.md）。remove/getline/getdelim/fscanf/scanf/sscanf/vfscanf 已随 stdio 迁 musl 移出 |
@@ -104,7 +100,6 @@ include 路径：-I. -Iuser/include → 自定义头文件优先。宿主机 fre
 | signal | user/lib/signal.cc | 信号封装（kill/sigaction/sigprocmask/sigpending/raise/signal/alarm/pause） |
 | ctype | user/lib/ctype.c | isdigit/isalpha 等 |
 | uname | user/lib/uname.c | uname |
-| sleep | user/lib/sleep.c | sleep/usleep |
 | assert | user/lib/assert.c | assert |
 | errno | user/lib/errno.cc | errno TLS + strerror |
 | input_client | user/lib/input_client.cc | input SHM ring 客户端（input_client_poll） |
@@ -144,7 +139,7 @@ libm 编译不依赖 libc（freestanding，`-nostdlib`），但运行时 libm.so
 - _start：musl `src/env/__libc_start_main.c`（`musl_stdlib_objs`）
 - string：user/lib/string.cc / user/include/string.h
 - malloc：user/lib/malloc.cc / user/include/stdlib.h
-- time：user/lib/time.cc / user/include/time.h
+- time：musl `src/time/*`（`musl_time_objs`）/ `user/include/time.h`；`sleep`/`usleep` 走 musl `src/unistd/{sleep,usleep}.c`
 - syscall 封装：arch/x64/utils.h : __syscall0-6 / common/syscall.h
 
 ## 待完成项

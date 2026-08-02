@@ -5,7 +5,9 @@
  */
 
 /* test_time_sleep — S15: nanosleep / clock_nanosleep (relative + TIMER_ABSTIME)
- * + signal-interrupted rem + sleep() no longer woken by IPC. */
+ * + signal-interrupted rem. (sleep()/usleep() themselves are musl's
+ * src/unistd wrappers now; they return the remaining interval on EINTR per
+ * POSIX — not loop-resumed — but no in-tree caller reads the return value.) */
 
 #include <errno.h>
 #include <signal.h>
