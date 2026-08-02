@@ -20,6 +20,9 @@ struct hidraw_devinfo {
   int32_t product;
 };
 
+/* Linux input bus type reported through hidraw_devinfo.bustype. */
+#define HIDRAW_BUS_USB 0x03
+
 // HIDIOCGRAWINFO: _IOR('H', 0x03, struct hidraw_devinfo)
 #define HIDIOCGRAWINFO _IOR('H', 0x03, struct hidraw_devinfo)
 #define HIDIOCGRDESCSIZE _IOR('H', 0x01, int)

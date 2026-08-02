@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef _SYS_IPC_H
-#define _SYS_IPC_H
+#ifndef XOS_IPC_H
+#define XOS_IPC_H
 
+#include <poll.h>
 #include <stdint.h>
 #include <sys/cdefs.h>
-#include <sys/poll.h>
 #include <sys/types.h>
-#include <syscall.h>
+#include <xos/syscall_ext.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,4 +45,4 @@ LIBC_EXPORT int ipcfd_read(int fd, struct recv_msg *msg, void *data_buf,
 }
 #endif
 
-#endif /* _SYS_IPC_H */
+#endif /* XOS_IPC_H */

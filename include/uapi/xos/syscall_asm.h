@@ -13,7 +13,7 @@
  * Shared by:
  *   - kernel  (arch/x64/utils.h includes this, though the kernel implements
  *              syscalls rather than issuing them)
- *   - userspace (user/include/syscall.h, the semantic sys_* wrappers)
+ *   - userspace (user/include/xos/syscall_ext.h, the semantic sys_* wrappers)
  *
  * Keeping these out of arch/x64/utils.h lets the userspace wrappers depend
  * only on this UAPI header instead of pulling in kernel-internal helpers
@@ -23,7 +23,7 @@
  *   RAX = syscall number, RDI/RSI/RDX/R10/R8/R9 = args
  *   RAX = return value
  *   RCX = saved RIP, R11 = saved RFLAGS (clobbered by SYSCALL)
- * Semantic wrappers live in user/include/syscall.h.
+ * Semantic wrappers live in user/include/xos/syscall_ext.h.
  */
 
 #include <stdint.h>

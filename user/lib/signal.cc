@@ -6,8 +6,8 @@
 
 #include <sched.h>
 #include <signal.h>
-#include <syscall.h>
 #include <unistd.h>
+#include <xos/syscall_ext.h>
 
 #include <sys/cdefs.h>
 

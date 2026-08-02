@@ -26,9 +26,9 @@
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/spinlock.h"
 
+#include <kernel/bsd/stat_abi.h>
 #include <xos/dirent.h>
 #include <xos/errno.h>
-#include <xos/stat.h>
 
 struct xtask;
 

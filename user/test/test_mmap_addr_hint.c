@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#define _GNU_SOURCE
+
 // S11: mmap addr hint + MAP_FIXED / MAP_FIXED_NOREPLACE.
 //
 // Covers the Linux addr-placement semantics introduced in S11:

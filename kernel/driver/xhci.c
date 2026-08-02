@@ -30,7 +30,6 @@
 #include "kernel/bsd/kfcntl.h"
 #include <xos/errno.h>
 #include <xos/hidraw.h>
-#include <xos/input.h>
 #include <xos/ioctl.h> // HID_BIND_IRQFD / HID_UNBIND_IRQFD
 #include <xos/shm.h>
 #include <xos/signal.h> // SIGKILL/SIGSTOP
@@ -890,7 +889,7 @@ static long usb_hid_ioctl(uint32_t cmd, void *arg) {
   // hidraw HIDIOCGRAWINFO
   if (cmd == HIDIOCGRAWINFO) {
     struct hidraw_devinfo info = {
-        .bustype = BUS_USB, .vendor = 1, .product = 1};
+        .bustype = HIDRAW_BUS_USB, .vendor = 1, .product = 1};
     __memcpy(arg, &info, sizeof(info));
     return 0;
   }

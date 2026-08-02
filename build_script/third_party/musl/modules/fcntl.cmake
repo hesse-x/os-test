@@ -34,6 +34,7 @@ set(MUSL_FCNTL_SOURCES
 
 add_library(musl_fcntl_objs OBJECT ${MUSL_FCNTL_SOURCES})
 target_include_directories(musl_fcntl_objs PRIVATE
+    ${MUSL_GEN_INCLUDE_DIR}
     ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
@@ -48,6 +49,7 @@ target_compile_options(musl_fcntl_objs PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -
 # sources with -fPIC for the shared link.
 add_library(musl_fcntl_objs_so OBJECT ${MUSL_FCNTL_SOURCES})
 target_include_directories(musl_fcntl_objs_so PRIVATE
+    ${MUSL_GEN_INCLUDE_DIR}
     ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
@@ -56,3 +58,5 @@ target_include_directories(musl_fcntl_objs_so PRIVATE
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
 target_compile_options(musl_fcntl_objs_so PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fPIC -Wno-all)
+add_dependencies(musl_fcntl_objs musl_headers)
+add_dependencies(musl_fcntl_objs_so musl_headers)

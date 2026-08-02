@@ -10,8 +10,8 @@
 
 #include <errno.h>
 #include <stdint.h>
-#include <syscall.h>
 #include <unistd.h> // IWYU pragma: keep
+#include <xos/syscall_ext.h>
 
 #include <sys/process.h>
 

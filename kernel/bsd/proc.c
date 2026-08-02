@@ -49,7 +49,7 @@
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
-#include <xos/stat.h> // S_ISUID/S_ISGID (execve setuid/setgid bit)
+#include <kernel/bsd/stat_abi.h> // S_ISUID/S_ISGID (execve setuid/setgid bit)
 
 #include "kernel/bsd/kfcntl.h"
 #include "kernel/user_check.h"

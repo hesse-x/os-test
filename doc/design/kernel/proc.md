@@ -80,7 +80,7 @@ files_t（kernel/proc.h : files_t）— fd 表，独立引用计数
 - 找到 ZOMBIE：设 REAPING，拷贝退出码到用户指针，task_reap 回收
 - 无 ZOMBIE：BLOCKED on WAIT_CHILD，等待 sys_exit 唤醒
 
-`options` 三层已打通：libc inline `__syscall3` 把 options 放进 `rdx`（`user/include/syscall.h`），wrapper 转发（`user/lib/sys_wait.cc`），内核第 3 参读 `options`。当前只兑现 `WNOHANG`：
+`options` 三层已打通：libc inline `__syscall3` 把 options 放进 `rdx`（`user/include/xos/syscall_ext.h`），wrapper 转发（`user/lib/sys_wait.cc`），内核第 3 参读 `options`。当前只兑现 `WNOHANG`：
 
 - **`WNOHANG`**：两条等待路径（pid==-1 / pid>=0）在「无 ZOMBIE、有 children」原本要 `schedule()` 阻塞处，按 `nohang = options & WNOHANG` 短路返回 0。无需新唤醒机制——复用现有 `schedule()`/`wake_process_any`。EINTR 语义不变（WNOHANG 不阻塞故无 EINTR；阻塞路径仍按 `deliv` 检查返回 `-EINTR`）。
 

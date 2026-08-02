@@ -199,7 +199,7 @@ IRQ 到达时向绑定进程的 recv 队列入 RECV_IRQ 消息，然后唤醒（
 
 ### libc 封装
 
-定义：user/include/sys/ipc.h
+定义：user/include/xos/ipc.h
 
 ipc_recv(req_msg, data_buf, data_buf_len, timeout_ms) / ipc_req(pid, req_buf, resp_buf) / ipc_resp(resp_buf) / ipc_msg(pid, req_buf, req_len, resp_buf, resp_len) / ipc_msg_resp(resp_buf, resp_len)
 

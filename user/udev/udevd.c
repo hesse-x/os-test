@@ -18,6 +18,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/input.h>
 #include <linux/netlink.h>
 #include <stdio.h>
 #include <string.h>
@@ -27,8 +28,6 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
-#include <xos/input.h>
-#include <xos/input_key.h>
 #include <xos/ioctl.h>
 
 #define UDEV_LISTEN_FD 3

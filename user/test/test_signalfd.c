@@ -18,11 +18,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/poll.h>
 #include <sys/signalfd.h>
 #include <unistd.h>
 #include <unity.h>
@@ -52,7 +52,7 @@ void test_signalfd_read_basic(void) {
   sigaddset(&mask, SIGUSR1);
   int fd = signalfd(-1, &mask, 0);
   raise(SIGUSR1);
-  signalfd_siginfo si;
+  struct signalfd_siginfo si;
   int r = read(fd, &si, sizeof(si));
   TEST_ASSERT_EQUAL_INT((int)sizeof(si), r);
   TEST_ASSERT_EQUAL_INT(SIGUSR1, (int)si.ssi_signo);
@@ -66,7 +66,7 @@ void test_signalfd_consumes(void) {
   sigaddset(&mask, SIGUSR1);
   int fd = signalfd(-1, &mask, 0);
   raise(SIGUSR1);
-  signalfd_siginfo si;
+  struct signalfd_siginfo si;
   read(fd, &si, sizeof(si));
   /* After consumption, sigpending must no longer report SIGUSR1. */
   sigset_t pend;
@@ -89,7 +89,7 @@ void test_signalfd_priority_over_handler(void) {
   sigaddset(&mask, SIGUSR1);
   int fd = signalfd(-1, &mask, 0);
   raise(SIGUSR1);
-  signalfd_siginfo si;
+  struct signalfd_siginfo si;
   int r = read(fd, &si, sizeof(si));
   TEST_ASSERT_EQUAL_INT((int)sizeof(si), r);
   /* Handler must NOT have run: signalfd consumes first. */
@@ -120,7 +120,7 @@ void test_signalfd_handler_fallback(void) {
   sigpending(&pend);
   TEST_ASSERT_TRUE(sigismember(&pend, SIGUSR1));
   /* Drain to clear. */
-  signalfd_siginfo si;
+  struct signalfd_siginfo si;
   read(fd, &si, sizeof(si));
   close(fd);
 }
@@ -137,7 +137,7 @@ void test_signalfd_blocked(void) {
   sigaddset(&bset, SIGUSR1);
   sigprocmask(SIG_BLOCK, &bset, NULL);
   raise(SIGUSR1);
-  signalfd_siginfo si;
+  struct signalfd_siginfo si;
   int r = read(fd, &si, sizeof(si));
   TEST_ASSERT_EQUAL_INT(-1, r);
   TEST_ASSERT_EQUAL_INT(EAGAIN, errno);
@@ -153,7 +153,7 @@ void test_signalfd_nonblock_eagain(void) {
   sigemptyset(&mask);
   sigaddset(&mask, SIGUSR1);
   int fd = signalfd(-1, &mask, SFD_NONBLOCK);
-  signalfd_siginfo si;
+  struct signalfd_siginfo si;
   int r = read(fd, &si, sizeof(si));
   TEST_ASSERT_EQUAL_INT(-1, r);
   TEST_ASSERT_EQUAL_INT(EAGAIN, errno);
@@ -172,7 +172,7 @@ void test_signalfd_poll(void) {
   pfd.revents = 0;
   TEST_ASSERT_TRUE(poll(&pfd, 1, 500) > 0);
   TEST_ASSERT_TRUE(pfd.revents & POLLIN);
-  signalfd_siginfo si;
+  struct signalfd_siginfo si;
   read(fd, &si, sizeof(si));
   close(fd);
 }
@@ -200,7 +200,7 @@ void test_signalfd_update_mask(void) {
   TEST_ASSERT_EQUAL_INT(0, poll(&pfd, 1, 50));
   /* SIGUSR2 is monitored → raise and read. */
   raise(SIGUSR2);
-  signalfd_siginfo si;
+  struct signalfd_siginfo si;
   int rr = read(fd, &si, sizeof(si));
   TEST_ASSERT_EQUAL_INT((int)sizeof(si), rr);
   TEST_ASSERT_EQUAL_INT(SIGUSR2, (int)si.ssi_signo);
@@ -219,7 +219,7 @@ void test_signalfd_multi_signal(void) {
   int fd = signalfd(-1, &mask, 0);
   raise(SIGUSR1);
   raise(SIGUSR2);
-  signalfd_siginfo si;
+  struct signalfd_siginfo si;
   uint32_t seen = 0;
   for (int i = 0; i < 2; i++) {
     int r = read(fd, &si, sizeof(si));

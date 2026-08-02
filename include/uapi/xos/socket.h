@@ -29,13 +29,13 @@
  *    to musl's x86_64 definitions and locked by _Static_assert below — the
  *    single source of truth that the two faces stay byte-compatible.
  *
- * pollfd, the POLL_xxx flags and nfds_t are NOT in musl's <sys/socket.h> (musl
- * puts them in <poll.h>); they are xos UAPI, defined once in the common section
- * below for both faces (the <sys/poll.h> shim and direct includers share this).
+ * Poll definitions come from musl's <poll.h> in userspace and are provided
+ * below only for the freestanding kernel build.
  */
 
 #ifndef __KERNEL__
 
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 
@@ -234,28 +234,19 @@ _Static_assert(sizeof(cmsghdr) == 16,
 
 #endif /* __KERNEL__ */
 
-// ===================== pollfd / POLL flags (common: xos UAPI, not in musl
-// socket.h) =====================
+#ifdef __KERNEL__
+// ===================== Kernel-private poll ABI =====================
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// musl's <sys/socket.h> does not define pollfd, the POLL_xxx flags, or nfds_t
-// (they live in musl <poll.h>); define them here so <sys/poll.h> and direct
-// <xos/socket.h> includers see them in both faces without pulling musl
-// <poll.h> (which would need <bits/poll.h> plumbing). Guard against a prior
-// musl <poll.h>.
-#ifndef __DEFINED_pollfd
 typedef unsigned long nfds_t;
 typedef struct pollfd {
   int fd;        // fd to poll
   short events;  // requested events
   short revents; // returned events
 } pollfd;
-#define __DEFINED_pollfd
-#endif
 
-#ifndef POLLIN
 #define POLLIN 0x001
 #define POLLPRI 0x002
 #define POLLOUT 0x004
@@ -267,7 +258,6 @@ typedef struct pollfd {
 #define POLLWRNORM 0x100
 #define POLLWRBAND 0x200
 #define POLLRDHUP 0x400
-#endif
 
 // Kernel-private SCM_RIGHTS fd cap; not in musl.
 #ifndef SCM_MAX_FD
@@ -277,5 +267,6 @@ typedef struct pollfd {
 #ifdef __cplusplus
 }
 #endif
+#endif /* __KERNEL__ */
 
 #endif // COMMON_SOCKET_H

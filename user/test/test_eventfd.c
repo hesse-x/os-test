@@ -8,11 +8,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/eventfd.h>
-#include <sys/poll.h>
 #include <sys/process.h>
 #include <sys/wait.h>
 #include <unistd.h>

@@ -16,9 +16,9 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <syscall.h>
 #include <unistd.h>
 #include <unity.h>
+#include <xos/syscall_ext.h>
 
 #define DYN_DEV_COUNT 40
 #define DYN_SUB_COUNT 20

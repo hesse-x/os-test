@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Strip the syslog <PRI> prefix (e.g. "<13>") so /var/log/messages holds

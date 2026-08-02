@@ -19,6 +19,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --test)
             CMAKE_EXTRA="$CMAKE_EXTRA -DTEST=1"
+            # The test image exercises every optional runtime integration.
+            FORCE_LIBCXX=1
+            FORCE_MESA=1
+            BUILD_WLROOTS_DEPS=1
             shift
             ;;
         --sanitizer)
@@ -304,6 +308,16 @@ if not os.path.isfile(seatd):
     raise SystemExit('ERROR: missing installed seatd executable')
 shutil.copy2(seatd, os.path.join('build', 'seatd'))
 PY
+
+    # These tests link the just-staged external libraries, so they cannot be
+    # part of the initial CMake ALL target. This mirrors the post-Mesa EGL test.
+    if echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
+        echo "=== Building wlroots prerequisite smoke ELFs ==="
+        ninja -C build \
+            test_pixman_smoke_dyn_elf \
+            test_display_info_smoke_dyn_elf \
+            test_xkbcommon_smoke_dyn_elf
+    fi
 fi
 
 # 3. Mesa cross-build (auto when products are missing; --mesa forces it).

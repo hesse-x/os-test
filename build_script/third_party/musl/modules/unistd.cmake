@@ -5,10 +5,10 @@
 # Build the upstream musl src/unistd/*.c into libc via a separate OBJECT library with a
 # musl-internal include order. The musl sources #include "syscall.h" / "libc.h" (quoted),
 # which must resolve to musl's OWN src/internal/{syscall,libc}.h — NOT this repo's
-# user/include/syscall.h (the sys_* wrapper layer). Achieved by ordering musl src/internal
-# ahead of user/include on this target's include path only; the rest of libc keeps the
-# repo order (user/include first). <bits/syscall.h> (SYS_*/__NR_* numbers) is generated
-# into user/include/bits/syscall.h (matching musl's Makefile sed product), shared by both.
+# user/include/xos/syscall_ext.h (the sys_* wrapper layer). Achieved by ordering musl src/internal
+# ahead of user/include on this target's include path only. <bits/syscall.h>
+# (SYS_*/__NR_* numbers) is generated into build/musl_gen, matching musl's
+# Makefile output.
 #
 # pthread-mechanism coupling: musl's cancellable wrappers (read/write/fsync/
 # pause/...) call syscall_cp(...) → __syscall_cp, and the set*id wrappers call
@@ -112,6 +112,7 @@ add_library(musl_unistd_objs OBJECT
 # Relaxed warnings (-Wno-all): upstream musl is third-party code, not under our
 # -Werror gate (same rationale as add_drm_lib for third_party/drm).
 target_include_directories(musl_unistd_objs PRIVATE
+    ${MUSL_GEN_INCLUDE_DIR}
     ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
@@ -120,6 +121,7 @@ target_include_directories(musl_unistd_objs PRIVATE
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi
 )
+add_dependencies(musl_unistd_objs musl_headers)
 # -Wno-visibility: like -Wempty-body, -Wvisibility is NOT grouped under -Wall
 # (clang keeps it outside -Wno-all). musl's <termios.h> declares
 # tcsetwinsize(int, const struct winsize *) right after __NEED_struct_winsize,
@@ -157,6 +159,7 @@ add_library(musl_unistd_objs_so OBJECT
     ${CMAKE_SOURCE_DIR}/user/lib/musl_shim/syscall_cp.c
 )
 target_include_directories(musl_unistd_objs_so PRIVATE
+    ${MUSL_GEN_INCLUDE_DIR}
     ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
@@ -165,6 +168,7 @@ target_include_directories(musl_unistd_objs_so PRIVATE
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi
 )
+add_dependencies(musl_unistd_objs_so musl_headers)
 target_compile_options(musl_unistd_objs_so PRIVATE
     -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fPIC -Wno-all -Wno-visibility)
 # The SHARED libc.so link consumes the PIC objects as bare .o files; the STATIC

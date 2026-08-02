@@ -33,8 +33,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <syscall.h>
 #include <unistd.h>
+#include <xos/syscall_ext.h>
 
 #include <fcntl.h>
 #include <sys/cdefs.h>

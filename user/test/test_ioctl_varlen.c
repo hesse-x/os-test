@@ -13,14 +13,14 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/ipc.h>
 #include <sys/process.h>
 #include <sys/wait.h>
-#include <syscall.h>
 #include <unistd.h>
 #include <unity.h>
 #include <xos/errno.h>
 #include <xos/ioctl.h>
+#include <xos/ipc.h>
+#include <xos/syscall_ext.h>
 
 void setUp(void) {}
 void tearDown(void) {}

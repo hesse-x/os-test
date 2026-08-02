@@ -17,8 +17,8 @@ struct xtask;
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/spinlock.h"
+#include <kernel/bsd/stat_abi.h>
 #include <xos/errno.h>
-#include <xos/stat.h>
 
 // ===== sysfs node tree =====
 static struct sysfs_node *sysfs_root;

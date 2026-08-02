@@ -20,7 +20,7 @@
 # Excluded from this list (supplied elsewhere):
 #   recv.c was previously excluded for a name collision with the microkernel IPC
 #   `recv` primitive, but that IPC symbol has been renamed to `ipc_recv` (see
-#   user/include/sys/ipc.h), freeing the POSIX `recv` name — musl recv.c is now
+#   user/include/xos/ipc.h), freeing the POSIX `recv` name — musl recv.c is now
 #   included.
 set(MUSL_SOCKET_SOURCES
     ${MUSL_DIR}/src/network/socket.c
@@ -44,6 +44,7 @@ set(MUSL_SOCKET_SOURCES
 
 add_library(musl_socket_objs OBJECT ${MUSL_SOCKET_SOURCES})
 target_include_directories(musl_socket_objs PRIVATE
+    ${MUSL_GEN_INCLUDE_DIR}
     ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
@@ -56,6 +57,7 @@ target_compile_options(musl_socket_objs PRIVATE -m64 ${USER_FREESTANDING_FLAGS} 
 # libc.so needs PIC objects (mirror the libc.a(-fno-pie)/libc.so(-fPIC) dual build).
 add_library(musl_socket_objs_so OBJECT ${MUSL_SOCKET_SOURCES})
 target_include_directories(musl_socket_objs_so PRIVATE
+    ${MUSL_GEN_INCLUDE_DIR}
     ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
@@ -64,3 +66,5 @@ target_include_directories(musl_socket_objs_so PRIVATE
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
 target_compile_options(musl_socket_objs_so PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fPIC -Wno-all)
+add_dependencies(musl_socket_objs musl_headers)
+add_dependencies(musl_socket_objs_so musl_headers)

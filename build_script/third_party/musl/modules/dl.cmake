@@ -34,6 +34,7 @@ set(MUSL_DL_SOURCES
 
 add_library(musl_dl_objs OBJECT ${MUSL_DL_SOURCES})
 target_include_directories(musl_dl_objs PRIVATE
+    ${MUSL_GEN_INCLUDE_DIR}
     ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
@@ -47,6 +48,7 @@ target_compile_options(musl_dl_objs PRIVATE
 # libc.so PIC mirror (same as musl_fcntl_objs_so above).
 add_library(musl_dl_objs_so OBJECT ${MUSL_DL_SOURCES})
 target_include_directories(musl_dl_objs_so PRIVATE
+    ${MUSL_GEN_INCLUDE_DIR}
     ${MUSL_DIR}/src/include
     ${MUSL_DIR}/src/internal
     ${MUSL_DIR}/include
@@ -56,3 +58,5 @@ target_include_directories(musl_dl_objs_so PRIVATE
     ${CMAKE_SOURCE_DIR}/include/uapi)
 target_compile_options(musl_dl_objs_so PRIVATE
     -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fPIC -Wno-all)
+add_dependencies(musl_dl_objs musl_headers)
+add_dependencies(musl_dl_objs_so musl_headers)

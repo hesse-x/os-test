@@ -18,10 +18,10 @@
  */
 
 #include <errno.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdint.h>
 #include <string.h>
-#include <sys/poll.h>
 #include <sys/process.h>
 #include <sys/socket.h>
 #include <sys/wait.h>

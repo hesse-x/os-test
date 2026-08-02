@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#define _GNU_SOURCE
+
 /* test_vma_restructure — S10 VMA refactor + S13 interval semantics.
  *
  * The VMA list moved from head-insert (unordered) to a vaddr-sorted list with

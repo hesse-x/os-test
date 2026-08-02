@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef USER_SYSCALL_H
-#define USER_SYSCALL_H
+#ifndef XOS_SYSCALL_EXT_H
+#define XOS_SYSCALL_EXT_H
 
 // User-space semantic syscall wrappers (sys_getpid, sys_recv, ...).
 //
@@ -14,7 +14,7 @@
 // (>=0 success, -errno failure) into the libc-style (-1 + errno) convention.
 //
 // This is the userspace counterpart to the kernel's UAPI headers; it is NOT a
-// standard POSIX header (glibc has no <syscall.h> at this path) and is meant
+// standard POSIX header and is meant
 // for libc internals and programs that issue syscalls directly.
 
 #include <errno.h>
@@ -27,7 +27,7 @@
 // the mman module switched to musl. Previously this pulled
 // <xos/mman.h>, but musl <sys/mman.h> and xos/mman.h both
 // define the common MAP_xx / PROT_xx set without per-macro
-// guards, so including both in one TU (common: <syscall.h>
+// guards, so including both in one TU (common: <xos/syscall_ext.h>
 // + <sys/mman.h>) trips -Wmacro-redefined. xos/mman.h is
 // now kernel-only.
 #include <xos/errno.h>
@@ -658,8 +658,8 @@ static inline int sys_faccessat2(int dirfd, const char *path, int mode,
 }
 
 // sys_statfs / sys_fstatfs — filesystem statistics (SYS_STATFS 137 /
-// SYS_FSTATFS 138). buf is struct statfs * (xos/statfs.h); passed as void *
-// here to avoid pulling the layout header into every syscall.h consumer.
+// SYS_FSTATFS 138). buf is struct statfs * (<sys/statfs.h>); passed as void *
+// here to avoid pulling the layout header into every syscall_ext.h consumer.
 static inline int sys_statfs(const char *path, void *buf) {
   int64_t r =
       __syscall2(SYS_STATFS, (int64_t)(uintptr_t)path, (int64_t)(uintptr_t)buf);
@@ -1345,4 +1345,4 @@ static inline int sys_ppoll(struct pollfd *fds, uint64_t nfds,
   return (int)r;
 }
 
-#endif // USER_SYSCALL_H
+#endif // XOS_SYSCALL_EXT_H

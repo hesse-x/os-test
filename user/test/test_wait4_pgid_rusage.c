@@ -29,11 +29,11 @@
 #include <sys/process.h>  // fork, setpgid, getpgid
 #include <sys/resource.h> // struct rusage
 #include <sys/wait.h>
-#include <syscall.h> // __syscall4, SYS_WAIT4
 #include <unistd.h>
 #include <unity.h>
 #include <xos/errno.h>
-#include <xos/time.h> // struct timeval (must precede <sys/resource.h>)
+#include <xos/syscall_ext.h> // __syscall4, SYS_WAIT4
+#include <xos/time.h>        // struct timeval (must precede <sys/resource.h>)
 
 void setUp(void) {}
 void tearDown(void) {}

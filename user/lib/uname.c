@@ -7,7 +7,7 @@
 #include <string.h>
 #include <xos/unistd_ext.h>
 
-#include <syscall.h>
+#include <xos/syscall_ext.h>
 
 /* uname() is now provided by musl src/misc/uname.c (musl_misc_objs), which
  * calls syscall(SYS_uname) and fills the 6-field struct utsname from the

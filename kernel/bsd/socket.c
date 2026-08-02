@@ -31,11 +31,11 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
+#include <kernel/bsd/stat_abi.h>
 #include <xos/errno.h>
 #include <xos/netlink.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
-#include <xos/stat.h>
 #include <xos/time.h> // IWYU pragma: keep
 
 // ===================== Global socket lock =====================

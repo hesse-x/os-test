@@ -14,6 +14,7 @@
 /* Must equal O_CLOEXEC (02000000, kernel/bsd/kfcntl.h) — see timerfd.h. */
 #define SFD_CLOEXEC 02000000
 #define SFD_NONBLOCK 0x800
+#define SIGNALFD_SIGINFO_SIZE 128
 
 typedef struct signalfd_ctx {
   uint64_t sigmask; // signals this fd accepts (sigset_t = uint64_t)
@@ -28,8 +29,12 @@ typedef struct signalfd_siginfo {
   int32_t ssi_code;
   uint32_t ssi_pid;
   uint32_t ssi_uid;
-  uint8_t _pad[112]; // pad to 128 bytes total
+  uint8_t _pad[SIGNALFD_SIGINFO_SIZE -
+               (3 * sizeof(uint32_t) + 2 * sizeof(int32_t))];
 } signalfd_siginfo;
+
+_Static_assert(sizeof(signalfd_siginfo) == SIGNALFD_SIGINFO_SIZE,
+               "signalfd_siginfo must match the Linux UAPI ABI");
 
 struct file;
 struct proc;

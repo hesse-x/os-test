@@ -11,9 +11,9 @@
 #include <sys/types.h>
 
 // struct pci_dev_info_bar and struct pci_dev_info are defined in
-// xos/syscall_nums.h (pulled in transitively via user/include/syscall.h).
+// xos/syscall_nums.h (pulled in transitively via xos/syscall_ext.h).
 #include <sys/cdefs.h>
-#include <syscall.h>
+#include <xos/syscall_ext.h>
 
 #ifdef __cplusplus
 extern "C" {

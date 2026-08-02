@@ -26,10 +26,10 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h" // tasks[], tasks_lock, MAX_PROC
 
+#include <kernel/bsd/stat_abi.h>
 #include <xos/dirent.h>
 #include <xos/errno.h>
 #include <xos/mman.h> // PROT_READ/WRITE/EXEC (maps_show)
-#include <xos/stat.h>
 #include <xos/syscall.h>
 
 /* ===== 全局状态(仿 sysfs.c:24-26) ===== */

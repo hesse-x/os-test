@@ -13,16 +13,16 @@
 // for coldplug.
 
 #include <errno.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/poll.h>
 #include <unistd.h>
 #include <unity.h>
 
 #include "libudev.h"
+#include <linux/input.h> // BUS_USB(dev_props.bustype)
 #include <sys/device.h>
-#include <xos/input.h> // BUS_USB(dev_props.bustype)
 
 void setUp(void) {}
 void tearDown(void) {}

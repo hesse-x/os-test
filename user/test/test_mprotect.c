@@ -34,10 +34,10 @@
 #include <sys/mman.h>
 #include <sys/process.h>
 #include <sys/wait.h>
-#include <syscall.h>
 #include <unistd.h>
 #include <unity.h>
 #include <xos/errno.h>
+#include <xos/syscall_ext.h>
 
 // xos/mman.h defines only PROT_READ/WRITE/EXEC; PROT_NONE is prot==0.
 #ifndef PROT_NONE

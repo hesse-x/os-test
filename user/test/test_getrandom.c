@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <unity.h>
 #include <xos/errno.h>
+#include <xos/random.h>
 
 void setUp(void) {}
 void tearDown(void) {}

@@ -752,7 +752,7 @@ void test_epoll_signalfd_deliver(void) {
   int n = epoll_wait(ep, out, 4, 500);
   TEST_ASSERT_TRUE(n >= 1);
   TEST_ASSERT_TRUE(out[0].events & EPOLLIN);
-  signalfd_siginfo si;
+  struct signalfd_siginfo si;
   TEST_ASSERT_EQUAL_INT((int)sizeof(si), (int)read(sfd, &si, sizeof(si)));
   TEST_ASSERT_EQUAL_INT(SIGUSR1, (int)si.ssi_signo);
   close(sfd);

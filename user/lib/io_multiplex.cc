@@ -12,12 +12,11 @@
 #include <stdint.h>
 #include <xos/time.h>
 
+#include <poll.h>
 #include <sys/cdefs.h>
-#include <sys/poll.h>
 #include <sys/select.h>
 #include <sys/timerfd.h>
 #include <xos/errno.h>
-#include <xos/socket.h>
 #include <xos/syscall_asm.h>
 #include <xos/syscall_nums.h>
 

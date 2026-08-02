@@ -24,10 +24,10 @@
 #include <string.h>
 #include <sys/process.h> // fork
 #include <sys/wait.h>
-#include <syscall.h> // __syscall4, SYS_WAIT4
 #include <unistd.h>
 #include <unity.h>
 #include <xos/errno.h>
+#include <xos/syscall_ext.h> // __syscall4, SYS_WAIT4
 
 void setUp(void) {}
 void tearDown(void) {}

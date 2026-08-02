@@ -22,9 +22,9 @@
 #include <threads.h>
 #include <unistd.h>
 
-#include <syscall.h>
 #include <unity.h>
 #include <xos/errno.h>
+#include <xos/syscall_ext.h>
 
 /* Command values mirror <sys/membarrier.h> (Linux UAPI). The kernel and these
  * constants must agree; the QUERY test asserts the exact advertised set so a

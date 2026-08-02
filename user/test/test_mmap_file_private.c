@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#define _GNU_SOURCE
+
 /* test_mmap_file_private.c — S12: MAP_PRIVATE+fd file-backed mmap + COW.
  *
  * Validates the demand-fault page-in path (file_fault_handler) for regular

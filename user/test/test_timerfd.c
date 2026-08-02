@@ -8,10 +8,10 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/poll.h>
 #include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>

@@ -31,11 +31,11 @@
 #include <sys/mman.h>
 #include <sys/process.h> // fork, setuid
 #include <sys/wait.h>
-#include <syscall.h> // SYS_CLONE
 #include <unistd.h>
 #include <unity.h>
 #include <xos/errno.h>
-#include <xos/signal.h> // NSIG
+#include <xos/signal.h>      // NSIG
+#include <xos/syscall_ext.h> // SYS_CLONE
 
 void setUp(void) {}
 void tearDown(void) {}

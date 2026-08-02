@@ -61,6 +61,8 @@
 #include "utils/macro.h"
 
 #include "kernel/bsd/kfcntl.h"
+#include <kernel/bsd/stat_abi.h>
+#include <kernel/bsd/statfs_abi.h>
 #include <xos/capability.h>
 #include <xos/confname.h> // _SC_* (shared with user-side sysconf)
 #include <xos/errno.h>
@@ -70,8 +72,6 @@
 #include <xos/prctl.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
-#include <xos/stat.h>
-#include <xos/statfs.h>
 #include <xos/syscall.h>
 #include <xos/syscall_nums.h>
 #include <xos/time.h>

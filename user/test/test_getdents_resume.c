@@ -19,9 +19,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <syscall.h>
 #include <unistd.h>
 #include <xos/dirent.h>
+#include <xos/syscall_ext.h>
 
 void setUp(void) {}
 void tearDown(void) {}

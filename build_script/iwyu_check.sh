@@ -118,7 +118,7 @@ iwyu_tool -p build -j "$(nproc)" $SOURCES -- -Xiwyu --no_comments -Xiwyu --max_l
 # iwyu_tool always exits 0, output must be parsed.
 # Violation = non-empty section after "<path> should add these lines:" ∪ non-empty section after "... should remove ...".
 python3 - "$IWYU_OUT" <<'PYEOF'
-import re, sys
+import os, re, sys
 
 path = sys.argv[1]
 lines = open(path).read().splitlines()
@@ -193,8 +193,16 @@ while i < n:
     else:
         i += 1
 
-# Drop files that ended up with no surviving violations (all adds filtered).
-violations = {f: v for f, v in violations.items() if v['add'] or v['remove']}
+# Drop violations reported against vendored third_party headers themselves.
+# iwyu analyzes the whole include graph of each first-party TU, so a vendored
+# header pulled in (e.g. third_party/musl/include/assert.h) gets its OWN
+# should-add/remove reported — that's musl's business, not ours to fix. The
+# source-list filter above only excludes third_party by *source* path; this
+# mirrors it on the reported *target file* path. (A first-party TU told to
+# add/remove a third_party include is still kept — only reports whose target
+# IS the vendored header are dropped.)
+violations = {f: v for f, v in violations.items()
+              if 'third_party' not in f.split(os.sep) and (v['add'] or v['remove'])}
 
 if not violations:
     print("iwyu check passed.")

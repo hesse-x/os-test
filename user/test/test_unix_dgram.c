@@ -23,16 +23,16 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/poll.h>
 #include <sys/process.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
-#include <syscall.h>
 #include <time.h>
 #include <unistd.h>
+#include <xos/syscall_ext.h>
 
 #include <unity.h>
 #include <xos/errno.h>

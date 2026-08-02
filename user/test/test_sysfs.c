@@ -6,6 +6,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/input.h>
+#include <poll.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/device.h>
@@ -13,7 +15,6 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
-#include <sys/poll.h>
 #include <sys/process.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -22,7 +23,6 @@
 #include <unistd.h>
 #include <unity.h>
 #include <xos/errno.h>
-#include <xos/input.h>
 #include <xos/ioctl.h>
 #include <xos/socket.h>
 #include <xos/unistd_ext.h>

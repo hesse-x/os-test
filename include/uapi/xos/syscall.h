@@ -18,7 +18,8 @@
 // the return convention and shared structs. Syscall numbers live in
 // xos/syscall_nums.h; the __syscallN inline-assembly wrappers live in
 // xos/syscall_asm.h; the semantic user-space wrappers (sys_getpid, ...)
-// live in user/include/syscall.h. Keeping these separate lets this header stay
+// live in user/include/xos/syscall_ext.h. Keeping these separate lets this
+// header stay
 // self-contained (no dependency on kernel-internal arch/x64/utils.h).
 
 // ===================== Kernel memory stats (shared with user space)

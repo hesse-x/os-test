@@ -31,12 +31,12 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
+#include <kernel/bsd/stat_abi.h>
+#include <kernel/bsd/statx_abi.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <xos/capability.h>
 #include <xos/errno.h>
-#include <xos/stat.h>
-#include <xos/statx.h>
 
 /* DRM 主号（仅 stat 设备号用，与 virtio_gpu.c DRM_MAJOR 同值；226 是 DRM 语义、
  * 不属于 devtmpfs 通用层，故各 .c 顶部各自定义而非放公共头）。 */

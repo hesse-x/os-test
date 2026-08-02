@@ -24,9 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
-#include <syscall.h> // sys_set_tid_address
 #include <unistd.h>
 #include <unity.h>
+#include <xos/syscall_ext.h> // sys_set_tid_address
 
 void setUp(void) {}
 void tearDown(void) {}

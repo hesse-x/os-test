@@ -18,7 +18,6 @@
 #include "kernel/bsd/evdev_broker.h"
 
 #include <xos/errno.h>
-#include <xos/input.h>
 #include <xos/ioctl.h>
 #include <xos/socket.h> // POLLIN
 
@@ -28,6 +27,7 @@
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/input_abi.h"
 #include "kernel/bsd/kfcntl.h"
 #include "kernel/bsd/poll_types.h"
 #include "kernel/bsd/proc.h"  // alloc_fd, fd_install, fd_lookup

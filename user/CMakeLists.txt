@@ -69,6 +69,7 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_dirent_objs>
                $<TARGET_OBJECTS:musl_resource_objs>
                $<TARGET_OBJECTS:musl_process_objs>
+               $<TARGET_OBJECTS:musl_ipc_objs>
                $<TARGET_OBJECTS:musl_pthread>
                $<TARGET_OBJECTS:musl_signal_objs>
                $<TARGET_OBJECTS:musl_string_objs>
@@ -118,6 +119,7 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_dirent_objs_so>
                $<TARGET_OBJECTS:musl_resource_objs>
                $<TARGET_OBJECTS:musl_process_objs>
+               $<TARGET_OBJECTS:musl_ipc_objs>
                $<TARGET_OBJECTS:musl_loader_objs> $<TARGET_OBJECTS:musl_pthread>
                $<TARGET_OBJECTS:musl_signal_objs>
                $<TARGET_OBJECTS:musl_string_objs>

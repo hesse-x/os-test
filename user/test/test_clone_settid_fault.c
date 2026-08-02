@@ -26,10 +26,10 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
-#include <syscall.h> // SYS_CLONE, __syscall5
 #include <unistd.h>
 #include <unity.h>
 #include <xos/errno.h>
+#include <xos/syscall_ext.h> // SYS_CLONE, __syscall5
 
 void setUp(void) {}
 void tearDown(void) {}

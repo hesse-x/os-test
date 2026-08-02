@@ -46,11 +46,8 @@ install -m 644 "$ROOT/third_party/pixman/pixman/pixman.h" \
 install -m 644 "$BUILD/wlroots/pixman/pixman/pixman-version.h" \
 	"$INCLUDE_DIR/pixman-1/"
 install -d "$INCLUDE_DIR/linux"
-install -m 644 "$ROOT/include/uapi/compat/linux/input-event-codes.h" \
+install -m 644 "$ROOT/include/uapi/linux/input-event-codes.h" \
 	"$INCLUDE_DIR/linux/"
-install -d "$INCLUDE_DIR/linux/linux"
-install -m 644 "$ROOT/third_party/libinput/include/linux/linux/input-event-codes.h" \
-	"$INCLUDE_DIR/linux/linux/"
 
 install -d "$INCLUDE_DIR/EGL" "$INCLUDE_DIR/GLES2" "$INCLUDE_DIR/KHR"
 install -m 644 "$ROOT/third_party/mesa/include/EGL/"*.h "$INCLUDE_DIR/EGL/"

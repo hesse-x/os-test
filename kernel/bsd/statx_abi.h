@@ -4,15 +4,15 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef _COMMON_STATX_H
-#define _COMMON_STATX_H
+#ifndef KERNEL_BSD_STATX_ABI_H
+#define KERNEL_BSD_STATX_ABI_H
 
 #include <stdint.h>
 
 /*
  * statx ABI — must match Linux x86-64 exactly (uapi linux/stat.h).
- * Shared between kernel and userspace so the layout can never silently
- * diverge. Total size: 256 bytes.
+ * Kernel-side mirror of the Linux ABI. Userspace gets this definition from
+ * musl's <sys/stat.h>. Total size: 256 bytes.
  *
  *   offset   0: stx_mask             uint32_t
  *   offset   4: stx_blksize          uint32_t
@@ -97,4 +97,4 @@ struct statx {
 #define AT_STATX_DONT_SYNC 0x4000
 #define AT_STATX_SYNC_TYPE 0x6000
 
-#endif /* _COMMON_STATX_H */
+#endif /* KERNEL_BSD_STATX_ABI_H */

@@ -17,7 +17,7 @@
 //   umask — process file-creation mask (musl implements it in src/stat/umask.c,
 //           not src/unistd/, so the unistd glob does not pull it in; no module
 //           globs src/stat/, so it would otherwise be absent from libc).
-#include <syscall.h>
+#include <xos/syscall_ext.h>
 
 #include <sys/stat.h>
 #include <sys/types.h>

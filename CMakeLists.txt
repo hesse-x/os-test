@@ -62,7 +62,10 @@ execute_process(
 set(KERNEL_FREESTANDING_FLAGS -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -mno-red-zone -nostdinc -isystem ${GCC_FREESTANDING_INC})
 set(USER_FREESTANDING_FLAGS  -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -mno-red-zone -nostdinc)
 set(FREESTANDING_FLAGS ${KERNEL_FREESTANDING_FLAGS})
-set(WARN_FLAGS -Wall -Wextra -Werror)
+set(WARN_FLAGS
+    -Wall -Wextra -Werror
+    # musl's public endian.h intentionally relies on C operator precedence.
+    -Wno-bitwise-op-parentheses -Wno-shift-op-parentheses)
 
 # ---- os_base_options: shared baseline INTERFACE lib ----
 # third_party and in-repo targets link as needed to get the common freestanding
@@ -267,8 +270,7 @@ target_sources(myos.elf PRIVATE
     $<TARGET_OBJECTS:bsd_obj>
     $<TARGET_OBJECTS:driver_obj>
     $<TARGET_OBJECTS:kernel_obj>
-    $<TARGET_OBJECTS:fcntl_sync_check>
-    $<TARGET_OBJECTS:mman_sync_check>)
+    $<TARGET_OBJECTS:fcntl_sync_check>)
 set_target_properties(myos.elf PROPERTIES OUTPUT_NAME "myos.elf")
 
 # Kernel ELF lives at the ESP image root (partition 1). Register for the

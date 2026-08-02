@@ -372,7 +372,8 @@ static inline uint64_t rdtsc64() {
 //   RAX = return value
 //   RCX = saved RIP, R11 = saved RFLAGS (clobbered by SYSCALL)
 // The __syscallN inline-assembly wrappers live in xos/syscall_asm.h
-// (UAPI, self-contained); semantic wrappers are in user/include/syscall.h.
+// (UAPI, self-contained); semantic wrappers are in
+// user/include/xos/syscall_ext.h.
 #include <xos/syscall_asm.h>
 
 #include <xos/shm.h>

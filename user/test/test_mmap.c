@@ -11,10 +11,10 @@
 #include <sys/param.h>
 #include <sys/time.h>
 #include <sys/wait.h>
-#include <syscall.h>
 #include <time.h>
 #include <unistd.h>
 #include <unity.h>
+#include <xos/syscall_ext.h>
 
 void setUp(void) {}
 void tearDown(void) {}

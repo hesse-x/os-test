@@ -16,11 +16,11 @@
 
 #include "xos/errno.h"
 
+#include <linux/input.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <xos/input.h>
 #include <xos/ioctl.h>
 #include <xos/socket.h>
 

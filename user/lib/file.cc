@@ -25,18 +25,17 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h> // IWYU pragma: keep
-#include <syscall.h>
 #include <termios.h>
 #include <unistd.h>
+#include <xos/syscall_ext.h>
 
 #include <sys/cdefs.h>
 #include <sys/ioctl.h>
-#include <sys/ipc.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <xos/errno.h>
-#include <xos/statx.h>
+#include <xos/ipc.h>
 
 // ===================== Working directory =====================
 // chdir / getcwd are provided by musl src/unistd/*.c (musl_unistd_objs). The

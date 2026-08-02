@@ -13,6 +13,7 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
+#include <stddef.h>
 #include <stdint.h>
 #include <xos/socket.h>
 
@@ -21,10 +22,11 @@ struct inode;
 // ===================== PTY buffer size =====================
 #define PTY_BUF_SIZE 4096
 
-// ===================== struct termios (Linux x86-64 ABI) =====================
-#define NCCS 19
+// ===================== struct termios (musl x86-64 userspace ABI) ============
+#define NCCS 32
 
-typedef unsigned long tcflag_t;
+typedef uint32_t tcflag_t;
+typedef uint32_t speed_t;
 typedef unsigned char cc_t;
 
 struct termios {
@@ -32,8 +34,18 @@ struct termios {
   tcflag_t c_oflag; // output flags
   tcflag_t c_cflag; // control flags
   tcflag_t c_lflag; // local flags
-  cc_t c_cc[NCCS];  // special characters
+  cc_t c_line;
+  cc_t c_cc[NCCS]; // special characters
+  speed_t __c_ispeed;
+  speed_t __c_ospeed;
 };
+
+_Static_assert(offsetof(struct termios, c_line) == 16,
+               "termios ABI must match musl x86-64");
+_Static_assert(offsetof(struct termios, __c_ispeed) == 52,
+               "termios ABI must match musl x86-64");
+_Static_assert(sizeof(struct termios) == 60,
+               "termios ABI must match musl x86-64");
 
 // c_cc indices (Linux x86-64)
 #define VINTR 0
@@ -83,7 +95,7 @@ struct termios {
 #define ECHOK 0x0020
 #define NOFLSH 0x0080
 #define TOSTOP 0x0100
-#define IEXTEN 0x0200
+#define IEXTEN 0x8000
 
 // Default termios
 extern const struct termios default_termios;

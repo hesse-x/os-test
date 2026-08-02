@@ -4,15 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef _COMMON_STAT_H
-#define _COMMON_STAT_H
+#ifndef KERNEL_BSD_STAT_ABI_H
+#define KERNEL_BSD_STAT_ABI_H
 
 #include <stdint.h>
 
 /*
- * Kernel-internal stat layout — must match userspace struct stat
- * (user/include/sys/stat.h) exactly.  Both kernel and libc include
- * this header so the layout can never silently diverge.
+ * Kernel-internal stat layout. Userspace uses musl's struct stat; this mirror
+ * is pinned to the same Linux x86-64 syscall ABI.
  *
  * Linux x86-64 ABI (natural alignment, 144 bytes):
  *   offset   0: st_dev      uint64_t

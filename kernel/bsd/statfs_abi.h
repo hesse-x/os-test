@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef COMMON_STATFS_H
-#define COMMON_STATFS_H
+#ifndef KERNEL_BSD_STATFS_ABI_H
+#define KERNEL_BSD_STATFS_ABI_H
 
 #include <stdint.h>
 
@@ -16,8 +16,8 @@
  * int[2]), so llvm-libc's statfs_utils (which includes the host
  * <asm/statfs.h>) copies the same bytes the kernel writes here.
  *
- * Kernel (sys_statfs/sys_fstatfs) and userspace (statfs/fstatfs wrappers)
- * both include this header so the layout cannot silently diverge.
+ * Kernel-side mirror of the Linux ABI. Userspace uses musl's
+ * <sys/statfs.h> definition.
  *
  * Capacity fields (f_blocks/f_bfree/f_bavail/f_files/f_ffree) are returned
  * as 0 by this kernel today: FAT32 keeps no free-cluster counter and
@@ -45,4 +45,4 @@ struct statfs {
 #define TMPFS_MAGIC 0x01021997   /* tmpfs / devtmpfs */
 #define SYSFS_MAGIC 0x62656572   /* sysfs */
 
-#endif /* COMMON_STATFS_H */
+#endif /* KERNEL_BSD_STATFS_ABI_H */

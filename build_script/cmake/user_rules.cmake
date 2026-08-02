@@ -16,10 +16,9 @@ set(USER_COMPILE_FLAGS -m64 ${WARN_FLAGS} ${USER_FREESTANDING_FLAGS} -fno-pie)
 # Userspace freestanding std headers (stdint/stddef/stdarg/stdbool) are provided
 # by musl, NOT the compiler's -isystem freestanding dir (USER_FREESTANDING_FLAGS
 # drops -isystem). MUSL_INCLUDE_FLAGS puts musl/include + arch on the search
-# path. Include order matters: user/include MUST precede musl so our static
-# user/include/bits/alltypes.h wins over musl's arch bits/alltypes.h.in template
-# (musl stdint/stddef #include <bits/alltypes.h>). Appended after -I user/include
-# in each bare-gcc COMPILE_FLAGS below. With pthread switched to musl, musl's
+# path. The generated-header directory supplies bits/alltypes.h and
+# bits/syscall.h ahead of musl's .in templates. With pthread switched to musl,
+# musl's
 # <pthread.h>/<signal.h>/<sched.h> (the repo's own copies were deleted) also
 # resolve from here.
 set(MUSL_INCLUDE_FLAGS
@@ -59,13 +58,9 @@ set(DRM_INCLUDE_FLAGS
     -I${DRM_XF86_INCLUDE_DIR2})
 
 # Generated-musl-header paths used by the bare-gcc DEPENDS lines below and by
-# add_musl_lib (pthread payload). musl_generate_headers() (called in
-# user/CMakeLists.txt) writes bits/alltypes.h / bits/syscall.h here and exports
-# MUSL_GEN_INCLUDE_DIR (PARENT_SCOPE); the files are also listed verbatim so
-# custom-command DEPENDS force ordering (generation before any musl-pulling
-# compile). Our own static user/include/bits/{alltypes,syscall}.h (checked in,
-# per the master ldso integration) still wins for non-musl-pthread compiles via
-# the -I user/include that precedes MUSL_INCLUDE_FLAGS on every path.
+# add_musl_lib (pthread payload). musl_generate_headers() writes
+# bits/alltypes.h / bits/syscall.h here; custom-command dependencies force
+# generation before any musl-pulling compile.
 set(MUSL_GEN_DIR ${CMAKE_BINARY_DIR}/musl_gen)
 set(MUSL_GEN_HEADERS
     ${MUSL_GEN_DIR}/bits/alltypes.h
@@ -224,7 +219,9 @@ function(add_user_lib lib_name)
         # When VERSION_MAP is set, .map + verify_libc_exports.sh gates the exports.
         # Libraries like libinput use LIBINPUT_EXPORT (__attribute__((visibility("default")))) markings.
         # -fPIC: required for all .so objects (position-independent code).
-        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${MUSL_INCLUDE_FLAGS} -fPIC ${DRM_INCLUDE_FLAGS} -fvisibility=hidden ${ARG_FLAGS_LIST})
+        # libc.map owns the public ABI. Do not require every standard function
+        # definition to inherit a project-specific visibility annotation.
+        set(COMPILE_FLAGS_BASE ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${MUSL_GEN_DIR} ${MUSL_INCLUDE_FLAGS} -fPIC ${DRM_INCLUDE_FLAGS} ${ARG_FLAGS_LIST})
         if(ARG_INCLUDE_DIRS)
             foreach(_dir ${ARG_INCLUDE_DIRS})
                 list(APPEND COMPILE_FLAGS_BASE -I${_dir})
@@ -491,6 +488,7 @@ function(musl_generate_headers)
     set(MUSL_SRC ${CMAKE_SOURCE_DIR}/third_party/musl)
     set(MUSL_GEN_INCLUDE_DIR ${CMAKE_BINARY_DIR}/musl_gen PARENT_SCOPE)
     set(_gendir ${CMAKE_BINARY_DIR}/musl_gen/bits)
+    file(MAKE_DIRECTORY ${_gendir})
 
     add_custom_command(
         OUTPUT ${_gendir}/alltypes.h
@@ -528,6 +526,8 @@ function(musl_generate_headers)
     string(STRIP "${_musl_version}" _musl_version)
     file(WRITE ${CMAKE_BINARY_DIR}/musl_gen/version.h
          "#define VERSION \"${_musl_version}\"\n")
+    file(WRITE ${_gendir}/posix.h
+         "#define _POSIX_V6_LP64_OFF64 1\n#define _POSIX_V7_LP64_OFF64 1\n")
 
     add_custom_target(musl_headers ALL
         DEPENDS ${_gendir}/alltypes.h ${_gendir}/syscall.h)
@@ -652,7 +652,7 @@ function(add_user_elf elf_name)
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${MUSL_GEN_DIR} ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra include directories
     if(ARG_INCLUDE_DIRS)
@@ -790,14 +790,14 @@ endfunction()
 #              bare-gcc add_custom_command doesn't auto-track configure_file outputs, so
 #              listing them forces a re-compile when the template changes.
 function(add_user_dyn_elf name)
-    cmake_parse_arguments(ARG "C;NO_IMAGE" "IMAGE_PATH;IMAGE_ARTIFACT;IMAGE_PARTITION" "SOURCES;LINK_LIBS;STATIC_LIBS;DEFS;INCLUDE_DIRS;GEN_HEADERS" ${ARGN})
+    cmake_parse_arguments(ARG "C;NO_IMAGE;EXCLUDE_FROM_ALL" "IMAGE_PATH;IMAGE_ARTIFACT;IMAGE_PARTITION" "SOURCES;LINK_LIBS;STATIC_LIBS;DEFS;INCLUDE_DIRS;GEN_HEADERS" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
     if(ARG_C)
         set(COMPILE_CMD ${CMAKE_C_COMPILER})
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${MUSL_GEN_DIR} ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
 
     # Extra include directories
     if(ARG_INCLUDE_DIRS)
@@ -887,7 +887,11 @@ function(add_user_dyn_elf name)
                 -o ${ELF_FILE} ${LD_ARGS}
         DEPENDS ${OBJ_FILES} ${SO_DEPS}
         COMMENT "Linking dynamic ${name}.elf")
-    add_custom_target(${name}_dyn_elf ALL DEPENDS ${ELF_FILE})
+    if(ARG_EXCLUDE_FROM_ALL)
+        add_custom_target(${name}_dyn_elf DEPENDS ${ELF_FILE})
+    else()
+        add_custom_target(${name}_dyn_elf ALL DEPENDS ${ELF_FILE})
+    endif()
     add_dependencies(${name}_dyn_elf musl_libc)
     # Build ordering for LINK_LIBS (.so variant targets, named <lib>_so or
     # lib<lib>_so) and STATIC_LIBS (the lib target itself). CMake archives are not

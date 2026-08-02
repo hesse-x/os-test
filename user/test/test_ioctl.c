@@ -4,20 +4,22 @@
  * SPDX-License-Identifier: MIT
  */
 
+#define _GNU_SOURCE
+
 #include "user/driver/display.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/input.h>
+#include <poll.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/poll.h>
 #include <sys/stat.h>
-#include <syscall.h>
 #include <unistd.h>
 #include <unity.h>
 #include <xos/errno.h>
-#include <xos/input.h>
 #include <xos/ioctl.h>
+#include <xos/syscall_ext.h>
 
 void setUp(void) {}
 void tearDown(void) {}

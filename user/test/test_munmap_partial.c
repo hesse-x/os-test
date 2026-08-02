@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#define _GNU_SOURCE
+
 // S13: munmap partial / hole-punch interval semantics.
 //
 // Before S13 sys_munmap only dropped a region whose start exactly matched

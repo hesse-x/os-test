@@ -26,9 +26,9 @@
 #include "kernel/xcore/spinlock.h"
 
 #include "kernel/bsd/kfcntl.h"
+#include <kernel/bsd/stat_abi.h>
 #include <xos/dirent.h>
 #include <xos/errno.h>
-#include <xos/stat.h>
 
 // ==================== FAT32 volume state ====================
 static uint32_t part_start_lba;

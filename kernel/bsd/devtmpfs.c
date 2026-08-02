@@ -22,10 +22,10 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
+#include <kernel/bsd/stat_abi.h>
 #include <stddef.h>
 #include <xos/dirent.h>
 #include <xos/errno.h>
-#include <xos/stat.h>
 
 #include "kernel/bsd/syscall.h"
 #include "kernel/bsd/sysfs.h"

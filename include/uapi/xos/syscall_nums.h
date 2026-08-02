@@ -171,7 +171,7 @@
 #define SYS_SENDFILE 40
 // setpriority(140)/getpriority(141) — backed by sys_setpriority/sys_getpriority
 // (PRIO_PROCESS nice, stored in xtask.nice). Match the Linux x86-64 numbers
-// used in user/include/bits/syscall.h so musl's SYS_setpriority/getpriority hit
+// used in musl's generated bits/syscall.h so SYS_setpriority/getpriority hit
 // these.
 #define SYS_GETPRIORITY 140
 #define SYS_SETPRIORITY 141

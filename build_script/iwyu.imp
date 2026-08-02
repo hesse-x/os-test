@@ -73,10 +73,6 @@
   # (userspace <fcntl.h> is now the musl real header via the shim — no xos
   #  mapping. The kernel uses its private kernel/bsd/kfcntl.h, never <fcntl.h>.)
 
-  # ---- stat / mode bits ----
-  { include: ["<sys/stat.h>", public, "<xos/stat.h>", public ] },
-  { include: ["<stat.h>", public, "<xos/stat.h>", public ] },
-
   # ---- mmap protection / map flags ----
   { include: ["\"sys/mman.h\"", public, "<sys/mman.h>", public ] },
   { include: ["\"sys/timerfd.h\"", public, "<sys/timerfd.h>", public ] },
@@ -100,6 +96,7 @@
   { include: ["\"bits/fcntl.h\"", private, "<fcntl.h>", public ] },
   { include: ["\"bits/signal.h\"", private, "<signal.h>", public ] },
   { include: ["\"bits/errno.h\"", private, "<errno.h>", public ] },
+  { include: ["\"bits/ioctl.h\"", private, "<sys/ioctl.h>", public ] },
   { include: ["\"fcntl.h\"", private, "<fcntl.h>", public ] },
   { include: ["\"stdio.h\"", private, "<stdio.h>", public ] },
   { include: ["\"errno.h\"", private, "<errno.h>", public ] },

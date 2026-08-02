@@ -10,6 +10,7 @@
 #include "user/include/usb_hid.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/input.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -17,15 +18,14 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
-#include <sys/ipc.h>
 #include <sys/mman.h>
-#include <syscall.h>
 #include <unistd.h>
 #include <xos/errno.h>
-#include <xos/input.h>
-#include <xos/input_key.h>
 #include <xos/ioctl.h>
+#include <xos/ipc.h>
+#include <xos/key_event.h>
 #include <xos/shm.h>
+#include <xos/syscall_ext.h>
 
 #define MAX_EVDEV_DEVICES 8
 // Reply buffer for inline RECV_REQ path and the data evdev hands to sys_resp.
@@ -82,8 +82,8 @@ static int on_key_event(input_event *ev) {
   struct timespec ts;
   if (sys_clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
     return 0;
-  ev->tv_sec = ts.tv_sec;
-  ev->tv_usec = ts.tv_nsec / 1000;
+  ev->input_event_sec = ts.tv_sec;
+  ev->input_event_usec = ts.tv_nsec / 1000;
   ev->type = EV_KEY;
   ev->code = ke.key;      // KEY_A, KEY_B, ... (evdev-aligned in input_key.h)
   ev->value = ke.pressed; // 1=press, 0=release
@@ -331,8 +331,8 @@ extern "C" int main(int argc, char **argv, char **envp) {
           struct timespec ts;
           if (sys_clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
             return 1;
-          syn_ev.tv_sec = ts.tv_sec;
-          syn_ev.tv_usec = ts.tv_nsec / 1000;
+          syn_ev.input_event_sec = ts.tv_sec;
+          syn_ev.input_event_usec = ts.tv_nsec / 1000;
           syn_ev.type = EV_SYN;
           syn_ev.code = 0; // SYN_REPORT
           syn_ev.value = 0;

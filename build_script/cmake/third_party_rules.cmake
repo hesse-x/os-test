@@ -78,27 +78,21 @@ function(add_third_party_lib name)
     # config -O/-g), no WARN_FLAGS.
     _tp_base_compile_flags(_base_flags)
 
-    # Private includes: project root (root-relative include style) + third_party
-    # (musl shim: user/include/unistd.h does #include "musl/include/unistd.h",
-    # resolved via -I third_party → third_party/musl/include/unistd.h) + UAPI
-    # contract headers + user/include + musl headers (stdint/stddef/stdarg/stdbool
-    # from musl since -isystem is dropped; user/include first so our
-    # bits/alltypes.h wins. After pthread/signal/sched switched to musl,
-    # third_party including <pthread.h>/<signal.h> lands in musl/include and pulls
-    # <bits/alltypes.h>, so musl_gen's generated-header dir must precede it) +
-    # this lib's INCLUDE_DIRS.
+    # Target-specific compatibility directories must precede the generic UAPI
+    # tree (libinput's full <linux/input.h> is one such override).
     set(_include_flags
         -I${CMAKE_SOURCE_DIR}
-        -I${CMAKE_SOURCE_DIR}/third_party
+        -I${CMAKE_SOURCE_DIR}/third_party)
+    foreach(_dir ${ARG_INCLUDE_DIRS})
+        list(APPEND _include_flags -I${_dir})
+    endforeach()
+    list(APPEND _include_flags
         -I${CMAKE_SOURCE_DIR}/include/uapi
         -I${CMAKE_SOURCE_DIR}/user/include
         -I${CMAKE_BINARY_DIR}/musl_gen
         -I${CMAKE_SOURCE_DIR}/third_party/musl/include
         -I${CMAKE_SOURCE_DIR}/third_party/musl/arch/x86_64
         -I${CMAKE_SOURCE_DIR}/third_party/musl/arch/generic)
-    foreach(_dir ${ARG_INCLUDE_DIRS})
-        list(APPEND _include_flags -I${_dir})
-    endforeach()
 
     # Third-party's own options. FLAGS may be a string, convert to list. -w
     # disables warnings (not subject to our -Werror gate).

@@ -592,6 +592,10 @@ global:
     mlock; munlock; mlockall; munlockall;
     shm_open; shm_unlink;
 
+    /* <sys/shm.h> — SysV SHM wrappers. The kernel currently returns ENOSYS;
+     * callers such as Mesa detect that and fall back to private allocation. */
+    shmat; shmctl; shmdt; shmget;
+
     /* <uchar.h> — musl src/multibyte/{c16,c32}{rtomb,rtoc16,rtoc32}.c (thin
      * wrappers over wcrtomb/mbrtowc in musl_multibyte_objs). C11 char16_t/
      * char32_t conversion. */

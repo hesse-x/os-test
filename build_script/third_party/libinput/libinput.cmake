@@ -44,7 +44,7 @@ set(LIBINPUT_SOURCES
 # these must be suppressed explicitly per-target. -Wno-unknown-warning-option
 # lets the same list pass under gcc (which doesn't know the clang-only entries).
 set(LIBINPUT_WARN_FLAGS
-    "-Wno-unused-parameter -Wno-duplicate-decl-specifier -Wno-implicit-function-declaration -Wno-return-type -Wno-int-conversion -Wno-format -Wno-implicit-fallthrough -Wno-sign-compare -Wno-error=cpp -Wno-maybe-uninitialized -Wno-sometimes-uninitialized -Wno-unknown-warning-option -Wno-deprecated-non-prototype")
+    "-Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-duplicate-decl-specifier -Wno-implicit-function-declaration -Wno-return-type -Wno-int-conversion -Wno-format -Wno-implicit-fallthrough -Wno-sign-compare -Wno-error=cpp -Wno-maybe-uninitialized -Wno-sometimes-uninitialized -Wno-unknown-warning-option -Wno-deprecated-non-prototype")
 
 add_user_lib(input
     SOURCES ${LIBINPUT_SOURCES}
@@ -55,9 +55,9 @@ add_user_lib(input
 
 set(LIBINPUT_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/include/uapi/compat
     ${CMAKE_SOURCE_DIR}/include/uapi
     ${CMAKE_SOURCE_DIR}/user/include
-    ${CMAKE_SOURCE_DIR}/include/uapi/compat
     ${CMAKE_SOURCE_DIR}/third_party/libinput/include
     ${CMAKE_SOURCE_DIR}/third_party/libinput
     ${CMAKE_SOURCE_DIR}/third_party/libinput/src
@@ -68,6 +68,8 @@ set(LIBINPUT_INCLUDE_DIRS
 )
 
 target_include_directories(input PRIVATE ${LIBINPUT_INCLUDE_DIRS})
+target_include_directories(input BEFORE PRIVATE
+    ${CMAKE_SOURCE_DIR}/include/uapi/compat)
 
 # libinput.so (shared library, third_party SHARED-only, dynamically linked into terminal.elf)
 # add_third_party_lib（分支 B）关 warning(-w)、用 os_base_options 等价基础项。-fvisibility=hidden

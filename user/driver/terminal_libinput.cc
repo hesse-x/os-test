@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <libinput.h>
 #include <libudev.h>
+#include <poll.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -30,15 +31,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/ipc.h>
 #include <sys/mman.h>
-#include <sys/poll.h>
 #include <sys/process.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+#include <xos/ipc.h>
 
 static int master_fd = -1;
 static pid_t shell_pid = -1;

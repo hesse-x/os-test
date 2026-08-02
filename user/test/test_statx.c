@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#define _GNU_SOURCE
+
 // test_statx.c — SYS_STATX(332) direct + stat/lstat/fstat/fstatat convergence.
 //
 // The kernel exposes only statx for metadata; libc's stat/lstat/fstat/fstatat

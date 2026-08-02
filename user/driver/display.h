@@ -23,8 +23,8 @@
 
 #include "user/driver/font.h"
 #include <sys/ioctl.h>
-#include <sys/ipc.h>
 #include <sys/mman.h>
+#include <xos/ipc.h>
 
 #include "xf86drm.h"
 #include "xf86drmMode.h"

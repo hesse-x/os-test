@@ -8,16 +8,16 @@
  * setcrtc, page flip */
 #include "drm/drm.h"
 #include "drm/drm_fourcc.h"
-#include "syscall.h"
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
-#include <sys/ipc.h>
 #include <sys/mman.h>
-#include <sys/poll.h>
 #include <unistd.h>
 #include <xos/ioctl.h>
+#include <xos/ipc.h>
+#include <xos/syscall_ext.h>
 
 #define DRM_FB_WIDTH 800
 #define DRM_FB_HEIGHT 600

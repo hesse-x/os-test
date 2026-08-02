@@ -10,6 +10,9 @@
 set(_TEST_RUNNER_DEFS "")
 if(TEST)
     list(APPEND _TEST_RUNNER_DEFS TEST)
+    if(WLROOTS_DEPS)
+        list(APPEND _TEST_RUNNER_DEFS WLROOTS_DEPS)
+    endif()
 endif()
 if(LIBCXX)
     list(APPEND _TEST_RUNNER_DEFS LIBCXX)
@@ -30,7 +33,7 @@ if(TEST)
         COMMAND ${CMAKE_C_COMPILER} ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS}
                 -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party
                 -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include
-                ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS}
+                -I${MUSL_GEN_DIR} ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS}
                 -I${CMAKE_SOURCE_DIR}/third_party/mesa/include
                 -c ${CMAKE_CURRENT_SOURCE_DIR}/test_egl_smoke.c -o ${EGL_SMOKE_OBJ}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_egl_smoke.c ${MUSL_GEN_HEADERS}
@@ -54,22 +57,25 @@ if(TEST)
 endif()
 
 # wlroots prerequisite dep smoke tests (WF-3/WF-5 runtime validation).
-# Each links the Meson-built .so staged into build/ by `build.sh --wlroots`
-# (LINK_LIBS <name> → build/lib<name>.so, recording DT_NEEDED). Pure-logic
-# paths only — no devices, no disk XKB data, no seatd daemon — so they run
-# under test_runner like any other test ELF. Built under if(TEST); the staged
-# .so must exist first (run `./build.sh --wlroots`), same precondition as
-# test_egl_smoke_elf. libseat is deferred to WF-6 (needs seatd + DRM/input).
-if(TEST)
-    add_user_dyn_elf(test_pixman_smoke C SOURCES test_pixman_smoke.c
-        LINK_LIBS pixman-1 c
-        INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include/pixman-1)
-    add_user_dyn_elf(test_display_info_smoke C SOURCES test_display_info_smoke.c
-        LINK_LIBS display-info c
-        INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include)
-    add_user_dyn_elf(test_xkbcommon_smoke C SOURCES test_xkbcommon_smoke.c
-        LINK_LIBS xkbcommon c
-        INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include)
+# Each links the Meson-built .so staged into build/ by `build.sh --wlroots`.
+# Keep them out of ALL, like test_egl_smoke_elf: build.sh creates and stages
+# the external libraries after the first CMake build, then requests these
+# targets explicitly. libseat is deferred to WF-6 (needs seatd + DRM/input).
+if(WLROOTS_DEPS)
+    if(TEST)
+        add_user_dyn_elf(test_pixman_smoke C SOURCES test_pixman_smoke.c
+            LINK_LIBS pixman-1 c
+            EXCLUDE_FROM_ALL
+            INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include/pixman-1)
+        add_user_dyn_elf(test_display_info_smoke C SOURCES test_display_info_smoke.c
+            LINK_LIBS display-info c
+            EXCLUDE_FROM_ALL
+            INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include)
+        add_user_dyn_elf(test_xkbcommon_smoke C SOURCES test_xkbcommon_smoke.c
+            LINK_LIBS xkbcommon c
+            EXCLUDE_FROM_ALL
+            INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include)
+    endif()
 endif()
 
 # Layer 1: unistd (pipe/read/write/close)
@@ -270,7 +276,7 @@ add_user_dyn_elf(modetest_dyn C SOURCES modetest_dyn.c LINK_LIBS drm c NO_IMAGE)
 # SOURCES compiles udev.c directly: udev_* symbols are implemented in that file,
 # standalone compilation suffices, no need to link the whole input static lib
 # (avoids pulling in all libinput deps). Default -Iinclude/uapi already covers
-# udev.c's <xos/input.h>/<xos/ioctl.h>.
+# udev.c's standard <linux/input.h> plus <xos/ioctl.h>.
 if(TEST)
     add_user_dyn_elf(test_libudev C SOURCES test_libudev.c ${CMAKE_SOURCE_DIR}/user/lib/udev-shim/udev.c LINK_LIBS c STATIC_LIBS unity DEFS TEST INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)
 endif()

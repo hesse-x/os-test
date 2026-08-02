@@ -9,10 +9,10 @@
  */
 
 #include <stdint.h>
-#include <sys/ipc.h>
 #include <sys/mount.h>
 #include <sys/types.h>
-#include <syscall.h>
+#include <xos/ipc.h>
+#include <xos/syscall_ext.h>
 
 // ===================== IPC =====================
 

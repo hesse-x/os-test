@@ -59,28 +59,15 @@ static struct test_entry tests[] = {
     {"test_locale", "/test/test_locale.elf"},
     {"test_regex", "/test/test_regex.elf"},
     {"test_passwd", "/test/test_passwd.elf"},
-#if defined(TEST)
     {"egl_smoke", "/test/test_egl_smoke.elf"},
-    /* wlroots prerequisite dep runtime smoke (WF-3/WF-5). Staged .so come
-     * from `build.sh --wlroots`; pure-logic, no devices/seatd. libseat is
-     * deferred to WF-6. */
     {"pixman_smoke", "/test/test_pixman_smoke.elf"},
     {"display_info_smoke", "/test/test_display_info_smoke.elf"},
     {"xkbcommon_smoke", "/test/test_xkbcommon_smoke.elf"},
-#endif
     {"hello_dyn", "/local/hello_dyn.elf"},
-    /* ldso.md Phase 1.5 go/no-go: musl fused libc.so self-bootstraps as
-     * PT_INTERP /lib/ld-musl-x86_64.so.1 and jumps to main. The ld_* ELFs pull
-     * liba.so/ libb.so from /test/lib via LD_LIBRARY_PATH (see child_env in
-     * main). */
     {"ld_single", "/test/ld_test_single.elf"},
     {"ld_chain", "/test/ld_test_chain.elf"},
     {"ld_diamond", "/test/ld_test_diamond.elf"},
     {"ld_cycle", "/test/ld_test_cycle.elf"},
-    /* dlfcn API smoke (DL-001~006): dlopen(NULL)/dlsym/dlclose/dlerror/dladdr
-     * against the fused loader + musl_dl_objs wrappers. Not a real .so load
-     * (Phase 3) — dlopen(NULL) returns the head handle, dlsym resolves against
-     * the existing global chain. */
     {"test_dl", "/test/test_dl.elf"},
     {"drm_ioctl", "/test/drm_ioctl.elf"},
     {"drm_phase_c", "/test/drm_phase_c.elf"},
@@ -129,12 +116,7 @@ static struct test_entry tests[] = {
     {"test_ffi", "/test/test_ffi.elf"},
     {"test_expat", "/test/test_expat.elf"},
     {"test_wayland_client", "/test/test_wayland_client.elf"},
-#if defined(LIBCXX)
-    /* libc++ end-to-end regression (refact_cmake.md §3.6): vector/string,
-     * throw/catch (libc++abi TLS), filesystem (int128 runtime), messages facet
-     * (catgets). Only present when built with -DLIBCXX=1 (./build.sh --cxx). */
     {"libcxx_smoke", "/test/libcxx_smoke.elf"},
-#endif
     {"ioctl_varlen", "/test/ioctl_varlen.elf"},
     {"epoll", "/test/epoll.elf"},
     {"epoll_oneshot", "/test/test_epoll_oneshot.elf"},
@@ -143,8 +125,6 @@ static struct test_entry tests[] = {
     {"signalfd", "/test/signalfd.elf"},
     {"getrandom", "/test/getrandom.elf"},
     {"mount", "/test/mount.elf"},
-    /* S18 accept_no_timeout sleeps up to 35s by design — run last so it does
-     * not gate the rest of the suite on its deliberate long block. */
     {"getdents_resume", "/test/test_getdents_resume.elf"},
     {"sa_restart", "/test/test_sa_restart.elf"},
     {"sa_nocldwait", "/test/test_sa_nocldwait.elf"},

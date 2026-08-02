@@ -16,12 +16,12 @@
 #include "xf86drmMode.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/poll.h>
 #include <unistd.h>
 
 /* Draw color bars: red, green, blue, white */

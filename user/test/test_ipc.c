@@ -4,15 +4,17 @@
  * SPDX-License-Identifier: MIT
  */
 
+#define _GNU_SOURCE
+
 #include "user/test/test_helpers.h"
 #include <string.h>
-#include <sys/ipc.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include <syscall.h>
 #include <unistd.h>
 #include <unity.h>
+#include <xos/ipc.h>
+#include <xos/syscall_ext.h>
 
 void setUp(void) {}
 void tearDown(void) {}

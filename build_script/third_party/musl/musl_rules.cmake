@@ -46,11 +46,8 @@ set(MUSL_DIR ${MUSL_SRC})
 # xos headers. Relaxed warnings (-Wno-all): upstream musl is third-party code,
 # not under our -Werror gate (same rationale as musl_unistd_objs).
 # MUSL_GEN_INCLUDE_DIR (build/musl_gen, from musl_generate_headers above) is
-# FIRST so <bits/alltypes.h> resolves to the v1.2.6-generated copy — it defines
-# __LONG_MAX, which musl 1.2.x <limits.h> references (#define LONG_MAX
-# __LONG_MAX). Our static user/include/bits/alltypes.h is a v1.1.19-era hand
-# write (no __LONG_MAX), so without musl_gen first, ldso/dynlink.c fails with
-# "use of undeclared identifier '__LONG_MAX'". Mirrors add_musl_lib's order.
+# FIRST so <bits/alltypes.h> resolves to the generated copy — it defines
+# __LONG_MAX, which musl <limits.h> references. Mirrors add_musl_lib's order.
 set(MUSL_INCLUDES
     ${MUSL_GEN_INCLUDE_DIR}
     ${MUSL_SRC}/arch/x86_64
@@ -80,11 +77,8 @@ target_include_directories(musl_loader_objs PRIVATE ${MUSL_INCLUDES})
 # add_library, so the generated-header dependency must be added by hand: dynlink.c
 # pulls musl <limits.h> → LONG_MAX → __LONG_MAX, defined ONLY in the generated
 # bits/alltypes.h (build/musl_gen/bits/, from arch/x86_64/bits/alltypes.h.in).
-# The static user/include/bits/alltypes.h fallback has no __LONG_MAX. v1.1.19's
-# dynlink.c never referenced __LONG_MAX so the missing dep was latent; v1.2.6's
-# does (the SSIZE_MAX/PATH_MAX and n_th overflow checks), and without this dep a
-# fast/parallel build can compile the loader before alltypes.h is generated,
-# falling back to the static header and failing with "undeclared __LONG_MAX".
+# Without this dependency a parallel build can compile the loader before the
+# generated header exists.
 add_dependencies(musl_loader_objs musl_headers)
 # Force -O2 regardless of CMAKE_BUILD_TYPE. The loader is bootstrap-critical:
 # at -O0 clang lowers every aggregate zero-init (e.g. `struct symdef def = {0}`
@@ -172,7 +166,7 @@ add_custom_target(musl_libc ALL
 # target deps at generate time so order is for readability, not correctness —
 # but musl_generate_headers() above MUST run before any add_musl_lib here.
 set(_musl_modules
-    unistd fcntl socket select dl linux dirent resource process mman
+    unistd fcntl socket select dl linux dirent resource process mman ipc
     stdio multibyte wchar pthread signal string ctype setjmp math stdlib malloc time locale regex passwd misc legacy)
 foreach(_m ${_musl_modules})
     include(${CMAKE_CURRENT_LIST_DIR}/modules/${_m}.cmake)
