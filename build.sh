@@ -182,8 +182,12 @@ if [ "${BUILD_WLROOTS_DEPS:-0}" = "1" ]; then
         local source="$2"
         shift 2
         local build_dir="build/wlroots/$name"
-        local setup=("$build_dir" "$source" --prefix /usr --libdir lib --buildtype=release \
-            --default-library=shared -Dwerror=false --cross-file "$WLROOTS_CROSS" "$@")
+        # Meson's setup synopsis is `setup [options] <builddir> [sourcedir]`:
+        # the build dir must follow all options, or meson treats the first
+        # positional as the source dir. Put options first, then builddir+source.
+        local setup=(--prefix /usr --libdir lib --buildtype=release \
+            --default-library=shared -Dwerror=false --cross-file "$WLROOTS_CROSS" \
+            "$build_dir" "$source" "$@")
 
         if [[ -d "$build_dir" ]]; then
             meson setup --reconfigure "${setup[@]}"
@@ -230,8 +234,12 @@ PY
             libdisplay-info)
                 install -d "$SYSROOT/usr/lib/pkgconfig" "$SYSROOT/usr/include"
                 install -m 755 "$build_dir/libdisplay-info.so.0.4.0" "$SYSROOT/usr/lib/"
-                ln -sf libdisplay-info.so.0.4.0 "$SYSROOT/usr/lib/libdisplay-info.so.0"
-                ln -sf libdisplay-info.so.0 "$SYSROOT/usr/lib/libdisplay-info.so"
+                # Upstream meson.build uses soversion=version_minor (4), so the
+                # real SONAME baked into the ELF is libdisplay-info.so.4 — NOT
+                # .so.0. wlroots links against the SONAME, so the runtime loader
+                # must find libdisplay-info.so.4 or compositor startup fails.
+                ln -sf libdisplay-info.so.0.4.0 "$SYSROOT/usr/lib/libdisplay-info.so.4"
+                ln -sf libdisplay-info.so.4 "$SYSROOT/usr/lib/libdisplay-info.so"
                 cp -a "$source/include/libdisplay-info" "$SYSROOT/usr/include/"
                 install -m 644 "$build_dir/meson-private/libdisplay-info.pc" "$SYSROOT/usr/lib/pkgconfig/"
                 ;;
@@ -254,7 +262,15 @@ PY
     build_wlroots_dependency libxkbcommon third_party/libxkbcommon \
         -Denable-tools=false -Denable-x11=false -Denable-xkbregistry=false \
         -Denable-wayland=false -Denable-bash-completion=false
-    build_wlroots_dependency libdisplay-info third_party/libdisplay-info
+    # libdisplay-info: override the cross-file's -fvisibility=hidden. Upstream
+    # marks no symbol with visibility("default") and ships a version-script
+    # (global: di_*), but a version-script cannot re-export symbols already
+    # hidden by -fvisibility=hidden at compile time — so without this override
+    # every di_* comes out as a local 't' symbol and the .so is a dead library
+    # (wlroots links it → undefined reference to di_*). -fvisibility=default
+    # lets the version-script's global:di_* actually export them.
+    build_wlroots_dependency libdisplay-info third_party/libdisplay-info \
+        -Dc_args=-fvisibility=default
     build_wlroots_dependency seatd third_party/seatd \
         -Dlibseat-logind=disabled -Dlibseat-builtin=disabled -Dlibseat-seatd=enabled \
         -Dserver=enabled -Dexamples=disabled -Dman-pages=disabled \
@@ -272,7 +288,7 @@ libdir = os.path.join(sysroot, 'usr', 'lib')
 staged = {
     'libpixman-1.so': ['libpixman-1.so', 'libpixman-1.so.0', 'libpixman-1.so.0.46.4'],
     'libxkbcommon.so': ['libxkbcommon.so', 'libxkbcommon.so.0', 'libxkbcommon.so.0.13.2'],
-    'libdisplay-info.so': ['libdisplay-info.so', 'libdisplay-info.so.0', 'libdisplay-info.so.0.4.0'],
+    'libdisplay-info.so': ['libdisplay-info.so', 'libdisplay-info.so.4', 'libdisplay-info.so.0.4.0'],
     'libseat.so': ['libseat.so', 'libseat.so.1'],
 }
 for names in staged.values():

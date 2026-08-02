@@ -61,6 +61,12 @@ static struct test_entry tests[] = {
     {"test_passwd", "/test/test_passwd.elf"},
 #if defined(TEST)
     {"egl_smoke", "/test/test_egl_smoke.elf"},
+    /* wlroots prerequisite dep runtime smoke (WF-3/WF-5). Staged .so come
+     * from `build.sh --wlroots`; pure-logic, no devices/seatd. libseat is
+     * deferred to WF-6. */
+    {"pixman_smoke", "/test/test_pixman_smoke.elf"},
+    {"display_info_smoke", "/test/test_display_info_smoke.elf"},
+    {"xkbcommon_smoke", "/test/test_xkbcommon_smoke.elf"},
 #endif
     {"hello_dyn", "/local/hello_dyn.elf"},
     /* ldso.md Phase 1.5 go/no-go: musl fused libc.so self-bootstraps as

@@ -53,6 +53,25 @@ if(TEST)
     os_image_path(test_egl_smoke_elf test_egl_smoke.elf test/test_egl_smoke.elf PARTITION 2)
 endif()
 
+# wlroots prerequisite dep smoke tests (WF-3/WF-5 runtime validation).
+# Each links the Meson-built .so staged into build/ by `build.sh --wlroots`
+# (LINK_LIBS <name> → build/lib<name>.so, recording DT_NEEDED). Pure-logic
+# paths only — no devices, no disk XKB data, no seatd daemon — so they run
+# under test_runner like any other test ELF. Built under if(TEST); the staged
+# .so must exist first (run `./build.sh --wlroots`), same precondition as
+# test_egl_smoke_elf. libseat is deferred to WF-6 (needs seatd + DRM/input).
+if(TEST)
+    add_user_dyn_elf(test_pixman_smoke C SOURCES test_pixman_smoke.c
+        LINK_LIBS pixman-1 c
+        INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include/pixman-1)
+    add_user_dyn_elf(test_display_info_smoke C SOURCES test_display_info_smoke.c
+        LINK_LIBS display-info c
+        INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include)
+    add_user_dyn_elf(test_xkbcommon_smoke C SOURCES test_xkbcommon_smoke.c
+        LINK_LIBS xkbcommon c
+        INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include)
+endif()
+
 # Layer 1: unistd (pipe/read/write/close)
 add_user_dyn_elf(pipe C SOURCES test_pipe.c LINK_LIBS c STATIC_LIBS unity)
 
