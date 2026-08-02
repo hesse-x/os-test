@@ -31,91 +31,20 @@
 
 #include <errno.h> // IWYU pragma: keep
 #include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <xos/syscall_ext.h>
 
-#include <fcntl.h>
-#include <sys/cdefs.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <xos/errno.h>
 #include <xos/unistd_ext.h>
 
-// ==================== mkstemp / mktemp (group 3) ====================
-// Replace the trailing X's in template with random letters, then open with
-// O_CREAT|O_EXCL|O_RDWR so a pre-existing name yields EEXIST and we retry.
-// Relies on the O_EXCL semantics enforced by sys_open (via i_op->create).
-static int fill_xxx(char *tmpl, int xstart, int xlen) {
-  // Seed from getpid + a monotonic counter so concurrent/sequential calls in
-  // one process produce distinct names without requiring srand().
-  static unsigned counter = 0;
-  unsigned seed = (unsigned)getpid() * 2654435761u + (counter++ * 2246822519u);
-  const char *set = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
-                    "456789";
-  for (int i = 0; i < xlen; i++) {
-    seed = seed * 1103515245u + 12345u;
-    tmpl[xstart + i] = set[(seed / 65536) % 62];
-  }
-  return 0;
-}
-
-// Find the run of trailing X's in template (POSIX requires >=6). Returns the
-// start index and length via out params, or -1 if none.
-static int find_xrun(char *tmpl, int *start, int *len) {
-  int slen = (int)strlen(tmpl);
-  int i = slen;
-  while (i > 0 && tmpl[i - 1] == 'X')
-    i--;
-  if (i == slen)
-    return -1;
-  *start = i;
-  *len = slen - i;
-  return 0;
-}
-
-LIBC_EXPORT int mkstemp(char *tmpl) {
-  int start, len;
-  if (find_xrun(tmpl, &start, &len) < 0 || len < 6) {
-    errno = EINVAL;
-    return -1;
-  }
-  // Try up to 2^len distinct names (capped).
-  for (int attempt = 0; attempt < 256; attempt++) {
-    fill_xxx(tmpl, start, len);
-    int fd = open(tmpl, O_CREAT | O_EXCL | O_RDWR, 0600);
-    if (fd >= 0)
-      return fd;
-    if (errno != EEXIST)
-      return -1;
-  }
-  errno = EEXIST;
-  return -1;
-}
-
-// mktemp: fill the template with a unique name that does not exist, without
-// opening it. Returns template on success, "" on failure. Inherently racy
-// (POSIX warns so); acceptable for this libc.
-LIBC_EXPORT char *mktemp(char *tmpl) {
-  int start, len;
-  if (find_xrun(tmpl, &start, &len) < 0 || len < 6) {
-    tmpl[0] = '\0';
-    return tmpl;
-  }
-  for (int attempt = 0; attempt < 256; attempt++) {
-    fill_xxx(tmpl, start, len);
-    struct stat st;
-    if (stat(tmpl, &st) < 0) {
-      if (errno == ENOENT)
-        return tmpl; // name is free
-      tmpl[0] = '\0';
-      return tmpl;
-    }
-  }
-  tmpl[0] = '\0';
-  return tmpl;
-}
+// ==================== mkstemp / mktemp / mkostemp ====================
+// ADOPTED musl upstream (src/temp/{mkstemp,mktemp,mkostemp}.c,
+// musl_stdlib_objs): __randname → __clock_gettime dep is satisfied (time module
+// migrated), and stdlib.cmake compiles __randname/__mkostemps. The repo's old
+// getpid-based mkstemp/mktemp (and fill_xxx/find_xrun helpers) are deleted.
+// Declares come from musl's <stdlib.h>.
 
 // ==================== realpath ====================
 // ADOPTED musl upstream (src/misc/realpath.c, musl_misc_objs): pure lexical

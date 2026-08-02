@@ -3993,27 +3993,37 @@ int64_t sys_access(int64_t a1, int64_t a2, int64_t unused1, int64_t unused2,
   return do_faccessat(AT_FDCWD, kpath, mode, 0);
 }
 
+/* sys_faccessat(dirfd, path, mode) — SYS_faccessat (269). The legacy entry has
+ * NO flags argument on Linux: musl calls it as syscall(SYS_faccessat, fd, file,
+ * mode) — a 3-arg __syscall3 that leaves r10 (arg4/a4) holding whatever the
+ * caller last put there (garbage, often a leftover AT_EACCESS from a prior
+ * __syscall4). Reading a4 as flags was non-deterministic: a stray AT_EACCESS
+ * bit flipped the real→effective uid selection and made access(2)/faccessat(,0)
+ * spuriously EACCES under split credentials (test_eaccess). Honour the Linux
+ * ABI: ignore a4 here, force flags=0;
+ * AT_EACCESS/AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH all reach do_faccessat through
+ * sys_faccessat2 (439), which musl only invokes when flag is nonzero. */
 int64_t sys_faccessat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                       int64_t unused5, int64_t unused6) {
+  (void)a4;
   (void)unused5;
   (void)unused6;
   int dirfd = (int)a1;
   const char __user *upath = (const char __user *__force)a2;
   int mode = (int)a3;
-  int flags = (int)a4;
   if (!upath)
     return -EFAULT;
   char kpath[256];
   if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
     return -EFAULT;
-  return do_faccessat(dirfd, kpath, mode, flags);
+  return do_faccessat(dirfd, kpath, mode, 0);
 }
 
-/* sys_faccessat2(dirfd, path, mode, flags) — SYS_FACCESSAT2 (439).  LLVM libc
- * hard-#errors without SYS_faccessat2 (faccessat.cpp).  The legacy
- * SYS_faccessat (269) accepts the same flags; the only Linux difference is
- * that the old entry ignored `flags`, while this kernel's do_faccessat has
- * always honoured them.  So this is a verbatim alias of sys_faccessat. */
+/* sys_faccessat2(dirfd, path, mode, flags) — SYS_faccessat2 (439).  LLVM libc
+ * hard-#errors without SYS_faccessat2 (faccessat.cpp).  This is the only entry
+ * that honours flags: AT_EACCESS/AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH reach
+ * do_faccessat here (musl routes nonzero flag to faccessat2; the legacy
+ * SYS_faccessat entry ignores flags — see sys_faccessat). */
 int64_t sys_faccessat2(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                        int64_t unused5, int64_t unused6) {
   (void)unused5;

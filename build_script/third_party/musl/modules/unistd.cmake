@@ -27,9 +27,13 @@
 # wrappers (and musl's own thread sources). It is NOT pulled into
 # musl_unistd_objs to avoid a duplicate-definition clash with musl_pthread.
 #
-# faccessat.c is intentionally EXCLUDED this batch: its AT_EACCESS path needs
-# __block_all_sigs/__restore_sigs/__clone shims; the repo's existing faccessat
-# (file.cc) is retained for now (tracked in unistd_worklist problem 4).
+# faccessat.c is ADOPTED: its AT_EACCESS clone path needs
+# __block_all_sigs/__restore_sigs (src/signal/block.c, compiled by musl_pthread)
+# + __clone (src/thread/clone.c, musl_pthread); __sys_wait4 is just an
+# __syscall(SYS_wait4,...) macro (no standalone symbol), and the kernel's
+# SYS_WAIT4 accepts __WCLONE. The clone child's setregid/setreuid/getegid/
+# geteuid/faccessat syscalls are all kernel-implemented. The repo's faccessat
+# (file.cc) is deleted to avoid a duplicate definition.
 #
 # ttyname.c / ttyname_r.c ARE ADOPTED: procfs now provides /proc/self/fd/N
 # (procfs M4), so musl's ttyname_r readlinks it and stats the result for
@@ -61,7 +65,6 @@ file(GLOB MUSL_UNISTD_SOURCES ${MUSL_DIR}/src/unistd/*.c)
 file(GLOB MUSL_SCHED_SOURCES CONFIGURE_DEPENDS ${MUSL_DIR}/src/sched/*.c)
 # Exclude sources we are not adopting this batch (see comments above / below).
 set(MUSL_UNISTD_EXCLUDE
-    ${MUSL_DIR}/src/unistd/faccessat.c   # AT_EACCESS clone path — repo faccessat retained
     ${MUSL_DIR}/src/unistd/setxid.c      # __setxid provided by musl_shim/syscall_cp.c
     ${MUSL_DIR}/src/unistd/isatty.c      # musl probes TIOCGWINSZ; serial only answers TCGETS — repo isatty retained
     ${MUSL_DIR}/src/unistd/gethostname.c # musl returns uname.nodename ("(none)"); repo reads sys_gethostname (sethostname round-trip) — retained
@@ -103,6 +106,11 @@ add_library(musl_unistd_objs OBJECT
     # <sys/sendfile.h> (in sysroot) + "syscall.h" (musl-internal, on this
     # target's include path) — same as the unistd wrappers.
     ${MUSL_DIR}/src/linux/sendfile.c
+    # umask lives in src/stat (not src/unistd), so the unistd glob misses it and
+    # no module globs src/stat. ADOPTED here as a one-line SYS_umask wrapper
+    # (kernel implements SYS_UMASK); the repo's unistd.cc wrapper — and thus the
+    # whole now-empty unistd.cc — is deleted.
+    ${MUSL_DIR}/src/stat/umask.c
     ${CMAKE_SOURCE_DIR}/user/lib/musl_shim/syscall_cp.c
 )
 # musl-internal include order: musl src/internal BEFORE user/include so the musl
@@ -156,6 +164,8 @@ add_library(musl_unistd_objs_so OBJECT
     # <sys/sendfile.h> (in sysroot) + "syscall.h" (musl-internal, on this
     # target's include path) — same as the unistd wrappers.
     ${MUSL_DIR}/src/linux/sendfile.c
+    # umask — see the -fno-pie list above (src/stat, one-line SYS_umask wrapper).
+    ${MUSL_DIR}/src/stat/umask.c
     ${CMAKE_SOURCE_DIR}/user/lib/musl_shim/syscall_cp.c
 )
 target_include_directories(musl_unistd_objs_so PRIVATE

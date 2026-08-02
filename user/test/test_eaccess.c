@@ -82,8 +82,9 @@ static void make_fixture(void) {
  *   access(SPLIT, R_OK)   → ruid=0 → owner bits (6) → R_OK ok → 0
  *   eaccess(SPLIT, R_OK)  → euid=1000 → 1000!=owner(0), 1000!=gid(0) → other(0)
  *                          → EACCES
- * Also faccessat(AT_EACCESS) exercises the repo faccessat → sys_faccessat →
- * AT_EACCESS → euid path, and must match eaccess. */
+ * Also faccessat(AT_EACCESS) exercises musl faccessat → SYS_faccessat2 →
+ * AT_EACCESS → euid path, and must match eaccess. And faccessat(,0) hits the
+ * legacy SYS_faccessat entry (flags ignored, ruid) and must match access(). */
 void test_access_ruid_eaccess_euid_differ(void) {
   pid_t child = fork();
   if (child == 0) {

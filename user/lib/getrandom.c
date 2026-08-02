@@ -4,36 +4,19 @@
  * SPDX-License-Identifier: MIT
  */
 
-// getentropy + arc4random_* (BSD extensions) — getrandom itself comes from
-// musl src/linux/getrandom.c (musl_linux_objs), so it is no longer defined
-// here. arc4random_buf/arc4random_uniform are BSD APIs musl does not ship;
-// they stay (todo.md:349). getentropy is also kept here rather than pulling
-// musl src/misc/getentropy.c into a new module: it is a trivial getrandom
-// loop with a 256-byte cap, and getrandom now resolves from the musl object
-// in the same archive at link time.
+// arc4random_* (BSD extensions) — musl does not ship these, so they stay here
+// (todo.md). getentropy is now ADOPTED from musl src/misc/getentropy.c
+// (musl_misc_objs): its deps (getrandom from musl_linux_objs,
+// pthread_setcancelstate from musl_pthread) are satisfied, and it is logic-
+// equivalent to the repo version (256-byte cap + getrandom loop, plus a
+// cancel-state guard). getrandom itself comes from musl src/linux/getrandom.c
+// (musl_linux_objs). The repo's old getentropy here is deleted.
 
-#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 
 #include <sys/random.h>
 #include <sys/types.h>
-
-int getentropy(void *buf, size_t buflen) {
-  if (buflen > 256) {
-    errno = EIO;
-    return -1;
-  }
-  // Retry on short reads until the buffer is full.
-  size_t done = 0;
-  while (done < buflen) {
-    ssize_t n = getrandom((char *)buf + done, buflen - done, 0);
-    if (n < 0)
-      return -1;
-    done += (size_t)n;
-  }
-  return 0;
-}
 
 void arc4random_buf(void *buf, size_t n) {
   size_t done = 0;

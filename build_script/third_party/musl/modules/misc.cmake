@@ -19,8 +19,9 @@
 #   syscall.c   — unistd module (public indirect-syscall primitive syscall()).
 #   getrlimit.c / setrlimit.c / getrusage.c — resource module (prlimit64 +
 #       __synccall fallback); see modules/resource.cmake.
-#   getentropy.c — repo retains its own in user/lib/getrandom.c (deliberately,
-#       same getrandom() wrapper); exclude to avoid a multi-define.
+#   getentropy.c — ADOPTED: deps (getrandom from musl_linux_objs,
+#       pthread_setcancelstate from musl_pthread) are satisfied; the repo's
+#       getentropy in getrandom.c is deleted (arc4random_* stay — musl has none).
 #
 # Routed syscall NOT implemented by the kernel (EXCLUDED — would set errno=ENOSYS
 # at runtime, or fail link via an uncompiled helper):
@@ -78,7 +79,6 @@ list(REMOVE_ITEM MUSL_MISC_SOURCES
     ${MUSL_DIR}/src/misc/getrlimit.c      # resource module (prlimit64)
     ${MUSL_DIR}/src/misc/setrlimit.c      # resource module (__synccall fallback)
     ${MUSL_DIR}/src/misc/getrusage.c      # resource module
-    ${MUSL_DIR}/src/misc/getentropy.c     # repo retains own in getrandom.c
     # Routed syscalls NOT implemented by the kernel (ENOSYS leak / link fail):
     ${MUSL_DIR}/src/misc/getresuid.c      # SYS_getresuid #118 stub
     ${MUSL_DIR}/src/misc/getresgid.c      # SYS_getresgid #120 stub

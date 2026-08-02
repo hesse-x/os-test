@@ -26,7 +26,7 @@
 # loader requires. mallocng runs in mmap-only mode (this kernel's sys_brk is a
 # fail stub; see kernel/bsd/syscall.c).
 set(LIBC_SOURCES
-    lib/unistd.cc lib/time.cc lib/file.cc
+    lib/time.cc lib/file.cc
     lib/stdlib_misc.c lib/uname.c
     lib/assert.c lib/signal.cc lib/getrandom.c
     lib/lfs64_compat.c

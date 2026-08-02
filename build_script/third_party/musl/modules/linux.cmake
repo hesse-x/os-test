@@ -34,10 +34,10 @@
 #   eventfd.c      SYS_eventfd2 (bsd); SYS_eventfd fallback unreachable [replaces io_multiplex.cc]
 #   fallocate.c    SYS_fallocate (bsd, lowercase)  [new symbol]
 #   flock.c        SYS_flock (bsd)                 [replaces sys_socket.cc]
-#   getrandom.c    SYS_getrandom (bsd, cancellable)[replaces getrandom.c; KEEP getentropy/arc4random_*]
+#   getrandom.c    SYS_getrandom (bsd, cancellable)[replaces getrandom.c; KEEP arc4random_* — musl has none; getentropy now from misc.cmake]
 #   gettid.c       reads __pthread_self()->tid (no syscall; tid set in __init_tls via SYS_set_tid_address)
 #                                                                  [replaces sys_process.cc]
-#   ioperm.c       SYS_ioperm (xcore/trap.c)       [replaces unistd.cc; umask stays]
+#   ioperm.c       SYS_ioperm (xcore/trap.c)       [replaces unistd.cc; umask now from unistd.cmake src/stat/umask.c — unistd.cc deleted]
 #   memfd_create.c SYS_memfd_create (bsd)          [replaces sys_process.cc; mman module does NOT compile it]
 #   prctl.c        SYS_prctl (bsd)                 [replaces musl_missing.c]
 #   sbrk.c         SYS_brk (bsd, fail stub)        [new symbol]

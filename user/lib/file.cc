@@ -154,19 +154,12 @@ int lstat(const char *path, struct stat *st) {
 // ===================== access / faccessat / utimensat =====================
 // access is provided by musl src/unistd (musl_unistd_objs); on x86-64 musl
 // routes it to syscall(SYS_access), which this kernel resolves via
-// vfs_resolve_user (cwd-relative). faccessat below is retained (musl's
-// AT_EACCESS clone path is not adopted this batch — see user/CMakeLists.txt
-// MUSL_UNISTD_EXCLUDE). faccessat(dirfd,path,mode,flags): dirfd-relative
-// variant of access. AT_FDCWD ≡ current root (kernel has no per-process CWD).
-// flags pass through AT_EACCESS / AT_SYMLINK_NOFOLLOW / AT_EMPTY_PATH
-// (kernel-validated).
-LIBC_EXPORT int faccessat(int dirfd, const char *path, int mode, int flags) {
-  if (!path) {
-    errno = EFAULT;
-    return -1;
-  }
-  return sys_faccessat(dirfd, path, mode, flags);
-}
+// vfs_resolve_user (cwd-relative). faccessat is ADOPTED from musl
+// src/unistd/faccessat.c (musl_unistd_objs): its AT_EACCESS clone path's deps
+// (__block_all_sigs/__restore_sigs from musl_pthread block.c, __clone from
+// musl_pthread clone.c, __sys_wait4 = __syscall macro) are all satisfied, and
+// the kernel's SYS_WAIT4/SYS_setreuid/SYS_setregid/SYS_faccessat are
+// implemented. The repo's old sys_faccessat wrapper here is deleted.
 
 // utimensat(dirfd,path,times,flags): set atime/mtime of path. Each times
 // entry's tv_nsec=UTIME_NOW (=now) / UTIME_OMIT (unchanged); times=NULL →

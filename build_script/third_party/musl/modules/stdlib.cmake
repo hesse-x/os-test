@@ -42,9 +42,11 @@
 #     current musl realpath.c is pure lexical (readlink + getcwd + strdup +
 #     SYMLOOP_MAX), NOT the /proc/self/fd + O_PATH path this stale note once
 #     described; the repo's getcwd-only realpath (stdlib_misc.c) is deleted.
-#   src/temp/{mkstemp,__randname,...}.c — __randname needs __clock_gettime
-#     (time module not yet migrated; would clash with repo time.cc); repo
-#     stdlib_misc.c:mkstemp/mktemp (getpid-based) kept.
+#   src/temp/{mkstemp,mktemp,mkostemp}.c — NOW ADOPTED here. __randname's dep
+#     (__clock_gettime) resolved once the time module migrated; stdlib.cmake
+#     already compiled __randname.c/mkostemps.c/mkstemps.c, and the same
+#     blocker that once gated tmpfile/tmpnam/tempnam (now musl) is gone. The
+#     repo's getpid-based mkstemp/mktemp (stdlib_misc.c) is deleted.
 #   src/conf/sysconf.c + src/legacy/getpagesize.c — musl sysconf redefines
 #     _SC_NPROCESSORS_ONLN semantics; repo stdlib_misc.c (sys_sysconf-backed)
 #     kept.
@@ -89,6 +91,14 @@ set(MUSL_STDLIB_SOURCES
     ${MUSL_DIR}/src/temp/__randname.c
     ${MUSL_DIR}/src/temp/mkostemps.c
     ${MUSL_DIR}/src/temp/mkstemps.c
+    # mkstemp/mktemp/mkostemp — the public temp API. mkstemp is a one-liner
+    # over __mkostemps; mktemp calls __randname directly; mkostemp is the
+    # flag-taking sibling of mkstemp. All deps (__randname/__mkostemps,
+    # __clock_gettime, open/stat) are already compiled above / in other
+    # modules. Replaces the repo's getpid-based stdlib_misc.c versions.
+    ${MUSL_DIR}/src/temp/mkstemp.c
+    ${MUSL_DIR}/src/temp/mktemp.c
+    ${MUSL_DIR}/src/temp/mkostemp.c
     # prng: musl's LCG (31-bit, RAND_MAX=0x7fffffff) replaces the repo's
     # 15-bit LCG. random/drand48 excluded (0 callers).
     ${MUSL_DIR}/src/prng/rand.c
