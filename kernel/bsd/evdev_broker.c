@@ -21,6 +21,10 @@
 #include <xos/ioctl.h>
 #include <xos/socket.h> // POLLIN
 
+#ifndef EVIOCREVOKE
+#define EVIOCREVOKE _IOW('E', 0x91, int)
+#endif
+
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h" // __memcpy/__memset/__strncpy/__strcmp
@@ -299,6 +303,8 @@ static ssize_t evdev_owner_write(struct xtask *proc, struct file *f,
   while (n && n != &inst->client_list) {
     struct evdev_client *client = LIST_ENTRY(n, struct evdev_client, node);
     n = n->next;
+    if (client->revoked)
+      continue;
     bool any_new = false;
     for (uint32_t i = 0; i < nev; i++) {
       const input_event *ev =
@@ -407,7 +413,7 @@ static ssize_t evdev_consumer_read(struct xtask *proc, struct file *f,
                                    void *buf, size_t count) {
   (void)proc;
   struct evdev_client *client = (struct evdev_client *)f->private_data;
-  if (!client || !client->inst || client->inst->dead)
+  if (!client || !client->inst || client->inst->dead || client->revoked)
     return -ENODEV;
   if (count == 0)
     return 0; // POSIX: read of zero bytes returns zero
@@ -432,7 +438,7 @@ static ssize_t evdev_consumer_read(struct xtask *proc, struct file *f,
     // f->wq, so owner write already wakes us — nothing to assign here.
 
     while (kfifo_len(&client->buffer) == 0) {
-      if (client->inst->dead) {
+      if (client->inst->dead || client->revoked) {
         remove_wait_queue(wq, &wait);
         return -ENODEV;
       }
@@ -458,8 +464,10 @@ static __poll evdev_consumer_poll(struct xtask *proc, struct file *f,
                                   int events) {
   (void)proc;
   struct evdev_client *client = (struct evdev_client *)f->private_data;
-  if (!client || !client->inst || client->inst->dead)
+  if (!client || !client->inst)
     return 0;
+  if (client->inst->dead || client->revoked)
+    return POLLERR | POLLHUP;
   if (kfifo_len(&client->buffer) > 0)
     return events & POLLIN;
   return 0;
@@ -475,7 +483,15 @@ static long evdev_consumer_ioctl(struct xtask *proc, struct file *f,
   struct evdev_client *client = (struct evdev_client *)f->private_data;
   if (!client || !client->inst)
     return -ENODEV;
+  if (client->revoked)
+    return cmd == (uint32_t)EVIOCREVOKE ? 0 : -ENODEV;
   struct evdev_instance *inst = client->inst;
+
+  // The manager only understands EVIOCGRAB. Revoke first releases any grab
+  // owned by this consumer, then permanently invalidates the shared OFD.
+  bool revoke = cmd == (uint32_t)EVIOCREVOKE;
+  if (revoke)
+    cmd = (uint32_t)EVIOCGRAB;
 
   // Liveness pre-check (§5.4/§12.2).
   if (inst->dead)
@@ -495,7 +511,7 @@ static long evdev_consumer_ioctl(struct xtask *proc, struct file *f,
   uint8_t req_data[56];
   __memset(req_data, 0, 56);
   *(uint32_t *)req_data = cmd;
-  if ((dir & _IOC_WRITE) && arg_size > 0 && arg_size <= 48) {
+  if (!revoke && (dir & _IOC_WRITE) && arg_size > 0 && arg_size <= 48) {
     if (copy_from_user(req_data + 4, arg, arg_size))
       return -EFAULT;
   }
@@ -556,6 +572,13 @@ static long evdev_consumer_ioctl(struct xtask *proc, struct file *f,
 
   if (proc->wait_timed_out)
     return -ETIMEDOUT;
+  if (revoke) {
+    client->revoked = true;
+    kfifo_reset(&client->buffer);
+    if (client->wq)
+      __wake_up(client->wq, POLLERR | POLLHUP);
+    return 0;
+  }
   return (long)proc->req_result;
 }
 

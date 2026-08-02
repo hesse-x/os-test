@@ -539,8 +539,8 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
     f->target_pid = ops->driver_pid;
     // Kernel device: call open callback. Callbacks mutate the FD_DEV file in
     // place (do not replace the pointer), so fd_table[fd] stays valid.
-    if (ops->driver_pid == 0 && ops->open) {
-      int rc = ops->open(proc, fd);
+    if (ops->driver_pid == 0 && (ops->open_file || ops->open)) {
+      int rc = ops->open_file ? ops->open_file(proc, f) : ops->open(proc, fd);
       if (rc < 0) {
         // Open failed: undo fd installation. Manual cleanup (not file_put) to
         // avoid calling ops->close when ops->open itself failed. Drop the

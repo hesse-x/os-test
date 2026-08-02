@@ -36,6 +36,11 @@ static inline uint32_t kfifo_len(const kfifo *kf) {
   return (t >= h) ? (t - h) : (kf->cap - h + t);
 }
 
+static inline void kfifo_reset(kfifo *kf) {
+  uint32_t tail = __atomic_load_n(&kf->tail, __ATOMIC_ACQUIRE);
+  __atomic_store_n(&kf->head, tail, __ATOMIC_RELEASE);
+}
+
 // Producer: enqueue one element. false when full (caller then drop-new + set
 // `dropped`).
 bool kfifo_in(kfifo *kf, const void *elem);

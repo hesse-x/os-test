@@ -312,10 +312,14 @@ if(WLROOTS_DEPS)
     os_image_path(xkbcommon_soname    libxkbcommon.so.0       lib/libxkbcommon.so.0       PARTITION 2)
     os_image_path(display_info_lib    libdisplay-info.so      lib/libdisplay-info.so      PARTITION 2)
     os_image_path(display_info_soname libdisplay-info.so.4    lib/libdisplay-info.so.4    PARTITION 2)
-    os_image_path(libseat_lib         libseat.so              lib/libseat.so              PARTITION 2)
-    os_image_path(libseat_soname      libseat.so.1            lib/libseat.so.1            PARTITION 2)
-    os_image_path(seatd_bin           seatd                   usr/bin/seatd               PARTITION 2)
 endif()
+
+# seatd/libseat are part of the default terminal session path.
+os_image_path(libseat_lib         libseat.so              lib/libseat.so              PARTITION 2)
+os_image_path(libseat_soname      libseat.so.1            lib/libseat.so.1            PARTITION 2)
+os_image_path(seatd_bin           seatd                   usr/bin/seatd               PARTITION 2)
+os_image_path(seat_session_smoke  seat-session-smoke      usr/bin/seat-session-smoke  PARTITION 2)
+os_image_path(seat_protocol_neg   seat-protocol-negative  usr/bin/seat-protocol-negative PARTITION 2)
 
 # Write the disk-image manifest now that every target above has registered.
 # (reface_cmake.md §6: single source of truth for mkdisk.sh.)

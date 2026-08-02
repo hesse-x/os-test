@@ -16,6 +16,7 @@
 #include "kernel/xcore/xtask.h"    // pid_t
 
 struct inode;
+struct file;
 
 // Linux 64-bit dev_t encoding (mirrors user sysmacros.h; pure arithmetic, no
 // deps).
@@ -63,6 +64,16 @@ struct dev_ops {
   ssize_t (*read)(xtask *proc, int fd, void *buf, size_t count);
   ssize_t (*write)(xtask *proc, int fd, const void *buf, size_t count);
   __poll (*poll)(xtask *proc, int events);
+
+  // OFD-aware callbacks for devices whose state must survive dup/fork and
+  // SCM_RIGHTS. When present these take precedence over the legacy callbacks.
+  int (*open_file)(xtask *proc, struct file *file);
+  int (*close_file)(xtask *proc, struct file *file);
+  long (*ioctl_file)(xtask *proc, struct file *file, uint32_t cmd, void *arg);
+  uint64_t (*mmap_file)(xtask *proc, struct file *file, uint64_t size,
+                        uint64_t offset);
+  ssize_t (*read_file)(xtask *proc, struct file *file, void *buf, size_t count);
+  __poll (*poll_file)(xtask *proc, struct file *file, int events);
 };
 
 void devtmpfs_init(void);

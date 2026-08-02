@@ -22,6 +22,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libinput.h>
+extern "C" {
+#include <libseat.h>
+}
 #include <libudev.h>
 #include <poll.h>
 #include <signal.h>
@@ -42,6 +45,26 @@
 
 static int master_fd = -1;
 static pid_t shell_pid = -1;
+
+#define MAX_SEAT_INPUT_DEVICES 32
+
+struct seat_input_device {
+  int fd;
+  int id;
+};
+
+struct terminal_seat {
+  struct libseat *seat;
+  struct libinput *libinput;
+  struct seat_input_device inputs[MAX_SEAT_INPUT_DEVICES];
+  int drm_fd;
+  int drm_id;
+  int active;
+  int initialized;
+  int fatal;
+};
+
+static struct terminal_seat terminal_seat;
 
 // ===================== VT100 state =====================
 
@@ -270,7 +293,7 @@ static void vt100_feed(char c) {
 }
 
 static void flush_dirty_cells() {
-  if (dirty_row_start >= dirty_row_end)
+  if (!terminal_seat.active || dirty_row_start >= dirty_row_end)
     return;
   for (int row = dirty_row_start; row < dirty_row_end; row++)
     for (int col = 0; col < vt.cols; col++) {
@@ -413,6 +436,70 @@ static int key_to_ascii(uint32_t key, int pressed, char *out, int out_max) {
 
 // ===================== libinput interface =====================
 
+static int open_seat_drm(struct terminal_seat *session) {
+  session->drm_id =
+      libseat_open_device(session->seat, "/dev/dri/card0", &session->drm_fd);
+  if (session->drm_id <= 0 || session->drm_fd < 0)
+    return -1;
+  if (display_client_init(session->drm_fd) == 0)
+    return 0;
+
+  (void)libseat_close_device(session->seat, session->drm_id);
+  close(session->drm_fd);
+  session->drm_id = -1;
+  session->drm_fd = -1;
+  return -1;
+}
+
+static void close_seat_drm(struct terminal_seat *session) {
+  display_client_destroy();
+  if (session->drm_id > 0)
+    (void)libseat_close_device(session->seat, session->drm_id);
+  if (session->drm_fd >= 0)
+    close(session->drm_fd);
+  session->drm_id = -1;
+  session->drm_fd = -1;
+}
+
+static void enable_seat(struct libseat *seat, void *data) {
+  (void)seat;
+  struct terminal_seat *session = (struct terminal_seat *)data;
+  if (session->active) {
+    session->fatal = 1;
+    return;
+  }
+  session->active = 1;
+  if (!session->initialized)
+    return;
+
+  if (open_seat_drm(session) < 0 || libinput_resume(session->libinput) < 0) {
+    session->fatal = 1;
+    return;
+  }
+  dirty_row_start = 0;
+  dirty_row_end = vt.rows;
+  flush_dirty_cells();
+}
+
+static void disable_seat(struct libseat *seat, void *data) {
+  struct terminal_seat *session = (struct terminal_seat *)data;
+  if (!session->active) {
+    session->fatal = 1;
+    return;
+  }
+  if (session->libinput != NULL)
+    libinput_suspend(session->libinput);
+  close_seat_drm(session);
+  session->active = 0;
+  if (libseat_disable_seat(seat) < 0)
+    session->fatal = 1;
+}
+
+static const struct libseat_seat_listener seat_listener = {
+    .enable_seat = enable_seat,
+    .disable_seat = disable_seat,
+};
+
 // libinput log handler
 #include <stdarg.h>
 static void libinput_log(struct libinput *libinput,
@@ -426,13 +513,34 @@ static void libinput_log(struct libinput *libinput,
 }
 
 static int open_restricted(const char *path, int flags, void *user_data) {
-  (void)user_data;
-  int fd = open(path, flags);
-  return fd >= 0 ? fd : -errno;
+  (void)flags;
+  struct terminal_seat *session = (struct terminal_seat *)user_data;
+  int fd = -1;
+  int id = libseat_open_device(session->seat, path, &fd);
+  if (id < 0)
+    return -errno;
+  for (size_t i = 0; i < MAX_SEAT_INPUT_DEVICES; i++) {
+    if (session->inputs[i].id == 0) {
+      session->inputs[i].fd = fd;
+      session->inputs[i].id = id;
+      return fd;
+    }
+  }
+  (void)libseat_close_device(session->seat, id);
+  close(fd);
+  return -EMFILE;
 }
 
 static void close_restricted(int fd, void *user_data) {
-  (void)user_data;
+  struct terminal_seat *session = (struct terminal_seat *)user_data;
+  for (size_t i = 0; i < MAX_SEAT_INPUT_DEVICES; i++) {
+    if (session->inputs[i].id != 0 && session->inputs[i].fd == fd) {
+      (void)libseat_close_device(session->seat, session->inputs[i].id);
+      session->inputs[i].fd = -1;
+      session->inputs[i].id = 0;
+      break;
+    }
+  }
   close(fd);
 }
 
@@ -500,12 +608,24 @@ extern "C" int main(int argc, char **argv, char **envp) {
   (void)argv;
   (void)envp;
 
-  if (display_client_init() < 0) {
-    printf("terminal: display_client_init FAILED\n");
-    while (1) {
-      struct recv_msg m;
-      ipc_recv(&m, NULL, 0, 0);
-    }
+  memset(&terminal_seat, 0, sizeof(terminal_seat));
+  terminal_seat.drm_fd = -1;
+  terminal_seat.drm_id = -1;
+  for (size_t i = 0; i < MAX_SEAT_INPUT_DEVICES; i++)
+    terminal_seat.inputs[i].fd = -1;
+
+  terminal_seat.seat = libseat_open_seat(&seat_listener, &terminal_seat);
+  if (terminal_seat.seat == NULL) {
+    printf("terminal: libseat_open_seat FAILED: %s\n", strerror(errno));
+    return 1;
+  }
+  while (!terminal_seat.active && !terminal_seat.fatal) {
+    if (libseat_dispatch(terminal_seat.seat, -1) < 0)
+      terminal_seat.fatal = 1;
+  }
+  if (terminal_seat.fatal || open_seat_drm(&terminal_seat) < 0) {
+    printf("terminal: seatd DRM setup FAILED: %s\n", strerror(errno));
+    return 1;
   }
 
   // Create libinput context (udev backend): udev_new + udev_create_context +
@@ -517,12 +637,13 @@ extern "C" int main(int argc, char **argv, char **envp) {
   struct udev *udev = udev_new();
   struct libinput *li = NULL;
   while (!li) {
-    li = libinput_udev_create_context(&interface, NULL, udev);
+    li = libinput_udev_create_context(&interface, &terminal_seat, udev);
     if (!li) {
       struct recv_msg m;
       ipc_recv(&m, NULL, 0, 1);
     }
   }
+  terminal_seat.libinput = li;
 
   // Set up libinput logging (after ctx created)
   libinput_log_set_handler(li, libinput_log);
@@ -572,6 +693,7 @@ extern "C" int main(int argc, char **argv, char **envp) {
   dirty_row_end = 0;
   display_client_clear(0x000000);
   display_client_flush(0, display_rows);
+  terminal_seat.initialized = 1;
 
   master_fd = open("/dev/ptmx", O_RDWR);
   if (master_fd < 0) {
@@ -621,6 +743,19 @@ extern "C" int main(int argc, char **argv, char **envp) {
   const int SPIN_THRESHOLD = 2000;
 
   while (1) {
+    if (libseat_dispatch(terminal_seat.seat, 0) < 0 || terminal_seat.fatal) {
+      printf("terminal: libseat session failed: %s\n", strerror(errno));
+      return 1;
+    }
+    if (!terminal_seat.active) {
+      struct pollfd seat_pfd = {.fd = libseat_get_fd(terminal_seat.seat),
+                                .events = POLLIN,
+                                .revents = 0};
+      if (poll(&seat_pfd, 1, -1) < 0 && errno != EINTR)
+        return 1;
+      continue;
+    }
+
     struct termios t;
     ioctl(master_fd, TCGETS, &t);
 
@@ -760,22 +895,25 @@ extern "C" int main(int argc, char **argv, char **envp) {
 
     flush_dirty_cells();
 
-    // Poll on libinput fd and master_fd
-    struct pollfd pfds[2];
-    pfds[0].fd = li_fd;
+    // Poll on seat lifecycle, libinput, and shell output.
+    struct pollfd pfds[3];
+    pfds[0].fd = libseat_get_fd(terminal_seat.seat);
     pfds[0].events = POLLIN;
     pfds[0].revents = 0;
-    pfds[1].fd = master_fd;
+    pfds[1].fd = li_fd;
     pfds[1].events = POLLIN;
     pfds[1].revents = 0;
-    int pr = poll(pfds, 2, -1);
+    pfds[2].fd = master_fd;
+    pfds[2].events = POLLIN;
+    pfds[2].revents = 0;
+    int pr = poll(pfds, 3, -1);
 
     // spin detection: li_fd permanently readable but never yielding events =
     // monitor pipe EOF busy-spin (§3.2). Real events (key/pty) reset it; only
     // EOF busy-spin accumulates to the threshold. master_fd is reassembled
     // each round after pty rebuild, orthogonal to resume (§3.3, grill Q6).
-    int real_activity = got_event || (pfds[1].revents & POLLIN);
-    if (!real_activity && pr > 0 && (pfds[0].revents & POLLIN)) {
+    int real_activity = got_event || (pfds[2].revents & POLLIN);
+    if (!real_activity && pr > 0 && (pfds[1].revents & POLLIN)) {
       if (++spin_count >= SPIN_THRESHOLD) {
         spin_count = 0;
         if (resume_reconnect(li) != 0) // path B: suspend→resume rebuild

@@ -20,6 +20,7 @@
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h" // xtask
 #include <stddef.h>
 #include <stdint.h>
@@ -43,12 +44,24 @@
 #define FD_SHM 6
 #define FD_FILE 7
 #define FD_TTY 8
-#define FD_IPC 9
+#define FD_EPOLL 9
 #define FD_EVENTFD 10
+#define FD_TIMERFD 11
+#define FD_SIGNALFD 12
+#define FD_NETLINK 13
+#define FD_IPC 14
+#define FD_SYNC_FILE 15
 
 struct inode;
 struct unix_sock;
 struct pty;
+struct eventpoll;
+struct eventfd_ctx;
+struct timerfd_ctx;
+struct signalfd_ctx;
+struct netlink_sock;
+struct drm_fence;
+struct file_operations;
 
 typedef struct file {
   refcount_t f_count;
@@ -56,6 +69,12 @@ typedef struct file {
   int flags;
   struct inode *inode;
   uint64_t offset;
+  wait_queue_head *wq;
+  const struct file_operations *f_op;
+  void *private_data;
+  pid_t f_owner;
+  int f_owner_sig;
+  int f_owner_type;
   union {
     struct pipe *pipe;
     struct shm *shm;
@@ -69,6 +88,13 @@ typedef struct file {
     } file_data;
     struct unix_sock *sock;
     struct pty *pty;
+    struct eventpoll *epoll;
+    struct eventfd_ctx *eventfd;
+    struct timerfd_ctx *timerfd;
+    struct signalfd_ctx *signalfd;
+    struct netlink_sock *nlsock;
+    pid_t ipcfd_owner_pid;
+    struct drm_fence *sync_file_fence;
   };
 } file;
 

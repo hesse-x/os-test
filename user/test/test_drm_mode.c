@@ -414,13 +414,21 @@ void test_drm_cursor2_bo(void) {
     return;
   }
 
+  int rc = ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
+  if (rc < 0 && errno == EBUSY) {
+    close(fd);
+    TEST_IGNORE_MESSAGE("master held by display");
+    return;
+  }
+  TEST_ASSERT_EQUAL_INT(0, rc);
+
   /* Create a dumb buffer with cursor-size data */
   struct drm_mode_create_dumb dumb;
   memset(&dumb, 0, sizeof(dumb));
   dumb.width = 64;
   dumb.height = 64;
   dumb.bpp = 32;
-  int rc = ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb);
+  rc = ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb);
   if (rc < 0) {
     close(fd);
     TEST_IGNORE_MESSAGE("CREATE_DUMB failed");
@@ -472,12 +480,20 @@ void test_drm_cursor2_move(void) {
     return;
   }
 
+  int rc = ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
+  if (rc < 0 && errno == EBUSY) {
+    close(fd);
+    TEST_IGNORE_MESSAGE("master held by display");
+    return;
+  }
+  TEST_ASSERT_EQUAL_INT(0, rc);
+
   struct drm_mode_cursor2 cur;
   memset(&cur, 0, sizeof(cur));
   cur.flags = DRM_MODE_CURSOR_MOVE;
   cur.x = 100;
   cur.y = 200;
-  int rc = ioctl(fd, DRM_IOCTL_MODE_CURSOR2, &cur);
+  rc = ioctl(fd, DRM_IOCTL_MODE_CURSOR2, &cur);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
   close(fd);

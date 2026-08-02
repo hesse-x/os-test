@@ -30,6 +30,7 @@ struct evdev_client {
   wait_queue_head *wq;         // per-fd wait queue (= file_wq_get(consumer_fd))
   uint32_t dropped;            // SYN_DROPPED counter
   bool in_frame;               // mid-frame flag (SYN_DROPPED frame boundary)
+  bool revoked;                // EVIOCREVOKE permanently disables this OFD
   pid_t owner_pid;             // consumer pid
 };
 

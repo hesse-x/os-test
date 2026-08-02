@@ -45,12 +45,21 @@ typedef enum unix_sock_state {
   UNIX_DGRAM_BOUND, // DGRAM after bind: named, not connected
 } unix_sock_state;
 
+struct unix_peer_cred {
+  pid_t pid;
+  uint32_t uid;
+  uint32_t gid;
+};
+
 // ===================== unix_sock (per-socket kernel structure)
 // =====================
 typedef struct unix_sock {
   int state;  // UNIX_* state
   int type;   // SOCK_STREAM / SOCK_DGRAM (set at socket()/socketpair())
   pid_t peer; // peer PID (CONNECTED)
+  struct unix_peer_cred local_cred; // creator/listener identity snapshot
+  struct unix_peer_cred peer_cred;  // immutable connected-peer snapshot
+  int has_peer_cred;
   struct unix_sock
       *peer_sock;     // direct pointer to peer socket (socketpair/connect)
   refcount_t u_count; // fd ref count (dup2 sharing)

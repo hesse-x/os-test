@@ -56,6 +56,11 @@ static uint32_t unix_hash(const char *path) {
   return h % UNIX_HASH_SIZE;
 }
 
+static bool unix_requires_vfs(const char *path) {
+  return path && path[0] == '/' && path[1] == 'r' && path[2] == 'u' &&
+         path[3] == 'n' && path[4] == '/';
+}
+
 static int unix_bind_lookup_hash(const char *sun_path, struct unix_sock **out,
                                  pid_t *owner_pid) {
   uint32_t h = unix_hash(sun_path);
@@ -177,6 +182,8 @@ int unix_bind_register(const char *sun_path, struct unix_sock *sock,
   if (IS_ERR(ip) && PTR_ERR(ip) == -EEXIST) {
     return -EADDRINUSE;
   }
+  if (unix_requires_vfs(sun_path))
+    return IS_ERR(ip) ? (int)PTR_ERR(ip) : -ENOENT;
   /* 其余 VFS 失败（/run 未挂载 / path 解析失败）→ 降级哈希表占名 */
   return unix_bind_register_hash(sun_path, sock, owner_pid);
 }
@@ -188,6 +195,12 @@ int unix_bind_lookup(const char *sun_path, struct unix_sock **out,
                      pid_t *owner_pid) {
   struct inode *ip = vfs_lookup_socket(sun_path);
   if (!IS_ERR(ip) && ip) {
+    int perm =
+        inode_permission(ip, W_OK, current_proc->euid, current_proc->egid);
+    if (perm) {
+      inode_put(ip);
+      return perm;
+    }
     struct unix_sock *s = (struct unix_sock *)ip->i_priv;
     if (s && s->state == UNIX_LISTEN) {
       *out = s;
@@ -199,6 +212,8 @@ int unix_bind_lookup(const char *sun_path, struct unix_sock **out,
     /* socket 文件存在但未 LISTEN（或 i_priv 空）→ ECONNREFUSED */
     return -ECONNREFUSED;
   }
+  if (unix_requires_vfs(sun_path))
+    return IS_ERR(ip) ? (int)PTR_ERR(ip) : -ENOENT;
   return unix_bind_lookup_hash(sun_path, out, owner_pid);
 }
 
@@ -331,6 +346,9 @@ struct unix_sock *unix_sock_alloc(void) {
   sock->state = UNIX_FREE;
   sock->type = SOCK_STREAM;
   sock->peer = -1;
+  __memset(&sock->local_cred, 0, sizeof(sock->local_cred));
+  __memset(&sock->peer_cred, 0, sizeof(sock->peer_cred));
+  sock->has_peer_cred = 0;
   sock->peer_sock = NULL;
   refcount_set(&sock->u_count, 1);
   sock->recv_queue_head = NULL;
@@ -433,6 +451,90 @@ static void unix_dgram_fill_sender(struct sk_buff *skb, struct unix_sock *src) {
 // but used by unix_dgram_sendto here.
 static int unix_scm_resolve(struct sk_buff *skb, const void *control,
                             size_t controllen);
+
+// Transfer all SCM_RIGHTS references as one fd-table transaction. The caller
+// owns every reference in scm_files on entry; success transfers all of them to
+// the fd table, while every failure drops all of them.
+static int unix_scm_install(struct file **scm_files, int num_files,
+                            void *control, size_t *controllen, int flags,
+                            int *out_flags) {
+  if (num_files <= 0) {
+    if (controllen)
+      *controllen = 0;
+    return 0;
+  }
+
+  size_t needed = CMSG_LEN((size_t)num_files * sizeof(int));
+  if (!control || !controllen || *controllen < needed) {
+    for (int i = 0; i < num_files; i++)
+      file_put(scm_files[i]);
+    if (controllen)
+      *controllen = 0;
+    if (out_flags)
+      *out_flags |= MSG_CTRUNC;
+    return 0;
+  }
+
+  int installed[SCM_MAX_FD];
+  files *fl = current_proc->files;
+  spin_lock(&fl->fd_lock);
+  int free_slots = 0;
+  for (int fd = 0; fd < MAX_FD && free_slots < num_files; fd++) {
+    if (!fd_lookup(fl, fd))
+      free_slots++;
+  }
+  if (free_slots < num_files) {
+    spin_unlock(&fl->fd_lock);
+    for (int i = 0; i < num_files; i++)
+      file_put(scm_files[i]);
+    *controllen = 0;
+    return -EMFILE;
+  }
+
+  int next = 0;
+  for (int i = 0; i < num_files; i++) {
+    int fd = alloc_fd(fl, next);
+    installed[i] = fd;
+    fd_install(fl, fd, scm_files[i]);
+    fd_set_cloexec(fl, fd, (flags & MSG_CMSG_CLOEXEC) != 0);
+    if (scm_files[i]->type == FD_TTY)
+      pty_dup_file(scm_files[i]);
+    next = fd + 1;
+  }
+  spin_unlock(&fl->fd_lock);
+
+  struct cmsghdr *cmsg = (struct cmsghdr *)control;
+  __memset(cmsg, 0, needed);
+  cmsg->cmsg_len = (uint32_t)needed;
+  cmsg->cmsg_level = SOL_SOCKET;
+  cmsg->cmsg_type = SCM_RIGHTS;
+  __memcpy(CMSG_DATA(cmsg), installed, (size_t)num_files * sizeof(int));
+  *controllen = needed;
+  return 0;
+}
+
+static void unix_scm_rollback_control(const void *control, size_t controllen) {
+  if (!control || controllen < sizeof(struct cmsghdr))
+    return;
+  const struct cmsghdr *cmsg = (const struct cmsghdr *)control;
+  if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
+      cmsg->cmsg_len < CMSG_LEN(0) || cmsg->cmsg_len > controllen)
+    return;
+  int count = (int)((cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+  const int *fds = (const int *)CMSG_DATA(cmsg);
+  for (int i = 0; i < count; i++) {
+    struct file *f = NULL;
+    files *fl = current_proc->files;
+    spin_lock(&fl->fd_lock);
+    if (fds[i] >= 0 && fds[i] < MAX_FD) {
+      f = fd_uninstall(fl, fds[i]);
+      fd_set_cloexec(fl, fds[i], 0);
+    }
+    spin_unlock(&fl->fd_lock);
+    if (f)
+      file_put(f);
+  }
+}
 
 // DGRAM sendto: resolve dest path to a bound DGRAM socket, enqueue one whole
 // skb carrying the sender's address. The target's u_count is bumped under
@@ -631,58 +733,14 @@ int64_t unix_dgram_recvmsg(struct unix_sock *sock, const struct iovec *iov,
     skb_free(skb);
     spin_unlock(&socket_lock);
 
-    // Install SCM_RIGHTS files into the receiver's fd table.
-    int installed_fds[SCM_MAX_FD];
-    int num_fds_installed = 0;
-    bool scm_truncated = false;
     if (do_scm) {
-      xtask *proc = current_task;
-      for (int i = 0; i < num_fds_to_install && num_fds_installed < SCM_MAX_FD;
-           i++) {
-        struct file *src = scm_files[i];
-        spinlock *fdlk = &proc->proc->files->fd_lock;
-        spin_lock(fdlk);
-        int new_fd = alloc_fd(proc->proc->files, 0);
-        if (new_fd < 0) {
-          spin_unlock(fdlk);
-          file_put(src);
-          scm_truncated = true;
-          break;
-        }
-        fd_install(proc->proc->files, new_fd, src);
-        if (src->type == FD_TTY)
-          pty_dup_file(src);
-        spin_unlock(fdlk);
-        installed_fds[num_fds_installed++] = new_fd;
-      }
-      for (int i = num_fds_installed; i < num_fds_to_install; i++)
-        file_put(scm_files[i]);
-    }
-
-    // Write SCM_RIGHTS cmsg back to the control buffer.
-    if (num_fds_installed > 0 && control && controllen && *controllen > 0) {
-      struct cmsghdr *cmsg = (struct cmsghdr *)control;
-      size_t needed =
-          CMSG_ALIGN(sizeof(struct cmsghdr)) + num_fds_installed * sizeof(int);
-      if (*controllen >= needed) {
-        cmsg->cmsg_len = (uint32_t)(CMSG_ALIGN(sizeof(struct cmsghdr)) +
-                                    num_fds_installed * sizeof(int));
-        cmsg->cmsg_level = SOL_SOCKET;
-        cmsg->cmsg_type = SCM_RIGHTS;
-        int *out_fds = (int *)CMSG_DATA(cmsg);
-        for (int i = 0; i < num_fds_installed; i++)
-          out_fds[i] = installed_fds[i];
-        *controllen = cmsg->cmsg_len;
-      } else {
-        *controllen = 0;
-        if (out_flags)
-          *out_flags |= MSG_CTRUNC;
-      }
-    } else if (control && controllen) {
+      int scm_ret = unix_scm_install(scm_files, num_fds_to_install, control,
+                                     controllen, flags, out_flags);
+      if (scm_ret < 0)
+        return scm_ret;
+    } else if (controllen) {
       *controllen = 0;
     }
-    if (scm_truncated && out_flags)
-      *out_flags |= MSG_CTRUNC;
 
     if (truncated && out_flags)
       *out_flags |= MSG_TRUNC;
@@ -709,9 +767,10 @@ static int unix_scm_resolve(struct sk_buff *skb, const void *control,
   uint8_t *cmsg_end = cmsg_ptr + controllen;
   while (cmsg_ptr + sizeof(struct cmsghdr) <= cmsg_end) {
     struct cmsghdr *cmsg = (struct cmsghdr *)cmsg_ptr;
+    uint32_t remaining = (uint32_t)(cmsg_end - cmsg_ptr);
+    if (cmsg->cmsg_len < CMSG_LEN(0) || cmsg->cmsg_len > remaining)
+      return -EINVAL;
     uint32_t aligned_len = CMSG_ALIGN(cmsg->cmsg_len);
-    if (aligned_len > (uint32_t)(cmsg_end - cmsg_ptr))
-      break;
     if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
       int num_fds =
           (cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int);
@@ -738,6 +797,10 @@ static int unix_scm_resolve(struct sk_buff *skb, const void *control,
     } else {
       return -EINVAL;
     }
+    // The final cmsg does not need trailing alignment bytes. This is the form
+    // seatd uses: msg_controllen equals CMSG_LEN(sizeof(int)), not CMSG_SPACE.
+    if (aligned_len > remaining)
+      break;
     cmsg_ptr += aligned_len;
   }
   return 0;
@@ -1037,74 +1100,16 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
 
     spin_unlock(&socket_lock);
 
-    // Install SCM_RIGHTS files into the receiver's fd table — sequential
-    // locks, no nesting. Files were ref-resolved at sendmsg time, so no
-    // sender pid/fd re-lookup (which previously broke socket-activation: the
-    // listening fd is bound by init but accept/sendmsg run in udevd).
-    int installed_fds[SCM_MAX_FD];
-    int num_fds_installed = 0;
-    bool scm_truncated = false; // EMFILE: fewer installed than requested
     if (do_scm) {
-      xtask *proc = current_task;
-      for (int i = 0; i < num_fds_to_install && num_fds_installed < SCM_MAX_FD;
-           i++) {
-        struct file *src = scm_files[i];
-
-        // receiver_fd_lock — find free slot + install pointer
-        spinlock *fdlk = &proc->proc->files->fd_lock;
-        spin_lock(fdlk);
-        int new_fd = alloc_fd(proc->proc->files, 0);
-        if (new_fd < 0) {
-          spin_unlock(fdlk);
-          file_put(src); // drop this file's ref
-          scm_truncated = true;
-          break; // no free fd slots
-        }
-        fd_install(proc->proc->files, new_fd,
-                   src); // install pointer directly, no extra bump needed
-        if (src->type == FD_TTY)
-          pty_dup_file(src);
-        spin_unlock(fdlk);
-
-        installed_fds[num_fds_installed++] = new_fd;
+      int scm_ret = unix_scm_install(scm_files, num_fds_to_install, control,
+                                     controllen, flags, out_flags);
+      if (scm_ret < 0) {
+        kfree(kiov);
+        return scm_ret;
       }
-      // Drop refs for any files we didn't install (e.g. broke out early on
-      // EMFILE). Installed files are now owned by the receiver's fd table.
-      for (int i = num_fds_installed; i < num_fds_to_install; i++)
-        file_put(scm_files[i]);
-    }
-
-    // Write SCM_RIGHTS to control buffer
-    if (num_fds_installed > 0 && control && controllen && *controllen > 0) {
-      struct cmsghdr *cmsg = (struct cmsghdr *)control;
-      size_t needed =
-          CMSG_ALIGN(sizeof(struct cmsghdr)) + num_fds_installed * sizeof(int);
-      if (*controllen >= needed) {
-        cmsg->cmsg_len = (uint32_t)(CMSG_ALIGN(sizeof(struct cmsghdr)) +
-                                    num_fds_installed * sizeof(int));
-        cmsg->cmsg_level = SOL_SOCKET;
-        cmsg->cmsg_type = SCM_RIGHTS;
-        int *out_fds = (int *)CMSG_DATA(cmsg);
-        for (int i = 0; i < num_fds_installed; i++) {
-          out_fds[i] = installed_fds[i];
-        }
-        *controllen = cmsg->cmsg_len;
-      } else {
-        // Control buffer too small for even one fd: report truncation. The
-        // fds are still installed in the receiver's table (consumed); only the
-        // ancillary report is lost. Linux sets MSG_CTRUNC and zeroes
-        // msg_controllen.
-        *controllen = 0;
-        if (out_flags)
-          *out_flags |= MSG_CTRUNC;
-      }
-    } else if (control && controllen) {
+    } else if (controllen) {
       *controllen = 0;
     }
-    // EMFILE mid-install: fewer fds installed than the skb carried. The
-    // receiver got a partial set; signal that ancillary data was truncated.
-    if (scm_truncated && out_flags)
-      *out_flags |= MSG_CTRUNC;
 
     // Advance the writable iov copy by the bytes just filled, so a subsequent
     // WAITALL iteration continues filling where this one left off.
@@ -1256,6 +1261,9 @@ int64_t sys_socket(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   sock->state = UNIX_FREE;
   sock->type = base_type;
+  sock->local_cred.pid = proc->pid;
+  sock->local_cred.uid = proc->proc->euid;
+  sock->local_cred.gid = proc->proc->egid;
 
   spinlock *fdlk = &proc->proc->files->fd_lock;
   spin_lock(fdlk);
@@ -1454,6 +1462,9 @@ int64_t sys_listen(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   spin_lock(&socket_lock);
   sock->state = UNIX_LISTEN;
   sock->backlog_max = backlog;
+  sock->local_cred.pid = proc->pid;
+  sock->local_cred.uid = proc->proc->euid;
+  sock->local_cred.gid = proc->proc->egid;
   spin_unlock(&socket_lock);
 
   file_put(lf);
@@ -1812,6 +1823,10 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   child->state = UNIX_CONNECTED;
   child->peer = proc->pid;
+  child->peer_cred.pid = proc->pid;
+  child->peer_cred.uid = proc->proc->euid;
+  child->peer_cred.gid = proc->proc->egid;
+  child->has_peer_cred = 1;
 
   // Update our socket to CONNECTED and set peer
   struct unix_sock *client_sock2 = cf->sock;
@@ -1824,6 +1839,8 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   client_sock2->state = UNIX_CONNECTED;
 
   client_sock2->peer = listener_pid;
+  client_sock2->peer_cred = listener->local_cred;
+  client_sock2->has_peer_cred = 1;
   client_sock2->peer_sock = child; // client's peer is the child (server-side)
   child->peer = proc->pid;
   child->peer_sock = client_sock2; // child's peer is the client
@@ -1885,10 +1902,16 @@ int64_t sys_socketpair(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   a->state = UNIX_CONNECTED;
   a->type = base_type;
   a->peer = proc->pid;
+  a->peer_cred.pid = proc->pid;
+  a->peer_cred.uid = proc->proc->euid;
+  a->peer_cred.gid = proc->proc->egid;
+  a->has_peer_cred = 1;
   a->peer_sock = b;
   b->state = UNIX_CONNECTED;
   b->type = base_type;
   b->peer = proc->pid;
+  b->peer_cred = a->peer_cred;
+  b->has_peer_cred = 1;
   b->peer_sock = a;
 
   spinlock *fdlk = &proc->proc->files->fd_lock;
@@ -2060,6 +2083,8 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   if (sf->type == FD_NETLINK) {
     struct netlink_sock *nlsock = sf->nlsock;
     if (!nlsock) {
+      if (kcontrol)
+        kfree(kcontrol);
       kfree(kiov);
       if (kcontrol)
         kfree(kcontrol);
@@ -2071,6 +2096,8 @@ int64_t sys_sendmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   } else {
     struct unix_sock *sock = sf->sock;
     if (!sock) {
+      if (kcontrol)
+        kfree(kcontrol);
       kfree(kiov);
       if (kcontrol)
         kfree(kcontrol);
@@ -2185,7 +2212,18 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       file_put(rf);
       return (int64_t)-EFAULT;
     }
-    kcontrol = (void *)ctrl_ptr; // write directly to user space
+    if (kmsg.msg_controllen > MAX_SOCKET_DATA) {
+      kfree(kiov);
+      file_put(rf);
+      return (int64_t)-EINVAL;
+    }
+    kcontrol = kmalloc(kmsg.msg_controllen);
+    if (!kcontrol) {
+      kfree(kiov);
+      file_put(rf);
+      return (int64_t)-ENOMEM;
+    }
+    __memset(kcontrol, 0, kmsg.msg_controllen);
     kcontrollen = kmsg.msg_controllen;
   }
 
@@ -2250,12 +2288,17 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       ret = unix_sock_recvmsg(sock, kiov, kmsg.msg_iovlen, kcontrol,
                               &kcontrollen, flags, &kmsg.msg_flags);
     }
-    // Update msg_controllen in user space (existing code)
+    // Publish ancillary bytes only after the fd-table transaction completes.
+    // If user copy fails, remove every newly installed fd again.
     if (ret >= 0) {
       if (kmsg.msg_control && kmsg.msg_controllen > 0) {
-        if (copy_to_user((void __user *)((char __user *)msg + 40), &kcontrollen,
-                         sizeof(size_t)))
+        if ((kcontrollen > 0 && copy_to_user((void __user *)kmsg.msg_control,
+                                             kcontrol, kcontrollen)) ||
+            copy_to_user((void __user *)((char __user *)msg + 40), &kcontrollen,
+                         sizeof(size_t))) {
+          unix_scm_rollback_control(kcontrol, kcontrollen);
           ret = (int64_t)-EFAULT;
+        }
       }
       // Write back msg_flags (MSG_TRUNC/MSG_CTRUNC) so the caller can detect
       // truncation. Use offsetof rather than a hardcoded offset so this stays
@@ -2270,6 +2313,8 @@ int64_t sys_recvmsg(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
   }
 
+  if (kcontrol)
+    kfree(kcontrol);
   kfree(kiov);
   file_put(rf);
   return (int64_t)ret;
@@ -3065,7 +3110,38 @@ int64_t sys_getsockopt(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     ret = 0;
     goto out;
   }
-  case SO_PEERCRED: // not implemented
+  case SO_PEERCRED: {
+    struct unix_peer_cred cred;
+    socklen_t len;
+    if (!optval || !optlen_ptr) {
+      ret = -EFAULT;
+      goto out;
+    }
+    if (copy_from_user(&len, optlen_ptr, sizeof(len))) {
+      ret = -EFAULT;
+      goto out;
+    }
+    if (len < sizeof(cred)) {
+      ret = -EINVAL;
+      goto out;
+    }
+    spin_lock(&socket_lock);
+    if (!f->sock || !f->sock->has_peer_cred) {
+      spin_unlock(&socket_lock);
+      ret = -ENOTCONN;
+      goto out;
+    }
+    cred = f->sock->peer_cred;
+    spin_unlock(&socket_lock);
+    if (copy_to_user(optval, &cred, sizeof(cred)) ||
+        copy_to_user(optlen_ptr, &(socklen_t){sizeof(cred)},
+                     sizeof(socklen_t))) {
+      ret = -EFAULT;
+      goto out;
+    }
+    ret = 0;
+    goto out;
+  }
   default:
     ret = -ENOPROTOOPT;
     goto out;

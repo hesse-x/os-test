@@ -288,8 +288,12 @@ void file_put(struct file *f) {
        * kfree(仅 user-space driver 且本 fd 是最后持有者时)。*/
       struct dev_ops *ops = dev_ops_peek_by_inode(ip);
       if (ops) {
-        if (ops->driver_pid == 0 && ops->close)
-          ops->close(current_task, -1);
+        if (ops->driver_pid == 0) {
+          if (ops->close_file)
+            ops->close_file(current_task, f);
+          else if (ops->close)
+            ops->close(current_task, -1);
+        }
         dev_ops_put(ops); /* 放 fd 引用 */
       }
       inode_put(ip);

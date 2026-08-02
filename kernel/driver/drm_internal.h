@@ -269,18 +269,11 @@ extern int g_drm_next_prop_id;
 extern struct drm_blob g_drm_blobs[DRM_MAX_BLOBS];
 extern int g_drm_next_blob_id;
 
-/* ===== DRM ioctl handler (called from sys_ioctl via dev_ops.ioctl) ===== */
-long drm_ioctl(uint32_t cmd, void *arg);
-
 /* ===== DRM mmap handler (called from dev_ops.mmap) ===== */
 uint64_t drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset);
 
 /* ===== DRM poll handler ===== */
 __poll drm_poll(xtask *proc, int events);
-
-/* ===== DRM open/close ===== */
-int drm_open(xtask *proc, int fd);
-int drm_close(xtask *proc, int fd);
 
 /* ===== Fence lifecycle (plan2). drm_fence_put reclaims the slot when the
  * last ref drops; called from sync_file fd close (proc.c file_put) and

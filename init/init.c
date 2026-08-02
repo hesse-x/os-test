@@ -25,34 +25,103 @@
 #include <xos/syscall_ext.h>
 #include <xos/unistd_ext.h>
 
-static int spawn_service(const char *path) {
+static int spawn_process(const char *path, char *const argv[],
+                         char *const envp[], int pass_fd, int child_fd,
+                         mode_t child_umask) {
   printf("spawn: %s\n", path);
-  pid_t pid = spawn(path);
-  return (pid > 0) ? (int)pid : -1;
-}
-
-// spawn_with_fd: fork+exec passes fd to the child as fd 3 (socket activation).
-// This OS's FD_CLOEXEC is per-struct-file (not per-fd); after fork parent and
-// child share the same struct file, so the Linux per-fd trick ("parent holds
-// CLOEXEC to prevent leakage, child clears CLOEXEC to keep fd") is not
-// possible. So CLOEXEC is not set: the listen fd leaks to sibling processes
-// (evdev/terminal) but is harmless (one extra unused fd). The child only does
-// dup2 to land fd 3 + close(4..31) to clear fd-table garbage + execve.
-// Returns -1 on failure.
-static int spawn_with_fd(const char *path, int listen_fd) {
   pid_t pid = fork();
   if (pid < 0)
     return -1;
   if (pid == 0) {
-    // Child: normalize to fd 3 + close leaked fds + execve
-    if (dup2(listen_fd, 3) < 0)
+    if (child_umask != (mode_t)-1)
+      umask(child_umask);
+    if (pass_fd >= 0 && pass_fd != child_fd && dup2(pass_fd, child_fd) < 0)
       _exit(127);
-    for (int fd = 4; fd < 32; fd++)
+    if (pass_fd >= 0 && fcntl(child_fd, F_SETFD, 0) < 0)
+      _exit(127);
+    long max_fd = sysconf(_SC_OPEN_MAX);
+    if (max_fd < 4)
+      max_fd = 1024;
+    for (int fd = 3; fd < max_fd; fd++) {
+      if (pass_fd >= 0 && fd == child_fd)
+        continue;
       close(fd);
-    execve(path, NULL, NULL);
+    }
+    execve(path, argv, envp);
     _exit(127);
   }
   return (int)pid;
+}
+
+static int spawn_service(const char *path) {
+  char *const argv[] = {(char *)path, NULL};
+  return spawn_process(path, argv, NULL, -1, -1, (mode_t)-1);
+}
+
+// spawn_with_fd: fork+exec passes fd to the child as fd 3 (socket activation).
+// The child normalizes the activation fd to 3, clears its per-fd CLOEXEC bit,
+// closes every other non-stdio descriptor, and then execs with explicit argv.
+// Returns -1 on failure.
+static int spawn_with_fd(const char *path, int listen_fd) {
+  char *const argv[] = {(char *)path, NULL};
+  return spawn_process(path, argv, NULL, listen_fd, 3, (mode_t)-1);
+}
+
+static int start_seatd(int *read_fd) {
+  int ready[2];
+  if (pipe2(ready, O_CLOEXEC) < 0)
+    return -1;
+  char *const argv[] = {"/usr/bin/seatd", "-n", "3", "-l", "debug", NULL};
+  char *const envp[] = {"SEATD_VTBOUND=0", NULL};
+  int pid = spawn_process(argv[0], argv, envp, ready[1], 3, 0077);
+  close(ready[1]);
+  if (pid < 0) {
+    close(ready[0]);
+    return -1;
+  }
+  *read_fd = ready[0];
+  return pid;
+}
+
+static int wait_seatd_ready(int fd) {
+  struct pollfd pfd = {.fd = fd, .events = POLLIN};
+  char byte;
+  int ok = poll(&pfd, 1, 2000) == 1 && (pfd.revents & POLLIN) &&
+           read(fd, &byte, 1) == 1;
+  close(fd);
+  struct stat st;
+  return ok && stat("/run/seatd.sock", &st) == 0 && S_ISSOCK(st.st_mode) ? 0
+                                                                         : -1;
+}
+
+#ifdef DESKTOP_COMPOSITOR
+static int start_compositor(void) {
+  char *const argv[] = {"/usr/bin/compositor", NULL};
+  char *const envp[] = {"LIBSEAT_BACKEND=seatd", "SEATD_SOCK=/run/seatd.sock",
+                        "XDG_RUNTIME_DIR=/run", "WAYLAND_DISPLAY=wayland-0",
+                        NULL};
+  return spawn_process(argv[0], argv, envp, -1, -1, (mode_t)-1);
+}
+#else
+static int start_terminal(void) {
+  char *const argv[] = {"/usr/bin/terminal", NULL};
+  char *const envp[] = {"LIBSEAT_BACKEND=seatd", "SEATD_SOCK=/run/seatd.sock",
+                        NULL};
+  return spawn_process(argv[0], argv, envp, -1, -1, (mode_t)-1);
+}
+#endif
+
+static void stop_process(int pid) {
+  if (pid <= 0)
+    return;
+  kill(pid, SIGTERM);
+  for (int i = 0; i < 200; i++) {
+    if (waitpid(pid, NULL, WNOHANG) == pid)
+      return;
+    usleep(10 * 1000);
+  }
+  kill(pid, SIGKILL);
+  waitpid(pid, NULL, 0);
 }
 
 // create_udev_socket: create an AF_UNIX listen socket bound to
@@ -136,7 +205,7 @@ int main(int argc, char **argv, char **envp) {
     udevd_pid = spawn_service("/usr/bin/udevd");
   }
 
-  // 4. Spawn terminal (which spawns shell internally)
+  // 4. Wait for the udev coldplug database before starting a display owner.
   // Settled gate: poll /run/udev/settled (created by udevd after coldplug
   // drain) so the db is ready before spawning terminal, otherwise libinput
   // reads empty ID_INPUT_* and judges unsupported -> terminal block is a
@@ -144,14 +213,53 @@ int main(int argc, char **argv, char **envp) {
   // anyway (degrades to original behavior, does not block boot; aligned with
   // systemd udev settle, diverging via a file marker + init polling rather
   // than an IPC command channel).
+  int udev_settled = 0;
   for (int i = 0; i < 200; i++) {
-    if (access("/run/udev/settled", F_OK) == 0)
+    if (access("/run/udev/settled", F_OK) == 0) {
+      udev_settled = 1;
       break;
+    }
     usleep(10 * 1000);
   }
+#ifdef DESKTOP_COMPOSITOR
+  if (!udev_settled) {
+    printf("init: fatal: udev settle timeout\n");
+    for (;;)
+      pause();
+  }
+#else
+  (void)udev_settled;
+#endif
+
+  int seatd_ready_fd = -1;
+  int seatd_pid = start_seatd(&seatd_ready_fd);
+  if (seatd_pid < 0 || wait_seatd_ready(seatd_ready_fd) < 0) {
+    printf("init: fatal: seatd readiness timeout\n");
+    stop_process(seatd_pid);
+    for (;;)
+      pause();
+  }
+  printf("init: seatd ready pid=%d\n", seatd_pid);
+#ifdef DESKTOP_COMPOSITOR
+  int compositor_pid = start_compositor();
+  if (compositor_pid < 0) {
+    printf("init: fatal: compositor spawn failed\n");
+    stop_process(seatd_pid);
+    for (;;)
+      pause();
+  }
+  printf("init: compositor spawned pid=%d\n", compositor_pid);
+#else
   printf("init: spawning terminal\n");
-  spawn_service("/usr/bin/terminal");
-  printf("init: terminal spawned\n");
+  int terminal_pid = start_terminal();
+  if (terminal_pid < 0) {
+    printf("init: fatal: terminal spawn failed\n");
+    stop_process(seatd_pid);
+    for (;;)
+      pause();
+  }
+  printf("init: terminal spawned pid=%d\n", terminal_pid);
+#endif
 
 // 5. Adopt orphans + reap children + udevd/evdev crash monitoring (R1)
 #define RESTART_SEC 1
@@ -166,6 +274,37 @@ int main(int argc, char **argv, char **envp) {
       continue;
     int crashed =
         WIFSIGNALED(status) || (WIFEXITED(status) && WEXITSTATUS(status) != 0);
+
+#ifdef DESKTOP_COMPOSITOR
+    if (ret == compositor_pid || ret == seatd_pid) {
+      printf("init: desktop fault pid=%d status=%d; stopping fault domain\n",
+             (int)ret, status);
+      if (ret == compositor_pid)
+        stop_process(seatd_pid);
+      else
+        stop_process(compositor_pid);
+      for (;;)
+        pause();
+    }
+    if (ret == evdev_pid) {
+      printf("init: evdev exited; stopping desktop fault domain\n");
+      stop_process(compositor_pid);
+      stop_process(seatd_pid);
+      for (;;)
+        pause();
+    }
+#else
+    if (ret == terminal_pid || ret == seatd_pid) {
+      printf("init: terminal fault pid=%d status=%d; stopping seat domain\n",
+             (int)ret, status);
+      if (ret == terminal_pid)
+        stop_process(seatd_pid);
+      else
+        stop_process(terminal_pid);
+      for (;;)
+        pause();
+    }
+#endif
 
     if (ret == syslogd_pid) {
       if (!crashed)

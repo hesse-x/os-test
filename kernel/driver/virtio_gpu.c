@@ -17,6 +17,7 @@
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/poll_types.h"
 #include "kernel/bsd/sysfs.h"
+#include "kernel/driver/bsd_types.h"
 #include "kernel/driver/driver.h"
 #include "kernel/driver/drm_internal.h"
 #include "kernel/driver/pci.h"
@@ -107,7 +108,6 @@ int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence);
 static struct drm_fence *drm_fence_find(uint32_t ctx_id, uint8_t ring_idx,
                                         uint64_t fence_id);
 static void drm_fence_signal(struct drm_fence *fence);
-static struct drm_file *drm_file_current(void);
 
 /* ===== 2.B: ctrlq initialization ===== */
 
@@ -1075,7 +1075,6 @@ static long drm_ioctl_virtgpu_getparam(void *arg) {
 }
 
 /* Forward declarations (plan1: ctx_id pool helpers, defined later). */
-static struct drm_file *drm_file_current(void);
 static uint32_t alloc_ctx_id(void);
 static void free_ctx_id(uint32_t id);
 
@@ -1115,7 +1114,7 @@ static long drm_ioctl_virtgpu_get_caps(void *arg) {
 
 /* DRM_IOCTL_VIRTGPU_CONTEXT_INIT — translate drm_virtgpu_context_set_param[]
  * into VIRTIO_GPU_CMD_CTX_CREATE. ctx_set_params is a user-space pointer. */
-static long drm_ioctl_virtgpu_context_init(void *arg) {
+static long drm_ioctl_virtgpu_context_init(void *arg, struct drm_file *df) {
   struct drm_virtgpu_context_init *ci = (struct drm_virtgpu_context_init *)arg;
 
   if (ci->num_params == 0)
@@ -1181,7 +1180,6 @@ static long drm_ioctl_virtgpu_context_init(void *arg) {
     return rc ? rc : -EIO;
   }
 
-  struct drm_file *df = drm_file_current();
   if (!df) {
     free_ctx_id(ctx_id);
     return -EBADF;
@@ -1216,7 +1214,7 @@ static long drm_ioctl_virtgpu_context_init(void *arg) {
  * kernel allocates guest backing and attaches it to the host resource here.
  * The bo_handle→res_handle mapping is persisted in g_drm.virgl_res[] so later
  * TRANSFER_TO/FROM_HOST and WAIT (which pass only bo_handle) can resolve it. */
-static long drm_ioctl_virtgpu_resource_create(void *arg) {
+static long drm_ioctl_virtgpu_resource_create(void *arg, struct drm_file *df) {
   struct drm_virtgpu_resource_create *rc =
       (struct drm_virtgpu_resource_create *)arg;
 
@@ -1285,7 +1283,6 @@ static long drm_ioctl_virtgpu_resource_create(void *arg) {
   rc->bo_handle = handle;
   rc->res_handle = res_id;
 
-  struct drm_file *df = drm_file_current();
   if (df && df->created_virgl_count < MAX_VIRGL_RESOURCES)
     df->created_virgl_handles[df->created_virgl_count++] = (int)handle;
 
@@ -1371,13 +1368,12 @@ static long drm_ioctl_virtgpu_transfer_from_host(void *arg) {
  * is reported busy if any unsignaled fence for the current fd's context exists.
  * This is conservative (a different resource's submit may be in flight) but
  * never races — virgl only uses this to decide whether to stall. */
-static long drm_ioctl_virtgpu_3d_wait(void *arg) {
+static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df) {
   struct drm_virtgpu_3d_wait *w = (struct drm_virtgpu_3d_wait *)arg;
 
   if (!drm_find_virgl_resource(w->handle))
     return -ENOENT;
 
-  struct drm_file *df = drm_file_current();
   uint32_t ctx_id = df ? df->ctx_id : 0;
   if (ctx_id == 0) {
     /* No context → no async submits can be in flight → always idle. */
@@ -1418,9 +1414,8 @@ static long drm_ioctl_virtgpu_3d_wait(void *arg) {
 /* DRM_IOCTL_VIRTGPU_EXECBUFFER — submit a 3D command stream on a ring.
  * Out-fence: optional sync_file fd (FENCE_FD_OUT) signaled when the host
  * completes this submission. */
-static long drm_ioctl_virtgpu_execbuffer(void *arg) {
+static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
   struct drm_virtgpu_execbuffer *eb = (struct drm_virtgpu_execbuffer *)arg;
-  struct drm_file *df = drm_file_current();
   if (!df || df->ctx_id == 0)
     return -EINVAL;
   if (eb->size == 0 || eb->command == 0)
@@ -1571,11 +1566,8 @@ static void drm_master_cleanup(void) {
 }
 
 /* Forward declaration (defined later in per-fd section) */
-static struct drm_file *drm_file_current(void);
-
 /* DRM_IOCTL_SET_MASTER — per-fd 互斥 */
-static long drm_ioctl_set_master(void) {
-  struct drm_file *f = drm_file_current();
+static long drm_ioctl_set_master(struct drm_file *f) {
   if (!f)
     return -EBADF;
   if (f->is_render)
@@ -1602,8 +1594,7 @@ static long drm_ioctl_set_master(void) {
   return 0;
 }
 
-static long drm_ioctl_drop_master(void) {
-  struct drm_file *f = drm_file_current();
+static long drm_ioctl_drop_master(struct drm_file *f) {
   if (!f)
     return -EBADF;
   if (f->is_render)
@@ -1623,11 +1614,10 @@ static long drm_ioctl_drop_master(void) {
 }
 
 /* DRM_IOCTL_GET_MAGIC — 记录到 per-fd */
-static long drm_ioctl_get_magic(void *arg) {
+static long drm_ioctl_get_magic(void *arg, struct drm_file *f) {
   struct drm_auth *a = (struct drm_auth *)arg;
   if (!a)
     return -EFAULT;
-  struct drm_file *f = drm_file_current();
   if (!f)
     return -EBADF;
   if (f->is_render)
@@ -1641,11 +1631,10 @@ static long drm_ioctl_get_magic(void *arg) {
 
 /* DRM_IOCTL_AUTH_MAGIC — 严格校验：仅 master fd 可认证，且 magic 必须是已签发的
  */
-static long drm_ioctl_auth_magic(void *arg) {
+static long drm_ioctl_auth_magic(void *arg, struct drm_file *current) {
   struct drm_auth *a = (struct drm_auth *)arg;
   if (!a)
     return -EFAULT;
-  struct drm_file *current = drm_file_current();
   if (!current)
     return -EBADF;
   if (current->is_render)
@@ -2195,7 +2184,7 @@ static long drm_ioctl_getplane(void *arg) {
 }
 
 /* DRM_IOCTL_MODE_CREATE_DUMB */
-static long drm_ioctl_create_dumb(void *arg) {
+static long drm_ioctl_create_dumb(void *arg, struct drm_file *cf) {
   struct drm_mode_create_dumb *d = (struct drm_mode_create_dumb *)arg;
   if (d->width != g_drm.fb_width || d->height != g_drm.fb_height ||
       d->bpp != g_drm.fb_bpp)
@@ -2237,7 +2226,6 @@ static long drm_ioctl_create_dumb(void *arg) {
   d->handle = (uint32_t)handle;
 
   /* Track in per-fd list (Phase C) */
-  struct drm_file *cf = drm_file_current();
   if (cf && cf->created_dumb_count < MAX_DUMB_BUFFERS) {
     cf->created_dumb_handles[cf->created_dumb_count++] = (int)d->handle;
   }
@@ -2336,7 +2324,7 @@ static long drm_ioctl_gem_close(void *arg) {
 }
 
 /* DRM_IOCTL_MODE_ADDFB */
-static long drm_ioctl_addfb(void *arg) {
+static long drm_ioctl_addfb(void *arg, struct drm_file *cf) {
   struct drm_mode_fb_cmd *f = (struct drm_mode_fb_cmd *)arg;
   spin_lock(&g_drm.dumb_lock);
   struct drm_dumb_buffer *d = drm_find_dumb((int)f->handle);
@@ -2369,7 +2357,6 @@ static long drm_ioctl_addfb(void *arg) {
   f->fb_id = (uint32_t)fb_id;
 
   /* Track in per-fd list (Phase C) */
-  struct drm_file *cf = drm_file_current();
   if (cf && cf->created_fb_count < MAX_FRAMEBUFFERS) {
     cf->created_fb_ids[cf->created_fb_count++] = (int)fb_id;
   }
@@ -2391,7 +2378,7 @@ static int bpp_from_format(uint32_t pixel_format) {
 }
 
 /* DRM_IOCTL_MODE_ADDFB2 */
-static long drm_ioctl_addfb2(void *arg) {
+static long drm_ioctl_addfb2(void *arg, struct drm_file *cf) {
   struct drm_mode_fb_cmd2 *c = (struct drm_mode_fb_cmd2 *)arg;
   if (!c)
     return -EFAULT;
@@ -2443,7 +2430,6 @@ static long drm_ioctl_addfb2(void *arg) {
 
   /* Track in per-fd list (Phase C) */
   {
-    struct drm_file *cf = drm_file_current();
     if (cf && cf->created_fb_count < MAX_FRAMEBUFFERS) {
       cf->created_fb_ids[cf->created_fb_count++] = (int)fb_id;
     }
@@ -2623,11 +2609,28 @@ static long drm_ioctl_dirtyfb(void *arg) {
 }
 
 /* Main DRM ioctl dispatcher */
-long drm_ioctl(uint32_t cmd, void *arg) {
+static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
+                           void *arg) {
+  (void)proc;
+  struct drm_file *df = file ? (struct drm_file *)file->private_data : NULL;
+  if (!df || !df->used)
+    return -EBADF;
   printk(LOG_DEBUG, "drm_ioctl: cmd=0x%x initialized=%d\n", cmd,
          g_drm.initialized);
   if (!g_drm.initialized)
     return -ENODEV;
+  switch (cmd) {
+  case DRM_IOCTL_MODE_SETCRTC:
+  case DRM_IOCTL_MODE_PAGE_FLIP:
+  case DRM_IOCTL_MODE_CURSOR:
+  case DRM_IOCTL_MODE_CURSOR2:
+  case DRM_IOCTL_MODE_DIRTYFB:
+    if (!df->is_master)
+      return -EACCES;
+    break;
+  default:
+    break;
+  }
   switch (cmd) {
   case DRM_IOCTL_VERSION:
     return drm_ioctl_version(arg);
@@ -2636,27 +2639,27 @@ long drm_ioctl(uint32_t cmd, void *arg) {
   case DRM_IOCTL_VIRTGPU_GET_CAPS:
     return drm_ioctl_virtgpu_get_caps(arg);
   case DRM_IOCTL_VIRTGPU_CONTEXT_INIT:
-    return drm_ioctl_virtgpu_context_init(arg);
+    return drm_ioctl_virtgpu_context_init(arg, df);
   case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE:
-    return drm_ioctl_virtgpu_resource_create(arg);
+    return drm_ioctl_virtgpu_resource_create(arg, df);
   case DRM_IOCTL_VIRTGPU_RESOURCE_INFO:
     return drm_ioctl_virtgpu_resource_info(arg);
   case DRM_IOCTL_VIRTGPU_EXECBUFFER:
-    return drm_ioctl_virtgpu_execbuffer(arg);
+    return drm_ioctl_virtgpu_execbuffer(arg, df);
   case DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST:
     return drm_ioctl_virtgpu_transfer_to_host(arg);
   case DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST:
     return drm_ioctl_virtgpu_transfer_from_host(arg);
   case DRM_IOCTL_VIRTGPU_WAIT:
-    return drm_ioctl_virtgpu_3d_wait(arg);
+    return drm_ioctl_virtgpu_3d_wait(arg, df);
   case DRM_IOCTL_GET_CAP:
     return drm_ioctl_get_cap(arg);
   case DRM_IOCTL_SET_CLIENT_CAP:
     return drm_ioctl_set_client_cap(arg);
   case DRM_IOCTL_SET_MASTER:
-    return drm_ioctl_set_master();
+    return drm_ioctl_set_master(df);
   case DRM_IOCTL_DROP_MASTER:
-    return drm_ioctl_drop_master();
+    return drm_ioctl_drop_master(df);
   case DRM_IOCTL_MODE_GETRESOURCES:
     return drm_ioctl_getresources(arg);
   case DRM_IOCTL_MODE_GETCRTC:
@@ -2672,15 +2675,15 @@ long drm_ioctl(uint32_t cmd, void *arg) {
   case DRM_IOCTL_MODE_GETPLANE:
     return drm_ioctl_getplane(arg);
   case DRM_IOCTL_MODE_CREATE_DUMB:
-    return drm_ioctl_create_dumb(arg);
+    return drm_ioctl_create_dumb(arg, df);
   case DRM_IOCTL_MODE_MAP_DUMB:
     return drm_ioctl_map_dumb(arg);
   case DRM_IOCTL_MODE_DESTROY_DUMB:
     return drm_ioctl_destroy_dumb(arg);
   case DRM_IOCTL_MODE_ADDFB:
-    return drm_ioctl_addfb(arg);
+    return drm_ioctl_addfb(arg, df);
   case DRM_IOCTL_MODE_ADDFB2:
-    return drm_ioctl_addfb2(arg);
+    return drm_ioctl_addfb2(arg, df);
   case DRM_IOCTL_MODE_RMFB:
     return drm_ioctl_rmfb(arg);
   case DRM_IOCTL_MODE_PAGE_FLIP:
@@ -2692,9 +2695,9 @@ long drm_ioctl(uint32_t cmd, void *arg) {
   case DRM_IOCTL_MODE_GETFB:
     return drm_ioctl_getfb(arg);
   case DRM_IOCTL_GET_MAGIC:
-    return drm_ioctl_get_magic(arg);
+    return drm_ioctl_get_magic(arg, df);
   case DRM_IOCTL_AUTH_MAGIC:
-    return drm_ioctl_auth_magic(arg);
+    return drm_ioctl_auth_magic(arg, df);
   case DRM_IOCTL_GEM_CLOSE:
     return drm_ioctl_gem_close(arg);
   case DRM_IOCTL_MODE_GETPROPERTY:
@@ -2713,23 +2716,6 @@ long drm_ioctl(uint32_t cmd, void *arg) {
     printk(LOG_WARN, "drm_ioctl: unknown cmd 0x%x\n", cmd);
     return -ENOSYS;
   }
-}
-
-/* ===== per-fd lookup (Phase C) ===== */
-static struct drm_file *drm_file_current(void) {
-  /* Find the drm_file slot for the current task.
-   * Called from ioctl handlers; the current task is what's running.
-   * Iterate g_drm_files[] matching ->proc == current xtask. */
-  xtask *cur = current_task;
-  spin_lock(&g_drm_files_lock);
-  for (int i = 0; i < MAX_DRM_FDS; i++) {
-    if (g_drm_files[i].used && g_drm_files[i].proc == cur) {
-      spin_unlock(&g_drm_files_lock);
-      return &g_drm_files[i];
-    }
-  }
-  spin_unlock(&g_drm_files_lock);
-  return NULL;
 }
 
 /* ctx_id pool: ctx_id 0 is reserved ("no context"), ids 1..MAX_CTX_IDS. */
@@ -2799,16 +2785,17 @@ static bool virgl_capset_present(uint32_t capset_id) {
 }
 
 /* ===== DRM device ops ===== */
-int drm_open(xtask *proc, int fd) {
+static int drm_open_file_common(xtask *proc, struct file *file,
+                                bool is_render) {
   spin_lock(&g_drm_files_lock);
   for (int i = 0; i < MAX_DRM_FDS; i++) {
     if (!g_drm_files[i].used) {
+      __memset(&g_drm_files[i], 0, sizeof(g_drm_files[i]));
       g_drm_files[i].used = true;
-      g_drm_files[i].fd = fd;
+      g_drm_files[i].fd = -1;
       g_drm_files[i].proc = proc;
-      g_drm_files[i].is_master = false;
-      g_drm_files[i].authenticated_magic = 0;
-      g_drm_files[i].auth_valid = false;
+      g_drm_files[i].is_render = is_render;
+      file->private_data = &g_drm_files[i];
       spin_unlock(&g_drm_files_lock);
       return 0;
     }
@@ -2817,25 +2804,14 @@ int drm_open(xtask *proc, int fd) {
   return -ENFILE;
 }
 
+static int drm_open_file(xtask *proc, struct file *file) {
+  return drm_open_file_common(proc, file, false);
+}
+
 /* Render node open: shares g_drm_files[] with card0 but marks is_render.
  * Render fds reject SET_MASTER/GET_MAGIC/AUTH_MAGIC. */
-static int drm_render_open(xtask *proc, int fd) {
-  spin_lock(&g_drm_files_lock);
-  for (int i = 0; i < MAX_DRM_FDS; i++) {
-    if (!g_drm_files[i].used) {
-      g_drm_files[i].used = true;
-      g_drm_files[i].fd = fd;
-      g_drm_files[i].proc = proc;
-      g_drm_files[i].is_master = false;
-      g_drm_files[i].is_render = true;
-      g_drm_files[i].authenticated_magic = 0;
-      g_drm_files[i].auth_valid = false;
-      spin_unlock(&g_drm_files_lock);
-      return 0;
-    }
-  }
-  spin_unlock(&g_drm_files_lock);
-  return -ENFILE;
+static int drm_render_open_file(xtask *proc, struct file *file) {
+  return drm_open_file_common(proc, file, true);
 }
 
 /* Helper: release a framebuffer (refcount decrement + cleanup) */
@@ -2887,23 +2863,15 @@ static void drm_release_dumb(int handle) {
   }
 }
 
-int drm_close(xtask *proc, int fd) {
+static int drm_close_file(xtask *proc, struct file *file) {
+  struct drm_file *target = file ? (struct drm_file *)file->private_data : NULL;
+  if (!target)
+    return 0;
   spin_lock(&g_drm_files_lock);
   for (int i = 0; i < MAX_DRM_FDS; i++) {
     struct drm_file *f = &g_drm_files[i];
-    if (!f->used)
+    if (!f->used || f != target)
       continue;
-    if (fd >= 0) {
-      /* Normal close via sys_close: match specific fd + proc. */
-      if (f->fd != fd || f->proc != proc)
-        continue;
-    } else {
-      /* Process-exit cleanup (file_put → ops->close(proc, -1)):
-       * no fd number available, match by proc only.  Each FD_DEV fd
-       * gets its own file_put call, so one iteration per entry. */
-      if (f->proc != proc)
-        continue;
-    }
     /* Release per-fd resources (Phase C) */
     for (int j = 0; j < f->created_fb_count; j++) {
       drm_release_fb(f->created_fb_ids[j]);
@@ -2960,6 +2928,7 @@ int drm_close(xtask *proc, int fd) {
       drm_master_cleanup();
     }
     __memset(f, 0, sizeof(*f));
+    file->private_data = NULL;
     spin_unlock(&g_drm_files_lock);
     return 0;
   }
@@ -2973,9 +2942,9 @@ static ssize_t drm_read(xtask *proc, int fd, void *buf, size_t count);
 struct dev_ops drm_dev_ops = {
     .driver_pid = 0,
     .is_block = false,
-    .open = drm_open,
-    .close = drm_close,
-    .ioctl = drm_ioctl,
+    .open_file = drm_open_file,
+    .close_file = drm_close_file,
+    .ioctl_file = drm_ioctl_file,
     .mmap = drm_mmap_handler,
     .read = drm_read,
     .poll = drm_poll,
@@ -2986,9 +2955,9 @@ struct dev_ops drm_dev_ops = {
 static struct dev_ops drm_render_ops = {
     .driver_pid = 0,
     .is_block = false,
-    .open = drm_render_open,
-    .close = drm_close,
-    .ioctl = drm_ioctl,
+    .open_file = drm_render_open_file,
+    .close_file = drm_close_file,
+    .ioctl_file = drm_ioctl_file,
     .mmap = drm_mmap_handler,
     .read = NULL,
     .poll = NULL,

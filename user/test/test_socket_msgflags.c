@@ -18,6 +18,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
@@ -324,6 +325,98 @@ void test_scm_rights_ctrunc(void) {
   close(sv[1]);
 }
 
+/* Linux accepts a final cmsghdr without its optional trailing alignment
+ * padding. seatd relies on this when passing an opened device fd. */
+void test_scm_rights_unpadded_controllen(void) {
+  int sv[2], payload[2];
+  TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+  TEST_ASSERT_EQUAL_INT(0, pipe(payload));
+
+  char byte = 'U';
+  struct iovec iov = {.iov_base = &byte, .iov_len = 1};
+  char control[CMSG_LEN(sizeof(int))];
+  struct msghdr msg = {0};
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = control;
+  msg.msg_controllen = CMSG_LEN(sizeof(int));
+  struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+  cmsg->cmsg_level = SOL_SOCKET;
+  cmsg->cmsg_type = SCM_RIGHTS;
+  cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+  memcpy(CMSG_DATA(cmsg), &payload[0], sizeof(int));
+  TEST_ASSERT_EQUAL_INT(1, sendmsg(sv[0], &msg, 0));
+
+  char received = 0;
+  int received_fd = -1;
+  struct iovec riov = {.iov_base = &received, .iov_len = 1};
+  char rcontrol[CMSG_SPACE(sizeof(int))];
+  struct msghdr rmsg = {0};
+  rmsg.msg_iov = &riov;
+  rmsg.msg_iovlen = 1;
+  rmsg.msg_control = rcontrol;
+  rmsg.msg_controllen = sizeof(rcontrol);
+  TEST_ASSERT_EQUAL_INT(1, recvmsg(sv[1], &rmsg, 0));
+  TEST_ASSERT_EQUAL_INT('U', received);
+  struct cmsghdr *received_cmsg = CMSG_FIRSTHDR(&rmsg);
+  TEST_ASSERT_NOT_NULL(received_cmsg);
+  TEST_ASSERT_EQUAL_INT(SCM_RIGHTS, received_cmsg->cmsg_type);
+  memcpy(&received_fd, CMSG_DATA(received_cmsg), sizeof(int));
+  TEST_ASSERT_TRUE(received_fd >= 0);
+
+  TEST_ASSERT_EQUAL_INT(1, write(payload[1], "P", 1));
+  char marker = 0;
+  TEST_ASSERT_EQUAL_INT(1, read(received_fd, &marker, 1));
+  TEST_ASSERT_EQUAL_INT('P', marker);
+
+  close(received_fd);
+  close(payload[0]);
+  close(payload[1]);
+  close(sv[0]);
+  close(sv[1]);
+}
+
+void test_scm_rights_cloexec(void) {
+  int sv[2], payload[2];
+  TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+  TEST_ASSERT_EQUAL_INT(0, pipe(payload));
+
+  char byte = 'F';
+  struct iovec iov = {.iov_base = &byte, .iov_len = 1};
+  char control[CMSG_SPACE(sizeof(int))];
+  struct msghdr msg = {0};
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = control;
+  msg.msg_controllen = sizeof(control);
+  struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+  cmsg->cmsg_level = SOL_SOCKET;
+  cmsg->cmsg_type = SCM_RIGHTS;
+  cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+  memcpy(CMSG_DATA(cmsg), &payload[0], sizeof(int));
+  TEST_ASSERT_EQUAL_INT(1, sendmsg(sv[0], &msg, 0));
+
+  char received;
+  int received_fd = -1;
+  struct iovec riov = {.iov_base = &received, .iov_len = 1};
+  char rcontrol[CMSG_SPACE(sizeof(int))];
+  struct msghdr rmsg = {0};
+  rmsg.msg_iov = &riov;
+  rmsg.msg_iovlen = 1;
+  rmsg.msg_control = rcontrol;
+  rmsg.msg_controllen = sizeof(rcontrol);
+  TEST_ASSERT_EQUAL_INT(1, recvmsg(sv[1], &rmsg, MSG_CMSG_CLOEXEC));
+  memcpy(&received_fd, CMSG_DATA(CMSG_FIRSTHDR(&rmsg)), sizeof(int));
+  TEST_ASSERT_TRUE(received_fd >= 0);
+  TEST_ASSERT_EQUAL_INT(FD_CLOEXEC, fcntl(received_fd, F_GETFD) & FD_CLOEXEC);
+
+  close(received_fd);
+  close(payload[0]);
+  close(payload[1]);
+  close(sv[0]);
+  close(sv[1]);
+}
+
 /* 8. poll on an out-of-range fd and on a closed fd returns POLLNVAL (not
  * POLLERR). */
 void test_poll_bad_fd_returns_pollnval(void) {
@@ -403,6 +496,8 @@ int main(void) {
   RUN_TEST(test_sendmsg_epipe_sigpipe_default_and_nosignal);
   RUN_TEST(test_pipe_write_epipe_sigpipe_default);
   RUN_TEST(test_scm_rights_ctrunc);
+  RUN_TEST(test_scm_rights_unpadded_controllen);
+  RUN_TEST(test_scm_rights_cloexec);
   RUN_TEST(test_poll_bad_fd_returns_pollnval);
   RUN_TEST(test_recvmsg_msg_flags_written_back);
   return UNITY_END();

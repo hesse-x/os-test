@@ -60,8 +60,13 @@ while [[ $# -gt 0 ]]; do
             BUILD_WLROOTS_DEPS=1
             shift
             ;;
+        --desktop=compositor)
+            CMAKE_EXTRA="$CMAKE_EXTRA -DDESKTOP_COMPOSITOR=1"
+            BUILD_WLROOTS_DEPS=1
+            shift
+            ;;
         *)
-            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf] [--gcc] [--clang] [--cxx] [--mesa] [--wlroots]"
+            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf] [--gcc] [--clang] [--cxx] [--mesa] [--wlroots] [--desktop=compositor]"
             exit 1
             ;;
     esac
@@ -151,10 +156,9 @@ if [ "${BUILD_LIBCXX:-0}" = "1" ]; then
     ninja -C build libcxx_smoke_elf
 fi
 
-# 3. wlroots prerequisites. Keep these in the sysroot so the later wlroots
-# build resolves them through pkg-config rather than accidentally using host libs.
-if [ "${BUILD_WLROOTS_DEPS:-0}" = "1" ]; then
-    echo "=== Building wlroots prerequisites (pixman, xkbcommon, libdisplay-info, seatd) ==="
+# 3. seatd/libseat are core terminal dependencies. The remaining projects stay
+# optional wlroots prerequisites.
+    echo "=== Building core seatd/libseat dependency ==="
 
     MESON_VENV=build/.mesa-venv
     if [[ ! -x "$MESON_VENV/bin/meson" ]]; then
@@ -261,28 +265,54 @@ PY
         esac
     }
 
-    build_wlroots_dependency pixman third_party/pixman \
-        -Dgtk=disabled -Ddemos=disabled -Dtests=disabled -Dlibpng=disabled -Dopenmp=disabled
-    build_wlroots_dependency libxkbcommon third_party/libxkbcommon \
-        -Denable-tools=false -Denable-x11=false -Denable-xkbregistry=false \
-        -Denable-wayland=false -Denable-bash-completion=false
-    # libdisplay-info: override the cross-file's -fvisibility=hidden. Upstream
-    # marks no symbol with visibility("default") and ships a version-script
-    # (global: di_*), but a version-script cannot re-export symbols already
-    # hidden by -fvisibility=hidden at compile time — so without this override
-    # every di_* comes out as a local 't' symbol and the .so is a dead library
-    # (wlroots links it → undefined reference to di_*). -fvisibility=default
-    # lets the version-script's global:di_* actually export them.
-    build_wlroots_dependency libdisplay-info third_party/libdisplay-info \
-        -Dc_args=-fvisibility=default
+    if [ "${BUILD_WLROOTS_DEPS:-0}" = "1" ]; then
+        echo "=== Building wlroots prerequisites (pixman, xkbcommon, libdisplay-info) ==="
+        build_wlroots_dependency pixman third_party/pixman \
+            -Dgtk=disabled -Ddemos=disabled -Dtests=disabled -Dlibpng=disabled -Dopenmp=disabled
+        build_wlroots_dependency libxkbcommon third_party/libxkbcommon \
+            -Denable-tools=false -Denable-x11=false -Denable-xkbregistry=false \
+            -Denable-wayland=false -Denable-bash-completion=false
+        # libdisplay-info needs default visibility so its version script can
+        # export the public di_* ABI.
+        build_wlroots_dependency libdisplay-info third_party/libdisplay-info \
+            -Dc_args=-fvisibility=default
+    fi
     build_wlroots_dependency seatd third_party/seatd \
         -Dlibseat-logind=disabled -Dlibseat-builtin=disabled -Dlibseat-seatd=enabled \
         -Dserver=enabled -Dexamples=disabled -Dman-pages=disabled \
         -Ddefaultpath=/run/seatd.sock
 
+    # Build the target-side WF-6 diagnostic against the just-staged libseat.
+    "$CC_BIN" -m64 -O2 -fPIC --sysroot="$SYSROOT" -nodefaultlibs \
+        -I"$SYSROOT/usr/include" -c user/seat/seat_session_smoke.c \
+        -o build/seat-session-smoke.o
+    "$CC_BIN" -m64 -fno-pie -no-pie --sysroot="$SYSROOT" \
+        -nostdlib -nodefaultlibs -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1 \
+        -Wl,--hash-style=gnu -Wl,--no-as-needed -Wl,--allow-shlib-undefined \
+        -o build/seat-session-smoke \
+        "$SYSROOT/usr/lib/Scrt1.o" "$SYSROOT/usr/lib/crti.o" \
+        build/seat-session-smoke.o -L"$SYSROOT/usr/lib" -lseat -lc \
+        "$SYSROOT/usr/lib/crtn.o"
+    "$CC_BIN" -m64 -O2 -fPIC --sysroot="$SYSROOT" -nodefaultlibs \
+        -I"$SYSROOT/usr/include" -c user/seat/seat_protocol_negative.c \
+        -o build/seat-protocol-negative.o
+    "$CC_BIN" -m64 -fno-pie -no-pie --sysroot="$SYSROOT" \
+        -nostdlib -nodefaultlibs -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1 \
+        -Wl,--hash-style=gnu -Wl,--no-as-needed -Wl,--allow-shlib-undefined \
+        -o build/seat-protocol-negative \
+        "$SYSROOT/usr/lib/Scrt1.o" "$SYSROOT/usr/lib/crti.o" \
+        build/seat-protocol-negative.o -L"$SYSROOT/usr/lib" -lc \
+        "$SYSROOT/usr/lib/crtn.o"
+
+    if readelf -d "$SYSROOT/usr/lib/libseat.so.1" "$SYSROOT/usr/bin/seatd" | \
+       grep -Eq 'lib(systemd|elogind|dbus)'; then
+        echo "ERROR: seatd/libseat pulled in a forbidden session dependency" >&2
+        exit 1
+    fi
+
     # Disk images are FAT32, so copy each runtime name as a real file instead
     # of preserving the symlinks Meson installs into the sysroot.
-    python3 - "$SYSROOT" <<'PY'
+    python3 - "$SYSROOT" "${BUILD_WLROOTS_DEPS:-0}" <<'PY'
 import os
 import shutil
 import sys
@@ -290,11 +320,14 @@ import sys
 sysroot = sys.argv[1]
 libdir = os.path.join(sysroot, 'usr', 'lib')
 staged = {
-    'libpixman-1.so': ['libpixman-1.so', 'libpixman-1.so.0', 'libpixman-1.so.0.46.4'],
-    'libxkbcommon.so': ['libxkbcommon.so', 'libxkbcommon.so.0', 'libxkbcommon.so.0.13.2'],
-    'libdisplay-info.so': ['libdisplay-info.so', 'libdisplay-info.so.4', 'libdisplay-info.so.0.4.0'],
     'libseat.so': ['libseat.so', 'libseat.so.1'],
 }
+if sys.argv[2] == '1':
+    staged.update({
+        'libpixman-1.so': ['libpixman-1.so', 'libpixman-1.so.0', 'libpixman-1.so.0.46.4'],
+        'libxkbcommon.so': ['libxkbcommon.so', 'libxkbcommon.so.0', 'libxkbcommon.so.0.13.2'],
+        'libdisplay-info.so': ['libdisplay-info.so', 'libdisplay-info.so.4', 'libdisplay-info.so.0.4.0'],
+    })
 for names in staged.values():
     source = next((os.path.join(libdir, name) for name in reversed(names)
                    if os.path.exists(os.path.join(libdir, name))), None)
@@ -309,16 +342,19 @@ if not os.path.isfile(seatd):
 shutil.copy2(seatd, os.path.join('build', 'seatd'))
 PY
 
+    # terminal now links libseat, so defer it until the external library exists.
+    ninja -C build terminal_dyn_elf
+
     # These tests link the just-staged external libraries, so they cannot be
     # part of the initial CMake ALL target. This mirrors the post-Mesa EGL test.
-    if echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
+    if [ "${BUILD_WLROOTS_DEPS:-0}" = "1" ] && \
+       echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
         echo "=== Building wlroots prerequisite smoke ELFs ==="
         ninja -C build \
             test_pixman_smoke_dyn_elf \
             test_display_info_smoke_dyn_elf \
             test_xkbcommon_smoke_dyn_elf
     fi
-fi
 
 # 3. Mesa cross-build (auto when products are missing; --mesa forces it).
 if [ "${BUILD_MESA:-0}" = "1" ]; then

@@ -63,6 +63,7 @@ static struct test_entry tests[] = {
     {"pixman_smoke", "/test/test_pixman_smoke.elf"},
     {"display_info_smoke", "/test/test_display_info_smoke.elf"},
     {"xkbcommon_smoke", "/test/test_xkbcommon_smoke.elf"},
+    {"seat_protocol", "/usr/bin/seat-protocol-negative"},
     {"hello_dyn", "/local/hello_dyn.elf"},
     {"ld_single", "/test/ld_test_single.elf"},
     {"ld_chain", "/test/ld_test_chain.elf"},

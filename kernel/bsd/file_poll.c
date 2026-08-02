@@ -109,8 +109,9 @@ __poll file_poll(struct file *f, __poll events) {
     struct inode *ip = f->inode;
     if (ip && ip->i_priv) {
       struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-      if (ops->driver_pid == 0 && ops->poll) {
-        revents |= ops->poll(current_task, events);
+      if (ops->driver_pid == 0 && (ops->poll_file || ops->poll)) {
+        revents |= ops->poll_file ? ops->poll_file(current_task, f, events)
+                                  : ops->poll(current_task, events);
       }
     }
     // User-space driver: always ready (IPC handles events)

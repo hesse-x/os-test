@@ -1104,8 +1104,9 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       struct inode *ip = f->inode;
       if (ip && ip->i_priv) {
         struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-        if (ops->driver_pid == 0 && ops->mmap) {
-          uint64_t ret = ops->mmap(proc, size, offset);
+        if (ops->driver_pid == 0 && (ops->mmap_file || ops->mmap)) {
+          uint64_t ret = ops->mmap_file ? ops->mmap_file(proc, f, size, offset)
+                                        : ops->mmap(proc, size, offset);
           file_put(f);
           spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
           return ret;
@@ -2699,8 +2700,10 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       goto out;
     }
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
-    if (ops->driver_pid == 0 && ops->read) {
-      ret = (int64_t)ops->read(proc, fd, (void __force *)buf, len);
+    if (ops->driver_pid == 0 && (ops->read_file || ops->read)) {
+      ret = ops->read_file
+                ? (int64_t)ops->read_file(proc, f, (void __force *)buf, len)
+                : (int64_t)ops->read(proc, fd, (void __force *)buf, len);
       goto out;
     }
     ret = -ENOSYS;
@@ -4885,7 +4888,7 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         ret = (int64_t)r;
         goto out;
       }
-      if (!ops->ioctl) {
+      if (!ops->ioctl_file && !ops->ioctl) {
         ret = -(int64_t)ENOTTY;
         goto out;
       }
@@ -4919,7 +4922,8 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         }
       }
 
-      long result = ops->ioctl(cmd, kbuf);
+      long result = ops->ioctl_file ? ops->ioctl_file(proc, f, cmd, kbuf)
+                                    : ops->ioctl(cmd, kbuf);
       printk(LOG_DEBUG, "sys_ioctl: ops->ioctl result=%ld\n", result);
 
       if ((__force uint64_t)arg != 0 && (dir & _IOC_READ) && result >= 0 &&
