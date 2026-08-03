@@ -89,6 +89,9 @@ struct vt100_state {
   int escape_state;
   int csi_params[8];
   int csi_param_count;
+  int csi_private; // DEC private marker '?' seen right after CSI introducer
+  int saved_x, saved_y; // DECSC \e7 / DECRC \e8 and SCOSC \e[s / SCORC \e[u
+  int cursor_visible;   // DEC private mode ?25 (block cursor on/off)
 };
 
 static struct cell *cells;
@@ -96,6 +99,11 @@ static int dirty_row_start;
 static int dirty_row_end;
 
 static struct vt100_state vt;
+
+// Block-cursor overlay: the inverted cursor is painted on top of the cell
+// buffer at flush time, and restored to normal before the next repaint.
+static int cursor_drawn; // an inverted cursor is currently on the back buffer
+static int prev_cx, prev_cy; // cell the inverted cursor was last painted on
 
 static const uint32_t vt100_colors[] = {
     0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080,
@@ -190,7 +198,63 @@ static int csi_param(int idx, int default_val) {
 }
 
 static void vt100_csi_dispatch(char final_ch) {
+  // DEC private modes (?...) only respond to h/l finals here.
+  if (vt.csi_private) {
+    switch (final_ch) {
+    case 'h': // DECSET
+      if (csi_param(0, 0) == 25)
+        vt.cursor_visible = 1;
+      break;
+    case 'l': // DECRST
+      if (csi_param(0, 0) == 25)
+        vt.cursor_visible = 0;
+      break;
+    }
+    return;
+  }
   switch (final_ch) {
+  case 'A': // CUU
+    vt.cursor_y -= csi_param(0, 1);
+    if (vt.cursor_y < 0)
+      vt.cursor_y = 0;
+    break;
+  case 'B': // CUD
+    vt.cursor_y += csi_param(0, 1);
+    if (vt.cursor_y >= vt.rows)
+      vt.cursor_y = vt.rows - 1;
+    break;
+  case 'C': // CUF
+    vt.cursor_x += csi_param(0, 1);
+    if (vt.cursor_x >= vt.cols)
+      vt.cursor_x = vt.cols - 1;
+    break;
+  case 'D': // CUB
+    vt.cursor_x -= csi_param(0, 1);
+    if (vt.cursor_x < 0)
+      vt.cursor_x = 0;
+    break;
+  case 'G': // CHA — column (1-based)
+    vt.cursor_x = csi_param(0, 1) - 1;
+    if (vt.cursor_x < 0)
+      vt.cursor_x = 0;
+    if (vt.cursor_x >= vt.cols)
+      vt.cursor_x = vt.cols - 1;
+    break;
+  case 'd': // VPA — row (1-based)
+    vt.cursor_y = csi_param(0, 1) - 1;
+    if (vt.cursor_y < 0)
+      vt.cursor_y = 0;
+    if (vt.cursor_y >= vt.rows)
+      vt.cursor_y = vt.rows - 1;
+    break;
+  case 's': // SCOSC — save cursor
+    vt.saved_x = vt.cursor_x;
+    vt.saved_y = vt.cursor_y;
+    break;
+  case 'u': // SCORC — restore cursor
+    vt.cursor_x = vt.saved_x;
+    vt.cursor_y = vt.saved_y;
+    break;
   case 'H':
   case 'f': {
     int row = csi_param(0, 1) - 1, col = csi_param(1, 1) - 1;
@@ -223,7 +287,19 @@ static void vt100_csi_dispatch(char final_ch) {
     break;
   }
   case 'K': {
-    for (int c = vt.cursor_x; c < vt.cols; c++) {
+    int mode = csi_param(0, 0);
+    int from, to;
+    if (mode == 0) { // erase cursor → EOL
+      from = vt.cursor_x;
+      to = vt.cols;
+    } else if (mode == 1) { // erase BOL → cursor
+      from = 0;
+      to = vt.cursor_x + 1;
+    } else { // mode == 2: whole line
+      from = 0;
+      to = vt.cols;
+    }
+    for (int c = from; c < to; c++) {
       struct cell *ce = &cells[vt.cursor_y * vt.cols + c];
       ce->ch = ' ';
       ce->fg_color = vt.fg_color;
@@ -270,8 +346,17 @@ static void vt100_feed(char c) {
     if (c == '[') {
       vt.escape_state = VT100_CSI;
       vt.csi_param_count = 0;
+      vt.csi_private = 0;
       for (int i = 0; i < 8; i++)
         vt.csi_params[i] = 0;
+    } else if (c == '7') { // DECSC — save cursor
+      vt.saved_x = vt.cursor_x;
+      vt.saved_y = vt.cursor_y;
+      vt.escape_state = VT100_NORMAL;
+    } else if (c == '8') { // DECRC — restore cursor
+      vt.cursor_x = vt.saved_x;
+      vt.cursor_y = vt.saved_y;
+      vt.escape_state = VT100_NORMAL;
     } else {
       cell_putc(c);
       vt.escape_state = VT100_NORMAL;
@@ -282,9 +367,12 @@ static void vt100_feed(char c) {
       if (vt.csi_param_count < 8)
         vt.csi_params[vt.csi_param_count] =
             vt.csi_params[vt.csi_param_count] * 10 + (c - '0');
-    } else if (c == ';')
+    } else if (c == ';') {
       vt.csi_param_count++;
-    else if (c >= 0x40 && c <= 0x7E) {
+    } else if (c == '?' && vt.csi_param_count == 0 &&
+               vt.csi_params[0] == 0) { // DEC private marker (only at start)
+      vt.csi_private = 1;
+    } else if (c >= 0x40 && c <= 0x7E) {
       vt.csi_param_count++;
       vt100_csi_dispatch(c);
       vt.escape_state = VT100_NORMAL;
@@ -293,14 +381,43 @@ static void vt100_feed(char c) {
   }
 }
 
-static void flush_dirty_cells() {
-  if (!terminal_seat.active || dirty_row_start >= dirty_row_end)
+static void draw_cursor_overlay() {
+  if (cursor_drawn) {
+    // Restore the previously-overlaid cell to its normal colors.
+    struct cell *ce = &cells[prev_cy * vt.cols + prev_cx];
+    display_client_render_cell(prev_cy, prev_cx, ce->ch, ce->fg_color,
+                               ce->bg_color);
+    cursor_drawn = 0;
+  }
+  if (!vt.cursor_visible)
     return;
+  int cx = vt.cursor_x, cy = vt.cursor_y;
+  if (cx < 0 || cx >= vt.cols || cy < 0 || cy >= vt.rows)
+    return;
+  struct cell *ce = &cells[cy * vt.cols + cx];
+  // Invert fg/bg for a block cursor.
+  display_client_render_cell(cy, cx, ce->ch, ce->bg_color, ce->fg_color);
+  cursor_drawn = 1;
+  prev_cx = cx;
+  prev_cy = cy;
+}
+
+static void flush_dirty_cells() {
+  if (!terminal_seat.active || dirty_row_start >= dirty_row_end) {
+    // Even with no dirty cells, the cursor may have moved (e.g. \e[A) — redraw
+    // its overlay so the visible cursor tracks the logical one.
+    if (terminal_seat.active) {
+      draw_cursor_overlay();
+      display_client_set_cursor(vt.cursor_x, vt.cursor_y);
+    }
+    return;
+  }
   for (int row = dirty_row_start; row < dirty_row_end; row++)
     for (int col = 0; col < vt.cols; col++) {
       struct cell *c = &cells[row * vt.cols + col];
       display_client_render_cell(row, col, c->ch, c->fg_color, c->bg_color);
     }
+  draw_cursor_overlay();
   display_client_set_cursor(vt.cursor_x, vt.cursor_y);
   int rs = dirty_row_start, re = dirty_row_end;
   dirty_row_start = vt.rows;
@@ -697,6 +814,11 @@ extern "C" int main(int argc, char **argv, char **envp) {
   vt.bg_color = 0x000000;
   vt.escape_state = VT100_NORMAL;
   vt.csi_param_count = 0;
+  vt.csi_private = 0;
+  vt.saved_x = 0;
+  vt.saved_y = 0;
+  vt.cursor_visible = 1;
+  cursor_drawn = 0;
 
   int cell_bytes = vt.rows * vt.cols * sizeof(struct cell);
   cells =
