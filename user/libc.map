@@ -666,6 +666,9 @@ global:
     /* <sys/signalfd.h> */
     signalfd;
 
+    /* <sys/inotify.h> — musl src/linux/inotify.c (kernel: kernel/bsd/inotify.c) */
+    inotify_init; inotify_init1; inotify_add_watch; inotify_rm_watch;
+
     /* <sys/mount.h> */
     mount;
 

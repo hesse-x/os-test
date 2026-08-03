@@ -18,6 +18,7 @@
 #include "arch/x64/rtc.h"  // wall_clock_boot_ns — RTC-epoch baseline
 #include "arch/x64/utils.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/inotify.h"
 #include "kernel/bsd/page_cache.h"
 #include "kernel/driver/blk_dev.h"
 #include "kernel/xcore/atomic.h"
@@ -622,6 +623,9 @@ static struct inode *fat32_dir_create(struct inode *dir, const char *name,
   if (wrc != 0)
     return ERR_PTR(-EIO);
   uint32_t ino = fat32_make_ino(target_cluster, free_idx);
+  // IN_CREATE on the parent dir (fat_lock released at :621). inotify never
+  // fails the VFS path; the child inode isn't watched yet so no self-event.
+  inotify_inode_event(dir, IN_CREATE, 0, name);
   return fat32_iget(ino, INODE_REGULAR, 0, 0, target_cluster, free_idx);
 }
 
@@ -716,6 +720,8 @@ static int fat32_dir_mkdir(struct inode *dir, const char *name, int mode) {
       fat32_iget(ino, INODE_DIR, 0, new_cluster, target_cluster, free_idx);
   if (ip)
     inode_put(ip); // cache holds the base ref; here we drop iget's +1
+  // IN_CREATE on the parent dir (fat_lock released at :712).
+  inotify_inode_event(dir, IN_CREATE, 0, name);
   return 0;
 }
 
@@ -751,6 +757,18 @@ static int fat32_dir_unlink(struct inode *dir, const char *name) {
     spin_lock(&fat_lock);
     fat32_free_chain(target_cluster);
     spin_unlock(&fat_lock);
+  }
+  // IN_DELETE on the parent (name) + IN_DELETE_SELF on the child inode. No
+  // fat_lock/i_lock held here. inode_lookup returns +1; inotify_inode_event
+  // only reads the pointer as an index key (no ref needed), so drop the ref
+  // here — otherwise every unlink leaks one inode ref, pinning the inode in
+  // the cache. A later create reusing the same dir-entry slot (same ino) then
+  // fat32_iget-hits the stale inode and reads the dead file's old size/data.
+  inotify_inode_event(dir, IN_DELETE, 0, name);
+  struct inode *child = inode_lookup(fat32_make_ino(dir_cluster, dir_idx));
+  if (child) {
+    inotify_inode_event(child, IN_DELETE_SELF, 0, NULL);
+    inode_put(child);
   }
   return 0;
 }
@@ -818,6 +836,15 @@ static int fat32_dir_rmdir(struct inode *dir, const char *name) {
   if (target_cluster >= 2 && target_cluster < 0x0FFFFFF8)
     fat32_free_chain(target_cluster);
   spin_unlock(&fat_lock);
+  // IN_DELETE on the parent (name) + IN_DELETE_SELF on the removed dir inode.
+  // inode_lookup returns +1; inotify_inode_event only reads the pointer as an
+  // index key, so drop the ref here (same ref-leak fix as fat32_dir_unlink).
+  inotify_inode_event(dir, IN_DELETE, 0, name);
+  struct inode *child = inode_lookup(fat32_make_ino(dir_cluster, dir_idx));
+  if (child) {
+    inotify_inode_event(child, IN_DELETE_SELF, 0, NULL);
+    inode_put(child);
+  }
   return 0;
 }
 
@@ -1737,6 +1764,10 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
   }
 
   spin_unlock(&ip->i_lock);
+  // IN_MODIFY on the written file (i_lock released above; fat_lock not held
+  // here). Only fire if something was actually written.
+  if (written > 0)
+    inotify_inode_event(ip, IN_MODIFY, 0, NULL);
   return (int)written;
 }
 

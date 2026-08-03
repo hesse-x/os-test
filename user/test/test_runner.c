@@ -127,6 +127,7 @@ static struct test_entry tests[] = {
     {"eventfd", "/test/eventfd.elf"},
     {"timerfd", "/test/timerfd.elf"},
     {"signalfd", "/test/signalfd.elf"},
+    {"inotify", "/test/inotify.elf"},
     {"getrandom", "/test/getrandom.elf"},
     {"mount", "/test/mount.elf"},
     {"getdents_resume", "/test/test_getdents_resume.elf"},

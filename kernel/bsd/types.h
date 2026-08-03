@@ -53,6 +53,7 @@
 #define FD_NETLINK 13
 #define FD_IPC 14
 #define FD_SYNC_FILE 15
+#define FD_INOTIFY 16
 
 typedef struct pipe {
   uint8_t *buf;

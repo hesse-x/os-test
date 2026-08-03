@@ -28,6 +28,7 @@
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/futex.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/inotify.h"
 #include "kernel/bsd/ipcfd.h"
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/netlink.h"
@@ -2890,6 +2891,12 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     goto out;
   }
 
+  // FD_INOTIFY: one or more struct inotify_event records
+  if (f->type == FD_INOTIFY) {
+    ret = inotify_do_read(proc, f, buf, len);
+    goto out;
+  }
+
   // FD_PIPE — explicit type dispatch so any unhandled fd type returns
   // -EINVAL instead of falling through into the pipe path (which once
   // dereferenced NULL f->pipe on a directory fd and page-faulted).
@@ -3037,6 +3044,13 @@ int64_t sys_close(int64_t arg1, int64_t unused1, int64_t unused2,
   if (!f)
     return (int64_t)-EBADF;
   synchronize_rcu();
+  // Unified IN_CLOSE_WRITE for regular files (inotify.md §4.4). FD_REGULAR
+  // gates out pipe/socket/eventfd/etc (f->inode==NULL there) AND pty/tty
+  // (FD_DEV with an inode, writable, but Linux does not emit IN_CLOSE_WRITE for
+  // char devs). At this point fd_lock is released, RCU synced, f still holds
+  // its ref — f->inode/f->flags are valid.
+  if (f->type == FD_REGULAR && f->inode && (f->flags & (O_WRONLY | O_RDWR)))
+    inotify_inode_event(f->inode, IN_CLOSE_WRITE, 0, NULL);
   file_put(f);
   return 0;
 }
@@ -6723,6 +6737,12 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_timerfd_settime(tf->rdi, tf->rsi, tf->rdx, tf->r10);
   case SYS_SIGNALFD4:
     return sys_signalfd4(tf->rdi, tf->rsi, tf->rdx, tf->r10);
+  case SYS_INOTIFY_INIT1:
+    return sys_inotify_init1(tf->rdi);
+  case SYS_INOTIFY_ADD_WATCH:
+    return sys_inotify_add_watch(tf->rdi, tf->rsi, tf->rdx);
+  case SYS_INOTIFY_RM_WATCH:
+    return sys_inotify_rm_watch(tf->rdi, tf->rsi);
   case SYS_MOUNT:
     return sys_mount(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // ENOSYS stubs (C group)

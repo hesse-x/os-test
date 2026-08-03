@@ -455,8 +455,8 @@ MESA_SETUP=(
     # Meson persists command-line built-in options across --wipe. Spell these
     # out so an older build configured with a partial c_args/cpp_args override
     # cannot silently mask the complete values in the cross file.
-    "-Dc_args=-m64 -fPIC --sysroot=$SYSROOT -nodefaultlibs -fvisibility=hidden -Wno-macro-redefined -DXOS_NO_INOTIFY=1"
-    "-Dcpp_args=-m64 -fPIC --sysroot=$SYSROOT -nodefaultlibs -stdlib=libc++ -nostdinc++ -I$SYSROOT/usr/include/c++/v1 -fvisibility=hidden -Wno-macro-redefined -DXOS_NO_INOTIFY=1"
+    "-Dc_args=-m64 -fPIC --sysroot=$SYSROOT -nodefaultlibs -fvisibility=hidden -Wno-macro-redefined"
+    "-Dcpp_args=-m64 -fPIC --sysroot=$SYSROOT -nodefaultlibs -stdlib=libc++ -nostdinc++ -I$SYSROOT/usr/include/c++/v1 -fvisibility=hidden -Wno-macro-redefined"
     "-Dgallium-drivers=$GALLIUM"
     -Dglx=disabled -Dopengl=false -Dgles1=disabled -Dgles2=enabled
     -Degl=enabled -Dgbm=enabled
@@ -551,6 +551,18 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
     echo "=== Building wlroots 0.20.2 and M0 compositor ==="
     bash build_script/third_party/wlroots/prepare-sysroot.sh
     SYSROOT="$(cd build/sysroot && pwd)"
+    # libEGL.so's DT_NEEDED includes libgallium-26.1.4.so; the Mesa stage only
+    # stages it to build/ for the image, not into the sysroot. wlroots/tinywl
+    # link -lEGL so its closure needs libgallium, plus dri_gbm.so is part of the
+    # Mesa megadriver triplet the runtime closure resolves. Stage both into the
+    # sysroot or linking -lEGL (and audit closure check) cannot resolve them.
+    for gallium_so in libgallium-26.1.4.so dri_gbm.so; do
+        if [[ ! -f "build/$gallium_so" ]]; then
+            echo "ERROR: missing build/$gallium_so (run Mesa stage first)" >&2
+            exit 1
+        fi
+        install -m 755 "build/$gallium_so" "$SYSROOT/usr/lib/"
+    done
     WLROOTS_BUILD=build/wlroots/wlroots
     WLROOTS_NATIVE=build/wlroots-native.txt
     WLROOTS_SETUP=(
@@ -560,7 +572,7 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
         -Dauto_features=disabled -Dbackends=drm,libinput -Drenderers=gles2
         -Dallocators=gbm -Dsession=enabled -Dxwayland=disabled
         -Dxcb-errors=disabled -Dcolor-management=disabled
-        -Dlibliftoff=disabled -Dexamples=false -Dwerror=false
+        -Dlibliftoff=disabled -Dexamples=true  -Dwerror=false
         "$WLROOTS_BUILD" third_party/wlroots
     )
     WLROOTS_CONFIG_SUM="$({ sha256sum build/wlroots-cross.txt "$WLROOTS_NATIVE"; \
@@ -575,7 +587,7 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
         meson setup "${WLROOTS_SETUP[@]}"
     fi
     printf '%s\n' "$WLROOTS_CONFIG_SUM" > "$WLROOTS_STAMP"
-    ninja -C "$WLROOTS_BUILD" libwlroots-0.20.so
+    ninja -C "$WLROOTS_BUILD" libwlroots-0.20.so tinywl
     meson install -C "$WLROOTS_BUILD" --no-rebuild --destdir "$SYSROOT"
 
     MESON_SUMMARY="$WLROOTS_BUILD/meson-logs/meson-log.txt"
@@ -594,43 +606,41 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
 
     WLROOTS_LIB="$SYSROOT/usr/lib/libwlroots-0.20.so"
     install -m 755 "$WLROOTS_LIB" build/libwlroots-0.20.so
-    XDG_XML=third_party/wayland-protocols/stable/xdg-shell/xdg-shell.xml
-    build/wayland-scanner client-header "$XDG_XML" build/xdg-shell-client-protocol.h
-    build/wayland-scanner private-code "$XDG_XML" build/xdg-shell-protocol.c
+    # tinywl has no install: kwarg, so the meson product stays in the builddir.
+    install -m 755 "$WLROOTS_BUILD/tinywl" build/tinywl
 
-    "$CC_BIN" -m64 -O2 -fPIC --sysroot="$SYSROOT" -nodefaultlibs \
-        -I"$SYSROOT/usr/include" -Ibuild -c user/compositor/wayland-smoke.c \
-        -o build/wayland-smoke.o
-    "$CC_BIN" -m64 -O2 -fPIC --sysroot="$SYSROOT" -nodefaultlibs \
-        -I"$SYSROOT/usr/include" -Ibuild -c build/xdg-shell-protocol.c \
-        -o build/xdg-shell-protocol.o
-    "$CC_BIN" -m64 -fno-pie -no-pie --sysroot="$SYSROOT" -nostdlib -nodefaultlibs \
-        -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1 -Wl,--hash-style=gnu \
-        -Wl,--no-as-needed -o build/wayland-smoke \
-        "$SYSROOT/usr/lib/Scrt1.o" "$SYSROOT/usr/lib/crti.o" \
-        build/wayland-smoke.o build/xdg-shell-protocol.o \
-        -L"$SYSROOT/usr/lib" -lwayland-client -lc "$SYSROOT/usr/lib/crtn.o"
-
-    "$CXX_BIN" -m64 -O2 -std=gnu++17 -fPIC -fno-exceptions -fno-rtti \
-        -DWLR_USE_UNSTABLE --sysroot="$SYSROOT" -nodefaultlibs -stdlib=libc++ \
-        -nostdinc++ -I"$SYSROOT/usr/include/c++/v1" \
-        -I"$SYSROOT/usr/include/wlroots-0.20" -I"$SYSROOT/usr/include" \
-        -I"$SYSROOT/usr/include/pixman-1" \
-        -c user/compositor/compositor.cc -o build/compositor.o
-    "$CXX_BIN" -m64 -fno-pie -no-pie --sysroot="$SYSROOT" -nostdlib -nodefaultlibs \
-        -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1 -Wl,--hash-style=gnu \
-        -Wl,--no-as-needed -Wl,--allow-shlib-undefined -o build/compositor \
-        "$SYSROOT/usr/lib/Scrt1.o" "$SYSROOT/usr/lib/crti.o" build/compositor.o \
-        -L"$SYSROOT/usr/lib" -lwlroots-0.20 -lwayland-server -linput -ludev \
-        -lseat -lEGL -lGLESv2 -lgbm -ldrm -lpixman-1 -lxkbcommon \
-        -ldisplay-info -lc++ -lc++abi -lunwind -lclang_rt -lc \
-        "$SYSROOT/usr/lib/crtn.o"
-
-    if readelf -d build/compositor build/wayland-smoke build/libwlroots-0.20.so | \
-       grep -Eiq 'lib(X11|xcb|vulkan|systemd|elogind|dbus|liftoff)|libstdc\+\+|llvmpipe'; then
-        echo "ERROR: forbidden dependency in wlroots M0 runtime" >&2
+    # --- ELF static audit: build/tinywl + build/libwlroots-0.20.so ---
+    # Judge 1: interpreter (executable ELF must be musl; .so has no PT_INTERP, skip)
+    tinywl_interp="$(readelf -lW build/tinywl 2>/dev/null | \
+        awk '/interpreter:/ {print $NF}' | tr -d '[]')"
+    if [ "$tinywl_interp" != "/lib/ld-musl-x86_64.so.1" ]; then
+        echo "ERROR: build/tinywl interpreter '$tinywl_interp' != /lib/ld-musl-x86_64.so.1" >&2
         exit 1
     fi
+    # Judge 2: forbidden dependency grep
+    if readelf -dW build/tinywl build/libwlroots-0.20.so | \
+       grep -Eiq 'lib(X11|xcb|vulkan|systemd|elogind|dbus|liftoff)|libstdc\+\+|llvmpipe'; then
+        echo "ERROR: forbidden dependency in wlroots runtime" >&2
+        exit 1
+    fi
+    # Judge 3: DT_NEEDED closure ⊆ sysroot/image (single-layer filename
+    # existence; the sysroot library set is closed, so direct NEEDED fully
+    # resolvable == transitive closure resolvable — no "passes layer 1 but a
+    # deep dep is missing" gap).
+    audit_allowed="$( ( ls "$SYSROOT/usr/lib"/*.so "$SYSROOT/usr/lib"/*.so.* 2>/dev/null; \
+                       ls build/*.so build/*.so.* 2>/dev/null ) \
+                     | xargs -n1 basename 2>/dev/null | sort -u )"
+    audit_needed="$(readelf -dW build/tinywl build/libwlroots-0.20.so 2>/dev/null \
+                    | awk '/NEEDED/ {gsub(/\[\]/,"",$NF); print $NF}' | sort -u)"
+    audit_missing=""
+    for n in $audit_needed; do
+        echo "$audit_allowed" | grep -qx "$n" || audit_missing="$audit_missing $n"
+    done
+    if [ -n "$audit_missing" ]; then
+        echo "ERROR: DT_NEEDED not resolvable in sysroot/image:$audit_missing" >&2
+        exit 1
+    fi
+    echo "wlroots ELF audit: PASS (tinywl + libwlroots-0.20.so)"
 fi
 
 # The EGL test links against staged Mesa .so files, so it must run after the

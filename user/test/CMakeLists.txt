@@ -211,6 +211,9 @@ add_user_dyn_elf(timerfd C SOURCES test_timerfd.c LINK_LIBS c STATIC_LIBS unity)
 # Layer 19: signalfd
 add_user_dyn_elf(signalfd C SOURCES test_signalfd.c LINK_LIBS c STATIC_LIBS unity)
 
+# Layer 20: inotify (kernel/bsd/inotify.c — init1/add_watch/rm_watch)
+add_user_dyn_elf(inotify C SOURCES test_inotify.c LINK_LIBS c STATIC_LIBS unity)
+
 # S14: CLOCK_REALTIME wall clock (CMOS RTC) + clockid set + clock_settime
 add_user_dyn_elf(test_clock_realtime C SOURCES test_clock_realtime.c LINK_LIBS c STATIC_LIBS unity)
 # S15: nanosleep/clock_nanosleep (relative + TIMER_ABSTIME) + EINTR rem

@@ -851,9 +851,12 @@ void sched_task_reap(xtask *proc) {
   uint32_t idx = proc->recv_tail;
   while (idx != proc->recv_head) {
     recv_msg *m = (recv_msg *)proc->recv_buf[idx];
-    if ((m->type == RECV_MSG || m->type == RECV_IOCTL) && m->msg.kmaddr) {
+    if (m->type == RECV_MSG && m->msg.kmaddr) {
       kfree(m->msg.kmaddr);
       m->msg.kmaddr = NULL;
+    } else if (m->type == RECV_IOCTL && m->ioctl.kmaddr) {
+      kfree(m->ioctl.kmaddr);
+      m->ioctl.kmaddr = NULL;
     }
     idx = (idx + 1) % RECV_QUEUE_SIZE;
   }

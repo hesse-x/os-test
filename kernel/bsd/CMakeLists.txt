@@ -8,7 +8,7 @@ add_kernel_object(bsd_obj
             socket.c pty.c elf_loader.c futex.c
             file_wq.c file_poll.c file_lock.c eventpoll.c eventfd.c timerfd.c signalfd.c
             netlink.c fops.c ipcfd.c random.c file_fault.c
-            evdev_broker.c kfifo.c
+            evdev_broker.c kfifo.c inotify.c
 )
 # Layer dependency graph: bsd_obj -> xcore_obj (transitively xcore_mem/arch_x64).
 target_link_libraries(bsd_obj PUBLIC xcore_obj)

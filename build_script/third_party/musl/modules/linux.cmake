@@ -11,10 +11,12 @@
 # kernel/xcore/trap.c — two-layer dispatch, either counts). Multi-path files
 # (e.g. pwritev2 tries SYS_pwritev2 then falls back to SYS_pwritev) are EXCLUDED
 # if ANY path's syscall is missing — otherwise an ENOSYS symbol leaks into libc.
-# Files needing complex kernel machinery (ptrace/xattr/fanotify/inotify/quotactl/
+# Files needing complex kernel machinery (ptrace/xattr/fanotify/quotactl/
 # module/klogctl/pivot_root/swap/setns/unshare/reboot/vhangup/process_vm/
-# copy_file_range/...) are excluded; they stay unimplemented. Files already
-# compiled by another musl module are excluded to avoid multi-define.
+# copy_file_range/...) are excluded; they stay unimplemented. inotify is NOW
+# implemented (kernel/bsd/inotify.c — init1/add_watch/rm_watch), so musl's
+# src/linux/inotify.c is included below. Files already compiled by another musl
+# module are excluded to avoid multi-define.
 #
 # NOT globbed on purpose: ~52 of the 67 src/linux files route to unimplemented
 # syscalls or drag heavy deps — a glob + giant REMOVE_ITEM is no clearer than an
@@ -38,6 +40,7 @@
 #   gettid.c       reads __pthread_self()->tid (no syscall; tid set in __init_tls via SYS_set_tid_address)
 #                                                                  [replaces sys_process.cc]
 #   ioperm.c       SYS_ioperm (xcore/trap.c)       [replaces unistd.cc; umask now from unistd.cmake src/stat/umask.c — unistd.cc deleted]
+#   inotify.c      SYS_inotify_init1/add_watch/rm_watch (bsd) [new symbols; inotify_init musl fallback is dead — init1 implemented]
 #   memfd_create.c SYS_memfd_create (bsd)          [replaces sys_process.cc; mman module does NOT compile it]
 #   prctl.c        SYS_prctl (bsd)                 [replaces musl_missing.c]
 #   sbrk.c         SYS_brk (bsd, fail stub)        [new symbol]
@@ -78,6 +81,7 @@ set(MUSL_LINUX_SOURCES
     ${MUSL_DIR}/src/linux/getrandom.c
     ${MUSL_DIR}/src/linux/gettid.c
     ${MUSL_DIR}/src/linux/ioperm.c
+    ${MUSL_DIR}/src/linux/inotify.c
     ${MUSL_DIR}/src/linux/memfd_create.c
     ${MUSL_DIR}/src/linux/prctl.c
     ${MUSL_DIR}/src/linux/sbrk.c

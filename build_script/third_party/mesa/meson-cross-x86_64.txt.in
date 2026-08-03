@@ -95,14 +95,14 @@ python3.12 = '@PYTHON@'
 # probe AND makes the Mesa .so products carry an explicit DT_NEEDED libc.so
 # (correct — they depend on libc). For .so links meson passes -shared, which skips
 # crt entirely, so -lc there only adds the libc dependency (no _start/crt clash).
-c_args = ['-m64', '-fPIC', '--sysroot=@SYSROOT@', '-nodefaultlibs', '-fvisibility=hidden', '-Wno-macro-redefined', '-DXOS_NO_INOTIFY=1']
+c_args = ['-m64', '-fPIC', '--sysroot=@SYSROOT@', '-nodefaultlibs', '-fvisibility=hidden', '-Wno-macro-redefined']
 # cpp_args adds -stdlib=libc++ (vs c_args): Mesa's C++ (libglsl, 51 .cpp — structurally
 # forced by any gallium driver) needs a C++ stdlib. The sysroot has musl (C only), so the
 # C++ stdlib is libc++ (built by build_libcxx.sh under --cxx, installed into the sysroot's
 # include/c++/v1 + usr/lib). -stdlib=libc++ makes clang resolve C++ headers from the sysroot's
 # c++/v1 (with --sysroot already constraining the search). -nodefaultlibs is link-only and
 # does not affect compile, so it coexists with -stdlib=libc++ here.
-cpp_args = ['-m64', '-fPIC', '--sysroot=@SYSROOT@', '-nodefaultlibs', '-stdlib=libc++', '-nostdinc++', '-I@SYSROOT@/usr/include/c++/v1', '-fvisibility=hidden', '-Wno-macro-redefined', '-DXOS_NO_INOTIFY=1']
+cpp_args = ['-m64', '-fPIC', '--sysroot=@SYSROOT@', '-nodefaultlibs', '-stdlib=libc++', '-nostdinc++', '-I@SYSROOT@/usr/include/c++/v1', '-fvisibility=hidden', '-Wno-macro-redefined']
 # -nodefaultlibs ALSO in *_link_args (not just *_args): meson passes c_args/cpp_args
 # to compile only and *_link_args to link only — they do not cross. With -nodefaultlibs
 # absent from the link step, clang++ re-adds its implicit runtime, and on this host the

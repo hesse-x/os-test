@@ -19,6 +19,7 @@
 #include "arch/x64/utils.h"
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/inotify.h"
 #include "kernel/bsd/mount.h"
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/atomic.h"
@@ -294,6 +295,8 @@ static struct inode *tmpfs_create(struct inode *dir, const char *name,
   struct inode *ip = tmpfs_new_node(parent_ti, name, type, mode, 1);
   if (!ip)
     return ERR_PTR(-ENOMEM);
+  // IN_CREATE on the parent dir (no ti->lock held here).
+  inotify_inode_event(dir, IN_CREATE, 0, name);
   return ip; /* i_count=2：1 目录项 + 1 返回给调用者(由调用者 put) */
 }
 
@@ -420,6 +423,8 @@ static int tmpfs_mkdir(struct inode *dir, const char *name, int mode) {
   spin_lock(&ip->i_lock);
   ip->nlink = 2;
   spin_unlock(&ip->i_lock);
+  // IN_CREATE on the parent dir (no ti->lock/i_lock held here).
+  inotify_inode_event(dir, IN_CREATE, 0, name);
   return 0;
 }
 
@@ -452,6 +457,10 @@ static int tmpfs_unlink(struct inode *dir, const char *name) {
         spin_unlock(&ip->i_lock);
       }
       spin_unlock(&parent_ti->lock);
+      // IN_DELETE on the parent (name) + IN_DELETE_SELF on the child. ti->lock
+      // released above; ip still holds its ref until the inode_put below.
+      inotify_inode_event(dir, IN_DELETE, 0, name);
+      inotify_inode_event(ip, IN_DELETE_SELF, 0, NULL);
       inode_put(ip); /* 摘目录项的引用；若 i_count 归 0 触发 inode kfree */
       if (last && !is_dir) {
         /* 普通文件且无打开 fd：回收 data（socket inode 的 i_priv 归 socket 层）
@@ -650,6 +659,9 @@ static int tmpfs_rmdir(struct inode *dir, const char *name) {
       spin_lock(&dir->i_lock);
       dir->nlink--;
       spin_unlock(&dir->i_lock);
+      // IN_DELETE on the parent (name) + IN_DELETE_SELF on the removed dir.
+      inotify_inode_event(dir, IN_DELETE, 0, name);
+      inotify_inode_event(ip, IN_DELETE_SELF, 0, NULL);
       kfree(c);
       inode_put(ip);
       return 0;
@@ -843,6 +855,8 @@ static ssize_t tmpfs_write(struct xtask *proc, struct file *f, const void *buf,
   ip->size = ti->size;
   f->offset = off + count;
   spin_unlock(&ti->lock);
+  // IN_MODIFY on the written file (ti->lock released above).
+  inotify_inode_event(ip, IN_MODIFY, 0, NULL);
   return (ssize_t)count;
 }
 

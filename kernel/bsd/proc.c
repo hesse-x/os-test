@@ -22,6 +22,7 @@
 #include "kernel/bsd/file_lock.h"
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/inotify.h"
 #include "kernel/bsd/ipcfd.h"
 #include "kernel/bsd/mount.h" // mount_of_inode, MS_NOSUID (execve setuid gate)
 #include "kernel/bsd/netlink.h"
@@ -349,6 +350,13 @@ void file_put(struct file *f) {
       kfree(f->signalfd);
       f->signalfd = NULL;
     }
+    break;
+  case FD_INOTIFY:
+    // Detaches from the global index, synchronize_rcu()s out trigger-side
+    // readers, then frees watches/queue/instance. f->wq is NULL for inotify
+    // (wq is embedded in the instance), so the generic kfree(f->wq) below is
+    // a no-op — no double-free.
+    inotify_release(f);
     break;
   case FD_SYNC_FILE:
     /* FD_SYNC_FILE (plan2): drop the fence ref the fd holds. Defined in the

@@ -14,6 +14,7 @@
 #include "kernel/bsd/file_poll.h"
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/inotify.h"
 #include "kernel/bsd/netlink.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/pty.h"
@@ -182,6 +183,8 @@ __poll file_poll(struct file *f, __poll events) {
       if (events & POLLOUT)
         revents |= POLLOUT;
     }
+  } else if (f->type == FD_INOTIFY) {
+    revents |= inotify_poll(f, events);
   } else {
     // FD_SHM etc: always ready
     if (events & POLLIN)

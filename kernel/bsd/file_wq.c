@@ -9,6 +9,7 @@
 #include "kernel/bsd/eventpoll.h" // struct eventpoll (ep->wq)
 #include "kernel/bsd/file_poll.h"
 #include "kernel/bsd/inode.h"   // struct inode (i_priv for FD_DEV wq routing)
+#include "kernel/bsd/inotify.h" // inotify (embedded wq)
 #include "kernel/bsd/netlink.h" // struct netlink_sock (wq field)
 #include "kernel/bsd/pty.h"     // struct pty (wq field)
 #include "kernel/bsd/socket.h"  // struct unix_sock (wq field)
@@ -79,6 +80,12 @@ wait_queue_head *file_wq_get(struct file *f) {
       return f->wq;
     return wq_alloc(&f->wq);
   }
+  /* FD_INOTIFY: embedded wq inside the instance (NOT f->wq lazy). The trigger
+   * side reaches it directly via &inst->wq with no inst→file back-ref, which
+   * avoids a UAF across close (inotify.md §2.4/§6.3). Must precede the generic
+   * f->wq fallback below. */
+  if (f->type == FD_INOTIFY && f->private_data)
+    return &((inotify *)f->private_data)->wq;
   /* Generic per-file wq (eventfd/timerfd/signalfd/other). */
   if (f->wq)
     return f->wq;

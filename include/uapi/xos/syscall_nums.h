@@ -108,6 +108,13 @@
 #define SYS_ACCEPT4 288
 #define SYS_SIGNALFD4 289
 #define SYS_EVENTFD2 290
+// inotify (Linux x86-64 numbers; musl src/linux/inotify.c routes here).
+// inotify_init (253) is musl's fallback when init1 returns -ENOSYS with
+// flags==0 — not routed since init1 is implemented (the fallback branch is
+// dead). See kernel/bsd/inotify.c.
+#define SYS_INOTIFY_INIT1 294
+#define SYS_INOTIFY_ADD_WATCH 254
+#define SYS_INOTIFY_RM_WATCH 255
 #define SYS_EPOLL_CREATE1 291
 #define SYS_OPENAT 257
 #define SYS_NEWFSTATAT 262
