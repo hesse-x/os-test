@@ -15,7 +15,22 @@ int shell_run_command(const char *source);
 int shell_requested_exit(void);
 
 // Interactive-shell setup: own process group, ignore terminal signals, take
-// the controlling terminal as foreground. Called once from main; idempotent.
+// the controlling terminal as foreground, install the SIGCHLD self-pipe.
+// Called once from main; idempotent.
 void shell_init_jobcontrol(void);
 
-#endif
+// M2-B: drain the SIGCHLD self-pipe wake bytes.
+void shell_drain_sigchld(void);
+// M2-B: non-blocking reap of reportable child state changes into the job
+// table + background completion notices. Called by the main loop after poll
+// wakes, before the prompt, and after each foreground wait.
+void shell_reap_jobs(void);
+// M2-B: SIGHUP+SIGCONT every running/stopped job on shell exit, then a
+// bounded drain. Called from the interactive loop on `exit` / EOF.
+void shell_hangup_jobs(void);
+// M2-B: block until stdin is readable or a SIGCHLD wake byte arrives, so a
+// background child exit can never leave the shell stuck in a blocking read.
+// Returns 1 = stdin ready, 0 = wake-only.
+int shell_wait_input(void);
+
+#endif // USER_SHELL_COMMAND_H

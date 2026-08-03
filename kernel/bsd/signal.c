@@ -18,6 +18,7 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/proc.h"
+#include "kernel/bsd/pty.h"
 #include "kernel/bsd/signalfd.h"
 #include "kernel/bsd/syscall.h"
 #include "kernel/xcore/kpi.h"
@@ -437,10 +438,12 @@ void check_pending_signals(trapframe *tf) {
       case DA_IGN:
         continue;
       case DA_STOP:
-        // 02: a syscall interrupted then stopped surfaces as -EINTR on resume
-        // (no restart across a stop/continue cycle).
+        // A stopped task resumes on this kernel stack after SIGCONT, so prepare
+        // the user trapframe now. Leaving restart_armed set is insufficient:
+        // the next syscall entry clears it before dispatch.
         if (current_task->restart_armed) {
-          tf->rax = (uint64_t)(int64_t)-EINTR;
+          tf->rip -= 2;
+          tf->rax = (uint64_t)current_task->restart_nr;
           current_task->restart_armed = false;
         }
         printk(LOG_INFO, "signal: pid=%d stopped by signal %d\n", proc->pid,
@@ -648,6 +651,121 @@ int pgsignal(pid_t pgid, int sig) {
     }
   }
   return found > 0 ? 0 : -ESRCH;
+}
+
+// ===================== M2-A: orphaned pgrp + tty hangup =====================
+// POSIX: a process group is orphaned when no member has a parent in the same
+// session but outside the group. Used by the PTY foreground-access gate to
+// decide EIO vs SIGTTIN/SIGTTOU, and by session-leader-exit cleanup to signal
+// newly-orphaned stopped groups. Caller MUST hold tasks_lock.
+bool pgrp_is_orphaned(pid_t pgid, pid_t sid) {
+  for (int i = 0; i < MAX_PROC; i++) {
+    xtask *t = tasks[i];
+    if (!t || t->pid < 0 || !t->proc)
+      continue;
+    if (t->proc->pgid != pgid || t->proc->sid != sid)
+      continue;
+    // t is a member of the group. Does its parent live in the same session
+    // but outside this group?
+    pid_t ppid = t->proc->signal ? t->proc->signal->parent_pid : -1;
+    if (ppid < 0 || ppid >= MAX_PROC)
+      continue;
+    xtask *parent = tasks[ppid];
+    if (!parent || parent->pid != ppid || !parent->proc)
+      continue;
+    if (parent->proc->sid == sid && parent->proc->pgid != pgid)
+      return false;
+  }
+  return true;
+}
+
+// Hang up a controlling terminal. See tty_hangup comment in signal.h. Sends
+// SIGHUP then SIGCONT to the foreground group, clears session ownership and
+// every session member's ctty ref, wakes blocked slave I/O. Idempotent.
+void tty_hangup(struct pty *pty) {
+  if (!pty)
+    return;
+  pid_t sid, fg;
+  spin_lock(&tasks_lock);
+  sid = pty->t_sid;
+  fg = pty->t_pgid;
+  if (sid == 0) {
+    // No session attached — just wake any blocked I/O.
+    spin_unlock(&tasks_lock);
+    if (pty->wq)
+      __wake_up(pty->wq, POLLHUP | POLLIN | POLLOUT);
+    return;
+  }
+  pty->t_sid = 0;
+  pty->t_pgid = 0;
+  // Detach every process still pointing at this pty as its ctty. Covers the
+  // dying session leader (caller) and all remaining session members so no
+  // dangling ctty ref survives into a reused session.
+  for (int i = 0; i < MAX_PROC; i++) {
+    xtask *t = tasks[i];
+    if (t && t->pid >= 0 && t->proc && t->proc->sid == sid &&
+        t->proc->ctty == pty)
+      t->proc->ctty = NULL;
+  }
+  spin_unlock(&tasks_lock);
+
+  if (pty->wq)
+    __wake_up(pty->wq, POLLHUP | POLLIN | POLLOUT);
+  // SIGHUP the foreground group, then SIGCONT so a stopped fg job actually
+  // runs to handle SIGHUP (and does not linger STOPPED forever).
+  if (fg > 0) {
+    pgsignal(fg, SIGHUP);
+    pgsignal(fg, SIGCONT);
+  }
+}
+
+// Session leader is exiting: hang up its ctty and send SIGHUP+SIGCONT to every
+// stopped process group in the session (those groups are now orphaned). proc
+// is still alive (pre-ZOMBIE). See session_leader_exit_cleanup in signal.h.
+void session_leader_exit_cleanup(xtask *proc) {
+  if (!proc || !proc->proc)
+    return;
+  pid_t sid = proc->proc->sid;
+  if (sid != proc->pid)
+    return; // not a session leader
+  struct pty *ctty = proc->proc->ctty;
+
+  // Collect the distinct stopped process groups in this session (bounded; a
+  // job-control shell with >16 concurrent stopped groups is out of scope for
+  // the first version and the excess simply gets the ctty hangup below).
+  pid_t stopped[16];
+  int nsig = 0;
+  spin_lock(&tasks_lock);
+  for (int i = 0; i < MAX_PROC; i++) {
+    xtask *t = tasks[i];
+    if (!t || t->pid < 0 || !t->proc)
+      continue;
+    if (t->proc->sid != sid)
+      continue;
+    if (t->state == STOPPED) {
+      pid_t g = t->proc->pgid;
+      int dup = 0;
+      for (int k = 0; k < nsig; k++)
+        if (stopped[k] == g) {
+          dup = 1;
+          break;
+        }
+      if (!dup && nsig < 16)
+        stopped[nsig++] = g;
+    }
+  }
+  spin_unlock(&tasks_lock);
+
+  // tty_hangup clears the pty session/ctty refs and signals the *foreground*
+  // group; the loop below catches stopped *background* groups that tty_hangup
+  // does not reach. (The fg group may appear in both — pgsignal is idempotent
+  // enough that a double SIGHUP just re-pends the bit.)
+  if (ctty)
+    tty_hangup(ctty);
+  for (int k = 0; k < nsig; k++) {
+    pgsignal(stopped[k], SIGHUP);
+    pgsignal(stopped[k], SIGCONT);
+  }
 }
 
 // ===================== BSD syscall: kill =====================

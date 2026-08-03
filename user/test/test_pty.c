@@ -351,11 +351,14 @@ static void interactive_ctrl_c(int use_pipe) {
   int ready_ok = pty_wait_ready(master, acc, &accn, use_pipe ? 2 : 1, 8000);
 
   /* ^C: ldisc flushes input, echoes ^C, SIGINTs the job pgid. The shell —
-   * own group, SIGINT ignored — survives; it reports 128+SIGINT via $? once
-   * it returns to the loop. Writing the probe right away is safe: the ldisc
-   * buffers it until the shell reads. */
+   * own group, SIGINT ignored — survives and regains the terminal. Wait for
+   * its next prompt before sending the probe so the probe cannot race the
+   * signal character's input flush. */
   int ctrlc_ok = ready_ok && write(master, "\x03", 1) == 1;
-  int probe_ok = ctrlc_ok && write(master, "echo $?\r", 8) == 8;
+  accn = 0;
+  acc[0] = '\0';
+  int reprompt_ok = ctrlc_ok && pty_wait_for(master, acc, &accn, "> ", 8000);
+  int probe_ok = reprompt_ok && write(master, "echo $?\r", 8) == 8;
   int status_ok = probe_ok && pty_wait_for(master, acc, &accn, "130", 8000);
 
   close(master);
@@ -366,6 +369,7 @@ static void interactive_ctrl_c(int use_pipe) {
   TEST_ASSERT_TRUE(write_ok);
   TEST_ASSERT_TRUE(ready_ok);
   TEST_ASSERT_TRUE(ctrlc_ok);
+  TEST_ASSERT_TRUE(reprompt_ok);
   TEST_ASSERT_TRUE(probe_ok);
   TEST_ASSERT_TRUE(status_ok);
 }
@@ -518,6 +522,99 @@ void test_pty_master_close_hup(void) {
   TEST_ASSERT_EQUAL_INT(129, WEXITSTATUS(status));
 }
 
+// ---- M2-A: background slave read -> SIGTTIN, fg+CONT resumes the read ------
+void test_pty_bg_read_sigttin(void) {
+  int master;
+  pid_t pid = forkpty(&master, NULL, NULL, NULL);
+  TEST_ASSERT_TRUE(pid >= 0);
+  if (pid == 0) {
+    execl("/test/test_pty_helper.elf", "h", "--bgread", (char *)NULL);
+    _exit(127);
+  }
+  fcntl(master, F_SETFL, O_NONBLOCK);
+  char acc[ACC_CAP];
+  int accn = 0;
+  acc[0] = '\0';
+  /* BGSTOPPED:21 = the bg child stopped on SIGTTIN (21). */
+  int stop_ok = pty_wait_for(master, acc, &accn, "BGSTOPPED:21", 8000);
+  /* The slave is canonical: submit a line so the resumed read can return. */
+  int write_ok = stop_ok && write(master, "Z\r", 2) == 2;
+  int read_ok = write_ok && pty_wait_for(master, acc, &accn, "BGREAD:Z", 8000);
+  int exit_ok = read_ok && pty_wait_for(master, acc, &accn, "BGEXIT:0", 8000);
+  close(master);
+  int status = 0;
+  pty_reap(pid, 4000, &status);
+  TEST_ASSERT_TRUE(stop_ok);
+  TEST_ASSERT_TRUE(write_ok);
+  TEST_ASSERT_TRUE(read_ok);
+  TEST_ASSERT_TRUE(exit_ok);
+}
+
+// ---- M2-A: background slave write — allowed by default, SIGTTOU on TOSTOP --
+void test_pty_bg_write_tostop(void) {
+  /* Without TOSTOP: a background write succeeds and the child exits 0. */
+  int master;
+  pid_t pid = forkpty(&master, NULL, NULL, NULL);
+  TEST_ASSERT_TRUE(pid >= 0);
+  if (pid == 0) {
+    execl("/test/test_pty_helper.elf", "h", "--bgwrite", (char *)NULL);
+    _exit(127);
+  }
+  fcntl(master, F_SETFL, O_NONBLOCK);
+  char acc[ACC_CAP];
+  int accn = 0;
+  acc[0] = '\0';
+  int w_ok = pty_wait_for(master, acc, &accn, "BGWROTE", 8000);
+  int e_ok = pty_wait_for(master, acc, &accn, "BGWEXIT:0", 8000);
+  close(master);
+  int s = 0;
+  pty_reap(pid, 4000, &s);
+  TEST_ASSERT_TRUE(w_ok);
+  TEST_ASSERT_TRUE(e_ok);
+
+  /* With TOSTOP: the background write is gated -> SIGTTOU (22) -> stop. */
+  pid = forkpty(&master, NULL, NULL, NULL);
+  TEST_ASSERT_TRUE(pid >= 0);
+  if (pid == 0) {
+    execl("/test/test_pty_helper.elf", "h", "--bgwrite", "tostop",
+          (char *)NULL);
+    _exit(127);
+  }
+  fcntl(master, F_SETFL, O_NONBLOCK);
+  accn = 0;
+  acc[0] = '\0';
+  int sw_ok = pty_wait_for(master, acc, &accn, "BGSTOPPED_W:22", 8000);
+  close(master);
+  s = 0;
+  pty_reap(pid, 4000, &s);
+  TEST_ASSERT_TRUE(sw_ok);
+}
+
+// ---- M2-A: tcsetpgrp errno matrix (non-ctty / bogus pgid / cross-session) -
+void test_pty_tcsetpgrp_errnos(void) {
+  int master;
+  pid_t pid = forkpty(&master, NULL, NULL, NULL);
+  TEST_ASSERT_TRUE(pid >= 0);
+  if (pid == 0) {
+    execl("/test/test_pty_helper.elf", "h", "--ttioerrs", (char *)NULL);
+    _exit(127);
+  }
+  fcntl(master, F_SETFL, O_NONBLOCK);
+  char acc[ACC_CAP];
+  int accn = 0;
+  acc[0] = '\0';
+  /* R1:-1:25 (ENOTTY)  R2:-1:1 (EPERM)  R3:-1:25 (ENOTTY) */
+  int r1 = pty_wait_for(master, acc, &accn, "R1:-1:25", 8000);
+  int r2 = r1 && pty_wait_for(master, acc, &accn, "R2:-1:1", 8000);
+  int r3 = r2 && pty_wait_for(master, acc, &accn, "R3:-1:25", 8000);
+  close(master);
+  int s = 0;
+  pty_reap(pid, 4000, &s);
+  TEST_ASSERT_TRUE(r1);
+  TEST_ASSERT_TRUE(r2);
+  TEST_ASSERT_TRUE(r3);
+}
+
 int main(void) {
   alarm(90); /* backstop: a stuck kernel/shell path must not hang the runner */
   UNITY_BEGIN();
@@ -535,5 +632,8 @@ int main(void) {
   RUN_TEST(test_pty_argv_path);
   RUN_TEST(test_pty_resize_winch);
   RUN_TEST(test_pty_master_close_hup);
+  RUN_TEST(test_pty_bg_read_sigttin);
+  RUN_TEST(test_pty_bg_write_tostop);
+  RUN_TEST(test_pty_tcsetpgrp_errnos);
   return UNITY_END();
 }

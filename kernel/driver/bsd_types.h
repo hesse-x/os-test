@@ -157,6 +157,7 @@ typedef struct proc {
   uint32_t sgid; // S19: saved-set GID (mirror kernel/bsd/proc.h)
   uint32_t umask;
   uint8_t exit_signal; // S19: clone exit signal (mirror kernel/bsd/proc.h)
+  uint8_t did_exec;    // M2-A: set at exec commit (mirror kernel/bsd/proc.h)
 
   // === RLIMIT_NOFILE (mirror kernel/bsd/proc.h) ===
   uint64_t rlimit_nofile_cur; // 0 = default MAX_FD

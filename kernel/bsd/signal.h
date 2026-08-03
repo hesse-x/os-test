@@ -7,6 +7,7 @@
 #ifndef KERNEL_BSD_SIGNAL_H
 #define KERNEL_BSD_SIGNAL_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "kernel/xcore/atomic.h"
@@ -48,6 +49,29 @@ struct signal_struct {
 // otherwise. Shared by sys_kill(neg pid), the PTY line discipline (signal
 // characters → foreground pgid), TIOCSWINSZ→SIGWINCH and master-close→SIGHUP.
 int pgsignal(pid_t pgid, int sig);
+
+struct pty; // forward decl — tty_hangup lives in signal.c (no pty.h include
+            // here to avoid a header cycle; pty.c/signal.c include pty.h)
+
+// M2-A: True if process group `pgid` (in session `sid`) is orphaned — no member
+// has a parent in the same session but outside the group. POSIX definition.
+// Caller MUST hold tasks_lock (scans tasks[]). Encapsulated here so the rule
+// does not scatter across PTY and signal code.
+bool pgrp_is_orphaned(pid_t pgid, pid_t sid);
+
+// M2-A: Hang up a controlling terminal. Sends SIGHUP then SIGCONT to the
+// foreground process group (so a stopped fg job can handle SIGHUP), clears the
+// pty's t_sid/t_pgid, clears the ctty pointer of every process in the pty's
+// session, and wakes blocked slave I/O. Idempotent (no-op if no session is
+// attached). Triggered by master-close and session-leader exit. No user copies
+// — safe to call from do_exit before ZOMBIE while proc is alive.
+void tty_hangup(struct pty *pty);
+
+// M2-A: Called when a session leader is exiting. Hangs up its controlling
+// terminal and sends SIGHUP+SIGCONT to every *stopped* process group in the
+// session (those groups are now orphaned). proc must still be alive
+// (pre-ZOMBIE).
+void session_leader_exit_cleanup(xtask *proc);
 
 struct signal_struct *signal_create(void);
 void signal_put(struct signal_struct *sig);

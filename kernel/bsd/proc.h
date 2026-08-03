@@ -70,6 +70,12 @@ typedef struct proc {
   // fork/proc_create default to SIGCHLD. uint8_t suffices: NSIG=65,
   // SIGRTMAX=64.
   uint8_t exit_signal;
+  // M2-A: set at exec commit. setpgid(child,...) after the child has exec'd
+  // returns EACCES (POSIX); this flag is the signal that the child crossed the
+  // point-of-no-return and may no longer be reparented into a new pgrp. Packed
+  // into the alignment padding before rlimit_nofile_cur (keeps sizeof(proc)
+  // and the files/signal offset asserts unchanged).
+  uint8_t did_exec;
 
   // === RLIMIT_NOFILE (per-process) ===
   // prlimit64 set/get round-trip. The OS does not enforce rlimits (the fd table

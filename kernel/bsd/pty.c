@@ -25,6 +25,7 @@
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 
+#include <xos/capability.h>
 #include <xos/errno.h>
 #include <xos/ioctl.h>
 #include <xos/signal.h>
@@ -595,8 +596,79 @@ int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
   return (int64_t)written;
 }
 
+// ===================== M2-A: foreground access gate =====================
+// Returns 0 = allow the slave access, -EIO = fail with EIO, -ERESTART = a
+// job-control signal was sent to the caller's pgrp and the syscall should
+// restart after the signal is processed (a SIGTTIN/SIGTTOU default-stop leaves
+// the caller stopped; on SIGCONT the syscall re-enters and re-evaluates).
+//
+// Only slave-side access is gated; master I/O is never subject to job control
+// (the terminal emulator owns the master). A caller that does not hold this
+// pty as its controlling terminal, or whose session does not match t_sid, is
+// treated as ordinary I/O — redirected-into-the-pty processes are NOT
+// background jobs.
+static int pty_fg_gate(struct pty *pty, xtask *t, enum tty_access_op op) {
+  proc *p = t->proc;
+  if (!p || !p->ctty || p->ctty != pty)
+    return 0;
+  if (pty->t_sid == 0 || p->sid != pty->t_sid)
+    return 0;
+
+  // Snapshot foreground pgid + orphan status under tasks_lock so the gate
+  // decision is consistent with a concurrent tcsetpgrp. pgsignal is deferred
+  // to after the unlock (tasks_lock → scheduler_lock order; signal delivery
+  // takes scheduler_lock in wake paths).
+  pid_t fg;
+  bool orphaned;
+  spin_lock(&tasks_lock);
+  fg = pty->t_pgid;
+  orphaned =
+      (fg != 0 && p->pgid != fg) ? pgrp_is_orphaned(p->pgid, p->sid) : false;
+  spin_unlock(&tasks_lock);
+
+  if (fg == 0 || p->pgid == fg)
+    return 0; // foreground (or no fg set yet) → allow
+
+  int sig = (op == TTY_READ) ? SIGTTIN : SIGTTOU;
+  // Disposition of the *calling* process (Linux uses the caller's action).
+  bool ign_blocked =
+      (p->sig_blocked & (1ULL << (sig - 1))) ||
+      (p->signal->action[sig].__sigaction_handler._sa_handler == SIG_IGN);
+
+  if (op == TTY_READ) {
+    // Background read: SIGTTIN; ignored/blocked or orphaned group → EIO.
+    if (ign_blocked || orphaned)
+      return -EIO;
+    pgsignal(p->pgid, SIGTTIN);
+    return -ERESTART;
+  }
+
+  // Write: only TOSTOP makes background writes signal. ioctl always signals
+  // (state-changing ioctls are gated by the caller; reads like TCGETS never
+  // reach here).
+  if (op == TTY_WRITE && !(pty->t_termios.c_lflag & TOSTOP))
+    return 0;
+
+  // TOSTOP write, or state-changing ioctl: SIGTTOU. An ignored/blocked
+  // SIGTTOU permits the operation even for an orphaned group; job-control
+  // shells rely on this exception to reclaim the terminal with tcsetpgrp().
+  if (ign_blocked)
+    return 0;
+  if (orphaned)
+    return -EIO;
+  pgsignal(p->pgid, SIGTTOU);
+  return -ERESTART;
+}
+
 // ===================== pty_slave_read =====================
 int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
+  // M2-A: foreground access gate. Must run before entering the wait queue
+  // and re-run after every wake (a SIGTTIN that stops the caller may be
+  // followed by a tcsetpgrp making it foreground before SIGCONT resumes).
+  int gate = pty_fg_gate(pty, proc, TTY_READ);
+  if (gate)
+    return (int64_t)gate;
+
   if (pty->master_refs == 0)
     return -EPIPE;
 
@@ -615,6 +687,14 @@ int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
   list_init(&wait.node);
   add_wait_queue(pty->wq, &wait);
   for (;;) {
+    // Re-evaluate the foreground gate after a wake: terminal ownership may
+    // have changed while we were blocked.
+    gate = pty_fg_gate(pty, proc, TTY_READ);
+    if (gate) {
+      proc->state = RUNNING;
+      remove_wait_queue(pty->wq, &wait);
+      return (int64_t)gate;
+    }
     int avail = canon ? ldisc_canon_avail(pty)
                       : pty_ring_avail(pty->m_to_s_head, pty->m_to_s_tail);
     if (avail > 0)
@@ -666,6 +746,12 @@ int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
 // =====================
 int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
                         size_t len) {
+  // M2-A: foreground access gate (TOSTOP only). Must run before writing the
+  // first byte and re-run after a blocking wake.
+  int gate = pty_fg_gate(pty, proc, TTY_WRITE);
+  if (gate)
+    return (int64_t)gate;
+
   if (pty->master_refs == 0)
     return -EPIPE;
 
@@ -674,6 +760,13 @@ int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
   size_t written = 0;
 
   while (written < len) {
+    // Re-evaluate gate after a wake: foreground may have changed.
+    gate = pty_fg_gate(pty, proc, TTY_WRITE);
+    if (gate) {
+      if (written > 0)
+        break;
+      return (int64_t)gate;
+    }
     const uint8_t ch = ((const uint8_t *)buf)[written];
     int wrote = 0;
 
@@ -745,6 +838,11 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
   case TCSETS:  // 0x5402
   case TCSETSW: // 0x5403 — no output drain (kept identical to TCSETS)
   {
+    // M2-A: background state-changing ioctl → SIGTTOU. Foreground (or a
+    // process not holding this pty as ctty) is allowed through.
+    int gate = pty_fg_gate(pty, current_task, TTY_IOCTL);
+    if (gate)
+      return gate;
     struct termios nt;
     if (copy_from_user(&nt, (const void __user *)arg, sizeof(struct termios)))
       return -EFAULT;
@@ -761,6 +859,9 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
 
   case TCSETSF: // 0x5404 — set termios + flush both directions
   {
+    int gate = pty_fg_gate(pty, current_task, TTY_IOCTL);
+    if (gate)
+      return gate;
     struct termios nt;
     if (copy_from_user(&nt, (const void __user *)arg, sizeof(struct termios)))
       return -EFAULT;
@@ -772,7 +873,14 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
 
   case TIOCGPGRP: // 0x540F
   {
-    pid_t pgid = pty->t_pgid;
+    // M2-A: fd must be the caller's controlling terminal.
+    if (!current_proc->ctty || current_proc->ctty != pty || pty->t_sid == 0 ||
+        pty->t_sid != current_proc->sid)
+      return -ENOTTY;
+    pid_t pgid;
+    spin_lock(&tasks_lock);
+    pgid = pty->t_pgid;
+    spin_unlock(&tasks_lock);
     if (copy_to_user((void __user *)arg, &pgid, sizeof(pid_t)))
       return -EFAULT;
     return 0;
@@ -780,28 +888,42 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
 
   case TIOCSPGRP: // 0x5410
   {
+    // M2-A: fd must be the caller's controlling terminal; the target group
+    // must exist in the caller's session. Background caller → SIGTTOU. The
+    // old "pgid == sid direct pass" bypass is removed — even the session
+    // leader must name a real group.
+    if (!current_proc->ctty || current_proc->ctty != pty || pty->t_sid == 0 ||
+        pty->t_sid != current_proc->sid)
+      return -ENOTTY;
+    int gate = pty_fg_gate(pty, current_task, TTY_IOCTL);
+    if (gate)
+      return gate;
     pid_t pgid;
     if (copy_from_user(&pgid, (const void __user *)arg, sizeof(pid_t)))
       return -EFAULT;
     if (pgid <= 0)
       return -EINVAL;
-    // The pgid must name a real process group belonging to the caller's
-    // session (Linux: tcsetpgrp EPERM otherwise). pgid == caller's own pid
-    // is the canonical "make myself foreground" case.
-    if (pgid != current_proc->sid) {
-      int found = 0;
+
+    spin_lock(&tasks_lock);
+    bool found = false;
+    if (pgid == current_proc->pgid) {
+      found = true; // joining/confirming own group as foreground
+    } else {
       for (int p = 0; p < MAX_PROC; p++) {
-        if (tasks[p] && tasks[p]->pid == p && tasks[p]->proc &&
-            tasks[p]->proc->pgid == pgid &&
-            tasks[p]->proc->sid == current_proc->sid) {
-          found = 1;
+        xtask *t = tasks[p];
+        if (t && t->pid == p && t->proc && t->proc->pgid == pgid &&
+            t->proc->sid == current_proc->sid) {
+          found = true;
           break;
         }
       }
-      if (!found)
-        return -EPERM;
+    }
+    if (!found) {
+      spin_unlock(&tasks_lock);
+      return -EPERM;
     }
     pty->t_pgid = pgid;
+    spin_unlock(&tasks_lock);
     return 0;
   }
 
@@ -813,6 +935,9 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
 
   case TIOCSWINSZ: // 0x5414
   {
+    int gate = pty_fg_gate(pty, current_task, TTY_IOCTL);
+    if (gate)
+      return gate;
     struct winsize old_ws = pty->t_winsize;
     if (copy_from_user(&pty->t_winsize, (const void __user *)arg,
                        sizeof(struct winsize)))
@@ -840,14 +965,50 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
 
   case TIOCSCTTY: // 0x540E — set controlling terminal
   {
+    // M2-A: caller must be a session leader. Idempotent if already holding
+    // this tty. A tty owned by another session may only be stolen with
+    // force+privilege (CAP_SYS_ADMIN); the old session's ctty refs are then
+    // cleared. The force arg is not an unconditional license.
     if (current_proc->sid != current_task->pid)
       return -EPERM;
     int force = (int)(uintptr_t)arg;
-    if (current_proc->ctty && !force)
-      return -EINVAL;
+
+    spin_lock(&tasks_lock);
+    if (current_proc->ctty == pty) {
+      // Idempotent: already controlling this tty. Refresh fg to caller's
+      // group (matches the first-acquisition path).
+      pty->t_sid = current_proc->sid;
+      pty->t_pgid = current_proc->pgid;
+      spin_unlock(&tasks_lock);
+      return 0;
+    }
+    // Tty already owned by a different session?
+    if (pty->t_sid != 0 && pty->t_sid != current_proc->sid) {
+      if (!(force && capable(CAP_SYS_ADMIN))) {
+        spin_unlock(&tasks_lock);
+        return -EPERM;
+      }
+      // Steal: clear the old session members' ctty refs + ownership.
+      pid_t old_sid = pty->t_sid;
+      for (int p = 0; p < MAX_PROC; p++) {
+        xtask *t = tasks[p];
+        if (t && t->pid >= 0 && t->proc && t->proc->sid == old_sid &&
+            t->proc->ctty == pty)
+          t->proc->ctty = NULL;
+      }
+      pty->t_sid = 0;
+      pty->t_pgid = 0;
+    } else if (current_proc->ctty && current_proc->ctty != pty) {
+      // Caller already controls a different tty: refuse unless force.
+      if (!force) {
+        spin_unlock(&tasks_lock);
+        return -EINVAL;
+      }
+    }
     current_proc->ctty = pty;
     pty->t_sid = current_proc->sid;
     pty->t_pgid = current_proc->pgid;
+    spin_unlock(&tasks_lock);
     return 0;
   }
 

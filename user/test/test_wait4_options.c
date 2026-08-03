@@ -112,6 +112,22 @@ void test_wait4_unknown_option_einval(void) {
   TEST_ASSERT_EQUAL_INT(child, r);
 }
 
+/* WCONTINUED is bit 3 in the Linux/musl wait ABI. Keep this direct syscall
+ * check so the kernel cannot accidentally confuse it with waitid's WEXITED
+ * bit (4), which makes shell foreground waits fail with EINVAL. */
+void test_wait4_accepts_wcontinued_bit(void) {
+  pid_t child = fork();
+  TEST_ASSERT_TRUE(child >= 0);
+  if (child == 0)
+    _exit(44);
+
+  int status = 0;
+  int64_t r = wait4_raw(child, &status, WCONTINUED);
+  TEST_ASSERT_EQUAL_INT(child, r);
+  TEST_ASSERT_TRUE(WIFEXITED(status));
+  TEST_ASSERT_EQUAL_INT(44, WEXITSTATUS(status));
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_wait4_wall_reaps);
@@ -119,5 +135,6 @@ int main(void) {
   RUN_TEST(test_wait4_wclone_reaps);
   RUN_TEST(test_wait4_wall_compose_wnohang);
   RUN_TEST(test_wait4_unknown_option_einval);
+  RUN_TEST(test_wait4_accepts_wcontinued_bit);
   return UNITY_END();
 }

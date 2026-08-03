@@ -181,6 +181,14 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
     spin_unlock(&tasks_lock);
   }
 
+  // 3b. M2-A: if the exiting task is a session leader, hang up its
+  //     controlling terminal and send SIGHUP+SIGCONT to every stopped process
+  //     group in the session (those groups are now orphaned). Runs before
+  //     ZOMBIE while proc is alive and cr3 is live — tty_hangup/session_*
+  //     do no user copies. session_leader_exit_cleanup is a no-op for a
+  //     non-leader.
+  session_leader_exit_cleanup(proc);
+
   // 4. clear_tid_addr: write 0 + futex_wake (pthread_join relies on this
   //    wakeup) BEFORE ZOMBIE — proc is alive, no concurrent sched_task_reap
   //    possible.
@@ -376,7 +384,7 @@ int64_t sys_exit_group(int64_t arg1, int64_t unused1, int64_t unused2,
 // (stopsig << 8) | 0x7f.
 #define WNOHANG 1
 #define WUNTRACED 2
-#define WCONTINUED 4
+#define WCONTINUED 8
 // Linux wait4/waitid extension flags (bits/waitflags.h values). This kernel has
 // no thread-group vs clone-child distinction — all children already match
 // (child_matches keys on signal->parent_pid), so __WALL/__WNOTHREAD are no-ops
@@ -5995,14 +6003,23 @@ out:
 // ===================== Session/pgid syscalls =====================
 int64_t sys_setsid(int64_t unused1, int64_t unused2, int64_t unused3,
                    int64_t unused4, int64_t unused5, int64_t unused6) {
-  if (current_proc->sid == current_task->pid)
+  // M2-A: succeeds only if the caller is NOT a process-group leader
+  // (pgid != pid). The old check (sid == pid) wrongly allowed a pgrp leader
+  // that was not a session leader to create a new session. Atomically
+  // establish sid=pgid=pid under tasks_lock; the new session has no ctty.
+  spin_lock(&tasks_lock);
+  if (current_proc->pgid == current_task->pid) {
+    spin_unlock(&tasks_lock);
     return (int64_t)-EPERM;
+  }
   current_proc->sid = current_task->pid;
   current_proc->pgid = current_task->pid;
   // A new session starts without a controlling terminal. The old terminal
   // remains attached to its original session; only this process detaches.
   current_proc->ctty = NULL;
-  return (int64_t)current_proc->sid;
+  pid_t sid = current_proc->sid;
+  spin_unlock(&tasks_lock);
+  return (int64_t)sid;
 }
 
 int64_t sys_setpgid(int64_t arg1, int64_t arg2, int64_t unused1,
@@ -6015,19 +6032,60 @@ int64_t sys_setpgid(int64_t arg1, int64_t arg2, int64_t unused1,
     pid = current_task->pid;
   if (pgid == 0)
     pgid = pid;
-  if (pid >= MAX_PROC || task_get(pid)->pid != pid)
+  if (pid >= MAX_PROC)
     return (int64_t)-ESRCH;
-  if (pid != current_task->pid) {
-    xtask *t = task_get(pid);
-    if (!t->proc || !t->proc->signal ||
-        t->proc->signal->parent_pid != current_task->pid)
-      return (int64_t)-ESRCH;
-    if (t->proc->sid != current_proc->sid)
-      return (int64_t)-EPERM;
-    t->proc->pgid = pgid;
-  } else {
-    task_get(pid)->proc->pgid = pgid;
+
+  // M2-A: serialize pgrp/session mutation + group-existence scan under
+  // tasks_lock. No lock-free "task_get then bare proc write" window.
+  spin_lock(&tasks_lock);
+  xtask *t = task_get(pid);
+  if (t->pid != pid || !t->proc) {
+    spin_unlock(&tasks_lock);
+    return (int64_t)-ESRCH;
   }
+
+  // Only self or a direct child may be moved.
+  if (pid != current_task->pid) {
+    pid_t ppid = t->proc->signal ? t->proc->signal->parent_pid : -1;
+    if (ppid != current_task->pid) {
+      spin_unlock(&tasks_lock);
+      return (int64_t)-ESRCH;
+    }
+    // Child that already exec'd → EACCES (POSIX).
+    if (t->proc->did_exec) {
+      spin_unlock(&tasks_lock);
+      return (int64_t)-EACCES;
+    }
+  }
+
+  // Target must be in the caller's session.
+  if (t->proc->sid != current_proc->sid) {
+    spin_unlock(&tasks_lock);
+    return (int64_t)-EPERM;
+  }
+  // A session leader cannot leave its group.
+  if (t->proc->sid == pid) {
+    spin_unlock(&tasks_lock);
+    return (int64_t)-EPERM;
+  }
+  // pgid != pid: the target group must already exist in the session.
+  if (pgid != pid) {
+    bool exists = false;
+    for (int p = 0; p < MAX_PROC; p++) {
+      xtask *m = tasks[p];
+      if (m && m->pid == p && m->proc && m->proc->pgid == pgid &&
+          m->proc->sid == current_proc->sid) {
+        exists = true;
+        break;
+      }
+    }
+    if (!exists) {
+      spin_unlock(&tasks_lock);
+      return (int64_t)-EPERM;
+    }
+  }
+  t->proc->pgid = pgid;
+  spin_unlock(&tasks_lock);
   return 0;
 }
 

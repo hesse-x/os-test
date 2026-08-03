@@ -445,11 +445,16 @@ void pty_close_file(struct file *f) {
   if (is_master) {
     pty->master_refs--;
     if (pty->master_refs == 0) {
-      // Hangup: SIGHUP the foreground process group (pgid is system-unique,
-      // so the pgid-only match in pgsignal implies the session).
+      // M2-A: hang up the controlling terminal (SIGHUP+SIGCONT to the fg
+      // group, clear session/ctty refs, wake blocked slave I/O). No-op if
+      // no session is attached. tty_hangup takes tasks_lock itself; we hold
+      // neither tasks_lock nor fd_lock here (files_put installs/uninstalls
+      // under fd_lock then file_put after synchronize_rcu, so this path is
+      // lock-free).
       if (pty->t_sid != 0)
-        pgsignal(pty->t_pgid, SIGHUP);
-      __wake_up(pty->wq, POLLHUP | POLLIN | POLLOUT);
+        tty_hangup(pty);
+      else
+        __wake_up(pty->wq, POLLHUP | POLLIN | POLLOUT);
     }
   } else {
     pty->slave_refs--;
@@ -1950,6 +1955,29 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   proc->mm = new_mm;
   proc->cr3 = new_mm->cr3;
   proc->entry = lr.entry;
+  // M2-A: mark the child as having crossed the exec point-of-no-return. After
+  // this, the parent may no longer setpgid it into a new group (POSIX EACCES).
+  proc->proc->did_exec = 1;
+
+  // 9b.1. Reset caught signal handlers across execve (POSIX): every disposition
+  // that is a user handler (not SIG_DFL, not SIG_IGN) is reset to SIG_DFL,
+  // because the handler code from the old image no longer exists at the same
+  // address in the new image. SIG_IGN dispositions are preserved (an ignored
+  // SIGCHLD stays ignored across exec). SIGKILL/SIGSTOP are never catchable so
+  // their entries are always SIG_DFL already. The signal block mask and
+  // altstack persist across exec per POSIX and are left untouched. Without this
+  // reset the shell's SIGCHLD handler address (from the static shell image)
+  // survives into the exec'd program and faults when SIGCHLD is later delivered
+  // there.
+  for (int s = 0; s < NSIG; s++) {
+    sigaction_t *a = &proc->proc->signal->action[s];
+    if (a->sa_handler != SIG_DFL && a->sa_handler != SIG_IGN) {
+      a->sa_handler = SIG_DFL;
+      a->sa_flags = 0;
+      a->sa_restorer = NULL;
+      a->sa_mask = 0;
+    }
+  }
 
   // 9c. Flush CR3 before releasing old_mm or a vfork parent.
   __asm__ volatile("movq %0, %%cr3" ::"r"(pml4_phys) : "memory");

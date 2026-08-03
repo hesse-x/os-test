@@ -173,6 +173,11 @@ struct pty {
 extern struct pty *pty_table[MAX_PTY];
 extern spinlock pty_alloc_lock;
 
+// ===================== Foreground access gate (M2-A) =====================
+// Operation kind passed to the slave-side foreground-access gate. Drives the
+// SIGTTIN (read) vs SIGTTOU (write/ioctl) split and the TOSTOP write rule.
+enum tty_access_op { TTY_READ, TTY_WRITE, TTY_IOCTL };
+
 // ===================== PTY functions =====================
 void pty_init(void);
 struct pty *pty_alloc(int *out_index);

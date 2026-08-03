@@ -545,3 +545,21 @@ procfs M0-M6 已上线（[procfs.md](procfs.md)）：`/proc/{meminfo,cpuinfo,upt
 - [ ] **seq_file（>页属性）**：当前 show 回调写单 4KB 页（`procfs_file_read` kbuf[4096]）。`/proc/[pid]/maps` 等大属性可能超页，需 seq_file 风格的多页迭代。当前 maps_show 在 VMA 多时可能截断。
 - [ ] **`FD_REGULAR` 真路径反查**：`/proc/[pid]/fd/N` 对磁盘文件当前返 `anon_inode:[regular]`（`struct inode` 不存路径）。真路径需动 inode/VFS（inode 记录路径或 dentry 反查），超出 procfs 范围。procps `ls -l /proc/*/fd/*` 对磁盘文件显示 anon_inode 串，不崩。
 
+
+## M2-A 作业控制：已上线范围与延后项（terminal/step2.md §3.1–3.2）
+
+M2-A 内核 pgrp/TTY 规则已落地（`kernel/bsd/{pty,signal,syscall,proc}.c` + `proc.h`/`bsd_types.h` `did_exec`）：前台访问 gate（SIGTTIN/SIGTTOU/TOSTOP/EIO/orphaned 矩阵）、收紧 `setsid/setpgid/TIOCSCTTY/TIOCSPGRP/TIOCGPGRP`（tasks_lock 保护、ctty/session 校验、did_exec→EACCES、session-leader 不可改 pgid）、master-close + session-leader-exit tty hangup（SIGHUP+SIGCONT、清 t_sid/t_pgid 与 session 各进程 ctty）、定向测试 `test_pty_{bg_read_sigttin,bg_write_tostop,tcsetpgrp_errnos}`。
+
+- [ ] **非 session-leader 退出时的 newly-orphaned HUP+CONT**：当前 `session_leader_exit_cleanup` 仅在**会话首**退出时触发（覆盖 shell 退出的主路径）。POSIX 还要求：任意进程退出导致 reparent、`setsid`、`setpgid` 使一个含 stopped 成员的组**新变成 orphaned** 时，对该组发 SIGHUP+SIGCONT。`pgrp_is_orphaned()` helper 已就位（`signal.c`，tasks_lock 内），缺的是在 `do_exit` reparent 通用路径、`sys_setsid`、`sys_setpgid` 三处的前后状态对比 + 投递。第一版按 step2.md 退出门优先 session-leader 路径；通用路径留待真实 stopped-后台-job-孤儿化用例出现时补。
+
+## M2-B Shell 作业控制：已上线范围与延后项（terminal/step2.md §3.3–3.5）
+
+`user/shell/shell_command.cc` + `shell.cc` 重写：固定容量 job 表（`jobs[16]`）+ 单一状态入口 `job_update`（stop/continue/exit 统一消费）；`job_launch`(fg/bg) + `job_wait_foreground`(WUNTRACED|WCONTINUED，前台 stop→保存 termios、恢复 shell termios+pgid)；SIGCHLD self-pipe + `SA_RESTART` handler（主循环 `shell_wait_input` poll stdin|pipe，prompt 前 `shell_reap_jobs`，EOF/exit 前 `shell_hangup_jobs`）；lexer 新增 `TOK_BACKGROUND`、parse 拒绝 `a && b &`/`jobs &`/`jobs | cat`；builtins `jobs/bg/fg`（仅 `job_control` 激活时生效，`sh -c` 返确定错误）；readline 区分 EOF 与空行（master 关闭→hangup+exit，不再忙循环）。
+
+- [ ] **M2-B 压力/竞态专项测试**：`test_pty.c` 现覆盖 ^C/hup/resize；新加 `&`/`jobs`/`bg`/`fg`/`Ctrl-Z` 闭环的纵向用例（100 次 stop/cont/exit 无 zombie/stopped 泄漏）待 M2 验证通过后补。
+- [ ] **current/previous job (`%+`/`%-`)**：当前 `job_by_jid` 仅近似取最高 jid 非-done；`%-` 未实现。非 M2 退出门。
+- [ ] **非 session-leader 的 orphaned-HUP**：同 M2-A 延后项，shell 通用退出路径目前依赖 `session_leader_exit_cleanup`（shell 自身是 session leader，覆盖主路径）。
+
+## M3-A / M3-B 未实施（terminal/step2.md §3.6–3.10）
+
+M2-A/M2-B（内核 + Shell 作业控制）已落地，是 M3 exec/脚本重构的前置依赖。M3-A（`sys_execve` 三层拆分 `copy_exec_request → do_execve(depth) → prepare/load/commit`、`range_in_file` 防 OOB、supplementary-group 存储与 `getgroups/setgroups`、execute-bit/`MS_NOEXEC` gate、shebang 递归(argv 重写,depth 4,`ELOOP`)、`did_exec`+signal disposition/altstack/procfs `exe/cmdline` 移到 commit）与 M3-B（`sh file [args]`、`$0..$9/$#`、`VMIN/VTIME`+`tcflush`+poll 一致性、独立命令 `cat/echo/env/...`、pager raw-mode+resize+tty restore smoke）尚未开始。**不在本批改动内**——M3-A 直接改核心 `sys_execve`，半成品会 brick 构建、阻断 M2 验证；按 step2.md 分阶段退出门，应先构建+QEMU 验证 M2（`./build.sh --test -d && ./run.sh -s`，跑 `test_pty` + `test_execve_vfs` 现有用例不回归 + 新 M2-A 矩阵）再进 M3-A。

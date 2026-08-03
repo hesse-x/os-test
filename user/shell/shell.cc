@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,16 +16,30 @@
 
 #include "shell_command.h"
 
+// Block until stdin is readable, then read one canonical line into buf
+// (NUL-terminated, trailing newline stripped). Returns the byte count, or -1
+// on EOF / read error. The M2-B self-pipe is drained by shell_wait_input
+// before each read so a background child exit wakes the loop even while idle.
 static int readline(char *buf, int len) {
-  // Canonical-mode read: the kernel line discipline buffers the line and
-  // echoes it (step1.md §3.4); a single read returns one complete line.
-  ssize_t n = read(0, buf, (size_t)(len - 1));
-  if (n <= 0)
-    return 0;
-  buf[n] = '\0';
-  while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
-    buf[--n] = '\0';
-  return (int)n;
+  for (;;) {
+    shell_wait_input();
+    ssize_t n = read(0, buf, (size_t)(len - 1));
+    if (n < 0) {
+      if (errno == EINTR)
+        continue; // SA_RESTART normally prevents this; be defensive
+      // If foreground ownership was lost during a child state transition,
+      // reclaim the terminal and retry instead of treating EIO as EOF.
+      if (errno == EIO && tcsetpgrp(0, getpgrp()) == 0)
+        continue;
+      return -1;
+    }
+    if (n == 0)
+      return -1; // EOF (master closed) — caller will HUP+exit, not busy-loop
+    buf[n] = '\0';
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+      buf[--n] = '\0';
+    return (int)n;
+  }
 }
 
 // ===================== Main =====================
@@ -34,8 +49,13 @@ static int readline(char *buf, int len) {
 // unmangled regardless, so this is a no-op for gcc and required for clang.
 extern "C" int main(int argc, char **argv, char **envp) {
   (void)envp;
-  if (argc >= 3 && strcmp(argv[1], "-c") == 0)
+  if (argc >= 3 && strcmp(argv[1], "-c") == 0) {
+    // A -c shell launched on a controlling tty still needs foreground process
+    // groups (notably for terminal-generated SIGHUP/SIGINT semantics).
+    if (isatty(0))
+      shell_init_jobcontrol();
     return shell_run_command(argv[2]);
+  }
   if (argc != 1) {
     fprintf(stderr, "usage: sh [-c command]\n");
     return 2;
@@ -66,11 +86,20 @@ extern "C" int main(int argc, char **argv, char **envp) {
   char line[256];
 
   while (1) {
+    // Drain background state changes before printing the prompt so a
+    // finished job's "[jid]+ Done" notice appears above the prompt.
+    shell_reap_jobs();
     printf("> ");
     // stdout is line-buffered on a tty: the prompt has no newline, so flush
     // it explicitly or it stays stuck until the next command's output.
     fflush(stdout);
     int len = readline(line, sizeof(line));
+    if (len < 0) {
+      // EOF (master closed): HUP every job and exit — do not busy-loop on a
+      // disconnected slave.
+      shell_hangup_jobs();
+      return 0;
+    }
     if (len == 0)
       continue;
 
@@ -79,7 +108,9 @@ extern "C" int main(int argc, char **argv, char **envp) {
     // else runs in pipeline children with a foreground pgid.
     shell_run_command(line);
     int ex = shell_requested_exit();
-    if (ex >= 0)
+    if (ex >= 0) {
+      shell_hangup_jobs();
       return ex;
+    }
   }
 }
