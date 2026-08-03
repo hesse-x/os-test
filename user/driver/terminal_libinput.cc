@@ -27,6 +27,7 @@ extern "C" {
 }
 #include <libudev.h>
 #include <poll.h>
+#include <pty.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -600,6 +601,31 @@ static void enter_degraded_hold(struct libinput *li) {
 
 // ===================== Main =====================
 
+// spawn_shell: create a PTY pair via the standard forkpty path (setsid +
+// TIOCSCTTY + dup2(slave,0/1/2) are done by libc login_tty in the child) and
+// exec the shell. On success returns the child pid with master_fd installed
+// (O_NONBLOCK); on failure returns -1. Exec failure is reported on the slave
+// so it appears on the terminal instead of a silent 127 (step1.md §3.2).
+static pid_t spawn_shell(const struct winsize *ws) {
+  int master;
+  pid_t pid = forkpty(&master, NULL, NULL, ws);
+  if (pid < 0)
+    return -1;
+  if (pid == 0) {
+    setenv("TERM", "xterm-256color", 1);
+    execlp("/bin/sh", "/bin/sh", (char *)NULL);
+    char msg[64];
+    int len =
+        snprintf(msg, sizeof(msg), "exec: /bin/sh: %s\n", strerror(errno));
+    if (len > 0)
+      write(1, msg, (size_t)len);
+    _exit(127);
+  }
+  fcntl(master, F_SETFL, O_RDWR | O_NONBLOCK);
+  master_fd = master;
+  return pid;
+}
+
 // extern "C": clang under -ffreestanding mangles a C++ `main`, breaking the
 // crt0.o `main` reference; gcc leaves `main` unmangled regardless. See
 // shell.cc.
@@ -695,46 +721,17 @@ extern "C" int main(int argc, char **argv, char **envp) {
   display_client_flush(0, display_rows);
   terminal_seat.initialized = 1;
 
-  master_fd = open("/dev/ptmx", O_RDWR);
-  if (master_fd < 0) {
-    printf("terminal: failed to open /dev/ptmx\n");
-    return 1;
-  }
-
-  int pty_idx;
-  ioctl(master_fd, TIOCGPTN, &pty_idx);
-  char pts_path[16];
-  snprintf(pts_path, sizeof(pts_path), "/dev/pts%d", pty_idx);
-
-  shell_pid = fork();
-  if (shell_pid == 0) {
-    int slave_fd = open(pts_path, O_RDWR);
-    if (slave_fd < 0) {
-      write(2, "shell: failed to open slave\n", 29);
-      _exit(127);
-    }
-    dup2(slave_fd, 0);
-    dup2(slave_fd, 1);
-    dup2(slave_fd, 2);
-    if (slave_fd > 2)
-      close(slave_fd);
-    close(master_fd);
-    execve("/usr/bin/shell", NULL, NULL);
-    write(2, "shell_child: execve FAILED\n", 28);
-    _exit(127);
-  }
-
-  fcntl(master_fd, F_SETFL, O_RDWR | O_NONBLOCK);
-
   struct winsize ws;
   ws.ws_row = display_rows;
   ws.ws_col = display_cols;
   ws.ws_xpixel = 0;
   ws.ws_ypixel = 0;
-  ioctl(master_fd, TIOCSWINSZ, &ws);
 
-  char linebuf[256];
-  int linebuf_len = 0;
+  shell_pid = spawn_shell(&ws);
+  if (shell_pid < 0) {
+    printf("terminal: forkpty failed\n");
+    return 1;
+  }
 
   // monitor death detection: count of consecutive "immediate return with zero
   // real events" (§3.2). EOF busy-spin is the only observable side effect of a
@@ -756,10 +753,9 @@ extern "C" int main(int argc, char **argv, char **envp) {
       continue;
     }
 
-    struct termios t;
-    ioctl(master_fd, TCGETS, &t);
-
-    // Drain all pending keyboard events via libinput (non-blocking dispatch)
+    // Drain all pending keyboard events via libinput (non-blocking dispatch).
+    // Line editing, echo and signal characters are handled by the kernel PTY
+    // line discipline (step1.md §3.4); every byte is forwarded as-is.
     libinput_dispatch(li);
     struct libinput_event *lev;
     int got_event = 0;
@@ -775,82 +771,9 @@ extern "C" int main(int argc, char **argv, char **envp) {
         char ascii_buf[4];
         int ascii_len = key_to_ascii(key, state == LIBINPUT_KEY_STATE_PRESSED,
                                      ascii_buf, sizeof(ascii_buf));
-        if (ascii_len <= 0) {
-          libinput_event_destroy(lev);
-          continue;
-        }
-
-        pid_t fg_pgid = shell_pid;
-        int tmp_pgid;
-        if (ioctl(master_fd, TIOCGPGRP, &tmp_pgid) == 0 && tmp_pgid > 0)
-          fg_pgid = tmp_pgid;
-
-        if ((t.c_lflag & ISIG) && ascii_buf[0] == (char)t.c_cc[VINTR]) {
-          kill(-fg_pgid, SIGINT);
-          libinput_event_destroy(lev);
-          continue;
-        }
-        if ((t.c_lflag & ISIG) && ascii_buf[0] == (char)t.c_cc[VSUSP]) {
-          kill(-fg_pgid, SIGTSTP);
-          libinput_event_destroy(lev);
-          continue;
-        }
-
-        if (t.c_lflag & ICANON) {
-          if (ascii_buf[0] == '\n') {
-            linebuf[linebuf_len++] = '\n';
-            write(master_fd, linebuf, linebuf_len);
-            vt100_feed('\r');
-            vt100_feed('\n');
-            linebuf_len = 0;
-            libinput_event_destroy(lev);
-            continue;
-          }
-          if (ascii_buf[0] == (char)t.c_cc[VEOF]) {
-            if (linebuf_len > 0) {
-              write(master_fd, linebuf, linebuf_len);
-              linebuf_len = 0;
-            } else
-              write(master_fd, "", 0);
-            libinput_event_destroy(lev);
-            continue;
-          }
-          if (ascii_buf[0] == (char)t.c_cc[VERASE]) {
-            if (linebuf_len > 0) {
-              linebuf_len--;
-              vt100_feed('\b');
-              vt100_feed(' ');
-              vt100_feed('\b');
-            }
-            libinput_event_destroy(lev);
-            continue;
-          }
-          if (ascii_buf[0] == (char)t.c_cc[VKILL]) {
-            linebuf_len = 0;
-            vt100_feed('\r');
-            vt100_feed('\n');
-            libinput_event_destroy(lev);
-            continue;
-          }
-          if (linebuf_len < (int)sizeof(linebuf) - 2) {
-            if (ascii_len > 1)
-              write(master_fd, ascii_buf, (size_t)ascii_len);
-            else {
-              linebuf[linebuf_len++] = ascii_buf[0];
-              if (t.c_lflag & ECHO)
-                vt100_feed(ascii_buf[0]);
-            }
-          }
-          libinput_event_destroy(lev);
-          continue;
-        }
-
-        write(master_fd, ascii_buf, (size_t)ascii_len);
-        if (t.c_lflag & ECHO) {
-          for (int i = 0; i < ascii_len; i++)
-            vt100_feed(ascii_buf[i]);
-        }
-      } // if KEYBOARD_KEY
+        if (ascii_len > 0)
+          write(master_fd, ascii_buf, (size_t)ascii_len);
+      }
       libinput_event_destroy(lev);
     }
 
@@ -867,30 +790,10 @@ extern "C" int main(int argc, char **argv, char **envp) {
     } else if (n == 0) {
       printf("terminal: shell exited (n=0), re-forking\n");
       close(master_fd);
-      master_fd = open("/dev/ptmx", O_RDWR);
-      if (master_fd < 0)
+      master_fd = -1;
+      shell_pid = spawn_shell(&ws);
+      if (shell_pid < 0)
         continue;
-      fcntl(master_fd, F_SETFL, O_RDWR | O_NONBLOCK);
-      ioctl(master_fd, TIOCGPTN, &pty_idx);
-      snprintf(pts_path, sizeof(pts_path), "/dev/pts%d", pty_idx);
-      ws.ws_row = display_rows;
-      ws.ws_col = display_cols;
-      ioctl(master_fd, TIOCSWINSZ, &ws);
-      shell_pid = fork();
-      if (shell_pid == 0) {
-        int slave_fd = open(pts_path, O_RDWR);
-        if (slave_fd < 0)
-          _exit(127);
-        dup2(slave_fd, 0);
-        dup2(slave_fd, 1);
-        dup2(slave_fd, 2);
-        if (slave_fd > 2)
-          close(slave_fd);
-        close(master_fd);
-        execve("/usr/bin/shell", NULL, NULL);
-        _exit(127);
-      }
-      linebuf_len = 0;
     }
 
     flush_dirty_cells();

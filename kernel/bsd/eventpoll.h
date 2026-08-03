@@ -18,22 +18,27 @@
 #define EP_MAX_ITEMS 128
 
 struct file;
+struct files;
 struct epoll_event;
 
 typedef struct epitem {
   rb_node rb_node;        // in eventpoll.rbt (ordered by file*)
   list_node rdllist_node; // in eventpoll.ready_list
+  list_node file_node;    // in file.epoll_items
   wait_queue_t wait;      // on monitored file/sock/pipe wq
-  struct file *file;      // monitored fd's file (held via file_get)
-  __poll events;          // user-registered event mask (excludes mode flags)
-  __poll revents;         // current ready events
-  uint64_t user_data;     // epoll_event.data.u64
-  int is_ready;           // currently on ready_list
-  int is_et;              // EPOLLET mode flag
-  int is_oneshot;         // EPOLLONESHOT mode flag (set on ADD/MOD)
-  int is_disarmed;        // ONESHOT: reported once, disarmed until MOD re-arms
-  int is_exclusive;       // EPOLLEXCLUSIVE: unicast wake (one exclusive waiter)
-  struct eventpoll *ep;   // back-pointer
+  wait_queue_head *target_wq;
+  struct file *file;    // monitored fd's file (held via file_get)
+  struct files *owner;  // fd table used by EPOLL_CTL_ADD
+  int fd;               // descriptor number used by EPOLL_CTL_ADD
+  __poll events;        // user-registered event mask (excludes mode flags)
+  __poll revents;       // current ready events
+  uint64_t user_data;   // epoll_event.data.u64
+  int is_ready;         // currently on ready_list
+  int is_et;            // EPOLLET mode flag
+  int is_oneshot;       // EPOLLONESHOT mode flag (set on ADD/MOD)
+  int is_disarmed;      // ONESHOT: reported once, disarmed until MOD re-arms
+  int is_exclusive;     // EPOLLEXCLUSIVE: unicast wake (one exclusive waiter)
+  struct eventpoll *ep; // back-pointer
 } epitem;
 
 typedef struct eventpoll {
@@ -46,8 +51,11 @@ typedef struct eventpoll {
 
 eventpoll *eventpoll_create(void);
 void eventpoll_release(eventpoll *ep);
-int ep_insert(eventpoll *ep, struct file *f, struct epoll_event *ev);
+void eventpoll_file_release(struct file *f);
+int ep_insert(eventpoll *ep, struct file *f, struct files *owner, int fd,
+              struct epoll_event *ev);
 int ep_remove(eventpoll *ep, struct file *f);
+int ep_remove_fd(eventpoll *ep, struct files *owner, int fd);
 int ep_modify(eventpoll *ep, struct file *f, struct epoll_event *ev);
 
 int64_t sys_epoll_create(int64_t size);

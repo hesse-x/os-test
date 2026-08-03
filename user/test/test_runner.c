@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -132,6 +133,7 @@ static struct test_entry tests[] = {
     {"sa_restart", "/test/test_sa_restart.elf"},
     {"sa_nocldwait", "/test/test_sa_nocldwait.elf"},
     {"accept_no_timeout", "/test/test_accept_no_timeout.elf"},
+    {"pty", "/test/pty.elf"},
 };
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))
@@ -148,7 +150,8 @@ int main(int argc, char **argv, char **envp) {
   // the musl loader reads LD_LIBRARY_PATH, so this is enough — no RPATH and no
   // global loader config change needed. We can't use spawn() because it passes
   // a NULL envp (empty environment, envc=0), so fork+execve with this env.
-  char *child_env[] = {"LD_LIBRARY_PATH=/lib:/test/lib", NULL};
+  char *child_env[] = {"LD_LIBRARY_PATH=/lib:/test/lib", "XOS_SKIP_AUTOTEST=1",
+                       NULL};
 
   int pass_count = 0;
   int fail_count = 0;
@@ -162,6 +165,21 @@ int main(int argc, char **argv, char **envp) {
 
     pid_t pid = fork();
     if (pid == 0) {
+      // The interactive shell ignores the job-control signals (SIGINT/SIGQUIT/
+      // SIGTSTP/SIGTTIN/SIGTTOU) and SIG_IGN persists across execve, so tests
+      // would inherit them — breaking default-action checks (SIGQUIT core
+      // dump, SIGTSTP stop). Hand every test a clean default disposition set.
+      for (int sig = 1; sig < NSIG; sig++)
+        signal(sig, SIG_DFL);
+
+      // Disposition cleanup may temporarily block signals (notably SIGABRT in
+      // musl's sigaction path). Do not let that implementation detail leak
+      // through execve: signal masks persist across exec by POSIX definition.
+      sigset_t empty_mask;
+      sigemptyset(&empty_mask);
+      if (sigprocmask(SIG_SETMASK, &empty_mask, NULL) < 0)
+        _exit(126);
+
       execve(path, NULL, child_env);
       _exit(127);
     }

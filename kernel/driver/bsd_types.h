@@ -16,6 +16,7 @@
 // its guard KERNEL_BSD_TYPES_H prevents duplicate definitions here.
 
 #include "kernel/xcore/atomic.h"
+#include "kernel/xcore/list.h"
 #include "kernel/xcore/mm_types.h" // mm, mmap_region, shm
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sparse.h"
@@ -65,6 +66,9 @@ struct file_operations;
 
 typedef struct file {
   refcount_t f_count;
+  atomic_t fd_refs;
+  list_node epoll_items;
+  int epoll_items_initialized;
   int type;
   int flags;
   struct inode *inode;

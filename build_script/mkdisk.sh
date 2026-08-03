@@ -56,6 +56,16 @@ while IFS=$'\t' read -r artifact image part; do
     fi
 done < "${MANIFEST}"
 
+# Runtime contract assertion: the interactive shell, dynamic loader and libc
+# must be in the image. Otherwise forkpty()->execlp("/bin/sh") fails at runtime
+# with a bare 127 instead of a build-time error (terminal/step1.md §3.2).
+for required in "bin/sh" "lib/ld-musl-x86_64.so.1" "lib/libc.so"; do
+    if ! awk -F'\t' -v img="$required" '$2 == img { found=1 } END { exit !found }' "${MANIFEST}"; then
+        echo "mkdisk.sh: required runtime file ${required} missing from image manifest"
+        exit 1
+    fi
+done
+
 # Total disk size: 192MB = 393216 sectors
 DISK_SECTORS=$((192 * 1024 * 1024 / 512))
 # Partition 1 (ESP): 32MB = 65536 sectors, starts at LBA 2048 (1MB alignment)

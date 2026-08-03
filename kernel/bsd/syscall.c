@@ -3068,8 +3068,6 @@ int64_t sys_dup2(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
 
   fd_install(proc->proc->files, new_fd, old_f);
   file_get(old_f);
-  if (old_f->type == FD_TTY)
-    pty_dup_file(old_f);
   // S06: dup2 never sets cloexec on the new fd (POSIX); clear the reused
   // slot's bitmap bit so a stale value from the closed victim does not leak.
   fd_set_cloexec(proc->proc->files, new_fd, 0);
@@ -5987,6 +5985,9 @@ int64_t sys_setsid(int64_t unused1, int64_t unused2, int64_t unused3,
     return (int64_t)-EPERM;
   current_proc->sid = current_task->pid;
   current_proc->pgid = current_task->pid;
+  // A new session starts without a controlling terminal. The old terminal
+  // remains attached to its original session; only this process detaches.
+  current_proc->ctty = NULL;
   return (int64_t)current_proc->sid;
 }
 

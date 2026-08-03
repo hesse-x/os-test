@@ -777,7 +777,7 @@ static int procfs_fd_readlink(int pid, int fd, char *buf, size_t bufsiz) {
   switch (type) {
   case FD_TTY:
     if (f->pty)
-      n = snprintf(buf, bufsiz, "/dev/pts%d", f->pty->index);
+      n = snprintf(buf, bufsiz, "/dev/pts/%d", f->pty->index);
     else
       n = snprintf(buf, bufsiz, "/dev/ttyS0"); /* 串口 tty 无 pty */
     break;

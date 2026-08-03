@@ -14,6 +14,7 @@
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/kfcntl.h"
 #include "kernel/bsd/proc.h"
+#include "kernel/bsd/signal.h"
 #include "kernel/bsd/types.h"
 #include "kernel/driver/serial.h"
 #include "kernel/xcore/list.h"
@@ -208,9 +209,45 @@ void pty_free(struct pty *pty) {
   spin_lock(&pty_alloc_lock);
   pty_table[pty->index] = NULL;
   spin_unlock(&pty_alloc_lock);
+  // If the slave side was never opened, the slave-close branch in
+  // pty_close_file never ran, so /dev/pts/N is still registered and
+  // pts_priv still owns a dangling pty pointer. Unregister + free here so a
+  // later ptmx_open can't land on a stale node (open("/dev/pts/N") would read
+  // a freed pty via priv->pty → __wake_up(NULL) panic). devtmpfs_remove is
+  // idempotent for a node the slave-close branch already removed.
+  if (pty->pts_priv) {
+    char name[16];
+    pty_slave_name(pty->index, name);
+    devtmpfs_remove(name);
+    kfree(pty->pts_priv);
+    pty->pts_priv = NULL;
+  }
   if (pty->wq)
     kfree(pty->wq);
   kfree(pty);
+}
+
+// ===================== pty_slave_name =====================
+void pty_slave_name(int index, char out[16]) {
+  int pos = 0;
+  out[pos++] = 'p';
+  out[pos++] = 't';
+  out[pos++] = 's';
+  out[pos++] = '/';
+  if (index == 0) {
+    out[pos++] = '0';
+  } else {
+    char tmp[8];
+    int tpos = 0;
+    int n = index;
+    while (n > 0) {
+      tmp[tpos++] = '0' + (n % 10);
+      n /= 10;
+    }
+    for (int i = tpos - 1; i >= 0; i--)
+      out[pos++] = tmp[i];
+  }
+  out[pos] = '\0';
 }
 
 // ===================== ptmx_open =====================
@@ -247,23 +284,9 @@ int ptmx_open(xtask *proc, int fd) {
   f->pty = pty;
   f->flags = O_RDWR;
 
-  // Register /dev/ptsN
-  char name[16] = "pts";
-  int pos = 3;
-  if (index == 0) {
-    name[pos++] = '0';
-  } else {
-    char tmp[8];
-    int tpos = 0;
-    int n = index;
-    while (n > 0) {
-      tmp[tpos++] = '0' + (n % 10);
-      n /= 10;
-    }
-    for (int i = tpos - 1; i >= 0; i--)
-      name[pos++] = tmp[i];
-  }
-  name[pos] = '\0';
+  // Register /dev/pts/N (devtmpfs subdirectory, same shape as dri/card0)
+  char name[16];
+  pty_slave_name(index, name);
   devtmpfs_create(name, &priv->ops, NULL);
 
   return 0;
@@ -390,29 +413,154 @@ int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
   return (int64_t)nread;
 }
 
-// ===================== pty_master_write =====================
-int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
-                         size_t len) {
-  // len==0: EOF signal (Ctrl-D empty linebuf → slave read returns 0)
-  if (len == 0) {
-    pty->eof_pending = 1;
+// ===================== N_TTY line discipline (input direction) =============
+// Minimal kernel N_TTY (terminal/step1.md §3.4): ICANON line buffering with
+// VERASE/VKILL/VEOF editing, ECHO/ECHOE/ECHOK, ICRNL mapping, and ISIG
+// signal characters delivered to the foreground pgid. Applies to
+// master->slave input only; output (slave->master) keeps the existing
+// OPOST/ONLCR path. Deliberately not implemented (recorded in todo.md):
+// INLCR/IGNCR, IXON/IXOFF, VMIN/VTIME timers, NOFLSH, VEOL/EOL2, ECHOCTL.
+
+// Committed bytes readable by the slave.
+static int ldisc_canon_avail(struct pty *pty) {
+  return pty_ring_avail(pty->canon_commit, pty->canon_tail);
+}
+
+// Flush all input state (TCSETSF, ICANON transitions, signal characters).
+static void ldisc_flush_input(struct pty *pty) {
+  pty->canon_tail = pty->canon_commit = pty->canon_head = 0;
+  pty->m_to_s_head = pty->m_to_s_tail = 0;
+  pty->eof_pending = 0;
+}
+
+// Echo goes through the slave_write output path so OPOST/ONLCR applies
+// uniformly to program output and echo. May block on a full output ring,
+// same as program output.
+static void ldisc_echo(struct pty *pty, xtask *proc, const char *s, int n) {
+  pty_slave_write(pty, proc, s, (size_t)n);
+}
+
+// Caret notation for control bytes ("^C"), used for signal chars and VEOF.
+static void ldisc_echo_caret(struct pty *pty, xtask *proc, uint8_t b) {
+  char caret[2] = {'^', (char)(b == 0x7F ? '?' : b + '@')};
+  ldisc_echo(pty, proc, caret, 2);
+}
+
+// Match a signal character. c_cc value 0 is _POSIX_VDISABLE — never matches.
+static int ldisc_sig_char(struct termios *t, uint8_t b, int *sig) {
+  if (b != 0 && b == t->c_cc[VINTR]) {
+    *sig = SIGINT;
+    return 1;
+  }
+  if (b != 0 && b == t->c_cc[VQUIT]) {
+    *sig = SIGQUIT;
+    return 1;
+  }
+  if (b != 0 && b == t->c_cc[VSUSP]) {
+    *sig = SIGTSTP;
+    return 1;
+  }
+  return 0;
+}
+
+// Process one input byte from the master side. Returns 0 if consumed, 1 if
+// the raw-mode input ring is full and the caller must apply its
+// block/EAGAIN policy (canonical input never blocks: a full queue drops the
+// byte and echoes BEL).
+static int ldisc_input(struct pty *pty, xtask *proc, uint8_t b) {
+  struct termios *t = &pty->t_termios;
+  tcflag_t lflag = t->c_lflag;
+  int sig;
+
+  // 1. Signal characters (canonical and raw alike). With no foreground
+  // process group there is nobody to signal: fall through and treat the
+  // byte as ordinary input rather than dropping it.
+  if ((lflag & ISIG) && ldisc_sig_char(t, b, &sig) && pty->t_pgid > 0) {
+    ldisc_flush_input(pty);
+    if (lflag & ECHO)
+      ldisc_echo_caret(pty, proc, b);
+    pgsignal(pty->t_pgid, sig);
+    return 0;
+  }
+
+  // 2. Input mapping.
+  if ((t->c_iflag & ICRNL) && b == '\r')
+    b = '\n';
+
+  // 3. Raw/cbreak mode: straight into the master->slave ring. Only the
+  // VMIN=1/VTIME=0 semantics (any byte is immediately readable); full
+  // VMIN/VTIME timers are M3.
+  if (!(lflag & ICANON)) {
+    if (!pty_ring_write1(pty->m_to_s_buf, &pty->m_to_s_head, pty->m_to_s_tail,
+                         b))
+      return 1;
+    if (lflag & ECHO)
+      ldisc_echo(pty, proc, (const char *)&b, 1);
     __wake_up(pty->wq, POLLIN);
     return 0;
   }
 
+  // 4. Canonical editing characters (c_cc==0 disables each, as above).
+  if (b != 0 && b == t->c_cc[VEOF]) {
+    if (pty->canon_head == pty->canon_commit)
+      pty->eof_pending = 1; // empty line: one-shot EOF for the next read
+    else
+      pty->canon_commit = pty->canon_head; // commit without trailing newline
+    if (lflag & ECHO)
+      ldisc_echo_caret(pty, proc, b);
+    __wake_up(pty->wq, POLLIN);
+    return 0;
+  }
+  if (b != 0 && b == t->c_cc[VERASE]) {
+    if (pty->canon_head != pty->canon_commit) {
+      pty->canon_head = (pty->canon_head + PTY_BUF_SIZE - 1) % PTY_BUF_SIZE;
+      if ((lflag & (ECHO | ECHOE)) == (ECHO | ECHOE))
+        ldisc_echo(pty, proc, "\b \b", 3);
+    }
+    return 0;
+  }
+  if (b != 0 && b == t->c_cc[VKILL]) {
+    if (pty->canon_head != pty->canon_commit) {
+      pty->canon_head = pty->canon_commit;
+      if ((lflag & (ECHO | ECHOK)) == (ECHO | ECHOK))
+        ldisc_echo(pty, proc, "\n", 1);
+    }
+    return 0;
+  }
+
+  // 5. Ordinary canonical byte. A full queue drops the byte and echoes BEL —
+  // the terminal's write path must never block on line-discipline state.
+  if (pty_ring_space(pty->canon_head, pty->canon_tail) == 0) {
+    if (lflag & ECHO)
+      ldisc_echo(pty, proc, "\a", 1);
+    return 0;
+  }
+  pty->canon_buf[pty->canon_head] = b;
+  pty->canon_head = (pty->canon_head + 1) % PTY_BUF_SIZE;
+  if (lflag & ECHO)
+    ldisc_echo(pty, proc, (const char *)&b, 1);
+  if (b == '\n') {
+    pty->canon_commit = pty->canon_head;
+    __wake_up(pty->wq, POLLIN);
+  }
+  return 0;
+}
+
+// ===================== pty_master_write =====================
+int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
+                         size_t len) {
+  // Every byte flows through the line discipline (ICANON/ECHO/ISIG/ICRNL).
+  // The len==0 → EOF hack is gone: Ctrl-D arrives as the VEOF byte and is
+  // handled by the ldisc.
   size_t written = 0;
 
   while (written < len) {
-    int n =
-        pty_ring_write(pty->m_to_s_buf, &pty->m_to_s_head, pty->m_to_s_tail,
-                       (const uint8_t *)buf + written, (int)(len - written));
-    if (n > 0) {
-      written += n;
-      __wake_up(pty->wq, POLLIN);
+    if (ldisc_input(pty, proc, ((const uint8_t *)buf)[written]) == 0) {
+      written++;
       continue;
     }
 
-    // Buffer full
+    // Raw-mode input ring full
     if (pty_is_nonblock(proc, pty, 1)) {
       if (written > 0)
         break;
@@ -452,10 +600,12 @@ int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
   if (pty->master_refs == 0)
     return -EPIPE;
 
-  // eof_pending: Ctrl-D EOF (master write len=0 set this)
+  int canon = (pty->t_termios.c_lflag & ICANON) != 0;
+
+  // One-shot EOF (ldisc VEOF on an empty line)
   if (pty->eof_pending) {
     pty->eof_pending = 0;
-    return 0; // EOF — returns 0 once then clears flag
+    return 0;
   }
 
   wait_queue_t wait;
@@ -464,7 +614,17 @@ int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
   wait.exclusive = 0;
   list_init(&wait.node);
   add_wait_queue(pty->wq, &wait);
-  while (pty_ring_avail(pty->m_to_s_head, pty->m_to_s_tail) == 0) {
+  for (;;) {
+    int avail = canon ? ldisc_canon_avail(pty)
+                      : pty_ring_avail(pty->m_to_s_head, pty->m_to_s_tail);
+    if (avail > 0)
+      break;
+    if (pty->eof_pending) { // VEOF arrived while blocked
+      pty->eof_pending = 0;
+      proc->state = RUNNING;
+      remove_wait_queue(pty->wq, &wait);
+      return 0;
+    }
     if (pty->master_refs == 0) {
       proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
@@ -489,17 +649,15 @@ int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
       remove_wait_queue(pty->wq, &wait);
       return -ERESTART;
     }
-    if (pty->master_refs == 0) {
-      proc->state = RUNNING;
-      remove_wait_queue(pty->wq, &wait);
-      return 0;
-    }
   }
   proc->state = RUNNING;
   remove_wait_queue(pty->wq, &wait);
 
-  int nread = pty_ring_read(pty->m_to_s_buf, pty->m_to_s_head,
-                            &pty->m_to_s_tail, (uint8_t *)buf, (int)len);
+  int nread = canon
+                  ? pty_ring_read(pty->canon_buf, pty->canon_commit,
+                                  &pty->canon_tail, (uint8_t *)buf, (int)len)
+                  : pty_ring_read(pty->m_to_s_buf, pty->m_to_s_head,
+                                  &pty->m_to_s_tail, (uint8_t *)buf, (int)len);
   __wake_up(pty->wq, POLLOUT);
   return (int64_t)nread;
 }
@@ -584,25 +742,33 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
       return -EFAULT;
     return 0;
 
-  case TCSETS: // 0x5402
-    if (copy_from_user(&pty->t_termios, (const void __user *)arg,
-                       sizeof(struct termios)))
+  case TCSETS:  // 0x5402
+  case TCSETSW: // 0x5403 — no output drain (kept identical to TCSETS)
+  {
+    struct termios nt;
+    if (copy_from_user(&nt, (const void __user *)arg, sizeof(struct termios)))
       return -EFAULT;
+    // Leaving ICANON: the uncommitted edit line has no canonical home, so it
+    // is dropped (committed bytes stay readable). Entering ICANON from raw:
+    // raw bytes already in the master->slave ring remain readable via the
+    // ring path (they bypass the canonical queue). Matches Linux's
+    // "pending unread data is flushed on mode switch" approximation.
+    if ((pty->t_termios.c_lflag & ICANON) && !(nt.c_lflag & ICANON))
+      pty->canon_head = pty->canon_commit = pty->canon_tail;
+    pty->t_termios = nt;
     return 0;
+  }
 
-  case TCSETSW: // 0x5403 — same as TCSETS (no output drain)
-    if (copy_from_user(&pty->t_termios, (const void __user *)arg,
-                       sizeof(struct termios)))
+  case TCSETSF: // 0x5404 — set termios + flush both directions
+  {
+    struct termios nt;
+    if (copy_from_user(&nt, (const void __user *)arg, sizeof(struct termios)))
       return -EFAULT;
-    return 0;
-
-  case TCSETSF: // 0x5404 — same as TCSETS + flush ring buffers
-    if (copy_from_user(&pty->t_termios, (const void __user *)arg,
-                       sizeof(struct termios)))
-      return -EFAULT;
-    pty->m_to_s_head = pty->m_to_s_tail = 0;
+    ldisc_flush_input(pty);
     pty->s_to_m_head = pty->s_to_m_tail = 0;
+    pty->t_termios = nt;
     return 0;
+  }
 
   case TIOCGPGRP: // 0x540F
   {
@@ -617,8 +783,24 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
     pid_t pgid;
     if (copy_from_user(&pgid, (const void __user *)arg, sizeof(pid_t)))
       return -EFAULT;
-    if (pgid < 0)
+    if (pgid <= 0)
       return -EINVAL;
+    // The pgid must name a real process group belonging to the caller's
+    // session (Linux: tcsetpgrp EPERM otherwise). pgid == caller's own pid
+    // is the canonical "make myself foreground" case.
+    if (pgid != current_proc->sid) {
+      int found = 0;
+      for (int p = 0; p < MAX_PROC; p++) {
+        if (tasks[p] && tasks[p]->pid == p && tasks[p]->proc &&
+            tasks[p]->proc->pgid == pgid &&
+            tasks[p]->proc->sid == current_proc->sid) {
+          found = 1;
+          break;
+        }
+      }
+      if (!found)
+        return -EPERM;
+    }
     pty->t_pgid = pgid;
     return 0;
   }
@@ -635,24 +817,13 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
     if (copy_from_user(&pty->t_winsize, (const void __user *)arg,
                        sizeof(struct winsize)))
       return -EFAULT;
-    // If size changed and session exists, send SIGWINCH to foreground pgid
+    // If size changed and session exists, send SIGWINCH to foreground pgid.
+    // pgid is system-unique, so pgsignal's pgid-only match implies the
+    // session; no separate t_sid filter is needed.
     if ((old_ws.ws_row != pty->t_winsize.ws_row ||
          old_ws.ws_col != pty->t_winsize.ws_col) &&
-        pty->t_sid != 0) {
-      for (int p = 0; p < MAX_PROC; p++) {
-        if (tasks[p] && tasks[p]->pid == p && tasks[p]->proc &&
-            tasks[p]->proc->pgid == pty->t_pgid &&
-            tasks[p]->proc->sid == pty->t_sid) {
-          __atomic_or_fetch(&tasks[p]->proc->sig_pending, SIGMASK(SIGWINCH),
-                            __ATOMIC_RELEASE);
-          // SIGWINCH must interrupt any blocking state (including
-          // WAIT_FUTEX/WAIT_CHILD); wake_process_any unconditionally wakes
-          // any BLOCKED target regardless of event type.
-          if (tasks[p]->state == BLOCKED)
-            wake_process_any(tasks[p]);
-        }
-      }
-    }
+        pty->t_sid != 0)
+      pgsignal(pty->t_pgid, SIGWINCH);
     return 0;
   }
 
@@ -701,7 +872,12 @@ uint32_t pty_poll(struct pty *pty, int is_master, uint32_t events) {
     }
   } else {
     if (events & POLLIN) {
-      if (pty_ring_avail(pty->m_to_s_head, pty->m_to_s_tail) > 0)
+      // Data source mirrors pty_slave_read: canonical queue in ICANON mode,
+      // raw ring otherwise.
+      int avail = (pty->t_termios.c_lflag & ICANON)
+                      ? pty_ring_avail(pty->canon_commit, pty->canon_tail)
+                      : pty_ring_avail(pty->m_to_s_head, pty->m_to_s_tail);
+      if (avail > 0)
         revents |= POLLIN;
       if (pty->master_refs == 0)
         revents |= POLLHUP | POLLIN;

@@ -43,6 +43,12 @@ struct signal_struct {
   uint64_t alarm_deadline; // 0 = no alarm; else sched_clock() ns absolute
 };
 
+// Send `sig` to every process in process group `pgid` (sig==0 probes
+// existence only). Returns 0 if at least one process matched, -ESRCH
+// otherwise. Shared by sys_kill(neg pid), the PTY line discipline (signal
+// characters → foreground pgid), TIOCSWINSZ→SIGWINCH and master-close→SIGHUP.
+int pgsignal(pid_t pgid, int sig);
+
 struct signal_struct *signal_create(void);
 void signal_put(struct signal_struct *sig);
 

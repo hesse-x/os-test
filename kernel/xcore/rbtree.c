@@ -194,17 +194,69 @@ static void rb_erase_fixup(rb_root *root, rb_node *node, rb_node *parent) {
 }
 
 void rb_erase(rb_root *root, rb_node *node) {
-  rb_node *child = node->rb_left ? node->rb_left : node->rb_right;
-  rb_node *parent = rb_parent(node);
-  int color = rb_color(node);
-  if (child)
+  rb_node *child;
+  rb_node *parent;
+  int color;
+
+  if (!node->rb_left) {
+    child = node->rb_right;
+    parent = rb_parent(node);
+    color = rb_color(node);
+    if (child)
+      rb_set_parent(child, parent);
+    if (!parent)
+      root->rb_node = child;
+    else if (parent->rb_left == node)
+      parent->rb_left = child;
+    else
+      parent->rb_right = child;
+  } else if (!node->rb_right) {
+    child = node->rb_left;
+    parent = rb_parent(node);
+    color = rb_color(node);
     rb_set_parent(child, parent);
-  if (!parent)
-    root->rb_node = child;
-  else if (parent->rb_left == node)
-    parent->rb_left = child;
-  else
-    parent->rb_right = child;
+    if (!parent)
+      root->rb_node = child;
+    else if (parent->rb_left == node)
+      parent->rb_left = child;
+    else
+      parent->rb_right = child;
+  } else {
+    // Replace a two-child node with its in-order successor. The old shortcut
+    // discarded the right subtree and left parent links pointing at freed
+    // nodes, which turned later erase fixups into use-after-free writes.
+    rb_node *successor = node->rb_right;
+    while (successor->rb_left)
+      successor = successor->rb_left;
+
+    color = rb_color(successor);
+    child = successor->rb_right;
+    rb_node *successor_parent = rb_parent(successor);
+    if (successor_parent == node) {
+      parent = successor;
+      if (child)
+        rb_set_parent(child, successor);
+    } else {
+      parent = successor_parent;
+      successor_parent->rb_left = child;
+      if (child)
+        rb_set_parent(child, successor_parent);
+      successor->rb_right = node->rb_right;
+      rb_set_parent(successor->rb_right, successor);
+    }
+
+    rb_node *node_parent = rb_parent(node);
+    if (!node_parent)
+      root->rb_node = successor;
+    else if (node_parent->rb_left == node)
+      node_parent->rb_left = successor;
+    else
+      node_parent->rb_right = successor;
+    successor->rb_parent_color = node->rb_parent_color;
+    successor->rb_left = node->rb_left;
+    rb_set_parent(successor->rb_left, successor);
+  }
+
   if (color == RB_BLACK)
     rb_erase_fixup(root, child, parent);
 }

@@ -109,7 +109,17 @@ static int start_compositor(void) {
 #else
 static int start_terminal(void) {
   char *const argv[] = {"/usr/bin/terminal", NULL};
-  char *const envp[] = {"LIBSEAT_BACKEND=seatd", "SEATD_SOCK=/run/seatd.sock",
+  // Minimal stable session environment (terminal/step1.md §3.2): terminal and
+  // its shell descendants must not run with an empty environ. Terminal-specific
+  // entries (TERM/COLORTERM) are set by the terminal itself.
+  char *const envp[] = {"LIBSEAT_BACKEND=seatd",
+                        "SEATD_SOCK=/run/seatd.sock",
+                        "PATH=/usr/local/bin:/usr/bin:/bin",
+                        "HOME=/root",
+                        "USER=root",
+                        "SHELL=/bin/sh",
+                        "LANG=C.UTF-8",
+                        "XDG_RUNTIME_DIR=/run",
                         NULL};
   return spawn_process(argv[0], argv, envp, -1, -1, (mode_t)-1);
 }

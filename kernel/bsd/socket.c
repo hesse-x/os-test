@@ -497,8 +497,6 @@ static int unix_scm_install(struct file **scm_files, int num_files,
     installed[i] = fd;
     fd_install(fl, fd, scm_files[i]);
     fd_set_cloexec(fl, fd, (flags & MSG_CMSG_CLOEXEC) != 0);
-    if (scm_files[i]->type == FD_TTY)
-      pty_dup_file(scm_files[i]);
     next = fd + 1;
   }
   spin_unlock(&fl->fd_lock);

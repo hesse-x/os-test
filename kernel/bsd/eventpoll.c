@@ -31,6 +31,10 @@
 size_t copy_from_user(void *dst, const void *src, size_t size);
 size_t copy_to_user(void *dst, const void *src, size_t size);
 
+// Serializes interest-tree changes and each file's reverse registration list.
+// Readiness delivery remains protected by the per-eventpoll lock.
+static spinlock epoll_ctl_lock = SPINLOCK_INIT;
+
 // ===================== rbtree compare (by file*) =====================
 static int ep_cmp(rb_node *a, rb_node *b) {
   epitem *ea = rb_entry(a, epitem, rb_node);
@@ -102,53 +106,42 @@ eventpoll *eventpoll_create(void) {
 }
 
 void eventpoll_release(eventpoll *ep) {
-  epitem *epi_array[EP_MAX_ITEMS];
-  int count = 0;
-
-  // Phase 1: under ep->lock, remove all epitems from their target wait
-  // queues, ready_list, and rbt.  Collect into epi_array for later cleanup.
-  spin_lock(&ep->lock);
-  rb_node *n = rb_first(&ep->rbt);
-  while (n && count < EP_MAX_ITEMS) {
+  while (1) {
+    spin_lock(&epoll_ctl_lock);
+    rb_node *n = rb_first(&ep->rbt);
+    if (!n) {
+      spin_unlock(&epoll_ctl_lock);
+      break;
+    }
     epitem *epi = rb_entry(n, epitem, rb_node);
-    wait_queue_head *wq = ep_target_wq(epi->file);
-    if (wq)
-      remove_wait_queue(wq, &epi->wait);
+    if (epi->target_wq)
+      remove_wait_queue(epi->target_wq, &epi->wait);
+    synchronize_rcu();
+    spin_lock(&ep->lock);
     if (epi->is_ready)
       list_remove(&epi->rdllist_node);
-    rb_erase(&ep->rbt, n);
-    epi_array[count++] = epi;
-    n = rb_first(&ep->rbt);
-  }
-  ep->nitems = 0;
-  spin_unlock(&ep->lock);
+    rb_erase(&ep->rbt, &epi->rb_node);
+    ep->nitems--;
+    spin_unlock(&ep->lock);
+    list_remove(&epi->file_node);
+    spin_unlock(&epoll_ctl_lock);
 
-  // Phase 2: wait for any in-flight ep_poll_callback (collected before our
-  // remove_wait_queue) to finish.  __wake_up wraps the callback in
-  // rcu_read_lock, so synchronize_rcu ensures no callback is still using
-  // these epitems.
-  synchronize_rcu();
-
-  // Phase 3: free all epitems.  No callback is in-flight at this point.
-  for (int i = 0; i < count; i++) {
-    file_put(epi_array[i]->file);
-    kfree(epi_array[i]);
+    file_put(epi->file);
+    kfree(epi);
   }
   kfree(ep);
 }
 
-int ep_insert(eventpoll *ep, struct file *f, struct epoll_event *ev) {
+int ep_insert(eventpoll *ep, struct file *f, struct files *owner, int fd,
+              struct epoll_event *ev) {
   if (f->type == FD_EPOLL)
     return -EINVAL;
-  if (ep->nitems >= EP_MAX_ITEMS)
-    return -ENOMEM;
-  epitem key = {.file = f};
-  if (rb_search(&ep->rbt, &key.rb_node, ep_cmp))
-    return -EEXIST;
   epitem *epi = kmalloc(sizeof(epitem));
   if (!epi)
     return -ENOMEM;
   epi->file = f;
+  epi->owner = owner;
+  epi->fd = fd;
   file_get(f);
   // Mode flags (EPOLLET/EPOLLONESHOT/EPOLLEXCLUSIVE) live on dedicated flags,
   // not in the event mask — events stores only real poll events (IN/OUT/...).
@@ -165,14 +158,45 @@ int ep_insert(eventpoll *ep, struct file *f, struct epoll_event *ev) {
   epi->wait.data = epi;
   epi->wait.exclusive = epi->is_exclusive;
   list_init(&epi->rdllist_node);
-  wait_queue_head *wq = ep_target_wq(f);
-  if (wq) {
-    add_wait_queue(wq, &epi->wait);
-  } else {
+  list_init(&epi->file_node);
+  epi->target_wq = ep_target_wq(f);
+  if (!epi->target_wq) {
     printk(LOG_WARN, "ep_insert: NO wq for fd_type=%d file=%p\n", f->type,
            (void *)f);
   }
+
+  spin_lock(&epoll_ctl_lock);
+  // The fd may have been closed after sys_epoll_ctl took its temporary file
+  // reference. Do not create an interest that can never be auto-removed.
+  if (atomic_read(&f->fd_refs) == 0) {
+    spin_unlock(&epoll_ctl_lock);
+    file_put(f);
+    kfree(epi);
+    return -EBADF;
+  }
   spin_lock(&ep->lock);
+  if (ep->nitems >= EP_MAX_ITEMS) {
+    spin_unlock(&ep->lock);
+    spin_unlock(&epoll_ctl_lock);
+    file_put(f);
+    kfree(epi);
+    return -ENOMEM;
+  }
+  epitem key = {.file = f};
+  if (rb_search(&ep->rbt, &key.rb_node, ep_cmp)) {
+    spin_unlock(&ep->lock);
+    spin_unlock(&epoll_ctl_lock);
+    file_put(f);
+    kfree(epi);
+    return -EEXIST;
+  }
+  if (!f->epoll_items_initialized) {
+    list_init(&f->epoll_items);
+    f->epoll_items_initialized = 1;
+  }
+  list_push_back(&f->epoll_items, &epi->file_node);
+  if (epi->target_wq)
+    add_wait_queue(epi->target_wq, &epi->wait);
   rb_insert(&ep->rbt, &epi->rb_node, ep_cmp);
   ep->nitems++;
   // Immediate readiness check
@@ -183,46 +207,85 @@ int ep_insert(eventpoll *ep, struct file *f, struct epoll_event *ev) {
     epi->is_ready = 1;
   }
   spin_unlock(&ep->lock);
+  spin_unlock(&epoll_ctl_lock);
   if (revents)
     __wake_up(&ep->wq, POLLIN);
   return 0;
 }
 
-int ep_remove(eventpoll *ep, struct file *f) {
-  epitem key = {.file = f};
-  rb_node *node = rb_search(&ep->rbt, &key.rb_node, ep_cmp);
-  if (!node)
-    return -ENOENT;
-  epitem *epi = rb_entry(node, epitem, rb_node);
-  wait_queue_head *wq = ep_target_wq(f);
-  if (wq)
-    remove_wait_queue(wq, &epi->wait);
-  // Wait for any in-flight ep_poll_callback (collected by __wake_up before our
-  // remove_wait_queue) to finish.  __wake_up wraps the callback call in
-  // rcu_read_lock, so synchronize_rcu() ensures the callback has completed.
+static void ep_remove_item(epitem *epi) {
+  eventpoll *ep = epi->ep;
+  if (epi->target_wq)
+    remove_wait_queue(epi->target_wq, &epi->wait);
   synchronize_rcu();
   spin_lock(&ep->lock);
   if (epi->is_ready)
     list_remove(&epi->rdllist_node);
-  rb_erase(&ep->rbt, node);
+  rb_erase(&ep->rbt, &epi->rb_node);
   ep->nitems--;
   spin_unlock(&ep->lock);
+  list_remove(&epi->file_node);
+}
+
+int ep_remove(eventpoll *ep, struct file *f) {
+  spin_lock(&epoll_ctl_lock);
+  epitem key = {.file = f};
+  rb_node *node = rb_search(&ep->rbt, &key.rb_node, ep_cmp);
+  if (!node) {
+    spin_unlock(&epoll_ctl_lock);
+    return -ENOENT;
+  }
+  epitem *epi = rb_entry(node, epitem, rb_node);
+  ep_remove_item(epi);
+  spin_unlock(&epoll_ctl_lock);
+  file_put(f);
+  kfree(epi);
+  return 0;
+}
+
+static epitem *ep_find_fd_node(rb_node *node, struct files *owner, int fd) {
+  if (!node)
+    return NULL;
+  epitem *found = ep_find_fd_node(node->rb_left, owner, fd);
+  if (found)
+    return found;
+  epitem *epi = rb_entry(node, epitem, rb_node);
+  if (epi->owner == owner && epi->fd == fd)
+    return epi;
+  return ep_find_fd_node(node->rb_right, owner, fd);
+}
+
+int ep_remove_fd(eventpoll *ep, struct files *owner, int fd) {
+  spin_lock(&epoll_ctl_lock);
+  epitem *epi = ep_find_fd_node(ep->rbt.rb_node, owner, fd);
+  if (!epi) {
+    spin_unlock(&epoll_ctl_lock);
+    return -ENOENT;
+  }
+  struct file *f = epi->file;
+  ep_remove_item(epi);
+  spin_unlock(&epoll_ctl_lock);
   file_put(f);
   kfree(epi);
   return 0;
 }
 
 int ep_modify(eventpoll *ep, struct file *f, struct epoll_event *ev) {
+  spin_lock(&epoll_ctl_lock);
   epitem key = {.file = f};
   rb_node *node = rb_search(&ep->rbt, &key.rb_node, ep_cmp);
-  if (!node)
+  if (!node) {
+    spin_unlock(&epoll_ctl_lock);
     return -ENOENT;
+  }
   epitem *epi = rb_entry(node, epitem, rb_node);
   // Linux: EPOLLEXCLUSIVE may only be set at ADD time; MOD that flips the
   // exclusive state returns -EINVAL. Toggling ONESHOT/ET on MOD is allowed.
   int new_is_exclusive = !!(ev->events & EPOLLEXCLUSIVE);
-  if (new_is_exclusive != epi->is_exclusive)
+  if (new_is_exclusive != epi->is_exclusive) {
+    spin_unlock(&epoll_ctl_lock);
     return -EINVAL;
+  }
   spin_lock(&ep->lock);
   epi->events = ev->events & ~(EPOLLET | EPOLLONESHOT | EPOLLEXCLUSIVE);
   epi->is_et = !!(ev->events & EPOLLET);
@@ -239,9 +302,39 @@ int ep_modify(eventpoll *ep, struct file *f, struct epoll_event *ev) {
     epi->is_ready = 0;
   }
   spin_unlock(&ep->lock);
+  spin_unlock(&epoll_ctl_lock);
   if (revents)
     __wake_up(&ep->wq, POLLIN);
   return 0;
+}
+
+void eventpoll_file_release(struct file *f) {
+  while (1) {
+    spin_lock(&epoll_ctl_lock);
+    if (!f->epoll_items_initialized || list_empty(&f->epoll_items)) {
+      spin_unlock(&epoll_ctl_lock);
+      return;
+    }
+
+    epitem *epi = LIST_ENTRY(list_front(&f->epoll_items), epitem, file_node);
+    eventpoll *ep = epi->ep;
+    if (epi->target_wq)
+      remove_wait_queue(epi->target_wq, &epi->wait);
+    synchronize_rcu();
+    spin_lock(&ep->lock);
+    if (epi->is_ready)
+      list_remove(&epi->rdllist_node);
+    rb_erase(&ep->rbt, &epi->rb_node);
+    ep->nitems--;
+    spin_unlock(&ep->lock);
+    list_remove(&epi->file_node);
+    spin_unlock(&epoll_ctl_lock);
+
+    // Drop the interest's file reference only after it is unreachable from
+    // both epoll and the file reverse list. The caller's file_put keeps f live.
+    file_put(f);
+    kfree(epi);
+  }
 }
 
 // ===================== epoll_wait wake callback =====================
@@ -304,6 +397,15 @@ int64_t sys_epoll_ctl(int64_t epfd, int64_t op, int64_t fd, int64_t ev_ptr) {
   struct file *f = fd_lookup(proc->proc->files, (int)fd);
   if (!f) {
     rcu_read_unlock();
+    if (op == EPOLL_CTL_DEL) {
+      // Some descriptors (notably SCM_RIGHTS device fds) still have aliases
+      // in another process after this process closes its local number. Such a
+      // file remains alive, so close cannot auto-detach it. Let a subsequent
+      // DEL identify the original interest by its owning fd table and number.
+      int ret = ep_remove_fd(ep, proc->proc->files, (int)fd);
+      file_put(ef);
+      return ret == -ENOENT ? -EBADF : ret;
+    }
     file_put(ef);
     return -EBADF;
   }
@@ -327,7 +429,7 @@ int64_t sys_epoll_ctl(int64_t epfd, int64_t op, int64_t fd, int64_t ev_ptr) {
     if (copy_from_user(&ev, (void *)ev_ptr, sizeof(ev))) {
       ret = -EFAULT;
     } else if (op == EPOLL_CTL_ADD) {
-      ret = ep_insert(ep, f, &ev);
+      ret = ep_insert(ep, f, proc->proc->files, (int)fd, &ev);
     } else if (op == EPOLL_CTL_MOD) {
       ret = ep_modify(ep, f, &ev);
     } else {

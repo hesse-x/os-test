@@ -51,6 +51,8 @@ void remove_wait_queue(wait_queue_head *wq, wait_queue_t *wait) {
 // __wake_up_common) — anti-thundering-herd for many processes/epolls sharing a
 // listen socket.
 void __wake_up(wait_queue_head *wq, unsigned long flags) {
+  if (__builtin_expect(!wq, 0))
+    panic("__wake_up: NULL wq, caller=%p", __builtin_return_address(0));
   uint64_t irqflags;
   spin_lock_irqsave(&wq->lock, &irqflags);
   list_node *it = wq->head.next;

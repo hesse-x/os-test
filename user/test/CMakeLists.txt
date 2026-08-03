@@ -56,26 +56,22 @@ if(TEST)
     os_image_path(test_egl_smoke_elf test_egl_smoke.elf test/test_egl_smoke.elf PARTITION 2)
 endif()
 
-# wlroots prerequisite dep smoke tests (WF-3/WF-5 runtime validation).
-# Each links the Meson-built .so staged into build/ by `build.sh --wlroots`.
-# Keep them out of ALL, like test_egl_smoke_elf: build.sh creates and stages
-# the external libraries after the first CMake build, then requests these
-# targets explicitly. libseat is deferred to WF-6 (needs seatd + DRM/input).
-if(WLROOTS_DEPS)
-    if(TEST)
-        add_user_dyn_elf(test_pixman_smoke C SOURCES test_pixman_smoke.c
-            LINK_LIBS pixman-1 c
-            EXCLUDE_FROM_ALL
-            INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include/pixman-1)
-        add_user_dyn_elf(test_display_info_smoke C SOURCES test_display_info_smoke.c
-            LINK_LIBS display-info c
-            EXCLUDE_FROM_ALL
-            INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include)
-        add_user_dyn_elf(test_xkbcommon_smoke C SOURCES test_xkbcommon_smoke.c
-            LINK_LIBS xkbcommon c
-            EXCLUDE_FROM_ALL
-            INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include)
-    endif()
+# These test ELFs are always part of a TEST image. They remain outside the
+# first ALL pass only because their external libraries are installed after the
+# sysroot is prepared; build.sh builds these targets immediately afterward.
+if(TEST)
+    add_user_dyn_elf(test_pixman_smoke C SOURCES test_pixman_smoke.c
+        LINK_LIBS pixman-1 c
+        EXCLUDE_FROM_ALL
+        INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include/pixman-1)
+    add_user_dyn_elf(test_display_info_smoke C SOURCES test_display_info_smoke.c
+        LINK_LIBS display-info c
+        EXCLUDE_FROM_ALL
+        INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include)
+    add_user_dyn_elf(test_xkbcommon_smoke C SOURCES test_xkbcommon_smoke.c
+        LINK_LIBS xkbcommon c
+        EXCLUDE_FROM_ALL
+        INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/build/sysroot/usr/include)
 endif()
 
 # Layer 1: unistd (pipe/read/write/close)
@@ -145,6 +141,17 @@ add_user_dyn_elf(ioctl C SOURCES test_ioctl.c LINK_LIBS c STATIC_LIBS unity)
 
 # Layer 12: device VFS unified path
 add_user_dyn_elf(dev_vfs C SOURCES test_dev_vfs.c LINK_LIBS c STATIC_LIBS unity)
+
+# PTY vertical integration (terminal/step1.md §6.2): openpty/forkpty naming,
+# N_TTY ldisc editing (VERASE/VKILL/VEOF/ECHO/ICRNL), ^C/^D/raw mode, shell
+# job control (^C kills only the foreground job), pipeline + redirect, argv/
+# PATH lookup, TIOCSWINSZ->SIGWINCH, master-close SIGHUP. test_pty_helper.elf
+# is also shipped as /usr/bin/ptytest so the PATH-lookup case can exec it by
+# bare name.
+add_user_dyn_elf(pty C SOURCES test_pty.c LINK_LIBS c STATIC_LIBS unity DEFS _GNU_SOURCE)
+add_user_elf(test_pty_helper C SOURCES test_pty_helper.c LINK_LIBS c)
+os_image_path(test_pty_helper test_pty_helper.elf test/test_pty_helper.elf)
+os_image_path(test_pty_helper test_pty_helper.elf usr/bin/ptytest)
 
 # FPU/SSE smoke test: explicit inline-asm movsd+mulsd to verify user-mode
 # SSE path (CR4.OSFXSR + lazy FPU #NM handler). No Unity — simple printf+exit.

@@ -7,11 +7,13 @@
 #include "shell_command.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -57,6 +59,10 @@ struct program {
 
 static int last_status;
 static int requested_exit = -1;
+
+// Queried by the interactive loop to distinguish `exit` from a command that
+// happened to return the same code (step1.md §3.5).
+int shell_requested_exit(void) { return requested_exit; }
 
 static bool append_char(char *out, int *n, char c) {
   if (*n >= 255)
@@ -336,36 +342,121 @@ static int apply_redirects(command &cmd) {
   return 0;
 }
 
+// Builtins that must run in the parent process (they change shell state):
+// cd/export/unset/exit. Everything else may run in a pipeline child.
+static bool parent_state_builtin(const char *s) {
+  return !strcmp(s, "cd") || !strcmp(s, "export") || !strcmp(s, "unset") ||
+         !strcmp(s, "exit");
+}
+
 static bool is_builtin(command &cmd) {
   if (!cmd.argc)
     return true;
   const char *s = cmd.argv[0];
-  return !strcmp(s, "cd") || !strcmp(s, "pwd") || !strcmp(s, "echo") ||
-         !strcmp(s, "true") || !strcmp(s, "false") || !strcmp(s, "exit");
+  return parent_state_builtin(s) || !strcmp(s, "pwd") || !strcmp(s, "echo") ||
+         !strcmp(s, "true") || !strcmp(s, "false") || !strcmp(s, "ls") ||
+         !strcmp(s, "cat") || !strcmp(s, "touch") || !strcmp(s, "mkdir") ||
+         !strcmp(s, "clear");
+}
+
+// These file/stat builtins resolve relative paths against the kernel cwd
+// (the shell keeps the real cwd via chdir), so no private cwd bookkeeping is
+// needed — unlike the pre-unification interactive shell.
+static int run_ls(const char *path, int long_format) {
+  char base[512];
+  if (!path || !*path) {
+    if (!getcwd(base, sizeof(base)))
+      return 1;
+    path = base;
+  }
+  DIR *dir = opendir(path);
+  if (!dir) {
+    fprintf(stderr, "ls: cannot access %s\n", path);
+    return 1;
+  }
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    if (entry->d_name[0] == '.')
+      continue;
+    if (!long_format) {
+      printf("%s\n", entry->d_name);
+      continue;
+    }
+    char full[768];
+    snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
+    struct stat st;
+    if (stat(full, &st) == 0) {
+      printf("%s %d root root %u %s\n",
+             S_ISDIR(st.st_mode) ? "drwxr-xr-x" : "-rw-r--r--",
+             S_ISDIR(st.st_mode) ? 2 : 1, (unsigned)st.st_size, entry->d_name);
+    } else {
+      printf("?????????? 1 root root 0 %s\n", entry->d_name);
+    }
+  }
+  closedir(dir);
+  return 0;
+}
+
+static int run_cat(const char *path) {
+  int fd = 0; /* no path: copy stdin to stdout (e.g. `echo x | cat`) */
+  if (path) {
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+      fprintf(stderr, "cat: cannot open %s\n", path);
+      return 1;
+    }
+  }
+  char buf[4096];
+  ssize_t n;
+  while ((n = read(fd, buf, sizeof(buf))) > 0)
+    for (ssize_t i = 0; i < n; i++)
+      putchar(buf[i]);
+  if (fd != 0)
+    close(fd);
+  return 0;
+}
+
+static int run_touch(const char *path) {
+  int fd = open(path, O_WRONLY | O_CREAT, 0666);
+  if (fd < 0) {
+    fprintf(stderr, "touch: %s: %s\n", path, strerror(errno));
+    return 1;
+  }
+  close(fd);
+  return 0;
+}
+
+static int run_mkdir(const char *path) {
+  if (mkdir(path, 0755) != 0) {
+    fprintf(stderr, "mkdir: %s: %s\n", path, strerror(errno));
+    return 1;
+  }
+  return 0;
 }
 
 static int run_builtin(command &cmd) {
   apply_assignments(cmd);
   if (!cmd.argc)
     return 0;
-  if (!strcmp(cmd.argv[0], "true"))
+  const char *s = cmd.argv[0];
+  if (!strcmp(s, "true"))
     return 0;
-  if (!strcmp(cmd.argv[0], "false"))
+  if (!strcmp(s, "false"))
     return 1;
-  if (!strcmp(cmd.argv[0], "echo")) {
+  if (!strcmp(s, "echo")) {
     for (int i = 1; i < cmd.argc; i++)
       printf("%s%s", i == 1 ? "" : " ", cmd.argv[i]);
     putchar('\n');
     return 0;
   }
-  if (!strcmp(cmd.argv[0], "pwd")) {
+  if (!strcmp(s, "pwd")) {
     char path[512];
     if (!getcwd(path, sizeof(path)))
       return 1;
     puts(path);
     return 0;
   }
-  if (!strcmp(cmd.argv[0], "cd")) {
+  if (!strcmp(s, "cd")) {
     const char *path = cmd.argc > 1 ? cmd.argv[1] : getenv("HOME");
     if (!path)
       path = "/";
@@ -375,13 +466,92 @@ static int run_builtin(command &cmd) {
     }
     return 0;
   }
-  int status = cmd.argc > 1 ? atoi(cmd.argv[1]) & 255 : last_status;
-  requested_exit = status;
-  return status;
+  if (!strcmp(s, "export")) {
+    // export NAME=value  sets the shell environment (parent process).
+    for (int i = 1; i < cmd.argc; i++) {
+      char *eq = strchr(cmd.argv[i], '=');
+      if (!eq || eq == cmd.argv[i])
+        continue;
+      *eq = 0;
+      setenv(cmd.argv[i], eq + 1, 1);
+      *eq = '=';
+    }
+    return 0;
+  }
+  if (!strcmp(s, "unset")) {
+    for (int i = 1; i < cmd.argc; i++)
+      unsetenv(cmd.argv[i]);
+    return 0;
+  }
+  if (!strcmp(s, "clear")) {
+    printf("\033[2J\033[H");
+    return 0;
+  }
+  if (!strcmp(s, "ls")) {
+    int long_fmt = 0;
+    const char *path = NULL;
+    for (int i = 1; i < cmd.argc; i++) {
+      if (!strcmp(cmd.argv[i], "-l"))
+        long_fmt = 1;
+      else
+        path = cmd.argv[i];
+    }
+    return run_ls(path, long_fmt);
+  }
+  if (!strcmp(s, "cat"))
+    return run_cat(cmd.argc > 1 ? cmd.argv[1] : NULL);
+  if (!strcmp(s, "touch"))
+    return cmd.argc > 1 ? run_touch(cmd.argv[1]) : 1;
+  if (!strcmp(s, "mkdir"))
+    return cmd.argc > 1 ? run_mkdir(cmd.argv[1]) : 1;
+  if (!strcmp(s, "exit")) {
+    int status = cmd.argc > 1 ? atoi(cmd.argv[1]) & 255 : last_status;
+    requested_exit = status;
+    return status;
+  }
+  return 0;
+}
+
+// Reset terminal signals to default before exec. The shell ignores these for
+// itself; POSIX keeps SIG_IGN across exec, so a child that did not reset here
+// would survive Ctrl-C (step1.md §3.6).
+static void reset_signal_defaults(void) {
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = SIG_DFL;
+  sigaction(SIGINT, &sa, NULL);
+  sigaction(SIGQUIT, &sa, NULL);
+  sigaction(SIGTSTP, &sa, NULL);
+  sigaction(SIGTTIN, &sa, NULL);
+  sigaction(SIGTTOU, &sa, NULL);
+}
+
+// Interactive-shell setup: the shell lives in its own process group, ignores
+// terminal-generated signals, and holds the controlling terminal as its
+// foreground group. Idempotent (the forkpty child already did setsid +
+// TIOCSCTTY via libc login_tty).
+void shell_init_jobcontrol(void) {
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = SIG_IGN;
+  sigaction(SIGINT, &sa, NULL);
+  sigaction(SIGQUIT, &sa, NULL);
+  sigaction(SIGTSTP, &sa, NULL);
+  sigaction(SIGTTIN, &sa, NULL);
+  sigaction(SIGTTOU, &sa, NULL);
+  setpgid(0, 0); // own group (idempotent)
+  tcsetpgrp(0, getpgrp());
 }
 
 static int run_pipeline(pipeline &pl) {
-  if (pl.count == 1 && is_builtin(pl.commands[0])) {
+  // Only parent-state builtins (cd/export/unset/exit) and assignment-only
+  // commands run in the parent: they must affect the shell, with redirects
+  // applied around them via the saved fds. Everything else — including
+  // blocking builtins like `cat` — goes through the job-control child path so
+  // ^C (routed to the job's pgid) can reach it; running `cat` in the parent
+  // would let it ignore SIGINT along with the shell and hang forever.
+  if (pl.count == 1 &&
+      (!pl.commands[0].argc || parent_state_builtin(pl.commands[0].argv[0]))) {
     int saved[3] = {dup(0), dup(1), dup(2)};
     int status =
         apply_redirects(pl.commands[0]) < 0 ? 1 : run_builtin(pl.commands[0]);
@@ -395,6 +565,11 @@ static int run_pipeline(pipeline &pl) {
     return status;
   }
 
+  // Foreground pipeline: every process joins one new process group (the first
+  // child's pid). Both sides call setpgid to close the fork/exec race; the
+  // terminal is handed to the job before waiting and reclaimed after
+  // (step1.md §3.6).
+  pid_t job_pgid = 0;
   int previous = -1;
   pid_t pids[16];
   for (int i = 0; i < pl.count; i++) {
@@ -414,17 +589,38 @@ static int run_pipeline(pipeline &pl) {
       if (fds[1] >= 0)
         close(fds[1]);
       command &cmd = pl.commands[i];
+      // The first child cannot know the group id before fork returns, so it
+      // starts its own group; later children join the established one.
+      setpgid(0, i == 0 ? 0 : job_pgid);
+      reset_signal_defaults();
       apply_assignments(cmd);
       if (apply_redirects(cmd) < 0)
         _exit(1);
-      if (is_builtin(cmd))
-        _exit(run_builtin(cmd));
+      if (is_builtin(cmd)) {
+        int st = run_builtin(cmd);
+        // _exit skips stdio flush: redirected output (stdout = a file) would
+        // otherwise stay in the 4 KiB buffer and the file would be empty.
+        fflush(0);
+        _exit(st);
+      }
       execvp(cmd.argv[0], cmd.argv);
+      fprintf(stderr, "sh: %s: %s\n", cmd.argv[0],
+              errno == ENOENT ? "command not found" : "permission denied");
       _exit(errno == ENOENT ? 127 : 126);
     }
     if (pid < 0)
       return 1;
     pids[i] = pid;
+    // Both sides call setpgid to close the fork/exec race (the child does its
+    // own above): without this parent-side call, waitpid(-job_pgid) can run
+    // before the child's setpgid, find no child in the group, and bail with
+    // ECHILD — reporting a bogus status 1 for e.g. `sh -c true`.
+    if (i == 0) {
+      job_pgid = pid; // first child's pid is the pipeline's group id
+      setpgid(pid, pid);
+    } else {
+      setpgid(pid, job_pgid);
+    }
     if (previous >= 0)
       close(previous);
     if (fds[1] >= 0)
@@ -433,16 +629,28 @@ static int run_pipeline(pipeline &pl) {
   }
   if (previous >= 0)
     close(previous);
+
+  // Hand the terminal to the job; the ldisc now routes ^C to the pipeline.
+  tcsetpgrp(0, job_pgid);
   int result = 1;
-  for (int i = 0; i < pl.count; i++) {
+  for (;;) {
     int status = 0;
-    if (waitpid(pids[i], &status, 0) == pids[i] && i == pl.count - 1) {
+    pid_t w = waitpid(-job_pgid, &status, WUNTRACED);
+    if (w < 0) {
+      if (errno == ECHILD)
+        break;  // group fully reaped
+      continue; // EINTR — retry
+    }
+    if (w == pids[pl.count - 1]) {
+      // Pipeline status = last stage's exit (matching old semantics).
       if (WIFEXITED(status))
         result = WEXITSTATUS(status);
       else if (WIFSIGNALED(status))
         result = 128 + WTERMSIG(status);
     }
   }
+  // Reclaim the terminal (safe: the shell ignores SIGTTOU).
+  tcsetpgrp(0, getpgrp());
   return result;
 }
 

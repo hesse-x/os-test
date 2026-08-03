@@ -131,6 +131,17 @@ struct pty {
   uint8_t s_to_m_buf[PTY_BUF_SIZE]; // slave->master (shell output)
   uint32_t s_to_m_head, s_to_m_tail;
 
+  // Canonical input queue (minimal N_TTY line discipline, master->slave
+  // direction). Ring over the same PTY_BUF_SIZE modulus as the raw rings.
+  // [canon_tail, canon_commit) = committed lines readable by the slave;
+  // [canon_commit, canon_head) = the uncommitted edit line (VERASE/VKILL
+  // operate here). Used only when termios ICANON is set; raw mode keeps
+  // flowing through m_to_s_buf.
+  uint8_t canon_buf[PTY_BUF_SIZE];
+  uint32_t canon_tail;
+  uint32_t canon_commit;
+  uint32_t canon_head;
+
   // Blocked waiters now hang on pty->wq; pid is no longer recorded
   // (queue-identity model, §5.2)
 
@@ -141,7 +152,7 @@ struct pty {
   struct winsize t_winsize;
 
   // PTY index and reference counts
-  int index;        // PTY number (corresponds to /dev/ptsN)
+  int index;        // PTY number (corresponds to /dev/pts/N)
   int master_refs;  // master fd reference count
   int slave_refs;   // slave fd reference count
   int slave_opened; // has the slave side been opened?
@@ -149,7 +160,8 @@ struct pty {
   // Session / foreground pgid (reserved for future job control)
   pid_t t_sid;     // session ID (0 = no session)
   pid_t t_pgid;    // foreground process group ID
-  int eof_pending; // Ctrl-D EOF flag: master write len=0 → slave read returns 0
+  int eof_pending; // one-shot EOF: ldisc VEOF on an empty line → next slave
+                   // read returns 0 once (set by ldisc, cleared by slave read)
 
   // Pointer to slave device priv (for cleanup)
   struct pts_dev_priv *pts_priv;
@@ -177,8 +189,13 @@ int pty_ring_space(uint32_t head, uint32_t tail);
 // /dev/ptmx open callback
 int ptmx_open(xtask *proc, int fd);
 
-// /dev/ptsN slave open callback
+// /dev/pts/N slave open callback
 int pts_open(xtask *proc, int fd);
+
+// Format the slave devtmpfs name "pts/N" for a PTY index (out holds at
+// least 16 bytes). Shared by ptmx_open (register) and pty_close_file
+// (unregister) so the two names can never drift apart.
+void pty_slave_name(int index, char out[16]);
 
 // PTY read/write
 int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len);
@@ -197,7 +214,7 @@ uint32_t pty_poll(struct pty *pty, int is_master, uint32_t events);
 // Determine if fd is master or slave side
 int pty_fd_is_master(files *files, int fd);
 
-// Check if inode is the ptmx master inode (for pty_close_file/pty_dup_file)
+// Check if inode is the ptmx master inode (for pty_close_file)
 int pty_is_master_inode(struct inode *inode);
 
 // Wake blocked pipe peers based on fd direction flags

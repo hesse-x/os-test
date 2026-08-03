@@ -9,12 +9,12 @@
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
-#include "arch/x64/utils.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
 
+#include <xos/page.h>
 #include <xos/syscall.h>
 
 // Global kmalloc cache array

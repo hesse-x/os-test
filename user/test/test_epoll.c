@@ -833,14 +833,75 @@ void test_epoll_closed_fd_auto(void) {
   int fd[2];
   pipe(fd);
   int ep = epoll_create1(0);
-  struct epoll_event ev = {.events = EPOLLIN, .data.fd = fd[0]};
+  const uint64_t stale_canary = 0xfeedfacecafebeefULL;
+  struct epoll_event ev = {.events = EPOLLIN, .data = {.u64 = stale_canary}};
   epoll_ctl(ep, EPOLL_CTL_ADD, fd[0], &ev);
   close(fd[0]);
-  /* Monitored fd closed: epoll should report an event (HUP/IN) or auto-DEL. */
+
+  /* Reuse the numeric fd and make the new file readable. The old open-file
+   * description must already have been removed from epoll. */
+  int reused[2];
+  pipe(reused);
+  write(reused[1], "x", 1);
+
   struct epoll_event out[4];
-  int n = epoll_wait(ep, out, 4, 200);
-  TEST_ASSERT_TRUE(n == 0 ||
-                   (n >= 1 && (out[0].events & (EPOLLIN | EPOLLHUP))));
+  int n = epoll_wait(ep, out, 4, 0);
+  TEST_ASSERT_EQUAL_INT(0, n);
+
+  close(reused[0]);
+  close(reused[1]);
+  close(fd[1]);
+  close(ep);
+}
+
+/* Closing one dup must retain the interest until the final descriptor for the
+ * same open-file description is closed. */
+void test_epoll_close_dup_lifetime(void) {
+  int fd[2];
+  pipe(fd);
+  int alias = dup(fd[0]);
+  int ep = epoll_create1(0);
+  struct epoll_event ev = {.events = EPOLLIN, .data = {.u64 = 0x12345678}};
+  TEST_ASSERT_EQUAL_INT(0, epoll_ctl(ep, EPOLL_CTL_ADD, fd[0], &ev));
+
+  close(fd[0]);
+  write(fd[1], "x", 1);
+  struct epoll_event out;
+  TEST_ASSERT_EQUAL_INT(1, epoll_wait(ep, &out, 1, 100));
+  TEST_ASSERT_EQUAL_HEX64(0x12345678, out.data.u64);
+
+  close(alias);
+  TEST_ASSERT_EQUAL_INT(0, epoll_wait(ep, &out, 1, 0));
+  close(fd[1]);
+  close(ep);
+}
+
+/* A descriptor received through SCM_RIGHTS has an alias in another process.
+ * If the receiver closes its local fd before DEL, the registration must still
+ * be removable by that now-closed fd number instead of leaking stale data. */
+void test_epoll_del_closed_fd_with_fork_alias(void) {
+  int fd[2];
+  pipe(fd);
+  int ep = epoll_create1(0);
+  struct epoll_event ev = {.events = EPOLLIN,
+                           .data = {.u64 = 0xfeedfacecafebeefULL}};
+  TEST_ASSERT_EQUAL_INT(0, epoll_ctl(ep, EPOLL_CTL_ADD, fd[0], &ev));
+
+  pid_t child = fork();
+  if (child == 0) {
+    usleep(200 * 1000);
+    _exit(0);
+  }
+
+  write(fd[1], "x", 1);
+  int registered_fd = fd[0];
+  close(fd[0]);
+  TEST_ASSERT_EQUAL_INT(0, epoll_ctl(ep, EPOLL_CTL_DEL, registered_fd, NULL));
+  struct epoll_event out;
+  TEST_ASSERT_EQUAL_INT(0, epoll_wait(ep, &out, 1, 0));
+
+  int status;
+  waitpid(child, &status, 0);
   close(fd[1]);
   close(ep);
 }
@@ -944,6 +1005,8 @@ int main(int argc, char **argv, char **envp) {
   /* 8.2.7 */
   RUN_TEST(test_epoll_bad_epfd);
   RUN_TEST(test_epoll_closed_fd_auto);
+  RUN_TEST(test_epoll_close_dup_lifetime);
+  RUN_TEST(test_epoll_del_closed_fd_with_fork_alias);
   RUN_TEST(test_epoll_maxitems);
   RUN_TEST(test_epoll_maxevents_limit);
   RUN_TEST(test_epoll_user_ptr_fault);

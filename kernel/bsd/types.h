@@ -76,6 +76,9 @@ struct drm_fence;
 
 typedef struct file {
   refcount_t f_count;
+  atomic_t fd_refs;      // number of fd-table entries referring to this file
+  list_node epoll_items; // epoll registrations targeting this file
+  int epoll_items_initialized;
   int type;
   int flags;
   struct inode *inode;
@@ -137,7 +140,6 @@ void files_put(files *files);
 // ===================== unified fd lifecycle =====================
 void file_put(struct file *f);
 int alloc_fd(files *files, int min_fd);
-void pty_dup_file(struct file *f);
 void pty_close_file(struct file *f);
 
 static inline void file_get(struct file *f) {
@@ -146,12 +148,15 @@ static inline void file_get(struct file *f) {
 }
 
 static inline void fd_install(files *files, int fd, struct file *f) {
+  atomic_inc(&f->fd_refs);
   RCU_ASSIGN_POINTER(files->fd_table[fd], f);
 }
 
 static inline struct file *fd_uninstall(files *files, int fd) {
   struct file *f = files->fd_table[fd];
   RCU_ASSIGN_POINTER(files->fd_table[fd], NULL);
+  if (f)
+    atomic_dec(&f->fd_refs);
   return f;
 }
 

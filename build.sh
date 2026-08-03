@@ -19,6 +19,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --test)
             CMAKE_EXTRA="$CMAKE_EXTRA -DTEST=1"
+            BUILD_TEST=1
             # The test image exercises every optional runtime integration.
             FORCE_LIBCXX=1
             FORCE_MESA=1
@@ -83,6 +84,9 @@ done
 # Ensure SANITIZE is explicitly set so CMake cache doesn't retain stale values
 if ! echo "$CMAKE_EXTRA" | grep -q "SANITIZE="; then
     CMAKE_EXTRA="$CMAKE_EXTRA -DSANITIZE=0"
+fi
+if [ "${BUILD_TEST:-0}" != "1" ]; then
+    CMAKE_EXTRA="$CMAKE_EXTRA -DTEST=0"
 fi
 
 # A normal build is incremental but self-healing: missing runtime products cause
@@ -372,11 +376,10 @@ PY
     # terminal now links libseat, so defer it until the external library exists.
     ninja -C build terminal_dyn_elf
 
-    # These tests link the just-staged external libraries, so they cannot be
-    # part of the initial CMake ALL target. This mirrors the post-Mesa EGL test.
-    if [ "${BUILD_WLROOTS_DEPS:-0}" = "1" ] && \
-       echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
-        echo "=== Building wlroots prerequisite smoke ELFs ==="
+    # These TEST-image ELFs link the just-staged external libraries, so build
+    # them after sysroot preparation rather than in the initial CMake pass.
+    if [ "${BUILD_TEST:-0}" = "1" ]; then
+        echo "=== Building TEST dependency smoke ELFs ==="
         ninja -C build \
             test_pixman_smoke_dyn_elf \
             test_display_info_smoke_dyn_elf \

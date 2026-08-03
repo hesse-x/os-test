@@ -736,7 +736,7 @@ static int fstat_fill(struct file *f, struct kstat *ks) {
     ks->st_mode = S_IFIFO | 0644;
     return 0;
   case FD_TTY: {
-    /* tty fd 的 f->inode 即 devtmpfs /dev/ptsN 节点(打开时由 sys_open 绑定)。
+    /* tty fd 的 f->inode 即 devtmpfs /dev/pts/N 节点(打开时由 sys_open 绑定)。
      * musl ttyname_r 用 stat(path) vs fstat(fd) 的 (dev,ino) 交叉校验确认
      * /proc/self/fd/N 链接所指即该 fd——故 fstat 必须回填与 stat 一致的
      * st_ino/st_rdev,否则闭环误判 ENODEV(procfs.md §3.4.1)。 */

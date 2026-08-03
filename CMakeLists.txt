@@ -303,7 +303,15 @@ if(MESA)
     os_image_path(mesa_dri_gbm      dri_gbm.so             lib/dri_gbm.so             PARTITION 2)
 endif()
 
-if(WLROOTS_DEPS)
+if(TEST)
+    # TEST images always exercise and ship these dependency libraries.
+    os_image_path(pixman_lib          libpixman-1.so          lib/libpixman-1.so          PARTITION 2)
+    os_image_path(pixman_soname       libpixman-1.so.0        lib/libpixman-1.so.0        PARTITION 2)
+    os_image_path(xkbcommon_lib       libxkbcommon.so         lib/libxkbcommon.so         PARTITION 2)
+    os_image_path(xkbcommon_soname    libxkbcommon.so.0       lib/libxkbcommon.so.0       PARTITION 2)
+    os_image_path(display_info_lib    libdisplay-info.so      lib/libdisplay-info.so      PARTITION 2)
+    os_image_path(display_info_soname libdisplay-info.so.4    lib/libdisplay-info.so.4    PARTITION 2)
+elseif(WLROOTS_DEPS)
     # build.sh --wlroots stages these Meson products as real files because the
     # root filesystem is FAT32 and cannot represent the usual SONAME symlinks.
     os_image_path(pixman_lib          libpixman-1.so          lib/libpixman-1.so          PARTITION 2)

@@ -450,7 +450,7 @@ global:
     siglongjmp; getitimer; psignal; psiginfo;
 
     /* <termios.h> */
-    tcgetattr; tcsetattr;
+    tcgetattr; tcsetattr; tcgetpgrp; tcsetpgrp;
 
     /* <dirent.h> */
     closedir; opendir; readdir; scandir;

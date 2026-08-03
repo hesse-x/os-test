@@ -203,6 +203,11 @@ static void deliver_signal(xtask *proc, trapframe *tf, int sig,
   // Modify trapframe → jump to handler
   tf->rip = (int64_t)sa->__sigaction_handler._sa_handler;
   tf->rsp = user_rsp - 8;
+  printk(LOG_ERROR,
+         "[DBG] deliver_signal pid=%d sig=%d handler=%p sa_flags=0x%lx "
+         "sa_restorer=%p user_rsp=%p\n",
+         proc->pid, sig, (void *)tf->rip, (unsigned long)sa->sa_flags,
+         (void *)sa->sa_restorer, (void *)user_rsp);
 
   if (sa->sa_flags & SA_SIGINFO) {
     tf->rdi = (int64_t)sig;
@@ -371,6 +376,11 @@ void check_pending_signals(trapframe *tf) {
     // need_resched set but never honored -> shell never scheduled.
     if (sig <= 0 || sig >= NSIG)
       break;
+
+    printk(LOG_ERROR,
+           "[DBG] cps consume pid=%d sig=%d blocked=0x%llx pending=0x%llx\n",
+           proc->pid, sig, (unsigned long long)proc->proc->sig_blocked,
+           (unsigned long long)proc->proc->sig_pending);
 
     // signalfd: if an open signalfd accepts this signal (and it is not
     // blocked), defer handler delivery — leave the bit pending so the
@@ -674,6 +684,9 @@ static int deliver_signal_to_process(xtask *leader, int sig) {
   spin_lock_irqsave(&leader->proc->signal->sig_lock, &sflags);
   leader->proc->signal->shared_pending |= (1ULL << (sig - 1));
   spin_unlock_irqrestore(&leader->proc->signal->sig_lock, sflags);
+  printk(LOG_ERROR,
+         "[DBG] deliver_to_process pid=%d sig=%d leader_blocked=0x%llx\n",
+         leader->pid, sig, (unsigned long long)leader->proc->sig_blocked);
   recalc_sigpending(leader);
   if (!(leader->proc->sig_blocked & (1ULL << (sig - 1))) &&
       leader->state == BLOCKED)
@@ -981,6 +994,12 @@ int64_t sys_tkill(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
 
 int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                         int64_t unused2, int64_t unused3) {
+  printk(
+      LOG_ERROR,
+      "[DBG] sigprocmask ENTER pid=%d how=%lld set=%p old=%p sigsetsize=%lld "
+      "sizeof(sigset_t)=%zu\n",
+      current_task->pid, (long long)arg1, (void *)arg2, (void *)arg3,
+      (long long)arg4, sizeof(sigset_t));
   // musl's pthread_sigmask passes arg4 = _NSIG/8 = 16 with a 128-byte
   // sigset_t buffer. Accept any sigsetsize >= our 8-byte sigset_t; we copy
   // only the low 8 bytes. Mirrors sys_sigpending/signalfd. The bounds check
@@ -1029,6 +1048,10 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     }
     // SIGKILL/SIGSTOP cannot be blocked
     proc->proc->sig_blocked &= ~((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP)));
+    printk(LOG_ERROR,
+           "[DBG] sigprocmask pid=%d how=%d newset=0x%llx -> blocked=0x%llx\n",
+           proc->pid, how, (unsigned long long)newset,
+           (unsigned long long)proc->proc->sig_blocked);
     // A mask change can make a previously-blocked pending signal deliverable
     // (SIG_UNBLOCK) or hide one (SIG_BLOCK); recalc so signal_pending() tracks
     // the new deliverable set. Mirrors Linux recalc_sigpending() in

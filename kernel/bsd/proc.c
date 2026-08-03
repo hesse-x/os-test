@@ -242,6 +242,13 @@ files *files_create(void) {
 void file_put(struct file *f) {
   if (!f)
     return;
+
+  // epoll holds its own file references, so f_count cannot identify the last
+  // descriptor close. fd_refs can: once it reaches zero, remove every epoll
+  // interest before dropping the caller's reference.
+  if (atomic_read(&f->fd_refs) == 0)
+    eventpoll_file_release(f);
+
   if (!refcount_dec_and_test(&f->f_count))
     return;
 
@@ -421,16 +428,6 @@ int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence) {
   return fd;
 }
 
-void pty_dup_file(struct file *f) {
-  struct pty *pty = f->pty;
-  if (!pty)
-    return;
-  if (pty_is_master_inode(f->inode))
-    pty->master_refs++;
-  else
-    pty->slave_refs++;
-}
-
 void pty_close_file(struct file *f) {
   struct pty *pty = f->pty;
   if (!pty)
@@ -440,21 +437,10 @@ void pty_close_file(struct file *f) {
   if (is_master) {
     pty->master_refs--;
     if (pty->master_refs == 0) {
-      if (pty->t_sid != 0) {
-        for (int p = 0; p < MAX_PROC; p++) {
-          if (tasks[p] && tasks[p]->pid == p && tasks[p]->proc &&
-              tasks[p]->proc->pgid == pty->t_pgid &&
-              tasks[p]->proc->sid == pty->t_sid) {
-            __atomic_or_fetch(&tasks[p]->proc->sig_pending, SIGMASK(SIGHUP),
-                              __ATOMIC_RELEASE);
-            // SIGHUP must interrupt any blocking state (including
-            // WAIT_FUTEX/WAIT_CHILD); wake_process_any unconditionally wakes
-            // any BLOCKED target regardless of event type.
-            if (tasks[p]->state == BLOCKED)
-              wake_process_any(tasks[p]);
-          }
-        }
-      }
+      // Hangup: SIGHUP the foreground process group (pgid is system-unique,
+      // so the pgid-only match in pgsignal implies the session).
+      if (pty->t_sid != 0)
+        pgsignal(pty->t_pgid, SIGHUP);
       __wake_up(pty->wq, POLLHUP | POLLIN | POLLOUT);
     }
   } else {
@@ -467,24 +453,9 @@ void pty_close_file(struct file *f) {
       __wake_up(pty->wq, POLLHUP | POLLIN);
       pty->slave_opened = 0;
 
-      // Remove /dev/ptsN from devtmpfs
-      char name[16] = "pts";
-      int pos = 3;
-      int idx = pty->index;
-      if (idx == 0) {
-        name[pos++] = '0';
-      } else {
-        char tmp[8];
-        int tpos = 0;
-        int n = idx;
-        while (n > 0) {
-          tmp[tpos++] = '0' + (n % 10);
-          n /= 10;
-        }
-        for (int i = tpos - 1; i >= 0; i--)
-          name[pos++] = tmp[i];
-      }
-      name[pos] = '\0';
+      // Remove /dev/pts/N from devtmpfs
+      char name[16];
+      pty_slave_name(pty->index, name);
       devtmpfs_remove(name);
 
       if (pty->pts_priv) {
@@ -873,7 +844,7 @@ uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
 }
 
 // Deep-copy fd_table from parent_files to child_files.
-// Bumps ref counts for pipe, SHM, file, inode, socket, TTY.
+// The shared file object's f_count owns all per-fd references.
 // S06: also copies the per-fd close_on_exec bitmap so the child inherits the
 // parent's cloexec settings (Linux: fork/clone-without-CLONE_FILES copies).
 static void __attribute__((unused)) copy_fd_table(files *parent_files,
@@ -891,12 +862,10 @@ static void __attribute__((unused)) copy_fd_table(files *parent_files,
   spin_lock(&parent_files->fd_lock);
   for (int fd = 0; fd < MAX_FD; fd++) {
     struct file *f = parent_files->fd_table[fd];
-    if (f) {
+    if (f)
       file_get(f);
-      if (f->type == FD_TTY)
-        pty_dup_file(f);
-    }
-    child_files->fd_table[fd] = f;
+    if (f)
+      fd_install(child_files, fd, f);
   }
   __memcpy(child_files->close_on_exec, parent_files->close_on_exec,
            sizeof(child_files->close_on_exec));
@@ -1090,6 +1059,8 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     return (int64_t)-EINVAL;
 
   // 1. Allocate an xtask slot
+  printk(LOG_ERROR, "[DBG] sys_clone ENTER parent_pid=%d flags=0x%lx\n",
+         parent->pid, (unsigned long)flags);
   spin_lock(&tasks_lock);
   int alloc_idx = -1;
   xtask *child = xtask_alloc(&alloc_idx);
@@ -1260,6 +1231,10 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
   child_bp->sig_pending = 0;
   child_bp->sig_blocked = parent->proc->sig_blocked;
+  printk(
+      LOG_ERROR,
+      "[DBG] clone parent_pid=%d child_pid=%d inherited_sig_blocked=0x%llx\n",
+      parent->pid, alloc_idx, (unsigned long long)parent->proc->sig_blocked);
   child_bp->exit_code = 0;
   child_bp->futex_uaddr = 0;
   list_init(&child_bp->futex_node);
@@ -1977,6 +1952,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   // 10. kfree ELF buffer
   kfree(elf_buf);
 
+  printk(LOG_ERROR, "[DBG] execve RET pid=%d sig_blocked=0x%llx\n", proc->pid,
+         (unsigned long long)proc->proc->sig_blocked);
   return 0;
 }
 
