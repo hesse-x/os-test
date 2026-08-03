@@ -6481,8 +6481,19 @@ int64_t sys_chdir(int64_t arg1, int64_t unused1, int64_t unused2,
     }
   }
 
+  // Normalize: collapse "." and ".." at the string level before resolution.
+  // path_walk relies on each fs's i_op->lookup to handle ".." (FAT32 via the
+  // on-disk ".." entry), but pseudo-fs mount roots have no ".." entry, so an
+  // un-normalized ".." (e.g. `cd /dev/..` or `cd ../..` from a deep cwd) would
+  // resolve to ENOENT there — or worse, against a stale parent. Normalizing
+  // here eliminates ".." from what path_walk ever sees, fixing cross-mount ".."
+  // ("/dev/.." → "/") and deep-relative ".." uniformly.
+  char norm[512];
+  if (normalize_path(abs_path, norm, sizeof(norm)) < 0)
+    return (int64_t)-ENAMETOOLONG;
+
   // Verify the path is a directory via vfs_open_kern
-  struct inode *ip = vfs_open_kern(abs_path);
+  struct inode *ip = vfs_open_kern(norm);
   if (!ip)
     return (int64_t)-ENOENT;
   if (!S_ISDIR(ip->mode)) {
@@ -6492,10 +6503,10 @@ int64_t sys_chdir(int64_t arg1, int64_t unused1, int64_t unused2,
   inode_put(ip);
 
   // Store the normalized absolute path
-  size_t abs_len = __strlen(abs_path);
+  size_t abs_len = __strlen(norm);
   if (abs_len + 1 > sizeof(bp->cwd))
     return (int64_t)-ENAMETOOLONG;
-  __strncpy(bp->cwd, abs_path, sizeof(bp->cwd) - 1);
+  __strncpy(bp->cwd, norm, sizeof(bp->cwd) - 1);
   bp->cwd[sizeof(bp->cwd) - 1] = '\0';
 
   return 0;

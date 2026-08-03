@@ -18,7 +18,6 @@
 #include "shell_command.h"
 
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -26,7 +25,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
@@ -470,82 +468,10 @@ static bool is_builtin(command &cmd) {
   if (!cmd.argc)
     return true;
   const char *s = cmd.argv[0];
-  return parent_state_builtin(s) || !strcmp(s, "pwd") || !strcmp(s, "echo") ||
-         !strcmp(s, "true") || !strcmp(s, "false") || !strcmp(s, "ls") ||
-         !strcmp(s, "cat") || !strcmp(s, "touch") || !strcmp(s, "mkdir") ||
-         !strcmp(s, "clear");
-}
-
-static int run_ls(const char *path, int long_format) {
-  char base[512];
-  if (!path || !*path) {
-    if (!getcwd(base, sizeof(base)))
-      return 1;
-    path = base;
-  }
-  DIR *dir = opendir(path);
-  if (!dir) {
-    fprintf(stderr, "ls: cannot access %s\n", path);
-    return 1;
-  }
-  struct dirent *entry;
-  while ((entry = readdir(dir)) != NULL) {
-    if (entry->d_name[0] == '.')
-      continue;
-    if (!long_format) {
-      printf("%s\n", entry->d_name);
-      continue;
-    }
-    char full[768];
-    snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
-    struct stat st;
-    if (stat(full, &st) == 0) {
-      printf("%s %d root root %u %s\n",
-             S_ISDIR(st.st_mode) ? "drwxr-xr-x" : "-rw-r--r--",
-             S_ISDIR(st.st_mode) ? 2 : 1, (unsigned)st.st_size, entry->d_name);
-    } else {
-      printf("?????????? 1 root root 0 %s\n", entry->d_name);
-    }
-  }
-  closedir(dir);
-  return 0;
-}
-
-static int run_cat(const char *path) {
-  int fd = 0; /* no path: copy stdin to stdout (e.g. `echo x | cat`) */
-  if (path) {
-    fd = open(path, O_RDONLY);
-    if (fd < 0) {
-      fprintf(stderr, "cat: cannot open %s\n", path);
-      return 1;
-    }
-  }
-  char buf[4096];
-  ssize_t n;
-  while ((n = read(fd, buf, sizeof(buf))) > 0)
-    for (ssize_t i = 0; i < n; i++)
-      putchar(buf[i]);
-  if (fd != 0)
-    close(fd);
-  return 0;
-}
-
-static int run_touch(const char *path) {
-  int fd = open(path, O_WRONLY | O_CREAT, 0666);
-  if (fd < 0) {
-    fprintf(stderr, "touch: %s: %s\n", path, strerror(errno));
-    return 1;
-  }
-  close(fd);
-  return 0;
-}
-
-static int run_mkdir(const char *path) {
-  if (mkdir(path, 0755) != 0) {
-    fprintf(stderr, "mkdir: %s: %s\n", path, strerror(errno));
-    return 1;
-  }
-  return 0;
+  // pwd/echo/true/false/ls/cat/touch/mkdir are NOT builtins: the shell execs
+  // the matching /usr/bin tool from sbase instead (full flag support, one
+  // impl).
+  return parent_state_builtin(s) || !strcmp(s, "clear");
 }
 
 // ---- job table helpers ----
@@ -810,23 +736,6 @@ static int run_builtin(command &cmd) {
   if (!cmd.argc)
     return 0;
   const char *s = cmd.argv[0];
-  if (!strcmp(s, "true"))
-    return 0;
-  if (!strcmp(s, "false"))
-    return 1;
-  if (!strcmp(s, "echo")) {
-    for (int i = 1; i < cmd.argc; i++)
-      printf("%s%s", i == 1 ? "" : " ", cmd.argv[i]);
-    putchar('\n');
-    return 0;
-  }
-  if (!strcmp(s, "pwd")) {
-    char path[512];
-    if (!getcwd(path, sizeof(path)))
-      return 1;
-    puts(path);
-    return 0;
-  }
   if (!strcmp(s, "cd")) {
     const char *path = cmd.argc > 1 ? cmd.argv[1] : getenv("HOME");
     if (!path)
@@ -857,23 +766,6 @@ static int run_builtin(command &cmd) {
     printf("\033[2J\033[H");
     return 0;
   }
-  if (!strcmp(s, "ls")) {
-    int long_fmt = 0;
-    const char *path = NULL;
-    for (int i = 1; i < cmd.argc; i++) {
-      if (!strcmp(cmd.argv[i], "-l"))
-        long_fmt = 1;
-      else
-        path = cmd.argv[i];
-    }
-    return run_ls(path, long_fmt);
-  }
-  if (!strcmp(s, "cat"))
-    return run_cat(cmd.argc > 1 ? cmd.argv[1] : NULL);
-  if (!strcmp(s, "touch"))
-    return cmd.argc > 1 ? run_touch(cmd.argv[1]) : 1;
-  if (!strcmp(s, "mkdir"))
-    return cmd.argc > 1 ? run_mkdir(cmd.argv[1]) : 1;
   if (!strcmp(s, "exit")) {
     int status = cmd.argc > 1 ? atoi(cmd.argv[1]) & 255 : last_status;
     requested_exit = status;

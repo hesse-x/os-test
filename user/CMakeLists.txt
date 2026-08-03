@@ -487,3 +487,9 @@ include(${CMAKE_SOURCE_DIR}/build_script/third_party/libexpat/libexpat.cmake)
 # extracted. include() runs in this scope, AFTER libffi.cmake (provides `ffi`)
 # and libexpat.cmake (provides LIBEXPAT_DIR for the host scanner).
 include(${CMAKE_SOURCE_DIR}/build_script/third_party/wayland/wayland.cmake)
+
+# ===================== sbase (third_party/sbase, suckless base tools) =====================
+# Static sbase_lib (libutf+libutil) + one user ELF per tool → /usr/bin/<tool>.
+# include() runs in this scope; no other target depends on sbase, placement is
+# flexible. See build_script/third_party/sbase/sbase.cmake.
+include(${CMAKE_SOURCE_DIR}/build_script/third_party/sbase/sbase.cmake)

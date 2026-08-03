@@ -1169,6 +1169,14 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     copy_fd_table(parent->proc->files, child_bp->files);
   }
 
+  // 4b. cwd: the child inherits the parent's absolute working-directory path.
+  // proc_create() initialized child_bp->cwd to "/", so without this copy a
+  // forked child (e.g. `pwd` run by the shell) silently resets to root — its
+  // getcwd() reports "/" regardless of where the parent had chdir'd, and
+  // relative-path resolution in the child is wrong. POSIX requires fork to
+  // inherit cwd.
+  __memcpy(child_bp->cwd, parent->proc->cwd, sizeof(child_bp->cwd));
+
   // 5. signal_struct
   if (flags & CLONE_SIGHAND) {
     signal_put(

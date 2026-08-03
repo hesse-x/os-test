@@ -168,12 +168,13 @@ global:
     getpagesize; sysconf;
     pathconf; fpathconf;
     nice; getpriority; setpriority;
-    chown; fchown; fchownat; readlink;
+    chown; fchown; fchownat; lchown; readlink;
+    getlogin;
     /* M1.1 — set*id ladder + getgroups (unistd.md §2.A1/A2). */
     setresuid; setresgid; setreuid; setregid; seteuid; setegid; getgroups;
 
     /* <fcntl.h> */
-    openat; fcntl; fcntl64; posix_fallocate;
+    openat; fcntl; fcntl64; posix_fallocate; creat;
 
     /* <sys/file.h> */
     flock;

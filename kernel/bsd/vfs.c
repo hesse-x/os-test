@@ -1227,6 +1227,15 @@ int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
     inode_put(parent);
     return (int64_t)-EPERM; /* 对齐 Linux vfs_mkdir:无 mkdir → EPERM */
   }
+  /* 先查目标是否已存在,fat32_dir_mkdir 不查重(直接分配 cluster 建项),
+   * 缺这层会建出重复同名目录项(见重复 /var bug)。对齐 Linux vfs_mkdir 的
+   * lookup_one_len:命中已存在 → EEXIST。 */
+  struct inode *existing = path_walk(m, relpath); /* +1 */
+  if (existing) {
+    inode_put(existing);
+    inode_put(parent);
+    return (int64_t)-EEXIST;
+  }
   int eff_mode = ((int)arg2 & 0777) & ~(int)current_proc->umask;
   rc = parent->i_op->mkdir(parent, lastname, eff_mode);
   inode_put(parent);

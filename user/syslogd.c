@@ -50,8 +50,12 @@ static int bind_log_socket(void) {
 
 int main(void) {
   char buf[1024];
-  mkdir("/var", 0755);
-  mkdir("/var/log", 0755);
+  /* Ensure /var/log exists; tolerate EEXIST (already created on a prior boot
+   * since run.sh writes disk changes back). mkdir returning any other error
+   * (e.g. EACCES) means we can't log, so bail. */
+  if ((mkdir("/var", 0755) < 0 && errno != EEXIST) ||
+      (mkdir("/var/log", 0755) < 0 && errno != EEXIST))
+    return 1;
   int sock = bind_log_socket();
   if (sock < 0)
     return 1;

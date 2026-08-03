@@ -47,3 +47,6 @@
 [submodule "third_party/wayland-protocols"]
 	path = third_party/wayland-protocols
 	url = https://gitlab.freedesktop.org/wayland/wayland-protocols.git
+[submodule "third_party/sbase"]
+	path = third_party/sbase
+	url = git://git.suckless.org/sbase
