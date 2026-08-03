@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #define FAT "/sym_fat"
@@ -86,6 +87,11 @@ void test_lstat_vs_stat(void) {
   struct stat st;
   TEST_ASSERT_EQUAL_INT(0, lstat(TFS "/lnk", &st));
   TEST_ASSERT_TRUE(((st.st_mode & S_IFMT) == S_IFLNK));
+
+  struct stat direct;
+  TEST_ASSERT_EQUAL_INT(0, syscall(SYS_lstat, TFS "/lnk", &direct));
+  TEST_ASSERT_TRUE(S_ISLNK(direct.st_mode));
+  TEST_ASSERT_EQUAL_UINT64(st.st_ino, direct.st_ino);
 
   TEST_ASSERT_EQUAL_INT(0, stat(TFS "/lnk", &st));
   TEST_ASSERT_TRUE(S_ISREG(st.st_mode));

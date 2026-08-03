@@ -71,6 +71,7 @@ add_user_lib(c
                $<TARGET_OBJECTS:musl_select_objs>
                $<TARGET_OBJECTS:musl_dl_objs> $<TARGET_OBJECTS:musl_linux_objs>
                $<TARGET_OBJECTS:musl_dirent_objs>
+               $<TARGET_OBJECTS:musl_stat_objs>
                $<TARGET_OBJECTS:musl_resource_objs>
                $<TARGET_OBJECTS:musl_process_objs>
                $<TARGET_OBJECTS:musl_ipc_objs>
@@ -121,6 +122,7 @@ add_user_lib(c_so
                $<TARGET_OBJECTS:musl_select_objs>
                $<TARGET_OBJECTS:musl_dl_objs_so> $<TARGET_OBJECTS:musl_linux_objs_so>
                $<TARGET_OBJECTS:musl_dirent_objs_so>
+               $<TARGET_OBJECTS:musl_stat_objs>
                $<TARGET_OBJECTS:musl_resource_objs>
                $<TARGET_OBJECTS:musl_process_objs>
                $<TARGET_OBJECTS:musl_ipc_objs>

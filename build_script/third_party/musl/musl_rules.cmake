@@ -166,7 +166,7 @@ add_custom_target(musl_libc ALL
 # target deps at generate time so order is for readability, not correctness —
 # but musl_generate_headers() above MUST run before any add_musl_lib here.
 set(_musl_modules
-    unistd fcntl socket select dl linux dirent resource process mman ipc
+    unistd fcntl socket select dl linux dirent stat resource process mman ipc
     stdio multibyte wchar pthread signal string ctype setjmp math stdlib malloc time locale regex passwd misc legacy)
 foreach(_m ${_musl_modules})
     include(${CMAKE_CURRENT_LIST_DIR}/modules/${_m}.cmake)

@@ -6639,6 +6639,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_open(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_STAT:
     return sys_stat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_LSTAT:
+    return sys_lstat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_OPENAT:
     return sys_openat(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_NEWFSTATAT:

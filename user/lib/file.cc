@@ -4,24 +4,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-// musl's <fcntl.h> (consumed via the shim) gates AT_EMPTY_PATH / F_SEAL_* etc.
-// behind _GNU_SOURCE||_BSD_SOURCE; file.cc uses AT_EMPTY_PATH (fstat/fstatat).
-// Define _DEFAULT_SOURCE before any include so AT_EMPTY_PATH is visible (musl
-// features.h turns _DEFAULT_SOURCE into _BSD_SOURCE=1). _DEFAULT_SOURCE rather
-// than _GNU_SOURCE: _GNU_SOURCE would also pull musl's __NEED_struct_iovec
-// (via <fcntl.h>'s #ifdef _GNU_SOURCE block), colliding with <xos/socket.h>'s
-// struct iovec. fcntl_worklist §3e feature-guard gap.
-#define _DEFAULT_SOURCE
-
-// libc file I/O: all file operations go through syscalls directly.
-// Kernel handles FAT32, devtmpfs, pipes, sockets, etc.
-// No libc-side fd_table — kernel's proc->fd_table is the single source of
-// truth. open/openat/fcntl/creat/posix_fadvise/posix_fallocate are provided by
-// musl src/fcntl/*.c (musl_fcntl_objs); chdir/getcwd/unlinkat/renameat by musl
-// src/unistd/*.c (musl_unistd_objs). The kernel resolves relative paths against
-// bp->cwd (vfs_resolve_user for plain syscalls, resolve_dirfd_start for *at
-// syscalls), so no libc-side cwd copy is needed.
-#include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h> // IWYU pragma: keep
@@ -32,7 +14,6 @@
 #include <sys/cdefs.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
-#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <xos/errno.h>
 #include <xos/ipc.h>
@@ -101,55 +82,8 @@ int ipc_msg_fd(int fd, const void *msg_buf, size_t msg_len, void *reply_buf,
 // lseek is provided by musl src/unistd (musl_unistd_objs); seekdir/rewinddir
 // below call it, resolved from the same archive.
 
-// ===================== statx (kernel's sole metadata syscall)
-// ===================== statx→stat narrowing: kernel only exposes statx; every
-// struct stat interface routes through this conversion.
-static void statx_to_stat(const struct statx *sx, struct stat *st) {
-  __builtin_memset(st, 0, sizeof(*st));
-  st->st_dev = makedev(sx->stx_dev_major, sx->stx_dev_minor);
-  st->st_ino = sx->stx_ino;
-  st->st_nlink = sx->stx_nlink;
-  st->st_mode = sx->stx_mode;
-  st->st_uid = sx->stx_uid;
-  st->st_gid = sx->stx_gid;
-  st->st_rdev = makedev(sx->stx_rdev_major, sx->stx_rdev_minor);
-  st->st_size = (off_t)sx->stx_size;
-  st->st_blksize = (blksize_t)sx->stx_blksize;
-  st->st_blocks = (blkcnt_t)sx->stx_blocks;
-  st->st_atim.tv_sec = sx->stx_atime.tv_sec;
-  st->st_atim.tv_nsec = sx->stx_atime.tv_nsec;
-  st->st_mtim.tv_sec = sx->stx_mtime.tv_sec;
-  st->st_mtim.tv_nsec = sx->stx_mtime.tv_nsec;
-  st->st_ctim.tv_sec = sx->stx_ctime.tv_sec;
-  st->st_ctim.tv_nsec = sx->stx_ctime.tv_nsec;
-}
-
-// statx() itself is provided by musl src/linux/statx.c (musl_linux_objs,
-// issuing SYS_statx directly; its fstatat fallback branch is unreachable
-// because SYS_statx is implemented). Not defined here.
-
-// Common path-stat body: pass through to statx; relative paths are resolved
-// by the kernel's resolve_dirfd_start (AT_FDCWD→bp->cwd). flags = 0 (stat) or
-// AT_SYMLINK_NOFOLLOW (lstat; this OS has no symlinks, so semantics match).
-static int do_stat_path(const char *path, int flags, struct stat *st) {
-  if (!path || !st) {
-    errno = EFAULT;
-    return -1;
-  }
-  struct statx sx;
-  if (sys_statx(AT_FDCWD, path, flags, STATX_BASIC_STATS, &sx) != 0)
-    return -1;
-  statx_to_stat(&sx, st);
-  return 0;
-}
-
-int stat(const char *path, struct stat *st) {
-  return do_stat_path(path, 0, st);
-}
-
-int lstat(const char *path, struct stat *st) {
-  return do_stat_path(path, AT_SYMLINK_NOFOLLOW, st);
-}
+// stat/lstat/fstat/fstatat and mkdir/mkdirat are provided by musl src/stat
+// (musl_stat_objs). Their legacy kstat syscalls share the kernel's statx core.
 
 // ===================== access / faccessat / utimensat =====================
 // access is provided by musl src/unistd (musl_unistd_objs); on x86-64 musl
@@ -267,57 +201,3 @@ int tcsetattr(int fd, int optional_actions, const struct termios *termios_p) {
 // kernel-internal routing to user-space drivers is unaffected. musl's ioctl.c
 // also gains the SIOCGSTAMP/SIOCGSTAMPNS time64 compat translation.
 // — see build_script/third_party/musl/modules/misc.cmake.
-
-// ===================== fstat (via statx AT_EMPTY_PATH) =====================
-int fstat(int fd, struct stat *st) {
-  if (!st) {
-    errno = EFAULT;
-    return -1;
-  }
-  struct statx sx;
-  if (sys_statx(fd, "", AT_EMPTY_PATH, STATX_BASIC_STATS, &sx) != 0)
-    return -1;
-  statx_to_stat(&sx, st);
-  return 0;
-}
-
-// S07: fstatat(dirfd, path, st, flags) — pass through to statx. AT_EMPTY_PATH
-// + empty path → kernel stats the dirfd itself; relative paths are resolved
-// by the kernel's resolve_dirfd_start (AT_FDCWD→bp->cwd).
-int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
-  if (!st) {
-    errno = EFAULT;
-    return -1;
-  }
-  struct statx sx;
-  if ((flags & AT_EMPTY_PATH) && path && path[0] == '\0') {
-    if (sys_statx(dirfd, "", flags, STATX_BASIC_STATS, &sx) != 0)
-      return -1;
-  } else if (sys_statx(dirfd, path, flags, STATX_BASIC_STATS, &sx) != 0) {
-    return -1;
-  }
-  statx_to_stat(&sx, st);
-  return 0;
-}
-
-// ===================== mkdir (via sys_mkdir syscall) =====================
-int mkdir(const char *path, mode_t mode) {
-  (void)mode; // FAT32 doesn't support permissions
-  if (!path) {
-    errno = EFAULT;
-    return -1;
-  }
-  return sys_mkdir(path, 0);
-}
-
-// S07: mkdirat(dirfd, path, mode) — thin pass-through; the kernel's
-// sys_mkdirat resolves AT_FDCWD→bp->cwd via resolve_dirfd_start. (musl's
-// mkdirat lives in src/stat/, not pulled, so the repo keeps this wrapper.)
-int mkdirat(int dirfd, const char *path, mode_t mode) {
-  (void)mode; // FAT32 doesn't support permissions
-  if (!path) {
-    errno = EFAULT;
-    return -1;
-  }
-  return sys_mkdirat(dirfd, path, mode);
-}

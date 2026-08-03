@@ -6,11 +6,10 @@
 
 #define _GNU_SOURCE
 
-// test_statx.c — SYS_STATX(332) direct + stat/lstat/fstat/fstatat convergence.
+// test_statx.c — SYS_STATX(332) and legacy stat syscall convergence.
 //
-// The kernel exposes only statx for metadata; libc's stat/lstat/fstat/fstatat
-// all route through statx with a statx→stat narrowing conversion. This test
-// cross-validates:
+// The kernel implements legacy stat/fstat/lstat/newfstatat as kstat views over
+// the shared statx core. This test cross-validates:
 //   1. statx basic fields (mask/mode/ino/size/nlink/blksize/uid/gid/rdev)
 //      match stat() (lossless conversion).
 //   2. AT_EMPTY_PATH + empty path ≡ fstat; dirfd + relative path resolves.
@@ -103,8 +102,7 @@ void test_statx_empty_path_matches_fstat(void) {
   unlink(FAT "/u");
 }
 
-// lstat (via statx AT_SYMLINK_NOFOLLOW) matches stat (no symlink support in
-// this OS).
+// lstat's legacy syscall path matches stat for a regular file.
 void test_lstat_matches_stat(void) {
   cleanup();
   TEST_ASSERT_EQUAL_INT(0, make_file(FAT "/u", "x", 1));
@@ -135,7 +133,7 @@ void test_statx_dirfd_relative(void) {
   TEST_ASSERT_EQUAL_UINT64(st.st_ino, sx.stx_ino);
   TEST_ASSERT_EQUAL_UINT64(3, sx.stx_size);
 
-  // fstatat (libc also routes through statx) matches same path
+  // fstatat's newfstatat syscall path matches the same inode.
   struct stat st2;
   TEST_ASSERT_EQUAL_INT(0, fstatat(dfd, "u", &st2, 0));
   TEST_ASSERT_EQUAL_UINT64(st.st_ino, st2.st_ino);

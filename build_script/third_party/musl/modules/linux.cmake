@@ -48,8 +48,8 @@
 #                                                   uname.nodename="(none)", repo reads live sys_gethostname]
 #   signalfd.c     SYS_signalfd4 (bsd); kernel accepts sizemask>=8 (musl passes _NSIG/8=8, repo passed
 #                   sizeof(sigset_t)=128 — both OK, kernel reads low 8 bytes)  [replaces io_multiplex.cc]
-#   statx.c        SYS_statx (bsd); fstatat fallback unreachable (SYS_statx implemented) [replaces file.cc;
-#                   stat/lstat/fstat/fstatat/statx_to_stat STAY — they wrap sys_statx, not statx()]
+#   statx.c        SYS_statx (bsd); fstatat fallback unreachable (SYS_statx implemented).
+#                   Core stat wrappers now come from modules/stat.cmake.
 #
 # Multi-path/deps EXCLUDED (keep repo hand-written where one exists):
 #   mount.c        umount/umount2 → SYS_umount2 missing; repo sys_ipc.cc mount stays

@@ -858,28 +858,43 @@ int64_t sys_statx(int64_t dirfd, int64_t path, int64_t flags, int64_t mask,
   return 0;
 }
 
-/* sys_stat(path, stat_buf) — SYS_STAT：vfs_statx 薄封装（缩窄到 kstat）。 */
-int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
-                 int64_t unused3, int64_t unused4) {
-  (void)unused1;
-  (void)unused2;
-  (void)unused3;
-  (void)unused4;
-  const char __user *upath = (const char __user *__force)arg1;
+/* Legacy path-stat syscalls are thin kstat views over the statx core. */
+static int64_t sys_stat_legacy(int64_t path, int64_t buf, unsigned flags) {
+  const char __user *upath = (const char __user *__force)path;
   if (!upath)
     return (int64_t)-EFAULT;
   char kpath[256];
   if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
     return (int64_t)-EFAULT;
   struct statx stx = {0};
-  int rc = vfs_statx(AT_FDCWD, kpath, 0, &stx);
+  int rc = vfs_statx(AT_FDCWD, kpath, flags, &stx);
   if (rc)
     return (int64_t)rc;
   struct kstat ks;
   kstat_from_statx(&ks, &stx);
-  if (copy_to_user((void __user *__force)arg2, &ks, sizeof(ks)))
+  if (copy_to_user((void __user *__force)buf, &ks, sizeof(ks)))
     return (int64_t)-EFAULT;
   return 0;
+}
+
+/* sys_stat(path, stat_buf) — SYS_STAT: follow the final symlink. */
+int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                 int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  return sys_stat_legacy(arg1, arg2, 0);
+}
+
+/* sys_lstat(path, stat_buf) — SYS_LSTAT: inspect the final symlink itself. */
+int64_t sys_lstat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  return sys_stat_legacy(arg1, arg2, AT_SYMLINK_NOFOLLOW);
 }
 
 // S07: resolve a *at dirfd to its starting directory inode (+1, caller puts),

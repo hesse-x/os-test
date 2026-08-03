@@ -24,6 +24,7 @@
 #define SYS_CLOSE 3
 #define SYS_STAT 4
 #define SYS_FSTAT 5
+#define SYS_LSTAT 6
 #define SYS_POLL 7
 #define SYS_LSEEK 8
 #define SYS_MMAP 9
