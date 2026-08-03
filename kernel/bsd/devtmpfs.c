@@ -98,6 +98,30 @@ struct dev_ops *dev_ops_peek_by_inode(struct inode *ip) {
   return ops;
 }
 
+// Reverse map: device inode → registered /dev/<name>. Used by procfs
+// /proc/self/fd/N readlink so a char/block device fd (FD_DEV) resolves to its
+// real /dev path (e.g. /dev/serial, /dev/console) instead of an anon_inode
+// magic string — matching Linux, where readlink on a device fd returns the
+// device path and ttyname_r's dev/ino cross-check then succeeds. Returns NULL
+// if the inode is not a registered devtmpfs device (caller falls back). The
+// returned pointer is owned by the dev_entry and stable while the device is
+// registered; caller must not free it and should copy out under no lock if it
+// outlives the call, so we copy into the caller's buffer here instead.
+const char *devtmpfs_name_by_inode(struct inode *ip) {
+  if (!ip)
+    return NULL;
+  const char *name = NULL;
+  spin_lock(&devtmpfs_lock);
+  for (struct dev_entry *e = dev_list; e; e = e->next) {
+    if (e->ip == ip) {
+      name = e->name;
+      break;
+    }
+  }
+  spin_unlock(&devtmpfs_lock);
+  return name;
+}
+
 // Forward: devtmpfs_iget defined later (after devtmpfs_get_or_create_dir),
 // but devtmpfs_init / devtmpfs_get_or_create_dir call it.
 static struct inode *devtmpfs_iget(int type);

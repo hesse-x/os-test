@@ -590,4 +590,13 @@ __attribute__((no_sanitize("kernel-address"))) void pci_init() {
 
   // 2. Scan buses
   pci_scan_bus(ecam_start_bus);
+
+  // 3. Debug: dump enumerated PCI devices (vendor/device/class) to diagnose
+  // driver matching. Temporary.
+  for (int i = 0; i < pci_device_count; i++) {
+    pci_device *d = &pci_devices[i];
+    printk(LOG_INFO, "pci[%d]: %02x:%02x.%02x vid=%04x did=%04x class=%04x\n",
+           i, d->bus, d->dev, d->func, d->vendor_id, d->device_id,
+           d->class_code);
+  }
 }

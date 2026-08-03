@@ -1889,6 +1889,138 @@ int64_t sys_sysconf(int64_t name, int64_t unused1, int64_t unused2,
   }
 }
 
+// ===================== BSD syscall: sysinfo =====================
+// sysinfo(struct sysinfo *info) — Linux __NR_sysinfo (99). Fills the classic
+// Linux struct sysinfo so musl sysconf() can derive _SC_PHYS_PAGES /
+// _SC_AVPHYS_PAGES via __lsysinfo. Fields are in PAGES with mem_unit=1 (musl
+// sysconf divides totalram/freeram by PAGE_SIZE). Layout matches musl
+// <sys/sysinfo.h> exactly (all unsigned long 8B on x86-64; ~336B total).
+//   totalram  = total_page_frames (E820 max phys)
+//   freeram   = (total - used) + bfc_free_page_nums()  — mirrors /proc/meminfo
+//               (adds the buddy free list to total-used to avoid double-
+//               counting slab-occupied pages; see procfs meminfo_show)
+//   uptime    = sched_clock()/1e9 s   loads/swap/high = 0 (not tracked)
+//   procs     = 0 (no cheap live-task counter; field unused by sysconf path)
+//   mem_unit  = 1
+struct k_sysinfo {
+  unsigned long uptime;
+  unsigned long loads[3];
+  unsigned long totalram;
+  unsigned long freeram;
+  unsigned long sharedram;
+  unsigned long bufferram;
+  unsigned long totalswap;
+  unsigned long freeswap;
+  unsigned short procs, pad;
+  unsigned long totalhigh;
+  unsigned long freehigh;
+  unsigned int mem_unit;
+  char __reserved[256];
+};
+int64_t sys_sysinfo(int64_t arg1, int64_t unused1, int64_t unused2,
+                    int64_t unused3, int64_t unused4, int64_t unused5) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+  if (!arg1)
+    return (int64_t)-EFAULT;
+
+  int total = memstat_read(&kernel_mem_stats.total_pages);
+  int used = memstat_read(&kernel_mem_stats.used_pages);
+  size_t free_pages = (size_t)(total - used) + bfc_free_page_nums();
+
+  struct k_sysinfo si;
+  __memset(&si, 0, sizeof(si));
+  si.uptime = (unsigned long)(sched_clock() / 1000000000ULL);
+  si.totalram = (unsigned long)total_page_frames;
+  si.freeram = (unsigned long)free_pages;
+  si.mem_unit = 1;
+
+  if (copy_to_user((void __user *)arg1, &si, sizeof(si)))
+    return (int64_t)-EFAULT;
+  return 0;
+}
+
+// ===================== BSD syscall: prlimit64 =====================
+// prlimit64(pid, resource, new_limit, old_limit) — Linux __NR_prlimit64 (302).
+// Backs musl getrlimit/setrlimit/prlimit: getrlimit calls with (0, res, NULL,
+// &rl), setrlimit with (0, res, &rl, NULL). The OS does not enforce rlimits
+// today, so set is accept-and-ignore (returns 0); get reports the per-resource
+// soft/hard caps. struct rlimit { rlim_t rlim_cur; rlim_t rlim_max; }
+// (rlim_t = u64, 16B), matching musl <sys/resource.h>. ~0ULL = RLIM_INFINITY.
+//   RLIMIT_NOFILE (7) → MAX_FD (1024)   RLIMIT_NPROC (6) → MAX_PROC (1024)
+//   all other RLIMIT_* → RLIM_INFINITY (none enforced; see syscall.c RLIMIT_AS
+//   todo). Unknown resource → -EINVAL. Only pid==0 (self) supported.
+struct k_rlimit {
+  unsigned long long rlim_cur;
+  unsigned long long rlim_max;
+};
+#define K_RLIM_INFINITY (~0ULL)
+#define K_RLIMIT_NPROC 6
+#define K_RLIMIT_NOFILE 7
+int64_t sys_prlimit64(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
+                      int64_t unused1, int64_t unused2) {
+  (void)unused1;
+  (void)unused2;
+  pid_t pid = (pid_t)arg1;
+  int resource = (int)arg2;
+  if (pid != 0)
+    return (int64_t)-EINVAL; // only self supported
+
+  // RLIMIT_NOFILE is the only enforced-round-trip resource: a lowered soft
+  // limit is stored per-process and reported back on get (the OS does not
+  // enforce it — the fd table stays a fixed MAX_FD array). 0 in the proc
+  // field means "use the MAX_FD default" so proc_create's zeroed kmalloc reads
+  // as 1024 until a setrlimit overrides it.
+  proc *self = current_proc;
+
+  struct k_rlimit cur;
+  switch (resource) {
+  case K_RLIMIT_NOFILE:
+    cur.rlim_cur = self->rlimit_nofile_cur ?: MAX_FD;
+    cur.rlim_max = self->rlimit_nofile_max ?: MAX_FD;
+    break;
+  case K_RLIMIT_NPROC:
+    cur.rlim_cur = MAX_PROC;
+    cur.rlim_max = MAX_PROC;
+    break;
+  default:
+    if (resource < 0 || resource > 15)
+      return (int64_t)-EINVAL;
+    cur.rlim_cur = K_RLIM_INFINITY;
+    cur.rlim_max = K_RLIM_INFINITY;
+    break;
+  }
+
+  // set: store new_limit. For RLIMIT_NOFILE clamp hard to MAX_FD and soft to
+  // hard (soft ≤ hard ≤ MAX_FD); persist so a later get reports the clamp.
+  // Other resources are unbounded — accept-and-ignore (no per-process store).
+  if (arg3) {
+    struct k_rlimit nl;
+    if (copy_from_user(&nl, (void __user *)arg3, sizeof(nl)))
+      return (int64_t)-EFAULT;
+    if (resource == K_RLIMIT_NOFILE) {
+      if (nl.rlim_max > MAX_FD)
+        nl.rlim_max = MAX_FD;
+      if (nl.rlim_cur > nl.rlim_max)
+        nl.rlim_cur = nl.rlim_max;
+      self->rlimit_nofile_cur = nl.rlim_cur;
+      self->rlimit_nofile_max = nl.rlim_max;
+      cur = nl;
+    }
+    // other resources: no enforcement, leave cur as the reported cap above
+  }
+
+  // get: copy out current limit
+  if (arg4) {
+    if (copy_to_user((void __user *)arg4, &cur, sizeof(cur)))
+      return (int64_t)-EFAULT;
+  }
+  return 0;
+}
+
 // pipe wq 回调：__wake_up(p->wq) → 唤醒挂在 p->wq 的阻塞 reader/writer。
 // 不查 wait_event（队列身份制：在 p->wq 上即唤醒）。类比 ring.c ring_wake_cb。
 static void pipe_wake_cb(wait_queue_t *wq, unsigned long flags) {
@@ -6683,6 +6815,10 @@ int64_t syscall_dispatch(trapframe *tf) {
   case SYS_SCHED_GETAFFINITY:
     return sys_sched_getaffinity(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
                                  tf->r9);
+  case SYS_sysinfo:
+    return sys_sysinfo(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_prlimit64:
+    return sys_prlimit64(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SETPRIORITY:
     return sys_setpriority(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_GETPRIORITY:

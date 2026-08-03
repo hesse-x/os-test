@@ -60,7 +60,10 @@
 # Candidates needing only a simple kernel syscall (tracked separately, not this batch):
 #   renameat2 (SYS_renameat2~SYS_RENAMEAT), pwritev/preadv2/pwritev2, timerfd_gettime,
 #   chroot, personality, syncfs, mlock2, umount2, iopl, settimeofday/stime,
-#   setfsgid/setfsuid, setgroups, sysinfo, etc.
+#   setfsgid/setfsuid, setgroups, etc.
+# sysinfo.c — NOW ADOPTED below: SYS_sysinfo is implemented in the kernel
+#   (fills struct sysinfo totalram/freeram); musl __lsysinfo/sysinfo supply
+#   the public symbols and back sysconf(_SC_PHYS_PAGES/_SC_AVPHYS_PAGES).
 #
 # gettid.c includes "pthread_impl.h" (musl-internal) → needs src/internal on the
 # include path (provided below, same as dl.cmake). It reads __pthread_self()->tid,
@@ -80,7 +83,8 @@ set(MUSL_LINUX_SOURCES
     ${MUSL_DIR}/src/linux/sbrk.c
     ${MUSL_DIR}/src/linux/sethostname.c
     ${MUSL_DIR}/src/linux/signalfd.c
-    ${MUSL_DIR}/src/linux/statx.c)
+    ${MUSL_DIR}/src/linux/statx.c
+    ${MUSL_DIR}/src/linux/sysinfo.c)
 
 add_library(musl_linux_objs OBJECT ${MUSL_LINUX_SOURCES})
 target_include_directories(musl_linux_objs PRIVATE

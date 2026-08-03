@@ -68,7 +68,7 @@ timespec 结构字段：tv_sec : time_t, tv_nsec : long
 
 `basename` 由 musl `src/misc/basename.c` 提供，随 `musl_string_objs` 一并编入 libc（详见 `string.md`）；POSIX 语义，会截断尾部 `/`（写入 `\0`），故不可对只读字面量调用。`__xpg_basename` 为其 weak alias。
 
-`getpagesize` 实现在 user/lib/unistd.cc：返回 4096（x86-64）。
+`getpagesize` 由 musl `src/legacy/getpagesize.c` 提供（`musl_legacy_objs`），返回 `PAGE_SIZE`（4096，x86-64）。`sysconf` 由 musl `src/conf/sysconf.c` 提供（`musl_stdlib_objs`），其动态分支走内核 `SYS_sysinfo`/`SYS_prlimit64`/`SYS_sched_getaffinity`。
 
 ### 链接方式
 
@@ -88,7 +88,7 @@ include 路径：-I. -Iuser/include → 自定义头文件优先。宿主机 fre
 | unistd | musl `src/unistd/*`（`musl_unistd_objs`）+ user/lib/unistd.cc 残留 | POSIX syscall 封装（含 sleep/usleep，POSIX EINTR 返剩余） |
 | file | user/lib/file.cc | fopen/fclose/fread/fwrite/fseek/rewind/feof/ferror/freopen/ftell/fdopen/flockfile/funlockfile |
 | stdlib | musl `src/stdlib/*`+`src/prng/{rand,rand_r}`+`src/internal/{intscan,shgetc,floatscan}`+`src/env/*`+`src/exit/*`（`musl_stdlib_objs`） | abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv, atoi/atol/atoll, strtol 全家(strtoimax/strtoumax), strtod/strtof/strtold/atof, qsort/bsearch, rand/srand/rand_r(RAND_MAX=0x7fffffff), environ/getenv/setenv/putenv/unsetenv/clearenv, exit/atexit/abort/quick_exit/at_quick_exit/_Exit, __libc_start_main 启动链 |
-| stdlib_misc | user/lib/stdlib_misc.c | 暂留子集：mkstemp/mktemp/realpath/mknod/chmod/getpagesize/sysconf（musl 无法替换，详见 todo.md）。remove/getline/getdelim/fscanf/scanf/sscanf/vfscanf 已随 stdio 迁 musl 移出 |
+| stdlib_misc | user/lib/stdlib_misc.c | 暂留子集：mknod/chmod（避免拉入 musl `src/misc/sysm.c`）。mkstemp/mktemp/mkostemp/realpath 已迁 musl（stdlib 模块），getpagesize/sysconf 已迁 musl（legacy/conf 模块，靠内核 `SYS_sysinfo`/`SYS_prlimit64`/`SYS_sched_getaffinity`）。remove/getline/getdelim/fscanf/scanf/sscanf/vfscanf 已随 stdio 迁 musl 移出 |
 | sys_ipc | user/lib/sys_ipc.cc | IPC 封装 |
 | sys_shm | user/lib/sys_shm.cc | SHM 封装 |
 | sys_wait | user/lib/sys_wait.cc | waitpid 封装 |

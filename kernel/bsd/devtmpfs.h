@@ -91,6 +91,9 @@ void dev_ops_put(struct dev_ops *ops);
 // holds fd ref so ops won't reach 0 before this fd closes. Prevents
 // borrow-window UAF.
 struct dev_ops *dev_ops_peek_by_inode(struct inode *ip);
+// Reverse map: device inode → registered /dev/<name> (borrowed; stable while
+// the device is registered). NULL if not a registered devtmpfs device.
+const char *devtmpfs_name_by_inode(struct inode *ip);
 
 extern struct fstype devtmpfs_fstype;
 

@@ -223,6 +223,13 @@
 #define SYS_fadvise64 221
 #define SYS_fallocate 285
 
+// ---- sysinfo / prlimit64 (resource & memory info) ----
+// Back musl sysconf(): _SC_PHYS_PAGES/_SC_AVPHYS_PAGES go through sysinfo(2),
+// _SC_OPEN_MAX/_SC_CHILD_MAX through prlimit64/getrlimit. Both are Linux
+// standard numbers; the kernel fills struct sysinfo / struct rlimit.
+#define SYS_sysinfo 99
+#define SYS_prlimit64 302
+
 // ---- Socket thin wrappers (F group) ----
 #define SYS_GETSOCKNAME 51
 #define SYS_GETPEERNAME 52

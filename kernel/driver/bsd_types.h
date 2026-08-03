@@ -154,6 +154,10 @@ typedef struct proc {
   uint32_t umask;
   uint8_t exit_signal; // S19: clone exit signal (mirror kernel/bsd/proc.h)
 
+  // === RLIMIT_NOFILE (mirror kernel/bsd/proc.h) ===
+  uint64_t rlimit_nofile_cur; // 0 = default MAX_FD
+  uint64_t rlimit_nofile_max; // 0 = default MAX_FD
+
   // === Working directory (mirror kernel/bsd/proc.h) ===
   char cwd[256];
 
@@ -172,7 +176,7 @@ DRV_STATIC_ASSERT(offsetof(proc, files) == 184,
                   "driver proc.files offset drift");
 DRV_STATIC_ASSERT(offsetof(proc, signal) == 176,
                   "driver proc.signal must be POINTER not inline");
-DRV_STATIC_ASSERT(sizeof(proc) == 536, "driver proc size drift");
+DRV_STATIC_ASSERT(sizeof(proc) == 552, "driver proc size drift");
 #undef DRV_STATIC_ASSERT
 
 #endif /* KERNEL_BSD_PROC_H */

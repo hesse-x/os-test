@@ -115,6 +115,13 @@ static void reclaim_lazy_resources(xtask *t) {
 // reclaim_lazy_resources.
 static void init_xtask_defaults(xtask *t) {
   __memset(t, 0, sizeof(*t));
+  // Default affinity = all online CPUs. The scheduler never enforces
+  // cpumask (sched_pick_cpu_pref uses pref_cpu only), so this is informational
+  // — but it is what sched_getaffinity reports, and musl sysconf derives
+  // _SC_NPROCESSORS_ONLN by counting set bits in it. Without this default the
+  // zeroed mask would make sysconf return 0 processors. ncpu starts at 1
+  // (smp.c) and is finalized by smp_boot_aps before the first user process.
+  t->cpumask = (ncpu >= 64) ? ~0ULL : ((1ULL << ncpu) - 1);
   t->pid = -1;
   t->state = UNUSED;
   t->tgid = -1;

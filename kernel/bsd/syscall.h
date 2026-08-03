@@ -44,6 +44,8 @@ int64_t sys_mremap(int64_t, int64_t, int64_t, int64_t, int64_t,
                    int64_t); // stub
 int64_t sys_mprotect(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_sysconf(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_sysinfo(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_prlimit64(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_getrandom(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // VFS

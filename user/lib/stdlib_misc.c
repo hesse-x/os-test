@@ -12,32 +12,27 @@
  * comes from musl upstream via musl_stdlib_objs.
  *
  * Remaining here:
- *   mkstemp/mktemp  — musl src/temp/ tree needs __randname → __clock_gettime
- * (time module not yet migrated); getpid-based impl kept.
- *   mknod/chmod     — wrap sys_mknod / sys_chmod (kernel has these syscalls;
- *                     musl's wrappers route through the same numbers, but
- *                     kept here to avoid pulling src/misc/sysm.c machinery).
- *   getpagesize/sysconf — musl src/legacy/getpagesize.c + src/conf/sysconf.c
- *                     redefined _SC_NPROCESSORS_ONLN semantics; repo
- *                     sys_sysconf-backed wrappers kept.
+ *   mknod/chmod — wrap sys_mknod / sys_chmod (kernel has these syscalls;
+ *                 musl's wrappers route through the same numbers, but kept
+ *                 here to avoid pulling src/misc/sysm.c machinery).
  *
- * Moved OUT to musl (stdio.md): remove/getline/getdelim/fscanf/scanf/sscanf/
- * vfscanf — were ENOSYS stubs here (the repo's hand-written stdio.cc had a
- * non-musl FILE layout so musl's scan chain could not link); now supplied by
- * musl src/stdio (musl_stdio_objs). Declares come from: stdlib.h
- * (mkstemp/mktemp/realpath via musl), sys/stat.h (mknod/chmod),
- * xos/unistd_ext.h (getpagesize/sysconf).
+ * Moved OUT to musl:
+ *   stdio.md   — remove/getline/getdelim/fscanf/scanf/sscanf/vfscanf (were
+ *                ENOSYS stubs; musl src/stdio now supplies them).
+ *   stdlib.md  — mkstemp/mktemp/mkostemp (src/temp), realpath (src/misc).
+ *   this batch — getpagesize (src/legacy/getpagesize.c) + sysconf
+ *                (src/conf/sysconf.c), backed by the now-implemented
+ * SYS_sysinfo / SYS_prlimit64 / SYS_sched_getaffinity. The OS-private
+ *                sys_sysconf syscall stays (test_mprotect.c calls it directly).
  */
 
 #include <errno.h> // IWYU pragma: keep
 #include <stdint.h>
-#include <unistd.h>
-#include <xos/syscall_ext.h>
 
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <xos/errno.h>
-#include <xos/unistd_ext.h>
+#include <xos/syscall_ext.h>
 
 // ==================== mkstemp / mktemp / mkostemp ====================
 // ADOPTED musl upstream (src/temp/{mkstemp,mktemp,mkostemp}.c,
@@ -76,34 +71,10 @@ int chmod(const char *path, mode_t mode) {
   return sys_chmod(path, (unsigned int)mode);
 }
 
-// getpagesize / sysconf: musl's <unistd.h> declares getpagesize only under
-// _GNU_SOURCE/_BSD_SOURCE (not enabled in the libc build → no prior C
-// declaration), and sysconf unconditionally but without a visibility
-// attribute (→ HIDDEN under -fvisibility=hidden). The LIBC_EXPORT
-// re-declarations in <xos/unistd_ext.h> give these default-visible C-linkage
-// definitions. The _SC_* switch constants come from musl's <unistd.h>.
-// musl itself places these in src/legacy/getpagesize.c and src/conf/sysconf.c;
-// this OS keeps the wrappers here until the musl implementations are wired in
-// (M0.2+).
-int getpagesize(void) { return 4096; }
-
-long sysconf(int name) {
-  // Dynamic values are backed by sys_sysconf (ncpu, total/free phys pages).
-  // Static/architecture-fixed values (PAGESIZE, CLK_TCK, OPEN_MAX, …) stay
-  // here — glibc hardcodes them too. Unknown → -1, errno unchanged (POSIX).
-  switch (name) {
-  case _SC_NPROCESSORS_CONF:
-  case _SC_NPROCESSORS_ONLN:
-  case _SC_PHYS_PAGES:
-  case _SC_AVPHYS_PAGES:
-    return sys_sysconf(name);
-  case _SC_PAGESIZE: // _SC_PAGE_SIZE is the same value (30)
-    return 4096;
-  case _SC_CLK_TCK:
-    return 100;
-  case _SC_OPEN_MAX:
-    return 128; // MAX_FD (kernel/bsd/types.h)
-  default:
-    return -1;
-  }
-}
+// getpagesize / sysconf — ADOPTED musl upstream (src/legacy/getpagesize.c +
+// src/conf/sysconf.c). musl sysconf's dynamic branches are backed by the
+// now-implemented SYS_sysinfo / SYS_prlimit64 / SYS_sched_getaffinity; the
+// repo's sys_sysconf-backed sysconf and the trivial getpagesize are deleted
+// here. The LIBC_EXPORT re-declarations in <xos/unistd_ext.h> stay (visibility
+// under -fvisibility=hidden). The OS-private sys_sysconf syscall remains for
+// test_mprotect.c, which calls it directly.

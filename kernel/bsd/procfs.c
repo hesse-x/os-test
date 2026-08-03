@@ -9,6 +9,7 @@
 
 #include "arch/x64/apic.h" // sched_clock
 #include "arch/x64/utils.h"
+#include "kernel/bsd/devtmpfs.h" // devtmpfs_name_by_inode (FD_DEV fd-N readlink)
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/mount.h"
@@ -780,6 +781,20 @@ static int procfs_fd_readlink(int pid, int fd, char *buf, size_t bufsiz) {
     else
       n = snprintf(buf, bufsiz, "/dev/ttyS0"); /* 串口 tty 无 pty */
     break;
+  case FD_DEV: {
+    /* Char/block device fd: resolve the real /dev/<name> path (Linux
+     * readlink /proc/self/fd/N on a device returns the device path, e.g.
+     * /dev/serial, /dev/console, /dev/dri/card0 — NOT an anon_inode magic
+     * string, which is reserved for anon-inode-backed files). Without this
+     * the serial console fd 0 resolves to anon_inode:[unknown], breaking
+     * ttyname_r's stat(readlink) vs fstat(fd) dev/ino cross-check. */
+    const char *devname = f->inode ? devtmpfs_name_by_inode(f->inode) : NULL;
+    if (devname)
+      n = snprintf(buf, bufsiz, "/dev/%s", devname);
+    else
+      n = snprintf(buf, bufsiz, "anon_inode:[unknown]");
+    break;
+  }
   case FD_PIPE:
     n = snprintf(buf, bufsiz, "pipe:[%u]", f->inode ? f->inode->ino : 0);
     break;

@@ -58,13 +58,15 @@ LIBC_EXPORT void wait_dev_ready(const char *dev_path);
 LIBC_EXPORT int sethostname(const char *name, size_t len);
 
 /* Page size. musl unistd.h declares this only under _GNU_SOURCE/_BSD_SOURCE
- * (not enabled in the libc build), so re-declare with LIBC_EXPORT. Defined
- * in stdlib_misc.c. */
+ * (not enabled in the libc build), so re-declare with LIBC_EXPORT. Defined in
+ * musl src/legacy/getpagesize.c (musl_legacy_objs). */
 LIBC_EXPORT int getpagesize(void);
 
 /* sysconf(3). musl unistd.h declares this unconditionally but without a
- * visibility attribute (→ HIDDEN). Re-declared with LIBC_EXPORT; the _SC_*
- * constants still come from musl's <unistd.h>. Defined in stdlib_misc.c. */
+ * visibility attribute (→ HIDDEN). Re-declared with LIBC_EXPORT so musl's
+ * src/conf/sysconf.c definition exports cleanly; the _SC_* constants come from
+ * musl's <unistd.h>. The dynamic branches are backed by SYS_sysinfo /
+ * SYS_prlimit64 / SYS_sched_getaffinity (kernel/bsd/syscall.c). */
 LIBC_EXPORT long sysconf(int name);
 
 #ifdef __cplusplus

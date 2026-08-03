@@ -18,6 +18,8 @@ struct test_entry {
 };
 
 static struct test_entry tests[] = {
+    {"test_resource", "/test/test_resource.elf"},
+    {"test_mprotect", "/test/test_mprotect.elf"},
     {"pipe", "/test/pipe.elf"},
     {"fcntl", "/test/fcntl.elf"},
     {"fcntl_ofd", "/test/fcntl_ofd.elf"},

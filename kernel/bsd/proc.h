@@ -71,6 +71,15 @@ typedef struct proc {
   // SIGRTMAX=64.
   uint8_t exit_signal;
 
+  // === RLIMIT_NOFILE (per-process) ===
+  // prlimit64 set/get round-trip. The OS does not enforce rlimits (the fd table
+  // is a fixed MAX_FD array), but a lowered soft limit must be reported back on
+  // get so callers see the value they set. 0 = "use the MAX_FD default" (so
+  // proc_create's zeroed kmalloc reads as the 1024 default until explicitly
+  // set). rlim_t is u64 (matches musl <sys/resource.h>).
+  uint64_t rlimit_nofile_cur; // 0 = default MAX_FD
+  uint64_t rlimit_nofile_max; // 0 = default MAX_FD
+
   // === Working directory (cwd) ===
   // FAT32 has no dentry tree, so cwd is stored as an absolute path string.
   // Initialized to "/" by proc_create. 256 bytes covers typical path limits.
@@ -103,7 +112,7 @@ STATIC_ASSERT(
     offsetof(proc, signal) == 176,
     "proc.signal must be a POINTER to a separately-allocated signal_struct, "
     "not an inline struct — inlining shifts the offset of files");
-STATIC_ASSERT(sizeof(proc) == 536,
+STATIC_ASSERT(sizeof(proc) == 552,
               "proc size changed — update kernel/driver/bsd_types.h to match");
 #undef STATIC_ASSERT
 

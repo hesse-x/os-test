@@ -12,4 +12,11 @@
 # DO NOT glob src/legacy: cuserid/err/ftw/getpass/utmpx/... have unmet deps
 # (stdio stderr layout, etc.). Add legacy sources here one-by-one as their deps
 # land.
-add_musl_lib(musl_legacy_objs SOURCES ${MUSL_DIR}/src/legacy/euidaccess.c)
+# getpagesize.c — trivial `return PAGE_SIZE;` (no syscall deps). The repo's
+# stdlib_misc.c getpagesize is deleted; this replaces it. <unistd.h> declares
+# getpagesize only under _GNU_SOURCE/_BSD_SOURCE, so the LIBC_EXPORT
+# re-declaration in <xos/unistd_ext.h> still carries the visible C-linkage decl
+# the definition attaches to.
+add_musl_lib(musl_legacy_objs SOURCES
+    ${MUSL_DIR}/src/legacy/euidaccess.c
+    ${MUSL_DIR}/src/legacy/getpagesize.c)

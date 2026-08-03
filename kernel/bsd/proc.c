@@ -1340,6 +1340,11 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   child_bp->umask = parent->proc->umask;
   child_bp->exit_signal = (uint8_t)exit_signal; // 0 for CLONE_THREAD (forced)
 
+  // RLIMIT_NOFILE is inherited (POSIX: child gets a copy of the parent's
+  // resource limits). 0 means "use the MAX_FD default".
+  child_bp->rlimit_nofile_cur = parent->proc->rlimit_nofile_cur;
+  child_bp->rlimit_nofile_max = parent->proc->rlimit_nofile_max;
+
   // Inherit session/job control when not CLONE_THREAD
   if (!(flags & CLONE_THREAD)) {
     child_bp->sid = parent->proc->sid;

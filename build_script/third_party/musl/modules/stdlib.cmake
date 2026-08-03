@@ -47,9 +47,15 @@
 #     already compiled __randname.c/mkostemps.c/mkstemps.c, and the same
 #     blocker that once gated tmpfile/tmpnam/tempnam (now musl) is gone. The
 #     repo's getpid-based mkstemp/mktemp (stdlib_misc.c) is deleted.
-#   src/conf/sysconf.c + src/legacy/getpagesize.c — musl sysconf redefines
-#     _SC_NPROCESSORS_ONLN semantics; repo stdlib_misc.c (sys_sysconf-backed)
-#     kept.
+#   src/legacy/getpagesize.c — NOW ADOPTED via the legacy module (modules/
+#     legacy.cmake): trivial `return PAGE_SIZE;`, no syscall deps.
+#   src/conf/sysconf.c — NOW ADOPTED below. Its three dynamic branches are
+#     backed by Linux-standard syscalls now implemented in the kernel:
+#     _SC_NPROCESSORS_* via SYS_sched_getaffinity (cpumask defaulted to all
+#     online CPUs in init_xtask_defaults), _SC_PHYS_PAGES/_SC_AVPHYS_PAGES via
+#     SYS_sysinfo, _SC_OPEN_MAX/_SC_CHILD_MAX via SYS_prlimit64/getrlimit.
+#     The repo's sys_sysconf-backed stdlib_misc.c sysconf is deleted. The OS-
+#     private SYS_SYSCONF/sys_sysconf stays (test_mprotect.c calls it directly).
 #   src/stdlib/{wcstod,wcstol}.c — compiled in musl_wchar_objs (wchar tier).
 #   src/stdlib/{ecvt,fcvt,gcvt}.c — deprecated BSD, 0 callers, sprintf chain.
 #   src/env/{__init_tls,__stack_chk_fail,__reset_tls}.c — already in
@@ -145,6 +151,12 @@ set(MUSL_STDLIB_SOURCES
     # PATH_MAX / PIPE_BUF / FILESIZEBITS from <limits.h>); no syscall.
     ${MUSL_DIR}/src/conf/pathconf.c
     ${MUSL_DIR}/src/conf/fpathconf.c
+    # sysconf (src/conf). Backs the libc sysconf() dynamic branches via the
+    # now-implemented SYS_sysinfo / SYS_prlimit64 / SYS_sched_getaffinity. The
+    # MINSIGSTKSZ/SIGSTKSZ branches use __getauxval (compiled in misc module)
+    # and clamp a missing AT_MINSIGSTKSZ, so they are safe without auxv entry.
+    # Replaces the repo's sys_sysconf-backed stdlib_misc.c sysconf.
+    ${MUSL_DIR}/src/conf/sysconf.c
     # stat/ — statvfs (src/stat). libc++ filesystem::__space calls statvfs for
     # filesystem capacity. Depends on <sys/statvfs.h> + <sys/statfs.h> (both
     # published) + syscall(SYS_statfs/SYS_fstatfs, both in bits/syscall.h: 137/
