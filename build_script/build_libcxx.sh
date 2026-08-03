@@ -17,12 +17,12 @@ LIBCXX_BUILD="$BUILD/libcxx-build"
 # Probe anchors: libc++.so in sysroot (symlink→libc++.so.1→libc++.so.1.0) + the
 # header tree. Both conditions must hold to count as "fully installed" — checking
 # only .so may miss headers, and vice versa.
-LIBCXX_SO="$SYSROOT/usr/lib/libc++.so"
+LIBCXX_SO="$SYSROOT/usr/lib/libc++.so.1.0"
 LIBCXX_HEADERS="$SYSROOT/usr/include/c++/v1"
 
 # ---- 0. Probe: if already built, skip (no rebuild) ----
 if [ -e "$LIBCXX_SO" ] && [ -d "$LIBCXX_HEADERS" ] && \
-   readelf -d "$LIBCXX_SO" 2>/dev/null | grep -Fq "Shared library: [libclang_rt.so]"; then
+   readelf -d "$LIBCXX_SO" 2>/dev/null | grep -Fq "[libclang_rt.so]"; then
   echo "libc++ already installed at $SYSROOT with libclang_rt.so — nothing to do."
   exit 0
 fi

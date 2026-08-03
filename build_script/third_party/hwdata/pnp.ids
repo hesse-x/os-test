@@ -1,0 +1,4 @@
+# Fixed PNP manufacturer subset required by the M0 QEMU display profile.
+QEMU	QEMU Project
+RHT	Red Hat, Inc.
+VRT	Virtio Project

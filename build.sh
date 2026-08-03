@@ -55,14 +55,22 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --wlroots)
-            # This first wlroots milestone only builds its four standalone
-            # dependencies. wlroots itself is intentionally not built yet.
+            # The complete compositor profile requires the C++ runtime and
+            # Mesa virgl before wlroots can be configured.
             BUILD_WLROOTS_DEPS=1
+            BUILD_WLROOTS=1
+            FORCE_LIBCXX=1
+            FORCE_MESA=1
+            MESA_DRIVER=virgl
             shift
             ;;
         --desktop=compositor)
             CMAKE_EXTRA="$CMAKE_EXTRA -DDESKTOP_COMPOSITOR=1"
             BUILD_WLROOTS_DEPS=1
+            BUILD_WLROOTS=1
+            FORCE_LIBCXX=1
+            FORCE_MESA=1
+            MESA_DRIVER=virgl
             shift
             ;;
         *)
@@ -116,6 +124,11 @@ if [ "${BUILD_WLROOTS_DEPS:-0}" = "1" ]; then
     CMAKE_EXTRA="$CMAKE_EXTRA -DWLROOTS_DEPS=1"
 else
     CMAKE_EXTRA="$CMAKE_EXTRA -DWLROOTS_DEPS=0"
+fi
+if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
+    CMAKE_EXTRA="$CMAKE_EXTRA -DWLROOTS=1"
+else
+    CMAKE_EXTRA="$CMAKE_EXTRA -DWLROOTS=0"
 fi
 
 # 1. CMake build (kernel + userspace)
@@ -255,7 +268,21 @@ PY
                 install -d "$SYSROOT/usr/lib/pkgconfig" "$SYSROOT/usr/include" "$SYSROOT/usr/bin"
                 install -m 755 "$build_dir/libseat.so.1" "$SYSROOT/usr/lib/"
                 ln -sf libseat.so.1 "$SYSROOT/usr/lib/libseat.so"
-                install -m 755 "$build_dir/seatd" "$SYSROOT/usr/bin/"
+                # seatd is the first dynamic ELF in the boot sequence. Loading
+                # the full libc.so from the cold FAT32 cache exceeds init's 2s
+                # readiness deadline, so relink this small core daemon against
+                # libc.a while keeping libseat shared for desktop clients.
+                "$CC_BIN" -m64 -static --sysroot="$SYSROOT" -nostdlib -nodefaultlibs \
+                    -Wl,--hash-style=gnu -o "$build_dir/seatd.static" \
+                    "$SYSROOT/usr/lib/crt1.o" "$SYSROOT/usr/lib/crti.o" \
+                    "$build_dir"/seatd.p/*.o -Wl,--start-group \
+                    "$SYSROOT/usr/lib/libc.a" -Wl,--end-group \
+                    "$SYSROOT/usr/lib/crtn.o"
+                if readelf -l "$build_dir/seatd.static" | grep -q 'interpreter'; then
+                    echo "ERROR: static seatd unexpectedly has a program interpreter" >&2
+                    return 1
+                fi
+                install -m 755 "$build_dir/seatd.static" "$SYSROOT/usr/bin/seatd"
                 install -m 644 "$source/include/libseat.h" "$SYSROOT/usr/include/"
                 install -m 644 "$build_dir/meson-private/libseat.pc" "$SYSROOT/usr/lib/pkgconfig/"
                 ;;
@@ -422,6 +449,11 @@ bash build_script/gen-pkgconfig.sh
 GALLIUM="${MESA_DRIVER:-softpipe}"
 MESA_SETUP=(
     "$MESADIR" third_party/mesa
+    # Meson persists command-line built-in options across --wipe. Spell these
+    # out so an older build configured with a partial c_args/cpp_args override
+    # cannot silently mask the complete values in the cross file.
+    "-Dc_args=-m64 -fPIC --sysroot=$SYSROOT -nodefaultlibs -fvisibility=hidden -Wno-macro-redefined -DXOS_NO_INOTIFY=1"
+    "-Dcpp_args=-m64 -fPIC --sysroot=$SYSROOT -nodefaultlibs -stdlib=libc++ -nostdinc++ -I$SYSROOT/usr/include/c++/v1 -fvisibility=hidden -Wno-macro-redefined -DXOS_NO_INOTIFY=1"
     "-Dgallium-drivers=$GALLIUM"
     -Dglx=disabled -Dopengl=false -Dgles1=disabled -Dgles2=enabled
     -Degl=enabled -Dgbm=enabled
@@ -509,6 +541,93 @@ missing = [g[0] for g in libs.values() if not any(n in staged for n in g)]
 if missing:
     raise SystemExit(f"ERROR: missing Mesa products: {missing}")
 PY
+fi
+
+# Build wlroots and the two M0 programs only for the explicit wlroots profile.
+if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
+    echo "=== Building wlroots 0.20.2 and M0 compositor ==="
+    bash build_script/third_party/wlroots/prepare-sysroot.sh
+    SYSROOT="$(cd build/sysroot && pwd)"
+    WLROOTS_BUILD=build/wlroots/wlroots
+    WLROOTS_NATIVE=build/wlroots-native.txt
+    WLROOTS_SETUP=(
+        --prefix /usr --libdir lib --buildtype release
+        --default-library shared --wrap-mode nodownload
+        --cross-file build/wlroots-cross.txt --native-file "$WLROOTS_NATIVE"
+        -Dauto_features=disabled -Dbackends=drm,libinput -Drenderers=gles2
+        -Dallocators=gbm -Dsession=enabled -Dxwayland=disabled
+        -Dxcb-errors=disabled -Dcolor-management=disabled
+        -Dlibliftoff=disabled -Dexamples=false -Dwerror=false
+        "$WLROOTS_BUILD" third_party/wlroots
+    )
+    WLROOTS_CONFIG_SUM="$({ sha256sum build/wlroots-cross.txt "$WLROOTS_NATIVE"; \
+        git -C third_party/wlroots rev-parse HEAD; printf '%s\n' "${WLROOTS_SETUP[*]}"; } | sha256sum | awk '{print $1}')"
+    WLROOTS_STAMP="$WLROOTS_BUILD/.xos-config.sha256"
+    if [ -d "$WLROOTS_BUILD" ] && \
+       { [ ! -f "$WLROOTS_STAMP" ] || [ "$(<"$WLROOTS_STAMP")" != "$WLROOTS_CONFIG_SUM" ]; }; then
+        meson setup --wipe "${WLROOTS_SETUP[@]}"
+    elif [ -d "$WLROOTS_BUILD" ]; then
+        meson setup --reconfigure "${WLROOTS_SETUP[@]}"
+    else
+        meson setup "${WLROOTS_SETUP[@]}"
+    fi
+    printf '%s\n' "$WLROOTS_CONFIG_SUM" > "$WLROOTS_STAMP"
+    ninja -C "$WLROOTS_BUILD" libwlroots-0.20.so
+    meson install -C "$WLROOTS_BUILD" --no-rebuild --destdir "$SYSROOT"
+
+    MESON_SUMMARY="$WLROOTS_BUILD/meson-logs/meson-log.txt"
+    for feature in 'drm-backend: YES' 'libinput-backend: YES' 'session: YES' \
+                   'gles2-renderer: YES' 'gbm-allocator: YES' 'egl: YES' \
+                   'x11-backend: NO' 'xwayland: NO' 'vulkan-renderer: NO' \
+                   'color-management: NO' 'libliftoff: NO'; do
+        feature_name="${feature%: *}"
+        feature_value="${feature##*: }"
+        if ! grep -Eq "^[[:space:]]*$feature_name[[:space:]]*:[[:space:]]*$feature_value$" \
+             "$MESON_SUMMARY"; then
+            echo "ERROR: wlroots feature matrix mismatch: $feature" >&2
+            exit 1
+        fi
+    done
+
+    WLROOTS_LIB="$SYSROOT/usr/lib/libwlroots-0.20.so"
+    install -m 755 "$WLROOTS_LIB" build/libwlroots-0.20.so
+    XDG_XML=third_party/wayland-protocols/stable/xdg-shell/xdg-shell.xml
+    build/wayland-scanner client-header "$XDG_XML" build/xdg-shell-client-protocol.h
+    build/wayland-scanner private-code "$XDG_XML" build/xdg-shell-protocol.c
+
+    "$CC_BIN" -m64 -O2 -fPIC --sysroot="$SYSROOT" -nodefaultlibs \
+        -I"$SYSROOT/usr/include" -Ibuild -c user/compositor/wayland-smoke.c \
+        -o build/wayland-smoke.o
+    "$CC_BIN" -m64 -O2 -fPIC --sysroot="$SYSROOT" -nodefaultlibs \
+        -I"$SYSROOT/usr/include" -Ibuild -c build/xdg-shell-protocol.c \
+        -o build/xdg-shell-protocol.o
+    "$CC_BIN" -m64 -fno-pie -no-pie --sysroot="$SYSROOT" -nostdlib -nodefaultlibs \
+        -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1 -Wl,--hash-style=gnu \
+        -Wl,--no-as-needed -o build/wayland-smoke \
+        "$SYSROOT/usr/lib/Scrt1.o" "$SYSROOT/usr/lib/crti.o" \
+        build/wayland-smoke.o build/xdg-shell-protocol.o \
+        -L"$SYSROOT/usr/lib" -lwayland-client -lc "$SYSROOT/usr/lib/crtn.o"
+
+    "$CXX_BIN" -m64 -O2 -std=gnu++17 -fPIC -fno-exceptions -fno-rtti \
+        -DWLR_USE_UNSTABLE --sysroot="$SYSROOT" -nodefaultlibs -stdlib=libc++ \
+        -nostdinc++ -I"$SYSROOT/usr/include/c++/v1" \
+        -I"$SYSROOT/usr/include/wlroots-0.20" -I"$SYSROOT/usr/include" \
+        -I"$SYSROOT/usr/include/pixman-1" \
+        -c user/compositor/compositor.cc -o build/compositor.o
+    "$CXX_BIN" -m64 -fno-pie -no-pie --sysroot="$SYSROOT" -nostdlib -nodefaultlibs \
+        -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1 -Wl,--hash-style=gnu \
+        -Wl,--no-as-needed -Wl,--allow-shlib-undefined -o build/compositor \
+        "$SYSROOT/usr/lib/Scrt1.o" "$SYSROOT/usr/lib/crti.o" build/compositor.o \
+        -L"$SYSROOT/usr/lib" -lwlroots-0.20 -lwayland-server -linput -ludev \
+        -lseat -lEGL -lGLESv2 -lgbm -ldrm -lpixman-1 -lxkbcommon \
+        -ldisplay-info -lc++ -lc++abi -lunwind -lclang_rt -lc \
+        "$SYSROOT/usr/lib/crtn.o"
+
+    if readelf -d build/compositor build/wayland-smoke build/libwlroots-0.20.so | \
+       grep -Eiq 'lib(X11|xcb|vulkan|systemd|elogind|dbus|liftoff)|libstdc\+\+|llvmpipe'; then
+        echo "ERROR: forbidden dependency in wlroots M0 runtime" >&2
+        exit 1
+    fi
 fi
 
 # The EGL test links against staged Mesa .so files, so it must run after the

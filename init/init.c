@@ -96,11 +96,15 @@ static int wait_seatd_ready(int fd) {
 
 #ifdef DESKTOP_COMPOSITOR
 static int start_compositor(void) {
-  char *const argv[] = {"/usr/bin/compositor", NULL};
-  char *const envp[] = {"LIBSEAT_BACKEND=seatd", "SEATD_SOCK=/run/seatd.sock",
-                        "XDG_RUNTIME_DIR=/run", "WAYLAND_DISPLAY=wayland-0",
+  char *const argv[] = {"/usr/bin/compositor", "--m0-smoke", NULL};
+  char *const envp[] = {"LIBSEAT_BACKEND=seatd",
+                        "SEATD_SOCK=/run/seatd.sock",
+                        "XDG_RUNTIME_DIR=/run",
+                        "WLR_BACKENDS=drm,libinput",
+                        "WLR_RENDERER=gles2",
+                        "XKB_CONFIG_ROOT=/usr/share/X11/xkb",
                         NULL};
-  return spawn_process(argv[0], argv, envp, -1, -1, (mode_t)-1);
+  return spawn_process(argv[0], argv, envp, -1, -1, 0077);
 }
 #else
 static int start_terminal(void) {
@@ -241,6 +245,13 @@ int main(int argc, char **argv, char **envp) {
   }
   printf("init: seatd ready pid=%d\n", seatd_pid);
 #ifdef DESKTOP_COMPOSITOR
+  if (access("/run/wayland-0", F_OK) == 0 ||
+      access("/run/wayland-0.lock", F_OK) == 0) {
+    printf("init: fatal: stale wayland socket\n");
+    stop_process(seatd_pid);
+    for (;;)
+      pause();
+  }
   int compositor_pid = start_compositor();
   if (compositor_pid < 0) {
     printf("init: fatal: compositor spawn failed\n");

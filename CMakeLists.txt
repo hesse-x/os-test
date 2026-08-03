@@ -314,6 +314,12 @@ if(WLROOTS_DEPS)
     os_image_path(display_info_soname libdisplay-info.so.4    lib/libdisplay-info.so.4    PARTITION 2)
 endif()
 
+if(WLROOTS)
+    os_image_path(wlroots_lib       libwlroots-0.20.so lib/libwlroots-0.20.so PARTITION 2)
+    os_image_path(compositor_bin    compositor          usr/bin/compositor    PARTITION 2)
+    os_image_path(wayland_smoke_bin wayland-smoke       usr/bin/wayland-smoke PARTITION 2)
+endif()
+
 # seatd/libseat are part of the default terminal session path.
 os_image_path(libseat_lib         libseat.so              lib/libseat.so              PARTITION 2)
 os_image_path(libseat_soname      libseat.so.1            lib/libseat.so.1            PARTITION 2)

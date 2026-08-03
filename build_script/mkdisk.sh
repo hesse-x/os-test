@@ -147,6 +147,20 @@ mmd -i "${BUILD_DIR}/part2.img" ::usr/share ::usr/share/libinput 2>/dev/null || 
 mcopy -i "${BUILD_DIR}/part2.img" "${PROJECT_DIR}/third_party/libinput/quirks/10-generic-keyboard.quirks"  ::usr/share/libinput/
 mcopy -i "${BUILD_DIR}/part2.img" "${PROJECT_DIR}/third_party/libinput/quirks/10-generic-mouse.quirks"     ::usr/share/libinput/
 
+# M0 installs only the xkeyboard-config closure needed by the fixed US keymap.
+if grep -q $'\tusr/bin/compositor\t2$' "${MANIFEST}"; then
+    mmd -i "${BUILD_DIR}/part2.img" ::usr/share/X11 ::usr/share/X11/xkb \
+        ::usr/share/X11/xkb/rules ::usr/share/X11/xkb/keycodes \
+        ::usr/share/X11/xkb/symbols ::usr/share/X11/xkb/types \
+        ::usr/share/X11/xkb/compat 2>/dev/null || true
+    XKB_DATA="${PROJECT_DIR}/third_party/libxkbcommon/test/data"
+    mcopy -i "${BUILD_DIR}/part2.img" "${XKB_DATA}/rules/evdev" ::usr/share/X11/xkb/rules/
+    mcopy -i "${BUILD_DIR}/part2.img" "${XKB_DATA}/keycodes/evdev" "${XKB_DATA}/keycodes/aliases" ::usr/share/X11/xkb/keycodes/
+    mcopy -i "${BUILD_DIR}/part2.img" "${XKB_DATA}/symbols/pc" "${XKB_DATA}/symbols/us" "${XKB_DATA}/symbols/inet" ::usr/share/X11/xkb/symbols/
+    mcopy -i "${BUILD_DIR}/part2.img" "${XKB_DATA}/types/complete" ::usr/share/X11/xkb/types/
+    mcopy -i "${BUILD_DIR}/part2.img" "${XKB_DATA}/compat/complete" ::usr/share/X11/xkb/compat/
+fi
+
 # Published header tree → /usr/include/ (standard FHS layout).
 # install-headers.sh (run before mkdisk in build.sh) already published the
 # self-contained header closure to build/sysroot/usr/include/ (xos/ + sys/ +

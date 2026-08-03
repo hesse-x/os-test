@@ -16,11 +16,14 @@ PROTOCOL_HEADER_BUILD="$BUILD/wlroots/wayland-protocols/include/wayland-protocol
 install -d "$INCLUDE_DIR" "$LIB_DIR" "$PC_DIR" "$NATIVE_PC_DIR"
 install -d "$PROTOCOL_DIR"
 cp -a "$ROOT/third_party/wayland-protocols/." "$PROTOCOL_DIR/"
-if [[ -d "$PROTOCOL_HEADER_BUILD" ]]; then
-	install -d "$INCLUDE_DIR/wayland-protocols"
-	install -m 644 "$PROTOCOL_HEADER_BUILD/"*.h \
-		"$INCLUDE_DIR/wayland-protocols/"
-fi
+install -d "$INCLUDE_DIR/wayland-protocols"
+# wlroots public headers include the generated protocol enum headers. Generate
+# the complete vendored set so consumers never depend on host protocol data.
+while IFS= read -r xml; do
+	name="$(basename "${xml%.xml}")-enum.h"
+	"$BUILD/wayland-scanner" --strict enum-header "$xml" \
+		"$INCLUDE_DIR/wayland-protocols/$name"
+done < <(find "$ROOT/third_party/wayland-protocols" -name '*.xml' -type f | sort)
 
 install -m 644 "$ROOT/third_party/wayland/src/wayland-server-core.h" "$INCLUDE_DIR/"
 install -m 644 "$ROOT/third_party/wayland/src/wayland-server.h" "$INCLUDE_DIR/"
@@ -165,8 +168,8 @@ Version: 1.25.91
 EOF
 
 cat > "$NATIVE_PC_DIR/hwdata.pc" <<EOF
-prefix=/usr
-pkgdatadir=/usr/share/hwdata
+prefix=$ROOT/build_script/third_party/hwdata
+pkgdatadir=\${prefix}
 
 Name: hwdata
 Description: Native PCI and PNP identifier database
