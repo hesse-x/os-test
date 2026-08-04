@@ -792,14 +792,14 @@ endfunction()
 #              bare-gcc add_custom_command doesn't auto-track configure_file outputs, so
 #              listing them forces a re-compile when the template changes.
 function(add_user_dyn_elf name)
-    cmake_parse_arguments(ARG "C;NO_IMAGE;EXCLUDE_FROM_ALL" "IMAGE_PATH;IMAGE_ARTIFACT;IMAGE_PARTITION" "SOURCES;LINK_LIBS;STATIC_LIBS;DEFS;INCLUDE_DIRS;GEN_HEADERS" ${ARGN})
+    cmake_parse_arguments(ARG "C;NO_IMAGE;EXCLUDE_FROM_ALL" "IMAGE_PATH;IMAGE_ARTIFACT;IMAGE_PARTITION" "SOURCES;LINK_LIBS;STATIC_LIBS;DEFS;INCLUDE_DIRS;GEN_HEADERS;FLAGS" ${ARGN})
     set(ELF_FILE ${CMAKE_BINARY_DIR}/${name}.elf)
     if(ARG_C)
         set(COMPILE_CMD ${CMAKE_C_COMPILER})
     else()
         set(COMPILE_CMD ${CMAKE_CXX_COMPILER})
     endif()
-    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${MUSL_GEN_DIR} ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src)
+    set(COMPILE_FLAGS ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS} -I${CMAKE_SOURCE_DIR} -I${CMAKE_SOURCE_DIR}/third_party -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include -I${MUSL_GEN_DIR} ${MUSL_INCLUDE_FLAGS} ${DRM_INCLUDE_FLAGS} -I${CMAKE_SOURCE_DIR}/third_party/Unity/src ${ARG_FLAGS})
 
     # Extra include directories
     if(ARG_INCLUDE_DIRS)

@@ -187,6 +187,34 @@ void test_mmap_memfd_private_cow(void) {
   close(fd);
 }
 
+/* wlroots opens one POSIX shm object twice, writes through a shared producer
+ * mapping, then sends the read-only fd to Mesa, which maps it MAP_PRIVATE. */
+void test_tmpfs_shared_mapping_cross_fd(void) {
+  const char *name = "/mfp_tmpfs_shared";
+  shm_unlink(name);
+  int rw_fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+  TEST_ASSERT_TRUE(rw_fd >= 0);
+  int ro_fd = shm_open(name, O_RDONLY, 0);
+  TEST_ASSERT_TRUE(ro_fd >= 0);
+  TEST_ASSERT_EQUAL_INT(0, shm_unlink(name));
+  TEST_ASSERT_EQUAL_INT(0, fchmod(rw_fd, 0));
+  TEST_ASSERT_EQUAL_INT(0, ftruncate(rw_fd, PAGE));
+
+  char *rw =
+      (char *)mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, rw_fd, 0);
+  char *ro = (char *)mmap(NULL, PAGE, PROT_READ, MAP_PRIVATE, ro_fd, 0);
+  TEST_ASSERT_TRUE(rw != NULL && rw != MAP_FAILED);
+  TEST_ASSERT_TRUE(ro != NULL && ro != MAP_FAILED);
+
+  memcpy(rw, "wlroots", 8);
+  TEST_ASSERT_EQUAL_INT(0, memcmp(ro, "wlroots", 8));
+
+  munmap(ro, PAGE);
+  munmap(rw, PAGE);
+  close(ro_fd);
+  close(rw_fd);
+}
+
 /* TC8: fork independence. fork copies the parent's address space, so the child
  * inherits the parent's in-flight MAP_PRIVATE write ('P') — that is NOT a write
  * to the backing file, it is private memory, and fork snapshots it. The
@@ -236,6 +264,7 @@ int main(void) {
   RUN_TEST(test_mmap_file_private_survives_close);
   RUN_TEST(test_mprotect_unfaulted_file_page);
   RUN_TEST(test_mmap_memfd_private_cow);
+  RUN_TEST(test_tmpfs_shared_mapping_cross_fd);
   RUN_TEST(test_mmap_file_private_fork_independent);
   return UNITY_END();
 }

@@ -723,6 +723,16 @@ static void drm_fence_signal(struct drm_fence *fence) {
   }
   fence->signaled = true;
   spin_unlock_irqrestore(&fence->lock, flags);
+
+  spin_lock_irqsave(&g_drm.fence_lock, &flags);
+  if (fence->ctx_id > 0 && fence->ctx_id <= MAX_CTX_IDS &&
+      fence->ring_idx < MAX_CTX_RINGS) {
+    uint64_t *completed =
+        &g_drm.completed_fence_ids[fence->ctx_id - 1][fence->ring_idx];
+    if (*completed < fence->fence_id)
+      *completed = fence->fence_id;
+  }
+  spin_unlock_irqrestore(&g_drm.fence_lock, flags);
   __wake_up(&fence->wq, 0);
 }
 
@@ -1177,8 +1187,16 @@ static long drm_ioctl_virtgpu_context_init(void *arg, struct drm_file *df) {
     return -EINVAL;
 
   uint32_t ctx_id = alloc_ctx_id();
-  if (ctx_id == 0)
+  if (ctx_id == 0) {
+    printk(LOG_ERROR, "drm: CONTEXT_INIT context id pool exhausted\n");
     return -ENOMEM;
+  }
+
+  uint64_t fence_flags;
+  spin_lock_irqsave(&g_drm.fence_lock, &fence_flags);
+  __memset(g_drm.completed_fence_ids[ctx_id - 1], 0,
+           sizeof(g_drm.completed_fence_ids[ctx_id - 1]));
+  spin_unlock_irqrestore(&g_drm.fence_lock, fence_flags);
 
   struct virtio_gpu_ctx_create cmd;
   __memset(&cmd, 0, sizeof(cmd));
@@ -1192,6 +1210,9 @@ static long drm_ioctl_virtgpu_context_init(void *arg, struct drm_file *df) {
   int rc = virtio_gpu_send_cmd_3d(&g_virtio_gpu, &cmd, sizeof(cmd), &resp,
                                   sizeof(resp));
   if (rc || resp.hdr.type != VIRTIO_GPU_RESP_OK_NODATA) {
+    printk(LOG_ERROR,
+           "drm: CONTEXT_INIT failed ctx=%u capset=%u rc=%d response=0x%x\n",
+           ctx_id, capset_id, rc, resp.hdr.type);
     free_ctx_id(ctx_id);
     return rc ? rc : -EIO;
   }
@@ -1463,26 +1484,41 @@ static long drm_ioctl_virtgpu_transfer_from_host(void *arg) {
  * never races — virgl only uses this to decide whether to stall. */
 static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df) {
   struct drm_virtgpu_3d_wait *w = (struct drm_virtgpu_3d_wait *)arg;
-
-  if (!drm_find_virgl_resource(w->handle))
-    return -ENOENT;
-
-  uint32_t ctx_id = df ? df->ctx_id : 0;
-  if (ctx_id == 0) {
-    /* No context → no async submits can be in flight → always idle. */
-    return 0;
-  }
+  (void)df;
 
   bool nowait = w->flags & VIRTGPU_WAIT_NOWAIT;
 
   for (;;) {
-    /* Find one unsignaled fence for this context under fence_lock, take a ref
-     * so the slot can't be reclaimed before we wait, then drop the lock. */
+    uint32_t ctx_id;
+    uint8_t ring_idx;
+    uint64_t fence_id;
+
+    spin_lock(&g_drm.virgl_lock);
+    struct drm_virgl_resource *r = drm_find_virgl_resource(w->handle);
+    if (!r) {
+      spin_unlock(&g_drm.virgl_lock);
+      return -ENOENT;
+    }
+    ctx_id = r->last_ctx_id;
+    ring_idx = r->last_ring_idx;
+    fence_id = r->last_fence_id;
+    spin_unlock(&g_drm.virgl_lock);
+
+    if (ctx_id == 0 || fence_id == 0)
+      return 0;
+
     struct drm_fence *fence = NULL;
     uint64_t flags;
     spin_lock_irqsave(&g_drm.fence_lock, &flags);
+    if (ctx_id <= MAX_CTX_IDS && ring_idx < MAX_CTX_RINGS &&
+        g_drm.completed_fence_ids[ctx_id - 1][ring_idx] >= fence_id) {
+      spin_unlock_irqrestore(&g_drm.fence_lock, flags);
+      return 0;
+    }
     for (int i = 0; i < MAX_FENCES; i++) {
-      if (g_drm.fences[i].ctx_id == ctx_id && !g_drm.fences[i].signaled) {
+      if (g_drm.fences[i].ctx_id == ctx_id &&
+          g_drm.fences[i].ring_idx == ring_idx &&
+          g_drm.fences[i].fence_id == fence_id) {
         fence = &g_drm.fences[i];
         refcount_inc(&fence->refcount);
         break;
@@ -1490,16 +1526,16 @@ static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df) {
     }
     spin_unlock_irqrestore(&g_drm.fence_lock, flags);
 
-    if (!fence)
-      return 0; /* all ctx fences signaled → idle */
-
     if (nowait) {
       drm_fence_put(fence);
       return -EBUSY;
     }
 
-    /* Block until this fence signals, then drop the ref and re-scan for more.
-     */
+    /* Completion may reclaim the fence between the completed-id probe and
+     * table scan. Retry so the completed-id check observes that completion. */
+    if (!fence)
+      continue;
+
     drm_fence_wait(fence, 0);
     drm_fence_put(fence);
   }
@@ -1510,6 +1546,7 @@ static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df) {
  * completes this submission. */
 static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
   struct drm_virtgpu_execbuffer *eb = (struct drm_virtgpu_execbuffer *)arg;
+  int rc = 0;
   if (!df || df->ctx_id == 0)
     return -EINVAL;
   if (eb->size == 0 || eb->command == 0)
@@ -1559,7 +1596,6 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
         return rc;
       }
     }
-    kfree(bo_handles);
   }
 
   uint64_t fence_id = ++df->ring_fence_counters[eb->ring_idx];
@@ -1567,17 +1603,19 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
   /* Copy user command stream into the SUBMIT_3D buffer. */
   void *cmd_data = kmalloc(eb->size);
   if (!cmd_data)
-    return -ENOMEM;
+    goto err_free_handles;
   if (copy_from_user(cmd_data, (void *)(uintptr_t)eb->command, eb->size)) {
     kfree(cmd_data);
-    return -EFAULT;
+    rc = -EFAULT;
+    goto err_free_handles;
   }
 
   size_t total_cmd_size = sizeof(struct virtio_gpu_cmd_submit) + eb->size;
   void *submit_buf = kmalloc(total_cmd_size);
   if (!submit_buf) {
     kfree(cmd_data);
-    return -ENOMEM;
+    rc = -ENOMEM;
+    goto err_free_handles;
   }
   struct virtio_gpu_cmd_submit *sh = (struct virtio_gpu_cmd_submit *)submit_buf;
   __memset(sh, 0, sizeof(*sh));
@@ -1595,7 +1633,8 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
       drm_fence_create(df->ctx_id, eb->ring_idx, fence_id);
   if (!fence) {
     kfree(submit_buf);
-    return -ENOMEM;
+    rc = -ENOMEM;
+    goto err_free_handles;
   }
 
   /* Reserve a reference for the async completion before publishing the
@@ -1610,15 +1649,28 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
    * it owns, so freeing submit_buf here is safe. */
   struct virtio_gpu_ctrl_hdr_response resp_template;
   __memset(&resp_template, 0, sizeof(resp_template));
-  int rc = virtio_gpu_send_cmd_3d_async(
-      &g_virtio_gpu, submit_buf, total_cmd_size, &resp_template,
-      sizeof(resp_template), fence_id, eb->ring_idx, df->ctx_id);
+  rc = virtio_gpu_send_cmd_3d_async(&g_virtio_gpu, submit_buf, total_cmd_size,
+                                    &resp_template, sizeof(resp_template),
+                                    fence_id, eb->ring_idx, df->ctx_id);
   kfree(submit_buf);
   if (rc) {
     drm_fence_put(fence); /* unused async-completion reference */
     drm_fence_put(fence);
-    return rc;
+    goto err_free_handles;
   }
+
+  spin_lock(&g_drm.virgl_lock);
+  for (uint32_t i = 0; i < eb->num_bo_handles; i++) {
+    struct drm_virgl_resource *r = drm_find_virgl_resource(bo_handles[i]);
+    if (!r)
+      continue;
+    r->last_ctx_id = df->ctx_id;
+    r->last_ring_idx = eb->ring_idx;
+    r->last_fence_id = fence_id;
+  }
+  spin_unlock(&g_drm.virgl_lock);
+  kfree(bo_handles);
+  bo_handles = NULL;
 
   /* Out-fence sync_file fd: install a fd bound to this fence (takes a ref). */
   if (eb->flags & VIRTGPU_EXECBUF_FENCE_FD_OUT) {
@@ -1639,6 +1691,10 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
   printk(LOG_DEBUG, "drm: EXECBUFFER ring=%u fence_id=%llu size=%u -> fd=%d\n",
          eb->ring_idx, (unsigned long long)fence_id, eb->size, eb->fence_fd);
   return 0;
+
+err_free_handles:
+  kfree(bo_handles);
+  return rc;
 }
 
 /* DRM_IOCTL_GET_CAP */
@@ -3038,15 +3094,26 @@ static void free_ctx_id(uint32_t id) {
 }
 
 /* blob handle: monotonic 1-based; slot reuse keyed by bo_handle. */
-/* virgl legacy (v1) resource handle: monotonic from VIRGL_HANDLE_BASE.
- * Returns 0 when the table is exhausted. Slot is keyed by bo_handle. */
+/* Virgl v1 handles mirror table indices. Probe from the last allocation so
+ * GEM_CLOSE slots are reusable instead of permanently exhausting the pool. */
 static uint32_t alloc_virgl_handle(void) {
   spin_lock(&g_drm.virgl_lock);
-  uint32_t h = g_drm.next_virgl_handle++;
+  uint32_t start = g_drm.next_virgl_handle - VIRGL_HANDLE_BASE;
+  for (uint32_t i = 0; i < MAX_VIRGL_RESOURCES; i++) {
+    uint32_t index = (start + i) % MAX_VIRGL_RESOURCES;
+    struct drm_virgl_resource *r = &g_drm.virgl_res[index];
+    if (r->bo_handle != 0)
+      continue;
+
+    uint32_t h = VIRGL_HANDLE_BASE + index;
+    r->bo_handle = h; /* reserve the slot until resource creation completes */
+    g_drm.next_virgl_handle =
+        VIRGL_HANDLE_BASE + ((index + 1) % MAX_VIRGL_RESOURCES);
+    spin_unlock(&g_drm.virgl_lock);
+    return h;
+  }
   spin_unlock(&g_drm.virgl_lock);
-  if (h < VIRGL_HANDLE_BASE || h >= VIRGL_HANDLE_BASE + MAX_VIRGL_RESOURCES)
-    return 0;
-  return h;
+  return 0;
 }
 
 static struct drm_virgl_resource *drm_find_virgl_resource(uint32_t handle) {
@@ -3198,6 +3265,7 @@ static int drm_open_file_common(xtask *proc, struct file *file,
     }
   }
   spin_unlock(&g_drm_files_lock);
+  printk(LOG_ERROR, "drm: open-file table exhausted (%d slots)\n", MAX_DRM_FDS);
   return -ENFILE;
 }
 

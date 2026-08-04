@@ -271,7 +271,11 @@ kernel/
 2. [步骤] → 验证: [检查]
 ```
 
-## 5. debug
+## 5. third_party原则
+
+third_party不可修改，所有问题都在仓库中修复
+
+## 6. debug
 
 ### 串口打印
 
@@ -331,10 +335,10 @@ tmux kill-session -t gdb; tmux kill-session -t serial; tmux kill-session -t qemu
 
 注：tmux send-keys 只能发按键到对应 session 的 stdio。QEMU monitor 在 qemu session 的 stdio，串口输入需通过 serial session 的 socat 连接发送。
 
-## 6. 技术债务
+## 7. 技术债务
 
 综合考量工作量和规范性、扩展性，不能一味追求简单快速，也不要过度设计。接口设计不确定时参考 Linux 实现方案，对于功能在内核态还是用户态参考 MAC 的方案。技术妥协中间状态需补充到 `doc/design/todo.md`。
 
-## 7. 文档原则
+## 8. 文档原则
 
 过时内容直接删除仅保留最新状态，历史信息由 git log 记录。文档内容在自己模块文档中最详细，其它引用处只保留必要信息 + 链接。

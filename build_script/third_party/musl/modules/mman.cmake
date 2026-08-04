@@ -31,12 +31,13 @@
 #   remap_file_pages — musl mremap.c does NOT define it (it is in src/linux/);
 #     not adopted.
 #
-# msync/madvise/mlock/mlockall/munlock/mincore have NO kernel handler (sys_msync
-# etc. are absent from kernel/bsd/syscall.c). The syscall dispatch returns
+# msync/madvise/mlock/mlockall/munlock have NO kernel handler (sys_msync etc.
+# are absent from kernel/bsd/syscall.c). The syscall dispatch returns
 # -ENOSYS for unregistered numbers, so the musl wrappers expose the symbols
 # (callers link) but return -1/ENOSYS — the same surface glibc/Linux would give
 # before the feature existed. This is the documented "POSIX symbol present,
-# kernel feature absent" middle state (doc/design/todo.md).
+# kernel feature absent" middle state (doc/design/todo.md). mincore is backed
+# by sys_mincore because Mesa uses it to validate native display pointers.
 set(MUSL_MMAN_SOURCES
     ${MUSL_DIR}/src/mman/mmap.c
     ${MUSL_DIR}/src/mman/munmap.c

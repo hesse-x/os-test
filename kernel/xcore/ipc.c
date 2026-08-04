@@ -168,6 +168,45 @@ uint64_t shm_add_page(struct shm *shm) {
   return phys;
 }
 
+int shm_grow(struct shm *shm, size_t npages) {
+  size_t old_npages = shm->page_list ? (size_t)shm->num_pages : shm->npages;
+  if (npages <= old_npages)
+    return 0;
+
+  uint64_t *pages = (uint64_t *)kmalloc(npages * sizeof(*pages));
+  if (!pages)
+    return -1;
+
+  for (size_t i = 0; i < old_npages; i++)
+    pages[i] = shm->page_list ? shm->page_list[i] : shm->phys + i * PAGE_SIZE;
+
+  size_t i = old_npages;
+  for (; i < npages; i++) {
+    struct page *page = bfc_alloc_page(1);
+    if (!page)
+      break;
+    pages[i] = (__force uint64_t)page_to_phys(page);
+    __memset((__force void *)phys_to_virt((__force phys_addr_t)pages[i]), 0,
+             PAGE_SIZE);
+  }
+  if (i != npages) {
+    while (i > old_npages) {
+      struct page *page = &bfc_frames[PHY_TO_PAGE(pages[--i])];
+      bfc_free_page(page, 1);
+    }
+    kfree(pages);
+    return -1;
+  }
+
+  if (shm->page_list)
+    kfree(shm->page_list);
+  shm->phys = 0;
+  shm->npages = 0;
+  shm->page_list = pages;
+  shm->num_pages = (int)npages;
+  return 0;
+}
+
 // ===================== Xcore IPC syscall: getpid =====================
 int64_t sys_getpid(int64_t unused1, int64_t unused2, int64_t unused3,
                    int64_t unused4, int64_t unused5, int64_t unused6) {

@@ -223,6 +223,34 @@ void test_sysconf_pagesize(void) {
   TEST_ASSERT_EQUAL_INT(4096, sysconf(_SC_PAGE_SIZE));
 }
 
+// ---- mincore mapping and residency checks (Mesa EGL pointer probe) ----
+
+void test_mincore_mapping_probe(void) {
+  unsigned char vec[2] = {0, 0};
+  void *pages = mmap(NULL, 8192, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  TEST_ASSERT_NOT_EQUAL(MAP_FAILED, pages);
+
+  // The anonymous mmap path eagerly installs both leaves, so both pages are
+  // resident. Mesa only depends on the return value for the first page.
+  TEST_ASSERT_EQUAL_INT(0, mincore(pages, 8192, vec));
+  TEST_ASSERT_EQUAL_UINT8(1, vec[0] & 1);
+  TEST_ASSERT_EQUAL_UINT8(1, vec[1] & 1);
+
+  errno = 0;
+  TEST_ASSERT_EQUAL_INT(-1, mincore((char *)pages + 1, 4096, vec));
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+
+  errno = 0;
+  TEST_ASSERT_EQUAL_INT(-1, mincore(pages, 4096, NULL));
+  TEST_ASSERT_EQUAL_INT(EFAULT, errno);
+
+  TEST_ASSERT_EQUAL_INT(0, munmap(pages, 8192));
+  errno = 0;
+  TEST_ASSERT_EQUAL_INT(-1, mincore(pages, 4096, vec));
+  TEST_ASSERT_EQUAL_INT(ENOMEM, errno);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -242,5 +270,6 @@ int main(int argc, char **argv, char **envp) {
 #endif
   RUN_TEST(test_mprotect_prot_none_munmap_no_leak);
   RUN_TEST(test_sysconf_pagesize);
+  RUN_TEST(test_mincore_mapping_probe);
   return UNITY_END();
 }

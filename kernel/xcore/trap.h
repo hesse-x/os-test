@@ -110,6 +110,7 @@ struct shm *shm_create_internal(uint64_t npages);
 struct shm *shm_get(struct shm *shm);
 void shm_put(struct shm *shm);
 uint64_t shm_add_page(struct shm *shm);
+int shm_grow(struct shm *shm, size_t npages);
 extern uint64_t sig_trampoline_phys;
 
 const char *syscall_name(uint64_t nr);

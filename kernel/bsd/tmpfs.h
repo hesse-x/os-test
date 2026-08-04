@@ -18,5 +18,6 @@ extern const struct file_operations tmpfs_file_fops;
 // Kernel-space read of a tmpfs regular file (execve dispatches here via
 // vfs_read_kernel by fstype).
 int tmpfs_read_kern(struct inode *ip, uint64_t offset, void *buf, size_t count);
+struct shm *tmpfs_get_shm(struct inode *ip);
 
 #endif

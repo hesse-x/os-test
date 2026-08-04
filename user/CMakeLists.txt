@@ -231,7 +231,7 @@ endif()
 # IMAGE_PATH local/hello_dyn.elf: ship to /local/ (override dyn-elf default test/).
 add_user_dyn_elf(hello_dyn C SOURCES hello_dyn.c LINK_LIBS c IMAGE_PATH local/hello_dyn.elf)
 
-# ===================== libc++ smoke ELF (opt-in, -DLIBCXX=1) =====================
+# ===================== libc++ smoke ELF (--test) =====================
 # libc++ end-to-end regression (refact_cmake.md §3.6): covers vector/string,
 # throw/catch (libc++abi TLS __cxa_thread_atexit), filesystem (int128 compiler
 # runtime), and the messages facet (catgets) — four historically recurring
@@ -244,14 +244,9 @@ add_user_dyn_elf(hello_dyn C SOURCES hello_dyn.c LINK_LIBS c IMAGE_PATH local/he
 # + -stdlib=libc++ + sysroot's c++/v1 headers and libc++*.so libs (build_libcxx.sh
 # installs into build/sysroot/usr).
 #
-# Timing: libc++ is installed into the sysroot by build_libcxx.sh after the main
-# ninja (--cxx), so this target is EXCLUDE_FROM_ALL — default ./build.sh does not
-# build it (sysroot may lack libc++; forcing the build would fail the link). Only
-# -DLIBCXX=1 (passed by ./build.sh --cxx) pulls it into the build. os_image_path
-# still registers it under test/, but an EXCLUDE_FROM_ALL target is not in
-# ninja's default target set; the manifest's dependency check is satisfied by
-# mkdisk after the actual build.
-if(LIBCXX)
+# Timing: libc++ is installed into the sysroot after the main Ninja pass, so the
+# test executable is built on demand by build.sh once those headers and DSOs exist.
+if(TEST)
     set(LIBCXX_SYSROOT ${CMAKE_BINARY_DIR}/sysroot)
     set(LIBCXX_LIB_DIR ${LIBCXX_SYSROOT}/usr/lib)
     set(LIBCXX_SMOKE_ELF ${CMAKE_BINARY_DIR}/libcxx_smoke.elf)
@@ -277,15 +272,14 @@ if(LIBCXX)
                 -o ${LIBCXX_SMOKE_OBJ}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test/libcxx_smoke.cpp
         IMPLICIT_DEPENDS CXX ${CMAKE_CURRENT_SOURCE_DIR}/test/libcxx_smoke.cpp
-        COMMENT "Compiling libcxx_smoke.o (libc++, opt-in)")
+        COMMENT "Compiling libcxx_smoke.o (libc++)")
 
     # Link: clang++ driver (understands -stdlib=libc++'s implicit runtime) +
     # Scrt1/crti/crtn + libc.so + sysroot's libc++/libc++abi/libunwind.
     # --no-as-needed keeps libc++ DT_NEEDED; --allow-shlib-undefined tolerates
     # libc++ → libc++abi → libunwind transitive deps.
-    # libc++*.so comes from the sysroot (installed by build_libcxx.sh), not a
-    # build/ CMake target, so there is no CMake target dependency — under
-    # EXCLUDE_FROM_ALL the --cxx full flow guarantees its presence.
+    # libc++*.so comes from the sysroot rather than a CMake target; build.sh
+    # guarantees it is installed before requesting this target.
     add_custom_command(OUTPUT ${LIBCXX_SMOKE_ELF}
         COMMAND ${CMAKE_CXX_COMPILER} -fno-pie -no-pie
                 -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1
@@ -302,30 +296,13 @@ if(LIBCXX)
                 ${CMAKE_BINARY_DIR}/libc.so ${CMAKE_BINARY_DIR}/libclang_rt.so
         COMMENT "Linking libcxx_smoke.elf (libc++, opt-in)")
     # No ALL keyword → not in the default build (the main `ninja` skips it); built on
-    # demand by `ninja libcxx_smoke_elf` in build.sh after build_libcxx.sh installs libc++.
+    # demand by build.sh after build_libcxx.sh installs libc++.
     add_custom_target(libcxx_smoke_elf DEPENDS ${LIBCXX_SMOKE_ELF})
     add_dependencies(libcxx_smoke_elf musl_libc c_so clang_rt)
 
-    # Ship to /test/ for test_runner (registered even though EXCLUDE_FROM_ALL; built only
-    # when -DLIBCXX=1 drives the target, which always coincides with --cxx having installed
-    # libc++ into the sysroot and mkdisk probe-shipped the runtime .so into /lib).
+    # Ship to /test/ for test_runner; mkdisk also stages the runtime DSOs.
     os_image_path(libcxx_smoke_elf libcxx_smoke.elf test/libcxx_smoke.elf PARTITION 2)
 endif()
-
-# terminal — dynamic ELF (libc.so + libinput.so), PT_INTERP → ld.so
-# IMAGE_PATH usr/bin/terminal: override dyn-elf default test/.
-set(_terminal_defs)
-if(TEST)
-    list(APPEND _terminal_defs TEST)
-endif()
-add_user_dyn_elf(terminal
-    SOURCES driver/terminal_libinput.cc
-    LINK_LIBS input drm m c udev seat
-    DEFS ${_terminal_defs}
-    INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/third_party/libinput/src;${CMAKE_SOURCE_DIR}/third_party/libinput/include;${CMAKE_SOURCE_DIR}/third_party/seatd/include;${CMAKE_SOURCE_DIR}/user/lib/udev-shim;${CMAKE_SOURCE_DIR}/user/lib/evdev-shim;${CMAKE_SOURCE_DIR}/third_party/drm;${CMAKE_SOURCE_DIR}/third_party/drm/include/drm"
-    EXCLUDE_FROM_ALL
-    IMAGE_PATH usr/bin/terminal
-)
 
 # evdev: real keyboard event source (xHCI HID → SHM ring → terminal) +
 # EVIOCG* ioctl query. Replaces the kbd driver for terminal input. Also registers

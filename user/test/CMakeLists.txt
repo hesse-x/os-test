@@ -7,21 +7,8 @@
 # Test runner (no Unity needed). Propagate -DLIBCXX when libc++ is enabled so the
 # static tests[] table's libcxx_smoke entry (guarded by #if defined(LIBCXX) in
 # test_runner.c) is compiled in. See refact_cmake.md §3.6.
-set(_TEST_RUNNER_DEFS "")
-if(TEST)
-    list(APPEND _TEST_RUNNER_DEFS TEST)
-    if(WLROOTS_DEPS)
-        list(APPEND _TEST_RUNNER_DEFS WLROOTS_DEPS)
-    endif()
-endif()
-if(LIBCXX)
-    list(APPEND _TEST_RUNNER_DEFS LIBCXX)
-endif()
-if(_TEST_RUNNER_DEFS)
-    add_user_dyn_elf(test_runner C SOURCES test_runner.c LINK_LIBS c DEFS ${_TEST_RUNNER_DEFS})
-else()
-    add_user_dyn_elf(test_runner C SOURCES test_runner.c LINK_LIBS c)
-endif()
+add_user_dyn_elf(test_runner C SOURCES test_runner.c LINK_LIBS c
+    DEFS TEST WLROOTS_DEPS LIBCXX)
 
 # EGL/GLES2 end-to-end smoke. Mesa is built and staged by build.sh after the
 # main CMake ninja, so this target deliberately stays out of ALL and is built

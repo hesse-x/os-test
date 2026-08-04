@@ -44,6 +44,7 @@
   25 // stub: -ENOSYS. musl pthread_getattr_np.c:19 uses it to probe the main
      // thread's stack size and falls back on failure. Must never return
      // -ENOMEM (musl would loop forever on the probe).
+#define SYS_MINCORE 27
 #define SYS_IOCTL 16
 #define SYS_PIPE 22
 #define SYS_PIPE2 293

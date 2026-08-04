@@ -38,6 +38,7 @@
 #include "kernel/bsd/signalfd.h"
 #include "kernel/bsd/socket.h"
 #include "kernel/bsd/timerfd.h"
+#include "kernel/bsd/tmpfs.h"
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/vfs.h"
 #include "kernel/driver/ahci.h"
@@ -888,6 +889,105 @@ static mmap_region *mmap_place_file_region(xtask *proc, uint64_t *pml4,
   return region;
 }
 
+static int64_t sys_mmap_tmpfs_shared(xtask *proc, uint64_t *pml4, uint64_t addr,
+                                     uint64_t size, uint32_t prot,
+                                     uint32_t flags, int fd, uint64_t offset,
+                                     uint64_t mmap_flags, uint64_t hint,
+                                     struct file *f) {
+  struct inode *ip = f->inode;
+  if (!ip || (offset & (PAGE_SIZE - 1)) || offset >= ip->size) {
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -EINVAL;
+  }
+  if ((prot & PROT_WRITE) && (f->flags & (O_WRONLY | O_RDWR)) == 0) {
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -EACCES;
+  }
+
+  struct shm *shm = tmpfs_get_shm(ip);
+  if (!shm) {
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -ENOMEM;
+  }
+  size_t backing_pages = shm->page_list ? (size_t)shm->num_pages : shm->npages;
+  size_t first_page = (size_t)(offset / PAGE_SIZE);
+  size_t map_pages = (size_t)(size / PAGE_SIZE);
+  if (first_page + map_pages > backing_pages) {
+    shm_put(shm);
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -EINVAL;
+  }
+
+  int64_t picked = vma_pick_addr(proc->mm, pml4, addr, size, flags, hint);
+  if (picked < 0) {
+    shm_put(shm);
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return picked;
+  }
+  uint64_t vaddr = (uint64_t)picked;
+  uint64_t pte_flags = PTE_PRESENT | PTE_USER;
+  if (prot & PROT_WRITE)
+    pte_flags |= PTE_RW;
+  if (!(prot & PROT_EXEC))
+    pte_flags |= PTE_NX;
+
+  size_t mapped = 0;
+  for (; mapped < map_pages; mapped++) {
+    size_t page = first_page + mapped;
+    uint64_t phys =
+        shm->page_list ? shm->page_list[page] : shm->phys + page * PAGE_SIZE;
+    if (!map_user_page_direct(pml4, vaddr + mapped * PAGE_SIZE, phys,
+                              pte_flags))
+      break;
+  }
+  if (mapped != map_pages) {
+    for (size_t i = 0; i < mapped; i++)
+      clear_user_pte(pml4, vaddr + i * PAGE_SIZE);
+    shm_put(shm);
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -ENOMEM;
+  }
+
+  mmap_region *region = (mmap_region *)kmalloc(sizeof(*region));
+  if (!region) {
+    for (size_t i = 0; i < map_pages; i++)
+      clear_user_pte(pml4, vaddr + i * PAGE_SIZE);
+    shm_put(shm);
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -ENOMEM;
+  }
+  __memset(region, 0, sizeof(*region));
+  region->vaddr = vaddr;
+  region->size = size;
+  region->shm_obj = shm;
+  region->prot = prot;
+  region->fd = fd;
+  region->offset = offset;
+  region->flags = flags;
+  if (vma_insert_sorted(proc->mm, region) != 0) {
+    for (size_t i = 0; i < map_pages; i++)
+      clear_user_pte(pml4, vaddr + i * PAGE_SIZE);
+    shm_put(shm);
+    kfree(region);
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return -ENOMEM;
+  }
+  if (vaddr == proc->mm->mmap_brk)
+    proc->mm->mmap_brk = vaddr + size;
+
+  file_put(f);
+  spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+  return (int64_t)vaddr;
+}
+
 // memfd (FD_SHM) MAP_PRIVATE: private COW mapping of a memfd. The region holds
 // a shm_get reference to the source shm; file_fault_handler copies pages out of
 // shm->phys / shm->page_list into private user pages on demand.
@@ -983,6 +1083,40 @@ static int64_t sys_mmap_file_backed(xtask *proc, uint64_t *pml4, uint64_t addr,
     file_put(f);
     spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
     return -EBADF;
+  }
+  if ((flags & MAP_SHARED) && f->f_op == &tmpfs_file_fops)
+    return sys_mmap_tmpfs_shared(proc, pml4, addr, size, prot, (uint32_t)flags,
+                                 fd, offset, mmap_flags, hint, f);
+
+  /* tmpfs data lives in inode->shm, not in the FAT32 page cache.  A private
+   * mapping must fault-copy from those same pages; wlroots relies on this when
+   * it writes a dma-buf format table through one fd and sends a read-only fd
+   * which Mesa maps MAP_PRIVATE. */
+  if ((flags & MAP_PRIVATE) && f->f_op == &tmpfs_file_fops) {
+    if ((offset & (PAGE_SIZE - 1)) || (offset >= ip->size && ip->size != 0)) {
+      file_put(f);
+      spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+      return -EINVAL;
+    }
+    struct shm *shm = tmpfs_get_shm(ip);
+    if (!shm) {
+      file_put(f);
+      spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+      return -ENOMEM;
+    }
+    int64_t err = 0;
+    mmap_region *region = mmap_place_file_region(
+        proc, pml4, addr, size, (uint32_t)flags, hint, prot, fd, offset, &err);
+    if (!region) {
+      shm_put(shm);
+      file_put(f);
+      spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+      return err;
+    }
+    region->shm_private_src = shm;
+    file_put(f);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    return (int64_t)region->vaddr;
   }
   inode_get(ip); // region reference — survives close(fd)
 
@@ -1498,6 +1632,61 @@ int64_t sys_munmap(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   }
   spin_unlock_irqrestore(&proc->mm->mmap_lock, flags);
   return (int64_t)r;
+}
+
+// ===================== BSD syscall: mincore =====================
+// Report one residency byte per page. A VMA without a leaf PTE is a valid,
+// non-resident demand mapping; pre-populated ELF pages have PTEs but no VMA.
+int64_t sys_mincore(int64_t addr_arg, int64_t len_arg, int64_t vec_arg,
+                    int64_t unused1, int64_t unused2, int64_t unused3) {
+  uint64_t addr = (uint64_t)addr_arg;
+  size_t len = (size_t)len_arg;
+  unsigned char __user *vec = (unsigned char __user *)(uintptr_t)vec_arg;
+
+  if (addr & (PAGE_SIZE - 1))
+    return (int64_t)-EINVAL;
+  if (len == 0)
+    return 0;
+  if (addr >= USER_VMA_UPPER_BOUND || len > USER_VMA_UPPER_BOUND - addr)
+    return (int64_t)-ENOMEM;
+
+  size_t npages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+  xtask *proc = current_task;
+  spinlock *lk = &proc->mm->mmap_lock;
+  uint64_t flags;
+
+  // Linux fails the whole query if any page in the interval is unmapped.
+  spin_lock_irqsave(lk, &flags);
+  for (size_t i = 0; i < npages; i++) {
+    uint64_t va = addr + i * PAGE_SIZE;
+    uint64_t *pte = lookup_pte(proc->mm->cr3, va);
+    if (!pte && !vma_find(proc->mm, va)) {
+      spin_unlock_irqrestore(lk, flags);
+      return (int64_t)-ENOMEM;
+    }
+  }
+  spin_unlock_irqrestore(lk, flags);
+
+  // Do not copy to userspace while holding mmap_lock: vec may itself be a
+  // not-yet-faulted file mapping whose page-fault path needs the same lock.
+  unsigned char residency[256];
+  for (size_t base = 0; base < npages; base += sizeof(residency)) {
+    size_t count = npages - base;
+    if (count > sizeof(residency))
+      count = sizeof(residency);
+
+    spin_lock_irqsave(lk, &flags);
+    for (size_t i = 0; i < count; i++) {
+      uint64_t va = addr + (base + i) * PAGE_SIZE;
+      uint64_t *pte = lookup_pte(proc->mm->cr3, va);
+      residency[i] = (pte && pte_present(*pte)) ? 1 : 0;
+    }
+    spin_unlock_irqrestore(lk, flags);
+
+    if (copy_to_user(vec + base, residency, count))
+      return (int64_t)-EFAULT;
+  }
+  return 0;
 }
 
 // ===================== BSD syscall: brk =====================
@@ -6575,6 +6764,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_brk(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MPROTECT:
     return sys_mprotect(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_MINCORE:
+    return sys_mincore(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SYSCONF:
     return sys_sysconf(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_GETRANDOM:

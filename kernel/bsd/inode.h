@@ -87,7 +87,7 @@ struct inode {
   const struct inode_operations
       *i_op; // behavior table (attached at iget exit); unmounted → dispatch
              // returns -ENOSYS/-EACCES
-  struct shm *shm;           /* INODE_DEV -> shared memory (NULL = no SHM) */
+  struct shm *shm; /* Device SHM or tmpfs regular-file shared backing. */
   struct mount_entry *mount; /* owning mount (set by sys_open lookup) */
   wait_queue_head *wq; /* ringbuf-backed: shared wq for epoll/poll waiters */
 

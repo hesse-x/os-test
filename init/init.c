@@ -94,29 +94,9 @@ static int wait_seatd_ready(int fd) {
                                                                          : -1;
 }
 
-#ifndef TINYWL
-static int start_terminal(void) {
-  char *const argv[] = {"/usr/bin/terminal", NULL};
-  // Minimal stable session environment (terminal/step1.md §3.2): terminal and
-  // its shell descendants must not run with an empty environ. Terminal-specific
-  // entries (TERM/COLORTERM) are set by the terminal itself.
-  char *const envp[] = {"LIBSEAT_BACKEND=seatd",
-                        "SEATD_SOCK=/run/seatd.sock",
-                        "PATH=/usr/local/bin:/usr/bin:/bin",
-                        "HOME=/root",
-                        "USER=root",
-                        "SHELL=/bin/sh",
-                        "LANG=C.UTF-8",
-                        "XDG_RUNTIME_DIR=/run",
-                        NULL};
-  return spawn_process(argv[0], argv, envp, -1, -1, (mode_t)-1);
-}
-#endif
-
-#if defined(TEST) || defined(TINYWL)
 static int start_tinywl(void) {
-  /* -s: tinywl spawns the wallpaper client once the Wayland socket is up. */
-  char *const argv[] = {"/usr/bin/tinywl", "-s", "/usr/bin/wallpaper", NULL};
+  char *const argv[] = {"/usr/bin/tinywl", "-s", "/usr/bin/desktop-shell",
+                        NULL};
   char *const envp[] = {"LIBSEAT_BACKEND=seatd",
                         "SEATD_SOCK=/run/seatd.sock",
                         "XDG_RUNTIME_DIR=/run",
@@ -125,10 +105,13 @@ static int start_tinywl(void) {
                         "GBM_BACKENDS_PATH=/lib",
                         "XKB_CONFIG_ROOT=/usr/share/X11/xkb",
                         "PATH=/usr/local/bin:/usr/bin:/bin",
+                        "HOME=/root",
+                        "USER=root",
+                        "SHELL=/bin/sh",
+                        "LANG=C.UTF-8",
                         NULL};
   return spawn_process(argv[0], argv, envp, -1, -1, (mode_t)-1);
 }
-#endif
 
 static void stop_process(int pid) {
   if (pid <= 0)
@@ -251,7 +234,6 @@ int main(int argc, char **argv, char **envp) {
       pause();
   }
   printf("init: seatd ready pid=%d\n", seatd_pid);
-#ifdef TINYWL
   // Wait for the mouse event1 node before spawning tinywl, but bound the wait:
   // xHCI mouse enumeration is non-fatal (mouse.md §5.1 — failure only
   // printk-warns, keyboard slot 0 stays up), so an unbounded wait here would
@@ -266,25 +248,14 @@ int main(int argc, char **argv, char **envp) {
            "continuing without pointer\n");
   }
   printf("init: spawning tinywl\n");
-  int direct_tinywl_pid = start_tinywl();
-  if (direct_tinywl_pid < 0) {
+  int tinywl_pid = start_tinywl();
+  if (tinywl_pid < 0) {
     printf("init: fatal: tinywl spawn failed\n");
     stop_process(seatd_pid);
     for (;;)
       pause();
   }
-  printf("init: tinywl spawned pid=%d\n", direct_tinywl_pid);
-#else
-  printf("init: spawning terminal\n");
-  int terminal_pid = start_terminal();
-  if (terminal_pid < 0) {
-    printf("init: fatal: terminal spawn failed\n");
-    stop_process(seatd_pid);
-    for (;;)
-      pause();
-  }
-  printf("init: terminal spawned pid=%d\n", terminal_pid);
-#endif
+  printf("init: tinywl spawned pid=%d\n", tinywl_pid);
 
 // 5. Adopt orphans + reap children + udevd/evdev crash monitoring (R1)
 #define RESTART_SEC 1
@@ -300,49 +271,16 @@ int main(int argc, char **argv, char **envp) {
     int crashed =
         WIFSIGNALED(status) || (WIFEXITED(status) && WEXITSTATUS(status) != 0);
 
-#ifdef TINYWL
-    if (ret == direct_tinywl_pid || ret == seatd_pid) {
+    if (ret == tinywl_pid || ret == seatd_pid) {
       printf("init: tinywl fault pid=%d status=%d; stopping seat domain\n",
              (int)ret, status);
-      if (ret == direct_tinywl_pid)
+      if (ret == tinywl_pid)
         stop_process(seatd_pid);
       else
-        stop_process(direct_tinywl_pid);
+        stop_process(tinywl_pid);
       for (;;)
         pause();
     }
-#else
-    if (ret == terminal_pid || ret == seatd_pid) {
-      if (ret == seatd_pid) {
-        printf("init: seatd fault status=%d; stopping terminal\n", status);
-        stop_process(terminal_pid);
-        for (;;)
-          pause();
-      }
-#ifdef TEST
-      printf("init: tests done, launching tinywl for TW-3 E2E\n");
-      int tinywl_pid = start_tinywl();
-      if (tinywl_pid < 0) {
-        perror("init: spawn tinywl failed");
-        for (;;)
-          pause();
-      }
-      int tinywl_status;
-      if (waitpid(tinywl_pid, &tinywl_status, 0) < 0)
-        perror("init: wait for tinywl failed");
-      else
-        printf("init: tinywl exited status=%d\n", tinywl_status);
-      for (;;)
-        pause();
-#else
-      printf("init: terminal fault pid=%d status=%d; stopping seat domain\n",
-             (int)ret, status);
-      stop_process(seatd_pid);
-      for (;;)
-        pause();
-#endif
-    }
-#endif
 
     if (ret == syslogd_pid) {
       if (!crashed)

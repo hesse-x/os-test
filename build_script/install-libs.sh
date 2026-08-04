@@ -16,6 +16,8 @@
 #   build/libexpat.so → $DEST/libexpat.so (Mesa idep_xmlconfig runtime dep, if present)
 #   build/libz.so     → $DEST/libz.so     (Mesa driconf/mesa_util runtime dep, if present)
 #   build/libffi.so   → $DEST/libffi.so   (gallium GL dispatch, if present)
+#   build/libwayland-client.so → $DEST/libwayland-client.so
+#   build/libwayland-server.so → $DEST/libwayland-server.so
 #   build/libc.so     → $DEST/ld-musl-x86_64.so.1  (fused libc.so is also the
 #                       dynamic interpreter; PT_INTERP = /lib/ld-musl-x86_64.so.1)
 #   build/musl/lib/{crt1,Scrt1,crti,crtn}.o → $DEST/*.o  (musl crt objects, so
@@ -56,6 +58,8 @@ mandatory=(
   "libclang_rt.so:libclang_rt.so"
   "libc.so:ld-musl-x86_64.so.1"
   "libdrm.a:libdrm.a"
+  "libwayland-client.so:libwayland-client.so"
+  "libwayland-server.so:libwayland-server.so"
 )
 
 # Files that are optional (built by later phases; absent is fine, not a failure).

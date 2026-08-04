@@ -20,12 +20,6 @@ while [[ $# -gt 0 ]]; do
         --test)
             CMAKE_EXTRA="$CMAKE_EXTRA -DTEST=1"
             BUILD_TEST=1
-            # The test image exercises every optional runtime integration.
-            FORCE_LIBCXX=1
-            FORCE_MESA=1
-            BUILD_WLROOTS_DEPS=1
-            BUILD_WLROOTS=1
-            MESA_DRIVER=virgl
             shift
             ;;
         --sanitizer)
@@ -44,40 +38,8 @@ while [[ $# -gt 0 ]]; do
             OS_COMPILER=clang
             shift
             ;;
-        --cxx)
-            # opt-in: build libc++ (LLVM runtimes) into build/sysroot after the
-            # default flow, so mkdisk can ship it into disk.img. Default flow
-            # does not build libc++ (zero cost). See refact_cmake.md.
-            FORCE_LIBCXX=1
-            shift
-            ;;
-        --mesa)
-            # Build Mesa only when explicitly requested; it depends on the
-            # libc++ sysroot supplied by --cxx.
-            FORCE_MESA=1
-            shift
-            ;;
-        --wlroots)
-            # wlroots needs the C++ runtime and Mesa virgl in its sysroot.
-            BUILD_WLROOTS_DEPS=1
-            BUILD_WLROOTS=1
-            FORCE_LIBCXX=1
-            FORCE_MESA=1
-            MESA_DRIVER=virgl
-            shift
-            ;;
-        --tinywl)
-            CMAKE_EXTRA="$CMAKE_EXTRA -DTINYWL=1"
-            BUILD_TINYWL=1
-            BUILD_WLROOTS_DEPS=1
-            BUILD_WLROOTS=1
-            FORCE_LIBCXX=1
-            FORCE_MESA=1
-            MESA_DRIVER=virgl
-            shift
-            ;;
         *)
-            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf] [--gcc] [--clang] [--cxx] [--mesa] [--wlroots] [--tinywl]"
+            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf] [--gcc] [--clang]"
             exit 1
             ;;
     esac
@@ -89,9 +51,6 @@ if ! echo "$CMAKE_EXTRA" | grep -q "SANITIZE="; then
 fi
 if [ "${BUILD_TEST:-0}" != "1" ]; then
     CMAKE_EXTRA="$CMAKE_EXTRA -DTEST=0"
-fi
-if [ "${BUILD_TINYWL:-0}" != "1" ]; then
-    CMAKE_EXTRA="$CMAKE_EXTRA -DTINYWL=0"
 fi
 
 # A normal build is incremental but self-healing: missing runtime products cause
@@ -106,7 +65,7 @@ for artifact in \
     build/sysroot/usr/include/c++/v1/vector; do
     [ -f "$artifact" ] || libcxx_complete=0
 done
-if [ "${FORCE_LIBCXX:-0}" = "1" ] || [ "$libcxx_complete" = "0" ]; then
+if [ "$libcxx_complete" = "0" ]; then
     BUILD_LIBCXX=1
 fi
 
@@ -122,23 +81,11 @@ for artifact in \
     build/libgallium-26.1.4.so build/dri_gbm.so; do
     [ -f "$artifact" ] || mesa_complete=0
 done
-if [ "${FORCE_MESA:-0}" = "1" ] || [ "$mesa_complete" = "0" ]; then
+if [ "$mesa_complete" = "0" ]; then
     BUILD_MESA=1
 fi
 
-# CMake needs the image entries even when the corresponding compiler step is
-# skipped because complete artifacts are reused from a previous build.
-CMAKE_EXTRA="$CMAKE_EXTRA -DLIBCXX=1 -DMESA=1"
-if [ "${BUILD_WLROOTS_DEPS:-0}" = "1" ]; then
-    CMAKE_EXTRA="$CMAKE_EXTRA -DWLROOTS_DEPS=1"
-else
-    CMAKE_EXTRA="$CMAKE_EXTRA -DWLROOTS_DEPS=0"
-fi
-if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
-    CMAKE_EXTRA="$CMAKE_EXTRA -DWLROOTS=1"
-else
-    CMAKE_EXTRA="$CMAKE_EXTRA -DWLROOTS=0"
-fi
+MESA_DRIVER=virgl
 
 # 1. CMake build (kernel + userspace)
 mkdir -p build && cd build
@@ -163,17 +110,16 @@ fi
 bash build_script/install-headers.sh
 bash build_script/install-libs.sh
 
-# 2b. (opt-in) Build libc++ into the sysroot. Must run AFTER install-headers/install-libs
+# 2b. Build libc++ into the sysroot. Must run AFTER install-headers/install-libs
 # (sysroot ready: crt + stub + headers + libc.so exports) and BEFORE mkdisk (which
-# probe-ships libc++ into the image). Default flow skips this entirely.
+# probe-ships libc++ into the image).
 if [ "${BUILD_LIBCXX:-0}" = "1" ]; then
-    echo "=== Building libc++ (opt-in, --cxx) ==="
+    echo "=== Building libc++ ==="
     bash build_script/build_libcxx.sh
 
-    # The libc++ smoke ELF (user/test/libcxx_smoke.cpp, -DLIBCXX=1) is EXCLUDE_FROM_ALL,
-    # so the main `ninja` above did not build it — and it could not have: its sysroot
-    # libc++ headers/.so only exist after build_libcxx.sh ran. Build it now (ninja target
-    # libcxx_smoke_elf), after libc++ is installed and before mkdisk's manifest check.
+fi
+
+if [ "${BUILD_TEST:-0}" = "1" ]; then
     echo "=== Building libc++ smoke ELF ==="
     ninja -C build libcxx_smoke_elf
 fi
@@ -301,18 +247,16 @@ PY
         esac
     }
 
-    if [ "${BUILD_WLROOTS_DEPS:-0}" = "1" ]; then
-        echo "=== Building wlroots prerequisites (pixman, xkbcommon, libdisplay-info) ==="
-        build_wlroots_dependency pixman third_party/pixman \
-            -Dgtk=disabled -Ddemos=disabled -Dtests=disabled -Dlibpng=disabled -Dopenmp=disabled
-        build_wlroots_dependency libxkbcommon third_party/libxkbcommon \
-            -Denable-tools=false -Denable-x11=false -Denable-xkbregistry=false \
-            -Denable-wayland=false -Denable-bash-completion=false
-        # libdisplay-info needs default visibility so its version script can
-        # export the public di_* ABI.
-        build_wlroots_dependency libdisplay-info third_party/libdisplay-info \
-            -Dc_args=-fvisibility=default
-    fi
+    echo "=== Building wlroots prerequisites (pixman, xkbcommon, libdisplay-info) ==="
+    build_wlroots_dependency pixman third_party/pixman \
+        -Dgtk=disabled -Ddemos=disabled -Dtests=disabled -Dlibpng=disabled -Dopenmp=disabled
+    build_wlroots_dependency libxkbcommon third_party/libxkbcommon \
+        -Denable-tools=false -Denable-x11=false -Denable-xkbregistry=false \
+        -Denable-wayland=false -Denable-bash-completion=false
+    # libdisplay-info needs default visibility so its version script can
+    # export the public di_* ABI.
+    build_wlroots_dependency libdisplay-info third_party/libdisplay-info \
+        -Dc_args=-fvisibility=default
     build_wlroots_dependency seatd third_party/seatd \
         -Dlibseat-logind=disabled -Dlibseat-builtin=disabled -Dlibseat-seatd=enabled \
         -Dserver=enabled -Dexamples=disabled -Dman-pages=disabled \
@@ -348,7 +292,7 @@ PY
 
     # Disk images are FAT32, so copy each runtime name as a real file instead
     # of preserving the symlinks Meson installs into the sysroot.
-    python3 - "$SYSROOT" "${BUILD_WLROOTS_DEPS:-0}" <<'PY'
+    python3 - "$SYSROOT" <<'PY'
 import os
 import shutil
 import sys
@@ -357,13 +301,10 @@ sysroot = sys.argv[1]
 libdir = os.path.join(sysroot, 'usr', 'lib')
 staged = {
     'libseat.so': ['libseat.so', 'libseat.so.1'],
+    'libpixman-1.so': ['libpixman-1.so', 'libpixman-1.so.0', 'libpixman-1.so.0.46.4'],
+    'libxkbcommon.so': ['libxkbcommon.so', 'libxkbcommon.so.0', 'libxkbcommon.so.0.13.2'],
+    'libdisplay-info.so': ['libdisplay-info.so', 'libdisplay-info.so.4', 'libdisplay-info.so.0.4.0'],
 }
-if sys.argv[2] == '1':
-    staged.update({
-        'libpixman-1.so': ['libpixman-1.so', 'libpixman-1.so.0', 'libpixman-1.so.0.46.4'],
-        'libxkbcommon.so': ['libxkbcommon.so', 'libxkbcommon.so.0', 'libxkbcommon.so.0.13.2'],
-        'libdisplay-info.so': ['libdisplay-info.so', 'libdisplay-info.so.4', 'libdisplay-info.so.0.4.0'],
-    })
 for names in staged.values():
     source = next((os.path.join(libdir, name) for name in reversed(names)
                    if os.path.exists(os.path.join(libdir, name))), None)
@@ -378,9 +319,6 @@ if not os.path.isfile(seatd):
 shutil.copy2(seatd, os.path.join('build', 'seatd'))
 PY
 
-    # terminal now links libseat, so defer it until the external library exists.
-    ninja -C build terminal_dyn_elf
-
     # These TEST-image ELFs link the just-staged external libraries, so build
     # them after sysroot preparation rather than in the initial CMake pass.
     if [ "${BUILD_TEST:-0}" = "1" ]; then
@@ -391,23 +329,20 @@ PY
             test_xkbcommon_smoke_dyn_elf
     fi
 
-# 3. Mesa cross-build (auto when products are missing; --mesa forces it).
+# 3. Mesa cross-build (incremental; rebuilt when products are missing).
 if [ "${BUILD_MESA:-0}" = "1" ]; then
 #    Softpipe first to validate the cross pipeline; switch to virgl by exporting
 #    MESA_DRIVER=virgl (one-line option change, identical codegen — see step2.md).
 #    Runs after the sysroot is populated (deps 2) and before mkdisk (so .so land in image).
-#    NOTE: the C++ GLSL compiler needs a C++ stdlib in the sysroot — build libc++ first
-#    (./build.sh --cxx) before the Mesa step can link the megadriver; see mesa_worklist.md §五.
-#    Guard: libc++ is opt-in (--cxx); the cross-file's cpp_args/cpp_link_args reference it,
-#    so without libc++.so in the sysroot meson/ninja fail with C++ stdlib symbol errors
-#    (or fall back to host libstdc++ → glibc dep). Fail early with a clear message instead.
+#    The C++ GLSL compiler consumes the libc++ sysroot built in the preceding step.
 if [[ ! -f build/sysroot/usr/lib/libc++.so ]]; then
-    echo "Mesa cross-build needs libc++ in the sysroot: run './build.sh --cxx' first (opt-in," >&2
-    echo "installs libc++.so/libc++abi/libunwind + c++/v1 headers into build/sysroot)." >&2
+    echo "Mesa cross-build needs the default libc++ sysroot." >&2
     exit 1
 fi
 MESADIR=build/mesa
 CROSS=build/mesa-cross.txt
+NATIVE=build/mesa-native.txt
+NATIVE_PCDIR=build/mesa-native-pkgconfig
 CC_BIN=clang; CXX_BIN=clang++
 if [[ "$OS_COMPILER" == "gcc" ]]; then
     CC_BIN=gcc; CXX_BIN=g++
@@ -451,6 +386,33 @@ sed -e "s#@CC@#$CC_BIN#g" -e "s#@CXX@#$CXX_BIN#g" -e "s#@PYTHON@#$PYTHON_BIN#g" 
     -e "s#@SYSROOT@#$SYSROOT#g" \
     build_script/third_party/mesa/meson-cross-x86_64.txt.in > "$CROSS"
 
+# wayland-scanner runs on the build machine, so it does not belong in the cross
+# file. Pin the scanner built from our Wayland submodule instead of accepting an
+# older host installation (Mesa requires it to match wayland-client's version).
+WAYLAND_SCANNER="$(cd build && pwd)/wayland-scanner"
+if [[ ! -x "$WAYLAND_SCANNER" ]]; then
+    echo "Mesa cross-build needs $WAYLAND_SCANNER." >&2
+    exit 1
+fi
+mkdir -p "$NATIVE_PCDIR"
+cat > "$NATIVE_PCDIR/wayland-scanner.pc" <<EOF
+prefix=$(cd build && pwd)
+bindir=\${prefix}
+wayland_scanner=\${bindir}/wayland-scanner
+
+Name: Wayland Scanner
+Description: Wayland protocol scanner built from the repository submodule
+Version: 1.25.91
+EOF
+NATIVE_PCDIR_ABS="$(cd "$NATIVE_PCDIR" && pwd)"
+cat > "$NATIVE" <<EOF
+[binaries]
+wayland-scanner = '$WAYLAND_SCANNER'
+
+[built-in options]
+pkg_config_path = ['$NATIVE_PCDIR_ABS']
+EOF
+
 # Emit libdrm/zlib/expat/ffi .pc into the sysroot so meson dependency() resolves.
 bash build_script/gen-pkgconfig.sh
 
@@ -466,17 +428,18 @@ MESA_SETUP=(
     "-Dgallium-drivers=$GALLIUM"
     -Dglx=disabled -Dopengl=false -Dgles1=disabled -Dgles2=enabled
     -Degl=enabled -Dgbm=enabled
-    -Dplatforms= -Dvulkan-drivers= -Dllvm=disabled
+    -Dplatforms=wayland -Dvulkan-drivers= -Dllvm=disabled
     -Dgallium-va=disabled -Dgallium-rusticl=false -Dvideo-codecs=
     -Dvalgrind=disabled -Dlibunwind=disabled -Dzstd=disabled
     -Dspirv-tools=disabled
     --cross-file "$CROSS"
+    --native-file "$NATIVE"
 )
 if [[ -d "$MESADIR" ]]; then
-    # Cross-file compiler flags affect Meson's configure probes, but a normal
-    # reconfigure retains failed probes. Only wipe when the cross-file changed.
+    # Machine-file changes affect Meson's configure probes, but a normal
+    # reconfigure retains failed probes. Wipe when either machine file changes.
     CROSS_STAMP="$MESADIR/.xos-cross-file.sha256"
-    CROSS_SUM="$(sha256sum "$CROSS" | awk '{print $1}')"
+    CROSS_SUM="$({ sha256sum "$CROSS" "$NATIVE"; printf '%s\n' "${MESA_SETUP[*]}"; } | sha256sum | awk '{print $1}')"
     if [[ ! -f "$CROSS_STAMP" || "$(<"$CROSS_STAMP")" != "$CROSS_SUM" ]]; then
         meson setup --wipe "${MESA_SETUP[@]}"
         printf '%s\n' "$CROSS_SUM" > "$CROSS_STAMP"
@@ -485,7 +448,7 @@ if [[ -d "$MESADIR" ]]; then
     fi
 else
     meson setup "${MESA_SETUP[@]}"
-    sha256sum "$CROSS" | awk '{print $1}' > "$MESADIR/.xos-cross-file.sha256"
+    { sha256sum "$CROSS" "$NATIVE"; printf '%s\n' "${MESA_SETUP[*]}"; } | sha256sum | awk '{print $1}' > "$MESADIR/.xos-cross-file.sha256"
 fi
 ninja -C "$MESADIR"
 
@@ -552,8 +515,7 @@ if missing:
 PY
 fi
 
-# Build wlroots only for the explicit wlroots profile.
-if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
+# Build the compositor stack after Mesa and the target sysroot are ready.
     echo "=== Building wlroots 0.20.2 ==="
     bash build_script/third_party/wlroots/prepare-sysroot.sh
     SYSROOT="$(cd build/sysroot && pwd)"
@@ -615,13 +577,10 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
     WLROOTS_LIB="$SYSROOT/usr/lib/libwlroots-0.20.so"
     install -m 755 "$WLROOTS_LIB" build/libwlroots-0.20.so
 
-    if [ "${BUILD_TINYWL:-0}" = "1" ]; then
-        # tinywl is built from user/compositor/tinywl.c by CMake (target
-        # tinywl_dyn_elf, EXCLUDE_FROM_ALL): it links the just-staged
-        # build/libwlroots-0.20.so, so it can only be built after
-        # `meson install` above.
-        echo "=== Building tinywl (user/compositor) ==="
-        ninja -C build tinywl_dyn_elf
+    # These targets link external products staged by Mesa/wlroots and therefore
+    # are built after the corresponding Meson installs.
+    echo "=== Building Wayland desktop executables ==="
+    ninja -C build tinywl_dyn_elf terminal_dyn_elf
 
         # --- ELF static audit: build/tinywl.elf + build/libwlroots-0.20.so ---
         # Judge 1: interpreter (executable ELF must be musl; .so has no PT_INTERP, skip)
@@ -658,9 +617,7 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
             echo "ERROR: DT_NEEDED not resolvable in sysroot/image:$audit_missing" >&2
             exit 1
         fi
-        echo "wlroots ELF audit: PASS (tinywl.elf + libwlroots-0.20.so)"
-    fi
-fi
+    echo "wlroots ELF audit: PASS (tinywl.elf + libwlroots-0.20.so)"
 
 # The EGL test links against staged Mesa .so files, so it must run after the
 # optional Mesa stage above rather than in the first CMake ninja invocation.

@@ -225,6 +225,38 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel,
   }
 }
 
+static void set_toplevel_maximized(struct tinywl_toplevel *toplevel,
+                                   struct wlr_output *output, bool maximized) {
+  if (output == NULL || toplevel->maximized == maximized)
+    return;
+
+  struct wlr_box box;
+  wlr_output_layout_get_box(toplevel->server->output_layout, output, &box);
+  if (maximized) {
+    int x, y;
+    wlr_scene_node_coords(&toplevel->scene_tree->node, &x, &y);
+    toplevel->restore_x = x;
+    toplevel->restore_y = y;
+    toplevel->restore_width =
+        toplevel->content_width > 0 ? toplevel->content_width : 720;
+    toplevel->restore_height =
+        toplevel->content_height > 0 ? toplevel->content_height : 460;
+    wlr_scene_node_set_position(&toplevel->scene_tree->node,
+                                box.x + SSD_BORDER_WIDTH,
+                                box.y + SSD_TITLE_HEIGHT + SSD_BORDER_WIDTH);
+    wlr_xdg_toplevel_set_size(
+        toplevel->xdg_toplevel, box.width - 2 * SSD_BORDER_WIDTH,
+        box.height - SSD_TITLE_HEIGHT - 2 * SSD_BORDER_WIDTH);
+  } else {
+    wlr_scene_node_set_position(&toplevel->scene_tree->node,
+                                toplevel->restore_x, toplevel->restore_y);
+    wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, toplevel->restore_width,
+                              toplevel->restore_height);
+  }
+  toplevel->maximized = maximized;
+  wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, maximized);
+}
+
 static void keyboard_handle_modifiers(struct wl_listener *listener,
                                       void *data) {
   /* This event is raised when a modifier key, such as shift or alt, is
@@ -628,31 +660,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
     if (rx >= 52 && rx < 52 + SSD_BUTTON_SIZE) {
       struct wlr_output *output = wlr_output_layout_output_at(
           server->output_layout, server->cursor->x, server->cursor->y);
-      if (output != NULL) {
-        struct wlr_box box;
-        wlr_output_layout_get_box(server->output_layout, output, &box);
-        if (!toplevel->maximized) {
-          toplevel->restore_x = tx;
-          toplevel->restore_y = ty;
-          toplevel->restore_width = toplevel->content_width;
-          toplevel->restore_height = toplevel->content_height;
-          wlr_scene_node_set_position(
-              &toplevel->scene_tree->node, box.x + SSD_BORDER_WIDTH,
-              box.y + SSD_TITLE_HEIGHT + SSD_BORDER_WIDTH);
-          wlr_xdg_toplevel_set_size(
-              toplevel->xdg_toplevel, box.width - 2 * SSD_BORDER_WIDTH,
-              box.height - SSD_TITLE_HEIGHT - 2 * SSD_BORDER_WIDTH);
-        } else {
-          wlr_scene_node_set_position(&toplevel->scene_tree->node,
-                                      toplevel->restore_x, toplevel->restore_y);
-          wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
-                                    toplevel->restore_width,
-                                    toplevel->restore_height);
-        }
-        toplevel->maximized = !toplevel->maximized;
-        wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel,
-                                       toplevel->maximized);
-      }
+      set_toplevel_maximized(toplevel, output, !toplevel->maximized);
       return;
     }
     begin_interactive(toplevel, TINYWL_CURSOR_MOVE, 0);
@@ -874,7 +882,19 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
   wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
   if (toplevel->scene_tree->node.x == 0 && toplevel->scene_tree->node.y == 0) {
-    wlr_scene_node_set_position(&toplevel->scene_tree->node, 96, 112);
+    struct wlr_output *output =
+        wlr_output_layout_get_center_output(toplevel->server->output_layout);
+    if (output != NULL) {
+      struct wlr_box box;
+      struct wlr_box geo = toplevel->xdg_toplevel->base->geometry;
+      wlr_output_layout_get_box(toplevel->server->output_layout, output, &box);
+      int x = box.x + (box.width - geo.width) / 2;
+      int y =
+          box.y +
+          (box.height - geo.height - SSD_TITLE_HEIGHT - SSD_BORDER_WIDTH) / 2 +
+          SSD_TITLE_HEIGHT;
+      wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
+    }
   }
 
   focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
@@ -904,7 +924,13 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
      * reply with a configure so the client can map the surface. tinywl
      * configures the xdg_toplevel with 0,0 size to let the client pick the
      * dimensions itself. */
-    wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
+    if (toplevel->xdg_toplevel->requested.maximized) {
+      struct wlr_output *output =
+          wlr_output_layout_get_center_output(toplevel->server->output_layout);
+      set_toplevel_maximized(toplevel, output, true);
+    } else {
+      wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
+    }
   }
   update_ssd(toplevel);
 }
@@ -994,18 +1020,14 @@ static void xdg_toplevel_request_resize(struct wl_listener *listener,
 
 static void xdg_toplevel_request_maximize(struct wl_listener *listener,
                                           void *data) {
-  /* This event is raised when a client would like to maximize itself,
-   * typically because the user clicked on the maximize button on client-side
-   * decorations. tinywl doesn't support maximization, but to conform to
-   * xdg-shell protocol we still must send a configure.
-   * wlr_xdg_surface_schedule_configure() is used to send an empty reply.
-   * However, if the request was sent before an initial commit, we don't do
-   * anything and let the client finish the initial surface setup. */
   struct tinywl_toplevel *toplevel =
       wl_container_of(listener, toplevel, request_maximize);
   (void)data;
   if (toplevel->xdg_toplevel->base->initialized) {
-    wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+    struct wlr_output *output =
+        wlr_output_layout_get_center_output(toplevel->server->output_layout);
+    set_toplevel_maximized(toplevel, output,
+                           toplevel->xdg_toplevel->requested.maximized);
   }
 }
 
@@ -1085,8 +1107,14 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 static void server_new_decoration(struct wl_listener *listener, void *data) {
   struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
   (void)listener;
-  wlr_xdg_toplevel_decoration_v1_set_mode(
-      decoration, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+  if (decoration->toplevel->base->initialized) {
+    wlr_xdg_toplevel_decoration_v1_set_mode(
+        decoration, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+  } else {
+    /* The initial surface commit will schedule the first configure. */
+    decoration->scheduled_mode =
+        WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
+  }
 }
 
 static void xdg_popup_commit(struct wl_listener *listener, void *data) {

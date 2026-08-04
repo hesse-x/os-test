@@ -70,6 +70,7 @@ uint64_t shm_alloc_pages(uint64_t npages);
 struct shm *shm_create_internal(uint64_t npages);
 struct shm *shm_get(struct shm *s);
 void shm_put(struct shm *s);
+int shm_grow(struct shm *s, size_t npages);
 
 // === inode refcount (BSD layer impl; declared here so Xcore VMA helpers can
 // drop file-backed mmap region refs uniformly with shm_put above) ===

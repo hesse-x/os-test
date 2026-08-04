@@ -582,12 +582,13 @@ global:
      * alias), so every mmap64 call site rewrites to mmap at preprocess time
      * and no object exports mmap64 — listing it here made the export check
      * fail under v1.2.6 (it was tolerated earlier only because a prior build
-     * path defined it). msync/madvise/mlock/mlockall/munlock/munlockall/
-     * mincore have no kernel handler (the syscall dispatch returns -ENOSYS)
-     * but the symbols are exported so callers link; they return -1/ENOSYS at
+     * path defined it). msync/madvise/mlock/mlockall/munlock/munlockall have
+     * no kernel handler (the syscall dispatch returns -ENOSYS) but the
+     * symbols are exported so callers link; they return -1/ENOSYS at
      * runtime (POSIX-symbol-present / kernel-feature-absent middle state,
-     * doc/design/todo.md). remap_file_pages is NOT built (musl mremap.c does
-     * not define it). */
+     * doc/design/todo.md). mincore is implemented by the kernel for Mesa's
+     * native-display pointer validation. remap_file_pages is NOT built (musl
+     * mremap.c does not define it). */
     memfd_create; mmap; munmap; mprotect; mremap; msync;
     madvise; posix_madvise; mincore;
     mlock; munlock; mlockall; munlockall;

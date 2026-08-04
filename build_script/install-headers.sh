@@ -89,11 +89,34 @@ cp "$SRC/third_party/libexpat/expat/lib/expat_external.h" \
 cp "$SRC/third_party/zlib/zlib.h" "$DEST/zlib.h"
 cp "$SRC/third_party/zlib/zconf.h" "$DEST/zconf.h"
 
+# Wayland's source headers and scanner-generated public protocol headers form
+# one installed API. Mesa consumes these exclusively through the target sysroot.
+wayland_src="$SRC/third_party/wayland/src"
+wayland_egl="$SRC/third_party/wayland/egl"
+wayland_cursor="$SRC/third_party/wayland/cursor"
+for header in \
+    wayland-util.h wayland-client.h wayland-client-core.h \
+    wayland-server.h wayland-server-core.h; do
+    cp "$wayland_src/$header" "$DEST/$header"
+done
+for header in wayland-egl.h wayland-egl-core.h wayland-egl-backend.h; do
+    cp "$wayland_egl/$header" "$DEST/$header"
+done
+cp "$wayland_cursor/wayland-cursor.h" "$DEST/wayland-cursor.h"
+
 build_dir="${BUILD:-$SRC/build}"
 for header in ffi.h ffitarget.h fficonfig.h; do
     if [ -f "$build_dir/$header" ]; then
         cp "$build_dir/$header" "$DEST/$header"
     fi
+done
+for header in \
+    wayland-version.h wayland-client-protocol.h wayland-server-protocol.h; do
+    if [ ! -f "$build_dir/$header" ]; then
+        echo "FAIL: generated Wayland header $build_dir/$header not found." >&2
+        exit 1
+    fi
+    cp "$build_dir/$header" "$DEST/$header"
 done
 
 echo "Checking installed standard and XOS header closures"

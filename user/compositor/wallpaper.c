@@ -5,7 +5,9 @@
  */
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <linux/input-event-codes.h>
 #include <png.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -18,6 +20,8 @@
 #include "wlr-layer-shell-client-protocol.h"
 
 #define MAX_OUTPUTS 8
+#define DOCK_WIDTH 112
+#define DOCK_HEIGHT 88
 
 struct image {
   uint32_t *pixels;
@@ -28,6 +32,8 @@ struct shell_output {
   struct wl_output *output;
   struct wl_surface *background;
   struct zwlr_layer_surface_v1 *background_layer;
+  struct wl_surface *dock;
+  struct zwlr_layer_surface_v1 *dock_layer;
   int background_width, background_height;
 };
 
@@ -36,6 +42,9 @@ struct app {
   struct wl_compositor *compositor;
   struct wl_shm *shm;
   struct zwlr_layer_shell_v1 *layer_shell;
+  struct wl_seat *seat;
+  struct wl_pointer *pointer;
+  struct wl_surface *pointer_surface;
   struct shell_output outputs[MAX_OUTPUTS];
   int output_count;
   struct image wallpaper;
@@ -152,6 +161,43 @@ static struct shm_buffer *create_buffer(int width, int height) {
   return buffer;
 }
 
+static uint32_t premul(uint32_t rgb, uint8_t alpha) {
+  uint32_t r = ((rgb >> 16) & 0xff) * alpha / 255;
+  uint32_t g = ((rgb >> 8) & 0xff) * alpha / 255;
+  uint32_t b = (rgb & 0xff) * alpha / 255;
+  return ((uint32_t)alpha << 24) | (r << 16) | (g << 8) | b;
+}
+
+static void rounded_rect(uint32_t *pixels, int stride, int canvas_height, int x,
+                         int y, int width, int height, int radius,
+                         uint32_t color) {
+  for (int py = y; py < y + height; py++) {
+    if (py < 0 || py >= canvas_height)
+      continue;
+    for (int px = x; px < x + width; px++) {
+      if (px < 0 || px >= stride)
+        continue;
+      int dx = px < x + radius
+                   ? x + radius - px - 1
+                   : (px >= x + width - radius ? px - (x + width - radius) : 0);
+      int dy =
+          py < y + radius
+              ? y + radius - py - 1
+              : (py >= y + height - radius ? py - (y + height - radius) : 0);
+      if (dx * dx + dy * dy <= radius * radius)
+        pixels[py * stride + px] = color;
+    }
+  }
+}
+
+static void fill_rect(uint32_t *pixels, int stride, int canvas_height, int x,
+                      int y, int width, int height, uint32_t color) {
+  for (int py = y; py < y + height && py < canvas_height; py++)
+    for (int px = x; px < x + width && px < stride; px++)
+      if (px >= 0 && py >= 0)
+        pixels[py * stride + px] = color;
+}
+
 static void draw_wallpaper(struct shell_output *output, int width, int height) {
   struct shm_buffer *buffer = create_buffer(width, height);
   if (buffer == NULL)
@@ -186,6 +232,29 @@ static void draw_wallpaper(struct shell_output *output, int width, int height) {
   wl_surface_commit(output->background);
 }
 
+static void draw_dock(struct shell_output *output) {
+  struct shm_buffer *buffer = create_buffer(DOCK_WIDTH, DOCK_HEIGHT);
+  if (buffer == NULL)
+    return;
+  uint32_t *pixels = buffer->data;
+  memset(pixels, 0, buffer->size);
+  rounded_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 1, 1, DOCK_WIDTH - 2,
+               DOCK_HEIGHT - 8, 20, premul(0xf4f5f7, 184));
+  rounded_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 24, 9, 64, 64, 15, 0xffd9dce2);
+  rounded_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 28, 13, 56, 56, 12, 0xff17191f);
+  for (int i = 0; i < 12; i++) {
+    fill_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 42 + i, 28 + i / 2, 3, 3,
+              0xfff4f6f8);
+    fill_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 42 + i, 40 - i / 2, 3, 3,
+              0xfff4f6f8);
+  }
+  fill_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 59, 45, 15, 3, 0xfff4f6f8);
+  rounded_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 52, 78, 8, 4, 2, 0xff2a2b30);
+  wl_surface_attach(output->dock, buffer->buffer, 0, 0);
+  wl_surface_damage_buffer(output->dock, 0, 0, DOCK_WIDTH, DOCK_HEIGHT);
+  wl_surface_commit(output->dock);
+}
+
 static void background_configure(void *data,
                                  struct zwlr_layer_surface_v1 *layer,
                                  uint32_t serial, uint32_t width,
@@ -200,6 +269,14 @@ static void background_configure(void *data,
   }
 }
 
+static void dock_configure(void *data, struct zwlr_layer_surface_v1 *layer,
+                           uint32_t serial, uint32_t width, uint32_t height) {
+  (void)width;
+  (void)height;
+  zwlr_layer_surface_v1_ack_configure(layer, serial);
+  draw_dock(data);
+}
+
 static void layer_closed(void *data, struct zwlr_layer_surface_v1 *layer) {
   (void)data;
   (void)layer;
@@ -208,6 +285,11 @@ static void layer_closed(void *data, struct zwlr_layer_surface_v1 *layer) {
 
 static const struct zwlr_layer_surface_v1_listener background_listener = {
     .configure = background_configure,
+    .closed = layer_closed,
+};
+
+static const struct zwlr_layer_surface_v1_listener dock_listener = {
+    .configure = dock_configure,
     .closed = layer_closed,
 };
 
@@ -228,6 +310,20 @@ static void create_output_surfaces(struct shell_output *output) {
   zwlr_layer_surface_v1_add_listener(output->background_layer,
                                      &background_listener, output);
   wl_surface_commit(output->background);
+
+  output->dock = wl_compositor_create_surface(app.compositor);
+  wl_surface_set_user_data(output->dock, output);
+  output->dock_layer = zwlr_layer_shell_v1_get_layer_surface(
+      app.layer_shell, output->dock, output->output,
+      ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "desktop-dock");
+  zwlr_layer_surface_v1_set_size(output->dock_layer, DOCK_WIDTH, DOCK_HEIGHT);
+  zwlr_layer_surface_v1_set_anchor(output->dock_layer,
+                                   ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM);
+  zwlr_layer_surface_v1_set_margin(output->dock_layer, 0, 0, 14, 0);
+  zwlr_layer_surface_v1_set_exclusive_zone(output->dock_layer, 0);
+  zwlr_layer_surface_v1_add_listener(output->dock_layer, &dock_listener,
+                                     output);
+  wl_surface_commit(output->dock);
 }
 
 static void output_geometry(void *data, struct wl_output *output, int32_t x,
@@ -285,6 +381,97 @@ static const struct wl_output_listener output_listener = {
     .description = output_description,
 };
 
+static void pointer_enter(void *data, struct wl_pointer *pointer,
+                          uint32_t serial, struct wl_surface *surface,
+                          wl_fixed_t x, wl_fixed_t y) {
+  (void)data;
+  (void)pointer;
+  (void)serial;
+  (void)x;
+  (void)y;
+  app.pointer_surface = surface;
+}
+
+static void pointer_leave(void *data, struct wl_pointer *pointer,
+                          uint32_t serial, struct wl_surface *surface) {
+  (void)data;
+  (void)pointer;
+  (void)serial;
+  (void)surface;
+  app.pointer_surface = NULL;
+}
+
+static void pointer_motion(void *data, struct wl_pointer *pointer,
+                           uint32_t time, wl_fixed_t x, wl_fixed_t y) {
+  (void)data;
+  (void)pointer;
+  (void)time;
+  (void)x;
+  (void)y;
+}
+
+static void spawn_terminal(void) {
+  pid_t pid = fork();
+  if (pid == 0) {
+    execl("/usr/bin/terminal", "/usr/bin/terminal", (char *)NULL);
+    _exit(127);
+  }
+}
+
+static void pointer_button(void *data, struct wl_pointer *pointer,
+                           uint32_t serial, uint32_t time, uint32_t button,
+                           uint32_t state) {
+  (void)data;
+  (void)pointer;
+  (void)serial;
+  (void)time;
+  if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_PRESSED)
+    return;
+  for (int i = 0; i < app.output_count; i++) {
+    if (app.pointer_surface != app.outputs[i].dock)
+      continue;
+    spawn_terminal();
+    break;
+  }
+}
+
+static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time,
+                         uint32_t axis, wl_fixed_t value) {
+  (void)data;
+  (void)pointer;
+  (void)time;
+  (void)axis;
+  (void)value;
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+    .enter = pointer_enter,
+    .leave = pointer_leave,
+    .motion = pointer_motion,
+    .button = pointer_button,
+    .axis = pointer_axis,
+};
+
+static void seat_capabilities(void *data, struct wl_seat *seat,
+                              uint32_t capabilities) {
+  (void)data;
+  if ((capabilities & WL_SEAT_CAPABILITY_POINTER) && app.pointer == NULL) {
+    app.pointer = wl_seat_get_pointer(seat);
+    wl_pointer_add_listener(app.pointer, &pointer_listener, NULL);
+  }
+}
+
+static void seat_name(void *data, struct wl_seat *seat, const char *name) {
+  (void)data;
+  (void)seat;
+  (void)name;
+}
+
+static const struct wl_seat_listener seat_listener = {
+    .capabilities = seat_capabilities,
+    .name = seat_name,
+};
+
 static void registry_global(void *data, struct wl_registry *registry,
                             uint32_t name, const char *interface,
                             uint32_t version) {
@@ -298,6 +485,9 @@ static void registry_global(void *data, struct wl_registry *registry,
     app.layer_shell =
         wl_registry_bind(registry, name, &zwlr_layer_shell_v1_interface,
                          version < 4 ? version : 4);
+  } else if (strcmp(interface, wl_seat_interface.name) == 0) {
+    app.seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
+    wl_seat_add_listener(app.seat, &seat_listener, NULL);
   } else if (strcmp(interface, wl_output_interface.name) == 0 &&
              app.output_count < MAX_OUTPUTS) {
     struct shell_output *output = &app.outputs[app.output_count++];
@@ -325,7 +515,9 @@ int main(int argc, char **argv) {
   if (wallpaper == NULL)
     wallpaper = "/usr/share/wallpaper.png";
   if (!load_png(wallpaper, &app.wallpaper))
-    fprintf(stderr, "wallpaper: cannot load %s, using fallback\n", wallpaper);
+    fprintf(stderr, "desktop-shell: cannot load %s, using fallback\n",
+            wallpaper);
+  signal(SIGCHLD, SIG_IGN);
   app.display = wl_display_connect(NULL);
   if (app.display == NULL)
     return 1;
@@ -333,11 +525,12 @@ int main(int argc, char **argv) {
   wl_registry_add_listener(registry, &registry_listener, NULL);
   wl_display_roundtrip(app.display);
   if (app.compositor == NULL || app.shm == NULL || app.layer_shell == NULL) {
-    fprintf(stderr, "wallpaper: compositor lacks wl_shm or layer-shell\n");
+    fprintf(stderr, "desktop-shell: compositor lacks wl_shm or layer-shell\n");
     return 1;
   }
   for (int i = 0; i < app.output_count; i++)
     create_output_surfaces(&app.outputs[i]);
+  spawn_terminal();
   wl_display_flush(app.display);
   while (app.running && wl_display_dispatch(app.display) >= 0) {
   }

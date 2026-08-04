@@ -226,12 +226,8 @@ add_subdirectory(kernel)
 add_subdirectory(user)
 add_subdirectory(init)
 
-# Wayland compositor (tinywl + wallpaper client), gated by --tinywl. tinywl
-# links the Meson-built libwlroots, so the directory only exists when the
-# wlroots profile is on.
-if(TINYWL)
-    add_subdirectory(user/compositor)
-endif()
+# The Wayland desktop is the only display path and is part of every image.
+add_subdirectory(user/compositor)
 
 # Test targets (only when --test is enabled)
 if(TEST)
@@ -315,44 +311,23 @@ add_custom_target(copy_boot ALL
 # EFI bootloader lands at EFI/BOOT/BOOTX64.EFI in the ESP (partition 1).
 os_image_path(copy_boot BOOTX64.EFI EFI/BOOT/BOOTX64.EFI PARTITION 1)
 
-if(MESA)
-    # Mesa is built outside CMake by build.sh --mesa. Register its staged files
-    # only for that opt-in, otherwise mkdisk must not require them. FAT32 has
-    # no symlinks, so the runtime SONAME aliases must be copied as real files.
-    os_image_path(mesa_egl          libEGL.so              lib/libEGL.so              PARTITION 2)
-    os_image_path(mesa_egl_soname   libEGL.so.1            lib/libEGL.so.1            PARTITION 2)
-    os_image_path(mesa_gles2        libGLESv2.so           lib/libGLESv2.so           PARTITION 2)
-    os_image_path(mesa_gles2_soname libGLESv2.so.2         lib/libGLESv2.so.2         PARTITION 2)
-    os_image_path(mesa_gallium      libgallium-26.1.4.so   lib/libgallium-26.1.4.so   PARTITION 2)
-    os_image_path(mesa_gbm          libgbm.so              lib/libgbm.so              PARTITION 2)
-    os_image_path(mesa_gbm_soname   libgbm.so.1            lib/libgbm.so.1            PARTITION 2)
-    os_image_path(mesa_dri_gbm      dri_gbm.so             lib/dri_gbm.so             PARTITION 2)
-endif()
+os_image_path(mesa_egl          libEGL.so              lib/libEGL.so              PARTITION 2)
+os_image_path(mesa_egl_soname   libEGL.so.1            lib/libEGL.so.1            PARTITION 2)
+os_image_path(mesa_gles2        libGLESv2.so           lib/libGLESv2.so           PARTITION 2)
+os_image_path(mesa_gles2_soname libGLESv2.so.2         lib/libGLESv2.so.2         PARTITION 2)
+os_image_path(mesa_gallium      libgallium-26.1.4.so   lib/libgallium-26.1.4.so   PARTITION 2)
+os_image_path(mesa_gbm          libgbm.so              lib/libgbm.so              PARTITION 2)
+os_image_path(mesa_gbm_soname   libgbm.so.1            lib/libgbm.so.1            PARTITION 2)
+os_image_path(mesa_dri_gbm      dri_gbm.so             lib/dri_gbm.so             PARTITION 2)
 
-if(TEST)
-    # TEST images always exercise and ship these dependency libraries.
-    os_image_path(pixman_lib          libpixman-1.so          lib/libpixman-1.so          PARTITION 2)
-    os_image_path(pixman_soname       libpixman-1.so.0        lib/libpixman-1.so.0        PARTITION 2)
-    os_image_path(xkbcommon_lib       libxkbcommon.so         lib/libxkbcommon.so         PARTITION 2)
-    os_image_path(xkbcommon_soname    libxkbcommon.so.0       lib/libxkbcommon.so.0       PARTITION 2)
-    os_image_path(display_info_lib    libdisplay-info.so      lib/libdisplay-info.so      PARTITION 2)
-    os_image_path(display_info_soname libdisplay-info.so.4    lib/libdisplay-info.so.4    PARTITION 2)
-elseif(WLROOTS_DEPS)
-    # build.sh --wlroots stages these Meson products as real files because the
-    # root filesystem is FAT32 and cannot represent the usual SONAME symlinks.
-    os_image_path(pixman_lib          libpixman-1.so          lib/libpixman-1.so          PARTITION 2)
-    os_image_path(pixman_soname       libpixman-1.so.0        lib/libpixman-1.so.0        PARTITION 2)
-    os_image_path(xkbcommon_lib       libxkbcommon.so         lib/libxkbcommon.so         PARTITION 2)
-    os_image_path(xkbcommon_soname    libxkbcommon.so.0       lib/libxkbcommon.so.0       PARTITION 2)
-    os_image_path(display_info_lib    libdisplay-info.so      lib/libdisplay-info.so      PARTITION 2)
-    os_image_path(display_info_soname libdisplay-info.so.4    lib/libdisplay-info.so.4    PARTITION 2)
-endif()
+os_image_path(pixman_lib          libpixman-1.so          lib/libpixman-1.so          PARTITION 2)
+os_image_path(pixman_soname       libpixman-1.so.0        lib/libpixman-1.so.0        PARTITION 2)
+os_image_path(xkbcommon_lib       libxkbcommon.so         lib/libxkbcommon.so         PARTITION 2)
+os_image_path(xkbcommon_soname    libxkbcommon.so.0       lib/libxkbcommon.so.0       PARTITION 2)
+os_image_path(display_info_lib    libdisplay-info.so      lib/libdisplay-info.so      PARTITION 2)
+os_image_path(display_info_soname libdisplay-info.so.4    lib/libdisplay-info.so.4    PARTITION 2)
 
-if(WLROOTS)
-    os_image_path(wlroots_lib libwlroots-0.20.so lib/libwlroots-0.20.so PARTITION 2)
-    # usr/bin/tinywl is registered by user/compositor (IMAGE_PATH), built from
-    # user/compositor/tinywl.c instead of the upstream wlroots example.
-endif()
+os_image_path(wlroots_lib libwlroots-0.20.so lib/libwlroots-0.20.so PARTITION 2)
 
 # seatd/libseat are part of the default terminal session path.
 os_image_path(libseat_lib         libseat.so              lib/libseat.so              PARTITION 2)

@@ -25,11 +25,14 @@
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/mem/kasan.h"
+#include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 
 #include <kernel/bsd/stat_abi.h>
 #include <xos/dirent.h>
 #include <xos/errno.h>
+#include <xos/page.h>
 
 struct xtask;
 
@@ -162,50 +165,132 @@ static int tmpfs_getattr(struct inode *ip, struct kstat *ks) {
   return 0;
 }
 
+static void *tmpfs_page_data(struct inode *ip, size_t page_index) {
+  struct shm *shm = ip->shm;
+  uint64_t phys = shm->page_list ? shm->page_list[page_index]
+                                 : shm->phys + page_index * PAGE_SIZE;
+  return (__force void *)phys_to_virt((__force phys_addr_t)phys);
+}
+
+static int tmpfs_grow_locked(struct inode *ip, struct tmpfs_inode_info *ti,
+                             size_t size) {
+  if (size <= ti->cap)
+    return 0;
+
+  size_t delta = size - ti->cap;
+  spin_lock(&tmpfs_total_lock);
+  if (tmpfs_total_used + delta > TMPFS_TOTAL_CAP) {
+    spin_unlock(&tmpfs_total_lock);
+    return -ENOSPC;
+  }
+  tmpfs_total_used += delta;
+  spin_unlock(&tmpfs_total_lock);
+
+  size_t npages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+  int rc = 0;
+  if (!ip->shm) {
+    ip->shm = shm_create_internal(npages);
+    if (!ip->shm)
+      rc = -ENOMEM;
+  } else if (shm_grow(ip->shm, npages) != 0) {
+    rc = -ENOMEM;
+  }
+  if (rc != 0) {
+    spin_lock(&tmpfs_total_lock);
+    tmpfs_total_used -= delta;
+    spin_unlock(&tmpfs_total_lock);
+    return rc;
+  }
+
+  ti->cap = size;
+  return 0;
+}
+
+static void tmpfs_zero_locked(struct inode *ip, size_t offset, size_t count) {
+  while (count > 0) {
+    size_t page_off = offset & (PAGE_SIZE - 1);
+    size_t n = PAGE_SIZE - page_off;
+    if (n > count)
+      n = count;
+    __memset((char *)tmpfs_page_data(ip, offset / PAGE_SIZE) + page_off, 0, n);
+    offset += n;
+    count -= n;
+  }
+}
+
+static int tmpfs_copy_out_locked(struct inode *ip, uint64_t offset, void *buf,
+                                 size_t count, bool user) {
+  size_t done = 0;
+  while (done < count) {
+    size_t page_off = (size_t)offset & (PAGE_SIZE - 1);
+    size_t n = PAGE_SIZE - page_off;
+    if (n > count - done)
+      n = count - done;
+    void *src =
+        (char *)tmpfs_page_data(ip, (size_t)offset / PAGE_SIZE) + page_off;
+    if (user) {
+      if (copy_to_user((char *)buf + done, src, n) != 0)
+        return -EFAULT;
+    } else {
+      __memcpy((char *)buf + done, src, n);
+    }
+    offset += n;
+    done += n;
+  }
+  return 0;
+}
+
+static int tmpfs_copy_in_locked(struct inode *ip, size_t offset,
+                                const void *buf, size_t count) {
+  size_t done = 0;
+  while (done < count) {
+    size_t page_off = offset & (PAGE_SIZE - 1);
+    size_t n = PAGE_SIZE - page_off;
+    if (n > count - done)
+      n = count - done;
+    void *dst = (char *)tmpfs_page_data(ip, offset / PAGE_SIZE) + page_off;
+    if (copy_from_user(dst, (const char *)buf + done, n) != 0)
+      return -EFAULT;
+    offset += n;
+    done += n;
+  }
+  return 0;
+}
+
 static int tmpfs_setattr(struct inode *ip, uint64_t size) {
   struct tmpfs_inode_info *ti = (struct tmpfs_inode_info *)ip->i_priv;
   if (!ti)
     return -EFAULT;
   spin_lock(&ti->lock);
-  if (size == 0) {
-    if (ti->data) {
-      spin_lock(&tmpfs_total_lock);
-      tmpfs_total_used -= ti->cap;
-      spin_unlock(&tmpfs_total_lock);
-      kfree(ti->data);
-      ti->data = NULL;
-    }
-    ti->size = 0;
-    ti->cap = 0;
-  } else if (size > ti->cap) {
-    if (size > TMPFS_FILE_CAP) {
-      spin_unlock(&ti->lock);
-      return -ENOSPC;
-    }
-    spin_lock(&tmpfs_total_lock);
-    if (tmpfs_total_used + (size - ti->cap) > TMPFS_TOTAL_CAP) {
-      spin_unlock(&tmpfs_total_lock);
-      spin_unlock(&ti->lock);
-      return -ENOSPC;
-    }
-    tmpfs_total_used += (size - ti->cap);
-    spin_unlock(&tmpfs_total_lock);
-    void *nd = krealloc(ti->data, size);
-    if (!nd) {
-      /* 回滚总量记账 */
-      spin_lock(&tmpfs_total_lock);
-      tmpfs_total_used -= (size - ti->cap);
-      spin_unlock(&tmpfs_total_lock);
-      spin_unlock(&ti->lock);
-      return -ENOMEM;
-    }
-    ti->data = nd;
-    ti->cap = size;
+  if (ip->type != INODE_REGULAR) {
+    spin_unlock(&ti->lock);
+    return -EINVAL;
   }
+  if (size > TMPFS_FILE_CAP) {
+    spin_unlock(&ti->lock);
+    return -ENOSPC;
+  }
+  int rc = tmpfs_grow_locked(ip, ti, (size_t)size);
+  if (rc != 0) {
+    spin_unlock(&ti->lock);
+    return rc;
+  }
+  if (size < ti->size && ip->shm)
+    tmpfs_zero_locked(ip, (size_t)size, ti->cap - (size_t)size);
   ti->size = size;
   ip->size = size;
   spin_unlock(&ti->lock);
   return 0;
+}
+
+struct shm *tmpfs_get_shm(struct inode *ip) {
+  struct tmpfs_inode_info *ti = (struct tmpfs_inode_info *)ip->i_priv;
+  if (!ti)
+    return NULL;
+  spin_lock(&ti->lock);
+  struct shm *shm = shm_get(ip->shm);
+  spin_unlock(&ti->lock);
+  return shm;
 }
 
 static struct inode *tmpfs_lookup(struct inode *dir, const char *name) {
@@ -768,7 +853,7 @@ static ssize_t tmpfs_read(struct xtask *proc, struct file *f, void *buf,
     return 0;
   }
   size_t n = ti->size - off < count ? ti->size - off : count;
-  if (copy_to_user(buf, (char *)ti->data + off, n) != 0) {
+  if (tmpfs_copy_out_locked(ip, off, buf, n, true) != 0) {
     spin_unlock(&ti->lock);
     return -EFAULT;
   }
@@ -790,7 +875,7 @@ static ssize_t tmpfs_read_at(struct xtask *proc, struct file *f, void *buf,
     return 0;
   }
   size_t n = ti->size - offset < count ? ti->size - offset : count;
-  if (copy_to_user(buf, (char *)ti->data + offset, n) != 0) {
+  if (tmpfs_copy_out_locked(ip, offset, buf, n, true) != 0) {
     spin_unlock(&ti->lock);
     return -EFAULT;
   }
@@ -812,9 +897,9 @@ int tmpfs_read_kern(struct inode *ip, uint64_t offset, void *buf,
     return 0;
   }
   size_t n = ti->size - offset < count ? ti->size - offset : count;
-  __memcpy(buf, (char *)ti->data + offset, n);
+  int rc = tmpfs_copy_out_locked(ip, offset, buf, n, false);
   spin_unlock(&ti->lock);
-  return (ssize_t)n;
+  return rc == 0 ? (ssize_t)n : (ssize_t)rc;
 }
 
 static ssize_t tmpfs_write(struct xtask *proc, struct file *f, const void *buf,
@@ -829,28 +914,14 @@ static ssize_t tmpfs_write(struct xtask *proc, struct file *f, const void *buf,
   if (need > TMPFS_FILE_CAP)
     return -ENOSPC;
   spin_lock(&ti->lock);
-  if (need > ti->cap) {
-    spin_lock(&tmpfs_total_lock);
-    size_t delta = need - ti->cap;
-    if (tmpfs_total_used + delta > TMPFS_TOTAL_CAP) {
-      spin_unlock(&tmpfs_total_lock);
-      spin_unlock(&ti->lock);
-      return -ENOSPC;
-    }
-    tmpfs_total_used += delta;
-    spin_unlock(&tmpfs_total_lock);
-    void *nd = krealloc(ti->data, need);
-    if (!nd) {
-      spin_lock(&tmpfs_total_lock);
-      tmpfs_total_used -= (need - ti->cap);
-      spin_unlock(&tmpfs_total_lock);
-      spin_unlock(&ti->lock);
-      return -ENOMEM;
-    }
-    ti->data = nd;
-    ti->cap = need;
+  int rc = tmpfs_grow_locked(ip, ti, need);
+  if (rc != 0) {
+    spin_unlock(&ti->lock);
+    return rc;
   }
-  if (copy_from_user((char *)ti->data + off, buf, count) != 0) {
+  if (off > ti->size)
+    tmpfs_zero_locked(ip, ti->size, off - ti->size);
+  if (tmpfs_copy_in_locked(ip, off, buf, count) != 0) {
     spin_unlock(&ti->lock);
     return -EFAULT;
   }

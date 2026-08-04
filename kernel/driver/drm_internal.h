@@ -104,10 +104,11 @@ extern struct drm_cursor g_drm_cursor;
 /* virgl legacy (v1) resources: GEM handles allocated from VIRGL_HANDLE_BASE
  * upward so they never collide numerically with dumb (1..16) handles, letting
  * GEM_CLOSE / RESOURCE_INFO dispatch by a single range test. */
-#define MAX_VIRGL_RESOURCES 128
+#define MAX_VIRGL_RESOURCES 1024
 #define VIRGL_HANDLE_BASE 0x1000u
 
 #define MAX_FENCES 256
+#define MAX_CTX_RINGS 64
 
 /* Fence: one per submitted EXECBUFFER with FENCE_FD_OUT (sync_file). */
 struct drm_fence {
@@ -132,6 +133,10 @@ struct drm_virgl_resource {
   int refcount;
   /* A resource may be shared through PRIME and used by several contexts. */
   uint32_t ctx_attach_bitmap[(MAX_CTX_IDS + 31) / 32];
+  /* Most recent EXECBUFFER which referenced this BO. */
+  uint32_t last_ctx_id;
+  uint8_t last_ring_idx;
+  uint64_t last_fence_id;
 };
 
 struct drm_prime_object {
@@ -239,11 +244,12 @@ struct drm_device {
 
   /* virgl legacy (v1) resource table. Handles start at VIRGL_HANDLE_BASE. */
   struct drm_virgl_resource virgl_res[MAX_VIRGL_RESOURCES];
-  uint32_t next_virgl_handle; /* monotonic from VIRGL_HANDLE_BASE */
+  uint32_t next_virgl_handle; /* next slot to probe, wraps across free slots */
   spinlock virgl_lock;
 
   /* fence table (plan2). slot free iff ctx_id==0. */
   struct drm_fence fences[MAX_FENCES];
+  uint64_t completed_fence_ids[MAX_CTX_IDS][MAX_CTX_RINGS];
   spinlock fence_lock; /* protects slot alloc/find across the table */
 
   /* dumb buffer table */
