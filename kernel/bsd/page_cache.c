@@ -224,33 +224,47 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
 
   spin_unlock(&page_cache_lock);
 
-  /* Read from disk — need to walk FAT chain to find the right cluster */
+  /* Read from disk. Resolve the page's clusters with the inode's forward-only
+   * cursor (O(n) total for sequential reads, not O(n²) from re-walking the
+   * chain head every page), then coalesce consecutive clusters into a single
+   * AHCI command so a contiguous 4KB page is one blk_read() of 8 sectors,
+   * not 8. */
   if (ip->type == INODE_REGULAR || ip->type == INODE_DIR) {
-    /* page_index is in 4096-byte units; each cluster may be smaller.
-       Convert to cluster index: cluster_idx = page_index * (4096 /
-       bytes_per_cluster) */
-    uint32_t clusters_per_page = 4096 / fat32_bytes_per_cluster();
-    uint32_t cluster_idx = page_index * clusters_per_page;
-    uint32_t target_cluster = fat32_walk_chain(ip->start_cluster, cluster_idx);
-    if (target_cluster < 2 || target_cluster >= 0x0FFFFFF8) {
-      /* Beyond file — zero fill (for write extend) */
+    uint32_t spc = fat32_sectors_per_cluster();
+    uint32_t bpc = fat32_bytes_per_cluster();
+    uint32_t clusters_per_page = 4096 / bpc;
+    uint32_t cluster_idx = (uint32_t)(page_index * clusters_per_page);
+
+    /* First cluster of the page — if it's past EOF, the whole page is zero. */
+    uint32_t first = fat32_walk_chain_cached(ip, cluster_idx);
+    if (first < 2 || first >= 0x0FFFFFF8) {
       __memset(new_cp->data, 0, 4096);
     } else {
-      /* Read all clusters that fit in this 4096-byte page */
       uint8_t *dst = new_cp->data;
-      for (uint32_t ci = 0; ci < clusters_per_page; ci++) {
-        uint32_t cl = fat32_walk_chain(ip->start_cluster, cluster_idx + ci);
+      uint32_t cl = first;
+      uint32_t ci = 0;
+      while (ci < clusters_per_page) {
         if (cl < 2 || cl >= 0x0FFFFFF8) {
-          /* No more clusters — zero remaining */
-          __memset(dst, 0, fat32_bytes_per_cluster());
-        } else {
-          uint32_t lba =
-              fat32_data_start_lba() + (cl - 2) * fat32_sectors_per_cluster();
-          if (blk_read(lba, fat32_sectors_per_cluster(), dst) != 0) {
-            __memset(dst, 0, fat32_bytes_per_cluster());
-          }
+          /* Past EOF — zero the rest of the page. */
+          __memset(dst, 0, (size_t)(clusters_per_page - ci) * bpc);
+          break;
         }
-        dst += fat32_bytes_per_cluster();
+        /* Find the longest run of consecutive clusters starting at cl. */
+        uint32_t run = 1;
+        while (ci + run < clusters_per_page) {
+          uint32_t next = fat32_walk_chain_cached(ip, cluster_idx + ci + run);
+          if (next < 2 || next >= 0x0FFFFFF8 || next != cl + run)
+            break;
+          run++;
+        }
+        uint32_t lba = fat32_data_start_lba() + (cl - 2) * spc;
+        if (blk_read(lba, run * spc, dst) != 0)
+          __memset(dst, 0, (size_t)run * bpc);
+        dst += run * bpc;
+        ci += run;
+        cl = (ci < clusters_per_page)
+                 ? fat32_walk_chain_cached(ip, cluster_idx + ci)
+                 : 0;
       }
     }
   } else {
@@ -314,6 +328,10 @@ void page_cache_release(struct cache_page *cp) {
 }
 
 void page_cache_invalidate_inode(struct inode *ip) {
+  /* Drop any stale FAT-chain walk cursor too: callers invoke this precisely
+   * when the cluster chain changes (write-extend, truncate, unlink, rename),
+   * so a retained cursor could point into freed/realigned clusters. */
+  ip->walk_cursor = 0;
   spin_lock(&page_cache_lock);
   for (int i = 0; i < (1 << PAGE_CACHE_HASH_BITS); i++) {
     struct cache_page **pp = &page_cache_hash[i];

@@ -102,6 +102,13 @@ struct inode {
   uint32_t dir_start_cluster;
   int dir_entry_index;
 
+  /* Forward-only FAT-chain walk cursor (REGULAR/DIR only): packs
+   * (cluster_index << 32) | cluster. fat32_walk_chain_cached resumes from here
+   * for target index >= cursor index, else restarts at start_cluster. FAT32
+   * chains only append-or-free-tail, so a stale cursor can only read past EOF
+   * (zero-filled), never wrong data; invalidated on every chain change. */
+  uint64_t walk_cursor;
+
   /* POSIX timestamps in ns since epoch (CLOCK_REALTIME). In-memory only —
    * FAT32 stores no timestamps (Q5: llvm libc utimensat tests don't survive
    * reboot); getattr reads these. Updated by update_time / generic_update_time.

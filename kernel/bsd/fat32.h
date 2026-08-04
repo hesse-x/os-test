@@ -12,6 +12,7 @@
 
 #include "kernel/bsd/mount.h"
 
+struct inode;
 /* FAT32 directory entry (32 bytes) */
 struct fat_dir_entry {
   uint8_t name[11];
@@ -36,9 +37,12 @@ uint32_t fat32_bytes_per_cluster(void);
 /* Core operations */
 int fat32_init(void);
 uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index);
+/* Walk the chain to the cluster at cluster_index, resuming from ip->walk_cursor
+ * when possible (forward-only). Advances the cursor; returns the cluster or an
+ * EOF marker (<2 / >=0x0FFFFFF8). */
+uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index);
 
 /* File operations */
-struct inode;
 int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count);
 int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
                 size_t count);

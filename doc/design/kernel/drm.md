@@ -177,7 +177,7 @@ wlroots drm-backend 需实现的 ioctl：
 
 | 接口 | 说明 |
 |---|---|
-| `DRM_IOCTL_MODE_CURSOR2` | wlroots 用 hardware cursor 实现指针渲染，需 `drmModeSetCursor2`（含 hotspot） |
+| `DRM_IOCTL_MODE_CURSOR2` | 内核软件光标 overlay（`drm_cursor_overlay` 合成进主 FB）。**注**：wlroots 仅在存在 `DRM_PLANE_TYPE_CURSOR` plane 时才走 `drmModeSetCursor2` 硬件光标路径；本驱动只暴露 1 个 PRIMARY plane，故 wlroots `crtc->cursor==NULL`、走自身软件光标（合成进 compositor 输出 buffer 再 page-flip），**不调** `drmModeSetCursor2`。此 ioctl 仅供 direct client（如 `terminal`/`display.h`）使用 |
 | `DRM_IOCTL_MODE_GETPROPERTY` | 查询 connector/CRTC/plane 属性。connector：`EDID`（空 blob）、`DPMS`（ON）。plane：`IN_FORMATS`、`CRTC_ID`、`SRC_*`、`FB_ID`。CRTC：`MODE_ID`、`ACTIVE`（仅 atomic 用，可选） |
 | `DRM_IOCTL_MODE_GETPROPBLOB` | 属性 blob 读取（至少支持 `IN_FORMATS`） |
 | `DRM_IOCTL_MODE_SETPROPERTY` | 属性设置（DPMS On/Off 可接受无操作） |
