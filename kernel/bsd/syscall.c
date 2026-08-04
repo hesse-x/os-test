@@ -849,6 +849,17 @@ int64_t sys_wait4(int64_t pid, int64_t wstatus, int64_t options, int64_t rusage,
 // the lock still held so sys_mmap's tail unlocks once); the region records only
 // metadata — pages are faulted in on demand by file_fault_handler.
 
+static void mmap_advance_brk(mm *mm, uint64_t requested_addr, uint32_t flags,
+                             uint64_t vaddr, uint64_t size) {
+  // NULL-address mappings are bump allocations even when gap selection has to
+  // skip a reserved/PTE-only hole. Explicit hints advance the cursor only when
+  // they resolve exactly at it, so a distant hint cannot fragment the default
+  // allocation stream.
+  if (!(flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) &&
+      (requested_addr == 0 || vaddr == mm->mmap_brk))
+    mm->mmap_brk = vaddr + size;
+}
+
 // Place a fresh region describing [vaddr, vaddr+size) with the given backing
 // fields. Uses vma_pick_addr for placement (honors MAP_FIXED / hint per S11).
 // Returns the region (inserted) or NULL + *out_err set (caller
@@ -884,8 +895,7 @@ static mmap_region *mmap_place_file_region(xtask *proc, uint64_t *pml4,
     *out_err = -ENOMEM;
     return NULL;
   }
-  if (vaddr == proc->mm->mmap_brk)
-    proc->mm->mmap_brk = vaddr + size;
+  mmap_advance_brk(proc->mm, addr, flags, vaddr, size);
   return region;
 }
 
@@ -980,8 +990,7 @@ static int64_t sys_mmap_tmpfs_shared(xtask *proc, uint64_t *pml4, uint64_t addr,
     spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
     return -ENOMEM;
   }
-  if (vaddr == proc->mm->mmap_brk)
-    proc->mm->mmap_brk = vaddr + size;
+  mmap_advance_brk(proc->mm, addr, flags, vaddr, size);
 
   file_put(f);
   spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
@@ -1320,8 +1329,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           region->shm_private_src = NULL;
           region->next = NULL;
           vma_insert_sorted(proc->mm, region);
-          if (vaddr == proc->mm->mmap_brk)
-            proc->mm->mmap_brk = vaddr + size;
+          mmap_advance_brk(proc->mm, addr, (uint32_t)flags, vaddr, size);
 
           file_put(f);
           spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
@@ -1414,8 +1422,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     region->shm_private_src = NULL;
     region->next = NULL;
     vma_insert_sorted(proc->mm, region);
-    if (vaddr == proc->mm->mmap_brk)
-      proc->mm->mmap_brk = vaddr + size;
+    mmap_advance_brk(proc->mm, addr, (uint32_t)flags, vaddr, size);
 
     spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
     return vaddr;
@@ -1584,8 +1591,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   region->shm_private_src = NULL;
   region->next = NULL;
   vma_insert_sorted(proc->mm, region);
-  if (vaddr == proc->mm->mmap_brk)
-    proc->mm->mmap_brk = vaddr + size;
+  mmap_advance_brk(proc->mm, addr, (uint32_t)flags, vaddr, size);
 
   kfree(phys_pages);
   spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
@@ -5989,32 +5995,37 @@ int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   uint64_t phys = (__force uint64_t)page_to_phys(pages);
   xtask *proc = current_task;
-
-  uint64_t vaddr = proc->mm->mmap_brk;
+  uint64_t *pml4 =
+      (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
+  uint64_t mmap_flags;
+  spin_lock_irqsave(&proc->mm->mmap_lock, &mmap_flags);
+  int64_t picked = vma_pick_addr(proc->mm, pml4, 0, size, 0, 0);
+  if (picked < 0) {
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    bfc_free_page(pages, npages);
+    return picked;
+  }
+  uint64_t vaddr = (uint64_t)picked;
   uint64_t vaddr_end = vaddr + size;
 
   for (size_t i = 0; i < npages; i++) {
     uint64_t page_phys = phys + i * PAGE_SIZE;
     uint64_t page_vaddr = vaddr + i * PAGE_SIZE;
-    if (!map_user_page_direct(
-            (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3),
-            page_vaddr, page_phys, PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
-      if (i > 0)
-        unmap_user_pages(
-            (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3),
-            vaddr, vaddr + i * PAGE_SIZE, i);
+    if (!map_user_page_direct(pml4, page_vaddr, page_phys,
+                              PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
+      for (size_t j = 0; j < i; j++)
+        clear_user_pte(pml4, vaddr + j * PAGE_SIZE);
+      spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
       bfc_free_page(pages, npages);
       return (int64_t)-ENOMEM;
     }
   }
 
-  proc->mm->mmap_brk = vaddr_end;
-
   mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
   if (!region) {
-    unmap_user_pages(
-        (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3), vaddr,
-        vaddr_end, npages);
+    for (size_t i = 0; i < npages; i++)
+      clear_user_pte(pml4, vaddr + i * PAGE_SIZE);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
     bfc_free_page(pages, npages);
     return (int64_t)-ENOMEM;
   }
@@ -6024,11 +6035,20 @@ int64_t sys_dma_alloc(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   region->shm_obj = NULL;
   region->fd = -1;
   region->offset = 0;
-  region->flags = KMAP_PHYSICAL;
+  region->flags = KMAP_PHYSICAL | KMAP_DMA_OWNED;
   region->inode = NULL;
   region->shm_private_src = NULL;
   region->next = NULL;
-  vma_insert_sorted(proc->mm, region);
+  if (vma_insert_sorted(proc->mm, region) != 0) {
+    for (size_t i = 0; i < npages; i++)
+      clear_user_pte(pml4, vaddr + i * PAGE_SIZE);
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+    kfree(region);
+    bfc_free_page(pages, npages);
+    return (int64_t)-EEXIST;
+  }
+  proc->mm->mmap_brk = vaddr_end;
+  spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
 
   {
     uint64_t vaddr_val = vaddr;
@@ -6049,17 +6069,22 @@ int64_t sys_dma_free(int64_t arg1, int64_t unused1, int64_t unused2,
     return (int64_t)-EINVAL;
 
   xtask *proc = current_task;
+  uint64_t mmap_flags;
+  spin_lock_irqsave(&proc->mm->mmap_lock, &mmap_flags);
 
   // Exact-start match only (mirrors sys_munmap behavior).
   mmap_region *r = vma_find(proc->mm, vaddr);
-  if (!r || r->vaddr != vaddr)
+  if (!r || r->vaddr != vaddr || !(r->flags & KMAP_DMA_OWNED)) {
+    spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
     return (int64_t)-EINVAL;
+  }
 
   size_t npages = r->size / PAGE_SIZE;
 
-  unmap_user_pages(
-      (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3),
-      r->vaddr, r->vaddr + r->size, npages);
+  uint64_t *pml4 =
+      (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
+  for (size_t i = 0; i < npages; i++)
+    clear_user_pte(pml4, r->vaddr + i * PAGE_SIZE);
 
   struct page *page = bfc_frames + (r->phys / PAGE_SIZE);
   bfc_free_page(page, npages);
@@ -6076,6 +6101,7 @@ int64_t sys_dma_free(int64_t arg1, int64_t unused1, int64_t unused2,
   if (r->shm_private_src)
     shm_put(r->shm_private_src);
   kfree(r);
+  spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
   return 0;
 }
 

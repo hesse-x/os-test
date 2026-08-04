@@ -13,6 +13,7 @@
 //   · 窗口装饰由 compositor 统一使用 SSD 绘制
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/input-event-codes.h> // BTN_LEFT
 #include <math.h>
 #include <poll.h>
@@ -641,7 +642,8 @@ struct app {
   // PTY / shell
   int pty_fd;
   pid_t shell_pid;
-  struct wl_callback *first_frame_callback;
+  struct wl_callback *frame_callback;
+  bool needs_render;
 
   // xkb 键盘状态
   struct xkb_context *xkb_ctx;
@@ -657,19 +659,22 @@ static struct app app = {
 };
 
 static void spawn_shell(void);
+static void render(void);
 
-static void first_frame_done(void *data, struct wl_callback *callback,
-                             uint32_t time) {
+static void frame_done(void *data, struct wl_callback *callback,
+                       uint32_t time) {
   (void)data;
   (void)time;
   wl_callback_destroy(callback);
-  app.first_frame_callback = NULL;
+  app.frame_callback = NULL;
   if (!app.closed && app.shell_pid <= 0)
     spawn_shell();
+  if (!app.closed && app.needs_render)
+    render();
 }
 
-static const struct wl_callback_listener first_frame_listener = {
-    .done = first_frame_done,
+static const struct wl_callback_listener frame_listener = {
+    .done = frame_done,
 };
 
 // 按窗口尺寸算出网格列/行数
@@ -883,6 +888,7 @@ static struct glyph *get_glyph(uint32_t cp) {
 static GLuint rect_prog, line_prog, text_prog;
 static GLint rect_proj_loc, line_proj_loc, text_proj_loc, atlas_loc;
 static GLuint vbo;
+static size_t vbo_offset;
 
 static GLuint compile_shader(GLenum type, const char *src) {
   GLuint shader = glCreateShader(type);
@@ -1107,9 +1113,11 @@ static void draw_rect(mat4 proj, float x, float y, float w, float h, float r,
       {x + w, y + h},
   };
   glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+  size_t offset = vbo_offset;
+  glBufferSubData(GL_ARRAY_BUFFER, offset, sizeof(verts), verts);
+  vbo_offset += sizeof(verts);
   glEnableVertexAttribArray(0);
-  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)(uintptr_t)offset);
 
   glUseProgram(rect_prog);
   glUniformMatrix4fv(rect_proj_loc, 1, GL_FALSE, proj.m);
@@ -1142,12 +1150,15 @@ static void draw_glyph_at(mat4 proj, uint32_t cp, float x, float baseline,
       {px + g->w, py, u1, v0}, {px + g->w, py + g->h, u1, v1},
   };
   glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+  size_t offset = vbo_offset;
+  glBufferSubData(GL_ARRAY_BUFFER, offset, sizeof(verts), verts);
+  vbo_offset += sizeof(verts);
   glEnableVertexAttribArray(0);
   glEnableVertexAttribArray(1);
-  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)0);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
+                        (void *)(uintptr_t)offset);
   glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
-                        (void *)(2 * sizeof(float)));
+                        (void *)(uintptr_t)(offset + 2 * sizeof(float)));
 
   glUseProgram(text_prog);
   glUniformMatrix4fv(text_proj_loc, 1, GL_FALSE, proj.m);
@@ -1162,9 +1173,10 @@ static void draw_glyph_at(mat4 proj, uint32_t cp, float x, float baseline,
   glDisableVertexAttribArray(1);
 }
 
-static void render(void) {
-  if (!app.configured)
+static void render_now(void) {
+  if (!app.configured || app.frame_callback != NULL)
     return; // xdg-shell 要求先 ack 首个 configure 才能提交 buffer
+  app.needs_render = false;
   if (!app.gl_ready)
     gl_init();
 
@@ -1177,6 +1189,14 @@ static void render(void) {
   glViewport(0, 0, app.width, app.height);
   glClearColor(0, 0, 0, 0);
   glClear(GL_COLOR_BUFFER_BIT);
+
+  // Give every primitive a disjoint range for this frame. Rewriting offset 0
+  // for each glyph makes virgl rename the busy 96-byte BO thousands of times.
+  size_t max_primitives = (size_t)term.cols * term.rows * 2 + 4;
+  size_t vbo_size = max_primitives * 6 * 4 * sizeof(float);
+  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+  glBufferData(GL_ARRAY_BUFFER, vbo_size, NULL, GL_STREAM_DRAW);
+  vbo_offset = 0;
 
   // 正交投影：像素坐标 → NDC。wayland 表面 y 向下，所以 top=0, bottom=h。
   mat4 proj = ortho(0, app.width, app.height, 0, -1, 1);
@@ -1235,16 +1255,23 @@ static void render(void) {
     }
   }
 
-  // 将 shell 启动挂到首帧回调上，避免 TEST 模式的 test_runner
-  // 在合成器处理终端首帧之前就开始输出。
-  if (app.shell_pid <= 0 && app.first_frame_callback == NULL) {
-    app.first_frame_callback = wl_surface_frame(app.surface);
-    wl_callback_add_listener(app.first_frame_callback, &first_frame_listener,
-                             NULL);
-  }
+  // 每次提交只挂一个帧回调。回调到来前继续解析 PTY，但不继续 swap，
+  // 避免测试的大量输出耗尽 EGL/Wayland buffer 后反向堵住 PTY。
+  app.frame_callback = wl_surface_frame(app.surface);
+  wl_callback_add_listener(app.frame_callback, &frame_listener, NULL);
 
   // swap 即提交：wayland-egl 会把渲染结果交给合成器
-  eglSwapBuffers(app.egl_dpy, app.egl_surf);
+  if (!eglSwapBuffers(app.egl_dpy, app.egl_surf)) {
+    fprintf(stderr, "render: eglSwapBuffers 失败: EGL error 0x%04x\n",
+            (unsigned int)eglGetError());
+    app.closed = true;
+  }
+}
+
+static void render(void) {
+  app.needs_render = true;
+  if (app.frame_callback == NULL)
+    render_now();
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,6 +1316,9 @@ static void spawn_shell(void) {
     _exit(127);
   }
   app.shell_pid = pid;
+  int flags = fcntl(app.pty_fd, F_GETFL, 0);
+  if (flags >= 0)
+    (void)fcntl(app.pty_fd, F_SETFL, flags | O_NONBLOCK);
   signal(SIGCHLD, SIG_IGN); // 自动回收，避免僵尸进程
   signal(SIGPIPE, SIG_IGN); // shell 先走时写 PTY 不要被打死
 }
@@ -1745,14 +1775,24 @@ extern "C" int main(void) {
 
     if (fds[1].revents & (POLLIN | POLLHUP)) {
       uint8_t buf[4096];
-      ssize_t n = read(app.pty_fd, buf, sizeof(buf));
-      if (n > 0) {
-        term_feed(buf, (size_t)n);
-        render();
-      } else {
-        // shell 退出了（exit / Ctrl+D）：关窗
+      bool got_output = false;
+      for (;;) {
+        ssize_t n = read(app.pty_fd, buf, sizeof(buf));
+        if (n > 0) {
+          term_feed(buf, (size_t)n);
+          got_output = true;
+          continue;
+        }
+        if (n < 0 && errno == EINTR)
+          continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+          break;
+        // shell 退出了（exit / Ctrl+D）或 PTY 发生不可恢复错误：关窗
         app.closed = true;
+        break;
       }
+      if (got_output)
+        render();
     }
   }
 

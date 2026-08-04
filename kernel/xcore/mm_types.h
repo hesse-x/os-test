@@ -42,9 +42,10 @@ typedef struct shm {
 // struct that records them so syscall.c and driver mmap paths share one
 // definition instead of redefining the magic numbers.
 #define KMAP_PHYSICAL                                                          \
-  0x80000000u         /* MAP_PHYSICAL: map a fixed physical range              \
-                       */
-#define KMAP_UC 0x08u /* map uncacheable (device MMIO) */
+  0x80000000u                      /* MAP_PHYSICAL: map a fixed physical range \
+                                    */
+#define KMAP_DMA_OWNED 0x40000000u /* kernel DMA allocation owns phys pages */
+#define KMAP_UC 0x08u              /* map uncacheable (device MMIO) */
 
 typedef struct mmap_region {
   uint64_t vaddr;

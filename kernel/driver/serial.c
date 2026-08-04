@@ -13,6 +13,7 @@
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/poll_types.h"
 #include "kernel/driver/serial.h"
+#include "kernel/xcore/kpi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/xtask.h"
@@ -62,6 +63,10 @@ uint64_t serial_tx_acquire(void) {
   uint64_t flags;
   spin_lock_irqsave(&serial_tx_lock, &flags);
   return flags;
+}
+
+bool serial_tx_try_acquire(uint64_t *flags) {
+  return spin_trylock_irqsave(&serial_tx_lock, flags) != 0;
 }
 
 void serial_tx_release(uint64_t flags) {
@@ -201,12 +206,20 @@ static ssize_t serial_dev_write(xtask *proc, int fd, const void *buf,
                                 size_t count) {
   if (!buf)
     return -EFAULT;
-  const char *src = (const char __force *)buf;
-  uint64_t flags = serial_tx_acquire();
-  for (size_t i = 0; i < count; i++)
-    serial_putc_locked(src[i]);
-  serial_tx_release(flags);
-  return (ssize_t)count;
+  const char __user *src = (const char __user *)buf;
+  size_t written = 0;
+  char kbuf[256];
+
+  while (written < count) {
+    size_t chunk = count - written;
+    if (chunk > sizeof(kbuf))
+      chunk = sizeof(kbuf);
+    if (copy_from_user(kbuf, src + written, chunk))
+      return written ? (ssize_t)written : -EFAULT;
+    serial_write(kbuf, chunk);
+    written += chunk;
+  }
+  return (ssize_t)written;
 }
 
 static long serial_dev_ioctl(uint32_t cmd, void *arg) {

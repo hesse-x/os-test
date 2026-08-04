@@ -163,29 +163,8 @@ void proc_reap(xtask *proc) {
   file_lock_release_pid(proc->pid);
 
   if (bp->files) {
-    // Heap-allocate the snapshot: MAX_FD=1024 makes this 8KB, too large for
-    // the 16KB kernel stack on the reap path. collect → synchronize_rcu → put
-    // mirrors files_put; failure to allocate falls back to per-fd put (still
-    // correct, just no batched RCU sync before dropping the last refs).
-    struct file **entries =
-        (struct file **)kmalloc(sizeof(struct file *) * MAX_FD);
-    if (entries) {
-      for (int fd = 0; fd < MAX_FD; fd++) {
-        entries[fd] = fd_uninstall(bp->files, fd);
-      }
-      synchronize_rcu();
-      for (int fd = 0; fd < MAX_FD; fd++) {
-        if (entries[fd])
-          file_put(entries[fd]);
-      }
-      kfree(entries);
-    } else {
-      for (int fd = 0; fd < MAX_FD; fd++) {
-        struct file *f = fd_uninstall(bp->files, fd);
-        if (f)
-          file_put(f);
-      }
-    }
+    // CLONE_FILES threads share this table. Only files_put may close its
+    // entries, after the final table reference is dropped.
     files_put(bp->files);
     bp->files = NULL;
   }
@@ -384,18 +363,21 @@ void file_put(struct file *f) {
     if (f->nlsock)
       netlink_sock_close(f->nlsock);
     break;
-  case FD_TTY:
-    pty_close_file(f);
+  case FD_TTY: {
     if (f->inode) {
       /* §5: ptmx_open/pts_open 把 FD_DEV mutate 成 FD_TTY,fd 引用随之转交,
-       * close 时在此放(对齐 FD_DEV 分支)。ops 为 static(ptmx_ops)/嵌入式
-       * (pts priv->ops),driver_pid==0,put 永不归 0,仅还回 open 取的计数。*/
+       * close 时在此放(对齐 FD_DEV 分支)。The slave ops is embedded in
+       * pts_priv, which pty_close_file may free when it removes /dev/pts/N,
+       * so the fd reference must be dropped before that teardown. */
       struct dev_ops *ops = dev_ops_peek_by_inode(f->inode);
       if (ops)
         dev_ops_put(ops);
-      inode_put(f->inode);
     }
+    pty_close_file(f);
+    if (f->inode)
+      inode_put(f->inode);
     break;
+  }
   }
   if (f->wq) {
     kfree(f->wq);
@@ -727,6 +709,10 @@ void mm_release(mm *mm, pid_t owner_pid) {
       inode_put(region->inode);
     if (region->shm_private_src)
       shm_put(region->shm_private_src);
+    if (region->flags & KMAP_DMA_OWNED) {
+      struct page *page = &bfc_frames[PHY_TO_PAGE(region->phys)];
+      bfc_free_page(page, region->size / PAGE_SIZE);
+    }
     kfree(region);
     region = next;
   }
@@ -1589,6 +1575,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   // untouched until commit, which is required when a vfork child shares it.
   mm *new_mm = mm_create();
   if (!new_mm) {
+    printk(LOG_ERROR, "execve: mm_create failed pid=%d err=%d\n", proc->pid,
+           ENOMEM);
     kfree(elf_buf);
     return (int64_t)-ENOMEM;
   }
@@ -1651,6 +1639,9 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     uint64_t ld_size = ld_ip->size;
     uint8_t *ld_buf = (uint8_t *)kmalloc(ld_size);
     if (!ld_buf) {
+      printk(LOG_ERROR,
+             "execve: ld.so buffer allocation failed pid=%d size=%lu err=%d\n",
+             proc->pid, (unsigned long)ld_size, ENOMEM);
       inode_put(ld_ip);
       kfree(elf_buf);
       mm_put(new_mm);
@@ -1678,6 +1669,9 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   int user_stack_pages = 2048;
   struct page *user_stack_page = bfc_alloc_page(user_stack_pages);
   if (!user_stack_page) {
+    printk(LOG_ERROR,
+           "execve: user stack allocation failed pid=%d pages=%d err=%d\n",
+           proc->pid, user_stack_pages, ENOMEM);
     kfree(elf_buf);
     mm_put(new_mm);
     return (int64_t)-ENOMEM;
@@ -1688,6 +1682,10 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     if (!map_user_page_direct(new_pml4, stack_base + i * PAGE_SIZE,
                               user_stack_phys + i * PAGE_SIZE,
                               PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX)) {
+      printk(LOG_ERROR,
+             "execve: user stack map failed pid=%d page=%d/%d err=%d\n",
+             proc->pid, i, user_stack_pages, ENOMEM);
+      bfc_free_page(user_stack_page + i, user_stack_pages - i);
       kfree(elf_buf);
       mm_put(new_mm);
       return (int64_t)-ENOMEM;
@@ -1696,12 +1694,22 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
   // Map signal trampoline page
   if (sig_trampoline_phys != 0) {
-    map_user_page_direct(new_pml4, SIG_TRAMPOLINE_ADDR, sig_trampoline_phys,
-                         PTE_PRESENT | PTE_USER);
+    if (!map_user_page_direct(new_pml4, SIG_TRAMPOLINE_ADDR,
+                              sig_trampoline_phys, PTE_PRESENT | PTE_USER)) {
+      printk(LOG_ERROR,
+             "execve: signal trampoline map failed pid=%d addr=0x%lx err=%d\n",
+             proc->pid, (uint64_t)SIG_TRAMPOLINE_ADDR, ENOMEM);
+      kfree(elf_buf);
+      mm_put(new_mm);
+      return (int64_t)-ENOMEM;
+    }
   }
 
   mmap_region *stack_region = (mmap_region *)kmalloc(sizeof(mmap_region));
   if (!stack_region) {
+    printk(LOG_ERROR,
+           "execve: user stack VMA allocation failed pid=%d err=%d\n",
+           proc->pid, ENOMEM);
     kfree(elf_buf);
     mm_put(new_mm);
     return (int64_t)-ENOMEM;
@@ -1725,6 +1733,8 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   uint64_t *argv_str_vaddrs = (uint64_t *)kmalloc(sizeof(uint64_t) * ARG_MAX);
   uint64_t *envp_str_vaddrs = (uint64_t *)kmalloc(sizeof(uint64_t) * ARG_MAX);
   if (!argv_strings || !envp_strings || !argv_str_vaddrs || !envp_str_vaddrs) {
+    printk(LOG_ERROR, "execve: argument allocation failed pid=%d err=%d\n",
+           proc->pid, ENOMEM);
     if (argv_strings)
       kfree(argv_strings);
     if (envp_strings)

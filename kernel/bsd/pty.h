@@ -130,6 +130,7 @@ struct pty {
   uint32_t m_to_s_head, m_to_s_tail;
   uint8_t s_to_m_buf[PTY_BUF_SIZE]; // slave->master (shell output)
   uint32_t s_to_m_head, s_to_m_tail;
+  spinlock s_to_m_lock; // serializes multiple slave-side output producers
 
   // Canonical input queue (minimal N_TTY line discipline, master->slave
   // direction). Ring over the same PTY_BUF_SIZE modulus as the raw rings.

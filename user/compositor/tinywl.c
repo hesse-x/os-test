@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: MIT
  */
 #include <assert.h>
+#include <errno.h>
 #include <getopt.h>
 #include <linux/input-event-codes.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
@@ -286,6 +288,7 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
    */
   switch (sym) {
   case XKB_KEY_Escape:
+    wlr_log(WLR_ERROR, "Alt+Escape requested compositor termination");
     wl_display_terminate(server->wl_display);
     break;
   case XKB_KEY_F1:
@@ -1367,7 +1370,11 @@ int main(int argc, char *argv[]) {
    * loop configuration to listen to libinput events, DRM events, generate
    * frame events at the refresh rate, and so on. */
   wlr_log(WLR_INFO, "Running Wayland compositor on WAYLAND_DISPLAY=%s", socket);
+  errno = 0;
   wl_display_run(server.wl_display);
+  int loop_errno = errno;
+  wlr_log(WLR_ERROR, "Wayland event loop stopped: errno=%d (%s)", loop_errno,
+          loop_errno ? strerror(loop_errno) : "none");
 
   /* Once wl_display_run returns, we destroy all clients then shut down the
    * server. */

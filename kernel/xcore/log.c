@@ -50,7 +50,9 @@ void printk(int level, const char *fmt, ...) {
   // suppressed the banner itself — only a bare BACKTRACE survived.)
   cpu_local *cl = get_cpu_local();
   if (level != LOG_PANIC && cl->printk_depth >= 1) {
-    uint64_t flags = serial_tx_acquire();
+    uint64_t flags;
+    if (!serial_tx_try_acquire(&flags))
+      return;
     serial_printf_locked("\n[recursive oops — printk re-entered]\n");
     serial_tx_release(flags);
     return;

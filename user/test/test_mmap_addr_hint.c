@@ -40,6 +40,8 @@ void tearDown(void) {}
 #define HINT_B 0x48000000UL
 #define HINT_C 0x60000000UL
 #define HINT_D 0x70000000UL
+#define TRAMPOLINE_BELOW 0x4FFFF000UL
+#define TRAMPOLINE_PAGE 0x50000000UL
 
 /* TC1: hint with no conflict is honored. */
 void test_hint_satisfied(void) {
@@ -208,6 +210,37 @@ void test_brk_no_advance_on_fixed(void) {
   munmap(v2, PAGE);
 }
 
+/* Kernel-installed mappings have PTEs but no VMA metadata. Gap selection must
+ * skip the signal trampoline instead of choosing a range that crosses it and
+ * failing later with a misleading ENOMEM. */
+void test_hint_crosses_signal_trampoline(void) {
+  char *p =
+      (char *)mmap((void *)TRAMPOLINE_BELOW, 3 * PAGE, PROT_READ | PROT_WRITE,
+                   MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  TEST_ASSERT_NOT_EQUAL(MAP_FAILED, p);
+  TEST_ASSERT_NOT_EQUAL((void *)TRAMPOLINE_BELOW, p);
+  p[0] = 1;
+  p[2 * PAGE] = 2;
+  TEST_ASSERT_EQUAL_INT(1, p[0]);
+  TEST_ASSERT_EQUAL_INT(2, p[2 * PAGE]);
+  munmap(p, 3 * PAGE);
+}
+
+/* The kernel ABI page cannot be replaced or removed through MAP_FIXED. */
+void test_fixed_rejects_signal_trampoline(void) {
+  errno = 0;
+  void *p = mmap((void *)TRAMPOLINE_PAGE, PAGE, PROT_READ | PROT_WRITE,
+                 MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  TEST_ASSERT_EQUAL_PTR(MAP_FAILED, p);
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+
+  errno = 0;
+  p = mmap((void *)TRAMPOLINE_PAGE, PAGE, PROT_READ | PROT_WRITE,
+           MAP_FIXED_NOREPLACE | MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  TEST_ASSERT_EQUAL_PTR(MAP_FAILED, p);
+  TEST_ASSERT_EQUAL_INT(EEXIST, errno);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -223,5 +256,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_noreplace_conflict_eexist);
   RUN_TEST(test_fixed_overwrite_shm);
   RUN_TEST(test_brk_no_advance_on_fixed);
+  RUN_TEST(test_hint_crosses_signal_trampoline);
+  RUN_TEST(test_fixed_rejects_signal_trampoline);
   return UNITY_END();
 }

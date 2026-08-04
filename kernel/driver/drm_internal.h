@@ -262,14 +262,17 @@ struct drm_device {
   int next_fb_id;
   spinlock fb_lock;
 
-  /* page flip event queue (single-entry, immediate delivery) */
+  /* Single-entry page-flip event, promoted to readable on the next emulated
+   * vblank instead of immediately from DRM_IOCTL_MODE_PAGE_FLIP. */
   spinlock event_lock;
+  bool event_armed;
   bool event_pending;
+  uint64_t event_deadline_ns;
   uint32_t event_sequence;
   uint64_t event_user_data;
 
   /* Unified vblank/event wait queue: drm_poll waiters register here via
-   * file_wq_get, and drm_ioctl_page_flip wakes it after setting event_pending.
+   * file_wq_get, and the periodic GPU poll wakes it at the emulated vblank.
    * Without this, waiters sat on a per-file f->wq that page_flip never woke
    * (poll(deadline=0) + no EVENT flag = permanent deadlock). See bug.md. */
   wait_queue_head event_wq;

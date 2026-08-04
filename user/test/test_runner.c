@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -184,6 +185,9 @@ int main(int argc, char **argv, char **envp) {
         _exit(126);
 
       execve(path, NULL, child_env);
+      int exec_errno = errno;
+      fprintf(stderr, "[EXEC-FAIL] %s: errno=%d (%s)\n", path, exec_errno,
+              strerror(exec_errno));
       _exit(127);
     }
     if (pid < 0) {

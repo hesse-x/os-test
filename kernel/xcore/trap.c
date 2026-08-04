@@ -646,6 +646,8 @@ void trap_dispatch(trapframe *tf) {
 // scheduler_lock) but sched count freezes, idle phase=4.
 static void reschedule_ipi_handler(trapframe *tf) {
   (void)tf;
+  /* An IPI cannot interrupt rcu_read_lock() because readers keep IRQs off. */
+  rcu_quiescent();
   current_task->need_resched = 1;
   lapic_eoi();
 }

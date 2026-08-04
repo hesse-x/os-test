@@ -5,6 +5,7 @@
  */
 
 #include "kernel/xcore/rcu.h"
+#include "arch/x64/apic.h"
 #include "arch/x64/smp.h" // ncpu, current_task
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/xtask.h"
@@ -39,6 +40,17 @@ void synchronize_rcu(void) {
   // wait for different generation thresholds — all satisfied by the
   // same rcu_quiescent() calls from timer IRQs.
   spin_unlock(&g_rcu_state.writer_lock);
+
+  /* Do not rely solely on the periodic LAPIC timer to move an idle CPU
+     through a grace period.  A CPU halted in the idle loop may otherwise
+     remain one generation behind indefinitely.  The reschedule IPI handler
+     publishes a quiescent state; if the target is inside an RCU read-side
+     section, IRQs are disabled and the pending IPI runs only after unlock. */
+  for (int i = 0; i < ncpu; i++) {
+    if (i != my_cpu)
+      lapic_send_reschedule(i);
+  }
+
   // Wait for all OTHER online CPUs to publish a quiescent state at >= new_gen.
   //
   // Correctness (vs the old `>= new_gen - 1`): every reader critical section

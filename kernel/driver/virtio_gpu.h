@@ -14,7 +14,6 @@
 #include "kernel/driver/virtio_pci.h"
 #include "kernel/driver/virtio_ring.h"
 #include "kernel/xcore/spinlock.h"
-#include "kernel/xcore/wait_queue.h"
 
 /* ===== virtio-gpu PCI config (device-specific config space) ===== */
 struct virtio_gpu_config {
@@ -286,6 +285,7 @@ enum virtgpu_cmd_ctx_tag { VIRTGPU_CTX_SYNC = 0, VIRTGPU_CTX_ASYNC = 1 };
 struct virtgpu_sync_ctx {
   enum virtgpu_cmd_ctx_tag tag; /* VIRTGPU_CTX_SYNC */
   volatile bool completed;
+  struct xtask *waiter; /* exact submitter; NULL during early boot polling */
 };
 
 /* Async-path pending node: owns heap cmd/resp, lives until ISR completes it. */
@@ -307,10 +307,8 @@ struct virtio_gpu_device {
   struct virtqueue ctrlq;
   struct virtio_gpu_config config;
 
-  /* command synchronization: cmd_lock serializes vring submission;
-     cmd_wq + per-command ctx track completion for multiple waiters */
+  /* cmd_lock serializes vring submission and synchronous completion arming. */
   spinlock cmd_lock;
-  wait_queue_head cmd_wq; /* wait queue for processes sleeping in send_cmd */
 
   /* per-command async completion (plan2). pending_list holds in-flight
    * EXECBUFFER submissions whose cmd/resp buffers are heap-allocated and
@@ -322,6 +320,9 @@ struct virtio_gpu_device {
 /* ===== API ===== */
 /* Initialize virtio-gpu device: transport + ctrlq + MSI-X + ISR. */
 void virtio_gpu_init(void);
+
+/* Periodic driver tick used to deliver paced DRM page-flip events. */
+void virtio_gpu_poll(void);
 
 /* High-level command wrappers (all synchronous): */
 int virtio_gpu_create_2d(uint32_t resource_id, uint32_t width, uint32_t height,

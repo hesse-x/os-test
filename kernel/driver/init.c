@@ -9,6 +9,7 @@
 
 #include "kernel/driver/driver.h"
 #include "kernel/driver/pci.h"
+#include "kernel/driver/virtio_gpu.h"
 #include "kernel/driver/xhci.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/trap.h"
@@ -18,6 +19,11 @@ extern dev_driver ahci_driver;
 extern dev_driver xhci_driver;
 extern dev_driver virtio_gpu_driver;
 extern dev_driver serial_driver;
+
+static void driver_timer_poll(void) {
+  xhci_poll();
+  virtio_gpu_poll();
+}
 
 void driver_init(void) {
   pci_init();
@@ -32,8 +38,8 @@ void driver_init(void) {
   // PCI class/vendor auto-match: calls init() for matched drivers
   driver_pci_match();
 
-  // Register xHCI timer poll hook (called periodically from timer IRQ handler)
-  timer_poll_hook = xhci_poll;
+  // Poll drivers that need coarse periodic service (currently every ~10 ms).
+  timer_poll_hook = driver_timer_poll;
 
   printk(LOG_INFO, "driver_init: done\n");
 }

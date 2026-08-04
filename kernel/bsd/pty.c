@@ -181,6 +181,7 @@ struct pty *pty_alloc(int *out_index) {
   pty->t_winsize.ws_xpixel = 0;
   pty->t_winsize.ws_ypixel = 0;
   pty->index = index;
+  pty->s_to_m_lock = SPINLOCK_INIT;
   pty->master_refs = 0;
   pty->slave_refs = 0;
   pty->slave_opened = 0;
@@ -352,7 +353,13 @@ int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
   wait.exclusive = 0;
   list_init(&wait.node);
   add_wait_queue(pty->wq, &wait);
-  while (pty_ring_avail(pty->s_to_m_head, pty->s_to_m_tail) == 0) {
+  for (;;) {
+    spin_lock(&pty->s_to_m_lock);
+    int avail = pty_ring_avail(pty->s_to_m_head, pty->s_to_m_tail);
+    spin_unlock(&pty->s_to_m_lock);
+    if (avail != 0)
+      break;
+
     // EOF only after slave was opened and then closed.
     // If slave has never been opened, avoid false EOF that triggers
     // premature re-fork in terminal — block or return EAGAIN instead.
@@ -408,8 +415,10 @@ int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
   proc->state = RUNNING;
   remove_wait_queue(pty->wq, &wait);
 
+  spin_lock(&pty->s_to_m_lock);
   int nread = pty_ring_read(pty->s_to_m_buf, pty->s_to_m_head,
                             &pty->s_to_m_tail, (uint8_t *)buf, (int)len);
+  spin_unlock(&pty->s_to_m_lock);
   __wake_up(pty->wq, POLLOUT);
   return (int64_t)nread;
 }
@@ -758,6 +767,8 @@ int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
   int do_opost =
       (pty->t_termios.c_oflag & OPOST) && (pty->t_termios.c_oflag & ONLCR);
   size_t written = 0;
+  char serial_buf[256];
+  size_t serial_len = 0;
 
   while (written < len) {
     // Re-evaluate gate after a wake: foreground may have changed.
@@ -768,23 +779,34 @@ int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
       return (int64_t)gate;
     }
     const uint8_t ch = ((const uint8_t *)buf)[written];
+    uint8_t output[2] = {ch, 0};
+    size_t output_len = 1;
+    if (do_opost && ch == '\n') {
+      output[0] = '\r';
+      output[1] = '\n';
+      output_len = 2;
+    }
     int wrote = 0;
 
-    if (do_opost && ch == '\n') {
-      // Need 2 bytes of ring space for \r\n
-      if (pty_ring_space(pty->s_to_m_head, pty->s_to_m_tail) >= 2) {
+    // Transform once, then feed the exact same post-OPOST bytes to the PTY
+    // master and the serial console mirror.
+    spin_lock(&pty->s_to_m_lock);
+    if (pty_ring_space(pty->s_to_m_head, pty->s_to_m_tail) >= (int)output_len) {
+      for (size_t i = 0; i < output_len; i++)
         pty_ring_write1(pty->s_to_m_buf, &pty->s_to_m_head, pty->s_to_m_tail,
-                        '\r');
-        pty_ring_write1(pty->s_to_m_buf, &pty->s_to_m_head, pty->s_to_m_tail,
-                        '\n');
-        wrote = 1;
-      }
-    } else {
-      wrote = pty_ring_write1(pty->s_to_m_buf, &pty->s_to_m_head,
-                              pty->s_to_m_tail, ch);
+                        output[i]);
+      wrote = 1;
     }
+    spin_unlock(&pty->s_to_m_lock);
 
     if (wrote) {
+      for (size_t i = 0; i < output_len; i++) {
+        if (serial_len == sizeof(serial_buf)) {
+          serial_write(serial_buf, serial_len);
+          serial_len = 0;
+        }
+        serial_buf[serial_len++] = (char)output[i];
+      }
       written++;
       __wake_up(pty->wq, POLLIN);
       continue;
@@ -822,7 +844,8 @@ int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
     }
   }
 
-  serial_write((const char *)buf, written);
+  if (serial_len != 0)
+    serial_write(serial_buf, serial_len);
   return (int64_t)written;
 }
 
@@ -857,7 +880,7 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
     return 0;
   }
 
-  case TCSETSF: // 0x5404 — set termios + flush both directions
+  case TCSETSF: // 0x5404 — set termios + flush unread input
   {
     int gate = pty_fg_gate(pty, current_task, TTY_IOCTL);
     if (gate)
@@ -866,7 +889,6 @@ long pty_ioctl(struct pty *pty, uint32_t cmd, void *arg) {
     if (copy_from_user(&nt, (const void __user *)arg, sizeof(struct termios)))
       return -EFAULT;
     ldisc_flush_input(pty);
-    pty->s_to_m_head = pty->s_to_m_tail = 0;
     pty->t_termios = nt;
     return 0;
   }

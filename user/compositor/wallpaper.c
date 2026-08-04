@@ -35,6 +35,7 @@ struct shell_output {
   struct wl_surface *dock;
   struct zwlr_layer_surface_v1 *dock_layer;
   int background_width, background_height;
+  bool dock_configured;
 };
 
 struct app {
@@ -273,8 +274,12 @@ static void dock_configure(void *data, struct zwlr_layer_surface_v1 *layer,
                            uint32_t serial, uint32_t width, uint32_t height) {
   (void)width;
   (void)height;
+  struct shell_output *output = data;
   zwlr_layer_surface_v1_ack_configure(layer, serial);
-  draw_dock(data);
+  if (!output->dock_configured) {
+    output->dock_configured = true;
+    draw_dock(output);
+  }
 }
 
 static void layer_closed(void *data, struct zwlr_layer_surface_v1 *layer) {

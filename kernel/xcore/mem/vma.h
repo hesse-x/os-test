@@ -22,9 +22,9 @@
 // Return the region containing addr ([vaddr, vaddr+size)), or NULL.
 mmap_region *vma_find(mm *mm, uint64_t addr);
 
-// Find a free interval of length >= len. Try [hint, hint+len) first; on
-// conflict, bump-scan from max(hint, mmap_brk). Returns the start vaddr, or 0
-// if none found (caller returns -ENOMEM). Pure query; does not touch mm.
+// Find a free interval of length >= len in the VMA list and page tables. The
+// fixed signal-trampoline ABI page is reserved explicitly even if its PTE is
+// temporarily absent. Returns 0 if no gap exists.
 uint64_t vma_find_gap(mm *mm, uint64_t len, uint64_t hint);
 
 // Insert region sorted by vaddr. Returns 0, or -EEXIST on vaddr collision.

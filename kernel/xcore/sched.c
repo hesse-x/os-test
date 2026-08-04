@@ -419,10 +419,21 @@ void sched_try_steal_task(void) {
   }
   ASSERT(cpu_locals[v].run_count > 0);
 
-  // Steal the tail: for a circular doubly-linked list head->prev is the tail
-  // (list_push_back already relies on this invariant)
+  /* A task may already be on its run queue while it is still executing on the
+     victim CPU: wake_from_wait can win the short BLOCKED -> schedule window.
+     It is READY, but must not migrate until that CPU enters schedule() and
+     consumes its run_node.  Stealing it would run one kernel stack on two
+     CPUs.  Find the last genuinely inactive runnable task instead. */
   list_node *head = &cpu_locals[v].run_queue;
   list_node *tail_node = head->prev;
+  xtask *victim_current = cpu_locals[v]._cur_proc;
+  while (tail_node != head &&
+         LIST_ENTRY(tail_node, xtask, run_node) == victim_current)
+    tail_node = tail_node->prev;
+  if (tail_node == head) {
+    spin_unlock_irqrestore(&cpu_locals[v].scheduler_lock, vflags);
+    goto out;
+  }
   xtask *t = LIST_ENTRY(tail_node, xtask, run_node);
   // design1 §4.4: steal integrity asserts — the stolen task must be READY and
   // its run_node on the victim's run_queue (we hold v's scheduler_lock, so the

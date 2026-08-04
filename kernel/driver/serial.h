@@ -8,6 +8,7 @@
 #define KERNEL_SERIAL_H
 
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -41,6 +42,7 @@ void serial_write(const char *buf, size_t len);
 // Multi-call atomic sections: bracket with acquire/release (irqsave), use the
 // *_locked variants inside. The public functions above lock internally.
 uint64_t serial_tx_acquire(void);
+bool serial_tx_try_acquire(uint64_t *flags);
 void serial_tx_release(uint64_t flags);
 void serial_printf_locked(const char *fmt, ...);
 void serial_vprintf_locked(const char *fmt, va_list ap);

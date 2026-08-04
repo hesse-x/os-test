@@ -47,6 +47,7 @@
 #include "drm/virtgpu_drm.h"
 
 #define DRM_MAJOR 226
+#define DRM_VBLANK_INTERVAL_NS (1000000000ULL / 60ULL)
 
 struct virtio_gpu_device g_virtio_gpu;
 struct drm_device g_drm;
@@ -80,17 +81,16 @@ static void virtio_gpu_cmd_callback(void *ctx, uint32_t len) {
   } else {
     struct virtgpu_sync_ctx *sc = (struct virtgpu_sync_ctx *)ctx;
     sc->completed = true;
+    if (sc->waiter)
+      wake_wq_target(sc->waiter);
   }
   (void)len;
 }
 
-/* Wake callback for wait_queue: bridges __wake_up → wake_wq_target.
-   队列身份制：cmd_wq 与资源 wq 物理隔离，跨源不可达；task 在 cmd_wq 上即唤醒，
-   不查 wait_event。锁序：cmd_wq.lock → scheduler_lock（A-class wq→sched）。 */
+/* Bridge fence wait-queue notifications to the scheduler. */
 static void virtio_gpu_wake_cb(wait_queue_t *wq, unsigned long flags) {
-  xtask *target = (xtask *)wq->data;
   (void)flags;
-  wake_wq_target(target);
+  wake_wq_target((xtask *)wq->data);
 }
 
 /* Forward declarations */
@@ -226,8 +226,6 @@ static void virtio_gpu_isr(trapframe *tf) {
       }
     }
     spin_unlock_irqrestore(&vgpu->pending_lock, flags);
-
-    __wake_up(&vgpu->cmd_wq, 0); /* sync-path sleepers */
   }
   /* config change: not handled (no EDID) */
 
@@ -247,8 +245,8 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
      when the device processes this descriptor.  Each caller has its own
      ctx on the stack, so concurrent send_cmd invocations don't clobber
      each other's state. */
-  struct virtgpu_sync_ctx cmd_ctx = {.tag = VIRTGPU_CTX_SYNC,
-                                     .completed = false};
+  struct virtgpu_sync_ctx cmd_ctx = {
+      .tag = VIRTGPU_CTX_SYNC, .completed = false, .waiter = current_task};
 
   /* Physical addresses for descriptors (must be guest-physical) */
   uint64_t cmd_phys = (uint64_t)PHY_ADDR((uintptr_t)cmd_buf);
@@ -280,19 +278,6 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
     return cmd_ctx.completed ? 0 : -1;
   }
 
-  /* Process context: register on wait queue, submit, and sleep in a loop.
-     The loop handles spurious wakes (__wake_up wakes all waiters; those
-     whose command hasn't completed yet re-sleep).  The "set BLOCKED →
-     re-check → schedule" pattern prevents lost wakeup: if the ISR fires
-     between setting BLOCKED and calling schedule(), wake_with_event sets
-     state to READY, and schedule() returns immediately. */
-  wait_queue_t wait;
-  wait.func = virtio_gpu_wake_cb;
-  wait.data = current_task;
-  wait.exclusive = 0;
-  list_init(&wait.node);
-  add_wait_queue(&vgpu->cmd_wq, &wait);
-
   /* Hold cmd_lock with interrupts disabled: the virtio-gpu ISR also takes
      cmd_lock to drain the used ring, so acquiring it irqsave on the
      process side prevents a same-CPU ISR re-entry from deadlocking, and
@@ -304,42 +289,45 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
   int head = vring_add_buf(&vgpu->ctrlq, addrs, lens, flags, 2, &cmd_ctx);
   if (head < 0) {
     spin_unlock_irqrestore(&vgpu->cmd_lock, irq_flags);
-    remove_wait_queue(&vgpu->cmd_wq, &wait);
     printk(LOG_ERROR, "virtio_gpu: vring_add_buf failed\n");
     return -1;
   }
 
-  /* Arm BLOCKED state before kick — lost-wakeup-safe: after we release
-     cmd_lock (re-enabling interrupts) the ISR may fire immediately, see
-     BLOCKED, and wake us via __wake_up(&cmd_wq). 队列身份制：cmd_wq 与资源 wq
-     物理隔离，能唤醒 GPU 等待者的只有 ISR 对 cmd_wq 的 __wake_up，跨源不可达；
-     此处 arm 防 unlock(cmd_lock) → schedule() 之间 ISR 在首轮 schedule 前
-     fire。 */
-  current_task->state = BLOCKED;
+  /* cmd_lock is also held by the completion callback.  Arm the task while
+     holding both cmd_lock and its scheduler lock, so completion cannot race
+     between the completion test and BLOCKED transition. */
+  xtask *waiter = current_task;
+  int wait_cpu = waiter->assigned_cpu;
+  spin_lock(&cpu_locals[wait_cpu].scheduler_lock);
+  waiter->state = BLOCKED;
+  spin_unlock(&cpu_locals[wait_cpu].scheduler_lock);
 
   vring_kick(&vgpu->ctrlq);
   virtio_pci_notify(&vgpu->vpci, vgpu->ctrlq.notify_off);
 
-  /* Release lock before sleeping — the ISR drains the used ring under
-     cmd_lock.  If the ISR already completed our command it set
-     cmd_ctx.completed=true and (via __wake_up) enqueued our run_node;
-     schedule() below dequeues it and runs us. */
+  /* Release cmd_lock before sleeping; the ISR completes this exact context
+     and wakes only its submitter. */
   spin_unlock_irqrestore(&vgpu->cmd_lock, irq_flags);
 
-  /* Wait loop.  We go through schedule() on EVERY iteration (do/while, not a
-     pre-test that early-exits): schedule() is the only place our run_node is
-     dequeued from the run_queue.  If the ISR already enqueued run_node (fast
-     completion), schedule() dequeues it and re-runs us; if not, we block
-     until the ISR wakes us via __wake_up(&cmd_wq). 队列身份制：被唤醒 ⇔ cmd_wq
-     wake ⇔ ISR 完成 ⇔ cmd_ctx.completed，循环只在真完成时退出；cmd_wq 与资源 wq
-     物理隔离，跨源不可达。used ring 仅由 ISR drain，此处不轮询。 */
-  do {
-    current_task->state = BLOCKED;
+  for (;;) {
     schedule();
-  } while (!cmd_ctx.completed);
+    if (cmd_ctx.completed)
+      break;
 
-  remove_wait_queue(&vgpu->cmd_wq, &wait);
-  return cmd_ctx.completed ? 0 : -1;
+    /* Signals may wake a blocked task without completing the command.  Take
+       cmd_lock before re-arming so the ISR cannot publish completion between
+       this check and the BLOCKED transition. */
+    spin_lock_irqsave(&vgpu->cmd_lock, &irq_flags);
+    if (!cmd_ctx.completed) {
+      wait_cpu = waiter->assigned_cpu;
+      spin_lock(&cpu_locals[wait_cpu].scheduler_lock);
+      waiter->state = BLOCKED;
+      spin_unlock(&cpu_locals[wait_cpu].scheduler_lock);
+    }
+    spin_unlock_irqrestore(&vgpu->cmd_lock, irq_flags);
+  }
+
+  return 0;
 }
 
 /* 3D/context/blob commands: identical to send_cmd (2-descriptor cmd+resp,
@@ -1759,7 +1747,9 @@ static void drm_master_cleanup(void) {
 
   /* 2. Clear pending page flip event */
   spin_lock(&g_drm.event_lock);
+  g_drm.event_armed = false;
   g_drm.event_pending = false;
+  g_drm.event_deadline_ns = 0;
   g_drm.event_sequence = 0;
   g_drm.event_user_data = 0;
   spin_unlock(&g_drm.event_lock);
@@ -2896,6 +2886,20 @@ static long drm_ioctl_page_flip(void *arg) {
   if (!resource_id)
     return -EINVAL;
 
+  bool armed_event = false;
+  if (p->flags & DRM_MODE_PAGE_FLIP_EVENT) {
+    spin_lock(&g_drm.event_lock);
+    if (g_drm.event_armed || g_drm.event_pending) {
+      spin_unlock(&g_drm.event_lock);
+      return -EBUSY;
+    }
+    g_drm.event_armed = true;
+    g_drm.event_deadline_ns = sched_clock() + DRM_VBLANK_INTERVAL_NS;
+    g_drm.event_user_data = p->user_data;
+    spin_unlock(&g_drm.event_lock);
+    armed_event = true;
+  }
+
   if (d) {
     drm_cursor_overlay(d);
     virtio_gpu_transfer_2d(resource_id, 0, 0, d->width, d->height, 0);
@@ -2904,27 +2908,32 @@ static long drm_ioctl_page_flip(void *arg) {
   virtio_gpu_flush(resource_id, 0, 0, fb->width, fb->height);
 
   g_drm.current_fb_id = p->fb_id;
-
-  bool signal_event = false;
-  if (p->flags & DRM_MODE_PAGE_FLIP_EVENT) {
-    spin_lock(&g_drm.event_lock);
-    g_drm.event_pending = true;
-    g_drm.event_sequence++;
-    g_drm.event_user_data = p->user_data;
-    spin_unlock(&g_drm.event_lock);
-    signal_event = true;
-  }
-  /* Wake poll waiters outside event_lock: __wake_up takes event_wq->lock,
-   * and keeping the order (event_lock → wq->lock) one-directional avoids
-   * any cross with drm_poll's event_lock-only read. */
-  if (signal_event)
-    __wake_up(&g_drm.event_wq, POLLIN);
-  if (signal_event && drm_page_flip_log_count < 3) {
+  if (armed_event && drm_page_flip_log_count < 3) {
     drm_page_flip_log_count++;
     printk(LOG_INFO, "drm: page flip #%u queued fb=%u resource=%u\n",
            drm_page_flip_log_count, p->fb_id, resource_id);
   }
   return 0;
+}
+
+void virtio_gpu_poll(void) {
+  if (!g_drm.initialized)
+    return;
+
+  bool signal_event = false;
+  uint64_t now = sched_clock();
+  spin_lock(&g_drm.event_lock);
+  if (g_drm.event_armed && now >= g_drm.event_deadline_ns) {
+    g_drm.event_armed = false;
+    g_drm.event_pending = true;
+    g_drm.event_sequence++;
+    signal_event = true;
+  }
+  spin_unlock(&g_drm.event_lock);
+
+  /* Keep event_lock and the wait-queue lock non-nested. */
+  if (signal_event)
+    __wake_up(&g_drm.event_wq, POLLIN);
 }
 
 /* DRM_IOCTL_MODE_DIRTYFB */
@@ -3642,7 +3651,10 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
   size_t npages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
   uint64_t *pml4 =
       (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->mm->cr3);
-  uint64_t vaddr = proc->mm->mmap_brk;
+  int64_t picked = vma_pick_addr(proc->mm, pml4, 0, size, 0, 0);
+  if (picked < 0)
+    return (uint64_t)picked;
+  uint64_t vaddr = (uint64_t)picked;
   uint64_t pte_flags = PTE_PRESENT | PTE_RW | PTE_USER | PTE_NX;
 
   for (size_t i = 0; i < npages; i++) {
@@ -3650,8 +3662,7 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
     if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, page_phys,
                               pte_flags)) {
       for (size_t j = 0; j < i; j++)
-        unmap_user_pages(pml4, vaddr + j * PAGE_SIZE,
-                         vaddr + (j + 1) * PAGE_SIZE, 1);
+        clear_user_pte(pml4, vaddr + j * PAGE_SIZE);
       return (uint64_t)-ENOMEM;
     }
   }
@@ -3659,8 +3670,7 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
   mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
   if (!region) {
     for (size_t i = 0; i < npages; i++)
-      unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE,
-                       1);
+      clear_user_pte(pml4, vaddr + i * PAGE_SIZE);
     return (uint64_t)-ENOMEM;
   }
   region->vaddr = vaddr;
@@ -3673,7 +3683,12 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
   region->inode = NULL;
   region->shm_private_src = NULL;
   region->next = NULL;
-  vma_insert_sorted(proc->mm, region);
+  if (vma_insert_sorted(proc->mm, region) != 0) {
+    for (size_t i = 0; i < npages; i++)
+      clear_user_pte(pml4, vaddr + i * PAGE_SIZE);
+    kfree(region);
+    return (uint64_t)-EEXIST;
+  }
   proc->mm->mmap_brk = vaddr + npages * PAGE_SIZE;
 
   return vaddr;
@@ -3716,6 +3731,7 @@ static ssize_t drm_read(xtask *proc, int fd, void *buf, size_t count) {
   ev.tv_usec = (uint32_t)((now % 1000000000ULL) / 1000ULL);
   ev.crtc_id = DRM_CRTC_ID;
   g_drm.event_pending = false;
+  g_drm.event_deadline_ns = 0;
   spin_unlock(&g_drm.event_lock);
 
   if (drm_flip_event_log_count < 3) {
@@ -3805,7 +3821,6 @@ void virtio_gpu_init(void) {
   struct virtio_gpu_device *vgpu = &g_virtio_gpu;
   __memset(vgpu, 0, sizeof(*vgpu));
   vgpu->cmd_lock = SPINLOCK_INIT;
-  init_wait_queue_head(&vgpu->cmd_wq);
   vgpu->pending_lock = SPINLOCK_INIT;
   vgpu->pending_list = NULL;
 

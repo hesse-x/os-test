@@ -21,6 +21,14 @@
 #include <xos/errno.h>
 #include <xos/mman.h>
 #include <xos/page.h>
+#include <xos/signal.h>
+
+static bool overlaps_signal_trampoline(uint64_t start, uint64_t len) {
+  if (len == 0 || start > UINT64_MAX - len)
+    return false;
+  uint64_t end = start + len;
+  return start < SIG_TRAMPOLINE_ADDR + PAGE_SIZE && end > SIG_TRAMPOLINE_ADDR;
+}
 
 // USER_VMA_UPPER_BOUND now lives in vma.h (shared with sys_mremap).
 
@@ -58,19 +66,49 @@ static bool vma_overlaps(mm *mm, uint64_t start, uint64_t len) {
   return false;
 }
 
-uint64_t vma_find_gap(mm *mm, uint64_t len, uint64_t hint) {
-  if (hint && !vma_overlaps(mm, hint, len))
-    return hint;
-  uint64_t cur = (hint < mm->mmap_brk) ? mm->mmap_brk : hint;
-  for (mmap_region *mr = mm->mmap_regions; mr; mr = mr->next) {
-    if (cur + len <= mr->vaddr)
-      return cur;
-    if (mr->vaddr + mr->size > cur)
-      cur = mr->vaddr + mr->size;
+static uint64_t first_mapped_page(mm *mm, uint64_t start, uint64_t len) {
+  // The trampoline is a kernel-owned reservation, not a normal mmap_region.
+  // Treat it as occupied even if its PTE is temporarily absent so a failed
+  // exec/map cannot make later allocations straddle the fixed signal ABI page.
+  if (overlaps_signal_trampoline(start, len))
+    return SIG_TRAMPOLINE_ADDR;
+  uint64_t end = start + len;
+  for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+    if (lookup_pte(mm->cr3, va))
+      return va;
   }
-  if (cur + len <= USER_VMA_UPPER_BOUND)
-    return cur;
   return 0;
+}
+
+uint64_t vma_find_gap(mm *mm, uint64_t len, uint64_t hint) {
+  if (hint && len <= USER_VMA_UPPER_BOUND - hint &&
+      !vma_overlaps(mm, hint, len) && !first_mapped_page(mm, hint, len))
+    return hint;
+
+  uint64_t cur = (hint < mm->mmap_brk) ? mm->mmap_brk : hint;
+  for (;;) {
+    if (cur >= USER_VMA_UPPER_BOUND || len > USER_VMA_UPPER_BOUND - cur)
+      return 0;
+
+    bool moved = false;
+    for (mmap_region *mr = mm->mmap_regions; mr; mr = mr->next) {
+      uint64_t mr_end = mr->vaddr + mr->size;
+      if (mr_end <= cur)
+        continue;
+      if (mr->vaddr >= cur + len)
+        break;
+      cur = mr_end;
+      moved = true;
+      break;
+    }
+    if (moved)
+      continue;
+
+    uint64_t mapped = first_mapped_page(mm, cur, len);
+    if (!mapped)
+      return cur;
+    cur = mapped + PAGE_SIZE;
+  }
 }
 
 mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
@@ -250,6 +288,8 @@ int vma_protect_range(mm *mm, uint64_t addr, uint64_t len, uint32_t prot) {
 // Does [start, start+len) overlap any region? Sorted list lets us stop early.
 // Public for MAP_FIXED_NOREPLACE conflict detection.
 bool vma_overlaps_any(mm *mm, uint64_t start, uint64_t len) {
+  if (overlaps_signal_trampoline(start, len))
+    return true;
   return vma_overlaps(mm, start, len);
 }
 
@@ -288,6 +328,10 @@ static void free_one_region(mm *mm, uint64_t *pml4, mmap_region *r) {
     }
     if (r->shm_obj)
       shm_put(r->shm_obj);
+    if (r->flags & KMAP_DMA_OWNED) {
+      struct page *page = &bfc_frames[r->phys / PAGE_SIZE];
+      bfc_free_page(page, npages);
+    }
   } else {
     // Anonymous: unmap_user_pages refcount-decs and frees pages + clears PTEs.
     for (size_t i = 0; i < npages; i++) {
@@ -366,11 +410,14 @@ int vma_unmap_range(mm *mm, uint64_t *pml4, uint64_t addr, uint64_t len) {
 //  - MAP_FIXED_NOREPLACE: -EEXIST on any overlap, else addr (no unmapping).
 //  - neither:             vma_find_gap(len, hint); 0 → -ENOMEM.
 // Returns the vaddr as a non-negative int64_t, or a negative -errno. The
-// caller advances mmap_brk only when the returned vaddr equals mmap_brk.
+// placement helper does not mutate mmap_brk; callers apply the policy for
+// default allocations versus explicit hints after the mapping succeeds.
 // Caller holds mm->mmap_lock.
 int64_t vma_pick_addr(mm *mm, uint64_t *pml4, uint64_t addr, uint64_t len,
                       uint32_t flags, uint64_t hint) {
   if (flags & MAP_FIXED) {
+    if (overlaps_signal_trampoline(addr, len))
+      return -EINVAL;
     int r = vma_unmap_range(mm, pml4, addr, len);
     if (r < 0)
       return r;
