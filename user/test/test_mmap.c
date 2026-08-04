@@ -90,6 +90,27 @@ void test_memfd_create(void) {
   close(fd);
 }
 
+/* POSIX shared memory is backed by the dedicated /dev/shm tmpfs mount. */
+void test_shm_open_mmap(void) {
+  const char *name = "/test_mmap_posix_shm";
+  shm_unlink(name);
+  TEST_ASSERT_EQUAL_INT(0, access("/dev/shm", F_OK));
+
+  int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+  TEST_ASSERT_TRUE(fd >= 0);
+  TEST_ASSERT_EQUAL_INT(-1, access("/run/test_mmap_posix_shm", F_OK));
+  TEST_ASSERT_EQUAL_INT(0, ftruncate(fd, 4096));
+
+  char *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  TEST_ASSERT_TRUE(p != NULL && p != MAP_FAILED);
+  memcpy(p, "posix-shm", sizeof("posix-shm"));
+  TEST_ASSERT_EQUAL_STRING("posix-shm", p);
+
+  munmap(p, 4096);
+  close(fd);
+  TEST_ASSERT_EQUAL_INT(0, shm_unlink(name));
+}
+
 /* 8. memfd → ftruncate → mmap → write/read */
 void test_memfd_mmap(void) {
   int fd = memfd_create("test_mmap", 0);
@@ -319,6 +340,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_mmap_addr_hint);
   RUN_TEST(test_mmap_shm_fd);
   RUN_TEST(test_memfd_create);
+  RUN_TEST(test_shm_open_mmap);
   RUN_TEST(test_memfd_mmap);
   RUN_TEST(test_memfd_write_mmap);
   RUN_TEST(test_ftruncate_grow);

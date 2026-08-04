@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * tmpfs: 内存文件系统，承载 /run（udevd db 前置）。重启清空，进程 crash
+ * tmpfs: 内存文件系统，承载 /run 和 /dev/shm。重启清空，进程 crash
  * 不影响。 ino 从 0xC0000000 段自维护分配，避开 devtmpfs 0x80000000 + FAT32
  * cluster 段。 注：INODE_DIR 经 inode_create 强制走 next_dev_ino（dev
  * 段），仅文件/socket 落 0xC0000000+ 段；各段由全局 inode hash
@@ -49,7 +49,6 @@ struct tmpfs_inode_info {
   spinlock lock; /* 保护 data/size/children */
 };
 
-static struct inode *tmpfs_root_inode;
 static uint32_t next_tmpfs_ino = 0xC0000000;
 static spinlock tmpfs_ino_lock = SPINLOCK_INIT;
 
@@ -737,16 +736,21 @@ done:
 
 /* ===== mount_root ===== */
 static struct inode *tmpfs_mount_root(struct mount_entry *m) {
-  (void)m;
-  if (!tmpfs_root_inode) {
+  if (!m->root) {
     uint32_t ino = tmpfs_alloc_ino();
-    tmpfs_root_inode = inode_create(ino, INODE_DIR, 0, 0, 0, 0);
-    if (!tmpfs_root_inode)
+    struct inode *root = inode_create(ino, INODE_DIR, 0, 0, 0, 0);
+    if (!root)
       return NULL;
-    tmpfs_root_inode->i_op = &tmpfs_dir_iop;
-    tmpfs_root_inode->i_priv = new_tmpfs_info(tmpfs_root_inode, NULL);
+    root->i_op = &tmpfs_dir_iop;
+    root->i_priv = new_tmpfs_info(root, NULL);
+    if (!root->i_priv) {
+      inode_put(root);
+      return NULL;
+    }
+    root->mount = m;
+    m->root = root;
   }
-  return inode_get(tmpfs_root_inode);
+  return inode_get(m->root);
 }
 
 /* ===== fops：read/write ===== */

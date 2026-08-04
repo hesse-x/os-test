@@ -100,6 +100,10 @@ void vfs_init(void) {
           fat32_mkdir("/run");
       }
       mount_internal(&tmpfs_fstype, "/run", NULL, 0);
+      /* POSIX shm_open maps names to /dev/shm. Keep it on a distinct tmpfs
+       * mount so shared-memory objects cannot collide with /run contents. */
+      devtmpfs_mkdir("shm");
+      mount_internal(&tmpfs_fstype, "/dev/shm", NULL, 0);
       devtmpfs_create("sda", &blk_dev_ops, NULL);
       break;
     }

@@ -29,6 +29,7 @@ void mount_init(void) {
     mount_table[i].mntpoint[0] = '\0';
     mount_table[i].fs = NULL;
     mount_table[i].fs_data = NULL;
+    mount_table[i].root = NULL;
   }
   fstype_count = 0;
 }
@@ -75,6 +76,7 @@ int mount_internal(struct fstype *fs, const char *target, void *fs_data,
   mount_table[slot].mntpoint[j] = '\0';
   mount_table[slot].fs = fs;
   mount_table[slot].fs_data = fs_data;
+  mount_table[slot].root = NULL;
   mount_table[slot].m_flags = flags;
   mount_table[slot].in_use = true;
   spin_unlock(&mount_lock);

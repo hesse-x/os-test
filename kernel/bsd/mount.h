@@ -81,9 +81,10 @@ struct fstype {
 struct mount_entry {
   char mntpoint[MNTPOINT_MAX]; // "/" / "/dev" / "/sys"
   struct fstype *fs;
-  void *fs_data;    // mount-private data (NULL for fat32/devtmpfs)
-  uint32_t m_flags; // MS_* bits accepted at mount(2) (MS_NOSUID consumed by
-                    // execve; RDONLY/NODEV/NOEXEC stored, not yet enforced)
+  void *fs_data;      // mount-private data (NULL for fat32/devtmpfs)
+  struct inode *root; // per-mount root inode for filesystems such as tmpfs
+  uint32_t m_flags;   // MS_* bits accepted at mount(2) (MS_NOSUID consumed by
+                      // execve; RDONLY/NODEV/NOEXEC stored, not yet enforced)
   bool in_use;
 };
 

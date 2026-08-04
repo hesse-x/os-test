@@ -181,6 +181,16 @@ static struct dev_dir *devtmpfs_get_or_create_dir(const char *name, int len) {
   return nd;
 }
 
+int devtmpfs_mkdir(const char *name) {
+  if (!name || !name[0] || __strchr(name, '/'))
+    return -EINVAL;
+  int len = (int)__strlen(name);
+  spin_lock(&devtmpfs_lock);
+  struct dev_dir *dir = devtmpfs_get_or_create_dir(name, len);
+  spin_unlock(&devtmpfs_lock);
+  return dir ? 0 : -ENOMEM;
+}
+
 // devtmpfs_iget: wraps inode_create + sets i_op. devtmpfs inodes are kept
 // resident by a base ref held via the dev_list/dev_dir kmalloc'd list node's
 // ip.

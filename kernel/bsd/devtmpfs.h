@@ -77,6 +77,7 @@ struct dev_ops {
 };
 
 void devtmpfs_init(void);
+int devtmpfs_mkdir(const char *name);
 int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm);
 uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
                        struct mount_entry *m);
