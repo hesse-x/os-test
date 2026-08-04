@@ -24,6 +24,8 @@ while [[ $# -gt 0 ]]; do
             FORCE_LIBCXX=1
             FORCE_MESA=1
             BUILD_WLROOTS_DEPS=1
+            BUILD_WLROOTS=1
+            MESA_DRIVER=virgl
             shift
             ;;
         --sanitizer)
@@ -56,8 +58,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --wlroots)
-            # The complete compositor profile requires the C++ runtime and
-            # Mesa virgl before wlroots can be configured.
+            # wlroots needs the C++ runtime and Mesa virgl in its sysroot.
             BUILD_WLROOTS_DEPS=1
             BUILD_WLROOTS=1
             FORCE_LIBCXX=1
@@ -65,8 +66,9 @@ while [[ $# -gt 0 ]]; do
             MESA_DRIVER=virgl
             shift
             ;;
-        --desktop=compositor)
-            CMAKE_EXTRA="$CMAKE_EXTRA -DDESKTOP_COMPOSITOR=1"
+        --tinywl)
+            CMAKE_EXTRA="$CMAKE_EXTRA -DTINYWL=1"
+            BUILD_TINYWL=1
             BUILD_WLROOTS_DEPS=1
             BUILD_WLROOTS=1
             FORCE_LIBCXX=1
@@ -75,7 +77,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         *)
-            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf] [--gcc] [--clang] [--cxx] [--mesa] [--wlroots] [--desktop=compositor]"
+            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf] [--gcc] [--clang] [--cxx] [--mesa] [--wlroots] [--tinywl]"
             exit 1
             ;;
     esac
@@ -87,6 +89,9 @@ if ! echo "$CMAKE_EXTRA" | grep -q "SANITIZE="; then
 fi
 if [ "${BUILD_TEST:-0}" != "1" ]; then
     CMAKE_EXTRA="$CMAKE_EXTRA -DTEST=0"
+fi
+if [ "${BUILD_TINYWL:-0}" != "1" ]; then
+    CMAKE_EXTRA="$CMAKE_EXTRA -DTINYWL=0"
 fi
 
 # A normal build is incremental but self-healing: missing runtime products cause
@@ -262,7 +267,7 @@ PY
                 # Upstream meson.build uses soversion=version_minor (4), so the
                 # real SONAME baked into the ELF is libdisplay-info.so.4 — NOT
                 # .so.0. wlroots links against the SONAME, so the runtime loader
-                # must find libdisplay-info.so.4 or compositor startup fails.
+                # must find libdisplay-info.so.4 at runtime.
                 ln -sf libdisplay-info.so.0.4.0 "$SYSROOT/usr/lib/libdisplay-info.so.4"
                 ln -sf libdisplay-info.so.4 "$SYSROOT/usr/lib/libdisplay-info.so"
                 cp -a "$source/include/libdisplay-info" "$SYSROOT/usr/include/"
@@ -546,9 +551,9 @@ if missing:
 PY
 fi
 
-# Build wlroots and the two M0 programs only for the explicit wlroots profile.
+# Build wlroots only for the explicit wlroots profile.
 if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
-    echo "=== Building wlroots 0.20.2 and M0 compositor ==="
+    echo "=== Building wlroots 0.20.2 ==="
     bash build_script/third_party/wlroots/prepare-sysroot.sh
     SYSROOT="$(cd build/sysroot && pwd)"
     # libEGL.so's DT_NEEDED includes libgallium-26.1.4.so; the Mesa stage only
@@ -587,7 +592,10 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
         meson setup "${WLROOTS_SETUP[@]}"
     fi
     printf '%s\n' "$WLROOTS_CONFIG_SUM" > "$WLROOTS_STAMP"
-    ninja -C "$WLROOTS_BUILD" libwlroots-0.20.so tinywl
+    # meson places the tinywl executable at <builddir>/tinywl/tinywl (the
+    # output subdir is named after the source subdir), so the ninja target and
+    # the staged source path both use tinywl/tinywl, not bare "tinywl".
+    ninja -C "$WLROOTS_BUILD" libwlroots-0.20.so tinywl/tinywl
     meson install -C "$WLROOTS_BUILD" --no-rebuild --destdir "$SYSROOT"
 
     MESON_SUMMARY="$WLROOTS_BUILD/meson-logs/meson-log.txt"
@@ -606,8 +614,9 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
 
     WLROOTS_LIB="$SYSROOT/usr/lib/libwlroots-0.20.so"
     install -m 755 "$WLROOTS_LIB" build/libwlroots-0.20.so
-    # tinywl has no install: kwarg, so the meson product stays in the builddir.
-    install -m 755 "$WLROOTS_BUILD/tinywl" build/tinywl
+    # tinywl has no install: kwarg, so the meson product stays in the builddir
+    # at tinywl/tinywl (see the ninja target note above).
+    install -m 755 "$WLROOTS_BUILD/tinywl/tinywl" build/tinywl
 
     # --- ELF static audit: build/tinywl + build/libwlroots-0.20.so ---
     # Judge 1: interpreter (executable ELF must be musl; .so has no PT_INTERP, skip)
@@ -618,7 +627,7 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
         exit 1
     fi
     # Judge 2: forbidden dependency grep
-    if readelf -dW build/tinywl build/libwlroots-0.20.so | \
+    if LC_ALL=C readelf -dW build/tinywl build/libwlroots-0.20.so | \
        grep -Eiq 'lib(X11|xcb|vulkan|systemd|elogind|dbus|liftoff)|libstdc\+\+|llvmpipe'; then
         echo "ERROR: forbidden dependency in wlroots runtime" >&2
         exit 1
@@ -630,8 +639,12 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
     audit_allowed="$( ( ls "$SYSROOT/usr/lib"/*.so "$SYSROOT/usr/lib"/*.so.* 2>/dev/null; \
                        ls build/*.so build/*.so.* 2>/dev/null ) \
                      | xargs -n1 basename 2>/dev/null | sort -u )"
-    audit_needed="$(readelf -dW build/tinywl build/libwlroots-0.20.so 2>/dev/null \
-                    | awk '/NEEDED/ {gsub(/\[\]/,"",$NF); print $NF}' | sort -u)"
+    # LC_ALL=C forces English readelf output so the awk field layout is stable
+    # (a zh_CN.UTF-8 host renders the NEEDED value as "共享库：[libc.so]", a
+    # single space-free field, which breaks the $NF extraction). The bracket
+    # class [\[\]] strips the surrounding [] that readelf wraps the soname in.
+    audit_needed="$(LC_ALL=C readelf -dW build/tinywl build/libwlroots-0.20.so 2>/dev/null \
+                    | awk '/NEEDED/ {gsub(/[\[\]]/,"",$NF); print $NF}' | sort -u)"
     audit_missing=""
     for n in $audit_needed; do
         echo "$audit_allowed" | grep -qx "$n" || audit_missing="$audit_missing $n"

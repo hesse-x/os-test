@@ -49,7 +49,10 @@ struct input_dev_props {
 struct sysfs_node {
   char name[32];
   bool is_dir;
-  bool attr_owned; // true = attr is kmalloc'd, free on removal
+  bool is_symlink;
+  bool attr_owned;      // true = attr is kmalloc'd, free on removal
+  bool attr_priv_owned; // true = attr->priv is kmalloc'd, free on removal
+  char *symlink_target;
   struct sysfs_node *parent;
   struct sysfs_node *children;
   struct sysfs_node *sibling;
@@ -74,8 +77,20 @@ struct sysfs_node *sysfs_create_dir(struct sysfs_node *parent,
 struct sysfs_node *sysfs_create_file(struct sysfs_node *parent,
                                      const char *name,
                                      const struct sysfs_attr *attr);
+struct sysfs_node *sysfs_create_symlink(struct sysfs_node *parent,
+                                        const char *name, const char *target);
 void sysfs_remove_dir(struct sysfs_node *dir);
 struct sysfs_node *sysfs_class_dir(const char *subsystem);
+struct sysfs_node *sysfs_devchar_register(unsigned major, unsigned minor,
+                                          const char *devname,
+                                          const char *subsystem_target);
+struct sysfs_node *sysfs_devchar_add_device_child(struct sysfs_node *root,
+                                                  const char *group,
+                                                  const char *name);
+struct sysfs_node *sysfs_devchar_add_device_file(struct sysfs_node *root,
+                                                 const char *name,
+                                                 const struct sysfs_attr *attr);
+void sysfs_devchar_unregister(unsigned major, unsigned minor);
 void sysfs_init(void);
 struct sysfs_node *sysfs_root_node(void);
 

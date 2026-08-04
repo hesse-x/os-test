@@ -368,6 +368,13 @@ void file_put(struct file *f) {
       f->sync_file_fence = NULL;
     }
     break;
+  case FD_DRM_PRIME:
+    if (f->drm_prime) {
+      extern void drm_prime_object_put(struct drm_prime_object * object);
+      drm_prime_object_put(f->drm_prime);
+      f->drm_prime = NULL;
+    }
+    break;
   case FD_IPC:
     // Clear the owner task's ipcfd_file back-link and drop the create-time
     // reference (evdev_refact.md §4.3 生命周期 / §5.6).
@@ -434,6 +441,48 @@ int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence) {
   fd_install(proc->proc->files, fd, f);
   spin_unlock(&proc->proc->files->fd_lock);
   return fd;
+}
+
+int bsd_drm_prime_fd_install(xtask *proc, struct drm_prime_object *object,
+                             bool cloexec) {
+  if (!proc || !object)
+    return -EINVAL;
+
+  files *fl = proc->proc->files;
+  spin_lock(&fl->fd_lock);
+  int fd = alloc_fd(fl, 0);
+  if (fd < 0) {
+    spin_unlock(&fl->fd_lock);
+    return -EMFILE;
+  }
+  struct file *f = (struct file *)kmalloc(sizeof(*f));
+  if (!f) {
+    spin_unlock(&fl->fd_lock);
+    return -ENOMEM;
+  }
+  __memset(f, 0, sizeof(*f));
+  refcount_set(&f->f_count, 1);
+  f->type = FD_DRM_PRIME;
+  f->drm_prime = object;
+  fd_install(fl, fd, f);
+  fd_set_cloexec(fl, fd, cloexec ? 1 : 0);
+  spin_unlock(&fl->fd_lock);
+  return fd;
+}
+
+struct file *bsd_drm_prime_fd_get(xtask *proc, int fd) {
+  if (!proc || fd < 0 || fd >= MAX_FD)
+    return NULL;
+  files *fl = proc->proc->files;
+  spin_lock(&fl->fd_lock);
+  struct file *f = fd_lookup(fl, fd);
+  if (!f || f->type != FD_DRM_PRIME || !f->drm_prime) {
+    spin_unlock(&fl->fd_lock);
+    return NULL;
+  }
+  file_get(f);
+  spin_unlock(&fl->fd_lock);
+  return f;
 }
 
 void pty_close_file(struct file *f) {
@@ -1072,7 +1121,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     return (int64_t)-EINVAL;
 
   // 1. Allocate an xtask slot
-  printk(LOG_ERROR, "[DBG] sys_clone ENTER parent_pid=%d flags=0x%lx\n",
+  printk(LOG_DEBUG, "[DBG] sys_clone ENTER parent_pid=%d flags=0x%lx\n",
          parent->pid, (unsigned long)flags);
   spin_lock(&tasks_lock);
   int alloc_idx = -1;
@@ -1253,7 +1302,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   child_bp->sig_pending = 0;
   child_bp->sig_blocked = parent->proc->sig_blocked;
   printk(
-      LOG_ERROR,
+      LOG_DEBUG,
       "[DBG] clone parent_pid=%d child_pid=%d inherited_sig_blocked=0x%llx\n",
       parent->pid, alloc_idx, (unsigned long long)parent->proc->sig_blocked);
   child_bp->exit_code = 0;
@@ -1996,7 +2045,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   // 10. kfree ELF buffer
   kfree(elf_buf);
 
-  printk(LOG_ERROR, "[DBG] execve RET pid=%d sig_blocked=0x%llx\n", proc->pid,
+  printk(LOG_DEBUG, "[DBG] execve RET pid=%d sig_blocked=0x%llx\n", proc->pid,
          (unsigned long long)proc->proc->sig_blocked);
   return 0;
 }

@@ -54,6 +54,7 @@
 #define FD_IPC 14
 #define FD_SYNC_FILE 15
 #define FD_INOTIFY 16
+#define FD_DRM_PRIME 17
 
 typedef struct pipe {
   uint8_t *buf;
@@ -74,6 +75,7 @@ struct timerfd_ctx;
 struct signalfd_ctx;
 struct netlink_sock;
 struct drm_fence;
+struct drm_prime_object;
 
 typedef struct file {
   refcount_t f_count;
@@ -115,6 +117,7 @@ typedef struct file {
                            // drains
     struct drm_fence
         *sync_file_fence; // FD_SYNC_FILE: bound fence (holds a ref)
+    struct drm_prime_object *drm_prime;
   };
 } file;
 

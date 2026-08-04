@@ -52,6 +52,8 @@
 #define FD_NETLINK 13
 #define FD_IPC 14
 #define FD_SYNC_FILE 15
+#define FD_INOTIFY 16
+#define FD_DRM_PRIME 17
 
 struct inode;
 struct unix_sock;
@@ -62,6 +64,7 @@ struct timerfd_ctx;
 struct signalfd_ctx;
 struct netlink_sock;
 struct drm_fence;
+struct drm_prime_object;
 struct file_operations;
 
 typedef struct file {
@@ -99,6 +102,7 @@ typedef struct file {
     struct netlink_sock *nlsock;
     pid_t ipcfd_owner_pid;
     struct drm_fence *sync_file_fence;
+    struct drm_prime_object *drm_prime;
   };
 } file;
 

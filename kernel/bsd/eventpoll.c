@@ -6,6 +6,9 @@
 
 #include "kernel/bsd/eventpoll.h"
 
+#include <stdbool.h>
+#include <stddef.h>
+
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
@@ -21,7 +24,7 @@
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
-#include <stddef.h>
+
 #include <xos/epoll.h>
 #include <xos/errno.h>
 #include <xos/signal.h>
@@ -92,6 +95,26 @@ static void ep_poll_callback(wait_queue_t *wq, unsigned long flags) {
 // can't diverge — a divergence left sys_poll waiters on an unwoken wq).
 static wait_queue_head *ep_target_wq(struct file *f) { return file_wq_get(f); }
 
+/* Linux permits epoll-on-epoll while rejecting cycles and overly deep nests. */
+static bool ep_graph_reaches(eventpoll *from, eventpoll *target, int depth);
+
+static bool ep_tree_reaches(rb_node *node, eventpoll *target, int depth) {
+  if (!node)
+    return false;
+  epitem *item = rb_entry(node, epitem, rb_node);
+  if (item->file->type == FD_EPOLL && item->file->epoll &&
+      ep_graph_reaches(item->file->epoll, target, depth + 1))
+    return true;
+  return ep_tree_reaches(node->rb_left, target, depth) ||
+         ep_tree_reaches(node->rb_right, target, depth);
+}
+
+static bool ep_graph_reaches(eventpoll *from, eventpoll *target, int depth) {
+  if (from == target || depth >= 4)
+    return true;
+  return ep_tree_reaches(from->rbt.rb_node, target, depth);
+}
+
 // ===================== eventpoll lifecycle =====================
 eventpoll *eventpoll_create(void) {
   eventpoll *ep = kmalloc(sizeof(eventpoll));
@@ -134,8 +157,6 @@ void eventpoll_release(eventpoll *ep) {
 
 int ep_insert(eventpoll *ep, struct file *f, struct files *owner, int fd,
               struct epoll_event *ev) {
-  if (f->type == FD_EPOLL)
-    return -EINVAL;
   epitem *epi = kmalloc(sizeof(epitem));
   if (!epi)
     return -ENOMEM;
@@ -166,6 +187,12 @@ int ep_insert(eventpoll *ep, struct file *f, struct files *owner, int fd,
   }
 
   spin_lock(&epoll_ctl_lock);
+  if (f->type == FD_EPOLL && ep_graph_reaches(f->epoll, ep, 0)) {
+    spin_unlock(&epoll_ctl_lock);
+    file_put(f);
+    kfree(epi);
+    return -ELOOP;
+  }
   // The fd may have been closed after sys_epoll_ctl took its temporary file
   // reference. Do not create an interest that can never be auto-removed.
   if (atomic_read(&f->fd_refs) == 0) {
@@ -417,7 +444,7 @@ int64_t sys_epoll_ctl(int64_t epfd, int64_t op, int64_t fd, int64_t ev_ptr) {
   // loop. Linux rejects this with -EINVAL (after fd resolution, so bad fds
   // still get -EBADF). ef and f are the same struct file here, so file_get
   // bumped its refcount twice — balance with two file_put.
-  if ((int)epfd == (int)fd) {
+  if (ef == f) {
     file_put(f);
     file_put(ef);
     return -EINVAL;

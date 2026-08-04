@@ -1113,7 +1113,7 @@ int64_t sys_tkill(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
 int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                         int64_t unused2, int64_t unused3) {
   printk(
-      LOG_ERROR,
+      LOG_DEBUG,
       "[DBG] sigprocmask ENTER pid=%d how=%lld set=%p old=%p sigsetsize=%lld "
       "sizeof(sigset_t)=%zu\n",
       current_task->pid, (long long)arg1, (void *)arg2, (void *)arg3,
@@ -1166,7 +1166,7 @@ int64_t sys_sigprocmask(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     }
     // SIGKILL/SIGSTOP cannot be blocked
     proc->proc->sig_blocked &= ~((SIGMASK(SIGKILL)) | (SIGMASK(SIGSTOP)));
-    printk(LOG_ERROR,
+    printk(LOG_DEBUG,
            "[DBG] sigprocmask pid=%d how=%d newset=0x%llx -> blocked=0x%llx\n",
            proc->pid, how, (unsigned long long)newset,
            (unsigned long long)proc->proc->sig_blocked);

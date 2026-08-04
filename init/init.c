@@ -5,7 +5,7 @@
  */
 
 // init process — PID 2 (VFS in-kernel)
-// Spawns kbd_driver, evdev, terminal, and optionally test_runner
+// Spawns the core services and terminal, then monitors their fault domains.
 // Adopts orphan children and reaps them via waitpid(-1)
 #include <fcntl.h>
 #include <poll.h>
@@ -94,19 +94,7 @@ static int wait_seatd_ready(int fd) {
                                                                          : -1;
 }
 
-#ifdef DESKTOP_COMPOSITOR
-static int start_compositor(void) {
-  char *const argv[] = {"/usr/bin/compositor", "--m0-smoke", NULL};
-  char *const envp[] = {"LIBSEAT_BACKEND=seatd",
-                        "SEATD_SOCK=/run/seatd.sock",
-                        "XDG_RUNTIME_DIR=/run",
-                        "WLR_BACKENDS=drm,libinput",
-                        "WLR_RENDERER=gles2",
-                        "XKB_CONFIG_ROOT=/usr/share/X11/xkb",
-                        NULL};
-  return spawn_process(argv[0], argv, envp, -1, -1, 0077);
-}
-#else
+#ifndef TINYWL
 static int start_terminal(void) {
   char *const argv[] = {"/usr/bin/terminal", NULL};
   // Minimal stable session environment (terminal/step1.md §3.2): terminal and
@@ -120,6 +108,22 @@ static int start_terminal(void) {
                         "SHELL=/bin/sh",
                         "LANG=C.UTF-8",
                         "XDG_RUNTIME_DIR=/run",
+                        NULL};
+  return spawn_process(argv[0], argv, envp, -1, -1, (mode_t)-1);
+}
+#endif
+
+#if defined(TEST) || defined(TINYWL)
+static int start_tinywl(void) {
+  char *const argv[] = {"/usr/bin/tinywl", NULL};
+  char *const envp[] = {"LIBSEAT_BACKEND=seatd",
+                        "SEATD_SOCK=/run/seatd.sock",
+                        "XDG_RUNTIME_DIR=/run",
+                        "WLR_BACKENDS=drm,libinput",
+                        "WLR_RENDERER=gles2",
+                        "GBM_BACKENDS_PATH=/lib",
+                        "XKB_CONFIG_ROOT=/usr/share/X11/xkb",
+                        "PATH=/usr/local/bin:/usr/bin:/bin",
                         NULL};
   return spawn_process(argv[0], argv, envp, -1, -1, (mode_t)-1);
 }
@@ -235,15 +239,7 @@ int main(int argc, char **argv, char **envp) {
     }
     usleep(10 * 1000);
   }
-#ifdef DESKTOP_COMPOSITOR
-  if (!udev_settled) {
-    printf("init: fatal: udev settle timeout\n");
-    for (;;)
-      pause();
-  }
-#else
   (void)udev_settled;
-#endif
 
   int seatd_ready_fd = -1;
   int seatd_pid = start_seatd(&seatd_ready_fd);
@@ -254,22 +250,16 @@ int main(int argc, char **argv, char **envp) {
       pause();
   }
   printf("init: seatd ready pid=%d\n", seatd_pid);
-#ifdef DESKTOP_COMPOSITOR
-  if (access("/run/wayland-0", F_OK) == 0 ||
-      access("/run/wayland-0.lock", F_OK) == 0) {
-    printf("init: fatal: stale wayland socket\n");
+#ifdef TINYWL
+  printf("init: spawning tinywl\n");
+  int direct_tinywl_pid = start_tinywl();
+  if (direct_tinywl_pid < 0) {
+    printf("init: fatal: tinywl spawn failed\n");
     stop_process(seatd_pid);
     for (;;)
       pause();
   }
-  int compositor_pid = start_compositor();
-  if (compositor_pid < 0) {
-    printf("init: fatal: compositor spawn failed\n");
-    stop_process(seatd_pid);
-    for (;;)
-      pause();
-  }
-  printf("init: compositor spawned pid=%d\n", compositor_pid);
+  printf("init: tinywl spawned pid=%d\n", direct_tinywl_pid);
 #else
   printf("init: spawning terminal\n");
   int terminal_pid = start_terminal();
@@ -296,34 +286,47 @@ int main(int argc, char **argv, char **envp) {
     int crashed =
         WIFSIGNALED(status) || (WIFEXITED(status) && WEXITSTATUS(status) != 0);
 
-#ifdef DESKTOP_COMPOSITOR
-    if (ret == compositor_pid || ret == seatd_pid) {
-      printf("init: desktop fault pid=%d status=%d; stopping fault domain\n",
+#ifdef TINYWL
+    if (ret == direct_tinywl_pid || ret == seatd_pid) {
+      printf("init: tinywl fault pid=%d status=%d; stopping seat domain\n",
              (int)ret, status);
-      if (ret == compositor_pid)
+      if (ret == direct_tinywl_pid)
         stop_process(seatd_pid);
       else
-        stop_process(compositor_pid);
-      for (;;)
-        pause();
-    }
-    if (ret == evdev_pid) {
-      printf("init: evdev exited; stopping desktop fault domain\n");
-      stop_process(compositor_pid);
-      stop_process(seatd_pid);
+        stop_process(direct_tinywl_pid);
       for (;;)
         pause();
     }
 #else
     if (ret == terminal_pid || ret == seatd_pid) {
-      printf("init: terminal fault pid=%d status=%d; stopping seat domain\n",
-             (int)ret, status);
-      if (ret == terminal_pid)
-        stop_process(seatd_pid);
-      else
+      if (ret == seatd_pid) {
+        printf("init: seatd fault status=%d; stopping terminal\n", status);
         stop_process(terminal_pid);
+        for (;;)
+          pause();
+      }
+#ifdef TEST
+      printf("init: tests done, launching tinywl for TW-3 E2E\n");
+      int tinywl_pid = start_tinywl();
+      if (tinywl_pid < 0) {
+        perror("init: spawn tinywl failed");
+        for (;;)
+          pause();
+      }
+      int tinywl_status;
+      if (waitpid(tinywl_pid, &tinywl_status, 0) < 0)
+        perror("init: wait for tinywl failed");
+      else
+        printf("init: tinywl exited status=%d\n", tinywl_status);
       for (;;)
         pause();
+#else
+      printf("init: terminal fault pid=%d status=%d; stopping seat domain\n",
+             (int)ret, status);
+      stop_process(seatd_pid);
+      for (;;)
+        pause();
+#endif
     }
 #endif
 

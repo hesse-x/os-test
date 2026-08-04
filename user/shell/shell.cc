@@ -78,8 +78,20 @@ extern "C" int main(int argc, char **argv, char **envp) {
       execve("/test/test_runner.elf", NULL, NULL);
       _exit(127);
     }
+    if (test_pid < 0) {
+      perror("shell: failed to start test runner");
+      return 1;
+    }
     int test_status = 0;
-    waitpid(test_pid, &test_status, 0);
+    pid_t waited;
+    do {
+      waited = waitpid(test_pid, &test_status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited < 0)
+      perror("shell: failed to wait for test runner");
+    printf("shell: test runner finished status=%d, exiting test session\n",
+           test_status);
+    return 0;
   }
 #endif
 

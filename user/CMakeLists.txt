@@ -314,9 +314,14 @@ endif()
 
 # terminal — dynamic ELF (libc.so + libinput.so), PT_INTERP → ld.so
 # IMAGE_PATH usr/bin/terminal: override dyn-elf default test/.
+set(_terminal_defs)
+if(TEST)
+    list(APPEND _terminal_defs TEST)
+endif()
 add_user_dyn_elf(terminal
     SOURCES driver/terminal_libinput.cc
     LINK_LIBS input drm m c udev seat
+    DEFS ${_terminal_defs}
     INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/third_party/libinput/src;${CMAKE_SOURCE_DIR}/third_party/libinput/include;${CMAKE_SOURCE_DIR}/third_party/seatd/include;${CMAKE_SOURCE_DIR}/user/lib/udev-shim;${CMAKE_SOURCE_DIR}/user/lib/evdev-shim;${CMAKE_SOURCE_DIR}/third_party/drm;${CMAKE_SOURCE_DIR}/third_party/drm/include/drm"
     EXCLUDE_FROM_ALL
     IMAGE_PATH usr/bin/terminal

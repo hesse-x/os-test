@@ -743,6 +743,19 @@ static pid_t spawn_shell(const struct winsize *ws) {
   return pid;
 }
 
+#ifdef TEST
+static void exit_test_session(int status) {
+  printf("terminal: shell exited (test mode) status=%d, handing display to "
+         "init\n",
+         status);
+  if (master_fd >= 0)
+    close(master_fd);
+  master_fd = -1;
+  display_client_destroy();
+  _exit(0);
+}
+#endif
+
 // extern "C": clang under -ffreestanding mangles a C++ `main`, breaking the
 // crt0.o `main` reference; gcc leaves `main` unmangled regardless. See
 // shell.cc.
@@ -862,6 +875,13 @@ extern "C" int main(int argc, char **argv, char **envp) {
   const int SPIN_THRESHOLD = 2000;
 
   while (1) {
+#ifdef TEST
+    // Test descendants may inherit the PTY slave, so master EOF is not a
+    // reliable indication that the direct shell child has exited.
+    int shell_status = 0;
+    if (waitpid(shell_pid, &shell_status, WNOHANG) == shell_pid)
+      exit_test_session(shell_status);
+#endif
     if (libseat_dispatch(terminal_seat.seat, 0) < 0 || terminal_seat.fatal) {
       printf("terminal: libseat session failed: %s\n", strerror(errno));
       return 1;
@@ -910,12 +930,16 @@ extern "C" int main(int argc, char **argv, char **envp) {
           flush_dirty_cells();
       }
     } else if (n == 0) {
+#ifdef TEST
+      exit_test_session(0);
+#else
       printf("terminal: shell exited (n=0), re-forking\n");
       close(master_fd);
       master_fd = -1;
       shell_pid = spawn_shell(&ws);
       if (shell_pid < 0)
         continue;
+#endif
     }
 
     flush_dirty_cells();

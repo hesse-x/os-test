@@ -84,6 +84,59 @@ struct sysfs_node *sysfs_create_file(struct sysfs_node *parent,
   return n;
 }
 
+struct sysfs_node *sysfs_create_symlink(struct sysfs_node *parent,
+                                        const char *name, const char *target) {
+  if (!parent)
+    parent = sysfs_root;
+  if (!parent || !target)
+    return NULL;
+
+  size_t target_len = __strlen(target);
+  char *target_copy = kmalloc(target_len + 1);
+  if (!target_copy)
+    return NULL;
+  __memcpy(target_copy, target, target_len + 1);
+
+  spin_lock(&sysfs_lock);
+  for (struct sysfs_node *c = parent->children; c; c = c->sibling) {
+    if (__strcmp(c->name, name) == 0) {
+      spin_unlock(&sysfs_lock);
+      kfree(target_copy);
+      return c->is_symlink ? c : NULL;
+    }
+  }
+  struct sysfs_node *n = node_alloc(name, false);
+  if (!n) {
+    spin_unlock(&sysfs_lock);
+    kfree(target_copy);
+    return NULL;
+  }
+  n->is_symlink = true;
+  n->symlink_target = target_copy;
+  n->parent = parent;
+  n->sibling = parent->children;
+  parent->children = n;
+  spin_unlock(&sysfs_lock);
+  return n;
+}
+
+static void sysfs_free_subtree(struct sysfs_node *n) {
+  struct sysfs_node *child = n->children;
+  while (child) {
+    struct sysfs_node *next = child->sibling;
+    sysfs_free_subtree(child);
+    child = next;
+  }
+  if (n->ip)
+    inode_put(n->ip);
+  if (n->attr_priv_owned && n->attr)
+    kfree(n->attr->priv);
+  if (n->attr_owned)
+    kfree(n->attr);
+  kfree(n->symlink_target);
+  kfree(n);
+}
+
 void sysfs_remove_dir(struct sysfs_node *dir) {
   if (!dir || !dir->parent)
     return;
@@ -94,22 +147,7 @@ void sysfs_remove_dir(struct sysfs_node *dir) {
     pp = &(*pp)->sibling;
   if (*pp)
     *pp = dir->sibling;
-  // Recursively free children.
-  struct sysfs_node *c = dir->children;
-  while (c) {
-    struct sysfs_node *next = c->sibling;
-    if (c->ip)
-      inode_put(c->ip);
-    if (c->attr_owned)
-      kfree(c->attr);
-    kfree(c);
-    c = next;
-  }
-  if (dir->ip)
-    inode_put(dir->ip);
-  if (dir->attr_owned)
-    kfree(dir->attr);
-  kfree(dir);
+  sysfs_free_subtree(dir);
   spin_unlock(&sysfs_lock);
 }
 
@@ -150,22 +188,29 @@ static struct sysfs_node *sysfs_walk(const char *relpath) {
 
 static const struct inode_operations sysfs_dir_iop;
 static const struct inode_operations sysfs_file_iop;
+static const struct inode_operations sysfs_lnk_iop;
 
 static struct inode *sysfs_node_to_inode(struct sysfs_node *n) {
   if (n->ip) {
-    n->ip->i_op = n->is_dir ? &sysfs_dir_iop : &sysfs_file_iop;
+    n->ip->i_op = n->is_symlink
+                      ? &sysfs_lnk_iop
+                      : (n->is_dir ? &sysfs_dir_iop : &sysfs_file_iop);
     return inode_get(n->ip);
   }
-  int type = n->is_dir ? INODE_DIR : INODE_REGULAR;
+  int type =
+      n->is_symlink ? INODE_LNK : (n->is_dir ? INODE_DIR : INODE_REGULAR);
   struct inode *ip = inode_create(n->ino, type, 0, 0, 0, 0);
   if (!ip)
     return NULL;
   // S08: sysfs attribute files are read-only 0100444 (inode_create defaults to
   // 0100644 writable, which doesn't match sysfs semantics); directories are
   // 0040755. Owner defaults to 0 (root) — kernel-created.
-  ip->mode = n->is_dir ? 0040755 : 0100444;
-  ip->i_priv = n->is_dir ? (void *)n : (void *)n->attr;
-  ip->i_op = n->is_dir ? &sysfs_dir_iop : &sysfs_file_iop;
+  ip->mode = n->is_symlink ? 0120777 : (n->is_dir ? 0040755 : 0100444);
+  ip->i_priv = (n->is_dir || n->is_symlink) ? (void *)n : (void *)n->attr;
+  ip->i_op = n->is_symlink ? &sysfs_lnk_iop
+                           : (n->is_dir ? &sysfs_dir_iop : &sysfs_file_iop);
+  if (n->is_symlink)
+    ip->size = __strlen(n->symlink_target);
   n->ip = inode_get(ip);
   return ip;
 }
@@ -225,6 +270,22 @@ static const struct inode_operations sysfs_file_iop = {
     .getattr = sysfs_getattr,
 };
 
+static int sysfs_symlink_readlink(struct inode *ip, char *buf, size_t bufsiz) {
+  struct sysfs_node *n = (struct sysfs_node *)ip->i_priv;
+  if (!n || !n->is_symlink || !n->symlink_target)
+    return -EIO;
+  size_t len = __strlen(n->symlink_target);
+  if (len > bufsiz)
+    len = bufsiz;
+  __memcpy(buf, n->symlink_target, len);
+  return (int)len;
+}
+
+static const struct inode_operations sysfs_lnk_iop = {
+    .readlink = sysfs_symlink_readlink,
+    .getattr = sysfs_getattr,
+};
+
 // sysfs_mount_root: returns the /sys root inode (with inode_get taken).
 static struct inode *sysfs_mount_root(struct mount_entry *m) {
   (void)m;
@@ -275,7 +336,7 @@ ssize_t sysfs_getdents(struct inode *dir, struct dir_context *ctx) {
   struct sysfs_node *c = n->children;
   while (c) {
     size_t nl = __strlen(c->name);
-    unsigned dt = c->is_dir ? DT_DIR : DT_REG;
+    unsigned dt = c->is_symlink ? DT_LNK : (c->is_dir ? DT_DIR : DT_REG);
     uint16_t r = (uint16_t)((sizeof(struct dirent64) + nl + 1 + 7) & ~7);
     if (cur_pos < ctx->pos) {
       cur_pos += r;
@@ -302,7 +363,7 @@ int sysfs_stat(const char *relpath, struct kstat *ks) {
   if (!n)
     return -ENOENT;
   __memset(ks, 0, sizeof(*ks));
-  ks->st_mode = n->is_dir ? 0040755 : 0100444;
+  ks->st_mode = n->is_symlink ? 0120777 : (n->is_dir ? 0040755 : 0100444);
   ks->st_ino = n->ino;
   ks->st_nlink = 1;
   ks->st_size = 0;
@@ -364,17 +425,24 @@ static ssize_t sysfs_file_read(struct xtask *proc, struct file *f, void *buf,
   struct sysfs_attr *attr = (struct sysfs_attr *)ip->i_priv;
   if (!attr->show)
     return 0;
-  if (count > 4096)
-    count = 4096;
+  if (count == 0)
+    return 0;
   char kbuf[4096];
-  ssize_t n = attr->show(kbuf, count, attr->priv);
+  ssize_t n = attr->show(kbuf, sizeof(kbuf), attr->priv);
   if (n < 0)
     return n;
-  if (n > (ssize_t)count)
-    n = (ssize_t)count;
-  if (copy_to_user(buf, kbuf, (size_t)n))
+  if (n > (ssize_t)sizeof(kbuf))
+    n = (ssize_t)sizeof(kbuf);
+  if (f->offset >= (uint64_t)n)
+    return 0;
+
+  size_t available = (size_t)n - (size_t)f->offset;
+  if (count > available)
+    count = available;
+  if (copy_to_user(buf, kbuf + f->offset, count))
     return -EFAULT;
-  return n;
+  f->offset += count;
+  return (ssize_t)count;
 }
 
 const struct file_operations sysfs_fops = {
@@ -399,10 +467,139 @@ void sysfs_init(void) {
     printk(LOG_ERROR, "sysfs_init: failed to alloc root\n");
     return;
   }
+  struct sysfs_node *dev = sysfs_create_dir(sysfs_root, "dev");
+  if (!dev || !sysfs_create_dir(dev, "char") ||
+      !sysfs_create_dir(dev, "block")) {
+    printk(LOG_ERROR, "sysfs_init: failed to create /sys/dev topology\n");
+    return;
+  }
   printk(LOG_INFO, "sysfs_init: root node created\n");
 }
 
 struct sysfs_node *sysfs_root_node(void) { return sysfs_root; }
+
+struct devchar_uevent_priv {
+  char devname[32];
+  unsigned major;
+  unsigned minor;
+};
+
+static ssize_t devchar_uevent_show(char *buf, size_t len, void *priv) {
+  struct devchar_uevent_priv *p = (struct devchar_uevent_priv *)priv;
+  if (!p)
+    return -EIO;
+  return snprintf(buf, len, "MAJOR=%u\nMINOR=%u\nDEVNAME=%s\n", p->major,
+                  p->minor, p->devname);
+}
+
+void sysfs_devchar_unregister(unsigned major, unsigned minor) {
+  char name[32];
+  int n = snprintf(name, sizeof(name), "%u:%u", major, minor);
+  if (n < 0 || (size_t)n >= sizeof(name))
+    return;
+  struct sysfs_node *node = sysfs_walk("dev/char");
+  if (!node)
+    return;
+  spin_lock(&sysfs_lock);
+  struct sysfs_node *found = NULL;
+  for (struct sysfs_node *c = node->children; c; c = c->sibling) {
+    if (__strcmp(c->name, name) == 0) {
+      found = c;
+      break;
+    }
+  }
+  spin_unlock(&sysfs_lock);
+  if (found)
+    sysfs_remove_dir(found);
+}
+
+struct sysfs_node *sysfs_devchar_register(unsigned major, unsigned minor,
+                                          const char *devname,
+                                          const char *subsystem_target) {
+  if (major > 4095 || minor > 1048575 || !devname || !subsystem_target ||
+      __strlen(devname) >= sizeof(((struct devchar_uevent_priv *)0)->devname))
+    return NULL;
+
+  char name[32];
+  int name_len = snprintf(name, sizeof(name), "%u:%u", major, minor);
+  if (name_len < 0 || (size_t)name_len >= sizeof(name))
+    return NULL;
+
+  struct sysfs_node *char_dir = sysfs_walk("dev/char");
+  if (!char_dir)
+    return NULL;
+  sysfs_devchar_unregister(major, minor);
+
+  struct sysfs_node *root = sysfs_create_dir(char_dir, name);
+  struct devchar_uevent_priv *priv = kmalloc(sizeof(*priv));
+  struct sysfs_attr *attr = kmalloc(sizeof(*attr));
+  if (!root || !priv || !attr)
+    goto fail;
+  __memset(priv, 0, sizeof(*priv));
+  __strncpy(priv->devname, devname, sizeof(priv->devname) - 1);
+  priv->major = major;
+  priv->minor = minor;
+  attr->name = "uevent";
+  attr->priv = priv;
+  attr->show = devchar_uevent_show;
+  attr->store = NULL;
+  struct sysfs_node *uevent = sysfs_create_file(root, "uevent", attr);
+  if (!uevent)
+    goto fail;
+  uevent->attr_owned = true;
+  uevent->attr_priv_owned = true;
+  priv = NULL;
+  attr = NULL;
+
+  struct sysfs_node *device = sysfs_create_dir(root, "device");
+  if (!device || !sysfs_create_dir(device, "drm") ||
+      !sysfs_create_symlink(device, "subsystem", subsystem_target))
+    goto fail;
+  return root;
+
+fail:
+  kfree(priv);
+  kfree(attr);
+  if (root)
+    sysfs_remove_dir(root);
+  return NULL;
+}
+
+struct sysfs_node *sysfs_devchar_add_device_child(struct sysfs_node *root,
+                                                  const char *group,
+                                                  const char *name) {
+  if (!root || !group || !name)
+    return NULL;
+  struct sysfs_node *device = NULL;
+  for (struct sysfs_node *n = root->children; n; n = n->sibling) {
+    if (n->is_dir && __strcmp(n->name, "device") == 0) {
+      device = n;
+      break;
+    }
+  }
+  if (!device)
+    return NULL;
+  struct sysfs_node *group_dir = NULL;
+  for (struct sysfs_node *n = device->children; n; n = n->sibling) {
+    if (n->is_dir && __strcmp(n->name, group) == 0) {
+      group_dir = n;
+      break;
+    }
+  }
+  return group_dir ? sysfs_create_dir(group_dir, name) : NULL;
+}
+
+struct sysfs_node *
+sysfs_devchar_add_device_file(struct sysfs_node *root, const char *name,
+                              const struct sysfs_attr *attr) {
+  if (!root || !name || !attr)
+    return NULL;
+  for (struct sysfs_node *n = root->children; n; n = n->sibling) {
+    if (n->is_dir && __strcmp(n->name, "device") == 0)
+      return sysfs_create_file(n, name, attr);
+  }
+  return NULL;
+}
 
 // evdev show callback (priv = input_dev_props*)
 static ssize_t evdev_show_name(char *buf, size_t len, void *priv) {

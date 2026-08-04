@@ -78,6 +78,7 @@ static struct test_entry tests[] = {
     {"drm_test_link", "/test/drm_test_link.elf"},
     {"virgl_channel", "/test/virgl_channel.elf"},
     {"test_sysfs", "/test/test_sysfs.elf"},
+    {"test_sysfs_devchar", "/test/test_sysfs_devchar.elf"},
     {"test_procfs", "/test/test_procfs.elf"},
     {"test_libudev", "/test/test_libudev.elf"},
     {"test_vfs_dispatch", "/test/test_vfs_dispatch.elf"},

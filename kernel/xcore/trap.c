@@ -655,7 +655,7 @@ static void timer_handler(trapframe *tf) {
   lapic_eoi();
 
   if (tick % 100 == 0)
-    printk(LOG_INFO, "timer alive: tick=%lu\n", tick);
+    printk(LOG_DEBUG, "timer alive: tick=%lu\n", tick);
 
   // Advance this CPU's RCU grace-period counter.  Without this, a CPU that
   // stays runnable in user mode (e.g. terminal flushing PTY output) never

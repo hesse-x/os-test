@@ -18,6 +18,9 @@
 #define DRM_CONNECTOR_ID 2
 #define DRM_ENCODER_ID 3
 #define DRM_PLANE_ID 4
+#define DRM_PLANE_TYPE_OVERLAY 0
+#define DRM_PLANE_TYPE_PRIMARY 1
+#define DRM_PLANE_TYPE_CURSOR 2
 
 /* ===== Property infrastructure (Phase C) ===== */
 #define DRM_MAX_PROPERTIES 32
@@ -127,7 +130,13 @@ struct drm_virgl_resource {
   void *kernel_vaddr;  /* kernel virtual address of backing pages */
   uint64_t size;
   int refcount;
-  bool ctx_attached; /* reserved for future CTX_ATTACH_RESOURCE */
+  /* A resource may be shared through PRIME and used by several contexts. */
+  uint32_t ctx_attach_bitmap[(MAX_CTX_IDS + 31) / 32];
+};
+
+struct drm_prime_object {
+  uint32_t handle;
+  bool is_virgl;
 };
 
 /* Cached capset info fetched at init via GET_CAPSET_INFO/GET_CAPSET. */
@@ -195,6 +204,7 @@ struct drm_framebuffer {
   int fb_id; /* 1-based, 0 = free slot */
   int refcount;
   int dumb_handle; /* references drm_dumb_buffer.handle */
+  bool is_virgl;
   uint32_t width;
   uint32_t height;
   uint32_t pitch;
@@ -279,6 +289,9 @@ __poll drm_poll(xtask *proc, int events);
  * last ref drops; called from sync_file fd close (proc.c file_put) and
  * EXECBUFFER error paths, so non-static. ===== */
 void drm_fence_put(struct drm_fence *fence);
+
+/* Drop the PRIME fd's buffer reference and release its wrapper object. */
+void drm_prime_object_put(struct drm_prime_object *object);
 
 /* Read-only signaled probe for sync_file poll (file_poll.c calls this to avoid
  * pulling the driver-layer drm_internal.h into the BSD layer). */
