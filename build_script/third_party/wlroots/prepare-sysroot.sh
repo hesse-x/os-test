@@ -14,17 +14,53 @@ PROTOCOL_BUILD="$BUILD/wlroots/wayland-protocols"
 
 install -d "$INCLUDE_DIR" "$LIB_DIR" "$PC_DIR" "$NATIVE_PC_DIR"
 
+# wayland-protocols 1.49 generates its *-enum.h headers with
+# `wayland-scanner --strict`, whose DTD validation fails on the host scanner
+# (its built-in DTD predates the `frozen` interface attribute). Pin the scanner
+# built from our Wayland submodule through a native file + pkg-config dir, the
+# same pattern the Mesa stage uses in build.sh.
+cat > "$NATIVE_PC_DIR/wayland-scanner.pc" <<EOF
+prefix=$BUILD
+bindir=\${prefix}
+wayland_scanner=\${bindir}/wayland-scanner
+
+Name: Wayland Scanner
+Description: Native Wayland protocol scanner
+Version: 1.25.91
+EOF
+
+cat > "$NATIVE_PC_DIR/hwdata.pc" <<EOF
+prefix=$ROOT/build_script/third_party/hwdata
+pkgdatadir=\${prefix}
+
+Name: hwdata
+Description: Native PCI and PNP identifier database
+Version: 0
+EOF
+
+cat > "$NATIVE_FILE" <<EOF
+[binaries]
+wayland-scanner = '$BUILD/wayland-scanner'
+
+[built-in options]
+pkg_config_path = ['$NATIVE_PC_DIR']
+EOF
+
 # wayland-protocols is a data package, not a runtime library. Install its XML
 # and pkg-config metadata with the upstream Meson rules so the sysroot layout
 # and advertised version stay in sync with the vendored submodule.
-protocol_setup=(--prefix /usr -Dtests=false \
+protocol_setup=(--prefix /usr -Dtests=false --native-file "$NATIVE_FILE" \
 	"$PROTOCOL_BUILD" "$ROOT/third_party/wayland-protocols")
 if [[ -d "$PROTOCOL_BUILD" ]]; then
-	meson setup --reconfigure "${protocol_setup[@]}"
+	# A plain reconfigure retains the previously resolved host-scanner probe;
+	# wipe so the native file above re-pins the OS-built scanner.
+	meson setup --wipe "${protocol_setup[@]}"
 else
 	meson setup "${protocol_setup[@]}"
 fi
-meson install -C "$PROTOCOL_BUILD" --no-rebuild --destdir "$SYSROOT"
+# The enum headers are Meson custom targets in the install plan, so build them
+# (no --no-rebuild) with the pinned scanner.
+meson install -C "$PROTOCOL_BUILD" --destdir "$SYSROOT"
 
 install -d "$INCLUDE_DIR/wayland-protocols"
 # wlroots public headers include the generated protocol enum headers. Generate
@@ -156,29 +192,5 @@ Libs: -L\${libdir} -l$library
 Cflags: -I\${includedir}
 EOF
 done
-
-cat > "$NATIVE_PC_DIR/wayland-scanner.pc" <<EOF
-prefix=$BUILD
-bindir=\${prefix}
-wayland_scanner=\${bindir}/wayland-scanner
-
-Name: Wayland Scanner
-Description: Native Wayland protocol scanner
-Version: 1.25.91
-EOF
-
-cat > "$NATIVE_PC_DIR/hwdata.pc" <<EOF
-prefix=$ROOT/build_script/third_party/hwdata
-pkgdatadir=\${prefix}
-
-Name: hwdata
-Description: Native PCI and PNP identifier database
-Version: 0
-EOF
-
-cat > "$NATIVE_FILE" <<EOF
-[built-in options]
-pkg_config_path = ['$NATIVE_PC_DIR']
-EOF
 
 echo "Prepared wlroots sysroot metadata in $PC_DIR"
