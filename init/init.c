@@ -115,7 +115,8 @@ static int start_terminal(void) {
 
 #if defined(TEST) || defined(TINYWL)
 static int start_tinywl(void) {
-  char *const argv[] = {"/usr/bin/tinywl", NULL};
+  /* -s: tinywl spawns the wallpaper client once the Wayland socket is up. */
+  char *const argv[] = {"/usr/bin/tinywl", "-s", "/usr/bin/wallpaper", NULL};
   char *const envp[] = {"LIBSEAT_BACKEND=seatd",
                         "SEATD_SOCK=/run/seatd.sock",
                         "XDG_RUNTIME_DIR=/run",

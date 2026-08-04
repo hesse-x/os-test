@@ -578,7 +578,9 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
         -Dauto_features=disabled -Dbackends=drm,libinput -Drenderers=gles2
         -Dallocators=gbm -Dsession=enabled -Dxwayland=disabled
         -Dxcb-errors=disabled -Dcolor-management=disabled
-        -Dlibliftoff=disabled -Dexamples=true  -Dwerror=false
+        # tinywl is maintained in user/compositor and linked against the
+        # installed shared library; do not build wlroots' upstream examples.
+        -Dlibliftoff=disabled -Dexamples=false -Dwerror=false
         "$WLROOTS_BUILD" third_party/wlroots
     )
     WLROOTS_CONFIG_SUM="$({ sha256sum build/wlroots-cross.txt "$WLROOTS_NATIVE"; \
@@ -593,10 +595,7 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
         meson setup "${WLROOTS_SETUP[@]}"
     fi
     printf '%s\n' "$WLROOTS_CONFIG_SUM" > "$WLROOTS_STAMP"
-    # meson places the tinywl executable at <builddir>/tinywl/tinywl (the
-    # output subdir is named after the source subdir), so the ninja target and
-    # the staged source path both use tinywl/tinywl, not bare "tinywl".
-    ninja -C "$WLROOTS_BUILD" libwlroots-0.20.so tinywl/tinywl
+    ninja -C "$WLROOTS_BUILD" libwlroots-0.20.so
     meson install -C "$WLROOTS_BUILD" --no-rebuild --destdir "$SYSROOT"
 
     MESON_SUMMARY="$WLROOTS_BUILD/meson-logs/meson-log.txt"
@@ -615,46 +614,52 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
 
     WLROOTS_LIB="$SYSROOT/usr/lib/libwlroots-0.20.so"
     install -m 755 "$WLROOTS_LIB" build/libwlroots-0.20.so
-    # tinywl has no install: kwarg, so the meson product stays in the builddir
-    # at tinywl/tinywl (see the ninja target note above).
-    install -m 755 "$WLROOTS_BUILD/tinywl/tinywl" build/tinywl
 
-    # --- ELF static audit: build/tinywl + build/libwlroots-0.20.so ---
-    # Judge 1: interpreter (executable ELF must be musl; .so has no PT_INTERP, skip)
-    tinywl_interp="$(readelf -lW build/tinywl 2>/dev/null | \
-        awk '/interpreter:/ {print $NF}' | tr -d '[]')"
-    if [ "$tinywl_interp" != "/lib/ld-musl-x86_64.so.1" ]; then
-        echo "ERROR: build/tinywl interpreter '$tinywl_interp' != /lib/ld-musl-x86_64.so.1" >&2
-        exit 1
+    if [ "${BUILD_TINYWL:-0}" = "1" ]; then
+        # tinywl is built from user/compositor/tinywl.c by CMake (target
+        # tinywl_dyn_elf, EXCLUDE_FROM_ALL): it links the just-staged
+        # build/libwlroots-0.20.so, so it can only be built after
+        # `meson install` above.
+        echo "=== Building tinywl (user/compositor) ==="
+        ninja -C build tinywl_dyn_elf
+
+        # --- ELF static audit: build/tinywl.elf + build/libwlroots-0.20.so ---
+        # Judge 1: interpreter (executable ELF must be musl; .so has no PT_INTERP, skip)
+        tinywl_interp="$(readelf -lW build/tinywl.elf 2>/dev/null | \
+            awk '/interpreter:/ {print $NF}' | tr -d '[]')"
+        if [ "$tinywl_interp" != "/lib/ld-musl-x86_64.so.1" ]; then
+            echo "ERROR: build/tinywl.elf interpreter '$tinywl_interp' != /lib/ld-musl-x86_64.so.1" >&2
+            exit 1
+        fi
+        # Judge 2: forbidden dependency grep
+        if LC_ALL=C readelf -dW build/tinywl.elf build/libwlroots-0.20.so | \
+           grep -Eiq 'lib(X11|xcb|vulkan|systemd|elogind|dbus|liftoff)|libstdc\+\+|llvmpipe'; then
+            echo "ERROR: forbidden dependency in wlroots runtime" >&2
+            exit 1
+        fi
+        # Judge 3: DT_NEEDED closure ⊆ sysroot/image (single-layer filename
+        # existence; the sysroot library set is closed, so direct NEEDED fully
+        # resolvable == transitive closure resolvable — no "passes layer 1 but a
+        # deep dep is missing" gap).
+        audit_allowed="$( ( ls "$SYSROOT/usr/lib"/*.so "$SYSROOT/usr/lib"/*.so.* 2>/dev/null; \
+                           ls build/*.so build/*.so.* 2>/dev/null ) \
+                         | xargs -n1 basename 2>/dev/null | sort -u )"
+        # LC_ALL=C forces English readelf output so the awk field layout is stable
+        # (a zh_CN.UTF-8 host renders the NEEDED value as "共享库：[libc.so]", a
+        # single space-free field, which breaks the $NF extraction). The bracket
+        # class [\[\]] strips the surrounding [] that readelf wraps the soname in.
+        audit_needed="$(LC_ALL=C readelf -dW build/tinywl.elf build/libwlroots-0.20.so 2>/dev/null \
+                        | awk '/NEEDED/ {gsub(/[\[\]]/,"",$NF); print $NF}' | sort -u)"
+        audit_missing=""
+        for n in $audit_needed; do
+            echo "$audit_allowed" | grep -qx "$n" || audit_missing="$audit_missing $n"
+        done
+        if [ -n "$audit_missing" ]; then
+            echo "ERROR: DT_NEEDED not resolvable in sysroot/image:$audit_missing" >&2
+            exit 1
+        fi
+        echo "wlroots ELF audit: PASS (tinywl.elf + libwlroots-0.20.so)"
     fi
-    # Judge 2: forbidden dependency grep
-    if LC_ALL=C readelf -dW build/tinywl build/libwlroots-0.20.so | \
-       grep -Eiq 'lib(X11|xcb|vulkan|systemd|elogind|dbus|liftoff)|libstdc\+\+|llvmpipe'; then
-        echo "ERROR: forbidden dependency in wlroots runtime" >&2
-        exit 1
-    fi
-    # Judge 3: DT_NEEDED closure ⊆ sysroot/image (single-layer filename
-    # existence; the sysroot library set is closed, so direct NEEDED fully
-    # resolvable == transitive closure resolvable — no "passes layer 1 but a
-    # deep dep is missing" gap).
-    audit_allowed="$( ( ls "$SYSROOT/usr/lib"/*.so "$SYSROOT/usr/lib"/*.so.* 2>/dev/null; \
-                       ls build/*.so build/*.so.* 2>/dev/null ) \
-                     | xargs -n1 basename 2>/dev/null | sort -u )"
-    # LC_ALL=C forces English readelf output so the awk field layout is stable
-    # (a zh_CN.UTF-8 host renders the NEEDED value as "共享库：[libc.so]", a
-    # single space-free field, which breaks the $NF extraction). The bracket
-    # class [\[\]] strips the surrounding [] that readelf wraps the soname in.
-    audit_needed="$(LC_ALL=C readelf -dW build/tinywl build/libwlroots-0.20.so 2>/dev/null \
-                    | awk '/NEEDED/ {gsub(/[\[\]]/,"",$NF); print $NF}' | sort -u)"
-    audit_missing=""
-    for n in $audit_needed; do
-        echo "$audit_allowed" | grep -qx "$n" || audit_missing="$audit_missing $n"
-    done
-    if [ -n "$audit_missing" ]; then
-        echo "ERROR: DT_NEEDED not resolvable in sysroot/image:$audit_missing" >&2
-        exit 1
-    fi
-    echo "wlroots ELF audit: PASS (tinywl + libwlroots-0.20.so)"
 fi
 
 # The EGL test links against staged Mesa .so files, so it must run after the

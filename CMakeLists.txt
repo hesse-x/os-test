@@ -226,6 +226,13 @@ add_subdirectory(kernel)
 add_subdirectory(user)
 add_subdirectory(init)
 
+# Wayland compositor (tinywl + wallpaper client), gated by --tinywl. tinywl
+# links the Meson-built libwlroots, so the directory only exists when the
+# wlroots profile is on.
+if(TINYWL)
+    add_subdirectory(user/compositor)
+endif()
+
 # Test targets (only when --test is enabled)
 if(TEST)
     add_subdirectory(user/test)
@@ -343,7 +350,8 @@ endif()
 
 if(WLROOTS)
     os_image_path(wlroots_lib libwlroots-0.20.so lib/libwlroots-0.20.so PARTITION 2)
-    os_image_path(tinywl_bin  tinywl              usr/bin/tinywl         PARTITION 2)
+    # usr/bin/tinywl is registered by user/compositor (IMAGE_PATH), built from
+    # user/compositor/tinywl.c instead of the upstream wlroots example.
 endif()
 
 # seatd/libseat are part of the default terminal session path.

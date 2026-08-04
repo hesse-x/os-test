@@ -132,13 +132,14 @@ b_pie = false
 # --sysroot that actually isolates the build is passed explicitly in [built-in options]
 # above (see comment there).
 sys_root = '@SYSROOT@'
-# pkg_config_libdir restricts pkg-config to search ONLY this dir (sets
+# pkg_config_libdir restricts pkg-config to search ONLY these sysroot dirs (sets
 # PKG_CONFIG_LIBDIR, pkgconfig.py:286). Without it, meson sets PKG_CONFIG_SYSROOT_DIR
 # from sys_root but leaves the search path at the host system's compiled defaults
 # (/usr/lib/x86_64-linux-gnu/pkgconfig ...), so zlib/expat resolve from the HOST
 # distro's .pc (wrong headers/libs) and libdrm fails outright (host has no libdrm.pc).
-# Pinning the libdir to our sysroot makes every dependency resolve from the .pc files
-# gen-pkgconfig.sh emitted there — full sysroot isolation, no host leakage.
+# Library packages install metadata below usr/lib/pkgconfig; data-only packages
+# such as wayland-protocols correctly use usr/share/pkgconfig. Search both while
+# retaining full sysroot isolation and preventing host leakage.
 # (pkg_config_path is a *built-in option* in meson ≥1.4, so it would go in
 # [built-in options]; pkg_config_libdir is a [properties] key — envconfig.py:195.)
-pkg_config_libdir = ['@SYSROOT@/usr/lib/pkgconfig']
+pkg_config_libdir = ['@SYSROOT@/usr/lib/pkgconfig', '@SYSROOT@/usr/share/pkgconfig']

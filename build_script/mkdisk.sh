@@ -153,7 +153,10 @@ done
 # the manifest). Their target directories are not necessarily created by the
 # manifest-driven skeleton above (no build artifact lands under usr/share/), so
 # create them explicitly before the copy — mirroring the old hardcoded skeleton.
-mmd -i "${BUILD_DIR}/part2.img" ::usr/share ::usr/share/libinput 2>/dev/null || true
+# usr/share may already exist when a manifest asset (for example wallpaper.png)
+# created it. Force non-interactive collision handling: mtools otherwise opens
+# /dev/tty for a prompt whose text is hidden by the stderr redirection.
+mmd -D o -i "${BUILD_DIR}/part2.img" ::usr/share ::usr/share/libinput 2>/dev/null || true
 mcopy -i "${BUILD_DIR}/part2.img" "${PROJECT_DIR}/third_party/libinput/quirks/10-generic-keyboard.quirks"  ::usr/share/libinput/
 mcopy -i "${BUILD_DIR}/part2.img" "${PROJECT_DIR}/third_party/libinput/quirks/10-generic-mouse.quirks"     ::usr/share/libinput/
 

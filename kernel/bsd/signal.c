@@ -1254,9 +1254,9 @@ int64_t sys_pthread_set_cancel_handler(int64_t arg1, int64_t unused1,
 // ===================== BSD syscall: sigaction =====================
 int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                       int64_t unused2, int64_t unused3) {
-  // musl's __libc_sigaction passes a 40-byte struct k_sigaction across the
+  // musl's __libc_sigaction passes a 32-byte struct k_sigaction across the
   // wire (handler/flags/restorer/mask[2], per arch/x86_64/ksigaction.h) with
-  // arg4 = _NSIG/8 = 16. Accept any sigsetsize >= our 8-byte sigset_t; we
+  // arg4 = _NSIG/8 = 8. Accept any sigsetsize >= our 8-byte sigset_t; we
   // only touch the low 8 bytes of mask[]. Mirrors sys_sigpending/signalfd.
   if ((size_t)arg4 < sizeof(sigset_t))
     return (int64_t)-EINVAL;
@@ -1281,15 +1281,14 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
         ptr + sizeof(struct k_sigaction_wire) > KERNEL_VMA_BOUNDARY)
       return (int64_t)-EFAULT;
 
-    // Build the wire shape from the internal sigaction_t: mask lives only in
-    // the low long; the high long is always 0 (kernel tracks signals 1..64).
+    // Build musl's two-word x86_64 wire mask from our 64-bit internal mask.
     struct k_sigaction_wire wire;
     sigaction_t *src = &proc->proc->signal->action[sig];
     wire.handler = src->sa_handler;
     wire.flags = src->sa_flags;
     wire.restorer = src->sa_restorer;
-    wire.mask[0] = src->sa_mask;
-    wire.mask[1] = 0;
+    wire.mask[0] = (uint32_t)src->sa_mask;
+    wire.mask[1] = (uint32_t)(src->sa_mask >> 32);
 
     uint64_t saved_cr3;
     __asm__ volatile("movq %%cr3, %0" : "=r"(saved_cr3));
@@ -1318,13 +1317,12 @@ int64_t sys_sigaction(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     __asm__ volatile("movq %0, %%cr3" ::"r"(saved_cr3) : "memory");
 
     // Field-assign the wire shape into the internal sigaction_t (whose field
-    // order differs from the wire). Only the low 8 bytes of mask[] carry
-    // signals 1..64; mask[1] (RT signals 65+) is dropped.
+    // order differs from the wire). The two 32-bit words carry signals 1..64.
     sigaction_t new_act;
     new_act.sa_handler = wire.handler;
     new_act.sa_flags = wire.flags;
     new_act.sa_restorer = wire.restorer;
-    new_act.sa_mask = wire.mask[0];
+    new_act.sa_mask = (uint64_t)wire.mask[0] | ((uint64_t)wire.mask[1] << 32);
 
     // SIGKILL and SIGSTOP cannot be blocked; Linux silently clears both
     // bits instead of rejecting an otherwise valid sigaction. Needed for

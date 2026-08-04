@@ -52,6 +52,7 @@ static spinlock fat_lock = SPINLOCK_INIT;
 struct fat_cache_entry {
   uint32_t sector_lba;
   uint8_t data[512];
+  bool filling;
 };
 
 static struct fat_cache_entry fat_cache[FAT_CACHE_PAGES];
@@ -62,7 +63,7 @@ static spinlock fat_cache_lock = SPINLOCK_INIT;
 static int fat_cache_lookup(uint32_t sector_lba) {
   spin_lock(&fat_cache_lock);
   for (int i = 0; i < FAT_CACHE_PAGES; i++) {
-    if (fat_cache[i].sector_lba == sector_lba) {
+    if (!fat_cache[i].filling && fat_cache[i].sector_lba == sector_lba) {
       fat_cache_age[i] = ++fat_cache_time;
       spin_unlock(&fat_cache_lock);
       return i;
@@ -74,13 +75,9 @@ static int fat_cache_lookup(uint32_t sector_lba) {
 
 // Read FAT sector into cache, returns cache slot.
 //
-// SMP-safe fill: the victim slot is invalidated (sector_lba cleared) BEFORE
-// blk_read fills its data, and the new sector_lba is published only AFTER the
-// read completes (with a release barrier). Without this, a concurrent
-// fat_cache_lookup that hits the slot between its tag being published and
-// blk_read finishing the fill would read a zeroed/partial buffer — causing an
-// allocator to see an in-use cluster (e.g. /test's directory cluster) as free
-// and overwrite it.
+// SMP-safe fill: reserve and invalidate the victim before I/O, then publish it
+// under fat_cache_lock only after the sector is complete. Consumers revalidate
+// the tag and copy their FAT word under the same lock.
 static int fat_cache_read(uint32_t sector_lba) {
   int slot = fat_cache_lookup(sector_lba);
   if (slot >= 0)
@@ -91,30 +88,42 @@ static int fat_cache_read(uint32_t sector_lba) {
   // inside the lock in case another CPU just filled this sector.
   spin_lock(&fat_cache_lock);
   for (int i = 0; i < FAT_CACHE_PAGES; i++) {
-    if (fat_cache[i].sector_lba == sector_lba) {
+    if (!fat_cache[i].filling && fat_cache[i].sector_lba == sector_lba) {
       fat_cache_age[i] = ++fat_cache_time;
       spin_unlock(&fat_cache_lock);
       return i;
     }
   }
-  int best = 0;
-  for (int i = 1; i < FAT_CACHE_PAGES; i++) {
-    if (fat_cache_age[i] < fat_cache_age[best])
+  int best = -1;
+  for (int i = 0; i < FAT_CACHE_PAGES; i++) {
+    if (!fat_cache[i].filling &&
+        (best < 0 || fat_cache_age[i] < fat_cache_age[best]))
       best = i;
   }
+  if (best < 0) {
+    spin_unlock(&fat_cache_lock);
+    return -1;
+  }
   fat_cache[best].sector_lba = 0xFFFFFFFF; // invalidate victim
+  fat_cache[best].filling = true;
   fat_cache_age[best] = ++fat_cache_time;
   spin_unlock(&fat_cache_lock);
 
   // Fill the buffer with no fat_cache_lock held (blk_read is polling and takes
   // ahci_lock itself). The slot is invisible to lookups during the fill.
-  if (blk_read_sector(sector_lba, fat_cache[best].data) != 0)
+  if (blk_read_sector(sector_lba, fat_cache[best].data) != 0) {
+    spin_lock(&fat_cache_lock);
+    fat_cache[best].filling = false;
+    spin_unlock(&fat_cache_lock);
     return -1;
+  }
 
-  // Publish the tag after the data is filled so a concurrent reader that hits
-  // this slot sees the completed buffer.
-  __sync_synchronize();
+  // Publish under the cache lock. Readers copy their FAT word under the same
+  // lock, so a slot cannot be evicted between tag validation and data access.
+  spin_lock(&fat_cache_lock);
   fat_cache[best].sector_lba = sector_lba;
+  fat_cache[best].filling = false;
+  spin_unlock(&fat_cache_lock);
   return best;
 }
 
@@ -138,14 +147,22 @@ static uint32_t fat32_read_entry(uint32_t cluster) {
   uint32_t fat_sector = fat_start_lba + (fat_offset / 512);
   uint32_t offset_in_sector = fat_offset % 512;
 
-  int slot = fat_cache_read(fat_sector);
-  if (slot < 0)
-    return 0x0FFFFFFF;
+  for (;;) {
+    int slot = fat_cache_read(fat_sector);
+    if (slot < 0)
+      return 0x0FFFFFFF;
 
-  uint8_t *src = fat_cache[slot].data + offset_in_sector;
-  uint32_t entry_val = (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-                       ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-  return entry_val & 0x0FFFFFFF;
+    spin_lock(&fat_cache_lock);
+    if (!fat_cache[slot].filling && fat_cache[slot].sector_lba == fat_sector) {
+      const uint8_t *src = fat_cache[slot].data + offset_in_sector;
+      uint32_t entry_val = (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
+                           ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
+      spin_unlock(&fat_cache_lock);
+      return entry_val & 0x0FFFFFFF;
+    }
+    spin_unlock(&fat_cache_lock);
+    // The slot was evicted after fat_cache_read() returned; retry lookup.
+  }
 }
 
 // Write a FAT entry (dual-write to FAT1 and FAT2).
@@ -1549,6 +1566,7 @@ int fat32_init(void) {
   // Initialize FAT cache.
   for (int i = 0; i < FAT_CACHE_PAGES; i++) {
     fat_cache[i].sector_lba = 0xFFFFFFFF;
+    fat_cache[i].filling = false;
     fat_cache_age[i] = 0;
   }
 

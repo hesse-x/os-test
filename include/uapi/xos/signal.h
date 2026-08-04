@@ -303,20 +303,28 @@ struct sigaction {
 typedef struct sigaction sigaction_t;
 
 // Wire layout matching musl arch/x86_64/ksigaction.h EXACTLY:
-// handler@0, flags@8, restorer@16, mask[2]@24 (40 bytes total). musl's
+// handler@0, flags@8, restorer@16, unsigned mask[2]@24 (32 bytes total). musl's
 // __libc_sigaction (src/signal/sigaction.c) passes a struct k_sigaction
 // across the rt_sigaction syscall, NOT its 152-byte user struct sigaction.
-// The kernel copies this 40-byte shape and field-assigns into the internal
+// The kernel copies this 32-byte shape and field-assigns into the internal
 // sigaction_t (which keeps its own field order + 8-byte sa_mask). arg4 is
-// _NSIG/8 = 16 (musl); we accept any sigsetsize >= 8 and read/write only the
-// low 8 bytes of mask[]. Distinct from sigaction_t so the in-kernel action[]
-// storage stays decoupled from the userspace wire ABI.
+// _NSIG/8 = 8 (musl x86_64); mask[2] is two 32-bit words, not two unsigned
+// longs. Distinct from sigaction_t so the in-kernel action[] storage stays
+// decoupled from the userspace wire ABI.
 struct k_sigaction_wire {
   void (*handler)(int);
   unsigned long flags;
   void (*restorer)(void);
-  unsigned long mask[2];
+  unsigned mask[2];
 };
+
+#ifdef __cplusplus
+static_assert(sizeof(struct k_sigaction_wire) == 32,
+              "musl x86_64 k_sigaction ABI size");
+#else
+_Static_assert(sizeof(struct k_sigaction_wire) == 32,
+               "musl x86_64 k_sigaction ABI size");
+#endif
 
 // Access union members — these macros translate struct member access
 #define sa_handler __sigaction_handler._sa_handler

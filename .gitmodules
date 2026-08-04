@@ -50,3 +50,6 @@
 [submodule "third_party/sbase"]
 	path = third_party/sbase
 	url = git://git.suckless.org/sbase
+[submodule "third_party/libpng"]
+	path = third_party/libpng
+	url = https://github.com/pnggroup/libpng.git

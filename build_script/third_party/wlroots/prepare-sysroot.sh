@@ -10,12 +10,22 @@ LIB_DIR="$SYSROOT/usr/lib"
 PC_DIR="$LIB_DIR/pkgconfig"
 NATIVE_PC_DIR="$BUILD/wlroots/native-pkgconfig"
 NATIVE_FILE="$BUILD/wlroots-native.txt"
-PROTOCOL_DIR="$SYSROOT/usr/share/wayland-protocols"
-PROTOCOL_HEADER_BUILD="$BUILD/wlroots/wayland-protocols/include/wayland-protocols"
+PROTOCOL_BUILD="$BUILD/wlroots/wayland-protocols"
 
 install -d "$INCLUDE_DIR" "$LIB_DIR" "$PC_DIR" "$NATIVE_PC_DIR"
-install -d "$PROTOCOL_DIR"
-cp -a "$ROOT/third_party/wayland-protocols/." "$PROTOCOL_DIR/"
+
+# wayland-protocols is a data package, not a runtime library. Install its XML
+# and pkg-config metadata with the upstream Meson rules so the sysroot layout
+# and advertised version stay in sync with the vendored submodule.
+protocol_setup=(--prefix /usr -Dtests=false \
+	"$PROTOCOL_BUILD" "$ROOT/third_party/wayland-protocols")
+if [[ -d "$PROTOCOL_BUILD" ]]; then
+	meson setup --reconfigure "${protocol_setup[@]}"
+else
+	meson setup "${protocol_setup[@]}"
+fi
+meson install -C "$PROTOCOL_BUILD" --no-rebuild --destdir "$SYSROOT"
+
 install -d "$INCLUDE_DIR/wayland-protocols"
 # wlroots public headers include the generated protocol enum headers. Generate
 # the complete vendored set so consumers never depend on host protocol data.
@@ -146,16 +156,6 @@ Libs: -L\${libdir} -l$library
 Cflags: -I\${includedir}
 EOF
 done
-
-cat > "$PC_DIR/wayland-protocols.pc" <<EOF
-prefix=/usr
-datarootdir=\${prefix}/share
-pkgdatadir=\${pc_sysrootdir}\${datarootdir}/wayland-protocols
-
-Name: Wayland Protocols
-Description: Wayland protocol XML files
-Version: 1.49
-EOF
 
 cat > "$NATIVE_PC_DIR/wayland-scanner.pc" <<EOF
 prefix=$BUILD
