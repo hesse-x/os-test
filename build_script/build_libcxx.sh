@@ -81,6 +81,8 @@ command -v clang++ >/dev/null 2>&1 || { echo "FAIL: clang++ not found (runtimes 
 echo "Configuring libc++ runtimes (cmake -S runtimes) → $LIBCXX_BUILD"
 cmake -G Ninja -S "$SRC/third_party/llvm-project/runtimes" -B "$LIBCXX_BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
+  "-DCMAKE_C_FLAGS_RELEASE=-O2 -DNDEBUG" \
+  "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG" \
   -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
   -DCMAKE_AR=/usr/bin/ar -DCMAKE_RANLIB=/usr/bin/ranlib \
   -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \

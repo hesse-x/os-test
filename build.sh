@@ -215,7 +215,7 @@ fi
         # Meson's setup synopsis is `setup [options] <builddir> [sourcedir]`:
         # the build dir must follow all options, or meson treats the first
         # positional as the source dir. Put options first, then builddir+source.
-        local setup=(--prefix /usr --libdir lib --buildtype=release \
+        local setup=(--prefix /usr --libdir lib --buildtype=release -Doptimization=2 \
             --default-library=shared -Dwerror=false --cross-file "$WLROOTS_CROSS" \
             "$build_dir" "$source" "$@")
 
@@ -457,6 +457,7 @@ bash build_script/gen-pkgconfig.sh
 GALLIUM="${MESA_DRIVER:-softpipe}"
 MESA_SETUP=(
     "$MESADIR" third_party/mesa
+    --buildtype release -Doptimization=2
     # Meson persists command-line built-in options across --wipe. Spell these
     # out so an older build configured with a partial c_args/cpp_args override
     # cannot silently mask the complete values in the cross file.
@@ -571,7 +572,7 @@ if [ "${BUILD_WLROOTS:-0}" = "1" ]; then
     WLROOTS_BUILD=build/wlroots/wlroots
     WLROOTS_NATIVE=build/wlroots-native.txt
     WLROOTS_SETUP=(
-        --prefix /usr --libdir lib --buildtype release
+        --prefix /usr --libdir lib --buildtype release -Doptimization=2
         --default-library shared --wrap-mode nodownload
         --cross-file build/wlroots-cross.txt --native-file "$WLROOTS_NATIVE"
         -Dauto_features=disabled -Dbackends=drm,libinput -Drenderers=gles2

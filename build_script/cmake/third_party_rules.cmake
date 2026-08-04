@@ -1,8 +1,8 @@
 # third_party_rules.cmake — add_third_party_lib() for third-party submodule libraries
 #
 # Autonomy boundary: third_party targets live in our build but each maintains its
-# own compile options and disables warnings; they only pull common freestanding
-# basics via link os_base_options. Our-specific options (WARN_FLAGS, -mno-sse, etc.)
+# own compile options and disables warnings; real targets pull common freestanding
+# basics via os_third_party_base_options. Our-specific options (WARN_FLAGS, -mno-sse, etc.)
 # do not leak into third_party.
 #
 # Product forms:
@@ -17,27 +17,24 @@
 # shared-library rules; even explicit add_library(x SHARED ...) is downgraded to
 # STATIC (observed: build rule becomes C_STATIC_LIBRARY_LINKER). So SHARED uses
 # branch B: a custom command produces .so (same mechanism as add_user_lib SHARED),
-# but flags come from os_base_options + -w, without our WARN_FLAGS(-Werror),
+# but flags come from the fixed-O2 third-party baseline + -w, without WARN_FLAGS,
 # keeping third-party warning autonomy. STATIC (Unity) uses a real
 # add_library(STATIC), which works normally.
 
 # _tp_base_compile_flags(out_var)
-# Mirrors os_base_options' common basics (freestanding + -m64 + config -O/-g),
+# Mirrors the fixed-optimization third-party baseline,
 # returned as a list for direct consumption by custom-command bare-gcc calls.
-# Custom commands do not inherit CMake target usage requirements, so os_base_options'
-# equivalent flags must be expanded manually. Kept in sync with the root
-# CMakeLists os_base_options (single logic: freestanding basics + build-type
-# optimization/debug).
+# Custom commands do not inherit CMake target usage requirements, so the
+# os_third_party_base_options equivalent must be expanded manually.
 function(_tp_base_compile_flags out_var)
     set(_flags ${USER_FREESTANDING_FLAGS} -m64)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         list(APPEND _flags -g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG)
-    elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
-        list(APPEND _flags -O3 -DNDEBUG)
-    elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-        list(APPEND _flags -O2 -g -DNDEBUG)
-    elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
-        list(APPEND _flags -Os -DNDEBUG)
+    elseif(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+        list(APPEND _flags -DNDEBUG)
+        if(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+            list(APPEND _flags -g)
+        endif()
     endif()
     set(${out_var} "${_flags}" PARENT_SCOPE)
 endfunction()
@@ -74,8 +71,8 @@ function(add_third_party_lib name)
         set(ARG_IMAGE_PARTITION 2)
     endif()
 
-    # Common compile flags: os_base_options equivalent (freestanding + -m64 +
-    # config -O/-g), no WARN_FLAGS.
+    # Common compile flags, no WARN_FLAGS. -O2 is appended after library FLAGS
+    # below so callers cannot accidentally make optimization build-type-dependent.
     _tp_base_compile_flags(_base_flags)
 
     # Target-specific compatibility directories must precede the generic UAPI
@@ -101,7 +98,7 @@ function(add_third_party_lib name)
     if(ARG_STATIC)
         # ---- STATIC (Unity-style): real add_library(STATIC), works normally ----
         add_library(${name} STATIC ${ARG_SOURCES})
-        target_link_libraries(${name} PRIVATE os_user_base_options)
+        target_link_libraries(${name} PRIVATE os_third_party_base_options)
         target_include_directories(${name} PRIVATE
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_SOURCE_DIR}/third_party
@@ -115,7 +112,7 @@ function(add_third_party_lib name)
         if(ARG_INTERFACE_INCLUDE_DIRS)
             target_include_directories(${name} INTERFACE ${ARG_INTERFACE_INCLUDE_DIRS})
         endif()
-        target_compile_options(${name} PRIVATE -w ${ARG_FLAGS_LIST})
+        target_compile_options(${name} PRIVATE -w ${ARG_FLAGS_LIST} ${THIRD_PARTY_OPT_FLAGS})
         set_target_properties(${name} PROPERTIES
             ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
             OUTPUT_NAME ${_output_name})
@@ -134,7 +131,8 @@ function(add_third_party_lib name)
         endif()
         # -fPIC (required for .so) + -fvisibility=hidden (default hidden, only
         # export-marked declarations are exported; some libs override via FLAGS).
-        set(COMPILE_FLAGS_BASE ${_base_flags} ${_include_flags} -fPIC -fvisibility=hidden ${ARG_FLAGS_LIST} -w)
+        set(COMPILE_FLAGS_BASE ${_base_flags} ${_include_flags} -fPIC -fvisibility=hidden
+            ${ARG_FLAGS_LIST} -w ${THIRD_PARTY_OPT_FLAGS})
 
         set(OBJ_FILES "")
         set(idx 0)

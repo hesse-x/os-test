@@ -67,6 +67,10 @@ set(WARN_FLAGS
     # musl's public endian.h intentionally relies on C operator precedence.
     -Wno-bitwise-op-parentheses -Wno-shift-op-parentheses)
 
+# Vendored code is always optimized at -O2, independently of the project build
+# type. Third-party helpers append this after any per-config compiler defaults.
+set(THIRD_PARTY_OPT_FLAGS -O2)
+
 # ---- os_base_options: shared baseline INTERFACE lib ----
 # third_party and in-repo targets link as needed to get the common freestanding
 # basics (-ffreestanding/-nostdlib/-fno-builtin/-fno-stack-protector/-mno-red-zone/
@@ -91,8 +95,8 @@ target_compile_options(os_base_options INTERFACE ${_base_opts})
 # Mirrors os_base_options but with USER_FREESTANDING_FLAGS (no -isystem) + -m64.
 # Userspace freestanding std headers (stdint/stddef/stdarg/stdbool) come from
 # musl exclusively; the compiler freestanding dir is no longer on the userspace
-# search path. Used by CMake-managed userspace targets (third_party STATIC, i.e.
-# unity). bare-gcc custom-command paths (libc.a/libc.so/user ELF/ld.so) are
+# search path. Available to CMake-managed in-repo userspace targets. Third-party
+# targets use the fixed-O2 baseline below. bare-gcc custom-command paths are
 # self-contained via USER_FREESTANDING_FLAGS + MUSL_INCLUDE_FLAGS (user_rules.cmake).
 add_library(os_user_base_options INTERFACE)
 set(_user_base_opts ${USER_FREESTANDING_FLAGS} -m64)
@@ -106,6 +110,21 @@ elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
     list(APPEND _user_base_opts -Os -DNDEBUG)
 endif()
 target_compile_options(os_user_base_options INTERFACE ${_user_base_opts})
+
+# Fixed-optimization baseline for real CMake third-party targets. Debug symbols
+# and config defines still follow the build type; optimization always ends in -O2.
+add_library(os_third_party_base_options INTERFACE)
+set(_third_party_base_opts ${USER_FREESTANDING_FLAGS} -m64)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    list(APPEND _third_party_base_opts -g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG)
+elseif(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+    list(APPEND _third_party_base_opts -DNDEBUG)
+    if(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+        list(APPEND _third_party_base_opts -g)
+    endif()
+endif()
+list(APPEND _third_party_base_opts ${THIRD_PARTY_OPT_FLAGS})
+target_compile_options(os_third_party_base_options INTERFACE ${_third_party_base_opts})
 
 # ---- os_uapi: UAPI contract headers INTERFACE lib ----
 # Header-only lib carrying include/uapi → #include "xos/*.h" (and the
@@ -155,8 +174,8 @@ target_compile_options(os_kernel_warn INTERFACE -Wno-unused-parameter)
 # The global string reverts to the toolchain baseline (-m64, see
 # toolchain-x86_64.cmake); no more directory-scope flag injection.
 # Config flags (-O3 -DNDEBUG etc.) come from CMake's per-config defaults +
-# os_base_options; both are redundant for CMake targets, gcc accepts duplicate
-# flags (harmless, matching libc.a's dual USER_COMPILE_FLAGS copies).
+# os_base_options. Third-party targets override only optimization with their
+# trailing -O2 while retaining debug symbols/config defines.
 
 # KASAN sanitizer flags (applied only to kernel OBJECT libraries via kernel_rules.cmake)
 # KASAN_SHADOW_OFFSET must match kasan.h's #define: gcc's -fsanitize=kernel-address

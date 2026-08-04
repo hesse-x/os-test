@@ -187,7 +187,7 @@ add_user_lib(m_so
 # Unity test framework (third_party exception: compile-time symbol dependency,
 # STATIC-linked into test ELF).
 # add_third_party_lib(unity STATIC ...): disables warnings (-w), only links
-# os_base_options for common basics, not polluted by our -Werror gate. Test ELF
+# os_third_party_base_options for common basics, not polluted by our -Werror gate. Test ELF
 # links unity instead of inlining unity.c (eliminating 28 inlines + duplicate DEFS).
 # UNITY_EXCLUDE_MATH_H: exclude host <math.h>. Under freestanding + -nostdlib,
 # <sys/cdefs.h> is not pulled in, so host math.h's __BEGIN_DECLS macros do not

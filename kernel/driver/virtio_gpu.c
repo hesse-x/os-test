@@ -35,6 +35,7 @@
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
+#include "utils/macro.h"
 
 #include <xos/errno.h>
 #include <xos/page.h>
@@ -206,6 +207,7 @@ static void virtio_gpu_isr(trapframe *tf) {
           struct drm_fence *f =
               drm_fence_find(p->hdr.ctx_id, p->hdr.ring_idx, p->hdr.fence_id);
           drm_fence_signal(f);
+          drm_fence_put(f); /* drop the in-flight submission reference */
         }
         if (p->waiter)
           wake_wq_target(p->waiter);
@@ -643,7 +645,8 @@ static struct drm_blob *drm_find_blob(uint32_t blob_id) {
  * table full. Caller (process context) owns the initial ref. */
 static struct drm_fence *drm_fence_create(uint32_t ctx_id, uint8_t ring_idx,
                                           uint64_t fence_id) {
-  spin_lock(&g_drm.fence_lock);
+  uint64_t flags;
+  spin_lock_irqsave(&g_drm.fence_lock, &flags);
   for (int i = 0; i < MAX_FENCES; i++) {
     if (!g_drm.fences[i].ctx_id) {
       struct drm_fence *f = &g_drm.fences[i];
@@ -654,44 +657,45 @@ static struct drm_fence *drm_fence_create(uint32_t ctx_id, uint8_t ring_idx,
       refcount_set(&f->refcount, 1);
       f->lock = SPINLOCK_INIT;
       init_wait_queue_head(&f->wq);
-      spin_unlock(&g_drm.fence_lock);
+      spin_unlock_irqrestore(&g_drm.fence_lock, flags);
       return f;
     }
   }
-  spin_unlock(&g_drm.fence_lock);
+  spin_unlock_irqrestore(&g_drm.fence_lock, flags);
   return NULL;
 }
 
 static struct drm_fence *drm_fence_find(uint32_t ctx_id, uint8_t ring_idx,
                                         uint64_t fence_id) {
-  spin_lock(&g_drm.fence_lock);
+  uint64_t flags;
+  spin_lock_irqsave(&g_drm.fence_lock, &flags);
   for (int i = 0; i < MAX_FENCES; i++) {
     if (g_drm.fences[i].ctx_id == ctx_id &&
         g_drm.fences[i].ring_idx == ring_idx &&
         g_drm.fences[i].fence_id == fence_id) {
-      spin_unlock(&g_drm.fence_lock);
+      spin_unlock_irqrestore(&g_drm.fence_lock, flags);
       return &g_drm.fences[i];
     }
   }
-  spin_unlock(&g_drm.fence_lock);
+  spin_unlock_irqrestore(&g_drm.fence_lock, flags);
   return NULL;
 }
 
-/* Drop a ref; when refcount hits 0, reclaim the slot (ctx_id=0, free signals
- * array). Safe to call from process context (sync_file close, EXECBUFFER error
- * path). Never call from ISR. Non-static: proc.c file_put calls it on
- * FD_SYNC_FILE close. */
+/* Drop a ref; when refcount hits 0, reclaim the slot. This is also called by
+ * the virtio-gpu ISR when an in-flight submission completes, so fence_lock
+ * must always be acquired with IRQs disabled. */
 void drm_fence_put(struct drm_fence *fence) {
   if (!fence)
     return;
   /* Reclaim under fence_lock so the table-scanned free check is atomic. */
-  spin_lock(&g_drm.fence_lock);
+  uint64_t flags;
+  spin_lock_irqsave(&g_drm.fence_lock, &flags);
   if (!refcount_dec_and_test(&fence->refcount)) {
-    spin_unlock(&g_drm.fence_lock);
+    spin_unlock_irqrestore(&g_drm.fence_lock, flags);
     return;
   }
   fence->ctx_id = 0; /* mark slot free */
-  spin_unlock(&g_drm.fence_lock);
+  spin_unlock_irqrestore(&g_drm.fence_lock, flags);
 }
 
 /* Read-only signaled probe for sync_file poll (BSD file_poll.c). */
@@ -772,11 +776,11 @@ static __attribute__((unused)) int drm_fence_wait(struct drm_fence *fence,
 static int drm_fence_install_sync_file(struct drm_fence *fence, xtask *proc) {
   if (!fence)
     return -EINVAL;
-  /* Take a ref for the fd. fence_lock is process-context only (create/find/put
-   * never run in ISR), so plain spin_lock suffices here. */
-  spin_lock(&g_drm.fence_lock);
+  /* Take a ref for the fd while excluding the completion ISR. */
+  uint64_t flags;
+  spin_lock_irqsave(&g_drm.fence_lock, &flags);
   refcount_inc(&fence->refcount);
-  spin_unlock(&g_drm.fence_lock);
+  spin_unlock_irqrestore(&g_drm.fence_lock, flags);
 
   int fd = bsd_sync_file_fd_install(proc, fence);
   if (fd < 0)
@@ -1475,7 +1479,8 @@ static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df) {
     /* Find one unsignaled fence for this context under fence_lock, take a ref
      * so the slot can't be reclaimed before we wait, then drop the lock. */
     struct drm_fence *fence = NULL;
-    spin_lock(&g_drm.fence_lock);
+    uint64_t flags;
+    spin_lock_irqsave(&g_drm.fence_lock, &flags);
     for (int i = 0; i < MAX_FENCES; i++) {
       if (g_drm.fences[i].ctx_id == ctx_id && !g_drm.fences[i].signaled) {
         fence = &g_drm.fences[i];
@@ -1483,7 +1488,7 @@ static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df) {
         break;
       }
     }
-    spin_unlock(&g_drm.fence_lock);
+    spin_unlock_irqrestore(&g_drm.fence_lock, flags);
 
     if (!fence)
       return 0; /* all ctx fences signaled → idle */
@@ -1593,6 +1598,14 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
     return -ENOMEM;
   }
 
+  /* Reserve a reference for the async completion before publishing the
+   * descriptor. The creator's reference remains live until out-fence setup is
+   * finished, even if the host completes immediately on another CPU. */
+  uint64_t fence_flags;
+  spin_lock_irqsave(&g_drm.fence_lock, &fence_flags);
+  refcount_inc(&fence->refcount);
+  spin_unlock_irqrestore(&g_drm.fence_lock, fence_flags);
+
   /* Submit async: send_cmd_3d_async copies submit_buf/resp into heap nodes
    * it owns, so freeing submit_buf here is safe. */
   struct virtio_gpu_ctrl_hdr_response resp_template;
@@ -1602,6 +1615,7 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
       sizeof(resp_template), fence_id, eb->ring_idx, df->ctx_id);
   kfree(submit_buf);
   if (rc) {
+    drm_fence_put(fence); /* unused async-completion reference */
     drm_fence_put(fence);
     return rc;
   }
@@ -1611,15 +1625,15 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
     int fd = drm_fence_install_sync_file(fence, current_task);
     if (fd < 0) {
       /* fence still valid and will signal; just no fd. Report error. */
-      drm_fence_put(fence);
+      drm_fence_put(fence); /* creator reference */
       return fd;
     }
     eb->fence_fd = fd;
   }
 
-  /* Drop EXECBUFFER's own ref on the fence. sync_file fd (if installed) and
-   * the in-flight ISR callback hold their own refs; the fence lives until all
-   * are released. */
+  /* The ISR owns the async-completion reference; an optional sync_file owns
+   * another. Drop the creator reference now that fd installation cannot race
+   * completion-driven reclamation. */
   drm_fence_put(fence);
 
   printk(LOG_DEBUG, "drm: EXECBUFFER ring=%u fence_id=%llu size=%u -> fd=%d\n",
@@ -3545,10 +3559,16 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
     spin_unlock(&g_drm.dumb_lock);
   }
 
-  if (!map_phys || size == 0 || size > map_size) {
-    printk(LOG_ERROR, "drm_mmap: no buffer for handle %u (offset=0x%llx)\n",
-           handle, (unsigned long long)offset);
-    return 0;
+  /* sys_mmap rounds the requested length to whole pages.  The backing store
+   * is allocated the same way, so permit the padding in its final page. */
+  uint64_t mapped_capacity = ALIGN_UP(map_size, PAGE_SIZE);
+  if (!map_phys || size == 0 || size > mapped_capacity) {
+    printk(LOG_ERROR,
+           "drm_mmap: invalid mapping for handle %u (offset=0x%llx, "
+           "size=%llu, capacity=%llu)\n",
+           handle, (unsigned long long)offset, (unsigned long long)size,
+           (unsigned long long)mapped_capacity);
+    return (uint64_t)-EINVAL;
   }
 
   size_t npages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -3564,7 +3584,7 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
       for (size_t j = 0; j < i; j++)
         unmap_user_pages(pml4, vaddr + j * PAGE_SIZE,
                          vaddr + (j + 1) * PAGE_SIZE, 1);
-      return 0;
+      return (uint64_t)-ENOMEM;
     }
   }
 
@@ -3573,7 +3593,7 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
     for (size_t i = 0; i < npages; i++)
       unmap_user_pages(pml4, vaddr + i * PAGE_SIZE, vaddr + (i + 1) * PAGE_SIZE,
                        1);
-    return 0;
+    return (uint64_t)-ENOMEM;
   }
   region->vaddr = vaddr;
   region->size = npages * PAGE_SIZE;

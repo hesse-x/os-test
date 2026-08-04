@@ -142,7 +142,8 @@ set(SBASE_COMPILE_FLAGS
     -I${MUSL_GEN_DIR}
     ${MUSL_INCLUDE_FLAGS}
     -I${SBASE_DIR}
-    ${SBASE_DEFS})
+    ${SBASE_DEFS}
+    ${THIRD_PARTY_OPT_FLAGS})
 
 # Scrt1.o (PIC _start) for dynamic executables; crti.o/crtn.o bracket .init/.fini.
 set(SBASE_MUSL_CRT  ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o)

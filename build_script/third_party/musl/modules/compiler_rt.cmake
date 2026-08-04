@@ -41,4 +41,5 @@ add_library(compiler_rt_int128 OBJECT
     ${COMPILER_RT_DIR}/muloti4.c)
 target_include_directories(compiler_rt_int128 PRIVATE ${COMPILER_RT_DIR})
 target_compile_options(compiler_rt_int128 PRIVATE
-    -m64 ${KERNEL_FREESTANDING_FLAGS} -fPIC -DCRT_HAS_128BIT -Wno-everything)
+    -m64 ${KERNEL_FREESTANDING_FLAGS} -fPIC -DCRT_HAS_128BIT -Wno-everything
+    ${THIRD_PARTY_OPT_FLAGS})

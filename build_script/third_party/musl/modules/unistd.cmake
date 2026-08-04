@@ -141,7 +141,8 @@ add_dependencies(musl_unistd_objs musl_headers)
 # before the full struct definition is in scope, so tcsetpgrp.c/tcgetpgrp.c
 # (which #include <termios.h>) trip -Wvisibility. Third-party source — silence.
 target_compile_options(musl_unistd_objs PRIVATE
-    -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fno-pie -Wno-all -Wno-visibility)
+    -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fno-pie -Wno-all
+    -Wno-visibility ${THIRD_PARTY_OPT_FLAGS})
 
 # libc.so needs PIC objects (the -fno-pie objects above produce non-PIC
 # relocations like R_X86_64_32 against .rodata, which ld rejects when building a
@@ -185,7 +186,8 @@ target_include_directories(musl_unistd_objs_so PRIVATE
 )
 add_dependencies(musl_unistd_objs_so musl_headers)
 target_compile_options(musl_unistd_objs_so PRIVATE
-    -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fPIC -Wno-all -Wno-visibility)
+    -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fPIC -Wno-all
+    -Wno-visibility ${THIRD_PARTY_OPT_FLAGS})
 # The SHARED libc.so link consumes the PIC objects as bare .o files; the STATIC
 # libc.a path consumes the -fno-pie objects via $<TARGET_OBJECTS:...>. Both are
 # wired through EXTRA_OBJS below.

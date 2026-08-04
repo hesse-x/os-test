@@ -89,7 +89,7 @@ add_dependencies(musl_loader_objs musl_headers)
 # likewise emits inline stores and avoids the self-referential PLT call.
 # -fno-builtin / -fno-tree-loop-distribute-patterns do NOT fix this at -O0.
 target_compile_options(musl_loader_objs PRIVATE
-    -m64 ${FREESTANDING_FLAGS} -fPIC -Wno-all -O2
+    -m64 ${FREESTANDING_FLAGS} -fPIC -Wno-all ${THIRD_PARTY_OPT_FLAGS}
     -std=c99 -D_XOPEN_SOURCE=700 -Wno-error
     # -Wno-all ≠ -w: clang does not group -Wempty-body under -Wall, so the
     # `for (...); auxv++;` idiom in dynlink.c:1394 still warns under -Wno-all.
@@ -107,7 +107,7 @@ file(MAKE_DIRECTORY ${MUSL_LIB_DIR})
 # Shared compile flags for the C crt sources (crt1.c / Scrt1.c). -DCRT selects
 # musl's _start/_start_c path (crt1.c is also #included by Scrt1.c with CRT
 # defined). crt1.o is non-PIC (-fno-pie) for the static link; Scrt1.o is -fPIC.
-set(_crt_c_flags -m64 ${FREESTANDING_FLAGS} -DCRT -Wno-all)
+set(_crt_c_flags -m64 ${FREESTANDING_FLAGS} -DCRT -Wno-all ${THIRD_PARTY_OPT_FLAGS})
 foreach(inc ${MUSL_INCLUDES})
     list(APPEND _crt_c_inc -I${inc})
 endforeach()

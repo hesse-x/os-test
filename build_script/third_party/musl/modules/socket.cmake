@@ -52,7 +52,7 @@ target_include_directories(musl_socket_objs PRIVATE
     ${MUSL_DIR}/arch/generic
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
-target_compile_options(musl_socket_objs PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fno-pie -Wno-all)
+target_compile_options(musl_socket_objs PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fno-pie -Wno-all ${THIRD_PARTY_OPT_FLAGS})
 
 # libc.so needs PIC objects (mirror the libc.a(-fno-pie)/libc.so(-fPIC) dual build).
 add_library(musl_socket_objs_so OBJECT ${MUSL_SOCKET_SOURCES})
@@ -65,6 +65,6 @@ target_include_directories(musl_socket_objs_so PRIVATE
     ${MUSL_DIR}/arch/generic
     ${CMAKE_SOURCE_DIR}/user/include
     ${CMAKE_SOURCE_DIR}/include/uapi)
-target_compile_options(musl_socket_objs_so PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fPIC -Wno-all)
+target_compile_options(musl_socket_objs_so PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -D_XOPEN_SOURCE=700 -fPIC -Wno-all ${THIRD_PARTY_OPT_FLAGS})
 add_dependencies(musl_socket_objs musl_headers)
 add_dependencies(musl_socket_objs_so musl_headers)

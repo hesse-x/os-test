@@ -453,7 +453,8 @@ function(add_drm_lib lib_name)
     # Third-party upstream code is not subject to our -Werror gate; any
     # warning suppression must be passed explicitly via FLAGS.
     separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
-    target_compile_options(${lib_name} PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -fno-pie ${ARG_FLAGS_LIST})
+    target_compile_options(${lib_name} PRIVATE -m64 ${USER_FREESTANDING_FLAGS} -fno-pie
+        ${ARG_FLAGS_LIST} ${THIRD_PARTY_OPT_FLAGS})
 
     set_target_properties(${lib_name} PROPERTIES
         ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -602,7 +603,8 @@ function(add_musl_lib lib_name)
     # set, _BSD_SOURCE stays undefined and the `long syscall` prototype is skipped.
     separate_arguments(ARG_FLAGS_LIST UNIX_COMMAND "${ARG_FLAGS}")
     target_compile_options(${lib_name} PRIVATE
-        -m64 ${FREESTANDING_FLAGS} -fPIC -Wno-everything -D_XOPEN_SOURCE=700 ${ARG_FLAGS_LIST})
+        -m64 ${FREESTANDING_FLAGS} -fPIC -Wno-everything -D_XOPEN_SOURCE=700
+        ${ARG_FLAGS_LIST} ${THIRD_PARTY_OPT_FLAGS})
     # -Wno-everything does NOT silence -Wvisibility in clang (visibility is a
     # hard warning outside the -everything group, like -Wempty-body below).
     # musl's <termios.h> declares tcgetwinsize/tcsetwinsize taking `struct
