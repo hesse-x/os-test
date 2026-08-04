@@ -328,9 +328,11 @@ add_user_dyn_elf(terminal
 )
 
 # evdev: real keyboard event source (xHCI HID → SHM ring → terminal) +
-# EVIOCG* ioctl query. Replaces the kbd driver for terminal input.
+# EVIOCG* ioctl query. Replaces the kbd driver for terminal input. Also registers
+# the mouse (event1): lib/usb_mouse.cc parses boot-mouse reports from the mouse
+# SHM sub-ring (rings[1]) into EV_KEY/EV_REL events. (mouse.md §3.3)
 # IMAGE_PATH driver/evdev.dev: rename evdev.elf → driver/evdev.dev in the image.
-add_user_elf(evdev  SOURCES driver/evdev.cc lib/usb_kbd.cc  LINK_LIBS c IMAGE_PATH driver/evdev.dev)
+add_user_elf(evdev  SOURCES driver/evdev.cc lib/usb_kbd.cc lib/usb_mouse.cc  LINK_LIBS c IMAGE_PATH driver/evdev.dev)
 
 # ===== libinput (static library, keyboard subset) — see build_script/third_party/libinput/libinput.cmake =====
 # Static `input` + shared `libinput.so` build rules extracted to keep this file

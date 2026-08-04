@@ -252,6 +252,19 @@ int main(int argc, char **argv, char **envp) {
   }
   printf("init: seatd ready pid=%d\n", seatd_pid);
 #ifdef TINYWL
+  // Wait for the mouse event1 node before spawning tinywl, but bound the wait:
+  // xHCI mouse enumeration is non-fatal (mouse.md §5.1 — failure only
+  // printk-warns, keyboard slot 0 stays up), so an unbounded wait here would
+  // deadlock the whole boot if the mouse never enumerates (no panic, no crash,
+  // just tinywl never spawns → Wayland acceptance blocked by a mouse fault).
+  // On timeout, warn and continue: tinywl still advertises the pointer
+  // capability, just with no pointer device arriving. (mouse.md §5.4)
+  if (wait_dev_ready_timeout("/dev/input/event1", 2500) == 0) {
+    printf("init: mouse event1 ready\n");
+  } else {
+    printf("init: mouse event1 not ready after 2.5s, "
+           "continuing without pointer\n");
+  }
   printf("init: spawning tinywl\n");
   int direct_tinywl_pid = start_tinywl();
   if (direct_tinywl_pid < 0) {

@@ -989,6 +989,11 @@ static int job_launch(pipeline &pl, bool foreground) {
     if (i == 0) {
       job_pgid = pid;
       setpgid(pid, pid);
+      // Publish the foreground group before launching later pipeline stages.
+      // Otherwise every stage can reach user code (and print readiness) while
+      // the shell still owns the tty, letting an immediate ^C miss the job.
+      if (foreground && job_control)
+        tcsetpgrp(0, job_pgid);
     } else {
       setpgid(pid, job_pgid);
     }

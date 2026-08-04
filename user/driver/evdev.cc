@@ -8,6 +8,7 @@
 // terminal consumer) + EVIOCG* ioctl query handler. Replaces the old kbd
 // driver; terminal now opens /dev/input/event0.
 #include "user/include/usb_hid.h"
+#include "user/include/usb_mouse.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
@@ -61,17 +62,23 @@ static struct evdev_device *find_device(uint32_t minor) {
   return NULL;
 }
 
-// Broadcast a batch of events to all clients via the broker owner write-fd.
-// The kernel broker fans out to per-client kfifo and wakes blocked readers.
-static void broadcast_events(const input_event *evs, int n) {
+// Broadcast a batch of events to all clients via the broker owner write-fd for
+// the given minor. The kernel broker fans out to per-client kfifo of the
+// /dev/input/event<minor> instance and wakes blocked readers. (mouse.md §3.3:
+// parameterized by minor — the old form hardcoded device_table[0], which only
+// served the keyboard; the mouse needs device_table[1].)
+static void broadcast_events(uint32_t minor, const input_event *evs, int n) {
   if (n <= 0)
     return;
-  int fd = device_table[0];
+  if (minor >= MAX_EVDEV_DEVICES)
+    return;
+  int fd = device_table[minor];
   if (fd < 0)
     return;
   ssize_t r = write(fd, evs, (size_t)n * sizeof(input_event));
   if (r < 0)
-    fprintf(stderr, "evdev: broadcast write failed errno=%d\n", errno);
+    fprintf(stderr, "evdev: broadcast write failed minor=%u errno=%d\n", minor,
+            errno);
 }
 
 // on_key_event: each call fills one event, returns 1=has event / 0=HID empty.
@@ -208,6 +215,44 @@ static void init_caps(struct evdev_device *dev) {
   }
 }
 
+// Advertise mouse capabilities: EV_KEY (three buttons) + EV_REL (X/Y/wheel).
+// Mirrors the layout udevd's input_id probes via EVIOCGBIT and that libinput
+// reads to classify the device as a pointer (ID_INPUT_MOUSE → wlr_pointer).
+// (mouse.md §3.3(b))
+static void init_mouse_caps(struct evdev_device *dev) {
+  memset(dev->caps_bitmap, 0, sizeof(dev->caps_bitmap));
+  // ev=0 (EV_SYN-type) bitmap advertises supported event types: EV_KEY +
+  // EV_REL.
+  dev->caps_bitmap[EV_SYN][EV_KEY / 8] |= (1u << (EV_KEY % 8));
+  dev->caps_bitmap[EV_SYN][EV_REL / 8] |= (1u << (EV_REL % 8));
+  // ev=1 (EV_KEY-type) bitmap: BTN_LEFT/RIGHT/MIDDLE.
+  dev->caps_bitmap[EV_KEY][BTN_LEFT / 8] |= (1u << (BTN_LEFT % 8));
+  dev->caps_bitmap[EV_KEY][BTN_RIGHT / 8] |= (1u << (BTN_RIGHT % 8));
+  dev->caps_bitmap[EV_KEY][BTN_MIDDLE / 8] |= (1u << (BTN_MIDDLE % 8));
+  // ev=2 (EV_REL-type) bitmap: REL_X/REL_Y/REL_WHEEL.
+  dev->caps_bitmap[EV_REL][REL_X / 8] |= (1u << (REL_X % 8));
+  dev->caps_bitmap[EV_REL][REL_Y / 8] |= (1u << (REL_Y % 8));
+  dev->caps_bitmap[EV_REL][REL_WHEEL / 8] |= (1u << (REL_WHEEL % 8));
+}
+
+// on_mouse_event: each call fills one event, returns 1=has event / 0=mouse
+// sub-ring empty. Timestamps are stamped here (mirrors on_key_event) since
+// get_mouse_event only fills type/code/value and leaves sec/usec zero.
+static int on_mouse_event(input_event *ev) {
+  input_event me;
+  if (get_mouse_event(&me) != 0)
+    return 0; // mouse sub-ring empty
+  struct timespec ts;
+  if (sys_clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    return 0;
+  ev->input_event_sec = ts.tv_sec;
+  ev->input_event_usec = ts.tv_nsec / 1000;
+  ev->type = me.type;
+  ev->code = me.code;
+  ev->value = me.value;
+  return 1;
+}
+
 // extern "C": clang under -ffreestanding mangles a C++ `main`, breaking the
 // crt0.o `main` reference; gcc leaves `main` unmangled regardless. See
 // shell.cc.
@@ -273,6 +318,50 @@ extern "C" int main(int argc, char **argv, char **envp) {
     device_set_meta("input/event0", "input", "evdev", &props);
   }
 
+  // 3b. Build event1 device record (minor=1): mouse identity + caps. Reuses the
+  //     same mmap'd HID SHM base (the mouse sub-ring rings[1] lives in the same
+  //     page as the keyboard rings[0]) and the same control node. The mouse
+  //     shares the keyboard's single irqfd — the kernel xHCI ISR signals every
+  //     bound irqfd on ANY HID report (keyboard or mouse), and the main loop
+  //     drains both sub-rings on each wake, so no second irqfd is needed.
+  //     (mouse.md §3.3 / §5.3)
+  get_mouse_event_init(hid_shm);
+  struct evdev_device *mdev = &devices[1];
+  mdev->minor = 1;
+  strncpy(mdev->name, "evdev mouse", sizeof(mdev->name) - 1);
+  mdev->id.bustype = BUS_USB;
+  mdev->id.vendor = 0x0001;
+  mdev->id.product = 0x0002; // distinct product distinguishes the mouse device
+  mdev->id.version = 0x0001;
+  mdev->prop_bitmap = 0;
+  mdev->grabbed = false;
+  mdev->grab_client = 0;
+  init_mouse_caps(mdev);
+  num_devices = 2;
+
+  // Register event1 via INPUT_REGISTER; broker returns an owner write-fd
+  // independent of event0's (per-instance kfifo, cross-device isolation).
+  __builtin_memset(&reg, 0, sizeof(reg));
+  strncpy(reg.name, "input/event1", sizeof(reg.name) - 1);
+  reg.minor = 1;
+  int owner_fd_mouse = ioctl(control_fd, INPUT_REGISTER, &reg);
+  if (owner_fd_mouse < 0) {
+    fprintf(stderr, "evdev: INPUT_REGISTER event1 failed errno=%d\n", errno);
+  } else {
+    device_table[1] = owner_fd_mouse;
+
+    struct dev_props mprops;
+    memset(&mprops, 0, sizeof(mprops));
+    mprops.bustype = BUS_USB;
+    mprops.vendor = 0x0001;
+    mprops.product = 0x0002;
+    mprops.version = 0x0001;
+    strncpy(mprops.name, "evdev mouse", 63);
+    mprops.name[63] = '\0';
+    device_set_meta("input/event1", "input", "evdev", &mprops);
+    printf("evdev: event1 registered\n");
+  }
+
   // 5. Split the two event sources onto separate pollable fds (evdev_refact.md
   //    §3.1/§4.4): HID hardware interrupts arrive on irqfd (an eventfd the
   //    xHCI ISR signals via eventfd_signal_isr), downstream IPC requests
@@ -314,8 +403,14 @@ extern "C" int main(int argc, char **argv, char **envp) {
       if (evs[i].data.fd == irqfd) {
         // HID interrupt arrived: clear the notification count, then drain the
         // HID SHM sub-ring to empty (LT + drain-to-empty = no loss, §3.2/§5.4).
+        // A single irqfd is shared by keyboard + mouse: the kernel xHCI ISR
+        // signals every bound irqfd on ANY HID report, so one wake must drain
+        // both sub-rings. Order is irrelevant — rings[0] and rings[1] have
+        // independent head/tail, no shared counter. (mouse.md §3.3(d)/§5.3)
         uint64_t c;
         read(irqfd, &c, 8);
+
+        // --- keyboard (minor 0) ---
         input_event batch[16];
         int nevents = 0;
         input_event ev;
@@ -336,8 +431,30 @@ extern "C" int main(int argc, char **argv, char **envp) {
           syn_ev.type = EV_SYN;
           syn_ev.code = 0; // SYN_REPORT
           syn_ev.value = 0;
-          broadcast_events(batch, nevents);
-          broadcast_events(&syn_ev, 1);
+          broadcast_events(0, batch, nevents);
+          broadcast_events(0, &syn_ev, 1);
+        }
+
+        // --- mouse (minor 1) ---
+        input_event mbatch[16];
+        int mevents = 0;
+        while (mevents < (int)(sizeof(mbatch) / sizeof(mbatch[0])) &&
+               on_mouse_event(&ev)) {
+          mbatch[mevents++] = ev;
+        }
+        if (mevents > 0) {
+          input_event syn_ev;
+          memset(&syn_ev, 0, sizeof(syn_ev));
+          struct timespec ts;
+          if (sys_clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+            return 1;
+          syn_ev.input_event_sec = ts.tv_sec;
+          syn_ev.input_event_usec = ts.tv_nsec / 1000;
+          syn_ev.type = EV_SYN;
+          syn_ev.code = 0; // SYN_REPORT
+          syn_ev.value = 0;
+          broadcast_events(1, mbatch, mevents);
+          broadcast_events(1, &syn_ev, 1);
         }
       } else if (evs[i].data.fd == ipcfd) {
         // Downstream IPC request: non-blocking dequeue (ipcfd_read =

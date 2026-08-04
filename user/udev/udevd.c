@@ -447,10 +447,10 @@ static int input_id_compute(const char *devnode, uint32_t devnum) {
   if (fd < 0)
     return -errno;
 
-  // Event type bitmap: EV_KEY/EV_REL/EV_ABS etc. This round event0 is a pure
-  // keyboard (only EV_KEY), but we still probe the full evbits to mirror
-  // Linux input_id's ID_INPUT decision (any of EV_KEY/EV_REL/EV_ABS →
-  // ID_INPUT=1), reserving for B6 real multi-device support.
+  // Event type bitmap: EV_KEY/EV_REL/EV_ABS etc. Probed per-device (event0 =
+  // keyboard, event1 = mouse), so the same input_id_compute serves both. The
+  // full evbits probe mirrors Linux input_id's ID_INPUT decision (any of
+  // EV_KEY/EV_REL/EV_ABS → ID_INPUT=1). (mouse.md §3.4)
   unsigned long evbits[NBITS(EV_MAX + 1)];
   memset(evbits, 0, sizeof(evbits));
   if (ioctl(fd, EVIOCGBIT(0, sizeof(evbits)), evbits) < 0) {
@@ -461,6 +461,7 @@ static int input_id_compute(const char *devnode, uint32_t devnum) {
   int is_input = 0;    // ID_INPUT=1
   int is_keyboard = 0; // ID_INPUT_KEYBOARD=1
   int is_key = 0;      // ID_INPUT_KEY=1
+  int is_mouse = 0;    // ID_INPUT_MOUSE=1 (mouse.md §3.4)
 
   // ID_INPUT: any EV_KEY/EV_REL/EV_ABS device (mirrors Linux input_id main
   // switch)
@@ -470,7 +471,9 @@ static int input_id_compute(const char *devnode, uint32_t devnum) {
 
   // ID_INPUT_KEYBOARD / KEY: EV_KEY plus keyboard-class keys
   // (mirrors Linux: any of KEY_A..KEY_Z / KEY_ENTER / KEY_SPACE etc. ⇒
-  // keyboard)
+  // keyboard). Non-mutex with the mouse branch below: a device with both
+  // KEY_A and REL_X/Y (e.g. a pointing stick + keyboard combo) gets both tags;
+  // a pure mouse has no KEY_* caps so this won't mis-fire on it.
   if (test_bit(EV_KEY, evbits)) {
     unsigned long keybits[NBITS(KEY_MAX + 1)];
     memset(keybits, 0, sizeof(keybits));
@@ -482,16 +485,24 @@ static int input_id_compute(const char *devnode, uint32_t devnum) {
         is_key = 1;
       }
     }
-    // B6 deferred (§3.4): MOUSE (EV_REL+REL_X/Y) / TOUCHPAD
-    // (BTN_TOOL_FINGER+ABS_X/Y) detection is not done this round — it needs
-    // real multi-device caps; this round's event0 is a pure keyboard so it
-    // won't trigger.
+  }
+
+  // ID_INPUT_MOUSE: EV_REL plus REL_X + REL_Y (mirrors Linux input_id's
+  // mouse/pointing-stick detection). libinput's udev backend reads
+  // ID_INPUT_MOUSE to tag the device as a pointer → wlroots produces a
+  // WLR_INPUT_DEVICE_POINTER → tinywl server_new_pointer. (mouse.md §3.4)
+  if (test_bit(EV_REL, evbits)) {
+    unsigned long relbits[NBITS(REL_MAX + 1)];
+    memset(relbits, 0, sizeof(relbits));
+    if (ioctl(fd, EVIOCGBIT(EV_REL, sizeof(relbits)), relbits) >= 0) {
+      if (test_bit(REL_X, relbits) && test_bit(REL_Y, relbits))
+        is_mouse = 1;
+    }
   }
 
   close(fd);
 
-  // Synthesize KV and write to db (this round only keyboard-class properties;
-  // ID_SEAT is always seat0, mirroring Linux)
+  // Synthesize KV and write to db. ID_SEAT is always seat0, mirroring Linux.
   char kv[512];
   int len = 0;
   len += snprintf(kv + len, sizeof(kv) - len, "ID_INPUT=%d\n", is_input);
@@ -499,6 +510,12 @@ static int input_id_compute(const char *devnode, uint32_t devnum) {
     len += snprintf(kv + len, sizeof(kv) - len, "ID_INPUT_KEYBOARD=1\n");
   if (is_key)
     len += snprintf(kv + len, sizeof(kv) - len, "ID_INPUT_KEY=1\n");
+  if (is_mouse) {
+    len += snprintf(kv + len, sizeof(kv) - len, "ID_INPUT_MOUSE=1\n");
+    // ID_INPUT_POINTING_DEVICE mirrors Linux input_id (set alongside MOUSE for
+    // any relative-pointer device); libinput uses ID_INPUT_MOUSE specifically.
+    len += snprintf(kv + len, sizeof(kv) - len, "ID_INPUT_POINTING_DEVICE=1\n");
+  }
   len += snprintf(kv + len, sizeof(kv) - len, "ID_SEAT=seat0\n");
 
   return db_write_property(devnum, kv, (size_t)len);

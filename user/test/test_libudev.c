@@ -30,16 +30,21 @@ static const char *pick_evdev_devnode(void) {
   if (!dir)
     return NULL;
   static char devnode[64];
+  char selected[32] = "";
   struct dirent *entry;
   while ((entry = readdir(dir)) != NULL) {
     if (strncmp(entry->d_name, "event", 5) != 0)
       continue;
-    snprintf(devnode, sizeof(devnode), "/dev/input/%s", entry->d_name);
-    closedir(dir);
-    return devnode;
+    // Directory iteration order is unspecified. The platform registers the
+    // keyboard first (event0), so consistently choose the lowest event node.
+    if (!selected[0] || strcmp(entry->d_name, selected) < 0)
+      snprintf(selected, sizeof(selected), "%s", entry->d_name);
   }
   closedir(dir);
-  return NULL;
+  if (!selected[0])
+    return NULL;
+  snprintf(devnode, sizeof(devnode), "/dev/input/%s", selected);
+  return devnode;
 }
 
 // ---- P0: get_sysattr_value reads real sysfs files ----

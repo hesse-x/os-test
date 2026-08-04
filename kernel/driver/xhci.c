@@ -222,8 +222,31 @@ typedef struct xhci_intr {
   int enqueue;
   int ccs;
   int slot_id;
-  int ep_dci; // Doorbell target (DCI): EP1-IN = 3
-  int ep_num; // Endpoint number for event matching: EP1-IN = 1
+  int ep_dci;   // Doorbell target (DCI): EP1-IN = 3
+  int ep_num;   // Endpoint number for event matching: EP1-IN = 1
+  int port_idx; // root-hub port this device occupies (for used_ports exclusion)
+
+  // Per-slot control-transfer resources (originally file-level globals when
+  // only the keyboard existed; migrated into the per-slot struct so a second
+  // HID device (mouse) can be enumerated without clobbering slot 0's state).
+  // See mouse.md §3.1(a)/(b).
+  struct page *dev_ctx_page; // Output Device Context (xHCI writes device state)
+  uint64_t dev_ctx_phys;
+  struct page *ep0_ring_page; // EP0 control transfer ring
+  uint64_t ep0_ring_phys;
+  void *ep0_ring_virt;
+  int ep0_ring_enqueue;
+  int ep0_ring_ccs;
+  struct page *ctrl_dma_page; // control-transfer data-stage DMA buffer
+  uint64_t ctrl_dma_phys;
+  void *ctrl_dma_virt;
+  // HID report DMA buffer (xHCI writes the interrupt-IN report here). CRITICAL
+  // per-slot: two armed EP1-IN endpoints have TRBs pointing at their own DMA
+  // page; if shared, the HC writing a mouse report would trample the keyboard
+  // buffer before the ISR reads it.
+  struct page *hid_dma_page;
+  uint64_t hid_dma_phys;
+  void *hid_dma_virt;
 } xhci_intr;
 
 static xhci_intr xhci_intrs[2]; // intr 0=keyboard, 1=spare
@@ -247,26 +270,18 @@ static spinlock hid_irqfd_lock = SPINLOCK_INIT;
 // the xHCI ISR after it enqueues a new HID report into the SHM sub-ring.
 static wait_queue_head *hidraw_wq;
 
-// HID DMA buffer (xHCI writes HID report here, <4GB)
-static struct page *hid_dma_page;
-static uint64_t hid_dma_phys;
-static void *hid_dma_virt;
-
-// EP0 Transfer Ring (for control transfers: Get Descriptor, Set Protocol)
-static struct page *ep0_ring_page;
-static uint64_t ep0_ring_phys;
-static void *ep0_ring_virt;
-static int ep0_ring_enqueue = 0;
-static int ep0_ring_ccs = 1;
-
-// Output Device Context (xHCI writes device state here)
-static struct page *dev_ctx_page;
-static uint64_t dev_ctx_phys;
-
-// Control transfer DMA buffer (for Get Descriptor data stage)
-static struct page *ctrl_dma_page;
-static uint64_t ctrl_dma_phys;
-static void *ctrl_dma_virt;
+// Input Context (scratch) for Address Device / Configure Endpoint commands.
+// Kept as a file-level shared global rather than per-slot: it is an
+// enumeration- time scratch buffer only (consumed during Address Device /
+// Configure Endpoint / Get Descriptor, which run strictly sequentially and
+// block on completion), and the HC does not retain a reference to it after the
+// command completes — the relevant fields are copied into the output device
+// context + internal slot/endpoint state. A single shared input_ctx page reused
+// in sequence across the keyboard then the mouse has no conflict. Truly
+// per-slot resources (dev_ctx / ep0_ring / hid_dma) live in xhci_intrs[idx].
+// See mouse.md §3.1(a) carve-out. (input_ctx_page / input_ctx_phys are declared
+// above with the base controller DMA pages — they are allocated once during
+// xhci_init base setup and reused across both HID slots.)
 
 // ===================== Helper functions =====================
 
@@ -472,8 +487,8 @@ static void xhci_isr(trapframe *tf) {
         volatile uint32_t *xfer_ring =
             (volatile uint32_t *)xhci_intrs[0].ring_virt;
         trb norm;
-        norm.dword0 = (uint32_t)hid_dma_phys;
-        norm.dword1 = (uint32_t)(hid_dma_phys >> 32);
+        norm.dword0 = (uint32_t)xhci_intrs[0].hid_dma_phys;
+        norm.dword1 = (uint32_t)(xhci_intrs[0].hid_dma_phys >> 32);
         norm.dword2 = 8;
         norm.dword3 = (TRB_NORMAL << TRB_TYPE_SHIFT) | TRB_IOC;
         xfer_ring_enqueue(xfer_ring, &xhci_intrs[0].enqueue, &xhci_intrs[0].ccs,
@@ -481,8 +496,9 @@ static void xhci_isr(trapframe *tf) {
         db_write(xhci_intrs[0].slot_id, xhci_intrs[0].ep_dci);
 
         if (cc == CC_SUCCESS) {
-          // Read 8-byte HID report from DMA buffer
-          volatile uint8_t *report = (volatile uint8_t *)hid_dma_virt;
+          // Read 8-byte HID report from DMA buffer (per-slot DMA source).
+          volatile uint8_t *report =
+              (volatile uint8_t *)xhci_intrs[0].hid_dma_virt;
 
           // Write to USB HID SHM keyboard sub-ring
           volatile struct usb_hid_shm_header *hdr =
@@ -504,20 +520,83 @@ static void xhci_isr(trapframe *tf) {
               slot->data[i] = report[i];
             __atomic_store_n(&hdr->rings[0].head, next, __ATOMIC_RELEASE);
           }
-
-          // Notify registered irqfds: signal each bound eventfd so evdev's
-          // epoll_wait wakes on the irqfd (evdev_refact.md §4.2/§3.2).
-          uint64_t irqflags;
-          spin_lock_irqsave(&hid_irqfd_lock, &irqflags);
-          for (int i = 0; i < HID_IRQFD_MAX; i++)
-            if (hid_irqfds[i])
-              eventfd_signal_isr(hid_irqfds[i]);
-          spin_unlock_irqrestore(&hid_irqfd_lock, irqflags);
-          // Wake any blocking /dev/hidraw0 read() waiters (report now
-          // enqueued in SHM sub-ring).
-          if (hidraw_wq)
-            __wake_up(hidraw_wq, POLLIN);
+          // Fall through to the shared irqfd signal + hidraw_wq wake below.
         }
+      } else if (xhci_intrs[1].slot_id != 0 &&
+                 sid == (uint32_t)xhci_intrs[1].slot_id &&
+                 epid == (uint32_t)xhci_intrs[1].ep_num) {
+        // Mouse EP1-IN path (mouse.md §3.1(d)). Per-slot DMA source must be
+        // selected by sid: reading the keyboard's hid_dma_virt here would
+        // capture the keyboard buffer, not the mouse report.
+        last_isr.last_cc = cc;
+        last_isr.last_len = d2 & 0xFFFFFF;
+        // Replenish TRB regardless of completion code to keep ring alive.
+        volatile uint32_t *xfer_ring =
+            (volatile uint32_t *)xhci_intrs[1].ring_virt;
+        trb norm;
+        norm.dword0 = (uint32_t)xhci_intrs[1].hid_dma_phys;
+        norm.dword1 = (uint32_t)(xhci_intrs[1].hid_dma_phys >> 32);
+        norm.dword2 = 8; // DMA buffer capacity (constant), not report length
+        norm.dword3 = (TRB_NORMAL << TRB_TYPE_SHIFT) | TRB_IOC;
+        xfer_ring_enqueue(xfer_ring, &xhci_intrs[1].enqueue, &xhci_intrs[1].ccs,
+                          &norm);
+        db_write(xhci_intrs[1].slot_id, xhci_intrs[1].ep_dci);
+
+        if (cc == CC_SUCCESS) {
+          // Actual report length is dynamic (3 or 4 bytes per report, possibly
+          // mixed): taken from the completion event's transfer-length field
+          // (dword2 & 0xFFFFFF), NOT any hardcoded constant. arm TRB's dword2
+          // above is the buffer *capacity* (8), an upper bound the HC may write
+          // up to — mis-filling it to 4 would leave the 4th byte as stale DMA
+          // garbage parsed as a phantom REL_WHEEL. See mouse.md §3.1(e).
+          uint32_t report_len = last_isr.last_len;
+          if (report_len > 8)
+            report_len = 8;
+          volatile uint8_t *report =
+              (volatile uint8_t *)xhci_intrs[1].hid_dma_virt;
+
+          volatile struct usb_hid_shm_header *hdr =
+              (volatile struct usb_hid_shm_header *)usb_hid_shm_virt;
+          uint32_t head =
+              __atomic_load_n(&hdr->rings[1].head, __ATOMIC_ACQUIRE);
+          uint32_t tail =
+              __atomic_load_n(&hdr->rings[1].tail, __ATOMIC_ACQUIRE);
+          uint32_t next = (head + 1) % HID_SUBRING_CAPACITY;
+
+          if (next != tail) { // ring not full
+            volatile struct usb_hid_slot *slot =
+                (volatile struct usb_hid_slot *)((uint8_t *)usb_hid_shm_virt +
+                                                 HID_SUBRING_MOUSE_OFFSET +
+                                                 head * HID_SLOT_SIZE);
+            slot->type = HID_TYPE_MOUSE;
+            slot->len = (uint8_t)report_len;
+            for (uint32_t i = 0; i < report_len; i++)
+              slot->data[i] = report[i];
+            __atomic_store_n(&hdr->rings[1].head, next, __ATOMIC_RELEASE);
+          }
+          // Fall through to the shared irqfd signal + hidraw_wq wake below.
+        }
+      }
+
+      // Shared HID-interrupt notification: signal every bound irqfd on ANY HID
+      // report (keyboard or mouse). evdev uses a single irqfd and drains both
+      // sub-rings on wake, so the two device paths share one notification
+      // channel — no per-device irqfd. (mouse.md §2.3 / §5.3)
+      if ((sid == (uint32_t)xhci_intrs[0].slot_id &&
+           epid == (uint32_t)xhci_intrs[0].ep_num) ||
+          (xhci_intrs[1].slot_id != 0 &&
+           sid == (uint32_t)xhci_intrs[1].slot_id &&
+           epid == (uint32_t)xhci_intrs[1].ep_num)) {
+        uint64_t irqflags;
+        spin_lock_irqsave(&hid_irqfd_lock, &irqflags);
+        for (int i = 0; i < HID_IRQFD_MAX; i++)
+          if (hid_irqfds[i])
+            eventfd_signal_isr(hid_irqfds[i]);
+        spin_unlock_irqrestore(&hid_irqfd_lock, irqflags);
+        // Wake any blocking /dev/hidraw0 read() waiters (report now
+        // enqueued in SHM sub-ring).
+        if (hidraw_wq)
+          __wake_up(hidraw_wq, POLLIN);
       }
     } else if (type == TRB_CMD_COMPLETE) {
       // No action needed at runtime
@@ -580,11 +659,44 @@ void xhci_poll() {
     // NAK'ing would never be delivered.  Event processing is handled by
     // xhci_isr (MSI-X).
     db_write(xhci_intrs[0].slot_id, xhci_intrs[0].ep_dci);
+  // Mouse EP1-IN likewise needs a doorbell kick to retry NAK'ed interrupt
+  // transfers (same QEMU behavior as the keyboard). Only ring if the mouse
+  // slot was successfully enumerated (slot_id != 0).
+  if (xhci_intrs[1].slot_id != 0)
+    db_write(xhci_intrs[1].slot_id, xhci_intrs[1].ep_dci);
 }
 
 // ===================== xHCI init =====================
 
-static void xhci_init_keyboard(); // forward declaration
+// ===================== USB HID device enumeration =====================
+
+// Initialize one HID boot device on its own xHCI slot:
+//   idx=0 → keyboard (slot 0), idx=1 → mouse (slot 1).
+//   hid_type selects the sub-ring the ISR tags reports with.
+//   used_ports/n_used list root-hub ports already taken by earlier slots, so
+//   port discovery skips them (the original keyboard path took the first CCS
+//   port and stopped — re-running it for the mouse would re-reset the
+//   keyboard's port). Returns 0 on success, -1 on failure; the caller must NOT
+//   panic on failure (mouse.md §5.1).
+//
+// idx==0 only (global one-time init, must NOT run again for idx==1, else it
+//   would overwrite the keyboard's SHM backing / re-register hidraw0 and break
+//   the keyboard link):
+//   - build the SHM header (4 sub-ring descriptors: kbd/mouse/gamepad/touchpad)
+//   - register /dev/hidraw0 + complete the SHM backing switch
+//     (bfc_alloc_page → shm_create_internal(1); the original bfc page is freed
+//     and usb_hid_shm_virt repointed; evdev open()+mmap() gets this page)
+//   - the original xhci_init_keyboard did this switch at :999-1042; it moves
+//     here under the idx==0 guard and must not be dropped
+// idx>=0 shared (per-slot resource alloc + device enumeration):
+//   - per-slot resource allocation (ring/ep0/dev_ctx/ctrl_dma/hid_dma, one page
+//     each)
+//   - port discovery (excluding used_ports) + device enumeration
+//     (Enable Slot → Address Device → Get Descriptor → Set Protocol(Boot)
+//      → Set Configuration → Configure Endpoint)
+//   - arm the first NORMAL TRB
+static int xhci_init_hid_device(int idx, uint8_t hid_type,
+                                const uint8_t *used_ports, int n_used);
 
 void xhci_init() {
   // 1. Find xHCI PCI device
@@ -758,8 +870,24 @@ void xhci_init() {
   if (op_read(XHCI_USBSTS) & USBSTS_HCH)
     return;
 
-  // USB HID device enumeration
-  xhci_init_keyboard();
+  // USB HID device enumeration: keyboard (slot 0) first, then mouse (slot 1).
+  // The keyboard must be enumerated first because the SHM header build +
+  // /dev/hidraw0 registration + SHM backing switch are global one-time init
+  // guarded by idx==0 inside xhci_init_hid_device. The mouse records which root
+  // hub port the keyboard occupies and skips it (used_ports) so it does not
+  // reset the keyboard's port. Mouse enumeration failure is non-fatal: the
+  // helper returns -1 and xhci_init only printk-warns, leaving the keyboard
+  // slot 0 fully functional. (mouse.md §3.1(a) / §5.1)
+  uint8_t used_ports[1];
+  int n_used = 0;
+  if (xhci_init_hid_device(0, HID_TYPE_KEYBOARD, NULL, 0) == 0 &&
+      xhci_intrs[0].slot_id != 0) {
+    used_ports[0] = xhci_intrs[0].port_idx;
+    n_used = 1;
+  }
+  if (xhci_init_hid_device(1, HID_TYPE_MOUSE, used_ports, n_used) != 0)
+    printk(LOG_WARN,
+           "xhci: mouse enumeration failed; continuing without pointer\n");
 
   // Enable interrupts (done regardless of keyboard presence)
   pci_msix_unmask_entry(xhci_dev, 0);
@@ -940,117 +1068,142 @@ static long usb_hid_ioctl(uint32_t cmd, void *arg) {
   }
 }
 
-static void xhci_init_keyboard() {
-  uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
+static int xhci_init_hid_device(int idx, uint8_t hid_type,
+                                const uint8_t *used_ports, int n_used) {
+  // Input validation (mouse.md §4.2).
+  if (idx < 0 || idx >= (int)(sizeof(xhci_intrs) / sizeof(xhci_intrs[0])))
+    return -1;
+  if (hid_type != HID_TYPE_KEYBOARD && hid_type != HID_TYPE_MOUSE)
+    return -1;
 
-  // Allocate additional pages for USB keyboard
-  usb_hid_shm_page = bfc_alloc_page(1);
-  hid_dma_page = bfc_alloc_page_low(1);
-  ep0_ring_page = bfc_alloc_page_low(1);
-  xhci_intrs[0].ring_page = bfc_alloc_page_low(1);
-  dev_ctx_page = bfc_alloc_page_low(1);
-  ctrl_dma_page = bfc_alloc_page_low(1);
+  // Single-char progress chain (mouse.md §3.7): keyboard uses K0..K5, mouse
+  // M0..M5, so the serial log can be attributed to a device even when both
+  // share the same enumeration stages.
+  char tag = (hid_type == HID_TYPE_MOUSE) ? 'M' : 'K';
 
-  if (!usb_hid_shm_page || !hid_dma_page || !ep0_ring_page ||
-      !xhci_intrs[0].ring_page || !dev_ctx_page || !ctrl_dma_page)
-    return;
+  // Per-slot resource allocation (mouse.md §3.1(a)/(b)). Every control-transfer
+  // and DMA resource that was a file-level global when only the keyboard
+  // existed is allocated per-slot here, so enumerating the mouse cannot clobber
+  // slot 0.
+  xhci_intr *intr = &xhci_intrs[idx];
+  intr->ring_page = bfc_alloc_page_low(1);
+  intr->dev_ctx_page = bfc_alloc_page_low(1);
+  intr->ep0_ring_page = bfc_alloc_page_low(1);
+  intr->ctrl_dma_page = bfc_alloc_page_low(1);
+  intr->hid_dma_page = bfc_alloc_page_low(1);
 
-  usb_hid_shm_phys = (__force uint64_t)page_to_phys(usb_hid_shm_page);
-  usb_hid_shm_virt =
-      (__force void *)phys_to_virt((__force phys_addr_t)usb_hid_shm_phys);
-  hid_dma_phys = (__force uint64_t)page_to_phys(hid_dma_page);
-  hid_dma_virt =
-      (__force void *)phys_to_virt((__force phys_addr_t)hid_dma_phys);
-  ep0_ring_phys = (__force uint64_t)page_to_phys(ep0_ring_page);
-  ep0_ring_virt =
-      (__force void *)phys_to_virt((__force phys_addr_t)ep0_ring_phys);
-  xhci_intrs[0].ring_phys =
-      (__force uint64_t)page_to_phys(xhci_intrs[0].ring_page);
-  xhci_intrs[0].ring_virt = (__force void *)phys_to_virt(
-      (__force phys_addr_t)xhci_intrs[0].ring_phys);
-  dev_ctx_phys = (__force uint64_t)page_to_phys(dev_ctx_page);
-  ctrl_dma_phys = (__force uint64_t)page_to_phys(ctrl_dma_page);
-  ctrl_dma_virt =
-      (__force void *)phys_to_virt((__force phys_addr_t)ctrl_dma_phys);
+  if (!intr->ring_page || !intr->dev_ctx_page || !intr->ep0_ring_page ||
+      !intr->ctrl_dma_page || !intr->hid_dma_page)
+    return -1;
 
-  // Zero all new pages
-  __memset((void *)usb_hid_shm_virt, 0, 4096);
-  __memset((void *)hid_dma_virt, 0, 4096);
-  __memset((void *)ep0_ring_virt, 0, 4096);
-  __memset((void *)xhci_intrs[0].ring_virt, 0, 4096);
-  __memset((__force void *)phys_to_virt((__force phys_addr_t)dev_ctx_phys), 0,
-           4096);
-  __memset((void *)ctrl_dma_virt, 0, 4096);
+  intr->ring_phys = (__force uint64_t)page_to_phys(intr->ring_page);
+  intr->ring_virt =
+      (__force void *)phys_to_virt((__force phys_addr_t)intr->ring_phys);
+  intr->dev_ctx_phys = (__force uint64_t)page_to_phys(intr->dev_ctx_page);
+  intr->ep0_ring_phys = (__force uint64_t)page_to_phys(intr->ep0_ring_page);
+  intr->ep0_ring_virt =
+      (__force void *)phys_to_virt((__force phys_addr_t)intr->ep0_ring_phys);
+  intr->ctrl_dma_phys = (__force uint64_t)page_to_phys(intr->ctrl_dma_page);
+  intr->ctrl_dma_virt =
+      (__force void *)phys_to_virt((__force phys_addr_t)intr->ctrl_dma_phys);
+  intr->hid_dma_phys = (__force uint64_t)page_to_phys(intr->hid_dma_page);
+  intr->hid_dma_virt =
+      (__force void *)phys_to_virt((__force phys_addr_t)intr->hid_dma_phys);
 
-  // Initialize USB HID SHM header
-  volatile struct usb_hid_shm_header *hid_hdr =
-      (volatile struct usb_hid_shm_header *)usb_hid_shm_virt;
-  hid_hdr->magic = USB_HID_SHM_MAGIC;
-  hid_hdr->version = USB_HID_SHM_VERSION;
-  for (int i = 0; i < 4; i++) {
-    hid_hdr->rings[i].head = 0;
-    hid_hdr->rings[i].tail = 0;
-    hid_hdr->rings[i].capacity = HID_SUBRING_CAPACITY;
-    hid_hdr->rings[i].reserved = 0;
-  }
+  // Zero all per-slot pages
+  __memset((void *)intr->ring_virt, 0, 4096);
+  __memset(
+      (__force void *)phys_to_virt((__force phys_addr_t)intr->dev_ctx_phys), 0,
+      4096);
+  __memset((void *)intr->ep0_ring_virt, 0, 4096);
+  __memset((void *)intr->ctrl_dma_virt, 0, 4096);
+  __memset((void *)intr->hid_dma_virt, 0, 4096);
 
-  // Register /dev/hidraw0 device with SHM — evdev opens it via open + mmap
-  // (and third-party hidraw tools via read()/HIDIOCG*); refact_evdev.md §14.
-  {
-    struct shm *hid_shm = shm_create_internal(1);
-    if (hid_shm) {
-      // Initialize HID SHM header in the new page (same as original init)
-      void *new_virt = (__force void *)phys_to_virt(
-          (__force phys_addr_t)hid_shm->page_list[0]);
-      usb_hid_shm_header *hdr = (usb_hid_shm_header *)new_virt;
-      hdr->magic = USB_HID_SHM_MAGIC;
-      hdr->version = USB_HID_SHM_VERSION;
-      // Sub-ring descriptors (same offsets as original init)
-      for (int i = 0; i < 4; i++) {
-        hdr->rings[i].head = 0;
-        hdr->rings[i].tail = 0;
-        hdr->rings[i].capacity = HID_SUBRING_CAPACITY;
-        hdr->rings[i].reserved = 0;
+  // ---- Global one-time init (idx==0 only) ----
+  // Build the SHM header (4 sub-ring descriptors) + register /dev/hidraw0 +
+  // complete the SHM backing switch (bfc page → shm_create_internal(1)). This
+  // must run exactly once: re-running for the mouse would overwrite the
+  // keyboard's SHM backing / re-register hidraw0 and break the keyboard link
+  // (mouse.md §3.1(a) / §5.1).
+  if (idx == 0) {
+    usb_hid_shm_page = bfc_alloc_page(1);
+    if (!usb_hid_shm_page)
+      return -1;
+    usb_hid_shm_phys = (__force uint64_t)page_to_phys(usb_hid_shm_page);
+    usb_hid_shm_virt =
+        (__force void *)phys_to_virt((__force phys_addr_t)usb_hid_shm_phys);
+    __memset((void *)usb_hid_shm_virt, 0, 4096);
+
+    // Initialize USB HID SHM header
+    volatile struct usb_hid_shm_header *hid_hdr =
+        (volatile struct usb_hid_shm_header *)usb_hid_shm_virt;
+    hid_hdr->magic = USB_HID_SHM_MAGIC;
+    hid_hdr->version = USB_HID_SHM_VERSION;
+    for (int i = 0; i < 4; i++) {
+      hid_hdr->rings[i].head = 0;
+      hid_hdr->rings[i].tail = 0;
+      hid_hdr->rings[i].capacity = HID_SUBRING_CAPACITY;
+      hid_hdr->rings[i].reserved = 0;
+    }
+
+    // Register /dev/hidraw0 device with SHM — evdev opens it via open + mmap
+    // (and third-party hidraw tools via read()/HIDIOCG*); refact_evdev.md §14.
+    {
+      struct shm *hid_shm = shm_create_internal(1);
+      if (hid_shm) {
+        // Initialize HID SHM header in the new page (same as original init)
+        void *new_virt = (__force void *)phys_to_virt(
+            (__force phys_addr_t)hid_shm->page_list[0]);
+        usb_hid_shm_header *hdr = (usb_hid_shm_header *)new_virt;
+        hdr->magic = USB_HID_SHM_MAGIC;
+        hdr->version = USB_HID_SHM_VERSION;
+        // Sub-ring descriptors (same offsets as original init)
+        for (int i = 0; i < 4; i++) {
+          hdr->rings[i].head = 0;
+          hdr->rings[i].tail = 0;
+          hdr->rings[i].capacity = HID_SUBRING_CAPACITY;
+          hdr->rings[i].reserved = 0;
+        }
+        // Update usb_hid_shm_virt to point to the new page. The per-slot HID
+        // DMA buffers (intr->hid_dma_*) remain separate bfc pages; the xHCI
+        // ISR copies from intr->hid_dma_virt into usb_hid_shm_virt.
+        usb_hid_shm_phys = hid_shm->page_list[0];
+        usb_hid_shm_virt = new_virt;
+        // Free the original bfc page (no longer used)
+        bfc_free_page(usb_hid_shm_page, 1);
+        usb_hid_shm_page = NULL;
+
+        static struct dev_ops usb_hid_ops;
+        __memset(&usb_hid_ops, 0, sizeof(usb_hid_ops));
+        usb_hid_ops.driver_pid = 0; // kernel device
+        usb_hid_ops.is_block = false;
+        usb_hid_ops.open = usb_hid_kbd_open;
+        usb_hid_ops.close = usb_hid_kbd_close;
+        usb_hid_ops.read = usb_hidraw_read;
+        usb_hid_ops.ioctl = usb_hid_ioctl;
+        // hidraw_wq: lazily allocate the blocking-read wait queue now that the
+        // device exists; the ISR __wake_ups it after enqueuing a HID report.
+        if (!hidraw_wq) {
+          hidraw_wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
+          if (hidraw_wq)
+            init_wait_queue_head(hidraw_wq);
+        }
+        devtmpfs_create("hidraw0", &usb_hid_ops, hid_shm);
+        shm_put(hid_shm); // devtmpfs_create took a reference via shm_get
       }
-      // Update usb_hid_shm_virt to point to the new page
-      // (xHCI DMA continues using the original hid_dma_page, not this SHM;
-      //  xHCI ISR copies from hid_dma_virt into usb_hid_shm_virt)
-      usb_hid_shm_phys = hid_shm->page_list[0];
-      usb_hid_shm_virt = new_virt;
-      // Free the original bfc page (no longer used)
-      bfc_free_page(usb_hid_shm_page, 1);
-      usb_hid_shm_page = NULL;
-
-      static struct dev_ops usb_hid_ops;
-      __memset(&usb_hid_ops, 0, sizeof(usb_hid_ops));
-      usb_hid_ops.driver_pid = 0; // kernel device
-      usb_hid_ops.is_block = false;
-      usb_hid_ops.open = usb_hid_kbd_open;
-      usb_hid_ops.close = usb_hid_kbd_close;
-      usb_hid_ops.read = usb_hidraw_read;
-      usb_hid_ops.ioctl = usb_hid_ioctl;
-      // hidraw_wq: lazily allocate the blocking-read wait queue now that the
-      // device exists; the ISR __wake_ups it after enqueuing a HID report.
-      if (!hidraw_wq) {
-        hidraw_wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
-        if (hidraw_wq)
-          init_wait_queue_head(hidraw_wq);
-      }
-      devtmpfs_create("hidraw0", &usb_hid_ops, hid_shm);
-      shm_put(hid_shm); // devtmpfs_create took a reference via shm_get
     }
   }
 
   // Initialize Transfer Rings with Link TRBs
-  volatile uint32_t *ep0_ring = (volatile uint32_t *)ep0_ring_virt;
-  ep0_ring[255 * 4 + 0] = (uint32_t)ep0_ring_phys;
-  ep0_ring[255 * 4 + 1] = (uint32_t)(ep0_ring_phys >> 32);
+  volatile uint32_t *ep0_ring = (volatile uint32_t *)intr->ep0_ring_virt;
+  ep0_ring[255 * 4 + 0] = (uint32_t)intr->ep0_ring_phys;
+  ep0_ring[255 * 4 + 1] = (uint32_t)(intr->ep0_ring_phys >> 32);
   ep0_ring[255 * 4 + 2] = 0;
   ep0_ring[255 * 4 + 3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC | 1;
 
-  volatile uint32_t *ep1_ring = (volatile uint32_t *)xhci_intrs[0].ring_virt;
-  ep1_ring[255 * 4 + 0] = (uint32_t)xhci_intrs[0].ring_phys;
-  ep1_ring[255 * 4 + 1] = (uint32_t)(xhci_intrs[0].ring_phys >> 32);
+  volatile uint32_t *ep1_ring = (volatile uint32_t *)intr->ring_virt;
+  ep1_ring[255 * 4 + 0] = (uint32_t)intr->ring_phys;
+  ep1_ring[255 * 4 + 1] = (uint32_t)(intr->ring_phys >> 32);
   ep1_ring[255 * 4 + 2] = 0;
   // Link TRB cycle bit must equal the producer's current cycle state (ccs=1 at
   // init) so the HC, when it reaches this slot at the end of a lap, sees a
@@ -1060,24 +1213,35 @@ static void xhci_init_keyboard() {
   // (exactly 255 NORMAL TRBs), reproducing the keyboard freeze.
   ep1_ring[255 * 4 + 3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC | 1;
 
-  xhci_intrs[0].enqueue = 0;
-  xhci_intrs[0].ccs = 1;
-  xhci_intrs[0].ep_dci = 3; // EP1-IN doorbell target (DCI)
-  xhci_intrs[0].ep_num =
-      3; // EPID in transfer events (QEMU reports DCI, not EP number)
+  intr->enqueue = 0;
+  intr->ccs = 1;
+  intr->ep_dci = 3; // EP1-IN doorbell target (DCI)
+  intr->ep_num = 3; // EPID in transfer events (QEMU reports DCI, not EP number)
 
   // ---- Step A: Port Discovery ----
+  // Skip any port already occupied by an earlier slot (used_ports) so the
+  // mouse does not re-select and reset the keyboard's port. (mouse.md §3.1(a))
   int usb_port = -1;
   for (int p = 0; p < max_ports; p++) {
     uint32_t portsc = portsc_read(p);
-    if (portsc & PORTSC_CCS) {
-      usb_port = p;
-      break;
-    }
+    if (!(portsc & PORTSC_CCS))
+      continue;
+    int used = 0;
+    for (int u = 0; u < n_used; u++)
+      if (used_ports[u] == (uint8_t)p) {
+        used = 1;
+        break;
+      }
+    if (used)
+      continue;
+    usb_port = p;
+    break;
   }
 
   if (usb_port < 0)
-    return;
+    return -1;
+  intr->port_idx = usb_port;
+  printk(LOG_INFO, "xhci: %c0 port=%d\n", tag, usb_port);
 
   // ---- Step B: Port Reset ----
   uint32_t portsc = portsc_read(usb_port);
@@ -1094,7 +1258,7 @@ static void xhci_init_keyboard() {
 
   portsc = portsc_read(usb_port);
   if (portsc & PORTSC_PR)
-    return;
+    return -1;
 
   int port_speed = (portsc & PORTSC_SPEED_MASK) >> 10;
 
@@ -1110,17 +1274,18 @@ static void xhci_init_keyboard() {
   uint32_t cc = 0, sid = 0, etype = 0;
   for (int tries = 0; tries < 10; tries++) {
     if (poll_event(&cc, &sid, &etype) < 0)
-      return;
+      return -1;
     if (etype == TRB_CMD_COMPLETE)
       break;
   }
 
   if (cc != CC_SUCCESS || etype != TRB_CMD_COMPLETE)
-    return;
+    return -1;
+  printk(LOG_INFO, "xhci: %c1 slot=%u\n", tag, sid);
 
   // ---- Step D: Address Device ----
   uint64_t *dcbaa = (uint64_t *)dcbaa_virt;
-  dcbaa[sid] = dev_ctx_phys;
+  dcbaa[sid] = intr->dev_ctx_phys; // per-slot output device context page
 
   volatile uint32_t *ictx = (__force volatile uint32_t *)phys_to_virt(
       (__force phys_addr_t)input_ctx_phys);
@@ -1134,8 +1299,8 @@ static void xhci_init_keyboard() {
   int max_pkt = (port_speed == 2) ? 8 : 64;
   ictx[16] = 0;
   ictx[17] = (EP_TYPE_CONTROL << 3) | (max_pkt << 16);
-  ictx[18] = (uint32_t)(ep0_ring_phys | 1);
-  ictx[19] = (uint32_t)(ep0_ring_phys >> 32);
+  ictx[18] = (uint32_t)(intr->ep0_ring_phys | 1);
+  ictx[19] = (uint32_t)(intr->ep0_ring_phys >> 32);
   ictx[22] = 8;
 
   trb addr_trb;
@@ -1148,44 +1313,48 @@ static void xhci_init_keyboard() {
 
   for (int tries = 0; tries < 10; tries++) {
     if (poll_event(&cc, &sid, &etype) < 0)
-      return;
+      return -1;
     if (etype == TRB_CMD_COMPLETE)
       break;
   }
 
   if (cc != CC_SUCCESS || etype != TRB_CMD_COMPLETE)
-    return;
+    return -1;
 
-  xhci_intrs[0].slot_id = sid;
+  intr->slot_id = sid;
+  printk(LOG_INFO, "xhci: %c2 addr slot=%u\n", tag, sid);
 
   // ---- Step E: Get Descriptor (Device Descriptor) ----
-  volatile uint32_t *ep0 = (volatile uint32_t *)ep0_ring_virt;
+  volatile uint32_t *ep0 = (volatile uint32_t *)intr->ep0_ring_virt;
 
   trb setup_trb;
   setup_trb.dword0 = 0x01000680;
   setup_trb.dword1 = 0x00120000;
   setup_trb.dword2 = 8;
   setup_trb.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
-  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &setup_trb);
+  xfer_ring_enqueue(ep0, &intr->ep0_ring_enqueue, &intr->ep0_ring_ccs,
+                    &setup_trb);
 
   trb data_trb;
-  data_trb.dword0 = (uint32_t)ctrl_dma_phys;
-  data_trb.dword1 = (uint32_t)(ctrl_dma_phys >> 32);
+  data_trb.dword0 = (uint32_t)intr->ctrl_dma_phys;
+  data_trb.dword1 = (uint32_t)(intr->ctrl_dma_phys >> 32);
   data_trb.dword2 = 18;
   data_trb.dword3 = (TRB_DATA_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
-  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &data_trb);
+  xfer_ring_enqueue(ep0, &intr->ep0_ring_enqueue, &intr->ep0_ring_ccs,
+                    &data_trb);
 
   trb status_trb;
   status_trb.dword0 = 0;
   status_trb.dword1 = 0;
   status_trb.dword2 = 0;
   status_trb.dword3 = (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_IOC;
-  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &status_trb);
+  xfer_ring_enqueue(ep0, &intr->ep0_ring_enqueue, &intr->ep0_ring_ccs,
+                    &status_trb);
 
   db_write(sid, 1);
   for (int tries = 0; tries < 30; tries++) {
     if (poll_event(&cc, &sid, &etype) < 0)
-      return;
+      return -1;
     if (etype == TRB_TRANSFER && cc == CC_SUCCESS)
       break;
     if (etype == TRB_CMD_COMPLETE)
@@ -1193,45 +1362,48 @@ static void xhci_init_keyboard() {
   }
 
   if (cc != CC_SUCCESS)
-    return;
+    return -1;
 
   // ---- Step E2: Get Descriptor (Configuration Descriptor) ----
-  ep0 = (volatile uint32_t *)ep0_ring_virt;
+  ep0 = (volatile uint32_t *)intr->ep0_ring_virt;
   trb cfg_setup;
   cfg_setup.dword0 = 0x02000680;
   cfg_setup.dword1 = 0x00400000;
   cfg_setup.dword2 = 8;
   cfg_setup.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
-  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &cfg_setup);
+  xfer_ring_enqueue(ep0, &intr->ep0_ring_enqueue, &intr->ep0_ring_ccs,
+                    &cfg_setup);
 
   trb cfg_data;
-  cfg_data.dword0 = (uint32_t)ctrl_dma_phys;
-  cfg_data.dword1 = (uint32_t)(ctrl_dma_phys >> 32);
+  cfg_data.dword0 = (uint32_t)intr->ctrl_dma_phys;
+  cfg_data.dword1 = (uint32_t)(intr->ctrl_dma_phys >> 32);
   cfg_data.dword2 = 64;
   cfg_data.dword3 = (TRB_DATA_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
-  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &cfg_data);
+  xfer_ring_enqueue(ep0, &intr->ep0_ring_enqueue, &intr->ep0_ring_ccs,
+                    &cfg_data);
 
   trb cfg_status;
   cfg_status.dword0 = 0;
   cfg_status.dword1 = 0;
   cfg_status.dword2 = 0;
   cfg_status.dword3 = (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_IOC;
-  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &cfg_status);
+  xfer_ring_enqueue(ep0, &intr->ep0_ring_enqueue, &intr->ep0_ring_ccs,
+                    &cfg_status);
 
   db_write(sid, 1);
   for (int tries = 0; tries < 30; tries++) {
     if (poll_event(&cc, &sid, &etype) < 0)
-      return;
+      return -1;
     if (etype == TRB_TRANSFER && cc == CC_SUCCESS)
       break;
     if (etype == TRB_CMD_COMPLETE)
       continue;
   }
   if (cc != CC_SUCCESS)
-    return;
+    return -1;
 
   // Parse Configuration Descriptor to find EP1-IN max packet size
-  volatile uint8_t *cfg_buf = (volatile uint8_t *)ctrl_dma_virt;
+  volatile uint8_t *cfg_buf = (volatile uint8_t *)intr->ctrl_dma_virt;
   int cfg_total = cfg_buf[2] | (cfg_buf[3] << 8);
   int off = 0;
   uint16_t ep_max_pkt = 8;
@@ -1249,12 +1421,16 @@ static void xhci_init_keyboard() {
   }
 
   // ---- Step F: Set Protocol (Boot Protocol) ----
+  // HID boot-protocol Set_Protocol(0) request. Both usb-kbd and usb-mouse
+  // support boot protocol; the report layout then follows the HID 1.11 boot
+  // mouse / keyboard fixed report (parsed in user space).
   trb sp_setup;
   sp_setup.dword0 = 0x00000B21;
   sp_setup.dword1 = 0x00000000;
   sp_setup.dword2 = 8;
   sp_setup.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
-  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sp_setup);
+  xfer_ring_enqueue(ep0, &intr->ep0_ring_enqueue, &intr->ep0_ring_ccs,
+                    &sp_setup);
 
   trb sp_status;
   sp_status.dword0 = 0;
@@ -1262,12 +1438,13 @@ static void xhci_init_keyboard() {
   sp_status.dword2 = 0;
   sp_status.dword3 =
       (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
-  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sp_status);
+  xfer_ring_enqueue(ep0, &intr->ep0_ring_enqueue, &intr->ep0_ring_ccs,
+                    &sp_status);
 
   db_write(sid, 1);
   for (int tries = 0; tries < 10; tries++) {
     if (poll_event(&cc, &sid, &etype) < 0)
-      return;
+      return -1;
     if (etype == TRB_TRANSFER && cc == CC_SUCCESS)
       break;
     if (etype == TRB_CMD_COMPLETE)
@@ -1275,7 +1452,8 @@ static void xhci_init_keyboard() {
   }
 
   if (cc != CC_SUCCESS)
-    return;
+    return -1;
+  printk(LOG_INFO, "xhci: %c3 boot-protocol\n", tag);
 
   // ---- Step F2: Set Configuration ----
   trb sc_setup;
@@ -1283,7 +1461,8 @@ static void xhci_init_keyboard() {
   sc_setup.dword1 = 0x00000000;
   sc_setup.dword2 = 8;
   sc_setup.dword3 = (TRB_SETUP_STAGE << TRB_TYPE_SHIFT) | TRB_IDT | TRB_IOC;
-  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sc_setup);
+  xfer_ring_enqueue(ep0, &intr->ep0_ring_enqueue, &intr->ep0_ring_ccs,
+                    &sc_setup);
 
   trb sc_status;
   sc_status.dword0 = 0;
@@ -1291,19 +1470,21 @@ static void xhci_init_keyboard() {
   sc_status.dword2 = 0;
   sc_status.dword3 =
       (TRB_STATUS_STAGE << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_IOC;
-  xfer_ring_enqueue(ep0, &ep0_ring_enqueue, &ep0_ring_ccs, &sc_status);
+  xfer_ring_enqueue(ep0, &intr->ep0_ring_enqueue, &intr->ep0_ring_ccs,
+                    &sc_status);
 
   db_write(sid, 1);
   for (int tries = 0; tries < 10; tries++) {
     if (poll_event(&cc, &sid, &etype) < 0)
-      return;
+      return -1;
     if (etype == TRB_TRANSFER && cc == CC_SUCCESS)
       break;
     if (etype == TRB_CMD_COMPLETE)
       continue;
   }
   if (cc != CC_SUCCESS)
-    return;
+    return -1;
+  printk(LOG_INFO, "xhci: %c4 set-config\n", tag);
 
   // ---- Step G: Configure Endpoint (EP1-IN Interrupt) ----
   __memset((void *)ictx, 0, 4096);
@@ -1316,8 +1497,8 @@ static void xhci_init_keyboard() {
 
   ictx[32] = 0;
   ictx[33] = (EP_TYPE_INTERRUPT_IN << 3) | (ep_max_pkt << 16);
-  ictx[34] = (uint32_t)(xhci_intrs[0].ring_phys | 1);
-  ictx[35] = (uint32_t)(xhci_intrs[0].ring_phys >> 32);
+  ictx[34] = (uint32_t)(intr->ring_phys | 1);
+  ictx[35] = (uint32_t)(intr->ring_phys >> 32);
   ictx[39] = ep_interval;
 
   trb cfg_trb;
@@ -1330,30 +1511,45 @@ static void xhci_init_keyboard() {
 
   for (int tries = 0; tries < 10; tries++) {
     if (poll_event(&cc, &sid, &etype) < 0)
-      return;
+      return -1;
     if (etype == TRB_CMD_COMPLETE)
       break;
   }
 
   if (cc != CC_SUCCESS || etype != TRB_CMD_COMPLETE)
-    return;
+    return -1;
+  printk(LOG_INFO, "xhci: %c5 ep-configured\n", tag);
 
-  // ---- Step H: Start keyboard data transfer ----
+  // ---- Step H: Start data transfer (arm first NORMAL TRB) ----
+  // dword2 is the DMA buffer *capacity* (8, constant), an upper bound on how
+  // many bytes the HC may write — NOT the report length. The actual report
+  // length is recovered per-transfer in the ISR from the completion event's
+  // transfer-length field (dynamic 3 or 4 bytes for the mouse). Mis-filling 4
+  // would leave the 4th byte as stale DMA garbage parsed as a phantom
+  // REL_WHEEL. (mouse.md §3.1(e))
   trb norm_trb;
-  norm_trb.dword0 = (uint32_t)hid_dma_phys;
-  norm_trb.dword1 = (uint32_t)(hid_dma_phys >> 32);
+  norm_trb.dword0 = (uint32_t)intr->hid_dma_phys;
+  norm_trb.dword1 = (uint32_t)(intr->hid_dma_phys >> 32);
   norm_trb.dword2 = 8;
   norm_trb.dword3 = (TRB_NORMAL << TRB_TYPE_SHIFT) | TRB_IOC;
-  xfer_ring_enqueue(ep1_ring, &xhci_intrs[0].enqueue, &xhci_intrs[0].ccs,
-                    &norm_trb);
+  xfer_ring_enqueue(ep1_ring, &intr->enqueue, &intr->ccs, &norm_trb);
 
   db_write(sid, 3);
 
-  // Mask PS/2 keyboard IRQ (GSI 1) — no longer needed
-  ioapic_set_irq(1, 33, bsp_apic_id, true, false, false);
+  // Keyboard-only finalization (idx==0): mask the legacy PS/2 keyboard IRQ
+  // (GSI 1) now that the USB keyboard is the active source, and enable the
+  // timer-driven doorbell poll (QEMU only retries NAK'ed interrupt-IN on a
+  // doorbell write). The mouse needs neither. (mouse.md §5.1)
+  if (idx == 0) {
+    uint32_t bsp_apic_id = lapic_read(LAPIC_ID) >> 24;
+    ioapic_set_irq(1, 33, bsp_apic_id, true, false, false);
+    xhci_poll_initialized = 1;
+    printk(LOG_INFO, "xhci: USB keyboard ready\n");
+  } else {
+    printk(LOG_INFO, "xhci: USB mouse ready\n");
+  }
 
-  printk(LOG_INFO, "xhci: USB keyboard ready\n");
-  xhci_poll_initialized = 1;
+  return 0;
 }
 
 // ===================== Driver registry =====================

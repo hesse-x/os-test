@@ -463,3 +463,14 @@ add_user_dyn_elf(test_dl C SOURCES test_dl.c LINK_LIBS c DEFS _GNU_SOURCE)
 # that the node exists for the musl LOG_CONS fallback (syslog.c opens it when
 # /dev/log is unreachable).
 add_user_dyn_elf(test_console C SOURCES test_console.c LINK_LIBS c STATIC_LIBS unity)
+
+# USB HID boot-mouse parser unit test (mouse.md §3.2/§5.6). Compiles usb_mouse.cc
+# (the real parser, also an evdev-target source) into the test and feeds it a
+# mock HID SHM page with constructed 3-byte (no wheel) and 4-byte (with wheel)
+# boot-mouse reports, asserting the EV_KEY/EV_REL event sequences. C++ (no C
+# flag) because usb_mouse.cc is C++; Unity is C-linkage compatible (extern "C"
+# guards in unity.h). Not in the test_runner table — run directly as
+# /test/test_mouse.elf.
+add_user_dyn_elf(test_mouse SOURCES test_mouse.cc
+    ${CMAKE_SOURCE_DIR}/user/lib/usb_mouse.cc
+    LINK_LIBS c STATIC_LIBS unity)

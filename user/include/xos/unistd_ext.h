@@ -48,6 +48,14 @@ LIBC_EXPORT pid_t gettid(void);
  * Defined in sys_device.cc. */
 LIBC_EXPORT void wait_dev_ready(const char *dev_path);
 
+/* Bounded variant of wait_dev_ready: poll the device node with a deadline.
+ * Returns 0 if the node appeared within timeout_ms, -1 on timeout. For
+ * non-critical devices whose enumeration failure must not wedge boot (e.g. the
+ * mouse's /dev/input/event1 — xHCI mouse enumeration is non-fatal, so init
+ * must not block forever on a node that may never appear). Defined in
+ * sys_device.cc. */
+LIBC_EXPORT int wait_dev_ready_timeout(const char *dev_path, int timeout_ms);
+
 /* Hostname get/set. musl unistd.h declares gethostname unconditionally but
  * without a visibility attribute (→ HIDDEN under -fvisibility=hidden); musl's
  * src/unistd/gethostname.c is adopted (reads uname.nodename), so no repo

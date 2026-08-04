@@ -74,3 +74,26 @@ extern "C" void wait_dev_ready(const char *dev_path) {
   }
   close(fd);
 }
+
+// Bounded variant of wait_dev_ready: poll the device node with a deadline.
+// Returns 0 if the node appeared within timeout_ms, -1 on timeout. Used for
+// non-critical devices whose enumeration failure must not wedge boot — e.g. the
+// mouse's /dev/input/event1: xHCI mouse enumeration is non-fatal (mouse.md
+// §5.1), so init must not block forever on a node that may never appear. An
+// unbounded wait here + a non-fatal mouse failure = a silent system deadlock
+// (no panic, no crash, just tinywl never spawns). (mouse.md §5.4)
+extern "C" int wait_dev_ready_timeout(const char *dev_path, int timeout_ms) {
+  for (int waited = 0; waited < timeout_ms; waited += 10) {
+    int fd = open(dev_path, O_RDWR);
+    if (fd >= 0) {
+      close(fd);
+      return 0;
+    }
+    // Sleep 10ms before retrying. usleep comes from <unistd.h> (already
+    // included) and matches the 10ms poll cadence used in init.c. A brief
+    // ipc_recv with a tiny timeout would also yield, but a direct sleep keeps
+    // this helper self-contained and free of IPC-side effects.
+    usleep(10 * 1000);
+  }
+  return -1;
+}
