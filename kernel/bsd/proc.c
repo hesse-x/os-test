@@ -1121,8 +1121,6 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     return (int64_t)-EINVAL;
 
   // 1. Allocate an xtask slot
-  printk(LOG_DEBUG, "[DBG] sys_clone ENTER parent_pid=%d flags=0x%lx\n",
-         parent->pid, (unsigned long)flags);
   spin_lock(&tasks_lock);
   int alloc_idx = -1;
   xtask *child = xtask_alloc(&alloc_idx);
@@ -1301,10 +1299,6 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   }
   child_bp->sig_pending = 0;
   child_bp->sig_blocked = parent->proc->sig_blocked;
-  printk(
-      LOG_DEBUG,
-      "[DBG] clone parent_pid=%d child_pid=%d inherited_sig_blocked=0x%llx\n",
-      parent->pid, alloc_idx, (unsigned long long)parent->proc->sig_blocked);
   child_bp->exit_code = 0;
   child_bp->futex_uaddr = 0;
   list_init(&child_bp->futex_node);
@@ -2044,9 +2038,6 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
   // 10. kfree ELF buffer
   kfree(elf_buf);
-
-  printk(LOG_DEBUG, "[DBG] execve RET pid=%d sig_blocked=0x%llx\n", proc->pid,
-         (unsigned long long)proc->proc->sig_blocked);
   return 0;
 }
 

@@ -321,7 +321,14 @@ void test_pty_ctrl_c_sigint(void) {
 //      survives and reports the status via $? ------------------------------
 static void interactive_ctrl_c(int use_pipe) {
   int master;
-  pid_t pid = forkpty(&master, NULL, NULL, NULL);
+  /* The interactive shell drives linenoise, whose getColumns() probes the
+   * terminal width via TIOCGWINSZ and only falls back to an ESC[6n cursor
+   * report when ws_col == 0. Over a bare PTY nothing answers that report, so
+   * an uninitialised winsize (col 0) deadlocks the shell before it can draw
+   * the prompt. Give the pty a sane 80x24 default so the ioctl path succeeds.
+   */
+  struct winsize ws = {.ws_row = 24, .ws_col = 80};
+  pid_t pid = forkpty(&master, NULL, NULL, &ws);
   TEST_ASSERT_TRUE(pid >= 0);
   if (pid == 0) {
     execl("/bin/sh", "sh", (char *)NULL);

@@ -1081,3 +1081,37 @@ int shell_wait_input(void) {
       return 1;
   }
 }
+
+// Single-shot poll: return as soon as EITHER stdin is readable OR a SIGCHLD
+// wake byte is pending, without re-polling on wake-only. Used by the linenoise
+// edit loop so a background completion can be surfaced (Hide → reap/notify →
+// Show) while the user is mid-edit, instead of being deferred until the next
+// keystroke. Returns 1 = stdin readable, 0 = SIGCHLD wake only (already
+// drained; caller reaps). Does NOT reap here — the caller decides when to reap
+// so it can bracket the notice with linenoiseHide/Show.
+int shell_poll_input(void) {
+  struct pollfd pfd[2];
+  int n = 0;
+  pfd[n].fd = 0;
+  pfd[n].events = POLLIN;
+  n++;
+  if (sigchld_pipe[0] >= 0) {
+    pfd[n].fd = sigchld_pipe[0];
+    pfd[n].events = POLLIN;
+    n++;
+  }
+  for (;;) {
+    int r = poll(pfd, (nfds_t)n, -1);
+    if (r < 0) {
+      if (errno == EINTR)
+        continue;
+      return 1; // fall back to a direct read
+    }
+    if (n > 1 && (pfd[1].revents & POLLIN)) {
+      shell_drain_sigchld();
+      return (pfd[0].revents & POLLIN) ? 1 : 0;
+    }
+    if (pfd[0].revents & (POLLIN | POLLHUP | POLLERR))
+      return 1;
+  }
+}

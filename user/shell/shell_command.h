@@ -32,5 +32,10 @@ void shell_hangup_jobs(void);
 // background child exit can never leave the shell stuck in a blocking read.
 // Returns 1 = stdin ready, 0 = wake-only.
 int shell_wait_input(void);
+// Single-shot poll for the linenoise edit loop: return on EITHER stdin ready OR
+// a SIGCHLD wake (drained here, reaped by caller) without re-polling on wake,
+// so a background completion can be surfaced mid-edit. Returns 1 = stdin ready,
+// 0 = SIGCHLD wake only.
+int shell_poll_input(void);
 
 #endif // USER_SHELL_COMMAND_H

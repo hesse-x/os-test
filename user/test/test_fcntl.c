@@ -334,6 +334,18 @@ void test_realpath(void) {
   /* musl's realpath resolves each component via readlink, so the leaf and
    * every intermediate dir must exist (unlike the old lexical-only impl).
    * Build /local/real_test/{a,b,b/c,x,x/y} under the writable scratch dir. */
+
+  /* mkdir is EEXIST-strict (aligns with Linux vfs_mkdir), and this fixture
+   * persists across runs on the same disk image — so tear down any leftover
+   * subtree first (deepest-first rmdir), then rebuild. Matches the cleanup
+   * idiom in test_openat_dirfd.c. */
+  rmdir("/local/real_test/b/c");
+  rmdir("/local/real_test/x/y");
+  rmdir("/local/real_test/a");
+  rmdir("/local/real_test/b");
+  rmdir("/local/real_test/x");
+  rmdir("/local/real_test");
+
   TEST_ASSERT_EQUAL_INT(0, mkdir("/local/real_test", 0755));
   TEST_ASSERT_EQUAL_INT(0, mkdir("/local/real_test/a", 0755));
   TEST_ASSERT_EQUAL_INT(0, mkdir("/local/real_test/b", 0755));

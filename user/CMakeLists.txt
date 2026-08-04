@@ -358,10 +358,18 @@ add_user_lib(libudev_so SHARED
     FLAGS "-fvisibility=default -O2"
 )
 
+# shell — dynamic ELF (libc.so + liblinenoise.so), PT_INTERP → ld.so. linenoise
+# drives the interactive prompt (history/Tab/Ctrl-R); the non-interactive `sh -c`
+# path never touches it. INCLUDE_DIRS resolves "linenoise.h" (also exposed via
+# linenoise_so's INTERFACE includes, kept explicit for call-site clarity).
 if(TEST)
-    add_user_elf(shell SOURCES shell/shell.cc shell/shell_command.cc LINK_LIBS c DEFS TEST IMAGE_PATH usr/bin/shell)
+    add_user_dyn_elf(shell SOURCES shell/shell.cc shell/shell_command.cc
+        LINK_LIBS linenoise c INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/linenoise
+        DEFS TEST IMAGE_PATH usr/bin/shell)
 else()
-    add_user_elf(shell SOURCES shell/shell.cc shell/shell_command.cc LINK_LIBS c IMAGE_PATH usr/bin/shell)
+    add_user_dyn_elf(shell SOURCES shell/shell.cc shell/shell_command.cc
+        LINK_LIBS linenoise c INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/linenoise
+        IMAGE_PATH usr/bin/shell)
 endif()
 os_image_path(shell shell.elf bin/sh)
 
@@ -498,3 +506,9 @@ include(${CMAKE_SOURCE_DIR}/build_script/third_party/wayland/wayland.cmake)
 # include() runs in this scope; no other target depends on sbase, placement is
 # flexible. See build_script/third_party/sbase/sbase.cmake.
 include(${CMAKE_SOURCE_DIR}/build_script/third_party/sbase/sbase.cmake)
+
+# ===================== linenoise (third_party/linenoise) =====================
+# liblinenoise.so → /lib/liblinenoise.so, linked dynamically by the shell for
+# interactive line editing (history/Tab/Ctrl-R). Built via add_third_party_lib
+# (branch B: custom-command .so, -w). See build_script/third_party/linenoise/linenoise.cmake.
+include(${CMAKE_SOURCE_DIR}/build_script/third_party/linenoise/linenoise.cmake)
