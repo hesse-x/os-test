@@ -55,13 +55,14 @@ static void ep_poll_callback(wait_queue_t *wq, unsigned long flags) {
   __poll mask = (__poll)flags;
   epitem *epi = wq->data;
   eventpoll *ep = epi->ep;
-  spin_lock(&ep->lock);
+  uint64_t irqflags;
+  spin_lock_irqsave(&ep->lock, &irqflags);
   // EPOLLONESHOT: after the single ready report (epoll_wait path sets
   // is_disarmed), stop re-enqueuing on subsequent wakeups until EPOLL_CTL_MOD
   // clears is_disarmed. Holds ep->lock, races only with ep_modify (also under
   // ep->lock) — no tearing.
   if (epi->is_disarmed) {
-    spin_unlock(&ep->lock);
+    spin_unlock_irqrestore(&ep->lock, irqflags);
     return;
   }
   if (epi->is_et) {
@@ -85,7 +86,7 @@ static void ep_poll_callback(wait_queue_t *wq, unsigned long flags) {
       __wake_up(&ep->wq, POLLIN);
     }
   }
-  spin_unlock(&ep->lock);
+  spin_unlock_irqrestore(&ep->lock, irqflags);
 }
 
 // Resolve which wait_queue_head a monitored file exposes for epoll waiters.
@@ -140,12 +141,13 @@ void eventpoll_release(eventpoll *ep) {
     if (epi->target_wq)
       remove_wait_queue(epi->target_wq, &epi->wait);
     synchronize_rcu();
-    spin_lock(&ep->lock);
+    uint64_t ep_flags;
+    spin_lock_irqsave(&ep->lock, &ep_flags);
     if (epi->is_ready)
       list_remove(&epi->rdllist_node);
     rb_erase(&ep->rbt, &epi->rb_node);
     ep->nitems--;
-    spin_unlock(&ep->lock);
+    spin_unlock_irqrestore(&ep->lock, ep_flags);
     list_remove(&epi->file_node);
     spin_unlock(&epoll_ctl_lock);
 
@@ -201,9 +203,10 @@ int ep_insert(eventpoll *ep, struct file *f, struct files *owner, int fd,
     kfree(epi);
     return -EBADF;
   }
-  spin_lock(&ep->lock);
+  uint64_t ep_flags;
+  spin_lock_irqsave(&ep->lock, &ep_flags);
   if (ep->nitems >= EP_MAX_ITEMS) {
-    spin_unlock(&ep->lock);
+    spin_unlock_irqrestore(&ep->lock, ep_flags);
     spin_unlock(&epoll_ctl_lock);
     file_put(f);
     kfree(epi);
@@ -211,7 +214,7 @@ int ep_insert(eventpoll *ep, struct file *f, struct files *owner, int fd,
   }
   epitem key = {.file = f};
   if (rb_search(&ep->rbt, &key.rb_node, ep_cmp)) {
-    spin_unlock(&ep->lock);
+    spin_unlock_irqrestore(&ep->lock, ep_flags);
     spin_unlock(&epoll_ctl_lock);
     file_put(f);
     kfree(epi);
@@ -233,7 +236,7 @@ int ep_insert(eventpoll *ep, struct file *f, struct files *owner, int fd,
     list_push_back(&ep->ready_list, &epi->rdllist_node);
     epi->is_ready = 1;
   }
-  spin_unlock(&ep->lock);
+  spin_unlock_irqrestore(&ep->lock, ep_flags);
   spin_unlock(&epoll_ctl_lock);
   if (revents)
     __wake_up(&ep->wq, POLLIN);
@@ -245,12 +248,13 @@ static void ep_remove_item(epitem *epi) {
   if (epi->target_wq)
     remove_wait_queue(epi->target_wq, &epi->wait);
   synchronize_rcu();
-  spin_lock(&ep->lock);
+  uint64_t ep_flags;
+  spin_lock_irqsave(&ep->lock, &ep_flags);
   if (epi->is_ready)
     list_remove(&epi->rdllist_node);
   rb_erase(&ep->rbt, &epi->rb_node);
   ep->nitems--;
-  spin_unlock(&ep->lock);
+  spin_unlock_irqrestore(&ep->lock, ep_flags);
   list_remove(&epi->file_node);
 }
 
@@ -313,7 +317,8 @@ int ep_modify(eventpoll *ep, struct file *f, struct epoll_event *ev) {
     spin_unlock(&epoll_ctl_lock);
     return -EINVAL;
   }
-  spin_lock(&ep->lock);
+  uint64_t ep_flags;
+  spin_lock_irqsave(&ep->lock, &ep_flags);
   epi->events = ev->events & ~(EPOLLET | EPOLLONESHOT | EPOLLEXCLUSIVE);
   epi->is_et = !!(ev->events & EPOLLET);
   epi->is_oneshot = !!(ev->events & EPOLLONESHOT);
@@ -328,7 +333,7 @@ int ep_modify(eventpoll *ep, struct file *f, struct epoll_event *ev) {
     list_remove(&epi->rdllist_node);
     epi->is_ready = 0;
   }
-  spin_unlock(&ep->lock);
+  spin_unlock_irqrestore(&ep->lock, ep_flags);
   spin_unlock(&epoll_ctl_lock);
   if (revents)
     __wake_up(&ep->wq, POLLIN);
@@ -348,12 +353,13 @@ void eventpoll_file_release(struct file *f) {
     if (epi->target_wq)
       remove_wait_queue(epi->target_wq, &epi->wait);
     synchronize_rcu();
-    spin_lock(&ep->lock);
+    uint64_t ep_flags;
+    spin_lock_irqsave(&ep->lock, &ep_flags);
     if (epi->is_ready)
       list_remove(&epi->rdllist_node);
     rb_erase(&ep->rbt, &epi->rb_node);
     ep->nitems--;
-    spin_unlock(&ep->lock);
+    spin_unlock_irqrestore(&ep->lock, ep_flags);
     list_remove(&epi->file_node);
     spin_unlock(&epoll_ctl_lock);
 
@@ -510,7 +516,8 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
     proc->state = BLOCKED;
     proc->wait_event = WAIT_POLL;
     proc->wait_timed_out = 0;
-    spin_lock(&ep->lock);
+    uint64_t ep_flags;
+    spin_lock_irqsave(&ep->lock, &ep_flags);
     if (!list_empty(&ep->ready_list)) {
       // Process only the items present at the start of this pass. LT items
       // that remain ready are re-enqueued to the tail but must not be
@@ -545,7 +552,7 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
         struct epoll_event ev = {.events = epi->revents,
                                  .data = {.u64 = epi->user_data}};
         if (copy_to_user(&((struct epoll_event *)ev_ptr)[n], &ev, sizeof(ev))) {
-          spin_unlock(&ep->lock);
+          spin_unlock_irqrestore(&ep->lock, ep_flags);
           sched_cancel_spurious_wake(proc);
           remove_wait_queue(&ep->wq, &wait);
           file_put(ef);
@@ -563,7 +570,7 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
           break; // reached end of this pass
         it = next;
       }
-      spin_unlock(&ep->lock);
+      spin_unlock_irqrestore(&ep->lock, ep_flags);
       // prepare_to_wait: the loop top marked BLOCKED; if a wake hit during
       // re-check and pushed run_node into the run_queue (state=READY), this
       // break without schedule() would leave a dangling run_node. Cancel the
@@ -573,7 +580,7 @@ int64_t sys_epoll_wait(int64_t epfd, int64_t ev_ptr, int64_t maxevents,
       file_put(ef);
       return n;
     }
-    spin_unlock(&ep->lock);
+    spin_unlock_irqrestore(&ep->lock, ep_flags);
 
     if (timeout_ms == 0) {
       sched_cancel_spurious_wake(proc);

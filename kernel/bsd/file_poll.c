@@ -173,12 +173,16 @@ __poll file_poll(struct file *f, __poll events) {
   } else if (f->type == FD_NETLINK) {
     struct netlink_sock *nlsock = f->nlsock;
     if (nlsock) {
-      spin_lock(&nl_group_lock);
-      if (nlsock->recv_queue_head) {
+      /* nl_group_broadcast holds nl_group_lock while waking this fd's epoll
+       * callback, which takes ep->lock.  epoll_wait probes readiness while
+       * holding ep->lock, so taking nl_group_lock here would invert those two
+       * locks and deadlock under a burst of uevents.  Poll readiness is only a
+       * snapshot; recvmsg still serializes queue consumption, and a concurrent
+       * enqueue also issues a wakeup, so an acquire-load is sufficient here. */
+      if (__atomic_load_n(&nlsock->recv_queue_head, __ATOMIC_ACQUIRE)) {
         if (events & POLLIN)
           revents |= POLLIN;
       }
-      spin_unlock(&nl_group_lock);
       // Netlink is always writable (broadcast does not block)
       if (events & POLLOUT)
         revents |= POLLOUT;
