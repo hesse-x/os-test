@@ -652,13 +652,14 @@ static int xhci_poll_initialized = 0;
 
 void xhci_poll() {
   if (!xhci_poll_initialized)
+    return;
 
-    // Ring the EP1-IN doorbell every poll. QEMU's xHCI only retries a NAK'ed
-    // interrupt-IN transfer on a doorbell write (not on timer expiry), so
-    // without this a key press that arrives while the previous transfer is
-    // NAK'ing would never be delivered.  Event processing is handled by
-    // xhci_isr (MSI-X).
-    db_write(xhci_intrs[0].slot_id, xhci_intrs[0].ep_dci);
+  // Ring the EP1-IN doorbell every poll. QEMU's xHCI only retries a NAK'ed
+  // interrupt-IN transfer on a doorbell write (not on timer expiry), so
+  // without this a key press that arrives while the previous transfer is
+  // NAK'ing would never be delivered. Event processing is handled by
+  // xhci_isr (MSI-X).
+  db_write(xhci_intrs[0].slot_id, xhci_intrs[0].ep_dci);
   // Mouse EP1-IN likewise needs a doorbell kick to retry NAK'ed interrupt
   // transfers (same QEMU behavior as the keyboard). Only ring if the mouse
   // slot was successfully enumerated (slot_id != 0).
@@ -1213,6 +1214,8 @@ static int xhci_init_hid_device(int idx, uint8_t hid_type,
   // (exactly 255 NORMAL TRBs), reproducing the keyboard freeze.
   ep1_ring[255 * 4 + 3] = (TRB_LINK << TRB_TYPE_SHIFT) | TRB_TC | 1;
 
+  intr->ep0_ring_enqueue = 0;
+  intr->ep0_ring_ccs = 1;
   intr->enqueue = 0;
   intr->ccs = 1;
   intr->ep_dci = 3; // EP1-IN doorbell target (DCI)
