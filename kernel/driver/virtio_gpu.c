@@ -1398,7 +1398,7 @@ static int drm_virgl_attach_resource(uint32_t handle, uint32_t ctx_id) {
   r->ctx_attach_bitmap[word] |= mask;
   spin_unlock(&g_drm.virgl_lock);
 
-  printk(LOG_INFO, "drm: context %u attached bo=%u resource=%u\n", ctx_id,
+  printk(LOG_DEBUG, "drm: context %u attached bo=%u resource=%u\n", ctx_id,
          handle, resource_id);
   return 0;
 }

@@ -633,6 +633,7 @@ struct app {
   EGLDisplay egl_dpy;
   EGLContext egl_ctx;
   EGLSurface egl_surf;
+  bool egl_ready;
   bool gl_ready;
 
   // 字体度量
@@ -659,6 +660,7 @@ static struct app app = {
 };
 
 static void spawn_shell(void);
+static void gl_init(void);
 static void render(void);
 
 static void frame_done(void *data, struct wl_callback *callback,
@@ -667,6 +669,10 @@ static void frame_done(void *data, struct wl_callback *callback,
   (void)time;
   wl_callback_destroy(callback);
   app.frame_callback = NULL;
+  if (!app.closed && !app.gl_ready) {
+    gl_init();
+    app.needs_render = true;
+  }
   if (!app.closed && app.shell_pid <= 0)
     spawn_shell();
   if (!app.closed && app.needs_render)
@@ -885,8 +891,8 @@ static struct glyph *get_glyph(uint32_t cp) {
 // ---------------------------------------------------------------------------
 // 坐标系：用像素坐标 + 正交投影，避免每个图元都算 NDC。窗口左上角为原点，
 // y 向下（和终端网格、wayland 表面坐标一致）。
-static GLuint rect_prog, line_prog, text_prog;
-static GLint rect_proj_loc, line_proj_loc, text_proj_loc, atlas_loc;
+static GLuint rect_prog, text_prog;
+static GLint rect_proj_loc, text_proj_loc, atlas_loc;
 static GLuint vbo;
 static size_t vbo_offset;
 
@@ -905,7 +911,7 @@ static GLuint compile_shader(GLenum type, const char *src) {
   return shader;
 }
 
-static void gl_init(void) {
+static void egl_init(void) {
   app.egl_dpy =
       eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_EXT, app.display, NULL);
   if (app.egl_dpy == EGL_NO_DISPLAY) {
@@ -973,6 +979,10 @@ static void gl_init(void) {
             (unsigned int)eglGetError());
     exit(1);
   }
+  app.egl_ready = true;
+}
+
+static void gl_init(void) {
   atlas_init();
 
   glEnable(GL_BLEND);
@@ -1015,32 +1025,6 @@ static void gl_init(void) {
   glBindAttribLocation(rect_prog, 0, "a_pos");
   glLinkProgram(rect_prog);
   rect_proj_loc = glGetUniformLocation(rect_prog, "u_proj");
-
-  // 圆头线段着色器：按钮图标用几何线段绘制，不受字体字形度量影响。
-  static const char *line_fs =
-      "#extension GL_OES_standard_derivatives : enable\n"
-      "precision mediump float;\n"
-      "uniform vec4 u_color;\n"
-      "uniform vec2 u_start;\n"
-      "uniform vec2 u_end;\n"
-      "uniform float u_half_width;\n"
-      "varying vec2 v_pos;\n"
-      "void main() {\n"
-      "  vec2 segment = u_end - u_start;\n"
-      "  vec2 rel = v_pos - u_start;\n"
-      "  float t = clamp(dot(rel, segment) / max(dot(segment, segment), "
-      "0.0001), 0.0, 1.0);\n"
-      "  float dist = length(rel - segment * t) - u_half_width;\n"
-      "  float aa = max(fwidth(dist), 0.001);\n"
-      "  float a = clamp(0.5 - dist / aa, 0.0, 1.0);\n"
-      "  gl_FragColor = u_color * a;\n"
-      "}\n";
-  line_prog = glCreateProgram();
-  glAttachShader(line_prog, compile_shader(GL_VERTEX_SHADER, rect_vs));
-  glAttachShader(line_prog, compile_shader(GL_FRAGMENT_SHADER, line_fs));
-  glBindAttribLocation(line_prog, 0, "a_pos");
-  glLinkProgram(line_prog);
-  line_proj_loc = glGetUniformLocation(line_prog, "u_proj");
 
   // 字形着色器：四边形覆盖字形位图区域，采样图集纹理，按 u_color 染色。
   // 图集把 FreeType 灰度覆盖率存在 RGBA 纹理的 alpha 通道。
@@ -1177,8 +1161,8 @@ static void render_now(void) {
   if (!app.configured || app.frame_callback != NULL)
     return; // xdg-shell 要求先 ack 首个 configure 才能提交 buffer
   app.needs_render = false;
-  if (!app.gl_ready)
-    gl_init();
+  if (!app.egl_ready)
+    egl_init();
 
   if (!eglMakeCurrent(app.egl_dpy, app.egl_surf, app.egl_surf, app.egl_ctx)) {
     fprintf(stderr, "render: eglMakeCurrent 失败: EGL error 0x%04x\n",
@@ -1187,8 +1171,26 @@ static void render_now(void) {
     return;
   }
   glViewport(0, 0, app.width, app.height);
-  glClearColor(0, 0, 0, 0);
+  // Match the normal terminal body so the lightweight first frame looks like
+  // a ready window instead of exposing only the server-side decoration.
+  glClearColor(0x17 / 255.0f * 0.84f, 0x17 / 255.0f * 0.84f,
+               0x1a / 255.0f * 0.84f, 0.84f);
   glClear(GL_COLOR_BUFFER_BIT);
+
+  // Put a lightweight buffer on screen before cold shader compilation and
+  // glyph-atlas construction. The frame callback completes GL setup while the
+  // compositor is already displaying the terminal surface.
+  if (!app.gl_ready) {
+    app.frame_callback = wl_surface_frame(app.surface);
+    wl_callback_add_listener(app.frame_callback, &frame_listener, NULL);
+    if (!eglSwapBuffers(app.egl_dpy, app.egl_surf)) {
+      fprintf(stderr,
+              "render: initial eglSwapBuffers failed: EGL error 0x%04x\n",
+              (unsigned int)eglGetError());
+      app.closed = true;
+    }
+    return;
+  }
 
   // Give every primitive a disjoint range for this frame. Rewriting offset 0
   // for each glyph makes virgl rename the busy 96-byte BO thousands of times.
