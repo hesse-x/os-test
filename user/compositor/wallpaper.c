@@ -20,8 +20,8 @@
 #include "wlr-layer-shell-client-protocol.h"
 
 #define MAX_OUTPUTS 8
-#define DOCK_WIDTH 112
-#define DOCK_HEIGHT 88
+#define DOCK_MIN_HEIGHT 48
+#define DOCK_MAX_HEIGHT 72
 
 struct image {
   uint32_t *pixels;
@@ -35,6 +35,10 @@ struct shell_output {
   struct wl_surface *dock;
   struct zwlr_layer_surface_v1 *dock_layer;
   int background_width, background_height;
+  int mode_width, mode_height;
+  int scale;
+  int dock_width, dock_height;
+  int dock_icon_size, dock_padding;
   bool dock_configured;
 };
 
@@ -169,6 +173,55 @@ static uint32_t premul(uint32_t rgb, uint8_t alpha) {
   return ((uint32_t)alpha << 24) | (r << 16) | (g << 8) | b;
 }
 
+static int clamp_int(int value, int low, int high) {
+  if (value < low)
+    return low;
+  if (value > high)
+    return high;
+  return value;
+}
+
+static uint32_t blend_coverage(uint32_t dst, uint32_t src, int coverage) {
+  unsigned int sa = ((src >> 24) & 0xff) * coverage / 16;
+  unsigned int sr = ((src >> 16) & 0xff) * coverage / 16;
+  unsigned int sg = ((src >> 8) & 0xff) * coverage / 16;
+  unsigned int sb = (src & 0xff) * coverage / 16;
+  unsigned int da = (dst >> 24) & 0xff;
+  unsigned int dr = (dst >> 16) & 0xff;
+  unsigned int dg = (dst >> 8) & 0xff;
+  unsigned int db = dst & 0xff;
+  unsigned int inverse = 255 - sa;
+  return ((sa + da * inverse / 255) << 24) | ((sr + dr * inverse / 255) << 16) |
+         ((sg + dg * inverse / 255) << 8) | (sb + db * inverse / 255);
+}
+
+static int rounded_coverage(int px, int py, int x, int y, int width, int height,
+                            int radius) {
+  const int samples = 4;
+  const int units = samples * 2;
+  int left_center = (x + radius) * units;
+  int right_center = (x + width - radius) * units;
+  int top_center = (y + radius) * units;
+  int bottom_center = (y + height - radius) * units;
+  int radius_scaled = radius * units;
+  int radius_sq = radius_scaled * radius_scaled;
+  int coverage = 0;
+
+  for (int sy = 0; sy < samples; sy++) {
+    for (int sx = 0; sx < samples; sx++) {
+      int sample_x = px * units + 1 + sx * 2;
+      int sample_y = py * units + 1 + sy * 2;
+      int nearest_x = clamp_int(sample_x, left_center, right_center);
+      int nearest_y = clamp_int(sample_y, top_center, bottom_center);
+      int dx = sample_x - nearest_x;
+      int dy = sample_y - nearest_y;
+      if (dx * dx + dy * dy <= radius_sq)
+        coverage++;
+    }
+  }
+  return coverage;
+}
+
 static void rounded_rect(uint32_t *pixels, int stride, int canvas_height, int x,
                          int y, int width, int height, int radius,
                          uint32_t color) {
@@ -178,15 +231,11 @@ static void rounded_rect(uint32_t *pixels, int stride, int canvas_height, int x,
     for (int px = x; px < x + width; px++) {
       if (px < 0 || px >= stride)
         continue;
-      int dx = px < x + radius
-                   ? x + radius - px - 1
-                   : (px >= x + width - radius ? px - (x + width - radius) : 0);
-      int dy =
-          py < y + radius
-              ? y + radius - py - 1
-              : (py >= y + height - radius ? py - (y + height - radius) : 0);
-      if (dx * dx + dy * dy <= radius * radius)
-        pixels[py * stride + px] = color;
+      int coverage = rounded_coverage(px, py, x, y, width, height, radius);
+      if (coverage > 0) {
+        int index = py * stride + px;
+        pixels[index] = blend_coverage(pixels[index], color, coverage);
+      }
     }
   }
 }
@@ -197,6 +246,19 @@ static void fill_rect(uint32_t *pixels, int stride, int canvas_height, int x,
     for (int px = x; px < x + width && px < stride; px++)
       if (px >= 0 && py >= 0)
         pixels[py * stride + px] = color;
+}
+
+static void update_dock_dimensions(struct shell_output *output) {
+  int scale = output->scale > 0 ? output->scale : 1;
+  int logical_height =
+      output->mode_height > 0 ? output->mode_height / scale : 720;
+  int target_height =
+      clamp_int(logical_height * 3 / 40, DOCK_MIN_HEIGHT, DOCK_MAX_HEIGHT);
+  output->dock_icon_size = target_height * 2 / 3;
+  output->dock_padding = clamp_int(target_height * 2 / 9, 10, 16);
+  int content_size = output->dock_icon_size + 2 * output->dock_padding;
+  output->dock_width = content_size;
+  output->dock_height = (content_size * 10 + 8) / 9;
 }
 
 static void draw_wallpaper(struct shell_output *output, int width, int height) {
@@ -233,26 +295,130 @@ static void draw_wallpaper(struct shell_output *output, int width, int height) {
   wl_surface_commit(output->background);
 }
 
+static void draw_frosted_backdrop(struct shell_output *output, uint32_t *pixels,
+                                  int stride, int canvas_height, int x, int y,
+                                  int width, int height, int radius) {
+  int scale = output->scale > 0 ? output->scale : 1;
+  int screen_width =
+      output->background_width > 0
+          ? output->background_width
+          : (output->mode_width > 0 ? output->mode_width / scale : 1280);
+  int screen_height =
+      output->background_height > 0
+          ? output->background_height
+          : (output->mode_height > 0 ? output->mode_height / scale : 720);
+  int dock_left = (screen_width - output->dock_width) / 2;
+  int dock_top = screen_height - output->dock_height;
+  double wallpaper_scale = 1.0;
+  double offset_x = 0.0, offset_y = 0.0;
+  if (app.wallpaper.pixels != NULL) {
+    double scale_x = (double)screen_width / app.wallpaper.width;
+    double scale_y = (double)screen_height / app.wallpaper.height;
+    wallpaper_scale = scale_x > scale_y ? scale_x : scale_y;
+    offset_x = (app.wallpaper.width * wallpaper_scale - screen_width) / 2.0;
+    offset_y = (app.wallpaper.height * wallpaper_scale - screen_height) / 2.0;
+  }
+
+  for (int py = y; py < y + height; py++) {
+    if (py < 0 || py >= canvas_height)
+      continue;
+    for (int px = x; px < x + width; px++) {
+      if (px < 0 || px >= stride)
+        continue;
+      int coverage = rounded_coverage(px, py, x, y, width, height, radius);
+      if (coverage == 0)
+        continue;
+
+      unsigned int red = 0, green = 0, blue = 0;
+      for (int ky = -2; ky <= 2; ky++) {
+        for (int kx = -2; kx <= 2; kx++) {
+          int gx =
+              clamp_int(dock_left + px / scale + kx * 3, 0, screen_width - 1);
+          int gy =
+              clamp_int(dock_top + py / scale + ky * 3, 0, screen_height - 1);
+          uint32_t sample = 0xff496b83;
+          if (app.wallpaper.pixels != NULL) {
+            int sx = clamp_int((int)((gx + offset_x) / wallpaper_scale), 0,
+                               app.wallpaper.width - 1);
+            int sy = clamp_int((int)((gy + offset_y) / wallpaper_scale), 0,
+                               app.wallpaper.height - 1);
+            sample = app.wallpaper.pixels[sy * app.wallpaper.width + sx];
+          }
+          red += (sample >> 16) & 0xff;
+          green += (sample >> 8) & 0xff;
+          blue += sample & 0xff;
+        }
+      }
+      int r = red / 25, g = green / 25, b = blue / 25;
+      int luminance = (r * 54 + g * 183 + b * 19) / 256;
+      r = clamp_int(luminance + (r - luminance) * 118 / 100 + 7, 0, 255);
+      g = clamp_int(luminance + (g - luminance) * 118 / 100 + 7, 0, 255);
+      b = clamp_int(luminance + (b - luminance) * 118 / 100 + 7, 0, 255);
+      r = (r * 88 + 245 * 12) / 100;
+      g = (g * 88 + 250 * 12) / 100;
+      b = (b * 88 + 252 * 12) / 100;
+      uint32_t color =
+          premul(((uint32_t)r << 16) | ((uint32_t)g << 8) | b, 222);
+      int index = py * stride + px;
+      pixels[index] = blend_coverage(pixels[index], color, coverage);
+    }
+  }
+}
+
 static void draw_dock(struct shell_output *output) {
-  struct shm_buffer *buffer = create_buffer(DOCK_WIDTH, DOCK_HEIGHT);
+  int scale = output->scale > 0 ? output->scale : 1;
+  int width = output->dock_width * scale;
+  int height = output->dock_height * scale;
+  struct shm_buffer *buffer = create_buffer(width, height);
   if (buffer == NULL)
     return;
   uint32_t *pixels = buffer->data;
   memset(pixels, 0, buffer->size);
-  rounded_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 1, 1, DOCK_WIDTH - 2,
-               DOCK_HEIGHT - 8, 20, premul(0xf4f5f7, 184));
-  rounded_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 24, 9, 64, 64, 15, 0xffd9dce2);
-  rounded_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 28, 13, 56, 56, 12, 0xff17191f);
-  for (int i = 0; i < 12; i++) {
-    fill_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 42 + i, 28 + i / 2, 3, 3,
-              0xfff4f6f8);
-    fill_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 42 + i, 40 - i / 2, 3, 3,
-              0xfff4f6f8);
+
+  int top = height / 10;
+  int radius = height / 4;
+  int icon_size = output->dock_icon_size * scale;
+  int icon_x = (width - icon_size) / 2;
+  int content_padding = output->dock_padding * scale;
+  int icon_y = top + content_padding;
+  int icon_inset = clamp_int(icon_size / 16, 2 * scale, 4 * scale);
+  int mark = clamp_int(icon_size / 24, scale, 3 * scale);
+  int indicator_h = clamp_int(height / 24, 2 * scale, 3 * scale);
+  int indicator_w = height / 9;
+  int indicator_x = (width - indicator_w) / 2;
+  int indicator_y = height - indicator_h - 2 * scale;
+
+  /* Blur and brighten the real wallpaper crop, then add a thin specular rim. */
+  rounded_rect(pixels, width, height, scale, top - scale, width - 2 * scale,
+               height - top + scale, radius, premul(0x17212a, 20));
+  rounded_rect(pixels, width, height, scale, top, width - 2 * scale,
+               height - top, radius, premul(0xffffff, 104));
+  draw_frosted_backdrop(output, pixels, width, height, 2 * scale, top + scale,
+                        width - 4 * scale, height - top - scale,
+                        radius - scale);
+  rounded_rect(pixels, width, height, 2 * scale, top + scale, width - 4 * scale,
+               height - top - scale, radius - scale, premul(0xf4f8fa, 20));
+  rounded_rect(pixels, width, height, icon_x, icon_y, icon_size, icon_size,
+               icon_size / 4, 0xffd9dce2);
+  rounded_rect(pixels, width, height, icon_x + icon_inset, icon_y + icon_inset,
+               icon_size - 2 * icon_inset, icon_size - 2 * icon_inset,
+               icon_size / 5, 0xff17191f);
+
+  int glyph_x = icon_x + icon_size / 4;
+  int glyph_y = icon_y + icon_size / 3;
+  int glyph_steps = icon_size / 6;
+  for (int i = 0; i < glyph_steps; i++) {
+    fill_rect(pixels, width, height, glyph_x + i * mark, glyph_y + i * mark / 2,
+              mark, mark, 0xfff4f6f8);
+    fill_rect(pixels, width, height, glyph_x + i * mark,
+              glyph_y + icon_size / 5 - i * mark / 2, mark, mark, 0xfff4f6f8);
   }
-  fill_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 59, 45, 15, 3, 0xfff4f6f8);
-  rounded_rect(pixels, DOCK_WIDTH, DOCK_HEIGHT, 52, 78, 8, 4, 2, 0xff2a2b30);
+  fill_rect(pixels, width, height, icon_x + icon_size / 2,
+            icon_y + icon_size * 3 / 5, icon_size / 4, mark, 0xfff4f6f8);
+  rounded_rect(pixels, width, height, indicator_x, indicator_y, indicator_w,
+               indicator_h, indicator_h / 2, 0xff2a2b30);
   wl_surface_attach(output->dock, buffer->buffer, 0, 0);
-  wl_surface_damage_buffer(output->dock, 0, 0, DOCK_WIDTH, DOCK_HEIGHT);
+  wl_surface_damage_buffer(output->dock, 0, 0, width, height);
   wl_surface_commit(output->dock);
 }
 
@@ -321,10 +487,14 @@ static void create_output_surfaces(struct shell_output *output) {
   output->dock_layer = zwlr_layer_shell_v1_get_layer_surface(
       app.layer_shell, output->dock, output->output,
       ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "desktop-dock");
-  zwlr_layer_surface_v1_set_size(output->dock_layer, DOCK_WIDTH, DOCK_HEIGHT);
+  update_dock_dimensions(output);
+  wl_surface_set_buffer_scale(output->dock,
+                              output->scale > 0 ? output->scale : 1);
+  zwlr_layer_surface_v1_set_size(output->dock_layer, output->dock_width,
+                                 output->dock_height);
   zwlr_layer_surface_v1_set_anchor(output->dock_layer,
                                    ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM);
-  zwlr_layer_surface_v1_set_margin(output->dock_layer, 0, 0, 14, 0);
+  zwlr_layer_surface_v1_set_margin(output->dock_layer, 0, 0, 0, 0);
   zwlr_layer_surface_v1_set_exclusive_zone(output->dock_layer, 0);
   zwlr_layer_surface_v1_add_listener(output->dock_layer, &dock_listener,
                                      output);
@@ -348,21 +518,22 @@ static void output_geometry(void *data, struct wl_output *output, int32_t x,
 }
 static void output_mode(void *data, struct wl_output *output, uint32_t flags,
                         int32_t width, int32_t height, int32_t refresh) {
-  (void)data;
+  struct shell_output *shell_output = data;
   (void)output;
-  (void)flags;
-  (void)width;
-  (void)height;
   (void)refresh;
+  if (flags & WL_OUTPUT_MODE_CURRENT) {
+    shell_output->mode_width = width;
+    shell_output->mode_height = height;
+  }
 }
 static void output_done(void *data, struct wl_output *output) {
   (void)data;
   (void)output;
 }
 static void output_scale(void *data, struct wl_output *output, int32_t factor) {
-  (void)data;
+  struct shell_output *shell_output = data;
   (void)output;
-  (void)factor;
+  shell_output->scale = factor > 0 ? factor : 1;
 }
 static void output_name(void *data, struct wl_output *output,
                         const char *name) {
@@ -496,6 +667,7 @@ static void registry_global(void *data, struct wl_registry *registry,
   } else if (strcmp(interface, wl_output_interface.name) == 0 &&
              app.output_count < MAX_OUTPUTS) {
     struct shell_output *output = &app.outputs[app.output_count++];
+    output->scale = 1;
     output->output = wl_registry_bind(registry, name, &wl_output_interface,
                                       version < 4 ? version : 4);
     wl_output_add_listener(output->output, &output_listener, output);
@@ -533,6 +705,8 @@ int main(int argc, char **argv) {
     fprintf(stderr, "desktop-shell: compositor lacks wl_shm or layer-shell\n");
     return 1;
   }
+  /* The first roundtrip discovers outputs; the second receives mode/scale. */
+  wl_display_roundtrip(app.display);
   for (int i = 0; i < app.output_count; i++)
     create_output_surfaces(&app.outputs[i]);
   spawn_terminal();

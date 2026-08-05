@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include <assert.h>
+#include <drm_fourcc.h>
 #include <errno.h>
 #include <getopt.h>
 #include <linux/input-event-codes.h>
@@ -15,6 +16,7 @@
 #include <unistd.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
+#include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>
@@ -37,7 +39,10 @@
 
 #define SSD_TITLE_HEIGHT 32
 #define SSD_BORDER_WIDTH 2
-#define SSD_BUTTON_SIZE 12
+#define SSD_BUTTON_SIZE 16
+#define SSD_BUTTON_CLOSE_X 12
+#define SSD_BUTTON_MINIMIZE_X 34
+#define SSD_BUTTON_MAXIMIZE_X 56
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum tinywl_cursor_mode {
@@ -107,13 +112,14 @@ struct tinywl_toplevel {
   struct wlr_xdg_toplevel *xdg_toplevel;
   struct wlr_scene_tree *scene_tree;
   struct wlr_scene_tree *content_tree;
+  struct wlr_scene_tree *decoration_tree;
   struct wlr_scene_rect *titlebar;
   struct wlr_scene_rect *border_left;
   struct wlr_scene_rect *border_right;
   struct wlr_scene_rect *border_bottom;
-  struct wlr_scene_rect *button_close;
-  struct wlr_scene_rect *button_minimize;
-  struct wlr_scene_rect *button_maximize;
+  struct wlr_scene_tree *button_close;
+  struct wlr_scene_tree *button_minimize;
+  struct wlr_scene_tree *button_maximize;
   int content_width, content_height;
   bool maximized;
   int restore_x, restore_y, restore_width, restore_height;
@@ -178,9 +184,132 @@ static void update_ssd(struct tinywl_toplevel *toplevel) {
   wlr_scene_node_set_position(&toplevel->border_bottom->node, 0, geo.height);
 
   const int button_y = -SSD_TITLE_HEIGHT / 2 - SSD_BUTTON_SIZE / 2;
-  wlr_scene_node_set_position(&toplevel->button_close->node, 12, button_y);
-  wlr_scene_node_set_position(&toplevel->button_minimize->node, 32, button_y);
-  wlr_scene_node_set_position(&toplevel->button_maximize->node, 52, button_y);
+  wlr_scene_node_set_position(&toplevel->button_close->node, SSD_BUTTON_CLOSE_X,
+                              button_y);
+  wlr_scene_node_set_position(&toplevel->button_minimize->node,
+                              SSD_BUTTON_MINIMIZE_X, button_y);
+  wlr_scene_node_set_position(&toplevel->button_maximize->node,
+                              SSD_BUTTON_MAXIMIZE_X, button_y);
+  if (toplevel->xdg_toplevel->base->surface->mapped) {
+    wlr_scene_node_set_enabled(&toplevel->decoration_tree->node, true);
+  }
+}
+
+enum ssd_button_icon {
+  SSD_ICON_CLOSE,
+  SSD_ICON_MINIMIZE,
+  SSD_ICON_MAXIMIZE,
+};
+
+struct ssd_button_buffer {
+  struct wlr_buffer base;
+  uint32_t pixels[SSD_BUTTON_SIZE * SSD_BUTTON_SIZE];
+};
+
+static void ssd_button_buffer_destroy(struct wlr_buffer *wlr_buffer) {
+  struct ssd_button_buffer *buffer = wl_container_of(wlr_buffer, buffer, base);
+  wlr_buffer_finish(wlr_buffer);
+  free(buffer);
+}
+
+static bool ssd_button_buffer_begin_access(struct wlr_buffer *wlr_buffer,
+                                           uint32_t flags, void **data,
+                                           uint32_t *format, size_t *stride) {
+  struct ssd_button_buffer *buffer = wl_container_of(wlr_buffer, buffer, base);
+  if (flags & WLR_BUFFER_DATA_PTR_ACCESS_WRITE) {
+    return false;
+  }
+  *data = buffer->pixels;
+  *format = DRM_FORMAT_ARGB8888;
+  *stride = SSD_BUTTON_SIZE * sizeof(uint32_t);
+  return true;
+}
+
+static void ssd_button_buffer_end_access(struct wlr_buffer *wlr_buffer) {
+  (void)wlr_buffer;
+}
+
+static const struct wlr_buffer_impl ssd_button_buffer_impl = {
+    .destroy = ssd_button_buffer_destroy,
+    .begin_data_ptr_access = ssd_button_buffer_begin_access,
+    .end_data_ptr_access = ssd_button_buffer_end_access,
+};
+
+static float absf(float value) { return value < 0 ? -value : value; }
+
+static bool ssd_icon_contains(enum ssd_button_icon icon, float x, float y) {
+  if (icon == SSD_ICON_CLOSE) {
+    return absf(x) <= 3.5f && absf(y) <= 3.5f &&
+           (absf(x - y) <= 0.72f || absf(x + y) <= 0.72f);
+  }
+  if (icon == SSD_ICON_MINIMIZE) {
+    return absf(x) <= 3.5f && absf(y) <= 0.68f;
+  }
+  return (absf(x) <= 3.5f && absf(y) <= 0.68f) ||
+         (absf(y) <= 3.5f && absf(x) <= 0.68f);
+}
+
+static struct ssd_button_buffer *
+create_ssd_button_buffer(const float color[static 4],
+                         enum ssd_button_icon icon) {
+  struct ssd_button_buffer *buffer = calloc(1, sizeof(*buffer));
+  if (buffer == NULL) {
+    return NULL;
+  }
+  wlr_buffer_init(&buffer->base, &ssd_button_buffer_impl, SSD_BUTTON_SIZE,
+                  SSD_BUTTON_SIZE);
+
+  const uint8_t base[3] = {(uint8_t)(color[0] * 255.0f),
+                           (uint8_t)(color[1] * 255.0f),
+                           (uint8_t)(color[2] * 255.0f)};
+  const uint8_t marks[3][3] = {
+      {104, 31, 25},
+      {105, 72, 8},
+      {12, 78, 24},
+  };
+  const uint8_t *mark = marks[icon];
+  const int samples = 4;
+  const float center = SSD_BUTTON_SIZE / 2.0f;
+  const float radius_sq = 7.25f * 7.25f;
+
+  /* Supersampling turns both the circle edge and symbols into coverage masks.
+   */
+  for (int py = 0; py < SSD_BUTTON_SIZE; py++) {
+    for (int px = 0; px < SSD_BUTTON_SIZE; px++) {
+      unsigned int a = 0, r = 0, g = 0, b = 0;
+      for (int sy = 0; sy < samples; sy++) {
+        for (int sx = 0; sx < samples; sx++) {
+          float x = px + (sx + 0.5f) / samples - center;
+          float y = py + (sy + 0.5f) / samples - center;
+          if (x * x + y * y > radius_sq) {
+            continue;
+          }
+          const uint8_t *sample = ssd_icon_contains(icon, x, y) ? mark : base;
+          a += 255;
+          r += sample[0];
+          g += sample[1];
+          b += sample[2];
+        }
+      }
+      unsigned int divisor = samples * samples;
+      buffer->pixels[py * SSD_BUTTON_SIZE + px] =
+          ((a / divisor) << 24) | ((r / divisor) << 16) | ((g / divisor) << 8) |
+          (b / divisor);
+    }
+  }
+  return buffer;
+}
+
+static struct wlr_scene_tree *create_ssd_button(struct wlr_scene_tree *parent,
+                                                const float color[static 4],
+                                                enum ssd_button_icon icon) {
+  struct wlr_scene_tree *button = wlr_scene_tree_create(parent);
+  struct ssd_button_buffer *buffer = create_ssd_button_buffer(color, icon);
+  if (buffer != NULL) {
+    wlr_scene_buffer_create(button, &buffer->base);
+    wlr_buffer_drop(&buffer->base);
+  }
+  return button;
 }
 
 static void focus_toplevel(struct tinywl_toplevel *toplevel,
@@ -656,11 +785,12 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
   double rx = server->cursor->x - tx;
   double ry = server->cursor->y - ty;
   if (ry < 0 && ry >= -SSD_TITLE_HEIGHT) {
-    if (rx >= 12 && rx < 12 + SSD_BUTTON_SIZE) {
+    if (rx >= SSD_BUTTON_CLOSE_X && rx < SSD_BUTTON_CLOSE_X + SSD_BUTTON_SIZE) {
       wlr_xdg_toplevel_send_close(toplevel->xdg_toplevel);
       return;
     }
-    if (rx >= 52 && rx < 52 + SSD_BUTTON_SIZE) {
+    if (rx >= SSD_BUTTON_MAXIMIZE_X &&
+        rx < SSD_BUTTON_MAXIMIZE_X + SSD_BUTTON_SIZE) {
       struct wlr_output *output = wlr_output_layout_output_at(
           server->output_layout, server->cursor->x, server->cursor->y);
       set_toplevel_maximized(toplevel, output, !toplevel->maximized);
@@ -884,6 +1014,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
   (void)data;
 
   wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
+  update_ssd(toplevel);
   if (toplevel->scene_tree->node.x == 0 && toplevel->scene_tree->node.y == 0) {
     struct wlr_output *output =
         wlr_output_layout_get_center_output(toplevel->server->output_layout);
@@ -913,6 +1044,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
     reset_cursor_mode(toplevel->server);
   }
 
+  wlr_scene_node_set_enabled(&toplevel->decoration_tree->node, false);
   wl_list_remove(&toplevel->link);
 }
 
@@ -1061,26 +1193,28 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
   toplevel->content_tree =
       wlr_scene_xdg_surface_create(toplevel->scene_tree, xdg_toplevel->base);
   xdg_toplevel->base->data = toplevel->content_tree;
+  toplevel->decoration_tree = wlr_scene_tree_create(toplevel->scene_tree);
+  wlr_scene_node_set_enabled(&toplevel->decoration_tree->node, false);
 
   const float title_color[4] = {0.20f, 0.20f, 0.23f, 1.0f};
   const float border_color[4] = {0.08f, 0.08f, 0.09f, 1.0f};
   const float close_color[4] = {1.0f, 0.37f, 0.34f, 1.0f};
   const float minimize_color[4] = {1.0f, 0.74f, 0.18f, 1.0f};
   const float maximize_color[4] = {0.16f, 0.78f, 0.25f, 1.0f};
-  toplevel->titlebar = wlr_scene_rect_create(toplevel->scene_tree, 1,
+  toplevel->titlebar = wlr_scene_rect_create(toplevel->decoration_tree, 1,
                                              SSD_TITLE_HEIGHT, title_color);
   toplevel->border_left = wlr_scene_rect_create(
-      toplevel->scene_tree, SSD_BORDER_WIDTH, 1, border_color);
+      toplevel->decoration_tree, SSD_BORDER_WIDTH, 1, border_color);
   toplevel->border_right = wlr_scene_rect_create(
-      toplevel->scene_tree, SSD_BORDER_WIDTH, 1, border_color);
+      toplevel->decoration_tree, SSD_BORDER_WIDTH, 1, border_color);
   toplevel->border_bottom = wlr_scene_rect_create(
-      toplevel->scene_tree, 1, SSD_BORDER_WIDTH, border_color);
-  toplevel->button_close = wlr_scene_rect_create(
-      toplevel->scene_tree, SSD_BUTTON_SIZE, SSD_BUTTON_SIZE, close_color);
-  toplevel->button_minimize = wlr_scene_rect_create(
-      toplevel->scene_tree, SSD_BUTTON_SIZE, SSD_BUTTON_SIZE, minimize_color);
-  toplevel->button_maximize = wlr_scene_rect_create(
-      toplevel->scene_tree, SSD_BUTTON_SIZE, SSD_BUTTON_SIZE, maximize_color);
+      toplevel->decoration_tree, 1, SSD_BORDER_WIDTH, border_color);
+  toplevel->button_close =
+      create_ssd_button(toplevel->decoration_tree, close_color, SSD_ICON_CLOSE);
+  toplevel->button_minimize = create_ssd_button(
+      toplevel->decoration_tree, minimize_color, SSD_ICON_MINIMIZE);
+  toplevel->button_maximize = create_ssd_button(
+      toplevel->decoration_tree, maximize_color, SSD_ICON_MAXIMIZE);
 
   /* Listen to the various events it can emit */
   toplevel->map.notify = xdg_toplevel_map;
