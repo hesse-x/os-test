@@ -2503,6 +2503,17 @@ static int64_t do_sys_poll(struct pollfd __user *fds, nfds_t nfds,
           list_init(&pwq[i].node);
           add_wait_queue(wq, &pwq[i]);
         }
+
+        // Close the check-before-registration lost-wakeup window. The first
+        // file_poll() above may have observed "not ready", then the producer
+        // can make the fd ready and call __wake_up before this wait node is on
+        // the queue. Re-check after enrollment: readiness is either observed
+        // here, or any later transition sees our BLOCKED waiter.
+        if (!kfds[i].revents) {
+          kfds[i].revents = file_poll(f, kfds[i].events);
+          if (kfds[i].revents)
+            ready++;
+        }
         // Drop a ref retained by a previous iteration's fd_lookup for this pfd
         // before overwriting it, so only the latest lookup's ref survives to
         // poll_out's file_put. (Each pass re-looks-up the fd; without this the
@@ -2589,7 +2600,6 @@ poll_out:
   // run_queue_push 单租户 ASSERT， 或被 steal 偷到 state≠READY 撞
   // sched.c:382）。cancel 掉虚假唤醒：摘 run_node + state=RUNNING。所有 goto
   // poll_out 路径统一在此处理。
-  sched_cancel_spurious_wake(proc);
   // Tear down every wait registration still held. Single cleanup point so no
   // return path can leave a pwq[i] on a wq (leaked heap node + dangling wq
   // links that wedge a later __wake_up traversal).
@@ -2609,6 +2619,9 @@ poll_out:
     file_put(f);
     polled[i] = NULL;
   }
+  // Wait-queue wake callbacks take wq->lock then scheduler_lock. Remove all
+  // wait nodes before taking scheduler_lock here to preserve that lock order.
+  sched_cancel_spurious_wake(proc);
 
   kfree(kfds);
   kfree(polled);

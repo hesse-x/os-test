@@ -102,6 +102,44 @@ static void pty_wake_cb(wait_queue_t *wq, unsigned long flags) {
   wake_wq_target(target);
 }
 
+// Enroll on the PTY wait queue and publish BLOCKED as one atomic wait
+// preparation step.  Interrupts remain disabled until the caller has
+// re-checked its condition and either schedules or cancels the wait.
+static uint64_t pty_prepare_wait(struct pty *pty, wait_queue_t *wait,
+                                 xtask *proc) {
+  uint64_t flags;
+  spin_lock_irqsave(&pty->wq->lock, &flags);
+  list_push_back(&pty->wq->head, &wait->node);
+
+  int cpu = proc->assigned_cpu;
+  spin_lock(&cpu_locals[cpu].scheduler_lock);
+  proc->state = BLOCKED;
+  proc->wait_event = WAIT_NONE;
+  spin_unlock(&cpu_locals[cpu].scheduler_lock);
+
+  // Keep IRQs disabled until the caller completes the resource re-check, so
+  // wait publication and validation remain one local critical section.
+  spin_unlock(&pty->wq->lock);
+  return flags;
+}
+
+static void pty_finish_wait_prepare(uint64_t flags) {
+  __asm__ volatile("pushq %0; popfq" : : "r"(flags));
+}
+
+// Re-arm a task whose wait node is already linked. The caller must re-check
+// the resource condition before restoring interrupts or scheduling.
+static uint64_t pty_reprepare_wait(xtask *proc) {
+  uint64_t flags;
+  __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags));
+  int cpu = proc->assigned_cpu;
+  spin_lock(&cpu_locals[cpu].scheduler_lock);
+  proc->state = BLOCKED;
+  proc->wait_event = WAIT_NONE;
+  spin_unlock(&cpu_locals[cpu].scheduler_lock);
+  return flags;
+}
+
 // Write a single byte to ring, return 1 on success, 0 if no space
 static int pty_ring_write1(uint8_t *buf, uint32_t *head, uint32_t tail,
                            uint8_t byte) {
@@ -354,11 +392,16 @@ int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
   list_init(&wait.node);
   add_wait_queue(pty->wq, &wait);
   for (;;) {
+    uint64_t wait_flags = pty_reprepare_wait(proc);
     spin_lock(&pty->s_to_m_lock);
     int avail = pty_ring_avail(pty->s_to_m_head, pty->s_to_m_tail);
     spin_unlock(&pty->s_to_m_lock);
-    if (avail != 0)
+    if (avail != 0) {
+      remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
       break;
+    }
 
     // EOF only after slave was opened and then closed.
     // If slave has never been opened, avoid false EOF that triggers
@@ -367,54 +410,54 @@ int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
       if (pty->slave_opened) {
         printk(LOG_INFO, "pty_master_read: EOF pty=%d (slave closed)\n",
                pty->index);
-        proc->state = RUNNING;
         remove_wait_queue(pty->wq, &wait);
+        sched_cancel_spurious_wake(proc);
+        pty_finish_wait_prepare(wait_flags);
         return 0; // real EOF
       }
       // Slave not yet opened: block or EAGAIN
       if (pty_is_nonblock(proc, pty, 1)) {
-        proc->state = RUNNING;
         remove_wait_queue(pty->wq, &wait);
+        sched_cancel_spurious_wake(proc);
+        pty_finish_wait_prepare(wait_flags);
         return -EAGAIN;
       }
-      proc->state = BLOCKED;
-      proc->wait_event = WAIT_NONE;
       if (pty_eintr_check(proc)) {
-        proc->state = RUNNING;
         remove_wait_queue(pty->wq, &wait);
+        sched_cancel_spurious_wake(proc);
+        pty_finish_wait_prepare(wait_flags);
         return -ERESTART;
       }
       schedule();
+      pty_finish_wait_prepare(wait_flags);
       if (pty_eintr_check(proc)) {
-        proc->state = RUNNING;
         remove_wait_queue(pty->wq, &wait);
+        sched_cancel_spurious_wake(proc);
         return -ERESTART;
       }
       continue; // re-check conditions after wake
     }
     if (pty_is_nonblock(proc, pty, 1)) {
-      proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
       return -EAGAIN;
     }
 
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_NONE;
     if (pty_eintr_check(proc)) {
-      proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
       return -ERESTART;
     }
     schedule();
+    pty_finish_wait_prepare(wait_flags);
     if (pty_eintr_check(proc)) {
-      proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
       return -ERESTART;
     }
   }
-  proc->state = RUNNING;
-  remove_wait_queue(pty->wq, &wait);
-
   spin_lock(&pty->s_to_m_lock);
   int nread = pty_ring_read(pty->s_to_m_buf, pty->s_to_m_head,
                             &pty->s_to_m_tail, (uint8_t *)buf, (int)len);
@@ -582,19 +625,28 @@ int64_t pty_master_write(struct pty *pty, xtask *proc, const void *buf,
     wait.data = proc;
     wait.exclusive = 0;
     list_init(&wait.node);
-    add_wait_queue(pty->wq, &wait);
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_NONE;
-    if (pty_eintr_check(proc)) {
-      proc->state = RUNNING;
+    uint64_t wait_flags = pty_prepare_wait(pty, &wait, proc);
+
+    // Close the registration race exactly as the slave-output path does: if
+    // the reader freed space just before enrollment, consume the byte now.
+    if (ldisc_input(pty, proc, ((const uint8_t *)buf)[written]) == 0) {
       remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
+      written++;
+      continue;
+    }
+    if (pty_eintr_check(proc)) {
+      remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
       if (written > 0)
         break;
       return -ERESTART;
     }
     schedule();
-    proc->state = RUNNING;
     remove_wait_queue(pty->wq, &wait);
+    pty_finish_wait_prepare(wait_flags);
     if (pty_eintr_check(proc)) {
       if (written > 0)
         break;
@@ -696,52 +748,58 @@ int64_t pty_slave_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
   list_init(&wait.node);
   add_wait_queue(pty->wq, &wait);
   for (;;) {
+    uint64_t wait_flags = pty_reprepare_wait(proc);
     // Re-evaluate the foreground gate after a wake: terminal ownership may
     // have changed while we were blocked.
     gate = pty_fg_gate(pty, proc, TTY_READ);
     if (gate) {
-      proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
       return (int64_t)gate;
     }
     int avail = canon ? ldisc_canon_avail(pty)
                       : pty_ring_avail(pty->m_to_s_head, pty->m_to_s_tail);
-    if (avail > 0)
+    if (avail > 0) {
+      remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
       break;
+    }
     if (pty->eof_pending) { // VEOF arrived while blocked
       pty->eof_pending = 0;
-      proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
       return 0;
     }
     if (pty->master_refs == 0) {
-      proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
       return 0; // EOF
     }
     if (pty_is_nonblock(proc, pty, 0)) {
-      proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
       return -EAGAIN;
     }
 
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_NONE;
     if (pty_eintr_check(proc)) {
-      proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
       return -ERESTART;
     }
     schedule();
+    pty_finish_wait_prepare(wait_flags);
     if (pty_eintr_check(proc)) {
-      proc->state = RUNNING;
       remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
       return -ERESTART;
     }
   }
-  proc->state = RUNNING;
-  remove_wait_queue(pty->wq, &wait);
-
   int nread = canon
                   ? pty_ring_read(pty->canon_buf, pty->canon_commit,
                                   &pty->canon_tail, (uint8_t *)buf, (int)len)
@@ -824,19 +882,32 @@ int64_t pty_slave_write(struct pty *pty, xtask *proc, const void *buf,
     wait.data = proc;
     wait.exclusive = 0;
     list_init(&wait.node);
-    add_wait_queue(pty->wq, &wait);
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_NONE;
-    if (pty_eintr_check(proc)) {
-      proc->state = RUNNING;
+    uint64_t wait_flags = pty_prepare_wait(pty, &wait, proc);
+
+    // The master may have drained the ring after the failed write but before
+    // this waiter was visible. Re-check after publishing BLOCKED so either the
+    // condition is observed here or a later drain wakes us.
+    spin_lock(&pty->s_to_m_lock);
+    int space_ready =
+        pty_ring_space(pty->s_to_m_head, pty->s_to_m_tail) >= (int)output_len;
+    spin_unlock(&pty->s_to_m_lock);
+    if (space_ready) {
       remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
+      continue;
+    }
+    if (pty_eintr_check(proc)) {
+      remove_wait_queue(pty->wq, &wait);
+      sched_cancel_spurious_wake(proc);
+      pty_finish_wait_prepare(wait_flags);
       if (written > 0)
         break;
       return -ERESTART;
     }
     schedule();
-    proc->state = RUNNING;
     remove_wait_queue(pty->wq, &wait);
+    pty_finish_wait_prepare(wait_flags);
     if (pty_eintr_check(proc)) {
       if (written > 0)
         break;
