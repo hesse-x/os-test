@@ -331,7 +331,7 @@ void page_cache_invalidate_inode(struct inode *ip) {
   /* Drop any stale FAT-chain walk cursor too: callers invoke this precisely
    * when the cluster chain changes (write-extend, truncate, unlink, rename),
    * so a retained cursor could point into freed/realigned clusters. */
-  ip->walk_cursor = 0;
+  __atomic_store_n(&ip->walk_cursor, 0, __ATOMIC_RELEASE);
   spin_lock(&page_cache_lock);
   for (int i = 0; i < (1 << PAGE_CACHE_HASH_BITS); i++) {
     struct cache_page **pp = &page_cache_hash[i];

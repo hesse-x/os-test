@@ -225,13 +225,12 @@ uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index) {
 // forward-only cursor when the target is at or beyond it. Sequential reads then
 // touch each FAT entry once total (O(n)) instead of restarting at the chain
 // head every page (O(n²)). Cursor packs (index<<32)|cluster; an out-of-range
-// cursor (stale after a chain change, or holding an EOF marker) falls back to a
-// head start — FAT32 chains only append-or-free-tail, so a stale cursor can at
-// worst land past the new EOF and read back zeros, never wrong data. The cursor
-// only moves forward; loads/stores are atomic so concurrent faults on the same
-// inode can't tear the (index, cluster) pair, and each published pair is
-// self-consistent (cluster really is at that index), so a lost update is at
-// worst a perf hiccup, never a wrong cluster.
+// cursor (holding an EOF marker or positioned after the target) falls back to a
+// head start, and chain mutations invalidate it through the page cache. The
+// packed pair is loaded and stored atomically so concurrent faults cannot tear
+// it. Letting the most recently completed walk publish its position also keeps
+// the cursor near the active mmap fault region instead of pinning it at the
+// highest index seen.
 uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index) {
   uint64_t cur = __atomic_load_n(&ip->walk_cursor, __ATOMIC_ACQUIRE);
   uint32_t cur_idx = (uint32_t)(cur >> 32);
@@ -251,8 +250,8 @@ uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index) {
     c = next;
     cur_idx++;
   }
-  // Reached cluster_index. Publish only if it holds a valid data cluster, so
-  // the cursor never stores an EOF marker (which can't be resumed from).
+  // Reached cluster_index. Publish only a valid data cluster; EOF markers
+  // cannot be resumed from.
   if (c >= 2 && c < 0x0FFFFFF8)
     __atomic_store_n(&ip->walk_cursor, ((uint64_t)cur_idx << 32) | (uint64_t)c,
                      __ATOMIC_RELEASE);
