@@ -128,6 +128,14 @@
 // TRB completion codes
 #define CC_SUCCESS 1
 #define CC_TRB_ERROR 2
+// xHCI 1.2 spec Table 8-12: completion code 13 = Short Packet. For interrupt-IN
+// endpoints this is a *successful* completion where the device returned fewer
+// bytes than the TRB's TD size (dword2 = buffer capacity). The DMA buffer holds
+// a valid report whose actual length is the transfer event's
+// trb_transfer_length (captured into last_isr.last_len). A boot mouse's 3/4-
+// byte report against an 8-byte TRB always completes Short Packet, never
+// Success — treating 13 as failure silently drops every mouse report.
+#define CC_SHORT_PACKET 13
 
 // TRB flags
 #define TRB_TC (1 << 1)      // Toggle Cycle (Link TRB)
@@ -542,13 +550,16 @@ static void xhci_isr(trapframe *tf) {
                           &norm);
         db_write(xhci_intrs[1].slot_id, xhci_intrs[1].ep_dci);
 
-        if (cc == CC_SUCCESS) {
+        if (cc == CC_SUCCESS || cc == CC_SHORT_PACKET) {
           // Actual report length is dynamic (3 or 4 bytes per report, possibly
           // mixed): taken from the completion event's transfer-length field
           // (dword2 & 0xFFFFFF), NOT any hardcoded constant. arm TRB's dword2
           // above is the buffer *capacity* (8), an upper bound the HC may write
           // up to — mis-filling it to 4 would leave the 4th byte as stale DMA
           // garbage parsed as a phantom REL_WHEEL. See mouse.md §3.1(e).
+          // A boot mouse's report (3/4B) against the 8B TRB completes Short
+          // Packet (cc=13), not Success; last_len carries the real report
+          // length in that case.
           uint32_t report_len = last_isr.last_len;
           if (report_len > 8)
             report_len = 8;

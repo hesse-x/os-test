@@ -90,7 +90,8 @@
 1. 读 IMAN 确认 IP，清 IMAN.IP + 确保 IE
 2. 遍历 Event Ring (cycle state 匹配):
    - Command Completion Event (type=33): 记录 completion code
-   - Transfer Event (TRB_TRANSFER): 若为键盘 EP1-IN，读 HID DMA buffer → 写 USB HID SHM keyboard sub-ring → `isr_lookup_driver(DEV_KBD)` 找 kbd_driver PID → `wake_process()` 通知；replenish TRB + ring Doorbell
+   - Transfer Event (TRB_TRANSFER): 按 slot_id + EPID 分派到键盘 EP1-IN 或鼠标 EP1-IN（两设备 ep_num 均为 DCI=3，靠 slot_id 区分）。读对应 slot 的 HID DMA buffer → 写 USB HID SHM 子环（键盘 rings[0] / 鼠标 rings[1]）→ 信号共享 irqfd + wake hidraw_wq；replenish TRB + ring Doorbell
+   - 完成码判定：interrupt-IN 数据仅在 `cc == Success(1)` **或** `cc == Short Packet(13)` 时有效。boot mouse report 3-4 字节 < TRB 8 字节容量，每次都走 Short Packet（13），实际长度取 transfer event 的 trb_transfer_length。错误码（Stall/Transaction Error 等）丢弃数据但仍 replenish TRB 保持 ring 活着
    - 其他事件: 跳过
 3. 更新 ERDP (dequeue pointer + EHB)
 4. `lapic_eoi()`
@@ -110,6 +111,5 @@
 |------|------|--------|
 | USB 设备热插拔 | Port Status Change 事件处理 + 异步状态机（需内核工作队列）；当前枚举在 xhci_init 一步完成 | 中 |
 | 多 interrupter | unmask 更多 MSI-X Entry，per-interrupter event ring（当前只用 interrupter 0） | 低 |
-| USB mouse | 第二设备 slot / 第二 endpoint | 低 |
 | AHCI MSI-X 迁移 | AHCI 可用 `pci_enable_msi` 一行启用 MSI，减少中断延迟 | 低 |
 | PS/2 完全清理 | xHCI 键盘稳定后确认 GSI 1 mask 可靠移除 | 低 |

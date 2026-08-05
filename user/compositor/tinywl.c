@@ -37,6 +37,8 @@
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "cursor.h"
+
 #define SSD_TITLE_HEIGHT 32
 #define SSD_BORDER_WIDTH 2
 #define SSD_BUTTON_SIZE 16
@@ -611,6 +613,10 @@ static void reset_cursor_mode(struct tinywl_server *server) {
   /* Reset the cursor mode to passthrough. */
   server->cursor_mode = TINYWL_CURSOR_PASSTHROUGH;
   server->grabbed_toplevel = NULL;
+  /* An interactive move/resize set a non-default cursor; restore the
+   * background arrow now that the gesture is over. (process_cursor_motion
+   * early-returns during MOVE/RESIZE, so it cannot do this for us.) */
+  os_cursor_apply(server->cursor, server->cursor_mgr, "left_ptr");
 }
 
 static void process_cursor_move(struct tinywl_server *server, uint32_t time) {
@@ -694,7 +700,7 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
     /* If there's no toplevel under the cursor, set the cursor image to a
      * default. This is what makes the cursor image appear when you move it
      * around the screen, not over any toplevels. */
-    wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
+    os_cursor_apply(server->cursor, server->cursor_mgr, "left_ptr");
   }
   if (surface) {
     /*
@@ -1105,6 +1111,19 @@ static void begin_interactive(struct tinywl_toplevel *toplevel,
   server->grabbed_toplevel = toplevel;
   server->cursor_mode = mode;
 
+  /* Set the gesture cursor on press. process_cursor_motion early-returns
+   * during MOVE/RESIZE, so the cursor chosen here stays until the button is
+   * released, when reset_cursor_mode restores the background arrow. Corner
+   * resizes only have h/v assets; route them to the horizontal arrow. */
+  if (mode == TINYWL_CURSOR_MOVE) {
+    os_cursor_apply(server->cursor, server->cursor_mgr, "move");
+  } else {
+    os_cursor_apply(server->cursor, server->cursor_mgr,
+                    (edges & (WLR_EDGE_LEFT | WLR_EDGE_RIGHT))
+                        ? "sb_h_double_arrow"
+                        : "sb_v_double_arrow");
+  }
+
   if (mode == TINYWL_CURSOR_MOVE) {
     server->grab_x = server->cursor->x - toplevel->scene_tree->node.x;
     server->grab_y = server->cursor->y - toplevel->scene_tree->node.y;
@@ -1435,6 +1454,12 @@ int main(int argc, char *argv[]) {
    * HiDPI support). */
   server.cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
 
+  /* Load the Apple-style cursor PNGs into cached self-built wlr_buffers.
+   * Self-built buffers need no allocator/renderer, so this is safe before the
+   * backend starts. Cursors that fail to load fall back to the wlroots default
+   * at apply time; the compositor never aborts. */
+  os_cursor_init();
+
   /*
    * wlr_cursor *only* displays an image on screen. It does not move around
    * when the pointer moves. However, we can attach input devices to it, and
@@ -1490,6 +1515,15 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  /* Bootstrap the cursor: warp it to the centre of the output layout and arm
+   * the left_ptr image, so the software cursor is visible immediately even
+   * before any pointer motion arrives (the kernel USB-mouse path may not yet
+   * deliver events). Without this wlr_cursor sits at (0,0) with no image and
+   * nothing renders. warp_absolute(NULL, 0.5, 0.5) maps to the full layout box
+   * and jumps to its midpoint; os_cursor_apply arms the buffer. */
+  wlr_cursor_warp_absolute(server.cursor, NULL, 0.5, 0.5);
+  os_cursor_apply(server.cursor, server.cursor_mgr, "left_ptr");
+
   /* Set the WAYLAND_DISPLAY environment variable to our socket and run the
    * startup command if requested. */
   setenv("WAYLAND_DISPLAY", socket, true);
@@ -1516,6 +1550,7 @@ int main(int argc, char *argv[]) {
   wlr_scene_node_destroy(&server.scene->tree.node);
   wlr_xcursor_manager_destroy(server.cursor_mgr);
   wlr_cursor_destroy(server.cursor);
+  os_cursor_fini();
   wlr_allocator_destroy(server.allocator);
   wlr_renderer_destroy(server.renderer);
   wlr_backend_destroy(server.backend);

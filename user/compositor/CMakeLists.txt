@@ -157,14 +157,19 @@ add_user_dyn_elf(terminal
 # xkbcommon and pixman are all installed there by prepare-sysroot.sh /
 # `meson install`. The *-protocol.h headers wlroots public headers reference
 # are NOT installed — they only exist in the Meson build tree (protocol/).
+#
+# cursor.c is the only TU including user/cursor/cursors.h (os_cursors[] is
+# static there); tinywl.c only sees cursor.h. libpng (vendored png_so, OUTPUT
+#_NAME png) decodes the cursor PNGs — same lib the desktop_shell wallpaper
+# client links — and needs its header dir + ${CMAKE_BINARY_DIR} (pnglibconf.h).
 set(WLROOTS_SYSROOT_DIR "${CMAKE_BINARY_DIR}/sysroot" CACHE PATH
     "Target sysroot containing installed wlroots dependencies")
 set(WLROOTS_MESON_BUILD_DIR "${CMAKE_BINARY_DIR}/wlroots/wlroots" CACHE PATH
     "Meson build directory for wlroots")
 set(WLROOTS_SYSROOT_INCLUDE ${WLROOTS_SYSROOT_DIR}/usr/include)
 add_user_dyn_elf(tinywl C
-    SOURCES tinywl.c
-    LINK_LIBS wlroots-0.20 wayland-server xkbcommon pixman-1 c
+    SOURCES tinywl.c cursor.c
+    LINK_LIBS wlroots-0.20 wayland-server xkbcommon pixman-1 png z c
     EXCLUDE_FROM_ALL
     DEFS WLR_USE_UNSTABLE
     INCLUDE_DIRS
@@ -172,6 +177,9 @@ add_user_dyn_elf(tinywl C
         ${WLROOTS_SYSROOT_INCLUDE}/wlroots-0.20
         ${WLROOTS_SYSROOT_INCLUDE}/pixman-1
         ${WLROOTS_MESON_BUILD_DIR}/protocol
+        ${CMAKE_SOURCE_DIR}/user/cursor
+        ${CMAKE_SOURCE_DIR}/third_party/libpng
+        ${CMAKE_BINARY_DIR}
     IMAGE_PATH usr/bin/tinywl)
 
 # Desktop assets are staged verbatim into the root filesystem.
@@ -186,3 +194,17 @@ os_image_path(terminal_font NotoMono-Regular.ttf
     usr/share/fonts/NotoMono-Regular.ttf)
 os_image_path(terminal_font_license OFL-1.1.txt
     usr/share/licenses/NotoMono/OFL-1.1.txt)
+
+# Apple-style cursor assets (MIT original, user/cursor/). The 44 static 128px
+# PNGs are staged into build/ (os_image_path's artifact_relpath is relative to
+# ${CMAKE_BINARY_DIR}, same pattern as wallpaper.png above) and registered in
+# the image manifest. Animation sequences (wait/, left_ptr_watch/) are excluded
+# — playback is out of scope this phase; cursors.h maps those names to the
+# default arrow. The on-disk filenames must match the paths in cursors.h.
+file(GLOB OS_CURSOR_PNGS "${CMAKE_SOURCE_DIR}/user/cursor/*.png")
+foreach(_png ${OS_CURSOR_PNGS})
+    get_filename_component(_name ${_png} NAME)
+    configure_file(${_png} ${CMAKE_BINARY_DIR}/${_name} COPYONLY)
+    os_image_path(cursor_${_name} ${_name} usr/share/cursors/${_name})
+endforeach()
+

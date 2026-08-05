@@ -22,28 +22,16 @@
 
 /* ===================== filter stubs ===================== */
 /*
- * Keyboard-only terminal never uses pointer acceleration; returning NULL is
- * safe because all callers in evdev.c check for NULL.
+ * Pointer-acceleration filters for mouse devices (flat/linear/low-dpi/custom)
+ * are compiled from the real third_party/libinput/src/filter-*.c sources — see
+ * libinput.cmake — so the mouse is accepted by evdev_init_accel(). Only the
+ * touchpad/tablet/trackpoint filter factories remain stubbed here: those device
+ * classes are never instantiated on this system, and all callers check for
+ * NULL. Do NOT re-add linear/flat/low_dpi/custom stubs, or the link will pick
+ * the NULL stub over the real implementation and silently break the mouse
+ * again.
  */
 
-struct motion_filter;
-struct motion_filter *create_pointer_accelerator_filter_flat(int dpi) {
-  (void)dpi;
-  return NULL;
-}
-struct motion_filter *
-create_pointer_accelerator_filter_linear(int dpi, bool use_velocity_averaging) {
-  (void)dpi;
-  (void)use_velocity_averaging;
-  return NULL;
-}
-struct motion_filter *
-create_pointer_accelerator_filter_linear_low_dpi(int dpi,
-                                                 bool use_velocity_averaging) {
-  (void)dpi;
-  (void)use_velocity_averaging;
-  return NULL;
-}
 struct motion_filter *create_pointer_accelerator_filter_touchpad(
     int dpi, uint64_t event_delta_smooth_threshold,
     uint64_t event_delta_smooth_value, bool use_velocity_averaging) {
@@ -82,7 +70,6 @@ struct motion_filter *create_pointer_accelerator_filter_tablet(int xres,
   (void)yres;
   return NULL;
 }
-struct motion_filter *create_custom_accelerator_filter(void) { return NULL; }
 
 /* ===================== evdev dispatch stubs ===================== */
 /*

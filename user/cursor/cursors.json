@@ -1,0 +1,41 @@
+{
+  "size": 32,
+  "cursors": [
+    {
+      "name": "left_ptr",
+      "file": "left_ptr.png",
+      "hotspot_x": 1,
+      "hotspot_y": 1
+    },
+    {
+      "name": "xterm",
+      "file": "xterm.png",
+      "hotspot_x": 16,
+      "hotspot_y": 16
+    },
+    {
+      "name": "hand2",
+      "file": "hand2.png",
+      "hotspot_x": 16,
+      "hotspot_y": 5
+    },
+    {
+      "name": "move",
+      "file": "move.png",
+      "hotspot_x": 16,
+      "hotspot_y": 16
+    },
+    {
+      "name": "sb_h_double_arrow",
+      "file": "sb_h_double_arrow.png",
+      "hotspot_x": 16,
+      "hotspot_y": 16
+    },
+    {
+      "name": "sb_v_double_arrow",
+      "file": "sb_v_double_arrow.png",
+      "hotspot_x": 16,
+      "hotspot_y": 16
+    }
+  ]
+}

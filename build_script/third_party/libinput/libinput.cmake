@@ -22,6 +22,16 @@ set(LIBINPUT_SOURCES
     ${CMAKE_SOURCE_DIR}/third_party/libinput/src/quirks.c
     # filters
     ${CMAKE_SOURCE_DIR}/third_party/libinput/src/filter.c
+    # Pointer-acceleration filters used by mouse (REL_X/REL_Y) devices.
+    # Without these, evdev.c:evdev_init_accel() gets NULL from the stubs in
+    # stubs.c and aborts device creation ("failed to initialize pointer
+    # acceleration"), so the mouse is never added as a wlr_pointer and cursor
+    # motion never reaches the compositor. (Keyboard-only builds historically
+    # stubbed these out — that assumption breaks once a real mouse exists.)
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/filter-mouse.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/filter-flat.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/filter-low-dpi.c
+    ${CMAKE_SOURCE_DIR}/third_party/libinput/src/filter-custom.c
     # utilities
     ${CMAKE_SOURCE_DIR}/third_party/libinput/src/util-files.c
     ${CMAKE_SOURCE_DIR}/third_party/libinput/src/util-list.c
