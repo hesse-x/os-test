@@ -15,6 +15,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pty.h>
 #include <signal.h>
 #include <stdio.h>
@@ -622,6 +623,83 @@ void test_pty_tcsetpgrp_errnos(void) {
   TEST_ASSERT_TRUE(r3);
 }
 
+// ---- regression: all shared poll waiters on a PTY must be woken ------------
+void test_pty_poll_wakes_all_waiters(void) {
+  int master, slave;
+  int ready[2], done[2];
+  TEST_ASSERT_EQUAL_INT(0, openpty(&master, &slave, NULL, NULL, NULL));
+  TEST_ASSERT_EQUAL_INT(0, pipe(ready));
+  TEST_ASSERT_EQUAL_INT(0, pipe(done));
+
+  pid_t children[2] = {-1, -1};
+  for (int i = 0; i < 2; i++) {
+    children[i] = fork();
+    TEST_ASSERT_TRUE(children[i] >= 0);
+    if (children[i] == 0) {
+      close(slave);
+      close(ready[0]);
+      close(done[0]);
+      char byte = 'R';
+      if (write(ready[1], &byte, 1) != 1)
+        _exit(2);
+
+      struct pollfd pfd = {.fd = master, .events = POLLIN, .revents = 0};
+      int ret = poll(&pfd, 1, 2000);
+      byte = (ret == 1 && (pfd.revents & POLLIN)) ? '1' : '0';
+      (void)write(done[1], &byte, 1);
+      _exit(byte == '1' ? 0 : 3);
+    }
+  }
+
+  close(ready[1]);
+  close(done[1]);
+
+  int ready_count = 0;
+  while (ready_count < 2) {
+    char buf[2];
+    ssize_t n = read(ready[0], buf, sizeof(buf));
+    if (n <= 0)
+      break;
+    ready_count += (int)n;
+  }
+
+  // Let both children enter poll before creating the readiness transition.
+  msleep(100);
+  int write_ok = write(slave, "X", 1) == 1;
+
+  int flags = fcntl(done[0], F_GETFL, 0);
+  if (flags >= 0)
+    fcntl(done[0], F_SETFL, flags | O_NONBLOCK);
+  int done_count = 0;
+  int good_count = 0;
+  for (int waited = 0; waited < 500 && done_count < 2; waited += 20) {
+    char buf[2];
+    ssize_t n = read(done[0], buf, sizeof(buf));
+    if (n > 0) {
+      done_count += (int)n;
+      for (ssize_t i = 0; i < n; i++)
+        good_count += buf[i] == '1';
+      continue;
+    }
+    msleep(20);
+  }
+
+  close(ready[0]);
+  close(done[0]);
+  close(master);
+  close(slave);
+  for (int i = 0; i < 2; i++) {
+    kill(children[i], SIGKILL);
+    int status = 0;
+    pty_reap(children[i], 1000, &status);
+  }
+
+  TEST_ASSERT_EQUAL_INT(2, ready_count);
+  TEST_ASSERT_TRUE(write_ok);
+  TEST_ASSERT_EQUAL_INT(2, done_count);
+  TEST_ASSERT_EQUAL_INT(2, good_count);
+}
+
 int main(void) {
   alarm(90); /* backstop: a stuck kernel/shell path must not hang the runner */
   UNITY_BEGIN();
@@ -642,5 +720,6 @@ int main(void) {
   RUN_TEST(test_pty_bg_read_sigttin);
   RUN_TEST(test_pty_bg_write_tostop);
   RUN_TEST(test_pty_tcsetpgrp_errnos);
+  RUN_TEST(test_pty_poll_wakes_all_waiters);
   return UNITY_END();
 }

@@ -2487,6 +2487,9 @@ static int64_t do_sys_poll(struct pollfd __user *fds, nfds_t nfds,
   }
   for (nfds_t i = 0; i < nfds; i++) {
     polled[i] = NULL;
+    pwq[i].func = NULL;
+    pwq[i].data = NULL;
+    pwq[i].exclusive = 0;
     list_init(&pwq[i].node); // self-ref = "not on any wq"; makes the
                              // on-wq guards below reliable on heap memory
                              // (kmalloc returns poison, not zeroed).
@@ -2553,6 +2556,7 @@ static int64_t do_sys_poll(struct pollfd __user *fds, nfds_t nfds,
         if (pwq[i].node.next == &pwq[i].node) {
           pwq[i].func = poll_wait_cb;
           pwq[i].data = proc;
+          pwq[i].exclusive = 0; // poll waiters are shared, never exclusive
           list_init(&pwq[i].node);
           add_wait_queue(wq, &pwq[i]);
         }

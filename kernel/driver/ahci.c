@@ -56,6 +56,8 @@
 #define FIS_H2D 0x27
 #define FIS_H2D_CMD 0x80
 
+#define AHCI_PORT_IRQ_MASK ((1U << 0) | (1U << 29) | (1U << 30) | (1U << 31))
+
 // Bounce buffer: 16 pages = 64KB
 #define AHCI_BOUNCE_PAGES 16
 
@@ -217,6 +219,12 @@ static void port_disable_interrupts(int port) {
   writel(port_reg(port, PxIE), 0);
   writel(port_reg(port, PxSERR), readl(port_reg(port, PxSERR)));
   writel(port_reg(port, PxIS), 0xFFFFFFFF);
+}
+
+static void port_enable_interrupts(int port) {
+  writel(port_reg(port, PxIS), 0xFFFFFFFF);
+  writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS), 1U << port);
+  writel(port_reg(port, PxIE), AHCI_PORT_IRQ_MASK);
 }
 
 // ===================== Port stop =====================
@@ -430,6 +438,12 @@ static void ahci_irq_handler(trapframe *tf) {
   if (bq_count > 0) {
     ahci_current_req = &block_pool[bq_head];
     ahci_issue_cmd(ahci_current_req);
+  } else {
+    // Normal filesystem I/O polls for completion.  Keep PxIE off while no
+    // asynchronous request is active so those commands do not also raise MSI.
+    port_disable_interrupts(active_port);
+    writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS),
+           1U << active_port);
   }
 }
 
@@ -563,9 +577,9 @@ int ahci_set_active_port(int port) {
   printk(LOG_INFO, "ahci: switching to port %d\n", port);
   port_init(port);
   active_port = port;
-  // Re-enable PxIE on the new active port (port_init leaves PxIE=0)
-  writel(port_reg(port, PxIE),
-         (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
+  // Filesystem I/O is synchronous and polls PxCI. Interrupts are enabled only
+  // while ahci_submit_async() has an in-flight request.
+  port_disable_interrupts(port);
   // Clear global IS to remove any stale bits from the old port
   writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS), 0xFFFFFFFF);
   return 0;
@@ -653,11 +667,6 @@ __attribute__((no_sanitize("kernel-address"))) void ahci_init() {
   // Idempotent re-initialize the active port
   port_init(active_port);
 
-  // Enable port interrupts only on the active port (DHRE + error bits).
-  // Non-active ports have PxIE=0 so they cannot generate interrupts.
-  writel(port_reg(active_port, PxIE),
-         (1U << 0) | (1U << 30) | (1U << 31) | (1U << 29));
-
   // Enable AHCI interrupts via MSI (bypasses I/O APIC entirely):
   // pci_enable_msi allocates a vector, writes Message Address/Data to the
   // device's MSI capability, enables MSI, and disables INTx.
@@ -713,6 +722,13 @@ __attribute__((no_sanitize("kernel-address"))) void ahci_init() {
 // =====================
 int ahci_read_lba(uint32_t lba, uint32_t count, void *buf) {
   uint8_t *dst = (uint8_t *)buf;
+
+  // blk_read() owns ahci_lock here, so no async command can legitimately be
+  // started concurrently. Polling and MSI completion must be mutually
+  // exclusive or every synchronous sector read also enters the IRQ handler.
+  port_disable_interrupts(active_port);
+  writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS),
+         1U << active_port);
 
   while (count > 0) {
     uint32_t chunk = count > AHCI_MAX_SECTORS ? AHCI_MAX_SECTORS : count;
@@ -791,6 +807,10 @@ int ahci_read_lba(uint32_t lba, uint32_t count, void *buf) {
 // =====================
 int ahci_write_lba(uint32_t lba, uint32_t count, const void *buf) {
   const uint8_t *src = (const uint8_t *)buf;
+
+  port_disable_interrupts(active_port);
+  writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS),
+         1U << active_port);
 
   while (count > 0) {
     uint32_t chunk = count > AHCI_MAX_SECTORS ? AHCI_MAX_SECTORS : count;
@@ -906,6 +926,7 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
   // Issue immediately if AHCI idle, else queue
   if (!ahci_current_req) {
     ahci_current_req = req;
+    port_enable_interrupts(active_port);
     ahci_issue_cmd(req);
     // Command completion is handled by ahci_irq_handler (MSI ISR).
     // ISR reads PxIS, copies data, builds notification, and calls
