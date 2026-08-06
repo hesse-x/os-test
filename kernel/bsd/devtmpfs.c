@@ -477,7 +477,7 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
     dev_ops_get(ops);
 
   spin_unlock(&devtmpfs_lock);
-  printk(LOG_INFO, "devtmpfs: created /dev/%s\n", name);
+  printk(LOG_DEBUG, "devtmpfs: created /dev/%s\n", name);
 
   // Broadcast uevent only for kernel devices (user-space drivers push via
   // SYS_DEV_SET_META after metadata is set — design 3.3.2 step 2).

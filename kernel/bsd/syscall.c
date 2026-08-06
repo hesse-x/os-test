@@ -160,7 +160,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   proc->exit_code = exit_code;       // xtask (UAF-safe for waitpid)
   proc->proc->exit_code = exit_code; // proc (legacy, waitpid now reads xtask)
   perf_target_exit(proc, exit_code);
-  printk(LOG_INFO, "do_exit: pid=%d tid=%d exit_code=%d\n", proc->tgid,
+  printk(LOG_DEBUG, "do_exit: pid=%d tid=%d exit_code=%d\n", proc->tgid,
          proc->pid, exit_code);
 
   // 2. CPU time accounting

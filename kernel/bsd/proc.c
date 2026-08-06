@@ -1483,7 +1483,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   xtask *proc = current_task;
   if (!proc->mm)
     return (int64_t)-EINVAL;
-  printk(LOG_INFO, "execve: pid=%d path=%s\n", proc->pid, pathname);
+  printk(LOG_DEBUG, "execve: pid=%d path=%s\n", proc->pid, pathname);
 
   // 1. Open pathname via VFS
   int64_t open_result =
@@ -1550,7 +1550,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     kfree(elf_buf);
     return (int64_t)-ENOEXEC;
   }
-  printk(LOG_INFO, "execve: pid=%d path=%s size=%lu magic OK\n", proc->pid,
+  printk(LOG_DEBUG, "execve: pid=%d path=%s size=%lu magic OK\n", proc->pid,
          pathname, (unsigned long)file_size);
 
   /* S_ISUID/S_ISGID 预计算（对齐 Linux prepare_binfmt → commit_creds 分离）。
@@ -1896,12 +1896,12 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   auxv[ai++] = 0;
 
   if (is_dynamic) {
-    printk(LOG_INFO,
+    printk(LOG_DEBUG,
            "exec auxv: PHDR=0x%lx PHENT=%lu PHNUM=%lu ENTRY=0x%lx "
            "BASE=0x%lx PAGESZ=%lu\n",
            lr.phdr_vaddr, lr.phent, lr.phnum, lr.entry, ld_lr.load_base,
            (uint64_t)PAGE_SIZE);
-    printk(LOG_INFO,
+    printk(LOG_DEBUG,
            "exec auxv: RANDOM=0x%lx EXECFN=0x%lx auxv=0x%lx argc=%d "
            "envc=%d\n",
            at_random_vaddr, at_execfn_vaddr, sp_user, argc, envc);
@@ -1998,7 +1998,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   if (is_dynamic) {
     tf->rip = ld_lr.entry; // ld.so entry
     tf->rsp = user_sp;     // points to argc
-    printk(LOG_INFO,
+    printk(LOG_DEBUG,
            "exec: ld.so @ 0x%lx, entry 0x%lx, main @ 0x%lx, rsp=0x%lx\n",
            ld_lr.load_base, ld_lr.entry, lr.entry, user_sp);
   } else {

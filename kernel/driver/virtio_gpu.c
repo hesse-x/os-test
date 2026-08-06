@@ -2921,7 +2921,7 @@ static long drm_ioctl_page_flip(void *arg) {
   g_drm.current_fb_id = p->fb_id;
   if (armed_event && drm_page_flip_log_count < 3) {
     drm_page_flip_log_count++;
-    printk(LOG_INFO, "drm: page flip #%u queued fb=%u resource=%u\n",
+    printk(LOG_DEBUG, "drm: page flip #%u queued fb=%u resource=%u\n",
            drm_page_flip_log_count, p->fb_id, resource_id);
   }
   return 0;
@@ -3334,7 +3334,7 @@ static int drm_open_file_common(xtask *proc, struct file *file,
       used_count++;
   int capacity = g_drm_files_capacity;
   spin_unlock(&g_drm_files_lock);
-  printk(LOG_INFO, "drm: open slot=%d pid=%d render=%d used=%d/%d\n", slot,
+  printk(LOG_DEBUG, "drm: open slot=%d pid=%d render=%d used=%d/%d\n", slot,
          proc ? proc->pid : -1, is_render, used_count, capacity);
   return 0;
 }
@@ -3452,7 +3452,7 @@ static int drm_close_file(xtask *proc, struct file *file) {
     int capacity = g_drm_files_capacity;
     spin_unlock(&g_drm_files_lock);
     kfree(f);
-    printk(LOG_INFO, "drm: close slot=%d pid=%d used=%d/%d\n", close_slot,
+    printk(LOG_DEBUG, "drm: close slot=%d pid=%d used=%d/%d\n", close_slot,
            proc ? proc->pid : -1, used_count, capacity);
     return 0;
   }
@@ -3807,7 +3807,7 @@ static ssize_t drm_read(xtask *proc, int fd, void *buf, size_t count) {
 
   if (drm_flip_event_log_count < 3) {
     drm_flip_event_log_count++;
-    printk(LOG_INFO, "drm: flip-complete event #%u delivered seq=%u\n",
+    printk(LOG_DEBUG, "drm: flip-complete event #%u delivered seq=%u\n",
            drm_flip_event_log_count, ev.sequence);
   }
 
