@@ -1388,10 +1388,15 @@ static void render_now(void) {
     return;
   }
   glViewport(0, 0, app.width, app.height);
-  // Match the normal terminal body so the lightweight first frame looks like
-  // a ready window instead of exposing only the server-side decoration.
-  glClearColor(0x17 / 255.0f * 0.84f, 0x17 / 255.0f * 0.84f,
-               0x1a / 255.0f * 0.84f, 0.84f);
+  // The lightweight frame has no shaders yet, so clear it directly to the
+  // terminal color. Normal frames draw that color below and must start fully
+  // transparent; otherwise the two 84%-opaque layers compound to 97.4%.
+  if (!app.gl_ready) {
+    glClearColor(0x17 / 255.0f * 0.84f, 0x17 / 255.0f * 0.84f,
+                 0x1a / 255.0f * 0.84f, 0.84f);
+  } else {
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+  }
   glClear(GL_COLOR_BUFFER_BIT);
 
   // Put a lightweight buffer on screen before cold shader compilation and

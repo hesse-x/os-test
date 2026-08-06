@@ -43,6 +43,9 @@ struct os_cursor_buf {
  * currently has 55 name entries (44 unique PNGs), so 64 leaves headroom. */
 static struct wlr_buffer *os_cursor_buffers[64];
 
+/* The packaged artwork is 128px but is displayed as a 32px logical cursor. */
+static const float os_cursor_buffer_scale = 4.0f;
+
 /* ---- libpng decode → straight ARGB8888 (mirrors wallpaper.c:load_png) ---- */
 static bool load_cursor_png(const char *path, uint32_t **out_argb, int *w,
                             int *h) {
@@ -226,11 +229,11 @@ void os_cursor_apply(struct wlr_cursor *cursor, struct wlr_xcursor_manager *mgr,
         if (hy < 0) {
           hy = 0;
         }
-        /* scale 4.0: assets are 128px, displayed at 32 logical px
-         * (wlr_cursor divides buffer size by scale). Hotspots are in 128px
-         * asset coords and are multiplied by the output scale (1.0) upstream,
-         * so they pass through unchanged. */
-        wlr_cursor_set_buffer(cursor, buf, hx, hy, 4.0f);
+        /* wlr_cursor_set_buffer expects a logical-coordinate hotspot, unlike
+         * the asset-coordinate hotspots stored in cursors.h. */
+        hx = (int)(hx / os_cursor_buffer_scale + 0.5f);
+        hy = (int)(hy / os_cursor_buffer_scale + 0.5f);
+        wlr_cursor_set_buffer(cursor, buf, hx, hy, os_cursor_buffer_scale);
         return;
       }
       break;
