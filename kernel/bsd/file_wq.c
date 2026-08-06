@@ -86,6 +86,11 @@ wait_queue_head *file_wq_get(struct file *f) {
    * f->wq fallback below. */
   if (f->type == FD_INOTIFY && f->private_data)
     return &((inotify *)f->private_data)->wq;
+  /* sync_file readiness is driven by drm_fence_signal(), which wakes the
+   * fence queue. Polling on a per-file queue would miss that completion and
+   * leave the waiter asleep even though file_poll() sees signaled=true. */
+  if (f->type == FD_SYNC_FILE && f->sync_file_fence)
+    return &f->sync_file_fence->wq;
   /* Generic per-file wq (eventfd/timerfd/signalfd/other). */
   if (f->wq)
     return f->wq;
