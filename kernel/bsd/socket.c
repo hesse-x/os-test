@@ -2504,12 +2504,6 @@ static int64_t do_sys_poll(struct pollfd __user *fds, nfds_t nfds,
 
   int64_t ret = 0;
   for (;;) {
-    // prepare_to_wait: 先标 BLOCKED 再 re-poll，使 fd 的 __wake_up
-    // 若在重查后到达 命中已 BLOCKED 的 task（poll 是多 wq，pwq[]
-    // 注册结构保留，只动 state 位置）。
-    proc->state = BLOCKED;
-    proc->wait_event = WAIT_POLL;
-    proc->wait_timed_out = 0;
     int ready = 0;
 
     // Check each fd and register a wait entry on its wq.
@@ -2604,10 +2598,40 @@ static int64_t do_sys_poll(struct pollfd __user *fds, nfds_t nfds,
       goto poll_out;
     }
 
-    // Block on WAIT_POLL
+    // Publish BLOCKED only after all wait entries are visible. Keep local IRQs
+    // disabled through one final readiness pass so timer preemption cannot
+    // switch us out between setting BLOCKED and closing the registration race.
+    uint64_t wait_irqflags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(wait_irqflags));
+    int pcpu = proc->assigned_cpu;
+    spin_lock(&cpu_locals[pcpu].scheduler_lock);
+    proc->state = BLOCKED;
+    proc->wait_event = WAIT_POLL;
+    proc->wait_timed_out = 0;
+    spin_unlock(&cpu_locals[pcpu].scheduler_lock);
+
+    for (nfds_t i = 0; i < nfds; i++) {
+      if (!polled[i] || kfds[i].revents)
+        continue;
+      kfds[i].revents = file_poll(polled[i], kfds[i].events);
+      if (kfds[i].revents)
+        ready++;
+    }
+    if (ready > 0) {
+      __asm__ volatile("pushq %0; popfq" : : "r"(wait_irqflags));
+      if (copy_to_user(fds, kfds, nfds * sizeof(struct pollfd))) {
+        ret = (int64_t)-EFAULT;
+        goto poll_out;
+      }
+      ret = (int64_t)ready;
+      goto poll_out;
+    }
+
+    // Block on WAIT_POLL.
     if (deadline > 0) {
       uint64_t now = sched_clock();
       if (now >= deadline) {
+        __asm__ volatile("pushq %0; popfq" : : "r"(wait_irqflags));
         for (nfds_t i = 0; i < nfds; i++)
           kfds[i].revents = 0;
         if (copy_to_user(fds, kfds, nfds * sizeof(struct pollfd))) {
@@ -2618,16 +2642,14 @@ static int64_t do_sys_poll(struct pollfd __user *fds, nfds_t nfds,
         goto poll_out;
       }
       proc->wait_deadline = deadline;
-      uint64_t pflags;
-      spin_lock_irqsave(&cpu_locals[proc->assigned_cpu].scheduler_lock,
-                        &pflags);
-      sched_timer_queue_insert(proc->assigned_cpu, proc);
-      spin_unlock_irqrestore(&cpu_locals[proc->assigned_cpu].scheduler_lock,
-                             pflags);
+      spin_lock(&cpu_locals[pcpu].scheduler_lock);
+      sched_timer_queue_insert(pcpu, proc);
+      spin_unlock(&cpu_locals[pcpu].scheduler_lock);
     } else {
       proc->wait_deadline = 0;
     }
 
+    __asm__ volatile("pushq %0; popfq" : : "r"(wait_irqflags));
     schedule();
 
     // EINTR check (before timeout check: signal priority over timeout)

@@ -2348,6 +2348,35 @@ static void pipe_wake_cb(wait_queue_t *wq, unsigned long flags) {
   wake_wq_target(target);
 }
 
+// Publish BLOCKED and recheck readiness under the scheduler lock so timer
+// preemption cannot switch out a task during the prepare-to-wait window.
+static bool pipe_prepare_wait(xtask *proc, struct pipe *p, bool writing,
+                              uint64_t deadline) {
+  int cpu = proc->assigned_cpu;
+  uint64_t flags;
+  spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
+  proc->state = BLOCKED;
+  proc->wait_event = WAIT_NONE;
+
+  bool ready = writing
+                   ? ((p->head + 1) % p->size != p->tail ||
+                      refcount_read(&p->p_count) <= 1)
+                   : (p->head != p->tail || refcount_read(&p->p_count) == 1);
+  if (ready) {
+    proc->state = RUNNING;
+    proc->wait_deadline = 0;
+    proc->wait_timed_out = 0;
+    spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+    return false;
+  }
+
+  proc->wait_deadline = deadline;
+  if (deadline != 0)
+    timer_queue_wait_push(cpu, proc);
+  spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
+  return true;
+}
+
 // ===================== BSD syscall: pipe =====================
 // 公共实现：flags 仅接受 O_CLOEXEC（per-fd bitmap）| O_NONBLOCK（f->flags）。
 // sys_pipe → do_pipe(fd_ptr, 0)；sys_pipe2 传入用户 flags。
@@ -2861,18 +2890,6 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       list_init(&wait.node);
       add_wait_queue(wq, &wait);
       for (;;) {
-        proc->state = BLOCKED;
-        proc->wait_event = WAIT_NONE;
-        if ((p->head + 1) % p->size != p->tail)
-          break; /* 有空间 */
-        if (f->flags & O_NONBLOCK) {
-          sched_cancel_spurious_wake(proc);
-          remove_wait_queue(wq, &wait);
-          if (written > 0)
-            break;
-          ret = -EAGAIN;
-          goto out;
-        }
         /* Borrow the process alarm deadline (if armed) as the wake deadline so
          * a pending SIGALRM can interrupt this indefinite blocking write —
          * mirrors sys_pause / epoll_wait. Re-read each iteration: a prior block
@@ -2887,16 +2904,8 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
           alarm_dl = proc->proc->signal->alarm_deadline;
           spin_unlock_irqrestore(&proc->proc->signal->sig_lock, sflags);
         }
-        if (alarm_dl != 0) {
-          proc->wait_deadline = alarm_dl;
-          int cpu = proc->assigned_cpu;
-          uint64_t flags;
-          spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
-          sched_timer_queue_insert(cpu, proc);
-          spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
-        } else {
-          proc->wait_deadline = 0;
-        }
+        if (!pipe_prepare_wait(proc, p, true, alarm_dl))
+          break;
         schedule();
         {
           /* Merge shared_pending so kill()-delivered signals interrupt a
@@ -3265,25 +3274,6 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     list_init(&wait.node);
     add_wait_queue(wq, &wait);
     for (;;) {
-      proc->state = BLOCKED;
-      proc->wait_event = WAIT_NONE;
-      /* 有数据优先于 EOF：写端关闭前已入队的字节必须先读出（POSIX drain
-       * 语义）。原顺序先查 p_count==1，write+close 紧挨着执行时 reader 醒来
-       * 会无视缓冲区的数据直接返回 0（flaky socket_msgflags Case A）。 */
-      if (p->head != p->tail)
-        break; /* 有数据 */
-      if (refcount_read(&p->p_count) == 1) {
-        sched_cancel_spurious_wake(proc);
-        remove_wait_queue(wq, &wait);
-        ret = 0;
-        goto out;
-      }
-      if (f->flags & O_NONBLOCK) {
-        sched_cancel_spurious_wake(proc);
-        remove_wait_queue(wq, &wait);
-        ret = -EAGAIN;
-        goto out;
-      }
       /* Borrow the process alarm deadline (if armed) as the wake deadline so a
        * pending SIGALRM can interrupt this indefinite blocking read — mirrors
        * sys_pause / epoll_wait. No user timeout exists for read(); a deadline
@@ -3298,16 +3288,8 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         alarm_dl = proc->proc->signal->alarm_deadline;
         spin_unlock_irqrestore(&proc->proc->signal->sig_lock, sflags);
       }
-      if (alarm_dl != 0) {
-        proc->wait_deadline = alarm_dl;
-        int cpu = proc->assigned_cpu;
-        uint64_t flags;
-        spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
-        sched_timer_queue_insert(cpu, proc);
-        spin_unlock_irqrestore(&cpu_locals[cpu].scheduler_lock, flags);
-      } else {
-        proc->wait_deadline = 0;
-      }
+      if (!pipe_prepare_wait(proc, p, false, alarm_dl))
+        break;
       schedule();
       {
         /* Merge shared_pending so kill()-delivered signals interrupt a
