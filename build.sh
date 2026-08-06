@@ -586,6 +586,9 @@ fi
     # are built after the corresponding Meson installs.
     echo "=== Building Wayland desktop executables ==="
     ninja -C build tinywl_dyn_elf terminal_dyn_elf
+    if [ "$BUILD_TEST" = "1" ]; then
+        ninja -C build test_terminal_sgr_dyn_elf
+    fi
 
         # --- ELF static audit: build/tinywl.elf + build/libwlroots-0.20.so ---
         # Judge 1: interpreter (executable ELF must be musl; .so has no PT_INTERP, skip)

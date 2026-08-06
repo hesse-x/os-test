@@ -151,6 +151,28 @@ add_user_dyn_elf(terminal
         ${CMAKE_BINARY_DIR}/xdg-decoration-client-protocol.h
     IMAGE_PATH usr/bin/terminal)
 
+if(TEST)
+    add_user_dyn_elf(test_terminal_sgr
+        SOURCES ${CMAKE_SOURCE_DIR}/user/driver/terminal.cc
+        LINK_LIBS c
+        STATIC_LIBS unity
+        EXCLUDE_FROM_ALL
+        DEFS WL_EGL_PLATFORM TERMINAL_SGR_TEST
+        FLAGS -Wno-unused-parameter -Wno-missing-field-initializers
+              -Wno-unused-function
+        INCLUDE_DIRS
+            ${CMAKE_SOURCE_DIR}/third_party/wayland/src
+            ${WAYLAND_EGL_DIR}
+            ${CMAKE_SOURCE_DIR}/third_party/mesa/include
+            ${CMAKE_SOURCE_DIR}/third_party/libxkbcommon/include
+            ${FREETYPE_DIR}/include
+            ${CMAKE_BINARY_DIR}
+        GEN_HEADERS
+            ${CMAKE_BINARY_DIR}/xdg-shell-client-protocol.h
+            ${CMAKE_BINARY_DIR}/xdg-decoration-client-protocol.h
+        IMAGE_PATH test/test_terminal_sgr.elf)
+endif()
+
 # tinywl links the Meson-built libwlroots (staged to ${CMAKE_BINARY_DIR} by
 # build.sh after `meson install --destdir sysroot`), so it stays out of ALL.
 # Headers resolve from the sysroot: wlroots (include/wlroots-0.20), wayland,
@@ -207,4 +229,3 @@ foreach(_png ${OS_CURSOR_PNGS})
     configure_file(${_png} ${CMAKE_BINARY_DIR}/${_name} COPYONLY)
     os_image_path(cursor_${_name} ${_name} usr/share/cursors/${_name})
 endforeach()
-

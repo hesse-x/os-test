@@ -38,6 +38,10 @@
 #include <xkbcommon/xkbcommon.h>
 #include FT_FREETYPE_H
 
+#ifdef TERMINAL_SGR_TEST
+#include <unity.h>
+#endif
+
 #include "xdg-decoration-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
@@ -52,15 +56,23 @@
 // 颜色存 0xRRGGBB；COLOR_DEFAULT 表示"用默认色"（fg 用浅绿白，bg 不填充）
 #define COLOR_DEFAULT UINT32_MAX
 
-#define CELL_INVERSE 1
+#define CELL_BOLD (1u << 0)
+#define CELL_UNDERLINE (1u << 1)
+#define CELL_INVERSE (1u << 2)
+#define CELL_STRIKE (1u << 3)
+
+// RGB values occupy bits 0-23. Indexed colors retain their palette identity so
+// bold can brighten ANSI colors at render time, independent of SGR order.
+#define COLOR_INDEXED (1u << 24)
+#define COLOR_INDEX(i) (COLOR_INDEXED | (uint32_t)(i))
 
 // ---------------------------------------------------------------------------
 // 终端模拟器：单元格网格 + ANSI 转义序列解析
 // ---------------------------------------------------------------------------
 struct cell {
   uint32_t cp;     // Unicode 码点（0 = 空）
-  uint32_t fg, bg; // 0xRRGGBB 或 COLOR_DEFAULT
-  uint8_t flags;   // CELL_INVERSE
+  uint32_t fg, bg; // 0xRRGGBB、COLOR_INDEX(n) 或 COLOR_DEFAULT
+  uint8_t flags;   // CELL_*
 };
 
 enum { P_GROUND, P_ESC, P_ESC_SKIP, P_CSI, P_OSC };
@@ -74,7 +86,7 @@ struct term {
   int saved_cx, saved_cy;
   int scroll_top, scroll_bottom;
   uint32_t fg, bg;
-  bool bold, inverse;
+  bool bold, underline, inverse, strike;
   bool wrap_pending; // 光标停在最右列，下一个字符先换行
   bool cursor_visible;
 
@@ -107,6 +119,18 @@ static void palette_init(void) {
     uint32_t g = 8 + 10 * i;
     palette[232 + i] = (g << 16) | (g << 8) | g;
   }
+}
+
+static uint32_t resolve_color(uint32_t color, bool bold) {
+  if (color == COLOR_DEFAULT)
+    return color;
+  if (color & COLOR_INDEXED) {
+    unsigned int index = color & 0xff;
+    if (bold && index < 8)
+      index += 8;
+    return palette[index];
+  }
+  return color;
 }
 
 static struct term term;
@@ -170,7 +194,9 @@ static void put_char(uint32_t cp) {
   c->cp = cp;
   c->fg = term.fg;
   c->bg = term.bg;
-  c->flags = term.inverse ? CELL_INVERSE : 0;
+  c->flags =
+      (term.bold ? CELL_BOLD : 0) | (term.underline ? CELL_UNDERLINE : 0) |
+      (term.inverse ? CELL_INVERSE : 0) | (term.strike ? CELL_STRIKE : 0);
   if (term.cx == term.cols - 1)
     term.wrap_pending = true;
   else
@@ -178,40 +204,59 @@ static void put_char(uint32_t cp) {
 }
 
 // ---------------------------------------------------------------------------
-// SGR：颜色/反色
+// SGR：字形属性和颜色
 // ---------------------------------------------------------------------------
+static int color_component(int value) {
+  if (value < 0)
+    return 0;
+  return value > 255 ? 255 : value;
+}
+
+static void reset_sgr(void) {
+  term.fg = COLOR_DEFAULT;
+  term.bg = COLOR_DEFAULT;
+  term.bold = false;
+  term.underline = false;
+  term.inverse = false;
+  term.strike = false;
+}
+
 static void term_sgr(void) {
   for (int i = 0; i < term.nparams; i++) {
     int p = term.params[i];
     if (p == 0) {
-      term.fg = COLOR_DEFAULT;
-      term.bg = COLOR_DEFAULT;
-      term.bold = false;
-      term.inverse = false;
+      reset_sgr();
     } else if (p == 1) {
       term.bold = true;
+    } else if (p == 4 || p == 21) {
+      term.underline = true;
     } else if (p == 22) {
       term.bold = false;
+    } else if (p == 24) {
+      term.underline = false;
     } else if (p == 7) {
       term.inverse = true;
     } else if (p == 27) {
       term.inverse = false;
+    } else if (p == 9) {
+      term.strike = true;
+    } else if (p == 29) {
+      term.strike = false;
     } else if (p == 39) {
       term.fg = COLOR_DEFAULT;
     } else if (p == 49) {
       term.bg = COLOR_DEFAULT;
     } else if (p >= 30 && p <= 37) {
-      // bold 用亮色代替加粗字体（排版的简化）
-      term.fg = palette[p - 30 + (term.bold ? 8 : 0)];
+      term.fg = COLOR_INDEX(p - 30);
     } else if (p >= 40 && p <= 47) {
-      term.bg = palette[p - 40];
+      term.bg = COLOR_INDEX(p - 40);
     } else if (p >= 90 && p <= 97) {
-      term.fg = palette[p - 90 + 8];
+      term.fg = COLOR_INDEX(p - 90 + 8);
     } else if (p >= 100 && p <= 107) {
-      term.bg = palette[p - 100 + 8];
+      term.bg = COLOR_INDEX(p - 100 + 8);
     } else if ((p == 38 || p == 48) && i + 2 < term.nparams &&
                term.params[i + 1] == 5) {
-      uint32_t col = palette[term.params[i + 2] & 0xFF];
+      uint32_t col = COLOR_INDEX(color_component(term.params[i + 2]));
       if (p == 38)
         term.fg = col;
       else
@@ -219,8 +264,9 @@ static void term_sgr(void) {
       i += 2;
     } else if ((p == 38 || p == 48) && i + 4 < term.nparams &&
                term.params[i + 1] == 2) {
-      uint32_t col = (term.params[i + 2] << 16) | (term.params[i + 3] << 8) |
-                     term.params[i + 4];
+      uint32_t col = ((uint32_t)color_component(term.params[i + 2]) << 16) |
+                     ((uint32_t)color_component(term.params[i + 3]) << 8) |
+                     (uint32_t)color_component(term.params[i + 4]);
       if (p == 38)
         term.fg = col;
       else
@@ -402,7 +448,11 @@ static void term_csi(uint8_t f) {
 // ---------------------------------------------------------------------------
 // OSC：只认 0/1/2（设置窗口标题），其余丢弃
 // ---------------------------------------------------------------------------
+#ifdef TERMINAL_SGR_TEST
+static void osc_done(void) { term.osc[term.osc_len] = '\0'; }
+#else
 static void osc_done(void);
+#endif
 
 static void term_control(uint8_t b) {
   switch (b) {
@@ -510,8 +560,7 @@ static void term_feed(const uint8_t *d, size_t n) {
         break;
       case 'c': { // RIS：全复位
         term.cx = term.cy = 0;
-        term.fg = term.bg = COLOR_DEFAULT;
-        term.bold = term.inverse = false;
+        reset_sgr();
         term.scroll_top = 0;
         term.scroll_bottom = term.rows - 1;
         clear_rows(0, term.rows - 1);
@@ -562,7 +611,7 @@ static void term_init(int cols, int rows) {
       calloc((size_t)cols * rows, sizeof(struct cell)));
   term.alt = static_cast<struct cell *>(
       calloc((size_t)cols * rows, sizeof(struct cell)));
-  term.fg = term.bg = COLOR_DEFAULT;
+  reset_sgr();
   term.scroll_top = 0;
   term.scroll_bottom = rows - 1;
   term.cursor_visible = true;
@@ -598,6 +647,59 @@ static bool term_resize(int cols, int rows) {
   term.wrap_pending = false;
   return true;
 }
+
+#ifdef TERMINAL_SGR_TEST
+void setUp(void) {}
+void tearDown(void) {}
+
+static void feed_test(const char *text) {
+  term_feed((const uint8_t *)text, strlen(text));
+}
+
+static void test_sgr_attributes_and_resets(void) {
+  feed_test("\033[4;7;9mX\033[24;27;29mY");
+  TEST_ASSERT_EQUAL_UINT8(CELL_UNDERLINE | CELL_INVERSE | CELL_STRIKE,
+                          cell_at(0, 0)->flags);
+  TEST_ASSERT_EQUAL_UINT8(0, cell_at(1, 0)->flags);
+}
+
+static void test_bold_color_is_order_independent(void) {
+  feed_test("\r\033[0;31;1mA\033[22mB\033[1;31mC");
+  struct cell *a = cell_at(0, 0);
+  struct cell *b = cell_at(1, 0);
+  struct cell *c = cell_at(2, 0);
+  TEST_ASSERT_EQUAL_UINT32(COLOR_INDEX(1), a->fg);
+  TEST_ASSERT_EQUAL_UINT32(COLOR_INDEX(1), b->fg);
+  TEST_ASSERT_EQUAL_UINT32(COLOR_INDEX(1), c->fg);
+  TEST_ASSERT_BITS_HIGH(CELL_BOLD, a->flags);
+  TEST_ASSERT_BITS_LOW(CELL_BOLD, b->flags);
+  TEST_ASSERT_BITS_HIGH(CELL_BOLD, c->flags);
+  TEST_ASSERT_EQUAL_HEX32(palette[9], resolve_color(a->fg, true));
+  TEST_ASSERT_EQUAL_HEX32(palette[1], resolve_color(b->fg, false));
+  TEST_ASSERT_EQUAL_HEX32(palette[9], resolve_color(c->fg, true));
+}
+
+static void test_extended_colors_and_reset(void) {
+  feed_test("\r\033[0;38;5;196;48;2;1;2;3mZ\033[0mR");
+  struct cell *colored = cell_at(0, 0);
+  struct cell *reset = cell_at(1, 0);
+  TEST_ASSERT_EQUAL_UINT32(COLOR_INDEX(196), colored->fg);
+  TEST_ASSERT_EQUAL_HEX32(0x010203, colored->bg);
+  TEST_ASSERT_EQUAL_UINT32(COLOR_DEFAULT, reset->fg);
+  TEST_ASSERT_EQUAL_UINT32(COLOR_DEFAULT, reset->bg);
+  TEST_ASSERT_EQUAL_UINT8(0, reset->flags);
+}
+
+extern "C" int main(void) {
+  palette_init();
+  term_init(16, 2);
+  UNITY_BEGIN();
+  RUN_TEST(test_sgr_attributes_and_resets);
+  RUN_TEST(test_bold_color_is_order_independent);
+  RUN_TEST(test_extended_colors_and_reset);
+  return UNITY_END();
+}
+#else
 
 // ---------------------------------------------------------------------------
 // 应用状态
@@ -1194,7 +1296,7 @@ static void render_now(void) {
 
   // Give every primitive a disjoint range for this frame. Rewriting offset 0
   // for each glyph makes virgl rename the busy 96-byte BO thousands of times.
-  size_t max_primitives = (size_t)term.cols * term.rows * 2 + 4;
+  size_t max_primitives = (size_t)term.cols * term.rows * 5 + 8;
   size_t vbo_size = max_primitives * 6 * 4 * sizeof(float);
   glBindBuffer(GL_ARRAY_BUFFER, vbo);
   glBufferData(GL_ARRAY_BUFFER, vbo_size, NULL, GL_STREAM_DRAW);
@@ -1217,7 +1319,9 @@ static void render_now(void) {
     float baseline = row_y + app.ascent;
     for (int x = 0; x < term.cols; x++) {
       struct cell *c = &grid[y * term.cols + x];
-      uint32_t fg = c->fg, bg = c->bg;
+      bool bold = c->flags & CELL_BOLD;
+      uint32_t fg = resolve_color(c->fg, bold);
+      uint32_t bg = resolve_color(c->bg, false);
       if (c->flags & CELL_INVERSE) {
         uint32_t t = fg;
         fg = (bg == COLOR_DEFAULT) ? 0x1a1a24 : bg;
@@ -1230,15 +1334,22 @@ static void render_now(void) {
         color_premul(bg, 1.0f, bgc);
         draw_rect(proj, px, row_y, app.cell_w, app.cell_h, 0, bgc);
       }
+      float fgc[4];
+      if (fg == COLOR_DEFAULT)
+        color_premul(0xd9e6d9, 1.0f, fgc);
+      else
+        color_premul(fg, 1.0f, fgc);
       // 字符
       if (c->cp) {
-        float fgc[4];
-        if (fg == COLOR_DEFAULT)
-          color_premul(0xd9e6d9, 1.0f, fgc);
-        else
-          color_premul(fg, 1.0f, fgc);
         draw_glyph_at(proj, c->cp, px, baseline, fgc);
+        if (bold)
+          draw_glyph_at(proj, c->cp, px + 0.65f, baseline, fgc);
       }
+      if (c->flags & CELL_UNDERLINE)
+        draw_rect(proj, px, baseline + 1.0f, app.cell_w, 1.0f, 0, fgc);
+      if (c->flags & CELL_STRIKE)
+        draw_rect(proj, px, baseline - app.ascent * 0.32f, app.cell_w, 1.0f, 0,
+                  fgc);
     }
   }
 
@@ -1806,3 +1917,4 @@ extern "C" int main(void) {
   wl_display_disconnect(app.display);
   return 0;
 }
+#endif

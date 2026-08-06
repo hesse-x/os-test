@@ -141,6 +141,7 @@ static struct test_entry tests[] = {
     {"sa_nocldwait", "/test/test_sa_nocldwait.elf"},
     {"accept_no_timeout", "/test/test_accept_no_timeout.elf"},
     {"pty", "/test/pty.elf"},
+    {"terminal_sgr", "/test/test_terminal_sgr.elf"},
 };
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))
