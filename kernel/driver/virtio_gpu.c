@@ -58,7 +58,8 @@ int g_drm_next_prop_id = 1;
 struct drm_blob g_drm_blobs[DRM_MAX_BLOBS];
 int g_drm_next_blob_id = 1;
 spinlock g_drm_files_lock = SPINLOCK_INIT;
-struct drm_file g_drm_files[MAX_DRM_FDS];
+struct drm_file **g_drm_files;
+int g_drm_files_capacity;
 struct drm_cursor g_drm_cursor;
 
 /* Single vring completion callback shared by sync and async paths. The ctx is
@@ -1776,8 +1777,8 @@ static long drm_ioctl_set_master(struct drm_file *f) {
   }
 
   /* Check if any other fd holds master */
-  for (int i = 0; i < MAX_DRM_FDS; i++) {
-    if (g_drm_files[i].used && g_drm_files[i].is_master) {
+  for (int i = 0; i < g_drm_files_capacity; i++) {
+    if (g_drm_files[i] && g_drm_files[i]->used && g_drm_files[i]->is_master) {
       spin_unlock(&g_drm_files_lock);
       return -EBUSY;
     }
@@ -1843,9 +1844,10 @@ static long drm_ioctl_auth_magic(void *arg, struct drm_file *current) {
   }
 
   /* Search all open fds for matching magic */
-  for (int i = 0; i < MAX_DRM_FDS; i++) {
-    if (g_drm_files[i].used && g_drm_files[i].authenticated_magic == a->magic) {
-      g_drm_files[i].auth_valid = true;
+  for (int i = 0; i < g_drm_files_capacity; i++) {
+    if (g_drm_files[i] && g_drm_files[i]->used &&
+        g_drm_files[i]->authenticated_magic == a->magic) {
+      g_drm_files[i]->auth_valid = true;
       spin_unlock(&g_drm_files_lock);
       return 0;
     }
@@ -3258,24 +3260,74 @@ static bool virgl_capset_present(uint32_t capset_id) {
 }
 
 /* ===== DRM device ops ===== */
+static int drm_files_grow_locked(void) {
+  if (g_drm_files_capacity >= DRM_FD_MAX_CAPACITY)
+    return -ENFILE;
+
+  int new_capacity =
+      g_drm_files_capacity ? g_drm_files_capacity * 2 : DRM_FD_INITIAL_CAPACITY;
+  if (new_capacity > DRM_FD_MAX_CAPACITY)
+    new_capacity = DRM_FD_MAX_CAPACITY;
+
+  struct drm_file **new_slots =
+      kmalloc(sizeof(struct drm_file *) * (size_t)new_capacity);
+  if (!new_slots)
+    return -ENOMEM;
+  __memset(new_slots, 0, sizeof(struct drm_file *) * (size_t)new_capacity);
+  if (g_drm_files_capacity > 0) {
+    __memcpy(new_slots, g_drm_files,
+             sizeof(struct drm_file *) * (size_t)g_drm_files_capacity);
+  }
+  kfree(g_drm_files);
+  g_drm_files = new_slots;
+  g_drm_files_capacity = new_capacity;
+  return 0;
+}
+
 static int drm_open_file_common(xtask *proc, struct file *file,
                                 bool is_render) {
   spin_lock(&g_drm_files_lock);
-  for (int i = 0; i < MAX_DRM_FDS; i++) {
-    if (!g_drm_files[i].used) {
-      __memset(&g_drm_files[i], 0, sizeof(g_drm_files[i]));
-      g_drm_files[i].used = true;
-      g_drm_files[i].fd = -1;
-      g_drm_files[i].proc = proc;
-      g_drm_files[i].is_render = is_render;
-      file->private_data = &g_drm_files[i];
-      spin_unlock(&g_drm_files_lock);
-      return 0;
+  int slot = -1;
+  for (int i = 0; i < g_drm_files_capacity; i++) {
+    if (!g_drm_files[i]) {
+      slot = i;
+      break;
     }
   }
+  if (slot < 0) {
+    int old_capacity = g_drm_files_capacity;
+    int ret = drm_files_grow_locked();
+    if (ret) {
+      spin_unlock(&g_drm_files_lock);
+      printk(LOG_ERROR, "drm: cannot grow open-file table capacity=%d ret=%d\n",
+             old_capacity, ret);
+      return ret;
+    }
+    slot = old_capacity;
+  }
+
+  struct drm_file *drm_file = kmalloc(sizeof(*drm_file));
+  if (!drm_file) {
+    spin_unlock(&g_drm_files_lock);
+    return -ENOMEM;
+  }
+  __memset(drm_file, 0, sizeof(*drm_file));
+  drm_file->used = true;
+  drm_file->fd = -1;
+  drm_file->proc = proc;
+  drm_file->is_render = is_render;
+  g_drm_files[slot] = drm_file;
+  file->private_data = drm_file;
+
+  int used_count = 0;
+  for (int i = 0; i < g_drm_files_capacity; i++)
+    if (g_drm_files[i])
+      used_count++;
+  int capacity = g_drm_files_capacity;
   spin_unlock(&g_drm_files_lock);
-  printk(LOG_ERROR, "drm: open-file table exhausted (%d slots)\n", MAX_DRM_FDS);
-  return -ENFILE;
+  printk(LOG_INFO, "drm: open slot=%d pid=%d render=%d used=%d/%d\n", slot,
+         proc ? proc->pid : -1, is_render, used_count, capacity);
+  return 0;
 }
 
 static int drm_open_file(xtask *proc, struct file *file) {
@@ -3319,11 +3371,13 @@ static int drm_close_file(xtask *proc, struct file *file) {
   struct drm_file *target = file ? (struct drm_file *)file->private_data : NULL;
   if (!target)
     return 0;
+  int close_slot = -1;
   spin_lock(&g_drm_files_lock);
-  for (int i = 0; i < MAX_DRM_FDS; i++) {
-    struct drm_file *f = &g_drm_files[i];
-    if (!f->used || f != target)
+  for (int i = 0; i < g_drm_files_capacity; i++) {
+    struct drm_file *f = g_drm_files[i];
+    if (!f || !f->used || f != target)
       continue;
+    close_slot = i;
     /* Release per-fd resources (Phase C) */
     for (int j = 0; j < f->created_fb_count; j++) {
       drm_release_fb(f->created_fb_ids[j]);
@@ -3380,9 +3434,17 @@ static int drm_close_file(xtask *proc, struct file *file) {
       g_drm.is_master = false;
       drm_master_cleanup();
     }
-    __memset(f, 0, sizeof(*f));
+    g_drm_files[i] = NULL;
     file->private_data = NULL;
+    int used_count = 0;
+    for (int j = 0; j < g_drm_files_capacity; j++)
+      if (g_drm_files[j])
+        used_count++;
+    int capacity = g_drm_files_capacity;
     spin_unlock(&g_drm_files_lock);
+    kfree(f);
+    printk(LOG_INFO, "drm: close slot=%d pid=%d used=%d/%d\n", close_slot,
+           proc ? proc->pid : -1, used_count, capacity);
     return 0;
   }
   spin_unlock(&g_drm_files_lock);

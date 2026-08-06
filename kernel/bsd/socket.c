@@ -40,6 +40,20 @@
 
 // ===================== Global socket lock =====================
 spinlock socket_lock = SPINLOCK_INIT;
+static spinlock socket_lifetime_lock = SPINLOCK_INIT;
+
+// Caller holds socket_lock, which keeps the pointer itself valid while a final
+// releaser waits to detach it. The lifetime lock makes get-vs-final-put atomic.
+static bool unix_sock_get_locked(struct unix_sock *sock) {
+  spin_lock(&socket_lifetime_lock);
+  if (refcount_read(&sock->u_count) <= 0) {
+    spin_unlock(&socket_lifetime_lock);
+    return false;
+  }
+  refcount_inc(&sock->u_count);
+  spin_unlock(&socket_lifetime_lock);
+  return true;
+}
 
 // Forward declaration: poll_wait_cb is defined later (per-fd poll callback)
 // but used by unix_sock_recvmsg/sys_accept before its definition.
@@ -336,6 +350,25 @@ struct sk_buff *skb_dequeue(struct unix_sock *sock) {
   return skb;
 }
 
+// Detach under socket_lock, then call skb_free_list after dropping the lock.
+// skb_free may file_put SCM_RIGHTS payloads and recursively release a socket.
+static struct sk_buff *skb_detach_all_locked(struct unix_sock *sock) {
+  struct sk_buff *head = sock->recv_queue_head;
+  sock->recv_queue_head = NULL;
+  sock->recv_queue_tail = NULL;
+  sock->recv_queue_len = 0;
+  return head;
+}
+
+static void skb_free_list(struct sk_buff *head) {
+  while (head) {
+    struct sk_buff *next = head->next;
+    head->next = NULL;
+    skb_free(head);
+    head = next;
+  }
+}
+
 // ===================== unix_sock allocation =====================
 
 struct unix_sock *unix_sock_alloc(void) {
@@ -387,32 +420,30 @@ void unix_sock_free(struct unix_sock *sock) {
   struct unix_sock *bp = sock->backlog_head;
   while (bp) {
     struct unix_sock *next = bp->backlog_head; // backlog_head is next in chain
-    // Tell peer we're closing
-    if (bp->peer >= 0) {
-      xtask *peer = task_get(bp->peer);
-      if (peer->pid == bp->peer) {
-        // Wake peer if waiting on this socket
-        unix_sock_wake_reader(bp);
-        unix_sock_wake_writer(bp);
-      }
+    struct unix_sock *peer_s = NULL;
+
+    // Transfer the backlog's initial reference to the normal release path.
+    // A sender may still hold a temporary reference, so directly kfree'ing the
+    // child here can leave that sender with a dangling socket/wait queue.
+    spin_lock(&socket_lock);
+    peer_s = bp->peer_sock;
+    if (peer_s) {
+      peer_s->peer_sock = NULL;
+      if (!unix_sock_get_locked(peer_s))
+        peer_s = NULL;
     }
-    // Detach peer's back-reference so it cannot dereference us after free.
-    if (bp->peer_sock) {
-      spin_lock(&socket_lock);
-      bp->peer_sock->peer_sock = NULL;
-      spin_unlock(&socket_lock);
-    }
-    // Free the child socket
+    bp->peer_sock = NULL;
     bp->peer = -1;
     bp->state = UNIX_CLOSED;
-    // Free any skbs
-    while (bp->recv_queue_head) {
-      struct sk_buff *skb2 = skb_dequeue(bp);
-      skb_free(skb2);
+    bp->backlog_head = NULL;
+    bp->backlog_tail = NULL;
+    spin_unlock(&socket_lock);
+
+    if (peer_s) {
+      __wake_up(peer_s->wq, POLLHUP | POLLIN | POLLOUT);
+      unix_sock_release(peer_s);
     }
-    if (bp->wq)
-      kfree(bp->wq);
-    kfree(bp);
+    unix_sock_release(bp);
     bp = next;
   }
   if (sock->wq)
@@ -423,10 +454,22 @@ void unix_sock_free(struct unix_sock *sock) {
 void unix_sock_release(struct unix_sock *sock) {
   if (!sock)
     return;
-  if (refcount_dec_and_test(&sock->u_count)) {
-    unix_bind_unregister(sock);
-    unix_sock_free(sock);
-  }
+
+  // Some puts originate from skb_free while socket_lock is held (SCM_RIGHTS),
+  // so refcount serialization uses a separate lock. A final releaser must then
+  // pass through socket_lock before freeing; a concurrent peer lookup either
+  // takes its ref first or observes zero while the pointer is still valid.
+  spin_lock(&socket_lifetime_lock);
+  bool free_sock = refcount_dec_and_test(&sock->u_count);
+  spin_unlock(&socket_lifetime_lock);
+
+  if (!free_sock)
+    return;
+
+  spin_lock(&socket_lock);
+  unix_bind_unregister(sock);
+  spin_unlock(&socket_lock);
+  unix_sock_free(sock);
 }
 
 // ===================== Wake helpers =====================
@@ -592,7 +635,11 @@ int64_t unix_dgram_sendto(struct unix_sock *src, const struct sockaddr_un *dest,
     skb_free(skb);
     return -EAGAIN;
   }
-  refcount_inc(&target->u_count);
+  if (!unix_sock_get_locked(target)) {
+    spin_unlock(&socket_lock);
+    skb_free(skb);
+    return -ECONNREFUSED;
+  }
   skb_enqueue(target, skb);
   wait_queue_head *twq = target->wq;
   spin_unlock(&socket_lock);
@@ -878,12 +925,16 @@ int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
     } else if ((flags & MSG_DONTWAIT) && peer_sock->recv_queue_len > 128) {
       send_error = -EAGAIN;
     } else {
-      refcount_inc(&peer_sock->u_count);
-      skb_enqueue(peer_sock, skb);
-      // DGRAM: stamp the sender address onto the skb so the receiver's
-      // recvmsg/recvfrom can report msg_name. STREAM leaves has_sender=0.
-      if (sock->type == SOCK_DGRAM)
-        unix_dgram_fill_sender(skb, sock);
+      if (!unix_sock_get_locked(peer_sock)) {
+        peer_sock = NULL;
+        send_error = -EPIPE;
+      } else {
+        skb_enqueue(peer_sock, skb);
+        // DGRAM: stamp the sender address onto the skb so the receiver's
+        // recvmsg/recvfrom can report msg_name. STREAM leaves has_sender=0.
+        if (sock->type == SOCK_DGRAM)
+          unix_dgram_fill_sender(skb, sock);
+      }
     }
   }
   spin_unlock(&socket_lock);
@@ -1161,11 +1212,7 @@ void unix_sock_close(struct unix_sock *sock) {
   sock->shutdown_write = 1;
   sock->state = UNIX_CLOSED;
 
-  // Free all skbs in recv queue
-  while (sock->recv_queue_head) {
-    struct sk_buff *skb = skb_dequeue(sock);
-    skb_free(skb);
-  }
+  struct sk_buff *recv_to_free = skb_detach_all_locked(sock);
 
   // Notify peer: mark its read side shutdown + detach back-reference
   struct unix_sock *peer_s = sock->peer_sock;
@@ -1176,11 +1223,18 @@ void unix_sock_close(struct unix_sock *sock) {
     peer_s->shutdown_read = 1;
     // Detach back-reference so the peer never dereferences us after free.
     peer_s->peer_sock = NULL;
+    // Concurrent operations that already hold a file reference may still run
+    // after this fd is uninstalled. Do not leave them a stale pointer once the
+    // temporary peer reference below is dropped.
+    sock->peer_sock = NULL;
     // Keep the peer and its wait queue alive across the unlocked wakeup.
-    refcount_inc(&peer_s->u_count);
+    if (!unix_sock_get_locked(peer_s))
+      peer_s = NULL;
   }
 
   spin_unlock(&socket_lock);
+
+  skb_free_list(recv_to_free);
 
   // 唤醒本端与对端阻塞 reader/writer（各自挂自己 wq）+ epoll 等待者（POLLHUP）
   __wake_up(sock->wq, POLLHUP | POLLIN | POLLOUT);
@@ -1591,6 +1645,12 @@ static int64_t do_accept(int64_t arg1, int64_t arg2, int64_t arg3,
       listen_sock->backlog_tail = NULL;
     }
     listen_sock->backlog_len--;
+    // backlog_head doubles as the listener queue's next link. Once dequeued,
+    // the accepted socket must not retain that link: unix_sock_free() treats a
+    // non-NULL backlog_head as owned child connections and would otherwise
+    // release the listener's remaining queue when this accepted fd closes.
+    child->backlog_head = NULL;
+    child->backlog_tail = NULL;
     spin_unlock(&socket_lock);
 
     // Allocate new fd for this child socket (fd_lock only, no socket_lock
@@ -2347,25 +2407,24 @@ int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t unused1,
     return (int64_t)-EINVAL;
   }
 
+  struct sk_buff *recv_to_free = NULL;
   spin_lock(&socket_lock);
 
   if (how == SHUT_RD || how == SHUT_RDWR) {
     sock->shutdown_read = 1;
-    // Free recv queue
-    while (sock->recv_queue_head) {
-      struct sk_buff *skb = skb_dequeue(sock);
-      skb_free(skb);
-    }
+    recv_to_free = skb_detach_all_locked(sock);
   }
   if (how == SHUT_WR || how == SHUT_RDWR) {
     sock->shutdown_write = 1;
   }
 
   struct unix_sock *peer_s = sock->peer_sock;
-  if (peer_s)
-    refcount_inc(&peer_s->u_count);
+  if (peer_s && !unix_sock_get_locked(peer_s))
+    peer_s = NULL;
 
   spin_unlock(&socket_lock);
+
+  skb_free_list(recv_to_free);
 
   // 唤醒本端与对端阻塞 reader/writer（各自挂自己 wq）
   __wake_up(sock->wq, POLLHUP | POLLIN | POLLOUT);

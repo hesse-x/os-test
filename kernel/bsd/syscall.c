@@ -241,12 +241,28 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   if (notify_parent && ppid >= 0 && ppid < MAX_PROC &&
       task_get(ppid)->pid == ppid) {
     xtask *parent = task_get(ppid);
-    if (parent->proc &&
-        (parent->proc->signal->action[SIGCHLD].sa_flags & SA_NOCLDWAIT)) {
-      auto_reap = true;
-      if (init_pid >= 0) {
-        sig->parent_pid = init_pid;
-        ppid = init_pid;
+    if (parent->proc) {
+      /* Linux do_exit autoreap semantics: a child whose parent will not reap
+       * it is reparented to init and reaped in init's context (we cannot
+       * sched_task_reap here — the dying task's cr3 is still live). Two
+       * independent triggers, both matching Linux:
+       *   - SA_NOCLDWAIT: the parent explicitly opted out of zombies.
+       *   - SIGCHLD set to SIG_IGN: the parent ignores child exits, so the
+       *     kernel auto-reaps instead of leaving a zombie. Without this, a
+       *     service that does signal(SIGCHLD, SIG_IGN) and never waitpid()s
+       *     (e.g. the desktop shell spawning terminals) leaks every child's
+       *     fd table — including DRM render-node slots — as permanent zombies.
+       */
+      bool parent_ignores_sigchld =
+          parent->proc->signal->action[SIGCHLD]
+              .__sigaction_handler._sa_handler == SIG_IGN;
+      if ((parent->proc->signal->action[SIGCHLD].sa_flags & SA_NOCLDWAIT) ||
+          parent_ignores_sigchld) {
+        auto_reap = true;
+        if (init_pid >= 0) {
+          sig->parent_pid = init_pid;
+          ppid = init_pid;
+        }
       }
     }
   }

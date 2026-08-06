@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 
+#include "arch/x64/memlayout.h" // KERNEL_VMA_BOUNDARY (DIAG range check)
 #include "arch/x64/smp.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/wait_queue.h"
@@ -58,6 +59,17 @@ void __wake_up(wait_queue_head *wq, unsigned long flags) {
   list_node *it = wq->head.next;
   int woken_exclusive = 0;
   while (it != &wq->head) {
+    // DIAG: a wait_queue_head is kernel memory; every linked node must be a
+    // kernel address. A user-space node here means the list was corrupted by a
+    // freed/reused waiter slab (UAF) or a stale wq head — dereferencing
+    // it->next below page-faults the kernel. Catch it before the fault so the
+    // dump names the waker (caller) and the offending pointers.
+    if ((uint64_t)it < KERNEL_VMA_BOUNDARY)
+      panic(
+          "__wake_up: user-space wq node it=%p wq=%p head.next=%p head.prev=%p "
+          "caller=%p",
+          (void *)it, (void *)wq, (void *)wq->head.next, (void *)wq->head.prev,
+          __builtin_return_address(0));
     wait_queue_t *wq_entry = LIST_ENTRY(it, wait_queue_t, node);
     // Save next first: the callback (wake_with_event) only flips
     // wq_entry->state without unlinking; unlinking is done solely by

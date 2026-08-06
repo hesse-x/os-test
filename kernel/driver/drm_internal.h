@@ -96,7 +96,8 @@ extern struct drm_cursor g_drm_cursor;
 #define MAX_FRAMEBUFFERS 16
 
 /* ===== per-fd tracking (Phase C) ===== */
-#define MAX_DRM_FDS 8
+#define DRM_FD_INITIAL_CAPACITY 8
+#define DRM_FD_MAX_CAPACITY 1024
 
 #define MAX_CAPSETS 8
 #define MAX_CTX_IDS 256
@@ -178,7 +179,8 @@ struct drm_file {
   int created_dumb_count;
 };
 
-extern struct drm_file g_drm_files[MAX_DRM_FDS];
+extern struct drm_file **g_drm_files;
+extern int g_drm_files_capacity;
 extern spinlock g_drm_files_lock;
 
 /* ===== Default mode: 800x600@60 (runtime-overridable via g_drm.fb_*) ===== */
