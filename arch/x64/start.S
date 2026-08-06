@@ -15,6 +15,7 @@
 .type _start, @function
 
 #define VMA_BASE 0xFFFFFF8000000000  // mirrors boot/boot.h -- keep in sync
+#include "kernel/xcore/perf/phase_ids.h"
 
 # Byte count copied from the UEFI boot_info buffer into g_boot_info below.
 # Must equal BOOT_INFO_SIZE (and thus sizeof(boot_info)) in boot/boot.h,
@@ -26,6 +27,14 @@
 
 _start:
     # rdi = boot_info* (physical address, passed by EFI stub)
+#ifdef PERF
+    # Capture the formal start before stack, paging, GDT, or any C call. RDI is
+    # the boot-info contract; RAX/RDX are caller-clobbered and safe here.
+    rdtsc
+    shlq $32, %rdx
+    orq %rdx, %rax
+    movq %rax, perf_boot_tsc(%rip)
+#endif
 
     # Set up physical-address stack
     lea stack_bottom(%rip), %rax
@@ -35,11 +44,34 @@ _start:
     # r12 = boot_info* physical address, preserved across ljmp
     movq %rdi, %r12
 
+#ifdef PERF
+    movl $PERF_PHASE_BOOT_TO_KERNEL_MAIN, %edi
+    movq perf_boot_tsc(%rip), %rsi
+    call perf_early_phase_begin_at
+
+    movl $PERF_PHASE_EARLY_PAGING, %edi
+    call perf_phase_begin
+
+    # Phase calls use RDI for their ID; restore the boot-info argument expected
+    # by enable_paging from the callee-saved copy.
+    movq %r12, %rdi
+#endif
     # Build page tables + load CR3
     call enable_paging
+#ifdef PERF
+    movl $PERF_PHASE_EARLY_PAGING, %edi
+    call perf_phase_end
+
+    movl $PERF_PHASE_EARLY_GDT, %edi
+    call perf_phase_begin
+#endif
 
     # Configure GDT + lgdt
     call gdt_init
+#ifdef PERF
+    movl $PERF_PHASE_EARLY_GDT, %edi
+    call perf_phase_end
+#endif
 
     # Set segment registers (GDT loaded; still at physical addresses,
     # identity map makes them accessible)
@@ -49,6 +81,11 @@ _start:
     movw %ax, %fs
     movw %ax, %gs
     movw %ax, %ss
+
+#ifdef PERF
+    movl $PERF_PHASE_EARLY_HIGHER_HALF, %edi
+    call perf_phase_begin
+#endif
 
     # Compute _entry64 virtual address: physical address + VMA_BASE.
     # VMA_BASE is a full 64-bit non-sign-extendable immediate (canonical
@@ -66,6 +103,11 @@ _start:
 .code64
 _entry64:
     # --- Virtual address execution ---
+
+#ifdef PERF
+    movl $PERF_PHASE_EARLY_HIGHER_HALF, %edi
+    call perf_phase_end
+#endif
 
     # Switch to virtual-address stack
     lea stack_bottom(%rip), %rsp
@@ -99,5 +141,22 @@ _entry64:
     jmp 1b
 
 .size _start, . - _start
+
+#ifdef PERF
+    .section .bss.perf_early,"aw",@nobits
+    .balign 64
+    .global perf_boot_tsc
+    .hidden perf_boot_tsc
+perf_boot_tsc:
+    .skip 8
+    .balign 64
+    .global perf_early_buffer
+    .hidden perf_early_buffer
+perf_early_buffer:
+    .skip 65536
+    .global perf_early_buffer_end
+    .hidden perf_early_buffer_end
+perf_early_buffer_end:
+#endif
 
     .section .note.GNU-stack,"",@progbits

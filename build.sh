@@ -27,7 +27,9 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --perf)
-            CMAKE_EXTRA="$CMAKE_EXTRA -DPERF=1"
+            CMAKE_EXTRA="$CMAKE_EXTRA -DPERF=1 -DTEST=1"
+            BUILD_PERF=1
+            BUILD_TEST=1
             shift
             ;;
         --gcc)
@@ -51,6 +53,9 @@ if ! echo "$CMAKE_EXTRA" | grep -q "SANITIZE="; then
 fi
 if [ "${BUILD_TEST:-0}" != "1" ]; then
     CMAKE_EXTRA="$CMAKE_EXTRA -DTEST=0"
+fi
+if ! echo "$CMAKE_EXTRA" | grep -q "PERF="; then
+    CMAKE_EXTRA="$CMAKE_EXTRA -DPERF=0"
 fi
 
 # A normal build is incremental but self-healing: missing runtime products cause
@@ -632,5 +637,12 @@ if echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
     TEST=1
 fi
 export TEST
+
+PERF="${BUILD_PERF:-0}"
+export PERF
+
+if [ "$PERF" = "1" ]; then
+    bash build_script/perf-symbols.sh
+fi
 
 ./build_script/mkdisk.sh

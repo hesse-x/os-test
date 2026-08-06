@@ -89,6 +89,9 @@ elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
 elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
     list(APPEND _base_opts -Os -DNDEBUG)
 endif()
+if(PERF)
+    list(APPEND _base_opts -g -fno-omit-frame-pointer)
+endif()
 target_compile_options(os_base_options INTERFACE ${_base_opts})
 
 # ---- os_user_base_options: userspace baseline INTERFACE lib ----
@@ -109,6 +112,10 @@ elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
 elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
     list(APPEND _user_base_opts -Os -DNDEBUG)
 endif()
+if(PERF)
+    list(APPEND _user_base_opts -g -fno-omit-frame-pointer)
+    target_compile_definitions(os_user_base_options INTERFACE PERF)
+endif()
 target_compile_options(os_user_base_options INTERFACE ${_user_base_opts})
 
 # Fixed-optimization baseline for real CMake third-party targets. Debug symbols
@@ -124,6 +131,9 @@ elseif(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
     endif()
 endif()
 list(APPEND _third_party_base_opts ${THIRD_PARTY_OPT_FLAGS})
+if(PERF)
+    list(APPEND _third_party_base_opts -g -fno-omit-frame-pointer)
+endif()
 target_compile_options(os_third_party_base_options INTERFACE ${_third_party_base_opts})
 
 # ---- os_uapi: UAPI contract headers INTERFACE lib ----
@@ -275,8 +285,12 @@ endif()
 # all six libs explicitly as a fallback.
 # The dependency graph (inter-layer PUBLIC link) still carries its usage-
 # requirement transitive benefits (include/flag propagation via PUBLIC).
+set(_kernel_perf_link_flags "")
+if(PERF)
+    set(_kernel_perf_link_flags "--build-id=sha1")
+endif()
 set(CMAKE_C_LINK_EXECUTABLE
-    "${KERNEL_LINKER} -m elf_x86_64 --no-relax -T ${LINKER_SCRIPT} <OBJECTS> -o <TARGET>")
+    "${KERNEL_LINKER} -m elf_x86_64 --no-relax ${_kernel_perf_link_flags} -T ${LINKER_SCRIPT} <OBJECTS> -o <TARGET>")
 
 add_executable(myos.elf)
 # Aggregate the six OBJECT libs' objects: explicit $<TARGET_OBJECTS:...> ensures
@@ -293,7 +307,9 @@ target_sources(myos.elf PRIVATE
     $<TARGET_OBJECTS:driver_obj>
     $<TARGET_OBJECTS:kernel_obj>
     $<TARGET_OBJECTS:fcntl_sync_check>)
-set_target_properties(myos.elf PROPERTIES OUTPUT_NAME "myos.elf")
+set_target_properties(myos.elf PROPERTIES
+    OUTPUT_NAME "myos.elf"
+    LINK_DEPENDS "${LINKER_SCRIPT}")
 
 # Kernel ELF lives at the ESP image root (partition 1). Register for the
 # disk-image manifest (reface_cmake.md §6).

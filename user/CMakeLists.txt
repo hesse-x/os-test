@@ -352,6 +352,10 @@ else()
 endif()
 os_image_path(shell shell.elf bin/sh)
 
+if(PERF)
+    add_subdirectory(perf)
+endif()
+
 # udev/ — device event daemon (subscribes to netlink uevent group)
 add_user_elf(udevd C SOURCES udev/udevd.c LINK_LIBS c IMAGE_PATH usr/bin/udevd)
 add_user_dyn_elf(udev_drm_smoke C

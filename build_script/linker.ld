@@ -20,6 +20,12 @@ SECTIONS {
     . = ALIGN(4096);
     __text_end = .;
 
+    .note.gnu.build-id : AT(ADDR(.note.gnu.build-id) - 0xFFFFFF8000000000) {
+        __perf_build_id_note_start = .;
+        KEEP(*(.note.gnu.build-id))
+        __perf_build_id_note_end = .;
+    } :rodata
+
     . = ALIGN(4096);
     __rodata_start = .;
     .rodata : AT(ADDR(.rodata) - 0xFFFFFF8000000000) {
@@ -67,6 +73,7 @@ SECTIONS {
     /* Uninitialized data section (BSS) - 4KB aligned for page table use */
     .bss (NOLOAD) : AT(ADDR(.bss) - 0xFFFFFF8000000000) {
         *(.bss)
+        *(.bss.*)
         *(COMMON)
     } :data
 
@@ -76,7 +83,6 @@ SECTIONS {
     /DISCARD/ : {
         *(.eh_frame)
         *(.note.gnu.property)
-        *(.note.gnu.build-id)
         *(.comment)
     }
 }

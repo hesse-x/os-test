@@ -31,6 +31,7 @@ qemu-system-x86_64 \
     -device qemu-xhci,id=xhci \
     -device usb-kbd,bus=xhci.0 \
     -device usb-mouse,bus=xhci.0 \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -vga none \
     -device virtio-gpu-gl \
     -display sdl,gl=on \

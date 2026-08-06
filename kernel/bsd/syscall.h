@@ -48,6 +48,7 @@ int64_t sys_sysconf(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_sysinfo(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_prlimit64(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_getrandom(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_perf(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 // VFS
 int64_t sys_ioctl(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);

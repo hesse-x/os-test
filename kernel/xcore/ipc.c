@@ -22,12 +22,14 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/perf/event.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
+#include "xos/perf.h"
 
 #include <xos/errno.h>
 #include <xos/page.h>
@@ -252,11 +254,23 @@ int64_t ipc_dequeue(xtask *proc, void __user *buf, void __user *data_buf,
   recv_msg *msg = (recv_msg *)proc->recv_buf[proc->recv_tail];
   if (msg->type == RECV_REQ) {
     proc->req_caller_pid = (pid_t)msg->src;
+#ifdef PERF
+    xtask *caller = task_get((pid_t)msg->src);
+    proc->perf_req_in_cookie = caller->perf_req_out_cookie;
+    perf_trace_causal(XOS_PERF_TRACE_IPC, XOS_PERF_IPC_RECEIVE,
+                      proc->perf_req_in_cookie);
+#endif
   }
   if (msg->type == RECV_MSG) {
     void *kmaddr = msg->msg.kmaddr;
     size_t len = msg->msg.len;
     proc->msg_caller_pid = (pid_t)msg->src;
+#ifdef PERF
+    xtask *caller = task_get((pid_t)msg->src);
+    proc->perf_msg_in_cookie = caller->perf_msg_out_cookie;
+    perf_trace_causal(XOS_PERF_TRACE_IPC, XOS_PERF_IPC_RECEIVE,
+                      proc->perf_msg_in_cookie);
+#endif
 
     if (!data_buf || data_buf_len < len) {
       kfree(kmaddr);
@@ -441,6 +455,11 @@ int64_t sys_req(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     return (int64_t)-EFAULT;
 
   xtask *proc = current_task;
+#ifdef PERF
+  proc->perf_req_out_cookie = perf_trace_next_cookie();
+  perf_trace_causal(XOS_PERF_TRACE_IPC, XOS_PERF_IPC_SEND,
+                    proc->perf_req_out_cookie);
+#endif
   // Arm per-request reply state BEFORE enqueue: sys_resp publishes
   // req_result/req_replied under our scheduler_lock; clearing them after
   // enqueue could clobber an already-delivered reply from a fast target on
@@ -523,6 +542,10 @@ int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused3,
   }
 
   xtask *proc = current_task;
+#ifdef PERF
+  perf_trace_causal(XOS_PERF_TRACE_IPC, XOS_PERF_IPC_REPLY,
+                    proc->perf_req_in_cookie);
+#endif
   pid_t caller_pid = proc->req_caller_pid;
   if (caller_pid < 0 || caller_pid >= MAX_PROC)
     return (int64_t)-EINVAL;
@@ -542,6 +565,10 @@ int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused3,
     caller->req_replied = 1;
     if (caller->state == BLOCKED && caller->wait_event == WAIT_REQ_REPLY)
       wake_from_wait(caller);
+#ifdef PERF
+    perf_trace_causal(XOS_PERF_TRACE_IPC, XOS_PERF_IPC_WAKE,
+                      proc->perf_req_in_cookie);
+#endif
     spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
 
     // Wake caller's ipcfd wq, if any (evdev_refact.md §5.6).
@@ -599,6 +626,10 @@ int64_t sys_resp(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused3,
   caller->req_replied = 1;
   if (caller->state == BLOCKED && caller->wait_event == WAIT_REQ_REPLY)
     wake_from_wait(caller);
+#ifdef PERF
+  perf_trace_causal(XOS_PERF_TRACE_IPC, XOS_PERF_IPC_WAKE,
+                    proc->perf_req_in_cookie);
+#endif
   spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
 
   // Wake caller's ipcfd wq, if any (evdev_refact.md §5.6).
@@ -922,6 +953,11 @@ int64_t sys_msg_to(pid_t target_pid, void *msg_buf, size_t msg_len,
   // sys_req (sys_msg_resp publishes msg_result/msg_replied under our
   // scheduler_lock; a post-enqueue clear could clobber a fast reply).
   xtask *proc = current_task;
+#ifdef PERF
+  proc->perf_msg_out_cookie = perf_trace_next_cookie();
+  perf_trace_causal(XOS_PERF_TRACE_IPC, XOS_PERF_IPC_SEND,
+                    proc->perf_msg_out_cookie);
+#endif
   proc->msg_target_pid = target_pid;
   proc->msg_reply_buf = (void __user *__force)reply_buf;
   proc->msg_reply_len = reply_len;
@@ -1016,6 +1052,10 @@ int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t unused1,
     return (int64_t)-EFAULT;
 
   xtask *proc = current_task;
+#ifdef PERF
+  perf_trace_causal(XOS_PERF_TRACE_IPC, XOS_PERF_IPC_REPLY,
+                    proc->perf_msg_in_cookie);
+#endif
   pid_t caller_pid = proc->msg_caller_pid;
   if (caller_pid < 0 || caller_pid >= MAX_PROC) {
     return (int64_t)-EINVAL;
@@ -1058,6 +1098,10 @@ int64_t sys_msg_resp(int64_t arg1, int64_t arg2, int64_t unused1,
   caller->msg_replied = 1;
   if (caller->state == BLOCKED && caller->wait_event == WAIT_MSG_REPLY)
     wake_from_wait(caller);
+#ifdef PERF
+  perf_trace_causal(XOS_PERF_TRACE_IPC, XOS_PERF_IPC_WAKE,
+                    proc->perf_msg_in_cookie);
+#endif
   spin_unlock_irqrestore(&cpu_locals[caller_cpu].scheduler_lock, flags);
 
   // Wake caller's ipcfd wq, if any (evdev_refact.md §5.6).

@@ -18,6 +18,8 @@
 #include "kernel/kernel.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/perf/phase.h"
+#include "kernel/xcore/perf/phase_ids.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
@@ -69,20 +71,37 @@ size_t hostname_get(char *dst, size_t maxlen) {
 extern kern_vaddr_t phys_to_virt(phys_addr_t phys);
 
 void kernel_main(boot_info *bi) {
+#ifdef PERF
+  PERF_PHASE_END(PERF_PHASE_BOOT_TO_KERNEL_MAIN);
+#endif
   // Layered initialization
+  PERF_PHASE_BEGIN(PERF_PHASE_XCORE);
   xcore_init(bi);
+  PERF_PHASE_END(PERF_PHASE_XCORE);
 
   // VFS data structures must be initialized before driver_init
   // so that devtmpfs_create() calls during driver_init survive.
   // sysfs_init must also run before driver_init so that
   // drm_dev_register can create /sys/class/drm/card0/* attributes.
+  PERF_PHASE_BEGIN(PERF_PHASE_VFS_CORE);
+  PERF_PHASE_BEGIN(PERF_PHASE_INODE);
   inode_init();
+  PERF_PHASE_END(PERF_PHASE_INODE);
+  PERF_PHASE_BEGIN(PERF_PHASE_PAGE_CACHE);
   page_cache_init();
+  PERF_PHASE_END(PERF_PHASE_PAGE_CACHE);
+  PERF_PHASE_BEGIN(PERF_PHASE_DEVTMPFS);
   devtmpfs_init();
+  PERF_PHASE_END(PERF_PHASE_DEVTMPFS);
   sysfs_init();
+  PERF_PHASE_END(PERF_PHASE_VFS_CORE);
 
+  PERF_PHASE_BEGIN(PERF_PHASE_DRIVER);
   driver_init();
+  PERF_PHASE_END(PERF_PHASE_DRIVER);
+  PERF_PHASE_BEGIN(PERF_PHASE_BSD);
   bsd_init();
+  PERF_PHASE_END(PERF_PHASE_BSD);
 
   printk(LOG_INFO, "kernel_main: all subsystems initialized\n");
 
@@ -129,7 +148,9 @@ void kernel_main(boot_info *bi) {
         (__force phys_addr_t)bi->init_elf_addr);
     printk(LOG_INFO, "kernel_main: loading init (phys=0x%lx size=%lu)...\n",
            bi->init_elf_addr, (unsigned long)bi->init_elf_size);
+    PERF_PHASE_BEGIN(PERF_PHASE_INIT_ELF);
     xtask *init_proc = process_create_elf(init_elf, bi->init_elf_size);
+    PERF_PHASE_END(PERF_PHASE_INIT_ELF);
     if (init_proc) {
       init_loaded = true;
       init_pid = init_proc->pid;

@@ -97,6 +97,14 @@ typedef struct xtask {
   uint8_t msg_replied; // set under caller's scheduler_lock by sys_msg_resp;
                        // same lost-wake guard as req_replied for WAIT_MSG_REPLY
 
+#ifdef PERF
+  // Per-session causal IDs. They disappear entirely from normal builds.
+  uint32_t perf_req_out_cookie;
+  uint32_t perf_req_in_cookie;
+  uint32_t perf_msg_out_cookie;
+  uint32_t perf_msg_in_cookie;
+#endif
+
   // === ipcfd (evdev downstream-IPC fd) ===
   // Points at the FD_IPC file bound to this task's recv queue (NULL if none).
   // Set by sys_ipcfd_create (holds a file reference); cleared by the fd's

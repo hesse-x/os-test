@@ -653,6 +653,8 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
       if (prev->last_sched != 0) {
         prev->cpu_time_ns += sched_clock() - prev->last_sched;
       }
+      perf_trace_sched_switch(prev->pid, idle->pid, (uint8_t)prev->state,
+                              (uint8_t)prev->wait_event, false, true);
       current_task = idle;
       per_cpu_tss[my_cpu].rsp0 = idle->k_stack_top;
       get_cpu_local()->tss_rsp0 = idle->k_stack_top;
@@ -725,6 +727,9 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
     ASSERT(cnt == cpu_locals[my_cpu].run_count);
   }
 #endif
+  perf_trace_sched_switch(prev->pid, next->pid, (uint8_t)prev->state,
+                          (uint8_t)prev->wait_event, prev == idle,
+                          next == idle);
   current_task = next;
   per_cpu_tss[my_cpu].rsp0 = next->k_stack_top;
   get_cpu_local()->tss_rsp0 = next->k_stack_top;

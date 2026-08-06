@@ -199,3 +199,204 @@ tmux kill-session -t gdb; tmux kill-session -t qemu
 ```
 
 注：tmux send-keys 只能发按键到对应 session 的 stdio。QEMU monitor 在 qemu session 的 stdio，键盘输入通过 `sendkey` monitor 命令注入到 qemu session。串口输入已移除，不再需要 socat serial session。
+
+## 15. PERF 采集与分析
+
+PERF 构建用于采集启动阶段和测试用例的 wall time。它与 Debug 构建用途不同：Debug 构建侧重异常现场和栈回溯，PERF 构建使用 Release 优化，同时保留调试符号、frame pointer 和 ELF build ID。
+
+### 15.1 一键运行
+
+```bash
+tools/perf-run.sh
+```
+
+该命令依次执行：
+
+1. `./build.sh --perf`，生成 512 MiB PERF 镜像和 `build/perf-symbols/` 符号副本。
+2. 启动 QEMU/KVM，串口仍写入 `log.txt`。
+3. 等待 collector 正常导出；如果串口连续 60 秒无变化，则停止 QEMU 并恢复最近一次持久化 checkpoint。
+4. 从磁盘的 MBR 分区表定位 FAT32 根分区，提取 raw/metadata 并生成报告。
+
+runner 正常结束后 collector 会先完成 raw/metadata 的 `fsync + rename + sync`，
+然后调用 `XOS_PERF_REQUEST_EXIT`；PERF QEMU 配置中的 `isa-debug-exit` 只在这个
+时刻退出，host 不会在 guest 仍写盘时提取镜像。默认 watchdog 从 boot TSC 起
+10 分钟：timer 只发布超时请求，collector 下一次轮询在进程上下文冻结、导出
+`complete=false` 结果并走相同受控退出路径，IRQ/NMI 中不会进入 VFS。
+
+默认结果目录是 `build/perf-results/`。也可以指定另一个目录：
+
+```bash
+tools/perf-run.sh build/perf-results/run-001
+```
+
+不要使用 `repeat.sh` 代替 `perf-run.sh` 做 PERF 采集。`repeat.sh` 看到 Test Runner 的 Summary 后会立即停止 QEMU，可能早于 collector 的最终 `fsync` 和 rename。
+
+### 15.2 checkpoint 与硬卡死恢复
+
+collector 在启动 runner 后立即落一份 checkpoint，之后每 60 秒执行一次：
+
+```text
+冻结当前 committed 边界（采集继续）
+  -> 覆盖写 perf.raw.tmp / meta.tmp
+  -> fsync
+  -> sync
+```
+
+正常结束时，runner 退出钩子将数据冻结为最终快照，collector 再原子发布 `perf.raw` 和 `metadata.json`。如果 guest 在测试中完全停止调度，进程定时器也无法运行，但磁盘上仍保留上一次 checkpoint。此时报告会显示 `complete: false`，这是可分析的中途快照，不是解析失败。
+
+串口中可用以下命令确认持久化进度：
+
+```bash
+rg 'perf: (checkpointed|exported)' log.txt
+```
+
+典型输出：
+
+```text
+perf: checkpointed 5456 bytes, 221 records, complete=0 status=-1
+perf: exported 5888 bytes, 239 records, complete=1 status=0
+```
+
+如果 QEMU 已经由其他方式运行并停止，可以单独提取：
+
+```bash
+tools/perf-extract.sh build/disk.img build/perf-results/manual
+```
+
+必须在 QEMU 停止后提取，避免读取正在修改的 FAT 镜像。提取器不使用固定 LBA，而是验证 MBR、分区范围和 FAT32 分区类型。当前 guest FAT 实现可能让 `fsck.fat -n` 报告目录元数据问题；提取器会给出 warning，并继续以只读方式提取，raw 自身仍必须通过边界和 CRC 校验。
+
+### 15.3 输出文件
+
+| 文件 | 用途 |
+|------|------|
+| `perf.raw` | 原始二进制记录；包含 ABI header、24-byte records、footer 和 CRC32 |
+| `metadata.json` | ABI、完成状态、结束原因、TSC 频率、记录数和 committed bytes |
+| `perf-report.txt` | 适合直接阅读的 kernel Top 热点、启动阶段及逐测试耗时 |
+| `perf-summary.json` | 含 build ID、采样质量、热点和阶段耗时的结构化结果 |
+| `perf.folded` | 带权重的完整 kernel/user 调用链，可交给 FlameGraph 的 `flamegraph.pl` |
+| `perf-speedscope.json` | 可直接拖入 speedscope.app 查看按样本权重排序的热点 |
+| `perf-trace.json` | Chrome/Perfetto Trace，可查看 phase/test 时间轴 |
+| `qemu-host.log` | QEMU host 侧输出；串口输出仍在仓库根目录 `log.txt` |
+
+符号文件按 ELF build ID 保存在：
+
+```text
+build/perf-symbols/
+build/perf-symbols/build-id-manifest.tsv
+```
+
+raw 和 metadata 是本次运行的数据，`perf-symbols/` 是与本次构建匹配的符号副本。不要拿另一次构建的 ELF 做地址解析。
+
+### 15.4 阅读报告
+
+```bash
+sed -n '1,160p' build/perf-results/perf-report.txt
+python3 -m json.tool build/perf-results/perf-summary.json | less
+```
+
+报告开头的 `Kernel hotspots` 是优化 kernel 时的主要入口。每行给出函数占
+全部 kernel 样本的比例、样本数和源码位置；报告工具会核对 raw 内嵌的完整
+SHA-1 build ID、`build/perf-symbols/build-id-manifest.tsv` 和 `myos.elf` 三者，
+一致后才批量调用 `addr2line`，避免误用同名但不同构建的符号文件。需要交互
+查看时：
+
+```bash
+# 浏览器中打开 https://www.speedscope.app/ 后拖入该文件
+ls build/perf-results/perf-speedscope.json
+
+# Chrome chrome://tracing 或 Perfetto UI 中加载
+ls build/perf-results/perf-trace.json
+
+# 已安装 FlameGraph 时生成传统 SVG
+flamegraph.pl build/perf-results/perf.folded > build/perf-results/perf.svg
+```
+
+采样器优先使用 architectural PMU 的 unhalted cycles overflow，以每 CPU 约
+1000 Hz 的独立 PMI/NMI 采样；NMI 使用 IST1，从 trapframe 的 RIP/RBP 开始做
+最多 32 帧的有界 frame-pointer unwind。用户栈通过页表和 direct-map 读取，
+kernel 栈只允许当前 task、IRQ 或 NMI 栈范围，过程中不分配、不打印、不取锁，
+也不会触发用户缺页。PMU 不可用时自动退回每 CPU 约 100 Hz 的 LAPIC timer。
+
+报告中的 `sampling.source` 会明确显示 `pmu_nmi`、`lapic_timer` 或 `mixed`。
+只有纯 PMU 结果才标记 `confidence: high` 和
+`interrupts_disabled_visible: true`；fallback 无法观察长时间关中断区间，必须按
+degraded 数据解释。在 Linux/KVM host 上还应确认：
+
+```bash
+cat /sys/module/kvm/parameters/enable_pmu
+```
+
+输出 `N` 表示 host 管理员禁用了 KVM vPMU，guest 会按设计使用 timer fallback，
+并不是采集器初始化失败。`lost_samples` 和 `trace_lost` 应为 0；非零表示固定
+容量的 callchain 或调度/因果 critical-event 表已满。高频业务 IRQ 不写逐次
+BEGIN/END 记录，而在 kernel 内按 CPU/vector 精确累计 count、total cycles 和
+max cycles，因此 IRQ storm 不会挤掉调度时间线。
+
+重点字段：
+
+- `complete`：`true` 表示目标正常结束并完成最终导出；`false` 表示 checkpoint/incomplete session。
+- `end_reason`：`0` 是运行中 checkpoint，`1` 是目标正常退出，`2` 是非零退出，`3` 是信号退出，`4` 是手工冻结，`5` 是 watchdog。
+- `duration_ms`：从 boot TSC 到本次快照边界的 wall time，不是 CPU time。
+- `record_count`：本次快照包含的 committed records 数量。
+- `sampling.sample_hits`：进入热点统计的 kernel RIP 样本总数。
+- `sampling.lost_samples`：聚合表冲突后无法容纳的样本数，健康结果应为 0。
+- `sampling.samples_per_cpu`：各 CPU 的 PMU/timer 样本数，用于发现未启用的 AP。
+- `sampling.nmi_count`、`handler_cycles`：PMI 次数和采集 handler 自身开销。
+- `sampling.truncated_callchains`：因坏 frame、未映射页、非执行地址或深度上限而截断的链数。
+- `top_kernel_hotspots`：按符号聚合并从高到低排序的 kernel 样本。
+- `scheduling.cpus`：每 CPU busy/idle、利用率和上下文切换次数。
+- `scheduling.top_tasks`：按重建 running interval 汇总的高 CPU task。
+- `scheduling.wake_latency`：`TASK_WAKE -> 该 task 下一次 switch-in` 的调度唤醒延迟分布及逐项证据。
+- `irqs`：按 CPU/vector/owner 汇总的业务 IRQ 次数、总 handler 时间和最长 handler 时间；timer/PMI 不进入该表。
+- `causal_chains`：按带子系统命名空间的 cookie 连接同步 IPC 及 AHCI/xHCI/virtio-GPU submit/IRQ-vector/complete/wake；重复 cookie 会按每次 submit 拆成独立 instance，`complete=false` 表示 checkpoint 截断。
+- `trace_errors`：未知 phase、栈不匹配、重复 END 或损坏记录；健康结果应为空。
+- `phases[].inclusive_ms`：阶段自身和所有子阶段的总 wall time。
+- `phases[].exclusive_ms`：扣除已知子阶段后的 wall time，用于判断耗时是在本阶段本体还是子阶段。
+- `tests[].status`：`pass`、`fail`、`skip`、`crash` 或 `running`。checkpoint 最后一个测试经常是 `running`，表示快照发生时它尚未 END。
+- `tests[].duration_ms`：对应 BEGIN/END marker 之间的 wall time；`running` 项没有完整时长。
+
+快速汇总测试状态：
+
+```bash
+python3 - <<'PY'
+import collections
+import json
+
+with open("build/perf-results/perf-summary.json", encoding="utf-8") as stream:
+    summary = json.load(stream)
+counts = collections.Counter(test["status"] for test in summary["tests"])
+print("complete:", summary["complete"])
+print("duration_ms:", round(summary["duration_ms"], 3))
+print("records:", summary["record_count"])
+print("tests:", dict(counts))
+PY
+```
+
+对比两次运行时优先比较相同 phase/test 的耗时，不要只比较总时长。先确认两份结果的 `complete`、测试集合、失败项和 build ID 一致，再判断性能回归；checkpoint 与完整结果不能直接当作同口径样本。
+
+### 15.5 raw 校验与故障判读
+
+也可以直接重新解析已经提取的 raw：
+
+```bash
+tools/perf-report.py build/perf-results/perf.raw \
+  --metadata build/perf-results/metadata.json \
+  --output-dir build/perf-results/reparsed
+```
+
+解析器把 raw 当作不可信输入，检查 magic、ABI version、endian、header/footer 大小、记录边界和对齐、sequence、timestamp、header CRC、record CRC，以及 metadata 的 boot TSC/TSC frequency/record count。出现 CRC 或边界错误时不要继续分析耗时，应先确认 QEMU 是否仍在运行、镜像是否完整同步、raw 是否来自匹配的 session。
+
+当前版本已经覆盖：
+
+- `_start -> kernel_main` 及 paging/GDT/higher-half early phases；
+- 每个测试的 BEGIN/END 和 pass/fail/skip/crash 状态；
+- PMU/NMI（或显式 timer fallback）RIP 采样及最多 32 帧的有界调用链；
+- 每 CPU switch/block/wake 时间线、busy/idle、top task 和 wake latency；
+- 不受 IRQ storm 影响的业务 IRQ 聚合，以及 IPC/AHCI/xHCI/virtio-GPU 因果链；
+- folded、Speedscope 和 Chrome/Perfetto 输出；
+- 完整退出冻结、启动时 checkpoint、每分钟 checkpoint、10 分钟 watchdog 和受控 QEMU 退出。
+
+它仍不会把 timer fallback 结果描述成关中断区间可见；只有报告明确显示
+`pmu_nmi` 且 `interrupts_disabled_visible=true` 时，才能用采样判断长 IRQ-off
+路径。完整 malformed/golden corpus、故障注入矩阵和穷举式端到端验证不属于
+本轮 kernel 优化工具的范围。

@@ -25,15 +25,14 @@
 
 uint64_t wall_clock_boot_ns = 0;
 
-// Read one CMOS register.  Disables NMI (0x70 bit7) for the duration of the
-// access; NMI is not restored — the kernel has no NMI handler and boot-time NMI
-// state is unspecified under UEFI, so leaving it masked is harmless (todo:
-// restore NMI when an NMI watchdog is added).  Caller must hold interrupts
-// disabled across the full read sequence so an IRQ doesn't stall the access
-// past a UIP flip.
+// Read one CMOS register. Disable NMI only around the port-0x71 transaction;
+// PERF uses PMI/NMI sampling after boot, so leaving bit 7 set would silently
+// suppress every PMU overflow.
 static uint8_t cmos_read_reg(int reg) {
   outb(0x70, (uint8_t)(reg | 0x80)); // select reg, NMI disabled
-  return inb(0x71);
+  uint8_t value = inb(0x71);
+  outb(0x70, (uint8_t)reg); // restore NMI delivery
+  return value;
 }
 
 // Wait for UIP (register A bit7) to clear, bounded by a ~1ms rdtsc budget so a

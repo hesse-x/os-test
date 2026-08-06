@@ -168,8 +168,13 @@ __alltraps:
 __trapret:
     # Check pending signals before returning to user mode
     # (gs still points to per-CPU data; swapgs not yet executed)
+    # NMI/PMI must not deliver signals or schedule while unwinding its IST
+    # frame; it may have interrupted scheduler_lock or another critical path.
+    cmpq $2, 120(%rsp)
+    je 3f
     movq %rsp, %rdi
     call check_pending_signals
+3:
 
     # Load current_task->fs_base into MSR_FS_BASE (TLS base for user mode).
     # cpu_local._cur_proc is at GS:16; xtask_fs_base_offset is a linker symbol

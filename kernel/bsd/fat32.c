@@ -1725,6 +1725,7 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
   }
 
   size_t written = 0;
+  uint32_t append_tail = 0;
   while (written < count) {
     uint64_t page_idx = (offset + written) / 4096;
     uint32_t page_off = (offset + written) % 4096;
@@ -1749,10 +1750,24 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
     uint32_t last_in_page = (page_off + chunk - 1) / bytes_per_cluster;
     bool enospc = false;
     for (uint32_t cip = first_in_page; cip <= last_in_page; cip++) {
-      uint32_t existing =
-          fat32_walk_chain(ip->start_cluster, cluster_idx + cip);
+      uint32_t chain_index = cluster_idx + cip;
+      uint32_t existing = fat32_walk_chain(ip->start_cluster, chain_index);
       if (existing >= 2 && existing < 0x0FFFFFF8)
         continue; // already allocated
+
+      // Sequential extension already has the preceding logical cluster. Keep
+      // that tail across this write instead of rescanning the entire FAT chain
+      // for every new 512-byte cluster (and imposing an artificial 1024-entry
+      // file-size ceiling).
+      if (ip->start_cluster != 0 && append_tail == 0 && chain_index != 0)
+        append_tail = fat32_walk_chain(ip->start_cluster, chain_index - 1);
+      if (ip->start_cluster != 0 &&
+          (append_tail < 2 || append_tail >= 0x0FFFFFF8)) {
+        WARN_ON(1);
+        spin_unlock(&ip->i_lock);
+        return written ? (int)written : -EIO;
+      }
+
       spin_lock(&fat_lock);
       uint32_t new_cluster = fat32_allocate_cluster();
       if (new_cluster == 0) {
@@ -1775,21 +1790,9 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
       if (ip->start_cluster == 0) {
         ip->start_cluster = new_cluster;
       } else {
-        uint32_t tail = ip->start_cluster;
-        int max_tail_walk = 1024;
-        while (max_tail_walk-- > 0) {
-          uint32_t next = fat32_read_entry(tail);
-          if (next >= 0x0FFFFFF8)
-            break;
-          tail = next;
-        }
-        if (max_tail_walk <= 0) {
-          WARN_ON(1);
-          spin_unlock(&fat_lock);
-          return -EIO;
-        }
-        fat32_link_cluster(tail, new_cluster);
+        fat32_link_cluster(append_tail, new_cluster);
       }
+      append_tail = new_cluster;
       spin_unlock(&fat_lock);
 
       // Invalidate page cache — new cluster changes mapping.

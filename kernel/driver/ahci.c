@@ -15,9 +15,11 @@
 #include "kernel/xcore/acpi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/perf/event.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
+#include "xos/perf.h"
 #include <stdbool.h>
 #include <xos/errno.h>
 #include <xos/syscall_nums.h>
@@ -414,12 +416,15 @@ static void ahci_irq_handler(trapframe *tf) {
   __memcpy(msg.data + 12, &ahci_current_req->count, 4);
 
   pid_t caller = ahci_current_req->caller_pid;
+  uint32_t perf_cookie = 0x80000000U | ahci_current_req->cookie;
+  perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_COMPLETE, perf_cookie);
   ahci_current_req = NULL;
   bq_count--;
   bq_head = (bq_head + 1) % BLOCK_QUEUE_SIZE;
 
   // Notify caller process
   notify_and_wake(caller, &msg);
+  perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_WAKE, perf_cookie);
 
   // Issue next queued request if available
   if (bq_count > 0) {
@@ -891,6 +896,8 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
   req->dir = dir;
   req->user_buf = buf;
   req->cookie = ++ahci_cookie_counter;
+  perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_SUBMIT,
+                    0x80000000U | req->cookie);
   req->result = 0;
 
   bq_tail = (bq_tail + 1) % BLOCK_QUEUE_SIZE;

@@ -5,6 +5,7 @@
  */
 
 #include "kernel/driver/virtio_gpu.h"
+#include "xos/perf.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -30,6 +31,7 @@
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/perf/event.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
@@ -204,6 +206,8 @@ static void virtio_gpu_isr(trapframe *tf) {
     struct virtgpu_cmd_pending *prev = NULL;
     while (p) {
       if (p->response_ready) {
+        perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_COMPLETE,
+                          0xc0000000U | (uint32_t)p->hdr.fence_id);
         if (p->hdr.flags & VIRTIO_GPU_FLAG_FENCE) {
           struct drm_fence *f =
               drm_fence_find(p->hdr.ctx_id, p->hdr.ring_idx, p->hdr.fence_id);
@@ -212,6 +216,9 @@ static void virtio_gpu_isr(trapframe *tf) {
         }
         if (p->waiter)
           wake_wq_target(p->waiter);
+        if (p->waiter)
+          perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_WAKE,
+                            0xc0000000U | (uint32_t)p->hdr.fence_id);
         struct virtgpu_cmd_pending *done = p;
         p = p->next;
         if (prev)
@@ -1647,6 +1654,8 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
     drm_fence_put(fence);
     goto err_free_handles;
   }
+  perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_SUBMIT,
+                    0xc0000000U | (uint32_t)fence_id);
 
   spin_lock(&g_drm.virgl_lock);
   for (uint32_t i = 0; i < eb->num_bo_handles; i++) {

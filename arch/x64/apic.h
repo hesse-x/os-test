@@ -20,6 +20,7 @@
 #define LAPIC_ICR_LOW 0x300
 #define LAPIC_ICR_HIGH 0x310
 #define LAPIC_LVT_TIMER 0x320
+#define LAPIC_LVT_PERFMON 0x340
 #define LAPIC_LVT_LINT0 0x350
 #define LAPIC_LVT_LINT1 0x360
 #define LAPIC_TIMER_ICR 0x380 // initial count
@@ -34,6 +35,7 @@
 
 // LAPIC LVT mask bit
 #define LAPIC_LVT_MASKED 0x10000
+#define LAPIC_LVT_DELIVERY_NMI 0x400
 
 // I/O APIC register offsets (MMIO)
 #define IOAPIC_REG 0x00

@@ -14,6 +14,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <xos/perf.h>
+#include <xos/syscall_nums.h>
+
 struct test_entry {
   const char *name;
   const char *path;
@@ -167,6 +170,11 @@ int main(int argc, char **argv, char **envp) {
 
     printf("[RUN]  %-20s ... running\n", name);
 
+#ifdef PERF
+    (void)syscall(SYS_PERF, XOS_PERF_MARK, (long)(i + 1), XOS_PERF_MARK_BEGIN,
+                  XOS_PERF_MARK_STATUS_NONE, 0, 0);
+#endif
+
     pid_t pid = fork();
     if (pid == 0) {
       // The interactive shell ignores the job-control signals (SIGINT/SIGQUIT/
@@ -193,6 +201,10 @@ int main(int argc, char **argv, char **envp) {
     if (pid < 0) {
       printf("[SKIP] %-20s (cannot spawn)\n", name);
       skip_count++;
+#ifdef PERF
+      (void)syscall(SYS_PERF, XOS_PERF_MARK, (long)(i + 1), XOS_PERF_MARK_END,
+                    XOS_PERF_MARK_STATUS_SKIP, 0, 0);
+#endif
       continue;
     }
 
@@ -202,9 +214,19 @@ int main(int argc, char **argv, char **envp) {
     if (status == 0) {
       printf("[PASS] %-20s (exit 0)\n", name);
       pass_count++;
+#ifdef PERF
+      (void)syscall(SYS_PERF, XOS_PERF_MARK, (long)(i + 1), XOS_PERF_MARK_END,
+                    XOS_PERF_MARK_STATUS_PASS, 0, 0);
+#endif
     } else {
       printf("[FAIL] %-20s (exit %d) -- check serial log\n", name, status);
       fail_count++;
+#ifdef PERF
+      uint32_t mark_status = WIFSIGNALED(status) ? XOS_PERF_MARK_STATUS_CRASH
+                                                 : XOS_PERF_MARK_STATUS_FAIL;
+      (void)syscall(SYS_PERF, XOS_PERF_MARK, (long)(i + 1), XOS_PERF_MARK_END,
+                    mark_status, 0, 0);
+#endif
     }
   }
 

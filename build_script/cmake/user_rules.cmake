@@ -82,6 +82,15 @@ elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
 else()
     set(USER_BUILD_FLAGS "")
 endif()
+if(PERF)
+    list(APPEND USER_COMPILE_FLAGS -DPERF)
+    list(APPEND USER_BUILD_FLAGS -g -fno-omit-frame-pointer)
+    set(USER_PERF_LINK_FLAGS -Wl,--build-id=sha1)
+    set(USER_PERF_LD_FLAGS --build-id=sha1)
+else()
+    set(USER_PERF_LINK_FLAGS "")
+    set(USER_PERF_LD_FLAGS "")
+endif()
 
 # Defense: userspace requires SSE (double/printf/FPU all depend on it), any
 # -mno-sse* flag signals a leak from global CMAKE_C_FLAGS (typical source:
@@ -316,6 +325,7 @@ function(add_user_lib lib_name)
 
         add_custom_command(OUTPUT ${SO_FILE}
             COMMAND ${CMAKE_C_COMPILER} -shared -fPIC -nostdlib -nodefaultlibs
+                    ${USER_PERF_LINK_FLAGS}
                     -Wl,--hash-style=gnu
                     -Wl,-soname,lib${ARG_OUTPUT_NAME}.so
                     ${SO_EXTRA_LDFLAGS}
@@ -755,8 +765,8 @@ function(add_user_elf elf_name)
 
     add_custom_command(
         OUTPUT ${ELF_FILE}
-        COMMAND ld -m elf_x86_64 -T ${CMAKE_SOURCE_DIR}/build_script/user_linker.ld ${LD_ARGS} -o ${ELF_FILE}
-        DEPENDS ${LD_DEPS}
+        COMMAND ld -m elf_x86_64 ${USER_PERF_LD_FLAGS} -T ${CMAKE_SOURCE_DIR}/build_script/user_linker.ld ${LD_ARGS} -o ${ELF_FILE}
+        DEPENDS ${LD_DEPS} ${CMAKE_SOURCE_DIR}/build_script/user_linker.ld
         COMMENT "Linking ${elf_name}.elf"
     )
 
@@ -881,6 +891,7 @@ function(add_user_dyn_elf name)
     endforeach()
     add_custom_command(OUTPUT ${ELF_FILE}
         COMMAND ${CMAKE_C_COMPILER} -fno-pie -no-pie
+                ${USER_PERF_LINK_FLAGS}
                 -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1
                 -Wl,--hash-style=gnu
                 -Wl,--no-as-needed

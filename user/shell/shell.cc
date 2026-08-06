@@ -238,7 +238,11 @@ extern "C" int main(int argc, char **argv, char **envp) {
   if (getenv("XOS_SKIP_AUTOTEST") == nullptr) {
     pid_t test_pid = fork();
     if (test_pid == 0) {
+#ifdef PERF
+      execve("/usr/bin/perf", NULL, NULL);
+#else
       execve("/test/test_runner.elf", NULL, NULL);
+#endif
       _exit(127);
     }
     if (test_pid < 0) {

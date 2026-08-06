@@ -5,6 +5,7 @@
  */
 
 #include "kernel/driver/xhci.h"
+#include "xos/perf.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -21,6 +22,7 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/perf/event.h"
 #include "kernel/xcore/sched.h" // schedule, wake_with_event
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
@@ -483,6 +485,8 @@ static void xhci_isr(trapframe *tf) {
       uint32_t cc = (d2 >> 24) & 0xFF;
       uint32_t sid = (d3 >> 24) & 0xFF;
       uint32_t epid = (d3 >> 16) & 0xFF;
+      uint32_t perf_cookie = 0x40000000U | (sid << 16) | epid;
+      perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_COMPLETE, perf_cookie);
 
       if (sid == (uint32_t)xhci_intrs[0].slot_id &&
           epid == (uint32_t)xhci_intrs[0].ep_num) {
@@ -502,6 +506,7 @@ static void xhci_isr(trapframe *tf) {
         xfer_ring_enqueue(xfer_ring, &xhci_intrs[0].enqueue, &xhci_intrs[0].ccs,
                           &norm);
         db_write(xhci_intrs[0].slot_id, xhci_intrs[0].ep_dci);
+        perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_SUBMIT, perf_cookie);
 
         if (cc == CC_SUCCESS) {
           // Read 8-byte HID report from DMA buffer (per-slot DMA source).
@@ -549,6 +554,7 @@ static void xhci_isr(trapframe *tf) {
         xfer_ring_enqueue(xfer_ring, &xhci_intrs[1].enqueue, &xhci_intrs[1].ccs,
                           &norm);
         db_write(xhci_intrs[1].slot_id, xhci_intrs[1].ep_dci);
+        perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_SUBMIT, perf_cookie);
 
         if (cc == CC_SUCCESS || cc == CC_SHORT_PACKET) {
           // Actual report length is dynamic (3 or 4 bytes per report, possibly

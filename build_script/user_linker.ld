@@ -44,6 +44,10 @@ SECTIONS
     } :text
     . = ALIGN(0x1000);
 
+    .note.gnu.build-id : {
+        KEEP(*(.note.gnu.build-id))
+    } :rodata
+
     .rodata : {
         *(.rodata .rodata.*)
         *(.eh_frame .eh_frame.*)
@@ -110,7 +114,6 @@ SECTIONS
 
     /DISCARD/ : {
         *(.note.gnu.property)
-        *(.note.gnu.build-id)
         *(.comment)
     }
 }

@@ -66,8 +66,12 @@ for required in "bin/sh" "lib/ld-musl-x86_64.so.1" "lib/libc.so"; do
     fi
 done
 
-# Total disk size: 192MB = 393216 sectors
-DISK_SECTORS=$((192 * 1024 * 1024 / 512))
+# PERF keeps trace output on the root partition and therefore needs more room.
+if [ "${PERF:-0}" = "1" ]; then
+    DISK_SECTORS=$((512 * 1024 * 1024 / 512))
+else
+    DISK_SECTORS=$((192 * 1024 * 1024 / 512))
+fi
 # Partition 1 (ESP): 32MB = 65536 sectors, starts at LBA 2048 (1MB alignment)
 PART1_START=2048
 PART1_SECTORS=65536

@@ -15,6 +15,7 @@
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/slab.h" // kmem_cache (needed for xtask_cache declaration)
+#include "kernel/xcore/perf/event.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
 
@@ -146,10 +147,12 @@ static inline bool sched_arm_timed_wait(xtask *proc, wait_event event,
 }
 
 static inline void wake_from_wait(xtask *p) {
+  wait_event perf_wait_event = p->wait_event;
   sched_timer_queue_cancel(p);
   p->state = READY;
   p->wait_event = WAIT_NONE;
   p->wait_timed_out = 0;
+  perf_trace_task_wake(p->pid, (uint8_t)perf_wait_event);
   int cpu = p->assigned_cpu;
   // Idempotent enqueue: if run_node is already on a run_queue (a prior wake
   // already enqueued p but schedule() hasn't dequeued it yet — possible when

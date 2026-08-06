@@ -21,12 +21,18 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/extable.h"
 #include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/perf/core.h"
+#include "kernel/xcore/perf/event.h"
+#include "kernel/xcore/perf/pmu.h"
+#include "kernel/xcore/perf/sample.h"
+#include "kernel/xcore/perf/unwind.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include <xos/errno.h>
 #include <xos/page.h>
+#include <xos/perf.h>
 #include <xos/signal.h>
 #include <xos/syscall_nums.h>
 
@@ -270,6 +276,10 @@ static void diag_overlap_dump(trapframe *tf) { (void)tf; }
 #endif
 
 void trap_dispatch(trapframe *tf) {
+  if (tf->trapno == 2) {
+    perf_pmu_handle_nmi(tf);
+    return;
+  }
   trapframe *saved_cur_tf __attribute__((cleanup(restore_cur_tf))) =
       get_cpu_local()->cur_tf;
   get_cpu_local()->cur_tf = tf;
@@ -292,6 +302,7 @@ void trap_dispatch(trapframe *tf) {
   if (tf->trapno >= 32 && tf->trapno < MAX_IRQ_HANDLERS &&
       __atomic_load_n(&irq_owner[tf->trapno], __ATOMIC_ACQUIRE) >= 0) {
     pid_t owner_pid = __atomic_load_n(&irq_owner[tf->trapno], __ATOMIC_ACQUIRE);
+    perf_trace_irq(XOS_PERF_TRACE_IRQ_BEGIN, (uint16_t)tf->trapno, owner_pid);
     // Direct index by PID — no scan needed
     if (owner_pid >= 0 && owner_pid < MAX_PROC) {
       xtask *target = task_get(owner_pid);
@@ -317,13 +328,20 @@ void trap_dispatch(trapframe *tf) {
       }
       spin_unlock_irqrestore(&cpu_locals[target_cpu].scheduler_lock, flags);
     }
+    perf_trace_irq(XOS_PERF_TRACE_IRQ_END, (uint16_t)tf->trapno, owner_pid);
     lapic_eoi();
     return;
   }
 
   // Check registered handler
   if (tf->trapno < MAX_IRQ_HANDLERS && irq_handlers[tf->trapno] != NULL) {
+    bool trace_irq =
+        tf->trapno != LAPIC_TIMER_VECTOR && tf->trapno != RESCHEDULE_VECTOR;
+    if (trace_irq)
+      perf_trace_irq(XOS_PERF_TRACE_IRQ_BEGIN, (uint16_t)tf->trapno, -1);
     irq_handlers[tf->trapno](tf);
+    if (trace_irq)
+      perf_trace_irq(XOS_PERF_TRACE_IRQ_END, (uint16_t)tf->trapno, -1);
     return;
   }
 
@@ -653,6 +671,17 @@ static void reschedule_ipi_handler(trapframe *tf) {
 }
 
 static void timer_handler(trapframe *tf) {
+  perf_watchdog_tick();
+  perf_pmu_ensure_cpu();
+#ifdef PERF
+  if (!perf_pmu_active_cpu()) {
+    uint64_t frames[PERF_CALLCHAIN_MAX_DEPTH];
+    uint8_t stop;
+    uint8_t depth = perf_unwind_trapframe(tf, frames, &stop);
+    perf_record_callchain((unsigned)get_cpu_local()->cpu_id, frames, depth,
+                          XOS_PERF_SAMPLE_LAPIC_TIMER, stop);
+  }
+#endif
   tick++;
   lapic_eoi();
 
@@ -711,6 +740,7 @@ static void timer_handler(trapframe *tf) {
       break; // sorted, stop at first unexpired
     timer_queue_wait_pop(p);
     if (p->state == BLOCKED) {
+      wait_event perf_wait_event = p->wait_event;
       // A thread borrowed a deadline onto the timer queue. On expiry the BSD
       // alarm_check hook re-reads the live process alarm_deadline under
       // sig_lock: if now due it clears the deadline AND forces SIGALRM,
@@ -726,6 +756,7 @@ static void timer_handler(trapframe *tf) {
       p->wait_event = WAIT_NONE;
       p->wait_timed_out = 1;
       p->wait_deadline = 0;
+      perf_trace_task_wake(p->pid, (uint8_t)perf_wait_event);
       if (p->proc && alarm_check_hook)
         alarm_check_hook(p, now);
       list_push_back(&wakeup_list, &p->wait_node);

@@ -53,6 +53,8 @@
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/perf/core.h"
+#include "kernel/xcore/perf/phase.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
@@ -71,6 +73,7 @@
 #include <xos/ioctl.h>
 #include <xos/mman.h>
 #include <xos/page.h>
+#include <xos/perf.h>
 #include <xos/prctl.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
@@ -153,6 +156,7 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   int32_t exit_code = encoded_exit_code;
   proc->exit_code = exit_code;       // xtask (UAF-safe for waitpid)
   proc->proc->exit_code = exit_code; // proc (legacy, waitpid now reads xtask)
+  perf_target_exit(proc, exit_code);
   printk(LOG_INFO, "do_exit: pid=%d tid=%d exit_code=%d\n", proc->tgid,
          proc->pid, exit_code);
 
@@ -348,6 +352,101 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   //    free the live cr3 mid-exit.
   schedule();
   return 0;
+}
+
+int64_t sys_perf(int64_t cmd, int64_t arg1, int64_t arg2, int64_t arg3,
+                 int64_t arg4, int64_t arg5) {
+#ifndef PERF
+  (void)cmd;
+  (void)arg1;
+  (void)arg2;
+  (void)arg3;
+  (void)arg4;
+  (void)arg5;
+  return -ENOSYS;
+#else
+  if (current_proc->euid != 0)
+    return -EPERM;
+
+  switch (cmd) {
+  case XOS_PERF_GET_INFO: {
+    if (arg1 == 0 || arg2 != (int64_t)sizeof(struct xos_perf_info) || arg3 ||
+        arg4 || arg5)
+      return -EINVAL;
+    struct xos_perf_info info;
+    perf_get_info(&info);
+    return copy_to_user((void __user *)(uintptr_t)arg1, &info, sizeof(info))
+               ? -EFAULT
+               : 0;
+  }
+  case XOS_PERF_REGISTER_TARGET: {
+    if (arg1 <= 0 || arg1 >= MAX_PROC || arg2 || arg3 || arg4 || arg5)
+      return -EINVAL;
+    xtask *target = tasks[arg1];
+    if (!target || target->pid != (pid_t)arg1)
+      return -ESRCH;
+    perf_register_target(target);
+    return 0;
+  }
+  case XOS_PERF_MARK:
+    if (arg1 <= 0 || arg1 > UINT16_MAX ||
+        (arg2 != XOS_PERF_MARK_BEGIN && arg2 != XOS_PERF_MARK_END) ||
+        arg3 < 0 || arg3 > UINT32_MAX || arg4 || arg5)
+      return -EINVAL;
+    perf_mark((uint16_t)arg1, (uint8_t)arg2, (uint32_t)arg3);
+    return 0;
+  case XOS_PERF_FREEZE:
+    if ((arg1 != XOS_PERF_END_MANUAL && arg1 != XOS_PERF_END_WATCHDOG) ||
+        (arg2 != 0 && arg2 != 1) ||
+        (arg1 == XOS_PERF_END_WATCHDOG && arg2 != 0) || arg3 || arg4 || arg5)
+      return -EINVAL;
+    return perf_freeze((uint32_t)arg1, arg2 != 0) == 0 ? 0 : -EBUSY;
+  case XOS_PERF_READ: {
+    if (arg1 == 0 || arg2 <= 0 || arg2 > XOS_PERF_MAX_READ || arg3 < 0 ||
+        arg4 || arg5)
+      return -EINVAL;
+    size_t length = (size_t)arg2;
+    void *buffer = kmalloc(length);
+    if (!buffer)
+      return -ENOMEM;
+    size_t copied = perf_raw_read((uint64_t)arg3, buffer, length);
+    if (copied == 0) {
+      struct xos_perf_info info;
+      perf_get_info(&info);
+      kfree(buffer);
+      return info.state == XOS_PERF_FROZEN ? 0 : -EBUSY;
+    }
+    if (copy_to_user((void __user *)(uintptr_t)arg1, buffer, copied)) {
+      kfree(buffer);
+      return -EFAULT;
+    }
+    kfree(buffer);
+    return (int64_t)copied;
+  }
+  case XOS_PERF_GET_METADATA: {
+    if (arg1 == 0 || arg2 != (int64_t)sizeof(struct xos_perf_metadata) ||
+        arg3 || arg4 || arg5)
+      return -EINVAL;
+    struct xos_perf_metadata metadata;
+    perf_get_metadata(&metadata);
+    return copy_to_user((void __user *)(uintptr_t)arg1, &metadata,
+                        sizeof(metadata))
+               ? -EFAULT
+               : 0;
+  }
+  case XOS_PERF_REQUEST_EXIT:
+    if (arg1 || arg2 || arg3 || arg4 || arg5)
+      return -EINVAL;
+    outl(0xf4, 0x10);
+    return 0;
+  case XOS_PERF_CHECKPOINT:
+    if (arg1 || arg2 || arg3 || arg4 || arg5)
+      return -EINVAL;
+    return perf_checkpoint() == 0 ? 0 : -EBUSY;
+  default:
+    return -EINVAL;
+  }
+#endif
 }
 
 // sys_exit: user-space exit/_exit syscall entry point. Encodes
@@ -6812,6 +6911,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_sysconf(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_GETRANDOM:
     return sys_getrandom(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_PERF:
+    return sys_perf(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_PIPE:
     return sys_pipe(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_PIPE2:

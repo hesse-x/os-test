@@ -12,6 +12,8 @@
 #include "kernel/driver/virtio_gpu.h"
 #include "kernel/driver/xhci.h"
 #include "kernel/xcore/log.h"
+#include "kernel/xcore/perf/phase.h"
+#include "kernel/xcore/perf/phase_ids.h"
 #include "kernel/xcore/trap.h"
 
 // Driver definitions (in respective .c files)
@@ -26,7 +28,9 @@ static void driver_timer_poll(void) {
 }
 
 void driver_init(void) {
+  PERF_PHASE_BEGIN(PERF_PHASE_PCI);
   pci_init();
+  PERF_PHASE_END(PERF_PHASE_PCI);
   printk(LOG_INFO, "driver_init: pci_init done\n");
 
   // Register all built-in drivers
