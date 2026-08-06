@@ -283,9 +283,12 @@ tools/perf-extract.sh build/disk.img build/perf-results/manual
 ```text
 build/perf-symbols/
 build/perf-symbols/build-id-manifest.tsv
+build/perf-symbols/test-manifest.tsv
 ```
 
 raw 和 metadata 是本次运行的数据，`perf-symbols/` 是与本次构建匹配的符号副本。不要拿另一次构建的 ELF 做地址解析。
+`test-manifest.tsv` 保存 test marker ID、名称和镜像路径，报告器用它为文本、JSON
+和 trace 输出恢复稳定的测试名称；它必须和同目录的本次构建符号一起保留。
 
 ### 15.4 阅读报告
 

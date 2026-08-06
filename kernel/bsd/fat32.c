@@ -295,15 +295,74 @@ static uint32_t fat32_allocate_cluster(void) {
   return 0; // ENOSPC
 }
 
+static bool fat32_chain_step(uint32_t cluster, uint64_t cluster_limit,
+                             uint32_t *next, bool *at_end) {
+  if (cluster >= 0x0FFFFFF8) {
+    *at_end = true;
+    return true;
+  }
+  if (cluster < 2 || cluster >= cluster_limit) {
+    printk(LOG_WARN, "fat32: invalid cluster %u in chain\n", cluster);
+    return false;
+  }
+  *next = fat32_read_entry(cluster);
+  *at_end = *next >= 0x0FFFFFF8;
+  if (!*at_end && (*next < 2 || *next >= cluster_limit)) {
+    printk(LOG_WARN, "fat32: cluster %u points outside volume to %u\n", cluster,
+           *next);
+    return false;
+  }
+  return true;
+}
+
+// Validate before mutation so clearing entries cannot hide a cycle that loops
+// back through an already-freed cluster.
+static bool fat32_chain_is_acyclic(uint32_t start_cluster,
+                                   uint64_t cluster_limit) {
+  uint32_t slow = start_cluster;
+  uint32_t fast = start_cluster;
+  uint64_t max_steps = cluster_limit - 2;
+  for (uint64_t step = 0; step < max_steps; step++) {
+    bool at_end;
+    if (!fat32_chain_step(slow, cluster_limit, &slow, &at_end))
+      return false;
+    if (at_end)
+      return true;
+    if (!fat32_chain_step(fast, cluster_limit, &fast, &at_end))
+      return false;
+    if (at_end)
+      return true;
+    if (!fat32_chain_step(fast, cluster_limit, &fast, &at_end))
+      return false;
+    if (at_end)
+      return true;
+    if (slow == fast) {
+      printk(LOG_WARN, "fat32: cycle detected at cluster %u\n", slow);
+      return false;
+    }
+  }
+  return false;
+}
+
 // Free an entire cluster chain starting from start_cluster.
 static void fat32_free_chain(uint32_t start_cluster) {
+  if (start_cluster < 2 || start_cluster >= 0x0FFFFFF8)
+    return;
+
+  uint64_t fat_entry_limit = (uint64_t)spf32 * (512 / sizeof(uint32_t));
+  uint64_t cluster_limit =
+      total_data_clusters ? (uint64_t)total_data_clusters + 2 : fat_entry_limit;
+  if (cluster_limit > fat_entry_limit)
+    cluster_limit = fat_entry_limit;
+  if (cluster_limit <= 2 ||
+      !fat32_chain_is_acyclic(start_cluster, cluster_limit)) {
+    WARN_ON(1);
+    return;
+  }
+
   uint32_t c = start_cluster;
-  int max_free = 1024; // safety limit: max clusters in a single chain
-  while (c >= 2 && c < 0x0FFFFFF8) {
-    if (--max_free <= 0) {
-      WARN_ON(1); // FAT chain loop detected
-      break;
-    }
+  uint64_t remaining = cluster_limit - 2;
+  while (c >= 2 && c < 0x0FFFFFF8 && remaining-- > 0) {
     uint32_t next = fat32_read_entry(c);
     fat32_write_fat_entry(c, 0);
     if (c < next_free_hint)

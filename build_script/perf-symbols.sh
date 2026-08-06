@@ -7,6 +7,7 @@ BUILD_DIR="$PROJECT_DIR/build"
 MANIFEST="$BUILD_DIR/image_manifest.txt"
 SYMBOL_DIR="$BUILD_DIR/perf-symbols"
 BUILD_ID_MANIFEST="$SYMBOL_DIR/build-id-manifest.tsv"
+TEST_MANIFEST="$SYMBOL_DIR/test-manifest.tsv"
 
 mkdir -p "$SYMBOL_DIR"
 : > "$BUILD_ID_MANIFEST"
@@ -35,4 +36,14 @@ while IFS=$'\t' read -r artifact image_path partition; do
 done < "$MANIFEST"
 
 LC_ALL=C sort -u -o "$BUILD_ID_MANIFEST" "$BUILD_ID_MANIFEST"
+awk -F'"' '
+    /^[[:space:]]*\{"[^"]+",[[:space:]]*"[^"]+"\},?[[:space:]]*$/ {
+        printf "%d\t%s\t%s\n", ++id, $2, $4
+    }
+' "$PROJECT_DIR/user/test/test_runner.c" > "$TEST_MANIFEST"
+if [ ! -s "$TEST_MANIFEST" ]; then
+    echo "perf-symbols: no test entries found in test_runner.c" >&2
+    exit 1
+fi
 echo "perf-symbols: wrote $BUILD_ID_MANIFEST"
+echo "perf-symbols: wrote $TEST_MANIFEST"
