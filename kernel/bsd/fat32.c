@@ -46,31 +46,38 @@ static uint32_t next_free_hint = 2;
 // writes). Lock order: i_lock → fat_lock → ahci_lock (via blk_write).
 static spinlock fat_lock = SPINLOCK_INIT;
 
-// ==================== FAT sector cache (16 slots, LRU) ====================
-#define FAT_CACHE_PAGES 16
+// ==================== FAT sector cache ====================
+// A cache miss fetches a whole aligned group. FAT chain walks are sequential,
+// so this turns up to eight 512-byte polling commands into one 4KB command.
+#define FAT_CACHE_PAGES 128
+#define FAT_CACHE_READAHEAD_SECTORS 8
+
+#if (FAT_CACHE_PAGES & (FAT_CACHE_PAGES - 1)) != 0
+#error "FAT_CACHE_PAGES must be a power of two"
+#endif
+#if (FAT_CACHE_PAGES % FAT_CACHE_READAHEAD_SECTORS) != 0
+#error "FAT cache groups must not wrap the data array"
+#endif
 
 struct fat_cache_entry {
   uint32_t sector_lba;
-  uint8_t data[512];
+  uint32_t generation;
   bool filling;
 };
 
 static struct fat_cache_entry fat_cache[FAT_CACHE_PAGES];
-static uint32_t fat_cache_time = 0;
-static uint32_t fat_cache_age[FAT_CACHE_PAGES];
+static uint8_t fat_cache_data[FAT_CACHE_PAGES][512]
+    __attribute__((aligned(4096)));
 static spinlock fat_cache_lock = SPINLOCK_INIT;
 
-static int fat_cache_lookup(uint32_t sector_lba) {
-  spin_lock(&fat_cache_lock);
-  for (int i = 0; i < FAT_CACHE_PAGES; i++) {
-    if (!fat_cache[i].filling && fat_cache[i].sector_lba == sector_lba) {
-      fat_cache_age[i] = ++fat_cache_time;
-      spin_unlock(&fat_cache_lock);
-      return i;
-    }
-  }
-  spin_unlock(&fat_cache_lock);
-  return -1;
+static uint64_t fat_cache_hits;
+static uint64_t fat_cache_misses;
+static uint64_t fat_cache_fill_waits;
+static uint64_t fat_cache_io_commands;
+static uint64_t fat_cache_io_sectors;
+
+static int fat_cache_slot(uint32_t sector_lba) {
+  return (int)((sector_lba - fat_start_lba) & (FAT_CACHE_PAGES - 1));
 }
 
 // Read FAT sector into cache, returns cache slot.
@@ -79,62 +86,75 @@ static int fat_cache_lookup(uint32_t sector_lba) {
 // under fat_cache_lock only after the sector is complete. Consumers revalidate
 // the tag and copy their FAT word under the same lock.
 static int fat_cache_read(uint32_t sector_lba) {
-  int slot = fat_cache_lookup(sector_lba);
-  if (slot >= 0)
-    return slot;
+  uint32_t relative = sector_lba - fat_start_lba;
+  uint32_t group_relative =
+      relative & ~(uint32_t)(FAT_CACHE_READAHEAD_SECTORS - 1);
+  uint32_t group_lba = fat_start_lba + group_relative;
+  uint32_t group_count = FAT_CACHE_READAHEAD_SECTORS;
+  if (group_relative + group_count > spf32)
+    group_count = spf32 - group_relative;
+  int slot = fat_cache_slot(sector_lba);
+  int group_slot = (int)(group_relative & (FAT_CACHE_PAGES - 1));
+  uint32_t generations[FAT_CACHE_READAHEAD_SECTORS];
 
-  // Pick an LRU victim under fat_cache_lock and invalidate it immediately so no
-  // concurrent lookup reads the buffer while we refill it. Re-check the tag
-  // inside the lock in case another CPU just filled this sector.
-  spin_lock(&fat_cache_lock);
-  for (int i = 0; i < FAT_CACHE_PAGES; i++) {
-    if (!fat_cache[i].filling && fat_cache[i].sector_lba == sector_lba) {
-      fat_cache_age[i] = ++fat_cache_time;
-      spin_unlock(&fat_cache_lock);
-      return i;
-    }
-  }
-  int best = -1;
-  for (int i = 0; i < FAT_CACHE_PAGES; i++) {
-    if (!fat_cache[i].filling &&
-        (best < 0 || fat_cache_age[i] < fat_cache_age[best]))
-      best = i;
-  }
-  if (best < 0) {
-    spin_unlock(&fat_cache_lock);
-    return -1;
-  }
-  fat_cache[best].sector_lba = 0xFFFFFFFF; // invalidate victim
-  fat_cache[best].filling = true;
-  fat_cache_age[best] = ++fat_cache_time;
-  spin_unlock(&fat_cache_lock);
-
-  // Fill the buffer with no fat_cache_lock held (blk_read is polling and takes
-  // ahci_lock itself). The slot is invisible to lookups during the fill.
-  if (blk_read_sector(sector_lba, fat_cache[best].data) != 0) {
+  for (;;) {
     spin_lock(&fat_cache_lock);
-    fat_cache[best].filling = false;
-    spin_unlock(&fat_cache_lock);
-    return -1;
-  }
+    if (!fat_cache[slot].filling && fat_cache[slot].sector_lba == sector_lba) {
+      __atomic_fetch_add(&fat_cache_hits, 1, __ATOMIC_RELAXED);
+      spin_unlock(&fat_cache_lock);
+      return slot;
+    }
 
-  // Publish under the cache lock. Readers copy their FAT word under the same
-  // lock, so a slot cannot be evicted between tag validation and data access.
-  spin_lock(&fat_cache_lock);
-  fat_cache[best].sector_lba = sector_lba;
-  fat_cache[best].filling = false;
-  spin_unlock(&fat_cache_lock);
-  return best;
+    // Overlapping fills share the result instead of issuing duplicate AHCI
+    // commands. A group is aligned, so its backing rows are contiguous.
+    bool busy = false;
+    for (uint32_t i = 0; i < group_count; i++) {
+      if (fat_cache[group_slot + i].filling) {
+        busy = true;
+        break;
+      }
+    }
+    if (busy) {
+      __atomic_fetch_add(&fat_cache_fill_waits, 1, __ATOMIC_RELAXED);
+      spin_unlock(&fat_cache_lock);
+      __asm__ volatile("pause");
+      continue;
+    }
+
+    for (uint32_t i = 0; i < group_count; i++) {
+      struct fat_cache_entry *entry = &fat_cache[group_slot + i];
+      entry->sector_lba = group_lba + i;
+      entry->filling = true;
+      generations[i] = ++entry->generation;
+    }
+    __atomic_fetch_add(&fat_cache_misses, 1, __ATOMIC_RELAXED);
+    spin_unlock(&fat_cache_lock);
+
+    int rc = blk_read(group_lba, group_count, fat_cache_data[group_slot]);
+    __atomic_fetch_add(&fat_cache_io_commands, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&fat_cache_io_sectors, group_count, __ATOMIC_RELAXED);
+
+    spin_lock(&fat_cache_lock);
+    for (uint32_t i = 0; i < group_count; i++) {
+      struct fat_cache_entry *entry = &fat_cache[group_slot + i];
+      if (entry->generation != generations[i])
+        entry->sector_lba = 0xFFFFFFFF;
+      else if (rc != 0)
+        entry->sector_lba = 0xFFFFFFFF;
+      entry->filling = false;
+    }
+    spin_unlock(&fat_cache_lock);
+    return rc == 0 ? slot : -1;
+  }
 }
 
 // Invalidate FAT cache entries for a given sector.
 static void fat_cache_invalidate_sector(uint32_t sector_lba) {
   spin_lock(&fat_cache_lock);
-  for (int i = 0; i < FAT_CACHE_PAGES; i++) {
-    if (fat_cache[i].sector_lba == sector_lba) {
-      fat_cache[i].sector_lba = 0xFFFFFFFF;
-      fat_cache_age[i] = 0;
-    }
+  int slot = fat_cache_slot(sector_lba);
+  if (fat_cache[slot].sector_lba == sector_lba) {
+    fat_cache[slot].sector_lba = 0xFFFFFFFF;
+    fat_cache[slot].generation++;
   }
   spin_unlock(&fat_cache_lock);
 }
@@ -154,7 +174,7 @@ static uint32_t fat32_read_entry(uint32_t cluster) {
 
     spin_lock(&fat_cache_lock);
     if (!fat_cache[slot].filling && fat_cache[slot].sector_lba == fat_sector) {
-      const uint8_t *src = fat_cache[slot].data + offset_in_sector;
+      const uint8_t *src = fat_cache_data[slot] + offset_in_sector;
       uint32_t entry_val = (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
                            ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
       spin_unlock(&fat_cache_lock);
@@ -1662,8 +1682,8 @@ int fat32_init(void) {
   // Initialize FAT cache.
   for (int i = 0; i < FAT_CACHE_PAGES; i++) {
     fat_cache[i].sector_lba = 0xFFFFFFFF;
+    fat_cache[i].generation = 0;
     fat_cache[i].filling = false;
-    fat_cache_age[i] = 0;
   }
 
   // Read MBR (LBA 0).
@@ -1732,8 +1752,10 @@ int fat32_init(void) {
     total_data_clusters = 0;
   }
 
-  // Pre-warm FAT cache.
-  for (uint32_t s = 0; s < spf32; s++) {
+  // Keep the beginning of the FAT resident. Warming the whole table only
+  // evicts its useful prefix when the table is larger than the cache.
+  uint32_t prewarm_sectors = spf32 < FAT_CACHE_PAGES ? spf32 : FAT_CACHE_PAGES;
+  for (uint32_t s = 0; s < prewarm_sectors; s++) {
     fat_cache_read(fat_start_lba + s);
   }
 
@@ -1743,6 +1765,20 @@ int fat32_init(void) {
       part_start_lba, fat_start_lba, data_start_lba, root_cluster,
       sectors_per_cluster, bytes_per_cluster, total_data_clusters);
   return 0;
+}
+
+void fat32_dump_cache_stats(void) {
+  uint64_t hits = __atomic_load_n(&fat_cache_hits, __ATOMIC_RELAXED);
+  uint64_t misses = __atomic_load_n(&fat_cache_misses, __ATOMIC_RELAXED);
+  uint64_t accesses = hits + misses;
+  uint64_t hit_permille = accesses ? hits * 1000 / accesses : 0;
+  printk(LOG_INFO,
+         "fat32-cache: hits=%lu misses=%lu hit=%lu.%lu%% waits=%lu "
+         "commands=%lu sectors=%lu\n",
+         hits, misses, hit_permille / 10, hit_permille % 10,
+         __atomic_load_n(&fat_cache_fill_waits, __ATOMIC_RELAXED),
+         __atomic_load_n(&fat_cache_io_commands, __ATOMIC_RELAXED),
+         __atomic_load_n(&fat_cache_io_sectors, __ATOMIC_RELAXED));
 }
 
 // ==================== File read ====================

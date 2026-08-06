@@ -437,6 +437,7 @@ int64_t sys_perf(int64_t cmd, int64_t arg1, int64_t arg2, int64_t arg3,
   case XOS_PERF_REQUEST_EXIT:
     if (arg1 || arg2 || arg3 || arg4 || arg5)
       return -EINVAL;
+    fat32_dump_cache_stats();
     outl(0xf4, 0x10);
     return 0;
   case XOS_PERF_CHECKPOINT:

@@ -36,6 +36,7 @@ uint32_t fat32_bytes_per_cluster(void);
 
 /* Core operations */
 int fat32_init(void);
+void fat32_dump_cache_stats(void);
 uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index);
 /* Walk the chain to the cluster at cluster_index, resuming from ip->walk_cursor
  * when possible (forward-only). Advances the cursor; returns the cluster or an
