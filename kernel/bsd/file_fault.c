@@ -92,8 +92,9 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
   // ---- FD_REGULAR file-backed mapping: page-in via the page cache ----
   if (mr->inode) {
     uint64_t page_idx = fault_off / PAGE_SIZE;
-    struct cache_page *cp = page_cache_fill(mr->inode, page_idx);
-    if (!cp) {
+    struct cache_page *cp;
+    int fill_rc = page_cache_get(mr->inode, page_idx, &cp);
+    if (fill_rc) {
       printk(LOG_WARN, "file_fault: page_cache_fill failed inode=%p idx=%lu\n",
              (void *)mr->inode, (unsigned long)page_idx);
       return 0; // read error → SIGSEGV

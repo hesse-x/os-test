@@ -145,6 +145,13 @@ static struct test_entry tests[] = {
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))
 
+#ifdef PERF
+static int perf_excludes_long_timeout_test(const char *name) {
+  return strcmp(name, "accept_no_timeout") == 0 || strcmp(name, "epoll") == 0 ||
+         strcmp(name, "ioctl_varlen") == 0;
+}
+#endif
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -167,6 +174,18 @@ int main(int argc, char **argv, char **envp) {
   for (size_t i = 0; i < NUM_TESTS; i++) {
     const char *name = tests[i].name;
     const char *path = tests[i].path;
+
+#ifdef PERF
+    if (perf_excludes_long_timeout_test(name)) {
+      printf("[SKIP] %-20s (long timeout excluded from PERF)\n", name);
+      (void)syscall(SYS_PERF, XOS_PERF_MARK, (long)(i + 1), XOS_PERF_MARK_BEGIN,
+                    XOS_PERF_MARK_STATUS_NONE, 0, 0);
+      (void)syscall(SYS_PERF, XOS_PERF_MARK, (long)(i + 1), XOS_PERF_MARK_END,
+                    XOS_PERF_MARK_STATUS_SKIP, 0, 0);
+      skip_count++;
+      continue;
+    }
+#endif
 
     printf("[RUN]  %-20s ... running\n", name);
 

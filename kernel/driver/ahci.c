@@ -15,6 +15,7 @@
 #include "kernel/xcore/acpi.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
+#include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/perf/event.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
@@ -64,6 +65,7 @@
 // ===================== Module state =====================
 static void __iomem *abar;
 static int active_port = -1;
+static uint64_t active_sector_count;
 
 spinlock ahci_lock = SPINLOCK_INIT;
 
@@ -92,6 +94,7 @@ typedef struct block_req {
   void *user_buf;  // user-space virtual address
   uint32_t cookie; // monotonic ID for completion matching
   int result;      // 0=ok, EIO=error
+  uint8_t staging[AHCI_MAX_SECTORS * 512];
 } block_req;
 
 static block_req block_pool[BLOCK_QUEUE_SIZE];
@@ -105,6 +108,10 @@ static uint32_t ahci_cookie_counter = 0;
 static inline void __iomem *port_reg(int port, uint32_t offset) {
   return (void __iomem *)((uint8_t __iomem *)abar + 0x100 + port * 0x80 +
                           offset);
+}
+
+uint64_t ahci_sector_count(void) {
+  return __atomic_load_n(&active_sector_count, __ATOMIC_ACQUIRE);
 }
 
 static void ahci_puts(const char *s) { (void)s; }
@@ -467,6 +474,9 @@ void ahci_issue_cmd(block_req *req) {
   uint32_t chunk = req->count;
   uint8_t cmd_byte = (req->dir == 0) ? CMD_READ_DMA_EXT : CMD_WRITE_DMA_EXT;
 
+  if (req->dir == 1)
+    __memcpy((void *)bounce_virt, req->staging, (size_t)chunk * 512);
+
   // Build Command Table: zero FIS area
   __memset((void *)cmd_table_virt, 0, 0x80);
 
@@ -641,8 +651,16 @@ __attribute__((no_sanitize("kernel-address"))) void ahci_init() {
     if (ahci_identify_device(i, idbuf) == 0) {
       ahci_puts(" SATA disk\n");
       // Keep the first detected port as active; try all ports for ELF later
-      if (active_port < 0)
+      if (active_port < 0) {
         active_port = i;
+        const uint16_t *words = (const uint16_t *)idbuf;
+        active_sector_count =
+            (uint64_t)words[100] | ((uint64_t)words[101] << 16) |
+            ((uint64_t)words[102] << 32) | ((uint64_t)words[103] << 48);
+        if (active_sector_count == 0)
+          active_sector_count =
+              (uint64_t)words[60] | ((uint64_t)words[61] << 16);
+      }
       disk_count++;
     } else {
       ahci_puts(" ATAPI, skipping\n");
@@ -887,29 +905,33 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
   // Validate user buffer
   uint64_t ptr = (uint64_t)buf;
   if (!ptr || ptr >= KERNEL_VMA_BOUNDARY)
-    return EFAULT;
+    return -EFAULT;
   uint64_t end = ptr + (uint64_t)count * 512;
   if (end < ptr || end > KERNEL_VMA_BOUNDARY)
-    return EFAULT;
+    return -EFAULT;
   if (count == 0 || count > AHCI_MAX_SECTORS)
-    return EINVAL;
+    return -EINVAL;
+  if (dir > 1)
+    return -EINVAL;
+  uint64_t capacity = ahci_sector_count();
+  if (capacity && ((uint64_t)lba + count > capacity))
+    return -EINVAL;
 
   uint64_t flags;
   spin_lock_irqsave(&ahci_lock, &flags);
 
   if (bq_count >= BLOCK_QUEUE_SIZE) {
     spin_unlock_irqrestore(&ahci_lock, flags);
-    return EBUSY;
-  }
-
-  // For writes: copy user data to bounce buffer (in syscall context, CR3
-  // loaded)
-  if (dir == 1) {
-    __memcpy((void *)bounce_virt, buf, (size_t)count * 512);
+    return -EBUSY;
   }
 
   // Allocate request from pool
   block_req *req = &block_pool[bq_tail];
+  if (dir == 1 && copy_from_user(req->staging, (const void __user *)buf,
+                                 (size_t)count * 512)) {
+    spin_unlock_irqrestore(&ahci_lock, flags);
+    return -EFAULT;
+  }
   req->caller_pid = current_task->pid;
   req->lba = lba;
   req->count = count;

@@ -229,6 +229,10 @@ runner 正常结束后 collector 会先完成 raw/metadata 的 `fsync + rename +
 tools/perf-run.sh build/perf-results/run-001
 ```
 
+PERF runner 默认跳过 `accept_no_timeout`、`epoll` 和 `ioctl_varlen` 三个长
+timeout 正确性测试，并在报告中将它们记为 `skip`。这三项合计约 55 秒，主要
+测量主动等待而不是 CPU 热点；普通 `./build.sh --test` 仍会完整执行它们。
+
 不要使用 `repeat.sh` 代替 `perf-run.sh` 做 PERF 采集。`repeat.sh` 看到 Test Runner 的 Summary 后会立即停止 QEMU，可能早于 collector 的最终 `fsync` 和 rename。
 
 ### 15.2 checkpoint 与硬卡死恢复

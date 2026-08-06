@@ -9,5 +9,7 @@ tmp
 log.txt
 *.out
 *.orig
+*.pyc
+__pycache__
 
 build

@@ -54,7 +54,6 @@
 #include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/perf/core.h"
-#include "kernel/xcore/perf/phase.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
@@ -73,7 +72,6 @@
 #include <xos/ioctl.h>
 #include <xos/mman.h>
 #include <xos/page.h>
-#include <xos/perf.h>
 #include <xos/prctl.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
@@ -81,6 +79,11 @@
 #include <xos/syscall_nums.h>
 #include <xos/time.h>
 #include <xos/utsname.h>
+
+#ifdef PERF
+#include "kernel/xcore/perf/phase.h"
+#include <xos/perf.h>
+#endif // PERF
 
 // OS-unique mmap flags (not in uapi mman.h, collision-free in 1024+ namespace)
 #define MAP_PHYSICAL 0x80000000
@@ -5987,6 +5990,9 @@ int64_t sys_fadvise64(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 // ===================== BSD syscall: block_async =====================
 int64_t sys_block_async(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                         int64_t unused1, int64_t unused2) {
+  if (arg1 < 0 || (uint64_t)arg1 > UINT32_MAX || arg3 <= 0 ||
+      (uint64_t)arg3 > UINT32_MAX || (arg4 != 0 && arg4 != 1))
+    return -EINVAL;
   uint32_t lba = (uint32_t)arg1;
   void __user *buf = (void __user *__force)arg2;
   uint32_t count = (uint32_t)arg3;

@@ -20,6 +20,7 @@
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/inotify.h"
 #include "kernel/bsd/page_cache.h"
+#include "kernel/driver/ahci.h"
 #include "kernel/driver/blk_dev.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/log.h"
@@ -75,6 +76,13 @@ static uint64_t fat_cache_misses;
 static uint64_t fat_cache_fill_waits;
 static uint64_t fat_cache_io_commands;
 static uint64_t fat_cache_io_sectors;
+static uint64_t fat_batch_count;
+static uint64_t fat_sector_reads;
+static uint64_t fat1_writes;
+static uint64_t fat2_writes;
+static uint64_t fat_zero_commands;
+static uint8_t fat_zero_region[AHCI_MAX_SECTORS * 512]
+    __attribute__((aligned(4096)));
 
 static int fat_cache_slot(uint32_t sector_lba) {
   return (int)((sector_lba - fat_start_lba) & (FAT_CACHE_PAGES - 1));
@@ -285,34 +293,87 @@ uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index) {
 // (directory lookups) don't take fat_lock and can refill/evict a shared
 // fat_cache slot mid-scan, which would let us read a buffer changing under us.
 // Read the sector into a private stack buffer so the scan bytes are stable.
+static int fat32_allocate_run(uint32_t wanted, uint32_t *first, uint32_t *last,
+                              uint32_t *allocated);
+
 static uint32_t fat32_allocate_cluster(void) {
+  uint32_t first = 0;
+  uint32_t last = 0;
+  uint32_t allocated = 0;
+  if (fat32_allocate_run(1, &first, &last, &allocated) != 0)
+    return 0;
+  return first;
+}
+
+static void fat32_store_entry(uint8_t *p, uint32_t value) {
+  uint32_t old = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                 ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+  uint32_t nv = (old & 0xF0000000) | (value & 0x0FFFFFFF);
+  p[0] = (uint8_t)nv;
+  p[1] = (uint8_t)(nv >> 8);
+  p[2] = (uint8_t)(nv >> 16);
+  p[3] = (uint8_t)(nv >> 24);
+}
+
+/* Allocate one physically contiguous run from a single FAT sector. */
+static int fat32_allocate_run(uint32_t wanted, uint32_t *first, uint32_t *last,
+                              uint32_t *allocated) {
+  if (!wanted || !first || !last || !allocated)
+    return -EINVAL;
   uint8_t sec[512];
   for (uint32_t sector = 0; sector < spf32; sector++) {
     uint32_t abs_sector = ((next_free_hint / 128) + sector) % spf32;
     if (blk_read_sector(fat_start_lba + abs_sector, sec) != 0)
       continue;
+    __atomic_fetch_add(&fat_sector_reads, 1, __ATOMIC_RELAXED);
 
-    const uint8_t *fd = sec;
     for (int i = 0; i < 128; i++) {
       uint32_t c = abs_sector * 128 + i;
       if (c < 2 || c >= total_data_clusters + 2)
         continue;
-      uint32_t e = (uint32_t)fd[i * 4] | ((uint32_t)fd[i * 4 + 1] << 8) |
-                   ((uint32_t)fd[i * 4 + 2] << 16) |
-                   ((uint32_t)fd[i * 4 + 3] << 24);
+      const uint8_t *p = sec + i * 4;
+      uint32_t e = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                   ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
       e &= 0x0FFFFFFF;
       if (e == 0) {
-        // Found free cluster — mark as EOF in FAT.
-        next_free_hint = c + 1;
+        uint32_t run = 1;
+        while (run < wanted && i + (int)run < 128) {
+          uint32_t candidate = c + run;
+          if (candidate >= total_data_clusters + 2)
+            break;
+          const uint8_t *q = sec + (i + run) * 4;
+          uint32_t qe = (uint32_t)q[0] | ((uint32_t)q[1] << 8) |
+                        ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+          if ((qe & 0x0FFFFFFF) != 0)
+            break;
+          run++;
+        }
+        for (uint32_t j = 0; j < run; j++)
+          fat32_store_entry(sec + (i + j) * 4,
+                            j + 1 < run ? c + j + 1 : 0x0FFFFFFF);
+
+        uint32_t lba = fat_start_lba + abs_sector;
+        if (blk_write(lba, 1, sec) != 0)
+          return -EIO;
+        __atomic_fetch_add(&fat1_writes, 1, __ATOMIC_RELAXED);
+        if (blk_write(lba + spf32, 1, sec) != 0)
+          return -EIO;
+        __atomic_fetch_add(&fat2_writes, 1, __ATOMIC_RELAXED);
+        fat_cache_invalidate_sector(lba);
+        fat_cache_invalidate_sector(lba + spf32);
+        __atomic_fetch_add(&fat_batch_count, 1, __ATOMIC_RELAXED);
+
+        *first = c;
+        *last = c + run - 1;
+        *allocated = run;
+        next_free_hint = c + run;
         if (next_free_hint >= total_data_clusters + 2)
           next_free_hint = 2;
-        if (fat32_write_fat_entry(c, 0x0FFFFFFF) != 0)
-          return 0;
-        return c;
+        return 0;
       }
     }
   }
-  return 0; // ENOSPC
+  return -ENOSPC;
 }
 
 static bool fat32_chain_step(uint32_t cluster, uint64_t cluster_limit,
@@ -396,6 +457,49 @@ static void fat32_free_chain(uint32_t start_cluster) {
 // Link a new cluster after tail_cluster in the FAT chain.
 static int fat32_link_cluster(uint32_t tail_cluster, uint32_t new_cluster) {
   return fat32_write_fat_entry(tail_cluster, new_cluster);
+}
+
+static int fat32_allocate_detached(uint32_t count, uint32_t *chain_start,
+                                   uint32_t *chain_tail) {
+  uint32_t start = 0;
+  uint32_t tail = 0;
+  uint32_t max_clusters = AHCI_MAX_SECTORS / sectors_per_cluster;
+  if (max_clusters == 0)
+    return -EIO;
+
+  while (count > 0) {
+    uint32_t wanted = count < max_clusters ? count : max_clusters;
+    uint32_t run_start, run_tail, got;
+    int rc = fat32_allocate_run(wanted, &run_start, &run_tail, &got);
+    if (rc) {
+      if (start)
+        fat32_free_chain(start);
+      return rc;
+    }
+
+    uint32_t lba = data_start_lba + (run_start - 2) * sectors_per_cluster;
+    rc = blk_write(lba, got * sectors_per_cluster, fat_zero_region);
+    __atomic_fetch_add(&fat_zero_commands, 1, __ATOMIC_RELAXED);
+    if (rc) {
+      fat32_free_chain(run_start);
+      if (start)
+        fat32_free_chain(start);
+      return rc;
+    }
+
+    if (!start)
+      start = run_start;
+    else if (fat32_link_cluster(tail, run_start) != 0) {
+      fat32_free_chain(run_start);
+      fat32_free_chain(start);
+      return -EIO;
+    }
+    tail = run_tail;
+    count -= got;
+  }
+  *chain_start = start;
+  *chain_tail = tail;
+  return 0;
 }
 
 // ==================== 8.3 name helpers ====================
@@ -1616,51 +1720,37 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
     }
     spin_unlock(&fat_lock);
   } else {
-    // Grow: allocate clusters until the chain holds keep_clusters.
+    // Grow into a detached chain, zero it in physical extents, then publish
+    // the single tail link only after all allocation and I/O has succeeded.
     spin_lock(&fat_lock);
-    if (ip->start_cluster == 0) {
-      uint32_t first = fat32_allocate_cluster();
-      if (first == 0) {
-        spin_unlock(&fat_lock);
-        return -ENOSPC;
-      }
-      ip->start_cluster = first;
-      // Zero the new cluster on disk.
-      uint8_t z[4096];
-      __memset(z, 0, bpc);
-      uint32_t lba = data_start_lba + (first - 2) * sectors_per_cluster;
-      blk_write(lba, sectors_per_cluster, z);
-      keep_clusters -= 1;
-    }
-    // Find current tail.
     uint32_t tail = ip->start_cluster;
-    uint32_t have = 1;
-    int guard = 1024;
-    while (guard-- > 0) {
+    uint32_t have = tail ? 1 : 0;
+    uint32_t guard = total_data_clusters;
+    while (tail && guard-- > 0) {
       uint32_t next = fat32_read_entry(tail);
       if (next >= 0x0FFFFFF8)
         break;
       tail = next;
       have++;
     }
-    // Append (keep_clusters - have) new zeroed clusters.
-    while (have < keep_clusters) {
-      uint32_t nc = fat32_allocate_cluster();
-      if (nc == 0) {
+    if (have < keep_clusters) {
+      uint32_t detached_start = 0, detached_tail = 0;
+      int rc = fat32_allocate_detached(keep_clusters - have, &detached_start,
+                                       &detached_tail);
+      if (rc) {
         spin_unlock(&fat_lock);
-        // Partial grow: update size to what we have so far.
-        ip->size = len;
-        fat32_update_dir_entry(ip->dir_start_cluster, ip->dir_entry_index,
-                               ip->start_cluster, (uint32_t)ip->size);
-        return -ENOSPC;
+        return rc;
       }
-      uint8_t z[4096];
-      __memset(z, 0, bpc);
-      uint32_t lba = data_start_lba + (nc - 2) * sectors_per_cluster;
-      blk_write(lba, sectors_per_cluster, z);
-      fat32_link_cluster(tail, nc);
-      tail = nc;
-      have++;
+      if (tail) {
+        rc = fat32_link_cluster(tail, detached_start);
+        if (rc) {
+          fat32_free_chain(detached_start);
+          spin_unlock(&fat_lock);
+          return rc;
+        }
+      } else {
+        ip->start_cluster = detached_start;
+      }
     }
     spin_unlock(&fat_lock);
   }
@@ -1772,13 +1862,28 @@ void fat32_dump_cache_stats(void) {
   uint64_t misses = __atomic_load_n(&fat_cache_misses, __ATOMIC_RELAXED);
   uint64_t accesses = hits + misses;
   uint64_t hit_permille = accesses ? hits * 1000 / accesses : 0;
-  printk(LOG_INFO,
+  printk(LOG_DEBUG,
          "fat32-cache: hits=%lu misses=%lu hit=%lu.%lu%% waits=%lu "
          "commands=%lu sectors=%lu\n",
          hits, misses, hit_permille / 10, hit_permille % 10,
          __atomic_load_n(&fat_cache_fill_waits, __ATOMIC_RELAXED),
          __atomic_load_n(&fat_cache_io_commands, __ATOMIC_RELAXED),
          __atomic_load_n(&fat_cache_io_sectors, __ATOMIC_RELAXED));
+  printk(LOG_DEBUG,
+         "fat32-alloc: batches=%lu sector_reads=%lu fat1_writes=%lu "
+         "fat2_writes=%lu zero_cmds=%lu\n",
+         __atomic_load_n(&fat_batch_count, __ATOMIC_RELAXED),
+         __atomic_load_n(&fat_sector_reads, __ATOMIC_RELAXED),
+         __atomic_load_n(&fat1_writes, __ATOMIC_RELAXED),
+         __atomic_load_n(&fat2_writes, __ATOMIC_RELAXED),
+         __atomic_load_n(&fat_zero_commands, __ATOMIC_RELAXED));
+  struct blk_stats bs;
+  blk_get_stats(&bs);
+  printk(LOG_DEBUG,
+         "blk: submitted=%lu completed=%lu failed=%lu read_cmds=%lu "
+         "write_cmds=%lu read_sectors=%lu write_sectors=%lu\n",
+         bs.submitted, bs.completed, bs.failed, bs.read_cmds, bs.write_cmds,
+         bs.read_sectors, bs.write_sectors);
 }
 
 // ==================== File read ====================
@@ -1798,9 +1903,10 @@ int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count) {
     if (chunk > count - nread)
       chunk = count - nread;
 
-    struct cache_page *cp = page_cache_fill(ip, page_idx);
-    if (!cp)
-      break;
+    struct cache_page *cp;
+    int rc = page_cache_get(ip, page_idx, &cp);
+    if (rc)
+      return nread ? (int)nread : rc;
     __memcpy((uint8_t *)buf + nread, cp->data + page_off, chunk);
     page_cache_release(cp);
     nread += chunk;
@@ -1820,6 +1926,11 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
   }
 
   size_t written = 0;
+  size_t durable = 0;
+  struct cache_page *write_pages[16];
+  int nr_write_pages = 0;
+  int writeback_error = 0;
+  int operation_error = 0;
   uint32_t append_tail = 0;
   while (written < count) {
     uint64_t page_idx = (offset + written) / 4096;
@@ -1863,48 +1974,65 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
         return written ? (int)written : -EIO;
       }
 
+      uint32_t need = last_in_page - cip + 1;
       spin_lock(&fat_lock);
-      uint32_t new_cluster = fat32_allocate_cluster();
-      if (new_cluster == 0) {
+      uint32_t detached_start = 0, detached_tail = 0;
+      int alloc_rc =
+          fat32_allocate_detached(need, &detached_start, &detached_tail);
+      if (alloc_rc != 0 ||
+          (ip->start_cluster != 0 &&
+           fat32_link_cluster(append_tail, detached_start) != 0)) {
+        operation_error = alloc_rc ? alloc_rc : -EIO;
+        if (detached_start)
+          fat32_free_chain(detached_start);
         spin_unlock(&fat_lock);
         enospc = true;
-        break; // ENOSPC
+        break;
       }
-      // Zero-fill new cluster.
-      uint8_t zero_buf[4096];
-      __memset(zero_buf, 0, bytes_per_cluster);
-      uint32_t lba = data_start_lba + (new_cluster - 2) * sectors_per_cluster;
-      blk_write(lba, sectors_per_cluster, zero_buf);
-
-      // Link into chain. Detect "first cluster" by start_cluster == 0 alone:
-      // ip->size is only updated AFTER the write loop (below), so it stays 0
-      // for every iteration of a multi-page write — gating on ip->size == 0
-      // would reset start_cluster to each newly-allocated cluster and skip the
-      // tail link, orphaning all but the last cluster and corrupting >4KB
-      // files.
-      if (ip->start_cluster == 0) {
-        ip->start_cluster = new_cluster;
-      } else {
-        fat32_link_cluster(append_tail, new_cluster);
-      }
-      append_tail = new_cluster;
+      if (ip->start_cluster == 0)
+        ip->start_cluster = detached_start;
+      append_tail = detached_tail;
       spin_unlock(&fat_lock);
 
       // Invalidate page cache — new cluster changes mapping.
       page_cache_invalidate_inode(ip);
+      break;
     }
     if (enospc)
       break;
 
     struct cache_page *cp = page_cache_fill(ip, page_idx);
-    if (!cp)
+    if (!cp) {
+      operation_error = -EIO;
       break;
+    }
     __memcpy(cp->data + page_off, (const uint8_t *)buf + written, chunk);
     page_cache_mark_dirty(cp);
-    page_cache_writeback(cp);
-    page_cache_release(cp);
+    write_pages[nr_write_pages++] = cp;
     written += chunk;
+
+    if (nr_write_pages == 16 || written == count) {
+      writeback_error = page_cache_writeback_pages(write_pages, nr_write_pages);
+      for (int i = 0; i < nr_write_pages; i++)
+        page_cache_release(write_pages[i]);
+      nr_write_pages = 0;
+      if (writeback_error)
+        break;
+      durable = written;
+    }
   }
+
+  if (nr_write_pages != 0) {
+    writeback_error = page_cache_writeback_pages(write_pages, nr_write_pages);
+    for (int i = 0; i < nr_write_pages; i++)
+      page_cache_release(write_pages[i]);
+    if (!writeback_error)
+      durable = written;
+  }
+  if (writeback_error)
+    written = durable;
+  if (writeback_error)
+    operation_error = writeback_error;
 
   uint64_t new_end = offset + written;
   if (new_end > ip->size) {
@@ -1921,7 +2049,7 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
   // here). Only fire if something was actually written.
   if (written > 0)
     inotify_inode_event(ip, IN_MODIFY, 0, NULL);
-  return (int)written;
+  return written ? (int)written : operation_error;
 }
 
 // ==================== Mkdir ====================

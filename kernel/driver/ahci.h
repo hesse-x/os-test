@@ -17,6 +17,7 @@
 void ahci_init();
 int ahci_read_lba(uint32_t lba, uint32_t count, void *buf);
 int ahci_write_lba(uint32_t lba, uint32_t count, const void *buf);
+uint64_t ahci_sector_count(void);
 
 // Submit async block request. Returns cookie (>0) on success, -errno on error.
 // Completion delivered via RECV_NOTIFY to caller.

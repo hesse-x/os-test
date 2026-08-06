@@ -4,15 +4,25 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "kernel/bsd/page_cache.h"
+#include <stdbool.h>
+#include <stddef.h>
+
+#include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/page_cache.h"
+#include "kernel/driver/ahci.h"
 #include "kernel/driver/blk_dev.h"
+#include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
+#include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/slab.h"
+#include "kernel/xcore/sched.h"
 #include "kernel/xcore/spinlock.h"
-#include <stddef.h>
+#include "kernel/xcore/xtask.h"
+
+#include <xos/errno.h>
 
 /* Hash table for page lookup: (inode, page_index) -> cache_page */
 static struct cache_page *page_cache_hash[1 << PAGE_CACHE_HASH_BITS];
@@ -26,6 +36,49 @@ static int lru_inited = 0;
 /* Free list for pre-allocated cache_page structs */
 static struct cache_page *free_list = NULL;
 static int free_count = 0;
+
+static void page_wait_wake(wait_queue_t *wait, unsigned long flags) {
+  (void)flags;
+  wake_wq_target((xtask *)wait->data);
+}
+
+static uint64_t page_cache_prepare_wait(xtask *task) {
+  uint64_t flags;
+  __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags));
+  int cpu = task->assigned_cpu;
+  spin_lock(&cpu_locals[cpu].scheduler_lock);
+  task->state = BLOCKED;
+  task->wait_event = WAIT_NONE;
+  spin_unlock(&cpu_locals[cpu].scheduler_lock);
+  return flags;
+}
+
+static void page_cache_finish_wait(uint64_t flags) {
+  __asm__ volatile("pushq %0; popfq" : : "r"(flags));
+}
+
+static void page_cache_wait(struct cache_page *cp, uint32_t mask) {
+  if (!current_task) {
+    while (__atomic_load_n(&cp->flags, __ATOMIC_ACQUIRE) & mask)
+      __asm__ volatile("pause");
+    return;
+  }
+  wait_queue_t wait = {
+      .func = page_wait_wake, .data = current_task, .exclusive = 0};
+  list_init(&wait.node);
+  add_wait_queue(&cp->waiters, &wait);
+  for (;;) {
+    uint64_t flags = page_cache_prepare_wait(current_task);
+    if (!(__atomic_load_n(&cp->flags, __ATOMIC_ACQUIRE) & mask)) {
+      sched_cancel_spurious_wake(current_task);
+      page_cache_finish_wait(flags);
+      break;
+    }
+    schedule();
+    page_cache_finish_wait(flags);
+  }
+  remove_wait_queue(&cp->waiters, &wait);
+}
 
 static unsigned page_cache_hashfn(struct inode *ip, uint64_t page_index) {
   return ((unsigned)(ip->ino) ^ (unsigned)(page_index)) &
@@ -94,7 +147,8 @@ void page_cache_init(void) {
     cp->inode = NULL;
     cp->data = NULL;
     atomic_set(&cp->pin_count, 0);
-    cp->dirty = false;
+    cp->flags = 0;
+    init_wait_queue_head(&cp->waiters);
     free_list_push(cp);
   }
   printk(LOG_INFO, "page_cache_init: %d cache_page structs pre-allocated\n",
@@ -108,15 +162,17 @@ struct cache_page *page_cache_lookup(struct inode *ip, uint64_t page_index) {
     struct cache_page *cp = page_cache_hash[idx];
     while (cp) {
       if (cp->inode == ip && cp->page_index == page_index && cp->data) {
-        /* Wait while page is being filled from disk.
-         * We hold page_cache_lock; the filler clears filling
-         * with an atomic store (no lock needed), so we will
-         * see the update via atomic loads. */
-        while (__atomic_load_n(&cp->filling, __ATOMIC_ACQUIRE))
-          __asm__ volatile("pause");
         atomic_inc(&cp->pin_count);
         lru_touch(cp);
+        uint32_t flags = cp->flags;
         spin_unlock(&page_cache_lock);
+        if (flags & CACHE_PAGE_FILLING)
+          page_cache_wait(cp, CACHE_PAGE_FILLING);
+        flags = __atomic_load_n(&cp->flags, __ATOMIC_ACQUIRE);
+        if (flags & (CACHE_PAGE_ERROR | CACHE_PAGE_INVALID)) {
+          page_cache_release(cp);
+          return NULL;
+        }
         return cp;
       }
       cp = cp->hash_next;
@@ -131,7 +187,8 @@ static int page_cache_evict(void) {
   /* Walk from LRU tail (least recently used), find first evictable page */
   struct cache_page *cp = lru_tail.lru_prev;
   while (cp != &lru_head) {
-    if (atomic_read(&cp->pin_count) == 0 && !cp->dirty && cp->data) {
+    if (atomic_read(&cp->pin_count) == 0 && !(cp->flags & CACHE_PAGE_DIRTY) &&
+        cp->data) {
       /* Remove from hash */
       unsigned idx = page_cache_hashfn(cp->inode, cp->page_index);
       struct cache_page **pp = &page_cache_hash[idx];
@@ -173,12 +230,17 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
     while (existing) {
       if (existing->inode == ip && existing->page_index == page_index &&
           existing->data) {
-        /* Wait while another CPU is filling this page */
-        while (__atomic_load_n(&existing->filling, __ATOMIC_ACQUIRE))
-          __asm__ volatile("pause");
         atomic_inc(&existing->pin_count);
         lru_touch(existing);
+        uint32_t flags = existing->flags;
         spin_unlock(&page_cache_lock);
+        if (flags & CACHE_PAGE_FILLING)
+          page_cache_wait(existing, CACHE_PAGE_FILLING);
+        flags = __atomic_load_n(&existing->flags, __ATOMIC_ACQUIRE);
+        if (flags & (CACHE_PAGE_ERROR | CACHE_PAGE_INVALID)) {
+          page_cache_release(existing);
+          return NULL;
+        }
         return existing;
       }
       existing = existing->hash_next;
@@ -212,8 +274,9 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
   new_cp->inode = ip;
   new_cp->page_index = page_index;
   atomic_set(&new_cp->pin_count, 1);
-  new_cp->dirty = false;
-  new_cp->filling = true; /* visible in hash but data not ready yet */
+  new_cp->flags = CACHE_PAGE_FILLING;
+  new_cp->error = 0;
+  new_cp->generation++;
 
   /* Insert into hash */
   new_cp->hash_next = page_cache_hash[idx];
@@ -229,6 +292,7 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
    * chain head every page), then coalesce consecutive clusters into a single
    * AHCI command so a contiguous 4KB page is one blk_read() of 8 sectors,
    * not 8. */
+  int io_error = 0;
   if (ip->type == INODE_REGULAR || ip->type == INODE_DIR) {
     uint32_t spc = fat32_sectors_per_cluster();
     uint32_t bpc = fat32_bytes_per_cluster();
@@ -258,8 +322,10 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
           run++;
         }
         uint32_t lba = fat32_data_start_lba() + (cl - 2) * spc;
-        if (blk_read(lba, run * spc, dst) != 0)
-          __memset(dst, 0, (size_t)run * bpc);
+        if (blk_read(lba, run * spc, dst) != 0) {
+          io_error = -EIO;
+          break;
+        }
         dst += run * bpc;
         ci += run;
         cl = (ci < clusters_per_page)
@@ -271,49 +337,130 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
     __memset(new_cp->data, 0, 4096);
   }
 
-  /* Data is now ready — clear filling flag so others can use this page.
-   * No lock needed: filling only transitions true→false, and waiters
-   * spin-read it with atomic loads for visibility. */
-  __atomic_store_n(&new_cp->filling, false, __ATOMIC_RELEASE);
+  spin_lock(&page_cache_lock);
+  new_cp->flags &= ~CACHE_PAGE_FILLING;
+  if (io_error) {
+    new_cp->flags |= CACHE_PAGE_ERROR;
+    new_cp->error = io_error;
+  } else {
+    new_cp->flags |= CACHE_PAGE_UPTODATE;
+  }
+  spin_unlock(&page_cache_lock);
+  __wake_up(&new_cp->waiters, 0);
+
+  if (io_error) {
+    page_cache_release(new_cp);
+    return NULL;
+  }
 
   return new_cp;
 }
 
+int page_cache_get(struct inode *ip, uint64_t page_index,
+                   struct cache_page **out) {
+  if (!out)
+    return -EINVAL;
+  *out = page_cache_fill(ip, page_index);
+  return *out ? 0 : -EIO;
+}
+
 void page_cache_mark_dirty(struct cache_page *cp) {
   spin_lock(&page_cache_lock);
-  cp->dirty = true;
+  cp->flags |= CACHE_PAGE_DIRTY;
+  cp->dirty_seq++;
   spin_unlock(&page_cache_lock);
 }
 
 int page_cache_writeback(struct cache_page *cp) {
-  if (!cp->dirty || !cp->data || !cp->inode)
+  struct cache_page *pages[1] = {cp};
+  return page_cache_writeback_pages(pages, 1);
+}
+
+int page_cache_writeback_pages(struct cache_page **pages, int nr_pages) {
+  if (!pages || nr_pages <= 0 || nr_pages > 16)
+    return -EINVAL;
+  struct cache_page *first = pages[0];
+  if (!(first->flags & CACHE_PAGE_DIRTY) || !first->data || !first->inode)
     return 0;
 
-  struct inode *ip = cp->inode;
+  struct inode *ip = first->inode;
   if (ip->type != INODE_REGULAR && ip->type != INODE_DIR)
     return 0;
 
-  uint32_t clusters_per_page = 4096 / fat32_bytes_per_cluster();
-  uint32_t cluster_idx = cp->page_index * clusters_per_page;
-  uint8_t *src = cp->data;
-
-  for (uint32_t ci = 0; ci < clusters_per_page; ci++) {
-    uint32_t cl = fat32_walk_chain(ip->start_cluster, cluster_idx + ci);
-    if (cl < 2 || cl >= 0x0FFFFFF8)
-      break;
-
-    uint32_t lba =
-        fat32_data_start_lba() + (cl - 2) * fat32_sectors_per_cluster();
-    blk_write(lba, fat32_sectors_per_cluster(), src);
-    src += fat32_bytes_per_cluster();
+  uint32_t snapshots[16];
+  spin_lock(&page_cache_lock);
+  for (int i = 0; i < nr_pages; i++) {
+    if (!pages[i] || pages[i]->inode != ip || !pages[i]->data ||
+        (i > 0 && pages[i]->page_index != pages[i - 1]->page_index + 1)) {
+      spin_unlock(&page_cache_lock);
+      return -EINVAL;
+    }
+    snapshots[i] = pages[i]->dirty_seq;
+    pages[i]->flags |= CACHE_PAGE_WRITEBACK;
   }
+  spin_unlock(&page_cache_lock);
 
-  int rc = 0;
-  if (rc == 0) {
+  void *staging = bfc_alloc_page_data(16);
+  if (!staging) {
     spin_lock(&page_cache_lock);
-    cp->dirty = false;
+    for (int i = 0; i < nr_pages; i++)
+      pages[i]->flags &= ~CACHE_PAGE_WRITEBACK;
     spin_unlock(&page_cache_lock);
+    return -ENOMEM;
   }
+
+  uint32_t bpc = fat32_bytes_per_cluster();
+  uint32_t spc = fat32_sectors_per_cluster();
+  uint32_t clusters_per_page = 4096 / bpc;
+  uint32_t run_lba = 0;
+  uint32_t run_sectors = 0;
+  size_t run_bytes = 0;
+  bool saw_cluster = false;
+  int rc = 0;
+
+  for (int pi = 0; pi < nr_pages && rc == 0; pi++) {
+    uint32_t base = (uint32_t)pages[pi]->page_index * clusters_per_page;
+    for (uint32_t ci = 0; ci < clusters_per_page; ci++) {
+      uint32_t cl = fat32_walk_chain(ip->start_cluster, base + ci);
+      if (cl < 2 || cl >= 0x0FFFFFF8) {
+        if (!saw_cluster)
+          rc = -EIO;
+        break;
+      }
+      saw_cluster = true;
+      uint32_t lba = fat32_data_start_lba() + (cl - 2) * spc;
+      if (run_sectors != 0 && (lba != run_lba + run_sectors ||
+                               run_sectors + spc > AHCI_MAX_SECTORS)) {
+        rc = blk_write(run_lba, run_sectors, staging);
+        run_sectors = 0;
+        run_bytes = 0;
+        if (rc)
+          break;
+      }
+      if (run_sectors == 0)
+        run_lba = lba;
+      __memcpy((uint8_t *)staging + run_bytes,
+               pages[pi]->data + (size_t)ci * bpc, bpc);
+      run_sectors += spc;
+      run_bytes += bpc;
+    }
+  }
+  if (rc == 0 && run_sectors != 0)
+    rc = blk_write(run_lba, run_sectors, staging);
+
+  bfc_free_page_data(staging, 16);
+
+  spin_lock(&page_cache_lock);
+  for (int i = 0; i < nr_pages; i++) {
+    pages[i]->flags &= ~CACHE_PAGE_WRITEBACK;
+    if (rc == 0 && pages[i]->dirty_seq == snapshots[i])
+      pages[i]->flags &= ~(CACHE_PAGE_DIRTY | CACHE_PAGE_ERROR);
+    else if (rc != 0)
+      pages[i]->flags |= CACHE_PAGE_ERROR;
+  }
+  spin_unlock(&page_cache_lock);
+  for (int i = 0; i < nr_pages; i++)
+    __wake_up(&pages[i]->waiters, 0);
   return rc;
 }
 
@@ -324,6 +471,14 @@ void page_cache_release(struct cache_page *cp) {
   spin_lock(&page_cache_lock);
   int old = atomic_dec_return(&cp->pin_count);
   WARN_ON(old < 0);
+  if (old == 0 && (cp->flags & CACHE_PAGE_INVALID)) {
+    if (cp->data)
+      kfree(cp->data);
+    cp->data = NULL;
+    cp->inode = NULL;
+    cp->flags = 0;
+    free_list_push(cp);
+  }
   spin_unlock(&page_cache_lock);
 }
 
@@ -340,11 +495,17 @@ void page_cache_invalidate_inode(struct inode *ip) {
       if (cp->inode == ip) {
         *pp = cp->hash_next;
         lru_remove(cp);
-        if (cp->data)
-          kfree(cp->data);
-        cp->data = NULL;
-        cp->inode = NULL;
-        free_list_push(cp);
+        cp->hash_next = NULL;
+        cp->flags |= CACHE_PAGE_INVALID;
+        if (atomic_read(&cp->pin_count) == 0) {
+          if (cp->data)
+            kfree(cp->data);
+          cp->data = NULL;
+          cp->inode = NULL;
+          cp->flags = 0;
+          free_list_push(cp);
+        }
+        __wake_up(&cp->waiters, 0);
       } else {
         pp = &cp->hash_next;
       }
@@ -363,7 +524,7 @@ static int collect_dirty(struct inode *only_ip, struct cache_page **out,
   for (int i = 0; i < (1 << PAGE_CACHE_HASH_BITS) && n < max; i++) {
     for (struct cache_page *cp = page_cache_hash[i]; cp && n < max;
          cp = cp->hash_next) {
-      if (cp->dirty && cp->data && cp->inode &&
+      if ((cp->flags & CACHE_PAGE_DIRTY) && cp->data && cp->inode &&
           (!only_ip || cp->inode == only_ip)) {
         atomic_inc(&cp->pin_count);
         out[n++] = cp;
