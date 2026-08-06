@@ -48,10 +48,13 @@ static GLuint compile_shader(GLenum type, const char *source) {
 }
 
 int main(void) {
-  // 1. eglGetDisplay(EGL_DEFAULT_DISPLAY) → surfaceless/DRM 平台。
-  EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+  // 1. Select surfaceless explicitly. EGL_DEFAULT_DISPLAY follows Mesa's
+  // configured native platform (Wayland here) and would require a compositor
+  // connection even though this test only renders to a pbuffer.
+  EGLDisplay dpy =
+      eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
   if (dpy == EGL_NO_DISPLAY)
-    fail("eglGetDisplay", eglGetError());
+    fail("eglGetPlatformDisplay(surfaceless)", eglGetError());
   printf("egl: got display %p\n", (void *)dpy);
 
   // 2. eglInitialize → 探测后端。virgl 无 host capset 时此处失败(P0 诊断点)。
