@@ -111,6 +111,38 @@ void test_monitor_device_property_id_input(void) {
   udev_unref(u);
 }
 
+// The project-owned event1 identity gets an explicit 1000 DPI baseline in
+// both the monitor payload (coldplug path) and the persistent udev database.
+void test_virtual_mouse_dpi_property(void) {
+  struct udev *u = udev_new();
+  struct udev_monitor *m = udev_monitor_new_from_netlink(u, "udev");
+  TEST_ASSERT_EQUAL_INT(0, udev_monitor_enable_receiving(m));
+
+  struct udev_device *mouse = NULL;
+  for (int i = 0; i < 8 && !mouse; i++) {
+    struct udev_device *d = recv_with_timeout(m, 1000);
+    if (!d)
+      break;
+    const char *sysname = udev_device_get_sysname(d);
+    if (sysname && strcmp(sysname, "event1") == 0)
+      mouse = d;
+    else
+      udev_device_unref(d);
+  }
+  TEST_ASSERT_NOT_NULL(mouse);
+  TEST_ASSERT_EQUAL_STRING("1000",
+                           udev_device_get_property_value(mouse, "MOUSE_DPI"));
+  udev_device_unref(mouse);
+  udev_monitor_unref(m);
+
+  mouse = udev_device_new_from_subsystem_sysname(u, "input", "event1");
+  TEST_ASSERT_NOT_NULL(mouse);
+  TEST_ASSERT_EQUAL_STRING("1000",
+                           udev_device_get_property_value(mouse, "MOUSE_DPI"));
+  udev_device_unref(mouse);
+  udev_unref(u);
+}
+
 // A successful filter registration must be retained by the monitor.
 void test_monitor_filter_registration(void) {
   struct udev *u = udev_new();
@@ -188,6 +220,7 @@ int main(void) {
   RUN_TEST(test_monitor_get_fd);
   RUN_TEST(test_monitor_receive_coldplug_add);
   RUN_TEST(test_monitor_device_property_id_input);
+  RUN_TEST(test_virtual_mouse_dpi_property);
   RUN_TEST(test_monitor_filter_registration);
   RUN_TEST(test_monitor_hotplug_add);
   return UNITY_END();

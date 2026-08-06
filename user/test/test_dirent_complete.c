@@ -43,6 +43,13 @@ static int keep_real_entries(const struct dirent *entry) {
   return strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0;
 }
 
+static int keep_quirks_files(const struct dirent *entry) {
+  size_t len = strlen(entry->d_name);
+  static const char suffix[] = ".quirks";
+  return len >= sizeof(suffix) - 1 &&
+         strcmp(entry->d_name + len - (sizeof(suffix) - 1), suffix) == 0;
+}
+
 void test_scandir_alphasort(void) {
   create_fixtures();
 
@@ -106,9 +113,30 @@ void test_posix_and_linux_getdents(void) {
   remove_fixtures();
 }
 
+void test_libinput_quirks_long_names_visible(void) {
+  struct dirent **entries = NULL;
+  int count =
+      scandir("/usr/share/libinput", &entries, keep_quirks_files, versionsort);
+  TEST_ASSERT_GREATER_THAN_INT(0, count);
+
+  int found_generic_mouse = 0;
+  int found_qemu = 0;
+  for (int i = 0; i < count; i++) {
+    if (strcmp(entries[i]->d_name, "10-generic-mouse.quirks") == 0)
+      found_generic_mouse = 1;
+    if (strcmp(entries[i]->d_name, "30-vendor-qemu.quirks") == 0)
+      found_qemu = 1;
+    free(entries[i]);
+  }
+  free(entries);
+  TEST_ASSERT_TRUE(found_generic_mouse);
+  TEST_ASSERT_TRUE(found_qemu);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_scandir_alphasort);
   RUN_TEST(test_posix_and_linux_getdents);
+  RUN_TEST(test_libinput_quirks_long_names_visible);
   return UNITY_END();
 }

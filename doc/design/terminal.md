@@ -192,7 +192,7 @@ Shell 启动后 setsid() + ioctl(0, TIOCSCTTY, 0)，成为 session leader 并设
 
 路径执行：未匹配内置命令时 spawn(abs_path) + waitpid。
 
-TEST 模式：fork → execve test_runner.elf + waitpid。
+TEST 模式：仅 desktop-shell 启动的首个 terminal 携带 `XOS_AUTOTEST=1`；shell 消费该标记，通过标准前台作业路径启动 test_runner.elf，测试结束后继续交互。后续 terminal 不自动重复测试。
 
 ### 进程树与 fd 分配
 
@@ -202,7 +202,7 @@ init (PID 2, fd 0/1/2 = /dev/serial)
   ├── fork → terminal (fd 0/1/2 = /dev/serial, 继承; master_fd = /dev/ptmx)
   │     ├── fork → shell (fd 0/1/2 = /dev/ptsN slave)
   │     │     ├── spawn → user_program (fd 0/1/2 继承 slave)
-  │     │     └── fork → test_runner (fd 0/1/2 继承 slave, TEST 模式)
+  │     │     └── foreground job → test_runner (fd 0/1/2 继承 slave，仅首个 TEST terminal)
 ```
 
 init 调 waitpid(-1) 兜底回收所有孤儿子进程。

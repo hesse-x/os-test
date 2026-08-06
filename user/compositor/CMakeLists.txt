@@ -191,7 +191,7 @@ set(WLROOTS_MESON_BUILD_DIR "${CMAKE_BINARY_DIR}/wlroots/wlroots" CACHE PATH
 set(WLROOTS_SYSROOT_INCLUDE ${WLROOTS_SYSROOT_DIR}/usr/include)
 add_user_dyn_elf(tinywl C
     SOURCES tinywl.c cursor.c
-    LINK_LIBS wlroots-0.20 wayland-server xkbcommon pixman-1 png z c
+    LINK_LIBS wlroots-0.20 wayland-server input xkbcommon pixman-1 png z c
     EXCLUDE_FROM_ALL
     DEFS WLR_USE_UNSTABLE
     INCLUDE_DIRS

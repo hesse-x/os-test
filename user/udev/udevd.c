@@ -443,6 +443,7 @@ static void accept_client(int listen_fd) {
 // and writes them to the db. Mirrors Linux src/udev/udev-builtin-input_id.c
 // (keyboard path subset).
 static int input_id_compute(const char *devnode, uint32_t devnum) {
+  static int mouse_dpi_logged;
   int fd = open(devnode, O_RDONLY);
   if (fd < 0)
     return -errno;
@@ -462,6 +463,19 @@ static int input_id_compute(const char *devnode, uint32_t devnum) {
   int is_keyboard = 0; // ID_INPUT_KEYBOARD=1
   int is_key = 0;      // ID_INPUT_KEY=1
   int is_mouse = 0;    // ID_INPUT_MOUSE=1 (mouse.md §3.4)
+  int is_virtual_mouse = 0;
+
+  // Keep the explicit DPI baseline scoped to this project's synthetic mouse;
+  // real USB mice must retain their own udev/hardware DPI properties.
+  struct input_id input_id;
+  char input_name[64];
+  memset(&input_id, 0, sizeof(input_id));
+  memset(input_name, 0, sizeof(input_name));
+  if (ioctl(fd, EVIOCGID, &input_id) >= 0 &&
+      ioctl(fd, EVIOCGNAME(sizeof(input_name)), input_name) >= 0 &&
+      input_id.bustype == BUS_USB && input_id.vendor == 0x0001 &&
+      input_id.product == 0x0002 && strcmp(input_name, "evdev mouse") == 0)
+    is_virtual_mouse = 1;
 
   // ID_INPUT: any EV_KEY/EV_REL/EV_ABS device (mirrors Linux input_id main
   // switch)
@@ -515,6 +529,13 @@ static int input_id_compute(const char *devnode, uint32_t devnum) {
     // ID_INPUT_POINTING_DEVICE mirrors Linux input_id (set alongside MOUSE for
     // any relative-pointer device); libinput uses ID_INPUT_MOUSE specifically.
     len += snprintf(kv + len, sizeof(kv) - len, "ID_INPUT_POINTING_DEVICE=1\n");
+    if (is_virtual_mouse) {
+      len += snprintf(kv + len, sizeof(kv) - len, "MOUSE_DPI=1000\n");
+      if (!mouse_dpi_logged) {
+        fprintf(stderr, "libinput: evdev mouse dpi=1000\n");
+        mouse_dpi_logged = 1;
+      }
+    }
   }
   len += snprintf(kv + len, sizeof(kv) - len, "ID_SEAT=seat0\n");
 

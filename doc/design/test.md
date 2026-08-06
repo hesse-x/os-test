@@ -11,14 +11,14 @@
 | 3 | 结果输出 | 串口 log（逐 case 详情）+ 退出码（0=全PASS, 1=有FAIL） | 和现有 malloctest 一致 |
 | 4 | 测试运行 | test_runner.elf 依次 spawn + waitpid | 实现简单，支持全跑和单模块跑 |
 | 5 | 构建集成 | build.sh --test 启用 -DTEST=1 | 条件编译，不影响正式构建 |
-| 6 | 自动执行 | init 进程在全部服务就绪后 spawn test_runner.elf | TEST 宏控制 |
+| 6 | 自动执行 | 桌面首个 terminal 标记 shell 启动 test_runner.elf | TEST 宏控制，后续 terminal 不重复运行 |
 | 7 | 磁盘部署 | FAT32 /test/ 目录 | mkdisk.sh 加 mcopy |
 | 8 | 多进程测试 | spawn 自己（子进程根据 mmap marker 走不同逻辑） | 不需额外 ELF，不需 IPC 协议约定 |
 | 9 | 退出码 | _exit(0)=全PASS, _exit(1)=有FAIL | Unity UnityEnd() 根据 FailCount 决定 |
 
 ### 构建集成
 
-build.sh --test 传 -DTEST=1 给 CMake → 顶层 CMakeLists.txt if(TEST) add_subdirectory(user/test) → init/init.c #ifdef TEST spawn test_runner.elf。
+build.sh --test 传 -DTEST=1 给 CMake → 顶层 CMakeLists.txt if(TEST) add_subdirectory(user/test)；desktop-shell 给首个 terminal 设置一次性 `XOS_AUTOTEST=1`，shell 通过正常前台作业路径启动 test_runner.elf。Dock 后续打开的 terminal 不携带该标记，只进入交互 shell。
 
 Unity 库：user/lib/unity/ — unity.c + unity.h + unity_internals.h，CMake target unity（STATIC），编译时定义 UNITY_EXCLUDE_SETJMP。
 
@@ -78,7 +78,7 @@ test_runner 需从 FAT32 加载 ELF → open + read + sys_spawn。
 | 模块 | 说明 |
 |------|------|
 | 构建系统 | build.sh --test + mkdisk.sh TEST 部署。详见 [cmake.md](cmake.md) |
-| 启动流程 | init 进程拉起 test_runner。详见 [boot.md](boot.md) |
+| 启动流程 | desktop-shell 的首个 terminal 拉起 test_runner。详见 [terminal.md](terminal.md) |
 | libc | 测试 ELF 链接 libc.a + libunity.a。详见 [libc.md](libc.md) |
 | syscall | 测试覆盖 59 个 syscall。详见 [syscall.md](syscall.md) |
 

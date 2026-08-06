@@ -461,3 +461,12 @@ add_user_dyn_elf(test_console C SOURCES test_console.c LINK_LIBS c STATIC_LIBS u
 add_user_dyn_elf(test_mouse SOURCES test_mouse.cc
     ${CMAKE_SOURCE_DIR}/user/lib/usb_mouse.cc
     LINK_LIBS c STATIC_LIBS unity)
+
+# Exercise the same installed-data parser used by libinput, with verbose
+# parser logging so a malformed file reports its path and line.
+add_user_dyn_elf(test_quirks C SOURCES test_quirks.c
+    LINK_LIBS udev c STATIC_LIBS input
+    INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/libinput/src
+                 ${CMAKE_SOURCE_DIR}/third_party/libinput
+                 ${CMAKE_SOURCE_DIR}/user/lib/libinput-config
+                 ${CMAKE_SOURCE_DIR}/user/lib/udev-shim)

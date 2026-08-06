@@ -29,7 +29,7 @@
  * with <dirent.h>'s versionsort declaration (libinput defines _GNU_SOURCE). */
 #define HAVE_VERSIONSORT 1
 
-#define LIBINPUT_QUIRKS_OVERRIDE_FILE "/usr/share/libinput/quirks"
+#define LIBINPUT_QUIRKS_OVERRIDE_FILE "/etc/libinput/local-overrides.quirks"
 #define LIBINPUT_PLUGIN_ETCDIR "/etc/libinput"
 #define LIBINPUT_PLUGIN_LIBDIR "/usr/lib/libinput"
 

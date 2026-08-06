@@ -234,31 +234,22 @@ extern "C" int main(int argc, char **argv, char **envp) {
 
 #ifdef TEST
   // Shells launched by integration tests must not recursively start the
-  // complete test suite inside their newly-created PTY.
-  if (getenv("XOS_SKIP_AUTOTEST") == nullptr) {
-    pid_t test_pid = fork();
-    if (test_pid == 0) {
-#ifdef PERF
-      execve("/usr/bin/perf", NULL, NULL);
-#else
-      execve("/test/test_runner.elf", NULL, NULL);
+  // complete test suite inside their newly-created PTY. XOS_AUTOTEST is
+  // consumed here so programs launched from this shell cannot accidentally
+  // start another automatic suite.
+  bool run_autotest = getenv("XOS_AUTOTEST") != nullptr &&
+                      getenv("XOS_SKIP_AUTOTEST") == nullptr;
 #endif
-      _exit(127);
-    }
-    if (test_pid < 0) {
-      perror("shell: failed to start test runner");
-      return 1;
-    }
-    int test_status = 0;
-    pid_t waited;
-    do {
-      waited = waitpid(test_pid, &test_status, 0);
-    } while (waited < 0 && errno == EINTR);
-    if (waited < 0)
-      perror("shell: failed to wait for test runner");
-    printf("shell: test runner finished status=%d, exiting test session\n",
+  unsetenv("XOS_AUTOTEST");
+#ifdef TEST
+  if (run_autotest) {
+#ifdef PERF
+    int test_status = shell_run_command("/usr/bin/perf");
+#else
+    int test_status = shell_run_command("/test/test_runner.elf");
+#endif
+    printf("shell: test runner finished status=%d, entering interactive mode\n",
            test_status);
-    return 0;
   }
 #endif
 

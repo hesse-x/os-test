@@ -2018,10 +2018,15 @@ extern "C" int main(void) {
       wl_display_cancel_read(app.display);
     wl_display_dispatch_pending(app.display);
 
+    if (app.closed)
+      break;
+
     if (fds[1].revents & (POLLIN | POLLHUP)) {
       uint8_t buf[4096];
       bool got_output = false;
-      for (;;) {
+      // Bound each drain pass so a chatty process cannot starve keyboard and
+      // close events on the Wayland fd.
+      for (int chunks = 0; chunks < 16; chunks++) {
         ssize_t n = read(app.pty_fd, buf, sizeof(buf));
         if (n > 0) {
           term_feed(buf, (size_t)n);

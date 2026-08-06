@@ -6,19 +6,18 @@
 
 #include "libevdev/libevdev.h"
 
-#include <errno.h>
+#include <errno.h> // IWYU pragma: keep
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "linux/input-event-codes.h"
 #include "linux/input.h"
-#include "linux/linux/input-event-codes.h"
 
 #include <sys/ioctl.h>
 #include <xos/errno.h>
-#include <xos/ioctl.h>
 #include <xos/time.h>
 
 #define EVDEV_BITS_PER_LONG (sizeof(long) * 8)
@@ -180,13 +179,41 @@ const char *libevdev_event_code_get_name(unsigned int type, unsigned int code) {
 }
 
 int libevdev_event_type_from_name(const char *name) {
-  (void)name;
+  static const struct {
+    const char *name;
+    int value;
+  } types[] = {
+      {"EV_SYN", EV_SYN}, {"EV_KEY", EV_KEY}, {"EV_REL", EV_REL},
+      {"EV_ABS", EV_ABS}, {"EV_MSC", EV_MSC}, {"EV_SW", EV_SW},
+      {"EV_LED", EV_LED}, {"EV_SND", EV_SND}, {"EV_REP", EV_REP},
+      {"EV_FF", EV_FF},   {"EV_PWR", EV_PWR}, {"EV_FF_STATUS", EV_FF_STATUS}};
+  for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++)
+    if (strcmp(name, types[i].name) == 0)
+      return types[i].value;
   return -1;
 }
 
 int libevdev_event_code_from_name(unsigned int type, const char *name) {
-  (void)type;
-  (void)name;
+  static const struct {
+    unsigned int type;
+    const char *name;
+    int value;
+  } codes[] = {
+      {EV_ABS, "ABS_DISTANCE", ABS_DISTANCE},
+      {EV_ABS, "ABS_MT_PRESSURE", ABS_MT_PRESSURE},
+      {EV_ABS, "ABS_MT_TOOL_TYPE", ABS_MT_TOOL_TYPE},
+      {EV_ABS, "ABS_PRESSURE", ABS_PRESSURE},
+      {EV_ABS, "ABS_TILT_X", ABS_TILT_X},
+      {EV_ABS, "ABS_TILT_Y", ABS_TILT_Y},
+      {EV_KEY, "BTN_0", BTN_0},
+      {EV_KEY, "BTN_MIDDLE", BTN_MIDDLE},
+      {EV_KEY, "BTN_RIGHT", BTN_RIGHT},
+      {EV_KEY, "BTN_TOOL_DOUBLETAP", BTN_TOOL_DOUBLETAP},
+      {EV_KEY, "BTN_TOOL_TRIPLETAP", BTN_TOOL_TRIPLETAP},
+  };
+  for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); i++)
+    if (type == codes[i].type && strcmp(name, codes[i].name) == 0)
+      return codes[i].value;
   return -1;
 }
 
@@ -196,12 +223,39 @@ int libevdev_event_type_from_code(unsigned int code) {
 }
 
 unsigned int libevdev_event_type_get_max(unsigned int type) {
-  (void)type;
-  return 0;
+  switch (type) {
+  case EV_SYN:
+    return SYN_MAX;
+  case EV_KEY:
+    return KEY_MAX;
+  case EV_REL:
+    return REL_MAX;
+  case EV_ABS:
+    return ABS_MAX;
+  case EV_MSC:
+    return MSC_MAX;
+  case EV_SW:
+    return SW_MAX;
+  case EV_LED:
+    return LED_MAX;
+  case EV_SND:
+    return SND_MAX;
+  case EV_REP:
+    return REP_MAX;
+  case EV_FF:
+    return FF_MAX;
+  case EV_FF_STATUS:
+    return FF_STATUS_MAX;
+  default:
+    return 0;
+  }
 }
 
 int libevdev_property_from_name(const char *name) {
-  (void)name;
+  if (strcmp(name, "INPUT_PROP_BUTTONPAD") == 0)
+    return INPUT_PROP_BUTTONPAD;
+  if (strcmp(name, "INPUT_PROP_SEMI_MT") == 0)
+    return INPUT_PROP_SEMI_MT;
   return -1;
 }
 

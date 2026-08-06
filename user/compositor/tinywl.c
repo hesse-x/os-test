@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
+#include <wlr/backend/libinput.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
@@ -45,6 +46,11 @@
 #define SSD_BUTTON_CLOSE_X 12
 #define SSD_BUTTON_MINIMIZE_X 34
 #define SSD_BUTTON_MAXIMIZE_X 56
+#define SSD_BUTTON_HIT_LEFT 4
+#define SSD_BUTTON_HIT_CLOSE_END 31
+#define SSD_BUTTON_HIT_MINIMIZE_END 53
+#define SSD_BUTTON_HIT_RIGHT 80
+#define TINYWL_POINTER_ACCEL_DEFAULT 0.15
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum tinywl_cursor_mode {
@@ -202,6 +208,17 @@ enum ssd_button_icon {
   SSD_ICON_MINIMIZE,
   SSD_ICON_MAXIMIZE,
 };
+
+static int ssd_button_at(double x, double y) {
+  if (y >= 0 || y < -SSD_TITLE_HEIGHT || x < SSD_BUTTON_HIT_LEFT ||
+      x >= SSD_BUTTON_HIT_RIGHT)
+    return -1;
+  if (x < SSD_BUTTON_HIT_CLOSE_END)
+    return SSD_ICON_CLOSE;
+  if (x < SSD_BUTTON_HIT_MINIMIZE_END)
+    return SSD_ICON_MINIMIZE;
+  return SSD_ICON_MAXIMIZE;
+}
 
 struct ssd_button_buffer {
   struct wlr_buffer base;
@@ -520,10 +537,37 @@ static void server_new_keyboard(struct tinywl_server *server,
 
 static void server_new_pointer(struct tinywl_server *server,
                                struct wlr_input_device *device) {
-  /* We don't do anything special with pointers. All of our pointer handling
-   * is proxied through wlr_cursor. On another compositor, you might take this
-   * opportunity to do libinput configuration on the device to set
-   * acceleration, etc. */
+  if (wlr_input_device_is_libinput(device)) {
+    struct libinput_device *libinput_device =
+        wlr_libinput_get_device_handle(device);
+    if (libinput_device_config_accel_is_available(libinput_device)) {
+      double speed = TINYWL_POINTER_ACCEL_DEFAULT;
+      const char *setting = getenv("TINYWL_POINTER_ACCEL");
+      if (setting != NULL) {
+        char *end = NULL;
+        errno = 0;
+        double configured_speed = strtod(setting, &end);
+        if (errno == 0 && end != setting && *end == '\0' &&
+            configured_speed >= -1.0 && configured_speed <= 1.0) {
+          speed = configured_speed;
+        } else {
+          wlr_log(WLR_ERROR,
+                  "invalid TINYWL_POINTER_ACCEL='%s'; using default %.2f",
+                  setting, speed);
+        }
+      }
+
+      enum libinput_config_status status =
+          libinput_device_config_accel_set_speed(libinput_device, speed);
+      if (status == LIBINPUT_CONFIG_STATUS_SUCCESS) {
+        wlr_log(WLR_INFO, "pointer acceleration speed set to %.2f", speed);
+      } else {
+        wlr_log(WLR_ERROR, "failed to set pointer acceleration speed: %d",
+                status);
+      }
+    }
+  }
+
   wlr_cursor_attach_input_device(server->cursor, device);
 }
 
@@ -791,17 +835,19 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
   double rx = server->cursor->x - tx;
   double ry = server->cursor->y - ty;
   if (ry < 0 && ry >= -SSD_TITLE_HEIGHT) {
-    if (rx >= SSD_BUTTON_CLOSE_X && rx < SSD_BUTTON_CLOSE_X + SSD_BUTTON_SIZE) {
+    int button = ssd_button_at(rx, ry);
+    if (button == SSD_ICON_CLOSE) {
       wlr_xdg_toplevel_send_close(toplevel->xdg_toplevel);
       return;
     }
-    if (rx >= SSD_BUTTON_MAXIMIZE_X &&
-        rx < SSD_BUTTON_MAXIMIZE_X + SSD_BUTTON_SIZE) {
+    if (button == SSD_ICON_MAXIMIZE) {
       struct wlr_output *output = wlr_output_layout_output_at(
           server->output_layout, server->cursor->x, server->cursor->y);
       set_toplevel_maximized(toplevel, output, !toplevel->maximized);
       return;
     }
+    if (button == SSD_ICON_MINIMIZE)
+      return; // Minimize is not implemented, but this is still button space.
     begin_interactive(toplevel, TINYWL_CURSOR_MOVE, 0);
     return;
   }

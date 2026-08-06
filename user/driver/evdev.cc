@@ -67,18 +67,24 @@ static struct evdev_device *find_device(uint32_t minor) {
 // /dev/input/event<minor> instance and wakes blocked readers. (mouse.md §3.3:
 // parameterized by minor — the old form hardcoded device_table[0], which only
 // served the keyboard; the mouse needs device_table[1].)
-static void broadcast_events(uint32_t minor, const input_event *evs, int n) {
+static int broadcast_events(uint32_t minor, const input_event *evs, int n) {
   if (n <= 0)
-    return;
+    return 0;
   if (minor >= MAX_EVDEV_DEVICES)
-    return;
+    return -EINVAL;
   int fd = device_table[minor];
   if (fd < 0)
-    return;
-  ssize_t r = write(fd, evs, (size_t)n * sizeof(input_event));
-  if (r < 0)
-    fprintf(stderr, "evdev: broadcast write failed minor=%u errno=%d\n", minor,
-            errno);
+    return -ENODEV;
+  size_t expected = (size_t)n * sizeof(input_event);
+  ssize_t actual = write(fd, evs, expected);
+  if (actual != (ssize_t)expected) {
+    fprintf(stderr,
+            "evdev: broadcast write failed minor=%u expected=%zu actual=%zd "
+            "errno=%d\n",
+            minor, expected, actual, actual < 0 ? errno : 0);
+    return actual < 0 ? -errno : -EIO;
+  }
+  return 0;
 }
 
 // on_key_event: each call fills one event, returns 1=has event / 0=HID empty.
@@ -235,22 +241,69 @@ static void init_mouse_caps(struct evdev_device *dev) {
   dev->caps_bitmap[EV_REL][REL_WHEEL / 8] |= (1u << (REL_WHEEL % 8));
 }
 
-// on_mouse_event: each call fills one event, returns 1=has event / 0=mouse
-// sub-ring empty. Timestamps are stamped here (mirrors on_key_event) since
-// get_mouse_event only fills type/code/value and leaves sec/usec zero.
-static int on_mouse_event(input_event *ev) {
-  input_event me;
-  if (get_mouse_event(&me) != 0)
-    return 0; // mouse sub-ring empty
-  struct timespec ts;
-  if (sys_clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-    return 0;
-  ev->input_event_sec = ts.tv_sec;
-  ev->input_event_usec = ts.tv_nsec / 1000;
-  ev->type = me.type;
-  ev->code = me.code;
-  ev->value = me.value;
-  return 1;
+struct mouse_stats {
+  uint64_t reports_drained_total;
+  uint64_t reports_per_wake_max;
+  uint64_t frames_published_total;
+  uint64_t empty_reports_total;
+  uint64_t malformed_reports_total;
+  uint64_t publish_errors_total;
+  int64_t raw_dx_total;
+  int64_t raw_dy_total;
+};
+
+static struct mouse_stats mouse_stats;
+
+// Drain complete reports. Each non-empty report is timestamped and published
+// as one write containing its data events and the closing SYN_REPORT.
+static int drain_mouse_reports(void) {
+  uint64_t reports_this_wake = 0;
+  for (;;) {
+    input_event frame[USB_MOUSE_REPORT_MAX_EVENTS + 1];
+    size_t count = 0;
+    int rc = get_mouse_report(frame, USB_MOUSE_REPORT_MAX_EVENTS, &count);
+    if (rc == USB_MOUSE_REPORT_EMPTY)
+      break;
+    if (rc < 0) {
+      fprintf(stderr, "evdev: get_mouse_report failed rc=%d\n", rc);
+      return rc;
+    }
+
+    reports_this_wake++;
+    mouse_stats.reports_drained_total++;
+    if (count == 0) {
+      mouse_stats.empty_reports_total++;
+      continue;
+    }
+
+    struct timespec ts;
+    if (sys_clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+      fprintf(stderr, "evdev: mouse clock_gettime failed errno=%d\n", errno);
+      return errno ? -errno : -EIO;
+    }
+    for (size_t i = 0; i < count; i++) {
+      frame[i].input_event_sec = ts.tv_sec;
+      frame[i].input_event_usec = ts.tv_nsec / 1000;
+      if (frame[i].type == EV_REL && frame[i].code == REL_X)
+        mouse_stats.raw_dx_total += frame[i].value;
+      if (frame[i].type == EV_REL && frame[i].code == REL_Y)
+        mouse_stats.raw_dy_total += frame[i].value;
+    }
+    memset(&frame[count], 0, sizeof(frame[count]));
+    frame[count].input_event_sec = ts.tv_sec;
+    frame[count].input_event_usec = ts.tv_nsec / 1000;
+    frame[count].type = EV_SYN;
+    frame[count].code = SYN_REPORT;
+
+    if (broadcast_events(1, frame, (int)count + 1) < 0)
+      mouse_stats.publish_errors_total++;
+    else
+      mouse_stats.frames_published_total++;
+  }
+  if (reports_this_wake > mouse_stats.reports_per_wake_max)
+    mouse_stats.reports_per_wake_max = reports_this_wake;
+  mouse_stats.malformed_reports_total = get_mouse_malformed_reports_total();
+  return 0;
 }
 
 // extern "C": clang under -ffreestanding mangles a C++ `main`, breaking the
@@ -360,6 +413,7 @@ extern "C" int main(int argc, char **argv, char **envp) {
     mprops.name[63] = '\0';
     device_set_meta("input/event1", "input", "evdev", &mprops);
     printf("evdev: event1 registered\n");
+    fprintf(stderr, "evdev: mouse framing=per-report drain=until-empty\n");
   }
 
   // 5. Split the two event sources onto separate pollable fds (evdev_refact.md
@@ -435,27 +489,10 @@ extern "C" int main(int argc, char **argv, char **envp) {
           broadcast_events(0, &syn_ev, 1);
         }
 
-        // --- mouse (minor 1) ---
-        input_event mbatch[16];
-        int mevents = 0;
-        while (mevents < (int)(sizeof(mbatch) / sizeof(mbatch[0])) &&
-               on_mouse_event(&ev)) {
-          mbatch[mevents++] = ev;
-        }
-        if (mevents > 0) {
-          input_event syn_ev;
-          memset(&syn_ev, 0, sizeof(syn_ev));
-          struct timespec ts;
-          if (sys_clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-            return 1;
-          syn_ev.input_event_sec = ts.tv_sec;
-          syn_ev.input_event_usec = ts.tv_nsec / 1000;
-          syn_ev.type = EV_SYN;
-          syn_ev.code = 0; // SYN_REPORT
-          syn_ev.value = 0;
-          broadcast_events(1, mbatch, mevents);
-          broadcast_events(1, &syn_ev, 1);
-        }
+        // --- mouse (minor 1): consume every report queued before returning
+        // to epoll, including no-change reports. ---
+        if (drain_mouse_reports() < 0)
+          return 1;
       } else if (evs[i].data.fd == ipcfd) {
         // Downstream IPC request: non-blocking dequeue (ipcfd_read =
         // ipc_dequeue, §4.3).  Drain until -EAGAIN so a batch of requests is

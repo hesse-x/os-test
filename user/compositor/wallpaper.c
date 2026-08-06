@@ -586,9 +586,11 @@ static void pointer_motion(void *data, struct wl_pointer *pointer,
   (void)y;
 }
 
-static void spawn_terminal(void) {
+static void spawn_terminal(bool run_autotest) {
   pid_t pid = fork();
   if (pid == 0) {
+    if (run_autotest)
+      setenv("XOS_AUTOTEST", "1", 1);
     execl("/usr/bin/terminal", "/usr/bin/terminal", (char *)NULL);
     _exit(127);
   }
@@ -606,7 +608,7 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
   for (int i = 0; i < app.output_count; i++) {
     if (app.pointer_surface != app.outputs[i].dock)
       continue;
-    spawn_terminal();
+    spawn_terminal(false);
     break;
   }
 }
@@ -709,7 +711,9 @@ int main(int argc, char **argv) {
   wl_display_roundtrip(app.display);
   for (int i = 0; i < app.output_count; i++)
     create_output_surfaces(&app.outputs[i]);
-  spawn_terminal();
+  // Only the desktop's initial terminal owns the automatic test run. Further
+  // terminals are ordinary interactive sessions, even in a TEST image.
+  spawn_terminal(true);
   wl_display_flush(app.display);
   while (app.running && wl_display_dispatch(app.display) >= 0) {
   }

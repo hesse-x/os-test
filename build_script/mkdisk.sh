@@ -161,8 +161,36 @@ done
 # created it. Force non-interactive collision handling: mtools otherwise opens
 # /dev/tty for a prompt whose text is hidden by the stderr redirection.
 mmd -D o -i "${BUILD_DIR}/part2.img" ::usr/share ::usr/share/libinput 2>/dev/null || true
-mcopy -i "${BUILD_DIR}/part2.img" "${PROJECT_DIR}/third_party/libinput/quirks/10-generic-keyboard.quirks"  ::usr/share/libinput/
-mcopy -i "${BUILD_DIR}/part2.img" "${PROJECT_DIR}/third_party/libinput/quirks/10-generic-mouse.quirks"     ::usr/share/libinput/
+shopt -s nullglob
+quirks_sources=("${PROJECT_DIR}/third_party/libinput/quirks/"*.quirks)
+if [ "${#quirks_sources[@]}" -eq 0 ]; then
+    echo "mkdisk.sh: no libinput quirks found" >&2
+    exit 1
+fi
+for required in 10-generic-mouse.quirks 30-vendor-qemu.quirks; do
+    if [ ! -f "${PROJECT_DIR}/third_party/libinput/quirks/${required}" ]; then
+        echo "mkdisk.sh: required libinput quirk ${required} is missing" >&2
+        exit 1
+    fi
+done
+mcopy -i "${BUILD_DIR}/part2.img" "${quirks_sources[@]}" ::usr/share/libinput/
+shopt -u nullglob
+
+# Audit the FAT image itself so copy/LFN failures cannot produce a silently
+# broken image that libinput later reports only as "failed to find data files".
+quirks_listing="$(mdir -i "${BUILD_DIR}/part2.img" -b ::usr/share/libinput/)"
+quirks_count="$(printf '%s\n' "${quirks_listing}" | grep -c '\.quirks$' || true)"
+if [ "${quirks_count}" -eq 0 ]; then
+    echo "mkdisk.sh: FAT image contains no long .quirks filenames" >&2
+    exit 1
+fi
+for required in 10-generic-mouse.quirks 30-vendor-qemu.quirks; do
+    if ! printf '%s\n' "${quirks_listing}" | grep -q "/${required}$"; then
+        echo "mkdisk.sh: FAT image audit missing ${required}" >&2
+        exit 1
+    fi
+done
+echo "mkdisk.sh: installed ${quirks_count} libinput quirks files"
 
 # Install the xkeyboard-config closure needed by tinywl.
 if grep -q $'\tusr/bin/tinywl\t2$' "${MANIFEST}"; then

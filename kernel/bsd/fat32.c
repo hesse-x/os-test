@@ -2352,10 +2352,14 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
         lfn_buf[0] = '\0';
         continue;
       }
-      // Skip LFN entries and volume labels.
-      if (de->attr == 0x0F || de->attr & 0x08) {
-        if (de->attr == 0x0F)
-          collect_lfn_entry(de, lfn_buf);
+      // LFN entries precede their owning 8.3 entry, often as a sequence of
+      // multiple records. Preserve the assembled name until that entry is
+      // emitted; volume labels are unrelated and reset the assembly.
+      if (de->attr == 0x0F) {
+        collect_lfn_entry(de, lfn_buf);
+        continue;
+      }
+      if (de->attr & 0x08) {
         lfn_buf[0] = '\0';
         continue;
       }
