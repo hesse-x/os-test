@@ -61,6 +61,8 @@
 #define CELL_INVERSE (1u << 2)
 #define CELL_STRIKE (1u << 3)
 
+enum cursor_shape { CURSOR_BLOCK, CURSOR_UNDERLINE, CURSOR_BAR };
+
 // RGB values occupy bits 0-23. Indexed colors retain their palette identity so
 // bold can brighten ANSI colors at render time, independent of SGR order.
 #define COLOR_INDEXED (1u << 24)
@@ -89,12 +91,16 @@ struct term {
   bool bold, underline, inverse, strike;
   bool wrap_pending; // 光标停在最右列，下一个字符先换行
   bool cursor_visible;
+  bool origin_mode; // DECOM：行坐标相对滚动区，移动限制在滚动区内
+  bool application_cursor; // DECCKM：方向键发送 SS3 序列
+  enum cursor_shape cursor_shape;
 
   // 解析器状态
   int pstate;
   int params[16];
   int nparams;
-  bool priv; // CSI 带 '?' 前缀
+  char prefix;       // CSI 私有前缀（当前处理 '?'）
+  char intermediate; // CSI 中间字节（如 DECSCUSR 的空格）
   char osc[256];
   int osc_len;
   uint32_t utf8_cp; // 未收完的 UTF-8 序列
@@ -134,6 +140,8 @@ static uint32_t resolve_color(uint32_t color, bool bold) {
 }
 
 static struct term term;
+
+static void term_reply(const char *s, size_t n);
 
 static struct cell *cur_grid(void) {
   return term.alt_active ? term.alt : term.grid;
@@ -283,15 +291,27 @@ static void term_sgr(void) {
   ((i) < term.nparams && term.params[(i)] > 0 ? term.params[(i)] : (def))
 #define CLAMP(v, lo, hi) ((v) < (lo) ? (lo) : (v) > (hi) ? (hi) : (v))
 
+static int cursor_top(void) { return term.origin_mode ? term.scroll_top : 0; }
+
+static int cursor_bottom(void) {
+  return term.origin_mode ? term.scroll_bottom : term.rows - 1;
+}
+
+static void cursor_home(void) {
+  term.cx = 0;
+  term.cy = cursor_top();
+  term.wrap_pending = false;
+}
+
 static void term_csi(uint8_t f) {
   int n;
   switch (f) {
   case 'A': // 光标上
-    term.cy = CLAMP(term.cy - PP(0, 1), 0, term.rows - 1);
+    term.cy = CLAMP(term.cy - PP(0, 1), cursor_top(), cursor_bottom());
     break;
   case 'B':
   case 'e': // 光标下
-    term.cy = CLAMP(term.cy + PP(0, 1), 0, term.rows - 1);
+    term.cy = CLAMP(term.cy + PP(0, 1), cursor_top(), cursor_bottom());
     break;
   case 'C':
   case 'a': // 光标右
@@ -303,12 +323,12 @@ static void term_csi(uint8_t f) {
     term.wrap_pending = false;
     break;
   case 'E':
-    term.cy = CLAMP(term.cy + PP(0, 1), 0, term.rows - 1);
+    term.cy = CLAMP(term.cy + PP(0, 1), cursor_top(), cursor_bottom());
     term.cx = 0;
     term.wrap_pending = false;
     break;
   case 'F':
-    term.cy = CLAMP(term.cy - PP(0, 1), 0, term.rows - 1);
+    term.cy = CLAMP(term.cy - PP(0, 1), cursor_top(), cursor_bottom());
     term.cx = 0;
     term.wrap_pending = false;
     break;
@@ -318,11 +338,11 @@ static void term_csi(uint8_t f) {
     term.wrap_pending = false;
     break;
   case 'd': // 移到行
-    term.cy = CLAMP(PP(0, 1) - 1, 0, term.rows - 1);
+    term.cy = CLAMP(cursor_top() + PP(0, 1) - 1, cursor_top(), cursor_bottom());
     break;
   case 'H':
   case 'f': // 移到 (行,列)
-    term.cy = CLAMP(PP(0, 1) - 1, 0, term.rows - 1);
+    term.cy = CLAMP(cursor_top() + PP(0, 1) - 1, cursor_top(), cursor_bottom());
     term.cx = CLAMP(PP(1, 1) - 1, 0, term.cols - 1);
     term.wrap_pending = false;
     break;
@@ -398,8 +418,43 @@ static void term_csi(uint8_t f) {
       term.scroll_top = top;
       term.scroll_bottom = bottom;
     }
-    term.cx = term.cy = 0;
-    term.wrap_pending = false;
+    cursor_home();
+    break;
+  }
+  case 'n': { // DSR：设备状态、光标位置
+    if (term.prefix != '\0' && term.prefix != '?')
+      break;
+    int p = PP(0, 0);
+    if (p == 5) {
+      term_reply(term.prefix == '?' ? "\033[?0n" : "\033[0n",
+                 term.prefix == '?' ? 5 : 4);
+    } else if (p == 6) {
+      char response[48];
+      int row = term.cy - (term.origin_mode ? term.scroll_top : 0) + 1;
+      int len = snprintf(response, sizeof(response),
+                         term.prefix == '?' ? "\033[?%d;%dR" : "\033[%d;%dR",
+                         row, term.cx + 1);
+      if (len > 0)
+        term_reply(response, (size_t)len);
+    }
+    break;
+  }
+  case 'c': // DA：主设备属性与常见的次设备属性查询
+    if (term.prefix == '\0' && PP(0, 0) == 0)
+      term_reply("\033[?1;2c", 7);
+    else if (term.prefix == '>' && PP(0, 0) == 0)
+      term_reply("\033[>0;1;0c", 9);
+    break;
+  case 'q': { // DECSCUSR：闪烁暂按对应静态形状显示
+    if (term.intermediate != ' ')
+      break;
+    int shape = PP(0, 0);
+    if (shape <= 2)
+      term.cursor_shape = CURSOR_BLOCK;
+    else if (shape <= 4)
+      term.cursor_shape = CURSOR_UNDERLINE;
+    else if (shape <= 6)
+      term.cursor_shape = CURSOR_BAR;
     break;
   }
   case 's': // 保存光标
@@ -413,11 +468,18 @@ static void term_csi(uint8_t f) {
     break;
   case 'h':
   case 'l': { // 模式设置/复位（只处理 ? 私有模式）
-    if (!term.priv)
+    if (term.prefix != '?')
       break;
     bool on = (f == 'h');
     for (int i = 0; i < term.nparams; i++) {
       switch (term.params[i]) {
+      case 1:
+        term.application_cursor = on;
+        break;
+      case 6:
+        term.origin_mode = on;
+        cursor_home();
+        break;
       case 25:
         term.cursor_visible = on;
         break;
@@ -524,7 +586,8 @@ static void term_feed(const uint8_t *d, size_t n) {
         term.pstate = P_CSI;
         term.nparams = 1;
         term.params[0] = 0;
-        term.priv = false;
+        term.prefix = '\0';
+        term.intermediate = '\0';
         break;
       case ']':
         term.pstate = P_OSC;
@@ -563,6 +626,10 @@ static void term_feed(const uint8_t *d, size_t n) {
         reset_sgr();
         term.scroll_top = 0;
         term.scroll_bottom = term.rows - 1;
+        term.origin_mode = false;
+        term.application_cursor = false;
+        term.cursor_visible = true;
+        term.cursor_shape = CURSOR_BLOCK;
         clear_rows(0, term.rows - 1);
         break;
       }
@@ -578,8 +645,11 @@ static void term_feed(const uint8_t *d, size_t n) {
       } else if (b == ';') {
         if (term.nparams < 16)
           term.params[term.nparams++] = 0;
-      } else if (b == '?') {
-        term.priv = true;
+      } else if ((b == '?' || b == '>') && term.nparams == 1 &&
+                 term.params[0] == 0) {
+        term.prefix = (char)b;
+      } else if (b >= 0x20 && b <= 0x2f) {
+        term.intermediate = (char)b;
       } else if (b >= 0x40 && b <= 0x7e) {
         term_csi(b);
         term.pstate = P_GROUND;
@@ -615,6 +685,7 @@ static void term_init(int cols, int rows) {
   term.scroll_top = 0;
   term.scroll_bottom = rows - 1;
   term.cursor_visible = true;
+  term.cursor_shape = CURSOR_BLOCK;
   clear_rows(0, rows - 1);
 }
 
@@ -649,6 +720,17 @@ static bool term_resize(int cols, int rows) {
 }
 
 #ifdef TERMINAL_SGR_TEST
+static char reply_buf[128];
+static size_t reply_len;
+
+static void term_reply(const char *s, size_t n) {
+  size_t room = sizeof(reply_buf) - reply_len;
+  if (n > room)
+    n = room;
+  memcpy(reply_buf + reply_len, s, n);
+  reply_len += n;
+}
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -690,13 +772,46 @@ static void test_extended_colors_and_reset(void) {
   TEST_ASSERT_EQUAL_UINT8(0, reset->flags);
 }
 
+static void test_origin_mode_coordinates_and_bounds(void) {
+  feed_test("\033[2;4r\033[?6h\033[2;3H");
+  TEST_ASSERT_TRUE(term.origin_mode);
+  TEST_ASSERT_EQUAL_INT(2, term.cy);
+  TEST_ASSERT_EQUAL_INT(2, term.cx);
+  feed_test("\033[99B");
+  TEST_ASSERT_EQUAL_INT(3, term.cy);
+  feed_test("\033[?6l");
+  TEST_ASSERT_FALSE(term.origin_mode);
+  TEST_ASSERT_EQUAL_INT(0, term.cy);
+  TEST_ASSERT_EQUAL_INT(0, term.cx);
+}
+
+static void test_dsr_da_and_cursor_shape(void) {
+  reply_len = 0;
+  feed_test("\033[3;4H\033[6n\033[c\033[>c");
+  TEST_ASSERT_EQUAL_size_t(22, reply_len);
+  TEST_ASSERT_EQUAL_MEMORY("\033[3;4R\033[?1;2c\033[>0;1;0c", reply_buf,
+                           reply_len);
+  feed_test("\033[3 q");
+  TEST_ASSERT_EQUAL_INT(CURSOR_UNDERLINE, term.cursor_shape);
+  feed_test("\033[6 q");
+  TEST_ASSERT_EQUAL_INT(CURSOR_BAR, term.cursor_shape);
+  feed_test("\033[0 q");
+  TEST_ASSERT_EQUAL_INT(CURSOR_BLOCK, term.cursor_shape);
+  feed_test("\033[?1h");
+  TEST_ASSERT_TRUE(term.application_cursor);
+  feed_test("\033[?1l");
+  TEST_ASSERT_FALSE(term.application_cursor);
+}
+
 extern "C" int main(void) {
   palette_init();
-  term_init(16, 2);
+  term_init(16, 6);
   UNITY_BEGIN();
   RUN_TEST(test_sgr_attributes_and_resets);
   RUN_TEST(test_bold_color_is_order_independent);
   RUN_TEST(test_extended_colors_and_reset);
+  RUN_TEST(test_origin_mode_coordinates_and_bounds);
+  RUN_TEST(test_dsr_da_and_cursor_shape);
   return UNITY_END();
 }
 #else
@@ -1353,15 +1468,25 @@ static void render_now(void) {
     }
   }
 
-  // 光标方块
+  // DECSCUSR 光标形状；闪烁型当前使用对应的静态形状。
   if (term.cursor_visible) {
     float px = TERM_PAD + term.cx * app.cell_w;
     float py = TERM_PAD + term.cy * app.cell_h;
     float cur[4];
     color_premul(0xd9e6d9, 0.85f, cur);
-    draw_rect(proj, px, py, app.cell_w, app.cell_h, 0, cur);
+    float cursor_x = px;
+    float cursor_y = py;
+    float cursor_w = app.cell_w;
+    float cursor_h = app.cell_h;
+    if (term.cursor_shape == CURSOR_UNDERLINE) {
+      cursor_y = py + app.cell_h - 2.0f;
+      cursor_h = 2.0f;
+    } else if (term.cursor_shape == CURSOR_BAR) {
+      cursor_w = 2.0f;
+    }
+    draw_rect(proj, cursor_x, cursor_y, cursor_w, cursor_h, 0, cur);
     struct cell *c = cell_at(term.cx, term.cy);
-    if (c->cp) {
+    if (c->cp && term.cursor_shape == CURSOR_BLOCK) {
       float inv[4];
       color_premul(0x17171a, 1.0f, inv);
       draw_glyph_at(proj, c->cp, px, py + app.ascent, inv);
@@ -1440,6 +1565,8 @@ static void pty_write(const char *s, size_t n) {
   if (app.pty_fd >= 0)
     (void)write(app.pty_fd, s, n);
 }
+
+static void term_reply(const char *s, size_t n) { pty_write(s, n); }
 
 // 通知 shell 窗口尺寸变了（SIGWINCH 由内核代发）
 static void pty_resize(void) {
@@ -1549,22 +1676,22 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
     pty_write(shift ? "\x1b[Z" : "\t", shift ? 3 : 1);
     return;
   case XKB_KEY_Up:
-    pty_write("\x1b[A", 3);
+    pty_write(term.application_cursor ? "\x1bOA" : "\x1b[A", 3);
     return;
   case XKB_KEY_Down:
-    pty_write("\x1b[B", 3);
+    pty_write(term.application_cursor ? "\x1bOB" : "\x1b[B", 3);
     return;
   case XKB_KEY_Right:
-    pty_write("\x1b[C", 3);
+    pty_write(term.application_cursor ? "\x1bOC" : "\x1b[C", 3);
     return;
   case XKB_KEY_Left:
-    pty_write("\x1b[D", 3);
+    pty_write(term.application_cursor ? "\x1bOD" : "\x1b[D", 3);
     return;
   case XKB_KEY_Home:
-    pty_write("\x1b[H", 3);
+    pty_write(term.application_cursor ? "\x1bOH" : "\x1b[H", 3);
     return;
   case XKB_KEY_End:
-    pty_write("\x1b[F", 3);
+    pty_write(term.application_cursor ? "\x1bOF" : "\x1b[F", 3);
     return;
   case XKB_KEY_Prior:
     pty_write("\x1b[5~", 4);
