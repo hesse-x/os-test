@@ -239,6 +239,40 @@ void test_pty_ldisc_erase(void) {
   close(m);
 }
 
+void test_pty_ldisc_extended_editing(void) {
+  int m, s;
+  TEST_ASSERT_EQUAL_INT(0, openpty(&m, &s, NULL, NULL, NULL));
+
+  struct termios t;
+  TEST_ASSERT_EQUAL_INT(0, tcgetattr(s, &t));
+  TEST_ASSERT_TRUE((t.c_lflag & (IEXTEN | ECHOCTL)) == (IEXTEN | ECHOCTL));
+  TEST_ASSERT_EQUAL_HEX8(0x17, t.c_cc[VWERASE]);
+  TEST_ASSERT_EQUAL_HEX8(0x12, t.c_cc[VREPRINT]);
+  TEST_ASSERT_EQUAL_HEX8(0x16, t.c_cc[VLNEXT]);
+
+  /* ^W removes "two", ^R redraws without changing input, and ^V makes the
+   * following ^D data instead of committing the line. */
+  const char input[] = "one two\x17X\x12!\x16\x04\r";
+  TEST_ASSERT_EQUAL_INT((int)sizeof(input) - 1,
+                        (int)write(m, input, sizeof(input) - 1));
+
+  const char expected[] = "one X!\x04\n";
+  char line[64];
+  ssize_t n = read(s, line, sizeof(line));
+  TEST_ASSERT_EQUAL_INT((int)sizeof(expected) - 1, (int)n);
+  TEST_ASSERT_EQUAL_MEMORY(expected, line, sizeof(expected) - 1);
+
+  fcntl(m, F_SETFL, O_NONBLOCK);
+  char acc[ACC_CAP];
+  int accn = 0;
+  acc[0] = '\0';
+  TEST_ASSERT_TRUE(pty_wait_for(m, acc, &accn, "^R\r\none X", 4000));
+  TEST_ASSERT_TRUE(strstr(acc, "^D") != NULL);
+
+  close(s);
+  close(m);
+}
+
 // ---- case 6: ^D empty line = EOF, non-empty commits (M1) -----------------
 void test_pty_ctrl_d_eof(void) {
   int m, s;
@@ -708,6 +742,7 @@ int main(void) {
   RUN_TEST(test_pty_16_create_destroy);
   RUN_TEST(test_pty_env_inherit);
   RUN_TEST(test_pty_ldisc_erase);
+  RUN_TEST(test_pty_ldisc_extended_editing);
   RUN_TEST(test_pty_ctrl_d_eof);
   RUN_TEST(test_pty_raw_mode);
   RUN_TEST(test_pty_ctrl_c_sigint);

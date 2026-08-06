@@ -95,6 +95,7 @@ _Static_assert(sizeof(struct termios) == 60,
 #define ECHOK 0x0020
 #define NOFLSH 0x0080
 #define TOSTOP 0x0100
+#define ECHOCTL 0x0200
 #define IEXTEN 0x8000
 
 // Default termios
@@ -163,6 +164,7 @@ struct pty {
   pid_t t_pgid;    // foreground process group ID
   int eof_pending; // one-shot EOF: ldisc VEOF on an empty line → next slave
                    // read returns 0 once (set by ldisc, cleared by slave read)
+  int lnext_pending; // VLNEXT: next input byte bypasses special handling
 
   // Pointer to slave device priv (for cleanup)
   struct pts_dev_priv *pts_priv;

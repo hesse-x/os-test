@@ -36,7 +36,7 @@ const struct termios default_termios = {
     .c_iflag = ICRNL | IXON,
     .c_oflag = OPOST | ONLCR,
     .c_cflag = CS8 | CLOCAL,
-    .c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN,
+    .c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | IEXTEN,
     .c_cc =
         {
             [VINTR] = 0x03,  // Ctrl-C
@@ -46,9 +46,12 @@ const struct termios default_termios = {
             [VEOF] = 0x04,   // Ctrl-D
             [VTIME] = 0,
             [VMIN] = 1,
-            [VSTART] = 0x11, // Ctrl-Q
-            [VSTOP] = 0x13,  // Ctrl-S
-            [VSUSP] = 0x1A,  // Ctrl-Z
+            [VSTART] = 0x11,   // Ctrl-Q
+            [VSTOP] = 0x13,    // Ctrl-S
+            [VSUSP] = 0x1A,    // Ctrl-Z
+            [VREPRINT] = 0x12, // Ctrl-R
+            [VWERASE] = 0x17,  // Ctrl-W
+            [VLNEXT] = 0x16,   // Ctrl-V
         },
 };
 
@@ -468,11 +471,12 @@ int64_t pty_master_read(struct pty *pty, xtask *proc, void *buf, size_t len) {
 
 // ===================== N_TTY line discipline (input direction) =============
 // Minimal kernel N_TTY (terminal/step1.md §3.4): ICANON line buffering with
-// VERASE/VKILL/VEOF editing, ECHO/ECHOE/ECHOK, ICRNL mapping, and ISIG
+// VERASE/VKILL/VEOF/VWERASE/VREPRINT/VLNEXT editing,
+// ECHO/ECHOE/ECHOK/ECHOCTL, ICRNL mapping, and ISIG
 // signal characters delivered to the foreground pgid. Applies to
 // master->slave input only; output (slave->master) keeps the existing
 // OPOST/ONLCR path. Deliberately not implemented (recorded in todo.md):
-// INLCR/IGNCR, IXON/IXOFF, VMIN/VTIME timers, NOFLSH, VEOL/EOL2, ECHOCTL.
+// INLCR/IGNCR, IXON/IXOFF, VMIN/VTIME timers, NOFLSH, and VEOL/EOL2.
 
 // Committed bytes readable by the slave.
 static int ldisc_canon_avail(struct pty *pty) {
@@ -484,6 +488,7 @@ static void ldisc_flush_input(struct pty *pty) {
   pty->canon_tail = pty->canon_commit = pty->canon_head = 0;
   pty->m_to_s_head = pty->m_to_s_tail = 0;
   pty->eof_pending = 0;
+  pty->lnext_pending = 0;
 }
 
 // Echo goes through the slave_write output path so OPOST/ONLCR applies
@@ -493,11 +498,32 @@ static void ldisc_echo(struct pty *pty, xtask *proc, const char *s, int n) {
   pty_slave_write(pty, proc, s, (size_t)n);
 }
 
-// Caret notation for control bytes ("^C"), used for signal chars and VEOF.
+// Caret notation for control bytes ("^C") when ECHOCTL is active.
 static void ldisc_echo_caret(struct pty *pty, xtask *proc, uint8_t b) {
   char caret[2] = {'^', (char)(b == 0x7F ? '?' : b + '@')};
   ldisc_echo(pty, proc, caret, 2);
 }
+
+static int ldisc_echoes_as_caret(tcflag_t lflag, uint8_t b) {
+  return (lflag & ECHOCTL) && (b < ' ' || b == 0x7F) && b != '\t' && b != '\n';
+}
+
+static void ldisc_echo_byte(struct pty *pty, xtask *proc, tcflag_t lflag,
+                            uint8_t b) {
+  if (ldisc_echoes_as_caret(lflag, b))
+    ldisc_echo_caret(pty, proc, b);
+  else
+    ldisc_echo(pty, proc, (const char *)&b, 1);
+}
+
+static void ldisc_echo_erase(struct pty *pty, xtask *proc, tcflag_t lflag,
+                             uint8_t b) {
+  int columns = ldisc_echoes_as_caret(lflag, b) ? 2 : 1;
+  while (columns-- > 0)
+    ldisc_echo(pty, proc, "\b \b", 3);
+}
+
+static int ldisc_word_space(uint8_t b) { return b == ' ' || b == '\t'; }
 
 // Match a signal character. c_cc value 0 is _POSIX_VDISABLE — never matches.
 static int ldisc_sig_char(struct termios *t, uint8_t b, int *sig) {
@@ -524,20 +550,25 @@ static int ldisc_input(struct pty *pty, xtask *proc, uint8_t b) {
   struct termios *t = &pty->t_termios;
   tcflag_t lflag = t->c_lflag;
   int sig;
+  int literal = pty->lnext_pending;
+
+  if (literal)
+    pty->lnext_pending = 0;
 
   // 1. Signal characters (canonical and raw alike). With no foreground
   // process group there is nobody to signal: fall through and treat the
   // byte as ordinary input rather than dropping it.
-  if ((lflag & ISIG) && ldisc_sig_char(t, b, &sig) && pty->t_pgid > 0) {
+  if (!literal && (lflag & ISIG) && ldisc_sig_char(t, b, &sig) &&
+      pty->t_pgid > 0) {
     ldisc_flush_input(pty);
     if (lflag & ECHO)
-      ldisc_echo_caret(pty, proc, b);
+      ldisc_echo_byte(pty, proc, lflag, b);
     pgsignal(pty->t_pgid, sig);
     return 0;
   }
 
   // 2. Input mapping.
-  if ((t->c_iflag & ICRNL) && b == '\r')
+  if (!literal && (t->c_iflag & ICRNL) && b == '\r')
     b = '\n';
 
   // 3. Raw/cbreak mode: straight into the master->slave ring. Only the
@@ -548,35 +579,74 @@ static int ldisc_input(struct pty *pty, xtask *proc, uint8_t b) {
                          b))
       return 1;
     if (lflag & ECHO)
-      ldisc_echo(pty, proc, (const char *)&b, 1);
+      ldisc_echo_byte(pty, proc, lflag, b);
     __wake_up(pty->wq, POLLIN);
     return 0;
   }
 
   // 4. Canonical editing characters (c_cc==0 disables each, as above).
-  if (b != 0 && b == t->c_cc[VEOF]) {
+  if (!literal && b != 0 && b == t->c_cc[VEOF]) {
     if (pty->canon_head == pty->canon_commit)
       pty->eof_pending = 1; // empty line: one-shot EOF for the next read
     else
       pty->canon_commit = pty->canon_head; // commit without trailing newline
     if (lflag & ECHO)
-      ldisc_echo_caret(pty, proc, b);
+      ldisc_echo_byte(pty, proc, lflag, b);
     __wake_up(pty->wq, POLLIN);
     return 0;
   }
-  if (b != 0 && b == t->c_cc[VERASE]) {
+  if (!literal && b != 0 && b == t->c_cc[VERASE]) {
     if (pty->canon_head != pty->canon_commit) {
       pty->canon_head = (pty->canon_head + PTY_BUF_SIZE - 1) % PTY_BUF_SIZE;
       if ((lflag & (ECHO | ECHOE)) == (ECHO | ECHOE))
-        ldisc_echo(pty, proc, "\b \b", 3);
+        ldisc_echo_erase(pty, proc, lflag, pty->canon_buf[pty->canon_head]);
     }
     return 0;
   }
-  if (b != 0 && b == t->c_cc[VKILL]) {
+  if (!literal && b != 0 && b == t->c_cc[VKILL]) {
     if (pty->canon_head != pty->canon_commit) {
       pty->canon_head = pty->canon_commit;
       if ((lflag & (ECHO | ECHOK)) == (ECHO | ECHOK))
         ldisc_echo(pty, proc, "\n", 1);
+    }
+    return 0;
+  }
+  if (!literal && (lflag & IEXTEN) && b != 0 && b == t->c_cc[VWERASE]) {
+    while (pty->canon_head != pty->canon_commit) {
+      uint32_t prev = (pty->canon_head + PTY_BUF_SIZE - 1) % PTY_BUF_SIZE;
+      if (!ldisc_word_space(pty->canon_buf[prev]))
+        break;
+      pty->canon_head = prev;
+      if ((lflag & (ECHO | ECHOE)) == (ECHO | ECHOE))
+        ldisc_echo_erase(pty, proc, lflag, pty->canon_buf[prev]);
+    }
+    while (pty->canon_head != pty->canon_commit) {
+      uint32_t prev = (pty->canon_head + PTY_BUF_SIZE - 1) % PTY_BUF_SIZE;
+      if (ldisc_word_space(pty->canon_buf[prev]))
+        break;
+      pty->canon_head = prev;
+      if ((lflag & (ECHO | ECHOE)) == (ECHO | ECHOE))
+        ldisc_echo_erase(pty, proc, lflag, pty->canon_buf[prev]);
+    }
+    return 0;
+  }
+  if (!literal && (lflag & IEXTEN) && b != 0 && b == t->c_cc[VREPRINT]) {
+    if (lflag & ECHO) {
+      ldisc_echo_byte(pty, proc, lflag, b);
+      ldisc_echo(pty, proc, "\n", 1);
+      for (uint32_t pos = pty->canon_commit; pos != pty->canon_head;
+           pos = (pos + 1) % PTY_BUF_SIZE)
+        ldisc_echo_byte(pty, proc, lflag, pty->canon_buf[pos]);
+    }
+    return 0;
+  }
+  if (!literal && (lflag & IEXTEN) && b != 0 && b == t->c_cc[VLNEXT]) {
+    pty->lnext_pending = 1;
+    if (lflag & ECHO) {
+      if (lflag & ECHOCTL)
+        ldisc_echo(pty, proc, "^\b", 2);
+      else
+        ldisc_echo(pty, proc, (const char *)&b, 1);
     }
     return 0;
   }
@@ -591,7 +661,7 @@ static int ldisc_input(struct pty *pty, xtask *proc, uint8_t b) {
   pty->canon_buf[pty->canon_head] = b;
   pty->canon_head = (pty->canon_head + 1) % PTY_BUF_SIZE;
   if (lflag & ECHO)
-    ldisc_echo(pty, proc, (const char *)&b, 1);
+    ldisc_echo_byte(pty, proc, lflag, b);
   if (b == '\n') {
     pty->canon_commit = pty->canon_head;
     __wake_up(pty->wq, POLLIN);
