@@ -1481,6 +1481,10 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   char **argv_ptr = (char **)a2; // user-space argv[]
   char **envp_ptr = (char **)a3; // user-space envp[]
   xtask *proc = current_task;
+  // cur_tf is CPU-local and may be replaced while this exec blocks in VFS I/O
+  // and another task runs on the same CPU. Keep this syscall's stack-resident
+  // trapframe so commit cannot rewrite an unrelated task's return context.
+  trapframe *exec_tf = get_cpu_local()->cur_tf;
   if (!proc->mm)
     return (int64_t)-EINVAL;
   printk(LOG_DEBUG, "execve: pid=%d path=%s\n", proc->pid, pathname);
@@ -1994,7 +1998,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   // 9. Switch to new address space
 
   // 9a. Modify current trapframe: rip=entry, rsp=user_sp
-  trapframe *tf = get_cpu_local()->cur_tf;
+  trapframe *tf = exec_tf;
   if (is_dynamic) {
     tf->rip = ld_lr.entry; // ld.so entry
     tf->rsp = user_sp;     // points to argc
