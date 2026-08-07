@@ -1966,10 +1966,11 @@ int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count) {
     if (count - nread >= 4 * 4096) {
       uint64_t bytes = page_off + (count - nread);
       read_window = (uint32_t)((bytes + 4095) / 4096);
-      if (read_window > 16)
-        read_window = 16;
+      if (read_window > PAGE_CACHE_RA_MAX_PAGES)
+        read_window = PAGE_CACHE_RA_MAX_PAGES;
     }
-    int rc = page_cache_get_ra(ip, page_idx, read_window, &cp);
+    int rc =
+        page_cache_get_ra(ip, page_idx, read_window, PAGE_CACHE_RA_READ, &cp);
     if (rc)
       return nread ? (int)nread : rc;
     __memcpy((uint8_t *)buf + nread, cp->data + page_off, chunk);

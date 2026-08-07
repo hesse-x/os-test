@@ -112,8 +112,9 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
         mr->ra_window_pages = 4;
         mr->ra_next_page = page_idx + 4;
       } else if (page_idx == mr->ra_next_page) {
-        mr->ra_window_pages =
-            mr->ra_window_pages < 16 ? mr->ra_window_pages * 2 : 16;
+        mr->ra_window_pages = mr->ra_window_pages < PAGE_CACHE_RA_MAX_PAGES
+                                  ? mr->ra_window_pages * 2
+                                  : PAGE_CACHE_RA_MAX_PAGES;
         mr->ra_next_page = page_idx + mr->ra_window_pages;
       }
       mr->ra_sequential_faults++;
@@ -140,7 +141,8 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
     spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
 
     struct cache_page *cp;
-    int fill_rc = page_cache_get_ra(ip, page_idx, window, &cp);
+    int fill_rc =
+        page_cache_get_ra(ip, page_idx, window, PAGE_CACHE_RA_MMAP, &cp);
     if (fill_rc) {
       printk(LOG_WARN, "file_fault: page_cache_fill failed inode=%p idx=%lu\n",
              (void *)ip, (unsigned long)page_idx);

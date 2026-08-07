@@ -118,6 +118,9 @@ static int bq_count = 0;                   // number of queued requests
 static block_req *ahci_current_req = NULL; // in-flight request
 static uint32_t ahci_cookie_counter = 0;
 static struct ahci_stats ahci_stats;
+#ifdef PERF
+static uint32_t ahci_stats_sequence;
+#endif
 
 static unsigned timing_bucket(uint64_t cycles) {
   unsigned bucket = 0;
@@ -135,6 +138,50 @@ static void update_max(uint64_t *value, uint64_t sample) {
                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
   }
 }
+
+#ifdef PERF
+static void record_irq_stage(enum ahci_irq_stage stage, uint64_t begin,
+                             uint64_t end) {
+  if (end < begin) {
+    ahci_stats.invalid_timing++;
+    return;
+  }
+  uint64_t cycles = end - begin;
+  struct ahci_stage_stats *stats = &ahci_stats.irq_stage[stage];
+  stats->count++;
+  stats->cycles += cycles;
+  update_max(&stats->max, cycles);
+  stats->hist[timing_bucket(cycles)]++;
+}
+
+static void record_irq_handler(uint64_t begin, uint64_t end) {
+  if (end < begin) {
+    ahci_stats.invalid_timing++;
+    return;
+  }
+  uint64_t cycles = end - begin;
+  ahci_stats.irq_handler_count++;
+  ahci_stats.irq_handler_cycles += cycles;
+  update_max(&ahci_stats.irq_handler_max, cycles);
+  ahci_stats.irq_handler_hist[timing_bucket(cycles)]++;
+}
+
+static void record_irq_long_tail(const uint64_t stage_cycles[7],
+                                 uint64_t handler_cycles) {
+  uint64_t thresholds[2] = {tsc_freq / 10000U, tsc_freq / 1000U};
+  for (unsigned threshold = 0; threshold < 2; threshold++) {
+    if (!thresholds[threshold] || handler_cycles < thresholds[threshold])
+      continue;
+    ahci_stats.long_tail_count[threshold]++;
+    for (unsigned stage = 0; stage < 7; stage++) {
+      ahci_stats.long_tail_stage_cycles[threshold][stage] +=
+          stage_cycles[stage];
+      update_max(&ahci_stats.long_tail_stage_max[threshold][stage],
+                 stage_cycles[stage]);
+    }
+  }
+}
+#endif
 
 static uint32_t next_cookie_locked(void) {
   ahci_cookie_counter = (ahci_cookie_counter + 1U) & 0x7fffffffU;
@@ -161,8 +208,21 @@ void ahci_get_stats(struct ahci_stats *out) {
     return;
   const uint64_t *source = (const uint64_t *)&ahci_stats;
   uint64_t *dest = (uint64_t *)out;
+#ifdef PERF
+  for (;;) {
+    uint32_t before = __atomic_load_n(&ahci_stats_sequence, __ATOMIC_ACQUIRE);
+    if (before & 1U)
+      continue;
+    for (size_t i = 0; i < sizeof(*out) / sizeof(uint64_t); i++)
+      dest[i] = __atomic_load_n(&source[i], __ATOMIC_RELAXED);
+    uint32_t after = __atomic_load_n(&ahci_stats_sequence, __ATOMIC_ACQUIRE);
+    if (before == after && !(after & 1U))
+      break;
+  }
+#else
   for (size_t i = 0; i < sizeof(*out) / sizeof(uint64_t); i++)
     dest[i] = __atomic_load_n(&source[i], __ATOMIC_RELAXED);
+#endif
   uint64_t now = rdtsc64();
   if (out->queue_depth_last_tsc && now >= out->queue_depth_last_tsc)
     out->queue_depth_cycles +=
@@ -427,6 +487,9 @@ done:
 void ahci_issue_cmd(block_req *req); // forward declaration
 
 static void ahci_irq_handler(trapframe *tf) {
+#ifdef PERF
+  uint64_t t0 = rdtsc64();
+#endif
   // Check if our port generated the interrupt
   uint32_t pxis = readl(port_reg(active_port, PxIS));
   if (pxis == 0) {
@@ -445,6 +508,13 @@ static void ahci_irq_handler(trapframe *tf) {
     writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS),
            readl((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS)));
     lapic_eoi();
+#ifdef PERF
+    uint64_t end = rdtsc64();
+    __atomic_fetch_add(&ahci_stats_sequence, 1, __ATOMIC_SEQ_CST);
+    ahci_stats.spurious_count++;
+    ahci_stats.spurious_cycles += end - t0;
+    __atomic_fetch_add(&ahci_stats_sequence, 1, __ATOMIC_SEQ_CST);
+#endif
     return;
   }
 
@@ -457,6 +527,9 @@ static void ahci_irq_handler(trapframe *tf) {
   // EOI early — allows LAPIC timer and other high-priority interrupts
   // to preempt our completion processing
   lapic_eoi();
+#ifdef PERF
+  uint64_t t1 = rdtsc64();
+#endif
 
   // No sti here. This is a hard-IRQ handler: every IDT gate is an interrupt
   // gate (IF=0 on entry), and hard-IRQs must stay non-reentrant. Re-enabling
@@ -469,8 +542,18 @@ static void ahci_irq_handler(trapframe *tf) {
 
   // Check if a command was in flight
   spin_lock(&ahci_queue_lock);
+#ifdef PERF
+  uint64_t t2 = rdtsc64();
+#endif
   if (!ahci_current_req) {
     spin_unlock(&ahci_queue_lock);
+#ifdef PERF
+    uint64_t end = rdtsc64();
+    __atomic_fetch_add(&ahci_stats_sequence, 1, __ATOMIC_SEQ_CST);
+    ahci_stats.orphan_count++;
+    ahci_stats.orphan_cycles += end - t0;
+    __atomic_fetch_add(&ahci_stats_sequence, 1, __ATOMIC_SEQ_CST);
+#endif
     return;
   }
 
@@ -486,6 +569,9 @@ static void ahci_irq_handler(trapframe *tf) {
   } else {
     ahci_stats.invalid_timing++;
   }
+#ifdef PERF
+  uint64_t t3 = rdtsc64();
+#endif
 
   // For reads: copy bounce buffer data to user buffer via page-table walk
   if (ahci_current_req->dir == 0 && !error && ahci_current_req->kernel_wait) {
@@ -498,6 +584,9 @@ static void ahci_irq_handler(trapframe *tf) {
     if (!ok)
       error = true; // page walk failed = I/O error
   }
+#ifdef PERF
+  uint64_t t4 = rdtsc64();
+#endif
 
   ahci_current_req->result = error ? EIO : 0;
 
@@ -543,6 +632,9 @@ static void ahci_irq_handler(trapframe *tf) {
     ahci_stats.async_wakes++;
     perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_WAKE, perf_cookie);
   }
+#ifdef PERF
+  uint64_t t5 = rdtsc64();
+#endif
 
   // Issue next queued request if available
   if (bq_count > 0) {
@@ -555,7 +647,27 @@ static void ahci_irq_handler(trapframe *tf) {
     writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS),
            1U << active_port);
   }
+#ifdef PERF
+  uint64_t t6 = rdtsc64();
+#endif
   spin_unlock(&ahci_queue_lock);
+#ifdef PERF
+  uint64_t t8 = rdtsc64();
+  __atomic_fetch_add(&ahci_stats_sequence, 1, __ATOMIC_SEQ_CST);
+  record_irq_stage(AHCI_IRQ_ACK, t0, t1);
+  record_irq_stage(AHCI_IRQ_LOCK_WAIT, t1, t2);
+  record_irq_stage(AHCI_IRQ_BOOKKEEPING, t2, t3);
+  record_irq_stage(AHCI_IRQ_COPY, t3, t4);
+  record_irq_stage(AHCI_IRQ_WAKE, t4, t5);
+  record_irq_stage(AHCI_IRQ_NEXT_SUBMIT, t5, t6);
+  record_irq_stage(AHCI_IRQ_UNLOCK_EXIT, t6, t8);
+  record_irq_stage(AHCI_IRQ_LOCKED_TOTAL, t2, t6);
+  record_irq_handler(t0, t8);
+  const uint64_t stage_cycles[7] = {t1 - t0, t2 - t1, t3 - t2, t4 - t3,
+                                    t5 - t4, t6 - t5, t8 - t6};
+  record_irq_long_tail(stage_cycles, t8 - t0);
+  __atomic_fetch_add(&ahci_stats_sequence, 1, __ATOMIC_SEQ_CST);
+#endif
 }
 
 // ===================== Command issue with memory barrier =====================

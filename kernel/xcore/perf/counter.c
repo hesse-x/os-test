@@ -19,8 +19,21 @@
 #include "kernel/xcore/spinlock.h"
 
 #define COUNTER_SNAPSHOT_MAX 6U
-#define COUNTER_VALUE_MAX 160U
+#define COUNTER_VALUE_MAX 1024U
 #define COUNTER_RECORD_MAX (COUNTER_SNAPSHOT_MAX * (COUNTER_VALUE_MAX + 3U))
+#define COUNTER_BLOCK_MAX 18U
+#define COUNTER_FAT_MAX 17U
+#define COUNTER_READAHEAD_MAX 64U
+#define COUNTER_AHCI_MAX 467U
+#define COUNTER_SCHED_MAX 26U
+#define COUNTER_EVENT_MAX 16U
+#define COUNTER_INTERNAL_MAX 3U
+
+_Static_assert(COUNTER_BLOCK_MAX + COUNTER_FAT_MAX + COUNTER_READAHEAD_MAX +
+                       COUNTER_AHCI_MAX + COUNTER_SCHED_MAX +
+                       COUNTER_EVENT_MAX + COUNTER_INTERNAL_MAX <=
+                   COUNTER_VALUE_MAX,
+               "counter snapshot design exceeds capacity");
 
 enum counter_id {
   C_EVENT_CPU_BASE = 128,
@@ -41,6 +54,7 @@ struct counter_snapshot {
   uint64_t availability;
   uint16_t mark_id;
   uint16_t nr_values;
+  bool overflow;
   struct counter_value values[COUNTER_VALUE_MAX];
 };
 
@@ -62,12 +76,23 @@ static struct counter_record records[2][COUNTER_RECORD_MAX];
 static spinlock counter_lock = SPINLOCK_INIT;
 static uint16_t nr_snapshots;
 static bool final_complete;
+static bool counter_overflow;
 static perf_counter_collector_fn external_collector;
 
 static void add(struct counter_snapshot *snapshot, uint16_t id,
                 uint64_t value) {
-  if (snapshot->nr_values >= COUNTER_VALUE_MAX)
+  if (snapshot->overflow)
     return;
+  for (uint16_t i = 0; i < snapshot->nr_values; i++) {
+    if (snapshot->values[i].id == id) {
+      snapshot->overflow = true;
+      return;
+    }
+  }
+  if (snapshot->nr_values >= COUNTER_VALUE_MAX) {
+    snapshot->overflow = true;
+    return;
+  }
   snapshot->values[snapshot->nr_values++] =
       (struct counter_value){.id = id, .value = value};
 }
@@ -86,6 +111,8 @@ void perf_counter_register_collector(perf_counter_collector_fn collector) {
 }
 
 static void collect(struct counter_snapshot *snapshot, uint16_t mark_id) {
+  snapshot->nr_values = 0;
+  snapshot->overflow = false;
   snapshot->begin_tsc = rdtsc64();
   snapshot->mark_id = mark_id;
   snapshot->availability =
@@ -119,6 +146,19 @@ static void collect(struct counter_snapshot *snapshot, uint16_t mark_id) {
     add(snapshot, base + 2, event.committed);
     add(snapshot, base + 3, event.high_water);
   }
+  uint16_t collected = snapshot->nr_values;
+  add(snapshot, PERF_COUNTER_CAPACITY, COUNTER_VALUE_MAX);
+  add(snapshot, PERF_COUNTER_COUNT, collected);
+  add(snapshot, PERF_COUNTER_OVERFLOW, snapshot->overflow ? 1 : 0);
+  if (snapshot->overflow) {
+    counter_overflow = true;
+    snapshot->nr_values = 0;
+    snapshot->availability = PERF_COUNTER_PROVIDER_OVERFLOW;
+    snapshot->overflow = false;
+    add(snapshot, PERF_COUNTER_CAPACITY, COUNTER_VALUE_MAX);
+    add(snapshot, PERF_COUNTER_COUNT, collected);
+    add(snapshot, PERF_COUNTER_OVERFLOW, 1);
+  }
   snapshot->end_tsc = rdtsc64();
 }
 
@@ -142,9 +182,12 @@ int perf_counter_mark(uint16_t id) {
 
 void perf_counter_capture_final(void) {
   spin_lock(&counter_lock);
-  final_complete = nr_snapshots == XOS_PERF_GUI_SHELL_READY;
+  final_complete =
+      nr_snapshots == XOS_PERF_GUI_SHELL_READY && !counter_overflow;
   if (nr_snapshots < COUNTER_SNAPSHOT_MAX) {
     collect(&snapshots[nr_snapshots], XOS_PERF_COUNTER_FINAL);
+    if (snapshots[nr_snapshots].availability & PERF_COUNTER_PROVIDER_OVERFLOW)
+      final_complete = false;
     nr_snapshots++;
   }
   spin_unlock(&counter_lock);

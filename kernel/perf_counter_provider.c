@@ -7,6 +7,7 @@
 #include "kernel/kernel.h"
 
 #ifdef PERF
+#include <stdint.h>
 
 #include "kernel/bsd/fat32.h"
 #include "kernel/bsd/page_cache.h"
@@ -70,6 +71,31 @@ collect_external_counters(const struct perf_counter_writer *writer) {
               ra.readahead_fragment_truncations);
   writer->add(writer->context, PERF_COUNTER_RA_FALLBACKS,
               ra.readahead_fallbacks);
+  for (unsigned source = 0; source < PAGE_CACHE_RA_SOURCE_COUNT; source++) {
+    uint16_t base = PERF_COUNTER_RA_DETAIL_BASE + source * 32U;
+    writer->add(writer->context, base + 0, ra.calls[source]);
+    writer->add(writer->context, base + 1, ra.requested_pages[source]);
+    writer->add(writer->context, base + 2, ra.admitted_demand[source]);
+    writer->add(writer->context, base + 3, ra.admitted_speculative[source]);
+    writer->add(writer->context, base + 4, ra.hits[source]);
+    writer->add(writer->context, base + 5, ra.eviction_waste[source]);
+    writer->add(writer->context, base + 6, ra.invalidation_waste[source]);
+    writer->add(writer->context, base + 7, ra.outstanding[source]);
+    writer->add(writer->context, base + 8, ra.outstanding_peak[source]);
+    for (unsigned bucket = 0; bucket < PAGE_CACHE_RA_BUCKET_COUNT; bucket++) {
+      writer->add(writer->context, base + 9 + bucket,
+                  ra.requested_window[source][bucket]);
+      writer->add(writer->context, base + 14 + bucket,
+                  ra.effective_window[source][bucket]);
+      writer->add(writer->context, base + 19 + bucket,
+                  ra.admitted_window[source][bucket]);
+    }
+    writer->add(writer->context, base + 24, ra.fragment_truncations[source]);
+    writer->add(writer->context, base + 25, ra.reservation_conflicts[source]);
+    writer->add(writer->context, base + 26, ra.staging_fallbacks[source]);
+    writer->add(writer->context, base + 27, ra.batch_io_commands[source]);
+    writer->add(writer->context, base + 28, ra.batch_io_sectors[source]);
+  }
 
   struct ahci_stats ahci;
   ahci_get_stats(&ahci);
@@ -111,6 +137,34 @@ collect_external_counters(const struct perf_counter_writer *writer) {
                 ahci.queue_wait_hist[bucket]);
     writer->add(writer->context, PERF_COUNTER_AHCI_SERVICE_HIST_BASE + bucket,
                 ahci.service_hist[bucket]);
+  }
+  for (unsigned stage = 0; stage < AHCI_IRQ_STAGE_COUNT; stage++) {
+    uint16_t base = PERF_COUNTER_AHCI_IRQ_STAGE_BASE + stage * 40U;
+    writer->add(writer->context, base + 0, ahci.irq_stage[stage].count);
+    writer->add(writer->context, base + 1, ahci.irq_stage[stage].cycles);
+    writer->add(writer->context, base + 2, ahci.irq_stage[stage].max);
+    for (unsigned bucket = 0; bucket < AHCI_TIMING_BUCKETS; bucket++)
+      writer->add(writer->context, base + 3 + bucket,
+                  ahci.irq_stage[stage].hist[bucket]);
+  }
+  writer->add(writer->context, 720, ahci.irq_handler_count);
+  writer->add(writer->context, 721, ahci.irq_handler_cycles);
+  writer->add(writer->context, 722, ahci.irq_handler_max);
+  for (unsigned bucket = 0; bucket < AHCI_TIMING_BUCKETS; bucket++)
+    writer->add(writer->context, 723 + bucket, ahci.irq_handler_hist[bucket]);
+  writer->add(writer->context, 755, ahci.spurious_count);
+  writer->add(writer->context, 756, ahci.spurious_cycles);
+  writer->add(writer->context, 757, ahci.orphan_count);
+  writer->add(writer->context, 758, ahci.orphan_cycles);
+  for (unsigned threshold = 0; threshold < 2; threshold++) {
+    uint16_t base = 759 + threshold * 15U;
+    writer->add(writer->context, base, ahci.long_tail_count[threshold]);
+    for (unsigned stage = 0; stage < 7; stage++) {
+      writer->add(writer->context, base + 1 + stage,
+                  ahci.long_tail_stage_cycles[threshold][stage]);
+      writer->add(writer->context, base + 8 + stage,
+                  ahci.long_tail_stage_max[threshold][stage]);
+    }
   }
 }
 

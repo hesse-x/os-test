@@ -22,6 +22,27 @@ struct inode;
 #define CACHE_PAGE_INVALID (1U << 5)
 #define CACHE_PAGE_READAHEAD (1U << 6)
 
+#define PAGE_CACHE_RA_MAX_PAGES 16
+
+#ifndef XOS_RA_MAX_PAGES
+#define XOS_RA_MAX_PAGES PAGE_CACHE_RA_MAX_PAGES
+#endif
+
+enum page_cache_ra_source {
+  PAGE_CACHE_RA_MMAP = 0,
+  PAGE_CACHE_RA_READ = 1,
+  PAGE_CACHE_RA_SOURCE_COUNT,
+};
+
+enum page_cache_ra_bucket {
+  PAGE_CACHE_RA_BUCKET_1 = 0,
+  PAGE_CACHE_RA_BUCKET_4,
+  PAGE_CACHE_RA_BUCKET_8,
+  PAGE_CACHE_RA_BUCKET_16,
+  PAGE_CACHE_RA_BUCKET_OTHER,
+  PAGE_CACHE_RA_BUCKET_COUNT,
+};
+
 struct cache_page {
   struct inode *inode;
   uint64_t page_index;
@@ -31,6 +52,9 @@ struct cache_page {
   int error;
   uint32_t generation;
   uint32_t dirty_seq;
+  uint8_t ra_source;
+  uint8_t ra_bucket;
+  uint8_t ra_lifecycle;
   wait_queue_head waiters;
   struct cache_page *hash_next;
   struct cache_page *lru_prev;
@@ -44,6 +68,26 @@ struct page_cache_stats {
   uint64_t readahead_waste;
   uint64_t readahead_fragment_truncations;
   uint64_t readahead_fallbacks;
+  uint64_t calls[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t requested_pages[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t admitted_demand[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t admitted_speculative[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t hits[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t eviction_waste[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t invalidation_waste[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t outstanding[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t outstanding_peak[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t requested_window[PAGE_CACHE_RA_SOURCE_COUNT]
+                           [PAGE_CACHE_RA_BUCKET_COUNT];
+  uint64_t effective_window[PAGE_CACHE_RA_SOURCE_COUNT]
+                           [PAGE_CACHE_RA_BUCKET_COUNT];
+  uint64_t admitted_window[PAGE_CACHE_RA_SOURCE_COUNT]
+                          [PAGE_CACHE_RA_BUCKET_COUNT];
+  uint64_t fragment_truncations[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t reservation_conflicts[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t staging_fallbacks[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t batch_io_commands[PAGE_CACHE_RA_SOURCE_COUNT];
+  uint64_t batch_io_sectors[PAGE_CACHE_RA_SOURCE_COUNT];
 };
 
 #define PAGE_CACHE_HASH_BITS 6
@@ -55,7 +99,9 @@ struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index);
 int page_cache_get(struct inode *ip, uint64_t page_index,
                    struct cache_page **out);
 int page_cache_get_ra(struct inode *ip, uint64_t page_index,
-                      uint32_t window_pages, struct cache_page **out);
+                      uint32_t window_pages, enum page_cache_ra_source source,
+                      struct cache_page **out);
+uint32_t page_cache_ra_cap(uint32_t requested_pages);
 void page_cache_mark_dirty(struct cache_page *cp);
 int page_cache_writeback(struct cache_page *cp);
 int page_cache_writeback_pages(struct cache_page **pages, int nr_pages);

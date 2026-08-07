@@ -11,6 +11,12 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 project(myos C CXX ASM)
 
+set(XOS_RA_MAX_PAGES "16" CACHE STRING "Maximum page-cache readahead window (0, 4, 8, or 16)")
+set_property(CACHE XOS_RA_MAX_PAGES PROPERTY STRINGS 0 4 8 16)
+if(NOT XOS_RA_MAX_PAGES MATCHES "^(0|4|8|16)$")
+    message(FATAL_ERROR "XOS_RA_MAX_PAGES must be one of: 0, 4, 8, 16")
+endif()
+
 # Export compile database for clang-tidy incremental naming checks (see doc/design/code_standard.md)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -93,6 +99,7 @@ if(PERF)
     list(APPEND _base_opts -g -fno-omit-frame-pointer)
 endif()
 target_compile_options(os_base_options INTERFACE ${_base_opts})
+target_compile_definitions(os_base_options INTERFACE XOS_RA_MAX_PAGES=${XOS_RA_MAX_PAGES})
 
 # ---- os_user_base_options: userspace baseline INTERFACE lib ----
 # Mirrors os_base_options but with USER_FREESTANDING_FLAGS (no -isystem) + -m64.

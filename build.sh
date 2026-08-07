@@ -10,6 +10,7 @@ BUILD_TYPE=Release
 CMAKE_EXTRA=""
 # Compiler: default clang, --gcc to switch. Both toolchains are supported.
 OS_COMPILER=clang
+RA_MAX_PAGES=16
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -40,8 +41,23 @@ while [[ $# -gt 0 ]]; do
             OS_COMPILER=clang
             shift
             ;;
+        --ra-pages)
+            if [[ $# -lt 2 ]]; then
+                echo "ERROR: --ra-pages requires off, 4, 8, or 16" >&2
+                exit 1
+            fi
+            case "$2" in
+                off|0) RA_MAX_PAGES=0 ;;
+                4|8|16) RA_MAX_PAGES="$2" ;;
+                *)
+                    echo "ERROR: --ra-pages requires off, 4, 8, or 16" >&2
+                    exit 1
+                    ;;
+            esac
+            shift 2
+            ;;
         *)
-            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf] [--gcc] [--clang]"
+            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf] [--ra-pages off|4|8|16] [--gcc] [--clang]"
             exit 1
             ;;
     esac
@@ -98,6 +114,7 @@ cmake -GNinja \
       -DCMAKE_TOOLCHAIN_FILE=../build_script/cmake/toolchain-x86_64.cmake \
       -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
       -DOS_COMPILER=$OS_COMPILER \
+      -DXOS_RA_MAX_PAGES=$RA_MAX_PAGES \
       $CMAKE_EXTRA \
       ..
 ninja

@@ -38,7 +38,7 @@ static int lru_inited = 0;
 static struct cache_page *free_list = NULL;
 static int free_count = 0;
 
-#define RA_MAX_PAGES 16
+#define RA_MAX_PAGES PAGE_CACHE_RA_MAX_PAGES
 #define SECTORS_PER_PAGE (PAGE_SIZE / 512)
 #define PAGE_CACHE_IO_RUN_MAX SECTORS_PER_PAGE
 
@@ -49,6 +49,67 @@ struct page_cache_io_run {
 };
 static int ra_staging_in_use;
 static struct page_cache_stats cache_stats;
+
+enum {
+  RA_LIFECYCLE_NONE = 0,
+  RA_LIFECYCLE_OUTSTANDING = 1,
+  RA_LIFECYCLE_RESOLVED = 2,
+};
+
+static enum page_cache_ra_bucket ra_bucket(uint32_t pages) {
+  switch (pages) {
+  case 1:
+    return PAGE_CACHE_RA_BUCKET_1;
+  case 4:
+    return PAGE_CACHE_RA_BUCKET_4;
+  case 8:
+    return PAGE_CACHE_RA_BUCKET_8;
+  case 16:
+    return PAGE_CACHE_RA_BUCKET_16;
+  default:
+    return PAGE_CACHE_RA_BUCKET_OTHER;
+  }
+}
+
+uint32_t page_cache_ra_cap(uint32_t requested_pages) {
+  uint32_t cap = XOS_RA_MAX_PAGES ? XOS_RA_MAX_PAGES : 1;
+  if (requested_pages < 1)
+    requested_pages = 1;
+  if (requested_pages > RA_MAX_PAGES)
+    requested_pages = RA_MAX_PAGES;
+  return requested_pages < cap ? requested_pages : cap;
+}
+
+static void ra_resolve_locked(struct cache_page *cp, bool invalidation) {
+  if (cp->ra_lifecycle != RA_LIFECYCLE_OUTSTANDING)
+    return;
+  unsigned source = cp->ra_source;
+  if (source >= PAGE_CACHE_RA_SOURCE_COUNT)
+    return;
+  if (cache_stats.outstanding[source])
+    cache_stats.outstanding[source]--;
+  if (invalidation)
+    cache_stats.invalidation_waste[source]++;
+  else
+    cache_stats.eviction_waste[source]++;
+  cache_stats.readahead_waste++;
+  cp->ra_lifecycle = RA_LIFECYCLE_RESOLVED;
+  cp->flags &= ~CACHE_PAGE_READAHEAD;
+}
+
+static void ra_hit_locked(struct cache_page *cp) {
+  if (cp->ra_lifecycle != RA_LIFECYCLE_OUTSTANDING)
+    return;
+  unsigned source = cp->ra_source;
+  if (source >= PAGE_CACHE_RA_SOURCE_COUNT)
+    return;
+  if (cache_stats.outstanding[source])
+    cache_stats.outstanding[source]--;
+  cache_stats.hits[source]++;
+  cache_stats.readahead_hits++;
+  cp->ra_lifecycle = RA_LIFECYCLE_RESOLVED;
+  cp->flags &= ~CACHE_PAGE_READAHEAD;
+}
 
 static void page_wait_wake(wait_queue_t *wait, unsigned long flags) {
   (void)flags;
@@ -186,6 +247,9 @@ struct cache_page *page_cache_lookup(struct inode *ip, uint64_t page_index) {
           page_cache_release(cp);
           return NULL;
         }
+        spin_lock(&page_cache_lock);
+        ra_hit_locked(cp);
+        spin_unlock(&page_cache_lock);
         return cp;
       }
       cp = cp->hash_next;
@@ -204,8 +268,7 @@ static int page_cache_evict(void) {
         !(cp->flags &
           (CACHE_PAGE_FILLING | CACHE_PAGE_WRITEBACK | CACHE_PAGE_DIRTY)) &&
         cp->data) {
-      if (cp->flags & CACHE_PAGE_READAHEAD)
-        __atomic_fetch_add(&cache_stats.readahead_waste, 1, __ATOMIC_RELAXED);
+      ra_resolve_locked(cp, false);
       /* Remove from hash */
       unsigned idx = page_cache_hashfn(cp->inode, cp->page_index);
       struct cache_page **pp = &page_cache_hash[idx];
@@ -251,6 +314,9 @@ page_cache_alloc_locked(struct inode *ip, uint64_t page_index, bool readahead) {
   cp->page_index = page_index;
   atomic_set(&cp->pin_count, 1); /* fill owner */
   cp->flags = CACHE_PAGE_FILLING | (readahead ? CACHE_PAGE_READAHEAD : 0);
+  cp->ra_source = PAGE_CACHE_RA_SOURCE_COUNT;
+  cp->ra_bucket = PAGE_CACHE_RA_BUCKET_OTHER;
+  cp->ra_lifecycle = RA_LIFECYCLE_NONE;
   cp->error = 0;
   cp->generation++;
   unsigned idx = page_cache_hashfn(ip, page_index);
@@ -323,17 +389,26 @@ static bool remember_lba(uint32_t *mapped_lbas, uint32_t *nr_mapped,
 }
 
 int page_cache_get_ra(struct inode *ip, uint64_t page_index,
-                      uint32_t window_pages, struct cache_page **out) {
-  if (!ip || !out || window_pages == 0 || window_pages > RA_MAX_PAGES)
+                      uint32_t window_pages, enum page_cache_ra_source source,
+                      struct cache_page **out) {
+  if (!ip || !out || window_pages == 0 || source >= PAGE_CACHE_RA_SOURCE_COUNT)
     return -EINVAL;
-  *out = page_cache_lookup(ip, page_index);
-  if (*out) {
-    uint32_t old = __atomic_fetch_and(&(*out)->flags, ~CACHE_PAGE_READAHEAD,
-                                      __ATOMIC_RELAXED);
-    if (old & CACHE_PAGE_READAHEAD)
-      __atomic_fetch_add(&cache_stats.readahead_hits, 1, __ATOMIC_RELAXED);
-    return 0;
+  uint32_t requested_pages = window_pages;
+  window_pages = page_cache_ra_cap(window_pages);
+  if (requested_pages > 1) {
+    __atomic_fetch_add(&cache_stats.calls[source], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&cache_stats.requested_pages[source], requested_pages,
+                       __ATOMIC_RELAXED);
+    __atomic_fetch_add(
+        &cache_stats.requested_window[source][ra_bucket(requested_pages)], 1,
+        __ATOMIC_RELAXED);
+    __atomic_fetch_add(
+        &cache_stats.effective_window[source][ra_bucket(window_pages)], 1,
+        __ATOMIC_RELAXED);
   }
+  *out = page_cache_lookup(ip, page_index);
+  if (*out)
+    return 0;
 
   if (ip->type != INODE_REGULAR)
     window_pages = 1;
@@ -361,6 +436,9 @@ int page_cache_get_ra(struct inode *ip, uint64_t page_index,
         lru_touch(existing);
         pages[0] = existing;
       }
+      if (nr > 0 && requested_pages > 1)
+        __atomic_fetch_add(&cache_stats.reservation_conflicts[source], 1,
+                           __ATOMIC_RELAXED);
       break; /* never overwrite or read across another fill owner */
     }
     pages[nr] = page_cache_alloc_locked(ip, index, nr != 0);
@@ -423,6 +501,8 @@ int page_cache_get_ra(struct inode *ip, uint64_t page_index,
       nr = 1;
       sectors = sectors > 8 ? 8 : sectors;
       __atomic_fetch_add(&cache_stats.readahead_fallbacks, 1, __ATOMIC_RELAXED);
+      __atomic_fetch_add(&cache_stats.staging_fallbacks[source], 1,
+                         __ATOMIC_RELAXED);
     }
   }
 
@@ -497,6 +577,8 @@ int page_cache_get_ra(struct inode *ip, uint64_t page_index,
   if (admitted_pages < nr) {
     __atomic_fetch_add(&cache_stats.readahead_fragment_truncations, 1,
                        __ATOMIC_RELAXED);
+    __atomic_fetch_add(&cache_stats.fragment_truncations[source], 1,
+                       __ATOMIC_RELAXED);
     spin_lock(&page_cache_lock);
     for (uint32_t i = admitted_pages; i < nr; i++)
       page_cache_unhash_locked(pages[i]);
@@ -544,7 +626,22 @@ int page_cache_get_ra(struct inode *ip, uint64_t page_index,
       page_cache_unhash_locked(pages[i]);
     } else {
       pages[i]->flags |= CACHE_PAGE_UPTODATE;
+      if (i > 0) {
+        pages[i]->ra_source = (uint8_t)source;
+        pages[i]->ra_bucket = (uint8_t)ra_bucket(nr);
+        pages[i]->ra_lifecycle = RA_LIFECYCLE_OUTSTANDING;
+        cache_stats.admitted_speculative[source]++;
+        cache_stats.outstanding[source]++;
+        if (cache_stats.outstanding[source] >
+            cache_stats.outstanding_peak[source])
+          cache_stats.outstanding_peak[source] =
+              cache_stats.outstanding[source];
+      }
     }
+  }
+  if (!io_error && requested_pages > 1) {
+    cache_stats.admitted_demand[source]++;
+    cache_stats.admitted_window[source][ra_bucket(nr)]++;
   }
   spin_unlock(&page_cache_lock);
   for (uint32_t i = 0; i < nr; i++)
@@ -561,6 +658,10 @@ int page_cache_get_ra(struct inode *ip, uint64_t page_index,
   if (nr > 1) {
     __atomic_fetch_add(&cache_stats.readahead_batches, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&cache_stats.readahead_pages, nr - 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&cache_stats.batch_io_commands[source], nr_runs,
+                       __ATOMIC_RELAXED);
+    __atomic_fetch_add(&cache_stats.batch_io_sectors[source], sectors,
+                       __ATOMIC_RELAXED);
   }
   *out = pages[0];
   return 0;
@@ -568,12 +669,14 @@ int page_cache_get_ra(struct inode *ip, uint64_t page_index,
 
 struct cache_page *page_cache_fill(struct inode *ip, uint64_t page_index) {
   struct cache_page *cp = NULL;
-  return page_cache_get_ra(ip, page_index, 1, &cp) == 0 ? cp : NULL;
+  return page_cache_get_ra(ip, page_index, 1, PAGE_CACHE_RA_READ, &cp) == 0
+             ? cp
+             : NULL;
 }
 
 int page_cache_get(struct inode *ip, uint64_t page_index,
                    struct cache_page **out) {
-  return page_cache_get_ra(ip, page_index, 1, out);
+  return page_cache_get_ra(ip, page_index, 1, PAGE_CACHE_RA_READ, out);
 }
 
 void page_cache_mark_dirty(struct cache_page *cp) {
@@ -700,8 +803,7 @@ void page_cache_invalidate_inode(struct inode *ip) {
     while (*pp) {
       struct cache_page *cp = *pp;
       if (cp->inode == ip) {
-        if (cp->flags & CACHE_PAGE_READAHEAD)
-          __atomic_fetch_add(&cache_stats.readahead_waste, 1, __ATOMIC_RELAXED);
+        ra_resolve_locked(cp, true);
         *pp = cp->hash_next;
         lru_remove(cp);
         cp->hash_next = NULL;
@@ -726,18 +828,9 @@ void page_cache_invalidate_inode(struct inode *ip) {
 void page_cache_get_stats(struct page_cache_stats *out) {
   if (!out)
     return;
-  out->readahead_batches =
-      __atomic_load_n(&cache_stats.readahead_batches, __ATOMIC_RELAXED);
-  out->readahead_pages =
-      __atomic_load_n(&cache_stats.readahead_pages, __ATOMIC_RELAXED);
-  out->readahead_hits =
-      __atomic_load_n(&cache_stats.readahead_hits, __ATOMIC_RELAXED);
-  out->readahead_waste =
-      __atomic_load_n(&cache_stats.readahead_waste, __ATOMIC_RELAXED);
-  out->readahead_fragment_truncations = __atomic_load_n(
-      &cache_stats.readahead_fragment_truncations, __ATOMIC_RELAXED);
-  out->readahead_fallbacks =
-      __atomic_load_n(&cache_stats.readahead_fallbacks, __ATOMIC_RELAXED);
+  spin_lock(&page_cache_lock);
+  __memcpy(out, &cache_stats, sizeof(*out));
+  spin_unlock(&page_cache_lock);
 }
 
 /* Collect dirty pages (optionally restricted to one inode) into out[], pinning

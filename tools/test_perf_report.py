@@ -94,6 +94,51 @@ class PerfReportRawTest(unittest.TestCase):
         with self.assertRaisesRegex(PERF.PerfFormatError, "rollback"):
             PERF.analyze_counters(snapshot)
 
+    def test_readahead_conservation_is_rejected(self):
+        snapshot = self.parse(make_raw(counter_ident=303))
+        with self.assertRaisesRegex(PERF.PerfFormatError, "conservation"):
+            PERF.analyze_counters(snapshot)
+
+    def test_zero_readahead_denominators_are_null(self):
+        snapshot = self.parse(make_raw(counter_ident=303))
+        for item in snapshot["counter_snapshots"]:
+            item["values"]["readahead.mmap.admitted_speculative"] = 0
+        counters, _, _, _ = PERF.analyze_counters(snapshot)
+        values = counters["final"]["readahead"]["mmap"]
+        self.assertIsNone(values["resolved_coverage"])
+        self.assertIsNone(values["resolved_waste_ratio"])
+
+    def test_ahci_stage_sum_validation(self):
+        counters = {"final": {"ahci_irq": {}}}
+        for stage in ("ack", "lock_wait", "bookkeeping", "copy", "wake",
+                      "next_submit", "unlock_exit"):
+            counters["final"]["ahci_irq"].update({
+                f"{stage}.count": 1, f"{stage}.cycles": 10,
+                f"{stage}.max": 10, f"{stage}.hist_3": 1})
+        counters["final"]["ahci_irq"].update({
+            "handler_total.count": 1, "handler_total.cycles": 70,
+            "handler_total.max": 70, "handler_total.hist_6": 1})
+        summary = PERF.summarize_ahci_irq(counters, 1_000_000)
+        self.assertTrue(summary["valid"])
+        counters["final"]["ahci_irq"]["handler_total.cycles"] = 71
+        self.assertFalse(PERF.summarize_ahci_irq(
+            counters, 1_000_000)["valid"])
+
+    def test_counter_overflow_invalidates_sample(self):
+        snapshot = self.parse(make_raw(counter_ident=72))
+        counters, _, _, _ = PERF.analyze_counters(snapshot)
+        self.assertTrue(counters["counter_overflow"])
+
+    def test_outstanding_is_a_gauge(self):
+        snapshot = self.parse(make_raw(counter_ident=307))
+        snapshot["counter_snapshots"][1]["values"][
+            "readahead.mmap.outstanding"] = 0
+        snapshot["counter_snapshots"][-1]["values"][
+            "readahead.mmap.outstanding"] = 0
+        _, _, deltas, _ = PERF.analyze_counters(snapshot)
+        self.assertEqual(deltas[0]["readahead"]["mmap.outstanding_start"], 1)
+        self.assertEqual(deltas[0]["readahead"]["mmap.outstanding_end"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

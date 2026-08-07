@@ -51,6 +51,7 @@ COUNTER_NAMES = {
     64: "readahead.batches", 65: "readahead.pages",
     66: "readahead.hits", 67: "readahead.waste",
     68: "readahead.fragment_truncations", 69: "readahead.fallbacks",
+    70: "counter.capacity", 71: "counter.count", 72: "counter.overflow",
     80: "ahci.sync_submitted", 81: "ahci.async_submitted",
     82: "ahci.completed", 83: "ahci.errors", 84: "ahci.sync_wakes",
     85: "ahci.async_wakes", 86: "ahci.early_completes",
@@ -79,10 +80,63 @@ def counter_name(ident):
         return "wake.cross_cpu_ipi"
     if ident == 185:
         return "wake.spurious_cancels"
-    if 200 <= ident < 216:
+    if 200 <= ident < 232:
         return f"ahci.queue_wait_hist_{ident - 200}"
-    if 216 <= ident < 232:
-        return f"ahci.service_hist_{ident - 216}"
+    if 232 <= ident < 264:
+        return f"ahci.service_hist_{ident - 232}"
+    if 300 <= ident < 364:
+        source_index, field_index = divmod(ident - 300, 32)
+        if source_index < 2:
+            source = ("mmap", "read")[source_index]
+            fields = ("calls", "requested_pages", "admitted_demand",
+                      "admitted_speculative", "hits", "eviction_waste",
+                      "invalidation_waste", "outstanding", "outstanding_peak")
+            if field_index < len(fields):
+                return f"readahead.{source}.{fields[field_index]}"
+            bucket_names = ("1", "4", "8", "16", "other")
+            if 9 <= field_index < 14:
+                return f"readahead.{source}.requested_window_{bucket_names[field_index - 9]}"
+            if 14 <= field_index < 19:
+                return f"readahead.{source}.effective_window_{bucket_names[field_index - 14]}"
+            if 19 <= field_index < 24:
+                return f"readahead.{source}.admitted_window_{bucket_names[field_index - 19]}"
+            detail = ("fragment_truncations", "reservation_conflicts",
+                      "staging_fallbacks", "batch_io_commands",
+                      "batch_io_sectors")
+            if 24 <= field_index < 29:
+                return f"readahead.{source}.{detail[field_index - 24]}"
+    if 400 <= ident < 720:
+        stage_index, field_index = divmod(ident - 400, 40)
+        stages = ("ack", "lock_wait", "bookkeeping", "copy", "wake",
+                  "next_submit", "unlock_exit", "locked_total")
+        if stage_index < len(stages):
+            stage = stages[stage_index]
+            if field_index < 3:
+                return f"ahci_irq.{stage}." + ("count", "cycles", "max")[field_index]
+            if field_index < 35:
+                return f"ahci_irq.{stage}.hist_{field_index - 3}"
+    if 720 <= ident < 723:
+        return "ahci_irq.handler_total." + ("count", "cycles", "max")[ident - 720]
+    if 723 <= ident < 755:
+        return f"ahci_irq.handler_total.hist_{ident - 723}"
+    if ident == 755:
+        return "ahci_irq.spurious.count"
+    if ident == 756:
+        return "ahci_irq.spurious.cycles"
+    if ident == 757:
+        return "ahci_irq.orphan.count"
+    if ident == 758:
+        return "ahci_irq.orphan.cycles"
+    if 759 <= ident < 789:
+        threshold_index, field_index = divmod(ident - 759, 15)
+        threshold = ("100us", "1ms")[threshold_index]
+        stages = ("ack", "lock_wait", "bookkeeping", "copy", "wake",
+                  "next_submit", "unlock_exit")
+        if field_index == 0:
+            return f"ahci_irq.long_tail_{threshold}.count"
+        if 1 <= field_index < 8:
+            return f"ahci_irq.long_tail_{threshold}.{stages[field_index - 1]}_cycles"
+        return f"ahci_irq.long_tail_{threshold}.{stages[field_index - 8]}_max"
     if 128 <= ident < 144:
         cpu, field = divmod(ident - 128, 4)
         return f"event.cpu{cpu}." + ("capacity", "attempted", "committed",
@@ -479,6 +533,53 @@ def percentile(values, percent):
     return values[min(len(values) - 1, int((len(values) - 1) * percent / 100.0))]
 
 
+def summarize_ahci_irq(counters, tsc_freq):
+    values = counters.get("final", {}).get("ahci_irq", {})
+    if not values:
+        return {"completion_mode": "inline", "valid": False}
+    components = ("ack", "lock_wait", "bookkeeping", "copy", "wake",
+                  "next_submit", "unlock_exit")
+    stages = components + ("locked_total", "handler_total")
+    output = {"completion_mode": "inline", "valid": True}
+    for stage in stages:
+        prefix = f"{stage}."
+        row = {key[len(prefix):]: value for key, value in values.items()
+               if key.startswith(prefix)}
+        count = row.get("count", 0)
+        threshold = (count * 95 + 99) // 100
+        cumulative = 0
+        p95_cycles = 0
+        for bucket in range(32):
+            cumulative += row.get(f"hist_{bucket}", 0)
+            if cumulative >= threshold and threshold:
+                p95_cycles = 1 << bucket
+                break
+        output[stage] = {
+            "count": count,
+            "total_us": row.get("cycles", 0) * 1_000_000.0 / tsc_freq,
+            "p95_us": p95_cycles * 1_000_000.0 / tsc_freq,
+            "max_us": row.get("max", 0) * 1_000_000.0 / tsc_freq,
+        }
+    handler = output["handler_total"]
+    stage_rows = [output[name] for name in components]
+    if (any(row["count"] != handler["count"] for row in stage_rows) or
+            abs(sum(row["total_us"] for row in stage_rows) -
+                handler["total_us"]) > 0.001):
+        output["valid"] = False
+    output["spurious"] = {"count": values.get("spurious.count", 0),
+                          "total_us": values.get("spurious.cycles", 0) *
+                          1_000_000.0 / tsc_freq}
+    output["orphan"] = {"count": values.get("orphan.count", 0),
+                        "total_us": values.get("orphan.cycles", 0) *
+                        1_000_000.0 / tsc_freq}
+    for threshold in ("100us", "1ms"):
+        prefix = f"long_tail_{threshold}."
+        output[f"long_tail_{threshold}"] = {
+            key[len(prefix):]: value for key, value in values.items()
+            if key.startswith(prefix)}
+    return output
+
+
 def read_build_id(elf):
     result = subprocess.run(["readelf", "-n", str(elf)], check=True,
                             capture_output=True, text=True, timeout=10)
@@ -604,6 +705,12 @@ def analyze_counters(snapshot):
             if name not in left["values"]:
                 continue
             start_value = left["values"][name]
+            if (name.endswith(".outstanding") or
+                    name.endswith(".outstanding_peak")):
+                group, field = name.split(".", 1)
+                groups[group][f"{field}_start"] = start_value
+                groups[group][f"{field}_end"] = end_value
+                continue
             if end_value < start_value:
                 raise PerfFormatError(f"counter rollback for {name} between "
                                       f"{left['name']} and {right['name']}")
@@ -638,6 +745,30 @@ def analyze_counters(snapshot):
         block[f"{direction}_sectors_per_command"] = (
             sectors / commands if commands else None)
 
+    readahead = final.get("readahead", {})
+    for source in ("mmap", "read"):
+        prefix = f"{source}."
+        values = {key[len(prefix):]: value for key, value in readahead.items()
+                  if key.startswith(prefix)}
+        if not values:
+            continue
+        admitted = values.get("admitted_speculative", 0)
+        hits = values.get("hits", 0)
+        waste = (values.get("eviction_waste", 0) +
+                 values.get("invalidation_waste", 0))
+        outstanding = values.get("outstanding", 0)
+        if admitted != hits + waste + outstanding:
+            raise PerfFormatError(
+                f"readahead {source} lifecycle conservation failed")
+        resolved = hits + waste
+        values["resolved_coverage"] = resolved / admitted if admitted else None
+        values["resolved_waste_ratio"] = waste / resolved if resolved else None
+        values["outstanding_ratio"] = outstanding / admitted if admitted else None
+        readahead[source] = values
+    for key in list(readahead):
+        if key.startswith("mmap.") or key.startswith("read."):
+            del readahead[key]
+
     cpus = []
     event = final.get("event", {})
     for cpu in range(4):
@@ -651,13 +782,19 @@ def analyze_counters(snapshot):
                      "high_water": high,
                      "utilization_percent": high * 100.0 / capacity if capacity else 0,
                      "degraded": bool(capacity and high * 100 >= capacity * 80)})
-    return {"final": dict(final)}, milestones, deltas, {
+    counter = final.get("counter", {})
+    counter_overflow = bool(counter.get("overflow", 0) or any(
+        item["availability"] & (1 << 63) for item in snapshots))
+    return {"final": dict(final),
+            "counter_capacity": counter.get("capacity"),
+            "counter_count": counter.get("count"),
+            "counter_overflow": counter_overflow}, milestones, deltas, {
         "cpus": cpus, "threshold_percent": 80}
 
 
 def write_outputs(snapshot, phases, tests, errors, trace, hotspots, chains,
                   scheduling, irqs, causal, output_dir, metadata, kernel_elf,
-                  build_id):
+                  build_id, ra_max_pages, run_manifest):
     output_dir.mkdir(parents=True, exist_ok=True)
     duration_ms = (snapshot["end_tsc"] - snapshot["boot_tsc"]) * 1000.0 / snapshot["tsc_freq"]
     sources = {chain["source"] for chain in chains}
@@ -680,10 +817,13 @@ def write_outputs(snapshot, phases, tests, errors, trace, hotspots, chains,
                 "truncated_callchains": metadata.get("truncated_callchains", 0) if metadata else 0,
                 "pmu_active_mask": metadata.get("pmu_active_mask", 0) if metadata else 0}
     counters, milestones, phase_deltas, event_buffers = analyze_counters(snapshot)
+    ahci_irq_stages = summarize_ahci_irq(counters, snapshot["tsc_freq"])
     trace_valid = ((metadata.get("trace_lost", 0) if metadata else 0) == 0 and
                    snapshot["lost_samples"] == 0 and
                    not any(cpu["degraded"] for cpu in event_buffers["cpus"]))
-    summary = {"format": "xos-perf-summary-v3", "complete": snapshot["complete"],
+    counter_overflow = counters.get("counter_overflow", False)
+    summary = {"format": "xos-perf-summary-v3",
+               "complete": snapshot["complete"] and not counter_overflow,
                "end_reason": snapshot["end_reason"], "duration_ms": duration_ms,
                "record_count": snapshot["record_count"], "trace_errors": errors,
                "trace_lost": metadata.get("trace_lost", 0) if metadata else 0,
@@ -691,8 +831,15 @@ def write_outputs(snapshot, phases, tests, errors, trace, hotspots, chains,
                "kernel_symbols": {"elf": str(kernel_elf), "build_id": build_id},
                "top_kernel_hotspots": hotspots, "scheduling": scheduling,
                "irqs": irqs, "causal_chains": causal,
+               "ahci_irq_stages": ahci_irq_stages,
                "event_buffers": event_buffers, "counters": counters,
                "gui_milestones": milestones, "gui_phase_deltas": phase_deltas}
+    summary["configuration"] = {
+        "ra_max_pages": ra_max_pages,
+        "build_id": build_id,
+        "git_sha": run_manifest.get("git_sha") if run_manifest else None,
+        "source_digest": run_manifest.get("source_digest") if run_manifest else None,
+    }
     if metadata:
         for field in ("abi_version", "boot_tsc", "tsc_freq", "record_count"):
             if field in metadata and metadata[field] != snapshot.get(field):
@@ -700,7 +847,7 @@ def write_outputs(snapshot, phases, tests, errors, trace, hotspots, chains,
     (output_dir / "perf-summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    lines = ["XOS performance report", f"complete: {str(snapshot['complete']).lower()}",
+    lines = ["XOS performance report", f"complete: {str(summary['complete']).lower()}",
              f"end reason: {snapshot['end_reason']}", f"total wall time: {duration_ms:.3f} ms",
              f"records: {snapshot['record_count']}", f"trace errors: {len(errors)}", "",
              f"Kernel hotspots ({source}, {sampling['confidence']} confidence):",
@@ -766,10 +913,15 @@ def main():
                         default=root / "build/perf-symbols/build-id-manifest.tsv")
     parser.add_argument("--test-manifest", type=Path,
                         default=root / "build/perf-symbols/test-manifest.tsv")
+    parser.add_argument("--ra-max-pages", choices=("off", "0", "4", "8", "16"),
+                        default="16")
+    parser.add_argument("--run-manifest", type=Path)
     args = parser.parse_args()
     try:
         snapshot = parse_raw(args.raw)
         metadata = json.loads(args.metadata.read_text(encoding="utf-8")) if args.metadata else None
+        run_manifest = (json.loads(args.run_manifest.read_text(encoding="utf-8"))
+                        if args.run_manifest else None)
         test_names = read_test_manifest(args.test_manifest)
         phases, tests, errors, phase_trace = analyze_phases(snapshot, test_names)
         scheduling, irqs, causal, event_trace = analyze_events(snapshot)
@@ -778,7 +930,9 @@ def main():
         hotspots, chains = symbolize(snapshot["chains"], args.kernel_elf)
         write_outputs(snapshot, phases, tests, errors, phase_trace + event_trace,
                       hotspots, chains, scheduling, irqs, causal,
-                      args.output_dir, metadata, args.kernel_elf, build_id)
+                      args.output_dir, metadata, args.kernel_elf, build_id,
+                      0 if args.ra_max_pages == "off" else int(args.ra_max_pages),
+                      run_manifest)
     except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError,
             PerfFormatError) as error:
         print(f"perf-report: {error}", file=sys.stderr)
