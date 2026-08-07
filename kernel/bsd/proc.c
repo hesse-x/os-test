@@ -384,6 +384,10 @@ void file_put(struct file *f) {
     kfree(f->wq);
     f->wq = NULL;
   }
+  if (f->mount) {
+    atomic_dec(&f->mount->sb.active_files);
+    f->mount = NULL;
+  }
   kfree(f);
 }
 
@@ -1531,6 +1535,10 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   struct mount_entry *me = mount_of_inode(ip);
   if (me)
     mnt_flags = me->m_flags;
+  if (mnt_flags & MS_NOEXEC) {
+    sys_close((int64_t)fd, 0, 0, 0, 0, 0);
+    return (int64_t)-EACCES;
+  }
 
   // 3. kmalloc buffer, read entire ELF into kernel
   uint8_t *elf_buf = (uint8_t *)kmalloc(file_size);

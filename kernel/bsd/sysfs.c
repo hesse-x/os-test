@@ -214,6 +214,7 @@ static struct sysfs_node *sysfs_walk(const char *relpath) {
 static const struct inode_operations sysfs_dir_iop;
 static const struct inode_operations sysfs_file_iop;
 static const struct inode_operations sysfs_lnk_iop;
+static struct super_block sysfs_sb;
 
 static struct inode *sysfs_node_to_inode(struct sysfs_node *n) {
   if (n->ip) {
@@ -224,7 +225,7 @@ static struct inode *sysfs_node_to_inode(struct sysfs_node *n) {
   }
   int type =
       n->is_symlink ? INODE_LNK : (n->is_dir ? INODE_DIR : INODE_REGULAR);
-  struct inode *ip = inode_create(n->ino, type, 0, 0, 0, 0);
+  struct inode *ip = inode_create(&sysfs_sb, n->ino, type, 0);
   if (!ip)
     return NULL;
   // S08: sysfs attribute files are read-only 0100444 (inode_create defaults to
@@ -236,6 +237,7 @@ static struct inode *sysfs_node_to_inode(struct sysfs_node *n) {
   ip->release_arg = n;
   ip->i_op = n->is_symlink ? &sysfs_lnk_iop
                            : (n->is_dir ? &sysfs_dir_iop : &sysfs_file_iop);
+  ip->i_fop = type == INODE_REGULAR ? &sysfs_fops : NULL;
   if (n->is_symlink)
     ip->size = __strlen(n->symlink_target);
   n->ip = inode_get(ip);
@@ -279,12 +281,12 @@ static int sysfs_getattr(struct inode *ip, struct kstat *ks) {
   ks->st_size = 0;
   ks->st_blksize = 4096;
   // Timestamps (Q5, in-memory): getattr reads ns and splits into sec/nsec.
-  ks->st_atim.tv_sec = (int64_t)(ip->atime / 1000000000ULL);
-  ks->st_atim.tv_nsec = (int64_t)(ip->atime % 1000000000ULL);
-  ks->st_mtim.tv_sec = (int64_t)(ip->mtime / 1000000000ULL);
-  ks->st_mtim.tv_nsec = (int64_t)(ip->mtime % 1000000000ULL);
-  ks->st_ctim.tv_sec = (int64_t)(ip->ctime / 1000000000ULL);
-  ks->st_ctim.tv_nsec = (int64_t)(ip->ctime % 1000000000ULL);
+  ks->st_atim.tv_sec = ip->atime.tv_sec;
+  ks->st_atim.tv_nsec = ip->atime.tv_nsec;
+  ks->st_mtim.tv_sec = ip->mtime.tv_sec;
+  ks->st_mtim.tv_nsec = ip->mtime.tv_nsec;
+  ks->st_ctim.tv_sec = ip->ctime.tv_sec;
+  ks->st_ctim.tv_nsec = ip->ctime.tv_nsec;
   return 0;
 }
 

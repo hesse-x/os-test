@@ -6,6 +6,7 @@
 #ifndef KERNEL_BSD_FOPS_H
 #define KERNEL_BSD_FOPS_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -25,6 +26,7 @@ struct file_operations {
   __poll (*poll)(struct xtask *proc, struct file *f, int events);
   int (*close)(struct xtask *proc, struct file *f);
   uint64_t (*mmap)(struct xtask *proc, struct file *f, uint64_t size);
+  int (*fsync)(struct file *f, bool datasync);
 };
 
 #endif

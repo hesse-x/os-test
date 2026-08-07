@@ -496,11 +496,12 @@ static const struct inode_operations procfs_dir_iop;
 static const struct inode_operations procfs_file_iop;
 static const struct inode_operations procfs_lnk_iop;
 static const struct inode_operations procfs_fddir_iop;
+static struct super_block procfs_sb;
 
 /* pid 目录 inode 合成:ino=0x21000+pid*2048,i_priv 指向 pid 目录元数据 */
 static struct inode *procfs_piddir_iget(int pid) {
   uint32_t ino = PROCFS_PID_BASE + (uint32_t)pid * PROCFS_PID_STRIDE;
-  struct inode *ip = inode_get_or_create(ino, INODE_DIR, 0, 0, 0, 0);
+  struct inode *ip = inode_get_or_create(&procfs_sb, ino, INODE_DIR, 0);
   if (!ip)
     return NULL;
   ip->mode = 0040755;
@@ -528,7 +529,7 @@ static struct inode *procfs_magic_self_iget(void) {
     s->ip->i_op = &procfs_lnk_iop;
     return inode_get(s->ip);
   }
-  struct inode *ip = inode_create(s->ino, INODE_LNK, 0, 0, 0, 0);
+  struct inode *ip = inode_create(&procfs_sb, s->ino, INODE_LNK, 0);
   if (!ip)
     return NULL;
   ip->mode = 0100777;
@@ -545,12 +546,13 @@ static struct inode *procfs_node_to_inode(struct procfs_node *n) {
     return inode_get(n->ip);
   }
   int type = n->is_dir ? INODE_DIR : INODE_REGULAR;
-  struct inode *ip = inode_create(n->ino, type, 0, 0, 0, 0);
+  struct inode *ip = inode_create(&procfs_sb, n->ino, type, 0);
   if (!ip)
     return NULL;
   ip->mode = n->is_dir ? 0040755 : 0100444; /* 仿 sysfs.c:165 */
   ip->i_priv = n->is_dir ? (void *)n : (void *)n->attr;
   ip->i_op = n->is_dir ? &procfs_dir_iop : &procfs_file_iop;
+  ip->i_fop = type == INODE_REGULAR ? &procfs_fops : NULL;
   n->ip = inode_get(ip);
   ASSERT(ip->i_op != NULL);
   return ip;
@@ -617,7 +619,7 @@ static struct inode *procfs_pidattr_lookup(int pid, const char *name) {
     if (i == ATTR_CWD || i == ATTR_EXE) {
       uint32_t ino =
           PROCFS_PID_BASE + (uint32_t)pid * PROCFS_PID_STRIDE + (uint32_t)i;
-      struct inode *ip = inode_get_or_create(ino, INODE_LNK, 0, 0, 0, 0);
+      struct inode *ip = inode_get_or_create(&procfs_sb, ino, INODE_LNK, 0);
       if (!ip)
         return NULL;
       ip->mode = 0100777;
@@ -628,7 +630,7 @@ static struct inode *procfs_pidattr_lookup(int pid, const char *name) {
     if (i == ATTR_FD) {
       uint32_t ino =
           PROCFS_PID_BASE + (uint32_t)pid * PROCFS_PID_STRIDE + (uint32_t)i;
-      struct inode *ip = inode_get_or_create(ino, INODE_DIR, 0, 0, 0, 0);
+      struct inode *ip = inode_get_or_create(&procfs_sb, ino, INODE_DIR, 0);
       if (!ip)
         return NULL;
       ip->mode = 0040755;
@@ -638,13 +640,13 @@ static struct inode *procfs_pidattr_lookup(int pid, const char *name) {
     }
     uint32_t ino =
         PROCFS_PID_BASE + (uint32_t)pid * PROCFS_PID_STRIDE + (uint32_t)i;
-    struct inode *ip = inode_get_or_create(ino, INODE_REGULAR, 0, 0, 0, 0);
+    struct inode *ip = inode_get_or_create(&procfs_sb, ino, INODE_REGULAR, 0);
     if (!ip)
       return NULL;
     ip->mode = 0100444;
     ip->i_op = &procfs_file_iop;
+    ip->i_fop = &procfs_fops;
     ip->i_priv = (void *)&pid_attrs[i];
-    ip->mount = NULL; /* f_op 接线靠 ip->mount->fs->name;由 sys_open 惰性设 */
     return ip;
   }
   return NULL;
@@ -672,7 +674,7 @@ static struct inode *procfs_fdlink_lookup(int pid, const char *name) {
   if (!f)
     return NULL;
   uint32_t ino = PROCFS_FD_BASE + (uint32_t)pid * MAX_FD + (uint32_t)fd;
-  struct inode *ip = inode_get_or_create(ino, INODE_LNK, 0, 0, 0, 0);
+  struct inode *ip = inode_get_or_create(&procfs_sb, ino, INODE_LNK, 0);
   if (!ip)
     return NULL;
   ip->mode = 0100777;
@@ -796,10 +798,10 @@ static int procfs_fd_readlink(int pid, int fd, char *buf, size_t bufsiz) {
     break;
   }
   case FD_PIPE:
-    n = snprintf(buf, bufsiz, "pipe:[%u]", f->inode ? f->inode->ino : 0);
+    n = snprintf(buf, bufsiz, "pipe:[%lu]", f->inode ? f->inode->ino : 0);
     break;
   case FD_SOCKET:
-    n = snprintf(buf, bufsiz, "socket:[%u]", f->inode ? f->inode->ino : 0);
+    n = snprintf(buf, bufsiz, "socket:[%lu]", f->inode ? f->inode->ino : 0);
     break;
   case FD_REGULAR:
   case FD_FILE:

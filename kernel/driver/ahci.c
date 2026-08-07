@@ -56,6 +56,7 @@
 #define CMD_READ_DMA_EXT 0x25
 #define CMD_WRITE_DMA_EXT 0x34
 #define CMD_IDENTIFY_DEVICE 0xEC
+#define CMD_FLUSH_CACHE_EXT 0xEA
 #define FIS_H2D 0x27
 #define FIS_H2D_CMD 0x80
 
@@ -91,8 +92,8 @@ static void *bounce_virt;
 typedef struct block_req {
   pid_t caller_pid;
   uint32_t lba;
-  uint32_t count;  // sector count (1..AHCI_MAX_SECTORS)
-  uint8_t dir;     // 0=read, 1=write
+  uint32_t count;  // sector count (1..AHCI_MAX_SECTORS), or 0 for flush
+  uint8_t dir;     // 0=read, 1=write, 2=flush
   void *user_buf;  // user-space virtual address
   uint32_t cookie; // monotonic ID for completion matching
   int result;      // 0=ok, EIO=error
@@ -698,7 +699,10 @@ void ahci_issue_cmd(block_req *req) {
   }
   uint32_t lba = req->lba;
   uint32_t chunk = req->count;
-  uint8_t cmd_byte = (req->dir == 0) ? CMD_READ_DMA_EXT : CMD_WRITE_DMA_EXT;
+  bool flush = req->dir == 2;
+  uint8_t cmd_byte = flush             ? CMD_FLUSH_CACHE_EXT
+                     : (req->dir == 0) ? CMD_READ_DMA_EXT
+                                       : CMD_WRITE_DMA_EXT;
 
   if (req->dir == 1)
     __memcpy((void *)bounce_virt, req->staging, (size_t)chunk * 512);
@@ -723,16 +727,18 @@ void ahci_issue_cmd(block_req *req) {
   fis[12] = (uint8_t)(chunk & 0xFF);
   fis[13] = (uint8_t)((chunk >> 8) & 0xFF);
 
-  // PRD entry at offset 0x80 in command table
-  uint32_t *prd = (uint32_t *)((uint8_t *)cmd_table_virt + 0x80);
-  prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);
-  prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);
-  prd[2] = 0;
-  prd[3] = ((chunk * 512 - 1) & 0x3FFFFF) | (1U << 31);
+  if (!flush) {
+    // PRD entry at offset 0x80 in command table
+    uint32_t *prd = (uint32_t *)((uint8_t *)cmd_table_virt + 0x80);
+    prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);
+    prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);
+    prd[2] = 0;
+    prd[3] = ((chunk * 512 - 1) & 0x3FFFFF) | (1U << 31);
+  }
 
   // Command Header (slot 0)
   uint32_t *hdr = (uint32_t *)cmd_list_virt;
-  uint32_t cmd_flags = (5 << 0) | (1 << 16); // CFL=5 DW, PRDTL=1
+  uint32_t cmd_flags = (5 << 0) | (flush ? 0 : (1 << 16));
   if (req->dir == 1)
     cmd_flags |= (1 << 6); // W=1 for write
   hdr[0] = cmd_flags;
@@ -1061,7 +1067,7 @@ int ahci_submit_sync(uint32_t lba, uint32_t count, void *buf, uint8_t dir) {
   req->submit_cpu = current_task ? (int16_t)current_task->assigned_cpu : -1;
   perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_SUBMIT,
                     0x80000000U | req->cookie);
-  if (dir)
+  if (dir == 1)
     __memcpy(req->staging, buf, (size_t)count * 512);
   bq_tail = (bq_tail + 1) % BLOCK_QUEUE_SIZE;
   queue_depth_change_locked((uint32_t)bq_count + 1, req->enqueue_tsc);
@@ -1110,6 +1116,8 @@ int ahci_submit_sync(uint32_t lba, uint32_t count, void *buf, uint8_t dir) {
     spin_unlock_irqrestore(&ahci_queue_lock, flags);
   }
 }
+
+int ahci_flush_cache(void) { return ahci_submit_sync(0, 0, NULL, 2); }
 
 // ===================== Driver registry =====================
 #include "kernel/driver/driver.h"

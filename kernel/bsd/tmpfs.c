@@ -157,12 +157,12 @@ static int tmpfs_getattr(struct inode *ip, struct kstat *ks) {
   /* S08: st_uid/st_gid 现报真实 ip->uid/gid(创建时由 sys_open/mkdir/mknod 设)。
    * 时间戳(Q5):内存态 atime/mtime/ctime,getattr 读出 ns 拆 sec/nsec。
    * st_rdev 仍留 0。 */
-  ks->st_atim.tv_sec = (int64_t)(ip->atime / 1000000000ULL);
-  ks->st_atim.tv_nsec = (int64_t)(ip->atime % 1000000000ULL);
-  ks->st_mtim.tv_sec = (int64_t)(ip->mtime / 1000000000ULL);
-  ks->st_mtim.tv_nsec = (int64_t)(ip->mtime % 1000000000ULL);
-  ks->st_ctim.tv_sec = (int64_t)(ip->ctime / 1000000000ULL);
-  ks->st_ctim.tv_nsec = (int64_t)(ip->ctime % 1000000000ULL);
+  ks->st_atim.tv_sec = ip->atime.tv_sec;
+  ks->st_atim.tv_nsec = ip->atime.tv_nsec;
+  ks->st_mtim.tv_sec = ip->mtime.tv_sec;
+  ks->st_mtim.tv_nsec = ip->mtime.tv_nsec;
+  ks->st_ctim.tv_sec = ip->ctime.tv_sec;
+  ks->st_ctim.tv_nsec = ip->ctime.tv_nsec;
   return 0;
 }
 
@@ -318,7 +318,9 @@ static struct inode *tmpfs_new_node(struct tmpfs_inode_info *parent_ti,
                                     const char *name, int type, int mode,
                                     int keep_mode) {
   uint32_t ino = tmpfs_alloc_ino();
-  struct inode *ip = inode_create(ino, type, 0, 0, 0, 0);
+  struct super_block *sb =
+      parent_ti && parent_ti->inode ? parent_ti->inode->i_sb : NULL;
+  struct inode *ip = inode_create(sb, ino, type, 0);
   if (!ip)
     return NULL;
   if (keep_mode)
@@ -326,6 +328,7 @@ static struct inode *tmpfs_new_node(struct tmpfs_inode_info *parent_ti,
   ip->i_op = (type == INODE_DIR)   ? &tmpfs_dir_iop
              : (type == INODE_LNK) ? &tmpfs_lnk_iop
                                    : &tmpfs_file_iop;
+  ip->i_fop = type == INODE_REGULAR ? &tmpfs_file_fops : NULL;
   struct tmpfs_inode_info *ti = new_tmpfs_info(ip, parent_ti);
   if (!ti) {
     inode_put(ip);
@@ -824,7 +827,7 @@ done:
 static struct inode *tmpfs_mount_root(struct mount_entry *m) {
   if (!m->root) {
     uint32_t ino = tmpfs_alloc_ino();
-    struct inode *root = inode_create(ino, INODE_DIR, 0, 0, 0, 0);
+    struct inode *root = inode_create(&m->sb, ino, INODE_DIR, 0);
     if (!root)
       return NULL;
     root->i_op = &tmpfs_dir_iop;
@@ -865,7 +868,6 @@ static ssize_t tmpfs_read(struct xtask *proc, struct file *f, void *buf,
 
 static ssize_t tmpfs_read_at(struct xtask *proc, struct file *f, void *buf,
                              size_t count, uint64_t offset) {
-  (void)proc;
   struct inode *ip = f->inode;
   struct tmpfs_inode_info *ti = (struct tmpfs_inode_info *)ip->i_priv;
   if (!ti)
@@ -876,7 +878,8 @@ static ssize_t tmpfs_read_at(struct xtask *proc, struct file *f, void *buf,
     return 0;
   }
   size_t n = ti->size - offset < count ? ti->size - offset : count;
-  if (tmpfs_copy_out_locked(ip, offset, buf, n, true) != 0) {
+  /* vfs_read_kernel passes proc == NULL and a kernel destination. */
+  if (tmpfs_copy_out_locked(ip, offset, buf, n, proc != NULL) != 0) {
     spin_unlock(&ti->lock);
     return -EFAULT;
   }

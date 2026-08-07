@@ -15,6 +15,7 @@ struct mount_entry; /* forward: vfs.h is included before mount.h/inode.h in
                      * the new path_walk prototypes take mount_entry* / inode**
                      */
 struct inode;
+struct vfs_timespec64;
 
 void vfs_init(void);
 
@@ -56,7 +57,8 @@ int inode_permission(struct inode *ip, int mask, uint32_t check_uid,
 /* generic_update_time:VFS 层默认时间戳更新(内存态,Q5)。按 which(ATIME_BIT/
  * MTIME_BIT/CTIME_BIT 组合)写非 OMIT 的时间戳。各 fs .update_time 可置 NULL,
  * VFS 回退到此。 */
-int generic_update_time(struct inode *ip, uint64_t at, uint64_t mt, uint64_t ct,
+int generic_update_time(struct inode *ip, struct vfs_timespec64 at,
+                        struct vfs_timespec64 mt, struct vfs_timespec64 ct,
                         int which);
 
 /* S19 §7: kernel-mode inode-read helper for execve/elf_loader. Reads `count`

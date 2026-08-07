@@ -110,6 +110,15 @@ struct dev_ops *dev_ops_peek_by_inode(struct inode *ip) {
   return ops;
 }
 
+void *devtmpfs_device_private(struct inode *ip) {
+  if (!ip)
+    return NULL;
+  spin_lock(&devtmpfs_lock);
+  void *device_private = ip->device_private;
+  spin_unlock(&devtmpfs_lock);
+  return device_private;
+}
+
 // Reverse map: device inode → registered /dev/<name>. Used by procfs
 // /proc/self/fd/N readlink so a char/block device fd (FD_DEV) resolves to its
 // real /dev path (e.g. /dev/serial, /dev/console) instead of an anon_inode
@@ -208,9 +217,10 @@ int devtmpfs_mkdir(const char *name) {
 // ip.
 static const struct inode_operations devtmpfs_dir_iop;
 static const struct inode_operations devtmpfs_dev_iop;
+static struct super_block devtmpfs_sb;
 
 static struct inode *devtmpfs_iget(int type) {
-  struct inode *ip = inode_create(0, type, 0, 0, 0, 0);
+  struct inode *ip = inode_create(&devtmpfs_sb, 0, type, 0);
   if (!ip)
     return NULL;
   ip->i_op = (type == INODE_DIR) ? &devtmpfs_dir_iop : &devtmpfs_dev_iop;
@@ -321,12 +331,12 @@ static int devtmpfs_getattr(struct inode *ip, struct kstat *ks) {
   ks->st_size = 0;
   ks->st_blksize = 4096;
   // Timestamps (Q5 in-memory): getattr splits ns into sec/nsec.
-  ks->st_atim.tv_sec = (int64_t)(ip->atime / 1000000000ULL);
-  ks->st_atim.tv_nsec = (int64_t)(ip->atime % 1000000000ULL);
-  ks->st_mtim.tv_sec = (int64_t)(ip->mtime / 1000000000ULL);
-  ks->st_mtim.tv_nsec = (int64_t)(ip->mtime % 1000000000ULL);
-  ks->st_ctim.tv_sec = (int64_t)(ip->ctime / 1000000000ULL);
-  ks->st_ctim.tv_nsec = (int64_t)(ip->ctime % 1000000000ULL);
+  ks->st_atim.tv_sec = ip->atime.tv_sec;
+  ks->st_atim.tv_nsec = ip->atime.tv_nsec;
+  ks->st_mtim.tv_sec = ip->mtime.tv_sec;
+  ks->st_mtim.tv_nsec = ip->mtime.tv_nsec;
+  ks->st_ctim.tv_sec = ip->ctime.tv_sec;
+  ks->st_ctim.tv_nsec = ip->ctime.tv_nsec;
   return 0;
 }
 
@@ -421,7 +431,8 @@ struct inode *devtmpfs_lookup(const char *name) {
   return NULL;
 }
 
-int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
+int devtmpfs_create_device(const char *name, struct dev_ops *ops,
+                           void *device_private, struct shm *shm) {
   WARN_ON(!devtmpfs_initialized); // catch order bugs: create before init
 
   // Check if already exists (full path). devtmpfs_lookup now returns a +1
@@ -452,6 +463,7 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
     return -ENOMEM;
   }
   ip->i_priv = ops;
+  ip->device_private = device_private;
   if (shm) {
     shm_get(shm); // +1 for inode reference
     ip->shm = shm;
@@ -503,6 +515,10 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
   return 0;
 }
 
+int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
+  return devtmpfs_create_device(name, ops, NULL, shm);
+}
+
 uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
                        struct mount_entry *m) {
   struct inode *ip = devtmpfs_lookup(name);
@@ -533,6 +549,8 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
     f->type = FD_DIR;
     f->flags = O_RDONLY;
     f->inode = ip; // file takes ownership of the lookup +1 reference
+    f->mount = m;
+    atomic_inc(&m->sb.active_files);
     f->offset = 0;
     fd_install(fs, fd, f);
     spin_unlock(fdlk);
@@ -622,6 +640,8 @@ uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
       f->f_op = &evdev_control_fops;
     }
   }
+  f->mount = m;
+  atomic_inc(&m->sb.active_files);
   spin_unlock(fdlk);
   return (uint64_t)fd;
 }

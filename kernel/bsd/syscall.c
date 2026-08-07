@@ -2617,8 +2617,9 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   if (f->f_op) {
     if (f->f_op->write)
-      return f->f_op->write(proc, f, buf, len);
-    ret = -EINVAL;
+      ret = f->f_op->write(proc, f, buf, len);
+    else
+      ret = -EINVAL;
     goto out;
   }
 
@@ -3047,8 +3048,9 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   // file_operations 分发: f_op 非 NULL 时优先走 f_op
   if (f->f_op) {
     if (f->f_op->read)
-      return f->f_op->read(proc, f, buf, len);
-    ret = -EINVAL;
+      ret = f->f_op->read(proc, f, buf, len);
+    else
+      ret = -EINVAL;
     goto out;
   }
 
@@ -4107,9 +4109,12 @@ static struct inode *resolve_path_or_fd(int dirfd, const char *kpath,
 static int update_ctime(struct inode *ip) {
   uint64_t now =
       __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
+  struct vfs_timespec64 ts = {.tv_sec = (int64_t)(now / 1000000000ULL),
+                              .tv_nsec = (uint32_t)(now % 1000000000ULL)};
+  struct vfs_timespec64 zero = {0};
   if (ip->i_op && ip->i_op->update_time)
-    return ip->i_op->update_time(ip, 0, 0, now, CTIME_BIT);
-  return generic_update_time(ip, 0, 0, now, CTIME_BIT);
+    return ip->i_op->update_time(ip, zero, zero, ts, CTIME_BIT);
+  return generic_update_time(ip, zero, zero, ts, CTIME_BIT);
 }
 
 /* apply_chmod:持 i_lock 改 mode(保留 S_IFMT 文件类型位),非特权 chmod 清
@@ -4669,7 +4674,8 @@ static int do_utimensat(int dirfd, const char *kpath, struct timespec *ktimes,
   if (flags & ~AT_SYMLINK_NOFOLLOW)
     return -EINVAL;
 
-  uint64_t na, nm; /* atime/mtime ns;UINT64_MAX=OMIT 哨兵,不写该字段 */
+  struct vfs_timespec64 na = {0}, nm = {0};
+  bool omit_atime = false, omit_mtime = false;
   if (ktimes) {
     /* 校验 tv_nsec:合法值 ∈ [0,1e9) ∪ {UTIME_NOW,UTIME_OMIT}(Q6 严格)。
      * 不改写 ktimes——NOW/OMIT 的判定在下方 na/nm 计算时仍需原值。 */
@@ -4681,21 +4687,25 @@ static int do_utimensat(int dirfd, const char *kpath, struct timespec *ktimes,
     }
     uint64_t now =
         __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
-    na = (ktimes[0].tv_nsec == UTIME_OMIT) ? UINT64_MAX
-         : (ktimes[0].tv_nsec == UTIME_NOW)
-             ? now
-             : (uint64_t)ktimes[0].tv_sec * 1000000000ULL +
-                   (uint64_t)ktimes[0].tv_nsec;
-    nm = (ktimes[1].tv_nsec == UTIME_OMIT) ? UINT64_MAX
-         : (ktimes[1].tv_nsec == UTIME_NOW)
-             ? now
-             : (uint64_t)ktimes[1].tv_sec * 1000000000ULL +
-                   (uint64_t)ktimes[1].tv_nsec;
+    struct vfs_timespec64 now_ts = {.tv_sec = (int64_t)(now / 1000000000ULL),
+                                    .tv_nsec = (uint32_t)(now % 1000000000ULL)};
+    omit_atime = ktimes[0].tv_nsec == UTIME_OMIT;
+    omit_mtime = ktimes[1].tv_nsec == UTIME_OMIT;
+    na = ktimes[0].tv_nsec == UTIME_NOW
+             ? now_ts
+             : (struct vfs_timespec64){.tv_sec = (int64_t)ktimes[0].tv_sec,
+                                       .tv_nsec = (uint32_t)ktimes[0].tv_nsec};
+    nm = ktimes[1].tv_nsec == UTIME_NOW
+             ? now_ts
+             : (struct vfs_timespec64){.tv_sec = (int64_t)ktimes[1].tv_sec,
+                                       .tv_nsec = (uint32_t)ktimes[1].tv_nsec};
   } else {
     /* times=NULL:atime=mtime=now,需写权限(对齐 Linux)。 */
     uint64_t now =
         __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
-    na = nm = now;
+    na = nm =
+        (struct vfs_timespec64){.tv_sec = (int64_t)(now / 1000000000ULL),
+                                .tv_nsec = (uint32_t)(now % 1000000000ULL)};
   }
 
   struct inode *ip;
@@ -4722,13 +4732,17 @@ static int do_utimensat(int dirfd, const char *kpath, struct timespec *ktimes,
       return r;
     }
   }
-  int which = ((na != UINT64_MAX) ? ATIME_BIT : 0) |
-              ((nm != UINT64_MAX) ? MTIME_BIT : 0);
+  int which = (!omit_atime ? ATIME_BIT : 0) | (!omit_mtime ? MTIME_BIT : 0);
+  uint64_t now_ns =
+      __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
+  struct vfs_timespec64 ct = {.tv_sec = (int64_t)(now_ns / 1000000000ULL),
+                              .tv_nsec = (uint32_t)(now_ns % 1000000000ULL)};
+  which |= CTIME_BIT;
   int err;
   if (ip->i_op && ip->i_op->update_time)
-    err = ip->i_op->update_time(ip, na, nm, 0, which);
+    err = ip->i_op->update_time(ip, na, nm, ct, which);
   else
-    err = generic_update_time(ip, na, nm, 0, which);
+    err = generic_update_time(ip, na, nm, ct, which);
   inode_put(ip);
   return err;
 }
@@ -7185,8 +7199,7 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_truncate(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_FSYNC:
   case SYS_FDATASYNC:
-    /* Metadata changes are synchronous, so fdatasync shares fsync writeback. */
-    return sys_fsync(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+    return sys_fsync(tf->rdi, 1, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_SYNC:
     return sys_sync(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // POSIX signal (group 4)
@@ -7219,6 +7232,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_inotify_rm_watch(tf->rdi, tf->rsi);
   case SYS_MOUNT:
     return sys_mount(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_UMOUNT2:
+    return sys_umount2(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   // ENOSYS stubs (C group)
   case SYS_SENDFILE:
     return sys_sendfile(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);

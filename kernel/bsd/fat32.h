@@ -10,9 +10,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "kernel/bsd/fops.h"
 #include "kernel/bsd/mount.h"
 
 struct inode;
+struct block_partition;
 
 enum fat32_walk_source {
   FAT32_WALK_DEMAND = 0,
@@ -32,6 +34,14 @@ struct fat32_stats {
   uint64_t walk_invalid[2];
   uint64_t mapped_sectors[2];
 };
+
+struct fat32_inode_info {
+  uint32_t start_cluster;
+  uint32_t dir_start_cluster;
+  int32_t dir_entry_index;
+  uint64_t walk_cursor;
+};
+extern const struct file_operations fat32_file_fops;
 /* FAT32 directory entry (32 bytes) */
 struct fat_dir_entry {
   uint8_t name[11];
@@ -54,7 +64,8 @@ uint32_t fat32_sectors_per_cluster(void);
 uint32_t fat32_bytes_per_cluster(void);
 
 /* Core operations */
-int fat32_init(void);
+int fat32_init(struct block_partition *part);
+struct block_partition *fat32_partition(void);
 void fat32_dump_cache_stats(void);
 uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index);
 /* Walk the chain to the cluster at cluster_index, resuming from ip->walk_cursor

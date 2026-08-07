@@ -66,6 +66,7 @@ struct netlink_sock;
 struct drm_fence;
 struct drm_prime_object;
 struct file_operations;
+struct mount_entry;
 
 typedef struct file {
   refcount_t f_count;
@@ -78,6 +79,7 @@ typedef struct file {
   uint64_t offset;
   wait_queue_head *wq;
   const struct file_operations *f_op;
+  struct mount_entry *mount;
   void *private_data;
   pid_t f_owner;
   int f_owner_sig;
@@ -105,6 +107,9 @@ typedef struct file {
     struct drm_prime_object *drm_prime;
   };
 } file;
+
+_Static_assert(offsetof(file, private_data) == 80,
+               "driver struct file ABI drift");
 
 typedef struct files {
   spinlock fd_lock;

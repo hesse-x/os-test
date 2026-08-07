@@ -80,6 +80,7 @@
 #define SYS_RMDIR 84
 #define SYS_UNLINK 87
 #define SYS_MKNOD 133
+#define SYS_UMOUNT2 166
 #define SYS_SIGALTSTACK 131
 #define SYS_UMASK 95
 #define SYS_SETHOSTNAME 170

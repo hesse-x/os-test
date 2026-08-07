@@ -9,6 +9,7 @@
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/fat32.h"
+#include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/kfcntl.h"
 #include "kernel/bsd/mount.h"
@@ -20,7 +21,6 @@
 #include "kernel/bsd/sysfs.h"
 #include "kernel/bsd/tmpfs.h"
 #include "kernel/bsd/types.h"
-#include "kernel/driver/ahci.h"
 #include "kernel/driver/blk_dev.h"
 #include "kernel/driver/serial.h"
 #include "kernel/xcore/atomic.h"
@@ -51,63 +51,57 @@ void vfs_init(void) {
   serial_dev_register();
   pty_init();
 
-  /* Try FAT32 on each AHCI port. disk.img is a single disk now (two
-     partitions: ESP + root), so the root FAT32 is on port 0 — but we
-     keep the multi-port scan for robustness. */
-  int try_ports[] = {0, 1, 2, 3, 4, 5};
-  int rc = -1;
-  for (int pi = 0; pi < 6; pi++) {
-    if (ahci_set_active_port(try_ports[pi]) != 0)
-      continue;
-    rc = fat32_init();
-    if (rc == 0) {
-      printk(LOG_INFO, "vfs_init: FAT32 inited on port %d\n", try_ports[pi]);
-      register_fstype(&fat32_fstype);
-      register_fstype(&devtmpfs_fstype);
-      register_fstype(&sysfs_fstype);
-      register_fstype(&tmpfs_fstype);
-      register_fstype(&procfs_fstype);
-      sysfs_init();
-      mount_internal(&fat32_fstype, "/", NULL, 0);
-      /* Create /dev directory entry on FAT32 root so getdents("/") sees it.
-       * fat32_mkdir is not idempotent (it allocates a cluster unconditionally),
-       * so only create when the entry is missing. */
-      {
-        uint8_t ksb[256];
-        if (fat32_stat("/dev", ksb) != 0)
-          fat32_mkdir("/dev");
-      }
-      mount_internal(&devtmpfs_fstype, "/dev", NULL, 0);
-      /* Create /sys directory on FAT32 root for getdents("/") visibility */
-      {
-        uint8_t ksb[256];
-        if (fat32_stat("/sys", ksb) != 0)
-          fat32_mkdir("/sys");
-      }
-      mount_internal(&sysfs_fstype, "/sys", sysfs_root_node(), 0);
-      /* procfs(procfs.md §2.4):建 /proc 目录挂 procfs_fstype。 */
-      {
-        uint8_t ksb[256];
-        if (fat32_stat("/proc", ksb) != 0)
-          fat32_mkdir("/proc");
-      }
-      procfs_init();
-      mount_internal(&procfs_fstype, "/proc", procfs_root_node(), 0);
-      /* Create /run directory on FAT32 root for getdents("/") visibility,
-       * then mount tmpfs on /run (内存 fs，udevd db/socket 前置)。 */
-      {
-        uint8_t ksb[256];
-        if (fat32_stat("/run", ksb) != 0)
-          fat32_mkdir("/run");
-      }
-      mount_internal(&tmpfs_fstype, "/run", NULL, 0);
-      /* POSIX shm_open maps names to /dev/shm. Keep it on a distinct tmpfs
-       * mount so shared-memory objects cannot collide with /run contents. */
-      devtmpfs_mkdir("shm");
-      mount_internal(&tmpfs_fstype, "/dev/shm", NULL, 0);
-      devtmpfs_create("sda", &blk_dev_ops, NULL);
-      break;
+  int rc = block_init_ahci();
+  struct block_partition *root_part =
+      block_partition_get(block_primary_device(), 2);
+  if (rc == 0 && root_part)
+    rc = fat32_init(root_part);
+  if (rc == 0) {
+    printk(LOG_INFO, "vfs_init: FAT32 inited on sda2\n");
+    register_fstype(&fat32_fstype);
+    register_fstype(&devtmpfs_fstype);
+    register_fstype(&sysfs_fstype);
+    register_fstype(&tmpfs_fstype);
+    register_fstype(&procfs_fstype);
+    sysfs_init();
+    mount_internal(&fat32_fstype, "/", NULL, 0);
+    /* Create /dev directory entry on FAT32 root so getdents("/") sees it.
+     * fat32_mkdir is not idempotent (it allocates a cluster unconditionally),
+     * so only create when the entry is missing. */
+    {
+      uint8_t ksb[256];
+      if (fat32_stat("/dev", ksb) != 0)
+        fat32_mkdir("/dev");
     }
+    mount_internal(&devtmpfs_fstype, "/dev", NULL, 0);
+    /* Create /sys directory on FAT32 root for getdents("/") visibility */
+    {
+      uint8_t ksb[256];
+      if (fat32_stat("/sys", ksb) != 0)
+        fat32_mkdir("/sys");
+    }
+    mount_internal(&sysfs_fstype, "/sys", sysfs_root_node(), 0);
+    /* procfs(procfs.md §2.4):建 /proc 目录挂 procfs_fstype。 */
+    {
+      uint8_t ksb[256];
+      if (fat32_stat("/proc", ksb) != 0)
+        fat32_mkdir("/proc");
+    }
+    procfs_init();
+    mount_internal(&procfs_fstype, "/proc", procfs_root_node(), 0);
+    /* Create /run directory on FAT32 root for getdents("/") visibility,
+     * then mount tmpfs on /run (内存 fs，udevd db/socket 前置)。 */
+    {
+      uint8_t ksb[256];
+      if (fat32_stat("/run", ksb) != 0)
+        fat32_mkdir("/run");
+    }
+    mount_internal(&tmpfs_fstype, "/run", NULL, 0);
+    /* POSIX shm_open maps names to /dev/shm. Keep it on a distinct tmpfs
+     * mount so shared-memory objects cannot collide with /run contents. */
+    devtmpfs_mkdir("shm");
+    mount_internal(&tmpfs_fstype, "/dev/shm", NULL, 0);
+    block_publish_devtmpfs();
   }
   if (rc != 0) {
     printk(LOG_ERROR, "vfs_init: FAT32 init failed on all ports\n");
@@ -441,10 +435,15 @@ int inode_permission(struct inode *ip, int mask, uint32_t check_uid,
 /* generic_update_time:VFS 层默认时间戳更新(内存态,Q5)。按 which 位写非 OMIT
  * 的时间戳。OMIT 哨兵由调用方(sys_utimensat)解释,此处只写显式传入的值。
  * 各 fs .update_time 可置 NULL,VFS 回退到此。 */
-int generic_update_time(struct inode *ip, uint64_t at, uint64_t mt, uint64_t ct,
+int generic_update_time(struct inode *ip, struct vfs_timespec64 at,
+                        struct vfs_timespec64 mt, struct vfs_timespec64 ct,
                         int which) {
   if (!ip)
     return -ENOENT;
+  if (((which & ATIME_BIT) && at.tv_nsec >= 1000000000U) ||
+      ((which & MTIME_BIT) && mt.tv_nsec >= 1000000000U) ||
+      ((which & CTIME_BIT) && ct.tv_nsec >= 1000000000U))
+    return -EINVAL;
   mutex_lock(&ip->i_lock);
   if ((which & ATIME_BIT))
     ip->atime = at;
@@ -469,13 +468,14 @@ int vfs_read_kernel(struct inode *ip, uint64_t offset, void *buf,
     return -EISDIR;
   if (ip->type != INODE_REGULAR)
     return -ENOEXEC;
-  /* 按 fstype 分发:tmpfs 普通文件走 tmpfs_read_kern(内存 buffer),其余(fat32)
-   * 走 fat32_read(page cache)。ip->mount 由 sys_open 设(execve 经 sys_open
-   * 打开,故非 NULL);NULL 时回退 fat32(根挂载,与历史行为一致)。这让 execve
-   * 不再绑死 fat32——tmpfs 上的 ELF 亦可执行(解锁 S_ISUID-on-exec 测试)。 */
-  if (ip->mount && __strcmp(ip->mount->fs->name, "tmpfs") == 0)
-    return tmpfs_read_kern(ip, offset, buf, count);
-  return fat32_read(ip, offset, buf, count);
+  if (!ip->i_fop || !ip->i_fop->read_at)
+    return -ENOEXEC;
+  struct file file = {.type = FD_REGULAR,
+                      .flags = O_RDONLY,
+                      .inode = ip,
+                      .offset = offset,
+                      .f_op = ip->i_fop};
+  return (int)ip->i_fop->read_at(NULL, &file, buf, count, offset);
 }
 
 /* sys_open(path, flags, mode) — SYS_OPEN */
@@ -492,11 +492,17 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   if (!m)
     return (int64_t)-ENOENT;
 
+  bool wants_write = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) != 0;
+  if ((m->m_flags & MS_RDONLY) && wants_write)
+    return (int64_t)-EROFS;
+
   /* 2. devtmpfs device files: delegate to devtmpfs_open so the fd is
    * created as FD_DEV and ops->open (ptmx/pts, serial, etc.) runs.
    * The bare "/dev" directory (relpath empty) falls through to the
    * generic directory path below. */
   if (m->fs == &devtmpfs_fstype && relpath[0] != '\0') {
+    if (m->m_flags & MS_NODEV)
+      return (int64_t)-EACCES;
     int64_t dev_ret = devtmpfs_open(current_task, relpath, flags, m);
     return dev_ret;
   }
@@ -596,21 +602,9 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   refcount_set(&f->f_count, 1);
 
   /* 6. Set up fd entry */
-  /* sysfs 属性文件: 设 f_op = sysfs_fops */
-  if (ip->type == INODE_REGULAR && ip->mount &&
-      __strcmp(ip->mount->fs->name, "sysfs") == 0)
-    f->f_op = &sysfs_fops;
-  /* procfs 属性文件: 设 f_op = procfs_fops */
-  if (ip->type == INODE_REGULAR && ip->mount &&
-      __strcmp(ip->mount->fs->name, "procfs") == 0)
-    f->f_op = &procfs_fops;
-  /* tmpfs 普通文件: 设 f_op = tmpfs_file_fops（read/write 走 tmpfs 内存
-   * buffer）。 sys_read/sys_write 在 f_op 非 NULL 时优先走 fop 回调，NULL 则落
-   * FD_REGULAR→ FAT32 page cache（对 tmpfs inode 错误），故 tmpfs
-   * 普通文件必须挂 f_op。 */
-  if (ip->type == INODE_REGULAR && ip->mount &&
-      __strcmp(ip->mount->fs->name, "tmpfs") == 0)
-    f->f_op = &tmpfs_file_fops;
+  f->f_op = ip->i_fop;
+  f->mount = m;
+  atomic_inc(&m->sb.active_files);
 
   if (ip->type == INODE_DIR) {
     f->type = FD_DIR;
@@ -980,6 +974,12 @@ int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
   }
 
   int iflags = (int)flags;
+  struct mount_entry *start_mount = mount_of_inode(start);
+  if (start_mount && (start_mount->m_flags & MS_RDONLY) &&
+      (iflags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC))) {
+    inode_put(start);
+    return (int64_t)-EROFS;
+  }
   struct inode *ip = path_walk_from(start, relpath); /* +1 or NULL */
   if (ip) {
     if ((iflags & O_CREAT) && (iflags & O_EXCL)) {
@@ -1067,16 +1067,10 @@ int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
   }
   __memset(f, 0, sizeof(*f));
   refcount_set(&f->f_count, 1);
-  if (ip->type == INODE_REGULAR && ip->mount &&
-      __strcmp(ip->mount->fs->name, "sysfs") == 0)
-    f->f_op = &sysfs_fops;
-  /* procfs 属性文件: 设 f_op = procfs_fops */
-  if (ip->type == INODE_REGULAR && ip->mount &&
-      __strcmp(ip->mount->fs->name, "procfs") == 0)
-    f->f_op = &procfs_fops;
-  if (ip->type == INODE_REGULAR && ip->mount &&
-      __strcmp(ip->mount->fs->name, "tmpfs") == 0)
-    f->f_op = &tmpfs_file_fops;
+  f->f_op = ip->i_fop;
+  f->mount = start_mount;
+  if (start_mount)
+    atomic_inc(&start_mount->sb.active_files);
   if (ip->type == INODE_DIR) {
     f->type = FD_DIR;
     f->flags = O_RDONLY;
@@ -1171,7 +1165,7 @@ int64_t sys_truncate(int64_t arg1, int64_t arg2, int64_t unused1,
 }
 
 /* sys_fsync(fd) — SYS_FSYNC (group 3): write back dirty pages of one inode. */
-int64_t sys_fsync(int64_t arg1, int64_t unused1, int64_t unused2,
+int64_t sys_fsync(int64_t arg1, int64_t datasync_arg, int64_t unused2,
                   int64_t unused3, int64_t unused4, int64_t unused5) {
   int fd = (int)arg1;
   xtask *proc = current_task;
@@ -1184,14 +1178,20 @@ int64_t sys_fsync(int64_t arg1, int64_t unused1, int64_t unused2,
     rcu_read_unlock();
     return (int64_t)-EINVAL;
   }
+  file_get(f);
   struct inode *ip = f->inode;
   rcu_read_unlock();
-  if (!ip)
+  if (!ip) {
+    file_put(f);
     return (int64_t)-EBADF;
+  }
 
   int rc = page_cache_flush_inode(ip);
-  /* FAT32 has no separate metadata journal; the dir entry is updated
-   * synchronously on each size/metadata change, so nothing more to flush. */
+  if (!rc && f->f_op && f->f_op->fsync)
+    rc = f->f_op->fsync(f, datasync_arg != 0);
+  if (!rc && ip->i_sb && ip->i_sb->part)
+    rc = partition_flush(ip->i_sb->part);
+  file_put(f);
   return (int64_t)rc;
 }
 
@@ -1204,7 +1204,9 @@ int64_t sys_sync(int64_t unused1, int64_t unused2, int64_t unused3,
   (void)unused4;
   (void)unused5;
   (void)unused6;
-  return (int64_t)page_cache_flush_all();
+  int rc = page_cache_flush_all();
+  int flush_rc = block_flush(block_primary_device());
+  return (int64_t)(rc ? rc : flush_rc);
 }
 
 /* sys_mkdir(path, mode) — SYS_MKDIR */

@@ -7,6 +7,7 @@
 #ifndef KERNEL_INODE_H
 #define KERNEL_INODE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -33,6 +34,40 @@
 
 struct inode;
 struct kstat;
+struct cache_page;
+
+struct super_block;
+
+struct vfs_timespec64 {
+  int64_t tv_sec;
+  uint32_t tv_nsec;
+};
+
+struct super_operations {
+  int (*sync_fs)(struct super_block *sb, bool wait);
+  void (*evict_inode)(struct inode *inode);
+  void (*put_super)(struct super_block *sb);
+};
+
+struct address_space_operations {
+  int (*readpage)(struct inode *inode, uint64_t page_index, void *page);
+  int (*writepages)(struct inode *inode, struct cache_page **pages,
+                    size_t nr_pages);
+};
+
+struct super_block {
+  const struct super_operations *s_op;
+  struct block_partition *part;
+  struct inode *root;
+  void *s_fs_info;
+  uint32_t block_size;
+  uint32_t flags;
+  atomic_t active_files;
+  atomic_t active_mmaps;
+  bool readonly;
+  bool dying;
+  int error;
+};
 
 // per-inode behavior table (mirrors Linux struct inode_operations, trimmed).
 // lookup/create/mkdir/unlink/rmdir dispatch from the parent directory's i_op;
@@ -68,13 +103,15 @@ struct inode_operations {
   int (*link)(struct inode *dir, struct inode *target, const char *newname);
   int (*readlink)(struct inode *ip, char *buf, size_t bufsiz);
   int (*permission)(struct inode *ip, int mask);
-  int (*update_time)(struct inode *ip, uint64_t at, uint64_t mt, uint64_t ct,
+  int (*update_time)(struct inode *ip, struct vfs_timespec64 at,
+                     struct vfs_timespec64 mt, struct vfs_timespec64 ct,
                      int which);
 };
 
 struct inode {
+  struct super_block *i_sb;
   int type;
-  uint32_t ino;
+  uint64_t ino;
   uint64_t size;
   uint32_t mode;
   uint32_t
@@ -84,10 +121,14 @@ struct inode {
   int nlink;
   refcount_t i_count;
   mutex i_lock;
-  void *i_priv; /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
+  void *i_priv;         /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
+  void *device_private; /* device instance; independent of dev_ops/i_priv */
   const struct inode_operations
       *i_op; // behavior table (attached at iget exit); unmounted → dispatch
              // returns -ENOSYS/-EACCES
+  const struct file_operations *i_fop;
+  const struct address_space_operations *i_aop;
+  void *i_private;
   struct shm *shm; /* Device SHM or tmpfs regular-file shared backing. */
   struct mount_entry *mount; /* owning mount (set by sys_open lookup) */
   wait_queue_head *wq; /* ringbuf-backed: shared wq for epoll/poll waiters */
@@ -100,25 +141,13 @@ struct inode {
   list_node i_flock;     /* head of file_lock list (list_init on create) */
   spinlock i_flock_lock; /* protects i_flock */
 
-  /* FAT32 metadata (REGULAR/DIR only) */
-  uint32_t start_cluster;
-  uint32_t dir_start_cluster;
-  int dir_entry_index;
-
-  /* Forward-only FAT-chain walk cursor (REGULAR/DIR only): packs
-   * (cluster_index << 32) | cluster. fat32_walk_chain_cached resumes from here
-   * for target index >= cursor index, else restarts at start_cluster. FAT32
-   * chains only append-or-free-tail, so a stale cursor can only read past EOF
-   * (zero-filled), never wrong data; invalidated on every chain change. */
-  uint64_t walk_cursor;
-
   /* POSIX timestamps in ns since epoch (CLOCK_REALTIME). In-memory only —
    * FAT32 stores no timestamps (Q5: llvm libc utimensat tests don't survive
    * reboot); getattr reads these. Updated by update_time / generic_update_time.
    */
-  uint64_t atime;
-  uint64_t mtime;
-  uint64_t ctime;
+  struct vfs_timespec64 atime;
+  struct vfs_timespec64 mtime;
+  struct vfs_timespec64 ctime;
 
   /* Hash chain */
   struct inode *hash_next;
@@ -129,13 +158,11 @@ struct inode {
 #define INODE_HASH_SIZE (1 << INODE_HASH_BITS) /* 64 */
 
 void inode_init(void);
-struct inode *inode_lookup(uint32_t ino);
-struct inode *inode_create(uint32_t ino, int type, uint64_t size,
-                           uint32_t start_cluster, uint32_t dir_cluster,
-                           int dir_entry_idx) __must_check;
-struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
-                                  uint32_t start_cluster, uint32_t dir_cluster,
-                                  int dir_entry_idx);
+struct inode *inode_lookup(struct super_block *sb, uint64_t ino);
+struct inode *inode_create(struct super_block *sb, uint64_t ino, int type,
+                           uint64_t size) __must_check;
+struct inode *inode_get_or_create(struct super_block *sb, uint64_t ino,
+                                  int type, uint64_t size);
 void inode_put(struct inode *ip);
 struct inode *inode_get(struct inode *ip);
 

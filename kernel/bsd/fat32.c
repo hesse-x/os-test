@@ -20,6 +20,7 @@
 #include "kernel/bsd/inode.h"
 #include "kernel/bsd/inotify.h"
 #include "kernel/bsd/page_cache.h"
+#include "kernel/bsd/types.h"
 #include "kernel/driver/ahci.h"
 #include "kernel/driver/blk_dev.h"
 #include "kernel/xcore/atomic.h"
@@ -32,6 +33,9 @@
 #include <kernel/bsd/stat_abi.h>
 #include <xos/dirent.h>
 #include <xos/errno.h>
+#include <xos/page.h>
+
+struct xtask;
 
 // ==================== FAT32 volume state ====================
 static uint32_t part_start_lba;
@@ -41,6 +45,27 @@ static uint32_t root_cluster;
 static uint32_t sectors_per_cluster;
 static uint32_t bytes_per_cluster;
 static uint32_t total_data_clusters;
+static struct block_partition *fat32_part;
+static struct super_block fat32_sb;
+
+#define FAT_I(ip) ((struct fat32_inode_info *)(ip)->i_private)
+
+static void fat32_evict_inode(struct inode *ip) {
+  if (ip->i_private) {
+    kfree(ip->i_private);
+    ip->i_private = NULL;
+  }
+}
+
+static const struct super_operations fat32_sops = {
+    .evict_inode = fat32_evict_inode,
+};
+
+static void fat32_invalidate_pages(struct inode *ip) {
+  if (FAT_I(ip))
+    __atomic_store_n(&FAT_I(ip)->walk_cursor, 0, __ATOMIC_RELEASE);
+  page_cache_invalidate_inode(ip);
+}
 static uint32_t spf32;
 static uint32_t next_free_hint = 2;
 
@@ -137,7 +162,8 @@ static int fat_cache_read(uint32_t sector_lba) {
   __atomic_fetch_add(&fat_cache_misses, 1, __ATOMIC_RELAXED);
   spin_unlock(&fat_cache_lock);
 
-  int rc = blk_read(group_lba, group_count, fat_cache_data[group_slot]);
+  int rc = partition_read(fat32_part, group_lba, group_count,
+                          fat_cache_data[group_slot]);
   __atomic_fetch_add(&fat_cache_io_commands, 1, __ATOMIC_RELAXED);
   __atomic_fetch_add(&fat_cache_io_sectors, group_count, __ATOMIC_RELAXED);
 
@@ -197,7 +223,7 @@ static int fat32_write_fat_entry(uint32_t cluster, uint32_t value) {
   uint32_t offset_in_sector = fat_offset % 512;
 
   uint8_t sector_buf[512];
-  if (blk_read_sector(fat_sector, sector_buf) != 0)
+  if (partition_read(fat32_part, fat_sector, 1, sector_buf) != 0)
     return -EIO;
 
   uint8_t *p = sector_buf + offset_in_sector;
@@ -210,10 +236,10 @@ static int fat32_write_fat_entry(uint32_t cluster, uint32_t value) {
   p[3] = (nv >> 24) & 0xFF;
 
   // Write FAT1.
-  if (blk_write(fat_sector, 1, sector_buf) != 0)
+  if (partition_write(fat32_part, fat_sector, 1, sector_buf) != 0)
     return -EIO;
   // Write FAT2.
-  if (blk_write(fat_sector + spf32, 1, sector_buf) != 0)
+  if (partition_write(fat32_part, fat_sector + spf32, 1, sector_buf) != 0)
     return -EIO;
 
   // Invalidate cache for this sector so subsequent reads get fresh data.
@@ -263,7 +289,7 @@ uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index,
     __atomic_fetch_add(&fat_stats.walk_invalid[source], 1, __ATOMIC_RELAXED);
   }
   __atomic_fetch_add(&fat_stats.walk_calls[source], 1, __ATOMIC_RELAXED);
-  uint64_t cur = __atomic_load_n(&ip->walk_cursor, __ATOMIC_ACQUIRE);
+  uint64_t cur = __atomic_load_n(&FAT_I(ip)->walk_cursor, __ATOMIC_ACQUIRE);
   uint32_t cur_idx = (uint32_t)(cur >> 32);
   uint32_t c = (uint32_t)(cur & 0xFFFFFFFF);
   if (c < 2 || c >= 0x0FFFFFF8 || cur_idx > cluster_index) {
@@ -275,7 +301,7 @@ uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index,
       __atomic_fetch_add(&fat_stats.walk_backtracks[source], 1,
                          __ATOMIC_RELAXED);
     cur_idx = 0;
-    c = ip->start_cluster;
+    c = FAT_I(ip)->start_cluster;
   }
   while (cur_idx < cluster_index) {
     if (c < 2 || c >= 0x0FFFFFF8) {
@@ -294,8 +320,8 @@ uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index,
   // Reached cluster_index. Publish only a valid data cluster; EOF markers
   // cannot be resumed from.
   if (c >= 2 && c < 0x0FFFFFF8)
-    __atomic_store_n(&ip->walk_cursor, ((uint64_t)cur_idx << 32) | (uint64_t)c,
-                     __ATOMIC_RELEASE);
+    __atomic_store_n(&FAT_I(ip)->walk_cursor,
+                     ((uint64_t)cur_idx << 32) | (uint64_t)c, __ATOMIC_RELEASE);
   return c;
 }
 
@@ -369,7 +395,7 @@ static int fat32_allocate_run(uint32_t wanted, uint32_t *first, uint32_t *last,
   uint8_t sec[512];
   for (uint32_t sector = 0; sector < spf32; sector++) {
     uint32_t abs_sector = ((next_free_hint / 128) + sector) % spf32;
-    if (blk_read_sector(fat_start_lba + abs_sector, sec) != 0)
+    if (partition_read(fat32_part, fat_start_lba + abs_sector, 1, sec) != 0)
       continue;
     __atomic_fetch_add(&fat_sector_reads, 1, __ATOMIC_RELAXED);
 
@@ -399,10 +425,10 @@ static int fat32_allocate_run(uint32_t wanted, uint32_t *first, uint32_t *last,
                             j + 1 < run ? c + j + 1 : 0x0FFFFFFF);
 
         uint32_t lba = fat_start_lba + abs_sector;
-        if (blk_write(lba, 1, sec) != 0)
+        if (partition_write(fat32_part, lba, 1, sec) != 0)
           return -EIO;
         __atomic_fetch_add(&fat1_writes, 1, __ATOMIC_RELAXED);
-        if (blk_write(lba + spf32, 1, sec) != 0)
+        if (partition_write(fat32_part, lba + spf32, 1, sec) != 0)
           return -EIO;
         __atomic_fetch_add(&fat2_writes, 1, __ATOMIC_RELAXED);
         fat_cache_invalidate_sector(lba);
@@ -524,7 +550,8 @@ static int fat32_allocate_detached(uint32_t count, uint32_t *chain_start,
     }
 
     uint32_t lba = data_start_lba + (run_start - 2) * sectors_per_cluster;
-    rc = blk_write(lba, got * sectors_per_cluster, fat_zero_region);
+    rc = partition_write(fat32_part, lba, got * sectors_per_cluster,
+                         fat_zero_region);
     __atomic_fetch_add(&fat_zero_commands, 1, __ATOMIC_RELAXED);
     if (rc) {
       fat32_free_chain(run_start);
@@ -650,6 +677,7 @@ static int match_lfn_name(const char *lfn_buf, const char *name, int name_len) {
 // ==================== Volume geometry accessors ====================
 
 uint32_t fat32_data_start_lba(void) { return data_start_lba; }
+struct block_partition *fat32_partition(void) { return fat32_part; }
 uint32_t fat32_sectors_per_cluster(void) { return sectors_per_cluster; }
 uint32_t fat32_bytes_per_cluster(void) { return bytes_per_cluster; }
 
@@ -677,6 +705,7 @@ static uint32_t fat32_make_ino(uint32_t dir_cluster, int dir_entry_idx) {
 // helpers are defined later in this file.
 static const struct inode_operations fat32_dir_iop;
 static const struct inode_operations fat32_file_iop;
+static const struct address_space_operations fat32_aops;
 static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
                             struct inode *new_parent, const char *new_name);
 static uint8_t *read_cluster_buf(uint32_t cluster);
@@ -690,11 +719,29 @@ static int write_cluster_sector(uint32_t cluster, int sector_idx,
 static struct inode *fat32_iget(uint32_t ino, int type, uint64_t size,
                                 uint32_t cluster, uint32_t dir_cluster,
                                 int dir_idx) {
-  struct inode *ip =
-      inode_get_or_create(ino, type, size, cluster, dir_cluster, dir_idx);
+  struct inode *ip = inode_get_or_create(&fat32_sb, ino, type, size);
   if (!ip)
     return NULL;
+  if (!ip->i_private) {
+    struct fat32_inode_info *info = kmalloc(sizeof(*info));
+    if (!info) {
+      inode_put(ip);
+      return NULL;
+    }
+    info->start_cluster = cluster;
+    info->dir_start_cluster = dir_cluster;
+    info->dir_entry_index = dir_idx;
+    info->walk_cursor = 0;
+    mutex_lock(&ip->i_lock);
+    if (!ip->i_private)
+      ip->i_private = info;
+    else
+      kfree(info);
+    mutex_unlock(&ip->i_lock);
+  }
   ip->i_op = (type == INODE_DIR) ? &fat32_dir_iop : &fat32_file_iop;
+  ip->i_fop = type == INODE_REGULAR ? &fat32_file_fops : NULL;
+  ip->i_aop = (type == INODE_REGULAR || type == INODE_DIR) ? &fat32_aops : NULL;
   // Q5: fat32 inodes have no fs-internal strong ref; after utimensat releases
   // them they can be reaped, and a later lookup builds a new inode whose
   // timestamps reset to 0. On cache miss (new build, refcount==1) initialize
@@ -705,10 +752,148 @@ static struct inode *fat32_iget(uint32_t ino, int type, uint64_t size,
   if (refcount_read(&ip->i_count) == 1) {
     uint64_t now =
         __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
-    ip->atime = ip->mtime = ip->ctime = now;
+    struct vfs_timespec64 ts = {.tv_sec = (int64_t)(now / 1000000000ULL),
+                                .tv_nsec = (uint32_t)(now % 1000000000ULL)};
+    ip->atime = ip->mtime = ip->ctime = ts;
   }
   return ip;
 }
+
+static ssize_t fat32_fop_read_at(struct xtask *proc, struct file *file,
+                                 void *buf, size_t count, uint64_t offset) {
+  (void)proc;
+  return fat32_read(file->inode, offset, buf, count);
+}
+
+static ssize_t fat32_fop_read(struct xtask *proc, struct file *file, void *buf,
+                              size_t count) {
+  ssize_t rc = fat32_fop_read_at(proc, file, buf, count, file->offset);
+  if (rc > 0)
+    file->offset += (uint64_t)rc;
+  return rc;
+}
+
+static ssize_t fat32_fop_write(struct xtask *proc, struct file *file,
+                               const void *buf, size_t count) {
+  (void)proc;
+  uint64_t offset = (file->flags & O_APPEND) ? file->inode->size : file->offset;
+  int rc = fat32_write(file->inode, offset, buf, count);
+  if (rc > 0)
+    file->offset = offset + (uint64_t)rc;
+  return rc;
+}
+
+static int fat32_fop_fsync(struct file *file, bool datasync) {
+  (void)file;
+  (void)datasync;
+  return 0;
+}
+
+const struct file_operations fat32_file_fops = {
+    .read = fat32_fop_read,
+    .read_at = fat32_fop_read_at,
+    .write = fat32_fop_write,
+    .fsync = fat32_fop_fsync,
+};
+
+static int fat32_map_file_sector(struct inode *ip, uint64_t file_sector,
+                                 uint64_t *sector) {
+  if (!sectors_per_cluster)
+    return -EIO;
+  uint64_t cluster_index = file_sector / sectors_per_cluster;
+  if (cluster_index > UINT32_MAX)
+    return -EFBIG;
+  uint32_t cluster =
+      fat32_walk_chain_cached(ip, (uint32_t)cluster_index, FAT32_WALK_DEMAND);
+  if (cluster < 2 || cluster >= 0x0ffffff8)
+    return -EIO;
+  uint64_t relative = (uint64_t)data_start_lba +
+                      (uint64_t)(cluster - 2) * sectors_per_cluster +
+                      file_sector % sectors_per_cluster;
+  if (relative >= fat32_part->sector_count)
+    return -EIO;
+  *sector = relative;
+  fat32_account_mapped_sector(FAT32_WALK_DEMAND);
+  return 0;
+}
+
+static int fat32_readpage(struct inode *ip, uint64_t page_index, void *page) {
+  if (!ip || !page)
+    return -EINVAL;
+  __memset(page, 0, PAGE_SIZE);
+  if (page_index > UINT64_MAX / PAGE_SIZE)
+    return -EFBIG;
+  uint64_t byte_offset = page_index * PAGE_SIZE;
+  if (byte_offset >= ip->size)
+    return 0;
+  uint64_t available = ip->size - byte_offset;
+  if (available > PAGE_SIZE)
+    available = PAGE_SIZE;
+  uint32_t sectors = (uint32_t)((available + 511) / 512);
+  for (uint32_t i = 0; i < sectors; i++) {
+    uint64_t disk_sector;
+    int rc = fat32_map_file_sector(ip, byte_offset / 512 + i, &disk_sector);
+    if (rc)
+      return rc;
+    rc = partition_read(fat32_part, disk_sector, 1,
+                        (uint8_t *)page + (size_t)i * 512);
+    if (rc)
+      return rc;
+  }
+  return 0;
+}
+
+static int fat32_writepages(struct inode *ip, struct cache_page **pages,
+                            size_t nr_pages) {
+  if (!ip || !pages || !nr_pages)
+    return -EINVAL;
+  for (size_t p = 0; p < nr_pages; p++) {
+    struct cache_page *cp = pages[p];
+    if (!cp || cp->inode != ip || !cp->data ||
+        cp->page_index > UINT64_MAX / PAGE_SIZE)
+      return -EINVAL;
+    uint64_t byte_offset = cp->page_index * PAGE_SIZE;
+    if (byte_offset >= ip->size)
+      continue;
+    uint64_t available = ip->size - byte_offset;
+    if (available > PAGE_SIZE)
+      available = PAGE_SIZE;
+    uint32_t sectors = (uint32_t)((available + 511) / 512);
+    uint32_t run_first = 0;
+    uint32_t run_count = 0;
+    uint64_t run_sector = 0;
+    for (uint32_t i = 0; i < sectors; i++) {
+      uint64_t disk_sector;
+      int rc = fat32_map_file_sector(ip, byte_offset / 512 + i, &disk_sector);
+      if (rc)
+        return rc;
+      if (run_count && disk_sector != run_sector + run_count) {
+        rc = partition_write(fat32_part, run_sector, run_count,
+                             cp->data + (size_t)run_first * 512);
+        if (rc)
+          return rc;
+        run_count = 0;
+      }
+      if (!run_count) {
+        run_sector = disk_sector;
+        run_first = i;
+      }
+      run_count++;
+    }
+    if (run_count) {
+      int rc = partition_write(fat32_part, run_sector, run_count,
+                               cp->data + (size_t)run_first * 512);
+      if (rc)
+        return rc;
+    }
+  }
+  return 0;
+}
+
+static const struct address_space_operations fat32_aops = {
+    .readpage = fat32_readpage,
+    .writepages = fat32_writepages,
+};
 
 // fat32_lookup_in_dir: scan the whole FAT chain of dir_cluster for an entry
 // named `name`; returns 0 on hit (fills out_*) / -ENOENT if not found / -EIO.
@@ -729,7 +914,7 @@ static int fat32_lookup_in_dir(uint32_t dir_cluster, const char *name,
     uint8_t *buf = (uint8_t *)kmalloc(bytes_per_cluster);
     if (!buf)
       return -ENOMEM;
-    if (blk_read(lba, sectors_per_cluster, buf) != 0) {
+    if (partition_read(fat32_part, lba, sectors_per_cluster, buf) != 0) {
       kfree(buf);
       return -EIO;
     }
@@ -782,8 +967,8 @@ static struct inode *fat32_dir_lookup(struct inode *dir, const char *name) {
   uint32_t cluster, dir_cluster;
   int dir_idx, is_dir;
   uint64_t size;
-  int rc = fat32_lookup_in_dir(dir->start_cluster, name, &cluster, &dir_cluster,
-                               &dir_idx, &size, &is_dir);
+  int rc = fat32_lookup_in_dir(FAT_I(dir)->start_cluster, name, &cluster,
+                               &dir_cluster, &dir_idx, &size, &is_dir);
   if (rc != 0)
     return NULL;
   int type = is_dir ? INODE_DIR : INODE_REGULAR;
@@ -844,7 +1029,7 @@ static int fat32_dir_find_slot(uint32_t start_cluster, uint32_t *out_cluster,
     }
     __memset(zb, 0, bytes_per_cluster);
     uint32_t lba = data_start_lba + (nc - 2) * sectors_per_cluster;
-    blk_write(lba, sectors_per_cluster, zb);
+    partition_write(fat32_part, lba, sectors_per_cluster, zb);
     kfree(zb);
     target_cluster = nc;
     free_idx = 0;
@@ -873,8 +1058,8 @@ static struct inode *fat32_dir_create(struct inode *dir, const char *name,
   int entries = bytes_per_cluster / 32;
   uint32_t target_cluster;
   int free_idx, was_end_of_dir;
-  int frc = fat32_dir_find_slot(dir->start_cluster, &target_cluster, &free_idx,
-                                &was_end_of_dir);
+  int frc = fat32_dir_find_slot(FAT_I(dir)->start_cluster, &target_cluster,
+                                &free_idx, &was_end_of_dir);
   if (frc != 0) {
     mutex_unlock(&fat_lock);
     return ERR_PTR(frc);
@@ -949,18 +1134,18 @@ static int fat32_dir_mkdir(struct inode *dir, const char *name, int mode) {
   for (int i = 2; i < 11; i++)
     dd->name[i] = ' ';
   dd->attr = 0x10;
-  dd->fst_clus_hi = (dir->start_cluster >> 16) & 0xFFFF;
-  dd->fst_clus_lo = dir->start_cluster & 0xFFFF;
+  dd->fst_clus_hi = (FAT_I(dir)->start_cluster >> 16) & 0xFFFF;
+  dd->fst_clus_lo = FAT_I(dir)->start_cluster & 0xFFFF;
   uint32_t lba = data_start_lba + (new_cluster - 2) * sectors_per_cluster;
-  blk_write(lba, sectors_per_cluster, db);
+  partition_write(fat32_part, lba, sectors_per_cluster, db);
   kfree(db);
   // Find a free slot (0x00 or 0xE5) on dir->start_cluster's chain; extend a
   // cluster if none (same as fat32_dir_create, via the shared helper).
   int entries = bytes_per_cluster / 32;
   uint32_t target_cluster;
   int free_idx, was_end_of_dir;
-  int frc = fat32_dir_find_slot(dir->start_cluster, &target_cluster, &free_idx,
-                                &was_end_of_dir);
+  int frc = fat32_dir_find_slot(FAT_I(dir)->start_cluster, &target_cluster,
+                                &free_idx, &was_end_of_dir);
   if (frc != 0) {
     fat32_free_chain(new_cluster);
     mutex_unlock(&fat_lock);
@@ -1014,8 +1199,8 @@ static int fat32_dir_unlink(struct inode *dir, const char *name) {
   int dir_idx, is_dir;
   uint64_t size;
   (void)size;
-  int rc = fat32_lookup_in_dir(dir->start_cluster, name, &cluster, &dir_cluster,
-                               &dir_idx, &size, &is_dir);
+  int rc = fat32_lookup_in_dir(FAT_I(dir)->start_cluster, name, &cluster,
+                               &dir_cluster, &dir_idx, &size, &is_dir);
   if (rc != 0)
     return rc;
   uint8_t *db = read_cluster_buf(dir_cluster);
@@ -1027,9 +1212,10 @@ static int fat32_dir_unlink(struct inode *dir, const char *name) {
     return -EISDIR;
   }
   uint32_t target_cluster = ((uint32_t)de->fst_clus_hi << 16) | de->fst_clus_lo;
-  struct inode *ip = inode_lookup(fat32_make_ino(dir_cluster, dir_idx));
+  struct inode *ip =
+      inode_lookup(&fat32_sb, fat32_make_ino(dir_cluster, dir_idx));
   if (ip) {
-    page_cache_invalidate_inode(ip);
+    fat32_invalidate_pages(ip);
     inode_put(ip);
   }
   db[dir_idx * 32] = 0xE5;
@@ -1048,7 +1234,8 @@ static int fat32_dir_unlink(struct inode *dir, const char *name) {
   // the cache. A later create reusing the same dir-entry slot (same ino) then
   // fat32_iget-hits the stale inode and reads the dead file's old size/data.
   inotify_inode_event(dir, IN_DELETE, 0, name);
-  struct inode *child = inode_lookup(fat32_make_ino(dir_cluster, dir_idx));
+  struct inode *child =
+      inode_lookup(&fat32_sb, fat32_make_ino(dir_cluster, dir_idx));
   if (child) {
     inotify_inode_event(child, IN_DELETE_SELF, 0, NULL);
     inode_put(child);
@@ -1095,8 +1282,8 @@ static int fat32_dir_rmdir(struct inode *dir, const char *name) {
   uint32_t cluster, dir_cluster;
   int dir_idx, is_dir;
   uint64_t size;
-  int rc = fat32_lookup_in_dir(dir->start_cluster, name, &cluster, &dir_cluster,
-                               &dir_idx, &size, &is_dir);
+  int rc = fat32_lookup_in_dir(FAT_I(dir)->start_cluster, name, &cluster,
+                               &dir_cluster, &dir_idx, &size, &is_dir);
   if (rc != 0)
     return rc;
   if (!is_dir)
@@ -1123,7 +1310,8 @@ static int fat32_dir_rmdir(struct inode *dir, const char *name) {
   // inode_lookup returns +1; inotify_inode_event only reads the pointer as an
   // index key, so drop the ref here (same ref-leak fix as fat32_dir_unlink).
   inotify_inode_event(dir, IN_DELETE, 0, name);
-  struct inode *child = inode_lookup(fat32_make_ino(dir_cluster, dir_idx));
+  struct inode *child =
+      inode_lookup(&fat32_sb, fat32_make_ino(dir_cluster, dir_idx));
   if (child) {
     inotify_inode_event(child, IN_DELETE_SELF, 0, NULL);
     inode_put(child);
@@ -1149,12 +1337,12 @@ static int fat32_getattr(struct inode *ip, struct kstat *ks) {
   // Timestamps (Q5 in-memory): getattr splits ns into sec/nsec. FAT32 disk
   // stores no timestamps; inode fields are written by update_time/utimensat
   // (revert to 0 on reboot, acceptable).
-  ks->st_atim.tv_sec = (int64_t)(ip->atime / 1000000000ULL);
-  ks->st_atim.tv_nsec = (int64_t)(ip->atime % 1000000000ULL);
-  ks->st_mtim.tv_sec = (int64_t)(ip->mtime / 1000000000ULL);
-  ks->st_mtim.tv_nsec = (int64_t)(ip->mtime % 1000000000ULL);
-  ks->st_ctim.tv_sec = (int64_t)(ip->ctime / 1000000000ULL);
-  ks->st_ctim.tv_nsec = (int64_t)(ip->ctime % 1000000000ULL);
+  ks->st_atim.tv_sec = ip->atime.tv_sec;
+  ks->st_atim.tv_nsec = ip->atime.tv_nsec;
+  ks->st_mtim.tv_sec = ip->mtime.tv_sec;
+  ks->st_mtim.tv_nsec = ip->mtime.tv_nsec;
+  ks->st_ctim.tv_sec = ip->ctime.tv_sec;
+  ks->st_ctim.tv_nsec = ip->ctime.tv_nsec;
   return 0;
 }
 
@@ -1219,7 +1407,7 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
   int old_dir_idx, old_is_dir;
   uint64_t old_size;
   (void)old_size;
-  int rc = fat32_lookup_in_dir(old_parent->start_cluster, old_name,
+  int rc = fat32_lookup_in_dir(FAT_I(old_parent)->start_cluster, old_name,
                                &old_cluster, &old_dir_cluster, &old_dir_idx,
                                &old_size, &old_is_dir);
   if (rc != 0)
@@ -1229,9 +1417,9 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
   int new_dir_idx, new_is_dir;
   uint64_t new_size;
   (void)new_size;
-  rc = fat32_lookup_in_dir(new_parent->start_cluster, new_name, &new_cluster,
-                           &new_dir_cluster, &new_dir_idx, &new_size,
-                           &new_is_dir);
+  rc = fat32_lookup_in_dir(FAT_I(new_parent)->start_cluster, new_name,
+                           &new_cluster, &new_dir_cluster, &new_dir_idx,
+                           &new_size, &new_is_dir);
   int new_exists = (rc == 0);
   if (rc != 0 && rc != -ENOENT)
     return rc; // -EIO etc.
@@ -1280,10 +1468,10 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
     target_idx = new_dir_idx;
   } else {
     int entries = bytes_per_cluster / 32;
-    target_cluster = new_parent->start_cluster;
+    target_cluster = FAT_I(new_parent)->start_cluster;
     target_idx = -1;
-    uint32_t tail = new_parent->start_cluster;
-    uint32_t cur = new_parent->start_cluster;
+    uint32_t tail = FAT_I(new_parent)->start_cluster;
+    uint32_t cur = FAT_I(new_parent)->start_cluster;
     while (cur >= 2 && cur < 0x0FFFFFF8) {
       tail = cur;
       uint8_t *db = read_cluster_buf(cur);
@@ -1330,7 +1518,7 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
       }
       __memset(zb, 0, bytes_per_cluster);
       uint32_t lba = data_start_lba + (nc - 2) * sectors_per_cluster;
-      blk_write(lba, sectors_per_cluster, zb);
+      partition_write(fat32_part, lba, sectors_per_cluster, zb);
       kfree(zb);
       target_cluster = nc;
       target_idx = 0;
@@ -1396,9 +1584,9 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
   // actively migrate the inode cache entry; the next lookup builds a new inode
   // via fat32_iget at the new position; the old inode is reaped when closed.
   struct inode *old_ip =
-      inode_lookup(fat32_make_ino(old_dir_cluster, old_dir_idx));
+      inode_lookup(&fat32_sb, fat32_make_ino(old_dir_cluster, old_dir_idx));
   if (old_ip) {
-    page_cache_invalidate_inode(old_ip);
+    fat32_invalidate_pages(old_ip);
     inode_put(old_ip);
   }
 
@@ -1527,7 +1715,8 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
           uint8_t *buf2 = (uint8_t *)kmalloc(bytes_per_cluster);
           if (!buf2)
             return -ENOMEM;
-          if (blk_read(lba2, sectors_per_cluster, buf2) != 0) {
+          if (partition_read(fat32_part, lba2, sectors_per_cluster, buf2) !=
+              0) {
             kfree(buf2);
             return -EIO;
           }
@@ -1579,7 +1768,7 @@ static int fat32_resolve_path(const char *path, uint32_t *out_cluster,
       uint8_t *buf = (uint8_t *)kmalloc(bytes_per_cluster);
       if (!buf)
         return -ENOMEM;
-      if (blk_read(lba, sectors_per_cluster, buf) != 0) {
+      if (partition_read(fat32_part, lba, sectors_per_cluster, buf) != 0) {
         kfree(buf);
         return -EIO;
       }
@@ -1663,7 +1852,7 @@ static uint8_t *read_cluster_buf(uint32_t cluster) {
   if (!buf)
     return NULL;
   uint32_t lba = data_start_lba + (cluster - 2) * sectors_per_cluster;
-  if (blk_read(lba, sectors_per_cluster, buf) != 0) {
+  if (partition_read(fat32_part, lba, sectors_per_cluster, buf) != 0) {
     kfree(buf);
     return NULL;
   }
@@ -1675,7 +1864,7 @@ static int write_cluster_sector(uint32_t cluster, int sector_idx,
                                 const uint8_t *data) {
   uint32_t lba =
       data_start_lba + (cluster - 2) * sectors_per_cluster + sector_idx;
-  return blk_write(lba, 1, data);
+  return partition_write(fat32_part, lba, 1, data);
 }
 
 // Update directory entry on disk.
@@ -1728,13 +1917,14 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
 
   if (len == 0) {
     // Shrink-to-zero reuses the simple path.
-    int rc = fat32_truncate(ip->start_cluster, ip->dir_start_cluster,
-                            ip->dir_entry_index);
+    int rc =
+        fat32_truncate(FAT_I(ip)->start_cluster, FAT_I(ip)->dir_start_cluster,
+                       FAT_I(ip)->dir_entry_index);
     if (rc)
       return rc;
-    ip->start_cluster = 0;
+    FAT_I(ip)->start_cluster = 0;
     ip->size = 0;
-    page_cache_invalidate_inode(ip);
+    fat32_invalidate_pages(ip);
     return 0;
   }
 
@@ -1743,12 +1933,12 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
   if (len < ip->size) {
     // Shrink: free every cluster past the keep boundary.
     mutex_lock(&fat_lock);
-    if (ip->start_cluster == 0) {
+    if (FAT_I(ip)->start_cluster == 0) {
       mutex_unlock(&fat_lock);
       return -EIO;
     }
     // Walk to the last cluster we keep (index keep_clusters-1).
-    uint32_t c = ip->start_cluster;
+    uint32_t c = FAT_I(ip)->start_cluster;
     uint32_t prev = 0;
     for (uint32_t i = 0; i < keep_clusters; i++) {
       if (c < 2 || c >= 0x0FFFFFF8) {
@@ -1769,7 +1959,7 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
     // Grow into a detached chain, zero it in physical extents, then publish
     // the single tail link only after all allocation and I/O has succeeded.
     mutex_lock(&fat_lock);
-    uint32_t tail = ip->start_cluster;
+    uint32_t tail = FAT_I(ip)->start_cluster;
     uint32_t have = tail ? 1 : 0;
     uint32_t guard = total_data_clusters;
     while (tail && guard-- > 0) {
@@ -1795,25 +1985,37 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
           return rc;
         }
       } else {
-        ip->start_cluster = detached_start;
+        FAT_I(ip)->start_cluster = detached_start;
       }
     }
     mutex_unlock(&fat_lock);
   }
 
   ip->size = len;
-  if (ip->dir_start_cluster >= 2) {
-    fat32_update_dir_entry(ip->dir_start_cluster, ip->dir_entry_index,
-                           ip->start_cluster, (uint32_t)ip->size);
+  if (FAT_I(ip)->dir_start_cluster >= 2) {
+    fat32_update_dir_entry(FAT_I(ip)->dir_start_cluster,
+                           FAT_I(ip)->dir_entry_index, FAT_I(ip)->start_cluster,
+                           (uint32_t)ip->size);
   }
-  page_cache_invalidate_inode(ip);
+  fat32_invalidate_pages(ip);
   return 0;
 }
 
 // ==================== FAT32 init ====================
 
-int fat32_init(void) {
+int fat32_init(struct block_partition *part) {
   printk(LOG_INFO, "fat32_init: starting\n");
+
+  if (!part || (part->mbr_type != 0x0b && part->mbr_type != 0x0c)) {
+    printk(LOG_ERROR, "fat32_init: root partition type=%x, expected 0b/0c\n",
+           part ? part->mbr_type : 0);
+    return -EINVAL;
+  }
+  fat32_part = part;
+  fat32_sb.s_op = &fat32_sops;
+  fat32_sb.part = part;
+  fat32_sb.block_size = 512;
+  fat32_sb.readonly = false;
 
   mutex_init(&fat_lock);
   mutex_init(&fat_cache_fill_lock);
@@ -1825,40 +2027,15 @@ int fat32_init(void) {
     fat_cache[i].filling = false;
   }
 
-  // Read MBR (LBA 0).
-  uint8_t mbr[512];
-  if (blk_read_sector(0, mbr) != 0) {
-    printk(LOG_ERROR, "fat32_init: MBR read failed\n");
-    return -EIO;
-  }
-
-  // Scan partition table for FAT32 (type 0x0B or 0x0C).
   part_start_lba = 0;
-  uint32_t part_total_sectors = 0;
-  for (int i = 0; i < 4; i++) {
-    uint8_t *entry = mbr + 0x1BE + i * 16;
-    uint8_t ptype = entry[4];
-    if (ptype == 0x0B || ptype == 0x0C) {
-      part_start_lba = (uint32_t)entry[8] | ((uint32_t)entry[9] << 8) |
-                       ((uint32_t)entry[10] << 16) |
-                       ((uint32_t)entry[11] << 24);
-      part_total_sectors = (uint32_t)entry[12] | ((uint32_t)entry[13] << 8) |
-                           ((uint32_t)entry[14] << 16) |
-                           ((uint32_t)entry[15] << 24);
-      break;
-    }
-  }
-
-  // Fallback: if no partition found, try LBA 2149 (current disk layout).
-  if (part_start_lba == 0) {
-    printk(LOG_WARN,
-           "fat32_init: no FAT32 partition in MBR, trying LBA 2149\n");
-    part_start_lba = 2149;
-  }
+  uint64_t part_total_sectors64 = part->sector_count;
+  if (part_total_sectors64 > UINT32_MAX)
+    return -EOVERFLOW;
+  uint32_t part_total_sectors = (uint32_t)part_total_sectors64;
 
   // Read BPB.
   uint8_t bpb[512];
-  if (blk_read_sector(part_start_lba, bpb) != 0) {
+  if (partition_read(part, 0, 1, bpb) != 0) {
     printk(LOG_ERROR, "fat32_init: BPB read failed\n");
     return -EIO;
   }
@@ -1880,7 +2057,7 @@ int fat32_init(void) {
     return -EINVAL;
   }
 
-  fat_start_lba = part_start_lba + reserved;
+  fat_start_lba = reserved;
   data_start_lba = fat_start_lba + spf32 * 2;
   bytes_per_cluster = sectors_per_cluster * 512;
 
@@ -1985,6 +2162,7 @@ int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count) {
 int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
                 size_t count) {
   mutex_lock(&ip->i_lock);
+  uint64_t original_size = ip->size;
 
   // O_APPEND: write at end of file.
   if (ip->mode & O_APPEND) {
@@ -2022,7 +2200,8 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
     bool enospc = false;
     for (uint32_t chain_index = first_chain; chain_index <= last_chain;
          chain_index++) {
-      uint32_t existing = fat32_walk_chain(ip->start_cluster, chain_index);
+      uint32_t existing =
+          fat32_walk_chain(FAT_I(ip)->start_cluster, chain_index);
       if (existing >= 2 && existing < 0x0FFFFFF8)
         continue; // already allocated
 
@@ -2030,9 +2209,10 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
       // that tail across this write instead of rescanning the entire FAT chain
       // for every new 512-byte cluster (and imposing an artificial 1024-entry
       // file-size ceiling).
-      if (ip->start_cluster != 0 && append_tail == 0 && chain_index != 0)
-        append_tail = fat32_walk_chain(ip->start_cluster, chain_index - 1);
-      if (ip->start_cluster != 0 &&
+      if (FAT_I(ip)->start_cluster != 0 && append_tail == 0 && chain_index != 0)
+        append_tail =
+            fat32_walk_chain(FAT_I(ip)->start_cluster, chain_index - 1);
+      if (FAT_I(ip)->start_cluster != 0 &&
           (append_tail < 2 || append_tail >= 0x0FFFFFF8)) {
         WARN_ON(1);
         mutex_unlock(&ip->i_lock);
@@ -2045,7 +2225,7 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
       int alloc_rc =
           fat32_allocate_detached(need, &detached_start, &detached_tail);
       if (alloc_rc != 0 ||
-          (ip->start_cluster != 0 &&
+          (FAT_I(ip)->start_cluster != 0 &&
            fat32_link_cluster(append_tail, detached_start) != 0)) {
         operation_error = alloc_rc ? alloc_rc : -EIO;
         if (detached_start)
@@ -2054,13 +2234,13 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
         enospc = true;
         break;
       }
-      if (ip->start_cluster == 0)
-        ip->start_cluster = detached_start;
+      if (FAT_I(ip)->start_cluster == 0)
+        FAT_I(ip)->start_cluster = detached_start;
       append_tail = detached_tail;
       mutex_unlock(&fat_lock);
 
       // Invalidate page cache — new cluster changes mapping.
-      page_cache_invalidate_inode(ip);
+      fat32_invalidate_pages(ip);
       break;
     }
     if (enospc)
@@ -2075,6 +2255,13 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
     page_cache_mark_dirty(cp);
     write_pages[nr_write_pages++] = cp;
     written += chunk;
+
+    /* writepages limits I/O using i_size. Publish the bytes covered by this
+     * dirty page before writeback, then roll back to the durable prefix if
+     * writeback fails below. */
+    uint64_t pending_end = offset + written;
+    if (pending_end > ip->size)
+      ip->size = pending_end;
 
     if (nr_write_pages == 16 || written == count) {
       writeback_error = page_cache_writeback_pages(write_pages, nr_write_pages);
@@ -2100,12 +2287,16 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
     operation_error = writeback_error;
 
   uint64_t new_end = offset + written;
-  if (new_end > ip->size) {
-    ip->size = new_end;
+  uint64_t final_size = new_end > original_size ? new_end : original_size;
+  if (writeback_error)
+    ip->size = final_size;
+  if (final_size != original_size) {
+    ip->size = final_size;
     // Update directory entry.
-    if (ip->dir_start_cluster >= 2) {
-      fat32_update_dir_entry(ip->dir_start_cluster, ip->dir_entry_index,
-                             ip->start_cluster, (uint32_t)ip->size);
+    if (FAT_I(ip)->dir_start_cluster >= 2) {
+      fat32_update_dir_entry(FAT_I(ip)->dir_start_cluster,
+                             FAT_I(ip)->dir_entry_index,
+                             FAT_I(ip)->start_cluster, (uint32_t)ip->size);
     }
   }
 
@@ -2181,7 +2372,7 @@ int fat32_mkdir(const char *path) {
 
   // Write new directory cluster to disk.
   uint32_t lba = data_start_lba + (new_cluster - 2) * sectors_per_cluster;
-  blk_write(lba, sectors_per_cluster, dir_buf);
+  partition_write(fat32_part, lba, sectors_per_cluster, dir_buf);
   kfree(dir_buf);
 
   // Add entry in parent directory.
@@ -2246,9 +2437,10 @@ int fat32_unlink(const char *path) {
   uint32_t target_cluster = ((uint32_t)de->fst_clus_hi << 16) | de->fst_clus_lo;
 
   // Invalidate page cache for this inode (lookup by dir-entry location ino).
-  struct inode *ip = inode_lookup(fat32_make_ino(dir_cluster, dir_idx));
+  struct inode *ip =
+      inode_lookup(&fat32_sb, fat32_make_ino(dir_cluster, dir_idx));
   if (ip) {
-    page_cache_invalidate_inode(ip);
+    fat32_invalidate_pages(ip);
     inode_put(ip);
   }
 
@@ -2518,7 +2710,8 @@ int fat32_getdents(uint32_t dir_cluster, uint64_t *pos, void *buf, size_t len) {
 #include "kernel/bsd/mount.h"
 
 static ssize_t fat32_fs_getdents(struct inode *dir, struct dir_context *ctx) {
-  int ret = fat32_getdents(dir->start_cluster, &ctx->pos, ctx->buf, ctx->len);
+  int ret =
+      fat32_getdents(FAT_I(dir)->start_cluster, &ctx->pos, ctx->buf, ctx->len);
   if (ret < 0)
     return (ssize_t)ret;
   ctx->written = (size_t)ret;

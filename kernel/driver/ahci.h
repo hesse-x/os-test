@@ -72,6 +72,7 @@ struct ahci_stats {
 
 void ahci_init();
 int ahci_submit_sync(uint32_t lba, uint32_t count, void *buf, uint8_t dir);
+int ahci_flush_cache(void);
 uint64_t ahci_sector_count(void);
 void ahci_get_stats(struct ahci_stats *out);
 

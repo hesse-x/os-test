@@ -7,13 +7,12 @@
 #ifndef KERNEL_MOUNT_H
 #define KERNEL_MOUNT_H
 
+#include "kernel/bsd/inode.h"
 #include "kernel/xcore/posix_types.h" // IWYU pragma: keep
 #include "kernel/xcore/sparse.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-struct inode;
 
 // d_type constants (Linux DT_* values) — used by dir_emit and fstype
 // getdents callbacks. No named constants existed before; fat32.c used
@@ -83,8 +82,9 @@ struct mount_entry {
   struct fstype *fs;
   void *fs_data;      // mount-private data (NULL for fat32/devtmpfs)
   struct inode *root; // per-mount root inode for filesystems such as tmpfs
-  uint32_t m_flags;   // MS_* bits accepted at mount(2) (MS_NOSUID consumed by
-                      // execve; RDONLY/NODEV/NOEXEC stored, not yet enforced)
+  struct super_block sb;
+  uint32_t m_flags; // MS_* bits accepted at mount(2) (MS_NOSUID consumed by
+                    // execve; RDONLY/NODEV/NOEXEC stored, not yet enforced)
   bool in_use;
 };
 
@@ -102,5 +102,7 @@ bool dir_emit(struct dir_context *ctx, const char *name, int namlen,
 int normalize_path(const char *in, char *out, size_t outcap);
 int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                   int64_t arg5, int64_t unused);
+int64_t sys_umount2(int64_t target, int64_t flags, int64_t, int64_t, int64_t,
+                    int64_t);
 
 #endif

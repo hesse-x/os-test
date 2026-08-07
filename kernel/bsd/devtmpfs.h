@@ -89,6 +89,8 @@ struct dev_ops {
 void devtmpfs_init(void);
 int devtmpfs_mkdir(const char *name);
 int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm);
+int devtmpfs_create_device(const char *name, struct dev_ops *ops,
+                           void *device_private, struct shm *shm);
 uint64_t devtmpfs_open(xtask *proc, const char *name, int flags,
                        struct mount_entry *m);
 struct inode *devtmpfs_lookup(const char *name);
@@ -103,6 +105,9 @@ extern const struct vma_owner_ops dev_ops_vma_owner_ops;
 // holds fd ref so ops won't reach 0 before this fd closes. Prevents
 // borrow-window UAF.
 struct dev_ops *dev_ops_peek_by_inode(struct inode *ip);
+// Return the device instance associated with a devtmpfs inode. This keeps
+// drivers independent of the BSD-layer struct inode layout.
+void *devtmpfs_device_private(struct inode *ip);
 // Reverse map: device inode → registered /dev/<name> (borrowed; stable while
 // the device is registered). NULL if not a registered devtmpfs device.
 const char *devtmpfs_name_by_inode(struct inode *ip);

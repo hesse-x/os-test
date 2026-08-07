@@ -76,6 +76,7 @@ struct signalfd_ctx;
 struct netlink_sock;
 struct drm_fence;
 struct drm_prime_object;
+struct mount_entry;
 
 typedef struct file {
   refcount_t f_count;
@@ -88,7 +89,8 @@ typedef struct file {
   uint64_t offset;
   wait_queue_head *wq; // lazily allocated: NULL means no waiters
   const struct file_operations
-      *f_op;          // fd-I/O dispatch (NULL = type-based dispatch)
+      *f_op; // fd-I/O dispatch (NULL = type-based dispatch)
+  struct mount_entry *mount;
   void *private_data; // Linux-style: used by broker/eventfd etc.; freed by
                       // f_op->close
   pid_t f_owner;   // F_SETOWN target pid (0 = none); stored, no SIGIO delivery
@@ -120,6 +122,9 @@ typedef struct file {
     struct drm_prime_object *drm_prime;
   };
 } file;
+
+_Static_assert(offsetof(file, private_data) == 80,
+               "struct file ABI changed - update driver/bsd_types.h");
 
 // S06: per-fd close-on-exec bitmap. cloexec is an fd-level attribute, but the
 // old design stored it on the refcounted/shared struct file (so dup'd fds

@@ -7,7 +7,10 @@
 #include "kernel/bsd/mount.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/inode.h"
+#include "kernel/bsd/page_cache.h"
 #include "kernel/bsd/proc.h" // current_proc (euid permission gate)
+#include "kernel/driver/blk_dev.h"
+#include "kernel/xcore/atomic.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
@@ -78,6 +81,11 @@ int mount_internal(struct fstype *fs, const char *target, void *fs_data,
   mount_table[slot].fs_data = fs_data;
   mount_table[slot].root = NULL;
   mount_table[slot].m_flags = flags;
+  mount_table[slot].sb.flags = flags;
+  mount_table[slot].sb.readonly = (flags & MS_RDONLY) != 0;
+  atomic_set(&mount_table[slot].sb.active_files, 0);
+  atomic_set(&mount_table[slot].sb.active_mmaps, 0);
+  mount_table[slot].sb.dying = false;
   mount_table[slot].in_use = true;
   spin_unlock(&mount_lock);
   return 0;
@@ -89,7 +97,7 @@ struct mount_entry *vfs_resolve(const char *path, char *relpath,
   struct mount_entry *best = NULL;
   size_t best_len = 0;
   for (int i = 0; i < MAX_MOUNTS; i++) {
-    if (!mount_table[i].in_use)
+    if (!mount_table[i].in_use || mount_table[i].sb.dying)
       continue;
     const char *mp = mount_table[i].mntpoint;
     size_t mplen = 0;
@@ -180,6 +188,18 @@ struct mount_entry *vfs_resolve_user(const char __user *upath, char *relpath,
 struct mount_entry *mount_of_inode(struct inode *ip) {
   if (ip && ip->mount)
     return ip->mount;
+  if (ip && ip->i_sb) {
+    spin_lock(&mount_lock);
+    for (int i = 0; i < MAX_MOUNTS; i++) {
+      if (mount_table[i].in_use &&
+          (&mount_table[i].sb == ip->i_sb ||
+           (mount_table[i].root && mount_table[i].root->i_sb == ip->i_sb))) {
+        spin_unlock(&mount_lock);
+        return &mount_table[i];
+      }
+    }
+    spin_unlock(&mount_lock);
+  }
   // Fallback: find root mount "/"
   spin_lock(&mount_lock);
   for (int i = 0; i < MAX_MOUNTS; i++) {
@@ -299,6 +319,8 @@ int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
   if (flags & (MS_REMOUNT | MS_BIND))
     return (int64_t)-ENOSYS; // not implemented; explicit over silent drop
+  if (flags & ~(MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC))
+    return (int64_t)-EINVAL;
   // MS_RDONLY/NOSUID/NODEV/NOEXEC accepted and stored in mount_entry.m_flags.
   // MS_NOSUID is consumed by execve (setuid/setgid bits honored only without
   // it); RDNODEV/NOEXEC are stored but not yet enforced (no permission/exec-bit
@@ -332,4 +354,90 @@ int64_t sys_mount(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // copy_from_user this under its own defined layout (todo.md).
   void *fs_data = (void *)(uintptr_t)arg5;
   return mount_internal(fs, target, fs_data, accepted);
+}
+
+int64_t sys_umount2(int64_t arg1, int64_t arg2, int64_t unused1,
+                    int64_t unused2, int64_t unused3, int64_t unused4) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  if (arg2 != 0)
+    return -EINVAL;
+  if (!capable(CAP_SYS_ADMIN))
+    return -EPERM;
+  const char __user *utarget = (const char __user *__force)arg1;
+  if (!utarget)
+    return -EFAULT;
+  char raw[MNTPOINT_MAX];
+  char target[MNTPOINT_MAX];
+  if (strncpy_from_user(raw, utarget, sizeof(raw)) < 0)
+    return -EFAULT;
+  raw[MNTPOINT_MAX - 1] = '\0';
+  if (normalize_path(raw, target, sizeof(target)) < 0 || target[0] != '/')
+    return -EINVAL;
+
+  struct mount_entry *victim = NULL;
+  spin_lock(&mount_lock);
+  for (int i = 0; i < MAX_MOUNTS; i++) {
+    if (mount_table[i].in_use &&
+        __strcmp(mount_table[i].mntpoint, target) == 0) {
+      victim = &mount_table[i];
+      break;
+    }
+  }
+  if (!victim) {
+    spin_unlock(&mount_lock);
+    return -EINVAL;
+  }
+  if (victim->mntpoint[0] == '/' && victim->mntpoint[1] == '\0') {
+    spin_unlock(&mount_lock);
+    return -EBUSY;
+  }
+  size_t target_len = __strlen(victim->mntpoint);
+  for (int i = 0; i < MAX_MOUNTS; i++) {
+    if (!mount_table[i].in_use || &mount_table[i] == victim)
+      continue;
+    if (__strncmp(mount_table[i].mntpoint, victim->mntpoint, target_len) == 0 &&
+        mount_table[i].mntpoint[target_len] == '/') {
+      spin_unlock(&mount_lock);
+      return -EBUSY;
+    }
+  }
+  if (atomic_read(&victim->sb.active_files) != 0 ||
+      atomic_read(&victim->sb.active_mmaps) != 0) {
+    spin_unlock(&mount_lock);
+    return -EBUSY;
+  }
+  victim->sb.dying = true;
+  spin_unlock(&mount_lock);
+
+  int rc = page_cache_flush_all();
+  if (!rc && victim->sb.s_op && victim->sb.s_op->sync_fs)
+    rc = victim->sb.s_op->sync_fs(&victim->sb, true);
+  if (!rc && victim->sb.part)
+    rc = partition_flush(victim->sb.part);
+  if (rc) {
+    spin_lock(&mount_lock);
+    victim->sb.dying = false;
+    spin_unlock(&mount_lock);
+    return rc;
+  }
+
+  spin_lock(&mount_lock);
+  if (atomic_read(&victim->sb.active_files) != 0 ||
+      atomic_read(&victim->sb.active_mmaps) != 0) {
+    victim->sb.dying = false;
+    spin_unlock(&mount_lock);
+    return -EBUSY;
+  }
+  struct inode *root = victim->root;
+  victim->root = NULL;
+  victim->in_use = false;
+  victim->sb.dying = false;
+  victim->mntpoint[0] = '\0';
+  spin_unlock(&mount_lock);
+  if (root)
+    inode_put(root);
+  return 0;
 }
