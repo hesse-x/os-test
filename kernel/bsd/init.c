@@ -24,6 +24,7 @@
 #include "kernel/kernel.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
+#include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
@@ -73,6 +74,8 @@ void bsd_init(void) {
   random_dev_init();
   // S12: file-backed mmap page-in (MAP_PRIVATE+fd demand fault + COW).
   fault_handler = file_fault_handler;
+  // Persist dirty regular-file MAP_SHARED pages before Xcore releases a VMA.
+  vma_writeback_hook = file_shared_mmap_writeback;
 
   printk(LOG_INFO, "bsd_init: done\n");
 }

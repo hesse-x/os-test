@@ -7,7 +7,7 @@
 // test_runner reports [FAIL].
 //
 // Links -stdlib=libc++ against sysroot libc++/libc++abi/libunwind (installed by
-// build_libcxx.sh). Built only when libc++ is enabled (-DLIBCXX=1).
+// build_libcxx.sh). Built in TEST images after the default libc++ build.
 
 #include <cstdio>
 #include <cstdlib>

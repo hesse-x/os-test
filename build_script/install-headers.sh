@@ -5,26 +5,16 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-DEST="${1:-$SRC/build/sysroot/usr/include}"
+FINAL_DEST="${1:-$SRC/build/sysroot/usr/include}"
+DEST="$(mktemp -d "$SRC/build/.headers.XXXXXX")"
 CC="${CC:-clang}"
-
-libcxx_backup=""
-if [ -d "$DEST/c++" ]; then
-    libcxx_backup="$(mktemp -d)"
-    mv "$DEST/c++" "$libcxx_backup/c++"
-fi
 
 cleanup() {
     rm -f /tmp/xos-header-probe.c /tmp/xos-header-probe.log
-    if [ -n "$libcxx_backup" ] && [ -d "$libcxx_backup/c++" ]; then
-        mkdir -p "$DEST"
-        mv "$libcxx_backup/c++" "$DEST/c++"
-        rmdir "$libcxx_backup" 2>/dev/null || true
-    fi
+    rm -rf "$DEST"
 }
 trap cleanup EXIT
 
-rm -rf "$DEST"
 mkdir -p "$DEST/bits"
 
 echo "Installing musl headers -> $DEST"
@@ -136,10 +126,9 @@ for header in "${probe_headers[@]}"; do
     fi
 done
 
-if [ -n "$libcxx_backup" ] && [ -d "$libcxx_backup/c++" ]; then
-    mv "$libcxx_backup/c++" "$DEST/c++"
-    rmdir "$libcxx_backup" 2>/dev/null || true
-    libcxx_backup=""
-fi
+# Preserve timestamps for unchanged headers so default incremental LLVM builds
+# do not recompile thousands of objects. libc++ is installed by its own build.
+mkdir -p "$FINAL_DEST"
+rsync -r --checksum --delete --exclude 'c++/' "$DEST/" "$FINAL_DEST/"
 
 echo "Headers installed successfully"

@@ -66,12 +66,8 @@ for required in "bin/sh" "lib/ld-musl-x86_64.so.1" "lib/libc.so"; do
     fi
 done
 
-# PERF keeps trace output on the root partition and therefore needs more room.
-if [ "${PERF:-0}" = "1" ]; then
-    DISK_SECTORS=$((512 * 1024 * 1024 / 512))
-else
-    DISK_SECTORS=$((192 * 1024 * 1024 / 512))
-fi
+# The default image includes LLVM/Clang and needs room for its shared libraries.
+DISK_SECTORS=$((512 * 1024 * 1024 / 512))
 # Partition 1 (ESP): 32MB = 65536 sectors, starts at LBA 2048 (1MB alignment)
 PART1_START=2048
 PART1_SECTORS=65536
@@ -222,11 +218,10 @@ else
     exit 1
 fi
 
-# ===================== libc++ (opt-in, probe-driven) =====================
-# libc++ is built separately by build_libcxx.sh (./build.sh --cxx) into the
-# sysroot; default build.sh does not build it. This is only a probe dispatch:
-# if present in sysroot, copy to img /lib; if absent, skip silently (no error,
-# no impact on img). Headers (include/c++/v1/*) already went in with the
+# ===================== libc++ =====================
+# libc++ is built separately by build_libcxx.sh into the sysroot as part of the
+# default build. Require and copy it into img /lib. Headers (include/c++/v1/*)
+# already went in with the
 # sysroot/usr/include tree mcopy -s above, no separate handling needed. The .so
 # must be copied separately: libc++ ninja install produces .so.1.0 (real file)
 # + .so.1/.so (symlink→1.0). FAT32 has no symlink support, so the .so.1.0 real
@@ -235,26 +230,59 @@ fi
 # via DT_NEEDED, link-time finds libc++.so, real content is in libc++.so.1.0 —
 # all three names copied as real-file copies).
 LIBCXX_LIB="${BUILD_DIR}/sysroot/usr/lib"
-if [ -f "${LIBCXX_LIB}/libc++.so.1.0" ]; then
-  # Three C++ runtime libs, each copied under soname real file + dev name (all
-  # pointing at the .so.VERSION.0 real file).
-  for lib in libc++ libc++abi libunwind; do
-    # Find the lib's real major-version file (.so.1.0 form). Probe anchor is the
-    # .so.1.0 real file (not a symlink), avoiding the host sysroot's .so-symlink
-    # resolution ambiguity.
-    real=$(ls "${LIBCXX_LIB}/${lib}.so."* 2>/dev/null | sort -V | tail -1 || true)
-    if [ -n "$real" ] && [ -f "$real" ]; then
-      base=$(basename "$real")   # e.g. libc++.so.1.0
-      mcopy -i "${BUILD_DIR}/part2.img" "$real" "::lib/${base}"
-      # Add dev name libc++.so and soname libc++.so.1 (FAT32 has no symlink → real-file copies).
-      mcopy -i "${BUILD_DIR}/part2.img" "$real" "::lib/${lib}.so"
-      mcopy -i "${BUILD_DIR}/part2.img" "$real" "::lib/${lib}.so.1" 2>/dev/null || true
-      echo "  libc++: $base → /lib/$base (+ ${lib}.so, ${lib}.so.1)"
-    fi
-  done
-else
-  echo "  libc++: not built (run ./build.sh --cxx to enable) — skipping /lib/libc++*"
+# Three C++ runtime libs, each copied under soname real file + dev name (all
+# pointing at the .so.VERSION.0 real file).
+for lib in libc++ libc++abi libunwind; do
+  real=$(ls "${LIBCXX_LIB}/${lib}.so."* 2>/dev/null | sort -V | tail -1 || true)
+  if [ -z "$real" ] || [ ! -f "$real" ]; then
+    echo "mkdisk.sh: required default runtime missing: ${LIBCXX_LIB}/${lib}.so.*" >&2
+    exit 1
+  fi
+  base=$(basename "$real")   # e.g. libc++.so.1.0
+  mcopy -i "${BUILD_DIR}/part2.img" "$real" "::lib/${base}"
+  # FAT32 has no symlinks, so install the dev name and soname as real copies.
+  mcopy -i "${BUILD_DIR}/part2.img" "$real" "::lib/${lib}.so"
+  mcopy -i "${BUILD_DIR}/part2.img" "$real" "::lib/${lib}.so.1" 2>/dev/null || true
+  echo "  libc++: $base → /lib/$base (+ ${lib}.so, ${lib}.so.1)"
+done
+
+# ===================== LLVM/Clang =====================
+LLVM_ROOT="${BUILD_DIR}/sysroot/usr"
+for required in bin/clang bin/ld.lld lib/libLLVM.so.18.1 \
+    lib/libclang-cpp.so.18.1 lib/crt1.o lib/Scrt1.o lib/crti.o lib/crtn.o; do
+  if [ ! -f "${LLVM_ROOT}/${required}" ]; then
+    echo "mkdisk.sh: required target toolchain file missing: ${LLVM_ROOT}/${required}" >&2
+    exit 1
+  fi
+done
+
+mcopy -i "${BUILD_DIR}/part2.img" "${LLVM_ROOT}/bin/clang" "::usr/bin/clang"
+mcopy -i "${BUILD_DIR}/part2.img" "${LLVM_ROOT}/bin/ld.lld" "::usr/bin/ld.lld"
+mcopy -i "${BUILD_DIR}/part2.img" "${LLVM_ROOT}/lib/libLLVM.so.18.1" \
+    "::lib/libLLVM.so.18.1"
+mcopy -i "${BUILD_DIR}/part2.img" "${LLVM_ROOT}/lib/libclang-cpp.so.18.1" \
+    "::lib/libclang-cpp.so.18.1"
+for crt in crt1.o Scrt1.o crti.o crtn.o; do
+  mcopy -i "${BUILD_DIR}/part2.img" "${LLVM_ROOT}/lib/${crt}" \
+      "::usr/lib/${crt}"
+done
+mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/clang_smoke.c" \
+    "::clang_smoke.c"
+
+resource_dir="${LLVM_ROOT}/lib/clang/18/include"
+runtime_dir="${LLVM_ROOT}/lib/clang/18/lib/linux"
+if [ ! -d "$resource_dir" ] || [ ! -d "$runtime_dir" ]; then
+  echo "mkdisk.sh: required clang resource directories are missing" >&2
+  exit 1
 fi
+mmd -D o -i "${BUILD_DIR}/part2.img" ::usr/lib ::usr/lib/clang \
+    ::usr/lib/clang/18 ::usr/lib/clang/18/include ::usr/lib/clang/18/lib \
+    ::usr/lib/clang/18/lib/linux 2>/dev/null || true
+mcopy -i "${BUILD_DIR}/part2.img" -s "$resource_dir"/* \
+    "::usr/lib/clang/18/include/"
+mcopy -i "${BUILD_DIR}/part2.img" "$runtime_dir"/* \
+    "::usr/lib/clang/18/lib/linux/"
+echo "  llvm: clang + lld + LLVM/Clang DSOs + crt + resource files → image"
 
 # Mesa artifacts are registered in image_manifest.txt by CMake and copied in
 # the manifest loop above. Do not copy them again here: mcopy rejects duplicate
@@ -262,6 +290,10 @@ fi
 
 # Preserve root directory README
 mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/README" ::README
+
+# Keep the Clang sample available in every image, independent of build options.
+mmd -i "${BUILD_DIR}/part2.img" ::tmp 2>/dev/null || true
+mcopy -i "${BUILD_DIR}/part2.img" "${TESTDATA_DIR}/hello.c" ::tmp/hello.c
 
 # Write back FAT32 partition
 dd if="${BUILD_DIR}/part2.img" of="${BUILD_DIR}/disk.img" bs=512 seek=${PART2_START} conv=notrunc status=none

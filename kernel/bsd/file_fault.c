@@ -241,3 +241,45 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
 
   return 0; // anonymous / SHM / PHYSICAL — not a file-backed demand-fault
 }
+
+int file_shared_mmap_writeback(uint64_t cr3, mmap_region *region) {
+  if (!region || !region->inode || !(region->flags & MAP_SHARED))
+    return 0;
+
+  int first_error = 0;
+  uint64_t file_offset = region->offset;
+  uint64_t file_size = region->inode->size;
+  for (uint64_t delta = 0; delta < region->size; delta += PAGE_SIZE) {
+    if (file_offset + delta >= file_size)
+      break;
+
+    uint64_t *pte = lookup_pte(cr3, region->vaddr + delta);
+    if (!pte || !(*pte & PTE_DIRTY))
+      continue;
+
+    struct cache_page *cp =
+        page_cache_fill(region->inode, (file_offset + delta) / PAGE_SIZE);
+    if (!cp) {
+      if (!first_error)
+        first_error = -EIO;
+      continue;
+    }
+
+    uint64_t remaining = file_size - (file_offset + delta);
+    size_t bytes = remaining < PAGE_SIZE ? (size_t)remaining : PAGE_SIZE;
+    uint64_t phys = *pte & PTE_PHYS_MASK;
+    void *source = (__force void *)phys_to_virt((__force phys_addr_t)phys);
+    __memcpy(cp->data, source, bytes);
+    page_cache_mark_dirty(cp);
+    int rc = page_cache_writeback(cp);
+    page_cache_release(cp);
+    if (rc) {
+      if (!first_error)
+        first_error = rc;
+      continue;
+    }
+
+    *pte &= ~PTE_DIRTY;
+  }
+  return first_error;
+}

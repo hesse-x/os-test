@@ -74,38 +74,6 @@ if ! echo "$CMAKE_EXTRA" | grep -q "PERF="; then
     CMAKE_EXTRA="$CMAKE_EXTRA -DPERF=0"
 fi
 
-# A normal build is incremental but self-healing: missing runtime products cause
-# their producer to run. The explicit flags force their respective build even
-# when the products are already complete.
-libcxx_complete=1
-for artifact in \
-    build/sysroot/usr/lib/libc++.so \
-    build/sysroot/usr/lib/libc++.so.1.0 \
-    build/sysroot/usr/lib/libc++abi.so.1.0 \
-    build/sysroot/usr/lib/libunwind.so.1.0 \
-    build/sysroot/usr/include/c++/v1/vector; do
-    [ -f "$artifact" ] || libcxx_complete=0
-done
-if [ "$libcxx_complete" = "0" ]; then
-    BUILD_LIBCXX=1
-fi
-
-# Check both Meson's products and the FAT32-safe build/ aliases used by mkdisk.
-mesa_complete=1
-for artifact in \
-    build/mesa/src/egl/libEGL.so.1.0.0 \
-    build/mesa/src/mesa/glapi/es2api/libGLESv2.so.2.0.0 \
-    build/mesa/src/gbm/libgbm.so.1.0.0 \
-    build/mesa/src/gallium/targets/dri/libgallium-26.1.4.so \
-    build/mesa/src/gbm/backends/dri/dri_gbm.so \
-    build/libEGL.so build/libGLESv2.so build/libgbm.so \
-    build/libgallium-26.1.4.so build/dri_gbm.so; do
-    [ -f "$artifact" ] || mesa_complete=0
-done
-if [ "$mesa_complete" = "0" ]; then
-    BUILD_MESA=1
-fi
-
 MESA_DRIVER=virgl
 
 # 1. CMake build (kernel + userspace)
@@ -134,20 +102,16 @@ bash build_script/install-libs.sh
 
 # 2b. Build libc++ into the sysroot. Must run AFTER install-headers/install-libs
 # (sysroot ready: crt + stub + headers + libc.so exports) and BEFORE mkdisk (which
-# probe-ships libc++ into the image).
-if [ "${BUILD_LIBCXX:-0}" = "1" ]; then
-    echo "=== Building libc++ ==="
-    bash build_script/build_libcxx.sh
-
-fi
+# ships libc++ into the image).
+echo "=== Building libc++ ==="
+bash build_script/build_libcxx.sh
 
 if [ "${BUILD_TEST:-0}" = "1" ]; then
     echo "=== Building libc++ smoke ELF ==="
     ninja -C build libcxx_smoke_elf
 fi
 
-# 3. seatd/libseat are core terminal dependencies. The remaining projects stay
-# optional wlroots prerequisites.
+# 3. Build the compositor dependency stack included by every image.
     echo "=== Building core seatd/libseat dependency ==="
 
     MESON_VENV=build/.mesa-venv
@@ -351,8 +315,7 @@ PY
             test_xkbcommon_smoke_dyn_elf
     fi
 
-# 3. Mesa cross-build (incremental; rebuilt when products are missing).
-if [ "${BUILD_MESA:-0}" = "1" ]; then
+# 3. Mesa cross-build (Meson/Ninja handles incremental rebuilds).
 #    Softpipe first to validate the cross pipeline; switch to virgl by exporting
 #    MESA_DRIVER=virgl (one-line option change, identical codegen — see step2.md).
 #    Runs after the sysroot is populated (deps 2) and before mkdisk (so .so land in image).
@@ -535,7 +498,6 @@ missing = [g[0] for g in libs.values() if not any(n in staged for n in g)]
 if missing:
     raise SystemExit(f"ERROR: missing Mesa products: {missing}")
 PY
-fi
 
 # Build the compositor stack after Mesa and the target sysroot are ready.
     echo "=== Building wlroots 0.20.2 ==="
@@ -645,7 +607,7 @@ fi
     echo "wlroots ELF audit: PASS (tinywl.elf + libwlroots-0.20.so)"
 
 # The EGL test links against staged Mesa .so files, so it must run after the
-# optional Mesa stage above rather than in the first CMake ninja invocation.
+# Mesa stage above rather than in the first CMake ninja invocation.
 if echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
     echo "=== Building EGL/GLES2 smoke ELF ==="
     ninja -C build test_egl_smoke_elf
@@ -664,5 +626,10 @@ export PERF
 if [ "$PERF" = "1" ]; then
     bash build_script/perf-symbols.sh
 fi
+
+# LLVM/Clang is part of the default OS image. The cross build is incremental;
+# missing compiler or linker artifacts are a hard build failure.
+echo "=== Building target LLVM/Clang toolchain ==="
+bash build_script/build_llvm.sh
 
 ./build_script/mkdisk.sh

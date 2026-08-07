@@ -23,6 +23,8 @@
 #include <xos/page.h>
 #include <xos/signal.h>
 
+vma_writeback_fn vma_writeback_hook = NULL;
+
 static bool overlaps_signal_trampoline(uint64_t start, uint64_t len) {
   if (len == 0 || start > UINT64_MAX - len)
     return false;
@@ -315,6 +317,11 @@ bool vma_overlaps_any(mm *mm, uint64_t start, uint64_t len) {
 // Caller holds mm->mmap_lock.
 static void free_one_region(mm *mm, uint64_t *pml4, mmap_region *r) {
   size_t npages = r->size / PAGE_SIZE;
+
+  // Regular-file MAP_SHARED faults currently use private user pages. Copy
+  // dirty pages back into the page cache before unmapping those pages.
+  if (vma_writeback_hook)
+    (void)vma_writeback_hook(mm->cr3, r);
 
   if (r->shm_obj || r->phys) {
     // SHM / MAP_PHYSICAL: clear leaf PTEs without freeing the backing pages.

@@ -225,6 +225,34 @@ void test_mmap_memfd_verify(void) {
   close(fd);
 }
 
+/* Writable regular-file MAP_SHARED pages must reach FAT32 when unmapped. */
+void test_mmap_file_shared_writeback(void) {
+  const char *path = "/tmp/mmap_shared_writeback";
+  const char first[] = "fat-shared-first";
+  const char second[] = "fat-shared-second";
+  char buf[sizeof(second)];
+
+  unlink(path);
+  int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+  TEST_ASSERT_TRUE(fd >= 0);
+  TEST_ASSERT_EQUAL_INT(0, ftruncate(fd, 2 * 4096));
+
+  char *map = mmap(NULL, 2 * 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  TEST_ASSERT_TRUE(map != NULL && map != MAP_FAILED);
+  memcpy(map + 17, first, sizeof(first));
+  memcpy(map + 4096 + 29, second, sizeof(second));
+  TEST_ASSERT_EQUAL_INT(0, munmap(map, 2 * 4096));
+
+  TEST_ASSERT_EQUAL_INT(17, lseek(fd, 17, SEEK_SET));
+  TEST_ASSERT_EQUAL_INT(sizeof(first), read(fd, buf, sizeof(first)));
+  TEST_ASSERT_EQUAL_MEMORY(first, buf, sizeof(first));
+  TEST_ASSERT_EQUAL_INT(4096 + 29, lseek(fd, 4096 + 29, SEEK_SET));
+  TEST_ASSERT_EQUAL_INT(sizeof(second), read(fd, buf, sizeof(second)));
+  TEST_ASSERT_EQUAL_MEMORY(second, buf, sizeof(second));
+  close(fd);
+  unlink(path);
+}
+
 /* 14. getpagesize returns the page size (4096 on x86-64) */
 void test_getpagesize(void) {
   int ps = getpagesize();
@@ -348,6 +376,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_mmap_memfd_shared_cross);
   RUN_TEST(test_mmap_bad_fd);
   RUN_TEST(test_mmap_memfd_verify);
+  RUN_TEST(test_mmap_file_shared_writeback);
   RUN_TEST(test_getpagesize);
   RUN_TEST(test_getpagesize_matches_param);
   RUN_TEST(test_getpagesize_mmap_boundary);

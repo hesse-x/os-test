@@ -566,15 +566,14 @@ global:
     tss_create; tss_delete; tss_get; tss_set;
 
     /* <sys/stat.h> */
-    fstat; fstatat; lstat; lstat64; mkdir; mkdirat; mknod; stat; statx;
+    fstat; fstatat; futimens; lstat; lstat64; mkdir; mkdirat; mknod; stat; statx;
     chmod; fchmod; fchmodat;
 
-    /* <sys/statvfs.h> — src/stat/statvfs.c. libc++ filesystem::__space. */
-    statvfs; fstatvfs;
+    /* <sys/statvfs.h>/<sys/statfs.h> — src/stat/statvfs.c. */
+    statvfs; fstatvfs; statfs; fstatfs;
 
-    /* <sys/wait.h> — musl src/process/{wait,waitpid,waitid}.c. musl folds
-     * wait4 into waitpid (no standalone wait4.c), so wait4 is not a symbol. */
-    waitpid; wait; waitid;
+    /* <sys/wait.h> — process wrappers plus Linux wait4 resource usage. */
+    waitpid; wait; waitid; wait4;
 
     /* <sys/mman.h> — musl upstream (src/mman/*.c via musl_mman_objs) + the
      * retained hand-written memfd_create (musl src/mman has none). mmap64 is
@@ -708,7 +707,7 @@ global:
     device_register; device_register_shm; device_set_meta;
 
     /* <unistd.h> */
-    wait_dev_ready;
+    wait_dev_ready; sbrk;
 
     /* 事实 ABI：musl crt1/Scrt1 跨 .so 调用 */
     __libc_start_main;

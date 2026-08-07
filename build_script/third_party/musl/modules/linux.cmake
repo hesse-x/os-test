@@ -58,8 +58,7 @@
 #   renameat2.c    flags≠0 → SYS_renameat2 missing
 #   preadv2.c      flags≠0 → SYS_preadv2 missing
 #   pwritev2.c     both SYS_pwritev (flags==0) and SYS_pwritev2 (flags≠0) missing
-#   wait4.c        time64 fallback → SYS_wait4_time64 (dead branch, but strict rule)
-#   wait3.c        calls wait4 (excluded)
+#   wait3.c        calls wait4 (not needed by the current target-side tools)
 # Candidates needing only a simple kernel syscall (tracked separately, not this batch):
 #   renameat2 (SYS_renameat2~SYS_RENAMEAT), pwritev/preadv2/pwritev2, timerfd_gettime,
 #   chroot, personality, syncfs, mlock2, umount2, iopl, settimeofday/stime,
@@ -89,6 +88,10 @@ set(MUSL_LINUX_SOURCES
     ${MUSL_DIR}/src/linux/signalfd.c
     ${MUSL_DIR}/src/linux/statx.c
     ${MUSL_DIR}/src/linux/sysinfo.c)
+
+# x86_64 aliases SYS_wait4_time64 to SYS_wait4, which the kernel implements.
+# LLVM uses wait4 to collect subprocess resource usage.
+list(APPEND MUSL_LINUX_SOURCES ${MUSL_DIR}/src/linux/wait4.c)
 
 add_library(musl_linux_objs OBJECT ${MUSL_LINUX_SOURCES})
 target_include_directories(musl_linux_objs PRIVATE

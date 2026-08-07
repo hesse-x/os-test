@@ -19,6 +19,11 @@
 // Matches sys_mprotect's user-space upper bound (syscall.c).
 #define USER_VMA_UPPER_BOUND 0x800000000000ULL
 
+// Optional upper-layer hook used before releasing a VMA. The BSD layer uses
+// it to persist dirty pages from regular-file MAP_SHARED mappings.
+typedef int (*vma_writeback_fn)(uint64_t cr3, mmap_region *region);
+extern vma_writeback_fn vma_writeback_hook;
+
 // Return the region containing addr ([vaddr, vaddr+size)), or NULL.
 mmap_region *vma_find(mm *mm, uint64_t addr);
 void vma_reset_readahead(mmap_region *region);

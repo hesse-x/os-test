@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/process.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -21,6 +22,21 @@ struct test_entry {
   const char *name;
   const char *path;
 };
+
+static char *const clang_smoke_argv[] = {"/usr/bin/clang", "/clang_smoke.c",
+                                         "-o", "/tmp/clang", NULL};
+static char *const clang_output_argv[] = {"/tmp/clang", NULL};
+
+static int clang_smoke_output_is_elf(void) {
+  static const unsigned char elf_magic[] = {0x7f, 'E', 'L', 'F'};
+  unsigned char magic[sizeof(elf_magic)];
+  FILE *file = fopen("/tmp/clang", "rb");
+  if (!file)
+    return 0;
+  size_t read = fread(magic, 1, sizeof(magic), file);
+  fclose(file);
+  return read == sizeof(magic) && memcmp(magic, elf_magic, sizeof(magic)) == 0;
+}
 
 static struct test_entry tests[] = {
     {"test_resource", "/test/test_resource.elf"},
@@ -143,6 +159,7 @@ static struct test_entry tests[] = {
     {"accept_no_timeout", "/test/test_accept_no_timeout.elf"},
     {"pty", "/test/pty.elf"},
     {"terminal_sgr", "/test/test_terminal_sgr.elf"},
+    {"clang_smoke", "/usr/bin/clang"},
 };
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))
@@ -213,7 +230,23 @@ int main(int argc, char **argv, char **envp) {
       if (sigprocmask(SIG_SETMASK, &empty_mask, NULL) < 0)
         _exit(126);
 
-      execve(path, NULL, child_env);
+      if (strcmp(name, "clang_smoke") == 0) {
+        if (mkdir("/tmp", 0777) < 0 && errno != EEXIST) {
+          fprintf(stderr, "[SETUP-FAIL] mkdir /tmp: errno=%d (%s)\n", errno,
+                  strerror(errno));
+          _exit(126);
+        }
+        // Keep the fixed-name smoke test repeatable. Its short basename also
+        // keeps LLD's temporary output distinct on the current FAT backend.
+        if (unlink("/tmp/clang") < 0 && errno != ENOENT) {
+          fprintf(stderr, "[SETUP-FAIL] unlink /tmp/clang: errno=%d (%s)\n",
+                  errno, strerror(errno));
+          _exit(126);
+        }
+        execv(path, clang_smoke_argv);
+      } else {
+        execve(path, NULL, child_env);
+      }
       int exec_errno = errno;
       fprintf(stderr, "[EXEC-FAIL] %s: errno=%d (%s)\n", path, exec_errno,
               strerror(exec_errno));
@@ -231,6 +264,21 @@ int main(int argc, char **argv, char **envp) {
 
     int status;
     waitpid(pid, &status, 0);
+
+    if (status == 0 && strcmp(name, "clang_smoke") == 0) {
+      if (!clang_smoke_output_is_elf()) {
+        fprintf(stderr, "[FAIL] clang_smoke produced a non-ELF /tmp/clang\n");
+        status = 1;
+      } else {
+        pid_t output_pid = fork();
+        if (output_pid == 0) {
+          execve("/tmp/clang", clang_output_argv, child_env);
+          _exit(127);
+        }
+        if (output_pid < 0 || waitpid(output_pid, &status, 0) < 0)
+          status = 1;
+      }
+    }
 
     if (status == 0) {
       printf("[PASS] %-20s (exit 0)\n", name);

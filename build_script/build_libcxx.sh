@@ -1,36 +1,17 @@
 #!/bin/bash
-# build_libcxx.sh — opt-in standalone build of libc++ (LLVM runtimes sub-build)
-# installed into build/sysroot.
+# build_libcxx.sh — incremental libc++ build (LLVM runtimes sub-build), installed
+# into build/sysroot as part of the default build.
 #
-# Default ./build.sh does not invoke this; --cxx (or manually
-# `bash build_script/build_libcxx.sh`) builds it. If already installed, returns
-# instantly without rebuilding; if prerequisites are missing, errors out with a
-# clear message instead of producing obscure cmake link errors.
+# CMake/Ninja handles incremental rebuilds; missing prerequisites produce a clear
+# error instead of an obscure link failure.
 #
-# See refact_cmake.md for the finalized reproducible opt-in standalone build.
+# See refact_cmake.md for the standalone runtimes build design.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${BUILD:-$SRC/build}"
 SYSROOT="${SYSROOT:-$BUILD/sysroot}"
 LIBCXX_BUILD="$BUILD/libcxx-build"
-# Probe anchors: libc++.so in sysroot (symlink→libc++.so.1→libc++.so.1.0) + the
-# header tree. Both conditions must hold to count as "fully installed" — checking
-# only .so may miss headers, and vice versa.
-LIBCXX_SO="$SYSROOT/usr/lib/libc++.so.1.0"
-LIBCXX_HEADERS="$SYSROOT/usr/include/c++/v1"
-
-# ---- 0. Probe: if already built, skip (no rebuild) ----
-if [ -e "$LIBCXX_SO" ] && [ -d "$LIBCXX_HEADERS" ] && \
-   readelf -d "$LIBCXX_SO" 2>/dev/null | grep -Fq "[libclang_rt.so]"; then
-  echo "libc++ already installed at $SYSROOT with libclang_rt.so — nothing to do."
-  exit 0
-fi
-
-if [ -e "$LIBCXX_SO" ] || [ -d "$LIBCXX_HEADERS" ]; then
-  echo "libc++ installation lacks libclang_rt.so dependency — rebuilding."
-fi
-
 # ---- 1. Precheck: sysroot must be ready (crt + stub + headers + libc.so exported symbols) ----
 # These are exactly install-libs.sh's mandatory block + install-headers.sh's
 # products, covering every gap the libc++ build has hit (cpp_worklist "fixed"
@@ -54,7 +35,7 @@ check_sysroot() {
   # link.h/elf.h/nl_types.h/langinfo.h/sys/syscall.h/linux/futex.h)
   [ -d "$SYSROOT/usr/include" ] || { echo "FAIL: $SYSROOT/usr/include missing — run install-headers.sh (via ./build.sh)." >&2; miss=1; }
   if [ "$miss" -ne 0 ]; then
-    echo "Sysroot not ready. Run ./build.sh (default flow) before --cxx." >&2
+    echo "Sysroot not ready. Run ./build.sh to prepare the default build." >&2
     exit 1
   fi
 }
@@ -105,4 +86,4 @@ ninja -C "$LIBCXX_BUILD" install
 # Products: $SYSROOT/usr/lib/{libc++,libc++abi,libunwind}.so{,.1,.1.0} + .a
 #           $SYSROOT/usr/include/c++/v1/*  (including __config_site / module.modulemap)
 
-echo "Done. libc++ installed at $SYSROOT (re-run ./build.sh [--cxx] to ship into disk.img)."
+echo "Done. libc++ installed at $SYSROOT (./build.sh ships it into disk.img)."

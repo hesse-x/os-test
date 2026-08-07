@@ -98,7 +98,7 @@ python3.12 = '@PYTHON@'
 c_args = ['-m64', '-fPIC', '--sysroot=@SYSROOT@', '-nodefaultlibs', '-fvisibility=hidden', '-Wno-macro-redefined']
 # cpp_args adds -stdlib=libc++ (vs c_args): Mesa's C++ (libglsl, 51 .cpp — structurally
 # forced by any gallium driver) needs a C++ stdlib. The sysroot has musl (C only), so the
-# C++ stdlib is libc++ (built by build_libcxx.sh under --cxx, installed into the sysroot's
+# C++ stdlib is libc++ (built by the default build and installed into the sysroot's
 # include/c++/v1 + usr/lib). -stdlib=libc++ makes clang resolve C++ headers from the sysroot's
 # c++/v1 (with --sysroot already constraining the search). -nodefaultlibs is link-only and
 # does not affect compile, so it coexists with -stdlib=libc++ here.

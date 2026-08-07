@@ -6,6 +6,7 @@ set(MUSL_STAT_SOURCES
     ${MUSL_DIR}/src/stat/lstat.c
     ${MUSL_DIR}/src/stat/fstat.c
     ${MUSL_DIR}/src/stat/fstatat.c
+    ${MUSL_DIR}/src/stat/futimens.c
     ${MUSL_DIR}/src/stat/mkdir.c
     ${MUSL_DIR}/src/stat/mkdirat.c)
 

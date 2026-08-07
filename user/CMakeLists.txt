@@ -294,7 +294,7 @@ if(TEST)
         DEPENDS ${LIBCXX_SMOKE_OBJ}
                 ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o ${MUSL_LIB_DIR}/crtn.o
                 ${CMAKE_BINARY_DIR}/libc.so ${CMAKE_BINARY_DIR}/libclang_rt.so
-        COMMENT "Linking libcxx_smoke.elf (libc++, opt-in)")
+        COMMENT "Linking libcxx_smoke.elf (libc++)")
     # No ALL keyword → not in the default build (the main `ninja` skips it); built on
     # demand by build.sh after build_libcxx.sh installs libc++.
     add_custom_target(libcxx_smoke_elf DEPENDS ${LIBCXX_SMOKE_ELF})

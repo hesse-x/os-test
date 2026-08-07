@@ -19,12 +19,12 @@
 ./build.sh          # 编译内核 + EFI bootloader + 用户态 ELF + 生成 disk.img
 ./build.sh -d       # Debug 模式（-g -fno-omit-frame-pointer）
 ./build.sh --test   # 测试构建（Unity 测试 ELF + test_runner）
-./build.sh --cxx    # 在默认流之后 opt-in 编译 libc++（LLVM runtimes）装进 build/sysroot，
-                    #   随后 mkdisk 探测分发进 disk.img /lib（默认 ./build.sh 不编、零成本）
+./build.sh --perf   # 性能测试构建（同时启用 TEST）
+./build.sh --sanitizer # 启用 sanitizer 构建
 ```
 
 build.sh 流程：CMake configure + ninja → install-headers.sh + install-libs.sh（发布 sysroot）
-→ [opt-in] build_libcxx.sh + ninja libcxx_smoke_elf → mkdisk.sh。
+→ 增量构建 libc++、Mesa、wlroots → TEST 模式按需构建 smoke ELF → mkdisk.sh。
 
 ### 工具链
 
@@ -104,26 +104,25 @@ add_user_elf(name [C] SOURCES ... [LINK_LIBS ...]) — 三步管线：compile �
 
 Terminal 和驱动不链接 libc，使用 syscall 原语。
 
-### libc++ 构建（opt-in，单独编译）
+### libc++ 构建（默认组件，单独编译）
 
-libc++（给 Mesa 交叉编译用的 C++ 标准库）是 LLVM **runtimes 子构建**（`cmake -S runtimes`），源文件列表由 LLVM 生成，不能像 musl 那样在主 CMake 里列源文件编；且强依赖 sysroot 就绪（子 cmake `--sysroot=build/sysroot`，需 crt + stub .so + 头 + libc.so 导出符号全到位）。故走**可复现的 opt-in 单独编译命令**，不进 CMake 依赖图、不进主 `ninja` 默认目标——定稿方案与选型理由见 `refact_cmake.md`（取代了"sysroot 发布搬进 CMake / ExternalProject / 经 manifest"的设想）。
+libc++（给 Mesa 交叉编译用的 C++ 标准库）是 LLVM **runtimes 子构建**（`cmake -S runtimes`），源文件列表由 LLVM 生成，不能像 musl 那样在主 CMake 里列源文件编；且强依赖 sysroot 就绪（子 cmake `--sysroot=build/sysroot`，需 crt + stub .so + 头 + libc.so 导出符号全到位）。因此由默认构建流程在 sysroot 发布后单独增量构建，不进主 CMake 依赖图。
 
-**构建脚本** `build_script/build_libcxx.sh`（`./build.sh --cxx` 触发，或裸调）：
-1. **探测秒过**：`sysroot/usr/lib/libc++.so` + `include/c++/v1` 双条件都在 → `exit 0`，不进 cmake/ninja（"已装就不重编"）。
-2. **前置校验** `check_sysroot()` 逐项检查 crt（crt1/Scrt1/crti/crtn.o）+ libc.so + ld-musl 解释器 + 5 个 stub .so（librt/libdl/libpthread/libresolv/libxnet）+ 头树，缺项明确报 `run ./build.sh first`；再校验 `clang++`（runtimes 必须 clang-18）与 `third_party/llvm-project/runtimes/` 子模块（缺则引导 `git submodule update --init`）。
-3. **编译+装回 sysroot**：`cmake -G Ninja -S runtimes` + `ninja` + `ninja install`，参数同 `cpp_worklist.md` 已验证编通那套（`-DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind"` + `--sysroot` + `-nodefaultlibs -lc` + `-nostdinc++` + `-DLIBCXX_HAS_MUSL_LIBC=ON` + `CMAKE_INSTALL_PREFIX=sysroot/usr`）。产物 `sysroot/usr/lib/{libc++,libc++abi,libunwind}.so{,.1,.1.0}` + `.a` + `include/c++/v1/*`（DT_NEEDED 链 libc++.so.1 → libc++abi.so.1 → libunwind.so.1 → libc.so）。
+**构建脚本** `build_script/build_libcxx.sh`（默认由 `./build.sh` 调用，也可裸调）：
+1. **前置校验** `check_sysroot()` 逐项检查 crt（crt1/Scrt1/crti/crtn.o）+ libc.so + ld-musl 解释器 + 5 个 stub .so（librt/libdl/libpthread/libresolv/libxnet）+ 头树，缺项明确报 `run ./build.sh first`；再校验 `clang++`（runtimes 必须 clang-18）与 `third_party/llvm-project/runtimes/` 子模块（缺则引导 `git submodule update --init`）。
+2. **增量编译并装回 sysroot**：每次进入 `cmake -G Ninja -S runtimes` + `ninja` + `ninja install`，由 Ninja 判定需要重编的目标。参数包括 `-DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind"`、`--sysroot`、`-nodefaultlibs -lc`、`-nostdinc++`、`-DLIBCXX_HAS_MUSL_LIBC=ON` 和 `CMAKE_INSTALL_PREFIX=sysroot/usr`。产物为 `sysroot/usr/lib/{libc++,libc++abi,libunwind}.so{,.1,.1.0}`、`.a` 与 `include/c++/v1/*`。
 
-**增量性**三层：入口探测（已装秒过）→ ninja 子构建（源/sysroot 未变 up-to-date）→ clean build（首次或 `build/` 清空，唯一真实成本）。不做时间戳比对，依赖 ninja 自身增量。**强制重建**：`rm -rf build/libcxx-build build/sysroot/usr/lib/libc++* build/sysroot/usr/include/c++ && bash build_script/build_libcxx.sh`（libc.so 导出符号变动时需要——入口探测只看存在性不看一致性）。
+**增量性**由 libc++ 子构建的 Ninja 依赖图负责；默认流程每次都会进入该构建，源文件和 sysroot 未变化时保持 up-to-date。**强制重建**：删除 `build/libcxx-build` 及对应 sysroot 产物后重新运行 `./build.sh`。
 
-**mkdisk 探测分发**（`build_script/mkdisk.sh`，在 `/usr/include` 整树拷之后、写回 FAT32 之前）：探测 `sysroot/usr/lib/libc++.so.1.0` 真实文件存在 → 对 libc++/libc++abi/libunwind 各拷 soname 真实文件 `.so.1.0` + 开发名 `.so` + soname `.so.1` 进 img `/lib`（FAT32 无 symlink，三个名字都拷成 `.so.1.0` 真实文件副本，仿 install-libs.sh 的 `ld-musl-x86_64.so.1` 双名处理）；头 `include/c++/v1/*` 已随 `sysroot/usr/include` 整树 `mcopy -s` 进 img `/usr/include/c++/v1`，无需单独处理。探测未命中 → 打印 `libc++: not built — skipping`，继续生成 img（不报错）。
+**mkdisk 分发**（`build_script/mkdisk.sh`，在 `/usr/include` 整树拷之后、写回 FAT32 之前）：要求 libc++/libc++abi/libunwind 已安装，并将各自 `.so.1.0`、开发名 `.so` 和 soname `.so.1` 复制进 img `/lib`（FAT32 无 symlink，因此三个名字均为真实文件副本）；头 `include/c++/v1/*` 随 `sysroot/usr/include` 整树进入 img `/usr/include/c++/v1`。缺少任一默认运行库时制盘直接失败。
 
-**回归冒烟 ELF** `user/test/libcxx_smoke.cpp`（`-DLIBCXX=1` 即 `--cxx` 启用）：覆盖历史上反复断链的四条路径——`<vector>`+`std::string`（基础 STL）、`throw std::runtime_error`+`catch`（异常 → libc++abi → TLS `__cxa_thread_atexit`）、`std::filesystem`（int128 `__divti3`/`__muloti4` compiler runtime 路径）、`std::messages` facet（catgets 路径）。任一步失败 `_exit` 非零，test_runner 报 `[FAIL]`。
+**回归冒烟 ELF** `user/test/libcxx_smoke.cpp`（TEST 构建启用）：覆盖历史上反复断链的四条路径——`<vector>`+`std::string`（基础 STL）、`throw std::runtime_error`+`catch`（异常 → libc++abi → TLS `__cxa_thread_atexit`）、`std::filesystem`（int128 `__divti3`/`__muloti4` compiler runtime 路径）、`std::messages` facet（catgets 路径）。任一步失败 `_exit` 非零，test_runner 报 `[FAIL]`。
 
 接入点（`user/CMakeLists.txt`，`if(LIBCXX)` 块）：**不走 `add_user_dyn_elf`**——那条路径硬编码 `-nostdlib -nodefaultlibs` 链接，无法注入 `-stdlib=libc++` + libc++/libc++abi/libunwind 运行时（`terminal` 能用它只因零 STL/异常）。照 `ld_test_*` stub 模式用手写 `add_custom_command`：
 - **编译**：`clang++ --sysroot=sysroot -stdlib=libc++`（自然解析 sysroot 的 `c++/v1` 头 + musl C 头）。**不用 `USER_FREESTANDING_FLAGS`**——其 `-nostdinc` 会同时禁掉 sysroot 的 `c++/v1` 搜索路径（`<cstdio>` 找不到），其 `-ffreestanding` 会让 clang 把 `main` 当普通函数 mangling（freestanding 下 main 不特殊）→ `Scrt1.o` 的 `_start_c` 找不到 C 链接的 `main`。本程序是 hosted 动态 ELF（有 PT_INTERP、libc、main），故去掉 `-ffreestanding`；只用 C++ 标准库头、无 OS 专有头依赖，故无需项目 `-I` 路径（`user/include` shim 反会抢先匹配 `<stdio.h>`）。`--sysroot` 已把搜索限制在 sysroot 内（无 host `/usr/include` 泄漏，已验证）。
-- **链接**：`clang++ -fno-pie -no-pie -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1 -Wl,--no-as-needed -Wl,--allow-shlib-undefined --sysroot=sysroot -stdlib=libc++ -nostdlib -nodefaultlibs` + `Scrt1.o`/`crti.o` + smoke.o + `-L sysroot/usr/lib -lc++ -lc++abi -lunwind` + `libc.so` + `crtn.o`。`--no-as-needed` 保留 libc++ DT_NEEDED；`--allow-shlib-undefined` 容忍 libc++ → libc++abi → libunwind 传递依赖。`libc++*.so` 来自 sysroot（非 build/ 的 CMake target），故无 CMake target 依赖——靠 `--cxx` 全流程保证其在场。
-- **时序**：libc++ 由 `build_libcxx.sh` 在主 `ninja` **之后**装 sysroot，故 smoke ELF 是**非 ALL** target（`add_custom_target(libcxx_smoke_elf DEPENDS ...)` 无 ALL 关键字 → 不进 `ninja` 默认目标）；`build.sh --cxx` 在 `build_libcxx.sh` 之后显式 `ninja -C build libcxx_smoke_elf`，再跑 mkdisk。默认 `./build.sh`（无 `LIBCXX`）连 target 都不注册，零影响。
-- **test_runner 表**：`tests[]` 是静态 C 数组，entry 用 `#if defined(LIBCXX)` 守卫；`-DLIBCXX` 经 `user/test/CMakeLists.txt` 的 `_TEST_RUNNER_DEFS` 传播到 `test_runner` 编译。`./build.sh --cxx --test` → smoke ELF 进 img `/test/`，test_runner 跑通即回归通过。
+- **链接**：`clang++ -fno-pie -no-pie -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1 -Wl,--no-as-needed -Wl,--allow-shlib-undefined --sysroot=sysroot -stdlib=libc++ -nostdlib -nodefaultlibs` + `Scrt1.o`/`crti.o` + smoke.o + `-L sysroot/usr/lib -lc++ -lc++abi -lunwind` + `libc.so` + `crtn.o`。`--no-as-needed` 保留 libc++ DT_NEEDED；`--allow-shlib-undefined` 容忍 libc++ → libc++abi → libunwind 传递依赖。默认流程保证 sysroot 中的 `libc++*.so` 已就绪。
+- **时序**：libc++ 由 `build_libcxx.sh` 在主 `ninja` **之后**装入 sysroot；TEST 构建随后显式请求非 ALL 的 `libcxx_smoke_elf` target，再运行 mkdisk。
+- **test_runner 表**：`libcxx_smoke` 固定注册；`./build.sh --test` 将 smoke ELF 放入 img `/test/`，test_runner 统一执行。
 
 ### 磁盘映像生成
 
@@ -150,7 +149,7 @@ mkdisk.sh 生成单盘两分区 build/disk.img（192MB）：
 - 磁盘镜像 manifest：build_script/cmake/image_rules.cmake
 - 链接脚本：build_script/linker.ld
 - 磁盘映像：build_script/mkdisk.sh
-- libc++ opt-in 编译：build_script/build_libcxx.sh
+- libc++ 默认增量构建：build_script/build_libcxx.sh
 - 顶层构建：CMakeLists.txt / build.sh
 
 第三方库 per-lib 构建规则住 `build_script/third_party/<lib>/`，从 `user/CMakeLists.txt`

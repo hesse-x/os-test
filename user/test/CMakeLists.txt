@@ -4,11 +4,10 @@
 
 # user/test/ — Unity-based test ELF targets
 
-# Test runner (no Unity needed). Propagate -DLIBCXX when libc++ is enabled so the
-# static tests[] table's libcxx_smoke entry (guarded by #if defined(LIBCXX) in
-# test_runner.c) is compiled in. See refact_cmake.md §3.6.
+# Test runner (no Unity needed). libc++ and wlroots are default components; only
+# their TEST-gated smoke executables need to be registered here.
 add_user_dyn_elf(test_runner C SOURCES test_runner.c LINK_LIBS c
-    DEFS TEST WLROOTS_DEPS LIBCXX)
+    DEFS TEST)
 
 # EGL/GLES2 end-to-end smoke. Mesa is built and staged by build.sh after the
 # main CMake ninja, so this target deliberately stays out of ALL and is built
@@ -372,7 +371,7 @@ if(TEST)
     add_user_dyn_elf(test_execve_vfs C SOURCES test_execve_vfs.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # musl process module exec-family varargs wrappers (execl/execv/execlp):
     # exercises the varargs→argv conversion that was missing from libc (the
-    # `undefined reference to execl` that broke the --cxx libc++ probe link).
+    # `undefined reference to execl` that broke the libc++ probe link).
     add_user_dyn_elf(test_exec_varargs C SOURCES test_exec_varargs.c LINK_LIBS c STATIC_LIBS unity DEFS TEST)
     # 02: getdents64 chunked resume (tmpfs/sysfs) + SA_RESTART restart +
     # SA_NOCLDWAIT auto-reap.

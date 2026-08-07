@@ -19,6 +19,7 @@
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/elf_loader.h"
 #include "kernel/bsd/eventpoll.h"
+#include "kernel/bsd/file_fault.h"
 #include "kernel/bsd/file_lock.h"
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/inode.h"
@@ -596,6 +597,11 @@ void mm_release(mm *mm, pid_t owner_pid) {
     return;
   uint64_t *pml4_virt =
       (__force uint64_t *)phys_to_virt((__force phys_addr_t)mm->cr3);
+
+  // This must happen before the leaf-page walk below frees file-backed user
+  // pages. It covers process exit and execve, which bypass vma_unmap_range.
+  for (mmap_region *region = mm->mmap_regions; region; region = region->next)
+    (void)file_shared_mmap_writeback(mm->cr3, region);
 
   // 1. Walk user PML4 entries (0-255, canonical low half), free leaf pages +
   // page table pages

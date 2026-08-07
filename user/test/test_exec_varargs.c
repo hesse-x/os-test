@@ -8,7 +8,7 @@
  * forward their va_list argv into execv/execve/execvp. These were missing from
  * libc entirely (process.cmake only globbed posix_spawn+execvp), leaving
  * libc.so with an undefined `execl` referenced by wordexp — which broke the
- * libc++ (--cxx) compiler probe link. This test exercises the varargs→argv
+ * libc++ compiler probe link. This test exercises the varargs→argv
  * conversion path that the bug fix restores:
  *   - execl:  absolute-path varargs list, runs hello.elf (exit 0).
  *   - execv:  prebuilt argv[], defaults envp to __environ via execv→execve.
