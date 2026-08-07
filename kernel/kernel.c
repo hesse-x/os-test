@@ -15,11 +15,13 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 #include "kernel/bsd/proc.h"
+#include "kernel/bsd/sysfs.h"
 #include "kernel/kernel.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/perf/phase.h"
 #include "kernel/xcore/sched.h"
+#include "kernel/xcore/selftest.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
@@ -69,7 +71,7 @@ size_t hostname_get(char *dst, size_t maxlen) {
 // here to create the init process — no early disk I/O required.
 extern kern_vaddr_t phys_to_virt(phys_addr_t phys);
 
-void kernel_main(boot_info *bi) {
+__attribute__((no_sanitize("kernel-address"))) void kernel_main(boot_info *bi) {
 #ifdef PERF
 #include "kernel/xcore/perf/phase_ids.h"
   PERF_PHASE_END(PERF_PHASE_BOOT_TO_KERNEL_MAIN);
@@ -105,6 +107,11 @@ void kernel_main(boot_info *bi) {
   kernel_perf_counter_init();
 
   printk(LOG_INFO, "kernel_main: all subsystems initialized\n");
+
+  // TEST builds exercise the asynchronous primitives only after the scheduler,
+  // allocator, and VFS have all reached their steady-state configuration.
+  sysfs_lifecycle_selftest();
+  xcore_async_selftest_start();
 
   // Early BSP-side SSE self-test: verify CR4.OSFXSR lets SSE instructions
   // execute without #UD. This is the exact failure mode seen when APs

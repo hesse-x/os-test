@@ -1449,6 +1449,7 @@ int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3,
   if (!kops)
     return (int64_t)-ENOMEM;
   __memset(kops, 0, sizeof(struct dev_ops));
+  kops->storage = DEV_OPS_HEAP;
 
   // Force driver_pid to current process — user-space can't set this
   kops->driver_pid = current_task->pid;

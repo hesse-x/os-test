@@ -45,7 +45,13 @@ typedef struct shm {
   0x80000000u                      /* MAP_PHYSICAL: map a fixed physical range \
                                     */
 #define KMAP_DMA_OWNED 0x40000000u /* kernel DMA allocation owns phys pages */
+#define KMAP_VMA_OWNER 0x20000000u /* region carries a vma_owner reference */
 #define KMAP_UC 0x08u              /* map uncacheable (device MMIO) */
+
+struct vma_owner_ops {
+  void (*get)(void *owner);
+  void (*put)(void *owner);
+};
 
 typedef struct mmap_region {
   uint64_t vaddr;
@@ -63,6 +69,8 @@ typedef struct mmap_region {
   // are released in munmap/mm_release/execve and bumped in copy_mmap_regions.
   struct inode *inode;
   struct shm *shm_private_src;
+  void *owner;
+  const struct vma_owner_ops *owner_ops;
   /* Per-mapping fault history. It is deliberately reset on VMA topology
    * changes and fork; access patterns are not meaningful across either. */
   uint64_t ra_last_page;

@@ -18,12 +18,14 @@
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/perf/phase.h"
-#include "kernel/xcore/perf/phase_ids.h"
 #include "kernel/xcore/random.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/serial_hook.h"
 #include "kernel/xcore/trap.h"
 
+#ifdef PERF
+#include "kernel/xcore/perf/phase_ids.h"
+#endif
 __attribute__((no_sanitize("kernel-address"))) void xcore_init(boot_info *bi) {
   serial_init();
 
@@ -38,15 +40,17 @@ __attribute__((no_sanitize("kernel-address"))) void xcore_init(boot_info *bi) {
   PERF_PHASE_BEGIN(PERF_PHASE_ACPI);
   acpi_init(bi->rsdp);
   PERF_PHASE_END(PERF_PHASE_ACPI);
-  PERF_PHASE_BEGIN(PERF_PHASE_APIC_TSC);
-  irq_init();
-  PERF_PHASE_END(PERF_PHASE_APIC_TSC);
 
-  // Disable bump allocator
+  // init_mem is the bump allocator's only post-paging consumer. Finalize its
+  // pages before KASAN starts consuming BFC pages for shadow page tables.
   bump_disable();
 
   kasan_init();
   slab_init();
+
+  PERF_PHASE_BEGIN(PERF_PHASE_APIC_TSC);
+  irq_init();
+  PERF_PHASE_END(PERF_PHASE_APIC_TSC);
 
   // rcu_init();  // RCU is initialized lazily in sched_init
 

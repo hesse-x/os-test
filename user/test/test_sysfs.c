@@ -322,15 +322,15 @@ void test_sysfs_drm_dev_attr(void) {
 /* ===== S3: evdev sysfs 属性树 ===== */
 #ifdef TEST
 
-/* Register a second input device (event1) from the test program itself, so the
+/* Register a test input device (event9) from the test program itself, so the
  * sysfs input class subtree can be exercised with >1 device. We only need the
  * sysfs attributes — no event ring — so pass shm_fd=-1 (no SHM binding). The
  * kernel fills driver_pid = our pid; the device has no ring so ringbuf fops are
  * never entered for it. This mirrors evdev's two-step registration
- * (device_register_shm → device_set_meta) and builds /sys/class/input/event1.
+ * (device_register_shm → device_set_meta) and builds /sys/class/input/event9.
  */
-static void register_event1(void) {
-  int rc = device_register_shm("input/event1", -1, 1);
+static void register_event9(void) {
+  int rc = device_register_shm("input/event9", -1, 9);
   TEST_ASSERT_EQUAL_INT(0, rc);
   struct dev_props props = {.bustype = BUS_USB,
                             .vendor = 0x0002,
@@ -338,24 +338,24 @@ static void register_event1(void) {
                             .version = 0x0001};
   strncpy(props.name, "evdev test dev", sizeof(props.name) - 1);
   props.name[sizeof(props.name) - 1] = '\0';
-  int r = device_set_meta("input/event1", "input", "evdev", &props);
+  int r = device_set_meta("input/event9", "input", "evdev", &props);
   TEST_ASSERT_EQUAL_INT(0, r);
 }
 
 void test_sysfs_input_class_getdents(void) {
   DIR *d = opendir("/sys/class/input");
   TEST_ASSERT_TRUE(d != NULL);
-  int found_event0 = 0, found_event1 = 0;
+  int found_event0 = 0, found_event9 = 0;
   struct dirent *e;
   while ((e = readdir(d)) != NULL) {
     if (strcmp(e->d_name, "event0") == 0)
       found_event0 = 1;
-    if (strcmp(e->d_name, "event1") == 0)
-      found_event1 = 1;
+    if (strcmp(e->d_name, "event9") == 0)
+      found_event9 = 1;
   }
   closedir(d);
   TEST_ASSERT_TRUE(found_event0);
-  TEST_ASSERT_TRUE(found_event1);
+  TEST_ASSERT_TRUE(found_event9);
 }
 
 void test_sysfs_input_event0_name(void) {
@@ -436,30 +436,30 @@ void test_sysfs_nonexistent_class(void) {
   TEST_ASSERT_EQUAL_INT(ENOENT, errno);
 }
 
-void test_sysfs_input_event1_name(void) {
-  /* event1 was registered by register_event1() in main(); its name attr
+void test_sysfs_input_event9_name(void) {
+  /* event9 was registered by register_event9() in main(); its name attr
    * should reflect the props.name we injected ("evdev test dev"). */
   char buf[64];
-  int r = read_sysfs_attr("/sys/class/input/event1/name", buf, sizeof(buf));
+  int r = read_sysfs_attr("/sys/class/input/event9/name", buf, sizeof(buf));
   TEST_ASSERT_TRUE(r > 0);
   TEST_ASSERT_EQUAL_STRING("evdev test dev\n", buf);
 }
 
 void test_sysfs_dev_set_meta_success(void) {
-  /* device_set_meta on a freshly registered device (event1, registered in
-   * main before tests run) already returned 0 via register_event1(). Here we
+  /* device_set_meta on a freshly registered device (event9, registered in
+   * main before tests run) already returned 0 via register_event9(). Here we
    * re-assert the observable result: the sysfs subtree exists and is readable,
    * which is only possible if the set_meta step succeeded. (We do NOT re-call
    * set_meta on event0 — that path leaks subsys_priv and duplicates sysfs
    * files, since sys_dev_set_meta has no idempotency guard.) */
   char buf[32];
   int r =
-      read_sysfs_attr("/sys/class/input/event1/id/vendor", buf, sizeof(buf));
+      read_sysfs_attr("/sys/class/input/event9/id/vendor", buf, sizeof(buf));
   TEST_ASSERT_TRUE(r > 0);
   TEST_ASSERT_EQUAL_STRING("0x0002\n", buf);
 
   struct stat st;
-  TEST_ASSERT_EQUAL_INT(0, stat("/sys/class/input/event1", &st));
+  TEST_ASSERT_EQUAL_INT(0, stat("/sys/class/input/event9", &st));
   TEST_ASSERT_TRUE(S_ISDIR(st.st_mode));
 }
 
@@ -587,9 +587,9 @@ int main(int argc, char **argv, char **envp) {
 #ifdef TEST
   wait_dev_ready("/dev/dri/card0");
   wait_dev_ready("/dev/input/event0");
-  /* Register event1 so S3 multi-device cases have a second device. Done after
+  /* Register event9 so S3 multi-device cases have a test device. Done after
    * event0 is ready so the /sys/class/input class dir already exists. */
-  register_event1();
+  register_event9();
 #endif
 
   /* S0: f_op regression */
@@ -638,7 +638,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_sysfs_input_event0_stat_dir);
   RUN_TEST(test_sysfs_dev_set_meta_enoent);
   RUN_TEST(test_sysfs_nonexistent_class);
-  RUN_TEST(test_sysfs_input_event1_name);
+  RUN_TEST(test_sysfs_input_event9_name);
   RUN_TEST(test_sysfs_dev_set_meta_success);
 
   /* S4: evdev broker consumer fd (read/poll/ioctl via /dev/input/eventN) */

@@ -59,6 +59,9 @@ struct sysfs_node {
   struct sysfs_attr *attr; // file: attribute; directory: NULL
   struct inode *ip;        // associated inode (created on lookup)
   uint32_t ino;            // unique inode number
+  bool removed;
+  void *owner;
+  const struct vma_owner_ops *owner_ops;
 };
 
 // evdev attributes (referenced by devtmpfs, defined in sysfs.c).
@@ -79,6 +82,8 @@ struct sysfs_node *sysfs_create_file(struct sysfs_node *parent,
                                      const struct sysfs_attr *attr);
 struct sysfs_node *sysfs_create_symlink(struct sysfs_node *parent,
                                         const char *name, const char *target);
+int sysfs_node_set_owner(struct sysfs_node *node, void *owner,
+                         const struct vma_owner_ops *ops);
 void sysfs_remove_dir(struct sysfs_node *dir);
 struct sysfs_node *sysfs_class_dir(const char *subsystem);
 struct sysfs_node *sysfs_devchar_register(unsigned major, unsigned minor,
@@ -92,6 +97,7 @@ struct sysfs_node *sysfs_devchar_add_device_file(struct sysfs_node *root,
                                                  const struct sysfs_attr *attr);
 void sysfs_devchar_unregister(unsigned major, unsigned minor);
 void sysfs_init(void);
+void sysfs_lifecycle_selftest(void);
 struct sysfs_node *sysfs_root_node(void);
 
 // fstype callbacks

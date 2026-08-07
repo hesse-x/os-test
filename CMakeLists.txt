@@ -195,12 +195,18 @@ target_compile_options(os_kernel_warn INTERFACE -Wno-unused-parameter)
 # trailing -O2 while retaining debug symbols/config defines.
 
 # KASAN sanitizer flags (applied only to kernel OBJECT libraries via kernel_rules.cmake)
-# KASAN_SHADOW_OFFSET must match kasan.h's #define: gcc's -fsanitize=kernel-address
-# uses this command-line macro to generate shadow-address arithmetic that the
-# runtime (kasan.c) must agree with. Recomputed for VMA_BASE=0xFFFFFF8000000000
-# so shadow(VMA_BASE) lands at PML4[503] base 0xFFFFFB8000000000.
+# KASAN_SHADOW_OFFSET must match both kasan.h and the compiler's instrumentation
+# mapping. Recomputed for VMA_BASE=0xFFFFFF8000000000 so shadow(VMA_BASE) lands
+# at PML4[503] base 0xFFFFFB8000000000.
 if(SANITIZE)
   set(KASAN_CFLAGS "-fsanitize=kernel-address" "-DKASAN_SHADOW_OFFSET=0xDFFFFB9000000000ULL" "-DSANITIZER=1")
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    list(APPEND KASAN_CFLAGS
+      "-mllvm=-asan-mapping-offset=0xDFFFFB9000000000"
+      "-mllvm=-asan-instrumentation-with-call-threshold=0")
+  elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    list(APPEND KASAN_CFLAGS "--param=asan-shadow-offset=0xDFFFFB9000000000")
+  endif()
 endif()
 
 # Debug-mode flags (-g -fno-omit-frame-pointer -DLOG_LEVEL_DEBUG) no longer

@@ -19,6 +19,7 @@
 #include "arch/x64/trap.h"
 #include "arch/x64/utils.h"
 #include "boot/boot.h"
+#include "kernel/bsd/dev_mmap.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/evdev_broker.h"
 #include "kernel/bsd/eventfd.h"
@@ -1296,6 +1297,60 @@ static int64_t sys_mmap_file_backed(xtask *proc, uint64_t *pml4, uint64_t addr,
 }
 
 // ===================== BSD syscall: mmap =====================
+static int64_t sys_mmap_device_prepared(xtask *proc, uint64_t addr,
+                                        uint64_t size, uint32_t prot,
+                                        uint32_t flags, int fd,
+                                        uint64_t offset) {
+  if (!(flags & MAP_SHARED) || fd < 0)
+    return -ENOSYS;
+  if (fd >= MAX_FD)
+    return -EBADF;
+
+  rcu_read_lock();
+  struct file *f = fd_lookup(proc->proc->files, fd);
+  if (f)
+    file_get(f);
+  rcu_read_unlock();
+  if (!f)
+    return -EBADF;
+  if (f->type != FD_DEV || !f->inode) {
+    file_put(f);
+    return -ENOSYS;
+  }
+
+  struct dev_ops *ops = dev_ops_peek_by_inode(f->inode);
+  if (!ops || ops->driver_pid != 0 || !ops->mmap_prepare_file) {
+    file_put(f);
+    return -ENOSYS;
+  }
+
+  struct dev_mmap_request request = {
+      .addr = addr,
+      .length = size,
+      .offset = offset,
+      .prot = prot,
+      .flags = flags,
+  };
+  struct dev_mmap_backing backing = {0};
+  int rc = ops->mmap_prepare_file(f, &request, &backing);
+  if (rc) {
+    dev_mmap_abort(&backing);
+    file_put(f);
+    return rc;
+  }
+
+  uint64_t mmap_flags;
+  spin_lock_irqsave(&proc->mm->mmap_lock, &mmap_flags);
+  uint64_t *pml4 =
+      (__force uint64_t *)phys_to_virt((__force phys_addr_t)proc->cr3);
+  int64_t result = dev_mmap_commit(proc->mm, pml4, &request, &backing);
+  spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+  if (result < 0)
+    dev_mmap_abort(&backing);
+  file_put(f);
+  return result;
+}
+
 int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                  int64_t arg5, int64_t arg6) {
   uint64_t addr = (uint64_t)arg1; // addr hint (or exact addr with MAP_FIXED)
@@ -1328,6 +1383,11 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   uint64_t hint = (!fixed && addr) ? ALIGN_DOWN(addr, PAGE_SIZE) : 0;
 
   xtask *proc = current_task;
+  int64_t prepared = sys_mmap_device_prepared(proc, addr, size, prot,
+                                              (uint32_t)flags, fd, offset);
+  if (prepared != -ENOSYS)
+    return prepared;
+
   uint64_t mmap_flags;
   spin_lock_irqsave(&proc->mm->mmap_lock, &mmap_flags);
   printk(LOG_DEBUG,
@@ -1386,6 +1446,16 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
         if (ops->driver_pid == 0 && (ops->mmap_file || ops->mmap)) {
           uint64_t ret = ops->mmap_file ? ops->mmap_file(proc, f, size, offset)
                                         : ops->mmap(proc, size, offset);
+          if ((int64_t)ret >= 0) {
+            mmap_region *mapped = vma_find(proc->mm, ret);
+            if (!mapped || mapped->vaddr != ret) {
+              ret = (uint64_t)-EINVAL;
+            } else if (!(mapped->flags & KMAP_VMA_OWNER) &&
+                       vma_attach_owner(mapped, ops, &dev_ops_vma_owner_ops) !=
+                           0) {
+              ret = (uint64_t)-EINVAL;
+            }
+          }
           file_put(f);
           spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
           return ret;

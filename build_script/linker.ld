@@ -61,12 +61,20 @@ SECTIONS {
         *(.got.plt)
     } :data
 
-    /* KASAN global variable redzone metadata */
-    __start_kasan_globals = .;
-    .kasan_globals : AT(ADDR(.kasan_globals) - 0xFFFFFF8000000000) {
-        KEEP(*(__kasan_globals))
+    /* Clang emits one ASan global-registration constructor per object. */
+    .kasan_init_array : AT(ADDR(.kasan_init_array) - 0xFFFFFF8000000000) {
+        __start_kasan_init_array = .;
+        KEEP(*(.init_array.1))
+        __stop_kasan_init_array = .;
     } :data
-    __stop_kasan_globals = .;
+
+    /* GCC KASAN global variable redzone metadata. Keep the boundaries inside
+       the output section so unrelated orphan sections cannot fall in range. */
+    .kasan_globals : AT(ADDR(.kasan_globals) - 0xFFFFFF8000000000) {
+        __start_kasan_globals = .;
+        KEEP(*(__kasan_globals))
+        __stop_kasan_globals = .;
+    } :data
 
     . = ALIGN(4096);
     __data_end = .;

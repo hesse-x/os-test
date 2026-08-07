@@ -16,6 +16,7 @@ struct xtask;
 #include "kernel/bsd/types.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/log.h"
+#include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/spinlock.h"
 #include <kernel/bsd/stat_abi.h>
 #include <xos/errno.h>
@@ -120,6 +121,29 @@ struct sysfs_node *sysfs_create_symlink(struct sysfs_node *parent,
   return n;
 }
 
+int sysfs_node_set_owner(struct sysfs_node *node, void *owner,
+                         const struct vma_owner_ops *ops) {
+  if (!node || !owner || !ops || !ops->get || !ops->put || node->owner)
+    return -EINVAL;
+  ops->get(owner);
+  node->owner = owner;
+  node->owner_ops = ops;
+  return 0;
+}
+
+static void sysfs_inode_release(struct inode *ip, void *arg) {
+  (void)ip;
+  struct sysfs_node *n = arg;
+  if (n->attr_priv_owned && n->attr)
+    kfree(n->attr->priv);
+  if (n->attr_owned)
+    kfree(n->attr);
+  kfree(n->symlink_target);
+  if (n->owner_ops)
+    n->owner_ops->put(n->owner);
+  kfree(n);
+}
+
 static void sysfs_free_subtree(struct sysfs_node *n) {
   struct sysfs_node *child = n->children;
   while (child) {
@@ -127,14 +151,15 @@ static void sysfs_free_subtree(struct sysfs_node *n) {
     sysfs_free_subtree(child);
     child = next;
   }
-  if (n->ip)
+  n->removed = true;
+  n->parent = NULL;
+  n->children = NULL;
+  n->sibling = NULL;
+  if (n->ip) {
     inode_put(n->ip);
-  if (n->attr_priv_owned && n->attr)
-    kfree(n->attr->priv);
-  if (n->attr_owned)
-    kfree(n->attr);
-  kfree(n->symlink_target);
-  kfree(n);
+    return;
+  }
+  sysfs_inode_release(NULL, n);
 }
 
 void sysfs_remove_dir(struct sysfs_node *dir) {
@@ -207,6 +232,8 @@ static struct inode *sysfs_node_to_inode(struct sysfs_node *n) {
   // 0040755. Owner defaults to 0 (root) — kernel-created.
   ip->mode = n->is_symlink ? 0120777 : (n->is_dir ? 0040755 : 0100444);
   ip->i_priv = (n->is_dir || n->is_symlink) ? (void *)n : (void *)n->attr;
+  ip->release = sysfs_inode_release;
+  ip->release_arg = n;
   ip->i_op = n->is_symlink ? &sysfs_lnk_iop
                            : (n->is_dir ? &sysfs_dir_iop : &sysfs_file_iop);
   if (n->is_symlink)
@@ -474,6 +501,49 @@ void sysfs_init(void) {
     return;
   }
   printk(LOG_INFO, "sysfs_init: root node created\n");
+}
+
+#ifdef TEST
+static ssize_t sysfs_selftest_show(char *buf, size_t len, void *priv) {
+  if (len < 2 || !priv)
+    return -EINVAL;
+  buf[0] = *(int *)priv == 42 ? 'Y' : 'N';
+  buf[1] = '\n';
+  return 2;
+}
+#endif
+
+void sysfs_lifecycle_selftest(void) {
+#ifdef TEST
+  struct sysfs_node *dir = sysfs_create_dir(sysfs_root, "__lifecycle_test");
+  BUG_ON(!dir);
+  int *priv = kmalloc(sizeof(*priv));
+  struct sysfs_attr *attr = kmalloc(sizeof(*attr));
+  BUG_ON(!priv || !attr);
+  *priv = 42;
+  *attr = (struct sysfs_attr){
+      .name = "value",
+      .priv = priv,
+      .show = sysfs_selftest_show,
+  };
+  struct sysfs_node *file = sysfs_create_file(dir, "value", attr);
+  BUG_ON(!file);
+  file->attr_owned = true;
+  file->attr_priv_owned = true;
+
+  struct inode *ip = sysfs_lookup("__lifecycle_test/value");
+  BUG_ON(!ip);
+  sysfs_remove_dir(dir);
+  BUG_ON(sysfs_lookup("__lifecycle_test/value") != NULL);
+
+  struct sysfs_attr *open_attr = ip->i_priv;
+  char value[2];
+  BUG_ON(!open_attr ||
+         open_attr->show(value, sizeof(value), open_attr->priv) != 2);
+  BUG_ON(value[0] != 'Y');
+  inode_put(ip);
+  printk(LOG_INFO, "sysfs lifecycle selftest: PASS\n");
+#endif
 }
 
 struct sysfs_node *sysfs_root_node(void) { return sysfs_root; }

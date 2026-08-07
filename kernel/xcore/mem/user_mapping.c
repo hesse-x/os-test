@@ -293,10 +293,10 @@ move_user_pages(uint64_t *pml4, uint64_t old_va, uint64_t new_va,
 // Deep-copy user page tables from src_pml4 to dst_pml4.
 // dst_pml4 must already have kernel entries copied.
 // For each present user PTE, allocates new physical page and memcpys content.
-// SHM/MAP_PHYSICAL pages: shares physical page (NO shm_get here — ref bump done
-// in copy_mmap_regions). Sig trampoline page: shares physical page (no ref
-// bump, global). Returns: 0 on success, negative errno on failure (dst
-// partially filled).
+// SHM/MAP_PHYSICAL/device-owner pages share physical pages (their owner ref is
+// bumped in copy_mmap_regions). Sig trampoline page also shares its global
+// physical page without a ref bump. Returns 0 on success, negative errno on
+// failure (dst partially filled).
 __attribute__((no_sanitize("kernel-address"))) int
 copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
                 mmap_region *mmap_regions) {
@@ -371,6 +371,9 @@ copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
             continue;
 
           uint64_t leaf_phys = pte & PTE_PHYS_MASK;
+          uint64_t leaf_vaddr =
+              ((uint64_t)pml4_idx << 39) | ((uint64_t)pdpt_idx << 30) |
+              ((uint64_t)pd_idx << 21) | ((uint64_t)pt_idx << 12);
 
           // Skip sig trampoline — shared physical page (global, no refcount
           // bump)
@@ -379,9 +382,13 @@ copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
             continue;
           }
 
-          // Check if this is an SHM/MAP_PHYSICAL page
+          // Check if this PTE belongs to an externally owned mapping.
           bool is_shared = false;
           for (mmap_region *mr = mmap_regions; mr; mr = mr->next) {
+            if ((mr->flags & KMAP_VMA_OWNER) && leaf_vaddr >= mr->vaddr &&
+                leaf_vaddr < mr->vaddr + mr->size) {
+              is_shared = true;
+            }
             if (mr->shm_obj != NULL) {
               shm *s = mr->shm_obj;
               if (s->page_list) {

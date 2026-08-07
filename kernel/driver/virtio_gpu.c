@@ -3463,6 +3463,11 @@ static int drm_close_file(xtask *proc, struct file *file) {
 /* forward declarations for ops callbacks defined further below */
 static ssize_t drm_read(xtask *proc, int fd, void *buf, size_t count);
 
+static wait_queue_head *drm_wait_queue_file(struct file *file) {
+  (void)file;
+  return &g_drm.event_wq;
+}
+
 struct dev_ops drm_dev_ops = {
     .driver_pid = 0,
     .is_block = false,
@@ -3472,6 +3477,7 @@ struct dev_ops drm_dev_ops = {
     .mmap = drm_mmap_handler,
     .read = drm_read,
     .poll = drm_poll,
+    .wait_queue_file = drm_wait_queue_file,
 };
 
 /* Render node ops: kernel device, shares ioctl/mmap/close with card0,

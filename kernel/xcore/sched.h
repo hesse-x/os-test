@@ -32,7 +32,7 @@ void sched_try_steal_task(void);
 void sched_timer_queue_insert(int cpu, xtask *proc);
 void sched_timer_queue_remove(xtask *proc);
 
-#define SCHED_WAIT_EVENT_COUNT (WAIT_MUTEX + 1)
+#define SCHED_WAIT_EVENT_COUNT (WAIT_KTHREAD + 1)
 struct sched_wake_stats {
   uint64_t valid[SCHED_WAIT_EVENT_COUNT];
   uint64_t noop[SCHED_WAIT_EVENT_COUNT];

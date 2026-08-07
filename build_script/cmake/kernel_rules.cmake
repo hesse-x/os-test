@@ -27,6 +27,9 @@ function(add_kernel_object lib_name)
     if(PERF)
         target_compile_definitions(${lib_name} PRIVATE PERF)
     endif()
+    if(TEST)
+        target_compile_definitions(${lib_name} PRIVATE TEST)
+    endif()
     # -Wno-unused-parameter moved to the os_kernel_warn INTERFACE lib (order-
     # sensitive, see comment above).
 

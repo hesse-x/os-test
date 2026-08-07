@@ -7,6 +7,11 @@ add_kernel_object(driver_obj
             ahci.c xhci.c pci.c serial.c blk_dev.c
             virtio_pci.c virtio_ring.c virtio_gpu.c
 )
+if(SANITIZE)
+    # The polled serial console is part of the pre-KASAN diagnostic path.
+    set_source_files_properties(serial.c
+        PROPERTIES COMPILE_OPTIONS "-fno-sanitize=kernel-address")
+endif()
 # DRM UAPI headers — upstream headers in third_party/drm/include/drm/ are
 # included as "drm/drm.h" by virtio_gpu.c (and drm_internal.h).
 target_include_directories(driver_obj PRIVATE

@@ -41,6 +41,8 @@ typedef enum wait_event {
   WAIT_SLEEP, // nanosleep/clock_nanosleep: block until deadline or signal
   WAIT_BLOCK_IO,
   WAIT_MUTEX,
+  WAIT_COMPLETION,
+  WAIT_KTHREAD,
 } wait_event;
 
 #define RECV_MSG_SIZE 64
@@ -186,7 +188,8 @@ typedef struct xtask {
                          // SS_DISABLE / SS_AUTODISARM
 
   // === pointer to BSD extension data (Xcore does not interpret contents) ===
-  struct proc *proc; // NULL = idle/task without POSIX semantics
+  struct proc *proc;    // NULL = idle/task without POSIX semantics
+  void *kernel_private; // owned by kernel-only tasks such as kthreads
 
   // === exit handshake (SMP) ===
   // 0 → the dying CPU may STILL be executing this task's do_exit tail

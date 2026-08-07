@@ -715,6 +715,7 @@ void mm_release(mm *mm, pid_t owner_pid) {
       inode_put(region->inode);
     if (region->shm_private_src)
       shm_put(region->shm_private_src);
+    vma_owner_put(region);
     if (region->flags & KMAP_DMA_OWNED) {
       struct page *page = &bfc_frames[PHY_TO_PAGE(region->phys)];
       bfc_free_page(page, region->size / PAGE_SIZE);
@@ -946,6 +947,7 @@ copy_mmap_regions(mmap_region *src) {
       inode_get(mr->inode);
     if (mr->shm_private_src)
       shm_get(mr->shm_private_src);
+    vma_owner_get(new_mr);
     if (!head)
       head = new_mr;
     else

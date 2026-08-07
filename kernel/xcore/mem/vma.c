@@ -64,6 +64,40 @@ int vma_insert_sorted(mm *mm, mmap_region *region) {
   return 0;
 }
 
+int vma_attach_owner(mmap_region *region, void *owner,
+                     const struct vma_owner_ops *ops) {
+  int rc = vma_adopt_owner(region, owner, ops);
+  if (rc)
+    return rc;
+  ops->get(owner);
+  return 0;
+}
+
+int vma_adopt_owner(mmap_region *region, void *owner,
+                    const struct vma_owner_ops *ops) {
+  if (!region || !owner || !ops || !ops->get || !ops->put ||
+      (region->flags & KMAP_VMA_OWNER))
+    return -EINVAL;
+  region->owner = owner;
+  region->owner_ops = ops;
+  region->flags |= KMAP_VMA_OWNER;
+  return 0;
+}
+
+void vma_owner_get(mmap_region *region) {
+  if (region && (region->flags & KMAP_VMA_OWNER))
+    region->owner_ops->get(region->owner);
+}
+
+void vma_owner_put(mmap_region *region) {
+  if (region && (region->flags & KMAP_VMA_OWNER)) {
+    region->flags &= ~KMAP_VMA_OWNER;
+    region->owner_ops->put(region->owner);
+    region->owner = NULL;
+    region->owner_ops = NULL;
+  }
+}
+
 // True if [start, start+len) overlaps any region. Sorted list lets us stop
 // early once a region starts at or past the interval end.
 static bool vma_overlaps(mm *mm, uint64_t start, uint64_t len) {
@@ -148,6 +182,7 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
     inode_get(mid->inode);
   if (mid->shm_private_src)
     shm_get(mid->shm_private_src);
+  vma_owner_get(mid);
 
   // Tail piece (if any).
   mmap_region *tail = NULL;
@@ -158,6 +193,7 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
         inode_put(mid->inode);
       if (mid->shm_private_src)
         shm_put(mid->shm_private_src);
+      vma_owner_put(mid);
       kfree(mid);
       return NULL;
     }
@@ -173,6 +209,7 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
       inode_get(tail->inode);
     if (tail->shm_private_src)
       shm_get(tail->shm_private_src);
+    vma_owner_get(tail);
   }
 
   if (addr == r->vaddr) {
@@ -190,6 +227,7 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
       inode_put(r->inode);
     if (r->shm_private_src)
       shm_put(r->shm_private_src);
+    vma_owner_put(r);
     kfree(r);
   } else {
     // Shrink r to the front piece.
@@ -210,13 +248,14 @@ mmap_region *vma_merge(mm *mm, mmap_region *r) {
   // without per-struct ref drop, so anything holding an inode/shm ref must be
   // excluded to avoid leaks.
   if (!r || r->fd != -1 || r->shm_obj || r->phys || r->inode ||
-      r->shm_private_src)
+      (r->flags & KMAP_VMA_OWNER) || r->shm_private_src)
     return r;
 
   // Merge with the next region if anonymous-private, same prot/flags, adjacent.
   mmap_region *n = r->next;
   if (n && n->fd == -1 && !n->shm_obj && !n->phys && !n->inode &&
-      !n->shm_private_src && n->prot == r->prot && n->flags == r->flags &&
+      !(n->flags & KMAP_VMA_OWNER) && !n->shm_private_src &&
+      n->prot == r->prot && n->flags == r->flags &&
       r->vaddr + r->size == n->vaddr) {
     r->size += n->size;
     r->next = n->next;
@@ -229,7 +268,8 @@ mmap_region *vma_merge(mm *mm, mmap_region *r) {
     pp = &(*pp)->next;
   mmap_region *p = *pp;
   if (p && p->fd == -1 && !p->shm_obj && !p->phys && !p->inode &&
-      !p->shm_private_src && p->prot == r->prot && p->flags == r->flags &&
+      !(p->flags & KMAP_VMA_OWNER) && !p->shm_private_src &&
+      p->prot == r->prot && p->flags == r->flags &&
       p->vaddr + p->size == r->vaddr) {
     p->size += r->size;
     p->next = r->next;
@@ -311,9 +351,8 @@ bool vma_overlaps_any(mm *mm, uint64_t start, uint64_t len) {
 // the descriptor. Mirrors sys_munmap's two-branch release:
 //  - anonymous (shm_obj==NULL && phys==0): unmap_user_pages refcount-decs and
 //    frees the backing pages.
-//  - SHM (shm_obj != NULL): clear PTEs only (pages are SHM-owned), then
-//    shm_put the mapping-instance reference.
-//  - MAP_PHYSICAL (phys != 0): clear PTEs only (phys is external MMIO).
+//  - SHM, MAP_PHYSICAL, and owner-backed device VMAs: clear PTEs only because
+//    their pages are released by the backing owner, not by the address space.
 // Caller holds mm->mmap_lock.
 static void free_one_region(mm *mm, uint64_t *pml4, mmap_region *r) {
   size_t npages = r->size / PAGE_SIZE;
@@ -323,8 +362,8 @@ static void free_one_region(mm *mm, uint64_t *pml4, mmap_region *r) {
   if (vma_writeback_hook)
     (void)vma_writeback_hook(mm->cr3, r);
 
-  if (r->shm_obj || r->phys) {
-    // SHM / MAP_PHYSICAL: clear leaf PTEs without freeing the backing pages.
+  if (r->shm_obj || r->phys || (r->flags & KMAP_VMA_OWNER)) {
+    // Externally owned mappings only drop this address space's PTE view.
     for (size_t i = 0; i < npages; i++) {
       uint64_t va = r->vaddr + i * PAGE_SIZE;
       uint64_t *pdpt = ensure_pd(pml4, va);
@@ -373,6 +412,7 @@ static void free_one_region(mm *mm, uint64_t *pml4, mmap_region *r) {
     inode_put(r->inode);
   if (r->shm_private_src)
     shm_put(r->shm_private_src);
+  vma_owner_put(r);
   kfree(r);
 }
 

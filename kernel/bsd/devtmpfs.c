@@ -34,11 +34,10 @@
 // so devtmpfs need not reverse-include driver headers).
 #define DRM_MAJOR_FOR_STAT 226
 
-struct shm;
-
 struct dev_entry {
   char name[32];
   struct inode *ip;
+  struct dev_ops *ops; // owns one registration reference while linked
   struct dev_entry *next;
 };
 
@@ -59,14 +58,9 @@ static bool devtmpfs_initialized = false;
 // subdirectories.
 static struct inode *devtmpfs_root_ip = NULL;
 
-// §5: dev_ops refcount wrapper (FUSE fuse_conn style).
-//   get: take a ref (open path holds the fd ref); refcount_inc BUG_ONs from-0
-//   (UAF). put: drop a ref (file_put drops fd ref, cleanup_pid drops
-//   registration ref); reaches 0 → kfree.
-// Only user-space drivers (driver_pid>0, kmalloc'd ops) reach 0; kernel device
-// ops are static, registration ref is permanent, put never kfree's. fd ref
-// covers raw i_priv reads in read/write/ioctl/poll, so those paths need no
-// get/put.
+// Registration and open-file references share this counter. The final put is
+// dispatched by the explicit storage/release policy; it never guesses from
+// driver_pid or assumes all kernel callbacks are permanent static objects.
 void dev_ops_get(struct dev_ops *ops) {
   ASSERT(ops);
   refcount_inc(&ops->refcount);
@@ -76,12 +70,30 @@ void dev_ops_put(struct dev_ops *ops) {
   if (!ops)
     return;
   if (refcount_dec_and_test(&ops->refcount)) {
-    // Only user-space driver kmalloc'd ops reach 0; kernel device ops are
-    // static and never reach 0. subsys_priv/uevent_priv/sysfs_dir were already
-    // cleaned by cleanup_pid.
-    kfree(ops);
+    if (ops->release) {
+      ops->release(ops);
+    } else if (ops->storage == DEV_OPS_HEAP) {
+      kfree(ops->uevent_priv);
+      kfree(ops->subsys_priv);
+      kfree(ops);
+    } else {
+      ASSERT(ops->storage == DEV_OPS_STATIC);
+    }
   }
 }
+
+static void dev_ops_vma_get(void *owner) {
+  dev_ops_get((struct dev_ops *)owner);
+}
+
+static void dev_ops_vma_put(void *owner) {
+  dev_ops_put((struct dev_ops *)owner);
+}
+
+const struct vma_owner_ops dev_ops_vma_owner_ops = {
+    .get = dev_ops_vma_get,
+    .put = dev_ops_vma_put,
+};
 
 // §5: under devtmpfs_lock, read inode->i_priv and return ops (no ref taken).
 // Used by file_put(FD_DEV/FD_TTY) etc.: the §3 borrow-window between a raw
@@ -459,6 +471,7 @@ int devtmpfs_create(const char *name, struct dev_ops *ops, struct shm *shm) {
     ne->name[i] = name[i];
   ne->name[i] = '\0';
   ne->ip = ip;
+  ne->ops = ops;
   ne->next = dev_list;
   dev_list = ne;
 
@@ -629,17 +642,9 @@ void devtmpfs_cleanup_pid(pid_t pid) {
         // Order: kfree uevent_priv → sysfs_remove_dir (frees attr structs, not
         // their priv) → kfree subsys_priv → put ops (mirrors sys_dev_set_meta
         // idempotent guard).
-        if (ops->uevent_priv) {
-          kfree(ops->uevent_priv);
-          ops->uevent_priv = NULL;
-        }
         if (ops->sysfs_dir) {
           sysfs_remove_dir(ops->sysfs_dir);
           ops->sysfs_dir = NULL;
-        }
-        if (ops->subsys_priv) {
-          kfree(ops->subsys_priv);
-          ops->subsys_priv = NULL;
         }
         // §5: drop registration ref (taken by dev_ops_get at devtmpfs_create).
         // Do NOT kfree directly: another process may hold an fd ref to ops
@@ -647,8 +652,6 @@ void devtmpfs_cleanup_pid(pid_t pid) {
         // subsequent file_put raw i_priv read would UAF. Use put; reaches 0 (no
         // fd refs) → kfree. User-space driver (driver_pid>0) kmalloc'd ops
         // reach 0; kernel device static ops never do.
-        if (ops->driver_pid > 0)
-          dev_ops_put(ops);
         // Free inode.
         inode_put(e->ip);
         e->ip = NULL;
@@ -666,6 +669,7 @@ void devtmpfs_cleanup_pid(pid_t pid) {
   // discipline).
   while (to_free) {
     struct dev_entry *n = to_free->next;
+    dev_ops_put(to_free->ops);
     kfree(to_free);
     to_free = n;
   }
@@ -673,14 +677,17 @@ void devtmpfs_cleanup_pid(pid_t pid) {
 
 void devtmpfs_remove(const char *name) {
   struct dev_entry *victim = NULL;
+  struct dev_ops *ops = NULL;
   spin_lock(&devtmpfs_lock);
   struct dev_entry **pp = &dev_list;
   while (*pp) {
     struct dev_entry *e = *pp;
     if (__strcmp(name, e->name) == 0) {
       *pp = e->next;
-      if (e->ip)
+      ops = e->ops;
+      if (e->ip) {
         inode_put(e->ip);
+      }
       e->ip = NULL;
       victim = e;
       break;
@@ -689,9 +696,12 @@ void devtmpfs_remove(const char *name) {
   }
   spin_unlock(&devtmpfs_lock);
 
-  kfree(victim); // reclaim outside the lock (mirrors tmpfs_unlink discipline)
+  bool removed = victim != NULL;
+  if (ops)
+    dev_ops_put(ops); // drop the registration reference after detach
+  kfree(victim);      // reclaim outside the lock
 
-  if (victim && devtmpfs_initialized && nl_is_initialized())
+  if (removed && devtmpfs_initialized && nl_is_initialized())
     nl_uevent_broadcast("remove", name, "misc");
 }
 
@@ -883,20 +893,12 @@ int64_t sys_dev_set_meta(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // sysfs_remove_dir frees only the attr structs, not their priv, so
   // uevent_priv must be freed first (subsys_priv freed after remove for
   // conservatism — remove doesn't call show, but keep the order conservative).
-  if (ops->uevent_priv) {
-    kfree(ops->uevent_priv);
-    ops->uevent_priv = NULL;
-  }
-  if (ops->sysfs_dir) {
-    sysfs_remove_dir(ops->sysfs_dir); // reuse existing sysfs subtree release
-    ops->sysfs_dir = NULL;
-  }
-  // subsys_priv already present (repeat call): kfree the old props (mirrors
-  // devtmpfs_cleanup_pid:499-501).
-  if (ops->subsys_priv) {
-    kfree(ops->subsys_priv);
-    ops->subsys_priv = NULL;
-  }
+  if (ops->sysfs_dir)
+    return 0;
+  kfree(ops->uevent_priv);
+  ops->uevent_priv = NULL;
+  kfree(ops->subsys_priv);
+  ops->subsys_priv = NULL;
 
   // Fill subsystem/devtype.
   __strncpy(ops->subsystem, subsystem, 7);
@@ -947,9 +949,10 @@ int64_t sys_dev_set_meta(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
         a->store = tmpl[i]->store;
         struct sysfs_node *target = (i == 0) ? devdir : iddir;
         struct sysfs_node *fn = sysfs_create_file(target, fnames[i], a);
-        if (fn)
+        if (fn) {
           fn->attr_owned = true;
-        else
+          sysfs_node_set_owner(fn, ops, &dev_ops_vma_owner_ops);
+        } else
           kfree(a);
       }
       // Writable uevent attr (used by coldplug): writing "add" → uevent_store →
@@ -974,9 +977,10 @@ int64_t sys_dev_set_meta(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           ua->show = uevent_attr.show;
           ua->store = uevent_attr.store;
           struct sysfs_node *ufn = sysfs_create_file(devdir, "uevent", ua);
-          if (ufn)
+          if (ufn) {
             ufn->attr_owned = true;
-          else
+            sysfs_node_set_owner(ufn, ops, &dev_ops_vma_owner_ops);
+          } else
             kfree(ua);
         }
       }

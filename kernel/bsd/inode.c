@@ -80,6 +80,8 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
   ip->shm = NULL;
   ip->mount = NULL;
   ip->wq = NULL;
+  ip->release = NULL;
+  ip->release_arg = NULL;
   ip->atime = ip->mtime = ip->ctime =
       0; // timestamps in-memory, written by update_time
   list_init(&ip->i_flock);
@@ -153,6 +155,8 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
   ip->shm = NULL;
   ip->mount = NULL;
   ip->wq = NULL;
+  ip->release = NULL;
+  ip->release_arg = NULL;
   ip->atime = ip->mtime = ip->ctime = 0;
   list_init(&ip->i_flock);
   ip->i_flock_lock = SPINLOCK_INIT;
@@ -218,6 +222,9 @@ void inode_put(struct inode *ip) {
      * locks remain (e.g. a process crashed without running cleanup) free them
      * here rather than leaking the file_lock nodes. */
     file_lock_release_all(ip);
+
+    if (ip->release)
+      ip->release(ip, ip->release_arg);
 
     kfree(ip);
   } else {

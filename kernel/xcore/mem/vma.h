@@ -37,6 +37,15 @@ uint64_t vma_find_gap(mm *mm, uint64_t len, uint64_t hint);
 // Caller has allocated and fully initialized the region.
 int vma_insert_sorted(mm *mm, mmap_region *region);
 
+// Attach a lifetime owner to a device mapping. The region takes one reference;
+// split/fork duplicate it and munmap/exec/mm_release drop it.
+int vma_attach_owner(mmap_region *region, void *owner,
+                     const struct vma_owner_ops *ops);
+int vma_adopt_owner(mmap_region *region, void *owner,
+                    const struct vma_owner_ops *ops);
+void vma_owner_get(mmap_region *region);
+void vma_owner_put(mmap_region *region);
+
 // Split [addr, addr+size) out of region. region may become up to three pieces
 // (front / mid / tail). Returns the mid piece (for the caller to mutate), or
 // NULL on bad args / OOM (region left intact). shm_obj refcount is NOT bumped:

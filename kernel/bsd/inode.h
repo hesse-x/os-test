@@ -91,6 +91,8 @@ struct inode {
   struct shm *shm; /* Device SHM or tmpfs regular-file shared backing. */
   struct mount_entry *mount; /* owning mount (set by sys_open lookup) */
   wait_queue_head *wq; /* ringbuf-backed: shared wq for epoll/poll waiters */
+  void (*release)(struct inode *ip, void *arg);
+  void *release_arg;
 
   /* POSIX file locks (S09): per-inode lock list + its own spinlock (independent
    * of i_lock, which guards filesystem metadata — flock ops never touch it).

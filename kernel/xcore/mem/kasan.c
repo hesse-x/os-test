@@ -39,13 +39,35 @@ struct kasan_global {
   const void *name;
   const void *module_name;
   unsigned long has_dynamic_init;
+#ifdef __clang__
+  // LLVM's __asan_global ABI appends source-location and ODR metadata.
+  const void *location;
+  uintptr_t odr_indicator;
+#endif
 };
 
 extern const struct kasan_global __start_kasan_globals[];
 extern const struct kasan_global __stop_kasan_globals[];
+typedef void (*kasan_init_fn)(void);
+extern kasan_init_fn __start_kasan_init_array[];
+extern kasan_init_fn __stop_kasan_init_array[];
 
 // ===================== Forward declarations =====================
 static void kasan_report(const void *addr, size_t size, bool is_write);
+
+static __attribute__((no_sanitize("kernel-address"))) void
+kasan_register_global(const struct kasan_global *g) {
+  kasan_unpoison_shadow(g->beg, g->size);
+
+  // A partial final 8-byte block is encoded by kasan_unpoison_shadow as
+  // 1..7 valid leading bytes. Do not overwrite that byte with FD; shadow can
+  // only poison the redzone starting at the following aligned block.
+  uintptr_t redzone_start = ((uintptr_t)g->beg + g->size + 7) & ~(uintptr_t)7;
+  uintptr_t redzone_end = (uintptr_t)g->beg + g->size_with_redzone;
+  if (redzone_end > redzone_start)
+    kasan_poison_shadow((const void *)redzone_start,
+                        redzone_end - redzone_start, KASAN_SHADOW_REDZONE);
+}
 
 // ===================== Shadow page table mapping =====================
 // Map shadow memory into kernel PML4 (PML4 index 503 for our shadow range).
@@ -120,8 +142,6 @@ static bool kasan_map_page(uint64_t vaddr, uint64_t phys, uint64_t flags) {
 
 // ===================== kasan_init =====================
 __attribute__((no_sanitize("kernel-address"))) void kasan_init(void) {
-  printk(LOG_INFO, "kasan_init: mapping shadow memory...\n");
-
   // 1. Allocate physical pages and map them to the shadow range.
   // Shadow covers exactly the direct-mapped physical RAM
   // [VMA_BASE, VMA_BASE + total_page_frames*PAGE_SIZE): 1 shadow byte per 8
@@ -141,25 +161,24 @@ __attribute__((no_sanitize("kernel-address"))) void kasan_init(void) {
   kasan_shadow_covered_end =
       (uint64_t)KERNEL_VMA_BOUNDARY + (uint64_t)total_page_frames * PAGE_SIZE;
 
-  printk(LOG_INFO, "  shadow_start=0x%lx size=%luMB pages=%lu\n", shadow_start,
-         shadow_size / (1024 * 1024), num_pages);
-
   for (size_t i = 0; i < num_pages; i++) {
     struct page *pg = bfc_alloc_page(1);
-    if (!pg) {
-      printk(LOG_ERROR, "kasan_init: OOM at shadow page %lu\n", i);
+    if (!pg)
       halt();
-    }
     uint64_t phys = (__force uint64_t)page_to_phys(pg);
     uint64_t vaddr = shadow_start + i * PAGE_SIZE;
 
-    if (!kasan_map_page(vaddr, phys, PTE_PRESENT | PTE_RW)) {
-      printk(LOG_ERROR, "kasan_init: map failed at 0x%lx\n", vaddr);
+    if (!kasan_map_page(vaddr, phys, PTE_PRESENT | PTE_RW))
       halt();
-    }
   }
 
   flush_tlb();
+
+  // Instrumented logging uses stack shadow, so it is only safe after every
+  // shadow page has been installed and the stale TLB entries are gone.
+  printk(LOG_INFO, "kasan_init: mapping shadow memory...\n");
+  printk(LOG_INFO, "  shadow_start=0x%lx size=%luMB pages=%lu\n", shadow_start,
+         shadow_size / (1024 * 1024), num_pages);
 
   // 2. Poison all shadow as inaccessible (0xFF)
   __memset((void *)shadow_start, 0xFF, num_pages * PAGE_SIZE);
@@ -329,18 +348,17 @@ __attribute__((no_sanitize("kernel-address"))) bool kasan_shadow_exists(void) {
 
 // ===================== Global variable poisoning =====================
 __attribute__((no_sanitize("kernel-address"))) void kasan_poison_globals(void) {
+  // Clang stores global descriptors in ordinary data and emits registration
+  // constructors in .init_array.1 instead of GCC's __kasan_globals section.
+  for (kasan_init_fn *fn = __start_kasan_init_array;
+       fn < __stop_kasan_init_array; fn++)
+    (*fn)();
+
   const struct kasan_global *g = __start_kasan_globals;
   const struct kasan_global *end = __stop_kasan_globals;
 
-  for (; g < end; g++) {
-    // Unpoison the actual global variable
-    kasan_unpoison_shadow(g->beg, g->size);
-    // Poison the redzone after it
-    if (g->size_with_redzone > g->size) {
-      kasan_poison_shadow((const void *)((uintptr_t)g->beg + g->size),
-                          g->size_with_redzone - g->size, KASAN_SHADOW_REDZONE);
-    }
-  }
+  for (; g < end; g++)
+    kasan_register_global(g);
 }
 
 // ===================== Slab/BFC hooks =====================
@@ -433,14 +451,8 @@ __asan_after_dynamic_init(void) {}
 
 __attribute__((no_sanitize("kernel-address"))) void
 __asan_register_globals(const struct kasan_global *globals, size_t n) {
-  for (size_t i = 0; i < n; i++) {
-    kasan_unpoison_shadow(globals[i].beg, globals[i].size);
-    if (globals[i].size_with_redzone > globals[i].size) {
-      kasan_poison_shadow(
-          (const void *)((uintptr_t)globals[i].beg + globals[i].size),
-          globals[i].size_with_redzone - globals[i].size, KASAN_SHADOW_REDZONE);
-    }
-  }
+  for (size_t i = 0; i < n; i++)
+    kasan_register_global(&globals[i]);
 }
 
 __attribute__((no_sanitize("kernel-address"))) void
