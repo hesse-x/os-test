@@ -21,6 +21,7 @@
 
 // Return the region containing addr ([vaddr, vaddr+size)), or NULL.
 mmap_region *vma_find(mm *mm, uint64_t addr);
+void vma_reset_readahead(mmap_region *region);
 
 // Find a free interval of length >= len in the VMA list and page tables. The
 // fixed signal-trampoline ABI page is reserved explicitly even if its PTE is

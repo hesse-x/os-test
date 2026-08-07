@@ -39,6 +39,8 @@ typedef enum wait_event {
   WAIT_VFORK,
   WAIT_PAUSE, // pause(): block until any signal; may carry an alarm deadline
   WAIT_SLEEP, // nanosleep/clock_nanosleep: block until deadline or signal
+  WAIT_BLOCK_IO,
+  WAIT_MUTEX,
 } wait_event;
 
 #define RECV_MSG_SIZE 64

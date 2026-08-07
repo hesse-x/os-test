@@ -17,7 +17,9 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/perf/event.h"
+#include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
+#include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
 #include "xos/perf.h"
@@ -67,7 +69,7 @@ static void __iomem *abar;
 static int active_port = -1;
 static uint64_t active_sector_count;
 
-spinlock ahci_lock = SPINLOCK_INIT;
+static spinlock ahci_queue_lock = SPINLOCK_INIT;
 
 static struct page *cmd_list_page;
 static struct page *fis_recv_page;
@@ -94,8 +96,17 @@ typedef struct block_req {
   void *user_buf;  // user-space virtual address
   uint32_t cookie; // monotonic ID for completion matching
   int result;      // 0=ok, EIO=error
+  bool kernel_wait;
+  void *kernel_buf;
+  struct ahci_wait_ctx *wait;
   uint8_t staging[AHCI_MAX_SECTORS * 512];
 } block_req;
+
+struct ahci_wait_ctx {
+  volatile bool done;
+  int result;
+  xtask *waiter;
+};
 
 static block_req block_pool[BLOCK_QUEUE_SIZE];
 static int bq_head = 0;                    // next slot to dequeue
@@ -401,7 +412,9 @@ static void ahci_irq_handler(trapframe *tf) {
   // with IF=1.
 
   // Check if a command was in flight
+  spin_lock(&ahci_queue_lock);
   if (!ahci_current_req) {
+    spin_unlock(&ahci_queue_lock);
     return;
   }
 
@@ -409,7 +422,10 @@ static void ahci_irq_handler(trapframe *tf) {
   bool error = (pxis & (1U << 30));
 
   // For reads: copy bounce buffer data to user buffer via page-table walk
-  if (ahci_current_req->dir == 0 && !error) {
+  if (ahci_current_req->dir == 0 && !error && ahci_current_req->kernel_wait) {
+    __memcpy(ahci_current_req->kernel_buf, (const void *)bounce_virt,
+             (size_t)ahci_current_req->count * 512);
+  } else if (ahci_current_req->dir == 0 && !error) {
     uint32_t byte_len = ahci_current_req->count * 512;
     bool ok = bounce_to_user_pages(ahci_current_req->caller_pid,
                                    ahci_current_req->user_buf, byte_len);
@@ -431,27 +447,36 @@ static void ahci_irq_handler(trapframe *tf) {
   __memcpy(msg.data + 12, &ahci_current_req->count, 4);
 
   pid_t caller = ahci_current_req->caller_pid;
+  bool kernel_wait = ahci_current_req->kernel_wait;
+  struct ahci_wait_ctx *wait = ahci_current_req->wait;
   uint32_t perf_cookie = 0x80000000U | ahci_current_req->cookie;
   perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_COMPLETE, perf_cookie);
   ahci_current_req = NULL;
   bq_count--;
   bq_head = (bq_head + 1) % BLOCK_QUEUE_SIZE;
 
-  // Notify caller process
-  notify_and_wake(caller, &msg);
-  perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_WAKE, perf_cookie);
+  if (kernel_wait) {
+    wait->result = error ? -EIO : 0;
+    __atomic_store_n(&wait->done, true, __ATOMIC_RELEASE);
+    if (wait->waiter)
+      wake_with_event(wait->waiter, WAIT_BLOCK_IO);
+  } else {
+    notify_and_wake(caller, &msg);
+    perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_WAKE, perf_cookie);
+  }
 
   // Issue next queued request if available
   if (bq_count > 0) {
     ahci_current_req = &block_pool[bq_head];
     ahci_issue_cmd(ahci_current_req);
   } else {
-    // Normal filesystem I/O polls for completion.  Keep PxIE off while no
-    // asynchronous request is active so those commands do not also raise MSI.
+    // No request owns slot 0 or the shared bounce buffer. The next submit
+    // re-enables PxIE immediately before ringing the doorbell.
     port_disable_interrupts(active_port);
     writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS),
            1U << active_port);
   }
+  spin_unlock(&ahci_queue_lock);
 }
 
 // ===================== Command issue with memory barrier =====================
@@ -567,7 +592,7 @@ static int ahci_comreset_port(int port) {
 }
 
 // ===================== ahci_set_active_port =====================
-// Switch the active port for polling I/O. Returns 0 on success, -EIO if port
+// Switch the active port while idle. Returns 0 on success, -EIO if port
 // has no device. Tries COMRESET if the port doesn't show DET=3 initially.
 int ahci_set_active_port(int port) {
   // Check if port has a device; try COMRESET if not detected
@@ -736,167 +761,6 @@ __attribute__((no_sanitize("kernel-address"))) void ahci_init() {
   ahci_puts("ahci: init done\n");
 }
 
-// ===================== ahci_read_lba (polling, for init-time ELF loading)
-// =====================
-int ahci_read_lba(uint32_t lba, uint32_t count, void *buf) {
-  uint8_t *dst = (uint8_t *)buf;
-
-  // blk_read() owns ahci_lock here, so no async command can legitimately be
-  // started concurrently. Polling and MSI completion must be mutually
-  // exclusive or every synchronous sector read also enters the IRQ handler.
-  port_disable_interrupts(active_port);
-  writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS),
-         1U << active_port);
-
-  while (count > 0) {
-    uint32_t chunk = count > AHCI_MAX_SECTORS ? AHCI_MAX_SECTORS : count;
-
-    __memset((void *)cmd_table_virt, 0, 0x80);
-
-    uint8_t *fis = (uint8_t *)cmd_table_virt;
-    fis[0] = FIS_H2D;
-    fis[1] = FIS_H2D_CMD;
-    fis[2] = CMD_READ_DMA_EXT;
-    fis[3] = 0x00;
-    fis[4] = (uint8_t)(lba & 0xFF);
-    fis[5] = (uint8_t)((lba >> 8) & 0xFF);
-    fis[6] = (uint8_t)((lba >> 16) & 0xFF);
-    fis[7] = 0x40;
-    fis[8] = (uint8_t)((lba >> 24) & 0xFF);
-    fis[9] = 0x00;
-    fis[10] = 0x00;
-    fis[11] = 0x00;
-    fis[12] = (uint8_t)(chunk & 0xFF);
-    fis[13] = (uint8_t)((chunk >> 8) & 0xFF);
-
-    uint32_t *prd = (uint32_t *)((uint8_t *)cmd_table_virt + 0x80);
-    prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);
-    prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);
-    prd[2] = 0;
-    prd[3] = ((chunk * 512 - 1) & 0x3FFFFF) | (1U << 31);
-
-    uint32_t *hdr = (uint32_t *)cmd_list_virt;
-    hdr[0] = (5 << 0) | (1 << 16);
-    hdr[1] = 0;
-    hdr[2] = (uint32_t)(cmd_table_phys & 0xFFFFFFFF);
-    hdr[3] = (uint32_t)((cmd_table_phys >> 32) & 0xFFFFFFFF);
-    hdr[4] = 0;
-    hdr[5] = 0;
-    hdr[6] = 0;
-    hdr[7] = 0;
-
-    writel(port_reg(active_port, PxIS), 0xFFFFFFFF);
-    ahci_issue_command();
-
-    // Poll until PxCI bit 0 clears
-    int timed_out = 1;
-    for (int i = 0; i < 10000000; i++) {
-      if (!(readl(port_reg(active_port, PxCI)) & 1)) {
-        timed_out = 0;
-        break;
-      }
-    }
-    if (timed_out) {
-      ahci_puts("ahci_read_lba: TIMEOUT (PxCI stuck)\n");
-      printk(LOG_ERROR, "  PxTFD=0x%x PxCMD=0x%x PxIS=0x%x\n",
-             readl(port_reg(active_port, PxTFD)),
-             readl(port_reg(active_port, PxCMD)),
-             readl(port_reg(active_port, PxIS)));
-      return -EIO;
-    }
-
-    uint32_t pxis = readl(port_reg(active_port, PxIS));
-    if (pxis & (1 << 30)) {
-      printk(LOG_ERROR, "ahci: task file error port=%d PxIS=%x PxTFD=%x\n",
-             active_port, pxis, readl(port_reg(active_port, PxTFD)));
-      return -EIO;
-    }
-
-    __memcpy(dst, (const void *)bounce_virt, chunk * 512);
-
-    dst += chunk * 512;
-    lba += chunk;
-    count -= chunk;
-  }
-  return 0;
-}
-
-// ===================== ahci_write_lba (polling, for init-time)
-// =====================
-int ahci_write_lba(uint32_t lba, uint32_t count, const void *buf) {
-  const uint8_t *src = (const uint8_t *)buf;
-
-  port_disable_interrupts(active_port);
-  writel((void __iomem *)((uint8_t __iomem *)abar + AHCI_IS),
-         1U << active_port);
-
-  while (count > 0) {
-    uint32_t chunk = count > AHCI_MAX_SECTORS ? AHCI_MAX_SECTORS : count;
-
-    __memcpy((void *)bounce_virt, src, chunk * 512);
-
-    __memset((void *)cmd_table_virt, 0, 0x80);
-
-    uint8_t *fis = (uint8_t *)cmd_table_virt;
-    fis[0] = FIS_H2D;
-    fis[1] = FIS_H2D_CMD;
-    fis[2] = CMD_WRITE_DMA_EXT;
-    fis[3] = 0x00;
-    fis[4] = (uint8_t)(lba & 0xFF);
-    fis[5] = (uint8_t)((lba >> 8) & 0xFF);
-    fis[6] = (uint8_t)((lba >> 16) & 0xFF);
-    fis[7] = 0x40;
-    fis[8] = (uint8_t)((lba >> 24) & 0xFF);
-    fis[9] = 0x00;
-    fis[10] = 0x00;
-    fis[11] = 0x00;
-    fis[12] = (uint8_t)(chunk & 0xFF);
-    fis[13] = (uint8_t)((chunk >> 8) & 0xFF);
-
-    uint32_t *prd = (uint32_t *)((uint8_t *)cmd_table_virt + 0x80);
-    prd[0] = (uint32_t)(bounce_phys & 0xFFFFFFFF);
-    prd[1] = (uint32_t)((bounce_phys >> 32) & 0xFFFFFFFF);
-    prd[2] = 0;
-    prd[3] = ((chunk * 512 - 1) & 0x3FFFFF) | (1U << 31);
-
-    uint32_t *hdr = (uint32_t *)cmd_list_virt;
-    hdr[0] = (5 << 0) | (1 << 6) | (1 << 16); // CFL=5 DW, W=1 (write), PRDTL=1
-    hdr[1] = 0;
-    hdr[2] = (uint32_t)(cmd_table_phys & 0xFFFFFFFF);
-    hdr[3] = (uint32_t)((cmd_table_phys >> 32) & 0xFFFFFFFF);
-    hdr[4] = 0;
-    hdr[5] = 0;
-    hdr[6] = 0;
-    hdr[7] = 0;
-
-    writel(port_reg(active_port, PxIS), 0xFFFFFFFF);
-    ahci_issue_command();
-
-    int timed_out = 1;
-    for (int i = 0; i < 10000000; i++) {
-      if (!(readl(port_reg(active_port, PxCI)) & 1)) {
-        timed_out = 0;
-        break;
-      }
-    }
-    if (timed_out) {
-      return -EIO;
-    }
-
-    uint32_t pxis = readl(port_reg(active_port, PxIS));
-    if (pxis & (1 << 30)) {
-      printk(LOG_ERROR, "ahci: write task file error port=%d PxIS=%x\n",
-             active_port, pxis);
-      return -EIO;
-    }
-
-    src += chunk * 512;
-    lba += chunk;
-    count -= chunk;
-  }
-  return 0;
-}
-
 // ===================== Async block I/O interface =====================
 
 // Submit async block request. Returns cookie (>0) on success, -errno on error.
@@ -918,10 +782,10 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
     return -EINVAL;
 
   uint64_t flags;
-  spin_lock_irqsave(&ahci_lock, &flags);
+  spin_lock_irqsave(&ahci_queue_lock, &flags);
 
   if (bq_count >= BLOCK_QUEUE_SIZE) {
-    spin_unlock_irqrestore(&ahci_lock, flags);
+    spin_unlock_irqrestore(&ahci_queue_lock, flags);
     return -EBUSY;
   }
 
@@ -929,7 +793,7 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
   block_req *req = &block_pool[bq_tail];
   if (dir == 1 && copy_from_user(req->staging, (const void __user *)buf,
                                  (size_t)count * 512)) {
-    spin_unlock_irqrestore(&ahci_lock, flags);
+    spin_unlock_irqrestore(&ahci_queue_lock, flags);
     return -EFAULT;
   }
   req->caller_pid = current_task->pid;
@@ -941,6 +805,9 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
   perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_SUBMIT,
                     0x80000000U | req->cookie);
   req->result = 0;
+  req->kernel_wait = false;
+  req->kernel_buf = NULL;
+  req->wait = NULL;
 
   bq_tail = (bq_tail + 1) % BLOCK_QUEUE_SIZE;
   bq_count++;
@@ -955,8 +822,80 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
     // notify_and_wake to unblock the caller.
   }
 
-  spin_unlock_irqrestore(&ahci_lock, flags);
+  spin_unlock_irqrestore(&ahci_queue_lock, flags);
   return (int)req->cookie; // positive cookie = success
+}
+
+int ahci_submit_sync(uint32_t lba, uint32_t count, void *buf, uint8_t dir) {
+  if (get_cpu_local()->in_hardirq != 0)
+    return -EWOULDBLOCK;
+
+  struct ahci_wait_ctx wait = {
+      .done = false, .result = -EIO, .waiter = current_task};
+  uint64_t flags;
+  spin_lock_irqsave(&ahci_queue_lock, &flags);
+  if (bq_count >= BLOCK_QUEUE_SIZE) {
+    spin_unlock_irqrestore(&ahci_queue_lock, flags);
+    return -EBUSY;
+  }
+  block_req *req = &block_pool[bq_tail];
+  req->caller_pid = -1;
+  req->lba = lba;
+  req->count = count;
+  req->dir = dir;
+  req->cookie = ++ahci_cookie_counter;
+  if (!req->cookie)
+    req->cookie = ++ahci_cookie_counter;
+  req->result = 0;
+  req->kernel_wait = true;
+  req->kernel_buf = buf;
+  req->wait = &wait;
+  if (dir)
+    __memcpy(req->staging, buf, (size_t)count * 512);
+  bq_tail = (bq_tail + 1) % BLOCK_QUEUE_SIZE;
+  bq_count++;
+
+  int cpu = current_task ? current_task->assigned_cpu : 0;
+  if (current_task) {
+    spin_lock(&cpu_locals[cpu].scheduler_lock);
+    current_task->state = BLOCKED;
+    current_task->wait_event = WAIT_BLOCK_IO;
+    spin_unlock(&cpu_locals[cpu].scheduler_lock);
+  }
+  if (!ahci_current_req) {
+    ahci_current_req = req;
+    port_enable_interrupts(active_port);
+    ahci_issue_cmd(req);
+  }
+  spin_unlock_irqrestore(&ahci_queue_lock, flags);
+
+  /* Before kernel_main installs the BSP idle task, filesystem discovery can
+   * still issue requests. It uses the same MSI completion path; there is no
+   * PxCI polling fallback. HLT merely waits for the completion interrupt. */
+  if (!current_task) {
+    while (!__atomic_load_n(&wait.done, __ATOMIC_ACQUIRE))
+      __asm__ volatile("sti; hlt; cli" ::: "memory");
+    __asm__ volatile("pushq %0; popfq" : : "r"(flags));
+    return wait.result;
+  }
+
+  for (;;) {
+    if (__atomic_load_n(&wait.done, __ATOMIC_ACQUIRE)) {
+      sched_cancel_spurious_wake(current_task);
+      return wait.result;
+    }
+    schedule();
+    if (__atomic_load_n(&wait.done, __ATOMIC_ACQUIRE))
+      return wait.result;
+    spin_lock_irqsave(&ahci_queue_lock, &flags);
+    spin_lock(&cpu_locals[cpu].scheduler_lock);
+    if (!__atomic_load_n(&wait.done, __ATOMIC_ACQUIRE)) {
+      current_task->state = BLOCKED;
+      current_task->wait_event = WAIT_BLOCK_IO;
+    }
+    spin_unlock(&cpu_locals[cpu].scheduler_lock);
+    spin_unlock_irqrestore(&ahci_queue_lock, flags);
+  }
 }
 
 // ===================== Driver registry =====================

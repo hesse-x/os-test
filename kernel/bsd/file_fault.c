@@ -44,9 +44,12 @@
 #include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/sparse.h"
+#include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/trap.h"
 #include "kernel/xcore/xtask.h"
 #include "utils/macro.h"
 
+#include <xos/errno.h>
 #include <xos/mman.h>
 #include <xos/page.h>
 
@@ -91,18 +94,64 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
 
   // ---- FD_REGULAR file-backed mapping: page-in via the page cache ----
   if (mr->inode) {
+    uint64_t mmap_flags;
+    spin_lock_irqsave(&t->mm->mmap_lock, &mmap_flags);
+    mr = vma_find(t->mm, page_addr);
+    if (!mr || !mr->inode) {
+      spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
+      return FAULT_NOT_HANDLED;
+    }
+    fault_off = mr->offset + (page_addr - mr->vaddr);
     uint64_t page_idx = fault_off / PAGE_SIZE;
+    uint32_t window = 1;
+    if (mr->ra_sequential_faults == 0) {
+      mr->ra_sequential_faults = 1;
+    } else if (mr->ra_last_page != UINT64_MAX &&
+               page_idx == mr->ra_last_page + 1) {
+      if (mr->ra_window_pages == 0) {
+        mr->ra_window_pages = 4;
+        mr->ra_next_page = page_idx + 4;
+      } else if (page_idx == mr->ra_next_page) {
+        mr->ra_window_pages =
+            mr->ra_window_pages < 16 ? mr->ra_window_pages * 2 : 16;
+        mr->ra_next_page = page_idx + mr->ra_window_pages;
+      }
+      mr->ra_sequential_faults++;
+      window = mr->ra_window_pages ? mr->ra_window_pages : 1;
+    } else {
+      mr->ra_window_pages = 0;
+      mr->ra_next_page = 0;
+      mr->ra_sequential_faults = 1;
+    }
+    mr->ra_last_page = page_idx;
+
+    uint64_t vma_end = mr->vaddr + mr->size;
+    uint64_t vma_pages = (vma_end - page_addr) / PAGE_SIZE;
+    if (vma_pages == 0)
+      vma_pages = 1;
+    if (window > vma_pages)
+      window = (uint32_t)vma_pages;
+
+    uint64_t snap_vaddr = mr->vaddr;
+    uint64_t snap_size = mr->size;
+    uint64_t snap_offset = mr->offset;
+    uint32_t snap_prot = mr->prot;
+    struct inode *ip = inode_get(mr->inode);
+    spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
+
     struct cache_page *cp;
-    int fill_rc = page_cache_get(mr->inode, page_idx, &cp);
+    int fill_rc = page_cache_get_ra(ip, page_idx, window, &cp);
     if (fill_rc) {
       printk(LOG_WARN, "file_fault: page_cache_fill failed inode=%p idx=%lu\n",
-             (void *)mr->inode, (unsigned long)page_idx);
-      return 0; // read error → SIGSEGV
+             (void *)ip, (unsigned long)page_idx);
+      inode_put(ip);
+      return fill_rc == -EIO ? FAULT_IO_ERROR : FAULT_NOT_HANDLED;
     }
 
     struct page *user_page = bfc_alloc_page(1);
     if (!user_page) {
       page_cache_release(cp);
+      inode_put(ip);
       printk(LOG_WARN, "file_fault: OOM user page addr=0x%lx\n",
              (unsigned long)page_addr);
       return 0;
@@ -117,7 +166,7 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
     // Zero the sub-page tail beyond EOF on the last page so a short file
     // mmap'd into a full page reads zero past its end (Linux semantics within
     // the mapped page; mappings extending past EOF are rejected at mmap time).
-    uint64_t file_size = mr->inode->size;
+    uint64_t file_size = ip->size;
     if (fault_off < file_size) {
       uint64_t page_end = fault_off + PAGE_SIZE;
       if (page_end > file_size) {
@@ -130,12 +179,27 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
       __memset(user_va, 0, PAGE_SIZE);
     }
 
-    uint64_t pte_flags = file_fault_pte_flags(mr->prot);
-    if (!file_fault_map(t->mm->cr3, page_addr, user_phys, pte_flags)) {
+    uint64_t pte_flags = file_fault_pte_flags(snap_prot);
+    spin_lock_irqsave(&t->mm->mmap_lock, &mmap_flags);
+    mmap_region *current = vma_find(t->mm, page_addr);
+    bool same_mapping =
+        current && current->inode == ip && current->vaddr == snap_vaddr &&
+        current->size == snap_size && current->offset == snap_offset &&
+        current->prot == snap_prot;
+    pte = lookup_pte(t->mm->cr3, page_addr);
+    if (same_mapping && pte && pte_present(*pte)) {
+      spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
       bfc_free_page(user_page, 1);
-      return 0;
+      inode_put(ip);
+      return FAULT_HANDLED;
     }
-    return 1;
+    bool mapped = same_mapping &&
+                  file_fault_map(t->mm->cr3, page_addr, user_phys, pte_flags);
+    spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
+    if (!mapped)
+      bfc_free_page(user_page, 1);
+    inode_put(ip);
+    return mapped ? FAULT_HANDLED : FAULT_NOT_HANDLED;
   }
 
   // ---- memfd MAP_PRIVATE mapping: COW-copy from the shm page list ----

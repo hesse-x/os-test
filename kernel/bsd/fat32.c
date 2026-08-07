@@ -25,6 +25,7 @@
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/slab.h"
+#include "kernel/xcore/mutex.h"
 #include "kernel/xcore/spinlock.h"
 
 #include "kernel/bsd/kfcntl.h"
@@ -44,8 +45,9 @@ static uint32_t spf32;
 static uint32_t next_free_hint = 2;
 
 // Global FAT lock: protects FAT modifications (free cluster scan + FAT entry
-// writes). Lock order: i_lock → fat_lock → ahci_lock (via blk_write).
-static spinlock fat_lock = SPINLOCK_INIT;
+// writes). Long-term metadata serialization is independent of the AHCI queue.
+static mutex fat_lock;
+static mutex fat_cache_fill_lock;
 
 // ==================== FAT sector cache ====================
 // A cache miss fetches a whole aligned group. FAT chain walks are sequential,
@@ -91,8 +93,9 @@ static int fat_cache_slot(uint32_t sector_lba) {
 // Read FAT sector into cache, returns cache slot.
 //
 // SMP-safe fill: reserve and invalidate the victim before I/O, then publish it
-// under fat_cache_lock only after the sector is complete. Consumers revalidate
-// the tag and copy their FAT word under the same lock.
+// under fat_cache_lock only after the sector is complete. Cache misses are
+// serialized by a sleepable mutex so a task never spins behind a filler that
+// blocked in the AHCI path.
 static int fat_cache_read(uint32_t sector_lba) {
   uint32_t relative = sector_lba - fat_start_lba;
   uint32_t group_relative =
@@ -105,55 +108,48 @@ static int fat_cache_read(uint32_t sector_lba) {
   int group_slot = (int)(group_relative & (FAT_CACHE_PAGES - 1));
   uint32_t generations[FAT_CACHE_READAHEAD_SECTORS];
 
-  for (;;) {
-    spin_lock(&fat_cache_lock);
-    if (!fat_cache[slot].filling && fat_cache[slot].sector_lba == sector_lba) {
-      __atomic_fetch_add(&fat_cache_hits, 1, __ATOMIC_RELAXED);
-      spin_unlock(&fat_cache_lock);
-      return slot;
-    }
-
-    // Overlapping fills share the result instead of issuing duplicate AHCI
-    // commands. A group is aligned, so its backing rows are contiguous.
-    bool busy = false;
-    for (uint32_t i = 0; i < group_count; i++) {
-      if (fat_cache[group_slot + i].filling) {
-        busy = true;
-        break;
-      }
-    }
-    if (busy) {
-      __atomic_fetch_add(&fat_cache_fill_waits, 1, __ATOMIC_RELAXED);
-      spin_unlock(&fat_cache_lock);
-      __asm__ volatile("pause");
-      continue;
-    }
-
-    for (uint32_t i = 0; i < group_count; i++) {
-      struct fat_cache_entry *entry = &fat_cache[group_slot + i];
-      entry->sector_lba = group_lba + i;
-      entry->filling = true;
-      generations[i] = ++entry->generation;
-    }
-    __atomic_fetch_add(&fat_cache_misses, 1, __ATOMIC_RELAXED);
+  spin_lock(&fat_cache_lock);
+  if (!fat_cache[slot].filling && fat_cache[slot].sector_lba == sector_lba) {
+    __atomic_fetch_add(&fat_cache_hits, 1, __ATOMIC_RELAXED);
     spin_unlock(&fat_cache_lock);
-
-    int rc = blk_read(group_lba, group_count, fat_cache_data[group_slot]);
-    __atomic_fetch_add(&fat_cache_io_commands, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&fat_cache_io_sectors, group_count, __ATOMIC_RELAXED);
-
-    spin_lock(&fat_cache_lock);
-    for (uint32_t i = 0; i < group_count; i++) {
-      struct fat_cache_entry *entry = &fat_cache[group_slot + i];
-      if (entry->generation != generations[i])
-        entry->sector_lba = 0xFFFFFFFF;
-      else if (rc != 0)
-        entry->sector_lba = 0xFFFFFFFF;
-      entry->filling = false;
-    }
-    spin_unlock(&fat_cache_lock);
-    return rc == 0 ? slot : -1;
+    return slot;
   }
+  spin_unlock(&fat_cache_lock);
+
+  mutex_lock(&fat_cache_fill_lock);
+
+  // Another filler may have populated this sector while we slept.
+  spin_lock(&fat_cache_lock);
+  if (!fat_cache[slot].filling && fat_cache[slot].sector_lba == sector_lba) {
+    __atomic_fetch_add(&fat_cache_hits, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&fat_cache_fill_waits, 1, __ATOMIC_RELAXED);
+    spin_unlock(&fat_cache_lock);
+    mutex_unlock(&fat_cache_fill_lock);
+    return slot;
+  }
+  for (uint32_t i = 0; i < group_count; i++) {
+    struct fat_cache_entry *entry = &fat_cache[group_slot + i];
+    entry->sector_lba = group_lba + i;
+    entry->filling = true;
+    generations[i] = ++entry->generation;
+  }
+  __atomic_fetch_add(&fat_cache_misses, 1, __ATOMIC_RELAXED);
+  spin_unlock(&fat_cache_lock);
+
+  int rc = blk_read(group_lba, group_count, fat_cache_data[group_slot]);
+  __atomic_fetch_add(&fat_cache_io_commands, 1, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&fat_cache_io_sectors, group_count, __ATOMIC_RELAXED);
+
+  spin_lock(&fat_cache_lock);
+  for (uint32_t i = 0; i < group_count; i++) {
+    struct fat_cache_entry *entry = &fat_cache[group_slot + i];
+    if (entry->generation != generations[i] || rc != 0)
+      entry->sector_lba = 0xFFFFFFFF;
+    entry->filling = false;
+  }
+  spin_unlock(&fat_cache_lock);
+  mutex_unlock(&fat_cache_fill_lock);
+  return rc == 0 ? slot : -1;
 }
 
 // Invalidate FAT cache entries for a given sector.
@@ -821,7 +817,7 @@ static struct inode *fat32_dir_create(struct inode *dir, const char *name,
   if (namelen == 0)
     return ERR_PTR(-ENOENT);
 
-  spin_lock(&fat_lock);
+  mutex_lock(&fat_lock);
   // Find a free slot (0x00 or 0xE5) on dir->start_cluster's chain; extend a
   // cluster if none.
   int entries = bytes_per_cluster / 32;
@@ -830,12 +826,12 @@ static struct inode *fat32_dir_create(struct inode *dir, const char *name,
   int frc = fat32_dir_find_slot(dir->start_cluster, &target_cluster, &free_idx,
                                 &was_end_of_dir);
   if (frc != 0) {
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
     return ERR_PTR(frc);
   }
   uint8_t *db = read_cluster_buf(target_cluster);
   if (!db) {
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
     return ERR_PTR(-EIO);
   }
   struct fat_dir_entry ne;
@@ -856,7 +852,7 @@ static struct inode *fat32_dir_create(struct inode *dir, const char *name,
       wrc = write_cluster_sector(target_cluster, ns, db + ns * 512);
   }
   kfree(db);
-  spin_unlock(&fat_lock);
+  mutex_unlock(&fat_lock);
   if (wrc != 0)
     return ERR_PTR(-EIO);
   uint32_t ino = fat32_make_ino(target_cluster, free_idx);
@@ -875,16 +871,16 @@ static int fat32_dir_mkdir(struct inode *dir, const char *name, int mode) {
     namelen++;
   if (namelen == 0)
     return -ENOENT;
-  spin_lock(&fat_lock);
+  mutex_lock(&fat_lock);
   uint32_t new_cluster = fat32_allocate_cluster();
   if (new_cluster == 0) {
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
     return -ENOSPC;
   }
   uint8_t *db = (uint8_t *)kmalloc(bytes_per_cluster);
   if (!db) {
     fat32_write_fat_entry(new_cluster, 0);
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
     return -ENOMEM;
   }
   __memset(db, 0, bytes_per_cluster);
@@ -917,13 +913,13 @@ static int fat32_dir_mkdir(struct inode *dir, const char *name, int mode) {
                                 &was_end_of_dir);
   if (frc != 0) {
     fat32_free_chain(new_cluster);
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
     return frc;
   }
   uint8_t *pb = read_cluster_buf(target_cluster);
   if (!pb) {
     fat32_free_chain(new_cluster);
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
     return -EIO;
   }
   struct fat_dir_entry ne;
@@ -946,7 +942,7 @@ static int fat32_dir_mkdir(struct inode *dir, const char *name, int mode) {
       wrc = write_cluster_sector(target_cluster, ns, pb + ns * 512);
   }
   kfree(pb);
-  spin_unlock(&fat_lock);
+  mutex_unlock(&fat_lock);
   if (wrc != 0)
     return -EIO;
   // Pre-build the inode cache entry (caller sys_mkdir doesn't take the inode
@@ -991,9 +987,9 @@ static int fat32_dir_unlink(struct inode *dir, const char *name) {
   write_cluster_sector(dir_cluster, sec, db + sec * 512);
   kfree(db);
   if (target_cluster >= 2 && target_cluster < 0x0FFFFFF8) {
-    spin_lock(&fat_lock);
+    mutex_lock(&fat_lock);
     fat32_free_chain(target_cluster);
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
   }
   // IN_DELETE on the parent (name) + IN_DELETE_SELF on the child inode. No
   // fat_lock/i_lock held here. inode_lookup returns +1; inotify_inode_event
@@ -1060,10 +1056,10 @@ static int fat32_dir_rmdir(struct inode *dir, const char *name) {
     target_cluster = root_cluster;
   if (!fat32_dir_is_empty(target_cluster))
     return -EBUSY;
-  spin_lock(&fat_lock);
+  mutex_lock(&fat_lock);
   uint8_t *db = read_cluster_buf(dir_cluster);
   if (!db) {
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
     return -EIO;
   }
   db[dir_idx * 32] = 0xE5;
@@ -1072,7 +1068,7 @@ static int fat32_dir_rmdir(struct inode *dir, const char *name) {
   kfree(db);
   if (target_cluster >= 2 && target_cluster < 0x0FFFFFF8)
     fat32_free_chain(target_cluster);
-  spin_unlock(&fat_lock);
+  mutex_unlock(&fat_lock);
   // IN_DELETE on the parent (name) + IN_DELETE_SELF on the removed dir inode.
   // inode_lookup returns +1; inotify_inode_event only reads the pointer as an
   // index key, so drop the ref here (same ref-leak fix as fat32_dir_unlink).
@@ -1116,9 +1112,9 @@ static int fat32_getattr(struct inode *ip, struct kstat *ks) {
 // setattr takes i_lock itself, then calls fat32_ftruncate (which takes
 // fat_lock internally). Caller does not hold i_lock.
 static int fat32_setattr(struct inode *ip, uint64_t size) {
-  spin_lock(&ip->i_lock);
+  mutex_lock(&ip->i_lock);
   int rc = fat32_ftruncate(ip, size);
-  spin_unlock(&ip->i_lock);
+  mutex_unlock(&ip->i_lock);
   return rc;
 }
 
@@ -1210,13 +1206,13 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
     }
   }
 
-  spin_lock(&fat_lock);
+  mutex_lock(&fat_lock);
 
   // Read the old entry (keep attr/fst_clus/size, only rewrite name to
   // new_name's 8.3 form).
   uint8_t *old_db = read_cluster_buf(old_dir_cluster);
   if (!old_db) {
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
     return -EIO;
   }
   struct fat_dir_entry ne;
@@ -1242,7 +1238,7 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
       tail = cur;
       uint8_t *db = read_cluster_buf(cur);
       if (!db) {
-        spin_unlock(&fat_lock);
+        mutex_unlock(&fat_lock);
         return -EIO;
       }
       for (int i = 0; i < entries; i++) {
@@ -1267,19 +1263,19 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
     if (target_idx < 0) {
       uint32_t nc = fat32_allocate_cluster();
       if (nc == 0) {
-        spin_unlock(&fat_lock);
+        mutex_unlock(&fat_lock);
         return -ENOSPC;
       }
       if (fat32_link_cluster(tail, nc) != 0) {
         fat32_write_fat_entry(nc, 0);
-        spin_unlock(&fat_lock);
+        mutex_unlock(&fat_lock);
         return -EIO;
       }
       uint8_t *zb = (uint8_t *)kmalloc(bytes_per_cluster);
       if (!zb) {
         fat32_write_fat_entry(nc, 0);
         fat32_write_fat_entry(tail, 0x0FFFFFFF);
-        spin_unlock(&fat_lock);
+        mutex_unlock(&fat_lock);
         return -ENOMEM;
       }
       __memset(zb, 0, bytes_per_cluster);
@@ -1296,7 +1292,7 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
   // the end-of-dir marker.
   uint8_t *new_db = read_cluster_buf(target_cluster);
   if (!new_db) {
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
     return -EIO;
   }
   int entries = bytes_per_cluster / 32;
@@ -1312,7 +1308,7 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
   }
   kfree(new_db);
   if (wrc != 0) {
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
     return -EIO;
   }
 
@@ -1321,7 +1317,7 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
   if (old_dir_cluster != target_cluster || old_dir_idx != target_idx) {
     uint8_t *odb = read_cluster_buf(old_dir_cluster);
     if (!odb) {
-      spin_unlock(&fat_lock);
+      mutex_unlock(&fat_lock);
       return -EIO;
     }
     odb[old_dir_idx * 32] = 0xE5;
@@ -1329,7 +1325,7 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
     wrc = write_cluster_sector(old_dir_cluster, osec, odb + osec * 512);
     kfree(odb);
     if (wrc != 0) {
-      spin_unlock(&fat_lock);
+      mutex_unlock(&fat_lock);
       return -EIO;
     }
   }
@@ -1356,7 +1352,7 @@ static int fat32_dir_rename(struct inode *old_parent, const char *old_name,
     inode_put(old_ip);
   }
 
-  spin_unlock(&fat_lock);
+  mutex_unlock(&fat_lock);
   return 0;
 }
 
@@ -1655,9 +1651,9 @@ static int fat32_update_dir_entry(uint32_t dir_cluster, int dir_idx,
 // ====================
 
 static int fat32_truncate(uint32_t cluster, uint32_t dir_cluster, int dir_idx) {
-  spin_lock(&fat_lock);
+  mutex_lock(&fat_lock);
   fat32_free_chain(cluster);
-  spin_unlock(&fat_lock);
+  mutex_unlock(&fat_lock);
 
   // Update directory entry: cluster=0, size=0.
   return fat32_update_dir_entry(dir_cluster, dir_idx, 0, 0);
@@ -1696,9 +1692,9 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
 
   if (len < ip->size) {
     // Shrink: free every cluster past the keep boundary.
-    spin_lock(&fat_lock);
+    mutex_lock(&fat_lock);
     if (ip->start_cluster == 0) {
-      spin_unlock(&fat_lock);
+      mutex_unlock(&fat_lock);
       return -EIO;
     }
     // Walk to the last cluster we keep (index keep_clusters-1).
@@ -1718,11 +1714,11 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
       fat32_write_fat_entry(prev, 0x0FFFFFFF);
       fat32_free_chain(c);
     }
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
   } else {
     // Grow into a detached chain, zero it in physical extents, then publish
     // the single tail link only after all allocation and I/O has succeeded.
-    spin_lock(&fat_lock);
+    mutex_lock(&fat_lock);
     uint32_t tail = ip->start_cluster;
     uint32_t have = tail ? 1 : 0;
     uint32_t guard = total_data_clusters;
@@ -1738,21 +1734,21 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
       int rc = fat32_allocate_detached(keep_clusters - have, &detached_start,
                                        &detached_tail);
       if (rc) {
-        spin_unlock(&fat_lock);
+        mutex_unlock(&fat_lock);
         return rc;
       }
       if (tail) {
         rc = fat32_link_cluster(tail, detached_start);
         if (rc) {
           fat32_free_chain(detached_start);
-          spin_unlock(&fat_lock);
+          mutex_unlock(&fat_lock);
           return rc;
         }
       } else {
         ip->start_cluster = detached_start;
       }
     }
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
   }
 
   ip->size = len;
@@ -1768,6 +1764,9 @@ int fat32_ftruncate(struct inode *ip, uint64_t len) {
 
 int fat32_init(void) {
   printk(LOG_INFO, "fat32_init: starting\n");
+
+  mutex_init(&fat_lock);
+  mutex_init(&fat_cache_fill_lock);
 
   // Initialize FAT cache.
   for (int i = 0; i < FAT_CACHE_PAGES; i++) {
@@ -1822,8 +1821,9 @@ int fat32_init(void) {
   root_cluster = (uint32_t)bpb[44] | ((uint32_t)bpb[45] << 8) |
                  ((uint32_t)bpb[46] << 16) | ((uint32_t)bpb[47] << 24);
 
-  if (bps != 512 || sectors_per_cluster == 0 || spf32 == 0 ||
-      root_cluster < 2) {
+  if (bps != 512 || sectors_per_cluster == 0 ||
+      (sectors_per_cluster & (sectors_per_cluster - 1)) != 0 ||
+      sectors_per_cluster > 128 || spf32 == 0 || root_cluster < 2) {
     printk(LOG_ERROR,
            "fat32_init: invalid BPB (bps=%u spc=%u spf=%u root=%u)\n", bps,
            sectors_per_cluster, spf32, root_cluster);
@@ -1884,6 +1884,14 @@ void fat32_dump_cache_stats(void) {
          "write_cmds=%lu read_sectors=%lu write_sectors=%lu\n",
          bs.submitted, bs.completed, bs.failed, bs.read_cmds, bs.write_cmds,
          bs.read_sectors, bs.write_sectors);
+  struct page_cache_stats pcs;
+  page_cache_get_stats(&pcs);
+  printk(LOG_DEBUG,
+         "readahead: batches=%lu pages=%lu hits=%lu waste=%lu "
+         "fragment_trunc=%lu fallback=%lu\n",
+         pcs.readahead_batches, pcs.readahead_pages, pcs.readahead_hits,
+         pcs.readahead_waste, pcs.readahead_fragment_truncations,
+         pcs.readahead_fallbacks);
 }
 
 // ==================== File read ====================
@@ -1904,7 +1912,14 @@ int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count) {
       chunk = count - nread;
 
     struct cache_page *cp;
-    int rc = page_cache_get(ip, page_idx, &cp);
+    uint32_t read_window = 1;
+    if (count - nread >= 4 * 4096) {
+      uint64_t bytes = page_off + (count - nread);
+      read_window = (uint32_t)((bytes + 4095) / 4096);
+      if (read_window > 16)
+        read_window = 16;
+    }
+    int rc = page_cache_get_ra(ip, page_idx, read_window, &cp);
     if (rc)
       return nread ? (int)nread : rc;
     __memcpy((uint8_t *)buf + nread, cp->data + page_off, chunk);
@@ -1918,7 +1933,7 @@ int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count) {
 
 int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
                 size_t count) {
-  spin_lock(&ip->i_lock);
+  mutex_lock(&ip->i_lock);
 
   // O_APPEND: write at end of file.
   if (ip->mode & O_APPEND) {
@@ -1939,9 +1954,6 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
     if (chunk > count - written)
       chunk = count - written;
 
-    // Convert page_idx to cluster index for FAT chain walk.
-    uint32_t clusters_per_page = 4096 / bytes_per_cluster;
-    uint32_t cluster_idx = page_idx * clusters_per_page;
     // The page cache is 4KB-granular: page_cache_fill reads and
     // page_cache_writeback writes every cluster spanning the page
     // (clusters_per_page of them — 8 when the FAT32 cluster is 512B). For the
@@ -1952,11 +1964,13 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
     // past the first cluster and corrupting files >4KB. Allocate every cluster
     // covering [page_off, page_off+chunk) here, in order, tail-linked onto the
     // chain.
-    uint32_t first_in_page = page_off / bytes_per_cluster;
-    uint32_t last_in_page = (page_off + chunk - 1) / bytes_per_cluster;
+    uint64_t write_start = offset + written;
+    uint64_t write_end = write_start + chunk - 1;
+    uint32_t first_chain = (uint32_t)(write_start / bytes_per_cluster);
+    uint32_t last_chain = (uint32_t)(write_end / bytes_per_cluster);
     bool enospc = false;
-    for (uint32_t cip = first_in_page; cip <= last_in_page; cip++) {
-      uint32_t chain_index = cluster_idx + cip;
+    for (uint32_t chain_index = first_chain; chain_index <= last_chain;
+         chain_index++) {
       uint32_t existing = fat32_walk_chain(ip->start_cluster, chain_index);
       if (existing >= 2 && existing < 0x0FFFFFF8)
         continue; // already allocated
@@ -1970,12 +1984,12 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
       if (ip->start_cluster != 0 &&
           (append_tail < 2 || append_tail >= 0x0FFFFFF8)) {
         WARN_ON(1);
-        spin_unlock(&ip->i_lock);
+        mutex_unlock(&ip->i_lock);
         return written ? (int)written : -EIO;
       }
 
-      uint32_t need = last_in_page - cip + 1;
-      spin_lock(&fat_lock);
+      uint32_t need = last_chain - chain_index + 1;
+      mutex_lock(&fat_lock);
       uint32_t detached_start = 0, detached_tail = 0;
       int alloc_rc =
           fat32_allocate_detached(need, &detached_start, &detached_tail);
@@ -1985,14 +1999,14 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
         operation_error = alloc_rc ? alloc_rc : -EIO;
         if (detached_start)
           fat32_free_chain(detached_start);
-        spin_unlock(&fat_lock);
+        mutex_unlock(&fat_lock);
         enospc = true;
         break;
       }
       if (ip->start_cluster == 0)
         ip->start_cluster = detached_start;
       append_tail = detached_tail;
-      spin_unlock(&fat_lock);
+      mutex_unlock(&fat_lock);
 
       // Invalidate page cache — new cluster changes mapping.
       page_cache_invalidate_inode(ip);
@@ -2044,7 +2058,7 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
     }
   }
 
-  spin_unlock(&ip->i_lock);
+  mutex_unlock(&ip->i_lock);
   // IN_MODIFY on the written file (i_lock released above; fat_lock not held
   // here). Only fire if something was actually written.
   if (written > 0)
@@ -2195,9 +2209,9 @@ int fat32_unlink(const char *path) {
 
   // Free cluster chain.
   if (target_cluster >= 2 && target_cluster < 0x0FFFFFF8) {
-    spin_lock(&fat_lock);
+    mutex_lock(&fat_lock);
     fat32_free_chain(target_cluster);
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
   }
 
   return 0;
@@ -2273,9 +2287,9 @@ int fat32_rmdir(const char *path) {
 
   // Free directory cluster chain.
   if (target_cluster >= 2 && target_cluster < 0x0FFFFFF8) {
-    spin_lock(&fat_lock);
+    mutex_lock(&fat_lock);
     fat32_free_chain(target_cluster);
-    spin_unlock(&fat_lock);
+    mutex_unlock(&fat_lock);
   }
 
   return 0;

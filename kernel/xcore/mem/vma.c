@@ -30,6 +30,15 @@ static bool overlaps_signal_trampoline(uint64_t start, uint64_t len) {
   return start < SIG_TRAMPOLINE_ADDR + PAGE_SIZE && end > SIG_TRAMPOLINE_ADDR;
 }
 
+void vma_reset_readahead(mmap_region *region) {
+  if (!region)
+    return;
+  region->ra_last_page = UINT64_MAX;
+  region->ra_next_page = 0;
+  region->ra_window_pages = 0;
+  region->ra_sequential_faults = 0;
+}
+
 // USER_VMA_UPPER_BOUND now lives in vma.h (shared with sys_mremap).
 
 mmap_region *vma_find(mm *mm, uint64_t addr) {
@@ -124,6 +133,7 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
   if (!mid)
     return NULL;
   *mid = *r;
+  vma_reset_readahead(mid);
   mid->vaddr = addr;
   mid->size = size;
   mid->offset = mid_off;
@@ -150,6 +160,7 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
       return NULL;
     }
     *tail = *r;
+    vma_reset_readahead(tail);
     uint64_t t_delta = (addr + size) - r->vaddr;
     tail->vaddr = addr + size;
     tail->size = r_end - (addr + size);
@@ -181,6 +192,7 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
   } else {
     // Shrink r to the front piece.
     r->size = delta;
+    vma_reset_readahead(r);
     mmap_region *after = r->next;
     r->next = mid;
     mid->next = tail ? tail : after;

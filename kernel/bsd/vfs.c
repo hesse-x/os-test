@@ -27,6 +27,7 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mem/slab.h"
+#include "kernel/xcore/mutex.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
@@ -444,14 +445,14 @@ int generic_update_time(struct inode *ip, uint64_t at, uint64_t mt, uint64_t ct,
                         int which) {
   if (!ip)
     return -ENOENT;
-  spin_lock(&ip->i_lock);
+  mutex_lock(&ip->i_lock);
   if ((which & ATIME_BIT))
     ip->atime = at;
   if ((which & MTIME_BIT))
     ip->mtime = mt;
   if ((which & CTIME_BIT))
     ip->ctime = ct;
-  spin_unlock(&ip->i_lock);
+  mutex_unlock(&ip->i_lock);
   return 0;
 }
 
@@ -1188,10 +1189,10 @@ int64_t sys_fsync(int64_t arg1, int64_t unused1, int64_t unused2,
   if (!ip)
     return (int64_t)-EBADF;
 
-  page_cache_flush_inode(ip);
+  int rc = page_cache_flush_inode(ip);
   /* FAT32 has no separate metadata journal; the dir entry is updated
    * synchronously on each size/metadata change, so nothing more to flush. */
-  return 0;
+  return (int64_t)rc;
 }
 
 /* sys_sync() — SYS_SYNC (group 3): write back all dirty pages. */
@@ -1203,8 +1204,7 @@ int64_t sys_sync(int64_t unused1, int64_t unused2, int64_t unused3,
   (void)unused4;
   (void)unused5;
   (void)unused6;
-  page_cache_flush_all();
-  return 0;
+  return (int64_t)page_cache_flush_all();
 }
 
 /* sys_mkdir(path, mode) — SYS_MKDIR */

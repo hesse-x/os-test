@@ -53,6 +53,7 @@
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/mutex.h"
 #include "kernel/xcore/perf/core.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
@@ -1000,6 +1001,7 @@ static mmap_region *mmap_place_file_region(xtask *proc, uint64_t *pml4,
     return NULL;
   }
   __memset(region, 0, sizeof(*region));
+  vma_reset_readahead(region);
   region->vaddr = vaddr;
   region->size = size;
   region->phys = 0;
@@ -2016,6 +2018,7 @@ int64_t sys_mremap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       if (old_end == proc->mm->mmap_brk)
         proc->mm->mmap_brk = new_end;
     }
+    vma_reset_readahead(r);
     ret = (int64_t)old_addr;
     goto out;
   }
@@ -2069,6 +2072,7 @@ int64_t sys_mremap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     *pp = r->next;
     r->vaddr = new_va;
     r->size = new_size;
+    vma_reset_readahead(r);
     r->next = NULL;
     // phys base is unchanged: a MAP_PHYSICAL mapping relocates the same phys
     // range to a new VA from offset 0 (only same-size move reaches here for
@@ -4036,13 +4040,13 @@ static int update_ctime(struct inode *ip) {
  * setuid/setgid 位(对齐 Linux chmod_common)。锁序:仅持 i_lock(leaf lock,
  * 照 fat32 i_lock→fat_lock 序,i_lock 在内层),不碰 fat_lock/page_cache_lock。 */
 static void apply_chmod(struct inode *ip, unsigned int new_mode) {
-  spin_lock(&ip->i_lock);
+  mutex_lock(&ip->i_lock);
   ip->mode = (ip->mode & S_IFMT) | (new_mode & 07777); /* 保留文件类型位 */
   if (!capable(CAP_FSETID) && S_ISREG(ip->mode))
     ip->mode &= ~(S_ISUID | S_ISGID); /* 非特权 chmod 必清 setuid 位 */
   if (!capable(CAP_FSETID) && S_ISDIR(ip->mode))
     ip->mode &= ~S_ISVTX;
-  spin_unlock(&ip->i_lock);
+  mutex_unlock(&ip->i_lock);
 }
 
 /* do_fchmodat:chmod/fchmod/fchmodat 共同实现。flags 校验照 do_utimensat(接受
@@ -4110,14 +4114,14 @@ int64_t sys_fchmod(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
  * 清 setuid/setgid 位(对齐 Linux chown_common)。锁序同 apply_chmod:仅 i_lock。
  */
 static void apply_chown(struct inode *ip, unsigned int uid, unsigned int gid) {
-  spin_lock(&ip->i_lock);
+  mutex_lock(&ip->i_lock);
   if (uid != (unsigned int)-1)
     ip->uid = uid;
   if (gid != (unsigned int)-1)
     ip->gid = gid;
   if (!capable(CAP_FSETID) && S_ISREG(ip->mode))
     ip->mode &= ~(S_ISUID | S_ISGID); /* chown 改 owner 后非特权清 setuid 位 */
-  spin_unlock(&ip->i_lock);
+  mutex_unlock(&ip->i_lock);
 }
 
 /* do_fchownat:chown/fchown/fchownat 共同实现。flags 校验同 chmod(接受

@@ -22,6 +22,12 @@ extern signal_check_fn signal_check_hook;
 typedef int (*fault_handler_fn)(uint64_t vaddr, xtask *t);
 extern fault_handler_fn fault_handler;
 
+enum fault_result {
+  FAULT_NOT_HANDLED = 0,
+  FAULT_HANDLED = 1,
+  FAULT_IO_ERROR = 2,
+};
+
 typedef void (*reap_fn)(void);
 extern reap_fn reap_hook;
 

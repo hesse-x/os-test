@@ -930,6 +930,7 @@ copy_mmap_regions(mmap_region *src) {
     if (!new_mr)
       return head; // partial copy, caller handles
     *new_mr = *mr;
+    vma_reset_readahead(new_mr);
     new_mr->next = NULL;
     if (mr->shm_obj)
       shm_get(mr->shm_obj);

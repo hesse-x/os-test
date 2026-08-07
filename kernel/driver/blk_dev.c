@@ -9,7 +9,6 @@
 #include "kernel/driver/ahci.h"
 #include "kernel/driver/blk_dev.h"
 #include "kernel/xcore/log.h"
-#include "kernel/xcore/spinlock.h"
 #include <xos/errno.h>
 
 static struct blk_stats stats;
@@ -32,10 +31,7 @@ int blk_read(uint32_t lba, uint32_t count, void *buf) {
   __atomic_fetch_add(&stats.submitted, 1, __ATOMIC_RELAXED);
   __atomic_fetch_add(&stats.read_cmds, 1, __ATOMIC_RELAXED);
   __atomic_fetch_add(&stats.read_sectors, count, __ATOMIC_RELAXED);
-  uint64_t flags;
-  spin_lock_irqsave(&ahci_lock, &flags);
-  int rc = ahci_read_lba(lba, count, buf);
-  spin_unlock_irqrestore(&ahci_lock, flags);
+  int rc = ahci_submit_sync(lba, count, buf, 0);
   __atomic_fetch_add(rc ? &stats.failed : &stats.completed, 1,
                      __ATOMIC_RELAXED);
   return rc;
@@ -48,10 +44,7 @@ int blk_write(uint32_t lba, uint32_t count, const void *buf) {
   __atomic_fetch_add(&stats.submitted, 1, __ATOMIC_RELAXED);
   __atomic_fetch_add(&stats.write_cmds, 1, __ATOMIC_RELAXED);
   __atomic_fetch_add(&stats.write_sectors, count, __ATOMIC_RELAXED);
-  uint64_t flags;
-  spin_lock_irqsave(&ahci_lock, &flags);
-  int rc = ahci_write_lba(lba, count, buf);
-  spin_unlock_irqrestore(&ahci_lock, flags);
+  int rc = ahci_submit_sync(lba, count, (void *)buf, 1);
   __atomic_fetch_add(rc ? &stats.failed : &stats.completed, 1,
                      __ATOMIC_RELAXED);
   return rc;

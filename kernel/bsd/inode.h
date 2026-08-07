@@ -12,6 +12,7 @@
 
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
+#include "kernel/xcore/mutex.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
@@ -82,7 +83,7 @@ struct inode {
       gid; // owner gid (set to creator's gid; existing inodes default to 0)
   int nlink;
   refcount_t i_count;
-  spinlock i_lock;
+  mutex i_lock;
   void *i_priv; /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
   const struct inode_operations
       *i_op; // behavior table (attached at iget exit); unmounted → dispatch
@@ -92,7 +93,7 @@ struct inode {
   wait_queue_head *wq; /* ringbuf-backed: shared wq for epoll/poll waiters */
 
   /* POSIX file locks (S09): per-inode lock list + its own spinlock (independent
-   * of i_lock, which guards FAT32 metadata — flock ops never touch metadata).
+   * of i_lock, which guards filesystem metadata — flock ops never touch it).
    */
   list_node i_flock;     /* head of file_lock list (list_init on create) */
   spinlock i_flock_lock; /* protects i_flock */

@@ -74,7 +74,7 @@ struct inode *inode_create(uint32_t ino, int type, uint64_t size,
   ip->gid = 0;
   ip->nlink = 1;
   refcount_set(&ip->i_count, 1);
-  ip->i_lock = SPINLOCK_INIT;
+  mutex_init(&ip->i_lock);
   ip->i_priv = NULL;
   ip->i_op = NULL; // unmounted inode dispatch safely returns -ENOSYS/-EACCES
   ip->shm = NULL;
@@ -146,7 +146,7 @@ struct inode *inode_get_or_create(uint32_t ino, int type, uint64_t size,
   ip->gid = 0;
   ip->nlink = 1;
   refcount_set(&ip->i_count, 1);
-  ip->i_lock = SPINLOCK_INIT;
+  mutex_init(&ip->i_lock);
   ip->i_priv = NULL;
   ip->i_op = NULL; // cache miss new inode; the hit branch reuses the old one,
                    // iget attaches i_op idempotently at the exit

@@ -132,9 +132,8 @@ static int unix_bind_register_hash(const char *sun_path, struct unix_sock *sock,
 }
 
 /* ===== VFS socket inode helpers（/run tmpfs 上 mknod socket）=====
- * 调用者持 socket_lock；本层取 mount_lock(vfs_resolve) + inode_hash_lock +
- * tmpfs_i_lock，锁序单向 socket_lock→mount_lock→inode_hash_lock→tmpfs_i_lock，
- * 无反向获取路径（inode_hash_lock 仅 inode.c 用，mount_lock 仅 mount.c 用）。
+ * Path walking may submit block I/O and schedule. It must run without
+ * socket_lock; only the final inode->i_priv/hash-table transaction is locked.
  */
 
 /* VFS 路径：path_walk 父目录 + i_op->create(S_IFSOCK) 建 socket inode。
@@ -183,23 +182,53 @@ static struct inode *vfs_lookup_socket(const char *sun_path) {
  * 对齐 Linux bind 语义：路径已存在（无论是否已 bind）→ EADDRINUSE。 */
 int unix_bind_register(const char *sun_path, struct unix_sock *sock,
                        pid_t owner_pid) {
+  spin_lock(&socket_lock);
+  if (sock->state != UNIX_FREE || sock->bind_in_progress) {
+    spin_unlock(&socket_lock);
+    return -EINVAL;
+  }
+  sock->bind_in_progress = 1;
+  spin_unlock(&socket_lock);
+
   struct inode *ip = vfs_mknod_socket(sun_path);
-  if (!IS_ERR(ip) && ip) {
-    /* create 成功（文件此前不存在）→ 挂 sock */
-    ip->i_priv = sock;     /* sock 挂 inode->i_priv */
-    sock->bind_inode = ip; /* 记录，unregister 时清 i_priv + inode_put */
+  int ret = 0;
+  bool use_vfs = !IS_ERR(ip) && ip;
+  if (!use_vfs) {
+    if (IS_ERR(ip) && PTR_ERR(ip) == -EEXIST)
+      ret = -EADDRINUSE;
+    else if (unix_requires_vfs(sun_path))
+      ret = IS_ERR(ip) ? (int)PTR_ERR(ip) : -ENOENT;
+  }
+
+  spin_lock(&socket_lock);
+  if (sock->state != UNIX_FREE || !sock->bind_in_progress) {
+    ret = -EINVAL;
+  } else if (!ret && use_vfs) {
+    ip->i_priv = sock;
+    sock->bind_inode = ip;
     sock->owner_pid = owner_pid;
-    /* 不 inode_put：bind 期间持有 inode 引用 */
-    return 0;
+  } else if (!ret) {
+    /* Non-/run paths fall back to the in-memory namespace. */
+    ret = unix_bind_register_hash(sun_path, sock, owner_pid);
   }
-  /* create 返 EEXIST：路径已存在 → 对齐 Linux 返 EADDRINUSE（非 EEXIST） */
-  if (IS_ERR(ip) && PTR_ERR(ip) == -EEXIST) {
-    return -EADDRINUSE;
+
+  if (!ret) {
+    int i = 0;
+    while (sun_path[i] && i < 107) {
+      sock->sun_path[i] = sun_path[i];
+      i++;
+    }
+    sock->sun_path[i] = '\0';
+    if (sock->type == SOCK_DGRAM)
+      sock->state = UNIX_DGRAM_BOUND;
   }
-  if (unix_requires_vfs(sun_path))
-    return IS_ERR(ip) ? (int)PTR_ERR(ip) : -ENOENT;
-  /* 其余 VFS 失败（/run 未挂载 / path 解析失败）→ 降级哈希表占名 */
-  return unix_bind_register_hash(sun_path, sock, owner_pid);
+  sock->bind_in_progress = 0;
+  spin_unlock(&socket_lock);
+
+  /* A committed VFS bind owns ip until unregister; all other paths drop it. */
+  if (use_vfs && ret)
+    inode_put(ip);
+  return ret;
 }
 
 /* 新 lookup：先走 VFS，失败降级哈希表。
@@ -208,93 +237,110 @@ int unix_bind_register(const char *sun_path, struct unix_sock *sock,
 int unix_bind_lookup(const char *sun_path, struct unix_sock **out,
                      pid_t *owner_pid) {
   struct inode *ip = vfs_lookup_socket(sun_path);
+  int ret = 0;
   if (!IS_ERR(ip) && ip) {
-    int perm =
-        inode_permission(ip, W_OK, current_proc->euid, current_proc->egid);
-    if (perm) {
+    ret = inode_permission(ip, W_OK, current_proc->euid, current_proc->egid);
+    if (ret) {
       inode_put(ip);
-      return perm;
+      return ret;
     }
+  } else if (unix_requires_vfs(sun_path)) {
+    return IS_ERR(ip) ? (int)PTR_ERR(ip) : -ENOENT;
+  }
+
+  spin_lock(&socket_lock);
+  if (!IS_ERR(ip) && ip) {
     struct unix_sock *s = (struct unix_sock *)ip->i_priv;
     if (s && s->state == UNIX_LISTEN) {
       *out = s;
       *owner_pid = s->owner_pid;
-      inode_put(ip);
-      return 0;
+      if (!unix_sock_get_locked(s))
+        ret = -ECONNREFUSED;
+    } else {
+      ret = -ECONNREFUSED;
     }
-    inode_put(ip);
-    /* socket 文件存在但未 LISTEN（或 i_priv 空）→ ECONNREFUSED */
-    return -ECONNREFUSED;
+  } else {
+    ret = unix_bind_lookup_hash(sun_path, out, owner_pid);
+    if (!ret && !unix_sock_get_locked(*out))
+      ret = -ECONNREFUSED;
   }
-  if (unix_requires_vfs(sun_path))
-    return IS_ERR(ip) ? (int)PTR_ERR(ip) : -ENOENT;
-  return unix_bind_lookup_hash(sun_path, out, owner_pid);
+  spin_unlock(&socket_lock);
+  if (!IS_ERR(ip) && ip)
+    inode_put(ip);
+  return ret;
 }
 
-/* DGRAM lookup: a bound SOCK_DGRAM socket is reachable by path. Unlike
- * unix_bind_lookup (which requires UNIX_LISTEN), a DGRAM target is valid in
- * UNIX_DGRAM_BOUND or UNIX_CONNECTED. Caller holds socket_lock; the returned
- * pointer is borrowed for the locked section only. */
+/* DGRAM lookup returns a referenced target so VFS work and queue updates can
+ * happen in separate, non-sleeping socket_lock critical sections. */
 int unix_bind_lookup_dgram(const char *sun_path, struct unix_sock **out) {
   struct inode *ip = vfs_lookup_socket(sun_path);
+  int ret = 0;
+  spin_lock(&socket_lock);
   if (!IS_ERR(ip) && ip) {
     struct unix_sock *s = (struct unix_sock *)ip->i_priv;
     if (s && s->type == SOCK_DGRAM &&
         (s->state == UNIX_DGRAM_BOUND || s->state == UNIX_CONNECTED)) {
       *out = s;
-      inode_put(ip);
-      return 0;
+      if (!unix_sock_get_locked(s))
+        ret = -ECONNREFUSED;
+    } else {
+      ret = (s && s->type != SOCK_DGRAM) ? -EPROTOTYPE : -ECONNREFUSED;
     }
-    inode_put(ip);
-    if (s && s->type != SOCK_DGRAM)
-      return -EPROTOTYPE; // path bound to a STREAM socket
-    return -ECONNREFUSED; // socket inode exists but not a bound DGRAM
-  }
-  // Hash-table fallback (VFS path failed to resolve).
-  uint32_t h = unix_hash(sun_path);
-  for (struct unix_bind_entry *e = unix_bind_table[h]; e; e = e->next) {
-    int i = 0;
-    while (i < 108 && sun_path[i] == e->sun_path[i]) {
-      if (sun_path[i] == '\0')
-        break;
-      i++;
-    }
-    if (i < 108 && sun_path[i] == '\0' && e->sun_path[i] == '\0') {
-      if (e->sock && e->sock->type == SOCK_DGRAM &&
-          (e->sock->state == UNIX_DGRAM_BOUND ||
-           e->sock->state == UNIX_CONNECTED)) {
-        *out = e->sock;
-        return 0;
+  } else {
+    uint32_t h = unix_hash(sun_path);
+    ret = -ENOENT;
+    for (struct unix_bind_entry *e = unix_bind_table[h]; e; e = e->next) {
+      int i = 0;
+      while (i < 108 && sun_path[i] == e->sun_path[i]) {
+        if (sun_path[i] == '\0')
+          break;
+        i++;
       }
-      if (e->sock && e->sock->type != SOCK_DGRAM)
-        return -EPROTOTYPE;
-      return -ECONNREFUSED;
+      if (i < 108 && sun_path[i] == '\0' && e->sun_path[i] == '\0') {
+        struct unix_sock *s = e->sock;
+        if (s && s->type == SOCK_DGRAM &&
+            (s->state == UNIX_DGRAM_BOUND || s->state == UNIX_CONNECTED)) {
+          *out = s;
+          ret = unix_sock_get_locked(s) ? 0 : -ECONNREFUSED;
+        } else {
+          ret = (s && s->type != SOCK_DGRAM) ? -EPROTOTYPE : -ECONNREFUSED;
+        }
+        break;
+      }
     }
   }
-  return -ENOENT;
+  spin_unlock(&socket_lock);
+  if (!IS_ERR(ip) && ip)
+    inode_put(ip);
+  return ret;
 }
 
 void unix_bind_unregister(struct unix_sock *sock) {
   /* VFS 路径清理：清 inode->i_priv + 释放 bind 期间持有的 inode 引用。
    * bind_inode 为 NULL 时 no-op（哈希表路径）。 */
+  struct inode *ip = NULL;
+  spin_lock(&socket_lock);
   if (sock->bind_inode) {
-    sock->bind_inode->i_priv = NULL;
-    inode_put(sock->bind_inode);
+    ip = sock->bind_inode;
+    ip->i_priv = NULL;
     sock->bind_inode = NULL;
   }
-  if (!sock->sun_path[0])
-    return; // not bound (哈希表路径未建 inode)
-  uint32_t h = unix_hash(sock->sun_path);
-  struct unix_bind_entry **pp = &unix_bind_table[h];
-  while (*pp) {
-    struct unix_bind_entry *e = *pp;
-    if (e->sock == sock) {
-      *pp = e->next;
-      kfree(e);
-      return;
+  if (sock->sun_path[0]) {
+    uint32_t h = unix_hash(sock->sun_path);
+    struct unix_bind_entry **pp = &unix_bind_table[h];
+    while (*pp) {
+      struct unix_bind_entry *e = *pp;
+      if (e->sock == sock) {
+        *pp = e->next;
+        kfree(e);
+        break;
+      }
+      pp = &e->next;
     }
-    pp = &e->next;
   }
+  spin_unlock(&socket_lock);
+  if (ip)
+    inode_put(ip);
 }
 
 // ===================== sk_buff allocation =====================
@@ -397,6 +443,7 @@ struct unix_sock *unix_sock_alloc(void) {
   sock->dgram_dst_path[0] = '\0';
   sock->bind_inode = NULL;
   sock->owner_pid = -1;
+  sock->bind_in_progress = 0;
   /* eager 分配 wq：阻塞 reader 改 add_wait_queue 后 wq 必须在创建时非
    * NULL（§7.1）。 */
   sock->wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
@@ -466,9 +513,7 @@ void unix_sock_release(struct unix_sock *sock) {
   if (!free_sock)
     return;
 
-  spin_lock(&socket_lock);
   unix_bind_unregister(sock);
-  spin_unlock(&socket_lock);
   unix_sock_free(sock);
 }
 
@@ -617,28 +662,30 @@ int64_t unix_dgram_sendto(struct unix_sock *src, const struct sockaddr_un *dest,
   }
   unix_dgram_fill_sender(skb, src);
 
-  spin_lock(&socket_lock);
   struct unix_sock *target = NULL;
   int ret = unix_bind_lookup_dgram(dest->sun_path, &target);
   if (ret) {
-    spin_unlock(&socket_lock);
     skb_free(skb);
     return ret;
   }
+  spin_lock(&socket_lock);
+  if (target->state == UNIX_CLOSED) {
+    spin_unlock(&socket_lock);
+    unix_sock_release(target);
+    skb_free(skb);
+    return -ECONNREFUSED;
+  }
   if (target->shutdown_read) {
     spin_unlock(&socket_lock);
+    unix_sock_release(target);
     skb_free(skb);
     return -ECONNREFUSED;
   }
   if ((flags & MSG_DONTWAIT) && target->recv_queue_len > 128) {
     spin_unlock(&socket_lock);
+    unix_sock_release(target);
     skb_free(skb);
     return -EAGAIN;
-  }
-  if (!unix_sock_get_locked(target)) {
-    spin_unlock(&socket_lock);
-    skb_free(skb);
-    return -ECONNREFUSED;
   }
   skb_enqueue(target, skb);
   wait_queue_head *twq = target->wq;
@@ -1446,37 +1493,13 @@ int64_t sys_bind(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     return (int64_t)-EBADF;
   }
 
-  spin_lock(&socket_lock);
-
-  // STREAM may bind while UNIX_FREE (listen transitions to UNIX_LISTEN). A
-  // DGRAM socket binds straight into UNIX_DGRAM_BOUND. Both start from
-  // UNIX_FREE here; UNIX_DGRAM_BOUND is rejected so a second bind fails.
-  if (sock->state != UNIX_FREE) {
-    spin_unlock(&socket_lock);
-    file_put(bf);
-    return (int64_t)-EINVAL;
-  }
-
-  // Register in name space
+  // VFS creation may block, so unix_bind_register reserves the socket briefly,
+  // drops socket_lock for path walking, then commits the namespace entry.
   int ret = unix_bind_register(sun_path, sock, current_task->pid);
   if (ret != 0) {
-    spin_unlock(&socket_lock);
     file_put(bf);
     return (int64_t)ret;
   }
-
-  // Save sun_path in sock
-  int i = 0;
-  while (sun_path[i] && i < 107) {
-    sock->sun_path[i] = sun_path[i];
-    i++;
-  }
-  sock->sun_path[i] = '\0';
-
-  if (sock->type == SOCK_DGRAM)
-    sock->state = UNIX_DGRAM_BOUND;
-
-  spin_unlock(&socket_lock);
 
   file_put(bf);
   return 0;
@@ -1817,13 +1840,8 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     return (int64_t)-EINVAL;
   }
 
-  spin_lock(&socket_lock);
-
-  // DGRAM connect: just fix the default send target. No child socket, no
-  // backlog, no accept wake — Linux semantics for SOCK_DGRAM connect().
   struct unix_sock *client_sock = cf->sock;
   if (!client_sock) {
-    spin_unlock(&socket_lock);
     file_put(cf);
     return (int64_t)-EBADF;
   }
@@ -1831,9 +1849,15 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     struct unix_sock *target = NULL;
     int dret = unix_bind_lookup_dgram(sun_path, &target);
     if (dret) {
-      spin_unlock(&socket_lock);
       file_put(cf);
       return (int64_t)dret;
+    }
+    spin_lock(&socket_lock);
+    if (client_sock->state == UNIX_CLOSED || target->state == UNIX_CLOSED) {
+      spin_unlock(&socket_lock);
+      unix_sock_release(target);
+      file_put(cf);
+      return (int64_t)-ECONNREFUSED;
     }
     // DGRAM connect: 只缓存目标 path，不持 peer_sock 指针。对端 dgram
     // socket 仅靠自身 fd 存活且无反向引用，缓存指针会在对端 close 后悬空
@@ -1845,28 +1869,32 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     client_sock->dgram_dst_path[sizeof(client_sock->dgram_dst_path) - 1] = '\0';
     client_sock->state = UNIX_CONNECTED;
     spin_unlock(&socket_lock);
+    unix_sock_release(target);
     file_put(cf);
     return 0;
   }
 
-  // Look up listener and owner PID via sun_path hash
+  // VFS lookup and permission checks may block. The returned reference keeps
+  // listener alive until the locked state/backlog transaction completes.
   struct unix_sock *listener = NULL;
   pid_t listener_pid = -1;
   int ret = unix_bind_lookup(sun_path, &listener, &listener_pid);
   if (ret != 0) {
-    spin_unlock(&socket_lock);
     file_put(cf);
     return (int64_t)ret;
   }
 
+  spin_lock(&socket_lock);
   if (listener->state != UNIX_LISTEN) {
     spin_unlock(&socket_lock);
+    unix_sock_release(listener);
     file_put(cf);
     return (int64_t)-ECONNREFUSED;
   }
 
   if (listener->backlog_len >= listener->backlog_max) {
     spin_unlock(&socket_lock);
+    unix_sock_release(listener);
     file_put(cf);
     return (int64_t)-ECONNREFUSED;
   }
@@ -1875,6 +1903,7 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   struct unix_sock *child = unix_sock_alloc();
   if (!child) {
     spin_unlock(&socket_lock);
+    unix_sock_release(listener);
     file_put(cf);
     return (int64_t)-ENOMEM;
   }
@@ -1891,6 +1920,7 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   if (!client_sock2) {
     spin_unlock(&socket_lock);
     unix_sock_free(child);
+    unix_sock_release(listener);
     file_put(cf);
     return (int64_t)-EBADF;
   }
@@ -1920,6 +1950,7 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   __wake_up(listener->wq, POLLIN);
 
+  unix_sock_release(listener);
   file_put(cf);
   return 0;
 }

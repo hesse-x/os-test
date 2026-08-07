@@ -26,6 +26,7 @@
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/mem/kasan.h"
 #include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/mutex.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 
@@ -478,9 +479,9 @@ static int tmpfs_link(struct inode *dir, struct inode *target,
   spin_unlock(&parent_ti->lock);
   /* nlink++:目录项计数。i_lock 保护 nlink(对齐 setattr/getattr 的 i_lock 用)。
    */
-  spin_lock(&target->i_lock);
+  mutex_lock(&target->i_lock);
   target->nlink++;
-  spin_unlock(&target->i_lock);
+  mutex_unlock(&target->i_lock);
   return 0;
 }
 
@@ -501,12 +502,12 @@ static int tmpfs_mkdir(struct inode *dir, const char *name, int mode) {
   inode_put(ip); /* mkdir 不返 inode，平衡 tmpfs_new_node 出口的 +1 返回引用 */
   /* §3.4 nlink 维护:新子目录使父目录 nlink++(目录的 "."/".." 自引用 + 子项
    * 计数);新目录自身 nlink=2("." 自引 + ".." 指父)。对齐 Linux tmpfs_mkdir。 */
-  spin_lock(&dir->i_lock);
+  mutex_lock(&dir->i_lock);
   dir->nlink++;
-  spin_unlock(&dir->i_lock);
-  spin_lock(&ip->i_lock);
+  mutex_unlock(&dir->i_lock);
+  mutex_lock(&ip->i_lock);
   ip->nlink = 2;
-  spin_unlock(&ip->i_lock);
+  mutex_unlock(&ip->i_lock);
   // IN_CREATE on the parent dir (no ti->lock/i_lock held here).
   inotify_inode_event(dir, IN_CREATE, 0, name);
   return 0;
@@ -532,13 +533,13 @@ static int tmpfs_unlink(struct inode *dir, const char *name) {
       int last = (refcount_read(&ip->i_count) == 1);
       int is_dir = (ip->type == INODE_DIR);
       /* §3.4 nlink 维护:unlink 摘目录项 → ip->nlink--(对齐 link 的 ++)。
-       * 在 spin_unlock 前调整,避免与 getattr/stat 的 i_lock 竞争。归 0 由
+       * 在释放锁前调整,避免与 getattr/stat 的 i_lock 竞争。归 0 由
        * inode_put 回收(目录项引用释放),nlink 不再被读。 */
       if (!is_dir) {
-        spin_lock(&ip->i_lock);
+        mutex_lock(&ip->i_lock);
         if (ip->nlink > 0) /* 防御:不应为 0(unlink 已摘的项不会再被找到) */
           ip->nlink--;
-        spin_unlock(&ip->i_lock);
+        mutex_unlock(&ip->i_lock);
       }
       spin_unlock(&parent_ti->lock);
       // IN_DELETE on the parent (name) + IN_DELETE_SELF on the child. ti->lock
@@ -740,9 +741,9 @@ static int tmpfs_rmdir(struct inode *dir, const char *name) {
       spin_unlock(&parent_ti->lock);
       /* §3.4 nlink 维护:rmdir 子目录使父目录 nlink--(对齐 mkdir 的 ++)。
        * 在 ip 释放前调整父 nlink;ip 自身随 inode_put 回收(nlink 不再被读)。 */
-      spin_lock(&dir->i_lock);
+      mutex_lock(&dir->i_lock);
       dir->nlink--;
-      spin_unlock(&dir->i_lock);
+      mutex_unlock(&dir->i_lock);
       // IN_DELETE on the parent (name) + IN_DELETE_SELF on the removed dir.
       inotify_inode_event(dir, IN_DELETE, 0, name);
       inotify_inode_event(ip, IN_DELETE_SELF, 0, NULL);

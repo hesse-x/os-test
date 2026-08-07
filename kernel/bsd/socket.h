@@ -97,6 +97,7 @@ typedef struct unix_sock {
                             // hash-table name claim)
   pid_t owner_pid;          // binding process pid (VFS path; aligns with
                             // bind_entry.owner_pid)
+  int bind_in_progress;     // reserves this socket while VFS bind may sleep
 
   wait_queue_head *wq; // eagerly allocated (kmalloc in unix_sock_create);
                        // blocked reader/epoll waiters hang here
@@ -127,13 +128,15 @@ void skb_free(struct sk_buff *skb);
 void skb_enqueue(struct unix_sock *sock, struct sk_buff *skb);
 struct sk_buff *skb_dequeue(struct unix_sock *sock);
 
+// Lookup helpers may sleep while resolving VFS paths. On success they return a
+// u_count-held socket; callers must unix_sock_release() it.
 int unix_bind_lookup(const char *sun_path, struct unix_sock **out,
                      pid_t *owner_pid);
 int unix_bind_register(const char *sun_path, struct unix_sock *sock,
                        pid_t owner_pid);
 void unix_bind_unregister(struct unix_sock *sock);
-// DGRAM lookup: resolve a bound SOCK_DGRAM socket by path (caller holds
-// socket_lock; returns a borrowed pointer, no u_count bump). Returns
+// DGRAM lookup: resolve a bound SOCK_DGRAM socket by path and return it with a
+// u_count reference. Returns
 // -EPROTOTYPE if the path is bound to a non-DGRAM socket, -ECONNREFUSED if
 // the path exists but the socket is not bound/connected, -ENOENT if absent.
 int unix_bind_lookup_dgram(const char *sun_path, struct unix_sock **out);

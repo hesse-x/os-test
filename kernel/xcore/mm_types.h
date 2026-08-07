@@ -63,6 +63,12 @@ typedef struct mmap_region {
   // are released in munmap/mm_release/execve and bumped in copy_mmap_regions.
   struct inode *inode;
   struct shm *shm_private_src;
+  /* Per-mapping fault history. It is deliberately reset on VMA topology
+   * changes and fork; access patterns are not meaningful across either. */
+  uint64_t ra_last_page;
+  uint64_t ra_next_page;
+  uint8_t ra_window_pages;
+  uint8_t ra_sequential_faults;
   struct mmap_region *next;
 } mmap_region;
 

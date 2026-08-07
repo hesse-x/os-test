@@ -390,7 +390,14 @@ void trap_dispatch(trapframe *tf) {
     // point (COW already returned above), and a process-context #PF scheduling
     // inside it is legitimate.
     if (fault_handler && current_task->proc) {
-      if (fault_handler(fault_addr, current_task)) {
+      int fault_result = fault_handler(fault_addr, current_task);
+      if (fault_result == FAULT_IO_ERROR) {
+        if (force_sig_hook)
+          force_sig_hook(current_task, SIGBUS, 2 /* BUS_ADRERR */,
+                         (void *)fault_addr);
+        return;
+      }
+      if (fault_result == FAULT_HANDLED) {
         return; // BSD layer handled the fault
       }
     }
